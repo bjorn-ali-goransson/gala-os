@@ -487,6 +487,7 @@ from the public documentation of each function (clean room):
 |---|---|---|---|
 | ntdll.dll | `user/testntdll` | `testntdll.dll` | `C:\Windows\System32` |
 | kernel32.dll | `user/kernel32` | `testkernel32.dll` | `C:\Windows\System32` |
+| bcryptprimitives.dll | `user/bcryptprimitives` | `testbcryptprimitives.dll` | `C:\Windows\System32` |
 
 (Exported under other names so that `user/bin`, which also runs on
 Windows, never shadows the system's DLLs.)
