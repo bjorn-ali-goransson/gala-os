@@ -144,8 +144,10 @@ to set and to argue for. Current order and why:
    building, not the test. One VM running many programs plus a Docker
    test image gives most of the speed-up quickly and makes every
    environment (CI, agents, laptops) identical.
-3. O1 (observability): the missing-features ledger and the event stream
-   are what make the Go and Nginx bring-ups data-driven.
+3. O1 (observability) with P1 (benchmarks): the missing-features ledger
+   and the event stream make the Go and Nginx bring-ups data-driven. The
+   benchmarks and the profiler answer "how fast is it", and both need the
+   same counters and timing plumbing.
 4. U1-U3 (gala-um): the NT layer as a Linux process. Much faster tests and
    host tools (perf, sanitizers, gdb), but a second platform under the NT
    layer; it starts with a design note and the platform seam.
@@ -170,6 +172,15 @@ U2. **gala-um runs hello.exe**, then the ntrt test programs; `cargo xtask
    um-test` runs them all in seconds.
 U3. **gala-um in CI** next to the QEMU scenarios, with differences between
    the two reported as bugs.
+P1. **Benchmarks**: `user/bench_*` programs that run unchanged on Windows
+   and gala and report nanoseconds per operation (QPC/TSC): a null system
+   call, an event ping-pong between two threads (switch and wake latency,
+   same and different CPUs), thread create+exit, a demand-zero page fault,
+   VirtualAlloc+free, mapping a section view, small and large file
+   reads/writes, and handle create+close. `cargo xtask bench` runs them and
+   writes `target/report/bench.json`; `cargo xtask compare` covers it. The
+   only meaningful numbers come from KVM or bare metal; under TCG, report
+   QEMU-plugin instruction counts instead (deterministic, for regressions).
 O1. **Observability, first part** (docs/OBSERVABILITY.md 1, 2, 5): JSON
    event stream on debugcon, the missing-features ledger merged by `xtask
    report`, symbolized panic backtraces. Before G2, so running a real Go
