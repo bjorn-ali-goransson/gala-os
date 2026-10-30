@@ -67,8 +67,16 @@ struct ObjectAttributes {
 unsafe extern "C" {
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
     fn strlen(s: *const u8) -> usize;
+    // MSVC-target unwind tables reference it (gala's ntdll provides it).
+    fn __CxxFrameHandler3();
 }
+
+/// MSVC-target codegen references this marker symbol directly, so it cannot
+/// come from an import. (It becomes a harmless extra data export.)
+#[unsafe(no_mangle)]
+pub static _fltused: i32 = 0;
 
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -784,6 +792,237 @@ pub extern "system" fn GetProcessAffinityMask(
         *system_mask = system as usize;
     }
     TRUE
+}
+
+// ---- Environment variables (the block in the process parameters) ----
+
+/// Serializes changes to the environment block (and readers against them).
+static ENV_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The block this DLL allocated last (freed when replaced), or 0.
+static ENV_OWNED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+fn with_env<R>(f: impl FnOnce() -> R) -> R {
+    use core::sync::atomic::Ordering;
+    while ENV_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err()
+    {
+        core::hint::spin_loop();
+    }
+    let r = f();
+    ENV_LOCK.store(false, Ordering::Release);
+    r
+}
+
+/// The process parameters (PEB+0x20).
+fn process_parameters() -> usize {
+    // SAFETY: gs:[0x60] is the PEB; ProcessParameters is always set.
+    unsafe { *((teb_u64(0x60) as usize + 0x20) as *const usize) }
+}
+
+/// The environment block's strings (without the final empty one).
+fn env_entries() -> impl Iterator<Item = &'static [u16]> {
+    // SAFETY: ProcessParameters->Environment (+0x80): NUL-terminated
+    // strings ending with an empty one, alive until replaced (callers hold
+    // ENV_LOCK).
+    let block = unsafe { *((process_parameters() + 0x80) as *const *const u16) };
+    let mut i = 0;
+    core::iter::from_fn(move || {
+        // SAFETY: as above.
+        unsafe {
+            let start = i;
+            while *block.add(i) != 0 {
+                i += 1;
+            }
+            if i == start {
+                return None;
+            }
+            i += 1;
+            Some(core::slice::from_raw_parts(block.add(start), i - 1 - start))
+        }
+    })
+}
+
+/// Splits `NAME=value`; a leading `=` belongs to the name (`=C:=C:\`).
+fn split_entry(entry: &[u16]) -> (&[u16], &[u16]) {
+    match entry.iter().skip(1).position(|&c| c == u16::from(b'=')) {
+        Some(i) => (&entry[..i + 1], &entry[i + 2..]),
+        None => (entry, &[]),
+    }
+}
+
+fn upper(c: u16) -> u16 {
+    if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c }
+}
+
+/// Environment names compare case-insensitively.
+fn same_name(a: &[u16], b: &[u16]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| upper(x) == upper(y))
+}
+
+fn wide_slice(s: *const u16) -> &'static [u16] {
+    // SAFETY: callers pass NUL-terminated strings.
+    unsafe { core::slice::from_raw_parts(s, wide_len(s)) }
+}
+
+/// Copies `value` to `buf` (of `size` characters) the Win32 way: its length
+/// if it fits with the NUL, else the size needed including the NUL.
+fn copy_out(value: &[u16], buf: *mut u16, size: u32) -> u32 {
+    if (size as usize) <= value.len() {
+        return value.len() as u32 + 1;
+    }
+    // SAFETY: the caller's buffer holds `size` > len characters.
+    unsafe {
+        core::ptr::copy_nonoverlapping(value.as_ptr(), buf, value.len());
+        *buf.add(value.len()) = 0;
+    }
+    value.len() as u32
+}
+
+const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, size: u32) -> u32 {
+    let name = wide_slice(name);
+    let found = with_env(|| {
+        env_entries().find_map(|e| {
+            let (n, v) = split_entry(e);
+            same_name(n, name).then(|| copy_out(v, buf, size))
+        })
+    });
+    found.unwrap_or_else(|| fail_with(ERROR_ENVVAR_NOT_FOUND, 0))
+}
+
+/// SetEnvironmentVariableW: builds a new block without the variable, plus
+/// `name=value` unless `value` is null, and installs it in the process
+/// parameters (as RtlSetEnvironmentVariable does).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetEnvironmentVariableW(name: *const u16, value: *const u16) -> Bool {
+    use core::sync::atomic::Ordering;
+    let name = wide_slice(name);
+    if name.is_empty() || name[1..].contains(&u16::from(b'=')) {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let value = (!value.is_null()).then(|| wide_slice(value));
+    with_env(|| {
+        let keep = |e: &&[u16]| !same_name(split_entry(e).0, name);
+        let mut chars: usize = env_entries().filter(keep).map(|e| e.len() + 1).sum();
+        if let Some(v) = value {
+            chars += name.len() + 1 + v.len() + 1;
+        }
+        chars += 1; // the final empty string
+        let block = VirtualAlloc(core::ptr::null_mut(), chars * 2, 0x3000, 4) as *mut u16;
+        if block.is_null() {
+            return FALSE;
+        }
+        let mut i = 0;
+        let mut put = |s: &[u16]| {
+            // SAFETY: `block` holds `chars` characters, counted above.
+            unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), block.add(i), s.len()) };
+            i += s.len();
+        };
+        for e in env_entries().filter(keep) {
+            put(e);
+            put(&[0]);
+        }
+        if let Some(v) = value {
+            put(name);
+            put(&[u16::from(b'=')]);
+            put(v);
+            put(&[0]);
+        }
+        put(&[0]);
+        let params = process_parameters();
+        // SAFETY: Environment (+0x80) and EnvironmentSize (+0x3f0) of this
+        // process's parameters, writable; readers hold ENV_LOCK.
+        unsafe {
+            *((params + 0x80) as *mut *mut u16) = block;
+            *((params + 0x3f0) as *mut usize) = chars * 2;
+        }
+        let old = ENV_OWNED.swap(block as usize, Ordering::Relaxed);
+        if old != 0 {
+            VirtualFree(old as *mut c_void, 0, 0x8000);
+        }
+        TRUE
+    })
+}
+
+// ---- Time zone (gala keeps UTC) ----
+
+/// GetTimeZoneInformation: UTC, no daylight saving (TIME_ZONE_ID_UNKNOWN);
+/// gala's clock and KUSER_SHARED_DATA's TimeZoneBias are UTC. Deliberate
+/// difference: the zone is named "UTC" (its time-zone key name), not
+/// Windows' display name "Coordinated Universal Time", because programs
+/// (Go's time package) map display names to keys through the registry,
+/// which gala does not have yet.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTimeZoneInformation(info: *mut u8) -> u32 {
+    const NAME: &[u8] = b"UTC";
+    // SAFETY: the caller's 172-byte TIME_ZONE_INFORMATION.
+    unsafe {
+        core::ptr::write_bytes(info, 0, 172);
+        // StandardName at +4 and DaylightName at +88, WCHAR[32] each.
+        for offset in [4usize, 88] {
+            for (i, &b) in NAME.iter().enumerate() {
+                *(info.add(offset + 2 * i) as *mut u16) = u16::from(b);
+            }
+        }
+    }
+    0
+}
+
+// ---- Directories ----
+
+/// GetCurrentDirectoryW: ProcessParameters->CurrentDirectory.DosPath
+/// without its trailing backslash (kept for a root such as `C:\`).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCurrentDirectoryW(size: u32, buf: *mut u16) -> u32 {
+    let params = process_parameters();
+    // SAFETY: CurrentDirectory.DosPath: UNICODE_STRING at +0x38.
+    let dos = unsafe {
+        let len = usize::from(*((params + 0x38) as *const u16)) / 2;
+        core::slice::from_raw_parts(*((params + 0x40) as *const *const u16), len)
+    };
+    let path = match dos {
+        [.., b] if *b == u16::from(b'\\') && dos.len() > 3 => &dos[..dos.len() - 1],
+        _ => dos,
+    };
+    copy_out(path, buf, size)
+}
+
+/// GetTempPathW: the first of TMP, TEMP, USERPROFILE, or the Windows
+/// directory, with a trailing backslash (documented order).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTempPathW(size: u32, buf: *mut u16) -> u32 {
+    let mut path = [0u16; 262];
+    let mut n = 0;
+    for name in [&b"TMP"[..], b"TEMP", b"USERPROFILE"] {
+        let mut wide = [0u16; 12];
+        for (w, &b) in wide.iter_mut().zip(name) {
+            *w = u16::from(b);
+        }
+        n = GetEnvironmentVariableW(wide.as_ptr(), path.as_mut_ptr(), 260) as usize;
+        if n > 0 && n < 260 {
+            break;
+        }
+        n = 0;
+    }
+    if n == 0 {
+        for &b in b"C:\\Windows" {
+            path[n] = u16::from(b);
+            n += 1;
+        }
+    }
+    if path[n - 1] != u16::from(b'\\') {
+        path[n] = u16::from(b'\\');
+        n += 1;
+    }
+    SetLastError(0);
+    copy_out(&path[..n], buf, size)
+}
+
+/// GetTempPath2W: as GetTempPathW for processes not running as SYSTEM.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTempPath2W(size: u32, buf: *mut u16) -> u32 {
+    GetTempPathW(size, buf)
 }
 
 // ---- Environment ----

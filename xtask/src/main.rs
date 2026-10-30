@@ -80,17 +80,34 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_thread_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_misc_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_misc_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_env_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_env_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "ntdll.dll", "Windows/System32"),
     ("prng_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "bcryptprimitives.dll", "Windows/System32"),
-    ("go_hello", "bcryptprimitives.dll", "Windows/System32"),
     ("go_hello", "ntdll.dll", "Windows/System32"),
     ("go_hello", "kernel32.dll", "Windows/System32"),
+    ("go_hello", "bcryptprimitives.dll", "Windows/System32"),
+    ("go_goroutines", "ntdll.dll", "Windows/System32"),
+    ("go_goroutines", "kernel32.dll", "Windows/System32"),
+    ("go_goroutines", "bcryptprimitives.dll", "Windows/System32"),
+    ("go_time", "ntdll.dll", "Windows/System32"),
+    ("go_time", "kernel32.dll", "Windows/System32"),
+    ("go_time", "bcryptprimitives.dll", "Windows/System32"),
+    ("go_gc", "ntdll.dll", "Windows/System32"),
+    ("go_gc", "kernel32.dll", "Windows/System32"),
+    ("go_gc", "bcryptprimitives.dll", "Windows/System32"),
+    ("go_os", "ntdll.dll", "Windows/System32"),
+    ("go_os", "kernel32.dll", "Windows/System32"),
+    ("go_os", "bcryptprimitives.dll", "Windows/System32"),
+    ("go_exit", "ntdll.dll", "Windows/System32"),
+    ("go_exit", "kernel32.dll", "Windows/System32"),
+    ("go_exit", "bcryptprimitives.dll", "Windows/System32"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
 /// user/bin is used). Reproducible: -trimpath and an empty build id.
-const GO_PROGRAMS: &[&str] = &["go_hello"];
+const GO_PROGRAMS: &[&str] = &["go_hello", "go_goroutines", "go_time", "go_gc", "go_os", "go_exit"];
 const GO_TOOLCHAIN: &str = "go1.24.7";
 
 const USER_PROGRAMS: &[&str] = &[
@@ -137,6 +154,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_thread_test",
     "kernel32_misc_test",
     "prng_test",
+    "kernel32_env_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -611,6 +629,36 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=go_hello.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["Hello from Go on gala!", "go_hello.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        name: "go_goroutines",
+        cmdline: "qemu_exit run=go_goroutines.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["go_goroutines: ok", "go_goroutines.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        name: "go_time",
+        cmdline: "qemu_exit run=go_time.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["go_time: ok", "go_time.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        name: "go_gc",
+        cmdline: "qemu_exit run=go_gc.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["go_gc: ok", "go_gc.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        name: "go_exit",
+        cmdline: "qemu_exit run=go_exit.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["go_exit: exiting with 3", "go_exit.exe finished with status 0x00000003"],
+    },
+    Scenario {
+        name: "kernel32_env_test",
+        cmdline: "qemu_exit run=kernel32_env_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["kernel32_env_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "ledger_test",

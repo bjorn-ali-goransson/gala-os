@@ -509,7 +509,11 @@ Windows, never shadows the system's DLLs.)
   starts at a thunk that calls ExitThread), TLS (TEB.TlsSlots),
   suspension and thread context, completion ports, waitable timers,
   vectored handlers, system information, environment strings, and the
-  process settings Go sets at startup. Names ntdll also exports (the
+  process settings Go sets at startup, environment variables (Get/Set,
+  a new block installed in the process parameters under a lock), the
+  current and temporary directories, and the time zone (UTC; named "UTC"
+  rather than "Coordinated Universal Time": a deliberate difference until
+  there is a registry to map display names to zone keys). Names ntdll also exports (the
   `Rtl*` unwind functions) are export forwarders (`build.rs`), as on
   Windows: defining them in kernel32 would shadow the ntdll imports.
 - **Gaps are never silent.** Unsupported parts of a function fail
