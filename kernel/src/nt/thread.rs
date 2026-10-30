@@ -45,6 +45,17 @@ pub struct NtThread {
     /// (Priority, BasePriority) as reported; stored, not yet used by the
     /// scheduler.
     pub priority: IrqMutex<(i32, i32)>,
+    /// Queued user APCs (FIFO), run at alertable waits.
+    apcs: IrqMutex<Vec<UserApc>>,
+    /// Set while the thread is in an alertable wait (an APC wakes it).
+    alertable: core::sync::atomic::AtomicBool,
+}
+
+/// A user-mode APC: `routine(args[0], args[1], args[2])`.
+#[derive(Clone, Copy, Debug)]
+pub struct UserApc {
+    pub routine: u64,
+    pub args: [u64; 3],
 }
 
 /// The base priority of every process (NORMAL_PRIORITY_CLASS).
@@ -148,6 +159,8 @@ pub fn create(
         create_time: crate::time::system_time(),
         exit_time: IrqMutex::new(0),
         priority: IrqMutex::new((PROCESS_BASE_PRIORITY, PROCESS_BASE_PRIORITY)),
+        apcs: IrqMutex::new(Vec::new()),
+        alertable: core::sync::atomic::AtomicBool::new(false),
     };
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -260,6 +273,43 @@ pub fn request_termination(object: &ObjectRef, status: NtStatus) {
     t.terminate_request.lock().get_or_insert(status);
     if let Some(tid) = *t.sched_id.lock() {
         sched::wake(tid);
+    }
+}
+
+/// Queues a user APC to thread `object`, waking it if it is in an
+/// alertable wait (NtQueueApcThread).
+pub fn queue_user_apc(object: &ObjectRef, apc: UserApc) -> Result<(), NtStatus> {
+    let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    if t.has_exited() {
+        return Err(NtStatus::UNSUCCESSFUL);
+    }
+    wait::with_dispatcher_lock(|| {
+        t.apcs.lock().try_push(apc).map_err(|_| NtStatus::NO_MEMORY)?;
+        if t.alertable.load(Ordering::SeqCst)
+            && let Some(tid) = *t.sched_id.lock()
+        {
+            sched::wake(tid);
+        }
+        Ok(())
+    })
+}
+
+/// Whether the current thread has a user APC queued.
+pub fn has_user_apc() -> bool {
+    current().is_some_and(|o| !as_thread(&o).apcs.lock().is_empty())
+}
+
+/// Takes the current thread's next user APC.
+pub fn take_user_apc() -> Option<UserApc> {
+    let object = current()?;
+    let mut apcs = as_thread(&object).apcs.lock();
+    (!apcs.is_empty()).then(|| apcs.remove(0))
+}
+
+/// Marks the current thread as in (or out of) an alertable wait.
+pub fn set_alertable(on: bool) {
+    if let Some(o) = current() {
+        as_thread(&o).alertable.store(on, Ordering::SeqCst);
     }
 }
 

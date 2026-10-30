@@ -18,6 +18,8 @@ pub struct Ntdll {
     /// KiUserExceptionDispatcher, if exported: user-mode exceptions are
     /// delivered there.
     pub dispatcher_rva: Option<u32>,
+    /// KiUserApcDispatcher, if exported: user APCs run there.
+    pub apc_dispatcher_rva: Option<u32>,
 }
 
 /// Loaded on first use; `Some(None)` once we know there is none.
@@ -53,7 +55,8 @@ fn load() -> Option<Ntdll> {
     };
     let dispatcher_rva =
         section.image.as_ref().and_then(|i| i.export(b"KiUserExceptionDispatcher"));
+    let apc_dispatcher_rva = section.image.as_ref().and_then(|i| i.export(b"KiUserApcDispatcher"));
     let section = KObject::new(ObjectBody::Section(section)).ok()?;
     info!("ntdll: using {PATH}, LdrInitializeThunk at rva {thunk_rva:#x}");
-    Some(Ntdll { section, thunk_rva, dispatcher_rva })
+    Some(Ntdll { section, thunk_rva, dispatcher_rva, apc_dispatcher_rva })
 }

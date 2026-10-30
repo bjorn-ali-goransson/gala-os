@@ -385,6 +385,28 @@ pub extern "system" fn KiUserExceptionDispatcher() -> ! {
     )
 }
 
+/// The kernel resumes a thread here to run a user APC: rsp points at the
+/// CONTEXT to return to, whose P1Home..P4Home hold NormalContext,
+/// SystemArgument1, SystemArgument2 and NormalRoutine. The routine runs
+/// with the CONTEXT's home area as its shadow space; NtContinue with
+/// TestAlert then delivers the next APC or resumes the CONTEXT.
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn KiUserApcDispatcher() -> ! {
+    core::arch::naked_asm!(
+        "mov rcx, [rsp]",
+        "mov rdx, [rsp + 8]",
+        "mov r8, [rsp + 0x10]",
+        "mov rax, [rsp + 0x18]",
+        "call rax",
+        "mov rcx, rsp",
+        "mov edx, 1",
+        "call {continue}",
+        "int3",
+        continue = sym NtContinue,
+    )
+}
+
 /// Calls the vectored handlers; resumes the context if one continues
 /// execution, else ends the process with the exception code.
 extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> ! {

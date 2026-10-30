@@ -54,6 +54,7 @@ stubs! {
     ntrt_nt_query_system_information = 0x0036;
     ntrt_nt_set_information_thread = 0x000d;
     ntrt_nt_yield_execution = 0x0046;
+    ntrt_nt_queue_apc_thread = 0x0045;
     ntrt_nt_wait_for_multiple_objects = 0x005b;
     ntrt_nt_query_object = 0x0010;
     ntrt_nt_open_event = 0x0040;
@@ -282,6 +283,13 @@ unsafe extern "system" {
     fn ntrt_nt_query_system_time(time: *mut i64) -> NtStatus;
     fn ntrt_nt_set_information_thread(h: Handle, class: u32, buf: *const u8, len: u32) -> NtStatus;
     fn ntrt_nt_yield_execution() -> NtStatus;
+    fn ntrt_nt_queue_apc_thread(
+        h: Handle,
+        routine: extern "system" fn(usize, usize, usize),
+        a1: usize,
+        a2: usize,
+        a3: usize,
+    ) -> NtStatus;
     fn ntrt_nt_query_system_information(
         class: u32,
         buf: *mut u8,
@@ -1120,6 +1128,35 @@ pub fn query_thread(h: Handle, class: u32, buf: &mut [u8]) -> (NtStatus, u32) {
 pub fn set_thread(h: Handle, class: u32, data: &[u8]) -> NtStatus {
     // SAFETY: valid buffer of the given length (may be empty).
     unsafe { ntrt_nt_set_information_thread(h, class, data.as_ptr(), data.len() as u32) }
+}
+
+pub const STATUS_USER_APC: NtStatus = 0x0000_00c0;
+
+/// NtQueueApcThread: `routine(a1, a2, a3)` runs in thread `h` at its next
+/// alertable wait.
+pub fn queue_apc(
+    h: Handle,
+    routine: extern "system" fn(usize, usize, usize),
+    a1: usize,
+    a2: usize,
+    a3: usize,
+) -> NtStatus {
+    // SAFETY: the kernel validates the handle; the routine is ours.
+    unsafe { ntrt_nt_queue_apc_thread(h, routine, a1, a2, a3) }
+}
+
+/// An alertable NtWaitForSingleObject (`timeout` as for `wait`).
+pub fn wait_alertable(h: Handle, timeout: Option<i64>) -> NtStatus {
+    let t = timeout.unwrap_or(0);
+    let p = if timeout.is_some() { &t as *const i64 } else { core::ptr::null() };
+    // SAFETY: valid timeout pointer or null.
+    unsafe { ntrt_nt_wait_for_single_object(h, 1, p) }
+}
+
+/// An alertable NtDelayExecution.
+pub fn delay_alertable(interval: i64) -> NtStatus {
+    // SAFETY: valid interval pointer.
+    unsafe { ntrt_nt_delay_execution(1, &interval) }
 }
 
 pub fn yield_execution() -> NtStatus {

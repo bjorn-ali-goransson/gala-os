@@ -119,10 +119,32 @@ impl Timeout {
 /// Waits until any (or all) of `objects` is signaled. Returns
 /// STATUS_WAIT_0 + index (any), STATUS_WAIT_0 (all) or STATUS_TIMEOUT.
 pub fn wait_for(objects: &[ObjectRef], wait_all: bool, timeout: Timeout) -> NtStatus {
+    wait_for_alertable(objects, wait_all, timeout, false)
+}
+
+/// Runs `f` under the dispatcher lock, which alertable waits hold between
+/// checking for user APCs and going to sleep (so queuing an APC and waking
+/// the thread under it cannot be missed).
+pub fn with_dispatcher_lock<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = DISPATCHER.lock();
+    f()
+}
+
+/// `wait_for`; an alertable wait also ends, with STATUS_USER_APC, when the
+/// thread has a user APC to run.
+pub fn wait_for_alertable(
+    objects: &[ObjectRef],
+    wait_all: bool,
+    timeout: Timeout,
+    alertable: bool,
+) -> NtStatus {
     let me = sched::current();
     let mut timed_out = false;
     loop {
         let guard = DISPATCHER.lock();
+        if alertable && super::thread::has_user_apc() {
+            return NtStatus::USER_APC;
+        }
         let ready: Option<Option<usize>> = if wait_all {
             objects.iter().all(is_signaled).then_some(None)
         } else {
@@ -150,9 +172,11 @@ pub fn wait_for(objects: &[ObjectRef], wait_all: bool, timeout: Timeout) -> NtSt
                 return NtStatus::NO_MEMORY;
             }
         }
+        super::thread::set_alertable(alertable);
         sched::prepare_wait(timeout.deadline());
         drop(guard);
         let reason = sched::wait();
+        super::thread::set_alertable(false);
         {
             let _guard = DISPATCHER.lock();
             unregister(objects, me);
@@ -175,16 +199,29 @@ fn unregister(objects: &[ObjectRef], me: ThreadId) {
     }
 }
 
-/// Sleeps the current thread until `timeout` (NtDelayExecution).
-pub fn delay(timeout: Timeout) {
+/// Sleeps the current thread until `timeout` (NtDelayExecution). An
+/// alertable delay ends early, with STATUS_USER_APC, for a user APC.
+pub fn delay(timeout: Timeout, alertable: bool) -> NtStatus {
+    let apc = || alertable && super::thread::has_user_apc();
+    let guard = DISPATCHER.lock();
+    if apc() {
+        return NtStatus::USER_APC;
+    }
     match timeout {
-        Timeout::Poll => sched::yield_now(),
+        Timeout::Poll => {
+            drop(guard);
+            sched::yield_now();
+        }
         t => {
             // Wake early if the thread is asked to terminate.
             if !super::thread::is_terminating() {
+                super::thread::set_alertable(alertable);
                 sched::prepare_wait(t.deadline());
+                drop(guard);
                 sched::wait();
+                super::thread::set_alertable(false);
             }
         }
     }
+    if apc() { NtStatus::USER_APC } else { NtStatus::SUCCESS }
 }

@@ -93,6 +93,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 - Asynchronous file I/O: offsets required, events and file objects reset
   at the start of an I/O and signaled on completion (always at once so
   far), FileModeInformation; `async_test`
+- User APCs: NtQueueApcThread, alertable waits/delays returning
+  STATUS_USER_APC, delivery through KiUserApcDispatcher, NtContinue
+  TestAlert; testntdll's dispatcher; `apc_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/

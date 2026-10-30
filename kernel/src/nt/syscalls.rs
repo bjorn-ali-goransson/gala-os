@@ -24,7 +24,7 @@ use super::thread;
 use super::vad;
 use super::vm;
 use super::wait::{self, Dispatcher, Timeout};
-use crate::arch::syscall::{self, SyscallFrame};
+use crate::arch::syscall::{self, SyscallFrame, UserRegs};
 use crate::console;
 use crate::mm::heap::KArc;
 use crate::mm::heap::TryVec;
@@ -44,6 +44,7 @@ pub const NT_CONTINUE: u32 = 0x0043;
 pub const NT_QUERY_SYSTEM_INFORMATION: u32 = 0x0036;
 pub const NT_SET_INFORMATION_THREAD: u32 = 0x000d;
 pub const NT_YIELD_EXECUTION: u32 = 0x0046;
+pub const NT_QUEUE_APC_THREAD: u32 = 0x0045;
 pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
 pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
 pub const NT_OPEN_SECTION: u32 = 0x0037;
@@ -97,6 +98,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_QUERY_SYSTEM_INFORMATION, "NtQuerySystemInformation", 4, nt_query_system_information),
     (NT_SET_INFORMATION_THREAD, "NtSetInformationThread", 4, nt_set_information_thread),
     (NT_YIELD_EXECUTION, "NtYieldExecution", 0, nt_yield_execution),
+    (NT_QUEUE_APC_THREAD, "NtQueueApcThread", 5, nt_queue_apc_thread),
     (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", 10, nt_map_view_of_section),
     (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", 2, nt_unmap_view_of_section),
     (NT_OPEN_SECTION, "NtOpenSection", 3, nt_open_section),
@@ -791,8 +793,11 @@ fn waitable(call: &Call<'_>, h: Handle) -> Result<ObjectRef, NtStatus> {
 fn nt_wait_for_single_object(call: &mut Call<'_>) -> NtStatus {
     let object = tri!(waitable(call, Handle(arg!(call, 0))));
     let timeout = tri!(call.timeout(arg!(call, 2)));
+    let alertable = arg!(call, 1) as u8 != 0;
     let objects = [object];
-    wait::wait_for(&objects, false, timeout)
+    let status = wait::wait_for_alertable(&objects, false, timeout, alertable);
+    drop(objects);
+    deliver_apc_after(call, status)
 }
 
 const MAXIMUM_WAIT_OBJECTS: u64 = 64;
@@ -818,7 +823,10 @@ fn nt_wait_for_multiple_objects(call: &mut Call<'_>) -> NtStatus {
         let h = Handle(tri!(call.read_u64(array + 8 * i)));
         let _ = objects.try_push(tri!(waitable(call, h)));
     }
-    wait::wait_for(&objects, wait_all, timeout)
+    let alertable = arg!(call, 3) as u8 != 0;
+    let status = wait::wait_for_alertable(&objects, wait_all, timeout, alertable);
+    drop(objects);
+    deliver_apc_after(call, status)
 }
 
 /// NtDelayExecution(Alertable, *DelayInterval)
@@ -827,8 +835,93 @@ fn nt_delay_execution(call: &mut Call<'_>) -> NtStatus {
     if ptr == 0 {
         return NtStatus::ACCESS_VIOLATION;
     }
-    wait::delay(tri!(call.timeout(ptr)));
-    NtStatus::SUCCESS
+    let status = wait::delay(tri!(call.timeout(ptr)), arg!(call, 0) as u8 != 0);
+    deliver_apc_after(call, status)
+}
+
+/// NtQueueApcThread(ThreadHandle, ApcRoutine, ApcArgument1, ApcArgument2,
+///                  ApcArgument3)
+fn nt_queue_apc_thread(call: &mut Call<'_>) -> NtStatus {
+    const THREAD_SET_CONTEXT: u32 = 0x0010;
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let object = tri!(entry.require(THREAD_SET_CONTEXT));
+    let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if !KArc::ptr_eq(&t.process, &call.process) {
+        // TODO: APCs to other processes.
+        return NtStatus::ACCESS_DENIED;
+    }
+    let apc = thread::UserApc {
+        routine: arg!(call, 1),
+        args: [arg!(call, 2), arg!(call, 3), arg!(call, 4)],
+    };
+    match thread::queue_user_apc(object, apc) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(e) => e,
+    }
+}
+
+/// After an alertable wait ended with STATUS_USER_APC, makes the system
+/// call return through ntdll!KiUserApcDispatcher to run the first queued
+/// APC; the CONTEXT it gets resumes the caller with rax = STATUS_USER_APC.
+fn deliver_apc_after(call: &Call<'_>, status: NtStatus) -> NtStatus {
+    if status != NtStatus::USER_APC {
+        return status;
+    }
+    let f = call.frame;
+    let regs = UserRegs {
+        // rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8..r15; SYSCALL left the
+        // return address in rcx and the flags in r11.
+        gpr: [
+            u64::from(status.0),
+            f.rip,
+            f.rdx,
+            f.rbx,
+            f.rsp,
+            f.rbp,
+            f.rsi,
+            f.rdi,
+            f.r8,
+            f.r9,
+            f.r10,
+            f.rflags,
+            f.r12,
+            f.r13,
+            f.r14,
+            f.r15,
+        ],
+        rip: f.rip,
+        rflags: f.rflags,
+    };
+    let context = super::context::to_bytes(&regs, Some(&crate::arch::cpu::fxsave()));
+    deliver_apc(call, context, f.rsp);
+    status
+}
+
+/// Runs the next user APC, if any, by resuming the thread in
+/// ntdll!KiUserApcDispatcher with `context` (the state to return to, with
+/// stack pointer `rsp`) at the top of a new frame below `rsp`. The x64
+/// contract (Windows Internals): rsp points to the CONTEXT, whose P1Home..
+/// P4Home hold NormalContext, SystemArgument1, SystemArgument2 and
+/// NormalRoutine; the dispatcher calls the routine and NtContinues the
+/// CONTEXT with TestAlert set, which delivers the next APC.
+// TODO: verify the frame against the pinned build's ntdll.
+fn deliver_apc(call: &Call<'_>, mut context: [u8; super::context::SIZE], rsp: u64) -> bool {
+    let dispatcher = call.process.apc_dispatcher.load(Ordering::Relaxed);
+    if dispatcher == 0 {
+        return false;
+    }
+    let Some(apc) = thread::take_user_apc() else { return false };
+    for (i, v) in [apc.args[0], apc.args[1], apc.args[2], apc.routine].iter().enumerate() {
+        context[8 * i..8 * i + 8].copy_from_slice(&v.to_le_bytes());
+    }
+    let frame = (rsp.wrapping_sub(super::context::SIZE as u64)) & !0xf;
+    if frame >= rsp || call.process.write(frame, &context).is_err() {
+        return false;
+    }
+    let mut gpr = [0u64; 16];
+    gpr[4] = frame;
+    syscall::continue_with(UserRegs { gpr, rip: dispatcher, rflags: 0 });
+    true
 }
 
 const DUPLICATE_CLOSE_SOURCE: u32 = 1;
@@ -899,6 +992,10 @@ fn nt_continue(call: &mut Call<'_>) -> NtStatus {
     let regs = super::context::from_bytes(&ctx);
     if !regs.is_valid() {
         return NtStatus::INVALID_PARAMETER;
+    }
+    // TestAlert: run the next queued user APC before resuming the context.
+    if arg!(call, 1) as u8 != 0 && thread::has_user_apc() && deliver_apc(call, ctx, regs.gpr[4]) {
+        return NtStatus::SUCCESS;
     }
     // The kernel does not use x87/SSE, so the state loaded now is what the
     // thread resumes with (context switches save and restore it).

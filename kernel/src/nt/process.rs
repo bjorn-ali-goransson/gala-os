@@ -40,6 +40,8 @@ pub struct Process {
     /// ntdll!KiUserExceptionDispatcher in this process, or 0: then user
     /// exceptions end the process.
     exception_dispatcher: core::sync::atomic::AtomicU64,
+    /// ntdll!KiUserApcDispatcher in this process, or 0 (no user APCs run).
+    pub apc_dispatcher: core::sync::atomic::AtomicU64,
 }
 
 impl fmt::Debug for Process {
@@ -413,6 +415,7 @@ pub fn spawn_from_pe(
         dispatcher: Dispatcher::new(0),
         image: (base, u64::from(image.size_of_image)),
         exception_dispatcher: core::sync::atomic::AtomicU64::new(0),
+        apc_dispatcher: core::sync::atomic::AtomicU64::new(0),
     })?;
     PROCESSES.lock().try_push(process.clone())?;
 
@@ -462,6 +465,11 @@ fn through_ntdll(process: &Process, start: &UserRegs) -> Result<UserRegs, NtStat
     if let Some(rva) = ntdll.dispatcher_rva {
         process
             .exception_dispatcher
+            .store(view.base + u64::from(rva), core::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(rva) = ntdll.apc_dispatcher_rva {
+        process
+            .apc_dispatcher
             .store(view.base + u64::from(rva), core::sync::atomic::Ordering::Relaxed);
     }
     let mut entry = *start;

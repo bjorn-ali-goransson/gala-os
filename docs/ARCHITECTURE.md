@@ -230,6 +230,17 @@ aligned rsp and the EXCEPTION_RECORD at rsp + 0x4f0, and resumes the thread
 there (to be checked against the pinned ntdll); otherwise the process ends
 with the status. The #BP gate has DPL 3 so `int3` works from user mode.
 
+**User APCs**: NtQueueApcThread (0x45) appends to the thread's FIFO and
+wakes it if it is in an alertable wait (under the dispatcher lock, which
+alertable waits hold between checking the queue and sleeping). Alertable
+NtWaitFor*Object(s)/NtDelayExecution return STATUS_USER_APC when an APC is
+queued; the system call then returns through ntdll!KiUserApcDispatcher
+with a CONTEXT of the interrupted caller (rax = STATUS_USER_APC) below its
+stack, P1Home..P4Home = NormalContext, SystemArgument1, SystemArgument2,
+NormalRoutine (to be checked against the pinned ntdll). The dispatcher
+calls the routine and NtContinues with TestAlert, which delivers the next
+APC first.
+
 **x87/SSE state**: the kernel target uses no SSE, so in a trap or system
 call the CPU still holds the user's x87/SSE registers. Context switches
 FXSAVE/FXRSTOR them per thread; exception delivery puts an FXSAVE image in
