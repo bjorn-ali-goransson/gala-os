@@ -373,3 +373,118 @@ mod tests {
         assert!(h.alloc(small).is_some(), "freed object is reusable");
     }
 }
+
+/// Atomically reference-counted pointer with fallible construction (std's
+/// `Arc::new` cannot report OOM on stable Rust).
+pub struct KArc<T> {
+    inner: NonNull<KArcInner<T>>,
+}
+
+struct KArcInner<T> {
+    strong: core::sync::atomic::AtomicUsize,
+    value: T,
+}
+
+// SAFETY: like `Arc<T>`: shared access to `T` from several threads needs
+// `T: Sync`, and the last owner may drop `T` on any thread, so `T: Send`.
+unsafe impl<T: Send + Sync> Send for KArc<T> {}
+// SAFETY: as above.
+unsafe impl<T: Send + Sync> Sync for KArc<T> {}
+
+impl<T> KArc<T> {
+    pub fn try_new(value: T) -> Result<Self, AllocError> {
+        let inner = try_box(KArcInner { strong: core::sync::atomic::AtomicUsize::new(1), value })?;
+        Ok(Self { inner: NonNull::from(alloc::boxed::Box::leak(inner)) })
+    }
+
+    fn inner(&self) -> &KArcInner<T> {
+        // SAFETY: the allocation lives while any `KArc` (this one) exists.
+        unsafe { self.inner.as_ref() }
+    }
+
+    pub fn ptr_eq(a: &Self, b: &Self) -> bool {
+        a.inner == b.inner
+    }
+
+    pub fn strong_count(this: &Self) -> usize {
+        this.inner().strong.load(core::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl<T> Clone for KArc<T> {
+    fn clone(&self) -> Self {
+        // Relaxed is enough for increments (as in std's Arc). Overflow is
+        // impossible in practice: each clone needs memory to live in.
+        self.inner().strong.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        Self { inner: self.inner }
+    }
+}
+
+impl<T> core::ops::Deref for KArc<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.inner().value
+    }
+}
+
+impl<T> Drop for KArc<T> {
+    fn drop(&mut self) {
+        use core::sync::atomic::{Ordering, fence};
+        if self.inner().strong.fetch_sub(1, Ordering::Release) != 1 {
+            return;
+        }
+        fence(Ordering::Acquire);
+        // SAFETY: this was the last reference; the allocation came from
+        // `try_box` (the global allocator, i.e. a `Box`).
+        drop(unsafe { alloc::boxed::Box::from_raw(self.inner.as_ptr()) });
+    }
+}
+
+impl<T: core::fmt::Debug> core::fmt::Debug for KArc<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+#[cfg(test)]
+mod karc_tests {
+    use super::KArc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn clone_and_drop() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        struct D(u32);
+        impl Drop for D {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let a = KArc::try_new(D(7)).unwrap();
+        let b = a.clone();
+        assert!(KArc::ptr_eq(&a, &b));
+        assert_eq!(KArc::strong_count(&a), 2);
+        assert_eq!(b.0, 7);
+        drop(a);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        drop(b);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn shared_across_threads() {
+        let a = KArc::try_new(AtomicUsize::new(0)).unwrap();
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let a = a.clone();
+                std::thread::spawn(move || a.fetch_add(1, Ordering::SeqCst))
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(a.load(Ordering::SeqCst), 4);
+        assert_eq!(KArc::strong_count(&a), 1);
+    }
+}

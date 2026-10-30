@@ -144,6 +144,13 @@ pub fn init_bsp() {
     }
 }
 
+/// Sets the ring-0 stack loaded when an interrupt arrives in user mode.
+pub fn set_rsp0(top: u64) {
+    // SAFETY: the CPU reads `rsp[0]` only on a privilege change; callers run
+    // with interrupts disabled, so no such change happens mid-write.
+    unsafe { (*TSS.get()).rsp[0] = top };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

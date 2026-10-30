@@ -35,3 +35,8 @@ The `xtask` host tool has no dependencies beyond `std`.
 | `kernel/src/arch/x86_64/qemu.rs` | QEMU `isa-debug-exit` device documentation | n/a |
 | `kernel/src/arch/x86_64/gdt.rs` selector values (`0x10`/`0x18` kernel, `0x23`/`0x2b`/`0x33` user) | User-visible x64 Windows segment selectors: Microsoft `CONTEXT` documentation and values used by Wine (`dlls/ntdll/unix/signal_x86_64.c`). Only the numbers are used; the GDT code is our own. | n/a (ABI facts) |
 | `kernel/src/arch/x86_64/{gdt,interrupts}.rs` descriptor formats | Intel SDM / AMD APM (GDT, TSS, IDT gate layouts, exception vectors) | n/a |
+| `kernel/src/nt/pe.rs` | Microsoft "PE Format" specification (learn.microsoft.com) | n/a |
+| `kernel/src/nt/status.rs` NTSTATUS values | mingw-w64 `ntstatus.h` (values only) | public domain / ZPL headers |
+| `kernel/src/nt/layout.rs` TEB/PEB/RTL_USER_PROCESS_PARAMETERS offsets | mingw-w64 `winternl.h`, Microsoft TEB/PEB documentation (offsets only) | as above |
+| `kernel/src/nt/syscalls.rs`, `user/ntrt` service numbers (NtWriteFile 0x08, NtClose 0x0f, NtTerminateProcess 0x2c) | Publicly known, black-box observable values, long stable across Windows 10/11 x64. **To be verified** against syscall traces of the pinned build (Windows 11 24H2, 26100). | n/a (ABI facts) |
+| `arch/x86_64/syscall.rs` calling convention | Windows x64 syscall convention as observable from user mode (number in eax, args in r10/rdx/r8/r9 then stack at rsp+0x28) | n/a |

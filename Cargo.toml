@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["kernel", "xtask"]
+members = ["kernel", "user/abi_test", "user/crash", "user/hello", "user/ntrt", "xtask"]
 # The kernel only builds for x86_64-unknown-none; build it via `cargo xtask`.
 default-members = ["xtask"]
 

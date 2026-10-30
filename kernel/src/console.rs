@@ -13,6 +13,14 @@ pub fn print(args: fmt::Arguments) {
     let _ = serial::COM1.lock().write_fmt(args);
 }
 
+/// Writes raw bytes (no newline translation), e.g. user-mode output.
+pub fn write_bytes(bytes: &[u8]) {
+    let mut port = serial::COM1.lock();
+    for &b in bytes {
+        port.write_byte(b);
+    }
+}
+
 /// Prints even if the console lock is held, e.g. when a panic happened while
 /// printing.
 pub fn emergency_println(args: fmt::Arguments) {

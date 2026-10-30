@@ -20,6 +20,7 @@ pub mod cmdline;
 #[macro_use]
 pub mod console;
 pub mod mm;
+pub mod nt;
 pub mod sched;
 mod selftest;
 pub mod sync;
@@ -58,6 +59,8 @@ pub fn kernel_main() -> ! {
     }
 
     arch::gdt::init_bsp();
+    arch::percpu::init_bsp();
+    arch::cpu::enable_sse();
     interrupts::init();
     info!("cpu: GDT, TSS and IDT loaded");
 
@@ -89,6 +92,11 @@ pub fn kernel_main() -> ! {
         panic!("scheduler: {e:?}");
     }
     info!("sched: boot thread {} running, idle thread started", sched::current());
+    nt::init();
+
+    if let Some(name) = cmdline.value("run") {
+        run_program(&info, name);
+    }
 
     if let Some(name) = cmdline.value("fault") {
         match Fault::from_name(name) {
@@ -223,4 +231,24 @@ fn init_timer() {
     time::init(&calibration);
     arch::cpu::enable_interrupts();
     info!("interrupts enabled, tick {} Hz", time::TICK_HZ);
+}
+
+/// Runs the boot module `name` as a user process and waits for it.
+fn run_program(info: &BootInfo, name: &str) {
+    let Some(module) = info.modules.find(name) else {
+        panic!("run: no boot module named {name:?}");
+    };
+    info!("run: {} ({} bytes)", module.path, module.data.len());
+    match nt::process::spawn_from_pe(module.file_name(), module.data) {
+        Ok((process, thread)) => {
+            let _ = sched::join(thread);
+            match process.exit_status() {
+                Some(status) => {
+                    info!("run: {} finished with status {:#010x}", process.name, status.0)
+                }
+                None => warn!("run: {} main thread ended without an exit status", process.name),
+            }
+        }
+        Err(e) => error!("run: cannot start {name}: {e:?}"),
+    }
 }

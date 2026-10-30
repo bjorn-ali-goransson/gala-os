@@ -196,6 +196,15 @@ pub type Handler = fn(&mut TrapFrame);
 static HANDLERS: [AtomicUsize; 256 - FIRST_EXTERNAL_VECTOR as usize] =
     [const { AtomicUsize::new(0) }; 256 - FIRST_EXTERNAL_VECTOR as usize];
 static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
+static USER_EXCEPTION_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
+/// Handler for CPU exceptions raised in user mode: `(frame, cr2)`.
+pub type UserExceptionHandler = fn(&mut TrapFrame, Option<u64>);
+
+/// Routes exceptions from user mode to `handler` instead of panicking.
+pub fn set_user_exception_handler(handler: UserExceptionHandler) {
+    USER_EXCEPTION_HANDLER.store(handler as usize, Ordering::Release);
+}
 
 /// Registers `handler` for external `vector`, replacing any previous one.
 pub fn set_handler(vector: u8, handler: Handler) {
@@ -217,6 +226,17 @@ pub fn breakpoint_count() -> u64 {
 
 extern "C" fn dispatch(frame: &mut TrapFrame) {
     let vector = frame.vector as u8;
+    if vector < FIRST_EXTERNAL_VECTOR && frame.from_user_mode() {
+        let raw = USER_EXCEPTION_HANDLER.load(Ordering::Acquire);
+        if raw != 0 {
+            let cr2 = (vector == VECTOR_PAGE_FAULT).then(super::cpu::read_cr2);
+            // SAFETY: only `set_user_exception_handler` stores non-zero
+            // values, and it stores `UserExceptionHandler`s.
+            let handler = unsafe { core::mem::transmute::<usize, UserExceptionHandler>(raw) };
+            handler(frame, cr2);
+            return;
+        }
+    }
     if vector == VECTOR_BREAKPOINT {
         BREAKPOINTS.fetch_add(1, Ordering::Relaxed);
         return;

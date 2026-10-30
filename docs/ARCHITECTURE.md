@@ -25,6 +25,10 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/mm/paging.rs      4-level page-table mapper, generic over table access (host-tested)
   src/mm/heap.rs        slab + page heap, global allocator, try_box/TryVec   [unsafe allowed]
   src/mm/mod.rs         global frame allocator instance
+  src/nt/               NT personality: PE loader, processes, handles, syscalls
+user/                   freestanding Windows test programs (x86_64-pc-windows-msvc)
+  ntrt/                 tiny runtime: ntdll-shaped syscall stubs, PEB access
+  hello/ abi_test/ crash/
 xtask/                  host tool: build ISO, run QEMU, boot test
 ```
 
@@ -159,8 +163,50 @@ reaps dead threads' stacks. API: `spawn`, `yield_now`, `sleep_ms`,
 10-tick quantum. Single CPU for now; the lock is released before the
 switch, which is only sound without other CPUs (see `TODO(smp)`).
 
+## User mode and the NT personality (milestone 4)
+
+**Pinned build**: Windows 11 24H2, build 26100 (tentative). Only service
+numbers depend on it so far.
+
+**Programs** in `user/` are no_std Rust built for `x86_64-pc-windows-msvc`
+and linked by `lld-link` with no CRT or imports (`.cargo/config.toml`).
+They only use raw system calls through `ntrt`'s ntdll-shaped stubs
+(`mov r10, rcx; mov eax, N; syscall; ret`) and the PEB, so the same
+binaries can run on real Windows for differential testing. xtask builds
+them (always optimized) and ships them as Limine modules in `/boot`; the
+kernel command line `run=<name>.exe` starts one and waits for it.
+
+**Address spaces**: `arch::paging::UserSpace` has a private lower half and
+shares the kernel half (all 256 kernel PML4 entries are populated at boot,
+so kernel mappings made later appear everywhere). Kernel accesses to user
+memory go through `UserSpace::read/write`, which walk the page tables and
+check user/writable bits, so the kernel never faults on user pointers.
+Each user thread holds a `KArc` of its space; switching loads its CR3 (or
+the kernel's for kernel threads).
+
+**Entering and leaving user mode**: `syscall::enter_user` uses `iretq`
+with the Windows selectors (CS 0x33, SS 0x2b) and `rcx = PEB`. SYSCALL
+enters at `gala_syscall_entry`, which swaps GS, switches to the thread's
+kernel stack (per-CPU area, updated with TSS.rsp0 on every switch), saves a
+`SyscallFrame` and calls the NT dispatcher with interrupts enabled. User
+GS base is the TEB. FXSAVE state is switched with every thread; CR4.OSFXSR
+is enabled for user SSE code.
+
+**Loader** (`nt::process::spawn_from_pe`): maps headers and sections at the
+preferred base with section permissions (no relocation or imports yet),
+a 256 KiB stack below `0x200000` with a guard page, and the PEB, process
+parameters (handles for stdin/stdout/stderr) and TEB at fixed addresses
+(`nt::layout`).
+
+**Services**: `NtWriteFile` (console handles only), `NtClose`,
+`NtTerminateProcess`; unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
+User-mode CPU exceptions terminate the process with the matching NTSTATUS
+(no SEH dispatch yet).
+
 ## Not done yet
 
+Imports/DLLs and relocation, SEH/exception dispatch, multi-threaded
+processes, KUSER_SHARED_DATA, bindgen-generated layouts, freeing processes,
 SMP, ACPI (MADT/HPET), reclaiming bootloader memory.
 Bootloader-reclaimable memory must not be reused until the boot info that
 lives there has been copied out.

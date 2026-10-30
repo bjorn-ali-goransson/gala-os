@@ -252,6 +252,12 @@ impl<M: TableMemory> Mapper<M> {
         Ok(Self { root, mem })
     }
 
+    /// Wraps existing tables rooted at `root` without taking ownership
+    /// semantics beyond what the caller arranges.
+    pub fn from_root(mem: M, root: Frame) -> Self {
+        Self { root, mem }
+    }
+
     pub fn root(&self) -> Frame {
         self.root
     }
@@ -391,6 +397,79 @@ impl<M: TableMemory> Mapper<M> {
             table = Frame::containing(entry.addr());
         }
         None
+    }
+}
+
+/// First PML4 index of the kernel (higher) half.
+pub const KERNEL_HALF_START: usize = 256;
+/// Exclusive end of the user half of the address space.
+pub const USER_END: u64 = 0x0000_8000_0000_0000;
+
+impl<M: TableMemory> Mapper<M> {
+    /// Makes sure every kernel-half PML4 entry points to a PDPT, so that
+    /// address spaces sharing these entries see all future kernel mappings.
+    pub fn populate_kernel_half(
+        &mut self,
+        alloc: &mut impl FnMut() -> Option<Frame>,
+    ) -> Result<(), MapError> {
+        for i in KERNEL_HALF_START..ENTRIES {
+            if !self.mem.table(self.root).0[i].is_present() {
+                let frame = alloc().ok_or(MapError::OutOfMemory)?;
+                *self.mem.table(frame) = PageTable::new();
+                self.mem.table(self.root).0[i] = Entry::table(frame, false);
+            }
+        }
+        Ok(())
+    }
+
+    /// Creates an address space whose kernel half is shared with `kernel`
+    /// (whose kernel half must be populated) and whose user half is empty.
+    pub fn new_sharing_kernel_half(
+        mut mem: M,
+        kernel: Frame,
+        alloc: &mut impl FnMut() -> Option<Frame>,
+    ) -> Result<Self, MapError> {
+        let mut upper = [Entry::EMPTY; ENTRIES - KERNEL_HALF_START];
+        upper.copy_from_slice(&mem.table(kernel).0[KERNEL_HALF_START..]);
+        let mut mapper = Self::new(mem, alloc)?;
+        let root = mapper.root;
+        mapper.mem.table(root).0[KERNEL_HALF_START..].copy_from_slice(&upper);
+        Ok(mapper)
+    }
+
+    /// Frees every user-half page table (not the mapped frames) through
+    /// `free`, then the root. Leaf frames are reported to `free_leaf`.
+    pub fn destroy(
+        mut self,
+        free_table: &mut impl FnMut(Frame),
+        free_leaf: &mut impl FnMut(Frame),
+    ) {
+        let root = self.root;
+        self.free_level(root, 4, KERNEL_HALF_START, free_table, free_leaf);
+        free_table(root);
+    }
+
+    fn free_level(
+        &mut self,
+        table: Frame,
+        level: usize,
+        limit: usize,
+        free_table: &mut impl FnMut(Frame),
+        free_leaf: &mut impl FnMut(Frame),
+    ) {
+        for i in 0..limit {
+            let entry = self.mem.table(table).0[i];
+            if !entry.is_present() {
+                continue;
+            }
+            if level == 1 || entry.is_huge() {
+                free_leaf(Frame::containing(entry.addr()));
+            } else {
+                let child = Frame::containing(entry.addr());
+                self.free_level(child, level - 1, ENTRIES, free_table, free_leaf);
+                free_table(child);
+            }
+        }
     }
 }
 
@@ -537,5 +616,30 @@ mod tests {
             m.map(KVIRT, 0, PageSize::Size4K, PageFlags::KERNEL_RW, &mut alloc),
             Err(MapError::OutOfMemory)
         );
+    }
+
+    #[test]
+    fn shared_kernel_half_and_destroy() {
+        let (mut kernel, mut alloc) = setup();
+        kernel.populate_kernel_half(&mut alloc).unwrap();
+        let kroot = kernel.root();
+        let FakeMemory(tables) = kernel.mem;
+        let mut user =
+            Mapper::new_sharing_kernel_half(FakeMemory(tables), kroot, &mut alloc).unwrap();
+        // A kernel mapping made later through the kernel tables is visible.
+        let mut k2 = Mapper { root: kroot, mem: FakeMemory(core::mem::take(&mut user.mem.0)) };
+        k2.map(KVIRT, 0x1000, PageSize::Size4K, PageFlags::KERNEL_RW, &mut alloc).unwrap();
+        user.mem.0 = core::mem::take(&mut k2.mem.0);
+        assert_eq!(user.translate(KVIRT).unwrap().phys, 0x1000);
+
+        let flags = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RW };
+        user.map(0x40_0000, 0x5000, PageSize::Size4K, flags, &mut alloc).unwrap();
+        user.map(0x7fff_0000_0000, 0x6000, PageSize::Size4K, flags, &mut alloc).unwrap();
+        let (mut tables_freed, mut leaves) = (0, Vec::new());
+        user.destroy(&mut |_| tables_freed += 1, &mut |f| leaves.push(f.number()));
+        leaves.sort();
+        assert_eq!(leaves, [5, 6]);
+        // Two PDPT+PD+PT chains plus the root; kernel tables untouched.
+        assert_eq!(tables_freed, 7);
     }
 }

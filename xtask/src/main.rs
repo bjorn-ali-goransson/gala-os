@@ -17,6 +17,9 @@ const LIMINE_COMMIT: &str = "5be26a73d7b7b4d4477d18be94e1d16e615adf56";
 const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
+/// Freestanding Windows test programs in `user/`, shipped as boot modules.
+const USER_TARGET: &str = "x86_64-pc-windows-msvc";
+const USER_PROGRAMS: &[&str] = &["hello", "abi_test", "crash"];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
 /// QEMU exit statuses for `QemuExitCode::{Success, Failure}` (`(code << 1) | 1`).
@@ -106,6 +109,14 @@ fn build_kernel(release: bool) -> Result {
     if release {
         cmd.arg("--release");
     }
+    run_cmd(&mut cmd)?;
+    // User programs are always optimized: without a CRT there is no
+    // `memcpy` etc. for unoptimized code to call.
+    let mut cmd = cargo();
+    cmd.args(["build", "--release", "--target", USER_TARGET]);
+    for program in USER_PROGRAMS {
+        cmd.args(["--package", program]);
+    }
     run_cmd(&mut cmd)
 }
 
@@ -124,10 +135,16 @@ fn make_iso(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
         fs::create_dir_all(dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
     }
     copy(&kernel, &boot.join("kernel"))?;
+    let mut modules = String::new();
+    for program in USER_PROGRAMS {
+        let exe = target_dir().join(USER_TARGET).join("release").join(format!("{program}.exe"));
+        copy(&exe, &boot.join(format!("{program}.exe")))?;
+        modules += &format!("    module_path: boot():/boot/{program}.exe\n");
+    }
     copy(&limine.join("BOOTX64.EFI"), &efi_boot.join("BOOTX64.EFI"))?;
     copy(&limine.join("limine-uefi-cd.bin"), &boot.join("limine/limine-uefi-cd.bin"))?;
     let config = format!(
-        "timeout: 0\n\n/gala-os\n    protocol: limine\n    path: boot():/boot/kernel\n    cmdline: {cmdline}\n"
+        "timeout: 0\n\n/gala-os\n    protocol: limine\n    path: boot():/boot/kernel\n    cmdline: {cmdline}\n{modules}"
     );
     write(&boot.join("limine/limine.conf"), &config)?;
 
@@ -245,6 +262,33 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "abi_test",
+        cmdline: "qemu_exit run=abi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["abi_test: write ok", "abi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "crash",
+        cmdline: "qemu_exit run=crash.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: writing to address 0",
+            "user exception: page fault (#PF)",
+            "process crash.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        name: "hello",
+        cmdline: "qemu_exit run=hello.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "Hello from user mode!",
+            "process hello.exe (pid 4) exited with status 0x00000000",
+            BOOT_OK_MARKER,
+        ],
+    },
     Scenario {
         name: "selftest",
         cmdline: "qemu_exit selftest",

@@ -174,6 +174,7 @@ pub fn init(layout: KernelLayout<'_>) -> Result<BuildStats, PagingError> {
         stats.kernel_pages += len / PAGE_SIZE;
     }
 
+    finish_kernel_half(&mut mapper)?;
     let root = mapper.root().start();
     // SAFETY: the new tables map everything the kernel currently uses: its
     // image (code, statics), and through the HHDM the current stack and boot
@@ -233,4 +234,176 @@ pub fn unmap_kernel_page(virt: u64) -> Option<Frame> {
     // SAFETY: invalidating a TLB entry cannot break memory safety.
     unsafe { asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
     Some(frame)
+}
+
+/// Physical address of the kernel's PML4 (0 before `init`).
+static KERNEL_ROOT: AtomicU64 = AtomicU64::new(0);
+
+/// Must run at the end of `init`: shares one kernel half with all future
+/// address spaces.
+fn finish_kernel_half(mapper: &mut Mapper<HhdmTables>) -> Result<(), PagingError> {
+    mapper.populate_kernel_half(&mut alloc_table)?;
+    KERNEL_ROOT.store(mapper.root().start(), Ordering::Release);
+    Ok(())
+}
+
+pub fn kernel_root() -> u64 {
+    KERNEL_ROOT.load(Ordering::Acquire)
+}
+
+/// Loads the page tables rooted at physical `root`.
+///
+/// # Safety
+/// `root` must be the kernel's root or the root of a live `UserSpace`
+/// (whose kernel half is the shared one), and must stay alive while loaded.
+pub unsafe fn activate(root: u64) {
+    if cpu::read_cr3() & !0xfff != root {
+        // SAFETY: forwarded to the caller; the kernel half, and therefore
+        // the code, stack and data in use, is identical in every such space.
+        unsafe { asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags)) };
+    }
+}
+
+fn hhdm_ptr(phys: u64) -> *mut u8 {
+    core::ptr::with_exposed_provenance_mut((crate::mm::hhdm_offset() + phys) as usize)
+}
+
+/// A user address space shared by the threads of a process.
+pub type SharedUserSpace = crate::mm::heap::KArc<IrqMutex<UserSpace>>;
+
+/// A user address space: private lower half, shared kernel half. Owns its
+/// page tables and every frame mapped in its lower half.
+pub struct UserSpace {
+    mapper: Mapper<HhdmTables>,
+}
+
+/// A user address was unmapped, not user-accessible, or (for writes) not
+/// writable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UserFault {
+    pub address: u64,
+}
+
+impl UserSpace {
+    pub fn new() -> Result<Self, PagingError> {
+        let kernel = kernel_root();
+        if kernel == 0 {
+            return Err(PagingError::NotInitialized);
+        }
+        let mem = HhdmTables { offset: crate::mm::hhdm_offset() };
+        let mapper =
+            Mapper::new_sharing_kernel_half(mem, Frame::containing(kernel), &mut alloc_table)?;
+        Ok(Self { mapper })
+    }
+
+    pub fn root(&self) -> u64 {
+        self.mapper.root().start()
+    }
+
+    /// Maps `pages` fresh zeroed pages at `virt` (page-aligned, user half).
+    pub fn map_zeroed(
+        &mut self,
+        virt: u64,
+        pages: u64,
+        mut flags: PageFlags,
+    ) -> Result<(), PagingError> {
+        use crate::mm::paging::{PageSize, USER_END};
+        flags.user = true;
+        flags.global = false;
+        let end =
+            virt.checked_add(pages * PAGE_SIZE).ok_or(PagingError::Map(MapError::BadAddress))?;
+        if end > USER_END || !virt.is_multiple_of(PAGE_SIZE) {
+            return Err(PagingError::Map(MapError::BadAddress));
+        }
+        for i in 0..pages {
+            let frame =
+                crate::mm::allocate_frame().ok_or(PagingError::Map(MapError::OutOfMemory))?;
+            // SAFETY: a freshly allocated frame, HHDM-mapped, owned by us.
+            unsafe { hhdm_ptr(frame.start()).write_bytes(0, PAGE_SIZE as usize) };
+            if let Err(e) = self.mapper.map(
+                virt + i * PAGE_SIZE,
+                frame.start(),
+                PageSize::Size4K,
+                flags,
+                &mut alloc_table,
+            ) {
+                let _ = crate::mm::free_frame(frame);
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Calls `f(phys, len, offset)` for each physically contiguous piece of
+    /// the user range `[virt, virt + len)`, checking user access (and
+    /// writability if `write`).
+    fn for_each_piece(
+        &mut self,
+        virt: u64,
+        len: usize,
+        write: bool,
+        mut f: impl FnMut(u64, usize, usize),
+    ) -> Result<(), UserFault> {
+        use crate::mm::paging::USER_END;
+        let end = virt
+            .checked_add(len as u64)
+            .filter(|&e| e <= USER_END)
+            .ok_or(UserFault { address: virt })?;
+        let mut addr = virt;
+        while addr < end {
+            let t = self.mapper.translate(addr).ok_or(UserFault { address: addr })?;
+            if !t.flags.user || (write && !t.flags.writable) {
+                return Err(UserFault { address: addr });
+            }
+            let page_left = PAGE_SIZE - (addr % PAGE_SIZE);
+            let n = page_left.min(end - addr) as usize;
+            f(t.phys, n, (addr - virt) as usize);
+            addr += n as u64;
+        }
+        Ok(())
+    }
+
+    /// Copies from user memory (as a user-mode read would).
+    pub fn read(&mut self, virt: u64, buf: &mut [u8]) -> Result<(), UserFault> {
+        let dst = buf.as_mut_ptr();
+        self.for_each_piece(virt, buf.len(), false, |phys, n, off| {
+            // SAFETY: `phys..phys+n` is a mapped user frame owned by this
+            // space (HHDM-mapped); `dst+off..+n` is inside `buf`. Raw copies,
+            // since user threads may write the frame concurrently.
+            unsafe { core::ptr::copy_nonoverlapping(hhdm_ptr(phys), dst.add(off), n) }
+        })
+    }
+
+    /// Copies into user memory, honouring page writability (as a user-mode
+    /// write would).
+    pub fn write(&mut self, virt: u64, data: &[u8]) -> Result<(), UserFault> {
+        self.copy_in(virt, data, true)
+    }
+
+    /// Copies into user memory ignoring writability (for the loader, e.g.
+    /// to fill read-only code pages).
+    pub fn write_initial(&mut self, virt: u64, data: &[u8]) -> Result<(), UserFault> {
+        self.copy_in(virt, data, false)
+    }
+
+    fn copy_in(&mut self, virt: u64, data: &[u8], check_writable: bool) -> Result<(), UserFault> {
+        let src = data.as_ptr();
+        self.for_each_piece(virt, data.len(), check_writable, |phys, n, off| {
+            // SAFETY: as in `read`, with source and destination swapped.
+            unsafe { core::ptr::copy_nonoverlapping(src.add(off), hhdm_ptr(phys), n) }
+        })
+    }
+}
+
+impl Drop for UserSpace {
+    fn drop(&mut self) {
+        // The space must not be active on any CPU any more (see `activate`).
+        let mem = HhdmTables { offset: crate::mm::hhdm_offset() };
+        let dummy = Frame::from_number(0);
+        let mapper = core::mem::replace(&mut self.mapper, Mapper::from_root(mem, dummy));
+        let free = &mut |f: Frame| {
+            let _ = crate::mm::free_frame(f);
+        };
+        mapper.destroy(&mut |f| free(f), &mut |f| free(f));
+    }
 }

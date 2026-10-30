@@ -100,3 +100,19 @@ pub fn rdtsc() -> u64 {
     // SAFETY: RDTSC has no side effects.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
+
+/// Enables SSE for code that uses it (user mode; the kernel is soft-float):
+/// CR0.EM off, CR0.MP on, CR4.OSFXSR and CR4.OSXMMEXCPT on.
+pub fn enable_sse() {
+    // SAFETY: these control bits only affect how SSE/x87 instructions
+    // behave; the kernel itself executes none outside FXSAVE/FXRSTOR.
+    unsafe {
+        let mut cr0: u64;
+        asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
+        cr0 = (cr0 & !(1 << 2)) | (1 << 1);
+        asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags));
+        let cr4 = read_cr4() | (1 << 9) | (1 << 10);
+        asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
+        asm!("fninit", options(nomem, nostack));
+    }
+}

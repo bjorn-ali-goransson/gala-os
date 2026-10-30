@@ -77,6 +77,49 @@ impl BootMemoryMap {
     }
 }
 
+/// A file loaded by the bootloader (`module_path` in limine.conf).
+#[derive(Clone, Copy)]
+pub struct Module {
+    /// Path on the boot volume, with a leading slash.
+    pub path: &'static str,
+    pub cmdline: &'static str,
+    pub data: &'static [u8],
+}
+
+impl Module {
+    /// File name without directories.
+    pub fn file_name(&self) -> &'static str {
+        self.path.rsplit('/').next().unwrap_or(self.path)
+    }
+}
+
+pub struct BootModules {
+    files: &'static [*const limine::RawFile],
+}
+
+impl BootModules {
+    pub fn iter(&self) -> impl Iterator<Item = Module> + '_ {
+        self.files.iter().filter_map(|&f| {
+            // SAFETY: entries point to `limine_file`s in bootloader-reclaimable
+            // memory; the file contents live in "executable and modules"
+            // memory, which is HHDM-mapped and never reused, so `'static`.
+            unsafe {
+                let f = f.as_ref()?;
+                let data = if f.address.is_null() {
+                    &[][..]
+                } else {
+                    core::slice::from_raw_parts(f.address, f.size as usize)
+                };
+                Some(Module { path: limine::c_str(f.path), cmdline: limine::c_str(f.string), data })
+            }
+        })
+    }
+
+    pub fn find(&self, file_name: &str) -> Option<Module> {
+        self.iter().find(|m| m.file_name().eq_ignore_ascii_case(file_name))
+    }
+}
+
 /// Everything the kernel takes from the bootloader.
 pub struct BootInfo {
     pub base_revision: u64,
@@ -87,6 +130,7 @@ pub struct BootInfo {
     pub kernel_address: Option<KernelAddress>,
     pub memory_map: BootMemoryMap,
     pub framebuffer: Option<Framebuffer>,
+    pub modules: BootModules,
 }
 
 /// Reads the bootloader responses. Call once, early in boot.
@@ -138,6 +182,15 @@ pub fn collect() -> Result<BootInfo, BootError> {
         }
     });
 
+    let modules = REQUESTS.modules.response().map_or(&[][..], |r| {
+        if r.modules.is_null() {
+            &[][..]
+        } else {
+            // SAFETY: an array of `module_count` file pointers, per the protocol.
+            unsafe { core::slice::from_raw_parts(r.modules, r.module_count as usize) }
+        }
+    });
+
     Ok(BootInfo {
         base_revision: loaded.unwrap_or(REQUESTED_BASE_REVISION),
         bootloader,
@@ -147,6 +200,7 @@ pub fn collect() -> Result<BootInfo, BootError> {
         kernel_address,
         memory_map: BootMemoryMap { entries },
         framebuffer,
+        modules: BootModules { files: modules },
     })
 }
 

@@ -116,6 +116,23 @@ pub struct RawFramebuffer {
 }
 
 #[repr(C)]
+pub struct ModuleResponse {
+    pub revision: u64,
+    pub module_count: u64,
+    pub modules: *const *const RawFile,
+}
+
+/// `struct limine_file`; only the leading fields are read.
+#[repr(C)]
+pub struct RawFile {
+    pub revision: u64,
+    pub address: *const u8,
+    pub size: u64,
+    pub path: *const c_char,
+    pub string: *const c_char,
+}
+
+#[repr(C)]
 pub struct ExecutableAddressResponse {
     pub revision: u64,
     pub physical_base: u64,
@@ -133,6 +150,7 @@ pub struct Requests {
     pub memmap: Request<MemmapResponse>,
     pub framebuffer: Request<FramebufferResponse>,
     pub executable_address: Request<ExecutableAddressResponse>,
+    pub modules: Request<ModuleResponse>,
     end_marker: [u64; 2],
 }
 
@@ -156,6 +174,7 @@ pub static REQUESTS: Requests = Requests {
     memmap: Request::new([0x67cf3d9d378a806f, 0xe304acdfc50c3c62]),
     framebuffer: Request::new([0x9d5827dcd881dd75, 0xa3148604f6fab11b]),
     executable_address: Request::new([0x71ba76863cc55f63, 0xb2644a48c516a487]),
+    modules: Request::new([0x3e7e279702be32af, 0xca1c4f3bd1280cee]),
     end_marker: REQUESTS_END_MARKER,
 };
 

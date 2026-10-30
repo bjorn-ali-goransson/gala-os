@@ -15,6 +15,7 @@ use core::fmt;
 
 use crate::arch::context::{Context, KernelStack, StackError};
 use crate::arch::cpu;
+use crate::arch::paging::{self, SharedUserSpace};
 use crate::mm::heap::{AllocError, TryVec, try_box};
 use crate::sync::IrqMutex;
 use crate::time;
@@ -55,6 +56,18 @@ struct Thread {
     entry: Option<(fn(usize), usize)>,
     /// Threads blocked in `join` on this one.
     joiners: Vec<ThreadId>,
+    /// Set for threads that run user code.
+    user: Option<UserThread>,
+}
+
+/// User-mode side of a thread.
+struct UserThread {
+    /// Keeps the address space alive while the thread exists; `root` is
+    /// its PML4, read without taking the space's lock.
+    space: SharedUserSpace,
+    root: u64,
+    /// GS base in user mode (the TEB).
+    gs_base: u64,
 }
 
 struct Scheduler {
@@ -121,6 +134,7 @@ pub fn init() -> Result<(), SpawnError> {
         stack: None,
         entry: None,
         joiners: Vec::new(),
+        user: None,
     };
     let mut sched = Scheduler {
         threads: Vec::new(),
@@ -143,6 +157,29 @@ pub fn init() -> Result<(), SpawnError> {
 
 /// Creates a thread running `entry(arg)`. It starts on the next switch.
 pub fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<ThreadId, SpawnError> {
+    spawn_inner(name, entry, arg, None)
+}
+
+/// Creates a thread that runs `entry(arg)` in kernel mode inside the user
+/// address space `space`, with user GS base `gs_base`. `entry` normally
+/// ends by entering user mode.
+pub fn spawn_user(
+    name: &'static str,
+    entry: fn(usize),
+    arg: usize,
+    space: SharedUserSpace,
+    gs_base: u64,
+) -> Result<ThreadId, SpawnError> {
+    let root = space.lock().root();
+    spawn_inner(name, entry, arg, Some(UserThread { space, root, gs_base }))
+}
+
+fn spawn_inner(
+    name: &'static str,
+    entry: fn(usize),
+    arg: usize,
+    user: Option<UserThread>,
+) -> Result<ThreadId, SpawnError> {
     // Allocate outside the scheduler lock.
     let stack = KernelStack::new().map_err(SpawnError::Stack)?;
     let context = Context::new_thread(&stack, thread_start);
@@ -153,6 +190,7 @@ pub fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<ThreadI
         stack: Some(stack),
         entry: Some((entry, arg)),
         joiners: Vec::new(),
+        user,
     };
     let mut guard = SCHED.lock();
     let sched = guard.as_mut().ok_or(SpawnError::NotInitialized)?;
@@ -214,15 +252,21 @@ fn schedule() {
         s.need_resched = false;
         (next != cur).then(|| {
             let from: *const Context = &s.thread(cur).context;
-            let to: *const Context = &s.thread(next).context;
-            (from, to)
+            let n = s.thread(next);
+            let target = switch::Target {
+                context: &n.context,
+                kernel_stack_top: n.stack.as_ref().map(KernelStack::top),
+                root: n.user.as_ref().map_or_else(paging::kernel_root, |u| u.root),
+                user_gs_base: n.user.as_ref().map_or(0, |u| u.gs_base),
+            };
+            (from, target)
         })
     };
     // The lock is released before switching; with interrupts disabled on a
     // single CPU nothing can touch the threads in between.
     // TODO(smp): hand the lock over across the switch instead.
-    if let Some((from, to)) = switch_pair {
-        switch::switch(from, to);
+    if let Some((from, target)) = switch_pair {
+        switch::switch(from, target);
     }
     if restore {
         cpu::enable_interrupts();
@@ -278,6 +322,7 @@ pub fn join(id: ThreadId) -> Result<(), JoinError> {
 pub fn reap() -> usize {
     // Take the stacks out under the lock, drop (unmap) them outside it.
     let mut stacks: [Option<KernelStack>; 8] = Default::default();
+    let mut spaces: [Option<SharedUserSpace>; 8] = Default::default();
     let mut n = 0;
     with(|s| {
         let cur = s.current;
@@ -288,10 +333,14 @@ pub fn reap() -> usize {
             if t.state == State::Dead && i != cur.0 && t.stack.is_some() {
                 stacks[n] = t.stack.take();
                 n += 1;
+                // Not active any more (a switch away loaded another root),
+                // so the address space may be freed with its last thread.
+                spaces[n - 1] = t.user.take().map(|u| u.space);
             }
         }
     });
     drop(stacks);
+    drop(spaces);
     n
 }
 
