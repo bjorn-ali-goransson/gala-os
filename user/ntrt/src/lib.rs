@@ -620,6 +620,27 @@ pub fn create_section(
 pub const SEC_IMAGE: u32 = 0x100_0000;
 pub const GENERIC_EXECUTE: u32 = 0x2000_0000;
 
+/// NtCreateSection(SEC_COMMIT) on an open file (a mapped file);
+/// `size` None passes NULL (the file's size).
+pub fn create_file_section(file: Handle, size: Option<i64>, protect: u32) -> (NtStatus, Handle) {
+    let mut h = Handle(0);
+    let s = size.unwrap_or(0);
+    let sp = if size.is_some() { &s as *const i64 } else { core::ptr::null() };
+    // SAFETY: valid pointers or null.
+    let st = unsafe {
+        ntrt_nt_create_section(
+            &mut h,
+            SECTION_ALL_ACCESS,
+            core::ptr::null(),
+            sp,
+            protect,
+            SEC_COMMIT,
+            file,
+        )
+    };
+    (st, h)
+}
+
 /// NtCreateSection(SEC_IMAGE) on an open file.
 pub fn create_image_section(file: Handle) -> (NtStatus, Handle) {
     let mut h = Handle(0);

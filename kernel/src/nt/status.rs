@@ -46,6 +46,8 @@ impl NtStatus {
     pub const NO_SUCH_FILE: NtStatus = NtStatus(0xc000_000f);
     pub const FILE_DELETED: NtStatus = NtStatus(0xc000_0123);
     pub const INVALID_ADDRESS: NtStatus = NtStatus(0xc000_0141);
+    pub const USER_MAPPED_FILE: NtStatus = NtStatus(0xc000_0243);
+    pub const MAPPED_FILE_SIZE_ZERO: NtStatus = NtStatus(0xc000_011e);
     pub const STACK_OVERFLOW: NtStatus = NtStatus(0xc000_00fd);
     pub const CONFLICTING_ADDRESSES: NtStatus = NtStatus(0xc000_0018);
     pub const UNABLE_TO_FREE_VM: NtStatus = NtStatus(0xc000_001a);

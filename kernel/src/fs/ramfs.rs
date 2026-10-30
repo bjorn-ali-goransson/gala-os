@@ -5,7 +5,9 @@
 
 use alloc::vec::Vec;
 
-use crate::mm::heap::TryVec;
+use alloc::boxed::Box;
+
+use crate::mm::heap::{TryVec, try_box};
 
 pub type NodeId = usize;
 
@@ -28,34 +30,114 @@ pub enum FsError {
     DirectoryNotEmpty,
     /// E.g. replacing a directory or an open file by rename.
     AccessDenied,
+    /// Truncating below the size a section maps.
+    UserMapped,
     NoMemory,
 }
+
+/// Size of a file page.
+pub const PAGE: usize = 4096;
+
+/// One page of file contents: page-aligned and at a fixed address while it
+/// exists, so the kernel can map it into address spaces (memory-mapped
+/// files) and see the same bytes as reads and writes.
+#[repr(C, align(4096))]
+pub struct Page(pub [u8; PAGE]);
 
 enum Data {
     /// Immutable contents owned elsewhere (boot modules).
     Static(&'static [u8]),
-    Owned(Vec<u8>),
+    /// `len` bytes in whole pages; bytes past `len` are kept zero.
+    Paged { pages: Vec<Box<Page>>, len: usize },
 }
 
 impl Data {
-    fn bytes(&self) -> &[u8] {
+    const EMPTY: Data = Data::Paged { pages: Vec::new(), len: 0 };
+
+    fn len(&self) -> usize {
         match self {
-            Data::Static(s) => s,
-            Data::Owned(v) => v,
+            Data::Static(s) => s.len(),
+            Data::Paged { len, .. } => *len,
         }
     }
 
-    /// Turns static data into owned data before modification.
-    fn owned(&mut self) -> Result<&mut Vec<u8>, FsError> {
+    fn read_at(&self, start: usize, buf: &mut [u8]) -> usize {
+        let len = self.len();
+        if start >= len {
+            return 0;
+        }
+        let n = buf.len().min(len - start);
+        match self {
+            Data::Static(s) => buf[..n].copy_from_slice(&s[start..start + n]),
+            Data::Paged { pages, .. } => {
+                let mut done = 0;
+                while done < n {
+                    let at = start + done;
+                    let (page, off) = (at / PAGE, at % PAGE);
+                    let k = (PAGE - off).min(n - done);
+                    buf[done..done + k].copy_from_slice(&pages[page].0[off..off + k]);
+                    done += k;
+                }
+            }
+        }
+        n
+    }
+
+    /// The pages, after turning static data into pages.
+    fn paged(&mut self) -> Result<(&mut Vec<Box<Page>>, &mut usize), FsError> {
         if let Data::Static(s) = *self {
-            let mut v = Vec::new();
-            v.try_extend_from_slice(s).map_err(|_| FsError::NoMemory)?;
-            *self = Data::Owned(v);
+            let mut d = Data::EMPTY;
+            d.write_at(0, s)?;
+            *self = d;
         }
         match self {
-            Data::Owned(v) => Ok(v),
+            Data::Paged { pages, len } => Ok((pages, len)),
             Data::Static(_) => unreachable!(),
         }
+    }
+
+    /// Makes sure the pages cover `size` bytes (new pages are zero).
+    fn cover(pages: &mut Vec<Box<Page>>, size: usize) -> Result<(), FsError> {
+        let need = size.div_ceil(PAGE);
+        if need > pages.len() {
+            pages.try_reserve(need - pages.len()).map_err(|_| FsError::NoMemory)?;
+            while pages.len() < need {
+                let page = try_box(Page([0; PAGE])).map_err(|_| FsError::NoMemory)?;
+                let _ = pages.try_push(page);
+            }
+        }
+        Ok(())
+    }
+
+    fn write_at(&mut self, start: usize, data: &[u8]) -> Result<(), FsError> {
+        let end = start.checked_add(data.len()).ok_or(FsError::NoMemory)?;
+        let (pages, len) = self.paged()?;
+        Self::cover(pages, end)?;
+        let mut done = 0;
+        while done < data.len() {
+            let at = start + done;
+            let (page, off) = (at / PAGE, at % PAGE);
+            let k = (PAGE - off).min(data.len() - done);
+            pages[page].0[off..off + k].copy_from_slice(&data[done..done + k]);
+            done += k;
+        }
+        *len = (*len).max(end);
+        Ok(())
+    }
+
+    fn set_len(&mut self, size: usize) -> Result<(), FsError> {
+        let (pages, len) = self.paged()?;
+        Self::cover(pages, size)?;
+        if size < *len {
+            // Keep bytes past the end zero (mapped views show them).
+            let keep = size.div_ceil(PAGE);
+            pages.truncate(keep);
+            if !size.is_multiple_of(PAGE) {
+                pages[keep - 1].0[size % PAGE..].fill(0);
+            }
+        }
+        *len = size;
+        Ok(())
     }
 }
 
@@ -104,6 +186,9 @@ pub struct Node {
     pub written: u64,
     opens: Opens,
     delete_pending: bool,
+    /// Sections mapping the file, and the largest size they map.
+    map_count: u32,
+    mapped_size: u64,
 }
 
 impl Node {
@@ -121,7 +206,7 @@ impl Node {
 
     pub fn size(&self) -> u64 {
         match &self.kind {
-            Kind::File(d) => d.bytes().len() as u64,
+            Kind::File(d) => d.len() as u64,
             Kind::Directory(_) => 0,
         }
     }
@@ -191,6 +276,8 @@ impl RamFs {
             written: now,
             opens: Opens::default(),
             delete_pending: false,
+            map_count: 0,
+            mapped_size: 0,
         };
         nodes.try_push(Some(root)).map_err(|_| FsError::NoMemory)?;
         Ok(Self { nodes })
@@ -257,7 +344,7 @@ impl RamFs {
         let (kind, attributes) = if directory {
             (Kind::Directory(Vec::new()), ATTRIBUTE_DIRECTORY)
         } else {
-            (Kind::File(Data::Owned(Vec::new())), ATTRIBUTE_ARCHIVE)
+            (Kind::File(Data::EMPTY), ATTRIBUTE_ARCHIVE)
         };
         let node = Node {
             parent,
@@ -268,6 +355,8 @@ impl RamFs {
             written: now,
             opens: Opens::default(),
             delete_pending: false,
+            map_count: 0,
+            mapped_size: 0,
         };
         let id = match self.nodes.iter().position(Option::is_none) {
             Some(free) => {
@@ -477,14 +566,8 @@ impl RamFs {
     pub fn read(&self, id: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, FsError> {
         let node = self.node(id).ok_or(FsError::NotFound)?;
         let Kind::File(data) = &node.kind else { return Err(FsError::IsADirectory) };
-        let bytes = data.bytes();
         let Ok(start) = usize::try_from(offset) else { return Ok(0) };
-        if start >= bytes.len() {
-            return Ok(0);
-        }
-        let n = buf.len().min(bytes.len() - start);
-        buf[..n].copy_from_slice(&bytes[start..start + n]);
-        Ok(n)
+        Ok(data.read_at(start, buf))
     }
 
     /// Writes at `offset`, extending (zero-filling a gap) as needed.
@@ -497,14 +580,8 @@ impl RamFs {
     ) -> Result<usize, FsError> {
         let node = self.node_mut(id)?;
         let Kind::File(contents) = &mut node.kind else { return Err(FsError::IsADirectory) };
-        let v = contents.owned()?;
         let start = usize::try_from(offset).map_err(|_| FsError::NoMemory)?;
-        let end = start.checked_add(data.len()).ok_or(FsError::NoMemory)?;
-        if end > v.len() {
-            v.try_reserve(end - v.len()).map_err(|_| FsError::NoMemory)?;
-            v.resize(end, 0);
-        }
-        v[start..end].copy_from_slice(data);
+        contents.write_at(start, data)?;
         node.written = now;
         Ok(data.len())
     }
@@ -512,15 +589,49 @@ impl RamFs {
     /// Truncates or extends (with zeros) to `size`.
     pub fn set_size(&mut self, id: NodeId, size: u64, now: u64) -> Result<(), FsError> {
         let node = self.node_mut(id)?;
-        let Kind::File(contents) = &mut node.kind else { return Err(FsError::IsADirectory) };
-        let v = contents.owned()?;
-        let size = usize::try_from(size).map_err(|_| FsError::NoMemory)?;
-        if size > v.len() {
-            v.try_reserve(size - v.len()).map_err(|_| FsError::NoMemory)?;
+        if node.map_count > 0 && size < node.mapped_size {
+            return Err(FsError::UserMapped);
         }
-        v.resize(size, 0);
+        let Kind::File(contents) = &mut node.kind else { return Err(FsError::IsADirectory) };
+        let size = usize::try_from(size).map_err(|_| FsError::NoMemory)?;
+        contents.set_len(size)?;
         node.written = now;
         Ok(())
+    }
+
+    /// Registers a section mapping the first `size` bytes of file `id`
+    /// (the file must be that large): its pages stay put and the file
+    /// cannot shrink below `size` until `unmap`.
+    pub fn map(&mut self, id: NodeId, size: u64) -> Result<(), FsError> {
+        let node = self.node_mut(id)?;
+        let Kind::File(contents) = &mut node.kind else { return Err(FsError::IsADirectory) };
+        if size > contents.len() as u64 {
+            return Err(FsError::NoMemory);
+        }
+        contents.paged()?;
+        node.map_count += 1;
+        node.mapped_size = node.mapped_size.max(size);
+        Ok(())
+    }
+
+    /// Ends a mapping registered with `map`.
+    pub fn unmap(&mut self, id: NodeId) {
+        if let Ok(node) = self.node_mut(id) {
+            node.map_count = node.map_count.saturating_sub(1);
+            if node.map_count == 0 {
+                node.mapped_size = 0;
+            }
+        }
+    }
+
+    /// The address of page `index` of mapped file `id` (see `map`).
+    pub fn page_address(&self, id: NodeId, index: usize) -> Option<usize> {
+        match &self.node(id)?.kind {
+            Kind::File(Data::Paged { pages, .. }) => {
+                pages.get(index).map(|p| &**p as *const Page as usize)
+            }
+            _ => None,
+        }
     }
 
     /// Creates the directories of `path` (components) that do not exist.
@@ -699,5 +810,56 @@ mod tests {
         assert_eq!(f.list(ROOT).unwrap(), [d]);
         assert_eq!(f.rename(d, d, &w("x"), false), Err(FsError::AccessDenied));
         assert_eq!(f.rename(a, d, &w("moved"), false), Ok(()), "renaming onto itself");
+    }
+
+    #[test]
+    fn paged_data_across_pages() {
+        let mut f = fs();
+        let id = f.create(ROOT, &w("p"), false, 1).unwrap();
+        let data: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        f.write(id, 0, &data, 2).unwrap();
+        let mut back = vec![0u8; 10_000];
+        assert_eq!(f.read(id, 0, &mut back), Ok(10_000));
+        assert_eq!(back, data);
+        let mut mid = [0u8; 10];
+        assert_eq!(f.read(id, 4090, &mut mid), Ok(10));
+        assert_eq!(&mid[..], &data[4090..4100]);
+        // Truncation keeps the tail of the last page zero.
+        f.set_size(id, 5000, 3).unwrap();
+        f.set_size(id, 6000, 4).unwrap();
+        let mut tail = [0xffu8; 1000];
+        assert_eq!(f.read(id, 5000, &mut tail), Ok(1000));
+        assert!(tail.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn mapped_pages_stay_put_and_block_truncation() {
+        let mut f = fs();
+        let id = f.create(ROOT, &w("m"), false, 1).unwrap();
+        f.write(id, 0, &[7; 5000], 2).unwrap();
+        assert_eq!(f.map(id, 0x3000), Err(FsError::NoMemory), "larger than the file");
+        f.map(id, 5000).unwrap();
+        let first = f.page_address(id, 0).unwrap();
+        assert_eq!(first % PAGE, 0);
+        f.write(id, 9000, b"grow", 3).unwrap();
+        assert_eq!(f.page_address(id, 0), Some(first), "pages do not move");
+        assert!(f.page_address(id, 2).is_some());
+        assert_eq!(f.set_size(id, 100, 4), Err(FsError::UserMapped));
+        f.set_size(id, 6000, 4).unwrap();
+        f.unmap(id);
+        f.set_size(id, 100, 5).unwrap();
+    }
+
+    #[test]
+    fn static_files_become_pages_when_mapped() {
+        static DATA: &[u8] = b"module";
+        let mut f = fs();
+        let id = f.add_static_file(ROOT, &w("s.dll"), DATA, 1).unwrap();
+        assert_eq!(f.page_address(id, 0), None);
+        f.map(id, 6).unwrap();
+        assert!(f.page_address(id, 0).is_some());
+        let mut b = [0u8; 6];
+        f.read(id, 0, &mut b).unwrap();
+        assert_eq!(&b, b"module");
     }
 }

@@ -314,6 +314,17 @@ relocations applied, so writes never reach other views (copy-on-write in
 effect, without sharing yet). A relocated view returns
 STATUS_IMAGE_NOT_AT_BASE. Non-PE files fail with STATUS_INVALID_IMAGE_NOT_MZ.
 
+Data sections on a file (memory-mapped files) share the file's pages:
+ramfs keeps file contents in page-aligned 4 KiB heap pages (`ramfs::Page`,
+whole-page allocations in the HHDM, so their frame is `addr - hhdm`), and
+the section's frames are those pages, mapped borrowed into views. Views,
+other sections and NtReadFile/NtWriteFile therefore see the same bytes.
+The section keeps the file object open; ramfs counts mappings and refuses
+to shrink a file below its mapped size (STATUS_USER_MAPPED_FILE). A size
+of 0 means the file's size; a larger one extends the file on a writable
+handle (else STATUS_SECTION_TOO_BIG); the handle must grant read (and
+write for PAGE_READWRITE).
+
 **Files** (`fs::ramfs`, `nt::file`): an in-memory file system (node
 arena, case-insensitive names, static boot-module contents copied on first
 write, NT share-access accounting, delete pending until the last open

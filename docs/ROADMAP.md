@@ -82,15 +82,18 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   (0x0d: priority, base priority, hide from debugger; priorities stored,
   not yet used by the scheduler), ThreadTimes/Win32StartAddress/
   AmILastThread/IsTerminated; `threadinfo_test`
+- Memory-mapped files: data sections on a file handle sharing the file's
+  pages (ramfs data in page-aligned pages), coherent with file I/O,
+  extension, access checks, STATUS_USER_MAPPED_FILE; `filemap_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
    NtOpenMutant, NtCreateSemaphore/NtReleaseSemaphore (0x0a); abandonment
    on thread exit. Create/open numbers vary by build: verify on 26100 first.
    Symbolic links (`\Sessions\1\BaseNamedObjects\Global`), NtQueryDirectoryObject.
-6c. **Image sections, rest**: share unmodified pages between views,
-   file-backed data sections, the kernel loader using image sections, and
-   loading DLL imports (needed for ntdll and 7).
+6c. **Sections, rest**: share unmodified image pages between views,
+   PAGE_WRITECOPY views of data files (private copies), the kernel loader
+   using image sections.
 6e. **User-mode loader support**: what a real ntdll's loader needs next:
    KnownDlls (`\KnownDlls` section objects), more NtQuerySystemInformation
    classes, NtSetInformationProcess/Thread bits, TLS slots in the TEB;

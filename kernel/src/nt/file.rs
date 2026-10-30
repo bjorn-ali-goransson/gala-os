@@ -147,6 +147,7 @@ pub fn fs_status(e: FsError) -> NtStatus {
         FsError::DeletePending => NtStatus::DELETE_PENDING,
         FsError::DirectoryNotEmpty => NtStatus::DIRECTORY_NOT_EMPTY,
         FsError::AccessDenied => NtStatus::ACCESS_DENIED,
+        FsError::UserMapped => NtStatus::USER_MAPPED_FILE,
         FsError::NoMemory => NtStatus::NO_MEMORY,
     }
 }

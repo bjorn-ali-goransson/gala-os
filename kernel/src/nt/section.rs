@@ -31,7 +31,19 @@ pub struct Section {
     pub image: Option<ImageLayout>,
     /// NT path of the backing file (MemoryMappedFilenameInformation).
     pub file_name: Option<Vec<u16>>,
+    /// For a data section on a file: the file's pages back the section.
+    file: Option<FileMapping>,
 }
+
+/// A mapped file: the open file object (keeping the file alive) and its
+/// node, whose pages (`ramfs::RamFs::page_address`) are the section's.
+struct FileMapping {
+    _object: ObjectRef,
+    node: crate::fs::ramfs::NodeId,
+}
+
+/// SEC_FILE: reported for sections backed by a file.
+pub const SEC_FILE: u32 = 0x80_0000;
 
 /// An executable image laid out at its preferred base (headers and
 /// sections at their RVAs), with the protection of every page.
@@ -117,6 +129,28 @@ impl Section {
             pages: IrqMutex::new(pages),
             image: None,
             file_name: None,
+            file: None,
+        })
+    }
+
+    /// A data section mapping the first `size` bytes of the file behind
+    /// `object` (node `node`, at least that large).
+    pub fn new_file(
+        object: ObjectRef,
+        node: crate::fs::ramfs::NodeId,
+        size: u64,
+        protect: u32,
+    ) -> Result<Self, NtStatus> {
+        vad::access_of(protect)?;
+        super::file::with_fs(|fs| fs.map(node, size)).map_err(super::file::fs_status)?;
+        Ok(Section {
+            size,
+            protect,
+            attributes: SEC_COMMIT | SEC_FILE,
+            pages: IrqMutex::new(Vec::new()),
+            image: None,
+            file_name: super::file::nt_path(node).ok(),
+            file: Some(FileMapping { _object: object, node }),
         })
     }
 
@@ -130,11 +164,22 @@ impl Section {
             pages: IrqMutex::new(Vec::new()),
             image: Some(layout),
             file_name: None,
+            file: None,
         })
     }
 
-    /// The frame backing page `index`, allocated zeroed on first use.
+    /// The frame backing page `index`: the file's page for a mapped file,
+    /// else allocated zeroed on first use.
     pub fn frame(&self, index: usize) -> Option<Frame> {
+        if let Some(f) = &self.file {
+            if index as u64 >= self.size.div_ceil(PAGE_SIZE) {
+                return None;
+            }
+            // File pages are whole-page heap allocations, which live in the
+            // HHDM: their physical address is their offset in it.
+            let addr = super::file::with_fs(|fs| fs.page_address(f.node, index))?;
+            return Some(Frame::containing(addr as u64 - crate::mm::hhdm_offset()));
+        }
         let mut pages = self.pages.lock();
         let slot = pages.get_mut(index)?;
         if slot.is_none() {
@@ -162,6 +207,9 @@ impl Section {
 
 impl Drop for Section {
     fn drop(&mut self) {
+        if let Some(f) = &self.file {
+            super::file::with_fs(|fs| fs.unmap(f.node));
+        }
         for frame in self.pages.lock().iter().flatten() {
             let _ = crate::mm::free_frame(*frame);
         }

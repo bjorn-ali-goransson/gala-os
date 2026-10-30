@@ -1226,8 +1226,9 @@ fn nt_create_section(call: &mut Call<'_>) -> NtStatus {
         return finish_create_section(call, out, access, attrs_ptr, body);
     }
     if file != 0 {
-        // TODO: file-backed data sections.
-        return NtStatus::NOT_IMPLEMENTED;
+        let size = if size_ptr == 0 { 0 } else { tri!(call.read_u64(size_ptr)) };
+        let body = tri!(file_section(call, file, size, protect));
+        return finish_create_section(call, out, access, attrs_ptr, body);
     }
     if size_ptr == 0 {
         return NtStatus::INVALID_PARAMETER_4;
@@ -1239,6 +1240,51 @@ fn nt_create_section(call: &mut Call<'_>) -> NtStatus {
     let body = tri!(section::Section::new(size, protect, attributes));
     finish_create_section(call, out, access, attrs_ptr, body)
 }
+
+/// A data section on an open file (a memory-mapped file): `size` 0 means
+/// the file's size; a larger size extends the file (writable handles
+/// only). The handle must allow what the protection allows.
+fn file_section(
+    call: &Call<'_>,
+    file: u64,
+    size: u64,
+    protect: u32,
+) -> Result<section::Section, NtStatus> {
+    let entry = call.handle(Handle(file))?;
+    let ObjectBody::File(f) = &entry.object.body else {
+        return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+    };
+    if f.directory {
+        return Err(NtStatus::INVALID_FILE_FOR_SECTION);
+    }
+    let a = vad::access_of(protect)?;
+    let writable = protect & (vad::PAGE_READWRITE | vad::PAGE_EXECUTE_READWRITE) != 0;
+    let mut need = file::FILE_READ_DATA;
+    if writable {
+        need |= file::FILE_WRITE_DATA;
+    }
+    if a.execute {
+        need |= FILE_EXECUTE;
+    }
+    if entry.access & need != need {
+        return Err(NtStatus::ACCESS_DENIED);
+    }
+    let file_size = file::with_fs(|fs| fs.node(f.node).map_or(0, |n| n.size()));
+    let size = if size == 0 { file_size } else { size };
+    if size == 0 {
+        return Err(NtStatus::MAPPED_FILE_SIZE_ZERO);
+    }
+    if size > file_size {
+        if entry.access & file::FILE_WRITE_DATA == 0 {
+            return Err(NtStatus::SECTION_TOO_BIG);
+        }
+        let now = crate::time::system_time();
+        file::with_fs(|fs| fs.set_size(f.node, size, now)).map_err(file::fs_status)?;
+    }
+    section::Section::new_file(entry.object.clone(), f.node, size, protect)
+}
+
+const FILE_EXECUTE: u32 = 0x0020;
 
 /// Builds a SEC_IMAGE section from the whole contents of an open file.
 fn image_section(call: &Call<'_>, file: u64) -> Result<section::Section, NtStatus> {

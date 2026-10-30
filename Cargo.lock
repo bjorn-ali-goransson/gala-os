@@ -45,6 +45,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "filemap_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "fpu_test"
 version = "0.1.0"
 dependencies = [
