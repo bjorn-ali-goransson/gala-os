@@ -1,5 +1,10 @@
 # Project brief: NT-compatible kernel in Rust
 
+**Name.** gala: from the Arabic *qal'a*, "fortress" (and a play on
+"Windows"). It stands for security built in from the start: a small
+trusted core, fallible allocation, confined `unsafe`, and user input that
+can never crash the kernel.
+
 ## Goal
 Build a new OS kernel, written in Rust, that is binary-compatible with
 Windows at the user-mode ABI level, so unmodified Windows programs can run

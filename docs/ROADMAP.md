@@ -128,8 +128,24 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   `smpsched_test`
 
 ## Next
-Order agreed with the project owner (2026-10-30): multiprocessor support
-first, then a real Go program, then Nginx.
+Direction from the project owner (2026-10-30): multiprocessor support, then
+a real Go program, then Nginx; fast testing (a QEMU test image, gala-um)
+and introspection are explicitly wanted. Priorities within that are ours
+to set and to argue for. Current order and why:
+
+1. S3 (user TLB shootdown): a live memory-safety bug since S2, small.
+2. T1 (test speed): most of a boot test's time is firmware boot and ISO
+   building, not the test. One VM running many programs plus a Docker
+   test image gives most of the speed-up quickly and makes every
+   environment (CI, agents, laptops) identical.
+3. O1 (observability): the missing-features ledger and the event stream
+   are what make the Go and Nginx bring-ups data-driven.
+4. U1-U3 (gala-um): the NT layer as a Linux process. Much faster tests and
+   host tools (perf, sanitizers, gdb), but a second platform under the NT
+   layer; it starts with a design note and the platform seam.
+5. G1, G2 (kernel32, Go).
+S4 waits until something needs it (Go's preemption uses SuspendThread/
+GetThreadContext, so at the latest G2).
 
 S3. **SMP memory**: TLB shootdown when user mappings change (unmap,
    protect, COW copies, guard pages) while threads of the space run on
@@ -137,6 +153,21 @@ S3. **SMP memory**: TLB shootdown when user mappings change (unmap,
    counters, wait/wake storms, unmapping under a running thread).
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
+T1. **Test speed and a test image**: `run=` with several programs in one
+   boot (per-program results), xtask grouping scenarios that share boot
+   modules into one VM, timing per phase (build, ISO, firmware, kernel,
+   tests) in `xtask report`; a Dockerfile with QEMU, OVMF, xorriso and the
+   toolchain (`cargo xtask docker-test` builds and runs it; KVM passed
+   through when the host has it), used by CI.
+U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
+   the NT layer: PE images mapped with mmap at their addresses, GS/TEB via
+   arch_prctl, NT system calls caught with syscall user dispatch,
+   exceptions via signals, threads as host threads); a `Platform` trait
+   between nt and arch (user memory, threads, waits, time).
+U2. **gala-um runs hello.exe**, then the ntrt test programs; `cargo xtask
+   um-test` runs them all in seconds.
+U3. **gala-um in CI** next to the QEMU scenarios, with differences between
+   the two reported as bugs.
 O1. **Observability, first part** (docs/OBSERVABILITY.md 1, 2, 5): JSON
    event stream on debugcon, the missing-features ledger merged by `xtask
    report`, symbolized panic backtraces. Before G2, so running a real Go

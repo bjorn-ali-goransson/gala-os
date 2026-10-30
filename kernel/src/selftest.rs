@@ -215,9 +215,10 @@ fn thread_stacks_are_reaped() {
         sched::reap();
         sched::yield_now();
     }
-    // Thread records stay (ids are unique), but stacks must be returned.
+    // Thread records stay (ids are unique; the heap grows for them), but
+    // stacks must be returned: unreaped stacks would cost 50 * 16 frames.
     let leaked = free_before.saturating_sub(mm::frame_stats().0);
-    assert!(leaked < 16, "{leaked} frames leaked by 50 threads");
+    assert!(leaked < 64, "{leaked} frames leaked by 50 threads");
 }
 
 fn event_wakes_blocked_waiter() {
