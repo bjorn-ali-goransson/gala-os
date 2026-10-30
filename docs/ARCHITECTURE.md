@@ -261,6 +261,14 @@ is spinning in user mode parks at the next timer tick; one blocked in a
 wait keeps waiting and parks when the wait ends. The caller's own context
 comes from its system call frame.
 
+**Waitable timers** (`nt::timer`): NtSetTimer converts the due time to a
+tick (`due_tick`: never early) and registers the timer; a kernel thread,
+`timers`, sleeps until the earliest due tick (at most 10 ticks), signals
+expired timers, queues their APC routine to the thread that set them and
+re-arms periodic ones. Doing this in thread context lets it allocate and
+drop references; timers whose last handle is closed are dropped.
+Synchronization timers reset when a wait is satisfied.
+
 **Services with build-dependent numbers**: the low system call numbers
 used so far are long-stable on x64; others (NtCreateMutant, NtOpenMutant,
 NtCreateSemaphore, ...) change between builds and gala's are unverified.

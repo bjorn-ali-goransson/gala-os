@@ -15,6 +15,7 @@ pub mod status;
 pub mod syscalls;
 pub mod sysinfo;
 pub mod thread;
+pub mod timer;
 pub mod vad;
 pub mod vm;
 pub mod wait;
@@ -26,6 +27,9 @@ pub fn init() {
     }
     if let Err(e) = file::init() {
         panic!("file system: {e:?}");
+    }
+    if let Err(e) = timer::init() {
+        panic!("timers: {e:?}");
     }
     let (_, total_frames) = crate::mm::frame_stats();
     if let Err(e) = kuser::init(total_frames) {

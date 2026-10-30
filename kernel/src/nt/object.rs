@@ -198,6 +198,34 @@ pub struct IoCompletion {
     pub queue: IrqMutex<CompletionQueue>,
 }
 
+pub const TIMER_QUERY_STATE: u32 = 0x0001;
+pub const TIMER_MODIFY_STATE: u32 = 0x0002;
+pub const TIMER_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x3;
+pub const TIMER_MAPPING: GenericMapping = GenericMapping {
+    read: READ_CONTROL | TIMER_QUERY_STATE,
+    write: READ_CONTROL | TIMER_MODIFY_STATE,
+    execute: READ_CONTROL | SYNCHRONIZE,
+    all: TIMER_ALL_ACCESS,
+};
+
+/// A waitable timer (`nt::timer` runs it).
+pub struct Timer {
+    pub dispatcher: Dispatcher,
+    /// SynchronizationTimer: a satisfied wait resets it.
+    pub synchronization: bool,
+    pub state: IrqMutex<TimerState>,
+}
+
+#[derive(Clone, Default)]
+pub struct TimerState {
+    /// Tick at which it expires next, if armed.
+    pub due: Option<u64>,
+    /// Ticks between expiries (0 = once).
+    pub period: u64,
+    /// (thread, routine, context) of the APC to queue on expiry.
+    pub apc: Option<(ObjectRef, u64, u64)>,
+}
+
 pub const SYMBOLIC_LINK_QUERY: u32 = 0x0001;
 pub const SYMBOLIC_LINK_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | 0x1;
 pub const SYMBOLIC_LINK_MAPPING: GenericMapping = GenericMapping {
@@ -287,6 +315,7 @@ pub enum ObjectBody {
     Semaphore(Semaphore),
     SymbolicLink(SymbolicLink),
     IoCompletion(IoCompletion),
+    Timer(Timer),
     Directory(Directory),
     Thread(super::thread::NtThread),
     Section(super::section::Section),
@@ -341,6 +370,7 @@ impl KObject {
             ObjectBody::Semaphore(_) => "Semaphore",
             ObjectBody::SymbolicLink(_) => "SymbolicLink",
             ObjectBody::IoCompletion(_) => "IoCompletion",
+            ObjectBody::Timer(_) => "Timer",
             ObjectBody::Directory(_) => "Directory",
             ObjectBody::Thread(_) => "Thread",
             ObjectBody::Section(_) => "Section",
@@ -371,6 +401,7 @@ impl KObject {
             ObjectBody::Mutant(m) => Some(&m.dispatcher),
             ObjectBody::Semaphore(s) => Some(&s.dispatcher),
             ObjectBody::IoCompletion(c) => Some(&c.dispatcher),
+            ObjectBody::Timer(t) => Some(&t.dispatcher),
             ObjectBody::Thread(t) => Some(&t.dispatcher),
             ObjectBody::Process(p) => Some(&p.dispatcher),
             ObjectBody::File(f) => Some(&f.dispatcher),
@@ -390,6 +421,7 @@ impl KObject {
             ObjectBody::Semaphore(_) => SEMAPHORE_MAPPING,
             ObjectBody::SymbolicLink(_) => SYMBOLIC_LINK_MAPPING,
             ObjectBody::IoCompletion(_) => IO_COMPLETION_MAPPING,
+            ObjectBody::Timer(_) => TIMER_MAPPING,
             ObjectBody::Directory(_) => DIRECTORY_MAPPING,
             ObjectBody::Thread(_) => THREAD_MAPPING,
             ObjectBody::Section(_) => SECTION_MAPPING,

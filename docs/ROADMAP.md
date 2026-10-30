@@ -107,6 +107,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   remove with timeout, depth), through ntdll exports; `iocp_test`
 - Thread suspension and context: NtSuspendThread, NtGet/SetContextThread
   (suspended threads park on their way to user mode); `context_test`
+- Waitable timers (notification/synchronization, relative/absolute,
+  periodic, cancel, query, APC routine, named) on a kernel timer thread;
+  `timer_test`
 
 ## Next
 3b. **Object manager, rest**: keyed events, OBJ_PERMANENT/NtMakeTemporary-

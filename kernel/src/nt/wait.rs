@@ -90,6 +90,10 @@ fn consume(object: &ObjectRef) -> bool {
             d.inner.lock().signal = 0;
             false
         }
+        (ObjectBody::Timer(t), Some(d)) if t.synchronization => {
+            d.inner.lock().signal = 0;
+            false
+        }
         (ObjectBody::Semaphore(s), _) => {
             s.dispatcher.inner.lock().signal -= 1;
             false

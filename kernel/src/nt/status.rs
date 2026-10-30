@@ -70,6 +70,7 @@ impl NtStatus {
     pub const INVALID_PARAMETER_3: NtStatus = NtStatus(0xc000_00f1);
     pub const INVALID_PARAMETER_4: NtStatus = NtStatus(0xc000_00f2);
     pub const INVALID_PARAMETER_5: NtStatus = NtStatus(0xc000_00f3);
+    pub const INVALID_PARAMETER_6: NtStatus = NtStatus(0xc000_00f4);
     pub const INVALID_IMAGE_FORMAT: NtStatus = NtStatus(0xc000_007b);
     pub const INVALID_IMAGE_NOT_MZ: NtStatus = NtStatus(0xc000_012f);
     pub const INVALID_FILE_FOR_SECTION: NtStatus = NtStatus(0xc000_0020);

@@ -101,6 +101,17 @@ syscall_stubs! {
     NtGetContextThread = 0xf2, fn(h: usize, context: *mut u8);
     NtSetContextThread = 0x18d, fn(h: usize, context: *const u8);
     NtSuspendThread = 0x1bc, fn(h: usize, previous: *mut u32);
+    // Waitable timers (gala's numbers, unverified).
+    NtCreateTimer = 0xd9, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes, kind: u32
+    );
+    NtOpenTimer = 0x13d, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
+    NtQueryTimer = 0x15f, fn(h: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32);
+    NtSetTimer = 0x19e, fn(
+        h: usize, due: *const i64, routine: usize, context: usize, resume: u8, period: i32,
+        previous: *mut u8
+    );
+    NtCancelTimer = 0xbd, fn(h: usize, current: *mut u8);
     NtQueryDirectoryObject = 0x14a, fn(
         h: usize, buf: *mut u8, len: u32, single: u8, restart: u8, context: *mut u32,
         returned: *mut u32

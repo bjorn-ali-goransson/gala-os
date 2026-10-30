@@ -72,6 +72,12 @@ pub const NT_SET_IO_COMPLETION: u32 = 0x01b0;
 pub const NT_GET_CONTEXT_THREAD: u32 = 0x00f2;
 pub const NT_SET_CONTEXT_THREAD: u32 = 0x018d;
 pub const NT_SUSPEND_THREAD: u32 = 0x01bc;
+// Waitable timers: gala's own numbers, UNVERIFIED.
+pub const NT_CREATE_TIMER: u32 = 0x00d9;
+pub const NT_OPEN_TIMER: u32 = 0x013d;
+pub const NT_QUERY_TIMER: u32 = 0x015f;
+pub const NT_SET_TIMER: u32 = 0x019e;
+pub const NT_CANCEL_TIMER: u32 = 0x00bd;
 pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
 pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
 pub const NT_OPEN_SECTION: u32 = 0x0037;
@@ -145,6 +151,11 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_GET_CONTEXT_THREAD, "NtGetContextThread", 2, nt_get_context_thread),
     (NT_SET_CONTEXT_THREAD, "NtSetContextThread", 2, nt_set_context_thread),
     (NT_SUSPEND_THREAD, "NtSuspendThread", 2, nt_suspend_thread),
+    (NT_CREATE_TIMER, "NtCreateTimer", 4, nt_create_timer),
+    (NT_OPEN_TIMER, "NtOpenTimer", 3, nt_open_timer),
+    (NT_QUERY_TIMER, "NtQueryTimer", 5, nt_query_timer),
+    (NT_SET_TIMER, "NtSetTimer", 7, nt_set_timer),
+    (NT_CANCEL_TIMER, "NtCancelTimer", 2, nt_cancel_timer),
     (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", 10, nt_map_view_of_section),
     (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", 2, nt_unmap_view_of_section),
     (NT_OPEN_SECTION, "NtOpenSection", 3, nt_open_section),
@@ -901,6 +912,91 @@ fn nt_delay_execution(call: &mut Call<'_>) -> NtStatus {
     }
     let status = wait::delay(tri!(call.timeout(ptr)), arg!(call, 0) as u8 != 0);
     deliver_apc_after(call, status)
+}
+
+fn is_timer(o: &KObject) -> bool {
+    matches!(o.body, ObjectBody::Timer(_))
+}
+
+fn timer_object(call: &Call<'_>, h: u64, access: u32) -> Result<ObjectRef, NtStatus> {
+    let entry = call.handle(Handle(h))?;
+    let object = entry.require(access)?.clone();
+    if is_timer(&object) { Ok(object) } else { Err(NtStatus::OBJECT_TYPE_MISMATCH) }
+}
+
+/// NtCreateTimer(*TimerHandle, DesiredAccess, ObjectAttributes, TimerType)
+fn nt_create_timer(call: &mut Call<'_>) -> NtStatus {
+    use super::object::{Timer, TimerState};
+    let (out, access, attrs_ptr) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
+    let synchronization = match arg!(call, 3) as u32 {
+        0 => false, // NotificationTimer
+        1 => true,  // SynchronizationTimer
+        _ => return NtStatus::INVALID_PARAMETER_4,
+    };
+    let timer = Timer {
+        dispatcher: Dispatcher::new(0),
+        synchronization,
+        state: IrqMutex::new(TimerState::default()),
+    };
+    let Ok(object) = KObject::new(ObjectBody::Timer(timer)) else { return NtStatus::NO_MEMORY };
+    create_object(call, out, access, attrs_ptr, object, is_timer)
+}
+
+/// NtOpenTimer(*TimerHandle, DesiredAccess, ObjectAttributes)
+fn nt_open_timer(call: &mut Call<'_>) -> NtStatus {
+    let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
+    let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_timer));
+    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+}
+
+/// NtSetTimer(TimerHandle, *DueTime, TimerApcRoutine, TimerContext,
+///            ResumeTimer, Period (ms), *PreviousState)
+fn nt_set_timer(call: &mut Call<'_>) -> NtStatus {
+    use super::timer;
+    let object = tri!(timer_object(call, arg!(call, 0), super::object::TIMER_MODIFY_STATE));
+    let due_ptr = arg!(call, 1);
+    if due_ptr == 0 {
+        return NtStatus::INVALID_PARAMETER_2;
+    }
+    let due = tri!(call.read_u64(due_ptr)) as i64;
+    let period = arg!(call, 5) as u32 as i32;
+    if period < 0 {
+        return NtStatus::INVALID_PARAMETER_6;
+    }
+    let (routine, context) = (arg!(call, 2), arg!(call, 3));
+    let apc = (routine != 0).then_some((routine, context));
+    let due = timer::due_tick(due, crate::time::ticks(), crate::time::system_time());
+    let previous = tri!(timer::arm(&object, due, timer::period_ticks(period as u32), apc));
+    let ptr = arg!(call, 6);
+    if ptr != 0 && call.process.write(ptr, &[u8::from(previous)]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    NtStatus::SUCCESS
+}
+
+/// NtCancelTimer(TimerHandle, *CurrentState)
+fn nt_cancel_timer(call: &mut Call<'_>) -> NtStatus {
+    let object = tri!(timer_object(call, arg!(call, 0), super::object::TIMER_MODIFY_STATE));
+    let current = tri!(super::timer::cancel(&object));
+    let ptr = arg!(call, 1);
+    if ptr != 0 && call.process.write(ptr, &[u8::from(current)]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    NtStatus::SUCCESS
+}
+
+/// NtQueryTimer(TimerHandle, Class, Buffer, Length, *ReturnLength):
+/// TIMER_BASIC_INFORMATION { RemainingTime, TimerState }.
+fn nt_query_timer(call: &mut Call<'_>) -> NtStatus {
+    let object = tri!(timer_object(call, arg!(call, 0), super::object::TIMER_QUERY_STATE));
+    if arg!(call, 1) as u32 != 0 {
+        return NtStatus::INVALID_INFO_CLASS;
+    }
+    let signaled = object.dispatcher().is_some_and(|d| d.signal_state() > 0);
+    let mut b = [0u8; 16];
+    b[0..8].copy_from_slice(&super::timer::remaining(&object).to_le_bytes());
+    b[8] = u8::from(signaled);
+    call.return_info(&b, arg!(call, 2), arg!(call, 3) as u32 as u64, arg!(call, 4))
 }
 
 const THREAD_GET_CONTEXT: u32 = 0x0008;

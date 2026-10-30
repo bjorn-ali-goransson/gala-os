@@ -224,6 +224,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "timer_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "vm_test"
 version = "0.1.0"
 dependencies = [
