@@ -4,6 +4,10 @@ The agent works through this list top to bottom, one chunk per session turn,
 pushing to `main` after each chunk passes `cargo xtask test`. Update this
 file in the same commit as the work. See `PROJECT_BRIEF.md` for milestones.
 
+Every chunk is test-driven: first write `user/<feature>_test` (expected
+results = real Windows behaviour), its boot scenario, and see it fail; then
+implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
+
 ## Done
 - M1 boot, serial, memory map
 - M2 (single CPU): GDT/IDT, frames, paging, heap, APIC timer, scheduler

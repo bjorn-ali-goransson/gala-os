@@ -37,6 +37,7 @@ commands:
   run          build, then boot in QEMU with serial on stdio [--headless]
   test         run host unit tests, then boot in QEMU and check the result
   boot-test    only the QEMU boot tests [scenario name filter]
+  export-tests copy the built test programs to user/bin/ (checked in)
 ";
 
 fn main() -> ExitCode {
@@ -48,6 +49,7 @@ fn main() -> ExitCode {
         Some("run") => build(release, "gala-os", "").and_then(|iso| run(&iso, headless)),
         Some("test") => unit_tests().and_then(|()| boot_tests(release, None)),
         Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
+        Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
         _ => {
             eprint!("{USAGE}");
             return ExitCode::from(2);
@@ -406,6 +408,19 @@ fn boot_scenario(scenario: &Scenario, iso: &Path) -> Result {
         );
     }
     verdict
+}
+
+/// Copies the test programs to `user/bin/`, where they are checked in so
+/// they can be run on real Windows without a Rust toolchain.
+fn export_tests() -> Result {
+    let dir = root().join("user/bin");
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    for program in USER_PROGRAMS {
+        let exe = target_dir().join(USER_TARGET).join("release").join(format!("{program}.exe"));
+        copy(&exe, &dir.join(format!("{program}.exe")))?;
+    }
+    eprintln!("xtask: exported {} test programs to {}", USER_PROGRAMS.len(), dir.display());
+    Ok(())
 }
 
 fn copy(from: &Path, to: &Path) -> Result {

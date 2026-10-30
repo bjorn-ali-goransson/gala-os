@@ -13,4 +13,9 @@ rustflags = [
     "-C", "link-arg=/ENTRY:mainCRTStartup",
     "-C", "link-arg=/SUBSYSTEM:CONSOLE",
     "-C", "link-arg=/NODEFAULTLIB",
+    # Reproducible output (no timestamps), so checked-in binaries can be verified.
+    "-C", "link-arg=/Brepro",
+    # No PDB: its contents are not deterministic and would change the image.
+    "-C", "debuginfo=0",
+    "-C", "link-arg=/DEBUG:NONE",
 ]
