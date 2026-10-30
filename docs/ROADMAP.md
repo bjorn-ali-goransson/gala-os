@@ -25,13 +25,14 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   (basic, name); `object_test`
 
 ## Next
+4. **Threads in processes**: NtCreateThread (0x4e, stable; NtCreateThreadEx
+   varies by build), NtResumeThread (0x52), NtTerminateThread, thread and
+   process objects waitable, exit codes, NtQueryInformationProcess/Thread
+   basics, process teardown (free address space).
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
    NtOpenMutant, NtCreateSemaphore/NtReleaseSemaphore (0x0a); abandonment
    on thread exit. Create/open numbers vary by build: verify on 26100 first.
    Symbolic links (`\Sessions\1\BaseNamedObjects\Global`), NtQueryDirectoryObject.
-4. **Threads in processes**: NtCreateThreadEx, NtTerminateThread, thread and
-   process objects waitable, exit codes, NtQueryInformationProcess/Thread
-   basics, process teardown (free address space).
 5. **KUSER_SHARED_DATA** at 0x7FFE0000 (time fields updated by the tick),
    NtQuerySystemTime, NtQueryPerformanceCounter.
 6. **Sections**: NtCreateSection/NtMapViewOfSection/NtUnmapViewOfSection
