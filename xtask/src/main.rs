@@ -73,6 +73,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_sys_test", "testdll.dll", "gala"),
     ("kernel32_thread_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_thread_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_misc_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_misc_test", "kernel32.dll", "Windows/System32"),
     ("go_hello", "ntdll.dll", "Windows/System32"),
     ("go_hello", "kernel32.dll", "Windows/System32"),
 ];
@@ -124,6 +126,7 @@ const USER_PROGRAMS: &[&str] = &[
     "missing_import_test",
     "kernel32_sys_test",
     "kernel32_thread_test",
+    "kernel32_misc_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -579,6 +582,12 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_thread_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_thread_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "kernel32_misc_test",
+        cmdline: "qemu_exit run=kernel32_misc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["kernel32_misc_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "ledger_test",

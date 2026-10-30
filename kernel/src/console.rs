@@ -72,6 +72,13 @@ impl Screen {
         match c {
             '\n' => return self.newline(),
             '\r' => return,
+            '\t' => {
+                // To the next multiple of 8 columns.
+                for _ in 0..8 - self.col % 8 {
+                    self.put_char(' ');
+                }
+                return;
+            }
             _ => {}
         }
         if self.line_len < self.line_start.len() && self.col == self.line_len as u64 {

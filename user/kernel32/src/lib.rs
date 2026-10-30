@@ -167,6 +167,52 @@ unsafe extern "system" {
     fn NtSuspendThread(h: Handle, previous: *mut u32) -> u32;
     fn NtTerminateThread(h: isize, status: u32) -> u32;
     fn NtGetContextThread(h: Handle, context: *mut Context) -> u32;
+    fn NtSetInformationFile(
+        h: Handle,
+        iosb: *mut [usize; 2],
+        buf: *const u8,
+        len: u32,
+        class: u32,
+    ) -> u32;
+    fn NtCreateIoCompletion(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        count: u32,
+    ) -> u32;
+    fn NtSetIoCompletion(
+        h: Handle,
+        key: usize,
+        apc_context: usize,
+        status: u32,
+        information: usize,
+    ) -> u32;
+    fn NtRemoveIoCompletion(
+        h: Handle,
+        key: *mut usize,
+        apc_context: *mut usize,
+        iosb: *mut [usize; 2],
+        timeout: *const i64,
+    ) -> u32;
+    fn NtCreateTimer(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        kind: u32,
+    ) -> u32;
+    fn NtSetTimer(
+        h: Handle,
+        due: *const i64,
+        routine: usize,
+        context: usize,
+        resume: u8,
+        period: i32,
+        previous: *mut u8,
+    ) -> u32;
+    fn RtlAddVectoredExceptionHandler(first: u32, handler: usize) -> *mut c_void;
+    fn RtlRemoveVectoredExceptionHandler(cookie: *mut c_void) -> u32;
+    fn RtlAddVectoredContinueHandler(first: u32, handler: usize) -> *mut c_void;
+    fn RtlRemoveVectoredContinueHandler(cookie: *mut c_void) -> u32;
     fn NtSetContextThread(h: Handle, context: *const Context) -> u32;
     fn NtWaitForMultipleObjects(
         count: u32,
@@ -980,6 +1026,220 @@ pub extern "system" fn SetThreadContext(h: Handle, context: *const Context) -> B
     let status = unsafe { NtSetContextThread(h, context) };
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
+
+// ---- I/O completion ports ----
+
+const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
+
+/// CreateIoCompletionPort: a new port (`file` = INVALID_HANDLE_VALUE), or
+/// `file` associated with `existing` (or a new port) under `key`.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateIoCompletionPort(
+    file: Handle,
+    existing: Handle,
+    key: usize,
+    threads: u32,
+) -> Handle {
+    let port = if existing.is_null() {
+        let mut port = core::ptr::null_mut();
+        // SAFETY: valid output pointer; IO_COMPLETION_ALL_ACCESS.
+        let status =
+            unsafe { NtCreateIoCompletion(&mut port, 0x1f_0003, core::ptr::null(), threads) };
+        if status != STATUS_SUCCESS {
+            return fail(status, core::ptr::null_mut());
+        }
+        port
+    } else {
+        existing
+    };
+    if file == INVALID_HANDLE_VALUE {
+        return if existing.is_null() {
+            port
+        } else {
+            fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut())
+        };
+    }
+    // FILE_COMPLETION_INFORMATION { Port, Key } (FileCompletionInformation).
+    let info = [port as usize, key];
+    let mut iosb = [0usize; 2];
+    // SAFETY: a 16-byte information buffer.
+    let status = unsafe { NtSetInformationFile(file, &mut iosb, info.as_ptr().cast(), 16, 30) };
+    if status != STATUS_SUCCESS {
+        if existing.is_null() {
+            CloseHandle(port);
+        }
+        return fail(status, core::ptr::null_mut());
+    }
+    port
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn PostQueuedCompletionStatus(
+    port: Handle,
+    bytes: u32,
+    key: usize,
+    overlapped: usize,
+) -> Bool {
+    // SAFETY: the kernel validates the port.
+    let status =
+        unsafe { NtSetIoCompletion(port, key, overlapped, STATUS_SUCCESS, bytes as usize) };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+#[repr(C)]
+pub struct OverlappedEntry {
+    completion_key: usize,
+    overlapped: usize,
+    internal: usize,
+    bytes: u32,
+}
+
+/// One entry from `port`, waiting up to `ms` (Err: the NTSTATUS).
+fn remove_completion(port: Handle, ms: u32) -> Result<OverlappedEntry, u32> {
+    let (mut key, mut context, mut iosb) = (0usize, 0usize, [0usize; 2]);
+    let t = timeout(ms);
+    let p = t.as_ref().map_or(core::ptr::null(), |t| t as *const i64);
+    // SAFETY: valid output pointers.
+    let status = unsafe { NtRemoveIoCompletion(port, &mut key, &mut context, &mut iosb, p) };
+    match status {
+        STATUS_SUCCESS => Ok(OverlappedEntry {
+            completion_key: key,
+            overlapped: context,
+            internal: iosb[0],
+            bytes: iosb[1] as u32,
+        }),
+        other => Err(other),
+    }
+}
+
+/// GetQueuedCompletionStatusEx: waits up to `ms` for the first entry, then
+/// takes what else is queued, up to `count`. Alertable waits are not
+/// supported yet (reported).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetQueuedCompletionStatusEx(
+    port: Handle,
+    entries: *mut OverlappedEntry,
+    count: u32,
+    removed: *mut u32,
+    ms: u32,
+    alertable: Bool,
+) -> Bool {
+    if alertable != 0 {
+        unsupported(b"kernel32.dll!GetQueuedCompletionStatusEx(alertable)", 0);
+    }
+    let mut n = 0;
+    while n < count {
+        match remove_completion(port, if n == 0 { ms } else { 0 }) {
+            // SAFETY: the caller's array holds `count` entries.
+            Ok(entry) => unsafe { entries.add(n as usize).write(entry) },
+            Err(STATUS_TIMEOUT) if n > 0 => break,
+            Err(STATUS_TIMEOUT) => return fail_with(258, FALSE), // WAIT_TIMEOUT
+            Err(status) => return fail(status, FALSE),
+        }
+        n += 1;
+    }
+    // SAFETY: the caller's output pointer.
+    unsafe { *removed = n };
+    TRUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetQueuedCompletionStatus(
+    port: Handle,
+    bytes: *mut u32,
+    key: *mut usize,
+    overlapped: *mut usize,
+    ms: u32,
+) -> Bool {
+    match remove_completion(port, ms) {
+        // SAFETY: the caller's output pointers.
+        Ok(e) => unsafe {
+            *bytes = e.bytes;
+            *key = e.completion_key;
+            *overlapped = e.overlapped;
+            if e.internal as u32 == STATUS_SUCCESS { TRUE } else { fail(e.internal as u32, FALSE) }
+        },
+        Err(STATUS_TIMEOUT) => {
+            // SAFETY: the caller's output pointer.
+            unsafe { *overlapped = 0 };
+            fail_with(258, FALSE)
+        }
+        Err(status) => fail(status, FALSE),
+    }
+}
+
+// ---- Waitable timers ----
+
+/// CreateWaitableTimerExW: unnamed timers (names and attributes are
+/// reported). CREATE_WAITABLE_TIMER_HIGH_RESOLUTION is accepted: gala's
+/// timers run on the 1 ms tick either way.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateWaitableTimerExW(
+    attributes: *mut c_void,
+    name: *const u16,
+    flags: u32,
+    access: u32,
+) -> Handle {
+    if !attributes.is_null() || !name.is_null() || flags & !3 != 0 {
+        unsupported(
+            b"kernel32.dll!CreateWaitableTimerExW(name/attributes/flags)",
+            u64::from(flags),
+        );
+        return fail_with(ERROR_NOT_SUPPORTED, core::ptr::null_mut());
+    }
+    let kind = if flags & 1 != 0 { 0 } else { 1 }; // manual reset: NotificationTimer
+    let mut h = core::ptr::null_mut();
+    // SAFETY: valid output pointer.
+    let status = unsafe { NtCreateTimer(&mut h, access, core::ptr::null(), kind) };
+    if status != STATUS_SUCCESS { fail(status, core::ptr::null_mut()) } else { h }
+}
+
+/// SetWaitableTimer: the completion routine has the NT timer APC shape
+/// (context, low, high), so it is passed through.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetWaitableTimer(
+    h: Handle,
+    due: *const i64,
+    period: i32,
+    routine: usize,
+    arg: usize,
+    resume: Bool,
+) -> Bool {
+    // SAFETY: the caller's due time.
+    let status = unsafe {
+        NtSetTimer(h, due, routine, arg, u8::from(resume != 0), period, core::ptr::null_mut())
+    };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+// ---- Vectored exception handling and unwinding (ntdll's) ----
+
+#[unsafe(no_mangle)]
+pub extern "system" fn AddVectoredExceptionHandler(first: u32, handler: usize) -> *mut c_void {
+    // SAFETY: ntdll keeps the handler pointer.
+    unsafe { RtlAddVectoredExceptionHandler(first, handler) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn RemoveVectoredExceptionHandler(cookie: *mut c_void) -> u32 {
+    // SAFETY: plain call.
+    unsafe { RtlRemoveVectoredExceptionHandler(cookie) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn AddVectoredContinueHandler(first: u32, handler: usize) -> *mut c_void {
+    // SAFETY: ntdll keeps the handler pointer.
+    unsafe { RtlAddVectoredContinueHandler(first, handler) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn RemoveVectoredContinueHandler(cookie: *mut c_void) -> u32 {
+    // SAFETY: plain call.
+    unsafe { RtlRemoveVectoredContinueHandler(cookie) }
+}
+
+// RtlLookupFunctionEntry and RtlVirtualUnwind are export forwarders to
+// ntdll, as on Windows (build.rs: /EXPORT:Name=ntdll.Name).
 
 // ---- Thread-local storage: TEB.TlsSlots (+0x1480, 64 slots) ----
 

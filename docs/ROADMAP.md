@@ -147,6 +147,14 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   ExitProcess) on ntdll exports; RtlNtStatusToDosError; DLL search falls
   back to System32; GalaRecordMissing feeds the ledger and the loader
   reports every missing import; `kernel32_test`, `missing_import_test`
+- Go bring-up (G2, in progress): user/go_hello built reproducibly with the
+  pinned Go; kernel32 grew everything Go 1.24 imports, test-first
+  (`kernel32_sys_test`, `kernel32_thread_test`, `kernel32_misc_test`):
+  process settings, system info, environment, LoadLibraryW/ExW, handle
+  duplication, waits, threads, TLS, suspension and context, IOCP,
+  waitable timers, vectored handlers, unwind lookup; the loader follows
+  export forwarders. The Go runtime now starts and stops at "fatal error:
+  bcryptprimitives.dll not found" (next: ProcessPrng)
 - Screen console (framebuffer text mirroring the serial log, Noto Sans Mono
   bitmap font) and `cargo xtask screenshot` (PNG via the QEMU monitor)
 

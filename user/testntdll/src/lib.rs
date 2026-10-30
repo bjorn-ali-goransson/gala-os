@@ -147,6 +147,9 @@ syscall_stubs! {
         suspended: u8
     );
     NtResumeThread = 0x52, fn(h: usize, previous: *mut u32);
+    NtSetInformationFile = 0x27, fn(
+        h: usize, iosb: *mut [usize; 2], buf: *const u8, len: u32, class: u32
+    );
     NtTerminateThread = 0x53, fn(h: isize, status: u32);
     NtWaitForMultipleObjects = 0x5b, fn(
         count: u32, handles: *const usize, wait_type: u32, alertable: u8, timeout: *const i64
@@ -224,7 +227,14 @@ fn directory(base: usize, index: usize) -> (usize, usize) {
 
 /// Export `name` (or `ordinal` if `name` is empty) of the image at `base`.
 fn export(base: usize, name: &[u8], ordinal: u32) -> Option<usize> {
-    let (rva, _) = directory(base, 0);
+    export_at_depth(base, name, ordinal, 0)
+}
+
+/// `export`, following forwarders (`DLL.Function` or `DLL.#ordinal`
+/// strings in place of an address) at most a few levels deep. A forwarder
+/// loads its target DLL (a reference that stays, as on Windows).
+fn export_at_depth(base: usize, name: &[u8], ordinal: u32, depth: u32) -> Option<usize> {
+    let (rva, size) = directory(base, 0);
     if rva == 0 {
         return None;
     }
@@ -243,8 +253,30 @@ fn export(base: usize, name: &[u8], ordinal: u32) -> Option<usize> {
     if index >= rd32(dir + 20) as usize {
         return None;
     }
-    // TODO: forwarders (an RVA inside the export directory).
-    Some(base + rd32(functions + 4 * index) as usize)
+    let target = rd32(functions + 4 * index) as usize;
+    if !(rva..rva + size).contains(&target) {
+        return Some(base + target);
+    }
+    // A forwarder string.
+    if depth == 4 {
+        return None;
+    }
+    let forward = c_str(base + target);
+    let dot = forward.iter().rposition(|&b| b == b'.')?;
+    let (dll, function) = (&forward[..dot], &forward[dot + 1..]);
+    let mut module = [0u8; MAX_NAME];
+    let len = normalize(dll.iter().map(|&b| u16::from(b)), &mut module).ok()?;
+    let slot = load_module(&module[..len], false).ok()?;
+    let target_base = with_modules(|m| m[slot].base);
+    match function.strip_prefix(b"#") {
+        Some(digits) => {
+            let ordinal = digits
+                .iter()
+                .try_fold(0u32, |n, &d| d.is_ascii_digit().then(|| n * 10 + u32::from(d - b'0')))?;
+            export_at_depth(target_base, &[], ordinal, depth + 1)
+        }
+        None => export_at_depth(target_base, function, 0, depth + 1),
+    }
 }
 
 /// Opens `dll` (an ASCII file name) from the directory of the executable
@@ -871,15 +903,79 @@ pub struct ExceptionPointers {
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const MAX_HANDLERS: usize = 16;
 
-/// Registered vectored handlers in call order, as (cookie, handler), and
-/// the next cookie.
-// TODO: a lock once processes have more than one thread using this.
-struct Handlers(core::cell::UnsafeCell<([(usize, usize); MAX_HANDLERS], usize)>);
+/// Registered vectored handlers in call order, as (cookie, handler): the
+/// exception handlers and the continue handlers, and the next cookie.
+struct HandlerTables {
+    exception: [(usize, usize); MAX_HANDLERS],
+    continue_: [(usize, usize); MAX_HANDLERS],
+    next: usize,
+}
 
-// SAFETY: only used single-threaded so far (see the TODO above).
+/// The tables behind a spinlock (threads register and dispatch at the same
+/// time; the critical sections are short and never block).
+struct Handlers {
+    lock: core::sync::atomic::AtomicBool,
+    tables: core::cell::UnsafeCell<HandlerTables>,
+}
+
+// SAFETY: `tables` is only accessed with `lock` held (see `with_handlers`).
 unsafe impl Sync for Handlers {}
 
-static HANDLERS: Handlers = Handlers(core::cell::UnsafeCell::new(([(0, 0); MAX_HANDLERS], 1)));
+static HANDLERS: Handlers = Handlers {
+    lock: core::sync::atomic::AtomicBool::new(false),
+    tables: core::cell::UnsafeCell::new(HandlerTables {
+        exception: [(0, 0); MAX_HANDLERS],
+        continue_: [(0, 0); MAX_HANDLERS],
+        next: 1,
+    }),
+};
+
+fn with_handlers<R>(f: impl FnOnce(&mut HandlerTables) -> R) -> R {
+    use core::sync::atomic::Ordering;
+    while HANDLERS
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: the lock is held, so this is the only reference.
+    let result = f(unsafe { &mut *HANDLERS.tables.get() });
+    HANDLERS.lock.store(false, Ordering::Release);
+    result
+}
+
+fn add_handler(continue_: bool, first: u32, handler: VectoredHandler) -> *mut core::ffi::c_void {
+    with_handlers(|t| {
+        let cookie = t.next;
+        let table = if continue_ { &mut t.continue_ } else { &mut t.exception };
+        let used = table.iter().take_while(|e| e.0 != 0).count();
+        if used == MAX_HANDLERS {
+            return core::ptr::null_mut();
+        }
+        let entry = (cookie, handler as usize);
+        if first != 0 {
+            table.copy_within(0..used, 1);
+            table[0] = entry;
+        } else {
+            table[used] = entry;
+        }
+        t.next += 1;
+        cookie as *mut core::ffi::c_void
+    })
+}
+
+fn remove_handler(continue_: bool, cookie: *mut core::ffi::c_void) -> u32 {
+    with_handlers(|t| {
+        let table = if continue_ { &mut t.continue_ } else { &mut t.exception };
+        let Some(i) = table.iter().position(|e| e.0 != 0 && e.0 == cookie as usize) else {
+            return 0;
+        };
+        table.copy_within(i + 1.., i);
+        table[MAX_HANDLERS - 1] = (0, 0);
+        1
+    })
+}
 
 /// RtlAddVectoredExceptionHandler(First, Handler): the cookie, or null if
 /// the table is full.
@@ -888,39 +984,109 @@ pub extern "system" fn RtlAddVectoredExceptionHandler(
     first: u32,
     handler: VectoredHandler,
 ) -> *mut core::ffi::c_void {
-    // SAFETY: single-threaded use (see HANDLERS).
-    unsafe {
-        let (table, next) = &mut *HANDLERS.0.get();
-        let used = table.iter().take_while(|e| e.0 != 0).count();
-        if used == MAX_HANDLERS {
-            return core::ptr::null_mut();
-        }
-        let cookie = *next;
-        *next += 1;
-        let entry = (cookie, handler as usize);
-        if first != 0 {
-            table.copy_within(0..used, 1);
-            table[0] = entry;
-        } else {
-            table[used] = entry;
-        }
-        cookie as *mut core::ffi::c_void
-    }
+    add_handler(false, first, handler)
 }
 
 /// RtlRemoveVectoredExceptionHandler(Handle): nonzero if it was registered.
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlRemoveVectoredExceptionHandler(cookie: *mut core::ffi::c_void) -> u32 {
-    // SAFETY: single-threaded use (see HANDLERS).
-    unsafe {
-        let (table, _) = &mut *HANDLERS.0.get();
-        let Some(i) = table.iter().position(|e| e.0 != 0 && e.0 == cookie as usize) else {
-            return 0;
-        };
-        table.copy_within(i + 1.., i);
-        table[MAX_HANDLERS - 1] = (0, 0);
-        1
+    remove_handler(false, cookie)
+}
+
+/// RtlAddVectoredContinueHandler(First, Handler).
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlAddVectoredContinueHandler(
+    first: u32,
+    handler: VectoredHandler,
+) -> *mut core::ffi::c_void {
+    add_handler(true, first, handler)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlRemoveVectoredContinueHandler(cookie: *mut core::ffi::c_void) -> u32 {
+    remove_handler(true, cookie)
+}
+
+/// RUNTIME_FUNCTION: an entry of an image's exception directory (.pdata).
+#[repr(C)]
+pub struct RuntimeFunction {
+    begin: u32,
+    end: u32,
+    unwind: u32,
+}
+
+/// RtlLookupFunctionEntry(ControlPc, *ImageBase, HistoryTable): the
+/// RUNTIME_FUNCTION covering `pc` in the loaded module containing it (from
+/// its exception directory, sorted by address), or null for leaf code and
+/// addresses outside modules.
+///
+/// # Safety
+/// `image_base` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlLookupFunctionEntry(
+    pc: u64,
+    image_base: *mut u64,
+    _history: *mut core::ffi::c_void,
+) -> *const RuntimeFunction {
+    let pc = pc as usize;
+    let base = with_modules(|m| {
+        m.iter().find_map(|module| {
+            let base = module.base;
+            if base == 0 || pc < base {
+                return None;
+            }
+            let size = rd32(base + rd32(base + 0x3c) as usize + 24 + 56) as usize; // SizeOfImage
+            (pc < base + size).then_some(base)
+        })
+    });
+    let Some(base) = base else { return core::ptr::null() };
+    let (rva, size) = directory(base, 3); // IMAGE_DIRECTORY_ENTRY_EXCEPTION
+    let count = size / 12;
+    let table = (base + rva) as *const RuntimeFunction;
+    let target = (pc - base) as u32;
+    let (mut low, mut high) = (0, count);
+    while low < high {
+        let mid = (low + high) / 2;
+        // SAFETY: inside the image's exception directory.
+        let f = unsafe { &*table.add(mid) };
+        if target < f.begin {
+            high = mid;
+        } else if target >= f.end {
+            low = mid + 1;
+        } else {
+            if !image_base.is_null() {
+                // SAFETY: the caller's output pointer.
+                unsafe { *image_base = base as u64 };
+            }
+            return f;
+        }
     }
+    core::ptr::null()
+}
+
+/// RtlVirtualUnwind: not implemented yet (reported); returns no handler
+/// and leaves the context as it is.
+///
+/// # Safety
+/// `establisher_frame` must be null or writable.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlVirtualUnwind(
+    _kind: u32,
+    _image_base: u64,
+    pc: u64,
+    _entry: *const RuntimeFunction,
+    _context: *mut u8,
+    _handler_data: *mut usize,
+    establisher_frame: *mut u64,
+    _pointers: *mut u8,
+) -> usize {
+    GalaRecordMissing(b"ntdll.dll!RtlVirtualUnwind".as_ptr(), 26, 3, pc);
+    if !establisher_frame.is_null() {
+        // SAFETY: the caller's output pointer.
+        unsafe { *establisher_frame = 0 };
+    }
+    0
 }
 
 /// Where the kernel puts the EXCEPTION_RECORD relative to the CONTEXT at
@@ -968,19 +1134,35 @@ pub extern "system" fn KiUserApcDispatcher() -> ! {
 
 /// Calls the vectored handlers; resumes the context if one continues
 /// execution, else ends the process with the exception code.
-extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> ! {
-    let mut pointers = ExceptionPointers { record, context };
-    // SAFETY: single-threaded use (see HANDLERS); handlers were registered
-    // as `VectoredHandler`s.
-    let table = unsafe { (*HANDLERS.0.get()).0 };
-    for &(cookie, raw) in &table {
+/// Calls the handlers of one table in order; whether one of them returned
+/// EXCEPTION_CONTINUE_EXECUTION.
+fn call_handlers(table: &[(usize, usize)], pointers: &mut ExceptionPointers) -> bool {
+    for &(cookie, raw) in table {
         if cookie == 0 {
             break;
         }
+        // SAFETY: handlers were registered as `VectoredHandler`s.
         let handler: VectoredHandler = unsafe { core::mem::transmute(raw) };
-        if handler(&mut pointers) == EXCEPTION_CONTINUE_EXECUTION {
-            NtContinue(context, 0);
+        if handler(pointers) == EXCEPTION_CONTINUE_EXECUTION {
+            return true;
         }
+    }
+    false
+}
+
+/// Exception dispatch (no frame-based SEH yet): the vectored exception
+/// handlers, then the vectored continue handlers, which run both when an
+/// exception handler continued execution and when none did (assumed from
+/// the documented contract and how Go uses them: its last continue handler
+/// reports unhandled crashes; to be checked against Windows). Unhandled:
+/// the process ends with the exception code.
+extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> ! {
+    let mut pointers = ExceptionPointers { record, context };
+    // Snapshots, so that handlers may (un)register handlers themselves.
+    let (exception, continue_) = with_handlers(|t| (t.exception, t.continue_));
+    let handled = call_handlers(&exception, &mut pointers);
+    if call_handlers(&continue_, &mut pointers) || handled {
+        NtContinue(context, 0);
     }
     // SAFETY: the record starts with its ExceptionCode.
     let code = unsafe { (record as *const u32).read_unaligned() };

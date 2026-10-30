@@ -500,7 +500,17 @@ Windows, never shadows the system's DLLs.)
   `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA).
 - **kernel32** implements Win32 functions on top of ntdll's exports
   (imported with `raw-dylib`): failures return the documented failure
-  value and set the last error (TEB+0x68) from the NTSTATUS.
+  value and set the last error (TEB+0x68) from the NTSTATUS. So far:
+  console output, last error, ids, memory (VirtualAlloc/Free/Query),
+  events and waits (single and multiple), Sleep and tick counts, the
+  performance counter, LoadLibrary(A/W/ExW)/GetProcAddress/FreeLibrary,
+  threads (CreateThread builds the stack and start CONTEXT itself and
+  starts at a thunk that calls ExitThread), TLS (TEB.TlsSlots),
+  suspension and thread context, completion ports, waitable timers,
+  vectored handlers, system information, environment strings, and the
+  process settings Go sets at startup. Names ntdll also exports (the
+  `Rtl*` unwind functions) are export forwarders (`build.rs`), as on
+  Windows: defining them in kernel32 would shadow the ntdll imports.
 - **Gaps are never silent.** Unsupported parts of a function fail
   (ERROR_NOT_SUPPORTED) and are reported with `GalaRecordMissing`, a
   gala-only system service (0x7f00) that feeds the kernel's
