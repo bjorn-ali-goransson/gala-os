@@ -19,7 +19,7 @@ const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Freestanding Windows test programs in `user/`, shipped as boot modules.
 const USER_TARGET: &str = "x86_64-pc-windows-msvc";
-const USER_PROGRAMS: &[&str] = &["hello", "abi_test", "crash", "vm_test"];
+const USER_PROGRAMS: &[&str] = &["hello", "abi_test", "crash", "vm_test", "wait_test"];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
 /// QEMU exit statuses for `QemuExitCode::{Success, Failure}` (`(code << 1) | 1`).
@@ -264,6 +264,12 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "wait_test",
+        cmdline: "qemu_exit run=wait_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wait_test: ok", "exited with status 0x00000000"],
+    },
     Scenario {
         name: "vm_test",
         cmdline: "qemu_exit run=vm_test.exe",

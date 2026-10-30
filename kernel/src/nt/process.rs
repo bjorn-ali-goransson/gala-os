@@ -6,7 +6,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::layout::{self, params, peb, teb};
-use super::object::{HandleTable, Object};
+use super::object::{HandleTable, KObject, ObjectBody};
 use super::pe::{self, PeError, PeImage};
 use super::status::NtStatus;
 use super::vad::{self, Vad};
@@ -238,9 +238,10 @@ pub fn spawn_from_pe(
 
     // Handles for the standard streams.
     let mut handles = HandleTable::default();
-    let stdin = handles.insert(Object::ConsoleInput)?;
-    let stdout = handles.insert(Object::ConsoleOutput)?;
-    let stderr = handles.insert(Object::ConsoleOutput)?;
+    let stdin = handles.insert_object(KObject::new(ObjectBody::ConsoleInput)?)?;
+    let output = KObject::new(ObjectBody::ConsoleOutput)?;
+    let stdout = handles.insert_object(output.clone())?;
+    let stderr = handles.insert_object(output)?;
 
     // RTL_USER_PROCESS_PARAMETERS.
     let p = layout::PARAMS_ADDRESS;

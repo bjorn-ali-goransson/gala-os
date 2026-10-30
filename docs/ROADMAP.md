@@ -15,14 +15,16 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   test programs `hello`, `abi_test`, `crash`
 - Virtual memory services: VAD, demand-zero paging, NtAllocate/Free/
   Protect/QueryVirtualMemory, `vm_test`
+- Object manager core + waits: typed objects behind `KArc`, handles with
+  granted access and generic mappings, NtDuplicateObject; dispatcher with
+  any/all waits and timeouts; events (create/set/clear/query);
+  NtDelayExecution, NtQueryPerformanceCounter, NtQuerySystemTime; `wait_test`
 
 ## Next
-2. **Object manager (M3)**: typed objects behind `KArc`, handle table with
-   access masks and attributes, NtClose/NtDuplicateObject, object names
-   (directory tree `\`, `\BaseNamedObjects`).
-3. **Waits and events**: scheduler wait queues; NtCreateEvent/NtSetEvent/
-   NtResetEvent/NtWaitForSingleObject/NtWaitForMultipleObjects with timeouts;
-   NtDelayExecution; `wait_test` program.
+3a. **Named objects**: object directory namespace (`\`, `\BaseNamedObjects`,
+   `\Sessions\1\BaseNamedObjects`), OBJECT_ATTRIBUTES/UNICODE_STRING parsing,
+   NtOpenEvent, open-or-create semantics (STATUS_OBJECT_NAME_EXISTS),
+   mutants and semaphores (numbers to verify), `object_test`.
 4. **Threads in processes**: NtCreateThreadEx, NtTerminateThread, thread and
    process objects waitable, exit codes, NtQueryInformationProcess/Thread
    basics, process teardown (free address space).

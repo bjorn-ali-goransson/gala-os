@@ -87,7 +87,7 @@ pub fn kernel_main() -> ! {
         free * mm::PAGE_SIZE / (1024 * 1024)
     );
     init_paging(&info);
-    init_timer();
+    init_timer(info.boot_unix_time);
     if let Err(e) = sched::init() {
         panic!("scheduler: {e:?}");
     }
@@ -216,7 +216,7 @@ fn init_paging(info: &BootInfo) {
     }
 }
 
-fn init_timer() {
+fn init_timer(boot_time: Option<i64>) {
     let calibration = match arch::apic::init_bsp() {
         Ok(c) => c,
         Err(e) => panic!("local APIC: {e:?}"),
@@ -229,6 +229,9 @@ fn init_timer() {
         calibration.tsc_hz / 1_000_000
     );
     time::init(&calibration);
+    if let Some(t) = boot_time {
+        time::set_boot_time(t);
+    }
     arch::cpu::enable_interrupts();
     info!("interrupts enabled, tick {} Hz", time::TICK_HZ);
 }

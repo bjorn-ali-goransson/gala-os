@@ -48,5 +48,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "wait_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "xtask"
 version = "0.1.0"

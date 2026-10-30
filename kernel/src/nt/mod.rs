@@ -8,6 +8,7 @@ pub mod status;
 pub mod syscalls;
 pub mod vad;
 pub mod vm;
+pub mod wait;
 
 /// Installs the syscall entry and user exception handling.
 pub fn init() {

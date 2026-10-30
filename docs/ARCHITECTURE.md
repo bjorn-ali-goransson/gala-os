@@ -209,9 +209,28 @@ registers the image (MEM_IMAGE, sections with Windows-style protections
 such as WRITECOPY), the 1 MiB demand-zero stack with an uncommitted guard
 page below it, and PEB/params/TEB.
 
+**Objects and handles** (`nt::object`): kernel objects are `KArc<KObject>`
+(an `ObjectBody` enum: console in/out, event, ...). A handle entry holds the
+object, the granted specific rights (requested rights mapped through the
+type's `GenericMapping`) and attributes; services check rights with
+`HandleEntry::require`. Handle values are `(slot + 1) * 4`.
+
+**Waits** (`nt::wait`): waitable objects embed a `Dispatcher` (signal
+state + waiter list). One global dispatcher lock covers all signal changes
+and wait checks, so WaitAll sees a consistent state. A waiter registers on
+every object, calls `sched::prepare_wait(deadline)`, drops the lock and
+calls `sched::wait()`; signalling wakes all waiters, which re-check
+(auto-reset events are consumed by the first). NT timeouts (negative =
+relative 100 ns, positive = absolute system time, 0 = poll) become tick
+deadlines rounded up. System time comes from Limine's boot timestamp plus
+the TSC clock; the performance counter runs at 10 MHz.
+
 **Services**: `NtWriteFile` (console handles only), `NtClose`,
 `NtTerminateProcess`, `NtAllocateVirtualMemory`, `NtFreeVirtualMemory`,
-`NtProtectVirtualMemory`, `NtQueryVirtualMemory` (current process only); unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
+`NtProtectVirtualMemory`, `NtQueryVirtualMemory` (current process only),
+`NtCreateEvent` (unnamed), `NtSetEvent`, `NtClearEvent`, `NtQueryEvent`,
+`NtWaitForSingleObject`, `NtWaitForMultipleObjects`, `NtDelayExecution`,
+`NtDuplicateObject`, `NtQueryPerformanceCounter`, `NtQuerySystemTime`; unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
 User-mode CPU exceptions terminate the process with the matching NTSTATUS
 (no SEH dispatch yet).
 

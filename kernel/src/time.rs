@@ -10,6 +10,22 @@ pub const TICK_HZ: u64 = 1000;
 static TICKS: AtomicU64 = AtomicU64::new(0);
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
 static TSC_AT_BOOT: AtomicU64 = AtomicU64::new(0);
+/// NT system time (100 ns units since 1601-01-01 UTC) at `init`.
+static SYSTEM_TIME_AT_INIT: AtomicU64 = AtomicU64::new(0);
+
+/// Seconds between 1601-01-01 and 1970-01-01.
+const EPOCH_DIFFERENCE_SECS: u64 = 11_644_473_600;
+
+/// Sets the wall clock from the UNIX time read at boot.
+pub fn set_boot_time(unix_secs: i64) {
+    let secs = (unix_secs.max(0) as u64) + EPOCH_DIFFERENCE_SECS;
+    SYSTEM_TIME_AT_INIT.store(secs * 10_000_000, Ordering::Relaxed);
+}
+
+/// Current NT system time (100 ns units since 1601-01-01 UTC).
+pub fn system_time() -> u64 {
+    SYSTEM_TIME_AT_INIT.load(Ordering::Relaxed) + monotonic_ns() / 100
+}
 
 /// Starts the periodic tick. Interrupts must be enabled by the caller.
 pub fn init(calibration: &apic::Calibration) {

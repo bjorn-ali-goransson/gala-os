@@ -131,6 +131,8 @@ pub struct BootInfo {
     pub memory_map: BootMemoryMap,
     pub framebuffer: Option<Framebuffer>,
     pub modules: BootModules,
+    /// UNIX time (seconds) of boot, from the RTC.
+    pub boot_unix_time: Option<i64>,
 }
 
 /// Reads the bootloader responses. Call once, early in boot.
@@ -201,6 +203,7 @@ pub fn collect() -> Result<BootInfo, BootError> {
         memory_map: BootMemoryMap { entries },
         framebuffer,
         modules: BootModules { files: modules },
+        boot_unix_time: REQUESTS.date_at_boot.response().map(|r| r.timestamp),
     })
 }
 

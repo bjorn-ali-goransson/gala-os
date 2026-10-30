@@ -29,6 +29,7 @@ const TESTS: &[Test] = &[
     Test { name: "preemption_without_yield", run: preemption_without_yield },
     Test { name: "sleep_waits_long_enough", run: sleep_waits_long_enough },
     Test { name: "thread_stacks_are_reaped", run: thread_stacks_are_reaped },
+    Test { name: "event_wakes_blocked_waiter", run: event_wakes_blocked_waiter },
 ];
 
 pub fn run_all() {
@@ -205,4 +206,32 @@ fn thread_stacks_are_reaped() {
     // Thread records stay (ids are unique), but stacks must be returned.
     let leaked = free_before.saturating_sub(mm::frame_stats().0);
     assert!(leaked < 16, "{leaked} frames leaked by 50 threads");
+}
+
+fn event_wakes_blocked_waiter() {
+    use crate::nt::object::{Event, EventType, KObject, ObjectBody, ObjectRef};
+    use crate::nt::status::NtStatus;
+    use crate::nt::wait::{self, Dispatcher, Timeout};
+
+    static EVENT: crate::sync::IrqMutex<Option<ObjectRef>> = crate::sync::IrqMutex::new(None);
+    static RESULT: AtomicU64 = AtomicU64::new(u64::MAX);
+    fn waiter(_: usize) {
+        let ev = EVENT.lock().clone().expect("event");
+        let status = wait::wait_for(core::slice::from_ref(&ev), false, Timeout::Infinite);
+        RESULT.store(u64::from(status.0), Ordering::SeqCst);
+    }
+    let ev = KObject::new(ObjectBody::Event(Event {
+        kind: EventType::Synchronization,
+        dispatcher: Dispatcher::new(0),
+    }))
+    .expect("event");
+    *EVENT.lock() = Some(ev.clone());
+    let t = sched::spawn("waiter", waiter, 0).expect("spawn");
+    sched::sleep_ms(10);
+    assert_eq!(RESULT.load(Ordering::SeqCst), u64::MAX, "waiter must still be blocked");
+    wait::set_signal(&ev, 1);
+    sched::join(t).expect("join");
+    assert_eq!(RESULT.load(Ordering::SeqCst), u64::from(NtStatus::SUCCESS.0));
+    assert_eq!(ev.dispatcher().unwrap().signal_state(), 0, "auto-reset consumed by the waiter");
+    *EVENT.lock() = None;
 }

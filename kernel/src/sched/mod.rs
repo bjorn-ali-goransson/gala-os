@@ -43,7 +43,13 @@ enum State {
     Running,
     Ready,
     Blocked,
-    Sleeping { until_tick: u64 },
+    Sleeping {
+        until_tick: u64,
+    },
+    /// Waiting for `wake` or, if set, until the tick deadline.
+    Waiting {
+        until_tick: Option<u64>,
+    },
     Dead,
 }
 
@@ -58,6 +64,15 @@ struct Thread {
     joiners: Vec<ThreadId>,
     /// Set for threads that run user code.
     user: Option<UserThread>,
+    /// Why the last `wait` ended.
+    wake_reason: WakeReason,
+}
+
+/// Why a `prepare_wait`/`wait` ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WakeReason {
+    Woken,
+    TimedOut,
 }
 
 /// User-mode side of a thread.
@@ -135,6 +150,7 @@ pub fn init() -> Result<(), SpawnError> {
         entry: None,
         joiners: Vec::new(),
         user: None,
+        wake_reason: WakeReason::Woken,
     };
     let mut sched = Scheduler {
         threads: Vec::new(),
@@ -191,6 +207,7 @@ fn spawn_inner(
         entry: Some((entry, arg)),
         joiners: Vec::new(),
         user,
+        wake_reason: WakeReason::Woken,
     };
     let mut guard = SCHED.lock();
     let sched = guard.as_mut().ok_or(SpawnError::NotInitialized)?;
@@ -344,6 +361,43 @@ pub fn reap() -> usize {
     n
 }
 
+/// First half of a wait: marks the current thread as waiting (until `wake`
+/// or the tick `deadline`). The caller then releases the locks that protect
+/// its wait condition and calls [`wait`]. A `wake` in between is not lost:
+/// the thread is simply already runnable when it calls `wait`.
+pub fn prepare_wait(deadline: Option<u64>) {
+    with(|s| {
+        let id = s.current;
+        let t = s.thread(id);
+        t.wake_reason = WakeReason::Woken;
+        t.state = State::Waiting { until_tick: deadline };
+        if deadline.is_some_and(|d| d <= time::ticks()) {
+            t.wake_reason = WakeReason::TimedOut;
+            s.make_ready(id);
+        }
+    });
+}
+
+/// Second half of a wait: blocks until woken or timed out.
+pub fn wait() -> WakeReason {
+    schedule();
+    with(|s| {
+        let id = s.current;
+        s.thread(id).wake_reason
+    })
+}
+
+/// Makes a waiting thread runnable. No effect on threads in other states.
+pub fn wake(id: ThreadId) {
+    with(|s| {
+        if let Some(t) = s.threads.get(id.0)
+            && matches!(t.state, State::Waiting { .. })
+        {
+            s.make_ready(id);
+        }
+    });
+}
+
 /// Called from the timer interrupt (after EOI). Wakes sleepers and preempts
 /// the current thread when its quantum is used up.
 pub(crate) fn on_tick(now: u64) {
@@ -351,10 +405,13 @@ pub(crate) fn on_tick(now: u64) {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };
         for i in 0..s.threads.len() {
-            if let State::Sleeping { until_tick } = s.threads[i].state
-                && until_tick <= now
-            {
-                s.make_ready(ThreadId(i));
+            match s.threads[i].state {
+                State::Sleeping { until_tick } if until_tick <= now => s.make_ready(ThreadId(i)),
+                State::Waiting { until_tick: Some(t) } if t <= now => {
+                    s.threads[i].wake_reason = WakeReason::TimedOut;
+                    s.make_ready(ThreadId(i));
+                }
+                _ => {}
             }
         }
         s.quantum_left = s.quantum_left.saturating_sub(1);
@@ -396,6 +453,7 @@ pub fn for_each_thread(mut f: impl FnMut(ThreadId, &'static str, &'static str)) 
                 State::Ready => "ready",
                 State::Blocked => "blocked",
                 State::Sleeping { .. } => "sleeping",
+                State::Waiting { .. } => "waiting",
                 State::Dead => "dead",
             };
             f(ThreadId(i), t.name, state);

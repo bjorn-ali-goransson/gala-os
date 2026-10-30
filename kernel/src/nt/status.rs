@@ -5,6 +5,9 @@ pub struct NtStatus(pub u32);
 
 impl NtStatus {
     pub const SUCCESS: NtStatus = NtStatus(0x0000_0000);
+    pub const TIMEOUT: NtStatus = NtStatus(0x0000_0102);
+    pub const ACCESS_DENIED: NtStatus = NtStatus(0xc000_0022);
+    pub const INVALID_PARAMETER_1: NtStatus = NtStatus(0xc000_00ef);
     pub const NOT_IMPLEMENTED: NtStatus = NtStatus(0xc000_0002);
     pub const ACCESS_VIOLATION: NtStatus = NtStatus(0xc000_0005);
     pub const INVALID_HANDLE: NtStatus = NtStatus(0xc000_0008);

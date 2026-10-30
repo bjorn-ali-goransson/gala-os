@@ -20,7 +20,7 @@ jobs:
           cargo clippy -p kernel --target x86_64-unknown-none -- -D warnings
           cargo clippy -p kernel --lib --tests -- -D warnings
           cargo clippy -p xtask -- -D warnings
-          cargo clippy --release --target x86_64-pc-windows-msvc -p ntrt -p hello -p abi_test -p crash -p vm_test -- -D warnings
+          cargo clippy --release --target x86_64-pc-windows-msvc -p ntrt -p hello -p abi_test -p crash -p vm_test -p wait_test -- -D warnings
       - name: Unit tests and QEMU boot test
         run: cargo xtask test
       - name: Checked-in test binaries match their sources

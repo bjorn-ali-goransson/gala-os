@@ -133,6 +133,12 @@ pub struct RawFile {
 }
 
 #[repr(C)]
+pub struct DateAtBootResponse {
+    pub revision: u64,
+    pub timestamp: i64,
+}
+
+#[repr(C)]
 pub struct ExecutableAddressResponse {
     pub revision: u64,
     pub physical_base: u64,
@@ -151,6 +157,7 @@ pub struct Requests {
     pub framebuffer: Request<FramebufferResponse>,
     pub executable_address: Request<ExecutableAddressResponse>,
     pub modules: Request<ModuleResponse>,
+    pub date_at_boot: Request<DateAtBootResponse>,
     end_marker: [u64; 2],
 }
 
@@ -175,6 +182,7 @@ pub static REQUESTS: Requests = Requests {
     framebuffer: Request::new([0x9d5827dcd881dd75, 0xa3148604f6fab11b]),
     executable_address: Request::new([0x71ba76863cc55f63, 0xb2644a48c516a487]),
     modules: Request::new([0x3e7e279702be32af, 0xca1c4f3bd1280cee]),
+    date_at_boot: Request::new([0x502746e184c088aa, 0xfbc5ec83e6327893]),
     end_marker: REQUESTS_END_MARKER,
 };
 
