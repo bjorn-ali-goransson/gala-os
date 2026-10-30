@@ -78,11 +78,14 @@ clean-room.
   deterministic and independent of timing. Under KVM, `perf kvm` on the
   host samples the guest.
 
-## 5. Post-mortem — next
+## 5. Post-mortem — backtraces done; gdb and record/replay next
 
-- Panics print a symbolized backtrace (frame-pointer walk in the kernel,
-  symbolized by xtask from the serial log), the current thread/process,
-  and the last N events from the event ring.
+- Panics print a backtrace (`backtrace: 0x... 0x...`, return addresses
+  from a frame-pointer walk, `arch::backtrace`; the kernel is built with
+  `-C force-frame-pointers=yes`). xtask symbolizes it with
+  `llvm-addr2line`/`addr2line` whenever it shows a failed boot's log, and
+  `cargo xtask symbolize <log>` does it for any log. Still to do: the
+  current thread/process and the last N events in the panic output.
 - `cargo xtask debug name` boots a scenario with QEMU's gdbstub (`-s -S`)
   and a gdb script, so an agent can get backtraces and inspect memory in
   batch mode.

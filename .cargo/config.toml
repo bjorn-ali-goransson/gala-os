@@ -3,7 +3,8 @@ xtask = "run --quiet --package xtask --"
 
 [target.x86_64-unknown-none]
 # Link at a fixed higher-half address (see kernel/linker.ld) instead of PIE.
-rustflags = ["-C", "relocation-model=static"]
+# Frame pointers make panic backtraces possible (arch::backtrace).
+rustflags = ["-C", "relocation-model=static", "-C", "force-frame-pointers=yes"]
 
 [target.x86_64-pc-windows-msvc]
 # Freestanding test programs: link with LLVM's lld-link, no CRT or libraries.

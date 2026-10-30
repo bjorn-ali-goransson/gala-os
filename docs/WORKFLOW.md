@@ -135,6 +135,9 @@ drawing text roughly doubles kernel time under emulation.
   show up (e.g. #UD on `syscall` = EFER.SCE missing on that CPU).
 - Kernel command-line flag `trace` logs every system call with arguments
   and status (add it to a scenario's `cmdline` temporarily).
+- Kernel panics print `backtrace:` return addresses; failed boot tests show
+  them symbolized (function and source line), and `cargo xtask symbolize
+  <serial log>` resolves any log.
 - The event stream: `XTASK_EVENTS=all cargo xtask boot-test name` writes
   JSON lines (system calls with timing, image maps, threads, processes,
   faults) to `target/debug/<iso>.events.jsonl`; filter with `jq` or grep.

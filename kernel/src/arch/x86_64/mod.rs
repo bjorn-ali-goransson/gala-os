@@ -2,6 +2,7 @@
 //! `unsafe` is permitted; every `unsafe` block must state why it is sound.
 
 pub mod apic;
+pub mod backtrace;
 pub mod context;
 pub mod cpu;
 pub mod debugcon;

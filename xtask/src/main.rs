@@ -123,6 +123,8 @@ commands:
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
                (default: the boot log, at 3 s; files in target/screenshots/)
+  symbolize    resolve the kernel backtraces in a serial log to functions
+               and source lines: symbolize <log> [--release]
   docker-test  build the test image (docker/test.Dockerfile) and run
                `cargo xtask test` (or the given xtask arguments) inside it
   report       run every test program on gala; write target/report/gala.{json,md}
@@ -143,6 +145,12 @@ fn main() -> ExitCode {
         Some("report") => gala_report(release),
         Some("docker-test") => docker_test(&args[1..]),
         Some("screenshot") => screenshot(release, &args[1..]),
+        Some("symbolize") => match args.get(1).filter(|a| !a.starts_with("--")) {
+            Some(log) => fs::read_to_string(log)
+                .map_err(|e| format!("reading {log}: {e}"))
+                .map(|text| print!("{}", symbolize(release, &text))),
+            None => Err("usage: cargo xtask symbolize <serial log> [--release]".into()),
+        },
         Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
             Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
             None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
@@ -696,13 +704,17 @@ const SCENARIOS: &[Scenario] = &[
         name: "fault-ud",
         cmdline: "qemu_exit fault=ud",
         exit_status: QEMU_EXIT_FAILURE,
-        expect: &["KERNEL PANIC", "CPU exception: invalid opcode (#UD)"],
+        expect: &["KERNEL PANIC", "CPU exception: invalid opcode (#UD)", "backtrace: 0xffffffff8"],
     },
     Scenario {
         name: "fault-pagefault",
         cmdline: "qemu_exit fault=pagefault",
         exit_status: QEMU_EXIT_FAILURE,
-        expect: &["CPU exception: page fault (#PF) error=0x0", "cr2=0x0000000000000008"],
+        expect: &[
+            "CPU exception: page fault (#PF) error=0x0",
+            "cr2=0x0000000000000008",
+            "backtrace: 0xffffffff8",
+        ],
     },
     Scenario {
         name: "fault-stackoverflow",
@@ -789,6 +801,7 @@ fn plan_vms<'a>(selected: &[&'a Scenario]) -> Vec<Vm<'a>> {
 }
 
 fn boot_tests(release: bool, filter: Option<&String>) -> Result {
+    RELEASE.store(release, std::sync::atomic::Ordering::Relaxed);
     let t0 = Instant::now();
     build_kernel(release)?;
     let built = t0.elapsed();
@@ -1101,6 +1114,43 @@ fn find_line(serial: &str, text: &str) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// Whether this run builds release kernels (for finding the ELF).
+static RELEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The `backtrace:` lines of a kernel log, resolved to function names and
+/// source lines with `llvm-addr2line` or `addr2line` (empty if there are
+/// none or no tool is installed).
+fn symbolize(release: bool, serial: &str) -> String {
+    let profile = if release { "release" } else { "debug" };
+    let elf = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
+    let mut out = String::new();
+    for line in serial.lines().filter_map(|l| l.split_once("backtrace:").map(|(_, a)| a)) {
+        let addresses: Vec<&str> = line.split_whitespace().collect();
+        if addresses.is_empty() {
+            continue;
+        }
+        let resolved = ["llvm-addr2line", "addr2line"].iter().find_map(|tool| {
+            Command::new(tool)
+                .args(["-f", "-C", "-i", "-p", "-e"])
+                .arg(&elf)
+                .args(&addresses)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+        });
+        match resolved {
+            Some(o) => {
+                out += "backtrace (symbolized):\n";
+                for frame in String::from_utf8_lossy(&o.stdout).lines() {
+                    out += &format!("  {frame}\n");
+                }
+            }
+            None => out += "backtrace: no addr2line found to symbolize it\n",
+        }
+    }
+    out
+}
+
 /// Boots one VM and judges each of its scenarios.
 fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)>) {
     let (scenarios, timeout): (Vec<&Scenario>, Duration) = match vm {
@@ -1161,6 +1211,7 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
             iso.with_extension("serial.log").display(),
             serial.trim_end()
         );
+        eprint!("{}", symbolize(RELEASE.load(std::sync::atomic::Ordering::Relaxed), &serial));
     }
     (time, verdicts)
 }

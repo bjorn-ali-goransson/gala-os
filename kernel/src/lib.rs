@@ -233,6 +233,22 @@ fn finish(code: QemuExitCode) -> ! {
 /// Called from the executable's `#[panic_handler]`.
 pub fn panic(info: &core::panic::PanicInfo) -> ! {
     console::emergency_println(format_args!("KERNEL PANIC: {info}"));
+    // Return addresses, innermost first; `cargo xtask` turns them into
+    // function names and lines from the kernel binary.
+    struct Backtrace;
+    impl core::fmt::Display for Backtrace {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("backtrace:")?;
+            let mut result = Ok(());
+            arch::backtrace::walk(|ret| {
+                if result.is_ok() {
+                    result = write!(f, " {ret:#x}");
+                }
+            });
+            result
+        }
+    }
+    console::emergency_println(format_args!("{Backtrace}"));
     finish(QemuExitCode::Failure)
 }
 
