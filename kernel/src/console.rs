@@ -74,14 +74,26 @@ impl Screen {
             '\r' => return,
             _ => {}
         }
-        if self.line_len < self.line_start.len() {
+        if self.line_len < self.line_start.len() && self.col == self.line_len as u64 {
             self.line_start[self.line_len] = c as u8;
             self.line_len += 1;
             let start = &self.line_start[..self.line_len];
-            if start.starts_with(b"[warn") {
-                self.color = WARNING;
+            let color = if start.starts_with(b"[warn") {
+                WARNING
             } else if start.starts_with(b"[error") || start.starts_with(b"KERNEL") {
-                self.color = ERROR;
+                ERROR
+            } else {
+                self.color
+            };
+            if color != self.color {
+                // Redraw what this line already shows in its colour.
+                self.color = color;
+                for (i, &b) in self.line_start[..self.line_len - 1].iter().enumerate() {
+                    if let Some(glyph) = get_raster(char::from(b), FONT, SIZE) {
+                        let (x, y) = self.origin(i as u64, self.row);
+                        self.fb.draw_glyph(x, y, glyph.raster(), color, BACKGROUND);
+                    }
+                }
             }
         }
         if self.col == self.cols {
