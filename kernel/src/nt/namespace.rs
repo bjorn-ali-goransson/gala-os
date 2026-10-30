@@ -20,7 +20,9 @@ static NAMESPACE: IrqMutex<Option<ObjectRef>> = IrqMutex::new(None);
 
 /// Directories that exist at boot (Windows has these and more).
 const SYSTEM_DIRECTORIES: &[&str] = &[
+    "??",
     "BaseNamedObjects",
+    "Device",
     "KernelObjects",
     "Sessions",
     "Sessions\\1",
@@ -117,6 +119,52 @@ pub fn lookup(start: Option<&ObjectRef>, path: &[u16], ci: bool) -> Result<Objec
         return Ok(dir);
     }
     find(&dir, last, ci).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)
+}
+
+/// Resolves `path` until it reaches an object that is not a directory
+/// (e.g. a device), returning it and the rest of the path (starting with
+/// `\`, or empty). This is how `\??\C:\dir\file` reaches the file system.
+pub fn lookup_parse<'p>(
+    start: Option<&ObjectRef>,
+    path: &'p [u16],
+    ci: bool,
+) -> Result<(ObjectRef, &'p [u16]), NtStatus> {
+    let guard = NAMESPACE.lock();
+    let root = guard.as_ref().ok_or(NtStatus::OBJECT_PATH_NOT_FOUND)?;
+    let (mut dir, mut rest) = match start {
+        None => match path.split_first() {
+            Some((&BACKSLASH, rest)) => (root.clone(), rest),
+            _ => return Err(NtStatus::OBJECT_PATH_SYNTAX_BAD),
+        },
+        Some(s) => {
+            if path.first() == Some(&BACKSLASH) {
+                return Err(NtStatus::OBJECT_PATH_SYNTAX_BAD);
+            }
+            (s.clone(), path)
+        }
+    };
+    loop {
+        if rest.is_empty() {
+            return Ok((dir, rest));
+        }
+        let end = rest.iter().position(|&c| c == BACKSLASH).unwrap_or(rest.len());
+        let (part, after) = rest.split_at(end);
+        if part.is_empty() {
+            return Err(NtStatus::OBJECT_NAME_INVALID);
+        }
+        let last = after.is_empty();
+        let next = match find(&dir, part, ci) {
+            Some(n) => n,
+            None if last => return Err(NtStatus::OBJECT_NAME_NOT_FOUND),
+            None => return Err(NtStatus::OBJECT_PATH_NOT_FOUND),
+        };
+        if next.as_directory().is_none() {
+            // Hand the remainder (with its leading `\`) to the object.
+            return Ok((next, after));
+        }
+        dir = next;
+        rest = after.get(1..).unwrap_or(&[]);
+    }
 }
 
 /// Links `object` under `path`. If the name exists and `open_if` is set,

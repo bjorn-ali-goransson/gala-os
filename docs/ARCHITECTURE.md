@@ -248,6 +248,16 @@ never free. View protections must be a subset of the section's
 (STATUS_SECTION_PROTECTION), offsets 64 KiB aligned; NtFreeVirtualMemory on
 a view is STATUS_UNABLE_TO_DELETE_SECTION.
 
+**Files** (`fs::ramfs`, `nt::file`): an in-memory file system (node
+arena, case-insensitive names, static boot-module contents copied on first
+write, NT share-access accounting, delete pending until the last open
+closes). It is the volume device `\Device\HarddiskVolume1`, also linked as
+`\??\C:`; `namespace::lookup_parse` walks the object namespace until it
+reaches a non-directory object and hands it the rest of the path. File
+objects keep the granted access, share mode, synchronous flag and file
+position, and close their open in `Drop`. Boot modules appear read-only in
+`C:\gala`; `C:\Windows\System32` and `C:\Users\Public` exist.
+
 **KUSER_SHARED_DATA** (`nt::kuser`): one kernel-owned `SharedPage`
 mapped read-only at 0x7FFE0000 into every process (`UserSpace::map_shared`
 never frees it). Constant fields describe the pinned build (10.0.26100,
@@ -275,7 +285,9 @@ the TSC clock; the performance counter runs at 10 MHz.
 `NtCreateThread`, `NtResumeThread`, `NtTerminateThread`,
 `NtQueryInformationThread`/`NtQueryInformationProcess` (basic information),
 `NtCreateSection`, `NtOpenSection`, `NtMapViewOfSection`,
-`NtUnmapViewOfSection`, `NtQuerySection`; unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
+`NtUnmapViewOfSection`, `NtQuerySection`, `NtCreateFile`, `NtOpenFile`,
+`NtReadFile`, `NtWriteFile` (files), `NtQueryInformationFile`,
+`NtSetInformationFile`, `NtQueryAttributesFile`; unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
 User-mode CPU exceptions terminate the process with the matching NTSTATUS
 (no SEH dispatch yet).
 

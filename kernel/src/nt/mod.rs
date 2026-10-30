@@ -1,5 +1,6 @@
 //! NT personality: the Windows user-mode ABI on top of the kernel core.
 
+pub mod file;
 pub mod kuser;
 pub mod layout;
 pub mod namespace;
@@ -18,6 +19,9 @@ pub mod wait;
 pub fn init() {
     if let Err(e) = namespace::init() {
         panic!("object namespace: {e:?}");
+    }
+    if let Err(e) = file::init() {
+        panic!("file system: {e:?}");
     }
     let (_, total_frames) = crate::mm::frame_stats();
     if let Err(e) = kuser::init(total_frames) {

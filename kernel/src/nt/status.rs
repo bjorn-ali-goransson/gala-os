@@ -22,6 +22,13 @@ impl NtStatus {
     pub const SECTION_PROTECTION: NtStatus = NtStatus(0xc000_004e);
     pub const SECTION_TOO_BIG: NtStatus = NtStatus(0xc000_0040);
     pub const MAPPED_ALIGNMENT: NtStatus = NtStatus(0xc000_0220);
+    pub const END_OF_FILE: NtStatus = NtStatus(0xc000_0011);
+    pub const INVALID_DEVICE_REQUEST: NtStatus = NtStatus(0xc000_0010);
+    pub const SHARING_VIOLATION: NtStatus = NtStatus(0xc000_0043);
+    pub const DELETE_PENDING: NtStatus = NtStatus(0xc000_0056);
+    pub const FILE_IS_A_DIRECTORY: NtStatus = NtStatus(0xc000_00ba);
+    pub const DIRECTORY_NOT_EMPTY: NtStatus = NtStatus(0xc000_0101);
+    pub const NOT_A_DIRECTORY: NtStatus = NtStatus(0xc000_0103);
     pub const NOT_IMPLEMENTED: NtStatus = NtStatus(0xc000_0002);
     pub const ACCESS_VIOLATION: NtStatus = NtStatus(0xc000_0005);
     pub const INVALID_HANDLE: NtStatus = NtStatus(0xc000_0008);

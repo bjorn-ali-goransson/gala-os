@@ -63,6 +63,14 @@ pub const EVENT_MAPPING: GenericMapping = GenericMapping {
 
 const FILE_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1ff;
 
+/// FILE_GENERIC_READ / WRITE / EXECUTE / FILE_ALL_ACCESS.
+pub const FILE_MAPPING: GenericMapping = GenericMapping {
+    read: READ_CONTROL | SYNCHRONIZE | 0x89,
+    write: READ_CONTROL | SYNCHRONIZE | 0x116,
+    execute: READ_CONTROL | SYNCHRONIZE | 0xa0,
+    all: FILE_ALL_ACCESS,
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventType {
     /// Stays signaled until cleared (manual reset).
@@ -149,6 +157,9 @@ pub enum ObjectBody {
     Directory(Directory),
     Thread(super::thread::NtThread),
     Section(super::section::Section),
+    /// The file system volume (`\Device\HarddiskVolume1`, `\??\C:`).
+    Volume,
+    File(super::file::FileObject),
     Process(KArc<super::process::Process>),
 }
 
@@ -196,6 +207,8 @@ impl KObject {
             ObjectBody::Directory(_) => "Directory",
             ObjectBody::Thread(_) => "Thread",
             ObjectBody::Section(_) => "Section",
+            ObjectBody::Volume => "Device",
+            ObjectBody::File(_) => "File",
             ObjectBody::Process(_) => "Process",
         }
     }
@@ -216,7 +229,9 @@ impl KObject {
             ObjectBody::ConsoleInput
             | ObjectBody::ConsoleOutput
             | ObjectBody::Directory(_)
-            | ObjectBody::Section(_) => None,
+            | ObjectBody::Section(_)
+            | ObjectBody::Volume
+            | ObjectBody::File(_) => None,
         }
     }
 
@@ -226,6 +241,7 @@ impl KObject {
             ObjectBody::Directory(_) => DIRECTORY_MAPPING,
             ObjectBody::Thread(_) => THREAD_MAPPING,
             ObjectBody::Section(_) => SECTION_MAPPING,
+            ObjectBody::Volume | ObjectBody::File(_) => FILE_MAPPING,
             ObjectBody::Process(_) => PROCESS_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,

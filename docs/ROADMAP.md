@@ -36,18 +36,28 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   NtMapViewOfSection (offsets, read-only views, protection checks),
   NtUnmapViewOfSection, NtQuerySection; section frames shared between views
   via borrowed PTEs; `section_test`
+- Files: in-memory file system (fs::ramfs: case-insensitive names, NT share
+  access, delete on close, boot modules as read-only C:\gala\*), volume
+  device at \Device\HarddiskVolume1 and \??\C:, namespace parse into the
+  device; NtCreateFile (all dispositions), NtOpenFile, NtReadFile/NtWriteFile
+  (positions, append, EOF), NtQuery/SetInformationFile (basic, standard,
+  position, EOF, disposition), NtQueryAttributesFile; `file_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
    NtOpenMutant, NtCreateSemaphore/NtReleaseSemaphore (0x0a); abandonment
    on thread exit. Create/open numbers vary by build: verify on 26100 first.
    Symbolic links (`\Sessions\1\BaseNamedObjects\Global`), NtQueryDirectoryObject.
-6b. **Image sections**: SEC_IMAGE from a file, loader maps images through
-   sections; file-backed sections after the file system exists.
+6b. **Image sections** (next): SEC_IMAGE from a file handle, NtMapViewOfSection
+   maps headers+sections with their protections and applies base relocations
+   when not at the preferred base (as Windows' memory manager does);
+   file-backed data sections; the kernel loader uses image sections. Test with
+   a small test DLL shipped in C:\gala.
 7. **Exceptions**: user-mode exception dispatch (KiUserExceptionDispatcher
    contract), NtContinue, NtRaiseException; vectored/SEH work in user mode.
-8. **Files**: a simple in-memory/virtio-blk filesystem, NtCreateFile/
-   NtReadFile/NtQueryInformationFile, `\??\C:` namespace.
+8b. **More file services**: NtQueryDirectoryFile, NtQueryVolumeInformationFile,
+   NtFlushBuffersFile, FileRenameInformation, RootDirectory = file handle,
+   FILE_DELETE_ON_CLOSE tests; `\??\C:` as a symbolic link.
 9. Toward M6: syscall-trace tooling and a differential test runner; run the
    first Wine ntdll conformance test binaries.
 

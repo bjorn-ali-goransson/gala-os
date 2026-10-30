@@ -6,6 +6,7 @@
 
 use alloc::vec::Vec;
 
+use super::file;
 use super::namespace;
 use super::object::{
     DIRECTORY_CREATE_OBJECT, DIRECTORY_TRAVERSE, EVENT_MODIFY_STATE, EVENT_QUERY_STATE, Event,
@@ -27,7 +28,13 @@ use crate::mm::heap::KArc;
 use crate::mm::heap::TryVec;
 
 pub const NT_WAIT_FOR_SINGLE_OBJECT: u32 = 0x0004;
+pub const NT_READ_FILE: u32 = 0x0006;
 pub const NT_WRITE_FILE: u32 = 0x0008;
+pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
+pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
+pub const NT_OPEN_FILE: u32 = 0x0033;
+pub const NT_QUERY_ATTRIBUTES_FILE: u32 = 0x003d;
+pub const NT_CREATE_FILE: u32 = 0x0055;
 pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
 pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
 pub const NT_OPEN_SECTION: u32 = 0x0037;
@@ -61,7 +68,13 @@ type Handler = fn(&mut Call<'_>) -> NtStatus;
 
 const TABLE: &[(u32, &str, Handler)] = &[
     (NT_WAIT_FOR_SINGLE_OBJECT, "NtWaitForSingleObject", nt_wait_for_single_object),
+    (NT_READ_FILE, "NtReadFile", nt_read_file),
     (NT_WRITE_FILE, "NtWriteFile", nt_write_file),
+    (NT_QUERY_INFORMATION_FILE, "NtQueryInformationFile", nt_query_information_file),
+    (NT_SET_INFORMATION_FILE, "NtSetInformationFile", nt_set_information_file),
+    (NT_OPEN_FILE, "NtOpenFile", nt_open_file),
+    (NT_QUERY_ATTRIBUTES_FILE, "NtQueryAttributesFile", nt_query_attributes_file),
+    (NT_CREATE_FILE, "NtCreateFile", nt_create_file),
     (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", nt_map_view_of_section),
     (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", nt_unmap_view_of_section),
     (NT_OPEN_SECTION, "NtOpenSection", nt_open_section),
@@ -201,6 +214,10 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
     let buffer = arg!(call, 5);
     let length = arg!(call, 6) as u32;
     let entry = tri!(call.handle(handle));
+    if let ObjectBody::File(file) = &entry.object.body {
+        let offset_ptr = arg!(call, 7);
+        return file_write(call, &entry, file, io_status, buffer, length, offset_ptr);
+    }
     if !matches!(entry.object.body, ObjectBody::ConsoleOutput) {
         return NtStatus::OBJECT_TYPE_MISMATCH;
     }
@@ -303,6 +320,8 @@ fn nt_query_virtual_memory(call: &mut Call<'_>) -> NtStatus {
     tri!(call.check_current_process(Handle(arg!(call, 0))));
     let (addr, class, buffer, length, ret_ptr) =
         (arg!(call, 1), arg!(call, 2), arg!(call, 3), arg!(call, 4), arg!(call, 5));
+    // The class is a ULONG: only the low 32 bits are defined.
+    let class = class as u32 as u64;
     if class != MEMORY_BASIC_INFORMATION {
         return NtStatus::INVALID_INFO_CLASS;
     }
@@ -503,6 +522,8 @@ fn nt_query_object(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (class, buffer, length, ret_ptr) =
         (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4));
+    // The class is a ULONG: only the low 32 bits are defined.
+    let class = class as u32 as u64;
     let mut out = Vec::new();
     match class {
         OBJECT_BASIC_INFORMATION => {
@@ -585,6 +606,8 @@ fn nt_query_event(call: &mut Call<'_>) -> NtStatus {
     let event = tri!(event_object(call, Handle(arg!(call, 0)), EVENT_QUERY_STATE));
     let (class, buffer, length, ret_ptr) =
         (arg!(call, 1), arg!(call, 2), arg!(call, 3), arg!(call, 4));
+    // The class is a ULONG: only the low 32 bits are defined.
+    let class = class as u32 as u64;
     if class != 0 {
         return NtStatus::INVALID_INFO_CLASS;
     }
@@ -822,6 +845,8 @@ fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (class, buffer, length, ret_ptr) =
         (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as u64, arg!(call, 4));
+    // The class is a ULONG: only the low 32 bits are defined.
+    let class = class as u32 as u64;
     let object = tri!(entry.require(THREAD_QUERY_LIMITED_INFORMATION));
     let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     if class != 0 {
@@ -844,6 +869,8 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (class, buffer, length, ret_ptr) =
         (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as u64, arg!(call, 4));
+    // The class is a ULONG: only the low 32 bits are defined.
+    let class = class as u32 as u64;
     let object = tri!(entry.require(PROCESS_QUERY_LIMITED_INFORMATION));
     let ObjectBody::Process(p) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     if class != 0 {
@@ -979,6 +1006,8 @@ fn nt_query_section(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (class, buffer, length, ret_ptr) =
         (arg!(call, 1), arg!(call, 2), arg!(call, 3), arg!(call, 4));
+    // The class is a ULONG: only the low 32 bits are defined.
+    let class = class as u32 as u64;
     let object = tri!(entry.require(SECTION_QUERY));
     let ObjectBody::Section(s) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     if class != 0 {
@@ -998,4 +1027,323 @@ fn nt_query_section(call: &mut Call<'_>) -> NtStatus {
         Ok(()) => NtStatus::SUCCESS,
         Err(_) => NtStatus::ACCESS_VIOLATION,
     }
+}
+
+impl Call<'_> {
+    /// Writes an IO_STATUS_BLOCK { Status (pointer-sized), Information }.
+    fn write_iosb(&self, ptr: u64, status: NtStatus, information: u64) -> Result<(), NtStatus> {
+        let mut b = [0u8; 16];
+        b[0..4].copy_from_slice(&status.0.to_le_bytes());
+        b[8..16].copy_from_slice(&information.to_le_bytes());
+        self.process.write(ptr, &b).map_err(|_| NtStatus::ACCESS_VIOLATION)
+    }
+
+    /// Resolves OBJECT_ATTRIBUTES naming a file to (volume, path on volume).
+    fn file_path(&self, attrs_ptr: u64) -> Result<(ObjectRef, Vec<u16>), NtStatus> {
+        let attrs = self
+            .object_attributes(attrs_ptr, DIRECTORY_TRAVERSE)?
+            .ok_or(NtStatus::INVALID_PARAMETER)?;
+        if attrs.name.is_empty() && attrs.root.is_none() {
+            return Err(NtStatus::OBJECT_NAME_INVALID);
+        }
+        // File names are case-insensitive on our volume regardless of
+        // OBJ_CASE_INSENSITIVE; the object directory part follows the flag.
+        let (device, rest) =
+            namespace::lookup_parse(attrs.root.as_ref(), &attrs.name, attrs.case_insensitive())?;
+        let mut owned = Vec::new();
+        owned.try_extend_from_slice(rest).map_err(|_| NtStatus::NO_MEMORY)?;
+        Ok((device, owned))
+    }
+
+    fn open_or_create(&self, r: OpenRequest) -> NtStatus {
+        let OpenRequest { out, access, attrs_ptr, iosb, share, disposition, options } = r;
+        let (device, rest) = tri!(self.file_path(attrs_ptr));
+        let granted = super::object::FILE_MAPPING.map(access);
+        let created = tri!(file::create(&device, &rest, granted, share, disposition, options));
+        let information = created.information;
+        let entry = HandleEntry { object: created.object, access: granted, attributes: 0 };
+        let Ok(handle) = self.process.handles.lock().insert(entry) else {
+            return NtStatus::NO_MEMORY;
+        };
+        if self.write_u64(out, handle.0).is_err() {
+            self.process.handles.lock().close(handle);
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        tri!(self.write_iosb(iosb, NtStatus::SUCCESS, information));
+        NtStatus::SUCCESS
+    }
+}
+
+/// Arguments shared by NtCreateFile and NtOpenFile.
+struct OpenRequest {
+    out: u64,
+    access: u32,
+    attrs_ptr: u64,
+    iosb: u64,
+    share: u32,
+    disposition: u32,
+    options: u32,
+}
+
+/// NtCreateFile(*FileHandle, DesiredAccess, ObjectAttributes, *IoStatusBlock,
+///              *AllocationSize, FileAttributes, ShareAccess,
+///              CreateDisposition, CreateOptions, EaBuffer, EaLength)
+fn nt_create_file(call: &mut Call<'_>) -> NtStatus {
+    let (out, access, attrs, iosb) =
+        (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));
+    let (share, disposition, options) =
+        (arg!(call, 6) as u32, arg!(call, 7) as u32, arg!(call, 8) as u32);
+    call.open_or_create(OpenRequest {
+        out,
+        access,
+        attrs_ptr: attrs,
+        iosb,
+        share,
+        disposition,
+        options,
+    })
+}
+
+/// NtOpenFile(*FileHandle, DesiredAccess, ObjectAttributes, *IoStatusBlock,
+///            ShareAccess, OpenOptions)
+fn nt_open_file(call: &mut Call<'_>) -> NtStatus {
+    let (out, access, attrs, iosb) =
+        (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));
+    let (share, options) = (arg!(call, 4) as u32, arg!(call, 5) as u32);
+    call.open_or_create(OpenRequest {
+        out,
+        access,
+        attrs_ptr: attrs,
+        iosb,
+        share,
+        disposition: file::FILE_OPEN,
+        options,
+    })
+}
+
+/// ByteOffset values meaning "end of file" and "current position".
+const FILE_WRITE_TO_END_OF_FILE: i64 = -1;
+const FILE_USE_FILE_POINTER_POSITION: i64 = -2;
+
+/// Chooses the offset of a read/write: explicit, or the file position for
+/// synchronous handles (asynchronous handles must pass one).
+fn io_offset(
+    call: &Call<'_>,
+    file: &file::FileObject,
+    offset_ptr: u64,
+    end: u64,
+) -> Result<u64, NtStatus> {
+    let explicit = if offset_ptr == 0 { None } else { Some(call.read_u64(offset_ptr)? as i64) };
+    match explicit {
+        Some(FILE_WRITE_TO_END_OF_FILE) => Ok(end),
+        Some(FILE_USE_FILE_POINTER_POSITION) | None if file.synchronous => {
+            Ok(*file.position.lock())
+        }
+        Some(o) if o >= 0 => Ok(o as u64),
+        _ => Err(NtStatus::INVALID_PARAMETER),
+    }
+}
+
+fn file_write(
+    call: &Call<'_>,
+    entry: &HandleEntry,
+    file: &file::FileObject,
+    iosb: u64,
+    buffer: u64,
+    length: u32,
+    offset_ptr: u64,
+) -> NtStatus {
+    if file.directory {
+        return NtStatus::INVALID_DEVICE_REQUEST;
+    }
+    if entry.access & (file::FILE_WRITE_DATA | file::FILE_APPEND_DATA) == 0 {
+        return NtStatus::ACCESS_DENIED;
+    }
+    let size = file::with_fs(|fs| fs.node(file.node).map_or(0, |n| n.size()));
+    let mut offset = tri!(io_offset(call, file, offset_ptr, size));
+    if entry.access & file::FILE_WRITE_DATA == 0 {
+        offset = size; // append-only handles always write at the end
+    }
+    let mut chunk = [0u8; 512];
+    let mut done = 0u64;
+    while done < u64::from(length) {
+        let n = (u64::from(length) - done).min(chunk.len() as u64) as usize;
+        if call.process.read(buffer + done, &mut chunk[..n]).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        let now = crate::time::system_time();
+        if let Err(e) = file::with_fs(|fs| fs.write(file.node, offset + done, &chunk[..n], now)) {
+            return file::fs_status(e);
+        }
+        done += n as u64;
+    }
+    if file.synchronous {
+        *file.position.lock() = offset + done;
+    }
+    tri!(call.write_iosb(iosb, NtStatus::SUCCESS, done));
+    NtStatus::SUCCESS
+}
+
+/// NtReadFile(FileHandle, Event, ApcRoutine, ApcContext, *IoStatusBlock,
+///            Buffer, Length, *ByteOffset, *Key)
+fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let (iosb, buffer, length, offset_ptr) =
+        (arg!(call, 4), arg!(call, 5), arg!(call, 6) as u32, arg!(call, 7));
+    let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if file.directory {
+        return NtStatus::INVALID_DEVICE_REQUEST;
+    }
+    if entry.access & file::FILE_READ_DATA == 0 {
+        return NtStatus::ACCESS_DENIED;
+    }
+    let size = file::with_fs(|fs| fs.node(file.node).map_or(0, |n| n.size()));
+    let offset = tri!(io_offset(call, file, offset_ptr, size));
+    if offset >= size && length > 0 {
+        tri!(call.write_iosb(iosb, NtStatus::END_OF_FILE, 0));
+        return NtStatus::END_OF_FILE;
+    }
+    let mut chunk = [0u8; 512];
+    let mut done = 0u64;
+    while done < u64::from(length) {
+        let want = (u64::from(length) - done).min(chunk.len() as u64) as usize;
+        let n = match file::with_fs(|fs| fs.read(file.node, offset + done, &mut chunk[..want])) {
+            Ok(n) => n,
+            Err(e) => return file::fs_status(e),
+        };
+        if n == 0 {
+            break;
+        }
+        if call.process.write(buffer + done, &chunk[..n]).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        done += n as u64;
+    }
+    if file.synchronous {
+        *file.position.lock() = offset + done;
+    }
+    tri!(call.write_iosb(iosb, NtStatus::SUCCESS, done));
+    NtStatus::SUCCESS
+}
+
+const FILE_BASIC_INFORMATION: u64 = 4;
+const FILE_STANDARD_INFORMATION: u64 = 5;
+const FILE_DISPOSITION_INFORMATION: u64 = 13;
+const FILE_POSITION_INFORMATION: u64 = 14;
+const FILE_END_OF_FILE_INFORMATION: u64 = 20;
+
+/// NtQueryInformationFile(FileHandle, *IoStatusBlock, Buffer, Length, Class)
+fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let (iosb, buffer, length, class) =
+        (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4));
+    // The class is a ULONG: only the low 32 bits are defined.
+    let class = class as u32 as u64;
+    let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let mut out = [0u8; 40];
+    let size = match class {
+        FILE_BASIC_INFORMATION => {
+            if entry.access & file::FILE_READ_ATTRIBUTES == 0 {
+                return NtStatus::ACCESS_DENIED;
+            }
+            out = tri!(file::basic_information(file.node));
+            40
+        }
+        FILE_STANDARD_INFORMATION => {
+            out[..24].copy_from_slice(&tri!(file::standard_information(file.node)));
+            24
+        }
+        FILE_POSITION_INFORMATION => {
+            out[..8].copy_from_slice(&file.position.lock().to_le_bytes());
+            8
+        }
+        _ => return NtStatus::INVALID_INFO_CLASS,
+    };
+    if length < size {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    if call.process.write(buffer, &out[..size]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    tri!(call.write_iosb(iosb, NtStatus::SUCCESS, size as u64));
+    NtStatus::SUCCESS
+}
+
+/// NtSetInformationFile(FileHandle, *IoStatusBlock, Buffer, Length, Class)
+fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let (iosb, buffer, length, class) =
+        (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4));
+    // The class is a ULONG: only the low 32 bits are defined.
+    let class = class as u32 as u64;
+    let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let need = match class {
+        FILE_POSITION_INFORMATION | FILE_END_OF_FILE_INFORMATION => 8,
+        FILE_DISPOSITION_INFORMATION => 1,
+        _ => return NtStatus::INVALID_INFO_CLASS,
+    };
+    if length < need {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let mut data = [0u8; 8];
+    if call.process.read(buffer, &mut data[..need]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let value = u64::from_le_bytes(data);
+    let status = match class {
+        FILE_POSITION_INFORMATION => {
+            *file.position.lock() = value;
+            NtStatus::SUCCESS
+        }
+        FILE_END_OF_FILE_INFORMATION => {
+            if entry.access & file::FILE_WRITE_DATA == 0 {
+                return NtStatus::ACCESS_DENIED;
+            }
+            let now = crate::time::system_time();
+            match file::with_fs(|fs| fs.set_size(file.node, value, now)) {
+                Ok(()) => NtStatus::SUCCESS,
+                Err(e) => file::fs_status(e),
+            }
+        }
+        _ => {
+            // FILE_DISPOSITION_INFORMATION { BOOLEAN DeleteFile; }
+            if entry.access & file::DELETE == 0 {
+                return NtStatus::ACCESS_DENIED;
+            }
+            match file::with_fs(|fs| fs.set_delete_pending(file.node, data[0] != 0)) {
+                Ok(()) => NtStatus::SUCCESS,
+                Err(e) => file::fs_status(e),
+            }
+        }
+    };
+    if status == NtStatus::SUCCESS {
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+    }
+    status
+}
+
+/// NtQueryAttributesFile(ObjectAttributes, *FileInformation)
+fn nt_query_attributes_file(call: &mut Call<'_>) -> NtStatus {
+    let (attrs, out) = (arg!(call, 0), arg!(call, 1));
+    let (device, rest) = tri!(call.file_path(attrs));
+    if !matches!(device.body, ObjectBody::Volume) {
+        return NtStatus::OBJECT_TYPE_MISMATCH;
+    }
+    let node = {
+        let Ok(parts) = file_components(&rest) else { return NtStatus::OBJECT_NAME_INVALID };
+        tri!(file::with_fs(|fs| fs.resolve(&parts)).map_err(file::fs_status))
+    };
+    let info = tri!(file::basic_information(node));
+    match call.process.write(out, &info) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(_) => NtStatus::ACCESS_VIOLATION,
+    }
+}
+
+fn file_components(rest: &[u16]) -> Result<Vec<&[u16]>, NtStatus> {
+    let mut out = Vec::new();
+    for part in rest.split(|&c| c == u16::from(b'\\')).filter(|p| !p.is_empty()) {
+        out.try_push(part).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    Ok(out)
 }

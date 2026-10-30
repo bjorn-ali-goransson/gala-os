@@ -19,6 +19,7 @@ pub mod boot;
 pub mod cmdline;
 #[macro_use]
 pub mod console;
+pub mod fs;
 pub mod mm;
 pub mod nt;
 pub mod sched;
@@ -93,6 +94,11 @@ pub fn kernel_main() -> ! {
     }
     info!("sched: boot thread {} running, idle thread started", sched::current());
     nt::init();
+    for module in info.modules.iter() {
+        if let Err(e) = nt::file::add_boot_file(module.file_name(), module.data) {
+            warn!("fs: cannot add {}: {e:?}", module.path);
+        }
+    }
 
     if let Some(name) = cmdline.value("run") {
         run_program(&info, name);

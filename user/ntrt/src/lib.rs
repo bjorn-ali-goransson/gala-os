@@ -65,6 +65,12 @@ stubs! {
     ntrt_nt_open_section = 0x0037;
     ntrt_nt_create_section = 0x004a;
     ntrt_nt_query_section = 0x0051;
+    ntrt_nt_read_file = 0x0006;
+    ntrt_nt_query_information_file = 0x0011;
+    ntrt_nt_set_information_file = 0x0027;
+    ntrt_nt_open_file = 0x0033;
+    ntrt_nt_query_attributes_file = 0x003d;
+    ntrt_nt_create_file = 0x0055;
     ntrt_nt_write_file = 0x0008;
     ntrt_nt_close = 0x000f;
     ntrt_nt_allocate_virtual_memory = 0x0018;
@@ -194,6 +200,56 @@ unsafe extern "system" {
         buf: *mut u8,
         len: usize,
         ret: *mut usize,
+    ) -> NtStatus;
+    fn ntrt_nt_read_file(
+        file: Handle,
+        event: Handle,
+        apc_routine: *mut c_void,
+        apc_context: *mut c_void,
+        io_status: *mut IoStatusBlock,
+        buffer: *mut u8,
+        length: u32,
+        byte_offset: *const i64,
+        key: *const u32,
+    ) -> NtStatus;
+    fn ntrt_nt_create_file(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        io_status: *mut IoStatusBlock,
+        allocation_size: *const i64,
+        file_attributes: u32,
+        share: u32,
+        disposition: u32,
+        options: u32,
+        ea: *const c_void,
+        ea_length: u32,
+    ) -> NtStatus;
+    fn ntrt_nt_open_file(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        io_status: *mut IoStatusBlock,
+        share: u32,
+        options: u32,
+    ) -> NtStatus;
+    fn ntrt_nt_query_information_file(
+        h: Handle,
+        io_status: *mut IoStatusBlock,
+        buf: *mut u8,
+        len: u32,
+        class: u32,
+    ) -> NtStatus;
+    fn ntrt_nt_set_information_file(
+        h: Handle,
+        io_status: *mut IoStatusBlock,
+        buf: *const u8,
+        len: u32,
+        class: u32,
+    ) -> NtStatus;
+    fn ntrt_nt_query_attributes_file(
+        attributes: *const ObjectAttributes,
+        info: *mut u8,
     ) -> NtStatus;
     fn ntrt_nt_query_performance_counter(counter: *mut i64, frequency: *mut i64) -> NtStatus;
     fn ntrt_nt_query_system_time(time: *mut i64) -> NtStatus;
@@ -501,6 +557,154 @@ pub fn query_section(h: Handle) -> (NtStatus, u32, u64) {
         u32::from_le_bytes(b[8..12].try_into().unwrap()),
         u64::from_le_bytes(b[16..24].try_into().unwrap()),
     )
+}
+
+pub const FILE_SUPERSEDE: u32 = 0;
+pub const FILE_OPEN: u32 = 1;
+pub const FILE_CREATE: u32 = 2;
+pub const FILE_OPEN_IF: u32 = 3;
+pub const FILE_OVERWRITE: u32 = 4;
+pub const FILE_OVERWRITE_IF: u32 = 5;
+pub const FILE_DIRECTORY_FILE: u32 = 0x1;
+pub const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
+pub const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
+pub const FILE_SHARE_READ: u32 = 1;
+pub const FILE_SHARE_WRITE: u32 = 2;
+pub const FILE_SHARE_DELETE: u32 = 4;
+pub const GENERIC_READ: u32 = 0x8000_0000;
+pub const GENERIC_WRITE: u32 = 0x4000_0000;
+pub const DELETE: u32 = 0x1_0000;
+pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+
+/// (status, handle, IoStatus.Information)
+pub fn create_file(
+    attrs: &ObjectAttributes,
+    access: u32,
+    share: u32,
+    disposition: u32,
+    options: u32,
+) -> (NtStatus, Handle, usize) {
+    let mut h = Handle(0);
+    let mut iosb = IoStatusBlock { status: 0, information: 0xdead };
+    // SAFETY: valid pointers; no EA buffer.
+    let st = unsafe {
+        ntrt_nt_create_file(
+            &mut h,
+            access | SYNCHRONIZE,
+            attrs,
+            &mut iosb,
+            core::ptr::null(),
+            FILE_ATTRIBUTE_NORMAL,
+            share,
+            disposition,
+            options,
+            core::ptr::null(),
+            0,
+        )
+    };
+    (st, h, iosb.information)
+}
+
+pub fn open_file(
+    attrs: &ObjectAttributes,
+    access: u32,
+    share: u32,
+    options: u32,
+) -> (NtStatus, Handle, usize) {
+    let mut h = Handle(0);
+    let mut iosb = IoStatusBlock { status: 0, information: 0xdead };
+    // SAFETY: valid pointers.
+    let st = unsafe {
+        ntrt_nt_open_file(&mut h, access | SYNCHRONIZE, attrs, &mut iosb, share, options)
+    };
+    (st, h, iosb.information)
+}
+
+/// NtReadFile; `offset` None uses the file position. Returns (status, bytes).
+pub fn read_file(h: Handle, buf: &mut [u8], offset: Option<i64>) -> (NtStatus, usize) {
+    let mut iosb = IoStatusBlock { status: 0, information: 0 };
+    let o = offset.unwrap_or(0);
+    let op = if offset.is_some() { &o as *const i64 } else { core::ptr::null() };
+    let null = core::ptr::null_mut::<c_void>();
+    // SAFETY: valid buffer and IO_STATUS_BLOCK.
+    let st = unsafe {
+        ntrt_nt_read_file(
+            h,
+            Handle(0),
+            null,
+            null,
+            &mut iosb,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            op,
+            core::ptr::null(),
+        )
+    };
+    (st, iosb.information)
+}
+
+/// NtWriteFile with an explicit offset (-1 = end of file). Returns (status, bytes).
+pub fn write_file_at(h: Handle, data: &[u8], offset: i64) -> (NtStatus, usize) {
+    let mut iosb = IoStatusBlock { status: 0, information: 0 };
+    let null = core::ptr::null_mut::<c_void>();
+    // SAFETY: valid buffer and IO_STATUS_BLOCK.
+    let st = unsafe {
+        ntrt_nt_write_file(
+            h,
+            Handle(0),
+            null,
+            null,
+            &mut iosb,
+            data.as_ptr(),
+            data.len() as u32,
+            &offset,
+            core::ptr::null(),
+        )
+    };
+    (st, iosb.information)
+}
+
+/// Returns (status, IoStatus.Information) of a plain write at the current position.
+pub fn write_file_info(h: Handle, data: &[u8]) -> (NtStatus, usize) {
+    let mut iosb = IoStatusBlock { status: 0, information: 0 };
+    let null = core::ptr::null_mut::<c_void>();
+    // SAFETY: valid buffer and IO_STATUS_BLOCK.
+    let st = unsafe {
+        ntrt_nt_write_file(
+            h,
+            Handle(0),
+            null,
+            null,
+            &mut iosb,
+            data.as_ptr(),
+            data.len() as u32,
+            core::ptr::null(),
+            core::ptr::null(),
+        )
+    };
+    (st, iosb.information)
+}
+
+pub fn query_file(h: Handle, class: u32, buf: &mut [u8]) -> NtStatus {
+    let mut iosb = IoStatusBlock { status: 0, information: 0 };
+    // SAFETY: valid buffer of the given length.
+    unsafe {
+        ntrt_nt_query_information_file(h, &mut iosb, buf.as_mut_ptr(), buf.len() as u32, class)
+    }
+}
+
+pub fn set_file(h: Handle, class: u32, data: &[u8]) -> NtStatus {
+    let mut iosb = IoStatusBlock { status: 0, information: 0 };
+    // SAFETY: valid buffer of the given length.
+    unsafe { ntrt_nt_set_information_file(h, &mut iosb, data.as_ptr(), data.len() as u32, class) }
+}
+
+/// NtQueryAttributesFile: (status, FileAttributes).
+pub fn query_attributes(attrs: &ObjectAttributes) -> (NtStatus, u32) {
+    let mut info = [0u8; 40];
+    // SAFETY: 40-byte FILE_BASIC_INFORMATION buffer.
+    let st = unsafe { ntrt_nt_query_attributes_file(attrs, info.as_mut_ptr()) };
+    (st, u32::from_le_bytes(info[32..36].try_into().unwrap()))
 }
 
 #[repr(C)]
