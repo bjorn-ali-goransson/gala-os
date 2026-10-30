@@ -833,6 +833,65 @@ pub fn read_file_async(
     }
 }
 
+/// PIO_APC_ROUTINE: (ApcContext, IoStatusBlock, Reserved).
+pub type IoApcRoutine = extern "system" fn(usize, *mut IoStatusBlock, u32);
+
+/// NtReadFile with an I/O completion APC (as ReadFileEx).
+pub fn read_file_apc(
+    h: Handle,
+    buf: &mut [u8],
+    offset: Option<i64>,
+    event: Handle,
+    routine: IoApcRoutine,
+    context: usize,
+    iosb: &mut IoStatusBlock,
+) -> NtStatus {
+    let o = offset.unwrap_or(0);
+    let op = if offset.is_some() { &o as *const i64 } else { core::ptr::null() };
+    // SAFETY: valid buffer and IO_STATUS_BLOCK, kept alive by the caller;
+    // the routine has the PIO_APC_ROUTINE signature.
+    unsafe {
+        ntrt_nt_read_file(
+            h,
+            event,
+            routine as *mut c_void,
+            context as *mut c_void,
+            iosb,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            op,
+            core::ptr::null(),
+        )
+    }
+}
+
+/// NtWriteFile with an I/O completion APC (as WriteFileEx).
+pub fn write_file_apc(
+    h: Handle,
+    data: &[u8],
+    offset: Option<i64>,
+    routine: IoApcRoutine,
+    context: usize,
+    iosb: &mut IoStatusBlock,
+) -> NtStatus {
+    let o = offset.unwrap_or(0);
+    let op = if offset.is_some() { &o as *const i64 } else { core::ptr::null() };
+    // SAFETY: as for `read_file_apc`.
+    unsafe {
+        ntrt_nt_write_file(
+            h,
+            Handle(0),
+            routine as *mut c_void,
+            context as *mut c_void,
+            iosb,
+            data.as_ptr(),
+            data.len() as u32,
+            op,
+            core::ptr::null(),
+        )
+    }
+}
+
 /// NtWriteFile counterpart of `read_file_async`.
 pub fn write_file_async(
     h: Handle,

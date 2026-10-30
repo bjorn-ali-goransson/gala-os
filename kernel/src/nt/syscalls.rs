@@ -308,9 +308,10 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(handle));
     if let ObjectBody::File(file) = &entry.object.body {
         let offset_ptr = arg!(call, 7);
+        let apc = tri!(io_apc(call, file, io_status));
         let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
         let status = file_write(call, &entry, file, io_status, buffer, length, offset_ptr);
-        finish_io(&entry.object, event.as_ref());
+        finish_io(&entry.object, event.as_ref(), apc, status);
         return status;
     }
     if !matches!(entry.object.body, ObjectBody::ConsoleOutput) {
@@ -1704,10 +1705,29 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
     let (iosb, buffer, length, offset_ptr) =
         (arg!(call, 4), arg!(call, 5), arg!(call, 6) as u32, arg!(call, 7));
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let apc = tri!(io_apc(call, file, iosb));
     let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
     let status = file_read(call, &entry, file, iosb, buffer, length, offset_ptr);
-    finish_io(&entry.object, event.as_ref());
+    finish_io(&entry.object, event.as_ref(), apc, status);
     status
+}
+
+/// The I/O completion APC of a read or write (ApcRoutine, ApcContext):
+/// queued to the calling thread when the I/O completes successfully, as
+/// ApcRoutine(ApcContext, IoStatusBlock, 0). Synchronous handles take none.
+fn io_apc(
+    call: &Call<'_>,
+    file: &file::FileObject,
+    iosb: u64,
+) -> Result<Option<thread::UserApc>, NtStatus> {
+    let routine = call.arg(2)?;
+    if routine == 0 {
+        return Ok(None);
+    }
+    if file.synchronous {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    Ok(Some(thread::UserApc { routine, args: [call.arg(3)?, iosb, 0] }))
 }
 
 /// The start of an I/O on `file`: the event (if any; it must be an event
@@ -1727,10 +1747,21 @@ fn start_io(call: &Call<'_>, file: &ObjectRef, event: u64) -> Result<Option<Obje
     Ok(event)
 }
 
-fn finish_io(file: &ObjectRef, event: Option<&ObjectRef>) {
+fn finish_io(
+    file: &ObjectRef,
+    event: Option<&ObjectRef>,
+    apc: Option<thread::UserApc>,
+    status: NtStatus,
+) {
     wait::set_signal(file, 1);
     if let Some(e) = event {
         wait::set_signal(e, 1);
+    }
+    // A failed I/O queues no completion routine (ReadFileEx documents it).
+    if let (Some(apc), Some(me)) = (apc, thread::current())
+        && status.0 < 0x8000_0000
+    {
+        let _ = thread::queue_user_apc(&me, apc);
     }
 }
 

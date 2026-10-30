@@ -240,6 +240,9 @@ stack, P1Home..P4Home = NormalContext, SystemArgument1, SystemArgument2,
 NormalRoutine (to be checked against the pinned ntdll). The dispatcher
 calls the routine and NtContinues with TestAlert, which delivers the next
 APC first.
+I/O completion routines use the same queue: a read or write on an
+asynchronous handle with an ApcRoutine queues ApcRoutine(ApcContext,
+IoStatusBlock, 0) to the caller when it completes successfully.
 
 **x87/SSE state**: the kernel target uses no SSE, so in a trap or system
 call the CPU still holds the user's x87/SSE registers. Context switches

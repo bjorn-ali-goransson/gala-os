@@ -96,6 +96,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 - User APCs: NtQueueApcThread, alertable waits/delays returning
   STATUS_USER_APC, delivery through KiUserApcDispatcher, NtContinue
   TestAlert; testntdll's dispatcher; `apc_test`
+- I/O completion APCs: NtReadFile/NtWriteFile ApcRoutine/ApcContext on
+  asynchronous handles (STATUS_INVALID_PARAMETER on synchronous ones),
+  queued on successful completion; `ioapc_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
@@ -112,8 +115,7 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
    SizeOfStackReserve/Commit from the image, AVX state (XSAVE, CONTEXT_EX)
    and FltSave in NtCreateThread, SEH unwinding is user-mode
    (ntdll) work; verify the dispatcher frame against the pinned ntdll.
-8c. **Files, rest**: `\??\C:` as a symbolic link, APC completion
-   routines and I/O completion ports, truly pending I/O, NtNotifyChangeDirectoryFile, file
+8c. **Files, rest**: `\??\C:` as a symbolic link, I/O completion ports, truly pending I/O, NtNotifyChangeDirectoryFile, file
    locks, short (8.3) names.
 9. Toward M6: collect windows.json on the pinned build and fix every
    difference (gala bug or wrong test expectation); run the first Wine
