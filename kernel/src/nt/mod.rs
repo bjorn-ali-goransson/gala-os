@@ -1,9 +1,11 @@
 //! NT personality: the Windows user-mode ABI on top of the kernel core.
 
+pub mod context;
 pub mod file;
 pub mod kuser;
 pub mod layout;
 pub mod namespace;
+pub mod ntdll;
 pub mod object;
 pub mod params;
 pub mod pe;

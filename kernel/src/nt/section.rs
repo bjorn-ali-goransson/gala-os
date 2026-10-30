@@ -29,6 +29,8 @@ pub struct Section {
     pages: IrqMutex<Vec<Option<Frame>>>,
     /// Set for SEC_IMAGE sections.
     pub image: Option<ImageLayout>,
+    /// NT path of the backing file (MemoryMappedFilenameInformation).
+    pub file_name: Option<Vec<u16>>,
 }
 
 /// An executable image laid out at its preferred base (headers and
@@ -93,6 +95,11 @@ impl ImageLayout {
     pub fn size(&self) -> u64 {
         self.bytes.len() as u64
     }
+
+    /// The RVA of export `name`.
+    pub fn export(&self, name: &[u8]) -> Option<u32> {
+        super::pe::find_export(&self.bytes, name)
+    }
 }
 
 impl Section {
@@ -103,7 +110,14 @@ impl Section {
         let mut pages = Vec::new();
         pages.try_reserve_exact(count).map_err(|_| NtStatus::NO_MEMORY)?;
         pages.resize(count, None);
-        Ok(Section { size, protect, attributes, pages: IrqMutex::new(pages), image: None })
+        Ok(Section {
+            size,
+            protect,
+            attributes,
+            pages: IrqMutex::new(pages),
+            image: None,
+            file_name: None,
+        })
     }
 
     /// A SEC_IMAGE section for the PE file contents `data`.
@@ -115,6 +129,7 @@ impl Section {
             attributes: SEC_IMAGE,
             pages: IrqMutex::new(Vec::new()),
             image: Some(layout),
+            file_name: None,
         })
     }
 
@@ -300,6 +315,15 @@ pub fn unmap_view(process: &Process, addr: u64) -> Result<(), NtStatus> {
         page += PAGE_SIZE;
     }
     Ok(())
+}
+
+/// The file name of the section view containing `addr`, if it has one.
+pub fn mapped_file_name(process: &Process, addr: u64) -> Option<Result<Vec<u16>, NtStatus>> {
+    let views = process.views.lock();
+    let v = views.iter().find(|v| (v.base..v.base + v.size).contains(&addr))?;
+    let name = section_of(&v.section).file_name.as_ref()?;
+    let mut out = Vec::new();
+    Some(out.try_extend_from_slice(name).map(|()| out).map_err(|_| NtStatus::NO_MEMORY))
 }
 
 /// The section frame backing user address `addr`, if it is in a view.

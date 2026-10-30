@@ -54,6 +54,10 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 - Process startup contract: PEB fields (version, processors, subsystem,
   session), full RTL_USER_PROCESS_PARAMETERS (image path, command line,
   current directory + handle, environment), TEB/ClientId checks; `peb_test`
+- Starting through ntdll: System32\ntdll.dll mapped into every process as
+  an image section, initial thread at LdrInitializeThunk(CONTEXT, base),
+  NtContinue (0x43, full-register return), MemoryMappedFilenameInformation;
+  our own `testntdll` and `startup_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
@@ -63,11 +67,12 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 6c. **Image sections, rest**: share unmodified pages between views,
    file-backed data sections, the kernel loader using image sections, and
    loading DLL imports (needed for ntdll and 7).
-6d. **Starting through ntdll**: map an ntdll.dll image (our own test
-   ntdll first) into every process, start the initial thread at its
-   LdrInitializeThunk export with the documented (CONTEXT, ntdll base)
-   arguments, PEB->Ldr left to user mode; boot cmdline `args=` for the
-   command line.
+6e. **User-mode loader support**: what a real ntdll's loader needs next:
+   NtOpenFile/NtCreateSection(SEC_IMAGE) on DLLs by path from user mode
+   (works), KnownDlls (`\KnownDlls` section objects), NtQuerySystem-
+   Information basics, NtSetInformationProcess/Thread bits, TLS slots in
+   the TEB, PEB->Ldr built by our test ntdll to resolve an exe's imports
+   from testdll; boot cmdline `args=` for the command line.
 7. **Exceptions**: user-mode exception dispatch (KiUserExceptionDispatcher
    contract), NtContinue, NtRaiseException; vectored/SEH work in user mode.
 8c. **Files, rest**: `\??\C:` as a symbolic link, asynchronous I/O

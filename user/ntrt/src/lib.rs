@@ -1012,6 +1012,68 @@ pub fn query(address: usize) -> (NtStatus, MemoryBasicInformation) {
     (st, mbi)
 }
 
+/// NtQueryVirtualMemory with any class into `buf`: (status, ReturnLength).
+pub fn query_virtual_raw(address: usize, class: u32, buf: &mut [u8]) -> (NtStatus, usize) {
+    let mut returned = 0;
+    // SAFETY: valid output buffer of the given length (the declared type
+    // is only a pointer type at the ABI level).
+    let st = unsafe {
+        ntrt_nt_query_virtual_memory(
+            CURRENT_PROCESS,
+            address,
+            class,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut returned,
+        )
+    };
+    (st, returned)
+}
+
+fn image_u32(addr: usize) -> u32 {
+    // SAFETY: callers read inside a mapped image's headers/export directory.
+    unsafe { (addr as *const u32).read_unaligned() }
+}
+
+/// The export directory of the image at `base`, if any.
+fn export_directory(base: usize) -> Option<usize> {
+    let pe = base + image_u32(base + 0x3c) as usize;
+    let rva = image_u32(pe + 24 + 112) as usize; // DataDirectory[0]
+    (rva != 0).then_some(base + rva)
+}
+
+/// A NUL-terminated string in a mapped image.
+fn image_str(addr: usize) -> &'static [u8] {
+    let mut n = 0;
+    // SAFETY: export names are NUL-terminated strings in the image.
+    unsafe {
+        while *((addr + n) as *const u8) != 0 {
+            n += 1;
+        }
+        core::slice::from_raw_parts(addr as *const u8, n)
+    }
+}
+
+/// The DLL name recorded in the export directory of the image at `base`.
+pub fn export_dll_name(base: usize) -> Option<&'static [u8]> {
+    let dir = export_directory(base)?;
+    Some(image_str(base + image_u32(dir + 12) as usize))
+}
+
+/// The address of export `name` of the image mapped at `base`.
+pub fn find_export(base: usize, name: &[u8]) -> Option<usize> {
+    let dir = export_directory(base)?;
+    let count = image_u32(dir + 24) as usize; // NumberOfNames
+    let functions = base + image_u32(dir + 28) as usize;
+    let names = base + image_u32(dir + 32) as usize;
+    let ordinals = base + image_u32(dir + 36) as usize;
+    (0..count).find(|&i| image_str(base + image_u32(names + 4 * i) as usize) == name).map(|i| {
+        // SAFETY: inside the export directory.
+        let ordinal = unsafe { ((ordinals + 2 * i) as *const u16).read_unaligned() } as usize;
+        base + image_u32(functions + 4 * ordinal) as usize
+    })
+}
+
 /// Returns (status, old protection).
 pub fn protect(base: usize, size: usize, new: u32) -> (NtStatus, u32) {
     let (mut b, mut s, mut old) = (base, size, 0);

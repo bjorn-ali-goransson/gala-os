@@ -265,6 +265,34 @@ impl PeImage<'_> {
     }
 }
 
+/// The RVA of export `name` in a laid-out image (`image` = SizeOfImage
+/// bytes as mapped). Forwarders are returned as their RVA too.
+pub fn find_export(image: &[u8], name: &[u8]) -> Option<u32> {
+    let u32_at = |off: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(image.get(off..off.checked_add(4)?)?.try_into().ok()?))
+    };
+    let pe = u32_at(0x3c)? as usize;
+    let dir = u32_at(pe + 24 + 112)? as usize; // DataDirectory[0]
+    if dir == 0 {
+        return None;
+    }
+    let count = u32_at(dir + 24)? as usize;
+    let functions = u32_at(dir + 28)? as usize;
+    let names = u32_at(dir + 32)? as usize;
+    let ordinals = u32_at(dir + 36)? as usize;
+    for i in 0..count {
+        let s = u32_at(names + 4 * i)? as usize;
+        let text = image.get(s..)?;
+        let end = text.iter().position(|&b| b == 0)?;
+        if &text[..end] == name {
+            let o = ordinals + 2 * i;
+            let ordinal = u16::from_le_bytes(image.get(o..o + 2)?.try_into().ok()?);
+            return u32_at(functions + 4 * usize::from(ordinal));
+        }
+    }
+    None
+}
+
 /// Applies base relocations to a loaded image (`image` is the whole image in
 /// memory, `SizeOfImage` bytes) that was placed `delta` bytes away from its
 /// preferred base.
@@ -426,6 +454,38 @@ mod tests {
         assert_eq!(&out[0x1000..0x1003], &[0x90, 0x90, 0xc3]);
         assert_eq!(out[0x1003], 0, "rest of the page is zero");
         assert_eq!(&out[0x2000..0x2008], &[7, 7, 7, 7, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn finds_exports_by_name() {
+        // An export directory at RVA 0x1000 with two names (sorted) and
+        // ordinals pointing at swapped functions.
+        let mut e = vec![0u8; 0x100];
+        let put =
+            |e: &mut Vec<u8>, off: usize, v: u32| e[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        put(&mut e, 20, 2); // NumberOfFunctions
+        put(&mut e, 24, 2); // NumberOfNames
+        put(&mut e, 28, 0x1040); // AddressOfFunctions
+        put(&mut e, 32, 0x1050); // AddressOfNames
+        put(&mut e, 36, 0x1060); // AddressOfNameOrdinals
+        put(&mut e, 0x40, 0x2000);
+        put(&mut e, 0x44, 0x2010);
+        put(&mut e, 0x50, 0x1070);
+        put(&mut e, 0x54, 0x1080);
+        e[0x60..0x64].copy_from_slice(&[1, 0, 0, 0]); // ordinals 1, 0
+        e[0x70..0x74].copy_from_slice(b"Alfa");
+        e[0x80..0x84].copy_from_slice(b"Beta");
+        let mut d = build(&[(".edata", 0x1000, 0x100, &e, IMAGE_SCN_MEM_READ)], 0x1000);
+        let dir0 = 0x44 + 20 + 112;
+        d[dir0..dir0 + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+        d[dir0 + 4..dir0 + 8].copy_from_slice(&0x100u32.to_le_bytes());
+        let pe = PeImage::parse_image(&d).unwrap();
+        let mut image = vec![0u8; pe.size_of_image as usize];
+        pe.lay_out(&mut image);
+        assert_eq!(find_export(&image, b"Alfa"), Some(0x2010));
+        assert_eq!(find_export(&image, b"Beta"), Some(0x2000));
+        assert_eq!(find_export(&image, b"Gamma"), None);
+        assert_eq!(find_export(&image, b"Alf"), None);
     }
 
     #[test]

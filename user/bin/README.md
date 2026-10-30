@@ -13,3 +13,7 @@ with status 0 on success, or exits with the number of the failing check.
 `testdll.dll` is a small DLL (exports, .data, base relocations) that
 `image_test.exe` embeds, writes to `C:\Users\Public` and maps as an image
 section; it is here for inspection only.
+
+`testntdll.dll` is gala's minimal stand-in for ntdll (built as
+`ntdll.dll`): the `startup_test` scenario installs it as
+`C:\Windows\System32\ntdll.dll`. It is not meant to be used on Windows.

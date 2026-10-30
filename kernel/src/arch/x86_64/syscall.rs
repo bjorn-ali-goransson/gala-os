@@ -126,6 +126,23 @@ extern "C" fn dispatch(frame: &mut SyscallFrame) {
     let handler: Handler = unsafe { core::mem::transmute::<usize, Handler>(raw) };
     handler(frame);
     run_user_return_hook();
+    // NtContinue: return with every register, through IRETQ. Only this
+    // thread's request counts (another may have been preempted after
+    // making one).
+    let pending = {
+        let mut slot = CONTINUE.lock();
+        match *slot {
+            Some((owner, regs)) if owner == crate::sched::current() => {
+                *slot = None;
+                Some(regs)
+            }
+            _ => None,
+        }
+    };
+    if let Some(regs) = pending {
+        // Nothing on this stack needs dropping: the handler has returned.
+        enter_user_regs(&regs);
+    }
     // SYSRET to a non-canonical rip would fault in ring 0; never allow it.
     if frame.rip >= USER_END - 0x1000 {
         panic!("syscall return to invalid rip {:#x}", frame.rip);
@@ -238,6 +255,16 @@ pub fn enter_user_regs(regs: &UserRegs) -> ! {
             options(noreturn),
         )
     }
+}
+
+/// A full-register return requested by the running system call.
+static CONTINUE: crate::sync::IrqMutex<Option<(crate::sched::ThreadId, UserRegs)>> =
+    crate::sync::IrqMutex::new(None);
+
+/// Makes the current system call return to user mode with `regs` (all
+/// general-purpose registers, unlike SYSRET) instead of its frame.
+pub fn continue_with(regs: UserRegs) {
+    *CONTINUE.lock() = Some((crate::sched::current(), regs));
 }
 
 static USER_RETURN_HOOK: AtomicUsize = AtomicUsize::new(0);

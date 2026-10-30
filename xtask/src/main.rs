@@ -19,8 +19,25 @@ const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Freestanding Windows test programs in `user/`, shipped as boot modules.
 const USER_TARGET: &str = "x86_64-pc-windows-msvc";
-/// Test DLLs (embedded by test programs; also exported to user/bin).
-const USER_DLLS: &[&str] = &["testdll"];
+/// A test DLL: its package, the file it builds, and its name in user/bin.
+struct Dll {
+    package: &'static str,
+    file: &'static str,
+    exported_as: &'static str,
+}
+
+/// Test DLLs (embedded by test programs or shipped to scenarios; also
+/// exported to user/bin).
+const USER_DLLS: &[Dll] = &[
+    Dll { package: "testdll", file: "testdll.dll", exported_as: "testdll.dll" },
+    // Built as ntdll.dll (its export directory says so); exported under
+    // another name so user/bin never holds a file called ntdll.dll.
+    Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
+];
+
+/// Extra boot modules per scenario: (scenario, built DLL file, directory
+/// on C: that the kernel puts it in, passed as the module string).
+const EXTRA_MODULES: &[(&str, &str, &str)] = &[("startup_test", "ntdll.dll", "Windows/System32")];
 const USER_PROGRAMS: &[&str] = &[
     "hello",
     "abi_test",
@@ -35,6 +52,7 @@ const USER_PROGRAMS: &[&str] = &[
     "image_test",
     "dir_test",
     "peb_test",
+    "startup_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -136,7 +154,7 @@ fn build_kernel(release: bool) -> Result {
     let mut cmd = cargo();
     cmd.args(["build", "--release", "--target", USER_TARGET]);
     for dll in USER_DLLS {
-        cmd.args(["--package", dll]);
+        cmd.args(["--package", dll.package]);
     }
     run_cmd(&mut cmd)?;
     let mut cmd = cargo();
@@ -167,6 +185,12 @@ fn make_iso(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
         let exe = target_dir().join(USER_TARGET).join("release").join(format!("{program}.exe"));
         copy(&exe, &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
+    }
+    let scenario = name.strip_prefix("test-").unwrap_or(name);
+    for (_, file, dir) in EXTRA_MODULES.iter().filter(|m| m.0 == scenario) {
+        let built = target_dir().join(USER_TARGET).join("release").join(file);
+        copy(&built, &boot.join(file))?;
+        modules += &format!("    module_path: boot():/boot/{file}\n    module_string: {dir}\n");
     }
     copy(&limine.join("BOOTX64.EFI"), &efi_boot.join("BOOTX64.EFI"))?;
     copy(&limine.join("limine-uefi-cd.bin"), &boot.join("limine/limine-uefi-cd.bin"))?;
@@ -289,6 +313,12 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "startup_test",
+        cmdline: "qemu_exit run=startup_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["startup_test: ok", "exited with status 0x00000000"],
+    },
     Scenario {
         name: "peb_test",
         cmdline: "qemu_exit run=peb_test.exe",
@@ -502,8 +532,8 @@ fn export_tests() -> Result {
         copy(&exe, &dir.join(format!("{program}.exe")))?;
     }
     for dll in USER_DLLS {
-        let file = target_dir().join(USER_TARGET).join("release").join(format!("{dll}.dll"));
-        copy(&file, &dir.join(format!("{dll}.dll")))?;
+        let file = target_dir().join(USER_TARGET).join("release").join(dll.file);
+        copy(&file, &dir.join(dll.exported_as))?;
     }
     eprintln!("xtask: exported {} test programs to {}", USER_PROGRAMS.len(), dir.display());
     Ok(())

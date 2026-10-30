@@ -44,6 +44,7 @@ impl NtStatus {
     pub const NO_MORE_FILES: NtStatus = NtStatus(0x8000_0006);
     pub const NO_SUCH_FILE: NtStatus = NtStatus(0xc000_000f);
     pub const FILE_DELETED: NtStatus = NtStatus(0xc000_0123);
+    pub const INVALID_ADDRESS: NtStatus = NtStatus(0xc000_0141);
     pub const STACK_OVERFLOW: NtStatus = NtStatus(0xc000_00fd);
     pub const CONFLICTING_ADDRESSES: NtStatus = NtStatus(0xc000_0018);
     pub const UNABLE_TO_FREE_VM: NtStatus = NtStatus(0xc000_001a);

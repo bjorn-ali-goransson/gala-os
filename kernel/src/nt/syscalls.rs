@@ -22,7 +22,7 @@ use super::thread;
 use super::vad;
 use super::vm;
 use super::wait::{self, Dispatcher, Timeout};
-use crate::arch::syscall::{self, SyscallFrame, UserRegs};
+use crate::arch::syscall::{self, SyscallFrame};
 use crate::console;
 use crate::mm::heap::KArc;
 use crate::mm::heap::TryVec;
@@ -38,6 +38,7 @@ pub const NT_CREATE_FILE: u32 = 0x0055;
 pub const NT_QUERY_DIRECTORY_FILE: u32 = 0x0035;
 pub const NT_QUERY_VOLUME_INFORMATION_FILE: u32 = 0x0049;
 pub const NT_FLUSH_BUFFERS_FILE: u32 = 0x004b;
+pub const NT_CONTINUE: u32 = 0x0043;
 pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
 pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
 pub const NT_OPEN_SECTION: u32 = 0x0037;
@@ -85,6 +86,7 @@ const TABLE: &[(u32, &str, Handler)] = &[
         nt_query_volume_information_file,
     ),
     (NT_FLUSH_BUFFERS_FILE, "NtFlushBuffersFile", nt_flush_buffers_file),
+    (NT_CONTINUE, "NtContinue", nt_continue),
     (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", nt_map_view_of_section),
     (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", nt_unmap_view_of_section),
     (NT_OPEN_SECTION, "NtOpenSection", nt_open_section),
@@ -322,6 +324,64 @@ fn nt_protect_virtual_memory(call: &mut Call<'_>) -> NtStatus {
 }
 
 const MEMORY_BASIC_INFORMATION: u64 = 0;
+const MEMORY_MAPPED_FILENAME_INFORMATION: u64 = 2;
+
+/// MemoryMappedFilenameInformation: a UNICODE_STRING followed by the NT
+/// path of the file mapped at `addr` (a section view or the executable).
+fn query_mapped_file_name(
+    call: &Call<'_>,
+    addr: u64,
+    buffer: u64,
+    length: u64,
+    ret_ptr: u64,
+) -> NtStatus {
+    let name = match section::mapped_file_name(&call.process, addr) {
+        Some(name) => tri!(name),
+        None => {
+            let (base, size) = call.process.image;
+            if !(base..base + size).contains(&addr) {
+                return NtStatus::INVALID_ADDRESS;
+            }
+            let mut path: Vec<u8> = Vec::new();
+            for part in [file::VOLUME_DEVICE, "\\gala\\", call.process.name] {
+                if path.try_extend_from_slice(part.as_bytes()).is_err() {
+                    return NtStatus::NO_MEMORY;
+                }
+            }
+            let mut name = Vec::new();
+            if name.try_reserve_exact(path.len()).is_err() {
+                return NtStatus::NO_MEMORY;
+            }
+            for &b in &path {
+                let _ = name.try_push(u16::from(b));
+            }
+            name
+        }
+    };
+    let bytes = name.len() * 2;
+    let needed = 16 + bytes + 2;
+    if ret_ptr != 0 {
+        tri!(call.write_u64(ret_ptr, needed as u64));
+    }
+    if (length as usize) < needed {
+        return NtStatus::BUFFER_OVERFLOW;
+    }
+    let mut out = Vec::new();
+    if out.try_reserve_exact(needed).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    out.resize(needed, 0u8);
+    out[0..2].copy_from_slice(&(bytes as u16).to_le_bytes());
+    out[2..4].copy_from_slice(&((bytes + 2) as u16).to_le_bytes());
+    out[8..16].copy_from_slice(&(buffer + 16).to_le_bytes());
+    for (i, c) in name.iter().enumerate() {
+        out[16 + 2 * i..18 + 2 * i].copy_from_slice(&c.to_le_bytes());
+    }
+    match call.process.write(buffer, &out) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(_) => NtStatus::ACCESS_VIOLATION,
+    }
+}
 const MBI_SIZE: usize = 48;
 
 /// NtQueryVirtualMemory(ProcessHandle, BaseAddress, MemoryInformationClass,
@@ -332,6 +392,9 @@ fn nt_query_virtual_memory(call: &mut Call<'_>) -> NtStatus {
         (arg!(call, 1), arg!(call, 2), arg!(call, 3), arg!(call, 4), arg!(call, 5));
     // The class is a ULONG: only the low 32 bits are defined.
     let class = class as u32 as u64;
+    if class == MEMORY_MAPPED_FILENAME_INFORMATION {
+        return query_mapped_file_name(call, addr, buffer, length, ret_ptr);
+    }
     if class != MEMORY_BASIC_INFORMATION {
         return NtStatus::INVALID_INFO_CLASS;
     }
@@ -756,11 +819,22 @@ fn nt_query_system_time(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
-/// Offsets in the x64 CONTEXT: Rax..R15 at 0x78 (16 registers), Rip at 0xf8,
-/// EFlags at 0x44.
-const CONTEXT_EFLAGS: usize = 0x44;
-const CONTEXT_GPR: usize = 0x78;
-const CONTEXT_RIP: usize = 0xf8;
+/// NtContinue(*Context, TestAlert): resumes the calling thread with the
+/// registers in `Context` (returned to user mode through IRETQ, since
+/// SYSRET cannot restore rcx and r11).
+fn nt_continue(call: &mut Call<'_>) -> NtStatus {
+    let ctx_ptr = arg!(call, 0);
+    let mut ctx = [0u8; super::context::INTEGER_PART];
+    if call.process.read(ctx_ptr, &mut ctx).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let regs = super::context::from_bytes(&ctx);
+    if !regs.is_valid() {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    syscall::continue_with(regs);
+    NtStatus::SUCCESS
+}
 
 /// NtCreateThread(*ThreadHandle, DesiredAccess, ObjectAttributes,
 ///                ProcessHandle, *ClientId, *ThreadContext, *InitialTeb,
@@ -773,19 +847,11 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
     if ctx_ptr == 0 || teb_ptr == 0 {
         return NtStatus::INVALID_PARAMETER;
     }
-    let mut ctx = [0u8; CONTEXT_RIP + 8];
+    let mut ctx = [0u8; super::context::INTEGER_PART];
     if call.process.read(ctx_ptr, &mut ctx).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
-    let word = |off: usize| u64::from_le_bytes(ctx[off..off + 8].try_into().unwrap_or([0; 8]));
-    let mut regs = UserRegs::default();
-    for (i, r) in regs.gpr.iter_mut().enumerate() {
-        *r = word(CONTEXT_GPR + 8 * i);
-    }
-    regs.rip = word(CONTEXT_RIP);
-    regs.rflags = u64::from(u32::from_le_bytes(
-        ctx[CONTEXT_EFLAGS..CONTEXT_EFLAGS + 4].try_into().unwrap_or([0; 4]),
-    ));
+    let regs = super::context::from_bytes(&ctx);
     // INITIAL_TEB { OldStackBase, OldStackLimit, StackBase, StackLimit, StackAllocationBase }
     let stack_base = tri!(call.read_u64(teb_ptr + 16));
     let stack_limit = tri!(call.read_u64(teb_ptr + 24));
@@ -973,14 +1039,10 @@ fn image_section(call: &Call<'_>, file: u64) -> Result<section::Section, NtStatu
     if entry.access & file::FILE_READ_DATA == 0 {
         return Err(NtStatus::ACCESS_DENIED);
     }
-    let size = file::with_fs(|fs| fs.node(f.node).map_or(0, |n| n.size()));
-    let len = usize::try_from(size).map_err(|_| NtStatus::SECTION_TOO_BIG)?;
-    let mut data = Vec::new();
-    data.try_reserve_exact(len).map_err(|_| NtStatus::NO_MEMORY)?;
-    data.resize(len, 0);
-    let n = file::with_fs(|fs| fs.read(f.node, 0, &mut data)).map_err(file::fs_status)?;
-    data.truncate(n);
-    section::Section::new_image(&data)
+    let data = file::read_all(f.node)?;
+    let mut section = section::Section::new_image(&data)?;
+    section.file_name = Some(file::nt_path(f.node)?);
+    Ok(section)
 }
 
 fn finish_create_section(

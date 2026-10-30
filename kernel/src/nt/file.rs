@@ -85,15 +85,55 @@ pub fn init() -> Result<(), NtStatus> {
     Ok(())
 }
 
-/// Adds a boot module as a read-only file `C:\\gala\\<name>`.
-pub fn add_boot_file(name: &str, data: &'static [u8]) -> Result<(), NtStatus> {
-    let gala = wide("gala")?;
+/// The device path of the volume.
+pub const VOLUME_DEVICE: &str = "\\Device\\HarddiskVolume1";
+
+/// Adds a boot module as a read-only file `C:\\<directory>\\<name>`; the
+/// directory (`/`-separated, created if needed) defaults to `gala`.
+pub fn add_boot_file(directory: &str, name: &str, data: &'static [u8]) -> Result<(), NtStatus> {
+    let directory = if directory.is_empty() { "gala" } else { directory };
+    let mut parts: Vec<Vec<u16>> = Vec::new();
+    for p in directory.split(['/', '\\']).filter(|p| !p.is_empty()) {
+        parts.try_push(wide(p)?).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    let mut refs: Vec<&[u16]> = Vec::new();
+    for p in &parts {
+        refs.try_push(p).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
     let name = wide(name)?;
     with_fs(|fs| {
-        let dir = fs.resolve(ramfs::ROOT, &[&gala]).map_err(fs_status)?;
-        fs.add_static_file(dir, &name, data, time::system_time()).map_err(fs_status)?;
+        let now = time::system_time();
+        let dir = fs.mkdir_all(&refs, now).map_err(fs_status)?;
+        fs.add_static_file(dir, &name, data, now).map_err(fs_status)?;
         Ok(())
     })
+}
+
+/// The NT path (`\\Device\\HarddiskVolume1\\...`) of `node`.
+pub fn nt_path(node: NodeId) -> Result<Vec<u16>, NtStatus> {
+    let path = with_fs(|fs| fs.path_of(node)).map_err(fs_status)?;
+    let mut out = wide(VOLUME_DEVICE)?;
+    out.try_extend_from_slice(&path).map_err(|_| NtStatus::NO_MEMORY)?;
+    Ok(out)
+}
+
+/// The node at `path` (`\\`-separated, from the volume root).
+pub fn lookup(path: &str) -> Result<NodeId, NtStatus> {
+    let wide_path = wide(path)?;
+    let parts = components(&wide_path, false)?;
+    with_fs(|fs| fs.resolve(ramfs::ROOT, &parts)).map_err(fs_status)
+}
+
+/// The whole contents of file `node`.
+pub fn read_all(node: NodeId) -> Result<Vec<u8>, NtStatus> {
+    let size = with_fs(|fs| fs.node(node).map_or(0, ramfs::Node::size));
+    let len = usize::try_from(size).map_err(|_| NtStatus::NO_MEMORY)?;
+    let mut data = Vec::new();
+    data.try_reserve_exact(len).map_err(|_| NtStatus::NO_MEMORY)?;
+    data.resize(len, 0);
+    let n = with_fs(|fs| fs.read(node, 0, &mut data)).map_err(fs_status)?;
+    data.truncate(n);
+    Ok(data)
 }
 
 pub fn fs_status(e: FsError) -> NtStatus {

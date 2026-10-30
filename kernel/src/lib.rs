@@ -95,7 +95,7 @@ pub fn kernel_main() -> ! {
     info!("sched: boot thread {} running, idle thread started", sched::current());
     nt::init();
     for module in info.modules.iter() {
-        if let Err(e) = nt::file::add_boot_file(module.file_name(), module.data) {
+        if let Err(e) = nt::file::add_boot_file(module.cmdline, module.file_name(), module.data) {
             warn!("fs: cannot add {}: {e:?}", module.path);
         }
     }

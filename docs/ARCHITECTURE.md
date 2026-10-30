@@ -203,6 +203,17 @@ CommandLine (`C:\gala\<name>`), current directory `C:\gala\` with an
 open directory handle (FILE_TRAVERSE | SYNCHRONIZE), DllPath, WindowTitle
 and an environment block (SystemRoot, Path, ...) with EnvironmentSize.
 
+**ntdll** (`nt::ntdll`): if `C:\Windows\System32\ntdll.dll` exists (boot
+modules can name a target directory in their module string), it is loaded
+once as an image section and mapped into every new process. The initial
+thread then starts at its `LdrInitializeThunk` export with rcx = a CONTEXT
+(`nt::context`) at the top of the stack describing the real start (entry
+point, rcx = PEB) and rdx = the ntdll base; ntdll resumes it with
+NtContinue, which returns through IRETQ (`syscall::continue_with`) because
+SYSRET cannot restore rcx/r11. Without an ntdll, threads start at the entry
+point directly. MemoryMappedFilenameInformation reports the NT path of the
+file behind an image view or the executable.
+
 **Virtual memory**: `nt::vad::Vad` tracks reservations (64 KiB aligned)
 as run-length lists of per-page state (committed + protection), so query
 regions fall out directly and huge reservations are cheap. Committed pages

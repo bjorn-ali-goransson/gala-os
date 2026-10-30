@@ -365,6 +365,26 @@ impl RamFs {
         }
     }
 
+    /// The full path of `id` (`\\a\\b`; `\\` for the root).
+    pub fn path_of(&self, id: NodeId) -> Result<Vec<u16>, FsError> {
+        let mut chain = Vec::new();
+        let mut at = id;
+        while at != ROOT {
+            chain.try_push(at).map_err(|_| FsError::NoMemory)?;
+            at = self.node(at).ok_or(FsError::NotFound)?.parent;
+        }
+        let mut out = Vec::new();
+        if chain.is_empty() {
+            out.try_push(u16::from(b'\\')).map_err(|_| FsError::NoMemory)?;
+        }
+        for &n in chain.iter().rev() {
+            out.try_push(u16::from(b'\\')).map_err(|_| FsError::NoMemory)?;
+            let name = &self.node(n).ok_or(FsError::NotFound)?.name;
+            out.try_extend_from_slice(name).map_err(|_| FsError::NoMemory)?;
+        }
+        Ok(out)
+    }
+
     /// The entries of directory `dir` in directory order.
     pub fn list(&self, dir: NodeId) -> Result<Vec<NodeId>, FsError> {
         let mut out = Vec::new();
@@ -622,6 +642,16 @@ mod tests {
         let id = f.mkdir_all(&[&a, &b], 1).unwrap();
         assert_eq!(f.mkdir_all(&[&a, &b], 1).unwrap(), id);
         assert_eq!(f.resolve(ROOT, &[&a, &b]), Ok(id));
+    }
+
+    #[test]
+    fn paths_of_nodes() {
+        let mut f = fs();
+        let d = f.create(ROOT, &w("Windows"), true, 1).unwrap();
+        let s = f.create(d, &w("System32"), true, 1).unwrap();
+        let n = f.create(s, &w("ntdll.dll"), false, 1).unwrap();
+        assert_eq!(f.path_of(n).unwrap(), w("\\Windows\\System32\\ntdll.dll"));
+        assert_eq!(f.path_of(ROOT).unwrap(), w("\\"));
     }
 
     #[test]

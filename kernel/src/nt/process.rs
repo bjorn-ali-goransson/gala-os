@@ -35,6 +35,8 @@ pub struct Process {
     exit_status: IrqMutex<Option<NtStatus>>,
     /// Signaled when the process has ended.
     pub dispatcher: Dispatcher,
+    /// The executable's mapping: (base, size).
+    pub image: (u64, u64),
 }
 
 impl fmt::Debug for Process {
@@ -373,16 +375,21 @@ pub fn spawn_from_pe(
         threads: IrqMutex::new(Vec::new()),
         exit_status: IrqMutex::new(None),
         dispatcher: Dispatcher::new(0),
+        image: (base, u64::from(image.size_of_image)),
     })?;
     PROCESSES.lock().try_push(process.clone())?;
 
     // Main thread: starts at the entry point with rcx = PEB, and rsp as if
-    // called (rsp % 16 == 8, 32-byte shadow area above the null return).
+    // called (rsp % 16 == 8, 32-byte shadow area above the null return);
+    // with an ntdll, at its LdrInitializeThunk with that as the context.
     let mut gpr = [0u64; 16];
     gpr[1] = peb_addr;
     gpr[4] = layout::STACK_TOP - 0x28;
-    let regs = UserRegs { gpr, rip: base + u64::from(image.entry_rva), rflags: 0 };
-    let main = match thread::create(&process, regs, (layout::STACK_TOP, stack_bottom), false) {
+    let start = UserRegs { gpr, rip: base + u64::from(image.entry_rva), rflags: 0 };
+    let started = through_ntdll(&process, &start).and_then(|regs| {
+        thread::create(&process, regs, (layout::STACK_TOP, stack_bottom), false).map(|t| (t, regs))
+    });
+    let (main, regs) = match started {
         Ok(t) => t,
         Err(_) => {
             PROCESSES.lock().retain(|p| !KArc::ptr_eq(p, &process));
@@ -391,6 +398,33 @@ pub fn spawn_from_pe(
     };
     info!("process {} (pid {}): starting at {:#x}", name, id, regs.rip);
     Ok((process, main))
+}
+
+/// The initial registers: `start` itself, or, if there is a system ntdll,
+/// its LdrInitializeThunk(rcx = &CONTEXT of `start`, rdx = ntdll base) with
+/// the CONTEXT at the top of the stack. The ntdll view is mapped here.
+fn through_ntdll(process: &Process, start: &UserRegs) -> Result<UserRegs, NtStatus> {
+    let Some(ntdll) = super::ntdll::get() else { return Ok(*start) };
+    let view = super::section::map_view(
+        process,
+        &ntdll.section,
+        0,
+        0,
+        0,
+        vad::PAGE_EXECUTE_WRITECOPY,
+        false,
+    )?;
+    let mut entry = *start;
+    let context_addr = (layout::STACK_TOP - super::context::SIZE as u64) & !0xf;
+    entry.gpr[4] = context_addr - 0x28;
+    process
+        .write(context_addr, &super::context::to_bytes(&entry))
+        .map_err(|_| NtStatus::NO_MEMORY)?;
+    let mut gpr = [0u64; 16];
+    gpr[1] = context_addr;
+    gpr[2] = view.base;
+    gpr[4] = entry.gpr[4] - 0x30; // call-like alignment, shadow space
+    Ok(UserRegs { gpr, rip: view.base + u64::from(ntdll.thunk_rva), rflags: 0 })
 }
 
 /// Ends `process` with `status`: other threads are asked to terminate, and
