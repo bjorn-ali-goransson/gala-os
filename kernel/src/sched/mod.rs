@@ -40,6 +40,11 @@ impl ThreadId {
     pub fn as_usize(self) -> usize {
         self.0
     }
+
+    /// The id whose `as_usize` is `raw` (for ids kept in atomics).
+    pub fn from_raw(raw: usize) -> Self {
+        Self(raw)
+    }
 }
 
 impl fmt::Display for ThreadId {

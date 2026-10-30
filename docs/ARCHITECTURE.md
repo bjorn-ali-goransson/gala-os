@@ -489,6 +489,7 @@ from the public documentation of each function (clean room):
 | ntdll.dll | `user/testntdll` | `testntdll.dll` | `C:\Windows\System32` |
 | kernel32.dll | `user/kernel32` | `testkernel32.dll` | `C:\Windows\System32` |
 | bcryptprimitives.dll | `user/bcryptprimitives` | `testbcryptprimitives.dll` | `C:\Windows\System32` |
+| ws2_32.dll | `user/ws2_32` | `testws2_32.dll` | `C:\Windows\System32` |
 
 (Exported under other names so that `user/bin`, which also runs on
 Windows, never shadows the system's DLLs.)
@@ -560,7 +561,8 @@ does a requester while it waits.
 
 ## Networking
 
-N1a (ROADMAP). Layers, bottom up:
+Layers, bottom up (N1a: the card and TCP/IP; N1b: sockets for user mode).
+
 - `arch::pci`: configuration space through ports 0xcf8/0xcfc, brute-force
   enumeration (bus 0-255, functions 1-7 only for multifunction devices).
   The firmware (SeaBIOS or OVMF) has assigned the BARs; we only turn on
@@ -577,19 +579,106 @@ N1a (ROADMAP). Layers, bottom up:
   the 10-byte legacy header in front of every frame (no offloads). It is a
   smoltcp `Device`; a received frame is copied out and its slot reposted at
   once, a sent frame is copied into a free transmit slot (counted as
-  dropped when none is free; TCP retransmits). Counters: frames received,
-  sent, dropped, logged by `net_echo`.
-- `net`: smoltcp with 10.0.2.15/24 and gateway 10.0.2.2 (QEMU's user
-  network). Today only the `net_echo` flag uses it, on the boot thread,
-  polling with 1 ms sleeps. N1b moves the interface and socket set into a
-  `net` kernel thread (woken by a timer and by socket requests) and puts
-  the AFD device on top.
+  dropped when none is free; TCP retransmits).
+- `net::loopback`: a smoltcp `Device` (medium IP, MTU 16 KiB) whose
+  transmitted packets come back as received ones, from a fixed ring of
+  buffers. 127.0.0.1/8 lives on its own interface: smoltcp has no
+  internal loopback, and a system without a card still needs it.
+- `net::stack` (N1b): two interfaces, `lo` (always) and `eth` (when a card
+  was found; 10.0.2.15/24, gateway 10.0.2.2, QEMU's user network), each
+  with its own smoltcp socket set, all under one `IrqMutex` (`STACK`).
+  A `net` kernel thread polls both: every millisecond while a card exists
+  (no device interrupts yet), otherwise only when smoltcp's timers ask or
+  when kicked (`net::kick`, after every socket call that queued
+  something). After each poll it compares every socket's readiness with
+  the previous poll and calls the notify hook with the socket's token for
+  each change; `nt::afd` uses it to signal the endpoint (so blocked
+  callers re-check).
+- `net::tcp` (N1b), the kernel's socket API, independent of NT:
+  `listen(local, backlog)`, `accept`, `connect(remote)`, `send`, `recv`,
+  `shutdown`, `close`, `local`/`remote` addresses, readiness. Sockets are
+  addressed by `SocketId` (interface + smoltcp handle + generation). A
+  listener bound to 0.0.0.0 listens on both interfaces. smoltcp has no
+  accept queue (a listening socket *becomes* the connection), so a
+  listener keeps `backlog` (1-8) listening sockets per interface; when one
+  is established it moves to the listener's ready queue and a fresh one
+  replaces it. Port 0 gets an ephemeral port (49152-65535, as Windows).
+  Closing is graceful: the socket sends FIN and stays in the set until it
+  is closed or in TIME-WAIT, then it is removed and its buffers freed
+  (`reap` in the poll loop). Socket buffers are 64 KiB each way, allocated
+  fallibly by us; smoltcp's `alloc` feature is on only so that a socket
+  can own its buffers (`ManagedSlice::Owned`); the socket sets are
+  pre-filled to a fixed capacity, so smoltcp never grows them.
+  Errors: a connection attempt answered by RST is refused
+  (STATUS_CONNECTION_REFUSED), an established one reset by the peer is
+  STATUS_CONNECTION_RESET (TODO: smoltcp ends a reset and a FIN both in
+  CLOSED, so a receive on a reset connection reports end of stream).
+  Memory: every listening socket owns full buffers (128 KiB), so a
+  listener on 0.0.0.0 with backlog 5 holds 1.25 MiB; fine for now, worth
+  shrinking (fewer listening sockets, smaller buffers) when servers with
+  many listeners come. `net: ...` at the end of every boot logs frames,
+  loopback packets, polls and the sockets still open (0 after programs
+  that closed theirs).
 
-The boot test `net_echo` (xtask `NET_SCENARIOS`): QEMU gets
-`-netdev user,hostfwd=tcp:127.0.0.1:<free port>-:7` and a virtio-net card
-(every other VM gets `-nic none`); once the log shows
-`net: echo listening on port 7`, xtask's `net_client` sends 64 KiB while
-reading the echo, half-closes, checks every byte and appends
+### AFD: sockets for Windows programs (N1b)
+
+On Windows, a SOCKET is a handle to a file object of the AFD driver
+(`\Device\Afd\Endpoint`), created by NtCreateFile with an extended
+attribute named `AfdOpenPacketXX`, and driven by NtDeviceIoControlFile
+(0x07). gala's `nt::afd` is that driver: `\Device\Afd` is a device object
+in the namespace; opening anything below it creates an endpoint
+(`ObjectBody::Socket`, reported as type "File"). Without an open packet
+the endpoint is a helper handle (what libuv/wepoll open for
+IOCTL_AFD_POLL); with one, its transport name (`\Device\Tcp`) picks TCP
+(`\Device\Udp` and raw sockets: STATUS_NOT_SUPPORTED, ledger).
+
+IOCTLs (code = 0x12000 | function << 2 | method):
+
+| Code | Function | Layout source |
+|---|---|---|
+| 0x12003 | BIND: `{u32 share; sockaddr}`, returns the bound sockaddr | Wine `include/wine/afd.h` (verified by Wine's tests on Windows) |
+| 0x12007 | CONNECT: `{u8 use_san; u32 root; u32 unknown; TRANSPORT_ADDRESS}` | ReactOS `afd/shared.h`, to be verified |
+| 0x1200b | LISTEN: `{i32 unknown1; i32 backlog; i32 unknown2}` | Wine |
+| 0x1200c | WAIT_FOR_LISTEN: returns `{u32 sequence; TRANSPORT_ADDRESS}` of a pending connection | ReactOS, to be verified |
+| 0x12010 | ACCEPT (on the listener): `{u32 use_san; u32 sequence; HANDLE accept_endpoint}` | ReactOS, to be verified |
+| 0x12017 | RECV: `{WSABUF *buffers; u32 count; u32 afd_flags; u32 tdi_flags}` | Wine (same as ReactOS) |
+| 0x1201f | SEND: same layout as RECV | ReactOS, to be verified |
+| 0x1202b | DISCONNECT: `{u32 type (1 send, 2 receive, 4 abort); i64 timeout}` | ReactOS, to be verified |
+| 0x1202f | GETSOCKNAME: returns the local sockaddr | Wine |
+| 0x12033 | GET_PEER_NAME: returns the remote sockaddr | ReactOS, to be verified |
+
+TRANSPORT_ADDRESS (TDI): `{i32 count = 1; u16 length = 14; u16 type = 2;
+u16 port (network order); u32 address; u8 zero[8]}`. Only IPv4 for now.
+
+Blocking: an operation that cannot finish yet clears the endpoint's
+signal, re-checks, and waits on the endpoint with the dispatcher's
+`wait_for` (so thread termination ends the wait); the notify hook sets the
+signal. Every operation completes before NtDeviceIoControlFile returns
+(it writes the IO_STATUS_BLOCK and sets the optional event), even on
+handles opened for asynchronous I/O, where Windows may return
+STATUS_PENDING. Overlapped socket I/O and completion ports (what Go's
+`net` package uses) are N1c. Closing the last handle closes the socket
+gracefully (a listener drops its pending connections).
+
+### ws2_32.dll
+
+`user/ws2_32` is gala's ws2_32 (built like kernel32): the BSD-style and
+WSA functions on top of ntdll's NtCreateFile/NtDeviceIoControlFile, with
+NTSTATUS mapped to WSA error codes in the thread's last-error value
+(WSAGetLastError is GetLastError, as on Windows). SOCKET values are the
+endpoint handles. mswsock.dll (AcceptEx, ConnectEx, TransmitFile) comes
+with overlapped I/O in N1c; Go asks ws2_32 for AcceptEx through
+WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER), so it can be served there.
+
+### Tests
+
+`net_echo` (kernel only: the flag serves one connection on port 7 through
+`net::tcp`) and `winsock_test` (a Windows program: loopback checks, then,
+with `serve`, an echo server on port 7). Both are in xtask's
+`NET_SCENARIOS`: QEMU gets `-netdev user,hostfwd=tcp:127.0.0.1:<free
+port>-:7` and a virtio-net card (every other VM gets `-nic none`); once the
+log shows the scenario's "listening" line, xtask's `net_client` sends 64 KiB
+while reading the echo, half-closes, checks every byte and appends
 `xtask: net client: echo ok` (or the error) to the serial log, which the
 scenario expects.
 
@@ -599,7 +688,9 @@ suspension/context of threads running on other CPUs, ranged (invlpg)
 shootdowns and PCIDs (ROADMAP S4), a real ntdll and
 kernel32 (gala runs test stand-ins), process creation from user mode,
 security, registry, storage devices, interrupts for devices (virtio-net
-polls), sockets for user mode (N1b), bindgen-generated
+polls), overlapped socket I/O and completion ports (N1c), UDP, IPv6,
+select/IOCTL_AFD_POLL, non-blocking sockets, telling a reset from a FIN
+on receive, bindgen-generated
 layouts, ACPI (MADT/HPET), reclaiming bootloader memory. Observability
 plans: `docs/OBSERVABILITY.md`.
 Bootloader-reclaimable memory must not be reused until the boot info that

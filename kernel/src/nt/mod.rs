@@ -1,5 +1,6 @@
 //! NT personality: the Windows user-mode ABI on top of the kernel core.
 
+pub mod afd;
 pub mod context;
 pub mod file;
 pub mod kuser;
@@ -28,6 +29,9 @@ pub fn init() {
     }
     if let Err(e) = file::init() {
         panic!("file system: {e:?}");
+    }
+    if let Err(e) = afd::init() {
+        panic!("AFD: {e:?}");
     }
     if let Err(e) = timer::init() {
         panic!("timers: {e:?}");

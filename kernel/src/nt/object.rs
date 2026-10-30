@@ -326,6 +326,10 @@ pub enum ObjectBody {
     Volume,
     File(super::file::FileObject),
     Process(KArc<super::process::Process>),
+    /// `\Device\Afd`: opening a name below it creates a socket endpoint.
+    AfdDevice,
+    /// An AFD socket endpoint (a SOCKET is a handle to one).
+    Socket(super::afd::Endpoint),
 }
 
 /// Where a named object lives in the namespace.
@@ -380,6 +384,8 @@ impl KObject {
             ObjectBody::Volume => "Device",
             ObjectBody::File(_) => "File",
             ObjectBody::Process(_) => "Process",
+            ObjectBody::AfdDevice => "Device",
+            ObjectBody::Socket(_) => "File",
         }
     }
 
@@ -408,12 +414,14 @@ impl KObject {
             ObjectBody::Thread(t) => Some(&t.dispatcher),
             ObjectBody::Process(p) => Some(&p.dispatcher),
             ObjectBody::File(f) => Some(&f.dispatcher),
+            ObjectBody::Socket(e) => Some(&e.dispatcher),
             ObjectBody::ConsoleInput
             | ObjectBody::ConsoleOutput
             | ObjectBody::Directory(_)
             | ObjectBody::SymbolicLink(_)
             | ObjectBody::Section(_)
-            | ObjectBody::Volume => None,
+            | ObjectBody::Volume
+            | ObjectBody::AfdDevice => None,
         }
     }
 
@@ -428,7 +436,10 @@ impl KObject {
             ObjectBody::Directory(_) => DIRECTORY_MAPPING,
             ObjectBody::Thread(_) => THREAD_MAPPING,
             ObjectBody::Section(_) => SECTION_MAPPING,
-            ObjectBody::Volume | ObjectBody::File(_) => FILE_MAPPING,
+            ObjectBody::Volume
+            | ObjectBody::File(_)
+            | ObjectBody::AfdDevice
+            | ObjectBody::Socket(_) => FILE_MAPPING,
             ObjectBody::Process(_) => PROCESS_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,

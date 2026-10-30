@@ -40,6 +40,8 @@ const USER_DLLS: &[Dll] = &[
         file: "bcryptprimitives.dll",
         exported_as: "testbcryptprimitives.dll",
     },
+    // gala's ws2_32.dll (Winsock on AFD).
+    Dll { package: "ws2_32", file: "ws2_32.dll", exported_as: "testws2_32.dll" },
     // Built as ntdll.dll (its export directory says so); exported under
     // another name so user/bin never holds a file called ntdll.dll.
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
@@ -87,6 +89,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("prng_test", "ntdll.dll", "Windows/System32"),
     ("prng_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("winsock_test", "ntdll.dll", "Windows/System32"),
+    ("winsock_test", "kernel32.dll", "Windows/System32"),
+    ("winsock_test", "ws2_32.dll", "Windows/System32"),
     ("go_hello", "ntdll.dll", "Windows/System32"),
     ("go_hello", "kernel32.dll", "Windows/System32"),
     ("go_hello", "bcryptprimitives.dll", "Windows/System32"),
@@ -157,6 +162,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_misc_test",
     "prng_test",
     "kernel32_env_test",
+    "winsock_test",
     "kernel32_file_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
@@ -483,11 +489,18 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
 
 /// Scenarios that get a virtio-net card on QEMU's user-mode network, with
-/// host port `<free port>` forwarded to the guest's TCP port 7.
-const NET_SCENARIOS: &[&str] = &["net_echo"];
+/// host port `<free port>` forwarded to the guest's TCP port 7, and the
+/// serial line after which the guest accepts connections there (xtask's
+/// `net_client` then connects).
+const NET_SCENARIOS: &[(&str, &str)] = &[
+    ("net_echo", "net: echo listening on port 7"),
+    ("winsock_test", "winsock_test: listening on port 7"),
+];
 
-/// The serial line after which the guest accepts connections on port 7.
-const NET_LISTENING: &str = "net: echo listening on port 7";
+/// The "listening" marker of a NET_SCENARIOS entry.
+fn net_marker(name: &str) -> Option<&'static str> {
+    NET_SCENARIOS.iter().find(|(n, _)| *n == name).map(|(_, m)| *m)
+}
 
 /// Bytes the client sends through the echo server.
 const NET_ECHO_BYTES: usize = 65536;
@@ -592,6 +605,19 @@ const SCENARIOS: &[Scenario] = &[
             "net: link up, 10.0.2.15/24",
             "net_echo: echoed 65536 bytes",
             "xtask: net client: echo ok",
+        ],
+    },
+    Scenario {
+        // N1b: Winsock over gala's ws2_32 and AFD: loopback checks, then
+        // (`serve`) an echo server on port 7 for xtask's client.
+        name: "winsock_test",
+        cmdline: "qemu_exit run=winsock_test.exe args=serve",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "winsock_test: echoed 65536 bytes",
+            "xtask: net client: echo ok",
+            "winsock_test: ok",
+            "exited with status 0x00000000",
         ],
     },
     Scenario {
@@ -976,6 +1002,7 @@ fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
     if s.exit_status != QEMU_EXIT_SUCCESS
         || scenario_boot(s.name) != Boot::Bios
         || s.expect.iter().any(|e| e.contains("pid "))
+        || net_marker(s.name).is_some()
     {
         return None;
     }
@@ -1252,7 +1279,7 @@ fn run_vm(
     iso: &Path,
     boot: Boot,
     timeout: Duration,
-    net: bool,
+    net: Option<&'static str>,
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let log = iso.with_extension("serial.log");
     let _ = fs::remove_file(&log);
@@ -1269,7 +1296,8 @@ fn run_vm(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let port = if net { Some(free_port()?) } else { None };
+    let port = if net.is_some() { Some(free_port()?) } else { None };
+    let marker = net.unwrap_or_default();
     if let Some(port) = port {
         add_net(&mut cmd, port);
     }
@@ -1282,9 +1310,7 @@ fn run_vm(
             break Some(status);
         }
         if let Some(port) = port.filter(|_| client.is_none())
-            && fs::read(&log).is_ok_and(|b| {
-                b.windows(NET_LISTENING.len()).any(|w| w == NET_LISTENING.as_bytes())
-            })
+            && fs::read(&log).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker.as_bytes()))
         {
             client = Some(thread::spawn(move || net_client(port)));
         }
@@ -1416,7 +1442,7 @@ fn bench_results(text: &str) -> Vec<(String, u64)> {
 fn bench(release: bool, windows: Option<&Path>) -> Result {
     build_kernel(release)?;
     let iso = make_iso(release, "bench", "qemu_exit noscreen run=bench.exe", &[])?;
-    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, false)?;
+    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, None)?;
     if status.and_then(|s| s.code()) != Some(QEMU_EXIT_SUCCESS) || !serial.contains("bench: done") {
         return Err(format!(
             "bench did not finish; see {}",
@@ -1494,7 +1520,10 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         }
     };
     let boot = scenario_boot(scenarios[0].name);
-    let net = matches!(vm, Vm::Single(s) if NET_SCENARIOS.contains(&s.name));
+    let net = match vm {
+        Vm::Single(s) => net_marker(s.name),
+        Vm::Batch(_) => None,
+    };
     let (status, serial, time) = match run_vm(iso, boot, timeout, net) {
         Ok(r) => r,
         Err(e) => {
@@ -1553,12 +1582,8 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
 
 /// Boots a scenario alone (for reports), without printing its log.
 fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
-    let (status, serial, _) = run_vm(
-        iso,
-        scenario_boot(scenario.name),
-        BOOT_TEST_TIMEOUT,
-        NET_SCENARIOS.contains(&scenario.name),
-    )?;
+    let (status, serial, _) =
+        run_vm(iso, scenario_boot(scenario.name), BOOT_TEST_TIMEOUT, net_marker(scenario.name))?;
     judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial)
 }
 
@@ -1588,7 +1613,7 @@ fn screenshot(release: bool, args: &[String]) -> Result {
     build_kernel(release)?;
     // gala's system DLLs in System32 (programs may look only there), the
     // test DLLs next to the programs.
-    let system = ["ntdll.dll", "kernel32.dll", "bcryptprimitives.dll"];
+    let system = ["ntdll.dll", "kernel32.dll", "bcryptprimitives.dll", "ws2_32.dll"];
     let modules: Vec<(&str, &str)> = USER_DLLS
         .iter()
         .map(|d| (d.file, if system.contains(&d.file) { "Windows/System32" } else { "gala" }))
@@ -1604,14 +1629,25 @@ fn screenshot(release: bool, args: &[String]) -> Result {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // `net_echo`: a card, and the client a little after boot (BIOS boots
-    // reach the kernel in about a second).
-    if cmdline.contains(&"net_echo") {
+    // Echo servers (`net_echo`, winsock_test's `serve`): a card, and the
+    // client once the guest listens (no serial log here, so retry). Not
+    // before 3 s: until the guest's network is up, QEMU holds the host
+    // connection open and the client would wait out its read timeout;
+    // after that a closed port is refused at once.
+    if cmdline.iter().any(|w| *w == "net_echo" || w.contains("serve")) {
         let port = free_port()?;
         add_net(&mut cmd, port);
         thread::spawn(move || {
+            let mut result = Err(String::new());
             thread::sleep(Duration::from_millis(2500));
-            if let Err(e) = net_client(port) {
+            for _ in 0..20 {
+                thread::sleep(Duration::from_millis(500));
+                result = net_client(port);
+                if result.is_ok() {
+                    break;
+                }
+            }
+            if let Err(e) = result {
                 eprintln!("xtask: net client: {e}");
             }
         });

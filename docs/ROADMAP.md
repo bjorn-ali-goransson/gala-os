@@ -191,8 +191,9 @@ to set and to argue for. Current order and why:
    lot for kernel32/Go, which is cheaper to do before splitting it behind
    a platform seam. The ledger and event stream now make the Go bring-up
    data-driven.
-5. G3 (workable Go programs): done. N1a done; next N1b (AFD and
-   Winsock), N1c, then N2
+5. G3 (workable Go programs): done. N1a, N1b done; next N1c (Go
+   net/http: overlapped socket I/O with completion ports, AcceptEx,
+   WSAIoctl), then N2
    (Nginx). S4 is mostly covered (suspending a thread running on another
    CPU works: it parks at its next tick); per-CPU run queues wait for a
    benchmark that needs them.
@@ -222,6 +223,10 @@ N1. **Networking (next)**, re-planned 2026-10-30 from data: the official
    N1b. Sockets as Windows has them: the AFD device (`\Device\Afd`,
         what ws2_32/mswsock talk to through NtCreateFile and
         NtDeviceIoControlFile), and gala's ws2_32.dll and mswsock.dll.
+        **Done** (ws2_32; mswsock moves to N1c with AcceptEx): a `net`
+        kernel thread, a loopback interface, `net::tcp`, `nt::afd`,
+        NtDeviceIoControlFile, gala's ws2_32; `winsock_test` (a Windows
+        program) does loopback round trips and serves the host.
    N1c. A Go `net/http` server answering the host (xtask fetches a page
         from it): the first web server on gala.
 N2. **Nginx**: either our own 64-bit build of Nginx (cross-compiled with

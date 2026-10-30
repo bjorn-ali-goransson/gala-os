@@ -75,4 +75,13 @@ impl NtStatus {
     pub const INVALID_IMAGE_NOT_MZ: NtStatus = NtStatus(0xc000_012f);
     pub const INVALID_FILE_FOR_SECTION: NtStatus = NtStatus(0xc000_0020);
     pub const IMAGE_NOT_AT_BASE: NtStatus = NtStatus(0x4000_0003);
+    // Network (AFD) statuses.
+    pub const NOT_SUPPORTED: NtStatus = NtStatus(0xc000_00bb);
+    pub const INSUFFICIENT_RESOURCES: NtStatus = NtStatus(0xc000_009a);
+    pub const INVALID_CONNECTION: NtStatus = NtStatus(0xc000_0140);
+    pub const INVALID_ADDRESS_COMPONENT: NtStatus = NtStatus(0xc000_0207);
+    pub const ADDRESS_ALREADY_EXISTS: NtStatus = NtStatus(0xc000_020a);
+    pub const CONNECTION_RESET: NtStatus = NtStatus(0xc000_020d);
+    pub const CONNECTION_REFUSED: NtStatus = NtStatus(0xc000_0236);
+    pub const NETWORK_UNREACHABLE: NtStatus = NtStatus(0xc000_023c);
 }

@@ -110,6 +110,7 @@ pub fn kernel_main() -> ! {
         Err(e) => warn!("smp: cannot start the other CPUs: {e:?}"),
     }
     nt::init();
+    net::init();
     for module in info.modules.iter() {
         if let Err(e) = nt::file::add_boot_file(module.cmdline, module.file_name(), module.data) {
             warn!("fs: cannot add {}: {e:?}", module.path);
@@ -163,6 +164,7 @@ pub fn kernel_main() -> ! {
     if events::written() > 0 {
         info!("events: {} written to the debug console", events::written());
     }
+    net::log_stats();
     let (shootdowns, ipis) = arch::smp::flush_stats();
     info!(
         "stats: {shootdowns} TLB shootdowns ({ipis} IPIs), {} frames leaked by deferred frees",

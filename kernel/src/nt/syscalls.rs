@@ -32,6 +32,7 @@ use crate::sync::IrqMutex;
 
 pub const NT_WAIT_FOR_SINGLE_OBJECT: u32 = 0x0004;
 pub const NT_READ_FILE: u32 = 0x0006;
+pub const NT_DEVICE_IO_CONTROL_FILE: u32 = 0x0007;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -190,6 +191,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_QUERY_SYSTEM_TIME, "NtQuerySystemTime", 1, nt_query_system_time),
     (NT_WAIT_FOR_MULTIPLE_OBJECTS, "NtWaitForMultipleObjects", 5, nt_wait_for_multiple_objects),
     (NT_CLOSE, "NtClose", 1, nt_close),
+    (NT_DEVICE_IO_CONTROL_FILE, "NtDeviceIoControlFile", 10, nt_device_io_control_file),
     (NT_ALLOCATE_VIRTUAL_MEMORY, "NtAllocateVirtualMemory", 6, nt_allocate_virtual_memory),
     (NT_FREE_VIRTUAL_MEMORY, "NtFreeVirtualMemory", 4, nt_free_virtual_memory),
     (NT_QUERY_VIRTUAL_MEMORY, "NtQueryVirtualMemory", 6, nt_query_virtual_memory),
@@ -2189,13 +2191,43 @@ impl Call<'_> {
         Ok(file::FilePath { start: crate::fs::ramfs::ROOT, name: rest })
     }
 
+    /// Whether OBJECT_ATTRIBUTES name something below `\Device\Afd`.
+    fn names_afd(&self, attrs_ptr: u64) -> Result<bool, NtStatus> {
+        let Some((0, name, attributes)) = self.raw_object_attributes(attrs_ptr)? else {
+            return Ok(false);
+        };
+        let ci = attributes & OBJ_CASE_INSENSITIVE != 0;
+        Ok(namespace::lookup_parse(None, &name, ci)
+            .is_ok_and(|(device, _)| matches!(device.body, ObjectBody::AfdDevice)))
+    }
+
+    /// Reads NtCreateFile's EA buffer (at most 4 KiB).
+    fn ea_buffer(&self, ptr: u64, len: u64) -> Result<Vec<u8>, NtStatus> {
+        if ptr == 0 || len == 0 {
+            return Ok(Vec::new());
+        }
+        if len > 4096 {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        let mut ea = Vec::new();
+        ea.try_reserve_exact(len as usize).map_err(|_| NtStatus::NO_MEMORY)?;
+        ea.resize(len as usize, 0);
+        self.process.read(ptr, &mut ea).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+        Ok(ea)
+    }
+
     fn open_or_create(&self, r: OpenRequest) -> NtStatus {
-        let OpenRequest { out, access, attrs_ptr, iosb, share, disposition, options } = r;
-        let path = tri!(self.file_path(attrs_ptr));
+        let OpenRequest { out, access, attrs_ptr, iosb, share, disposition, options, ea } = r;
         let granted = super::object::FILE_MAPPING.map(access);
-        let created = tri!(file::create(&path, granted, share, disposition, options));
-        let information = created.information;
-        let entry = HandleEntry { object: created.object, access: granted, attributes: 0 };
+        let (object, information) = if tri!(self.names_afd(attrs_ptr)) {
+            let ea = tri!(self.ea_buffer(ea.0, ea.1));
+            (tri!(super::afd::open(&ea)), file::FILE_OPENED)
+        } else {
+            let path = tri!(self.file_path(attrs_ptr));
+            let created = tri!(file::create(&path, granted, share, disposition, options));
+            (created.object, created.information)
+        };
+        let entry = HandleEntry { object, access: granted, attributes: 0 };
         let Ok(handle) = self.process.handles.lock().insert(entry) else {
             return NtStatus::NO_MEMORY;
         };
@@ -2217,6 +2249,8 @@ struct OpenRequest {
     share: u32,
     disposition: u32,
     options: u32,
+    /// EaBuffer and EaLength (NtCreateFile only; the AFD open packet).
+    ea: (u64, u64),
 }
 
 /// NtCreateFile(*FileHandle, DesiredAccess, ObjectAttributes, *IoStatusBlock,
@@ -2227,6 +2261,7 @@ fn nt_create_file(call: &mut Call<'_>) -> NtStatus {
         (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));
     let (share, disposition, options) =
         (arg!(call, 6) as u32, arg!(call, 7) as u32, arg!(call, 8) as u32);
+    let ea = (arg!(call, 9), arg!(call, 10));
     call.open_or_create(OpenRequest {
         out,
         access,
@@ -2235,6 +2270,7 @@ fn nt_create_file(call: &mut Call<'_>) -> NtStatus {
         share,
         disposition,
         options,
+        ea,
     })
 }
 
@@ -2252,7 +2288,52 @@ fn nt_open_file(call: &mut Call<'_>) -> NtStatus {
         share,
         disposition: file::FILE_OPEN,
         options,
+        ea: (0, 0),
     })
+}
+
+/// NtDeviceIoControlFile(FileHandle, Event, ApcRoutine, ApcContext,
+///   *IoStatusBlock, IoControlCode, InputBuffer, InputBufferLength,
+///   OutputBuffer, OutputBufferLength). Only AFD endpoints have device
+/// controls so far. Requests complete before returning (see
+/// docs/ARCHITECTURE.md, "AFD"): the IO_STATUS_BLOCK is written and the
+/// event set on success.
+fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
+    let (handle, event, apc, iosb, code) =
+        (arg!(call, 0), arg!(call, 1), arg!(call, 2), arg!(call, 4), arg!(call, 5) as u32);
+    let (input, input_len, output, output_len) =
+        (arg!(call, 6), arg!(call, 7) as u32, arg!(call, 8), arg!(call, 9) as u32);
+    let entry = tri!(call.handle(Handle(handle)));
+    if !matches!(entry.object.body, ObjectBody::Socket(_)) {
+        super::ledger::record("NtDeviceIoControlFile", "device", u64::from(code));
+        return NtStatus::INVALID_DEVICE_REQUEST;
+    }
+    if apc != 0 {
+        // Completion APCs come with overlapped socket I/O (N1c).
+        super::ledger::record("NtDeviceIoControlFile", "apc", u64::from(code));
+    }
+    let event = match event {
+        0 => None,
+        h => Some(tri!(call.handle(Handle(h))).object),
+    };
+    if let Some(e) = &event {
+        super::wait::set_signal(e, 0);
+    }
+    let request = super::afd::Request {
+        process: &call.process,
+        object: &entry.object,
+        code,
+        input,
+        input_len,
+        output,
+        output_len,
+    };
+    let information = tri!(super::afd::ioctl(&request));
+    tri!(call.write_iosb(iosb, NtStatus::SUCCESS, information));
+    if let Some(e) = &event {
+        super::wait::set_signal(e, 1);
+    }
+    NtStatus::SUCCESS
 }
 
 /// ByteOffset values meaning "end of file" and "current position".

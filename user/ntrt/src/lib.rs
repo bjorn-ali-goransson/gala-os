@@ -70,6 +70,7 @@ stubs! {
     ntrt_nt_create_section = 0x004a;
     ntrt_nt_query_section = 0x0051;
     ntrt_nt_read_file = 0x0006;
+    ntrt_nt_device_io_control_file = 0x0007;
     ntrt_nt_query_information_file = 0x0011;
     ntrt_nt_set_information_file = 0x0027;
     ntrt_nt_open_file = 0x0033;

@@ -16,5 +16,5 @@ bench = false
 
 [dependencies]
 noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = ["size_16", "regular", "unicode-basic-latin", "unicode-specials"] }
-smoltcp = { version = "0.12", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-tcp"] }
+smoltcp = { version = "0.12", default-features = false, features = ["alloc", "medium-ethernet", "medium-ip", "proto-ipv4", "socket-tcp"] }
 spin = { version = "0.12.3", default-features = false, features = ["spin_mutex"] }

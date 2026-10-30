@@ -152,6 +152,11 @@ syscall_stubs! {
         h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
         buffer: *mut u8, length: u32, offset: *const i64, key: *const u32
     );
+    // Device controls (AFD sockets; long-stable x64 number).
+    NtDeviceIoControlFile = 0x07, fn(
+        h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
+        code: u32, input: *const u8, input_length: u32, output: *mut u8, output_length: u32
+    );
     NtQueryInformationFile = 0x11, fn(
         h: usize, iosb: *mut [usize; 2], buf: *mut u8, len: u32, class: u32
     );
