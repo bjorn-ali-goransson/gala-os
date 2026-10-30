@@ -134,6 +134,10 @@ S3. **SMP memory**: TLB shootdown IPIs when user mappings change while
    counters, wait/wake storms, unmapping under a running thread).
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
+O1. **Observability, first part** (docs/OBSERVABILITY.md 1, 2, 5): JSON
+   event stream on debugcon, the missing-features ledger merged by `xtask
+   report`, symbolized panic backtraces. Before G2, so running a real Go
+   binary produces a ranked work list.
 G1. **kernel32 shim, first part**: kernel32.dll on gala (console, last
    error, memory, events, sleep, time, LoadLibrary/GetProcAddress), DLL
    search in System32; `kernel32_test`.

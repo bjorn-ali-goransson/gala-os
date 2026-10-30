@@ -90,6 +90,9 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `qemu_exit` | report the result via isa-debug-exit instead of halting |
 | `selftest` | run in-kernel self-tests after boot |
 | `fault=ud`, `fault=pagefault` | provoke that exception (tests the handler) |
+| `run=<file>` | run that boot module as a user process |
+| `args=<percent-encoded>` | its command-line arguments |
+| `trace` | log every system call (arguments, status) |
 
 ## Physical memory
 
@@ -465,8 +468,10 @@ only so far. CPU indices are dense (0 = boot CPU), at most 64.
 
 ## Not done yet
 
-Imports/DLLs and relocation, SEH/exception dispatch, multi-threaded
-processes, KUSER_SHARED_DATA, bindgen-generated layouts, freeing processes,
-scheduling on the APs, ACPI (MADT/HPET), reclaiming bootloader memory.
+Scheduling on the APs and TLB shootdown (ROADMAP S2-S4), a real ntdll and
+kernel32 (gala runs test stand-ins), process creation from user mode,
+security, registry, storage and network devices, bindgen-generated
+layouts, ACPI (MADT/HPET), reclaiming bootloader memory. Observability
+plans: `docs/OBSERVABILITY.md`.
 Bootloader-reclaimable memory must not be reused until the boot info that
 lives there has been copied out.

@@ -2,7 +2,12 @@
 
 - Read `docs/PROJECT_BRIEF.md` and `docs/CLEAN_ROOM.md` first. The clean-room
   rules are mandatory: never use disassembly, decompiled code, or leaked
-  Windows source.
+  Windows source. Then `docs/WORKFLOW.md` (how a chunk of work is done,
+  pitfalls, where things are), `docs/ROADMAP.md` (status and agreed order)
+  and the sections of `docs/ARCHITECTURE.md` you touch.
+- Keep the docs current in the same commit as the code: ROADMAP (done/next),
+  ARCHITECTURE (design, invariants, TODOs), WORKFLOW (new conventions or
+  pitfalls). The next session only knows what is written down.
 - **Test first.** Every piece of work starts from a test program in
   `user/<feature>_test/` (a freestanding Windows .exe built on `user/ntrt`)
   whose expected results are those of real Windows. Write it first, add its
