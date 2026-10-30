@@ -60,6 +60,11 @@ stubs! {
     ntrt_nt_create_thread = 0x004e;
     ntrt_nt_resume_thread = 0x0052;
     ntrt_nt_terminate_thread = 0x0053;
+    ntrt_nt_map_view_of_section = 0x0028;
+    ntrt_nt_unmap_view_of_section = 0x002a;
+    ntrt_nt_open_section = 0x0037;
+    ntrt_nt_create_section = 0x004a;
+    ntrt_nt_query_section = 0x0051;
     ntrt_nt_write_file = 0x0008;
     ntrt_nt_close = 0x000f;
     ntrt_nt_allocate_virtual_memory = 0x0018;
@@ -155,6 +160,40 @@ unsafe extern "system" {
         buf: *mut u8,
         len: u32,
         ret: *mut u32,
+    ) -> NtStatus;
+    fn ntrt_nt_create_section(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        maximum_size: *const i64,
+        protect: u32,
+        allocation: u32,
+        file: Handle,
+    ) -> NtStatus;
+    fn ntrt_nt_open_section(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+    ) -> NtStatus;
+    fn ntrt_nt_map_view_of_section(
+        section: Handle,
+        process: Handle,
+        base: *mut usize,
+        zero_bits: usize,
+        commit_size: usize,
+        offset: *mut i64,
+        view_size: *mut usize,
+        inherit: u32,
+        allocation: u32,
+        protect: u32,
+    ) -> NtStatus;
+    fn ntrt_nt_unmap_view_of_section(process: Handle, base: usize) -> NtStatus;
+    fn ntrt_nt_query_section(
+        h: Handle,
+        class: u32,
+        buf: *mut u8,
+        len: usize,
+        ret: *mut usize,
     ) -> NtStatus;
     fn ntrt_nt_query_performance_counter(counter: *mut i64, frequency: *mut i64) -> NtStatus;
     fn ntrt_nt_query_system_time(time: *mut i64) -> NtStatus;
@@ -390,6 +429,78 @@ pub fn teb_field(offset: usize) -> usize {
         asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly, preserves_flags))
     };
     v
+}
+
+pub const SECTION_ALL_ACCESS: u32 = 0xf_001f;
+pub const SEC_COMMIT: u32 = 0x800_0000;
+pub const VIEW_SHARE: u32 = 1;
+
+/// NtCreateSection backed by the paging file. `size` None passes NULL.
+pub fn create_section(
+    attrs: Option<&ObjectAttributes>,
+    size: Option<i64>,
+    protect: u32,
+) -> (NtStatus, Handle) {
+    let mut h = Handle(0);
+    let s = size.unwrap_or(0);
+    let sp = if size.is_some() { &s as *const i64 } else { core::ptr::null() };
+    let a = attrs.map_or(core::ptr::null(), |a| a as *const ObjectAttributes);
+    // SAFETY: valid pointers or null.
+    let st = unsafe {
+        ntrt_nt_create_section(&mut h, SECTION_ALL_ACCESS, a, sp, protect, SEC_COMMIT, Handle(0))
+    };
+    (st, h)
+}
+
+pub fn open_section(attrs: &ObjectAttributes) -> (NtStatus, Handle) {
+    let mut h = Handle(0);
+    // SAFETY: valid pointers.
+    let st = unsafe { ntrt_nt_open_section(&mut h, SECTION_ALL_ACCESS, attrs) };
+    (st, h)
+}
+
+/// Maps a view anywhere; returns (status, base, view size).
+pub fn map_view(
+    section: Handle,
+    offset: i64,
+    size: usize,
+    protect: u32,
+) -> (NtStatus, usize, usize) {
+    let (mut base, mut view, mut off) = (0usize, size, offset);
+    // SAFETY: valid in/out pointers.
+    let st = unsafe {
+        ntrt_nt_map_view_of_section(
+            section,
+            CURRENT_PROCESS,
+            &mut base,
+            0,
+            0,
+            &mut off,
+            &mut view,
+            VIEW_SHARE,
+            0,
+            protect,
+        )
+    };
+    (st, base, view)
+}
+
+pub fn unmap_view(base: usize) -> NtStatus {
+    // SAFETY: the kernel validates the address.
+    unsafe { ntrt_nt_unmap_view_of_section(CURRENT_PROCESS, base) }
+}
+
+/// SectionBasicInformation: (status, allocation attributes, maximum size).
+pub fn query_section(h: Handle) -> (NtStatus, u32, u64) {
+    let mut b = [0u8; 24];
+    let mut ret = 0;
+    // SAFETY: 24-byte SECTION_BASIC_INFORMATION buffer.
+    let st = unsafe { ntrt_nt_query_section(h, 0, b.as_mut_ptr(), 24, &mut ret) };
+    (
+        st,
+        u32::from_le_bytes(b[8..12].try_into().unwrap()),
+        u64::from_le_bytes(b[16..24].try_into().unwrap()),
+    )
 }
 
 #[repr(C)]

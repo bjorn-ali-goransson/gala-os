@@ -19,6 +19,9 @@ const HUGE: u64 = 1 << 7;
 /// PAT bit in 4 KiB entries (same position as `HUGE` in higher levels).
 const PAT_4K: u64 = 1 << 7;
 const GLOBAL: u64 = 1 << 8;
+/// Software-available bit: the leaf maps a frame this address space does
+/// not own (a section page, a shared kernel page); never free it.
+const BORROWED: u64 = 1 << 9;
 /// PAT bit in 2 MiB / 1 GiB entries.
 const PAT_LARGE: u64 = 1 << 12;
 const NO_EXECUTE: u64 = 1 << 63;
@@ -57,6 +60,8 @@ pub struct PageFlags {
     pub user: bool,
     pub global: bool,
     pub cache: CacheMode,
+    /// The frame is owned elsewhere (see `BORROWED`).
+    pub borrowed: bool,
 }
 
 impl PageFlags {
@@ -67,6 +72,7 @@ impl PageFlags {
         user: false,
         global: true,
         cache: CacheMode::WriteBack,
+        borrowed: false,
     };
     pub const KERNEL_RW: PageFlags = PageFlags { writable: true, ..Self::KERNEL_RO };
     pub const KERNEL_RX: PageFlags = PageFlags { executable: true, ..Self::KERNEL_RO };
@@ -82,6 +88,9 @@ impl PageFlags {
         }
         if self.global {
             bits |= GLOBAL;
+        }
+        if self.borrowed {
+            bits |= BORROWED;
         }
         if !self.executable {
             bits |= NO_EXECUTE;
@@ -113,6 +122,7 @@ impl PageFlags {
             user: bits & USER != 0,
             global: bits & GLOBAL != 0,
             cache: CacheMode::from_index(index),
+            borrowed: bits & BORROWED != 0,
         }
     }
 }
@@ -367,13 +377,21 @@ impl<M: TableMemory> Mapper<M> {
         if !slot.is_present() {
             return Err(MapError::BadAddress);
         }
-        *slot = Entry(slot.addr() | flags.leaf_bits(false));
+        // Ownership is a property of the mapping, not of the protection.
+        let borrowed = slot.0 & BORROWED;
+        *slot = Entry(slot.addr() | flags.leaf_bits(false) | borrowed);
         Ok(())
     }
 
     /// Removes the 4 KiB mapping at `virt`, returning the frame it mapped.
     /// Page tables are not freed. The caller must flush the TLB.
     pub fn unmap_4k(&mut self, virt: u64) -> Option<Frame> {
+        self.unmap_4k_owned(virt).map(|(f, _)| f)
+    }
+
+    /// Like `unmap_4k`, also reporting whether the frame was owned (not
+    /// `borrowed`).
+    pub fn unmap_4k_owned(&mut self, virt: u64) -> Option<(Frame, bool)> {
         let mut table = self.root;
         for level in (2..=4).rev() {
             let entry = self.mem.table(table).0[index(virt, level)];
@@ -387,8 +405,9 @@ impl<M: TableMemory> Mapper<M> {
             return None;
         }
         let frame = Frame::containing(slot.addr());
+        let owned = slot.0 & BORROWED == 0;
         *slot = Entry::EMPTY;
-        Some(frame)
+        Some((frame, owned))
     }
 
     pub fn translate(&mut self, virt: u64) -> Option<Translation> {
@@ -485,7 +504,9 @@ impl<M: TableMemory> Mapper<M> {
                 continue;
             }
             if level == 1 || entry.is_huge() {
-                free_leaf(Frame::containing(entry.addr()));
+                if entry.0 & BORROWED == 0 {
+                    free_leaf(Frame::containing(entry.addr()));
+                }
             } else {
                 let child = Frame::containing(entry.addr());
                 self.free_level(child, level - 1, ENTRIES, free_table, free_leaf);
@@ -550,6 +571,7 @@ mod tests {
                     user: true,
                     global: false,
                     cache,
+                    borrowed: true,
                 };
                 assert_eq!(PageFlags::from_leaf_bits(flags.leaf_bits(large), large), flags);
             }
@@ -663,5 +685,22 @@ mod tests {
         assert_eq!(leaves, [5, 6]);
         // Two PDPT+PD+PT chains plus the root; kernel tables untouched.
         assert_eq!(tables_freed, 7);
+    }
+
+    #[test]
+    fn borrowed_frames_are_not_freed_and_survive_protection_changes() {
+        let (mut m, mut alloc) = setup();
+        let owned = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RW };
+        let borrowed = PageFlags { borrowed: true, ..owned };
+        m.map(0x40_0000, 0x5000, PageSize::Size4K, owned, &mut alloc).unwrap();
+        m.map(0x40_1000, 0x6000, PageSize::Size4K, borrowed, &mut alloc).unwrap();
+        m.update_flags_4k(0x40_1000, PageFlags { borrowed: false, writable: false, ..owned })
+            .unwrap();
+        assert!(m.translate(0x40_1000).unwrap().flags.borrowed, "kept across a protection change");
+        assert_eq!(m.unmap_4k_owned(0x40_1000), Some((Frame::from_number(6), false)));
+        m.map(0x40_1000, 0x6000, PageSize::Size4K, borrowed, &mut alloc).unwrap();
+        let mut leaves = Vec::new();
+        m.destroy(&mut |_| {}, &mut |f| leaves.push(f.number()));
+        assert_eq!(leaves, [5]);
     }
 }

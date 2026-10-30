@@ -102,6 +102,19 @@ pub const THREAD_MAPPING: GenericMapping = GenericMapping {
     all: THREAD_ALL_ACCESS,
 };
 
+pub const SECTION_QUERY: u32 = 0x0001;
+pub const SECTION_MAP_WRITE: u32 = 0x0002;
+pub const SECTION_MAP_READ: u32 = 0x0004;
+pub const SECTION_MAP_EXECUTE: u32 = 0x0008;
+pub const SECTION_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | 0x1f;
+
+pub const SECTION_MAPPING: GenericMapping = GenericMapping {
+    read: READ_CONTROL | SECTION_QUERY | SECTION_MAP_READ,
+    write: READ_CONTROL | SECTION_MAP_WRITE,
+    execute: READ_CONTROL | SECTION_MAP_EXECUTE,
+    all: SECTION_ALL_ACCESS,
+};
+
 pub const PROCESS_TERMINATE: u32 = 0x0001;
 pub const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
 pub const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
@@ -135,6 +148,7 @@ pub enum ObjectBody {
     Event(Event),
     Directory(Directory),
     Thread(super::thread::NtThread),
+    Section(super::section::Section),
     Process(KArc<super::process::Process>),
 }
 
@@ -181,6 +195,7 @@ impl KObject {
             ObjectBody::Event(_) => "Event",
             ObjectBody::Directory(_) => "Directory",
             ObjectBody::Thread(_) => "Thread",
+            ObjectBody::Section(_) => "Section",
             ObjectBody::Process(_) => "Process",
         }
     }
@@ -198,7 +213,10 @@ impl KObject {
             ObjectBody::Event(e) => Some(&e.dispatcher),
             ObjectBody::Thread(t) => Some(&t.dispatcher),
             ObjectBody::Process(p) => Some(&p.dispatcher),
-            ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput | ObjectBody::Directory(_) => None,
+            ObjectBody::ConsoleInput
+            | ObjectBody::ConsoleOutput
+            | ObjectBody::Directory(_)
+            | ObjectBody::Section(_) => None,
         }
     }
 
@@ -207,6 +225,7 @@ impl KObject {
             ObjectBody::Event(_) => EVENT_MAPPING,
             ObjectBody::Directory(_) => DIRECTORY_MAPPING,
             ObjectBody::Thread(_) => THREAD_MAPPING,
+            ObjectBody::Section(_) => SECTION_MAPPING,
             ObjectBody::Process(_) => PROCESS_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,

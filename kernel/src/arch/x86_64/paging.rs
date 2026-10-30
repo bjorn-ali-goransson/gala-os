@@ -275,12 +275,7 @@ pub type SharedUserSpace = crate::mm::heap::KArc<IrqMutex<UserSpace>>;
 /// page tables and every frame mapped in its lower half.
 pub struct UserSpace {
     mapper: Mapper<HhdmTables>,
-    /// Pages mapping frames this space does not own (`map_shared`); they
-    /// are unmapped, not freed, on drop.
-    shared: [Option<u64>; MAX_SHARED_PAGES],
 }
-
-const MAX_SHARED_PAGES: usize = 4;
 
 /// A kernel-owned page that is also mapped into user address spaces
 /// (e.g. KUSER_SHARED_DATA). The kernel writes it through the HHDM with
@@ -360,10 +355,12 @@ impl UserSpace {
     /// Unmaps a page and frees its frame. Returns whether it was mapped.
     pub fn unmap_page(&mut self, virt: u64) -> bool {
         let virt = virt / PAGE_SIZE * PAGE_SIZE;
-        match self.mapper.unmap_4k(virt) {
-            Some(frame) => {
+        match self.mapper.unmap_4k_owned(virt) {
+            Some((frame, owned)) => {
                 invlpg(virt);
-                let _ = crate::mm::free_frame(frame);
+                if owned {
+                    let _ = crate::mm::free_frame(frame);
+                }
                 true
             }
             None => false,
@@ -378,7 +375,7 @@ impl UserSpace {
         let mem = HhdmTables { offset: crate::mm::hhdm_offset() };
         let mapper =
             Mapper::new_sharing_kernel_half(mem, Frame::containing(kernel), &mut alloc_table)?;
-        Ok(Self { mapper, shared: [None; MAX_SHARED_PAGES] })
+        Ok(Self { mapper })
     }
 
     pub fn root(&self) -> u64 {
@@ -487,28 +484,44 @@ impl UserSpace {
         &mut self,
         virt: u64,
         page: &SharedPage,
+        flags: PageFlags,
+    ) -> Result<(), PagingError> {
+        self.map_borrowed(virt, page.frame(), flags)
+    }
+
+    /// Maps a frame owned elsewhere (section pages, shared pages) at
+    /// `virt`; it is never freed by this space.
+    pub fn map_borrowed(
+        &mut self,
+        virt: u64,
+        frame: Frame,
         mut flags: PageFlags,
     ) -> Result<(), PagingError> {
         use crate::mm::paging::PageSize;
-        let slot = self
-            .shared
-            .iter_mut()
-            .find(|s| s.is_none())
-            .ok_or(PagingError::Map(MapError::OutOfMemory))?;
         flags.user = true;
         flags.global = false;
-        self.mapper.map(virt, page.frame().start(), PageSize::Size4K, flags, &mut alloc_table)?;
-        *slot = Some(virt);
+        flags.borrowed = true;
+        self.mapper.map(
+            virt / PAGE_SIZE * PAGE_SIZE,
+            frame.start(),
+            PageSize::Size4K,
+            flags,
+            &mut alloc_table,
+        )?;
         Ok(())
+    }
+
+    /// Allocates a zeroed frame (for section pages backed on demand).
+    pub fn zeroed_frame() -> Option<Frame> {
+        let frame = crate::mm::allocate_frame()?;
+        // SAFETY: a freshly allocated frame, HHDM-mapped, owned by the caller.
+        unsafe { hhdm_ptr(frame.start()).write_bytes(0, PAGE_SIZE as usize) };
+        Some(frame)
     }
 }
 
 impl Drop for UserSpace {
     fn drop(&mut self) {
-        for virt in self.shared.iter().flatten() {
-            // Not ours to free.
-            let _ = self.mapper.unmap_4k(*virt);
-        }
         // The space must not be active on any CPU any more (see `activate`).
         let mem = HhdmTables { offset: crate::mm::hhdm_offset() };
         let dummy = Frame::from_number(0);

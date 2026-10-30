@@ -13,9 +13,12 @@ use super::object::{
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, SYNCHRONIZE, THREAD_ALL_ACCESS,
     THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME, THREAD_TERMINATE,
 };
+use super::object::{SECTION_MAP_EXECUTE, SECTION_MAP_READ, SECTION_MAP_WRITE, SECTION_QUERY};
 use super::process::{self, Process};
+use super::section;
 use super::status::NtStatus;
 use super::thread;
+use super::vad;
 use super::vm;
 use super::wait::{self, Dispatcher, Timeout};
 use crate::arch::syscall::{self, SyscallFrame, UserRegs};
@@ -25,6 +28,11 @@ use crate::mm::heap::TryVec;
 
 pub const NT_WAIT_FOR_SINGLE_OBJECT: u32 = 0x0004;
 pub const NT_WRITE_FILE: u32 = 0x0008;
+pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
+pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
+pub const NT_OPEN_SECTION: u32 = 0x0037;
+pub const NT_CREATE_SECTION: u32 = 0x004a;
+pub const NT_QUERY_SECTION: u32 = 0x0051;
 pub const NT_QUERY_INFORMATION_PROCESS: u32 = 0x0019;
 pub const NT_QUERY_INFORMATION_THREAD: u32 = 0x0025;
 pub const NT_CREATE_THREAD: u32 = 0x004e;
@@ -54,6 +62,11 @@ type Handler = fn(&mut Call<'_>) -> NtStatus;
 const TABLE: &[(u32, &str, Handler)] = &[
     (NT_WAIT_FOR_SINGLE_OBJECT, "NtWaitForSingleObject", nt_wait_for_single_object),
     (NT_WRITE_FILE, "NtWriteFile", nt_write_file),
+    (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", nt_map_view_of_section),
+    (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", nt_unmap_view_of_section),
+    (NT_OPEN_SECTION, "NtOpenSection", nt_open_section),
+    (NT_CREATE_SECTION, "NtCreateSection", nt_create_section),
+    (NT_QUERY_SECTION, "NtQuerySection", nt_query_section),
     (NT_QUERY_INFORMATION_PROCESS, "NtQueryInformationProcess", nt_query_information_process),
     (NT_QUERY_INFORMATION_THREAD, "NtQueryInformationThread", nt_query_information_thread),
     (NT_CREATE_THREAD, "NtCreateThread", nt_create_thread),
@@ -845,4 +858,144 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
     b[24..28].copy_from_slice(&8u32.to_le_bytes());
     b[32..40].copy_from_slice(&p.id.to_le_bytes());
     call.return_info(&b, buffer, length, ret_ptr)
+}
+
+/// Creates or opens-if `object` under the name in `attrs` (if named), for
+/// the create services. Returns the object to hand out and whether it
+/// already existed.
+fn link_new_object(
+    attrs: Option<Attributes>,
+    object: ObjectRef,
+    same_type: fn(&KObject) -> bool,
+) -> Result<(ObjectRef, bool, u32), NtStatus> {
+    match attrs {
+        Some(a) if !a.name.is_empty() || a.root.is_some() => {
+            let open_if = a.attributes & OBJ_OPENIF != 0;
+            let (object, existed) =
+                namespace::create(a.root.as_ref(), &a.name, object, a.case_insensitive(), open_if)?;
+            if existed && !same_type(&object) {
+                return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+            }
+            Ok((object, existed, a.attributes & HANDLE_ATTRIBUTES))
+        }
+        Some(a) => Ok((object, false, a.attributes & HANDLE_ATTRIBUTES)),
+        None => Ok((object, false, 0)),
+    }
+}
+
+fn is_section(o: &KObject) -> bool {
+    matches!(o.body, ObjectBody::Section(_))
+}
+
+/// NtCreateSection(*SectionHandle, DesiredAccess, ObjectAttributes,
+///                 *MaximumSize, SectionPageProtection, AllocationAttributes,
+///                 FileHandle)
+fn nt_create_section(call: &mut Call<'_>) -> NtStatus {
+    let (out, access, attrs_ptr, size_ptr) =
+        (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));
+    let (protect, attributes, file) = (arg!(call, 4) as u32, arg!(call, 5) as u32, arg!(call, 6));
+    if file != 0 || attributes & section::SEC_IMAGE != 0 {
+        // TODO: file-backed and image sections.
+        return NtStatus::NOT_IMPLEMENTED;
+    }
+    if size_ptr == 0 {
+        return NtStatus::INVALID_PARAMETER_4;
+    }
+    let size = tri!(call.read_u64(size_ptr));
+    if size == 0 || size as i64 <= 0 {
+        return NtStatus::INVALID_PARAMETER_4;
+    }
+    let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
+    let body = tri!(section::Section::new(size, protect, attributes));
+    let Ok(object) = KObject::new(ObjectBody::Section(body)) else { return NtStatus::NO_MEMORY };
+    let (object, existed, handle_attributes) = tri!(link_new_object(attrs, object, is_section));
+    let status = call.return_handle(out, object, access, handle_attributes);
+    if status == NtStatus::SUCCESS && existed { NtStatus::OBJECT_NAME_EXISTS } else { status }
+}
+
+/// NtOpenSection(*SectionHandle, DesiredAccess, ObjectAttributes)
+fn nt_open_section(call: &mut Call<'_>) -> NtStatus {
+    let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
+    let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_section));
+    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+}
+
+const MEM_TOP_DOWN: u32 = 0x10_0000;
+
+/// Section rights a view with `protect` needs.
+fn view_access(protect: u32) -> Result<u32, NtStatus> {
+    let a = vad::access_of(protect)?;
+    let mut need = 0;
+    if a.read {
+        need |= SECTION_MAP_READ;
+    }
+    if a.write {
+        need |= SECTION_MAP_WRITE;
+    }
+    if a.execute {
+        need |= SECTION_MAP_EXECUTE;
+    }
+    Ok(need)
+}
+
+/// NtMapViewOfSection(SectionHandle, ProcessHandle, *BaseAddress, ZeroBits,
+///                    CommitSize, *SectionOffset, *ViewSize,
+///                    InheritDisposition, AllocationType, Win32Protect)
+fn nt_map_view_of_section(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    tri!(call.check_current_process(Handle(arg!(call, 1))));
+    let (base_ptr, offset_ptr, size_ptr) = (arg!(call, 2), arg!(call, 5), arg!(call, 6));
+    let (allocation, protect) = (arg!(call, 8) as u32, arg!(call, 9) as u32);
+    if base_ptr == 0 || size_ptr == 0 {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let object = tri!(entry.require(tri!(view_access(protect))));
+    if !is_section(object) {
+        return NtStatus::OBJECT_TYPE_MISMATCH;
+    }
+    let base = tri!(call.read_u64(base_ptr));
+    let offset = if offset_ptr == 0 { 0 } else { tri!(call.read_u64(offset_ptr)) };
+    let size = tri!(call.read_u64(size_ptr));
+    let top_down = allocation & MEM_TOP_DOWN != 0;
+    let (base, size) =
+        tri!(section::map_view(&call.process, object, base, offset, size, protect, top_down));
+    tri!(call.write_u64(base_ptr, base));
+    tri!(call.write_u64(size_ptr, size));
+    NtStatus::SUCCESS
+}
+
+/// NtUnmapViewOfSection(ProcessHandle, BaseAddress)
+fn nt_unmap_view_of_section(call: &mut Call<'_>) -> NtStatus {
+    tri!(call.check_current_process(Handle(arg!(call, 0))));
+    match section::unmap_view(&call.process, arg!(call, 1)) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(e) => e,
+    }
+}
+
+/// NtQuerySection(SectionHandle, SectionInformationClass, Buffer, Length,
+///                *ReturnLength)
+fn nt_query_section(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let (class, buffer, length, ret_ptr) =
+        (arg!(call, 1), arg!(call, 2), arg!(call, 3), arg!(call, 4));
+    let object = tri!(entry.require(SECTION_QUERY));
+    let ObjectBody::Section(s) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if class != 0 {
+        return NtStatus::INVALID_INFO_CLASS;
+    }
+    // SECTION_BASIC_INFORMATION { BaseAddress, AllocationAttributes, MaximumSize }
+    let mut b = [0u8; 24];
+    b[8..12].copy_from_slice(&s.attributes.to_le_bytes());
+    b[16..24].copy_from_slice(&s.size.to_le_bytes());
+    if ret_ptr != 0 {
+        tri!(call.write_u64(ret_ptr, b.len() as u64));
+    }
+    if (length as usize) < b.len() {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    match call.process.write(buffer, &b) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(_) => NtStatus::ACCESS_VIOLATION,
+    }
 }

@@ -239,6 +239,15 @@ address space is freed when the last thread is reaped. `run=` checks this
 and logs "address space still referenced" otherwise, which fails the boot
 scenario. Pseudo handles: -1 = current process, -2 = current thread.
 
+**Sections** (`nt::section`): a pagefile-backed `Section` owns its frames
+(allocated zeroed on first access through any view) and is freed with its
+last handle and view. Views are VAD allocations of kind MEM_MAPPED plus a
+`View` record in the process; the fault path maps the section's frame as a
+*borrowed* PTE (software bit 9), which unmapping and address-space teardown
+never free. View protections must be a subset of the section's
+(STATUS_SECTION_PROTECTION), offsets 64 KiB aligned; NtFreeVirtualMemory on
+a view is STATUS_UNABLE_TO_DELETE_SECTION.
+
 **KUSER_SHARED_DATA** (`nt::kuser`): one kernel-owned `SharedPage`
 mapped read-only at 0x7FFE0000 into every process (`UserSpace::map_shared`
 never frees it). Constant fields describe the pinned build (10.0.26100,
@@ -264,7 +273,9 @@ the TSC clock; the performance counter runs at 10 MHz.
 `NtWaitForSingleObject`, `NtWaitForMultipleObjects`, `NtDelayExecution`,
 `NtDuplicateObject`, `NtQueryPerformanceCounter`, `NtQuerySystemTime`,
 `NtCreateThread`, `NtResumeThread`, `NtTerminateThread`,
-`NtQueryInformationThread`/`NtQueryInformationProcess` (basic information); unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
+`NtQueryInformationThread`/`NtQueryInformationProcess` (basic information),
+`NtCreateSection`, `NtOpenSection`, `NtMapViewOfSection`,
+`NtUnmapViewOfSection`, `NtQuerySection`; unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
 User-mode CPU exceptions terminate the process with the matching NTSTATUS
 (no SEH dispatch yet).
 

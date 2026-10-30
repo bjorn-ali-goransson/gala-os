@@ -16,6 +16,12 @@ impl NtStatus {
     pub const OBJECT_PATH_SYNTAX_BAD: NtStatus = NtStatus(0xc000_003b);
     pub const PENDING: NtStatus = NtStatus(0x0000_0103);
     pub const THREAD_IS_TERMINATING: NtStatus = NtStatus(0xc000_004b);
+    pub const NOT_MAPPED_VIEW: NtStatus = NtStatus(0xc000_0019);
+    pub const UNABLE_TO_DELETE_SECTION: NtStatus = NtStatus(0xc000_001b);
+    pub const INVALID_VIEW_SIZE: NtStatus = NtStatus(0xc000_001f);
+    pub const SECTION_PROTECTION: NtStatus = NtStatus(0xc000_004e);
+    pub const SECTION_TOO_BIG: NtStatus = NtStatus(0xc000_0040);
+    pub const MAPPED_ALIGNMENT: NtStatus = NtStatus(0xc000_0220);
     pub const NOT_IMPLEMENTED: NtStatus = NtStatus(0xc000_0002);
     pub const ACCESS_VIOLATION: NtStatus = NtStatus(0xc000_0005);
     pub const INVALID_HANDLE: NtStatus = NtStatus(0xc000_0008);

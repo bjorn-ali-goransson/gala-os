@@ -28,6 +28,8 @@ pub struct Process {
     pub handles: IrqMutex<HandleTable>,
     /// Lock order: `vad` before `space`.
     pub vad: IrqMutex<Vad>,
+    /// Mapped section views (lock order: `views`, then `vad`, then `space`).
+    pub views: IrqMutex<Vec<super::section::View>>,
     /// Thread objects of the live threads.
     threads: IrqMutex<Vec<ObjectRef>>,
     exit_status: IrqMutex<Option<NtStatus>>,
@@ -158,6 +160,7 @@ fn section_flags(characteristics: u32) -> PageFlags {
         user: true,
         global: false,
         cache: crate::mm::paging::CacheMode::WriteBack,
+        borrowed: false,
     }
 }
 
@@ -297,6 +300,7 @@ pub fn spawn_from_pe(
         space,
         handles: IrqMutex::new(handles),
         vad: IrqMutex::new(vad),
+        views: IrqMutex::new(Vec::new()),
         threads: IrqMutex::new(Vec::new()),
         exit_status: IrqMutex::new(None),
         dispatcher: Dispatcher::new(0),

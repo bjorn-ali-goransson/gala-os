@@ -29,6 +29,7 @@ pub fn flags_for(protect: u32) -> PageFlags {
         user,
         global: false,
         cache,
+        borrowed: false,
     }
 }
 
@@ -44,8 +45,12 @@ pub enum AccessKind {
 /// zeroed frame. Returns false if the access is not allowed (an access
 /// violation for the program).
 pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> bool {
-    let vad = process.vad.lock();
-    let Some(PageState { committed: true, protect }) = vad.page(addr) else { return false };
+    let (protect, mapped) = {
+        let vad = process.vad.lock();
+        let Some(PageState { committed: true, protect }) = vad.page(addr) else { return false };
+        let mapped = vad.query(addr).is_ok_and(|q| q.kind == vad::MEM_MAPPED);
+        (protect, mapped)
+    };
     let Ok(access) = vad::access_of(protect) else { return false };
     let allowed = match kind {
         AccessKind::Read => access.read,
@@ -55,12 +60,24 @@ pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> bool {
     if !allowed || protect & vad::PAGE_GUARD != 0 {
         return false;
     }
+    // Section pages come from the section (views lock before space lock).
+    let section_frame = if mapped {
+        match super::section::frame_for(process, addr) {
+            Some(f) => Some(f),
+            None => return false,
+        }
+    } else {
+        None
+    };
     let mut space = process.space.lock();
     if space.is_mapped(addr) {
         // Present and allowed by the VAD: the PTE is stale. Re-sync it.
         return space.set_flags(addr, flags_for(protect)).is_ok();
     }
-    space.map_zero_page(addr, flags_for(protect)).is_ok()
+    match section_frame {
+        Some(frame) => space.map_borrowed(addr, frame, flags_for(protect)).is_ok(),
+        None => space.map_zero_page(addr, flags_for(protect)).is_ok(),
+    }
 }
 
 /// Re-applies VAD state to the page tables for `[start, start + size)`:
@@ -134,6 +151,9 @@ pub fn free(
     size: u64,
     free_type: u32,
 ) -> Result<(u64, u64), NtStatus> {
+    if process.vad.lock().query(base).is_ok_and(|q| q.kind == vad::MEM_MAPPED) {
+        return Err(NtStatus::UNABLE_TO_DELETE_SECTION);
+    }
     let range = match free_type {
         MEM_DECOMMIT => process.vad.lock().decommit(base, size)?,
         MEM_RELEASE => process.vad.lock().release(base, size)?,

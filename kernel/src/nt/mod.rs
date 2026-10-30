@@ -6,6 +6,7 @@ pub mod namespace;
 pub mod object;
 pub mod pe;
 pub mod process;
+pub mod section;
 pub mod status;
 pub mod syscalls;
 pub mod thread;
