@@ -73,12 +73,21 @@ impl KernelStack {
     }
 }
 
+/// Dropping a stack flushes every CPU's TLB, so it must not happen while an
+/// `IrqMutex` is held (see `smp::flush_tlb_everywhere`).
 impl Drop for KernelStack {
     fn drop(&mut self) {
-        for i in 0..self.pages {
-            if let Some(frame) = paging::unmap_kernel_page(self.bottom() + i as u64 * PAGE_SIZE) {
-                let _ = mm::free_frame(frame);
-            }
+        let mut frames = [None; STACK_PAGES];
+        for (i, slot) in frames.iter_mut().enumerate().take(self.pages) {
+            *slot = paging::unmap_kernel_page(self.bottom() + i as u64 * PAGE_SIZE);
+        }
+        // Other CPUs may still cache the old translations (kernel pages are
+        // global): flush them before the frames and the slot are reused.
+        if self.pages > 0 {
+            super::smp::flush_tlb_everywhere();
+        }
+        for frame in frames.into_iter().flatten() {
+            let _ = mm::free_frame(frame);
         }
         SLOTS.lock()[self.slot / 64] &= !(1 << (self.slot % 64));
     }

@@ -105,13 +105,13 @@ pub type Handler = fn(&mut SyscallFrame);
 
 static HANDLER: AtomicUsize = AtomicUsize::new(0);
 
-/// Enables SYSCALL on the boot CPU, delivering to `handler`.
-pub fn init_bsp(handler: Handler) {
+/// Sets the function system calls are delivered to (on every CPU).
+pub fn set_handler(handler: Handler) {
     HANDLER.store(handler as usize, Ordering::Release);
-    init_cpu();
 }
 
-/// Enables SYSCALL on this CPU (the handler is the one `init_bsp` set).
+/// Enables SYSCALL on this CPU. Each CPU calls it during its own setup
+/// (MSRs are per CPU), before any thread can move between CPUs.
 pub fn init_cpu() {
     let star = u64::from(USER32_CS & !3) << 48 | u64::from(KERNEL_CS) << 32;
     // SAFETY: architected MSRs. The entry point switches to the kernel
@@ -127,22 +127,13 @@ pub fn init_cpu() {
 
 extern "C" fn dispatch(frame: &mut SyscallFrame) {
     let raw = HANDLER.load(Ordering::Acquire);
-    // SAFETY: only `init_bsp` stores into HANDLER, and it stores a `Handler`.
+    // SAFETY: only `set_handler` stores into HANDLER, and it stores a `Handler`.
     let handler: Handler = unsafe { core::mem::transmute::<usize, Handler>(raw) };
     handler(frame);
     // NtContinue: return with every register, through IRETQ. Only this
     // thread's request counts (another may have been preempted after
     // making one).
-    let pending = {
-        let mut slot = CONTINUE.lock();
-        match *slot {
-            Some((owner, regs)) if owner == crate::sched::current() => {
-                *slot = None;
-                Some(regs)
-            }
-            _ => None,
-        }
-    };
+    let pending = crate::sched::take_pending_continue();
     // The return hook sees (and may change) the registers user mode gets.
     let mut regs = pending.unwrap_or_else(|| syscall_regs(frame));
     let changed = run_user_return_hook(&mut regs);
@@ -264,14 +255,10 @@ pub fn enter_user_regs(regs: &UserRegs) -> ! {
     }
 }
 
-/// A full-register return requested by the running system call.
-static CONTINUE: crate::sync::IrqMutex<Option<(crate::sched::ThreadId, UserRegs)>> =
-    crate::sync::IrqMutex::new(None);
-
 /// Makes the current system call return to user mode with `regs` (all
 /// general-purpose registers, unlike SYSRET) instead of its frame.
 pub fn continue_with(regs: UserRegs) {
-    *CONTINUE.lock() = Some((crate::sched::current(), regs));
+    crate::sched::set_pending_continue(regs);
 }
 
 /// The user registers a SYSCALL frame returns with (SYSRET leaves the

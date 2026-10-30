@@ -34,9 +34,22 @@ pub fn system_time() -> u64 {
 
 /// Starts the periodic tick. Interrupts must be enabled by the caller.
 pub fn init(calibration: &apic::Calibration) {
+    *CALIBRATION.lock() = Some(*calibration);
     TSC_HZ.store(calibration.tsc_hz, Ordering::Relaxed);
     TSC_AT_BOOT.store(cpu::rdtsc(), Ordering::Relaxed);
     apic::start_periodic_timer(calibration, TICK_HZ, on_tick);
+}
+
+static CALIBRATION: crate::sync::IrqMutex<Option<apic::Calibration>> =
+    crate::sync::IrqMutex::new(None);
+
+/// Starts the tick on a CPU other than the boot CPU (it only preempts; the
+/// boot CPU's tick keeps time).
+pub fn start_tick_here() {
+    let calibration = *CALIBRATION.lock();
+    if let Some(c) = calibration {
+        apic::start_periodic_timer_here(&c, TICK_HZ);
+    }
 }
 
 /// Performance counter frequency: 10 MHz (100 ns resolution), as on
@@ -52,6 +65,11 @@ pub fn set_tick_callback(callback: fn(u64)) {
 }
 
 fn on_tick(_frame: &mut TrapFrame) {
+    if crate::arch::percpu::cpu_index() != 0 {
+        apic::eoi();
+        crate::sched::on_tick_here();
+        return;
+    }
     let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     apic::eoi();
     let callback = *TICK_CALLBACK.lock();

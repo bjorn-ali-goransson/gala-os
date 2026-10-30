@@ -70,6 +70,7 @@ pub const NT_QUERY_IO_COMPLETION: u32 = 0x014f;
 pub const NT_SET_IO_COMPLETION: u32 = 0x01b0;
 // Thread suspension and context: gala's own numbers, UNVERIFIED.
 pub const NT_GET_CONTEXT_THREAD: u32 = 0x00f2;
+pub const NT_GET_CURRENT_PROCESSOR_NUMBER: u32 = 0x00f8;
 pub const NT_SET_CONTEXT_THREAD: u32 = 0x018d;
 pub const NT_SUSPEND_THREAD: u32 = 0x01bc;
 // Waitable timers: gala's own numbers, UNVERIFIED.
@@ -149,6 +150,12 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_QUERY_IO_COMPLETION, "NtQueryIoCompletion", 5, nt_query_io_completion),
     (NT_SET_IO_COMPLETION, "NtSetIoCompletion", 5, nt_set_io_completion),
     (NT_GET_CONTEXT_THREAD, "NtGetContextThread", 2, nt_get_context_thread),
+    (
+        NT_GET_CURRENT_PROCESSOR_NUMBER,
+        "NtGetCurrentProcessorNumber",
+        0,
+        nt_get_current_processor_number,
+    ),
     (NT_SET_CONTEXT_THREAD, "NtSetContextThread", 2, nt_set_context_thread),
     (NT_SUSPEND_THREAD, "NtSuspendThread", 2, nt_suspend_thread),
     (NT_CREATE_TIMER, "NtCreateTimer", 4, nt_create_timer),
@@ -352,7 +359,7 @@ impl fmt::Display for TraceLine<'_> {
 }
 
 pub fn init() {
-    syscall::init_bsp(dispatch);
+    syscall::set_handler(dispatch);
 }
 
 /// NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock,
@@ -1393,7 +1400,7 @@ fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
     b[8..16].copy_from_slice(&t.teb.to_le_bytes());
     b[16..24].copy_from_slice(&t.process.id.to_le_bytes());
     b[24..32].copy_from_slice(&t.id.to_le_bytes());
-    b[32..40].copy_from_slice(&crate::arch::smp::online_mask().to_le_bytes());
+    b[32..40].copy_from_slice(&t.affinity().to_le_bytes());
     b[40..44].copy_from_slice(&priority.to_le_bytes());
     b[44..48].copy_from_slice(&base.to_le_bytes());
     call.return_info(&b, buffer, length, ret_ptr)
@@ -1402,6 +1409,7 @@ fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
 const THREAD_TIMES: u64 = 1;
 const THREAD_PRIORITY: u64 = 2;
 const THREAD_BASE_PRIORITY: u64 = 3;
+const THREAD_AFFINITY_MASK: u64 = 4;
 const THREAD_WIN32_START_ADDRESS: u64 = 9;
 const THREAD_AM_I_LAST_THREAD: u64 = 12;
 const THREAD_HIDE_FROM_DEBUGGER: u64 = 17;
@@ -1420,6 +1428,7 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
     let need = match class {
         THREAD_HIDE_FROM_DEBUGGER => 0,
         THREAD_PRIORITY | THREAD_BASE_PRIORITY => 4,
+        THREAD_AFFINITY_MASK => 8,
         _ => return NtStatus::INVALID_INFO_CLASS,
     };
     if length != need {
@@ -1427,6 +1436,19 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
     }
     if class == THREAD_HIDE_FROM_DEBUGGER {
         return NtStatus::SUCCESS; // there is no debugger to hide from
+    }
+    if class == THREAD_AFFINITY_MASK {
+        let mut v = [0u8; 8];
+        if call.process.read(buffer, &mut v).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        // Non-empty and within the process's affinity (all online CPUs).
+        let mask = u64::from_le_bytes(v);
+        if mask == 0 || mask & !crate::arch::smp::online_mask() != 0 {
+            return NtStatus::INVALID_PARAMETER;
+        }
+        t.set_affinity(mask);
+        return NtStatus::SUCCESS;
     }
     let mut v = [0u8; 4];
     if call.process.read(buffer, &mut v).is_err() {
@@ -1451,6 +1473,12 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
         }
     }
     NtStatus::SUCCESS
+}
+
+/// NtGetCurrentProcessorNumber(): the caller's processor (it may move
+/// right after); the return value is the number, not a status.
+fn nt_get_current_processor_number(_call: &mut Call<'_>) -> NtStatus {
+    NtStatus(crate::sched::current_cpu())
 }
 
 /// NtYieldExecution(): lets another ready thread run.

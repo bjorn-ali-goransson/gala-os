@@ -63,6 +63,7 @@ pub fn kernel_main() -> ! {
     arch::percpu::init_bsp();
     arch::cpu::enable_sse();
     interrupts::init();
+    arch::syscall::init_cpu();
     info!("cpu: GDT, TSS and IDT loaded");
 
     log_boot_info(&info);
@@ -89,17 +90,17 @@ pub fn kernel_main() -> ! {
     );
     init_paging(&info);
     init_timer(info.boot_unix_time);
+    if let Err(e) = sched::init() {
+        panic!("scheduler: {e:?}");
+    }
+    info!("sched: boot thread {} running, idle thread started", sched::current());
     arch::smp::init_bsp();
-    match arch::smp::start_aps(&info.processors) {
+    match arch::smp::start_aps(&info.processors, sched::run_ap) {
         Ok(n) => {
             info!("smp: {n} CPUs online ({} reported by the bootloader)", info.processors.len())
         }
         Err(e) => warn!("smp: cannot start the other CPUs: {e:?}"),
     }
-    if let Err(e) = sched::init() {
-        panic!("scheduler: {e:?}");
-    }
-    info!("sched: boot thread {} running, idle thread started", sched::current());
     nt::init();
     for module in info.modules.iter() {
         if let Err(e) = nt::file::add_boot_file(module.cmdline, module.file_name(), module.data) {

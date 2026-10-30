@@ -45,6 +45,8 @@ pub struct NtThread {
     /// (Priority, BasePriority) as reported; stored, not yet used by the
     /// scheduler.
     pub priority: IrqMutex<(i32, i32)>,
+    /// ThreadAffinityMask: the CPUs it may run on.
+    affinity: core::sync::atomic::AtomicU64,
     /// Queued user APCs (FIFO), run at alertable waits.
     apcs: IrqMutex<Vec<UserApc>>,
     /// Set while the thread is in an alertable wait (an APC wakes it).
@@ -90,6 +92,24 @@ pub fn base_priority(increment: i32) -> Option<i32> {
 }
 
 impl NtThread {
+    pub fn affinity(&self) -> u64 {
+        self.affinity.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Sets ThreadAffinityMask (validated by the caller); the thread moves
+    /// to an allowed CPU at its next reschedule.
+    pub fn set_affinity(&self, mask: u64) {
+        self.affinity.store(mask, core::sync::atomic::Ordering::Relaxed);
+        self.apply_affinity();
+    }
+
+    fn apply_affinity(&self) {
+        let tid = *self.sched_id.lock();
+        if let Some(tid) = tid {
+            sched::set_affinity(tid, self.affinity());
+        }
+    }
+
     /// ExitStatus as reported by NtQueryInformationThread.
     pub fn exit_status(&self) -> NtStatus {
         self.exit_status.lock().unwrap_or(NtStatus::PENDING)
@@ -166,6 +186,7 @@ pub fn create(
         teb: teb_addr,
         process: process.clone(),
         sched_id: IrqMutex::new(None),
+        affinity: core::sync::atomic::AtomicU64::new(crate::arch::smp::online_mask()),
         dispatcher: Dispatcher::new(0),
         exit_status: IrqMutex::new(None),
         suspend_count: IrqMutex::new(u32::from(suspended)),
@@ -243,6 +264,7 @@ fn thread_entry(id: usize) {
     let Some(object) = by_id(id as u64) else { sched::exit() };
     let t = as_thread(&object);
     *t.sched_id.lock() = Some(sched::current());
+    t.apply_affinity();
     // Stay here while suspended; `resume` wakes us.
     loop {
         let count = t.suspend_count.lock();

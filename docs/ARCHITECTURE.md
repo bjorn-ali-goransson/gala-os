@@ -162,9 +162,29 @@ never reused yet) and a FIFO ready queue whose capacity is reserved at
 spawn time, so scheduling itself never allocates. Thread #0 is the boot
 thread; a separate idle thread runs only when nothing else is ready and
 reaps dead threads' stacks. API: `spawn`, `yield_now`, `sleep_ms`,
-`join`, `exit`, `reap`. The 1 kHz tick wakes sleepers and preempts after a
-10-tick quantum. Single CPU for now; the lock is released before the
-switch, which is only sound without other CPUs (see `TODO(smp)`).
+`join`, `exit`, `reap`, `set_affinity`. The boot CPU's 1 kHz tick keeps
+time and wakes sleepers and timed-out waiters; every CPU's tick preempts
+after a 10-tick quantum.
+
+All CPUs schedule from the one ready queue under the `SCHED` lock. Per CPU
+(`Scheduler::cpus[percpu::cpu_index()]`, read only with the lock held):
+current thread, idle thread (the boot CPU spawns one; each AP adopts its
+startup code as its idle thread in `run_ap`), quantum, need_resched, and
+`prev`. Invariants:
+- `on_cpu`: set on a thread from the moment a CPU picks it until that CPU,
+  after switching to the next thread, runs `finish_switch` (the lock is
+  released before the switch). No other CPU picks a thread with `on_cpu`
+  set, and `reap` does not free its stack.
+- Affinity: a thread is only picked by CPUs in its mask; `set_affinity`
+  moves the caller at once and others at their CPU's next tick.
+- Waking: `make_ready` sends a reschedule IPI (vector 0x31, empty handler:
+  it only ends `hlt`) to one idle CPU allowed to run the thread.
+- Per-CPU hardware state (MSRs, APIC, CR4) must be set up in each CPU's
+  own setup path, never from a thread after scheduling starts: threads
+  move between CPUs (the boot thread too).
+- Per-thread state belongs in `Thread`, not in globals keyed by "the
+  current system call" (e.g. the NtContinue register set,
+  `set/take_pending_continue`).
 
 ## User mode and the NT personality (milestone 4)
 
@@ -461,14 +481,23 @@ Limine parks each AP until its `goto_address` is written; `gala_ap_entry`
 then sets EFER.NXE, the kernel's PAT and CR4.PGE, loads the kernel's PML4
 and a kernel stack, and `ap_main` loads the CPU's own GDT/TSS (with its
 own IST stacks), per-CPU block (GS base: kernel stack, CPU index, TSS),
-the shared IDT, the SYSCALL MSRs, the local APIC (timer masked) and
-IA32_TSC_AUX = CPU index (what RDTSCP reports to user mode as the
-processor number). The APs then idle; the scheduler runs on the boot CPU
-only so far. CPU indices are dense (0 = boot CPU), at most 64.
+the shared IDT, the SYSCALL MSRs, the local APIC and IA32_TSC_AUX = CPU
+index (what RDTSCP reports to user mode as the processor number; also
+NtGetCurrentProcessorNumber), then enters `sched::run_ap`, which starts its
+tick. CPU indices are dense (0 = boot CPU), at most 64.
+
+**TLB shootdown**: `smp::flush_tlb_everywhere` flushes every CPU's whole
+TLB (global entries too, by toggling CR4.PGE) via IPI vector 0x32 and waits
+for all; a waiting CPU serves requests aimed at it, so two concurrent
+shootdowns do not deadlock. It must not be called with an `IrqMutex` held.
+Used when kernel stacks are freed (kernel pages are global, so CR3 switches
+do not drop them). **Not yet** done for user mappings (unmap, protect, COW
+copy) while other threads of the process run on other CPUs: ROADMAP S3.
 
 ## Not done yet
 
-Scheduling on the APs and TLB shootdown (ROADMAP S2-S4), a real ntdll and
+TLB shootdown for user mappings, suspension/context of threads running on
+other CPUs (ROADMAP S3-S4), a real ntdll and
 kernel32 (gala runs test stand-ins), process creation from user mode,
 security, registry, storage and network devices, bindgen-generated
 layouts, ACPI (MADT/HPET), reclaiming bootloader memory. Observability

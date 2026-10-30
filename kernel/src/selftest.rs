@@ -136,6 +136,10 @@ fn timer_ticks_advance() {
 
 fn irq_mutex_masks_interrupts() {
     static M: IrqMutex<u32> = IrqMutex::new(0);
+    // Ticks are counted by the boot CPU: run there, so that a tick could
+    // only be counted if this CPU took it.
+    crate::sched::set_affinity(crate::sched::current(), 1);
+    crate::sched::yield_now();
     {
         let mut g = M.lock();
         assert!(!cpu::interrupts_enabled());
@@ -147,6 +151,7 @@ fn irq_mutex_masks_interrupts() {
         assert_eq!(time::ticks(), t, "no tick while the lock is held");
     }
     assert!(cpu::interrupts_enabled(), "interrupts restored on unlock");
+    crate::sched::set_affinity(crate::sched::current(), u64::MAX);
 }
 
 fn threads_run_and_join() {
@@ -203,6 +208,12 @@ fn thread_stacks_are_reaped() {
         let t = sched::spawn("short", nothing, 0).expect("spawn");
         sched::join(t).expect("join");
         while sched::reap() > 0 {}
+    }
+    // A thread that exited on another CPU is reaped once that CPU has
+    // switched away from it.
+    for _ in 0..100 {
+        sched::reap();
+        sched::yield_now();
     }
     // Thread records stay (ids are unique), but stacks must be returned.
     let leaked = free_before.saturating_sub(mm::frame_stats().0);

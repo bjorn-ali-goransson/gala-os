@@ -120,20 +120,23 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   (GS), IDT, SYSCALL MSRs, local APIC and IA32_TSC_AUX; processor count and
   active mask in system/process/thread information, the PEB,
   KUSER_SHARED_DATA and NUMBER_OF_PROCESSORS; the APs idle; `smp_test`
+- SMP scheduling (S2): every CPU schedules from the shared queue (per-CPU
+  current/idle/quantum, `on_cpu` hand-off, AP ticks, reschedule IPIs),
+  thread affinity (ThreadAffinityMask), NtGetCurrentProcessorNumber, TLB
+  shootdown for freed kernel stacks; fixes for code that assumed one CPU
+  (SYSCALL MSRs set per CPU, NtContinue state per thread);
+  `smpsched_test`
 
 ## Next
 Order agreed with the project owner (2026-10-30): multiprocessor support
 first, then a real Go program, then Nginx.
 
-S2. **SMP scheduling** (with the APs' LAPIC timers, still masked after S1): per-CPU current/idle threads, a shared run queue
-   (later per-CPU queues with stealing), reschedule IPIs on wake, thread
-   affinity (ThreadAffinityMask, NtGetCurrentProcessorNumber); threads of
-   one process running at the same time on different CPUs.
-S3. **SMP memory**: TLB shootdown IPIs when user mappings change while
-   threads of the space run elsewhere; contention tests (interlocked
+S3. **SMP memory**: TLB shootdown when user mappings change (unmap,
+   protect, COW copies, guard pages) while threads of the space run on
+   other CPUs (track which CPUs have each space loaded); contention tests (interlocked
    counters, wait/wake storms, unmapping under a running thread).
 S4. **SMP, rest**: suspension and context of threads running on another
-   CPU (IPI), per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
+   CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 O1. **Observability, first part** (docs/OBSERVABILITY.md 1, 2, 5): JSON
    event stream on debugcon, the missing-features ledger merged by `xtask
    report`, symbolized panic backtraces. Before G2, so running a real Go

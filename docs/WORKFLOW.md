@@ -47,9 +47,14 @@ is done and what comes next (the "Next" list is the agreed order).
   `user/bin/testntdll.dll`.
 - **Fallible allocation only** (`try_box`, `try_push`, `try_reserve`);
   clippy bans the rest. `unsafe` only where `CLAUDE.md` allows it.
-- **Multiprocessor.** Since S1 the APs are online. Never rely on "interrupts
-  off" as a lock; use `sync::IrqMutex`. Per-CPU data lives behind GS
-  (`arch::percpu`).
+- **Multiprocessor.** All CPUs schedule threads (S2), and any thread,
+  the boot thread included, can move between CPUs at any reschedule.
+  Never rely on "interrupts off" as a lock; use `sync::IrqMutex`. Per-CPU
+  data lives behind GS (`arch::percpu`); per-CPU hardware setup belongs in
+  each CPU's own init path (`ap_main` / early `kernel_main`), never in code
+  run later by a thread. Per-thread state goes in `sched::Thread` or
+  `NtThread`, not in a global "current request" slot. Single-CPU tests
+  that measure ticks must pin themselves (`sched::set_affinity`).
 - **Commit messages** are passed through the shell: do not put backticks in
   a double-quoted `-m` (use a heredoc `-F -`).
 - **Flaky boot tests** usually mean a race; rerun the one scenario a few
@@ -59,6 +64,10 @@ is done and what comes next (the "Next" list is the agreed order).
 
 - `XTASK_VERBOSE=1 cargo xtask boot-test name` prints the serial log; logs
   are also kept in `target/debug/test-<name>.serial.log`.
+- `XTASK_QEMU_ARGS="-d int -D qemu.log" cargo xtask boot-test name` passes
+  extra QEMU arguments; the interrupt log shows every exception with the
+  full register state (EFER, CR4, TR...), which is how per-CPU setup bugs
+  show up (e.g. #UD on `syscall` = EFER.SCE missing on that CPU).
 - Kernel command-line flag `trace` logs every system call with arguments
   and status (add it to a scenario's `cmdline` temporarily).
 - `cargo xtask report` writes `target/report/gala.{json,md}`;

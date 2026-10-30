@@ -18,6 +18,9 @@ const REG_LVT_TIMER: u32 = 0x320;
 const REG_TIMER_INITIAL: u32 = 0x380;
 const REG_TIMER_CURRENT: u32 = 0x390;
 const REG_TIMER_DIVIDE: u32 = 0x3e0;
+const REG_ICR_LOW: u32 = 0x300;
+const REG_ICR_HIGH: u32 = 0x310;
+const ICR_DELIVERY_PENDING: u32 = 1 << 12;
 
 const SPURIOUS_ENABLE: u32 = 1 << 8;
 const LVT_MASKED: u32 = 1 << 16;
@@ -152,6 +155,50 @@ pub fn start_periodic_timer(calibration: &Calibration, hz: u64, handler: interru
     write(REG_TIMER_DIVIDE, DIVIDE_BY_16);
     write(REG_LVT_TIMER, LVT_TIMER_PERIODIC | u32::from(TIMER_VECTOR));
     write(REG_TIMER_INITIAL, count);
+}
+
+/// Starts this CPU's periodic timer at `hz` on [`TIMER_VECTOR`] (whose
+/// handler `start_periodic_timer` installed), for CPUs other than the boot
+/// CPU; local APIC timers tick at the same rate on every CPU.
+pub fn start_periodic_timer_here(calibration: &Calibration, hz: u64) {
+    let count = (calibration.timer_hz / hz).clamp(1, u64::from(u32::MAX)) as u32;
+    write(REG_TIMER_DIVIDE, DIVIDE_BY_16);
+    write(REG_LVT_TIMER, LVT_TIMER_PERIODIC | u32::from(TIMER_VECTOR));
+    write(REG_TIMER_INITIAL, count);
+}
+
+/// Sends a fixed interrupt with `vector` to the CPU whose local APIC id is
+/// `apic_id` (physical destination mode).
+pub fn send_ipi(apic_id: u32, vector: u8) {
+    // An interrupt handler sending an IPI between the two xAPIC writes
+    // would garble the ICR.
+    let restore = cpu::disable_interrupts();
+    if X2APIC.load(Ordering::Relaxed) {
+        // SAFETY: the x2APIC ICR is a single 64-bit MSR (destination in the
+        // high half); writing it only sends the interrupt.
+        unsafe {
+            cpu::wrmsr(
+                X2APIC_MSR_BASE + REG_ICR_LOW / 16,
+                u64::from(apic_id) << 32 | u64::from(vector),
+            )
+        };
+    } else {
+        while read(REG_ICR_LOW) & ICR_DELIVERY_PENDING != 0 {
+            core::hint::spin_loop();
+        }
+        // The write to the low half sends it.
+        write(REG_ICR_HIGH, apic_id << 24);
+        write(REG_ICR_LOW, u32::from(vector));
+    }
+    if restore {
+        cpu::enable_interrupts();
+    }
+}
+
+/// This CPU's local APIC id.
+pub fn id() -> u32 {
+    let id = read(REG_ID);
+    if X2APIC.load(Ordering::Relaxed) { id } else { id >> 24 }
 }
 
 /// Signals end of interrupt to the local APIC.

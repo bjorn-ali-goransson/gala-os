@@ -105,6 +105,8 @@ syscall_stubs! {
     NtGetContextThread = 0xf2, fn(h: usize, context: *mut u8);
     NtSetContextThread = 0x18d, fn(h: usize, context: *const u8);
     NtSuspendThread = 0x1bc, fn(h: usize, previous: *mut u32);
+    // Processors (gala's number, unverified).
+    NtGetCurrentProcessorNumber = 0xf8, fn();
     // Waitable timers (gala's numbers, unverified).
     NtCreateTimer = 0xd9, fn(
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, kind: u32

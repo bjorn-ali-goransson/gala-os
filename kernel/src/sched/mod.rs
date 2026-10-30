@@ -1,5 +1,14 @@
-//! Kernel threads and a round-robin, preemptive scheduler (single CPU for
-//! now).
+//! Kernel threads and a round-robin, preemptive scheduler for all CPUs.
+//!
+//! One run queue, shared by every CPU under `SCHED` (an `IrqMutex`, so a
+//! spinlock with interrupts off). Each CPU has its current and idle thread
+//! and quantum in `Scheduler::cpus`, indexed by `percpu::cpu_index()`,
+//! which is only read while `SCHED` is held (interrupts are off then, so
+//! the thread cannot move to another CPU meanwhile).
+//!
+//! A thread switched away from keeps `on_cpu` set until the CPU has saved
+//! its context and runs the next thread (`finish_switch`); no other CPU
+//! picks it up before that, and its stack is not freed before that.
 //!
 //! Locking rule: every lock that can be taken while a thread may be
 //! preempted must be an `IrqMutex`. The timer interrupt can then only
@@ -14,8 +23,9 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::arch::context::{Context, KernelStack, StackError};
-use crate::arch::cpu;
 use crate::arch::paging::{self, SharedUserSpace};
+use crate::arch::syscall::UserRegs;
+use crate::arch::{cpu, percpu, smp};
 use crate::mm::heap::{AllocError, TryVec, try_box};
 use crate::sync::IrqMutex;
 use crate::time;
@@ -57,7 +67,8 @@ struct Thread {
     name: &'static str,
     state: State,
     context: Context,
-    /// `None` for the boot thread (Limine's stack) and after reaping.
+    /// `None` for the boot thread and the APs' idle threads (stacks that
+    /// are never freed), and after reaping.
     stack: Option<KernelStack>,
     entry: Option<(fn(usize), usize)>,
     /// Threads blocked in `join` on this one.
@@ -66,6 +77,14 @@ struct Thread {
     user: Option<UserThread>,
     /// Why the last `wait` ended.
     wake_reason: WakeReason,
+    /// Some CPU is running on this thread's stack (see the module docs).
+    on_cpu: bool,
+    /// CPUs this thread may run on.
+    affinity: u64,
+    /// A CPU's idle thread: never queued, run when nothing else is.
+    is_idle: bool,
+    /// Registers the current system call returns with (NtContinue).
+    pending_continue: Option<UserRegs>,
 }
 
 /// Why a `prepare_wait`/`wait` ended.
@@ -85,6 +104,29 @@ struct UserThread {
     gs_base: u64,
 }
 
+/// One CPU's scheduling state.
+#[derive(Clone, Copy)]
+struct Cpu {
+    /// Whether this CPU schedules (its idle thread exists).
+    online: bool,
+    current: ThreadId,
+    idle: Option<ThreadId>,
+    quantum_left: u32,
+    need_resched: bool,
+    /// The thread this CPU just switched away from, whose `on_cpu` is
+    /// cleared by `finish_switch` on this CPU.
+    prev: Option<ThreadId>,
+}
+
+const OFFLINE: Cpu = Cpu {
+    online: false,
+    current: ThreadId(0),
+    idle: None,
+    quantum_left: QUANTUM_TICKS,
+    need_resched: false,
+    prev: None,
+};
+
 struct Scheduler {
     /// Indexed by `ThreadId`; entries are never removed, so ids are unique.
     /// Boxed so that each `Context` keeps its address when the vector grows.
@@ -92,10 +134,7 @@ struct Scheduler {
     threads: Vec<Box<Thread>>,
     /// Invariant: capacity >= number of threads, so pushing never allocates.
     ready: VecDeque<ThreadId>,
-    current: ThreadId,
-    idle: Option<ThreadId>,
-    quantum_left: u32,
-    need_resched: bool,
+    cpus: [Cpu; smp::MAX_CPUS],
 }
 
 static SCHED: IrqMutex<Option<Scheduler>> = IrqMutex::new(None);
@@ -117,33 +156,82 @@ fn with<R>(f: impl FnOnce(&mut Scheduler) -> R) -> R {
     f(SCHED.lock().as_mut().expect("scheduler not initialized"))
 }
 
+/// This CPU's index; stable while `SCHED` is held (interrupts are off).
+fn me() -> usize {
+    percpu::cpu_index() as usize
+}
+
+/// Every CPU.
+const ALL_CPUS: u64 = u64::MAX;
+
 impl Scheduler {
     fn thread(&mut self, id: ThreadId) -> &mut Thread {
         &mut self.threads[id.0]
     }
 
+    /// The thread running on this CPU.
+    fn current(&self) -> ThreadId {
+        self.cpus[me()].current
+    }
+
     fn make_ready(&mut self, id: ThreadId) {
-        self.thread(id).state = State::Ready;
-        if Some(id) != self.idle {
-            debug_assert!(self.ready.len() < self.ready.capacity());
-            self.ready.push_back(id);
+        let t = self.thread(id);
+        t.state = State::Ready;
+        if t.is_idle {
+            return;
+        }
+        let affinity = t.affinity;
+        debug_assert!(self.ready.len() < self.ready.capacity());
+        self.ready.push_back(id);
+        // Wake one idle CPU that may run it (an idle CPU sits in `hlt`).
+        let here = me();
+        if let Some(cpu) = (0..smp::MAX_CPUS).find(|&c| {
+            let cpu = &self.cpus[c];
+            c != here && cpu.online && Some(cpu.current) == cpu.idle && affinity & (1 << c) != 0
+        }) {
+            smp::send_reschedule(cpu as u32);
         }
     }
 
+    /// Whether a queued thread may run on CPU `cpu` now: allowed there and
+    /// not still on another CPU's stack (the current thread is fine).
+    fn runnable_here(&self, id: ThreadId, cpu: usize) -> bool {
+        let t = &self.threads[id.0];
+        t.affinity & (1 << cpu) != 0 && (!t.on_cpu || id == self.cpus[cpu].current)
+    }
+
+    fn has_work(&self, cpu: usize) -> bool {
+        self.ready.iter().any(|&id| self.runnable_here(id, cpu))
+    }
+
+    /// Takes the first queued thread that may run on `cpu`.
+    fn pick(&mut self, cpu: usize) -> Option<ThreadId> {
+        let i = self.ready.iter().position(|&id| self.runnable_here(id, cpu))?;
+        self.ready.remove(i)
+    }
+
     fn add(&mut self, thread: Thread) -> Result<ThreadId, SpawnError> {
-        self.ready
-            .try_reserve(self.threads.len() + 1 - self.ready.len())
-            .map_err(|_| AllocError)?;
+        self.add_boxed(try_box(thread)?).map_err(|_| SpawnError::OutOfMemory)
+    }
+
+    /// Adds a thread; on failure (no memory) hands it back, so that the
+    /// caller can drop it outside the lock.
+    #[allow(clippy::result_large_err)]
+    fn add_boxed(&mut self, thread: Box<Thread>) -> Result<ThreadId, Box<Thread>> {
+        let grow = self.threads.len() + 1 - self.ready.len();
+        if self.ready.try_reserve(grow).is_err() || self.threads.try_reserve(1).is_err() {
+            return Err(thread);
+        }
         let id = ThreadId(self.threads.len());
-        self.threads.try_push(try_box(thread)?)?;
+        self.threads.try_push(thread).map_err(|_| AllocError).expect("capacity was reserved");
         Ok(id)
     }
 }
 
-/// Adopts the running boot thread as thread #0 and starts the idle thread.
-pub fn init() -> Result<(), SpawnError> {
-    let boot = Thread {
-        name: "boot",
+/// A thread record for code that is already running on this CPU.
+fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Thread {
+    Thread {
+        name,
         state: State::Running,
         context: Context::current(),
         stack: None,
@@ -151,24 +239,51 @@ pub fn init() -> Result<(), SpawnError> {
         joiners: Vec::new(),
         user: None,
         wake_reason: WakeReason::Woken,
-    };
-    let mut sched = Scheduler {
-        threads: Vec::new(),
-        ready: VecDeque::new(),
-        current: ThreadId(0),
-        idle: None,
-        quantum_left: QUANTUM_TICKS,
-        need_resched: false,
-    };
-    sched.add(boot)?;
+        on_cpu: true,
+        affinity,
+        is_idle,
+        pending_continue: None,
+    }
+}
+
+/// Adopts the running boot thread as thread #0 and starts the boot CPU's
+/// idle thread.
+pub fn init() -> Result<(), SpawnError> {
+    let mut sched =
+        Scheduler { threads: Vec::new(), ready: VecDeque::new(), cpus: [OFFLINE; smp::MAX_CPUS] };
+    let boot = sched.add(adopted("boot", false, ALL_CPUS))?;
+    sched.cpus[0] = Cpu { online: true, current: boot, ..OFFLINE };
     *SCHED.lock() = Some(sched);
     let idle = spawn("idle", idle_loop, 0)?;
     with(|s| {
         // `spawn` queued it; the idle thread is only run when nothing else is.
         s.ready.retain(|&t| t != idle);
-        s.idle = Some(idle);
+        let t = s.thread(idle);
+        t.is_idle = true;
+        t.affinity = 1;
+        s.cpus[0].idle = Some(idle);
     });
     Ok(())
+}
+
+/// Entered by each AP once its CPU is set up (see `arch::smp`): adopts the
+/// running code as the CPU's idle thread and starts scheduling there.
+pub fn run_ap(index: u32) -> ! {
+    let cpu = index as usize;
+    let added = with(|s| {
+        let id = s.add(adopted("idle", true, 1 << cpu))?;
+        s.cpus[cpu] = Cpu { online: true, current: id, idle: Some(id), ..OFFLINE };
+        Ok::<_, SpawnError>(())
+    });
+    if let Err(e) = added {
+        crate::warn!("sched: CPU {index} stays idle: {e:?}");
+        loop {
+            cpu::enable_interrupts_and_halt();
+        }
+    }
+    time::start_tick_here();
+    idle_loop(0);
+    unreachable!("the idle loop does not return");
 }
 
 /// Creates a thread running `entry(arg)`. It starts on the next switch.
@@ -208,17 +323,34 @@ fn spawn_inner(
         joiners: Vec::new(),
         user,
         wake_reason: WakeReason::Woken,
+        on_cpu: false,
+        affinity: ALL_CPUS,
+        is_idle: false,
+        pending_continue: None,
     };
-    let mut guard = SCHED.lock();
-    let sched = guard.as_mut().ok_or(SpawnError::NotInitialized)?;
-    let id = sched.add(thread)?;
-    sched.make_ready(id);
-    Ok(id)
+    let thread = try_box(thread)?;
+    let added = {
+        let mut guard = SCHED.lock();
+        match guard.as_mut() {
+            None => Err((SpawnError::NotInitialized, Some(thread))),
+            Some(sched) => match sched.add_boxed(thread) {
+                Ok(id) => {
+                    sched.make_ready(id);
+                    Ok(id)
+                }
+                Err(thread) => Err((SpawnError::OutOfMemory, Some(thread))),
+            },
+        }
+    };
+    // On failure the thread (and its stack) is dropped here, outside the
+    // lock: freeing a stack flushes other CPUs' TLBs.
+    added.map_err(|(e, _thread)| e)
 }
 
 extern "C" fn thread_start() -> ! {
+    finish_switch();
     let (entry, arg) = with(|s| {
-        let id = s.current;
+        let id = s.current();
         s.thread(id).entry.take().expect("new thread has an entry point")
     });
     cpu::enable_interrupts();
@@ -229,7 +361,7 @@ extern "C" fn thread_start() -> ! {
 /// Ends the current thread.
 pub fn exit() -> ! {
     with(|s| {
-        let id = s.current;
+        let id = s.current();
         let joiners = core::mem::take(&mut s.thread(id).joiners);
         for j in joiners {
             s.make_ready(j);
@@ -241,14 +373,71 @@ pub fn exit() -> ! {
 }
 
 pub fn current() -> ThreadId {
-    with(|s| s.current)
+    with(|s| s.current())
 }
 
 pub fn current_name() -> &'static str {
     with(|s| {
-        let id = s.current;
+        let id = s.current();
         s.thread(id).name
     })
+}
+
+/// Makes the current thread's system call return with `regs`.
+pub fn set_pending_continue(regs: UserRegs) {
+    with(|s| {
+        let id = s.current();
+        s.thread(id).pending_continue = Some(regs);
+    });
+}
+
+/// Takes the registers set by `set_pending_continue`, if any.
+pub fn take_pending_continue() -> Option<UserRegs> {
+    with(|s| {
+        let id = s.current();
+        s.thread(id).pending_continue.take()
+    })
+}
+
+/// The CPU the caller runs on (it may move right after).
+pub fn current_cpu() -> u32 {
+    percpu::cpu_index()
+}
+
+/// Sets the CPUs thread `id` may run on (`mask` must contain an online
+/// CPU). A thread running on a CPU outside the mask moves at its next
+/// reschedule: right away for the caller itself, else within a tick.
+pub fn set_affinity(id: ThreadId, mask: u64) {
+    let move_self = with(|s| {
+        let here = me();
+        let Some(t) = s.threads.get_mut(id.0) else { return false };
+        t.affinity = mask;
+        let running = t.state == State::Running;
+        for c in 0..smp::MAX_CPUS {
+            if running && s.cpus[c].online && s.cpus[c].current == id && mask & (1 << c) == 0 {
+                if c == here {
+                    return true;
+                }
+                s.cpus[c].need_resched = true;
+            }
+        }
+        false
+    });
+    if move_self {
+        schedule();
+    }
+}
+
+/// Clears `on_cpu` of the thread this CPU just switched away from. Runs
+/// on the new thread right after every switch (and first thing in new
+/// threads).
+fn finish_switch() {
+    with(|s| {
+        let cpu = me();
+        if let Some(prev) = s.cpus[cpu].prev.take() {
+            s.thread(prev).on_cpu = false;
+        }
+    });
 }
 
 /// Picks the next thread and switches to it. The current thread is
@@ -258,18 +447,22 @@ fn schedule() {
     let switch_pair = {
         let mut guard = SCHED.lock();
         let s = guard.as_mut().expect("scheduler not initialized");
-        let cur = s.current;
+        let here = me();
+        let cur = s.cpus[here].current;
         if s.thread(cur).state == State::Running {
             s.make_ready(cur);
         }
-        let next = s.ready.pop_front().or(s.idle).unwrap_or(cur);
+        let next = s.pick(here).or(s.cpus[here].idle).unwrap_or(cur);
         s.thread(next).state = State::Running;
-        s.current = next;
-        s.quantum_left = QUANTUM_TICKS;
-        s.need_resched = false;
+        let cpu = &mut s.cpus[here];
+        cpu.current = next;
+        cpu.quantum_left = QUANTUM_TICKS;
+        cpu.need_resched = false;
         (next != cur).then(|| {
+            s.cpus[here].prev = Some(cur);
             let from: *const Context = &s.thread(cur).context;
             let n = s.thread(next);
+            n.on_cpu = true;
             let target = switch::Target {
                 context: &n.context,
                 kernel_stack_top: n.stack.as_ref().map(KernelStack::top),
@@ -279,11 +472,11 @@ fn schedule() {
             (from, target)
         })
     };
-    // The lock is released before switching; with interrupts disabled on a
-    // single CPU nothing can touch the threads in between.
-    // TODO(smp): hand the lock over across the switch instead.
+    // The lock is released before switching. `cur` keeps `on_cpu` until
+    // `finish_switch`, so no other CPU runs it or frees its stack meanwhile.
     if let Some((from, target)) = switch_pair {
         switch::switch(from, target);
+        finish_switch();
     }
     if restore {
         cpu::enable_interrupts();
@@ -299,7 +492,7 @@ pub fn yield_now() {
 pub fn sleep_ms(ms: u64) {
     let ticks = ms.saturating_mul(time::TICK_HZ).div_ceil(1000).max(1);
     with(|s| {
-        let id = s.current;
+        let id = s.current();
         s.thread(id).state = State::Sleeping { until_tick: time::ticks() + ticks };
     });
     schedule();
@@ -316,7 +509,7 @@ pub enum JoinError {
 pub fn join(id: ThreadId) -> Result<(), JoinError> {
     loop {
         let wait = with(|s| {
-            let me = s.current;
+            let me = s.current();
             if id == me {
                 return Err(JoinError::JoinSelf);
             }
@@ -335,19 +528,18 @@ pub fn join(id: ThreadId) -> Result<(), JoinError> {
     }
 }
 
-/// Frees the stacks of dead threads (never the current one).
+/// Frees the stacks of dead threads that no CPU runs on any more.
 pub fn reap() -> usize {
     // Take the stacks out under the lock, drop (unmap) them outside it.
     let mut stacks: [Option<KernelStack>; 8] = Default::default();
     let mut spaces: [Option<SharedUserSpace>; 8] = Default::default();
     let mut n = 0;
     with(|s| {
-        let cur = s.current;
-        for (i, t) in s.threads.iter_mut().enumerate() {
+        for t in s.threads.iter_mut() {
             if n == stacks.len() {
                 break;
             }
-            if t.state == State::Dead && i != cur.0 && t.stack.is_some() {
+            if t.state == State::Dead && !t.on_cpu && t.stack.is_some() {
                 stacks[n] = t.stack.take();
                 n += 1;
                 // Not active any more (a switch away loaded another root),
@@ -367,7 +559,7 @@ pub fn reap() -> usize {
 /// the thread is simply already runnable when it calls `wait`.
 pub fn prepare_wait(deadline: Option<u64>) {
     with(|s| {
-        let id = s.current;
+        let id = s.current();
         let t = s.thread(id);
         t.wake_reason = WakeReason::Woken;
         t.state = State::Waiting { until_tick: deadline };
@@ -382,7 +574,7 @@ pub fn prepare_wait(deadline: Option<u64>) {
 pub fn wait() -> WakeReason {
     schedule();
     with(|s| {
-        let id = s.current;
+        let id = s.current();
         s.thread(id).wake_reason
     })
 }
@@ -398,10 +590,10 @@ pub fn wake(id: ThreadId) {
     });
 }
 
-/// Called from the timer interrupt (after EOI). Wakes sleepers and preempts
-/// the current thread when its quantum is used up.
+/// Called from the boot CPU's timer interrupt (after EOI): wakes sleepers
+/// and timed-out waiters, then does this CPU's preemption.
 pub(crate) fn on_tick(now: u64) {
-    let preempt = {
+    {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };
         for i in 0..s.threads.len() {
@@ -414,12 +606,30 @@ pub(crate) fn on_tick(now: u64) {
                 _ => {}
             }
         }
-        s.quantum_left = s.quantum_left.saturating_sub(1);
-        let idle_with_work = Some(s.current) == s.idle && !s.ready.is_empty();
-        if s.quantum_left == 0 || idle_with_work {
-            s.need_resched = true;
+    }
+    on_tick_here();
+}
+
+/// Called from every CPU's timer interrupt: preempts the current thread
+/// when its quantum is used up or it was asked to move.
+pub(crate) fn on_tick_here() {
+    let preempt = {
+        let mut guard = SCHED.lock();
+        let Some(s) = guard.as_mut() else { return };
+        let here = me();
+        if !s.cpus[here].online {
+            return;
         }
-        s.need_resched && !s.ready.is_empty()
+        let has_work = s.has_work(here);
+        let cpu = &mut s.cpus[here];
+        cpu.quantum_left = cpu.quantum_left.saturating_sub(1);
+        let idle_with_work = Some(cpu.current) == cpu.idle && has_work;
+        if cpu.quantum_left == 0 || idle_with_work {
+            cpu.need_resched = true;
+        }
+        // A thread that must leave this CPU goes even with nothing queued.
+        let must_move = s.threads[cpu.current.0].affinity & (1 << here) == 0;
+        cpu.need_resched && (has_work || must_move)
     };
     if preempt {
         schedule();
@@ -431,9 +641,10 @@ fn idle_loop(_: usize) {
         reap();
         let has_work = {
             // Check and halt with interrupts off, so a wakeup between the
-            // check and `hlt` cannot be missed (`sti; hlt` is atomic).
+            // check and `hlt` cannot be missed (`sti; hlt` is atomic, and a
+            // reschedule IPI sent meanwhile stays pending until then).
             cpu::disable_interrupts();
-            with(|s| !s.ready.is_empty())
+            with(|s| s.has_work(me()))
         };
         if has_work {
             cpu::enable_interrupts();

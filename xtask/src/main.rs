@@ -57,6 +57,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("loader_test", "ntdll.dll", "Windows/System32"),
     ("loader_test", "testdll.dll", "gala"),
     ("loader_test", "testdll2.dll", "gala"),
+    ("smpsched_test", "ntdll.dll", "Windows/System32"),
 ];
 const USER_PROGRAMS: &[&str] = &[
     "hello",
@@ -92,6 +93,7 @@ const USER_PROGRAMS: &[&str] = &[
     "timer_test",
     "loader_test",
     "smp_test",
+    "smpsched_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -339,6 +341,10 @@ fn qemu(iso: &Path) -> Result<Command> {
         cmd.arg("-drive").arg(format!("if=pflash,format=raw,unit=1,file={}", copy_path.display()));
     }
     cmd.arg("-cdrom").arg(iso);
+    // Extra arguments for debugging, e.g. "-d int,cpu_reset -D qemu.log".
+    if let Ok(extra) = std::env::var("XTASK_QEMU_ARGS") {
+        cmd.args(extra.split_whitespace());
+    }
     Ok(cmd)
 }
 
@@ -379,6 +385,12 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=smp_test.exe args=cpus=2",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["smp: 2 CPUs online", "smp_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "smpsched_test",
+        cmdline: "qemu_exit run=smpsched_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["smpsched_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "context_test",
