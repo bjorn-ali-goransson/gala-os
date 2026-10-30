@@ -236,6 +236,15 @@ signaled for waiters when free or owned by the waiting thread
 that exits owning one abandons it (the next acquirer gets
 STATUS_ABANDONED_WAIT_n). A semaphore's dispatcher signal is its count.
 
+**Symbolic links** (`ObjectBody::SymbolicLink`): `namespace::walk` resolves
+every lookup (create's parent, open, and parse into a device). A link met
+in the middle of a path, or at its end unless the link itself is opened
+(NtOpenSymbolicLinkObject), is replaced by its target and the walk starts
+again (at most 32 times). `\??\C:` is a link to `\Device\HarddiskVolume1`
+and `\Sessions\1\BaseNamedObjects\Global` one to `\BaseNamedObjects`.
+NtQueryDirectoryObject returns OBJECT_DIRECTORY_INFORMATION entries in
+link order, with the context as the next index.
+
 **Services with build-dependent numbers**: the low system call numbers
 used so far are long-stable on x64; others (NtCreateMutant, NtOpenMutant,
 NtCreateSemaphore, ...) change between builds and gala's are unverified.

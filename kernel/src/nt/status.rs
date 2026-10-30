@@ -41,6 +41,9 @@ impl NtStatus {
     pub const PRIVILEGED_INSTRUCTION: NtStatus = NtStatus(0xc000_0096);
     pub const BREAKPOINT: NtStatus = NtStatus(0x8000_0003);
     pub const USER_APC: NtStatus = NtStatus(0x0000_00c0);
+    pub const MORE_ENTRIES: NtStatus = NtStatus(0x0000_0105);
+    pub const NO_MORE_ENTRIES: NtStatus = NtStatus(0x8000_001a);
+    pub const BUFFER_TOO_SMALL: NtStatus = NtStatus(0xc000_0023);
     pub const ABANDONED_WAIT_0: NtStatus = NtStatus(0x0000_0080);
     pub const MUTANT_NOT_OWNED: NtStatus = NtStatus(0xc000_0046);
     pub const SEMAPHORE_LIMIT_EXCEEDED: NtStatus = NtStatus(0xc000_0047);

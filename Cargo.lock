@@ -167,6 +167,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "symlink_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "sync_test"
 version = "0.1.0"
 dependencies = [

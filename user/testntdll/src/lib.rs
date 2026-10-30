@@ -75,6 +75,19 @@ syscall_stubs! {
     NtOpenSemaphore = 0x12f, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtQueryMutant = 0x146, fn(h: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32);
     NtQuerySemaphore = 0x15a, fn(h: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32);
+    // Symbolic links and directory queries (gala's numbers, unverified).
+    NtCreateSymbolicLinkObject = 0xd1, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes,
+        target: *const UnicodeString
+    );
+    NtOpenSymbolicLinkObject = 0x137, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes
+    );
+    NtQuerySymbolicLinkObject = 0x16a, fn(h: usize, target: *mut UnicodeString, returned: *mut u32);
+    NtQueryDirectoryObject = 0x14a, fn(
+        h: usize, buf: *mut u8, len: u32, single: u8, restart: u8, context: *mut u32,
+        returned: *mut u32
+    );
 }
 
 #[repr(C)]

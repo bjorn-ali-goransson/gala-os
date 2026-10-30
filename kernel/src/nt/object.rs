@@ -149,6 +149,21 @@ pub fn semaphore_counts_valid(initial: i32, maximum: i32) -> bool {
     maximum > 0 && initial >= 0 && initial <= maximum
 }
 
+pub const SYMBOLIC_LINK_QUERY: u32 = 0x0001;
+pub const SYMBOLIC_LINK_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | 0x1;
+pub const SYMBOLIC_LINK_MAPPING: GenericMapping = GenericMapping {
+    read: READ_CONTROL | SYMBOLIC_LINK_QUERY,
+    write: READ_CONTROL,
+    execute: READ_CONTROL | SYMBOLIC_LINK_QUERY,
+    all: SYMBOLIC_LINK_ALL_ACCESS,
+};
+
+/// A symbolic link in the object namespace: lookups that reach it continue
+/// at `target` (an absolute path).
+pub struct SymbolicLink {
+    pub target: Vec<u16>,
+}
+
 pub const DIRECTORY_QUERY: u32 = 0x0001;
 pub const DIRECTORY_TRAVERSE: u32 = 0x0002;
 pub const DIRECTORY_CREATE_OBJECT: u32 = 0x0004;
@@ -221,6 +236,7 @@ pub enum ObjectBody {
     Event(Event),
     Mutant(Mutant),
     Semaphore(Semaphore),
+    SymbolicLink(SymbolicLink),
     Directory(Directory),
     Thread(super::thread::NtThread),
     Section(super::section::Section),
@@ -273,12 +289,20 @@ impl KObject {
             ObjectBody::Event(_) => "Event",
             ObjectBody::Mutant(_) => "Mutant",
             ObjectBody::Semaphore(_) => "Semaphore",
+            ObjectBody::SymbolicLink(_) => "SymbolicLink",
             ObjectBody::Directory(_) => "Directory",
             ObjectBody::Thread(_) => "Thread",
             ObjectBody::Section(_) => "Section",
             ObjectBody::Volume => "Device",
             ObjectBody::File(_) => "File",
             ObjectBody::Process(_) => "Process",
+        }
+    }
+
+    pub fn as_symbolic_link(&self) -> Option<&[u16]> {
+        match &self.body {
+            ObjectBody::SymbolicLink(l) => Some(&l.target),
+            _ => None,
         }
     }
 
@@ -301,6 +325,7 @@ impl KObject {
             ObjectBody::ConsoleInput
             | ObjectBody::ConsoleOutput
             | ObjectBody::Directory(_)
+            | ObjectBody::SymbolicLink(_)
             | ObjectBody::Section(_)
             | ObjectBody::Volume => None,
         }
@@ -311,6 +336,7 @@ impl KObject {
             ObjectBody::Event(_) => EVENT_MAPPING,
             ObjectBody::Mutant(_) => MUTANT_MAPPING,
             ObjectBody::Semaphore(_) => SEMAPHORE_MAPPING,
+            ObjectBody::SymbolicLink(_) => SYMBOLIC_LINK_MAPPING,
             ObjectBody::Directory(_) => DIRECTORY_MAPPING,
             ObjectBody::Thread(_) => THREAD_MAPPING,
             ObjectBody::Section(_) => SECTION_MAPPING,

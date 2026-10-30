@@ -58,6 +58,10 @@ pub const NT_OPEN_MUTANT: u32 = 0x012c;
 pub const NT_OPEN_SEMAPHORE: u32 = 0x012f;
 pub const NT_QUERY_MUTANT: u32 = 0x0146;
 pub const NT_QUERY_SEMAPHORE: u32 = 0x015a;
+pub const NT_CREATE_SYMBOLIC_LINK_OBJECT: u32 = 0x00d1;
+pub const NT_OPEN_SYMBOLIC_LINK_OBJECT: u32 = 0x0137;
+pub const NT_QUERY_SYMBOLIC_LINK_OBJECT: u32 = 0x016a;
+pub const NT_QUERY_DIRECTORY_OBJECT: u32 = 0x014a;
 pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
 pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
 pub const NT_OPEN_SECTION: u32 = 0x0037;
@@ -120,6 +124,10 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_OPEN_SEMAPHORE, "NtOpenSemaphore", 3, nt_open_semaphore),
     (NT_QUERY_MUTANT, "NtQueryMutant", 5, nt_query_mutant),
     (NT_QUERY_SEMAPHORE, "NtQuerySemaphore", 5, nt_query_semaphore),
+    (NT_CREATE_SYMBOLIC_LINK_OBJECT, "NtCreateSymbolicLinkObject", 4, nt_create_symbolic_link),
+    (NT_OPEN_SYMBOLIC_LINK_OBJECT, "NtOpenSymbolicLinkObject", 3, nt_open_symbolic_link),
+    (NT_QUERY_SYMBOLIC_LINK_OBJECT, "NtQuerySymbolicLinkObject", 3, nt_query_symbolic_link),
+    (NT_QUERY_DIRECTORY_OBJECT, "NtQueryDirectoryObject", 7, nt_query_directory_object),
     (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", 10, nt_map_view_of_section),
     (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", 2, nt_unmap_view_of_section),
     (NT_OPEN_SECTION, "NtOpenSection", 3, nt_open_section),
@@ -619,13 +627,29 @@ impl Call<'_> {
         attrs_ptr: u64,
         is_type: fn(&KObject) -> bool,
     ) -> Result<(ObjectRef, u32), NtStatus> {
+        self.open_named_with(attrs_ptr, is_type, true)
+    }
+
+    /// `open_named`; with `follow_final` false a symbolic link named by
+    /// the full path is opened itself.
+    fn open_named_with(
+        &self,
+        attrs_ptr: u64,
+        is_type: fn(&KObject) -> bool,
+        follow_final: bool,
+    ) -> Result<(ObjectRef, u32), NtStatus> {
         let attrs = self
             .object_attributes(attrs_ptr, DIRECTORY_TRAVERSE)?
             .ok_or(NtStatus::INVALID_PARAMETER)?;
         if attrs.name.is_empty() && attrs.root.is_none() {
             return Err(NtStatus::OBJECT_PATH_SYNTAX_BAD);
         }
-        let object = namespace::lookup(attrs.root.as_ref(), &attrs.name, attrs.case_insensitive())?;
+        let ci = attrs.case_insensitive();
+        let object = if !follow_final {
+            namespace::lookup_link(attrs.root.as_ref(), &attrs.name, ci)?
+        } else {
+            namespace::lookup(attrs.root.as_ref(), &attrs.name, ci)?
+        };
         if !is_type(&object) {
             return Err(NtStatus::OBJECT_TYPE_MISMATCH);
         }
@@ -1482,6 +1506,112 @@ fn nt_query_semaphore(call: &mut Call<'_>) -> NtStatus {
     call.return_info(&b, arg!(call, 2), arg!(call, 3) as u32 as u64, arg!(call, 4))
 }
 
+fn is_symbolic_link(o: &KObject) -> bool {
+    matches!(o.body, ObjectBody::SymbolicLink(_))
+}
+
+/// NtCreateSymbolicLinkObject(*LinkHandle, DesiredAccess, ObjectAttributes,
+///                            *LinkTarget)
+fn nt_create_symbolic_link(call: &mut Call<'_>) -> NtStatus {
+    let (out, access, attrs_ptr, target_ptr) =
+        (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));
+    if target_ptr == 0 {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let target = tri!(call.unicode_string(target_ptr));
+    let link = super::object::SymbolicLink { target };
+    let Ok(object) = KObject::new(ObjectBody::SymbolicLink(link)) else {
+        return NtStatus::NO_MEMORY;
+    };
+    create_object(call, out, access, attrs_ptr, object, is_symbolic_link)
+}
+
+/// NtOpenSymbolicLinkObject(*LinkHandle, DesiredAccess, ObjectAttributes)
+fn nt_open_symbolic_link(call: &mut Call<'_>) -> NtStatus {
+    let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
+    // Opening a symbolic link opens the link, not its target.
+    let (object, attributes) = tri!(call.open_named_with(arg!(call, 2), is_symbolic_link, false));
+    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+}
+
+/// NtQuerySymbolicLinkObject(LinkHandle, *LinkTarget, *ReturnedLength): the
+/// target goes into the caller's UNICODE_STRING buffer (NUL-terminated if
+/// there is room); ReturnedLength is the size needed with the terminator.
+fn nt_query_symbolic_link(call: &mut Call<'_>) -> NtStatus {
+    use super::object::SYMBOLIC_LINK_QUERY;
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let object = tri!(entry.require(SYMBOLIC_LINK_QUERY));
+    let Some(target) = object.as_symbolic_link() else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let (string, ret_ptr) = (arg!(call, 1), arg!(call, 2));
+    let mut header = [0u8; 16];
+    if call.process.read(string, &mut header).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let maximum = usize::from(u16::from_le_bytes([header[2], header[3]]));
+    let buffer = u64::from_le_bytes(header[8..16].try_into().unwrap_or([0; 8]));
+    let bytes = target.len() * 2;
+    let needed = bytes + 2;
+    if ret_ptr != 0 {
+        tri!(call.write_u32(ret_ptr, needed as u32));
+    }
+    if maximum < bytes {
+        return NtStatus::BUFFER_TOO_SMALL;
+    }
+    let mut data = Vec::new();
+    if data.try_reserve_exact(needed).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    for c in target {
+        let _ = data.try_extend_from_slice(&c.to_le_bytes());
+    }
+    if maximum >= needed {
+        let _ = data.try_extend_from_slice(&[0, 0]);
+    }
+    if call.process.write(buffer, &data).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    if call.process.write(string, &(bytes as u16).to_le_bytes()).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    NtStatus::SUCCESS
+}
+
+/// NtQueryDirectoryObject(DirectoryHandle, Buffer, Length, ReturnSingleEntry,
+///                        RestartScan, *Context, *ReturnLength): entries
+/// from index *Context on (0 with RestartScan); *Context moves past those
+/// returned.
+fn nt_query_directory_object(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let object = tri!(entry.require(super::object::DIRECTORY_QUERY)).clone();
+    let (buffer, length) = (arg!(call, 1), arg!(call, 2) as u32 as usize);
+    let (single, restart) = (arg!(call, 3) as u8 != 0, arg!(call, 4) as u8 != 0);
+    let (context_ptr, ret_ptr) = (arg!(call, 5), arg!(call, 6));
+    if context_ptr == 0 {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let mut ctx = [0u8; 4];
+    if call.process.read(context_ptr, &mut ctx).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let from = if restart { 0 } else { u32::from_le_bytes(ctx) as usize };
+    let entries = tri!(namespace::directory_entries(&object, from));
+    if entries.is_empty() {
+        return NtStatus::NO_MORE_ENTRIES;
+    }
+    let Some((data, count)) = tri!(namespace::encode_directory(&entries, single, length, buffer))
+    else {
+        return NtStatus::BUFFER_TOO_SMALL;
+    };
+    if call.process.write(buffer, &data).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    tri!(call.write_u32(context_ptr, (from + count) as u32));
+    if ret_ptr != 0 {
+        tri!(call.write_u32(ret_ptr, data.len() as u32));
+    }
+    if count < entries.len() && !single { NtStatus::MORE_ENTRIES } else { NtStatus::SUCCESS }
+}
+
 fn is_section(o: &KObject) -> bool {
     matches!(o.body, ObjectBody::Section(_))
 }
@@ -1735,9 +1865,7 @@ impl Call<'_> {
         if !matches!(device.body, ObjectBody::Volume) {
             return Err(NtStatus::OBJECT_TYPE_MISMATCH);
         }
-        let mut owned = Vec::new();
-        owned.try_extend_from_slice(rest).map_err(|_| NtStatus::NO_MEMORY)?;
-        Ok(file::FilePath { start: crate::fs::ramfs::ROOT, name: owned })
+        Ok(file::FilePath { start: crate::fs::ramfs::ROOT, name: rest })
     }
 
     fn open_or_create(&self, r: OpenRequest) -> NtStatus {

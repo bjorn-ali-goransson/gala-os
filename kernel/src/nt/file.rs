@@ -81,7 +81,10 @@ pub fn init() -> Result<(), NtStatus> {
     let volume =
         KObject::with_permanence(ObjectBody::Volume, true).map_err(|_| NtStatus::NO_MEMORY)?;
     namespace::create(None, &wide("\\Device\\HarddiskVolume1")?, volume.clone(), false, false)?;
-    namespace::create(None, &wide("\\??\\C:")?, volume, false, false)?;
+    // C: is a symbolic link to the volume, as on Windows.
+    let c_drive = namespace::new_symbolic_link(&wide(VOLUME_DEVICE)?)?;
+    namespace::create(None, &wide("\\??\\C:")?, c_drive, false, false)?;
+    drop(volume);
     Ok(())
 }
 

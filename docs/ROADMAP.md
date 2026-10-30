@@ -101,10 +101,12 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   queued on successful completion; `ioapc_test`
 - Mutants and semaphores (ownership, recursion, abandonment, counts,
   named objects, wait-all), through ntdll exports; `sync_test`
+- Symbolic links (reparse in lookups, `\??\C:`, session Global link),
+  NtQueryDirectoryObject; `symlink_test`
 
 ## Next
-3b. **Object manager, rest**: symbolic links (`\Sessions\1\BaseNamedObjects\
-   Global`, `\??\C:`), NtQueryDirectoryObject, keyed events.
+3b. **Object manager, rest**: keyed events, OBJ_PERMANENT/NtMakeTemporary-
+   Object, security descriptors (all access is granted so far).
 6c. **Sections, rest**: the kernel loader using image sections (the exe
    shared like DLLs), sharing read-only pages of relocated views.
 6e. **User-mode loader support**: what a real ntdll's loader needs next:
@@ -115,7 +117,7 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
    SizeOfStackReserve/Commit from the image, AVX state (XSAVE, CONTEXT_EX)
    and FltSave in NtCreateThread, SEH unwinding is user-mode
    (ntdll) work; verify the dispatcher frame against the pinned ntdll.
-8c. **Files, rest**: `\??\C:` as a symbolic link, I/O completion ports, truly pending I/O, NtNotifyChangeDirectoryFile, file
+8c. **Files, rest**: I/O completion ports, truly pending I/O, NtNotifyChangeDirectoryFile, file
    locks, short (8.3) names.
 9. Toward M6: collect windows.json on the pinned build and fix every
    difference (gala bug or wrong test expectation); run the first Wine
