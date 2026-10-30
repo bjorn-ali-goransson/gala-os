@@ -68,7 +68,9 @@ pub extern "system" fn ProcessPrng(data: *mut u8, length: usize) -> i32 {
                 GalaRecordMissing(name.as_ptr(), name.len(), 2, 0);
                 NtTerminateProcess(-1, 0xc000_0409);
             }
-            loop {}
+            loop {
+                core::hint::spin_loop();
+            }
         };
         for b in word.to_le_bytes() {
             if i == length {
@@ -90,5 +92,7 @@ pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved:
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    loop {}
+    loop {
+        core::hint::spin_loop();
+    }
 }

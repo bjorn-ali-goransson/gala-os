@@ -26,5 +26,7 @@ pub extern "C" fn mainCRTStartup() -> ! {
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    loop {}
+    loop {
+        core::hint::spin_loop();
+    }
 }

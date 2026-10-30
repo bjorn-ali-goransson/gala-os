@@ -25,7 +25,8 @@ is done and what comes next (the "Next" list is the agreed order).
 5. Checks (all must pass):
    ```sh
    cargo fmt --all
-   sed -n 20,25p .github/workflows/ci.yml | sed 's/^ *//' | bash -e   # clippy
+   # every clippy/build line CI runs (selected by content, not line number)
+   grep -E '^ +cargo (clippy|build --release)' .github/workflows/ci.yml | sed 's/^ *//' | bash -e
    cargo xtask test            # host tests + every boot scenario
    cargo xtask export-tests    # refresh user/bin (CI compares)
    ```
