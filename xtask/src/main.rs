@@ -263,6 +263,12 @@ const SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_FAILURE,
         expect: &["CPU exception: page fault (#PF) error=0x0", "cr2=0x0000000000000008"],
     },
+    Scenario {
+        name: "fault-stackoverflow",
+        cmdline: "qemu_exit fault=stackoverflow",
+        exit_status: QEMU_EXIT_FAILURE,
+        expect: &["CPU exception: double fault (#DF)"],
+    },
 ];
 
 /// Boots every scenario (matching `filter`) headless, in parallel.

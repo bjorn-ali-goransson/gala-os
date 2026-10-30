@@ -19,8 +19,9 @@ pub fn init(calibration: &apic::Calibration) {
 }
 
 fn on_tick(_frame: &mut TrapFrame) {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     apic::eoi();
+    crate::sched::on_tick(now);
 }
 
 /// Timer ticks since `init`.

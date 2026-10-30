@@ -20,6 +20,7 @@ pub mod cmdline;
 #[macro_use]
 pub mod console;
 pub mod mm;
+pub mod sched;
 mod selftest;
 pub mod sync;
 pub mod time;
@@ -84,12 +85,25 @@ pub fn kernel_main() -> ! {
     );
     init_paging(&info);
     init_timer();
+    if let Err(e) = sched::init() {
+        panic!("scheduler: {e:?}");
+    }
+    info!("sched: boot thread {} running, idle thread started", sched::current());
 
     if let Some(name) = cmdline.value("fault") {
         match Fault::from_name(name) {
             Some(fault) => {
+                // On a scheduler thread, so stack overflows hit a guard page.
                 info!("provoking fault {fault:?}");
-                interrupts::provoke(fault);
+                let index = Fault::ALL.iter().position(|&f| f == fault).unwrap_or(0);
+                let provoke = |i: usize| interrupts::provoke(Fault::ALL[i]);
+                match sched::spawn("fault", provoke, index) {
+                    Ok(t) => {
+                        let _ = sched::join(t);
+                    }
+                    Err(e) => panic!("spawn: {e:?}"),
+                }
+                panic!("provoked fault did not stop the kernel");
             }
             None => panic!("unknown fault {name:?}"),
         }

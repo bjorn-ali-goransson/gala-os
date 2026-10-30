@@ -312,20 +312,31 @@ impl fmt::Display for ExceptionReport<'_> {
 }
 
 /// Faults that can be provoked on purpose to test the exception path.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fault {
     InvalidOpcode,
     PageFault,
+    /// Overflow a kernel stack into its guard page (handled as #DF on IST1).
+    StackOverflow,
 }
 
 impl Fault {
+    pub const ALL: [Fault; 3] = [Fault::InvalidOpcode, Fault::PageFault, Fault::StackOverflow];
+
     pub fn from_name(name: &str) -> Option<Fault> {
         match name {
             "ud" => Some(Fault::InvalidOpcode),
             "pagefault" => Some(Fault::PageFault),
+            "stackoverflow" => Some(Fault::StackOverflow),
             _ => None,
         }
     }
+}
+
+#[allow(unconditional_recursion)]
+fn recurse(depth: u64) -> u64 {
+    let buf = core::hint::black_box([depth; 32]);
+    recurse(depth + 1) + buf[31]
 }
 
 /// Triggers `fault`. The exception handlers treat every fault as fatal, so
@@ -339,6 +350,9 @@ pub fn provoke(fault: Fault) -> ! {
         Fault::PageFault => unsafe {
             core::ptr::read_volatile(core::ptr::without_provenance::<u64>(0x8));
         },
+        Fault::StackOverflow => {
+            recurse(0);
+        }
     }
     unreachable!("provoked {fault:?} did not fault")
 }

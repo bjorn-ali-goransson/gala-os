@@ -8,7 +8,9 @@ use alloc::vec::Vec;
 use crate::arch::cpu;
 use crate::mm::heap::{TryVec, try_box};
 use crate::sync::IrqMutex;
-use crate::{mm, time};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use crate::{mm, sched, time};
 
 struct Test {
     name: &'static str,
@@ -23,6 +25,10 @@ const TESTS: &[Test] = &[
     Test { name: "heap_exhaustion_is_an_error", run: heap_exhaustion_is_an_error },
     Test { name: "timer_ticks_advance", run: timer_ticks_advance },
     Test { name: "irq_mutex_masks_interrupts", run: irq_mutex_masks_interrupts },
+    Test { name: "threads_run_and_join", run: threads_run_and_join },
+    Test { name: "preemption_without_yield", run: preemption_without_yield },
+    Test { name: "sleep_waits_long_enough", run: sleep_waits_long_enough },
+    Test { name: "thread_stacks_are_reaped", run: thread_stacks_are_reaped },
 ];
 
 pub fn run_all() {
@@ -139,4 +145,64 @@ fn irq_mutex_masks_interrupts() {
         assert_eq!(time::ticks(), t, "no tick while the lock is held");
     }
     assert!(cpu::interrupts_enabled(), "interrupts restored on unlock");
+}
+
+fn threads_run_and_join() {
+    static SUM: AtomicU64 = AtomicU64::new(0);
+    fn worker(n: usize) {
+        for _ in 0..100 {
+            SUM.fetch_add(n as u64, Ordering::Relaxed);
+            sched::yield_now();
+        }
+    }
+    SUM.store(0, Ordering::Relaxed);
+    let mut ids = [None; 8];
+    for (n, slot) in ids.iter_mut().enumerate() {
+        *slot = Some(sched::spawn("worker", worker, n + 1).expect("spawn"));
+    }
+    for id in ids.into_iter().flatten() {
+        sched::join(id).expect("join");
+    }
+    assert_eq!(SUM.load(Ordering::Relaxed), 100 * (1..=8).sum::<u64>());
+    assert_eq!(sched::join(sched::current()), Err(sched::JoinError::JoinSelf));
+}
+
+fn preemption_without_yield() {
+    static STOP: AtomicBool = AtomicBool::new(false);
+    static SPINS: AtomicU64 = AtomicU64::new(0);
+    fn spinner(_: usize) {
+        // Never yields: only the timer can take the CPU away.
+        while !STOP.load(Ordering::Relaxed) {
+            SPINS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    STOP.store(false, Ordering::Relaxed);
+    let t = sched::spawn("spinner", spinner, 0).expect("spawn");
+    // Sleeping hands the CPU to the spinner; we only get it back through
+    // preemption.
+    sched::sleep_ms(30);
+    STOP.store(true, Ordering::Relaxed);
+    sched::join(t).expect("join");
+    assert!(SPINS.load(Ordering::Relaxed) > 0, "spinner ran");
+}
+
+fn sleep_waits_long_enough() {
+    let start = time::monotonic_ns();
+    sched::sleep_ms(25);
+    let ms = (time::monotonic_ns() - start) / 1_000_000;
+    assert!(ms >= 20, "slept only {ms} ms");
+}
+
+fn thread_stacks_are_reaped() {
+    fn nothing(_: usize) {}
+    sched::reap();
+    let (free_before, _) = mm::frame_stats();
+    for _ in 0..50 {
+        let t = sched::spawn("short", nothing, 0).expect("spawn");
+        sched::join(t).expect("join");
+        while sched::reap() > 0 {}
+    }
+    // Thread records stay (ids are unique), but stacks must be returned.
+    let leaked = free_before.saturating_sub(mm::frame_stats().0);
+    assert!(leaked < 16, "{leaked} frames leaked by 50 threads");
 }

@@ -15,6 +15,8 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/boot/             Limine protocol bindings and handoff -> plain types  [unsafe allowed]
   src/sync.rs           IrqMutex: spinlock that masks interrupts while held
   src/time.rs           periodic tick + TSC monotonic clock
+  src/sched/            threads, round-robin preemptive scheduler
+  src/sched/switch.rs   the scheduler's one context-switch call        [unsafe allowed]
   src/console.rs        kprint!/kprintln!/info!/warn!/error! over COM1
   src/cmdline.rs        kernel command line parsing (host-tested)
   src/selftest.rs       in-kernel tests run at boot with `selftest`
@@ -29,7 +31,8 @@ xtask/                  host tool: build ISO, run QEMU, boot test
 ## Safety boundary
 
 `kernel/src/lib.rs` sets `#![deny(unsafe_code)]`. Only the `arch` and
-`boot` modules and `mm/heap.rs` (a global allocator cannot be safe) opt back in, and every `unsafe` block there carries a
+`boot` modules, `mm/heap.rs` (a global allocator cannot be safe) and
+`sched/switch.rs` (the context switch) opt back in, and every `unsafe` block there carries a
 `SAFETY:` comment. Those modules expose safe APIs; the rest of the kernel
 is safe Rust. The NT personality's syscall/ABI layer will be the third and
 last place allowed to use `unsafe`.
@@ -140,8 +143,24 @@ The LAPIC timer (divide-by-16) and the TSC are calibrated against a 10 ms
 PIT channel-2 one-shot. `time` runs a 1 kHz periodic tick on vector 0x30
 and offers `monotonic_ns()` from the TSC. Spurious interrupts use vector 0xff.
 
-## Not done yet (milestone 2)
+## Threads and scheduling
 
-Threads and scheduler, SMP, ACPI (MADT/HPET), reclaiming bootloader memory.
+`arch::context` provides `KernelStack` (16 pages in a 128 KiB slot of the
+stack window at `0xffff_d000_0000_0000`; the unmapped rest of the slot is
+the guard, so an overflow faults and is reported as #DF on IST1) and
+`Context` (saved rsp; the switch pushes the six callee-saved registers).
+
+`sched` keeps boxed `Thread`s in a vector indexed by `ThreadId` (ids are
+never reused yet) and a FIFO ready queue whose capacity is reserved at
+spawn time, so scheduling itself never allocates. Thread #0 is the boot
+thread; a separate idle thread runs only when nothing else is ready and
+reaps dead threads' stacks. API: `spawn`, `yield_now`, `sleep_ms`,
+`join`, `exit`, `reap`. The 1 kHz tick wakes sleepers and preempts after a
+10-tick quantum. Single CPU for now; the lock is released before the
+switch, which is only sound without other CPUs (see `TODO(smp)`).
+
+## Not done yet
+
+SMP, ACPI (MADT/HPET), reclaiming bootloader memory.
 Bootloader-reclaimable memory must not be reused until the boot info that
 lives there has been copied out.

@@ -216,3 +216,21 @@ pub fn map_mmio(phys: u64, len: u64) -> Result<u64, PagingError> {
         .ok_or(PagingError::NotInitialized)??;
     Ok(virt + (phys - start))
 }
+
+/// Maps one 4 KiB kernel page. The range must not be mapped already.
+pub fn map_kernel_page(virt: u64, frame: Frame, flags: PageFlags) -> Result<(), PagingError> {
+    use crate::mm::paging::PageSize;
+    with_space(|m| m.map(virt, frame.start(), PageSize::Size4K, flags, &mut alloc_table))
+        .ok_or(PagingError::NotInitialized)??;
+    Ok(())
+}
+
+/// Unmaps one 4 KiB kernel page and flushes it from this CPU's TLB.
+/// Returns the frame that was mapped there.
+// TODO(smp): TLB shootdown on other CPUs.
+pub fn unmap_kernel_page(virt: u64) -> Option<Frame> {
+    let frame = with_space(|m| m.unmap_4k(virt)).flatten()?;
+    // SAFETY: invalidating a TLB entry cannot break memory safety.
+    unsafe { asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
+    Some(frame)
+}
