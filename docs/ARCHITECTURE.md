@@ -245,6 +245,12 @@ and `\Sessions\1\BaseNamedObjects\Global` one to `\BaseNamedObjects`.
 NtQueryDirectoryObject returns OBJECT_DIRECTORY_INFORMATION entries in
 link order, with the context as the next index.
 
+**I/O completion ports** (`ObjectBody::IoCompletion`): a FIFO of
+(key, context, status, information) packets, signaled while non-empty.
+FileCompletionInformation binds a file to a port and key; every read or
+write on it that does not fail at once posts a packet (context =
+ApcContext). NtRemoveIoCompletion pops one, waiting with a timeout.
+
 **Services with build-dependent numbers**: the low system call numbers
 used so far are long-stable on x64; others (NtCreateMutant, NtOpenMutant,
 NtCreateSemaphore, ...) change between builds and gala's are unverified.

@@ -62,6 +62,12 @@ pub const NT_CREATE_SYMBOLIC_LINK_OBJECT: u32 = 0x00d1;
 pub const NT_OPEN_SYMBOLIC_LINK_OBJECT: u32 = 0x0137;
 pub const NT_QUERY_SYMBOLIC_LINK_OBJECT: u32 = 0x016a;
 pub const NT_QUERY_DIRECTORY_OBJECT: u32 = 0x014a;
+// I/O completion ports: NtRemoveIoCompletion (0x09) is long-stable on x64;
+// the others are gala's own, UNVERIFIED.
+pub const NT_REMOVE_IO_COMPLETION: u32 = 0x0009;
+pub const NT_CREATE_IO_COMPLETION: u32 = 0x00c9;
+pub const NT_QUERY_IO_COMPLETION: u32 = 0x014f;
+pub const NT_SET_IO_COMPLETION: u32 = 0x01b0;
 pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
 pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
 pub const NT_OPEN_SECTION: u32 = 0x0037;
@@ -128,6 +134,10 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_OPEN_SYMBOLIC_LINK_OBJECT, "NtOpenSymbolicLinkObject", 3, nt_open_symbolic_link),
     (NT_QUERY_SYMBOLIC_LINK_OBJECT, "NtQuerySymbolicLinkObject", 3, nt_query_symbolic_link),
     (NT_QUERY_DIRECTORY_OBJECT, "NtQueryDirectoryObject", 7, nt_query_directory_object),
+    (NT_REMOVE_IO_COMPLETION, "NtRemoveIoCompletion", 5, nt_remove_io_completion),
+    (NT_CREATE_IO_COMPLETION, "NtCreateIoCompletion", 4, nt_create_io_completion),
+    (NT_QUERY_IO_COMPLETION, "NtQueryIoCompletion", 5, nt_query_io_completion),
+    (NT_SET_IO_COMPLETION, "NtSetIoCompletion", 5, nt_set_io_completion),
     (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", 10, nt_map_view_of_section),
     (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", 2, nt_unmap_view_of_section),
     (NT_OPEN_SECTION, "NtOpenSection", 3, nt_open_section),
@@ -341,6 +351,7 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
         let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
         let status = file_write(call, &entry, file, io_status, buffer, length, offset_ptr);
         finish_io(&entry.object, event.as_ref(), apc, status);
+        post_completion(call, file, io_status, status);
         return status;
     }
     if !matches!(entry.object.body, ObjectBody::ConsoleOutput) {
@@ -2008,7 +2019,115 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
     let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
     let status = file_read(call, &entry, file, iosb, buffer, length, offset_ptr);
     finish_io(&entry.object, event.as_ref(), apc, status);
+    post_completion(call, file, iosb, status);
     status
+}
+
+/// Posts a completed I/O to the file's completion port, if it has one:
+/// (key, ApcContext, status, IoStatus.Information). An I/O that failed at
+/// once posts nothing.
+fn post_completion(call: &Call<'_>, file: &file::FileObject, iosb: u64, status: NtStatus) {
+    if status.0 >= 0xc000_0000 {
+        return;
+    }
+    let Some((port, key)) = file.completion.lock().clone() else { return };
+    let information = call.read_u64(iosb + 8).unwrap_or(0);
+    let packet = super::object::CompletionPacket {
+        key,
+        context: call.arg(3).unwrap_or(0),
+        status: status.0,
+        information,
+    };
+    post_packet(&port, packet);
+}
+
+fn post_packet(port: &ObjectRef, packet: super::object::CompletionPacket) -> NtStatus {
+    let ObjectBody::IoCompletion(c) = &port.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if c.queue.lock().push(packet).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    wait::set_signal(port, 1);
+    NtStatus::SUCCESS
+}
+
+fn is_io_completion(o: &KObject) -> bool {
+    matches!(o.body, ObjectBody::IoCompletion(_))
+}
+
+fn io_completion_object(call: &Call<'_>, h: u64, access: u32) -> Result<ObjectRef, NtStatus> {
+    let entry = call.handle(Handle(h))?;
+    let object = entry.require(access)?.clone();
+    if is_io_completion(&object) { Ok(object) } else { Err(NtStatus::OBJECT_TYPE_MISMATCH) }
+}
+
+/// NtCreateIoCompletion(*Handle, DesiredAccess, ObjectAttributes, Count)
+fn nt_create_io_completion(call: &mut Call<'_>) -> NtStatus {
+    use super::object::{CompletionQueue, IoCompletion};
+    let (out, access, attrs_ptr) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
+    // TODO: the concurrency limit (Count) once there is more than one CPU.
+    let port = IoCompletion {
+        dispatcher: Dispatcher::new(0),
+        queue: IrqMutex::new(CompletionQueue::default()),
+    };
+    let Ok(object) = KObject::new(ObjectBody::IoCompletion(port)) else {
+        return NtStatus::NO_MEMORY;
+    };
+    create_object(call, out, access, attrs_ptr, object, is_io_completion)
+}
+
+/// NtSetIoCompletion(Handle, KeyContext, ApcContext, IoStatus, Information)
+fn nt_set_io_completion(call: &mut Call<'_>) -> NtStatus {
+    let port =
+        tri!(io_completion_object(call, arg!(call, 0), super::object::IO_COMPLETION_MODIFY_STATE));
+    let packet = super::object::CompletionPacket {
+        key: arg!(call, 1),
+        context: arg!(call, 2),
+        status: arg!(call, 3) as u32,
+        information: arg!(call, 4),
+    };
+    post_packet(&port, packet)
+}
+
+/// NtRemoveIoCompletion(Handle, *KeyContext, *ApcContext, *IoStatusBlock,
+///                      *Timeout): the oldest packet, waiting for one.
+fn nt_remove_io_completion(call: &mut Call<'_>) -> NtStatus {
+    let port =
+        tri!(io_completion_object(call, arg!(call, 0), super::object::IO_COMPLETION_MODIFY_STATE));
+    let ObjectBody::IoCompletion(c) = &port.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let (key_ptr, context_ptr, iosb) = (arg!(call, 1), arg!(call, 2), arg!(call, 3));
+    let timeout = tri!(call.timeout(arg!(call, 4)));
+    let objects = [port.clone()];
+    loop {
+        if let Some(p) = c.queue.lock().pop() {
+            tri!(call.write_u64(key_ptr, p.key));
+            tri!(call.write_u64(context_ptr, p.context));
+            tri!(call.write_iosb(iosb, NtStatus(p.status), p.information));
+            return NtStatus::SUCCESS;
+        }
+        match wait::wait_for(&objects, false, timeout) {
+            NtStatus::TIMEOUT => return NtStatus::TIMEOUT,
+            NtStatus::SUCCESS => {}
+            other => return other,
+        }
+    }
+}
+
+/// NtQueryIoCompletion(Handle, Class, Buffer, Length, *ReturnLength):
+/// IO_COMPLETION_BASIC_INFORMATION { Depth }.
+fn nt_query_io_completion(call: &mut Call<'_>) -> NtStatus {
+    let port =
+        tri!(io_completion_object(call, arg!(call, 0), super::object::IO_COMPLETION_QUERY_STATE));
+    let ObjectBody::IoCompletion(c) = &port.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if arg!(call, 1) as u32 != 0 {
+        return NtStatus::INVALID_INFO_CLASS;
+    }
+    let depth = c.queue.lock().len() as u32;
+    call.return_info(
+        &depth.to_le_bytes(),
+        arg!(call, 2),
+        arg!(call, 3) as u32 as u64,
+        arg!(call, 4),
+    )
 }
 
 /// The I/O completion APC of a read or write (ApcRoutine, ApcContext):
@@ -2114,6 +2233,7 @@ const FILE_RENAME_INFORMATION: u64 = 10;
 const FILE_DISPOSITION_INFORMATION: u64 = 13;
 const FILE_POSITION_INFORMATION: u64 = 14;
 const FILE_MODE_INFORMATION: u64 = 16;
+const FILE_COMPLETION_INFORMATION: u64 = 30;
 const FILE_END_OF_FILE_INFORMATION: u64 = 20;
 
 /// NtQueryInformationFile(FileHandle, *IoStatusBlock, Buffer, Length, Class)
@@ -2165,6 +2285,18 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
     // The class is a ULONG: only the low 32 bits are defined.
     let class = class as u32 as u64;
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if class == FILE_COMPLETION_INFORMATION {
+        // FILE_COMPLETION_INFORMATION { HANDLE Port; PVOID Key; }
+        if length < 16 {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        let (port, key) = (tri!(call.read_u64(buffer)), tri!(call.read_u64(buffer + 8)));
+        let port =
+            tri!(io_completion_object(call, port, super::object::IO_COMPLETION_MODIFY_STATE));
+        *file.completion.lock() = Some((port, key));
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+        return NtStatus::SUCCESS;
+    }
     if class == FILE_RENAME_INFORMATION {
         let status = rename_file(call, &entry, file, buffer, length);
         if status == NtStatus::SUCCESS {

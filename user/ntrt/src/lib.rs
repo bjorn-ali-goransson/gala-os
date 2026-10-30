@@ -892,6 +892,55 @@ pub fn write_file_apc(
     }
 }
 
+/// NtReadFile on an asynchronous handle with an ApcContext and no routine
+/// (what a completion port receives as the packet's context).
+pub fn read_file_context(
+    h: Handle,
+    buf: &mut [u8],
+    offset: i64,
+    context: usize,
+    iosb: &mut IoStatusBlock,
+) -> NtStatus {
+    // SAFETY: valid buffer and IO_STATUS_BLOCK, kept alive by the caller.
+    unsafe {
+        ntrt_nt_read_file(
+            h,
+            Handle(0),
+            core::ptr::null_mut(),
+            context as *mut c_void,
+            iosb,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &offset,
+            core::ptr::null(),
+        )
+    }
+}
+
+/// NtWriteFile counterpart of `read_file_context`.
+pub fn write_file_context(
+    h: Handle,
+    data: &[u8],
+    offset: i64,
+    context: usize,
+    iosb: &mut IoStatusBlock,
+) -> NtStatus {
+    // SAFETY: as for `read_file_context`.
+    unsafe {
+        ntrt_nt_write_file(
+            h,
+            Handle(0),
+            core::ptr::null_mut(),
+            context as *mut c_void,
+            iosb,
+            data.as_ptr(),
+            data.len() as u32,
+            &offset,
+            core::ptr::null(),
+        )
+    }
+}
+
 /// NtWriteFile counterpart of `read_file_async`.
 pub fn write_file_async(
     h: Handle,

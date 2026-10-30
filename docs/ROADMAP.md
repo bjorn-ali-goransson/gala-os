@@ -103,6 +103,8 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   named objects, wait-all), through ntdll exports; `sync_test`
 - Symbolic links (reparse in lookups, `\??\C:`, session Global link),
   NtQueryDirectoryObject; `symlink_test`
+- I/O completion ports (create, bind a file, post on completion, set,
+  remove with timeout, depth), through ntdll exports; `iocp_test`
 
 ## Next
 3b. **Object manager, rest**: keyed events, OBJ_PERMANENT/NtMakeTemporary-
@@ -117,7 +119,7 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
    SizeOfStackReserve/Commit from the image, AVX state (XSAVE, CONTEXT_EX)
    and FltSave in NtCreateThread, SEH unwinding is user-mode
    (ntdll) work; verify the dispatcher frame against the pinned ntdll.
-8c. **Files, rest**: I/O completion ports, truly pending I/O, NtNotifyChangeDirectoryFile, file
+8c. **Files, rest**: completion port concurrency limits, truly pending I/O, NtNotifyChangeDirectoryFile, file
    locks, short (8.3) names.
 9. Toward M6: collect windows.json on the pinned build and fix every
    difference (gala bug or wrong test expectation); run the first Wine

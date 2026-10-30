@@ -174,6 +174,9 @@ pub struct FileObject {
     pub mode: u32,
     /// Signaled when an I/O on it completes (waiting on a file handle).
     pub dispatcher: super::wait::Dispatcher,
+    /// FileCompletionInformation: the completion port and key that its
+    /// completed I/O is posted to.
+    pub completion: IrqMutex<Option<(ObjectRef, u64)>>,
 }
 
 /// CreateOptions reported by FileModeInformation.
@@ -332,6 +335,7 @@ pub fn create(
         scan: IrqMutex::new(None),
         mode: mode_of(options),
         dispatcher: super::wait::Dispatcher::new(0),
+        completion: IrqMutex::new(None),
     };
     let object = match KObject::new(ObjectBody::File(file)) {
         Ok(o) => o,

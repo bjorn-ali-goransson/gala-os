@@ -149,6 +149,55 @@ pub fn semaphore_counts_valid(initial: i32, maximum: i32) -> bool {
     maximum > 0 && initial >= 0 && initial <= maximum
 }
 
+pub const IO_COMPLETION_QUERY_STATE: u32 = 0x0001;
+pub const IO_COMPLETION_MODIFY_STATE: u32 = 0x0002;
+pub const IO_COMPLETION_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x3;
+pub const IO_COMPLETION_MAPPING: GenericMapping = GenericMapping {
+    read: READ_CONTROL | IO_COMPLETION_QUERY_STATE,
+    write: READ_CONTROL | IO_COMPLETION_MODIFY_STATE,
+    execute: READ_CONTROL | SYNCHRONIZE,
+    all: IO_COMPLETION_ALL_ACCESS,
+};
+
+/// A completion packet: what NtRemoveIoCompletion returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompletionPacket {
+    pub key: u64,
+    pub context: u64,
+    pub status: u32,
+    pub information: u64,
+}
+
+/// The FIFO of an I/O completion port.
+#[derive(Default)]
+pub struct CompletionQueue {
+    packets: Vec<CompletionPacket>,
+}
+
+impl CompletionQueue {
+    pub fn push(&mut self, packet: CompletionPacket) -> Result<(), AllocError> {
+        self.packets.try_push(packet)
+    }
+
+    pub fn pop(&mut self) -> Option<CompletionPacket> {
+        (!self.packets.is_empty()).then(|| self.packets.remove(0))
+    }
+
+    pub fn len(&self) -> usize {
+        self.packets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+}
+
+/// An I/O completion port: waitable while packets are queued.
+pub struct IoCompletion {
+    pub dispatcher: Dispatcher,
+    pub queue: IrqMutex<CompletionQueue>,
+}
+
 pub const SYMBOLIC_LINK_QUERY: u32 = 0x0001;
 pub const SYMBOLIC_LINK_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | 0x1;
 pub const SYMBOLIC_LINK_MAPPING: GenericMapping = GenericMapping {
@@ -237,6 +286,7 @@ pub enum ObjectBody {
     Mutant(Mutant),
     Semaphore(Semaphore),
     SymbolicLink(SymbolicLink),
+    IoCompletion(IoCompletion),
     Directory(Directory),
     Thread(super::thread::NtThread),
     Section(super::section::Section),
@@ -290,6 +340,7 @@ impl KObject {
             ObjectBody::Mutant(_) => "Mutant",
             ObjectBody::Semaphore(_) => "Semaphore",
             ObjectBody::SymbolicLink(_) => "SymbolicLink",
+            ObjectBody::IoCompletion(_) => "IoCompletion",
             ObjectBody::Directory(_) => "Directory",
             ObjectBody::Thread(_) => "Thread",
             ObjectBody::Section(_) => "Section",
@@ -319,6 +370,7 @@ impl KObject {
             ObjectBody::Event(e) => Some(&e.dispatcher),
             ObjectBody::Mutant(m) => Some(&m.dispatcher),
             ObjectBody::Semaphore(s) => Some(&s.dispatcher),
+            ObjectBody::IoCompletion(c) => Some(&c.dispatcher),
             ObjectBody::Thread(t) => Some(&t.dispatcher),
             ObjectBody::Process(p) => Some(&p.dispatcher),
             ObjectBody::File(f) => Some(&f.dispatcher),
@@ -337,6 +389,7 @@ impl KObject {
             ObjectBody::Mutant(_) => MUTANT_MAPPING,
             ObjectBody::Semaphore(_) => SEMAPHORE_MAPPING,
             ObjectBody::SymbolicLink(_) => SYMBOLIC_LINK_MAPPING,
+            ObjectBody::IoCompletion(_) => IO_COMPLETION_MAPPING,
             ObjectBody::Directory(_) => DIRECTORY_MAPPING,
             ObjectBody::Thread(_) => THREAD_MAPPING,
             ObjectBody::Section(_) => SECTION_MAPPING,
@@ -446,6 +499,19 @@ impl HandleTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_queue_is_fifo() {
+        let mut q = CompletionQueue::default();
+        let p = |key| CompletionPacket { key, context: key * 2, status: 0, information: 1 };
+        q.push(p(1)).unwrap();
+        q.push(p(2)).unwrap();
+        assert_eq!(q.len(), 2);
+        assert_eq!(q.pop(), Some(p(1)));
+        assert_eq!(q.pop(), Some(p(2)));
+        assert_eq!(q.pop(), None);
+        assert!(q.is_empty());
+    }
 
     #[test]
     fn semaphore_and_mutant_counts() {

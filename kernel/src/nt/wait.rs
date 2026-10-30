@@ -70,6 +70,9 @@ pub fn signal_dispatcher(d: &Dispatcher, signal: i32) {
 
 /// Whether `object` would satisfy a wait right now.
 fn is_signaled(object: &ObjectRef) -> bool {
+    if let ObjectBody::IoCompletion(c) = &object.body {
+        return !c.queue.lock().is_empty();
+    }
     if let ObjectBody::Mutant(m) = &object.body {
         // Free, or already ours (mutants are recursive).
         let owner = m.state.lock().owner;

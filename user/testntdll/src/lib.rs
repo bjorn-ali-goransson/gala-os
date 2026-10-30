@@ -84,6 +84,19 @@ syscall_stubs! {
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes
     );
     NtQuerySymbolicLinkObject = 0x16a, fn(h: usize, target: *mut UnicodeString, returned: *mut u32);
+    // I/O completion ports: 0x09 is long-stable on x64; the others are
+    // gala's numbers (unverified).
+    NtRemoveIoCompletion = 0x09, fn(
+        h: usize, key: *mut usize, apc_context: *mut usize, iosb: *mut [usize; 2],
+        timeout: *const i64
+    );
+    NtCreateIoCompletion = 0xc9, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes, count: u32
+    );
+    NtSetIoCompletion = 0x1b0, fn(
+        h: usize, key: usize, apc_context: usize, status: u32, information: usize
+    );
+    NtQueryIoCompletion = 0x14f, fn(h: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32);
     NtQueryDirectoryObject = 0x14a, fn(
         h: usize, buf: *mut u8, len: u32, single: u8, restart: u8, context: *mut u32,
         returned: *mut u32
