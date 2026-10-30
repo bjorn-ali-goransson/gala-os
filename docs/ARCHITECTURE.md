@@ -215,6 +215,15 @@ object, the granted specific rights (requested rights mapped through the
 type's `GenericMapping`) and attributes; services check rights with
 `HandleEntry::require`. Handle values are `(slot + 1) * 4`.
 
+**Namespace** (`nt::namespace`): a tree of `Directory` objects rooted at
+`\` with `\BaseNamedObjects`, `\KernelObjects`, `\Sessions\1\BaseNamedObjects`
+created at boot (permanent). Named objects record their parent and name;
+each object counts its handles, and a non-permanent named object is
+unlinked when the last handle closes (`HandleTable::close`). Services
+capture OBJECT_ATTRIBUTES (length must be 48, RootDirectory needs
+DIRECTORY_TRAVERSE / DIRECTORY_CREATE_OBJECT) and UNICODE_STRINGs.
+Case-insensitive matching is ASCII-only for now.
+
 **Waits** (`nt::wait`): waitable objects embed a `Dispatcher` (signal
 state + waiter list). One global dispatcher lock covers all signal changes
 and wait checks, so WaitAll sees a consistent state. A waiter registers on
@@ -228,7 +237,8 @@ the TSC clock; the performance counter runs at 10 MHz.
 **Services**: `NtWriteFile` (console handles only), `NtClose`,
 `NtTerminateProcess`, `NtAllocateVirtualMemory`, `NtFreeVirtualMemory`,
 `NtProtectVirtualMemory`, `NtQueryVirtualMemory` (current process only),
-`NtCreateEvent` (unnamed), `NtSetEvent`, `NtClearEvent`, `NtQueryEvent`,
+`NtCreateEvent`, `NtOpenEvent`, `NtOpenDirectoryObject`, `NtQueryObject`
+(basic, name), `NtSetEvent`, `NtClearEvent`, `NtQueryEvent`,
 `NtWaitForSingleObject`, `NtWaitForMultipleObjects`, `NtDelayExecution`,
 `NtDuplicateObject`, `NtQueryPerformanceCounter`, `NtQuerySystemTime`; unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
 User-mode CPU exceptions terminate the process with the matching NTSTATUS

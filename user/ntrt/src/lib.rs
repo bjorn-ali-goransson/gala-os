@@ -52,6 +52,9 @@ stubs! {
     ntrt_nt_query_event = 0x0056;
     ntrt_nt_query_system_time = 0x005a;
     ntrt_nt_wait_for_multiple_objects = 0x005b;
+    ntrt_nt_query_object = 0x0010;
+    ntrt_nt_open_event = 0x0040;
+    ntrt_nt_open_directory_object = 0x0058;
     ntrt_nt_write_file = 0x0008;
     ntrt_nt_close = 0x000f;
     ntrt_nt_allocate_virtual_memory = 0x0018;
@@ -94,7 +97,7 @@ unsafe extern "system" {
     fn ntrt_nt_create_event(
         handle: *mut Handle,
         access: u32,
-        attributes: *const c_void,
+        attributes: *const ObjectAttributes,
         kind: u32,
         initial: u8,
     ) -> NtStatus;
@@ -102,6 +105,23 @@ unsafe extern "system" {
         handle: Handle,
         class: u32,
         info: *mut [u32; 2],
+        length: u32,
+        returned: *mut u32,
+    ) -> NtStatus;
+    fn ntrt_nt_open_event(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+    ) -> NtStatus;
+    fn ntrt_nt_open_directory_object(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+    ) -> NtStatus;
+    fn ntrt_nt_query_object(
+        handle: Handle,
+        class: u32,
+        buffer: *mut u8,
         length: u32,
         returned: *mut u32,
     ) -> NtStatus;
@@ -165,11 +185,104 @@ pub const fn relative_ms(ms: i64) -> i64 {
 }
 
 pub fn create_event(access: u32, kind: u32, initial: bool) -> (NtStatus, Handle) {
+    create_event_with(access, None, kind, initial)
+}
+
+pub fn create_event_with(
+    access: u32,
+    attrs: Option<&ObjectAttributes>,
+    kind: u32,
+    initial: bool,
+) -> (NtStatus, Handle) {
     let mut h = Handle(0);
-    // SAFETY: valid output pointer; no object attributes.
-    let st =
-        unsafe { ntrt_nt_create_event(&mut h, access, core::ptr::null(), kind, initial as u8) };
+    let a = attrs.map_or(core::ptr::null(), |a| a as *const ObjectAttributes);
+    // SAFETY: valid output pointer; attributes valid or null.
+    let st = unsafe { ntrt_nt_create_event(&mut h, access, a, kind, initial as u8) };
     (st, h)
+}
+
+pub fn open_event(access: u32, attrs: &ObjectAttributes) -> (NtStatus, Handle) {
+    let mut h = Handle(0);
+    // SAFETY: valid pointers.
+    let st = unsafe { ntrt_nt_open_event(&mut h, access, attrs) };
+    (st, h)
+}
+
+pub fn open_directory(access: u32, attrs: &ObjectAttributes) -> (NtStatus, Handle) {
+    let mut h = Handle(0);
+    // SAFETY: valid pointers.
+    let st = unsafe { ntrt_nt_open_directory_object(&mut h, access, attrs) };
+    (st, h)
+}
+
+/// NtQueryObject into `buf`; returns (status, returned length).
+pub fn query_object(h: Handle, class: u32, buf: &mut [u8]) -> (NtStatus, u32) {
+    let mut ret = 0;
+    // SAFETY: valid buffer of the given length.
+    let st =
+        unsafe { ntrt_nt_query_object(h, class, buf.as_mut_ptr(), buf.len() as u32, &mut ret) };
+    (st, ret)
+}
+
+#[repr(C)]
+pub struct UnicodeString {
+    pub length: u16,
+    pub maximum_length: u16,
+    pub buffer: *const u16,
+}
+
+impl UnicodeString {
+    pub fn new(s: &[u16]) -> Self {
+        let bytes = (s.len() * 2) as u16;
+        UnicodeString { length: bytes, maximum_length: bytes, buffer: s.as_ptr() }
+    }
+}
+
+#[repr(C)]
+pub struct ObjectAttributes {
+    pub length: u32,
+    pub root_directory: Handle,
+    pub object_name: *const UnicodeString,
+    pub attributes: u32,
+    pub security_descriptor: *const c_void,
+    pub security_quality_of_service: *const c_void,
+}
+
+pub const OBJ_INHERIT: u32 = 0x02;
+pub const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+pub const OBJ_OPENIF: u32 = 0x80;
+
+impl ObjectAttributes {
+    pub fn new(name: &UnicodeString, root: Handle, attributes: u32) -> Self {
+        ObjectAttributes {
+            length: core::mem::size_of::<ObjectAttributes>() as u32,
+            root_directory: root,
+            object_name: name,
+            attributes,
+            security_descriptor: core::ptr::null(),
+            security_quality_of_service: core::ptr::null(),
+        }
+    }
+}
+
+/// Builds a UTF-16 array from an ASCII string literal at compile time.
+#[macro_export]
+macro_rules! wide {
+    ($s:literal) => {{
+        const S: &str = $s;
+        const N: usize = S.len();
+        const W: [u16; N] = {
+            let b = S.as_bytes();
+            let mut w = [0u16; N];
+            let mut i = 0;
+            while i < N {
+                w[i] = b[i] as u16;
+                i += 1;
+            }
+            w
+        };
+        W
+    }};
 }
 
 /// Returns (status, previous state).
@@ -422,4 +535,92 @@ macro_rules! entry {
             $crate::exit(0xc000_0409)
         }
     };
+}
+
+// Memory intrinsics that the compiler may call. Without a CRT we provide
+// them; copy/fill use `rep` string instructions so they cannot be compiled
+// back into calls to themselves.
+global_asm!(
+    ".globl memcpy",
+    "memcpy:",
+    "mov rax, rcx",
+    "mov r9, rdi",
+    "mov r10, rsi",
+    "mov rdi, rcx",
+    "mov rsi, rdx",
+    "mov rcx, r8",
+    "rep movsb",
+    "mov rdi, r9",
+    "mov rsi, r10",
+    "ret",
+    ".globl memmove",
+    "memmove:",
+    "mov rax, rcx",
+    "mov r9, rdi",
+    "mov r10, rsi",
+    "mov rdi, rcx",
+    "mov rsi, rdx",
+    "mov rcx, r8",
+    "cmp rdi, rsi",
+    "jbe 2f",
+    // Overlapping with dst above src: copy backwards.
+    "lea rsi, [rsi + rcx - 1]",
+    "lea rdi, [rdi + rcx - 1]",
+    "std",
+    "rep movsb",
+    "cld",
+    "jmp 3f",
+    "2:",
+    "rep movsb",
+    "3:",
+    "mov rdi, r9",
+    "mov rsi, r10",
+    "ret",
+    ".globl memset",
+    "memset:",
+    "mov r9, rdi",
+    "mov r10, rcx",
+    "mov rdi, rcx",
+    "mov eax, edx",
+    "mov rcx, r8",
+    "rep stosb",
+    "mov rdi, r9",
+    "mov rax, r10",
+    "ret",
+);
+
+/// # Safety
+/// Both ranges must be readable for `n` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
+    for i in 0..n {
+        // SAFETY: within the caller-guaranteed ranges.
+        let (x, y) = unsafe { (*a.add(i), *b.add(i)) };
+        if x != y {
+            return i32::from(x) - i32::from(y);
+        }
+    }
+    0
+}
+
+/// Same as `memcmp`; LLVM may emit it for equality-only comparisons.
+///
+/// # Safety
+/// Both ranges must be readable for `n` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
+    // SAFETY: forwarded.
+    unsafe { memcmp(a, b, n) }
+}
+
+/// MSVC marker symbol that object files using floating point reference.
+#[unsafe(no_mangle)]
+#[used]
+pub static _fltused: i32 = 0;
+
+/// Unwind personality referenced by the prebuilt `core` library's unwind
+/// tables. With `panic = abort` nothing unwinds, so it is never called.
+#[unsafe(no_mangle)]
+pub extern "C" fn __CxxFrameHandler3() -> ! {
+    exit(0xc000_0409)
 }

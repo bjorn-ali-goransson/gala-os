@@ -53,6 +53,12 @@ impl<T> Drop for IrqGuard<'_, T> {
     }
 }
 
+impl<T: Default> Default for IrqMutex<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
 /// Host unit tests run in user mode, where `cli`/`sti` would fault.
 #[cfg(test)]
 mod host_cpu {

@@ -2,10 +2,12 @@
 //! handle tables with granted access masks.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::status::NtStatus;
 use super::wait::Dispatcher;
 use crate::mm::heap::{AllocError, KArc, TryVec};
+use crate::sync::IrqMutex;
 
 // Standard and generic access rights (winnt.h).
 pub const DELETE: u32 = 0x0001_0000;
@@ -74,35 +76,102 @@ pub struct Event {
     pub dispatcher: Dispatcher,
 }
 
+pub const DIRECTORY_QUERY: u32 = 0x0001;
+pub const DIRECTORY_TRAVERSE: u32 = 0x0002;
+pub const DIRECTORY_CREATE_OBJECT: u32 = 0x0004;
+pub const DIRECTORY_CREATE_SUBDIRECTORY: u32 = 0x0008;
+pub const DIRECTORY_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | 0xf;
+
+pub const DIRECTORY_MAPPING: GenericMapping = GenericMapping {
+    read: READ_CONTROL | DIRECTORY_QUERY | DIRECTORY_TRAVERSE,
+    write: READ_CONTROL | DIRECTORY_CREATE_OBJECT | DIRECTORY_CREATE_SUBDIRECTORY,
+    execute: READ_CONTROL | DIRECTORY_QUERY | DIRECTORY_TRAVERSE,
+    all: DIRECTORY_ALL_ACCESS,
+};
+
+/// An object directory: named children (see `nt::namespace`).
+#[derive(Default)]
+pub struct Directory {
+    pub entries: IrqMutex<Vec<DirEntry>>,
+}
+
+pub struct DirEntry {
+    pub name: Vec<u16>,
+    pub object: ObjectRef,
+}
+
 pub enum ObjectBody {
     /// Console output: writes go to the kernel console.
     ConsoleOutput,
     ConsoleInput,
     Event(Event),
+    Directory(Directory),
+}
+
+/// Where a named object lives in the namespace.
+pub struct ObjectName {
+    pub parent: ObjectRef,
+    pub name: Vec<u16>,
 }
 
 pub struct KObject {
     pub body: ObjectBody,
+    /// Set while the object is linked into a directory.
+    pub name: IrqMutex<Option<ObjectName>>,
+    /// Open handles; a non-permanent named object leaves the namespace
+    /// when this drops to zero.
+    handle_count: AtomicUsize,
+    /// Permanent objects stay named without handles (system directories).
+    pub permanent: bool,
 }
 
 pub type ObjectRef = KArc<KObject>;
 
 impl KObject {
     pub fn new(body: ObjectBody) -> Result<ObjectRef, AllocError> {
-        KArc::try_new(KObject { body })
+        Self::with_permanence(body, false)
+    }
+
+    pub fn with_permanence(body: ObjectBody, permanent: bool) -> Result<ObjectRef, AllocError> {
+        KArc::try_new(KObject {
+            body,
+            name: IrqMutex::new(None),
+            handle_count: AtomicUsize::new(0),
+            permanent,
+        })
+    }
+
+    pub fn handle_count(&self) -> usize {
+        self.handle_count.load(Ordering::Acquire)
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        match self.body {
+            ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => "File",
+            ObjectBody::Event(_) => "Event",
+            ObjectBody::Directory(_) => "Directory",
+        }
+    }
+
+    pub fn as_directory(&self) -> Option<&Directory> {
+        match &self.body {
+            ObjectBody::Directory(d) => Some(d),
+            _ => None,
+        }
     }
 
     /// Signal state shared with waiters, for waitable objects.
     pub fn dispatcher(&self) -> Option<&Dispatcher> {
         match &self.body {
             ObjectBody::Event(e) => Some(&e.dispatcher),
-            ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => None,
+            ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput | ObjectBody::Directory(_) => None,
         }
     }
 
     pub fn mapping(&self) -> GenericMapping {
         match &self.body {
             ObjectBody::Event(_) => EVENT_MAPPING,
+            ObjectBody::Directory(_) => DIRECTORY_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,
                 write: READ_CONTROL | SYNCHRONIZE | 0x116,
@@ -155,6 +224,7 @@ fn slot(handle: Handle) -> Option<usize> {
 
 impl HandleTable {
     pub fn insert(&mut self, entry: HandleEntry) -> Result<Handle, AllocError> {
+        let object = entry.object.clone();
         let index = match self.entries.iter().position(Option::is_none) {
             Some(i) => {
                 self.entries[i] = Some(entry);
@@ -165,6 +235,7 @@ impl HandleTable {
                 self.entries.len() - 1
             }
         };
+        object.handle_count.fetch_add(1, Ordering::AcqRel);
         Ok(Handle((index as u64 + 1) * 4))
     }
 
@@ -179,7 +250,12 @@ impl HandleTable {
     }
 
     pub fn close(&mut self, handle: Handle) -> Option<HandleEntry> {
-        self.entries.get_mut(slot(handle)?)?.take()
+        let entry = self.entries.get_mut(slot(handle)?)?.take()?;
+        if entry.object.handle_count.fetch_sub(1, Ordering::AcqRel) == 1 && !entry.object.permanent
+        {
+            super::namespace::unlink(&entry.object);
+        }
+        Some(entry)
     }
 }
 

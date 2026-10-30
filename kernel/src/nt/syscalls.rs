@@ -6,9 +6,10 @@
 
 use alloc::vec::Vec;
 
+use super::namespace;
 use super::object::{
-    EVENT_MODIFY_STATE, EVENT_QUERY_STATE, Event, EventType, Handle, HandleEntry, KObject,
-    ObjectBody, ObjectRef, SYNCHRONIZE,
+    DIRECTORY_CREATE_OBJECT, DIRECTORY_TRAVERSE, EVENT_MODIFY_STATE, EVENT_QUERY_STATE, Event,
+    EventType, Handle, HandleEntry, KObject, ObjectBody, ObjectRef, SYNCHRONIZE,
 };
 use super::process::{self, Process};
 use super::status::NtStatus;
@@ -21,6 +22,9 @@ use crate::mm::heap::TryVec;
 
 pub const NT_WAIT_FOR_SINGLE_OBJECT: u32 = 0x0004;
 pub const NT_WRITE_FILE: u32 = 0x0008;
+pub const NT_QUERY_OBJECT: u32 = 0x0010;
+pub const NT_OPEN_EVENT: u32 = 0x0040;
+pub const NT_OPEN_DIRECTORY_OBJECT: u32 = 0x0058;
 pub const NT_SET_EVENT: u32 = 0x000e;
 pub const NT_QUERY_PERFORMANCE_COUNTER: u32 = 0x0031;
 pub const NT_DELAY_EXECUTION: u32 = 0x0034;
@@ -42,6 +46,9 @@ type Handler = fn(&mut Call<'_>) -> NtStatus;
 const TABLE: &[(u32, &str, Handler)] = &[
     (NT_WAIT_FOR_SINGLE_OBJECT, "NtWaitForSingleObject", nt_wait_for_single_object),
     (NT_WRITE_FILE, "NtWriteFile", nt_write_file),
+    (NT_QUERY_OBJECT, "NtQueryObject", nt_query_object),
+    (NT_OPEN_EVENT, "NtOpenEvent", nt_open_event),
+    (NT_OPEN_DIRECTORY_OBJECT, "NtOpenDirectoryObject", nt_open_directory_object),
     (NT_SET_EVENT, "NtSetEvent", nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", nt_delay_execution),
@@ -282,28 +289,224 @@ fn nt_query_virtual_memory(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
-const OBJECT_ATTRIBUTES_OBJECT_NAME: u64 = 0x10;
+const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+const OBJ_OPENIF: u32 = 0x80;
+/// sizeof(OBJECT_ATTRIBUTES) on x64.
+const OBJECT_ATTRIBUTES_SIZE: u32 = 48;
+/// Longest name accepted (UNICODE_STRING lengths are u16 byte counts).
+const MAX_NAME_CHARS: usize = 0x7fff;
+
+/// Captured OBJECT_ATTRIBUTES.
+struct Attributes {
+    root: Option<ObjectRef>,
+    /// Empty if there is no name.
+    name: Vec<u16>,
+    attributes: u32,
+}
+
+impl Attributes {
+    fn case_insensitive(&self) -> bool {
+        self.attributes & OBJ_CASE_INSENSITIVE != 0
+    }
+}
+
+impl Call<'_> {
+    /// Copies a UNICODE_STRING from user memory.
+    fn unicode_string(&self, ptr: u64) -> Result<Vec<u16>, NtStatus> {
+        let mut header = [0u8; 16];
+        self.process.read(ptr, &mut header).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+        let length = usize::from(u16::from_le_bytes([header[0], header[1]]));
+        let maximum = usize::from(u16::from_le_bytes([header[2], header[3]]));
+        let buffer = u64::from_le_bytes(header[8..16].try_into().unwrap_or([0; 8]));
+        if length % 2 != 0 || length > maximum || length / 2 > MAX_NAME_CHARS {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(length).map_err(|_| NtStatus::NO_MEMORY)?;
+        bytes.resize(length, 0u8);
+        self.process.read(buffer, &mut bytes).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+        let mut name = Vec::new();
+        name.try_reserve_exact(length / 2).map_err(|_| NtStatus::NO_MEMORY)?;
+        for pair in bytes.chunks_exact(2) {
+            let _ = name.try_push(u16::from_le_bytes([pair[0], pair[1]]));
+        }
+        Ok(name)
+    }
+
+    /// Captures OBJECT_ATTRIBUTES; a RootDirectory handle must grant
+    /// `root_access` on a directory.
+    fn object_attributes(
+        &self,
+        ptr: u64,
+        root_access: u32,
+    ) -> Result<Option<Attributes>, NtStatus> {
+        if ptr == 0 {
+            return Ok(None);
+        }
+        let mut raw = [0u8; OBJECT_ATTRIBUTES_SIZE as usize];
+        self.process.read(ptr, &mut raw).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+        let field = |off: usize| u64::from_le_bytes(raw[off..off + 8].try_into().unwrap_or([0; 8]));
+        if u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) != OBJECT_ATTRIBUTES_SIZE {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        let root = match field(8) {
+            0 => None,
+            h => {
+                let entry = self.handle(Handle(h))?;
+                let object = entry.require(root_access)?.clone();
+                if object.as_directory().is_none() {
+                    return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+                }
+                Some(object)
+            }
+        };
+        let name = match field(16) {
+            0 => Vec::new(),
+            p => self.unicode_string(p)?,
+        };
+        Ok(Some(Attributes { root, name, attributes: field(24) as u32 }))
+    }
+
+    /// Inserts a handle for `object` and stores its value at `out`.
+    fn return_handle(&self, out: u64, object: ObjectRef, access: u32, attributes: u32) -> NtStatus {
+        let entry = HandleEntry { access: object.mapping().map(access), object, attributes };
+        let Ok(handle) = self.process.handles.lock().insert(entry) else {
+            return NtStatus::NO_MEMORY;
+        };
+        if self.write_u64(out, handle.0).is_err() {
+            self.process.handles.lock().close(handle);
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        NtStatus::SUCCESS
+    }
+
+    /// Opens the named object described by `attrs_ptr`, checking its type.
+    fn open_named(
+        &self,
+        attrs_ptr: u64,
+        is_type: fn(&KObject) -> bool,
+    ) -> Result<(ObjectRef, u32), NtStatus> {
+        let attrs = self
+            .object_attributes(attrs_ptr, DIRECTORY_TRAVERSE)?
+            .ok_or(NtStatus::INVALID_PARAMETER)?;
+        if attrs.name.is_empty() && attrs.root.is_none() {
+            return Err(NtStatus::OBJECT_PATH_SYNTAX_BAD);
+        }
+        let object = namespace::lookup(attrs.root.as_ref(), &attrs.name, attrs.case_insensitive())?;
+        if !is_type(&object) {
+            return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+        }
+        Ok((object, attrs.attributes))
+    }
+}
+
+/// Handle attribute bits that are kept on the handle.
+const HANDLE_ATTRIBUTES: u32 = 0x02; // OBJ_INHERIT
 
 /// NtCreateEvent(*EventHandle, DesiredAccess, ObjectAttributes, EventType,
 ///               InitialState)
 fn nt_create_event(call: &mut Call<'_>) -> NtStatus {
-    let (out, access, attrs) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
+    let (out, access, attrs_ptr) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
     let kind = match arg!(call, 3) as u32 {
         0 => EventType::Notification,
         1 => EventType::Synchronization,
         _ => return NtStatus::INVALID_PARAMETER_4,
     };
     let initial = arg!(call, 4) as u8 != 0;
-    if attrs != 0 && tri!(call.read_u64(attrs + OBJECT_ATTRIBUTES_OBJECT_NAME)) != 0 {
-        // TODO: named objects (object directory namespace).
-        return NtStatus::NOT_IMPLEMENTED;
-    }
+    let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
     let event = Event { kind, dispatcher: Dispatcher::new(i32::from(initial)) };
     let Ok(object) = KObject::new(ObjectBody::Event(event)) else { return NtStatus::NO_MEMORY };
-    let entry = HandleEntry { access: object.mapping().map(access), object, attributes: 0 };
-    let Ok(handle) = call.process.handles.lock().insert(entry) else { return NtStatus::NO_MEMORY };
-    if call.write_u64(out, handle.0).is_err() {
-        call.process.handles.lock().close(handle);
+    let (object, existed, handle_attributes) = match attrs {
+        Some(a) if !a.name.is_empty() || a.root.is_some() => {
+            let open_if = a.attributes & OBJ_OPENIF != 0;
+            let (object, existed) = tri!(namespace::create(
+                a.root.as_ref(),
+                &a.name,
+                object,
+                a.case_insensitive(),
+                open_if
+            ));
+            if existed && !matches!(object.body, ObjectBody::Event(_)) {
+                return NtStatus::OBJECT_TYPE_MISMATCH;
+            }
+            (object, existed, a.attributes & HANDLE_ATTRIBUTES)
+        }
+        Some(a) => (object, false, a.attributes & HANDLE_ATTRIBUTES),
+        None => (object, false, 0),
+    };
+    let status = call.return_handle(out, object, access, handle_attributes);
+    if status == NtStatus::SUCCESS && existed { NtStatus::OBJECT_NAME_EXISTS } else { status }
+}
+
+/// NtOpenEvent(*EventHandle, DesiredAccess, ObjectAttributes)
+fn nt_open_event(call: &mut Call<'_>) -> NtStatus {
+    let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
+    let (object, attributes) =
+        tri!(call.open_named(arg!(call, 2), |o| matches!(o.body, ObjectBody::Event(_))));
+    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+}
+
+/// NtOpenDirectoryObject(*DirectoryHandle, DesiredAccess, ObjectAttributes)
+fn nt_open_directory_object(call: &mut Call<'_>) -> NtStatus {
+    let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
+    let (object, attributes) = tri!(call.open_named(arg!(call, 2), |o| o.as_directory().is_some()));
+    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+}
+
+const OBJECT_BASIC_INFORMATION: u64 = 0;
+const OBJECT_NAME_INFORMATION: u64 = 1;
+const OBJECT_BASIC_INFORMATION_SIZE: usize = 56;
+
+/// NtQueryObject(Handle, ObjectInformationClass, Buffer, Length, *ReturnLength)
+fn nt_query_object(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let (class, buffer, length, ret_ptr) =
+        (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4));
+    let mut out = Vec::new();
+    match class {
+        OBJECT_BASIC_INFORMATION => {
+            // Attributes, GrantedAccess, HandleCount, PointerCount, pool
+            // charges, reserved, info sizes, CreationTime.
+            if out.try_reserve(OBJECT_BASIC_INFORMATION_SIZE).is_err() {
+                return NtStatus::NO_MEMORY;
+            }
+            out.resize(OBJECT_BASIC_INFORMATION_SIZE, 0u8);
+            let put = |out: &mut Vec<u8>, off: usize, v: u32| {
+                out[off..off + 4].copy_from_slice(&v.to_le_bytes())
+            };
+            put(&mut out, 0, entry.attributes);
+            put(&mut out, 4, entry.access);
+            put(&mut out, 8, entry.object.handle_count() as u32);
+            put(&mut out, 12, KArc::strong_count(&entry.object) as u32);
+        }
+        OBJECT_NAME_INFORMATION => {
+            let Ok(name) = namespace::full_name(&entry.object) else { return NtStatus::NO_MEMORY };
+            // OBJECT_NAME_INFORMATION { UNICODE_STRING Name; } followed by
+            // the NUL-terminated string the Buffer field points to.
+            let bytes = name.len() * 2;
+            let total = 16 + if name.is_empty() { 0 } else { bytes + 2 };
+            if out.try_reserve(total).is_err() {
+                return NtStatus::NO_MEMORY;
+            }
+            out.resize(total, 0u8);
+            if !name.is_empty() {
+                out[0..2].copy_from_slice(&(bytes as u16).to_le_bytes());
+                out[2..4].copy_from_slice(&(bytes as u16 + 2).to_le_bytes());
+                out[8..16].copy_from_slice(&(buffer + 16).to_le_bytes());
+                for (i, c) in name.iter().enumerate() {
+                    out[16 + 2 * i..18 + 2 * i].copy_from_slice(&c.to_le_bytes());
+                }
+            }
+        }
+        _ => return NtStatus::INVALID_INFO_CLASS,
+    }
+    if ret_ptr != 0 {
+        tri!(call.write_u32(ret_ptr, out.len() as u32));
+    }
+    if length < out.len() {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    if call.process.write(buffer, &out).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS

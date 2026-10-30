@@ -19,12 +19,16 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   granted access and generic mappings, NtDuplicateObject; dispatcher with
   any/all waits and timeouts; events (create/set/clear/query);
   NtDelayExecution, NtQueryPerformanceCounter, NtQuerySystemTime; `wait_test`
+- Named objects: namespace tree with system directories, OBJECT_ATTRIBUTES
+  capture, open-or-create, case-insensitive lookup, names unlinked with the
+  last handle, NtOpenEvent, NtOpenDirectoryObject, NtQueryObject
+  (basic, name); `object_test`
 
 ## Next
-3a. **Named objects**: object directory namespace (`\`, `\BaseNamedObjects`,
-   `\Sessions\1\BaseNamedObjects`), OBJECT_ATTRIBUTES/UNICODE_STRING parsing,
-   NtOpenEvent, open-or-create semantics (STATUS_OBJECT_NAME_EXISTS),
-   mutants and semaphores (numbers to verify), `object_test`.
+3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
+   NtOpenMutant, NtCreateSemaphore/NtReleaseSemaphore (0x0a); abandonment
+   on thread exit. Create/open numbers vary by build: verify on 26100 first.
+   Symbolic links (`\Sessions\1\BaseNamedObjects\Global`), NtQueryDirectoryObject.
 4. **Threads in processes**: NtCreateThreadEx, NtTerminateThread, thread and
    process objects waitable, exit codes, NtQueryInformationProcess/Thread
    basics, process teardown (free address space).
