@@ -69,10 +69,46 @@ is done and what comes next (the "Next" list is the agreed order).
 - **Flaky boot tests** usually mean a race; rerun the one scenario a few
   times (`cargo xtask boot-test name`) before blaming CI.
 
+## Test speed and environments
+
+`cargo xtask test` (host unit tests + every boot scenario) took 66 s for
+the boot scenarios before T1 and 14 s after, under software emulation on a
+4-CPU container (40 scenarios). Where the time went, and what changed:
+
+| | before | after |
+|---|---|---|
+| VMs | 40 | 13 |
+| firmware + bootloader (summed over VMs) | 193 s (OVMF) | 24 s (SeaBIOS) |
+| kernel + tests (summed) | 38 s | 18 s |
+| ISO creation | 5.7 s (sequential) | 0.5 s (parallel) |
+| boot-test wall time | 66 s | 14 s |
+
+- **BIOS boot by default.** ISOs are hybrid (BIOS and UEFI). SeaBIOS
+  reaches the kernel in ~0.9 s against ~4.5 s for OVMF. `hello`,
+  `selftest` and `fault-pagefault` still boot by UEFI so that path stays
+  tested; `XTASK_FIRMWARE=uefi|bios` forces one for everything.
+- **Shared VMs.** Scenarios that just run one program with no other
+  flags, expect success, boot by BIOS and expect no process ids are
+  grouped by identical boot modules and run in shared VMs
+  (`run=a.exe,b.exe`). Each program is judged on its own section of the
+  log (between `run: begin` and `run: end`, plus the boot preamble).
+  `XTASK_NO_BATCH=1` gives every scenario its own VM; `cargo xtask
+  boot-test <name>` with one match always boots it alone.
+- xtask prints per-scenario (or per-VM) timing and a summary, also written
+  to `target/report/timing.txt`.
+- **Docker**: `cargo xtask docker-test [xtask args]` builds
+  `docker/test.Dockerfile` (Ubuntu 24.04, QEMU, OVMF, xorriso, the pinned
+  toolchain) and runs `cargo xtask test` (or the given arguments) inside
+  it with the repository at /work and build output in `target/docker`.
+  It passes `/dev/kvm` through when the host has it (then boots run at
+  near-native speed) and forwards the `XTASK_*` variables. In a cloud
+  container without a running daemon, start one with `dockerd &`.
+
 ## Debugging
 
 - `XTASK_VERBOSE=1 cargo xtask boot-test name` prints the serial log; logs
-  are also kept in `target/debug/test-<name>.serial.log`.
+  are also kept in `target/debug/test-<name>.serial.log` (shared VMs:
+  `target/debug/batch-<first program>.serial.log`).
 - `XTASK_QEMU_ARGS="-d int -D qemu.log" cargo xtask boot-test name` passes
   extra QEMU arguments; the interrupt log shows every exception with the
   full register state (EFER, CR4, TR...), which is how per-CPU setup bugs

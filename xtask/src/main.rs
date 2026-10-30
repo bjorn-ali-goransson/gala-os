@@ -117,6 +117,8 @@ commands:
   test         run host unit tests, then boot in QEMU and check the result
   boot-test    only the QEMU boot tests [scenario name filter]
   export-tests copy the built test programs to user/bin/ (checked in)
+  docker-test  build the test image (docker/test.Dockerfile) and run
+               `cargo xtask test` (or the given xtask arguments) inside it
   report       run every test program on gala; write target/report/gala.{json,md}
   compare      compare a report from Windows (user/bin/run-all.ps1) with gala's:
                compare <windows.json> [<gala.json>]
@@ -133,6 +135,7 @@ fn main() -> ExitCode {
         Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
         Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
         Some("report") => gala_report(release),
+        Some("docker-test") => docker_test(&args[1..]),
         Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
             Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
             None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
@@ -190,7 +193,7 @@ fn unit_tests() -> Result {
 /// `name.iso` whose boot entry passes `cmdline` to the kernel.
 fn build(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
     build_kernel(release)?;
-    make_iso(release, name, cmdline)
+    make_iso(release, name, cmdline, &[])
 }
 
 fn build_kernel(release: bool) -> Result {
@@ -217,7 +220,7 @@ fn build_kernel(release: bool) -> Result {
     run_cmd(&mut cmd)
 }
 
-fn make_iso(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
+fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
     let kernel = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
     let limine = fetch_limine()?;
@@ -238,14 +241,15 @@ fn make_iso(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
         copy(&exe, &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
     }
-    let scenario = ["test-", "report-"].iter().find_map(|p| name.strip_prefix(p)).unwrap_or(name);
-    for (_, file, dir) in EXTRA_MODULES.iter().filter(|m| m.0 == scenario) {
+    for (file, dir) in extra {
         let built = target_dir().join(USER_TARGET).join("release").join(file);
         copy(&built, &boot.join(file))?;
         modules += &format!("    module_path: boot():/boot/{file}\n    module_string: {dir}\n");
     }
     copy(&limine.join("BOOTX64.EFI"), &efi_boot.join("BOOTX64.EFI"))?;
-    copy(&limine.join("limine-uefi-cd.bin"), &boot.join("limine/limine-uefi-cd.bin"))?;
+    for file in ["limine-uefi-cd.bin", "limine-bios-cd.bin", "limine-bios.sys"] {
+        copy(&limine.join(file), &boot.join("limine").join(file))?;
+    }
     let config = format!(
         "timeout: 0\n\n/gala-os\n    protocol: limine\n    path: boot():/boot/kernel\n    cmdline: {cmdline}\n{modules}"
     );
@@ -255,12 +259,16 @@ fn make_iso(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
     run_quiet(
         Command::new("xorriso")
             .args(["-as", "mkisofs", "-R", "-r", "-J", "-quiet"])
+            .args(["-b", "boot/limine/limine-bios-cd.bin", "-no-emul-boot", "-boot-load-size", "4"])
+            .args(["-boot-info-table"])
             .args(["--efi-boot", "boot/limine/limine-uefi-cd.bin"])
             .args(["-efi-boot-part", "--efi-boot-image", "--protective-msdos-label"])
             .arg(&iso_root)
             .arg("-o")
             .arg(&iso),
     )?;
+    // Hybrid image: bootable by BIOS (Limine's stages) and UEFI.
+    run_quiet(Command::new(limine.join("limine")).arg("bios-install").arg(&iso))?;
     if name == "gala-os" {
         eprintln!("xtask: built {}", iso.display());
     }
@@ -280,6 +288,10 @@ fn fetch_limine() -> Result<PathBuf> {
                 .args(["clone", "--quiet", "--depth", "1", "--branch", LIMINE_TAG, LIMINE_REPO])
                 .arg(&dir),
         )?;
+    }
+    if !dir.join("limine").exists() {
+        // The host tool that installs Limine's BIOS stages into an ISO.
+        run_quiet(Command::new("make").arg("-C").arg(&dir))?;
     }
     let head = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -327,20 +339,46 @@ fn find_ovmf() -> Result<Firmware> {
         .ok_or_else(|| "no OVMF firmware found; install OVMF or set OVMF_CODE".into())
 }
 
-fn qemu(iso: &Path) -> Result<Command> {
-    let fw = find_ovmf()?;
+/// The firmware a VM boots with. ISOs are hybrid, so either works.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Boot {
+    /// QEMU's SeaBIOS: reaches the kernel about 5x faster than OVMF under
+    /// software emulation, so boot tests use it by default.
+    Bios,
+    /// OVMF (UEFI), the path real machines take.
+    Uefi,
+}
+
+/// Boot tests that boot through UEFI, so that path stays covered.
+const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
+
+/// The firmware for scenario `name` (`XTASK_FIRMWARE=bios|uefi` overrides).
+fn scenario_boot(name: &str) -> Boot {
+    match env::var("XTASK_FIRMWARE").as_deref() {
+        Ok("uefi") => Boot::Uefi,
+        Ok("bios") => Boot::Bios,
+        _ if UEFI_SCENARIOS.contains(&name) => Boot::Uefi,
+        _ => Boot::Bios,
+    }
+}
+
+fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     let mut cmd = Command::new("qemu-system-x86_64");
     cmd.args(["-machine", "q35", "-cpu", "max", "-m", "512M", "-smp", "2"])
         // KVM when available, otherwise software emulation.
         .args(["-accel", "kvm", "-accel", "tcg"])
-        .args(["-no-reboot"])
-        .arg("-drive")
-        .arg(format!("if=pflash,format=raw,unit=0,readonly=on,file={}", fw.code.display()));
-    if let Some(vars) = fw.vars {
-        // The firmware writes its variable store; give it a private copy.
-        let copy_path = iso.with_extension("ovmf-vars.fd");
-        copy(&vars, &copy_path)?;
-        cmd.arg("-drive").arg(format!("if=pflash,format=raw,unit=1,file={}", copy_path.display()));
+        .args(["-no-reboot"]);
+    if boot == Boot::Uefi {
+        let fw = find_ovmf()?;
+        cmd.arg("-drive")
+            .arg(format!("if=pflash,format=raw,unit=0,readonly=on,file={}", fw.code.display()));
+        if let Some(vars) = fw.vars {
+            // The firmware writes its variable store; give it a private copy.
+            let copy_path = iso.with_extension("ovmf-vars.fd");
+            copy(&vars, &copy_path)?;
+            cmd.arg("-drive")
+                .arg(format!("if=pflash,format=raw,unit=1,file={}", copy_path.display()));
+        }
     }
     cmd.arg("-cdrom").arg(iso);
     // Extra arguments for debugging, e.g. "-d int,cpu_reset -D qemu.log".
@@ -351,7 +389,7 @@ fn qemu(iso: &Path) -> Result<Command> {
 }
 
 fn run(iso: &Path, headless: bool) -> Result {
-    let mut cmd = qemu(iso)?;
+    let mut cmd = qemu(iso, Boot::Uefi)?;
     cmd.args(["-serial", "stdio"]);
     if headless {
         cmd.args(["-display", "none"]);
@@ -628,29 +666,152 @@ const SCENARIOS: &[Scenario] = &[
 ];
 
 /// Boots every scenario (matching `filter`) headless, in parallel.
+/// Programs per shared VM at most (more VMs than CPUs only queue).
+const MAX_BATCH: usize = 12;
+
+/// One VM of a boot test run: a scenario of its own, or several
+/// compatible scenarios whose programs run one after another.
+enum Vm<'a> {
+    Single(&'a Scenario),
+    Batch(Vec<&'a Scenario>),
+}
+
+/// The boot modules (file, directory) scenario `name` ships besides the
+/// test programs.
+fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
+    let mut modules: Vec<_> =
+        EXTRA_MODULES.iter().filter(|m| m.0 == name).map(|m| (m.1, m.2)).collect();
+    modules.sort_unstable();
+    modules
+}
+
+/// `(program file, args)` if the scenario can share a VM: it only runs one
+/// program (no other kernel flags), expects success, boots by BIOS, and
+/// expects nothing that depends on running first (process ids).
+fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
+    if s.exit_status != QEMU_EXIT_SUCCESS
+        || scenario_boot(s.name) != Boot::Bios
+        || s.expect.iter().any(|e| e.contains("pid "))
+    {
+        return None;
+    }
+    let (mut program, mut args) = (None, "");
+    for word in s.cmdline.split_whitespace() {
+        match word.split_once('=') {
+            _ if word == "qemu_exit" => {}
+            Some(("run", p)) if !p.contains(',') => program = Some(p),
+            Some(("args", a)) if !a.contains(',') => args = a,
+            _ => return None,
+        }
+    }
+    program.map(|p| (p, args))
+}
+
+/// Groups the selected scenarios into VMs: batchable ones with identical
+/// boot modules share VMs (spread over the host CPUs), the rest boot alone.
+fn plan_vms<'a>(selected: &[&'a Scenario]) -> Vec<Vm<'a>> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<Vec<(&str, &str)>, Vec<&Scenario>> = BTreeMap::new();
+    let mut vms = Vec::new();
+    for &s in selected {
+        match batchable(s) {
+            Some(_) if env::var_os("XTASK_NO_BATCH").is_none() => {
+                groups.entry(extra_modules(s.name)).or_default().push(s)
+            }
+            _ => vms.push(Vm::Single(s)),
+        }
+    }
+    let cpus = thread::available_parallelism().map_or(2, |n| n.get());
+    let batched: usize = groups.values().map(Vec::len).sum();
+    let size = batched.div_ceil(cpus).clamp(1, MAX_BATCH);
+    for group in groups.into_values() {
+        for chunk in group.chunks(size) {
+            vms.push(match chunk {
+                [one] => Vm::Single(one),
+                _ => Vm::Batch(chunk.to_vec()),
+            });
+        }
+    }
+    vms
+}
+
 fn boot_tests(release: bool, filter: Option<&String>) -> Result {
+    let t0 = Instant::now();
     build_kernel(release)?;
+    let built = t0.elapsed();
     let selected: Vec<&Scenario> =
         SCENARIOS.iter().filter(|s| filter.is_none_or(|f| s.name.contains(f.as_str()))).collect();
     if selected.is_empty() {
         return Err("no boot test scenario matches the filter".into());
     }
-    let mut isos = Vec::new();
-    for scenario in &selected {
-        isos.push(make_iso(release, &format!("test-{}", scenario.name), scenario.cmdline)?);
-    }
-    let jobs: Vec<(&Scenario, &PathBuf)> = selected.iter().copied().zip(&isos).collect();
-    let results = run_parallel(&jobs, |(scenario, iso)| boot_scenario(scenario, iso));
+    let vms = plan_vms(&selected);
+    let t1 = Instant::now();
+    let isos = run_parallel(&vms, |vm| match vm {
+        Vm::Single(s) => {
+            make_iso(release, &format!("test-{}", s.name), s.cmdline, &extra_modules(s.name))
+        }
+        Vm::Batch(group) => {
+            let (programs, args): (Vec<_>, Vec<_>) =
+                group.iter().filter_map(|s| batchable(s)).unzip();
+            let cmdline = format!("qemu_exit run={} args={}", programs.join(","), args.join(","));
+            make_iso(
+                release,
+                &format!("batch-{}", group[0].name),
+                &cmdline,
+                &extra_modules(group[0].name),
+            )
+        }
+    });
+    let isos: Vec<PathBuf> = isos.into_iter().collect::<Result<_>>()?;
+    let isos_made = t1.elapsed();
+    let t2 = Instant::now();
+    let jobs: Vec<(&Vm, &PathBuf)> = vms.iter().zip(&isos).collect();
+    let results = run_parallel(&jobs, |(vm, iso)| Ok(boot_vm(vm, iso)));
+    let booted = t2.elapsed();
     let mut failed = 0;
-    for (scenario, result) in selected.iter().zip(&results) {
-        match result {
-            Ok(()) => eprintln!("xtask: boot test {:<20} ok", scenario.name),
-            Err(e) => {
-                failed += 1;
-                eprintln!("xtask: boot test {:<20} FAILED: {e}", scenario.name);
+    let (mut firmware, mut kernel) = (Duration::ZERO, Duration::ZERO);
+    for (vm, result) in vms.iter().zip(results) {
+        let Ok((time, verdicts)) = result else { continue };
+        firmware += time.to_banner;
+        kernel += time.total.saturating_sub(time.to_banner);
+        let shared = matches!(vm, Vm::Batch(_));
+        for (scenario, verdict) in verdicts {
+            match verdict {
+                Ok(()) if shared => eprintln!("xtask: boot test {:<20} ok", scenario.name),
+                Ok(()) => eprintln!(
+                    "xtask: boot test {:<20} ok  ({:.1}s to kernel, {:.1}s in kernel)",
+                    scenario.name,
+                    time.to_banner.as_secs_f64(),
+                    time.total.saturating_sub(time.to_banner).as_secs_f64()
+                ),
+                Err(e) => {
+                    failed += 1;
+                    eprintln!("xtask: boot test {:<20} FAILED: {e}", scenario.name);
+                }
             }
         }
+        if let Vm::Batch(group) = vm {
+            eprintln!(
+                "xtask:   (shared VM of {} programs: {:.1}s to kernel, {:.1}s in kernel)",
+                group.len(),
+                time.to_banner.as_secs_f64(),
+                time.total.saturating_sub(time.to_banner).as_secs_f64()
+            );
+        }
     }
+    let summary = format!(
+        "build {:.1}s, ISOs {:.1}s, boots {:.1}s wall ({} scenarios in {} VMs; summed: {:.1}s firmware+bootloader, {:.1}s kernel)",
+        built.as_secs_f64(),
+        isos_made.as_secs_f64(),
+        booted.as_secs_f64(),
+        selected.len(),
+        vms.len(),
+        firmware.as_secs_f64(),
+        kernel.as_secs_f64()
+    );
+    eprintln!("xtask: timing: {summary}");
+    let _ = fs::create_dir_all(report_dir());
+    let _ = write(&report_dir().join("timing.txt"), &format!("{summary}\n"));
     if failed == 0 {
         Ok(())
     } else {
@@ -661,12 +822,15 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
 /// Runs `f` on every job, at most one per host CPU at a time (each job is
 /// an emulator that needs a CPU: running them all at once starves them on
 /// small CI machines). Results are in job order.
-fn run_parallel<J: Sync>(jobs: &[J], f: impl Fn(&J) -> Result + Sync) -> Vec<Result> {
+fn run_parallel<J: Sync, T: Send>(
+    jobs: &[J],
+    f: impl Fn(&J) -> Result<T> + Sync,
+) -> Vec<Result<T>> {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let workers = thread::available_parallelism().map_or(2, |n| n.get()).min(jobs.len().max(1));
     let next = AtomicUsize::new(0);
-    let results: Mutex<Vec<Option<Result>>> = Mutex::new(jobs.iter().map(|_| None).collect());
+    let results: Mutex<Vec<Option<Result<T>>>> = Mutex::new(jobs.iter().map(|_| None).collect());
     thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
@@ -707,7 +871,12 @@ fn gala_report(release: bool) -> Result {
         SCENARIOS.iter().filter_map(|s| scenario_program(s).map(|p| (s, p))).collect();
     let mut isos = Vec::new();
     for (scenario, _) in &selected {
-        isos.push(make_iso(release, &format!("report-{}", scenario.name), scenario.cmdline)?);
+        isos.push(make_iso(
+            release,
+            &format!("report-{}", scenario.name),
+            scenario.cmdline,
+            &extra_modules(scenario.name),
+        )?);
     }
     // The verdicts do not matter here: outcomes are read from the logs.
     let jobs: Vec<(&Scenario, &PathBuf)> = selected.iter().map(|(s, _)| *s).zip(&isos).collect();
@@ -759,18 +928,27 @@ fn compare_reports(windows: &Path, gala: Option<&Path>) -> Result {
 }
 
 /// `boot_scenario` without printing logs (for reports).
-fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
-    boot_scenario_with(scenario, iso, false)
+/// How long a boot took: until the kernel's banner appeared on the serial
+/// console (firmware and bootloader), and in total.
+#[derive(Clone, Copy, Default)]
+struct BootTime {
+    to_banner: Duration,
+    total: Duration,
 }
 
-fn boot_scenario(scenario: &Scenario, iso: &Path) -> Result {
-    boot_scenario_with(scenario, iso, true)
-}
+/// The kernel's first serial line (see `kernel_main`).
+const KERNEL_BANNER: &str = "gala-os kernel";
 
-fn boot_scenario_with(scenario: &Scenario, iso: &Path, show_failures: bool) -> Result {
+/// Boots `iso` (with `boot` firmware) until QEMU exits or `timeout`;
+/// returns the exit status (None on timeout), the serial log and timing.
+fn run_vm(
+    iso: &Path,
+    boot: Boot,
+    timeout: Duration,
+) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let log = iso.with_extension("serial.log");
     let _ = fs::remove_file(&log);
-    let mut cmd = qemu(iso)?;
+    let mut cmd = qemu(iso, boot)?;
     cmd.args(["-display", "none", "-monitor", "none"])
         .arg("-serial")
         .arg(format!("file:{}", log.display()))
@@ -780,44 +958,156 @@ fn boot_scenario_with(scenario: &Scenario, iso: &Path, show_failures: bool) -> R
         .stderr(Stdio::null());
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn QEMU: {e}"))?;
     let start = Instant::now();
+    let mut to_banner = None;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break Some(status);
         }
-        if start.elapsed() > BOOT_TEST_TIMEOUT {
+        if to_banner.is_none()
+            && fs::read(&log).is_ok_and(|b| {
+                b.windows(KERNEL_BANNER.len()).any(|w| w == KERNEL_BANNER.as_bytes())
+            })
+        {
+            to_banner = Some(start.elapsed());
+        }
+        if start.elapsed() > timeout {
             let _ = child.kill();
             let _ = child.wait();
             break None;
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(50));
     };
-
+    let total = start.elapsed();
     let mut serial = String::new();
     if let Ok(mut f) = fs::File::open(&log) {
         let _ = f.read_to_string(&mut serial);
     }
+    Ok((status, serial, BootTime { to_banner: to_banner.unwrap_or(total), total }))
+}
+
+/// Judges one scenario from the exit status and its part of the log.
+fn judge(scenario: &Scenario, status: Option<i32>, timed_out: bool, serial: &str) -> Result {
     let missing: Vec<&str> =
         scenario.expect.iter().copied().filter(|e| !serial.contains(e)).collect();
-    let verdict = match status {
-        None => Err(format!("timed out after {}s", BOOT_TEST_TIMEOUT.as_secs())),
-        Some(s) if s.code() != Some(scenario.exit_status) => {
-            Err(format!("QEMU exited with {s}, expected status {}", scenario.exit_status))
+    match status {
+        _ if timed_out => Err(format!("timed out after {}s", BOOT_TEST_TIMEOUT.as_secs())),
+        s if s != Some(scenario.exit_status) => {
+            Err(format!("QEMU exited with {s:?}, expected status {}", scenario.exit_status))
         }
-        Some(_) if !missing.is_empty() => Err(format!("serial log lacks {missing:?}")),
-        Some(_) if scenario.exit_status == QEMU_EXIT_SUCCESS && serial.contains(LEAK_MARKER) => {
+        _ if !missing.is_empty() => Err(format!("serial log lacks {missing:?}")),
+        _ if scenario.exit_status == QEMU_EXIT_SUCCESS && serial.contains(LEAK_MARKER) => {
             Err("a process address space was not freed".into())
         }
-        Some(_) => Ok(()),
+        _ => Ok(()),
+    }
+}
+
+/// The part of a shared VM's log that belongs to `program`, and whether it
+/// ran to its end.
+fn program_section<'a>(serial: &'a str, program: &str) -> Option<(&'a str, bool)> {
+    let start = find_line(serial, &format!("run: begin {program}"))?;
+    let rest = &serial[start..];
+    Some(match find_line(rest, &format!("run: end {program}")) {
+        Some(i) => (&rest[..i], true),
+        None => (rest, false),
+    })
+}
+
+/// Where the first line ending in `text` (CRLF or LF) is in `serial`.
+fn find_line(serial: &str, text: &str) -> Option<usize> {
+    serial
+        .match_indices(text)
+        .find(|(i, _)| matches!(serial.as_bytes().get(i + text.len()), Some(b'\r' | b'\n')))
+        .map(|(i, _)| i)
+}
+
+/// Boots one VM and judges each of its scenarios.
+fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)>) {
+    let (scenarios, timeout): (Vec<&Scenario>, Duration) = match vm {
+        Vm::Single(s) => (vec![*s], BOOT_TEST_TIMEOUT),
+        Vm::Batch(group) => {
+            (group.clone(), BOOT_TEST_TIMEOUT + Duration::from_secs(20) * group.len() as u32)
+        }
     };
-    if (verdict.is_err() && show_failures) || env::var_os("XTASK_VERBOSE").is_some() {
+    let boot = scenario_boot(scenarios[0].name);
+    let (status, serial, time) = match run_vm(iso, boot, timeout) {
+        Ok(r) => r,
+        Err(e) => {
+            return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
+        }
+    };
+    let code = status.and_then(|s| s.code());
+    let verdicts: Vec<(&Scenario, Result)> = match vm {
+        Vm::Single(s) => vec![(*s, judge(s, code, status.is_none(), &serial))],
+        Vm::Batch(group) => group
+            .iter()
+            .map(|&s| {
+                let program = batchable(s).map_or("", |(p, _)| p);
+                // Boot-time lines (before the first program) belong to all.
+                let preamble = &serial[..serial.find("run: begin ").unwrap_or(0)];
+                let verdict = match program_section(&serial, program) {
+                    // Finished: judge its section as if it had its own VM.
+                    Some((section, true)) => {
+                        judge(s, Some(QEMU_EXIT_SUCCESS), false, &format!("{preamble}{section}"))
+                    }
+                    // Started but the VM ended (or hung) in it.
+                    Some((section, false)) => {
+                        judge(s, code, status.is_none(), &format!("{preamble}{section}"))
+                            .and(Err("the shared VM ended during this program".into()))
+                    }
+                    None => Err("did not run (the shared VM ended before it)".into()),
+                };
+                (s, verdict)
+            })
+            .collect(),
+    };
+    let show = env::var_os("XTASK_VERBOSE").is_some() || verdicts.iter().any(|(_, v)| v.is_err());
+    if show {
         eprintln!(
             "----- {} serial output ({}) -----\n{}\n-----",
-            scenario.name,
-            log.display(),
+            scenarios.iter().map(|s| s.name).collect::<Vec<_>>().join(", "),
+            iso.with_extension("serial.log").display(),
             serial.trim_end()
         );
     }
-    verdict
+    (time, verdicts)
+}
+
+/// Boots a scenario alone (for reports), without printing its log.
+fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
+    let (status, serial, _) = run_vm(iso, scenario_boot(scenario.name), BOOT_TEST_TIMEOUT)?;
+    judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial)
+}
+
+/// The image `docker-test` builds and runs.
+const DOCKER_IMAGE: &str = "gala-os-test";
+
+/// Builds the test image and runs xtask inside it with the repository
+/// mounted (`args` default to `test`), using KVM when the host has it.
+fn docker_test(args: &[String]) -> Result {
+    run_cmd(
+        Command::new("docker")
+            .args(["build", "--quiet", "-t", DOCKER_IMAGE, "-f"])
+            .arg(root().join("docker/test.Dockerfile"))
+            .arg(root().join("docker")),
+    )?;
+    let mut cmd = Command::new("docker");
+    cmd.args(["run", "--rm", "-v"]).arg(format!("{}:/work", root().display()));
+    if Path::new("/dev/kvm").exists() {
+        cmd.args(["--device", "/dev/kvm"]);
+    }
+    for var in ["XTASK_VERBOSE", "XTASK_QEMU_ARGS", "XTASK_FIRMWARE", "XTASK_NO_BATCH"] {
+        if let Ok(value) = env::var(var) {
+            cmd.arg("-e").arg(format!("{var}={value}"));
+        }
+    }
+    cmd.args([DOCKER_IMAGE, "cargo", "xtask"]);
+    if args.is_empty() {
+        cmd.arg("test");
+    } else {
+        cmd.args(args);
+    }
+    run_cmd(&mut cmd)
 }
 
 /// Copies the test programs to `user/bin/`, where they are checked in so

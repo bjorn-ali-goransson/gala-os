@@ -132,6 +132,11 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   locks held), shootdown counters in the boot log; `smpmem_test` (free,
   decommit, protect and unmap under a thread on another CPU; interlocked
   counts; event storms)
+- Test speed (T1): per-phase timing in xtask; hybrid BIOS/UEFI ISOs with
+  SeaBIOS by default (OVMF was 83% of boot-test time); several programs per
+  boot (`run=a.exe,b.exe`) with xtask grouping compatible scenarios and
+  judging each program on its own log section; parallel ISO creation; a
+  Docker test image (`cargo xtask docker-test`). Boot tests: 66 s -> 14 s
 
 ## Next
 Direction from the project owner (2026-10-30): multiprocessor support, then
@@ -140,10 +145,7 @@ and introspection are explicitly wanted. Priorities within that are ours
 to set and to argue for. Current order and why:
 
 1. S3 (user TLB shootdown): done.
-2. T1 (test speed): most of a boot test's time is firmware boot and ISO
-   building, not the test. One VM running many programs plus a Docker
-   test image gives most of the speed-up quickly and makes every
-   environment (CI, agents, laptops) identical.
+2. T1 (test speed): done (66 s -> 14 s for the boot tests).
 3. O1 (observability) with P1 (benchmarks): the missing-features ledger
    and the event stream make the Go and Nginx bring-ups data-driven. The
    benchmarks and the profiler answer "how fast is it", and both need the
@@ -157,12 +159,6 @@ GetThreadContext, so at the latest G2).
 
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
-T1. **Test speed and a test image**: `run=` with several programs in one
-   boot (per-program results), xtask grouping scenarios that share boot
-   modules into one VM, timing per phase (build, ISO, firmware, kernel,
-   tests) in `xtask report`; a Dockerfile with QEMU, OVMF, xorriso and the
-   toolchain (`cargo xtask docker-test` builds and runs it; KVM passed
-   through when the host has it), used by CI.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
    the NT layer: PE images mapped with mmap at their addresses, GS/TEB via
    arch_prctl, NT system calls caught with syscall user dispatch,

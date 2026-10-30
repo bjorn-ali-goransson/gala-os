@@ -77,9 +77,10 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 ## Testing
 
 - Host unit tests: `cargo test -p kernel --lib` for hardware-independent code.
-- Boot scenarios (`SCENARIOS` in `xtask/src/main.rs`): each boots its own ISO
-  with a specific kernel command line and checks the QEMU exit status plus
-  expected serial output. `selftest` runs `kernel/src/selftest.rs`;
+- Boot scenarios (`SCENARIOS` in `xtask/src/main.rs`): each runs with a
+  specific kernel command line and checks the QEMU exit status plus
+  expected serial output. Compatible scenarios share a VM (see WORKFLOW,
+  "Test speed"); ISOs are hybrid BIOS/UEFI. `selftest` runs `kernel/src/selftest.rs`;
   `fault=<name>` provokes a CPU exception to test the fault path.
 - `XTASK_VERBOSE=1 cargo xtask boot-test [filter]` prints every serial log.
 
@@ -90,8 +91,8 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `qemu_exit` | report the result via isa-debug-exit instead of halting |
 | `selftest` | run in-kernel self-tests after boot |
 | `fault=ud`, `fault=pagefault` | provoke that exception (tests the handler) |
-| `run=<file>` | run that boot module as a user process |
-| `args=<percent-encoded>` | its command-line arguments |
+| `run=<file>[,<file>...]` | run those boot modules as user processes, one after another (each between `run: begin` and `run: end` log lines) |
+| `args=<percent-encoded>[,...]` | their command-line arguments, in the same order (`%2C` for a comma) |
 | `trace` | log every system call (arguments, status) |
 
 ## Physical memory

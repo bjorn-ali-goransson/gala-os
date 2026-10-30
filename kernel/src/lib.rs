@@ -109,12 +109,19 @@ pub fn kernel_main() -> ! {
     }
 
     nt::syscalls::set_trace(cmdline.flag("trace"));
-    if let Some(name) = cmdline.value("run") {
-        let mut args = alloc::vec::Vec::new();
-        if cmdline::percent_decode(cmdline.value("args").unwrap_or(""), &mut args).is_err() {
-            panic!("run: out of memory for the arguments");
+    // `run=a.exe,b.exe` runs the programs one after another; `args=` holds
+    // their (percent-encoded) command-line arguments in the same order.
+    if let Some(names) = cmdline.value("run") {
+        let mut args = cmdline.value("args").unwrap_or("").split(',');
+        for name in names.split(',').filter(|n| !n.is_empty()) {
+            let mut decoded = alloc::vec::Vec::new();
+            if cmdline::percent_decode(args.next().unwrap_or(""), &mut decoded).is_err() {
+                panic!("run: out of memory for the arguments");
+            }
+            info!("run: begin {name}");
+            run_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""));
+            info!("run: end {name}");
         }
-        run_program(&info, name, core::str::from_utf8(&args).unwrap_or(""));
     }
 
     if let Some(name) = cmdline.value("fault") {
