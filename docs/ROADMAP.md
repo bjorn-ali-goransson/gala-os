@@ -137,6 +137,10 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   boot (`run=a.exe,b.exe`) with xtask grouping compatible scenarios and
   judging each program on its own log section; parallel ISO creation; a
   Docker test image (`cargo xtask docker-test`). Boot tests: 66 s -> 14 s
+- Observability O1: missing-features ledger (`ledger_test`,
+  target/report/ledger.md), JSON event stream on the debug console
+  (`events` scenario), symbolized panic backtraces; benchmarks P1
+  (`user/bench`, `cargo xtask bench`, Windows comparison via run-all.ps1)
 - Screen console (framebuffer text mirroring the serial log, Noto Sans Mono
   bitmap font) and `cargo xtask screenshot` (PNG via the QEMU monitor)
 
@@ -148,14 +152,17 @@ to set and to argue for. Current order and why:
 
 1. S3 (user TLB shootdown): done.
 2. T1 (test speed): done (66 s -> 14 s for the boot tests).
-3. O1 (observability) with P1 (benchmarks): the missing-features ledger
-   and the event stream make the Go and Nginx bring-ups data-driven. The
-   benchmarks and the profiler answer "how fast is it", and both need the
-   same counters and timing plumbing.
-4. U1-U3 (gala-um): the NT layer as a Linux process. Much faster tests and
-   host tools (perf, sanitizers, gdb), but a second platform under the NT
-   layer; it starts with a design note and the platform seam.
-5. G1, G2 (kernel32, Go).
+3. O1 + P1: done (ledger, events, backtraces, benchmarks). Still open from
+   docs/OBSERVABILITY.md: the sampling profiler, live introspection,
+   trace diffing against Windows.
+4. G1, G2 (kernel32, Go hello world). Moved ahead of gala-um on
+   2026-10-30: gala-um was wanted mainly for test speed, and T1 already
+   took the boot tests from 66 s to ~12 s; the NT layer will also grow a
+   lot for kernel32/Go, which is cheaper to do before splitting it behind
+   a platform seam. The ledger and event stream now make the Go bring-up
+   data-driven.
+5. U1-U3 (gala-um): the NT layer as a Linux process, for host tools
+   (perf, sanitizers, gdb) and millisecond tests; design in docs/GALA_UM.md.
 S4 waits until something needs it (Go's preemption uses SuspendThread/
 GetThreadContext, so at the latest G2).
 
@@ -170,19 +177,6 @@ U2. **gala-um runs hello.exe**, then the ntrt test programs; `cargo xtask
    um-test` runs them all in seconds.
 U3. **gala-um in CI** next to the QEMU scenarios, with differences between
    the two reported as bugs.
-P1. **Benchmarks**: `user/bench_*` programs that run unchanged on Windows
-   and gala and report nanoseconds per operation (QPC/TSC): a null system
-   call, an event ping-pong between two threads (switch and wake latency,
-   same and different CPUs), thread create+exit, a demand-zero page fault,
-   VirtualAlloc+free, mapping a section view, small and large file
-   reads/writes, and handle create+close. `cargo xtask bench` runs them and
-   writes `target/report/bench.json`; `cargo xtask compare` covers it. The
-   only meaningful numbers come from KVM or bare metal; under TCG, report
-   QEMU-plugin instruction counts instead (deterministic, for regressions).
-O1. **Observability, first part** (docs/OBSERVABILITY.md 1, 2, 5): JSON
-   event stream on debugcon, the missing-features ledger merged by `xtask
-   report`, symbolized panic backtraces. Before G2, so running a real Go
-   binary produces a ranked work list.
 G1. **kernel32 shim, first part**: kernel32.dll on gala (console, last
    error, memory, events, sleep, time, LoadLibrary/GetProcAddress), DLL
    search in System32; `kernel32_test`.

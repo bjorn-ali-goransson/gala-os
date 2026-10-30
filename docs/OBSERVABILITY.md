@@ -59,7 +59,21 @@ NtTrace-like tool, or ETW syscall events) run by `user/bin/run-all.ps1`.
 The Windows results we collect are black-box behaviour, so this stays
 clean-room.
 
-## 4. Profiling — next (kernel), later (user)
+## 4. Profiling — benchmarks done (P1); sampling profiler next
+
+**Benchmarks**: `user/bench` (one program, unchanged on Windows) prints
+`bench: <name> ns_per_op <n>`; `cargo xtask bench [bench-windows.txt]`
+boots it on a release kernel, writes `target/report/bench.json` and
+prints a table next to Windows' numbers (run-all.ps1 saves
+`bench-windows.txt`). First numbers (QEMU TCG on a 4-CPU container, so
+only relative): null syscall 2.2 us, event create+close 6 us, 64 KiB
+alloc+free 17 us, demand-zero fault 7 us, section map+unmap 13 us, event
+round trip 20 us on one CPU and 124 us across CPUs, thread create+exit
+369 us. Lessons: a debug kernel is ~30x slower per system call (boot tests
+use debug builds on purpose; never benchmark them); thread creation and
+cross-CPU wakes are the outliers to look at first. QEMU instruction
+counts (TCG plugins) need a QEMU built with plugins; Ubuntu's has none.
+
 
 - **Sampling**: the LAPIC timer interrupt already runs on every CPU. At
   each tick, record the interrupted RIP (and, with frame pointers, a short

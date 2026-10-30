@@ -110,6 +110,15 @@ the boot scenarios before T1 and 14 s after, under software emulation on a
   near-native speed) and forwards the `XTASK_*` variables. In a cloud
   container without a running daemon, start one with `dockerd &`.
 
+## Benchmarks
+
+`cargo xtask bench` (always a release kernel) runs `user/bench` and writes
+`target/report/bench.json`; on Windows, `user/bin/run-all.ps1` writes
+`bench-windows.txt`, which `cargo xtask bench bench-windows.txt` puts next
+to gala's numbers. For where time goes inside the kernel:
+`XTASK_EVENTS=syscall cargo xtask boot-test bench`, then group the
+`events.jsonl` lines by `name` and look at `ns`.
+
 ## Screenshots
 
 `cargo xtask screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]`

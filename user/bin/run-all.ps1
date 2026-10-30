@@ -68,6 +68,10 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     if ($null -eq $line) { $line = $lines | Select-Object -First 1 }
     if ($null -eq $line) { $line = "" }
     $results += [ordered]@{ program = $name; exit = $code; line = $line }
+    # The benchmarks' numbers, for `cargo xtask bench <this file>`.
+    if ($name -eq "bench") {
+        $text | Set-Content -Path (Join-Path (Split-Path -Parent $Out) "bench-windows.txt") -Encoding UTF8
+    }
     Write-Host ("{0,-18} {1:x8}  {2}" -f $name, $code, $line)
 }
 

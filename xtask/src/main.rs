@@ -99,6 +99,7 @@ const USER_PROGRAMS: &[&str] = &[
     "smpsched_test",
     "smpmem_test",
     "ledger_test",
+    "bench",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -123,6 +124,8 @@ commands:
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
                (default: the boot log, at 3 s; files in target/screenshots/)
+  bench        run user/bench on gala; write target/report/bench.json and
+               compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
   symbolize    resolve the kernel backtraces in a serial log to functions
                and source lines: symbolize <log> [--release]
   docker-test  build the test image (docker/test.Dockerfile) and run
@@ -145,6 +148,9 @@ fn main() -> ExitCode {
         Some("report") => gala_report(release),
         Some("docker-test") => docker_test(&args[1..]),
         Some("screenshot") => screenshot(release, &args[1..]),
+        Some("bench") => {
+            bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
+        }
         Some("symbolize") => match args.get(1).filter(|a| !a.starts_with("--")) {
             Some(log) => fs::read_to_string(log)
                 .map_err(|e| format!("reading {log}: {e}"))
@@ -481,6 +487,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit events=all run=import_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["import_test: ok", "events: "],
+    },
+    Scenario {
+        // Smoke test only; `cargo xtask bench` collects the numbers.
+        name: "bench",
+        cmdline: "qemu_exit run=bench.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["bench: null_syscall ns_per_op", "bench: done", "exited with status 0x00000000"],
     },
     Scenario {
         name: "ledger_test",
@@ -1112,6 +1125,56 @@ fn find_line(serial: &str, text: &str) -> Option<usize> {
         .match_indices(text)
         .find(|(i, _)| matches!(serial.as_bytes().get(i + text.len()), Some(b'\r' | b'\n')))
         .map(|(i, _)| i)
+}
+
+/// `name -> ns per operation` from `bench: <name> ns_per_op <n>` lines.
+fn bench_results(text: &str) -> Vec<(String, u64)> {
+    text.lines()
+        .filter_map(|l| l.split_once("bench: ").map(|(_, rest)| rest))
+        .filter_map(|rest| {
+            let mut words = rest.split_whitespace();
+            let name = words.next()?;
+            (words.next()? == "ns_per_op").then_some(())?;
+            Some((name.to_string(), words.next()?.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Boots `bench.exe` on gala, writes target/report/bench.json and prints
+/// the numbers, next to Windows' if a run-all.ps1 bench file is given.
+fn bench(release: bool, windows: Option<&Path>) -> Result {
+    build_kernel(release)?;
+    let iso = make_iso(release, "bench", "qemu_exit noscreen run=bench.exe", &[])?;
+    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT)?;
+    if status.and_then(|s| s.code()) != Some(QEMU_EXIT_SUCCESS) || !serial.contains("bench: done") {
+        return Err(format!(
+            "bench did not finish; see {}",
+            iso.with_extension("serial.log").display()
+        ));
+    }
+    let gala = bench_results(&serial);
+    let windows = match windows {
+        Some(path) => {
+            bench_results(&fs::read_to_string(path).map_err(|e| format!("reading {path:?}: {e}"))?)
+        }
+        None => Vec::new(),
+    };
+    let accel = if Path::new("/dev/kvm").exists() { "kvm" } else { "tcg" };
+    let mut json = format!("{{\n  \"platform\": \"gala qemu-{accel}\",\n  \"results\": [\n");
+    for (i, (name, ns)) in gala.iter().enumerate() {
+        let comma = if i + 1 < gala.len() { "," } else { "" };
+        json += &format!("    {{\"name\": \"{name}\", \"ns_per_op\": {ns}}}{comma}\n");
+    }
+    json += "  ]\n}\n";
+    fs::create_dir_all(report_dir()).map_err(|e| e.to_string())?;
+    write(&report_dir().join("bench.json"), &json)?;
+    println!("| benchmark | gala (qemu-{accel}) ns/op | Windows ns/op |\n|---|---|---|");
+    for (name, ns) in &gala {
+        let win = windows.iter().find(|(n, _)| n == name).map_or("".into(), |(_, w)| w.to_string());
+        println!("| {name} | {ns} | {win} |");
+    }
+    eprintln!("xtask: wrote {}", report_dir().join("bench.json").display());
+    Ok(())
 }
 
 /// Whether this run builds release kernels (for finding the ELF).
