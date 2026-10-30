@@ -147,6 +147,26 @@ syscall_stubs! {
         suspended: u8
     );
     NtResumeThread = 0x52, fn(h: usize, previous: *mut u32);
+    // Files (long-stable x64 numbers).
+    NtReadFile = 0x06, fn(
+        h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
+        buffer: *mut u8, length: u32, offset: *const i64, key: *const u32
+    );
+    NtQueryInformationFile = 0x11, fn(
+        h: usize, iosb: *mut [usize; 2], buf: *mut u8, len: u32, class: u32
+    );
+    NtQueryDirectoryFile = 0x35, fn(
+        h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
+        buf: *mut u8, len: u32, class: u32, single: u8, mask: *const UnicodeString,
+        restart: u8
+    );
+    NtQueryAttributesFile = 0x3d, fn(attributes: *const ObjectAttributes, info: *mut u8);
+    NtFlushBuffersFile = 0x4b, fn(h: usize, iosb: *mut [usize; 2]);
+    NtCreateFile = 0x55, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes,
+        iosb: *mut [usize; 2], allocation: *const i64, file_attributes: u32, share: u32,
+        disposition: u32, options: u32, ea: *const u8, ea_length: u32
+    );
     NtQueryVolumeInformationFile = 0x49, fn(
         h: usize, iosb: *mut [usize; 2], buf: *mut u8, len: u32, class: u32
     );
@@ -838,7 +858,10 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_00a0, 487),  // MEMORY_NOT_ALLOCATED -> ERROR_INVALID_ADDRESS
     (0xc000_00ba, 5),    // FILE_IS_A_DIRECTORY -> ERROR_ACCESS_DENIED
     (0xc000_00bb, 50),   // NOT_SUPPORTED
+    (0xc000_0056, 5),    // DELETE_PENDING -> ERROR_ACCESS_DENIED
+    (0xc000_0101, 145),  // DIRECTORY_NOT_EMPTY -> ERROR_DIR_NOT_EMPTY
     (0xc000_0103, 267),  // NOT_A_DIRECTORY -> ERROR_DIRECTORY
+    (0xc000_0121, 5),    // CANNOT_DELETE -> ERROR_ACCESS_DENIED
     (0xc000_0120, 995),  // CANCELLED -> ERROR_OPERATION_ABORTED
     (0xc000_0135, 126),  // DLL_NOT_FOUND -> ERROR_MOD_NOT_FOUND
     (0xc000_0138, 182),  // ORDINAL_NOT_FOUND -> ERROR_INVALID_ORDINAL
@@ -1300,6 +1323,35 @@ pub extern "C" fn memset(_dst: *mut u8, _value: i32, _n: usize) -> *mut u8 {
         "rep stosb",
         "mov rdi, r9",
         "mov rax, r10",
+        "ret",
+    )
+}
+
+/// __chkstk: the stack probe compilers call before allocating more than a
+/// page of stack (rax = bytes). Touches each page from the caller's stack
+/// pointer down, so guard pages grow the stack in order; changes no
+/// register (the caller then subtracts rax from rsp). Exported by ntdll,
+/// as on Windows.
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "C" fn __chkstk() {
+    core::arch::naked_asm!(
+        "push rcx",
+        "push rax",
+        "lea rcx, [rsp + 24]", // the caller's rsp (after our return)
+        "cmp rax, 0x1000",
+        "jb 2f",
+        "1:",
+        "sub rcx, 0x1000",
+        "test byte ptr [rcx], 0",
+        "sub rax, 0x1000",
+        "cmp rax, 0x1000",
+        "ja 1b",
+        "2:",
+        "sub rcx, rax",
+        "test byte ptr [rcx], 0",
+        "pop rax",
+        "pop rcx",
         "ret",
     )
 }

@@ -2539,6 +2539,8 @@ fn file_read(
 
 const FILE_BASIC_INFORMATION: u64 = 4;
 const FILE_STANDARD_INFORMATION: u64 = 5;
+const FILE_INTERNAL_INFORMATION: u64 = 6;
+const FILE_ATTRIBUTE_TAG_INFORMATION: u64 = 35;
 const FILE_RENAME_INFORMATION: u64 = 10;
 const FILE_DISPOSITION_INFORMATION: u64 = 13;
 const FILE_POSITION_INFORMATION: u64 = 14;
@@ -2570,6 +2572,17 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
         FILE_MODE_INFORMATION => {
             out[..4].copy_from_slice(&file.mode.to_le_bytes());
             4
+        }
+        FILE_INTERNAL_INFORMATION => {
+            // IndexNumber: the file's node, unique on the volume.
+            out[..8].copy_from_slice(&file::index_number(file.node).to_le_bytes());
+            8
+        }
+        FILE_ATTRIBUTE_TAG_INFORMATION => {
+            // FileAttributes, ReparseTag (no reparse points on this volume).
+            let basic = tri!(file::basic_information(file.node));
+            out[..4].copy_from_slice(&basic[32..36]);
+            8
         }
         FILE_POSITION_INFORMATION => {
             out[..8].copy_from_slice(&file.position.lock().to_le_bytes());

@@ -71,6 +71,8 @@ unsafe extern "C" {
     fn strlen(s: *const u8) -> usize;
     // MSVC-target unwind tables reference it (gala's ntdll provides it).
     fn __CxxFrameHandler3();
+    // The stack probe for frames over a page (ntdll exports it).
+    fn __chkstk();
 }
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
@@ -154,6 +156,52 @@ unsafe extern "system" {
         options: u32,
     ) -> u32;
     fn NtYieldExecution() -> u32;
+    fn NtReadFile(
+        h: Handle,
+        event: usize,
+        apc: usize,
+        apc_context: usize,
+        iosb: *mut [usize; 2],
+        buffer: *mut u8,
+        length: u32,
+        offset: *const i64,
+        key: *const u32,
+    ) -> u32;
+    fn NtQueryInformationFile(
+        h: Handle,
+        iosb: *mut [usize; 2],
+        buf: *mut u8,
+        len: u32,
+        class: u32,
+    ) -> u32;
+    fn NtQueryDirectoryFile(
+        h: Handle,
+        event: usize,
+        apc: usize,
+        apc_context: usize,
+        iosb: *mut [usize; 2],
+        buf: *mut u8,
+        len: u32,
+        class: u32,
+        single: u8,
+        mask: *const UnicodeString,
+        restart: u8,
+    ) -> u32;
+    fn NtQueryAttributesFile(attributes: *const ObjectAttributes, info: *mut u8) -> u32;
+    fn NtFlushBuffersFile(h: Handle, iosb: *mut [usize; 2]) -> u32;
+    fn NtCreateFile(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        iosb: *mut [usize; 2],
+        allocation: *const i64,
+        file_attributes: u32,
+        share: u32,
+        disposition: u32,
+        options: u32,
+        ea: *const u8,
+        ea_length: u32,
+    ) -> u32;
     fn NtQueryVolumeInformationFile(
         h: Handle,
         iosb: *mut [usize; 2],
@@ -639,6 +687,774 @@ pub extern "system" fn FormatMessageW(
 ) -> u32 {
     unsupported(b"kernel32.dll!FormatMessageW", u64::from(message));
     fail_with(317, 0) // ERROR_MR_MID_NOT_FOUND
+}
+
+// ---- Paths ----
+
+const MAX_PATH_CHARS: usize = 1024;
+const BACKSLASH: u16 = b'\\' as u16;
+
+/// A path being built (UTF-16, not NUL-terminated).
+struct PathBuf {
+    chars: [u16; MAX_PATH_CHARS],
+    len: usize,
+}
+
+impl PathBuf {
+    fn new() -> PathBuf {
+        PathBuf { chars: [0; MAX_PATH_CHARS], len: 0 }
+    }
+
+    fn push(&mut self, s: &[u16]) -> Result<(), u32> {
+        let end = self.len + s.len();
+        if end >= MAX_PATH_CHARS {
+            return Err(206); // ERROR_FILENAME_EXCED_RANGE
+        }
+        self.chars[self.len..end].copy_from_slice(s);
+        self.len = end;
+        Ok(())
+    }
+
+    fn as_slice(&self) -> &[u16] {
+        &self.chars[..self.len]
+    }
+}
+
+fn is_sep(c: u16) -> bool {
+    c == BACKSLASH || c == u16::from(b'/')
+}
+
+/// The full Win32 path of `path` (GetFullPathNameW's rules): relative paths
+/// join the current directory, a leading separator takes the current drive,
+/// `/` becomes `\\`, and `.`/`..` components are resolved. `\\\\?\\` paths are
+/// returned unchanged.
+fn full_path(path: &[u16]) -> Result<PathBuf, u32> {
+    let mut out = PathBuf::new();
+    let verbatim = [BACKSLASH, BACKSLASH, u16::from(b'?'), BACKSLASH];
+    if path.starts_with(&verbatim) {
+        out.push(path)?;
+        return Ok(out);
+    }
+    let drive = path.len() >= 2 && path[1] == u16::from(b':');
+    let mut base = PathBuf::new();
+    if drive && path.len() >= 3 && is_sep(path[2]) {
+        base.push(&path[..2])?;
+    } else {
+        // The current directory (with its trailing backslash).
+        let mut cwd = [0u16; MAX_PATH_CHARS];
+        let n = GetCurrentDirectoryW(MAX_PATH_CHARS as u32, cwd.as_mut_ptr()) as usize;
+        if n == 0 || n >= MAX_PATH_CHARS {
+            return Err(3);
+        }
+        if drive || (!path.is_empty() && is_sep(path[0])) {
+            base.push(&cwd[..2])?; // the current drive ("X:rel" keeps it simple)
+        } else {
+            base.push(&cwd[..n])?;
+        }
+    }
+    let rest = if drive { &path[2..] } else { path };
+    // Components: the base's after the drive, then the path's.
+    let mut parts: [(usize, usize, bool); 128] = [(0, 0, false); 128]; // (start, len, from base)
+    let mut count = 0;
+    let add = |src: &[u16],
+               from_base: bool,
+               parts: &mut [(usize, usize, bool); 128],
+               count: &mut usize| {
+        let mut i = 0;
+        while i < src.len() {
+            while i < src.len() && is_sep(src[i]) {
+                i += 1;
+            }
+            let start = i;
+            while i < src.len() && !is_sep(src[i]) {
+                i += 1;
+            }
+            let part = &src[start..i];
+            if part.is_empty() || part == [u16::from(b'.')] {
+                continue;
+            }
+            if part == [u16::from(b'.'), u16::from(b'.')] {
+                *count = count.saturating_sub(1);
+            } else if *count < parts.len() {
+                parts[*count] = (start, i - start, from_base);
+                *count += 1;
+            }
+        }
+    };
+    let base_rest = &base.as_slice()[2..];
+    add(base_rest, true, &mut parts, &mut count);
+    add(rest, false, &mut parts, &mut count);
+    out.push(&base.as_slice()[..2])?;
+    out.push(&[BACKSLASH])?;
+    for (i, &(start, len, from_base)) in parts[..count].iter().enumerate() {
+        if i > 0 {
+            out.push(&[BACKSLASH])?;
+        }
+        let src = if from_base { base_rest } else { rest };
+        out.push(&src[start..start + len])?;
+    }
+    // A trailing separator on the input is kept (directory syntax).
+    if count > 0 && path.last().is_some_and(|&c| is_sep(c)) {
+        out.push(&[BACKSLASH])?;
+    }
+    Ok(out)
+}
+
+/// The NT path (`\\??\\X:\\...`) of a Win32 path.
+fn nt_path(path: *const u16) -> Result<PathBuf, u32> {
+    let full = full_path(wide_slice(path))?;
+    let mut nt = PathBuf::new();
+    let verbatim = [BACKSLASH, BACKSLASH, u16::from(b'?'), BACKSLASH];
+    if full.as_slice().starts_with(&verbatim) {
+        nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
+        nt.push(&full.as_slice()[4..])?;
+    } else {
+        nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
+        nt.push(full.as_slice())?;
+    }
+    Ok(nt)
+}
+
+/// Runs `f` with OBJECT_ATTRIBUTES for the NT path of `path`
+/// (case-insensitive).
+fn with_object_attributes<R>(
+    path: *const u16,
+    f: impl FnOnce(&ObjectAttributes) -> R,
+) -> Result<R, u32> {
+    let nt = nt_path(path)?;
+    let name = UnicodeString {
+        length: (nt.len * 2) as u16,
+        maximum_length: (nt.len * 2) as u16,
+        buffer: nt.chars.as_ptr(),
+    };
+    let attributes = ObjectAttributes {
+        length: core::mem::size_of::<ObjectAttributes>() as u32,
+        root_directory: 0,
+        object_name: &name,
+        attributes: 0x40, // OBJ_CASE_INSENSITIVE
+        security_descriptor: 0,
+        security_quality_of_service: 0,
+    };
+    Ok(f(&attributes))
+}
+
+/// GetFullPathNameW: the full path's length (or the size needed, with the
+/// NUL); `file_part` points at its last component.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFullPathNameW(
+    path: *const u16,
+    size: u32,
+    buf: *mut u16,
+    file_part: *mut *mut u16,
+) -> u32 {
+    let full = match full_path(wide_slice(path)) {
+        Ok(f) => f,
+        Err(e) => return fail_with(e, 0),
+    };
+    let n = copy_out(full.as_slice(), buf, size);
+    if !file_part.is_null() && n as usize == full.len {
+        let last = full.as_slice().iter().rposition(|&c| c == BACKSLASH).map_or(0, |i| i + 1);
+        // SAFETY: the caller's output pointer; `last` lies in `buf`.
+        unsafe { *file_part = if last < full.len { buf.add(last) } else { core::ptr::null_mut() } };
+    }
+    n
+}
+
+// ---- Files ----
+
+const SYNCHRONIZE: u32 = 0x10_0000;
+const FILE_READ_ATTRIBUTES: u32 = 0x80;
+const FILE_LIST_DIRECTORY: u32 = 0x1;
+const DELETE: u32 = 0x1_0000;
+const SHARE_ALL: u32 = 7;
+const FILE_DIRECTORY_FILE: u32 = 0x1;
+const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
+const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
+const FILE_OPEN_FOR_BACKUP_INTENT: u32 = 0x4000;
+const FILE_OPEN_REPARSE_POINT: u32 = 0x20_0000;
+
+/// NtCreateFile on a Win32 path; Err: the Win32 error.
+fn open_path(
+    path: *const u16,
+    access: u32,
+    share: u32,
+    disposition: u32,
+    options: u32,
+    attributes: u32,
+) -> Result<(Handle, usize), u32> {
+    let (mut h, mut iosb) = (core::ptr::null_mut(), [0usize; 2]);
+    let status = with_object_attributes(path, |oa| {
+        // SAFETY: valid pointers for the call.
+        unsafe {
+            NtCreateFile(
+                &mut h,
+                access,
+                oa,
+                &mut iosb,
+                core::ptr::null(),
+                attributes,
+                share,
+                disposition,
+                options,
+                core::ptr::null(),
+                0,
+            )
+        }
+    })?;
+    if status != STATUS_SUCCESS {
+        // SAFETY: plain call.
+        return Err(unsafe { RtlNtStatusToDosError(status) });
+    }
+    Ok((h, iosb[1]))
+}
+
+/// CreateFileW: Win32 dispositions and flags mapped to NtCreateFile.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateFileW(
+    path: *const u16,
+    access: u32,
+    share: u32,
+    _security: *mut c_void,
+    disposition: u32,
+    flags: u32,
+    template: Handle,
+) -> Handle {
+    const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    if !template.is_null() {
+        unsupported(b"kernel32.dll!CreateFileW(template)", 0);
+    }
+    let nt_disposition = match disposition {
+        1 => 2, // CREATE_NEW -> FILE_CREATE
+        2 => 5, // CREATE_ALWAYS -> FILE_OVERWRITE_IF
+        3 => 1, // OPEN_EXISTING -> FILE_OPEN
+        4 => 3, // OPEN_ALWAYS -> FILE_OPEN_IF
+        5 => 4, // TRUNCATE_EXISTING -> FILE_OVERWRITE
+        _ => return fail_with(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE),
+    };
+    let mut options = 0;
+    if flags & FILE_FLAG_OVERLAPPED == 0 {
+        options |= FILE_SYNCHRONOUS_IO_NONALERT;
+    }
+    if flags & FILE_FLAG_BACKUP_SEMANTICS != 0 {
+        options |= FILE_OPEN_FOR_BACKUP_INTENT;
+    } else {
+        options |= FILE_NON_DIRECTORY_FILE;
+    }
+    if flags & FILE_FLAG_DELETE_ON_CLOSE != 0 {
+        options |= 0x1000;
+    }
+    if flags & FILE_FLAG_OPEN_REPARSE_POINT != 0 {
+        options |= FILE_OPEN_REPARSE_POINT;
+    }
+    let access = access | SYNCHRONIZE | FILE_READ_ATTRIBUTES;
+    match open_path(path, access, share, nt_disposition, options, flags & 0x7fff) {
+        Ok((h, information)) => {
+            // OPEN_ALWAYS/CREATE_ALWAYS on an existing file: success, with
+            // ERROR_ALREADY_EXISTS (FILE_OPENED = 1, FILE_OVERWRITTEN = 3).
+            let existed = matches!(disposition, 2 | 4) && matches!(information, 1 | 3);
+            SetLastError(if existed { ERROR_ALREADY_EXISTS } else { 0 });
+            h
+        }
+        // CREATE_NEW on an existing file: ERROR_FILE_EXISTS, not 183.
+        Err(ERROR_ALREADY_EXISTS) if disposition == 1 => fail_with(80, INVALID_HANDLE_VALUE),
+        Err(e) => fail_with(e, INVALID_HANDLE_VALUE),
+    }
+}
+
+/// ReadFile: synchronous reads (end of file reads 0 bytes, TRUE).
+#[unsafe(no_mangle)]
+pub extern "system" fn ReadFile(
+    h: Handle,
+    buffer: *mut u8,
+    length: u32,
+    read: *mut u32,
+    overlapped: *mut c_void,
+) -> Bool {
+    if !overlapped.is_null() {
+        unsupported(b"kernel32.dll!ReadFile(overlapped)", 0);
+        return fail_with(ERROR_NOT_SUPPORTED, FALSE);
+    }
+    let mut iosb = [0usize; 2];
+    // SAFETY: the caller's buffer; a valid IO_STATUS_BLOCK.
+    let mut status = unsafe {
+        NtReadFile(h, 0, 0, 0, &mut iosb, buffer, length, core::ptr::null(), core::ptr::null())
+    };
+    if status == STATUS_PENDING {
+        // SAFETY: waits for the read to complete.
+        status = unsafe { NtWaitForSingleObject(h, 0, core::ptr::null()) };
+        if status == STATUS_SUCCESS {
+            status = iosb[0] as u32;
+        }
+    }
+    let count = if status == 0xc000_0011 { 0 } else { iosb[1] as u32 }; // STATUS_END_OF_FILE
+    if !read.is_null() {
+        // SAFETY: the caller's output pointer.
+        unsafe { *read = count };
+    }
+    match status {
+        STATUS_SUCCESS | 0xc000_0011 => TRUE,
+        _ => fail(status, FALSE),
+    }
+}
+
+/// NtQueryInformationFile into `out`.
+fn query_file(h: Handle, class: u32, out: &mut [u8]) -> Result<(), u32> {
+    let mut iosb = [0usize; 2];
+    // SAFETY: `out` is a valid buffer of its length.
+    let status =
+        unsafe { NtQueryInformationFile(h, &mut iosb, out.as_mut_ptr(), out.len() as u32, class) };
+    if status != STATUS_SUCCESS {
+        // SAFETY: plain call.
+        return Err(unsafe { RtlNtStatusToDosError(status) });
+    }
+    Ok(())
+}
+
+fn set_file(h: Handle, class: u32, data: &[u8]) -> Result<(), u32> {
+    let mut iosb = [0usize; 2];
+    // SAFETY: `data` is a valid buffer of its length.
+    let status =
+        unsafe { NtSetInformationFile(h, &mut iosb, data.as_ptr(), data.len() as u32, class) };
+    if status != STATUS_SUCCESS {
+        // SAFETY: plain call.
+        return Err(unsafe { RtlNtStatusToDosError(status) });
+    }
+    Ok(())
+}
+
+fn i64_at(b: &[u8], i: usize) -> i64 {
+    u64_at(b, i) as i64
+}
+
+/// SetFilePointerEx: FILE_BEGIN (0), FILE_CURRENT (1), FILE_END (2).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetFilePointerEx(
+    h: Handle,
+    distance: i64,
+    new: *mut i64,
+    method: u32,
+) -> Bool {
+    let base = match method {
+        0 => Ok(0),
+        1 => {
+            let mut b = [0u8; 8];
+            query_file(h, 14, &mut b).map(|()| i64_at(&b, 0)) // FilePositionInformation
+        }
+        2 => {
+            let mut b = [0u8; 24];
+            query_file(h, 5, &mut b).map(|()| i64_at(&b, 8)) // FileStandardInformation.EndOfFile
+        }
+        _ => Err(ERROR_INVALID_PARAMETER),
+    };
+    let position = match base.map(|b| b + distance) {
+        Ok(p) if p >= 0 => p,
+        Ok(_) => return fail_with(131, FALSE), // ERROR_NEGATIVE_SEEK
+        Err(e) => return fail_with(e, FALSE),
+    };
+    if let Err(e) = set_file(h, 14, &position.to_le_bytes()) {
+        return fail_with(e, FALSE);
+    }
+    if !new.is_null() {
+        // SAFETY: the caller's output pointer.
+        unsafe { *new = position };
+    }
+    TRUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFileSizeEx(h: Handle, size: *mut i64) -> Bool {
+    let mut b = [0u8; 24];
+    match query_file(h, 5, &mut b) {
+        Ok(()) => {
+            // SAFETY: the caller's output pointer.
+            unsafe { *size = i64_at(&b, 8) };
+            TRUE
+        }
+        Err(e) => fail_with(e, FALSE),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn FlushFileBuffers(h: Handle) -> Bool {
+    let mut iosb = [0usize; 2];
+    // SAFETY: valid IO_STATUS_BLOCK.
+    let status = unsafe { NtFlushBuffersFile(h, &mut iosb) };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+/// FILETIME halves of an NT time.
+fn filetime(t: i64) -> [u32; 2] {
+    [t as u32, (t as u64 >> 32) as u32]
+}
+
+/// GetFileInformationByHandle: BY_HANDLE_FILE_INFORMATION from the basic,
+/// standard, internal (index) and volume (serial) information.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFileInformationByHandle(h: Handle, info: *mut u32) -> Bool {
+    let (mut basic, mut standard, mut internal) = ([0u8; 40], [0u8; 24], [0u8; 8]);
+    let result = query_file(h, 4, &mut basic)
+        .and_then(|()| query_file(h, 5, &mut standard))
+        .and_then(|()| query_file(h, 6, &mut internal));
+    if let Err(e) = result {
+        return fail_with(e, FALSE);
+    }
+    let mut volume = [0u8; 64];
+    let mut iosb = [0usize; 2];
+    // SAFETY: a valid buffer (the label, if any, may be cut off: only the
+    // serial number at offset 8 is used).
+    unsafe { NtQueryVolumeInformationFile(h, &mut iosb, volume.as_mut_ptr(), 64, 1) };
+    let [c0, c1] = filetime(i64_at(&basic, 0));
+    let [a0, a1] = filetime(i64_at(&basic, 8));
+    let [w0, w1] = filetime(i64_at(&basic, 16));
+    let size = u64_at(&standard, 8);
+    let index = u64_at(&internal, 0);
+    let fields = [
+        u32_at(&basic, 32),
+        c0,
+        c1,
+        a0,
+        a1,
+        w0,
+        w1,
+        u32_at(&volume, 8),
+        (size >> 32) as u32,
+        size as u32,
+        u32_at(&standard, 16),
+        (index >> 32) as u32,
+        index as u32,
+    ];
+    // SAFETY: the caller's 52-byte structure.
+    unsafe { core::ptr::copy_nonoverlapping(fields.as_ptr(), info, fields.len()) };
+    TRUE
+}
+
+/// GetFileAttributesW: NtQueryAttributesFile's FileAttributes, or
+/// INVALID_FILE_ATTRIBUTES with the error.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFileAttributesW(path: *const u16) -> u32 {
+    let mut basic = [0u8; 40];
+    // SAFETY: a 40-byte FILE_BASIC_INFORMATION buffer.
+    let status =
+        with_object_attributes(path, |oa| unsafe { NtQueryAttributesFile(oa, basic.as_mut_ptr()) });
+    match status {
+        Ok(STATUS_SUCCESS) => u32_at(&basic, 32),
+        Ok(status) => fail(status, u32::MAX),
+        Err(e) => fail_with(e, u32::MAX),
+    }
+}
+
+/// GetFileAttributesExW(GetFileExInfoStandard): attributes, times and size
+/// (WIN32_FILE_ATTRIBUTE_DATA).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFileAttributesExW(path: *const u16, level: u32, info: *mut u32) -> Bool {
+    if level != 0 {
+        unsupported(b"kernel32.dll!GetFileAttributesExW(level)", u64::from(level));
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let (h, _) = match open_path(
+        path,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        SHARE_ALL,
+        1, // FILE_OPEN
+        FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT,
+        0,
+    ) {
+        Ok(o) => o,
+        Err(e) => return fail_with(e, FALSE),
+    };
+    let (mut basic, mut standard) = ([0u8; 40], [0u8; 24]);
+    let result = query_file(h, 4, &mut basic).and_then(|()| query_file(h, 5, &mut standard));
+    CloseHandle(h);
+    if let Err(e) = result {
+        return fail_with(e, FALSE);
+    }
+    let [c0, c1] = filetime(i64_at(&basic, 0));
+    let [a0, a1] = filetime(i64_at(&basic, 8));
+    let [w0, w1] = filetime(i64_at(&basic, 16));
+    let size = u64_at(&standard, 8);
+    let fields = [u32_at(&basic, 32), c0, c1, a0, a1, w0, w1, (size >> 32) as u32, size as u32];
+    // SAFETY: the caller's 36-byte structure.
+    unsafe { core::ptr::copy_nonoverlapping(fields.as_ptr(), info, fields.len()) };
+    TRUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateDirectoryW(path: *const u16, _security: *mut c_void) -> Bool {
+    match open_path(
+        path,
+        FILE_LIST_DIRECTORY | SYNCHRONIZE,
+        SHARE_ALL,
+        2,
+        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+        0,
+    ) {
+        Ok((h, _)) => {
+            CloseHandle(h);
+            TRUE
+        }
+        Err(e) => fail_with(e, FALSE),
+    }
+}
+
+/// Opens `path` for deletion and marks it (FileDispositionInformation).
+fn delete_path(path: *const u16, directory: bool) -> Bool {
+    let kind = if directory { FILE_DIRECTORY_FILE } else { FILE_NON_DIRECTORY_FILE };
+    let options = kind | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT;
+    let (h, _) = match open_path(path, DELETE | SYNCHRONIZE, SHARE_ALL, 1, options, 0) {
+        Ok(o) => o,
+        Err(e) => return fail_with(e, FALSE),
+    };
+    let result = set_file(h, 13, &[1]);
+    CloseHandle(h);
+    match result {
+        Ok(()) => TRUE,
+        Err(e) => fail_with(e, FALSE),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DeleteFileW(path: *const u16) -> Bool {
+    delete_path(path, false)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn RemoveDirectoryW(path: *const u16) -> Bool {
+    delete_path(path, true)
+}
+
+/// GetVolumeInformationByHandleW: label, serial (FileFsVolumeInformation),
+/// flags, maximum component length and file system name
+/// (FileFsAttributeInformation).
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn GetVolumeInformationByHandleW(
+    h: Handle,
+    name: *mut u16,
+    name_size: u32,
+    serial: *mut u32,
+    max_component: *mut u32,
+    flags: *mut u32,
+    fs_name: *mut u16,
+    fs_name_size: u32,
+) -> Bool {
+    let (mut volume, mut attributes, mut iosb) = ([0u8; 300], [0u8; 300], [0usize; 2]);
+    // SAFETY: valid buffers.
+    let status = unsafe { NtQueryVolumeInformationFile(h, &mut iosb, volume.as_mut_ptr(), 300, 1) };
+    if status != STATUS_SUCCESS && status != 0x8000_0005 {
+        return fail(status, FALSE);
+    }
+    // SAFETY: as above.
+    let status =
+        unsafe { NtQueryVolumeInformationFile(h, &mut iosb, attributes.as_mut_ptr(), 300, 5) };
+    if status != STATUS_SUCCESS && status != 0x8000_0005 {
+        return fail(status, FALSE);
+    }
+    let wide_at = |b: &[u8], len_at: usize, at: usize| -> [u16; 140] {
+        let len = (u32_at(b, len_at) as usize / 2).min(139);
+        let mut w = [0u16; 140];
+        for (i, c) in w.iter_mut().enumerate().take(len) {
+            *c = u16::from_le_bytes([b[at + 2 * i], b[at + 2 * i + 1]]);
+        }
+        w
+    };
+    // SAFETY: the caller's optional output pointers and buffers.
+    unsafe {
+        if !serial.is_null() {
+            *serial = u32_at(&volume, 8);
+        }
+        if !max_component.is_null() {
+            *max_component = u32_at(&attributes, 4);
+        }
+        if !flags.is_null() {
+            *flags = u32_at(&attributes, 0);
+        }
+        if !name.is_null() {
+            let label = wide_at(&volume, 12, 18);
+            let n = label.iter().position(|&c| c == 0).unwrap_or(0);
+            copy_out(&label[..n], name, name_size);
+        }
+        if !fs_name.is_null() {
+            let fs = wide_at(&attributes, 8, 12);
+            let n = fs.iter().position(|&c| c == 0).unwrap_or(0);
+            copy_out(&fs[..n], fs_name, fs_name_size);
+        }
+    }
+    TRUE
+}
+
+/// GetFileInformationByHandleEx: the directory listing classes (as
+/// NtQueryDirectoryFile) and the basic, standard and attribute-tag ones.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFileInformationByHandleEx(
+    h: Handle,
+    class: u32,
+    buffer: *mut u8,
+    size: u32,
+) -> Bool {
+    // FILE_INFO_BY_HANDLE_CLASS -> (NT class, directory listing, restart).
+    let (nt_class, listing, restart) = match class {
+        0 => (4, false, false),  // FileBasicInfo
+        1 => (5, false, false),  // FileStandardInfo
+        9 => (35, false, false), // FileAttributeTagInfo
+        10 => (37, true, false), // FileIdBothDirectoryInfo
+        11 => (37, true, true),  // FileIdBothDirectoryRestartInfo
+        14 => (2, true, false),  // FileFullDirectoryInfo
+        15 => (2, true, true),   // FileFullDirectoryRestartInfo
+        _ => {
+            unsupported(b"kernel32.dll!GetFileInformationByHandleEx(class)", u64::from(class));
+            return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+        }
+    };
+    let mut iosb = [0usize; 2];
+    let status = if listing {
+        // SAFETY: the caller's buffer of `size` bytes.
+        unsafe {
+            NtQueryDirectoryFile(
+                h,
+                0,
+                0,
+                0,
+                &mut iosb,
+                buffer,
+                size,
+                nt_class,
+                0,
+                core::ptr::null(),
+                u8::from(restart),
+            )
+        }
+    } else {
+        // SAFETY: as above.
+        unsafe { NtQueryInformationFile(h, &mut iosb, buffer, size, nt_class) }
+    };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+// ---- FindFirstFileW / FindNextFileW ----
+
+/// What a find handle points at (allocated with VirtualAlloc).
+#[repr(C)]
+struct FindState {
+    directory: Handle,
+}
+
+/// Fills WIN32_FIND_DATAW from one FILE_FULL_DIR_INFORMATION entry.
+fn fill_find_data(entry: &[u8], data: *mut u16) {
+    let ints = data.cast::<u32>();
+    let name_len = (u32_at(entry, 60) as usize / 2).min(259);
+    // SAFETY: the caller's WIN32_FIND_DATAW (592 bytes).
+    unsafe {
+        core::ptr::write_bytes(data.cast::<u8>(), 0, 592);
+        *ints = u32_at(entry, 56); // dwFileAttributes
+        for (i, at) in [8usize, 16, 24].iter().enumerate() {
+            let [lo, hi] = filetime(i64_at(entry, *at));
+            *ints.add(1 + 2 * i) = lo;
+            *ints.add(2 + 2 * i) = hi;
+        }
+        let size = u64_at(entry, 40);
+        *ints.add(7) = (size >> 32) as u32;
+        *ints.add(8) = size as u32;
+        for i in 0..name_len {
+            *data.add(22 + i) = u16::from_le_bytes([entry[68 + 2 * i], entry[69 + 2 * i]]);
+        }
+    }
+}
+
+/// One entry from the directory (FileFullDirectoryInformation), matching
+/// `mask` on the first call.
+fn next_entry(directory: Handle, mask: Option<&UnicodeString>, data: *mut u16) -> Result<(), u32> {
+    let mut entry = [0u8; 68 + 520];
+    let mut iosb = [0usize; 2];
+    let restart = mask.is_some();
+    let mask = mask.map_or(core::ptr::null(), |m| m as *const UnicodeString);
+    // SAFETY: valid buffer and pointers.
+    let status = unsafe {
+        NtQueryDirectoryFile(
+            directory,
+            0,
+            0,
+            0,
+            &mut iosb,
+            entry.as_mut_ptr(),
+            entry.len() as u32,
+            2,
+            1,
+            mask,
+            u8::from(restart),
+        )
+    };
+    if status != STATUS_SUCCESS {
+        // SAFETY: plain call.
+        return Err(unsafe { RtlNtStatusToDosError(status) });
+    }
+    fill_find_data(&entry, data);
+    Ok(())
+}
+
+/// FindFirstFileW: opens the pattern's directory and returns the first
+/// entry matching its last component.
+#[unsafe(no_mangle)]
+pub extern "system" fn FindFirstFileW(pattern: *const u16, data: *mut u16) -> Handle {
+    let full = match full_path(wide_slice(pattern)) {
+        Ok(f) => f,
+        Err(e) => return fail_with(e, INVALID_HANDLE_VALUE),
+    };
+    let path = full.as_slice();
+    let split = path.iter().rposition(|&c| c == BACKSLASH).map_or(0, |i| i + 1);
+    let (dir, mask) = (&path[..split], &path[split..]);
+    let mut dir_z = [0u16; MAX_PATH_CHARS + 1];
+    dir_z[..dir.len()].copy_from_slice(dir);
+    let opened = open_path(
+        dir_z.as_ptr(),
+        FILE_LIST_DIRECTORY | SYNCHRONIZE,
+        SHARE_ALL,
+        1,
+        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT,
+        0,
+    );
+    let (directory, _) = match opened {
+        Ok(o) => o,
+        Err(e) => return fail_with(e, INVALID_HANDLE_VALUE),
+    };
+    let mask = UnicodeString {
+        length: (mask.len() * 2) as u16,
+        maximum_length: (mask.len() * 2) as u16,
+        buffer: mask.as_ptr(),
+    };
+    if let Err(e) = next_entry(directory, Some(&mask), data) {
+        CloseHandle(directory);
+        // No match: ERROR_FILE_NOT_FOUND (as FindFirstFile reports it).
+        return fail_with(if e == 18 { 2 } else { e }, INVALID_HANDLE_VALUE);
+    }
+    let state = VirtualAlloc(core::ptr::null_mut(), 0x1000, 0x3000, 4) as *mut FindState;
+    if state.is_null() {
+        CloseHandle(directory);
+        return INVALID_HANDLE_VALUE;
+    }
+    // SAFETY: a fresh allocation.
+    unsafe { state.write(FindState { directory }) };
+    state.cast()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn FindNextFileW(find: Handle, data: *mut u16) -> Bool {
+    // SAFETY: `find` came from FindFirstFileW.
+    let directory = unsafe { (*find.cast::<FindState>()).directory };
+    match next_entry(directory, None, data) {
+        Ok(()) => TRUE,
+        Err(e) => fail_with(e, FALSE),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn FindClose(find: Handle) -> Bool {
+    // SAFETY: `find` came from FindFirstFileW.
+    let directory = unsafe { (*find.cast::<FindState>()).directory };
+    CloseHandle(directory);
+    VirtualFree(find, 0, 0x8000)
 }
 
 // ---- Process-wide settings ----

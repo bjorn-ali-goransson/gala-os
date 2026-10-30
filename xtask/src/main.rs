@@ -80,6 +80,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_thread_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_misc_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_misc_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_file_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_file_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_env_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_env_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "ntdll.dll", "Windows/System32"),
@@ -155,6 +157,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_misc_test",
     "prng_test",
     "kernel32_env_test",
+    "kernel32_file_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -649,6 +652,12 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["go_gc: ok", "go_gc.exe finished with status 0x00000000"],
     },
     Scenario {
+        name: "go_os",
+        cmdline: "qemu_exit run=go_os.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["go_os: ok", "go_os.exe finished with status 0x00000000"],
+    },
+    Scenario {
         name: "go_exit",
         cmdline: "qemu_exit run=go_exit.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -659,6 +668,12 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_env_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_env_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "kernel32_file_test",
+        cmdline: "qemu_exit run=kernel32_file_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["kernel32_file_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "ledger_test",

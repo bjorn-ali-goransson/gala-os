@@ -156,6 +156,10 @@ name = "kernel32_env_test"
 version = "0.1.0"
 
 [[package]]
+name = "kernel32_file_test"
+version = "0.1.0"
+
+[[package]]
 name = "kernel32_misc_test"
 version = "0.1.0"
 

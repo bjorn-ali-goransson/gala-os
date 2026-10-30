@@ -346,6 +346,11 @@ pub fn create(
 }
 
 /// FILE_BASIC_INFORMATION (40 bytes) for `node`.
+/// FileInternalInformation's IndexNumber: the node, unique on the volume.
+pub fn index_number(node: NodeId) -> u64 {
+    node as u64
+}
+
 pub fn basic_information(node: NodeId) -> Result<[u8; 40], NtStatus> {
     with_fs(|fs| {
         let n = fs.node(node).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;

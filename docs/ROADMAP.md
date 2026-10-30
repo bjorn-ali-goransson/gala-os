@@ -159,6 +159,18 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   ledger; a new bcryptprimitives.dll (ProcessPrng from RDRAND/RDSEED); the
   kernel reports console handles as FILE_DEVICE_CONSOLE and finishes a
   process exactly once when its last threads exit at the same time
+- **Workable Go programs (G3)**: go_goroutines (1000 goroutines,
+  channels, mutexes, select), go_time (sleep, tickers, AfterFunc), go_gc
+  (93 collections over 200 MB), go_os (environment, temp dirs, files:
+  create/write/read/stat/ReadDir/remove, Getwd), go_exit (exit codes).
+  Test-first: `kernel32_env_test` (environment, time zone, current and
+  temp directories), `kernel32_file_test` (the Win32 file layer:
+  CreateFileW and its dispositions, Read/Write/SetFilePointerEx, file
+  information, attributes, FindFirst/NextFileW, directory listing through
+  GetFileInformationByHandleEx, volume information, GetFullPathNameW,
+  delete/remove). Kernel: FileInternalInformation and
+  FileAttributeTagInformation; ntdll exports __chkstk. Kernel test builds
+  at opt-level 1: boot tests 32 s -> 14 s
 - Screen console (framebuffer text mirroring the serial log, Noto Sans Mono
   bitmap font) and `cargo xtask screenshot` (PNG via the QEMU monitor)
 
@@ -179,11 +191,12 @@ to set and to argue for. Current order and why:
    lot for kernel32/Go, which is cheaper to do before splitting it behind
    a platform seam. The ledger and event stream now make the Go bring-up
    data-driven.
-5. U1-U3 (gala-um): the NT layer as a Linux process, for host tools
+5. G3 (workable Go programs): done. Next: N1 (networking), then N2
+   (Nginx). S4 is mostly covered (suspending a thread running on another
+   CPU works: it parks at its next tick); per-CPU run queues wait for a
+   benchmark that needs them.
+6. U1-U3 (gala-um): the NT layer as a Linux process, for host tools
    (perf, sanitizers, gdb) and millisecond tests; design in docs/GALA_UM.md.
-S4 waits until something needs it (Go's preemption uses SuspendThread/
-GetThreadContext, so at the latest G2).
-
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
@@ -195,34 +208,21 @@ U2. **gala-um runs hello.exe**, then the ntrt test programs; `cargo xtask
    um-test` runs them all in seconds.
 U3. **gala-um in CI** next to the QEMU scenarios, with differences between
    the two reported as bugs.
-G3. **More Go**: goroutines across threads under load, timers and
-   sleeping, the GC under pressure, os (files, directories, environment,
-   args), time, then net (needs N1's sockets). Go's own test programs as
-   tests; RtlVirtualUnwind and FormatMessageW (message tables) when Go
-   needs them for tracebacks and error text.
-N1. **Toward Nginx**: process creation (CreateProcess), a C runtime
-   (ucrt/msvcrt subset), a virtio disk and NIC, a TCP/IP stack and AFD
-   (Winsock) sockets.
-3b. **Object manager, rest**: keyed events, OBJ_PERMANENT/NtMakeTemporary-
-   Object, security descriptors (all access is granted so far).
-6c. **Sections, rest**: the kernel loader using image sections (the exe
-   shared like DLLs), sharing read-only pages of relocated views.
-6e. **User-mode loader support**: what a real ntdll's loader needs next
-   (and: images that cannot load at their base go to the lowest free
-   address, 0x10000, where Windows picks a high one; seen in the event
-   stream):
-   KnownDlls (`\KnownDlls` section objects), more NtQuerySystemInformation
-   classes, NtSetInformationProcess/Thread bits, TLS slots in the TEB;
-   (testntdll: PEB->Ldr, forwarders, search paths, a loader lock.)
-7b. **Exceptions, rest**: NtRaiseException (first/second chance),
-   SizeOfStackReserve/Commit from the image, AVX state (XSAVE, CONTEXT_EX)
-   and FltSave in NtCreateThread, SEH unwinding is user-mode
-   (ntdll) work; verify the dispatcher frame against the pinned ntdll.
-8c. **Files, rest**: completion port concurrency limits, truly pending I/O, NtNotifyChangeDirectoryFile, file
-   locks, short (8.3) names.
-9. Toward M6: collect windows.json on the pinned build and fix every
-   difference (gala bug or wrong test expectation); run the first Wine
-   ntdll conformance test binaries.
+N1. **Networking (next)**, re-planned 2026-10-30 from data: the official
+   Nginx Windows build is a 32-bit (PE32) program (imports: KERNEL32 152,
+   ADVAPI32 21, WS2_32 7, CRYPT32 7, USER32 4; C runtime linked in), and
+   gala runs 64-bit programs only. Whatever server runs first, it needs the
+   same foundation, so that comes first, proven with Go (which works):
+   N1a. A network device (virtio-net, QEMU user networking with port
+        forwarding) and a TCP/IP stack in the kernel.
+   N1b. Sockets as Windows has them: the AFD device (`\Device\Afd`,
+        what ws2_32/mswsock talk to through NtCreateFile and
+        NtDeviceIoControlFile), and gala's ws2_32.dll and mswsock.dll.
+   N1c. A Go `net/http` server answering the host (xtask fetches a page
+        from it): the first web server on gala.
+N2. **Nginx**: either our own 64-bit build of Nginx (cross-compiled with
+   mingw-w64) or a WoW64-style layer for 32-bit programs (much larger);
+   then CreateProcess for its worker processes, advapi32/crypt32 pieces.
 
 ## Later
 SMP, ACPI (MADT/HPET), virtio devices, bindgen-generated layouts from
