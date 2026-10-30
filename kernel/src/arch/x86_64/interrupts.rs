@@ -148,12 +148,13 @@ impl Gate {
         _reserved: 0,
     };
 
-    fn interrupt(handler: u64, ist: u8) -> Gate {
+    /// A 64-bit interrupt gate; `dpl` 3 lets user mode raise it with `int`.
+    fn interrupt(handler: u64, ist: u8, dpl: u8) -> Gate {
         Gate {
             offset_low: handler as u16,
             selector: KERNEL_CS,
             ist,
-            attributes: 0x8e, // present, DPL 0, 64-bit interrupt gate
+            attributes: 0x8e | (dpl & 3) << 5, // present, 64-bit interrupt gate
             offset_mid: (handler >> 16) as u16,
             offset_high: (handler >> 32) as u32,
             _reserved: 0,
@@ -183,7 +184,10 @@ pub fn init() {
                 18 => gdt::IST_MACHINE_CHECK,
                 _ => 0,
             };
-            *gate = Gate::interrupt(base + 16 * vector as u64, ist);
+            // int3 is allowed from user mode (it raises STATUS_BREAKPOINT
+            // there); other vectors raised by `int n` from ring 3 are #GP.
+            let dpl = if vector as u8 == VECTOR_BREAKPOINT { 3 } else { 0 };
+            *gate = Gate::interrupt(base + 16 * vector as u64, ist, dpl);
         }
         let pointer = super::gdt::descriptor_pointer(IDT.get().cast(), size_of::<Idt>());
         asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags));

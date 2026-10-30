@@ -1074,6 +1074,57 @@ pub fn find_export(base: usize, name: &[u8]) -> Option<usize> {
     })
 }
 
+fn ascii_upper(c: u16) -> u16 {
+    if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c }
+}
+
+/// Case-insensitive (ASCII) suffix test on a UTF-16 string.
+pub fn ends_with_ci(s: &[u16], suffix: &str) -> bool {
+    s.len() >= suffix.len()
+        && s[s.len() - suffix.len()..]
+            .iter()
+            .zip(suffix.bytes())
+            .all(|(&a, b)| ascii_upper(a) == ascii_upper(u16::from(b)))
+}
+
+pub const MEMORY_MAPPED_FILENAME_INFORMATION: u32 = 2;
+
+/// The NT path of the file mapped at `addr` (MemoryMappedFilenameInformation),
+/// stored in `buf`.
+pub fn mapped_file_name(addr: usize, buf: &mut [u8; 600]) -> Result<&[u16], NtStatus> {
+    let (s, _) = query_virtual_raw(addr, MEMORY_MAPPED_FILENAME_INFORMATION, buf);
+    if s != STATUS_SUCCESS {
+        return Err(s);
+    }
+    let len = usize::from(u16::from_le_bytes([buf[0], buf[1]]));
+    let ptr = usize::from_le_bytes(buf[8..16].try_into().unwrap()) as *const u16;
+    // SAFETY: the name buffer is inside `buf`, `len` bytes long.
+    Ok(unsafe { core::slice::from_raw_parts(ptr, len / 2) })
+}
+
+/// The base of the image mapped from `...\System32\ntdll.dll`, found by
+/// walking the address space (works the same on Windows and gala).
+pub fn find_ntdll() -> Option<usize> {
+    const USER_TOP: usize = 0x7fff_ffff_0000;
+    let mut addr = 0;
+    let mut buf = [0u8; 600];
+    while addr < USER_TOP {
+        let (s, mbi) = query(addr);
+        if s != STATUS_SUCCESS || mbi.region_size == 0 {
+            return None;
+        }
+        if mbi.kind == MEM_IMAGE
+            && mbi.base_address == mbi.allocation_base
+            && mapped_file_name(addr, &mut buf)
+                .is_ok_and(|n| ends_with_ci(n, "\\System32\\ntdll.dll"))
+        {
+            return Some(addr);
+        }
+        addr = mbi.base_address + mbi.region_size;
+    }
+    None
+}
+
 /// Returns (status, old protection).
 pub fn protect(base: usize, size: usize, new: u32) -> (NtStatus, u32) {
     let (mut b, mut s, mut old) = (base, size, 0);

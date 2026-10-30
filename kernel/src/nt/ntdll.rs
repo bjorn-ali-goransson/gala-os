@@ -15,6 +15,9 @@ const PATH: &str = "\\Windows\\System32\\ntdll.dll";
 pub struct Ntdll {
     pub section: ObjectRef,
     pub thunk_rva: u32,
+    /// KiUserExceptionDispatcher, if exported: user-mode exceptions are
+    /// delivered there.
+    pub dispatcher_rva: Option<u32>,
 }
 
 /// Loaded on first use; `Some(None)` once we know there is none.
@@ -48,7 +51,9 @@ fn load() -> Option<Ntdll> {
         warn!("ntdll: {PATH} does not export LdrInitializeThunk");
         return None;
     };
+    let dispatcher_rva =
+        section.image.as_ref().and_then(|i| i.export(b"KiUserExceptionDispatcher"));
     let section = KObject::new(ObjectBody::Section(section)).ok()?;
     info!("ntdll: using {PATH}, LdrInitializeThunk at rva {thunk_rva:#x}");
-    Some(Ntdll { section, thunk_rva })
+    Some(Ntdll { section, thunk_rva, dispatcher_rva })
 }

@@ -37,6 +37,9 @@ pub struct Process {
     pub dispatcher: Dispatcher,
     /// The executable's mapping: (base, size).
     pub image: (u64, u64),
+    /// ntdll!KiUserExceptionDispatcher in this process, or 0: then user
+    /// exceptions end the process.
+    exception_dispatcher: core::sync::atomic::AtomicU64,
 }
 
 impl fmt::Debug for Process {
@@ -376,6 +379,7 @@ pub fn spawn_from_pe(
         exit_status: IrqMutex::new(None),
         dispatcher: Dispatcher::new(0),
         image: (base, u64::from(image.size_of_image)),
+        exception_dispatcher: core::sync::atomic::AtomicU64::new(0),
     })?;
     PROCESSES.lock().try_push(process.clone())?;
 
@@ -414,6 +418,11 @@ fn through_ntdll(process: &Process, start: &UserRegs) -> Result<UserRegs, NtStat
         vad::PAGE_EXECUTE_WRITECOPY,
         false,
     )?;
+    if let Some(rva) = ntdll.dispatcher_rva {
+        process
+            .exception_dispatcher
+            .store(view.base + u64::from(rva), core::sync::atomic::Ordering::Relaxed);
+    }
     let mut entry = *start;
     let context_addr = (layout::STACK_TOP - super::context::SIZE as u64) & !0xf;
     entry.gpr[4] = context_addr - 0x28;
@@ -490,6 +499,11 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
         14 => NtStatus::ACCESS_VIOLATION,
         _ => NtStatus::ACCESS_VIOLATION,
     };
+    if let Some(process) = current()
+        && deliver_to_user(&process, frame, status, cr2)
+    {
+        return;
+    }
     warn!(
         "user exception: {} at rip {:#x} (cr2 {:#x}, error {:#x})",
         interrupts::exception_name(vector),
@@ -499,6 +513,78 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
     );
     // Takes effect on the way back to user mode (the user-return hook).
     terminate_current(status)
+}
+
+/// The dispatcher frame on the user stack: the CONTEXT at the new rsp,
+/// the EXCEPTION_RECORD at `RECORD_OFFSET`, then room for a machine frame.
+/// The layout follows the documented KiUserExceptionDispatcher contract as
+/// far as it is public (rsp -> CONTEXT, record above it).
+// TODO: check the offsets against the pinned build's ntdll.
+const RECORD_OFFSET: u64 = 0x4f0;
+const RECORD_SIZE: u64 = 0x98;
+const DISPATCH_FRAME_SIZE: u64 = RECORD_OFFSET + 0xa0 + 0x30;
+
+/// EXCEPTION_RECORD (x64) for `status` raised at `address`.
+fn exception_record(status: NtStatus, address: u64, info: &[u64]) -> [u8; RECORD_SIZE as usize] {
+    let mut r = [0u8; RECORD_SIZE as usize];
+    r[0..4].copy_from_slice(&status.0.to_le_bytes());
+    r[0x10..0x18].copy_from_slice(&address.to_le_bytes());
+    r[0x18..0x1c].copy_from_slice(&(info.len() as u32).to_le_bytes());
+    for (i, v) in info.iter().enumerate() {
+        r[0x20 + 8 * i..0x28 + 8 * i].copy_from_slice(&v.to_le_bytes());
+    }
+    r
+}
+
+/// Hands a user-mode exception to ntdll!KiUserExceptionDispatcher, if the
+/// process has one: CONTEXT and EXCEPTION_RECORD go on the user stack and
+/// the thread resumes in the dispatcher. False if it cannot be delivered.
+fn deliver_to_user(
+    process: &Process,
+    frame: &mut TrapFrame,
+    status: NtStatus,
+    cr2: Option<u64>,
+) -> bool {
+    let dispatcher = process.exception_dispatcher.load(core::sync::atomic::Ordering::Relaxed);
+    if dispatcher == 0 {
+        return false;
+    }
+    // Breakpoints report the int3 itself (the trap left rip after it).
+    let rip = if status == NtStatus::BREAKPOINT { frame.rip.wrapping_sub(1) } else { frame.rip };
+    let info: &[u64] = match status {
+        NtStatus::BREAKPOINT => &[0],
+        NtStatus::ACCESS_VIOLATION => {
+            // 0 = read, 1 = write, 8 = execute (DEP).
+            let kind = match frame.error_code {
+                e if e & (1 << 4) != 0 => 8,
+                e if e & (1 << 1) != 0 => 1,
+                _ => 0,
+            };
+            &[kind, cr2.unwrap_or(u64::MAX)]
+        }
+        _ => &[],
+    };
+    let record = exception_record(status, rip, info);
+    let regs = UserRegs {
+        gpr: [
+            frame.rax, frame.rcx, frame.rdx, frame.rbx, frame.rsp, frame.rbp, frame.rsi, frame.rdi,
+            frame.r8, frame.r9, frame.r10, frame.r11, frame.r12, frame.r13, frame.r14, frame.r15,
+        ],
+        rip,
+        rflags: frame.rflags,
+    };
+    let context = super::context::to_bytes(&regs);
+    let new_rsp = (frame.rsp.wrapping_sub(DISPATCH_FRAME_SIZE)) & !0xf;
+    if new_rsp >= frame.rsp
+        || process.write(new_rsp, &context).is_err()
+        || process.write(new_rsp + RECORD_OFFSET, &record).is_err()
+    {
+        warn!("user exception: cannot push the dispatcher frame (rsp {:#x})", frame.rsp);
+        return false;
+    }
+    frame.rip = dispatcher;
+    frame.rsp = new_rsp;
+    true
 }
 
 pub fn init() {

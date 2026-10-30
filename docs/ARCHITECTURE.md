@@ -214,6 +214,16 @@ SYSRET cannot restore rcx/r11. Without an ntdll, threads start at the entry
 point directly. MemoryMappedFilenameInformation reports the NT path of the
 file behind an image view or the executable.
 
+**User-mode exceptions**: a CPU exception from user mode that the fault
+path does not resolve becomes an NTSTATUS (#DE INTEGER_DIVIDE_BY_ZERO, #BP
+BREAKPOINT with the int3's own address, #UD ILLEGAL_INSTRUCTION, #PF
+ACCESS_VIOLATION with information (0 read / 1 write / 8 execute, address),
+#GP PRIVILEGED_INSTRUCTION). If the process's ntdll exports
+KiUserExceptionDispatcher, the kernel pushes the CONTEXT at a new 16-byte
+aligned rsp and the EXCEPTION_RECORD at rsp + 0x4f0, and resumes the thread
+there (to be checked against the pinned ntdll); otherwise the process ends
+with the status. The #BP gate has DPL 3 so `int3` works from user mode.
+
 **Virtual memory**: `nt::vad::Vad` tracks reservations (64 KiB aligned)
 as run-length lists of per-page state (committed + protection), so query
 regions fall out directly and huge reservations are cheap. Committed pages

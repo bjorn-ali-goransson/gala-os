@@ -16,9 +16,7 @@ unsafe extern "C" {
     static __ImageBase: u8;
 }
 
-const MEMORY_MAPPED_FILENAME_INFORMATION: u32 = 2;
 const PAGE_EXECUTE_READ: u32 = 0x20;
-const USER_TOP: usize = 0x7fff_ffff_0000;
 const TEST_NTDLL_MAGIC: u64 = 0x6761_6c61_6e74_646c;
 
 struct Checks(u32);
@@ -42,50 +40,6 @@ impl Checks {
     }
 }
 
-fn upper(c: u16) -> u16 {
-    if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c }
-}
-
-fn ends_with_ci(s: &[u16], suffix: &str) -> bool {
-    s.len() >= suffix.len()
-        && s[s.len() - suffix.len()..]
-            .iter()
-            .zip(suffix.bytes())
-            .all(|(&a, b)| upper(a) == upper(u16::from(b)))
-}
-
-/// The mapped file name of `addr` (MemoryMappedFilenameInformation).
-fn mapped_name(addr: usize, buf: &mut [u8; 600]) -> Result<&[u16], NtStatus> {
-    let (s, _) = query_virtual_raw(addr, MEMORY_MAPPED_FILENAME_INFORMATION, buf);
-    if s != STATUS_SUCCESS {
-        return Err(s);
-    }
-    let len = usize::from(u16::from_le_bytes([buf[0], buf[1]]));
-    let ptr = usize::from_le_bytes(buf[8..16].try_into().unwrap()) as *const u16;
-    // SAFETY: the name buffer is inside `buf`, `len` bytes long.
-    Ok(unsafe { core::slice::from_raw_parts(ptr, len / 2) })
-}
-
-/// Finds the image mapped from `...\System32\ntdll.dll`.
-fn find_ntdll() -> Option<usize> {
-    let mut addr = 0;
-    let mut buf = [0u8; 600];
-    while addr < USER_TOP {
-        let (s, mbi) = query(addr);
-        if s != STATUS_SUCCESS || mbi.region_size == 0 {
-            return None;
-        }
-        if mbi.kind == MEM_IMAGE
-            && mbi.base_address == mbi.allocation_base
-            && mapped_name(addr, &mut buf).is_ok_and(|n| ends_with_ci(n, "\\System32\\ntdll.dll"))
-        {
-            return Some(addr);
-        }
-        addr = mbi.base_address + mbi.region_size;
-    }
-    None
-}
-
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     let Some(ntdll) = find_ntdll() else { return c.ok(false, 0) };
@@ -106,9 +60,12 @@ fn run() -> Result<(), u32> {
     // Our own image is mapped from our file; private memory has no name.
     let image = &raw const __ImageBase as usize;
     let mut buf = [0u8; 600];
-    c.ok(mapped_name(image, &mut buf).is_ok_and(|n| ends_with_ci(n, "\\startup_test.exe")), 0)?;
+    c.ok(
+        mapped_file_name(image, &mut buf).is_ok_and(|n| ends_with_ci(n, "\\startup_test.exe")),
+        0,
+    )?;
     let local = 0u8;
-    c.ok(mapped_name(&raw const local as usize, &mut buf).is_err(), 0)?;
+    c.ok(mapped_file_name(&raw const local as usize, &mut buf).is_err(), 0)?;
 
     // gala's test ntdll records its LdrInitializeThunk call.
     if let Some(state) = find_export(ntdll, b"GalaTestNtdllState") {

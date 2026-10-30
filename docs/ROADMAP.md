@@ -58,6 +58,10 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   an image section, initial thread at LdrInitializeThunk(CONTEXT, base),
   NtContinue (0x43, full-register return), MemoryMappedFilenameInformation;
   our own `testntdll` and `startup_test`
+- User-mode exceptions: delivery to ntdll!KiUserExceptionDispatcher
+  (CONTEXT + EXCEPTION_RECORD on the user stack), int3 from user mode;
+  testntdll's vectored handler list (RtlAdd/RemoveVectoredException-
+  Handler) and dispatcher; `exception_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
@@ -73,8 +77,10 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
    Information basics, NtSetInformationProcess/Thread bits, TLS slots in
    the TEB, PEB->Ldr built by our test ntdll to resolve an exe's imports
    from testdll; boot cmdline `args=` for the command line.
-7. **Exceptions**: user-mode exception dispatch (KiUserExceptionDispatcher
-   contract), NtContinue, NtRaiseException; vectored/SEH work in user mode.
+7b. **Exceptions, rest**: NtRaiseException (first/second chance),
+   guard pages (STATUS_GUARD_PAGE_VIOLATION, stack growth), XMM/x87 state
+   in CONTEXT (save/restore with FXSAVE/XSAVE), SEH unwinding is user-mode
+   (ntdll) work; verify the dispatcher frame against the pinned ntdll.
 8c. **Files, rest**: `\??\C:` as a symbolic link, asynchronous I/O
    (events, APCs, STATUS_PENDING), NtNotifyChangeDirectoryFile, file
    locks, short (8.3) names.

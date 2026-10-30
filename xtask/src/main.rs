@@ -37,7 +37,10 @@ const USER_DLLS: &[Dll] = &[
 
 /// Extra boot modules per scenario: (scenario, built DLL file, directory
 /// on C: that the kernel puts it in, passed as the module string).
-const EXTRA_MODULES: &[(&str, &str, &str)] = &[("startup_test", "ntdll.dll", "Windows/System32")];
+const EXTRA_MODULES: &[(&str, &str, &str)] = &[
+    ("startup_test", "ntdll.dll", "Windows/System32"),
+    ("exception_test", "ntdll.dll", "Windows/System32"),
+];
 const USER_PROGRAMS: &[&str] = &[
     "hello",
     "abi_test",
@@ -53,6 +56,7 @@ const USER_PROGRAMS: &[&str] = &[
     "dir_test",
     "peb_test",
     "startup_test",
+    "exception_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -313,6 +317,12 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "exception_test",
+        cmdline: "qemu_exit run=exception_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["exception_test: ok", "exited with status 0x00000000"],
+    },
     Scenario {
         name: "startup_test",
         cmdline: "qemu_exit run=startup_test.exe",
