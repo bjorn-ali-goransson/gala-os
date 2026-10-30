@@ -29,6 +29,8 @@ cargo xtask run            # boot in QEMU, serial on stdio (add --headless for n
 cargo xtask test           # host unit tests + headless QEMU boot scenarios
 cargo xtask boot-test ud   # only boot scenarios whose name contains "ud"
 cargo xtask export-tests   # refresh the checked-in test programs in user/bin/
+cargo xtask report         # run every test program on gala -> target/report/gala.{json,md}
+cargo xtask compare windows.json  # compare with user/bin/run-all.ps1's report from Windows
 cargo xtask run --release  # any command takes --release
 ```
 

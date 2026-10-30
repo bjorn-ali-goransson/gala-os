@@ -11,6 +11,8 @@ use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod report;
+
 /// Pinned Limine release (prebuilt binary branch tag) and its expected commit.
 const LIMINE_TAG: &str = "v11.4.1-binary";
 const LIMINE_COMMIT: &str = "5be26a73d7b7b4d4477d18be94e1d16e615adf56";
@@ -90,6 +92,9 @@ commands:
   test         run host unit tests, then boot in QEMU and check the result
   boot-test    only the QEMU boot tests [scenario name filter]
   export-tests copy the built test programs to user/bin/ (checked in)
+  report       run every test program on gala; write target/report/gala.{json,md}
+  compare      compare a report from Windows (user/bin/run-all.ps1) with gala's:
+               compare <windows.json> [<gala.json>]
 ";
 
 fn main() -> ExitCode {
@@ -102,6 +107,11 @@ fn main() -> ExitCode {
         Some("test") => unit_tests().and_then(|()| boot_tests(release, None)),
         Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
         Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
+        Some("report") => gala_report(release),
+        Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
+            Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
+            None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
+        },
         _ => {
             eprint!("{USAGE}");
             return ExitCode::from(2);
@@ -146,8 +156,9 @@ fn run_cmd(cmd: &mut Command) -> Result {
 }
 
 fn unit_tests() -> Result {
-    eprintln!("xtask: running kernel unit tests on the host");
-    run_cmd(cargo().args(["test", "--package", "kernel", "--lib"]))
+    eprintln!("xtask: running kernel and xtask unit tests on the host");
+    run_cmd(cargo().args(["test", "--package", "kernel", "--lib"]))?;
+    run_cmd(cargo().args(["test", "--package", "xtask"]))
 }
 
 /// Builds the kernel and packs it with Limine into a UEFI-bootable ISO named
@@ -202,7 +213,7 @@ fn make_iso(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
         copy(&exe, &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
     }
-    let scenario = name.strip_prefix("test-").unwrap_or(name);
+    let scenario = ["test-", "report-"].iter().find_map(|p| name.strip_prefix(p)).unwrap_or(name);
     for (_, file, dir) in EXTRA_MODULES.iter().filter(|m| m.0 == scenario) {
         let built = target_dir().join(USER_TARGET).join("release").join(file);
         copy(&built, &boot.join(file))?;
@@ -551,7 +562,91 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     }
 }
 
+/// The program a scenario runs, if it is that program's own scenario.
+fn scenario_program(scenario: &Scenario) -> Option<&'static str> {
+    let program = scenario.cmdline.split_whitespace().find_map(|w| w.strip_prefix("run="))?;
+    let program = program.strip_suffix(".exe")?;
+    (program == scenario.name).then_some(program)
+}
+
+fn report_dir() -> PathBuf {
+    target_dir().join("report")
+}
+
+/// Runs every test program's scenario and records each outcome.
+fn gala_report(release: bool) -> Result {
+    build_kernel(release)?;
+    let selected: Vec<(&Scenario, &str)> =
+        SCENARIOS.iter().filter_map(|s| scenario_program(s).map(|p| (s, p))).collect();
+    let mut isos = Vec::new();
+    for (scenario, _) in &selected {
+        isos.push(make_iso(release, &format!("report-{}", scenario.name), scenario.cmdline)?);
+    }
+    thread::scope(|scope| {
+        for ((scenario, _), iso) in selected.iter().zip(&isos) {
+            // The verdict does not matter here: the outcome is read from
+            // the serial log.
+            scope.spawn(move || {
+                let _ = boot_scenario_quiet(scenario, iso);
+            });
+        }
+    });
+    let mut results = Vec::new();
+    for ((_, program), iso) in selected.iter().zip(&isos) {
+        let serial = fs::read_to_string(iso.with_extension("serial.log")).unwrap_or_default();
+        results.push(report::outcome_from_serial(program, &serial));
+    }
+    let dir = report_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    write(&dir.join("gala.json"), &report::to_json("gala", &results))?;
+    let table = report::markdown("gala", &results);
+    write(&dir.join("gala.md"), &table)?;
+    print!("{table}");
+    eprintln!("xtask: wrote {}", dir.join("gala.json").display());
+    Ok(())
+}
+
+/// Prints how each program fared on Windows and on gala; fails if any
+/// program that ran on both ended differently.
+fn compare_reports(windows: &Path, gala: Option<&Path>) -> Result {
+    let read = |p: &Path| -> Result<(String, Vec<report::Outcome>)> {
+        let text = fs::read_to_string(p).map_err(|e| format!("reading {p:?}: {e}"))?;
+        report::from_json(&text).map_err(|e| format!("{p:?}: {e}"))
+    };
+    let gala_path = gala.map_or_else(|| report_dir().join("gala.json"), Path::to_path_buf);
+    let (_, w) = read(windows)?;
+    let (_, g) = read(&gala_path)?;
+    let show = |o: &Option<report::Outcome>| match o {
+        Some(report::Outcome { exit: Some(e), .. }) => format!("{e:#010x}"),
+        Some(report::Outcome { skipped: Some(s), .. }) => format!("skipped ({s})"),
+        _ => "-".to_string(),
+    };
+    println!("| program | windows | gala | |\n|---|---|---|---|");
+    let mut different = 0;
+    for (name, win, gal, verdict) in report::compare(&w, &g) {
+        let mark = match verdict {
+            report::Verdict::Same => "same",
+            report::Verdict::Different => {
+                different += 1;
+                "DIFFERENT"
+            }
+            report::Verdict::Missing => "missing",
+        };
+        println!("| {name} | {} | {} | {mark} |", show(&win), show(&gal));
+    }
+    if different == 0 { Ok(()) } else { Err(format!("{different} programs differ")) }
+}
+
+/// `boot_scenario` without printing logs (for reports).
+fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
+    boot_scenario_with(scenario, iso, false)
+}
+
 fn boot_scenario(scenario: &Scenario, iso: &Path) -> Result {
+    boot_scenario_with(scenario, iso, true)
+}
+
+fn boot_scenario_with(scenario: &Scenario, iso: &Path, show_failures: bool) -> Result {
     let log = iso.with_extension("serial.log");
     let _ = fs::remove_file(&log);
     let mut cmd = qemu(iso)?;
@@ -593,7 +688,7 @@ fn boot_scenario(scenario: &Scenario, iso: &Path) -> Result {
         }
         Some(_) => Ok(()),
     };
-    if verdict.is_err() || env::var_os("XTASK_VERBOSE").is_some() {
+    if (verdict.is_err() && show_failures) || env::var_os("XTASK_VERBOSE").is_some() {
         eprintln!(
             "----- {} serial output ({}) -----\n{}\n-----",
             scenario.name,

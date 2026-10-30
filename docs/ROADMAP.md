@@ -88,6 +88,8 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 - Copy-on-write: PAGE_WRITECOPY views of files and image pages get
   private copies on write (protection then PAGE_READWRITE); image pages
   shared between views at the preferred base; `cow_test`
+- Differential runner: `cargo xtask report` (gala), `user/bin/run-all.ps1`
+  (Windows), `cargo xtask compare`; JSON schema and parser host-tested
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
@@ -107,9 +109,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 8c. **Files, rest**: `\??\C:` as a symbolic link, asynchronous I/O
    (events, APCs, STATUS_PENDING), NtNotifyChangeDirectoryFile, file
    locks, short (8.3) names.
-9. Toward M6: a differential test runner (same user/bin programs on
-   Windows and gala, compare output); run the first Wine ntdll
-   conformance test binaries.
+9. Toward M6: collect windows.json on the pinned build and fix every
+   difference (gala bug or wrong test expectation); run the first Wine
+   ntdll conformance test binaries.
 
 ## Later
 SMP, ACPI (MADT/HPET), virtio devices, bindgen-generated layouts from
