@@ -314,7 +314,7 @@ fn build_go_programs() -> Result {
         }
         run_quiet(
             Command::new("go")
-                .args(["build", "-trimpath", "-ldflags=-buildid=", "-o"])
+                .args(["build", "-trimpath", "-buildvcs=false", "-ldflags=-buildid=", "-o"])
                 .arg(&exe)
                 .arg(".")
                 .current_dir(root().join("user").join(program))
