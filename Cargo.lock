@@ -156,6 +156,10 @@ name = "kernel32_test"
 version = "0.1.0"
 
 [[package]]
+name = "kernel32_thread_test"
+version = "0.1.0"
+
+[[package]]
 name = "kuser_test"
 version = "0.1.0"
 dependencies = [

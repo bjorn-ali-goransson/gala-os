@@ -146,6 +146,28 @@ unsafe extern "system" {
         options: u32,
     ) -> u32;
     fn NtYieldExecution() -> u32;
+    fn NtQueryInformationThread(
+        h: Handle,
+        class: u32,
+        buf: *mut u8,
+        len: u32,
+        ret: *mut u32,
+    ) -> u32;
+    fn NtCreateThread(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        process: isize,
+        client_id: *mut [usize; 2],
+        context: *const Context,
+        initial_teb: *const [usize; 5],
+        suspended: u8,
+    ) -> u32;
+    fn NtResumeThread(h: Handle, previous: *mut u32) -> u32;
+    fn NtSuspendThread(h: Handle, previous: *mut u32) -> u32;
+    fn NtTerminateThread(h: isize, status: u32) -> u32;
+    fn NtGetContextThread(h: Handle, context: *mut Context) -> u32;
+    fn NtSetContextThread(h: Handle, context: *const Context) -> u32;
     fn NtWaitForMultipleObjects(
         count: u32,
         handles: *const Handle,
@@ -807,6 +829,226 @@ pub extern "system" fn RaiseFailFastException(
         unsafe { *record }
     };
     ExitProcess(code)
+}
+
+// ---- Threads ----
+
+/// CONTEXT (x64 layout, 0x4d0 bytes, 16-byte aligned).
+#[repr(C, align(16))]
+pub struct Context {
+    home: [u64; 6],
+    context_flags: u32,
+    mx_csr: u32,
+    /// SegCs, SegDs, SegEs, SegFs, SegGs, SegSs.
+    segs: [u16; 6],
+    eflags: u32,
+    dr: [u64; 6],
+    /// Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi, R8..R15.
+    gpr: [u64; 16],
+    rip: u64,
+    rest: [u8; 0x4d0 - 0x100],
+}
+
+type StartRoutine = extern "system" fn(*mut c_void) -> u32;
+
+/// Every thread CreateThread makes starts here (rcx = start, rdx = param),
+/// like Windows' thread start thunk: run the routine, exit with its result.
+extern "system" fn thread_start(start: StartRoutine, param: *mut c_void) -> ! {
+    ExitThread(start(param))
+}
+
+/// Default stack reservation for new threads (Windows takes it from the
+/// executable's header; 1 MiB is the usual value).
+const DEFAULT_STACK: usize = 0x10_0000;
+
+/// CreateThread: the stack is reserved and committed here (no guard page
+/// yet: a thread that overflows it faults), then NtCreateThread starts the
+/// thread at `thread_start`. Thread attributes are not supported yet.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateThread(
+    attributes: *mut c_void,
+    stack_size: usize,
+    start: StartRoutine,
+    param: *mut c_void,
+    flags: u32,
+    thread_id: *mut u32,
+) -> Handle {
+    const CREATE_SUSPENDED: u32 = 0x4;
+    const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x1_0000;
+    if !attributes.is_null() || flags & !(CREATE_SUSPENDED | STACK_SIZE_PARAM_IS_A_RESERVATION) != 0
+    {
+        unsupported(b"kernel32.dll!CreateThread(attributes/flags)", u64::from(flags));
+        return fail_with(ERROR_NOT_SUPPORTED, core::ptr::null_mut());
+    }
+    let size = stack_size.max(DEFAULT_STACK).next_multiple_of(0x1_0000);
+    let stack = VirtualAlloc(core::ptr::null_mut(), size, 0x3000, 4) as usize;
+    if stack == 0 {
+        return core::ptr::null_mut();
+    }
+    let top = stack + size;
+    // SAFETY: an all-zero CONTEXT is a valid bit pattern.
+    let mut context: Context = unsafe { core::mem::zeroed() };
+    context.context_flags = 0x10_000b; // CONTEXT_FULL
+    context.mx_csr = 0x1f80;
+    context.segs = [0x33, 0x2b, 0x2b, 0x53, 0x2b, 0x2b];
+    context.eflags = 0x200;
+    context.rip = thread_start as *const () as u64;
+    context.gpr[1] = start as *const () as u64; // rcx
+    context.gpr[2] = param as u64; // rdx
+    context.gpr[4] = (top - 0x28) as u64; // rsp, as if called
+    // INITIAL_TEB: OldStackBase, OldStackLimit, StackBase, StackLimit,
+    // StackAllocationBase.
+    let initial_teb = [0, 0, top, stack, stack];
+    let (mut h, mut cid) = (core::ptr::null_mut(), [0usize; 2]);
+    // SAFETY: valid pointers for the call.
+    let status = unsafe {
+        NtCreateThread(
+            &mut h,
+            0x1f_ffff, // THREAD_ALL_ACCESS
+            core::ptr::null(),
+            CURRENT_PROCESS,
+            &mut cid,
+            &context,
+            &initial_teb,
+            u8::from(flags & CREATE_SUSPENDED != 0),
+        )
+    };
+    if status != STATUS_SUCCESS {
+        VirtualFree(stack as *mut c_void, 0, 0x8000);
+        return fail(status, core::ptr::null_mut());
+    }
+    if !thread_id.is_null() {
+        // SAFETY: the caller's output pointer.
+        unsafe { *thread_id = cid[1] as u32 };
+    }
+    h
+}
+
+/// ExitThread. TODO: DLL_THREAD_DETACH notifications; the stack is not
+/// freed (Windows frees it).
+#[unsafe(no_mangle)]
+pub extern "system" fn ExitThread(code: u32) -> ! {
+    // SAFETY: ends the current thread (-2 = the current thread).
+    unsafe { NtTerminateThread(-2, code) };
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// GetExitCodeThread: STILL_ACTIVE (259) while it runs.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetExitCodeThread(h: Handle, code: *mut u32) -> Bool {
+    let mut basic = [0u8; 48];
+    let mut ret = 0;
+    // SAFETY: a 48-byte THREAD_BASIC_INFORMATION buffer.
+    let status = unsafe { NtQueryInformationThread(h, 0, basic.as_mut_ptr(), 48, &mut ret) };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    // SAFETY: the caller's output pointer.
+    unsafe { *code = u32_at(&basic, 0) };
+    TRUE
+}
+
+/// SuspendThread/ResumeThread: the previous suspend count, or (DWORD)-1.
+#[unsafe(no_mangle)]
+pub extern "system" fn SuspendThread(h: Handle) -> u32 {
+    let mut previous = 0;
+    // SAFETY: valid output pointer.
+    let status = unsafe { NtSuspendThread(h, &mut previous) };
+    if status != STATUS_SUCCESS { fail(status, u32::MAX) } else { previous }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ResumeThread(h: Handle) -> u32 {
+    let mut previous = 0;
+    // SAFETY: valid output pointer.
+    let status = unsafe { NtResumeThread(h, &mut previous) };
+    if status != STATUS_SUCCESS { fail(status, u32::MAX) } else { previous }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadContext(h: Handle, context: *mut Context) -> Bool {
+    // SAFETY: the caller's CONTEXT.
+    let status = unsafe { NtGetContextThread(h, context) };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SetThreadContext(h: Handle, context: *const Context) -> Bool {
+    // SAFETY: the caller's CONTEXT.
+    let status = unsafe { NtSetContextThread(h, context) };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+// ---- Thread-local storage: TEB.TlsSlots (+0x1480, 64 slots) ----
+
+/// Allocated TLS indexes (bit set = in use). TODO: the expansion slots
+/// (indexes 64..1088, TEB.TlsExpansionSlots).
+static TLS_BITMAP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+const TLS_SLOTS: usize = 0x1480;
+
+fn tls_slot(index: u32) -> usize {
+    TLS_SLOTS + 8 * index as usize
+}
+
+/// TlsAlloc: the lowest free index, its slot zeroed in this thread (TODO:
+/// zero it in the other threads too, as Windows does).
+#[unsafe(no_mangle)]
+pub extern "system" fn TlsAlloc() -> u32 {
+    use core::sync::atomic::Ordering;
+    let mut bits = TLS_BITMAP.load(Ordering::Relaxed);
+    loop {
+        if bits == u64::MAX {
+            unsupported(b"kernel32.dll!TlsAlloc(expansion slots)", 64);
+            return fail_with(8, u32::MAX); // ERROR_NOT_ENOUGH_MEMORY, TLS_OUT_OF_INDEXES
+        }
+        let index = bits.trailing_ones();
+        match TLS_BITMAP.compare_exchange(
+            bits,
+            bits | 1 << index,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                TlsSetValue(index, core::ptr::null_mut());
+                return index;
+            }
+            Err(now) => bits = now,
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TlsFree(index: u32) -> Bool {
+    use core::sync::atomic::Ordering;
+    if index >= 64 || TLS_BITMAP.fetch_and(!(1 << index), Ordering::AcqRel) & 1 << index == 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    TRUE
+}
+
+/// TlsGetValue: also clears the last error on success, as documented (so
+/// callers can tell a stored 0 from a failure).
+#[unsafe(no_mangle)]
+pub extern "system" fn TlsGetValue(index: u32) -> *mut c_void {
+    if index >= 64 {
+        return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
+    }
+    SetLastError(0);
+    teb_u64(tls_slot(index)) as *mut c_void
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TlsSetValue(index: u32, value: *mut c_void) -> Bool {
+    if index >= 64 {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the slot lies in the current thread's TEB.
+    unsafe {
+        core::arch::asm!("mov gs:[{}], {}", in(reg) tls_slot(index), in(reg) value as u64, options(nostack))
+    };
+    TRUE
 }
 
 /// ExitProcess. TODO: DLL_PROCESS_DETACH notifications and ending other

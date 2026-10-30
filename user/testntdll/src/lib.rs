@@ -138,6 +138,16 @@ syscall_stubs! {
         access: u32, attributes: u32, options: u32
     );
     NtYieldExecution = 0x46, fn();
+    NtQueryInformationThread = 0x25, fn(
+        h: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32
+    );
+    NtCreateThread = 0x4e, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes, process: isize,
+        client_id: *mut [usize; 2], context: *const u8, initial_teb: *const [usize; 5],
+        suspended: u8
+    );
+    NtResumeThread = 0x52, fn(h: usize, previous: *mut u32);
+    NtTerminateThread = 0x53, fn(h: isize, status: u32);
     NtWaitForMultipleObjects = 0x5b, fn(
         count: u32, handles: *const usize, wait_type: u32, alertable: u8, timeout: *const i64
     );
