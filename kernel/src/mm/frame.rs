@@ -62,11 +62,11 @@ impl<'a> FrameAllocator<'a> {
     }
 
     /// Creates an allocator whose free frames are the usable regions of `map`,
-    /// except `reserved` (the physical range holding `bitmap` itself).
+    /// except the `reserved` physical ranges (e.g. the one holding `bitmap`).
     pub fn from_memory_map(
         bitmap: &'a mut [u64],
         map: impl IntoIterator<Item = MemoryRegion>,
-        reserved: core::ops::Range<u64>,
+        reserved: &[core::ops::Range<u64>],
     ) -> Self {
         let mut alloc = Self::new(bitmap);
         for region in map {
@@ -78,7 +78,9 @@ impl<'a> FrameAllocator<'a> {
             let end = region.end() / PAGE_SIZE;
             alloc.release_range(start, end);
         }
-        alloc.claim_range(reserved.start / PAGE_SIZE, reserved.end.div_ceil(PAGE_SIZE));
+        for range in reserved {
+            alloc.claim_range(range.start / PAGE_SIZE, range.end.div_ceil(PAGE_SIZE));
+        }
         alloc
     }
 
@@ -183,7 +185,7 @@ mod tests {
             MemoryRegion { base: 0x10000, len: 0x4000, kind: RegionKind::Reserved },
             region(0x20000, 0x2000), // frames 32..34
         ];
-        let alloc = FrameAllocator::from_memory_map(&mut bits, map, 0..0);
+        let alloc = FrameAllocator::from_memory_map(&mut bits, map, &[]);
         assert_eq!(alloc.free_frames(), 5);
         assert_eq!(alloc.total_frames(), 128);
     }
@@ -191,22 +193,23 @@ mod tests {
     #[test]
     fn reserved_range_is_not_handed_out() {
         let mut bits = [0; 1];
-        let alloc = FrameAllocator::from_memory_map(&mut bits, [region(0, 0x8000)], 0x1000..0x2800);
-        // Frames 1 and 2 are covered (end rounds up).
-        assert_eq!(alloc.free_frames(), 6);
+        let reserved = [0x1000..0x2800, 0x7000..0x9000];
+        let alloc = FrameAllocator::from_memory_map(&mut bits, [region(0, 0x8000)], &reserved);
+        // Frames 1, 2 (end rounds up) and 7 are reserved.
+        assert_eq!(alloc.free_frames(), 5);
     }
 
     #[test]
     fn regions_beyond_bitmap_are_clamped() {
         let mut bits = [0; 1]; // 64 frames
-        let alloc = FrameAllocator::from_memory_map(&mut bits, [region(0x3f000, 0x10000)], 0..0);
+        let alloc = FrameAllocator::from_memory_map(&mut bits, [region(0x3f000, 0x10000)], &[]);
         assert_eq!(alloc.free_frames(), 1);
     }
 
     #[test]
     fn allocate_returns_distinct_frames_until_exhausted() {
         let mut bits = [0; 2];
-        let mut alloc = FrameAllocator::from_memory_map(&mut bits, [region(0x3e000, 0x4000)], 0..0);
+        let mut alloc = FrameAllocator::from_memory_map(&mut bits, [region(0x3e000, 0x4000)], &[]);
         let got: Vec<u64> = core::iter::from_fn(|| alloc.allocate()).map(Frame::number).collect();
         assert_eq!(got, [62, 63, 64, 65]);
         assert_eq!(alloc.free_frames(), 0);
@@ -216,7 +219,7 @@ mod tests {
     #[test]
     fn free_and_reuse() {
         let mut bits = [0; 1];
-        let mut alloc = FrameAllocator::from_memory_map(&mut bits, [region(0, 0x2000)], 0..0);
+        let mut alloc = FrameAllocator::from_memory_map(&mut bits, [region(0, 0x2000)], &[]);
         let a = alloc.allocate().unwrap();
         let b = alloc.allocate().unwrap();
         assert_ne!(a, b);
@@ -231,7 +234,7 @@ mod tests {
         let mut bits = [0; 1];
         // Free: 1..5, 8..16 (frames).
         let map = [region(0x1000, 0x4000), region(0x8000, 0x8000)];
-        let mut alloc = FrameAllocator::from_memory_map(&mut bits, map, 0..0);
+        let mut alloc = FrameAllocator::from_memory_map(&mut bits, map, &[]);
         assert_eq!(alloc.allocate_contiguous(4, 1), Some(Frame::from_number(1)));
         assert_eq!(alloc.allocate_contiguous(4, 4), Some(Frame::from_number(8)));
         assert_eq!(alloc.allocate_contiguous(5, 1), None);

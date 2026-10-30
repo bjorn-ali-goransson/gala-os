@@ -2,6 +2,7 @@
 
 pub mod frame;
 pub mod memmap;
+pub mod paging;
 
 use spin::Mutex;
 
@@ -34,7 +35,8 @@ pub fn init(info: &BootInfo) -> Result<(), InitError> {
     let words = FrameAllocator::words_for(end);
     let (bitmap, reserved) =
         boot::take_frame_bitmap(info, words).ok_or(InitError::NoBitmapStorage)?;
-    let alloc = FrameAllocator::from_memory_map(bitmap, info.memory_map.iter(), reserved);
+    let reserved = [0..boot::LOW_MEMORY_END, reserved];
+    let alloc = FrameAllocator::from_memory_map(bitmap, info.memory_map.iter(), &reserved);
     *FRAMES.lock() = Some(alloc);
     Ok(())
 }

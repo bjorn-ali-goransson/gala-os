@@ -18,6 +18,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/selftest.rs       in-kernel tests run at boot with `selftest`
   src/mm/memmap.rs      physical memory map model + validation (host-tested)
   src/mm/frame.rs       bitmap physical frame allocator (host-tested)
+  src/mm/paging.rs      4-level page-table mapper, generic over table access (host-tested)
   src/mm/mod.rs         global frame allocator instance
 xtask/                  host tool: build ISO, run QEMU, boot test
 ```
@@ -89,10 +90,27 @@ usable region above 1 MiB by `boot::take_frame_bitmap` (the only place that
 turns physical memory into a Rust slice) and is excluded from the free set.
 Single-frame allocation is next-fit over bitmap words; contiguous aligned
 runs (for DMA, large pages) use a linear scan. Double frees are rejected.
+The first 1 MiB is never handed out (reserved for SMP trampolines etc.).
+
+## Virtual memory
+
+`mm::paging::Mapper` implements 4-level tables (4K/2M/1G leaves, NX, PAT
+cache modes) over a `TableMemory` trait; the host tests use a fake, the
+kernel uses `arch::paging::HhdmTables`. At boot `arch::paging::init`
+programs the PAT (WB, WT, UC-, UC, WP, WC, UC-, UC), enables NXE and PGE,
+and builds the kernel address space:
+
+- the kernel image, per section from linker symbols: rodata (incl. Limine
+  requests) RO+NX, text RX, data+bss RW+NX, all global;
+- the HHDM at Limine's offset for the same region types Limine maps
+  (framebuffer as write-combining), using the largest pages alignment allows;
+- nothing in the lower half (null dereferences fault).
+
+It then switches CR3. The boot stack and boot data stay valid because they
+live in HHDM-mapped bootloader-reclaimable memory.
 
 ## Not done yet (milestone 2)
 
-Own page tables,
-heap (`alloc`, fallible only), interrupt-safe console lock, SMP.
+Heap (`alloc`, fallible only), APIC timer, threads and scheduler, interrupt-safe console lock, SMP.
 Bootloader-reclaimable memory must not be reused until the boot info that
 lives there has been copied out.

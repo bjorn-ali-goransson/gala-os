@@ -152,7 +152,7 @@ pub fn collect() -> Result<BootInfo, BootError> {
 
 /// Lowest address for kernel-owned allocations made here; memory below 1 MiB
 /// is kept free for things that need it (e.g. SMP trampolines).
-const LOW_MEMORY_END: u64 = 0x10_0000;
+pub const LOW_MEMORY_END: u64 = 0x10_0000;
 
 static FRAME_BITMAP_TAKEN: AtomicBool = AtomicBool::new(false);
 

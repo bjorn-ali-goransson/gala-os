@@ -76,6 +76,7 @@ pub fn kernel_main() -> ! {
         total,
         free * mm::PAGE_SIZE / (1024 * 1024)
     );
+    init_paging(&info);
 
     if let Some(name) = cmdline.value("fault") {
         match Fault::from_name(name) {
@@ -155,4 +156,28 @@ fn finish(code: QemuExitCode) -> ! {
 pub fn panic(info: &core::panic::PanicInfo) -> ! {
     console::emergency_println(format_args!("KERNEL PANIC: {info}"));
     finish(QemuExitCode::Failure)
+}
+
+fn init_paging(info: &BootInfo) {
+    let Some(kernel) = info.kernel_address else {
+        panic!("bootloader did not report the kernel's load address");
+    };
+    let mut regions = info.memory_map.iter();
+    let layout = arch::paging::KernelLayout {
+        hhdm_offset: info.hhdm_offset,
+        kernel_phys_base: kernel.physical_base,
+        kernel_virt_base: kernel.virtual_base,
+        memory_map: &mut regions,
+    };
+    match arch::paging::init(layout) {
+        Ok(stats) => info!(
+            "paging: own tables at {:#x}; HHDM {}x4K {}x2M {}x1G, kernel {} pages",
+            arch::paging::active_root(),
+            stats.hhdm_pages[0],
+            stats.hhdm_pages[1],
+            stats.hhdm_pages[2],
+            stats.kernel_pages
+        ),
+        Err(e) => panic!("paging: {e:?}"),
+    }
 }
