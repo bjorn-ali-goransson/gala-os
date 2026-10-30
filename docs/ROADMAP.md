@@ -85,15 +85,17 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 - Memory-mapped files: data sections on a file handle sharing the file's
   pages (ramfs data in page-aligned pages), coherent with file I/O,
   extension, access checks, STATUS_USER_MAPPED_FILE; `filemap_test`
+- Copy-on-write: PAGE_WRITECOPY views of files and image pages get
+  private copies on write (protection then PAGE_READWRITE); image pages
+  shared between views at the preferred base; `cow_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
    NtOpenMutant, NtCreateSemaphore/NtReleaseSemaphore (0x0a); abandonment
    on thread exit. Create/open numbers vary by build: verify on 26100 first.
    Symbolic links (`\Sessions\1\BaseNamedObjects\Global`), NtQueryDirectoryObject.
-6c. **Sections, rest**: share unmodified image pages between views,
-   PAGE_WRITECOPY views of data files (private copies), the kernel loader
-   using image sections.
+6c. **Sections, rest**: the kernel loader using image sections (the exe
+   shared like DLLs), sharing read-only pages of relocated views.
 6e. **User-mode loader support**: what a real ntdll's loader needs next:
    KnownDlls (`\KnownDlls` section objects), more NtQuerySystemInformation
    classes, NtSetInformationProcess/Thread bits, TLS slots in the TEB;

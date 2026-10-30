@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["kernel", "user/abi_test", "user/args_test", "user/file_test", "user/filemap_test", "user/fpu_test", "user/guard_test", "user/crash", "user/exception_test", "user/dir_test", "user/hello", "user/import_test", "user/kuser_test", "user/ntrt", "user/object_test", "user/peb_test", "user/section_test", "user/startup_test", "user/sysinfo_test", "user/testdll", "user/testntdll", "user/thread_test", "user/threadinfo_test", "user/image_test", "user/vm_test", "user/wait_test", "xtask"]
+members = ["kernel", "user/abi_test", "user/args_test", "user/file_test", "user/filemap_test", "user/fpu_test", "user/guard_test", "user/cow_test", "user/crash", "user/exception_test", "user/dir_test", "user/hello", "user/import_test", "user/kuser_test", "user/ntrt", "user/object_test", "user/peb_test", "user/section_test", "user/startup_test", "user/sysinfo_test", "user/testdll", "user/testntdll", "user/thread_test", "user/threadinfo_test", "user/image_test", "user/vm_test", "user/wait_test", "xtask"]
 # The kernel only builds for x86_64-unknown-none; build it via `cargo xtask`.
 default-members = ["xtask"]
 

@@ -173,15 +173,10 @@ impl From<UserFault> for LoadError {
     }
 }
 
+/// Page flags for an image section: writable sections are copy-on-write,
+/// mapped read-only until written.
 fn section_flags(characteristics: u32) -> PageFlags {
-    PageFlags {
-        writable: characteristics & pe::IMAGE_SCN_MEM_WRITE != 0,
-        executable: characteristics & pe::IMAGE_SCN_MEM_EXECUTE != 0,
-        user: true,
-        global: false,
-        cache: crate::mm::paging::CacheMode::WriteBack,
-        borrowed: false,
-    }
+    vm::flags_for(section_protect(characteristics))
 }
 
 const USER_RW: PageFlags = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RW };

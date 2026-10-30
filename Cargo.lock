@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cow_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "crash"
 version = "0.1.0"
 dependencies = [

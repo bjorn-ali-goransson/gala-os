@@ -53,6 +53,17 @@ pub struct ImageLayout {
     page_protect: Vec<u32>,
     relocations: super::pe::DataDirectory,
     relocatable: bool,
+    /// Frames of read-only pages, shared by every view at the preferred
+    /// base (made on first use, freed with the section).
+    shared: IrqMutex<Vec<Option<Frame>>>,
+}
+
+impl Drop for ImageLayout {
+    fn drop(&mut self) {
+        for frame in self.shared.lock().iter().flatten() {
+            let _ = crate::mm::free_frame(*frame);
+        }
+    }
 }
 
 /// Windows-style protection of an image section (writable = copy on write).
@@ -95,13 +106,29 @@ impl ImageLayout {
                 *p = image_section_protect(s.characteristics);
             }
         }
+        let mut shared = Vec::new();
+        shared.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
+        shared.resize(pages, None);
         Ok(ImageLayout {
             base: image.image_base,
             bytes,
             page_protect,
             relocations: image.directory(super::pe::DIRECTORY_BASERELOC),
             relocatable: image.relocatable,
+            shared: IrqMutex::new(shared),
         })
+    }
+
+    /// The shared frame of page `index` (unrelocated contents).
+    fn shared_frame(&self, index: usize) -> Option<Frame> {
+        let mut shared = self.shared.lock();
+        let slot = shared.get_mut(index)?;
+        if slot.is_none() {
+            let start = index * PAGE_SIZE as usize;
+            let end = (start + PAGE_SIZE as usize).min(self.bytes.len());
+            *slot = Some(UserSpace::frame_with(&self.bytes[start..end])?);
+        }
+        *slot
     }
 
     pub fn size(&self) -> u64 {
@@ -334,10 +361,21 @@ fn map_image_view(
             let _ = vad.release(view_base, 0);
             NtStatus::NO_MEMORY
         };
-        if vad.commit(va, PAGE_SIZE, protect).is_err()
-            || space.map_zeroed(va, 1, super::vm::flags_for(protect)).is_err()
-            || space.write_initial(va, page).is_err()
-        {
+        if vad.commit(va, PAGE_SIZE, protect).is_err() {
+            return Err(fail(&mut vad, &mut space));
+        }
+        // Pages no view writes to without a copy (read-only, or copy-on-write
+        // until written) are shared, unless relocation changed them.
+        let flags = super::vm::flags_for(protect);
+        let mapped = if delta == 0 {
+            match image.shared_frame(i) {
+                Some(frame) => space.map_borrowed(va, frame, flags).is_ok(),
+                None => false,
+            }
+        } else {
+            space.map_zeroed(va, 1, flags).is_ok() && space.write_initial(va, page).is_ok()
+        };
+        if !mapped {
             return Err(fail(&mut vad, &mut space));
         }
     }

@@ -16,6 +16,9 @@ pub fn flags_for(protect: u32) -> PageFlags {
         execute: false,
     });
     let user = (access.read || access.execute) && protect & vad::PAGE_GUARD == 0;
+    // Copy-on-write pages are mapped read-only; the first write faults and
+    // gets a private copy (`resolve_fault`).
+    let writable = access.write && !is_write_copy(protect);
     let cache = if protect & vad::PAGE_NOCACHE != 0 {
         CacheMode::Uncached
     } else if protect & vad::PAGE_WRITECOMBINE != 0 {
@@ -24,13 +27,38 @@ pub fn flags_for(protect: u32) -> PageFlags {
         CacheMode::WriteBack
     };
     PageFlags {
-        writable: user && access.write,
+        writable: user && writable,
         executable: user && access.execute,
         user,
         global: false,
         cache,
         borrowed: false,
     }
+}
+
+/// Whether `protect` is PAGE_WRITECOPY or PAGE_EXECUTE_WRITECOPY.
+pub fn is_write_copy(protect: u32) -> bool {
+    matches!(protect & 0xff, vad::PAGE_WRITECOPY | vad::PAGE_EXECUTE_WRITECOPY)
+}
+
+/// What a copy-on-write page becomes once copied (modifiers kept).
+fn after_copy(protect: u32) -> u32 {
+    let base = match protect & 0xff {
+        vad::PAGE_EXECUTE_WRITECOPY => vad::PAGE_EXECUTE_READWRITE,
+        _ => vad::PAGE_READWRITE,
+    };
+    (protect & !0xff) | base
+}
+
+/// Image pages cannot become shared-writable: Windows turns a request for
+/// read/write on them into copy-on-write.
+fn image_protection(protect: u32) -> u32 {
+    let base = match protect & 0xff {
+        vad::PAGE_READWRITE => vad::PAGE_WRITECOPY,
+        vad::PAGE_EXECUTE_READWRITE => vad::PAGE_EXECUTE_WRITECOPY,
+        other => other,
+    };
+    (protect & !0xff) | base
 }
 
 /// Kind of user access that faulted.
@@ -78,7 +106,7 @@ pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> Fault {
         return guard_hit(process, addr, protect & !vad::PAGE_GUARD);
     }
     // Section pages come from the section (views lock before space lock).
-    let section_frame = if mapped {
+    let section_frame = if mapped && !process.space.lock().is_mapped(addr) {
         match super::section::frame_for(process, addr) {
             Some(f) => Some(f),
             None => return Fault::Denied,
@@ -86,6 +114,9 @@ pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> Fault {
     } else {
         None
     };
+    if kind == AccessKind::Write && is_write_copy(protect) {
+        return copy_on_write(process, addr, protect, section_frame);
+    }
     let mut space = process.space.lock();
     let done = if space.is_mapped(addr) {
         // Present and allowed by the VAD: the PTE is stale. Re-sync it.
@@ -95,6 +126,33 @@ pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> Fault {
             Some(frame) => space.map_borrowed(addr, frame, flags_for(protect)).is_ok(),
             None => space.map_zero_page(addr, flags_for(protect)).is_ok(),
         }
+    };
+    if done { Fault::Resolved } else { Fault::Denied }
+}
+
+/// A write to a copy-on-write page: the page becomes private to this view
+/// (a copy of the shared frame, or the frame it already owns) and is
+/// reported as PAGE_READWRITE (or PAGE_EXECUTE_READWRITE) from now on.
+fn copy_on_write(
+    process: &Process,
+    addr: u64,
+    protect: u32,
+    section_frame: Option<crate::mm::frame::Frame>,
+) -> Fault {
+    let page = addr / PAGE_SIZE * PAGE_SIZE;
+    let writable = after_copy(protect);
+    if process.vad.lock().protect(page, PAGE_SIZE, writable).is_err() {
+        return Fault::Denied;
+    }
+    let flags = flags_for(writable);
+    let mut space = process.space.lock();
+    let done = match space.mapping(page) {
+        Some((frame, true)) => space.map_private_copy(page, frame, flags).is_ok(),
+        Some((_, false)) => space.set_flags(page, flags).is_ok(),
+        None => match section_frame {
+            Some(frame) => space.map_private_copy(page, frame, flags).is_ok(),
+            None => space.map_zero_page(page, flags).is_ok(),
+        },
     };
     if done { Fault::Resolved } else { Fault::Denied }
 }
@@ -233,7 +291,11 @@ pub fn protect(
     size: u64,
     new: u32,
 ) -> Result<(u32, u64, u64), NtStatus> {
-    let result = process.vad.lock().protect(base, size, new)?;
+    let result = {
+        let mut vad = process.vad.lock();
+        let image = vad.query(base).is_ok_and(|q| q.kind == vad::MEM_IMAGE);
+        vad.protect(base, size, if image { image_protection(new) } else { new })?
+    };
     sync_range(process, result.1, result.2);
     Ok(result)
 }

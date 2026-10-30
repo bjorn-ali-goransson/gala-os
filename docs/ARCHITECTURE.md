@@ -309,9 +309,10 @@ Image sections (SEC_IMAGE on a file handle with FILE_READ_DATA) keep an
 `ImageLayout`: the file laid out at its RVAs, with a Windows-style
 protection per page (writable sections are WRITECOPY). Each view is a
 MEM_IMAGE VAD at the preferred base, or anywhere when that is taken and the
-image is relocatable; its pages are private copies of the layout with base
-relocations applied, so writes never reach other views (copy-on-write in
-effect, without sharing yet). A relocated view returns
+image is relocatable. At the preferred base every page is a frame shared
+by all views (made on first use, owned by the section), mapped borrowed;
+writable pages are copy-on-write. A relocated view gets private copies of
+the layout with base relocations applied and returns
 STATUS_IMAGE_NOT_AT_BASE. Non-PE files fail with STATUS_INVALID_IMAGE_NOT_MZ.
 
 Data sections on a file (memory-mapped files) share the file's pages:
@@ -320,7 +321,14 @@ whole-page allocations in the HHDM, so their frame is `addr - hhdm`), and
 the section's frames are those pages, mapped borrowed into views. Views,
 other sections and NtReadFile/NtWriteFile therefore see the same bytes.
 The section keeps the file object open; ramfs counts mappings and refuses
-to shrink a file below its mapped size (STATUS_USER_MAPPED_FILE). A size
+to shrink a file below its mapped size (STATUS_USER_MAPPED_FILE).
+
+**Copy-on-write**: PAGE_WRITECOPY / PAGE_EXECUTE_WRITECOPY pages are
+mapped read-only (`vm::flags_for`). A write fault gives the page a private
+frame (a copy of the borrowed shared frame, or the frame it already owns)
+and changes its VAD protection to PAGE_READWRITE / PAGE_EXECUTE_READWRITE,
+as Windows reports it. NtProtectVirtualMemory turns read/write requests on
+image pages into copy-on-write. A size
 of 0 means the file's size; a larger one extends the file on a writable
 handle (else STATUS_SECTION_TOO_BIG); the handle must grant read (and
 write for PAGE_READWRITE).

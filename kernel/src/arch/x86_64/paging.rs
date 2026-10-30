@@ -511,6 +511,56 @@ impl UserSpace {
         Ok(())
     }
 
+    /// The frame mapped at `virt` and whether it is borrowed.
+    pub fn mapping(&mut self, virt: u64) -> Option<(Frame, bool)> {
+        let t = self.mapper.translate(virt)?;
+        Some((Frame::containing(t.phys), t.flags.borrowed))
+    }
+
+    /// Maps at `virt` a new private frame holding a copy of `source`
+    /// (copy-on-write), replacing what was mapped there (an owned frame
+    /// there is freed after the copy, a borrowed one is left alone).
+    pub fn map_private_copy(
+        &mut self,
+        virt: u64,
+        source: Frame,
+        mut flags: PageFlags,
+    ) -> Result<(), PagingError> {
+        use crate::mm::paging::PageSize;
+        let frame = crate::mm::allocate_frame().ok_or(MapError::OutOfMemory)?;
+        // SAFETY: `frame` is freshly allocated and `source` is a mapped
+        // user frame; both are distinct 4 KiB frames in the HHDM.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                hhdm_ptr(source.start()),
+                hhdm_ptr(frame.start()),
+                PAGE_SIZE as usize,
+            );
+        }
+        self.unmap_page(virt);
+        flags.user = true;
+        flags.global = false;
+        flags.borrowed = false;
+        let virt = virt / PAGE_SIZE * PAGE_SIZE;
+        if let Err(e) =
+            self.mapper.map(virt, frame.start(), PageSize::Size4K, flags, &mut alloc_table)
+        {
+            let _ = crate::mm::free_frame(frame);
+            return Err(e.into());
+        }
+        invlpg(virt);
+        Ok(())
+    }
+
+    /// Allocates a frame holding `data` (at most a page), zero-filled.
+    pub fn frame_with(data: &[u8]) -> Option<Frame> {
+        let frame = Self::zeroed_frame()?;
+        let n = data.len().min(PAGE_SIZE as usize);
+        // SAFETY: a freshly allocated frame, HHDM-mapped, owned by the caller.
+        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), hhdm_ptr(frame.start()), n) };
+        Some(frame)
+    }
+
     /// Allocates a zeroed frame (for section pages backed on demand).
     pub fn zeroed_frame() -> Option<Frame> {
         let frame = crate::mm::allocate_frame()?;
