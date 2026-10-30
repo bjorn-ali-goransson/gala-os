@@ -68,6 +68,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_test", "testdll.dll", "gala"),
     ("missing_import_test", "ntdll.dll", "Windows/System32"),
     ("missing_import_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_sys_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_sys_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_sys_test", "testdll.dll", "gala"),
     ("go_hello", "ntdll.dll", "Windows/System32"),
     ("go_hello", "kernel32.dll", "Windows/System32"),
 ];
@@ -117,6 +120,7 @@ const USER_PROGRAMS: &[&str] = &[
     "bench",
     "kernel32_test",
     "missing_import_test",
+    "kernel32_sys_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -560,6 +564,12 @@ const SCENARIOS: &[Scenario] = &[
             r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionOne","what":"missing export""#,
             r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionTwo","what":"missing export""#,
         ],
+    },
+    Scenario {
+        name: "kernel32_sys_test",
+        cmdline: "qemu_exit run=kernel32_sys_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["kernel32_sys_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "ledger_test",

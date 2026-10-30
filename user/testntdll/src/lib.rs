@@ -125,6 +125,22 @@ syscall_stubs! {
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, kind: u32,
         initial: u8
     );
+    // More for gala's kernel32 (long-stable x64 numbers).
+    NtQueryInformationProcess = 0x19, fn(
+        process: isize, class: u32, buf: *mut u8, len: u32, ret: *mut u32
+    );
+    NtQueryVirtualMemory = 0x23, fn(
+        process: isize, address: usize, class: u32, buf: *mut u8, len: usize, ret: *mut usize
+    );
+    NtQuerySystemInformation = 0x36, fn(class: u32, buf: *mut u8, len: u32, ret: *mut u32);
+    NtDuplicateObject = 0x3c, fn(
+        source_process: isize, source: usize, target_process: isize, target: *mut usize,
+        access: u32, attributes: u32, options: u32
+    );
+    NtYieldExecution = 0x46, fn();
+    NtWaitForMultipleObjects = 0x5b, fn(
+        count: u32, handles: *const usize, wait_type: u32, alertable: u8, timeout: *const i64
+    );
     // gala's own service: report a gap to the kernel's missing-features
     // ledger (not part of Windows; gala's DLLs only).
     GalaRecordMissing = 0x7f00, fn(name: *const u8, length: usize, what: u32, detail: u64);
@@ -224,7 +240,7 @@ fn export(base: usize, name: &[u8], ordinal: u32) -> Option<usize> {
 /// Opens `dll` (an ASCII file name) from the directory of the executable
 /// (`ImagePathName`), else from `<SystemRoot>\System32` (KUSER_SHARED_DATA's
 /// NtSystemRoot), and maps it; returns its base.
-fn map_dll(dll: &[u8]) -> Result<usize, u32> {
+fn map_dll(dll: &[u8], system32_only: bool) -> Result<usize, u32> {
     // SAFETY: gs:[0x60] is the PEB; ProcessParameters and ImagePathName are
     // filled in by the kernel.
     let image_path = unsafe {
@@ -248,6 +264,9 @@ fn map_dll(dll: &[u8]) -> Result<usize, u32> {
     for &b in b"\\System32\\" {
         system32[n] = u16::from(b);
         n += 1;
+    }
+    if system32_only {
+        return open_dll(&system32[..n], dll);
     }
     match open_dll(&image_path[..dir_len], dll) {
         Err(STATUS_DLL_NOT_FOUND) => open_dll(&system32[..n], dll),
@@ -418,7 +437,7 @@ fn entry_point(base: usize) -> Option<extern "system" fn(usize, u32, usize) -> i
 /// Loads the DLL `name` (normalized) or takes another reference on it:
 /// maps it from the executable's directory, binds its imports (loading
 /// those DLLs first) and calls its DllMain with DLL_PROCESS_ATTACH once.
-fn load_module(name: &[u8]) -> Result<usize, u32> {
+fn load_module(name: &[u8], system32_only: bool) -> Result<usize, u32> {
     if let Some(i) = find_module(name) {
         return Ok(with_modules(|m| {
             if m[i].refs != PINNED {
@@ -427,7 +446,7 @@ fn load_module(name: &[u8]) -> Result<usize, u32> {
             i
         }));
     }
-    let base = map_dll(name)?;
+    let base = map_dll(name, system32_only)?;
     let slot = match add_module(name, base, 1) {
         Ok(slot) => slot,
         Err(status) => {
@@ -488,7 +507,7 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
             c_str(base + rd32(desc + 12) as usize).iter().map(|&b| u16::from(b)),
             &mut name,
         )?;
-        let dependency = load_module(&name[..len])?;
+        let dependency = load_module(&name[..len], false)?;
         if let Some(slot) = slot {
             let recorded = with_modules(|m| {
                 let n = m[slot].dependency_count;
@@ -594,13 +613,18 @@ fn unicode_name(name: *const UnicodeString, out: &mut [u8; MAX_NAME]) -> Result<
 /// `name` must be a valid UNICODE_STRING and `handle` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn LdrLoadDll(
-    _path: *const u16,
+    path: *const u16,
     _characteristics: *const u32,
     name: *const UnicodeString,
     handle: *mut usize,
 ) -> u32 {
+    // As on newer Windows, LoadLibraryExW's LOAD_LIBRARY_SEARCH_* flags come
+    // in `path` with its low bit set (a real path is 2-byte aligned).
+    let flags = if path as usize & 1 != 0 { path as usize & !1 } else { 0 };
+    const LOAD_LIBRARY_SEARCH_SYSTEM32: usize = 0x800;
+    let system32_only = flags & LOAD_LIBRARY_SEARCH_SYSTEM32 != 0;
     let mut buf = [0u8; MAX_NAME];
-    let loaded = unicode_name(name, &mut buf).and_then(|n| load_module(&buf[..n]));
+    let loaded = unicode_name(name, &mut buf).and_then(|n| load_module(&buf[..n], system32_only));
     match loaded {
         Ok(slot) => {
             // SAFETY: the caller passes a writable handle.

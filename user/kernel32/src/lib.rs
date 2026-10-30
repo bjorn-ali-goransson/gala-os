@@ -120,6 +120,39 @@ unsafe extern "system" {
     ) -> u32;
     fn LdrUnloadDll(base: Handle) -> u32;
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
+    fn NtQueryInformationProcess(
+        process: isize,
+        class: u32,
+        buf: *mut u8,
+        len: u32,
+        ret: *mut u32,
+    ) -> u32;
+    fn NtQueryVirtualMemory(
+        process: isize,
+        address: usize,
+        class: u32,
+        buf: *mut u8,
+        len: usize,
+        ret: *mut usize,
+    ) -> u32;
+    fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
+    fn NtDuplicateObject(
+        source_process: Handle,
+        source: Handle,
+        target_process: Handle,
+        target: *mut Handle,
+        access: u32,
+        attributes: u32,
+        options: u32,
+    ) -> u32;
+    fn NtYieldExecution() -> u32;
+    fn NtWaitForMultipleObjects(
+        count: u32,
+        handles: *const Handle,
+        wait_type: u32,
+        alertable: u8,
+        timeout: *const i64,
+    ) -> u32;
 }
 
 /// Reads a field of the current TEB.
@@ -384,17 +417,52 @@ pub extern "system" fn LoadLibraryA(name: *const u8) -> Handle {
             n += 1;
         }
     }
-    LoadLibraryW(wide[..n].as_ptr(), n)
+    load_library(wide[..n].as_ptr(), n, 0)
 }
 
-/// Loads a library by UTF-16 name of `len` characters.
-fn LoadLibraryW(name: *const u16, len: usize) -> Handle {
+/// Loads a library by UTF-16 name of `len` characters; `search` holds the
+/// LOAD_LIBRARY_SEARCH_* flags (passed to LdrLoadDll in its path argument
+/// with the low bit set, as newer Windows does).
+fn load_library(name: *const u16, len: usize, search: u32) -> Handle {
     let us =
         UnicodeString { length: (len * 2) as u16, maximum_length: (len * 2) as u16, buffer: name };
+    let path = if search != 0 { (search as usize | 1) as *const u16 } else { core::ptr::null() };
     let mut base = core::ptr::null_mut();
     // SAFETY: valid UNICODE_STRING and output pointer.
-    let status = unsafe { LdrLoadDll(core::ptr::null(), core::ptr::null(), &us, &mut base) };
+    let status = unsafe { LdrLoadDll(path, core::ptr::null(), &us, &mut base) };
     if status != STATUS_SUCCESS { fail(status, core::ptr::null_mut()) } else { base }
+}
+
+/// Length of a NUL-terminated UTF-16 string.
+fn wide_len(s: *const u16) -> usize {
+    let mut n = 0;
+    // SAFETY: callers pass NUL-terminated strings.
+    unsafe {
+        while core::ptr::read_volatile(s.add(n)) != 0 {
+            n += 1;
+        }
+    }
+    n
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn LoadLibraryW(name: *const u16) -> Handle {
+    load_library(name, wide_len(name), 0)
+}
+
+/// LoadLibraryExW: no data/image-resource loading yet (reported); the
+/// LOAD_LIBRARY_SEARCH_* flags choose where to look.
+#[unsafe(no_mangle)]
+pub extern "system" fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32) -> Handle {
+    const SEARCH_FLAGS: u32 = 0x0000_1f00; // LOAD_LIBRARY_SEARCH_* (0x100..0x1000)
+    if !file.is_null() || flags & !SEARCH_FLAGS != 0 {
+        unsupported(b"kernel32.dll!LoadLibraryExW(flags)", u64::from(flags));
+        return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
+    }
+    // LOAD_LIBRARY_SEARCH_SYSTEM32 alone restricts the search to System32;
+    // the default-directories flags include the application directory.
+    let search = if flags & SEARCH_FLAGS == 0x800 { 0x800 } else { 0 };
+    load_library(name, wide_len(name), search)
 }
 
 /// GetProcAddress: by name, or by ordinal when `name` < 0x10000.
@@ -424,6 +492,321 @@ pub extern "system" fn FreeLibrary(module: Handle) -> Bool {
     // SAFETY: the loader validates the module.
     let status = unsafe { LdrUnloadDll(module) };
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+// ---- Console (gala has no console devices: like redirected output) ----
+
+const ERROR_INVALID_HANDLE: u32 = 6;
+
+/// GetConsoleMode: only console handles have a mode; gala's standard
+/// handles are files or devices, as with redirected output on Windows.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetConsoleMode(_h: Handle, _mode: *mut u32) -> Bool {
+    fail_with(ERROR_INVALID_HANDLE, FALSE)
+}
+
+/// WriteConsoleW: as GetConsoleMode (callers fall back to WriteFile).
+#[unsafe(no_mangle)]
+pub extern "system" fn WriteConsoleW(
+    _h: Handle,
+    _buffer: *const u16,
+    _length: u32,
+    _written: *mut u32,
+    _reserved: *mut c_void,
+) -> Bool {
+    fail_with(ERROR_INVALID_HANDLE, FALSE)
+}
+
+/// SetConsoleCtrlHandler: kept (gala raises no console control events).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetConsoleCtrlHandler(_handler: usize, _add: Bool) -> Bool {
+    TRUE
+}
+
+// ---- Process-wide settings ----
+
+static ERROR_MODE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static WER_FLAGS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SetErrorMode(mode: u32) -> u32 {
+    ERROR_MODE.swap(mode, core::sync::atomic::Ordering::Relaxed)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetErrorMode() -> u32 {
+    ERROR_MODE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// WerSetFlags/WerGetFlags: kept for the process (gala has no error
+/// reporting service to act on them). S_OK.
+#[unsafe(no_mangle)]
+pub extern "system" fn WerSetFlags(flags: u32) -> i32 {
+    WER_FLAGS.store(flags, core::sync::atomic::Ordering::Relaxed);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WerGetFlags(_process: Handle, flags: *mut u32) -> i32 {
+    // SAFETY: the caller's output pointer.
+    unsafe { *flags = WER_FLAGS.load(core::sync::atomic::Ordering::Relaxed) };
+    0
+}
+
+/// SetProcessPriorityBoost: gala's scheduler has no priority boosts, so
+/// disabling them (what callers ask) already holds.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetProcessPriorityBoost(_process: Handle, _disable: Bool) -> Bool {
+    TRUE
+}
+
+// ---- System information ----
+
+#[repr(C)]
+pub struct SystemInfo {
+    processor_architecture: u16,
+    reserved: u16,
+    page_size: u32,
+    minimum_application_address: usize,
+    maximum_application_address: usize,
+    active_processor_mask: usize,
+    number_of_processors: u32,
+    processor_type: u32,
+    allocation_granularity: u32,
+    processor_level: u16,
+    processor_revision: u16,
+}
+
+/// SystemBasicInformation (64 bytes on x64).
+fn basic_information() -> [u8; 64] {
+    let mut b = [0u8; 64];
+    let mut ret = 0;
+    // SAFETY: a 64-byte buffer.
+    unsafe { NtQuerySystemInformation(0, b.as_mut_ptr(), 64, &mut ret) };
+    b
+}
+
+fn u64_at(b: &[u8], i: usize) -> u64 {
+    u64::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3], b[i + 4], b[i + 5], b[i + 6], b[i + 7]])
+}
+
+fn u32_at(b: &[u8], i: usize) -> u32 {
+    u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]])
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSystemInfo(info: *mut SystemInfo) {
+    let b = basic_information();
+    let i = SystemInfo {
+        processor_architecture: 9, // PROCESSOR_ARCHITECTURE_AMD64
+        reserved: 0,
+        page_size: u32_at(&b, 8),
+        minimum_application_address: u64_at(&b, 32) as usize,
+        maximum_application_address: u64_at(&b, 40) as usize,
+        active_processor_mask: u64_at(&b, 48) as usize,
+        number_of_processors: u32::from(b[56]),
+        processor_type: 8664, // PROCESSOR_AMD_X8664
+        allocation_granularity: u32_at(&b, 24),
+        processor_level: 6,
+        processor_revision: 0,
+    };
+    // SAFETY: the caller's output structure.
+    unsafe { info.write(i) };
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetNativeSystemInfo(info: *mut SystemInfo) {
+    GetSystemInfo(info);
+}
+
+/// GetSystemDirectoryA: `<NtSystemRoot>\system32` (from
+/// KUSER_SHARED_DATA). Returns the length without the NUL, or the size
+/// needed (with it) if `buffer` is too small.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSystemDirectoryA(buffer: *mut u8, size: u32) -> u32 {
+    let mut path = [0u8; 280];
+    let mut n = 0;
+    // SAFETY: KUSER_SHARED_DATA.NtSystemRoot, a NUL-terminated WCHAR[260].
+    unsafe {
+        while n < 260 {
+            let c = core::ptr::read_volatile((0x7ffe_0030 + 2 * n) as *const u16);
+            if c == 0 {
+                break;
+            }
+            path[n] = if c < 0x80 { c as u8 } else { b'?' };
+            n += 1;
+        }
+    }
+    for &b in b"\\system32" {
+        path[n] = b;
+        n += 1;
+    }
+    if (size as usize) <= n {
+        return n as u32 + 1;
+    }
+    // SAFETY: the caller's buffer holds `size` > n bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(path.as_ptr(), buffer, n);
+        *buffer.add(n) = 0;
+    }
+    n as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetProcessAffinityMask(
+    process: Handle,
+    process_mask: *mut usize,
+    system_mask: *mut usize,
+) -> Bool {
+    // PROCESS_BASIC_INFORMATION.AffinityMask (offset 16).
+    let mut pbi = [0u8; 48];
+    let mut ret = 0;
+    // SAFETY: a 48-byte buffer.
+    let status =
+        unsafe { NtQueryInformationProcess(process as isize, 0, pbi.as_mut_ptr(), 48, &mut ret) };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    let system = u64_at(&basic_information(), 48);
+    // SAFETY: the caller's output pointers.
+    unsafe {
+        *process_mask = u64_at(&pbi, 16) as usize;
+        *system_mask = system as usize;
+    }
+    TRUE
+}
+
+// ---- Environment ----
+
+/// GetEnvironmentStringsW: a private copy of the environment block
+/// (`NAME=value\0...\0`), freed with FreeEnvironmentStringsW.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetEnvironmentStringsW() -> *mut u16 {
+    // SAFETY: PEB (gs:[0x60]) -> ProcessParameters (+0x20) -> Environment
+    // (+0x80), a block ending with an empty string.
+    unsafe {
+        let peb = teb_u64(0x60) as usize;
+        let params = *((peb + 0x20) as *const usize);
+        let env = *((params + 0x80) as *const *const u16);
+        let mut n = 0;
+        while !(core::ptr::read_volatile(env.add(n)) == 0
+            && core::ptr::read_volatile(env.add(n + 1)) == 0)
+        {
+            n += 1;
+        }
+        let bytes = (n + 2) * 2;
+        let copy = VirtualAlloc(core::ptr::null_mut(), bytes, 0x3000, 4) as *mut u16;
+        if !copy.is_null() {
+            core::ptr::copy_nonoverlapping(env, copy, n + 2);
+        }
+        copy
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn FreeEnvironmentStringsW(block: *mut u16) -> Bool {
+    VirtualFree(block.cast(), 0, 0x8000)
+}
+
+// ---- Handles, waits, memory, threads ----
+
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateEventA(
+    attributes: *mut c_void,
+    manual_reset: Bool,
+    initial: Bool,
+    name: *const u8,
+) -> Handle {
+    if !name.is_null() {
+        unsupported(b"kernel32.dll!CreateEventA(name)", 0);
+        return fail_with(ERROR_NOT_SUPPORTED, core::ptr::null_mut());
+    }
+    CreateEventW(attributes, manual_reset, initial, core::ptr::null())
+}
+
+/// WaitForMultipleObjects: index of the signaled (or abandoned + 0x80)
+/// object, WAIT_TIMEOUT, or WAIT_FAILED.
+#[unsafe(no_mangle)]
+pub extern "system" fn WaitForMultipleObjects(
+    count: u32,
+    handles: *const Handle,
+    all: Bool,
+    ms: u32,
+) -> u32 {
+    let t = timeout(ms);
+    let p = t.as_ref().map_or(core::ptr::null(), |t| t as *const i64);
+    // WaitAll = 0, WaitAny = 1.
+    let wait_type = if all != 0 { 0 } else { 1 };
+    // SAFETY: the caller's handle array; valid or null timeout pointer.
+    let status = unsafe { NtWaitForMultipleObjects(count, handles, wait_type, 0, p) };
+    match status {
+        0..=0x3f | 0x80..=0xbf | STATUS_TIMEOUT => status,
+        _ => fail(status, WAIT_FAILED),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DuplicateHandle(
+    source_process: Handle,
+    source: Handle,
+    target_process: Handle,
+    target: *mut Handle,
+    access: u32,
+    inherit: Bool,
+    options: u32,
+) -> Bool {
+    let attributes = if inherit != 0 { 0x2 } else { 0 }; // OBJ_INHERIT
+    // SAFETY: the kernel validates handles and the output pointer.
+    let status = unsafe {
+        NtDuplicateObject(
+            source_process,
+            source,
+            target_process,
+            target,
+            access,
+            attributes,
+            options,
+        )
+    };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+/// VirtualQuery: MEMORY_BASIC_INFORMATION for `address`; returns the bytes
+/// written, 0 on failure.
+#[unsafe(no_mangle)]
+pub extern "system" fn VirtualQuery(address: *const c_void, info: *mut u8, length: usize) -> usize {
+    let mut ret = 0;
+    // SAFETY: the caller's buffer of `length` bytes.
+    let status = unsafe {
+        NtQueryVirtualMemory(CURRENT_PROCESS, address as usize, 0, info, length, &mut ret)
+    };
+    if status != STATUS_SUCCESS { fail(status, 0) } else { ret }
+}
+
+/// SwitchToThread: whether another thread ran (STATUS_NO_YIELD_PERFORMED
+/// means none was ready).
+#[unsafe(no_mangle)]
+pub extern "system" fn SwitchToThread() -> Bool {
+    // SAFETY: no arguments.
+    let status = unsafe { NtYieldExecution() };
+    if status == 0x4000_0024 { FALSE } else { TRUE }
+}
+
+/// RaiseFailFastException: ends the process at once with the exception's
+/// code (STATUS_FAIL_FAST_EXCEPTION without a record), bypassing handlers.
+#[unsafe(no_mangle)]
+pub extern "system" fn RaiseFailFastException(
+    record: *const u32,
+    _context: *const c_void,
+    _flags: u32,
+) -> ! {
+    let code = if record.is_null() {
+        0xc000_0602
+    } else {
+        // SAFETY: EXCEPTION_RECORD.ExceptionCode is its first field.
+        unsafe { *record }
+    };
+    ExitProcess(code)
 }
 
 /// ExitProcess. TODO: DLL_PROCESS_DETACH notifications and ending other
