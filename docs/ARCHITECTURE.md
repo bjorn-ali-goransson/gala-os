@@ -10,9 +10,12 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   linker.ld             higher-half layout, kernel linked at 0xffffffff80000000
   src/main.rs           entry symbol `kmain` + panic handler only
   src/lib.rs            boot sequence (`kernel_main`)
-  src/arch/x86_64/      port I/O, CPU control, 16550 UART, QEMU debug-exit   [unsafe allowed]
+  src/arch/x86_64/      port I/O, CPU control, GDT/TSS, IDT + ISR stubs,
+                        16550 UART, QEMU debug-exit                        [unsafe allowed]
   src/boot/             Limine protocol bindings and handoff -> plain types  [unsafe allowed]
   src/console.rs        kprint!/kprintln!/info!/warn!/error! over COM1
+  src/cmdline.rs        kernel command line parsing (host-tested)
+  src/selftest.rs       in-kernel tests run at boot with `selftest`
   src/mm/memmap.rs      physical memory map model + validation (host-tested)
 xtask/                  host tool: build ISO, run QEMU, boot test
 ```
@@ -46,9 +49,38 @@ logic (e.g. memory map validation) is unit-tested on the host with
    (test ISO only) it then exits QEMU through `isa-debug-exit`
    (status 33 = success, 35 = panic); otherwise it halts.
 
+## CPU tables
+
+The GDT uses the x64 Windows selector values because user mode can observe
+them: kernel CS/SS `0x10`/`0x18`, user CS `0x33`, user SS `0x2b`, 32-bit
+compat CS `0x23`, TSS `0x40`. This ordering is also exactly what
+SYSCALL/SYSRET require. The TSS provides IST stacks for #DF, NMI and #MC.
+
+All 256 IDT vectors point at 16-byte stubs generated in `interrupts.rs`;
+they build a uniform `TrapFrame` and call `dispatch`. CPU exceptions are
+fatal (panic with a register dump) except #BP, which is counted and
+returns. Vectors 32..255 go to handlers registered with `set_handler`.
+
+## Testing
+
+- Host unit tests: `cargo test -p kernel --lib` for hardware-independent code.
+- Boot scenarios (`SCENARIOS` in `xtask/src/main.rs`): each boots its own ISO
+  with a specific kernel command line and checks the QEMU exit status plus
+  expected serial output. `selftest` runs `kernel/src/selftest.rs`;
+  `fault=<name>` provokes a CPU exception to test the fault path.
+- `XTASK_VERBOSE=1 cargo xtask boot-test [filter]` prints every serial log.
+
+## Kernel command line
+
+| Word | Effect |
+|---|---|
+| `qemu_exit` | report the result via isa-debug-exit instead of halting |
+| `selftest` | run in-kernel self-tests after boot |
+| `fault=ud`, `fault=pagefault` | provoke that exception (tests the handler) |
+
 ## Not done yet (milestone 2)
 
-GDT/IDT and exception handlers, physical frame allocator, own page tables,
+Physical frame allocator, own page tables,
 heap (`alloc`, fallible only), interrupt-safe console lock, SMP.
 Bootloader-reclaimable memory must not be reused until the boot info that
 lives there has been copied out.

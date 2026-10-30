@@ -12,14 +12,18 @@
 pub mod arch;
 #[allow(unsafe_code)]
 pub mod boot;
+pub mod cmdline;
 #[macro_use]
 pub mod console;
 pub mod mm;
+mod selftest;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use arch::interrupts::{self, Fault};
 use arch::qemu::{self, QemuExitCode};
 use boot::{BootInfo, FirmwareType};
+use cmdline::Cmdline;
 use mm::memmap::{MemorySummary, RegionKind};
 
 /// Set when the kernel command line asks us to report the result to QEMU's
@@ -41,13 +45,14 @@ pub fn kernel_main() -> ! {
         Ok(info) => info,
         Err(e) => panic!("bootloader handoff rejected: {e}"),
     };
-    if info
-        .cmdline
-        .split_ascii_whitespace()
-        .any(|w| w == QEMU_EXIT_FLAG)
-    {
+    let cmdline = Cmdline::new(info.cmdline);
+    if cmdline.flag(QEMU_EXIT_FLAG) {
         QEMU_EXIT.store(true, Ordering::Relaxed);
     }
+
+    arch::gdt::init_bsp();
+    interrupts::init();
+    info!("cpu: GDT, TSS and IDT loaded");
 
     log_boot_info(&info);
     let summary = log_memory_map(&info);
@@ -66,6 +71,19 @@ pub fn kernel_main() -> ! {
 
     if summary.usable_bytes == 0 {
         panic!("no usable memory reported");
+    }
+
+    if let Some(name) = cmdline.value("fault") {
+        match Fault::from_name(name) {
+            Some(fault) => {
+                info!("provoking fault {fault:?}");
+                interrupts::provoke(fault);
+            }
+            None => panic!("unknown fault {name:?}"),
+        }
+    }
+    if cmdline.flag("selftest") {
+        selftest::run_all();
     }
 
     kprintln!("{BOOT_OK_MARKER}");

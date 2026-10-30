@@ -33,3 +33,5 @@ The `xtask` host tool has no dependencies beyond `std`.
 | `kernel/src/boot/limine.rs` | Limine boot protocol, `PROTOCOL.md` in github.com/limine-bootloader/limine-protocol (fetched 2026-10-30) | BSD-2-Clause (`limine.h`); request IDs and struct layouts taken from the spec |
 | `kernel/src/arch/x86_64/serial.rs` | Generic 16550 UART register description (public datasheets / OSDev wiki) | n/a |
 | `kernel/src/arch/x86_64/qemu.rs` | QEMU `isa-debug-exit` device documentation | n/a |
+| `kernel/src/arch/x86_64/gdt.rs` selector values (`0x10`/`0x18` kernel, `0x23`/`0x2b`/`0x33` user) | User-visible x64 Windows segment selectors: Microsoft `CONTEXT` documentation and values used by Wine (`dlls/ntdll/unix/signal_x86_64.c`). Only the numbers are used; the GDT code is our own. | n/a (ABI facts) |
+| `kernel/src/arch/x86_64/{gdt,interrupts}.rs` descriptor formats | Intel SDM / AMD APM (GDT, TSS, IDT gate layouts, exception vectors) | n/a |

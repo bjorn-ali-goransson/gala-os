@@ -19,8 +19,9 @@ const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
-/// QEMU exit status for `QemuExitCode::Success` (`(0x10 << 1) | 1`).
+/// QEMU exit statuses for `QemuExitCode::{Success, Failure}` (`(code << 1) | 1`).
 const QEMU_EXIT_SUCCESS: i32 = 33;
+const QEMU_EXIT_FAILURE: i32 = 35;
 const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 type Result<T = ()> = std::result::Result<T, String>;
@@ -32,7 +33,7 @@ commands:
   build        build the kernel and a bootable UEFI ISO (target/<profile>/gala-os.iso)
   run          build, then boot in QEMU with serial on stdio [--headless]
   test         run host unit tests, then boot in QEMU and check the result
-  boot-test    only the QEMU boot test
+  boot-test    only the QEMU boot tests [scenario name filter]
 ";
 
 fn main() -> ExitCode {
@@ -40,10 +41,10 @@ fn main() -> ExitCode {
     let release = args.iter().any(|a| a == "--release");
     let headless = args.iter().any(|a| a == "--headless");
     let result = match args.first().map(String::as_str) {
-        Some("build") => build(release, Mode::Interactive).map(drop),
-        Some("run") => build(release, Mode::Interactive).and_then(|iso| run(&iso, headless)),
-        Some("test") => unit_tests().and_then(|()| boot_test(release)),
-        Some("boot-test") => boot_test(release),
+        Some("build") => build(release, "gala-os", "").map(drop),
+        Some("run") => build(release, "gala-os", "").and_then(|iso| run(&iso, headless)),
+        Some("test") => unit_tests().and_then(|()| boot_tests(release, None)),
+        Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
         _ => {
             eprint!("{USAGE}");
             return ExitCode::from(2);
@@ -56,13 +57,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Mode {
-    Interactive,
-    /// Kernel reports its result through QEMU's isa-debug-exit device.
-    Test,
 }
 
 fn root() -> PathBuf {
@@ -82,6 +76,22 @@ fn cargo() -> Command {
     cmd
 }
 
+/// Runs `cmd`, showing its output only if it fails.
+fn run_quiet(cmd: &mut Command) -> Result {
+    let out = cmd
+        .output()
+        .map_err(|e| format!("failed to spawn {cmd:?}: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    eprint!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Err(format!("{cmd:?} failed: {}", out.status))
+}
+
 fn run_cmd(cmd: &mut Command) -> Result {
     let status = cmd
         .status()
@@ -98,9 +108,14 @@ fn unit_tests() -> Result {
     run_cmd(cargo().args(["test", "--package", "kernel", "--lib"]))
 }
 
-/// Builds the kernel and packs it with Limine into a UEFI-bootable ISO.
-fn build(release: bool, mode: Mode) -> Result<PathBuf> {
-    let profile = if release { "release" } else { "debug" };
+/// Builds the kernel and packs it with Limine into a UEFI-bootable ISO named
+/// `name.iso` whose boot entry passes `cmdline` to the kernel.
+fn build(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
+    build_kernel(release)?;
+    make_iso(release, name, cmdline)
+}
+
+fn build_kernel(release: bool) -> Result {
     let mut cmd = cargo();
     cmd.args([
         "build",
@@ -114,17 +129,16 @@ fn build(release: bool, mode: Mode) -> Result<PathBuf> {
     if release {
         cmd.arg("--release");
     }
-    run_cmd(&mut cmd)?;
+    run_cmd(&mut cmd)
+}
+
+fn make_iso(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
+    let profile = if release { "release" } else { "debug" };
     let kernel = target_dir()
         .join(KERNEL_TARGET)
         .join(profile)
         .join("kernel");
-
     let limine = fetch_limine()?;
-    let name = match mode {
-        Mode::Interactive => "gala-os",
-        Mode::Test => "gala-os-test",
-    };
     let out = target_dir().join(profile);
     let iso_root = out.join(format!("{name}-iso-root"));
     if iso_root.exists() {
@@ -141,17 +155,13 @@ fn build(release: bool, mode: Mode) -> Result<PathBuf> {
         &limine.join("limine-uefi-cd.bin"),
         &boot.join("limine/limine-uefi-cd.bin"),
     )?;
-    let cmdline = match mode {
-        Mode::Interactive => "",
-        Mode::Test => "qemu_exit",
-    };
     let config = format!(
         "timeout: 0\n\n/gala-os\n    protocol: limine\n    path: boot():/boot/kernel\n    cmdline: {cmdline}\n"
     );
     write(&boot.join("limine/limine.conf"), &config)?;
 
     let iso = out.join(format!("{name}.iso"));
-    run_cmd(
+    run_quiet(
         Command::new("xorriso")
             .args(["-as", "mkisofs", "-R", "-r", "-J", "-quiet"])
             .args(["--efi-boot", "boot/limine/limine-uefi-cd.bin"])
@@ -164,7 +174,9 @@ fn build(release: bool, mode: Mode) -> Result<PathBuf> {
             .arg("-o")
             .arg(&iso),
     )?;
-    eprintln!("xtask: built {}", iso.display());
+    if name == "gala-os" {
+        eprintln!("xtask: built {}", iso.display());
+    }
     Ok(iso)
 }
 
@@ -288,21 +300,96 @@ fn run(iso: &Path, headless: bool) -> Result {
     run_cmd(&mut cmd)
 }
 
-/// Boots the test ISO headless and checks the kernel's verdict.
-fn boot_test(release: bool) -> Result {
-    let iso = build(release, Mode::Test)?;
+/// A boot test: a kernel command line and the expected outcome.
+struct Scenario {
+    name: &'static str,
+    cmdline: &'static str,
+    exit_status: i32,
+    /// Lines (substrings) that must appear in the serial log.
+    expect: &'static [&'static str],
+}
+
+const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "selftest",
+        cmdline: "qemu_exit selftest",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[BOOT_OK_MARKER, "selftest: "],
+    },
+    Scenario {
+        name: "fault-ud",
+        cmdline: "qemu_exit fault=ud",
+        exit_status: QEMU_EXIT_FAILURE,
+        expect: &["KERNEL PANIC", "CPU exception: invalid opcode (#UD)"],
+    },
+    Scenario {
+        name: "fault-pagefault",
+        cmdline: "qemu_exit fault=pagefault",
+        exit_status: QEMU_EXIT_FAILURE,
+        expect: &[
+            "CPU exception: page fault (#PF) error=0x0",
+            "cr2=0x0000000000000008",
+        ],
+    },
+];
+
+/// Boots every scenario (matching `filter`) headless, in parallel.
+fn boot_tests(release: bool, filter: Option<&String>) -> Result {
+    build_kernel(release)?;
+    let selected: Vec<&Scenario> = SCENARIOS
+        .iter()
+        .filter(|s| filter.is_none_or(|f| s.name.contains(f.as_str())))
+        .collect();
+    if selected.is_empty() {
+        return Err("no boot test scenario matches the filter".into());
+    }
+    let mut isos = Vec::new();
+    for scenario in &selected {
+        isos.push(make_iso(
+            release,
+            &format!("test-{}", scenario.name),
+            scenario.cmdline,
+        )?);
+    }
+    let results: Vec<Result> = thread::scope(|scope| {
+        let handles: Vec<_> = selected
+            .iter()
+            .zip(&isos)
+            .map(|(scenario, iso)| scope.spawn(move || boot_scenario(scenario, iso)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err("panicked".into())))
+            .collect()
+    });
+    let mut failed = 0;
+    for (scenario, result) in selected.iter().zip(&results) {
+        match result {
+            Ok(()) => eprintln!("xtask: boot test {:<20} ok", scenario.name),
+            Err(e) => {
+                failed += 1;
+                eprintln!("xtask: boot test {:<20} FAILED: {e}", scenario.name);
+            }
+        }
+    }
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err(format!("{failed} of {} boot tests failed", selected.len()))
+    }
+}
+
+fn boot_scenario(scenario: &Scenario, iso: &Path) -> Result {
     let log = iso.with_extension("serial.log");
-    let mut cmd = qemu(&iso)?;
+    let _ = fs::remove_file(&log);
+    let mut cmd = qemu(iso)?;
     cmd.args(["-display", "none", "-monitor", "none"])
         .arg("-serial")
         .arg(format!("file:{}", log.display()))
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
-        .stdin(Stdio::null());
-    eprintln!(
-        "xtask: booting {} (timeout {}s)",
-        iso.display(),
-        BOOT_TEST_TIMEOUT.as_secs()
-    );
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn QEMU: {e}"))?;
@@ -323,29 +410,30 @@ fn boot_test(release: bool) -> Result {
     if let Ok(mut f) = fs::File::open(&log) {
         let _ = f.read_to_string(&mut serial);
     }
-    eprintln!(
-        "----- serial output -----\n{}\n-------------------------",
-        serial.trim_end()
-    );
-
-    let marker = serial.lines().any(|l| l.trim_end() == BOOT_OK_MARKER);
-    match status {
-        None => Err(format!(
-            "boot test timed out after {}s",
-            BOOT_TEST_TIMEOUT.as_secs()
+    let missing: Vec<&str> = scenario
+        .expect
+        .iter()
+        .copied()
+        .filter(|e| !serial.contains(e))
+        .collect();
+    let verdict = match status {
+        None => Err(format!("timed out after {}s", BOOT_TEST_TIMEOUT.as_secs())),
+        Some(s) if s.code() != Some(scenario.exit_status) => Err(format!(
+            "QEMU exited with {s}, expected status {}",
+            scenario.exit_status
         )),
-        Some(s) if s.code() == Some(QEMU_EXIT_SUCCESS) && marker => {
-            eprintln!(
-                "xtask: boot test passed in {:.1}s",
-                start.elapsed().as_secs_f64()
-            );
-            Ok(())
-        }
-        Some(s) if s.code() == Some(QEMU_EXIT_SUCCESS) => {
-            Err("kernel reported success but the boot marker is missing".into())
-        }
-        Some(s) => Err(format!("boot test failed: QEMU exited with {s}")),
+        Some(_) if !missing.is_empty() => Err(format!("serial log lacks {missing:?}")),
+        Some(_) => Ok(()),
+    };
+    if verdict.is_err() || env::var_os("XTASK_VERBOSE").is_some() {
+        eprintln!(
+            "----- {} serial output ({}) -----\n{}\n-----",
+            scenario.name,
+            log.display(),
+            serial.trim_end()
+        );
     }
+    verdict
 }
 
 fn copy(from: &Path, to: &Path) -> Result {

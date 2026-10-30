@@ -26,7 +26,8 @@ If OVMF is somewhere unusual, set `OVMF_CODE` (and optionally `OVMF_VARS`).
 ```sh
 cargo xtask build          # kernel + target/debug/gala-os.iso
 cargo xtask run            # boot in QEMU, serial on stdio (add --headless for no window)
-cargo xtask test           # host unit tests + headless QEMU boot test
+cargo xtask test           # host unit tests + headless QEMU boot scenarios
+cargo xtask boot-test ud   # only boot scenarios whose name contains "ud"
 cargo xtask run --release  # any command takes --release
 ```
 
