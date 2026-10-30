@@ -257,10 +257,31 @@ pub const SESSION_ID: u32 = 1;
 const BOOT_DIRECTORY: &str = "C:\\gala\\";
 /// FILE_TRAVERSE | SYNCHRONIZE, as Windows opens the current directory.
 const CURDIR_ACCESS: u32 = 0x20 | super::object::SYNCHRONIZE;
+/// `NAME=value` in `buf` (`name` includes the `=`; it must fit with ten
+/// digits).
+fn number_variable<'a>(buf: &'a mut [u8; 24], name: &'a str, value: u32) -> &'a str {
+    buf[..name.len()].copy_from_slice(name.as_bytes());
+    let mut digits = [0u8; 10];
+    let mut n = 0;
+    let mut v = value;
+    loop {
+        digits[n] = b'0' + (v % 10) as u8;
+        n += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    for i in 0..n {
+        buf[name.len() + i] = digits[n - 1 - i];
+    }
+    core::str::from_utf8(&buf[..name.len() + n]).unwrap_or(name)
+}
+
 /// The initial environment.
 const ENVIRONMENT: &[&str] = &[
     "ComSpec=C:\\Windows\\System32\\cmd.exe",
-    "NUMBER_OF_PROCESSORS=1",
+    "NUMBER_OF_PROCESSORS=", // completed with the count in `load`
     "OS=Windows_NT",
     "Path=C:\\Windows\\System32;C:\\Windows",
     "PROCESSOR_ARCHITECTURE=AMD64",
@@ -358,6 +379,13 @@ pub fn spawn_from_pe(
         command_line.try_extend_from_slice(args.as_bytes())?;
     }
     let command_line = core::str::from_utf8(&command_line).unwrap_or(image_path);
+    let cpus = crate::arch::smp::online_count();
+    let mut cpus_var = [0u8; 24];
+    let cpus_var = number_variable(&mut cpus_var, "NUMBER_OF_PROCESSORS=", cpus);
+    let mut environment = [""; ENVIRONMENT.len()];
+    for (slot, var) in environment.iter_mut().zip(ENVIRONMENT) {
+        *slot = if *var == "NUMBER_OF_PROCESSORS=" { cpus_var } else { var };
+    }
     let p = layout::PARAMS_ADDRESS;
     let block = super::params::build(
         &super::params::ProcessParameters {
@@ -367,7 +395,7 @@ pub fn spawn_from_pe(
             current_directory_handle: cwd_handle,
             dll_path: "",
             std_handles: [stdin.0, stdout.0, stderr.0],
-            environment: ENVIRONMENT,
+            environment: &environment,
         },
         p,
     )
@@ -388,7 +416,7 @@ pub fn spawn_from_pe(
     space.map_zeroed(peb_addr, peb::PAGES, USER_RW)?;
     put_u64(&mut space, peb_addr + peb::IMAGE_BASE_ADDRESS, base)?;
     put_u64(&mut space, peb_addr + peb::PROCESS_PARAMETERS, p)?;
-    put_u32(&mut space, peb_addr + peb::NUMBER_OF_PROCESSORS, 1)?;
+    put_u32(&mut space, peb_addr + peb::NUMBER_OF_PROCESSORS, cpus)?;
     put_u32(&mut space, peb_addr + peb::OS_MAJOR_VERSION, super::kuser::MAJOR_VERSION)?;
     put_u32(&mut space, peb_addr + peb::OS_MINOR_VERSION, super::kuser::MINOR_VERSION)?;
     space.write_initial(
@@ -650,4 +678,19 @@ fn deliver_to_user(
 pub fn init() {
     interrupts::set_user_exception_handler(on_user_exception);
     thread::init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::number_variable;
+
+    #[test]
+    fn number_variables() {
+        let mut buf = [0u8; 24];
+        assert_eq!(number_variable(&mut buf, "NUMBER_OF_PROCESSORS=", 2), "NUMBER_OF_PROCESSORS=2");
+        let mut buf = [0u8; 24];
+        assert_eq!(number_variable(&mut buf, "N=", 0), "N=0");
+        let mut buf = [0u8; 24];
+        assert_eq!(number_variable(&mut buf, "N=", 4_000_000_000), "N=4000000000");
+    }
 }

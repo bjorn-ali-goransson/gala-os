@@ -108,6 +108,11 @@ static HANDLER: AtomicUsize = AtomicUsize::new(0);
 /// Enables SYSCALL on the boot CPU, delivering to `handler`.
 pub fn init_bsp(handler: Handler) {
     HANDLER.store(handler as usize, Ordering::Release);
+    init_cpu();
+}
+
+/// Enables SYSCALL on this CPU (the handler is the one `init_bsp` set).
+pub fn init_cpu() {
     let star = u64::from(USER32_CS & !3) << 48 | u64::from(KERNEL_CS) << 32;
     // SAFETY: architected MSRs. The entry point switches to the kernel
     // stack set by `percpu::set_kernel_stack` before touching memory, and

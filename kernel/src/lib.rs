@@ -89,6 +89,13 @@ pub fn kernel_main() -> ! {
     );
     init_paging(&info);
     init_timer(info.boot_unix_time);
+    arch::smp::init_bsp();
+    match arch::smp::start_aps(&info.processors) {
+        Ok(n) => {
+            info!("smp: {n} CPUs online ({} reported by the bootloader)", info.processors.len())
+        }
+        Err(e) => warn!("smp: cannot start the other CPUs: {e:?}"),
+    }
     if let Err(e) = sched::init() {
         panic!("scheduler: {e:?}");
     }

@@ -13,6 +13,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::mm::PAGE_SIZE;
 use crate::mm::memmap::{MemoryRegion, RegionKind};
 pub use framebuffer::Framebuffer;
+pub use limine::{MP_INFO_EXTRA_ARGUMENT, MpInfo};
 use limine::{MemmapEntry, REQUESTED_BASE_REVISION, REQUESTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,6 +134,29 @@ pub struct BootInfo {
     pub modules: BootModules,
     /// UNIX time (seconds) of boot, from the RTC.
     pub boot_unix_time: Option<i64>,
+    pub processors: Processors,
+}
+
+/// The processors the bootloader found (all parked until started).
+pub struct Processors {
+    pub bsp_lapic_id: u32,
+    cpus: &'static [*const limine::MpInfo],
+}
+
+impl Processors {
+    pub fn len(&self) -> usize {
+        self.cpus.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cpus.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &'static limine::MpInfo> + '_ {
+        // SAFETY: each entry points to a `limine_mp_info` in
+        // bootloader-reclaimable memory, per the protocol.
+        self.cpus.iter().filter_map(|&p| unsafe { p.as_ref() })
+    }
 }
 
 /// Reads the bootloader responses. Call once, early in boot.
@@ -193,6 +217,16 @@ pub fn collect() -> Result<BootInfo, BootError> {
         }
     });
 
+    let (bsp_lapic_id, cpus) = REQUESTS.mp.request.response().map_or((0, &[][..]), |r| {
+        let cpus = if r.cpus.is_null() {
+            &[][..]
+        } else {
+            // SAFETY: an array of `cpu_count` info pointers, per the protocol.
+            unsafe { core::slice::from_raw_parts(r.cpus, r.cpu_count as usize) }
+        };
+        (r.bsp_lapic_id, cpus)
+    });
+
     Ok(BootInfo {
         base_revision: loaded.unwrap_or(REQUESTED_BASE_REVISION),
         bootloader,
@@ -204,6 +238,7 @@ pub fn collect() -> Result<BootInfo, BootError> {
         framebuffer,
         modules: BootModules { files: modules },
         boot_unix_time: REQUESTS.date_at_boot.response().map(|r| r.timestamp),
+        processors: Processors { bsp_lapic_id, cpus },
     })
 }
 

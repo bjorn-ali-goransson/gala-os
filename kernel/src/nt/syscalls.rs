@@ -1393,7 +1393,7 @@ fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
     b[8..16].copy_from_slice(&t.teb.to_le_bytes());
     b[16..24].copy_from_slice(&t.process.id.to_le_bytes());
     b[24..32].copy_from_slice(&t.id.to_le_bytes());
-    b[32..40].copy_from_slice(&1u64.to_le_bytes());
+    b[32..40].copy_from_slice(&crate::arch::smp::online_mask().to_le_bytes());
     b[40..44].copy_from_slice(&priority.to_le_bytes());
     b[44..48].copy_from_slice(&base.to_le_bytes());
     call.return_info(&b, buffer, length, ret_ptr)
@@ -1501,7 +1501,7 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
     let mut b = [0u8; BASIC_INFORMATION_SIZE];
     b[0..4].copy_from_slice(&p.exit_status().unwrap_or(NtStatus::PENDING).0.to_le_bytes());
     b[8..16].copy_from_slice(&super::layout::PEB_ADDRESS.to_le_bytes());
-    b[16..24].copy_from_slice(&1u64.to_le_bytes());
+    b[16..24].copy_from_slice(&crate::arch::smp::online_mask().to_le_bytes());
     b[24..28].copy_from_slice(&8u32.to_le_bytes());
     b[32..40].copy_from_slice(&p.id.to_le_bytes());
     call.return_info(&b, buffer, length, ret_ptr)
@@ -1520,9 +1520,10 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
     match class {
         sysinfo::SYSTEM_BASIC_INFORMATION => {
             let (_, total) = crate::mm::frame_stats();
-            // One processor; the timer ticks at TICK_HZ (100 ns units).
+            // The timer ticks at TICK_HZ (100 ns units).
             let resolution = (10_000_000 / crate::time::TICK_HZ) as u32;
-            let info = sysinfo::basic_information(total, 1, resolution);
+            let cpus = crate::arch::smp::online_count().min(64) as u8;
+            let info = sysinfo::basic_information(total, cpus, resolution);
             call.return_info(&info, buffer, length, ret_ptr)
         }
         sysinfo::SYSTEM_TIME_OF_DAY_INFORMATION => {

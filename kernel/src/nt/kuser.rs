@@ -88,7 +88,7 @@ pub fn init(physical_pages: u64) -> Result<(), crate::arch::paging::PagingError>
     page.write_u32(NUMBER_OF_PHYSICAL_PAGES, physical_pages.min(u64::from(u32::MAX)) as u32);
     page.write(TEST_RET_INSTRUCTION, &[0xc3]); // ret
     page.write(QPC_FREQUENCY, &time::PERFORMANCE_FREQUENCY.to_le_bytes());
-    page.write_u32(ACTIVE_PROCESSOR_COUNT, 1);
+    page.write_u32(ACTIVE_PROCESSOR_COUNT, crate::arch::smp::online_count());
     page.write(ACTIVE_GROUP_COUNT, &[1]);
     update_page(&page, time::ticks());
     *PAGE.lock() = Some(page);

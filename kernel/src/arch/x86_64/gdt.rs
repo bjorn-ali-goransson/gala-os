@@ -55,22 +55,44 @@ const _: () = assert!(size_of::<Tss>() == 104);
 #[repr(C, align(16))]
 struct Gdt([u64; 10]);
 
+/// One CPU's GDT and TSS.
+#[repr(C, align(16))]
+pub struct CpuTables {
+    gdt: Gdt,
+    tss: Tss,
+}
+
+impl CpuTables {
+    pub const fn new() -> Self {
+        CpuTables {
+            gdt: Gdt([0; 10]),
+            tss: Tss {
+                _reserved0: 0,
+                rsp: [0; 3],
+                _reserved1: 0,
+                ist: [0; 7],
+                _reserved2: 0,
+                _reserved3: 0,
+                iomap_base: size_of::<Tss>() as u16, // no I/O permission bitmap
+            },
+        }
+    }
+}
+
+impl Default for CpuTables {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[repr(C, align(16))]
 struct IstStack([u8; IST_STACK_SIZE]);
 
-// The boot CPU's tables. Written only by `init_bsp` (once, before interrupts
-// are enabled); afterwards the CPU reads them and sets the TSS busy bit.
-// TODO(smp): per-CPU copies.
-static GDT: HwCell<Gdt> = HwCell::new(Gdt([0; 10]));
-static TSS: HwCell<Tss> = HwCell::new(Tss {
-    _reserved0: 0,
-    rsp: [0; 3],
-    _reserved1: 0,
-    ist: [0; 7],
-    _reserved2: 0,
-    _reserved3: 0,
-    iomap_base: size_of::<Tss>() as u16, // no I/O permission bitmap
-});
+// The boot CPU's tables and IST stacks (other CPUs get theirs from the
+// heap and kernel stacks, see `smp`). Written only by `init_bsp` (once,
+// before interrupts are enabled); afterwards the CPU reads them and sets
+// the TSS busy bit.
+static BSP_TABLES: HwCell<CpuTables> = HwCell::new(CpuTables::new());
 static IST_STACKS: HwCell<[IstStack; 3]> =
     HwCell::new([const { IstStack([0; IST_STACK_SIZE]) }; 3]);
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -86,22 +108,42 @@ pub(super) fn descriptor_pointer(base: *const u8, size: usize) -> DescriptorPoin
     DescriptorPointer { limit: (size - 1) as u16, base: base as u64 }
 }
 
+/// The boot CPU's TSS.
+pub(super) fn bsp_tss() -> *mut Tss {
+    // SAFETY: only computes the field's address.
+    unsafe { &raw mut (*BSP_TABLES.get()).tss }
+}
+
 /// Loads the GDT and TSS on the boot CPU. Must be called exactly once.
 pub fn init_bsp() {
     assert!(!INITIALIZED.swap(true, Ordering::SeqCst), "GDT initialized twice");
-
-    // SAFETY: `INITIALIZED` guarantees this runs once, and nothing else touches
-    // these statics until the CPU starts using them below.
-    unsafe {
+    // SAFETY: `INITIALIZED` guarantees this runs once, and nothing else
+    // touches these statics.
+    let tops = unsafe {
         let stacks = &mut *IST_STACKS.get();
-        let tss = &mut *TSS.get();
-        for (slot, stack) in [IST_DOUBLE_FAULT, IST_NMI, IST_MACHINE_CHECK].into_iter().zip(stacks)
+        stacks.each_mut().map(|stack| stack.0.as_mut_ptr().add(IST_STACK_SIZE) as u64)
+    };
+    // SAFETY: as above; the boot CPU's tables are used by this CPU only.
+    unsafe { load(BSP_TABLES.get(), tops) };
+}
+
+/// Fills `tables` (with IST stacks for double fault, NMI and machine
+/// check at `ist_tops`), loads them on this CPU and returns its TSS.
+///
+/// # Safety
+/// `tables` must stay alive and unused by any other CPU for as long as
+/// this CPU runs, and the stacks must be mapped and stay so.
+pub unsafe fn load(tables: *mut CpuTables, ist_tops: [u64; 3]) -> *mut Tss {
+    // SAFETY: forwarded to the caller; the CPU does not use the tables
+    // until `lgdt`/`ltr` below.
+    unsafe {
+        let tss = &raw mut (*tables).tss;
+        for (slot, top) in [IST_DOUBLE_FAULT, IST_NMI, IST_MACHINE_CHECK].into_iter().zip(ist_tops)
         {
-            let top = stack.0.as_mut_ptr().add(IST_STACK_SIZE) as u64;
-            tss.ist[usize::from(slot) - 1] = top;
+            (*tss).ist[usize::from(slot) - 1] = top;
         }
 
-        let tss_base = TSS.get() as u64;
+        let tss_base = tss as u64;
         let tss_limit = (size_of::<Tss>() - 1) as u64;
         let tss_low = (tss_limit & 0xffff)
             | ((tss_base & 0xff_ffff) << 16)
@@ -110,7 +152,7 @@ pub fn init_bsp() {
             | (((tss_base >> 24) & 0xff) << 56);
         let tss_high = tss_base >> 32;
 
-        let gdt = &mut *GDT.get();
+        let gdt = &mut (*tables).gdt;
         gdt.0[usize::from(KERNEL_CS / 8)] = KERNEL_CODE64;
         gdt.0[usize::from(KERNEL_SS / 8)] = KERNEL_DATA;
         gdt.0[usize::from(USER32_CS / 8)] = USER_CODE32;
@@ -119,7 +161,7 @@ pub fn init_bsp() {
         gdt.0[usize::from(TSS_SELECTOR / 8)] = tss_low;
         gdt.0[usize::from(TSS_SELECTOR / 8) + 1] = tss_high;
 
-        let pointer = descriptor_pointer(GDT.get().cast(), size_of::<Gdt>());
+        let pointer = descriptor_pointer((&raw const (*tables).gdt).cast(), size_of::<Gdt>());
         asm!(
             "lgdt [{ptr}]",
             // Reload CS with a far return.
@@ -141,14 +183,19 @@ pub fn init_bsp() {
             tss = in(reg) u64::from(TSS_SELECTOR),
             tmp = out(reg) _,
         );
+        tss
     }
 }
 
 /// Sets the ring-0 stack loaded when an interrupt arrives in user mode.
-pub fn set_rsp0(top: u64) {
+///
+/// # Safety
+/// `tss` must be this CPU's TSS (from `init_bsp`/`load`).
+pub unsafe fn set_rsp0(tss: *mut Tss, top: u64) {
     // SAFETY: the CPU reads `rsp[0]` only on a privilege change; callers run
-    // with interrupts disabled, so no such change happens mid-write.
-    unsafe { (*TSS.get()).rsp[0] = top };
+    // with interrupts disabled, so no such change happens mid-write, and
+    // only this CPU uses its TSS.
+    unsafe { (*tss).rsp[0] = top };
 }
 
 #[cfg(test)]

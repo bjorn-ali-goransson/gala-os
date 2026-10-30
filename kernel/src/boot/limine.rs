@@ -145,6 +145,38 @@ pub struct ExecutableAddressResponse {
     pub virtual_base: u64,
 }
 
+/// The MP (multiprocessor) request: a request with a trailing flags word
+/// (bit 0 asks for x2APIC mode, not used).
+#[repr(C)]
+pub struct MpRequest {
+    pub request: Request<MpResponse>,
+    flags: u64,
+}
+
+/// `struct limine_mp_response` (x86_64).
+#[repr(C)]
+pub struct MpResponse {
+    pub revision: u64,
+    pub flags: u32,
+    pub bsp_lapic_id: u32,
+    pub cpu_count: u64,
+    pub cpus: *const *const MpInfo,
+}
+
+/// `struct limine_mp_info` (x86_64). An AP spins until `goto_address` is
+/// written, then jumps there with `rdi` pointing at this structure, on a
+/// bootloader stack and with the bootloader's page tables and GDT.
+#[repr(C)]
+pub struct MpInfo {
+    pub processor_id: u32,
+    pub lapic_id: u32,
+    reserved: u64,
+    pub goto_address: core::sync::atomic::AtomicU64,
+    pub extra_argument: core::sync::atomic::AtomicU64,
+}
+
+pub const MP_INFO_EXTRA_ARGUMENT: usize = core::mem::offset_of!(MpInfo, extra_argument);
+
 #[repr(C)]
 pub struct Requests {
     start_marker: [u64; 4],
@@ -158,6 +190,7 @@ pub struct Requests {
     pub executable_address: Request<ExecutableAddressResponse>,
     pub modules: Request<ModuleResponse>,
     pub date_at_boot: Request<DateAtBootResponse>,
+    pub mp: MpRequest,
     end_marker: [u64; 2],
 }
 
@@ -183,6 +216,7 @@ pub static REQUESTS: Requests = Requests {
     executable_address: Request::new([0x71ba76863cc55f63, 0xb2644a48c516a487]),
     modules: Request::new([0x3e7e279702be32af, 0xca1c4f3bd1280cee]),
     date_at_boot: Request::new([0x502746e184c088aa, 0xfbc5ec83e6327893]),
+    mp: MpRequest { request: Request::new([0x95a67b819a1b857e, 0xa0b61b723b6a73e0]), flags: 0 },
     end_marker: REQUESTS_END_MARKER,
 };
 

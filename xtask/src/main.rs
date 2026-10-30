@@ -91,6 +91,7 @@ const USER_PROGRAMS: &[&str] = &[
     "context_test",
     "timer_test",
     "loader_test",
+    "smp_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -371,6 +372,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=loader_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["loader_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "smp_test",
+        // QEMU runs with -smp 2 (see `qemu`).
+        cmdline: "qemu_exit run=smp_test.exe args=cpus=2",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["smp: 2 CPUs online", "smp_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "context_test",

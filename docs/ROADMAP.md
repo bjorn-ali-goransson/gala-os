@@ -115,16 +115,17 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   table, imports of DLLs bound recursively, DllMain attach/detach once;
   images without a relocation directory are relocatable unless
   IMAGE_FILE_RELOCS_STRIPPED; `loader_test` (with `testdll2`)
+- SMP bring-up (S1): APs started through Limine's MP request onto the
+  kernel's page tables, each with its own GDT/TSS/IST stacks, per-CPU block
+  (GS), IDT, SYSCALL MSRs, local APIC and IA32_TSC_AUX; processor count and
+  active mask in system/process/thread information, the PEB,
+  KUSER_SHARED_DATA and NUMBER_OF_PROCESSORS; the APs idle; `smp_test`
 
 ## Next
 Order agreed with the project owner (2026-10-30): multiprocessor support
 first, then a real Go program, then Nginx.
 
-S1. **SMP bring-up**: start the APs (Limine MP request); per-CPU GDT/TSS/IST
-   stacks, PerCpu (GS base), IDT, LAPIC and timer on each CPU; IA32_TSC_AUX
-   holds the CPU number; NtQuerySystemInformation reports the processor
-   count and active mask; `smp_test`.
-S2. **SMP scheduling**: per-CPU current/idle threads, a shared run queue
+S2. **SMP scheduling** (with the APs' LAPIC timers, still masked after S1): per-CPU current/idle threads, a shared run queue
    (later per-CPU queues with stealing), reschedule IPIs on wake, thread
    affinity (ThreadAffinityMask, NtGetCurrentProcessorNumber); threads of
    one process running at the same time on different CPUs.

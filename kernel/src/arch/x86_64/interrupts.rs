@@ -189,9 +189,17 @@ pub fn init() {
             let dpl = if vector as u8 == VECTOR_BREAKPOINT { 3 } else { 0 };
             *gate = Gate::interrupt(base + 16 * vector as u64, ist, dpl);
         }
-        let pointer = super::gdt::descriptor_pointer(IDT.get().cast(), size_of::<Idt>());
-        asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags));
     }
+    load();
+}
+
+/// Loads the IDT on this CPU (other CPUs share the boot CPU's table, which
+/// is only read after `init`).
+pub fn load() {
+    let pointer = super::gdt::descriptor_pointer(IDT.get().cast(), size_of::<Idt>());
+    // SAFETY: the table is filled by `init` before any CPU loads it and
+    // never changes afterwards.
+    unsafe { asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags)) };
 }
 
 /// Handler for an external interrupt vector.

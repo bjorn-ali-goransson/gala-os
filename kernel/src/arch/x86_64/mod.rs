@@ -12,5 +12,6 @@ mod pit;
 pub mod port;
 pub mod qemu;
 pub mod serial;
+pub mod smp;
 mod sync;
 pub mod syscall;

@@ -107,6 +107,21 @@ pub fn init_bsp() -> Result<Calibration, ApicError> {
     Ok(Calibration { x2apic, apic_id, timer_hz, tsc_hz })
 }
 
+/// Enables the local APIC of the calling CPU (not the boot CPU) in the
+/// boot CPU's mode, with its timer masked. Requires `init_bsp` first.
+pub fn init_ap() {
+    // SAFETY: as in `init_bsp`; every CPU has its own IA32_APIC_BASE, and
+    // in xAPIC mode its registers sit at the same physical (and so the
+    // same mapped) address as the boot CPU's.
+    unsafe {
+        let base = cpu::rdmsr(IA32_APIC_BASE);
+        let mode = if X2APIC.load(Ordering::Relaxed) { APIC_BASE_X2APIC } else { 0 };
+        cpu::wrmsr(IA32_APIC_BASE, base | APIC_BASE_ENABLE | mode);
+    }
+    write(REG_SPURIOUS, SPURIOUS_ENABLE | u32::from(SPURIOUS_VECTOR));
+    write(REG_LVT_TIMER, LVT_MASKED);
+}
+
 /// Measures the LAPIC timer and TSC over a PIT-timed interval.
 fn calibrate() -> Result<(u64, u64), ApicError> {
     const SAMPLE_MS: u64 = 10;

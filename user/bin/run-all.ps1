@@ -34,6 +34,7 @@ Add-Type -Namespace Gala -Name Native -MemberDefinition @'
 
 # Command lines that scenarios pass (gala: `args=` in xtask/src/main.rs).
 $arguments = @{ "args_test" = 'alpha "beta gamma"' }
+# smp_test takes an expected processor count (cpus=N); none on Windows.
 
 $results = @()
 foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {

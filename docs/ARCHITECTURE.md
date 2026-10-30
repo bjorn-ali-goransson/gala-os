@@ -451,10 +451,22 @@ the TSC clock; the performance counter runs at 10 MHz.
 User-mode CPU exceptions terminate the process with the matching NTSTATUS
 (no SEH dispatch yet).
 
+## Processors
+
+`arch::smp` starts the application processors through Limine's MP request.
+Limine parks each AP until its `goto_address` is written; `gala_ap_entry`
+then sets EFER.NXE, the kernel's PAT and CR4.PGE, loads the kernel's PML4
+and a kernel stack, and `ap_main` loads the CPU's own GDT/TSS (with its
+own IST stacks), per-CPU block (GS base: kernel stack, CPU index, TSS),
+the shared IDT, the SYSCALL MSRs, the local APIC (timer masked) and
+IA32_TSC_AUX = CPU index (what RDTSCP reports to user mode as the
+processor number). The APs then idle; the scheduler runs on the boot CPU
+only so far. CPU indices are dense (0 = boot CPU), at most 64.
+
 ## Not done yet
 
 Imports/DLLs and relocation, SEH/exception dispatch, multi-threaded
 processes, KUSER_SHARED_DATA, bindgen-generated layouts, freeing processes,
-SMP, ACPI (MADT/HPET), reclaiming bootloader memory.
+scheduling on the APs, ACPI (MADT/HPET), reclaiming bootloader memory.
 Bootloader-reclaimable memory must not be reused until the boot info that
 lives there has been copied out.
