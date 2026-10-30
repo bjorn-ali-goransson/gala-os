@@ -1,0 +1,23 @@
+# The kernel must never panic on out-of-memory, so infallible allocating
+# constructors are banned. Use the fallible alternatives instead.
+disallowed-methods = [
+    { path = "alloc::boxed::Box::new", reason = "panics on OOM; use mm::heap::try_box" },
+    { path = "alloc::vec::Vec::with_capacity", reason = "panics on OOM; use Vec::new + try_reserve" },
+    { path = "alloc::vec::Vec::reserve", reason = "panics on OOM; use try_reserve" },
+    { path = "alloc::vec::Vec::reserve_exact", reason = "panics on OOM; use try_reserve_exact" },
+    { path = "alloc::vec::Vec::push", reason = "panics on OOM; use mm::heap::TryVec::try_push" },
+    { path = "alloc::vec::Vec::insert", reason = "panics on OOM; use TryVec::try_insert" },
+    { path = "alloc::vec::Vec::extend_from_slice", reason = "panics on OOM; use TryVec::try_extend_from_slice" },
+    { path = "alloc::string::String::push", reason = "panics on OOM; try_reserve first" },
+    { path = "alloc::string::String::push_str", reason = "panics on OOM; try_reserve first" },
+    { path = "alloc::string::String::with_capacity", reason = "panics on OOM; use String::new + try_reserve" },
+    { path = "alloc::string::String::reserve", reason = "panics on OOM; use try_reserve" },
+    { path = "alloc::sync::Arc::new", reason = "panics on OOM; no fallible Arc on stable yet" },
+    { path = "alloc::rc::Rc::new", reason = "panics on OOM" },
+    { path = "alloc::borrow::ToOwned::to_owned", reason = "panics on OOM" },
+    { path = "alloc::string::ToString::to_string", reason = "panics on OOM" },
+]
+disallowed-macros = [
+    { path = "alloc::vec", reason = "panics on OOM" },
+    { path = "alloc::format", reason = "panics on OOM" },
+]

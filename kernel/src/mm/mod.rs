@@ -1,8 +1,12 @@
 //! Memory management core.
 
 pub mod frame;
+#[allow(unsafe_code)]
+pub mod heap;
 pub mod memmap;
 pub mod paging;
+
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Mutex;
 
@@ -16,6 +20,12 @@ pub const PAGE_SIZE: u64 = 4096;
 // TODO: make this interrupt-safe before frames are allocated from interrupt
 // handlers.
 static FRAMES: Mutex<Option<FrameAllocator<'static>>> = Mutex::new(None);
+static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+/// Virtual address at which all RAM is direct-mapped.
+pub fn hhdm_offset() -> u64 {
+    HHDM_OFFSET.load(Ordering::Relaxed)
+}
 
 #[derive(Debug)]
 pub enum InitError {
@@ -24,6 +34,7 @@ pub enum InitError {
 
 /// Sets up the global frame allocator from the boot memory map.
 pub fn init(info: &BootInfo) -> Result<(), InitError> {
+    HHDM_OFFSET.store(info.hhdm_offset, Ordering::Relaxed);
     // Track bootloader-reclaimable memory too, so it can be released later.
     let end = info
         .memory_map

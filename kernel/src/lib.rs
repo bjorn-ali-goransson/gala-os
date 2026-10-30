@@ -7,6 +7,10 @@
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
+// Host unit tests may use the infallible allocation APIs.
+#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_macros))]
+
+extern crate alloc;
 
 #[allow(unsafe_code)]
 pub mod arch;

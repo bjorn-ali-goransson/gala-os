@@ -19,6 +19,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/mm/memmap.rs      physical memory map model + validation (host-tested)
   src/mm/frame.rs       bitmap physical frame allocator (host-tested)
   src/mm/paging.rs      4-level page-table mapper, generic over table access (host-tested)
+  src/mm/heap.rs        slab + page heap, global allocator, try_box/TryVec   [unsafe allowed]
   src/mm/mod.rs         global frame allocator instance
 xtask/                  host tool: build ISO, run QEMU, boot test
 ```
@@ -26,7 +27,7 @@ xtask/                  host tool: build ISO, run QEMU, boot test
 ## Safety boundary
 
 `kernel/src/lib.rs` sets `#![deny(unsafe_code)]`. Only the `arch` and
-`boot` modules opt back in, and every `unsafe` block there carries a
+`boot` modules and `mm/heap.rs` (a global allocator cannot be safe) opt back in, and every `unsafe` block there carries a
 `SAFETY:` comment. Those modules expose safe APIs; the rest of the kernel
 is safe Rust. The NT personality's syscall/ABI layer will be the third and
 last place allowed to use `unsafe`.
@@ -109,8 +110,23 @@ and builds the kernel address space:
 It then switches CR3. The boot stack and boot data stay valid because they
 live in HHDM-mapped bootloader-reclaimable memory.
 
+## Heap
+
+`mm::heap::Heap` serves sizes up to 2 KiB from one-page slabs in eight
+power-of-two classes (objects are aligned to their class size) and larger
+or page-aligned requests from contiguous frames. Pages come from a
+`PageSource` (frames via the HHDM in the kernel, `std::alloc` in host
+tests). Slab pages are not returned to the frame allocator yet.
+
+Allocation never panics: the allocator returns null on exhaustion, and
+`kernel/clippy.toml` bans the infallible std APIs (`Box::new`, `vec!`,
+`format!`, `Vec::push`, ...). Use `try_box`, `TryVec::{try_push,
+try_insert, try_extend_from_slice}` and `try_reserve`. There is no
+fallible `Arc` on stable Rust, so shared kernel objects will get our own
+reference-counted type.
+
 ## Not done yet (milestone 2)
 
-Heap (`alloc`, fallible only), APIC timer, threads and scheduler, interrupt-safe console lock, SMP.
+APIC timer, threads and scheduler, interrupt-safe console lock, SMP.
 Bootloader-reclaimable memory must not be reused until the boot info that
 lives there has been copied out.

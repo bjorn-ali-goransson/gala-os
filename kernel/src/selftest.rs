@@ -3,7 +3,10 @@
 //! harness sees as QEMU exit status 35.
 
 use crate::arch::{interrupts, paging};
+use alloc::vec::Vec;
+
 use crate::mm;
+use crate::mm::heap::{TryVec, try_box};
 
 struct Test {
     name: &'static str,
@@ -14,6 +17,8 @@ const TESTS: &[Test] = &[
     Test { name: "breakpoint_returns", run: breakpoint_returns },
     Test { name: "frame_alloc_roundtrip", run: frame_alloc_roundtrip },
     Test { name: "kernel_sections_mapped_with_permissions", run: kernel_sections_mapped },
+    Test { name: "heap_small_and_large", run: heap_small_and_large },
+    Test { name: "heap_exhaustion_is_an_error", run: heap_exhaustion_is_an_error },
 ];
 
 pub fn run_all() {
@@ -69,4 +74,38 @@ fn kernel_sections_mapped() {
     assert_eq!(paging::translate(0x1000), None, "lower half must be unmapped");
     let image = paging::kernel_image();
     assert!(image.contains(&text));
+}
+
+fn heap_small_and_large() {
+    let before = mm::heap::stats();
+    {
+        let boxed = try_box([7u64; 4]).expect("small box");
+        assert_eq!(boxed.iter().sum::<u64>(), 28);
+        let big = try_box([0x5au8; 16 * 1024]).expect("16 KiB box");
+        assert!(big.iter().all(|&b| b == 0x5a));
+        assert_eq!(big.as_ptr() as usize % 4096, 0);
+
+        let mut v: Vec<u32> = Vec::new();
+        for i in 0..10_000 {
+            v.try_push(i).expect("push");
+        }
+        assert_eq!(v.iter().map(|&x| u64::from(x)).sum::<u64>(), 49_995_000);
+        let aligned = try_box(Aligned([0; 256])).expect("aligned box");
+        assert_eq!(&raw const *aligned as usize % 256, 0);
+        assert_eq!(aligned.0[255], 0);
+    }
+    let after = mm::heap::stats();
+    assert_eq!(after.in_use, before.in_use, "everything freed");
+    assert_eq!(after.large_pages, before.large_pages);
+}
+
+#[repr(align(256))]
+struct Aligned([u8; 256]);
+
+fn heap_exhaustion_is_an_error() {
+    let (free_before, _) = mm::frame_stats();
+    let mut v: Vec<u8> = Vec::new();
+    // More than all RAM: must fail cleanly instead of panicking.
+    assert!(v.try_reserve(1 << 40).is_err());
+    assert_eq!(mm::frame_stats().0, free_before, "failed reservation leaks nothing");
 }
