@@ -37,6 +37,28 @@ pub struct NtThread {
     start: UserRegs,
     /// MXCSR to start with, from the creating CONTEXT.
     start_mxcsr: Option<u32>,
+    /// ThreadQuerySetWin32StartAddress.
+    pub win32_start: u64,
+    /// NT times (ThreadTimes); exit time 0 while running.
+    pub create_time: u64,
+    pub exit_time: IrqMutex<u64>,
+    /// (Priority, BasePriority) as reported; stored, not yet used by the
+    /// scheduler.
+    pub priority: IrqMutex<(i32, i32)>,
+}
+
+/// The base priority of every process (NORMAL_PRIORITY_CLASS).
+pub const PROCESS_BASE_PRIORITY: i32 = 8;
+
+/// The base priority for a ThreadBasePriority increment over the process's
+/// base: -2..=2, or saturation to idle (1) / time critical (15) with -15/15.
+pub fn base_priority(increment: i32) -> Option<i32> {
+    match increment {
+        -2..=2 => Some(PROCESS_BASE_PRIORITY + increment),
+        15 => Some(15),
+        -15 => Some(1),
+        _ => None,
+    }
 }
 
 impl NtThread {
@@ -97,9 +119,11 @@ fn by_id(id: u64) -> Option<ObjectRef> {
 /// Creates a user thread in `process` that starts with `regs` once resumed
 /// (if `suspended`). `stack` is `(base, limit, allocation base)` for the
 /// TEB (StackBase, StackLimit, DeallocationStack).
+/// `win32_start` is what ThreadQuerySetWin32StartAddress reports.
 pub fn create(
     process: &KArc<Process>,
     regs: UserRegs,
+    win32_start: u64,
     mxcsr: Option<u32>,
     stack: (u64, u64, u64),
     suspended: bool,
@@ -120,6 +144,10 @@ pub fn create(
         terminate_request: IrqMutex::new(None),
         start: regs,
         start_mxcsr: mxcsr,
+        win32_start,
+        create_time: crate::time::system_time(),
+        exit_time: IrqMutex::new(0),
+        priority: IrqMutex::new((PROCESS_BASE_PRIORITY, PROCESS_BASE_PRIORITY)),
     };
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -256,6 +284,7 @@ pub fn exit_current(status: NtStatus) -> ! {
     if let Some(object) = current() {
         let t = as_thread(&object);
         t.exit_status.lock().get_or_insert(status);
+        *t.exit_time.lock() = crate::time::system_time();
         wait::set_signal(&object, 1);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
         let process = t.process.clone();
@@ -278,4 +307,19 @@ pub fn exit_current_on_return(status: NtStatus) {
 
 pub fn init() {
     syscall::set_user_return_hook(on_user_return);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_priority_increments() {
+        assert_eq!(base_priority(0), Some(8));
+        assert_eq!(base_priority(2), Some(10));
+        assert_eq!(base_priority(-2), Some(6));
+        assert_eq!(base_priority(15), Some(15));
+        assert_eq!(base_priority(-15), Some(1));
+        assert_eq!(base_priority(3), None);
+    }
 }

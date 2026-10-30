@@ -238,6 +238,12 @@ MxCsr from the CONTEXT (reserved MXCSR bits cleared, as FXRSTOR would
 fault on them); NtCreateThread applies the CONTEXT's MxCsr when the thread
 first enters user mode.
 
+**Thread information**: each NtThread records its create/exit times, its
+Win32 start address (the image entry point for main threads; CONTEXT.Rax
+for NtCreateThread, as ReactOS does) and (Priority, BasePriority). The
+priorities are reported and validated but the scheduler is still plain
+round robin.
+
 **Guard pages and stacks** (`vm::resolve_fault` returns Resolved / Raise /
 Denied): a PAGE_GUARD page loses its guard on first touch. Inside the
 current thread's stack reservation (TEB DeallocationStack..StackBase) the

@@ -42,6 +42,8 @@ pub const NT_QUERY_VOLUME_INFORMATION_FILE: u32 = 0x0049;
 pub const NT_FLUSH_BUFFERS_FILE: u32 = 0x004b;
 pub const NT_CONTINUE: u32 = 0x0043;
 pub const NT_QUERY_SYSTEM_INFORMATION: u32 = 0x0036;
+pub const NT_SET_INFORMATION_THREAD: u32 = 0x000d;
+pub const NT_YIELD_EXECUTION: u32 = 0x0046;
 pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
 pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
 pub const NT_OPEN_SECTION: u32 = 0x0037;
@@ -93,6 +95,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_FLUSH_BUFFERS_FILE, "NtFlushBuffersFile", 2, nt_flush_buffers_file),
     (NT_CONTINUE, "NtContinue", 2, nt_continue),
     (NT_QUERY_SYSTEM_INFORMATION, "NtQuerySystemInformation", 4, nt_query_system_information),
+    (NT_SET_INFORMATION_THREAD, "NtSetInformationThread", 4, nt_set_information_thread),
+    (NT_YIELD_EXECUTION, "NtYieldExecution", 0, nt_yield_execution),
     (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", 10, nt_map_view_of_section),
     (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", 2, nt_unmap_view_of_section),
     (NT_OPEN_SECTION, "NtOpenSection", 3, nt_open_section),
@@ -927,6 +931,9 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
     let object = tri!(thread::create(
         &call.process,
         regs,
+        // As ReactOS does: the "return register" of the start context
+        // (kernel32's thunks pass the Win32 start routine there).
+        regs.gpr[0],
         mxcsr,
         (stack_base, stack_limit, stack_bottom),
         suspended
@@ -1008,19 +1015,101 @@ fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
     let class = class as u32 as u64;
     let object = tri!(entry.require(THREAD_QUERY_LIMITED_INFORMATION));
     let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
-    if class != 0 {
-        return NtStatus::INVALID_INFO_CLASS;
+    match class {
+        0 => {}
+        THREAD_TIMES => {
+            // KERNEL_USER_TIMES { CreateTime, ExitTime, KernelTime, UserTime }
+            // TODO: account kernel and user time.
+            let mut b = [0u8; 32];
+            b[0..8].copy_from_slice(&t.create_time.to_le_bytes());
+            b[8..16].copy_from_slice(&t.exit_time.lock().to_le_bytes());
+            return call.return_info(&b, buffer, length, ret_ptr);
+        }
+        THREAD_WIN32_START_ADDRESS => {
+            return call.return_info(&t.win32_start.to_le_bytes(), buffer, length, ret_ptr);
+        }
+        THREAD_AM_I_LAST_THREAD => {
+            let last = u32::from(t.process.thread_count() == 1);
+            return call.return_info(&last.to_le_bytes(), buffer, length, ret_ptr);
+        }
+        THREAD_IS_TERMINATED => {
+            let done = u32::from(t.has_exited());
+            return call.return_info(&done.to_le_bytes(), buffer, length, ret_ptr);
+        }
+        _ => return NtStatus::INVALID_INFO_CLASS,
     }
     // THREAD_BASIC_INFORMATION { ExitStatus, TebBaseAddress, ClientId,
     // AffinityMask, Priority, BasePriority }
+    let (priority, base) = *t.priority.lock();
     let mut b = [0u8; BASIC_INFORMATION_SIZE];
     b[0..4].copy_from_slice(&t.exit_status().0.to_le_bytes());
     b[8..16].copy_from_slice(&t.teb.to_le_bytes());
     b[16..24].copy_from_slice(&t.process.id.to_le_bytes());
     b[24..32].copy_from_slice(&t.id.to_le_bytes());
     b[32..40].copy_from_slice(&1u64.to_le_bytes());
-    b[40..44].copy_from_slice(&8u32.to_le_bytes());
+    b[40..44].copy_from_slice(&priority.to_le_bytes());
+    b[44..48].copy_from_slice(&base.to_le_bytes());
     call.return_info(&b, buffer, length, ret_ptr)
+}
+
+const THREAD_TIMES: u64 = 1;
+const THREAD_PRIORITY: u64 = 2;
+const THREAD_BASE_PRIORITY: u64 = 3;
+const THREAD_WIN32_START_ADDRESS: u64 = 9;
+const THREAD_AM_I_LAST_THREAD: u64 = 12;
+const THREAD_HIDE_FROM_DEBUGGER: u64 = 17;
+const THREAD_IS_TERMINATED: u64 = 20;
+const THREAD_SET_INFORMATION: u32 = 0x0020;
+/// Highest priority (real-time range ends at 31).
+const MAXIMUM_PRIORITY: i32 = 31;
+
+/// NtSetInformationThread(ThreadHandle, Class, Buffer, Length)
+fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let (class, buffer, length) =
+        (arg!(call, 1) as u32 as u64, arg!(call, 2), arg!(call, 3) as u32);
+    let object = tri!(entry.require(THREAD_SET_INFORMATION));
+    let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let need = match class {
+        THREAD_HIDE_FROM_DEBUGGER => 0,
+        THREAD_PRIORITY | THREAD_BASE_PRIORITY => 4,
+        _ => return NtStatus::INVALID_INFO_CLASS,
+    };
+    if length != need {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    if class == THREAD_HIDE_FROM_DEBUGGER {
+        return NtStatus::SUCCESS; // there is no debugger to hide from
+    }
+    let mut v = [0u8; 4];
+    if call.process.read(buffer, &mut v).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let value = i32::from_le_bytes(v);
+    let mut p = t.priority.lock();
+    match class {
+        THREAD_PRIORITY => {
+            // KPRIORITY: 1..31 (raising into real time would need a privilege).
+            if !(1..=MAXIMUM_PRIORITY).contains(&value) {
+                return NtStatus::INVALID_PARAMETER;
+            }
+            p.0 = value;
+        }
+        _ => {
+            let Some(base) = thread::base_priority(value) else {
+                return NtStatus::INVALID_PARAMETER;
+            };
+            p.1 = base;
+            p.0 = p.0.max(base);
+        }
+    }
+    NtStatus::SUCCESS
+}
+
+/// NtYieldExecution(): lets another ready thread run.
+fn nt_yield_execution(_call: &mut Call<'_>) -> NtStatus {
+    crate::sched::yield_now();
+    NtStatus::SUCCESS
 }
 
 /// NtQueryInformationProcess(ProcessHandle, Class, Buffer, Length, *ReturnLength)

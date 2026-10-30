@@ -78,6 +78,10 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 - System/process information: NtQuerySystemInformation (0x36) basic and
   time-of-day classes; NtQueryInformationProcess image file name, debug
   port, WOW64, session (`nt::sysinfo` encoders); `sysinfo_test`
+- Thread information: NtYieldExecution (0x46), NtSetInformationThread
+  (0x0d: priority, base priority, hide from debugger; priorities stored,
+  not yet used by the scheduler), ThreadTimes/Win32StartAddress/
+  AmILastThread/IsTerminated; `threadinfo_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/

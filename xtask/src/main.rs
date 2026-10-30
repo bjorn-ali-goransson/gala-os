@@ -66,6 +66,7 @@ const USER_PROGRAMS: &[&str] = &[
     "args_test",
     "fpu_test",
     "sysinfo_test",
+    "threadinfo_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -326,6 +327,12 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "threadinfo_test",
+        cmdline: "qemu_exit run=threadinfo_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["threadinfo_test: ok", "exited with status 0x00000000"],
+    },
     Scenario {
         name: "sysinfo_test",
         cmdline: "qemu_exit run=sysinfo_test.exe",

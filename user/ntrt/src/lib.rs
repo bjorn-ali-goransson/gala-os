@@ -52,6 +52,8 @@ stubs! {
     ntrt_nt_query_event = 0x0056;
     ntrt_nt_query_system_time = 0x005a;
     ntrt_nt_query_system_information = 0x0036;
+    ntrt_nt_set_information_thread = 0x000d;
+    ntrt_nt_yield_execution = 0x0046;
     ntrt_nt_wait_for_multiple_objects = 0x005b;
     ntrt_nt_query_object = 0x0010;
     ntrt_nt_open_event = 0x0040;
@@ -278,6 +280,8 @@ unsafe extern "system" {
     ) -> NtStatus;
     fn ntrt_nt_query_performance_counter(counter: *mut i64, frequency: *mut i64) -> NtStatus;
     fn ntrt_nt_query_system_time(time: *mut i64) -> NtStatus;
+    fn ntrt_nt_set_information_thread(h: Handle, class: u32, buf: *const u8, len: u32) -> NtStatus;
+    fn ntrt_nt_yield_execution() -> NtStatus;
     fn ntrt_nt_query_system_information(
         class: u32,
         buf: *mut u8,
@@ -1023,6 +1027,27 @@ pub fn query_system(class: u32, buf: &mut [u8]) -> (NtStatus, u32) {
         ntrt_nt_query_system_information(class, buf.as_mut_ptr(), buf.len() as u32, &mut ret)
     };
     (st, ret)
+}
+
+/// NtQueryInformationThread with any class: (status, ReturnLength).
+pub fn query_thread(h: Handle, class: u32, buf: &mut [u8]) -> (NtStatus, u32) {
+    let mut ret = 0xdead;
+    // SAFETY: valid buffer of the given length.
+    let st = unsafe {
+        ntrt_nt_query_information_thread(h, class, buf.as_mut_ptr(), buf.len() as u32, &mut ret)
+    };
+    (st, ret)
+}
+
+/// NtSetInformationThread.
+pub fn set_thread(h: Handle, class: u32, data: &[u8]) -> NtStatus {
+    // SAFETY: valid buffer of the given length (may be empty).
+    unsafe { ntrt_nt_set_information_thread(h, class, data.as_ptr(), data.len() as u32) }
+}
+
+pub fn yield_execution() -> NtStatus {
+    // SAFETY: no arguments.
+    unsafe { ntrt_nt_yield_execution() }
 }
 
 /// NtQueryInformationProcess with any class: (status, ReturnLength).

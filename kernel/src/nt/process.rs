@@ -429,8 +429,15 @@ pub fn spawn_from_pe(
     gpr[4] = layout::STACK_TOP - 0x28;
     let start = UserRegs { gpr, rip: base + u64::from(image.entry_rva), rflags: 0 };
     let started = through_ntdll(&process, &start).and_then(|regs| {
-        thread::create(&process, regs, None, (layout::STACK_TOP, stack_limit, stack_bottom), false)
-            .map(|t| (t, regs))
+        thread::create(
+            &process,
+            regs,
+            start.rip,
+            None,
+            (layout::STACK_TOP, stack_limit, stack_bottom),
+            false,
+        )
+        .map(|t| (t, regs))
     });
     let (main, regs) = match started {
         Ok(t) => t,
