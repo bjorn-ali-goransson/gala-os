@@ -35,6 +35,8 @@ pub struct NtThread {
     /// Set when another thread asked this one to terminate.
     terminate_request: IrqMutex<Option<NtStatus>>,
     start: UserRegs,
+    /// MXCSR to start with, from the creating CONTEXT.
+    start_mxcsr: Option<u32>,
 }
 
 impl NtThread {
@@ -98,6 +100,7 @@ fn by_id(id: u64) -> Option<ObjectRef> {
 pub fn create(
     process: &KArc<Process>,
     regs: UserRegs,
+    mxcsr: Option<u32>,
     stack: (u64, u64, u64),
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
@@ -116,6 +119,7 @@ pub fn create(
         suspend_count: IrqMutex::new(u32::from(suspended)),
         terminate_request: IrqMutex::new(None),
         start: regs,
+        start_mxcsr: mxcsr,
     };
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -191,9 +195,14 @@ fn thread_entry(id: usize) {
     }
     let pending = *t.terminate_request.lock();
     let regs = t.start;
+    let mxcsr = t.start_mxcsr;
     drop(object);
     if let Some(status) = pending {
         exit_current(status);
+    }
+    // The kernel never touches SSE state, so this is what user mode gets.
+    if let Some(value) = mxcsr {
+        crate::arch::cpu::set_mxcsr(value);
     }
     syscall::enter_user_regs(&regs)
 }

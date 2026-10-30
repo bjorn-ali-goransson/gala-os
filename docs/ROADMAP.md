@@ -72,6 +72,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 - Command-line arguments (`args=`, percent-encoded) and `args_test`
   (CommandLineToArgvW rules); syscall tracing (`trace` flag, per-service
   argument counts in the handler table)
+- x87/SSE state in exceptions: CONTEXT.FltSave/MxCsr filled on delivery,
+  restored by NtContinue, MxCsr honoured by NtCreateThread; threads keep
+  XMM registers across preemption; `fpu_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
@@ -86,8 +89,8 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
    basics, NtSetInformationProcess/Thread bits, TLS slots in the TEB;
    (testntdll: imports of DLLs, PEB->Ldr, forwarders.)
 7b. **Exceptions, rest**: NtRaiseException (first/second chance),
-   SizeOfStackReserve/Commit from the image, XMM/x87 state
-   in CONTEXT (save/restore with FXSAVE/XSAVE), SEH unwinding is user-mode
+   SizeOfStackReserve/Commit from the image, AVX state (XSAVE, CONTEXT_EX)
+   and FltSave in NtCreateThread, SEH unwinding is user-mode
    (ntdll) work; verify the dispatcher frame against the pinned ntdll.
 8c. **Files, rest**: `\??\C:` as a symbolic link, asynchronous I/O
    (events, APCs, STATUS_PENDING), NtNotifyChangeDirectoryFile, file

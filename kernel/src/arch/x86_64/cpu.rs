@@ -116,3 +116,44 @@ pub fn enable_sse() {
         asm!("fninit", options(nomem, nostack));
     }
 }
+
+/// An FXSAVE image of the x87/SSE state (the layout of CONTEXT.FltSave).
+#[repr(C, align(16))]
+#[derive(Clone)]
+pub struct FxState(pub [u8; 512]);
+
+/// MXCSR bits the CPU supports (FXSAVE's MXCSR_MASK; 0 means the default).
+fn mxcsr_mask(state: &FxState) -> u32 {
+    match u32::from_le_bytes([state.0[28], state.0[29], state.0[30], state.0[31]]) {
+        0 => 0xffbf,
+        m => m,
+    }
+}
+
+/// The current x87/SSE register state. The kernel itself never uses
+/// these registers, so in a trap or system call they hold the user's.
+pub fn fxsave() -> FxState {
+    let mut state = FxState([0; 512]);
+    // SAFETY: FXSAVE writes 512 bytes to a 16-byte aligned buffer.
+    unsafe { asm!("fxsave64 [{}]", in(reg) state.0.as_mut_ptr(), options(nostack)) };
+    state
+}
+
+/// Loads `state` (as user code may supply it: reserved MXCSR bits are
+/// cleared, since FXRSTOR would fault on them).
+pub fn fxrstor(state: &FxState) {
+    let mask = mxcsr_mask(&fxsave());
+    let mut s = state.clone();
+    let mxcsr = u32::from_le_bytes([s.0[24], s.0[25], s.0[26], s.0[27]]) & mask;
+    s.0[24..28].copy_from_slice(&mxcsr.to_le_bytes());
+    // SAFETY: FXRSTOR reads 512 bytes from a 16-byte aligned buffer whose
+    // MXCSR has only supported bits set.
+    unsafe { asm!("fxrstor64 [{}]", in(reg) s.0.as_ptr(), options(nostack, readonly)) };
+}
+
+/// Sets MXCSR (reserved bits cleared).
+pub fn set_mxcsr(value: u32) {
+    let mut state = fxsave();
+    state.0[24..28].copy_from_slice(&value.to_le_bytes());
+    fxrstor(&state);
+}

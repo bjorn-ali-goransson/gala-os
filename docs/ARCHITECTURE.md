@@ -230,6 +230,14 @@ aligned rsp and the EXCEPTION_RECORD at rsp + 0x4f0, and resumes the thread
 there (to be checked against the pinned ntdll); otherwise the process ends
 with the status. The #BP gate has DPL 3 so `int3` works from user mode.
 
+**x87/SSE state**: the kernel target uses no SSE, so in a trap or system
+call the CPU still holds the user's x87/SSE registers. Context switches
+FXSAVE/FXRSTOR them per thread; exception delivery puts an FXSAVE image in
+CONTEXT.FltSave (Xmm0 at 0x1a0) and MxCsr; NtContinue loads FltSave with
+MxCsr from the CONTEXT (reserved MXCSR bits cleared, as FXRSTOR would
+fault on them); NtCreateThread applies the CONTEXT's MxCsr when the thread
+first enters user mode.
+
 **Guard pages and stacks** (`vm::resolve_fault` returns Resolved / Raise /
 Denied): a PAGE_GUARD page loses its guard on first touch. Inside the
 current thread's stack reservation (TEB DeallocationStack..StackBase) the

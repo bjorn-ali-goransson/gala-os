@@ -427,6 +427,34 @@ impl Context {
     }
 }
 
+/// Creates a thread from a caller-built CONTEXT on a fresh 64 KiB stack
+/// (the context's rsp is set to its top). Returns (status, handle, id).
+pub fn create_thread_with_context(ctx: &mut Context) -> (NtStatus, Handle, usize) {
+    let (st, stack, size) = allocate(0, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if st != STATUS_SUCCESS {
+        return (st, Handle(0), 0);
+    }
+    let top = stack + size;
+    ctx.gpr[4] = (top - 0x28) as u64;
+    let initial_teb = [0, 0, top, stack, stack];
+    let mut h = Handle(0);
+    let mut cid = [0usize; 2];
+    // SAFETY: all pointers are valid for the call.
+    let st = unsafe {
+        ntrt_nt_create_thread(
+            &mut h,
+            THREAD_ALL_ACCESS,
+            core::ptr::null(),
+            CURRENT_PROCESS,
+            &mut cid,
+            ctx,
+            &initial_teb,
+            0,
+        )
+    };
+    (st, h, cid[1])
+}
+
 /// Creates a thread at `entry(arg)` with a fresh 64 KiB stack.
 /// Returns (status, handle, thread id).
 pub fn create_thread(

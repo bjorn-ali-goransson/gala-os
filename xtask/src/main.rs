@@ -43,6 +43,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("guard_test", "ntdll.dll", "Windows/System32"),
     ("import_test", "ntdll.dll", "Windows/System32"),
     ("import_test", "testdll.dll", "gala"),
+    ("fpu_test", "ntdll.dll", "Windows/System32"),
 ];
 const USER_PROGRAMS: &[&str] = &[
     "hello",
@@ -63,6 +64,7 @@ const USER_PROGRAMS: &[&str] = &[
     "guard_test",
     "import_test",
     "args_test",
+    "fpu_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -323,6 +325,12 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "fpu_test",
+        cmdline: "qemu_exit run=fpu_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["fpu_test: ok", "exited with status 0x00000000"],
+    },
     Scenario {
         name: "args_test",
         // `args=` is percent-encoded: %20 space, %22 quote, %25 percent.

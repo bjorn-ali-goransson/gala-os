@@ -418,7 +418,7 @@ pub fn spawn_from_pe(
     gpr[4] = layout::STACK_TOP - 0x28;
     let start = UserRegs { gpr, rip: base + u64::from(image.entry_rva), rflags: 0 };
     let started = through_ntdll(&process, &start).and_then(|regs| {
-        thread::create(&process, regs, (layout::STACK_TOP, stack_limit, stack_bottom), false)
+        thread::create(&process, regs, None, (layout::STACK_TOP, stack_limit, stack_bottom), false)
             .map(|t| (t, regs))
     });
     let (main, regs) = match started {
@@ -455,7 +455,7 @@ fn through_ntdll(process: &Process, start: &UserRegs) -> Result<UserRegs, NtStat
     let context_addr = (layout::STACK_TOP - super::context::SIZE as u64) & !0xf;
     entry.gpr[4] = context_addr - 0x28;
     process
-        .write(context_addr, &super::context::to_bytes(&entry))
+        .write(context_addr, &super::context::to_bytes(&entry, None))
         .map_err(|_| NtStatus::NO_MEMORY)?;
     let mut gpr = [0u64; 16];
     gpr[1] = context_addr;
@@ -612,7 +612,7 @@ fn deliver_to_user(
         rip,
         rflags: frame.rflags,
     };
-    let context = super::context::to_bytes(&regs);
+    let context = super::context::to_bytes(&regs, Some(&crate::arch::cpu::fxsave()));
     let new_rsp = (frame.rsp.wrapping_sub(DISPATCH_FRAME_SIZE)) & !0xf;
     if new_rsp >= frame.rsp
         || process.write(new_rsp, &context).is_err()

@@ -896,13 +896,18 @@ fn nt_query_system_time(call: &mut Call<'_>) -> NtStatus {
 /// SYSRET cannot restore rcx and r11).
 fn nt_continue(call: &mut Call<'_>) -> NtStatus {
     let ctx_ptr = arg!(call, 0);
-    let mut ctx = [0u8; super::context::INTEGER_PART];
+    let mut ctx = [0u8; super::context::SIZE];
     if call.process.read(ctx_ptr, &mut ctx).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
     let regs = super::context::from_bytes(&ctx);
     if !regs.is_valid() {
         return NtStatus::INVALID_PARAMETER;
+    }
+    // The kernel does not use x87/SSE, so the state loaded now is what the
+    // thread resumes with (context switches save and restore it).
+    if let Some(fx) = super::context::float_state(&ctx) {
+        crate::arch::cpu::fxrstor(&fx);
     }
     syscall::continue_with(regs);
     NtStatus::SUCCESS
@@ -919,11 +924,13 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
     if ctx_ptr == 0 || teb_ptr == 0 {
         return NtStatus::INVALID_PARAMETER;
     }
-    let mut ctx = [0u8; super::context::INTEGER_PART];
+    let mut ctx = [0u8; super::context::SIZE];
     if call.process.read(ctx_ptr, &mut ctx).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
     let regs = super::context::from_bytes(&ctx);
+    // TODO: the rest of FltSave (x87 state, XMM registers).
+    let mxcsr = super::context::mxcsr(&ctx);
     // INITIAL_TEB { OldStackBase, OldStackLimit, StackBase, StackLimit, StackAllocationBase }
     let stack_base = tri!(call.read_u64(teb_ptr + 16));
     let stack_limit = tri!(call.read_u64(teb_ptr + 24));
@@ -931,6 +938,7 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
     let object = tri!(thread::create(
         &call.process,
         regs,
+        mxcsr,
         (stack_base, stack_limit, stack_bottom),
         suspended
     ));
