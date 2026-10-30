@@ -568,14 +568,8 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     for scenario in &selected {
         isos.push(make_iso(release, &format!("test-{}", scenario.name), scenario.cmdline)?);
     }
-    let results: Vec<Result> = thread::scope(|scope| {
-        let handles: Vec<_> = selected
-            .iter()
-            .zip(&isos)
-            .map(|(scenario, iso)| scope.spawn(move || boot_scenario(scenario, iso)))
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("panicked".into()))).collect()
-    });
+    let jobs: Vec<(&Scenario, &PathBuf)> = selected.iter().copied().zip(&isos).collect();
+    let results = run_parallel(&jobs, |(scenario, iso)| boot_scenario(scenario, iso));
     let mut failed = 0;
     for (scenario, result) in selected.iter().zip(&results) {
         match result {
@@ -591,6 +585,37 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     } else {
         Err(format!("{failed} of {} boot tests failed", selected.len()))
     }
+}
+
+/// Runs `f` on every job, at most one per host CPU at a time (each job is
+/// an emulator that needs a CPU: running them all at once starves them on
+/// small CI machines). Results are in job order.
+fn run_parallel<J: Sync>(jobs: &[J], f: impl Fn(&J) -> Result + Sync) -> Vec<Result> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let workers = thread::available_parallelism().map_or(2, |n| n.get()).min(jobs.len().max(1));
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<Result>>> = Mutex::new(jobs.iter().map(|_| None).collect());
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(job) = jobs.get(i) else { break };
+                    let result = f(job);
+                    if let Ok(mut r) = results.lock() {
+                        r[i] = Some(result);
+                    }
+                }
+            });
+        }
+    });
+    results
+        .into_inner()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.unwrap_or_else(|| Err("did not run".into())))
+        .collect()
 }
 
 /// The program a scenario runs, if it is that program's own scenario.
@@ -613,15 +638,9 @@ fn gala_report(release: bool) -> Result {
     for (scenario, _) in &selected {
         isos.push(make_iso(release, &format!("report-{}", scenario.name), scenario.cmdline)?);
     }
-    thread::scope(|scope| {
-        for ((scenario, _), iso) in selected.iter().zip(&isos) {
-            // The verdict does not matter here: the outcome is read from
-            // the serial log.
-            scope.spawn(move || {
-                let _ = boot_scenario_quiet(scenario, iso);
-            });
-        }
-    });
+    // The verdicts do not matter here: outcomes are read from the logs.
+    let jobs: Vec<(&Scenario, &PathBuf)> = selected.iter().map(|(s, _)| *s).zip(&isos).collect();
+    let _ = run_parallel(&jobs, |(scenario, iso)| boot_scenario_quiet(scenario, iso));
     let mut results = Vec::new();
     for ((_, program), iso) in selected.iter().zip(&isos) {
         let serial = fs::read_to_string(iso.with_extension("serial.log")).unwrap_or_default();
