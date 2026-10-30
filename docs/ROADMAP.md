@@ -117,6 +117,32 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   IMAGE_FILE_RELOCS_STRIPPED; `loader_test` (with `testdll2`)
 
 ## Next
+Order agreed with the project owner (2026-10-30): multiprocessor support
+first, then a real Go program, then Nginx.
+
+S1. **SMP bring-up**: start the APs (Limine MP request); per-CPU GDT/TSS/IST
+   stacks, PerCpu (GS base), IDT, LAPIC and timer on each CPU; IA32_TSC_AUX
+   holds the CPU number; NtQuerySystemInformation reports the processor
+   count and active mask; `smp_test`.
+S2. **SMP scheduling**: per-CPU current/idle threads, a shared run queue
+   (later per-CPU queues with stealing), reschedule IPIs on wake, thread
+   affinity (ThreadAffinityMask, NtGetCurrentProcessorNumber); threads of
+   one process running at the same time on different CPUs.
+S3. **SMP memory**: TLB shootdown IPIs when user mappings change while
+   threads of the space run elsewhere; contention tests (interlocked
+   counters, wait/wake storms, unmapping under a running thread).
+S4. **SMP, rest**: suspension and context of threads running on another
+   CPU (IPI), per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
+G1. **kernel32 shim, first part**: kernel32.dll on gala (console, last
+   error, memory, events, sleep, time, LoadLibrary/GetProcAddress), DLL
+   search in System32; `kernel32_test`.
+G2. **Go hello world**: the rest of what the Go runtime imports from
+   kernel32 (threads, TLS, IOCP, timers, exceptions/vectored handlers,
+   SetThreadContext preemption, environment, system info); run a real Go
+   binary with `trace`, fix what it hits.
+N1. **Toward Nginx**: process creation (CreateProcess), a C runtime
+   (ucrt/msvcrt subset), a virtio disk and NIC, a TCP/IP stack and AFD
+   (Winsock) sockets.
 3b. **Object manager, rest**: keyed events, OBJ_PERMANENT/NtMakeTemporary-
    Object, security descriptors (all access is granted so far).
 6c. **Sections, rest**: the kernel loader using image sections (the exe
