@@ -44,6 +44,10 @@ macro_rules! stubs {
 stubs! {
     ntrt_nt_write_file = 0x0008;
     ntrt_nt_close = 0x000f;
+    ntrt_nt_allocate_virtual_memory = 0x0018;
+    ntrt_nt_free_virtual_memory = 0x001e;
+    ntrt_nt_query_virtual_memory = 0x0023;
+    ntrt_nt_protect_virtual_memory = 0x0050;
     ntrt_nt_terminate_process = 0x002c;
     ntrt_invalid_service = 0x0fff;
 }
@@ -63,6 +67,111 @@ unsafe extern "system" {
     fn ntrt_nt_close(handle: Handle) -> NtStatus;
     fn ntrt_nt_terminate_process(process: Handle, status: NtStatus) -> NtStatus;
     fn ntrt_invalid_service() -> NtStatus;
+    fn ntrt_nt_allocate_virtual_memory(
+        process: Handle,
+        base: *mut usize,
+        zero_bits: usize,
+        size: *mut usize,
+        kind: u32,
+        protect: u32,
+    ) -> NtStatus;
+    fn ntrt_nt_free_virtual_memory(
+        process: Handle,
+        base: *mut usize,
+        size: *mut usize,
+        kind: u32,
+    ) -> NtStatus;
+    fn ntrt_nt_query_virtual_memory(
+        process: Handle,
+        address: usize,
+        class: u32,
+        buffer: *mut MemoryBasicInformation,
+        length: usize,
+        returned: *mut usize,
+    ) -> NtStatus;
+    fn ntrt_nt_protect_virtual_memory(
+        process: Handle,
+        base: *mut usize,
+        size: *mut usize,
+        new: u32,
+        old: *mut u32,
+    ) -> NtStatus;
+}
+
+pub const MEM_COMMIT: u32 = 0x1000;
+pub const MEM_RESERVE: u32 = 0x2000;
+pub const MEM_DECOMMIT: u32 = 0x4000;
+pub const MEM_RELEASE: u32 = 0x8000;
+pub const MEM_FREE: u32 = 0x1_0000;
+pub const MEM_PRIVATE: u32 = 0x2_0000;
+pub const MEM_IMAGE: u32 = 0x100_0000;
+pub const PAGE_NOACCESS: u32 = 0x01;
+pub const PAGE_READONLY: u32 = 0x02;
+pub const PAGE_READWRITE: u32 = 0x04;
+pub const PAGE_EXECUTE_WRITECOPY: u32 = 0x80;
+pub const STATUS_CONFLICTING_ADDRESSES: NtStatus = 0xc000_0018;
+pub const STATUS_INVALID_PAGE_PROTECTION: NtStatus = 0xc000_0045;
+
+#[repr(C)]
+#[derive(Default, Debug)]
+pub struct MemoryBasicInformation {
+    pub base_address: usize,
+    pub allocation_base: usize,
+    pub allocation_protect: u32,
+    pub partition_id: u16,
+    pub region_size: usize,
+    pub state: u32,
+    pub protect: u32,
+    pub kind: u32,
+}
+
+/// NtAllocateVirtualMemory on the current process; returns (status, base, size).
+pub fn allocate(base: usize, size: usize, kind: u32, protect: u32) -> (NtStatus, usize, usize) {
+    let (mut b, mut s) = (base, size);
+    // SAFETY: valid in/out pointers.
+    let st = unsafe {
+        ntrt_nt_allocate_virtual_memory(CURRENT_PROCESS, &mut b, 0, &mut s, kind, protect)
+    };
+    (st, b, s)
+}
+
+pub fn free(base: usize, size: usize, kind: u32) -> (NtStatus, usize, usize) {
+    let (mut b, mut s) = (base, size);
+    // SAFETY: valid in/out pointers.
+    let st = unsafe { ntrt_nt_free_virtual_memory(CURRENT_PROCESS, &mut b, &mut s, kind) };
+    (st, b, s)
+}
+
+pub fn query(address: usize) -> (NtStatus, MemoryBasicInformation) {
+    let mut mbi = MemoryBasicInformation::default();
+    let mut returned = 0;
+    // SAFETY: valid output buffer of the declared size.
+    let st = unsafe {
+        ntrt_nt_query_virtual_memory(
+            CURRENT_PROCESS,
+            address,
+            0,
+            &mut mbi,
+            core::mem::size_of::<MemoryBasicInformation>(),
+            &mut returned,
+        )
+    };
+    (st, mbi)
+}
+
+/// Returns (status, old protection).
+pub fn protect(base: usize, size: usize, new: u32) -> (NtStatus, u32) {
+    let (mut b, mut s, mut old) = (base, size, 0);
+    // SAFETY: valid in/out pointers.
+    let st =
+        unsafe { ntrt_nt_protect_virtual_memory(CURRENT_PROCESS, &mut b, &mut s, new, &mut old) };
+    (st, old)
+}
+
+/// `PEB->ImageBaseAddress`.
+pub fn image_base() -> usize {
+    // SAFETY: PEB+0x10 is ImageBaseAddress on x64.
+    unsafe { *(peb().add(0x10) as *const usize) }
 }
 
 /// Calls service number 0xfff, which does not exist.

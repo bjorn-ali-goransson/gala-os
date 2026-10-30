@@ -17,5 +17,17 @@ impl NtStatus {
     pub const PRIVILEGED_INSTRUCTION: NtStatus = NtStatus(0xc000_0096);
     pub const BREAKPOINT: NtStatus = NtStatus(0x8000_0003);
     pub const STACK_OVERFLOW: NtStatus = NtStatus(0xc000_00fd);
+    pub const CONFLICTING_ADDRESSES: NtStatus = NtStatus(0xc000_0018);
+    pub const UNABLE_TO_FREE_VM: NtStatus = NtStatus(0xc000_001a);
+    pub const NOT_COMMITTED: NtStatus = NtStatus(0xc000_002d);
+    pub const INVALID_PAGE_PROTECTION: NtStatus = NtStatus(0xc000_0045);
+    pub const FREE_VM_NOT_AT_BASE: NtStatus = NtStatus(0xc000_009f);
+    pub const MEMORY_NOT_ALLOCATED: NtStatus = NtStatus(0xc000_00a0);
+    pub const INVALID_INFO_CLASS: NtStatus = NtStatus(0xc000_0003);
+    pub const INFO_LENGTH_MISMATCH: NtStatus = NtStatus(0xc000_0004);
+    pub const INVALID_PARAMETER_2: NtStatus = NtStatus(0xc000_00f0);
+    pub const INVALID_PARAMETER_3: NtStatus = NtStatus(0xc000_00f1);
+    pub const INVALID_PARAMETER_4: NtStatus = NtStatus(0xc000_00f2);
+    pub const INVALID_PARAMETER_5: NtStatus = NtStatus(0xc000_00f3);
     pub const INVALID_IMAGE_FORMAT: NtStatus = NtStatus(0xc000_007b);
 }

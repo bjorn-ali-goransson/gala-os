@@ -198,8 +198,20 @@ a 256 KiB stack below `0x200000` with a guard page, and the PEB, process
 parameters (handles for stdin/stdout/stderr) and TEB at fixed addresses
 (`nt::layout`).
 
+**Virtual memory**: `nt::vad::Vad` tracks reservations (64 KiB aligned)
+as run-length lists of per-page state (committed + protection), so query
+regions fall out directly and huge reservations are cheap. Committed pages
+get frames lazily: the user #PF path (and kernel copies into user memory,
+via `Process::read/write`) calls `nt::vm::resolve_fault`, which maps a
+zeroed frame if the VAD allows the access. NOACCESS/GUARD pages stay mapped
+but kernel-only, so user accesses fault while contents survive. The loader
+registers the image (MEM_IMAGE, sections with Windows-style protections
+such as WRITECOPY), the 1 MiB demand-zero stack with an uncommitted guard
+page below it, and PEB/params/TEB.
+
 **Services**: `NtWriteFile` (console handles only), `NtClose`,
-`NtTerminateProcess`; unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
+`NtTerminateProcess`, `NtAllocateVirtualMemory`, `NtFreeVirtualMemory`,
+`NtProtectVirtualMemory`, `NtQueryVirtualMemory` (current process only); unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
 User-mode CPU exceptions terminate the process with the matching NTSTATUS
 (no SEH dispatch yet).
 

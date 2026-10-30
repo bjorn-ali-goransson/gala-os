@@ -42,5 +42,5 @@ pub const FIRST_TEB_ADDRESS: u64 = 0x0000_7ff0_0010_0000;
 /// Main thread stack: `[STACK_TOP - size, STACK_TOP)`, with an unmapped
 /// guard page below.
 pub const STACK_TOP: u64 = 0x0000_0000_0020_0000;
-/// Committed main-thread stack (no demand paging yet).
-pub const STACK_SIZE: u64 = 256 * 1024;
+/// Main-thread stack size (committed, backed on demand).
+pub const STACK_SIZE: u64 = 1024 * 1024;

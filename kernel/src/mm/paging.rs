@@ -349,6 +349,28 @@ impl<M: TableMemory> Mapper<M> {
         Ok(counts)
     }
 
+    /// Replaces the flags of the existing 4 KiB mapping at `virt`, keeping
+    /// its frame. The caller must flush the TLB.
+    pub fn update_flags_4k(&mut self, virt: u64, flags: PageFlags) -> Result<(), MapError> {
+        let mut table = self.root;
+        for level in (2..=4).rev() {
+            let entry = self.mem.table(table).0[index(virt, level)];
+            if !entry.is_present() {
+                return Err(MapError::BadAddress);
+            }
+            if entry.is_huge() {
+                return Err(MapError::LargePageConflict);
+            }
+            table = Frame::containing(entry.addr());
+        }
+        let slot = &mut self.mem.table(table).0[index(virt, 1)];
+        if !slot.is_present() {
+            return Err(MapError::BadAddress);
+        }
+        *slot = Entry(slot.addr() | flags.leaf_bits(false));
+        Ok(())
+    }
+
     /// Removes the 4 KiB mapping at `virt`, returning the frame it mapped.
     /// Page tables are not freed. The caller must flush the TLB.
     pub fn unmap_4k(&mut self, virt: u64) -> Option<Frame> {

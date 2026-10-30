@@ -9,6 +9,8 @@ use super::layout::{self, params, peb, teb};
 use super::object::{HandleTable, Object};
 use super::pe::{self, PeError, PeImage};
 use super::status::NtStatus;
+use super::vad::{self, Vad};
+use super::vm::{self, AccessKind};
 use crate::arch::interrupts::{self, TrapFrame};
 use crate::arch::paging::{PagingError, SharedUserSpace, UserFault, UserSpace};
 use crate::arch::syscall;
@@ -23,6 +25,8 @@ pub struct Process {
     pub name: &'static str,
     pub space: SharedUserSpace,
     pub handles: IrqMutex<HandleTable>,
+    /// Lock order: `vad` before `space`.
+    pub vad: IrqMutex<Vad>,
     threads: IrqMutex<Vec<ThreadId>>,
     exit_status: IrqMutex<Option<NtStatus>>,
     /// Main thread start state.
@@ -42,9 +46,25 @@ impl Process {
         *self.exit_status.lock()
     }
 
+    /// Runs a user-memory copy, resolving demand-zero faults on the way
+    /// (each retry backs at least one more page).
+    fn with_faults(
+        &self,
+        kind: AccessKind,
+        mut op: impl FnMut(&mut UserSpace) -> Result<(), UserFault>,
+    ) -> Result<(), UserFault> {
+        loop {
+            let result = op(&mut self.space.lock());
+            match result {
+                Err(fault) if vm::resolve_fault(self, fault.address, kind) => continue,
+                other => return other,
+            }
+        }
+    }
+
     /// Copies `buf.len()` bytes from user address `addr`.
     pub fn read(&self, addr: u64, buf: &mut [u8]) -> Result<(), UserFault> {
-        self.space.lock().read(addr, buf)
+        self.with_faults(AccessKind::Read, |s| s.read(addr, buf))
     }
 
     pub fn read_u64(&self, addr: u64) -> Result<u64, UserFault> {
@@ -54,7 +74,11 @@ impl Process {
     }
 
     pub fn write(&self, addr: u64, data: &[u8]) -> Result<(), UserFault> {
-        self.space.lock().write(addr, data)
+        self.with_faults(AccessKind::Write, |s| s.write(addr, data))
+    }
+
+    pub fn write_u64(&self, addr: u64, value: u64) -> Result<(), UserFault> {
+        self.write(addr, &value.to_le_bytes())
     }
 }
 
@@ -94,6 +118,12 @@ impl From<PagingError> for LoadError {
     }
 }
 
+impl From<NtStatus> for LoadError {
+    fn from(_: NtStatus) -> Self {
+        LoadError::BadImageBase
+    }
+}
+
 impl From<UserFault> for LoadError {
     fn from(_: UserFault) -> Self {
         LoadError::BadImageBase
@@ -125,8 +155,26 @@ fn put_u32(space: &mut UserSpace, addr: u64, value: u32) -> Result<(), UserFault
     space.write_initial(addr, &value.to_le_bytes())
 }
 
+/// Page protection for an image section, as Windows reports it (writable
+/// image pages are copy-on-write).
+fn section_protect(characteristics: u32) -> u32 {
+    let (r, w, x) = (
+        characteristics & pe::IMAGE_SCN_MEM_READ != 0,
+        characteristics & pe::IMAGE_SCN_MEM_WRITE != 0,
+        characteristics & pe::IMAGE_SCN_MEM_EXECUTE != 0,
+    );
+    match (x, w, r) {
+        (true, true, _) => vad::PAGE_EXECUTE_WRITECOPY,
+        (true, false, true) => vad::PAGE_EXECUTE_READ,
+        (true, false, false) => vad::PAGE_EXECUTE,
+        (false, true, _) => vad::PAGE_WRITECOPY,
+        (false, false, true) => vad::PAGE_READONLY,
+        (false, false, false) => vad::PAGE_NOACCESS,
+    }
+}
+
 /// Maps the image at its preferred base.
-fn map_image(space: &mut UserSpace, image: &PeImage<'_>) -> Result<u64, LoadError> {
+fn map_image(space: &mut UserSpace, vad: &mut Vad, image: &PeImage<'_>) -> Result<u64, LoadError> {
     let base = image.image_base;
     let end = base.checked_add(u64::from(image.size_of_image)).ok_or(LoadError::BadImageBase)?;
     // Keep the first 64 KiB free (null-pointer region) and stay clear of
@@ -138,6 +186,14 @@ fn map_image(space: &mut UserSpace, image: &PeImage<'_>) -> Result<u64, LoadErro
         return Err(LoadError::BadImageBase);
     }
     // TODO: relocate (pe::apply_relocations) when the preferred base is taken.
+    vad.reserve(
+        Some(base),
+        u64::from(image.size_of_image),
+        vad::PAGE_EXECUTE_WRITECOPY,
+        vad::MEM_IMAGE,
+        false,
+    )?;
+    vad.commit(base, u64::from(image.size_of_headers), vad::PAGE_READONLY)?;
     space.map_zeroed(base, pages(u64::from(image.size_of_headers)), USER_RO)?;
     space.write_initial(base, image.headers())?;
     for section in image.sections() {
@@ -146,6 +202,7 @@ fn map_image(space: &mut UserSpace, image: &PeImage<'_>) -> Result<u64, LoadErro
         if size == 0 {
             continue;
         }
+        vad.commit(va, size, section_protect(section.characteristics))?;
         space.map_zeroed(va, pages(size), section_flags(section.characteristics))?;
         space.write_initial(va, image.section_data(&section))?;
     }
@@ -162,13 +219,22 @@ pub fn spawn_from_pe(
         return Err(LoadError::ImportsNotSupported);
     }
     let mut space = UserSpace::new()?;
-    let base = map_image(&mut space, &image)?;
+    let mut vad = Vad::default();
+    let base = map_image(&mut space, &mut vad, &image)?;
     let id = next_id();
     let thread_id = next_id();
 
-    // Main thread stack.
+    // Main thread stack: committed demand-zero pages above an uncommitted
+    // guard page.
     let stack_bottom = layout::STACK_TOP - layout::STACK_SIZE;
-    space.map_zeroed(stack_bottom, pages(layout::STACK_SIZE), USER_RW)?;
+    vad.reserve(
+        Some(stack_bottom - PAGE_SIZE),
+        layout::STACK_SIZE + PAGE_SIZE,
+        vad::PAGE_READWRITE,
+        vad::MEM_PRIVATE,
+        false,
+    )?;
+    vad.commit(stack_bottom, layout::STACK_SIZE, vad::PAGE_READWRITE)?;
 
     // Handles for the standard streams.
     let mut handles = HandleTable::default();
@@ -178,6 +244,7 @@ pub fn spawn_from_pe(
 
     // RTL_USER_PROCESS_PARAMETERS.
     let p = layout::PARAMS_ADDRESS;
+    vm::register(&mut vad, p, params::PAGES * PAGE_SIZE, vad::MEM_PRIVATE, vad::PAGE_READWRITE)?;
     space.map_zeroed(p, params::PAGES, USER_RW)?;
     let size = (params::PAGES * PAGE_SIZE) as u32;
     put_u32(&mut space, p + params::MAXIMUM_LENGTH, size)?;
@@ -189,12 +256,26 @@ pub fn spawn_from_pe(
 
     // PEB.
     let peb_addr = layout::PEB_ADDRESS;
+    vm::register(
+        &mut vad,
+        peb_addr,
+        peb::PAGES * PAGE_SIZE,
+        vad::MEM_PRIVATE,
+        vad::PAGE_READWRITE,
+    )?;
     space.map_zeroed(peb_addr, peb::PAGES, USER_RW)?;
     put_u64(&mut space, peb_addr + peb::IMAGE_BASE_ADDRESS, base)?;
     put_u64(&mut space, peb_addr + peb::PROCESS_PARAMETERS, p)?;
 
     // TEB of the main thread.
     let teb_addr = layout::FIRST_TEB_ADDRESS;
+    vm::register(
+        &mut vad,
+        teb_addr,
+        teb::PAGES * PAGE_SIZE,
+        vad::MEM_PRIVATE,
+        vad::PAGE_READWRITE,
+    )?;
     space.map_zeroed(teb_addr, teb::PAGES, USER_RW)?;
     put_u64(&mut space, teb_addr + teb::STACK_BASE, layout::STACK_TOP)?;
     put_u64(&mut space, teb_addr + teb::STACK_LIMIT, stack_bottom)?;
@@ -209,6 +290,7 @@ pub fn spawn_from_pe(
         name,
         space: space.clone(),
         handles: IrqMutex::new(handles),
+        vad: IrqMutex::new(vad),
         threads: IrqMutex::new(Vec::new()),
         exit_status: IrqMutex::new(None),
         entry: base + u64::from(image.entry_rva),
@@ -269,6 +351,17 @@ pub fn terminate_current(status: NtStatus) -> ! {
 /// User-mode CPU exceptions: no SEH dispatch yet, so they end the process.
 fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
     let vector = frame.vector as u8;
+    if let (14, Some(addr), Some(process)) = (vector, cr2, current()) {
+        // Page-fault error code: bit 1 = write, bit 4 = instruction fetch.
+        let kind = match frame.error_code {
+            e if e & (1 << 4) != 0 => AccessKind::Execute,
+            e if e & (1 << 1) != 0 => AccessKind::Write,
+            _ => AccessKind::Read,
+        };
+        if vm::resolve_fault(&process, addr, kind) {
+            return; // retry the instruction
+        }
+    }
     let status = match vector {
         0 => NtStatus::INTEGER_DIVIDE_BY_ZERO,
         3 => NtStatus::BREAKPOINT,

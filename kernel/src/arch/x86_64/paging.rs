@@ -284,7 +284,45 @@ pub struct UserFault {
     pub address: u64,
 }
 
+fn invlpg(virt: u64) {
+    // SAFETY: invalidating a TLB entry cannot break memory safety. Doing it
+    // for a space that is not active only costs an unnecessary flush.
+    unsafe { asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
+}
+
 impl UserSpace {
+    /// Maps one fresh zeroed page at `virt` (demand-zero fault, commit).
+    pub fn map_zero_page(&mut self, virt: u64, flags: PageFlags) -> Result<(), PagingError> {
+        self.map_zeroed(virt / PAGE_SIZE * PAGE_SIZE, 1, flags)
+    }
+
+    /// Whether `virt` has a page-table mapping (of any kind).
+    pub fn is_mapped(&mut self, virt: u64) -> bool {
+        self.mapper.translate(virt).is_some()
+    }
+
+    /// Changes the flags of a mapped page; `user` is not forced, so a
+    /// kernel-only flags value makes the page inaccessible to user mode.
+    pub fn set_flags(&mut self, virt: u64, mut flags: PageFlags) -> Result<(), PagingError> {
+        flags.global = false;
+        self.mapper.update_flags_4k(virt / PAGE_SIZE * PAGE_SIZE, flags)?;
+        invlpg(virt);
+        Ok(())
+    }
+
+    /// Unmaps a page and frees its frame. Returns whether it was mapped.
+    pub fn unmap_page(&mut self, virt: u64) -> bool {
+        let virt = virt / PAGE_SIZE * PAGE_SIZE;
+        match self.mapper.unmap_4k(virt) {
+            Some(frame) => {
+                invlpg(virt);
+                let _ = crate::mm::free_frame(frame);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn new() -> Result<Self, PagingError> {
         let kernel = kernel_root();
         if kernel == 0 {
