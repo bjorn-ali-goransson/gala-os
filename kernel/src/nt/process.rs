@@ -277,9 +277,11 @@ fn open_boot_directory() -> Option<ObjectRef> {
 }
 
 /// Creates a process from a PE executable and starts its main thread.
+/// `args` follow the image path on the command line.
 pub fn spawn_from_pe(
     name: &'static str,
     data: &[u8],
+    args: &str,
 ) -> Result<(KArc<Process>, ObjectRef), LoadError> {
     let image = PeImage::parse(data).map_err(LoadError::Pe)?;
     // Binding imports is the user-mode loader's job (ntdll), as on Windows.
@@ -332,11 +334,27 @@ pub fn spawn_from_pe(
     image_path.try_extend_from_slice(BOOT_DIRECTORY.as_bytes())?;
     image_path.try_extend_from_slice(name.as_bytes())?;
     let image_path = core::str::from_utf8(&image_path).unwrap_or(name);
+    // The command line: the image path (quoted if it has spaces), then the
+    // arguments, as a shell would pass them.
+    let mut command_line: Vec<u8> = Vec::new();
+    let quote = image_path.contains(' ');
+    if quote {
+        command_line.try_push(b'"')?;
+    }
+    command_line.try_extend_from_slice(image_path.as_bytes())?;
+    if quote {
+        command_line.try_push(b'"')?;
+    }
+    if !args.is_empty() {
+        command_line.try_push(b' ')?;
+        command_line.try_extend_from_slice(args.as_bytes())?;
+    }
+    let command_line = core::str::from_utf8(&command_line).unwrap_or(image_path);
     let p = layout::PARAMS_ADDRESS;
     let block = super::params::build(
         &super::params::ProcessParameters {
             image_path,
-            command_line: image_path,
+            command_line,
             current_directory: BOOT_DIRECTORY,
             current_directory_handle: cwd_handle,
             dll_path: "",

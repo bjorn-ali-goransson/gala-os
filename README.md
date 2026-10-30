@@ -34,3 +34,17 @@ cargo xtask run --release  # any command takes --release
 
 The first build clones the pinned Limine release into `target/`. QEMU uses
 KVM if `/dev/kvm` is available and falls back to TCG otherwise.
+
+### Kernel command line
+
+Boot scenarios (in `xtask/src/main.rs`) pass whitespace-separated words:
+
+- `run=<name>.exe` runs boot module `C:\gala\<name>.exe` as a process;
+  `args=<text>` adds command-line arguments, percent-encoded (`%20` space,
+  `%22` quote, `%25` percent), e.g. `args=alpha%20%22beta%20gamma%22`.
+- `trace` logs every system call to the serial console once it returns:
+  `trace: pid 4 tid 8 NtWriteFile(0x8, 0x0, ...) -> 0x00000000` (arguments
+  in order, `?` if a stack argument cannot be read). See the `trace`
+  scenario; `XTASK_VERBOSE=1 cargo xtask boot-test trace` prints the log.
+- `qemu_exit` reports the result to QEMU and exits; `selftest` runs the
+  in-kernel tests; `fault=<name>` provokes a CPU exception.

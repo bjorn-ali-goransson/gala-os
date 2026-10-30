@@ -100,8 +100,13 @@ pub fn kernel_main() -> ! {
         }
     }
 
+    nt::syscalls::set_trace(cmdline.flag("trace"));
     if let Some(name) = cmdline.value("run") {
-        run_program(&info, name);
+        let mut args = alloc::vec::Vec::new();
+        if cmdline::percent_decode(cmdline.value("args").unwrap_or(""), &mut args).is_err() {
+            panic!("run: out of memory for the arguments");
+        }
+        run_program(&info, name, core::str::from_utf8(&args).unwrap_or(""));
     }
 
     if let Some(name) = cmdline.value("fault") {
@@ -242,14 +247,15 @@ fn init_timer(boot_time: Option<i64>) {
     info!("interrupts enabled, tick {} Hz", time::TICK_HZ);
 }
 
-/// Runs the boot module `name` as a user process and waits for it.
-fn run_program(info: &BootInfo, name: &str) {
+/// Runs the boot module `name` as a user process with command-line
+/// arguments `args` and waits for it.
+fn run_program(info: &BootInfo, name: &str, args: &str) {
     let Some(module) = info.modules.find(name) else {
         panic!("run: no boot module named {name:?}");
     };
     info!("run: {} ({} bytes)", module.path, module.data.len());
     let (free_before, _) = mm::frame_stats();
-    let space = match nt::process::spawn_from_pe(module.file_name(), module.data) {
+    let space = match nt::process::spawn_from_pe(module.file_name(), module.data, args) {
         Ok((process, main_thread)) => {
             drop(main_thread);
             // Wait for the whole process (all threads) to end.

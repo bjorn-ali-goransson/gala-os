@@ -62,6 +62,7 @@ const USER_PROGRAMS: &[&str] = &[
     "exception_test",
     "guard_test",
     "import_test",
+    "args_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -322,6 +323,24 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "args_test",
+        // `args=` is percent-encoded: %20 space, %22 quote, %25 percent.
+        cmdline: "qemu_exit run=args_test.exe args=alpha%20%22beta%20gamma%22",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["args_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "trace",
+        cmdline: "qemu_exit trace run=hello.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "trace: pid 4 tid 8 NtWriteFile(",
+            ") -> 0x00000000",
+            "NtTerminateProcess(0xffffffffffffffff, 0x0)",
+            "Hello from user mode!",
+        ],
+    },
     Scenario {
         name: "import_test",
         cmdline: "qemu_exit run=import_test.exe",

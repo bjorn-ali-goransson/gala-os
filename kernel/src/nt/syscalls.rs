@@ -5,6 +5,8 @@
 //! values and must be verified against syscall traces from that build.
 
 use alloc::vec::Vec;
+use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::file;
 use super::namespace;
@@ -70,51 +72,53 @@ pub const NT_PROTECT_VIRTUAL_MEMORY: u32 = 0x0050;
 
 type Handler = fn(&mut Call<'_>) -> NtStatus;
 
-const TABLE: &[(u32, &str, Handler)] = &[
-    (NT_WAIT_FOR_SINGLE_OBJECT, "NtWaitForSingleObject", nt_wait_for_single_object),
-    (NT_READ_FILE, "NtReadFile", nt_read_file),
-    (NT_WRITE_FILE, "NtWriteFile", nt_write_file),
-    (NT_QUERY_INFORMATION_FILE, "NtQueryInformationFile", nt_query_information_file),
-    (NT_SET_INFORMATION_FILE, "NtSetInformationFile", nt_set_information_file),
-    (NT_OPEN_FILE, "NtOpenFile", nt_open_file),
-    (NT_QUERY_ATTRIBUTES_FILE, "NtQueryAttributesFile", nt_query_attributes_file),
-    (NT_CREATE_FILE, "NtCreateFile", nt_create_file),
-    (NT_QUERY_DIRECTORY_FILE, "NtQueryDirectoryFile", nt_query_directory_file),
+/// (number, name, argument count, handler) of every system service.
+const TABLE: &[(u32, &str, usize, Handler)] = &[
+    (NT_WAIT_FOR_SINGLE_OBJECT, "NtWaitForSingleObject", 3, nt_wait_for_single_object),
+    (NT_READ_FILE, "NtReadFile", 9, nt_read_file),
+    (NT_WRITE_FILE, "NtWriteFile", 9, nt_write_file),
+    (NT_QUERY_INFORMATION_FILE, "NtQueryInformationFile", 5, nt_query_information_file),
+    (NT_SET_INFORMATION_FILE, "NtSetInformationFile", 5, nt_set_information_file),
+    (NT_OPEN_FILE, "NtOpenFile", 6, nt_open_file),
+    (NT_QUERY_ATTRIBUTES_FILE, "NtQueryAttributesFile", 2, nt_query_attributes_file),
+    (NT_CREATE_FILE, "NtCreateFile", 11, nt_create_file),
+    (NT_QUERY_DIRECTORY_FILE, "NtQueryDirectoryFile", 11, nt_query_directory_file),
     (
         NT_QUERY_VOLUME_INFORMATION_FILE,
         "NtQueryVolumeInformationFile",
+        5,
         nt_query_volume_information_file,
     ),
-    (NT_FLUSH_BUFFERS_FILE, "NtFlushBuffersFile", nt_flush_buffers_file),
-    (NT_CONTINUE, "NtContinue", nt_continue),
-    (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", nt_map_view_of_section),
-    (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", nt_unmap_view_of_section),
-    (NT_OPEN_SECTION, "NtOpenSection", nt_open_section),
-    (NT_CREATE_SECTION, "NtCreateSection", nt_create_section),
-    (NT_QUERY_SECTION, "NtQuerySection", nt_query_section),
-    (NT_QUERY_INFORMATION_PROCESS, "NtQueryInformationProcess", nt_query_information_process),
-    (NT_QUERY_INFORMATION_THREAD, "NtQueryInformationThread", nt_query_information_thread),
-    (NT_CREATE_THREAD, "NtCreateThread", nt_create_thread),
-    (NT_RESUME_THREAD, "NtResumeThread", nt_resume_thread),
-    (NT_TERMINATE_THREAD, "NtTerminateThread", nt_terminate_thread),
-    (NT_QUERY_OBJECT, "NtQueryObject", nt_query_object),
-    (NT_OPEN_EVENT, "NtOpenEvent", nt_open_event),
-    (NT_OPEN_DIRECTORY_OBJECT, "NtOpenDirectoryObject", nt_open_directory_object),
-    (NT_SET_EVENT, "NtSetEvent", nt_set_event),
-    (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", nt_query_performance_counter),
-    (NT_DELAY_EXECUTION, "NtDelayExecution", nt_delay_execution),
-    (NT_DUPLICATE_OBJECT, "NtDuplicateObject", nt_duplicate_object),
-    (NT_CLEAR_EVENT, "NtClearEvent", nt_clear_event),
-    (NT_CREATE_EVENT, "NtCreateEvent", nt_create_event),
-    (NT_QUERY_EVENT, "NtQueryEvent", nt_query_event),
-    (NT_QUERY_SYSTEM_TIME, "NtQuerySystemTime", nt_query_system_time),
-    (NT_WAIT_FOR_MULTIPLE_OBJECTS, "NtWaitForMultipleObjects", nt_wait_for_multiple_objects),
-    (NT_CLOSE, "NtClose", nt_close),
-    (NT_ALLOCATE_VIRTUAL_MEMORY, "NtAllocateVirtualMemory", nt_allocate_virtual_memory),
-    (NT_FREE_VIRTUAL_MEMORY, "NtFreeVirtualMemory", nt_free_virtual_memory),
-    (NT_QUERY_VIRTUAL_MEMORY, "NtQueryVirtualMemory", nt_query_virtual_memory),
-    (NT_TERMINATE_PROCESS, "NtTerminateProcess", nt_terminate_process),
-    (NT_PROTECT_VIRTUAL_MEMORY, "NtProtectVirtualMemory", nt_protect_virtual_memory),
+    (NT_FLUSH_BUFFERS_FILE, "NtFlushBuffersFile", 2, nt_flush_buffers_file),
+    (NT_CONTINUE, "NtContinue", 2, nt_continue),
+    (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", 10, nt_map_view_of_section),
+    (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", 2, nt_unmap_view_of_section),
+    (NT_OPEN_SECTION, "NtOpenSection", 3, nt_open_section),
+    (NT_CREATE_SECTION, "NtCreateSection", 7, nt_create_section),
+    (NT_QUERY_SECTION, "NtQuerySection", 5, nt_query_section),
+    (NT_QUERY_INFORMATION_PROCESS, "NtQueryInformationProcess", 5, nt_query_information_process),
+    (NT_QUERY_INFORMATION_THREAD, "NtQueryInformationThread", 5, nt_query_information_thread),
+    (NT_CREATE_THREAD, "NtCreateThread", 8, nt_create_thread),
+    (NT_RESUME_THREAD, "NtResumeThread", 2, nt_resume_thread),
+    (NT_TERMINATE_THREAD, "NtTerminateThread", 2, nt_terminate_thread),
+    (NT_QUERY_OBJECT, "NtQueryObject", 5, nt_query_object),
+    (NT_OPEN_EVENT, "NtOpenEvent", 3, nt_open_event),
+    (NT_OPEN_DIRECTORY_OBJECT, "NtOpenDirectoryObject", 3, nt_open_directory_object),
+    (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
+    (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
+    (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
+    (NT_DUPLICATE_OBJECT, "NtDuplicateObject", 7, nt_duplicate_object),
+    (NT_CLEAR_EVENT, "NtClearEvent", 1, nt_clear_event),
+    (NT_CREATE_EVENT, "NtCreateEvent", 5, nt_create_event),
+    (NT_QUERY_EVENT, "NtQueryEvent", 5, nt_query_event),
+    (NT_QUERY_SYSTEM_TIME, "NtQuerySystemTime", 1, nt_query_system_time),
+    (NT_WAIT_FOR_MULTIPLE_OBJECTS, "NtWaitForMultipleObjects", 5, nt_wait_for_multiple_objects),
+    (NT_CLOSE, "NtClose", 1, nt_close),
+    (NT_ALLOCATE_VIRTUAL_MEMORY, "NtAllocateVirtualMemory", 6, nt_allocate_virtual_memory),
+    (NT_FREE_VIRTUAL_MEMORY, "NtFreeVirtualMemory", 4, nt_free_virtual_memory),
+    (NT_QUERY_VIRTUAL_MEMORY, "NtQueryVirtualMemory", 6, nt_query_virtual_memory),
+    (NT_TERMINATE_PROCESS, "NtTerminateProcess", 2, nt_terminate_process),
+    (NT_PROTECT_VIRTUAL_MEMORY, "NtProtectVirtualMemory", 5, nt_protect_virtual_memory),
 ];
 
 /// One system call in progress.
@@ -204,14 +208,82 @@ fn dispatch(frame: &mut SyscallFrame) {
     let Some(process) = process::current() else {
         panic!("syscall {number:#x} from a thread without a process");
     };
-    let status = match TABLE.iter().find(|(n, _, _)| *n == number) {
-        Some((_, _, handler)) => handler(&mut Call { frame, process }),
+    let service = TABLE.iter().find(|(n, ..)| *n == number);
+    let mut call = Call { frame, process };
+    let status = match service {
+        Some((.., handler)) => handler(&mut call),
         None => {
-            warn!("{}: unimplemented system service {number:#x}", process.name);
+            warn!("{}: unimplemented system service {number:#x}", call.process.name);
             NtStatus::INVALID_SYSTEM_SERVICE
         }
     };
+    if TRACE.load(Ordering::Relaxed) {
+        trace(&call, number, service.map(|&(_, name, argc, _)| (name, argc)), status);
+    }
     frame.rax = u64::from(status.0);
+}
+
+/// Set by the `trace` kernel command-line flag: log every system call.
+static TRACE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_trace(on: bool) {
+    TRACE.store(on, Ordering::Relaxed);
+}
+
+/// Logs one finished system call (arguments as passed; unreadable stack
+/// arguments show as `?`).
+fn trace(call: &Call<'_>, number: u32, service: Option<(&str, usize)>, status: NtStatus) {
+    let mut args = [None; 12];
+    let (name, argc) = service.unwrap_or(("", 0));
+    for (i, slot) in args.iter_mut().enumerate().take(argc) {
+        *slot = Some(call.arg(i).ok());
+    }
+    let tid = thread::current().and_then(|t| match &t.body {
+        ObjectBody::Thread(t) => Some(t.id),
+        _ => None,
+    });
+    let line = TraceLine {
+        pid: call.process.id,
+        tid: tid.unwrap_or(0),
+        number,
+        name,
+        args: &args,
+        status,
+    };
+    kprintln!("{line}");
+}
+
+/// One trace line: `trace: pid P tid T NtName(arg, ...) -> 0xSTATUS`.
+pub struct TraceLine<'a> {
+    pub pid: u64,
+    pub tid: u64,
+    pub number: u32,
+    /// Empty for an unknown service.
+    pub name: &'a str,
+    /// `Some(None)` is an argument that could not be read.
+    pub args: &'a [Option<Option<u64>>],
+    pub status: NtStatus,
+}
+
+impl fmt::Display for TraceLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "trace: pid {} tid {} ", self.pid, self.tid)?;
+        if self.name.is_empty() {
+            write!(f, "service {:#x}(", self.number)?;
+        } else {
+            write!(f, "{}(", self.name)?;
+        }
+        for (i, arg) in self.args.iter().flatten().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            match arg {
+                Some(v) => write!(f, "{v:#x}")?,
+                None => f.write_str("?")?,
+            }
+        }
+        write!(f, ") -> {:#010x}", self.status.0)
+    }
 }
 
 pub fn init() {
@@ -1662,5 +1734,33 @@ fn nt_query_attributes_file(call: &mut Call<'_>) -> NtStatus {
     match call.process.write(out, &info) {
         Ok(()) => NtStatus::SUCCESS,
         Err(_) => NtStatus::ACCESS_VIOLATION,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trace_line_format() {
+        let args = [Some(Some(0x24)), Some(None), Some(Some(0)), None];
+        let line = TraceLine {
+            pid: 4,
+            tid: 8,
+            number: 8,
+            name: "NtWriteFile",
+            args: &args,
+            status: NtStatus::SUCCESS,
+        };
+        assert_eq!(line.to_string(), "trace: pid 4 tid 8 NtWriteFile(0x24, ?, 0x0) -> 0x00000000");
+        let unknown = TraceLine {
+            pid: 4,
+            tid: 8,
+            number: 0xfff,
+            name: "",
+            args: &[],
+            status: NtStatus(0xc000_001c),
+        };
+        assert_eq!(unknown.to_string(), "trace: pid 4 tid 8 service 0xfff() -> 0xc000001c");
     }
 }

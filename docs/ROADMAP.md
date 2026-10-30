@@ -69,6 +69,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 - Executables with imports: accepted when an ntdll is present; testntdll
   binds them from the exe's directory (by name and ordinal, IAT under
   NtProtectVirtualMemory, DllMain attach); `import_test` (raw-dylib)
+- Command-line arguments (`args=`, percent-encoded) and `args_test`
+  (CommandLineToArgvW rules); syscall tracing (`trace` flag, per-service
+  argument counts in the handler table)
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
@@ -81,8 +84,7 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 6e. **User-mode loader support**: what a real ntdll's loader needs next:
    KnownDlls (`\KnownDlls` section objects), NtQuerySystemInformation
    basics, NtSetInformationProcess/Thread bits, TLS slots in the TEB;
-   boot cmdline `args=` for the command line. (testntdll: imports of
-   DLLs, PEB->Ldr, forwarders.)
+   (testntdll: imports of DLLs, PEB->Ldr, forwarders.)
 7b. **Exceptions, rest**: NtRaiseException (first/second chance),
    SizeOfStackReserve/Commit from the image, XMM/x87 state
    in CONTEXT (save/restore with FXSAVE/XSAVE), SEH unwinding is user-mode
@@ -90,8 +92,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 8c. **Files, rest**: `\??\C:` as a symbolic link, asynchronous I/O
    (events, APCs, STATUS_PENDING), NtNotifyChangeDirectoryFile, file
    locks, short (8.3) names.
-9. Toward M6: syscall-trace tooling and a differential test runner; run the
-   first Wine ntdll conformance test binaries.
+9. Toward M6: a differential test runner (same user/bin programs on
+   Windows and gala, compare output); run the first Wine ntdll
+   conformance test binaries.
 
 ## Later
 SMP, ACPI (MADT/HPET), virtio devices, bindgen-generated layouts from
