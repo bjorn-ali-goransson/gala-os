@@ -1,9 +1,20 @@
 # Project brief: NT-compatible kernel in Rust
 
-**Name.** gala: from the Arabic *qal'a*, "fortress" (and a play on
-"Windows"). It stands for security built in from the start: a small
-trusted core, fallible allocation, confined `unsafe`, and user input that
-can never crash the kernel.
+**Name and context.** gala: from the Arabic *qal'a*, "fortress" (and a
+play on "Windows"). It belongs to the owner's *Built in Saudi* family
+(built-in-saudi.com; Ali Web Services, Riyadh, ali-web-services.com) and
+carries the same sovereign mindset: foundational software built and
+controlled in the Kingdom rather than rented from elsewhere. The values of
+those products apply here too:
+- privacy by design: collect nothing that is not needed, no telemetry
+  leaves the machine unless its owner sends it, no hidden logging;
+- honesty about limits: say plainly what does not work yet (ROADMAP,
+  "Not done yet", the missing-features ledger);
+- security built in: a small trusted core, fallible allocation, confined
+  `unsafe`, and user input that can never crash the kernel.
+
+(The observability work in docs/OBSERVABILITY.md is for the system's
+owner and its developers. It stays local by default.)
 
 ## Goal
 Build a new OS kernel, written in Rust, that is binary-compatible with
