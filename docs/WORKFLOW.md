@@ -33,6 +33,16 @@ is done and what comes next (the "Next" list is the agreed order).
    `docs/ARCHITECTURE.md` (how it works, invariants, TODOs). Commit with a
    message saying what the test checks and what changed; push.
 
+## Go programs
+
+`user/<name>/` with a `main.go` and `go.mod`, listed in `GO_PROGRAMS` in
+xtask: built for windows/amd64 with the pinned toolchain (`GO_TOOLCHAIN`,
+`-trimpath`, empty build id, so the binary is reproducible and checked in
+under `user/bin`). Without `go` installed, xtask uses the checked-in
+binary. Bring-up loop: run it (`XTASK_EVENTS=all cargo xtask boot-test
+<name>` once it has a scenario, or `cargo xtask screenshot run=<name>.exe`)
+and read the `ledger:` lines: every missing import is listed by name.
+
 ## Adding a function to gala's ntdll or kernel32
 
 1. A test program that imports it (`raw-dylib` against `kernel32` or

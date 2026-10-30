@@ -68,7 +68,15 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_test", "testdll.dll", "gala"),
     ("missing_import_test", "ntdll.dll", "Windows/System32"),
     ("missing_import_test", "kernel32.dll", "Windows/System32"),
+    ("go_hello", "ntdll.dll", "Windows/System32"),
+    ("go_hello", "kernel32.dll", "Windows/System32"),
 ];
+/// Go programs in `user/<name>/`, built for windows/amd64 with this Go
+/// toolchain (when `go` is installed; otherwise the checked-in binary in
+/// user/bin is used). Reproducible: -trimpath and an empty build id.
+const GO_PROGRAMS: &[&str] = &["go_hello"];
+const GO_TOOLCHAIN: &str = "go1.24.7";
+
 const USER_PROGRAMS: &[&str] = &[
     "hello",
     "abi_test",
@@ -247,7 +255,36 @@ fn build_kernel(release: bool) -> Result {
     for program in USER_PROGRAMS {
         cmd.args(["--package", program]);
     }
-    run_cmd(&mut cmd)
+    run_cmd(&mut cmd)?;
+    build_go_programs()
+}
+
+/// Builds GO_PROGRAMS into the user target directory (or copies the
+/// checked-in binaries when there is no Go toolchain).
+fn build_go_programs() -> Result {
+    let out_dir = target_dir().join(USER_TARGET).join("release");
+    fs::create_dir_all(&out_dir).map_err(|e| format!("creating {out_dir:?}: {e}"))?;
+    let have_go = Command::new("go").arg("version").output().is_ok_and(|o| o.status.success());
+    for program in GO_PROGRAMS {
+        let exe = out_dir.join(format!("{program}.exe"));
+        if !have_go {
+            copy(&root().join("user/bin").join(format!("{program}.exe")), &exe)?;
+            continue;
+        }
+        run_quiet(
+            Command::new("go")
+                .args(["build", "-trimpath", "-ldflags=-buildid=", "-o"])
+                .arg(&exe)
+                .arg(".")
+                .current_dir(root().join("user").join(program))
+                .env("GOOS", "windows")
+                .env("GOARCH", "amd64")
+                .env("CGO_ENABLED", "0")
+                .env("GOTOOLCHAIN", GO_TOOLCHAIN)
+                .env("GOFLAGS", "-mod=mod"),
+        )?;
+    }
+    Ok(())
 }
 
 fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) -> Result<PathBuf> {
@@ -266,7 +303,7 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
     }
     copy(&kernel, &boot.join("kernel"))?;
     let mut modules = String::new();
-    for program in USER_PROGRAMS {
+    for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS) {
         let exe = target_dir().join(USER_TARGET).join("release").join(format!("{program}.exe"));
         copy(&exe, &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
@@ -1525,7 +1562,7 @@ fn docker_test(args: &[String]) -> Result {
 fn export_tests() -> Result {
     let dir = root().join("user/bin");
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
-    for program in USER_PROGRAMS {
+    for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS) {
         let exe = target_dir().join(USER_TARGET).join("release").join(format!("{program}.exe"));
         copy(&exe, &dir.join(format!("{program}.exe")))?;
     }
