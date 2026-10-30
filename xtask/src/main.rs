@@ -40,6 +40,7 @@ const USER_DLLS: &[Dll] = &[
 const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("startup_test", "ntdll.dll", "Windows/System32"),
     ("exception_test", "ntdll.dll", "Windows/System32"),
+    ("guard_test", "ntdll.dll", "Windows/System32"),
 ];
 const USER_PROGRAMS: &[&str] = &[
     "hello",
@@ -57,6 +58,7 @@ const USER_PROGRAMS: &[&str] = &[
     "peb_test",
     "startup_test",
     "exception_test",
+    "guard_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -317,6 +319,12 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "guard_test",
+        cmdline: "qemu_exit run=guard_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["guard_test: ok", "exited with status 0x00000000"],
+    },
     Scenario {
         name: "exception_test",
         cmdline: "qemu_exit run=exception_test.exe",

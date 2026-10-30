@@ -62,6 +62,10 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   (CONTEXT + EXCEPTION_RECORD on the user stack), int3 from user mode;
   testntdll's vectored handler list (RtlAdd/RemoveVectoredException-
   Handler) and dispatcher; `exception_test`
+- Guard pages and stack growth: one-shot STATUS_GUARD_PAGE_VIOLATION,
+  stack guard moving down with TEB StackLimit, STATUS_STACK_OVERFLOW at
+  the end of the reservation; `create_thread_with_stack` in ntrt;
+  `guard_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
@@ -78,7 +82,7 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
    the TEB, PEB->Ldr built by our test ntdll to resolve an exe's imports
    from testdll; boot cmdline `args=` for the command line.
 7b. **Exceptions, rest**: NtRaiseException (first/second chance),
-   guard pages (STATUS_GUARD_PAGE_VIOLATION, stack growth), XMM/x87 state
+   SizeOfStackReserve/Commit from the image, XMM/x87 state
    in CONTEXT (save/restore with FXSAVE/XSAVE), SEH unwinding is user-mode
    (ntdll) work; verify the dispatcher frame against the pinned ntdll.
 8c. **Files, rest**: `\??\C:` as a symbolic link, asynchronous I/O

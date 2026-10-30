@@ -12,6 +12,8 @@ pub mod teb {
     pub const CLIENT_ID_PROCESS: u64 = 0x40;
     pub const CLIENT_ID_THREAD: u64 = 0x48;
     pub const PEB: u64 = 0x60;
+    /// The bottom of the stack reservation.
+    pub const DEALLOCATION_STACK: u64 = 0x1478;
     /// Size of the x64 TEB, rounded up to pages.
     pub const PAGES: u64 = 2;
 }
@@ -65,5 +67,7 @@ pub const FIRST_TEB_ADDRESS: u64 = 0x0000_7ff0_0010_0000;
 /// Main thread stack: `[STACK_TOP - size, STACK_TOP)`, with an unmapped
 /// guard page below.
 pub const STACK_TOP: u64 = 0x0000_0000_0020_0000;
-/// Main-thread stack size (committed, backed on demand).
+/// Main-thread stack reservation (above one never-committed bottom page).
 pub const STACK_SIZE: u64 = 1024 * 1024;
+/// Initially committed top of the main-thread stack.
+pub const STACK_COMMIT: u64 = 0x4000;

@@ -41,43 +41,101 @@ pub enum AccessKind {
     Execute,
 }
 
-/// Resolves a fault on a committed but not yet backed page by mapping a
-/// zeroed frame. Returns false if the access is not allowed (an access
-/// violation for the program).
-pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> bool {
+/// What a user page fault comes to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fault {
+    /// The page is usable now: retry the access.
+    Resolved,
+    /// Raise this exception (the guard is gone; a retry may succeed).
+    Raise(NtStatus),
+    /// Not allowed: an access violation.
+    Denied,
+}
+
+/// Resolves a fault on a committed page: maps a zeroed (or section) frame
+/// on first use, and handles guard pages (one-shot
+/// STATUS_GUARD_PAGE_VIOLATION, or stack growth for the current thread's
+/// stack guard).
+pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> Fault {
     let (protect, mapped) = {
         let vad = process.vad.lock();
-        let Some(PageState { committed: true, protect }) = vad.page(addr) else { return false };
+        let Some(PageState { committed: true, protect }) = vad.page(addr) else {
+            return Fault::Denied;
+        };
         let mapped = vad.query(addr).is_ok_and(|q| q.kind == vad::MEM_MAPPED);
         (protect, mapped)
     };
-    let Ok(access) = vad::access_of(protect) else { return false };
+    let Ok(access) = vad::access_of(protect) else { return Fault::Denied };
     let allowed = match kind {
         AccessKind::Read => access.read,
         AccessKind::Write => access.write,
         AccessKind::Execute => access.execute,
     };
-    if !allowed || protect & vad::PAGE_GUARD != 0 {
-        return false;
+    if !allowed {
+        return Fault::Denied;
+    }
+    if protect & vad::PAGE_GUARD != 0 {
+        return guard_hit(process, addr, protect & !vad::PAGE_GUARD);
     }
     // Section pages come from the section (views lock before space lock).
     let section_frame = if mapped {
         match super::section::frame_for(process, addr) {
             Some(f) => Some(f),
-            None => return false,
+            None => return Fault::Denied,
         }
     } else {
         None
     };
     let mut space = process.space.lock();
-    if space.is_mapped(addr) {
+    let done = if space.is_mapped(addr) {
         // Present and allowed by the VAD: the PTE is stale. Re-sync it.
-        return space.set_flags(addr, flags_for(protect)).is_ok();
+        space.set_flags(addr, flags_for(protect)).is_ok()
+    } else {
+        match section_frame {
+            Some(frame) => space.map_borrowed(addr, frame, flags_for(protect)).is_ok(),
+            None => space.map_zero_page(addr, flags_for(protect)).is_ok(),
+        }
+    };
+    if done { Fault::Resolved } else { Fault::Denied }
+}
+
+/// A touched guard page: the guard is removed. In the current thread's
+/// stack, the guard moves one page down and StackLimit follows, silently;
+/// with no room left (the bottom page stays reserved) the stack overflows.
+/// Elsewhere the program gets STATUS_GUARD_PAGE_VIOLATION.
+fn guard_hit(process: &Process, addr: u64, protect: u32) -> Fault {
+    let page = addr / PAGE_SIZE * PAGE_SIZE;
+    let stack = super::thread::current_stack(process);
+    let (result, new_limit) = {
+        let mut vad = process.vad.lock();
+        if vad.protect(page, PAGE_SIZE, protect).is_err() {
+            return Fault::Denied;
+        }
+        match stack {
+            Some((teb, bottom, base)) if (bottom..base).contains(&page) => {
+                let next = page - PAGE_SIZE;
+                let room = next > bottom;
+                let grown = room
+                    && match vad.page(next) {
+                        Some(PageState { committed: true, .. }) => true,
+                        Some(_) => vad.commit(next, PAGE_SIZE, protect | vad::PAGE_GUARD).is_ok(),
+                        None => false,
+                    };
+                let result =
+                    if grown { Fault::Resolved } else { Fault::Raise(NtStatus::STACK_OVERFLOW) };
+                (result, Some((teb, page)))
+            }
+            _ => (Fault::Raise(NtStatus::GUARD_PAGE_VIOLATION), None),
+        }
+    };
+    let mut space = process.space.lock();
+    if space.is_mapped(page) {
+        let _ = space.set_flags(page, flags_for(protect));
     }
-    match section_frame {
-        Some(frame) => space.map_borrowed(addr, frame, flags_for(protect)).is_ok(),
-        None => space.map_zero_page(addr, flags_for(protect)).is_ok(),
+    if let Some((teb, limit)) = new_limit {
+        let _ = space.write(teb + super::layout::teb::STACK_LIMIT, &limit.to_le_bytes());
     }
+    result
 }
 
 /// Re-applies VAD state to the page tables for `[start, start + size)`:

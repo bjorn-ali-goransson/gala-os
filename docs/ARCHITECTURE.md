@@ -194,7 +194,7 @@ is enabled for user SSE code.
 
 **Loader** (`nt::process::spawn_from_pe`): maps headers and sections at the
 preferred base with section permissions (no relocation or imports yet),
-a 1 MiB stack below `0x200000` with a guard page, and the PEB, process
+a 1 MiB stack below `0x200000` (see guard pages below), and the PEB, process
 parameters and TEB at fixed addresses (`nt::layout`). The PEB carries the
 image base, OS version of the pinned build, processor count, image
 subsystem and its version, and session 1. `nt::params` builds a normalized
@@ -223,6 +223,17 @@ KiUserExceptionDispatcher, the kernel pushes the CONTEXT at a new 16-byte
 aligned rsp and the EXCEPTION_RECORD at rsp + 0x4f0, and resumes the thread
 there (to be checked against the pinned ntdll); otherwise the process ends
 with the status. The #BP gate has DPL 3 so `int3` works from user mode.
+
+**Guard pages and stacks** (`vm::resolve_fault` returns Resolved / Raise /
+Denied): a PAGE_GUARD page loses its guard on first touch. Inside the
+current thread's stack reservation (TEB DeallocationStack..StackBase) the
+guard moves one page down and StackLimit follows, without an exception;
+when only the never-committed bottom page is left, STATUS_STACK_OVERFLOW
+is raised (the touched page stays usable for the handler). Anywhere else
+the program gets STATUS_GUARD_PAGE_VIOLATION (read/write, address). The
+main thread's stack is a 1 MiB reservation with 16 KiB committed and a
+guard page below, as Windows lays out stacks; NtCreateThread takes
+DeallocationStack from INITIAL_TEB.StackAllocationBase.
 
 **Virtual memory**: `nt::vad::Vad` tracks reservations (64 KiB aligned)
 as run-length lists of per-page state (committed + protection), so query

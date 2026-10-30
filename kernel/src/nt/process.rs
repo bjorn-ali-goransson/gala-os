@@ -87,7 +87,11 @@ impl Process {
         loop {
             let result = op(&mut self.space.lock());
             match result {
-                Err(fault) if vm::resolve_fault(self, fault.address, kind) => continue,
+                Err(fault)
+                    if vm::resolve_fault(self, fault.address, kind) == vm::Fault::Resolved =>
+                {
+                    continue;
+                }
                 other => return other,
             }
         }
@@ -286,17 +290,21 @@ pub fn spawn_from_pe(
     let base = map_image(&mut space, &mut vad, &image)?;
     let id = thread::next_id();
 
-    // Main thread stack: committed demand-zero pages above an uncommitted
-    // guard page.
-    let stack_bottom = layout::STACK_TOP - layout::STACK_SIZE;
+    // Main thread stack, laid out as Windows does: a reservation whose top
+    // pages are committed, with a guard page below them that moves down as
+    // the stack grows (`vm::resolve_fault`); the bottom page stays reserved.
+    // TODO: honour SizeOfStackReserve/SizeOfStackCommit.
+    let stack_bottom = layout::STACK_TOP - layout::STACK_SIZE - PAGE_SIZE;
+    let stack_limit = layout::STACK_TOP - layout::STACK_COMMIT;
     vad.reserve(
-        Some(stack_bottom - PAGE_SIZE),
+        Some(stack_bottom),
         layout::STACK_SIZE + PAGE_SIZE,
         vad::PAGE_READWRITE,
         vad::MEM_PRIVATE,
         false,
     )?;
-    vad.commit(stack_bottom, layout::STACK_SIZE, vad::PAGE_READWRITE)?;
+    vad.commit(stack_limit, layout::STACK_COMMIT, vad::PAGE_READWRITE)?;
+    vad.commit(stack_limit - PAGE_SIZE, PAGE_SIZE, vad::PAGE_READWRITE | vad::PAGE_GUARD)?;
 
     super::kuser::map_into(&mut space, &mut vad)?;
 
@@ -391,7 +399,8 @@ pub fn spawn_from_pe(
     gpr[4] = layout::STACK_TOP - 0x28;
     let start = UserRegs { gpr, rip: base + u64::from(image.entry_rva), rflags: 0 };
     let started = through_ntdll(&process, &start).and_then(|regs| {
-        thread::create(&process, regs, (layout::STACK_TOP, stack_bottom), false).map(|t| (t, regs))
+        thread::create(&process, regs, (layout::STACK_TOP, stack_limit, stack_bottom), false)
+            .map(|t| (t, regs))
     });
     let (main, regs) = match started {
         Ok(t) => t,
@@ -487,8 +496,19 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
             e if e & (1 << 1) != 0 => AccessKind::Write,
             _ => AccessKind::Read,
         };
-        if vm::resolve_fault(&process, addr, kind) {
-            return; // retry the instruction
+        match vm::resolve_fault(&process, addr, kind) {
+            vm::Fault::Resolved => return, // retry the instruction
+            vm::Fault::Raise(status) => {
+                if !deliver_to_user(&process, frame, status, cr2) {
+                    warn!(
+                        "user exception: {:#x} at rip {:#x} (cr2 {addr:#x})",
+                        status.0, frame.rip
+                    );
+                    terminate_current(status);
+                }
+                return;
+            }
+            vm::Fault::Denied => {}
         }
     }
     let status = match vector {
@@ -553,7 +573,7 @@ fn deliver_to_user(
     let rip = if status == NtStatus::BREAKPOINT { frame.rip.wrapping_sub(1) } else { frame.rip };
     let info: &[u64] = match status {
         NtStatus::BREAKPOINT => &[0],
-        NtStatus::ACCESS_VIOLATION => {
+        NtStatus::ACCESS_VIOLATION | NtStatus::GUARD_PAGE_VIOLATION | NtStatus::STACK_OVERFLOW => {
             // 0 = read, 1 = write, 8 = execute (DEP).
             let kind = match frame.error_code {
                 e if e & (1 << 4) != 0 => 8,

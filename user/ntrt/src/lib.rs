@@ -460,6 +460,52 @@ pub fn create_thread(
     (st, h, cid[1])
 }
 
+pub const PAGE_GUARD: u32 = 0x100;
+
+/// Creates a thread at `entry(arg)` with a Windows-style stack: `reserve`
+/// bytes reserved, the top `commit` bytes committed, and a guard page below
+/// them that the system moves down as the stack grows.
+/// Returns (status, handle, thread id).
+pub fn create_thread_with_stack(
+    entry: extern "C" fn(usize) -> !,
+    arg: usize,
+    reserve: usize,
+    commit: usize,
+) -> (NtStatus, Handle, usize) {
+    let (st, base, size) = allocate(0, reserve, MEM_RESERVE, PAGE_READWRITE);
+    if st != STATUS_SUCCESS {
+        return (st, Handle(0), 0);
+    }
+    let top = base + size;
+    let limit = top - commit;
+    let st = allocate(limit, commit, MEM_COMMIT, PAGE_READWRITE).0;
+    if st != STATUS_SUCCESS {
+        return (st, Handle(0), 0);
+    }
+    let st = allocate(limit - 0x1000, 0x1000, MEM_COMMIT, PAGE_READWRITE | PAGE_GUARD).0;
+    if st != STATUS_SUCCESS {
+        return (st, Handle(0), 0);
+    }
+    let ctx = Context::for_thread(entry, arg, top);
+    let initial_teb = [0, 0, top, limit, base];
+    let mut h = Handle(0);
+    let mut cid = [0usize; 2];
+    // SAFETY: all pointers are valid for the call.
+    let st = unsafe {
+        ntrt_nt_create_thread(
+            &mut h,
+            THREAD_ALL_ACCESS,
+            core::ptr::null(),
+            CURRENT_PROCESS,
+            &mut cid,
+            &ctx,
+            &initial_teb,
+            0,
+        )
+    };
+    (st, h, cid[1])
+}
+
 /// Returns (status, previous suspend count).
 pub fn resume_thread(h: Handle) -> (NtStatus, u32) {
     let mut prev = 0xffff_ffff;

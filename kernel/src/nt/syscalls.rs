@@ -855,7 +855,13 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
     // INITIAL_TEB { OldStackBase, OldStackLimit, StackBase, StackLimit, StackAllocationBase }
     let stack_base = tri!(call.read_u64(teb_ptr + 16));
     let stack_limit = tri!(call.read_u64(teb_ptr + 24));
-    let object = tri!(thread::create(&call.process, regs, (stack_base, stack_limit), suspended));
+    let stack_bottom = tri!(call.read_u64(teb_ptr + 32));
+    let object = tri!(thread::create(
+        &call.process,
+        regs,
+        (stack_base, stack_limit, stack_bottom),
+        suspended
+    ));
     let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     let tid = t.id;
     let status = call.return_handle(out, object.clone(), access, 0);

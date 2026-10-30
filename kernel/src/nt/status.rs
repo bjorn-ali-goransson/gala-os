@@ -40,6 +40,7 @@ impl NtStatus {
     pub const INTEGER_DIVIDE_BY_ZERO: NtStatus = NtStatus(0xc000_0094);
     pub const PRIVILEGED_INSTRUCTION: NtStatus = NtStatus(0xc000_0096);
     pub const BREAKPOINT: NtStatus = NtStatus(0x8000_0003);
+    pub const GUARD_PAGE_VIOLATION: NtStatus = NtStatus(0x8000_0001);
     pub const BUFFER_OVERFLOW: NtStatus = NtStatus(0x8000_0005);
     pub const NO_MORE_FILES: NtStatus = NtStatus(0x8000_0006);
     pub const NO_SUCH_FILE: NtStatus = NtStatus(0xc000_000f);

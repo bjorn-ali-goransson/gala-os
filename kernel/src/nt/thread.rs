@@ -70,16 +70,35 @@ pub fn current() -> Option<ObjectRef> {
     THREADS.lock().iter().find(|o| *as_thread(o).sched_id.lock() == Some(me)).cloned()
 }
 
+/// The current thread's TEB and its stack reservation `[bottom, base)`
+/// (DeallocationStack, StackBase), if it is a thread of `process`.
+pub fn current_stack(process: &Process) -> Option<(u64, u64, u64)> {
+    let object = current()?;
+    let t = as_thread(&object);
+    if !core::ptr::eq(&*t.process, process) {
+        return None;
+    }
+    let mut space = process.space.lock();
+    let mut word = |off: u64| {
+        let mut b = [0u8; 8];
+        space.read(t.teb + off, &mut b).ok().map(|()| u64::from_le_bytes(b))
+    };
+    let base = word(teb::STACK_BASE)?;
+    let bottom = word(teb::DEALLOCATION_STACK)?;
+    (bottom != 0 && bottom < base).then_some((t.teb, bottom, base))
+}
+
 fn by_id(id: u64) -> Option<ObjectRef> {
     THREADS.lock().iter().find(|o| as_thread(o).id == id).cloned()
 }
 
 /// Creates a user thread in `process` that starts with `regs` once resumed
-/// (if `suspended`). `stack` is `(base, limit)` for the TEB.
+/// (if `suspended`). `stack` is `(base, limit, allocation base)` for the
+/// TEB (StackBase, StackLimit, DeallocationStack).
 pub fn create(
     process: &KArc<Process>,
     regs: UserRegs,
-    stack: (u64, u64),
+    stack: (u64, u64, u64),
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
     if !regs.is_valid() {
@@ -127,7 +146,7 @@ pub fn create(
 fn allocate_teb(
     process: &Process,
     id: u64,
-    (stack_base, stack_limit): (u64, u64),
+    (stack_base, stack_limit, stack_bottom): (u64, u64, u64),
 ) -> Result<u64, NtStatus> {
     let size = teb::PAGES * PAGE_SIZE;
     let addr = {
@@ -148,6 +167,7 @@ fn allocate_teb(
     let put = |off: u64, v: u64| process.write_u64(addr + off, v).map_err(|_| NtStatus::NO_MEMORY);
     put(teb::STACK_BASE, stack_base)?;
     put(teb::STACK_LIMIT, stack_limit)?;
+    put(teb::DEALLOCATION_STACK, stack_bottom)?;
     put(teb::SELF, addr)?;
     put(teb::CLIENT_ID_PROCESS, process.id)?;
     put(teb::CLIENT_ID_THREAD, id)?;
