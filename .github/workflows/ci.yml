@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU, OVMF, xorriso
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: |
+          cargo clippy -p kernel --target x86_64-unknown-none -- -D warnings
+          cargo clippy -p kernel --lib --tests -- -D warnings
+          cargo clippy -p xtask -- -D warnings
+      - name: Unit tests and QEMU boot test
+        run: cargo xtask test

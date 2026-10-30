@@ -1,0 +1,18 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+test = true
+bench = false
+
+[[bin]]
+name = "kernel"
+test = false
+bench = false
+
+[dependencies]
+spin = { version = "0.12.3", default-features = false, features = ["spin_mutex"] }

@@ -1,0 +1,35 @@
+# Third-party code and provenance
+
+Every borrowed component, and every piece of code written from a third-party
+specification or source, is listed here with its origin and license. This
+matters if the project is ever released (Wine is LGPL, ReactOS mostly GPL).
+
+Rules for this file:
+- Add an entry in the same commit that introduces the borrowed code or
+  dependency.
+- Record what was used: the code itself (copied/adapted), or only a
+  specification or behavior description (written from scratch).
+- Never list, and never use, disassembly, decompiled code, or leaked Windows
+  source (see `docs/CLEAN_ROOM.md`).
+
+## Shipped in the boot image (not linked into the kernel)
+
+| Component | Version | Source | License | How it is used |
+|---|---|---|---|---|
+| Limine bootloader | `v11.4.1-binary` (commit `5be26a73d7b7`) | github.com/limine-bootloader/limine | BSD-2-Clause | Prebuilt `BOOTX64.EFI` and `limine-uefi-cd.bin`, fetched by `cargo xtask` into `target/` and copied onto the ISO. Not committed. |
+
+## Rust crate dependencies (linked into the kernel)
+
+| Crate | Version | License | Purpose |
+|---|---|---|---|
+| `spin` | 0.12.3 | MIT | Spinlock for the serial console. |
+
+The `xtask` host tool has no dependencies beyond `std`.
+
+## Written from third-party specifications (no code copied)
+
+| Our code | Specification | Spec license |
+|---|---|---|
+| `kernel/src/boot/limine.rs` | Limine boot protocol, `PROTOCOL.md` in github.com/limine-bootloader/limine-protocol (fetched 2026-10-30) | BSD-2-Clause (`limine.h`); request IDs and struct layouts taken from the spec |
+| `kernel/src/arch/x86_64/serial.rs` | Generic 16550 UART register description (public datasheets / OSDev wiki) | n/a |
+| `kernel/src/arch/x86_64/qemu.rs` | QEMU `isa-debug-exit` device documentation | n/a |

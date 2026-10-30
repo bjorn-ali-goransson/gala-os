@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["kernel", "xtask"]
+# The kernel only builds for x86_64-unknown-none; build it via `cargo xtask`.
+default-members = ["xtask"]
+
+[workspace.package]
+edition = "2024"
+license = "LicenseRef-Proprietary"
+publish = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+debug = true
