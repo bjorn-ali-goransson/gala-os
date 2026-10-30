@@ -282,7 +282,8 @@ pub fn spawn_from_pe(
     data: &[u8],
 ) -> Result<(KArc<Process>, ObjectRef), LoadError> {
     let image = PeImage::parse(data).map_err(LoadError::Pe)?;
-    if image.has_imports() {
+    // Binding imports is the user-mode loader's job (ntdll), as on Windows.
+    if image.has_imports() && super::ntdll::get().is_none() {
         return Err(LoadError::ImportsNotSupported);
     }
     let mut space = UserSpace::new()?;

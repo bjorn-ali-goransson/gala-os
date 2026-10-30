@@ -66,6 +66,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   stack guard moving down with TEB StackLimit, STATUS_STACK_OVERFLOW at
   the end of the reservation; `create_thread_with_stack` in ntrt;
   `guard_test`
+- Executables with imports: accepted when an ntdll is present; testntdll
+  binds them from the exe's directory (by name and ordinal, IAT under
+  NtProtectVirtualMemory, DllMain attach); `import_test` (raw-dylib)
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
@@ -76,11 +79,10 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
    file-backed data sections, the kernel loader using image sections, and
    loading DLL imports (needed for ntdll and 7).
 6e. **User-mode loader support**: what a real ntdll's loader needs next:
-   NtOpenFile/NtCreateSection(SEC_IMAGE) on DLLs by path from user mode
-   (works), KnownDlls (`\KnownDlls` section objects), NtQuerySystem-
-   Information basics, NtSetInformationProcess/Thread bits, TLS slots in
-   the TEB, PEB->Ldr built by our test ntdll to resolve an exe's imports
-   from testdll; boot cmdline `args=` for the command line.
+   KnownDlls (`\KnownDlls` section objects), NtQuerySystemInformation
+   basics, NtSetInformationProcess/Thread bits, TLS slots in the TEB;
+   boot cmdline `args=` for the command line. (testntdll: imports of
+   DLLs, PEB->Ldr, forwarders.)
 7b. **Exceptions, rest**: NtRaiseException (first/second chance),
    SizeOfStackReserve/Commit from the image, XMM/x87 state
    in CONTEXT (save/restore with FXSAVE/XSAVE), SEH unwinding is user-mode

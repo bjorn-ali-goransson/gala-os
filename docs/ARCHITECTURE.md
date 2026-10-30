@@ -213,6 +213,12 @@ NtContinue, which returns through IRETQ (`syscall::continue_with`) because
 SYSRET cannot restore rcx/r11. Without an ntdll, threads start at the entry
 point directly. MemoryMappedFilenameInformation reports the NT path of the
 file behind an image view or the executable.
+Executables with imports are accepted only when an ntdll is present:
+binding them is the user-mode loader's job, as on Windows. gala's test
+ntdll does a minimal version in LdrInitializeThunk (map each DLL from the
+executable's directory with NtOpenFile + NtCreateSection(SEC_IMAGE) +
+NtMapViewOfSection, fill the IAT under NtProtectVirtualMemory, call the
+DLL entry point); a real ntdll needs no kernel support beyond those calls.
 
 **User-mode exceptions**: a CPU exception from user mode that the fault
 path does not resolve becomes an NTSTATUS (#DE INTEGER_DIVIDE_BY_ZERO, #BP

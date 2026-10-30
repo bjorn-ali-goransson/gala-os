@@ -59,6 +59,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "import_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "kernel"
 version = "0.1.0"
 dependencies = [
