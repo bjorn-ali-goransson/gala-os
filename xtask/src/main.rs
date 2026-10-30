@@ -279,8 +279,15 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
     Ok(iso)
 }
 
-/// Clones the pinned Limine binary release into the target directory once.
+/// Clones the pinned Limine binary release into the target directory once
+/// (once per xtask run too: ISOs are built in parallel, and concurrent
+/// clones into one directory fail).
 fn fetch_limine() -> Result<PathBuf> {
+    static LIMINE: std::sync::OnceLock<Result<PathBuf>> = std::sync::OnceLock::new();
+    LIMINE.get_or_init(fetch_limine_once).clone()
+}
+
+fn fetch_limine_once() -> Result<PathBuf> {
     // Under the repository's own target/ even with CARGO_TARGET_DIR set, so
     // the host and the Docker image (target/docker) share one checkout.
     let dir = root().join("target").join(format!("limine-{LIMINE_TAG}"));
