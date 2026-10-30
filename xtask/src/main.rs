@@ -32,6 +32,7 @@ struct Dll {
 /// exported to user/bin).
 const USER_DLLS: &[Dll] = &[
     Dll { package: "testdll", file: "testdll.dll", exported_as: "testdll.dll" },
+    Dll { package: "testdll2", file: "testdll2.dll", exported_as: "testdll2.dll" },
     // Built as ntdll.dll (its export directory says so); exported under
     // another name so user/bin never holds a file called ntdll.dll.
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
@@ -53,6 +54,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("iocp_test", "ntdll.dll", "Windows/System32"),
     ("context_test", "ntdll.dll", "Windows/System32"),
     ("timer_test", "ntdll.dll", "Windows/System32"),
+    ("loader_test", "ntdll.dll", "Windows/System32"),
+    ("loader_test", "testdll.dll", "gala"),
+    ("loader_test", "testdll2.dll", "gala"),
 ];
 const USER_PROGRAMS: &[&str] = &[
     "hello",
@@ -86,6 +90,7 @@ const USER_PROGRAMS: &[&str] = &[
     "iocp_test",
     "context_test",
     "timer_test",
+    "loader_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -360,6 +365,12 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=timer_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["timer_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "loader_test",
+        cmdline: "qemu_exit run=loader_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["loader_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "context_test",

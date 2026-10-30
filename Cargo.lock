@@ -143,6 +143,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "loader_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "ntrt"
 version = "0.1.0"
 
@@ -203,6 +210,10 @@ dependencies = [
 
 [[package]]
 name = "testdll"
+version = "0.1.0"
+
+[[package]]
+name = "testdll2"
 version = "0.1.0"
 
 [[package]]

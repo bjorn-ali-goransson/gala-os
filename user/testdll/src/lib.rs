@@ -24,9 +24,18 @@ pub extern "C" fn gala_get_value() -> u64 {
     unsafe { core::ptr::read_volatile(GALA_VALUE_PTR) }
 }
 
-/// Entry point required by our link flags; a DllMain that does nothing.
+/// Number of DLL_PROCESS_ATTACH calls DllMain has seen.
 #[unsafe(no_mangle)]
-pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved: usize) -> i32 {
+pub static mut GALA_ATTACH_COUNT: u64 = 0;
+
+/// Entry point required by our link flags; a DllMain that counts attaches.
+#[unsafe(no_mangle)]
+pub extern "system" fn mainCRTStartup(_instance: usize, reason: u32, _reserved: usize) -> i32 {
+    if reason == 1 {
+        // SAFETY: the loader calls DllMain with the loader lock held, so
+        // nothing else touches the counter at the same time.
+        unsafe { GALA_ATTACH_COUNT += 1 };
+    }
     1
 }
 

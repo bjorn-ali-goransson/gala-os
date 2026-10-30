@@ -110,6 +110,11 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 - Waitable timers (notification/synchronization, relative/absolute,
   periodic, cancel, query, APC routine, named) on a kernel timer thread;
   `timer_test`
+- Dynamic loading in the test ntdll: LdrLoadDll/LdrGetDllHandle/
+  LdrGetProcedureAddress/LdrUnloadDll over a reference-counted module
+  table, imports of DLLs bound recursively, DllMain attach/detach once;
+  images without a relocation directory are relocatable unless
+  IMAGE_FILE_RELOCS_STRIPPED; `loader_test` (with `testdll2`)
 
 ## Next
 3b. **Object manager, rest**: keyed events, OBJ_PERMANENT/NtMakeTemporary-
@@ -119,7 +124,7 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 6e. **User-mode loader support**: what a real ntdll's loader needs next:
    KnownDlls (`\KnownDlls` section objects), more NtQuerySystemInformation
    classes, NtSetInformationProcess/Thread bits, TLS slots in the TEB;
-   (testntdll: imports of DLLs, PEB->Ldr, forwarders.)
+   (testntdll: PEB->Ldr, forwarders, search paths, a loader lock.)
 7b. **Exceptions, rest**: NtRaiseException (first/second chance),
    SizeOfStackReserve/Commit from the image, AVX state (XSAVE, CONTEXT_EX)
    and FltSave in NtCreateThread, SEH unwinding is user-mode

@@ -5,8 +5,11 @@
 //! thread's real start; once user-mode initialization is done, the thunk
 //! resumes that context with `NtContinue`.
 //!
-//! This one only records that it ran (`GalaTestNtdllState`, which
-//! `startup_test` reads) and continues.
+//! This one records that it ran (`GalaTestNtdllState`, which
+//! `startup_test` reads), binds the executable's imports and continues. It
+//! also has a small loader (LdrLoadDll and friends: DLLs from the
+//! executable's directory, reference counted), vectored exception
+//! handling, the APC dispatcher and the system call stubs tests use.
 
 #![no_std]
 #![allow(non_snake_case, non_upper_case_globals)]
@@ -45,6 +48,7 @@ macro_rules! syscall_stubs {
 // Numbers of the pinned build (to be verified), as in ntrt.
 syscall_stubs! {
     NtClose = 0x0f, fn(h: usize);
+    NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,
         offset: *mut u64, size: *mut usize, inherit: u32, kind: u32, protect: u32
@@ -264,17 +268,194 @@ fn map_dll(dll: &[u8]) -> Result<usize, u32> {
     }
 }
 
-/// Binds the imports of the image at `base`: maps each DLL, fills the IAT
-/// and runs the DLL's entry point (DLL_PROCESS_ATTACH).
-// TODO: the DLLs' own imports, a module list (PEB->Ldr), TLS, ordering.
-fn bind_imports(base: usize) -> Result<(), u32> {
+const STATUS_NO_MEMORY: u32 = 0xc000_0017;
+const STATUS_PROCEDURE_NOT_FOUND: u32 = 0xc000_007a;
+const STATUS_ORDINAL_NOT_FOUND: u32 = 0xc000_0138;
+const STATUS_DLL_INIT_FAILED: u32 = 0xc000_0142;
+
+const MAX_MODULES: usize = 32;
+const MAX_DEPENDENCIES: usize = 16;
+const MAX_NAME: usize = 64;
+/// Reference count of modules that are never unloaded (ntdll, the exe).
+const PINNED: u32 = u32::MAX;
+
+/// A loaded image: its base (0 for a free slot), reference count, base
+/// name (lowercase ASCII), whether DllMain has seen DLL_PROCESS_ATTACH,
+/// and the modules its imports hold references on.
+#[derive(Clone, Copy)]
+struct Module {
+    base: usize,
+    refs: u32,
+    name: [u8; MAX_NAME],
+    name_len: usize,
+    attached: bool,
+    dependencies: [usize; MAX_DEPENDENCIES],
+    dependency_count: usize,
+}
+
+const FREE: Module = Module {
+    base: 0,
+    refs: 0,
+    name: [0; MAX_NAME],
+    name_len: 0,
+    attached: false,
+    dependencies: [0; MAX_DEPENDENCIES],
+    dependency_count: 0,
+};
+
+// TODO: PEB->Ldr lists and the loader lock, once processes have more than
+// one thread using the loader.
+struct Modules(core::cell::UnsafeCell<[Module; MAX_MODULES]>);
+
+// SAFETY: only used single-threaded so far (see the TODO above).
+unsafe impl Sync for Modules {}
+
+static MODULES: Modules = Modules(core::cell::UnsafeCell::new([FREE; MAX_MODULES]));
+
+/// Runs `f` on the module table. `f` must not call back into the loader
+/// (no DllMain calls inside).
+fn with_modules<R>(f: impl FnOnce(&mut [Module; MAX_MODULES]) -> R) -> R {
+    // SAFETY: single-threaded (see `Modules`), and `f` does not re-enter.
+    f(unsafe { &mut *MODULES.0.get() })
+}
+
+/// The slot of the module named `name` (already normalized).
+fn find_module(name: &[u8]) -> Option<usize> {
+    with_modules(|m| m.iter().position(|m| m.base != 0 && &m.name[..m.name_len] == name))
+}
+
+/// Records a new module; returns its slot.
+fn add_module(name: &[u8], base: usize, refs: u32) -> Result<usize, u32> {
+    if name.len() > MAX_NAME {
+        return Err(STATUS_DLL_NOT_FOUND);
+    }
+    with_modules(|m| {
+        let i = m.iter().position(|m| m.base == 0).ok_or(STATUS_NO_MEMORY)?;
+        m[i] = Module { base, refs, name_len: name.len(), ..FREE };
+        m[i].name[..name.len()].copy_from_slice(name);
+        Ok(i)
+    })
+}
+
+/// A module's normalized name: the file part of `path`, lowercased, with
+/// ".dll" appended if it has no extension.
+fn normalize(path: impl Iterator<Item = u16>, out: &mut [u8; MAX_NAME]) -> Result<usize, u32> {
+    let mut n = 0;
+    let mut dot = false;
+    for c in path {
+        if c == u16::from(b'\\') || c == u16::from(b'/') {
+            n = 0;
+            dot = false;
+            continue;
+        }
+        let c = u8::try_from(c).ok().filter(u8::is_ascii).ok_or(STATUS_DLL_NOT_FOUND)?;
+        *out.get_mut(n).ok_or(STATUS_DLL_NOT_FOUND)? = c.to_ascii_lowercase();
+        dot |= c == b'.';
+        n += 1;
+    }
+    if !dot {
+        out.get_mut(n..n + 4).ok_or(STATUS_DLL_NOT_FOUND)?.copy_from_slice(b".dll");
+        n += 4;
+    }
+    Ok(n)
+}
+
+/// The entry point of the image at `base`, if it has one.
+fn entry_point(base: usize) -> Option<extern "system" fn(usize, u32, usize) -> i32> {
+    let rva = rd32(base + rd32(base + 0x3c) as usize + 24 + 16) as usize;
+    // SAFETY: the image's entry point (DllMain signature for a DLL).
+    (rva != 0).then(|| unsafe {
+        core::mem::transmute::<usize, extern "system" fn(usize, u32, usize) -> i32>(base + rva)
+    })
+}
+
+/// Loads the DLL `name` (normalized) or takes another reference on it:
+/// maps it from the executable's directory, binds its imports (loading
+/// those DLLs first) and calls its DllMain with DLL_PROCESS_ATTACH once.
+fn load_module(name: &[u8]) -> Result<usize, u32> {
+    if let Some(i) = find_module(name) {
+        return Ok(with_modules(|m| {
+            if m[i].refs != PINNED {
+                m[i].refs += 1;
+            }
+            i
+        }));
+    }
+    let base = map_dll(name)?;
+    let slot = match add_module(name, base, 1) {
+        Ok(slot) => slot,
+        Err(status) => {
+            NtUnmapViewOfSection(-1, base);
+            return Err(status);
+        }
+    };
+    let attach = || {
+        bind_imports(base, Some(slot))?;
+        with_modules(|m| m[slot].attached = true);
+        match entry_point(base) {
+            Some(entry) if entry(base, 1, 0) == 0 => Err(STATUS_DLL_INIT_FAILED),
+            _ => Ok(()),
+        }
+    };
+    if let Err(status) = attach() {
+        unload_module(slot);
+        return Err(status);
+    }
+    Ok(slot)
+}
+
+/// Drops a reference on the module in `slot`; the last one detaches it
+/// (DLL_PROCESS_DETACH), unmaps it and releases its dependencies.
+fn unload_module(slot: usize) {
+    let module = with_modules(|m| {
+        if m[slot].refs == PINNED {
+            return None;
+        }
+        m[slot].refs -= 1;
+        (m[slot].refs == 0).then(|| core::mem::replace(&mut m[slot], FREE))
+    });
+    let Some(module) = module else { return };
+    if module.attached
+        && let Some(entry) = entry_point(module.base)
+    {
+        entry(module.base, 0, 0); // DLL_PROCESS_DETACH
+    }
+    NtUnmapViewOfSection(-1, module.base);
+    for &dependency in module.dependencies[..module.dependency_count].iter().rev() {
+        unload_module(dependency);
+    }
+}
+
+/// Binds the imports of the image at `base` (the module in `slot`, or the
+/// executable): loads each DLL and fills the IAT.
+// TODO: TLS, delay-load imports, forwarders, bound imports.
+fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
     let (rva, _) = directory(base, 1);
     if rva == 0 {
         return Ok(());
     }
     let mut desc = base + rva;
     while rd32(desc + 12) != 0 {
-        let dll = map_dll(c_str(base + rd32(desc + 12) as usize))?;
+        let mut name = [0u8; MAX_NAME];
+        let len = normalize(
+            c_str(base + rd32(desc + 12) as usize).iter().map(|&b| u16::from(b)),
+            &mut name,
+        )?;
+        let dependency = load_module(&name[..len])?;
+        if let Some(slot) = slot {
+            let recorded = with_modules(|m| {
+                let n = m[slot].dependency_count;
+                let free = m[slot].dependencies.get_mut(n)?;
+                *free = dependency;
+                m[slot].dependency_count += 1;
+                Some(())
+            });
+            if recorded.is_none() {
+                unload_module(dependency);
+                return Err(STATUS_NO_MEMORY);
+            }
+        }
+        let dll = with_modules(|m| m[dependency].base);
         let lookup = base + rd32(if rd32(desc) != 0 { desc } else { desc + 16 }) as usize;
         let iat = base + rd32(desc + 16) as usize;
         let mut count = 0;
@@ -298,14 +479,144 @@ fn bind_imports(base: usize) -> Result<(), u32> {
         }
         let (mut at, mut size, mut ignored) = (iat, count * 8, 0u32);
         NtProtectVirtualMemory(-1, &mut at, &mut size, old, &mut ignored);
-        let entry_rva = rd32(dll + rd32(dll + 0x3c) as usize + 24 + 16) as usize;
-        if entry_rva != 0 {
-            // SAFETY: the DLL's entry point (DllMain signature).
-            let entry: extern "system" fn(usize, u32, usize) -> i32 =
-                unsafe { core::mem::transmute(dll + entry_rva) };
-            entry(dll, 1, 0); // DLL_PROCESS_ATTACH
-        }
         desc += 20;
+    }
+    Ok(())
+}
+
+/// The normalized name in a UNICODE_STRING.
+fn unicode_name(name: *const UnicodeString, out: &mut [u8; MAX_NAME]) -> Result<usize, u32> {
+    if name.is_null() {
+        return Err(STATUS_DLL_NOT_FOUND);
+    }
+    // SAFETY: the caller passes a valid UNICODE_STRING.
+    let chars = unsafe {
+        let name = &*name;
+        core::slice::from_raw_parts(name.buffer, usize::from(name.length) / 2)
+    };
+    normalize(chars.iter().copied(), out)
+}
+
+/// LdrLoadDll(DllPath, DllCharacteristics, DllName, DllHandle): loads a DLL
+/// from the executable's directory (the search path is ignored).
+///
+/// # Safety
+/// `name` must be a valid UNICODE_STRING and `handle` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn LdrLoadDll(
+    _path: *const u16,
+    _characteristics: *const u32,
+    name: *const UnicodeString,
+    handle: *mut usize,
+) -> u32 {
+    let mut buf = [0u8; MAX_NAME];
+    let loaded = unicode_name(name, &mut buf).and_then(|n| load_module(&buf[..n]));
+    match loaded {
+        Ok(slot) => {
+            // SAFETY: the caller passes a writable handle.
+            unsafe { handle.write(with_modules(|m| m[slot].base)) };
+            STATUS_SUCCESS
+        }
+        Err(status) => status,
+    }
+}
+
+/// LdrGetDllHandle(DllPath, DllCharacteristics, DllName, DllHandle): the
+/// base of a loaded module.
+///
+/// # Safety
+/// As for `LdrLoadDll`.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn LdrGetDllHandle(
+    _path: *const u16,
+    _characteristics: *const u32,
+    name: *const UnicodeString,
+    handle: *mut usize,
+) -> u32 {
+    let mut buf = [0u8; MAX_NAME];
+    let found = unicode_name(name, &mut buf)
+        .and_then(|n| find_module(&buf[..n]).ok_or(STATUS_DLL_NOT_FOUND));
+    match found {
+        Ok(slot) => {
+            // SAFETY: the caller passes a writable handle.
+            unsafe { handle.write(with_modules(|m| m[slot].base)) };
+            STATUS_SUCCESS
+        }
+        Err(status) => status,
+    }
+}
+
+#[repr(C)]
+pub struct AnsiString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *const u8,
+}
+
+/// LdrGetProcedureAddress(DllHandle, ProcedureName, ProcedureNumber,
+/// ProcedureAddress): an export by name, or by ordinal if the name is null.
+///
+/// # Safety
+/// `module` must be a loaded image, `name` null or a valid ANSI_STRING,
+/// `address` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn LdrGetProcedureAddress(
+    module: usize,
+    name: *const AnsiString,
+    ordinal: u32,
+    address: *mut usize,
+) -> u32 {
+    let found = if name.is_null() {
+        export(module, &[], ordinal).ok_or(STATUS_ORDINAL_NOT_FOUND)
+    } else {
+        // SAFETY: the caller passes a valid ANSI_STRING.
+        let name = unsafe {
+            let name = &*name;
+            core::slice::from_raw_parts(name.buffer, usize::from(name.length))
+        };
+        match name {
+            [] => Err(STATUS_PROCEDURE_NOT_FOUND),
+            _ => export(module, name, 0).ok_or(STATUS_PROCEDURE_NOT_FOUND),
+        }
+    };
+    match found {
+        Ok(target) => {
+            // SAFETY: the caller passes a writable address.
+            unsafe { address.write(target) };
+            STATUS_SUCCESS
+        }
+        Err(status) => status,
+    }
+}
+
+/// LdrUnloadDll(DllHandle): drops a reference taken by LdrLoadDll.
+#[unsafe(no_mangle)]
+pub extern "system" fn LdrUnloadDll(module: usize) -> u32 {
+    match with_modules(|m| m.iter().position(|m| m.base != 0 && m.base == module)) {
+        Some(slot) => {
+            unload_module(slot);
+            STATUS_SUCCESS
+        }
+        None => STATUS_DLL_NOT_FOUND,
+    }
+}
+
+/// Records ntdll and the executable as pinned modules.
+fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
+    add_module(b"ntdll.dll", ntdll, PINNED)?;
+    // SAFETY: gs:[0x60] is the PEB; ProcessParameters->ImagePathName is
+    // filled in by the kernel.
+    let image_path = unsafe {
+        let peb: usize;
+        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        let params = rd64(peb + 0x20) as usize;
+        let len = usize::from(*((params + 0x60) as *const u16)) / 2;
+        core::slice::from_raw_parts(rd64(params + 0x68) as *const u16, len)
+    };
+    let mut name = [0u8; MAX_NAME];
+    // An executable whose name is not a plain ASCII one is just not listed.
+    if let Ok(n) = normalize(image_path.iter().copied(), &mut name) {
+        add_module(&name[..n], image, PINNED)?;
     }
     Ok(())
 }
@@ -330,7 +641,9 @@ pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base:
         core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
         rd64(peb + 0x10) as usize
     };
-    if let Err(status) = bind_imports(image) {
+    if let Err(status) = register_startup_modules(ntdll_base as usize, image)
+        .and_then(|()| bind_imports(image, None))
+    {
         NtTerminateProcess(-1, status);
     }
     NtContinue(context, 0);

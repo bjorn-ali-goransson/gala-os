@@ -40,7 +40,8 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     $name = [IO.Path]::GetFileNameWithoutExtension($exe.Name)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exe.FullName
-    # import_test loads testdll.dll from the executable's directory.
+    # import_test and loader_test load testdll*.dll from the executable's
+    # directory.
     $psi.WorkingDirectory = $here
     if ($arguments.ContainsKey($name)) { $psi.Arguments = $arguments[$name] }
     $psi.UseShellExecute = $false

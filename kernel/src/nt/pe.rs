@@ -206,7 +206,10 @@ impl<'a> PeImage<'a> {
         if entry_rva >= size_of_image {
             return Err(PeError::SectionOutOfBounds);
         }
-        image.relocatable = !relocs_stripped && image.directory(DIRECTORY_BASERELOC).size != 0;
+        // Only IMAGE_FILE_RELOCS_STRIPPED pins an image to its base: one
+        // without a relocation directory simply has nothing to fix up (PE
+        // format docs; lld omits an empty .reloc).
+        image.relocatable = !relocs_stripped;
         Ok(image)
     }
 
@@ -447,7 +450,7 @@ mod tests {
         d[0x44 + 19] = 0x20; // IMAGE_FILE_DLL
         let pe = PeImage::parse_image(&d).unwrap();
         assert!(pe.is_dll);
-        assert!(!pe.relocatable, "no relocation directory");
+        assert!(pe.relocatable, "no fixups, but not IMAGE_FILE_RELOCS_STRIPPED");
         let mut out = vec![0xffu8; pe.size_of_image as usize];
         pe.lay_out(&mut out);
         assert_eq!(&out[0..2], b"MZ");
