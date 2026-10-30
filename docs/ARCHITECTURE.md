@@ -266,6 +266,15 @@ reaches a non-directory object and hands it the rest of the path. File
 objects keep the granted access, share mode, synchronous flag and file
 position, and close their open in `Drop`. Boot modules appear read-only in
 `C:\gala`; `C:\Windows\System32` and `C:\Users\Public` exist.
+Names resolve from the volume root, or from an open directory file given
+as RootDirectory (no access needed on it). NtQueryDirectoryFile keeps a
+per-handle `DirScan` (mask fixed by the first query, "." and ".." outside
+the root, then children in NTFS collation order, resuming after the last
+returned name); an empty first result is STATUS_NO_SUCH_FILE, later ones
+STATUS_NO_MORE_FILES. Rename (FileRenameInformation, DELETE access) moves
+the node; FILE_DELETE_ON_CLOSE needs DELETE and takes effect when that open
+closes. The volume reports itself as an NTFS disk (FileFs* classes) with
+RAM as its size.
 
 **KUSER_SHARED_DATA** (`nt::kuser`): one kernel-owned `SharedPage`
 mapped read-only at 0x7FFE0000 into every process (`UserSpace::map_shared`

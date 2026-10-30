@@ -90,7 +90,7 @@ pub fn add_boot_file(name: &str, data: &'static [u8]) -> Result<(), NtStatus> {
     let gala = wide("gala")?;
     let name = wide(name)?;
     with_fs(|fs| {
-        let dir = fs.resolve(&[&gala]).map_err(fs_status)?;
+        let dir = fs.resolve(ramfs::ROOT, &[&gala]).map_err(fs_status)?;
         fs.add_static_file(dir, &name, data, time::system_time()).map_err(fs_status)?;
         Ok(())
     })
@@ -106,6 +106,7 @@ pub fn fs_status(e: FsError) -> NtStatus {
         FsError::SharingViolation => NtStatus::SHARING_VIOLATION,
         FsError::DeletePending => NtStatus::DELETE_PENDING,
         FsError::DirectoryNotEmpty => NtStatus::DIRECTORY_NOT_EMPTY,
+        FsError::AccessDenied => NtStatus::ACCESS_DENIED,
         FsError::NoMemory => NtStatus::NO_MEMORY,
     }
 }
@@ -121,22 +122,40 @@ pub struct FileObject {
     /// Opened for synchronous I/O: the file position is maintained.
     pub synchronous: bool,
     pub position: IrqMutex<u64>,
+    /// FILE_DELETE_ON_CLOSE: delete pending once this open closes.
+    delete_on_close: bool,
+    /// Directory enumeration state (NtQueryDirectoryFile).
+    pub scan: IrqMutex<Option<DirScan>>,
 }
 
 impl Drop for FileObject {
     fn drop(&mut self) {
         let (node, access, share) = (self.node, self.access, self.share);
         if let Some(fs) = FS.lock().as_mut() {
+            if self.delete_on_close {
+                // Fails for a non-empty directory, which then stays.
+                let _ = fs.set_delete_pending(node, true);
+            }
             fs.close(node, access, share);
         }
     }
 }
 
-/// Splits a `\\a\\b\\c` path (relative to a volume) into components.
-fn components(rest: &[u16]) -> Result<Vec<&[u16]>, NtStatus> {
+/// A file name relative to directory `start` on the volume.
+pub struct FilePath {
+    pub start: NodeId,
+    pub name: Vec<u16>,
+}
+
+/// Splits a `\\a\\b\\c` path (relative to the volume root) or an `a\\b`
+/// path (relative to a directory) into components.
+pub fn components(rest: &[u16], relative: bool) -> Result<Vec<&[u16]>, NtStatus> {
     let mut out = Vec::new();
-    let Some(body) = rest.strip_prefix(&[u16::from(b'\\')]) else {
-        return if rest.is_empty() { Ok(out) } else { Err(NtStatus::OBJECT_NAME_INVALID) };
+    let body = match rest.strip_prefix(&[u16::from(b'\\')]) {
+        Some(_) if relative => return Err(NtStatus::OBJECT_NAME_INVALID),
+        Some(body) => body,
+        None if relative || rest.is_empty() => rest,
+        None => return Err(NtStatus::OBJECT_NAME_INVALID),
     };
     for part in body.split(|&c| c == u16::from(b'\\')) {
         if part.is_empty() {
@@ -154,19 +173,19 @@ pub struct Created {
     pub information: u64,
 }
 
-/// Opens or creates `rest` on the volume `device` (NtCreateFile semantics).
+/// Opens or creates `path` (NtCreateFile semantics).
 pub fn create(
-    device: &ObjectRef,
-    rest: &[u16],
+    path: &FilePath,
     granted: u32,
     share_mask: u32,
     disposition: u32,
     options: u32,
 ) -> Result<Created, NtStatus> {
-    if !matches!(device.body, ObjectBody::Volume) {
-        return Err(NtStatus::OBJECT_TYPE_MISMATCH);
-    }
     if disposition > FILE_OVERWRITE_IF {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    let delete_on_close = options & FILE_DELETE_ON_CLOSE != 0;
+    if delete_on_close && granted & DELETE == 0 {
         return Err(NtStatus::INVALID_PARAMETER);
     }
     let want_dir = options & FILE_DIRECTORY_FILE != 0;
@@ -174,7 +193,8 @@ pub fn create(
     if want_dir && want_file {
         return Err(NtStatus::INVALID_PARAMETER);
     }
-    let parts = components(rest)?;
+    let start = path.start;
+    let parts = components(&path.name, start != ramfs::ROOT)?;
     let access = Access {
         read: granted & FILE_READ_DATA != 0,
         write: granted & (FILE_WRITE_DATA | FILE_APPEND_DATA) != 0,
@@ -188,9 +208,9 @@ pub fn create(
     let now = time::system_time();
     let (node, information) = with_fs(|fs| -> Result<(NodeId, u64), NtStatus> {
         let existing = match parts.last() {
-            None => Some(ramfs::ROOT),
+            None => Some(start),
             Some(last) => {
-                let parent = fs.parent_of(&parts).map_err(fs_status)?;
+                let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
                 fs.find(parent, last).map_err(fs_status)?
             }
         };
@@ -231,7 +251,7 @@ pub fn create(
                     return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
                 }
                 let last = parts.last().ok_or(NtStatus::OBJECT_NAME_INVALID)?;
-                let parent = fs.parent_of(&parts).map_err(fs_status)?;
+                let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
                 let node = fs.create(parent, last, want_dir, now).map_err(fs_status)?;
                 fs.open(node, access, share).map_err(fs_status)?;
                 Ok((node, FILE_CREATED))
@@ -247,16 +267,14 @@ pub fn create(
         share,
         synchronous: options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT) != 0,
         position: IrqMutex::new(0),
+        delete_on_close,
+        scan: IrqMutex::new(None),
     };
-    let delete_on_close = options & FILE_DELETE_ON_CLOSE != 0;
     let object = match KObject::new(ObjectBody::File(file)) {
         Ok(o) => o,
         // `file` was dropped inside, which closed the open.
         Err(_) => return Err(NtStatus::NO_MEMORY),
     };
-    if delete_on_close {
-        with_fs(|fs| fs.set_delete_pending(node, true)).map_err(fs_status)?;
-    }
     Ok(Created { object, information })
 }
 
@@ -287,4 +305,261 @@ pub fn standard_information(node: NodeId) -> Result<[u8; 24], NtStatus> {
         b[21] = u8::from(n.is_dir());
         Ok(b)
     })
+}
+
+/// Where a directory enumeration stands.
+pub struct DirScan {
+    /// The search mask, fixed by the first query on the handle.
+    pub mask: Vec<u16>,
+    /// "." and ".." returned so far (0..=2).
+    dots: u8,
+    /// The last returned name; enumeration resumes after it.
+    after: Option<Vec<u16>>,
+}
+
+impl DirScan {
+    pub fn new(mask: Vec<u16>) -> Self {
+        DirScan { mask, dots: 0, after: None }
+    }
+
+    pub fn at_start(&self) -> bool {
+        self.dots == 0 && self.after.is_none()
+    }
+
+    pub fn restart(&mut self) {
+        self.dots = 0;
+        self.after = None;
+    }
+}
+
+pub const FILE_DIRECTORY_INFORMATION: u32 = 1;
+pub const FILE_FULL_DIRECTORY_INFORMATION: u32 = 2;
+pub const FILE_BOTH_DIRECTORY_INFORMATION: u32 = 3;
+pub const FILE_NAMES_INFORMATION: u32 = 12;
+pub const FILE_ID_BOTH_DIRECTORY_INFORMATION: u32 = 37;
+pub const FILE_ID_FULL_DIRECTORY_INFORMATION: u32 = 38;
+
+/// (fixed size, FileName offset) of a directory information class.
+pub fn directory_class_layout(class: u32) -> Option<(usize, usize)> {
+    match class {
+        FILE_DIRECTORY_INFORMATION => Some((64, 64)),
+        FILE_FULL_DIRECTORY_INFORMATION => Some((68, 68)),
+        FILE_BOTH_DIRECTORY_INFORMATION => Some((94, 94)),
+        FILE_NAMES_INFORMATION => Some((12, 12)),
+        FILE_ID_BOTH_DIRECTORY_INFORMATION => Some((104, 104)),
+        FILE_ID_FULL_DIRECTORY_INFORMATION => Some((80, 80)),
+        _ => None,
+    }
+}
+
+/// The result of one NtQueryDirectoryFile call.
+pub struct Listing {
+    pub status: NtStatus,
+    /// The filled buffer (IoStatus.Information = its length).
+    pub data: Vec<u8>,
+}
+
+/// One directory entry to report.
+struct Entry<'a> {
+    node: &'a ramfs::Node,
+    name: &'a [u16],
+}
+
+fn put(b: &mut [u8], off: usize, v: &[u8]) {
+    b[off..off + v.len()].copy_from_slice(v);
+}
+
+/// Encodes `e` in `class` at the start of `out` (which holds at least the
+/// fixed part); returns false if the name was truncated.
+fn encode_entry(out: &mut [u8], class: u32, e: &Entry<'_>, name_at: usize) -> bool {
+    let n = e.node;
+    let name_bytes = e.name.len() * 2;
+    if class == FILE_NAMES_INFORMATION {
+        put(out, 8, &(name_bytes as u32).to_le_bytes());
+    } else {
+        put(out, 8, &n.created.to_le_bytes());
+        put(out, 16, &n.written.to_le_bytes());
+        put(out, 24, &n.written.to_le_bytes());
+        put(out, 32, &n.written.to_le_bytes());
+        put(out, 40, &n.size().to_le_bytes());
+        put(out, 48, &n.size().next_multiple_of(4096).to_le_bytes());
+        put(out, 56, &n.attributes.to_le_bytes());
+        put(out, 60, &(name_bytes as u32).to_le_bytes());
+    }
+    let room = (out.len() - name_at) / 2;
+    for (i, c) in e.name.iter().take(room).enumerate() {
+        put(out, name_at + 2 * i, &c.to_le_bytes());
+    }
+    room >= e.name.len()
+}
+
+const DOT: [u16; 1] = [b'.' as u16];
+const DOT_DOT: [u16; 2] = [b'.' as u16, b'.' as u16];
+
+/// Fills up to `length` bytes of `class` entries of directory `dir` from
+/// the position in `scan` (NtQueryDirectoryFile semantics).
+pub fn list_directory(
+    dir: NodeId,
+    scan: &mut DirScan,
+    class: u32,
+    length: usize,
+    single: bool,
+) -> Result<Listing, NtStatus> {
+    let (fixed, name_at) = directory_class_layout(class).ok_or(NtStatus::INVALID_INFO_CLASS)?;
+    if length < fixed {
+        return Err(NtStatus::INFO_LENGTH_MISMATCH);
+    }
+    let first = scan.at_start();
+    with_fs(|fs| {
+        let this = fs.node(dir).ok_or(NtStatus::FILE_DELETED)?;
+        let ids = fs.list(dir).map_err(fs_status)?;
+        let mut data: Vec<u8> = Vec::new();
+        let mut last_start: Option<usize> = None;
+        let mut status = NtStatus::SUCCESS;
+        // Candidates in order: ".", ".." (not in the root), then children.
+        let dots: &[(&[u16], NodeId)] =
+            if dir == ramfs::ROOT { &[] } else { &[(&DOT, dir), (&DOT_DOT, this.parent())] };
+        let candidates = dots
+            .iter()
+            .enumerate()
+            .skip(usize::from(scan.dots))
+            .map(|(i, &(name, id))| (Some(i), name, id))
+            .chain(ids.iter().filter_map(|&id| fs.node(id).map(|n| (None, n.name(), id))).filter(
+                |(_, name, _)| scan.after.as_ref().is_none_or(|a| ramfs::collate(name, a).is_gt()),
+            ));
+        let mut consumed_dots = scan.dots;
+        let mut consumed_after: Option<&[u16]> = None;
+        for (dot, name, id) in candidates {
+            if !ramfs::wildcard_match(&scan.mask, name) {
+                if let Some(i) = dot {
+                    consumed_dots = i as u8 + 1;
+                } else {
+                    consumed_after = Some(name);
+                }
+                continue;
+            }
+            let Some(node) = fs.node(id) else { continue };
+            let start = data.len().next_multiple_of(8);
+            let need = fixed.max(name_at + name.len() * 2);
+            if start + need > length {
+                if last_start.is_none() {
+                    // Not even the first entry fits: return what does.
+                    data.try_reserve_exact(length).map_err(|_| NtStatus::NO_MEMORY)?;
+                    data.resize(length, 0);
+                    encode_entry(&mut data, class, &Entry { node, name }, name_at);
+                    status = NtStatus::BUFFER_OVERFLOW;
+                }
+                break;
+            }
+            data.try_reserve(start + need - data.len()).map_err(|_| NtStatus::NO_MEMORY)?;
+            data.resize(start + need, 0);
+            encode_entry(&mut data[start..], class, &Entry { node, name }, name_at);
+            if let Some(prev) = last_start {
+                put(&mut data, prev, &((start - prev) as u32).to_le_bytes());
+            }
+            last_start = Some(start);
+            if let Some(i) = dot {
+                consumed_dots = i as u8 + 1;
+            } else {
+                consumed_after = Some(name);
+            }
+            if single {
+                break;
+            }
+        }
+        if dots.is_empty() || consumed_after.is_some() {
+            consumed_dots = 2;
+        }
+        let after = match consumed_after {
+            Some(name) => {
+                let mut v = Vec::new();
+                v.try_extend_from_slice(name).map_err(|_| NtStatus::NO_MEMORY)?;
+                Some(v)
+            }
+            None => None,
+        };
+        scan.dots = consumed_dots;
+        if after.is_some() {
+            scan.after = after;
+        }
+        if last_start.is_none() && status == NtStatus::SUCCESS {
+            status = if first { NtStatus::NO_SUCH_FILE } else { NtStatus::NO_MORE_FILES };
+        }
+        Ok(Listing { status, data })
+    })
+}
+
+pub const FILE_FS_VOLUME_INFORMATION: u32 = 1;
+pub const FILE_FS_SIZE_INFORMATION: u32 = 3;
+pub const FILE_FS_DEVICE_INFORMATION: u32 = 4;
+pub const FILE_FS_ATTRIBUTE_INFORMATION: u32 = 5;
+pub const FILE_FS_FULL_SIZE_INFORMATION: u32 = 7;
+
+const FILE_DEVICE_DISK: u32 = 7;
+const FILE_DEVICE_IS_MOUNTED: u32 = 0x20;
+const FILE_CASE_PRESERVED_NAMES: u32 = 0x2;
+const FILE_UNICODE_ON_DISK: u32 = 0x4;
+const VOLUME_SERIAL: u32 = 0x6a1a_0001;
+const SECTORS_PER_CLUSTER: u32 = 8;
+const BYTES_PER_SECTOR: u32 = 512;
+/// The file system name reported to programs (they check for it).
+const FS_NAME: &[u8] = b"NTFS";
+
+/// Volume information of `class` as (bytes, minimum buffer length). Sizes
+/// are in clusters of free and total RAM (the volume lives in memory).
+pub fn volume_information(class: u32) -> Result<(Vec<u8>, usize), NtStatus> {
+    let (free, total) = crate::mm::frame_stats();
+    let mut b = Vec::new();
+    let grow = |b: &mut Vec<u8>, n: usize| -> Result<(), NtStatus> {
+        b.try_reserve_exact(n).map_err(|_| NtStatus::NO_MEMORY)?;
+        b.resize(n, 0);
+        Ok(())
+    };
+    let min = match class {
+        FILE_FS_VOLUME_INFORMATION => {
+            // VolumeCreationTime, VolumeSerialNumber, VolumeLabelLength (0),
+            // SupportsObjects, then the (empty) label.
+            grow(&mut b, 18)?;
+            let created = with_fs(|fs| fs.node(ramfs::ROOT).map_or(0, |n| n.created));
+            put(&mut b, 0, &created.to_le_bytes());
+            put(&mut b, 8, &VOLUME_SERIAL.to_le_bytes());
+            24
+        }
+        FILE_FS_SIZE_INFORMATION => {
+            grow(&mut b, 24)?;
+            put(&mut b, 0, &total.to_le_bytes());
+            put(&mut b, 8, &free.to_le_bytes());
+            put(&mut b, 16, &SECTORS_PER_CLUSTER.to_le_bytes());
+            put(&mut b, 20, &BYTES_PER_SECTOR.to_le_bytes());
+            24
+        }
+        FILE_FS_FULL_SIZE_INFORMATION => {
+            grow(&mut b, 32)?;
+            put(&mut b, 0, &total.to_le_bytes());
+            put(&mut b, 8, &free.to_le_bytes());
+            put(&mut b, 16, &free.to_le_bytes());
+            put(&mut b, 24, &SECTORS_PER_CLUSTER.to_le_bytes());
+            put(&mut b, 28, &BYTES_PER_SECTOR.to_le_bytes());
+            32
+        }
+        FILE_FS_DEVICE_INFORMATION => {
+            grow(&mut b, 8)?;
+            put(&mut b, 0, &FILE_DEVICE_DISK.to_le_bytes());
+            put(&mut b, 4, &FILE_DEVICE_IS_MOUNTED.to_le_bytes());
+            8
+        }
+        FILE_FS_ATTRIBUTE_INFORMATION => {
+            grow(&mut b, 12 + 2 * FS_NAME.len())?;
+            let attributes = FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK;
+            put(&mut b, 0, &attributes.to_le_bytes());
+            put(&mut b, 4, &255u32.to_le_bytes()); // MaximumComponentNameLength
+            put(&mut b, 8, &((2 * FS_NAME.len()) as u32).to_le_bytes());
+            for (i, &c) in FS_NAME.iter().enumerate() {
+                put(&mut b, 12 + 2 * i, &u16::from(c).to_le_bytes());
+            }
+            16
+        }
+        _ => return Err(NtStatus::INVALID_INFO_CLASS),
+    };
+    Ok((b, min))
 }

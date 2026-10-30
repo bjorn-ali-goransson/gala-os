@@ -33,6 +33,7 @@ const USER_PROGRAMS: &[&str] = &[
     "section_test",
     "file_test",
     "image_test",
+    "dir_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -287,6 +288,12 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "dir_test",
+        cmdline: "qemu_exit run=dir_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["dir_test: ok", "exited with status 0x00000000"],
+    },
     Scenario {
         name: "image_test",
         cmdline: "qemu_exit run=image_test.exe",

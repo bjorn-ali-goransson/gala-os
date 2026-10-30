@@ -46,6 +46,11 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   views with per-section protections (MEM_IMAGE), base relocations when not
   at the preferred base (STATUS_IMAGE_NOT_AT_BASE), private copy-on-write
   pages; test DLL `testdll` driven by `image_test`
+- More file services: NtQueryDirectoryFile (directory/full/both/names/id
+  classes, masks with wildcards, single entry, restart), NtQueryVolume-
+  InformationFile (volume, size, full size, device, attribute),
+  NtFlushBuffersFile, FileRenameInformation, FILE_DELETE_ON_CLOSE at close,
+  RootDirectory = directory file handle; `__chkstk` in ntrt; `dir_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
@@ -57,9 +62,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
    loading DLL imports (needed for ntdll and 7).
 7. **Exceptions**: user-mode exception dispatch (KiUserExceptionDispatcher
    contract), NtContinue, NtRaiseException; vectored/SEH work in user mode.
-8b. **More file services**: NtQueryDirectoryFile, NtQueryVolumeInformationFile,
-   NtFlushBuffersFile, FileRenameInformation, RootDirectory = file handle,
-   FILE_DELETE_ON_CLOSE tests; `\??\C:` as a symbolic link.
+8c. **Files, rest**: `\??\C:` as a symbolic link, asynchronous I/O
+   (events, APCs, STATUS_PENDING), NtNotifyChangeDirectoryFile, file
+   locks, short (8.3) names.
 9. Toward M6: syscall-trace tooling and a differential test runner; run the
    first Wine ntdll conformance test binaries.
 

@@ -71,6 +71,9 @@ stubs! {
     ntrt_nt_open_file = 0x0033;
     ntrt_nt_query_attributes_file = 0x003d;
     ntrt_nt_create_file = 0x0055;
+    ntrt_nt_query_directory_file = 0x0035;
+    ntrt_nt_query_volume_information_file = 0x0049;
+    ntrt_nt_flush_buffers_file = 0x004b;
     ntrt_nt_write_file = 0x0008;
     ntrt_nt_close = 0x000f;
     ntrt_nt_allocate_virtual_memory = 0x0018;
@@ -247,6 +250,27 @@ unsafe extern "system" {
         len: u32,
         class: u32,
     ) -> NtStatus;
+    fn ntrt_nt_query_directory_file(
+        h: Handle,
+        event: Handle,
+        apc_routine: *mut c_void,
+        apc_context: *mut c_void,
+        io_status: *mut IoStatusBlock,
+        buf: *mut u8,
+        len: u32,
+        class: u32,
+        single: u8,
+        mask: *const UnicodeString,
+        restart: u8,
+    ) -> NtStatus;
+    fn ntrt_nt_query_volume_information_file(
+        h: Handle,
+        io_status: *mut IoStatusBlock,
+        buf: *mut u8,
+        len: u32,
+        class: u32,
+    ) -> NtStatus;
+    fn ntrt_nt_flush_buffers_file(h: Handle, io_status: *mut IoStatusBlock) -> NtStatus;
     fn ntrt_nt_query_attributes_file(
         attributes: *const ObjectAttributes,
         info: *mut u8,
@@ -592,6 +616,8 @@ pub const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
 pub const FILE_SHARE_READ: u32 = 1;
 pub const FILE_SHARE_WRITE: u32 = 2;
 pub const FILE_SHARE_DELETE: u32 = 4;
+pub const FILE_DELETE_ON_CLOSE: u32 = 0x1000;
+pub const FILE_LIST_DIRECTORY: u32 = 0x1;
 pub const GENERIC_READ: u32 = 0x8000_0000;
 pub const GENERIC_WRITE: u32 = 0x4000_0000;
 pub const DELETE: u32 = 0x1_0000;
@@ -718,6 +744,59 @@ pub fn set_file(h: Handle, class: u32, data: &[u8]) -> NtStatus {
     let mut iosb = IoStatusBlock { status: 0, information: 0 };
     // SAFETY: valid buffer of the given length.
     unsafe { ntrt_nt_set_information_file(h, &mut iosb, data.as_ptr(), data.len() as u32, class) }
+}
+
+/// NtQueryDirectoryFile on a synchronous handle: (status, IoStatus.Information).
+pub fn query_directory(
+    h: Handle,
+    buf: &mut [u8],
+    class: u32,
+    single: bool,
+    mask: Option<&UnicodeString>,
+    restart: bool,
+) -> (NtStatus, usize) {
+    let mut iosb = IoStatusBlock { status: 0, information: 0xdead };
+    let null = core::ptr::null_mut::<c_void>();
+    let mask = mask.map_or(core::ptr::null(), |m| m as *const UnicodeString);
+    // SAFETY: valid buffer of the given length; `mask` is null or valid.
+    let st = unsafe {
+        ntrt_nt_query_directory_file(
+            h,
+            Handle(0),
+            null,
+            null,
+            &mut iosb,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            class,
+            u8::from(single),
+            mask,
+            u8::from(restart),
+        )
+    };
+    (st, iosb.information)
+}
+
+/// NtQueryVolumeInformationFile: (status, IoStatus.Information).
+pub fn query_volume(h: Handle, class: u32, buf: &mut [u8]) -> (NtStatus, usize) {
+    let mut iosb = IoStatusBlock { status: 0, information: 0xdead };
+    // SAFETY: valid buffer of the given length.
+    let st = unsafe {
+        ntrt_nt_query_volume_information_file(
+            h,
+            &mut iosb,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            class,
+        )
+    };
+    (st, iosb.information)
+}
+
+pub fn flush_file(h: Handle) -> NtStatus {
+    let mut iosb = IoStatusBlock { status: 0, information: 0 };
+    // SAFETY: valid IO_STATUS_BLOCK.
+    unsafe { ntrt_nt_flush_buffers_file(h, &mut iosb) }
 }
 
 /// NtQueryAttributesFile: (status, FileAttributes).
@@ -1090,6 +1169,32 @@ global_asm!(
     "rep stosb",
     "mov rdi, r9",
     "mov rax, r10",
+    "ret",
+);
+
+// Stack probe for frames larger than a page. Contract (MSVC x64): RAX
+// holds the frame size; every page from the caller's RSP down to RSP - RAX
+// is touched in order, so a guard page below the stack grows it one page at
+// a time; RSP and all other registers are left unchanged.
+global_asm!(
+    ".globl __chkstk",
+    "__chkstk:",
+    "push rcx",
+    "push rax",
+    // The caller's RSP: above our two pushes and the return address.
+    "lea rcx, [rsp + 0x18]",
+    "2:",
+    "cmp rax, 0x1000",
+    "jb 3f",
+    "sub rcx, 0x1000",
+    "test byte ptr [rcx], 0",
+    "sub rax, 0x1000",
+    "jmp 2b",
+    "3:",
+    "sub rcx, rax",
+    "test byte ptr [rcx], 0",
+    "pop rax",
+    "pop rcx",
     "ret",
 );
 

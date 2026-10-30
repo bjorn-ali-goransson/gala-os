@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dir_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "file_test"
 version = "0.1.0"
 dependencies = [

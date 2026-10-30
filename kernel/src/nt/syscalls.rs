@@ -35,6 +35,9 @@ pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
 pub const NT_OPEN_FILE: u32 = 0x0033;
 pub const NT_QUERY_ATTRIBUTES_FILE: u32 = 0x003d;
 pub const NT_CREATE_FILE: u32 = 0x0055;
+pub const NT_QUERY_DIRECTORY_FILE: u32 = 0x0035;
+pub const NT_QUERY_VOLUME_INFORMATION_FILE: u32 = 0x0049;
+pub const NT_FLUSH_BUFFERS_FILE: u32 = 0x004b;
 pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
 pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
 pub const NT_OPEN_SECTION: u32 = 0x0037;
@@ -75,6 +78,13 @@ const TABLE: &[(u32, &str, Handler)] = &[
     (NT_OPEN_FILE, "NtOpenFile", nt_open_file),
     (NT_QUERY_ATTRIBUTES_FILE, "NtQueryAttributesFile", nt_query_attributes_file),
     (NT_CREATE_FILE, "NtCreateFile", nt_create_file),
+    (NT_QUERY_DIRECTORY_FILE, "NtQueryDirectoryFile", nt_query_directory_file),
+    (
+        NT_QUERY_VOLUME_INFORMATION_FILE,
+        "NtQueryVolumeInformationFile",
+        nt_query_volume_information_file,
+    ),
+    (NT_FLUSH_BUFFERS_FILE, "NtFlushBuffersFile", nt_flush_buffers_file),
     (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", nt_map_view_of_section),
     (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", nt_unmap_view_of_section),
     (NT_OPEN_SECTION, "NtOpenSection", nt_open_section),
@@ -400,16 +410,10 @@ impl Call<'_> {
         ptr: u64,
         root_access: u32,
     ) -> Result<Option<Attributes>, NtStatus> {
-        if ptr == 0 {
+        let Some((root, name, attributes)) = self.raw_object_attributes(ptr)? else {
             return Ok(None);
-        }
-        let mut raw = [0u8; OBJECT_ATTRIBUTES_SIZE as usize];
-        self.process.read(ptr, &mut raw).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
-        let field = |off: usize| u64::from_le_bytes(raw[off..off + 8].try_into().unwrap_or([0; 8]));
-        if u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) != OBJECT_ATTRIBUTES_SIZE {
-            return Err(NtStatus::INVALID_PARAMETER);
-        }
-        let root = match field(8) {
+        };
+        let root = match root {
             0 => None,
             h => {
                 let entry = self.handle(Handle(h))?;
@@ -420,11 +424,25 @@ impl Call<'_> {
                 Some(object)
             }
         };
+        Ok(Some(Attributes { root, name, attributes }))
+    }
+
+    /// Captures OBJECT_ATTRIBUTES as (RootDirectory handle, name, Attributes).
+    fn raw_object_attributes(&self, ptr: u64) -> Result<Option<(u64, Vec<u16>, u32)>, NtStatus> {
+        if ptr == 0 {
+            return Ok(None);
+        }
+        let mut raw = [0u8; OBJECT_ATTRIBUTES_SIZE as usize];
+        self.process.read(ptr, &mut raw).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+        let field = |off: usize| u64::from_le_bytes(raw[off..off + 8].try_into().unwrap_or([0; 8]));
+        if u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) != OBJECT_ATTRIBUTES_SIZE {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
         let name = match field(16) {
             0 => Vec::new(),
             p => self.unicode_string(p)?,
         };
-        Ok(Some(Attributes { root, name, attributes: field(24) as u32 }))
+        Ok(Some((field(8), name, field(24) as u32)))
     }
 
     /// Inserts a handle for `object` and stores its value at `out`.
@@ -1077,28 +1095,60 @@ impl Call<'_> {
         self.process.write(ptr, &b).map_err(|_| NtStatus::ACCESS_VIOLATION)
     }
 
-    /// Resolves OBJECT_ATTRIBUTES naming a file to (volume, path on volume).
-    fn file_path(&self, attrs_ptr: u64) -> Result<(ObjectRef, Vec<u16>), NtStatus> {
-        let attrs = self
-            .object_attributes(attrs_ptr, DIRECTORY_TRAVERSE)?
-            .ok_or(NtStatus::INVALID_PARAMETER)?;
-        if attrs.name.is_empty() && attrs.root.is_none() {
+    /// Resolves OBJECT_ATTRIBUTES naming a file to a path on the volume.
+    fn file_path(&self, attrs_ptr: u64) -> Result<file::FilePath, NtStatus> {
+        let (root, name, attributes) =
+            self.raw_object_attributes(attrs_ptr)?.ok_or(NtStatus::INVALID_PARAMETER)?;
+        self.resolve_file_name(root, name, attributes)
+    }
+
+    /// Resolves `name` relative to `root` (0, an object directory or an
+    /// open directory file) to a path on the volume.
+    fn resolve_file_name(
+        &self,
+        root: u64,
+        name: Vec<u16>,
+        attributes: u32,
+    ) -> Result<file::FilePath, NtStatus> {
+        let root = match root {
+            0 => None,
+            h => {
+                let entry = self.handle(Handle(h))?;
+                if let ObjectBody::File(f) = &entry.object.body {
+                    // Relative to an open directory: no access needed on it.
+                    if !f.directory {
+                        return Err(NtStatus::INVALID_PARAMETER);
+                    }
+                    return Ok(file::FilePath { start: f.node, name });
+                }
+                let object = entry.require(DIRECTORY_TRAVERSE)?.clone();
+                if object.as_directory().is_none() {
+                    return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+                }
+                Some(object)
+            }
+        };
+        if name.is_empty() && root.is_none() {
             return Err(NtStatus::OBJECT_NAME_INVALID);
         }
+        let attrs = Attributes { root, name, attributes };
         // File names are case-insensitive on our volume regardless of
         // OBJ_CASE_INSENSITIVE; the object directory part follows the flag.
         let (device, rest) =
             namespace::lookup_parse(attrs.root.as_ref(), &attrs.name, attrs.case_insensitive())?;
+        if !matches!(device.body, ObjectBody::Volume) {
+            return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+        }
         let mut owned = Vec::new();
         owned.try_extend_from_slice(rest).map_err(|_| NtStatus::NO_MEMORY)?;
-        Ok((device, owned))
+        Ok(file::FilePath { start: crate::fs::ramfs::ROOT, name: owned })
     }
 
     fn open_or_create(&self, r: OpenRequest) -> NtStatus {
         let OpenRequest { out, access, attrs_ptr, iosb, share, disposition, options } = r;
-        let (device, rest) = tri!(self.file_path(attrs_ptr));
+        let path = tri!(self.file_path(attrs_ptr));
         let granted = super::object::FILE_MAPPING.map(access);
-        let created = tri!(file::create(&device, &rest, granted, share, disposition, options));
+        let created = tri!(file::create(&path, granted, share, disposition, options));
         let information = created.information;
         let entry = HandleEntry { object: created.object, access: granted, attributes: 0 };
         let Ok(handle) = self.process.handles.lock().insert(entry) else {
@@ -1267,6 +1317,7 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
 
 const FILE_BASIC_INFORMATION: u64 = 4;
 const FILE_STANDARD_INFORMATION: u64 = 5;
+const FILE_RENAME_INFORMATION: u64 = 10;
 const FILE_DISPOSITION_INFORMATION: u64 = 13;
 const FILE_POSITION_INFORMATION: u64 = 14;
 const FILE_END_OF_FILE_INFORMATION: u64 = 20;
@@ -1316,6 +1367,13 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
     // The class is a ULONG: only the low 32 bits are defined.
     let class = class as u32 as u64;
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if class == FILE_RENAME_INFORMATION {
+        let status = rename_file(call, &entry, file, buffer, length);
+        if status == NtStatus::SUCCESS {
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+        }
+        return status;
+    }
     let need = match class {
         FILE_POSITION_INFORMATION | FILE_END_OF_FILE_INFORMATION => 8,
         FILE_DISPOSITION_INFORMATION => 1,
@@ -1361,28 +1419,180 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
     status
 }
 
+/// FileRenameInformation: FILE_RENAME_INFORMATION { BOOLEAN ReplaceIfExists;
+/// HANDLE RootDirectory; ULONG FileNameLength; WCHAR FileName[]; } (24 bytes
+/// with padding). A bare name renames within the same directory.
+fn rename_file(
+    call: &Call<'_>,
+    entry: &HandleEntry,
+    file: &file::FileObject,
+    buffer: u64,
+    length: usize,
+) -> NtStatus {
+    const HEADER: usize = 20;
+    if entry.access & file::DELETE == 0 {
+        return NtStatus::ACCESS_DENIED;
+    }
+    if length < 24 {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let mut header = [0u8; HEADER];
+    if call.process.read(buffer, &mut header).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let replace = header[0] != 0;
+    let root = u64::from_le_bytes(header[8..16].try_into().unwrap_or([0; 8]));
+    let name_len = u32::from_le_bytes(header[16..20].try_into().unwrap_or([0; 4])) as usize;
+    if name_len == 0 || !name_len.is_multiple_of(2) || HEADER + name_len > length {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(name_len).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    bytes.resize(name_len, 0u8);
+    if call.process.read(buffer + HEADER as u64, &mut bytes).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let mut name = Vec::new();
+    if name.try_reserve_exact(name_len / 2).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    for pair in bytes.chunks_exact(2) {
+        let _ = name.try_push(u16::from_le_bytes([pair[0], pair[1]]));
+    }
+    let node = file.node;
+    let result = if root == 0 && !name.contains(&u16::from(b'\\')) {
+        file::with_fs(|fs| {
+            let parent = fs.node(node).ok_or(crate::fs::ramfs::FsError::NotFound)?.parent();
+            fs.rename(node, parent, &name, replace)
+        })
+    } else {
+        let path = tri!(call.resolve_file_name(root, name, OBJ_CASE_INSENSITIVE));
+        let relative = path.start != crate::fs::ramfs::ROOT;
+        let parts = tri!(file::components(&path.name, relative));
+        let Some(last) = parts.last() else { return NtStatus::INVALID_PARAMETER };
+        file::with_fs(|fs| {
+            let parent = fs.parent_of(path.start, &parts)?;
+            fs.rename(node, parent, last, replace)
+        })
+    };
+    match result {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(e) => file::fs_status(e),
+    }
+}
+
+/// NtQueryDirectoryFile(FileHandle, Event, ApcRoutine, ApcContext,
+///                      *IoStatusBlock, FileInformation, Length,
+///                      FileInformationClass, ReturnSingleEntry, *FileName,
+///                      RestartScan)
+// TODO: asynchronous handles (Event/APC completion).
+fn nt_query_directory_file(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let (iosb, buffer, length, class) =
+        (arg!(call, 4), arg!(call, 5), arg!(call, 6) as u32 as usize, arg!(call, 7) as u32);
+    let (single, mask_ptr, restart) =
+        (arg!(call, 8) as u8 != 0, arg!(call, 9), arg!(call, 10) as u8 != 0);
+    let Some((fixed, _)) = file::directory_class_layout(class) else {
+        return NtStatus::INVALID_INFO_CLASS;
+    };
+    if length < fixed {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let ObjectBody::File(dir) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if !dir.directory {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    if entry.access & file::FILE_READ_DATA == 0 {
+        // FILE_LIST_DIRECTORY
+        return NtStatus::ACCESS_DENIED;
+    }
+    let mask = if mask_ptr == 0 { None } else { Some(tri!(call.unicode_string(mask_ptr))) };
+    let listing = {
+        let mut scan = dir.scan.lock();
+        match scan.as_mut() {
+            None => {
+                let mask = match mask {
+                    Some(m) if !m.is_empty() => m,
+                    _ => {
+                        let mut star = Vec::new();
+                        if star.try_push(u16::from(b'*')).is_err() {
+                            return NtStatus::NO_MEMORY;
+                        }
+                        star
+                    }
+                };
+                *scan = Some(file::DirScan::new(mask));
+            }
+            Some(state) if restart => {
+                state.restart();
+                if let Some(m) = mask.filter(|m| !m.is_empty()) {
+                    state.mask = m;
+                }
+            }
+            Some(_) => {}
+        }
+        let Some(state) = scan.as_mut() else { return NtStatus::NO_MEMORY };
+        tri!(file::list_directory(dir.node, state, class, length, single))
+    };
+    if call.process.write(buffer, &listing.data).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    if listing.status.0 < 0xc000_0000 {
+        tri!(call.write_iosb(iosb, listing.status, listing.data.len() as u64));
+    }
+    listing.status
+}
+
+/// NtQueryVolumeInformationFile(FileHandle, *IoStatusBlock, FsInformation,
+///                              Length, FsInformationClass)
+fn nt_query_volume_information_file(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let (iosb, buffer, length, class) =
+        (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4) as u32);
+    if !matches!(entry.object.body, ObjectBody::File(_)) {
+        return NtStatus::OBJECT_TYPE_MISMATCH;
+    }
+    let (info, min) = tri!(file::volume_information(class));
+    if length < min {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let n = info.len().min(length);
+    if call.process.write(buffer, &info[..n]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let status = if n < info.len() { NtStatus::BUFFER_OVERFLOW } else { NtStatus::SUCCESS };
+    tri!(call.write_iosb(iosb, status, n as u64));
+    status
+}
+
+/// NtFlushBuffersFile(FileHandle, *IoStatusBlock): the volume is in memory,
+/// so only the access check remains.
+fn nt_flush_buffers_file(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    if !matches!(entry.object.body, ObjectBody::File(_)) {
+        return NtStatus::OBJECT_TYPE_MISMATCH;
+    }
+    if entry.access & (file::FILE_WRITE_DATA | file::FILE_APPEND_DATA) == 0 {
+        return NtStatus::ACCESS_DENIED;
+    }
+    tri!(call.write_iosb(arg!(call, 1), NtStatus::SUCCESS, 0));
+    NtStatus::SUCCESS
+}
+
 /// NtQueryAttributesFile(ObjectAttributes, *FileInformation)
 fn nt_query_attributes_file(call: &mut Call<'_>) -> NtStatus {
     let (attrs, out) = (arg!(call, 0), arg!(call, 1));
-    let (device, rest) = tri!(call.file_path(attrs));
-    if !matches!(device.body, ObjectBody::Volume) {
-        return NtStatus::OBJECT_TYPE_MISMATCH;
-    }
+    let path = tri!(call.file_path(attrs));
     let node = {
-        let Ok(parts) = file_components(&rest) else { return NtStatus::OBJECT_NAME_INVALID };
-        tri!(file::with_fs(|fs| fs.resolve(&parts)).map_err(file::fs_status))
+        let relative = path.start != crate::fs::ramfs::ROOT;
+        let parts = tri!(file::components(&path.name, relative));
+        tri!(file::with_fs(|fs| fs.resolve(path.start, &parts)).map_err(file::fs_status))
     };
     let info = tri!(file::basic_information(node));
     match call.process.write(out, &info) {
         Ok(()) => NtStatus::SUCCESS,
         Err(_) => NtStatus::ACCESS_VIOLATION,
     }
-}
-
-fn file_components(rest: &[u16]) -> Result<Vec<&[u16]>, NtStatus> {
-    let mut out = Vec::new();
-    for part in rest.split(|&c| c == u16::from(b'\\')).filter(|p| !p.is_empty()) {
-        out.try_push(part).map_err(|_| NtStatus::NO_MEMORY)?;
-    }
-    Ok(out)
 }

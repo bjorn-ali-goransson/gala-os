@@ -26,6 +26,8 @@ pub enum FsError {
     SharingViolation,
     DeletePending,
     DirectoryNotEmpty,
+    /// E.g. replacing a directory or an open file by rename.
+    AccessDenied,
     NoMemory,
 }
 
@@ -109,6 +111,14 @@ impl Node {
         matches!(self.kind, Kind::Directory(_))
     }
 
+    pub fn name(&self) -> &[u16] {
+        &self.name
+    }
+
+    pub fn parent(&self) -> NodeId {
+        self.parent
+    }
+
     pub fn size(&self) -> u64 {
         match &self.kind {
             Kind::File(d) => d.bytes().len() as u64,
@@ -117,11 +127,52 @@ impl Node {
     }
 }
 
-/// Case-insensitive comparison (ASCII folding).
+/// Upcases one UTF-16 unit (ASCII only).
 // TODO: the full Unicode upcase table NTFS uses.
+fn fold(c: u16) -> u16 {
+    if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c }
+}
+
+/// Case-insensitive comparison.
 fn same_name(a: &[u16], b: &[u16]) -> bool {
-    let fold = |c: u16| if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c };
     a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| fold(x) == fold(y))
+}
+
+/// Directory order: upcased names compared unit by unit (NTFS collation).
+pub fn collate(a: &[u16], b: &[u16]) -> core::cmp::Ordering {
+    a.iter().map(|&c| fold(c)).cmp(b.iter().map(|&c| fold(c)))
+}
+
+/// Case-insensitive wildcard match: `*` any run, `?` one unit, and the DOS
+/// forms `<` (as `*`), `>` (as `?`) and `"` (as `.`).
+pub fn wildcard_match(mask: &[u16], name: &[u16]) -> bool {
+    const STAR: [u16; 2] = [b'*' as u16, b'<' as u16];
+    const QM: [u16; 2] = [b'?' as u16, b'>' as u16];
+    let (mut m, mut n) = (0, 0);
+    // Backtracking point: (mask index after the star, name index).
+    let mut star: Option<(usize, usize)> = None;
+    while n < name.len() {
+        let unit = |c: u16| if c == u16::from(b'"') { u16::from(b'.') } else { c };
+        if m < mask.len() && STAR.contains(&mask[m]) {
+            star = Some((m + 1, n));
+            m += 1;
+        } else if m < mask.len() && (QM.contains(&mask[m]) || fold(unit(mask[m])) == fold(name[n]))
+        {
+            m += 1;
+            n += 1;
+        } else if let Some((sm, sn)) = star {
+            m = sm;
+            n = sn + 1;
+            star = Some((sm, sn + 1));
+        } else {
+            return false;
+        }
+    }
+    mask[m..].iter().all(|c| STAR.contains(c))
+}
+
+pub fn has_wildcards(mask: &[u16]) -> bool {
+    mask.iter().any(|&c| b"*?<>\"".iter().any(|&w| c == u16::from(w)))
 }
 
 pub struct RamFs {
@@ -169,10 +220,11 @@ impl RamFs {
             .find(|&c| self.node(c).is_some_and(|n| same_name(&n.name, name))))
     }
 
-    /// Resolves all but the last of `components` as directories, returning
-    /// that directory (for create/open of the last component).
-    pub fn parent_of(&self, components: &[&[u16]]) -> Result<NodeId, FsError> {
-        let mut dir = ROOT;
+    /// Resolves all but the last of `components` (relative to directory
+    /// `start`) as directories, returning that directory (for create/open of
+    /// the last component).
+    pub fn parent_of(&self, start: NodeId, components: &[&[u16]]) -> Result<NodeId, FsError> {
+        let mut dir = start;
         for part in components.iter().take(components.len().saturating_sub(1)) {
             match self.find(dir, part) {
                 Ok(Some(next)) if self.node(next).is_some_and(Node::is_dir) => dir = next,
@@ -182,10 +234,10 @@ impl RamFs {
         Ok(dir)
     }
 
-    /// Resolves a full path.
-    pub fn resolve(&self, components: &[&[u16]]) -> Result<NodeId, FsError> {
-        let Some(last) = components.last() else { return Ok(ROOT) };
-        let parent = self.parent_of(components)?;
+    /// Resolves a path relative to directory `start`.
+    pub fn resolve(&self, start: NodeId, components: &[&[u16]]) -> Result<NodeId, FsError> {
+        let Some(last) = components.last() else { return Ok(start) };
+        let parent = self.parent_of(start, components)?;
         self.find(parent, last)?.ok_or(FsError::NotFound)
     }
 
@@ -313,6 +365,78 @@ impl RamFs {
         }
     }
 
+    /// The entries of directory `dir` in directory order.
+    pub fn list(&self, dir: NodeId) -> Result<Vec<NodeId>, FsError> {
+        let mut out = Vec::new();
+        out.try_extend_from_slice(self.children(dir)?).map_err(|_| FsError::NoMemory)?;
+        let name = |id: NodeId| self.node(id).map_or(&[][..], |n| n.name.as_slice());
+        out.sort_unstable_by(|&a, &b| collate(name(a), name(b)));
+        Ok(out)
+    }
+
+    /// Moves `id` to `name` in directory `parent`. An existing target is
+    /// replaced only if `replace` and it is a file nobody has open.
+    pub fn rename(
+        &mut self,
+        id: NodeId,
+        parent: NodeId,
+        name: &[u16],
+        replace: bool,
+    ) -> Result<(), FsError> {
+        if id == ROOT {
+            return Err(FsError::AccessDenied);
+        }
+        // A directory cannot move below itself.
+        let mut up = parent;
+        loop {
+            if up == id {
+                return Err(FsError::AccessDenied);
+            }
+            if up == ROOT {
+                break;
+            }
+            up = self.node(up).ok_or(FsError::PathNotFound)?.parent;
+        }
+        let target = self.find(parent, name)?;
+        if let Some(t) = target
+            && t != id
+        {
+            if !replace {
+                return Err(FsError::Exists);
+            }
+            let n = self.node(t).ok_or(FsError::NotFound)?;
+            if n.is_dir() || n.opens.handles != 0 {
+                return Err(FsError::AccessDenied);
+            }
+        }
+        let mut owned = Vec::new();
+        owned.try_extend_from_slice(name).map_err(|_| FsError::NoMemory)?;
+        let old_parent = self.node(id).ok_or(FsError::NotFound)?.parent;
+        if old_parent != parent {
+            match &mut self.node_mut(parent)?.kind {
+                Kind::Directory(c) => c.try_reserve(1).map_err(|_| FsError::NoMemory)?,
+                Kind::File(_) => return Err(FsError::NotADirectory),
+            }
+        }
+        if let Some(t) = target
+            && t != id
+        {
+            self.remove(t);
+        }
+        if old_parent != parent {
+            if let Kind::Directory(c) = &mut self.node_mut(old_parent)?.kind {
+                c.retain(|&x| x != id);
+            }
+            if let Kind::Directory(c) = &mut self.node_mut(parent)?.kind {
+                let _ = c.try_push(id);
+            }
+        }
+        let node = self.node_mut(id)?;
+        node.parent = parent;
+        node.name = owned;
+        Ok(())
+    }
+
     /// Marks a node for deletion when its last open closes.
     pub fn set_delete_pending(&mut self, id: NodeId, pending: bool) -> Result<(), FsError> {
         if pending && id == ROOT {
@@ -418,9 +542,9 @@ mod tests {
         assert_eq!(f.find(d, &w("README.txt")).unwrap(), Some(file));
         assert_eq!(f.create(d, &w("readme.txt"), false, 2), Err(FsError::Exists));
         let parts = [users.as_slice(), &w("readme.txt")];
-        assert_eq!(f.resolve(&parts), Ok(file));
-        assert_eq!(f.resolve(&[&w("Nope"), &w("x")]), Err(FsError::PathNotFound));
-        assert_eq!(f.resolve(&[users.as_slice(), &w("x")]), Err(FsError::NotFound));
+        assert_eq!(f.resolve(ROOT, &parts), Ok(file));
+        assert_eq!(f.resolve(ROOT, &[&w("Nope"), &w("x")]), Err(FsError::PathNotFound));
+        assert_eq!(f.resolve(ROOT, &[users.as_slice(), &w("x")]), Err(FsError::NotFound));
         assert_eq!(f.node(file).unwrap().attributes, ATTRIBUTE_ARCHIVE);
         assert!(f.node(d).unwrap().is_dir());
     }
@@ -497,6 +621,53 @@ mod tests {
         let b = w("System32");
         let id = f.mkdir_all(&[&a, &b], 1).unwrap();
         assert_eq!(f.mkdir_all(&[&a, &b], 1).unwrap(), id);
-        assert_eq!(f.resolve(&[&a, &b]), Ok(id));
+        assert_eq!(f.resolve(ROOT, &[&a, &b]), Ok(id));
+    }
+
+    #[test]
+    fn wildcards() {
+        let m = |mask: &str, name: &str| wildcard_match(&w(mask), &w(name));
+        assert!(m("*", "anything.txt"));
+        assert!(m("*.txt", "B.TXT"));
+        assert!(!m("*.txt", "b.txt.bak"));
+        assert!(m("?.dat", "A.dat"));
+        assert!(!m("?.dat", "AB.dat"));
+        assert!(m("a*b*c", "aXXbYYc"));
+        assert!(!m("a*b*c", "aXXbYY"));
+        assert!(m("B.TXT", "b.txt"));
+        assert!(m("<.txt", "x.txt"));
+        assert!(!has_wildcards(&w("plain.txt")));
+        assert!(has_wildcards(&w("p?ain")));
+    }
+
+    #[test]
+    fn list_is_sorted_case_insensitively() {
+        let mut f = fs();
+        for name in ["sub", "b.txt", "A.dat", "c.txt"] {
+            f.create(ROOT, &w(name), false, 1).unwrap();
+        }
+        let names: Vec<Vec<u16>> =
+            f.list(ROOT).unwrap().iter().map(|&id| f.node(id).unwrap().name().to_vec()).collect();
+        assert_eq!(names, [w("A.dat"), w("b.txt"), w("c.txt"), w("sub")]);
+    }
+
+    #[test]
+    fn rename_moves_and_replaces() {
+        let mut f = fs();
+        let d = f.create(ROOT, &w("d"), true, 1).unwrap();
+        let a = f.create(ROOT, &w("a"), false, 1).unwrap();
+        let b = f.create(ROOT, &w("b"), false, 1).unwrap();
+        assert_eq!(f.rename(a, ROOT, &w("B"), false), Err(FsError::Exists));
+        f.open(b, R, SHARE_R).unwrap();
+        assert_eq!(f.rename(a, ROOT, &w("b"), true), Err(FsError::AccessDenied));
+        f.close(b, R, SHARE_R);
+        f.rename(a, ROOT, &w("b"), true).unwrap();
+        assert!(f.node(b).is_none(), "replaced target removed");
+        assert_eq!(f.resolve(ROOT, &[&w("b")]), Ok(a));
+        f.rename(a, d, &w("moved"), false).unwrap();
+        assert_eq!(f.resolve(ROOT, &[&w("d"), &w("MOVED")]), Ok(a));
+        assert_eq!(f.list(ROOT).unwrap(), [d]);
+        assert_eq!(f.rename(d, d, &w("x"), false), Err(FsError::AccessDenied));
+        assert_eq!(f.rename(a, d, &w("moved"), false), Ok(()), "renaming onto itself");
     }
 }
