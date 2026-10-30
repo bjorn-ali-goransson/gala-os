@@ -239,6 +239,13 @@ address space is freed when the last thread is reaped. `run=` checks this
 and logs "address space still referenced" otherwise, which fails the boot
 scenario. Pseudo handles: -1 = current process, -2 = current thread.
 
+**KUSER_SHARED_DATA** (`nt::kuser`): one kernel-owned `SharedPage`
+mapped read-only at 0x7FFE0000 into every process (`UserSpace::map_shared`
+never frees it). Constant fields describe the pinned build (10.0.26100,
+AMD64, `C:\Windows`, workstation); InterruptTime, SystemTime and TickCount
+(1 ms ticks, multiplier `1 << 24`) are rewritten on every timer tick using
+the KSYSTEM_TIME protocol (High2Time, LowPart, High1Time).
+
 **Waits** (`nt::wait`): waitable objects embed a `Dispatcher` (signal
 state + waiter list). One global dispatcher lock covers all signal changes
 and wait checks, so WaitAll sees a consistent state. A waiter registers on

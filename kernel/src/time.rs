@@ -34,9 +34,25 @@ pub fn init(calibration: &apic::Calibration) {
     apic::start_periodic_timer(calibration, TICK_HZ, on_tick);
 }
 
+/// Performance counter frequency: 10 MHz (100 ns resolution), as on
+/// current Windows.
+pub const PERFORMANCE_FREQUENCY: u64 = 10_000_000;
+
+static TICK_CALLBACK: crate::sync::IrqMutex<Option<fn(u64)>> = crate::sync::IrqMutex::new(None);
+
+/// Registers a function called on every tick with the tick count (in
+/// interrupt context, before scheduling decisions).
+pub fn set_tick_callback(callback: fn(u64)) {
+    *TICK_CALLBACK.lock() = Some(callback);
+}
+
 fn on_tick(_frame: &mut TrapFrame) {
     let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     apic::eoi();
+    let callback = *TICK_CALLBACK.lock();
+    if let Some(callback) = callback {
+        callback(now);
+    }
     crate::sched::on_tick(now);
 }
 

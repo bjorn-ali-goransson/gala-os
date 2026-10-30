@@ -684,9 +684,7 @@ fn nt_duplicate_object(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
-/// Performance counter frequency: 10 MHz (100 ns resolution), as on
-/// current Windows.
-const PERFORMANCE_FREQUENCY: u64 = 10_000_000;
+use crate::time::PERFORMANCE_FREQUENCY;
 
 /// NtQueryPerformanceCounter(*Counter, *Frequency)
 fn nt_query_performance_counter(call: &mut Call<'_>) -> NtStatus {

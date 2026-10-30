@@ -29,14 +29,15 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   exit codes via NtQueryInformationThread/Process basic info, NtTerminate-
   Process for all threads, process teardown (handles closed, address space
   freed, checked by every boot scenario); `thread_test`
+- KUSER_SHARED_DATA at 0x7FFE0000: version/platform fields of the pinned
+  build, QPC frequency, InterruptTime/SystemTime/TickCount updated every
+  tick; read-only shared page in every process; `kuser_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
    NtOpenMutant, NtCreateSemaphore/NtReleaseSemaphore (0x0a); abandonment
    on thread exit. Create/open numbers vary by build: verify on 26100 first.
    Symbolic links (`\Sessions\1\BaseNamedObjects\Global`), NtQueryDirectoryObject.
-5. **KUSER_SHARED_DATA** at 0x7FFE0000 (time fields updated by the tick),
-   NtQuerySystemTime, NtQueryPerformanceCounter.
 6. **Sections**: NtCreateSection/NtMapViewOfSection/NtUnmapViewOfSection
    (pagefile-backed first, then image sections), loader uses image sections.
 7. **Exceptions**: user-mode exception dispatch (KiUserExceptionDispatcher

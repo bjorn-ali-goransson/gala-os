@@ -50,3 +50,4 @@ The `xtask` host tool has no dependencies beyond `std`.
 | `user/ntrt` memcpy/memmove/memset/memcmp, `_fltused`, `__CxxFrameHandler3` stubs | Own minimal implementations of the C ABI symbols the compiler expects | n/a |
 | Service numbers NtQueryInformationProcess 0x19, NtQueryInformationThread 0x25, NtCreateThread 0x4e, NtResumeThread 0x52, NtTerminateThread 0x53 | Publicly known black-box values; **to be verified** on the pinned build | n/a |
 | CONTEXT, INITIAL_TEB, THREAD_/PROCESS_BASIC_INFORMATION layouts; thread/process access rights | mingw-w64 `winnt.h`/`winternl.h`, Microsoft documentation (offsets and values only) | n/a |
+| `kernel/src/nt/kuser.rs` KUSER_SHARED_DATA offsets and KSYSTEM_TIME protocol; PF_* indices | Microsoft documentation of KUSER_SHARED_DATA / KSYSTEM_TIME, WDK and mingw-w64 `ntddk.h`/`winnt.h` (offsets and values only) | n/a |

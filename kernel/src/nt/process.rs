@@ -256,6 +256,8 @@ pub fn spawn_from_pe(
     )?;
     vad.commit(stack_bottom, layout::STACK_SIZE, vad::PAGE_READWRITE)?;
 
+    super::kuser::map_into(&mut space, &mut vad)?;
+
     // Handles for the standard streams.
     let mut handles = HandleTable::default();
     let stdin = handles.insert_object(KObject::new(ObjectBody::ConsoleInput)?)?;

@@ -275,6 +275,53 @@ pub type SharedUserSpace = crate::mm::heap::KArc<IrqMutex<UserSpace>>;
 /// page tables and every frame mapped in its lower half.
 pub struct UserSpace {
     mapper: Mapper<HhdmTables>,
+    /// Pages mapping frames this space does not own (`map_shared`); they
+    /// are unmapped, not freed, on drop.
+    shared: [Option<u64>; MAX_SHARED_PAGES],
+}
+
+const MAX_SHARED_PAGES: usize = 4;
+
+/// A kernel-owned page that is also mapped into user address spaces
+/// (e.g. KUSER_SHARED_DATA). The kernel writes it through the HHDM with
+/// volatile stores, since user threads read it concurrently.
+pub struct SharedPage {
+    frame: Frame,
+}
+
+impl SharedPage {
+    pub fn new() -> Result<Self, PagingError> {
+        let frame = crate::mm::allocate_frame().ok_or(PagingError::Map(MapError::OutOfMemory))?;
+        // SAFETY: a freshly allocated frame, HHDM-mapped, owned by us.
+        unsafe { hhdm_ptr(frame.start()).write_bytes(0, PAGE_SIZE as usize) };
+        Ok(Self { frame })
+    }
+
+    pub fn frame(&self) -> Frame {
+        self.frame
+    }
+
+    /// Writes `bytes` at `offset`; out-of-range writes are dropped.
+    pub fn write(&self, offset: usize, bytes: &[u8]) {
+        if offset.checked_add(bytes.len()).is_none_or(|end| end > PAGE_SIZE as usize) {
+            return;
+        }
+        let base = hhdm_ptr(self.frame.start());
+        for (i, &b) in bytes.iter().enumerate() {
+            // SAFETY: in bounds of the owned frame; volatile because user
+            // mode reads the page concurrently through its own mapping.
+            unsafe { base.add(offset + i).write_volatile(b) };
+        }
+    }
+
+    pub fn write_u32(&self, offset: usize, value: u32) {
+        if !offset.is_multiple_of(4) || offset + 4 > PAGE_SIZE as usize {
+            return;
+        }
+        // SAFETY: aligned and in bounds of the owned frame; a single
+        // volatile store, so readers never see a torn 32-bit value.
+        unsafe { hhdm_ptr(self.frame.start()).add(offset).cast::<u32>().write_volatile(value) };
+    }
 }
 
 /// A user address was unmapped, not user-accessible, or (for writes) not
@@ -331,7 +378,7 @@ impl UserSpace {
         let mem = HhdmTables { offset: crate::mm::hhdm_offset() };
         let mapper =
             Mapper::new_sharing_kernel_half(mem, Frame::containing(kernel), &mut alloc_table)?;
-        Ok(Self { mapper })
+        Ok(Self { mapper, shared: [None; MAX_SHARED_PAGES] })
     }
 
     pub fn root(&self) -> u64 {
@@ -433,8 +480,35 @@ impl UserSpace {
     }
 }
 
+impl UserSpace {
+    /// Maps `page` at `virt` with `flags` (user forced); the frame stays
+    /// owned by the `SharedPage`.
+    pub fn map_shared(
+        &mut self,
+        virt: u64,
+        page: &SharedPage,
+        mut flags: PageFlags,
+    ) -> Result<(), PagingError> {
+        use crate::mm::paging::PageSize;
+        let slot = self
+            .shared
+            .iter_mut()
+            .find(|s| s.is_none())
+            .ok_or(PagingError::Map(MapError::OutOfMemory))?;
+        flags.user = true;
+        flags.global = false;
+        self.mapper.map(virt, page.frame().start(), PageSize::Size4K, flags, &mut alloc_table)?;
+        *slot = Some(virt);
+        Ok(())
+    }
+}
+
 impl Drop for UserSpace {
     fn drop(&mut self) {
+        for virt in self.shared.iter().flatten() {
+            // Not ours to free.
+            let _ = self.mapper.unmap_4k(*virt);
+        }
         // The space must not be active on any CPU any more (see `activate`).
         let mem = HhdmTables { offset: crate::mm::hhdm_offset() };
         let dummy = Frame::from_number(0);
