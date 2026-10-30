@@ -2791,6 +2791,21 @@ fn nt_query_volume_information_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (iosb, buffer, length, class) =
         (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4) as u32);
+    let console = matches!(entry.object.body, ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput);
+    if console && class == file::FILE_FS_DEVICE_INFORMATION {
+        // FILE_FS_DEVICE_INFORMATION { DeviceType: FILE_DEVICE_CONSOLE,
+        // Characteristics: 0 } (what console handles report on Windows).
+        let mut info = [0u8; 8];
+        info[0..4].copy_from_slice(&0x50u32.to_le_bytes());
+        if length < info.len() {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        if call.process.write(buffer, &info).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 8));
+        return NtStatus::SUCCESS;
+    }
     if !matches!(entry.object.body, ObjectBody::File(_)) {
         return NtStatus::OBJECT_TYPE_MISMATCH;
     }

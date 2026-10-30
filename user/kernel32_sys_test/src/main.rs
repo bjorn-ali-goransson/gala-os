@@ -97,7 +97,15 @@ unsafe extern "system" {
     fn VirtualFree(addr: *mut c_void, size: usize, kind: u32) -> Bool;
     fn VirtualQuery(addr: *const c_void, info: *mut MemoryBasicInformation, len: usize) -> usize;
     fn SwitchToThread() -> Bool;
+    fn GetFileType(h: Handle) -> u32;
+    fn GetCommandLineW() -> *const u16;
     fn ExitProcess(code: u32) -> !;
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RtlGetVersion(info: *mut u32) -> u32;
+    fn RtlGetCurrentPeb() -> usize;
 }
 
 // C helpers the compiler calls; ntdll exports them (on Windows too).
@@ -326,6 +334,46 @@ fn run() -> Result<(), u32> {
         VirtualFree(p, 0, 0x8000);
 
         SwitchToThread();
+
+        // GetCommandLineW: the PEB's command line, NUL-terminated, naming
+        // this program.
+        let line = GetCommandLineW();
+        let peb: usize;
+        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        let params = *((peb + 0x20) as *const usize);
+        c.eq(line as u64, *((params + 0x78) as *const u64))?;
+        let len = usize::from(*((params + 0x70) as *const u16)) / 2;
+        c.eq((*line.add(len)).into(), 0)?;
+        let text = core::slice::from_raw_parts(line, len);
+        let name = b"kernel32_sys_test";
+        c.ok(
+            text.windows(name.len())
+                .any(|w| w.iter().zip(name).all(|(&a, &b)| (a as u8).to_ascii_lowercase() == b)),
+            len as u64,
+        )?;
+
+        // GetFileType: standard output is a character device, pipe or file
+        // depending on where it goes (gala: the console, a character
+        // device); a bad handle is FILE_TYPE_UNKNOWN with
+        // ERROR_INVALID_HANDLE.
+        let kind = GetFileType(stdout);
+        c.ok((1..=3).contains(&kind), kind.into())?;
+        SetLastError(0);
+        c.eq(GetFileType(0x1234 as Handle).into(), 0)?;
+        c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
+
+        // ntdll: RtlGetVersion (OSVERSIONINFOW: size, major, minor, build,
+        // platform, CSD string) agrees with KUSER_SHARED_DATA; the PEB.
+        let mut version = [0u32; 69]; // 276 bytes
+        version[0] = 276;
+        c.eq(RtlGetVersion(version.as_mut_ptr()).into(), 0)?;
+        c.eq(version[1].into(), 10)?;
+        c.eq(version[2].into(), 0)?;
+        c.eq(version[3].into(), core::ptr::read_volatile(0x7ffe_0260 as *const u32).into())?;
+        c.eq(version[4].into(), 2)?; // VER_PLATFORM_WIN32_NT
+        let peb: usize;
+        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        c.eq(RtlGetCurrentPeb() as u64, peb as u64)?;
     }
     Ok(())
 }

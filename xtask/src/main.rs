@@ -35,6 +35,11 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "testdll2", file: "testdll2.dll", exported_as: "testdll2.dll" },
     // gala's kernel32.dll, exported under another name like ntdll.
     Dll { package: "kernel32", file: "kernel32.dll", exported_as: "testkernel32.dll" },
+    Dll {
+        package: "bcryptprimitives",
+        file: "bcryptprimitives.dll",
+        exported_as: "testbcryptprimitives.dll",
+    },
     // Built as ntdll.dll (its export directory says so); exported under
     // another name so user/bin never holds a file called ntdll.dll.
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
@@ -75,6 +80,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_thread_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_misc_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_misc_test", "kernel32.dll", "Windows/System32"),
+    ("prng_test", "ntdll.dll", "Windows/System32"),
+    ("prng_test", "kernel32.dll", "Windows/System32"),
+    ("prng_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("go_hello", "bcryptprimitives.dll", "Windows/System32"),
     ("go_hello", "ntdll.dll", "Windows/System32"),
     ("go_hello", "kernel32.dll", "Windows/System32"),
 ];
@@ -127,6 +136,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_sys_test",
     "kernel32_thread_test",
     "kernel32_misc_test",
+    "prng_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -588,6 +598,19 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_misc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_misc_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "prng_test",
+        cmdline: "qemu_exit run=prng_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["prng_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // A real Go program (user/go_hello): ROADMAP G2.
+        name: "go_hello",
+        cmdline: "qemu_exit run=go_hello.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["Hello from Go on gala!", "go_hello.exe finished with status 0x00000000"],
     },
     Scenario {
         name: "ledger_test",
@@ -1403,9 +1426,12 @@ fn screenshot(release: bool, args: &[String]) -> Result {
         }
     }
     build_kernel(release)?;
-    let modules: Vec<(&str, &str)> = [("ntdll.dll", "Windows/System32")]
-        .into_iter()
-        .chain(USER_DLLS.iter().filter(|d| d.file != "ntdll.dll").map(|d| (d.file, "gala")))
+    // gala's system DLLs in System32 (programs may look only there), the
+    // test DLLs next to the programs.
+    let system = ["ntdll.dll", "kernel32.dll", "bcryptprimitives.dll"];
+    let modules: Vec<(&str, &str)> = USER_DLLS
+        .iter()
+        .map(|d| (d.file, if system.contains(&d.file) { "Windows/System32" } else { "gala" }))
         .collect();
     let iso = make_iso(release, &format!("shot-{name}"), &cmdline.join(" "), &modules)?;
     let dir = target_dir().join("screenshots");

@@ -147,14 +147,18 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   ExitProcess) on ntdll exports; RtlNtStatusToDosError; DLL search falls
   back to System32; GalaRecordMissing feeds the ledger and the loader
   reports every missing import; `kernel32_test`, `missing_import_test`
-- Go bring-up (G2, in progress): user/go_hello built reproducibly with the
-  pinned Go; kernel32 grew everything Go 1.24 imports, test-first
-  (`kernel32_sys_test`, `kernel32_thread_test`, `kernel32_misc_test`):
-  process settings, system info, environment, LoadLibraryW/ExW, handle
-  duplication, waits, threads, TLS, suspension and context, IOCP,
-  waitable timers, vectored handlers, unwind lookup; the loader follows
-  export forwarders. The Go runtime now starts and stops at "fatal error:
-  bcryptprimitives.dll not found" (next: ProcessPrng)
+- **Go hello world runs (G2, 2026-10-30)**: user/go_hello (Go 1.24.7,
+  built reproducibly) prints "Hello from Go on gala!" and exits 0 (scenario
+  `go_hello`). Driven by the ledger; test-first along the way:
+  `kernel32_sys_test`, `kernel32_thread_test`, `kernel32_misc_test`,
+  `prng_test`. kernel32 gained process settings, system info, environment,
+  command line, file types, LoadLibraryW/ExW, handle duplication, waits,
+  threads, TLS, suspension and context, IOCP, waitable timers, vectored
+  handlers, unwind lookup; ntdll gained RtlGetVersion, RtlGetCurrentPeb,
+  export forwarders, continue handlers, GetProcAddress misses in the
+  ledger; a new bcryptprimitives.dll (ProcessPrng from RDRAND/RDSEED); the
+  kernel reports console handles as FILE_DEVICE_CONSOLE and finishes a
+  process exactly once when its last threads exit at the same time
 - Screen console (framebuffer text mirroring the serial log, Noto Sans Mono
   bitmap font) and `cargo xtask screenshot` (PNG via the QEMU monitor)
 
@@ -169,7 +173,7 @@ to set and to argue for. Current order and why:
 3. O1 + P1: done (ledger, events, backtraces, benchmarks). Still open from
    docs/OBSERVABILITY.md: the sampling profiler, live introspection,
    trace diffing against Windows.
-4. G1, G2 (kernel32, Go hello world). Moved ahead of gala-um on
+4. G1, G2 (kernel32, Go hello world): done. Moved ahead of gala-um on
    2026-10-30: gala-um was wanted mainly for test speed, and T1 already
    took the boot tests from 66 s to ~12 s; the NT layer will also grow a
    lot for kernel32/Go, which is cheaper to do before splitting it behind
@@ -191,10 +195,11 @@ U2. **gala-um runs hello.exe**, then the ntrt test programs; `cargo xtask
    um-test` runs them all in seconds.
 U3. **gala-um in CI** next to the QEMU scenarios, with differences between
    the two reported as bugs.
-G2. **Go hello world**: the rest of what the Go runtime imports from
-   kernel32 (threads, TLS, IOCP, timers, exceptions/vectored handlers,
-   SetThreadContext preemption, environment, system info); run a real Go
-   binary with `trace`, fix what it hits.
+G3. **More Go**: goroutines across threads under load, timers and
+   sleeping, the GC under pressure, os (files, directories, environment,
+   args), time, then net (needs N1's sockets). Go's own test programs as
+   tests; RtlVirtualUnwind and FormatMessageW (message tables) when Go
+   needs them for tracebacks and error text.
 N1. **Toward Nginx**: process creation (CreateProcess), a C runtime
    (ucrt/msvcrt subset), a virtio disk and NIC, a TCP/IP stack and AFD
    (Winsock) sockets.

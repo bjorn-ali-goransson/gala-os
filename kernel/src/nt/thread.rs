@@ -229,7 +229,7 @@ pub fn create(
         }
         Err(_) => {
             THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
-            process.remove_thread(&object);
+            let _ = process.remove_thread(&object);
             Err(NtStatus::NO_MEMORY)
         }
     }
@@ -519,10 +519,12 @@ pub fn exit_current(status: NtStatus) -> ! {
         abandon_mutants(t);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
         let process = t.process.clone();
-        process.remove_thread(&object);
+        let last = process.remove_thread(&object);
         wait::set_signal(&object, 1);
         drop(object);
-        if process.thread_count() == 0 {
+        // Exactly one of several threads exiting at once on different CPUs
+        // is the last one (decided under the process's thread lock).
+        if last {
             process::finish(&process, status);
         }
     }

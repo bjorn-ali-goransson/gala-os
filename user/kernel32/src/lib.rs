@@ -146,6 +146,13 @@ unsafe extern "system" {
         options: u32,
     ) -> u32;
     fn NtYieldExecution() -> u32;
+    fn NtQueryVolumeInformationFile(
+        h: Handle,
+        iosb: *mut [usize; 2],
+        buf: *mut u8,
+        len: u32,
+        class: u32,
+    ) -> u32;
     fn NtQueryInformationThread(
         h: Handle,
         class: u32,
@@ -591,6 +598,41 @@ pub extern "system" fn SetConsoleCtrlHandler(_handler: usize, _add: Bool) -> Boo
     TRUE
 }
 
+/// GetFileType: from the device type of the handle's file object
+/// (FileFsDeviceInformation): FILE_TYPE_DISK (1), FILE_TYPE_CHAR (2),
+/// FILE_TYPE_PIPE (3), or FILE_TYPE_UNKNOWN (0) with the error set.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFileType(h: Handle) -> u32 {
+    let (mut iosb, mut info) = ([0usize; 2], [0u8; 8]);
+    // SAFETY: an 8-byte FILE_FS_DEVICE_INFORMATION buffer.
+    let status = unsafe { NtQueryVolumeInformationFile(h, &mut iosb, info.as_mut_ptr(), 8, 4) };
+    if status != STATUS_SUCCESS {
+        return fail(status, 0);
+    }
+    match u32_at(&info, 0) {
+        0x11 => 3,                                    // FILE_DEVICE_NAMED_PIPE
+        0x02 | 0x03 | 0x07 | 0x08 | 0x24 => 1,        // CD-ROM, disks, file systems
+        0x0b | 0x15 | 0x1b | 0x50 | 0x16 | 0x17 => 2, // keyboard, null, serial, console...
+        _ => fail_with(0, 0),
+    }
+}
+
+/// FormatMessageW: no message tables yet (reported). Callers fall back to
+/// printing the number (Go does).
+#[unsafe(no_mangle)]
+pub extern "system" fn FormatMessageW(
+    _flags: u32,
+    _source: *const c_void,
+    message: u32,
+    _language: u32,
+    _buffer: *mut u16,
+    _size: u32,
+    _args: *mut c_void,
+) -> u32 {
+    unsupported(b"kernel32.dll!FormatMessageW", u64::from(message));
+    fail_with(317, 0) // ERROR_MR_MID_NOT_FOUND
+}
+
 // ---- Process-wide settings ----
 
 static ERROR_MODE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -745,6 +787,19 @@ pub extern "system" fn GetProcessAffinityMask(
 }
 
 // ---- Environment ----
+
+/// GetCommandLineW: the process's command line (ProcessParameters->
+/// CommandLine, a NUL-terminated buffer).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCommandLineW() -> *const u16 {
+    // SAFETY: PEB (gs:[0x60]) -> ProcessParameters (+0x20) -> CommandLine
+    // (UNICODE_STRING at +0x70, Buffer at +0x78).
+    unsafe {
+        let peb = teb_u64(0x60) as usize;
+        let params = *((peb + 0x20) as *const usize);
+        *((params + 0x78) as *const *const u16)
+    }
+}
 
 /// GetEnvironmentStringsW: a private copy of the environment block
 /// (`NAME=value\0...\0`), freed with FreeEnvironmentStringsW.

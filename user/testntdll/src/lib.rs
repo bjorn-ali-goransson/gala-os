@@ -147,6 +147,9 @@ syscall_stubs! {
         suspended: u8
     );
     NtResumeThread = 0x52, fn(h: usize, previous: *mut u32);
+    NtQueryVolumeInformationFile = 0x49, fn(
+        h: usize, iosb: *mut [usize; 2], buf: *mut u8, len: u32, class: u32
+    );
     NtSetInformationFile = 0x27, fn(
         h: usize, iosb: *mut [usize; 2], buf: *const u8, len: u32, class: u32
     );
@@ -735,6 +738,24 @@ pub unsafe extern "system" fn LdrGetProcedureAddress(
             _ => export(module, name, 0).ok_or(STATUS_PROCEDURE_NOT_FOUND),
         }
     };
+    // Programs probe for optional functions this way: every miss goes to
+    // the missing-features ledger (`dll!name`).
+    if found.is_err() {
+        let mut dll = [0u8; MAX_NAME];
+        let len = with_modules(|m| {
+            m.iter().find(|e| e.base != 0 && e.base == module).map_or(0, |e| {
+                dll[..e.name_len].copy_from_slice(&e.name[..e.name_len]);
+                e.name_len
+            })
+        });
+        let wanted = if name.is_null() {
+            &[][..]
+        } else {
+            // SAFETY: the caller passes a valid ANSI_STRING.
+            unsafe { core::slice::from_raw_parts((*name).buffer, usize::from((*name).length)) }
+        };
+        report_missing_export(&dll[..len], wanted, ordinal);
+    }
     match found {
         Ok(target) => {
             // SAFETY: the caller passes a writable address.
@@ -787,6 +808,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0x4000_0000, 183),  // OBJECT_NAME_EXISTS -> ERROR_ALREADY_EXISTS
     (0x8000_0005, 234),  // BUFFER_OVERFLOW -> ERROR_MORE_DATA
     (0x8000_0006, 18),   // NO_MORE_FILES
+    (0xc000_0001, 31),   // UNSUCCESSFUL -> ERROR_GEN_FAILURE
     (0xc000_0002, 1),    // NOT_IMPLEMENTED -> ERROR_INVALID_FUNCTION
     (0xc000_0003, 87),   // INVALID_INFO_CLASS -> ERROR_INVALID_PARAMETER
     (0xc000_0004, 24),   // INFO_LENGTH_MISMATCH -> ERROR_BAD_LENGTH
@@ -810,6 +832,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0045, 87),   // INVALID_PAGE_PROTECTION -> ERROR_INVALID_PARAMETER
     (0xc000_0046, 288),  // MUTANT_NOT_OWNED -> ERROR_NOT_OWNER
     (0xc000_0047, 298),  // SEMAPHORE_LIMIT_EXCEEDED -> ERROR_TOO_MANY_POSTS
+    (0xc000_004b, 5),    // THREAD_IS_TERMINATING -> ERROR_ACCESS_DENIED
     (0xc000_007a, 127),  // PROCEDURE_NOT_FOUND -> ERROR_PROC_NOT_FOUND
     (0xc000_007b, 193),  // INVALID_IMAGE_FORMAT -> ERROR_BAD_EXE_FORMAT
     (0xc000_00a0, 487),  // MEMORY_NOT_ALLOCATED -> ERROR_INVALID_ADDRESS
@@ -841,6 +864,48 @@ pub extern "system" fn RtlNtStatusToDosError(status: u32) -> u32 {
             317
         }
     }
+}
+
+/// RtlGetCurrentPeb(): this process's PEB.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlGetCurrentPeb() -> usize {
+    let peb: usize;
+    // SAFETY: gs:[0x60] is TEB.ProcessEnvironmentBlock.
+    unsafe { core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly)) };
+    peb
+}
+
+/// RtlGetVersion(*OSVERSIONINFO[EX]W): the version KUSER_SHARED_DATA
+/// reports (NtMajorVersion +0x26c, NtMinorVersion +0x270, NtBuildNumber
+/// +0x260), platform VER_PLATFORM_WIN32_NT, no service pack; the EX fields
+/// (when dwOSVersionInfoSize says so) as a workstation.
+///
+/// # Safety
+/// `info` must point to an OSVERSIONINFOW (276 bytes) or OSVERSIONINFOEXW
+/// (284 bytes) whose first field is its size.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlGetVersion(info: *mut u32) -> u32 {
+    // SAFETY: forwarded to the caller; KUSER_SHARED_DATA is always mapped.
+    unsafe {
+        let size = *info;
+        if size != 276 && size != 284 {
+            return 0xc000_000d; // STATUS_INVALID_PARAMETER
+        }
+        let kuser = |offset: usize| core::ptr::read_volatile((0x7ffe_0000 + offset) as *const u32);
+        *info.add(1) = kuser(0x26c);
+        *info.add(2) = kuser(0x270);
+        *info.add(3) = kuser(0x260) & 0xffff;
+        *info.add(4) = 2; // VER_PLATFORM_WIN32_NT
+        core::ptr::write_bytes(info.add(5).cast::<u8>(), 0, 256); // szCSDVersion
+        if size == 284 {
+            // wServicePackMajor/Minor, wSuiteMask, wProductType
+            // (VER_NT_WORKSTATION), wReserved.
+            let ex = info.cast::<u8>().add(276);
+            core::ptr::write_bytes(ex, 0, 8);
+            *ex.add(6) = 1;
+        }
+    }
+    STATUS_SUCCESS
 }
 
 /// The initial thread's first user-mode instruction.

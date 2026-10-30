@@ -70,8 +70,13 @@ impl Process {
         self.threads.lock().try_push(thread)
     }
 
-    pub fn remove_thread(&self, thread: &ObjectRef) {
-        self.threads.lock().retain(|t| !KArc::ptr_eq(t, thread));
+    /// Removes `thread`; whether it was the last one (decided under the
+    /// lock, so that of threads exiting at once exactly one is last).
+    pub fn remove_thread(&self, thread: &ObjectRef) -> bool {
+        let mut threads = self.threads.lock();
+        let before = threads.len();
+        threads.retain(|t| !KArc::ptr_eq(t, thread));
+        before != threads.len() && threads.is_empty()
     }
 
     pub fn thread_count(&self) -> usize {
