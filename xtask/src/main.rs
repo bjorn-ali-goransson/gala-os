@@ -71,6 +71,7 @@ const USER_PROGRAMS: &[&str] = &[
     "threadinfo_test",
     "filemap_test",
     "cow_test",
+    "async_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -340,6 +341,12 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "async_test",
+        cmdline: "qemu_exit run=async_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["async_test: ok", "exited with status 0x00000000"],
+    },
     Scenario {
         name: "cow_test",
         cmdline: "qemu_exit run=cow_test.exe",

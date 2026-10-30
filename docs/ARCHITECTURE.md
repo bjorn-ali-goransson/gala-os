@@ -351,6 +351,11 @@ STATUS_NO_MORE_FILES. Rename (FileRenameInformation, DELETE access) moves
 the node; FILE_DELETE_ON_CLOSE needs DELETE and takes effect when that open
 closes. The volume reports itself as an NTFS disk (FileFs* classes) with
 RAM as its size.
+File objects are waitable: NtReadFile/NtWriteFile reset the caller's
+event (and the file object) when an I/O starts and signal both when it
+completes, which is always before the system call returns; asynchronous
+handles (no FILE_SYNCHRONOUS_IO_*) need explicit offsets and keep no
+position.
 
 **KUSER_SHARED_DATA** (`nt::kuser`): one kernel-owned `SharedPage`
 mapped read-only at 0x7FFE0000 into every process (`UserSpace::map_shared`

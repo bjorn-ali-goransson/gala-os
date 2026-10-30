@@ -226,12 +226,12 @@ impl KObject {
             ObjectBody::Event(e) => Some(&e.dispatcher),
             ObjectBody::Thread(t) => Some(&t.dispatcher),
             ObjectBody::Process(p) => Some(&p.dispatcher),
+            ObjectBody::File(f) => Some(&f.dispatcher),
             ObjectBody::ConsoleInput
             | ObjectBody::ConsoleOutput
             | ObjectBody::Directory(_)
             | ObjectBody::Section(_)
-            | ObjectBody::Volume
-            | ObjectBody::File(_) => None,
+            | ObjectBody::Volume => None,
         }
     }
 

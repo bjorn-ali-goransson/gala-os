@@ -306,7 +306,10 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(handle));
     if let ObjectBody::File(file) = &entry.object.body {
         let offset_ptr = arg!(call, 7);
-        return file_write(call, &entry, file, io_status, buffer, length, offset_ptr);
+        let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
+        let status = file_write(call, &entry, file, io_status, buffer, length, offset_ptr);
+        finish_io(&entry.object, event.as_ref());
+        return status;
     }
     if !matches!(entry.object.body, ObjectBody::ConsoleOutput) {
         return NtStatus::OBJECT_TYPE_MISMATCH;
@@ -1604,6 +1607,45 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
     let (iosb, buffer, length, offset_ptr) =
         (arg!(call, 4), arg!(call, 5), arg!(call, 6) as u32, arg!(call, 7));
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
+    let status = file_read(call, &entry, file, iosb, buffer, length, offset_ptr);
+    finish_io(&entry.object, event.as_ref());
+    status
+}
+
+/// The start of an I/O on `file`: the event (if any; it must be an event
+/// the caller may modify) and the file object are reset; they are signaled
+/// again by `finish_io` when the I/O completes. Every I/O completes before
+/// its system call returns so far.
+// TODO: APCs and I/O completion ports.
+fn start_io(call: &Call<'_>, file: &ObjectRef, event: u64) -> Result<Option<ObjectRef>, NtStatus> {
+    let event = match event {
+        0 => None,
+        h => Some(event_object(call, Handle(h), EVENT_MODIFY_STATE)?),
+    };
+    if let Some(e) = &event {
+        wait::set_signal(e, 0);
+    }
+    wait::set_signal(file, 0);
+    Ok(event)
+}
+
+fn finish_io(file: &ObjectRef, event: Option<&ObjectRef>) {
+    wait::set_signal(file, 1);
+    if let Some(e) = event {
+        wait::set_signal(e, 1);
+    }
+}
+
+fn file_read(
+    call: &Call<'_>,
+    entry: &HandleEntry,
+    file: &file::FileObject,
+    iosb: u64,
+    buffer: u64,
+    length: u32,
+    offset_ptr: u64,
+) -> NtStatus {
     if file.directory {
         return NtStatus::INVALID_DEVICE_REQUEST;
     }
@@ -1644,6 +1686,7 @@ const FILE_STANDARD_INFORMATION: u64 = 5;
 const FILE_RENAME_INFORMATION: u64 = 10;
 const FILE_DISPOSITION_INFORMATION: u64 = 13;
 const FILE_POSITION_INFORMATION: u64 = 14;
+const FILE_MODE_INFORMATION: u64 = 16;
 const FILE_END_OF_FILE_INFORMATION: u64 = 20;
 
 /// NtQueryInformationFile(FileHandle, *IoStatusBlock, Buffer, Length, Class)
@@ -1666,6 +1709,10 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
         FILE_STANDARD_INFORMATION => {
             out[..24].copy_from_slice(&tri!(file::standard_information(file.node)));
             24
+        }
+        FILE_MODE_INFORMATION => {
+            out[..4].copy_from_slice(&file.mode.to_le_bytes());
+            4
         }
         FILE_POSITION_INFORMATION => {
             out[..8].copy_from_slice(&file.position.lock().to_le_bytes());

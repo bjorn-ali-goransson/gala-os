@@ -167,6 +167,23 @@ pub struct FileObject {
     delete_on_close: bool,
     /// Directory enumeration state (NtQueryDirectoryFile).
     pub scan: IrqMutex<Option<DirScan>>,
+    /// FileModeInformation: the mode options it was opened with.
+    pub mode: u32,
+    /// Signaled when an I/O on it completes (waiting on a file handle).
+    pub dispatcher: super::wait::Dispatcher,
+}
+
+/// CreateOptions reported by FileModeInformation.
+const MODE_OPTIONS: u32 = 0x0002 // FILE_WRITE_THROUGH
+    | 0x0004 // FILE_SEQUENTIAL_ONLY
+    | 0x0008 // FILE_NO_INTERMEDIATE_BUFFERING
+    | FILE_SYNCHRONOUS_IO_ALERT
+    | FILE_SYNCHRONOUS_IO_NONALERT
+    | FILE_DELETE_ON_CLOSE;
+
+/// FileModeInformation for a file opened with `options`.
+pub fn mode_of(options: u32) -> u32 {
+    options & MODE_OPTIONS
 }
 
 impl Drop for FileObject {
@@ -310,6 +327,8 @@ pub fn create(
         position: IrqMutex::new(0),
         delete_on_close,
         scan: IrqMutex::new(None),
+        mode: mode_of(options),
+        dispatcher: super::wait::Dispatcher::new(0),
     };
     let object = match KObject::new(ObjectBody::File(file)) {
         Ok(o) => o,
@@ -603,4 +622,19 @@ pub fn volume_information(class: u32) -> Result<(Vec<u8>, usize), NtStatus> {
         _ => return Err(NtStatus::INVALID_INFO_CLASS),
     };
     Ok((b, min))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_information_keeps_mode_options_only() {
+        assert_eq!(
+            mode_of(FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE),
+            FILE_SYNCHRONOUS_IO_NONALERT
+        );
+        assert_eq!(mode_of(FILE_NON_DIRECTORY_FILE | FILE_DIRECTORY_FILE), 0);
+        assert_eq!(mode_of(FILE_DELETE_ON_CLOSE | 0x0002), FILE_DELETE_ON_CLOSE | 0x0002);
+    }
 }

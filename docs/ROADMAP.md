@@ -90,6 +90,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   shared between views at the preferred base; `cow_test`
 - Differential runner: `cargo xtask report` (gala), `user/bin/run-all.ps1`
   (Windows), `cargo xtask compare`; JSON schema and parser host-tested
+- Asynchronous file I/O: offsets required, events and file objects reset
+  at the start of an I/O and signaled on completion (always at once so
+  far), FileModeInformation; `async_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
@@ -106,8 +109,8 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
    SizeOfStackReserve/Commit from the image, AVX state (XSAVE, CONTEXT_EX)
    and FltSave in NtCreateThread, SEH unwinding is user-mode
    (ntdll) work; verify the dispatcher frame against the pinned ntdll.
-8c. **Files, rest**: `\??\C:` as a symbolic link, asynchronous I/O
-   (events, APCs, STATUS_PENDING), NtNotifyChangeDirectoryFile, file
+8c. **Files, rest**: `\??\C:` as a symbolic link, APC completion
+   routines and I/O completion ports, truly pending I/O, NtNotifyChangeDirectoryFile, file
    locks, short (8.3) names.
 9. Toward M6: collect windows.json on the pinned build and fix every
    difference (gala bug or wrong test expectation); run the first Wine

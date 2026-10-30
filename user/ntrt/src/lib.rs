@@ -796,6 +796,62 @@ pub fn read_file(h: Handle, buf: &mut [u8], offset: Option<i64>) -> (NtStatus, u
     (st, iosb.information)
 }
 
+/// NtReadFile as for an asynchronous handle: completion is reported in
+/// `iosb` (which, like `buf`, must stay alive until the I/O completes) and
+/// by signaling `event`, or the file object if `event` is `Handle(0)`.
+pub fn read_file_async(
+    h: Handle,
+    buf: &mut [u8],
+    offset: Option<i64>,
+    event: Handle,
+    iosb: &mut IoStatusBlock,
+) -> NtStatus {
+    let o = offset.unwrap_or(0);
+    let op = if offset.is_some() { &o as *const i64 } else { core::ptr::null() };
+    let null = core::ptr::null_mut::<c_void>();
+    // SAFETY: valid buffer and IO_STATUS_BLOCK, kept alive by the caller.
+    unsafe {
+        ntrt_nt_read_file(
+            h,
+            event,
+            null,
+            null,
+            iosb,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            op,
+            core::ptr::null(),
+        )
+    }
+}
+
+/// NtWriteFile counterpart of `read_file_async`.
+pub fn write_file_async(
+    h: Handle,
+    data: &[u8],
+    offset: Option<i64>,
+    event: Handle,
+    iosb: &mut IoStatusBlock,
+) -> NtStatus {
+    let o = offset.unwrap_or(0);
+    let op = if offset.is_some() { &o as *const i64 } else { core::ptr::null() };
+    let null = core::ptr::null_mut::<c_void>();
+    // SAFETY: valid buffer and IO_STATUS_BLOCK, kept alive by the caller.
+    unsafe {
+        ntrt_nt_write_file(
+            h,
+            event,
+            null,
+            null,
+            iosb,
+            data.as_ptr(),
+            data.len() as u32,
+            op,
+            core::ptr::null(),
+        )
+    }
+}
+
 /// NtWriteFile with an explicit offset (-1 = end of file). Returns (status, bytes).
 pub fn write_file_at(h: Handle, data: &[u8], offset: i64) -> (NtStatus, usize) {
     let mut iosb = IoStatusBlock { status: 0, information: 0 };

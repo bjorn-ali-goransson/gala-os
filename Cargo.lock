@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "async_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "cow_test"
 version = "0.1.0"
 dependencies = [
