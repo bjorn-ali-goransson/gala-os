@@ -222,15 +222,13 @@ mod global {
     use core::alloc::{GlobalAlloc, Layout};
     use core::ptr::{self, NonNull};
 
-    use spin::Mutex;
-
     use super::{FramePages, Heap, HeapStats};
+    use crate::sync::IrqMutex;
 
-    struct KernelHeap(Mutex<Heap<FramePages>>);
+    struct KernelHeap(IrqMutex<Heap<FramePages>>);
 
-    // TODO: make interrupt-safe before allocating from interrupt handlers.
     #[global_allocator]
-    static HEAP: KernelHeap = KernelHeap(Mutex::new(Heap::new(FramePages)));
+    static HEAP: KernelHeap = KernelHeap(IrqMutex::new(Heap::new(FramePages)));
 
     // SAFETY: `Heap` returns memory that is exclusively owned, sized and
     // aligned for `layout`, or null; the mutex serializes access.

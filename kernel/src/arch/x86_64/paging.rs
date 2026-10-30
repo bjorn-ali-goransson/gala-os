@@ -3,7 +3,7 @@
 use core::arch::asm;
 use core::ops::Range;
 
-use spin::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::cpu;
 use crate::mm::PAGE_SIZE;
@@ -12,6 +12,7 @@ use crate::mm::memmap::{MemoryRegion, RegionKind};
 use crate::mm::paging::{
     CacheMode, MapError, Mapper, PageFlags, PageTable, TableMemory, Translation,
 };
+use crate::sync::IrqMutex;
 
 const IA32_PAT: u32 = 0x277;
 const IA32_EFER: u32 = 0xc000_0080;
@@ -53,11 +54,17 @@ impl TableMemory for HhdmTables {
     }
 }
 
-static KERNEL_SPACE: Mutex<Option<Mapper<HhdmTables>>> = Mutex::new(None);
+static KERNEL_SPACE: IrqMutex<Option<Mapper<HhdmTables>>> = IrqMutex::new(None);
+
+/// Virtual window for device memory mappings (bump-allocated, never freed).
+const MMIO_WINDOW: Range<u64> = 0xffff_e000_0000_0000..0xffff_e100_0000_0000;
+static MMIO_NEXT: AtomicU64 = AtomicU64::new(MMIO_WINDOW.start);
 
 #[derive(Debug)]
 pub enum PagingError {
     NoExecuteUnsupported,
+    NotInitialized,
+    MmioWindowFull,
     Map(MapError),
 }
 
@@ -194,4 +201,18 @@ pub fn active_root() -> u64 {
 pub fn kernel_image() -> Range<u64> {
     // SAFETY: linker-script symbols; only their addresses are used.
     unsafe { sym(&__kernel_start)..sym(&__kernel_end) }
+}
+
+/// Maps `len` bytes of device memory at physical `phys` uncached and returns
+/// the virtual address corresponding to `phys`.
+pub fn map_mmio(phys: u64, len: u64) -> Result<u64, PagingError> {
+    let start = phys / PAGE_SIZE * PAGE_SIZE;
+    let size = (phys + len).next_multiple_of(PAGE_SIZE) - start;
+    let virt = MMIO_NEXT.fetch_add(size, Ordering::Relaxed);
+    if virt + size > MMIO_WINDOW.end {
+        return Err(PagingError::MmioWindowFull);
+    }
+    with_space(|m| m.map_range(virt, start, size, PageFlags::MMIO, &mut alloc_table))
+        .ok_or(PagingError::NotInitialized)??;
+    Ok(virt + (phys - start))
 }

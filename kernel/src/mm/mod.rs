@@ -8,18 +8,15 @@ pub mod paging;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Mutex;
-
 use crate::boot::{self, BootInfo};
+use crate::sync::IrqMutex;
 use frame::{Frame, FrameAllocator, FreeError};
 use memmap::RegionKind;
 
 /// Size of a base page.
 pub const PAGE_SIZE: u64 = 4096;
 
-// TODO: make this interrupt-safe before frames are allocated from interrupt
-// handlers.
-static FRAMES: Mutex<Option<FrameAllocator<'static>>> = Mutex::new(None);
+static FRAMES: IrqMutex<Option<FrameAllocator<'static>>> = IrqMutex::new(None);
 static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 /// Virtual address at which all RAM is direct-mapped.

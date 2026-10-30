@@ -10,7 +10,6 @@ pub fn init() {
 
 #[doc(hidden)]
 pub fn print(args: fmt::Arguments) {
-    // TODO: once interrupts are enabled, mask them while holding this lock.
     let _ = serial::COM1.lock().write_fmt(args);
 }
 

@@ -21,6 +21,8 @@ pub mod cmdline;
 pub mod console;
 pub mod mm;
 mod selftest;
+pub mod sync;
+pub mod time;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -81,6 +83,7 @@ pub fn kernel_main() -> ! {
         free * mm::PAGE_SIZE / (1024 * 1024)
     );
     init_paging(&info);
+    init_timer();
 
     if let Some(name) = cmdline.value("fault") {
         match Fault::from_name(name) {
@@ -96,7 +99,12 @@ pub fn kernel_main() -> ! {
     }
 
     kprintln!("{BOOT_OK_MARKER}");
-    finish(QemuExitCode::Success)
+    if QEMU_EXIT.load(Ordering::Relaxed) {
+        qemu::exit(QemuExitCode::Success);
+    }
+    loop {
+        arch::cpu::enable_interrupts_and_halt();
+    }
 }
 
 fn log_boot_info(info: &BootInfo) {
@@ -148,7 +156,7 @@ fn log_memory_map(info: &BootInfo) -> MemorySummary {
     summary
 }
 
-/// Ends the boot path: reports to QEMU in test mode, otherwise idles forever.
+/// Stops after a failure: reports to QEMU in test mode, otherwise halts.
 fn finish(code: QemuExitCode) -> ! {
     if QEMU_EXIT.load(Ordering::Relaxed) {
         qemu::exit(code);
@@ -184,4 +192,21 @@ fn init_paging(info: &BootInfo) {
         ),
         Err(e) => panic!("paging: {e:?}"),
     }
+}
+
+fn init_timer() {
+    let calibration = match arch::apic::init_bsp() {
+        Ok(c) => c,
+        Err(e) => panic!("local APIC: {e:?}"),
+    };
+    info!(
+        "apic: id {} ({}), timer {} kHz, TSC {} MHz",
+        calibration.apic_id,
+        if calibration.x2apic { "x2APIC" } else { "xAPIC" },
+        calibration.timer_hz / 1000,
+        calibration.tsc_hz / 1_000_000
+    );
+    time::init(&calibration);
+    arch::cpu::enable_interrupts();
+    info!("interrupts enabled, tick {} Hz", time::TICK_HZ);
 }

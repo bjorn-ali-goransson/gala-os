@@ -13,6 +13,8 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/arch/x86_64/      port I/O, CPU control, GDT/TSS, IDT + ISR stubs,
                         16550 UART, QEMU debug-exit                        [unsafe allowed]
   src/boot/             Limine protocol bindings and handoff -> plain types  [unsafe allowed]
+  src/sync.rs           IrqMutex: spinlock that masks interrupts while held
+  src/time.rs           periodic tick + TSC monotonic clock
   src/console.rs        kprint!/kprintln!/info!/warn!/error! over COM1
   src/cmdline.rs        kernel command line parsing (host-tested)
   src/selftest.rs       in-kernel tests run at boot with `selftest`
@@ -125,8 +127,21 @@ try_insert, try_extend_from_slice}` and `try_reserve`. There is no
 fallible `Arc` on stable Rust, so shared kernel objects will get our own
 reference-counted type.
 
+## Interrupts and time
+
+Every lock that interrupt handlers may take is an `IrqMutex` (console,
+frame allocator, heap, kernel address space). The local APIC is used in
+x2APIC mode when CPUID offers it, otherwise in xAPIC mode through an
+uncached mapping in the MMIO window (`0xffff_e000_0000_0000`, bump
+allocated by `arch::paging::map_mmio`). Note: QEMU 8.x TCG has no x2APIC,
+so the boot tests only exercise xAPIC; x2APIC runs under KVM.
+
+The LAPIC timer (divide-by-16) and the TSC are calibrated against a 10 ms
+PIT channel-2 one-shot. `time` runs a 1 kHz periodic tick on vector 0x30
+and offers `monotonic_ns()` from the TSC. Spurious interrupts use vector 0xff.
+
 ## Not done yet (milestone 2)
 
-APIC timer, threads and scheduler, interrupt-safe console lock, SMP.
+Threads and scheduler, SMP, ACPI (MADT/HPET), reclaiming bootloader memory.
 Bootloader-reclaimable memory must not be reused until the boot info that
 lives there has been copied out.

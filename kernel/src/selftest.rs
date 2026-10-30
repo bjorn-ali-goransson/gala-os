@@ -5,8 +5,10 @@
 use crate::arch::{interrupts, paging};
 use alloc::vec::Vec;
 
-use crate::mm;
+use crate::arch::cpu;
 use crate::mm::heap::{TryVec, try_box};
+use crate::sync::IrqMutex;
+use crate::{mm, time};
 
 struct Test {
     name: &'static str,
@@ -19,6 +21,8 @@ const TESTS: &[Test] = &[
     Test { name: "kernel_sections_mapped_with_permissions", run: kernel_sections_mapped },
     Test { name: "heap_small_and_large", run: heap_small_and_large },
     Test { name: "heap_exhaustion_is_an_error", run: heap_exhaustion_is_an_error },
+    Test { name: "timer_ticks_advance", run: timer_ticks_advance },
+    Test { name: "irq_mutex_masks_interrupts", run: irq_mutex_masks_interrupts },
 ];
 
 pub fn run_all() {
@@ -108,4 +112,31 @@ fn heap_exhaustion_is_an_error() {
     // More than all RAM: must fail cleanly instead of panicking.
     assert!(v.try_reserve(1 << 40).is_err());
     assert_eq!(mm::frame_stats().0, free_before, "failed reservation leaks nothing");
+}
+
+fn timer_ticks_advance() {
+    assert!(cpu::interrupts_enabled());
+    let (t0, ns0) = (time::ticks(), time::monotonic_ns());
+    while time::ticks() < t0 + 20 {
+        cpu::enable_interrupts_and_halt();
+    }
+    let elapsed_ms = (time::monotonic_ns() - ns0) / 1_000_000;
+    // 20 ticks at 1 kHz = 20 ms. Emulation is imprecise; only catch gross
+    // calibration errors (wrong units, wrong divider).
+    assert!((5..=200).contains(&elapsed_ms), "20 ticks took {elapsed_ms} ms by the TSC");
+}
+
+fn irq_mutex_masks_interrupts() {
+    static M: IrqMutex<u32> = IrqMutex::new(0);
+    {
+        let mut g = M.lock();
+        assert!(!cpu::interrupts_enabled());
+        *g += 1;
+        let t = time::ticks();
+        for _ in 0..1_000_000 {
+            core::hint::spin_loop();
+        }
+        assert_eq!(time::ticks(), t, "no tick while the lock is held");
+    }
+    assert!(cpu::interrupts_enabled(), "interrupts restored on unlock");
 }

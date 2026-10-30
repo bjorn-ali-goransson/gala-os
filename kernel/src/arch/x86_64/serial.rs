@@ -2,16 +2,15 @@
 
 use core::fmt;
 
-use spin::Mutex;
-
 use super::port::Port;
+use crate::sync::IrqMutex;
 
 /// I/O base of the first legacy serial port.
 const COM1_BASE: u16 = 0x3f8;
 
 /// The first legacy serial port, used as the kernel console.
 // SAFETY: 0x3f8 is the standard COM1 UART; this is its only regular handle.
-pub static COM1: Mutex<SerialPort> = Mutex::new(unsafe { SerialPort::new(COM1_BASE) });
+pub static COM1: IrqMutex<SerialPort> = IrqMutex::new(unsafe { SerialPort::new(COM1_BASE) });
 
 /// Returns an extra, unsynchronized handle to COM1 for last-words output when
 /// [`COM1`] may be locked (e.g. a panic while printing). Output can interleave
