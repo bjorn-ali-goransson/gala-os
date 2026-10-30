@@ -132,6 +132,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysinfo_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "testdll"
 version = "0.1.0"
 

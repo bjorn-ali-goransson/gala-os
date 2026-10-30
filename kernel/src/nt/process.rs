@@ -49,6 +49,17 @@ impl fmt::Debug for Process {
 }
 
 impl Process {
+    /// The NT path of the executable (`\\Device\\HarddiskVolume1\\gala\\x.exe`).
+    pub fn image_nt_path(&self) -> Result<Vec<u16>, NtStatus> {
+        let mut name = Vec::new();
+        for part in [super::file::VOLUME_DEVICE, "\\gala\\", self.name] {
+            for b in part.bytes() {
+                name.try_push(u16::from(b)).map_err(|_| NtStatus::NO_MEMORY)?;
+            }
+        }
+        Ok(name)
+    }
+
     pub fn exit_status(&self) -> Option<NtStatus> {
         *self.exit_status.lock()
     }
@@ -244,7 +255,7 @@ fn map_image(space: &mut UserSpace, vad: &mut Vad, image: &PeImage<'_>) -> Resul
 
 const VER_PLATFORM_WIN32_NT: u32 = 2;
 /// Interactive programs run in session 1 (session 0 is for services).
-const SESSION_ID: u32 = 1;
+pub const SESSION_ID: u32 = 1;
 /// Boot modules live here; it is also the initial current directory.
 const BOOT_DIRECTORY: &str = "C:\\gala\\";
 /// FILE_TRAVERSE | SYNCHRONIZE, as Windows opens the current directory.

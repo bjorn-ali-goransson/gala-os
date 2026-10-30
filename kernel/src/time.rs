@@ -22,6 +22,11 @@ pub fn set_boot_time(unix_secs: i64) {
     SYSTEM_TIME_AT_INIT.store(secs * 10_000_000, Ordering::Relaxed);
 }
 
+/// NT system time when the kernel's clock started (the boot time).
+pub fn boot_system_time() -> u64 {
+    SYSTEM_TIME_AT_INIT.load(Ordering::Relaxed)
+}
+
 /// Current NT system time (100 ns units since 1601-01-01 UTC).
 pub fn system_time() -> u64 {
     SYSTEM_TIME_AT_INIT.load(Ordering::Relaxed) + monotonic_ns() / 100

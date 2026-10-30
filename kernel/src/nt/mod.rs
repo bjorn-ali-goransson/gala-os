@@ -13,6 +13,7 @@ pub mod process;
 pub mod section;
 pub mod status;
 pub mod syscalls;
+pub mod sysinfo;
 pub mod thread;
 pub mod vad;
 pub mod vm;

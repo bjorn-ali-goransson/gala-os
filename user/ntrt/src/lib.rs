@@ -51,6 +51,7 @@ stubs! {
     ntrt_nt_create_event = 0x0048;
     ntrt_nt_query_event = 0x0056;
     ntrt_nt_query_system_time = 0x005a;
+    ntrt_nt_query_system_information = 0x0036;
     ntrt_nt_wait_for_multiple_objects = 0x005b;
     ntrt_nt_query_object = 0x0010;
     ntrt_nt_open_event = 0x0040;
@@ -277,6 +278,12 @@ unsafe extern "system" {
     ) -> NtStatus;
     fn ntrt_nt_query_performance_counter(counter: *mut i64, frequency: *mut i64) -> NtStatus;
     fn ntrt_nt_query_system_time(time: *mut i64) -> NtStatus;
+    fn ntrt_nt_query_system_information(
+        class: u32,
+        buf: *mut u8,
+        len: u32,
+        ret: *mut u32,
+    ) -> NtStatus;
     fn ntrt_nt_delay_execution(alertable: u8, interval: *const i64) -> NtStatus;
     fn ntrt_nt_duplicate_object(
         source_process: Handle,
@@ -1006,6 +1013,26 @@ pub fn system_time() -> (NtStatus, i64) {
     // SAFETY: valid output pointer.
     let st = unsafe { ntrt_nt_query_system_time(&mut t) };
     (st, t)
+}
+
+/// NtQuerySystemInformation: (status, ReturnLength).
+pub fn query_system(class: u32, buf: &mut [u8]) -> (NtStatus, u32) {
+    let mut ret = 0xdead;
+    // SAFETY: valid buffer of the given length.
+    let st = unsafe {
+        ntrt_nt_query_system_information(class, buf.as_mut_ptr(), buf.len() as u32, &mut ret)
+    };
+    (st, ret)
+}
+
+/// NtQueryInformationProcess with any class: (status, ReturnLength).
+pub fn query_process(h: Handle, class: u32, buf: &mut [u8]) -> (NtStatus, u32) {
+    let mut ret = 0xdead;
+    // SAFETY: valid buffer of the given length.
+    let st = unsafe {
+        ntrt_nt_query_information_process(h, class, buf.as_mut_ptr(), buf.len() as u32, &mut ret)
+    };
+    (st, ret)
 }
 
 pub fn duplicate(h: Handle) -> (NtStatus, Handle) {

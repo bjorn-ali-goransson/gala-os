@@ -75,6 +75,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 - x87/SSE state in exceptions: CONTEXT.FltSave/MxCsr filled on delivery,
   restored by NtContinue, MxCsr honoured by NtCreateThread; threads keep
   XMM registers across preemption; `fpu_test`
+- System/process information: NtQuerySystemInformation (0x36) basic and
+  time-of-day classes; NtQueryInformationProcess image file name, debug
+  port, WOW64, session (`nt::sysinfo` encoders); `sysinfo_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
@@ -85,8 +88,8 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
    file-backed data sections, the kernel loader using image sections, and
    loading DLL imports (needed for ntdll and 7).
 6e. **User-mode loader support**: what a real ntdll's loader needs next:
-   KnownDlls (`\KnownDlls` section objects), NtQuerySystemInformation
-   basics, NtSetInformationProcess/Thread bits, TLS slots in the TEB;
+   KnownDlls (`\KnownDlls` section objects), more NtQuerySystemInformation
+   classes, NtSetInformationProcess/Thread bits, TLS slots in the TEB;
    (testntdll: imports of DLLs, PEB->Ldr, forwarders.)
 7b. **Exceptions, rest**: NtRaiseException (first/second chance),
    SizeOfStackReserve/Commit from the image, AVX state (XSAVE, CONTEXT_EX)

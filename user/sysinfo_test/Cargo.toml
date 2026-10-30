@@ -1,0 +1,14 @@
+[package]
+name = "sysinfo_test"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ntrt = { path = "../ntrt" }
+
+[[bin]]
+name = "sysinfo_test"
+test = false
+bench = false

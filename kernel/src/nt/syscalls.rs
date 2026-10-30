@@ -41,6 +41,7 @@ pub const NT_QUERY_DIRECTORY_FILE: u32 = 0x0035;
 pub const NT_QUERY_VOLUME_INFORMATION_FILE: u32 = 0x0049;
 pub const NT_FLUSH_BUFFERS_FILE: u32 = 0x004b;
 pub const NT_CONTINUE: u32 = 0x0043;
+pub const NT_QUERY_SYSTEM_INFORMATION: u32 = 0x0036;
 pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
 pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
 pub const NT_OPEN_SECTION: u32 = 0x0037;
@@ -91,6 +92,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     ),
     (NT_FLUSH_BUFFERS_FILE, "NtFlushBuffersFile", 2, nt_flush_buffers_file),
     (NT_CONTINUE, "NtContinue", 2, nt_continue),
+    (NT_QUERY_SYSTEM_INFORMATION, "NtQuerySystemInformation", 4, nt_query_system_information),
     (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", 10, nt_map_view_of_section),
     (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", 2, nt_unmap_view_of_section),
     (NT_OPEN_SECTION, "NtOpenSection", 3, nt_open_section),
@@ -414,20 +416,7 @@ fn query_mapped_file_name(
             if !(base..base + size).contains(&addr) {
                 return NtStatus::INVALID_ADDRESS;
             }
-            let mut path: Vec<u8> = Vec::new();
-            for part in [file::VOLUME_DEVICE, "\\gala\\", call.process.name] {
-                if path.try_extend_from_slice(part.as_bytes()).is_err() {
-                    return NtStatus::NO_MEMORY;
-                }
-            }
-            let mut name = Vec::new();
-            if name.try_reserve_exact(path.len()).is_err() {
-                return NtStatus::NO_MEMORY;
-            }
-            for &b in &path {
-                let _ = name.try_push(u16::from(b));
-            }
-            name
+            tri!(call.process.image_nt_path())
         }
     };
     let bytes = name.len() * 2;
@@ -1043,8 +1032,33 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
     let class = class as u32 as u64;
     let object = tri!(entry.require(PROCESS_QUERY_LIMITED_INFORMATION));
     let ObjectBody::Process(p) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
-    if class != 0 {
-        return NtStatus::INVALID_INFO_CLASS;
+    match class {
+        0 => {}
+        PROCESS_DEBUG_PORT | PROCESS_WOW64_INFORMATION => {
+            // No debugger; not a WOW64 process.
+            return call.return_info(&0u64.to_le_bytes(), buffer, length, ret_ptr);
+        }
+        PROCESS_SESSION_INFORMATION => {
+            let session = process::SESSION_ID.to_le_bytes();
+            return call.return_info(&session, buffer, length, ret_ptr);
+        }
+        PROCESS_IMAGE_FILE_NAME => {
+            let name = tri!(p.image_nt_path());
+            let Some(info) = super::sysinfo::unicode_string_in_place(&name, buffer) else {
+                return NtStatus::NO_MEMORY;
+            };
+            if ret_ptr != 0 {
+                tri!(call.write_u32(ret_ptr, info.len() as u32));
+            }
+            if (length as usize) < info.len() {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            return match call.process.write(buffer, &info) {
+                Ok(()) => NtStatus::SUCCESS,
+                Err(_) => NtStatus::ACCESS_VIOLATION,
+            };
+        }
+        _ => return NtStatus::INVALID_INFO_CLASS,
     }
     // PROCESS_BASIC_INFORMATION { ExitStatus, PebBaseAddress, AffinityMask,
     // BasePriority, UniqueProcessId, InheritedFromUniqueProcessId }
@@ -1055,6 +1069,33 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
     b[24..28].copy_from_slice(&8u32.to_le_bytes());
     b[32..40].copy_from_slice(&p.id.to_le_bytes());
     call.return_info(&b, buffer, length, ret_ptr)
+}
+
+const PROCESS_DEBUG_PORT: u64 = 7;
+const PROCESS_SESSION_INFORMATION: u64 = 24;
+const PROCESS_WOW64_INFORMATION: u64 = 26;
+const PROCESS_IMAGE_FILE_NAME: u64 = 27;
+
+/// NtQuerySystemInformation(Class, Buffer, Length, *ReturnLength)
+fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
+    use super::sysinfo;
+    let (class, buffer, length, ret_ptr) =
+        (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2) as u32 as u64, arg!(call, 3));
+    match class {
+        sysinfo::SYSTEM_BASIC_INFORMATION => {
+            let (_, total) = crate::mm::frame_stats();
+            // One processor; the timer ticks at TICK_HZ (100 ns units).
+            let resolution = (10_000_000 / crate::time::TICK_HZ) as u32;
+            let info = sysinfo::basic_information(total, 1, resolution);
+            call.return_info(&info, buffer, length, ret_ptr)
+        }
+        sysinfo::SYSTEM_TIME_OF_DAY_INFORMATION => {
+            let info =
+                sysinfo::time_of_day(crate::time::boot_system_time(), crate::time::system_time());
+            call.return_info(&info, buffer, length, ret_ptr)
+        }
+        _ => NtStatus::INVALID_INFO_CLASS,
+    }
 }
 
 /// Creates or opens-if `object` under the name in `attrs` (if named), for
