@@ -19,6 +19,7 @@ pub mod boot;
 pub mod cmdline;
 #[macro_use]
 pub mod console;
+pub mod events;
 pub mod fs;
 pub mod mm;
 pub mod nt;
@@ -115,6 +116,7 @@ pub fn kernel_main() -> ! {
     }
 
     nt::syscalls::set_trace(cmdline.flag("trace"));
+    events::set_mask(cmdline.value("events").map_or(0, events::parse_mask));
     // `run=a.exe,b.exe` runs the programs one after another; `args=` holds
     // their (percent-encoded) command-line arguments in the same order.
     if let Some(names) = cmdline.value("run") {
@@ -154,6 +156,9 @@ pub fn kernel_main() -> ! {
     }
 
     nt::ledger::dump();
+    if events::written() > 0 {
+        info!("events: {} written to the debug console", events::written());
+    }
     let (shootdowns, ipis) = arch::smp::flush_stats();
     info!(
         "stats: {shootdowns} TLB shootdowns ({ipis} IPIs), {} frames leaked by deferred frees",

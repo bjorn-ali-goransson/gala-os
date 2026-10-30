@@ -59,6 +59,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("loader_test", "testdll2.dll", "gala"),
     ("smpsched_test", "ntdll.dll", "Windows/System32"),
     ("smpmem_test", "ntdll.dll", "Windows/System32"),
+    ("events", "ntdll.dll", "Windows/System32"),
+    ("events", "testdll.dll", "gala"),
 ];
 const USER_PROGRAMS: &[&str] = &[
     "hello",
@@ -363,6 +365,19 @@ enum Boot {
     Uefi,
 }
 
+/// Lines the event stream (debug console) of a scenario must contain.
+const EVENT_EXPECT: &[(&str, &[&str])] = &[(
+    "events",
+    &[
+        r#""ev":"process start","pid":4,"name":"import_test.exe""#,
+        r#""ev":"image","pid":4,"name":"import_test.exe""#,
+        r#""name":"\\Device\\HarddiskVolume1\\gala\\testdll.dll""#,
+        r#""ev":"syscall","pid":4,"tid":8,"nr":8,"name":"NtWriteFile""#,
+        r#""ev":"thread exit","pid":4,"tid":8,"status":0"#,
+        r#""ev":"process exit","pid":4,"status":0"#,
+    ],
+)];
+
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
 
@@ -451,6 +466,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=smpmem_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["smpmem_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The event stream (see EVENT_EXPECT) while import_test runs.
+        name: "events",
+        cmdline: "qemu_exit events=all run=import_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["import_test: ok", "events: "],
     },
     Scenario {
         name: "ledger_test",
@@ -701,6 +723,12 @@ enum Vm<'a> {
     Batch(Vec<&'a Scenario>),
 }
 
+/// ` events=<list>` when `XTASK_EVENTS` asks for the event stream in every
+/// boot (written to `<iso>.events.jsonl`).
+fn events_flag() -> String {
+    env::var("XTASK_EVENTS").map(|e| format!(" events={e}")).unwrap_or_default()
+}
+
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
 fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
@@ -773,7 +801,10 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     let t1 = Instant::now();
     // Tests read the serial log; the screen console stays on only where
     // the scenario boots by UEFI, which keeps that code covered.
-    let screen = |s: &Scenario| if scenario_boot(s.name) == Boot::Uefi { "" } else { " noscreen" };
+    let screen = |s: &Scenario| {
+        let screen = if scenario_boot(s.name) == Boot::Uefi { "" } else { " noscreen" };
+        format!("{screen}{}", events_flag())
+    };
     let isos = run_parallel(&vms, |vm| match vm {
         Vm::Single(s) => make_iso(
             release,
@@ -784,8 +815,12 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
         Vm::Batch(group) => {
             let (programs, args): (Vec<_>, Vec<_>) =
                 group.iter().filter_map(|s| batchable(s)).unzip();
-            let cmdline =
-                format!("qemu_exit noscreen run={} args={}", programs.join(","), args.join(","));
+            let cmdline = format!(
+                "qemu_exit noscreen{} run={} args={}",
+                events_flag(),
+                programs.join(","),
+                args.join(",")
+            );
             make_iso(
                 release,
                 &format!("batch-{}", group[0].name),
@@ -988,10 +1023,15 @@ fn run_vm(
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let log = iso.with_extension("serial.log");
     let _ = fs::remove_file(&log);
+    let events = iso.with_extension("events.jsonl");
+    let _ = fs::remove_file(&events);
     let mut cmd = qemu(iso, boot)?;
     cmd.args(["-display", "none", "-monitor", "none"])
         .arg("-serial")
         .arg(format!("file:{}", log.display()))
+        // The kernel's event stream (`events=` on its command line).
+        .arg("-debugcon")
+        .arg(format!("file:{}", events.display()))
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1078,7 +1118,19 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
     };
     let code = status.and_then(|s| s.code());
     let verdicts: Vec<(&Scenario, Result)> = match vm {
-        Vm::Single(s) => vec![(*s, judge(s, code, status.is_none(), &serial))],
+        Vm::Single(s) => {
+            let events = fs::read_to_string(iso.with_extension("events.jsonl")).unwrap_or_default();
+            let wanted = EVENT_EXPECT.iter().filter(|(n, _)| *n == s.name).flat_map(|(_, e)| *e);
+            let missing: Vec<&str> = wanted.copied().filter(|e| !events.contains(e)).collect();
+            let verdict = judge(s, code, status.is_none(), &serial).and_then(|()| {
+                if missing.is_empty() {
+                    Ok(())
+                } else {
+                    Err(format!("event stream lacks {missing:?}"))
+                }
+            });
+            vec![(*s, verdict)]
+        }
         Vm::Batch(group) => group
             .iter()
             .map(|&s| {

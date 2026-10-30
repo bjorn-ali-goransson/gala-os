@@ -279,7 +279,20 @@ pub fn map_view(
 ) -> Result<Mapped, NtStatus> {
     let section = section_of(object);
     if let Some(image) = &section.image {
-        return map_image_view(process, object, image, base, offset);
+        let mapped = map_image_view(process, object, image, base, offset)?;
+        let empty: &[u16] = &[];
+        crate::events::emit(
+            crate::events::Category::Image,
+            "image",
+            format_args!(
+                r#""pid":{},"name":{},"base":{},"size":{}"#,
+                process.id,
+                crate::events::Utf16(section.file_name.as_deref().unwrap_or(empty)),
+                mapped.base,
+                mapped.size
+            ),
+        );
+        return Ok(mapped);
     }
     section.allows(protect)?;
     if !offset.is_multiple_of(vad::ALLOCATION_GRANULARITY) {

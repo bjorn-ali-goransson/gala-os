@@ -197,7 +197,10 @@ N1. **Toward Nginx**: process creation (CreateProcess), a C runtime
    Object, security descriptors (all access is granted so far).
 6c. **Sections, rest**: the kernel loader using image sections (the exe
    shared like DLLs), sharing read-only pages of relocated views.
-6e. **User-mode loader support**: what a real ntdll's loader needs next:
+6e. **User-mode loader support**: what a real ntdll's loader needs next
+   (and: images that cannot load at their base go to the lowest free
+   address, 0x10000, where Windows picks a high one; seen in the event
+   stream):
    KnownDlls (`\KnownDlls` section objects), more NtQuerySystemInformation
    classes, NtSetInformationProcess/Thread bits, TLS slots in the TEB;
    (testntdll: PEB->Ldr, forwarders, search paths, a loader lock.)

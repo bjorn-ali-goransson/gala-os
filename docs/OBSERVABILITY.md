@@ -6,7 +6,7 @@ what did the program ask for, what did we not implement, where did the
 time go, and what was the state when it broke. Status per item: **done**,
 **next**, **later**.
 
-## 1. Structured event stream — next
+## 1. Structured event stream — done (`events`, scenario `events`)
 
 - A second output channel next to the human serial log: QEMU's
   `isa-debugcon` (port 0xe9, one `out` per byte, no UART handshake) written
@@ -19,6 +19,18 @@ time go, and what was the state when it broke. Status per item: **done**,
   maps (base, size, name — needed to symbolize user addresses), panics.
 - Cheap when off: a per-category mask from the command line
   (`events=syscall,image`), checked with one relaxed atomic load.
+
+Implemented: `kernel/src/events.rs` writes to QEMU's debug console
+(port 0xe9, `arch::debugcon`); xtask always attaches it to
+`<iso>.events.jsonl` next to the serial log. Categories: `syscall`
+(pid, tid, nr, name, args, status, ns), `image` (pid, NT path, base,
+size: the exe and every image view), `thread` (create with start and TEB,
+exit with status), `process` (start, exit), `fault` (every user-mode CPU
+exception, before it is resolved or delivered). `XTASK_EVENTS=all cargo
+xtask boot-test` turns it on for every scenario; `EVENT_EXPECT` in xtask
+checks a scenario's stream. Next: process-relative times, a `cargo xtask
+events` summary (top services by count and time), user-address
+symbolization from the image events.
 
 ## 2. "What is missing" ledger — done (`nt::ledger`, `ledger_test`)
 

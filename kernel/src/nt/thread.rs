@@ -217,6 +217,14 @@ pub fn create(
     ) {
         Ok(tid) => {
             *as_thread(&object).sched_id.lock() = Some(tid);
+            crate::events::emit(
+                crate::events::Category::Thread,
+                "thread create",
+                format_args!(
+                    r#""pid":{},"tid":{id},"start":{},"teb":{teb_addr}"#,
+                    process.id, win32_start
+                ),
+            );
             Ok(object)
         }
         Err(_) => {
@@ -499,6 +507,11 @@ pub fn exit_current(status: NtStatus) -> ! {
     if let Some(object) = current() {
         let t = as_thread(&object);
         t.exit_status.lock().get_or_insert(status);
+        crate::events::emit(
+            crate::events::Category::Thread,
+            "thread exit",
+            format_args!(r#""pid":{},"tid":{},"status":{}"#, t.process.id, t.id, status.0),
+        );
         *t.exit_time.lock() = crate::time::system_time();
         // Leave the process before waking waiters: once the thread object
         // is signaled, the thread must no longer count as live (e.g. for

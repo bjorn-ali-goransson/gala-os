@@ -95,6 +95,7 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `args=<percent-encoded>[,...]` | their command-line arguments, in the same order (`%2C` for a comma) |
 | `trace` | log every system call (arguments, status) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
+| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault` or `all` |
 
 ## Physical memory
 

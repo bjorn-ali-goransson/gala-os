@@ -135,6 +135,9 @@ drawing text roughly doubles kernel time under emulation.
   show up (e.g. #UD on `syscall` = EFER.SCE missing on that CPU).
 - Kernel command-line flag `trace` logs every system call with arguments
   and status (add it to a scenario's `cmdline` temporarily).
+- The event stream: `XTASK_EVENTS=all cargo xtask boot-test name` writes
+  JSON lines (system calls with timing, image maps, threads, processes,
+  faults) to `target/debug/<iso>.events.jsonl`; filter with `jq` or grep.
 - `cargo xtask report` writes `target/report/gala.{json,md}`;
   `cargo xtask compare windows.json` diffs against results collected on
   Windows with `user/bin/run-all.ps1`.

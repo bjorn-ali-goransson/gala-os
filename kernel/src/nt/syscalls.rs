@@ -281,6 +281,8 @@ fn dispatch(frame: &mut SyscallFrame) {
         panic!("syscall {number:#x} from a thread without a process");
     };
     let service = TABLE.iter().find(|(n, ..)| *n == number);
+    let started =
+        crate::events::enabled(crate::events::Category::Syscall).then(crate::time::monotonic_ns);
     let mut call = Call { frame, process };
     let status = match service {
         Some((.., handler)) => handler(&mut call),
@@ -303,6 +305,15 @@ fn dispatch(frame: &mut SyscallFrame) {
             _ => {}
         }
     }
+    if let Some(started) = started {
+        syscall_event(
+            &call,
+            number,
+            service.map(|&(_, name, argc, _)| (name, argc)),
+            status,
+            started,
+        );
+    }
     if TRACE.load(Ordering::Relaxed) {
         trace(&call, number, service.map(|&(_, name, argc, _)| (name, argc)), status);
     }
@@ -314,6 +325,49 @@ static TRACE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Relaxed);
+}
+
+/// The `syscall` event for a finished call (unreadable arguments: null).
+fn syscall_event(
+    call: &Call<'_>,
+    number: u32,
+    service: Option<(&str, usize)>,
+    status: NtStatus,
+    started: u64,
+) {
+    struct Args<'a>(&'a Call<'a>, usize);
+    impl fmt::Display for Args<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            for i in 0..self.1 {
+                if i > 0 {
+                    f.write_str(",")?;
+                }
+                match self.0.arg(i) {
+                    Ok(v) => write!(f, "{v}")?,
+                    Err(_) => f.write_str("null")?,
+                }
+            }
+            Ok(())
+        }
+    }
+    let (name, argc) = service.unwrap_or(("?", 0));
+    let tid = thread::current().and_then(|t| match &t.body {
+        ObjectBody::Thread(t) => Some(t.id),
+        _ => None,
+    });
+    crate::events::emit(
+        crate::events::Category::Syscall,
+        "syscall",
+        format_args!(
+            r#""pid":{},"tid":{},"nr":{number},"name":{},"args":[{}],"status":{},"ns":{}"#,
+            call.process.id,
+            tid.unwrap_or(0),
+            crate::events::Str(name),
+            Args(call, argc),
+            status.0,
+            crate::time::monotonic_ns().saturating_sub(started)
+        ),
+    );
 }
 
 /// Logs one finished system call (arguments as passed; unreadable stack

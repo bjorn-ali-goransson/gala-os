@@ -321,6 +321,15 @@ pub fn spawn_from_pe(
     let mut vad = Vad::default();
     let base = map_image(&mut space, &mut vad, &image)?;
     let id = thread::next_id();
+    crate::events::emit(
+        crate::events::Category::Image,
+        "image",
+        format_args!(
+            r#""pid":{id},"name":{},"base":{base},"size":{}"#,
+            crate::events::Str(name),
+            image.size_of_image
+        ),
+    );
 
     // Main thread stack, laid out as Windows does: a reservation whose top
     // pages are committed, with a guard page below them that moves down as
@@ -473,6 +482,15 @@ pub fn spawn_from_pe(
         }
     };
     info!("process {} (pid {}): starting at {:#x}", name, id, regs.rip);
+    crate::events::emit(
+        crate::events::Category::Process,
+        "process start",
+        format_args!(
+            r#""pid":{id},"name":{},"image_base":{base},"entry":{}"#,
+            crate::events::Str(name),
+            regs.rip
+        ),
+    );
     Ok((process, main))
 }
 
@@ -546,6 +564,11 @@ pub fn terminate_current(status: NtStatus) {
 pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     let status = *process.exit_status.lock().get_or_insert(last_status);
     info!("process {} (pid {}) exited with status {:#010x}", process.name, process.id, status.0);
+    crate::events::emit(
+        crate::events::Category::Process,
+        "process exit",
+        format_args!(r#""pid":{},"status":{}"#, process.id, status.0),
+    );
     wait::signal_dispatcher(&process.dispatcher, 1);
     // Close every handle (this breaks reference cycles through handles to
     // the process's own objects) and forget the process.
@@ -554,9 +577,21 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     PROCESSES.lock().retain(|p| !KArc::ptr_eq(p, process));
 }
 
-/// User-mode CPU exceptions: no SEH dispatch yet, so they end the process.
+/// User-mode CPU exceptions: resolved (demand paging, guard pages, COW),
+/// delivered to the process's exception dispatcher, or fatal.
 fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
     let vector = frame.vector as u8;
+    crate::events::emit(
+        crate::events::Category::Fault,
+        "fault",
+        format_args!(
+            r#""pid":{},"vector":{vector},"rip":{},"cr2":{},"error":{}"#,
+            current().map_or(0, |p| p.id),
+            frame.rip,
+            cr2.unwrap_or(0),
+            frame.error_code
+        ),
+    );
     if let (14, Some(addr), Some(process)) = (vector, cr2, current()) {
         // Page-fault error code: bit 1 = write, bit 4 = instruction fetch.
         let kind = match frame.error_code {
