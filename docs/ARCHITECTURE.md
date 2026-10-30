@@ -248,6 +248,15 @@ never free. View protections must be a subset of the section's
 (STATUS_SECTION_PROTECTION), offsets 64 KiB aligned; NtFreeVirtualMemory on
 a view is STATUS_UNABLE_TO_DELETE_SECTION.
 
+Image sections (SEC_IMAGE on a file handle with FILE_READ_DATA) keep an
+`ImageLayout`: the file laid out at its RVAs, with a Windows-style
+protection per page (writable sections are WRITECOPY). Each view is a
+MEM_IMAGE VAD at the preferred base, or anywhere when that is taken and the
+image is relocatable; its pages are private copies of the layout with base
+relocations applied, so writes never reach other views (copy-on-write in
+effect, without sharing yet). A relocated view returns
+STATUS_IMAGE_NOT_AT_BASE. Non-PE files fail with STATUS_INVALID_IMAGE_NOT_MZ.
+
 **Files** (`fs::ramfs`, `nt::file`): an in-memory file system (node
 arena, case-insensitive names, static boot-module contents copied on first
 write, NT share-access accounting, delete pending until the last open

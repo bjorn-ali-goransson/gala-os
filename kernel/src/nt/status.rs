@@ -54,4 +54,7 @@ impl NtStatus {
     pub const INVALID_PARAMETER_4: NtStatus = NtStatus(0xc000_00f2);
     pub const INVALID_PARAMETER_5: NtStatus = NtStatus(0xc000_00f3);
     pub const INVALID_IMAGE_FORMAT: NtStatus = NtStatus(0xc000_007b);
+    pub const INVALID_IMAGE_NOT_MZ: NtStatus = NtStatus(0xc000_012f);
+    pub const INVALID_FILE_FOR_SECTION: NtStatus = NtStatus(0xc000_0020);
+    pub const IMAGE_NOT_AT_BASE: NtStatus = NtStatus(0x4000_0003);
 }

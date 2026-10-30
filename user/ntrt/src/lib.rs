@@ -508,6 +508,27 @@ pub fn create_section(
     (st, h)
 }
 
+pub const SEC_IMAGE: u32 = 0x100_0000;
+pub const GENERIC_EXECUTE: u32 = 0x2000_0000;
+
+/// NtCreateSection(SEC_IMAGE) on an open file.
+pub fn create_image_section(file: Handle) -> (NtStatus, Handle) {
+    let mut h = Handle(0);
+    // SAFETY: valid output pointer; size and attributes come from the image.
+    let st = unsafe {
+        ntrt_nt_create_section(
+            &mut h,
+            SECTION_ALL_ACCESS,
+            core::ptr::null(),
+            core::ptr::null(),
+            PAGE_READONLY,
+            SEC_IMAGE,
+            file,
+        )
+    };
+    (st, h)
+}
+
 pub fn open_section(attrs: &ObjectAttributes) -> (NtStatus, Handle) {
     let mut h = Handle(0);
     // SAFETY: valid pointers.

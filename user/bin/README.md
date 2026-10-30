@@ -9,3 +9,7 @@ use raw system calls of the pinned build (Windows 11 24H2, 26100). Copy
 them to a Windows machine and run them from a console to compare results
 with gala-os (differential testing). Each prints `<name>: ok` and exits
 with status 0 on success, or exits with the number of the failing check.
+
+`testdll.dll` is a small DLL (exports, .data, base relocations) that
+`image_test.exe` embeds, writes to `C:\Users\Public` and maps as an image
+section; it is here for inspection only.

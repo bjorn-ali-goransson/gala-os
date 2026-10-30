@@ -151,7 +151,12 @@ pub fn free(
     size: u64,
     free_type: u32,
 ) -> Result<(u64, u64), NtStatus> {
-    if process.vad.lock().query(base).is_ok_and(|q| q.kind == vad::MEM_MAPPED) {
+    if process
+        .vad
+        .lock()
+        .query(base)
+        .is_ok_and(|q| q.kind == vad::MEM_MAPPED || q.kind == vad::MEM_IMAGE)
+    {
         return Err(NtStatus::UNABLE_TO_DELETE_SECTION);
     }
     let range = match free_type {

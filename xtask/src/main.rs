@@ -19,6 +19,8 @@ const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Freestanding Windows test programs in `user/`, shipped as boot modules.
 const USER_TARGET: &str = "x86_64-pc-windows-msvc";
+/// Test DLLs (embedded by test programs; also exported to user/bin).
+const USER_DLLS: &[&str] = &["testdll"];
 const USER_PROGRAMS: &[&str] = &[
     "hello",
     "abi_test",
@@ -30,6 +32,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kuser_test",
     "section_test",
     "file_test",
+    "image_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -126,7 +129,14 @@ fn build_kernel(release: bool) -> Result {
     }
     run_cmd(&mut cmd)?;
     // User programs are always optimized: without a CRT there is no
-    // `memcpy` etc. for unoptimized code to call.
+    // `memcpy` etc. for unoptimized code to call. DLLs that programs embed
+    // are built first.
+    let mut cmd = cargo();
+    cmd.args(["build", "--release", "--target", USER_TARGET]);
+    for dll in USER_DLLS {
+        cmd.args(["--package", dll]);
+    }
+    run_cmd(&mut cmd)?;
     let mut cmd = cargo();
     cmd.args(["build", "--release", "--target", USER_TARGET]);
     for program in USER_PROGRAMS {
@@ -277,6 +287,12 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "image_test",
+        cmdline: "qemu_exit run=image_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["image_test: ok", "exited with status 0x00000000"],
+    },
     Scenario {
         name: "file_test",
         cmdline: "qemu_exit run=file_test.exe",
@@ -470,6 +486,10 @@ fn export_tests() -> Result {
     for program in USER_PROGRAMS {
         let exe = target_dir().join(USER_TARGET).join("release").join(format!("{program}.exe"));
         copy(&exe, &dir.join(format!("{program}.exe")))?;
+    }
+    for dll in USER_DLLS {
+        let file = target_dir().join(USER_TARGET).join("release").join(format!("{dll}.dll"));
+        copy(&file, &dir.join(format!("{dll}.dll")))?;
     }
     eprintln!("xtask: exported {} test programs to {}", USER_PROGRAMS.len(), dir.display());
     Ok(())

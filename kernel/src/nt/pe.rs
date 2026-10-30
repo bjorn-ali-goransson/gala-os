@@ -7,6 +7,7 @@ const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 const PE32_PLUS_MAGIC: u16 = 0x20b;
 const IMAGE_FILE_EXECUTABLE_IMAGE: u16 = 0x0002;
 const IMAGE_FILE_DLL: u16 = 0x2000;
+const IMAGE_FILE_RELOCS_STRIPPED: u16 = 0x0001;
 
 pub const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 pub const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
@@ -94,10 +95,23 @@ pub struct PeImage<'a> {
     directories: [DataDirectory; 16],
     section_table: usize,
     section_count: usize,
+    pub is_dll: bool,
+    /// Whether the image can be loaded away from `image_base`.
+    pub relocatable: bool,
 }
 
 impl<'a> PeImage<'a> {
+    /// Parses an executable (.exe) image.
     pub fn parse(data: &'a [u8]) -> Result<Self, PeError> {
+        let image = Self::parse_image(data)?;
+        if image.is_dll {
+            return Err(PeError::NotExecutable);
+        }
+        Ok(image)
+    }
+
+    /// Parses any image (executable or DLL), as for SEC_IMAGE sections.
+    pub fn parse_image(data: &'a [u8]) -> Result<Self, PeError> {
         if data.get(0..2) != Some(b"MZ") {
             return Err(PeError::BadDosSignature);
         }
@@ -113,11 +127,11 @@ impl<'a> PeImage<'a> {
         let section_count = usize::from(u16_at(data, coff + 2)?);
         let optional_size = usize::from(u16_at(data, coff + 16)?);
         let characteristics = u16_at(data, coff + 18)?;
-        if characteristics & IMAGE_FILE_EXECUTABLE_IMAGE == 0
-            || characteristics & IMAGE_FILE_DLL != 0
-        {
+        if characteristics & IMAGE_FILE_EXECUTABLE_IMAGE == 0 {
             return Err(PeError::NotExecutable);
         }
+        let is_dll = characteristics & IMAGE_FILE_DLL != 0;
+        let relocs_stripped = characteristics & IMAGE_FILE_RELOCS_STRIPPED != 0;
 
         let opt = coff + 20;
         if u16_at(data, opt)? != PE32_PLUS_MAGIC {
@@ -151,7 +165,7 @@ impl<'a> PeImage<'a> {
             return Err(PeError::Truncated);
         }
 
-        let image = PeImage {
+        let mut image = PeImage {
             data,
             image_base,
             size_of_image,
@@ -164,6 +178,8 @@ impl<'a> PeImage<'a> {
             directories,
             section_table: opt + optional_size,
             section_count,
+            is_dll,
+            relocatable: false,
         };
         let mut prev_end = size_of_headers;
         for i in 0..section_count {
@@ -186,6 +202,7 @@ impl<'a> PeImage<'a> {
         if entry_rva >= size_of_image {
             return Err(PeError::SectionOutOfBounds);
         }
+        image.relocatable = !relocs_stripped && image.directory(DIRECTORY_BASERELOC).size != 0;
         Ok(image)
     }
 
@@ -226,6 +243,21 @@ impl<'a> PeImage<'a> {
 
     pub fn has_imports(&self) -> bool {
         self.directory(DIRECTORY_IMPORT).size != 0
+    }
+}
+
+impl PeImage<'_> {
+    /// Copies headers and sections to their RVAs in `out` (`SizeOfImage`
+    /// bytes, the rest is zeroed).
+    pub fn lay_out(&self, out: &mut [u8]) {
+        out.fill(0);
+        let headers = self.headers();
+        out[..headers.len()].copy_from_slice(headers);
+        for s in self.sections() {
+            let data = self.section_data(&s);
+            let start = s.virtual_address as usize;
+            out[start..start + data.len()].copy_from_slice(data);
+        }
     }
 }
 
@@ -372,6 +404,24 @@ mod tests {
         d[0x44 + 18] = 0x22;
         d[0x44 + 19] = 0x20; // IMAGE_FILE_DLL
         assert_eq!(PeImage::parse(&d).unwrap_err(), PeError::NotExecutable);
+    }
+
+    #[test]
+    fn dll_parses_as_image_and_lays_out() {
+        let mut d = build(
+            &[(".text", 0x1000, 3, &[0x90, 0x90, 0xc3], TEXT), (".data", 0x2000, 8, &[7; 4], DATA)],
+            0x1000,
+        );
+        d[0x44 + 19] = 0x20; // IMAGE_FILE_DLL
+        let pe = PeImage::parse_image(&d).unwrap();
+        assert!(pe.is_dll);
+        assert!(!pe.relocatable, "no relocation directory");
+        let mut out = vec![0xffu8; pe.size_of_image as usize];
+        pe.lay_out(&mut out);
+        assert_eq!(&out[0..2], b"MZ");
+        assert_eq!(&out[0x1000..0x1003], &[0x90, 0x90, 0xc3]);
+        assert_eq!(out[0x1003], 0, "rest of the page is zero");
+        assert_eq!(&out[0x2000..0x2008], &[7, 7, 7, 7, 0, 0, 0, 0]);
     }
 
     #[test]

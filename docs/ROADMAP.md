@@ -42,17 +42,19 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   device; NtCreateFile (all dispositions), NtOpenFile, NtReadFile/NtWriteFile
   (positions, append, EOF), NtQuery/SetInformationFile (basic, standard,
   position, EOF, disposition), NtQueryAttributesFile; `file_test`
+- Image sections: NtCreateSection(SEC_IMAGE) from a file handle, image
+  views with per-section protections (MEM_IMAGE), base relocations when not
+  at the preferred base (STATUS_IMAGE_NOT_AT_BASE), private copy-on-write
+  pages; test DLL `testdll` driven by `image_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
    NtOpenMutant, NtCreateSemaphore/NtReleaseSemaphore (0x0a); abandonment
    on thread exit. Create/open numbers vary by build: verify on 26100 first.
    Symbolic links (`\Sessions\1\BaseNamedObjects\Global`), NtQueryDirectoryObject.
-6b. **Image sections** (next): SEC_IMAGE from a file handle, NtMapViewOfSection
-   maps headers+sections with their protections and applies base relocations
-   when not at the preferred base (as Windows' memory manager does);
-   file-backed data sections; the kernel loader uses image sections. Test with
-   a small test DLL shipped in C:\gala.
+6c. **Image sections, rest**: share unmodified pages between views,
+   file-backed data sections, the kernel loader using image sections, and
+   loading DLL imports (needed for ntdll and 7).
 7. **Exceptions**: user-mode exception dispatch (KiUserExceptionDispatcher
    contract), NtContinue, NtRaiseException; vectored/SEH work in user mode.
 8b. **More file services**: NtQueryDirectoryFile, NtQueryVolumeInformationFile,

@@ -921,8 +921,12 @@ fn nt_create_section(call: &mut Call<'_>) -> NtStatus {
     let (out, access, attrs_ptr, size_ptr) =
         (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));
     let (protect, attributes, file) = (arg!(call, 4) as u32, arg!(call, 5) as u32, arg!(call, 6));
-    if file != 0 || attributes & section::SEC_IMAGE != 0 {
-        // TODO: file-backed and image sections.
+    if attributes & section::SEC_IMAGE != 0 {
+        let body = tri!(image_section(call, file));
+        return finish_create_section(call, out, access, attrs_ptr, body);
+    }
+    if file != 0 {
+        // TODO: file-backed data sections.
         return NtStatus::NOT_IMPLEMENTED;
     }
     if size_ptr == 0 {
@@ -932,8 +936,43 @@ fn nt_create_section(call: &mut Call<'_>) -> NtStatus {
     if size == 0 || size as i64 <= 0 {
         return NtStatus::INVALID_PARAMETER_4;
     }
-    let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
     let body = tri!(section::Section::new(size, protect, attributes));
+    finish_create_section(call, out, access, attrs_ptr, body)
+}
+
+/// Builds a SEC_IMAGE section from the whole contents of an open file.
+fn image_section(call: &Call<'_>, file: u64) -> Result<section::Section, NtStatus> {
+    if file == 0 {
+        return Err(NtStatus::INVALID_FILE_FOR_SECTION);
+    }
+    let entry = call.handle(Handle(file))?;
+    let ObjectBody::File(f) = &entry.object.body else {
+        return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+    };
+    if f.directory {
+        return Err(NtStatus::INVALID_FILE_FOR_SECTION);
+    }
+    if entry.access & file::FILE_READ_DATA == 0 {
+        return Err(NtStatus::ACCESS_DENIED);
+    }
+    let size = file::with_fs(|fs| fs.node(f.node).map_or(0, |n| n.size()));
+    let len = usize::try_from(size).map_err(|_| NtStatus::SECTION_TOO_BIG)?;
+    let mut data = Vec::new();
+    data.try_reserve_exact(len).map_err(|_| NtStatus::NO_MEMORY)?;
+    data.resize(len, 0);
+    let n = file::with_fs(|fs| fs.read(f.node, 0, &mut data)).map_err(file::fs_status)?;
+    data.truncate(n);
+    section::Section::new_image(&data)
+}
+
+fn finish_create_section(
+    call: &mut Call<'_>,
+    out: u64,
+    access: u32,
+    attrs_ptr: u64,
+    body: section::Section,
+) -> NtStatus {
+    let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
     let Ok(object) = KObject::new(ObjectBody::Section(body)) else { return NtStatus::NO_MEMORY };
     let (object, existed, handle_attributes) = tri!(link_new_object(attrs, object, is_section));
     let status = call.return_handle(out, object, access, handle_attributes);
@@ -984,11 +1023,11 @@ fn nt_map_view_of_section(call: &mut Call<'_>) -> NtStatus {
     let offset = if offset_ptr == 0 { 0 } else { tri!(call.read_u64(offset_ptr)) };
     let size = tri!(call.read_u64(size_ptr));
     let top_down = allocation & MEM_TOP_DOWN != 0;
-    let (base, size) =
+    let view =
         tri!(section::map_view(&call.process, object, base, offset, size, protect, top_down));
-    tri!(call.write_u64(base_ptr, base));
-    tri!(call.write_u64(size_ptr, size));
-    NtStatus::SUCCESS
+    tri!(call.write_u64(base_ptr, view.base));
+    tri!(call.write_u64(size_ptr, view.size));
+    if view.relocated { NtStatus::IMAGE_NOT_AT_BASE } else { NtStatus::SUCCESS }
 }
 
 /// NtUnmapViewOfSection(ProcessHandle, BaseAddress)

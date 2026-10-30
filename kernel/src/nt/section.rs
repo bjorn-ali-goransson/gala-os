@@ -27,6 +27,72 @@ pub struct Section {
     pub protect: u32,
     pub attributes: u32,
     pages: IrqMutex<Vec<Option<Frame>>>,
+    /// Set for SEC_IMAGE sections.
+    pub image: Option<ImageLayout>,
+}
+
+/// An executable image laid out at its preferred base (headers and
+/// sections at their RVAs), with the protection of every page.
+pub struct ImageLayout {
+    pub base: u64,
+    bytes: Vec<u8>,
+    page_protect: Vec<u32>,
+    relocations: super::pe::DataDirectory,
+    relocatable: bool,
+}
+
+/// Windows-style protection of an image section (writable = copy on write).
+pub fn image_section_protect(characteristics: u32) -> u32 {
+    use super::pe::{
+        IMAGE_SCN_MEM_EXECUTE as X, IMAGE_SCN_MEM_READ as R, IMAGE_SCN_MEM_WRITE as W,
+    };
+    match (characteristics & X != 0, characteristics & W != 0, characteristics & R != 0) {
+        (true, true, _) => vad::PAGE_EXECUTE_WRITECOPY,
+        (true, false, true) => vad::PAGE_EXECUTE_READ,
+        (true, false, false) => vad::PAGE_EXECUTE,
+        (false, true, _) => vad::PAGE_WRITECOPY,
+        (false, false, true) => vad::PAGE_READONLY,
+        (false, false, false) => vad::PAGE_NOACCESS,
+    }
+}
+
+impl ImageLayout {
+    /// Lays out the PE image in `data`.
+    pub fn new(data: &[u8]) -> Result<Self, NtStatus> {
+        use super::pe::{PeError, PeImage};
+        let image = PeImage::parse_image(data).map_err(|e| match e {
+            PeError::BadDosSignature => NtStatus::INVALID_IMAGE_NOT_MZ,
+            _ => NtStatus::INVALID_IMAGE_FORMAT,
+        })?;
+        let size = image.size_of_image as usize;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(size).map_err(|_| NtStatus::NO_MEMORY)?;
+        bytes.resize(size, 0);
+        image.lay_out(&mut bytes);
+        let pages = size.div_ceil(PAGE_SIZE as usize);
+        let mut page_protect = Vec::new();
+        page_protect.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
+        // Headers and gaps are read-only; sections get their own protection.
+        page_protect.resize(pages, vad::PAGE_READONLY);
+        for s in image.sections() {
+            let first = s.virtual_address as usize / PAGE_SIZE as usize;
+            let count = (s.memory_size() as usize).div_ceil(PAGE_SIZE as usize);
+            for p in page_protect.iter_mut().skip(first).take(count) {
+                *p = image_section_protect(s.characteristics);
+            }
+        }
+        Ok(ImageLayout {
+            base: image.image_base,
+            bytes,
+            page_protect,
+            relocations: image.directory(super::pe::DIRECTORY_BASERELOC),
+            relocatable: image.relocatable,
+        })
+    }
+
+    pub fn size(&self) -> u64 {
+        self.bytes.len() as u64
+    }
 }
 
 impl Section {
@@ -37,7 +103,19 @@ impl Section {
         let mut pages = Vec::new();
         pages.try_reserve_exact(count).map_err(|_| NtStatus::NO_MEMORY)?;
         pages.resize(count, None);
-        Ok(Section { size, protect, attributes, pages: IrqMutex::new(pages) })
+        Ok(Section { size, protect, attributes, pages: IrqMutex::new(pages), image: None })
+    }
+
+    /// A SEC_IMAGE section for the PE file contents `data`.
+    pub fn new_image(data: &[u8]) -> Result<Self, NtStatus> {
+        let layout = ImageLayout::new(data)?;
+        Ok(Section {
+            size: layout.size(),
+            protect: vad::PAGE_EXECUTE_WRITECOPY,
+            attributes: SEC_IMAGE,
+            pages: IrqMutex::new(Vec::new()),
+            image: Some(layout),
+        })
     }
 
     /// The frame backing page `index`, allocated zeroed on first use.
@@ -91,6 +169,14 @@ fn section_of(object: &ObjectRef) -> &Section {
     }
 }
 
+/// Where a view was mapped.
+pub struct Mapped {
+    pub base: u64,
+    pub size: u64,
+    /// An image view not at its preferred base (STATUS_IMAGE_NOT_AT_BASE).
+    pub relocated: bool,
+}
+
 /// Maps a view of `object` (a section) into `process`.
 pub fn map_view(
     process: &Process,
@@ -100,8 +186,11 @@ pub fn map_view(
     size: u64,
     protect: u32,
     top_down: bool,
-) -> Result<(u64, u64), NtStatus> {
+) -> Result<Mapped, NtStatus> {
     let section = section_of(object);
+    if let Some(image) = &section.image {
+        return map_image_view(process, object, image, base, offset);
+    }
     section.allows(protect)?;
     if !offset.is_multiple_of(vad::ALLOCATION_GRANULARITY) {
         return Err(NtStatus::MAPPED_ALIGNMENT);
@@ -122,7 +211,75 @@ pub fn map_view(
         vad.commit(base, size, protect)?;
     }
     let _ = views.try_push(View { base, size, offset, section: object.clone() });
-    Ok((base, size))
+    Ok(Mapped { base, size, relocated: false })
+}
+
+/// Maps an image view: private pages copied from the layout, relocated if
+/// not at the preferred base.
+// TODO: share unmodified read-only pages between views.
+fn map_image_view(
+    process: &Process,
+    object: &ObjectRef,
+    image: &ImageLayout,
+    base: u64,
+    offset: u64,
+) -> Result<Mapped, NtStatus> {
+    if offset != 0 {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    let size = image.size();
+    let mut views = process.views.lock();
+    views.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
+    let mut vad = process.vad.lock();
+    let wanted = if base != 0 { base } else { image.base };
+    let reserved =
+        match vad.reserve(Some(wanted), size, vad::PAGE_EXECUTE_WRITECOPY, vad::MEM_IMAGE, false) {
+            Ok(r) => r,
+            Err(NtStatus::CONFLICTING_ADDRESSES | NtStatus::INVALID_PARAMETER)
+                if base == 0 && image.relocatable =>
+            {
+                vad.reserve(None, size, vad::PAGE_EXECUTE_WRITECOPY, vad::MEM_IMAGE, false)?
+            }
+            Err(e) => return Err(e),
+        };
+    let view_base = reserved.0;
+    let delta = view_base.wrapping_sub(image.base);
+    if delta != 0 && !image.relocatable {
+        let _ = vad.release(view_base, 0);
+        return Err(NtStatus::CONFLICTING_ADDRESSES);
+    }
+    // The view's contents: the layout, relocated for this base.
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(image.bytes.len()).is_err() {
+        let _ = vad.release(view_base, 0);
+        return Err(NtStatus::NO_MEMORY);
+    }
+    bytes.resize(image.bytes.len(), 0);
+    bytes.copy_from_slice(&image.bytes);
+    if super::pe::apply_relocations(&mut bytes, image.relocations, delta).is_err() {
+        let _ = vad.release(view_base, 0);
+        return Err(NtStatus::INVALID_IMAGE_FORMAT);
+    }
+    let mut space = process.space.lock();
+    for (i, &protect) in image.page_protect.iter().enumerate() {
+        let va = view_base + i as u64 * PAGE_SIZE;
+        let page = &bytes[i * PAGE_SIZE as usize..((i + 1) * PAGE_SIZE as usize).min(bytes.len())];
+        let fail = |vad: &mut vad::Vad, space: &mut UserSpace| {
+            for j in 0..i as u64 {
+                space.unmap_page(view_base + j * PAGE_SIZE);
+            }
+            let _ = vad.release(view_base, 0);
+            NtStatus::NO_MEMORY
+        };
+        if vad.commit(va, PAGE_SIZE, protect).is_err()
+            || space.map_zeroed(va, 1, super::vm::flags_for(protect)).is_err()
+            || space.write_initial(va, page).is_err()
+        {
+            return Err(fail(&mut vad, &mut space));
+        }
+    }
+    let _ = views.try_push(View { base: view_base, size, offset: 0, section: object.clone() });
+    Ok(Mapped { base: view_base, size, relocated: delta != 0 })
 }
 
 /// Unmaps the view containing `addr`.
