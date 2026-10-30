@@ -137,6 +137,8 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   boot (`run=a.exe,b.exe`) with xtask grouping compatible scenarios and
   judging each program on its own log section; parallel ISO creation; a
   Docker test image (`cargo xtask docker-test`). Boot tests: 66 s -> 14 s
+- Screen console (framebuffer text mirroring the serial log, Noto Sans Mono
+  bitmap font) and `cargo xtask screenshot` (PNG via the QEMU monitor)
 
 ## Next
 Direction from the project owner (2026-10-30): multiprocessor support, then

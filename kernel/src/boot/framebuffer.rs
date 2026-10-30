@@ -14,6 +14,10 @@ pub struct Framebuffer {
     channels: [(u8, u8); 3], // (mask size, shift) for red, green, blue
 }
 
+// SAFETY: the value owns the framebuffer memory (see `from_raw`); which
+// thread or CPU draws through it does not matter.
+unsafe impl Send for Framebuffer {}
+
 impl Framebuffer {
     /// Returns `None` for framebuffers this driver cannot draw on.
     ///
@@ -69,6 +73,45 @@ impl Framebuffer {
             .zip(self.channels)
             .map(|(&c, (size, shift))| (c >> (8 - size)) << shift)
             .fold(0, |pixel, c| pixel | c)
+    }
+
+    /// Writes an encoded pixel; coordinates outside the screen are ignored.
+    fn put(&self, x: u64, y: u64, pixel: u32) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        // SAFETY: as in `fill`: inside the `pitch * height` bytes guaranteed
+        // by `from_raw`, 4-byte aligned.
+        unsafe {
+            let p = self.base.as_ptr().add((y * self.pitch + x * 4) as usize).cast::<u32>();
+            p.write_volatile(pixel);
+        }
+    }
+
+    /// Fills a rectangle (clipped to the screen) with `0x00RRGGBB`.
+    pub fn fill_rect(&self, x: u64, y: u64, w: u64, h: u64, rgb: u32) {
+        let pixel = self.encode(rgb);
+        for yy in y..(y + h).min(self.height) {
+            for xx in x..(x + w).min(self.width) {
+                self.put(xx, yy, pixel);
+            }
+        }
+    }
+
+    /// Draws a grayscale glyph (`rows[y][x]` = coverage 0..=255) at (x, y),
+    /// blending `fg` over `bg` (both `0x00RRGGBB`).
+    pub fn draw_glyph(&self, x: u64, y: u64, rows: &[&[u8]], fg: u32, bg: u32) {
+        let mix = |a: u32, b: u32, t: u32, shift: u32| {
+            let (a, b) = ((a >> shift) & 0xff, (b >> shift) & 0xff);
+            ((a * (255 - t) + b * t) / 255) << shift
+        };
+        for (dy, row) in rows.iter().enumerate() {
+            for (dx, &coverage) in row.iter().enumerate() {
+                let t = u32::from(coverage);
+                let rgb = mix(bg, fg, t, 16) | mix(bg, fg, t, 8) | mix(bg, fg, t, 0);
+                self.put(x + dx as u64, y + dy as u64, self.encode(rgb));
+            }
+        }
     }
 
     /// Fills the whole screen with `0x00RRGGBB`.

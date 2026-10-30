@@ -33,6 +33,23 @@ impl<T> IrqMutex<T> {
     }
 }
 
+impl<T> IrqMutex<T> {
+    /// Takes the lock if it is free (for paths that must not wait, such as
+    /// panic output).
+    pub fn try_lock(&self) -> Option<IrqGuard<'_, T>> {
+        let restore = cpu::disable_interrupts();
+        match self.inner.try_lock() {
+            Some(guard) => Some(IrqGuard { guard: Some(guard), restore }),
+            None => {
+                if restore {
+                    cpu::enable_interrupts();
+                }
+                None
+            }
+        }
+    }
+}
+
 pub struct IrqGuard<'a, T> {
     guard: Option<spin::MutexGuard<'a, T>>,
     restore: bool,

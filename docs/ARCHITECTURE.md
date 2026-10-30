@@ -94,6 +94,7 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `run=<file>[,<file>...]` | run those boot modules as user processes, one after another (each between `run: begin` and `run: end` log lines) |
 | `args=<percent-encoded>[,...]` | their command-line arguments, in the same order (`%2C` for a comma) |
 | `trace` | log every system call (arguments, status) |
+| `noscreen` | keep the console on the serial port only (no framebuffer text) |
 
 ## Physical memory
 

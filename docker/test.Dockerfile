@@ -7,9 +7,15 @@
 # KVM is used when the host passes /dev/kvm through (docker-test does).
 FROM ubuntu:24.04
 
+# Behind a TLS-intercepting proxy, docker-test puts its CA here
+# (XTASK_DOCKER_CA, or SSL_CERT_FILE); proxy variables come as build args.
+COPY extra-ca/ /usr/local/share/ca-certificates/extra/
+ARG http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY
+
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         qemu-system-x86 ovmf xorriso git make gcc libc6-dev curl ca-certificates \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # The toolchain pinned in rust-toolchain.toml (keep in sync).

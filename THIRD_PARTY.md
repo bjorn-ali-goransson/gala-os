@@ -16,15 +16,16 @@ Rules for this file:
 
 | Component | Version | Source | License | How it is used |
 |---|---|---|---|---|
-| Limine bootloader | `v11.4.1-binary` (commit `5be26a73d7b7`) | github.com/limine-bootloader/limine | BSD-2-Clause | Prebuilt `BOOTX64.EFI` and `limine-uefi-cd.bin`, fetched by `cargo xtask` into `target/` and copied onto the ISO. Not committed. |
+| Limine bootloader | `v11.4.1-binary` (commit `5be26a73d7b7`) | github.com/limine-bootloader/limine | BSD-2-Clause | Prebuilt `BOOTX64.EFI`, `limine-uefi-cd.bin`, `limine-bios-cd.bin` and `limine-bios.sys`, fetched by `cargo xtask` into `target/` and copied onto the ISO; its `limine` host tool (built from `limine.c` in the same checkout) installs the BIOS stages. Not committed. |
 
 ## Rust crate dependencies (linked into the kernel)
 
 | Crate | Version | License | Purpose |
 |---|---|---|---|
 | `spin` | 0.12.3 | MIT | Spinlock for the serial console. |
+| `noto-sans-mono-bitmap` | 0.3.2 | MIT (crate); the glyphs are rasterized from Noto Sans Mono, SIL Open Font License 1.1 | Pre-rasterized font for the on-screen console (`console.rs`); only the regular 16 px basic-Latin subset is enabled. |
 
-The `xtask` host tool has no dependencies beyond `std`.
+The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `screenshot` is its own, uncompressed).
 
 ## Written from third-party specifications (no code copied)
 

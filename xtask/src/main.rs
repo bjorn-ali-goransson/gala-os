@@ -117,6 +117,9 @@ commands:
   test         run host unit tests, then boot in QEMU and check the result
   boot-test    only the QEMU boot tests [scenario name filter]
   export-tests copy the built test programs to user/bin/ (checked in)
+  screenshot   boot and save PNG screenshots of the screen:
+               screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
+               (default: the boot log, at 3 s; files in target/screenshots/)
   docker-test  build the test image (docker/test.Dockerfile) and run
                `cargo xtask test` (or the given xtask arguments) inside it
   report       run every test program on gala; write target/report/gala.{json,md}
@@ -136,6 +139,7 @@ fn main() -> ExitCode {
         Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
         Some("report") => gala_report(release),
         Some("docker-test") => docker_test(&args[1..]),
+        Some("screenshot") => screenshot(release, &args[1..]),
         Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
             Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
             None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
@@ -277,7 +281,9 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
 
 /// Clones the pinned Limine binary release into the target directory once.
 fn fetch_limine() -> Result<PathBuf> {
-    let dir = target_dir().join(format!("limine-{LIMINE_TAG}"));
+    // Under the repository's own target/ even with CARGO_TARGET_DIR set, so
+    // the host and the Docker image (target/docker) share one checkout.
+    let dir = root().join("target").join(format!("limine-{LIMINE_TAG}"));
     if !dir.join("BOOTX64.EFI").exists() {
         if dir.exists() {
             fs::remove_dir_all(&dir).map_err(|e| format!("cleaning {dir:?}: {e}"))?;
@@ -746,14 +752,21 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     }
     let vms = plan_vms(&selected);
     let t1 = Instant::now();
+    // Tests read the serial log; the screen console stays on only where
+    // the scenario boots by UEFI, which keeps that code covered.
+    let screen = |s: &Scenario| if scenario_boot(s.name) == Boot::Uefi { "" } else { " noscreen" };
     let isos = run_parallel(&vms, |vm| match vm {
-        Vm::Single(s) => {
-            make_iso(release, &format!("test-{}", s.name), s.cmdline, &extra_modules(s.name))
-        }
+        Vm::Single(s) => make_iso(
+            release,
+            &format!("test-{}", s.name),
+            &format!("{}{}", s.cmdline, screen(s)),
+            &extra_modules(s.name),
+        ),
         Vm::Batch(group) => {
             let (programs, args): (Vec<_>, Vec<_>) =
                 group.iter().filter_map(|s| batchable(s)).unzip();
-            let cmdline = format!("qemu_exit run={} args={}", programs.join(","), args.join(","));
+            let cmdline =
+                format!("qemu_exit noscreen run={} args={}", programs.join(","), args.join(","));
             make_iso(
                 release,
                 &format!("batch-{}", group[0].name),
@@ -1079,20 +1092,195 @@ fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
     judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial)
 }
 
+/// Boots an ISO with the given kernel command line (all test programs and
+/// test DLLs as boot modules, ntdll in System32) and saves the screen as
+/// PNG at each requested time, through QEMU's monitor (`screendump`).
+fn screenshot(release: bool, args: &[String]) -> Result {
+    let mut boot = Boot::Bios;
+    let mut times = vec![3.0f64];
+    let mut name = String::from("gala");
+    let mut cmdline = Vec::new();
+    let mut it = args.iter().filter(|a| *a != "--release");
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--uefi" => boot = Boot::Uefi,
+            "--at" => {
+                let list = it.next().ok_or("--at needs a list of seconds")?;
+                times = list
+                    .split(',')
+                    .map(|t| t.parse().map_err(|_| format!("bad time {t:?}")))
+                    .collect::<Result<_>>()?;
+            }
+            "--name" => name = it.next().ok_or("--name needs a value")?.clone(),
+            _ => cmdline.push(arg.as_str()),
+        }
+    }
+    build_kernel(release)?;
+    let modules: Vec<(&str, &str)> = [("ntdll.dll", "Windows/System32")]
+        .into_iter()
+        .chain(USER_DLLS.iter().filter(|d| d.file != "ntdll.dll").map(|d| (d.file, "gala")))
+        .collect();
+    let iso = make_iso(release, &format!("shot-{name}"), &cmdline.join(" "), &modules)?;
+    let dir = target_dir().join("screenshots");
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    let socket = iso.with_extension("monitor.sock");
+    let _ = fs::remove_file(&socket);
+    let mut cmd = qemu(&iso, boot)?;
+    cmd.args(["-display", "none", "-serial", "null", "-monitor"])
+        .arg(format!("unix:{},server,nowait", socket.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().map_err(|e| format!("failed to spawn QEMU: {e}"))?;
+    let start = Instant::now();
+    let result = (|| {
+        let mut monitor = None;
+        for _ in 0..100 {
+            if let Ok(s) = std::os::unix::net::UnixStream::connect(&socket) {
+                monitor = Some(s);
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let mut monitor = monitor.ok_or("cannot connect to the QEMU monitor")?;
+        for &t in &times {
+            let at = Duration::from_secs_f64(t);
+            if let Some(wait) = at.checked_sub(start.elapsed()) {
+                thread::sleep(wait);
+            }
+            let ppm = dir.join(format!("{name}-{t}s.ppm"));
+            let _ = fs::remove_file(&ppm);
+            use std::io::Write;
+            writeln!(monitor, "screendump {}", ppm.display()).map_err(|e| e.to_string())?;
+            for _ in 0..100 {
+                if fs::metadata(&ppm).is_ok_and(|m| m.len() > 0) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            thread::sleep(Duration::from_millis(100));
+            let png = dir.join(format!("{name}-{t}s.png"));
+            ppm_to_png(&ppm, &png)?;
+            let _ = fs::remove_file(&ppm);
+            eprintln!("xtask: wrote {}", png.display());
+        }
+        Ok(())
+    })();
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+/// Converts a binary PPM (P6, 8-bit) to PNG (stored, uncompressed deflate
+/// blocks: no dependencies, files are larger but every viewer reads them).
+fn ppm_to_png(ppm: &Path, png: &Path) -> Result {
+    let data = fs::read(ppm).map_err(|e| format!("reading {ppm:?}: {e}"))?;
+    // Header: "P6" whitespace width whitespace height whitespace 255 single whitespace.
+    let mut fields = Vec::new();
+    let mut i = 0;
+    while fields.len() < 4 {
+        while data.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        let start = i;
+        while data.get(i).is_some_and(|b| !b.is_ascii_whitespace()) {
+            i += 1;
+        }
+        if start == i {
+            return Err(format!("{ppm:?}: truncated PPM header"));
+        }
+        fields.push(String::from_utf8_lossy(&data[start..i]).into_owned());
+    }
+    let (w, h): (usize, usize) = match (fields[0].as_str(), fields[1].parse(), fields[2].parse()) {
+        ("P6", Ok(w), Ok(h)) if fields[3] == "255" => (w, h),
+        _ => return Err(format!("{ppm:?}: not an 8-bit P6 PPM")),
+    };
+    let pixels = data.get(i + 1..i + 1 + w * h * 3).ok_or(format!("{ppm:?}: truncated PPM"))?;
+    // Scanlines with filter byte 0.
+    let mut raw = Vec::with_capacity(h * (w * 3 + 1));
+    for row in pixels.chunks(w * 3) {
+        raw.push(0);
+        raw.extend_from_slice(row);
+    }
+    let mut zlib = vec![0x78, 0x01];
+    for (n, block) in raw.chunks(65535).enumerate() {
+        let last = (n + 1) * 65535 >= raw.len();
+        zlib.push(u8::from(last));
+        let len = block.len() as u16;
+        zlib.extend_from_slice(&len.to_le_bytes());
+        zlib.extend_from_slice(&(!len).to_le_bytes());
+        zlib.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &raw {
+        a = (a + u32::from(byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&(w as u32).to_be_bytes());
+    ihdr.extend_from_slice(&(h as u32).to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit RGB
+    for (kind, body) in [(b"IHDR", &ihdr), (b"IDAT", &zlib), (b"IEND", &Vec::new())] {
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        let start = out.len();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        let crc = crc32(&out[start..]);
+        out.extend_from_slice(&crc.to_be_bytes());
+    }
+    fs::write(png, out).map_err(|e| format!("writing {png:?}: {e}"))
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
 /// The image `docker-test` builds and runs.
 const DOCKER_IMAGE: &str = "gala-os-test";
 
 /// Builds the test image and runs xtask inside it with the repository
 /// mounted (`args` default to `test`), using KVM when the host has it.
 fn docker_test(args: &[String]) -> Result {
-    run_cmd(
-        Command::new("docker")
-            .args(["build", "--quiet", "-t", DOCKER_IMAGE, "-f"])
-            .arg(root().join("docker/test.Dockerfile"))
-            .arg(root().join("docker")),
-    )?;
+    // Behind a proxy (as in sandboxes): forward its settings, trust its CA,
+    // and share the host's network when the proxy listens on localhost.
+    const PROXY_VARS: [&str; 6] =
+        ["http_proxy", "https_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"];
+    let proxies: Vec<(&str, String)> =
+        PROXY_VARS.iter().filter_map(|&v| env::var(v).ok().map(|value| (v, value))).collect();
+    let host_network =
+        proxies.iter().any(|(_, v)| v.contains("127.0.0.1") || v.contains("localhost"));
+    let ca_dir = root().join("docker/extra-ca");
+    if let Some(ca) = env::var_os("XTASK_DOCKER_CA").or_else(|| env::var_os("SSL_CERT_FILE")) {
+        copy(Path::new(&ca), &ca_dir.join("extra.crt"))?;
+    }
+    let mut build = Command::new("docker");
+    build
+        .args(["build", "--quiet", "-t", DOCKER_IMAGE, "-f"])
+        .arg(root().join("docker/test.Dockerfile"));
+    if host_network {
+        build.args(["--network", "host"]);
+    }
+    for (var, value) in &proxies {
+        build.arg("--build-arg").arg(format!("{var}={value}"));
+    }
+    run_cmd(build.arg(root().join("docker")))?;
     let mut cmd = Command::new("docker");
     cmd.args(["run", "--rm", "-v"]).arg(format!("{}:/work", root().display()));
+    if host_network {
+        cmd.args(["--network", "host"]);
+    }
+    for (var, value) in &proxies {
+        cmd.arg("-e").arg(format!("{var}={value}"));
+    }
     if Path::new("/dev/kvm").exists() {
         cmd.args(["--device", "/dev/kvm"]);
     }

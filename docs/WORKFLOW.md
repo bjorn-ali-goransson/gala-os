@@ -104,6 +104,20 @@ the boot scenarios before T1 and 14 s after, under software emulation on a
   near-native speed) and forwards the `XTASK_*` variables. In a cloud
   container without a running daemon, start one with `dockerd &`.
 
+## Screenshots
+
+`cargo xtask screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]`
+boots an ISO (all test programs and DLLs as boot modules, ntdll in
+System32) and writes `target/screenshots/<name>-<t>s.png` at each time,
+through QEMU's monitor (`screendump`). The kernel's screen console shows
+the same log as the serial port (green header bar; warnings yellow, errors
+and panics red), so a screenshot shows what is going on. Example:
+
+    cargo xtask screenshot --name demo --at 6 run=hello.exe,smp_test.exe args=,cpus=2
+
+Boot tests pass `noscreen` (serial only) except in the UEFI scenarios:
+drawing text roughly doubles kernel time under emulation.
+
 ## Debugging
 
 - `XTASK_VERBOSE=1 cargo xtask boot-test name` prints the serial log; logs

@@ -50,7 +50,7 @@ pub fn kernel_main() -> ! {
     kprintln!();
     kprintln!("gala-os kernel {}", env!("CARGO_PKG_VERSION"));
 
-    let info = match boot::collect() {
+    let mut info = match boot::collect() {
         Ok(info) => info,
         Err(e) => panic!("bootloader handoff rejected: {e}"),
     };
@@ -68,9 +68,15 @@ pub fn kernel_main() -> ! {
 
     log_boot_info(&info);
     let summary = log_memory_map(&info);
-    if let Some(fb) = &info.framebuffer {
+    // `noscreen`: serial only (boot tests read the serial log; drawing text
+    // is slow under emulation).
+    if let Some(fb) = info.framebuffer.take().filter(|_| !cmdline.flag("noscreen")) {
         info!("framebuffer: {}x{} pitch={} bpp={}", fb.width(), fb.height(), fb.pitch(), fb.bpp());
-        fb.fill(0x00_10_20_40);
+        console::attach_framebuffer(
+            fb,
+            concat!("gala-os ", env!("CARGO_PKG_VERSION"), "  |  qal'a  |  Built in Saudi"),
+        );
+        kprintln!("gala-os kernel {} (screen console)", env!("CARGO_PKG_VERSION"));
     } else {
         warn!("framebuffer: none provided");
     }

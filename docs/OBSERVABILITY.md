@@ -75,6 +75,12 @@ queries: threads and their states/CPUs, a process's handle table and VADs,
 object namespace, counters. Agents can ask a hung system what it is
 waiting on instead of guessing.
 
+## 6b. Screen — done
+
+The kernel's screen console mirrors the serial log on the framebuffer, and
+`cargo xtask screenshot` captures it as PNG at chosen times (docs/WORKFLOW.md).
+Later: a status area (CPU load, threads, memory) drawn by the kernel.
+
 ## 7. Fuzzing — later
 
 A user-mode fuzzer program calling services with random/mutated arguments
