@@ -105,6 +105,8 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   NtQueryDirectoryObject; `symlink_test`
 - I/O completion ports (create, bind a file, post on completion, set,
   remove with timeout, depth), through ntdll exports; `iocp_test`
+- Thread suspension and context: NtSuspendThread, NtGet/SetContextThread
+  (suspended threads park on their way to user mode); `context_test`
 
 ## Next
 3b. **Object manager, rest**: keyed events, OBJ_PERMANENT/NtMakeTemporary-

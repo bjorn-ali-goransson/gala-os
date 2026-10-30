@@ -238,7 +238,7 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
             // values, and it stores `UserExceptionHandler`s.
             let handler = unsafe { core::mem::transmute::<usize, UserExceptionHandler>(raw) };
             handler(frame, cr2);
-            super::syscall::run_user_return_hook();
+            user_return(frame);
             return;
         }
     }
@@ -259,7 +259,15 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
     let handler: Handler = unsafe { core::mem::transmute::<usize, Handler>(raw) };
     handler(frame);
     if frame.from_user_mode() {
-        super::syscall::run_user_return_hook();
+        user_return(frame);
+    }
+}
+
+/// Runs the user-return hook on an interrupt frame from user mode.
+fn user_return(frame: &mut TrapFrame) {
+    let mut regs = super::syscall::trap_regs(frame);
+    if super::syscall::run_user_return_hook(&mut regs) {
+        super::syscall::set_trap_regs(frame, &regs);
     }
 }
 

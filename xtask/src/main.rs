@@ -51,6 +51,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sync_test", "ntdll.dll", "Windows/System32"),
     ("symlink_test", "ntdll.dll", "Windows/System32"),
     ("iocp_test", "ntdll.dll", "Windows/System32"),
+    ("context_test", "ntdll.dll", "Windows/System32"),
 ];
 const USER_PROGRAMS: &[&str] = &[
     "hello",
@@ -82,6 +83,7 @@ const USER_PROGRAMS: &[&str] = &[
     "sync_test",
     "symlink_test",
     "iocp_test",
+    "context_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -351,6 +353,12 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "context_test",
+        cmdline: "qemu_exit run=context_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["context_test: ok", "exited with status 0x00000000"],
+    },
     Scenario {
         name: "iocp_test",
         cmdline: "qemu_exit run=iocp_test.exe",

@@ -68,6 +68,10 @@ pub const NT_REMOVE_IO_COMPLETION: u32 = 0x0009;
 pub const NT_CREATE_IO_COMPLETION: u32 = 0x00c9;
 pub const NT_QUERY_IO_COMPLETION: u32 = 0x014f;
 pub const NT_SET_IO_COMPLETION: u32 = 0x01b0;
+// Thread suspension and context: gala's own numbers, UNVERIFIED.
+pub const NT_GET_CONTEXT_THREAD: u32 = 0x00f2;
+pub const NT_SET_CONTEXT_THREAD: u32 = 0x018d;
+pub const NT_SUSPEND_THREAD: u32 = 0x01bc;
 pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
 pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
 pub const NT_OPEN_SECTION: u32 = 0x0037;
@@ -138,6 +142,9 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_CREATE_IO_COMPLETION, "NtCreateIoCompletion", 4, nt_create_io_completion),
     (NT_QUERY_IO_COMPLETION, "NtQueryIoCompletion", 5, nt_query_io_completion),
     (NT_SET_IO_COMPLETION, "NtSetIoCompletion", 5, nt_set_io_completion),
+    (NT_GET_CONTEXT_THREAD, "NtGetContextThread", 2, nt_get_context_thread),
+    (NT_SET_CONTEXT_THREAD, "NtSetContextThread", 2, nt_set_context_thread),
+    (NT_SUSPEND_THREAD, "NtSuspendThread", 2, nt_suspend_thread),
     (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", 10, nt_map_view_of_section),
     (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", 2, nt_unmap_view_of_section),
     (NT_OPEN_SECTION, "NtOpenSection", 3, nt_open_section),
@@ -896,10 +903,97 @@ fn nt_delay_execution(call: &mut Call<'_>) -> NtStatus {
     deliver_apc_after(call, status)
 }
 
+const THREAD_GET_CONTEXT: u32 = 0x0008;
+const THREAD_SET_CONTEXT: u32 = 0x0010;
+
+/// A thread handle with `access`, for the thread services.
+fn thread_object(call: &Call<'_>, h: u64, access: u32) -> Result<ObjectRef, NtStatus> {
+    let entry = call.handle(Handle(h))?;
+    let object = entry.require(access)?.clone();
+    match &object.body {
+        ObjectBody::Thread(t) if KArc::ptr_eq(&t.process, &call.process) => Ok(object),
+        // TODO: threads of other processes.
+        ObjectBody::Thread(_) => Err(NtStatus::ACCESS_DENIED),
+        _ => Err(NtStatus::OBJECT_TYPE_MISMATCH),
+    }
+}
+
+fn is_current_thread(object: &ObjectRef) -> bool {
+    thread::current().is_some_and(|me| KArc::ptr_eq(&me, object))
+}
+
+/// The calling thread's user registers as they will be when this system
+/// call returns (rax = STATUS_SUCCESS).
+fn caller_regs(call: &Call<'_>) -> UserRegs {
+    let f = call.frame;
+    UserRegs {
+        gpr: [
+            0, f.rip, f.rdx, f.rbx, f.rsp, f.rbp, f.rsi, f.rdi, f.r8, f.r9, f.r10, f.rflags, f.r12,
+            f.r13, f.r14, f.r15,
+        ],
+        rip: f.rip,
+        rflags: f.rflags,
+    }
+}
+
+/// NtSuspendThread(ThreadHandle, *PreviousSuspendCount)
+fn nt_suspend_thread(call: &mut Call<'_>) -> NtStatus {
+    let object = tri!(thread_object(call, arg!(call, 0), THREAD_SUSPEND_RESUME));
+    let previous = tri!(thread::suspend(&object));
+    let ptr = arg!(call, 1);
+    if ptr != 0 {
+        tri!(call.write_u32(ptr, previous));
+    }
+    NtStatus::SUCCESS
+}
+
+/// NtGetContextThread(ThreadHandle, *Context): the user registers of the
+/// caller, or of a suspended thread once it has stopped.
+fn nt_get_context_thread(call: &mut Call<'_>) -> NtStatus {
+    let object = tri!(thread_object(call, arg!(call, 0), THREAD_GET_CONTEXT));
+    let (regs, fx) = if is_current_thread(&object) {
+        (caller_regs(call), crate::arch::cpu::fxsave())
+    } else {
+        let p = tri!(thread::parked_state(&object));
+        (p.regs, p.fx)
+    };
+    // TODO: honour ContextFlags (only the requested parts).
+    let context = super::context::to_bytes(&regs, Some(&fx));
+    match call.process.write(arg!(call, 1), &context) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(_) => NtStatus::ACCESS_VIOLATION,
+    }
+}
+
+/// NtSetContextThread(ThreadHandle, *Context): for the caller it takes
+/// effect on return (as NtContinue); for a suspended thread, on resume.
+fn nt_set_context_thread(call: &mut Call<'_>) -> NtStatus {
+    let object = tri!(thread_object(call, arg!(call, 0), THREAD_SET_CONTEXT));
+    let mut ctx = [0u8; super::context::SIZE];
+    if call.process.read(arg!(call, 1), &mut ctx).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let regs = super::context::from_bytes(&ctx);
+    if !regs.is_valid() {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let fx = super::context::float_state(&ctx);
+    if is_current_thread(&object) {
+        if let Some(fx) = &fx {
+            crate::arch::cpu::fxrstor(fx);
+        }
+        syscall::continue_with(regs);
+        return NtStatus::SUCCESS;
+    }
+    match thread::set_parked_state(&object, regs, fx) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(e) => e,
+    }
+}
+
 /// NtQueueApcThread(ThreadHandle, ApcRoutine, ApcArgument1, ApcArgument2,
 ///                  ApcArgument3)
 fn nt_queue_apc_thread(call: &mut Call<'_>) -> NtStatus {
-    const THREAD_SET_CONTEXT: u32 = 0x0010;
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let object = tri!(entry.require(THREAD_SET_CONTEXT));
     let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };

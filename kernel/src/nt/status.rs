@@ -46,6 +46,7 @@ impl NtStatus {
     pub const BUFFER_TOO_SMALL: NtStatus = NtStatus(0xc000_0023);
     pub const ABANDONED_WAIT_0: NtStatus = NtStatus(0x0000_0080);
     pub const MUTANT_NOT_OWNED: NtStatus = NtStatus(0xc000_0046);
+    pub const SUSPEND_COUNT_EXCEEDED: NtStatus = NtStatus(0xc000_004a);
     pub const SEMAPHORE_LIMIT_EXCEEDED: NtStatus = NtStatus(0xc000_0047);
     pub const UNSUCCESSFUL: NtStatus = NtStatus(0xc000_0001);
     pub const GUARD_PAGE_VIOLATION: NtStatus = NtStatus(0x8000_0001);

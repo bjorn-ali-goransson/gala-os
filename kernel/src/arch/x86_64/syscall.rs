@@ -125,7 +125,6 @@ extern "C" fn dispatch(frame: &mut SyscallFrame) {
     // SAFETY: only `init_bsp` stores into HANDLER, and it stores a `Handler`.
     let handler: Handler = unsafe { core::mem::transmute::<usize, Handler>(raw) };
     handler(frame);
-    run_user_return_hook();
     // NtContinue: return with every register, through IRETQ. Only this
     // thread's request counts (another may have been preempted after
     // making one).
@@ -139,7 +138,10 @@ extern "C" fn dispatch(frame: &mut SyscallFrame) {
             _ => None,
         }
     };
-    if let Some(regs) = pending {
+    // The return hook sees (and may change) the registers user mode gets.
+    let mut regs = pending.unwrap_or_else(|| syscall_regs(frame));
+    let changed = run_user_return_hook(&mut regs);
+    if pending.is_some() || changed {
         // Nothing on this stack needs dropping: the handler has returned.
         enter_user_regs(&regs);
     }
@@ -267,21 +269,63 @@ pub fn continue_with(regs: UserRegs) {
     *CONTINUE.lock() = Some((crate::sched::current(), regs));
 }
 
+/// The user registers a SYSCALL frame returns with (SYSRET leaves the
+/// return address in rcx and the flags in r11).
+fn syscall_regs(f: &SyscallFrame) -> UserRegs {
+    UserRegs {
+        gpr: [
+            f.rax, f.rip, f.rdx, f.rbx, f.rsp, f.rbp, f.rsi, f.rdi, f.r8, f.r9, f.r10, f.rflags,
+            f.r12, f.r13, f.r14, f.r15,
+        ],
+        rip: f.rip,
+        rflags: f.rflags,
+    }
+}
+
+/// The user registers in an interrupt frame from user mode.
+pub(super) fn trap_regs(f: &super::interrupts::TrapFrame) -> UserRegs {
+    UserRegs {
+        gpr: [
+            f.rax, f.rcx, f.rdx, f.rbx, f.rsp, f.rbp, f.rsi, f.rdi, f.r8, f.r9, f.r10, f.r11,
+            f.r12, f.r13, f.r14, f.r15,
+        ],
+        rip: f.rip,
+        rflags: f.rflags,
+    }
+}
+
+/// Writes `r` back into an interrupt frame from user mode (IRETQ then
+/// returns with it; only user-settable flags are taken).
+pub(super) fn set_trap_regs(f: &mut super::interrupts::TrapFrame, r: &UserRegs) {
+    let g = &r.gpr;
+    (f.rax, f.rcx, f.rdx, f.rbx, f.rsp, f.rbp, f.rsi, f.rdi) =
+        (g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]);
+    (f.r8, f.r9, f.r10, f.r11, f.r12, f.r13, f.r14, f.r15) =
+        (g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]);
+    f.rip = r.rip;
+    f.rflags = (r.rflags & USER_SETTABLE_FLAGS) | USER_RFLAGS;
+}
+
 static USER_RETURN_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+/// What the user-return hook gets: the registers user mode resumes with;
+/// it returns true if it changed them.
+pub type UserReturnHook = fn(&mut UserRegs) -> bool;
 
 /// Registers a function run on every return to user mode from a system
 /// call or interrupt, in kernel context (e.g. to act on a pending thread
-/// termination). It may not return.
-pub fn set_user_return_hook(hook: fn()) {
+/// termination or suspension). It may not return.
+pub fn set_user_return_hook(hook: UserReturnHook) {
     USER_RETURN_HOOK.store(hook as usize, Ordering::Release);
 }
 
-pub(super) fn run_user_return_hook() {
+pub(super) fn run_user_return_hook(regs: &mut UserRegs) -> bool {
     let raw = USER_RETURN_HOOK.load(Ordering::Acquire);
-    if raw != 0 {
-        // SAFETY: only `set_user_return_hook` stores non-zero values, and
-        // it stores `fn()`s.
-        let hook = unsafe { core::mem::transmute::<usize, fn()>(raw) };
-        hook();
+    if raw == 0 {
+        return false;
     }
+    // SAFETY: only `set_user_return_hook` stores non-zero values, and it
+    // stores `UserReturnHook`s.
+    let hook = unsafe { core::mem::transmute::<usize, UserReturnHook>(raw) };
+    hook(regs)
 }

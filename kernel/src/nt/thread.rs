@@ -51,7 +51,22 @@ pub struct NtThread {
     alertable: core::sync::atomic::AtomicBool,
     /// Mutants it owns (abandoned if it exits).
     owned_mutants: IrqMutex<Vec<ObjectRef>>,
+    /// While suspended on its way to user mode: the registers it will
+    /// resume with (NtGet/SetContextThread from other threads).
+    parked: IrqMutex<Option<Parked>>,
 }
+
+/// The user state of a thread parked by suspension.
+#[derive(Clone)]
+pub struct Parked {
+    pub regs: UserRegs,
+    pub fx: crate::arch::cpu::FxState,
+    /// Set by NtSetContextThread: resume with `regs`/`fx`.
+    pub changed: bool,
+}
+
+/// The most a thread can be suspended (MAXIMUM_SUSPEND_COUNT).
+const MAXIMUM_SUSPEND_COUNT: u32 = 127;
 
 /// A user-mode APC: `routine(args[0], args[1], args[2])`.
 #[derive(Clone, Copy, Debug)]
@@ -164,6 +179,7 @@ pub fn create(
         apcs: IrqMutex::new(Vec::new()),
         alertable: core::sync::atomic::AtomicBool::new(false),
         owned_mutants: IrqMutex::new(Vec::new()),
+        parked: IrqMutex::new(None),
     };
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -361,11 +377,96 @@ pub fn is_terminating() -> bool {
 }
 
 /// Runs on every return to user mode: acts on a pending termination.
-fn on_user_return() {
-    let pending = current().and_then(|o| *as_thread(&o).terminate_request.lock());
-    if let Some(status) = pending {
+fn on_user_return(regs: &mut UserRegs) -> bool {
+    let Some(object) = current() else { return false };
+    let t = as_thread(&object);
+    let terminate = *t.terminate_request.lock();
+    if let Some(status) = terminate {
+        drop(object);
         exit_current(status);
     }
+    if *t.suspend_count.lock() == 0 {
+        return false;
+    }
+    // Suspended: wait here, with the user state where other threads can
+    // read and change it, until resumed (or terminated).
+    *t.parked.lock() = Some(Parked { regs: *regs, fx: crate::arch::cpu::fxsave(), changed: false });
+    loop {
+        let count = t.suspend_count.lock();
+        if *count == 0 || t.terminate_request.lock().is_some() {
+            break;
+        }
+        sched::prepare_wait(None);
+        drop(count);
+        sched::wait();
+    }
+    let parked = t.parked.lock().take();
+    let terminate = *t.terminate_request.lock();
+    if let Some(status) = terminate {
+        drop(object);
+        exit_current(status);
+    }
+    match parked {
+        Some(p) if p.changed => {
+            *regs = p.regs;
+            crate::arch::cpu::fxrstor(&p.fx);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// NtSuspendThread: raises the suspend count (the thread stops on its way
+/// back to user mode). Returns the previous count.
+pub fn suspend(object: &ObjectRef) -> Result<u32, NtStatus> {
+    let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    if t.has_exited() || t.terminate_request.lock().is_some() {
+        return Err(NtStatus::THREAD_IS_TERMINATING);
+    }
+    let mut count = t.suspend_count.lock();
+    if *count >= MAXIMUM_SUSPEND_COUNT {
+        return Err(NtStatus::SUSPEND_COUNT_EXCEEDED);
+    }
+    let previous = *count;
+    *count += 1;
+    Ok(previous)
+}
+
+/// The parked user state of a suspended thread, waiting (up to about a
+/// second) for it to reach the point where it parks.
+pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
+    let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    for _ in 0..1000 {
+        if let Some(p) = t.parked.lock().clone() {
+            return Ok(p);
+        }
+        if *t.suspend_count.lock() == 0 || t.has_exited() {
+            break;
+        }
+        sched::sleep_ms(1);
+    }
+    // TODO: the context of a thread that is not suspended, or is blocked
+    // in a wait (Windows interrupts it with a kernel APC).
+    Err(NtStatus::UNSUCCESSFUL)
+}
+
+/// Replaces the parked user state of a suspended thread (applied when it
+/// resumes).
+pub fn set_parked_state(
+    object: &ObjectRef,
+    regs: UserRegs,
+    fx: Option<crate::arch::cpu::FxState>,
+) -> Result<(), NtStatus> {
+    let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    parked_state(object)?;
+    let mut parked = t.parked.lock();
+    let p = parked.as_mut().ok_or(NtStatus::UNSUCCESSFUL)?;
+    p.regs = regs;
+    if let Some(fx) = fx {
+        p.fx = fx;
+    }
+    p.changed = true;
+    Ok(())
 }
 
 /// Ends the current thread with `status`. If it was the last thread of its

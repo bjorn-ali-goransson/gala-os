@@ -251,6 +251,16 @@ FileCompletionInformation binds a file to a port and key; every read or
 write on it that does not fail at once posts a packet (context =
 ApcContext). NtRemoveIoCompletion pops one, waiting with a timeout.
 
+**Suspension and thread context**: the user-return hook (run on every
+return to user mode, from system calls and interrupts) receives the user
+registers it returns with and may change them (system calls then return
+through IRETQ). A thread with a suspend count parks there, publishing its
+registers and FXSAVE state; NtGetContextThread/NtSetContextThread on it
+read and replace them (the change applies when it resumes). A thread that
+is spinning in user mode parks at the next timer tick; one blocked in a
+wait keeps waiting and parks when the wait ends. The caller's own context
+comes from its system call frame.
+
 **Services with build-dependent numbers**: the low system call numbers
 used so far are long-stable on x64; others (NtCreateMutant, NtOpenMutant,
 NtCreateSemaphore, ...) change between builds and gala's are unverified.

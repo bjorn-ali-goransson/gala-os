@@ -97,6 +97,10 @@ syscall_stubs! {
         h: usize, key: usize, apc_context: usize, status: u32, information: usize
     );
     NtQueryIoCompletion = 0x14f, fn(h: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32);
+    // Thread suspension and register state (gala's numbers, unverified).
+    NtGetContextThread = 0xf2, fn(h: usize, context: *mut u8);
+    NtSetContextThread = 0x18d, fn(h: usize, context: *const u8);
+    NtSuspendThread = 0x1bc, fn(h: usize, previous: *mut u32);
     NtQueryDirectoryObject = 0x14a, fn(
         h: usize, buf: *mut u8, len: u32, single: u8, restart: u8, context: *mut u32,
         returned: *mut u32
