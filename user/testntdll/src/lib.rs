@@ -60,6 +60,21 @@ syscall_stubs! {
     NtProtectVirtualMemory = 0x50, fn(
         process: isize, base: *mut usize, size: *mut usize, protect: u32, old: *mut u32
     );
+    // Mutants and semaphores. 0x0a and 0x20 are long-stable on x64; the
+    // others vary by build: gala's choices (kernel/src/nt/syscalls.rs).
+    NtReleaseSemaphore = 0x0a, fn(h: usize, count: i32, previous: *mut i32);
+    NtReleaseMutant = 0x20, fn(h: usize, previous: *mut i32);
+    NtCreateMutant = 0xc3, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes, owner: u8
+    );
+    NtCreateSemaphore = 0xcf, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes, initial: i32,
+        maximum: i32
+    );
+    NtOpenMutant = 0x12c, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
+    NtOpenSemaphore = 0x12f, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
+    NtQueryMutant = 0x146, fn(h: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32);
+    NtQuerySemaphore = 0x15a, fn(h: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32);
 }
 
 #[repr(C)]

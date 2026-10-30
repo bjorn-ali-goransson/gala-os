@@ -28,6 +28,7 @@ use crate::arch::syscall::{self, SyscallFrame, UserRegs};
 use crate::console;
 use crate::mm::heap::KArc;
 use crate::mm::heap::TryVec;
+use crate::sync::IrqMutex;
 
 pub const NT_WAIT_FOR_SINGLE_OBJECT: u32 = 0x0004;
 pub const NT_READ_FILE: u32 = 0x0006;
@@ -45,6 +46,18 @@ pub const NT_QUERY_SYSTEM_INFORMATION: u32 = 0x0036;
 pub const NT_SET_INFORMATION_THREAD: u32 = 0x000d;
 pub const NT_YIELD_EXECUTION: u32 = 0x0046;
 pub const NT_QUEUE_APC_THREAD: u32 = 0x0045;
+// Mutants and semaphores. NtReleaseSemaphore (0x0a) and NtReleaseMutant
+// (0x20) are long-stable on x64; the create/open/query numbers vary by build
+// and these are gala's own, UNVERIFIED for 26100 (tests reach them through
+// ntdll's exports, see docs/ARCHITECTURE.md).
+pub const NT_RELEASE_SEMAPHORE: u32 = 0x000a;
+pub const NT_RELEASE_MUTANT: u32 = 0x0020;
+pub const NT_CREATE_MUTANT: u32 = 0x00c3;
+pub const NT_CREATE_SEMAPHORE: u32 = 0x00cf;
+pub const NT_OPEN_MUTANT: u32 = 0x012c;
+pub const NT_OPEN_SEMAPHORE: u32 = 0x012f;
+pub const NT_QUERY_MUTANT: u32 = 0x0146;
+pub const NT_QUERY_SEMAPHORE: u32 = 0x015a;
 pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
 pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
 pub const NT_OPEN_SECTION: u32 = 0x0037;
@@ -99,6 +112,14 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_SET_INFORMATION_THREAD, "NtSetInformationThread", 4, nt_set_information_thread),
     (NT_YIELD_EXECUTION, "NtYieldExecution", 0, nt_yield_execution),
     (NT_QUEUE_APC_THREAD, "NtQueueApcThread", 5, nt_queue_apc_thread),
+    (NT_RELEASE_SEMAPHORE, "NtReleaseSemaphore", 3, nt_release_semaphore),
+    (NT_RELEASE_MUTANT, "NtReleaseMutant", 2, nt_release_mutant),
+    (NT_CREATE_MUTANT, "NtCreateMutant", 4, nt_create_mutant),
+    (NT_CREATE_SEMAPHORE, "NtCreateSemaphore", 5, nt_create_semaphore),
+    (NT_OPEN_MUTANT, "NtOpenMutant", 3, nt_open_mutant),
+    (NT_OPEN_SEMAPHORE, "NtOpenSemaphore", 3, nt_open_semaphore),
+    (NT_QUERY_MUTANT, "NtQueryMutant", 5, nt_query_mutant),
+    (NT_QUERY_SEMAPHORE, "NtQuerySemaphore", 5, nt_query_semaphore),
     (NT_MAP_VIEW_OF_SECTION, "NtMapViewOfSection", 10, nt_map_view_of_section),
     (NT_UNMAP_VIEW_OF_SECTION, "NtUnmapViewOfSection", 2, nt_unmap_view_of_section),
     (NT_OPEN_SECTION, "NtOpenSection", 3, nt_open_section),
@@ -1309,6 +1330,156 @@ fn link_new_object(
         Some(a) => Ok((object, false, a.attributes & HANDLE_ATTRIBUTES)),
         None => Ok((object, false, 0)),
     }
+}
+
+fn is_mutant(o: &KObject) -> bool {
+    matches!(o.body, ObjectBody::Mutant(_))
+}
+
+fn is_semaphore(o: &KObject) -> bool {
+    matches!(o.body, ObjectBody::Semaphore(_))
+}
+
+/// Links a new object under its name (if any) and returns a handle.
+fn create_object(
+    call: &mut Call<'_>,
+    out: u64,
+    access: u32,
+    attrs_ptr: u64,
+    object: ObjectRef,
+    same: fn(&KObject) -> bool,
+) -> NtStatus {
+    let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
+    let (object, existed, handle_attributes) = tri!(link_new_object(attrs, object, same));
+    let status = call.return_handle(out, object, access, handle_attributes);
+    if status == NtStatus::SUCCESS && existed { NtStatus::OBJECT_NAME_EXISTS } else { status }
+}
+
+/// NtCreateMutant(*MutantHandle, DesiredAccess, ObjectAttributes, InitialOwner)
+fn nt_create_mutant(call: &mut Call<'_>) -> NtStatus {
+    use super::object::{Mutant, MutantState};
+    let (out, access, attrs_ptr) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
+    let owned = arg!(call, 3) as u8 != 0;
+    let state = match owned {
+        true => MutantState { owner: thread::current_id(), count: 1, abandoned: false },
+        false => MutantState::default(),
+    };
+    let mutant =
+        Mutant { dispatcher: Dispatcher::new(i32::from(!owned)), state: IrqMutex::new(state) };
+    let Ok(object) = KObject::new(ObjectBody::Mutant(mutant)) else { return NtStatus::NO_MEMORY };
+    if owned {
+        thread::note_mutant_owned(&object);
+    }
+    create_object(call, out, access, attrs_ptr, object, is_mutant)
+}
+
+/// NtOpenMutant(*MutantHandle, DesiredAccess, ObjectAttributes)
+fn nt_open_mutant(call: &mut Call<'_>) -> NtStatus {
+    let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
+    let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_mutant));
+    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+}
+
+/// NtReleaseMutant(MutantHandle, *PreviousCount)
+fn nt_release_mutant(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let object = entry.object.clone();
+    let ObjectBody::Mutant(m) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let (previous, free) = {
+        let mut state = m.state.lock();
+        if state.owner.is_none() || state.owner != thread::current_id() {
+            return NtStatus::MUTANT_NOT_OWNED;
+        }
+        let previous = state.current_count();
+        state.count -= 1;
+        if state.count == 0 {
+            state.owner = None;
+        }
+        (previous, state.count == 0)
+    };
+    if free {
+        thread::note_mutant_released(&object);
+        wait::set_signal(&object, 1);
+    }
+    let ptr = arg!(call, 1);
+    if ptr != 0 {
+        tri!(call.write_u32(ptr, previous as u32));
+    }
+    NtStatus::SUCCESS
+}
+
+/// NtQueryMutant(MutantHandle, Class, Buffer, Length, *ReturnLength):
+/// MUTANT_BASIC_INFORMATION { CurrentCount, OwnedByCaller, AbandonedState }.
+fn nt_query_mutant(call: &mut Call<'_>) -> NtStatus {
+    use super::object::MUTANT_QUERY_STATE;
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let object = tri!(entry.require(MUTANT_QUERY_STATE));
+    let ObjectBody::Mutant(m) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if arg!(call, 1) as u32 != 0 {
+        return NtStatus::INVALID_INFO_CLASS;
+    }
+    let state = *m.state.lock();
+    let mut b = [0u8; 8];
+    b[0..4].copy_from_slice(&state.current_count().to_le_bytes());
+    b[4] = u8::from(state.owner.is_some() && state.owner == thread::current_id());
+    b[5] = u8::from(state.abandoned);
+    call.return_info(&b, arg!(call, 2), arg!(call, 3) as u32 as u64, arg!(call, 4))
+}
+
+/// NtCreateSemaphore(*SemaphoreHandle, DesiredAccess, ObjectAttributes,
+///                   InitialCount, MaximumCount)
+fn nt_create_semaphore(call: &mut Call<'_>) -> NtStatus {
+    use super::object::{Semaphore, semaphore_counts_valid};
+    let (out, access, attrs_ptr) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
+    let (initial, maximum) = (arg!(call, 3) as u32 as i32, arg!(call, 4) as u32 as i32);
+    if !semaphore_counts_valid(initial, maximum) {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let semaphore = Semaphore { dispatcher: Dispatcher::new(initial), maximum };
+    let Ok(object) = KObject::new(ObjectBody::Semaphore(semaphore)) else {
+        return NtStatus::NO_MEMORY;
+    };
+    create_object(call, out, access, attrs_ptr, object, is_semaphore)
+}
+
+/// NtOpenSemaphore(*SemaphoreHandle, DesiredAccess, ObjectAttributes)
+fn nt_open_semaphore(call: &mut Call<'_>) -> NtStatus {
+    let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
+    let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_semaphore));
+    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+}
+
+/// NtReleaseSemaphore(SemaphoreHandle, ReleaseCount, *PreviousCount)
+fn nt_release_semaphore(call: &mut Call<'_>) -> NtStatus {
+    use super::object::{SEMAPHORE_MODIFY_STATE, semaphore_release};
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let object = tri!(entry.require(SEMAPHORE_MODIFY_STATE)).clone();
+    let ObjectBody::Semaphore(s) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let release = arg!(call, 1) as u32 as i32;
+    let previous = s.dispatcher.signal_state();
+    let next = tri!(semaphore_release(previous, s.maximum, release));
+    wait::set_signal(&object, next);
+    let ptr = arg!(call, 2);
+    if ptr != 0 {
+        tri!(call.write_u32(ptr, previous as u32));
+    }
+    NtStatus::SUCCESS
+}
+
+/// NtQuerySemaphore(SemaphoreHandle, Class, Buffer, Length, *ReturnLength):
+/// SEMAPHORE_BASIC_INFORMATION { CurrentCount, MaximumCount }.
+fn nt_query_semaphore(call: &mut Call<'_>) -> NtStatus {
+    use super::object::SEMAPHORE_QUERY_STATE;
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let object = tri!(entry.require(SEMAPHORE_QUERY_STATE));
+    let ObjectBody::Semaphore(s) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if arg!(call, 1) as u32 != 0 {
+        return NtStatus::INVALID_INFO_CLASS;
+    }
+    let mut b = [0u8; 8];
+    b[0..4].copy_from_slice(&s.dispatcher.signal_state().to_le_bytes());
+    b[4..8].copy_from_slice(&s.maximum.to_le_bytes());
+    call.return_info(&b, arg!(call, 2), arg!(call, 3) as u32 as u64, arg!(call, 4))
 }
 
 fn is_section(o: &KObject) -> bool {

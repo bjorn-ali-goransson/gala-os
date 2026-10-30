@@ -99,12 +99,12 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 - I/O completion APCs: NtReadFile/NtWriteFile ApcRoutine/ApcContext on
   asynchronous handles (STATUS_INVALID_PARAMETER on synchronous ones),
   queued on successful completion; `ioapc_test`
+- Mutants and semaphores (ownership, recursion, abandonment, counts,
+  named objects, wait-all), through ntdll exports; `sync_test`
 
 ## Next
-3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
-   NtOpenMutant, NtCreateSemaphore/NtReleaseSemaphore (0x0a); abandonment
-   on thread exit. Create/open numbers vary by build: verify on 26100 first.
-   Symbolic links (`\Sessions\1\BaseNamedObjects\Global`), NtQueryDirectoryObject.
+3b. **Object manager, rest**: symbolic links (`\Sessions\1\BaseNamedObjects\
+   Global`, `\??\C:`), NtQueryDirectoryObject, keyed events.
 6c. **Sections, rest**: the kernel loader using image sections (the exe
    shared like DLLs), sharing read-only pages of relocated views.
 6e. **User-mode loader support**: what a real ntdll's loader needs next:

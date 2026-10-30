@@ -230,6 +230,20 @@ aligned rsp and the EXCEPTION_RECORD at rsp + 0x4f0, and resumes the thread
 there (to be checked against the pinned ntdll); otherwise the process ends
 with the status. The #BP gate has DPL 3 so `int3` works from user mode.
 
+**Mutants and semaphores** (`ObjectBody::Mutant/Semaphore`): a mutant is
+signaled for waiters when free or owned by the waiting thread
+(recursive); acquiring records it in the thread's owned list, and a thread
+that exits owning one abandons it (the next acquirer gets
+STATUS_ABANDONED_WAIT_n). A semaphore's dispatcher signal is its count.
+
+**Services with build-dependent numbers**: the low system call numbers
+used so far are long-stable on x64; others (NtCreateMutant, NtOpenMutant,
+NtCreateSemaphore, ...) change between builds and gala's are unverified.
+Tests reach such services through the ntdll exports they find in their
+address space instead of raw `syscall` stubs, so on Windows the real
+ntdll's (correct) stubs run and on gala the test ntdll's carry gala's
+numbers. This keeps the test programs safe to run on Windows.
+
 **User APCs**: NtQueueApcThread (0x45) appends to the thread's FIFO and
 wakes it if it is in an alertable wait (under the dispatcher lock, which
 alertable waits hold between checking the queue and sleeping). Alertable

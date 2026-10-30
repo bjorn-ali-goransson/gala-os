@@ -49,6 +49,8 @@ pub struct NtThread {
     apcs: IrqMutex<Vec<UserApc>>,
     /// Set while the thread is in an alertable wait (an APC wakes it).
     alertable: core::sync::atomic::AtomicBool,
+    /// Mutants it owns (abandoned if it exits).
+    owned_mutants: IrqMutex<Vec<ObjectRef>>,
 }
 
 /// A user-mode APC: `routine(args[0], args[1], args[2])`.
@@ -161,6 +163,7 @@ pub fn create(
         priority: IrqMutex::new((PROCESS_BASE_PRIORITY, PROCESS_BASE_PRIORITY)),
         apcs: IrqMutex::new(Vec::new()),
         alertable: core::sync::atomic::AtomicBool::new(false),
+        owned_mutants: IrqMutex::new(Vec::new()),
     };
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -294,6 +297,45 @@ pub fn queue_user_apc(object: &ObjectRef, apc: UserApc) -> Result<(), NtStatus> 
     })
 }
 
+/// The current thread's ClientId.UniqueThread.
+pub fn current_id() -> Option<u64> {
+    current().map(|o| as_thread(&o).id)
+}
+
+/// Records that the current thread now owns `mutant`.
+pub fn note_mutant_owned(mutant: &ObjectRef) {
+    if let Some(o) = current() {
+        // Without memory for the record, abandonment is missed; the mutant
+        // still works.
+        let _ = as_thread(&o).owned_mutants.lock().try_push(mutant.clone());
+    }
+}
+
+/// Records that the current thread released `mutant` completely.
+pub fn note_mutant_released(mutant: &ObjectRef) {
+    if let Some(o) = current() {
+        as_thread(&o).owned_mutants.lock().retain(|m| !KArc::ptr_eq(m, mutant));
+    }
+}
+
+/// Abandons the mutants a dying thread still owns: they become free and
+/// the next acquirer is told (STATUS_ABANDONED_WAIT_n).
+fn abandon_mutants(t: &NtThread) {
+    let owned = core::mem::take(&mut *t.owned_mutants.lock());
+    for object in owned {
+        if let ObjectBody::Mutant(m) = &object.body {
+            {
+                let mut state = m.state.lock();
+                if state.owner != Some(t.id) {
+                    continue;
+                }
+                *state = super::object::MutantState { owner: None, count: 0, abandoned: true };
+            }
+            wait::set_signal(&object, 1);
+        }
+    }
+}
+
 /// Whether the current thread has a user APC queued.
 pub fn has_user_apc() -> bool {
     current().is_some_and(|o| !as_thread(&o).apcs.lock().is_empty())
@@ -338,6 +380,7 @@ pub fn exit_current(status: NtStatus) -> ! {
         // Leave the process before waking waiters: once the thread object
         // is signaled, the thread must no longer count as live (e.g. for
         // ThreadAmILastThread).
+        abandon_mutants(t);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
         let process = t.process.clone();
         process.remove_thread(&object);

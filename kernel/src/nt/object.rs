@@ -84,6 +84,71 @@ pub struct Event {
     pub dispatcher: Dispatcher,
 }
 
+pub const MUTANT_QUERY_STATE: u32 = 0x0001;
+pub const MUTANT_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1;
+pub const MUTANT_MAPPING: GenericMapping = GenericMapping {
+    read: READ_CONTROL | MUTANT_QUERY_STATE,
+    write: READ_CONTROL,
+    execute: READ_CONTROL | SYNCHRONIZE,
+    all: MUTANT_ALL_ACCESS,
+};
+pub const SEMAPHORE_QUERY_STATE: u32 = 0x0001;
+pub const SEMAPHORE_MODIFY_STATE: u32 = 0x0002;
+pub const SEMAPHORE_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x3;
+pub const SEMAPHORE_MAPPING: GenericMapping = GenericMapping {
+    read: READ_CONTROL | SEMAPHORE_QUERY_STATE,
+    write: READ_CONTROL | SEMAPHORE_MODIFY_STATE,
+    execute: READ_CONTROL | SYNCHRONIZE,
+    all: SEMAPHORE_ALL_ACCESS,
+};
+
+/// A mutant (mutex): owned by one thread at a time, recursively.
+pub struct Mutant {
+    pub dispatcher: Dispatcher,
+    pub state: crate::sync::IrqMutex<MutantState>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MutantState {
+    /// NT thread id of the owner.
+    pub owner: Option<u64>,
+    /// Recursive acquisitions by the owner.
+    pub count: u32,
+    /// Set when the owner exited without releasing it; reported (and
+    /// cleared) by the next acquisition.
+    pub abandoned: bool,
+}
+
+impl MutantState {
+    /// MUTANT_BASIC_INFORMATION.CurrentCount: 1 when free, then 0, -1, ...
+    pub fn current_count(&self) -> i32 {
+        1 - self.count as i32
+    }
+}
+
+/// A semaphore: its dispatcher's signal state is the current count.
+pub struct Semaphore {
+    pub dispatcher: Dispatcher,
+    pub maximum: i32,
+}
+
+/// The new count after releasing `release` units of a semaphore at
+/// `current` of `maximum`.
+pub fn semaphore_release(current: i32, maximum: i32, release: i32) -> Result<i32, NtStatus> {
+    if release <= 0 {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    match current.checked_add(release) {
+        Some(n) if n <= maximum => Ok(n),
+        _ => Err(NtStatus::SEMAPHORE_LIMIT_EXCEEDED),
+    }
+}
+
+/// Whether (initial, maximum) are valid semaphore counts.
+pub fn semaphore_counts_valid(initial: i32, maximum: i32) -> bool {
+    maximum > 0 && initial >= 0 && initial <= maximum
+}
+
 pub const DIRECTORY_QUERY: u32 = 0x0001;
 pub const DIRECTORY_TRAVERSE: u32 = 0x0002;
 pub const DIRECTORY_CREATE_OBJECT: u32 = 0x0004;
@@ -154,6 +219,8 @@ pub enum ObjectBody {
     ConsoleOutput,
     ConsoleInput,
     Event(Event),
+    Mutant(Mutant),
+    Semaphore(Semaphore),
     Directory(Directory),
     Thread(super::thread::NtThread),
     Section(super::section::Section),
@@ -204,6 +271,8 @@ impl KObject {
         match self.body {
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => "File",
             ObjectBody::Event(_) => "Event",
+            ObjectBody::Mutant(_) => "Mutant",
+            ObjectBody::Semaphore(_) => "Semaphore",
             ObjectBody::Directory(_) => "Directory",
             ObjectBody::Thread(_) => "Thread",
             ObjectBody::Section(_) => "Section",
@@ -224,6 +293,8 @@ impl KObject {
     pub fn dispatcher(&self) -> Option<&Dispatcher> {
         match &self.body {
             ObjectBody::Event(e) => Some(&e.dispatcher),
+            ObjectBody::Mutant(m) => Some(&m.dispatcher),
+            ObjectBody::Semaphore(s) => Some(&s.dispatcher),
             ObjectBody::Thread(t) => Some(&t.dispatcher),
             ObjectBody::Process(p) => Some(&p.dispatcher),
             ObjectBody::File(f) => Some(&f.dispatcher),
@@ -238,6 +309,8 @@ impl KObject {
     pub fn mapping(&self) -> GenericMapping {
         match &self.body {
             ObjectBody::Event(_) => EVENT_MAPPING,
+            ObjectBody::Mutant(_) => MUTANT_MAPPING,
+            ObjectBody::Semaphore(_) => SEMAPHORE_MAPPING,
             ObjectBody::Directory(_) => DIRECTORY_MAPPING,
             ObjectBody::Thread(_) => THREAD_MAPPING,
             ObjectBody::Section(_) => SECTION_MAPPING,
@@ -347,6 +420,24 @@ impl HandleTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semaphore_and_mutant_counts() {
+        assert_eq!(semaphore_release(0, 3, 2), Ok(2));
+        assert_eq!(semaphore_release(2, 3, 2), Err(NtStatus::SEMAPHORE_LIMIT_EXCEEDED));
+        assert_eq!(semaphore_release(2, 3, 0), Err(NtStatus::INVALID_PARAMETER));
+        assert_eq!(
+            semaphore_release(i32::MAX, i32::MAX, 1),
+            Err(NtStatus::SEMAPHORE_LIMIT_EXCEEDED)
+        );
+        assert!(semaphore_counts_valid(2, 3));
+        assert!(!semaphore_counts_valid(4, 3));
+        assert!(!semaphore_counts_valid(0, 0));
+        let free = MutantState::default();
+        assert_eq!(free.current_count(), 1);
+        let twice = MutantState { owner: Some(8), count: 2, abandoned: false };
+        assert_eq!(twice.current_count(), -1);
+    }
 
     fn console() -> ObjectRef {
         KObject::new(ObjectBody::ConsoleOutput).unwrap()

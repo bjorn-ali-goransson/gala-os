@@ -70,15 +70,38 @@ pub fn signal_dispatcher(d: &Dispatcher, signal: i32) {
 
 /// Whether `object` would satisfy a wait right now.
 fn is_signaled(object: &ObjectRef) -> bool {
+    if let ObjectBody::Mutant(m) = &object.body {
+        // Free, or already ours (mutants are recursive).
+        let owner = m.state.lock().owner;
+        return owner.is_none() || owner == super::thread::current_id();
+    }
     object.dispatcher().is_some_and(|d| d.inner.lock().signal > 0)
 }
 
-/// The side effect of a satisfied wait (auto-reset events reset).
-fn consume(object: &ObjectRef) {
-    if let (ObjectBody::Event(e), Some(d)) = (&object.body, object.dispatcher())
-        && e.kind == EventType::Synchronization
-    {
-        d.inner.lock().signal = 0;
+/// The side effect of a satisfied wait: auto-reset events reset, semaphores
+/// count down, mutants are acquired. Returns whether a mutant was
+/// abandoned (the wait then reports STATUS_ABANDONED_WAIT_n).
+fn consume(object: &ObjectRef) -> bool {
+    match (&object.body, object.dispatcher()) {
+        (ObjectBody::Event(e), Some(d)) if e.kind == EventType::Synchronization => {
+            d.inner.lock().signal = 0;
+            false
+        }
+        (ObjectBody::Semaphore(s), _) => {
+            s.dispatcher.inner.lock().signal -= 1;
+            false
+        }
+        (ObjectBody::Mutant(m), _) => {
+            let mut state = m.state.lock();
+            if state.owner.is_none() {
+                state.owner = super::thread::current_id();
+                super::thread::note_mutant_owned(object);
+            }
+            state.count += 1;
+            m.dispatcher.inner.lock().signal = 0;
+            core::mem::take(&mut state.abandoned)
+        }
+        _ => false,
     }
 }
 
@@ -152,12 +175,12 @@ pub fn wait_for_alertable(
         };
         match ready {
             Some(None) => {
-                objects.iter().for_each(consume);
-                return NtStatus::SUCCESS;
+                let abandoned = objects.iter().fold(false, |a, o| consume(o) | a);
+                return if abandoned { NtStatus::ABANDONED_WAIT_0 } else { NtStatus::SUCCESS };
             }
             Some(Some(i)) => {
-                consume(&objects[i]);
-                return NtStatus(i as u32);
+                let base = if consume(&objects[i]) { NtStatus::ABANDONED_WAIT_0.0 } else { 0 };
+                return NtStatus(base + i as u32);
             }
             None => {}
         }
