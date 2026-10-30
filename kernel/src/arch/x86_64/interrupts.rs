@@ -170,10 +170,7 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Installs the IDT on the boot CPU. Requires `gdt::init_bsp` first.
 pub fn init() {
-    assert!(
-        !INITIALIZED.swap(true, Ordering::SeqCst),
-        "IDT initialized twice"
-    );
+    assert!(!INITIALIZED.swap(true, Ordering::SeqCst), "IDT initialized twice");
     // SAFETY: `INITIALIZED` makes this the only writer, and interrupts are
     // disabled so the CPU does not read the table while it is being filled.
     unsafe {
@@ -202,10 +199,7 @@ static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
 
 /// Registers `handler` for external `vector`, replacing any previous one.
 pub fn set_handler(vector: u8, handler: Handler) {
-    assert!(
-        vector >= FIRST_EXTERNAL_VECTOR,
-        "vector {vector} is a CPU exception"
-    );
+    assert!(vector >= FIRST_EXTERNAL_VECTOR, "vector {vector} is a CPU exception");
     HANDLERS[usize::from(vector - FIRST_EXTERNAL_VECTOR)]
         .store(handler as usize, Ordering::Release);
 }
@@ -276,10 +270,7 @@ pub fn exception_name(vector: u8) -> &'static str {
         "security (#SX)",
         "reserved (31)",
     ];
-    NAMES
-        .get(usize::from(vector))
-        .copied()
-        .unwrap_or("external interrupt")
+    NAMES.get(usize::from(vector)).copied().unwrap_or("external interrupt")
 }
 
 struct ExceptionReport<'a> {
@@ -299,11 +290,7 @@ impl fmt::Display for ExceptionReport<'_> {
         if let Some(cr2) = self.cr2 {
             writeln!(f, "  cr2={cr2:#018x}")?;
         }
-        writeln!(
-            f,
-            "  rip={:#018x} cs={:#06x} rflags={:#010x}",
-            fr.rip, fr.cs, fr.rflags
-        )?;
+        writeln!(f, "  rip={:#018x} cs={:#06x} rflags={:#010x}", fr.rip, fr.cs, fr.rflags)?;
         writeln!(f, "  rsp={:#018x} ss={:#06x}", fr.rsp, fr.ss)?;
         writeln!(
             f,
@@ -320,11 +307,7 @@ impl fmt::Display for ExceptionReport<'_> {
             "  r9 ={:#018x} r10={:#018x} r11={:#018x} r12={:#018x}",
             fr.r9, fr.r10, fr.r11, fr.r12
         )?;
-        write!(
-            f,
-            "  r13={:#018x} r14={:#018x} r15={:#018x}",
-            fr.r13, fr.r14, fr.r15
-        )
+        write!(f, "  r13={:#018x} r14={:#018x} r15={:#018x}", fr.r13, fr.r14, fr.r15)
     }
 }
 

@@ -7,7 +7,10 @@ mod framebuffer;
 mod limine;
 
 use core::fmt;
+use core::ops::Range;
+use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::mm::PAGE_SIZE;
 use crate::mm::memmap::{MemoryRegion, RegionKind};
 pub use framebuffer::Framebuffer;
 use limine::{MemmapEntry, REQUESTED_BASE_REVISION, REQUESTS};
@@ -99,37 +102,21 @@ pub fn collect() -> Result<BootInfo, BootError> {
         .bootloader_info
         .response()
         .map(|r| unsafe { (limine::c_str(r.name), limine::c_str(r.version)) });
-    let cmdline = REQUESTS
-        .cmdline
-        .response()
-        .map_or("", |r| unsafe { limine::c_str(r.cmdline) });
-    let firmware = REQUESTS
-        .firmware_type
-        .response()
-        .map(|r| match r.firmware_type {
-            0 => FirmwareType::X86Bios,
-            1 => FirmwareType::Efi32,
-            2 => FirmwareType::Efi64,
-            3 => FirmwareType::Sbi,
-            other => FirmwareType::Unknown(other),
-        });
-    let hhdm_offset = REQUESTS
-        .hhdm
-        .response()
-        .ok_or(BootError::MissingResponse("HHDM"))?
-        .offset;
+    let cmdline = REQUESTS.cmdline.response().map_or("", |r| unsafe { limine::c_str(r.cmdline) });
+    let firmware = REQUESTS.firmware_type.response().map(|r| match r.firmware_type {
+        0 => FirmwareType::X86Bios,
+        1 => FirmwareType::Efi32,
+        2 => FirmwareType::Efi64,
+        3 => FirmwareType::Sbi,
+        other => FirmwareType::Unknown(other),
+    });
+    let hhdm_offset = REQUESTS.hhdm.response().ok_or(BootError::MissingResponse("HHDM"))?.offset;
     let kernel_address = REQUESTS
         .executable_address
         .response()
-        .map(|r| KernelAddress {
-            physical_base: r.physical_base,
-            virtual_base: r.virtual_base,
-        });
+        .map(|r| KernelAddress { physical_base: r.physical_base, virtual_base: r.virtual_base });
 
-    let memmap = REQUESTS
-        .memmap
-        .response()
-        .ok_or(BootError::MissingResponse("memory map"))?;
+    let memmap = REQUESTS.memmap.response().ok_or(BootError::MissingResponse("memory map"))?;
     let entries = if memmap.entries.is_null() {
         &[][..]
     } else {
@@ -161,4 +148,39 @@ pub fn collect() -> Result<BootInfo, BootError> {
         memory_map: BootMemoryMap { entries },
         framebuffer,
     })
+}
+
+/// Lowest address for kernel-owned allocations made here; memory below 1 MiB
+/// is kept free for things that need it (e.g. SMP trampolines).
+const LOW_MEMORY_END: u64 = 0x10_0000;
+
+static FRAME_BITMAP_TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// Carves `words` zero-initialized `u64`s out of usable RAM for the frame
+/// allocator's bitmap. Returns the slice and the physical range it occupies,
+/// which the caller must keep out of the allocator. Can be called once.
+pub fn take_frame_bitmap(
+    info: &BootInfo,
+    words: usize,
+) -> Option<(&'static mut [u64], Range<u64>)> {
+    if FRAME_BITMAP_TAKEN.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    let bytes = (words as u64).checked_mul(8)?.next_multiple_of(PAGE_SIZE);
+    let region = info
+        .memory_map
+        .iter()
+        .find(|r| r.kind == RegionKind::Usable && r.base >= LOW_MEMORY_END && r.len >= bytes)?;
+    let phys = region.base..region.base + bytes;
+    let virt = info.hhdm_offset.checked_add(region.base)?;
+    // SAFETY: the range is usable RAM (so mapped in the HHDM at base revision
+    // >= 3, page-aligned, and unused by anything else), the once-flag above
+    // ensures it is handed out only once, and the frame allocator built on top
+    // never hands it out. Zeroing first makes every `u64` initialized.
+    let slice = unsafe {
+        let ptr = core::ptr::with_exposed_provenance_mut::<u64>(virt as usize);
+        ptr.write_bytes(0, words);
+        core::slice::from_raw_parts_mut(ptr, words)
+    };
+    Some((slice, phys))
 }

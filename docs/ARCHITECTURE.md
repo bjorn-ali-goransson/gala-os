@@ -17,6 +17,8 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/cmdline.rs        kernel command line parsing (host-tested)
   src/selftest.rs       in-kernel tests run at boot with `selftest`
   src/mm/memmap.rs      physical memory map model + validation (host-tested)
+  src/mm/frame.rs       bitmap physical frame allocator (host-tested)
+  src/mm/mod.rs         global frame allocator instance
 xtask/                  host tool: build ISO, run QEMU, boot test
 ```
 
@@ -78,9 +80,19 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `selftest` | run in-kernel self-tests after boot |
 | `fault=ud`, `fault=pagefault` | provoke that exception (tests the handler) |
 
+## Physical memory
+
+`mm::frame::FrameAllocator` keeps one bit per 4 KiB frame (1 = in use) for
+all frames below the highest usable or bootloader-reclaimable address. Only
+`usable` regions start out free. The bitmap itself is carved from the first
+usable region above 1 MiB by `boot::take_frame_bitmap` (the only place that
+turns physical memory into a Rust slice) and is excluded from the free set.
+Single-frame allocation is next-fit over bitmap words; contiguous aligned
+runs (for DMA, large pages) use a linear scan. Double frees are rejected.
+
 ## Not done yet (milestone 2)
 
-Physical frame allocator, own page tables,
+Own page tables,
 heap (`alloc`, fallible only), interrupt-safe console lock, SMP.
 Bootloader-reclaimable memory must not be reused until the boot info that
 lives there has been copied out.

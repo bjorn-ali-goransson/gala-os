@@ -62,10 +62,7 @@ impl<T: PortValue> Port<T> {
     /// memory safety (e.g. by reprogramming DMA), and the caller must own the
     /// device behind it so that no other code accesses it concurrently.
     pub const unsafe fn new(port: u16) -> Self {
-        Self {
-            port,
-            _width: PhantomData,
-        }
+        Self { port, _width: PhantomData }
     }
 
     pub fn read(&mut self) -> T {

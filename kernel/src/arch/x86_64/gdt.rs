@@ -83,27 +83,19 @@ pub(super) struct DescriptorPointer {
 }
 
 pub(super) fn descriptor_pointer(base: *const u8, size: usize) -> DescriptorPointer {
-    DescriptorPointer {
-        limit: (size - 1) as u16,
-        base: base as u64,
-    }
+    DescriptorPointer { limit: (size - 1) as u16, base: base as u64 }
 }
 
 /// Loads the GDT and TSS on the boot CPU. Must be called exactly once.
 pub fn init_bsp() {
-    assert!(
-        !INITIALIZED.swap(true, Ordering::SeqCst),
-        "GDT initialized twice"
-    );
+    assert!(!INITIALIZED.swap(true, Ordering::SeqCst), "GDT initialized twice");
 
     // SAFETY: `INITIALIZED` guarantees this runs once, and nothing else touches
     // these statics until the CPU starts using them below.
     unsafe {
         let stacks = &mut *IST_STACKS.get();
         let tss = &mut *TSS.get();
-        for (slot, stack) in [IST_DOUBLE_FAULT, IST_NMI, IST_MACHINE_CHECK]
-            .into_iter()
-            .zip(stacks)
+        for (slot, stack) in [IST_DOUBLE_FAULT, IST_NMI, IST_MACHINE_CHECK].into_iter().zip(stacks)
         {
             let top = stack.0.as_mut_ptr().add(IST_STACK_SIZE) as u64;
             tss.ist[usize::from(slot) - 1] = top;

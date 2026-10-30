@@ -57,13 +57,7 @@ pub fn kernel_main() -> ! {
     log_boot_info(&info);
     let summary = log_memory_map(&info);
     if let Some(fb) = &info.framebuffer {
-        info!(
-            "framebuffer: {}x{} pitch={} bpp={}",
-            fb.width(),
-            fb.height(),
-            fb.pitch(),
-            fb.bpp()
-        );
+        info!("framebuffer: {}x{} pitch={} bpp={}", fb.width(), fb.height(), fb.pitch(), fb.bpp());
         fb.fill(0x00_10_20_40);
     } else {
         warn!("framebuffer: none provided");
@@ -72,6 +66,16 @@ pub fn kernel_main() -> ! {
     if summary.usable_bytes == 0 {
         panic!("no usable memory reported");
     }
+    if let Err(e) = mm::init(&info) {
+        panic!("frame allocator: {e:?}");
+    }
+    let (free, total) = mm::frame_stats();
+    info!(
+        "frames: {} free of {} tracked ({} MiB free)",
+        free,
+        total,
+        free * mm::PAGE_SIZE / (1024 * 1024)
+    );
 
     if let Some(name) = cmdline.value("fault") {
         match Fault::from_name(name) {
@@ -103,10 +107,7 @@ fn log_boot_info(info: &BootInfo) {
     info!("cmdline: {:?}", info.cmdline);
     info!("hhdm offset: {:#018x}", info.hhdm_offset);
     if let Some(addr) = info.kernel_address {
-        info!(
-            "kernel image: phys {:#x} -> virt {:#x}",
-            addr.physical_base, addr.virtual_base
-        );
+        info!("kernel image: phys {:#x} -> virt {:#x}", addr.physical_base, addr.virtual_base);
     }
 }
 
@@ -132,11 +133,7 @@ fn log_memory_map(info: &BootInfo) -> MemorySummary {
         }
     }
     if summary.unknown_bytes != 0 {
-        warn!(
-            "  total {:<22} {:>8} KiB",
-            "unknown types",
-            summary.unknown_bytes / 1024
-        );
+        warn!("  total {:<22} {:>8} KiB", "unknown types", summary.unknown_bytes / 1024);
     }
     info!(
         "usable memory: {} MiB, highest usable address {:#x}",

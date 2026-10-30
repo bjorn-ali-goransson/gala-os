@@ -11,12 +11,8 @@ use core::ptr;
 
 const COMMON_MAGIC: [u64; 2] = [0xc7b1dd30df4c8b88, 0x0a82e883a194f07b];
 const BASE_REVISION_MAGIC: [u64; 2] = [0xf9562b2d5c95a6c8, 0x6a7b384944536bdc];
-const REQUESTS_START_MARKER: [u64; 4] = [
-    0xf6b8f4b39de7d1ae,
-    0xfab91a6940fcb9cf,
-    0x785c6ed015d3e316,
-    0x181e920a7852b9d9,
-];
+const REQUESTS_START_MARKER: [u64; 4] =
+    [0xf6b8f4b39de7d1ae, 0xfab91a6940fcb9cf, 0x785c6ed015d3e316, 0x181e920a7852b9d9];
 const REQUESTS_END_MARKER: [u64; 2] = [0xadc0e0531bb10d03, 0x9572709f31764c62];
 
 /// The base revision we are written against. Revisions 0-5 are deprecated.
@@ -169,12 +165,8 @@ impl Requests {
     pub fn base_revision(&self) -> (bool, Option<u64>) {
         let tag = self.base_revision.get().cast::<u64>();
         // SAFETY: `tag` points to our own `[u64; 3]`; see `Sync` impl above.
-        let (loaded, requested) = unsafe {
-            (
-                ptr::read_volatile(tag.add(1)),
-                ptr::read_volatile(tag.add(2)),
-            )
-        };
+        let (loaded, requested) =
+            unsafe { (ptr::read_volatile(tag.add(1)), ptr::read_volatile(tag.add(2))) };
         let loaded = (loaded != BASE_REVISION_MAGIC[1]).then_some(loaded);
         (requested == 0, loaded)
     }

@@ -151,10 +151,8 @@ impl MemorySummary {
         let mut max_exclusive_end = 0;
 
         for (index, region) in regions.into_iter().enumerate() {
-            let end = region
-                .base
-                .checked_add(region.len)
-                .ok_or(MemoryMapError::Overflow { index })?;
+            let end =
+                region.base.checked_add(region.len).ok_or(MemoryMapError::Overflow { index })?;
             if region.base < prev_base {
                 return Err(MemoryMapError::Unsorted { index });
             }
@@ -245,19 +243,13 @@ mod tests {
     #[test]
     fn rejects_unsorted() {
         let map = [r(0x2000, 0x1000, Usable), r(0x1000, 0x1000, Usable)];
-        assert_eq!(
-            MemorySummary::from_regions(map),
-            Err(MemoryMapError::Unsorted { index: 1 })
-        );
+        assert_eq!(MemorySummary::from_regions(map), Err(MemoryMapError::Unsorted { index: 1 }));
     }
 
     #[test]
     fn rejects_misaligned_ram_but_not_reserved() {
         let map = [r(0x1000, 0x800, Usable)];
-        assert_eq!(
-            MemorySummary::from_regions(map),
-            Err(MemoryMapError::Misaligned { index: 0 })
-        );
+        assert_eq!(MemorySummary::from_regions(map), Err(MemoryMapError::Misaligned { index: 0 }));
         let map = [r(0x1234, 0x800, Reserved)];
         assert!(MemorySummary::from_regions(map).is_ok());
     }
@@ -272,38 +264,22 @@ mod tests {
     fn rejects_overlap_with_exclusive_ram() {
         // Reserved region starting inside usable RAM.
         let map = [r(0x1000, 0x2000, Usable), r(0x2000, 0x10, Reserved)];
-        assert_eq!(
-            MemorySummary::from_regions(map),
-            Err(MemoryMapError::Overlap { index: 1 })
-        );
+        assert_eq!(MemorySummary::from_regions(map), Err(MemoryMapError::Overlap { index: 1 }));
         // Usable RAM starting inside an earlier, long reserved region.
-        let map = [
-            r(0x0, 0x10000, Reserved),
-            r(0x1000, 0x1000, AcpiNvs),
-            r(0x4000, 0x1000, Usable),
-        ];
-        assert_eq!(
-            MemorySummary::from_regions(map),
-            Err(MemoryMapError::Overlap { index: 2 })
-        );
+        let map =
+            [r(0x0, 0x10000, Reserved), r(0x1000, 0x1000, AcpiNvs), r(0x4000, 0x1000, Usable)];
+        assert_eq!(MemorySummary::from_regions(map), Err(MemoryMapError::Overlap { index: 2 }));
     }
 
     #[test]
     fn adjacent_regions_do_not_overlap() {
-        let map = [
-            r(0x1000, 0x1000, Reserved),
-            r(0x2000, 0x1000, Usable),
-            r(0x3000, 1, Reserved),
-        ];
+        let map = [r(0x1000, 0x1000, Reserved), r(0x2000, 0x1000, Usable), r(0x3000, 1, Reserved)];
         assert!(MemorySummary::from_regions(map).is_ok());
     }
 
     #[test]
     fn rejects_overflow() {
         let map = [r(u64::MAX - 0xfff, 0x2000, Reserved)];
-        assert_eq!(
-            MemorySummary::from_regions(map),
-            Err(MemoryMapError::Overflow { index: 0 })
-        );
+        assert_eq!(MemorySummary::from_regions(map), Err(MemoryMapError::Overflow { index: 0 }));
     }
 }

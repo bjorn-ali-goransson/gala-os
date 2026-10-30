@@ -60,10 +60,7 @@ fn main() -> ExitCode {
 }
 
 fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
 fn target_dir() -> PathBuf {
@@ -78,29 +75,17 @@ fn cargo() -> Command {
 
 /// Runs `cmd`, showing its output only if it fails.
 fn run_quiet(cmd: &mut Command) -> Result {
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to spawn {cmd:?}: {e}"))?;
+    let out = cmd.output().map_err(|e| format!("failed to spawn {cmd:?}: {e}"))?;
     if out.status.success() {
         return Ok(());
     }
-    eprint!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    eprint!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     Err(format!("{cmd:?} failed: {}", out.status))
 }
 
 fn run_cmd(cmd: &mut Command) -> Result {
-    let status = cmd
-        .status()
-        .map_err(|e| format!("failed to spawn {cmd:?}: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{cmd:?} failed: {status}"))
-    }
+    let status = cmd.status().map_err(|e| format!("failed to spawn {cmd:?}: {e}"))?;
+    if status.success() { Ok(()) } else { Err(format!("{cmd:?} failed: {status}")) }
 }
 
 fn unit_tests() -> Result {
@@ -117,15 +102,7 @@ fn build(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
 
 fn build_kernel(release: bool) -> Result {
     let mut cmd = cargo();
-    cmd.args([
-        "build",
-        "--package",
-        "kernel",
-        "--bin",
-        "kernel",
-        "--target",
-        KERNEL_TARGET,
-    ]);
+    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET]);
     if release {
         cmd.arg("--release");
     }
@@ -134,10 +111,7 @@ fn build_kernel(release: bool) -> Result {
 
 fn make_iso(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
-    let kernel = target_dir()
-        .join(KERNEL_TARGET)
-        .join(profile)
-        .join("kernel");
+    let kernel = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
     let limine = fetch_limine()?;
     let out = target_dir().join(profile);
     let iso_root = out.join(format!("{name}-iso-root"));
@@ -151,10 +125,7 @@ fn make_iso(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
     }
     copy(&kernel, &boot.join("kernel"))?;
     copy(&limine.join("BOOTX64.EFI"), &efi_boot.join("BOOTX64.EFI"))?;
-    copy(
-        &limine.join("limine-uefi-cd.bin"),
-        &boot.join("limine/limine-uefi-cd.bin"),
-    )?;
+    copy(&limine.join("limine-uefi-cd.bin"), &boot.join("limine/limine-uefi-cd.bin"))?;
     let config = format!(
         "timeout: 0\n\n/gala-os\n    protocol: limine\n    path: boot():/boot/kernel\n    cmdline: {cmdline}\n"
     );
@@ -165,11 +136,7 @@ fn make_iso(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
         Command::new("xorriso")
             .args(["-as", "mkisofs", "-R", "-r", "-J", "-quiet"])
             .args(["--efi-boot", "boot/limine/limine-uefi-cd.bin"])
-            .args([
-                "-efi-boot-part",
-                "--efi-boot-image",
-                "--protective-msdos-label",
-            ])
+            .args(["-efi-boot-part", "--efi-boot-image", "--protective-msdos-label"])
             .arg(&iso_root)
             .arg("-o")
             .arg(&iso),
@@ -190,15 +157,7 @@ fn fetch_limine() -> Result<PathBuf> {
         eprintln!("xtask: fetching Limine {LIMINE_TAG}");
         run_cmd(
             Command::new("git")
-                .args([
-                    "clone",
-                    "--quiet",
-                    "--depth",
-                    "1",
-                    "--branch",
-                    LIMINE_TAG,
-                    LIMINE_REPO,
-                ])
+                .args(["clone", "--quiet", "--depth", "1", "--branch", LIMINE_TAG, LIMINE_REPO])
                 .arg(&dir),
         )?;
     }
@@ -224,26 +183,11 @@ struct Firmware {
 
 fn find_ovmf() -> Result<Firmware> {
     const CANDIDATES: &[(&str, &str)] = &[
-        (
-            "/usr/share/OVMF/OVMF_CODE_4M.fd",
-            "/usr/share/OVMF/OVMF_VARS_4M.fd",
-        ),
-        (
-            "/usr/share/OVMF/OVMF_CODE.fd",
-            "/usr/share/OVMF/OVMF_VARS.fd",
-        ),
-        (
-            "/usr/share/edk2/x64/OVMF_CODE.4m.fd",
-            "/usr/share/edk2/x64/OVMF_VARS.4m.fd",
-        ),
-        (
-            "/usr/share/edk2/ovmf/OVMF_CODE.fd",
-            "/usr/share/edk2/ovmf/OVMF_VARS.fd",
-        ),
-        (
-            "/usr/share/qemu/edk2-x86_64-code.fd",
-            "/usr/share/qemu/edk2-i386-vars.fd",
-        ),
+        ("/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"),
+        ("/usr/share/OVMF/OVMF_CODE.fd", "/usr/share/OVMF/OVMF_VARS.fd"),
+        ("/usr/share/edk2/x64/OVMF_CODE.4m.fd", "/usr/share/edk2/x64/OVMF_VARS.4m.fd"),
+        ("/usr/share/edk2/ovmf/OVMF_CODE.fd", "/usr/share/edk2/ovmf/OVMF_VARS.fd"),
+        ("/usr/share/qemu/edk2-x86_64-code.fd", "/usr/share/qemu/edk2-i386-vars.fd"),
         (
             "/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
             "/opt/homebrew/share/qemu/edk2-i386-vars.fd",
@@ -251,10 +195,7 @@ fn find_ovmf() -> Result<Firmware> {
     ];
     if let Some(code) = env::var_os("OVMF_CODE") {
         let vars = env::var_os("OVMF_VARS").map(PathBuf::from);
-        return Ok(Firmware {
-            code: code.into(),
-            vars,
-        });
+        return Ok(Firmware { code: code.into(), vars });
     }
     CANDIDATES
         .iter()
@@ -274,18 +215,12 @@ fn qemu(iso: &Path) -> Result<Command> {
         .args(["-accel", "kvm", "-accel", "tcg"])
         .args(["-no-reboot"])
         .arg("-drive")
-        .arg(format!(
-            "if=pflash,format=raw,unit=0,readonly=on,file={}",
-            fw.code.display()
-        ));
+        .arg(format!("if=pflash,format=raw,unit=0,readonly=on,file={}", fw.code.display()));
     if let Some(vars) = fw.vars {
         // The firmware writes its variable store; give it a private copy.
         let copy_path = iso.with_extension("ovmf-vars.fd");
         copy(&vars, &copy_path)?;
-        cmd.arg("-drive").arg(format!(
-            "if=pflash,format=raw,unit=1,file={}",
-            copy_path.display()
-        ));
+        cmd.arg("-drive").arg(format!("if=pflash,format=raw,unit=1,file={}", copy_path.display()));
     }
     cmd.arg("-cdrom").arg(iso);
     Ok(cmd)
@@ -326,30 +261,21 @@ const SCENARIOS: &[Scenario] = &[
         name: "fault-pagefault",
         cmdline: "qemu_exit fault=pagefault",
         exit_status: QEMU_EXIT_FAILURE,
-        expect: &[
-            "CPU exception: page fault (#PF) error=0x0",
-            "cr2=0x0000000000000008",
-        ],
+        expect: &["CPU exception: page fault (#PF) error=0x0", "cr2=0x0000000000000008"],
     },
 ];
 
 /// Boots every scenario (matching `filter`) headless, in parallel.
 fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     build_kernel(release)?;
-    let selected: Vec<&Scenario> = SCENARIOS
-        .iter()
-        .filter(|s| filter.is_none_or(|f| s.name.contains(f.as_str())))
-        .collect();
+    let selected: Vec<&Scenario> =
+        SCENARIOS.iter().filter(|s| filter.is_none_or(|f| s.name.contains(f.as_str()))).collect();
     if selected.is_empty() {
         return Err("no boot test scenario matches the filter".into());
     }
     let mut isos = Vec::new();
     for scenario in &selected {
-        isos.push(make_iso(
-            release,
-            &format!("test-{}", scenario.name),
-            scenario.cmdline,
-        )?);
+        isos.push(make_iso(release, &format!("test-{}", scenario.name), scenario.cmdline)?);
     }
     let results: Vec<Result> = thread::scope(|scope| {
         let handles: Vec<_> = selected
@@ -357,10 +283,7 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
             .zip(&isos)
             .map(|(scenario, iso)| scope.spawn(move || boot_scenario(scenario, iso)))
             .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|_| Err("panicked".into())))
-            .collect()
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("panicked".into()))).collect()
     });
     let mut failed = 0;
     for (scenario, result) in selected.iter().zip(&results) {
@@ -390,9 +313,7 @@ fn boot_scenario(scenario: &Scenario, iso: &Path) -> Result {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to spawn QEMU: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("failed to spawn QEMU: {e}"))?;
     let start = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
@@ -410,18 +331,13 @@ fn boot_scenario(scenario: &Scenario, iso: &Path) -> Result {
     if let Ok(mut f) = fs::File::open(&log) {
         let _ = f.read_to_string(&mut serial);
     }
-    let missing: Vec<&str> = scenario
-        .expect
-        .iter()
-        .copied()
-        .filter(|e| !serial.contains(e))
-        .collect();
+    let missing: Vec<&str> =
+        scenario.expect.iter().copied().filter(|e| !serial.contains(e)).collect();
     let verdict = match status {
         None => Err(format!("timed out after {}s", BOOT_TEST_TIMEOUT.as_secs())),
-        Some(s) if s.code() != Some(scenario.exit_status) => Err(format!(
-            "QEMU exited with {s}, expected status {}",
-            scenario.exit_status
-        )),
+        Some(s) if s.code() != Some(scenario.exit_status) => {
+            Err(format!("QEMU exited with {s}, expected status {}", scenario.exit_status))
+        }
         Some(_) if !missing.is_empty() => Err(format!("serial log lacks {missing:?}")),
         Some(_) => Ok(()),
     };
@@ -437,9 +353,7 @@ fn boot_scenario(scenario: &Scenario, iso: &Path) -> Result {
 }
 
 fn copy(from: &Path, to: &Path) -> Result {
-    fs::copy(from, to)
-        .map(drop)
-        .map_err(|e| format!("copying {from:?} to {to:?}: {e}"))
+    fs::copy(from, to).map(drop).map_err(|e| format!("copying {from:?} to {to:?}: {e}"))
 }
 
 fn write(path: &Path, contents: &str) -> Result {
