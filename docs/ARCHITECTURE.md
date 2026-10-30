@@ -95,6 +95,7 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `args=<percent-encoded>[,...]` | their command-line arguments, in the same order (`%2C` for a comma) |
 | `trace` | log every system call (arguments, status) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
+| `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |
 | `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault` or `all` |
 
 ## Physical memory
@@ -557,12 +558,48 @@ does a requester while it waits.
 - Counters (shootdowns, IPIs, leaked frames) are logged before `boot ok`.
 
 
+## Networking
+
+N1a (ROADMAP). Layers, bottom up:
+- `arch::pci`: configuration space through ports 0xcf8/0xcfc, brute-force
+  enumeration (bus 0-255, functions 1-7 only for multifunction devices).
+  The firmware (SeaBIOS or OVMF) has assigned the BARs; we only turn on
+  I/O decoding and bus mastering.
+- `arch::virtio`: the virtio *legacy* PCI interface (registers in I/O BAR
+  0; QEMU gets `disable-legacy=off`). It is in `arch` because the device
+  DMAs: `LegacyDevice` owns its queues and resets the device in `drop`
+  before the queue memory is freed (fields drop after `drop`). Each
+  `Virtqueue` has physically contiguous ring memory and a buffer region of
+  up to 64 fixed slots; slot *i* is descriptor *i* (no chains), and a bit
+  mask tracks which slots the device owns. Drivers poll (the available
+  ring asks for no interrupts).
+- `net::virtio_net`: queue 0 receive, 1 transmit, 32 slots of 2 KiB each,
+  the 10-byte legacy header in front of every frame (no offloads). It is a
+  smoltcp `Device`; a received frame is copied out and its slot reposted at
+  once, a sent frame is copied into a free transmit slot (counted as
+  dropped when none is free; TCP retransmits). Counters: frames received,
+  sent, dropped, logged by `net_echo`.
+- `net`: smoltcp with 10.0.2.15/24 and gateway 10.0.2.2 (QEMU's user
+  network). Today only the `net_echo` flag uses it, on the boot thread,
+  polling with 1 ms sleeps. N1b moves the interface and socket set into a
+  `net` kernel thread (woken by a timer and by socket requests) and puts
+  the AFD device on top.
+
+The boot test `net_echo` (xtask `NET_SCENARIOS`): QEMU gets
+`-netdev user,hostfwd=tcp:127.0.0.1:<free port>-:7` and a virtio-net card
+(every other VM gets `-nic none`); once the log shows
+`net: echo listening on port 7`, xtask's `net_client` sends 64 KiB while
+reading the echo, half-closes, checks every byte and appends
+`xtask: net client: echo ok` (or the error) to the serial log, which the
+scenario expects.
+
 ## Not done yet
 
 suspension/context of threads running on other CPUs, ranged (invlpg)
 shootdowns and PCIDs (ROADMAP S4), a real ntdll and
 kernel32 (gala runs test stand-ins), process creation from user mode,
-security, registry, storage and network devices, bindgen-generated
+security, registry, storage devices, interrupts for devices (virtio-net
+polls), sockets for user mode (N1b), bindgen-generated
 layouts, ACPI (MADT/HPET), reclaiming bootloader memory. Observability
 plans: `docs/OBSERVABILITY.md`.
 Bootloader-reclaimable memory must not be reused until the boot info that

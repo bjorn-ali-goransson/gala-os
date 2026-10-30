@@ -191,7 +191,8 @@ to set and to argue for. Current order and why:
    lot for kernel32/Go, which is cheaper to do before splitting it behind
    a platform seam. The ledger and event stream now make the Go bring-up
    data-driven.
-5. G3 (workable Go programs): done. Next: N1 (networking), then N2
+5. G3 (workable Go programs): done. N1a done; next N1b (AFD and
+   Winsock), N1c, then N2
    (Nginx). S4 is mostly covered (suspending a thread running on another
    CPU works: it parks at its next tick); per-CPU run queues wait for a
    benchmark that needs them.
@@ -214,7 +215,10 @@ N1. **Networking (next)**, re-planned 2026-10-30 from data: the official
    gala runs 64-bit programs only. Whatever server runs first, it needs the
    same foundation, so that comes first, proven with Go (which works):
    N1a. A network device (virtio-net, QEMU user networking with port
-        forwarding) and a TCP/IP stack in the kernel.
+        forwarding) and a TCP/IP stack in the kernel. **Done**: PCI
+        enumeration, virtio legacy transport, virtio-net driver, smoltcp;
+        boot test `net_echo` (xtask's client echoes 64 KiB through the
+        kernel, under SeaBIOS and OVMF).
    N1b. Sockets as Windows has them: the AFD device (`\Device\Afd`,
         what ws2_32/mswsock talk to through NtCreateFile and
         NtDeviceIoControlFile), and gala's ws2_32.dll and mswsock.dll.

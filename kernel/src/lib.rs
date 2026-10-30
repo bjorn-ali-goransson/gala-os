@@ -22,6 +22,7 @@ pub mod console;
 pub mod events;
 pub mod fs;
 pub mod mm;
+pub mod net;
 pub mod nt;
 pub mod sched;
 mod selftest;
@@ -150,6 +151,9 @@ pub fn kernel_main() -> ! {
             }
             None => panic!("unknown fault {name:?}"),
         }
+    }
+    if cmdline.flag("net_echo") {
+        net::echo_test();
     }
     if cmdline.flag("selftest") {
         selftest::run_all();

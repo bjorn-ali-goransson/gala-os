@@ -215,11 +215,15 @@ fn run() -> Result<(), u32> {
         c.eq(SuspendThread(h).into(), 0)?;
         c.eq(SuspendThread(h).into(), 1)?;
         c.eq(ResumeThread(h).into(), 2)?;
+        // SuspendThread is asynchronous (the thread may run on another CPU
+        // for a moment); GetThreadContext returns once it has stopped, so
+        // read the counter after it, as the Win32 documentation advises.
+        let mut ctx: Context = core::mem::zeroed();
+        ctx.context_flags = CONTEXT_CONTROL_INTEGER;
+        c.ok(GetThreadContext(h, &mut ctx) != 0, 0)?;
         let spins = SPINS.load(Ordering::SeqCst);
         Sleep(20);
         c.eq(SPINS.load(Ordering::SeqCst), spins)?; // still suspended (count 1)
-        let mut ctx: Context = core::mem::zeroed();
-        ctx.context_flags = CONTEXT_CONTROL_INTEGER;
         c.ok(GetThreadContext(h, &mut ctx) != 0, 0)?;
         c.ok(ctx.rip != 0 && ctx.gpr[4] != 0, ctx.rip)?;
         ctx.rip = redirected as *const () as u64;

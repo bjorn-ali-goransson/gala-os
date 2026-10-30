@@ -103,6 +103,17 @@ and read the `ledger:` lines: every missing import is listed by name.
 - **Fresh checkouts**: CI starts without `target/`; things fetched or
   built on first use (Limine) must also work when several threads need
   them at once.
+- **Network tests**: VMs have no network card unless the scenario is in
+  xtask's `NET_SCENARIOS` (`-nic none` otherwise). Those get a virtio-net
+  card on QEMU's user network with a host port forwarded to guest port 7,
+  and xtask plays the remote side (`net_client`) once the guest logs that
+  it listens; the client's verdict is appended to the serial log as an
+  `xtask: net client: ...` line for `expect` to check. QEMU's user network
+  needs no privileges, so this works in containers and CI.
+- **Asynchronous Windows APIs in tests**: SuspendThread returns before a
+  thread running on another CPU has stopped, on Windows as on gala. A test
+  that needs it stopped calls GetThreadContext first (kernel32_thread_test
+  was flaky until it did).
 - **Flaky boot tests** usually mean a race; rerun the one scenario a few
   times (`cargo xtask boot-test name`) before blaming CI.
 

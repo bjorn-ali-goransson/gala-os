@@ -23,6 +23,8 @@ Rules for this file:
 | Crate | Version | License | Purpose |
 |---|---|---|---|
 | `spin` | 0.12.3 | MIT | Spinlock for the serial console. |
+| `smoltcp` | 0.12.0 | 0BSD | TCP/IP stack (`kernel/src/net`); features `medium-ethernet`, `proto-ipv4`, `socket-tcp`, no `alloc` (socket storage and buffers are ours, allocated fallibly). |
+| `managed`, `heapless`, `hash32`, `byteorder`, `bitflags` 1, `cfg-if`, `stable_deref_trait` | 0.8.0, 0.8.0, 0.3.1, 1.5.0, 1.3.2, 1.0.5, 1.2.1 | 0BSD; MIT OR Apache-2.0 (byteorder: Unlicense OR MIT) | smoltcp's dependencies. |
 | `noto-sans-mono-bitmap` | 0.3.2 | MIT (crate); the glyphs are rasterized from Noto Sans Mono, SIL Open Font License 1.1 | Pre-rasterized font for the on-screen console (`console.rs`); only the regular 16 px basic-Latin subset is enabled. |
 
 The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `screenshot` is its own, uncompressed).
@@ -34,6 +36,8 @@ The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `scre
 | `kernel/src/boot/limine.rs` | Limine boot protocol, `PROTOCOL.md` in github.com/limine-bootloader/limine-protocol (fetched 2026-10-30) | BSD-2-Clause (`limine.h`); request IDs and struct layouts taken from the spec |
 | `kernel/src/arch/x86_64/serial.rs` | Generic 16550 UART register description (public datasheets / OSDev wiki) | n/a |
 | `kernel/src/arch/x86_64/qemu.rs` | QEMU `isa-debug-exit` device documentation | n/a |
+| `kernel/src/arch/x86_64/pci.rs` | PCI Local Bus specification: configuration mechanism #1 (ports 0xcf8/0xcfc), configuration header layout (public descriptions, OSDev wiki) | n/a |
+| `kernel/src/arch/x86_64/virtio.rs`, `kernel/src/net/virtio_net.rs` | OASIS *Virtual I/O Device (VIRTIO) Version 1.x*: legacy PCI register layout, split virtqueue layout, device status, network device (feature bits, `virtio_net_hdr`), PCI IDs | OASIS specification (implementations are free to write from it) |
 | `kernel/src/arch/x86_64/gdt.rs` selector values (`0x10`/`0x18` kernel, `0x23`/`0x2b`/`0x33` user) | User-visible x64 Windows segment selectors: Microsoft `CONTEXT` documentation and values used by Wine (`dlls/ntdll/unix/signal_x86_64.c`). Only the numbers are used; the GDT code is our own. | n/a (ABI facts) |
 | `kernel/src/arch/x86_64/{gdt,interrupts}.rs` descriptor formats | Intel SDM / AMD APM (GDT, TSS, IDT gate layouts, exception vectors) | n/a |
 | `kernel/src/nt/pe.rs` | Microsoft "PE Format" specification (learn.microsoft.com) | n/a |

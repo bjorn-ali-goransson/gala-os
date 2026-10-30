@@ -482,6 +482,16 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
 
+/// Scenarios that get a virtio-net card on QEMU's user-mode network, with
+/// host port `<free port>` forwarded to the guest's TCP port 7.
+const NET_SCENARIOS: &[&str] = &["net_echo"];
+
+/// The serial line after which the guest accepts connections on port 7.
+const NET_LISTENING: &str = "net: echo listening on port 7";
+
+/// Bytes the client sends through the echo server.
+const NET_ECHO_BYTES: usize = 65536;
+
 /// The firmware for scenario `name` (`XTASK_FIRMWARE=bios|uefi` overrides).
 fn scenario_boot(name: &str) -> Boot {
     match env::var("XTASK_FIRMWARE").as_deref() {
@@ -497,7 +507,9 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     cmd.args(["-machine", "q35", "-cpu", "max", "-m", "512M", "-smp", "2"])
         // KVM when available, otherwise software emulation.
         .args(["-accel", "kvm", "-accel", "tcg"])
-        .args(["-no-reboot"]);
+        .args(["-no-reboot"])
+        // No default network card; NET_SCENARIOS add their own.
+        .args(["-nic", "none"]);
     if boot == Boot::Uefi {
         let fw = find_ovmf()?;
         cmd.arg("-drive")
@@ -567,6 +579,20 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=smpmem_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["smpmem_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // N1a: a kernel TCP echo server on port 7 behind QEMU's user-mode
+        // network; xtask connects through a host port forward (see
+        // `net_client`) and appends its verdict to the log.
+        name: "net_echo",
+        cmdline: "qemu_exit net_echo",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "net: virtio-net",
+            "net: link up, 10.0.2.15/24",
+            "net_echo: echoed 65536 bytes",
+            "xtask: net client: echo ok",
+        ],
     },
     Scenario {
         // The event stream (see EVENT_EXPECT) while import_test runs.
@@ -1226,6 +1252,7 @@ fn run_vm(
     iso: &Path,
     boot: Boot,
     timeout: Duration,
+    net: bool,
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let log = iso.with_extension("serial.log");
     let _ = fs::remove_file(&log);
@@ -1242,12 +1269,24 @@ fn run_vm(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    let port = if net { Some(free_port()?) } else { None };
+    if let Some(port) = port {
+        add_net(&mut cmd, port);
+    }
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn QEMU: {e}"))?;
     let start = Instant::now();
     let mut to_banner = None;
+    let mut client = None;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break Some(status);
+        }
+        if let Some(port) = port.filter(|_| client.is_none())
+            && fs::read(&log).is_ok_and(|b| {
+                b.windows(NET_LISTENING.len()).any(|w| w == NET_LISTENING.as_bytes())
+            })
+        {
+            client = Some(thread::spawn(move || net_client(port)));
         }
         if to_banner.is_none()
             && fs::read(&log).is_ok_and(|b| {
@@ -1268,7 +1307,59 @@ fn run_vm(
     if let Ok(mut f) = fs::File::open(&log) {
         let _ = f.read_to_string(&mut serial);
     }
+    if let Some(client) = client {
+        let verdict = client.join().unwrap_or_else(|_| Err("client panicked".into()));
+        serial += &match verdict {
+            Ok(()) => "xtask: net client: echo ok\n".to_string(),
+            Err(e) => format!("xtask: net client: {e}\n"),
+        };
+    }
     Ok((status, serial, BootTime { to_banner: to_banner.unwrap_or(total), total }))
+}
+
+/// A virtio-net card on QEMU's user network, host `port` forwarded to the
+/// guest's TCP port 7.
+fn add_net(cmd: &mut Command, port: u16) {
+    cmd.arg("-netdev")
+        .arg(format!("user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:7"))
+        // The legacy (0.9.5) interface: one I/O BAR (see docs/ARCHITECTURE.md).
+        .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
+}
+
+/// A free host TCP port (for QEMU's port forward).
+fn free_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    Ok(listener.local_addr().map_err(|e| e.to_string())?.port())
+}
+
+/// The host side of `net_echo`: sends NET_ECHO_BYTES of a pattern to the
+/// guest's port 7 (writing and reading at the same time, so neither side's
+/// window fills up), then half-closes and expects the same bytes back.
+fn net_client(port: u16) -> Result {
+    use std::io::Write;
+    let pattern = |i: usize| (i * 7 + i / 251) as u8;
+    let mut stream =
+        std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect: {e}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(60))).map_err(|e| e.to_string())?;
+    let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
+    let sender = thread::spawn(move || -> Result {
+        let data: Vec<u8> = (0..NET_ECHO_BYTES).map(pattern).collect();
+        for chunk in data.chunks(4096) {
+            writer.write_all(chunk).map_err(|e| format!("send: {e}"))?;
+        }
+        writer.shutdown(std::net::Shutdown::Write).map_err(|e| format!("shutdown: {e}"))
+    });
+    let mut echoed = Vec::new();
+    let read = stream.read_to_end(&mut echoed);
+    sender.join().unwrap_or_else(|_| Err("sender panicked".into()))?;
+    read.map_err(|e| format!("receive after {} bytes: {e}", echoed.len()))?;
+    if echoed.len() != NET_ECHO_BYTES {
+        return Err(format!("echoed {} bytes, sent {NET_ECHO_BYTES}", echoed.len()));
+    }
+    match echoed.iter().enumerate().find(|&(i, &b)| b != pattern(i)) {
+        Some((i, b)) => Err(format!("byte {i} is {b:#x}, sent {:#x}", pattern(i))),
+        None => Ok(()),
+    }
 }
 
 /// Judges one scenario from the exit status and its part of the log.
@@ -1325,7 +1416,7 @@ fn bench_results(text: &str) -> Vec<(String, u64)> {
 fn bench(release: bool, windows: Option<&Path>) -> Result {
     build_kernel(release)?;
     let iso = make_iso(release, "bench", "qemu_exit noscreen run=bench.exe", &[])?;
-    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT)?;
+    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, false)?;
     if status.and_then(|s| s.code()) != Some(QEMU_EXIT_SUCCESS) || !serial.contains("bench: done") {
         return Err(format!(
             "bench did not finish; see {}",
@@ -1403,7 +1494,8 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         }
     };
     let boot = scenario_boot(scenarios[0].name);
-    let (status, serial, time) = match run_vm(iso, boot, timeout) {
+    let net = matches!(vm, Vm::Single(s) if NET_SCENARIOS.contains(&s.name));
+    let (status, serial, time) = match run_vm(iso, boot, timeout, net) {
         Ok(r) => r,
         Err(e) => {
             return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
@@ -1461,7 +1553,12 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
 
 /// Boots a scenario alone (for reports), without printing its log.
 fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
-    let (status, serial, _) = run_vm(iso, scenario_boot(scenario.name), BOOT_TEST_TIMEOUT)?;
+    let (status, serial, _) = run_vm(
+        iso,
+        scenario_boot(scenario.name),
+        BOOT_TEST_TIMEOUT,
+        NET_SCENARIOS.contains(&scenario.name),
+    )?;
     judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial)
 }
 
@@ -1507,6 +1604,18 @@ fn screenshot(release: bool, args: &[String]) -> Result {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // `net_echo`: a card, and the client a little after boot (BIOS boots
+    // reach the kernel in about a second).
+    if cmdline.contains(&"net_echo") {
+        let port = free_port()?;
+        add_net(&mut cmd, port);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(2500));
+            if let Err(e) = net_client(port) {
+                eprintln!("xtask: net client: {e}");
+            }
+        });
+    }
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn QEMU: {e}"))?;
     let start = Instant::now();
     let result = (|| {
