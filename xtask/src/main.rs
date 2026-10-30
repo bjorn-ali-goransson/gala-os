@@ -33,6 +33,8 @@ struct Dll {
 const USER_DLLS: &[Dll] = &[
     Dll { package: "testdll", file: "testdll.dll", exported_as: "testdll.dll" },
     Dll { package: "testdll2", file: "testdll2.dll", exported_as: "testdll2.dll" },
+    // gala's kernel32.dll, exported under another name like ntdll.
+    Dll { package: "kernel32", file: "kernel32.dll", exported_as: "testkernel32.dll" },
     // Built as ntdll.dll (its export directory says so); exported under
     // another name so user/bin never holds a file called ntdll.dll.
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
@@ -61,6 +63,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("smpmem_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
     ("events", "testdll.dll", "gala"),
+    ("kernel32_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_test", "testdll.dll", "gala"),
+    ("missing_import_test", "ntdll.dll", "Windows/System32"),
+    ("missing_import_test", "kernel32.dll", "Windows/System32"),
 ];
 const USER_PROGRAMS: &[&str] = &[
     "hello",
@@ -100,6 +107,8 @@ const USER_PROGRAMS: &[&str] = &[
     "smpmem_test",
     "ledger_test",
     "bench",
+    "kernel32_test",
+    "missing_import_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -494,6 +503,26 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=bench.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["bench: null_syscall ns_per_op", "bench: done", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "kernel32_test",
+        cmdline: "qemu_exit run=kernel32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "kernel32_test: hello from kernel32",
+            "kernel32_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        name: "missing_import_test",
+        cmdline: "qemu_exit run=missing_import_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "missing_import_test.exe finished with status 0xc0000139",
+            r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionOne","what":"missing export""#,
+            r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionTwo","what":"missing export""#,
+        ],
     },
     Scenario {
         name: "ledger_test",

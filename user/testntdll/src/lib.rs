@@ -107,6 +107,27 @@ syscall_stubs! {
     NtSuspendThread = 0x1bc, fn(h: usize, previous: *mut u32);
     // Processors (gala's number, unverified).
     NtGetCurrentProcessorNumber = 0xf8, fn();
+    // For gala's kernel32 (long-stable x64 numbers).
+    NtWaitForSingleObject = 0x04, fn(h: usize, alertable: u8, timeout: *const i64);
+    NtWriteFile = 0x08, fn(
+        h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
+        buffer: *const u8, length: u32, offset: *const i64, key: *const u32
+    );
+    NtSetEvent = 0x0e, fn(h: usize, previous: *mut i32);
+    NtAllocateVirtualMemory = 0x18, fn(
+        process: isize, base: *mut usize, zero_bits: usize, size: *mut usize, kind: u32,
+        protect: u32
+    );
+    NtFreeVirtualMemory = 0x1e, fn(process: isize, base: *mut usize, size: *mut usize, kind: u32);
+    NtQueryPerformanceCounter = 0x31, fn(counter: *mut i64, frequency: *mut i64);
+    NtDelayExecution = 0x34, fn(alertable: u8, interval: *const i64);
+    NtCreateEvent = 0x48, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes, kind: u32,
+        initial: u8
+    );
+    // gala's own service: report a gap to the kernel's missing-features
+    // ledger (not part of Windows; gala's DLLs only).
+    GalaRecordMissing = 0x7f00, fn(name: *const u8, length: usize, what: u32, detail: u64);
     // Waitable timers (gala's numbers, unverified).
     NtCreateTimer = 0xd9, fn(
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, kind: u32
@@ -200,8 +221,9 @@ fn export(base: usize, name: &[u8], ordinal: u32) -> Option<usize> {
     Some(base + rd32(functions + 4 * index) as usize)
 }
 
-/// Maps `dll` (an ASCII file name) from the directory of the executable
-/// (`ImagePathName`) and returns its base.
+/// Opens `dll` (an ASCII file name) from the directory of the executable
+/// (`ImagePathName`), else from `<SystemRoot>\System32` (KUSER_SHARED_DATA's
+/// NtSystemRoot), and maps it; returns its base.
 fn map_dll(dll: &[u8]) -> Result<usize, u32> {
     // SAFETY: gs:[0x60] is the PEB; ProcessParameters and ImagePathName are
     // filled in by the kernel.
@@ -213,18 +235,40 @@ fn map_dll(dll: &[u8]) -> Result<usize, u32> {
         core::slice::from_raw_parts(rd64(params + 0x68) as *const u16, len)
     };
     let dir_len = image_path.iter().rposition(|&c| c == u16::from(b'\\')).map_or(0, |i| i + 1);
+    let mut system32 = [0u16; 280];
+    let mut n = 0;
+    // SAFETY: KUSER_SHARED_DATA is mapped read-only at 0x7ffe0000 in every
+    // process; NtSystemRoot (at +0x30) is a NUL-terminated WCHAR[260].
+    unsafe {
+        while n < 260 && *((0x7ffe_0030 + 2 * n) as *const u16) != 0 {
+            system32[n] = *((0x7ffe_0030 + 2 * n) as *const u16);
+            n += 1;
+        }
+    }
+    for &b in b"\\System32\\" {
+        system32[n] = u16::from(b);
+        n += 1;
+    }
+    match open_dll(&image_path[..dir_len], dll) {
+        Err(STATUS_DLL_NOT_FOUND) => open_dll(&system32[..n], dll),
+        other => other,
+    }
+}
+
+/// Opens `dir` + `dll` (`dir` ends with a backslash) and maps it.
+fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
     let mut path = [0u16; 300];
     let prefix = *b"\\??\\";
-    let total = prefix.len() + dir_len + dll.len();
+    let total = prefix.len() + dir.len() + dll.len();
     if total > path.len() {
         return Err(STATUS_DLL_NOT_FOUND);
     }
     for (i, &b) in prefix.iter().enumerate() {
         path[i] = u16::from(b);
     }
-    path[prefix.len()..prefix.len() + dir_len].copy_from_slice(&image_path[..dir_len]);
+    path[prefix.len()..prefix.len() + dir.len()].copy_from_slice(dir);
     for (i, &b) in dll.iter().enumerate() {
-        path[prefix.len() + dir_len + i] = u16::from(b);
+        path[prefix.len() + dir.len() + i] = u16::from(b);
     }
     let name = UnicodeString {
         length: (total * 2) as u16,
@@ -437,6 +481,7 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
         return Ok(());
     }
     let mut desc = base + rva;
+    let mut missing = false;
     while rd32(desc + 12) != 0 {
         let mut name = [0u8; MAX_NAME];
         let len = normalize(
@@ -470,20 +515,63 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
         }
         for i in 0..count {
             let entry = rd64(lookup + 8 * i);
-            let target = if entry >> 63 != 0 {
-                export(dll, &[], (entry & 0xffff) as u32)
+            let (name, ordinal) = if entry >> 63 != 0 {
+                (&[][..], (entry & 0xffff) as u32)
             } else {
-                export(dll, c_str(base + (entry as usize & 0x7fff_ffff) + 2), 0)
+                (c_str(base + (entry as usize & 0x7fff_ffff) + 2), 0)
             };
-            let target = target.ok_or(STATUS_ENTRYPOINT_NOT_FOUND)?;
-            // SAFETY: the IAT slot, made writable above.
-            unsafe { ((iat + 8 * i) as *mut u64).write_unaligned(target as u64) };
+            match export(dll, name, ordinal) {
+                // SAFETY: the IAT slot, made writable above.
+                Some(target) => unsafe {
+                    ((iat + 8 * i) as *mut u64).write_unaligned(target as u64)
+                },
+                None => {
+                    // As on Windows the image will not load, but every
+                    // missing import is reported first (not just the first).
+                    report_missing_export(c_str(base + rd32(desc + 12) as usize), name, ordinal);
+                    missing = true;
+                }
+            }
         }
         let (mut at, mut size, mut ignored) = (iat, count * 8, 0u32);
         NtProtectVirtualMemory(-1, &mut at, &mut size, old, &mut ignored);
         desc += 20;
     }
-    Ok(())
+    if missing { Err(STATUS_ENTRYPOINT_NOT_FOUND) } else { Ok(()) }
+}
+
+/// Reports `dll!name` (or `dll!#ordinal`) to the kernel's missing-features
+/// ledger (gala's own service; see `GalaRecordMissing`).
+fn report_missing_export(dll: &[u8], name: &[u8], ordinal: u32) {
+    let mut text = [0u8; 64];
+    let mut n = 0;
+    let mut push = |bytes: &[u8]| {
+        for &b in bytes {
+            if n < text.len() {
+                text[n] = b;
+                n += 1;
+            }
+        }
+    };
+    push(dll);
+    push(b"!");
+    if name.is_empty() {
+        push(b"#");
+        let mut digits = [0u8; 10];
+        let (mut v, mut d) = (ordinal, digits.len());
+        loop {
+            d -= 1;
+            digits[d] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        push(&digits[d..]);
+    } else {
+        push(name);
+    }
+    GalaRecordMissing(text.as_ptr(), n, 1, u64::from(ordinal));
 }
 
 /// The normalized name in a UNICODE_STRING.
@@ -621,6 +709,72 @@ fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
         add_module(&name[..n], image, PINNED)?;
     }
     Ok(())
+}
+
+/// NTSTATUS -> Win32 error code, for the statuses gala returns (written from
+/// the documented correspondences: Microsoft's NTSTATUS/Win32 error
+/// reference, Wine's mapping table as a cross-check).
+const STATUS_TO_ERROR: &[(u32, u32)] = &[
+    (0x0000_0000, 0),    // SUCCESS
+    (0x0000_0102, 1460), // TIMEOUT -> ERROR_TIMEOUT
+    (0x0000_0103, 997),  // PENDING -> ERROR_IO_PENDING
+    (0x4000_0000, 183),  // OBJECT_NAME_EXISTS -> ERROR_ALREADY_EXISTS
+    (0x8000_0005, 234),  // BUFFER_OVERFLOW -> ERROR_MORE_DATA
+    (0x8000_0006, 18),   // NO_MORE_FILES
+    (0xc000_0002, 1),    // NOT_IMPLEMENTED -> ERROR_INVALID_FUNCTION
+    (0xc000_0003, 87),   // INVALID_INFO_CLASS -> ERROR_INVALID_PARAMETER
+    (0xc000_0004, 24),   // INFO_LENGTH_MISMATCH -> ERROR_BAD_LENGTH
+    (0xc000_0005, 998),  // ACCESS_VIOLATION -> ERROR_NOACCESS
+    (0xc000_0008, 6),    // INVALID_HANDLE
+    (0xc000_000d, 87),   // INVALID_PARAMETER
+    (0xc000_000f, 2),    // NO_SUCH_FILE -> ERROR_FILE_NOT_FOUND
+    (0xc000_0011, 38),   // END_OF_FILE -> ERROR_HANDLE_EOF
+    (0xc000_0017, 8),    // NO_MEMORY -> ERROR_NOT_ENOUGH_MEMORY
+    (0xc000_0018, 487),  // CONFLICTING_ADDRESSES -> ERROR_INVALID_ADDRESS
+    (0xc000_001c, 1),    // INVALID_SYSTEM_SERVICE -> ERROR_INVALID_FUNCTION
+    (0xc000_0022, 5),    // ACCESS_DENIED
+    (0xc000_0023, 122),  // BUFFER_TOO_SMALL -> ERROR_INSUFFICIENT_BUFFER
+    (0xc000_0024, 6),    // OBJECT_TYPE_MISMATCH -> ERROR_INVALID_HANDLE
+    (0xc000_0033, 123),  // OBJECT_NAME_INVALID -> ERROR_INVALID_NAME
+    (0xc000_0034, 2),    // OBJECT_NAME_NOT_FOUND -> ERROR_FILE_NOT_FOUND
+    (0xc000_0035, 183),  // OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS
+    (0xc000_0039, 161),  // OBJECT_PATH_INVALID -> ERROR_BAD_PATHNAME
+    (0xc000_003a, 3),    // OBJECT_PATH_NOT_FOUND -> ERROR_PATH_NOT_FOUND
+    (0xc000_0043, 32),   // SHARING_VIOLATION
+    (0xc000_0045, 87),   // INVALID_PAGE_PROTECTION -> ERROR_INVALID_PARAMETER
+    (0xc000_0046, 288),  // MUTANT_NOT_OWNED -> ERROR_NOT_OWNER
+    (0xc000_0047, 298),  // SEMAPHORE_LIMIT_EXCEEDED -> ERROR_TOO_MANY_POSTS
+    (0xc000_007a, 127),  // PROCEDURE_NOT_FOUND -> ERROR_PROC_NOT_FOUND
+    (0xc000_007b, 193),  // INVALID_IMAGE_FORMAT -> ERROR_BAD_EXE_FORMAT
+    (0xc000_00a0, 487),  // MEMORY_NOT_ALLOCATED -> ERROR_INVALID_ADDRESS
+    (0xc000_00ba, 5),    // FILE_IS_A_DIRECTORY -> ERROR_ACCESS_DENIED
+    (0xc000_00bb, 50),   // NOT_SUPPORTED
+    (0xc000_0103, 267),  // NOT_A_DIRECTORY -> ERROR_DIRECTORY
+    (0xc000_0120, 995),  // CANCELLED -> ERROR_OPERATION_ABORTED
+    (0xc000_0135, 126),  // DLL_NOT_FOUND -> ERROR_MOD_NOT_FOUND
+    (0xc000_0138, 182),  // ORDINAL_NOT_FOUND -> ERROR_INVALID_ORDINAL
+    (0xc000_0139, 127),  // ENTRYPOINT_NOT_FOUND -> ERROR_PROC_NOT_FOUND
+];
+
+/// RtlNtStatusToDosError(Status): the Win32 error for an NTSTATUS
+/// (ERROR_MR_MID_NOT_FOUND, 317, for statuses without one).
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlNtStatusToDosError(status: u32) -> u32 {
+    if (0xc000_00ef..=0xc000_00fa).contains(&status) {
+        return 87; // STATUS_INVALID_PARAMETER_1..12
+    }
+    match STATUS_TO_ERROR.iter().find(|&&(s, _)| s == status) {
+        Some(&(_, error)) => error,
+        None => {
+            GalaRecordMissing(
+                b"ntdll.dll!RtlNtStatusToDosError".as_ptr(),
+                31,
+                2,
+                u64::from(status),
+            );
+            317
+        }
+    }
 }
 
 /// The initial thread's first user-mode instruction.
@@ -867,6 +1021,23 @@ pub extern "C" fn memset(_dst: *mut u8, _value: i32, _n: usize) -> *mut u8 {
         "mov rax, r10",
         "ret",
     )
+}
+
+/// strlen (exported by ntdll, as on Windows; gala's DLLs import it).
+///
+/// # Safety
+/// `s` must be a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
+    let mut n = 0;
+    // SAFETY: forwarded to the caller. Volatile so that this loop is not
+    // itself turned into a call to strlen.
+    unsafe {
+        while core::ptr::read_volatile(s.add(n)) != 0 {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// memcmp(a, b, n)

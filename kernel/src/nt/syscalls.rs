@@ -71,6 +71,9 @@ pub const NT_SET_IO_COMPLETION: u32 = 0x01b0;
 // Thread suspension and context: gala's own numbers, UNVERIFIED.
 pub const NT_GET_CONTEXT_THREAD: u32 = 0x00f2;
 pub const NT_GET_CURRENT_PROCESSOR_NUMBER: u32 = 0x00f8;
+/// gala's own service (not Windows'): gala's user-mode DLLs report
+/// unsupported functions and missing exports to the ledger.
+pub const GALA_RECORD_MISSING: u32 = 0x7f00;
 pub const NT_SET_CONTEXT_THREAD: u32 = 0x018d;
 pub const NT_SUSPEND_THREAD: u32 = 0x01bc;
 // Waitable timers: gala's own numbers, UNVERIFIED.
@@ -150,6 +153,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_QUERY_IO_COMPLETION, "NtQueryIoCompletion", 5, nt_query_io_completion),
     (NT_SET_IO_COMPLETION, "NtSetIoCompletion", 5, nt_set_io_completion),
     (NT_GET_CONTEXT_THREAD, "NtGetContextThread", 2, nt_get_context_thread),
+    (GALA_RECORD_MISSING, "GalaRecordMissing", 4, gala_record_missing),
     (
         NT_GET_CURRENT_PROCESSOR_NUMBER,
         "NtGetCurrentProcessorNumber",
@@ -1543,6 +1547,22 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
             p.0 = p.0.max(base);
         }
     }
+    NtStatus::SUCCESS
+}
+
+/// GalaRecordMissing(Name, NameLength, What, Detail): counts a gap that
+/// gala's user-mode DLLs ran into (ASCII name such as
+/// `kernel32.dll!CreateFileW`; What: 1 missing export, 2 unsupported, 3
+/// not implemented) in the missing-features ledger.
+fn gala_record_missing(call: &mut Call<'_>) -> NtStatus {
+    let (ptr, len) = (arg!(call, 0), arg!(call, 1) as usize);
+    let mut name = [0u8; 64];
+    let len = len.min(name.len());
+    if call.process.read(ptr, &mut name[..len]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let what = super::ledger::user_what(arg!(call, 2) as u32);
+    super::ledger::record_user(&name[..len], what, arg!(call, 3));
     NtStatus::SUCCESS
 }
 

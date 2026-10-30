@@ -141,6 +141,12 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   target/report/ledger.md), JSON event stream on the debug console
   (`events` scenario), symbolized panic backtraces; benchmarks P1
   (`user/bench`, `cargo xtask bench`, Windows comparison via run-all.ps1)
+- kernel32 first part (G1): gala's kernel32.dll (console output, last
+  error, ids, virtual memory, events and waits, Sleep/GetTickCount64, the
+  performance counter, LoadLibrary/GetProcAddress/FreeLibrary,
+  ExitProcess) on ntdll exports; RtlNtStatusToDosError; DLL search falls
+  back to System32; GalaRecordMissing feeds the ledger and the loader
+  reports every missing import; `kernel32_test`, `missing_import_test`
 - Screen console (framebuffer text mirroring the serial log, Noto Sans Mono
   bitmap font) and `cargo xtask screenshot` (PNG via the QEMU monitor)
 
@@ -177,9 +183,6 @@ U2. **gala-um runs hello.exe**, then the ntrt test programs; `cargo xtask
    um-test` runs them all in seconds.
 U3. **gala-um in CI** next to the QEMU scenarios, with differences between
    the two reported as bugs.
-G1. **kernel32 shim, first part**: kernel32.dll on gala (console, last
-   error, memory, events, sleep, time, LoadLibrary/GetProcAddress), DLL
-   search in System32; `kernel32_test`.
 G2. **Go hello world**: the rest of what the Go runtime imports from
    kernel32 (threads, TLS, IOCP, timers, exceptions/vectored handlers,
    SetThreadContext preemption, environment, system info); run a real Go

@@ -33,6 +33,26 @@ is done and what comes next (the "Next" list is the agreed order).
    `docs/ARCHITECTURE.md` (how it works, invariants, TODOs). Commit with a
    message saying what the test checks and what changed; push.
 
+## Adding a function to gala's ntdll or kernel32
+
+1. A test program that imports it (`raw-dylib` against `kernel32` or
+   `ntdll`, as `kernel32_test` does), with the results real Windows gives,
+   last-error codes included. Its scenario lists the DLLs in
+   `EXTRA_MODULES` (`ntdll.dll` and `kernel32.dll` to
+   `Windows/System32`).
+2. In `user/kernel32/src/lib.rs`: `#[unsafe(no_mangle)] pub extern
+   "system" fn Name(...)` with the documented signature. Call ntdll's
+   exports (add them to the `raw-dylib` block); set the last error through
+   `fail(status, value)` / `fail_with(error, value)`; report unsupported
+   cases with `unsupported(b"kernel32.dll!Name(case)", detail)`.
+3. A new system call for it goes into testntdll's `syscall_stubs!` (and
+   the kernel's table), with a stable x64 number or gala's own (see
+   "System call numbers" below).
+4. A new NTSTATUS the kernel returns needs a row in testntdll's
+   `STATUS_TO_ERROR` (unmapped ones give 317 and are reported).
+5. Run the program you are bringing up and read the `ledger:` lines: they
+   list every missing import by name.
+
 ## Things that are easy to get wrong
 
 - **System call numbers.** Long-stable x64 numbers are used directly (list

@@ -477,6 +477,37 @@ the TSC clock; the performance counter runs at 10 MHz.
 User-mode CPU exceptions terminate the process with the matching NTSTATUS
 (no SEH dispatch yet).
 
+## gala's user-mode DLLs
+
+Windows programs need ntdll.dll and kernel32.dll in their process. gala
+ships its own, built from `user/` as freestanding Rust cdylibs, written
+from the public documentation of each function (clean room):
+
+| DLL | Crate | In `user/bin` as | On the gala disk |
+|---|---|---|---|
+| ntdll.dll | `user/testntdll` | `testntdll.dll` | `C:\Windows\System32` |
+| kernel32.dll | `user/kernel32` | `testkernel32.dll` | `C:\Windows\System32` |
+
+(Exported under other names so that `user/bin`, which also runs on
+Windows, never shadows the system's DLLs.)
+
+- **ntdll** holds the user-mode loader (`LdrInitializeThunk`, import
+  binding, `LdrLoadDll`/`LdrGetProcedureAddress`/`LdrGetDllHandle`/
+  `LdrUnloadDll`, a module table with reference counts), the exception and
+  APC dispatchers, vectored handlers, `RtlNtStatusToDosError`, C runtime
+  helpers (`memcpy`, `memset`, `strlen`...) and the system call stubs
+  (`syscall_stubs!`). DLLs are searched next to the executable, then in
+  `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA).
+- **kernel32** implements Win32 functions on top of ntdll's exports
+  (imported with `raw-dylib`): failures return the documented failure
+  value and set the last error (TEB+0x68) from the NTSTATUS.
+- **Gaps are never silent.** Unsupported parts of a function fail
+  (ERROR_NOT_SUPPORTED) and are reported with `GalaRecordMissing`, a
+  gala-only system service (0x7f00) that feeds the kernel's
+  missing-features ledger. When an import cannot be bound, the loader
+  reports every missing `dll!function` before failing the process with
+  STATUS_ENTRYPOINT_NOT_FOUND, as Windows does (`missing_import_test`).
+
 ## Processors
 
 `arch::smp` starts the application processors through Limine's MP request.
