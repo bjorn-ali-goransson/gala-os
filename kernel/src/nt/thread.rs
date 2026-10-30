@@ -285,10 +285,13 @@ pub fn exit_current(status: NtStatus) -> ! {
         let t = as_thread(&object);
         t.exit_status.lock().get_or_insert(status);
         *t.exit_time.lock() = crate::time::system_time();
-        wait::set_signal(&object, 1);
+        // Leave the process before waking waiters: once the thread object
+        // is signaled, the thread must no longer count as live (e.g. for
+        // ThreadAmILastThread).
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
         let process = t.process.clone();
         process.remove_thread(&object);
+        wait::set_signal(&object, 1);
         drop(object);
         if process.thread_count() == 0 {
             process::finish(&process, status);
