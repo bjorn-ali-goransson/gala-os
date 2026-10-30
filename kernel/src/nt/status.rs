@@ -14,6 +14,8 @@ impl NtStatus {
     pub const OBJECT_NAME_COLLISION: NtStatus = NtStatus(0xc000_0035);
     pub const OBJECT_PATH_NOT_FOUND: NtStatus = NtStatus(0xc000_003a);
     pub const OBJECT_PATH_SYNTAX_BAD: NtStatus = NtStatus(0xc000_003b);
+    pub const PENDING: NtStatus = NtStatus(0x0000_0103);
+    pub const THREAD_IS_TERMINATING: NtStatus = NtStatus(0xc000_004b);
     pub const NOT_IMPLEMENTED: NtStatus = NtStatus(0xc000_0002);
     pub const ACCESS_VIOLATION: NtStatus = NtStatus(0xc000_0005);
     pub const INVALID_HANDLE: NtStatus = NtStatus(0xc000_0008);

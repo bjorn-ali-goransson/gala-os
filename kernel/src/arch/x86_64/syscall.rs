@@ -125,6 +125,7 @@ extern "C" fn dispatch(frame: &mut SyscallFrame) {
     // SAFETY: only `init_bsp` stores into HANDLER, and it stores a `Handler`.
     let handler: Handler = unsafe { core::mem::transmute::<usize, Handler>(raw) };
     handler(frame);
+    run_user_return_hook();
     // SYSRET to a non-canonical rip would fault in ring 0; never allow it.
     if frame.rip >= USER_END - 0x1000 {
         panic!("syscall return to invalid rip {:#x}", frame.rip);
@@ -172,5 +173,88 @@ pub fn enter_user(entry: u64, stack: u64, arg: u64) -> ! {
             in("rcx") arg,
             options(noreturn),
         )
+    }
+}
+
+/// User register state for entering a new thread (CONTEXT order:
+/// rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8..r15).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UserRegs {
+    pub gpr: [u64; 16],
+    pub rip: u64,
+    pub rflags: u64,
+}
+
+/// RFLAGS bits user mode may choose: CF, PF, AF, ZF, SF, DF, OF.
+const USER_SETTABLE_FLAGS: u64 = 0xcd5;
+const RSP_INDEX: usize = 4;
+
+impl UserRegs {
+    /// Whether rip and rsp are user addresses (iretq to a non-canonical
+    /// rip would fault in the kernel).
+    pub fn is_valid(&self) -> bool {
+        self.rip < USER_END && self.gpr[RSP_INDEX] < USER_END
+    }
+}
+
+/// Enters user mode with every general-purpose register from `regs`, using
+/// the GS base set by `percpu::set_user_gs_base`. Never returns.
+pub fn enter_user_regs(regs: &UserRegs) -> ! {
+    assert!(regs.is_valid(), "user entry outside user space");
+    assert!(percpu::kernel_stack() != 0, "no kernel stack for user entry");
+    let mut r = *regs;
+    r.rflags = (r.rflags & USER_SETTABLE_FLAGS) | USER_RFLAGS;
+    // SAFETY: as in `enter_user`; `r` lives on this stack, which stays
+    // mapped until the `iretq` (the last instruction reading it).
+    unsafe {
+        asm!(
+            "cli",
+            "swapgs",
+            "push {ss}",
+            "push qword ptr [rdi + 32]", // rsp
+            "push qword ptr [rdi + 136]", // rflags
+            "push {cs}",
+            "push qword ptr [rdi + 128]", // rip
+            "mov rax, [rdi + 0]",
+            "mov rcx, [rdi + 8]",
+            "mov rdx, [rdi + 16]",
+            "mov rbx, [rdi + 24]",
+            "mov rbp, [rdi + 40]",
+            "mov rsi, [rdi + 48]",
+            "mov r8, [rdi + 64]",
+            "mov r9, [rdi + 72]",
+            "mov r10, [rdi + 80]",
+            "mov r11, [rdi + 88]",
+            "mov r12, [rdi + 96]",
+            "mov r13, [rdi + 104]",
+            "mov r14, [rdi + 112]",
+            "mov r15, [rdi + 120]",
+            "mov rdi, [rdi + 56]",
+            "iretq",
+            ss = const USER_SS as u64,
+            cs = const USER_CS as u64,
+            in("rdi") &r,
+            options(noreturn),
+        )
+    }
+}
+
+static USER_RETURN_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+/// Registers a function run on every return to user mode from a system
+/// call or interrupt, in kernel context (e.g. to act on a pending thread
+/// termination). It may not return.
+pub fn set_user_return_hook(hook: fn()) {
+    USER_RETURN_HOOK.store(hook as usize, Ordering::Release);
+}
+
+pub(super) fn run_user_return_hook() {
+    let raw = USER_RETURN_HOOK.load(Ordering::Acquire);
+    if raw != 0 {
+        // SAFETY: only `set_user_return_hook` stores non-zero values, and
+        // it stores `fn()`s.
+        let hook = unsafe { core::mem::transmute::<usize, fn()>(raw) };
+        hook();
     }
 }

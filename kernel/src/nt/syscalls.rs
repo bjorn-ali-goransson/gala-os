@@ -9,19 +9,27 @@ use alloc::vec::Vec;
 use super::namespace;
 use super::object::{
     DIRECTORY_CREATE_OBJECT, DIRECTORY_TRAVERSE, EVENT_MODIFY_STATE, EVENT_QUERY_STATE, Event,
-    EventType, Handle, HandleEntry, KObject, ObjectBody, ObjectRef, SYNCHRONIZE,
+    EventType, Handle, HandleEntry, KObject, ObjectBody, ObjectRef, PROCESS_ALL_ACCESS,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, SYNCHRONIZE, THREAD_ALL_ACCESS,
+    THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME, THREAD_TERMINATE,
 };
 use super::process::{self, Process};
 use super::status::NtStatus;
+use super::thread;
 use super::vm;
 use super::wait::{self, Dispatcher, Timeout};
-use crate::arch::syscall::{self, SyscallFrame};
+use crate::arch::syscall::{self, SyscallFrame, UserRegs};
 use crate::console;
 use crate::mm::heap::KArc;
 use crate::mm::heap::TryVec;
 
 pub const NT_WAIT_FOR_SINGLE_OBJECT: u32 = 0x0004;
 pub const NT_WRITE_FILE: u32 = 0x0008;
+pub const NT_QUERY_INFORMATION_PROCESS: u32 = 0x0019;
+pub const NT_QUERY_INFORMATION_THREAD: u32 = 0x0025;
+pub const NT_CREATE_THREAD: u32 = 0x004e;
+pub const NT_RESUME_THREAD: u32 = 0x0052;
+pub const NT_TERMINATE_THREAD: u32 = 0x0053;
 pub const NT_QUERY_OBJECT: u32 = 0x0010;
 pub const NT_OPEN_EVENT: u32 = 0x0040;
 pub const NT_OPEN_DIRECTORY_OBJECT: u32 = 0x0058;
@@ -46,6 +54,11 @@ type Handler = fn(&mut Call<'_>) -> NtStatus;
 const TABLE: &[(u32, &str, Handler)] = &[
     (NT_WAIT_FOR_SINGLE_OBJECT, "NtWaitForSingleObject", nt_wait_for_single_object),
     (NT_WRITE_FILE, "NtWriteFile", nt_write_file),
+    (NT_QUERY_INFORMATION_PROCESS, "NtQueryInformationProcess", nt_query_information_process),
+    (NT_QUERY_INFORMATION_THREAD, "NtQueryInformationThread", nt_query_information_thread),
+    (NT_CREATE_THREAD, "NtCreateThread", nt_create_thread),
+    (NT_RESUME_THREAD, "NtResumeThread", nt_resume_thread),
+    (NT_TERMINATE_THREAD, "NtTerminateThread", nt_terminate_thread),
     (NT_QUERY_OBJECT, "NtQueryObject", nt_query_object),
     (NT_OPEN_EVENT, "NtOpenEvent", nt_open_event),
     (NT_OPEN_DIRECTORY_OBJECT, "NtOpenDirectoryObject", nt_open_directory_object),
@@ -103,7 +116,18 @@ impl Call<'_> {
 
     /// Looks up a handle in the current process.
     fn handle(&self, h: Handle) -> Result<HandleEntry, NtStatus> {
-        self.process.handles.lock().get(h).ok_or(NtStatus::INVALID_HANDLE)
+        match h {
+            Handle::CURRENT_PROCESS => {
+                let object = KObject::new(ObjectBody::Process(self.process.clone()))
+                    .map_err(|_| NtStatus::NO_MEMORY)?;
+                Ok(HandleEntry { object, access: PROCESS_ALL_ACCESS, attributes: 0 })
+            }
+            Handle::CURRENT_THREAD => {
+                let object = thread::current().ok_or(NtStatus::INVALID_HANDLE)?;
+                Ok(HandleEntry { object, access: THREAD_ALL_ACCESS, attributes: 0 })
+            }
+            _ => self.process.handles.lock().get(h).ok_or(NtStatus::INVALID_HANDLE),
+        }
     }
 
     /// Reads an optional `PLARGE_INTEGER` timeout.
@@ -199,13 +223,17 @@ fn nt_close(call: &mut Call<'_>) -> NtStatus {
 fn nt_terminate_process(call: &mut Call<'_>) -> NtStatus {
     let handle = Handle(arg!(call, 0));
     let status = NtStatus(arg!(call, 1) as u32);
-    match handle {
-        // NULL: terminate all other threads of the current process; there
-        // are none yet.
-        Handle(0) => NtStatus::SUCCESS,
-        Handle::CURRENT_PROCESS => process::terminate_current(status),
-        _ => NtStatus::INVALID_HANDLE,
+    if handle == Handle(0) {
+        // NULL: terminate every other thread of the current process.
+        process::terminate(&call.process, status, false);
+        return NtStatus::SUCCESS;
     }
+    let entry = tri!(call.handle(handle));
+    let object = tri!(entry.require(PROCESS_TERMINATE));
+    let ObjectBody::Process(p) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    // Includes the caller if it belongs to `p`; it exits on its way out.
+    process::terminate(p, status, true);
+    NtStatus::SUCCESS
 }
 
 /// NtAllocateVirtualMemory(ProcessHandle, *BaseAddress, ZeroBits,
@@ -674,4 +702,149 @@ fn nt_query_performance_counter(call: &mut Call<'_>) -> NtStatus {
 fn nt_query_system_time(call: &mut Call<'_>) -> NtStatus {
     tri!(call.write_u64(arg!(call, 0), crate::time::system_time()));
     NtStatus::SUCCESS
+}
+
+/// Offsets in the x64 CONTEXT: Rax..R15 at 0x78 (16 registers), Rip at 0xf8,
+/// EFlags at 0x44.
+const CONTEXT_EFLAGS: usize = 0x44;
+const CONTEXT_GPR: usize = 0x78;
+const CONTEXT_RIP: usize = 0xf8;
+
+/// NtCreateThread(*ThreadHandle, DesiredAccess, ObjectAttributes,
+///                ProcessHandle, *ClientId, *ThreadContext, *InitialTeb,
+///                CreateSuspended)
+fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
+    let (out, access, _attrs) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
+    tri!(call.check_current_process(Handle(arg!(call, 3))));
+    let (cid_ptr, ctx_ptr, teb_ptr) = (arg!(call, 4), arg!(call, 5), arg!(call, 6));
+    let suspended = arg!(call, 7) as u8 != 0;
+    if ctx_ptr == 0 || teb_ptr == 0 {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let mut ctx = [0u8; CONTEXT_RIP + 8];
+    if call.process.read(ctx_ptr, &mut ctx).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let word = |off: usize| u64::from_le_bytes(ctx[off..off + 8].try_into().unwrap_or([0; 8]));
+    let mut regs = UserRegs::default();
+    for (i, r) in regs.gpr.iter_mut().enumerate() {
+        *r = word(CONTEXT_GPR + 8 * i);
+    }
+    regs.rip = word(CONTEXT_RIP);
+    regs.rflags = u64::from(u32::from_le_bytes(
+        ctx[CONTEXT_EFLAGS..CONTEXT_EFLAGS + 4].try_into().unwrap_or([0; 4]),
+    ));
+    // INITIAL_TEB { OldStackBase, OldStackLimit, StackBase, StackLimit, StackAllocationBase }
+    let stack_base = tri!(call.read_u64(teb_ptr + 16));
+    let stack_limit = tri!(call.read_u64(teb_ptr + 24));
+    let object = tri!(thread::create(&call.process, regs, (stack_base, stack_limit), suspended));
+    let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let tid = t.id;
+    let status = call.return_handle(out, object.clone(), access, 0);
+    if status != NtStatus::SUCCESS {
+        thread::request_termination(&object, status);
+        thread::resume(&object);
+        return status;
+    }
+    if cid_ptr != 0 {
+        tri!(call.write_u64(cid_ptr, call.process.id));
+        tri!(call.write_u64(cid_ptr + 8, tid));
+    }
+    NtStatus::SUCCESS
+}
+
+/// NtResumeThread(ThreadHandle, *PreviousSuspendCount)
+fn nt_resume_thread(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let object = tri!(entry.require(THREAD_SUSPEND_RESUME));
+    if !matches!(object.body, ObjectBody::Thread(_)) {
+        return NtStatus::OBJECT_TYPE_MISMATCH;
+    }
+    let previous = thread::resume(object);
+    let prev_ptr = arg!(call, 1);
+    if prev_ptr != 0 {
+        tri!(call.write_u32(prev_ptr, previous));
+    }
+    NtStatus::SUCCESS
+}
+
+/// NtTerminateThread(ThreadHandle, ExitStatus)
+fn nt_terminate_thread(call: &mut Call<'_>) -> NtStatus {
+    let handle = match Handle(arg!(call, 0)) {
+        Handle(0) => Handle::CURRENT_THREAD,
+        h => h,
+    };
+    let status = NtStatus(arg!(call, 1) as u32);
+    let entry = tri!(call.handle(handle));
+    let object = tri!(entry.require(THREAD_TERMINATE));
+    if !matches!(object.body, ObjectBody::Thread(_)) {
+        return NtStatus::OBJECT_TYPE_MISMATCH;
+    }
+    if thread::current().is_some_and(|me| KArc::ptr_eq(&me, object)) {
+        thread::exit_current_on_return(status);
+    } else {
+        thread::request_termination(object, status);
+    }
+    NtStatus::SUCCESS
+}
+
+const BASIC_INFORMATION_SIZE: usize = 48;
+
+impl Call<'_> {
+    /// Writes an information-class result, honouring Length/ReturnLength.
+    fn return_info(&self, data: &[u8], buffer: u64, length: u64, ret_ptr: u64) -> NtStatus {
+        if ret_ptr != 0 {
+            tri!(self.write_u32(ret_ptr, data.len() as u32));
+        }
+        if (length as usize) != data.len() {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        match self.process.write(buffer, data) {
+            Ok(()) => NtStatus::SUCCESS,
+            Err(_) => NtStatus::ACCESS_VIOLATION,
+        }
+    }
+}
+
+/// NtQueryInformationThread(ThreadHandle, Class, Buffer, Length, *ReturnLength)
+fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let (class, buffer, length, ret_ptr) =
+        (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as u64, arg!(call, 4));
+    let object = tri!(entry.require(THREAD_QUERY_LIMITED_INFORMATION));
+    let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if class != 0 {
+        return NtStatus::INVALID_INFO_CLASS;
+    }
+    // THREAD_BASIC_INFORMATION { ExitStatus, TebBaseAddress, ClientId,
+    // AffinityMask, Priority, BasePriority }
+    let mut b = [0u8; BASIC_INFORMATION_SIZE];
+    b[0..4].copy_from_slice(&t.exit_status().0.to_le_bytes());
+    b[8..16].copy_from_slice(&t.teb.to_le_bytes());
+    b[16..24].copy_from_slice(&t.process.id.to_le_bytes());
+    b[24..32].copy_from_slice(&t.id.to_le_bytes());
+    b[32..40].copy_from_slice(&1u64.to_le_bytes());
+    b[40..44].copy_from_slice(&8u32.to_le_bytes());
+    call.return_info(&b, buffer, length, ret_ptr)
+}
+
+/// NtQueryInformationProcess(ProcessHandle, Class, Buffer, Length, *ReturnLength)
+fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let (class, buffer, length, ret_ptr) =
+        (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as u64, arg!(call, 4));
+    let object = tri!(entry.require(PROCESS_QUERY_LIMITED_INFORMATION));
+    let ObjectBody::Process(p) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if class != 0 {
+        return NtStatus::INVALID_INFO_CLASS;
+    }
+    // PROCESS_BASIC_INFORMATION { ExitStatus, PebBaseAddress, AffinityMask,
+    // BasePriority, UniqueProcessId, InheritedFromUniqueProcessId }
+    let mut b = [0u8; BASIC_INFORMATION_SIZE];
+    b[0..4].copy_from_slice(&p.exit_status().unwrap_or(NtStatus::PENDING).0.to_le_bytes());
+    b[8..16].copy_from_slice(&super::layout::PEB_ADDRESS.to_le_bytes());
+    b[16..24].copy_from_slice(&1u64.to_le_bytes());
+    b[24..28].copy_from_slice(&8u32.to_le_bytes());
+    b[32..40].copy_from_slice(&p.id.to_le_bytes());
+    call.return_info(&b, buffer, length, ret_ptr)
 }

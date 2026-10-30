@@ -55,6 +55,11 @@ stubs! {
     ntrt_nt_query_object = 0x0010;
     ntrt_nt_open_event = 0x0040;
     ntrt_nt_open_directory_object = 0x0058;
+    ntrt_nt_query_information_process = 0x0019;
+    ntrt_nt_query_information_thread = 0x0025;
+    ntrt_nt_create_thread = 0x004e;
+    ntrt_nt_resume_thread = 0x0052;
+    ntrt_nt_terminate_thread = 0x0053;
     ntrt_nt_write_file = 0x0008;
     ntrt_nt_close = 0x000f;
     ntrt_nt_allocate_virtual_memory = 0x0018;
@@ -124,6 +129,32 @@ unsafe extern "system" {
         buffer: *mut u8,
         length: u32,
         returned: *mut u32,
+    ) -> NtStatus;
+    fn ntrt_nt_create_thread(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        process: Handle,
+        client_id: *mut [usize; 2],
+        context: *const Context,
+        initial_teb: *const [usize; 5],
+        suspended: u8,
+    ) -> NtStatus;
+    fn ntrt_nt_resume_thread(handle: Handle, previous: *mut u32) -> NtStatus;
+    fn ntrt_nt_terminate_thread(handle: Handle, status: NtStatus) -> NtStatus;
+    fn ntrt_nt_query_information_thread(
+        h: Handle,
+        class: u32,
+        buf: *mut u8,
+        len: u32,
+        ret: *mut u32,
+    ) -> NtStatus;
+    fn ntrt_nt_query_information_process(
+        h: Handle,
+        class: u32,
+        buf: *mut u8,
+        len: u32,
+        ret: *mut u32,
     ) -> NtStatus;
     fn ntrt_nt_query_performance_counter(counter: *mut i64, frequency: *mut i64) -> NtStatus;
     fn ntrt_nt_query_system_time(time: *mut i64) -> NtStatus;
@@ -222,6 +253,143 @@ pub fn query_object(h: Handle, class: u32, buf: &mut [u8]) -> (NtStatus, u32) {
     let st =
         unsafe { ntrt_nt_query_object(h, class, buf.as_mut_ptr(), buf.len() as u32, &mut ret) };
     (st, ret)
+}
+
+/// `NtCurrentThread()`.
+pub const CURRENT_THREAD: Handle = Handle(usize::MAX - 1);
+pub const THREAD_ALL_ACCESS: u32 = 0x1f_ffff;
+pub const STATUS_PENDING: NtStatus = 0x0000_0103;
+
+/// x64 CONTEXT (1232 bytes, 16-byte aligned); only the fields used here are
+/// named, the rest is padding with the public layout's offsets.
+#[repr(C, align(16))]
+pub struct Context {
+    pub home: [u64; 6],
+    pub context_flags: u32,
+    pub mx_csr: u32,
+    pub seg_cs: u16,
+    pub seg_ds: u16,
+    pub seg_es: u16,
+    pub seg_fs: u16,
+    pub seg_gs: u16,
+    pub seg_ss: u16,
+    pub eflags: u32,
+    pub dr: [u64; 6],
+    /// Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi, R8..R15.
+    pub gpr: [u64; 16],
+    pub rip: u64,
+    pub rest: [u8; 0x4d0 - 0x100],
+}
+
+pub const CONTEXT_FULL: u32 = 0x10_000b;
+
+impl Context {
+    /// A context that starts at `entry(arg)` on the stack ending at `stack_top`.
+    pub fn for_thread(entry: extern "C" fn(usize) -> !, arg: usize, stack_top: usize) -> Self {
+        let mut c = Context {
+            home: [0; 6],
+            context_flags: CONTEXT_FULL,
+            mx_csr: 0x1f80,
+            seg_cs: 0x33,
+            seg_ds: 0x2b,
+            seg_es: 0x2b,
+            seg_fs: 0x53,
+            seg_gs: 0x2b,
+            seg_ss: 0x2b,
+            eflags: 0x200,
+            dr: [0; 6],
+            gpr: [0; 16],
+            rip: entry as usize as u64,
+            rest: [0; 0x4d0 - 0x100],
+        };
+        c.gpr[1] = arg as u64; // rcx
+        c.gpr[4] = (stack_top - 0x28) as u64; // rsp: as if called
+        c
+    }
+}
+
+/// Creates a thread at `entry(arg)` with a fresh 64 KiB stack.
+/// Returns (status, handle, thread id).
+pub fn create_thread(
+    entry: extern "C" fn(usize) -> !,
+    arg: usize,
+    suspended: bool,
+) -> (NtStatus, Handle, usize) {
+    let (st, stack, size) = allocate(0, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if st != STATUS_SUCCESS {
+        return (st, Handle(0), 0);
+    }
+    let top = stack + size;
+    let ctx = Context::for_thread(entry, arg, top);
+    // INITIAL_TEB: OldStackBase, OldStackLimit, StackBase, StackLimit, StackAllocationBase.
+    let initial_teb = [0, 0, top, stack, stack];
+    let mut h = Handle(0);
+    let mut cid = [0usize; 2];
+    // SAFETY: all pointers are valid for the call.
+    let st = unsafe {
+        ntrt_nt_create_thread(
+            &mut h,
+            THREAD_ALL_ACCESS,
+            core::ptr::null(),
+            CURRENT_PROCESS,
+            &mut cid,
+            &ctx,
+            &initial_teb,
+            suspended as u8,
+        )
+    };
+    (st, h, cid[1])
+}
+
+/// Returns (status, previous suspend count).
+pub fn resume_thread(h: Handle) -> (NtStatus, u32) {
+    let mut prev = 0xffff_ffff;
+    // SAFETY: valid output pointer.
+    let st = unsafe { ntrt_nt_resume_thread(h, &mut prev) };
+    (st, prev)
+}
+
+/// Ends the calling thread.
+pub fn exit_thread(status: NtStatus) -> ! {
+    terminate_thread(CURRENT_THREAD, status);
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+pub fn terminate_thread(h: Handle, status: NtStatus) -> NtStatus {
+    // SAFETY: the kernel validates the handle.
+    unsafe { ntrt_nt_terminate_thread(h, status) }
+}
+
+/// ThreadBasicInformation: (status, exit status, TEB, thread id).
+pub fn thread_basic_info(h: Handle) -> (NtStatus, u32, usize, usize) {
+    let mut b = [0u8; 48];
+    let mut ret = 0;
+    // SAFETY: 48-byte THREAD_BASIC_INFORMATION buffer.
+    let st = unsafe { ntrt_nt_query_information_thread(h, 0, b.as_mut_ptr(), 48, &mut ret) };
+    let word = |o: usize| usize::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    (st, u32::from_le_bytes(b[0..4].try_into().unwrap()), word(8), word(24))
+}
+
+/// ProcessBasicInformation: (status, exit status, PEB, process id).
+pub fn process_basic_info(h: Handle) -> (NtStatus, u32, usize, usize) {
+    let mut b = [0u8; 48];
+    let mut ret = 0;
+    // SAFETY: 48-byte PROCESS_BASIC_INFORMATION buffer.
+    let st = unsafe { ntrt_nt_query_information_process(h, 0, b.as_mut_ptr(), 48, &mut ret) };
+    let word = |o: usize| usize::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    (st, u32::from_le_bytes(b[0..4].try_into().unwrap()), word(8), word(32))
+}
+
+/// Reads a pointer-sized TEB field (`gs:[offset]`).
+pub fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: gs points to the TEB in user mode on x64 Windows.
+    unsafe {
+        asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly, preserves_flags))
+    };
+    v
 }
 
 #[repr(C)]

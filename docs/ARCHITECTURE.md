@@ -224,6 +224,21 @@ capture OBJECT_ATTRIBUTES (length must be 48, RootDirectory needs
 DIRECTORY_TRAVERSE / DIRECTORY_CREATE_OBJECT) and UNICODE_STRINGs.
 Case-insensitive matching is ASCII-only for now.
 
+**Threads and processes** (`nt::thread`, `nt::process`): an `NtThread`
+is a waitable object (signaled on exit) with its ClientId, TEB, initial
+`UserRegs` (from the CONTEXT), suspend count and exit status; `THREADS` maps
+scheduler threads to them. A process owns its thread objects, a dispatcher
+(signaled when the last thread exits), handle table, VAD and address space.
+Terminating another thread is cooperative: it is flagged and woken, and
+exits at its next safe point (the user-return hook run after every syscall
+and every interrupt from user mode, or after a wait wakes). Self-exit also
+goes through the hook, so the syscall path drops its references first.
+When the last thread exits, the process records its exit status, closes all
+its handles (breaking reference cycles) and leaves the registry; the
+address space is freed when the last thread is reaped. `run=` checks this
+and logs "address space still referenced" otherwise, which fails the boot
+scenario. Pseudo handles: -1 = current process, -2 = current thread.
+
 **Waits** (`nt::wait`): waitable objects embed a `Dispatcher` (signal
 state + waiter list). One global dispatcher lock covers all signal changes
 and wait checks, so WaitAll sees a consistent state. A waiter registers on
@@ -240,7 +255,9 @@ the TSC clock; the performance counter runs at 10 MHz.
 `NtCreateEvent`, `NtOpenEvent`, `NtOpenDirectoryObject`, `NtQueryObject`
 (basic, name), `NtSetEvent`, `NtClearEvent`, `NtQueryEvent`,
 `NtWaitForSingleObject`, `NtWaitForMultipleObjects`, `NtDelayExecution`,
-`NtDuplicateObject`, `NtQueryPerformanceCounter`, `NtQuerySystemTime`; unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
+`NtDuplicateObject`, `NtQueryPerformanceCounter`, `NtQuerySystemTime`,
+`NtCreateThread`, `NtResumeThread`, `NtTerminateThread`,
+`NtQueryInformationThread`/`NtQueryInformationProcess` (basic information); unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
 User-mode CPU exceptions terminate the process with the matching NTSTATUS
 (no SEH dispatch yet).
 

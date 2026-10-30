@@ -242,16 +242,49 @@ fn run_program(info: &BootInfo, name: &str) {
         panic!("run: no boot module named {name:?}");
     };
     info!("run: {} ({} bytes)", module.path, module.data.len());
-    match nt::process::spawn_from_pe(module.file_name(), module.data) {
-        Ok((process, thread)) => {
-            let _ = sched::join(thread);
+    let (free_before, _) = mm::frame_stats();
+    let space = match nt::process::spawn_from_pe(module.file_name(), module.data) {
+        Ok((process, main_thread)) => {
+            drop(main_thread);
+            // Wait for the whole process (all threads) to end.
+            match nt::object::KObject::new(nt::object::ObjectBody::Process(process.clone())) {
+                Ok(object) => {
+                    nt::wait::wait_for(
+                        core::slice::from_ref(&object),
+                        false,
+                        nt::wait::Timeout::Infinite,
+                    );
+                }
+                Err(_) => error!("run: out of memory"),
+            }
             match process.exit_status() {
                 Some(status) => {
                     info!("run: {} finished with status {:#010x}", process.name, status.0)
                 }
-                None => warn!("run: {} main thread ended without an exit status", process.name),
+                None => warn!("run: {} ended without an exit status", process.name),
             }
+            process.space.clone()
         }
-        Err(e) => error!("run: cannot start {name}: {e:?}"),
+        Err(e) => {
+            error!("run: cannot start {name}: {e:?}");
+            return;
+        }
+    };
+    // Teardown check: once the exiting threads are reaped, ours must be the
+    // last reference to the address space; then its memory is returned.
+    let deadline = time::ticks() + time::TICK_HZ;
+    while mm::heap::KArc::strong_count(&space) > 1 && time::ticks() < deadline {
+        sched::reap();
+        sched::sleep_ms(1);
     }
+    if mm::heap::KArc::strong_count(&space) > 1 {
+        warn!(
+            "run: address space still referenced {} times after exit",
+            mm::heap::KArc::strong_count(&space) - 1
+        );
+    }
+    drop(space);
+    let (free_after, _) = mm::frame_stats();
+    // Heap slab pages are kept by design, so a few frames remain in use.
+    info!("run: {} frames not returned", free_before.saturating_sub(free_after));
 }

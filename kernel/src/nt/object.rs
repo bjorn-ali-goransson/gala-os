@@ -89,6 +89,31 @@ pub const DIRECTORY_MAPPING: GenericMapping = GenericMapping {
     all: DIRECTORY_ALL_ACCESS,
 };
 
+pub const THREAD_TERMINATE: u32 = 0x0001;
+pub const THREAD_SUSPEND_RESUME: u32 = 0x0002;
+pub const THREAD_QUERY_INFORMATION: u32 = 0x0040;
+pub const THREAD_QUERY_LIMITED_INFORMATION: u32 = 0x0800;
+pub const THREAD_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0xffff;
+
+pub const THREAD_MAPPING: GenericMapping = GenericMapping {
+    read: READ_CONTROL | THREAD_QUERY_INFORMATION | 0x0008,
+    write: READ_CONTROL | THREAD_TERMINATE | THREAD_SUSPEND_RESUME | 0x0034,
+    execute: READ_CONTROL | SYNCHRONIZE | THREAD_QUERY_LIMITED_INFORMATION | 0x1000,
+    all: THREAD_ALL_ACCESS,
+};
+
+pub const PROCESS_TERMINATE: u32 = 0x0001;
+pub const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+pub const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+pub const PROCESS_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0xffff;
+
+pub const PROCESS_MAPPING: GenericMapping = GenericMapping {
+    read: READ_CONTROL | PROCESS_QUERY_INFORMATION | 0x0010,
+    write: READ_CONTROL | 0x0bea,
+    execute: READ_CONTROL | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+    all: PROCESS_ALL_ACCESS,
+};
+
 /// An object directory: named children (see `nt::namespace`).
 #[derive(Default)]
 pub struct Directory {
@@ -100,12 +125,17 @@ pub struct DirEntry {
     pub object: ObjectRef,
 }
 
+// Objects already live in their own `KArc` allocation, so variant size
+// differences only cost a little memory per object.
+#[allow(clippy::large_enum_variant)]
 pub enum ObjectBody {
     /// Console output: writes go to the kernel console.
     ConsoleOutput,
     ConsoleInput,
     Event(Event),
     Directory(Directory),
+    Thread(super::thread::NtThread),
+    Process(KArc<super::process::Process>),
 }
 
 /// Where a named object lives in the namespace.
@@ -150,6 +180,8 @@ impl KObject {
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => "File",
             ObjectBody::Event(_) => "Event",
             ObjectBody::Directory(_) => "Directory",
+            ObjectBody::Thread(_) => "Thread",
+            ObjectBody::Process(_) => "Process",
         }
     }
 
@@ -164,6 +196,8 @@ impl KObject {
     pub fn dispatcher(&self) -> Option<&Dispatcher> {
         match &self.body {
             ObjectBody::Event(e) => Some(&e.dispatcher),
+            ObjectBody::Thread(t) => Some(&t.dispatcher),
+            ObjectBody::Process(p) => Some(&p.dispatcher),
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput | ObjectBody::Directory(_) => None,
         }
     }
@@ -172,6 +206,8 @@ impl KObject {
         match &self.body {
             ObjectBody::Event(_) => EVENT_MAPPING,
             ObjectBody::Directory(_) => DIRECTORY_MAPPING,
+            ObjectBody::Thread(_) => THREAD_MAPPING,
+            ObjectBody::Process(_) => PROCESS_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,
                 write: READ_CONTROL | SYNCHRONIZE | 0x116,
@@ -247,6 +283,20 @@ impl HandleTable {
 
     pub fn get(&self, handle: Handle) -> Option<HandleEntry> {
         self.entries.get(slot(handle)?)?.clone()
+    }
+
+    /// Closes every handle (process teardown). The entries are returned so
+    /// the caller can drop them outside the handle table lock.
+    pub fn close_all(&mut self) -> Vec<HandleEntry> {
+        let mut out = Vec::new();
+        let _ = out.try_reserve(self.entries.len());
+        for i in 0..self.entries.len() {
+            if let Some(entry) = self.close(Handle((i as u64 + 1) * 4)) {
+                // Capacity was reserved; if that failed, drop in place.
+                let _ = out.try_push(entry);
+            }
+        }
+        out
     }
 
     pub fn close(&mut self, handle: Handle) -> Option<HandleEntry> {

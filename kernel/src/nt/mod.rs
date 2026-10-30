@@ -7,6 +7,7 @@ pub mod pe;
 pub mod process;
 pub mod status;
 pub mod syscalls;
+pub mod thread;
 pub mod vad;
 pub mod vm;
 pub mod wait;

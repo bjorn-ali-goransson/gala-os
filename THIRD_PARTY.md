@@ -48,3 +48,5 @@ The `xtask` host tool has no dependencies beyond `std`.
 | Service numbers NtQueryObject 0x10, NtOpenEvent 0x40, NtOpenDirectoryObject 0x58 | Publicly known black-box values; **to be verified** on the pinned build | n/a |
 | `nt/namespace.rs` lookup rules, OBJECT_ATTRIBUTES / OBJECT_NAME_INFORMATION / OBJECT_BASIC_INFORMATION layouts | Microsoft documentation (object manager, InitializeObjectAttributes, NtQueryObject), *Windows Internals*; constants from mingw-w64 `winternl.h`/`ntstatus.h` | n/a |
 | `user/ntrt` memcpy/memmove/memset/memcmp, `_fltused`, `__CxxFrameHandler3` stubs | Own minimal implementations of the C ABI symbols the compiler expects | n/a |
+| Service numbers NtQueryInformationProcess 0x19, NtQueryInformationThread 0x25, NtCreateThread 0x4e, NtResumeThread 0x52, NtTerminateThread 0x53 | Publicly known black-box values; **to be verified** on the pinned build | n/a |
+| CONTEXT, INITIAL_TEB, THREAD_/PROCESS_BASIC_INFORMATION layouts; thread/process access rights | mingw-w64 `winnt.h`/`winternl.h`, Microsoft documentation (offsets and values only) | n/a |

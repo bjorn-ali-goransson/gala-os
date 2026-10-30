@@ -23,12 +23,14 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   capture, open-or-create, case-insensitive lookup, names unlinked with the
   last handle, NtOpenEvent, NtOpenDirectoryObject, NtQueryObject
   (basic, name); `object_test`
+- Threads in processes: NtCreateThread (CONTEXT + INITIAL_TEB), per-thread
+  TEBs, suspended creation + NtResumeThread, NtTerminateThread (self and
+  others, cooperative at safe points), waitable thread/process objects,
+  exit codes via NtQueryInformationThread/Process basic info, NtTerminate-
+  Process for all threads, process teardown (handles closed, address space
+  freed, checked by every boot scenario); `thread_test`
 
 ## Next
-4. **Threads in processes**: NtCreateThread (0x4e, stable; NtCreateThreadEx
-   varies by build), NtResumeThread (0x52), NtTerminateThread, thread and
-   process objects waitable, exit codes, NtQueryInformationProcess/Thread
-   basics, process teardown (free address space).
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
    NtOpenMutant, NtCreateSemaphore/NtReleaseSemaphore (0x0a); abandonment
    on thread exit. Create/open numbers vary by build: verify on 26100 first.

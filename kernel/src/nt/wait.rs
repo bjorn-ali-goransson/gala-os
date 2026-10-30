@@ -55,6 +55,19 @@ pub fn set_signal(object: &ObjectRef, signal: i32) -> i32 {
     previous
 }
 
+/// Sets a dispatcher's signal state directly (for objects reached without
+/// an `ObjectRef`, e.g. a process from its own code).
+pub fn signal_dispatcher(d: &Dispatcher, signal: i32) {
+    let _guard = DISPATCHER.lock();
+    let mut inner = d.inner.lock();
+    inner.signal = signal;
+    if signal > 0 {
+        for &t in &inner.waiters {
+            sched::wake(t);
+        }
+    }
+}
+
 /// Whether `object` would satisfy a wait right now.
 fn is_signaled(object: &ObjectRef) -> bool {
     object.dispatcher().is_some_and(|d| d.inner.lock().signal > 0)
@@ -145,6 +158,9 @@ pub fn wait_for(objects: &[ObjectRef], wait_all: bool, timeout: Timeout) -> NtSt
             unregister(objects, me);
         }
         timed_out = reason == WakeReason::TimedOut;
+        if super::thread::is_terminating() {
+            return NtStatus::THREAD_IS_TERMINATING;
+        }
     }
 }
 
@@ -164,8 +180,11 @@ pub fn delay(timeout: Timeout) {
     match timeout {
         Timeout::Poll => sched::yield_now(),
         t => {
-            sched::prepare_wait(t.deadline());
-            sched::wait();
+            // Wake early if the thread is asked to terminate.
+            if !super::thread::is_terminating() {
+                sched::prepare_wait(t.deadline());
+                sched::wait();
+            }
         }
     }
 }

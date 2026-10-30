@@ -20,12 +20,14 @@ const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Freestanding Windows test programs in `user/`, shipped as boot modules.
 const USER_TARGET: &str = "x86_64-pc-windows-msvc";
 const USER_PROGRAMS: &[&str] =
-    &["hello", "abi_test", "crash", "vm_test", "wait_test", "object_test"];
+    &["hello", "abi_test", "crash", "vm_test", "wait_test", "object_test", "thread_test"];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
 /// QEMU exit statuses for `QemuExitCode::{Success, Failure}` (`(code << 1) | 1`).
 const QEMU_EXIT_SUCCESS: i32 = 33;
 const QEMU_EXIT_FAILURE: i32 = 35;
+/// Logged by the kernel when a finished process's memory is still referenced.
+const LEAK_MARKER: &str = "address space still referenced";
 const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 type Result<T = ()> = std::result::Result<T, String>;
@@ -266,6 +268,12 @@ struct Scenario {
 
 const SCENARIOS: &[Scenario] = &[
     Scenario {
+        name: "thread_test",
+        cmdline: "qemu_exit run=thread_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["thread_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         name: "object_test",
         cmdline: "qemu_exit run=object_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -410,6 +418,9 @@ fn boot_scenario(scenario: &Scenario, iso: &Path) -> Result {
             Err(format!("QEMU exited with {s}, expected status {}", scenario.exit_status))
         }
         Some(_) if !missing.is_empty() => Err(format!("serial log lacks {missing:?}")),
+        Some(_) if scenario.exit_status == QEMU_EXIT_SUCCESS && serial.contains(LEAK_MARKER) => {
+            Err("a process address space was not freed".into())
+        }
         Some(_) => Ok(()),
     };
     if verdict.is_err() || env::var_os("XTASK_VERBOSE").is_some() {

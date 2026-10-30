@@ -234,6 +234,7 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
             // values, and it stores `UserExceptionHandler`s.
             let handler = unsafe { core::mem::transmute::<usize, UserExceptionHandler>(raw) };
             handler(frame, cr2);
+            super::syscall::run_user_return_hook();
             return;
         }
     }
@@ -253,6 +254,9 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
     // SAFETY: only `set_handler` stores non-zero values, and it stores `Handler`s.
     let handler: Handler = unsafe { core::mem::transmute::<usize, Handler>(raw) };
     handler(frame);
+    if frame.from_user_mode() {
+        super::syscall::run_user_return_hook();
+    }
 }
 
 pub fn exception_name(vector: u8) -> &'static str {

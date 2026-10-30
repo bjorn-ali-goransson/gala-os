@@ -3,21 +3,22 @@
 
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::layout::{self, params, peb, teb};
-use super::object::{HandleTable, KObject, ObjectBody};
+use super::layout::{self, params, peb};
+use super::object::{HandleTable, KObject, ObjectBody, ObjectRef};
 use super::pe::{self, PeError, PeImage};
 use super::status::NtStatus;
+use super::thread;
 use super::vad::{self, Vad};
 use super::vm::{self, AccessKind};
+use super::wait::{self, Dispatcher};
 use crate::arch::interrupts::{self, TrapFrame};
 use crate::arch::paging::{PagingError, SharedUserSpace, UserFault, UserSpace};
-use crate::arch::syscall;
+use crate::arch::syscall::UserRegs;
 use crate::mm::PAGE_SIZE;
 use crate::mm::heap::{AllocError, KArc, TryVec};
-use crate::mm::paging::{PageFlags, USER_END};
-use crate::sched::{self, SpawnError, ThreadId};
+use crate::mm::paging::PageFlags;
+use crate::sched::SpawnError;
 use crate::sync::IrqMutex;
 
 pub struct Process {
@@ -27,12 +28,11 @@ pub struct Process {
     pub handles: IrqMutex<HandleTable>,
     /// Lock order: `vad` before `space`.
     pub vad: IrqMutex<Vad>,
-    threads: IrqMutex<Vec<ThreadId>>,
+    /// Thread objects of the live threads.
+    threads: IrqMutex<Vec<ObjectRef>>,
     exit_status: IrqMutex<Option<NtStatus>>,
-    /// Main thread start state.
-    entry: u64,
-    initial_rsp: u64,
-    teb: u64,
+    /// Signaled when the process has ended.
+    pub dispatcher: Dispatcher,
 }
 
 impl fmt::Debug for Process {
@@ -44,6 +44,30 @@ impl fmt::Debug for Process {
 impl Process {
     pub fn exit_status(&self) -> Option<NtStatus> {
         *self.exit_status.lock()
+    }
+
+    pub fn add_thread(&self, thread: ObjectRef) -> Result<(), AllocError> {
+        self.threads.lock().try_push(thread)
+    }
+
+    pub fn remove_thread(&self, thread: &ObjectRef) {
+        self.threads.lock().retain(|t| !KArc::ptr_eq(t, thread));
+    }
+
+    pub fn thread_count(&self) -> usize {
+        self.threads.lock().len()
+    }
+
+    /// A snapshot of the live threads.
+    pub fn threads(&self) -> Vec<ObjectRef> {
+        let threads = self.threads.lock();
+        let mut out = Vec::new();
+        if out.try_reserve(threads.len()).is_ok() {
+            for t in threads.iter() {
+                let _ = out.try_push(t.clone());
+            }
+        }
+        out
     }
 
     /// Runs a user-memory copy, resolving demand-zero faults on the way
@@ -83,17 +107,14 @@ impl Process {
 }
 
 static PROCESSES: IrqMutex<Vec<KArc<Process>>> = IrqMutex::new(Vec::new());
-/// NT process and thread ids are multiples of 4.
-static NEXT_ID: AtomicU64 = AtomicU64::new(4);
-
-fn next_id() -> u64 {
-    NEXT_ID.fetch_add(4, Ordering::Relaxed)
-}
 
 /// The process owning the current thread, if it is a user thread.
 pub fn current() -> Option<KArc<Process>> {
-    let me = sched::current();
-    PROCESSES.lock().iter().find(|p| p.threads.lock().contains(&me)).cloned()
+    let t = thread::current()?;
+    match &t.body {
+        ObjectBody::Thread(t) => Some(t.process.clone()),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -213,7 +234,7 @@ fn map_image(space: &mut UserSpace, vad: &mut Vad, image: &PeImage<'_>) -> Resul
 pub fn spawn_from_pe(
     name: &'static str,
     data: &[u8],
-) -> Result<(KArc<Process>, ThreadId), LoadError> {
+) -> Result<(KArc<Process>, ObjectRef), LoadError> {
     let image = PeImage::parse(data).map_err(LoadError::Pe)?;
     if image.has_imports() {
         return Err(LoadError::ImportsNotSupported);
@@ -221,8 +242,7 @@ pub fn spawn_from_pe(
     let mut space = UserSpace::new()?;
     let mut vad = Vad::default();
     let base = map_image(&mut space, &mut vad, &image)?;
-    let id = next_id();
-    let thread_id = next_id();
+    let id = thread::next_id();
 
     // Main thread stack: committed demand-zero pages above an uncommitted
     // guard page.
@@ -268,85 +288,75 @@ pub fn spawn_from_pe(
     put_u64(&mut space, peb_addr + peb::IMAGE_BASE_ADDRESS, base)?;
     put_u64(&mut space, peb_addr + peb::PROCESS_PARAMETERS, p)?;
 
-    // TEB of the main thread.
-    let teb_addr = layout::FIRST_TEB_ADDRESS;
-    vm::register(
-        &mut vad,
-        teb_addr,
-        teb::PAGES * PAGE_SIZE,
-        vad::MEM_PRIVATE,
-        vad::PAGE_READWRITE,
-    )?;
-    space.map_zeroed(teb_addr, teb::PAGES, USER_RW)?;
-    put_u64(&mut space, teb_addr + teb::STACK_BASE, layout::STACK_TOP)?;
-    put_u64(&mut space, teb_addr + teb::STACK_LIMIT, stack_bottom)?;
-    put_u64(&mut space, teb_addr + teb::SELF, teb_addr)?;
-    put_u64(&mut space, teb_addr + teb::CLIENT_ID_PROCESS, id)?;
-    put_u64(&mut space, teb_addr + teb::CLIENT_ID_THREAD, thread_id)?;
-    put_u64(&mut space, teb_addr + teb::PEB, peb_addr)?;
-
     let space = KArc::try_new(IrqMutex::new(space))?;
     let process = KArc::try_new(Process {
         id,
         name,
-        space: space.clone(),
+        space,
         handles: IrqMutex::new(handles),
         vad: IrqMutex::new(vad),
         threads: IrqMutex::new(Vec::new()),
         exit_status: IrqMutex::new(None),
-        entry: base + u64::from(image.entry_rva),
-        // As if called: rsp % 16 == 8, with the caller's 32-byte shadow
-        // area above the (null) return address.
-        initial_rsp: layout::STACK_TOP - 0x28,
-        teb: teb_addr,
+        dispatcher: Dispatcher::new(0),
     })?;
-
-    // Register the process (with its thread list reserved) before the
-    // thread can run, so `current()` finds it.
-    process.threads.lock().try_reserve(1).map_err(|_| AllocError)?;
     PROCESSES.lock().try_push(process.clone())?;
-    let tid = sched::spawn_user(name, main_thread, id as usize, space, teb_addr)
-        .map_err(LoadError::Spawn)?;
-    process.threads.lock().try_push(tid)?;
-    Ok((process, tid))
-}
 
-fn by_id(id: u64) -> Option<KArc<Process>> {
-    PROCESSES.lock().iter().find(|p| p.id == id).cloned()
-}
-
-fn main_thread(pid: usize) {
-    // Wait until the spawner has recorded this thread (it may be preempted
-    // right after `spawn_user`).
-    let process = loop {
-        if let Some(p) = current() {
-            break p;
+    // Main thread: starts at the entry point with rcx = PEB, and rsp as if
+    // called (rsp % 16 == 8, 32-byte shadow area above the null return).
+    let mut gpr = [0u64; 16];
+    gpr[1] = peb_addr;
+    gpr[4] = layout::STACK_TOP - 0x28;
+    let regs = UserRegs { gpr, rip: base + u64::from(image.entry_rva), rflags: 0 };
+    let main = match thread::create(&process, regs, (layout::STACK_TOP, stack_bottom), false) {
+        Ok(t) => t,
+        Err(_) => {
+            PROCESSES.lock().retain(|p| !KArc::ptr_eq(p, &process));
+            return Err(LoadError::OutOfMemory);
         }
-        sched::yield_now();
     };
-    debug_assert_eq!(process.id, pid as u64);
-    let _ = by_id(pid as u64);
-    let (entry, rsp, peb_addr) = (process.entry, process.initial_rsp, layout::PEB_ADDRESS);
-    debug_assert!(entry < USER_END);
-    info!(
-        "process {} (pid {}): starting at {:#x}, TEB {:#x}",
-        process.name, process.id, entry, process.teb
-    );
-    drop(process);
-    syscall::enter_user(entry, rsp, peb_addr)
+    info!("process {} (pid {}): starting at {:#x}", name, id, regs.rip);
+    Ok((process, main))
 }
 
-/// Ends the current thread's process with `status` (single-threaded
-/// processes only, so far).
-pub fn terminate_current(status: NtStatus) -> ! {
-    if let Some(p) = current() {
-        p.exit_status.lock().get_or_insert(status);
-        info!("process {} (pid {}) exited with status {:#010x}", p.name, p.id, status.0);
-        let me = sched::current();
-        p.threads.lock().retain(|&t| t != me);
-        PROCESSES.lock().retain(|q| !KArc::ptr_eq(q, &p) || !q.threads.lock().is_empty());
+/// Ends `process` with `status`: other threads are asked to terminate, and
+/// the calling thread exits too if it belongs to the process.
+pub fn terminate(process: &KArc<Process>, status: NtStatus, include_caller: bool) {
+    process.exit_status.lock().get_or_insert(status);
+    let me = thread::current();
+    for t in process.threads() {
+        if me.as_ref().is_some_and(|m| KArc::ptr_eq(m, &t)) {
+            continue;
+        }
+        thread::request_termination(&t, status);
     }
-    sched::exit()
+    if include_caller
+        && me.is_some_and(
+            |m| matches!(&m.body, ObjectBody::Thread(t) if KArc::ptr_eq(&t.process, process)),
+        )
+    {
+        // Exits on the way back to user mode.
+        thread::exit_current_on_return(status);
+    }
+}
+
+/// Ends the current thread's process (NtTerminateProcess(NtCurrentProcess()));
+/// takes effect when the caller returns towards user mode.
+pub fn terminate_current(status: NtStatus) {
+    if let Some(p) = current() {
+        terminate(&p, status, true);
+    }
+}
+
+/// Called when the last thread of `process` has exited.
+pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
+    let status = *process.exit_status.lock().get_or_insert(last_status);
+    info!("process {} (pid {}) exited with status {:#010x}", process.name, process.id, status.0);
+    wait::signal_dispatcher(&process.dispatcher, 1);
+    // Close every handle (this breaks reference cycles through handles to
+    // the process's own objects) and forget the process.
+    let entries = process.handles.lock().close_all();
+    drop(entries);
+    PROCESSES.lock().retain(|p| !KArc::ptr_eq(p, process));
 }
 
 /// User-mode CPU exceptions: no SEH dispatch yet, so they end the process.
@@ -378,10 +388,11 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
         cr2.unwrap_or(0),
         frame.error_code
     );
-    // Interrupts are off in the handler; exiting switches away for good.
+    // Takes effect on the way back to user mode (the user-return hook).
     terminate_current(status)
 }
 
 pub fn init() {
     interrupts::set_user_exception_handler(on_user_exception);
+    thread::init();
 }
