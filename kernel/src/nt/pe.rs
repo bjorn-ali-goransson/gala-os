@@ -90,6 +90,8 @@ pub struct PeImage<'a> {
     pub entry_rva: u32,
     pub section_alignment: u32,
     pub subsystem: u16,
+    /// (MajorSubsystemVersion, MinorSubsystemVersion)
+    pub subsystem_version: (u16, u16),
     pub stack_reserve: u64,
     pub stack_commit: u64,
     directories: [DataDirectory; 16],
@@ -144,6 +146,7 @@ impl<'a> PeImage<'a> {
         let size_of_image = u32_at(data, opt + 56)?;
         let size_of_headers = u32_at(data, opt + 60)?;
         let subsystem = u16_at(data, opt + 68)?;
+        let subsystem_version = (u16_at(data, opt + 48)?, u16_at(data, opt + 50)?);
         let stack_reserve = u64_at(data, opt + 72)?;
         let stack_commit = u64_at(data, opt + 80)?;
         let dir_count = (u32_at(data, opt + 108)? as usize).min(16);
@@ -173,6 +176,7 @@ impl<'a> PeImage<'a> {
             entry_rva,
             section_alignment,
             subsystem,
+            subsystem_version,
             stack_reserve,
             stack_commit,
             directories,

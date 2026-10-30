@@ -194,9 +194,14 @@ is enabled for user SSE code.
 
 **Loader** (`nt::process::spawn_from_pe`): maps headers and sections at the
 preferred base with section permissions (no relocation or imports yet),
-a 256 KiB stack below `0x200000` with a guard page, and the PEB, process
-parameters (handles for stdin/stdout/stderr) and TEB at fixed addresses
-(`nt::layout`).
+a 1 MiB stack below `0x200000` with a guard page, and the PEB, process
+parameters and TEB at fixed addresses (`nt::layout`). The PEB carries the
+image base, OS version of the pinned build, processor count, image
+subsystem and its version, and session 1. `nt::params` builds a normalized
+RTL_USER_PROCESS_PARAMETERS: standard handles, ImagePathName and
+CommandLine (`C:\gala\<name>`), current directory `C:\gala\` with an
+open directory handle (FILE_TRAVERSE | SYNCHRONIZE), DllPath, WindowTitle
+and an environment block (SystemRoot, Path, ...) with EnvironmentSize.
 
 **Virtual memory**: `nt::vad::Vad` tracks reservations (64 KiB aligned)
 as run-length lists of per-page state (committed + protection), so query

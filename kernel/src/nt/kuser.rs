@@ -48,6 +48,8 @@ const PF_XMMI_INSTRUCTIONS_AVAILABLE: usize = 6;
 const PF_XMMI64_INSTRUCTIONS_AVAILABLE: usize = 10;
 const PF_NX_ENABLED: usize = 12;
 
+pub const MAJOR_VERSION: u32 = 10;
+pub const MINOR_VERSION: u32 = 0;
 pub const BUILD_NUMBER: u32 = 26100;
 
 static PAGE: IrqMutex<Option<SharedPage>> = IrqMutex::new(None);

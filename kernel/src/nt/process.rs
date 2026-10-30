@@ -233,6 +233,40 @@ fn map_image(space: &mut UserSpace, vad: &mut Vad, image: &PeImage<'_>) -> Resul
     Ok(base)
 }
 
+const VER_PLATFORM_WIN32_NT: u32 = 2;
+/// Interactive programs run in session 1 (session 0 is for services).
+const SESSION_ID: u32 = 1;
+/// Boot modules live here; it is also the initial current directory.
+const BOOT_DIRECTORY: &str = "C:\\gala\\";
+/// FILE_TRAVERSE | SYNCHRONIZE, as Windows opens the current directory.
+const CURDIR_ACCESS: u32 = 0x20 | super::object::SYNCHRONIZE;
+/// The initial environment.
+const ENVIRONMENT: &[&str] = &[
+    "ComSpec=C:\\Windows\\System32\\cmd.exe",
+    "NUMBER_OF_PROCESSORS=1",
+    "OS=Windows_NT",
+    "Path=C:\\Windows\\System32;C:\\Windows",
+    "PROCESSOR_ARCHITECTURE=AMD64",
+    "SystemDrive=C:",
+    "SystemRoot=C:\\Windows",
+    "TEMP=C:\\Users\\Public",
+    "TMP=C:\\Users\\Public",
+    "windir=C:\\Windows",
+];
+
+/// Opens `C:\\gala` as a directory file object.
+fn open_boot_directory() -> Option<ObjectRef> {
+    use super::file;
+    let mut name = Vec::new();
+    for c in "\\gala".bytes() {
+        name.try_push(u16::from(c)).ok()?;
+    }
+    let path = file::FilePath { start: crate::fs::ramfs::ROOT, name };
+    let share = file::FILE_SHARE_READ | file::FILE_SHARE_WRITE | file::FILE_SHARE_DELETE;
+    let options = file::FILE_DIRECTORY_FILE | file::FILE_SYNCHRONOUS_IO_NONALERT;
+    file::create(&path, CURDIR_ACCESS, share, file::FILE_OPEN, options).ok().map(|c| c.object)
+}
+
 /// Creates a process from a PE executable and starts its main thread.
 pub fn spawn_from_pe(
     name: &'static str,
@@ -268,17 +302,39 @@ pub fn spawn_from_pe(
     let stdout = handles.insert_object(output.clone())?;
     let stderr = handles.insert_object(output)?;
 
+    // The current directory, C:\\gala\\ (where boot modules live), as a handle.
+    let cwd_handle = match open_boot_directory() {
+        Some(object) => handles
+            .insert(super::object::HandleEntry { object, access: CURDIR_ACCESS, attributes: 0 })
+            .map_or(0, |h| h.0),
+        None => {
+            warn!("process {name}: cannot open the current directory");
+            0
+        }
+    };
+
     // RTL_USER_PROCESS_PARAMETERS.
+    let mut image_path: Vec<u8> = Vec::new();
+    image_path.try_extend_from_slice(BOOT_DIRECTORY.as_bytes())?;
+    image_path.try_extend_from_slice(name.as_bytes())?;
+    let image_path = core::str::from_utf8(&image_path).unwrap_or(name);
     let p = layout::PARAMS_ADDRESS;
+    let block = super::params::build(
+        &super::params::ProcessParameters {
+            image_path,
+            command_line: image_path,
+            current_directory: BOOT_DIRECTORY,
+            current_directory_handle: cwd_handle,
+            dll_path: "",
+            std_handles: [stdin.0, stdout.0, stderr.0],
+            environment: ENVIRONMENT,
+        },
+        p,
+    )
+    .map_err(|_| LoadError::OutOfMemory)?;
     vm::register(&mut vad, p, params::PAGES * PAGE_SIZE, vad::MEM_PRIVATE, vad::PAGE_READWRITE)?;
     space.map_zeroed(p, params::PAGES, USER_RW)?;
-    let size = (params::PAGES * PAGE_SIZE) as u32;
-    put_u32(&mut space, p + params::MAXIMUM_LENGTH, size)?;
-    put_u32(&mut space, p + params::LENGTH, size)?;
-    put_u32(&mut space, p + params::FLAGS, params::FLAG_NORMALIZED)?;
-    put_u64(&mut space, p + params::STANDARD_INPUT, stdin.0)?;
-    put_u64(&mut space, p + params::STANDARD_OUTPUT, stdout.0)?;
-    put_u64(&mut space, p + params::STANDARD_ERROR, stderr.0)?;
+    space.write_initial(p, &block)?;
 
     // PEB.
     let peb_addr = layout::PEB_ADDRESS;
@@ -292,6 +348,19 @@ pub fn spawn_from_pe(
     space.map_zeroed(peb_addr, peb::PAGES, USER_RW)?;
     put_u64(&mut space, peb_addr + peb::IMAGE_BASE_ADDRESS, base)?;
     put_u64(&mut space, peb_addr + peb::PROCESS_PARAMETERS, p)?;
+    put_u32(&mut space, peb_addr + peb::NUMBER_OF_PROCESSORS, 1)?;
+    put_u32(&mut space, peb_addr + peb::OS_MAJOR_VERSION, super::kuser::MAJOR_VERSION)?;
+    put_u32(&mut space, peb_addr + peb::OS_MINOR_VERSION, super::kuser::MINOR_VERSION)?;
+    space.write_initial(
+        peb_addr + peb::OS_BUILD_NUMBER,
+        &(super::kuser::BUILD_NUMBER as u16).to_le_bytes(),
+    )?;
+    put_u32(&mut space, peb_addr + peb::OS_PLATFORM_ID, VER_PLATFORM_WIN32_NT)?;
+    put_u32(&mut space, peb_addr + peb::IMAGE_SUBSYSTEM, u32::from(image.subsystem))?;
+    let (major, minor) = image.subsystem_version;
+    put_u32(&mut space, peb_addr + peb::IMAGE_SUBSYSTEM_MAJOR_VERSION, u32::from(major))?;
+    put_u32(&mut space, peb_addr + peb::IMAGE_SUBSYSTEM_MINOR_VERSION, u32::from(minor))?;
+    put_u32(&mut space, peb_addr + peb::SESSION_ID, SESSION_ID)?;
 
     let space = KArc::try_new(IrqMutex::new(space))?;
     let process = KArc::try_new(Process {

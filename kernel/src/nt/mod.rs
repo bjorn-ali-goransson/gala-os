@@ -5,6 +5,7 @@ pub mod kuser;
 pub mod layout;
 pub mod namespace;
 pub mod object;
+pub mod params;
 pub mod pe;
 pub mod process;
 pub mod section;

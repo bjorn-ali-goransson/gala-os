@@ -51,6 +51,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   InformationFile (volume, size, full size, device, attribute),
   NtFlushBuffersFile, FileRenameInformation, FILE_DELETE_ON_CLOSE at close,
   RootDirectory = directory file handle; `__chkstk` in ntrt; `dir_test`
+- Process startup contract: PEB fields (version, processors, subsystem,
+  session), full RTL_USER_PROCESS_PARAMETERS (image path, command line,
+  current directory + handle, environment), TEB/ClientId checks; `peb_test`
 
 ## Next
 3b. **Mutants and semaphores**: NtCreateMutant/NtReleaseMutant (0x20)/
@@ -60,6 +63,11 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 6c. **Image sections, rest**: share unmodified pages between views,
    file-backed data sections, the kernel loader using image sections, and
    loading DLL imports (needed for ntdll and 7).
+6d. **Starting through ntdll**: map an ntdll.dll image (our own test
+   ntdll first) into every process, start the initial thread at its
+   LdrInitializeThunk export with the documented (CONTEXT, ntdll base)
+   arguments, PEB->Ldr left to user mode; boot cmdline `args=` for the
+   command line.
 7. **Exceptions**: user-mode exception dispatch (KiUserExceptionDispatcher
    contract), NtContinue, NtRaiseException; vectored/SEH work in user mode.
 8c. **Files, rest**: `\??\C:` as a symbolic link, asynchronous I/O

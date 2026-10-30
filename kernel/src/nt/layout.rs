@@ -17,8 +17,18 @@ pub mod teb {
 }
 
 pub mod peb {
+    pub const BEING_DEBUGGED: u64 = 0x02;
     pub const IMAGE_BASE_ADDRESS: u64 = 0x10;
     pub const PROCESS_PARAMETERS: u64 = 0x20;
+    pub const NUMBER_OF_PROCESSORS: u64 = 0xb8;
+    pub const OS_MAJOR_VERSION: u64 = 0x118;
+    pub const OS_MINOR_VERSION: u64 = 0x11c;
+    pub const OS_BUILD_NUMBER: u64 = 0x120;
+    pub const OS_PLATFORM_ID: u64 = 0x124;
+    pub const IMAGE_SUBSYSTEM: u64 = 0x128;
+    pub const IMAGE_SUBSYSTEM_MAJOR_VERSION: u64 = 0x12c;
+    pub const IMAGE_SUBSYSTEM_MINOR_VERSION: u64 = 0x130;
+    pub const SESSION_ID: u64 = 0x2c0;
     pub const PAGES: u64 = 1;
 }
 
@@ -29,9 +39,22 @@ pub mod params {
     pub const STANDARD_INPUT: u64 = 0x20;
     pub const STANDARD_OUTPUT: u64 = 0x28;
     pub const STANDARD_ERROR: u64 = 0x30;
+    /// CURDIR { UNICODE_STRING DosPath; HANDLE Handle; }
+    pub const CURRENT_DIRECTORY: u64 = 0x38;
+    pub const CURRENT_DIRECTORY_HANDLE: u64 = 0x48;
+    pub const DLL_PATH: u64 = 0x50;
+    pub const IMAGE_PATH_NAME: u64 = 0x60;
+    pub const COMMAND_LINE: u64 = 0x70;
+    pub const ENVIRONMENT: u64 = 0x80;
+    pub const WINDOW_TITLE: u64 = 0xb0;
+    pub const ENVIRONMENT_SIZE: u64 = 0x3f0;
+    /// Size of the structure itself (strings follow it).
+    pub const STRUCT_SIZE: u64 = 0x440;
+    /// Where the environment block starts in our allocation.
+    pub const ENVIRONMENT_OFFSET: u64 = 0x1000;
     /// RTL_USER_PROCESS_PARAMETERS_NORMALIZED: pointers are absolute.
     pub const FLAG_NORMALIZED: u32 = 1;
-    pub const PAGES: u64 = 1;
+    pub const PAGES: u64 = 2;
 }
 
 // Our placement of per-process structures (Windows randomizes these; apps

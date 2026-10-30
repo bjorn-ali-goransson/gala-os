@@ -70,6 +70,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "peb_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "section_test"
 version = "0.1.0"
 dependencies = [

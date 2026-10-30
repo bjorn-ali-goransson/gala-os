@@ -34,6 +34,7 @@ const USER_PROGRAMS: &[&str] = &[
     "file_test",
     "image_test",
     "dir_test",
+    "peb_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -288,6 +289,12 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "peb_test",
+        cmdline: "qemu_exit run=peb_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["peb_test: ok", "exited with status 0x00000000"],
+    },
     Scenario {
         name: "dir_test",
         cmdline: "qemu_exit run=dir_test.exe",
