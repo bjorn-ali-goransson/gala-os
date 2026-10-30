@@ -38,9 +38,28 @@ pub const RESCHEDULE_VECTOR: u8 = 0x31;
 /// Vector of the TLB shootdown IPI.
 pub const TLB_FLUSH_VECTOR: u8 = 0x32;
 
-/// Set by a CPU asking CPU `i` to flush its TLB; cleared by CPU `i` once
-/// it has.
-static FLUSH_PENDING: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+/// TLB flush requests: CPU `i` has been asked for `FLUSH_REQUESTED[i]`
+/// flushes and has done all requests up to `FLUSH_DONE[i]`. A flush that
+/// starts after reading the request count covers every request counted
+/// (each requester changed its mappings before counting).
+static FLUSH_REQUESTED: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static FLUSH_DONE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// The page-table root each CPU has loaded (`paging::activate`), to find
+/// the CPUs that may cache a user space's translations.
+static CPU_ROOT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Set once per-CPU blocks exist on the boot CPU and APs may run.
+static STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Shootdowns that had to interrupt other CPUs, and IPIs sent for them.
+static SHOOTDOWNS: AtomicU64 = AtomicU64::new(0);
+static FLUSH_IPIS: AtomicU64 = AtomicU64::new(0);
+
+/// (shootdowns, flush IPIs) so far.
+pub fn flush_stats() -> (u64, u64) {
+    (SHOOTDOWNS.load(Ordering::Relaxed), FLUSH_IPIS.load(Ordering::Relaxed))
+}
 
 /// Flushes this CPU's whole TLB, global (kernel) entries included.
 fn flush_local() {
@@ -59,38 +78,81 @@ fn flush_local() {
     };
 }
 
-/// Flushes the TLBs of all CPUs (kernel and user entries) and waits until
-/// every online CPU has. Used after kernel mappings are removed, before
-/// their frames or virtual addresses are reused.
-///
-/// The caller must not hold any `IrqMutex`: another CPU spinning on it
-/// with interrupts off could never take the flush interrupt.
-pub fn flush_tlb_everywhere() {
-    flush_local();
-    let me = percpu::cpu_index();
-    let others = online_mask() & !(1 << me);
-    if others == 0 {
+/// Does the flushes requested of this CPU so far, if any.
+fn serve_flush(me: usize) {
+    let requested = FLUSH_REQUESTED[me].load(Ordering::Acquire);
+    if requested > FLUSH_DONE[me].load(Ordering::Acquire) {
+        flush_local();
+        FLUSH_DONE[me].fetch_max(requested, Ordering::AcqRel);
+    }
+}
+
+/// Called while spinning for a lock with interrupts off: a CPU holding
+/// that lock may be waiting for this CPU to flush its TLB.
+pub fn serve_pending_flush() {
+    if STARTED.load(Ordering::Acquire) {
+        serve_flush(percpu::cpu_index() as usize);
+    }
+}
+
+/// Records that this CPU loads page-table root `root` (before loading it).
+pub fn note_root(root: u64) {
+    if STARTED.load(Ordering::Acquire) {
+        CPU_ROOT[percpu::cpu_index() as usize].store(root, Ordering::SeqCst);
+    }
+}
+
+/// Flushes the TLBs of the CPUs in `mask` (never this one) and waits until
+/// they have. Safe with locks held: CPUs spinning for a lock serve flush
+/// requests (`serve_pending_flush`), and so does this one while it waits.
+fn flush_cpus(mask: u64) {
+    let me = percpu::cpu_index() as usize;
+    let mask = mask & online_mask() & !(1 << me);
+    if mask == 0 {
         return;
     }
-    for cpu in (0..MAX_CPUS).filter(|c| others & (1 << c) != 0) {
-        FLUSH_PENDING[cpu].store(true, Ordering::Release);
+    SHOOTDOWNS.fetch_add(1, Ordering::Relaxed);
+    let mut wanted = [0u64; MAX_CPUS];
+    for cpu in (0..MAX_CPUS).filter(|c| mask & (1 << c) != 0) {
+        wanted[cpu] = FLUSH_REQUESTED[cpu].fetch_add(1, Ordering::AcqRel) + 1;
         apic::send_ipi(APIC_IDS[cpu].load(Ordering::Relaxed), TLB_FLUSH_VECTOR);
+        FLUSH_IPIS.fetch_add(1, Ordering::Relaxed);
     }
-    for cpu in (0..MAX_CPUS).filter(|c| others & (1 << c) != 0) {
-        while FLUSH_PENDING[cpu].load(Ordering::Acquire) {
-            // Another CPU may be waiting for us the same way (with
-            // interrupts off): serve its request while waiting.
-            if FLUSH_PENDING[me as usize].swap(false, Ordering::AcqRel) {
-                flush_local();
-            }
+    for cpu in (0..MAX_CPUS).filter(|c| mask & (1 << c) != 0) {
+        while FLUSH_DONE[cpu].load(Ordering::Acquire) < wanted[cpu] {
+            serve_flush(me);
             core::hint::spin_loop();
         }
     }
 }
 
-fn on_flush_ipi(_: &mut interrupts::TrapFrame) {
+/// Flushes the TLBs of all CPUs (kernel and user entries) and waits until
+/// every online CPU has. Used after kernel mappings are removed, before
+/// their frames or virtual addresses are reused.
+pub fn flush_tlb_everywhere() {
     flush_local();
-    FLUSH_PENDING[percpu::cpu_index() as usize].store(false, Ordering::Release);
+    flush_cpus(u64::MAX);
+}
+
+/// Makes every other CPU that has user space `root` loaded drop its cached
+/// translations (this CPU invalidates its own entries as it changes them).
+/// Call after changing the space's page tables and before reusing frames
+/// they mapped.
+pub fn flush_user_space(root: u64) {
+    if !STARTED.load(Ordering::Acquire) {
+        return;
+    }
+    // Order the page-table writes before reading CPU_ROOT; a CPU that loads
+    // the root later walks the new tables.
+    core::sync::atomic::fence(Ordering::SeqCst);
+    let mask = (0..MAX_CPUS)
+        .filter(|&c| CPU_ROOT[c].load(Ordering::SeqCst) == root)
+        .fold(0u64, |m, c| m | 1 << c);
+    flush_cpus(mask);
+}
+
+fn on_flush_ipi(_: &mut interrupts::TrapFrame) {
+    serve_flush(percpu::cpu_index() as usize);
     apic::eoi();
 }
 
@@ -206,6 +268,7 @@ extern "C" fn ap_main(start: &'static ApStart) -> ! {
         unsafe { cpu::wrmsr(IA32_TSC_AUX, u64::from(start.index)) };
     }
     APIC_IDS[start.index as usize].store(apic::id(), Ordering::Relaxed);
+    CPU_ROOT[start.index as usize].store(paging::kernel_root(), Ordering::SeqCst);
     ONLINE_MASK.fetch_or(1 << start.index, Ordering::AcqRel);
     ONLINE.fetch_add(1, Ordering::AcqRel);
     let main = AP_MAIN.load(Ordering::Acquire);
@@ -243,6 +306,8 @@ pub fn init_bsp() {
 /// returns the number of CPUs online. Each AP ends in `main(index)`. Call
 /// once, after paging, the heap and the boot CPU's local APIC are set up.
 pub fn start_aps(processors: &Processors, main: fn(u32) -> !) -> Result<u32, SmpError> {
+    CPU_ROOT[0].store(cpu::read_cr3() & !0xfff, Ordering::SeqCst);
+    STARTED.store(true, Ordering::Release);
     AP_MAIN.store(main as usize as u64, Ordering::Release);
     AP_CR3.store(paging::kernel_root(), Ordering::Release);
     let mut started = 1;

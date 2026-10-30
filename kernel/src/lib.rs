@@ -139,6 +139,11 @@ pub fn kernel_main() -> ! {
         selftest::run_all();
     }
 
+    let (shootdowns, ipis) = arch::smp::flush_stats();
+    info!(
+        "stats: {shootdowns} TLB shootdowns ({ipis} IPIs), {} frames leaked by deferred frees",
+        arch::paging::leaked_frames()
+    );
     kprintln!("{BOOT_OK_MARKER}");
     if QEMU_EXIT.load(Ordering::Relaxed) {
         qemu::exit(QemuExitCode::Success);

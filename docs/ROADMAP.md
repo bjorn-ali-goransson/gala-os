@@ -126,6 +126,12 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   shootdown for freed kernel stacks; fixes for code that assumed one CPU
   (SYSCALL MSRs set per CPU, NtContinue state per thread);
   `smpsched_test`
+- SMP memory (S3): user TLB shootdown (per-CPU loaded roots, dirty spaces,
+  frames freed only after other CPUs flushed, via the space lock's guard),
+  counted flush requests, lock spinning serves flushes (no deadlock with
+  locks held), shootdown counters in the boot log; `smpmem_test` (free,
+  decommit, protect and unmap under a thread on another CPU; interlocked
+  counts; event storms)
 
 ## Next
 Direction from the project owner (2026-10-30): multiprocessor support, then
@@ -133,7 +139,7 @@ a real Go program, then Nginx; fast testing (a QEMU test image, gala-um)
 and introspection are explicitly wanted. Priorities within that are ours
 to set and to argue for. Current order and why:
 
-1. S3 (user TLB shootdown): a live memory-safety bug since S2, small.
+1. S3 (user TLB shootdown): done.
 2. T1 (test speed): most of a boot test's time is firmware boot and ISO
    building, not the test. One VM running many programs plus a Docker
    test image gives most of the speed-up quickly and makes every
@@ -147,10 +153,6 @@ to set and to argue for. Current order and why:
 S4 waits until something needs it (Go's preemption uses SuspendThread/
 GetThreadContext, so at the latest G2).
 
-S3. **SMP memory**: TLB shootdown when user mappings change (unmap,
-   protect, COW copies, guard pages) while threads of the space run on
-   other CPUs (track which CPUs have each space loaded); contention tests (interlocked
-   counters, wait/wake storms, unmapping under a running thread).
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 T1. **Test speed and a test image**: `run=` with several programs in one

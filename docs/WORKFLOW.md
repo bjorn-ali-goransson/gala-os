@@ -55,8 +55,17 @@ is done and what comes next (the "Next" list is the agreed order).
   run later by a thread. Per-thread state goes in `sched::Thread` or
   `NtThread`, not in a global "current request" slot. Single-CPU tests
   that measure ticks must pin themselves (`sched::set_affinity`).
+- **Changing user mappings** goes through `process.space.lock()` (a
+  `SpaceGuard`): the guard's drop does the TLB shootdown and frees the
+  unmapped frames. Do not free user frames any other way while the space
+  may be live. Cross-CPU memory tests need the victim thread pinned to
+  another CPU and nothing else flushing meanwhile (let reaping settle
+  first, as `smpmem_test` does), or the bug they look for is masked.
 - **Commit messages** are passed through the shell: do not put backticks in
   a double-quoted `-m` (use a heredoc `-F -`).
+- **Never run two xtask boot runs at once** (e.g. a full `cargo xtask test`
+  and a single `boot-test`): they share ISO and serial-log files under
+  `target/` and fail each other.
 - **Flaky boot tests** usually mean a race; rerun the one scenario a few
   times (`cargo xtask boot-test name`) before blaming CI.
 

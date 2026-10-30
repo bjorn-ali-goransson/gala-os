@@ -58,6 +58,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("loader_test", "testdll.dll", "gala"),
     ("loader_test", "testdll2.dll", "gala"),
     ("smpsched_test", "ntdll.dll", "Windows/System32"),
+    ("smpmem_test", "ntdll.dll", "Windows/System32"),
 ];
 const USER_PROGRAMS: &[&str] = &[
     "hello",
@@ -94,6 +95,7 @@ const USER_PROGRAMS: &[&str] = &[
     "loader_test",
     "smp_test",
     "smpsched_test",
+    "smpmem_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -391,6 +393,12 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=smpsched_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["smpsched_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "smpmem_test",
+        cmdline: "qemu_exit run=smpmem_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["smpmem_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "context_test",

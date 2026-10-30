@@ -430,7 +430,7 @@ pub fn spawn_from_pe(
     put_u32(&mut space, peb_addr + peb::IMAGE_SUBSYSTEM_MINOR_VERSION, u32::from(minor))?;
     put_u32(&mut space, peb_addr + peb::SESSION_ID, SESSION_ID)?;
 
-    let space = KArc::try_new(IrqMutex::new(space))?;
+    let space = KArc::try_new(crate::arch::paging::SpaceLock::new(space))?;
     let process = KArc::try_new(Process {
         id,
         name,

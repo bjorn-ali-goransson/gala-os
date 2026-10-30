@@ -486,18 +486,32 @@ index (what RDTSCP reports to user mode as the processor number; also
 NtGetCurrentProcessorNumber), then enters `sched::run_ap`, which starts its
 tick. CPU indices are dense (0 = boot CPU), at most 64.
 
-**TLB shootdown**: `smp::flush_tlb_everywhere` flushes every CPU's whole
-TLB (global entries too, by toggling CR4.PGE) via IPI vector 0x32 and waits
-for all; a waiting CPU serves requests aimed at it, so two concurrent
-shootdowns do not deadlock. It must not be called with an `IrqMutex` held.
-Used when kernel stacks are freed (kernel pages are global, so CR3 switches
-do not drop them). **Not yet** done for user mappings (unmap, protect, COW
-copy) while other threads of the process run on other CPUs: ROADMAP S3.
+**TLB shootdown.** Each CPU flushes on request through IPI vector 0x32;
+requests are counted per CPU (`FLUSH_REQUESTED`/`FLUSH_DONE`): a flush
+that starts after reading the request count covers every request counted
+so far, so concurrent requesters never miss one. Requesters wait for the
+flush. That is safe with locks held because `IrqMutex::lock` serves
+pending flush requests while it spins (`cpu::lock_contended`), and so
+does a requester while it waits.
+- Kernel mappings (kernel stacks; global pages survive CR3 loads):
+  `smp::flush_tlb_everywhere`, before the frames and the stack slot are
+  reused.
+- User mappings: `paging::activate` records each CPU's root (`CPU_ROOT`,
+  stored before the CR3 load). `UserSpace` changes that remove or weaken
+  mappings (`unmap_page`, `set_flags`, `map_private_copy`) invalidate
+  locally and mark the space dirty; unmapped frames go to a deferred list.
+  The space lock is a `SpaceLock`, whose guard, when dropped, flushes the
+  other CPUs that have the root loaded (`smp::flush_user_space`), then
+  frees the deferred frames. So no frame is reused while another CPU can
+  still reach it. A failed deferral leaks the frame (counted) rather than
+  free it early.
+- Counters (shootdowns, IPIs, leaked frames) are logged before `boot ok`.
+
 
 ## Not done yet
 
-TLB shootdown for user mappings, suspension/context of threads running on
-other CPUs (ROADMAP S3-S4), a real ntdll and
+suspension/context of threads running on other CPUs, ranged (invlpg)
+shootdowns and PCIDs (ROADMAP S4), a real ntdll and
 kernel32 (gala runs test stand-ins), process creation from user mode,
 security, registry, storage and network devices, bindgen-generated
 layouts, ACPI (MADT/HPET), reclaiming bootloader memory. Observability

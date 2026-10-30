@@ -20,7 +20,16 @@ impl<T> IrqMutex<T> {
 
     pub fn lock(&self) -> IrqGuard<'_, T> {
         let restore = cpu::disable_interrupts();
-        IrqGuard { guard: Some(self.inner.lock()), restore }
+        let guard = loop {
+            if let Some(guard) = self.inner.try_lock() {
+                break guard;
+            }
+            // The holder may be waiting for this CPU (interrupts off) to
+            // flush its TLB.
+            cpu::lock_contended();
+            core::hint::spin_loop();
+        };
+        IrqGuard { guard: Some(guard), restore }
     }
 }
 
@@ -66,4 +75,5 @@ mod host_cpu {
         false
     }
     pub fn enable_interrupts() {}
+    pub fn lock_contended() {}
 }

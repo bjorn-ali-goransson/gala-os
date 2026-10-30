@@ -96,6 +96,11 @@ pub fn enable_interrupts_and_halt() {
     unsafe { asm!("sti", "hlt", options(nomem, nostack)) };
 }
 
+/// Called by `IrqMutex` while it spins for a held lock.
+pub fn lock_contended() {
+    super::smp::serve_pending_flush();
+}
+
 pub fn rdtsc() -> u64 {
     // SAFETY: RDTSC has no side effects.
     unsafe { core::arch::x86_64::_rdtsc() }

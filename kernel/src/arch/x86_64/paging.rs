@@ -8,6 +8,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use super::cpu;
 use crate::mm::PAGE_SIZE;
 use crate::mm::frame::Frame;
+use crate::mm::heap::TryVec;
 use crate::mm::memmap::{MemoryRegion, RegionKind};
 use crate::mm::paging::{
     CacheMode, MapError, Mapper, PageFlags, PageTable, TableMemory, Translation,
@@ -236,6 +237,14 @@ pub fn unmap_kernel_page(virt: u64) -> Option<Frame> {
     Some(frame)
 }
 
+/// Frames kept forever because their deferred free could not be recorded.
+static LEAKED_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// Frames leaked because their deferred free could not be recorded.
+pub fn leaked_frames() -> u64 {
+    LEAKED_FRAMES.load(Ordering::Relaxed)
+}
+
 /// Physical address of the kernel's PML4 (0 before `init`).
 static KERNEL_ROOT: AtomicU64 = AtomicU64::new(0);
 
@@ -257,6 +266,9 @@ pub fn kernel_root() -> u64 {
 /// `root` must be the kernel's root or the root of a live `UserSpace`
 /// (whose kernel half is the shared one), and must stay alive while loaded.
 pub unsafe fn activate(root: u64) {
+    // Before loading it: a shootdown that misses this CPU's new root then
+    // happened before the load, which flushes non-global entries.
+    super::smp::note_root(root);
     if cpu::read_cr3() & !0xfff != root {
         // SAFETY: forwarded to the caller; the kernel half, and therefore
         // the code, stack and data in use, is identical in every such space.
@@ -269,12 +281,67 @@ fn hhdm_ptr(phys: u64) -> *mut u8 {
 }
 
 /// A user address space shared by the threads of a process.
-pub type SharedUserSpace = crate::mm::heap::KArc<IrqMutex<UserSpace>>;
+pub type SharedUserSpace = crate::mm::heap::KArc<SpaceLock>;
+
+/// The lock around a `UserSpace`. Releasing it completes the mapping
+/// changes made under it: CPUs that may cache the old translations are
+/// flushed (TLB shootdown), then the frames those changes unmapped are
+/// freed. Threads of the space may run on other CPUs meanwhile.
+pub struct SpaceLock(IrqMutex<UserSpace>);
+
+impl SpaceLock {
+    pub fn new(space: UserSpace) -> Self {
+        SpaceLock(IrqMutex::new(space))
+    }
+
+    pub fn lock(&self) -> SpaceGuard<'_> {
+        SpaceGuard { guard: Some(self.0.lock()) }
+    }
+}
+
+pub struct SpaceGuard<'a> {
+    guard: Option<crate::sync::IrqGuard<'a, UserSpace>>,
+}
+
+impl core::ops::Deref for SpaceGuard<'_> {
+    type Target = UserSpace;
+
+    fn deref(&self) -> &UserSpace {
+        self.guard.as_ref().expect("guard is present until drop")
+    }
+}
+
+impl core::ops::DerefMut for SpaceGuard<'_> {
+    fn deref_mut(&mut self) -> &mut UserSpace {
+        self.guard.as_mut().expect("guard is present until drop")
+    }
+}
+
+impl Drop for SpaceGuard<'_> {
+    fn drop(&mut self) {
+        let Some(mut guard) = self.guard.take() else { return };
+        let dirty = core::mem::take(&mut guard.dirty);
+        let frames = core::mem::take(&mut guard.freed);
+        let root = guard.root();
+        drop(guard);
+        if dirty {
+            super::smp::flush_user_space(root);
+        }
+        for frame in frames {
+            let _ = crate::mm::free_frame(frame);
+        }
+    }
+}
 
 /// A user address space: private lower half, shared kernel half. Owns its
 /// page tables and every frame mapped in its lower half.
 pub struct UserSpace {
     mapper: Mapper<HhdmTables>,
+    /// Mappings were changed or removed since the lock was taken: other
+    /// CPUs must be flushed when it is released.
+    dirty: bool,
+    /// Frames unmapped under the lock, freed once other CPUs are flushed.
+    freed: alloc::vec::Vec<Frame>,
 }
 
 /// A kernel-owned page that is also mapped into user address spaces
@@ -349,6 +416,7 @@ impl UserSpace {
         flags.global = false;
         self.mapper.update_flags_4k(virt / PAGE_SIZE * PAGE_SIZE, flags)?;
         invlpg(virt);
+        self.dirty = true;
         Ok(())
     }
 
@@ -358,8 +426,13 @@ impl UserSpace {
         match self.mapper.unmap_4k_owned(virt) {
             Some((frame, owned)) => {
                 invlpg(virt);
-                if owned {
-                    let _ = crate::mm::free_frame(frame);
+                self.dirty = true;
+                // Other CPUs may still reach the frame through their TLBs
+                // until the lock is released (see `SpaceGuard`).
+                if owned && self.freed.try_push(frame).is_err() {
+                    // No memory to defer the free: keep the frame (a
+                    // leak) rather than reuse it while still mapped.
+                    LEAKED_FRAMES.fetch_add(1, Ordering::Relaxed);
                 }
                 true
             }
@@ -375,7 +448,7 @@ impl UserSpace {
         let mem = HhdmTables { offset: crate::mm::hhdm_offset() };
         let mapper =
             Mapper::new_sharing_kernel_half(mem, Frame::containing(kernel), &mut alloc_table)?;
-        Ok(Self { mapper })
+        Ok(Self { mapper, dirty: false, freed: alloc::vec::Vec::new() })
     }
 
     pub fn root(&self) -> u64 {
