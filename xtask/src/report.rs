@@ -325,6 +325,79 @@ pub fn markdown(platform: &str, results: &[Outcome]) -> String {
     out
 }
 
+/// One kind of missing feature, merged over programs (from the kernel's
+/// `ledger: {...}` lines).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LedgerEntry {
+    pub service: String,
+    pub what: String,
+    pub detail: u64,
+    pub hits: u64,
+    pub programs: Vec<String>,
+}
+
+/// Adds the ledger lines in `serial` (from `program`) to `ledger`.
+pub fn merge_ledger(ledger: &mut Vec<LedgerEntry>, program: &str, serial: &str) {
+    for line in serial.lines() {
+        let Some(json) = line.split_once("ledger: ").map(|(_, j)| j.trim()) else { continue };
+        let mut p = Parser { s: json.as_bytes(), i: 0 };
+        let Ok(Json::Object(o)) = p.value() else { continue };
+        let text = |k: &str| match o.get(k) {
+            Some(Json::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        let number = |k: &str| match o.get(k) {
+            Some(Json::Number(n)) if *n >= 0.0 => *n as u64,
+            _ => 0,
+        };
+        let (service, what, detail) = (text("service"), text("what"), number("detail"));
+        let hits = number("hits");
+        match ledger
+            .iter_mut()
+            .find(|e| e.service == service && e.what == what && e.detail == detail)
+        {
+            Some(e) => {
+                e.hits += hits;
+                if !e.programs.iter().any(|p| p == program) {
+                    e.programs.push(program.to_string());
+                }
+            }
+            None => ledger.push(LedgerEntry {
+                service,
+                what,
+                detail,
+                hits,
+                programs: vec![program.to_string()],
+            }),
+        }
+    }
+}
+
+/// The ledger as a markdown table, most programs and hits first.
+pub fn ledger_markdown(ledger: &[LedgerEntry]) -> String {
+    let mut rows = ledger.to_vec();
+    rows.sort_by(|a, b| {
+        (b.programs.len(), b.hits).cmp(&(a.programs.len(), a.hits)).then(a.service.cmp(&b.service))
+    });
+    let mut out = String::from(
+        "# Missing features (gala ledger)\n\n| service | what | detail | hits | programs |\n|---|---|---|---|---|\n",
+    );
+    for e in &rows {
+        out += &format!(
+            "| {} | {} | {:#x} | {} | {} |\n",
+            e.service,
+            e.what,
+            e.detail,
+            e.hits,
+            e.programs.join(", ")
+        );
+    }
+    if rows.is_empty() {
+        out += "| (nothing missing) | | | | |\n";
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,5 +469,22 @@ mod tests {
                 ("d", Verdict::Missing)
             ]
         );
+    }
+
+    #[test]
+    fn ledger_merges_and_ranks() {
+        let mut ledger = Vec::new();
+        let a = r#"[info ] x
+ledger: {"service":"NtQ","what":"info class","detail":5,"hits":2}
+ledger: {"service":"?","what":"unknown service","detail":4095,"hits":1}"#;
+        let b = r#"ledger: {"service":"NtQ","what":"info class","detail":5,"hits":3}"#;
+        merge_ledger(&mut ledger, "a", a);
+        merge_ledger(&mut ledger, "b", b);
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(ledger[0].hits, 5);
+        assert_eq!(ledger[0].programs, ["a", "b"]);
+        let md = ledger_markdown(&ledger);
+        let first = md.lines().nth(4).unwrap();
+        assert!(first.starts_with("| NtQ | info class | 0x5 | 5 | a, b |"), "{first}");
     }
 }

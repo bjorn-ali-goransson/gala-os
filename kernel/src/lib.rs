@@ -126,6 +126,7 @@ pub fn kernel_main() -> ! {
             }
             info!("run: begin {name}");
             run_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""));
+            nt::ledger::dump();
             info!("run: end {name}");
         }
     }
@@ -152,6 +153,7 @@ pub fn kernel_main() -> ! {
         selftest::run_all();
     }
 
+    nt::ledger::dump();
     let (shootdowns, ipis) = arch::smp::flush_stats();
     info!(
         "stats: {shootdowns} TLB shootdowns ({ipis} IPIs), {} frames leaked by deferred frees",

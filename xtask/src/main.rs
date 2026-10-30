@@ -96,6 +96,7 @@ const USER_PROGRAMS: &[&str] = &[
     "smp_test",
     "smpsched_test",
     "smpmem_test",
+    "ledger_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -450,6 +451,17 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=smpmem_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["smpmem_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "ledger_test",
+        cmdline: "qemu_exit run=ledger_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "ledger_test: ok",
+            "exited with status 0x00000000",
+            r#"ledger: {"service":"?","what":"unknown service","detail":4095,"hits":1}"#,
+            r#"ledger: {"service":"NtQueryInformationProcess","what":"info class","detail":32512,"hits":2}"#,
+        ],
     },
     Scenario {
         name: "context_test",
@@ -902,12 +914,20 @@ fn gala_report(release: bool) -> Result {
     let jobs: Vec<(&Scenario, &PathBuf)> = selected.iter().map(|(s, _)| *s).zip(&isos).collect();
     let _ = run_parallel(&jobs, |(scenario, iso)| boot_scenario_quiet(scenario, iso));
     let mut results = Vec::new();
+    let mut ledger = Vec::new();
     for ((_, program), iso) in selected.iter().zip(&isos) {
         let serial = fs::read_to_string(iso.with_extension("serial.log")).unwrap_or_default();
         results.push(report::outcome_from_serial(program, &serial));
+        report::merge_ledger(&mut ledger, program, &serial);
     }
     let dir = report_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    write(&dir.join("ledger.md"), &report::ledger_markdown(&ledger))?;
+    eprintln!(
+        "xtask: wrote {} ({} missing features)",
+        dir.join("ledger.md").display(),
+        ledger.len()
+    );
     write(&dir.join("gala.json"), &report::to_json("gala", &results))?;
     let table = report::markdown("gala", &results);
     write(&dir.join("gala.md"), &table)?;

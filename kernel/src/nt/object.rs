@@ -220,6 +220,9 @@ pub struct Timer {
 pub struct TimerState {
     /// Tick at which it expires next, if armed.
     pub due: Option<u64>,
+    /// The expiry as asked for (NT system time); `due` is it rounded up to
+    /// a tick. QueryTimer's RemainingTime comes from this one.
+    pub due_time: u64,
     /// Ticks between expiries (0 = once).
     pub period: u64,
     /// (thread, routine, context) of the APC to queue on expiry.

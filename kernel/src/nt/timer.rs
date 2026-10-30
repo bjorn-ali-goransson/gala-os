@@ -65,6 +65,7 @@ fn timer_of(object: &ObjectRef) -> Option<&super::object::Timer> {
 pub fn arm(
     object: &ObjectRef,
     due: u64,
+    due_time: u64,
     period: u64,
     apc: Option<(u64, u64)>,
 ) -> Result<bool, NtStatus> {
@@ -81,7 +82,7 @@ pub fn arm(
             timers.try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
         }
     }
-    *timer.state.lock() = super::object::TimerState { due: Some(due), period, apc };
+    *timer.state.lock() = super::object::TimerState { due: Some(due), due_time, period, apc };
     let previous = wait::set_signal(object, 0) > 0;
     wake_worker();
     Ok(previous)
@@ -94,11 +95,16 @@ pub fn cancel(object: &ObjectRef) -> Result<bool, NtStatus> {
     Ok(timer.dispatcher.signal_state() > 0)
 }
 
-/// 100 ns units until `object` expires (0 if disarmed or due).
+/// 100 ns units until `object` expires as asked (0 if disarmed or due).
 pub fn remaining(object: &ObjectRef) -> i64 {
     let Some(timer) = timer_of(object) else { return 0 };
-    let due = timer.state.lock().due;
-    due.map_or(0, |d| (d.saturating_sub(time::ticks()) * UNITS_PER_TICK) as i64)
+    let state = timer.state.lock();
+    state.due.map_or(0, |_| state.due_time.saturating_sub(time::system_time()) as i64)
+}
+
+/// The absolute system time of an NT due time (negative = relative).
+pub fn due_system_time(due: i64, now_system: u64) -> u64 {
+    if due < 0 { now_system.saturating_add(due.unsigned_abs()) } else { due as u64 }
 }
 
 fn worker(_: usize) {
@@ -135,6 +141,7 @@ fn worker(_: usize) {
                             let mut d = due;
                             while d <= now {
                                 d += state.period;
+                                state.due_time += state.period * UNITS_PER_TICK;
                             }
                             state.due = Some(d);
                             next = next.min(d);
@@ -183,6 +190,9 @@ mod tests {
         // Past or zero: due now.
         assert_eq!(due_tick(500, 7, 1_000_000), 7);
         assert_eq!(due_tick(0, 7, 1_000_000), 7);
+        // The asked-for expiry, for RemainingTime.
+        assert_eq!(due_system_time(-500_000, 1_000_000), 1_500_000);
+        assert_eq!(due_system_time(1_300_000, 1_000_000), 1_300_000);
         assert_eq!(period_ticks(20), 20);
     }
 }

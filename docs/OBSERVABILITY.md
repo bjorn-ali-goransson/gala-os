@@ -20,7 +20,7 @@ time go, and what was the state when it broke. Status per item: **done**,
 - Cheap when off: a per-category mask from the command line
   (`events=syscall,image`), checked with one relaxed atomic load.
 
-## 2. "What is missing" ledger — next
+## 2. "What is missing" ledger — done (`nt::ledger`, `ledger_test`)
 
 Every STATUS_NOT_IMPLEMENTED, STATUS_INVALID_SYSTEM_SERVICE, unknown
 information class, unsupported flag or TODO path increments a counter keyed
@@ -28,6 +28,15 @@ by (service, detail). At process exit the kernel prints the ledger as
 JSON; `cargo xtask report` merges it over all scenarios and real programs.
 When running a real program (Go, Nginx), this list *is* the work queue,
 ranked by how often it was hit.
+
+Implemented: a fixed 64-entry table keyed by (service, what, detail);
+the dispatcher records unknown services and, generically, any
+STATUS_INVALID_INFO_CLASS (with the class argument, per
+`ledger::class_argument`) and STATUS_NOT_IMPLEMENTED. Other code calls
+`nt::ledger::record(service, what, detail)` for unsupported flags and TODO
+paths. Lines are `ledger: {"service":..,"what":..,"detail":..,"hits":..}`,
+dumped after each program and before `boot ok`. `cargo xtask report`
+writes `target/report/ledger.md`, ranked by programs and hits.
 
 ## 3. Trace diffing against Windows — later
 

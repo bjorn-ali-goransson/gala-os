@@ -22,7 +22,7 @@ jobs:
           cargo clippy -p xtask -- -D warnings
           cargo build --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testntdll
           cargo clippy --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testntdll -- -D warnings
-          cargo clippy --release --target x86_64-pc-windows-msvc -p ntrt -p hello -p abi_test -p crash -p vm_test -p wait_test -p object_test -p thread_test -p kuser_test -p section_test -p file_test -p image_test -p dir_test -p peb_test -p startup_test -p exception_test -p guard_test -p import_test -p args_test -p fpu_test -p sysinfo_test -p threadinfo_test -p filemap_test -p cow_test -p async_test -p apc_test -p ioapc_test -p sync_test -p symlink_test -p iocp_test -p context_test -p timer_test -p loader_test -p smp_test -p smpsched_test -p smpmem_test -- -D warnings
+          cargo clippy --release --target x86_64-pc-windows-msvc -p ntrt -p hello -p abi_test -p crash -p vm_test -p wait_test -p object_test -p thread_test -p kuser_test -p section_test -p file_test -p image_test -p dir_test -p peb_test -p startup_test -p exception_test -p guard_test -p import_test -p args_test -p fpu_test -p sysinfo_test -p threadinfo_test -p filemap_test -p cow_test -p async_test -p apc_test -p ioapc_test -p sync_test -p symlink_test -p iocp_test -p context_test -p timer_test -p loader_test -p smp_test -p smpsched_test -p smpmem_test -p ledger_test -- -D warnings
       - name: Unit tests and QEMU boot test
         run: cargo xtask test
       - name: Checked-in test binaries match their sources

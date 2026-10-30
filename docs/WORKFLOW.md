@@ -66,6 +66,12 @@ is done and what comes next (the "Next" list is the agreed order).
 - **Never run two xtask boot runs at once** (e.g. a full `cargo xtask test`
   and a single `boot-test`): they share ISO and serial-log files under
   `target/` and fail each other.
+- **Unsupported paths**: when you leave a flag, class or case
+  unimplemented, call `nt::ledger::record(service, what, detail)` there, so
+  real programs that need it show up in `target/report/ledger.md`.
+- **Fresh checkouts**: CI starts without `target/`; things fetched or
+  built on first use (Limine) must also work when several threads need
+  them at once.
 - **Flaky boot tests** usually mean a race; rerun the one scenario a few
   times (`cargo xtask boot-test name`) before blaming CI.
 

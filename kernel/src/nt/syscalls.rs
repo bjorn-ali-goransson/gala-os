@@ -286,9 +286,23 @@ fn dispatch(frame: &mut SyscallFrame) {
         Some((.., handler)) => handler(&mut call),
         None => {
             warn!("{}: unimplemented system service {number:#x}", call.process.name);
+            super::ledger::record("?", "unknown service", u64::from(number));
             NtStatus::INVALID_SYSTEM_SERVICE
         }
     };
+    // Unsupported requests go to the missing-features ledger.
+    if let Some(&(_, name, ..)) = service {
+        match status {
+            NtStatus::INVALID_INFO_CLASS => {
+                let class = super::ledger::class_argument(name)
+                    .and_then(|i| call.arg(i).ok())
+                    .map_or(u64::MAX, |c| c & 0xffff_ffff);
+                super::ledger::record(name, "info class", class);
+            }
+            NtStatus::NOT_IMPLEMENTED => super::ledger::record(name, "not implemented", 0),
+            _ => {}
+        }
+    }
     if TRACE.load(Ordering::Relaxed) {
         trace(&call, number, service.map(|&(_, name, argc, _)| (name, argc)), status);
     }
@@ -972,8 +986,11 @@ fn nt_set_timer(call: &mut Call<'_>) -> NtStatus {
     }
     let (routine, context) = (arg!(call, 2), arg!(call, 3));
     let apc = (routine != 0).then_some((routine, context));
-    let due = timer::due_tick(due, crate::time::ticks(), crate::time::system_time());
-    let previous = tri!(timer::arm(&object, due, timer::period_ticks(period as u32), apc));
+    let now = crate::time::system_time();
+    let due_time = timer::due_system_time(due, now);
+    let due = timer::due_tick(due, crate::time::ticks(), now);
+    let previous =
+        tri!(timer::arm(&object, due, due_time, timer::period_ticks(period as u32), apc));
     let ptr = arg!(call, 6);
     if ptr != 0 && call.process.write(ptr, &[u8::from(previous)]).is_err() {
         return NtStatus::ACCESS_VIOLATION;
