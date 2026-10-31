@@ -798,6 +798,21 @@ and thread (full access).
 
 
 
+### Keyed events
+
+`nt::keyed_event`: NtCreateKeyedEvent/NtOpenKeyedEvent (named through
+the namespace), NtWaitForKeyedEvent and NtReleaseKeyedEvent (gala's
+numbers 0x7f0f-0x7f12 until verified). A release wakes one thread of the
+same process waiting on the same key, and with none waiting blocks until
+one comes (and the other way round); keys must be even
+(STATUS_INVALID_PARAMETER_1); a null handle is the system's keyed event
+(made on first use, permanent). Each blocked thread queues (key, kind,
+process, its own notification event) and waits on that event; the
+arrival that pairs with it removes the entry and signals it. A wait that
+ends by timeout or APC withdraws its entry unless a partner already took
+it, in which case it was paired and succeeds (`keyed_event_test`). The
+JDK's wepoll selector (NIO on Windows) looks these up at run time.
+
 ### Job objects
 
 `nt::job` and `nt/job_calls.rs`: NtCreateJobObject (named through the

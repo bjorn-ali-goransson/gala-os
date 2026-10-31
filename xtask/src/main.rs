@@ -230,6 +230,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("tls_test", "ntdll.dll", "Windows/System32"),
     ("tls_test", "kernel32.dll", "Windows/System32"),
     ("tls_test", "tlsdll.dll", "gala"),
+    ("keyed_event_test", "ntdll.dll", "Windows/System32"),
+    ("keyed_event_test", "kernel32.dll", "Windows/System32"),
     ("registry_test", "ntdll.dll", "Windows/System32"),
     ("registry_test", "kernel32.dll", "Windows/System32"),
     ("registry_test", "advapi32.dll", "Windows/System32"),
@@ -827,6 +829,7 @@ const USER_PROGRAMS: &[&str] = &[
     "console_test",
     "advapi32_test",
     "registry_test",
+    "keyed_event_test",
     "win32_misc_test",
     "kernel32_pool_test",
     "tls_test",
@@ -1602,6 +1605,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=advapi32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["advapi32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (Elasticsearch): keyed events (the JDK's wepoll selector).
+        name: "keyed_event_test",
+        cmdline: "qemu_exit run=keyed_event_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["keyed_event_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (PowerShell, .NET, JDK): the registry (advapi32's Reg* and

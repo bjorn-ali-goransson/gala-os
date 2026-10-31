@@ -4,6 +4,7 @@ pub mod afd;
 pub mod context;
 pub mod file;
 pub mod job;
+pub mod keyed_event;
 pub mod kuser;
 pub mod layout;
 pub mod ledger;

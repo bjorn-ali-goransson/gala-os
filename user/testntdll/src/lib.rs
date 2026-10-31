@@ -106,6 +106,15 @@ syscall_stubs! {
         job: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32
     );
     NtIsProcessInJob = 0x7f0e, fn(process: isize, job: usize);
+    // Keyed events (gala's numbers, unverified).
+    NtCreateKeyedEvent = 0x7f0f, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes, flags: u32
+    );
+    NtOpenKeyedEvent = 0x7f10, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes
+    );
+    NtWaitForKeyedEvent = 0x7f11, fn(h: usize, key: usize, alertable: u8, timeout: *const i64);
+    NtReleaseKeyedEvent = 0x7f12, fn(h: usize, key: usize, alertable: u8, timeout: *const i64);
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,

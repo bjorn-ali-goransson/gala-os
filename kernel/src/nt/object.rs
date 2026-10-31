@@ -344,6 +344,7 @@ pub enum ObjectBody {
     Key(super::registry::KeyObject),
     /// A job object (nt::job).
     Job(super::job::Job),
+    KeyedEvent(super::keyed_event::KeyedEvent),
 }
 
 /// Where a named object lives in the namespace.
@@ -406,6 +407,7 @@ impl KObject {
             ObjectBody::Null(_) => "File",
             ObjectBody::Key(_) => "Key",
             ObjectBody::Job(_) => "Job",
+            ObjectBody::KeyedEvent(_) => "KeyedEvent",
         }
     }
 
@@ -447,7 +449,8 @@ impl KObject {
             | ObjectBody::NamedPipeDevice
             | ObjectBody::NullDevice
             | ObjectBody::Key(_)
-            | ObjectBody::Job(_) => None,
+            | ObjectBody::Job(_)
+            | ObjectBody::KeyedEvent(_) => None,
         }
     }
 
@@ -473,6 +476,7 @@ impl KObject {
             ObjectBody::Process(_) => PROCESS_MAPPING,
             ObjectBody::Key(_) => super::registry::KEY_MAPPING,
             ObjectBody::Job(_) => super::job::JOB_MAPPING,
+            ObjectBody::KeyedEvent(_) => super::keyed_event::KEYED_EVENT_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,
                 write: READ_CONTROL | SYNCHRONIZE | 0x116,

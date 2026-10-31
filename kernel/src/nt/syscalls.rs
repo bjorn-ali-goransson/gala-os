@@ -64,6 +64,11 @@ pub const NT_ASSIGN_PROCESS_TO_JOB_OBJECT: u32 = 0x7f0b;
 pub const NT_SET_INFORMATION_JOB_OBJECT: u32 = 0x7f0c;
 pub const NT_QUERY_INFORMATION_JOB_OBJECT: u32 = 0x7f0d;
 pub const NT_IS_PROCESS_IN_JOB: u32 = 0x7f0e;
+// Keyed events: gala's numbers until verified (reached through ntdll).
+pub const NT_CREATE_KEYED_EVENT: u32 = 0x7f0f;
+pub const NT_OPEN_KEYED_EVENT: u32 = 0x7f10;
+pub const NT_WAIT_FOR_KEYED_EVENT: u32 = 0x7f11;
+pub const NT_RELEASE_KEYED_EVENT: u32 = 0x7f12;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -272,6 +277,10 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
         job_calls::nt_query_information_job_object,
     ),
     (NT_IS_PROCESS_IN_JOB, "NtIsProcessInJob", 2, job_calls::nt_is_process_in_job),
+    (NT_CREATE_KEYED_EVENT, "NtCreateKeyedEvent", 4, nt_create_keyed_event),
+    (NT_OPEN_KEYED_EVENT, "NtOpenKeyedEvent", 3, nt_open_keyed_event),
+    (NT_WAIT_FOR_KEYED_EVENT, "NtWaitForKeyedEvent", 4, nt_wait_for_keyed_event),
+    (NT_RELEASE_KEYED_EVENT, "NtReleaseKeyedEvent", 4, nt_release_keyed_event),
 ];
 
 /// The name of service `number` (for diagnostics).
@@ -3770,6 +3779,54 @@ mod tests {
 
 #[path = "registry_calls.rs"]
 mod registry_calls;
+
+fn is_keyed_event(o: &KObject) -> bool {
+    matches!(o.body, ObjectBody::KeyedEvent(_))
+}
+
+/// NtCreateKeyedEvent(*KeyedEventHandle, DesiredAccess, ObjectAttributes,
+///                    Flags)
+fn nt_create_keyed_event(call: &mut Call<'_>) -> NtStatus {
+    use super::keyed_event::KeyedEvent;
+    let (out, access, attrs) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
+    let Ok(object) = KObject::new(ObjectBody::KeyedEvent(KeyedEvent::default())) else {
+        return NtStatus::NO_MEMORY;
+    };
+    create_object(call, out, access, attrs, object, is_keyed_event)
+}
+
+/// NtOpenKeyedEvent(*KeyedEventHandle, DesiredAccess, ObjectAttributes)
+fn nt_open_keyed_event(call: &mut Call<'_>) -> NtStatus {
+    let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
+    let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_keyed_event));
+    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+}
+
+/// NtWaitForKeyedEvent / NtReleaseKeyedEvent(KeyedEventHandle, Key,
+/// Alertable, *Timeout): a null handle is the system's keyed event.
+fn keyed_event_call(call: &mut Call<'_>, release: bool) -> NtStatus {
+    use super::keyed_event::{self, KEYEDEVENT_WAIT, KEYEDEVENT_WAKE};
+    let h = arg!(call, 0);
+    let object = if h == 0 {
+        tri!(keyed_event::system())
+    } else {
+        let entry = tri!(call.handle(Handle(h)));
+        tri!(entry.require(if release { KEYEDEVENT_WAKE } else { KEYEDEVENT_WAIT })).clone()
+    };
+    let (key, alertable) = (arg!(call, 1), arg!(call, 2) as u8 != 0);
+    let timeout = tri!(call.timeout(arg!(call, 3)));
+    let status = keyed_event::meet(&object, key, release, call.process.id, timeout, alertable);
+    drop(object);
+    deliver_apc_after(call, status)
+}
+
+fn nt_wait_for_keyed_event(call: &mut Call<'_>) -> NtStatus {
+    keyed_event_call(call, false)
+}
+
+fn nt_release_keyed_event(call: &mut Call<'_>) -> NtStatus {
+    keyed_event_call(call, true)
+}
 
 #[path = "job_calls.rs"]
 mod job_calls;

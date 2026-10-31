@@ -639,8 +639,17 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       node ID and registers its features, then Netty's NIO selector
       fails: the JDK's wepoll (nio.dll) looks up ntdll's keyed events
       (NtCreateKeyedEvent, NtWaitForKeyedEvent, NtReleaseKeyedEvent) at
-      run time. Next: keyed events in the kernel (test first), then
-      whatever the HTTP and transport listeners need.
+      run time. Keyed events done (`keyed_event_test`): Netty's event
+      loops start and the node starts its components, then binding the
+      transport fails ("Failed to resolve host"): the default
+      network.host `_local_` enumerates network interfaces, and Java's
+      NetworkInterface uses iphlpapi's GetIfTable2 (not there yet). Next:
+      iphlpapi's interface and address tables (GetIfTable2,
+      GetIfEntry2, GetUnicastIpAddressTable / GetAdaptersAddresses) over
+      gala's loopback and virtio adapters, test first; then the HTTP
+      (9200) and transport (9300) listeners. (elasticsearch.bat also sets
+      HOSTNAME, from which the node takes its name; gala's boot has no
+      way to set it yet.)
    5. SQL Server (asked for 2026-10-31): start with SQL Server Express
       LocalDB, the small edition that runs sqlservr.exe as an ordinary
       process started on demand (no Windows service), queried with a

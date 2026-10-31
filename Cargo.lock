@@ -375,6 +375,10 @@ name = "kernel32_thread_test"
 version = "0.1.0"
 
 [[package]]
+name = "keyed_event_test"
+version = "0.1.0"
+
+[[package]]
 name = "kuser_test"
 version = "0.1.0"
 dependencies = [
