@@ -474,11 +474,20 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       variables, InitOnce, FLS, SLists, semaphores, and small thread
       functions (Encode/DecodePointer, IsProcessorFeaturePresent,
       GetCurrentProcessorNumber, GetThreadTimes, GetThreadId, OpenThread
-      of the current thread). Next batches: locale and time (GetLocaleInfo,
-      LCMapString, CompareString, date/time formats, time zones), memory
-      and system (GlobalMemoryStatusEx, NUMA, psapi K32*, large pages),
-      files (FindFirstFileExW, MoveFileExW, SetFileInformationByHandle,
-      GetVolumePathNameW), then advapi32 security and the new DLLs. Surveyed: the JDK ships Microsoft's C runtime
+      of the current thread). Batch B done (`kernel32_locale_test`):
+      the en-US locale (GetLocaleInfo, LCMapString, CompareString,
+      GetStringType, date and time pictures), UTC local time and
+      GetDynamicTimeZoneInformation, the US geo id. Batch C done
+      (`kernel32_system_test`): GlobalMemoryStatusEx (new kernel class
+      SystemPerformanceInformation for available pages), NUMA (one node),
+      psapi K32*, QueryFullProcessImageNameW, ANSI forms,
+      SetFileAttributesW, MoveFileExW, SetFileInformationByHandle,
+      OpenFileMapping, RtlCaptureStackBackTrace, VerifyVersionInfoW.
+      kernel32 now has everything the four DLLs import. Next: advapi32
+      (security: SIDs, ACLs, tokens, GetUserNameW, LookupAccountSidW),
+      user32 (CharNextExA, GetUserObjectInformationA, MessageBoxA),
+      ws2_32 ordinals 111 and 115, and comctl32, powrprof, shell32,
+      version.dll; then boot java_version and follow it. Surveyed: the JDK ships Microsoft's C runtime
       (ucrtbase, vcruntime140, the api-ms-win-* forwarders, which forward
       to kernel32), so gala needs no CRT of its own; it needs ~100 more
       kernel32 functions (SRW locks, condition variables, FLS, locale,

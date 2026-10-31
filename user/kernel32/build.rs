@@ -12,6 +12,7 @@ fn main() {
         "RtlRestoreContext",
         "RtlAddFunctionTable",
         "RtlDeleteFunctionTable",
+        "RtlCaptureStackBackTrace",
     ] {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=ntdll.{name}");
     }

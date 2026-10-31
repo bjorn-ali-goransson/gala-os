@@ -1868,6 +1868,11 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
             let info = sysinfo::basic_information(total, cpus, resolution);
             call.return_info(&info, buffer, length, ret_ptr)
         }
+        sysinfo::SYSTEM_PERFORMANCE_INFORMATION => {
+            let (free, total) = platform::frame_stats();
+            let info = sysinfo::performance_information(free, total);
+            call.return_info(&info, buffer, length, ret_ptr)
+        }
         sysinfo::SYSTEM_TIME_OF_DAY_INFORMATION => {
             let info = sysinfo::time_of_day(platform::boot_system_time(), platform::system_time());
             call.return_info(&info, buffer, length, ret_ptr)

@@ -132,30 +132,14 @@ pub extern "system" fn GetFullPathNameA(
     len as u32
 }
 
-/// MoveFileExA: MOVEFILE_REPLACE_EXISTING replaces the target; the other
-/// flags (copy allowed, write through) change nothing here.
+/// MoveFileExA: MoveFileExW.
 #[unsafe(no_mangle)]
 pub extern "system" fn MoveFileExA(from: *const u8, to: *const u8, flags: u32) -> Bool {
-    const MOVEFILE_REPLACE_EXISTING: u32 = 1;
     let (mut a, mut b) = ([0u16; MAX], [0u16; MAX]);
-    let (from, to) = match (wide(from, &mut a), wide(to, &mut b)) {
-        (Ok(f), Ok(t)) => (f, t),
-        (Err(e), _) | (_, Err(e)) => return fail_with(e, FALSE),
-    };
-    if to.is_null() {
-        // A null target deletes the source.
-        return DeleteFileW(from);
+    match (wide(from, &mut a), wide(to, &mut b)) {
+        (Ok(f), Ok(t)) => MoveFileExW(f, t, flags),
+        (Err(e), _) | (_, Err(e)) => fail_with(e, FALSE),
     }
-    if super::mapping::MoveFileW(from, to) != FALSE {
-        return TRUE;
-    }
-    if flags & MOVEFILE_REPLACE_EXISTING != 0
-        && GetLastError() == ERROR_ALREADY_EXISTS
-        && DeleteFileW(to) != FALSE
-    {
-        return super::mapping::MoveFileW(from, to);
-    }
-    FALSE
 }
 
 #[unsafe(no_mangle)]
@@ -284,4 +268,138 @@ fn search_path_to_ansi(
         }
     }
     len as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateDirectoryA(path: *const u8, security: *mut c_void) -> Bool {
+    let mut buf = [0u16; MAX];
+    match wide(path, &mut buf) {
+        Ok(p) => CreateDirectoryW(p, security),
+        Err(e) => fail_with(e, FALSE),
+    }
+}
+
+/// An ANSI result from a W function that returns a length (`f` fills a
+/// UTF-16 buffer): the length without the NUL, or the size needed (with
+/// it) if `size` is too small.
+fn ansi_result(size: u32, buf: *mut u8, f: impl FnOnce(u32, *mut u16) -> u32) -> u32 {
+    let mut w = [0u16; MAX];
+    let n = f(MAX as u32, w.as_mut_ptr());
+    if n == 0 || n as usize >= MAX {
+        return 0;
+    }
+    let mut tmp = [0u8; MAX * 3];
+    let Some(len) = to_utf8(&w[..n as usize], tmp.as_mut_ptr(), tmp.len()) else { return 0 };
+    if (size as usize) <= len || buf.is_null() {
+        return len as u32 + 1;
+    }
+    // SAFETY: the caller's buffer of `size` > len bytes.
+    unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf, len + 1) };
+    len as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTempPathA(size: u32, buf: *mut u8) -> u32 {
+    ansi_result(size, buf, |n, w| GetTempPathW(n, w))
+}
+
+/// GetModuleHandleExA: the W form (FROM_ADDRESS takes an address, not a
+/// name).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetModuleHandleExA(
+    flags: u32,
+    name: *const u8,
+    module: *mut Handle,
+) -> Bool {
+    const FROM_ADDRESS: u32 = 4;
+    if flags & FROM_ADDRESS != 0 || name.is_null() {
+        return super::text::GetModuleHandleExW(flags, name.cast(), module);
+    }
+    let mut buf = [0u16; MAX];
+    match wide(name, &mut buf) {
+        Ok(p) => super::text::GetModuleHandleExW(flags, p, module),
+        Err(e) => fail_with(e, FALSE),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn OpenFileMappingA(access: u32, inherit: Bool, name: *const u8) -> Handle {
+    let mut buf = [0u16; MAX];
+    match wide(name, &mut buf) {
+        Ok(p) => super::mapping::OpenFileMappingW(access, inherit, p),
+        Err(e) => fail_with(e, core::ptr::null_mut()),
+    }
+}
+
+/// GetEnvironmentStrings (the ANSI block): the environment converted to
+/// UTF-8 in a heap block, each string NUL-terminated and the block ending
+/// with an empty one; freed by FreeEnvironmentStringsA.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetEnvironmentStrings() -> *mut u8 {
+    let env = GetEnvironmentStringsW();
+    // The length of the W block, up to and including its final NUL.
+    let mut n = 0;
+    // SAFETY: the block ends with an empty string (two NULs).
+    unsafe {
+        while *env.add(n) != 0 || *env.add(n + 1) != 0 {
+            n += 1;
+        }
+    }
+    n += 2;
+    // SAFETY: the block has `n` units.
+    let units = unsafe { core::slice::from_raw_parts(env, n) };
+    let size = super::text::WideCharToMultiByte(
+        65001,
+        0,
+        units.as_ptr(),
+        n as i32,
+        core::ptr::null_mut(),
+        0,
+        core::ptr::null(),
+        core::ptr::null_mut(),
+    );
+    let block =
+        super::heap::HeapAlloc(super::heap::GetProcessHeap(), 0, size.max(2) as usize) as *mut u8;
+    if block.is_null() {
+        FreeEnvironmentStringsW(env);
+        return fail_with(8, core::ptr::null_mut()); // ERROR_NOT_ENOUGH_MEMORY
+    }
+    super::text::WideCharToMultiByte(
+        65001,
+        0,
+        units.as_ptr(),
+        n as i32,
+        block,
+        size,
+        core::ptr::null(),
+        core::ptr::null_mut(),
+    );
+    FreeEnvironmentStringsW(env);
+    block
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn FreeEnvironmentStringsA(block: *mut u8) -> Bool {
+    super::heap::HeapFree(super::heap::GetProcessHeap(), 0, block.cast())
+}
+
+/// MoveFileExW: MOVEFILE_REPLACE_EXISTING replaces the target; the other
+/// flags (copy allowed, write through) change nothing here; a null target
+/// deletes the source.
+#[unsafe(no_mangle)]
+pub extern "system" fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> Bool {
+    const MOVEFILE_REPLACE_EXISTING: u32 = 1;
+    if to.is_null() {
+        return DeleteFileW(from);
+    }
+    if super::mapping::MoveFileW(from, to) != FALSE {
+        return TRUE;
+    }
+    if flags & MOVEFILE_REPLACE_EXISTING != 0
+        && GetLastError() == ERROR_ALREADY_EXISTS
+        && DeleteFileW(to) != FALSE
+    {
+        return super::mapping::MoveFileW(from, to);
+    }
+    FALSE
 }

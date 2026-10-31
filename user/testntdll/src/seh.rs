@@ -603,6 +603,56 @@ fn frame_ok(frame: u64, stack_base: u64) -> bool {
     frame & 7 == 0 && frame < stack_base && frame != 0
 }
 
+// --- Stack back traces -------------------------------------------------
+
+unsafe extern "system" {
+    /// The assembly RtlCaptureContext below.
+    fn RtlCaptureContext(context: *mut u8);
+}
+
+/// RtlCaptureStackBackTrace(FramesToSkip, FramesToCapture, BackTrace,
+/// BackTraceHash): the return addresses of the frames above this one,
+/// the caller's first, after skipping `skip`; the hash is their sum
+/// (truncated). Returns how many were captured.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "system" fn RtlCaptureStackBackTrace(
+    skip: u32,
+    count: u32,
+    frames: *mut usize,
+    hash: *mut u32,
+) -> u16 {
+    let mut ctx = Context([0; CONTEXT_SIZE]);
+    // SAFETY: a 16-byte aligned CONTEXT of ours.
+    unsafe { RtlCaptureContext(ctx.0.as_mut_ptr()) };
+    let (_, stack_base) = stack_bounds();
+    let (mut n, mut skipped, mut sum) = (0u32, 0u32, 0u32);
+    // The captured context is in this function; each step undoes a frame.
+    for _ in 0..1024 {
+        if n >= count.min(u32::from(u16::MAX)) {
+            break;
+        }
+        unwind_frame(0, &mut ctx);
+        let (pc, rsp) = (ctx.get(CTX_RIP), ctx.get(CTX_RSP));
+        if pc == 0 || rsp >= stack_base {
+            break;
+        }
+        if skipped < skip {
+            skipped += 1;
+            continue;
+        }
+        // SAFETY: the caller's array of `count` entries.
+        unsafe { *frames.add(n as usize) = pc as usize };
+        sum = sum.wrapping_add(pc as u32);
+        n += 1;
+    }
+    if !hash.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *hash = sum };
+    }
+    n as u16
+}
+
 // --- Dispatch ----------------------------------------------------------
 
 /// Calls the exception handlers of the frames from `context` outwards;

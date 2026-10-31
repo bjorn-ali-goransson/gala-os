@@ -48,6 +48,7 @@ not_a_console! {
     FillConsoleOutputAttribute(h: Handle, attribute: u16, length: u32, at: u32, written: *mut u32);
     FillConsoleOutputCharacterA(h: Handle, c: u8, length: u32, at: u32, written: *mut u32);
     GetNumberOfConsoleInputEvents(h: Handle, count: *mut u32);
+    PeekConsoleInputA(h: Handle, buffer: *mut u8, length: u32, read: *mut u32);
     PeekConsoleInputW(h: Handle, buffer: *mut u8, length: u32, read: *mut u32);
     ReadConsoleInputA(h: Handle, buffer: *mut u8, length: u32, read: *mut u32);
     ReadConsoleInputW(h: Handle, buffer: *mut u8, length: u32, read: *mut u32);

@@ -81,6 +81,7 @@ syscall_stubs! {
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, size: *const i64,
         protect: u32, attributes: u32, file: usize
     );
+    NtOpenSection = 0x37, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtProtectVirtualMemory = 0x50, fn(
         process: isize, base: *mut usize, size: *mut usize, protect: u32, old: *mut u32
     );

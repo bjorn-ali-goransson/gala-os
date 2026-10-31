@@ -5,6 +5,7 @@
 use alloc::vec::Vec;
 
 pub const SYSTEM_BASIC_INFORMATION: u32 = 0;
+pub const SYSTEM_PERFORMANCE_INFORMATION: u32 = 2;
 pub const SYSTEM_TIME_OF_DAY_INFORMATION: u32 = 3;
 pub const SYSTEM_PROCESS_INFORMATION: u32 = 5;
 
@@ -28,6 +29,25 @@ pub fn basic_information(physical_pages: u64, processors: u8, timer_resolution: 
     let mask = if processors >= 64 { u64::MAX } else { (1u64 << processors) - 1 };
     b[48..56].copy_from_slice(&mask.to_le_bytes()); // ActiveProcessorsAffinityMask
     b[56] = processors;
+    b
+}
+
+/// SYSTEM_PERFORMANCE_INFORMATION's size on x64 (TODO: check against the
+/// pinned build).
+pub const PERFORMANCE_INFORMATION_SIZE: usize = 0x158;
+
+/// SYSTEM_PERFORMANCE_INFORMATION: only the memory counts are filled in
+/// (AvailablePages at 0x2c, CommittedPages at 0x30, CommitLimit at 0x34,
+/// PeakCommitment at 0x38, after the idle time and the I/O counters); the
+/// rest is zero.
+pub fn performance_information(available: u64, total: u64) -> [u8; PERFORMANCE_INFORMATION_SIZE] {
+    let mut b = [0u8; PERFORMANCE_INFORMATION_SIZE];
+    let pages = |v: u64| u32::try_from(v).unwrap_or(u32::MAX).to_le_bytes();
+    let committed = total.saturating_sub(available);
+    b[0x2c..0x30].copy_from_slice(&pages(available));
+    b[0x30..0x34].copy_from_slice(&pages(committed));
+    b[0x34..0x38].copy_from_slice(&pages(total));
+    b[0x38..0x3c].copy_from_slice(&pages(committed));
     b
 }
 
@@ -142,6 +162,14 @@ pub fn push_process(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn performance_information_has_the_memory_counts() {
+        let b = super::performance_information(100, 400);
+        let at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        assert_eq!((at(0x2c), at(0x30), at(0x34)), (100, 300, 400));
+        assert_eq!(b.len(), 0x158);
+    }
+
     use super::*;
 
     #[test]

@@ -126,6 +126,41 @@ fn named_path(name: *const u16, path: &mut [u16; 300]) -> Option<usize> {
     Some(n)
 }
 
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtOpenSection(handle: *mut Handle, access: u32, attributes: *const ObjectAttributes) -> u32;
+}
+
+/// OpenFileMappingW: a named section (FILE_MAP_* are the SECTION_*
+/// rights; FILE_MAP_ALL_ACCESS is SECTION_ALL_ACCESS).
+#[unsafe(no_mangle)]
+pub extern "system" fn OpenFileMappingW(access: u32, inherit: Bool, name: *const u16) -> Handle {
+    if name.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
+    }
+    let mut path = [0u16; 300];
+    let Some(len) = named_path(name, &mut path) else {
+        return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
+    };
+    let us = UnicodeString {
+        length: (len * 2) as u16,
+        maximum_length: (len * 2) as u16,
+        buffer: path.as_ptr(),
+    };
+    let oa = ObjectAttributes {
+        length: size_of::<ObjectAttributes>() as u32,
+        root_directory: 0,
+        object_name: &us,
+        attributes: if inherit != 0 { 0x2 } else { 0 },
+        security_descriptor: 0,
+        security_quality_of_service: 0,
+    };
+    let mut h = core::ptr::null_mut();
+    // SAFETY: valid output pointer and attributes.
+    let status = unsafe { NtOpenSection(&mut h, access, &oa) };
+    if status != STATUS_SUCCESS { fail(status, core::ptr::null_mut()) } else { h }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn CreateFileMappingA(
     file: Handle,
@@ -494,12 +529,19 @@ pub unsafe extern "system" fn RaiseException(
     unsafe { RtlRaiseException(record.as_mut_ptr().cast()) };
 }
 
-/// SetUnhandledExceptionFilter: remembered and returned; gala ends a
-/// process with an unhandled exception without calling it (yet).
+/// SetUnhandledExceptionFilter: remembered and returned (UnhandledExceptionFilter
+/// calls it); gala's ntdll ends a process with an unhandled exception
+/// without calling it (yet).
 #[unsafe(no_mangle)]
 pub extern "system" fn SetUnhandledExceptionFilter(filter: usize) -> usize {
-    static FILTER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     FILTER.swap(filter, core::sync::atomic::Ordering::AcqRel)
+}
+
+static FILTER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// The filter SetUnhandledExceptionFilter set (0: none).
+pub(crate) fn unhandled_filter() -> usize {
+    FILTER.load(core::sync::atomic::Ordering::Acquire)
 }
 
 /// The volume is in memory: report a fixed geometry (512-byte sectors, 4 KiB

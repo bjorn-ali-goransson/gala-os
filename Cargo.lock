@@ -247,6 +247,10 @@ name = "kernel32_file_test"
 version = "0.1.0"
 
 [[package]]
+name = "kernel32_locale_test"
+version = "0.1.0"
+
+[[package]]
 name = "kernel32_misc_test"
 version = "0.1.0"
 
@@ -256,6 +260,10 @@ version = "0.1.0"
 
 [[package]]
 name = "kernel32_sys_test"
+version = "0.1.0"
+
+[[package]]
+name = "kernel32_system_test"
 version = "0.1.0"
 
 [[package]]

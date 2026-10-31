@@ -736,6 +736,11 @@ STATUS_INVALID_CID (ERROR_INVALID_PARAMETER) otherwise, and grants the
 access asked for (no security descriptors yet). Each process records
 its creator's id (`parent_id`, 0 for boot programs).
 
+`NtQuerySystemInformation(SystemPerformanceInformation)` (class 2) fills
+only the memory counts of SYSTEM_PERFORMANCE_INFORMATION (0x158 bytes,
+size to be checked): AvailablePages (free frames), CommittedPages,
+CommitLimit (all frames), for GlobalMemoryStatusEx.
+
 `NtQuerySystemInformation(SystemProcessInformation)` lists the idle
 process (id 0, no image, as on Windows) and every running process
 (exited ones are not listed) with its threads, in the public x64 layout
@@ -789,7 +794,13 @@ Windows, never shadows the system's DLLs.)
   then sleeping 1 ms at a time, until a kernel address wait exists; every
   wake ends every wait, which the API allows), fiber local storage (TLS
   indexes with callbacks, run at thread exit and FlsFree), Sleep and tick
-  counts, the
+  counts, the en-US locale and UTC local time (locale.rs: one locale,
+  0x409, also for the defaults and LOCALE_INVARIANT; linguistic order
+  compares letters without case first, then puts lower case first;
+  character types from Unicode properties), memory status, one NUMA
+  node, psapi for the current process (modules from the address space's
+  image regions; memory counters from its committed regions), version
+  checks (sysmem.rs), the
   performance counter, LoadLibrary(A/W/ExW)/GetProcAddress/FreeLibrary,
   threads (CreateThread builds the stack and start CONTEXT itself and
   starts at a thunk that calls ExitThread), TLS (TEB.TlsSlots),

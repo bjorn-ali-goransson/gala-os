@@ -135,6 +135,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_sys_test", "testdll.dll", "gala"),
     ("kernel32_thread_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_sync_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_locale_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_system_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_system_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_locale_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sync_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_thread_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_misc_test", "ntdll.dll", "Windows/System32"),
@@ -424,6 +428,8 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_sys_test",
     "kernel32_thread_test",
     "kernel32_sync_test",
+    "kernel32_locale_test",
+    "kernel32_system_test",
     "kernel32_misc_test",
     "prng_test",
     "kernel32_env_test",
@@ -1085,6 +1091,20 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_sys_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_sys_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (JDK): memory, process, file and version functions.
+        name: "kernel32_system_test",
+        cmdline: "qemu_exit run=kernel32_system_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["kernel32_system_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (JDK): locale and time (en-US, UTC).
+        name: "kernel32_locale_test",
+        cmdline: "qemu_exit run=kernel32_locale_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["kernel32_locale_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (JDK): SRW locks, condition variables, InitOnce, FLS, SLists,
