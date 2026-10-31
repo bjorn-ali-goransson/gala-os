@@ -231,20 +231,32 @@ the agent proxy would otherwise intercept 127.0.0.1.
 
 ## gala-um
 
-`cargo xtask um-test` builds `um/` for the host and runs the scenarios
-listed in xtask's `UM_SCENARIOS` as Linux processes (milliseconds each,
-no QEMU), checking the same `expect` lines as their boot scenario. Run a
-program directly with `target/debug/um user/bin/<name>.exe`, with
-`--module=Windows/System32/ntdll.dll=user/bin/testntdll.dll` (and the
-like) for its DLLs, before the program; it logs
-the kernel's log on stderr and the program's output on stdout. gala-um
-runs the real NT layer (the kernel crate with `--features hosted`), so a
-change to `kernel/src/nt` is checked in milliseconds there before the
-QEMU suite; when a test passes in QEMU but not in gala-um (or the other
-way round), one of the two platforms is wrong. A program's code must
-stay below 0x5000_0000_0000 (above is the host's, where `syscall` is not
-caught). Needs Linux 5.11+ (syscall user dispatch); `gdb` and `perf`
-work on it (`handle SIGSYS nostop noprint` in gdb).
+`cargo xtask test` runs `um-test` right after the unit tests: every
+program scenario that `runs_in_um` (xtask) runs as a Linux process with
+the real NT layer (the kernel crate with `--features hosted`), checked
+against the scenario's `expect` lines; ~50 programs in ~3 s. Run it
+alone with `cargo xtask um-test` while changing `kernel/src/nt`: it is
+the fastest check there is. A new test program runs in gala-um by
+default; if it cannot (child processes, a network card), add it to
+`NOT_IN_UM` with the reason.
+
+Run a program directly:
+
+    target/debug/um [--trace] [--cpus=2] \
+        --module=Windows/System32/ntdll.dll=user/bin/testntdll.dll \
+        user/bin/<name>.exe [arguments]
+
+`--module` adds a file to C: as a boot module would (DLLs under their
+`test*` names in user/bin), `--trace` logs every system call, `--cpus`
+caps the processors (um-test uses 2, as QEMU). The kernel's log goes to
+stderr, the program's output to stdout. When a program passes in QEMU
+but not in gala-um, or the other way round, one of the two platforms is
+wrong; `cargo xtask report` lists such programs. Program code must stay
+below 0x5000_0000_0000 (above is the host's, where `syscall` is not
+caught). Needs Linux 5.11+ (syscall user dispatch). `gdb -p` works
+(`handle SIGSYS nostop noprint`, `handle SIGURG nostop noprint`), and
+`thread apply all bt` shows where NT threads are inside the NT layer:
+that is how the lock starvation and the GetContext bug were found.
 
 ## Debugging
 

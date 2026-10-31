@@ -250,7 +250,7 @@ usage: cargo xtask <command> [--release]
 commands:
   build        build the kernel and a bootable UEFI ISO (target/<profile>/gala-os.iso)
   run          build, then boot in QEMU with serial on stdio [--headless]
-  test         run host unit tests, then boot in QEMU and check the result
+  test         run host unit tests, then um-test (gala-um), then the QEMU boot tests
   boot-test    only the QEMU boot tests [scenario name filter]
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
@@ -259,7 +259,7 @@ commands:
   serve        boot a network scenario and keep it running, its port 7
                forwarded to 127.0.0.1:<port> (for a browser):
                serve <nginx|nginx_master|nginx_tls|go_http|...> [port, default 8080]
-  um-test      run the scenarios gala-um supports (UM_SCENARIOS) in gala-um,
+  um-test      run the program scenarios gala-um supports (runs_in_um) in gala-um,
                the NT layer as a Linux process (docs/GALA_UM.md)
   bench        run user/bench on gala; write target/report/bench.json and
                compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
@@ -279,7 +279,10 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("build") => build(release, "gala-os", "").map(drop),
         Some("run") => build(release, "gala-os", "").and_then(|iso| run(&iso, headless)),
-        Some("test") => unit_tests().and_then(|()| boot_tests(release, None)),
+        // gala-um first: it fails in seconds, before minutes of boots.
+        Some("test") => {
+            unit_tests().and_then(|()| um_test(release)).and_then(|()| boot_tests(release, None))
+        }
         Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
         Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
         Some("report") => gala_report(release),
@@ -1346,126 +1349,100 @@ fn run_parallel<J: Sync, T: Send>(
         .collect()
 }
 
-/// Scenarios gala-um runs (docs/GALA_UM.md): their program from user/bin
-/// must print the scenario's expected lines there too.
-const UM_SCENARIOS: &[&str] = &[
-    "hello",
-    "abi_test",
-    "apc_test",
-    "args_test",
-    "async_test",
-    "context_test",
-    "cow_test",
-    "crash",
-    "dir_test",
-    "exception_test",
-    "file_test",
-    "filemap_test",
-    "fpu_test",
-    "go_exit",
-    "go_gc",
-    "go_goroutines",
-    "go_hello",
-    "go_os",
-    "go_time",
-    "guard_test",
-    "image_test",
-    "import_test",
-    "ioapc_test",
-    "iocp_test",
-    "kernel32_env_test",
-    "kernel32_file_test",
-    "kernel32_misc_test",
-    "kernel32_sys_test",
-    "kernel32_test",
-    "kernel32_thread_test",
-    "kuser_test",
-    "ledger_test",
-    "loader_test",
-    "missing_import_test",
-    "object_test",
-    "peb_test",
-    "prng_test",
-    "section_test",
-    "startup_test",
-    "symlink_test",
-    "sync_test",
-    "sysinfo_test",
-    "thread_test",
-    "threadinfo_test",
-    "timer_test",
-    "vm_test",
-    "wait_test",
+/// Program scenarios gala-um does not run, and why (docs/GALA_UM.md).
+const NOT_IN_UM: &[(&str, &str)] = &[
+    ("process_test", "child processes (one NT process per Linux process)"),
+    ("bench", "measures the platform: gala-um's numbers are the host's"),
 ];
+
+/// Whether gala-um runs scenario `s`: a program's own scenario (its
+/// program and expected lines, no other kernel flags), except network
+/// scenarios (they need a network card and xtask's client) and NOT_IN_UM.
+fn runs_in_um(s: &Scenario) -> bool {
+    scenario_program(s).is_some()
+        && net_marker(s.name).is_none()
+        && !NOT_IN_UM.iter().any(|(n, _)| *n == s.name)
+}
 
 /// Seconds a gala-um program may run (they take milliseconds).
 const UM_TIMEOUT_SECS: u32 = 30;
 
-/// `cargo xtask um-test`: builds um/ for the host and runs each
-/// UM_SCENARIOS program in it, checking the QEMU scenario's `expect` lines
-/// (except the boot marker).
+/// `cargo xtask um-test`: builds um/ for the host and runs the program of
+/// each scenario that `runs_in_um` in it, checking the QEMU scenario's
+/// `expect` lines (except the boot marker).
 fn um_test(release: bool) -> Result {
+    let um = build_um(release)?;
+    let mut failed = Vec::new();
+    let all = Instant::now();
+    let selected: Vec<&Scenario> = SCENARIOS.iter().filter(|s| runs_in_um(s)).collect();
+    for s in &selected {
+        let started = Instant::now();
+        let log = run_um(&um, s)?;
+        let missing: Vec<_> =
+            s.expect.iter().filter(|e| **e != BOOT_OK_MARKER && !log.contains(**e)).collect();
+        if missing.is_empty() {
+            eprintln!(
+                "xtask: um test {:<20} ok  ({:.1} ms)",
+                s.name,
+                started.elapsed().as_secs_f64() * 1e3
+            );
+        } else {
+            eprintln!("xtask: um test {:<20} FAILED, missing {missing:?}; output:\n{log}", s.name);
+            failed.push(s.name);
+        }
+    }
+    eprintln!(
+        "xtask: um-test: {} programs in {:.2} s",
+        selected.len(),
+        all.elapsed().as_secs_f64()
+    );
+    if failed.is_empty() { Ok(()) } else { Err(format!("um tests failed: {failed:?}")) }
+}
+
+/// Builds um/ for the host; returns the binary.
+fn build_um(release: bool) -> Result<PathBuf> {
     let mut build = cargo();
     build.args(["build", "--package", "um"]);
     if release {
         build.arg("--release");
     }
     run_quiet(&mut build)?;
-    let um = target_dir().join(if release { "release" } else { "debug" }).join("um");
-    let mut failed = Vec::new();
-    let all = Instant::now();
-    for name in UM_SCENARIOS {
-        let s = SCENARIOS.iter().find(|s| s.name == *name).ok_or(format!("no scenario {name}"))?;
-        let program = scenario_program(s).ok_or(format!("{name}: not a program scenario"))?;
-        let started = Instant::now();
-        // The scenario's `args=` (percent-encoded), as one command-line string.
-        let args = s.cmdline.split_whitespace().find_map(|w| w.strip_prefix("args=")).unwrap_or("");
-        // A hung program fails instead of hanging the run (Linux only, as
-        // gala-um itself).
-        let mut cmd = Command::new("timeout");
-        cmd.arg(UM_TIMEOUT_SECS.to_string()).arg(&um);
-        // Its boot modules, from user/bin (checked in) as `--module=`.
-        for (file, dir) in extra_modules(name) {
-            let (host, file_name) = match file.rsplit_once('/') {
-                Some((_, n)) => (root().join(file), n),
-                None => {
-                    let dll = USER_DLLS
-                        .iter()
-                        .find(|d| d.file == file)
-                        .ok_or(format!("{name}: no DLL {file}"))?;
-                    (root().join("user/bin").join(dll.exported_as), file)
-                }
-            };
-            cmd.arg(format!("--module={dir}/{file_name}={}", host.display()));
-        }
-        let out = cmd
-            .arg(root().join("user/bin").join(format!("{program}.exe")))
-            .arg(percent_decode(args))
-            .output()
-            .map_err(|e| format!("running {}: {e}", um.display()))?;
-        let log = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let missing: Vec<_> =
-            s.expect.iter().filter(|e| **e != BOOT_OK_MARKER && !log.contains(**e)).collect();
-        if missing.is_empty() {
-            eprintln!(
-                "xtask: um test {name:<20} ok  ({:.1} ms)",
-                started.elapsed().as_secs_f64() * 1e3
-            );
-        } else {
-            eprintln!("xtask: um test {name:<20} FAILED, missing {missing:?}; output:\n{log}");
-            failed.push(*name);
-        }
+    Ok(target_dir().join(if release { "release" } else { "debug" }).join("um"))
+}
+
+/// Runs scenario `s`'s program in gala-um (binary `um`) as its boot test
+/// would run: its boot modules from user/bin, its `args=`, two
+/// processors; returns stdout and stderr.
+fn run_um(um: &Path, s: &Scenario) -> Result<String> {
+    let name = s.name;
+    let program = scenario_program(s).ok_or(format!("{name}: not a program scenario"))?;
+    // The scenario's `args=` (percent-encoded), as one command-line string.
+    let args = s.cmdline.split_whitespace().find_map(|w| w.strip_prefix("args=")).unwrap_or("");
+    // A hung program fails instead of hanging the run (Linux only, as
+    // gala-um itself).
+    let mut cmd = Command::new("timeout");
+    // As many processors as the QEMU boot tests (-smp 2).
+    cmd.arg(UM_TIMEOUT_SECS.to_string()).arg(um).arg("--cpus=2");
+    // Its boot modules, from user/bin (checked in) as `--module=`.
+    for (file, dir) in extra_modules(name) {
+        let (host, file_name) = match file.rsplit_once('/') {
+            Some((_, n)) => (root().join(file), n),
+            None => {
+                let dll = USER_DLLS
+                    .iter()
+                    .find(|d| d.file == file)
+                    .ok_or(format!("{name}: no DLL {file}"))?;
+                (root().join("user/bin").join(dll.exported_as), file)
+            }
+        };
+        cmd.arg(format!("--module={dir}/{file_name}={}", host.display()));
     }
-    eprintln!(
-        "xtask: um-test: {} programs in {:.2} s",
-        UM_SCENARIOS.len(),
-        all.elapsed().as_secs_f64()
-    );
-    if failed.is_empty() { Ok(()) } else { Err(format!("um tests failed: {failed:?}")) }
+    let out = cmd
+        .arg(root().join("user/bin").join(format!("{program}.exe")))
+        .arg(percent_decode(args))
+        .output()
+        .map_err(|e| format!("running {}: {e}", um.display()))?;
+    Ok(format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
 }
 
 /// Decodes `%XX` escapes (the kernel's `args=` encoding).
@@ -1532,11 +1509,51 @@ fn gala_report(release: bool) -> Result {
         dir.join("ledger.md").display(),
         ledger.len()
     );
+    // The same programs in gala-um: a different outcome is a bug in one
+    // of the two platforms.
+    let um = build_um(release)?;
+    let mut um_results = Vec::new();
+    for (scenario, program) in &selected {
+        um_results.push(if runs_in_um(scenario) {
+            report::outcome_from_serial(program, &run_um(&um, scenario)?)
+        } else {
+            let why = NOT_IN_UM.iter().find(|(n, _)| *n == scenario.name).map_or(
+                "network scenario (needs a network card and xtask's client)",
+                |(_, why)| why,
+            );
+            report::Outcome {
+                program: program.to_string(),
+                skipped: Some(why.to_string()),
+                ..Default::default()
+            }
+        });
+    }
+    write(&dir.join("gala-um.json"), &report::to_json("gala-um", &um_results))?;
+    write(&dir.join("gala-um.md"), &report::markdown("gala-um", &um_results))?;
     write(&dir.join("gala.json"), &report::to_json("gala", &results))?;
-    let table = report::markdown("gala", &results);
+    let mut table = report::markdown("gala", &results);
+    table += "\n## gala (QEMU) and gala-um\n\n";
+    let mut different = 0;
+    for (name, q, u, verdict) in report::compare(&results, &um_results) {
+        if verdict == report::Verdict::Different {
+            different += 1;
+            let exit = |o: Option<report::Outcome>| o.and_then(|o| o.exit).unwrap_or(0);
+            table += &format!(
+                "- DIFFERENT: {name}: QEMU {:#010x}, gala-um {:#010x}\n",
+                exit(q),
+                exit(u)
+            );
+        }
+    }
+    if different == 0 {
+        table += "Every program that ran on both ended the same.\n";
+    }
     write(&dir.join("gala.md"), &table)?;
     print!("{table}");
-    eprintln!("xtask: wrote {}", dir.join("gala.json").display());
+    eprintln!(
+        "xtask: wrote {} and gala-um.json ({different} programs differ between QEMU and gala-um)",
+        dir.join("gala.json").display()
+    );
     Ok(())
 }
 

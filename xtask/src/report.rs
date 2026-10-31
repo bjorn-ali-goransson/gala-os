@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
     pub program: String,
     pub exit: Option<u32>,

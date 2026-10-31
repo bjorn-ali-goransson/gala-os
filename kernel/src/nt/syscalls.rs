@@ -291,13 +291,16 @@ macro_rules! arg {
 
 fn dispatch(frame: &mut SyscallFrame) {
     let number = frame.rax as u32;
-    let Some(process) = process::current() else {
+    let Some(me) = thread::current() else {
         panic!("syscall {number:#x} from a thread without a process");
     };
+    let ObjectBody::Thread(t) = &me.body else { unreachable!("thread objects are threads") };
+    let process = t.process.clone();
     let service = TABLE.iter().find(|(n, ..)| *n == number);
     let started =
         crate::events::enabled(crate::events::Category::Syscall).then(platform::monotonic_ns);
     let mut call = Call { frame, process };
+    thread::set_in_syscall(&me, Some(caller_regs(&call)));
     let status = match service {
         Some((.., handler)) => handler(&mut call),
         None => {
@@ -306,6 +309,7 @@ fn dispatch(frame: &mut SyscallFrame) {
             NtStatus::INVALID_SYSTEM_SERVICE
         }
     };
+    thread::set_in_syscall(&me, None);
     // Unsupported requests go to the missing-features ledger.
     if let Some(&(_, name, ..)) = service {
         match status {

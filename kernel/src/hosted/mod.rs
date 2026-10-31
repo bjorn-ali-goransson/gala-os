@@ -99,16 +99,18 @@ impl Threads for Um {
     fn interrupt(id: ThreadId) {
         threads::signal(id, entry::SIG_INTERRUPT)
     }
-    // One processor, as far as the program can tell: the host schedules.
-    fn set_affinity(_id: ThreadId, _mask: u64) {}
+    // The host's processors (see threads::cpu_count).
+    fn set_affinity(id: ThreadId, mask: u64) {
+        threads::set_affinity(id, mask)
+    }
     fn current_cpu() -> u32 {
-        0
+        threads::current_cpu()
     }
     fn online_count() -> u32 {
-        1
+        threads::cpu_count()
     }
     fn online_mask() -> u64 {
-        1
+        threads::online_mask()
     }
 }
 
@@ -178,8 +180,14 @@ pub fn run(
     modules: Vec<(String, String, Vec<u8>)>,
 ) -> Result<u32, String> {
     memory::init()?;
+    // As the kernel's boot log (the host's processors, see threads.rs).
+    crate::info!("smp: {} CPUs online (host)", threads::cpu_count());
     entry::init();
     crate::nt::init();
+    // The TCP stack on its loopback interface (no network card here).
+    if let Err(e) = crate::net::tcp::start(None) {
+        crate::warn!("net: not started ({e:?})");
+    }
     for (directory, file, contents) in modules {
         crate::nt::file::add_boot_file(&directory, &file, contents.leak())
             .map_err(|e| alloc::format!("adding {directory}/{file}: {e:?}"))?;

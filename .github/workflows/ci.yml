@@ -30,9 +30,7 @@ jobs:
           cargo build --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testntdll -p kernel32 -p bcryptprimitives
           cargo clippy --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testntdll -p kernel32 -p bcryptprimitives -- -D warnings
           cargo clippy --release --target x86_64-pc-windows-msvc -p ntrt -p hello -p abi_test -p crash -p vm_test -p wait_test -p object_test -p thread_test -p kuser_test -p section_test -p file_test -p image_test -p dir_test -p peb_test -p startup_test -p exception_test -p guard_test -p import_test -p args_test -p fpu_test -p sysinfo_test -p threadinfo_test -p filemap_test -p cow_test -p async_test -p apc_test -p ioapc_test -p sync_test -p symlink_test -p iocp_test -p context_test -p timer_test -p loader_test -p smp_test -p smpsched_test -p smpmem_test -p ledger_test -p bench -p kernel32_test -p missing_import_test -p kernel32_sys_test -p kernel32_thread_test -p kernel32_misc_test -p prng_test -p kernel32_env_test -p kernel32_file_test -- -D warnings
-      - name: Unit tests and QEMU boot test
+      - name: Unit tests, gala-um and the QEMU boot tests
         run: cargo xtask test
-      - name: gala-um (the NT layer as a Linux process)
-        run: cargo xtask um-test
       - name: Checked-in test binaries match their sources
         run: cargo xtask export-tests && git diff --exit-code user/bin

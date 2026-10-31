@@ -93,5 +93,11 @@ mod host_cpu {
         false
     }
     pub fn enable_interrupts() {}
-    pub fn lock_contended() {}
+    /// In gala-um the holder is a host thread the host may deschedule
+    /// (the kernel's holders run with interrupts off): spinning would keep
+    /// it from finishing, so give the processor away.
+    pub fn lock_contended() {
+        #[cfg(feature = "hosted")]
+        std::thread::yield_now();
+    }
 }

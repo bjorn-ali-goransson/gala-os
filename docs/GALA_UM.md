@@ -1,10 +1,12 @@
 # gala-um: the NT personality as a Linux process (design draft)
 
-Status (2026-10-31): U1 seam (`kernel/src/nt/platform.rs`), U2 and U2c
-done: gala-um runs the real NT layer (`kernel/src/hosted`, `um/`); 47
-test programs (the ntrt tests, kernel32 tests with gala's DLLs, the Go
-programs) pass in `cargo xtask um-test` in about 1.3 s together. Next:
-U3. Design written 2026-10-30.
+Status (2026-10-31): U1, U2 and U3 done. gala-um runs the real NT layer
+(`kernel/src/hosted`, `um/`); every program scenario except child
+processes, the benchmark and the network-card scenarios runs in it: 51
+programs (ntrt tests, kernel32 tests, Go, SMP tests on two host CPUs,
+Winsock over loopback) in ~2.7 s, first in `cargo xtask test`; `cargo
+xtask report` lists any program that ends differently in QEMU and
+gala-um. Design written 2026-10-30.
 
 ## Why
 
@@ -198,22 +200,51 @@ One processor as far as programs can tell (`online_count` 1).
   from the system allocator.
 - um-test runs each program under `timeout` (30 s) and reports the total.
 
-**Passing (UM_SCENARIOS, 47):** every ntrt test program except the ones
-below, the kernel32 tests, import/loader/missing-import tests, crash,
-prng_test, and the Go programs (go_hello, go_goroutines, go_time,
-go_gc, go_os, go_exit). Each in 3-300 ms; all 47 in ~1.3 s (the QEMU
-suite: ~36 s of boots on CI).
+## U3: gala-um next to QEMU (2026-10-31)
 
-**Not in gala-um:**
-- smp_test with `cpus=2`, smpsched_test, smpmem_test: gala-um shows one
-  processor (`online_count` 1).
+- **Which scenarios**: `runs_in_um` in xtask: every program's own
+  scenario (`run=<name>.exe`, no other kernel flags), except network
+  scenarios (`NET_SCENARIOS`: they need a network card and xtask's client)
+  and `NOT_IN_UM` (process_test: child processes; bench: measures the
+  platform). No list of passing programs to maintain: a new test program
+  runs in gala-um by default.
+- **`cargo xtask test`** runs um-test after the unit tests and before the
+  QEMU boots: a broken NT layer fails in seconds.
+- **`cargo xtask report`** also runs gala-um and writes
+  `target/report/gala-um.{json,md}`; gala.md ends with every program
+  whose exit status differs between QEMU and gala-um (a bug in one of
+  them). `cargo xtask compare gala.json gala-um.json` works too.
+- **Processors**: gala-um shows the host's CPUs (NT processor n = host CPU
+  n, for the contiguous start of the process's affinity), so RDTSCP's
+  TSC_AUX and NtGetCurrentProcessorNumber agree; affinity is
+  `pthread_setaffinity_np`. `um --cpus=n` caps the count; um-test uses 2,
+  as the QEMU tests (`-smp 2`).
+- **Locks**: the kernel's `IrqMutex` spins with interrupts off, where the
+  holder cannot be preempted. In gala-um the host may deschedule a holder
+  (one doing a futex wake under the dispatcher lock, say), and spinners
+  pinned to the same CPUs starved it: smpmem_test took 9 s, go_gc 20 s.
+  `lock_contended()` (called in the spin loop) yields in gala-um.
+- **A bug found by gala-um, fixed in nt**: NtGetContextThread of a thread
+  suspended while blocked in a system call failed after waiting a second
+  (the TODO in `thread::parked_state`). Go preempts goroutines with
+  SuspendThread + GetThreadContext, so with two CPUs go_gc spent 1 s per
+  attempt. Windows reports the thread's user state at the `syscall`; nt
+  now records it while a service runs (`thread::set_in_syscall`, by the
+  dispatcher) and returns it, with the default floating-point state.
+  context_test checks it (failed on the kernel before, passes on both).
+- **Networking**: `net::tcp` takes threads and time through
+  `nt::platform` too, and `hosted::run` starts it on its loopback
+  interface (no card): winsock_test and winsock_async_test run.
+- `um --trace`: every system call on stderr (the kernel's `trace` flag).
+
+**Not in gala-um** (by design or not yet):
 - process_test, nginx_master: child processes (one NT process per Linux
-  process; would need a host process per NT process).
-- networking (net_echo, winsock_*, go_http, nginx*): AFD over smoltcp
-  needs the net thread and a device; host sockets or a loopback device.
-- bench: runs, but its numbers are the host's.
+  process; a host process per NT process would be needed).
+- Network-card scenarios (net_echo, winsock_test serve, go_http, nginx,
+  nginx_tls): a TAP device or host sockets behind AFD.
+- bench: runs, but measures the host.
 - Scenarios that test the kernel itself (selftest, fault-*, trace,
-  events, timings).
+  events).
 
 ## Steps
 
@@ -224,7 +255,8 @@ suite: ~36 s of boots on CI).
    allocator arenas. Runs `hello.exe`, then `abi_test`, `file_test`...
    then threads and waits.
 3. **U3**: `cargo xtask um-test` runs every scenario that gala-um supports
-   (a per-scenario `um: bool`), in CI next to QEMU; the report shows both.
+   (derived: `runs_in_um`), first in `cargo xtask test`; the report shows
+   both. Done.
 
 ## Risks and open questions
 

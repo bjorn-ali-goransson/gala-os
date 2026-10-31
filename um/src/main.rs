@@ -2,7 +2,10 @@
 //! gala's NT layer (the kernel library built with `--features hosted`) as
 //! its "kernel". The platform is `kernel::hosted` (docs/GALA_UM.md).
 //!
-//! usage: um [--module=<directory on C:>/<name>=<host file>]... <program.exe> [arguments]
+//! usage: um [--trace] [--cpus=<n>] [--module=<directory on C:>/<name>=<host file>]... <program.exe> [arguments]
+//!
+//! `--cpus`: show at most n of the host's processors (um-test: 2, as the
+//! QEMU boot tests).
 //!
 //! Modules are what the kernel gets as boot modules (gala's ntdll.dll in
 //! Windows/System32, test DLLs in gala, ...).
@@ -16,8 +19,26 @@ static ALLOCATOR: kernel::hosted::memory::Allocator = kernel::hosted::memory::Al
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1).peekable();
     let mut modules = Vec::new();
-    while let Some(spec) = args.next_if(|a| a.starts_with("--module=")) {
-        let spec = &spec["--module=".len()..];
+    while let Some(option) = args.next_if(|a| a.starts_with("--")) {
+        if option == "--trace" {
+            // Every system call on stderr, as the kernel's `trace` flag.
+            kernel::nt::syscalls::set_trace(true);
+            continue;
+        }
+        if let Some(n) = option.strip_prefix("--cpus=") {
+            match n.parse() {
+                Ok(n) => kernel::hosted::threads::limit_cpus(n),
+                Err(_) => {
+                    eprintln!("um: --cpus=<number>, not {option}");
+                    return ExitCode::from(2);
+                }
+            }
+            continue;
+        }
+        let Some(spec) = option.strip_prefix("--module=") else {
+            eprintln!("um: unknown option {option}");
+            return ExitCode::from(2);
+        };
         let Some((target, host)) = spec.split_once('=') else {
             eprintln!("um: --module=<directory>/<name>=<host file>, not {spec}");
             return ExitCode::from(2);
@@ -32,7 +53,9 @@ fn main() -> ExitCode {
         }
     }
     let Some(path) = args.next() else {
-        eprintln!("usage: um [--module=<dir>/<name>=<host file>]... <program.exe> [arguments]");
+        eprintln!(
+            "usage: um [--trace] [--cpus=<n>] [--module=<dir>/<name>=<host file>]... <program.exe> [arguments]"
+        );
         return ExitCode::from(2);
     };
     let image = match std::fs::read(&path) {

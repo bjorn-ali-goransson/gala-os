@@ -57,6 +57,10 @@ pub struct NtThread {
     /// While suspended on its way to user mode: the registers it will
     /// resume with (NtGet/SetContextThread from other threads).
     parked: IrqMutex<Option<Parked>>,
+    /// While it is inside a system call: its user registers at the
+    /// `syscall` (the context Windows reports for a thread suspended while
+    /// blocked in one).
+    in_syscall: IrqMutex<Option<UserRegs>>,
 }
 
 /// The user state of a thread parked by suspension.
@@ -202,6 +206,7 @@ pub fn create(
         alertable: core::sync::atomic::AtomicBool::new(false),
         owned_mutants: IrqMutex::new(Vec::new()),
         parked: IrqMutex::new(None),
+        in_syscall: IrqMutex::new(None),
     };
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -469,8 +474,16 @@ pub fn suspend(object: &ObjectRef) -> Result<u32, NtStatus> {
     Ok(previous)
 }
 
-/// The parked user state of a suspended thread, waiting (up to about a
-/// second) for it to reach the point where it parks.
+/// Records (or clears) the current thread's user registers while it is in
+/// a system call (the dispatcher calls this around every service).
+pub fn set_in_syscall(object: &ObjectRef, regs: Option<UserRegs>) {
+    *as_thread(object).in_syscall.lock() = regs;
+}
+
+/// The user state of a suspended thread: parked on its way to user mode,
+/// or, while it is inside a system call (blocked in a wait, say), its
+/// registers at the `syscall` with the default floating-point state.
+/// Waits up to about a second for one of the two.
 pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
     let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     for _ in 0..1000 {
@@ -480,11 +493,22 @@ pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
         if *t.suspend_count.lock() == 0 || t.has_exited() {
             break;
         }
+        if let Some(regs) = *t.in_syscall.lock() {
+            return Ok(Parked { regs, fx: default_fx(), changed: false });
+        }
         platform::sleep_ms(1);
     }
-    // TODO: the context of a thread that is not suspended, or is blocked
-    // in a wait (Windows interrupts it with a kernel APC).
+    // TODO: the context of a thread that is not suspended (Windows
+    // interrupts it with a kernel APC).
     Err(NtStatus::UNSUCCESSFUL)
+}
+
+/// The floating-point state after reset (FCW 0x37f, MXCSR 0x1f80).
+fn default_fx() -> platform::FxState {
+    let mut fx = platform::FxState([0; 512]);
+    fx.0[0..2].copy_from_slice(&0x37fu16.to_le_bytes());
+    fx.0[24..28].copy_from_slice(&0x1f80u32.to_le_bytes());
+    fx
 }
 
 /// Replaces the parked user state of a suspended thread (applied when it

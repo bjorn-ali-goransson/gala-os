@@ -204,7 +204,16 @@ user entry and user memory only through `nt::platform` (traits `Clock`,
 frame allocator. New machine needs go into a trait, not around it.
 With the `hosted` feature, `P` is `hosted::Um` (gala-um, docs/GALA_UM.md):
 the same NT code runs in a Linux process; any new trait method needs a
-hosted implementation too.
+hosted implementation too. `net::tcp` also uses `nt::platform` for its
+thread and clock. `Threads::interrupt(id)` makes a thread in user mode
+pass through the user-return hook soon (suspension, termination); the
+kernel's tick already does that, gala-um sends a signal.
+
+**Context of a thread in a system call**: the dispatcher records the
+caller's user registers while a service runs (`thread::set_in_syscall`);
+NtGetContextThread of a thread suspended while inside a system call
+(blocked in a wait) returns them, as Windows does, with the default
+floating-point state.
 
 **Pinned build**: Windows 11 24H2, build 26100 (tentative). Only service
 numbers depend on it so far.

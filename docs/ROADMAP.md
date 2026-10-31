@@ -194,7 +194,7 @@ to set and to argue for. Current order and why:
 5. G3 (workable Go programs): done. N1 done (N1a-N1c: Go's net/http
    serves the host). N2a, N2b done: Nginx serves the host in its normal
    master/worker mode, with gzip, rewrite and TLS (N2c, N2d: zlib,
-   PCRE2, OpenSSL). U1 and U2 (a-c) done; next: U3.
+   PCRE2, OpenSSL). U1-U3 done (gala-um).
    N2a was decided 2026-10-31: Nginx is the stated
    goal and the ledger makes bring-up data-driven, so build an x64 Nginx
    with mingw-w64 and run it on gala before choosing anything larger
@@ -227,7 +227,10 @@ U2. **gala-um runs hello.exe**, then the ntrt test programs; `cargo xtask
    arguments, `Threads::interrupt` (suspending running threads), memfd
    file pages: 47 programs (ntrt, kernel32, Go) pass in ~1.3 s. Next U3.
 U3. **gala-um in CI** next to the QEMU scenarios, with differences between
-   the two reported as bugs.
+   the two reported as bugs. Done 2026-10-31: `runs_in_um` (no list),
+   um-test first in `cargo xtask test`, gala-um outcomes in the report;
+   host CPUs, loopback networking; 51 programs in ~2.7 s. It found a real
+   NT bug at once (context of a thread suspended in a system call).
 N1. **Networking (next)**, re-planned 2026-10-30 from data: the official
    Nginx Windows build is a 32-bit (PE32) program (imports: KERNEL32 152,
    ADVAPI32 21, WS2_32 7, CRYPT32 7, USER32 4; C runtime linked in), and

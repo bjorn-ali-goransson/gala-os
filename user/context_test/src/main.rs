@@ -2,7 +2,8 @@
 //! goroutine preemption use), with results expected to match real Windows
 //! (NtSuspendThread/NtGetContextThread/NtSetContextThread through ntdll's
 //! exports: their numbers depend on the build). Prints `context_test: ok`
-//! or exits with the number of the failing check.
+//! or exits with the number of the failing check. Also: the context of a
+//! thread suspended while blocked in a wait is its state at the system call.
 
 #![no_std]
 #![no_main]
@@ -211,6 +212,12 @@ fn run() -> Result<(), u32> {
     c.st(s, ok)?;
     delay(SECOND / 50);
     c.st(suspend(w, &mut prev), ok)?;
+    // Its context while blocked in the wait: the user state at the system
+    // call (rip in our image, after ntrt's `syscall`).
+    let mut wc = Ctx::full();
+    c.st(get_context(w, wc.0.as_mut_ptr()), ok)?;
+    let rip = wc.get(CTX_RIP);
+    c.ok(rip > image && rip < image + 0x10_0000, rip)?;
     c.st(set_event(event).0, ok)?;
     delay(SECOND / 50);
     c.eq(WAITER_DONE.load(Ordering::SeqCst), 0)?;

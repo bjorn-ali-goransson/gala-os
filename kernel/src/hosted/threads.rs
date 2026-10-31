@@ -24,6 +24,8 @@ struct Slot {
     wake: Condvar,
     /// The host thread (0 until it has started).
     pthread: Mutex<libc::pthread_t>,
+    /// Processor affinity (NT mask; 0: all), applied when it starts.
+    affinity: Mutex<u64>,
 }
 
 static SLOTS: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
@@ -72,6 +74,10 @@ pub fn spawn(
             if let Some(s) = slot(id) {
                 // SAFETY: pthread_self has no preconditions.
                 *s.pthread.lock().unwrap() = unsafe { libc::pthread_self() };
+                let mask = *s.affinity.lock().unwrap();
+                if mask != 0 {
+                    pin(&s, mask);
+                }
             }
             setup();
             entry(arg);
@@ -132,6 +138,72 @@ pub fn signal(id: ThreadId, signal: i32) {
     if pthread != 0 {
         // SAFETY: a host thread that never exits (see `exit`).
         unsafe { libc::pthread_kill(pthread, signal) };
+    }
+}
+
+/// Processors: NT processor n is host CPU n, for the CPUs 0..n that the
+/// process may run on (the contiguous start of its affinity, at most 64;
+/// one if that is empty), so RDTSCP's processor number (Linux's TSC_AUX)
+/// and NtGetCurrentProcessorNumber agree, as on Windows.
+pub fn cpu_count() -> u32 {
+    *CPUS.get_or_init(|| {
+        // SAFETY: a zeroed cpu_set_t filled by the kernel.
+        let mask = unsafe {
+            let mut set: libc::cpu_set_t = core::mem::zeroed();
+            if libc::sched_getaffinity(0, core::mem::size_of_val(&set), &mut set) != 0 {
+                return 1;
+            }
+            (0..64).filter(|&i| libc::CPU_ISSET(i, &set)).fold(0u64, |m, i| m | 1 << i)
+        };
+        mask.trailing_ones().max(1).min(CPU_LIMIT.load(core::sync::atomic::Ordering::Relaxed))
+    })
+}
+
+static CPUS: OnceLock<u32> = OnceLock::new();
+static CPU_LIMIT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(64);
+
+/// Shows at most `n` processors (before the program starts), e.g. as many
+/// as the QEMU boot tests have.
+pub fn limit_cpus(n: u32) {
+    CPU_LIMIT.store(n.clamp(1, 64), core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn online_mask() -> u64 {
+    match cpu_count() {
+        64 => u64::MAX,
+        n => (1 << n) - 1,
+    }
+}
+
+pub fn current_cpu() -> u32 {
+    // SAFETY: no preconditions.
+    let cpu = unsafe { libc::sched_getcpu() };
+    if cpu >= 0 && (cpu as u32) < cpu_count() { cpu as u32 } else { 0 }
+}
+
+/// Restricts thread `id` to the processors in `mask` (now if it runs,
+/// else when it starts).
+pub fn set_affinity(id: ThreadId, mask: u64) {
+    if let Some(s) = slot(id) {
+        *s.affinity.lock().unwrap() = mask;
+        if *s.pthread.lock().unwrap() != 0 {
+            pin(&s, mask);
+        }
+    }
+}
+
+fn pin(s: &Slot, mask: u64) {
+    let pthread = *s.pthread.lock().unwrap();
+    // SAFETY: a zeroed cpu_set_t with bits set; a host thread that never
+    // exits.
+    unsafe {
+        let mut set: libc::cpu_set_t = core::mem::zeroed();
+        for i in 0..64 {
+            if mask & online_mask() & (1 << i) != 0 {
+                libc::CPU_SET(i, &mut set);
+            }
+        }
+        libc::pthread_setaffinity_np(pthread, core::mem::size_of_val(&set), &set);
     }
 }
 
