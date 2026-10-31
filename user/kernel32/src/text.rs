@@ -260,7 +260,27 @@ pub extern "system" fn GetModuleHandleExW(
     };
     // SAFETY: the caller's output pointer.
     unsafe { *module = found };
-    if found.is_null() { FALSE } else { TRUE }
+    if found.is_null() {
+        return FALSE;
+    }
+    // A reference the caller drops with FreeLibrary, unless
+    // GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT (2); FLAG_PIN (1) pins.
+    if flags & UNCHANGED_REFCOUNT == 0 {
+        // SAFETY: a plain call.
+        let status = unsafe { LdrAddRefDll(flags & PIN, found) };
+        if status != STATUS_SUCCESS {
+            return fail(status, FALSE);
+        }
+    }
+    TRUE
+}
+
+const PIN: u32 = 1;
+const UNCHANGED_REFCOUNT: u32 = 2;
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn LdrAddRefDll(flags: u32, module: Handle) -> u32;
 }
 
 #[unsafe(no_mangle)]

@@ -1629,3 +1629,22 @@ pub unsafe extern "system" fn LdrGetDllFullName(module: usize, name: *mut Unicod
         STATUS_SUCCESS
     })
 }
+
+/// LdrAddRefDll(Flags, DllHandle): another reference on a loaded module;
+/// LDR_ADDREF_DLL_PIN (1) pins it for the process's lifetime.
+#[unsafe(no_mangle)]
+pub extern "system" fn LdrAddRefDll(flags: u32, module: usize) -> u32 {
+    with_loader_lock(|| {
+        with_modules(|m| match m.iter_mut().find(|m| m.base == module && module != 0) {
+            Some(entry) => {
+                if flags & 1 != 0 {
+                    entry.refs = PINNED;
+                } else if entry.refs != PINNED {
+                    entry.refs += 1;
+                }
+                STATUS_SUCCESS
+            }
+            None => STATUS_DLL_NOT_FOUND,
+        })
+    })
+}

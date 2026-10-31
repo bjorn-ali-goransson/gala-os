@@ -44,6 +44,9 @@ unsafe extern "system" {
     fn SetEvent(h: Handle) -> Bool;
     fn LoadLibraryA(name: *const u8) -> Handle;
     fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
+    fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn GetModuleHandleExA(flags: u32, name: *const u8, module: *mut Handle) -> Bool;
+    fn FreeLibrary(module: Handle) -> Bool;
 }
 
 #[allow(dead_code)]
@@ -336,6 +339,27 @@ fn run() -> Result<(), u32> {
     // The executable's callback saw all three threads.
     c.eq(seen(2), 3)?;
     c.eq(seen(3), 3)?;
+
+    // GetModuleHandleEx takes a reference (unless asked not to), which
+    // FreeLibrary drops: the DLL stays loaded by LoadLibrary's reference.
+    // SAFETY: plain calls.
+    unsafe {
+        let name = c"tlsdll.dll".as_ptr().cast();
+        let dll = GetModuleHandleA(name);
+        c.ok(!dll.is_null(), 0)?;
+        let mut h = core::ptr::null_mut();
+        c.ok(GetModuleHandleExA(0, name, &mut h) != 0, GetLastError().into())?;
+        c.eq(h as u64, dll as u64)?;
+        c.ok(FreeLibrary(h) != 0, 0)?;
+        c.eq(GetModuleHandleA(name) as u64, dll as u64)?;
+        // By address (FROM_ADDRESS), with UNCHANGED_REFCOUNT: no reference.
+        let mut h2 = core::ptr::null_mut();
+        c.ok(GetModuleHandleExA(4 | 2, get_dll as usize as *const u8, &mut h2) != 0, 0)?;
+        c.eq(h2 as u64, dll as u64)?;
+        // The last reference: LoadLibrary's.
+        c.ok(FreeLibrary(dll) != 0, 0)?;
+        c.ok(GetModuleHandleA(name).is_null(), 0)?;
+    }
     Ok(())
 }
 

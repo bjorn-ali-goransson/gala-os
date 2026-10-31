@@ -797,6 +797,9 @@ Windows, never shadows the system's DLLs.)
   ends. Each module keeps the path it was loaded from
   (LdrGetDllFullName, for GetModuleFileName). The executable's static
   imports (loaded at startup) are pinned: FreeLibrary never unloads them.
+  LdrAddRefDll takes a reference (or pins); GetModuleHandleEx takes one
+  unless GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT is given, as
+  documented (the JVM pairs it with FreeLibrary).
   A recursive loader lock serializes loading, unloading and thread
   notifications.
 - **Static TLS** (ntdll tls.rs): each image with a TLS directory gets an
