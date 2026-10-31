@@ -24,6 +24,8 @@ use crate::sync::IrqMutex;
 
 pub struct Process {
     pub id: u64,
+    /// The creating process's id (0: started by the kernel).
+    pub parent_id: u64,
     pub name: &'static str,
     /// The Win32 path of the executable (`C:\\gala\\x.exe`).
     pub path: &'static str,
@@ -153,7 +155,44 @@ impl Process {
     }
 }
 
+/// Every process object: running ones, and exited ones while something
+/// else (a handle, a thread object) still refers to them, so they can be
+/// opened by id as on Windows. `prune` forgets the rest.
 static PROCESSES: IrqMutex<Vec<KArc<Process>>> = IrqMutex::new(Vec::new());
+
+/// Drops exited processes that only PROCESSES refers to (outside the lock:
+/// dropping one frees its address space).
+pub fn prune() {
+    loop {
+        let victim = {
+            let mut list = PROCESSES.lock();
+            let Some(i) =
+                list.iter().position(|p| *p.exit_time.lock() != 0 && KArc::strong_count(p) == 1)
+            else {
+                return;
+            };
+            list.swap_remove(i)
+        };
+        drop(victim);
+    }
+}
+
+/// The running processes (for SystemProcessInformation).
+pub fn running() -> Result<Vec<KArc<Process>>, AllocError> {
+    let list = PROCESSES.lock();
+    let mut out = Vec::new();
+    out.try_reserve(list.len()).map_err(|_| AllocError)?;
+    for p in list.iter().filter(|p| *p.exit_time.lock() == 0) {
+        out.try_push(p.clone())?;
+    }
+    Ok(out)
+}
+
+/// The process with id `id` (running, or exited and still referenced).
+pub fn by_id(id: u64) -> Option<KArc<Process>> {
+    prune();
+    PROCESSES.lock().iter().find(|p| p.id == id).cloned()
+}
 
 /// The process owning the current thread, if it is a user thread.
 pub fn current() -> Option<KArc<Process>> {
@@ -395,6 +434,7 @@ pub fn spawn_from_pe(
         handles: None,
         suspended: false,
         runtime_data: &[],
+        parent_id: 0,
     })
 }
 
@@ -417,6 +457,8 @@ pub struct Spawn<'a> {
     pub suspended: bool,
     /// STARTUPINFO's lpReserved2 bytes for the parameters' RuntimeData.
     pub runtime_data: &'a [u8],
+    /// The creating process's id (0: the kernel).
+    pub parent_id: u64,
 }
 
 /// Creates a process from a PE executable and starts (or prepares) its
@@ -432,6 +474,7 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
         handles,
         suspended,
         runtime_data,
+        parent_id,
     } = spec;
     let image = PeImage::parse(data).map_err(LoadError::Pe)?;
     // Binding imports is the user-mode loader's job (ntdll), as on Windows.
@@ -550,6 +593,7 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
     let space = KArc::try_new(platform::SpaceLock::new(space))?;
     let process = KArc::try_new(Process {
         id,
+        parent_id,
         name,
         path,
         space,
@@ -565,6 +609,7 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
         create_time: platform::system_time(),
         exit_time: IrqMutex::new(0),
     })?;
+    prune();
     PROCESSES.lock().try_push(process.clone())?;
 
     // Main thread: starts at the entry point with rcx = PEB, and rsp as if
@@ -686,7 +731,8 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     // the process's own objects) and forget the process.
     let entries = process.handles.lock().close_all();
     drop(entries);
-    PROCESSES.lock().retain(|p| !KArc::ptr_eq(p, process));
+    // Stays in PROCESSES while referenced (OpenProcess by id); `prune`
+    // forgets it after that.
 }
 
 /// User-mode CPU exceptions: resolved (demand paging, guard pages, COW),

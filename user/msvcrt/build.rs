@@ -6,7 +6,7 @@ fn main() {
     for name in ["memcmp", "memcpy", "memmove", "memset", "strlen"] {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=ntdll.{name}");
     }
-    for name in ["fprintf", "printf", "sprintf", "sscanf", "_setjmp", "longjmp"] {
+    for name in ["fprintf", "printf", "sprintf", "_snprintf", "sscanf", "_setjmp", "longjmp"] {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}");
     }
 }

@@ -121,6 +121,36 @@ fn block_len(block: *const u16) -> usize {
     }
 }
 
+/// An ANSI (UTF-8 here) environment block as UTF-16, in memory that
+/// FreeEnvironmentStringsW frees; None if out of memory.
+fn ansi_block_to_wide(block: *const u8) -> Option<*mut u16> {
+    let mut n = 0;
+    // SAFETY: an environment block ends with two NULs (or is one NUL
+    // pair when empty).
+    unsafe {
+        while !(*block.add(n) == 0 && (n == 0 || *block.add(n - 1) == 0)) {
+            n += 1;
+        }
+    }
+    let n = n + 1; // bytes, with the final NUL
+    // UTF-8 never needs more UTF-16 units than bytes, plus one NUL pair
+    // for an empty block.
+    let units = n + 1;
+    let w = VirtualAlloc(core::ptr::null_mut(), units * 2, 0x3000, 4).cast::<u16>();
+    if w.is_null() {
+        return None;
+    }
+    let got = super::text::MultiByteToWideChar(65001, 0, block, n as i32, w, units as i32);
+    if got <= 0 {
+        FreeEnvironmentStringsW(w);
+        return None;
+    }
+    // SAFETY: inside the zeroed allocation of `units` units: an empty
+    // block ("\0") gets its second NUL.
+    unsafe { *w.add(got as usize) = 0 };
+    Some(w)
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn CreateProcessW(
     application: *const u16,
@@ -191,8 +221,10 @@ pub extern "system" fn CreateProcessW(
     } else if flags & CREATE_UNICODE_ENVIRONMENT != 0 {
         (environment.cast::<u16>(), false)
     } else {
-        unsupported(b"kernel32.dll!CreateProcessW(ANSI environment)", 0);
-        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+        match ansi_block_to_wide(environment.cast::<u8>()) {
+            Some(w) => (w, true),
+            None => return fail_with(ERROR_NOT_ENOUGH_MEMORY, FALSE),
+        }
     };
     // Standard handles: from STARTUPINFO if it says so, else ours.
     // SAFETY: the caller's STARTUPINFOW (dwFlags at 60, handles at 80).
@@ -317,10 +349,6 @@ pub extern "system" fn CreateProcessA(
         Ok(p) => p,
         Err(e) => return fail_with(e, FALSE),
     };
-    if !environment.is_null() && flags & CREATE_UNICODE_ENVIRONMENT == 0 {
-        unsupported(b"kernel32.dll!CreateProcessA(ANSI environment)", 0);
-        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
-    }
     CreateProcessW(
         app_w,
         line_w.cast_mut(),
@@ -515,12 +543,27 @@ pub extern "system" fn IsWow64Process(_process: Handle, wow64: *mut Bool) -> Boo
     TRUE
 }
 
-/// OpenProcess: opening another process by id is not there yet (as for
-/// an id that does not exist: ERROR_INVALID_PARAMETER); recorded.
+/// OpenProcess(access, inherit, id): NtOpenProcess with the id as
+/// CLIENT_ID.UniqueProcess; an id that is no process fails with
+/// ERROR_INVALID_PARAMETER.
 #[unsafe(no_mangle)]
-pub extern "system" fn OpenProcess(_access: u32, _inherit: Bool, id: u32) -> Handle {
-    unsupported(b"kernel32.dll!OpenProcess", id.into());
-    fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut())
+pub extern "system" fn OpenProcess(access: u32, inherit: Bool, id: u32) -> Handle {
+    let attributes = ObjectAttributes {
+        length: size_of::<ObjectAttributes>() as u32,
+        root_directory: 0,
+        object_name: core::ptr::null(),
+        attributes: if inherit != 0 { 2 } else { 0 }, // OBJ_INHERIT
+        security_descriptor: 0,
+        security_quality_of_service: 0,
+    };
+    let client_id = [id as usize, 0];
+    let mut h = 0usize;
+    // SAFETY: valid output, attributes and CLIENT_ID.
+    let status = unsafe { NtOpenProcess(&mut h, access, &attributes, &client_id) };
+    if status != STATUS_SUCCESS {
+        return fail(status, core::ptr::null_mut());
+    }
+    h as Handle
 }
 
 /// Other processes' memory and threads: not yet; recorded.
@@ -548,23 +591,6 @@ pub extern "system" fn CreateRemoteThread(
 ) -> Handle {
     unsupported(b"kernel32.dll!CreateRemoteThread", 0);
     fail_with(ERROR_NOT_SUPPORTED, core::ptr::null_mut())
-}
-
-/// Toolhelp process lists (ps): not yet; recorded.
-#[unsafe(no_mangle)]
-pub extern "system" fn CreateToolhelp32Snapshot(flags: u32, _process: u32) -> Handle {
-    unsupported(b"kernel32.dll!CreateToolhelp32Snapshot", flags.into());
-    fail_with(ERROR_NOT_SUPPORTED, -1isize as Handle)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Process32First(_snapshot: Handle, _entry: *mut u8) -> Bool {
-    fail_with(18, FALSE) // ERROR_NO_MORE_FILES
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Process32Next(_snapshot: Handle, _entry: *mut u8) -> Bool {
-    fail_with(18, FALSE)
 }
 
 /// GetStartupInfoW: from the process parameters: the standard handles

@@ -221,6 +221,13 @@ pub extern "system" fn VirtualProtect(
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 
+/// GetSystemTimePreciseAsFileTime: the system time has the clock's full
+/// precision here already.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSystemTimePreciseAsFileTime(time: *mut u64) {
+    GetSystemTimeAsFileTime(time)
+}
+
 /// GetSystemTimeAsFileTime: 100 ns intervals since 1601 (UTC).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemTimeAsFileTime(time: *mut u64) {

@@ -284,6 +284,27 @@ pub extern "C" fn _wfopen(path: *const u16, mode: *const u16) -> *mut u8 {
     }
 }
 
+/// freopen(path, mode, file): `file` now reads or writes the file at
+/// `path` on the same descriptor (so freopen of stdout redirects fd 1 and
+/// the standard handle); its old file is closed. `file`, or NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn freopen(path: *const u8, mode: *const u8, file: *mut u8) -> *mut u8 {
+    let Some(s) = stream(file) else { return null_mut() };
+    fflush(file);
+    let fresh = fopen(path, mode);
+    let Some(new) = stream(fresh) else { return null_mut() };
+    let (fd, new_fd) = (s.fd, new.fd);
+    if _dup2(new_fd, fd) != 0 {
+        fclose(fresh);
+        return null_mut();
+    }
+    fclose(fresh);
+    let Some(h) = handle_of_fd(fd) else { return null_mut() };
+    // SAFETY: the caller's stream, reset to the new file.
+    unsafe { file.cast::<Stream>().write(Stream::new(h, fd)) };
+    file
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn fclose(file: *mut u8) -> i32 {
     let Some(s) = stream(file) else { return -1 };
@@ -1457,6 +1478,15 @@ core::arch::global_asm!(
     "call {vsprintf}",
     "add rsp, 40",
     "ret",
+    // _snprintf(buf, count, fmt, ...): the list starts at r9's slot.
+    ".globl _snprintf",
+    "_snprintf:",
+    "mov [rsp+32], r9",
+    "lea r9, [rsp+32]",
+    "sub rsp, 40",
+    "call {_vsnprintf}",
+    "add rsp, 40",
+    "ret",
     ".globl printf",
     "printf:",
     "mov [rsp+8], rcx",
@@ -1471,4 +1501,5 @@ core::arch::global_asm!(
     vfprintf = sym vfprintf,
     vsprintf = sym vsprintf,
     vprintf = sym vprintf,
+    _vsnprintf = sym _vsnprintf,
 );

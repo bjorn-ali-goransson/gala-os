@@ -213,7 +213,8 @@ to set and to argue for. Current order and why:
    child stdio) done; next H2 (a real CLI tool or shell-like program
    driving children through pipes, chosen from what the ledger shows).
    H2 done (Go's os/exec, busybox-w32's sh); H3 (scripts and file
-   tools) done; next H4 (a toolchain).
+   tools) done; H4 (a C compiler on gala) done; next H5 (TinyCC builds
+   itself on gala).
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
@@ -345,6 +346,25 @@ H3. **Scripts and tools on gala**: busybox utilities over files (ls,
    process parameters' CurrentDirectory buffer only fit the first
    directory (Windows reserves MAX_PATH), so `cd` failed. Next H4: a
    toolchain on gala.
+H4. **A C compiler on gala**: done 2026-10-31. The `tcc` scenario:
+   busybox's tar unpacks TinyCC (`user/tcc/build.sh`: pinned commit,
+   tcc.c compiled directly with mingw-w64, no configure), tcc.exe builds
+   its own runtime library on gala (14 objects and `tcc -ar`), compiles
+   `user/tcc/hello.c` and the result runs (output and exit code as on
+   Windows). It needed CreateProcess with an ANSI environment block,
+   msvcrt's `_snprintf`, `freopen`, `remove`, `_spawnvp`, `_cwait`,
+   `system`, `_strlwr`, `_assert`, `__argc`, `_controlfp`, `_XcptFilter`
+   (msvcrt_test checks the testable ones), kernel32's SearchPathA/W and
+   GetSystemTimePreciseAsFileTime, and found that busybox's sh never
+   waited for external programs: its getppid walks Toolhelp, which was a
+   stub. Now NtOpenProcess, SystemProcessInformation and Toolhelp
+   (Process32/Thread32) exist, and exited processes stay openable while
+   referenced (process_test checks both). Left in the ledger: SetFileTime
+   (tar restores times), RtlAddFunctionTable (accepted, unused: tcc -run).
+H5. **TinyCC builds itself on gala**: next. tcc.c compiled on gala by
+   the tcc.exe from H4 into a second tcc.exe, which then builds the
+   runtime and hello.c again with the same results; then gala's own C
+   test (msvcrt_test) built by tcc on gala.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

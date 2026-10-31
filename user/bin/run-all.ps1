@@ -76,18 +76,25 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     Write-Host ("{0,-18} {1:x8}  {2}" -f $name, $code, $line)
 }
 
-# busybox scripts (the busybox_files and busybox_script scenarios): their
-# full output goes to <name>-windows.txt next to the report, to compare
-# with the scenario's expected lines.
-foreach ($script in "files", "script") {
-    $path = Join-Path $here "..\busybox\$script.sh"
+# Scripts run by busybox sh (the busybox_files, busybox_script and tcc
+# scenarios): their full output goes to <name>-windows.txt next to the
+# report, to compare with the scenario's expected lines. tcc.sh unpacks
+# tcc.tar (user/tcc/build.sh), builds TinyCC's runtime with it, compiles
+# hello.c and runs it.
+$scripts = @(
+    @{ name = "busybox_files"; path = "..\busybox\files.sh"; args = @() },
+    @{ name = "busybox_script"; path = "..\busybox\script.sh"; args = @() },
+    @{ name = "tcc"; path = "..\tcc\tcc.sh"; args = @((Join-Path $here "tcc.tar")) }
+)
+foreach ($s in $scripts) {
+    $path = Join-Path $here $s.path
     if (-not (Test-Path $path) -or -not (Test-Path (Join-Path $here "busybox.exe"))) { continue }
-    $text = & (Join-Path $here "busybox.exe") sh $path 2>&1 | Out-String
+    $text = & (Join-Path $here "busybox.exe") sh $path @($s.args) 2>&1 | Out-String
     $code = $LASTEXITCODE
-    $text | Set-Content -Path (Join-Path (Split-Path -Parent $Out) "busybox_$script-windows.txt") -Encoding UTF8
+    $text | Set-Content -Path (Join-Path (Split-Path -Parent $Out) "$($s.name)-windows.txt") -Encoding UTF8
     $last = @($text -split "`r?`n" | Where-Object { $_ -ne "" }) | Select-Object -Last 1
-    $results += [ordered]@{ program = "busybox_$script"; exit = $code; line = $last }
-    Write-Host ("{0,-18} {1:x8}  {2}" -f "busybox_$script", $code, $last)
+    $results += [ordered]@{ program = $s.name; exit = $code; line = $last }
+    Write-Host ("{0,-18} {1:x8}  {2}" -f $s.name, $code, $last)
 }
 
 $os = Get-CimInstance Win32_OperatingSystem

@@ -2,7 +2,8 @@
  * behaviour only): sscanf, _vsnprintf measuring and truncating,
  * setjmp/longjmp, _pipe/_read/_write/_close with end of file, _dup and
  * _dup2 on fd 1, strtok, atof, _stricmp/_strnicmp, mbstowcs, _isatty,
- * _getcwd. Built against msvcrt (not mingw's own stdio) by build.sh.
+ * _getcwd; __argc, _controlfp, _snprintf, _strlwr and remove (TinyCC's
+ * startup code and tcc.exe use them). Built against msvcrt (not mingw's own stdio) by build.sh.
  * Prints "msvcrt_test: ok" or exits with the number of the failing check. */
 #include <stdio.h>
 #include <stdarg.h>
@@ -12,6 +13,7 @@
 #include <io.h>
 #include <fcntl.h>
 #include <direct.h>
+#include <float.h>
 
 static int check;
 #define CHECK(cond) do { check++; if (!(cond)) { printf("msvcrt_test: check %d failed\n", check); fflush(stdout); exit(check); } } while (0)
@@ -92,6 +94,21 @@ int main(void) {
     CHECK(mbstowcs(NULL, "h\xc3\xa9llo", 0) == 5 || mbstowcs(NULL, "h\xc3\xa9llo", 0) == 6);
     char cwd[260];
     CHECK(_getcwd(cwd, sizeof cwd) != NULL && cwd[1] == ':');
+
+    /* What TinyCC's startup code and tcc.exe use. */
+    CHECK(__argc == 1);
+    /* x64: every exception masked, round to nearest (MXCSR 0x1f80). */
+    CHECK(_controlfp(0, 0) == 0x8001f);
+    CHECK(_controlfp(_RC_CHOP, _MCW_RC) == 0x8031f);
+    CHECK((_controlfp(0, 0) & _MCW_RC) == _RC_CHOP);
+    CHECK(_controlfp(_RC_NEAR, _MCW_RC) == 0x8001f);
+    CHECK(_snprintf(small, sizeof small, "%d", 42) == 2 && strcmp(small, "42") == 0);
+    CHECK(_snprintf(small, sizeof small, "%d", 123456) == -1);
+    char mixed[] = "MiXeD 1";
+    CHECK(_strlwr(mixed) == mixed && strcmp(mixed, "mixed 1") == 0);
+    FILE *tmp = fopen("msvcrt_test.tmp", "w");
+    CHECK(tmp != NULL && fputs("x", tmp) >= 0 && fclose(tmp) == 0);
+    CHECK(remove("msvcrt_test.tmp") == 0 && remove("msvcrt_test.tmp") == -1);
 
     printf("msvcrt_test: ok\n");
     return 0;

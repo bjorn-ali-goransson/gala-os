@@ -414,6 +414,20 @@ fn compare_ci(a: *const u8, b: *const u8, n: usize) -> i32 {
     0
 }
 
+/// _strlwr(s): ASCII letters lowered in place; `s`.
+#[unsafe(no_mangle)]
+pub extern "C" fn _strlwr(s: *mut u8) -> *mut u8 {
+    let mut p = s;
+    // SAFETY: the caller's NUL-terminated string.
+    unsafe {
+        while *p != 0 {
+            *p = (*p).to_ascii_lowercase();
+            p = p.add(1);
+        }
+    }
+    s
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _stricmp(a: *const u8, b: *const u8) -> i32 {
     compare_ci(a, b, usize::MAX)

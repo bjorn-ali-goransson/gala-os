@@ -169,6 +169,11 @@ fn by_id(id: u64) -> Option<ObjectRef> {
     THREADS.lock().iter().find(|o| as_thread(o).id == id).cloned()
 }
 
+/// The process of the thread with id `id`.
+pub fn process_of(id: u64) -> Option<KArc<Process>> {
+    by_id(id).map(|t| as_thread(&t).process.clone())
+}
+
 /// Creates a user thread in `process` that starts with `regs` once resumed
 /// (if `suspended`). `stack` is `(base, limit, allocation base)` for the
 /// TEB (StackBase, StackLimit, DeallocationStack).

@@ -610,6 +610,37 @@ and thread (full access).
 
 
 
+### Process lifetime, OpenProcess and process lists (H4)
+
+A process stays in the kernel's process list (`process::PROCESSES`)
+after it exits for as long as anything else refers to it (a handle from
+CreateProcess, a thread object), so `NtOpenProcess` (0x26) finds it by
+id as Windows does: a parent that kept its handle can open its exited
+child and read the exit code. `process::prune()` forgets exited
+processes only the list refers to; it runs before every spawn and
+lookup, when a process or thread handle is closed (often the last
+reference), and in run_program's teardown check. NtOpenProcess takes
+CLIENT_ID.UniqueProcess (or the process of UniqueThread), fails with
+STATUS_INVALID_CID (ERROR_INVALID_PARAMETER) otherwise, and grants the
+access asked for (no security descriptors yet). Each process records
+its creator's id (`parent_id`, 0 for boot programs).
+
+`NtQuerySystemInformation(SystemProcessInformation)` lists the idle
+process (id 0, no image, as on Windows) and every running process
+(exited ones are not listed) with its threads, in the public x64 layout
+(`sysinfo::push_process`: SYSTEM_PROCESS_INFORMATION of 0x100 bytes,
+then SYSTEM_THREAD_INFORMATION entries of 0x50, then the image name;
+CreateTime, ImageName, UniqueProcessId, InheritedFromUniqueProcessId,
+HandleCount; base priority 8; threads show as waiting). A short buffer
+gets STATUS_INFO_LENGTH_MISMATCH and the size needed. kernel32's Toolhelp
+(`toolhelp.rs`) is built on it as on Windows: CreateToolhelp32Snapshot
+copies the list into an anonymous section after a small header holding
+the Process32/Thread32 cursors, so the handle is the whole snapshot;
+modules and heaps are not listed. busybox-w32 needs both: its getppid
+walks the Toolhelp list (pid, parent, create times through OpenProcess
+and GetProcessTimes), and a shell child that cannot find its parent
+there exits at once instead of waiting for the program it started.
+
 Windows programs need ntdll.dll and kernel32.dll in their process. gala
 ships its own, built from `user/` as freestanding Rust cdylibs, written
 from the public documentation of each function (clean room):

@@ -238,3 +238,138 @@ pub extern "system" fn GetFinalPathNameByHandleA(
     unsafe { *out.add(needed as usize) = 0 };
     needed as u32
 }
+
+const ERROR_FILE_NOT_FOUND_: u32 = 2;
+
+/// Characters of SearchPath's candidate buffer (on the stack: frames
+/// stay under 4 KiB, there is no __chkstk).
+const SEARCH_CHARS: usize = 520;
+
+/// Appends `parts` to `out` at `*n`; false if they do not fit (with a NUL).
+fn append(out: &mut [u16; SEARCH_CHARS], n: &mut usize, parts: &[&[u16]]) -> bool {
+    for part in parts {
+        if *n + part.len() >= SEARCH_CHARS {
+            return false;
+        }
+        out[*n..*n + part.len()].copy_from_slice(part);
+        *n += part.len();
+    }
+    out[*n] = 0;
+    true
+}
+
+/// Whether `dir` + `\\` + `name` + `ext` names an existing file; if so its
+/// full path goes to the caller's buffer as SearchPathW returns it.
+#[inline(never)] // its own frame: SearchPathW's stays under 4 KiB
+fn try_candidate(
+    dir: &[u16],
+    name: &[u16],
+    ext: &[u16],
+    size: u32,
+    buf: *mut u16,
+    file_part: *mut *mut u16,
+) -> Option<u32> {
+    let mut c = [0u16; SEARCH_CHARS];
+    let mut n = 0;
+    let sep: &[u16] =
+        if dir.is_empty() || dir.last().is_some_and(|&ch| is_sep(ch)) { &[] } else { &[BACKSLASH] };
+    if !append(&mut c, &mut n, &[dir, sep, name, ext]) {
+        return None;
+    }
+    let attributes = GetFileAttributesW(c.as_ptr());
+    if attributes == u32::MAX || attributes & 0x10 != 0 {
+        return None; // missing, or a directory
+    }
+    Some(GetFullPathNameW(c.as_ptr(), size, buf, file_part))
+}
+
+/// SearchPathW(path, file, extension, size, buf, file_part): the full path
+/// of `file` (with `extension` if it has none) in the `;`-separated `path`,
+/// or by default in the program's directory, System32, the Windows
+/// directory, the current directory and PATH. The length without the
+/// NUL, the size needed if `buf` is too small, or 0 (ERROR_FILE_NOT_FOUND_).
+#[unsafe(no_mangle)]
+pub extern "system" fn SearchPathW(
+    path: *const u16,
+    file: *const u16,
+    extension: *const u16,
+    size: u32,
+    buf: *mut u16,
+    file_part: *mut *mut u16,
+) -> u32 {
+    if file.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    let name = wide_slice(file);
+    let base = name.iter().rposition(|&c| is_sep(c) || c == u16::from(b':')).map_or(0, |i| i + 1);
+    let ext: &[u16] = if extension.is_null() || name[base..].contains(&u16::from(b'.')) {
+        &[]
+    } else {
+        wide_slice(extension)
+    };
+    // A name with a directory is only looked up there.
+    if base > 0 {
+        return try_candidate(&[], name, ext, size, buf, file_part)
+            .unwrap_or_else(|| fail_with(ERROR_FILE_NOT_FOUND_, 0));
+    }
+    let mut list = [0u16; 1536];
+    let dirs: &[u16] = if !path.is_null() {
+        wide_slice(path)
+    } else {
+        // The default order: the program's directory, the system
+        // directories, the current directory, then PATH.
+        let mut n =
+            super::process::GetModuleFileNameW(core::ptr::null_mut(), list.as_mut_ptr(), 520)
+                as usize;
+        n = list[..n.min(520)].iter().rposition(|&c| is_sep(c)).unwrap_or(0);
+        for s in [
+            &ascii16::<19>(b"C:\\Windows\\System32")[..],
+            &ascii16::<10>(b"C:\\Windows"),
+            &[u16::from(b'.')],
+        ] {
+            list[n] = u16::from(b';');
+            list[n + 1..n + 1 + s.len()].copy_from_slice(s);
+            n += 1 + s.len();
+        }
+        list[n] = u16::from(b';');
+        n += 1;
+        let name_path = ascii16::<5>(b"PATH\0");
+        let room = (list.len() - n) as u32;
+        let len = GetEnvironmentVariableW(name_path.as_ptr(), list[n..].as_mut_ptr(), room);
+        if len < room {
+            n += len as usize;
+        }
+        &list[..n]
+    };
+    for dir in dirs.split(|&c| c == u16::from(b';')) {
+        if let Some(r) = try_candidate(dir, name, ext, size, buf, file_part) {
+            return r;
+        }
+    }
+    fail_with(ERROR_FILE_NOT_FOUND_, 0)
+}
+
+/// ASCII `s` as UTF-16.
+const fn ascii16<const N: usize>(s: &[u8]) -> [u16; N] {
+    let mut out = [0u16; N];
+    let mut i = 0;
+    while i < N {
+        out[i] = s[i] as u16;
+        i += 1;
+    }
+    out
+}
+
+/// RtlAddFunctionTable (kernel32 forwards it to ntdll): registers unwind
+/// data for generated code (tcc -run). gala's exception dispatch only
+/// reads images' .pdata: the table is accepted and not consulted (ledger).
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlAddFunctionTable(_table: *const c_void, _count: u32, _base: u64) -> u8 {
+    unsupported(b"kernel32.dll!RtlAddFunctionTable", 0);
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlDeleteFunctionTable(_table: *const c_void) -> u8 {
+    1
+}

@@ -222,3 +222,66 @@ pub extern "system" fn FindNextFileA(find: Handle, data: *mut u8) -> Bool {
     find_data_to_ansi(&w, data);
     TRUE
 }
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SearchPathA(
+    path: *const u8,
+    file: *const u8,
+    extension: *const u8,
+    size: u32,
+    out: *mut u8,
+    file_part: *mut *mut u8,
+) -> u32 {
+    let (mut p, mut f) = ([0u16; MAX], [0u16; MAX_PATH]);
+    let mut e = [0u16; 32];
+    let p = match wide(path, &mut p) {
+        Ok(p) => p,
+        Err(e) => return fail_with(e, 0),
+    };
+    let convert = |s: *const u8, buf: &mut [u16]| -> Result<*const u16, u32> {
+        if s.is_null() {
+            return Ok(core::ptr::null());
+        }
+        super::sync::ansi_to_wide(s, buf).ok_or(ERROR_FILENAME_EXCED_RANGE)?;
+        Ok(buf.as_ptr())
+    };
+    match (convert(file, &mut f), convert(extension, &mut e)) {
+        (Ok(f), Ok(e)) => search_path_to_ansi(p, f, e, size, out, file_part),
+        (Err(e), _) | (_, Err(e)) => fail_with(e, 0),
+    }
+}
+
+const MAX_PATH: usize = 260;
+
+/// SearchPathW's result as UTF-8 (its own frame: SearchPathA's stays
+/// under 4 KiB).
+#[inline(never)]
+fn search_path_to_ansi(
+    p: *const u16,
+    f: *const u16,
+    e: *const u16,
+    size: u32,
+    out: *mut u8,
+    file_part: *mut *mut u8,
+) -> u32 {
+    let mut full = [0u16; 520];
+    let n = super::files::SearchPathW(p, f, e, 520, full.as_mut_ptr(), core::ptr::null_mut());
+    if n == 0 || n >= 520 {
+        return 0;
+    }
+    let mut utf8 = [0u8; 4 * 520];
+    let Some(len) = to_utf8(&full[..n as usize], utf8.as_mut_ptr(), utf8.len()) else { return 0 };
+    if out.is_null() || (size as usize) <= len {
+        return len as u32 + 1;
+    }
+    // SAFETY: the caller's buffer of `size` > len bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(utf8.as_ptr(), out, len);
+        *out.add(len) = 0;
+        if !file_part.is_null() {
+            let last = utf8[..len].iter().rposition(|&c| c == b'\\').map_or(0, |i| i + 1);
+            *file_part = out.add(last);
+        }
+    }
+    len as u32
+}

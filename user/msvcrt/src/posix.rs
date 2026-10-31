@@ -45,6 +45,14 @@ unsafe extern "system" {
     ) -> i32;
     fn GetSystemTimeAsFileTime(time: *mut u64);
     fn GetLastError() -> u32;
+    fn SearchPathA(
+        path: *const u8,
+        file: *const u8,
+        extension: *const u8,
+        size: u32,
+        buf: *mut u8,
+        file_part: *mut *mut u8,
+    ) -> u32;
     fn SetCurrentDirectoryW(path: *const u16) -> i32;
     fn WriteFile(
         h: *mut c_void,
@@ -168,6 +176,12 @@ pub extern "C" fn _rmdir(path: *const u8) -> i32 {
 pub extern "C" fn _unlink(path: *const u8) -> i32 {
     // SAFETY: a NUL-terminated path.
     by_path(path, |p| unsafe { DeleteFileW(p) } != 0)
+}
+
+/// remove(path): a file, as _unlink.
+#[unsafe(no_mangle)]
+pub extern "C" fn remove(path: *const u8) -> i32 {
+    _unlink(path)
 }
 
 /// rename(from, to): fails if `to` exists (as msvcrt's).
@@ -544,4 +558,65 @@ pub extern "C" fn _getche() -> i32 {
         unsafe { WriteFile(GetStdHandle(-11i32 as u32), &b, 1, &mut written, null_mut()) };
     }
     c
+}
+
+/// _spawnvp(mode, cmdname, argv): _spawnve with our environment, the
+/// program searched for (with ".exe" if it has no extension) in the
+/// current directory and PATH, as SearchPath does.
+#[unsafe(no_mangle)]
+pub extern "C" fn _spawnvp(mode: i32, cmdname: *const u8, argv: *const *const u8) -> isize {
+    let mut found = [0u8; PATH];
+    // SAFETY: the caller's NUL-terminated name; our buffer.
+    let n = unsafe {
+        SearchPathA(
+            core::ptr::null(),
+            cmdname,
+            c".exe".as_ptr().cast(),
+            PATH as u32,
+            found.as_mut_ptr(),
+            null_mut(),
+        )
+    } as usize;
+    let program = if n > 0 && n < PATH { found.as_ptr() } else { cmdname };
+    _spawnve(mode, program, argv, core::ptr::null())
+}
+
+/// _cwait(status, process, action): waits for a process from
+/// _spawn*(P_NOWAIT), stores its exit code and closes its handle; the
+/// handle, or -1.
+#[unsafe(no_mangle)]
+pub extern "C" fn _cwait(status: *mut i32, process: isize, _action: i32) -> isize {
+    let h = process as *mut c_void;
+    let mut code = 0u32;
+    // SAFETY: the caller's process handle and status pointer.
+    unsafe {
+        if WaitForSingleObject(h, u32::MAX) != 0 || GetExitCodeProcess(h, &mut code) == 0 {
+            set_errno(ECHILD);
+            return -1;
+        }
+        CloseHandle(h);
+        if !status.is_null() {
+            *status = code as i32;
+        }
+    }
+    process
+}
+
+const ECHILD: i32 = 10;
+
+/// system(command): `%COMSPEC% /c command`. gala has no command
+/// interpreter unless COMSPEC names one: then system(NULL) is 0 and a
+/// command fails with ENOENT.
+#[unsafe(no_mangle)]
+pub extern "C" fn system(command: *const u8) -> i32 {
+    let comspec = crate::getenv(c"COMSPEC".as_ptr().cast());
+    if command.is_null() {
+        return i32::from(!comspec.is_null());
+    }
+    if comspec.is_null() {
+        set_errno(ENOENT);
+        return -1;
+    }
+    let argv = [comspec.cast_const(), c"/c".as_ptr().cast(), command, core::ptr::null()];
+    _spawnve(P_WAIT, comspec, argv.as_ptr(), core::ptr::null()) as i32
 }

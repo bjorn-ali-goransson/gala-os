@@ -100,6 +100,9 @@ pub static mut _fmode: i32 = 0;
 /// __argv: the program's arguments (set by __getmainargs).
 #[unsafe(no_mangle)]
 pub static mut __argv: *mut *mut u8 = null_mut();
+/// __argc: their number (set by __getmainargs).
+#[unsafe(no_mangle)]
+pub static mut __argc: i32 = 0;
 
 static mut ARGC: i32 = 0;
 static mut ARGV: *mut *mut u8 = null_mut();
@@ -296,6 +299,7 @@ pub extern "C" fn __getmainargs(
         *argc = ARGC;
         *argv = ARGV;
         __argv = ARGV;
+        __argc = ARGC;
         *envp = _environ;
     }
     0
@@ -394,6 +398,81 @@ pub extern "C" fn abort() -> ! {
     stdio::write_stderr(b"\r\nabnormal program termination\r\n");
     // SAFETY: ends the process (abort's exit code is 3).
     unsafe { ExitProcess(3) }
+}
+
+/// _controlfp(new, mask): the floating-point control word in msvcrt's
+/// abstract form, its `mask` bits set from `new`; the new word. On x64 it
+/// is MXCSR: exception masks (_MCW_EM), rounding (_MCW_RC) and
+/// denormal flushing (_MCW_DN); precision (_MCW_PC) does not apply.
+#[unsafe(no_mangle)]
+pub extern "C" fn _controlfp(new: u32, mask: u32) -> u32 {
+    // (abstract bit, MXCSR bit): the exception masks, then FTZ.
+    const BITS: [(u32, u32); 7] = [
+        (0x10, 0x80),          // _EM_INVALID
+        (0x8_0000, 0x100),     // _EM_DENORMAL
+        (0x8, 0x200),          // _EM_ZERODIVIDE
+        (0x4, 0x400),          // _EM_OVERFLOW
+        (0x2, 0x800),          // _EM_UNDERFLOW
+        (0x1, 0x1000),         // _EM_INEXACT
+        (0x0100_0000, 0x8000), // _DN_FLUSH
+    ];
+    // _RC_NEAR 0, _RC_DOWN 0x100, _RC_UP 0x200, _RC_CHOP 0x300; MXCSR's
+    // RC field (bits 13-14) is 0 nearest, 1 down, 2 up, 3 toward zero.
+    const MCW_RC: u32 = 0x300;
+    let mut mxcsr = 0u32;
+    // SAFETY: reads MXCSR into a local.
+    unsafe { core::arch::asm!("stmxcsr [{}]", in(reg) &raw mut mxcsr, options(nostack)) };
+    let mut word = BITS.iter().filter(|(_, m)| mxcsr & m != 0).fold(0, |w, (a, _)| w | a);
+    word |= ((mxcsr >> 13) & 3) << 8;
+    let mask = mask & !0x3_0000; // _MCW_PC
+    word = (word & !mask) | (new & mask);
+    let mut out = mxcsr & !(0x1f80 | 0x8000 | 0x6000);
+    for (a, m) in BITS {
+        if word & a != 0 {
+            out |= m;
+        }
+    }
+    out |= ((word & MCW_RC) >> 8) << 13;
+    // SAFETY: loads the updated MXCSR (only control bits changed).
+    unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &raw const out, options(nostack)) };
+    word
+}
+
+/// _XcptFilter(code, pointers): the C runtime's exception filter, which
+/// runs a signal() handler for the exception's signal. signal() installs
+/// no handlers here, so the exception goes on to the next handler
+/// (EXCEPTION_CONTINUE_SEARCH).
+#[unsafe(no_mangle)]
+pub extern "C" fn _XcptFilter(_code: u32, _pointers: *mut c_void) -> i32 {
+    0
+}
+
+/// _assert(expression, file, line): reports a failed assert() on stderr
+/// and aborts, as msvcrt's console programs do.
+#[unsafe(no_mangle)]
+pub extern "C" fn _assert(expression: *const u8, file: *const u8, line: u32) -> ! {
+    let mut digits = [0u8; 10];
+    let mut i = digits.len();
+    let mut n = line;
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    stdio::write_stderr(b"Assertion failed: ");
+    // SAFETY: the caller's NUL-terminated strings.
+    unsafe {
+        stdio::write_stderr(c_str(expression));
+        stdio::write_stderr(b", file ");
+        stdio::write_stderr(c_str(file));
+    }
+    stdio::write_stderr(b", line ");
+    stdio::write_stderr(&digits[i..]);
+    stdio::write_stderr(b"\r\n");
+    abort()
 }
 
 /// _amsg_exit(n): the runtime's fatal error "R60nn".

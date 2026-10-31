@@ -5,7 +5,12 @@
 //! parent waits on the process handle and reads the exit code
 //! (STILL_ACTIVE while it runs), sees the event set, starts a child
 //! suspended (it does not run until ResumeThread) and checks that a
-//! missing program fails with ERROR_FILE_NOT_FOUND. Then redirected
+//! missing program fails with ERROR_FILE_NOT_FOUND. OpenProcess by id
+//! opens an exited child (while a handle keeps it), a suspended one and
+//! the caller; id 0 or an unused id fail with ERROR_INVALID_PARAMETER.
+//! A Toolhelp snapshot lists the suspended child (parent, threads, name)
+//! and its thread.
+//! Then redirected
 //! standard handles (STARTF_USESTDHANDLES): a child (`process_test
 //! pipes`) reads its stdin from one pipe until end of file and writes its
 //! stdout and stderr into another, which the parent reads until
@@ -70,6 +75,13 @@ unsafe extern "system" {
     ) -> Bool;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetExitCodeProcess(h: Handle, code: *mut u32) -> Bool;
+    fn OpenProcess(access: u32, inherit: Bool, id: u32) -> Handle;
+    fn GetCurrentProcessId() -> u32;
+    fn CreateToolhelp32Snapshot(flags: u32, process: u32) -> Handle;
+    fn Process32FirstW(snapshot: Handle, entry: *mut u64) -> Bool;
+    fn Process32NextW(snapshot: Handle, entry: *mut u64) -> Bool;
+    fn Thread32First(snapshot: Handle, entry: *mut u32) -> Bool;
+    fn Thread32Next(snapshot: Handle, entry: *mut u32) -> Bool;
     fn ResumeThread(h: Handle) -> u32;
     fn ReadFile(h: Handle, buf: *mut u8, len: u32, read: *mut u32, ov: *mut c_void) -> Bool;
     fn CreatePipe(
@@ -104,6 +116,12 @@ const INFINITE: u32 = 0xffff_ffff;
 const WAIT_TIMEOUT: u32 = 258;
 const STILL_ACTIVE: u32 = 259;
 const CREATE_SUSPENDED: u32 = 4;
+const SYNCHRONIZE: u32 = 0x0010_0000;
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_NO_MORE_FILES: u32 = 18;
+const TH32CS_SNAPPROCESS: u32 = 2;
+const TH32CS_SNAPTHREAD: u32 = 4;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const CHILD_EXIT: u32 = 0x1234;
 const PIPES_CHILD_EXIT: u32 = 0x77;
@@ -344,6 +362,62 @@ fn pipes(c: &mut Checks, path: &[u16; 260], n: usize) -> Result<(), u32> {
     Ok(())
 }
 
+/// Toolhelp snapshots: the suspended child `info` is listed with us as
+/// its parent, one thread and its file name, and we are listed; its
+/// thread belongs to it; the lists end with ERROR_NO_MORE_FILES.
+fn toolhelp(c: &mut Checks, info: &ProcessInformation) -> Result<(), u32> {
+    // SAFETY: documented kernel32 calls with valid arguments.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS | TH32CS_SNAPTHREAD, 0);
+        c.ok(snapshot as isize != -1, GetLastError().into())?;
+        // PROCESSENTRY32W: dwSize, cntUsage, th32ProcessID, (pad),
+        // th32DefaultHeapID, th32ModuleID, cntThreads (28),
+        // th32ParentProcessID (32), pcPriClassBase, dwFlags, szExeFile (44).
+        let mut entry = [0u64; 71];
+        entry[0] = 568;
+        let field = |e: &[u64; 71], at: usize| {
+            let b = e.as_ptr().cast::<u8>().add(at);
+            u32::from_le_bytes([*b, *b.add(1), *b.add(2), *b.add(3)])
+        };
+        // The child's (parent, threads, named), and whether we were named.
+        let (mut child, mut self_named, mut count) = (None, false, 0u64);
+        let mut ok = Process32FirstW(snapshot, entry.as_mut_ptr());
+        while ok != 0 {
+            count += 1;
+            let name =
+                core::slice::from_raw_parts(entry.as_ptr().cast::<u8>().add(44).cast::<u16>(), 260);
+            let len = name.iter().position(|&ch| ch == 0).unwrap_or(260);
+            let named =
+                name[..len].iter().copied().eq(b"process_test.exe".iter().map(|&b| u16::from(b)));
+            if field(&entry, 8) == info.process_id {
+                child = Some((field(&entry, 32), field(&entry, 28), named));
+            }
+            if field(&entry, 8) == GetCurrentProcessId() {
+                self_named = named;
+            }
+            ok = Process32NextW(snapshot, entry.as_mut_ptr());
+        }
+        c.eq(GetLastError().into(), ERROR_NO_MORE_FILES.into())?;
+        c.ok(child == Some((GetCurrentProcessId(), 1, true)), count)?;
+        c.ok(self_named, count)?;
+        // THREADENTRY32: dwSize, cntUsage, th32ThreadID, th32OwnerProcessID, ...
+        let mut thread = [0u32; 7];
+        thread[0] = 28;
+        let mut owner = None;
+        let mut ok = Thread32First(snapshot, thread.as_mut_ptr());
+        while ok != 0 {
+            if thread[2] == info.thread_id {
+                owner = Some(thread[3]);
+            }
+            ok = Thread32Next(snapshot, thread.as_mut_ptr());
+        }
+        c.eq(GetLastError().into(), ERROR_NO_MORE_FILES.into())?;
+        c.ok(owner == Some(info.process_id), owner.unwrap_or(0).into())?;
+        c.ok(CloseHandle(snapshot) != 0, GetLastError().into())?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     // SAFETY: documented kernel32 calls with valid arguments.
@@ -392,6 +466,25 @@ fn run() -> Result<(), u32> {
         c.ok(GetExitCodeProcess(info.process, &mut code) != 0, GetLastError().into())?;
         c.eq(code.into(), CHILD_EXIT.into())?;
         c.eq(WaitForSingleObject(event, 0).into(), 0)?; // the child set it
+        // OpenProcess by id: the exited child (its object lives on while
+        // we hold a handle), ourselves, and an id that is no process.
+        let opened =
+            OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, info.process_id);
+        c.ok(!opened.is_null(), GetLastError().into())?;
+        c.eq(WaitForSingleObject(opened, 0).into(), 0)?;
+        code = 0;
+        c.ok(GetExitCodeProcess(opened, &mut code) != 0, GetLastError().into())?;
+        c.eq(code.into(), CHILD_EXIT.into())?;
+        CloseHandle(opened);
+        let me = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, GetCurrentProcessId());
+        c.ok(!me.is_null(), GetLastError().into())?;
+        c.ok(GetExitCodeProcess(me, &mut code) != 0, GetLastError().into())?;
+        c.eq(code.into(), STILL_ACTIVE.into())?;
+        CloseHandle(me);
+        c.ok(OpenProcess(SYNCHRONIZE, 0, 0).is_null(), 0)?;
+        c.eq(GetLastError().into(), ERROR_INVALID_PARAMETER.into())?;
+        c.ok(OpenProcess(SYNCHRONIZE, 0, 0x7fff_fff0).is_null(), 0)?;
+        c.eq(GetLastError().into(), ERROR_INVALID_PARAMETER.into())?;
         CloseHandle(info.thread);
         CloseHandle(info.process);
 
@@ -412,7 +505,14 @@ fn run() -> Result<(), u32> {
         c.eq(WaitForSingleObject(info.process, 200).into(), WAIT_TIMEOUT.into())?;
         c.ok(GetExitCodeProcess(info.process, &mut code) != 0, GetLastError().into())?;
         c.eq(code.into(), STILL_ACTIVE.into())?;
+        // Opened by id while it waits to run.
+        let opened = OpenProcess(SYNCHRONIZE, 0, info.process_id);
+        c.ok(!opened.is_null(), GetLastError().into())?;
+        c.eq(WaitForSingleObject(opened, 0).into(), WAIT_TIMEOUT.into())?;
+        toolhelp(&mut c, &info)?;
         c.eq(ResumeThread(info.thread).into(), 1)?;
+        c.eq(WaitForSingleObject(opened, INFINITE).into(), 0)?;
+        CloseHandle(opened);
         c.eq(WaitForSingleObject(info.process, INFINITE).into(), 0)?;
         c.ok(GetExitCodeProcess(info.process, &mut code) != 0 && code == CHILD_EXIT, code.into())?;
         CloseHandle(info.thread);

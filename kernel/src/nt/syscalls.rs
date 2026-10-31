@@ -121,6 +121,7 @@ pub const NT_ALLOCATE_VIRTUAL_MEMORY: u32 = 0x0018;
 pub const NT_FREE_VIRTUAL_MEMORY: u32 = 0x001e;
 pub const NT_QUERY_VIRTUAL_MEMORY: u32 = 0x0023;
 pub const NT_TERMINATE_PROCESS: u32 = 0x002c;
+pub const NT_OPEN_PROCESS: u32 = 0x0026;
 pub const NT_PROTECT_VIRTUAL_MEMORY: u32 = 0x0050;
 
 type Handler = fn(&mut Call<'_>) -> NtStatus;
@@ -212,6 +213,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_FREE_VIRTUAL_MEMORY, "NtFreeVirtualMemory", 4, nt_free_virtual_memory),
     (NT_QUERY_VIRTUAL_MEMORY, "NtQueryVirtualMemory", 6, nt_query_virtual_memory),
     (NT_TERMINATE_PROCESS, "NtTerminateProcess", 2, nt_terminate_process),
+    (NT_OPEN_PROCESS, "NtOpenProcess", 4, nt_open_process),
     (NT_PROTECT_VIRTUAL_MEMORY, "NtProtectVirtualMemory", 5, nt_protect_virtual_memory),
 ];
 
@@ -557,10 +559,16 @@ fn pipe_io(
 /// NtClose(Handle)
 fn nt_close(call: &mut Call<'_>) -> NtStatus {
     let handle = Handle(arg!(call, 0));
-    match call.process.handles.lock().close(handle) {
-        Some(_) => NtStatus::SUCCESS,
-        None => NtStatus::INVALID_HANDLE,
+    let closed = call.process.handles.lock().close(handle);
+    let Some(entry) = closed else { return NtStatus::INVALID_HANDLE };
+    let was_process = matches!(entry.object.body, ObjectBody::Process(_) | ObjectBody::Thread(_));
+    drop(entry);
+    if was_process {
+        // Perhaps the last reference to an exited process (a thread holds
+        // its process): free it now.
+        process::prune();
     }
+    NtStatus::SUCCESS
 }
 
 /// NtTerminateProcess(ProcessHandle, ExitStatus)
@@ -578,6 +586,31 @@ fn nt_terminate_process(call: &mut Call<'_>) -> NtStatus {
     // Includes the caller if it belongs to `p`; it exits on its way out.
     process::terminate(p, status, true);
     NtStatus::SUCCESS
+}
+
+/// NtOpenProcess(*ProcessHandle, DesiredAccess, ObjectAttributes, ClientId):
+/// the process with CLIENT_ID.UniqueProcess (or, if that is 0, the
+/// process of UniqueThread); STATUS_INVALID_CID if there is none.
+/// Access is granted as asked (no security descriptors yet).
+fn nt_open_process(call: &mut Call<'_>) -> NtStatus {
+    let (out, access, attrs, cid) =
+        (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));
+    if cid == 0 {
+        return NtStatus::INVALID_PARAMETER_MIX;
+    }
+    let attributes = tri!(call.handle_attributes(attrs));
+    let pid = tri!(call.read_u64(cid));
+    let tid = tri!(call.read_u64(cid + 8));
+    let found = if pid != 0 {
+        process::by_id(pid)
+    } else if tid != 0 {
+        thread::process_of(tid)
+    } else {
+        None
+    };
+    let Some(p) = found else { return NtStatus::INVALID_CID };
+    let Ok(object) = KObject::new(ObjectBody::Process(p)) else { return NtStatus::NO_MEMORY };
+    call.return_handle(out, object, access, attributes)
 }
 
 /// NtAllocateVirtualMemory(ProcessHandle, *BaseAddress, ZeroBits,
@@ -1783,6 +1816,35 @@ const PROCESS_SESSION_INFORMATION: u64 = 24;
 const PROCESS_WOW64_INFORMATION: u64 = 26;
 const PROCESS_IMAGE_FILE_NAME: u64 = 27;
 
+/// SystemProcessInformation for a buffer at user address `buffer`: the
+/// idle process (id 0), then each running process with its threads.
+fn process_information(buffer: u64) -> Result<Vec<u8>, NtStatus> {
+    use super::sysinfo::{ProcessRecord, ThreadRecord, push_process};
+    let no_memory = |_| NtStatus::NO_MEMORY;
+    let mut out = Vec::new();
+    let idle = ProcessRecord { id: 0, parent_id: 0, create_time: 0, handle_count: 0, name: "" };
+    push_process(&mut out, &idle, &[], buffer).map_err(no_memory)?;
+    for p in process::running().map_err(no_memory)? {
+        let mut threads = Vec::new();
+        for t in p.threads() {
+            if let ObjectBody::Thread(t) = &t.body {
+                let record =
+                    ThreadRecord { id: t.id, start: t.win32_start, create_time: t.create_time };
+                threads.try_push(record).map_err(no_memory)?;
+            }
+        }
+        let record = ProcessRecord {
+            id: p.id,
+            parent_id: p.parent_id,
+            create_time: p.create_time,
+            handle_count: p.handles.lock().iter().count() as u32,
+            name: p.name,
+        };
+        push_process(&mut out, &record, &threads, buffer).map_err(no_memory)?;
+    }
+    Ok(out)
+}
+
 /// NtQuerySystemInformation(Class, Buffer, Length, *ReturnLength)
 fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
     use super::sysinfo;
@@ -1800,6 +1862,20 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
         sysinfo::SYSTEM_TIME_OF_DAY_INFORMATION => {
             let info = sysinfo::time_of_day(platform::boot_system_time(), platform::system_time());
             call.return_info(&info, buffer, length, ret_ptr)
+        }
+        sysinfo::SYSTEM_PROCESS_INFORMATION => {
+            let info = tri!(process_information(buffer));
+            if ret_ptr != 0 {
+                tri!(call.write_u32(ret_ptr, info.len() as u32));
+            }
+            // Any buffer large enough (the list changes between calls).
+            if (length as usize) < info.len() {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            match call.process.write(buffer, &info) {
+                Ok(()) => NtStatus::SUCCESS,
+                Err(_) => NtStatus::ACCESS_VIOLATION,
+            }
         }
         _ => NtStatus::INVALID_INFO_CLASS,
     }
@@ -2756,6 +2832,7 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         handles: Some((table, std)),
         suspended,
         runtime_data: &runtime_data,
+        parent_id: call.process.id,
     });
     let (child, thread_object) = match spawned {
         Ok(p) => p,

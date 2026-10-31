@@ -29,6 +29,7 @@ mod pipe;
 mod process;
 mod sync;
 mod text;
+mod toolhelp;
 mod volume;
 
 type Bool = i32;
@@ -44,6 +45,7 @@ const STATUS_OBJECT_NAME_EXISTS: u32 = 0x4000_0000;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 const ERROR_NOT_SUPPORTED: u32 = 50;
 const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
 const WAIT_FAILED: u32 = 0xffff_ffff;
 const INFINITE: u32 = 0xffff_ffff;
@@ -127,6 +129,12 @@ unsafe extern "system" {
         initial: u8,
     ) -> u32;
     fn NtClose(h: Handle) -> u32;
+    fn NtOpenProcess(
+        handle: *mut usize,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        client_id: *const [usize; 2],
+    ) -> u32;
     fn NtTerminateProcess(process: isize, status: u32) -> u32;
     fn RtlNtStatusToDosError(status: u32) -> u32;
     fn LdrLoadDll(

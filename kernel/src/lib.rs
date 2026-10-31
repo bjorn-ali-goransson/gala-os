@@ -356,6 +356,8 @@ fn run_program(info: &BootInfo, name: &str, args: &str) {
     let deadline = time::ticks() + time::TICK_HZ;
     while mm::heap::KArc::strong_count(&space) > 1 && time::ticks() < deadline {
         sched::reap();
+        // Exited processes nothing refers to any more (kept for OpenProcess).
+        nt::process::prune();
         sched::sleep_ms(1);
     }
     if mm::heap::KArc::strong_count(&space) > 1 {
