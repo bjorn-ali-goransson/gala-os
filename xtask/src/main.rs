@@ -89,6 +89,11 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "user32", file: "user32.dll", exported_as: "testuser32.dll" },
     // gala's winmm.dll (timer resolution; Go and the JVM load it).
     Dll { package: "winmm", file: "winmm.dll", exported_as: "testwinmm.dll" },
+    // comctl32, powrprof, shell32, version: what the JVM imports from them.
+    Dll { package: "comctl32", file: "comctl32.dll", exported_as: "testcomctl32.dll" },
+    Dll { package: "powrprof", file: "powrprof.dll", exported_as: "testpowrprof.dll" },
+    Dll { package: "shell32", file: "shell32.dll", exported_as: "testshell32.dll" },
+    Dll { package: "version", file: "version.dll", exported_as: "testversion.dll" },
     // gala's ncrypt.dll (no key storage providers; bound at startup).
     Dll { package: "ncrypt", file: "ncrypt.dll", exported_as: "testncrypt.dll" },
     // gala's crypt32.dll (certificate stores; only what OpenSSL imports).
@@ -137,6 +142,21 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_sync_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_locale_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_system_test", "ntdll.dll", "Windows/System32"),
+    ("win32_misc_test", "ntdll.dll", "Windows/System32"),
+    ("win32_misc_test", "kernel32.dll", "Windows/System32"),
+    ("win32_misc_test", "advapi32.dll", "Windows/System32"),
+    ("win32_misc_test", "user32.dll", "Windows/System32"),
+    ("win32_misc_test", "ws2_32.dll", "Windows/System32"),
+    ("win32_misc_test", "mswsock.dll", "Windows/System32"),
+    ("win32_misc_test", "comctl32.dll", "Windows/System32"),
+    ("win32_misc_test", "powrprof.dll", "Windows/System32"),
+    ("win32_misc_test", "shell32.dll", "Windows/System32"),
+    ("win32_misc_test", "version.dll", "Windows/System32"),
+    ("win32_misc_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("advapi32_test", "ntdll.dll", "Windows/System32"),
+    ("advapi32_test", "kernel32.dll", "Windows/System32"),
+    ("advapi32_test", "advapi32.dll", "Windows/System32"),
+    ("advapi32_test", "bcryptprimitives.dll", "Windows/System32"),
     ("kernel32_system_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_locale_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sync_test", "kernel32.dll", "Windows/System32"),
@@ -300,6 +320,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("java_version", "kernel32.dll", "Windows/System32"),
     ("java_version", "advapi32.dll", "Windows/System32"),
     ("java_version", "winmm.dll", "Windows/System32"),
+    ("java_version", "version.dll", "Windows/System32"),
+    ("java_version", "shell32.dll", "Windows/System32"),
+    ("java_version", "powrprof.dll", "Windows/System32"),
+    ("java_version", "comctl32.dll", "Windows/System32"),
     ("java_version", "ncrypt.dll", "Windows/System32"),
     ("java_version", "crypt32.dll", "Windows/System32"),
     ("java_version", "ws2_32.dll", "Windows/System32"),
@@ -430,6 +454,8 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_sync_test",
     "kernel32_locale_test",
     "kernel32_system_test",
+    "advapi32_test",
+    "win32_misc_test",
     "kernel32_misc_test",
     "prng_test",
     "kernel32_env_test",
@@ -1093,6 +1119,21 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["kernel32_sys_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // P1 (JDK): user32, ws2_32 ordinals, comctl32, powrprof, shell32,
+        // version.
+        name: "win32_misc_test",
+        cmdline: "qemu_exit run=win32_misc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["win32_misc_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (JDK): SIDs, ACLs, security descriptors, the process token.
+        name: "advapi32_test",
+        cmdline: "qemu_exit run=advapi32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["advapi32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // P1 (JDK): memory, process, file and version functions.
         name: "kernel32_system_test",
         cmdline: "qemu_exit run=kernel32_system_test.exe",
@@ -1335,7 +1376,7 @@ const SCENARIOS: &[Scenario] = &[
         // P1: the unmodified Temurin JDK 21 (fetched and checked by xtask,
         // PREBUILT): `java -version`, as on Windows (to stderr).
         name: "java_version",
-        cmdline: "qemu_exit trace run=java.exe args=-version",
+        cmdline: "qemu_exit run=java.exe args=-version",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "openjdk version \"21.0.5\" 2024-10-15 LTS",

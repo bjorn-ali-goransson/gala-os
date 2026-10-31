@@ -483,11 +483,21 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       psapi K32*, QueryFullProcessImageNameW, ANSI forms,
       SetFileAttributesW, MoveFileExW, SetFileInformationByHandle,
       OpenFileMapping, RtlCaptureStackBackTrace, VerifyVersionInfoW.
-      kernel32 now has everything the four DLLs import. Next: advapi32
-      (security: SIDs, ACLs, tokens, GetUserNameW, LookupAccountSidW),
-      user32 (CharNextExA, GetUserObjectInformationA, MessageBoxA),
-      ws2_32 ordinals 111 and 115, and comctl32, powrprof, shell32,
-      version.dll; then boot java_version and follow it. Surveyed: the JDK ships Microsoft's C runtime
+      kernel32 now has everything the four DLLs import. Then
+      (`advapi32_test`, `win32_misc_test`): advapi32 SIDs, ACLs,
+      security descriptors, accounts and a stand-in process token;
+      user32 CharNextExA/GetUserObjectInformationA/MessageBoxA; ws2_32's
+      standard ordinals; new comctl32, powrprof, shell32 and version.dll;
+      LocalAlloc on the heap; the loader's module table (256) and
+      dependency lists (64) were too small for the JDK's ~60 DLLs.
+      Now the launcher runs: it prints "Error: Failed to load
+      C:\jdk\bin\msvcp140.dll", which it loads at run time (not an
+      import, so the survey missed it). msvcp140 needs the kernel32
+      thread pool (CreateThreadpoolWork/Timer/Wait, Submit, Set, Close,
+      WaitForThreadpoolTimerCallbacks, FreeLibraryWhenCallbackReturns),
+      CreateEventExW, CreateSymbolicLinkW, CreateHardLinkW, CopyFileW.
+      Next: those (test first), then the survey again with msvcp140,
+      vcruntime140(_1) and the DLLs the JVM loads, and boot again. Surveyed: the JDK ships Microsoft's C runtime
       (ucrtbase, vcruntime140, the api-ms-win-* forwarders, which forward
       to kernel32), so gala needs no CRT of its own; it needs ~100 more
       kernel32 functions (SRW locks, condition variables, FLS, locale,

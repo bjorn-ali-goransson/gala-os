@@ -1,5 +1,5 @@
 //! More file functions: sizes, locks, device control, change
-//! notification, named pipe servers, LocalFree.
+//! notification, named pipe servers.
 
 use super::*;
 
@@ -146,16 +146,6 @@ pub extern "system" fn UnlockFileEx(
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
     unlock(h, overlapped_offset(overlapped), u64::from(low) | u64::from(high) << 32)
-}
-
-/// LocalFree: gala's kernel32 has no LocalAlloc; memory programs free
-/// with it came from VirtualAlloc. Returns NULL on success.
-#[unsafe(no_mangle)]
-pub extern "system" fn LocalFree(memory: *mut c_void) -> *mut c_void {
-    if !memory.is_null() {
-        VirtualFree(memory, 0, 0x8000); // MEM_RELEASE
-    }
-    core::ptr::null_mut()
 }
 
 /// DeviceIoControl: no device control codes yet (recorded by code).

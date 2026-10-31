@@ -773,6 +773,11 @@ from the public documentation of each function (clean room):
 | user32.dll | `user/user32` | `testuser32.dll` | `C:\Windows\System32` |
 | winmm.dll | `user/winmm` | `testwinmm.dll` | `C:\Windows\System32` |
 | ncrypt.dll | `user/ncrypt` | `testncrypt.dll` | `C:\Windows\System32` |
+| crypt32.dll | `user/crypt32` | `testcrypt32.dll` | `C:\Windows\System32` |
+| comctl32.dll | `user/comctl32` | `testcomctl32.dll` | `C:\Windows\System32` |
+| powrprof.dll | `user/powrprof` | `testpowrprof.dll` | `C:\Windows\System32` |
+| shell32.dll | `user/shell32` | `testshell32.dll` | `C:\Windows\System32` |
+| version.dll | `user/version` | `testversion.dll` | `C:\Windows\System32` |
 
 (Exported under other names so that `user/bin`, which also runs on
 Windows, never shadows the system's DLLs.)
@@ -783,7 +788,21 @@ Windows, never shadows the system's DLLs.)
   APC dispatchers, vectored handlers, `RtlNtStatusToDosError`, C runtime
   helpers (`memcpy`, `memset`, `strlen`...) and the system call stubs
   (`syscall_stubs!`). DLLs are searched next to the executable, then in
-  `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA).
+  `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA). The module table
+  holds 256 modules with up to 64 dependencies each; a DLL not found, a
+  full table and a full dependency list are in the ledger.
+- **advapi32** builds and reads SIDs, ACLs and absolute security
+  descriptors as documented (security.rs), knows the user "gala"
+  (S-1-5-21-...-1001) and the well-known accounts, and has a stand-in
+  process token (OpenProcessToken duplicates the process handle; the
+  token functions describe a standard user). Nothing is enforced and
+  files keep no descriptors (SetFileSecurity succeeds, recorded). The
+  registry is empty (keys not found, predefined keys without subkeys).
+- **shell32/version/powrprof/comctl32**: profile folders from the
+  environment (SHGetFolderPathW, SHGetKnownFolderPath), version resources
+  read from PE files and walked (GetFileVersionInfo*, VerQueryValue*),
+  processor power information (base frequency from CPUID 0x16), and
+  InitCommonControlsEx.
 - **kernel32** implements Win32 functions on top of ntdll's exports
   (imported with `raw-dylib`): failures return the documented failure
   value and set the last error (TEB+0x68) from the NTSTATUS. So far:

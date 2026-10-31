@@ -112,6 +112,68 @@ pub extern "system" fn GetUserObjectInformationW(
     0
 }
 
+/// GetUserObjectInformationA: as the W form (gala has no window stations).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetUserObjectInformationA(
+    object: usize,
+    index: i32,
+    info: *mut u8,
+    length: u32,
+    needed: *mut u32,
+) -> i32 {
+    GetUserObjectInformationW(object, index, info, length, needed)
+}
+
+/// CharNextExA: the next character of an ANSI string (gala's ANSI code
+/// page is UTF-8: the next UTF-8 sequence); at the NUL, the NUL itself.
+#[unsafe(no_mangle)]
+pub extern "system" fn CharNextExA(_code_page: u16, s: *const u8, _flags: u32) -> *const u8 {
+    if s.is_null() {
+        return s;
+    }
+    // SAFETY: the caller's NUL-terminated string.
+    unsafe {
+        if *s == 0 {
+            return s;
+        }
+        let mut p = s.add(1);
+        while *p & 0xc0 == 0x80 {
+            p = p.add(1);
+        }
+        p
+    }
+}
+
+/// MessageBoxA: as MessageBoxW (the text to standard error, IDOK).
+#[unsafe(no_mangle)]
+pub extern "system" fn MessageBoxA(
+    window: usize,
+    text: *const u8,
+    caption: *const u8,
+    kind: u32,
+) -> i32 {
+    let (mut t, mut c) = ([0u16; 1024], [0u16; 256]);
+    let widen = |s: *const u8, out: &mut [u16]| -> *const u16 {
+        if s.is_null() {
+            return core::ptr::null();
+        }
+        let mut n = 0;
+        // SAFETY: the caller's NUL-terminated string (ASCII is kept, other
+        // bytes become '?').
+        unsafe {
+            while *s.add(n) != 0 && n < out.len() - 1 {
+                let b = *s.add(n);
+                out[n] = if b < 0x80 { b.into() } else { u16::from(b'?') };
+                n += 1;
+            }
+        }
+        out[n] = 0;
+        out.as_ptr()
+    };
+    let (text, caption) = (widen(text, &mut t), widen(caption, &mut c));
+    MessageBoxW(window, text, caption, kind)
+}
+
 /// MessageBoxW: no desktop; the caption and text go to standard error and
 /// the answer is IDOK.
 #[unsafe(no_mangle)]
