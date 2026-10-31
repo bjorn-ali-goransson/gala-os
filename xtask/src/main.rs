@@ -425,6 +425,26 @@ fn cargo() -> Command {
     cmd
 }
 
+/// `cargo build` of user crates (release, the Windows target). Paths of
+/// crates.io dependencies (panic locations in libm, say) are absolute
+/// under the cargo home, which differs between machines: they are
+/// remapped to `/cargo` so that the checked-in binaries are the same
+/// wherever they are built (CI compares them).
+fn user_build() -> Command {
+    let mut cmd = cargo();
+    cmd.args(["build", "--release", "--target", USER_TARGET]);
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+    if let Some(home) = cargo_home {
+        // Cargo merges this array with the target's rustflags in
+        // .cargo/config.toml.
+        let flag = format!("--remap-path-prefix={}=/cargo", home.display());
+        cmd.arg("--config").arg(format!("target.{USER_TARGET}.rustflags=[{flag:?}]"));
+    }
+    cmd
+}
+
 /// Runs `cmd`, showing its output only if it fails.
 fn run_quiet(cmd: &mut Command) -> Result {
     let out = cmd.output().map_err(|e| format!("failed to spawn {cmd:?}: {e}"))?;
@@ -463,14 +483,12 @@ fn build_kernel(release: bool) -> Result {
     // User programs are always optimized: without a CRT there is no
     // `memcpy` etc. for unoptimized code to call. DLLs that programs embed
     // are built first.
-    let mut cmd = cargo();
-    cmd.args(["build", "--release", "--target", USER_TARGET]);
+    let mut cmd = user_build();
     for dll in USER_DLLS {
         cmd.args(["--package", dll.package]);
     }
     run_cmd(&mut cmd)?;
-    let mut cmd = cargo();
-    cmd.args(["build", "--release", "--target", USER_TARGET]);
+    let mut cmd = user_build();
     for program in USER_PROGRAMS {
         cmd.args(["--package", program]);
     }
