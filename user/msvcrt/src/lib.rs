@@ -100,6 +100,10 @@ pub static mut _fmode: i32 = 0;
 /// __argv: the program's arguments (set by __getmainargs).
 #[unsafe(no_mangle)]
 pub static mut __argv: *mut *mut u8 = null_mut();
+/// _HUGE: HUGE_VAL for headers that read it from msvcrt (TinyCC's math.h).
+#[unsafe(no_mangle)]
+pub static _HUGE: f64 = f64::INFINITY;
+
 /// __argc: their number (set by __getmainargs).
 #[unsafe(no_mangle)]
 pub static mut __argc: i32 = 0;

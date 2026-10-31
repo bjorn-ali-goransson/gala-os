@@ -543,6 +543,13 @@ sets the process's standard handle (as msvcrt does), so redirections
 reach children. msvcrt's FILE starts with the real 48-byte layout
 (`_cnt` 0), because mingw's inline getc reads it and calls `_filbuf`.
 
+**Floating-point text** (H5): msvcrt's strtod, atof and sscanf's %f find
+the C-syntax prefix (sign, digits with an optional point, an exponent
+only if it has digits) and parse it with core's `f64` parser, which
+rounds correctly; strtod sets ERANGE on overflow (HUGE_VAL) and on
+underflow to 0. TinyCC parses float constants with strtod, so programs
+it builds on gala get the same constants as elsewhere.
+
 **NUL**: `\Device\Null` (with `\??\NUL` linking to it) opens as a file
 whose reads are at end of file and whose writes are discarded
 (FILE_DEVICE_NULL); kernel32 maps the DOS name `NUL` to `\??\NUL`.

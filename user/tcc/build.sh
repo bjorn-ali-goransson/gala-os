@@ -8,6 +8,8 @@
 #   tcc/lib/*.def    import definitions (kernel32, msvcrt, ...)
 #   tcc/src/         the sources of libtcc1.a and the startup code, which
 #                    the scenario compiles on gala with this tcc.exe
+#   tcc/src/tcc/     the compiler's own sources (with this config.h), which
+#                    the tcc_self scenario compiles on gala
 # Reproducible: a pinned commit, no debug info, no link timestamp, a tar
 # with sorted names, fixed times and owners. Needs x86_64-w64-mingw32-gcc
 # (Ubuntu: gcc-mingw-w64-x86-64), git and GNU tar. Without them, keep
@@ -44,6 +46,8 @@ cp win32/lib/crt1.c win32/lib/crt1w.c win32/lib/wincrt1.c win32/lib/wincrt1w.c \
     win32/lib/dllcrt1.c win32/lib/dllmain.c win32/lib/winex.c win32/lib/crtinit.c \
     win32/lib/chkstk.S lib/libtcc1.c lib/alloca.S lib/alloca-bt.S \
     lib/stdatomic.c lib/atomic.S lib/builtin.c "$T/src/"
+mkdir -p "$T/src/tcc"
+cp ./*.c ./*.h ./*.def VERSION "$T/src/tcc/"
 cp COPYING "$T/"
 tar -C "$WORK/out" --sort=name --mtime=@1700000000 --owner=0 --group=0 \
     --numeric-owner --format=ustar -cf "$ROOT/user/bin/tcc.tar" tcc

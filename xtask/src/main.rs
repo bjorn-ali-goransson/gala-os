@@ -188,6 +188,20 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("tcc", "user/bin/tcc.tar", "gala"),
     ("tcc", "user/tcc/tcc.sh", "gala"),
     ("tcc", "user/tcc/hello.c", "gala"),
+    ("tcc_self", "ntdll.dll", "Windows/System32"),
+    ("tcc_self", "kernel32.dll", "Windows/System32"),
+    ("tcc_self", "ws2_32.dll", "Windows/System32"),
+    ("tcc_self", "mswsock.dll", "Windows/System32"),
+    ("tcc_self", "msvcrt.dll", "Windows/System32"),
+    ("tcc_self", "advapi32.dll", "Windows/System32"),
+    ("tcc_self", "user32.dll", "Windows/System32"),
+    ("tcc_self", "bcryptprimitives.dll", "Windows/System32"),
+    ("tcc_self", "user/bin/busybox.exe", "gala"),
+    ("tcc_self", "user/bin/tcc.tar", "gala"),
+    ("tcc_self", "user/tcc/tcc.sh", "gala"),
+    ("tcc_self", "user/tcc/self.sh", "gala"),
+    ("tcc_self", "user/tcc/hello.c", "gala"),
+    ("tcc_self", "user/msvcrt_test/main.c", "gala"),
     ("nginx", "user/nginx/conf/nginx.conf", "nginx/conf"),
     ("nginx", "user/nginx/html/index.html", "nginx/html"),
     ("nginx", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
@@ -1010,6 +1024,23 @@ const SCENARIOS: &[Scenario] = &[
             "hello from tcc: sum of squares=385",
             "argc=4 last=three len=5",
             "status=7",
+            "busybox.exe (pid 4) exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // H5: TinyCC builds itself on gala (user/tcc/self.sh): after the
+        // tcc scenario's steps, tcc.exe compiles TinyCC's sources into
+        // tcc2.exe, which compiles hello.c and msvcrt_test's main.c; both
+        // run. Expected as on Windows.
+        name: "tcc_self",
+        cmdline: "qemu_exit run=busybox.exe args=sh%20C:/gala/self.sh%20C:/gala/tcc.tar%20C:/gala/main.c",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "status=7",
+            "tcc2: tcc version 0.9.28rc mob:e23dabe (x86_64 Windows)",
+            "status2=7",
+            "msvcrt_test: ok",
+            "msvcrt_test status=0",
             "busybox.exe (pid 4) exited with status 0x00000000",
         ],
     },
@@ -2065,7 +2096,20 @@ fn dechunk(mut b: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Judges one scenario from the exit status and its part of the log.
+/// Judges a run; on failure the serial log is kept in
+/// `target/failed/<scenario>.log` (rare failures need it).
 fn judge(scenario: &Scenario, status: Option<i32>, timed_out: bool, serial: &str) -> Result {
+    judge_log(scenario, status, timed_out, serial).map_err(|e| {
+        let dir = target_dir().join("failed");
+        let path = dir.join(format!("{}.log", scenario.name));
+        match fs::create_dir_all(&dir).and_then(|()| fs::write(&path, serial)) {
+            Ok(()) => format!("{e} (serial log: {})", path.display()),
+            Err(_) => e,
+        }
+    })
+}
+
+fn judge_log(scenario: &Scenario, status: Option<i32>, timed_out: bool, serial: &str) -> Result {
     let missing: Vec<&str> =
         scenario.expect.iter().copied().filter(|e| !serial.contains(e)).collect();
     if scenario.exit_status == XTASK_STOPS && serial.contains(STOPPED_LINE) {

@@ -521,6 +521,37 @@ pub extern "C" fn bsearch(
 }
 
 /// atof(s): leading white space, then a decimal number (0.0 if none).
+/// strtod(s, end): leading whitespace, then a decimal number (see
+/// scan::float); `*end` after it (or `s` if there is none). Overflow gives
+/// +-HUGE_VAL and underflow 0, both with errno ERANGE.
+#[unsafe(no_mangle)]
+pub extern "C" fn strtod(s: *const u8, end: *mut *mut u8) -> f64 {
+    const ERANGE: i32 = 34;
+    // SAFETY: the caller's NUL-terminated string.
+    let text = unsafe { crate::c_str(s) };
+    let start = text
+        .iter()
+        .position(|&c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
+        .unwrap_or(text.len());
+    let (v, used) = match crate::scan::float(&text[start..], usize::MAX) {
+        Some((v, n)) => (v, start + n),
+        None => (0.0, 0),
+    };
+    if !end.is_null() {
+        // SAFETY: the caller's output pointer; `used` is inside the string.
+        unsafe { *end = s.add(used).cast_mut() };
+    }
+    let nonzero_digits = text[start..start + used.saturating_sub(start)]
+        .iter()
+        .take_while(|c| !matches!(c, b'e' | b'E'))
+        .any(|c| matches!(c, b'1'..=b'9'));
+    if v.is_infinite() || (v == 0.0 && nonzero_digits) {
+        // SAFETY: the process's errno.
+        unsafe { *crate::stdio::_errno() = ERANGE };
+    }
+    v
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn atof(s: *const u8) -> f64 {
     // SAFETY: the caller's NUL-terminated string.

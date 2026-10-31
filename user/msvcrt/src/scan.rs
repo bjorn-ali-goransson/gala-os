@@ -69,75 +69,42 @@ fn integer(s: &[u8], base: u32, width: usize) -> Option<(i128, usize)> {
     Some((if negative { -v } else { v }, i))
 }
 
-/// 10^0..10^22, all exact in an f64.
-const POW10: [f64; 23] = [
-    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
-    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
-];
-
-/// Parses a decimal floating-point number; (value, bytes used).
+/// Parses a decimal floating-point number (sign, digits with an optional
+/// point, optional exponent) from at most `width` bytes; (value, bytes
+/// used). The value is correctly rounded (core's parser).
 pub fn float(s: &[u8], width: usize) -> Option<(f64, usize)> {
     let s = &s[..s.len().min(width)];
-    let mut i = 0;
-    let negative = match s.first() {
-        Some(b'-') => {
-            i = 1;
-            true
-        }
-        Some(b'+') => {
-            i = 1;
-            false
-        }
-        _ => false,
-    };
-    let (mut mantissa, mut digits, mut exponent) = (0u64, 0, 0i32);
-    let mut seen = false;
-    while let Some(&c) = s.get(i).filter(|c| c.is_ascii_digit()) {
-        if digits < 19 {
-            mantissa = mantissa * 10 + u64::from(c - b'0');
-            digits += 1;
-        } else {
-            exponent += 1;
-        }
-        seen = true;
-        i += 1;
-    }
-    if s.get(i) == Some(&b'.') {
-        i += 1;
-        while let Some(&c) = s.get(i).filter(|c| c.is_ascii_digit()) {
-            if digits < 19 {
-                mantissa = mantissa * 10 + u64::from(c - b'0');
-                digits += 1;
-                exponent -= 1;
-            }
-            seen = true;
+    let digits_from = |mut i: usize| {
+        while s.get(i).is_some_and(u8::is_ascii_digit) {
             i += 1;
         }
+        i
+    };
+    let mut i = usize::from(matches!(s.first(), Some(b'-' | b'+')));
+    let int_end = digits_from(i);
+    let mut seen = int_end > i;
+    i = int_end;
+    if s.get(i) == Some(&b'.') {
+        let frac_end = digits_from(i + 1);
+        seen |= frac_end > i + 1;
+        i = frac_end;
     }
     if !seen {
         return None;
     }
-    if matches!(s.get(i), Some(b'e' | b'E'))
-        && let Some((e, used)) = integer(&s[i + 1..], 10, usize::MAX)
-    {
-        exponent = exponent.saturating_add(e.clamp(-10_000, 10_000) as i32);
-        i += 1 + used;
+    // An exponent only counts with at least one digit.
+    if matches!(s.get(i), Some(b'e' | b'E')) {
+        let sign = usize::from(matches!(s.get(i + 1), Some(b'-' | b'+')));
+        let exp_end = digits_from(i + 1 + sign);
+        if exp_end > i + 1 + sign {
+            i = exp_end;
+        }
     }
-    let mut v = mantissa as f64;
-    // Scale by 10^exponent in steps (exact for the small exponents
-    // programs pass; close otherwise).
-    let mut e = exponent;
-    while e > 0 {
-        let k = e.min(22);
-        v *= POW10[k as usize];
-        e -= k;
-    }
-    while e < 0 {
-        let k = (-e).min(22);
-        v /= POW10[k as usize];
-        e += k;
-    }
-    Some((if negative { -v } else { v }, i))
+    let text = core::str::from_utf8(&s[..i]).ok()?;
+    // core rejects a trailing point ("5."): C accepts it.
+    let text = text.strip_suffix('.').unwrap_or(text);
+    let v: f64 = text.parse().ok()?;
+    Some((v, i))
 }
 
 /// vsscanf(input, format, args).

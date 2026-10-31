@@ -3,7 +3,8 @@
  * setjmp/longjmp, _pipe/_read/_write/_close with end of file, _dup and
  * _dup2 on fd 1, strtok, atof, _stricmp/_strnicmp, mbstowcs, _isatty,
  * _getcwd; __argc, _controlfp, _snprintf, _strlwr and remove (TinyCC's
- * startup code and tcc.exe use them). Built against msvcrt (not mingw's own stdio) by build.sh.
+ * startup code and tcc.exe use them); strtod (tcc parses float
+ * constants with it). Built against msvcrt (not mingw's own stdio) by build.sh.
  * Prints "msvcrt_test: ok" or exits with the number of the failing check. */
 #include <stdio.h>
 #include <stdarg.h>
@@ -14,6 +15,18 @@
 #include <fcntl.h>
 #include <direct.h>
 #include <float.h>
+#include <errno.h>
+#include <math.h>
+#include <windows.h>
+
+/* TinyCC's own float.h (the tcc_self scenario compiles this file) does
+ * not declare msvcrt's _controlfp. */
+#ifndef _MCW_RC
+#define _MCW_RC 0x300
+#define _RC_NEAR 0
+#define _RC_CHOP 0x300
+unsigned int __cdecl _controlfp(unsigned int new_value, unsigned int mask);
+#endif
 
 static int check;
 #define CHECK(cond) do { check++; if (!(cond)) { printf("msvcrt_test: check %d failed\n", check); fflush(stdout); exit(check); } } while (0)
@@ -109,6 +122,20 @@ int main(void) {
     FILE *tmp = fopen("msvcrt_test.tmp", "w");
     CHECK(tmp != NULL && fputs("x", tmp) >= 0 && fclose(tmp) == 0);
     CHECK(remove("msvcrt_test.tmp") == 0 && remove("msvcrt_test.tmp") == -1);
+
+    /* msvcrt's own strtod (mingw's headers send strtod to libmingwex):
+     * the end, overflow, no number, values. */
+    typedef double (*strtod_fn)(const char *, char **);
+    strtod_fn msvcrt_strtod = (strtod_fn)GetProcAddress(GetModuleHandleA("msvcrt.dll"), "strtod");
+    CHECK(msvcrt_strtod != NULL);
+    char *end = NULL;
+    CHECK(msvcrt_strtod(" 0.1x", &end) == 0.1 && *end == 'x');
+    errno = 0;
+    CHECK(msvcrt_strtod("1e400;", &end) == HUGE_VAL && errno == ERANGE && *end == ';');
+    const char *none = "abc";
+    CHECK(msvcrt_strtod(none, &end) == 0.0 && end == none);
+    CHECK(msvcrt_strtod("1.7976931348623157e308", NULL) == DBL_MAX);
+    CHECK(msvcrt_strtod("-2.5e-3", NULL) == -0.0025);
 
     printf("msvcrt_test: ok\n");
     return 0;

@@ -301,6 +301,13 @@ startup functions (`__getmainargs`, `__argc`, `_controlfp`,
 only for tools that the scenario does not run. The scenario takes about
 4 s in the kernel (16 tcc runs).
 
+The `tcc_self` scenario (`user/tcc/self.sh`) runs tcc.sh, then compiles
+TinyCC's sources (`tcc/src/tcc/` in the archive) with tcc on gala into
+tcc2.exe, and uses tcc2 to build hello.c and `user/msvcrt_test/main.c`
+(about 7 s in the kernel). main.c must therefore build with both mingw's
+and TinyCC's headers (TinyCC's float.h lacks `_controlfp`; mingw's
+headers send `strtod` to libmingwex, so the test looks msvcrt's up).
+
 ## Hunting a rare hang
 
 A scenario that fails once in N runs: loop `cargo xtask boot-test <name>`
@@ -311,6 +318,12 @@ which timeout. Tracing (`trace`) changes the timing enough to hide such
 races, so prefer the dump. In gala-um, catch a hung instance live and
 use `gdb -p` (`thread apply all bt`); its process is named `exe` after
 gala-um re-executes itself without ASLR.
+
+A failed boot scenario's serial log is kept in
+`target/failed/<scenario>.log` (also from `cargo xtask test`), so a rare
+failure in a full run is not lost. timer_test failed once in three full
+runs after tcc_self added load (the check was not captured then; it
+passes alone): if it recurs, its log says which bound was missed.
 
 ## Debugging
 

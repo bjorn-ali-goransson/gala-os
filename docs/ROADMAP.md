@@ -213,8 +213,8 @@ to set and to argue for. Current order and why:
    child stdio) done; next H2 (a real CLI tool or shell-like program
    driving children through pipes, chosen from what the ledger shows).
    H2 done (Go's os/exec, busybox-w32's sh); H3 (scripts and file
-   tools) done; H4 (a C compiler on gala) done; next H5 (TinyCC builds
-   itself on gala).
+   tools) done; H4 (a C compiler on gala) done; H5 (TinyCC builds
+   itself on gala) done; next H6 (make on gala).
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
@@ -361,10 +361,22 @@ H4. **A C compiler on gala**: done 2026-10-31. The `tcc` scenario:
    (Process32/Thread32) exist, and exited processes stay openable while
    referenced (process_test checks both). Left in the ledger: SetFileTime
    (tar restores times), RtlAddFunctionTable (accepted, unused: tcc -run).
-H5. **TinyCC builds itself on gala**: next. tcc.c compiled on gala by
-   the tcc.exe from H4 into a second tcc.exe, which then builds the
-   runtime and hello.c again with the same results; then gala's own C
-   test (msvcrt_test) built by tcc on gala.
+H5. **TinyCC builds itself on gala**: done 2026-10-31. The `tcc_self`
+   scenario (`user/tcc/self.sh`): after the tcc scenario's steps, the
+   mingw-built tcc.exe compiles TinyCC's own sources (now in tcc.tar)
+   on gala into tcc2.exe; tcc2 reports the same version, compiles
+   hello.c (same output and status) and msvcrt_test's main.c, which
+   passes every check when built by tcc2 on gala. It needed msvcrt's
+   strtod (tcc parses float constants with it; mingw programs use
+   libmingwex's) and the `_HUGE` data export. strtod, atof and sscanf's
+   %f now parse with core's correctly rounded f64 parser (msvcrt_test
+   calls msvcrt's strtod through GetProcAddress). Left in the ledger:
+   FormatMessage(FROM_SYSTEM) (busybox's error text), SetFileTime.
+H6. **make on gala**: next. busybox-w32's make (pdpmake) builds a small
+   multi-file C program with tcc on gala from a Makefile, then rebuilds
+   only what a changed source needs (file times: SetFileTime, the
+   resolution make compares), and a failing rule stops the build with
+   make's status, all as on Windows.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

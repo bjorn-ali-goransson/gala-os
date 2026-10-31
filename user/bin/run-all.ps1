@@ -80,11 +80,13 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
 # scenarios): their full output goes to <name>-windows.txt next to the
 # report, to compare with the scenario's expected lines. tcc.sh unpacks
 # tcc.tar (user/tcc/build.sh), builds TinyCC's runtime with it, compiles
-# hello.c and runs it.
+# hello.c and runs it; self.sh then has tcc compile itself (tcc2.exe), and
+# tcc2 compile hello.c and msvcrt_test's main.c.
 $scripts = @(
     @{ name = "busybox_files"; path = "..\busybox\files.sh"; args = @() },
     @{ name = "busybox_script"; path = "..\busybox\script.sh"; args = @() },
-    @{ name = "tcc"; path = "..\tcc\tcc.sh"; args = @((Join-Path $here "tcc.tar")) }
+    @{ name = "tcc"; path = "..\tcc\tcc.sh"; args = @((Join-Path $here "tcc.tar")) },
+    @{ name = "tcc_self"; path = "..\tcc\self.sh"; args = @((Join-Path $here "tcc.tar"), (Join-Path $here "..\msvcrt_test\main.c")) }
 )
 foreach ($s in $scripts) {
     $path = Join-Path $here $s.path
