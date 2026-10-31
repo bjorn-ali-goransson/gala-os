@@ -661,9 +661,20 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       kernel heap, whose large allocations need physically contiguous
       frames, and after ten minutes of Elasticsearch there were none
       ("net: listen on port 7: NoMemory", logged with the socket and
-      frame counts). Next: large kernel allocations from single frames
-      mapped into a kernel virtual area (no contiguity needed), then
-      this check again.
+      frame counts). Several-page kernel allocations now come from single
+      frames mapped into a kernel window (`mm::vmap`), no contiguity
+      needed - but the real cause was exhaustion: the VM (~1.5 GiB) ran
+      out of frames ("vm: out of memory ... 0 of 371712 frames free", now
+      logged; a user page fault without a frame becomes an access
+      violation, so the JVM crashed). The scenario's VM now gets 3 GiB:
+      Elasticsearch starts with HTTP on 0.0.0.0:7 ("publish_address
+      {10.0.2.15:7}"), but the host's GET / gets no answer (the
+      connection is accepted by QEMU, nothing comes back within 60 s).
+      Nginx (select/AFD poll) and Caddy (IOCP) serve the host, so the
+      suspect is the JDK's NIO path (wepoll over AFD) for connections
+      through the card. Next: a small Java HTTP server
+      (com.sun.net.httpserver, the same selector path, seconds instead
+      of ten minutes) serving the host, then this check again.
    5. SQL Server (asked for 2026-10-31): start with SQL Server Express
       LocalDB, the small edition that runs sqlservr.exe as an ordinary
       process started on demand (no Windows service), queried with a

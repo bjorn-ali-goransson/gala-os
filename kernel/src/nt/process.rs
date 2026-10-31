@@ -55,6 +55,8 @@ pub struct Process {
     pub exit_time: IrqMutex<u64>,
     /// The job object the process is in (nt::job).
     pub job: IrqMutex<Option<ObjectRef>>,
+    /// A page fault found no free frame (logged once).
+    pub oom_logged: core::sync::atomic::AtomicBool,
 }
 
 impl fmt::Debug for Process {
@@ -634,6 +636,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         create_time: platform::system_time(),
         exit_time: IrqMutex::new(0),
         job: IrqMutex::new(None),
+        oom_logged: core::sync::atomic::AtomicBool::new(false),
     })?;
     prune();
     PROCESSES.lock().try_push(process.clone())?;

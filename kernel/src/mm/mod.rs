@@ -5,6 +5,7 @@ pub mod frame;
 pub mod heap;
 pub mod memmap;
 pub mod paging;
+pub mod vmap;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

@@ -861,6 +861,8 @@ const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// tens of seconds locally, over twice that on a slow CI runner. They get
 /// this much instead of BOOT_TEST_TIMEOUT.
 const SLOW_SCENARIOS: &[&str] = &["java_version", "java_hello", "dotnet_hello", "pwsh_hello"];
+/// Memory for the Elasticsearch scenario's VM.
+const ELASTICSEARCH_MEMORY_MIB: u64 = 3072;
 /// Elasticsearch starts three JVMs and ~60 modules under TCG.
 const ELASTICSEARCH_TIMEOUT: Duration = Duration::from_secs(900);
 const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
@@ -1439,7 +1441,13 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     // 512 MiB, plus twice the image for images with large programs (the
     // boot modules stay in memory, and programs like a JVM map them).
     let image_mib = fs::metadata(iso).map_or(0, |m| m.len() >> 20);
-    let memory = if image_mib > 64 { 512 + 2 * image_mib } else { 512 };
+    let mut memory = if image_mib > 64 { 512 + 2 * image_mib } else { 512 };
+    // Elasticsearch: a 256 MiB heap pre-touched, its launcher's JVM, and
+    // the files it writes on C: (in memory) need more than that; with
+    // ~1.5 GiB it ran out of frames (Elastic asks for several GiB).
+    if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("elasticsearch")) {
+        memory = memory.max(ELASTICSEARCH_MEMORY_MIB);
+    }
     let mut cmd = Command::new("qemu-system-x86_64");
     cmd.args(["-machine", "q35", "-cpu", "max", "-m", &format!("{memory}M"), "-smp", "2"])
         // KVM when available, otherwise software emulation.

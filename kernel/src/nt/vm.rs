@@ -128,7 +128,27 @@ pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> Fault {
             None => space.map_zero_page(addr, flags_for(protect)).is_ok(),
         }
     };
-    if done { Fault::Resolved } else { Fault::Denied }
+    if done {
+        Fault::Resolved
+    } else {
+        out_of_memory(process, addr);
+        Fault::Denied
+    }
+}
+
+/// A committed page could not be given a frame: the machine is out of
+/// memory. Windows refuses the commit instead (commit charge, not done
+/// yet), so the program sees an access violation; this is logged (once per
+/// process) and counted in the ledger so it is not mistaken for a bug.
+fn out_of_memory(process: &Process, addr: u64) {
+    let (free, total) = platform::frame_stats();
+    super::ledger::record("user page fault", "out of memory", free);
+    if !process.oom_logged.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        crate::warn!(
+            "vm: out of memory in pid {} at {addr:#x} ({free} of {total} frames free)",
+            process.id
+        );
+    }
 }
 
 /// A write to a copy-on-write page: the page becomes private to this view
@@ -155,7 +175,12 @@ fn copy_on_write(
             None => space.map_zero_page(page, flags).is_ok(),
         },
     };
-    if done { Fault::Resolved } else { Fault::Denied }
+    if done {
+        Fault::Resolved
+    } else {
+        out_of_memory(process, addr);
+        Fault::Denied
+    }
 }
 
 /// A touched guard page: the guard is removed. In the current thread's

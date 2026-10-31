@@ -182,9 +182,17 @@ pub fn kernel_main() -> ! {
     net::log_stats();
     info!("nt: {}", nt::stats::Summary);
     let (shootdowns, ipis) = arch::smp::flush_stats();
+    let heap = mm::heap::stats();
+    let window_flushes = mm::vmap::WINDOW.lock().flushes();
     info!(
-        "stats: {shootdowns} TLB shootdowns ({ipis} IPIs), {} frames leaked by deferred frees",
-        arch::paging::leaked_frames()
+        "stats: {shootdowns} TLB shootdowns ({ipis} IPIs), {} frames leaked by deferred frees; \
+         heap {} KiB in use, {} large pages, {window_flushes} mapped-window flushes; \
+         frames free {} of {}",
+        arch::paging::leaked_frames(),
+        heap.in_use / 1024,
+        heap.large_pages,
+        mm::frame_stats().0,
+        mm::frame_stats().1
     );
     kprintln!("{BOOT_OK_MARKER}");
     if QEMU_EXIT.load(Ordering::Relaxed) {

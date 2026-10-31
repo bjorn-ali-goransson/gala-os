@@ -137,11 +137,20 @@ live in HHDM-mapped bootloader-reclaimable memory.
 power-of-two classes (objects are aligned to their class size) and larger
 or page-aligned requests from contiguous frames. Pages come from a
 `PageSource` (frames via the HHDM in the kernel, `std::alloc` in host
-tests). Slab pages are not returned to the frame allocator yet. TODO: large
-allocations need physically contiguous frames; after long runs memory
-can be too fragmented for 16 (a socket's 64 KiB buffers: Elasticsearch
-could not open its HTTP listener). Plan: single frames mapped into a
-kernel virtual area for multi-page allocations.
+tests). Slab pages are not returned to the frame allocator yet. Allocations of
+several pages (with at most page alignment) need no physical contiguity:
+they take single frames mapped into the mapped-allocation window
+(`mm::vmap`, 4 GiB at 0xffff_e800_0000_0000), so a fragmented physical
+memory still serves them. Single pages and
+larger alignments stay in the HHDM (file pages are mapped into processes
+by their frame: `frame_of_heap_page`); device memory (virtio rings) takes
+frames from the frame allocator directly. A freed run is unmapped and its
+frames freed at once, but its virtual range stays dirty, not reused, until
+every CPU has flushed its TLB (kernel pages are global): when no clean run
+is left, the allocator calls `smp::flush_tlb_everywhere` (safe with locks
+held) and reuses the dirty ones. Before paging is set up, it falls back to
+contiguous frames. Lock order: heap, window, kernel address space, frame
+allocator.
 
 Allocation never panics: the allocator returns null on exhaustion, and
 `kernel/clippy.toml` bans the infallible std APIs (`Box::new`, `vec!`,

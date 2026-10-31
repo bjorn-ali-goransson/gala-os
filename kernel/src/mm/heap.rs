@@ -26,6 +26,17 @@ pub trait PageSource {
     /// # Safety
     /// `ptr` and `pages` must come from a matching `alloc_pages` call.
     unsafe fn free_pages(&mut self, ptr: NonNull<u8>, pages: usize);
+    /// Returns `pages` virtually contiguous, page-aligned pages that need
+    /// not be physically contiguous (several-page heap allocations).
+    fn alloc_mapped(&mut self, pages: usize) -> Option<NonNull<u8>> {
+        self.alloc_pages(pages, 1)
+    }
+    /// # Safety
+    /// `ptr` and `pages` must come from a matching `alloc_mapped` call.
+    unsafe fn free_mapped(&mut self, ptr: NonNull<u8>, pages: usize) {
+        // SAFETY: forwarded; the default `alloc_mapped` is `alloc_pages`.
+        unsafe { self.free_pages(ptr, pages) }
+    }
 }
 
 struct FreeObject {
@@ -106,7 +117,14 @@ impl<S: PageSource> Heap<S> {
             }
             None => {
                 let (pages, align) = pages_of(layout);
-                let ptr = self.source.alloc_pages(pages, align)?;
+                // Several pages with no more than page alignment need no
+                // physical contiguity (single pages stay in the HHDM:
+                // file pages are mapped into processes by their frame).
+                let ptr = if pages > 1 && align == 1 {
+                    self.source.alloc_mapped(pages)?
+                } else {
+                    self.source.alloc_pages(pages, align)?
+                };
                 self.stats.in_use += pages * PAGE;
                 self.stats.large_pages += pages;
                 Some(ptr)
@@ -128,10 +146,17 @@ impl<S: PageSource> Heap<S> {
                 self.stats.in_use -= CLASSES[class];
             }
             None => {
-                let (pages, _) = pages_of(layout);
-                // SAFETY: large allocations come straight from `alloc_pages`
-                // with this page count.
-                unsafe { self.source.free_pages(ptr, pages) };
+                let (pages, align) = pages_of(layout);
+                // SAFETY: large allocations come from `alloc_mapped` or
+                // `alloc_pages` (as `alloc` chose by the same layout) with
+                // this page count.
+                unsafe {
+                    if pages > 1 && align == 1 {
+                        self.source.free_mapped(ptr, pages)
+                    } else {
+                        self.source.free_pages(ptr, pages)
+                    }
+                };
                 self.stats.in_use -= pages * PAGE;
                 self.stats.large_pages -= pages;
             }
@@ -195,7 +220,8 @@ impl<T> TryVec<T> for alloc::vec::Vec<T> {
 }
 
 /// The kernel's page source: frames from the frame allocator, accessed via
-/// the HHDM.
+/// the HHDM; several-page allocations from single frames mapped into the
+/// mapped-allocation window (`mm::vmap`).
 pub struct FramePages;
 
 impl PageSource for FramePages {
@@ -213,6 +239,72 @@ impl PageSource for FramePages {
             if super::free_frame(frame).is_err() {
                 panic!("heap: freeing {frame} failed");
             }
+        }
+    }
+
+    fn alloc_mapped(&mut self, pages: usize) -> Option<NonNull<u8>> {
+        use super::vmap::{Region, WINDOW};
+        let start = {
+            let mut region = WINDOW.lock();
+            match region.reserve(pages) {
+                Some(start) => start,
+                None if region.has_dirty() => {
+                    // Freed runs are reusable once no CPU caches their old
+                    // translations (safe with locks held: CPUs spinning
+                    // for a lock serve flush requests).
+                    crate::arch::smp::flush_tlb_everywhere();
+                    region.flushed();
+                    region.reserve(pages)?
+                }
+                None => return None,
+            }
+        };
+        let base = Region::address(start);
+        for i in 0..pages {
+            let virt = base + (i * PAGE) as u64;
+            let mapped = super::allocate_frame().and_then(|frame| {
+                let flags = super::paging::PageFlags::KERNEL_RW;
+                match crate::arch::paging::map_kernel_page(virt, frame, flags) {
+                    Ok(()) => Some(()),
+                    Err(_) => {
+                        let _ = super::free_frame(frame);
+                        None
+                    }
+                }
+            });
+            if mapped.is_none() {
+                // Undo: the pages mapped so far, then the run.
+                unmap_run(base, i);
+                WINDOW.lock().release(start, pages);
+                // Before paging is up (or out of frames): contiguous frames.
+                return self.alloc_pages(pages, 1);
+            }
+        }
+        NonNull::new(core::ptr::with_exposed_provenance_mut(base as usize))
+    }
+
+    unsafe fn free_mapped(&mut self, ptr: NonNull<u8>, pages: usize) {
+        use super::vmap::{Region, WINDOW};
+        let virt = ptr.as_ptr().addr() as u64;
+        match Region::index_of(virt) {
+            Some(start) => {
+                unmap_run(virt, pages);
+                WINDOW.lock().release(start, pages);
+            }
+            // SAFETY: not in the window: `alloc_mapped` fell back to
+            // `alloc_pages` with this count.
+            None => unsafe { self.free_pages(ptr, pages) },
+        }
+    }
+}
+
+/// Unmaps `pages` pages of the window from `base` and frees their frames
+/// (other CPUs' stale entries are flushed before the run is reused).
+fn unmap_run(base: u64, pages: usize) {
+    for i in 0..pages {
+        if let Some(frame) = crate::arch::paging::unmap_kernel_page(base + (i * PAGE) as u64) {
+            // A failure here means a corrupt window; nothing to report to.
+            let _ = super::free_frame(frame);
         }
     }
 }

@@ -81,6 +81,11 @@ shows it.
 
 ## Things that are easy to get wrong
 
+- **A JVM crashing with access violations at odd addresses** after a
+  long run may be the machine out of memory: a user page fault that finds
+  no free frame becomes an access violation (no commit charge yet). Look
+  for "vm: out of memory" in the log and the free frames on the `stats:`
+  line; give the scenario more memory (xtask's `qemu`).
 - **Disk space**: ISOs of the runtime scenarios are 120-470 MB each, and
   their `*-iso-root` copies as much again; `target/debug/*.iso`,
   `*-iso-root` and `*.events.jsonl` are rebuilt on every run and can be
