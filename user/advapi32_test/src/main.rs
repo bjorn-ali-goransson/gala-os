@@ -21,7 +21,9 @@
 //!   no size), GetSidSubAuthority(Count), RevertToSelf without
 //!   impersonation, SetKernelObjectSecurity with a NULL DACL, ETW
 //!   providers (EventRegister, EventEnabled, EventWrite(Transfer),
-//!   EventUnregister) with no session listening.
+//!   EventUnregister) with no session listening; the thread's activity id
+//!   (EventActivityIdControl); software restriction policies (none: a
+//!   script is fully trusted; SaferIdentifyLevel and friends).
 //!
 //! Prints `advapi32_test: ok` or exits with the number of the failing
 //! check.
@@ -188,6 +190,28 @@ unsafe extern "system" {
     ) -> u32;
     fn EventEnabled(handle: u64, descriptor: *const [u8; 16]) -> u8;
     fn EventUnregister(handle: u64) -> u32;
+    fn EventActivityIdControl(code: u32, id: *mut [u8; 16]) -> u32;
+    fn SaferIdentifyLevel(
+        count: u32,
+        props: *mut u8,
+        level: *mut Handle,
+        reserved: *mut c_void,
+    ) -> Bool;
+    fn SaferGetLevelInformation(
+        level: Handle,
+        class: u32,
+        buf: *mut u32,
+        len: u32,
+        needed: *mut u32,
+    ) -> Bool;
+    fn SaferComputeTokenFromLevel(
+        level: Handle,
+        token: Handle,
+        out: *mut Handle,
+        flags: u32,
+        reserved: *mut c_void,
+    ) -> Bool;
+    fn SaferCloseLevel(level: Handle) -> Bool;
 }
 
 #[allow(dead_code)]
@@ -741,6 +765,58 @@ fn clr(c: &mut Checks) -> Result<(), u32> {
         );
         c.eq(r.into(), 0)?;
         c.eq(EventUnregister(handle).into(), 0)?;
+
+        // The thread's activity id: none at first; CREATE makes new ones
+        // (not stored), SET stores, GET reads, GET_SET swaps.
+        let mut id = [9u8; 16];
+        c.eq(EventActivityIdControl(1, &mut id).into(), 0)?; // EVENT_ACTIVITY_CTRL_GET_ID
+        c.ok(id == [0; 16], id[0].into())?;
+        let (mut a, mut b) = ([0u8; 16], [0u8; 16]);
+        c.eq(EventActivityIdControl(3, &mut a).into(), 0)?; // CREATE_ID
+        c.eq(EventActivityIdControl(3, &mut b).into(), 0)?;
+        c.ok(a != b && a != [0; 16], 0)?;
+        c.eq(EventActivityIdControl(1, &mut id).into(), 0)?;
+        c.ok(id == [0; 16], 0)?;
+        let mut set = a;
+        c.eq(EventActivityIdControl(2, &mut set).into(), 0)?; // SET_ID
+        c.eq(EventActivityIdControl(1, &mut id).into(), 0)?;
+        c.ok(id == a, 0)?;
+        let mut swap = b;
+        c.eq(EventActivityIdControl(4, &mut swap).into(), 0)?; // GET_SET_ID
+        c.ok(swap == a, 0)?;
+        c.eq(EventActivityIdControl(1, &mut id).into(), 0)?;
+        c.ok(id == b, 0)?;
+        let mut zero = [0u8; 16];
+        EventActivityIdControl(2, &mut zero);
+        c.eq(EventActivityIdControl(9, &mut id).into(), 87)?; // ERROR_INVALID_PARAMETER
+
+        // Software restriction policies: none are configured, so a script
+        // is fully trusted and runs with the caller's own token.
+        let path = w("C:\\gala\\script.ps1");
+        let mut props = [0u64; 17]; // SAFER_CODE_PROPERTIES (V1, 136 bytes)
+        props[0] = 136 | (1 << 32); // cbSize, SAFER_CRITERIA_IMAGEPATH
+        props[1] = path.as_ptr() as u64;
+        let mut level = core::ptr::null_mut();
+        let ok =
+            SaferIdentifyLevel(1, props.as_mut_ptr().cast(), &mut level, core::ptr::null_mut());
+        c.ok(ok != 0 && !level.is_null(), GetLastError().into())?;
+        let (mut id, mut needed) = (0u32, 0u32);
+        c.ok(SaferGetLevelInformation(level, 1, &mut id, 4, &mut needed) != 0, 0)?; // SaferObjectLevelId
+        c.eq(id.into(), 0x4_0000)?; // SAFER_LEVELID_FULLYTRUSTED
+        let mut token = 7 as Handle;
+        let flags = 1; // SAFER_TOKEN_NULL_IF_EQUAL
+        c.ok(
+            SaferComputeTokenFromLevel(
+                level,
+                core::ptr::null_mut(),
+                &mut token,
+                flags,
+                core::ptr::null_mut(),
+            ) != 0,
+            0,
+        )?;
+        c.ok(token.is_null(), token as u64)?;
+        c.ok(SaferCloseLevel(level) != 0, 0)?;
     }
     Ok(())
 }

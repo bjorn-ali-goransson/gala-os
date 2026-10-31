@@ -180,8 +180,15 @@ fn guard_hit(process: &Process, addr: u64, protect: u32) -> Fault {
                         Some(_) => vad.commit(next, PAGE_SIZE, protect | vad::PAGE_GUARD).is_ok(),
                         None => false,
                     };
-                let result =
-                    if grown { Fault::Resolved } else { Fault::Raise(NtStatus::STACK_OVERFLOW) };
+                let result = if grown {
+                    Fault::Resolved
+                } else {
+                    crate::warn!(
+                        "vm: stack overflow in pid {} at {addr:#x} (stack {bottom:#x}..{base:#x})",
+                        process.id
+                    );
+                    Fault::Raise(NtStatus::STACK_OVERFLOW)
+                };
                 (result, Some((teb, page)))
             }
             _ => (Fault::Raise(NtStatus::GUARD_PAGE_VIOLATION), None),

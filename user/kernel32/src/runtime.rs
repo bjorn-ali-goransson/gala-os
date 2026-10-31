@@ -477,3 +477,43 @@ pub extern "system" fn GetThreadDescription(thread: Handle, out: *mut *mut u16) 
     }
     0
 }
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
+}
+
+/// GetSystemTimes: FILETIMEs summed over the processors. gala does not
+/// account processor time yet (TODO: in the scheduler), so every
+/// processor counts as idle since boot: kernel time (which includes idle
+/// time, as documented) equals idle time and user time is 0. Utilization
+/// computed from these reads as 0%.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSystemTimes(idle: *mut u64, kernel: *mut u64, user: *mut u64) -> Bool {
+    // SYSTEM_TIME_OF_DAY_INFORMATION: BootTime, CurrentTime, ...
+    let mut tod = [0u64; 6];
+    // SAFETY: a 48-byte buffer.
+    let status =
+        unsafe { NtQuerySystemInformation(3, tod.as_mut_ptr().cast(), 48, core::ptr::null_mut()) };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    let mut basic = [0u8; 64];
+    // SAFETY: a 64-byte SYSTEM_BASIC_INFORMATION buffer.
+    unsafe { NtQuerySystemInformation(0, basic.as_mut_ptr(), 64, core::ptr::null_mut()) };
+    let processors = u64::from(basic[56].max(1));
+    let elapsed = tod[1].saturating_sub(tod[0]).max(1) * processors;
+    // SAFETY: the caller's outputs (each may be null).
+    unsafe {
+        if !idle.is_null() {
+            *idle = elapsed;
+        }
+        if !kernel.is_null() {
+            *kernel = elapsed;
+        }
+        if !user.is_null() {
+            *user = 0;
+        }
+    }
+    TRUE
+}

@@ -98,3 +98,50 @@ pub extern "system" fn EventSetInformation(
 ) -> u32 {
     0
 }
+
+/// TEB.ActivityId (x64 offset 0x1710): the thread's ETW activity id.
+fn activity_id() -> *mut [u8; 16] {
+    let teb: usize;
+    // SAFETY: gs:[0x30] is the TEB's self pointer.
+    unsafe { core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(nostack, readonly)) };
+    (teb + 0x1710) as *mut [u8; 16]
+}
+
+#[link(name = "bcryptprimitives", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn ProcessPrng(data: *mut u8, length: usize) -> i32;
+}
+
+/// EventActivityIdControl: GET_ID (1), SET_ID (2), CREATE_ID (3, a new
+/// version-4 GUID, not stored), GET_SET_ID (4, swap), CREATE_SET_ID (5,
+/// store a new one, return the old).
+#[unsafe(no_mangle)]
+pub extern "system" fn EventActivityIdControl(code: u32, id: *mut [u8; 16]) -> u32 {
+    if id.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let new_id = || {
+        let mut g = [0u8; 16];
+        // SAFETY: our buffer.
+        unsafe { ProcessPrng(g.as_mut_ptr(), 16) };
+        g[7] = (g[7] & 0x0f) | 0x40;
+        g[8] = (g[8] & 0x3f) | 0x80;
+        g
+    };
+    let current = activity_id();
+    // SAFETY: the caller's GUID; this thread's TEB.
+    unsafe {
+        match code {
+            1 => *id = *current,
+            2 => *current = *id,
+            3 => *id = new_id(),
+            4 => core::ptr::swap(id, current),
+            5 => {
+                *id = *current;
+                *current = new_id();
+            }
+            _ => return ERROR_INVALID_PARAMETER,
+        }
+    }
+    0
+}

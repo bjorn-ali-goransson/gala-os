@@ -67,10 +67,11 @@ pub mod params {
 pub const PEB_ADDRESS: u64 = 0x0000_7ff0_0000_0000;
 pub const PARAMS_ADDRESS: u64 = 0x0000_7ff0_0001_0000;
 pub const FIRST_TEB_ADDRESS: u64 = 0x0000_7ff0_0010_0000;
-/// Main thread stack: `[STACK_TOP - size, STACK_TOP)`, with an unmapped
-/// guard page below.
+/// Where the main thread's stack ends when its reservation (the image's
+/// SizeOfStackReserve) fits below: `[STACK_TOP - reserve, STACK_TOP)`,
+/// the bottom page never committed.
 pub const STACK_TOP: u64 = 0x0000_0000_0020_0000;
-/// Main-thread stack reservation (above one never-committed bottom page).
-pub const STACK_SIZE: u64 = 1024 * 1024;
+/// The largest main-thread stack reservation taken from a header.
+pub const MAX_STACK: u64 = 256 * 1024 * 1024;
 /// Initially committed top of the main-thread stack.
 pub const STACK_COMMIT: u64 = 0x4000;

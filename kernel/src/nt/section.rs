@@ -71,6 +71,9 @@ pub struct ImageInfo {
     pub subsystem_version: (u16, u16),
     pub is_dll: bool,
     pub has_imports: bool,
+    /// SizeOfStackReserve / SizeOfStackCommit (the main thread's stack).
+    pub stack_reserve: u64,
+    pub stack_commit: u64,
 }
 
 impl Drop for ImageLayout {
@@ -131,6 +134,8 @@ impl ImageLayout {
             subsystem_version: image.subsystem_version,
             is_dll: image.is_dll,
             has_imports: image.has_imports(),
+            stack_reserve: image.stack_reserve,
+            stack_commit: image.stack_commit,
         };
         Ok(ImageLayout {
             base: image.image_base,

@@ -2200,13 +2200,31 @@ unsafe extern "system" {
     pub(crate) fn LdrDisableThreadCalloutsForDll(module: Handle) -> u32;
 }
 
-/// Default stack reservation for new threads (Windows takes it from the
-/// executable's header; 1 MiB is the usual value).
-const DEFAULT_STACK: usize = 0x10_0000;
+/// The executable's SizeOfStackReserve (PE32+ optional header +72): the
+/// default reservation for new threads, as on Windows (1 MiB if unset).
+fn default_stack() -> usize {
+    let base = mapping::image_base() as usize;
+    // SAFETY: the executable's mapped headers.
+    let reserve = unsafe {
+        let nt = base + (*((base + 0x3c) as *const u32)) as usize;
+        *((nt + 24 + 72) as *const u64) as usize
+    };
+    if reserve == 0 { 0x10_0000 } else { reserve }
+}
 
-/// CreateThread: the stack is reserved and committed here (no guard page
-/// yet: a thread that overflows it faults), then NtCreateThread starts the
-/// thread at `thread_start`. Thread attributes are not supported yet.
+/// The executable's SizeOfStackCommit (PE32+ optional header +80).
+fn default_stack_commit() -> usize {
+    let base = mapping::image_base() as usize;
+    // SAFETY: the executable's mapped headers.
+    unsafe {
+        let nt = base + (*((base + 0x3c) as *const u32)) as usize;
+        *((nt + 24 + 80) as *const u64) as usize
+    }
+}
+
+/// CreateThread: the stack is reserved and partly committed here, with a
+/// guard page (see below), then NtCreateThread starts the thread at
+/// `thread_start`. Thread attributes are not supported yet.
 #[unsafe(no_mangle)]
 pub extern "system" fn CreateThread(
     attributes: *mut c_void,
@@ -2223,12 +2241,41 @@ pub extern "system" fn CreateThread(
         unsupported(b"kernel32.dll!CreateThread(attributes/flags)", u64::from(flags));
         return fail_with(ERROR_NOT_SUPPORTED, core::ptr::null_mut());
     }
-    let size = stack_size.max(DEFAULT_STACK).next_multiple_of(0x1_0000);
-    let stack = VirtualAlloc(core::ptr::null_mut(), size, 0x3000, 4) as usize;
+    // A reservation given as such; otherwise the size is what to commit and
+    // the reservation is the executable's default (or that size, rounded
+    // up to a megabyte, if larger).
+    let size = if flags & STACK_SIZE_PARAM_IS_A_RESERVATION != 0 && stack_size != 0 {
+        stack_size
+    } else if stack_size > default_stack() {
+        stack_size.next_multiple_of(0x10_0000)
+    } else {
+        default_stack()
+    }
+    .next_multiple_of(0x1_0000);
+    // As Windows lays out a thread stack: the reservation, its top pages
+    // committed (the requested commit size, else the header's, at least
+    // 16 KiB), a guard page below them that moves down as the stack grows
+    // (the kernel's guard-page handling), the bottom page never committed.
+    let commit = if flags & STACK_SIZE_PARAM_IS_A_RESERVATION == 0 && stack_size != 0 {
+        stack_size
+    } else {
+        default_stack_commit()
+    }
+    .max(0x4000)
+    .next_multiple_of(0x1000)
+    .min(size / 2);
+    let stack = VirtualAlloc(core::ptr::null_mut(), size, 0x2000, 4) as usize; // MEM_RESERVE
     if stack == 0 {
         return core::ptr::null_mut();
     }
     let top = stack + size;
+    let limit = top - commit;
+    let committed = !VirtualAlloc(limit as *mut c_void, commit, 0x1000, 4).is_null()
+        && !VirtualAlloc((limit - 0x1000) as *mut c_void, 0x1000, 0x1000, 0x104).is_null(); // PAGE_GUARD
+    if !committed {
+        VirtualFree(stack as *mut c_void, 0, 0x8000);
+        return core::ptr::null_mut();
+    }
     // SAFETY: an all-zero CONTEXT is a valid bit pattern.
     let mut context: Context = unsafe { core::mem::zeroed() };
     context.context_flags = 0x10_000b; // CONTEXT_FULL
@@ -2241,7 +2288,7 @@ pub extern "system" fn CreateThread(
     context.gpr[4] = (top - 0x28) as u64; // rsp, as if called
     // INITIAL_TEB: OldStackBase, OldStackLimit, StackBase, StackLimit,
     // StackAllocationBase.
-    let initial_teb = [0, 0, top, stack, stack];
+    let initial_teb = [0, 0, top, limit, stack];
     let (mut h, mut cid) = (core::ptr::null_mut(), [0usize; 2]);
     // SAFETY: valid pointers for the call.
     let status = unsafe {

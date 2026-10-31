@@ -267,10 +267,7 @@ fn map_image(
     let end = base.checked_add(size).ok_or(LoadError::BadImageBase)?;
     // Keep the first 64 KiB free (null-pointer region) and stay clear of
     // our fixed structures.
-    if base < 0x1_0000
-        || end > layout::PEB_ADDRESS
-        || (base < layout::STACK_TOP && end > layout::STACK_TOP - layout::STACK_SIZE - PAGE_SIZE)
-    {
+    if base < 0x1_0000 || end > layout::PEB_ADDRESS {
         return Err(LoadError::BadImageBase);
     }
     // TODO: relocate when the preferred base is taken.
@@ -496,20 +493,26 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         ),
     );
 
-    // Main thread stack, laid out as Windows does: a reservation whose top
-    // pages are committed, with a guard page below them that moves down as
-    // the stack grows (`vm::resolve_fault`); the bottom page stays reserved.
-    // TODO: honour SizeOfStackReserve/SizeOfStackCommit.
-    let stack_bottom = layout::STACK_TOP - layout::STACK_SIZE - PAGE_SIZE;
-    let stack_limit = layout::STACK_TOP - layout::STACK_COMMIT;
-    vad.reserve(
-        Some(stack_bottom),
-        layout::STACK_SIZE + PAGE_SIZE,
-        vad::PAGE_READWRITE,
-        vad::MEM_PRIVATE,
-        false,
-    )?;
-    vad.commit(stack_limit, layout::STACK_COMMIT, vad::PAGE_READWRITE)?;
+    // Main thread stack, laid out as Windows does: a reservation of the
+    // header's SizeOfStackReserve (in 64 KiB units) whose top pages
+    // (SizeOfStackCommit, at least STACK_COMMIT) are committed, with a guard
+    // page below them that moves down as the stack grows
+    // (`vm::resolve_fault`); the bottom page stays reserved. It ends at
+    // STACK_TOP when it fits below it, else it goes where there is room.
+    let reserve = info.stack_reserve.clamp(0x1_0000, layout::MAX_STACK).next_multiple_of(0x1_0000);
+    let commit =
+        info.stack_commit.max(layout::STACK_COMMIT).next_multiple_of(PAGE_SIZE).min(reserve / 2);
+    let preferred = layout::STACK_TOP.checked_sub(reserve).filter(|&b| b >= 0x1_0000);
+    let reserved = match preferred {
+        Some(b) => vad
+            .reserve(Some(b), reserve, vad::PAGE_READWRITE, vad::MEM_PRIVATE, false)
+            .or_else(|_| vad.reserve(None, reserve, vad::PAGE_READWRITE, vad::MEM_PRIVATE, false)),
+        None => vad.reserve(None, reserve, vad::PAGE_READWRITE, vad::MEM_PRIVATE, false),
+    }?;
+    let stack_bottom = reserved.0;
+    let stack_top = stack_bottom + reserve;
+    let stack_limit = stack_top - commit;
+    vad.commit(stack_limit, commit, vad::PAGE_READWRITE)?;
     vad.commit(stack_limit - PAGE_SIZE, PAGE_SIZE, vad::PAGE_READWRITE | vad::PAGE_GUARD)?;
 
     super::kuser::map_into(&mut space, &mut vad)?;
@@ -619,15 +622,15 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     // with an ntdll, at its LdrInitializeThunk with that as the context.
     let mut gpr = [0u64; 16];
     gpr[1] = peb_addr;
-    gpr[4] = layout::STACK_TOP - 0x28;
+    gpr[4] = stack_top - 0x28;
     let start = UserRegs { gpr, rip: base + u64::from(info.entry_rva), rflags: 0 };
-    let started = through_ntdll(&process, &start).and_then(|regs| {
+    let started = through_ntdll(&process, &start, stack_top).and_then(|regs| {
         thread::create(
             &process,
             regs,
             start.rip,
             None,
-            (layout::STACK_TOP, stack_limit, stack_bottom),
+            (stack_top, stack_limit, stack_bottom),
             suspended,
         )
         .map(|t| (t, regs))
@@ -655,7 +658,11 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
 /// The initial registers: `start` itself, or, if there is a system ntdll,
 /// its LdrInitializeThunk(rcx = &CONTEXT of `start`, rdx = ntdll base) with
 /// the CONTEXT at the top of the stack. The ntdll view is mapped here.
-fn through_ntdll(process: &Process, start: &UserRegs) -> Result<UserRegs, NtStatus> {
+fn through_ntdll(
+    process: &Process,
+    start: &UserRegs,
+    stack_top: u64,
+) -> Result<UserRegs, NtStatus> {
     let Some(ntdll) = super::ntdll::get() else { return Ok(*start) };
     let view = super::section::map_view(
         process,
@@ -677,7 +684,7 @@ fn through_ntdll(process: &Process, start: &UserRegs) -> Result<UserRegs, NtStat
             .store(view.base + u64::from(rva), core::sync::atomic::Ordering::Relaxed);
     }
     let mut entry = *start;
-    let context_addr = (layout::STACK_TOP - super::context::SIZE as u64) & !0xf;
+    let context_addr = (stack_top - super::context::SIZE as u64) & !0xf;
     entry.gpr[4] = context_addr - 0x28;
     process
         .write(context_addr, &super::context::to_bytes(&entry, None))

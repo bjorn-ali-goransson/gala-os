@@ -420,8 +420,6 @@ no_security! {
     DuplicateToken(token: usize, level: u32, new: *mut usize);
     CheckTokenMembership(token: usize, sid: *const u8, member: *mut i32);
     AccessCheck(descriptor: *const u8, token: usize, access: u32, mapping: *const u8, privileges: *mut u8, length: *mut u32, granted: *mut u32, status: *mut i32);
-    SaferCreateLevel(scope: u32, level: u32, flags: u32, handle: *mut usize, reserved: *mut c_void);
-    SaferComputeTokenFromLevel(level: usize, token: usize, out: *mut usize, flags: u32, reserved: *mut c_void);
 }
 
 /// GetSecurityInfo: returns the error itself (not via GetLastError).

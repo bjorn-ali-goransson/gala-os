@@ -591,10 +591,16 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       Status: PowerShell 7.4.22 (PREBUILT, a self-contained .NET 8 app)
       is the pending `pwsh_hello` scenario. Its apphost needed activation
       contexts (CreateActCtxW and friends, manifest_test) and
-      ShellExecuteW; its managed code runs and stops on an unhandled
-      exception: bcrypt.dll (CNG: random numbers, hashes) is missing.
-      Next: bcrypt (test first, with known test vectors), GetSystemTimes,
-      FormatMessage FROM_SYSTEM/FROM_STRING.
+      ShellExecuteW. Since then: gala's bcrypt.dll (bcrypt_test, test
+      vectors), thread stacks laid out as on Windows (header
+      reservations, a guard page below StackLimit - CoreCLR looks for it),
+      GetSystemTimes, the ETW activity id, software restriction policies
+      (none: fully trusted). PowerShell's Main now runs through policy
+      checks into its console host, which stops: it cannot open the
+      active console output buffer (CONOUT$). Next: a console - CONOUT$/
+      CONIN$, console modes, GetConsoleScreenBufferInfo, WriteConsoleW
+      (test first); then FormatMessage FROM_SYSTEM/FROM_STRING and the
+      registry reads (RegOpenKeyExW, 11 hits).
    4. Elasticsearch on the JDK, started with java directly (its .bat
       launchers need cmd.exe, which gala does not have). As a Windows
       service it also needs a service control manager. Memory (QEMU's

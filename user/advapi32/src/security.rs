@@ -1306,3 +1306,105 @@ pub extern "system" fn SetKernelObjectSecurity(handle: usize, _info: u32, sd: *c
     missing(b"advapi32.dll!SetKernelObjectSecurity(not kept)");
     1
 }
+
+// ---- Software restriction policies (SAFER) ----
+//
+// gala has no policies, as a Windows machine without software restriction
+// policies or AppLocker rules: every program and script is fully trusted.
+// A level handle is the level id itself (only the fully trusted one is
+// ever handed out).
+
+const SAFER_LEVELID_FULLYTRUSTED: usize = 0x4_0000;
+
+/// SaferIdentifyLevel: the level for the code described - fully trusted.
+#[unsafe(no_mangle)]
+pub extern "system" fn SaferIdentifyLevel(
+    _count: u32,
+    _properties: *mut u8,
+    level: *mut usize,
+    _reserved: *mut c_void,
+) -> i32 {
+    if level.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's output.
+    unsafe { *level = SAFER_LEVELID_FULLYTRUSTED };
+    1
+}
+
+/// SaferCreateLevel: the levels exist (handles name them).
+#[unsafe(no_mangle)]
+pub extern "system" fn SaferCreateLevel(
+    _scope: u32,
+    level_id: u32,
+    _open_flags: u32,
+    level: *mut usize,
+    _reserved: *mut c_void,
+) -> i32 {
+    if level.is_null() || level_id == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's output.
+    unsafe { *level = level_id as usize };
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SaferCloseLevel(level: usize) -> i32 {
+    if level == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    1
+}
+
+/// SaferGetLevelInformation: SaferObjectLevelId (1) only (a DWORD).
+#[unsafe(no_mangle)]
+pub extern "system" fn SaferGetLevelInformation(
+    level: usize,
+    class: u32,
+    buffer: *mut u32,
+    size: u32,
+    needed: *mut u32,
+) -> i32 {
+    if level == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if class != 1 {
+        missing(b"advapi32.dll!SaferGetLevelInformation(class)");
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's outputs.
+    unsafe {
+        if !needed.is_null() {
+            *needed = 4;
+        }
+        if buffer.is_null() || size < 4 {
+            return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        *buffer = level as u32;
+    }
+    1
+}
+
+/// SaferComputeTokenFromLevel: a fully trusted level restricts nothing:
+/// with SAFER_TOKEN_NULL_IF_EQUAL (1) no token, else a copy of the
+/// caller's (the stand-in token: a process handle duplicate).
+#[unsafe(no_mangle)]
+pub extern "system" fn SaferComputeTokenFromLevel(
+    level: usize,
+    _token: usize,
+    out: *mut usize,
+    flags: u32,
+    _reserved: *mut c_void,
+) -> i32 {
+    if level == 0 || out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if flags & 1 != 0 {
+        // SAFETY: the caller's output.
+        unsafe { *out = 0 };
+        return 1;
+    }
+    // SAFETY: plain call (the current process pseudo-handle).
+    OpenProcessToken(unsafe { GetCurrentProcess() }, 0, out)
+}

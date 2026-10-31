@@ -795,6 +795,7 @@ from the public documentation of each function (clean room):
 | version.dll | `user/version` | `testversion.dll` | `C:\Windows\System32` |
 | ole32.dll | `user/ole32` | `testole32.dll` | `C:\Windows\System32` |
 | oleaut32.dll | `user/oleaut32` | `testoleaut32.dll` | `C:\Windows\System32` |
+| bcrypt.dll | `user/bcrypt` | `testbcrypt.dll` | `C:\Windows\System32` |
 
 (Exported under other names so that `user/bin`, which also runs on
 Windows, never shadows the system's DLLs.)
@@ -888,6 +889,21 @@ Windows, never shadows the system's DLLs.)
   BSTR/interface/VARIANT elements owned), VarCyFromDec; type libraries
   are not registered. Its exports have Windows' ordinals (build.rs, from
   Wine's spec); Get/Set/CreateErrorInfo forward to ole32.
+- **CNG** (bcrypt): BCryptGenRandom (ProcessPrng), MD5/SHA-1/SHA-2 and
+  their HMACs through providers or the documented pseudo-handles
+  (incremental, duplicated, reusable, one shot), BCryptGetProperty for
+  lengths; the digests are the RustCrypto crates'. Keys, ciphers and key
+  derivation fail with STATUS_NOT_SUPPORTED (recorded).
+- **Thread stacks**: laid out as Windows does - a reservation of the
+  executable's SizeOfStackReserve (main thread: the kernel, placed to end
+  at 0x200000 when it fits; CreateThread with size 0: kernel32 reads the
+  header), the top committed (SizeOfStackCommit or the requested size, at
+  least 16 KiB), a guard page just below StackLimit that moves down as
+  the stack grows, the bottom page never committed. CoreCLR checks for
+  that guard page (without it, it reports an unhandled exception as
+  "Stack overflow."). No processor time is accounted yet (TODO):
+  GetSystemTimes reports every processor idle since boot, thread times
+  are zero.
 - **Activation contexts** (kernel32 actctx.rs): CreateActCtxW checks
   that the manifest exists (an RT_MANIFEST resource of the module or PE
   file, or a manifest file) and returns a reference-counted handle;

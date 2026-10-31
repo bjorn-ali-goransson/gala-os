@@ -29,6 +29,10 @@
 //!   32-bit native DLL does not (ERROR_BAD_EXE_FORMAT);
 //!   RtlDllShutdownInProgress; Set/GetThreadDescription;
 //!   GetLocaleInfoW(LOCALE_SPARENT).
+//! - Stack reservations from the header's SizeOfStackReserve (3 MiB,
+//!   build.rs) for the main thread and CreateThread(0); a given reservation;
+//!   a guard page just below each thread's StackLimit (CoreCLR checks it).
+//! - GetSystemTimes: kernel time includes idle time; both grow.
 //! - An unhandled exception goes to the SetUnhandledExceptionFilter
 //!   filter; EXCEPTION_CONTINUE_EXECUTION resumes.
 //!
@@ -141,6 +145,17 @@ unsafe extern "system" {
     fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32) -> Handle;
     fn SetUnhandledExceptionFilter(filter: usize) -> usize;
     fn RaiseException(code: u32, flags: u32, count: u32, args: *const usize);
+    fn GetSystemTimes(idle: *mut u64, kernel: *mut u64, user: *mut u64) -> Bool;
+    fn Sleep(ms: u32);
+    fn VirtualQuery(address: *const c_void, info: *mut [u64; 6], len: usize) -> usize;
+    fn CreateThread(
+        attrs: *mut c_void,
+        stack: usize,
+        start: extern "system" fn(*mut c_void) -> u32,
+        param: *mut c_void,
+        flags: u32,
+        id: *mut u32,
+    ) -> Handle;
     fn GetModuleHandleW(name: *const u16) -> Handle;
     fn FreeLibrary(module: Handle) -> Bool;
     fn FindResourceW(module: Handle, name: *const u16, kind: *const u16) -> Handle;
@@ -611,6 +626,83 @@ fn unhandled(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// This thread's stack reservation: TEB.StackBase - TEB.DeallocationStack.
+fn stack_reservation() -> u64 {
+    let (base, bottom): (u64, u64);
+    // SAFETY: gs:[0x8] is TEB.StackBase, gs:[0x1478] TEB.DeallocationStack.
+    unsafe {
+        core::arch::asm!("mov {}, gs:[0x8]", out(reg) base, options(nostack, readonly));
+        core::arch::asm!("mov {}, gs:[0x1478]", out(reg) bottom, options(nostack, readonly));
+    }
+    base - bottom
+}
+
+/// Whether the page just below this thread's StackLimit is a guard page
+/// (PAGE_READWRITE | PAGE_GUARD), as Windows lays out thread stacks.
+fn guard_below_limit() -> bool {
+    let limit: u64;
+    // SAFETY: gs:[0x10] is TEB.StackLimit.
+    unsafe { core::arch::asm!("mov {}, gs:[0x10]", out(reg) limit, options(nostack, readonly)) };
+    let mut mbi = [0u64; 6];
+    // SAFETY: a MEMORY_BASIC_INFORMATION buffer (48 bytes).
+    let n = unsafe { VirtualQuery((limit - 0x1000) as *const c_void, &mut mbi, 48) };
+    // Protect is the DWORD at offset 36 (the high half of mbi[4]).
+    n == 48 && (mbi[4] >> 32) as u32 == 0x104
+}
+
+extern "system" fn report_stack(out: *mut c_void) -> u32 {
+    // SAFETY: the creator's two u64s, read after the thread ends.
+    unsafe {
+        *out.cast::<u64>() = stack_reservation();
+        *out.cast::<u64>().add(1) = u64::from(guard_below_limit());
+    }
+    0
+}
+
+/// Stack reservations come from the header's SizeOfStackReserve (build.rs:
+/// 3 MiB): the main thread's, and a new thread's when CreateThread gets 0;
+/// STACK_SIZE_PARAM_IS_A_RESERVATION sets it.
+fn stacks(c: &mut Checks) -> Result<(), u32> {
+    c.eq(stack_reservation(), 0x30_0000)?;
+    c.ok(guard_below_limit(), 0)?;
+    for (size, flags, want) in [(0, 0, 0x30_0000), (0x20_0000, 0x1_0000, 0x20_0000)] {
+        let mut got = [0u64; 2];
+        // SAFETY: the thread writes `got` and is waited for.
+        unsafe {
+            let p = got.as_mut_ptr().cast();
+            let t = CreateThread(
+                core::ptr::null_mut(),
+                size,
+                report_stack,
+                p,
+                flags,
+                core::ptr::null_mut(),
+            );
+            c.ok(!t.is_null(), 0)?;
+            WaitForSingleObject(t, u32::MAX);
+            CloseHandle(t);
+        }
+        c.eq(got[0], want)?;
+        c.eq(got[1], 1)?; // a guard page below the committed part
+    }
+    Ok(())
+}
+
+/// GetSystemTimes: kernel time includes idle time, and both grow.
+fn system_times(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: plain calls with outputs of ours.
+    unsafe {
+        let (mut idle, mut kernel, mut user) = (0u64, 0u64, 0u64);
+        c.ok(GetSystemTimes(&mut idle, &mut kernel, &mut user) != 0, GetLastError().into())?;
+        c.ok(kernel >= idle && kernel > 0, kernel)?;
+        Sleep(50);
+        let (mut idle2, mut kernel2) = (0u64, 0u64);
+        c.ok(GetSystemTimes(&mut idle2, &mut kernel2, core::ptr::null_mut()) != 0, 0)?;
+        c.ok(kernel2 > kernel && idle2 >= idle, kernel2 - kernel)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     waits(&mut c)?;
@@ -620,7 +712,9 @@ fn run() -> Result<(), u32> {
     threads_memory(&mut c)?;
     api_sets(&mut c)?;
     libraries(&mut c)?;
-    unhandled(&mut c)
+    unhandled(&mut c)?;
+    stacks(&mut c)?;
+    system_times(&mut c)
 }
 
 #[unsafe(no_mangle)]
