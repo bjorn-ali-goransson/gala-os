@@ -2284,6 +2284,7 @@ fn screenshot(release: bool, args: &[String]) -> Result {
     let mut times = vec![3.0f64];
     let mut name = String::from("gala");
     let mut cmdline = Vec::new();
+    let mut with_files: Option<String> = None;
     let mut it = args.iter().filter(|a| *a != "--release");
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -2296,6 +2297,9 @@ fn screenshot(release: bool, args: &[String]) -> Result {
                     .collect::<Result<_>>()?;
             }
             "--name" => name = it.next().ok_or("--name needs a value")?.clone(),
+            "--scenario" => {
+                with_files = Some(it.next().ok_or("--scenario needs a name")?.clone());
+            }
             _ => cmdline.push(arg.as_str()),
         }
     }
@@ -2317,6 +2321,14 @@ fn screenshot(release: bool, args: &[String]) -> Result {
             "nginx"
         };
         modules.extend(extra_modules(scenario).into_iter().filter(|(file, _)| file.contains('/')));
+    }
+    // --scenario S: S's files from the repository too (scripts, archives).
+    if let Some(scenario) = &with_files {
+        let files = extra_modules(scenario);
+        if files.is_empty() {
+            return Err(format!("no scenario {scenario:?} with extra modules").into());
+        }
+        modules.extend(files.into_iter().filter(|(file, _)| file.contains('/')));
     }
     let iso = make_iso(release, &format!("shot-{name}"), &cmdline.join(" "), &modules)?;
     let dir = target_dir().join("screenshots");

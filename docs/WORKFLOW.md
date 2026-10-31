@@ -215,6 +215,10 @@ and panics red), so a screenshot shows what is going on. Example:
 
     cargo xtask screenshot --name demo --at 6 run=hello.exe,smp_test.exe args=,cpus=2
 
+`--scenario S` adds S's files from the repository (scripts, archives):
+
+    cargo xtask screenshot --name tcc --scenario tcc --at 16 run=busybox.exe "args=sh%20C:/gala/tcc.sh%20C:/gala/tcc.tar"
+
 Boot tests pass `noscreen` (serial only) except in the UEFI scenarios:
 drawing text roughly doubles kernel time under emulation.
 
