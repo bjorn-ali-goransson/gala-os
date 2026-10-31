@@ -308,6 +308,13 @@ tcc2.exe, and uses tcc2 to build hello.c and `user/msvcrt_test/main.c`
 and TinyCC's headers (TinyCC's float.h lacks `_controlfp`; mingw's
 headers send `strtod` to libmingwex, so the test looks msvcrt's up).
 
+The `tcc_make` scenario (`user/tcc/make.sh`) builds `user/tcc/make/`
+(boot modules in `C:\gala\make`) with busybox's make, passing
+`CC=../tcc/tcc.exe CFLAGS=-B../tcc` so make's echoed commands are the
+same on gala and Windows; each step's lines carry the step's name
+(`build:`, `after touch:`, `again:`, `broken:`), since a scenario's
+expected lines are only searched for.
+
 ## Hunting a rare hang
 
 A scenario that fails once in N runs: loop `cargo xtask boot-test <name>`

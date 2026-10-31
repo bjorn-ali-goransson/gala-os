@@ -550,6 +550,14 @@ rounds correctly; strtod sets ERANGE on overflow (HUGE_VAL) and on
 underflow to 0. TinyCC parses float constants with strtod, so programs
 it builds on gala get the same constants as elsewhere.
 
+**File times** (H6): ramfs nodes keep a creation and a write time (NT
+times); FileBasicInformation reports the write time as the access and
+change times too. Setting FileBasicInformation (FILE_WRITE_ATTRIBUTES)
+changes the creation and write times given (0 or -1 keep a value; the
+access and change times have nowhere to go) and the settable attribute
+bits; kernel32's SetFileTime/GetFileTime are built on it. make compares
+write times, tar restores them.
+
 **NUL**: `\Device\Null` (with `\??\NUL` linking to it) opens as a file
 whose reads are at end of file and whose writes are discarded
 (FILE_DEVICE_NULL); kernel32 maps the DOS name `NUL` to `\??\NUL`.

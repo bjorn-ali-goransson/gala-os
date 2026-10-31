@@ -5,7 +5,7 @@
 //! GetFileInformationByHandle, GetFileSizeEx, GetFileAttributes(Ex)W,
 //! FindFirstFileW/FindNextFileW, GetFileInformationByHandleEx's directory
 //! classes, GetVolumeInformationByHandleW, GetFinalPathNameByHandleW,
-//! GetFullPathNameW, DeleteFileW,
+//! GetFileTime/SetFileTime, GetFullPathNameW, DeleteFileW,
 //! RemoveDirectoryW, all inside the temporary directory. Prints
 //! `kernel32_file_test: ok` or exits with the number of the failing check.
 
@@ -57,6 +57,13 @@ unsafe extern "system" {
         fs_name_len: u32,
     ) -> Bool;
     fn GetFinalPathNameByHandleW(h: Handle, buf: *mut u16, len: u32, flags: u32) -> u32;
+    fn GetFileTime(h: Handle, created: *mut u64, accessed: *mut u64, written: *mut u64) -> Bool;
+    fn SetFileTime(
+        h: Handle,
+        created: *const u64,
+        accessed: *const u64,
+        written: *const u64,
+    ) -> Bool;
     fn GetCurrentDirectoryW(len: u32, buf: *mut u16) -> u32;
     fn SetCurrentDirectoryW(path: *const u16) -> Bool;
     fn GetFullPathNameW(path: *const u16, len: u32, buf: *mut u16, file_part: *mut *mut u16)
@@ -253,6 +260,23 @@ fn run() -> Result<(), u32> {
         c.eq(info[10].into(), 1)?; // nNumberOfLinks
         let mut size = 0i64;
         c.ok(GetFileSizeEx(h, &mut size) != 0 && size == 11, size as u64)?;
+        // SetFileTime: the write time (2020-01-01), then the creation time
+        // (2019-01-01); a null pointer keeps a time.
+        const JAN_2020: u64 = 132_223_104_000_000_000;
+        const JAN_2019: u64 = 131_907_744_000_000_000;
+        let null = core::ptr::null_mut();
+        let (mut created, mut written) = (0u64, 0u64);
+        c.ok(GetFileTime(h, &mut created, null, &mut written) != 0, GetLastError().into())?;
+        c.ok(created != 0 && written >= created, written)?;
+        c.ok(SetFileTime(h, null, null, &JAN_2020) != 0, GetLastError().into())?;
+        let (mut created2, mut written2) = (0u64, 0u64);
+        c.ok(GetFileTime(h, &mut created2, null, &mut written2) != 0, GetLastError().into())?;
+        c.ok(written2 == JAN_2020 && created2 == created, written2)?;
+        c.ok(GetFileInformationByHandle(h, info.as_mut_ptr()) != 0, 0)?;
+        c.eq(u64::from(info[5]) | u64::from(info[6]) << 32, JAN_2020)?; // ftLastWriteTime
+        c.ok(SetFileTime(h, &JAN_2019, null, null) != 0, GetLastError().into())?;
+        c.ok(GetFileTime(h, &mut created2, null, &mut written2) != 0, GetLastError().into())?;
+        c.ok(created2 == JAN_2019 && written2 == JAN_2020, created2)?;
         c.ok(FlushFileBuffers(h) != 0, 0)?;
         c.ok(CloseHandle(h) != 0, 0)?;
 

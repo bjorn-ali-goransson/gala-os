@@ -214,7 +214,8 @@ to set and to argue for. Current order and why:
    driving children through pipes, chosen from what the ledger shows).
    H2 done (Go's os/exec, busybox-w32's sh); H3 (scripts and file
    tools) done; H4 (a C compiler on gala) done; H5 (TinyCC builds
-   itself on gala) done; next H6 (make on gala).
+   itself on gala) done; H6 (make on gala) done; next H7 (a real C
+   project built on gala).
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
@@ -372,11 +373,20 @@ H5. **TinyCC builds itself on gala**: done 2026-10-31. The `tcc_self`
    %f now parse with core's correctly rounded f64 parser (msvcrt_test
    calls msvcrt's strtod through GetProcAddress). Left in the ledger:
    FormatMessage(FROM_SYSTEM) (busybox's error text), SetFileTime.
-H6. **make on gala**: next. busybox-w32's make (pdpmake) builds a small
-   multi-file C program with tcc on gala from a Makefile, then rebuilds
-   only what a changed source needs (file times: SetFileTime, the
-   resolution make compares), and a failing rule stops the build with
-   make's status, all as on Windows.
+H6. **make on gala**: done 2026-10-31. The `tcc_make` scenario
+   (`user/tcc/make.sh`, project in `user/tcc/make/`): busybox-w32's make
+   (pdpmake) builds three objects and a program with tcc on gala, after
+   `touch` of one source rebuilds exactly that object and the program,
+   then reports "'calc.exe' is up to date", and a failing rule stops it
+   with status 2. It needed SetFileTime/GetFileTime: FileBasicInformation
+   can now be set (creation and write times, attributes; 0 or -1 keeps a
+   value; FILE_WRITE_ATTRIBUTES), checked in kernel32_file_test and a
+   ramfs unit test. tar now restores file times too.
+H7. **A real C project built on gala**: next. Lua (MIT, pure C99, a
+   plain Makefile) unpacked, built with make and tcc on gala, its
+   interpreter running a test script with output as on Windows. Then
+   the ledger decides (FormatMessage(FROM_SYSTEM) for busybox's error
+   text is the oldest open entry).
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

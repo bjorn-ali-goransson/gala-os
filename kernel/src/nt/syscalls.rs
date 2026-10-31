@@ -3317,6 +3317,36 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
         tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
         return NtStatus::SUCCESS;
     }
+    if class == FILE_BASIC_INFORMATION {
+        // FILE_BASIC_INFORMATION { CreationTime, LastAccessTime,
+        // LastWriteTime, ChangeTime, FileAttributes }: 0 (and -1, "stop
+        // updating") keep a value. Access and change times are the write
+        // time here.
+        if length < 40 {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        if entry.access & file::FILE_WRITE_ATTRIBUTES == 0 {
+            return NtStatus::ACCESS_DENIED;
+        }
+        let mut b = [0u8; 40];
+        if call.process.read(buffer, &mut b).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        let time = |at: usize| {
+            let t = i64::from_le_bytes(b[at..at + 8].try_into().unwrap_or([0; 8]));
+            (t > 0).then_some(t as u64)
+        };
+        let attributes = u32::from_le_bytes([b[32], b[33], b[34], b[35]]);
+        let attributes = (attributes != 0).then_some(attributes);
+        let (created, written) = (time(0), time(16));
+        return match file::with_fs(|fs| fs.set_basic(file.node, created, written, attributes)) {
+            Ok(()) => {
+                tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+                NtStatus::SUCCESS
+            }
+            Err(e) => file::fs_status(e),
+        };
+    }
     if class == FILE_RENAME_INFORMATION {
         let status = rename_file(call, &entry, file, buffer, length);
         if status == NtStatus::SUCCESS {

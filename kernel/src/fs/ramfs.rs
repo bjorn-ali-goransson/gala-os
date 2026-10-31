@@ -586,6 +586,32 @@ impl RamFs {
         Ok(data.len())
     }
 
+    /// FileBasicInformation: the times and attributes given (None keeps
+    /// one). Attributes are the settable bits (read-only, hidden, system,
+    /// archive...); the directory bit follows the node, and a file left
+    /// with none reads as FILE_ATTRIBUTE_NORMAL's empty set.
+    pub fn set_basic(
+        &mut self,
+        id: NodeId,
+        created: Option<u64>,
+        written: Option<u64>,
+        attributes: Option<u32>,
+    ) -> Result<(), FsError> {
+        let node = self.node_mut(id)?;
+        if let Some(t) = created {
+            node.created = t;
+        }
+        if let Some(t) = written {
+            node.written = t;
+        }
+        if let Some(a) = attributes {
+            const SETTABLE: u32 = 0x01 | 0x02 | 0x04 | ATTRIBUTE_ARCHIVE | 0x100 | 0x2000;
+            let dir = node.attributes & ATTRIBUTE_DIRECTORY;
+            node.attributes = (a & SETTABLE) | dir;
+        }
+        Ok(())
+    }
+
     /// Truncates or extends (with zeros) to `size`.
     pub fn set_size(&mut self, id: NodeId, size: u64, now: u64) -> Result<(), FsError> {
         let node = self.node_mut(id)?;
@@ -861,5 +887,20 @@ mod tests {
         let mut b = [0u8; 6];
         f.read(id, 0, &mut b).unwrap();
         assert_eq!(&b, b"module");
+    }
+
+    #[test]
+    fn set_basic_times_and_attributes() {
+        let mut f = fs();
+        let file = f.create(ROOT, &w("t.txt"), false, 5).unwrap();
+        f.set_basic(file, None, Some(99), None).unwrap();
+        let n = f.node(file).unwrap();
+        assert_eq!((n.created, n.written, n.attributes), (5, 99, ATTRIBUTE_ARCHIVE));
+        f.set_basic(file, Some(7), None, Some(ATTRIBUTE_READONLY | ATTRIBUTE_DIRECTORY)).unwrap();
+        let n = f.node(file).unwrap();
+        assert_eq!((n.created, n.written, n.attributes), (7, 99, ATTRIBUTE_READONLY));
+        let d = f.create(ROOT, &w("d"), true, 5).unwrap();
+        f.set_basic(d, None, None, Some(0x02)).unwrap();
+        assert_eq!(f.node(d).unwrap().attributes, 0x02 | ATTRIBUTE_DIRECTORY);
     }
 }

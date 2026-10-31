@@ -578,14 +578,48 @@ pub extern "system" fn SetEndOfFile(file: Handle) -> Bool {
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 
-/// SetFileTime: not yet (reported).
+/// SetFileTime(file, created, accessed, written): FileBasicInformation
+/// with the given times (a null pointer, or 0, keeps one).
 #[unsafe(no_mangle)]
 pub extern "system" fn SetFileTime(
-    _file: Handle,
-    _created: *const u64,
-    _accessed: *const u64,
-    _written: *const u64,
+    file: Handle,
+    created: *const u64,
+    accessed: *const u64,
+    written: *const u64,
 ) -> Bool {
-    unsupported(b"kernel32.dll!SetFileTime", 0);
-    fail_with(ERROR_NOT_SUPPORTED, FALSE)
+    let mut basic = [0u8; 40];
+    for (at, t) in [(0, created), (8, accessed), (16, written)] {
+        if !t.is_null() {
+            // SAFETY: the caller's FILETIME (4-byte aligned).
+            let v = unsafe { t.read_unaligned() };
+            basic[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    match super::set_file(file, 4, &basic) {
+        Ok(()) => TRUE,
+        Err(e) => fail_with(e, FALSE),
+    }
+}
+
+/// GetFileTime(file, created, accessed, written): from
+/// FileBasicInformation; null pointers are skipped.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFileTime(
+    file: Handle,
+    created: *mut u64,
+    accessed: *mut u64,
+    written: *mut u64,
+) -> Bool {
+    let mut basic = [0u8; 40];
+    if let Err(e) = super::query_file(file, 4, &mut basic) {
+        return fail_with(e, FALSE);
+    }
+    for (at, t) in [(0, created), (8, accessed), (16, written)] {
+        if !t.is_null() {
+            let v = u64::from_le_bytes(basic[at..at + 8].try_into().unwrap_or([0; 8]));
+            // SAFETY: the caller's FILETIME (4-byte aligned).
+            unsafe { t.write_unaligned(v) };
+        }
+    }
+    TRUE
 }
