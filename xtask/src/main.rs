@@ -2326,7 +2326,7 @@ fn screenshot(release: bool, args: &[String]) -> Result {
     if let Some(scenario) = &with_files {
         let files = extra_modules(scenario);
         if files.is_empty() {
-            return Err(format!("no scenario {scenario:?} with extra modules").into());
+            return Err(format!("no scenario {scenario:?} with extra modules"));
         }
         modules.extend(files.into_iter().filter(|(file, _)| file.contains('/')));
     }
