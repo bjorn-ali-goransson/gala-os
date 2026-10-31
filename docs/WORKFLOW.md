@@ -218,6 +218,17 @@ and panics red), so a screenshot shows what is going on. Example:
 Boot tests pass `noscreen` (serial only) except in the UEFI scenarios:
 drawing text roughly doubles kernel time under emulation.
 
+## Serving to a browser
+
+`cargo xtask serve <scenario> [port]` boots a network scenario (nginx,
+nginx_master, nginx_tls, go_http, ...) as its boot test does, but forwards
+a fixed host port (default 8080) to the guest's port 7 and keeps the VM
+running, with the serial log on stdout. Then open `http://127.0.0.1:8080/`
+(or `https://` for nginx_tls; the certificate is self-signed) in a browser.
+For a picture, Playwright's Chromium is preinstalled in the cloud
+container: `chromium.launch({args: ['--no-proxy-server']})`, because
+the agent proxy would otherwise intercept 127.0.0.1.
+
 ## Debugging
 
 - `XTASK_VERBOSE=1 cargo xtask boot-test name` prints the serial log; logs

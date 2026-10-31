@@ -256,6 +256,9 @@ commands:
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
                (default: the boot log, at 3 s; files in target/screenshots/)
+  serve        boot a network scenario and keep it running, its port 7
+               forwarded to 127.0.0.1:<port> (for a browser):
+               serve <nginx|nginx_master|nginx_tls|go_http|...> [port, default 8080]
   bench        run user/bench on gala; write target/report/bench.json and
                compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
   symbolize    resolve the kernel backtraces in a serial log to functions
@@ -280,6 +283,7 @@ fn main() -> ExitCode {
         Some("report") => gala_report(release),
         Some("docker-test") => docker_test(&args[1..]),
         Some("screenshot") => screenshot(release, &args[1..]),
+        Some("serve") => serve(release, &args[1..]),
         Some("bench") => {
             bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
         }
@@ -600,8 +604,9 @@ fn net_marker(name: &str) -> Option<(&'static str, NetClient)> {
 
 /// The page go_http serves (user/go_http/main.go).
 const GO_HTTP_PAGE: &str = "hello from gala, a fortress for Windows programs\n";
-/// The page nginx serves (user/nginx/html/index.html).
-const NGINX_PAGE: &str = "hello from nginx on gala, a fortress for Windows programs\n";
+/// The page Nginx serves: its own start page (user/nginx/html/index.html,
+/// from the Nginx release), compared byte for byte.
+const NGINX_PAGE: &str = include_str!("../../user/nginx/html/index.html");
 
 /// Bytes the client sends through the echo server.
 const NET_ECHO_BYTES: usize = 65536;
@@ -1535,6 +1540,31 @@ fn add_net(cmd: &mut Command, port: u16) {
         .arg(format!("user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:7"))
         // The legacy (0.9.5) interface: one I/O BAR (see docs/ARCHITECTURE.md).
         .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
+}
+
+/// `cargo xtask serve <scenario> [port]`: boots a NET_SCENARIOS entry as
+/// the boot test does, but forwards a fixed host port and keeps the VM
+/// running (serial log on stdout) until it exits or is killed.
+fn serve(release: bool, args: &[String]) -> Result {
+    let mut args = args.iter().filter(|a| !a.starts_with("--"));
+    let usage = "usage: cargo xtask serve <network scenario> [port]";
+    let name = args.next().ok_or(usage)?;
+    let port = match args.next() {
+        Some(p) => p.parse().map_err(|_| usage)?,
+        None => 8080,
+    };
+    let s = SCENARIOS
+        .iter()
+        .find(|s| s.name == name && net_marker(s.name).is_some())
+        .ok_or_else(|| format!("{name} is not a network scenario"))?;
+    build_kernel(release)?;
+    let cmdline = format!("{} noscreen", s.cmdline);
+    let iso = make_iso(release, &format!("serve-{name}"), &cmdline, &extra_modules(s.name))?;
+    let mut cmd = qemu(&iso, scenario_boot(s.name))?;
+    cmd.args(["-serial", "stdio", "-display", "none"]);
+    add_net(&mut cmd, port);
+    eprintln!("xtask: serving {name} on 127.0.0.1:{port}");
+    run_cmd(&mut cmd)
 }
 
 /// A free host TCP port (for QEMU's port forward).

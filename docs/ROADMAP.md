@@ -289,6 +289,12 @@ N2. **Nginx**: either our own 64-bit build of Nginx (cross-compiled with
         mode, and a non-blocking send that queued part reports that part.
 
 ## Later
+Self-hosting: building gala's test programs (and then Nginx) on gala
+itself. It needs pipes and the remaining process creation (cargo and the
+compilers spawn children and read their output), more file system
+(writable, larger), and a Windows-hosted toolchain such as llvm-mingw or
+the MSVC Rust target running on gala.
+
 SMP, ACPI (MADT/HPET), virtio devices, bindgen-generated layouts from
 mingw-w64 headers, registry, verifying syscall numbers against traces of the
 pinned build.
