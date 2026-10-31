@@ -276,9 +276,31 @@ BREAKPOINT with the int3's own address, #UD ILLEGAL_INSTRUCTION, #PF
 ACCESS_VIOLATION with information (0 read / 1 write / 8 execute, address),
 #GP PRIVILEGED_INSTRUCTION). If the process's ntdll exports
 KiUserExceptionDispatcher, the kernel pushes the CONTEXT at a new 16-byte
-aligned rsp and the EXCEPTION_RECORD at rsp + 0x4f0, and resumes the thread
-there (to be checked against the pinned ntdll); otherwise the process ends
-with the status. The #BP gate has DPL 3 so `int3` works from user mode.
+aligned rsp, the EXCEPTION_RECORD at rsp + 0x4f0 and a machine frame
+(rip, cs, rflags, rsp, ss of the fault) at rsp + 0x590, and resumes the
+thread there (to be checked against the pinned ntdll); otherwise the
+process ends with the status. The machine frame is what the dispatcher's
+unwind data (UWOP_PUSH_MACHFRAME) restores, so unwinding walks through the
+dispatcher into the faulting function.
+
+**Frame-based exception handling** (gala's ntdll, `seh.rs`, written from
+Microsoft's "x64 exception handling" documentation): after the vectored
+handlers, dispatch walks the frames from the exception's CONTEXT with
+RtlVirtualUnwind (unwind codes; in a prologue only those that ran; an
+epilogue emulated from its instructions; leaf functions without unwind
+data pop their return address) and calls each UNW_FLAG_EHANDLER handler
+with a DISPATCHER_CONTEXT, until one returns ExceptionContinueExecution.
+RtlUnwindEx walks from its caller to the target frame calling
+UNW_FLAG_UHANDLER handlers with EXCEPTION_UNWINDING (plus
+EXCEPTION_TARGET_UNWIND for the target), then resumes the target frame's
+context at TargetIp with rax = ReturnValue (NtContinue). The functions
+that start from their caller's registers (RtlCaptureContext,
+RtlRaiseException, RtlUnwindEx) and KiUserExceptionDispatcher are
+assembly with their own unwind data, so walks pass through them like any
+frame; they are exported through `/EXPORT` (testntdll's build.rs).
+RtlAddFunctionTable registers unwind data for code outside images (JIT
+compilers). Not yet: nested exceptions and collided unwinds, function
+table callbacks, unhandled exception filters, unwind consolidation. The #BP gate has DPL 3 so `int3` works from user mode.
 
 **Mutants and semaphores** (`ObjectBody::Mutant/Semaphore`): a mutant is
 signaled for waiters when free or owned by the waiting thread
@@ -498,8 +520,8 @@ the TSC clock; the performance counter runs at 10 MHz.
 `NtUnmapViewOfSection`, `NtQuerySection`, `NtCreateFile`, `NtOpenFile`,
 `NtReadFile`, `NtWriteFile` (files), `NtQueryInformationFile`,
 `NtSetInformationFile`, `NtQueryAttributesFile`; unknown numbers return STATUS_INVALID_SYSTEM_SERVICE.
-User-mode CPU exceptions terminate the process with the matching NTSTATUS
-(no SEH dispatch yet).
+User-mode CPU exceptions go to ntdll's dispatcher (vectored handlers,
+then frame-based SEH); unhandled, the process ends with the NTSTATUS.
 
 ## Pipes (H1)
 

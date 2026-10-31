@@ -85,6 +85,7 @@ const USER_DLLS: &[Dll] = &[
 const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("startup_test", "ntdll.dll", "Windows/System32"),
     ("exception_test", "ntdll.dll", "Windows/System32"),
+    ("seh_test", "ntdll.dll", "Windows/System32"),
     ("guard_test", "ntdll.dll", "Windows/System32"),
     ("import_test", "ntdll.dll", "Windows/System32"),
     ("import_test", "testdll.dll", "gala"),
@@ -360,6 +361,7 @@ const USER_PROGRAMS: &[&str] = &[
     "peb_test",
     "startup_test",
     "exception_test",
+    "seh_test",
     "guard_test",
     "import_test",
     "args_test",
@@ -1474,6 +1476,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=guard_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["guard_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1: frame-based exception handling (unwind data, language
+        // handlers, RtlVirtualUnwind/RtlUnwindEx/RtlRaiseException).
+        name: "seh_test",
+        cmdline: "qemu_exit run=seh_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["seh_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "exception_test",

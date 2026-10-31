@@ -25,8 +25,8 @@ const CONTEXT_FULL: u32 = 0x10_000b;
 const CONTEXT_FLOATING_POINT: u32 = 0x10_0008;
 /// FltSave: the FXSAVE image (512 bytes); Xmm0 is at FltSave + 0xa0.
 const FLT_SAVE: usize = 0x100;
-const USER_CS: u16 = 0x33;
-const USER_DS: u16 = 0x2b;
+pub(super) const USER_CS: u16 = 0x33;
+pub(super) const USER_DS: u16 = 0x2b;
 const DEFAULT_MXCSR: u32 = 0x1f80;
 const DEFAULT_FPU_CONTROL: u16 = 0x27f;
 const RFLAGS_IF: u32 = 0x200;

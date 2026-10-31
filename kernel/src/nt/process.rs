@@ -817,7 +817,11 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
 // TODO: check the offsets against the pinned build's ntdll.
 const RECORD_OFFSET: u64 = 0x4f0;
 const RECORD_SIZE: u64 = 0x98;
-const DISPATCH_FRAME_SIZE: u64 = RECORD_OFFSET + 0xa0 + 0x30;
+/// The machine frame (rip, cs, rflags, rsp, ss of the fault) above the
+/// record: ntdll's dispatcher describes it in its unwind data
+/// (UWOP_PUSH_MACHFRAME), so unwinding continues into the faulting frame.
+const MACHINE_FRAME_OFFSET: u64 = 0x590;
+const DISPATCH_FRAME_SIZE: u64 = MACHINE_FRAME_OFFSET + 0x30;
 
 /// EXCEPTION_RECORD (x64) for `status` raised at `address`.
 fn exception_record(status: NtStatus, address: u64, info: &[u64]) -> [u8; RECORD_SIZE as usize] {
@@ -829,6 +833,17 @@ fn exception_record(status: NtStatus, address: u64, info: &[u64]) -> [u8; RECORD
         r[0x20 + 8 * i..0x28 + 8 * i].copy_from_slice(&v.to_le_bytes());
     }
     r
+}
+
+/// MACHINE_FRAME: rip, cs, rflags, rsp, ss of the interrupted code.
+fn machine_frame(rip: u64, frame: &TrapFrame) -> [u8; 40] {
+    let mut m = [0u8; 40];
+    let (cs, ss) = (super::context::USER_CS.into(), super::context::USER_DS.into());
+    let values = [rip, cs, frame.rflags, frame.rsp, ss];
+    for (chunk, v) in m.chunks_exact_mut(8).zip(values) {
+        chunk.copy_from_slice(&v.to_le_bytes());
+    }
+    m
 }
 
 /// Hands a user-mode exception to ntdll!KiUserExceptionDispatcher, if the
@@ -873,6 +888,7 @@ fn deliver_to_user(
     if new_rsp >= frame.rsp
         || process.write(new_rsp, &context).is_err()
         || process.write(new_rsp + RECORD_OFFSET, &record).is_err()
+        || process.write(new_rsp + MACHINE_FRAME_OFFSET, &machine_frame(rip, frame)).is_err()
     {
         warn!("user exception: cannot push the dispatcher frame (rsp {:#x})", frame.rsp);
         return false;

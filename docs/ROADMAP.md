@@ -457,12 +457,14 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
    their directories), and registry calls answering "not found". Caddy
    also serves a site to the host (`caddy file-server --listen :7`,
    `caddy_http` scenario), with nothing new needed.
+   Frame-based exception handling in ntdll, what both the JDK and .NET
+   need first: RtlVirtualUnwind (unwind codes, prologues, epilogues,
+   machine frames), dispatch to language handlers, RtlUnwindEx/RtlUnwind,
+   RtlRaiseException, RtlCaptureContext, RtlRestoreContext,
+   RtlPcToFileHeader, RtlAdd/DeleteFunctionTable; kernel32 RaiseException
+   and the forwarders (`seh_test`, `kernel32_misc_test`).
    Next, in order:
-   1. Frame-based exception handling in ntdll (RtlVirtualUnwind,
-      dispatch to language handlers, RtlUnwindEx, RtlRaiseException,
-      RtlCaptureContext/RtlRestoreContext, RtlPcToFileHeader): what both
-      the JDK and .NET need first (`seh_test`).
-   2. A JDK: `java -version` from the unmodified Temurin 21 zip, then a
+   1. A JDK: `java -version` from the unmodified Temurin 21 zip, then a
       Java program. Surveyed: the JDK ships Microsoft's C runtime
       (ucrtbase, vcruntime140, the api-ms-win-* forwarders, which forward
       to kernel32), so gala needs no CRT of its own; it needs ~100 more
@@ -471,7 +473,7 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       (RtlUnwindEx, RtlCaptureContext - the JVM turns access violations
       into NullPointerExceptions), ~40 advapi32 (registry, security), and
       version, powrprof, winhttp, comctl32. The largest step so far.
-   3. .NET 8+ (asked for 2026-10-31): a self-contained console app from
+   2. .NET 8+ (asked for 2026-10-31): a self-contained console app from
       `dotnet publish`, then `dotnet --info` from the official runtime
       zip. CoreCLR is MSVC-built on the same UCRT, so it shares the JDK's
       prerequisites (frame-based SEH and unwinding are central: CoreCLR
@@ -479,15 +481,15 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       same: FLS, SRW locks, wait/thread-pool APIs, VirtualAlloc with
       reserve/commit and guard pages, and its GC's memory queries.
       Start with the import survey, as for the JDK.
-   4. PowerShell 7 on that runtime: `pwsh -NoProfile -Command ...`. On
+   3. PowerShell 7 on that runtime: `pwsh -NoProfile -Command ...`. On
       top of .NET it needs the console API (modes, screen buffer info,
       reading keys for the interactive prompt), the registry (read) and
       more advapi32 security calls.
-   5. Elasticsearch on the JDK, started with java directly (its .bat
+   4. Elasticsearch on the JDK, started with java directly (its .bat
       launchers need cmd.exe, which gala does not have). As a Windows
       service it also needs a service control manager. Memory (QEMU's
       512 MB) and JIT speed under TCG will matter.
-   6. FileZilla: the client is a GUI program (wxWidgets), out of reach
+   5. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to
       browsers, so the installer has to be supplied by hand.

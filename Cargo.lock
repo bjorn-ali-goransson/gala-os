@@ -386,6 +386,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "seh_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "smoltcp"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

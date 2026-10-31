@@ -81,6 +81,18 @@ shows it.
 
 ## Things that are easy to get wrong
 
+- **Functions that must start from their caller's registers** (anything
+  that captures a context or walks frames: RtlCaptureContext,
+  RtlRaiseException, RtlUnwindEx, the dispatchers) are `global_asm!` with
+  `.seh_*` directives in ntdll's `seh.rs`, not naked functions: naked
+  functions get no unwind data, and a walk cannot pass through them.
+  Assembly symbols are exported through `/EXPORT` in testntdll's
+  build.rs. `llvm-readobj --unwind` shows what the assembler emitted.
+- **The exception dispatcher runs on what is left of the stack** (a stack
+  overflow is delivered with only the guard region below rsp): keep the
+  vectored-handler path's frames small and put CONTEXT copies in
+  `#[inline(never)]` helpers (`guard_test` catches this).
+
 - **System call numbers.** Long-stable x64 numbers are used directly (list
   in `kernel/src/nt/syscalls.rs`). Numbers that change between builds are
   *gala's own choices*, unverified: tests must call those services through

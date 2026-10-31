@@ -458,6 +458,42 @@ pub extern "system" fn SetStdHandle(which: u32, h: Handle) -> Bool {
     TRUE
 }
 
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RtlRaiseException(record: *mut u8);
+}
+
+/// EXCEPTION_MAXIMUM_PARAMETERS.
+const EXCEPTION_MAXIMUM_PARAMETERS: u32 = 15;
+const EXCEPTION_NONCONTINUABLE: u32 = 1;
+
+/// RaiseException(code, flags, count, arguments): raises a software
+/// exception with at most EXCEPTION_MAXIMUM_PARAMETERS parameters
+/// (more are cut, as documented). Returns if a handler continues
+/// execution.
+///
+/// # Safety
+/// `args` must hold `count` values (or be null with count 0).
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RaiseException(
+    code: u32,
+    flags: u32,
+    count: u32,
+    args: *const usize,
+) {
+    let mut record = [0u64; 19];
+    let count = if args.is_null() { 0 } else { count.min(EXCEPTION_MAXIMUM_PARAMETERS) };
+    record[0] = u64::from(code) | (u64::from(flags & EXCEPTION_NONCONTINUABLE) << 32);
+    record[3] = u64::from(count);
+    for i in 0..count as usize {
+        // SAFETY: the caller's array of `count` values.
+        record[4 + i] = unsafe { *args.add(i) } as u64;
+    }
+    // SAFETY: a complete EXCEPTION_RECORD; RtlRaiseException fills in
+    // ExceptionAddress.
+    unsafe { RtlRaiseException(record.as_mut_ptr().cast()) };
+}
+
 /// SetUnhandledExceptionFilter: remembered and returned; gala ends a
 /// process with an unhandled exception without calling it (yet).
 #[unsafe(no_mangle)]

@@ -4,7 +4,8 @@
 //! several entries, WAIT_TIMEOUT when empty), waitable timers
 //! (CreateWaitableTimerExW/A/W, SetWaitableTimer with a relative due time),
 //! vectored exception and continue handlers (AddVectoredExceptionHandler
-//! sees a breakpoint and continues past it), and RtlLookupFunctionEntry
+//! sees a breakpoint and continues past it, and RaiseException's record),
+//! RtlPcToFileHeader, and RtlLookupFunctionEntry
 //! (the unwind entry of a function in this image), and FormatMessageW's
 //! system messages (English text with a CRLF; ERROR_MR_MID_NOT_FOUND for
 //! a number without one; ERROR_INSUFFICIENT_BUFFER); heaps (GetProcessHeap
@@ -112,6 +113,9 @@ unsafe extern "system" {
         base: *mut u64,
         history: *mut c_void,
     ) -> *const RuntimeFunction;
+    fn RaiseException(code: u32, flags: u32, count: u32, args: *const usize);
+    fn RtlPcToFileHeader(pc: u64, base: *mut u64) -> u64;
+    fn GetModuleHandleW(name: *const u16) -> u64;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetTickCount64() -> u64;
     fn CloseHandle(h: Handle) -> Bool;
@@ -228,12 +232,35 @@ impl Checks {
 }
 
 static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
+/// The code RaiseException raises in this test.
+const CODE_RAISED: u32 = 0xe000_0123;
+/// What the handler saw of it: flags, ExceptionAddress, parameter count,
+/// the first and the last parameter.
+static RAISED: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 
-/// Continues past breakpoints (rip points at the int3).
+/// Continues past breakpoints (rip points at the int3) and after
+/// CODE_RAISED (RaiseException returns).
 extern "system" fn on_exception(pointers: *mut ExceptionPointers) -> i32 {
     // SAFETY: the dispatcher passes valid EXCEPTION_POINTERS.
     unsafe {
-        if *(*pointers).record != STATUS_BREAKPOINT {
+        let record = (*pointers).record;
+        if *record == CODE_RAISED {
+            let r = record as *const u8;
+            let rd = |off: usize| (r.add(off) as *const u64).read_unaligned();
+            let count = rd(0x18) & 0xffff_ffff;
+            let values = [
+                rd(0x04) & 0xffff_ffff,
+                rd(0x10),
+                count,
+                rd(0x20),
+                rd(0x20 + 8 * (count as usize).saturating_sub(1)),
+            ];
+            for (slot, v) in RAISED.iter().zip(values) {
+                slot.store(v, Ordering::SeqCst);
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if *record != STATUS_BREAKPOINT {
             return EXCEPTION_CONTINUE_SEARCH;
         }
         BREAKPOINTS.fetch_add(1, Ordering::SeqCst);
@@ -419,6 +446,25 @@ fn run() -> Result<(), u32> {
         c.ok(!AddVectoredContinueHandler(1, on_continue).is_null(), 0)?;
         core::arch::asm!("int3");
         c.eq(BREAKPOINTS.load(Ordering::SeqCst), 1)?;
+
+        // RaiseException: the record as given (more than
+        // EXCEPTION_MAXIMUM_PARAMETERS = 15 parameters are cut to 15), the
+        // address inside kernel32 (where it raised), continued.
+        let args: [usize; 17] = core::array::from_fn(|i| 100 + i);
+        RaiseException(CODE_RAISED, 0, 17, args.as_ptr());
+        let raised = |i: usize| RAISED[i].load(Ordering::SeqCst);
+        c.eq(raised(0), 0)?; // flags
+        c.eq(raised(2), 15)?;
+        c.eq(raised(3), 100)?;
+        c.eq(raised(4), 114)?;
+        let mut name = [0u16; 13];
+        for (d, &b) in name.iter_mut().zip(b"kernel32.dll") {
+            *d = b.into();
+        }
+        let kernel32 = GetModuleHandleW(name.as_ptr());
+        let mut base = 0;
+        c.eq(RtlPcToFileHeader(raised(1), &mut base), kernel32)?;
+        c.eq(base, kernel32)?;
 
         // The unwind entry covering a function of this image.
         let image = &raw const __ImageBase as u64;

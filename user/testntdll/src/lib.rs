@@ -16,6 +16,7 @@
 #![allow(non_snake_case, non_upper_case_globals)]
 
 mod heap;
+mod seh;
 
 /// "galantdl": marks the state as written by this DLL.
 const MAGIC: u64 = 0x6761_6c61_6e74_646c;
@@ -1167,109 +1168,6 @@ pub extern "system" fn RtlRemoveVectoredContinueHandler(cookie: *mut core::ffi::
     remove_handler(true, cookie)
 }
 
-/// RUNTIME_FUNCTION: an entry of an image's exception directory (.pdata).
-#[repr(C)]
-pub struct RuntimeFunction {
-    begin: u32,
-    end: u32,
-    unwind: u32,
-}
-
-/// RtlLookupFunctionEntry(ControlPc, *ImageBase, HistoryTable): the
-/// RUNTIME_FUNCTION covering `pc` in the loaded module containing it (from
-/// its exception directory, sorted by address), or null for leaf code and
-/// addresses outside modules.
-///
-/// # Safety
-/// `image_base` must be null or writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn RtlLookupFunctionEntry(
-    pc: u64,
-    image_base: *mut u64,
-    _history: *mut core::ffi::c_void,
-) -> *const RuntimeFunction {
-    let pc = pc as usize;
-    let base = with_modules(|m| {
-        m.iter().find_map(|module| {
-            let base = module.base;
-            if base == 0 || pc < base {
-                return None;
-            }
-            let size = rd32(base + rd32(base + 0x3c) as usize + 24 + 56) as usize; // SizeOfImage
-            (pc < base + size).then_some(base)
-        })
-    });
-    let Some(base) = base else { return core::ptr::null() };
-    let (rva, size) = directory(base, 3); // IMAGE_DIRECTORY_ENTRY_EXCEPTION
-    let count = size / 12;
-    let table = (base + rva) as *const RuntimeFunction;
-    let target = (pc - base) as u32;
-    let (mut low, mut high) = (0, count);
-    while low < high {
-        let mid = (low + high) / 2;
-        // SAFETY: inside the image's exception directory.
-        let f = unsafe { &*table.add(mid) };
-        if target < f.begin {
-            high = mid;
-        } else if target >= f.end {
-            low = mid + 1;
-        } else {
-            if !image_base.is_null() {
-                // SAFETY: the caller's output pointer.
-                unsafe { *image_base = base as u64 };
-            }
-            return f;
-        }
-    }
-    core::ptr::null()
-}
-
-/// RtlVirtualUnwind: not implemented yet (reported); returns no handler
-/// and leaves the context as it is.
-///
-/// # Safety
-/// `establisher_frame` must be null or writable.
-#[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn RtlVirtualUnwind(
-    _kind: u32,
-    _image_base: u64,
-    pc: u64,
-    _entry: *const RuntimeFunction,
-    _context: *mut u8,
-    _handler_data: *mut usize,
-    establisher_frame: *mut u64,
-    _pointers: *mut u8,
-) -> usize {
-    GalaRecordMissing(b"ntdll.dll!RtlVirtualUnwind".as_ptr(), 26, 3, pc);
-    if !establisher_frame.is_null() {
-        // SAFETY: the caller's output pointer.
-        unsafe { *establisher_frame = 0 };
-    }
-    0
-}
-
-/// Where the kernel puts the EXCEPTION_RECORD relative to the CONTEXT at
-/// rsp (gala's dispatcher frame; to be checked against the real layout).
-const RECORD_OFFSET: usize = 0x4f0;
-
-/// The kernel resumes a thread here after a user-mode exception, with rsp
-/// pointing at the CONTEXT of the fault and the EXCEPTION_RECORD above it.
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "system" fn KiUserExceptionDispatcher() -> ! {
-    core::arch::naked_asm!(
-        "cld",
-        "mov rdx, rsp",
-        "lea rcx, [rsp + {record}]",
-        "sub rsp, 0x20",
-        "call {dispatch}",
-        "int3",
-        record = const RECORD_OFFSET,
-        dispatch = sym dispatch_exception,
-    )
-}
-
 /// The kernel resumes a thread here to run a user APC: rsp points at the
 /// CONTEXT to return to, whose P1Home..P4Home hold NormalContext,
 /// SystemArgument1, SystemArgument2 and NormalRoutine. The routine runs
@@ -1292,8 +1190,6 @@ pub extern "system" fn KiUserApcDispatcher() -> ! {
     )
 }
 
-/// Calls the vectored handlers; resumes the context if one continues
-/// execution, else ends the process with the exception code.
 /// Calls the handlers of one table in order; whether one of them returned
 /// EXCEPTION_CONTINUE_EXECUTION.
 fn call_handlers(table: &[(usize, usize)], pointers: &mut ExceptionPointers) -> bool {
@@ -1308,28 +1204,6 @@ fn call_handlers(table: &[(usize, usize)], pointers: &mut ExceptionPointers) -> 
         }
     }
     false
-}
-
-/// Exception dispatch (no frame-based SEH yet): the vectored exception
-/// handlers, then the vectored continue handlers, which run both when an
-/// exception handler continued execution and when none did (assumed from
-/// the documented contract and how Go uses them: its last continue handler
-/// reports unhandled crashes; to be checked against Windows). Unhandled:
-/// the process ends with the exception code.
-extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> ! {
-    let mut pointers = ExceptionPointers { record, context };
-    // Snapshots, so that handlers may (un)register handlers themselves.
-    let (exception, continue_) = with_handlers(|t| (t.exception, t.continue_));
-    let handled = call_handlers(&exception, &mut pointers);
-    if call_handlers(&continue_, &mut pointers) || handled {
-        NtContinue(context, 0);
-    }
-    // SAFETY: the record starts with its ExceptionCode.
-    let code = unsafe { (record as *const u32).read_unaligned() };
-    NtTerminateProcess(-1, code);
-    loop {
-        core::hint::spin_loop();
-    }
 }
 
 // Memory routines (ntdll exports them; the compiler also calls them).
