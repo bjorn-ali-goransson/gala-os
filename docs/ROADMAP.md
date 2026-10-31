@@ -467,11 +467,23 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       (RtlUnwindEx, RtlCaptureContext - the JVM turns access violations
       into NullPointerExceptions), ~40 advapi32 (registry, security), and
       version, powrprof, winhttp, comctl32. The largest step so far.
-   3. Elasticsearch on that JDK, started with java directly (its .bat
+   3. .NET 8+ (asked for 2026-10-31): a self-contained console app from
+      `dotnet publish`, then `dotnet --info` from the official runtime
+      zip. CoreCLR is MSVC-built on the same UCRT, so it shares the JDK's
+      prerequisites (frame-based SEH and unwinding are central: CoreCLR
+      dispatches managed exceptions through them), and adds more of the
+      same: FLS, SRW locks, wait/thread-pool APIs, VirtualAlloc with
+      reserve/commit and guard pages, and its GC's memory queries.
+      Start with the import survey, as for the JDK.
+   4. PowerShell 7 on that runtime: `pwsh -NoProfile -Command ...`. On
+      top of .NET it needs the console API (modes, screen buffer info,
+      reading keys for the interactive prompt), the registry (read) and
+      more advapi32 security calls.
+   5. Elasticsearch on the JDK, started with java directly (its .bat
       launchers need cmd.exe, which gala does not have). As a Windows
       service it also needs a service control manager. Memory (QEMU's
       512 MB) and JIT speed under TCG will matter.
-   4. FileZilla: the client is a GUI program (wxWidgets), out of reach
+   6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to
       browsers, so the installer has to be supplied by hand.
@@ -482,6 +494,21 @@ itself. It needs pipes and the remaining process creation (cargo and the
 compilers spawn children and read their output), more file system
 (writable, larger), and a Windows-hosted toolchain such as llvm-mingw or
 the MSVC Rust target running on gala.
+
+Architectures: x86_64 only (Intel and AMD alike). ARM64 needs a second
+arch port (boot, MMU, exceptions, timer, context switch) and ARM64 PE
+images plus ARM64 builds of gala's DLLs; the NT layer above is portable.
+32-bit programs need WoW64 (a 32-bit ntdll and thunks). Neither is
+planned before P1.
+
+Drivers: gala writes its own, against published standards (virtio,
+then AHCI/NVMe, xHCI, e1000), not hardware-specific ones. Reusing
+Windows drivers would mean implementing the kernel-mode driver API
+(WDM/KMDF: IRPs, IRQL, DPCs, PnP, power) as a second, larger
+compatibility layer, and hardware drivers are closed binaries that
+cannot be shipped. Reusing Linux drivers through a shim is possible in
+principle but GPL and Linux-internal APIs make it a poor fit. Revisit
+once the user-mode side is broad.
 
 SMP, ACPI (MADT/HPET), virtio devices, bindgen-generated layouts from
 mingw-w64 headers, registry, verifying syscall numbers against traces of the
