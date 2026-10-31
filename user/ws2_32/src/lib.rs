@@ -1296,6 +1296,9 @@ pub extern "system" fn ioctlsocket(s: Socket, cmd: i32, arg: *mut u32) -> i32 {
     }
 }
 
+/// The machine's host name (gethostname).
+const HOST_NAME: &[u8] = b"gala";
+
 /// gethostname: gala's machine name.
 #[unsafe(no_mangle)]
 pub extern "system" fn gethostname(name: *mut u8, len: i32) -> i32 {
@@ -1309,8 +1312,10 @@ pub extern "system" fn gethostname(name: *mut u8, len: i32) -> i32 {
 }
 
 /// getaddrinfo(node, service, hints, result): numeric IPv4 addresses,
-/// "localhost" and a missing node (any address, or loopback) with a
-/// numeric service; no name resolution yet (reported). One result, in a
+/// "localhost", the machine's own host name (gethostname's; loopback, as
+/// Windows answers without network adapters: gala does not list its
+/// adapters yet) and a missing node (any address, or loopback) with a
+/// numeric service; no other name resolution yet (reported). One result, in a
 /// page of its own (freeaddrinfo releases it).
 #[unsafe(no_mangle)]
 pub extern "system" fn getaddrinfo(
@@ -1334,7 +1339,7 @@ pub extern "system" fn getaddrinfo(
             if flags & 1 != 0 { [0, 0, 0, 0] } else { [127, 0, 0, 1] } // AI_PASSIVE
         } else {
             let text = core::slice::from_raw_parts(node, strlen(node));
-            if text.eq_ignore_ascii_case(b"localhost") {
+            if text.eq_ignore_ascii_case(b"localhost") || text.eq_ignore_ascii_case(HOST_NAME) {
                 [127, 0, 0, 1]
             } else if let Some(ip) = parse_ipv4(text) {
                 ip

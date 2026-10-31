@@ -5,7 +5,8 @@
 //! GetFileInformationByHandle, GetFileSizeEx, GetFileAttributes(Ex)W,
 //! FindFirstFileW/FindNextFileW, GetFileInformationByHandleEx's directory
 //! classes, GetVolumeInformationByHandleW, GetFinalPathNameByHandleW,
-//! GetFileTime/SetFileTime, GetFullPathNameW, DeleteFileW,
+//! GetFileTime/SetFileTime, GetFullPathNameW, GetShortPathNameW,
+//! GetCompressedFileSizeW, DeleteFileW,
 //! RemoveDirectoryW, all inside the temporary directory. Prints
 //! `kernel32_file_test: ok` or exits with the number of the failing check.
 
@@ -66,6 +67,8 @@ unsafe extern "system" {
     ) -> Bool;
     fn GetCurrentDirectoryW(len: u32, buf: *mut u16) -> u32;
     fn SetCurrentDirectoryW(path: *const u16) -> Bool;
+    fn GetShortPathNameW(long: *const u16, short: *mut u16, len: u32) -> u32;
+    fn GetCompressedFileSizeW(path: *const u16, high: *mut u32) -> u32;
     fn GetFullPathNameW(path: *const u16, len: u32, buf: *mut u16, file_part: *mut *mut u16)
     -> u32;
     fn DeleteFileW(path: *const u16) -> Bool;
@@ -392,6 +395,27 @@ fn run() -> Result<(), u32> {
         let expect_len = expect.buf.iter().position(|&ch| ch == 0).unwrap_or(0);
         c.ok(n == expect_len && full[..n] == expect.buf[..n], n as u64)?;
         c.ok(part == full.as_mut_ptr().add(n - 5), 0)?;
+
+        // GetShortPathNameW: a path of an existing file (its 8.3 form where
+        // there is one, else as given); the size needed with the NUL when
+        // the buffer is short; ERROR_FILE_NOT_FOUND for a missing file.
+        let mut short = [0u16; 300];
+        let a = Path::new(temp, b"gala_k32\\a.txt");
+        let n = GetShortPathNameW(a.ptr(), short.as_mut_ptr(), 300) as usize;
+        c.ok(n > 0 && n < 300 && short[n] == 0, n as u64)?;
+        c.eq(GetShortPathNameW(a.ptr(), short.as_mut_ptr(), 1).into(), n as u64 + 1)?;
+        // GetCompressedFileSizeW: the size on disk, which for an
+        // uncompressed file is its size (as GetFileAttributesExW reports).
+        let mut data = [0u32; 9];
+        c.ok(GetFileAttributesExW(a.ptr(), 0, data.as_mut_ptr()) != 0, 0)?;
+        let mut high = 7u32;
+        c.eq(GetCompressedFileSizeW(a.ptr(), &mut high).into(), data[8].into())?;
+        c.eq(high.into(), data[7].into())?;
+        let missing = Path::new(temp, b"gala_k32\\no-such-file.txt");
+        c.eq(GetShortPathNameW(missing.ptr(), short.as_mut_ptr(), 300).into(), 0)?;
+        c.eq(GetLastError().into(), ERROR_FILE_NOT_FOUND.into())?;
+        c.eq(GetCompressedFileSizeW(missing.ptr(), &mut high).into(), u32::MAX.into())?;
+        c.eq(GetLastError().into(), ERROR_FILE_NOT_FOUND.into())?;
 
         // SetCurrentDirectoryW to a longer path than the one the process
         // started in, and back (a directory in use cannot be removed).

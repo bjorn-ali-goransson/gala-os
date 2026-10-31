@@ -621,6 +621,26 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       launchers need cmd.exe, which gala does not have). As a Windows
       service it also needs a service control manager. Memory (QEMU's
       512 MB) and JIT speed under TCG will matter.
+      Status (pending scenario `elasticsearch`): Elasticsearch 8.15.3's
+      official zip (PREBUILT; ~250 MB without its bundled JDK and ML's
+      native programs), gala's Temurin 21 in its `jdk` directory, started
+      as elasticsearch.bat would (`cwd=C:/es`, the CLI launcher class).
+      The launcher runs `java -XX:+PrintFlagsFinal` twice, then starts
+      the server as a third java.exe; the server finds its native access
+      (JDK provider), installs its system call filter (a job object with
+      a one-process limit) and loads its ~60 modules. What it took so
+      far: psapi.dll (forwarders), GetShortPathNameW,
+      GetCompressedFileSizeW, VirtualQueryEx, working set sizes, job
+      objects with the active-process limit enforced, getaddrinfo of the
+      machine's own name, command lines up to 32767 characters (the
+      process parameters were fixed at two pages), empty directories in
+      boot archives, a `cwd=` boot option. Under TCG it needs minutes
+      (900 s timeout). Now the node gets its data path, heap (256 MB) and
+      node ID and registers its features, then Netty's NIO selector
+      fails: the JDK's wepoll (nio.dll) looks up ntdll's keyed events
+      (NtCreateKeyedEvent, NtWaitForKeyedEvent, NtReleaseKeyedEvent) at
+      run time. Next: keyed events in the kernel (test first), then
+      whatever the HTTP and transport listeners need.
    5. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to

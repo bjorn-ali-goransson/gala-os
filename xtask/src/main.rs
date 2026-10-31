@@ -29,6 +29,8 @@ struct Prebuilt {
     checksum: &'static str,
     /// The files used, inside the zip.
     members: &'static [&'static str],
+    /// Files left out of those (unzip -x patterns).
+    excludes: &'static [&'static str],
 }
 
 const PREBUILT: &[Prebuilt] = &[
@@ -37,6 +39,7 @@ const PREBUILT: &[Prebuilt] = &[
         url: "https://github.com/caddyserver/caddy/releases/download/v2.8.4/caddy_2.8.4_windows_amd64.zip",
         checksum: "2631fbe1c4f6fb08783ed6dc6ac238d6655b4c923abe2bce1433dbd7fd079630",
         members: &["caddy.exe"],
+        excludes: &[],
     },
     // Eclipse Temurin (OpenJDK) 21.0.5+11; the SHA-256 is Adoptium's
     // published one. What `java` needs: the launcher, the DLLs (with
@@ -52,10 +55,12 @@ const PREBUILT: &[Prebuilt] = &[
             "jdk-21.0.5+11/lib/modules",
             "jdk-21.0.5+11/lib/jvm.cfg",
             "jdk-21.0.5+11/lib/tzdb.dat",
+            "jdk-21.0.5+11/lib/tzmappings",
             "jdk-21.0.5+11/lib/security/*",
             "jdk-21.0.5+11/conf/*",
             "jdk-21.0.5+11/release",
         ],
+        excludes: &[],
     },
     // The .NET 8 runtime (Microsoft.NETCore.App and the dotnet host); the
     // SHA-512 is Microsoft's published one (releases.json).
@@ -64,6 +69,7 @@ const PREBUILT: &[Prebuilt] = &[
         url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/8.0.33/dotnet-runtime-8.0.33-win-x64.zip",
         checksum: "ceb56fa91c15aa7c465db8cd42ee4e978589c58885cd1f164f8fcde7231ea15c3cfc0bcddb2e6b452238b3687a3e2bcb3683349b8b92a7172e03154ed280be67",
         members: &[],
+        excludes: &[],
     },
     // PowerShell 7.4 (a self-contained .NET 8 application); the SHA-256 is
     // the one in the release's hashes.sha256.
@@ -72,6 +78,24 @@ const PREBUILT: &[Prebuilt] = &[
         url: "https://github.com/PowerShell/PowerShell/releases/download/v7.4.22/PowerShell-7.4.22-win-x64.zip",
         checksum: "5f89f51860a1a3b07937945663afd7cbd44387361ff9985f5758939cb9bd6359",
         members: &[],
+        excludes: &[],
+    },
+    // Elasticsearch 8.15.3's Windows zip; the SHA-512 is Elastic's
+    // published one (the .sha512 next to the zip). Without its bundled JDK
+    // (gala's Temurin 21 goes in its place) and the machine learning
+    // native programs (ML is disabled), ~250 MB instead of 1 GB unpacked.
+    Prebuilt {
+        name: "elasticsearch",
+        url: "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-8.15.3-windows-x86_64.zip",
+        checksum: "25eed8feba05e4e398bc9700eaea2042b4166ab3ca75eb9b34a6394d9eebbf7de5eb1c8516f72ed587d0428cfe3966fb45b18587fabc47b1828826d59da4947c",
+        members: &[
+            "elasticsearch-8.15.3/lib/*",
+            "elasticsearch-8.15.3/modules/*",
+            "elasticsearch-8.15.3/config/*",
+            "elasticsearch-8.15.3/logs/",
+            "elasticsearch-8.15.3/plugins/",
+        ],
+        excludes: &["elasticsearch-8.15.3/modules/x-pack-ml/platform/*"],
     },
 ];
 
@@ -115,6 +139,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "oleaut32", file: "oleaut32.dll", exported_as: "testoleaut32.dll" },
     Dll { package: "shell32", file: "shell32.dll", exported_as: "testshell32.dll" },
     Dll { package: "version", file: "version.dll", exported_as: "testversion.dll" },
+    // psapi.dll: forwarders to kernel32's K32* (JNA's jnidispatch.dll).
+    Dll { package: "psapi", file: "psapi.dll", exported_as: "testpsapi.dll" },
     // iphlpapi, secur32, winhttp: what the JDK's net.dll imports.
     Dll { package: "iphlpapi", file: "iphlpapi.dll", exported_as: "testiphlpapi.dll" },
     Dll { package: "secur32", file: "secur32.dll", exported_as: "testsecur32.dll" },
@@ -214,6 +240,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("advapi32_test", "secur32.dll", "Windows/System32"),
     ("advapi32_test", "bcryptprimitives.dll", "Windows/System32"),
     ("kernel32_system_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_system_test", "psapi.dll", "Windows/System32"),
     ("kernel32_locale_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sync_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_thread_test", "kernel32.dll", "Windows/System32"),
@@ -391,6 +418,29 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("java_version", "winhttp.dll", "Windows/System32"),
     ("java_version", "msvcrt.dll", "Windows/System32"),
     ("java_version", "target/prebuilt/jdk/jdk-21.0.5+11/", "jdk"),
+    ("elasticsearch", "ntdll.dll", "Windows/System32"),
+    ("elasticsearch", "kernel32.dll", "Windows/System32"),
+    ("elasticsearch", "advapi32.dll", "Windows/System32"),
+    ("elasticsearch", "winmm.dll", "Windows/System32"),
+    ("elasticsearch", "version.dll", "Windows/System32"),
+    ("elasticsearch", "shell32.dll", "Windows/System32"),
+    ("elasticsearch", "powrprof.dll", "Windows/System32"),
+    ("elasticsearch", "comctl32.dll", "Windows/System32"),
+    ("elasticsearch", "ncrypt.dll", "Windows/System32"),
+    ("elasticsearch", "crypt32.dll", "Windows/System32"),
+    ("elasticsearch", "ws2_32.dll", "Windows/System32"),
+    ("elasticsearch", "mswsock.dll", "Windows/System32"),
+    ("elasticsearch", "bcryptprimitives.dll", "Windows/System32"),
+    ("elasticsearch", "user32.dll", "Windows/System32"),
+    ("elasticsearch", "iphlpapi.dll", "Windows/System32"),
+    ("elasticsearch", "secur32.dll", "Windows/System32"),
+    ("elasticsearch", "winhttp.dll", "Windows/System32"),
+    ("elasticsearch", "msvcrt.dll", "Windows/System32"),
+    ("elasticsearch", "psapi.dll", "Windows/System32"),
+    ("elasticsearch", "target/prebuilt/elasticsearch/elasticsearch-8.15.3/", "es"),
+    // The JDK where Elasticsearch looks for its bundled one (C:\\es\\jdk).
+    ("elasticsearch", "target/prebuilt/jdk/jdk-21.0.5+11/", "es/jdk"),
+    ("elasticsearch", "user/elasticsearch/gala.options", "es/config/jvm.options.d"),
     ("dotnet", "ntdll.dll", "Windows/System32"),
     ("dotnet", "kernel32.dll", "Windows/System32"),
     ("dotnet", "advapi32.dll", "Windows/System32"),
@@ -804,11 +854,19 @@ const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// tens of seconds locally, over twice that on a slow CI runner. They get
 /// this much instead of BOOT_TEST_TIMEOUT.
 const SLOW_SCENARIOS: &[&str] = &["java_version", "java_hello", "dotnet_hello", "pwsh_hello"];
+/// Elasticsearch starts three JVMs and ~60 modules under TCG.
+const ELASTICSEARCH_TIMEOUT: Duration = Duration::from_secs(900);
 const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long scenario `name` may run.
 fn scenario_timeout(name: &str) -> Duration {
-    if SLOW_SCENARIOS.contains(&name) { SLOW_TIMEOUT } else { BOOT_TEST_TIMEOUT }
+    if name == "elasticsearch" {
+        ELASTICSEARCH_TIMEOUT
+    } else if SLOW_SCENARIOS.contains(&name) {
+        SLOW_TIMEOUT
+    } else {
+        BOOT_TEST_TIMEOUT
+    }
 }
 
 type Result<T = ()> = std::result::Result<T, String>;
@@ -1081,8 +1139,14 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
 fn write_tar(dir: &Path, files: &[PathBuf], out: &Path) -> Result {
     let mut tar = Vec::new();
     for rel in files {
-        let path = rel.to_string_lossy().replace('\\', "/");
-        let data = fs::read(dir.join(rel)).map_err(|e| format!("reading {rel:?}: {e}"))?;
+        let is_dir = dir.join(rel).is_dir();
+        let mut path = rel.to_string_lossy().replace('\\', "/");
+        let data = if is_dir {
+            path.push('/');
+            Vec::new()
+        } else {
+            fs::read(dir.join(rel)).map_err(|e| format!("reading {rel:?}: {e}"))?
+        };
         // `prefix/name`: the name holds 100 bytes, the prefix 155.
         let (prefix, name) = if path.len() <= 100 {
             ("", path.as_str())
@@ -1100,7 +1164,7 @@ fn write_tar(dir: &Path, files: &[PathBuf], out: &Path) -> Result {
         h[116..124].copy_from_slice(b"0000000\0");
         h[124..136].copy_from_slice(format!("{:011o}\0", data.len()).as_bytes());
         h[136..148].copy_from_slice(b"00000000000\0");
-        h[156] = b'0';
+        h[156] = if is_dir { b'5' } else { b'0' };
         h[257..263].copy_from_slice(b"ustar\0");
         h[263..265].copy_from_slice(b"00");
         h[345..345 + prefix.len()].copy_from_slice(prefix.as_bytes());
@@ -1115,7 +1179,8 @@ fn write_tar(dir: &Path, files: &[PathBuf], out: &Path) -> Result {
     fs::write(out, tar).map_err(|e| format!("writing {out:?}: {e}"))
 }
 
-/// The files under `dir` (paths relative to it), recursively.
+/// The files and directories under `dir` (paths relative to it),
+/// recursively, each directory before its contents.
 fn tree_files(dir: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> Result {
     let entries =
         fs::read_dir(dir.join(rel)).map_err(|e| format!("reading {dir:?}/{rel:?}: {e}"))?;
@@ -1128,6 +1193,8 @@ fn tree_files(dir: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> Result {
         }
         let path = rel.join(&name);
         if dir.join(&path).is_dir() {
+            // The directory itself too (an empty one would be lost).
+            out.push(path.clone());
             tree_files(dir, &path, out)?;
         } else {
             out.push(path);
@@ -1153,7 +1220,14 @@ fn fetch_prebuilt(path: &str) -> Result {
     let dir = root().join("target/prebuilt").join(p.name);
     // Written once the release is unpacked: a partial unpack (an
     // interrupted run) is redone.
-    let done = dir.join(format!(".unpacked-{}", p.checksum));
+    // Keyed by the selection too, so a changed member list unpacks again.
+    let selection = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (p.members, p.excludes).hash(&mut h);
+        h.finish()
+    };
+    let done = dir.join(format!(".unpacked-{}-{selection:016x}", p.checksum));
     if full.exists() && done.exists() {
         return Ok(());
     }
@@ -1171,6 +1245,9 @@ fn fetch_prebuilt(path: &str) -> Result {
     }
     let mut cmd = Command::new("unzip");
     cmd.args(["-q", "-o"]).arg(&zip).args(p.members).arg("-d").arg(&dir);
+    if !p.excludes.is_empty() {
+        cmd.arg("-x").args(p.excludes);
+    }
     run_cmd(&mut cmd)?;
     let _ = fs::remove_file(&zip);
     if !full.exists() {
@@ -1274,7 +1351,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &[];
+const PENDING: &[&str] = &["elasticsearch"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -1865,6 +1942,16 @@ const SCENARIOS: &[Scenario] = &[
             "pi=3.14159",
             "dotnet.exe finished with status 0x00000000",
         ],
+    },
+    Scenario {
+        // P1 step 4 (pending): Elasticsearch 8.15 on the JDK, started as its
+        // elasticsearch.bat does (gala has no cmd.exe): the CLI launcher,
+        // which starts the server as a second java.exe. Single node, no
+        // security, no machine learning; 256 MB heap (gala.options).
+        name: "elasticsearch",
+        cmdline: "qemu_exit cwd=C:/es run=java.exe args=-Xms4m%20-Xmx64m%20-XX:+UseSerialGC%20-Dcli.name=server%20-Dcli.script=C:/es/bin/elasticsearch.bat%20-Dcli.libs=C:/es/lib/tools/server-cli%20-Des.path.home=C:/es%20-Des.path.conf=C:/es/config%20-Des.distribution.type=zip%20-cp%20C:/es/lib/*;C:/es/lib/cli-launcher/*%20org.elasticsearch.launcher.CliToolLauncher%20-E%20discovery.type=single-node%20-E%20xpack.security.enabled=false%20-E%20xpack.ml.enabled=false",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["] started {"],
     },
     Scenario {
         // P1: the unmodified Temurin JDK 21 (fetched and checked by xtask,

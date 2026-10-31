@@ -81,6 +81,14 @@ shows it.
 
 ## Things that are easy to get wrong
 
+- **Disk space**: ISOs of the runtime scenarios are 120-470 MB each, and
+  their `*-iso-root` copies as much again; `target/debug/*.iso`,
+  `*-iso-root` and `*.events.jsonl` are rebuilt on every run and can be
+  deleted when xorriso reports "exceeds free space".
+- **PREBUILT members** are unzip patterns (`*` crosses `/`), `excludes`
+  are unzip `-x` patterns; the unpack marker includes a hash of both, so
+  changing them unpacks again.
+
 - **Predefined registry keys are sign-extended on x64**: winreg.h
   defines HKEY_LOCAL_MACHINE as `(HKEY)(ULONG_PTR)((LONG)0x80000002)`,
   0xFFFFFFFF80000002; C programs and .NET pass that form, Rust test

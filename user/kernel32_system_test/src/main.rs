@@ -6,7 +6,8 @@
 //!   VirtualAllocExNuma, AllocateUserPhysicalPages without the privilege
 //!   (ERROR_PRIVILEGE_NOT_HELD), HeapQueryInformation (the
 //!   low-fragmentation heap, 2).
-//! - psapi's K32EnumProcessModules (the executable first),
+//! - psapi's K32EnumProcessModules (the executable first; also through
+//!   psapi.dll's EnumProcessModules and GetModuleFileNameExA),
 //!   K32GetModuleInformation, K32GetModuleFileNameExA,
 //!   K32GetProcessMemoryInfo; QueryFullProcessImageNameW;
 //!   GetModuleHandleExA by name and by address.
@@ -30,6 +31,12 @@ use core::ffi::c_void;
 
 type Bool = i32;
 type Handle = *mut c_void;
+
+#[link(name = "psapi", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn EnumProcessModules(h: Handle, mods: *mut Handle, size: u32, needed: *mut u32) -> Bool;
+    fn GetModuleFileNameExA(h: Handle, module: Handle, buf: *mut u8, size: u32) -> u32;
+}
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -323,6 +330,13 @@ fn process(c: &mut Checks) -> Result<(), u32> {
         let kernel32 = GetModuleHandleA(c"kernel32.dll".as_ptr().cast());
         let count = (needed / 8) as usize;
         c.ok(mods[..count.min(32)].contains(&kernel32), 0)?;
+
+        // psapi.dll's names for them (forwarded to kernel32 on Windows 7+).
+        let mut via_psapi = [core::ptr::null_mut(); 32];
+        c.ok(EnumProcessModules(me, via_psapi.as_mut_ptr(), 256, &mut needed) != 0, 0)?;
+        c.eq(via_psapi[0] as u64, image as u64)?;
+        let mut name = [0u8; 260];
+        c.ok(GetModuleFileNameExA(me, kernel32, name.as_mut_ptr(), 260) > 0, 0)?;
 
         let mut info =
             ModuleInfo { base: core::ptr::null_mut(), size: 0, entry: core::ptr::null_mut() };

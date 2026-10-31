@@ -5,7 +5,7 @@ use super::platform;
 use alloc::vec::Vec;
 use core::fmt;
 
-use super::layout::{self, params, peb};
+use super::layout::{self, peb};
 use super::object::{HandleTable, KObject, ObjectBody, ObjectRef};
 use super::pe::{PeError, PeImage};
 use super::platform::PAGE_SIZE;
@@ -53,6 +53,8 @@ pub struct Process {
     /// NT times (ProcessTimes); exit time 0 while it runs.
     pub create_time: u64,
     pub exit_time: IrqMutex<u64>,
+    /// The job object the process is in (nt::job).
+    pub job: IrqMutex<Option<ObjectRef>>,
 }
 
 impl fmt::Debug for Process {
@@ -370,13 +372,30 @@ pub fn intern(s: &str) -> Result<&'static str, AllocError> {
 
 /// Creates a process from a PE executable that is a boot module (in
 /// `directory` on C:) and starts its main thread. `args` follow the image
-/// path on the command line.
+/// path on the command line; it starts in `cwd` (a Win32 path, `C:\a\`
+/// or `C:/a`), or in C:\gala.
 pub fn spawn_from_pe(
     name: &'static str,
     directory: &str,
     data: &[u8],
     args: &str,
+    cwd: Option<&str>,
 ) -> Result<(KArc<Process>, ObjectRef), LoadError> {
+    // The current directory with backslashes and a trailing one, as the
+    // process parameters keep it.
+    let mut current: Vec<u8> = Vec::new();
+    match cwd {
+        Some(dir) if !dir.is_empty() => {
+            for b in dir.bytes() {
+                current.try_push(if b == b'/' { b'\\' } else { b })?;
+            }
+            if current.last() != Some(&b'\\') {
+                current.try_push(b'\\')?;
+            }
+        }
+        _ => current.try_extend_from_slice(BOOT_DIRECTORY.as_bytes())?,
+    }
+    let current_directory = core::str::from_utf8(&current).unwrap_or(BOOT_DIRECTORY);
     // C:\<directory>\<name>, the directory as the boot module names it
     // (`a/b`, empty for C:\gala).
     let mut image_path: Vec<u8> = Vec::new();
@@ -416,7 +435,7 @@ pub fn spawn_from_pe(
         path: intern(image_path)?,
         image: KArc::try_new(layout)?,
         command_line,
-        current_directory: BOOT_DIRECTORY,
+        current_directory,
         environment: None,
         handles: None,
         suspended: false,
@@ -564,8 +583,9 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         p,
     )
     .map_err(|_| LoadError::OutOfMemory)?;
-    vm::register(&mut vad, p, params::PAGES * PAGE_SIZE, vad::MEM_PRIVATE, vad::PAGE_READWRITE)?;
-    space.map_zeroed(p, params::PAGES, USER_RW)?;
+    let pages = block.len() as u64 / PAGE_SIZE;
+    vm::register(&mut vad, p, pages * PAGE_SIZE, vad::MEM_PRIVATE, vad::PAGE_READWRITE)?;
+    space.map_zeroed(p, pages, USER_RW)?;
     space.write_initial(p, &block)?;
 
     // PEB.
@@ -613,6 +633,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         apc_dispatcher: core::sync::atomic::AtomicU64::new(0),
         create_time: platform::system_time(),
         exit_time: IrqMutex::new(0),
+        job: IrqMutex::new(None),
     })?;
     prune();
     PROCESSES.lock().try_push(process.clone())?;

@@ -225,7 +225,7 @@ pub fn run(
     let data: &'static [u8] = data.leak();
     crate::nt::file::add_boot_file("", name, data)
         .map_err(|e| alloc::format!("adding {name}: {e:?}"))?;
-    let (process, main_thread) = crate::nt::process::spawn_from_pe(name, "", data, args)
+    let (process, main_thread) = crate::nt::process::spawn_from_pe(name, "", data, args, None)
         .map_err(|e| alloc::format!("starting {name}: {e:?}"))?;
     drop(main_thread);
     let object =

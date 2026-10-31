@@ -3,6 +3,7 @@
 pub mod afd;
 pub mod context;
 pub mod file;
+pub mod job;
 pub mod kuser;
 pub mod layout;
 pub mod ledger;

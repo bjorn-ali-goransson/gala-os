@@ -20,7 +20,6 @@ const WAIT_FAILED: u32 = u32::MAX;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_NOT_LOCKED: u32 = 158;
-const ERROR_NOT_SUPPORTED: u32 = 50;
 
 /// WaitForMultipleObjectsEx: WAIT_IO_COMPLETION (0xc0) when an APC ran
 /// during an alertable wait.
@@ -270,32 +269,161 @@ pub extern "system" fn IsWow64Process2(
     TRUE
 }
 
-/// IsProcessInJob: gala has no job objects, so no process is in one.
+// ---- Job objects (the kernel's, nt::job) ----
+
+const JOB_OBJECT_ALL_ACCESS: u32 = 0x1f_003f;
+const STATUS_PROCESS_IN_JOB: u32 = 0x123;
+
+/// CreateJobObjectW(lpJobAttributes, lpName): a new job, or the existing
+/// one of that name (ERROR_ALREADY_EXISTS).
 #[unsafe(no_mangle)]
-pub extern "system" fn IsProcessInJob(_process: Handle, _job: Handle, result: *mut Bool) -> Bool {
+pub extern "system" fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle {
+    let mut h = core::ptr::null_mut();
+    let status = super::sync::with_name(name, super::sync::inheritable(attributes), |oa| {
+        // SAFETY: valid output pointer and attributes.
+        unsafe { NtCreateJobObject(&mut h, JOB_OBJECT_ALL_ACCESS, oa.cast()) }
+    });
+    match status {
+        Ok(status) => super::sync::created(status, h),
+        Err(e) => fail_with(e, core::ptr::null_mut()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateJobObjectA(attributes: *mut c_void, name: *const u8) -> Handle {
+    let mut buf = [0u16; 260];
+    match super::sync::wide_name(name, &mut buf) {
+        Ok(name) => CreateJobObjectW(attributes, name),
+        Err(e) => fail_with(e, core::ptr::null_mut()),
+    }
+}
+
+/// AssignProcessToJobObject(hJob, hProcess)
+#[unsafe(no_mangle)]
+pub extern "system" fn AssignProcessToJobObject(job: Handle, process: Handle) -> Bool {
+    // SAFETY: plain call.
+    let status = unsafe { NtAssignProcessToJobObject(job, process) };
+    if status == STATUS_SUCCESS { TRUE } else { fail(status, FALSE) }
+}
+
+/// SetInformationJobObject(hJob, class, info, length): the basic and
+/// extended limits (the active-process limit is enforced).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetInformationJobObject(
+    job: Handle,
+    class: u32,
+    info: *const c_void,
+    length: u32,
+) -> Bool {
+    // SAFETY: the caller's buffer of `length` bytes.
+    let status = unsafe { NtSetInformationJobObject(job, class, info, length) };
+    if status == STATUS_SUCCESS { TRUE } else { fail(status, FALSE) }
+}
+
+/// QueryInformationJobObject(hJob, class, info, length, returned): basic
+/// accounting, basic and extended limits; a null job is the caller's.
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryInformationJobObject(
+    job: Handle,
+    class: u32,
+    info: *mut c_void,
+    length: u32,
+    returned: *mut u32,
+) -> Bool {
+    // SAFETY: the caller's buffer of `length` bytes.
+    let status = unsafe { NtQueryInformationJobObject(job, class, info, length, returned) };
+    if status == STATUS_SUCCESS { TRUE } else { fail(status, FALSE) }
+}
+
+/// IsProcessInJob(ProcessHandle, JobHandle, Result): a null job means any.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsProcessInJob(process: Handle, job: Handle, result: *mut Bool) -> Bool {
     if result.is_null() {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
+    // SAFETY: plain call.
+    let status = unsafe { NtIsProcessInJob(process, job) };
+    if status & 0x8000_0000 != 0 {
+        return fail(status, FALSE);
+    }
     // SAFETY: the caller's output.
-    unsafe { *result = FALSE };
+    unsafe { *result = Bool::from(status == STATUS_PROCESS_IN_JOB) };
     TRUE
 }
 
-/// QueryInformationJobObject: no job objects (recorded).
+// ---- Working sets ----
+
+/// The working set limits SetProcessWorkingSetSize last set; Windows'
+/// defaults (50 and 345 pages) before that. gala does not trim working
+/// sets, so they are only reported back.
+static WORKING_SET: [core::sync::atomic::AtomicUsize; 2] = [
+    core::sync::atomic::AtomicUsize::new(50 * 4096),
+    core::sync::atomic::AtomicUsize::new(345 * 4096),
+];
+
+/// SetProcessWorkingSetSize(hProcess, min, max): (SIZE_T)-1 for both
+/// trims the working set (nothing to do here).
 #[unsafe(no_mangle)]
-pub extern "system" fn QueryInformationJobObject(
-    _job: Handle,
-    class: u32,
-    _info: *mut c_void,
-    _length: u32,
-    _returned: *mut u32,
+pub extern "system" fn SetProcessWorkingSetSize(_process: Handle, min: usize, max: usize) -> Bool {
+    if min == usize::MAX && max == usize::MAX {
+        return TRUE;
+    }
+    if min > max {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    WORKING_SET[0].store(min, Ordering::Relaxed);
+    WORKING_SET[1].store(max, Ordering::Relaxed);
+    TRUE
+}
+
+/// GetProcessWorkingSetSize(hProcess, *min, *max)
+#[unsafe(no_mangle)]
+pub extern "system" fn GetProcessWorkingSetSize(
+    _process: Handle,
+    min: *mut usize,
+    max: *mut usize,
 ) -> Bool {
-    unsupported(b"kernel32.dll!QueryInformationJobObject", class.into());
-    fail_with(ERROR_NOT_SUPPORTED, FALSE)
+    if min.is_null() || max.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's outputs.
+    unsafe {
+        *min = WORKING_SET[0].load(Ordering::Relaxed);
+        *max = WORKING_SET[1].load(Ordering::Relaxed);
+    }
+    TRUE
+}
+
+/// VirtualQueryEx(hProcess, address, buffer, length): VirtualQuery of the
+/// process the handle names (NtQueryVirtualMemory).
+#[unsafe(no_mangle)]
+pub extern "system" fn VirtualQueryEx(
+    process: Handle,
+    address: *const c_void,
+    info: *mut u8,
+    length: usize,
+) -> usize {
+    let mut ret = 0;
+    // SAFETY: the caller's buffer of `length` bytes.
+    let status = unsafe {
+        super::NtQueryVirtualMemory(process as isize, address as usize, 0, info, length, &mut ret)
+    };
+    if status != STATUS_SUCCESS { fail(status, 0) } else { ret }
 }
 
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn NtCreateJobObject(out: *mut Handle, access: u32, attributes: *const c_void) -> u32;
+    fn NtAssignProcessToJobObject(job: Handle, process: Handle) -> u32;
+    fn NtSetInformationJobObject(job: Handle, class: u32, info: *const c_void, len: u32) -> u32;
+    fn NtQueryInformationJobObject(
+        job: Handle,
+        class: u32,
+        info: *mut c_void,
+        len: u32,
+        ret: *mut u32,
+    ) -> u32;
+    fn NtIsProcessInJob(process: Handle, job: Handle) -> u32;
     fn NtQueueApcThread(thread: Handle, routine: usize, a1: usize, a2: usize, a3: usize) -> u32;
     fn NtFsControlFile(
         h: Handle,

@@ -58,6 +58,12 @@ pub const NT_OPEN_KEY_EX: u32 = 0x7f06;
 pub const NT_DELETE_KEY: u32 = 0x7f07;
 pub const NT_DELETE_VALUE_KEY: u32 = 0x7f08;
 pub const NT_FLUSH_KEY: u32 = 0x7f09;
+// Job objects: gala's numbers until verified (reached through ntdll).
+pub const NT_CREATE_JOB_OBJECT: u32 = 0x7f0a;
+pub const NT_ASSIGN_PROCESS_TO_JOB_OBJECT: u32 = 0x7f0b;
+pub const NT_SET_INFORMATION_JOB_OBJECT: u32 = 0x7f0c;
+pub const NT_QUERY_INFORMATION_JOB_OBJECT: u32 = 0x7f0d;
+pub const NT_IS_PROCESS_IN_JOB: u32 = 0x7f0e;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -246,6 +252,26 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_DELETE_KEY, "NtDeleteKey", 1, registry_calls::nt_delete_key),
     (NT_DELETE_VALUE_KEY, "NtDeleteValueKey", 2, registry_calls::nt_delete_value_key),
     (NT_FLUSH_KEY, "NtFlushKey", 1, registry_calls::nt_flush_key),
+    (NT_CREATE_JOB_OBJECT, "NtCreateJobObject", 3, job_calls::nt_create_job_object),
+    (
+        NT_ASSIGN_PROCESS_TO_JOB_OBJECT,
+        "NtAssignProcessToJobObject",
+        2,
+        job_calls::nt_assign_process_to_job_object,
+    ),
+    (
+        NT_SET_INFORMATION_JOB_OBJECT,
+        "NtSetInformationJobObject",
+        4,
+        job_calls::nt_set_information_job_object,
+    ),
+    (
+        NT_QUERY_INFORMATION_JOB_OBJECT,
+        "NtQueryInformationJobObject",
+        5,
+        job_calls::nt_query_information_job_object,
+    ),
+    (NT_IS_PROCESS_IN_JOB, "NtIsProcessInJob", 2, job_calls::nt_is_process_in_job),
 ];
 
 /// The name of service `number` (for diagnostics).
@@ -2887,6 +2913,8 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
     }
     let command_line = core::str::from_utf8(&command_line).unwrap_or("");
     let directory = core::str::from_utf8(&directory).unwrap_or("C:\\");
+    // The caller's job: its limit, and the job the child joins.
+    let job = tri!(job_calls::job_for_child(&call.process));
     let spawned = process::spawn(process::Spawn {
         name,
         path: path_static,
@@ -2904,6 +2932,7 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         Err(process::LoadError::Pe(_)) => return NtStatus::INVALID_IMAGE_FORMAT,
         Err(_) => return NtStatus::NO_MEMORY,
     };
+    job_calls::join(&child, job);
     let thread_id = match &thread_object.body {
         ObjectBody::Thread(t) => t.id,
         _ => 0,
@@ -3741,3 +3770,6 @@ mod tests {
 
 #[path = "registry_calls.rs"]
 mod registry_calls;
+
+#[path = "job_calls.rs"]
+mod job_calls;

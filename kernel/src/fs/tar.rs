@@ -4,15 +4,18 @@
 //! xtask packs directory trees (a JDK, the .NET runtime) into one archive
 //! per tree: Limine cannot load hundreds of separate boot modules. The
 //! kernel adds the archive's regular files to the ramfs in place (their
-//! contents stay in the module's memory).
+//! contents stay in the module's memory), and its directories (empty ones
+//! matter: a program may expect them).
 
-/// A regular file in an archive: its path (`/`-separated) and contents.
+/// A regular file or a directory in an archive: its path (`/`-separated,
+/// without a trailing slash) and contents (none for a directory).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Entry<'p, 'a> {
     pub path: &'p str,
     /// The file name (the path's last component), inside the archive.
     pub name: &'a str,
     pub data: &'a [u8],
+    pub directory: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -47,8 +50,8 @@ fn octal(field: &[u8]) -> Result<usize, Error> {
     Ok(n)
 }
 
-/// The archive's regular files, in order. Other entries (directories,
-/// links) are skipped; a header that does not parse ends the walk with an
+/// The archive's regular files and directories, in order. Other entries
+/// (links, devices) are skipped; a header that does not parse ends the walk with an
 /// error.
 pub struct Entries<'a> {
     archive: &'a [u8],
@@ -62,7 +65,8 @@ pub fn entries(archive: &[u8]) -> Entries<'_> {
 }
 
 impl<'a> Entries<'a> {
-    /// The next regular file, `Ok(None)` at the end of the archive.
+    /// The next regular file or directory, `Ok(None)` at the end of the
+    /// archive.
     #[allow(clippy::should_implement_trait)] // the paths borrow `self`
     pub fn next(&mut self) -> Result<Option<Entry<'_, 'a>>, Error> {
         loop {
@@ -93,13 +97,15 @@ impl<'a> Entries<'a> {
                 return Err(Error::Truncated);
             }
             self.at = start + size.div_ceil(512) * 512;
-            if !matches!(header[156], b'0' | 0) {
+            let directory = header[156] == b'5';
+            if !matches!(header[156], b'0' | 0 | b'5') {
                 continue;
             }
             let archive: &'a [u8] = self.archive;
             let header = &archive[start - 512..start];
             let prefix = text(&header[345..500])?;
             let name = text(&header[0..100])?;
+            let name = name.strip_suffix('/').unwrap_or(name);
             let file_name = name.rsplit('/').next().unwrap_or(name);
             let mut len = 0;
             for part in [prefix, if prefix.is_empty() { "" } else { "/" }, name] {
@@ -107,7 +113,8 @@ impl<'a> Entries<'a> {
                 len += part.len();
             }
             let path = core::str::from_utf8(&self.path[..len]).map_err(|_| Error::BadHeader)?;
-            return Ok(Some(Entry { path, name: file_name, data: &archive[start..end] }));
+            let data = &archive[start..end];
+            return Ok(Some(Entry { path, name: file_name, data, directory }));
         }
     }
 }
@@ -164,14 +171,18 @@ mod tests {
             ("", "empty", b"", 0),
         ]);
         let files = collect(&a).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_eq!(files.len(), 4);
         assert_eq!(files[0], ("a.txt".into(), b"hello".to_vec()));
-        assert_eq!(files[1].0, "shared/Microsoft.NETCore.App/8.0.33/coreclr.dll");
+        assert_eq!(files[1], ("dir".into(), Vec::new()));
+        assert_eq!(files[2].0, "shared/Microsoft.NETCore.App/8.0.33/coreclr.dll");
         let mut e = entries(&a);
         e.next().unwrap();
-        assert_eq!(e.next().unwrap().unwrap().name, "coreclr.dll");
-        assert_eq!(files[1].1, big);
-        assert_eq!(files[2], ("empty".into(), Vec::new()));
+        let dir = e.next().unwrap().unwrap();
+        assert!(dir.directory && dir.name == "dir");
+        let file = e.next().unwrap().unwrap();
+        assert!(!file.directory && file.name == "coreclr.dll");
+        assert_eq!(files[2].1, big);
+        assert_eq!(files[3], ("empty".into(), Vec::new()));
     }
 
     #[test]

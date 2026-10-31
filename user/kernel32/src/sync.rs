@@ -51,7 +51,7 @@ const OBJ_INHERIT: u32 = 0x2;
 /// Runs `f` with OBJECT_ATTRIBUTES naming `name` (UTF-16, NUL-terminated)
 /// in the session's object directory (none for a null name), with
 /// OBJ_INHERIT if `inherit`.
-fn with_name<R>(
+pub(crate) fn with_name<R>(
     name: *const u16,
     inherit: bool,
     f: impl FnOnce(*const ObjectAttributes) -> R,
@@ -94,7 +94,7 @@ fn with_name<R>(
 }
 
 /// An ANSI name as UTF-16 (None: no name); Err: ERROR_INVALID_PARAMETER.
-fn wide_name(name: *const u8, buf: &mut [u16; 260]) -> Result<*const u16, u32> {
+pub(crate) fn wide_name(name: *const u8, buf: &mut [u16; 260]) -> Result<*const u16, u32> {
     if name.is_null() {
         return Ok(core::ptr::null());
     }
@@ -104,7 +104,7 @@ fn wide_name(name: *const u8, buf: &mut [u16; 260]) -> Result<*const u16, u32> {
 
 /// The result of creating a possibly named object: the handle, with
 /// ERROR_ALREADY_EXISTS when an existing one was opened.
-fn created(status: u32, h: Handle) -> Handle {
+pub(crate) fn created(status: u32, h: Handle) -> Handle {
     match status {
         STATUS_SUCCESS => {
             SetLastError(0);

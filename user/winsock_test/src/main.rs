@@ -1,5 +1,6 @@
 //! Winsock TCP as programs use it, with the results real Windows gives:
-//! WSAStartup (version 2.2), socket/bind/listen/accept/connect on the
+//! WSAStartup (version 2.2), getaddrinfo of the machine's own host name
+//! and of "localhost" (IPv4 addresses), socket/bind/listen/accept/connect on the
 //! loopback address, getsockname (an ephemeral port after binding port 0;
 //! accept reports the client's address), send/recv round trips in both
 //! directions (with MSG_PEEK), a 16 KiB transfer, a graceful close (recv
@@ -35,6 +36,14 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn WSAStartup(version: u16, data: *mut WsaData) -> i32;
     fn WSACleanup() -> i32;
+    fn gethostname(name: *mut u8, len: i32) -> i32;
+    fn getaddrinfo(
+        node: *const u8,
+        service: *const u8,
+        hints: *const i32,
+        out: *mut *mut u8,
+    ) -> i32;
+    fn freeaddrinfo(ai: *mut u8);
     fn WSAGetLastError() -> i32;
     fn socket(af: i32, kind: i32, protocol: i32) -> Socket;
     fn bind(s: Socket, addr: *const SockaddrIn, len: i32) -> i32;
@@ -190,6 +199,20 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         c.eq(WSAStartup(0x0202, &mut data) as u64, 0)?;
         c.eq(data.version.into(), 0x0202)?;
 
+        // Name resolution of this machine's own host name and of
+        // "localhost": IPv4 addresses (ADDRINFOA: family at 4, addr at 32).
+        let mut host = [0u8; 256];
+        c.eq(gethostname(host.as_mut_ptr(), 256) as u64, 0)?;
+        let hints = [0i32, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, 0, 0, 0, 0, 0, 0, 0];
+        for node in [host.as_ptr(), c"localhost".as_ptr().cast()] {
+            let mut ai = core::ptr::null_mut();
+            c.eq(getaddrinfo(node, c"80".as_ptr().cast(), hints.as_ptr(), &mut ai) as u64, 0)?;
+            c.eq((*ai.add(4).cast::<i32>()) as u64, AF_INET as u64)?;
+            let sa = *ai.add(32).cast::<*const u8>();
+            c.eq(u16::from_be_bytes([*sa.add(2), *sa.add(3)]).into(), 80)?;
+            freeaddrinfo(ai);
+        }
+
         // A listener on an ephemeral loopback port.
         let listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         c.ok(listener != INVALID_SOCKET, WSAGetLastError() as u64)?;
@@ -343,7 +366,7 @@ fn wants_serve() -> bool {
         }
         core::slice::from_raw_parts(p, n)
     };
-    let word: [u16; 5] = [b's', b'e', b'r', b'v', b'e'].map(u16::from);
+    let word: [u16; 5] = b"serve".map(u16::from);
     line.windows(5).any(|w| w == word)
 }
 

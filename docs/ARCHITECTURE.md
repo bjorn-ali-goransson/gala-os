@@ -97,6 +97,7 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `fault=ud`, `fault=pagefault` | provoke that exception (tests the handler) |
 | `run=<file>[,<file>...]` | run those boot modules as user processes, one after another (each between `run: begin` and `run: end` log lines) |
 | `args=<percent-encoded>[,...]` | their command-line arguments, in the same order (`%2C` for a comma) |
+| `cwd=C:/dir` | their current directory (default `C:\gala\`; Elasticsearch expects its home) |
 | `trace` | log every system call (arguments, status) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |
@@ -252,6 +253,10 @@ RTL_USER_PROCESS_PARAMETERS: standard handles, ImagePathName and
 CommandLine (`C:\gala\<name>`), current directory `C:\gala\` with an
 open directory handle (FILE_TRAVERSE | SYNCHRONIZE), DllPath, WindowTitle
 and an environment block (SystemRoot, Path, ...) with EnvironmentSize.
+The block is as large as its strings need (whole pages, mapped as one
+region below the first TEB): each string up to a UNICODE_STRING's 32767
+characters as on Windows (Elasticsearch starts its server with a
+~5000-character command line), the environment after them.
 
 **ntdll** (`nt::ntdll`): if `C:\Windows\System32\ntdll.dll` exists (boot
 modules can name a target directory in their module string), it is loaded
@@ -488,7 +493,9 @@ objects keep the granted access, share mode, synchronous flag and file
 position, and close their open in `Drop`. Boot modules appear read-only in
 `C:\gala` (or the directory their module string names); a module string
 `tar:<dir>` is a USTAR archive (`fs/tar.rs`) whose regular files are added
-under `C:\<dir>` in place, without copies. `C:\Windows\System32` and
+under `C:\<dir>` in place, without copies, and whose directory entries
+(typeflag 5) are created, so empty directories survive (xtask writes one
+for every directory of a tree; Elasticsearch needs its empty `logs`). `C:\Windows\System32` and
 `C:\Users\Public` exist.
 Names resolve from the volume root, or from an open directory file given
 as RootDirectory (no access needed on it). NtQueryDirectoryFile keeps a
@@ -791,6 +798,22 @@ and thread (full access).
 
 
 
+### Job objects
+
+`nt::job` and `nt/job_calls.rs`: NtCreateJobObject (named through the
+namespace like events), NtAssignProcessToJobObject, NtSet/
+NtQueryInformationJobObject (basic accounting, basic and extended
+limits) and NtIsProcessInJob, gala's numbers 0x7f0a-0x7f0e until
+verified. A process is in at most one job (`Process::job`; nested jobs,
+Windows 8+, are not done: assigning a process that is in another job is
+STATUS_ACCESS_DENIED); a process created by one in a job joins it. Only
+JOB_OBJECT_LIMIT_ACTIVE_PROCESS is enforced: GalaCreateProcess fails with
+STATUS_QUOTA_EXCEEDED (ERROR_NOT_ENOUGH_QUOTA) when the caller's job
+already has that many running processes (counted over the process
+list). That is how Elasticsearch forbids itself child processes on
+Windows (`process_test` checks it). Other limits are kept and reported
+back, not applied; accounting has process counts but no times.
+
 ### Process lifetime, OpenProcess and process lists (H4)
 
 A process stays in the kernel's process list (`process::PROCESSES`)
@@ -1009,7 +1032,10 @@ Windows, never shadows the system's DLLs.)
   compares letters without case first, then puts lower case first;
   character types from Unicode properties), memory status, one NUMA
   node, psapi for the current process (modules from the address space's
-  image regions; memory counters from its committed regions), version
+  image regions; memory counters from its committed regions; gala's
+  psapi.dll forwards EnumProcessModules & co. to these K32* functions, as
+  Windows' does), job objects over the kernel's (see "Job objects"),
+  working set sizes (kept, not applied), version
   checks (sysmem.rs), the version reported to the program (as Windows:
   the real version only if the executable's RT_MANIFEST declares Windows
   10/11, 6.3.9600 for Windows 8.1, else 6.2.9200; GetVersion(Ex)A/W and
@@ -1246,7 +1272,10 @@ gala's mswsock.dll forwards its AcceptEx and GetAcceptExSockaddrs exports
 there (Go imports them from mswsock). Socket options that only tune the
 stack (TCP_NODELAY, keepalive, SO_UPDATE_*_CONTEXT, buffer sizes) are
 accepted and have no effect yet; unknown ones fail with WSAENOPROTOOPT and
-go to the ledger.
+go to the ledger. getaddrinfo resolves numeric IPv4 addresses,
+"localhost" and the machine's own host name (gethostname's "gala", to
+loopback: what Windows answers without network adapters, until gala
+lists its adapters); other names are reported (WSAHOST_NOT_FOUND).
 
 ### Tests
 

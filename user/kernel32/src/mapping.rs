@@ -638,6 +638,52 @@ pub extern "system" fn GetDiskFreeSpaceExW(
     TRUE
 }
 
+/// GetCompressedFileSizeW(lpFileName, lpFileSizeHigh): the bytes the
+/// file takes on disk; nothing is compressed or sparse here, so its size.
+/// INVALID_FILE_SIZE with the error of GetFileAttributesExW otherwise.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCompressedFileSizeW(path: *const u16, high: *mut u32) -> u32 {
+    // WIN32_FILE_ATTRIBUTE_DATA: nFileSizeHigh at 28, nFileSizeLow at 32.
+    let mut data = [0u32; 9];
+    if crate::GetFileAttributesExW(path, 0, data.as_mut_ptr()) == 0 {
+        return u32::MAX;
+    }
+    if !high.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *high = data[7] };
+    }
+    if data[8] == u32::MAX {
+        // A real size of 0xFFFFFFFF: the caller tells by GetLastError.
+        crate::SetLastError(0);
+    }
+    data[8]
+}
+
+/// GetShortPathNameW: gala's file system keeps no 8.3 names, so a path
+/// of an existing file or directory is its own short form (as on a
+/// Windows volume with short names disabled). A missing one fails as
+/// GetFileAttributesW does (ERROR_FILE_NOT_FOUND); a short buffer gets the
+/// size needed with the NUL.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetShortPathNameW(long: *const u16, short: *mut u16, size: u32) -> u32 {
+    if long.is_null() {
+        return crate::fail_with(crate::ERROR_INVALID_PARAMETER, 0);
+    }
+    if crate::GetFileAttributesW(long) == u32::MAX {
+        return 0;
+    }
+    let path = wide_slice(long);
+    if path.len() + 1 > size as usize {
+        return (path.len() + 1) as u32;
+    }
+    // SAFETY: the caller's buffer of `size` characters (it may be `long`).
+    unsafe {
+        core::ptr::copy(path.as_ptr(), short, path.len());
+        *short.add(path.len()) = 0;
+    }
+    path.len() as u32
+}
+
 /// GetLongPathNameW: gala has no short (8.3) names, so the path itself.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetLongPathNameW(short: *const u16, long: *mut u16, size: u32) -> u32 {

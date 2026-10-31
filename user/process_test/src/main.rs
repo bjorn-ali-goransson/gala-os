@@ -16,6 +16,9 @@
 //! stdout and stderr into another, which the parent reads until
 //! ERROR_BROKEN_PIPE (the CreatePipe docs' pattern: the parent's ends are
 //! not inheritable, and it closes the child's ends after CreateProcess).
+//! A child started with a 20000-character command line sees all of it.
+//! Last, job objects: limits, accounting, and a one-process limit that
+//! stops this process from starting another (ERROR_NOT_ENOUGH_QUOTA).
 //! Prints `process_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -74,9 +77,21 @@ unsafe extern "system" {
         info: *mut ProcessInformation,
     ) -> Bool;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+    fn CreateJobObjectW(security: *const c_void, name: *const u16) -> Handle;
+    fn SetInformationJobObject(job: Handle, class: u32, info: *const u8, len: u32) -> Bool;
+    fn QueryInformationJobObject(
+        job: Handle,
+        class: u32,
+        info: *mut u8,
+        len: u32,
+        ret: *mut u32,
+    ) -> Bool;
+    fn AssignProcessToJobObject(job: Handle, process: Handle) -> Bool;
+    fn IsProcessInJob(process: Handle, job: Handle, result: *mut Bool) -> Bool;
     fn GetExitCodeProcess(h: Handle, code: *mut u32) -> Bool;
     fn OpenProcess(access: u32, inherit: Bool, id: u32) -> Handle;
     fn GetCurrentProcessId() -> u32;
+    fn GetCurrentProcess() -> Handle;
     fn CreateToolhelp32Snapshot(flags: u32, process: u32) -> Handle;
     fn Process32FirstW(snapshot: Handle, entry: *mut u64) -> Bool;
     fn Process32NextW(snapshot: Handle, entry: *mut u64) -> Bool;
@@ -101,6 +116,8 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    // The stack probe for frames over a page (the long command line).
+    fn __chkstk();
 }
 
 #[unsafe(no_mangle)]
@@ -205,6 +222,11 @@ fn parse_hex(w: &[u16]) -> Option<usize> {
 }
 
 /// UTF-16 of `text` into `buf` at `at`; returns the new end.
+const ERROR_BAD_LENGTH: u32 = 24;
+
+/// The long command line's length, in characters.
+const LONG_LINE: usize = 20_000;
+
 fn put(buf: &mut [u16], at: usize, text: &[u8]) -> usize {
     for (i, &b) in text.iter().enumerate() {
         buf[at + i] = u16::from(b);
@@ -538,7 +560,108 @@ fn run() -> Result<(), u32> {
         c.eq(ok as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_FILE_NOT_FOUND.into())?;
         CloseHandle(event);
+
+        // A long command line (Windows allows 32767 characters): the child
+        // (`process_test long xxx...`) exits with its length.
+        let mut long = [0u16; LONG_LINE + 1];
+        let mut at = put(&mut long, 0, b"process_test long ");
+        while at < LONG_LINE {
+            long[at] = u16::from(b'x');
+            at += 1;
+        }
+        long[LONG_LINE] = 0;
+        let ok = CreateProcessW(
+            path.as_ptr(),
+            long.as_mut_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            0,
+            0,
+            core::ptr::null(),
+            core::ptr::null(),
+            &startup,
+            &mut info,
+        );
+        c.ok(ok != 0, GetLastError().into())?;
+        c.eq(WaitForSingleObject(info.process, INFINITE).into(), 0)?;
+        c.ok(GetExitCodeProcess(info.process, &mut code) != 0, 0)?;
+        c.eq(code.into(), LONG_LINE as u64)?;
+        CloseHandle(info.thread);
+        CloseHandle(info.process);
         pipes(&mut c, &path, n)?;
+        jobs(&mut c, &path)?;
+    }
+    Ok(())
+}
+
+/// Job objects, last (the limit then binds this process): a new job has
+/// no limits and no processes; with JOB_OBJECT_LIMIT_ACTIVE_PROCESS at 1
+/// and this process assigned, CreateProcess fails with
+/// ERROR_NOT_ENOUGH_QUOTA (the documented effect: the limit counts this
+/// process, and children join their parent's job).
+fn jobs(c: &mut Checks, path: &[u16; 260]) -> Result<(), u32> {
+    const BASIC_ACCOUNTING: u32 = 1; // JobObjectBasicAccountingInformation
+    const BASIC_LIMIT: u32 = 2; // JobObjectBasicLimitInformation
+    const LIMIT_ACTIVE_PROCESS: u32 = 8;
+    const ERROR_NOT_ENOUGH_QUOTA: u32 = 1816;
+    // SAFETY: documented calls with buffers of ours.
+    unsafe {
+        let me = GetCurrentProcess();
+        let job = CreateJobObjectW(core::ptr::null(), core::ptr::null());
+        c.ok(!job.is_null(), GetLastError().into())?;
+        let mut inside = 1;
+        c.ok(IsProcessInJob(me, job, &mut inside) != 0 && inside == 0, inside as u64)?;
+        // JOBOBJECT_BASIC_LIMIT_INFORMATION (64 bytes on x64): no limits.
+        let mut limits = [0u8; 64];
+        let mut ret = 0;
+        c.ok(
+            QueryInformationJobObject(job, BASIC_LIMIT, limits.as_mut_ptr(), 64, &mut ret) != 0,
+            0,
+        )?;
+        c.eq(ret.into(), 64)?;
+        c.ok(limits.iter().all(|&b| b == 0), 0)?;
+        // A wrong size.
+        c.eq(SetInformationJobObject(job, BASIC_LIMIT, limits.as_ptr(), 63) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_BAD_LENGTH.into())?;
+        // One active process at most: LimitFlags at 16, ActiveProcessLimit at 40.
+        limits[16..20].copy_from_slice(&LIMIT_ACTIVE_PROCESS.to_le_bytes());
+        limits[40..44].copy_from_slice(&1u32.to_le_bytes());
+        c.ok(SetInformationJobObject(job, BASIC_LIMIT, limits.as_ptr(), 64) != 0, 0)?;
+        c.ok(AssignProcessToJobObject(job, me) != 0, GetLastError().into())?;
+        c.ok(IsProcessInJob(me, job, &mut inside) != 0 && inside != 0, 0)?;
+        // JOBOBJECT_BASIC_ACCOUNTING_INFORMATION: ActiveProcesses at 40.
+        let mut accounting = [0u8; 48];
+        c.ok(
+            QueryInformationJobObject(job, BASIC_ACCOUNTING, accounting.as_mut_ptr(), 48, &mut ret)
+                != 0,
+            0,
+        )?;
+        c.eq(
+            u32::from_le_bytes([accounting[40], accounting[41], accounting[42], accounting[43]])
+                .into(),
+            1,
+        )?;
+        let mut line = [0u16; 300];
+        let end = put(&mut line, 0, b"process_test child 0");
+        line[end] = 0;
+        let mut startup: StartupInfo = core::mem::zeroed();
+        startup.cb = size_of::<StartupInfo>() as u32;
+        let mut info: ProcessInformation = core::mem::zeroed();
+        let ok = CreateProcessW(
+            path.as_ptr(),
+            line.as_mut_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            0,
+            0,
+            core::ptr::null(),
+            core::ptr::null(),
+            &startup,
+            &mut info,
+        );
+        c.eq(ok as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_NOT_ENOUGH_QUOTA.into())?;
+        c.ok(CloseHandle(job) != 0, 0)?;
     }
     Ok(())
 }
@@ -556,10 +679,14 @@ pub extern "C" fn mainCRTStartup() -> ! {
     };
     let mut args: [&[u16]; 4] = [&[]; 4];
     let argc = arguments(line, &mut args);
-    let child_word: [u16; 5] = [b'c', b'h', b'i', b'l', b'd'].map(u16::from);
-    let pipes_word: [u16; 5] = [b'p', b'i', b'p', b'e', b's'].map(u16::from);
+    let child_word: [u16; 5] = b"child".map(u16::from);
+    let pipes_word: [u16; 5] = b"pipes".map(u16::from);
     if argc == 1 && args[0] == pipes_word {
         pipes_child();
+    }
+    if argc == 2 && args[0] == b"long".map(u16::from) {
+        // SAFETY: ends the process.
+        unsafe { ExitProcess(line.len() as u32) }
     }
     if argc == 2 && args[0] == child_word {
         child(parse_hex(args[1]).unwrap_or(0));

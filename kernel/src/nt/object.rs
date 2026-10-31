@@ -342,6 +342,8 @@ pub enum ObjectBody {
     Null(Dispatcher),
     /// An open registry key (`\Registry\...`).
     Key(super::registry::KeyObject),
+    /// A job object (nt::job).
+    Job(super::job::Job),
 }
 
 /// Where a named object lives in the namespace.
@@ -403,6 +405,7 @@ impl KObject {
             ObjectBody::NullDevice => "Device",
             ObjectBody::Null(_) => "File",
             ObjectBody::Key(_) => "Key",
+            ObjectBody::Job(_) => "Job",
         }
     }
 
@@ -443,7 +446,8 @@ impl KObject {
             | ObjectBody::AfdDevice
             | ObjectBody::NamedPipeDevice
             | ObjectBody::NullDevice
-            | ObjectBody::Key(_) => None,
+            | ObjectBody::Key(_)
+            | ObjectBody::Job(_) => None,
         }
     }
 
@@ -468,6 +472,7 @@ impl KObject {
             | ObjectBody::Null(_) => FILE_MAPPING,
             ObjectBody::Process(_) => PROCESS_MAPPING,
             ObjectBody::Key(_) => super::registry::KEY_MAPPING,
+            ObjectBody::Job(_) => super::job::JOB_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,
                 write: READ_CONTROL | SYNCHRONIZE | 0x116,

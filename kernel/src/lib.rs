@@ -133,7 +133,8 @@ pub fn kernel_main() -> ! {
     nt::syscalls::set_trace(cmdline.flag("trace"));
     events::set_mask(cmdline.value("events").map_or(0, events::parse_mask));
     // `run=a.exe,b.exe` runs the programs one after another; `args=` holds
-    // their (percent-encoded) command-line arguments in the same order.
+    // their (percent-encoded) command-line arguments in the same order;
+    // `cwd=C:/dir` is their current directory (default C:\gala).
     if let Some(names) = cmdline.value("run") {
         let mut args = cmdline.value("args").unwrap_or("").split(',');
         for name in names.split(',').filter(|n| !n.is_empty()) {
@@ -142,7 +143,8 @@ pub fn kernel_main() -> ! {
                 panic!("run: out of memory for the arguments");
             }
             info!("run: begin {name}");
-            run_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""));
+            let cwd = cmdline.value("cwd");
+            run_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""), cwd);
             nt::ledger::dump();
             info!("run: end {name}");
         }
@@ -316,13 +318,21 @@ fn init_timer(boot_time: Option<i64>) {
     info!("interrupts enabled, tick {} Hz", time::TICK_HZ);
 }
 
-/// Adds the regular files of the USTAR archive `data` (boot module `path`)
-/// under C:\\<dir>, in place.
+/// Adds the regular files (in place) and directories of the USTAR archive
+/// `data` (boot module `path`) under C:\\<dir>.
 fn add_tree(dir: &str, path: &str, data: &'static [u8]) {
     let mut entries = fs::tar::entries(data);
     let mut count = 0;
     loop {
         match entries.next() {
+            Ok(Some(entry)) if entry.directory => {
+                let mut buf = [0u8; 512];
+                match join_dir(&mut buf, dir, entry.path).map(nt::file::add_boot_directory) {
+                    Some(Ok(())) => {}
+                    Some(Err(e)) => warn!("fs: cannot add {dir}/{}: {e:?}", entry.path),
+                    None => warn!("fs: path too long: {}", entry.path),
+                }
+            }
             Ok(Some(entry)) => {
                 let (sub, name) = entry.path.rsplit_once('/').unwrap_or(("", entry.path));
                 let mut buf = [0u8; 512];
@@ -368,7 +378,7 @@ fn find_program<'b>(
         let Some(dir) = module.cmdline.strip_prefix("tar:") else { continue };
         let mut entries = fs::tar::entries(module.data);
         while let Ok(Some(entry)) = entries.next() {
-            if entry.name.eq_ignore_ascii_case(name) {
+            if !entry.directory && entry.name.eq_ignore_ascii_case(name) {
                 let sub = entry.path.rsplit_once('/').map_or("", |(sub, _)| sub);
                 let (file, data) = (entry.name, entry.data);
                 return Some((file, data, join_dir(buf, dir, sub)?));
@@ -380,14 +390,14 @@ fn find_program<'b>(
 
 /// Runs the boot module `name` as a user process with command-line
 /// arguments `args` and waits for it.
-fn run_program(info: &BootInfo, name: &str, args: &str) {
+fn run_program(info: &BootInfo, name: &str, args: &str, cwd: Option<&str>) {
     let mut buf = [0u8; 512];
     let Some((file_name, data, directory)) = find_program(info, name, &mut buf) else {
         panic!("run: no boot module named {name:?}");
     };
     info!("run: {directory}/{file_name} ({} bytes)", data.len());
     let (free_before, _) = mm::frame_stats();
-    let space = match nt::process::spawn_from_pe(file_name, directory, data, args) {
+    let space = match nt::process::spawn_from_pe(file_name, directory, data, args, cwd) {
         Ok((process, main_thread)) => {
             drop(main_thread);
             // Wait for the whole process (all threads) to end.

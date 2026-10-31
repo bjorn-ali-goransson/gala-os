@@ -5,7 +5,7 @@
 use super::platform;
 use alloc::vec::Vec;
 
-use super::layout::params;
+use super::layout::{self, params};
 use crate::mm::heap::AllocError;
 
 /// What goes into a process's parameters block.
@@ -36,7 +36,7 @@ const CURRENT_DIRECTORY_CHARS: u64 = 260;
 /// buffer of at least `capacity` characters with the NUL) and stores its
 /// UNICODE_STRING at `field`.
 fn put_string(
-    b: &mut [u8],
+    b: &mut Vec<u8>,
     base: u64,
     field: u64,
     cursor: &mut u64,
@@ -46,9 +46,10 @@ fn put_string(
     let units = s.len() as u64;
     let room = (units + 1).max(capacity);
     let end = *cursor + 2 * room;
-    if end > params::ENVIRONMENT_OFFSET || room * 2 > u64::from(u16::MAX) {
+    if room * 2 > u64::from(u16::MAX) {
         return None;
     }
+    grow(b, end).ok()?;
     for (i, c) in s.bytes().enumerate() {
         put(b, *cursor + 2 * i as u64, &u16::from(c).to_le_bytes());
     }
@@ -71,13 +72,29 @@ impl From<AllocError> for ParamsError {
     }
 }
 
-/// Builds the block to be placed at user address `base` (`PAGES` pages:
-/// structure and strings, then the environment from `ENVIRONMENT_OFFSET`).
+/// The most the block may take (it must end below the first TEB).
+pub const MAX_SIZE: u64 = layout::FIRST_TEB_ADDRESS - layout::PARAMS_ADDRESS;
+
+/// Makes `b` at least `len` bytes long (zeroed), within MAX_SIZE.
+fn grow(b: &mut Vec<u8>, len: u64) -> Result<(), ParamsError> {
+    if len > MAX_SIZE {
+        return Err(ParamsError::TooLarge);
+    }
+    let len = len as usize;
+    if b.len() < len {
+        b.try_reserve(len - b.len()).map_err(|_| ParamsError::NoMemory)?;
+        b.resize(len, 0);
+    }
+    Ok(())
+}
+
+/// Builds the block to be placed at user address `base`: the structure,
+/// its strings, then the environment; a whole number of pages, as large
+/// as they need (each string within a UNICODE_STRING's 32767 characters,
+/// as on Windows, where a command line may be that long).
 pub fn build(p: &ProcessParameters<'_>, base: u64) -> Result<Vec<u8>, ParamsError> {
-    let total = (params::PAGES * platform::PAGE_SIZE) as usize;
     let mut b = Vec::new();
-    b.try_reserve_exact(total).map_err(|_| ParamsError::NoMemory)?;
-    b.resize(total, 0);
+    grow(&mut b, params::STRUCT_SIZE)?;
     let mut cursor = params::STRUCT_SIZE;
     let strings = [
         (params::CURRENT_DIRECTORY, p.current_directory, CURRENT_DIRECTORY_CHARS),
@@ -91,9 +108,10 @@ pub fn build(p: &ProcessParameters<'_>, base: u64) -> Result<Vec<u8>, ParamsErro
     }
     if !p.runtime_data.is_empty() {
         let n = p.runtime_data.len() as u64;
-        if cursor + n > params::ENVIRONMENT_OFFSET || n > u64::from(u16::MAX) {
+        if n > u64::from(u16::MAX) {
             return Err(ParamsError::TooLarge);
         }
+        grow(&mut b, cursor + n)?;
         put(&mut b, cursor, p.runtime_data);
         put(&mut b, params::RUNTIME_DATA, &(n as u16).to_le_bytes());
         put(&mut b, params::RUNTIME_DATA + 2, &(n as u16).to_le_bytes());
@@ -108,21 +126,25 @@ pub fn build(p: &ProcessParameters<'_>, base: u64) -> Result<Vec<u8>, ParamsErro
     }
     put(&mut b, params::CURRENT_DIRECTORY_HANDLE, &p.current_directory_handle.to_le_bytes());
 
-    // Environment: each string null-terminated, then an empty string.
-    let mut at = params::ENVIRONMENT_OFFSET;
+    // Environment, after the strings: each string null-terminated, then
+    // an empty string.
+    let start = cursor.next_multiple_of(16);
+    let mut at = start;
     for var in p.environment {
         let end = at + 2 * (var.len() as u64 + 1);
-        if end + 2 > total as u64 {
-            return Err(ParamsError::TooLarge);
-        }
+        grow(&mut b, end + 2)?;
         for (i, c) in var.bytes().enumerate() {
             put(&mut b, at + 2 * i as u64, &u16::from(c).to_le_bytes());
         }
         at = end;
     }
-    let env_size = at + 2 - params::ENVIRONMENT_OFFSET;
-    put(&mut b, params::ENVIRONMENT, &(base + params::ENVIRONMENT_OFFSET).to_le_bytes());
+    grow(&mut b, at + 2)?;
+    let env_size = at + 2 - start;
+    put(&mut b, params::ENVIRONMENT, &(base + start).to_le_bytes());
     put(&mut b, params::ENVIRONMENT_SIZE, &env_size.to_le_bytes());
+    // Whole pages: the block is mapped as it is.
+    let whole = (b.len() as u64).next_multiple_of(platform::PAGE_SIZE);
+    grow(&mut b, whole)?;
     Ok(b)
 }
 
@@ -184,8 +206,32 @@ mod tests {
     }
 
     #[test]
+    fn long_command_lines_fit() {
+        // Elasticsearch starts its server with a ~5000-character command
+        // line; Windows allows 32767 characters.
+        let line = "y".repeat(32_000);
+        let p = ProcessParameters {
+            image_path: "C:\\a.exe",
+            command_line: &line,
+            current_directory: "C:\\",
+            current_directory_handle: 0,
+            dll_path: "",
+            std_handles: [0; 3],
+            environment: &["A=1"],
+            runtime_data: &[],
+        };
+        let base = 0x7ff0_0001_0000;
+        let b = build(&p, base).unwrap();
+        assert_eq!(b.len() as u64 % platform::PAGE_SIZE, 0);
+        assert_eq!(string(&b, base, params::COMMAND_LINE).len(), 32_000);
+        let env = u64_at(&b, params::ENVIRONMENT) - base;
+        assert!(env >= 2 * 32_000);
+        assert_eq!(u16_at(&b, env), u16::from(b'A'));
+    }
+
+    #[test]
     fn oversized_strings_are_rejected() {
-        let long = "x".repeat(4000);
+        let long = "x".repeat(40_000);
         let p = ProcessParameters {
             image_path: &long,
             command_line: "",

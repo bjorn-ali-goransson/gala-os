@@ -55,11 +55,8 @@ pub mod params {
     pub const ENVIRONMENT_SIZE: u64 = 0x3f0;
     /// Size of the structure itself (strings follow it).
     pub const STRUCT_SIZE: u64 = 0x440;
-    /// Where the environment block starts in our allocation.
-    pub const ENVIRONMENT_OFFSET: u64 = 0x1000;
     /// RTL_USER_PROCESS_PARAMETERS_NORMALIZED: pointers are absolute.
     pub const FLAG_NORMALIZED: u32 = 1;
-    pub const PAGES: u64 = 2;
 }
 
 // Our placement of per-process structures (Windows randomizes these; apps

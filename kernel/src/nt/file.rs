@@ -129,6 +129,20 @@ pub fn add_boot_file(directory: &str, name: &str, data: &'static [u8]) -> Result
     })
 }
 
+/// Makes the directory `directory` (`a/b`, on C:) and its parents, for a
+/// boot archive's (possibly empty) directories.
+pub fn add_boot_directory(directory: &str) -> Result<(), NtStatus> {
+    let mut parts: Vec<Vec<u16>> = Vec::new();
+    for p in directory.split(['/', '\\']).filter(|p| !p.is_empty()) {
+        parts.try_push(wide(p)?).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    let mut refs: Vec<&[u16]> = Vec::new();
+    for p in &parts {
+        refs.try_push(p).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    with_fs(|fs| fs.mkdir_all(&refs, platform::system_time()).map(|_| ()).map_err(fs_status))
+}
+
 /// The NT path (`\\Device\\HarddiskVolume1\\...`) of `node`.
 pub fn nt_path(node: NodeId) -> Result<Vec<u16>, NtStatus> {
     let path = with_fs(|fs| fs.path_of(node)).map_err(fs_status)?;

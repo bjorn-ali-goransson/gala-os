@@ -96,6 +96,16 @@ syscall_stubs! {
     NtDeleteKey = 0x7f07, fn(h: usize);
     NtDeleteValueKey = 0x7f08, fn(h: usize, name: *const UnicodeString);
     NtFlushKey = 0x7f09, fn(h: usize);
+    // Job objects (gala's numbers, unverified).
+    NtCreateJobObject = 0x7f0a, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes
+    );
+    NtAssignProcessToJobObject = 0x7f0b, fn(job: usize, process: isize);
+    NtSetInformationJobObject = 0x7f0c, fn(job: usize, class: u32, buf: *const u8, len: u32);
+    NtQueryInformationJobObject = 0x7f0d, fn(
+        job: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32
+    );
+    NtIsProcessInJob = 0x7f0e, fn(process: isize, job: usize);
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,
@@ -1184,6 +1194,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0121, 5),    // CANNOT_DELETE -> ERROR_ACCESS_DENIED
     (0x8000_001a, 259),  // NO_MORE_ENTRIES -> ERROR_NO_MORE_ITEMS
     (0xc000_017c, 1018), // KEY_DELETED -> ERROR_KEY_DELETED
+    (0xc000_0044, 1816), // QUOTA_EXCEEDED -> ERROR_NOT_ENOUGH_QUOTA
     (0xc000_0181, 1021), // CHILD_MUST_BE_VOLATILE -> ERROR_CHILD_MUST_BE_VOLATILE
     (0xc000_0120, 995),  // CANCELLED -> ERROR_OPERATION_ABORTED
     (0xc000_0135, 126),  // DLL_NOT_FOUND -> ERROR_MOD_NOT_FOUND

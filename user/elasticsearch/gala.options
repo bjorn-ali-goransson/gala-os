@@ -1,0 +1,5 @@
+# JVM options for Elasticsearch on gala (config/jvm.options.d): a fixed,
+# small heap (Elasticsearch would otherwise size it from the machine's
+# memory).
+-Xms256m
+-Xmx256m
