@@ -110,6 +110,14 @@ and read the `ledger:` lines: every missing import is listed by name.
   it listens; the client's verdict is appended to the serial log as an
   `xtask: net client: ...` line for `expect` to check. QEMU's user network
   needs no privileges, so this works in containers and CI.
+- **32-bit system call arguments**: a ULONG (lengths, classes, codes,
+  flags) passed on the stack, and sometimes in a register, has garbage in
+  its upper half. Read it with `arg!(call, n) as u32`. go_http failed
+  6 times out of 10 because NtCreateFile read EaLength as 64 bits
+  (`0xc0_0000_003a`); the event stream (`XTASK_EVENTS=syscall`) showed it.
+- **Handle reuse**: a handle value freed by NtClose is handed out again
+  at once, so "use after close" tests may hit a new object of another
+  type (ws2_32 maps "not a socket" device requests to WSAENOTSOCK).
 - **Asynchronous Windows APIs in tests**: SuspendThread returns before a
   thread running on another CPU has stopped, on Windows as on gala. A test
   that needs it stopped calls GetThreadContext first (kernel32_thread_test

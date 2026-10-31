@@ -48,6 +48,8 @@ macro_rules! syscall_stubs {
 // Numbers of the pinned build (to be verified), as in ntrt.
 syscall_stubs! {
     NtClose = 0x0f, fn(h: usize);
+    // gala's number until verified on the pinned build (see the kernel).
+    NtCancelIoFileEx = 0x7f01, fn(h: usize, request: *mut [usize; 2], iosb: *mut [usize; 2]);
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,
@@ -871,6 +873,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0135, 126),  // DLL_NOT_FOUND -> ERROR_MOD_NOT_FOUND
     (0xc000_0138, 182),  // ORDINAL_NOT_FOUND -> ERROR_INVALID_ORDINAL
     (0xc000_0139, 127),  // ENTRYPOINT_NOT_FOUND -> ERROR_PROC_NOT_FOUND
+    (0xc000_0225, 1168), // NOT_FOUND -> ERROR_NOT_FOUND
 ];
 
 /// RtlNtStatusToDosError(Status): the Win32 error for an NTSTATUS

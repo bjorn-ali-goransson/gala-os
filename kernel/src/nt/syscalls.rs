@@ -33,6 +33,8 @@ use crate::sync::IrqMutex;
 pub const NT_WAIT_FOR_SINGLE_OBJECT: u32 = 0x0004;
 pub const NT_READ_FILE: u32 = 0x0006;
 pub const NT_DEVICE_IO_CONTROL_FILE: u32 = 0x0007;
+/// gala's number for NtCancelIoFileEx until verified (not Windows').
+pub const NT_CANCEL_IO_FILE_EX: u32 = 0x7f01;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -192,6 +194,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_WAIT_FOR_MULTIPLE_OBJECTS, "NtWaitForMultipleObjects", 5, nt_wait_for_multiple_objects),
     (NT_CLOSE, "NtClose", 1, nt_close),
     (NT_DEVICE_IO_CONTROL_FILE, "NtDeviceIoControlFile", 10, nt_device_io_control_file),
+    (NT_CANCEL_IO_FILE_EX, "NtCancelIoFileEx", 3, nt_cancel_io_file_ex),
     (NT_ALLOCATE_VIRTUAL_MEMORY, "NtAllocateVirtualMemory", 6, nt_allocate_virtual_memory),
     (NT_FREE_VIRTUAL_MEMORY, "NtFreeVirtualMemory", 4, nt_free_virtual_memory),
     (NT_QUERY_VIRTUAL_MEMORY, "NtQueryVirtualMemory", 6, nt_query_virtual_memory),
@@ -911,8 +914,9 @@ fn nt_clear_event(call: &mut Call<'_>) -> NtStatus {
 /// NtQueryEvent(EventHandle, EventInformationClass, Buffer, Length, *ReturnLength)
 fn nt_query_event(call: &mut Call<'_>) -> NtStatus {
     let event = tri!(event_object(call, Handle(arg!(call, 0)), EVENT_QUERY_STATE));
+    // Length is a ULONG: only the low 32 bits are defined.
     let (class, buffer, length, ret_ptr) =
-        (arg!(call, 1), arg!(call, 2), arg!(call, 3), arg!(call, 4));
+        (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as u64, arg!(call, 4));
     // The class is a ULONG: only the low 32 bits are defined.
     let class = class as u32 as u64;
     if class != 0 {
@@ -2261,7 +2265,8 @@ fn nt_create_file(call: &mut Call<'_>) -> NtStatus {
         (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));
     let (share, disposition, options) =
         (arg!(call, 6) as u32, arg!(call, 7) as u32, arg!(call, 8) as u32);
-    let ea = (arg!(call, 9), arg!(call, 10));
+    // EaLength is a ULONG: on the stack its upper half is garbage.
+    let ea = (arg!(call, 9), arg!(call, 10) as u32 as u64);
     call.open_or_create(OpenRequest {
         out,
         access,
@@ -2309,12 +2314,13 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::INVALID_DEVICE_REQUEST;
     }
     if apc != 0 {
-        // Completion APCs come with overlapped socket I/O (N1c).
+        // Completion routines (WSARecv's lpCompletionRoutine): not yet.
         super::ledger::record("NtDeviceIoControlFile", "apc", u64::from(code));
+        return NtStatus::NOT_SUPPORTED;
     }
     let event = match event {
         0 => None,
-        h => Some(tri!(call.handle(Handle(h))).object),
+        h => Some(tri!(event_object(call, Handle(h), EVENT_MODIFY_STATE))),
     };
     if let Some(e) = &event {
         super::wait::set_signal(e, 0);
@@ -2328,10 +2334,27 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         output,
         output_len,
     };
-    let information = tri!(super::afd::ioctl(&request));
-    tri!(call.write_iosb(iosb, NtStatus::SUCCESS, information));
-    if let Some(e) = &event {
-        super::wait::set_signal(e, 1);
+    let io = super::afd::Io { process: call.process.clone(), iosb, event, context: arg!(call, 3) };
+    super::afd::ioctl(&request, io)
+}
+
+/// NtCancelIoFileEx(FileHandle, *IoRequestToCancel, *IoStatusBlock): cancels
+/// the caller's pending I/O on a socket (the one whose IO_STATUS_BLOCK is
+/// given, or all). gala's service number until verified on the pinned
+/// build (docs/ARCHITECTURE.md, "AFD").
+fn nt_cancel_io_file_ex(call: &mut Call<'_>) -> NtStatus {
+    let (handle, request, iosb) = (arg!(call, 0), arg!(call, 1), arg!(call, 2));
+    let entry = tri!(call.handle(Handle(handle)));
+    let ObjectBody::Socket(endpoint) = &entry.object.body else {
+        // Other files complete their I/O inside the call: nothing pending.
+        return NtStatus::NOT_FOUND;
+    };
+    let target = (request != 0).then_some(request);
+    if super::afd::cancel(&endpoint.state, Some(&call.process), target) == 0 {
+        return NtStatus::NOT_FOUND;
+    }
+    if iosb != 0 {
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
     }
     NtStatus::SUCCESS
 }
@@ -2627,6 +2650,8 @@ const FILE_DISPOSITION_INFORMATION: u64 = 13;
 const FILE_POSITION_INFORMATION: u64 = 14;
 const FILE_MODE_INFORMATION: u64 = 16;
 const FILE_COMPLETION_INFORMATION: u64 = 30;
+/// FileIoCompletionNotificationInformation (SetFileCompletionNotificationModes).
+const FILE_IO_COMPLETION_NOTIFICATION_INFORMATION: u64 = 41;
 const FILE_END_OF_FILE_INFORMATION: u64 = 20;
 
 /// NtQueryInformationFile(FileHandle, *IoStatusBlock, Buffer, Length, Class)
@@ -2682,12 +2707,60 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
 }
 
 /// NtSetInformationFile(FileHandle, *IoStatusBlock, Buffer, Length, Class)
+/// NtSetInformationFile on a socket: the completion port
+/// (CreateIoCompletionPort) and the notification modes
+/// (SetFileCompletionNotificationModes).
+fn set_socket_information(
+    call: &Call<'_>,
+    state: &super::afd::EndpointState,
+    iosb: u64,
+    buffer: u64,
+    length: usize,
+    class: u64,
+) -> NtStatus {
+    match class {
+        FILE_COMPLETION_INFORMATION => {
+            // FILE_COMPLETION_INFORMATION { HANDLE Port; PVOID Key; }
+            if length < 16 {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            let (port, key) = (tri!(call.read_u64(buffer)), tri!(call.read_u64(buffer + 8)));
+            let port =
+                tri!(io_completion_object(call, port, super::object::IO_COMPLETION_MODIFY_STATE));
+            *state.completion.lock() = Some((port, key));
+        }
+        FILE_IO_COMPLETION_NOTIFICATION_INFORMATION => {
+            // FILE_IO_COMPLETION_NOTIFICATION_INFORMATION { ULONG Flags; }:
+            // modes can be added, not removed.
+            if length < 4 {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            let mut b = [0u8; 4];
+            if call.process.read(buffer, &mut b).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let flags = u32::from_le_bytes(b);
+            if flags & !3 != 0 {
+                super::ledger::record("NtSetInformationFile", "completion mode", u64::from(flags));
+                return NtStatus::INVALID_PARAMETER;
+            }
+            state.modes.fetch_or(flags, core::sync::atomic::Ordering::AcqRel);
+        }
+        _ => return NtStatus::INVALID_INFO_CLASS,
+    }
+    tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+    NtStatus::SUCCESS
+}
+
 fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (iosb, buffer, length, class) =
         (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4));
     // The class is a ULONG: only the low 32 bits are defined.
     let class = class as u32 as u64;
+    if let ObjectBody::Socket(endpoint) = &entry.object.body {
+        return set_socket_information(call, &endpoint.state, iosb, buffer, length, class);
+    }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     if class == FILE_COMPLETION_INFORMATION {
         // FILE_COMPLETION_INFORMATION { HANDLE Port; PVOID Key; }

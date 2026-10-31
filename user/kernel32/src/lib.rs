@@ -237,6 +237,7 @@ unsafe extern "system" {
         len: u32,
         class: u32,
     ) -> u32;
+    fn NtCancelIoFileEx(h: Handle, request: *mut c_void, iosb: *mut [usize; 2]) -> u32;
     fn NtCreateIoCompletion(
         handle: *mut Handle,
         access: u32,
@@ -2181,6 +2182,41 @@ pub extern "system" fn CreateIoCompletionPort(
         return fail(status, core::ptr::null_mut());
     }
     port
+}
+
+/// SetFileCompletionNotificationModes(FileHandle, Flags): FILE_SKIP_*
+/// modes (FileIoCompletionNotificationInformation).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetFileCompletionNotificationModes(file: Handle, flags: u8) -> Bool {
+    let info = u32::from(flags);
+    let mut iosb = [0usize; 2];
+    // SAFETY: a 4-byte information buffer.
+    let status = unsafe { NtSetInformationFile(file, &mut iosb, (&raw const info).cast(), 4, 41) };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    TRUE
+}
+
+/// CancelIoEx(hFile, lpOverlapped): cancels the process's pending I/O on
+/// the handle (the one using `overlapped`, or all); ERROR_NOT_FOUND if
+/// there is none.
+#[unsafe(no_mangle)]
+pub extern "system" fn CancelIoEx(file: Handle, overlapped: *mut c_void) -> Bool {
+    let mut iosb = [0usize; 2];
+    // SAFETY: the OVERLAPPED starts with the request's IO_STATUS_BLOCK.
+    let status = unsafe { NtCancelIoFileEx(file, overlapped, &mut iosb) };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    TRUE
+}
+
+/// CancelIo(hFile): all of the handle's pending I/O.
+// TODO: Windows cancels only the I/O the calling thread issued.
+#[unsafe(no_mangle)]
+pub extern "system" fn CancelIo(file: Handle) -> Bool {
+    CancelIoEx(file, core::ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]

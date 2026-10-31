@@ -48,6 +48,14 @@ unsafe extern "system" {
         output_length: u32,
     ) -> u32;
     fn NtClose(h: usize) -> u32;
+    fn NtCreateEvent(
+        handle: *mut usize,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        kind: u32,
+        initial: u8,
+    ) -> u32;
+    fn NtWaitForSingleObject(h: usize, alertable: u8, timeout: *const i64) -> u32;
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
@@ -99,6 +107,11 @@ const WSAENOBUFS: u32 = 10055;
 const WSAENOTCONN: u32 = 10057;
 const WSAECONNREFUSED: u32 = 10061;
 const WSAVERNOTSUPPORTED: u32 = 10092;
+const WSAENOPROTOOPT: u32 = 10042;
+const WSA_IO_PENDING: u32 = 997;
+const WSA_IO_INCOMPLETE: u32 = 996;
+const WSA_OPERATION_ABORTED: u32 = 995;
+const STATUS_PENDING: u32 = 0x103;
 const WSANOTINITIALISED: u32 = 10093;
 
 // AFD device controls (docs/ARCHITECTURE.md, "AFD").
@@ -112,6 +125,8 @@ const IOCTL_AFD_SEND: u32 = 0x1201f;
 const IOCTL_AFD_DISCONNECT: u32 = 0x1202b;
 const IOCTL_AFD_GETSOCKNAME: u32 = 0x1202f;
 const IOCTL_AFD_GET_PEER_NAME: u32 = 0x12033;
+const IOCTL_AFD_SUPER_ACCEPT: u32 = 0x12083;
+const IOCTL_AFD_SUPER_CONNECT: u32 = 0x120c7;
 
 /// WSAStartup calls not yet matched by WSACleanup.
 static STARTED: AtomicU32 = AtomicU32::new(0);
@@ -131,16 +146,18 @@ fn last_error() -> u32 {
 /// The WSA error for an NTSTATUS from AFD.
 fn wsa_error(status: u32) -> u32 {
     match status {
+        0xc000_0120 => WSA_OPERATION_ABORTED,
         0xc000_0236 => WSAECONNREFUSED,
         0xc000_020d => WSAECONNRESET,
         0xc000_020a => WSAEADDRINUSE,
         0xc000_0207 => WSAEADDRNOTAVAIL,
         0xc000_0140 => WSAENOTCONN,
         0xc000_023c => WSAENETUNREACH,
-        0xc000_0008 | 0xc000_0024 => WSAENOTSOCK,
+        // Not a handle, or a handle to something that is not a socket.
+        0xc000_0008 | 0xc000_0024 | 0xc000_0010 => WSAENOTSOCK,
         0xc000_009a | 0xc000_0017 => WSAENOBUFS,
         0xc000_0005 => WSAEFAULT,
-        0xc000_00bb | 0xc000_0010 => WSAEOPNOTSUPP,
+        0xc000_00bb => WSAEOPNOTSUPP,
         _ => WSAEINVAL,
     }
 }
@@ -161,14 +178,23 @@ fn started() -> bool {
     STARTED.load(Ordering::Acquire) > 0
 }
 
-/// NtDeviceIoControlFile on a socket; IoStatus.Information or the status.
+/// A blocking NtDeviceIoControlFile on a socket: AFD answers
+/// STATUS_PENDING when it has to wait, so wait for the request's event.
+/// Returns IoStatus.Information or the status.
 fn afd(s: Socket, code: u32, input: &[u8], output: &mut [u8]) -> Result<usize, u32> {
+    let mut event = 0usize;
+    // SAFETY: valid output pointer; EVENT_ALL_ACCESS, notification event.
+    let status = unsafe { NtCreateEvent(&mut event, 0x1f_0003, core::ptr::null(), 0, 0) };
+    if status != 0 {
+        return Err(status);
+    }
     let mut iosb = [0usize; 2];
-    // SAFETY: valid buffers of the lengths given.
-    let status = unsafe {
+    // SAFETY: valid buffers of the lengths given; they live until the
+    // request completes (we wait for it below).
+    let mut status = unsafe {
         NtDeviceIoControlFile(
             s,
-            0,
+            event,
             0,
             0,
             &mut iosb,
@@ -179,7 +205,72 @@ fn afd(s: Socket, code: u32, input: &[u8], output: &mut [u8]) -> Result<usize, u
             output.len() as u32,
         )
     };
+    if status == STATUS_PENDING {
+        // SAFETY: waits on our event; the kernel has written the status
+        // block when it is set.
+        unsafe {
+            NtWaitForSingleObject(event, 0, core::ptr::null());
+            status = core::ptr::read_volatile(&raw const iosb[0]) as u32;
+        }
+    }
+    // SAFETY: our event.
+    unsafe { NtClose(event) };
     if status == 0 { Ok(iosb[1]) } else { Err(status) }
+}
+
+/// OVERLAPPED (x64): the IO_STATUS_BLOCK (Internal, InternalHigh), the
+/// offset, hEvent.
+#[repr(C)]
+pub struct Overlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u64,
+    event: usize,
+}
+
+/// An overlapped NtDeviceIoControlFile: the OVERLAPPED is the status
+/// block, its event is set and (unless the event's low bit is set, as
+/// documented) a completion packet carries it. Returns the NTSTATUS.
+fn afd_overlapped(
+    s: Socket,
+    code: u32,
+    input: &[u8],
+    output: *mut u8,
+    output_len: u32,
+    ov: *mut Overlapped,
+) -> u32 {
+    // SAFETY: the caller's OVERLAPPED, valid until the I/O completes.
+    let event = unsafe {
+        (*ov).internal = STATUS_PENDING as usize;
+        (*ov).internal_high = 0;
+        (*ov).event
+    };
+    let context = if event & 1 != 0 { 0 } else { ov as usize };
+    // SAFETY: as above; the input is copied by the kernel during the call.
+    unsafe {
+        NtDeviceIoControlFile(
+            s,
+            event & !1,
+            0,
+            context,
+            ov.cast(),
+            code,
+            input.as_ptr(),
+            input.len() as u32,
+            output,
+            output_len,
+        )
+    }
+}
+
+/// The result of an overlapped call as Winsock reports it: 0 (done),
+/// or SOCKET_ERROR with WSA_IO_PENDING or the mapped error.
+fn overlapped_result(status: u32) -> i32 {
+    match status {
+        0 => 0,
+        STATUS_PENDING => fail(WSA_IO_PENDING),
+        s => fail(wsa_error(s)),
+    }
 }
 
 /// Runs an AFD request, mapping a failure to the last error.
@@ -524,6 +615,433 @@ pub extern "system" fn closesocket(s: Socket) -> i32 {
         0 => 0,
         _ => fail(WSAENOTSOCK),
     }
+}
+
+/// WSASocketW(af, type, protocol, lpProtocolInfo, g, dwFlags): AFD
+/// endpoints always allow overlapped I/O, so the flags change nothing.
+#[unsafe(no_mangle)]
+pub extern "system" fn WSASocketW(
+    af: i32,
+    kind: i32,
+    protocol: i32,
+    info: *const u8,
+    group: u32,
+    _flags: u32,
+) -> Socket {
+    if !info.is_null() || group != 0 {
+        missing(b"ws2_32.dll!WSASocketW(protocol info or group)", group.into());
+    }
+    socket(af, kind, protocol)
+}
+
+/// WSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags,
+/// lpOverlapped, lpCompletionRoutine).
+#[unsafe(no_mangle)]
+pub extern "system" fn WSARecv(
+    s: Socket,
+    buffers: *const u8,
+    count: u32,
+    received: *mut u32,
+    flags: *mut u32,
+    ov: *mut Overlapped,
+    routine: usize,
+) -> i32 {
+    // SAFETY: the caller passes valid flags (in/out).
+    if !flags.is_null() && unsafe { *flags } != 0 {
+        missing(b"ws2_32.dll!WSARecv(flags)", unsafe { *flags }.into());
+        return fail(WSAEOPNOTSUPP);
+    }
+    let result = transfer_buffers(s, IOCTL_AFD_RECV, buffers, count, received, ov, routine);
+    if result == 0 && !flags.is_null() {
+        // SAFETY: as above.
+        unsafe { *flags = 0 };
+    }
+    result
+}
+
+/// WSASend(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags,
+/// lpOverlapped, lpCompletionRoutine).
+#[unsafe(no_mangle)]
+pub extern "system" fn WSASend(
+    s: Socket,
+    buffers: *const u8,
+    count: u32,
+    sent: *mut u32,
+    flags: u32,
+    ov: *mut Overlapped,
+    routine: usize,
+) -> i32 {
+    if flags != 0 {
+        missing(b"ws2_32.dll!WSASend(flags)", flags.into());
+        return fail(WSAEOPNOTSUPP);
+    }
+    transfer_buffers(s, IOCTL_AFD_SEND, buffers, count, sent, ov, routine)
+}
+
+/// A RECV/SEND with the caller's WSABUF array (its layout is AFD's).
+fn transfer_buffers(
+    s: Socket,
+    code: u32,
+    buffers: *const u8,
+    count: u32,
+    bytes: *mut u32,
+    ov: *mut Overlapped,
+    routine: usize,
+) -> i32 {
+    if !started() {
+        return fail(WSANOTINITIALISED);
+    }
+    if routine != 0 {
+        missing(b"ws2_32.dll!WSARecv/WSASend(completion routine)", 0);
+        return fail(WSAEOPNOTSUPP);
+    }
+    let mut info = [0u8; 24];
+    info[..8].copy_from_slice(&(buffers as u64).to_le_bytes());
+    info[8..12].copy_from_slice(&count.to_le_bytes());
+    if ov.is_null() {
+        return match afd(s, code, &info, &mut []) {
+            Ok(n) => {
+                if !bytes.is_null() {
+                    // SAFETY: the caller's count pointer.
+                    unsafe { *bytes = n as u32 };
+                }
+                0
+            }
+            Err(status) => fail(wsa_error(status)),
+        };
+    }
+    let status = afd_overlapped(s, code, &info, core::ptr::null_mut(), 0, ov);
+    if status == 0 && !bytes.is_null() {
+        // SAFETY: done: the kernel wrote InternalHigh; the caller's count.
+        unsafe { *bytes = (*ov).internal_high as u32 };
+    }
+    overlapped_result(status)
+}
+
+/// WSAGetOverlappedResult(s, lpOverlapped, lpcbTransfer, fWait, lpdwFlags).
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAGetOverlappedResult(
+    s: Socket,
+    ov: *mut Overlapped,
+    bytes: *mut u32,
+    wait: i32,
+    flags: *mut u32,
+) -> i32 {
+    if ov.is_null() || bytes.is_null() {
+        set_last_error(WSAEFAULT);
+        return 0;
+    }
+    // SAFETY: the caller's OVERLAPPED; the kernel writes it on completion.
+    let status = || unsafe { core::ptr::read_volatile(&raw const (*ov).internal) } as u32;
+    if status() == STATUS_PENDING {
+        if wait == 0 {
+            set_last_error(WSA_IO_INCOMPLETE);
+            return 0;
+        }
+        // SAFETY: the OVERLAPPED's event, else the socket (signaled when
+        // its I/O completes).
+        let event = unsafe { (*ov).event } & !1;
+        unsafe { NtWaitForSingleObject(if event != 0 { event } else { s }, 0, core::ptr::null()) };
+    }
+    // SAFETY: as above.
+    unsafe {
+        *bytes = core::ptr::read_volatile(&raw const (*ov).internal_high) as u32;
+        if !flags.is_null() {
+            *flags = 0;
+        }
+    }
+    match status() {
+        0 => 1,
+        s => {
+            set_last_error(wsa_error(s));
+            0
+        }
+    }
+}
+
+/// AcceptEx(sListenSocket, sAcceptSocket, lpOutputBuffer,
+/// dwReceiveDataLength, dwLocalAddressLength, dwRemoteAddressLength,
+/// lpdwBytesReceived, lpOverlapped): IOCTL_AFD_SUPER_ACCEPT on the
+/// listener. Also mswsock.dll's export (forwarded here).
+#[unsafe(no_mangle)]
+pub extern "system" fn AcceptEx(
+    listener: Socket,
+    accept: Socket,
+    output: *mut u8,
+    receive: u32,
+    local: u32,
+    remote: u32,
+    bytes: *mut u32,
+    ov: *mut Overlapped,
+) -> i32 {
+    if !started() {
+        fail(WSANOTINITIALISED);
+        return 0;
+    }
+    if ov.is_null() {
+        fail(WSAEINVAL);
+        return 0;
+    }
+    let mut info = [0u8; 28];
+    info[8..16].copy_from_slice(&(accept as u64).to_le_bytes());
+    info[16..20].copy_from_slice(&receive.to_le_bytes());
+    info[20..24].copy_from_slice(&local.to_le_bytes());
+    info[24..28].copy_from_slice(&remote.to_le_bytes());
+    let total = receive.saturating_add(local).saturating_add(remote);
+    let status = afd_overlapped(listener, IOCTL_AFD_SUPER_ACCEPT, &info, output, total, ov);
+    if status == 0 && !bytes.is_null() {
+        // SAFETY: the caller's count.
+        unsafe { *bytes = 0 };
+    }
+    i32::from(overlapped_result(status) == 0)
+}
+
+/// GetAcceptExSockaddrs: the local and remote SOCKADDR_INs AcceptEx stored
+/// at the start of its two address blocks.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetAcceptExSockaddrs(
+    output: *mut u8,
+    receive: u32,
+    local: u32,
+    _remote: u32,
+    local_addr: *mut *mut u8,
+    local_len: *mut i32,
+    remote_addr: *mut *mut u8,
+    remote_len: *mut i32,
+) {
+    // SAFETY: the caller's AcceptEx buffer and output pointers.
+    unsafe {
+        let at = output.add(receive as usize);
+        *local_addr = at;
+        *local_len = SOCKADDR_LEN;
+        *remote_addr = at.add(local as usize);
+        *remote_len = SOCKADDR_LEN;
+    }
+}
+
+/// ConnectEx (handed out by WSAIoctl): IOCTL_AFD_SUPER_CONNECT on a bound
+/// socket.
+extern "system" fn connect_ex(
+    s: Socket,
+    name: *const u8,
+    len: i32,
+    send: *const u8,
+    send_len: u32,
+    sent: *mut u32,
+    ov: *mut Overlapped,
+) -> i32 {
+    if ov.is_null() {
+        fail(WSAEINVAL);
+        return 0;
+    }
+    if !send.is_null() && send_len > 0 {
+        missing(b"ws2_32.dll!ConnectEx(send data)", send_len.into());
+        fail(WSAEOPNOTSUPP);
+        return 0;
+    }
+    let sa = match read_sockaddr(name, len) {
+        Ok(sa) => sa,
+        Err(_) => return 0,
+    };
+    // {u8 use_san; TRANSPORT_ADDRESS at 4}.
+    let mut info = [0u8; 4 + 22];
+    info[4..].copy_from_slice(&transport_address(&sa));
+    let status = afd_overlapped(s, IOCTL_AFD_SUPER_CONNECT, &info, core::ptr::null_mut(), 0, ov);
+    if status == 0 && !sent.is_null() {
+        // SAFETY: the caller's count.
+        unsafe { *sent = 0 };
+    }
+    i32::from(overlapped_result(status) == 0)
+}
+
+const SIO_GET_EXTENSION_FUNCTION_POINTER: u32 = 0xc800_0006;
+const SIO_KEEPALIVE_VALS: u32 = 0x9800_0004;
+const SIO_TCP_INITIAL_RTO: u32 = 0x9800_0011;
+/// WSAID_ACCEPTEX, WSAID_CONNECTEX, WSAID_GETACCEPTEXSOCKADDRS (mswsock.h)
+/// as GUID bytes.
+const WSAID_ACCEPTEX: [u8; 16] =
+    guid(0xb536_7df1, 0xcbac, 0x11cf, [0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92]);
+const WSAID_CONNECTEX: [u8; 16] =
+    guid(0x25a2_07b9, 0xddf3, 0x4660, [0x8e, 0xe9, 0x76, 0xe5, 0x8c, 0x74, 0x06, 0x3e]);
+const WSAID_GETACCEPTEXSOCKADDRS: [u8; 16] =
+    guid(0xb536_7df2, 0xcbac, 0x11cf, [0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92]);
+
+const fn guid(a: u32, b: u16, c: u16, d: [u8; 8]) -> [u8; 16] {
+    let (a, b, c) = (a.to_le_bytes(), b.to_le_bytes(), c.to_le_bytes());
+    [a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]
+}
+
+/// WSAIoctl(s, dwIoControlCode, lpvInBuffer, cbInBuffer, lpvOutBuffer,
+/// cbOutBuffer, lpcbBytesReturned, lpOverlapped, lpCompletionRoutine):
+/// the extension function pointers; keepalive and initial-RTO tuning are
+/// accepted without effect.
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAIoctl(
+    _s: Socket,
+    code: u32,
+    input: *const u8,
+    input_len: u32,
+    output: *mut u8,
+    output_len: u32,
+    returned: *mut u32,
+    _ov: *mut Overlapped,
+    _routine: usize,
+) -> i32 {
+    match code {
+        SIO_GET_EXTENSION_FUNCTION_POINTER => {
+            if input.is_null() || input_len < 16 || output.is_null() || output_len < 8 {
+                return fail(WSAEFAULT);
+            }
+            let mut id = [0u8; 16];
+            // SAFETY: the caller's 16-byte GUID.
+            unsafe { core::ptr::copy_nonoverlapping(input, id.as_mut_ptr(), 16) };
+            let function = match id {
+                WSAID_ACCEPTEX => AcceptEx as *const () as usize,
+                WSAID_CONNECTEX => connect_ex as *const () as usize,
+                WSAID_GETACCEPTEXSOCKADDRS => GetAcceptExSockaddrs as *const () as usize,
+                _ => {
+                    missing(
+                        b"ws2_32.dll!WSAIoctl(extension function)",
+                        u64::from(u32::from_le_bytes([id[0], id[1], id[2], id[3]])),
+                    );
+                    return fail(WSAEINVAL);
+                }
+            };
+            // SAFETY: the caller's 8-byte output buffer and count.
+            unsafe {
+                core::ptr::write_unaligned(output.cast::<usize>(), function);
+                if !returned.is_null() {
+                    *returned = 8;
+                }
+            }
+            0
+        }
+        SIO_KEEPALIVE_VALS | SIO_TCP_INITIAL_RTO => {
+            if !returned.is_null() {
+                // SAFETY: the caller's count.
+                unsafe { *returned = 0 };
+            }
+            0
+        }
+        _ => {
+            missing(b"ws2_32.dll!WSAIoctl", code.into());
+            fail(WSAEOPNOTSUPP)
+        }
+    }
+}
+
+const SOL_SOCKET: i32 = 0xffff;
+
+/// setsockopt(s, level, optname, optval, optlen): options that only tune
+/// the stack are accepted without effect (docs/ARCHITECTURE.md).
+#[unsafe(no_mangle)]
+pub extern "system" fn setsockopt(
+    s: Socket,
+    level: i32,
+    name: i32,
+    value: *const u8,
+    len: i32,
+) -> i32 {
+    if !started() {
+        return fail(WSANOTINITIALISED);
+    }
+    let _ = s;
+    let accepted = match (level, name) {
+        // SO_REUSEADDR, SO_KEEPALIVE, SO_LINGER, SO_SNDBUF, SO_RCVBUF,
+        // SO_EXCLUSIVEADDRUSE, SO_UPDATE_ACCEPT_CONTEXT,
+        // SO_UPDATE_CONNECT_CONTEXT.
+        (SOL_SOCKET, 0x4 | 0x8 | 0x80 | 0x1001 | 0x1002 | -5 | 0x700b | 0x7010) => true,
+        // TCP_NODELAY (already the behaviour), TCP_KEEPIDLE, TCP_KEEPCNT,
+        // TCP_KEEPINTVL.
+        (IPPROTO_TCP, 1 | 3 | 16 | 17) => true,
+        _ => false,
+    };
+    if !accepted {
+        missing(b"ws2_32.dll!setsockopt", ((level as u64) << 32) | name as u32 as u64);
+        return fail(WSAENOPROTOOPT);
+    }
+    if len > 0 && value.is_null() {
+        return fail(WSAEFAULT);
+    }
+    0
+}
+
+/// getsockopt: SO_ERROR (0) and SO_TYPE (stream) so far.
+#[unsafe(no_mangle)]
+pub extern "system" fn getsockopt(
+    _s: Socket,
+    level: i32,
+    name: i32,
+    value: *mut u8,
+    len: *mut i32,
+) -> i32 {
+    let v: i32 = match (level, name) {
+        (SOL_SOCKET, 0x1007) => 0,           // SO_ERROR
+        (SOL_SOCKET, 0x1008) => SOCK_STREAM, // SO_TYPE
+        _ => {
+            missing(b"ws2_32.dll!getsockopt", ((level as u64) << 32) | name as u32 as u64);
+            return fail(WSAENOPROTOOPT);
+        }
+    };
+    // SAFETY: the caller's value buffer and length.
+    unsafe {
+        if value.is_null() || len.is_null() || *len < 4 {
+            return fail(WSAEFAULT);
+        }
+        core::ptr::write_unaligned(value.cast::<i32>(), v);
+        *len = 4;
+    }
+    0
+}
+
+/// WSAEnumProtocolsW(lpiProtocols, lpProtocolBuffer, lpdwBufferLength):
+/// one provider, TCP over IPv4, with IFS handles (sockets are file
+/// handles), which is what lets Go use FILE_SKIP_COMPLETION_PORT_ON_SUCCESS.
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAEnumProtocolsW(
+    protocols: *const i32,
+    buffer: *mut u8,
+    length: *mut u32,
+) -> i32 {
+    const SIZE: usize = 628; // WSAPROTOCOL_INFOW
+    if length.is_null() {
+        return fail(WSAEFAULT);
+    }
+    // TCP is listed unless the filter (zero-terminated) leaves it out.
+    let mut wanted = protocols.is_null();
+    let mut p = protocols;
+    // SAFETY: the caller's zero-terminated list.
+    while !p.is_null() && unsafe { *p } != 0 {
+        wanted |= unsafe { *p } == IPPROTO_TCP;
+        p = unsafe { p.add(1) };
+    }
+    if !wanted {
+        return 0;
+    }
+    // SAFETY: the caller's length and buffer of that length.
+    unsafe {
+        if (*length as usize) < SIZE || buffer.is_null() {
+            *length = SIZE as u32;
+            return fail(WSAENOBUFS);
+        }
+        memset(buffer, 0, SIZE);
+        // XP1_GUARANTEED_DELIVERY | XP1_GUARANTEED_ORDER |
+        // XP1_GRACEFUL_CLOSE | XP1_EXPEDITED_DATA | XP1_IFS_HANDLES.
+        core::ptr::write_unaligned(buffer.cast::<u32>(), 0x2_0066);
+        let int_at =
+            |off: usize, v: i32| core::ptr::write_unaligned(buffer.add(off).cast::<i32>(), v);
+        int_at(76, 2); // iVersion
+        int_at(80, AF_INET); // iAddressFamily
+        int_at(84, SOCKADDR_LEN); // iMaxSockAddr
+        int_at(88, SOCKADDR_LEN); // iMinSockAddr
+        int_at(92, SOCK_STREAM); // iSocketType
+        int_at(96, IPPROTO_TCP); // iProtocol
+        int_at(104, 0); // iNetworkByteOrder: BIGENDIAN
+        for (i, c) in "gala TCP/IP".encode_utf16().enumerate() {
+            core::ptr::write_unaligned(buffer.add(116 + 2 * i).cast::<u16>(), c);
+        }
+    }
+    1
 }
 
 #[unsafe(no_mangle)]

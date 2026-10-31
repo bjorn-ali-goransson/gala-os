@@ -42,6 +42,8 @@ const USER_DLLS: &[Dll] = &[
     },
     // gala's ws2_32.dll (Winsock on AFD).
     Dll { package: "ws2_32", file: "ws2_32.dll", exported_as: "testws2_32.dll" },
+    // gala's mswsock.dll (forwarders to ws2_32).
+    Dll { package: "mswsock", file: "mswsock.dll", exported_as: "testmswsock.dll" },
     // Built as ntdll.dll (its export directory says so); exported under
     // another name so user/bin never holds a file called ntdll.dll.
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
@@ -89,6 +91,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("prng_test", "ntdll.dll", "Windows/System32"),
     ("prng_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("winsock_async_test", "ntdll.dll", "Windows/System32"),
+    ("winsock_async_test", "kernel32.dll", "Windows/System32"),
+    ("winsock_async_test", "ws2_32.dll", "Windows/System32"),
+    ("winsock_async_test", "mswsock.dll", "Windows/System32"),
     ("winsock_test", "ntdll.dll", "Windows/System32"),
     ("winsock_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ws2_32.dll", "Windows/System32"),
@@ -107,6 +113,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("go_os", "ntdll.dll", "Windows/System32"),
     ("go_os", "kernel32.dll", "Windows/System32"),
     ("go_os", "bcryptprimitives.dll", "Windows/System32"),
+    ("go_http", "ntdll.dll", "Windows/System32"),
+    ("go_http", "kernel32.dll", "Windows/System32"),
+    ("go_http", "bcryptprimitives.dll", "Windows/System32"),
+    ("go_http", "ws2_32.dll", "Windows/System32"),
+    ("go_http", "mswsock.dll", "Windows/System32"),
     ("go_exit", "ntdll.dll", "Windows/System32"),
     ("go_exit", "kernel32.dll", "Windows/System32"),
     ("go_exit", "bcryptprimitives.dll", "Windows/System32"),
@@ -114,7 +125,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
 /// user/bin is used). Reproducible: -trimpath and an empty build id.
-const GO_PROGRAMS: &[&str] = &["go_hello", "go_goroutines", "go_time", "go_gc", "go_os", "go_exit"];
+const GO_PROGRAMS: &[&str] =
+    &["go_hello", "go_goroutines", "go_time", "go_gc", "go_os", "go_exit", "go_http"];
 const GO_TOOLCHAIN: &str = "go1.24.7";
 
 const USER_PROGRAMS: &[&str] = &[
@@ -163,6 +175,7 @@ const USER_PROGRAMS: &[&str] = &[
     "prng_test",
     "kernel32_env_test",
     "winsock_test",
+    "winsock_async_test",
     "kernel32_file_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
@@ -488,19 +501,32 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
 
+/// What xtask's host-side client does in a net scenario.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NetClient {
+    /// Sends NET_ECHO_BYTES and expects them back (`net_client`).
+    Echo,
+    /// GETs `/` and expects HTTP_PAGE (`http_client`).
+    Http,
+}
+
 /// Scenarios that get a virtio-net card on QEMU's user-mode network, with
-/// host port `<free port>` forwarded to the guest's TCP port 7, and the
-/// serial line after which the guest accepts connections there (xtask's
-/// `net_client` then connects).
-const NET_SCENARIOS: &[(&str, &str)] = &[
-    ("net_echo", "net: echo listening on port 7"),
-    ("winsock_test", "winsock_test: listening on port 7"),
+/// host port `<free port>` forwarded to the guest's TCP port 7, the serial
+/// line after which the guest accepts connections there, and the client
+/// xtask then runs.
+const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
+    ("net_echo", "net: echo listening on port 7", NetClient::Echo),
+    ("winsock_test", "winsock_test: listening on port 7", NetClient::Echo),
+    ("go_http", "go_http: listening on port 7", NetClient::Http),
 ];
 
-/// The "listening" marker of a NET_SCENARIOS entry.
-fn net_marker(name: &str) -> Option<&'static str> {
-    NET_SCENARIOS.iter().find(|(n, _)| *n == name).map(|(_, m)| *m)
+/// The listening marker and client of a NET_SCENARIOS entry.
+fn net_marker(name: &str) -> Option<(&'static str, NetClient)> {
+    NET_SCENARIOS.iter().find(|(n, ..)| *n == name).map(|&(_, m, c)| (m, c))
 }
+
+/// The page go_http serves (user/go_http/main.go).
+const HTTP_PAGE: &str = "hello from gala, a fortress for Windows programs\n";
 
 /// Bytes the client sends through the echo server.
 const NET_ECHO_BYTES: usize = 65536;
@@ -708,6 +734,26 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=go_os.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["go_os: ok", "go_os.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        // N1c: overlapped Winsock with a completion port (what Go uses).
+        name: "winsock_async_test",
+        cmdline: "qemu_exit run=winsock_async_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["winsock_async_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // N1c: net/http on gala: a loopback GET, then a page for the host.
+        name: "go_http",
+        cmdline: "qemu_exit run=go_http.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "go_http: loopback GET ok",
+            "go_http: served /",
+            "xtask: net client: http ok",
+            "go_http: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         name: "go_exit",
@@ -1279,7 +1325,7 @@ fn run_vm(
     iso: &Path,
     boot: Boot,
     timeout: Duration,
-    net: Option<&'static str>,
+    net: Option<(&'static str, NetClient)>,
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let log = iso.with_extension("serial.log");
     let _ = fs::remove_file(&log);
@@ -1297,7 +1343,7 @@ fn run_vm(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let port = if net.is_some() { Some(free_port()?) } else { None };
-    let marker = net.unwrap_or_default();
+    let (marker, kind) = net.unwrap_or(("", NetClient::Echo));
     if let Some(port) = port {
         add_net(&mut cmd, port);
     }
@@ -1312,7 +1358,10 @@ fn run_vm(
         if let Some(port) = port.filter(|_| client.is_none())
             && fs::read(&log).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker.as_bytes()))
         {
-            client = Some(thread::spawn(move || net_client(port)));
+            client = Some(thread::spawn(move || match kind {
+                NetClient::Echo => net_client(port),
+                NetClient::Http => http_client(port),
+            }));
         }
         if to_banner.is_none()
             && fs::read(&log).is_ok_and(|b| {
@@ -1336,7 +1385,10 @@ fn run_vm(
     if let Some(client) = client {
         let verdict = client.join().unwrap_or_else(|_| Err("client panicked".into()));
         serial += &match verdict {
-            Ok(()) => "xtask: net client: echo ok\n".to_string(),
+            Ok(()) => format!(
+                "xtask: net client: {} ok\n",
+                if kind == NetClient::Http { "http" } else { "echo" }
+            ),
             Err(e) => format!("xtask: net client: {e}\n"),
         };
     }
@@ -1386,6 +1438,28 @@ fn net_client(port: u16) -> Result {
         Some((i, b)) => Err(format!("byte {i} is {b:#x}, sent {:#x}", pattern(i))),
         None => Ok(()),
     }
+}
+
+/// The host side of an HTTP scenario: GET / with HTTP/1.1, expect 200 and
+/// HTTP_PAGE as the body.
+fn http_client(port: u16) -> Result {
+    use std::io::Write;
+    let mut stream =
+        std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect: {e}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(60))).map_err(|e| e.to_string())?;
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: gala\r\nConnection: close\r\n\r\n")
+        .map_err(|e| format!("send: {e}"))?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).map_err(|e| format!("receive: {e}"))?;
+    let (head, body) = response.split_once("\r\n\r\n").ok_or("no end of headers")?;
+    if !head.starts_with("HTTP/1.1 200 OK") {
+        return Err(format!("status line {:?}", head.lines().next()));
+    }
+    if body != HTTP_PAGE {
+        return Err(format!("body {body:?}"));
+    }
+    Ok(())
 }
 
 /// Judges one scenario from the exit status and its part of the log.
@@ -1613,7 +1687,7 @@ fn screenshot(release: bool, args: &[String]) -> Result {
     build_kernel(release)?;
     // gala's system DLLs in System32 (programs may look only there), the
     // test DLLs next to the programs.
-    let system = ["ntdll.dll", "kernel32.dll", "bcryptprimitives.dll", "ws2_32.dll"];
+    let system = ["ntdll.dll", "kernel32.dll", "bcryptprimitives.dll", "ws2_32.dll", "mswsock.dll"];
     let modules: Vec<(&str, &str)> = USER_DLLS
         .iter()
         .map(|d| (d.file, if system.contains(&d.file) { "Windows/System32" } else { "gala" }))
@@ -1634,7 +1708,8 @@ fn screenshot(release: bool, args: &[String]) -> Result {
     // before 3 s: until the guest's network is up, QEMU holds the host
     // connection open and the client would wait out its read timeout;
     // after that a closed port is refused at once.
-    if cmdline.iter().any(|w| *w == "net_echo" || w.contains("serve")) {
+    let http = cmdline.iter().any(|w| w.contains("go_http"));
+    if cmdline.iter().any(|w| *w == "net_echo" || w.contains("serve")) || http {
         let port = free_port()?;
         add_net(&mut cmd, port);
         thread::spawn(move || {
@@ -1642,7 +1717,7 @@ fn screenshot(release: bool, args: &[String]) -> Result {
             thread::sleep(Duration::from_millis(2500));
             for _ in 0..20 {
                 thread::sleep(Duration::from_millis(500));
-                result = net_client(port);
+                result = if http { http_client(port) } else { net_client(port) };
                 if result.is_ok() {
                     break;
                 }

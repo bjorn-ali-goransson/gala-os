@@ -191,10 +191,13 @@ to set and to argue for. Current order and why:
    lot for kernel32/Go, which is cheaper to do before splitting it behind
    a platform seam. The ledger and event stream now make the Go bring-up
    data-driven.
-5. G3 (workable Go programs): done. N1a, N1b done; next N1c (Go
-   net/http: overlapped socket I/O with completion ports, AcceptEx,
-   WSAIoctl), then N2
-   (Nginx). S4 is mostly covered (suspending a thread running on another
+5. G3 (workable Go programs): done. N1 done (N1a-N1c: Go's net/http
+   serves the host). Next: N2a, decided 2026-10-31: Nginx is the stated
+   goal and the ledger makes bring-up data-driven, so build an x64 Nginx
+   with mingw-w64 and run it on gala before choosing anything larger
+   (WoW64). gala-um (U1-U3) waits: the full suite still runs in ~20 s,
+   and the NT layer keeps changing fast; splitting it behind a platform
+   seam pays off once it settles. S4 is mostly covered (suspending a thread running on another
    CPU works: it parks at its next tick); per-CPU run queues wait for a
    benchmark that needs them.
 6. U1-U3 (gala-um): the NT layer as a Linux process, for host tools
@@ -228,10 +231,24 @@ N1. **Networking (next)**, re-planned 2026-10-30 from data: the official
         NtDeviceIoControlFile, gala's ws2_32; `winsock_test` (a Windows
         program) does loopback round trips and serves the host.
    N1c. A Go `net/http` server answering the host (xtask fetches a page
-        from it): the first web server on gala.
+        from it): the first web server on gala. **Done**: overlapped AFD
+        (pending requests completed by the `net` thread, completion
+        ports, FILE_SKIP_* modes, cancellation), SUPER_ACCEPT/CONNECT,
+        ws2_32 overlapped API (WSASocketW, WSARecv/WSASend,
+        WSAGetOverlappedResult, WSAIoctl extension pointers, AcceptEx,
+        ConnectEx, GetAcceptExSockaddrs, setsockopt, WSAEnumProtocolsW),
+        mswsock.dll (forwarders), kernel32 CancelIoEx/CancelIo/
+        SetFileCompletionNotificationModes; tests `winsock_async_test`
+        (Windows-compatible) and `go_http` (loopback GET, then the host's
+        GET through QEMU's port forward).
 N2. **Nginx**: either our own 64-bit build of Nginx (cross-compiled with
    mingw-w64) or a WoW64-style layer for 32-bit programs (much larger);
    then CreateProcess for its worker processes, advapi32/crypt32 pieces.
+   N2a (next). Cross-compile Nginx for x64 with mingw-w64 (pinned
+        version, script in the repo, binary checked in like the Go
+        programs), run it on gala with a minimal config (master process
+        only if possible: `master_process off`), and let the ledger list
+        the work; an `nginx` net scenario GETs its default page.
 
 ## Later
 SMP, ACPI (MADT/HPET), virtio devices, bindgen-generated layouts from

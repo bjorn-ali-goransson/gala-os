@@ -490,6 +490,7 @@ from the public documentation of each function (clean room):
 | kernel32.dll | `user/kernel32` | `testkernel32.dll` | `C:\Windows\System32` |
 | bcryptprimitives.dll | `user/bcryptprimitives` | `testbcryptprimitives.dll` | `C:\Windows\System32` |
 | ws2_32.dll | `user/ws2_32` | `testws2_32.dll` | `C:\Windows\System32` |
+| mswsock.dll | `user/mswsock` | `testmswsock.dll` | `C:\Windows\System32` |
 
 (Exported under other names so that `user/bin`, which also runs on
 Windows, never shadows the system's DLLs.)
@@ -646,29 +647,70 @@ IOCTLs (code = 0x12000 | function << 2 | method):
 | 0x1202b | DISCONNECT: `{u32 type (1 send, 2 receive, 4 abort); i64 timeout}` | ReactOS, to be verified |
 | 0x1202f | GETSOCKNAME: returns the local sockaddr | Wine |
 | 0x12033 | GET_PEER_NAME: returns the remote sockaddr | ReactOS, to be verified |
+| 0x12083 | SUPER_ACCEPT (AcceptEx), see below | ReactOS, to be verified |
+| 0x120c7 | SUPER_CONNECT (ConnectEx), see below | ReactOS, to be verified |
 
 TRANSPORT_ADDRESS (TDI): `{i32 count = 1; u16 length = 14; u16 type = 2;
 u16 port (network order); u32 address; u8 zero[8]}`. Only IPv4 for now.
 
-Blocking: an operation that cannot finish yet clears the endpoint's
-signal, re-checks, and waits on the endpoint with the dispatcher's
-`wait_for` (so thread termination ends the wait); the notify hook sets the
-signal. Every operation completes before NtDeviceIoControlFile returns
-(it writes the IO_STATUS_BLOCK and sets the optional event), even on
-handles opened for asynchronous I/O, where Windows may return
-STATUS_PENDING. Overlapped socket I/O and completion ports (what Go's
-`net` package uses) are N1c. Closing the last handle closes the socket
-gracefully (a listener drops its pending connections).
+**Asynchronous completion (N1c).** As on Windows, AFD never blocks
+inside NtDeviceIoControlFile: a request that cannot finish now becomes a
+*pending request* of its endpoint and the call returns STATUS_PENDING.
+Callers that want blocking behaviour (gala's ws2_32 for `recv`, `accept`,
+...) pass an event and wait for it; overlapped callers (Go) get the
+completion through the event, the IO_STATUS_BLOCK (the OVERLAPPED's
+Internal/InternalHigh) and the endpoint's I/O completion port.
+- An endpoint's state lives in a `KArc<EndpointState>` shared by the
+  socket object and the token registry: the socket id, the completion
+  port and key (NtSetInformationFile FileCompletionInformation, i.e.
+  CreateIoCompletionPort), the notification modes
+  (FileIoCompletionNotificationInformation, i.e.
+  SetFileCompletionNotificationModes) and a FIFO of pending requests:
+  receive, send (with the bytes already queued), wait-for-listen, accept
+  (AcceptEx: the listener's request carries the accepting endpoint) and
+  connect. Each holds the issuing process (user buffers are reached
+  through its address space from whichever thread completes it), the
+  IO_STATUS_BLOCK address, the event and the ApcContext (the OVERLAPPED
+  pointer, posted to the port as the packet's context).
+- A request is tried at once if no earlier request of the same kind is
+  pending (order per kind is kept). Completion happens in the `net`
+  thread's notify hook (`try_complete`), under the endpoint's pending
+  lock (lock order: pending, then the stack, the address space, the
+  dispatcher): perform the operation, write the IO_STATUS_BLOCK, set the
+  event, signal the endpoint (unless FILE_SKIP_SET_EVENT_ON_HANDLE),
+  post (key, ApcContext, status, information) to the port.
+- A request that completes at once returns its status and is also
+  posted to the port, unless the endpoint has
+  FILE_SKIP_COMPLETION_PORT_ON_SUCCESS (what Go asks for, after
+  WSAEnumProtocols reports XP1_IFS_HANDLES).
+- Cancellation (NtCancelIoFileEx, i.e. CancelIoEx; a gala service number
+  until verified on the pinned build) completes the matching pending
+  requests (all of the process's, or the one whose IO_STATUS_BLOCK is
+  given) with STATUS_CANCELLED; nothing pending is STATUS_NOT_FOUND.
+  Closing the endpoint's last handle cancels what is still pending.
+- IOCTL_AFD_SUPER_ACCEPT (0x12083, AcceptEx: input
+  `{u8 san; u8 fix; HANDLE accept; u32 receive_length; u32
+  local_length; u32 remote_length}`, the output buffer receives
+  [data][local address][remote address]) and IOCTL_AFD_SUPER_CONNECT
+  (0x120c7, ConnectEx: input `{u8 san; TRANSPORT_ADDRESS at 4}`); codes
+  from ReactOS, to be verified. The address blocks hold a SOCKADDR_IN at
+  their start; gala's GetAcceptExSockaddrs reads them back.
 
 ### ws2_32.dll
 
 `user/ws2_32` is gala's ws2_32 (built like kernel32): the BSD-style and
-WSA functions on top of ntdll's NtCreateFile/NtDeviceIoControlFile, with
+WSA functions on top of ntdll's NtCreateFile/NtDeviceIoControlFile
+(blocking calls wait on a per-call event when AFD returns STATUS_PENDING;
+overlapped calls pass the caller's OVERLAPPED), with
 NTSTATUS mapped to WSA error codes in the thread's last-error value
 (WSAGetLastError is GetLastError, as on Windows). SOCKET values are the
-endpoint handles. mswsock.dll (AcceptEx, ConnectEx, TransmitFile) comes
-with overlapped I/O in N1c; Go asks ws2_32 for AcceptEx through
-WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER), so it can be served there.
+endpoint handles. AcceptEx, GetAcceptExSockaddrs and ConnectEx are in
+ws2_32 (also handed out by WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER));
+gala's mswsock.dll forwards its AcceptEx and GetAcceptExSockaddrs exports
+there (Go imports them from mswsock). Socket options that only tune the
+stack (TCP_NODELAY, keepalive, SO_UPDATE_*_CONTEXT, buffer sizes) are
+accepted and have no effect yet; unknown ones fail with WSAENOPROTOOPT and
+go to the ledger.
 
 ### Tests
 
@@ -688,8 +730,9 @@ suspension/context of threads running on other CPUs, ranged (invlpg)
 shootdowns and PCIDs (ROADMAP S4), a real ntdll and
 kernel32 (gala runs test stand-ins), process creation from user mode,
 security, registry, storage devices, interrupts for devices (virtio-net
-polls), overlapped socket I/O and completion ports (N1c), UDP, IPv6,
-select/IOCTL_AFD_POLL, non-blocking sockets, telling a reset from a FIN
+polls), completion routines (APCs) for socket I/O, AcceptEx with
+receive data, ConnectEx with send data, UDP, IPv6,
+select/IOCTL_AFD_POLL, non-blocking sockets, socket options with effect, telling a reset from a FIN
 on receive, bindgen-generated
 layouts, ACPI (MADT/HPET), reclaiming bootloader memory. Observability
 plans: `docs/OBSERVABILITY.md`.

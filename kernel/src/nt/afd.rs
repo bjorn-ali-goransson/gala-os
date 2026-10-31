@@ -6,12 +6,12 @@
 //! there); see THIRD_PARTY.md.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use super::object::{Handle, KObject, ObjectBody, ObjectRef};
+use super::object::{CompletionPacket, Handle, KObject, ObjectBody, ObjectRef};
 use super::process::Process;
 use super::status::NtStatus;
-use super::wait::{self, Dispatcher, Timeout};
+use super::wait::{self, Dispatcher};
 use crate::mm::heap::{KArc, TryVec};
 use crate::net::tcp::{self, Addr, NetError, SocketId};
 use crate::sync::IrqMutex;
@@ -26,6 +26,8 @@ pub const IOCTL_AFD_SEND: u32 = 0x1201f;
 pub const IOCTL_AFD_DISCONNECT: u32 = 0x1202b;
 pub const IOCTL_AFD_GETSOCKNAME: u32 = 0x1202f;
 pub const IOCTL_AFD_GET_PEER_NAME: u32 = 0x12033;
+pub const IOCTL_AFD_SUPER_ACCEPT: u32 = 0x12083;
+pub const IOCTL_AFD_SUPER_CONNECT: u32 = 0x120c7;
 
 const AFD_DISCONNECT_SEND: u32 = 1;
 const AFD_DISCONNECT_ABORT: u32 = 4;
@@ -48,34 +50,319 @@ pub enum Transport {
     Tcp,
 }
 
-/// A socket endpoint (`ObjectBody::Socket`).
-pub struct Endpoint {
-    pub dispatcher: KArc<Dispatcher>,
+/// FILE_SKIP_COMPLETION_PORT_ON_SUCCESS / FILE_SKIP_SET_EVENT_ON_HANDLE
+/// (FileIoCompletionNotificationInformation).
+pub const FILE_SKIP_COMPLETION_PORT_ON_SUCCESS: u32 = 1;
+pub const FILE_SKIP_SET_EVENT_ON_HANDLE: u32 = 2;
+
+/// Where a request's completion is reported.
+pub struct Io {
+    pub process: KArc<Process>,
+    /// IO_STATUS_BLOCK (an OVERLAPPED's Internal/InternalHigh), or 0.
+    pub iosb: u64,
+    pub event: Option<ObjectRef>,
+    /// ApcContext: the completion packet's context (the OVERLAPPED); a
+    /// request with none posts no packet.
+    pub context: u64,
+}
+
+/// An operation waiting for the network (docs/ARCHITECTURE.md, "AFD").
+enum Op {
+    Recv {
+        buffers: Vec<(u64, usize)>,
+    },
+    /// `done` bytes are already queued.
+    Send {
+        buffers: Vec<(u64, usize)>,
+        done: usize,
+    },
+    WaitForListen {
+        output: u64,
+        output_len: u32,
+    },
+    /// AcceptEx: the accepting endpoint and the output buffer's layout.
+    SuperAccept {
+        accept: KArc<EndpointState>,
+        output: u64,
+        receive: u32,
+        local: u32,
+    },
+    Connect,
+}
+
+impl Op {
+    fn kind(&self) -> u8 {
+        match self {
+            Op::Recv { .. } => 0,
+            Op::Send { .. } => 1,
+            Op::WaitForListen { .. } | Op::SuperAccept { .. } => 2,
+            Op::Connect => 3,
+        }
+    }
+}
+
+struct Pending {
+    op: Op,
+    io: Io,
+}
+
+enum Attempt {
+    Done(NtStatus, u64),
+    Wait,
+}
+
+/// An endpoint's state, shared by its object and the token registry.
+pub struct EndpointState {
+    pub dispatcher: Dispatcher,
     pub transport: Transport,
     token: u64,
     socket: IrqMutex<Option<SocketId>>,
+    /// The completion port and key (FileCompletionInformation).
+    pub completion: IrqMutex<Option<(ObjectRef, u64)>>,
+    /// FILE_SKIP_* notification modes.
+    pub modes: AtomicU32,
+    pending: IrqMutex<Vec<Pending>>,
+}
+
+/// A socket endpoint (`ObjectBody::Socket`).
+pub struct Endpoint {
+    pub state: KArc<EndpointState>,
 }
 
 impl Drop for Endpoint {
     fn drop(&mut self) {
-        REGISTRY.lock().retain(|(t, _)| *t != self.token);
-        if let Some(id) = self.socket.lock().take() {
+        REGISTRY.lock().retain(|e| e.token != self.state.token);
+        // Closing the last handle cancels what is still pending.
+        cancel(&self.state, None, None);
+        if let Some(id) = self.state.socket.lock().take() {
             tcp::close(id, false);
         }
     }
 }
 
 /// Endpoints by token, for the notify hook.
-static REGISTRY: IrqMutex<Vec<(u64, KArc<Dispatcher>)>> = IrqMutex::new(Vec::new());
+static REGISTRY: IrqMutex<Vec<KArc<EndpointState>>> = IrqMutex::new(Vec::new());
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 
-/// `net::tcp`'s notify hook: the endpoint's state changed; its blocked
-/// callers re-check.
+/// `net::tcp`'s notify hook (in the `net` thread): the endpoint's socket
+/// changed; complete what can be completed now.
 fn notify(token: u64) {
-    let dispatcher = REGISTRY.lock().iter().find(|(t, _)| *t == token).map(|(_, d)| d.clone());
-    if let Some(d) = dispatcher {
-        wait::signal_dispatcher(&d, 1);
+    let state = REGISTRY.lock().iter().find(|e| e.token == token).cloned();
+    if let Some(state) = state {
+        try_complete(&state);
     }
+}
+
+/// Reports a finished request: IO_STATUS_BLOCK, event, the endpoint's own
+/// signal, the completion port. `immediate`: it finished inside its system
+/// call (then a failure posts nothing, and FILE_SKIP_COMPLETION_PORT_ON_
+/// SUCCESS suppresses the packet of a success).
+fn finish(state: &EndpointState, io: &Io, status: NtStatus, information: u64, immediate: bool) {
+    if io.iosb != 0 {
+        let mut b = [0u8; 16];
+        b[0..4].copy_from_slice(&status.0.to_le_bytes());
+        b[8..16].copy_from_slice(&information.to_le_bytes());
+        let _ = io.process.write(io.iosb, &b);
+    }
+    let failed = status.0 >= 0xc000_0000;
+    if immediate && failed {
+        return;
+    }
+    if let Some(e) = &io.event {
+        wait::set_signal(e, 1);
+    }
+    let modes = state.modes.load(Ordering::Acquire);
+    if modes & FILE_SKIP_SET_EVENT_ON_HANDLE == 0 {
+        wait::signal_dispatcher(&state.dispatcher, 1);
+    }
+    if immediate && modes & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS != 0 {
+        return;
+    }
+    let port = state.completion.lock().clone();
+    if let (Some((port, key)), true) = (port, io.context != 0) {
+        let packet = CompletionPacket { key, context: io.context, status: status.0, information };
+        if let ObjectBody::IoCompletion(c) = &port.body
+            && c.queue.lock().push(packet).is_ok()
+        {
+            wait::set_signal(&port, 1);
+        }
+    }
+}
+
+fn user_read(process: &Process, addr: u64, buf: &mut [u8]) -> Result<(), NtStatus> {
+    process.read(addr, buf).map_err(|_| NtStatus::ACCESS_VIOLATION)
+}
+
+fn user_write(process: &Process, addr: u64, data: &[u8]) -> Result<(), NtStatus> {
+    process.write(addr, data).map_err(|_| NtStatus::ACCESS_VIOLATION)
+}
+
+/// Tries an operation once, without waiting.
+fn attempt(state: &EndpointState, op: &mut Op, process: &Process) -> Attempt {
+    let socket = *state.socket.lock();
+    match attempt_inner(socket, op, process) {
+        Ok(Some(information)) => Attempt::Done(NtStatus::SUCCESS, information),
+        Ok(None) | Err(Failure::Net(NetError::WouldBlock)) => Attempt::Wait,
+        Err(Failure::Net(e)) => Attempt::Done(status_of(e), 0),
+        Err(Failure::Nt(status)) => Attempt::Done(status, 0),
+    }
+}
+
+enum Failure {
+    Net(NetError),
+    Nt(NtStatus),
+}
+
+impl From<NetError> for Failure {
+    fn from(e: NetError) -> Self {
+        Failure::Net(e)
+    }
+}
+
+impl From<NtStatus> for Failure {
+    fn from(s: NtStatus) -> Self {
+        Failure::Nt(s)
+    }
+}
+
+/// `Ok(Some(information))` when done, `Ok(None)` to keep waiting.
+fn attempt_inner(
+    socket: Option<SocketId>,
+    op: &mut Op,
+    process: &Process,
+) -> Result<Option<u64>, Failure> {
+    let id = socket.ok_or(Failure::Nt(NtStatus::INVALID_CONNECTION))?;
+    match op {
+        Op::Recv { buffers } => {
+            let capacity: usize = buffers.iter().map(|&(_, l)| l).sum();
+            let mut buf = bounce()?;
+            let want = capacity.min(CHUNK);
+            let got = tcp::recv(id, &mut buf[..want])?;
+            let mut copied = 0;
+            for &(addr, len) in buffers.iter() {
+                if copied == got {
+                    break;
+                }
+                let n = len.min(got - copied);
+                user_write(process, addr, &buf[copied..copied + n])?;
+                copied += n;
+            }
+            Ok(Some(got as u64))
+        }
+        Op::Send { buffers, done } => {
+            let total: usize = buffers.iter().map(|&(_, l)| l).sum();
+            let mut buf = bounce()?;
+            while *done < total {
+                // The buffer and offset holding byte `done`.
+                let (mut at, mut skip) = (0, *done);
+                while skip >= buffers[at].1 {
+                    skip -= buffers[at].1;
+                    at += 1;
+                }
+                let (addr, len) = buffers[at];
+                let n = (len - skip).min(CHUNK);
+                user_read(process, addr + skip as u64, &mut buf[..n])?;
+                match tcp::send(id, &buf[..n]) {
+                    Ok(queued) => *done += queued,
+                    Err(NetError::WouldBlock) => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Ok(Some(total as u64))
+        }
+        Op::WaitForListen { output, output_len } => {
+            let (sequence, remote) = tcp::pending(id)?;
+            let mut out = [0u8; 4 + TRANSPORT_ADDRESS_LEN];
+            out[..4].copy_from_slice(&sequence.to_le_bytes());
+            out[4..].copy_from_slice(&to_transport_address(remote));
+            if (*output_len as usize) < out.len() {
+                return Err(NtStatus::BUFFER_TOO_SMALL.into());
+            }
+            user_write(process, *output, &out)?;
+            Ok(Some(out.len() as u64))
+        }
+        Op::SuperAccept { accept, output, receive, local } => {
+            let (sequence, remote) = tcp::pending(id)?;
+            let mut slot = accept.socket.lock();
+            if slot.is_some() {
+                return Err(NtStatus::INVALID_PARAMETER.into());
+            }
+            let new = tcp::accept(id, sequence, accept.token)?;
+            *slot = Some(new);
+            drop(slot);
+            let local_addr = tcp::local(new)?;
+            let at = *output + u64::from(*receive);
+            user_write(process, at, &to_sockaddr_in(local_addr))?;
+            user_write(process, at + u64::from(*local), &to_sockaddr_in(remote))?;
+            Ok(Some(0))
+        }
+        Op::Connect => {
+            tcp::connected(id)?;
+            Ok(Some(0))
+        }
+    }
+}
+
+/// Completes the pending requests that can finish now, oldest first
+/// (a request waits while an older one of its kind does).
+fn try_complete(state: &EndpointState) {
+    let mut pending = state.pending.lock();
+    let mut blocked = [false; 4];
+    let mut i = 0;
+    while i < pending.len() {
+        let kind = usize::from(pending[i].op.kind());
+        if blocked[kind] {
+            i += 1;
+            continue;
+        }
+        let p = &mut pending[i];
+        match attempt(state, &mut p.op, &p.io.process) {
+            Attempt::Done(status, information) => {
+                let p = pending.remove(i);
+                finish(state, &p.io, status, information, false);
+            }
+            Attempt::Wait => {
+                blocked[kind] = true;
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Starts a request: done at once if possible, else pending.
+fn submit(state: &EndpointState, mut op: Op, io: Io) -> NtStatus {
+    let mut pending = state.pending.lock();
+    let kind = op.kind();
+    if !pending.iter().any(|p| p.op.kind() == kind)
+        && let Attempt::Done(status, information) = attempt(state, &mut op, &io.process)
+    {
+        finish(state, &io, status, information, true);
+        return status;
+    }
+    if pending.try_push(Pending { op, io }).is_err() {
+        return NtStatus::INSUFFICIENT_RESOURCES;
+    }
+    NtStatus::PENDING
+}
+
+/// Cancels pending requests of `process` (all processes if None) whose
+/// IO_STATUS_BLOCK is `iosb` (any if None); returns how many.
+pub fn cancel(state: &EndpointState, process: Option<&KArc<Process>>, iosb: Option<u64>) -> usize {
+    let mut pending = state.pending.lock();
+    let mut n = 0;
+    let mut i = 0;
+    while i < pending.len() {
+        let p = &pending[i];
+        let mine = process.is_none_or(|q| KArc::ptr_eq(q, &p.io.process));
+        if mine && iosb.is_none_or(|b| b == p.io.iosb) {
+            let p = pending.remove(i);
+            finish(state, &p.io, NtStatus::CANCELLED, 0, false);
+            n += 1;
+        } else {
+            i += 1;
+        }
+    }
+    n
 }
 
 /// Creates `\Device\Afd` and connects the notify hook.
@@ -150,12 +437,20 @@ fn transport_of(packet: &[u8]) -> Result<Transport, NtStatus> {
 /// Opens an endpoint (NtCreateFile below `\Device\Afd`).
 pub fn open(ea: &[u8]) -> Result<ObjectRef, NtStatus> {
     let transport = if ea.is_empty() { Transport::None } else { parse_open_packet(ea)? };
-    let dispatcher = KArc::try_new(Dispatcher::new(0)).map_err(|_| NtStatus::NO_MEMORY)?;
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
-    REGISTRY.lock().try_push((token, dispatcher.clone())).map_err(|_| NtStatus::NO_MEMORY)?;
-    let endpoint = Endpoint { dispatcher, transport, token, socket: IrqMutex::new(None) };
+    let state = KArc::try_new(EndpointState {
+        dispatcher: Dispatcher::new(0),
+        transport,
+        token,
+        socket: IrqMutex::new(None),
+        completion: IrqMutex::new(None),
+        modes: AtomicU32::new(0),
+        pending: IrqMutex::new(Vec::new()),
+    })
+    .map_err(|_| NtStatus::NO_MEMORY)?;
+    REGISTRY.lock().try_push(state.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
     // On failure the endpoint drops and unregisters itself.
-    KObject::new(ObjectBody::Socket(endpoint)).map_err(|_| NtStatus::NO_MEMORY)
+    KObject::new(ObjectBody::Socket(Endpoint { state })).map_err(|_| NtStatus::NO_MEMORY)
 }
 
 pub fn status_of(e: NetError) -> NtStatus {
@@ -170,29 +465,6 @@ pub fn status_of(e: NetError) -> NtStatus {
         NetError::Unreachable => NtStatus::NETWORK_UNREACHABLE,
         NetError::NoMemory => NtStatus::INSUFFICIENT_RESOURCES,
         NetError::NoSocket => NtStatus::INVALID_HANDLE,
-    }
-}
-
-/// Runs `f` until it does not block, waiting on the endpoint in between.
-/// The wait is bounded (50 ms) so that two threads clearing the same
-/// endpoint's signal cannot strand each other.
-fn blocking<R>(
-    object: &ObjectRef,
-    endpoint: &Endpoint,
-    mut f: impl FnMut() -> Result<R, NetError>,
-) -> Result<R, NtStatus> {
-    loop {
-        wait::signal_dispatcher(&endpoint.dispatcher, 0);
-        match f() {
-            Err(NetError::WouldBlock) => {}
-            Ok(r) => return Ok(r),
-            Err(e) => return Err(status_of(e)),
-        }
-        let timeout = Timeout::Tick(crate::time::ticks() + 50);
-        let status = wait::wait_for(core::slice::from_ref(object), false, timeout);
-        if status != NtStatus::SUCCESS && status != NtStatus::TIMEOUT {
-            return Err(status);
-        }
     }
 }
 
@@ -307,18 +579,51 @@ fn bounce() -> Result<Vec<u8>, NtStatus> {
     Ok(buf)
 }
 
-/// Handles an IOCTL on an endpoint; returns IoStatus.Information.
-pub fn ioctl(r: &Request<'_>) -> Result<u64, NtStatus> {
-    let ObjectBody::Socket(ep) = &r.object.body else {
-        return Err(NtStatus::INVALID_DEVICE_REQUEST);
+/// The endpoint behind a handle (AcceptEx's accepting socket).
+fn endpoint_of(process: &Process, handle: u64) -> Result<KArc<EndpointState>, NtStatus> {
+    let entry = process.handles.lock().get(Handle(handle)).ok_or(NtStatus::INVALID_HANDLE)?;
+    match &entry.object.body {
+        ObjectBody::Socket(e) => Ok(e.state.clone()),
+        _ => Err(NtStatus::OBJECT_TYPE_MISMATCH),
+    }
+}
+
+/// Handles an IOCTL on an endpoint and reports its completion (now or
+/// later) through `io`; returns the status NtDeviceIoControlFile returns.
+pub fn ioctl(r: &Request<'_>, io: Io) -> NtStatus {
+    let ObjectBody::Socket(endpoint) = &r.object.body else {
+        return NtStatus::INVALID_DEVICE_REQUEST;
     };
+    let ep = &*endpoint.state;
     if ep.transport == Transport::None {
         super::ledger::record("NtDeviceIoControlFile", "afd helper ioctl", u64::from(r.code));
-        return Err(NtStatus::INVALID_DEVICE_REQUEST);
+        return NtStatus::INVALID_DEVICE_REQUEST;
     }
+    let op = match immediate(r, ep) {
+        Ok(Immediate::Done(information)) => {
+            finish(ep, &io, NtStatus::SUCCESS, information, true);
+            return NtStatus::SUCCESS;
+        }
+        Ok(Immediate::Async(op)) => op,
+        Err(status) => {
+            finish(ep, &io, status, 0, true);
+            return status;
+        }
+    };
+    submit(ep, op, io)
+}
+
+enum Immediate {
+    Done(u64),
+    Async(Op),
+}
+
+/// Validates a request; does what needs no waiting, or returns the
+/// operation to submit.
+fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus> {
     let current = || *ep.socket.lock();
     let socket = || current().ok_or(NtStatus::INVALID_CONNECTION);
-    match r.code {
+    Ok(match r.code {
         IOCTL_AFD_BIND => {
             let b: [u8; 4 + SOCKADDR_LEN] = r.input()?;
             let local = sockaddr_in(&b[4..])?;
@@ -330,87 +635,78 @@ pub fn ioctl(r: &Request<'_>) -> Result<u64, NtStatus> {
             *slot = Some(id);
             drop(slot);
             let bound = tcp::local(id).map_err(status_of)?;
-            if r.output_len as usize >= SOCKADDR_LEN {
-                r.output(&to_sockaddr_in(bound))
+            Immediate::Done(if r.output_len as usize >= SOCKADDR_LEN {
+                r.output(&to_sockaddr_in(bound))?
             } else {
-                Ok(0)
-            }
+                0
+            })
         }
         IOCTL_AFD_LISTEN => {
             let b: [u8; 12] = r.input()?;
             let backlog = u32_at(&b, 4) as i32;
             tcp::listen(socket()?, backlog.max(1) as usize).map_err(status_of)?;
-            Ok(0)
+            Immediate::Done(0)
         }
-        IOCTL_AFD_CONNECT => {
-            let b: [u8; 12 + TRANSPORT_ADDRESS_LEN] = r.input()?;
-            let remote = transport_address(&b[12..])?;
+        IOCTL_AFD_CONNECT | IOCTL_AFD_SUPER_CONNECT => {
+            let remote = if r.code == IOCTL_AFD_CONNECT {
+                let b: [u8; 12 + TRANSPORT_ADDRESS_LEN] = r.input()?;
+                transport_address(&b[12..])?
+            } else {
+                let b: [u8; 4 + TRANSPORT_ADDRESS_LEN] = r.input()?;
+                transport_address(&b[4..])?
+            };
             let id = tcp::connect(current(), remote, ep.token).map_err(status_of)?;
             *ep.socket.lock() = Some(id);
-            blocking(r.object, ep, || tcp::connected(id))?;
-            Ok(0)
+            Immediate::Async(Op::Connect)
         }
         IOCTL_AFD_WAIT_FOR_LISTEN => {
-            let id = socket()?;
-            let (sequence, remote) = blocking(r.object, ep, || tcp::pending(id))?;
-            let mut out = [0u8; 4 + TRANSPORT_ADDRESS_LEN];
-            out[..4].copy_from_slice(&sequence.to_le_bytes());
-            out[4..].copy_from_slice(&to_transport_address(remote));
-            r.output(&out)
+            socket()?;
+            Immediate::Async(Op::WaitForListen { output: r.output, output_len: r.output_len })
         }
         IOCTL_AFD_ACCEPT => {
             let b: [u8; 16] = r.input()?;
             let (sequence, handle) = (u32_at(&b, 4), u64_at(&b, 8));
-            let target =
-                r.process.handles.lock().get(Handle(handle)).ok_or(NtStatus::INVALID_HANDLE)?;
-            let ObjectBody::Socket(accepting) = &target.object.body else {
-                return Err(NtStatus::OBJECT_TYPE_MISMATCH);
-            };
+            let accepting = endpoint_of(r.process, handle)?;
             let mut slot = accepting.socket.lock();
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
             *slot = Some(tcp::accept(socket()?, sequence, accepting.token).map_err(status_of)?);
-            Ok(0)
+            Immediate::Done(0)
+        }
+        IOCTL_AFD_SUPER_ACCEPT => {
+            // {u8 san; u8 fix_alignment; HANDLE accept; u32 receive_length;
+            //  u32 local_length; u32 remote_length}
+            let b: [u8; 28] = r.input()?;
+            let (handle, receive) = (u64_at(&b, 8), u32_at(&b, 16));
+            let (local, remote) = (u32_at(&b, 20), u32_at(&b, 24));
+            if receive != 0 {
+                // AcceptEx that also waits for the first data.
+                super::ledger::record(
+                    "NtDeviceIoControlFile",
+                    "AcceptEx receive length",
+                    u64::from(receive),
+                );
+                return Err(NtStatus::NOT_SUPPORTED);
+            }
+            let room = u64::from(receive) + u64::from(local) + u64::from(remote);
+            if (local as usize) < SOCKADDR_LEN
+                || (remote as usize) < SOCKADDR_LEN
+                || u64::from(r.output_len) < room
+            {
+                return Err(NtStatus::BUFFER_TOO_SMALL);
+            }
+            socket()?;
+            let accept = endpoint_of(r.process, handle)?;
+            Immediate::Async(Op::SuperAccept { accept, output: r.output, receive, local })
         }
         IOCTL_AFD_SEND => {
-            let id = socket()?;
-            let mut buf = bounce()?;
-            let mut total = 0u64;
-            for (addr, len) in buffers(r)? {
-                let mut done = 0;
-                while done < len {
-                    let n = (len - done).min(CHUNK);
-                    r.read(addr + done as u64, &mut buf[..n])?;
-                    let mut queued = 0;
-                    while queued < n {
-                        queued += blocking(r.object, ep, || tcp::send(id, &buf[queued..n]))?;
-                    }
-                    done += n;
-                }
-                total += len as u64;
-            }
-            Ok(total)
+            socket()?;
+            Immediate::Async(Op::Send { buffers: buffers(r)?, done: 0 })
         }
         IOCTL_AFD_RECV => {
-            let id = socket()?;
-            let list = buffers(r)?;
-            let capacity: usize = list.iter().map(|&(_, l)| l).sum();
-            let mut buf = bounce()?;
-            // What has arrived (at least one byte, or end of stream), up
-            // to the buffers' size: recv's semantics.
-            let want = capacity.min(CHUNK);
-            let got = blocking(r.object, ep, || tcp::recv(id, &mut buf[..want]))?;
-            let mut copied = 0;
-            for (addr, len) in list {
-                if copied == got {
-                    break;
-                }
-                let n = len.min(got - copied);
-                r.write(addr, &buf[copied..copied + n])?;
-                copied += n;
-            }
-            Ok(got as u64)
+            socket()?;
+            Immediate::Async(Op::Recv { buffers: buffers(r)? })
         }
         IOCTL_AFD_DISCONNECT => {
             let b: [u8; 16] = r.input()?;
@@ -422,22 +718,22 @@ pub fn ioctl(r: &Request<'_>) -> Result<u64, NtStatus> {
             } else if kind & AFD_DISCONNECT_SEND != 0 {
                 tcp::shutdown_send(socket()?).map_err(status_of)?;
             }
-            Ok(0)
+            Immediate::Done(0)
         }
         IOCTL_AFD_GETSOCKNAME => {
             let local = tcp::local(socket().map_err(|_| NtStatus::INVALID_PARAMETER)?)
                 .map_err(status_of)?;
-            r.output(&to_sockaddr_in(local))
+            Immediate::Done(r.output(&to_sockaddr_in(local))?)
         }
         IOCTL_AFD_GET_PEER_NAME => {
             let remote = tcp::remote(socket()?).map_err(status_of)?;
-            r.output(&to_sockaddr_in(remote))
+            Immediate::Done(r.output(&to_sockaddr_in(remote))?)
         }
         code => {
             super::ledger::record("NtDeviceIoControlFile", "afd ioctl", u64::from(code));
-            Err(NtStatus::INVALID_DEVICE_REQUEST)
+            return Err(NtStatus::INVALID_DEVICE_REQUEST);
         }
-    }
+    })
 }
 
 #[cfg(test)]

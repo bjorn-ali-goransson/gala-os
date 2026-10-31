@@ -285,6 +285,10 @@ name = "missing_import_test"
 version = "0.1.0"
 
 [[package]]
+name = "mswsock"
+version = "0.1.0"
+
+[[package]]
 name = "noto-sans-mono-bitmap"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -495,6 +499,10 @@ version = "0.1.0"
 dependencies = [
  "ntrt",
 ]
+
+[[package]]
+name = "winsock_async_test"
+version = "0.1.0"
 
 [[package]]
 name = "winsock_test"
