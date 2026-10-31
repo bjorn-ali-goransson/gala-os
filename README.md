@@ -1,5 +1,7 @@
 # gala-os
 
+![Gala - the Saudi operating system](docs/images/gala-banner.png)
+
 A from-scratch x86_64 kernel in Rust that runs unmodified 64-bit Windows
 programs. It implements the Windows NT kernel's system call interface
 (the "NT layer"), and ships its own clean-room ntdll.dll, kernel32.dll,
