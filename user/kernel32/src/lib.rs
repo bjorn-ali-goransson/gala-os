@@ -428,7 +428,14 @@ pub extern "system" fn WriteFile(
         // SAFETY: the caller's output pointer.
         unsafe { *written = iosb[1] as u32 };
     }
-    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    if !buffer.is_null() && length > 0 {
+        // SAFETY: the caller's buffer of `length` bytes.
+        console::wrote(h, unsafe { core::slice::from_raw_parts(buffer, length as usize) });
+    }
+    TRUE
 }
 
 #[unsafe(no_mangle)]
@@ -482,7 +489,11 @@ pub extern "system" fn WaitForSingleObject(h: Handle, ms: u32) -> u32 {
 pub extern "system" fn CloseHandle(h: Handle) -> Bool {
     // SAFETY: the kernel validates the handle.
     let status = unsafe { NtClose(h) };
-    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    console::forget(h);
+    TRUE
 }
 
 #[unsafe(no_mangle)]
@@ -684,25 +695,6 @@ pub extern "system" fn FreeLibrary(module: Handle) -> Bool {
 
 const ERROR_INVALID_HANDLE: u32 = 6;
 
-/// GetConsoleMode: only console handles have a mode; gala's standard
-/// handles are files or devices, as with redirected output on Windows.
-#[unsafe(no_mangle)]
-pub extern "system" fn GetConsoleMode(_h: Handle, _mode: *mut u32) -> Bool {
-    fail_with(ERROR_INVALID_HANDLE, FALSE)
-}
-
-/// WriteConsoleW: as GetConsoleMode (callers fall back to WriteFile).
-#[unsafe(no_mangle)]
-pub extern "system" fn WriteConsoleW(
-    _h: Handle,
-    _buffer: *const u16,
-    _length: u32,
-    _written: *mut u32,
-    _reserved: *mut c_void,
-) -> Bool {
-    fail_with(ERROR_INVALID_HANDLE, FALSE)
-}
-
 /// SetConsoleCtrlHandler: kept (gala raises no console control events).
 #[unsafe(no_mangle)]
 pub extern "system" fn SetConsoleCtrlHandler(_handler: usize, _add: Bool) -> Bool {
@@ -844,6 +836,12 @@ fn nt_path(path: *const u16) -> Result<PathBuf, u32> {
     let mut nt = PathBuf::new();
     // The DOS device NUL (Go's os.DevNull, `> NUL` redirections).
     let name = wide_slice(path);
+    // The console's buffers (CONOUT$, CONIN$): \??\CONOUT$ and \??\CONIN$.
+    if console::console_name(name).is_some() {
+        nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
+        nt.push(name)?;
+        return Ok(nt);
+    }
     if name.len() == 3 && name.iter().zip(b"NUL").all(|(&c, &n)| c & !0x20 == u16::from(n)) {
         nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
         nt.push(&[u16::from(b'N'), u16::from(b'U'), u16::from(b'L')])?;
@@ -1002,6 +1000,9 @@ pub extern "system" fn CreateFileW(
             // ERROR_ALREADY_EXISTS (FILE_OPENED = 1, FILE_OVERWRITTEN = 3).
             let existed = matches!(disposition, 2 | 4) && matches!(information, 1 | 3);
             SetLastError(if existed { ERROR_ALREADY_EXISTS } else { 0 });
+            if let Some(input) = console::console_name(wide_slice(path)) {
+                console::register(h, input);
+            }
             h
         }
         // CREATE_NEW on an existing file: ERROR_FILE_EXISTS, not 183.

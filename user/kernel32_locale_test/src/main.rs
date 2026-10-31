@@ -15,6 +15,7 @@
 //!   (UTC, TIME_ZONE_ID_UNKNOWN); SystemTimeToTzSpecificLocalTime and back.
 //! - GetUserGeoID (244, United States), GetGeoInfoA (GEO_ISO2 "US").
 //! - Get{User,System}PreferredUILanguages: en-US, by name or id.
+//! - GetCPInfoExW of CP_ACP (the ANSI code page and its name).
 //!
 //! Prints `kernel32_locale_test: ok` or exits with the number of the
 //! failing check.
@@ -44,6 +45,8 @@ unsafe extern "system" {
         buf: *mut u16,
         len: *mut u32,
     ) -> Bool;
+    fn GetCPInfoExW(code_page: u32, flags: u32, info: *mut u8) -> Bool;
+    fn GetACP() -> u32;
     fn GetLastError() -> u32;
     fn SetLastError(e: u32);
     fn GetStdHandle(which: u32) -> Handle;
@@ -419,8 +422,39 @@ fn ui_languages(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// GetCPInfoExW of CP_ACP: the ANSI code page itself, its "?" default
+/// character, U+003F as the Unicode default, a name starting with its
+/// number. (CPINFOEXW: MaxCharSize, DefaultChar[2], LeadByte[12],
+/// UnicodeDefaultChar, CodePage, CodePageName[260].)
+fn code_page_info(c: &mut Checks) -> Result<(), u32> {
+    let mut info = [0u8; 24 + 520];
+    // SAFETY: a CPINFOEXW-sized buffer.
+    unsafe {
+        c.ok(GetCPInfoExW(0, 0, info.as_mut_ptr()) != 0, GetLastError().into())?;
+        let acp = GetACP();
+        let at = |o: usize| u32::from_le_bytes(info[o..o + 4].try_into().unwrap_or([0; 4]));
+        c.eq(at(20).into(), acp.into())?;
+        c.ok(at(0) >= 1, at(0).into())?;
+        c.eq(info[4].into(), u64::from(b'?'))?;
+        c.eq(u16::from_le_bytes([info[18], info[19]]).into(), 0x3f)?;
+        // The name begins with the number ("65001 (UTF-8)", "1252  (ANSI - Latin I)").
+        let mut digits = [0u16; 10];
+        let mut n = acp;
+        let mut k = 10;
+        while n > 0 {
+            k -= 1;
+            digits[k] = u16::from(b'0') + (n % 10) as u16;
+            n /= 10;
+        }
+        let name: &[u16] = core::slice::from_raw_parts(info.as_ptr().add(24).cast(), 10 - k);
+        c.ok(name == &digits[k..], name[0].into())?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    code_page_info(&mut c)?;
     ui_languages(&mut c)?;
     locales(&mut c)?;
     strings(&mut c)?;

@@ -2453,6 +2453,26 @@ impl Call<'_> {
     }
 
     /// Whether OBJECT_ATTRIBUTES name `\Device\Null` (`\??\NUL`).
+    /// The console object `\??\CONOUT$` or `\??\CONIN$` names (what
+    /// Win32 opens for those names), if the attributes name one.
+    fn names_console(&self, attrs_ptr: u64) -> Result<Option<ObjectBody>, NtStatus> {
+        let Some((0, name, _)) = self.raw_object_attributes(attrs_ptr)? else { return Ok(None) };
+        let is = |text: &str| {
+            name.len() == text.len()
+                && name
+                    .iter()
+                    .zip(text.bytes())
+                    .all(|(&c, b)| u8::try_from(c).is_ok_and(|c| c.eq_ignore_ascii_case(&b)))
+        };
+        Ok(if is("\\??\\CONOUT$") {
+            Some(ObjectBody::ConsoleOutput)
+        } else if is("\\??\\CONIN$") {
+            Some(ObjectBody::ConsoleInput)
+        } else {
+            None
+        })
+    }
+
     fn names_null(&self, attrs_ptr: u64) -> Result<bool, NtStatus> {
         let Some((0, name, attributes)) = self.raw_object_attributes(attrs_ptr)? else {
             return Ok(false);
@@ -2489,6 +2509,9 @@ impl Call<'_> {
         let (object, information) = if tri!(self.names_afd(attrs_ptr)) {
             let ea = tri!(self.ea_buffer(ea.0, ea.1));
             (tri!(super::afd::open(&ea)), file::FILE_OPENED)
+        } else if let Some(body) = tri!(self.names_console(attrs_ptr)) {
+            let Ok(object) = KObject::new(body) else { return NtStatus::NO_MEMORY };
+            (object, file::FILE_OPENED)
         } else if tri!(self.names_null(attrs_ptr)) {
             let Ok(object) = KObject::new(ObjectBody::Null(Dispatcher::new(1))) else {
                 return NtStatus::NO_MEMORY;

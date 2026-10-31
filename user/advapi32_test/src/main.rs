@@ -23,7 +23,8 @@
 //!   providers (EventRegister, EventEnabled, EventWrite(Transfer),
 //!   EventUnregister) with no session listening; the thread's activity id
 //!   (EventActivityIdControl); software restriction policies (none: a
-//!   script is fully trusted; SaferIdentifyLevel and friends).
+//!   script is fully trusted; SaferIdentifyLevel and friends);
+//!   CreateWellKnownSid; secur32's GetUserNameExW.
 //!
 //! Prints `advapi32_test: ok` or exits with the number of the failing
 //! check.
@@ -212,6 +213,12 @@ unsafe extern "system" {
         reserved: *mut c_void,
     ) -> Bool;
     fn SaferCloseLevel(level: Handle) -> Bool;
+    fn CreateWellKnownSid(kind: u32, domain: *const u8, sid: *mut u8, size: *mut u32) -> Bool;
+}
+
+#[link(name = "secur32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GetUserNameExW(format: u32, buf: *mut u16, size: *mut u32) -> u8;
 }
 
 #[allow(dead_code)]
@@ -817,6 +824,48 @@ fn clr(c: &mut Checks) -> Result<(), u32> {
         )?;
         c.ok(token.is_null(), token as u64)?;
         c.ok(SaferCloseLevel(level) != 0, 0)?;
+
+        // Well-known SIDs: the size first, then the SID.
+        let mut size = 0u32;
+        c.eq(
+            CreateWellKnownSid(26, core::ptr::null(), core::ptr::null_mut(), &mut size) as u64,
+            0,
+        )?;
+        c.eq(GetLastError().into(), ERROR_INSUFFICIENT_BUFFER.into())?;
+        c.eq(size.into(), 16)?; // two subauthorities
+        // GetUserNameExW: NameSamCompatible is MACHINE\user; a local
+        // account has no user principal name.
+        let mut name = [0u16; 64];
+        let mut size = 3u32;
+        c.eq(GetUserNameExW(2, name.as_mut_ptr(), &mut size).into(), 0)?;
+        c.eq(GetLastError().into(), 234)?; // ERROR_MORE_DATA
+        c.eq(size.into(), 10)?; // "GALA\gala" and the NUL
+        let mut size = 64u32;
+        c.eq(GetUserNameExW(2, name.as_mut_ptr(), &mut size).into(), 1)?;
+        c.eq(size.into(), 9)?;
+        c.text(name.as_ptr(), "GALA\\gala")?;
+        let mut size = 64u32;
+        c.eq(GetUserNameExW(8, name.as_mut_ptr(), &mut size).into(), 0)?; // NameUserPrincipal
+        c.eq(GetLastError().into(), 1332)?; // ERROR_NONE_MAPPED
+
+        for (kind, text) in [
+            (26u32, "S-1-5-32-544"),
+            (1, "S-1-1-0"),
+            (22, "S-1-5-18"),
+            (17, "S-1-5-11"),
+            (27, "S-1-5-32-545"),
+        ] {
+            let mut sid = [0u8; 68];
+            let mut size = 68u32;
+            c.ok(
+                CreateWellKnownSid(kind, core::ptr::null(), sid.as_mut_ptr(), &mut size) != 0,
+                kind.into(),
+            )?;
+            let mut s = core::ptr::null_mut();
+            ConvertSidToStringSidW(sid.as_ptr(), &mut s);
+            c.text(s, text)?;
+            LocalFree(s.cast());
+        }
     }
     Ok(())
 }

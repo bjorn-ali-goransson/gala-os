@@ -90,6 +90,49 @@ pub extern "system" fn FreeCredentialsHandle(_credential: usize) -> u32 {
     SEC_E_INVALID_HANDLE
 }
 
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn SetLastError(code: u32);
+}
+
+/// GetUserNameExW: the one user's names. NameSamCompatible (2) is
+/// "GALA\gala"; NameDisplay (3) is "gala" (no full name is set); the
+/// directory-service formats (fully qualified, principal and the like)
+/// have no mapping for a local account (ERROR_NONE_MAPPED). Returns a
+/// BOOLEAN; with too small a buffer, ERROR_MORE_DATA and the size needed
+/// (with the NUL), else the length written (without it).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetUserNameExW(format: u32, buf: *mut u16, size: *mut u32) -> u8 {
+    let name: &str = match format {
+        2 => "GALA\\gala",
+        3 => "gala",
+        _ => {
+            // SAFETY: plain call.
+            unsafe { SetLastError(1332) }; // ERROR_NONE_MAPPED
+            return 0;
+        }
+    };
+    if size.is_null() {
+        // SAFETY: as above.
+        unsafe { SetLastError(87) };
+        return 0;
+    }
+    // SAFETY: the caller's size and buffer of that many characters.
+    unsafe {
+        if buf.is_null() || (*size as usize) < name.len() + 1 {
+            *size = name.len() as u32 + 1;
+            SetLastError(234); // ERROR_MORE_DATA
+            return 0;
+        }
+        for (i, b) in name.bytes().enumerate() {
+            *buf.add(i) = b.into();
+        }
+        *buf.add(name.len()) = 0;
+        *size = name.len() as u32;
+    }
+    1
+}
+
 /// DllMain (the entry point our link flags name).
 #[unsafe(no_mangle)]
 pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved: usize) -> i32 {

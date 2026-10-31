@@ -99,6 +99,10 @@ name = "comctl32"
 version = "0.1.0"
 
 [[package]]
+name = "console_test"
+version = "0.1.0"
+
+[[package]]
 name = "context_test"
 version = "0.1.0"
 dependencies = [

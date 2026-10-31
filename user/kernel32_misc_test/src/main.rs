@@ -6,7 +6,8 @@
 //! vectored exception and continue handlers (AddVectoredExceptionHandler
 //! sees a breakpoint and continues past it, and RaiseException's record),
 //! RtlPcToFileHeader, and RtlLookupFunctionEntry
-//! (the unwind entry of a function in this image), and FormatMessageW's
+//! (the unwind entry of a function in this image), FormatMessageW's
+//! allocated buffers, strings with inserts and IGNORE_INSERTS, and its
 //! system messages (English text with a CRLF; ERROR_MR_MID_NOT_FOUND for
 //! a number without one; ERROR_INSUFFICIENT_BUFFER); heaps (GetProcessHeap
 //! is the PEB's ProcessHeap; HeapAlloc with HEAP_ZERO_MEMORY, HeapSize as
@@ -76,6 +77,7 @@ unsafe extern "system" {
         size: u32,
         args: *mut c_void,
     ) -> u32;
+    fn LocalFree(p: *mut c_void) -> *mut c_void;
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn GetLastError() -> u32;
@@ -552,9 +554,62 @@ fn run() -> Result<(), u32> {
         );
         c.eq(n.into(), 0)?;
         c.eq(GetLastError().into(), 122)?; // ERROR_INSUFFICIENT_BUFFER
+
+        // FORMAT_MESSAGE_ALLOCATE_BUFFER: a LocalAlloc'ed message.
+        let mut p: *mut u16 = core::ptr::null_mut();
+        let n = FormatMessageW(
+            0x1000 | 0x200 | 0x100 | 0xff, // FROM_SYSTEM, IGNORE_INSERTS, ALLOCATE, one line
+            core::ptr::null(),
+            5,
+            0,
+            (&mut p as *mut *mut u16).cast(),
+            0,
+            core::ptr::null_mut(),
+        );
+        c.ok(
+            !p.is_null()
+                && expect(b"Access is denied.", core::slice::from_raw_parts(p, n as usize)),
+            n.into(),
+        )?;
+        LocalFree(p.cast());
+        // FORMAT_MESSAGE_FROM_STRING with an argument array: inserts with
+        // their formats, %% and %n.
+        let fmt = wide("%1 has %2!d! items (%3!x!)%%%n");
+        let name = wide("list");
+        let args: [usize; 3] = [name.as_ptr() as usize, 42, 255];
+        let n = FormatMessageW(
+            0x400 | 0x2000, // FROM_STRING, ARGUMENT_ARRAY
+            fmt.as_ptr().cast(),
+            0,
+            0,
+            buf.as_mut_ptr(),
+            256,
+            args.as_ptr() as *mut c_void,
+        );
+        c.ok(expect(b"list has 42 items (ff)%\r\n", &buf[..n as usize]), n.into())?;
+        // IGNORE_INSERTS keeps them as they are.
+        let n = FormatMessageW(
+            0x400 | 0x200,
+            fmt.as_ptr().cast(),
+            0,
+            0,
+            buf.as_mut_ptr(),
+            256,
+            core::ptr::null_mut(),
+        );
+        c.ok(expect(b"%1 has %2!d! items (%3!x!)%%%n", &buf[..n as usize]), n.into())?;
     }
     heaps(&mut c)?;
     Ok(())
+}
+
+/// A NUL-terminated UTF-16 copy of an ASCII string.
+fn wide(s: &str) -> [u16; 64] {
+    let mut b = [0u16; 64];
+    for (d, ch) in b.iter_mut().zip(s.bytes()) {
+        *d = ch.into();
+    }
+    b
 }
 
 #[unsafe(no_mangle)]

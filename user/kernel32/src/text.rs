@@ -41,6 +41,36 @@ pub extern "system" fn GetCPInfo(_code_page: u32, info: *mut u8) -> Bool {
     TRUE
 }
 
+/// GetCPInfoExW: CPINFOEXW (MaxCharSize, DefaultChar[2], LeadByte[12],
+/// UnicodeDefaultChar, CodePage, CodePageName[260]) of a code page gala
+/// serves (CP_ACP, CP_OEMCP and CP_THREAD_ACP are the ANSI code page).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCPInfoExW(code_page: u32, _flags: u32, info: *mut u8) -> Bool {
+    let cp = if matches!(code_page, 0 | 1 | 3) { GetACP() } else { code_page };
+    let name: &str = match cp {
+        65001 => "65001 (UTF-8)",
+        1252 => "1252  (ANSI - Latin I)",
+        437 => "437   (OEM - United States)",
+        20127 => "20127 (US-ASCII)",
+        _ => return fail_with(ERROR_INVALID_PARAMETER, FALSE),
+    };
+    if info.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's CPINFOEXW (24 + 520 bytes).
+    unsafe {
+        core::ptr::write_bytes(info, 0, 24 + 520);
+        info.cast::<u32>().write_unaligned(if cp == 65001 { 4 } else { 1 });
+        *info.add(4) = b'?';
+        (info.add(18) as *mut u16).write_unaligned(0x3f);
+        (info.add(20) as *mut u32).write_unaligned(cp);
+        for (i, b) in name.bytes().enumerate() {
+            (info.add(24 + 2 * i) as *mut u16).write_unaligned(b.into());
+        }
+    }
+    TRUE
+}
+
 /// IsValidCodePage: UTF-8 (and the ASCII-compatible code pages programs
 /// ask about are served as UTF-8 too).
 #[unsafe(no_mangle)]
@@ -282,36 +312,6 @@ const UNCHANGED_REFCOUNT: u32 = 2;
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
     fn LdrAddRefDll(flags: u32, module: Handle) -> u32;
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn SetConsoleMode(_console: Handle, _mode: u32) -> Bool {
-    TRUE
-}
-
-/// ReadConsoleA/W: no console input yet (reported).
-#[unsafe(no_mangle)]
-pub extern "system" fn ReadConsoleA(
-    _console: Handle,
-    _buf: *mut c_void,
-    _len: u32,
-    _read: *mut u32,
-    _control: *mut c_void,
-) -> Bool {
-    unsupported(b"kernel32.dll!ReadConsoleA", 0);
-    fail_with(ERROR_NOT_SUPPORTED, FALSE)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn ReadConsoleW(
-    _console: Handle,
-    _buf: *mut c_void,
-    _len: u32,
-    _read: *mut u32,
-    _control: *mut c_void,
-) -> Bool {
-    unsupported(b"kernel32.dll!ReadConsoleW", 0);
-    fail_with(ERROR_NOT_SUPPORTED, FALSE)
 }
 
 // Fibers: not yet (OpenSSL's asynchronous jobs use them; Nginx does not

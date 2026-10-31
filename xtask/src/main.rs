@@ -170,6 +170,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_clr_test", "ntdll.dll", "Windows/System32"),
     ("com_test", "ntdll.dll", "Windows/System32"),
     ("bcrypt_test", "ntdll.dll", "Windows/System32"),
+    ("console_test", "ntdll.dll", "Windows/System32"),
+    ("console_test", "kernel32.dll", "Windows/System32"),
     ("bcrypt_test", "kernel32.dll", "Windows/System32"),
     ("bcrypt_test", "bcrypt.dll", "Windows/System32"),
     ("bcrypt_test", "bcryptprimitives.dll", "Windows/System32"),
@@ -205,6 +207,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("advapi32_test", "ntdll.dll", "Windows/System32"),
     ("advapi32_test", "kernel32.dll", "Windows/System32"),
     ("advapi32_test", "advapi32.dll", "Windows/System32"),
+    ("advapi32_test", "secur32.dll", "Windows/System32"),
     ("advapi32_test", "bcryptprimitives.dll", "Windows/System32"),
     ("kernel32_system_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_locale_test", "kernel32.dll", "Windows/System32"),
@@ -409,6 +412,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pwsh", "version.dll", "Windows/System32"),
     ("pwsh", "ole32.dll", "Windows/System32"),
     ("pwsh", "bcrypt.dll", "Windows/System32"),
+    ("pwsh", "secur32.dll", "Windows/System32"),
+    ("pwsh", "iphlpapi.dll", "Windows/System32"),
     ("pwsh", "oleaut32.dll", "Windows/System32"),
     ("pwsh", "shell32.dll", "Windows/System32"),
     ("pwsh", "winmm.dll", "Windows/System32"),
@@ -765,6 +770,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_clr_test",
     "com_test",
     "bcrypt_test",
+    "console_test",
     "advapi32_test",
     "win32_misc_test",
     "kernel32_pool_test",
@@ -1514,6 +1520,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=advapi32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["advapi32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (PowerShell): the console (CONOUT$, CONIN$) behind redirected
+        // standard handles.
+        name: "console_test",
+        cmdline: "qemu_exit run=console_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["console_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (PowerShell): CNG random numbers and hashes (.NET's crypto).

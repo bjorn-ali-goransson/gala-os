@@ -1408,3 +1408,64 @@ pub extern "system" fn SaferComputeTokenFromLevel(
     // SAFETY: plain call (the current process pseudo-handle).
     OpenProcessToken(unsafe { GetCurrentProcess() }, 0, out)
 }
+
+/// CreateWellKnownSid: the documented well-known SIDs that need no domain
+/// (WELL_KNOWN_SID_TYPE values); others are recorded.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateWellKnownSid(
+    kind: u32,
+    _domain: *const u8,
+    sid: *mut u8,
+    size: *mut u32,
+) -> i32 {
+    const NT: [u8; 6] = [0, 0, 0, 0, 0, 5];
+    let auth = |a: u8| [0, 0, 0, 0, 0, a];
+    let (authority, subs): ([u8; 6], &[u32]) = match kind {
+        0 => (auth(0), &[0]),        // WinNullSid S-1-0-0
+        1 => (auth(1), &[0]),        // WinWorldSid S-1-1-0
+        2 => (auth(2), &[0]),        // WinLocalSid S-1-2-0
+        3 => (auth(3), &[0]),        // WinCreatorOwnerSid S-1-3-0
+        4 => (auth(3), &[1]),        // WinCreatorGroupSid S-1-3-1
+        7 => (NT, &[]),              // WinNtAuthoritySid S-1-5
+        8 => (NT, &[1]),             // WinDialupSid
+        9 => (NT, &[2]),             // WinNetworkSid
+        10 => (NT, &[3]),            // WinBatchSid
+        11 => (NT, &[4]),            // WinInteractiveSid
+        12 => (NT, &[6]),            // WinServiceSid
+        13 => (NT, &[7]),            // WinAnonymousSid
+        17 => (NT, &[11]),           // WinAuthenticatedUserSid
+        18 => (NT, &[12]),           // WinRestrictedCodeSid
+        19 => (NT, &[13]),           // WinTerminalServerSid
+        20 => (NT, &[14]),           // WinRemoteLogonIdSid
+        22 => (NT, &[18]),           // WinLocalSystemSid
+        23 => (NT, &[19]),           // WinLocalServiceSid
+        24 => (NT, &[20]),           // WinNetworkServiceSid
+        25 => (NT, &[32]),           // WinBuiltinDomainSid
+        26 => (NT, &[32, 544]),      // WinBuiltinAdministratorsSid
+        27 => (NT, &[32, 545]),      // WinBuiltinUsersSid
+        28 => (NT, &[32, 546]),      // WinBuiltinGuestsSid
+        29 => (NT, &[32, 547]),      // WinBuiltinPowerUsersSid
+        66 => (auth(16), &[0x1000]), // WinLowLabelSid
+        67 => (auth(16), &[0x2000]), // WinMediumLabelSid
+        68 => (auth(16), &[0x3000]), // WinHighLabelSid
+        69 => (auth(16), &[0x4000]), // WinSystemLabelSid
+        _ => {
+            missing(b"advapi32.dll!CreateWellKnownSid(type)");
+            return fail(ERROR_INVALID_PARAMETER, 0);
+        }
+    };
+    if size.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let need = sid_len(subs.len()) as u32;
+    // SAFETY: the caller's size and buffer of that many bytes.
+    unsafe {
+        let have = *size;
+        *size = need;
+        if sid.is_null() || have < need {
+            return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+    }
+    write_sid(sid, authority, subs);
+    1
+}

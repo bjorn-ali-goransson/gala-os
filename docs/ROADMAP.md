@@ -596,11 +596,15 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       reservations, a guard page below StackLimit - CoreCLR looks for it),
       GetSystemTimes, the ETW activity id, software restriction policies
       (none: fully trusted). PowerShell's Main now runs through policy
-      checks into its console host, which stops: it cannot open the
-      active console output buffer (CONOUT$). Next: a console - CONOUT$/
-      CONIN$, console modes, GetConsoleScreenBufferInfo, WriteConsoleW
-      (test first); then FormatMessage FROM_SYSTEM/FROM_STRING and the
-      registry reads (RegOpenKeyExW, 11 hits).
+      checks into its console host. Then: the console (console_test:
+      CONOUT$/CONIN$ behind the redirected standard handles), FormatMessage
+      with inserts and allocated buffers, GetCPInfoExW, CreateWellKnownSid,
+      secur32's GetUserNameExW. PowerShell now stops creating its
+      runspace: .NET's NLS calendar data (GetCalendarInfoEx missing).
+      Next: the calendar and date/time format functions .NET's NLS
+      globalization uses (GetCalendarInfoEx, EnumCalendarInfoExEx,
+      EnumTimeFormatsEx, EnumDateFormatsExEx; test first, en-US
+      Gregorian), then the registry reads (RegOpenKeyExW, 15 hits).
    4. Elasticsearch on the JDK, started with java directly (its .bat
       launchers need cmd.exe, which gala does not have). As a Windows
       service it also needs a service control manager. Memory (QEMU's

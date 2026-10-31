@@ -889,6 +889,23 @@ Windows, never shadows the system's DLLs.)
   BSTR/interface/VARIANT elements owned), VarCyFromDec; type libraries
   are not registered. Its exports have Windows' ordinals (build.rs, from
   Wine's spec); Get/Set/CreateErrorInfo forward to ole32.
+- **Console** (kernel32 console.rs): the standard handles are the serial
+  line, a character device that is not a console (as redirected output:
+  FILE_TYPE_CHAR, GetConsoleMode fails); the console itself is CONOUT$ /
+  CONIN$ (kernel32 maps the names to `\??\CONOUT$`/`\??\CONIN$`, which
+  the kernel opens as console objects). Its screen buffer keeps no cells:
+  writes reach the serial line as UTF-8, and kernel32 keeps what the
+  console functions report - modes, a 120x9001 buffer with a 120x30
+  window following the cursor, the cursor (moved by WriteConsole* and
+  WriteFile through these handles), attributes, cursor info, the title.
+  There is no keyboard: no input events, reads return nothing (recorded).
+  Console handles are those kernel32 opened by name (a table); duplicates
+  are not recognized yet (TODO).
+- **FormatMessage** (kernel32 messages.rs): system messages from a table
+  of the documented US English texts, or the caller's string; inserts
+  (%1..%99 with printf-style formats, %n %r %t %b %0 %%), IGNORE_INSERTS,
+  argument arrays or va_lists, ALLOCATE_BUFFER (LocalAlloc). Message
+  tables in modules are not supported yet (recorded).
 - **CNG** (bcrypt): BCryptGenRandom (ProcessPrng), MD5/SHA-1/SHA-2 and
   their HMACs through providers or the documented pseudo-handles
   (incremental, duplicated, reusable, one shot), BCryptGetProperty for
