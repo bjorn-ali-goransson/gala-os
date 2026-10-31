@@ -277,6 +277,28 @@ pub fn has_wildcards(mask: &[u16]) -> bool {
 
 pub struct RamFs {
     nodes: Vec<Option<Node>>,
+    /// Changes since the last `take_changes`, recorded while `journal` is
+    /// on (directory change notification: nt::notify).
+    changes: Vec<Change>,
+    pub journal: bool,
+    /// A change could not be recorded (no memory): watchers must rescan.
+    changes_lost: bool,
+}
+
+/// FILE_ACTION_* of a change.
+pub const ACTION_ADDED: u32 = 1;
+pub const ACTION_REMOVED: u32 = 2;
+pub const ACTION_MODIFIED: u32 = 3;
+pub const ACTION_RENAMED_OLD_NAME: u32 = 4;
+pub const ACTION_RENAMED_NEW_NAME: u32 = 5;
+
+/// One change to a directory's entries or to a file's contents.
+pub struct Change {
+    /// The directory the entry is (or was) in, and its name there.
+    pub parent: NodeId,
+    pub name: Vec<u16>,
+    pub directory: bool,
+    pub action: u32,
 }
 
 impl RamFs {
@@ -296,7 +318,62 @@ impl RamFs {
             mapped_size: 0,
         };
         nodes.try_push(Some(root)).map_err(|_| FsError::NoMemory)?;
-        Ok(Self { nodes })
+        Ok(Self { nodes, changes: Vec::new(), journal: false, changes_lost: false })
+    }
+
+    /// Records a change (if the journal is on); the same change twice in a
+    /// row is recorded once (writes come in chunks).
+    fn note(&mut self, parent: NodeId, name: &[u16], directory: bool, action: u32) {
+        if !self.journal {
+            return;
+        }
+        if let Some(last) = self.changes.last()
+            && last.parent == parent
+            && last.action == action
+            && last.name == name
+        {
+            return;
+        }
+        let mut owned = Vec::new();
+        let recorded = owned.try_extend_from_slice(name).is_ok()
+            && self.changes.try_push(Change { parent, name: owned, directory, action }).is_ok();
+        if !recorded {
+            self.changes_lost = true;
+        }
+    }
+
+    /// The changes recorded so far, and whether some were lost.
+    pub fn take_changes(&mut self) -> (Vec<Change>, bool) {
+        let lost = core::mem::take(&mut self.changes_lost);
+        (core::mem::take(&mut self.changes), lost)
+    }
+
+    /// The name of entry `name` of directory `parent` relative to `dir`:
+    /// `name` if `parent` is `dir`; with `tree`, `sub\\name` for entries
+    /// below it; None otherwise.
+    pub fn relative_name(
+        &self,
+        dir: NodeId,
+        parent: NodeId,
+        name: &[u16],
+        tree: bool,
+    ) -> Option<Vec<u16>> {
+        let mut chain: Vec<NodeId> = Vec::new();
+        let mut at = parent;
+        while at != dir {
+            if !tree || at == ROOT {
+                return None;
+            }
+            chain.try_push(at).ok()?;
+            at = self.node(at)?.parent;
+        }
+        let mut out = Vec::new();
+        for &n in chain.iter().rev() {
+            out.try_extend_from_slice(&self.node(n)?.name).ok()?;
+            out.try_push(u16::from(b'\\')).ok()?;
+        }
+        out.try_extend_from_slice(name).ok()?;
+        Some(out)
     }
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
@@ -391,6 +468,7 @@ impl RamFs {
             self.nodes[id] = None;
             return Err(FsError::NoMemory);
         }
+        self.note(parent, name, directory, ACTION_ADDED);
         Ok(id)
     }
 
@@ -464,6 +542,7 @@ impl RamFs {
 
     fn remove(&mut self, id: NodeId) {
         let Some(node) = self.nodes.get_mut(id).and_then(Option::take) else { return };
+        self.note(node.parent, &node.name, node.is_dir(), ACTION_REMOVED);
         if let Some(Some(Node { kind: Kind::Directory(children), .. })) =
             self.nodes.get_mut(node.parent)
         {
@@ -558,8 +637,11 @@ impl RamFs {
             }
         }
         let node = self.node_mut(id)?;
+        let old_name = core::mem::replace(&mut node.name, owned);
         node.parent = parent;
-        node.name = owned;
+        let directory = node.is_dir();
+        self.note(old_parent, &old_name, directory, ACTION_RENAMED_OLD_NAME);
+        self.note(parent, name, directory, ACTION_RENAMED_NEW_NAME);
         Ok(())
     }
 
@@ -601,6 +683,11 @@ impl RamFs {
         contents.write_at(start, data)?;
         node.written = now;
         node.version = next_version();
+        let (parent, name) = (node.parent, core::mem::take(&mut node.name));
+        self.note(parent, &name, false, ACTION_MODIFIED);
+        if let Ok(node) = self.node_mut(id) {
+            node.name = name;
+        }
         Ok(data.len())
     }
 
@@ -641,6 +728,11 @@ impl RamFs {
         contents.set_len(size)?;
         node.written = now;
         node.version = next_version();
+        let (parent, name) = (node.parent, core::mem::take(&mut node.name));
+        self.note(parent, &name, false, ACTION_MODIFIED);
+        if let Ok(node) = self.node_mut(id) {
+            node.name = name;
+        }
         Ok(())
     }
 
@@ -836,6 +928,45 @@ mod tests {
         let names: Vec<Vec<u16>> =
             f.list(ROOT).unwrap().iter().map(|&id| f.node(id).unwrap().name().to_vec()).collect();
         assert_eq!(names, [w("A.dat"), w("b.txt"), w("c.txt"), w("sub")]);
+    }
+
+    #[test]
+    fn change_journal_and_relative_names() {
+        let mut f = fs();
+        let d = f.create(ROOT, &w("d"), true, 1).unwrap();
+        // Off by default: nothing recorded.
+        assert!(f.take_changes().0.is_empty());
+        f.journal = true;
+        let a = f.create(d, &w("a"), false, 1).unwrap();
+        f.write(a, 0, b"x", 2).unwrap();
+        f.write(a, 1, b"y", 2).unwrap(); // the same change again: once
+        let sub = f.create(d, &w("sub"), true, 1).unwrap();
+        f.rename(a, sub, &w("b"), false).unwrap();
+        let (changes, lost) = f.take_changes();
+        assert!(!lost);
+        let summary: Vec<(u32, String, NodeId)> = changes
+            .iter()
+            .map(|c| (c.action, String::from_utf16_lossy(&c.name), c.parent))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (ACTION_ADDED, "a".into(), d),
+                (ACTION_MODIFIED, "a".into(), d),
+                (ACTION_ADDED, "sub".into(), d),
+                (ACTION_RENAMED_OLD_NAME, "a".into(), d),
+                (ACTION_RENAMED_NEW_NAME, "b".into(), sub),
+            ]
+        );
+        assert!(changes[2].directory);
+        let rel = |dir, parent, tree| {
+            f.relative_name(dir, parent, &w("b"), tree).map(|v| String::from_utf16_lossy(&v))
+        };
+        assert_eq!(rel(sub, sub, false).as_deref(), Some("b"));
+        assert_eq!(rel(d, sub, false), None);
+        assert_eq!(rel(d, sub, true).as_deref(), Some("sub\\b"));
+        assert_eq!(rel(ROOT, sub, true).as_deref(), Some("d\\sub\\b"));
+        assert_eq!(rel(sub, d, true), None);
     }
 
     #[test]

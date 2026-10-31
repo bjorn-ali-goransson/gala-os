@@ -435,7 +435,7 @@ impl KObject {
             ObjectBody::Timer(t) => Some(&t.dispatcher),
             ObjectBody::Thread(t) => Some(&t.dispatcher),
             ObjectBody::Process(p) => Some(&p.dispatcher),
-            ObjectBody::File(f) => Some(&f.dispatcher),
+            ObjectBody::File(f) => Some(&*f.dispatcher),
             ObjectBody::Socket(e) => Some(&e.state.dispatcher),
             ObjectBody::Pipe(p) => Some(&p.dispatcher),
             ObjectBody::Null(d) => Some(d),

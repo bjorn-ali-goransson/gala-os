@@ -2655,7 +2655,10 @@ pub extern "system" fn GetQueuedCompletionStatus(
             *bytes = e.bytes;
             *key = e.completion_key;
             *overlapped = e.overlapped;
-            if e.internal as u32 == STATUS_SUCCESS { TRUE } else { fail(e.internal as u32, FALSE) }
+            // A packet of a failed I/O (an error or warning status) fails;
+            // success codes (e.g. STATUS_NOTIFY_CLEANUP) do not.
+            let status = e.internal as u32;
+            if (status as i32) >= 0 { TRUE } else { fail(status, FALSE) }
         },
         Err(STATUS_TIMEOUT) => {
             // SAFETY: the caller's output pointer.

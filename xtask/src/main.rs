@@ -230,6 +230,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("tls_test", "ntdll.dll", "Windows/System32"),
     ("tls_test", "kernel32.dll", "Windows/System32"),
     ("tls_test", "tlsdll.dll", "gala"),
+    ("dirchange_test", "ntdll.dll", "Windows/System32"),
+    ("dirchange_test", "kernel32.dll", "Windows/System32"),
     ("afd_poll_test", "ntdll.dll", "Windows/System32"),
     ("afd_poll_test", "kernel32.dll", "Windows/System32"),
     ("afd_poll_test", "ws2_32.dll", "Windows/System32"),
@@ -858,6 +860,7 @@ const USER_PROGRAMS: &[&str] = &[
     "keyed_event_test",
     "iphlpapi_test",
     "afd_poll_test",
+    "dirchange_test",
     "win32_misc_test",
     "kernel32_pool_test",
     "tls_test",
@@ -1657,6 +1660,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=advapi32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["advapi32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (Elasticsearch, Java's WatchService): directory change
+        // notification.
+        name: "dirchange_test",
+        cmdline: "qemu_exit run=dirchange_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["dirchange_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (Elasticsearch, Java NIO): AFD polls as wepoll makes them.

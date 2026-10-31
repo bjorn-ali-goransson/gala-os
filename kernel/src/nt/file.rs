@@ -15,9 +15,18 @@ use crate::sync::IrqMutex;
 
 static FS: IrqMutex<Option<RamFs>> = IrqMutex::new(None);
 
-/// Runs `f` on the file system (initialized by `init`).
+/// Runs `f` on the file system (initialized by `init`); then delivers the
+/// directory change notifications its changes caused (nt::notify), with
+/// the file system released.
 pub fn with_fs<R>(f: impl FnOnce(&mut RamFs) -> R) -> R {
-    f(FS.lock().as_mut().expect("file system initialized"))
+    let (r, events) = {
+        let mut guard = FS.lock();
+        let fs = guard.as_mut().expect("file system initialized");
+        let r = f(fs);
+        (r, super::notify::collect(fs))
+    };
+    super::notify::deliver(events);
+    r
 }
 
 pub const FILE_READ_DATA: u32 = 0x0001;
@@ -209,8 +218,9 @@ pub struct FileObject {
     pub scan: IrqMutex<Option<DirScan>>,
     /// FileModeInformation: the mode options it was opened with.
     pub mode: u32,
-    /// Signaled when an I/O on it completes (waiting on a file handle).
-    pub dispatcher: super::wait::Dispatcher,
+    /// Signaled when an I/O on it completes (waiting on a file handle);
+    /// shared with requests that complete later (nt::notify).
+    pub dispatcher: crate::mm::heap::KArc<super::wait::Dispatcher>,
     /// FileCompletionInformation: the completion port and key that its
     /// completed I/O is posted to.
     pub completion: IrqMutex<Option<(ObjectRef, u64)>>,
@@ -239,13 +249,21 @@ impl FileObject {
 impl Drop for FileObject {
     fn drop(&mut self) {
         super::locks::release_owner(self.lock_owner());
+        // Its directory watch ends (waiting requests: NOTIFY_CLEANUP).
+        if self.directory && super::notify::watched(self.lock_owner()) {
+            super::notify::cleanup(self.lock_owner());
+        }
         let (node, access, share) = (self.node, self.access, self.share);
-        if let Some(fs) = FS.lock().as_mut() {
+        let events = FS.lock().as_mut().map(|fs| {
             if self.delete_on_close {
                 // Fails for a non-empty directory, which then stays.
                 let _ = fs.set_delete_pending(node, true);
             }
             fs.close(node, access, share);
+            super::notify::collect(fs)
+        });
+        if let Some(events) = events {
+            super::notify::deliver(events);
         }
     }
 }
@@ -379,7 +397,12 @@ pub fn create(
         delete_on_close,
         scan: IrqMutex::new(None),
         mode: mode_of(options),
-        dispatcher: super::wait::Dispatcher::new(0),
+        dispatcher: crate::mm::heap::KArc::try_new(super::wait::Dispatcher::new(0)).map_err(
+            |_| {
+                with_fs(|fs| fs.close(node, access, share));
+                NtStatus::NO_MEMORY
+            },
+        )?,
         completion: IrqMutex::new(None),
     };
     let object = match KObject::new(ObjectBody::File(file)) {

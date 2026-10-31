@@ -209,6 +209,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirchange_test"
+version = "0.1.0"
+
+[[package]]
 name = "exception_test"
 version = "0.1.0"
 dependencies = [

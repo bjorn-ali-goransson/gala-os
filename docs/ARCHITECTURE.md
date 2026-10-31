@@ -814,6 +814,31 @@ and thread (full access).
 
 
 
+### Directory change notification
+
+`nt::notify`: NtNotifyChangeDirectoryFile (gala's number 0x7f13 until
+verified; kernel32's ReadDirectoryChangesW over it). A watch belongs to
+one open of a directory (keyed by its file object); while any watch
+exists the ramfs records a journal of changes (`Change`: parent, name,
+directory?, FILE_ACTION_*: created, removed, renamed old/new, written or
+resized; the same change twice in a row once). `file::with_fs` hands the
+journal to `notify::collect` before releasing the file system (names are
+made relative to each watched directory there, `sub\name` for subtree
+watches) and `notify::deliver` completes requests after. Changes that
+come while no request waits are kept as FILE_NOTIFY_INFORMATION records
+up to the last request's buffer size; past it (or if the journal lost a
+change) the next request gets STATUS_NOTIFY_ENUM_DIR and no data, so the
+caller rescans. A request completes like AFD's: IO_STATUS_BLOCK, event,
+the file object's signal (its dispatcher is a shared `KArc`, so a
+waiting request does not keep the file object alive), a completion-port
+packet, the completion routine (kernel32 calls the caller's
+LPOVERLAPPED_COMPLETION_ROUTINE through a trampoline). A synchronous
+handle's call waits for its result. NtCancelIoFileEx ends waiting
+requests with STATUS_CANCELLED; the open's close (FileObject's Drop) with
+STATUS_NOTIFY_CLEANUP (`dirchange_test`). Filters: file and directory
+names, size and last write; attribute and time changes are not
+reported yet.
+
 ### Keyed events
 
 `nt::keyed_event`: NtCreateKeyedEvent/NtOpenKeyedEvent (named through

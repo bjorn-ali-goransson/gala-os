@@ -682,8 +682,9 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       answers the host**: `cargo xtask boot-test elasticsearch` (3 GiB,
       about 8 minutes in the kernel under TCG) passes, the host's GET /
       returning the cluster name, version 8.15.3 and "You Know, for
-      Search". Still pending (too slow for CI). Left: ReadDirectoryChangesW
-      (file-settings watcher, a warning), the node name (HOSTNAME).
+      Search". Still pending (too slow for CI). ReadDirectoryChangesW is
+      done (`dirchange_test`; its file-settings watcher). Left: the node
+      name (HOSTNAME).
    5. SQL Server (asked for 2026-10-31): start with SQL Server Express
       LocalDB, the small edition that runs sqlservr.exe as an ordinary
       process started on demand (no Windows service), queried with a

@@ -69,6 +69,8 @@ pub const NT_CREATE_KEYED_EVENT: u32 = 0x7f0f;
 pub const NT_OPEN_KEYED_EVENT: u32 = 0x7f10;
 pub const NT_WAIT_FOR_KEYED_EVENT: u32 = 0x7f11;
 pub const NT_RELEASE_KEYED_EVENT: u32 = 0x7f12;
+/// gala's number until verified (reached through ntdll).
+pub const NT_NOTIFY_CHANGE_DIRECTORY_FILE: u32 = 0x7f13;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -281,6 +283,12 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_OPEN_KEYED_EVENT, "NtOpenKeyedEvent", 3, nt_open_keyed_event),
     (NT_WAIT_FOR_KEYED_EVENT, "NtWaitForKeyedEvent", 4, nt_wait_for_keyed_event),
     (NT_RELEASE_KEYED_EVENT, "NtReleaseKeyedEvent", 4, nt_release_keyed_event),
+    (
+        NT_NOTIFY_CHANGE_DIRECTORY_FILE,
+        "NtNotifyChangeDirectoryFile",
+        9,
+        nt_notify_change_directory_file,
+    ),
 ];
 
 /// The name of service `number` (for diagnostics).
@@ -2779,12 +2787,19 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
 fn nt_cancel_io_file_ex(call: &mut Call<'_>) -> NtStatus {
     let (handle, request, iosb) = (arg!(call, 0), arg!(call, 1), arg!(call, 2));
     let entry = tri!(call.handle(Handle(handle)));
-    let ObjectBody::Socket(endpoint) = &entry.object.body else {
-        // Other files complete their I/O inside the call: nothing pending.
-        return NtStatus::NOT_FOUND;
-    };
     let target = (request != 0).then_some(request);
-    if super::afd::cancel(&endpoint.state, Some(&call.process), target) == 0 {
+    let cancelled = match &entry.object.body {
+        ObjectBody::Socket(endpoint) => {
+            super::afd::cancel(&endpoint.state, Some(&call.process), target)
+        }
+        // A directory's waiting change notifications; other file I/O
+        // completes inside its call.
+        ObjectBody::File(f) if f.directory => {
+            super::notify::cancel(f.lock_owner(), &call.process, target)
+        }
+        _ => 0,
+    };
+    if cancelled == 0 {
         return NtStatus::NOT_FOUND;
     }
     if iosb != 0 {
@@ -3623,6 +3638,68 @@ fn rename_file(
     match result {
         Ok(()) => NtStatus::SUCCESS,
         Err(e) => file::fs_status(e),
+    }
+}
+
+/// NtNotifyChangeDirectoryFile(FileHandle, Event, ApcRoutine, ApcContext,
+///     IoStatusBlock, Buffer, Length, CompletionFilter, WatchTree): see
+/// nt::notify. A synchronous handle's call waits for the result.
+fn nt_notify_change_directory_file(call: &mut Call<'_>) -> NtStatus {
+    use super::notify;
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let ObjectBody::File(dir) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if !dir.directory {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    if entry.access & file::FILE_READ_DATA == 0 {
+        // FILE_LIST_DIRECTORY
+        return NtStatus::ACCESS_DENIED;
+    }
+    let (event_handle, iosb, buffer) = (arg!(call, 1), arg!(call, 4), arg!(call, 5));
+    let (length, filter, tree) =
+        (arg!(call, 6) as u32, arg!(call, 7) as u32, arg!(call, 8) as u8 != 0);
+    if filter == 0 || filter & !0x17f != 0 {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let event = tri!(start_io(call, &entry.object, event_handle));
+    let apc = tri!(io_apc(call, dir, iosb)).and_then(|apc| thread::current().map(|t| (t, apc)));
+    let done = if dir.synchronous {
+        let e = Event { kind: EventType::Notification, dispatcher: Dispatcher::new(0) };
+        match KObject::new(ObjectBody::Event(e)) {
+            Ok(o) => Some(o),
+            Err(_) => return NtStatus::NO_MEMORY,
+        }
+    } else {
+        None
+    };
+    let request = notify::Request {
+        process: call.process.clone(),
+        iosb,
+        buffer,
+        length,
+        event,
+        port: dir.completion.lock().clone(),
+        apc_context: arg!(call, 3),
+        apc,
+        file_signal: dir.dispatcher.clone(),
+        done: done.clone(),
+    };
+    let key = dir.lock_owner();
+    let node = dir.node;
+    drop(entry);
+    let status = notify::request(key, node, filter, tree, request);
+    match (status, done) {
+        (NtStatus::PENDING, Some(done)) => {
+            let objects = [done];
+            wait::wait_for(&objects, false, Timeout::Infinite);
+            // The result is in the caller's IO_STATUS_BLOCK.
+            let mut b = [0u8; 4];
+            match call.process.read(iosb, &mut b) {
+                Ok(()) => NtStatus(u32::from_le_bytes(b)),
+                Err(_) => NtStatus::ACCESS_VIOLATION,
+            }
+        }
+        (status, _) => status,
     }
 }
 

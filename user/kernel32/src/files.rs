@@ -21,6 +21,17 @@ pub extern "system" fn GetFileSize(h: Handle, high: *mut u32) -> u32 {
 
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn NtNotifyChangeDirectoryFile(
+        h: Handle,
+        event: usize,
+        apc: usize,
+        apc_context: usize,
+        iosb: *mut [usize; 2],
+        buffer: *mut u8,
+        length: u32,
+        filter: u32,
+        tree: u8,
+    ) -> u32;
     fn NtLockFile(
         h: Handle,
         event: Handle,
@@ -164,20 +175,91 @@ pub extern "system" fn DeviceIoControl(
     fail_with(ERROR_NOT_SUPPORTED, FALSE)
 }
 
-/// ReadDirectoryChangesW: no change notification yet.
+/// ReadDirectoryChangesW(hDirectory, lpBuffer, nBufferLength,
+/// bWatchSubtree, dwNotifyFilter, lpBytesReturned, lpOverlapped,
+/// lpCompletionRoutine), over NtNotifyChangeDirectoryFile. Without an
+/// OVERLAPPED it waits for a change; with one it returns at once (TRUE),
+/// the OVERLAPPED being the status block, its hEvent the event and,
+/// unless its low bit is set, the completion packet's context; a
+/// completion routine runs as an APC. A buffer overflow
+/// (STATUS_NOTIFY_ENUM_DIR) succeeds with 0 bytes: the caller rescans.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub extern "system" fn ReadDirectoryChangesW(
-    _h: Handle,
-    _buffer: *mut c_void,
-    _length: u32,
-    _subtree: Bool,
-    _filter: u32,
-    _returned: *mut u32,
-    _overlapped: *mut c_void,
-    _routine: usize,
+    h: Handle,
+    buffer: *mut c_void,
+    length: u32,
+    subtree: Bool,
+    filter: u32,
+    returned: *mut u32,
+    overlapped: *mut c_void,
+    routine: usize,
 ) -> Bool {
-    unsupported(b"kernel32.dll!ReadDirectoryChangesW", 0);
-    fail_with(ERROR_NOT_SUPPORTED, FALSE)
+    const STATUS_NOTIFY_ENUM_DIR: u32 = 0x10c;
+    let tree = u8::from(subtree != 0);
+    if overlapped.is_null() {
+        let mut iosb = [0usize; 2];
+        // SAFETY: the caller's buffer of `length` bytes; our status block.
+        let mut status = unsafe {
+            NtNotifyChangeDirectoryFile(h, 0, 0, 0, &mut iosb, buffer.cast(), length, filter, tree)
+        };
+        if status == STATUS_PENDING {
+            // SAFETY: waits for the request on an asynchronous handle.
+            unsafe { NtWaitForSingleObject(h, 0, core::ptr::null()) };
+            status = iosb[0] as u32;
+        }
+        if status != STATUS_SUCCESS && status != STATUS_NOTIFY_ENUM_DIR {
+            return fail(status, FALSE);
+        }
+        if !returned.is_null() {
+            // SAFETY: the caller's output.
+            unsafe { *returned = iosb[1] as u32 };
+        }
+        return TRUE;
+    }
+    let ov = overlapped.cast::<usize>();
+    // SAFETY: the caller's OVERLAPPED, valid until the request completes.
+    let event = unsafe {
+        *ov = STATUS_PENDING as usize;
+        *ov.add(1) = 0;
+        *ov.add(3)
+    };
+    let (apc, context) = if routine != 0 {
+        (io_completion_trampoline as *const () as usize, routine)
+    } else {
+        (0, if event & 1 != 0 { 0 } else { ov as usize })
+    };
+    // SAFETY: as above; the caller's buffer of `length` bytes.
+    let status = unsafe {
+        NtNotifyChangeDirectoryFile(
+            h,
+            event & !1,
+            apc,
+            context,
+            ov.cast(),
+            buffer.cast(),
+            length,
+            filter,
+            tree,
+        )
+    };
+    match status {
+        STATUS_SUCCESS | STATUS_PENDING | STATUS_NOTIFY_ENUM_DIR => TRUE,
+        _ => fail(status, FALSE),
+    }
+}
+
+/// An I/O completion APC (ApcContext = the caller's
+/// LPOVERLAPPED_COMPLETION_ROUTINE, the IO_STATUS_BLOCK = its OVERLAPPED):
+/// calls routine(error code, bytes, overlapped).
+extern "system" fn io_completion_trampoline(routine: usize, iosb: *mut usize, _reserved: usize) {
+    // SAFETY: the routine the caller gave and its OVERLAPPED.
+    unsafe {
+        let routine: extern "system" fn(u32, u32, *mut usize) = core::mem::transmute(routine);
+        let status = *iosb as u32;
+        let error = if status == STATUS_SUCCESS { 0 } else { RtlNtStatusToDosError(status) };
+        routine(error, *iosb.add(1) as u32, iosb);
+    }
 }
 
 /// CreateNamedPipeA: named pipe servers are not there yet (anonymous

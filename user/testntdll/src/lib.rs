@@ -115,6 +115,11 @@ syscall_stubs! {
     );
     NtWaitForKeyedEvent = 0x7f11, fn(h: usize, key: usize, alertable: u8, timeout: *const i64);
     NtReleaseKeyedEvent = 0x7f12, fn(h: usize, key: usize, alertable: u8, timeout: *const i64);
+    // Directory change notification (gala's number, unverified).
+    NtNotifyChangeDirectoryFile = 0x7f13, fn(
+        h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
+        buffer: *mut u8, length: u32, filter: u32, tree: u8
+    );
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,

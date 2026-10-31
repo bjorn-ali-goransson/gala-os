@@ -10,6 +10,7 @@ pub mod layout;
 pub mod ledger;
 pub mod locks;
 pub mod namespace;
+pub mod notify;
 pub mod ntdll;
 pub mod object;
 pub mod params;
