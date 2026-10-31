@@ -379,9 +379,16 @@ there, then `cargo xtask compare windows.json` here.
 | `xtask/` | the build and test driver (`cargo xtask ...`, scenarios) |
 | `docs/` | design, roadmap, workflow, measurements |
 
+## Contributing
+
+Issues, questions and discussion are welcome. Pull requests are not
+accepted for now: without a license, contributed code would have no clear
+terms.
+
 ## License
 
-No license is granted. The source code is published so that people can
+Copyright (c) 2026 Björn Ali Göransson. No license is granted (see
+[`LICENSE`](LICENSE)). The source code is published so that people can
 read it and follow the project, but all rights are reserved: publishing it
 does not give permission to use, copy, modify or redistribute it (GitHub's
 terms of service still allow viewing and forking on GitHub itself). The
