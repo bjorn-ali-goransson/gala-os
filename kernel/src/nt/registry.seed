@@ -1,0 +1,125 @@
+; The registry gala boots with: the keys and values real programs read,
+; with the values Windows 11 24H2 (build 26100) has, adapted to gala's
+; machine (user gala, computer GALA, code page UTF-8). Loaded by
+; nt::registry::load into memory at boot.
+;
+; Format: [\Registry\...] starts a key (made with any missing parents);
+; "name"=type:data or @=type:data (the unnamed value) sets a value. Types:
+; sz, expand (REG_EXPAND_SZ), multi (items separated by |), dword, qword
+; (decimal or 0x hex), hex (bytes, comma-separated). Data runs to the end
+; of the line, backslashes as they are. Lines starting ; are comments.
+
+[\Registry\Machine\HARDWARE\DESCRIPTION\System]
+[\Registry\Machine\SAM]
+[\Registry\Machine\SECURITY]
+
+; Windows 11 still reports itself as "Windows 10" in ProductName (and
+; CurrentVersion 6.3); programs tell Windows 11 by CurrentBuild >= 22000.
+[\Registry\Machine\SOFTWARE\Microsoft\Windows NT\CurrentVersion]
+"ProductName"=sz:Windows 10 Pro
+"EditionID"=sz:Professional
+"InstallationType"=sz:Client
+"CurrentVersion"=sz:6.3
+"CurrentBuild"=sz:26100
+"CurrentBuildNumber"=sz:26100
+"CurrentMajorVersionNumber"=dword:10
+"CurrentMinorVersionNumber"=dword:0
+"CurrentType"=sz:Multiprocessor Free
+"DisplayVersion"=sz:24H2
+"ReleaseId"=sz:2009
+"UBR"=dword:1
+"BuildLab"=sz:26100.ge_release.240331-1435
+"BuildLabEx"=sz:26100.1.amd64fre.ge_release.240331-1435
+"BuildBranch"=sz:ge_release
+"SystemRoot"=sz:C:\Windows
+"PathName"=sz:C:\Windows
+"RegisteredOwner"=sz:gala
+"RegisteredOrganization"=sz:
+"InstallDate"=dword:0
+"SoftwareType"=sz:System
+; The time zone database: gala's clock is UTC (TimeZoneInformation below).
+; TZI is REG_TZI_FORMAT: Bias, StandardBias, DaylightBias, StandardDate,
+; DaylightDate (SYSTEMTIMEs), all zero for UTC.
+[\Registry\Machine\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC]
+"Display"=sz:(UTC) Coordinated Universal Time
+"Std"=sz:Coordinated Universal Time
+"Dlt"=sz:Coordinated Universal Time
+"TZI"=hex:00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+[\Registry\Machine\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList]
+"ProfilesDirectory"=expand:%SystemDrive%\Users
+"Default"=expand:%SystemDrive%\Users\Default
+"Public"=expand:%SystemDrive%\Users\Public
+"ProgramData"=expand:%SystemDrive%\ProgramData
+[\Registry\Machine\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-21-1000000001-1000000002-1000000003-1001]
+"ProfileImagePath"=expand:C:\Users\gala
+
+[\Registry\Machine\SOFTWARE\Microsoft\Windows\CurrentVersion]
+"ProgramFilesDir"=sz:C:\Program Files
+"ProgramFilesDir (x86)"=sz:C:\Program Files (x86)
+"ProgramW6432Dir"=sz:C:\Program Files
+"CommonFilesDir"=sz:C:\Program Files\Common Files
+"CommonFilesDir (x86)"=sz:C:\Program Files (x86)\Common Files
+"CommonW6432Dir"=sz:C:\Program Files\Common Files
+"ProgramFilesPath"=expand:%ProgramFiles%
+"MediaPathUnexpanded"=expand:%SystemRoot%\Media
+[\Registry\Machine\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders]
+[\Registry\Machine\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies]
+[\Registry\Machine\SOFTWARE\Policies\Microsoft\Windows]
+[\Registry\Machine\SOFTWARE\Classes]
+[\Registry\Machine\SOFTWARE\WOW6432Node]
+
+[\Registry\Machine\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName]
+"ComputerName"=sz:GALA
+[\Registry\Machine\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName]
+"ComputerName"=sz:GALA
+[\Registry\Machine\SYSTEM\CurrentControlSet\Control\Nls\CodePage]
+"ACP"=sz:65001
+"OEMCP"=sz:65001
+"MACCP"=sz:10000
+[\Registry\Machine\SYSTEM\CurrentControlSet\Control\Nls\Language]
+"Default"=sz:0409
+"InstallLanguage"=sz:0409
+[\Registry\Machine\SYSTEM\CurrentControlSet\Control\Nls\Locale]
+@=sz:00000409
+[\Registry\Machine\SYSTEM\CurrentControlSet\Control\Session Manager]
+[\Registry\Machine\SYSTEM\CurrentControlSet\Control\Session Manager\Environment]
+"ComSpec"=expand:%SystemRoot%\system32\cmd.exe
+"OS"=sz:Windows_NT
+"Path"=expand:%SystemRoot%\system32;%SystemRoot%
+"PATHEXT"=sz:.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC
+"PROCESSOR_ARCHITECTURE"=sz:AMD64
+"TEMP"=expand:%SystemRoot%\TEMP
+"TMP"=expand:%SystemRoot%\TEMP
+"USERNAME"=sz:SYSTEM
+"windir"=expand:%SystemRoot%
+[\Registry\Machine\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management]
+[\Registry\Machine\SYSTEM\CurrentControlSet\Control\TimeZoneInformation]
+"TimeZoneKeyName"=sz:UTC
+"Bias"=dword:0
+"ActiveTimeBias"=dword:0
+"StandardName"=sz:Coordinated Universal Time
+"DaylightName"=sz:Coordinated Universal Time
+"DynamicDaylightTimeDisabled"=dword:0
+[\Registry\Machine\SYSTEM\CurrentControlSet\Services]
+[\Registry\Machine\SYSTEM\Setup]
+"SystemSetupInProgress"=dword:0
+
+[\Registry\User\.DEFAULT]
+[\Registry\User\S-1-5-21-1000000001-1000000002-1000000003-1001\Environment]
+"TEMP"=expand:%USERPROFILE%\AppData\Local\Temp
+"TMP"=expand:%USERPROFILE%\AppData\Local\Temp
+[\Registry\User\S-1-5-21-1000000001-1000000002-1000000003-1001\Volatile Environment]
+"USERNAME"=sz:gala
+"USERDOMAIN"=sz:GALA
+"USERPROFILE"=sz:C:\Users\gala
+"HOMEDRIVE"=sz:C:
+"HOMEPATH"=sz:\Users\gala
+"APPDATA"=sz:C:\Users\gala\AppData\Roaming
+"LOCALAPPDATA"=sz:C:\Users\gala\AppData\Local
+[\Registry\User\S-1-5-21-1000000001-1000000002-1000000003-1001\Console]
+[\Registry\User\S-1-5-21-1000000001-1000000002-1000000003-1001\Control Panel\International]
+"LocaleName"=sz:en-US
+"Locale"=sz:00000409
+[\Registry\User\S-1-5-21-1000000001-1000000002-1000000003-1001\Software\Classes]
+[\Registry\User\S-1-5-21-1000000001-1000000002-1000000003-1001\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders]
+[\Registry\User\S-1-5-21-1000000001-1000000002-1000000003-1001\Software\Policies]

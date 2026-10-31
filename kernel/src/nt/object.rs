@@ -340,6 +340,8 @@ pub enum ObjectBody {
     /// An open of `\Device\Null`: reads are at end of file, writes are
     /// discarded. Signaled (waits on it return at once).
     Null(Dispatcher),
+    /// An open registry key (`\Registry\...`).
+    Key(super::registry::KeyObject),
 }
 
 /// Where a named object lives in the namespace.
@@ -400,6 +402,7 @@ impl KObject {
             ObjectBody::Pipe(_) => "File",
             ObjectBody::NullDevice => "Device",
             ObjectBody::Null(_) => "File",
+            ObjectBody::Key(_) => "Key",
         }
     }
 
@@ -439,7 +442,8 @@ impl KObject {
             | ObjectBody::Volume
             | ObjectBody::AfdDevice
             | ObjectBody::NamedPipeDevice
-            | ObjectBody::NullDevice => None,
+            | ObjectBody::NullDevice
+            | ObjectBody::Key(_) => None,
         }
     }
 
@@ -463,6 +467,7 @@ impl KObject {
             | ObjectBody::NullDevice
             | ObjectBody::Null(_) => FILE_MAPPING,
             ObjectBody::Process(_) => PROCESS_MAPPING,
+            ObjectBody::Key(_) => super::registry::KEY_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,
                 write: READ_CONTROL | SYNCHRONIZE | 0x116,

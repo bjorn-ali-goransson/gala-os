@@ -538,6 +538,61 @@ the TSC clock; the performance counter runs at 10 MHz.
 User-mode CPU exceptions go to ntdll's dispatcher (vectored handlers,
 then frame-based SEH); unhandled, the process ends with the NTSTATUS.
 
+## Registry
+
+The configuration manager (`nt::registry`, the services in
+`nt/registry_calls.rs`) keeps the registry in kernel memory: one tree
+rooted at `\REGISTRY` with `MACHINE` and `USER` below it, nodes in an
+arena under one `IrqMutex`. It is not part of the object manager's
+directory tree: NtOpenKey/NtCreateKey take an absolute `\Registry\...`
+name (first component compared case-insensitively) or a name relative to
+a key handle in RootDirectory. A key object (`ObjectBody::Key`) holds a
+node index; the node counts key objects (`retain`/`release`), so a key
+deleted while open stays in the arena, marked deleted (its handles get
+STATUS_KEY_DELETED), and is freed with its last handle. Invariant: a key
+object is never dropped while the registry lock is held (its Drop takes
+it), so handlers make the key object after leaving `registry::with`.
+
+Rules kept from Windows (documented behaviour, checked by
+`registry_test`): names are case-insensitive and case-preserving
+(ASCII folding for now, as in the object namespace); subkeys enumerate
+in name order, values in the order first set; NtCreateKey creates only
+the last component (advapi32's RegCreateKeyEx walks the path); a
+volatile key's children must be volatile; a key with subkeys or a hive
+root cannot be deleted (STATUS_CANNOT_DELETE). Information classes:
+KEY_BASIC/NODE/FULL/NAME/CACHED_INFORMATION (flags and handle tags as
+zeros), KEY_VALUE_BASIC/FULL/PARTIAL_INFORMATION and the ALIGN64 forms;
+a buffer shorter than the fixed part is STATUS_BUFFER_TOO_SMALL, one
+shorter than the whole STATUS_BUFFER_OVERFLOW with what fits, and
+ResultLength is always the size needed. Access is checked against the
+handle (KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_ENUMERATE_SUB_KEYS, DELETE;
+KeyNameInformation needs none); the WOW64 view bits are dropped (one
+view). There are no security descriptors yet.
+
+Services: NtOpenKey 0x12, NtEnumerateValueKey 0x13, NtQueryKey 0x16,
+NtQueryValueKey 0x17, NtCreateKey 0x1d, NtEnumerateKey 0x32 (long-stable
+on x64), NtSetValueKey 0x60 (to be verified), and gala's numbers for
+NtOpenKeyEx, NtDeleteKey, NtDeleteValueKey, NtFlushKey (0x7f06-0x7f09).
+
+The tree is built at boot from `kernel/src/nt/registry.seed` (a small
+text format, described at its top) plus
+`HARDWARE\DESCRIPTION\System\CentralProcessor\<n>` per processor from
+CPUID (name, vendor, identifier, base MHz). Nothing is saved: writes
+last until shutdown. NtOpenKey of a missing key records it in the ledger
+(`registry:MACHINE/...`, "absent key"), which is how the seed grows.
+
+advapi32 (`user/advapi32/src/registry.rs`): the predefined HKEYs (zero-
+or sign-extended, as winreg.h's x64 values are) open their key on first
+use and keep the handle: HKLM `\Registry\Machine`, HKU `\Registry\User`,
+HKCU `\Registry\User\<the user's SID>` (S-1-5-21-1000000001-...-1001,
+advapi32's account), HKCR `\Registry\Machine\SOFTWARE\Classes` (no
+per-user merge yet), HKEY_CURRENT_CONFIG; HKEY_PERFORMANCE_DATA is
+reported. Errors come from RtlNtStatusToDosError. RegGetValue filters by
+type (RRF_RT_*, REG_BINARY of 4/8 bytes for DWORD/QWORD), expands
+REG_EXPAND_SZ unless RRF_NOEXPAND and terminates strings. The A
+functions convert names and string data through the ANSI code page
+(UTF-8 on gala).
+
 ## Pipes (H1)
 
 `nt/pipe.rs`. `\Device\NamedPipe` is a device object (like `\Device\Afd`):
@@ -1210,7 +1265,8 @@ scenario expects.
 suspension/context of threads running on other CPUs, ranged (invlpg)
 shootdowns and PCIDs (ROADMAP S4), a real ntdll and
 kernel32 (gala runs test stand-ins), process creation from user mode,
-security, registry, storage devices, interrupts for devices (virtio-net
+security, a persistent registry (registry security, symbolic link keys,
+change notifications, WOW64 views), storage devices, interrupts for devices (virtio-net
 polls), completion routines (APCs) for socket I/O, AcceptEx with
 receive data, ConnectEx with send data, UDP, IPv6,
 select/IOCTL_AFD_POLL, non-blocking sockets, socket options with effect, telling a reset from a FIN

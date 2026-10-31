@@ -37,6 +37,7 @@ unsafe extern "system" {
 }
 
 mod etw;
+mod registry;
 mod security;
 
 /// The C runtime's marker that floating point is used (the linker wants
@@ -55,156 +56,11 @@ unsafe extern "system" {
     fn ProcessPrng(data: *mut u8, length: usize) -> i32;
 }
 
-const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_NOT_SUPPORTED: u32 = 50;
 
 fn missing(function: &[u8]) {
     // SAFETY: a valid buffer.
     unsafe { GalaRecordMissing(function.as_ptr(), function.len(), 2, 0) };
-}
-
-/// RegCreateKeyExA: no registry yet; registry functions return the error
-/// (they do not use the last-error value).
-#[unsafe(no_mangle)]
-pub extern "system" fn RegCreateKeyExA(
-    _key: usize,
-    _subkey: *const u8,
-    _reserved: u32,
-    _class: *const u8,
-    _options: u32,
-    _access: u32,
-    _security: *mut c_void,
-    _result: *mut usize,
-    _disposition: *mut u32,
-) -> i32 {
-    missing(b"advapi32.dll!RegCreateKeyExA");
-    ERROR_ACCESS_DENIED as i32
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn RegSetValueExA(
-    _key: usize,
-    _name: *const u8,
-    _reserved: u32,
-    _kind: u32,
-    _data: *const u8,
-    _size: u32,
-) -> i32 {
-    missing(b"advapi32.dll!RegSetValueExA");
-    ERROR_ACCESS_DENIED as i32
-}
-
-/// HKEY_CLASSES_ROOT (0x80000000) to HKEY_CURRENT_USER_LOCAL_SETTINGS
-/// (0x80000007): the predefined keys.
-fn predefined(key: usize) -> bool {
-    (0x8000_0000..=0x8000_0007).contains(&key)
-}
-
-const ERROR_FILE_NOT_FOUND: i32 = 2;
-const ERROR_INVALID_HANDLE: i32 = 6;
-
-/// RegCloseKey: predefined keys close successfully (as on Windows); no
-/// other key can have been opened.
-#[unsafe(no_mangle)]
-pub extern "system" fn RegCloseKey(key: usize) -> i32 {
-    if predefined(key) { 0 } else { ERROR_INVALID_HANDLE }
-}
-
-/// RegOpenKeyExW / A, RegOpenKeyW / A: gala has no registry yet, so no key
-/// below the predefined ones exists (ERROR_FILE_NOT_FOUND; programs treat
-/// that as an ordinary outcome). Recorded in the ledger.
-#[unsafe(no_mangle)]
-pub extern "system" fn RegOpenKeyExW(
-    key: usize,
-    _subkey: *const u16,
-    _options: u32,
-    _access: u32,
-    result: *mut usize,
-) -> i32 {
-    open_key(b"advapi32.dll!RegOpenKeyExW", key, result)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn RegOpenKeyExA(
-    key: usize,
-    _subkey: *const u8,
-    _options: u32,
-    _access: u32,
-    result: *mut usize,
-) -> i32 {
-    open_key(b"advapi32.dll!RegOpenKeyExA", key, result)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn RegOpenKeyW(key: usize, _subkey: *const u16, result: *mut usize) -> i32 {
-    open_key(b"advapi32.dll!RegOpenKeyW", key, result)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn RegOpenKeyA(key: usize, _subkey: *const u8, result: *mut usize) -> i32 {
-    open_key(b"advapi32.dll!RegOpenKeyA", key, result)
-}
-
-fn open_key(function: &[u8], key: usize, result: *mut usize) -> i32 {
-    missing(function);
-    if !result.is_null() {
-        // SAFETY: the caller's output pointer.
-        unsafe { *result = 0 };
-    }
-    if predefined(key) { ERROR_FILE_NOT_FOUND } else { ERROR_INVALID_HANDLE }
-}
-
-/// RegQueryValueExW / A: only predefined keys can be open, and they have
-/// no values here.
-#[unsafe(no_mangle)]
-pub extern "system" fn RegQueryValueExW(
-    key: usize,
-    _name: *const u16,
-    _reserved: *mut u32,
-    _kind: *mut u32,
-    _data: *mut u8,
-    _size: *mut u32,
-) -> i32 {
-    missing(b"advapi32.dll!RegQueryValueExW");
-    if predefined(key) { ERROR_FILE_NOT_FOUND } else { ERROR_INVALID_HANDLE }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn RegQueryValueExA(
-    key: usize,
-    _name: *const u8,
-    _reserved: *mut u32,
-    _kind: *mut u32,
-    _data: *mut u8,
-    _size: *mut u32,
-) -> i32 {
-    missing(b"advapi32.dll!RegQueryValueExA");
-    if predefined(key) { ERROR_FILE_NOT_FOUND } else { ERROR_INVALID_HANDLE }
-}
-
-/// RegGetValueW: the flags must allow some type (RRF_RT_*), and data
-/// needs a size; then the key (or value) is not there, as for
-/// RegOpenKeyExW and RegQueryValueExW.
-#[unsafe(no_mangle)]
-pub extern "system" fn RegGetValueW(
-    key: usize,
-    _subkey: *const u16,
-    _value: *const u16,
-    flags: u32,
-    kind: *mut u32,
-    data: *mut c_void,
-    size: *mut u32,
-) -> i32 {
-    const ERROR_INVALID_PARAMETER: i32 = 87;
-    if flags & 0xffff == 0 || (!data.is_null() && size.is_null()) {
-        return ERROR_INVALID_PARAMETER;
-    }
-    missing(b"advapi32.dll!RegGetValueW");
-    if !kind.is_null() {
-        // SAFETY: the caller's output.
-        unsafe { *kind = 0 };
-    }
-    if predefined(key) { ERROR_FILE_NOT_FOUND } else { ERROR_INVALID_HANDLE }
 }
 
 /// RegisterEventSourceA: no event log yet (NULL, ERROR_NOT_SUPPORTED).

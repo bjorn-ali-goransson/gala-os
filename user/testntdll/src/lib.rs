@@ -69,6 +69,33 @@ syscall_stubs! {
         input: *const u8, input_length: u32, output: *mut u8, output_length: u32
     );
     NtSetInformationObject = 0x7f05, fn(h: usize, class: u32, buffer: *const u8, length: u32);
+    // The registry: 0x12, 0x13, 0x16, 0x17, 0x1d and 0x32 are long-stable on
+    // x64, 0x60 is to be verified; the others are gala's numbers (see the
+    // kernel).
+    NtOpenKey = 0x12, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
+    NtEnumerateValueKey = 0x13, fn(
+        h: usize, index: u32, class: u32, buf: *mut u8, len: u32, ret: *mut u32
+    );
+    NtQueryKey = 0x16, fn(h: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32);
+    NtQueryValueKey = 0x17, fn(
+        h: usize, name: *const UnicodeString, class: u32, buf: *mut u8, len: u32, ret: *mut u32
+    );
+    NtCreateKey = 0x1d, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes, title: u32,
+        class: *const UnicodeString, options: u32, disposition: *mut u32
+    );
+    NtEnumerateKey = 0x32, fn(
+        h: usize, index: u32, class: u32, buf: *mut u8, len: u32, ret: *mut u32
+    );
+    NtSetValueKey = 0x60, fn(
+        h: usize, name: *const UnicodeString, title: u32, kind: u32, data: *const u8, size: u32
+    );
+    NtOpenKeyEx = 0x7f06, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes, options: u32
+    );
+    NtDeleteKey = 0x7f07, fn(h: usize);
+    NtDeleteValueKey = 0x7f08, fn(h: usize, name: *const UnicodeString);
+    NtFlushKey = 0x7f09, fn(h: usize);
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,
@@ -1155,6 +1182,9 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0101, 145),  // DIRECTORY_NOT_EMPTY -> ERROR_DIR_NOT_EMPTY
     (0xc000_0103, 267),  // NOT_A_DIRECTORY -> ERROR_DIRECTORY
     (0xc000_0121, 5),    // CANNOT_DELETE -> ERROR_ACCESS_DENIED
+    (0x8000_001a, 259),  // NO_MORE_ENTRIES -> ERROR_NO_MORE_ITEMS
+    (0xc000_017c, 1018), // KEY_DELETED -> ERROR_KEY_DELETED
+    (0xc000_0181, 1021), // CHILD_MUST_BE_VOLATILE -> ERROR_CHILD_MUST_BE_VOLATILE
     (0xc000_0120, 995),  // CANCELLED -> ERROR_OPERATION_ABORTED
     (0xc000_0135, 126),  // DLL_NOT_FOUND -> ERROR_MOD_NOT_FOUND
     (0xc000_0138, 182),  // ORDINAL_NOT_FOUND -> ERROR_INVALID_ORDINAL

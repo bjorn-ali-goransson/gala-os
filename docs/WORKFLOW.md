@@ -81,6 +81,18 @@ shows it.
 
 ## Things that are easy to get wrong
 
+- **Predefined registry keys are sign-extended on x64**: winreg.h
+  defines HKEY_LOCAL_MACHINE as `(HKEY)(ULONG_PTR)((LONG)0x80000002)`,
+  0xFFFFFFFF80000002; C programs and .NET pass that form, Rust test
+  programs usually the zero-extended one. Accept both (advapi32's
+  `predefined`). PowerShell's 23 registry reads all failed with
+  ERROR_INVALID_HANDLE until this was handled.
+- **Registry keys a program needs**: boot it and read the ledger's
+  `"what":"absent key"` lines (`registry:MACHINE/...`, the end of long
+  names). Keys a clean Windows has go in `kernel/src/nt/registry.seed`
+  with Windows' values; keys a clean Windows lacks too (policies, other
+  products) stay absent.
+
 - **Functions that must start from their caller's registers** (anything
   that captures a context or walks frames: RtlCaptureContext,
   RtlRaiseException, RtlUnwindEx, the dispatchers) are `global_asm!` with

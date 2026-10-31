@@ -11,7 +11,7 @@
 
 use core::ffi::c_void;
 
-use super::{ERROR_INSUFFICIENT_BUFFER, fail, missing, predefined};
+use super::{ERROR_INSUFFICIENT_BUFFER, fail, missing};
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -37,7 +37,6 @@ const ERROR_INVALID_ACL: u32 = 1336;
 const ERROR_NO_SUCH_PRIVILEGE: u32 = 1313;
 const ERROR_NOT_ALL_ASSIGNED: u32 = 1300;
 const ERROR_INVALID_SECURITY_DESCR: u32 = 1338;
-const ERROR_NO_MORE_ITEMS: u32 = 259;
 const ERROR_INVALID_HANDLE: u32 = 6;
 
 const SID_MAX_SUB_AUTHORITIES: usize = 15;
@@ -222,7 +221,7 @@ const SID_TYPE_ALIAS: u32 = 4;
 
 /// gala's user's SID: a machine SID (S-1-5-21-x-y-z) and RID 1001, the
 /// first local account's.
-const USER_SUBS: [u32; 5] = [21, 1_000_000_001, 1_000_000_002, 1_000_000_003, 1001];
+pub(crate) const USER_SUBS: [u32; 5] = [21, 1_000_000_001, 1_000_000_002, 1_000_000_003, 1001];
 const NT: [u8; 6] = [0, 0, 0, 0, 0, 5];
 
 /// Accounts: (authority, sub-authorities, name, domain, SID_NAME_USE).
@@ -884,110 +883,6 @@ pub extern "system" fn CryptAcquireContextA(
     let container: *const u16 =
         if container.is_null() { core::ptr::null() } else { [0u16; 1].as_ptr() };
     super::CryptAcquireContextW(provider, container, core::ptr::null(), kind, flags)
-}
-
-/// RegEnumKeyExA/W: the registry is empty: no subkeys of the predefined
-/// keys (ERROR_NO_MORE_ITEMS); other handles are not open.
-#[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
-pub extern "system" fn RegEnumKeyExA(
-    key: usize,
-    _index: u32,
-    _name: *mut u8,
-    _name_len: *mut u32,
-    _reserved: *mut u32,
-    _class: *mut u8,
-    _class_len: *mut u32,
-    _time: *mut u64,
-) -> i32 {
-    (if predefined(key) { ERROR_NO_MORE_ITEMS } else { ERROR_INVALID_HANDLE }) as i32
-}
-
-#[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
-pub extern "system" fn RegEnumKeyExW(
-    key: usize,
-    index: u32,
-    name: *mut u16,
-    name_len: *mut u32,
-    reserved: *mut u32,
-    class: *mut u16,
-    class_len: *mut u32,
-    time: *mut u64,
-) -> i32 {
-    RegEnumKeyExA(key, index, name.cast(), name_len, reserved, class.cast(), class_len, time)
-}
-
-/// RegQueryInfoKeyA/W: a predefined key of the empty registry: no
-/// subkeys, values or class.
-#[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
-pub extern "system" fn RegQueryInfoKeyA(
-    key: usize,
-    class: *mut c_void,
-    class_len: *mut u32,
-    _reserved: *mut u32,
-    subkeys: *mut u32,
-    max_subkey: *mut u32,
-    max_class: *mut u32,
-    values: *mut u32,
-    max_value_name: *mut u32,
-    max_value: *mut u32,
-    security: *mut u32,
-    time: *mut u64,
-) -> i32 {
-    if !predefined(key) {
-        return ERROR_INVALID_HANDLE as i32;
-    }
-    for p in
-        [class_len, subkeys, max_subkey, max_class, values, max_value_name, max_value, security]
-    {
-        if !p.is_null() {
-            // SAFETY: the caller's outputs.
-            unsafe { *p = 0 };
-        }
-    }
-    if !class.is_null() {
-        // SAFETY: the caller's class buffer (an empty string).
-        unsafe { *class.cast::<u16>() = 0 };
-    }
-    if !time.is_null() {
-        // SAFETY: the caller's FILETIME.
-        unsafe { *time = 0 };
-    }
-    0
-}
-
-#[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
-pub extern "system" fn RegQueryInfoKeyW(
-    key: usize,
-    class: *mut c_void,
-    class_len: *mut u32,
-    reserved: *mut u32,
-    subkeys: *mut u32,
-    max_subkey: *mut u32,
-    max_class: *mut u32,
-    values: *mut u32,
-    max_value_name: *mut u32,
-    max_value: *mut u32,
-    security: *mut u32,
-    time: *mut u64,
-) -> i32 {
-    RegQueryInfoKeyA(
-        key,
-        class,
-        class_len,
-        reserved,
-        subkeys,
-        max_subkey,
-        max_class,
-        values,
-        max_value_name,
-        max_value,
-        security,
-        time,
-    )
 }
 
 // ---- What the JDK's net and nio libraries import ----

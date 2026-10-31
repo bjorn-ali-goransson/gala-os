@@ -600,8 +600,18 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       inserts, GetCPInfoExW, CreateWellKnownSid, GetUserNameExW, .NET's
       NLS calendar and format data (GetCalendarInfoEx,
       EnumCalendarInfoExEx, EnumTimeFormatsEx, EnumDateFormatsExEx),
-      FindNLSStringEx, the placeholder compatibility mode. Still in its
-      ledger: the registry (RegOpenKeyExW, 23 reads: no registry yet),
+      FindNLSStringEx, the placeholder compatibility mode. Since then
+      gala has a registry (`registry_test`, docs/ARCHITECTURE.md
+      "Registry"): the kernel keeps an in-memory key tree under
+      \Registry, seeded at boot with the keys programs read (Windows
+      NT\CurrentVersion, Nls, the session environment, the time zone
+      database's UTC, CentralProcessor\N from CPUID, the user's hive);
+      ntdll has the Nt*Key services and advapi32 the Reg* functions (W
+      and A) over them; kernel32 got ExpandEnvironmentStrings. PowerShell's
+      23 registry reads now find their keys or are told "not found" for
+      keys a clean Windows lacks too (its policy keys); its time in the
+      kernel halved (22 s to 11.5 s). Absent keys a program asks for are
+      in the ledger ("absent key"). Still in its ledger:
       mpr.dll (network drives), QueryUnbiasedInterruptTime, amsi.dll and
       wldp.dll (Windows' antimalware and lockdown policy DLLs; absent
       means none), LOCALE_SENGLISHDISPLAYNAME/SNATIVEDISPLAYNAME-style

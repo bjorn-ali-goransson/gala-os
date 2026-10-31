@@ -204,6 +204,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("tls_test", "ntdll.dll", "Windows/System32"),
     ("tls_test", "kernel32.dll", "Windows/System32"),
     ("tls_test", "tlsdll.dll", "gala"),
+    ("registry_test", "ntdll.dll", "Windows/System32"),
+    ("registry_test", "kernel32.dll", "Windows/System32"),
+    ("registry_test", "advapi32.dll", "Windows/System32"),
+    ("registry_test", "bcryptprimitives.dll", "Windows/System32"),
     ("advapi32_test", "ntdll.dll", "Windows/System32"),
     ("advapi32_test", "kernel32.dll", "Windows/System32"),
     ("advapi32_test", "advapi32.dll", "Windows/System32"),
@@ -772,6 +776,7 @@ const USER_PROGRAMS: &[&str] = &[
     "bcrypt_test",
     "console_test",
     "advapi32_test",
+    "registry_test",
     "win32_misc_test",
     "kernel32_pool_test",
     "tls_test",
@@ -1520,6 +1525,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=advapi32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["advapi32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (PowerShell, .NET, JDK): the registry (advapi32's Reg* and
+        // ntdll's Nt*Key over the kernel's key tree).
+        name: "registry_test",
+        cmdline: "qemu_exit run=registry_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["registry_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (PowerShell): the console (CONOUT$, CONIN$) behind redirected

@@ -15,6 +15,7 @@ pub mod pe;
 pub mod pipe;
 pub mod platform;
 pub mod process;
+pub mod registry;
 pub mod section;
 pub mod stats;
 pub mod status;
@@ -39,6 +40,9 @@ pub fn init() {
     }
     if let Err(e) = afd::init() {
         panic!("AFD: {e:?}");
+    }
+    if let Err(e) = registry::init(platform::system_time()) {
+        panic!("registry: {e:?}");
     }
     if let Err(e) = timer::init() {
         panic!("timers: {e:?}");

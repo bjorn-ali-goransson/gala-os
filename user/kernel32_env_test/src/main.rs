@@ -7,7 +7,8 @@
 //! path ending in a backslash), the user's profile variables (USERPROFILE,
 //! APPDATA, LOCALAPPDATA, ProgramData: existing directories),
 //! GetSystemDirectoryW / GetWindowsDirectoryW, AddDllDirectory /
-//! RemoveDllDirectory / SetDefaultDllDirectories. Prints
+//! RemoveDllDirectory / SetDefaultDllDirectories, ExpandEnvironmentStringsW/A
+//! (unset variables and a lone % stay as they are). Prints
 //! `kernel32_env_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -26,6 +27,8 @@ unsafe extern "system" {
     fn SetLastError(code: u32);
     fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, size: u32) -> u32;
     fn SetEnvironmentVariableW(name: *const u16, value: *const u16) -> Bool;
+    fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32;
+    fn ExpandEnvironmentStringsA(src: *const u8, dst: *mut u8, size: u32) -> u32;
     fn GetEnvironmentStringsW() -> *mut u16;
     fn FreeEnvironmentStringsW(block: *mut u16) -> Bool;
     fn GetTimeZoneInformation(info: *mut u8) -> u32;
@@ -177,6 +180,23 @@ fn run() -> Result<(), u32> {
         c.ok(!block_has(b"GALA_VAR=fortress"), 0)?;
         // Variables from the start still there.
         c.ok(GetEnvironmentVariableW(w!("SystemRoot"), buf.as_mut_ptr(), 300) > 0, 0)?;
+
+        // Expansion: set variables replaced (names ignore case), others
+        // and a lone % left as they are; the count includes the NUL.
+        c.ok(SetEnvironmentVariableW(w!("GALA_VAR"), w!("qala")) != 0, 0)?;
+        let src = w!("a%gala_var%b %GALA_NOT_SET% 100%");
+        c.eq(ExpandEnvironmentStringsW(src, buf.as_mut_ptr(), 300).into(), 27)?;
+        c.ok(ascii_eq(&buf[..26], b"aqalab %GALA_NOT_SET% 100%") && buf[26] == 0, 0)?;
+        // Too small: the size needed.
+        c.eq(ExpandEnvironmentStringsW(src, buf.as_mut_ptr(), 3).into(), 27)?;
+        let mut narrow = [0u8; 64];
+        c.eq(
+            ExpandEnvironmentStringsA(c"x%GALA_VAR%".as_ptr().cast(), narrow.as_mut_ptr(), 64)
+                .into(),
+            6,
+        )?;
+        c.ok(&narrow[..6] == b"xqala\0", narrow[0].into())?;
+        SetEnvironmentVariableW(w!("GALA_VAR"), core::ptr::null());
 
         // Time zone: a valid answer (TIME_ZONE_ID_UNKNOWN/STANDARD/DAYLIGHT).
         let mut tzi = [0u8; 172];

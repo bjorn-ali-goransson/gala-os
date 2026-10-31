@@ -44,6 +44,20 @@ pub const GALA_CREATE_PROCESS: u32 = 0x7f02;
 pub const NT_CREATE_NAMED_PIPE_FILE: u32 = 0x7f03;
 pub const NT_FS_CONTROL_FILE: u32 = 0x7f04;
 pub const NT_SET_INFORMATION_OBJECT: u32 = 0x7f05;
+// The registry. 0x12, 0x13, 0x16, 0x17, 0x1d and 0x32 are long-stable on
+// x64; NtSetValueKey's 0x60 is to be verified on the pinned build; the
+// others are gala's numbers until verified (reached through ntdll).
+pub const NT_OPEN_KEY: u32 = 0x0012;
+pub const NT_ENUMERATE_VALUE_KEY: u32 = 0x0013;
+pub const NT_QUERY_KEY: u32 = 0x0016;
+pub const NT_QUERY_VALUE_KEY: u32 = 0x0017;
+pub const NT_CREATE_KEY: u32 = 0x001d;
+pub const NT_ENUMERATE_KEY: u32 = 0x0032;
+pub const NT_SET_VALUE_KEY: u32 = 0x0060;
+pub const NT_OPEN_KEY_EX: u32 = 0x7f06;
+pub const NT_DELETE_KEY: u32 = 0x7f07;
+pub const NT_DELETE_VALUE_KEY: u32 = 0x7f08;
+pub const NT_FLUSH_KEY: u32 = 0x7f09;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -221,6 +235,17 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_TERMINATE_PROCESS, "NtTerminateProcess", 2, nt_terminate_process),
     (NT_OPEN_PROCESS, "NtOpenProcess", 4, nt_open_process),
     (NT_PROTECT_VIRTUAL_MEMORY, "NtProtectVirtualMemory", 5, nt_protect_virtual_memory),
+    (NT_OPEN_KEY, "NtOpenKey", 3, registry_calls::nt_open_key),
+    (NT_OPEN_KEY_EX, "NtOpenKeyEx", 4, registry_calls::nt_open_key_ex),
+    (NT_CREATE_KEY, "NtCreateKey", 7, registry_calls::nt_create_key),
+    (NT_QUERY_KEY, "NtQueryKey", 5, registry_calls::nt_query_key),
+    (NT_ENUMERATE_KEY, "NtEnumerateKey", 6, registry_calls::nt_enumerate_key),
+    (NT_QUERY_VALUE_KEY, "NtQueryValueKey", 6, registry_calls::nt_query_value_key),
+    (NT_ENUMERATE_VALUE_KEY, "NtEnumerateValueKey", 6, registry_calls::nt_enumerate_value_key),
+    (NT_SET_VALUE_KEY, "NtSetValueKey", 6, registry_calls::nt_set_value_key),
+    (NT_DELETE_KEY, "NtDeleteKey", 1, registry_calls::nt_delete_key),
+    (NT_DELETE_VALUE_KEY, "NtDeleteValueKey", 2, registry_calls::nt_delete_value_key),
+    (NT_FLUSH_KEY, "NtFlushKey", 1, registry_calls::nt_flush_key),
 ];
 
 /// The name of service `number` (for diagnostics).
@@ -3713,3 +3738,6 @@ mod tests {
         assert_eq!(unknown.to_string(), "trace: pid 4 tid 8 service 0xfff() -> 0xc000001c");
     }
 }
+
+#[path = "registry_calls.rs"]
+mod registry_calls;

@@ -205,6 +205,12 @@ pub fn set_affinity(id: ThreadId, mask: u64) {
 pub fn current_cpu() -> u32 {
     <P as Threads>::current_cpu()
 }
+/// CPUID leaf `leaf` (subleaf `sub`) of this processor: (eax, ebx, ecx, edx).
+#[inline]
+pub fn cpuid(leaf: u32, sub: u32) -> (u32, u32, u32, u32) {
+    let r = crate::arch::cpu::cpuid(leaf, sub);
+    (r.eax, r.ebx, r.ecx, r.edx)
+}
 #[inline]
 pub fn online_count() -> u32 {
     <P as Threads>::online_count()

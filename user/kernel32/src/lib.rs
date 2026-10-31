@@ -1840,6 +1840,119 @@ pub extern "system" fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, 
     found.unwrap_or_else(|| fail_with(ERROR_ENVVAR_NOT_FOUND, 0))
 }
 
+/// Expands `%NAME%` references in `src` with the environment, passing
+/// each resulting character to `emit`: a variable that is not set (or an
+/// empty name) stays as written, its closing `%` then starting the next
+/// reference, as RtlExpandEnvironmentStrings does. Returns the characters
+/// emitted.
+fn expand_environment(src: &[u16], mut emit: impl FnMut(u16)) -> usize {
+    let percent = u16::from(b'%');
+    let mut count = 0;
+    let mut out = |c: u16, count: &mut usize| {
+        emit(c);
+        *count += 1;
+    };
+    let mut i = 0;
+    with_env(|| {
+        while i < src.len() {
+            if src[i] == percent
+                && let Some(len) = src[i + 1..].iter().position(|&c| c == percent)
+            {
+                let name = &src[i + 1..i + 1 + len];
+                let value = (!name.is_empty())
+                    .then(|| env_entries().map(split_entry).find(|(n, _)| same_name(n, name)))
+                    .flatten();
+                if let Some((_, v)) = value {
+                    for &c in v {
+                        out(c, &mut count);
+                    }
+                    i += len + 2;
+                } else {
+                    // Kept: the % and the name; the closing % is looked at again.
+                    for &c in &src[i..i + 1 + len] {
+                        out(c, &mut count);
+                    }
+                    i += len + 1;
+                }
+                continue;
+            }
+            out(src[i], &mut count);
+            i += 1;
+        }
+    });
+    count
+}
+
+/// ExpandEnvironmentStringsW(lpSrc, lpDst, nSize): the characters needed
+/// including the NUL; the expansion is written only if it fits.
+#[unsafe(no_mangle)]
+pub extern "system" fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32 {
+    if src.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    let src = wide_slice(src);
+    let mut at = 0usize;
+    let n = expand_environment(src, |c| {
+        if !dst.is_null() && at < size as usize {
+            // SAFETY: the caller's buffer of `size` characters.
+            unsafe { *dst.add(at) = c };
+        }
+        at += 1;
+    });
+    if !dst.is_null() && n < size as usize {
+        // SAFETY: as above.
+        unsafe { *dst.add(n) = 0 };
+    }
+    n as u32 + 1
+}
+
+/// ExpandEnvironmentStringsA: as the W function, in the ANSI code page
+/// (UTF-8 here); the count is in bytes.
+#[unsafe(no_mangle)]
+pub extern "system" fn ExpandEnvironmentStringsA(src: *const u8, dst: *mut u8, size: u32) -> u32 {
+    if src.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's NUL-terminated string.
+    let bytes = unsafe { core::ffi::CStr::from_ptr(src.cast()) }.to_bytes();
+    let Ok(text) = core::str::from_utf8(bytes) else {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    };
+    let mut wide = [0u16; 2048];
+    let mut len = 0;
+    for c in text.encode_utf16() {
+        if len == wide.len() {
+            return fail_with(ERROR_INVALID_PARAMETER, 0);
+        }
+        wide[len] = c;
+        len += 1;
+    }
+    let mut units = [0u16; 8192];
+    let mut at = 0;
+    let n = expand_environment(&wide[..len], |c| {
+        if at < units.len() {
+            units[at] = c;
+        }
+        at += 1;
+    });
+    let mut written = 0usize;
+    for c in core::char::decode_utf16(units[..n.min(units.len())].iter().copied()) {
+        let mut b = [0u8; 4];
+        for &byte in c.unwrap_or('?').encode_utf8(&mut b).as_bytes() {
+            if !dst.is_null() && written < size as usize {
+                // SAFETY: the caller's buffer of `size` bytes.
+                unsafe { *dst.add(written) = byte };
+            }
+            written += 1;
+        }
+    }
+    if !dst.is_null() && written < size as usize {
+        // SAFETY: as above.
+        unsafe { *dst.add(written) = 0 };
+    }
+    written as u32 + 1
+}
+
 /// SetEnvironmentVariableW: builds a new block without the variable, plus
 /// `name=value` unless `value` is null, and installs it in the process
 /// parameters (as RtlSetEnvironmentVariable does).
