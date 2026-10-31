@@ -1351,21 +1351,55 @@ fn run_parallel<J: Sync, T: Send>(
 const UM_SCENARIOS: &[&str] = &[
     "hello",
     "abi_test",
+    "apc_test",
+    "args_test",
     "async_test",
+    "context_test",
+    "cow_test",
+    "crash",
     "dir_test",
+    "exception_test",
     "file_test",
+    "filemap_test",
+    "fpu_test",
+    "go_exit",
+    "go_gc",
+    "go_goroutines",
+    "go_hello",
+    "go_os",
+    "go_time",
+    "guard_test",
     "image_test",
+    "import_test",
+    "ioapc_test",
+    "iocp_test",
+    "kernel32_env_test",
+    "kernel32_file_test",
+    "kernel32_misc_test",
+    "kernel32_sys_test",
+    "kernel32_test",
+    "kernel32_thread_test",
     "kuser_test",
     "ledger_test",
+    "loader_test",
+    "missing_import_test",
     "object_test",
     "peb_test",
+    "prng_test",
     "section_test",
+    "startup_test",
+    "symlink_test",
+    "sync_test",
     "sysinfo_test",
     "thread_test",
     "threadinfo_test",
+    "timer_test",
     "vm_test",
     "wait_test",
 ];
+
+/// Seconds a gala-um program may run (they take milliseconds).
+const UM_TIMEOUT_SECS: u32 = 30;
 
 /// `cargo xtask um-test`: builds um/ for the host and runs each
 /// UM_SCENARIOS program in it, checking the QEMU scenario's `expect` lines
@@ -1379,12 +1413,34 @@ fn um_test(release: bool) -> Result {
     run_quiet(&mut build)?;
     let um = target_dir().join(if release { "release" } else { "debug" }).join("um");
     let mut failed = Vec::new();
+    let all = Instant::now();
     for name in UM_SCENARIOS {
         let s = SCENARIOS.iter().find(|s| s.name == *name).ok_or(format!("no scenario {name}"))?;
         let program = scenario_program(s).ok_or(format!("{name}: not a program scenario"))?;
         let started = Instant::now();
-        let out = Command::new(&um)
+        // The scenario's `args=` (percent-encoded), as one command-line string.
+        let args = s.cmdline.split_whitespace().find_map(|w| w.strip_prefix("args=")).unwrap_or("");
+        // A hung program fails instead of hanging the run (Linux only, as
+        // gala-um itself).
+        let mut cmd = Command::new("timeout");
+        cmd.arg(UM_TIMEOUT_SECS.to_string()).arg(&um);
+        // Its boot modules, from user/bin (checked in) as `--module=`.
+        for (file, dir) in extra_modules(name) {
+            let (host, file_name) = match file.rsplit_once('/') {
+                Some((_, n)) => (root().join(file), n),
+                None => {
+                    let dll = USER_DLLS
+                        .iter()
+                        .find(|d| d.file == file)
+                        .ok_or(format!("{name}: no DLL {file}"))?;
+                    (root().join("user/bin").join(dll.exported_as), file)
+                }
+            };
+            cmd.arg(format!("--module={dir}/{file_name}={}", host.display()));
+        }
+        let out = cmd
             .arg(root().join("user/bin").join(format!("{program}.exe")))
+            .arg(percent_decode(args))
             .output()
             .map_err(|e| format!("running {}: {e}", um.display()))?;
         let log = format!(
@@ -1404,7 +1460,33 @@ fn um_test(release: bool) -> Result {
             failed.push(*name);
         }
     }
+    eprintln!(
+        "xtask: um-test: {} programs in {:.2} s",
+        UM_SCENARIOS.len(),
+        all.elapsed().as_secs_f64()
+    );
     if failed.is_empty() { Ok(()) } else { Err(format!("um tests failed: {failed:?}")) }
+}
+
+/// Decodes `%XX` escapes (the kernel's `args=` encoding).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let hex = b.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok());
+        match (b[i], hex.and_then(|h| u8::from_str_radix(h, 16).ok())) {
+            (b'%', Some(v)) => {
+                out.push(v);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The program a scenario runs, if it is that program's own scenario.

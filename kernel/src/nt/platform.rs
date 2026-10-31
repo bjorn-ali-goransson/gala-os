@@ -75,6 +75,10 @@ pub trait Threads {
     fn prepare_wait(deadline: Option<u64>);
     fn wait() -> WakeReason;
     fn wake(id: ThreadId);
+    /// Makes `id`, if it is running user code, pass through the
+    /// user-return hook soon (a suspension or termination request then
+    /// takes effect).
+    fn interrupt(id: ThreadId);
     /// The processors `id` may run on (bit n: processor n).
     fn set_affinity(id: ThreadId, mask: u64);
     fn current_cpu() -> u32;
@@ -188,6 +192,10 @@ pub fn wait() -> WakeReason {
 #[inline]
 pub fn wake(id: ThreadId) {
     <P as Threads>::wake(id)
+}
+#[inline]
+pub fn interrupt(id: ThreadId) {
+    <P as Threads>::interrupt(id)
 }
 #[inline]
 pub fn set_affinity(id: ThreadId, mask: u64) {

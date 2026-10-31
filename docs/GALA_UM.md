@@ -1,9 +1,10 @@
 # gala-um: the NT personality as a Linux process (design draft)
 
-Status (2026-10-31): U1 seam (`kernel/src/nt/platform.rs`) and U2 done:
-gala-um runs the real NT layer (`kernel/src/hosted`, `um/`); 16 test
-programs pass in `cargo xtask um-test` (CI) in a few ms each. Next: the
-failures listed under "U2b", then U3. Design written 2026-10-30.
+Status (2026-10-31): U1 seam (`kernel/src/nt/platform.rs`), U2 and U2c
+done: gala-um runs the real NT layer (`kernel/src/hosted`, `um/`); 47
+test programs (the ntrt tests, kernel32 tests with gala's DLLs, the Go
+programs) pass in `cargo xtask um-test` in about 1.3 s together. Next:
+U3. Design written 2026-10-30.
 
 ## Why
 
@@ -175,26 +176,44 @@ gala-um; it stays as the plan if `nt/` ever becomes its own crate.
 
 One processor as far as programs can tell (`online_count` 1).
 
-**Passing (UM_SCENARIOS):** hello, abi_test, async_test, dir_test,
-file_test, image_test, kuser_test, ledger_test, object_test, peb_test,
-section_test, sysinfo_test, thread_test, threadinfo_test, vm_test,
-wait_test.
+## U2c: closing the gaps (2026-10-31)
 
-**Not yet** (the first failing check, from `um user/bin/<x>.exe`):
-- programs with imports (kernel32_*, import_test, prng_test, winsock_*,
-  process_test): `ImportsNotSupported`, as `spawn_from_pe` asks for the
-  DLLs from the boot volume; gala-um must add gala's DLLs from user/bin
-  and System32 as the kernel's boot modules do.
-- file-backed sections (cow_test, filemap_test): file pages are host
-  heap memory, not memfd frames; ramfs pages should come from frames.
-- exceptions and contexts: exception_test, guard_test, context_test,
-  fpu_test, crash (SEH dispatch through `KiUserExceptionDispatcher`
-  needs checking against the signal path), apc_test, ioapc_test,
-  iocp_test, timer_test, sync_test, startup_test, symlink_test,
-  args_test (um-test passes no `args=` yet), loader_test, smp*_test
-  (one CPU here).
-- suspending a thread while it runs program code (takes effect at its
-  next system call: needs a signal to interrupt it).
+- **Boot modules**: `um --module=<directory on C:>/<name>=<host file>`
+  adds a file as the kernel's boot modules do; um-test passes each
+  scenario's `extra_modules` from user/bin (gala's ntdll.dll, kernel32.dll,
+  ... under their `test*` names) and its `args=` (percent-decoded). Most
+  "failures" of U2b were the missing ntdll.dll: with it, the exception
+  path (SEH, guard pages, contexts, FPU state), APCs, I/O completion,
+  timers, the loader, imports and the kernel32 tests pass unchanged.
+- **Suspending a running thread**: a new seam call,
+  `Threads::interrupt(id)` ("pass through the user-return hook soon"),
+  made by nt's NtSuspendThread and termination requests. The kernel needs
+  nothing (its tick does it); gala-um sends SIGURG, whose handler runs the
+  hook only if the thread was in program code (host code reaches it at
+  the end of its system call).
+- **File-backed sections**: ramfs file pages are page-sized, page-aligned
+  heap allocations that sections map by address; `hosted::memory::
+  Allocator` (um's `#[global_allocator]`) serves exactly those from memfd
+  frames, as the kernel heap serves them from HHDM frames, and the rest
+  from the system allocator.
+- um-test runs each program under `timeout` (30 s) and reports the total.
+
+**Passing (UM_SCENARIOS, 47):** every ntrt test program except the ones
+below, the kernel32 tests, import/loader/missing-import tests, crash,
+prng_test, and the Go programs (go_hello, go_goroutines, go_time,
+go_gc, go_os, go_exit). Each in 3-300 ms; all 47 in ~1.3 s (the QEMU
+suite: ~36 s of boots on CI).
+
+**Not in gala-um:**
+- smp_test with `cpus=2`, smpsched_test, smpmem_test: gala-um shows one
+  processor (`online_count` 1).
+- process_test, nginx_master: child processes (one NT process per Linux
+  process; would need a host process per NT process).
+- networking (net_echo, winsock_*, go_http, nginx*): AFD over smoltcp
+  needs the net thread and a device; host sockets or a loopback device.
+- bench: runs, but its numbers are the host's.
+- Scenarios that test the kernel itself (selftest, fault-*, trace,
+  events, timings).
 
 ## Steps
 

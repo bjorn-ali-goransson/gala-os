@@ -234,7 +234,9 @@ the agent proxy would otherwise intercept 127.0.0.1.
 `cargo xtask um-test` builds `um/` for the host and runs the scenarios
 listed in xtask's `UM_SCENARIOS` as Linux processes (milliseconds each,
 no QEMU), checking the same `expect` lines as their boot scenario. Run a
-program directly with `target/debug/um user/bin/<name>.exe`; it logs
+program directly with `target/debug/um user/bin/<name>.exe`, with
+`--module=Windows/System32/ntdll.dll=user/bin/testntdll.dll` (and the
+like) for its DLLs, before the program; it logs
 the kernel's log on stderr and the program's output on stdout. gala-um
 runs the real NT layer (the kernel crate with `--features hosted`), so a
 change to `kernel/src/nt` is checked in milliseconds there before the

@@ -66,6 +66,10 @@ impl Threads for Kernel {
     fn wake(id: ThreadId) {
         sched::wake(id)
     }
+    fn interrupt(_id: ThreadId) {
+        // Nothing to do: a thread in user mode reaches the hook at its next
+        // timer tick (within 1 ms).
+    }
     fn set_affinity(id: ThreadId, mask: u64) {
         sched::set_affinity(id, mask)
     }

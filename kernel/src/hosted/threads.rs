@@ -22,6 +22,8 @@ struct WaitState {
 struct Slot {
     state: Mutex<WaitState>,
     wake: Condvar,
+    /// The host thread (0 until it has started).
+    pthread: Mutex<libc::pthread_t>,
 }
 
 static SLOTS: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
@@ -67,6 +69,10 @@ pub fn spawn(
         .stack_size(HOST_STACK)
         .spawn(move || {
             CURRENT.with(|c| c.set(Some(id)));
+            if let Some(s) = slot(id) {
+                // SAFETY: pthread_self has no preconditions.
+                *s.pthread.lock().unwrap() = unsafe { libc::pthread_self() };
+            }
             setup();
             entry(arg);
             exit()
@@ -116,6 +122,16 @@ pub fn wake(id: ThreadId) {
     if let Some(s) = slot(id) {
         s.state.lock().unwrap().woken = true;
         s.wake.notify_all();
+    }
+}
+
+/// Sends `signal` to thread `id`'s host thread, if it has started.
+pub fn signal(id: ThreadId, signal: i32) {
+    let Some(s) = slot(id) else { return };
+    let pthread = *s.pthread.lock().unwrap();
+    if pthread != 0 {
+        // SAFETY: a host thread that never exits (see `exit`).
+        unsafe { libc::pthread_kill(pthread, signal) };
     }
 }
 

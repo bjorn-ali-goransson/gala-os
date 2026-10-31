@@ -49,6 +49,46 @@ pub fn init() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// The global allocator of gala-um's binary: page-sized, page-aligned
+/// allocations (ramfs file pages, which sections map into programs) are
+/// memfd frames, as the kernel heap's page allocations are frames in the
+/// HHDM; everything else comes from the host's allocator.
+pub struct Allocator;
+
+fn in_view(addr: u64) -> bool {
+    let base = mm::hhdm_offset();
+    base != 0 && (base..base + MEMORY_SIZE).contains(&addr)
+}
+
+// SAFETY: frames are exclusively owned page-sized, page-aligned memory
+// while allocated; the rest is the system allocator's contract.
+unsafe impl core::alloc::GlobalAlloc for Allocator {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        if layout.size() == PAGE_SIZE as usize
+            && layout.align() == PAGE_SIZE as usize
+            && let Some(frame) = mm::allocate_frame()
+        {
+            return hhdm_ptr(frame);
+        }
+        // SAFETY: forwarded.
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+        if in_view(ptr as u64) {
+            let _ = mm::free_frame(Frame::containing(ptr as u64 - mm::hhdm_offset()));
+        } else {
+            // SAFETY: forwarded; it came from the system allocator.
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+    }
+}
+
+/// The frame of a heap page from `Allocator`'s frame path.
+pub fn frame_of_heap_page(addr: usize) -> Option<Frame> {
+    in_view(addr as u64).then(|| Frame::containing(addr as u64 - mm::hhdm_offset()))
+}
+
 fn hhdm_ptr(frame: Frame) -> *mut u8 {
     (mm::hhdm_offset() + frame.start()) as *mut u8
 }

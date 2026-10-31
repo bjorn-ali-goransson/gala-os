@@ -323,6 +323,7 @@ pub fn request_termination(object: &ObjectRef, status: NtStatus) {
     t.terminate_request.lock().get_or_insert(status);
     if let Some(tid) = *t.sched_id.lock() {
         platform::wake(tid);
+        platform::interrupt(tid);
     }
 }
 
@@ -460,6 +461,11 @@ pub fn suspend(object: &ObjectRef) -> Result<u32, NtStatus> {
     }
     let previous = *count;
     *count += 1;
+    drop(count);
+    // A thread running user code stops at its next pass through the hook.
+    if let Some(tid) = *t.sched_id.lock() {
+        platform::interrupt(tid);
+    }
     Ok(previous)
 }
 

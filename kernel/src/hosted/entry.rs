@@ -30,6 +30,9 @@ const SYSCALL_DISPATCH_FILTER_BLOCK: u8 = 1;
 const ARCH_SET_GS: i32 = 0x1001;
 /// The signal that enters user mode (see `enter_user`).
 const SIG_ENTER: i32 = libc::SIGUSR2;
+/// The signal that sends a thread in user code through the user-return
+/// hook (`Threads::interrupt`; the kernel's timer tick does this).
+pub const SIG_INTERRUPT: i32 = libc::SIGURG;
 /// RFLAGS bits user mode may choose (as the kernel's syscall return).
 const USER_SETTABLE_FLAGS: u64 = 0xcd5;
 const ALT_STACK: usize = 256 * 1024;
@@ -206,6 +209,29 @@ extern "C" fn on_fault(sig: i32, info: *mut libc::siginfo_t, context: *mut libc:
     });
 }
 
+extern "C" fn on_interrupt(_sig: i32, _info: *mut libc::siginfo_t, context: *mut libc::c_void) {
+    use libc::*;
+    // SAFETY: the kernel passes the interrupted thread's ucontext.
+    let rip = unsafe { (*context.cast::<ucontext_t>()).uc_mcontext.gregs[REG_RIP as usize] } as u64;
+    if rip >= HOST_START {
+        // Host code (a system call in progress, a wait): the hook runs when
+        // it returns to the program anyway.
+        return;
+    }
+    with_context(context, |uc| {
+        let gr = &mut uc.uc_mcontext.gregs;
+        let order = [
+            REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI, REG_R8, REG_R9,
+            REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15,
+        ];
+        let mut regs = UserRegs { rip, rflags: g(gr, REG_EFL), ..UserRegs::default() };
+        for (i, reg) in order.into_iter().enumerate() {
+            regs.gpr[i] = g(gr, reg);
+        }
+        return_to_user(gr, regs);
+    });
+}
+
 extern "C" fn on_enter(_sig: i32, _info: *mut libc::siginfo_t, context: *mut libc::c_void) {
     with_context(context, |uc| {
         if let Some(regs) = ENTER.with(Cell::take) {
@@ -235,6 +261,7 @@ pub fn init() {
         install(sig, on_fault);
     }
     install(SIG_ENTER, on_enter);
+    install(SIG_INTERRUPT, on_interrupt);
 }
 
 /// Per-thread setup: no blocked signals (a thread created inside another
