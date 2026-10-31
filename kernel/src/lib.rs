@@ -310,33 +310,34 @@ fn run_program(info: &BootInfo, name: &str, args: &str) {
     };
     info!("run: {} ({} bytes)", module.path, module.data.len());
     let (free_before, _) = mm::frame_stats();
-    let space = match nt::process::spawn_from_pe(module.file_name(), module.data, args) {
-        Ok((process, main_thread)) => {
-            drop(main_thread);
-            // Wait for the whole process (all threads) to end.
-            match nt::object::KObject::new(nt::object::ObjectBody::Process(process.clone())) {
-                Ok(object) => {
-                    nt::wait::wait_for(
-                        core::slice::from_ref(&object),
-                        false,
-                        nt::wait::Timeout::Infinite,
-                    );
+    let space =
+        match nt::process::spawn_from_pe(module.file_name(), module.cmdline, module.data, args) {
+            Ok((process, main_thread)) => {
+                drop(main_thread);
+                // Wait for the whole process (all threads) to end.
+                match nt::object::KObject::new(nt::object::ObjectBody::Process(process.clone())) {
+                    Ok(object) => {
+                        nt::wait::wait_for(
+                            core::slice::from_ref(&object),
+                            false,
+                            nt::wait::Timeout::Infinite,
+                        );
+                    }
+                    Err(_) => error!("run: out of memory"),
                 }
-                Err(_) => error!("run: out of memory"),
-            }
-            match process.exit_status() {
-                Some(status) => {
-                    info!("run: {} finished with status {:#010x}", process.name, status.0)
+                match process.exit_status() {
+                    Some(status) => {
+                        info!("run: {} finished with status {:#010x}", process.name, status.0)
+                    }
+                    None => warn!("run: {} ended without an exit status", process.name),
                 }
-                None => warn!("run: {} ended without an exit status", process.name),
+                process.space.clone()
             }
-            process.space.clone()
-        }
-        Err(e) => {
-            error!("run: cannot start {name}: {e:?}");
-            return;
-        }
-    };
+            Err(e) => {
+                error!("run: cannot start {name}: {e:?}");
+                return;
+            }
+        };
     // Teardown check: once the exiting threads are reaped, ours must be the
     // last reference to the address space; then its memory is returned.
     let deadline = time::ticks() + time::TICK_HZ;

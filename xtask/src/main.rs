@@ -101,6 +101,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winsock_async_test", "kernel32.dll", "Windows/System32"),
     ("winsock_async_test", "ws2_32.dll", "Windows/System32"),
     ("winsock_async_test", "mswsock.dll", "Windows/System32"),
+    ("process_test", "ntdll.dll", "Windows/System32"),
+    ("process_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ntdll.dll", "Windows/System32"),
     ("winsock_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ws2_32.dll", "Windows/System32"),
@@ -136,6 +138,18 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("nginx", "user/nginx/html/index.html", "nginx/html"),
     ("nginx", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
     ("nginx", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
+    ("nginx_master", "ntdll.dll", "Windows/System32"),
+    ("nginx_master", "kernel32.dll", "Windows/System32"),
+    ("nginx_master", "ws2_32.dll", "Windows/System32"),
+    ("nginx_master", "mswsock.dll", "Windows/System32"),
+    ("nginx_master", "msvcrt.dll", "Windows/System32"),
+    ("nginx_master", "advapi32.dll", "Windows/System32"),
+    ("nginx_master", "user32.dll", "Windows/System32"),
+    ("nginx_master", "user/bin/nginx.exe", "nginx"),
+    ("nginx_master", "user/nginx/conf/nginx-master.conf", "nginx/conf"),
+    ("nginx_master", "user/nginx/html/index.html", "nginx/html"),
+    ("nginx_master", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
+    ("nginx_master", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
     ("go_exit", "ntdll.dll", "Windows/System32"),
     ("go_exit", "kernel32.dll", "Windows/System32"),
     ("go_exit", "bcryptprimitives.dll", "Windows/System32"),
@@ -194,6 +208,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_env_test",
     "winsock_test",
     "winsock_async_test",
+    "process_test",
     "kernel32_file_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
@@ -542,6 +557,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("winsock_test", "winsock_test: listening on port 7", NetClient::Echo),
     ("go_http", "go_http: listening on port 7", NetClient::Http(GO_HTTP_PAGE)),
     ("nginx", "using the \"select\" event method", NetClient::Http(NGINX_PAGE)),
+    ("nginx_master", "start worker process", NetClient::Http(NGINX_PAGE)),
 ];
 
 /// Scenarios whose program serves until stopped: once the net client has
@@ -768,6 +784,17 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["go_os: ok", "go_os.exe finished with status 0x00000000"],
     },
     Scenario {
+        // N2b: CreateProcessW (the test starts itself as a child).
+        name: "process_test",
+        cmdline: "qemu_exit run=process_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "process_test: child says hello through the inherited console",
+            "process_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // N1c: overlapped Winsock with a completion port (what Go uses).
         name: "winsock_async_test",
         cmdline: "qemu_exit run=winsock_async_test.exe",
@@ -798,6 +825,14 @@ const SCENARIOS: &[Scenario] = &[
             "nginx/1.30.6",
             "xtask: net client: http ok",
         ],
+    },
+    Scenario {
+        // N2b: Nginx's normal mode: the master starts a worker process
+        // (CreateProcess) that serves the page.
+        name: "nginx_master",
+        cmdline: "qemu_exit run=nginx.exe args=-p%20C:/nginx/%20-c%20conf/nginx-master.conf",
+        exit_status: XTASK_STOPS,
+        expect: &["start worker process", "xtask: net client: http ok"],
     },
     Scenario {
         name: "go_exit",
@@ -1501,6 +1536,25 @@ fn net_client(port: u16) -> Result {
 /// The host side of an HTTP scenario: GET / with HTTP/1.1, expect 200 and
 /// `page` as the body.
 fn http_client(port: u16, page: &str) -> Result {
+    // A server may log that it started before it listens (Nginx's master
+    // logs before its worker opens the socket): retry while nothing at all
+    // comes back, for up to 10 s.
+    let mut last = String::new();
+    for _ in 0..50 {
+        match http_get(port, page) {
+            Err(e) if e.starts_with("no response") => {
+                last = e;
+                thread::sleep(Duration::from_millis(200));
+            }
+            other => return other,
+        }
+    }
+    Err(last)
+}
+
+/// One GET for `http_client`; "no response: ..." if the connection gave
+/// nothing back.
+fn http_get(port: u16, page: &str) -> Result {
     use std::io::Write;
     let mut stream =
         std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect: {e}"))?;
@@ -1509,7 +1563,12 @@ fn http_client(port: u16, page: &str) -> Result {
         .write_all(b"GET / HTTP/1.1\r\nHost: gala\r\nConnection: close\r\n\r\n")
         .map_err(|e| format!("send: {e}"))?;
     let mut response = String::new();
-    stream.read_to_string(&mut response).map_err(|e| format!("receive: {e}"))?;
+    let read = stream.read_to_string(&mut response);
+    if response.is_empty() {
+        let why = read.err().map_or("closed".to_string(), |e| e.to_string());
+        return Err(format!("no response: {why}"));
+    }
+    read.map_err(|e| format!("receive: {e}"))?;
     let (head, body) = response.split_once("\r\n\r\n").ok_or("no end of headers")?;
     if !head.starts_with("HTTP/1.1 200 OK") {
         return Err(format!("status line {:?}", head.lines().next()));
@@ -1758,14 +1817,19 @@ fn screenshot(release: bool, args: &[String]) -> Result {
     build_kernel(release)?;
     // gala's system DLLs in System32 (programs may look only there), the
     // test DLLs next to the programs.
-    let system = ["ntdll.dll", "kernel32.dll", "bcryptprimitives.dll", "ws2_32.dll", "mswsock.dll"];
+    // Every gala DLL is a system DLL except the test DLLs (testdll*.dll).
     let mut modules: Vec<(&str, &str)> = USER_DLLS
         .iter()
-        .map(|d| (d.file, if system.contains(&d.file) { "Windows/System32" } else { "gala" }))
+        .map(|d| (d.file, if d.file.starts_with("testdll") { "gala" } else { "Windows/System32" }))
         .collect();
     // Programs shipped from the repository (Nginx and its files).
     if cmdline.iter().any(|w| w.contains("nginx.exe")) {
-        modules.extend(extra_modules("nginx").into_iter().filter(|(file, _)| file.contains('/')));
+        let scenario = if cmdline.iter().any(|w| w.contains("nginx-master")) {
+            "nginx_master"
+        } else {
+            "nginx"
+        };
+        modules.extend(extra_modules(scenario).into_iter().filter(|(file, _)| file.contains('/')));
     }
     let iso = make_iso(release, &format!("shot-{name}"), &cmdline.join(" "), &modules)?;
     let dir = target_dir().join("screenshots");
@@ -1994,4 +2058,51 @@ fn copy(from: &Path, to: &Path) -> Result {
 
 fn write(path: &Path, contents: &str) -> Result {
     fs::write(path, contents).map_err(|e| format!("writing {path:?}: {e}"))
+}
+
+#[cfg(test)]
+mod constants {
+    /// The kernel's NTSTATUS values (kernel/src/nt/status.rs) against
+    /// mingw-w64's ntstatus.h, when it is installed (Ubuntu:
+    /// mingw-w64-common; CI has none and skips). A wrong value is a
+    /// silent ABI bug: STATUS_OBJECT_NAME_EXISTS was 0x40000035 here, and
+    /// a test expected it, until this check found it.
+    #[test]
+    fn ntstatus_values_match_mingw() {
+        let header = std::path::Path::new("/usr/share/mingw-w64/include/ntstatus.h");
+        let Ok(header) = std::fs::read_to_string(header) else {
+            eprintln!("skipped: no mingw-w64 ntstatus.h");
+            return;
+        };
+        let mut defined = std::collections::HashMap::new();
+        for line in header.lines() {
+            // #define STATUS_NAME ((NTSTATUS)0x....)
+            let Some(rest) = line.strip_prefix("#define STATUS_") else { continue };
+            let Some((name, value)) = rest.split_once(char::is_whitespace) else { continue };
+            let Some(hex) = value.trim().strip_prefix("((NTSTATUS)0x") else { continue };
+            let hex = hex.trim_end_matches(')').trim_end_matches('L');
+            if let Ok(v) = u32::from_str_radix(hex, 16) {
+                defined.insert(name.to_string(), v);
+            }
+        }
+        let source =
+            std::fs::read_to_string(super::root().join("kernel/src/nt/status.rs")).unwrap();
+        let mut checked = 0;
+        for line in source.lines() {
+            // pub const NAME: NtStatus = NtStatus(0x....);
+            let Some(rest) = line.trim().strip_prefix("pub const ") else { continue };
+            let Some((name, value)) = rest.split_once(": NtStatus = NtStatus(0x") else { continue };
+            let hex: String = value
+                .chars()
+                .take_while(|c| c.is_ascii_hexdigit() || *c == '_')
+                .filter(|&c| c != '_')
+                .collect();
+            let ours = u32::from_str_radix(&hex, 16).unwrap();
+            if let Some(&theirs) = defined.get(name) {
+                assert_eq!(ours, theirs, "STATUS_{name}: kernel {ours:#x}, ntstatus.h {theirs:#x}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 50, "only {checked} statuses compared");
+    }
 }

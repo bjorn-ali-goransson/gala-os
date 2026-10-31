@@ -478,7 +478,37 @@ the TSC clock; the performance counter runs at 10 MHz.
 User-mode CPU exceptions terminate the process with the matching NTSTATUS
 (no SEH dispatch yet).
 
-## gala's user-mode DLLs
+## Processes started by programs (N2b)
+
+kernel32's CreateProcessW/A calls `GalaCreateProcess` (service 0x7f02,
+gala's own, like GalaRecordMissing): Windows' NtCreateUserProcess takes
+attribute lists whose layout changes between builds; until it is
+verified on the pinned build, gala's kernel32 (the only caller) passes
+one flat structure (120 bytes):
+
+| Offset | Field |
+|---|---|
+| 0 | image path (UTF-16 NT path, `\??\C:\...`), 8: its length in characters, 12: flags (1 inherit handles, 2 suspended) |
+| 16 / 24 | command line / length |
+| 32 / 40 | current directory (Win32, with a trailing backslash) / length |
+| 48 / 56 | environment block (UTF-16, `NAME=value\0...\0`) / length in characters |
+| 64, 72, 80 | standard input, output, error handles (parent's values) |
+| 88, 96, 104, 112 | out: process handle, thread handle, process id, thread id |
+
+The kernel opens the image like NtOpenFile (so a missing file is
+STATUS_OBJECT_NAME_NOT_FOUND, ERROR_FILE_NOT_FOUND to the caller), reads
+it and builds the process with the same code as boot-time programs
+(`process::spawn`): image, stack, KUSER_SHARED_DATA, process parameters
+(the given command line, current directory, environment and standard
+handles), PEB, the main thread through ntdll's LdrInitializeThunk
+(created suspended if asked). The child's handle table starts with the
+parent's inheritable handles (OBJ_INHERIT, i.e. bInheritHandle in the
+SECURITY_ATTRIBUTES) at the same values, and the three standard handles
+at their values whatever the inherit flag (console handles are shared,
+as with Windows' console). The parent gets handles to the new process
+and thread (full access).
+
+
 
 Windows programs need ntdll.dll and kernel32.dll in their process. gala
 ships its own, built from `user/` as freestanding Rust cdylibs, written

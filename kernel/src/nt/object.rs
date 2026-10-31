@@ -508,6 +508,29 @@ impl HandleTable {
         Ok(Handle((index as u64 + 1) * 4))
     }
 
+    /// Inserts `entry` at the handle value `handle` (inherited handles keep
+    /// their values); fails if the slot is taken.
+    pub fn insert_at(&mut self, handle: Handle, entry: HandleEntry) -> Result<(), AllocError> {
+        let index = slot(handle).ok_or(AllocError)?;
+        while self.entries.len() <= index {
+            self.entries.try_push(None)?;
+        }
+        if self.entries[index].is_some() {
+            return Err(AllocError);
+        }
+        entry.object.handle_count.fetch_add(1, Ordering::AcqRel);
+        self.entries[index] = Some(entry);
+        Ok(())
+    }
+
+    /// Every entry with its handle value.
+    pub fn iter(&self) -> impl Iterator<Item = (Handle, &HandleEntry)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| e.as_ref().map(|e| (Handle((i as u64 + 1) * 4), e)))
+    }
+
     /// Inserts `object` with its full rights (used for kernel-created handles).
     pub fn insert_object(&mut self, object: ObjectRef) -> Result<Handle, AllocError> {
         let access = object.mapping().all;

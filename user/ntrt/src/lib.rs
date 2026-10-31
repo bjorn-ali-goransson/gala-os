@@ -72,6 +72,7 @@ stubs! {
     ntrt_nt_read_file = 0x0006;
     ntrt_nt_device_io_control_file = 0x0007;
     ntrt_nt_cancel_io_file_ex = 0x7f01;
+    ntrt_gala_create_process = 0x7f02;
     ntrt_nt_query_information_file = 0x0011;
     ntrt_nt_set_information_file = 0x0027;
     ntrt_nt_open_file = 0x0033;

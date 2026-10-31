@@ -125,6 +125,18 @@ shows it.
   it listens; the client's verdict is appended to the serial log as an
   `xtask: net client: ...` line for `expect` to check. QEMU's user network
   needs no privileges, so this works in containers and CI.
+- **Constants from headers**: values typed in by hand go wrong
+  silently (STATUS_OBJECT_NAME_EXISTS was 0x40000035, and a test agreed
+  with it). With mingw-w64 installed (`apt install mingw-w64-common`, or
+  the cross compiler), `cargo test -p xtask` compares every NTSTATUS in
+  `kernel/src/nt/status.rs` with `ntstatus.h`; check other constants the
+  same way when you add them.
+- **Servers start late**: a program may log that it started before it
+  listens (Nginx's master logs, then its worker opens the socket). The
+  HTTP client retries for 10 s while it gets no response at all.
+- **Boot module directories are real paths**: a program run from a boot
+  module in `nginx/` has the image path `C:\nginx\nginx.exe`; the
+  loader looks for DLLs next to it, then in System32.
 - **32-bit system call arguments**: a ULONG (lengths, classes, codes,
   flags) passed on the stack, and sometimes in a register, has garbage in
   its upper half. Read it with `arg!(call, n) as u32`. go_http failed

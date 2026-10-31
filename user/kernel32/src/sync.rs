@@ -39,11 +39,37 @@ pub(crate) fn ansi_to_wide(s: *const u8, out: &mut [u16]) -> Option<usize> {
     Some(n)
 }
 
+/// Whether SECURITY_ATTRIBUTES (nLength, lpSecurityDescriptor,
+/// bInheritHandle) ask for an inheritable handle.
+pub(crate) fn inheritable(attributes: *mut c_void) -> bool {
+    // SAFETY: the caller's SECURITY_ATTRIBUTES (or NULL).
+    !attributes.is_null() && unsafe { *attributes.cast::<u8>().add(16).cast::<i32>() } != 0
+}
+
+const OBJ_INHERIT: u32 = 0x2;
+
 /// Runs `f` with OBJECT_ATTRIBUTES naming `name` (UTF-16, NUL-terminated)
-/// in the session's object directory, or none for a null name.
-fn with_name<R>(name: *const u16, f: impl FnOnce(*const ObjectAttributes) -> R) -> Result<R, u32> {
+/// in the session's object directory (none for a null name), with
+/// OBJ_INHERIT if `inherit`.
+fn with_name<R>(
+    name: *const u16,
+    inherit: bool,
+    f: impl FnOnce(*const ObjectAttributes) -> R,
+) -> Result<R, u32> {
+    let inherit_bit = if inherit { OBJ_INHERIT } else { 0 };
     if name.is_null() {
-        return Ok(f(core::ptr::null()));
+        if !inherit {
+            return Ok(f(core::ptr::null()));
+        }
+        let oa = ObjectAttributes {
+            length: size_of::<ObjectAttributes>() as u32,
+            root_directory: 0,
+            object_name: core::ptr::null(),
+            attributes: inherit_bit,
+            security_descriptor: 0,
+            security_quality_of_service: 0,
+        };
+        return Ok(f(&oa));
     }
     let mut path = [0u16; 300];
     let mut n = 0;
@@ -60,7 +86,7 @@ fn with_name<R>(name: *const u16, f: impl FnOnce(*const ObjectAttributes) -> R) 
         length: size_of::<ObjectAttributes>() as u32,
         root_directory: 0,
         object_name: &us,
-        attributes: OBJ_OPENIF,
+        attributes: OBJ_OPENIF | inherit_bit,
         security_descriptor: 0,
         security_quality_of_service: 0,
     };
@@ -97,13 +123,10 @@ pub extern "system" fn CreateEventW(
     initial: Bool,
     name: *const u16,
 ) -> Handle {
-    if !attributes.is_null() {
-        unsupported(b"kernel32.dll!CreateEventW(security attributes)", 0);
-    }
     let mut h = core::ptr::null_mut();
     // NotificationEvent (0) for manual reset, else SynchronizationEvent (1).
     let kind = if manual_reset != 0 { 0 } else { 1 };
-    let status = with_name(name, |oa| {
+    let status = with_name(name, inheritable(attributes), |oa| {
         // SAFETY: valid output pointer and attributes.
         unsafe { NtCreateEvent(&mut h, EVENT_ALL_ACCESS, oa.cast(), kind, u8::from(initial != 0)) }
     });
@@ -137,7 +160,7 @@ fn open_named(
     }
     let mut h = core::ptr::null_mut();
     // SAFETY: valid output pointer and attributes.
-    match with_name(name, |oa| unsafe { open(&mut h, access, oa) }) {
+    match with_name(name, false, |oa| unsafe { open(&mut h, access, oa) }) {
         Ok(STATUS_SUCCESS) => h,
         Ok(status) => fail(status, core::ptr::null_mut()),
         Err(e) => fail_with(e, core::ptr::null_mut()),
@@ -171,11 +194,8 @@ pub extern "system" fn CreateMutexW(
     owner: Bool,
     name: *const u16,
 ) -> Handle {
-    if !attributes.is_null() {
-        unsupported(b"kernel32.dll!CreateMutexW(security attributes)", 0);
-    }
     let mut h = core::ptr::null_mut();
-    let status = with_name(name, |oa| {
+    let status = with_name(name, inheritable(attributes), |oa| {
         // SAFETY: valid output pointer and attributes.
         unsafe { NtCreateMutant(&mut h, MUTANT_ALL_ACCESS, oa, u8::from(owner != 0)) }
     });

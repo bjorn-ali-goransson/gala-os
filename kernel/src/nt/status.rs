@@ -8,7 +8,7 @@ impl NtStatus {
     pub const TIMEOUT: NtStatus = NtStatus(0x0000_0102);
     pub const ACCESS_DENIED: NtStatus = NtStatus(0xc000_0022);
     pub const INVALID_PARAMETER_1: NtStatus = NtStatus(0xc000_00ef);
-    pub const OBJECT_NAME_EXISTS: NtStatus = NtStatus(0x4000_0035);
+    pub const OBJECT_NAME_EXISTS: NtStatus = NtStatus(0x4000_0000);
     pub const OBJECT_NAME_INVALID: NtStatus = NtStatus(0xc000_0033);
     pub const OBJECT_NAME_NOT_FOUND: NtStatus = NtStatus(0xc000_0034);
     pub const OBJECT_NAME_COLLISION: NtStatus = NtStatus(0xc000_0035);

@@ -50,6 +50,8 @@ syscall_stubs! {
     NtClose = 0x0f, fn(h: usize);
     // gala's number until verified on the pinned build (see the kernel).
     NtCancelIoFileEx = 0x7f01, fn(h: usize, request: *mut [usize; 2], iosb: *mut [usize; 2]);
+    // gala's process creation (kernel32's CreateProcess; see the kernel).
+    GalaCreateProcess = 0x7f02, fn(parameters: *mut u8);
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,

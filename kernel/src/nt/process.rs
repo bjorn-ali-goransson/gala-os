@@ -24,6 +24,8 @@ use crate::sync::IrqMutex;
 pub struct Process {
     pub id: u64,
     pub name: &'static str,
+    /// The Win32 path of the executable (`C:\\gala\\x.exe`).
+    pub path: &'static str,
     pub space: SharedUserSpace,
     pub handles: IrqMutex<HandleTable>,
     /// Lock order: `vad` before `space`.
@@ -54,7 +56,9 @@ impl Process {
     /// The NT path of the executable (`\\Device\\HarddiskVolume1\\gala\\x.exe`).
     pub fn image_nt_path(&self) -> Result<Vec<u16>, NtStatus> {
         let mut name = Vec::new();
-        for part in [super::file::VOLUME_DEVICE, "\\gala\\", self.name] {
+        // The volume device instead of the drive letter.
+        let rest = self.path.get(2..).unwrap_or(self.path);
+        for part in [super::file::VOLUME_DEVICE, rest] {
             for b in part.bytes() {
                 name.try_push(u16::from(b)).map_err(|_| NtStatus::NO_MEMORY)?;
             }
@@ -297,12 +301,13 @@ const ENVIRONMENT: &[&str] = &[
     "windir=C:\\Windows",
 ];
 
-/// Opens `C:\\gala` as a directory file object.
-fn open_boot_directory() -> Option<ObjectRef> {
+/// Opens a directory (`C:\\...`, Win32 form) as a directory file object.
+fn open_directory(win32: &str) -> Option<ObjectRef> {
     use super::file;
+    let rest = win32.get(2..)?.trim_end_matches('\\');
     let mut name = Vec::new();
-    for c in "\\gala".bytes() {
-        name.try_push(u16::from(c)).ok()?;
+    for c in rest.encode_utf16() {
+        name.try_push(c).ok()?;
     }
     let path = file::FilePath { start: crate::fs::ramfs::ROOT, name };
     let share = file::FILE_SHARE_READ | file::FILE_SHARE_WRITE | file::FILE_SHARE_DELETE;
@@ -310,13 +315,106 @@ fn open_boot_directory() -> Option<ObjectRef> {
     file::create(&path, CURDIR_ACCESS, share, file::FILE_OPEN, options).ok().map(|c| c.object)
 }
 
-/// Creates a process from a PE executable and starts its main thread.
-/// `args` follow the image path on the command line.
+/// Names and paths of processes live as long as the kernel: each distinct
+/// string is allocated once.
+static INTERNED: IrqMutex<Vec<&'static str>> = IrqMutex::new(Vec::new());
+
+pub fn intern(s: &str) -> Result<&'static str, AllocError> {
+    let mut table = INTERNED.lock();
+    if let Some(&found) = table.iter().find(|&&t| t == s) {
+        return Ok(found);
+    }
+    table.try_reserve(1).map_err(|_| AllocError)?;
+    let mut owned: Vec<u8> = Vec::new();
+    owned.try_extend_from_slice(s.as_bytes())?;
+    let leaked: &'static str = core::str::from_utf8(owned.leak()).unwrap_or("?");
+    table.try_push(leaked)?;
+    Ok(leaked)
+}
+
+/// Creates a process from a PE executable that is a boot module (in
+/// `directory` on C:) and starts its main thread. `args` follow the image
+/// path on the command line.
 pub fn spawn_from_pe(
     name: &'static str,
+    directory: &str,
     data: &[u8],
     args: &str,
 ) -> Result<(KArc<Process>, ObjectRef), LoadError> {
+    // C:\<directory>\<name>, the directory as the boot module names it
+    // (`a/b`, empty for C:\gala).
+    let mut image_path: Vec<u8> = Vec::new();
+    if directory.is_empty() {
+        image_path.try_extend_from_slice(BOOT_DIRECTORY.as_bytes())?;
+    } else {
+        image_path.try_extend_from_slice(b"C:\\")?;
+        for part in directory.split(['/', '\\']).filter(|p| !p.is_empty()) {
+            image_path.try_extend_from_slice(part.as_bytes())?;
+            image_path.try_push(b'\\')?;
+        }
+    }
+    image_path.try_extend_from_slice(name.as_bytes())?;
+    let image_path = core::str::from_utf8(&image_path).unwrap_or(name);
+    // The command line: the image path (quoted if it has spaces), then the
+    // arguments, as a shell would pass them.
+    let mut command_line: Vec<u8> = Vec::new();
+    let quote = image_path.contains(' ');
+    if quote {
+        command_line.try_push(b'"')?;
+    }
+    command_line.try_extend_from_slice(image_path.as_bytes())?;
+    if quote {
+        command_line.try_push(b'"')?;
+    }
+    if !args.is_empty() {
+        command_line.try_push(b' ')?;
+        command_line.try_extend_from_slice(args.as_bytes())?;
+    }
+    let command_line = core::str::from_utf8(&command_line).unwrap_or(image_path);
+    spawn(Spawn {
+        name,
+        path: intern(image_path)?,
+        data,
+        command_line,
+        current_directory: BOOT_DIRECTORY,
+        environment: None,
+        handles: None,
+        suspended: false,
+    })
+}
+
+/// What a new process starts with.
+pub struct Spawn<'a> {
+    /// The executable's file name (for logs and events).
+    pub name: &'static str,
+    /// Its Win32 path.
+    pub path: &'static str,
+    pub data: &'a [u8],
+    pub command_line: &'a str,
+    /// With a trailing backslash.
+    pub current_directory: &'a str,
+    /// `NAME=value` strings; None: the boot environment.
+    pub environment: Option<&'a [&'a str]>,
+    /// The handle table and the standard handles in it; None: new console
+    /// handles.
+    pub handles: Option<(HandleTable, [u64; 3])>,
+    /// The main thread waits for a resume.
+    pub suspended: bool,
+}
+
+/// Creates a process from a PE executable and starts (or prepares) its
+/// main thread.
+pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
+    let Spawn {
+        name,
+        path,
+        data,
+        command_line,
+        current_directory,
+        environment,
+        handles,
+        suspended,
+    } = spec;
     let image = PeImage::parse(data).map_err(LoadError::Pe)?;
     // Binding imports is the user-mode loader's job (ntdll), as on Windows.
     if image.has_imports() && super::ntdll::get().is_none() {
@@ -354,15 +452,21 @@ pub fn spawn_from_pe(
 
     super::kuser::map_into(&mut space, &mut vad)?;
 
-    // Handles for the standard streams.
-    let mut handles = HandleTable::default();
-    let stdin = handles.insert_object(KObject::new(ObjectBody::ConsoleInput)?)?;
-    let output = KObject::new(ObjectBody::ConsoleOutput)?;
-    let stdout = handles.insert_object(output.clone())?;
-    let stderr = handles.insert_object(output)?;
+    // Handles: given (inherited), or new ones for the standard streams.
+    let (mut handles, std_handles) = match handles {
+        Some(given) => given,
+        None => {
+            let mut handles = HandleTable::default();
+            let stdin = handles.insert_object(KObject::new(ObjectBody::ConsoleInput)?)?;
+            let output = KObject::new(ObjectBody::ConsoleOutput)?;
+            let stdout = handles.insert_object(output.clone())?;
+            let stderr = handles.insert_object(output)?;
+            (handles, [stdin.0, stdout.0, stderr.0])
+        }
+    };
 
-    // The current directory, C:\\gala\\ (where boot modules live), as a handle.
-    let cwd_handle = match open_boot_directory() {
+    // The current directory, as a handle.
+    let cwd_handle = match open_directory(current_directory) {
         Some(object) => handles
             .insert(super::object::HandleEntry { object, access: CURDIR_ACCESS, attributes: 0 })
             .map_or(0, |h| h.0),
@@ -373,43 +477,23 @@ pub fn spawn_from_pe(
     };
 
     // RTL_USER_PROCESS_PARAMETERS.
-    let mut image_path: Vec<u8> = Vec::new();
-    image_path.try_extend_from_slice(BOOT_DIRECTORY.as_bytes())?;
-    image_path.try_extend_from_slice(name.as_bytes())?;
-    let image_path = core::str::from_utf8(&image_path).unwrap_or(name);
-    // The command line: the image path (quoted if it has spaces), then the
-    // arguments, as a shell would pass them.
-    let mut command_line: Vec<u8> = Vec::new();
-    let quote = image_path.contains(' ');
-    if quote {
-        command_line.try_push(b'"')?;
-    }
-    command_line.try_extend_from_slice(image_path.as_bytes())?;
-    if quote {
-        command_line.try_push(b'"')?;
-    }
-    if !args.is_empty() {
-        command_line.try_push(b' ')?;
-        command_line.try_extend_from_slice(args.as_bytes())?;
-    }
-    let command_line = core::str::from_utf8(&command_line).unwrap_or(image_path);
     let cpus = crate::arch::smp::online_count();
     let mut cpus_var = [0u8; 24];
     let cpus_var = number_variable(&mut cpus_var, "NUMBER_OF_PROCESSORS=", cpus);
-    let mut environment = [""; ENVIRONMENT.len()];
-    for (slot, var) in environment.iter_mut().zip(ENVIRONMENT) {
+    let mut environment_default = [""; ENVIRONMENT.len()];
+    for (slot, var) in environment_default.iter_mut().zip(ENVIRONMENT) {
         *slot = if *var == "NUMBER_OF_PROCESSORS=" { cpus_var } else { var };
     }
     let p = layout::PARAMS_ADDRESS;
     let block = super::params::build(
         &super::params::ProcessParameters {
-            image_path,
+            image_path: path,
             command_line,
-            current_directory: BOOT_DIRECTORY,
+            current_directory,
             current_directory_handle: cwd_handle,
             dll_path: "",
-            std_handles: [stdin.0, stdout.0, stderr.0],
-            environment: &environment,
+            std_handles,
+            environment: environment.unwrap_or(&environment_default),
         },
         p,
     )
@@ -448,6 +532,7 @@ pub fn spawn_from_pe(
     let process = KArc::try_new(Process {
         id,
         name,
+        path,
         space,
         handles: IrqMutex::new(handles),
         vad: IrqMutex::new(vad),
@@ -475,7 +560,7 @@ pub fn spawn_from_pe(
             start.rip,
             None,
             (layout::STACK_TOP, stack_limit, stack_bottom),
-            false,
+            suspended,
         )
         .map(|t| (t, regs))
     });

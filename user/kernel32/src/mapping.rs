@@ -244,24 +244,6 @@ pub extern "system" fn GetExitCodeProcess(process: Handle, code: *mut u32) -> Bo
     TRUE
 }
 
-/// CreateProcessA: gala cannot start processes from user mode yet.
-#[unsafe(no_mangle)]
-pub extern "system" fn CreateProcessA(
-    _application: *const u8,
-    _command_line: *mut u8,
-    _process_attributes: *mut c_void,
-    _thread_attributes: *mut c_void,
-    _inherit: Bool,
-    _flags: u32,
-    _environment: *mut c_void,
-    _directory: *const u8,
-    _startup: *mut c_void,
-    _info: *mut c_void,
-) -> Bool {
-    unsupported(b"kernel32.dll!CreateProcessA", 0);
-    fail_with(ERROR_NOT_SUPPORTED, FALSE)
-}
-
 /// GetCommandLineA: the command line in the ANSI code page (UTF-8 on
 /// gala), converted once.
 #[unsafe(no_mangle)]

@@ -192,8 +192,9 @@ to set and to argue for. Current order and why:
    a platform seam. The ledger and event stream now make the Go bring-up
    data-driven.
 5. G3 (workable Go programs): done. N1 done (N1a-N1c: Go's net/http
-   serves the host). N2a done: Nginx serves the host. Next: N2b (Nginx
-   in its normal master/worker mode: process creation from user mode).
+   serves the host). N2a, N2b done: Nginx serves the host in its normal
+   master/worker mode. Next: N2c (Nginx with zlib and PCRE2: gzip and
+   rewrite; then OpenSSL for TLS), then U1 (gala-um).
    N2a was decided 2026-10-31: Nginx is the stated
    goal and the ledger makes bring-up data-driven, so build an x64 Nginx
    with mingw-w64 and run it on gala before choosing anything larger
@@ -259,11 +260,20 @@ N2. **Nginx**: either our own 64-bit build of Nginx (cross-compiled with
         (IOCTL_AFD_POLL), non-blocking sockets (FIONBIO), getaddrinfo
         (numeric/localhost), gethostname. The `nginx` scenario: xtask
         GETs the page, then stops the VM (Nginx serves until stopped).
-   N2b (next). Nginx's normal mode: `master_process on` starts worker
+   N2b. Nginx's normal mode: `master_process on` starts worker
         processes with CreateProcess (NtCreateUserProcess, handle
         inheritance, the named events and shared memory it already
-        uses), stopped with `nginx -s stop`. Then the modules that need
-        libraries: PCRE2 (rewrite), zlib (gzip), OpenSSL (TLS).
+        uses), stopped with `nginx -s stop`. **Done** (without `-s stop`,
+        which needs two programs running side by side in a scenario):
+        `process_test` (Windows-compatible), GalaCreateProcess,
+        CreateProcessW/A, handle inheritance, suspended start; the
+        `nginx_master` scenario (a master and one worker). Found on the
+        way: STATUS_OBJECT_NAME_EXISTS was 0x40000035 (it is
+        0x40000000); xtask now checks every kernel NTSTATUS against
+        mingw-w64's ntstatus.h.
+   N2c (next). The modules that need libraries, built from pinned sources
+        like Nginx: zlib (gzip), PCRE2 (rewrite); then OpenSSL (TLS, with
+        gala's bcrypt/crypt32 pieces as the ledger asks).
 
 ## Later
 SMP, ACPI (MADT/HPET), virtio devices, bindgen-generated layouts from

@@ -35,6 +35,9 @@ pub const NT_READ_FILE: u32 = 0x0006;
 pub const NT_DEVICE_IO_CONTROL_FILE: u32 = 0x0007;
 /// gala's number for NtCancelIoFileEx until verified (not Windows').
 pub const NT_CANCEL_IO_FILE_EX: u32 = 0x7f01;
+/// gala's process creation service (docs/ARCHITECTURE.md, "Processes
+/// started by programs").
+pub const GALA_CREATE_PROCESS: u32 = 0x7f02;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -195,6 +198,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_CLOSE, "NtClose", 1, nt_close),
     (NT_DEVICE_IO_CONTROL_FILE, "NtDeviceIoControlFile", 10, nt_device_io_control_file),
     (NT_CANCEL_IO_FILE_EX, "NtCancelIoFileEx", 3, nt_cancel_io_file_ex),
+    (GALA_CREATE_PROCESS, "GalaCreateProcess", 1, gala_create_process),
     (NT_ALLOCATE_VIRTUAL_MEMORY, "NtAllocateVirtualMemory", 6, nt_allocate_virtual_memory),
     (NT_FREE_VIRTUAL_MEMORY, "NtFreeVirtualMemory", 4, nt_free_virtual_memory),
     (NT_QUERY_VIRTUAL_MEMORY, "NtQueryVirtualMemory", 6, nt_query_virtual_memory),
@@ -2355,6 +2359,151 @@ fn nt_cancel_io_file_ex(call: &mut Call<'_>) -> NtStatus {
     }
     if iosb != 0 {
         tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+    }
+    NtStatus::SUCCESS
+}
+
+impl Call<'_> {
+    /// `len` UTF-16 characters at `ptr` (at most 32 Ki).
+    fn read_wide(&self, ptr: u64, len: u64) -> Result<Vec<u16>, NtStatus> {
+        if len > 32 * 1024 {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(len as usize * 2).map_err(|_| NtStatus::NO_MEMORY)?;
+        bytes.resize(len as usize * 2, 0u8);
+        self.process.read(ptr, &mut bytes).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(len as usize).map_err(|_| NtStatus::NO_MEMORY)?;
+        for pair in bytes.chunks_exact(2) {
+            let _ = out.try_push(u16::from_le_bytes([pair[0], pair[1]]));
+        }
+        Ok(out)
+    }
+}
+
+/// UTF-16 to UTF-8 (unpaired surrogates become U+FFFD).
+fn utf8_of(wide: &[u16]) -> Result<Vec<u8>, NtStatus> {
+    let mut out = Vec::new();
+    for c in char::decode_utf16(wide.iter().copied()) {
+        let mut b = [0u8; 4];
+        let s = c.unwrap_or(char::REPLACEMENT_CHARACTER).encode_utf8(&mut b);
+        out.try_extend_from_slice(s.as_bytes()).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    Ok(out)
+}
+
+/// GalaCreateProcess(*Parameters): gala's process creation (layout in
+/// docs/ARCHITECTURE.md). Reads the image from the volume, builds the
+/// process with the parent's inheritable and standard handles, and returns
+/// handles to the process and its main thread.
+fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
+    let ptr = arg!(call, 0);
+    let mut b = [0u8; 120];
+    if call.process.read(ptr, &mut b).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let u64_at = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap_or([0; 8]));
+    let u32_at =
+        |at: usize| u64::from(u32::from_le_bytes(b[at..at + 4].try_into().unwrap_or([0; 4])));
+    let flags = u32_at(12);
+    let (inherit, suspended) = (flags & 1 != 0, flags & 2 != 0);
+    let image = tri!(call.read_wide(u64_at(0), u32_at(8)));
+    let command_line = tri!(utf8_of(&tri!(call.read_wide(u64_at(16), u32_at(24)))));
+    let directory = tri!(utf8_of(&tri!(call.read_wide(u64_at(32), u32_at(40)))));
+    let environment = tri!(utf8_of(&tri!(call.read_wide(u64_at(48), u32_at(56)))));
+    let std = [u64_at(64), u64_at(72), u64_at(80)];
+
+    // Open and read the image (missing: STATUS_OBJECT_NAME_NOT_FOUND).
+    let path = tri!(call.resolve_file_name(0, image.clone(), OBJ_CASE_INSENSITIVE));
+    let opened = tri!(file::create(
+        &path,
+        file::FILE_READ_DATA,
+        file::FILE_SHARE_READ,
+        file::FILE_OPEN,
+        file::FILE_NON_DIRECTORY_FILE
+    ));
+    let ObjectBody::File(f) = &opened.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let data = tri!(file::read_all(f.node));
+
+    // Names: the Win32 path (without `\??\`) and the file name.
+    let win32 = tri!(utf8_of(image.strip_prefix(&[0x5c, 0x3f, 0x3f, 0x5c][..]).unwrap_or(&image)));
+    let win32 = core::str::from_utf8(&win32).unwrap_or("?");
+    let file_name = win32.rsplit('\\').next().unwrap_or(win32);
+    let (Ok(path_static), Ok(name)) = (process::intern(win32), process::intern(file_name)) else {
+        return NtStatus::NO_MEMORY;
+    };
+
+    // The child's handles: inheritable ones and the standard handles, at
+    // the parent's values.
+    let mut table = super::object::HandleTable::default();
+    {
+        let parent = call.process.handles.lock();
+        for (h, entry) in parent.iter() {
+            let wanted =
+                (inherit && entry.attributes & HANDLE_ATTRIBUTES != 0) || std.contains(&h.0);
+            if wanted && table.insert_at(h, entry.clone()).is_err() {
+                return NtStatus::NO_MEMORY;
+            }
+        }
+    }
+
+    // `NAME=value\0...\0\0` to a list of strings.
+    let env_text = core::str::from_utf8(&environment).unwrap_or("");
+    let mut vars: Vec<&str> = Vec::new();
+    for var in env_text.split('\0').filter(|v| !v.is_empty()) {
+        if vars.try_push(var).is_err() {
+            return NtStatus::NO_MEMORY;
+        }
+    }
+    let command_line = core::str::from_utf8(&command_line).unwrap_or("");
+    let directory = core::str::from_utf8(&directory).unwrap_or("C:\\");
+    let spawned = process::spawn(process::Spawn {
+        name,
+        path: path_static,
+        data: &data,
+        command_line,
+        current_directory: directory,
+        environment: (!vars.is_empty()).then_some(&vars[..]),
+        handles: Some((table, std)),
+        suspended,
+    });
+    let (child, thread_object) = match spawned {
+        Ok(p) => p,
+        Err(process::LoadError::Pe(_)) => return NtStatus::INVALID_IMAGE_FORMAT,
+        Err(_) => return NtStatus::NO_MEMORY,
+    };
+    let thread_id = match &thread_object.body {
+        ObjectBody::Thread(t) => t.id,
+        _ => 0,
+    };
+    let child_id = child.id;
+    let Ok(process_object) = KObject::new(ObjectBody::Process(child)) else {
+        return NtStatus::NO_MEMORY;
+    };
+    let mut handles = call.process.handles.lock();
+    let Ok(ph) = handles.insert(HandleEntry {
+        object: process_object,
+        access: PROCESS_ALL_ACCESS,
+        attributes: 0,
+    }) else {
+        return NtStatus::NO_MEMORY;
+    };
+    let Ok(th) = handles.insert(HandleEntry {
+        object: thread_object,
+        access: THREAD_ALL_ACCESS,
+        attributes: 0,
+    }) else {
+        return NtStatus::NO_MEMORY;
+    };
+    drop(handles);
+    let mut out = [0u8; 32];
+    out[0..8].copy_from_slice(&ph.0.to_le_bytes());
+    out[8..16].copy_from_slice(&th.0.to_le_bytes());
+    out[16..24].copy_from_slice(&child_id.to_le_bytes());
+    out[24..32].copy_from_slice(&thread_id.to_le_bytes());
+    if call.process.write(ptr + 88, &out).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS
 }
