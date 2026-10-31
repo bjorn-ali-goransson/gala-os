@@ -445,6 +445,37 @@ H11. **busybox httpd and wget over loopback**: next. busybox-w32's httpd
    client) fetches files from it over 127.0.0.1, in one boot: sockets
    from C programs and busybox's networking, output as on Windows.
 
+P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
+   files as their makers ship them, not only ones we build). Done: Caddy
+   2.8.4's official Windows release (Go 1.22) - `caddy version` and
+   `list-modules` (`caddy` scenario; xtask fetches pinned releases into
+   target/prebuilt and checks their SHA-256). It needed winmm.dll,
+   ncrypt.dll (no key storage), Get/SetThreadPriority,
+   CreateWaitableTimerA/W, RtlGetNtVersionNumbers, GetComputerName(Ex),
+   GetSystem/WindowsDirectory, AddDllDirectory/SetDefaultDllDirectories,
+   the user's profile (USERPROFILE, APPDATA, LOCALAPPDATA, ProgramData and
+   their directories), and registry calls answering "not found".
+   Next, in order:
+   1. Caddy serving files to the host over the network (a net scenario,
+      like go_http and nginx).
+   2. A JDK: `java -version` from the unmodified Temurin 21 zip, then a
+      Java program. Surveyed: the JDK ships Microsoft's C runtime
+      (ucrtbase, vcruntime140, the api-ms-win-* forwarders, which forward
+      to kernel32), so gala needs no CRT of its own; it needs ~100 more
+      kernel32 functions (SRW locks, condition variables, FLS, locale,
+      time), ntdll's frame-based exception handling and unwinding
+      (RtlUnwindEx, RtlCaptureContext - the JVM turns access violations
+      into NullPointerExceptions), ~40 advapi32 (registry, security), and
+      version, powrprof, winhttp, comctl32. The largest step so far.
+   3. Elasticsearch on that JDK, started with java directly (its .bat
+      launchers need cmd.exe, which gala does not have). As a Windows
+      service it also needs a service control manager. Memory (QEMU's
+      512 MB) and JIT speed under TCG will matter.
+   4. FileZilla: the client is a GUI program (wxWidgets), out of reach
+      until gala has windows. FileZilla Server (mingw-built, a service)
+      is a candidate, but its download page only hands out links to
+      browsers, so the installer has to be supplied by hand.
+
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala
 itself. It needs pipes and the remaining process creation (cargo and the

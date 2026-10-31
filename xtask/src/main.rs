@@ -18,6 +18,25 @@ const LIMINE_TAG: &str = "v11.4.1-binary";
 const LIMINE_COMMIT: &str = "5be26a73d7b7b4d4477d18be94e1d16e615adf56";
 const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
 
+/// Unmodified prebuilt Windows programs that scenarios run, fetched on
+/// first use into target/prebuilt/<name>/ and checked against their
+/// SHA-256 (they are not kept in the repository). THIRD_PARTY.md lists
+/// them.
+struct Prebuilt {
+    name: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+    /// The files used, inside the zip.
+    members: &'static [&'static str],
+}
+
+const PREBUILT: &[Prebuilt] = &[Prebuilt {
+    name: "caddy",
+    url: "https://github.com/caddyserver/caddy/releases/download/v2.8.4/caddy_2.8.4_windows_amd64.zip",
+    sha256: "2631fbe1c4f6fb08783ed6dc6ac238d6655b4c923abe2bce1433dbd7fd079630",
+    members: &["caddy.exe"],
+}];
+
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Freestanding Windows test programs in `user/`, shipped as boot modules.
 const USER_TARGET: &str = "x86_64-pc-windows-msvc";
@@ -47,6 +66,10 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt.dll" },
     Dll { package: "advapi32", file: "advapi32.dll", exported_as: "testadvapi32.dll" },
     Dll { package: "user32", file: "user32.dll", exported_as: "testuser32.dll" },
+    // gala's winmm.dll (timer resolution; Go and the JVM load it).
+    Dll { package: "winmm", file: "winmm.dll", exported_as: "testwinmm.dll" },
+    // gala's ncrypt.dll (no key storage providers; bound at startup).
+    Dll { package: "ncrypt", file: "ncrypt.dll", exported_as: "testncrypt.dll" },
     // gala's crypt32.dll (certificate stores; only what OpenSSL imports).
     Dll { package: "crypt32", file: "crypt32.dll", exported_as: "testcrypt32.dll" },
     // gala's mswsock.dll (forwarders to ws2_32).
@@ -92,6 +115,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_thread_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_misc_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_misc_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_misc_test", "winmm.dll", "Windows/System32"),
+    ("kernel32_misc_test", "advapi32.dll", "Windows/System32"),
+    ("kernel32_misc_test", "ncrypt.dll", "Windows/System32"),
+    ("kernel32_misc_test", "bcryptprimitives.dll", "Windows/System32"),
     ("kernel32_file_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_file_test", "kernel32.dll", "Windows/System32"),
     ("pipe_test", "ntdll.dll", "Windows/System32"),
@@ -220,6 +247,16 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("tcc_make", "user/tcc/make/main.c", "gala/make"),
     ("tcc_make", "user/tcc/make/add.c", "gala/make"),
     ("tcc_make", "user/tcc/make/mul.c", "gala/make"),
+    ("caddy", "ntdll.dll", "Windows/System32"),
+    ("caddy", "kernel32.dll", "Windows/System32"),
+    ("caddy", "advapi32.dll", "Windows/System32"),
+    ("caddy", "winmm.dll", "Windows/System32"),
+    ("caddy", "ncrypt.dll", "Windows/System32"),
+    ("caddy", "crypt32.dll", "Windows/System32"),
+    ("caddy", "ws2_32.dll", "Windows/System32"),
+    ("caddy", "mswsock.dll", "Windows/System32"),
+    ("caddy", "bcryptprimitives.dll", "Windows/System32"),
+    ("caddy", "target/prebuilt/caddy/caddy.exe", "gala"),
     ("lua", "ntdll.dll", "Windows/System32"),
     ("lua", "kernel32.dll", "Windows/System32"),
     ("lua", "ws2_32.dll", "Windows/System32"),
@@ -570,6 +607,9 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
     for (file, dir) in extra {
         // A path with a slash is a file in the repository (checked-in
         // binaries, configuration); otherwise a built DLL.
+        if file.starts_with("target/prebuilt/") {
+            fetch_prebuilt(file)?;
+        }
         let (source, name) = match file.rsplit_once('/') {
             Some((_, name)) => (root().join(file), name),
             None => (target_dir().join(USER_TARGET).join("release").join(file), *file),
@@ -609,6 +649,35 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
 /// Clones the pinned Limine binary release into the target directory once
 /// (once per xtask run too: ISOs are built in parallel, and concurrent
 /// clones into one directory fail).
+/// Makes sure the prebuilt file `path` (`target/prebuilt/<name>/<file>`)
+/// is there: downloads its release (curl), checks the SHA-256 and unzips
+/// the members (unzip).
+fn fetch_prebuilt(path: &str) -> Result {
+    let full = root().join(path);
+    if full.exists() {
+        return Ok(());
+    }
+    let name = path.split('/').nth(2).ok_or(format!("bad prebuilt path {path}"))?;
+    let p = PREBUILT.iter().find(|p| p.name == name).ok_or(format!("no prebuilt {name:?}"))?;
+    let dir = root().join("target/prebuilt").join(p.name);
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    let zip = dir.join("download.zip");
+    eprintln!("xtask: fetching {} ({})", p.name, p.url);
+    run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&zip).arg(p.url))?;
+    let sum =
+        Command::new("sha256sum").arg(&zip).output().map_err(|e| format!("sha256sum: {e}"))?;
+    let sum = String::from_utf8_lossy(&sum.stdout);
+    if sum.split_whitespace().next() != Some(p.sha256) {
+        let _ = fs::remove_file(&zip);
+        return Err(format!("{}: SHA-256 mismatch ({sum})", p.url));
+    }
+    let mut cmd = Command::new("unzip");
+    cmd.args(["-q", "-o"]).arg(&zip).args(p.members).arg("-d").arg(&dir);
+    run_cmd(&mut cmd)?;
+    let _ = fs::remove_file(&zip);
+    if full.exists() { Ok(()) } else { Err(format!("{path} is not in {}", p.url)) }
+}
+
 fn fetch_limine() -> Result<PathBuf> {
     static LIMINE: std::sync::OnceLock<Result<PathBuf>> = std::sync::OnceLock::new();
     LIMINE.get_or_init(fetch_limine_once).clone()
@@ -1094,6 +1163,20 @@ const SCENARIOS: &[Scenario] = &[
             "argc=4 last=three len=5",
             "status=7",
             "busybox.exe (pid 4) exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // Unmodified prebuilt programs: Caddy 2.8.4's official Windows
+        // release (Go 1.22, fetched and checked by xtask, PREBUILT) prints
+        // its version and lists its modules. Expected as on Windows.
+        name: "caddy",
+        cmdline: "qemu_exit run=caddy.exe,caddy.exe args=version,list-modules",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "v2.8.4 h1:q3pe0wpBj1OcHFZ3n/1nl4V4bxBrYoSoab7rL9BMYNk=",
+            "http.handlers.file_server",
+            "Standard modules: 121",
+            "caddy.exe finished with status 0x00000000",
         ],
     },
     Scenario {

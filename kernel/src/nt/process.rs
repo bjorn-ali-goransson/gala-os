@@ -312,17 +312,31 @@ fn number_variable<'a>(buf: &'a mut [u8; 24], name: &'a str, value: u32) -> &'a 
     core::str::from_utf8(&buf[..name.len() + n]).unwrap_or(name)
 }
 
-/// The initial environment.
+/// The initial environment: the system's variables and the profile of
+/// the user `gala` (directories made by `file::init`), as a Windows logon
+/// sets them.
 const ENVIRONMENT: &[&str] = &[
+    "ALLUSERSPROFILE=C:\\ProgramData",
+    "APPDATA=C:\\Users\\gala\\AppData\\Roaming",
     "ComSpec=C:\\Windows\\System32\\cmd.exe",
+    "COMPUTERNAME=GALA",
+    "HOMEDRIVE=C:",
+    "HOMEPATH=\\Users\\gala",
+    "LOCALAPPDATA=C:\\Users\\gala\\AppData\\Local",
     "NUMBER_OF_PROCESSORS=", // completed with the count in `load`
     "OS=Windows_NT",
     "Path=C:\\Windows\\System32;C:\\Windows",
     "PROCESSOR_ARCHITECTURE=AMD64",
+    "ProgramData=C:\\ProgramData",
+    "ProgramFiles=C:\\Program Files",
+    "PUBLIC=C:\\Users\\Public",
     "SystemDrive=C:",
     "SystemRoot=C:\\Windows",
     "TEMP=C:\\Users\\Public",
     "TMP=C:\\Users\\Public",
+    "USERDOMAIN=GALA",
+    "USERNAME=gala",
+    "USERPROFILE=C:\\Users\\gala",
     "windir=C:\\Windows",
 ];
 

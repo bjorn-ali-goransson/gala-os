@@ -238,6 +238,7 @@ unsafe extern "system" {
         len: u32,
         ret: *mut u32,
     ) -> u32;
+    fn NtSetInformationThread(h: Handle, class: u32, buf: *const u8, len: u32) -> u32;
     fn NtCreateThread(
         handle: *mut Handle,
         access: u32,
@@ -583,10 +584,39 @@ pub extern "system" fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32
         unsupported(b"kernel32.dll!LoadLibraryExW(flags)", u64::from(flags));
         return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
     }
+    // No search flags: those of SetDefaultDllDirectories, if any.
+    let flags = if flags & SEARCH_FLAGS == 0 {
+        DEFAULT_DLL_DIRECTORIES.load(core::sync::atomic::Ordering::Relaxed)
+    } else {
+        flags
+    };
+    // LOAD_LIBRARY_SEARCH_USER_DIRS (or DEFAULT_DIRS, which includes it):
+    // the AddDllDirectory directories first.
+    if flags & (0x400 | 0x1000) != 0
+        && let Some(h) = files::load_from_dll_directories(name)
+    {
+        return h;
+    }
     // LOAD_LIBRARY_SEARCH_SYSTEM32 alone restricts the search to System32;
     // the default-directories flags include the application directory.
     let search = if flags & SEARCH_FLAGS == 0x800 { 0x800 } else { 0 };
     load_library(name, wide_len(name), search)
+}
+
+/// SetDefaultDllDirectories' flags (0: none set).
+static DEFAULT_DLL_DIRECTORIES: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// SetDefaultDllDirectories: the LOAD_LIBRARY_SEARCH_* flags LoadLibrary
+/// uses when it is given none.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetDefaultDllDirectories(flags: u32) -> Bool {
+    const ALLOWED: u32 = 0x200 | 0x400 | 0x800 | 0x1000;
+    if flags == 0 || flags & !ALLOWED != 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    DEFAULT_DLL_DIRECTORIES.store(flags, core::sync::atomic::Ordering::Relaxed);
+    TRUE
 }
 
 /// GetProcAddress: by name, or by ordinal when `name` < 0x10000.
@@ -1587,39 +1617,6 @@ pub extern "system" fn GetNativeSystemInfo(info: *mut SystemInfo) {
     GetSystemInfo(info);
 }
 
-/// GetSystemDirectoryA: `<NtSystemRoot>\system32` (from
-/// KUSER_SHARED_DATA). Returns the length without the NUL, or the size
-/// needed (with it) if `buffer` is too small.
-#[unsafe(no_mangle)]
-pub extern "system" fn GetSystemDirectoryA(buffer: *mut u8, size: u32) -> u32 {
-    let mut path = [0u8; 280];
-    let mut n = 0;
-    // SAFETY: KUSER_SHARED_DATA.NtSystemRoot, a NUL-terminated WCHAR[260].
-    unsafe {
-        while n < 260 {
-            let c = core::ptr::read_volatile((0x7ffe_0030 + 2 * n) as *const u16);
-            if c == 0 {
-                break;
-            }
-            path[n] = if c < 0x80 { c as u8 } else { b'?' };
-            n += 1;
-        }
-    }
-    for &b in b"\\system32" {
-        path[n] = b;
-        n += 1;
-    }
-    if (size as usize) <= n {
-        return n as u32 + 1;
-    }
-    // SAFETY: the caller's buffer holds `size` > n bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(path.as_ptr(), buffer, n);
-        *buffer.add(n) = 0;
-    }
-    n as u32
-}
-
 #[unsafe(no_mangle)]
 pub extern "system" fn GetProcessAffinityMask(
     process: Handle,
@@ -2416,6 +2413,63 @@ pub extern "system" fn CreateWaitableTimerExW(
     // SAFETY: valid output pointer.
     let status = unsafe { NtCreateTimer(&mut h, access, core::ptr::null(), kind) };
     if status != STATUS_SUCCESS { fail(status, core::ptr::null_mut()) } else { h }
+}
+
+/// SetThreadPriority: ThreadBasePriority (the increment, -2..2 or the
+/// saturated -15/15; ERROR_INVALID_PARAMETER otherwise).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetThreadPriority(h: Handle, priority: i32) -> Bool {
+    const THREAD_BASE_PRIORITY: u32 = 3;
+    let v = priority.to_le_bytes();
+    // SAFETY: a 4-byte buffer.
+    let status = unsafe { NtSetInformationThread(h, THREAD_BASE_PRIORITY, v.as_ptr(), 4) };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+/// GetThreadPriority: THREAD_BASIC_INFORMATION.BasePriority (the
+/// process's base, 8 for the normal class, plus the increment) as an
+/// increment; 15 and 1 are the saturated TIME_CRITICAL and IDLE.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadPriority(h: Handle) -> i32 {
+    const THREAD_PRIORITY_ERROR_RETURN: i32 = 0x7fff_ffff;
+    let mut basic = [0u8; 48];
+    let mut ret = 0;
+    // SAFETY: a 48-byte buffer.
+    let status = unsafe { NtQueryInformationThread(h, 0, basic.as_mut_ptr(), 48, &mut ret) };
+    if status != STATUS_SUCCESS {
+        return fail(status, THREAD_PRIORITY_ERROR_RETURN);
+    }
+    match i32::from_le_bytes([basic[44], basic[45], basic[46], basic[47]]) {
+        15.. => 15,
+        ..=1 => -15,
+        base => base - 8,
+    }
+}
+
+/// CreateWaitableTimerW / A: CreateWaitableTimerExW with
+/// CREATE_WAITABLE_TIMER_MANUAL_RESET for a manual-reset timer.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateWaitableTimerW(
+    attributes: *mut c_void,
+    manual: Bool,
+    name: *const u16,
+) -> Handle {
+    const TIMER_ALL_ACCESS: u32 = 0x1f_0003;
+    CreateWaitableTimerExW(attributes, name, u32::from(manual != FALSE), TIMER_ALL_ACCESS)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateWaitableTimerA(
+    attributes: *mut c_void,
+    manual: Bool,
+    name: *const u8,
+) -> Handle {
+    if !name.is_null() {
+        // Named timers are not supported by the W version either.
+        unsupported(b"kernel32.dll!CreateWaitableTimerA(name)", 0);
+        return fail_with(ERROR_NOT_SUPPORTED, core::ptr::null_mut());
+    }
+    CreateWaitableTimerW(attributes, manual, core::ptr::null())
 }
 
 /// SetWaitableTimer: the completion routine has the NT timer APC shape

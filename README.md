@@ -43,6 +43,16 @@ program and compares its output with what Windows gives.
 | **Lua** 5.4.7 | the unmodified source release is built on gala by its own makefile (37 compiler runs), then runs a test script | `lua` |
 | **SQLite** 3.54.1 | the 9.5 MB amalgamation compiled on gala by tcc; creates, queries and reopens a database file; two processes write it **at once**, using file locks | `sqlite` |
 | A C runtime test | gala's msvcrt.dll checked by a C program built with mingw-w64 - and also built by tcc on gala | `msvcrt_test`, `tcc_self` |
+| **Caddy** 2.8.4 | the **unmodified official Windows release** (not built by us): prints its version and lists its 121 modules | `caddy` |
+
+Most of these programs were built from their sources for gala's tests,
+but Caddy is the official release binary, downloaded from GitHub by
+xtask and checked against its SHA-256. Getting it to run needed only
+small, honest pieces: a winmm.dll (timer resolution), an ncrypt.dll with
+no key storage, thread priorities, the user's profile directories and
+environment, computer names, and registry calls that answer "not found"
+(gala has no registry yet). More prebuilt programs are on the way
+(docs/ROADMAP.md, P1).
 
 ### The Windows layers underneath
 
@@ -74,7 +84,7 @@ program and compares its output with what Windows gives.
   classes, random numbers (RDRAND).
 - **DLLs gala provides** (written from documentation): ntdll, kernel32,
   msvcrt, ws2_32, mswsock, advapi32, user32 (no windows), crypt32,
-  bcryptprimitives.
+  bcryptprimitives, winmm, ncrypt.
 
 About 50 test programs (`user/*_test`) check these layers call by call;
 the same programs run on Windows (`user/bin/run-all.ps1`) so that the two
@@ -87,13 +97,130 @@ can be compared (`cargo xtask compare`).
   under `C:\`, everything written is gone at reboot); the only network
   card is QEMU's virtio-net. On a real PC gala boots, runs the programs
   on its command line and shows their output on the screen.
-- No graphical user interface (user32 has no windows), no registry, no
-  security model (tokens, ACLs), no 32-bit programs.
+- No graphical user interface (user32 has no windows), no registry (keys
+  are reported as not found), no security model (tokens, ACLs), no
+  32-bit programs, no Windows services (no service control manager).
 - Some system call numbers are gala's own guesses for the pinned Windows
   build (marked UNVERIFIED in `kernel/src/nt/syscalls.rs`); programs
   that go through ntdll are not affected.
 - Functions that are missing or only partly done are reported at the end
   of each run (the "ledger" lines), so gaps are never silent.
+
+## How it fits together
+
+### The layers
+
+A Windows program on gala talks to the same DLLs it would on Windows;
+only those DLLs, and the kernel under them, are gala's.
+
+```mermaid
+flowchart TB
+    subgraph user["User mode (per process)"]
+        app["Windows program (.exe)<br/>Go, Rust, mingw-w64 or MSVC-built"]
+        crt["msvcrt.dll<br/>(or the program's own ucrtbase)"]
+        dlls["kernel32 · advapi32 · ws2_32 · mswsock<br/>user32 · crypt32 · winmm · ncrypt · bcryptprimitives"]
+        ntdll["ntdll.dll<br/>loader · heaps · exception and APC dispatch · system call stubs"]
+        app --> crt --> dlls --> ntdll
+        app --> dlls
+    end
+    subgraph kernel["gala kernel (Rust)"]
+        nt["NT layer (kernel/src/nt)<br/>system calls · objects and handles · processes and threads<br/>virtual memory and sections · files and pipes · waits and timers · AFD sockets · locks"]
+        seam["platform seam (nt::platform)"]
+        core["kernel core<br/>x86_64 and SMP · paging · frames and heap · scheduler · time"]
+        fs["ramfs (C:)"]
+        net["TCP/IP (smoltcp)<br/>loopback · virtio-net"]
+        nt --> seam --> core
+        nt --> fs
+        nt --> net
+    end
+    um["gala-um: the same NT layer<br/>as a Linux process (tests, debugging)"]
+    ntdll -- "syscall" --> nt
+    seam -. "hosted feature" .-> um
+```
+
+### Booting
+
+```mermaid
+flowchart LR
+    fw["BIOS or UEFI<br/>(CD, disk or USB stick)"] --> limine["Limine<br/>kernel + boot modules<br/>+ command line"]
+    limine --> init["kernel init<br/>GDT/IDT · memory map · paging<br/>heap · APIC timer · all CPUs"]
+    init --> fsinit["C: in memory<br/>boot modules under C:\gala,<br/>DLLs under C:\Windows\System32"]
+    fsinit --> run["run=a.exe,b.exe<br/>each program as a process"]
+    run --> log["serial port + screen:<br/>output, ledger, nt: line"]
+```
+
+### Starting a process
+
+```mermaid
+sequenceDiagram
+    participant P as Parent (kernel32 CreateProcessW)
+    participant K as gala kernel
+    participant L as ntdll (child)
+    participant C as Child program
+    P->>K: GalaCreateProcess(image, command line, handles, environment)
+    K->>K: image layout from the cache (shared code pages)<br/>address space, PEB, parameters, inherited handles
+    K->>L: initial thread at LdrInitializeThunk
+    L->>L: process heap, load and bind DLLs, DllMain
+    L->>C: NtContinue to the entry point
+    C-->>K: system calls ... NtTerminateProcess
+    K-->>P: process object signaled, exit code
+```
+
+### A system call
+
+```mermaid
+flowchart LR
+    stub["ntdll stub<br/>mov eax, n · syscall"] --> entry["syscall entry<br/>(arch)"]
+    entry --> dispatch["dispatch<br/>table of services"]
+    dispatch --> handler["service<br/>e.g. NtReadFile"]
+    handler --> objects["objects and handles<br/>access checks"]
+    handler --> back["status in rax<br/>back to user mode"]
+    dispatch -.-> obs["ledger (gaps) · trace<br/>events · nt: counters"]
+```
+
+### Networking
+
+```mermaid
+flowchart TB
+    prog["program: Winsock calls<br/>(socket, connect, WSARecv, select ...)"] --> ws2["ws2_32.dll · mswsock.dll"]
+    ws2 -- "NtDeviceIoControlFile on \Device\Afd" --> afd["AFD in the kernel<br/>endpoints · pending requests · completion ports"]
+    afd --> nett["net thread: smoltcp TCP/IP"]
+    nett --> lo["loopback (127.0.0.1)"]
+    nett --> vio["virtio-net card<br/>(QEMU user network)"]
+```
+
+### Building on gala
+
+The self-hosting scenarios chain real tools, each running as Windows
+programs on gala:
+
+```mermaid
+flowchart LR
+    sh["busybox sh<br/>(script)"] --> tar["tar / unzip<br/>unpack sources"]
+    tar --> tcc["tcc.exe"]
+    tcc --> rt["libtcc1.a<br/>(tcc's runtime, built on gala)"]
+    tcc --> tcc2["tcc2.exe<br/>(tcc compiled by itself)"]
+    sh --> make["busybox make"]
+    make --> tcc
+    tcc --> lua["lua.exe (Lua's makefile)"]
+    tcc --> sqlite["sqlrun.exe + SQLite"]
+    lua --> out["programs run on gala<br/>output compared with Windows"]
+    sqlite --> out
+```
+
+### Testing
+
+```mermaid
+flowchart LR
+    tp["test program<br/>user/&lt;name&gt;_test<br/>expected = Windows' results"] --> sc["scenario in xtask<br/>command line + expected lines"]
+    sc --> unit["host unit tests"]
+    sc --> um["gala-um<br/>(Linux process, ms)"]
+    sc --> qemu["QEMU boots<br/>(BIOS/UEFI, 2 CPUs)"]
+    tp --> win["Windows 11<br/>run-all.ps1"]
+    qemu --> rep["cargo xtask report"]
+    win --> cmp["cargo xtask compare"]
+    rep --> cmp
+```
 
 ## Building
 

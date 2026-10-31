@@ -138,6 +138,7 @@ syscall_stubs! {
         protect: u32
     );
     NtFreeVirtualMemory = 0x1e, fn(process: isize, base: *mut usize, size: *mut usize, kind: u32);
+    NtSetInformationThread = 0x0d, fn(h: usize, class: u32, buf: *const u8, len: u32);
     NtLockFile = 0x123, fn(
         h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
         offset: *const i64, length: *const i64, key: u32, fail_immediately: u8, exclusive: u8
@@ -975,6 +976,29 @@ pub unsafe extern "system" fn RtlGetVersion(info: *mut u32) -> u32 {
         }
     }
     STATUS_SUCCESS
+}
+
+/// RtlGetNtVersionNumbers(*Major, *Minor, *Build): the pinned build's
+/// version (KUSER_SHARED_DATA has the same numbers), with 0xF0000000 in
+/// the build number as a free (release) build reports it.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlGetNtVersionNumbers(major: *mut u32, minor: *mut u32, build: *mut u32) {
+    // SAFETY: KUSER_SHARED_DATA (0x7ffe0000): NtMajorVersion at +0x26c,
+    // NtMinorVersion at +0x270, NtBuildNumber at +0x260; the caller's
+    // pointers (each may be null).
+    unsafe {
+        let kuser = 0x7ffe_0000usize;
+        let values = [
+            (major, rd32(kuser + 0x26c)),
+            (minor, rd32(kuser + 0x270)),
+            (build, rd32(kuser + 0x260) | 0xf000_0000),
+        ];
+        for (p, v) in values {
+            if !p.is_null() {
+                *p = v;
+            }
+        }
+    }
 }
 
 /// The initial thread's first user-mode instruction.

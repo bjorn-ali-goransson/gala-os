@@ -4,8 +4,9 @@
 //! TlsGetValue, stored in the TEB's TlsSlots at +0x1480, zero in a new
 //! thread), SuspendThread/ResumeThread counts, and redirecting a suspended
 //! thread with GetThreadContext/SetThreadContext (how Go preempts
-//! goroutines). Prints `kernel32_thread_test: ok` or exits with the number
-//! of the failing check.
+//! goroutines), and SetThreadPriority/GetThreadPriority (increments, the
+//! saturated values, an invalid one). Prints `kernel32_thread_test: ok` or
+//! exits with the number of the failing check.
 
 #![no_std]
 #![no_main]
@@ -19,6 +20,10 @@ type StartRoutine = extern "system" fn(*mut c_void) -> u32;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetCurrentThread() -> Handle;
+    fn SetThreadPriority(h: Handle, priority: i32) -> Bool;
+    fn GetThreadPriority(h: Handle) -> i32;
+    fn GetLastError() -> u32;
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn CreateThread(
@@ -235,6 +240,23 @@ fn run() -> Result<(), u32> {
         c.ok(GetExitCodeThread(h, &mut code) != 0 && code == 5, code.into())?;
         CloseHandle(h);
         c.ok(TlsFree(index) != 0, 0)?;
+    }
+    // Priorities, relative to the process's class (normal).
+    // SAFETY: documented kernel32 calls on our own thread.
+    unsafe {
+        let me = GetCurrentThread();
+        c.eq(GetThreadPriority(me) as u64, 0)?;
+        c.ok(SetThreadPriority(me, 1) != 0, GetLastError().into())?; // ABOVE_NORMAL
+        c.eq(GetThreadPriority(me) as u64, 1)?;
+        c.ok(SetThreadPriority(me, -2) != 0, GetLastError().into())?; // LOWEST
+        c.eq(GetThreadPriority(me) as i64 as u64, -2i64 as u64)?;
+        c.ok(SetThreadPriority(me, 15) != 0, GetLastError().into())?; // TIME_CRITICAL
+        c.eq(GetThreadPriority(me) as u64, 15)?;
+        c.ok(SetThreadPriority(me, -15) != 0, GetLastError().into())?; // IDLE
+        c.eq(GetThreadPriority(me) as i64 as u64, -15i64 as u64)?;
+        c.ok(SetThreadPriority(me, 7) == 0, 0)?;
+        c.eq(GetLastError().into(), 87)?; // ERROR_INVALID_PARAMETER
+        c.ok(SetThreadPriority(me, 0) != 0, GetLastError().into())?;
     }
     Ok(())
 }

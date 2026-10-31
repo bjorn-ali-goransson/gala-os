@@ -550,6 +550,20 @@ rounds correctly; strtod sets ERANGE on overflow (HUGE_VAL) and on
 underflow to 0. TinyCC parses float constants with strtod, so programs
 it builds on gala get the same constants as elsewhere.
 
+**The user and the machine** (P1): processes start with a logged-on
+user's environment - the user `gala` (as GetUserName says), profile
+`C:\Users\gala` with `AppData\Roaming` and `AppData\Local`,
+`C:\ProgramData`, `C:\Program Files`, COMPUTERNAME `GALA` - and
+`file::init` makes those directories. The computer's names: NetBIOS
+`GALA`, DNS host `gala` (ws2_32's gethostname agrees), no DNS domain.
+**No registry yet**: advapi32's RegOpenKey(Ex)W/A and RegQueryValueExW/A
+answer ERROR_FILE_NOT_FOUND for every key below the predefined ones (and
+record the call in the ledger); predefined keys close successfully.
+Programs treat a missing key as an ordinary outcome; a real registry
+(hives in memory, seeded at boot) is future work. ncrypt.dll has no key
+storage providers (NTE_NOT_SUPPORTED); winmm.dll grants timer periods
+(the tick is 1 ms already).
+
 **Heaps** (H9): ntdll implements the NT heap API (`user/testntdll/src/
 heap.rs`: RtlCreateHeap, RtlDestroyHeap, RtlAllocateHeap,
 RtlReAllocateHeap, RtlFreeHeap, RtlSizeHeap, RtlValidateHeap,
@@ -730,6 +744,8 @@ from the public documentation of each function (clean room):
 | msvcrt.dll | `user/msvcrt` | `testmsvcrt.dll` | `C:\Windows\System32` |
 | advapi32.dll | `user/advapi32` | `testadvapi32.dll` | `C:\Windows\System32` |
 | user32.dll | `user/user32` | `testuser32.dll` | `C:\Windows\System32` |
+| winmm.dll | `user/winmm` | `testwinmm.dll` | `C:\Windows\System32` |
+| ncrypt.dll | `user/ncrypt` | `testncrypt.dll` | `C:\Windows\System32` |
 
 (Exported under other names so that `user/bin`, which also runs on
 Windows, never shadows the system's DLLs.)

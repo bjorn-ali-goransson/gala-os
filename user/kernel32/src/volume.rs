@@ -173,3 +173,75 @@ no_volume_names! {
 pub extern "system" fn FindVolumeClose(_find: Handle) -> Bool {
     TRUE
 }
+
+/// The computer's name (ws2_32's gethostname agrees): NetBIOS names are
+/// upper case, DNS host names as given; there is no DNS domain.
+const HOST_NAME: &[u8] = b"gala";
+const ERROR_MORE_DATA: u32 = 234;
+
+/// COMPUTER_NAME_FORMAT: 0 NetBIOS, 1 DnsHostname, 2 DnsDomain,
+/// 3 DnsFullyQualified, 4-7 the Physical variants of the same; the name
+/// for `kind` as bytes (None: an invalid kind).
+fn computer_name(kind: u32, out: &mut [u8; 16]) -> Option<usize> {
+    let name: &[u8] = match kind % 4 {
+        2 => b"",
+        _ => HOST_NAME,
+    };
+    if kind > 7 {
+        return None;
+    }
+    for (o, &c) in out.iter_mut().zip(name) {
+        *o = if kind.is_multiple_of(4) { c.to_ascii_uppercase() } else { c };
+    }
+    Some(name.len())
+}
+
+/// Copies the name into the caller's buffer of `*size` characters: the
+/// length without the NUL, or ERROR_MORE_DATA with `*size` the size needed.
+fn put_name<T: From<u8> + Copy>(name: &[u8], buf: *mut T, size: *mut u32) -> Bool {
+    if size.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's size pointer and buffer of `*size` characters.
+    unsafe {
+        if buf.is_null() || (*size as usize) <= name.len() {
+            *size = name.len() as u32 + 1;
+            return fail_with(ERROR_MORE_DATA, FALSE);
+        }
+        for (i, &c) in name.iter().enumerate() {
+            *buf.add(i) = T::from(c);
+        }
+        *buf.add(name.len()) = T::from(0);
+        *size = name.len() as u32;
+    }
+    TRUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetComputerNameExW(kind: u32, buf: *mut u16, size: *mut u32) -> Bool {
+    let mut name = [0u8; 16];
+    let Some(n) = computer_name(kind, &mut name) else {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    };
+    put_name(&name[..n], buf, size)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetComputerNameExA(kind: u32, buf: *mut u8, size: *mut u32) -> Bool {
+    let mut name = [0u8; 16];
+    let Some(n) = computer_name(kind, &mut name) else {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    };
+    put_name(&name[..n], buf, size)
+}
+
+/// GetComputerNameW / A: the NetBIOS name.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetComputerNameW(buf: *mut u16, size: *mut u32) -> Bool {
+    GetComputerNameExW(0, buf, size)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetComputerNameA(buf: *mut u8, size: *mut u32) -> Bool {
+    GetComputerNameExA(0, buf, size)
+}

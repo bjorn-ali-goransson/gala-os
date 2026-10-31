@@ -4,8 +4,11 @@
 //! SetEnvironmentVariableW (set, replace, delete; visible in
 //! GetEnvironmentStringsW), GetTimeZoneInformation, GetCurrentDirectoryW
 //! (the PEB's current directory), GetTempPathW/GetTempPath2W (a directory
-//! path ending in a backslash). Prints `kernel32_env_test: ok` or exits
-//! with the number of the failing check.
+//! path ending in a backslash), the user's profile variables (USERPROFILE,
+//! APPDATA, LOCALAPPDATA, ProgramData: existing directories),
+//! GetSystemDirectoryW / GetWindowsDirectoryW, AddDllDirectory /
+//! RemoveDllDirectory / SetDefaultDllDirectories. Prints
+//! `kernel32_env_test: ok` or exits with the number of the failing check.
 
 #![no_std]
 #![no_main]
@@ -29,6 +32,12 @@ unsafe extern "system" {
     fn GetCurrentDirectoryW(size: u32, buf: *mut u16) -> u32;
     fn GetTempPathW(size: u32, buf: *mut u16) -> u32;
     fn GetTempPath2W(size: u32, buf: *mut u16) -> u32;
+    fn GetFileAttributesW(path: *const u16) -> u32;
+    fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32;
+    fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32;
+    fn AddDllDirectory(path: *const u16) -> *mut c_void;
+    fn RemoveDllDirectory(cookie: *mut c_void) -> Bool;
+    fn SetDefaultDllDirectories(flags: u32) -> Bool;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -199,6 +208,30 @@ fn run() -> Result<(), u32> {
         let mut buf2 = [0u16; 300];
         let n2 = GetTempPath2W(300, buf2.as_mut_ptr()) as usize;
         c.ok(n2 > 3 && buf2[n2 - 1] == u16::from(b'\\'), n2 as u64)?;
+
+        // The user's profile: variables naming existing directories.
+        for name in [w!("USERPROFILE"), w!("APPDATA"), w!("LOCALAPPDATA"), w!("ProgramData")] {
+            let n = GetEnvironmentVariableW(name, buf.as_mut_ptr(), 300) as usize;
+            c.ok(n > 3 && buf[1] == u16::from(b':'), n as u64)?;
+            let attributes = GetFileAttributesW(buf.as_ptr());
+            c.ok(attributes != u32::MAX && attributes & 0x10 != 0, attributes.into())?;
+        }
+
+        // The system directories: Windows\System32 under the Windows one.
+        let n = GetWindowsDirectoryW(buf.as_mut_ptr(), 300) as usize;
+        let s = GetSystemDirectoryW(buf2.as_mut_ptr(), 300) as usize;
+        let tail: [u16; 9] = (*b"\\system32").map(u16::from);
+        let lower = |c: u16| if (65..=90).contains(&c) { c + 32 } else { c };
+        c.ok(n > 2 && s == n + 9 && buf2[..n] == buf[..n], s as u64)?;
+        c.ok(buf2[n..s].iter().zip(&tail).all(|(&a, &b)| lower(a) == b) && buf2[s] == 0, 0)?;
+        c.eq(GetSystemDirectoryW(buf2.as_mut_ptr(), 3).into(), s as u64 + 1)?; // too small
+        c.ok(GetFileAttributesW(buf2.as_ptr()) & 0x10 != 0, 0)?;
+
+        // DLL directories: added, removed; the default search set.
+        let cookie = AddDllDirectory(buf.as_ptr());
+        c.ok(!cookie.is_null(), GetLastError().into())?;
+        c.ok(RemoveDllDirectory(cookie) != 0, GetLastError().into())?;
+        c.ok(SetDefaultDllDirectories(0x1000) != 0, GetLastError().into())?; // DEFAULT_DIRS
     }
     Ok(())
 }

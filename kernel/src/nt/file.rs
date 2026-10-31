@@ -51,7 +51,18 @@ pub const FILE_NON_DIRECTORY_FILE: u32 = 0x0040;
 pub const FILE_DELETE_ON_CLOSE: u32 = 0x1000;
 
 /// Directories created at boot.
-const DIRECTORIES: &[&[&str]] = &[&["Windows", "System32"], &["Users", "Public"], &["gala"]];
+/// The directories every boot starts with: the system's, the user's
+/// profile (`gala`, as advapi32's GetUserName names the user) with its
+/// AppData folders, the shared ones.
+const DIRECTORIES: &[&[&str]] = &[
+    &["Windows", "System32"],
+    &["Users", "Public"],
+    &["Users", "gala", "AppData", "Roaming"],
+    &["Users", "gala", "AppData", "Local", "Temp"],
+    &["ProgramData"],
+    &["Program Files"],
+    &["gala"],
+];
 
 fn wide(s: &str) -> Result<Vec<u16>, NtStatus> {
     let mut v = Vec::new();

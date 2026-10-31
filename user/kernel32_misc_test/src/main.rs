@@ -2,7 +2,7 @@
 //! real Windows gives: I/O completion ports (CreateIoCompletionPort,
 //! PostQueuedCompletionStatus, GetQueuedCompletionStatusEx removing
 //! several entries, WAIT_TIMEOUT when empty), waitable timers
-//! (CreateWaitableTimerExW, SetWaitableTimer with a relative due time),
+//! (CreateWaitableTimerExW/A/W, SetWaitableTimer with a relative due time),
 //! vectored exception and continue handlers (AddVectoredExceptionHandler
 //! sees a breakpoint and continues past it), and RtlLookupFunctionEntry
 //! (the unwind entry of a function in this image), and FormatMessageW's
@@ -11,7 +11,12 @@
 //! is the PEB's ProcessHeap; HeapAlloc with HEAP_ZERO_MEMORY, HeapSize as
 //! asked, HeapReAlloc keeping the contents and zeroing the growth,
 //! HEAP_REALLOC_IN_PLACE_ONLY failing, a private heap from HeapCreate,
-//! HeapValidate, HeapDestroy); GetDriveTypeW, AreFileApisANSI. Prints
+//! HeapValidate, HeapDestroy); GetDriveTypeW, AreFileApisANSI; winmm's
+//! timeBeginPeriod/timeEndPeriod/timeGetTime; ntdll's
+//! RtlGetNtVersionNumbers (10.0, build 26100 with the high bits); advapi32
+//! RegOpenKeyExW/A of a key that does not exist, RegCloseKey of a
+//! predefined key; GetComputerNameW/ExW; ncrypt's NCryptFreeObject of a
+//! null handle. Prints
 //! `kernel32_misc_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -58,6 +63,8 @@ unsafe extern "system" {
     fn HeapSize(heap: Handle, flags: u32, p: *const u8) -> usize;
     fn HeapValidate(heap: Handle, flags: u32, p: *const u8) -> Bool;
     fn GetDriveTypeW(root: *const u16) -> u32;
+    fn GetComputerNameExW(kind: u32, buf: *mut u16, size: *mut u32) -> Bool;
+    fn GetComputerNameW(buf: *mut u16, size: *mut u32) -> Bool;
     fn AreFileApisANSI() -> Bool;
     fn FormatMessageW(
         flags: u32,
@@ -82,6 +89,8 @@ unsafe extern "system" {
         ms: u32,
         alertable: Bool,
     ) -> Bool;
+    fn CreateWaitableTimerA(attrs: *mut c_void, manual: Bool, name: *const u8) -> Handle;
+    fn CreateWaitableTimerW(attrs: *mut c_void, manual: Bool, name: *const u16) -> Handle;
     fn CreateWaitableTimerExW(
         attrs: *mut c_void,
         name: *const u16,
@@ -107,6 +116,42 @@ unsafe extern "system" {
     fn GetTickCount64() -> u64;
     fn CloseHandle(h: Handle) -> Bool;
     fn ExitProcess(code: u32) -> !;
+}
+
+#[link(name = "advapi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RegOpenKeyExW(
+        key: usize,
+        subkey: *const u16,
+        options: u32,
+        access: u32,
+        out: *mut usize,
+    ) -> i32;
+    fn RegOpenKeyExA(
+        key: usize,
+        subkey: *const u8,
+        options: u32,
+        access: u32,
+        out: *mut usize,
+    ) -> i32;
+    fn RegCloseKey(key: usize) -> i32;
+}
+
+#[link(name = "ncrypt", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NCryptFreeObject(object: usize) -> i32;
+}
+
+#[link(name = "winmm", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+    fn timeEndPeriod(period: u32) -> u32;
+    fn timeGetTime() -> u32;
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RtlGetNtVersionNumbers(major: *mut u32, minor: *mut u32, build: *mut u32);
 }
 
 #[allow(dead_code)]
@@ -259,6 +304,49 @@ fn heaps(c: &mut Checks) -> Result<(), u32> {
         c.eq(GetDriveTypeW(c_root.as_ptr()).into(), DRIVE_FIXED.into())?;
         c.eq(GetDriveTypeW(q_root.as_ptr()).into(), DRIVE_NO_ROOT_DIR.into())?;
         c.ok(AreFileApisANSI() != 0, 0)?;
+
+        // winmm: timer resolution requests and the millisecond clock.
+        const TIMERR_NOCANDO: u32 = 97;
+        c.eq(timeBeginPeriod(1).into(), 0)?;
+        c.eq(timeEndPeriod(1).into(), 0)?;
+        c.eq(timeBeginPeriod(0).into(), TIMERR_NOCANDO.into())?;
+        let (t1, ticks) = (timeGetTime(), GetTickCount64() as u32);
+        let t2 = timeGetTime();
+        c.ok(t2.wrapping_sub(t1) < 1000 && t1.abs_diff(ticks) < 1000, u64::from(t1))?;
+
+        // The computer's names: the DNS host name (what Go's os.Hostname
+        // asks for, ComputerNamePhysicalDnsHostname) is the NetBIOS name up
+        // to case; too small a buffer gets the size needed.
+        let (mut dns, mut netbios) = ([0u16; 64], [0u16; 64]);
+        let (mut n_dns, mut n_bios) = (64u32, 64u32);
+        c.ok(GetComputerNameExW(5, dns.as_mut_ptr(), &mut n_dns) != 0, GetLastError().into())?;
+        c.ok(GetComputerNameW(netbios.as_mut_ptr(), &mut n_bios) != 0, GetLastError().into())?;
+        c.ok(n_dns > 0 && n_bios > 0 && n_bios <= 15, u64::from(n_dns))?;
+        let upper = |c: u16| if (97..=122).contains(&c) { c - 32 } else { c };
+        let same = dns[..n_bios as usize].iter().zip(&netbios).all(|(&a, &b)| upper(a) == b);
+        c.ok(same && dns[n_dns as usize] == 0, 0)?;
+        let mut small = 1u32;
+        c.ok(GetComputerNameExW(5, dns.as_mut_ptr(), &mut small) == 0, 0)?;
+        c.eq(GetLastError().into(), 234)?; // ERROR_MORE_DATA
+        c.eq(small.into(), u64::from(n_dns) + 1)?;
+
+        // ncrypt: no object behind a null handle (NTE_INVALID_HANDLE).
+        c.eq(NCryptFreeObject(0) as u32 as u64, 0x8009_0026)?;
+
+        // The registry: a key that does not exist, closing a predefined key.
+        const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;
+        const KEY_READ: u32 = 0x2_0019;
+        let name: [u16; 28] = (*b"SOFTWARE\\gala-os-no-such-ke\0").map(u16::from);
+        let mut key = 0usize;
+        c.eq(RegOpenKeyExW(HKEY_LOCAL_MACHINE, name.as_ptr(), 0, KEY_READ, &mut key) as u64, 2)?;
+        let name_a = b"SOFTWARE\\gala-os-no-such-key\0";
+        c.eq(RegOpenKeyExA(HKEY_LOCAL_MACHINE, name_a.as_ptr(), 0, KEY_READ, &mut key) as u64, 2)?;
+        c.eq(RegCloseKey(HKEY_LOCAL_MACHINE) as u64, 0)?;
+
+        // ntdll: the version numbers, build with 0xF0000000 (a free build).
+        let (mut major, mut minor, mut build) = (0, 0, 0);
+        RtlGetNtVersionNumbers(&mut major, &mut minor, &mut build);
+        c.ok(major == 10 && minor == 0 && build == 0xf000_0000 | 26100, u64::from(build))?;
     }
     Ok(())
 }
@@ -310,6 +398,20 @@ fn run() -> Result<(), u32> {
         c.eq(WaitForSingleObject(timer, 5000).into(), 0)?;
         let elapsed = GetTickCount64() - start;
         c.ok((10..3000).contains(&elapsed), elapsed)?;
+        CloseHandle(timer);
+        // CreateWaitableTimerA/W: a manual-reset timer stays signaled.
+        let timer = CreateWaitableTimerA(core::ptr::null_mut(), 1, core::ptr::null());
+        c.ok(!timer.is_null(), GetLastError().into())?;
+        let due = -10_000i64; // 1 ms
+        c.ok(
+            SetWaitableTimer(timer, &due, 0, core::ptr::null_mut(), core::ptr::null_mut(), 0) != 0,
+            0,
+        )?;
+        c.eq(WaitForSingleObject(timer, 5000).into(), 0)?;
+        c.eq(WaitForSingleObject(timer, 0).into(), 0)?; // still signaled
+        CloseHandle(timer);
+        let timer = CreateWaitableTimerW(core::ptr::null_mut(), 0, core::ptr::null());
+        c.ok(!timer.is_null(), GetLastError().into())?;
         CloseHandle(timer);
 
         // Vectored handlers: a breakpoint handled, execution continues.
