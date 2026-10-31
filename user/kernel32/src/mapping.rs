@@ -417,21 +417,6 @@ pub extern "system" fn GetVersionExA(info: *mut u8) -> Bool {
     TRUE
 }
 
-/// FormatMessageA: no message tables yet (reported; ERROR_MR_MID_NOT_FOUND).
-#[unsafe(no_mangle)]
-pub extern "system" fn FormatMessageA(
-    _flags: u32,
-    _source: *const c_void,
-    message: u32,
-    _language: u32,
-    _buffer: *mut u8,
-    _size: u32,
-    _args: *mut c_void,
-) -> u32 {
-    unsupported(b"kernel32.dll!FormatMessageA", message.into());
-    fail_with(317, 0)
-}
-
 #[unsafe(no_mangle)]
 pub extern "system" fn FreeConsole() -> Bool {
     TRUE

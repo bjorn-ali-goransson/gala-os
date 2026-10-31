@@ -21,6 +21,7 @@
 use core::ffi::c_void;
 
 mod mapping;
+mod messages;
 mod process;
 mod sync;
 
@@ -647,22 +648,6 @@ pub extern "system" fn GetFileType(h: Handle) -> u32 {
         0x0b | 0x15 | 0x1b | 0x50 | 0x16 | 0x17 => 2, // keyboard, null, serial, console...
         _ => fail_with(0, 0),
     }
-}
-
-/// FormatMessageW: no message tables yet (reported). Callers fall back to
-/// printing the number (Go does).
-#[unsafe(no_mangle)]
-pub extern "system" fn FormatMessageW(
-    _flags: u32,
-    _source: *const c_void,
-    message: u32,
-    _language: u32,
-    _buffer: *mut u16,
-    _size: u32,
-    _args: *mut c_void,
-) -> u32 {
-    unsupported(b"kernel32.dll!FormatMessageW", u64::from(message));
-    fail_with(317, 0) // ERROR_MR_MID_NOT_FOUND
 }
 
 // ---- Paths ----

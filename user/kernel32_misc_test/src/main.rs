@@ -5,7 +5,9 @@
 //! (CreateWaitableTimerExW, SetWaitableTimer with a relative due time),
 //! vectored exception and continue handlers (AddVectoredExceptionHandler
 //! sees a breakpoint and continues past it), and RtlLookupFunctionEntry
-//! (the unwind entry of a function in this image). Prints
+//! (the unwind entry of a function in this image), and FormatMessageW's
+//! system messages (English text with a CRLF; ERROR_MR_MID_NOT_FOUND for
+//! a number without one; ERROR_INSUFFICIENT_BUFFER). Prints
 //! `kernel32_misc_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -43,6 +45,15 @@ type VectoredHandler = extern "system" fn(*mut ExceptionPointers) -> i32;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn FormatMessageW(
+        flags: u32,
+        source: *const c_void,
+        message: u32,
+        language: u32,
+        buffer: *mut u16,
+        size: u32,
+        args: *mut c_void,
+    ) -> u32;
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn GetLastError() -> u32;
@@ -247,6 +258,62 @@ fn run() -> Result<(), u32> {
         let rva = (pc - image) as u32;
         c.ok((*entry).begin <= rva && rva < (*entry).end, (*entry).begin.into())?;
         c.eq(some_function(), 7)?;
+
+        // FormatMessageW: system messages.
+        const FROM_SYSTEM_IGNORE_INSERTS: u32 = 0x1000 | 0x200;
+        let expect = |text: &[u8], got: &[u16]| {
+            text.len() == got.len() && text.iter().zip(got).all(|(&a, &b)| u16::from(a) == b)
+        };
+        let mut buf = [0u16; 256];
+        let n = FormatMessageW(
+            FROM_SYSTEM_IGNORE_INSERTS,
+            core::ptr::null(),
+            2,
+            0,
+            buf.as_mut_ptr(),
+            256,
+            core::ptr::null_mut(),
+        );
+        c.ok(
+            expect(b"The system cannot find the file specified.\r\n", &buf[..n as usize]),
+            n.into(),
+        )?;
+        let n = FormatMessageW(
+            FROM_SYSTEM_IGNORE_INSERTS,
+            core::ptr::null(),
+            10061,
+            0,
+            buf.as_mut_ptr(),
+            256,
+            core::ptr::null_mut(),
+        );
+        let refused =
+            b"No connection could be made because the target machine actively refused it.\r\n";
+        c.ok(expect(refused, &buf[..n as usize]), n.into())?;
+        // A number with no message.
+        let n = FormatMessageW(
+            FROM_SYSTEM_IGNORE_INSERTS,
+            core::ptr::null(),
+            0x2fff_fff0,
+            0,
+            buf.as_mut_ptr(),
+            256,
+            core::ptr::null_mut(),
+        );
+        c.eq(n.into(), 0)?;
+        c.eq(GetLastError().into(), 317)?; // ERROR_MR_MID_NOT_FOUND
+        // Too small a buffer.
+        let n = FormatMessageW(
+            FROM_SYSTEM_IGNORE_INSERTS,
+            core::ptr::null(),
+            2,
+            0,
+            buf.as_mut_ptr(),
+            8,
+            core::ptr::null_mut(),
+        );
+        c.eq(n.into(), 0)?;
+        c.eq(GetLastError().into(), 122)?; // ERROR_INSUFFICIENT_BUFFER
     }
     Ok(())
 }

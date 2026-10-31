@@ -273,7 +273,12 @@ N2. **Nginx**: either our own 64-bit build of Nginx (cross-compiled with
         mingw-w64's ntstatus.h.
    N2c (next). The modules that need libraries, built from pinned sources
         like Nginx: zlib (gzip), PCRE2 (rewrite); then OpenSSL (TLS, with
-        gala's bcrypt/crypt32 pieces as the ledger asks).
+        gala's bcrypt/crypt32 pieces as the ledger asks). Sources chosen
+        (2026-10-31): zlib 1.3.2 (zlib.net, SHA-256 bb329a0a...0119d16),
+        PCRE2 10.49 (GitHub release, SHA-256 929f0b20...e557ae). Waiting
+        for the user's permission to run third-party build scripts in
+        the session (the agent's sandbox stopped `configure`/`make` of
+        downloaded sources).
 
 ## Later
 SMP, ACPI (MADT/HPET), virtio devices, bindgen-generated layouts from
