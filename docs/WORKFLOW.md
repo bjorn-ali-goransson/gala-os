@@ -258,6 +258,17 @@ caught). Needs Linux 5.11+ (syscall user dispatch). `gdb -p` works
 `thread apply all bt` shows where NT threads are inside the NT layer:
 that is how the lock starvation and the GetContext bug were found.
 
+## busybox
+
+`user/busybox/build.sh` rebuilds `user/bin/busybox.exe` (pinned
+busybox-w32 commit, reproducible; the build directory
+`/tmp/gala-busybox-build` keeps `busybox_unstripped.exe.map`, which maps
+a faulting rip to a function). The `busybox` scenario runs a sh command
+line; to try others, change its `args=` (percent-encoded). With the
+`trace` flag the kernel also logs every user fault (vector, rip, cr2),
+which a system call trace cannot show: an unhandled one ends the process
+with its status through ntdll's dispatcher.
+
 ## Hunting a rare hang
 
 A scenario that fails once in N runs: loop `cargo xtask boot-test <name>`

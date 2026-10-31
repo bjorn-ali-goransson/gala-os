@@ -206,3 +206,53 @@ pub extern "C" fn strftime(buf: *mut u8, max: usize, fmt: *const u8, tm: *const 
     unsafe { *buf.add(n) = 0 };
     n
 }
+
+/// Seconds west of UTC: gala's local time is UTC.
+#[unsafe(no_mangle)]
+pub static mut _timezone: i32 = 0;
+
+/// _tzset: the zone is fixed (UTC), so nothing to read.
+#[unsafe(no_mangle)]
+pub extern "C" fn _tzset() {}
+
+/// The documented buffer of ctime (per process here).
+static mut CTIME: [u8; 26] = [0; 26];
+
+/// _ctime64(t): "Www Mmm dd hh:mm:ss yyyy\n" for local time.
+#[unsafe(no_mangle)]
+pub extern "C" fn _ctime64(t: *const i64) -> *mut u8 {
+    let tm = _localtime64(t);
+    if tm.is_null() {
+        return core::ptr::null_mut();
+    }
+    const DAYS: &[u8; 21] = b"SunMonTueWedThuFriSat";
+    const MONTHS: &[u8; 36] = b"JanFebMarAprMayJunJulAugSepOctNovDec";
+    // SAFETY: the static tm just filled; our static buffer.
+    unsafe {
+        let tm = &*tm;
+        let out = &mut *(&raw mut CTIME);
+        let d = (tm.wday.clamp(0, 6) * 3) as usize;
+        let m = (tm.mon.clamp(0, 11) * 3) as usize;
+        out[0..3].copy_from_slice(&DAYS[d..d + 3]);
+        out[3] = b' ';
+        out[4..7].copy_from_slice(&MONTHS[m..m + 3]);
+        let two = |v: i32| [b'0' + (v / 10 % 10) as u8, b'0' + (v % 10) as u8];
+        out[7] = b' ';
+        let day = two(tm.mday);
+        out[8] = if day[0] == b'0' { b' ' } else { day[0] };
+        out[9] = day[1];
+        out[10] = b' ';
+        out[11..13].copy_from_slice(&two(tm.hour));
+        out[13] = b':';
+        out[14..16].copy_from_slice(&two(tm.min));
+        out[16] = b':';
+        out[17..19].copy_from_slice(&two(tm.sec));
+        out[19] = b' ';
+        let year = tm.year + 1900;
+        out[20..22].copy_from_slice(&two(year / 100));
+        out[22..24].copy_from_slice(&two(year % 100));
+        out[24] = b'\n';
+        out[25] = 0;
+        out.as_mut_ptr()
+    }
+}

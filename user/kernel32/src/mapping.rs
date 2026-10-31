@@ -61,9 +61,8 @@ pub extern "system" fn CreateFileMappingW(
     size_low: u32,
     name: *const u16,
 ) -> Handle {
-    if !attributes.is_null() {
-        unsupported(b"kernel32.dll!CreateFileMappingW(security attributes)", 0);
-    }
+    // SECURITY_ATTRIBUTES: only bInheritHandle matters here (OBJ_INHERIT).
+    let inherit = if super::sync::inheritable(attributes) { 0x02 } else { 0 };
     let size = (i64::from(size_high) << 32) | i64::from(size_low);
     let size_ptr = if size == 0 { core::ptr::null() } else { &size as *const i64 };
     let file = if file == INVALID_HANDLE_VALUE { core::ptr::null_mut() } else { file };
@@ -80,11 +79,24 @@ pub extern "system" fn CreateFileMappingW(
         length: size_of::<ObjectAttributes>() as u32,
         root_directory: 0,
         object_name: &us,
-        attributes: 0x80, // OBJ_OPENIF
+        attributes: 0x80 | inherit, // OBJ_OPENIF
         security_descriptor: 0,
         security_quality_of_service: 0,
     };
-    let oa_ptr = if name.is_null() { core::ptr::null() } else { &oa as *const ObjectAttributes };
+    // Unnamed: attributes only to ask for an inheritable handle.
+    let unnamed = ObjectAttributes {
+        length: size_of::<ObjectAttributes>() as u32,
+        root_directory: 0,
+        object_name: core::ptr::null(),
+        attributes: inherit,
+        security_descriptor: 0,
+        security_quality_of_service: 0,
+    };
+    let oa_ptr = match (name.is_null(), inherit != 0) {
+        (false, _) => &oa as *const ObjectAttributes,
+        (true, true) => &unnamed as *const ObjectAttributes,
+        (true, false) => core::ptr::null(),
+    };
     // SAFETY: valid pointers for the call.
     let status = unsafe {
         NtCreateSection(&mut h, SECTION_ALL_ACCESS, oa_ptr, size_ptr, protect, SEC_COMMIT, file)

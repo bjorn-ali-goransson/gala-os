@@ -394,6 +394,7 @@ pub fn spawn_from_pe(
         environment: None,
         handles: None,
         suspended: false,
+        runtime_data: &[],
     })
 }
 
@@ -414,6 +415,8 @@ pub struct Spawn<'a> {
     pub handles: Option<(HandleTable, [u64; 3])>,
     /// The main thread waits for a resume.
     pub suspended: bool,
+    /// STARTUPINFO's lpReserved2 bytes for the parameters' RuntimeData.
+    pub runtime_data: &'a [u8],
 }
 
 /// Creates a process from a PE executable and starts (or prepares) its
@@ -428,6 +431,7 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
         environment,
         handles,
         suspended,
+        runtime_data,
     } = spec;
     let image = PeImage::parse(data).map_err(LoadError::Pe)?;
     // Binding imports is the user-mode loader's job (ntdll), as on Windows.
@@ -508,6 +512,7 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
             dll_path: "",
             std_handles,
             environment: environment.unwrap_or(&environment_default),
+            runtime_data,
         },
         p,
     )
@@ -699,6 +704,15 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
             frame.error_code
         ),
     );
+    if super::syscalls::tracing() {
+        info!(
+            "trace: pid {} fault: vector {vector} at rip {:#x} (cr2 {:#x}, error {:#x})",
+            current().map_or(0, |p| p.id),
+            frame.rip,
+            cr2.unwrap_or(0),
+            frame.error_code
+        );
+    }
     if let (14, Some(addr), Some(process)) = (vector, cr2, current()) {
         // Page-fault error code: bit 1 = write, bit 4 = instruction fetch.
         let kind = match frame.error_code {

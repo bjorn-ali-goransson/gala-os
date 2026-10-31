@@ -219,7 +219,7 @@ pub extern "system" fn CreateProcessW(
     } else {
         None
     };
-    let mut p = [0u8; 136];
+    let mut p = [0u8; 152];
     let mut put = |at: usize, v: u64| p[at..at + 8].copy_from_slice(&v.to_le_bytes());
     put(0, image.chars.as_ptr() as u64);
     put(16, line.as_ptr() as u64);
@@ -239,13 +239,26 @@ pub extern "system" fn CreateProcessW(
     if flags & CREATE_SUSPENDED != 0 {
         bits |= 2;
     }
+    // STARTUPINFO cbReserved2 (66) / lpReserved2 (72): the C runtime's
+    // inherited descriptors, for the child's RuntimeData.
+    // SAFETY: the caller's STARTUPINFO.
+    let (reserved_len, reserved) = if startup.is_null() {
+        (0, 0)
+    } else {
+        unsafe { (*startup.add(66).cast::<u16>(), *startup.add(72).cast::<u64>()) }
+    };
+    if reserved_len != 0 && reserved != 0 {
+        bits |= 8;
+        p[136..144].copy_from_slice(&reserved.to_le_bytes());
+        p[144..148].copy_from_slice(&u32::from(reserved_len).to_le_bytes());
+    }
     if let Some((handles, size)) = handle_list {
         bits |= 4;
         p[120..128].copy_from_slice(&(handles as u64).to_le_bytes());
         p[128..132].copy_from_slice(&((size / 8) as u32).to_le_bytes());
     }
     p[12..16].copy_from_slice(&bits.to_le_bytes());
-    // SAFETY: the 136-byte parameter block; its pointers live through
+    // SAFETY: the 152-byte parameter block; its pointers live through
     // the call.
     let status = unsafe { GalaCreateProcess(p.as_mut_ptr()) };
     if own_env {
@@ -470,4 +483,117 @@ pub extern "system" fn GetProcessTimes(
         }
     }
     TRUE
+}
+
+/// GetProcessId: PROCESS_BASIC_INFORMATION.UniqueProcessId.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetProcessId(process: Handle) -> u32 {
+    let mut info = [0u64; 6];
+    // SAFETY: a 48-byte PROCESS_BASIC_INFORMATION buffer.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process as isize,
+            0,
+            info.as_mut_ptr().cast(),
+            48,
+            core::ptr::null_mut(),
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, 0);
+    }
+    info[4] as u32
+}
+
+/// IsWow64Process: gala runs 64-bit processes only.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsWow64Process(_process: Handle, wow64: *mut Bool) -> Bool {
+    if !wow64.is_null() {
+        // SAFETY: the caller's output pointer.
+        unsafe { *wow64 = FALSE };
+    }
+    TRUE
+}
+
+/// OpenProcess: opening another process by id is not there yet (as for
+/// an id that does not exist: ERROR_INVALID_PARAMETER); recorded.
+#[unsafe(no_mangle)]
+pub extern "system" fn OpenProcess(_access: u32, _inherit: Bool, id: u32) -> Handle {
+    unsupported(b"kernel32.dll!OpenProcess", id.into());
+    fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut())
+}
+
+/// Other processes' memory and threads: not yet; recorded.
+#[unsafe(no_mangle)]
+pub extern "system" fn ReadProcessMemory(
+    _process: Handle,
+    _address: *const c_void,
+    _buffer: *mut c_void,
+    _size: usize,
+    _read: *mut usize,
+) -> Bool {
+    unsupported(b"kernel32.dll!ReadProcessMemory", 0);
+    fail_with(ERROR_NOT_SUPPORTED, FALSE)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateRemoteThread(
+    _process: Handle,
+    _attributes: *mut c_void,
+    _stack: usize,
+    _start: usize,
+    _parameter: *mut c_void,
+    _flags: u32,
+    _id: *mut u32,
+) -> Handle {
+    unsupported(b"kernel32.dll!CreateRemoteThread", 0);
+    fail_with(ERROR_NOT_SUPPORTED, core::ptr::null_mut())
+}
+
+/// Toolhelp process lists (ps): not yet; recorded.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateToolhelp32Snapshot(flags: u32, _process: u32) -> Handle {
+    unsupported(b"kernel32.dll!CreateToolhelp32Snapshot", flags.into());
+    fail_with(ERROR_NOT_SUPPORTED, -1isize as Handle)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Process32First(_snapshot: Handle, _entry: *mut u8) -> Bool {
+    fail_with(18, FALSE) // ERROR_NO_MORE_FILES
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Process32Next(_snapshot: Handle, _entry: *mut u8) -> Bool {
+    fail_with(18, FALSE)
+}
+
+/// GetStartupInfoW: from the process parameters: the standard handles
+/// (STARTF_USESTDHANDLES) and cbReserved2/lpReserved2 (RuntimeData, the
+/// C runtime's inherited descriptors).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetStartupInfoW(info: *mut u8) {
+    let params = process_parameters();
+    // SAFETY: the caller's STARTUPINFOW (104 bytes); our parameters:
+    // standard handles at 0x20, RuntimeData (Length, Buffer) at 0xe0.
+    unsafe {
+        core::ptr::write_bytes(info, 0, 104);
+        info.cast::<u32>().write_unaligned(104);
+        info.add(60).cast::<u32>().write_unaligned(STARTF_USESTDHANDLES);
+        for i in 0..3 {
+            let h = *((params + 0x20 + 8 * i) as *const u64);
+            info.add(80 + 8 * i).cast::<u64>().write_unaligned(h);
+        }
+        let len = *((params + 0xe0) as *const u16);
+        let data = *((params + 0xe8) as *const u64);
+        if len != 0 && data != 0 {
+            info.add(66).cast::<u16>().write_unaligned(len);
+            info.add(72).cast::<u64>().write_unaligned(data);
+        }
+    }
+}
+
+/// GetStartupInfoA: the same fields (the string fields stay null).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetStartupInfoA(info: *mut u8) {
+    GetStartupInfoW(info);
 }

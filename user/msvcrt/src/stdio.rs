@@ -38,6 +38,27 @@ unsafe extern "system" {
     fn SetFilePointerEx(h: *mut c_void, distance: i64, new: *mut i64, method: u32) -> i32;
     fn GetFileAttributesExW(path: *const u16, level: u32, info: *mut u8) -> i32;
     fn GetLastError() -> u32;
+    fn GetFileType(h: *mut c_void) -> u32;
+    fn SetStdHandle(which: u32, h: *mut c_void) -> i32;
+    fn GetHandleInformation(h: *mut c_void, flags: *mut u32) -> i32;
+    fn GetStartupInfoA(info: *mut u8);
+    fn GetCurrentProcess() -> *mut c_void;
+    fn DuplicateHandle(
+        source_process: *mut c_void,
+        source: *mut c_void,
+        target_process: *mut c_void,
+        target: *mut *mut c_void,
+        access: u32,
+        inherit: i32,
+        options: u32,
+    ) -> i32;
+    fn GetFileSizeEx(h: *mut c_void, size: *mut i64) -> i32;
+    fn CreatePipe(
+        read: *mut *mut c_void,
+        write: *mut *mut c_void,
+        attributes: *mut c_void,
+        size: u32,
+    ) -> i32;
 }
 
 const INVALID_HANDLE: *mut c_void = -1isize as *mut c_void;
@@ -57,6 +78,7 @@ fn set_errno(e: i32) {
     unsafe { ERRNO = e };
 }
 
+const ERROR_BROKEN_PIPE: u32 = 109;
 const ENOENT: i32 = 2;
 const EBADF: i32 = 9;
 const EACCES: i32 = 13;
@@ -86,9 +108,14 @@ static mut IOB: [[u8; FILE_SIZE]; 3] = [[0; FILE_SIZE]; 3];
 const MAGIC: u64 = 0x656c_6966_616c_6167; // "galafile"
 const READ_BUF: usize = 4096;
 
-/// The state of a stream. Files from fopen are this struct itself.
+/// The state of a stream. Files from fopen are this struct itself. It
+/// starts with msvcrt's 48-byte FILE (`_ptr`, `_cnt`, `_base`, `_flag`,
+/// `_file`, `_charbuf`, `_bufsiz`, `_tmpfname`) because mingw's inline
+/// `getc` reads `_cnt` and `_ptr`: `_cnt` stays 0, so every inline getc
+/// calls `_filbuf`, which reads through the stream.
 #[repr(C)]
 struct Stream {
+    iob: [u8; FILE_SIZE],
     magic: u64,
     handle: *mut c_void,
     fd: i32,
@@ -102,7 +129,14 @@ struct Stream {
 
 impl Stream {
     const fn new(handle: *mut c_void, fd: i32) -> Self {
+        let mut iob = [0u8; FILE_SIZE];
+        let f = fd.to_le_bytes();
+        iob[24] = f[0];
+        iob[25] = f[1];
+        iob[26] = f[2];
+        iob[27] = f[3];
         Self {
+            iob,
             magic: MAGIC,
             handle,
             fd,
@@ -122,6 +156,12 @@ static mut STD: [Stream; 3] =
 /// __iob_func(): the stdin, stdout and stderr FILE objects.
 #[unsafe(no_mangle)]
 pub extern "C" fn __iob_func() -> *mut u8 {
+    // SAFETY: the console slots; `_file` (offset 24) is their descriptor.
+    unsafe {
+        for (i, slot) in (*(&raw mut IOB)).iter_mut().enumerate() {
+            slot[24..28].copy_from_slice(&(i as i32).to_le_bytes());
+        }
+    }
     (&raw mut IOB).cast()
 }
 
@@ -272,11 +312,13 @@ fn read_some(s: &mut Stream, out: &mut [u8]) -> usize {
             let ok = unsafe {
                 ReadFile(s.handle, s.buf.as_mut_ptr(), READ_BUF as u32, &mut got, null_mut())
             };
-            if ok == 0 {
+            // The end of a pipe (ERROR_BROKEN_PIPE) is end of file.
+            // SAFETY: plain call.
+            if ok == 0 && unsafe { GetLastError() } != ERROR_BROKEN_PIPE {
                 s.error = true;
                 break;
             }
-            if got == 0 {
+            if ok == 0 || got == 0 {
                 s.eof = true;
                 break;
             }
@@ -433,7 +475,7 @@ pub extern "C" fn _fileno(file: *mut u8) -> i32 {
 
 // ---- Low-level descriptors ------------------------------------------------------
 
-const MAX_FDS: usize = 64;
+pub const MAX_FDS: usize = 64;
 /// Handles of descriptors 3 and up (0-2 are the console's).
 static mut FDS: [usize; MAX_FDS] = [0; MAX_FDS];
 
@@ -448,6 +490,68 @@ fn new_fd(h: *mut c_void) -> i32 {
                 i as i32
             }
             None => -1,
+        }
+    }
+}
+
+/// The C runtime's descriptor inheritance (STARTUPINFO cbReserved2 /
+/// lpReserved2, the layout Wine's msvcrt documents): a u32 count, a flags
+/// byte per descriptor (FOPEN 0x01), then a HANDLE per descriptor, packed.
+const FOPEN: u8 = 0x01;
+
+/// The block for a child: our open descriptors whose handles it inherits
+/// (descriptors 0-2 are its standard handles anyway). Written to `out`;
+/// its length, or 0 if there is nothing to pass.
+pub fn inheritance_block(out: &mut [u8; 4 + 9 * MAX_FDS]) -> usize {
+    let mut count = 0;
+    for fd in 3..MAX_FDS {
+        if handle_of_fd(fd as i32).is_some() {
+            count = fd + 1;
+        }
+    }
+    if count == 0 {
+        return 0;
+    }
+    out[..4].copy_from_slice(&(count as u32).to_le_bytes());
+    for fd in 0..count {
+        let h = if fd >= 3 { handle_of_fd(fd as i32) } else { None };
+        let mut flags = 0u32;
+        // SAFETY: plain call on our handle.
+        let inheritable = h
+            .is_some_and(|h| unsafe { GetHandleInformation(h, &mut flags) } != 0 && flags & 1 != 0);
+        let (flag, value) = match h {
+            Some(h) if inheritable => (FOPEN, h as u64),
+            _ => (0, u64::MAX),
+        };
+        out[4 + fd] = flag;
+        let at = 4 + count + 8 * fd;
+        out[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    4 + 9 * count
+}
+
+/// At startup: takes the descriptors (3 and up) a parent's CRT passed.
+pub fn inherit_descriptors() {
+    let mut info = [0u8; 104];
+    // SAFETY: a STARTUPINFOA-sized buffer; the block it names stays in our
+    // process parameters.
+    unsafe {
+        GetStartupInfoA(info.as_mut_ptr());
+        let len = usize::from(u16::from_le_bytes([info[66], info[67]]));
+        let block = u64::from_le_bytes(info[72..80].try_into().unwrap_or([0; 8])) as *const u8;
+        if block.is_null() || len < 4 {
+            return;
+        }
+        let count = (block.cast::<u32>().read_unaligned() as usize).min(MAX_FDS);
+        if 4 + 9 * count > len {
+            return;
+        }
+        let fds = &mut *(&raw mut FDS);
+        for fd in 3..count {
+            let h = block.add(4 + count + 8 * fd).cast::<u64>().read_unaligned();
+            if *block.add(4 + fd) & FOPEN != 0 && h != 0 && h != u64::MAX {
+                fds[fd] = h as usize;
+            }
         }
     }
 }
@@ -489,6 +593,11 @@ pub extern "C" fn _read(fd: i32, buf: *mut u8, count: u32) -> i32 {
     let mut got = 0u32;
     // SAFETY: the caller's buffer.
     if unsafe { ReadFile(h, buf, count, &mut got, null_mut()) } == 0 {
+        // The end of a pipe is end of file (as msvcrt's _read).
+        // SAFETY: plain call.
+        if unsafe { GetLastError() } == ERROR_BROKEN_PIPE {
+            return 0;
+        }
         set_errno(errno_of_last_error());
         return -1;
     }
@@ -523,12 +632,83 @@ pub extern "C" fn _lseek(fd: i32, offset: i32, whence: i32) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _close(fd: i32) -> i32 {
-    if fd <= 2 || handle_of_fd(fd).is_none() {
+    let Some(h) = handle_of_fd(fd) else {
         set_errno(EBADF);
         return -1;
+    };
+    if fd <= 2 {
+        // A standard descriptor: its handle goes, and so does the process's
+        // standard handle (as msvcrt does).
+        // SAFETY: the standard handle we own.
+        unsafe {
+            CloseHandle(h);
+            SetStdHandle((-10 - fd) as u32, INVALID_HANDLE);
+        }
+        return 0;
     }
     close_fd(fd);
     0
+}
+
+/// A duplicate of `h` (inheritable, like msvcrt's descriptors).
+fn duplicate(h: *mut c_void) -> Option<*mut c_void> {
+    let mut new = null_mut();
+    // SAFETY: plain call on our handles.
+    let ok = unsafe {
+        let me = GetCurrentProcess();
+        DuplicateHandle(me, h, me, &mut new, 0, 1, 2) // DUPLICATE_SAME_ACCESS
+    };
+    (ok != 0).then_some(new)
+}
+
+/// _dup(fd): a new descriptor for the same file.
+#[unsafe(no_mangle)]
+pub extern "C" fn _dup(fd: i32) -> i32 {
+    let Some(new) = handle_of_fd(fd).and_then(duplicate) else {
+        set_errno(EBADF);
+        return -1;
+    };
+    let n = new_fd(new);
+    if n < 0 {
+        // SAFETY: our duplicate.
+        unsafe { CloseHandle(new) };
+        set_errno(24); // EMFILE
+    }
+    n
+}
+
+/// _dup2(fd, target): `target` (closed first if open) becomes a duplicate
+/// of `fd`. For 0-2 the process's standard handle changes too (msvcrt
+/// does this), so children started later get the redirection.
+#[unsafe(no_mangle)]
+pub extern "C" fn _dup2(fd: i32, target: i32) -> i32 {
+    if target < 0 || target as usize >= MAX_FDS {
+        set_errno(EBADF);
+        return -1;
+    }
+    let Some(new) = handle_of_fd(fd).and_then(duplicate) else {
+        set_errno(EBADF);
+        return -1;
+    };
+    if let Some(old) = handle_of_fd(target) {
+        // SAFETY: the descriptor's old handle, replaced below.
+        unsafe { CloseHandle(old) };
+    }
+    // SAFETY: the table / the process's standard handle.
+    unsafe {
+        if target <= 2 {
+            SetStdHandle((-10 - target) as u32, new);
+        } else {
+            (*(&raw mut FDS))[target as usize] = new as usize;
+        }
+    }
+    0
+}
+
+/// _creat(path, mode): _open for writing, created or truncated.
+#[unsafe(no_mangle)]
+pub extern "C" fn _creat(path: *const u8, mode: i32) -> i32 {
+    _open(path, O_WRONLY | O_CREAT | O_TRUNC, mode)
 }
 
 /// _setmode: files are always binary here (no CRLF translation); the
@@ -575,6 +755,228 @@ pub extern "C" fn _stat64(path: *const u8, buf: *mut u8) -> i32 {
         core::ptr::write_unaligned(buf.add(32).cast::<i64>(), time(12));
         core::ptr::write_unaligned(buf.add(40).cast::<i64>(), time(20));
         core::ptr::write_unaligned(buf.add(48).cast::<i64>(), time(4));
+    }
+    0
+}
+
+/// _filbuf: the refill behind mingw's inline getc (see Stream): the next
+/// byte, or -1 (EOF); `_cnt` is set back to 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn _filbuf(file: *mut u8) -> i32 {
+    let c = fgetc(file);
+    if !file.is_null() {
+        // SAFETY: a FILE (console slot or ours): `_cnt` at offset 8.
+        unsafe { file.add(8).cast::<i32>().write_unaligned(0) };
+    }
+    c
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn putc(c: i32, file: *mut u8) -> i32 {
+    fputc(c, file)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn putchar(c: i32) -> i32 {
+    // SAFETY: stdout's slot.
+    fputc(c, unsafe { __iob_func().add(FILE_SIZE) })
+}
+
+/// setvbuf/setbuf: writes are unbuffered here and reads use the stream's
+/// own buffer, so the request changes nothing (and succeeds).
+#[unsafe(no_mangle)]
+pub extern "C" fn setvbuf(_file: *mut u8, _buf: *mut u8, _mode: i32, _size: usize) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn setbuf(_file: *mut u8, _buf: *mut u8) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn clearerr(file: *mut u8) {
+    if let Some(s) = stream(file) {
+        s.eof = false;
+        s.error = false;
+    }
+}
+
+/// _vscprintf(fmt, args): the length the formatted text would have.
+#[unsafe(no_mangle)]
+pub extern "C" fn _vscprintf(fmt: *const u8, args: *const u64) -> i32 {
+    let mut out = Out { sink: Sink::Bytes { ptr: null_mut(), cap: 0 }, total: 0 };
+    // SAFETY: the caller's NUL-terminated format.
+    format(&mut out, unsafe { crate::c_str(fmt) }, Args(args), false);
+    out.total as i32
+}
+
+/// A new stream on descriptor `fd` (its handle), or null.
+fn stream_on(fd: i32) -> *mut u8 {
+    let Some(h) = handle_of_fd(fd) else {
+        set_errno(EBADF);
+        return null_mut();
+    };
+    let file = malloc(size_of::<Stream>()).cast::<Stream>();
+    if !file.is_null() {
+        // SAFETY: a fresh allocation of the right size.
+        unsafe { file.write(Stream::new(h, fd)) };
+    }
+    file.cast()
+}
+
+/// _fdopen(fd, mode): a stream on an open descriptor.
+#[unsafe(no_mangle)]
+pub extern "C" fn _fdopen(fd: i32, _mode: *const u8) -> *mut u8 {
+    stream_on(fd)
+}
+
+/// _open_osfhandle(handle, flags): a descriptor for a Win32 handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn _open_osfhandle(handle: isize, _flags: i32) -> i32 {
+    if handle == -1 || handle == 0 {
+        set_errno(EBADF);
+        return -1;
+    }
+    new_fd(handle as *mut c_void)
+}
+
+const O_WRONLY: i32 = 0x1;
+const O_RDWR: i32 = 0x2;
+const O_APPEND: i32 = 0x8;
+const O_NOINHERIT: i32 = 0x80;
+const O_CREAT: i32 = 0x100;
+const O_TRUNC: i32 = 0x200;
+const O_EXCL: i32 = 0x400;
+
+/// _open(path, flags, mode): CreateFile with the flags' access and
+/// disposition (the permission `mode` only matters for read-only files).
+#[unsafe(no_mangle)]
+pub extern "C" fn _open(path: *const u8, flags: i32, _mode: i32) -> i32 {
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    let mut wide = [0u16; 1024];
+    // SAFETY: the caller's NUL-terminated path.
+    if wide_path(unsafe { crate::c_str(path) }, &mut wide).is_none() {
+        set_errno(ENOENT);
+        return -1;
+    }
+    let access = match flags & 3 {
+        O_WRONLY => GENERIC_WRITE,
+        O_RDWR => GENERIC_READ | GENERIC_WRITE,
+        _ => GENERIC_READ,
+    };
+    // CREATE_NEW 1, CREATE_ALWAYS 2, OPEN_EXISTING 3, OPEN_ALWAYS 4,
+    // TRUNCATE_EXISTING 5.
+    let disposition = match (flags & O_CREAT != 0, flags & O_EXCL != 0, flags & O_TRUNC != 0) {
+        (true, true, _) => 1,
+        (true, false, true) => 2,
+        (true, false, false) => 4,
+        (false, _, true) => 5,
+        (false, _, false) => 3,
+    };
+    let inherit = flags & O_NOINHERIT == 0;
+    // SECURITY_ATTRIBUTES { nLength, lpSecurityDescriptor, bInheritHandle }.
+    let mut sa = [24u64, 0, u64::from(inherit)];
+    // SAFETY: a NUL-terminated path; a valid SECURITY_ATTRIBUTES.
+    let h = unsafe {
+        CreateFileW(wide.as_ptr(), access, 3, sa.as_mut_ptr().cast(), disposition, 0x80, null_mut())
+    };
+    if h == INVALID_HANDLE {
+        set_errno(errno_of_last_error());
+        return -1;
+    }
+    if flags & O_APPEND != 0 {
+        // SAFETY: our handle.
+        unsafe { SetFilePointerEx(h, 0, null_mut(), 2) };
+    }
+    let fd = new_fd(h);
+    if fd < 0 {
+        // SAFETY: our handle.
+        unsafe { CloseHandle(h) };
+        set_errno(24); // EMFILE
+    }
+    fd
+}
+
+/// _pipe(fds[2], size, mode): an anonymous pipe as two descriptors
+/// (inheritable unless _O_NOINHERIT).
+#[unsafe(no_mangle)]
+pub extern "C" fn _pipe(fds: *mut i32, size: u32, mode: i32) -> i32 {
+    let (mut r, mut w) = (null_mut(), null_mut());
+    let mut sa = [24u64, 0, u64::from(mode & O_NOINHERIT == 0)];
+    // SAFETY: valid output pointers and SECURITY_ATTRIBUTES.
+    if unsafe { CreatePipe(&mut r, &mut w, sa.as_mut_ptr().cast(), size) } == 0 {
+        set_errno(errno_of_last_error());
+        return -1;
+    }
+    let (a, b) = (new_fd(r), new_fd(w));
+    if a < 0 || b < 0 {
+        set_errno(24); // EMFILE
+        return -1;
+    }
+    // SAFETY: the caller's int[2].
+    unsafe {
+        *fds = a;
+        *fds.add(1) = b;
+    }
+    0
+}
+
+/// _isatty: a character device (the console, NUL), as msvcrt decides.
+#[unsafe(no_mangle)]
+pub extern "C" fn _isatty(fd: i32) -> i32 {
+    // SAFETY: plain call.
+    handle_of_fd(fd).map_or(0, |h| i32::from(unsafe { GetFileType(h) } == 2))
+}
+
+/// _lseeki64(fd, offset, origin).
+#[unsafe(no_mangle)]
+pub extern "C" fn _lseeki64(fd: i32, offset: i64, origin: i32) -> i64 {
+    let Some(h) = handle_of_fd(fd) else {
+        set_errno(EBADF);
+        return -1;
+    };
+    let mut new = 0i64;
+    // SAFETY: our descriptor's handle.
+    if unsafe { SetFilePointerEx(h, offset, &mut new, origin as u32) } == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    new
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _telli64(fd: i32) -> i64 {
+    _lseeki64(fd, 0, 1)
+}
+
+/// _fstat64(fd, buf): pipes are FIFOs and character devices (the console,
+/// NUL) are character devices, with no times; files report their size.
+#[unsafe(no_mangle)]
+pub extern "C" fn _fstat64(fd: i32, buf: *mut u8) -> i32 {
+    let Some(h) = handle_of_fd(fd) else {
+        set_errno(EBADF);
+        return -1;
+    };
+    // SAFETY: plain calls on our descriptor's handle.
+    let (kind, size) = unsafe {
+        let mut size = 0i64;
+        let kind = GetFileType(h);
+        if kind == 1 {
+            GetFileSizeEx(h, &mut size);
+        }
+        (kind, size)
+    };
+    let mode: u16 = match kind {
+        3 => 0x1000 | 0o666, // _S_IFIFO
+        2 => 0x2000 | 0o666, // _S_IFCHR
+        _ => 0x8000 | 0o666, // _S_IFREG
+    };
+    // SAFETY: the caller's struct _stat64 (see _stat64).
+    unsafe {
+        core::ptr::write_bytes(buf, 0, 56);
+        core::ptr::write_unaligned(buf.add(6).cast::<u16>(), mode);
+        core::ptr::write_unaligned(buf.add(8).cast::<i16>(), 1);
+        core::ptr::write_unaligned(buf.add(24).cast::<i64>(), size);
     }
     0
 }
@@ -959,7 +1361,10 @@ pub extern "C" fn _vsnprintf(buf: *mut u8, count: usize, fmt: *const u8, args: *
     // SAFETY: the caller's NUL-terminated format.
     format(&mut out, unsafe { crate::c_str(fmt) }, Args(args), false);
     let n = out.total;
-    if n < count {
+    if buf.is_null() && count == 0 {
+        // The documented way to measure: the length the output needs.
+        n as i32
+    } else if n < count {
         // SAFETY: room for the terminator.
         unsafe { *buf.add(n) = 0 };
         n as i32

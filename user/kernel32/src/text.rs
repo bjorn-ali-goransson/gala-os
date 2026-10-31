@@ -24,6 +24,30 @@ pub extern "system" fn GetOEMCP() -> u32 {
     CP_UTF8
 }
 
+/// GetCPInfo: every code page is UTF-8 here (up to 4 bytes a character,
+/// default character '?', no DBCS lead bytes).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCPInfo(_code_page: u32, info: *mut u8) -> Bool {
+    if info.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's CPINFO (20 bytes: MaxCharSize, DefaultChar[2],
+    // LeadByte[12]).
+    unsafe {
+        core::ptr::write_bytes(info, 0, 20);
+        info.cast::<u32>().write_unaligned(4);
+        *info.add(4) = b'?';
+    }
+    TRUE
+}
+
+/// IsValidCodePage: UTF-8 (and the ASCII-compatible code pages programs
+/// ask about are served as UTF-8 too).
+#[unsafe(no_mangle)]
+pub extern "system" fn IsValidCodePage(code_page: u32) -> Bool {
+    if matches!(code_page, 65001 | 20127 | 1252 | 437) { TRUE } else { FALSE }
+}
+
 /// No double-byte code pages here.
 #[unsafe(no_mangle)]
 pub extern "system" fn IsDBCSLeadByteEx(_code_page: u32, _byte: u8) -> Bool {
@@ -128,6 +152,26 @@ pub extern "system" fn GetSystemTime(st: *mut u16) {
     let mut t = 0i64;
     // SAFETY: a valid output pointer.
     unsafe { NtQuerySystemTime(&mut t) };
+    write_system_time(t, st);
+}
+
+/// FileTimeToSystemTime(*lpFileTime, *lpSystemTime): the UTC fields.
+#[unsafe(no_mangle)]
+pub extern "system" fn FileTimeToSystemTime(ft: *const u64, st: *mut u16) -> Bool {
+    if ft.is_null() || st.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's FILETIME (maybe unaligned).
+    let t = unsafe { ft.read_unaligned() };
+    if t >= 0x8000_0000_0000_0000 {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    write_system_time(t as i64, st);
+    TRUE
+}
+
+/// SYSTEMTIME fields of `t` (100 ns since 1601) into the caller's `st`.
+fn write_system_time(t: i64, st: *mut u16) {
     let since_epoch = t - UNIX_EPOCH_FILETIME;
     let days = since_epoch.div_euclid(864_000_000_000);
     let rest = since_epoch.rem_euclid(864_000_000_000);

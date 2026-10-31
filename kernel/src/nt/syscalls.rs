@@ -354,6 +354,11 @@ fn dispatch(frame: &mut SyscallFrame) {
 /// Set by the `trace` kernel command-line flag: log every system call.
 static TRACE: AtomicBool = AtomicBool::new(false);
 
+/// Whether the `trace` flag is on (system calls and user faults logged).
+pub fn tracing() -> bool {
+    TRACE.load(Ordering::Relaxed)
+}
+
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Relaxed);
 }
@@ -2674,6 +2679,28 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         }
     }
 
+    // Flag 8: the C runtime's block (lpReserved2) at 136, length at 144,
+    // for the child's RuntimeData.
+    let mut runtime_data: Vec<u8> = Vec::new();
+    if flags & 8 != 0 {
+        let mut ext = [0u8; 16];
+        if call.process.read(ptr + 136, &mut ext).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        let at = u64::from_le_bytes(ext[0..8].try_into().unwrap_or([0; 8]));
+        let len = u32::from_le_bytes(ext[8..12].try_into().unwrap_or([0; 4])) as usize;
+        if len > 8192 {
+            return NtStatus::INVALID_PARAMETER;
+        }
+        if runtime_data.try_reserve_exact(len).is_err() {
+            return NtStatus::NO_MEMORY;
+        }
+        runtime_data.resize(len, 0);
+        if call.process.read(at, &mut runtime_data).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+    }
+
     // Open and read the image (missing: STATUS_OBJECT_NAME_NOT_FOUND).
     let path = tri!(call.resolve_file_name(0, image.clone(), OBJ_CASE_INSENSITIVE));
     let opened = tri!(file::create(
@@ -2728,6 +2755,7 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         environment: (!vars.is_empty()).then_some(&vars[..]),
         handles: Some((table, std)),
         suspended,
+        runtime_data: &runtime_data,
     });
     let (child, thread_object) = match spawned {
         Ok(p) => p,

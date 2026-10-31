@@ -221,6 +221,97 @@ not_yet! {
     CryptGetUserKey(provider: usize, key_spec: u32, key: *mut usize);
 }
 
+// ---- Security and users (busybox-w32 imports these) ----
+
+/// SystemFunction036 (RtlGenRandom): random bytes from ProcessPrng.
+#[unsafe(no_mangle)]
+pub extern "system" fn SystemFunction036(buffer: *mut u8, length: u32) -> u8 {
+    // SAFETY: the caller's buffer of `length` bytes.
+    unsafe { ProcessPrng(buffer, length as usize) };
+    1
+}
+
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+/// The one user name gala reports (there are no accounts).
+const USER_NAME: &[u8] = b"gala";
+
+/// GetUserNameA(lpBuffer, *pcbBuffer): the size includes the NUL.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetUserNameA(buffer: *mut u8, size: *mut u32) -> i32 {
+    if size.is_null() {
+        return fail(87, 0);
+    }
+    let needed = USER_NAME.len() as u32 + 1;
+    // SAFETY: the caller's size and buffer of *size bytes.
+    unsafe {
+        if buffer.is_null() || *size < needed {
+            *size = needed;
+            return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        memcpy(buffer, USER_NAME.as_ptr(), USER_NAME.len());
+        *buffer.add(USER_NAME.len()) = 0;
+        *size = needed;
+    }
+    1
+}
+
+/// EqualSid: same revision, authority and sub-authorities (a SID is 8
+/// bytes plus 4 per sub-authority, their count at offset 1).
+#[unsafe(no_mangle)]
+pub extern "system" fn EqualSid(a: *const u8, b: *const u8) -> i32 {
+    if a.is_null() || b.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's SIDs; their length comes from their header.
+    unsafe {
+        let len = 8 + 4 * usize::from(*a.add(1));
+        if *a.add(1) != *b.add(1) {
+            return 0;
+        }
+        i32::from((0..len).all(|i| *a.add(i) == *b.add(i)))
+    }
+}
+
+/// Tokens, access checks and Safer levels: not yet (no security model);
+/// each fails with ERROR_NOT_SUPPORTED and is recorded.
+macro_rules! no_security {
+    ($($name:ident($($arg:ident: $ty:ty),*);)*) => {$(
+        #[unsafe(no_mangle)]
+        pub extern "system" fn $name($($arg: $ty),*) -> i32 {
+            $(let _ = $arg;)*
+            missing(concat!("advapi32.dll!", stringify!($name)).as_bytes());
+            fail(ERROR_NOT_SUPPORTED, 0)
+        }
+    )*};
+}
+
+no_security! {
+    OpenProcessToken(process: usize, access: u32, token: *mut usize);
+    GetTokenInformation(token: usize, class: u32, info: *mut u8, length: u32, ret: *mut u32);
+    SetTokenInformation(token: usize, class: u32, info: *const u8, length: u32);
+    DuplicateToken(token: usize, level: u32, new: *mut usize);
+    CheckTokenMembership(token: usize, sid: *const u8, member: *mut i32);
+    AccessCheck(descriptor: *const u8, token: usize, access: u32, mapping: *const u8, privileges: *mut u8, length: *mut u32, granted: *mut u32, status: *mut i32);
+    SaferCreateLevel(scope: u32, level: u32, flags: u32, handle: *mut usize, reserved: *mut c_void);
+    SaferComputeTokenFromLevel(level: usize, token: usize, out: *mut usize, flags: u32, reserved: *mut c_void);
+}
+
+/// GetSecurityInfo: returns the error itself (not via GetLastError).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSecurityInfo(
+    _handle: usize,
+    _kind: u32,
+    _info: u32,
+    _owner: *mut usize,
+    _group: *mut usize,
+    _dacl: *mut usize,
+    _sacl: *mut usize,
+    _descriptor: *mut usize,
+) -> u32 {
+    missing(b"advapi32.dll!GetSecurityInfo");
+    ERROR_NOT_SUPPORTED
+}
+
 /// DllMain (the entry point our link flags name).
 #[unsafe(no_mangle)]
 pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved: usize) -> i32 {

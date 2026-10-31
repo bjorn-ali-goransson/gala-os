@@ -49,6 +49,9 @@ pub mod params {
     pub const COMMAND_LINE: u64 = 0x70;
     pub const ENVIRONMENT: u64 = 0x80;
     pub const WINDOW_TITLE: u64 = 0xb0;
+    /// STARTUPINFO's cbReserved2/lpReserved2 (the C runtime's inherited
+    /// file descriptors), as a UNICODE_STRING-shaped byte block.
+    pub const RUNTIME_DATA: u64 = 0xe0;
     pub const ENVIRONMENT_SIZE: u64 = 0x3f0;
     /// Size of the structure itself (strings follow it).
     pub const STRUCT_SIZE: u64 = 0x440;

@@ -26,9 +26,10 @@ Rules for this file:
 | zlib | 1.3.2 (`zlib-1.3.2.tar.gz`, SHA-256 `bb329a0a...0119d16`) | zlib.net | zlib License | Built into `user/bin/nginx.exe` by `user/nginx/build.sh` (Nginx's gzip module). |
 | PCRE2 | 10.49 (`pcre2-10.49.tar.gz`, SHA-256 `929f0b20...e557ae`) | github.com/PCRE2Project/pcre2 releases | BSD-3-Clause (with the PCRE2 exception) | Built into `user/bin/nginx.exe` by `user/nginx/build.sh` (Nginx's rewrite module). |
 | OpenSSL | 3.5.9 LTS (`openssl-3.5.9.tar.gz`, SHA-256 `603f5602...eb859a`, matching the release's published checksum) | github.com/openssl/openssl releases | Apache-2.0 | Built into `user/bin/nginx.exe` by `user/nginx/build.sh` (target mingw64, no-shared, no-threads; SOURCE_DATE_EPOCH fixed for a reproducible build); Nginx's ssl module. |
+| busybox-w32 | `FRP-6354-g5f09fb446` (git commit `5f09fb446adf81d005f0aad9dc47eca19ac3b74c`) | github.com/rmyorston/busybox-w32 (the maintainer's repository; releases on frippery.org/busybox) | GPL-2.0 | `user/bin/busybox.exe`, built unmodified by `user/busybox/build.sh` (its `mingw64_defconfig`, mingw-w64, reproducible); run by the `busybox` scenario. The corresponding source is that commit, which the build script fetches and checks. |
 | Nginx start page | 1.30.6 (`html/index.html` of the release) | nginx.org | BSD-2-Clause | `user/nginx/html/index.html`, unmodified: the page the Nginx scenarios serve and check. |
 | Test certificate | `user/nginx/conf/gala-test.crt/.key` | generated with `openssl req -x509` (ECDSA P-256, self-signed, CN "gala test") | test data, not secret | The `nginx_tls` scenario's server certificate. |
-| mingw-w64 runtime and GCC support code | Ubuntu 24.04 `gcc-mingw-w64-x86-64` 13.2.0 | mingw-w64.org, gcc.gnu.org | mingw-w64 CRT: ZPL/public domain; libgcc: GPL-3.0 with the GCC Runtime Library Exception | Statically linked into `nginx.exe` by the toolchain (program startup, helpers). |
+| mingw-w64 runtime and GCC support code | Ubuntu 24.04 `gcc-mingw-w64-x86-64` 13.2.0 | mingw-w64.org, gcc.gnu.org | mingw-w64 CRT: ZPL/public domain; libgcc: GPL-3.0 with the GCC Runtime Library Exception | Statically linked into `nginx.exe` and `busybox.exe` by the toolchain (program startup, helpers). |
 
 ## Rust crate dependencies (linked into the kernel)
 
@@ -48,6 +49,11 @@ The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `scre
 | `libc` | 0.2.191 (pinned) | MIT OR Apache-2.0 | gala-um: the kernel crate's optional `hosted` feature (`kernel/src/hosted`, never in the kernel binary): memfd_create, mmap, mprotect, sigaction, sigaltstack, pthread_sigmask, prctl (syscall user dispatch), arch_prctl. |
 
 ## Written from third-party specifications (no code copied)
+
+- The C runtime's file-descriptor inheritance block (STARTUPINFO
+  cbReserved2/lpReserved2: a count, a flags byte and a HANDLE per
+  descriptor) in gala's msvcrt (`user/msvcrt/src/stdio.rs`), from its
+  description in Wine's msvcrt (layout only; no code copied).
 
 | Our code | Specification | Spec license |
 |---|---|---|

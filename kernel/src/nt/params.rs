@@ -19,6 +19,8 @@ pub struct ProcessParameters<'a> {
     pub std_handles: [u64; 3],
     /// `NAME=value` strings.
     pub environment: &'a [&'a str],
+    /// RuntimeData: STARTUPINFO's lpReserved2 bytes (empty: none).
+    pub runtime_data: &'a [u8],
 }
 
 fn put(b: &mut [u8], off: u64, v: &[u8]) {
@@ -73,6 +75,17 @@ pub fn build(p: &ProcessParameters<'_>, base: u64) -> Result<Vec<u8>, ParamsErro
     ];
     for (field, s) in strings {
         put_string(&mut b, base, field, &mut cursor, s).ok_or(ParamsError::TooLarge)?;
+    }
+    if !p.runtime_data.is_empty() {
+        let n = p.runtime_data.len() as u64;
+        if cursor + n > params::ENVIRONMENT_OFFSET || n > u64::from(u16::MAX) {
+            return Err(ParamsError::TooLarge);
+        }
+        put(&mut b, cursor, p.runtime_data);
+        put(&mut b, params::RUNTIME_DATA, &(n as u16).to_le_bytes());
+        put(&mut b, params::RUNTIME_DATA + 2, &(n as u16).to_le_bytes());
+        put(&mut b, params::RUNTIME_DATA + 8, &(base + cursor).to_le_bytes());
+        cursor = (cursor + n).next_multiple_of(8);
     }
     put(&mut b, params::MAXIMUM_LENGTH, &(cursor as u32).to_le_bytes());
     put(&mut b, params::LENGTH, &(cursor as u32).to_le_bytes());
@@ -132,11 +145,16 @@ mod tests {
             dll_path: "",
             std_handles: [4, 8, 0xc],
             environment: &["A=1", "SystemRoot=C:\\Windows"],
+            runtime_data: &[1, 0, 0, 0, 0x41, 0x2c, 0, 0, 0, 0, 0, 0, 0],
         };
         let b = build(&p, base).unwrap();
         assert_eq!(string(&b, base, params::IMAGE_PATH_NAME), "C:\\gala\\x.exe");
         assert_eq!(string(&b, base, params::COMMAND_LINE), "C:\\gala\\x.exe arg");
         assert_eq!(string(&b, base, params::CURRENT_DIRECTORY), "C:\\gala\\");
+        // RuntimeData: the bytes, with their length.
+        assert_eq!(u16_at(&b, params::RUNTIME_DATA), 13);
+        let at = (u64_at(&b, params::RUNTIME_DATA + 8) - base) as usize;
+        assert_eq!(&b[at..at + 13], &[1, 0, 0, 0, 0x41, 0x2c, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(u64_at(&b, params::CURRENT_DIRECTORY_HANDLE), 0x20);
         assert_eq!(u64_at(&b, params::STANDARD_OUTPUT), 8);
         let length = u32::from_le_bytes(b[4..8].try_into().unwrap());
@@ -161,6 +179,7 @@ mod tests {
             dll_path: "",
             std_handles: [0; 3],
             environment: &[],
+            runtime_data: &[],
         };
         assert_eq!(build(&p, 0).unwrap_err(), ParamsError::TooLarge);
     }

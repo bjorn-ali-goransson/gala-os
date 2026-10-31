@@ -13,6 +13,64 @@ unsafe extern "C" {
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
 }
 
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn WaitForMultipleObjects(count: u32, handles: *const usize, all: i32, ms: u32) -> u32;
+}
+
+// ---- Messages and windows: gala has no windows, so no messages ----
+
+/// PeekMessageA: the queue is always empty.
+#[unsafe(no_mangle)]
+pub extern "system" fn PeekMessageA(
+    _msg: *mut u8,
+    _window: usize,
+    _min: u32,
+    _max: u32,
+    _remove: u32,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TranslateMessage(_msg: *const u8) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DispatchMessageA(_msg: *const u8) -> isize {
+    0
+}
+
+/// MsgWaitForMultipleObjects: a plain wait, since no message can arrive.
+#[unsafe(no_mangle)]
+pub extern "system" fn MsgWaitForMultipleObjects(
+    count: u32,
+    handles: *const usize,
+    all: i32,
+    ms: u32,
+    _wake_mask: u32,
+) -> u32 {
+    // SAFETY: the caller's handle array.
+    unsafe { WaitForMultipleObjects(count, handles, all, ms) }
+}
+
+/// ShowWindow: there is no window (returns "was not visible").
+#[unsafe(no_mangle)]
+pub extern "system" fn ShowWindow(_window: usize, _command: i32) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn IsWindowVisible(_window: usize) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn IsIconic(_window: usize) -> i32 {
+    0
+}
+
 /// CharToOemBuffA(src, dst, length): ANSI to the OEM code page. gala's
 /// code pages are the same (UTF-8 for ANSI text), so this copies.
 #[unsafe(no_mangle)]

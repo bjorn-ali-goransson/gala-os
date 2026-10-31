@@ -1517,3 +1517,124 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
         core::hint::spin_loop();
     }
 }
+
+/// Writes the dotted-decimal text of the IPv4 `address` (network order)
+/// into `out` (`size` bytes, NUL added); its length, or None.
+fn ipv4_text(address: u32, out: *mut u8, size: usize) -> Option<usize> {
+    let text = inet_ntoa(address);
+    let mut n = 0;
+    // SAFETY: inet_ntoa's NUL-terminated text (at most 16 bytes).
+    while unsafe { *text.add(n) } != 0 {
+        n += 1;
+    }
+    if out.is_null() || n + 1 > size {
+        return None;
+    }
+    // SAFETY: n + 1 <= size bytes of the caller's buffer.
+    unsafe { core::ptr::copy_nonoverlapping(text, out, n + 1) };
+    Some(n)
+}
+
+/// getnameinfo(sa, len, host, hostlen, serv, servlen, flags): numeric
+/// only (there is no resolver): the address and the port as text.
+#[unsafe(no_mangle)]
+pub extern "system" fn getnameinfo(
+    sa: *const u8,
+    _len: i32,
+    host: *mut u8,
+    host_len: u32,
+    serv: *mut u8,
+    serv_len: u32,
+    _flags: i32,
+) -> i32 {
+    // SAFETY: the caller's sockaddr: family at 0; sockaddr_in port at 2,
+    // address at 4.
+    let (family, port, address) = unsafe {
+        (
+            sa.cast::<u16>().read_unaligned(),
+            sa.add(2).cast::<u16>().read_unaligned(),
+            sa.add(4).cast::<u32>().read_unaligned(),
+        )
+    };
+    if family != 2 {
+        return 10047; // WSAEAFNOSUPPORT
+    }
+    if !host.is_null() && ipv4_text(address, host, host_len as usize).is_none() {
+        return 10055; // WSAENOBUFS
+    }
+    if !serv.is_null() {
+        let mut digits = [0u8; 6];
+        let mut p = u16::from_be(port);
+        let mut n = 0;
+        loop {
+            digits[n] = b'0' + (p % 10) as u8;
+            n += 1;
+            p /= 10;
+            if p == 0 {
+                break;
+            }
+        }
+        if n + 1 > serv_len as usize {
+            return 10055;
+        }
+        for i in 0..n {
+            // SAFETY: n + 1 <= serv_len bytes.
+            unsafe { *serv.add(i) = digits[n - 1 - i] };
+        }
+        // SAFETY: as above.
+        unsafe { *serv.add(n) = 0 };
+    }
+    0
+}
+
+/// WSAAddressToStringA(sa, len, info, out, *outlen): "a.b.c.d[:port]".
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAAddressToStringA(
+    sa: *const u8,
+    _len: u32,
+    _info: *mut u8,
+    out: *mut u8,
+    out_len: *mut u32,
+) -> i32 {
+    let (mut host, mut serv) = ([0u8; 16], [0u8; 6]);
+    if getnameinfo(sa, 16, host.as_mut_ptr(), 16, serv.as_mut_ptr(), 6, 0) != 0 {
+        return fail(10022); // WSAEINVAL
+    }
+    let h = host.iter().position(|&c| c == 0).unwrap_or(0);
+    let s = serv.iter().position(|&c| c == 0).unwrap_or(0);
+    let with_port = serv[..s] != *b"0";
+    let need = h + if with_port { 1 + s } else { 0 } + 1;
+    // SAFETY: the caller's length and buffer.
+    unsafe {
+        if out.is_null() || out_len.is_null() || (*out_len as usize) < need {
+            if !out_len.is_null() {
+                *out_len = need as u32;
+            }
+            return fail(10014); // WSAEFAULT
+        }
+        core::ptr::copy_nonoverlapping(host.as_ptr(), out, h);
+        let mut at = h;
+        if with_port {
+            *out.add(at) = b':';
+            core::ptr::copy_nonoverlapping(serv.as_ptr(), out.add(at + 1), s);
+            at += 1 + s;
+        }
+        *out.add(at) = 0;
+        *out_len = need as u32;
+    }
+    0
+}
+
+/// WSAEventSelect/WSAEnumNetworkEvents: not yet (select and overlapped
+/// I/O are); recorded.
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAEventSelect(_s: usize, _event: usize, events: i32) -> i32 {
+    missing(b"ws2_32.dll!WSAEventSelect", events as u64);
+    fail(WSAEOPNOTSUPP)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAEnumNetworkEvents(_s: usize, _event: usize, _out: *mut u8) -> i32 {
+    missing(b"ws2_32.dll!WSAEnumNetworkEvents", 0);
+    fail(WSAEOPNOTSUPP)
+}

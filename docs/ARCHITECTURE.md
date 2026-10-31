@@ -530,6 +530,19 @@ protect-from-close bit on a handle; file opens now keep OBJ_INHERIT from
 OBJECT_ATTRIBUTES. Not yet: overlapped pipe I/O, message mode, named
 pipe servers with several instances or ConnectNamedPipe.
 
+**The C runtime's descriptor inheritance** (H2, busybox): msvcrt passes
+its open descriptors to children in STARTUPINFO cbReserved2/lpReserved2
+(a count, a flags byte and a HANDLE per descriptor). gala's msvcrt
+writes the block in `_spawnve` (inheritable handles only, so a child
+never trusts a value it did not inherit) and reads it at DLL attach;
+kernel32's CreateProcess passes it to GalaCreateProcess (flag 8, pointer
+at 136, length at 144), which stores it as the child's
+RTL_USER_PROCESS_PARAMETERS.RuntimeData (0xe0); GetStartupInfo returns
+it. msvcrt's descriptors 0-2 are the standard handles; `_dup2` onto them
+sets the process's standard handle (as msvcrt does), so redirections
+reach children. msvcrt's FILE starts with the real 48-byte layout
+(`_cnt` 0), because mingw's inline getc reads it and calls `_filbuf`.
+
 **NUL**: `\Device\Null` (with `\??\NUL` linking to it) opens as a file
 whose reads are at end of file and whose writes are discarded
 (FILE_DEVICE_NULL); kernel32 maps the DOS name `NUL` to `\??\NUL`.

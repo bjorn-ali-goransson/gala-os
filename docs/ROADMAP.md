@@ -212,7 +212,7 @@ to set and to argue for. Current order and why:
    and real programs beyond servers need it too. H1 (pipes, redirected
    child stdio) done; next H2 (a real CLI tool or shell-like program
    driving children through pipes, chosen from what the ledger shows).
-   H2 step 1 (Go's os/exec) done; next busybox-w32.
+   H2 done (Go's os/exec, busybox-w32's sh); next H3.
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
@@ -325,9 +325,17 @@ H2. **A real program driving children through pipes**: step 1 done
    STARTUPINFOEX handle lists (Initialize/UpdateProcThreadAttribute),
    DuplicateHandle's close-only form and GetProcessTimes, and it exposed
    three races in the NT layer, fixed for both platforms (ARCHITECTURE,
-   "Races found by go_exec"). Next: busybox-w32 (sh, coreutils) as the
-   first shell.
-H3. **A toolchain on gala** (later; see "Later").
+   "Races found by go_exec"). Step 2 done 2026-10-31: busybox-w32's sh
+   runs pipelines and $(...) on gala (`busybox` scenario: echo | cat,
+   sed, grep, exit status). It needed ~150 functions (kernel32 A
+   variants, console/volume stubs, advapi32, user32 message stubs,
+   msvcrt's POSIX layer, sscanf, setjmp/longjmp, _spawnve, inheritable
+   file mappings), the C runtime's descriptor inheritance through
+   RuntimeData, and two msvcrt fixes found by it (_vsnprintf(NULL, 0)
+   measures; a pipe's end is EOF for _read). Next H3.
+H3. **Scripts and tools on gala**: busybox utilities over files (ls,
+   find, grep -r, tar), shell scripts from files, then a toolchain (see
+   "Later").
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

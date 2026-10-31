@@ -143,6 +143,15 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("nginx", "crypt32.dll", "Windows/System32"),
     ("nginx", "bcryptprimitives.dll", "Windows/System32"),
     ("nginx", "user/bin/nginx.exe", "nginx"),
+    ("busybox", "ntdll.dll", "Windows/System32"),
+    ("busybox", "kernel32.dll", "Windows/System32"),
+    ("busybox", "ws2_32.dll", "Windows/System32"),
+    ("busybox", "mswsock.dll", "Windows/System32"),
+    ("busybox", "msvcrt.dll", "Windows/System32"),
+    ("busybox", "advapi32.dll", "Windows/System32"),
+    ("busybox", "user32.dll", "Windows/System32"),
+    ("busybox", "bcryptprimitives.dll", "Windows/System32"),
+    ("busybox", "user/bin/busybox.exe", "gala"),
     ("nginx", "user/nginx/conf/nginx.conf", "nginx/conf"),
     ("nginx", "user/nginx/html/index.html", "nginx/html"),
     ("nginx", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
@@ -878,6 +887,24 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // H2: busybox-w32's sh (user/busybox/build.sh) runs
+        //   sh -c "echo hello | cat; echo pipe=$?; echo abc | sed s/b/X/;
+        //          echo count=$(printf 'x\ny\nx\n' | grep -c x); exit 3"
+        // Pipelines and $(...) are child processes joined by pipes (no fork
+        // on Windows). Expected as on Windows (POSIX sh semantics, the same
+        // binary): the four lines (pipe=0: cat succeeded), then status 3.
+        name: "busybox",
+        cmdline: "qemu_exit run=busybox.exe args=sh%20-c%20%22echo%20hello%20%7C%20cat;%20echo%20pipe=$?;%20echo%20abc%20%7C%20sed%20s/b/X/;%20echo%20count=$(printf%20'x%5Cny%5Cnx%5Cn'%20%7C%20grep%20-c%20x);%20exit%203%22",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hello",
+            "pipe=0",
+            "aXc",
+            "count=2",
+            "busybox.exe (pid 4) exited with status 0x00000003",
+        ],
+    },
+    Scenario {
         // N2b: Nginx's normal mode: the master starts a worker process
         // (CreateProcess) that serves the page.
         name: "nginx_master",
@@ -1374,6 +1401,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("process_test", "child processes (one NT process per Linux process)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
+    ("busybox", "child processes (pipelines are child processes)"),
 ];
 
 /// Whether gala-um runs scenario `s`: a program's own scenario (its

@@ -20,12 +20,16 @@
 
 use core::ffi::c_void;
 
+mod ansi;
+mod console;
+mod files;
 mod mapping;
 mod messages;
 mod pipe;
 mod process;
 mod sync;
 mod text;
+mod volume;
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -40,6 +44,7 @@ const STATUS_OBJECT_NAME_EXISTS: u32 = 0x4000_0000;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 const ERROR_NOT_SUPPORTED: u32 = 50;
 const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
 const WAIT_FAILED: u32 = 0xffff_ffff;
 const INFINITE: u32 = 0xffff_ffff;
 
@@ -1822,6 +1827,65 @@ pub extern "system" fn GetCurrentDirectoryW(size: u32, buf: *mut u16) -> u32 {
         _ => dos,
     };
     copy_out(path, buf, size)
+}
+
+/// SetCurrentDirectoryW: ProcessParameters->CurrentDirectory: DosPath
+/// (with a trailing backslash, in its own buffer) and Handle (an open
+/// handle to the directory, as Windows keeps one).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetCurrentDirectoryW(path: *const u16) -> Bool {
+    let mut full = match full_path(wide_slice(path)) {
+        Ok(f) => f,
+        Err(e) => return fail_with(e, FALSE),
+    };
+    if !full.as_slice().ends_with(&[BACKSLASH]) && full.push(&[BACKSLASH]).is_err() {
+        return fail_with(ERROR_FILENAME_EXCED_RANGE, FALSE);
+    }
+    let mut z = PathBuf::new();
+    if z.push(full.as_slice()).is_err() || z.push(&[0]).is_err() {
+        return fail_with(ERROR_FILENAME_EXCED_RANGE, FALSE);
+    }
+    let attributes = GetFileAttributesW(z.chars.as_ptr());
+    if attributes == u32::MAX {
+        return FALSE;
+    }
+    if attributes & 0x10 == 0 {
+        return fail_with(267, FALSE); // ERROR_DIRECTORY
+    }
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    // FILE_TRAVERSE | SYNCHRONIZE, as the directory handle Windows keeps.
+    let h = CreateFileW(
+        z.chars.as_ptr(),
+        0x10_0020,
+        3,
+        core::ptr::null_mut(),
+        3,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        core::ptr::null_mut(),
+    );
+    if h == INVALID_HANDLE_VALUE {
+        return FALSE;
+    }
+    let params = process_parameters();
+    // SAFETY: CurrentDirectory: DosPath UNICODE_STRING at +0x38 (Length,
+    // MaximumLength, Buffer at +0x40), Handle at +0x48.
+    unsafe {
+        let max = usize::from(*((params + 0x3a) as *const u16)) / 2;
+        let chars = full.as_slice();
+        if chars.len() + 1 > max {
+            CloseHandle(h);
+            return fail_with(ERROR_FILENAME_EXCED_RANGE, FALSE);
+        }
+        let buf = *((params + 0x40) as *const *mut u16);
+        core::ptr::copy_nonoverlapping(chars.as_ptr(), buf, chars.len());
+        *buf.add(chars.len()) = 0;
+        *((params + 0x38) as *mut u16) = (chars.len() * 2) as u16;
+        let old = core::mem::replace(&mut *((params + 0x48) as *mut Handle), h);
+        if !old.is_null() {
+            CloseHandle(old);
+        }
+    }
+    TRUE
 }
 
 /// GetTempPathW: the first of TMP, TEMP, USERPROFILE, or the Windows

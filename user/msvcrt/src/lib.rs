@@ -16,6 +16,9 @@
 
 mod heap;
 mod misc;
+mod posix;
+mod scan;
+mod setjmp;
 mod stdio;
 mod time;
 
@@ -93,6 +96,10 @@ pub static mut __initenv: *mut *mut u8 = null_mut();
 pub static mut _commode: i32 = 0;
 #[unsafe(no_mangle)]
 pub static mut _fmode: i32 = 0;
+
+/// __argv: the program's arguments (set by __getmainargs).
+#[unsafe(no_mangle)]
+pub static mut __argv: *mut *mut u8 = null_mut();
 
 static mut ARGC: i32 = 0;
 static mut ARGV: *mut *mut u8 = null_mut();
@@ -288,6 +295,7 @@ pub extern "C" fn __getmainargs(
     unsafe {
         *argc = ARGC;
         *argv = ARGV;
+        __argv = ARGV;
         *envp = _environ;
     }
     0
@@ -661,7 +669,11 @@ pub extern "C" fn srand(seed: u32) {
 
 /// DllMain (the entry point our link flags name).
 #[unsafe(no_mangle)]
-pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved: usize) -> i32 {
+pub extern "system" fn mainCRTStartup(_instance: usize, reason: u32, _reserved: usize) -> i32 {
+    if reason == 1 {
+        // DLL_PROCESS_ATTACH: descriptors inherited from a parent's CRT.
+        stdio::inherit_descriptors();
+    }
     1
 }
 

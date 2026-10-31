@@ -374,3 +374,168 @@ pub extern "C" fn _lock(_which: i32) {}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _unlock(_which: i32) {}
+
+// ---- Character classes (the "C" locale: ASCII) ----
+
+macro_rules! ctype {
+    ($($name:ident: $test:expr;)*) => {$(
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(c: i32) -> i32 {
+            let f: fn(u8) -> bool = $test;
+            i32::from(u8::try_from(c).is_ok_and(f))
+        }
+    )*};
+}
+
+ctype! {
+    isalnum: |b| b.is_ascii_alphanumeric();
+    isalpha: |b| b.is_ascii_alphabetic();
+    iscntrl: |b| b.is_ascii_control();
+    isdigit: |b| b.is_ascii_digit();
+    isgraph: |b| b.is_ascii_graphic();
+    islower: |b| b.is_ascii_lowercase();
+    isprint: |b| b.is_ascii_graphic() || b == b' ';
+    ispunct: |b| b.is_ascii_punctuation();
+    isupper: |b| b.is_ascii_uppercase();
+}
+
+// ---- Strings ----
+
+/// Compares at most `n` bytes ignoring ASCII case.
+fn compare_ci(a: *const u8, b: *const u8, n: usize) -> i32 {
+    for i in 0..n {
+        // SAFETY: the caller's NUL-terminated strings (we stop at a NUL).
+        let (x, y) = unsafe { (*a.add(i), *b.add(i)) };
+        let (x, y) = (x.to_ascii_lowercase(), y.to_ascii_lowercase());
+        if x != y || x == 0 {
+            return i32::from(x) - i32::from(y);
+        }
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _stricmp(a: *const u8, b: *const u8) -> i32 {
+    compare_ci(a, b, usize::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _strnicmp(a: *const u8, b: *const u8, n: usize) -> i32 {
+    compare_ci(a, b, n)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wcsncmp(a: *const u16, b: *const u16, n: usize) -> i32 {
+    for i in 0..n {
+        // SAFETY: the caller's NUL-terminated strings.
+        let (x, y) = unsafe { (*a.add(i), *b.add(i)) };
+        if x != y || x == 0 {
+            return i32::from(x) - i32::from(y);
+        }
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _wcsnicmp(a: *const u16, b: *const u16, n: usize) -> i32 {
+    let lower = |c: u16| if (0x41..=0x5a).contains(&c) { c + 32 } else { c };
+    for i in 0..n {
+        // SAFETY: the caller's NUL-terminated strings.
+        let (x, y) = unsafe { (lower(*a.add(i)), lower(*b.add(i))) };
+        if x != y || x == 0 {
+            return i32::from(x) - i32::from(y);
+        }
+    }
+    0
+}
+
+/// strtok's position (per process here; per thread in the CRT).
+static mut STRTOK: *mut u8 = core::ptr::null_mut();
+
+/// strtok(s, delimiters): the next token; s null continues the last.
+#[unsafe(no_mangle)]
+pub extern "C" fn strtok(s: *mut u8, delimiters: *const u8) -> *mut u8 {
+    // SAFETY: the caller's NUL-terminated, writable string and delimiters.
+    unsafe {
+        let delims = crate::c_str(delimiters);
+        let mut p = if s.is_null() { *(&raw const STRTOK) } else { s };
+        if p.is_null() {
+            return p;
+        }
+        while *p != 0 && delims.contains(&*p) {
+            p = p.add(1);
+        }
+        if *p == 0 {
+            *(&raw mut STRTOK) = core::ptr::null_mut();
+            return core::ptr::null_mut();
+        }
+        let token = p;
+        while *p != 0 && !delims.contains(&*p) {
+            p = p.add(1);
+        }
+        if *p == 0 {
+            *(&raw mut STRTOK) = core::ptr::null_mut();
+        } else {
+            *p = 0;
+            *(&raw mut STRTOK) = p.add(1);
+        }
+        token
+    }
+}
+
+/// bsearch(key, base, count, size, compare).
+#[unsafe(no_mangle)]
+pub extern "C" fn bsearch(
+    key: *const u8,
+    base: *const u8,
+    count: usize,
+    size: usize,
+    compare: extern "C" fn(*const u8, *const u8) -> i32,
+) -> *mut u8 {
+    let (mut lo, mut hi) = (0usize, count);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        // SAFETY: inside the caller's array of `count` elements.
+        let item = unsafe { base.add(mid * size) };
+        match compare(key, item) {
+            0 => return item.cast_mut(),
+            c if c < 0 => hi = mid,
+            _ => lo = mid + 1,
+        }
+    }
+    core::ptr::null_mut()
+}
+
+/// atof(s): leading white space, then a decimal number (0.0 if none).
+#[unsafe(no_mangle)]
+pub extern "C" fn atof(s: *const u8) -> f64 {
+    // SAFETY: the caller's NUL-terminated string.
+    let text = unsafe { crate::c_str(s) };
+    let start =
+        text.iter().position(|&c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r')).unwrap_or(text.len());
+    crate::scan::float(&text[start..], usize::MAX).map_or(0.0, |(v, _)| v)
+}
+
+/// mbstowcs(dst, src, n): UTF-8 (the ANSI code page) to UTF-16; with a
+/// null `dst`, the length needed.
+#[unsafe(no_mangle)]
+pub extern "C" fn mbstowcs(dst: *mut u16, src: *const u8, n: usize) -> usize {
+    // SAFETY: the caller's NUL-terminated string.
+    let Ok(text) = core::str::from_utf8(unsafe { crate::c_str(src) }) else { return usize::MAX };
+    let mut count = 0;
+    for c in text.encode_utf16() {
+        if !dst.is_null() {
+            if count >= n {
+                return count;
+            }
+            // SAFETY: count < n characters of the caller's buffer.
+            unsafe { *dst.add(count) = c };
+        }
+        count += 1;
+    }
+    if !dst.is_null() && count < n {
+        // SAFETY: as above.
+        unsafe { *dst.add(count) = 0 };
+    }
+    count
+}
