@@ -49,6 +49,16 @@ pub fn init(info: &BootInfo) -> Result<(), InitError> {
     Ok(())
 }
 
+/// gala-um: frames are the pages of a memfd of `size` bytes, mapped whole
+/// at `hhdm_offset` (frame 0 stays unused, like low memory on a PC).
+#[cfg(feature = "hosted")]
+pub fn init_hosted(hhdm_offset: u64, size: u64, bitmap: &'static mut [u64]) {
+    HHDM_OFFSET.store(hhdm_offset, Ordering::Relaxed);
+    let usable =
+        memmap::MemoryRegion { base: PAGE_SIZE, len: size - PAGE_SIZE, kind: RegionKind::Usable };
+    *FRAMES.lock() = Some(FrameAllocator::from_memory_map(bitmap, [usable], &[]));
+}
+
 fn with_frames<R>(f: impl FnOnce(&mut FrameAllocator<'static>) -> R) -> Option<R> {
     FRAMES.lock().as_mut().map(f)
 }

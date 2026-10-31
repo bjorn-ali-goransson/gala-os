@@ -1,8 +1,9 @@
 # gala-um: the NT personality as a Linux process (design draft)
 
-Status (2026-10-31): U1 seam in place (`kernel/src/nt/platform.rs`).
-U2a done: `um/` runs hello.exe (`cargo xtask um-test`, in CI) with
-bootstrap services. Next: U2b, the NT layer itself in gala-um. Design written 2026-10-30.
+Status (2026-10-31): U1 seam (`kernel/src/nt/platform.rs`) and U2 done:
+gala-um runs the real NT layer (`kernel/src/hosted`, `um/`); 16 test
+programs pass in `cargo xtask um-test` (CI) in a few ms each. Next: the
+failures listed under "U2b", then U3. Design written 2026-10-30.
 
 ## Why
 
@@ -119,39 +120,81 @@ changed (all QEMU scenarios pass).
 
 ## U2a: the host mechanism (2026-10-31)
 
-`um/` (a std binary, `um <program.exe>`; `cargo xtask um-test` runs the
-`UM_SCENARIOS` and checks each QEMU scenario's `expect` lines; CI runs
-it):
+First `um/` ran hello.exe with its own loader and two bootstrap services
+(NtWriteFile, NtTerminateProcess), to prove the mechanism: image at its
+base, PEB/TEB/KUSER at gala's layout, GS via `arch_prctl`, syscall user
+dispatch with the host's half as the always-allowed range. U2b moved it
+into the kernel crate and replaced the services with the NT layer.
 
-- `process.rs`: the image at its base (`MAP_FIXED_NOREPLACE`, laid out
-  by the kernel's own `nt/pe.rs`, shared by `#[path]`, section
-  protections as the kernel sets them); PEB, process parameters, TEB,
-  KUSER_SHARED_DATA and the stack at `nt/layout.rs`'s addresses, filled
-  like the kernel fills them (pid 4, console handles 4/8/12).
-- `host.rs`: GS = TEB (`arch_prctl`), syscall user dispatch, SIGSYS on an
-  alternate stack decoding the NT arguments (stack arguments at
-  rsp+0x28), fault signals reported; the main thread enters the program
-  with rcx = PEB and rsp as if called, like the kernel.
-- `services.rs`: bootstrap services, NtWriteFile on the console handles
-  and NtTerminateProcess, logging the kernel's exit line. Replaced by the
-  NT layer in U2b.
+## U2b: the NT layer in gala-um (2026-10-31)
 
-Result: hello.exe prints the same lines as its QEMU scenario, in about
-2 ms instead of ~5 s. abi_test and file_test stop at their first service
-outside the bootstrap set (0x0fff, 0x0033), crash.exe's access
-violation is caught and reported. These need U2b.
+**No crate split needed.** The kernel crate gets a `hosted` cargo feature
+(never set for the kernel binary). With it, `nt::platform::P` is
+`kernel::hosted::Um` and the address-space types come from
+`kernel::hosted::memory`; the NT layer is the same code. The kernel's
+interrupt-disabling locks, global allocator, debug console and serial
+console get host stand-ins under `any(test, feature = "hosted")` (the unit
+tests' stand-ins, mostly). `um/` is a thin binary: `um <program.exe>
+[arguments]` calls `kernel::hosted::run`, which does what the kernel's
+`run=` does (nt::init, the image as C:\gala\<name>, spawn_from_pe, wait
+for the process, the ledger dump), and exits with 0 if the program did.
+The "Remaining for the split" list above is therefore not needed for
+gala-um; it stays as the plan if `nt/` ever becomes its own crate.
 
-**U2b plan:** link the NT layer (the kernel lib already builds for the
-host for its unit tests). The kernel's memory model carries over almost
-unchanged if gala-um's "physical memory" is one memfd: frames are pages
-of it (the kernel's own bitmap frame allocator), the HHDM is one
-`MAP_SHARED` view of the whole memfd, and a user mapping of a frame is
-an `mmap(MAP_SHARED | MAP_FIXED)` of that page at the user address.
-`map_borrowed`, `map_private_copy` (COW), `set_flags` (mprotect) and
-`unmap_page` map one to one, so `UserSpace` becomes a trait-associated
-type with a kernel and a memfd implementation (step 2 of "Remaining for
-the split"). Threads: one host thread per NT thread, waits on a futex
-per thread behind `Threads`.
+`kernel/src/hosted`:
+
+- `memory.rs`: "physical memory" is a 1 GiB memfd (sparse). Frames are
+  its pages, handed out by the kernel's frame allocator
+  (`mm::init_hosted`); the HHDM is one `MAP_SHARED` view of it; a user
+  page is its frame mapped with `MAP_SHARED | MAP_FIXED` at the user
+  address, so owned and borrowed frames, sections sharing frames,
+  KUSER_SHARED_DATA (one frame mapped read-only) and copy-on-write (copy
+  a frame, map the copy) work as in the kernel. `read`/`write` go through
+  the HHDM after checking the page table (a BTreeMap), like the kernel's.
+  A page gala-um never placed is mapped with `MAP_FIXED_NOREPLACE`: the
+  PEB area (0x7ff0_0000_0000) shares the 0x7f... band with the host's
+  libraries, which must never be replaced.
+- `threads.rs`: one host thread per NT thread and per NT helper thread
+  (timers); `prepare_wait`/`wait`/`wake` with a mutex and condition
+  variable per thread; ticks = milliseconds of the host's monotonic
+  clock, the tick callback (KUSER times) on a host thread. An exiting
+  thread parks forever (it may be inside a signal handler).
+- `entry.rs`: SIGSYS fills a `SyscallFrame` from the ucontext, nt's own
+  dispatcher runs, and the return registers follow the kernel's SYSRET
+  (rcx = rip, r11 = rflags) or NtContinue's registers, after the
+  user-return hook (APCs, suspension). Fault signals fill a `TrapFrame`
+  from Linux's `trapno`/`err` (so a page fault has its error code and
+  cr2 = si_addr) and go to nt's exception handler (guard pages, demand
+  commit, SEH dispatch). User mode is entered by sending the thread
+  SIGUSR2, whose handler writes the registers into the ucontext; the
+  return from the handler loads them all. `fxsave`/`fxrstor` act on the
+  signal context's FXSAVE area (the handler runs with fresh FPU state).
+  Each thread clears its signal mask first: a thread created inside a
+  SIGSYS handler inherits SIGSYS blocked, and a blocked SIGSYS from
+  syscall user dispatch kills the process.
+
+One processor as far as programs can tell (`online_count` 1).
+
+**Passing (UM_SCENARIOS):** hello, abi_test, async_test, dir_test,
+file_test, image_test, kuser_test, ledger_test, object_test, peb_test,
+section_test, sysinfo_test, thread_test, threadinfo_test, vm_test,
+wait_test.
+
+**Not yet** (the first failing check, from `um user/bin/<x>.exe`):
+- programs with imports (kernel32_*, import_test, prng_test, winsock_*,
+  process_test): `ImportsNotSupported`, as `spawn_from_pe` asks for the
+  DLLs from the boot volume; gala-um must add gala's DLLs from user/bin
+  and System32 as the kernel's boot modules do.
+- file-backed sections (cow_test, filemap_test): file pages are host
+  heap memory, not memfd frames; ramfs pages should come from frames.
+- exceptions and contexts: exception_test, guard_test, context_test,
+  fpu_test, crash (SEH dispatch through `KiUserExceptionDispatcher`
+  needs checking against the signal path), apc_test, ioapc_test,
+  iocp_test, timer_test, sync_test, startup_test, symlink_test,
+  args_test (um-test passes no `args=` yet), loader_test, smp*_test
+  (one CPU here).
+- suspending a thread while it runs program code (takes effect at its
+  next system call: needs a signal to interrupt it).
 
 ## Steps
 

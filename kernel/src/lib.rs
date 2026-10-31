@@ -11,6 +11,8 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_macros))]
 
 extern crate alloc;
+#[cfg(feature = "hosted")]
+extern crate std;
 
 #[allow(unsafe_code)]
 pub mod arch;
@@ -21,9 +23,14 @@ pub mod cmdline;
 pub mod console;
 pub mod events;
 pub mod fs;
+/// gala-um's platform: the NT layer inside a Linux process.
+#[cfg(feature = "hosted")]
+#[allow(unsafe_code)]
+pub mod hosted;
 pub mod mm;
 pub mod net;
 pub mod nt;
+#[cfg(not(feature = "hosted"))]
 pub mod platform;
 pub mod sched;
 mod selftest;

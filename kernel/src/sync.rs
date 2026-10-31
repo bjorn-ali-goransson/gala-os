@@ -2,9 +2,9 @@
 
 use core::ops::{Deref, DerefMut};
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "hosted")))]
 use crate::arch::cpu;
-#[cfg(test)]
+#[cfg(any(test, feature = "hosted"))]
 use host_cpu as cpu;
 
 /// A spinlock that keeps interrupts disabled on this CPU while it is held,
@@ -85,8 +85,9 @@ impl<T: Default> Default for IrqMutex<T> {
     }
 }
 
-/// Host unit tests run in user mode, where `cli`/`sti` would fault.
-#[cfg(test)]
+/// Host unit tests and gala-um run in user mode, where `cli`/`sti` would
+/// fault.
+#[cfg(any(test, feature = "hosted"))]
 mod host_cpu {
     pub fn disable_interrupts() -> bool {
         false

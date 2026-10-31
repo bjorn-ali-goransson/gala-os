@@ -56,7 +56,7 @@ pub fn written() -> u64 {
 /// Writes one event: `{"t":..,"cpu":..,"ev":"<name>",<fields>}`. `fields`
 /// are the remaining JSON members (without braces); strings in them must
 /// be wrapped in [`Str`].
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "hosted")))]
 pub fn emit(category: Category, name: &str, fields: fmt::Arguments) {
     if !enabled(category) {
         return;
@@ -68,8 +68,8 @@ pub fn emit(category: Category, name: &str, fields: fmt::Arguments) {
     WRITTEN.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Host unit tests have no debug console.
-#[cfg(test)]
+/// Host unit tests and gala-um have no debug console.
+#[cfg(any(test, feature = "hosted"))]
 pub fn emit(_category: Category, _name: &str, _fields: fmt::Arguments) {}
 
 /// A string escaped for JSON (quotes, backslashes, control characters).

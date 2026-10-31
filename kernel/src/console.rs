@@ -10,6 +10,7 @@ use core::fmt::{self, Write};
 
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
 
+#[cfg(not(feature = "hosted"))]
 use crate::arch::serial;
 use crate::boot::Framebuffer;
 use crate::sync::IrqMutex;
@@ -135,6 +136,7 @@ impl Write for Screen {
 static SCREEN: IrqMutex<Option<Screen>> = IrqMutex::new(None);
 
 pub fn init() {
+    #[cfg(not(feature = "hosted"))]
     serial::COM1.lock().init();
 }
 
@@ -162,6 +164,28 @@ pub fn attach_framebuffer(fb: Framebuffer, title: &str) {
 }
 
 #[doc(hidden)]
+#[cfg(feature = "hosted")]
+pub fn print(args: fmt::Arguments) {
+    // gala-um: the log goes to stderr.
+    std::eprint!("{args}");
+}
+
+/// gala-um: user-mode output goes to stdout.
+#[cfg(feature = "hosted")]
+pub fn write_bytes(bytes: &[u8]) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(bytes);
+    let _ = out.flush();
+}
+
+#[cfg(feature = "hosted")]
+pub fn emergency_println(args: fmt::Arguments) {
+    std::eprintln!("\n{args}");
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "hosted"))]
 pub fn print(args: fmt::Arguments) {
     let _ = serial::COM1.lock().write_fmt(args);
     if let Some(screen) = SCREEN.lock().as_mut() {
@@ -170,6 +194,7 @@ pub fn print(args: fmt::Arguments) {
 }
 
 /// Writes raw bytes (no newline translation), e.g. user-mode output.
+#[cfg(not(feature = "hosted"))]
 pub fn write_bytes(bytes: &[u8]) {
     {
         let mut port = serial::COM1.lock();
@@ -186,6 +211,7 @@ pub fn write_bytes(bytes: &[u8]) {
 
 /// Prints even if the console lock is held, e.g. when a panic happened while
 /// printing.
+#[cfg(not(feature = "hosted"))]
 pub fn emergency_println(args: fmt::Arguments) {
     let _ = serial::com1_emergency().write_fmt(format_args!("\n{args}\n"));
     // On screen only if nobody holds it (the panic may come from inside).

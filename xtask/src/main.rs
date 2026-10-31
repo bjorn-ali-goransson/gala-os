@@ -1348,7 +1348,24 @@ fn run_parallel<J: Sync, T: Send>(
 
 /// Scenarios gala-um runs (docs/GALA_UM.md): their program from user/bin
 /// must print the scenario's expected lines there too.
-const UM_SCENARIOS: &[&str] = &["hello"];
+const UM_SCENARIOS: &[&str] = &[
+    "hello",
+    "abi_test",
+    "async_test",
+    "dir_test",
+    "file_test",
+    "image_test",
+    "kuser_test",
+    "ledger_test",
+    "object_test",
+    "peb_test",
+    "section_test",
+    "sysinfo_test",
+    "thread_test",
+    "threadinfo_test",
+    "vm_test",
+    "wait_test",
+];
 
 /// `cargo xtask um-test`: builds um/ for the host and runs each
 /// UM_SCENARIOS program in it, checking the QEMU scenario's `expect` lines

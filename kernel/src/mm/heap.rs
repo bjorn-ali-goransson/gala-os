@@ -217,7 +217,7 @@ impl PageSource for FramePages {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "hosted")))]
 mod global {
     use core::alloc::{GlobalAlloc, Layout};
     use core::ptr::{self, NonNull};
@@ -250,11 +250,11 @@ mod global {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "hosted")))]
 pub use global::stats;
 
 /// Host builds use std's allocator; there are no kernel heap statistics.
-#[cfg(test)]
+#[cfg(any(test, feature = "hosted"))]
 pub fn stats() -> HeapStats {
     HeapStats::default()
 }

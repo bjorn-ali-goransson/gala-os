@@ -6,7 +6,8 @@
 //! `crate::platform::Kernel`; gala-um's host process in U2), and the
 //! functions below are the NT layer's way to call it. No other file in
 //! `nt/` names `crate::arch`, `crate::sched`, `crate::time` or the frame
-//! allocator (xtask's unit tests check this).
+//! allocator (xtask's unit tests check this). With the `hosted` feature,
+//! `P` and the address-space types come from `crate::hosted` (gala-um).
 //!
 //! The data types the platform provides (thread ids, register sets, the
 //! address space, page flags, frames) are re-exported here for now; they
@@ -15,17 +16,23 @@
 
 pub use crate::arch::cpu::FxState;
 pub use crate::arch::interrupts::TrapFrame;
-pub use crate::arch::paging::{
-    PagingError, SharedPage, SharedUserSpace, SpaceLock, UserFault, UserSpace,
-};
+pub use crate::arch::paging::{PagingError, UserFault};
+#[cfg(not(feature = "hosted"))]
+pub use crate::arch::paging::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};
 pub use crate::arch::syscall::{SyscallFrame, UserRegs};
+#[cfg(feature = "hosted")]
+pub use crate::hosted::memory::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};
 pub use crate::mm::PAGE_SIZE;
 pub use crate::mm::frame::Frame;
 pub use crate::mm::paging::{CacheMode, PageFlags};
 pub use crate::sched::{SpawnError, ThreadId, WakeReason};
 
-/// The implementation the NT layer runs on.
+/// The implementation the NT layer runs on: the kernel, or gala-um's host
+/// process (`--features hosted`).
+#[cfg(not(feature = "hosted"))]
 pub type P = crate::platform::Kernel;
+#[cfg(feature = "hosted")]
+pub type P = crate::hosted::Um;
 
 /// Time: a periodic tick (timers, the shared page) and two clocks.
 pub trait Clock {

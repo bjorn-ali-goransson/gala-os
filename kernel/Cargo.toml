@@ -14,7 +14,13 @@ name = "kernel"
 test = false
 bench = false
 
+[features]
+# gala-um: the kernel library as the NT layer inside a Linux process
+# (kernel/src/hosted, docs/GALA_UM.md). Never set for the kernel binary.
+hosted = ["dep:libc"]
+
 [dependencies]
+libc = { version = "=0.2.191", optional = true }
 noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = ["size_16", "regular", "unicode-basic-latin", "unicode-specials"] }
 smoltcp = { version = "0.12", default-features = false, features = ["alloc", "medium-ethernet", "medium-ip", "proto-ipv4", "socket-tcp"] }
 spin = { version = "0.12.3", default-features = false, features = ["spin_mutex"] }

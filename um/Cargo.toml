@@ -7,4 +7,4 @@ publish.workspace = true
 description = "gala-um: gala's NT layer as a Linux process (docs/GALA_UM.md)"
 
 [dependencies]
-libc = "=0.2.191"
+kernel = { path = "../kernel", features = ["hosted"] }

@@ -19,8 +19,8 @@
 - Record any borrowed code or new dependency in `THIRD_PARTY.md` in the same
   commit.
 - `unsafe` is only allowed in `kernel/src/arch`, `kernel/src/boot`,
-  `kernel/src/mm/heap.rs` and `kernel/src/sched/switch.rs` (and later the NT ABI/syscall layer), and in gala-um's host glue
-  (`um/src/host.rs`, `um/src/process.rs`). Test programs in `user/` are
+  `kernel/src/mm/heap.rs` and `kernel/src/sched/switch.rs` (and later the NT ABI/syscall layer), and in gala-um's platform
+  (`kernel/src/hosted`, the `hosted` feature). Test programs in `user/` are
   freestanding Windows binaries and may use `unsafe` freely. Every
   `unsafe` block needs a `SAFETY:` comment.
 - Allocation must be fallible; the kernel must never panic on OOM. Use

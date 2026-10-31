@@ -28,6 +28,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/nt/               NT personality: PE loader, processes, handles, syscalls
   src/nt/platform.rs    the seam: traits for what nt needs from the machine
   src/platform.rs       the kernel's implementation of nt::platform
+  src/hosted/           gala-um's implementation (feature `hosted`; memfd, host threads, signals)
 user/                   freestanding Windows test programs (x86_64-pc-windows-msvc)
   ntrt/                 tiny runtime: ntdll-shaped syscall stubs, PEB access
   hello/ abi_test/ crash/
@@ -201,6 +202,9 @@ user entry and user memory only through `nt::platform` (traits `Clock`,
 `platform::Kernel`). Invariant, checked by xtask's unit tests: no file in
 `nt/` but `platform.rs` names `crate::arch`, `sched`, `time` or the
 frame allocator. New machine needs go into a trait, not around it.
+With the `hosted` feature, `P` is `hosted::Um` (gala-um, docs/GALA_UM.md):
+the same NT code runs in a Linux process; any new trait method needs a
+hosted implementation too.
 
 **Pinned build**: Windows 11 24H2, build 26100 (tentative). Only service
 numbers depend on it so far.

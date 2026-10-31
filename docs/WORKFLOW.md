@@ -235,9 +235,14 @@ the agent proxy would otherwise intercept 127.0.0.1.
 listed in xtask's `UM_SCENARIOS` as Linux processes (milliseconds each,
 no QEMU), checking the same `expect` lines as their boot scenario. Run a
 program directly with `target/debug/um user/bin/<name>.exe`; it logs
-each NT service it does not have yet. A program's code must stay below
-0x5000_0000_0000 (above is the host's, where `syscall` is not caught).
-Needs Linux 5.11+ (syscall user dispatch); `gdb`/`strace` work on it.
+the kernel's log on stderr and the program's output on stdout. gala-um
+runs the real NT layer (the kernel crate with `--features hosted`), so a
+change to `kernel/src/nt` is checked in milliseconds there before the
+QEMU suite; when a test passes in QEMU but not in gala-um (or the other
+way round), one of the two platforms is wrong. A program's code must
+stay below 0x5000_0000_0000 (above is the host's, where `syscall` is not
+caught). Needs Linux 5.11+ (syscall user dispatch); `gdb` and `perf`
+work on it (`handle SIGSYS nostop noprint` in gdb).
 
 ## Debugging
 

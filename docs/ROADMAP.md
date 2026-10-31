@@ -194,7 +194,7 @@ to set and to argue for. Current order and why:
 5. G3 (workable Go programs): done. N1 done (N1a-N1c: Go's net/http
    serves the host). N2a, N2b done: Nginx serves the host in its normal
    master/worker mode, with gzip, rewrite and TLS (N2c, N2d: zlib,
-   PCRE2, OpenSSL). U1 seam and U2a done; next: U2b (the NT layer in gala-um).
+   PCRE2, OpenSSL). U1 and U2 (a, b) done; next: the gala-um gaps, then U3.
    N2a was decided 2026-10-31: Nginx is the stated
    goal and the ledger makes bring-up data-driven, so build an x64 Nginx
    with mingw-w64 and run it on gala before choosing anything larger
@@ -220,8 +220,11 @@ U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
 U2. **gala-um runs hello.exe**, then the ntrt test programs; `cargo xtask
    um-test` runs them all in seconds. U2a done 2026-10-31: `um/` runs
    hello.exe (image at its base, PEB/TEB/KUSER at gala's layout, GS,
-   syscall user dispatch; bootstrap services), in CI. Next U2b: the NT
-   layer itself in gala-um (memfd as physical memory; docs/GALA_UM.md).
+   syscall user dispatch; bootstrap services), in CI. U2b done the same
+   day: the real NT layer runs in gala-um (kernel `hosted` feature, memfd
+   as physical memory, host threads, signals); 16 test programs pass in
+   `cargo xtask um-test`. Next: imports, file-backed sections, exception
+   paths (list in docs/GALA_UM.md), then U3.
 U3. **gala-um in CI** next to the QEMU scenarios, with differences between
    the two reported as bugs.
 N1. **Networking (next)**, re-planned 2026-10-30 from data: the official

@@ -228,6 +228,7 @@ dependencies = [
 name = "kernel"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "noto-sans-mono-bitmap",
  "smoltcp",
  "spin",
@@ -506,7 +507,7 @@ dependencies = [
 name = "um"
 version = "0.1.0"
 dependencies = [
- "libc",
+ "kernel",
 ]
 
 [[package]]
