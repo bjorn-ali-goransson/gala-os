@@ -888,6 +888,12 @@ Windows, never shadows the system's DLLs.)
   BSTR/interface/VARIANT elements owned), VarCyFromDec; type libraries
   are not registered. Its exports have Windows' ordinals (build.rs, from
   Wine's spec); Get/Set/CreateErrorInfo forward to ole32.
+- **Activation contexts** (kernel32 actctx.rs): CreateActCtxW checks
+  that the manifest exists (an RT_MANIFEST resource of the module or PE
+  file, or a manifest file) and returns a reference-counted handle;
+  ActivateActCtx/DeactivateActCtx keep a per-thread stack (16 deep, 64
+  threads) with unique cookies. Nothing is read from the manifests (no
+  side-by-side redirection).
 - **Resources** (kernel32 resource.rs): FindResource(Ex)A/W walk the
   image's resource directory (type, name, language; ids, case-insensitive
   names, "#n"); an HRSRC is the data entry's address, LoadResource and

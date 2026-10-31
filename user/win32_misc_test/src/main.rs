@@ -11,6 +11,7 @@
 //! - shell32: SHGetFolderPathW and SHGetKnownFolderPath name the profile
 //!   folders the environment names (USERPROFILE, APPDATA, LOCALAPPDATA)
 //!   and the Windows directory; an unknown CSIDL is E_INVALIDARG.
+//!   ShellExecuteW of a missing file: ERROR_FILE_NOT_FOUND (2).
 //! - version: GetFileVersionInfo(Size)(Ex)W of this program's own version
 //!   resource (build.rs); VerQueryValueW finds VS_FIXEDFILEINFO ("\") and
 //!   a child block in a VS_VERSION_INFO tree.
@@ -104,6 +105,14 @@ unsafe extern "system" {
         token: Handle,
         path: *mut *mut u16,
     ) -> i32;
+    fn ShellExecuteW(
+        window: Handle,
+        verb: *const u16,
+        file: *const u16,
+        params: *const u16,
+        dir: *const u16,
+        show: i32,
+    ) -> Handle;
 }
 
 #[link(name = "version", kind = "raw-dylib")]
@@ -512,10 +521,30 @@ fn resources(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// ShellExecuteW of a file that does not exist: a value of 32 or less,
+/// ERROR_FILE_NOT_FOUND (2).
+fn shell_execute(c: &mut Checks) -> Result<(), u32> {
+    let verb = w("open");
+    let file = w("C:\\gala\\no-such-file.xyz");
+    // SAFETY: NUL-terminated strings of ours.
+    let r = unsafe {
+        ShellExecuteW(
+            core::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            1,
+        )
+    };
+    c.eq(r as u64, 2)
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     user32_ws2(&mut c)?;
     shell(&mut c)?;
+    shell_execute(&mut c)?;
     version(&mut c)?;
     resources(&mut c)
 }

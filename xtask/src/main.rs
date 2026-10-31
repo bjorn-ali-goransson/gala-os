@@ -65,6 +65,14 @@ const PREBUILT: &[Prebuilt] = &[
         checksum: "ceb56fa91c15aa7c465db8cd42ee4e978589c58885cd1f164f8fcde7231ea15c3cfc0bcddb2e6b452238b3687a3e2bcb3683349b8b92a7172e03154ed280be67",
         members: &[],
     },
+    // PowerShell 7.4 (a self-contained .NET 8 application); the SHA-256 is
+    // the one in the release's hashes.sha256.
+    Prebuilt {
+        name: "pwsh",
+        url: "https://github.com/PowerShell/PowerShell/releases/download/v7.4.22/PowerShell-7.4.22-win-x64.zip",
+        checksum: "5f89f51860a1a3b07937945663afd7cbd44387361ff9985f5758939cb9bd6359",
+        members: &[],
+    },
 ];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -384,6 +392,98 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "shell32.dll", "Windows/System32"),
     ("dotnet", "winmm.dll", "Windows/System32"),
     ("dotnet", "msvcrt.dll", "Windows/System32"),
+    ("pwsh", "target/prebuilt/pwsh/", "pwsh"),
+    ("pwsh", "ntdll.dll", "Windows/System32"),
+    ("pwsh", "kernel32.dll", "Windows/System32"),
+    ("pwsh", "advapi32.dll", "Windows/System32"),
+    ("pwsh", "user32.dll", "Windows/System32"),
+    ("pwsh", "ws2_32.dll", "Windows/System32"),
+    ("pwsh", "mswsock.dll", "Windows/System32"),
+    ("pwsh", "bcryptprimitives.dll", "Windows/System32"),
+    ("pwsh", "version.dll", "Windows/System32"),
+    ("pwsh", "ole32.dll", "Windows/System32"),
+    ("pwsh", "oleaut32.dll", "Windows/System32"),
+    ("pwsh", "shell32.dll", "Windows/System32"),
+    ("pwsh", "winmm.dll", "Windows/System32"),
+    ("pwsh", "msvcrt.dll", "Windows/System32"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-console-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-console-l1-2-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-datetime-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-debug-l1-1-0.dll", "pwsh"),
+    (
+        "pwsh",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-errorhandling-l1-1-0.dll",
+        "pwsh",
+    ),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-fibers-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-fibers-l1-1-1.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-file-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-file-l1-2-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-file-l2-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-handle-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-heap-l1-1-0.dll", "pwsh"),
+    (
+        "pwsh",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-interlocked-l1-1-0.dll",
+        "pwsh",
+    ),
+    (
+        "pwsh",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-kernel32-legacy-l1-1-1.dll",
+        "pwsh",
+    ),
+    (
+        "pwsh",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-libraryloader-l1-1-0.dll",
+        "pwsh",
+    ),
+    (
+        "pwsh",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-localization-l1-2-0.dll",
+        "pwsh",
+    ),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-memory-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-namedpipe-l1-1-0.dll", "pwsh"),
+    (
+        "pwsh",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-processenvironment-l1-1-0.dll",
+        "pwsh",
+    ),
+    (
+        "pwsh",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-processthreads-l1-1-0.dll",
+        "pwsh",
+    ),
+    (
+        "pwsh",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-processthreads-l1-1-1.dll",
+        "pwsh",
+    ),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-profile-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-rtlsupport-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-string-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-synch-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-synch-l1-2-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-sysinfo-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-sysinfo-l1-2-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-timezone-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-util-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-conio-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-convert-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-environment-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-filesystem-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-heap-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-locale-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-math-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-multibyte-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-private-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-process-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-runtime-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-stdio-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-string-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-time-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-utility-l1-1-0.dll", "pwsh"),
+    ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "pwsh"),
     ("dotnet", "target/prebuilt/dotnet/", "dotnet"),
     ("dotnet", "user/bin/dotnet_hello.dll", "gala"),
     ("dotnet", "user/dotnet_hello/dotnet_hello.runtimeconfig.json", "gala"),
@@ -1144,7 +1244,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &[];
+const PENDING: &[&str] = &["pwsh_hello"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -1685,6 +1785,14 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // P1: PowerShell 7.4 (fetched by xtask, PREBUILT), a self-contained
+        // .NET 8 application, running one command.
+        name: "pwsh_hello",
+        cmdline: "qemu_exit run=pwsh.exe args=-NoProfile%20-NonInteractive%20-Command%20Write-Output%20(1+2);%20$PSVersionTable.PSVersion.ToString()",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["\n3\r", "7.4.22", "pwsh.exe finished with status 0x00000000"],
+    },
+    Scenario {
         // P1: a managed program (user/dotnet_hello, built by its build.sh)
         // on the unmodified .NET 8 runtime: CoreCLR, the JIT, the GC,
         // managed exceptions (one from an access violation), a thread.
@@ -2142,7 +2250,8 @@ fn events_flag() -> String {
 
 /// Scenarios that ship a named set of EXTRA_MODULES instead of their own
 /// (the same set: they share a VM).
-const MODULE_SETS: &[(&str, &str)] = &[("dotnet_info", "dotnet"), ("dotnet_hello", "dotnet")];
+const MODULE_SETS: &[(&str, &str)] =
+    &[("dotnet_info", "dotnet"), ("dotnet_hello", "dotnet"), ("pwsh_hello", "pwsh")];
 
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.

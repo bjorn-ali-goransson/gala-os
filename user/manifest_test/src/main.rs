@@ -3,7 +3,9 @@
 //! real version to it - GetVersionExW/A 10.0 and the build (26100 on the
 //! pinned build), GetVersion the same packed, VerifyVersionInfoW true for
 //! major version 10. (Programs without the manifest get 6.2, build 9200:
-//! kernel32_test.) Prints `manifest_test: ok` or exits with the number of
+//! kernel32_test.) An activation context made from the manifest activates
+//! and deactivates (CreateActCtxW, ActivateActCtx, GetCurrentActCtx,
+//! DeactivateActCtx, ReleaseActCtx). Prints `manifest_test: ok` or exits with the number of
 //! the failing check.
 
 #![no_std]
@@ -24,6 +26,27 @@ unsafe extern "system" {
     fn GetVersion() -> u32;
     fn VerSetConditionMask(mask: u64, kind: u32, condition: u8) -> u64;
     fn VerifyVersionInfoW(info: *mut u32, kind: u32, mask: u64) -> Bool;
+    fn GetModuleHandleW(name: *const u16) -> Handle;
+    fn CreateActCtxW(ctx: *const ActCtx) -> Handle;
+    fn ActivateActCtx(ctx: Handle, cookie: *mut usize) -> Bool;
+    fn DeactivateActCtx(flags: u32, cookie: usize) -> Bool;
+    fn GetCurrentActCtx(ctx: *mut Handle) -> Bool;
+    fn ReleaseActCtx(ctx: Handle);
+    fn GetLastError() -> u32;
+}
+
+/// ACTCTXW.
+#[repr(C)]
+struct ActCtx {
+    size: u32,
+    flags: u32,
+    source: *const u16,
+    architecture: u16,
+    language: u16,
+    assembly_directory: *const u16,
+    resource_name: *const u16,
+    application_name: *const u16,
+    module: Handle,
 }
 
 #[allow(dead_code)]
@@ -107,6 +130,36 @@ fn run() -> Result<(), u32> {
         v[1] = 10;
         let mask = VerSetConditionMask(0, 2, 3); // VER_MAJORVERSION, >=
         c.eq(VerifyVersionInfoW(v.as_mut_ptr(), 2, mask) as u64, 1)?;
+
+        // An activation context from this program's manifest (resource 1),
+        // activated and deactivated; resource 2 does not exist.
+        // ACTCTX_FLAG_RESOURCE_NAME_VALID | ACTCTX_FLAG_HMODULE_VALID.
+        let mut ctx = ActCtx {
+            size: core::mem::size_of::<ActCtx>() as u32,
+            flags: 0x8 | 0x80,
+            source: core::ptr::null(),
+            architecture: 0,
+            language: 0,
+            assembly_directory: core::ptr::null(),
+            resource_name: core::ptr::without_provenance(1),
+            application_name: core::ptr::null(),
+            module: GetModuleHandleW(core::ptr::null()),
+        };
+        let invalid = usize::MAX;
+        let h = CreateActCtxW(&ctx);
+        c.eq(u64::from(h as usize != invalid), 1)?;
+        let mut cookie = 0usize;
+        c.eq(ActivateActCtx(h, &mut cookie) as u64, 1)?;
+        c.eq(u64::from(cookie != 0), 1)?;
+        let mut current = core::ptr::null_mut();
+        c.eq(GetCurrentActCtx(&mut current) as u64, 1)?;
+        c.eq(current as u64, h as u64)?;
+        ReleaseActCtx(current); // GetCurrentActCtx took a reference
+        c.eq(DeactivateActCtx(0, cookie) as u64, 1)?;
+        ReleaseActCtx(h);
+        ctx.resource_name = core::ptr::without_provenance(2);
+        c.eq(CreateActCtxW(&ctx) as u64, invalid as u64)?;
+        c.eq(GetLastError().into(), 1814)?; // ERROR_RESOURCE_NAME_NOT_FOUND
     }
     Ok(())
 }

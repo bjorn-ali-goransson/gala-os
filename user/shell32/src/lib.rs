@@ -32,6 +32,12 @@ unsafe extern "system" {
     fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32;
     fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32;
     fn LocalAlloc(flags: u32, bytes: usize) -> *mut u16;
+    fn GetFileAttributesW(path: *const u16) -> u32;
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
 const S_OK: i32 = 0;
@@ -211,4 +217,27 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+/// ShellExecuteW: gala has no file associations or shell verbs yet. A file
+/// (or program) that does not exist gives ERROR_FILE_NOT_FOUND (2), as on
+/// Windows; anything else SE_ERR_NOASSOC (31), recorded. The result is an
+/// HINSTANCE-typed value; 32 or less means failure.
+#[unsafe(no_mangle)]
+pub extern "system" fn ShellExecuteW(
+    _window: usize,
+    _verb: *const u16,
+    file: *const u16,
+    _params: *const u16,
+    _dir: *const u16,
+    _show: i32,
+) -> usize {
+    // SAFETY: the caller's NUL-terminated path (or null).
+    if file.is_null() || unsafe { GetFileAttributesW(file) } == u32::MAX {
+        return 2;
+    }
+    let what = b"shell32.dll!ShellExecuteW";
+    // SAFETY: a valid buffer.
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, 0) };
+    31
 }
