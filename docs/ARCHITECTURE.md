@@ -299,8 +299,11 @@ RtlRaiseException, RtlUnwindEx) and KiUserExceptionDispatcher are
 assembly with their own unwind data, so walks pass through them like any
 frame; they are exported through `/EXPORT` (testntdll's build.rs).
 RtlAddFunctionTable registers unwind data for code outside images (JIT
-compilers). Not yet: nested exceptions and collided unwinds, function
-table callbacks, unhandled exception filters, unwind consolidation. The #BP gate has DPL 3 so `int3` works from user mode.
+compilers); RtlInstallFunctionTableCallback registers a callback that
+RtlLookupFunctionEntry asks for addresses in its range (CoreCLR's code
+heaps; called without the tables' spin lock held). Not yet: nested
+exceptions and collided unwinds, unhandled exception filters, unwind
+consolidation. The #BP gate has DPL 3 so `int3` works from user mode.
 
 **Mutants and semaphores** (`ObjectBody::Mutant/Semaphore`): a mutant is
 signaled for waiters when free or owned by the waiting thread
@@ -878,7 +881,17 @@ Windows, never shadows the system's DLLs.)
   a new block installed in the process parameters under a lock), the
   current and temporary directories, and the time zone (UTC; named "UTC"
   rather than "Coordinated Universal Time": a deliberate difference until
-  there is a registry to map display names to zone keys). Names ntdll also exports (the
+  there is a registry to map display names to zone keys); what language
+  runtimes use (runtime.rs: alertable multi-object waits,
+  SignalObjectAndWait - not atomic here, TODO a kernel service - user
+  APCs, the stack guarantee and error mode in the TEB, cycle times
+  scaled from thread times, remembered VirtualLock ranges, memory
+  resource notifications that never report low memory, no job objects,
+  WER registration as a no-op); processor groups and topology
+  (processor.rs: one group, one NUMA node, one package, a core per
+  processor, caches from CPUID leaf 4); CONTEXT buffers (context.rs:
+  InitializeContext, CopyContext by flag group; x87 and SSE are the only
+  XState features, as gala saves FXSAVE state only). Names ntdll also exports (the
   `Rtl*` unwind functions) are export forwarders (`build.rs`), as on
   Windows: defining them in kernel32 would shadow the ntdll imports.
 - **Gaps are never silent.** Unsupported parts of a function fail

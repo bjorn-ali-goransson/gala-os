@@ -285,11 +285,6 @@ unsafe extern "system" {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn VirtualLock(_address: *mut c_void, _size: usize) -> Bool {
-    TRUE // gala does not page memory out
-}
-
-#[unsafe(no_mangle)]
 pub extern "system" fn SetConsoleMode(_console: Handle, _mode: u32) -> Bool {
     TRUE
 }

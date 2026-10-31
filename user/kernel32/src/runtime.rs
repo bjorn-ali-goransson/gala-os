@@ -1,0 +1,390 @@
+//! What language runtimes (CoreCLR) use beyond the basics: alertable
+//! multi-object waits, SignalObjectAndWait, user APCs, stack guarantees,
+//! per-thread error modes, thread cycle times, locked pages, memory
+//! resource notifications, IsWow64Process2, jobs, the named-pipe server
+//! calls, WER runtime modules and FlushInstructionCache. As documented
+//! for each; gala's limits are noted where they apply.
+
+use core::ffi::c_void;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use super::files::WaitForSingleObjectEx;
+use super::process::GetThreadTimes;
+use super::sync::{CreateEventW, ReleaseMutex, ReleaseSemaphore};
+use super::{
+    Bool, FALSE, GetLastError, Handle, NtWaitForMultipleObjects, STATUS_SUCCESS, STATUS_TIMEOUT,
+    SetEvent, TRUE, fail, fail_with, teb_u64, timeout, unsupported,
+};
+
+const WAIT_FAILED: u32 = u32::MAX;
+const ERROR_INVALID_HANDLE: u32 = 6;
+const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_NOT_LOCKED: u32 = 158;
+const ERROR_NOT_SUPPORTED: u32 = 50;
+
+/// WaitForMultipleObjectsEx: WAIT_IO_COMPLETION (0xc0) when an APC ran
+/// during an alertable wait.
+#[unsafe(no_mangle)]
+pub extern "system" fn WaitForMultipleObjectsEx(
+    count: u32,
+    handles: *const Handle,
+    all: Bool,
+    ms: u32,
+    alertable: Bool,
+) -> u32 {
+    let t = timeout(ms);
+    let p = t.as_ref().map_or(core::ptr::null(), |t| t as *const i64);
+    // WaitAll = 0, WaitAny = 1.
+    let wait_type = if all != 0 { 0 } else { 1 };
+    // SAFETY: the caller's handle array; valid or null timeout pointer.
+    let status =
+        unsafe { NtWaitForMultipleObjects(count, handles, wait_type, u8::from(alertable != 0), p) };
+    match status {
+        0..=0x3f | 0x80..=0xbf | 0xc0 | STATUS_TIMEOUT => status,
+        _ => fail(status, WAIT_FAILED),
+    }
+}
+
+/// SignalObjectAndWait: signals an event, semaphore (by one) or mutex,
+/// then waits for the other object. On Windows the two steps are one
+/// atomic operation; here another thread may run between them (TODO: a
+/// kernel service).
+#[unsafe(no_mangle)]
+pub extern "system" fn SignalObjectAndWait(
+    signal: Handle,
+    wait: Handle,
+    ms: u32,
+    alertable: Bool,
+) -> u32 {
+    let signaled = SetEvent(signal) != FALSE
+        || ReleaseSemaphore(signal, 1, core::ptr::null_mut()) != FALSE
+        || ReleaseMutex(signal) != FALSE;
+    if !signaled {
+        return fail_with(GetLastError(), WAIT_FAILED);
+    }
+    WaitForSingleObjectEx(wait, ms, alertable)
+}
+
+/// QueueUserAPC: the routine runs with `data` in the thread's next
+/// alertable wait (NtQueueApcThread passes it as the first argument).
+#[unsafe(no_mangle)]
+pub extern "system" fn QueueUserAPC(routine: usize, thread: Handle, data: usize) -> u32 {
+    // SAFETY: the kernel validates the handle; the routine is the caller's.
+    let status = unsafe { NtQueueApcThread(thread, routine, data, 0, 0) };
+    if status != STATUS_SUCCESS {
+        return fail(status, 0);
+    }
+    1
+}
+
+/// The current thread's TEB.
+fn teb() -> usize {
+    teb_u64(0x30) as usize
+}
+
+/// TEB.GuaranteedStackBytes (x64 offset 0x1748).
+const TEB_GUARANTEED_STACK_BYTES: usize = 0x1748;
+/// TEB.HardErrorMode (x64 offset 0x16b0).
+const TEB_HARD_ERROR_MODE: usize = 0x16b0;
+
+/// SetThreadStackGuarantee: raises the stack the thread keeps for its
+/// stack-overflow handler (never lowers it) and returns the previous
+/// guarantee; 0 only queries. Kept in the TEB; gala's guard page handling
+/// does not reserve it yet (TODO).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetThreadStackGuarantee(size: *mut u32) -> Bool {
+    if size.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let field = (teb() + TEB_GUARANTEED_STACK_BYTES) as *mut u32;
+    // SAFETY: the caller's value; this thread's TEB.
+    unsafe {
+        let previous = *field;
+        if *size > previous {
+            *field = *size;
+        }
+        *size = previous;
+    }
+    TRUE
+}
+
+/// SetThreadErrorMode: SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX and
+/// SEM_NOOPENFILEERRORBOX only (gala shows no error boxes either way).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetThreadErrorMode(mode: u32, old: *mut u32) -> Bool {
+    if mode & !(0x1 | 0x2 | 0x8000) != 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let field = (teb() + TEB_HARD_ERROR_MODE) as *mut u32;
+    // SAFETY: this thread's TEB; the caller's output.
+    unsafe {
+        if !old.is_null() {
+            *old = *field;
+        }
+        *field = mode;
+    }
+    TRUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadErrorMode() -> u32 {
+    // SAFETY: this thread's TEB.
+    unsafe { *((teb() + TEB_HARD_ERROR_MODE) as *const u32) }
+}
+
+/// QueryThreadCycleTime: the thread's processor time (kernel plus user,
+/// in 100 ns units) scaled to cycles of a nominal 3 GHz clock, at least 1.
+/// Windows counts real cycles; the documentation says not to convert the
+/// value to time, so a scaled time is a faithful stand-in.
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryThreadCycleTime(thread: Handle, cycles: *mut u64) -> Bool {
+    let (mut created, mut exited, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+    if GetThreadTimes(thread, &mut created, &mut exited, &mut kernel, &mut user) == FALSE {
+        return FALSE;
+    }
+    if cycles.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's output.
+    unsafe { *cycles = ((kernel + user) * 300).max(1) };
+    TRUE
+}
+
+/// Pages locked with VirtualLock: (first page, end), as gala never pages
+/// memory out locking only has to be remembered for VirtualUnlock.
+const MAX_LOCKED: usize = 64;
+
+struct Locked {
+    lock: AtomicBool,
+    ranges: core::cell::UnsafeCell<[(usize, usize); MAX_LOCKED]>,
+}
+
+// SAFETY: `ranges` is only touched with `lock` held.
+unsafe impl Sync for Locked {}
+
+static LOCKED: Locked = Locked {
+    lock: AtomicBool::new(false),
+    ranges: core::cell::UnsafeCell::new([(0, 0); MAX_LOCKED]),
+};
+
+fn with_locked<R>(f: impl FnOnce(&mut [(usize, usize); MAX_LOCKED]) -> R) -> R {
+    while LOCKED
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: the lock is held.
+    let r = f(unsafe { &mut *LOCKED.ranges.get() });
+    LOCKED.lock.store(false, Ordering::Release);
+    r
+}
+
+fn page_range(address: *mut c_void, size: usize) -> (usize, usize) {
+    let start = address as usize & !0xfff;
+    (start, (address as usize + size.max(1) + 0xfff) & !0xfff)
+}
+
+/// VirtualLock: gala does not page memory out; the range is remembered.
+#[unsafe(no_mangle)]
+pub extern "system" fn VirtualLock(address: *mut c_void, size: usize) -> Bool {
+    let range = page_range(address, size);
+    let added = with_locked(|r| match r.iter_mut().find(|e| e.0 == 0) {
+        Some(slot) => {
+            *slot = range;
+            true
+        }
+        None => false,
+    });
+    if !added {
+        unsupported(b"kernel32.dll!VirtualLock(too many ranges)", MAX_LOCKED as u64);
+    }
+    TRUE
+}
+
+/// VirtualUnlock: ERROR_NOT_LOCKED unless the pages were locked.
+#[unsafe(no_mangle)]
+pub extern "system" fn VirtualUnlock(address: *mut c_void, size: usize) -> Bool {
+    let (start, end) = page_range(address, size);
+    let found =
+        with_locked(|r| match r.iter_mut().find(|e| e.0 != 0 && e.0 <= start && end <= e.1) {
+            Some(slot) => {
+                *slot = (0, 0);
+                true
+            }
+            None => false,
+        });
+    if found { TRUE } else { fail_with(ERROR_NOT_LOCKED, FALSE) }
+}
+
+/// CreateMemoryResourceNotification: memory is never low on gala's terms
+/// (no paging), so the low-memory notification (0) is an event that stays
+/// unsignaled and the high-memory one (1) one that stays signaled.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateMemoryResourceNotification(kind: u32) -> Handle {
+    if kind > 1 {
+        return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
+    }
+    CreateEventW(core::ptr::null_mut(), TRUE, Bool::from(kind == 1), core::ptr::null())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryMemoryResourceNotification(h: Handle, state: *mut Bool) -> Bool {
+    if state.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    match WaitForSingleObjectEx(h, 0, FALSE) {
+        0 => {
+            // SAFETY: the caller's output.
+            unsafe { *state = TRUE };
+            TRUE
+        }
+        STATUS_TIMEOUT => {
+            // SAFETY: as above.
+            unsafe { *state = FALSE };
+            TRUE
+        }
+        _ => FALSE,
+    }
+}
+
+/// IsWow64Process2: every gala process is native x64
+/// (IMAGE_FILE_MACHINE_UNKNOWN for the process, AMD64 for the machine).
+#[unsafe(no_mangle)]
+pub extern "system" fn IsWow64Process2(
+    _process: Handle,
+    machine: *mut u16,
+    native: *mut u16,
+) -> Bool {
+    if machine.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's outputs.
+    unsafe {
+        *machine = 0;
+        if !native.is_null() {
+            *native = 0x8664;
+        }
+    }
+    TRUE
+}
+
+/// IsProcessInJob: gala has no job objects, so no process is in one.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsProcessInJob(_process: Handle, _job: Handle, result: *mut Bool) -> Bool {
+    if result.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's output.
+    unsafe { *result = FALSE };
+    TRUE
+}
+
+/// QueryInformationJobObject: no job objects (recorded).
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryInformationJobObject(
+    _job: Handle,
+    class: u32,
+    _info: *mut c_void,
+    _length: u32,
+    _returned: *mut u32,
+) -> Bool {
+    unsupported(b"kernel32.dll!QueryInformationJobObject", class.into());
+    fail_with(ERROR_NOT_SUPPORTED, FALSE)
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtQueueApcThread(thread: Handle, routine: usize, a1: usize, a2: usize, a3: usize) -> u32;
+    fn NtFsControlFile(
+        h: Handle,
+        event: usize,
+        apc: usize,
+        context: usize,
+        iosb: *mut [usize; 2],
+        code: u32,
+        input: *const u8,
+        input_length: u32,
+        output: *mut u8,
+        output_length: u32,
+    ) -> u32;
+}
+
+/// A named-pipe server control (FSCTL_PIPE_*): the file system answers
+/// (gala's pipes are anonymous; other handles are not pipes).
+fn pipe_control(pipe: Handle, code: u32, overlapped: *mut c_void) -> Bool {
+    let mut iosb = [0usize; 2];
+    let event = if overlapped.is_null() {
+        0
+    } else {
+        // SAFETY: the caller's OVERLAPPED (hEvent at offset 24).
+        unsafe { *(overlapped.cast::<u8>().add(24) as *const usize) }
+    };
+    // SAFETY: plain call with our status block.
+    let status = unsafe {
+        NtFsControlFile(
+            pipe,
+            event,
+            0,
+            0,
+            &mut iosb,
+            code,
+            core::ptr::null(),
+            0,
+            core::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    TRUE
+}
+
+/// ConnectNamedPipe: FSCTL_PIPE_LISTEN.
+#[unsafe(no_mangle)]
+pub extern "system" fn ConnectNamedPipe(pipe: Handle, overlapped: *mut c_void) -> Bool {
+    if pipe.is_null() {
+        return fail_with(ERROR_INVALID_HANDLE, FALSE);
+    }
+    pipe_control(pipe, 0x0011_0008, overlapped)
+}
+
+/// DisconnectNamedPipe: FSCTL_PIPE_DISCONNECT.
+#[unsafe(no_mangle)]
+pub extern "system" fn DisconnectNamedPipe(pipe: Handle) -> Bool {
+    if pipe.is_null() {
+        return fail_with(ERROR_INVALID_HANDLE, FALSE);
+    }
+    pipe_control(pipe, 0x0011_0004, core::ptr::null_mut())
+}
+
+/// WerRegisterRuntimeExceptionModule: there is no Windows Error Reporting
+/// to call the module back; registering succeeds (S_OK).
+#[unsafe(no_mangle)]
+pub extern "system" fn WerRegisterRuntimeExceptionModule(
+    _dll: *const u16,
+    _context: *mut c_void,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WerUnregisterRuntimeExceptionModule(
+    _dll: *const u16,
+    _context: *mut c_void,
+) -> i32 {
+    0
+}
+
+/// FlushInstructionCache: x86 keeps instruction caches coherent with
+/// stores; nothing to do.
+#[unsafe(no_mangle)]
+pub extern "system" fn FlushInstructionCache(
+    _process: Handle,
+    _base: *const c_void,
+    _size: usize,
+) -> Bool {
+    TRUE
+}

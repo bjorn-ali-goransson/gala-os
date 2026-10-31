@@ -566,11 +566,17 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       Done from the batch: advapi32 (RegGetValueW, ETW providers,
       GetSidSubAuthority(Count), RevertToSelf, SetKernelObjectSecurity),
       user32 LoadStringW/A, kernel32 resources (FindResource*, ...),
-      version GetFileVersionInfo(Size)ExW. Next: a managed program
-      (`dotnet Hello.dll`, built portable on the host with the .NET SDK
-      for Linux), which loads hostpolicy, coreclr and clrjit: the
-      kernel32 functions above, ole32/oleaut32 (new DLLs), rpcrt4
-      UuidCreate, api-ms-win-core-winrt.
+      version GetFileVersionInfo(Size)ExW, the 33 kernel32 functions
+      (kernel32_clr_test). A managed program is the pending
+      `dotnet_hello` scenario (user/dotnet_hello: C# built by build.sh
+      with Mono's mcs, a distro package, since downloaded binaries only
+      run inside QEMU; .NET runs it through mscorlib's type forwards):
+      coreclr.dll now fails to load on ole32.dll. Next: ole32/oleaut32
+      (new DLLs), rpcrt4 UuidCreate, api-ms-win-core-winrt; the API set
+      redirection (api-ms-win-* names to kernel32 & co., as the schema
+      does on Windows) would quiet the UCRT's probes; dotnet.exe
+      crashes (access violation) after coreclr fails to load - check
+      once it loads.
    3. PowerShell 7 on that runtime: `pwsh -NoProfile -Command ...`. On
       top of .NET it needs the console API (modes, screen buffer info,
       reading keys for the interactive prompt), the registry (read) and

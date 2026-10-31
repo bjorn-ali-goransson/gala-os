@@ -245,7 +245,12 @@ Large programs (the JDK): a module path ending in `/`
 (`boot/<dir>.tree.tar`, module string `tar:<dir>`) that the kernel unpacks
 into its ramfs in place (`kernel/src/fs/tar.rs`): Limine panics with
 "Memory map exhausted" with a few hundred modules (the .NET runtime has
-~190 files). `run=` finds a program inside an archive too. QEMU gets 512 MiB
+~190 files). `run=` finds a program inside an archive too. Scenarios
+that ship the same large set share it through `MODULE_SETS` (and so a
+VM). Managed (.NET) test programs are C# in `user/<name>/` built by its
+`build.sh` with Mono's `mcs` (apt package `mono-mcs`) into `user/bin`
+(reproducible: the script pins the MVID and timestamp); CI does not
+rebuild them, as for the other third-party-tool builds. QEMU gets 512 MiB
 plus twice the image size when the image is over 64 MiB (boot modules stay
 in memory). A scenario still being brought up goes in `PENDING`: `cargo
 xtask boot-test <name>` runs it, `cargo xtask test` and CI do not. A DLL

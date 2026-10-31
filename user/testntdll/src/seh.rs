@@ -146,18 +146,58 @@ fn stack64(addr: u64) -> u64 {
 /// entry count, base address).
 const MAX_TABLES: usize = 32;
 
-struct Tables(core::cell::UnsafeCell<[(usize, u32, u64); MAX_TABLES]>);
+/// A table registered with RtlInstallFunctionTableCallback: its id (the
+/// low two bits set; 0: free slot), base, length, callback and context.
+#[derive(Clone, Copy)]
+struct Callback {
+    id: u64,
+    base: u64,
+    length: u32,
+    callback: usize,
+    context: usize,
+}
 
-// SAFETY: changed only by RtlAdd/DeleteFunctionTable; callers registering
-// code they are about to run do so before running it (no lock yet, like
-// the module table).
+const NO_CALLBACK: Callback = Callback { id: 0, base: 0, length: 0, callback: 0, context: 0 };
+
+struct State {
+    tables: [(usize, u32, u64); MAX_TABLES],
+    callbacks: [Callback; MAX_TABLES],
+}
+
+struct Tables {
+    lock: core::sync::atomic::AtomicBool,
+    state: core::cell::UnsafeCell<State>,
+}
+
+// SAFETY: the state is only touched with `lock` held (a spin lock: the
+// critical sections are a few loads and stores, and callbacks run outside).
 unsafe impl Sync for Tables {}
 
-static TABLES: Tables = Tables(core::cell::UnsafeCell::new([(0, 0, 0); MAX_TABLES]));
+static TABLES: Tables = Tables {
+    lock: core::sync::atomic::AtomicBool::new(false),
+    state: core::cell::UnsafeCell::new(State {
+        tables: [(0, 0, 0); MAX_TABLES],
+        callbacks: [NO_CALLBACK; MAX_TABLES],
+    }),
+};
+
+fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
+    use core::sync::atomic::Ordering;
+    while TABLES
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: the lock is held.
+    let r = f(unsafe { &mut *TABLES.state.get() });
+    TABLES.lock.store(false, Ordering::Release);
+    r
+}
 
 fn with_tables<R>(f: impl FnOnce(&mut [(usize, u32, u64); MAX_TABLES]) -> R) -> R {
-    // SAFETY: see `Tables`.
-    f(unsafe { &mut *TABLES.0.get() })
+    with_state(|s| f(&mut s.tables))
 }
 
 /// The base of the loaded image containing `pc`, if any.
@@ -233,7 +273,51 @@ fn lookup(pc: u64) -> (u64, *const RuntimeFunction) {
             (!f.is_null()).then_some((base, f))
         })
     });
-    found.unwrap_or((0, core::ptr::null()))
+    if let Some(found) = found {
+        return found;
+    }
+    // A callback covering `pc`, called without the lock held.
+    let cb = with_state(|s| {
+        s.callbacks
+            .iter()
+            .copied()
+            .find(|c| c.id != 0 && pc >= c.base && pc - c.base < u64::from(c.length))
+    });
+    if let Some(cb) = cb {
+        // SAFETY: a PGET_RUNTIME_FUNCTION_CALLBACK the program registered.
+        let f: extern "system" fn(u64, usize) -> *const RuntimeFunction =
+            unsafe { core::mem::transmute(cb.callback) };
+        let entry = f(pc, cb.context);
+        if !entry.is_null() {
+            return (cb.base, entry);
+        }
+    }
+    (0, core::ptr::null())
+}
+
+/// RtlInstallFunctionTableCallback(TableIdentifier, BaseAddress, Length,
+/// Callback, Context, OutOfProcessCallbackDll): unwind data for
+/// [BaseAddress, +Length) comes from Callback(pc, Context). The id must
+/// have its low two bits set (it is what RtlDeleteFunctionTable takes).
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlInstallFunctionTableCallback(
+    id: u64,
+    base: u64,
+    length: u32,
+    callback: usize,
+    context: usize,
+    _dll: *const u16,
+) -> u8 {
+    if id & 3 != 3 || callback == 0 {
+        return 0;
+    }
+    with_state(|s| match s.callbacks.iter_mut().find(|c| c.id == 0) {
+        Some(slot) => {
+            *slot = Callback { id, base, length, callback, context };
+            1
+        }
+        None => 0,
+    })
 }
 
 /// RtlAddFunctionTable(FunctionTable, EntryCount, BaseAddress): registers
@@ -257,12 +341,19 @@ pub extern "system" fn RtlAddFunctionTable(
 /// RtlDeleteFunctionTable(FunctionTable).
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlDeleteFunctionTable(table: *const RuntimeFunction) -> u8 {
-    with_tables(|t| match t.iter_mut().find(|e| e.0 == table as usize && e.0 != 0) {
-        Some(slot) => {
+    let id = table as usize;
+    with_state(|s| {
+        if let Some(slot) = s.tables.iter_mut().find(|e| e.0 == id && id != 0) {
             *slot = (0, 0, 0);
-            1
+            return 1;
         }
-        None => 0,
+        match s.callbacks.iter_mut().find(|c| c.id == id as u64 && id != 0) {
+            Some(slot) => {
+                *slot = NO_CALLBACK;
+                1
+            }
+            None => 0,
+        }
     })
 }
 

@@ -13,6 +13,7 @@ fn main() {
         "RtlAddFunctionTable",
         "RtlDeleteFunctionTable",
         "RtlCaptureStackBackTrace",
+        "RtlInstallFunctionTableCallback",
     ] {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=ntdll.{name}");
     }

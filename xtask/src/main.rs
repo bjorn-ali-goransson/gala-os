@@ -156,6 +156,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_sync_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_locale_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_system_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_clr_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_clr_test", "kernel32.dll", "Windows/System32"),
     ("win32_misc_test", "ntdll.dll", "Windows/System32"),
     ("win32_misc_test", "kernel32.dll", "Windows/System32"),
     ("win32_misc_test", "advapi32.dll", "Windows/System32"),
@@ -358,244 +360,146 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("java_version", "winhttp.dll", "Windows/System32"),
     ("java_version", "msvcrt.dll", "Windows/System32"),
     ("java_version", "target/prebuilt/jdk/jdk-21.0.5+11/", "jdk"),
-    ("dotnet_info", "ntdll.dll", "Windows/System32"),
-    ("dotnet_info", "kernel32.dll", "Windows/System32"),
-    ("dotnet_info", "advapi32.dll", "Windows/System32"),
-    ("dotnet_info", "user32.dll", "Windows/System32"),
-    ("dotnet_info", "ws2_32.dll", "Windows/System32"),
-    ("dotnet_info", "mswsock.dll", "Windows/System32"),
-    ("dotnet_info", "bcryptprimitives.dll", "Windows/System32"),
-    ("dotnet_info", "version.dll", "Windows/System32"),
-    ("dotnet_info", "shell32.dll", "Windows/System32"),
-    ("dotnet_info", "winmm.dll", "Windows/System32"),
-    ("dotnet_info", "msvcrt.dll", "Windows/System32"),
-    ("dotnet_info", "target/prebuilt/dotnet/", "dotnet"),
+    ("dotnet", "ntdll.dll", "Windows/System32"),
+    ("dotnet", "kernel32.dll", "Windows/System32"),
+    ("dotnet", "advapi32.dll", "Windows/System32"),
+    ("dotnet", "user32.dll", "Windows/System32"),
+    ("dotnet", "ws2_32.dll", "Windows/System32"),
+    ("dotnet", "mswsock.dll", "Windows/System32"),
+    ("dotnet", "bcryptprimitives.dll", "Windows/System32"),
+    ("dotnet", "version.dll", "Windows/System32"),
+    ("dotnet", "shell32.dll", "Windows/System32"),
+    ("dotnet", "winmm.dll", "Windows/System32"),
+    ("dotnet", "msvcrt.dll", "Windows/System32"),
+    ("dotnet", "target/prebuilt/dotnet/", "dotnet"),
+    ("dotnet", "user/bin/dotnet_hello.dll", "gala"),
+    ("dotnet", "user/dotnet_hello/dotnet_hello.runtimeconfig.json", "gala"),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-console-l1-1-0.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-console-l1-2-0.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-datetime-l1-1-0.dll",
         "dotnet",
     ),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-debug-l1-1-0.dll", "dotnet"),
     (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-debug-l1-1-0.dll",
         "dotnet",
-    ),
-    (
-        "dotnet_info",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-errorhandling-l1-1-0.dll",
         "dotnet",
     ),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-fibers-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-fibers-l1-1-1.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-file-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-file-l1-2-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-file-l2-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-handle-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-heap-l1-1-0.dll", "dotnet"),
     (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-fibers-l1-1-0.dll",
         "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-fibers-l1-1-1.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-file-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-file-l1-2-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-file-l2-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-handle-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-heap-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-interlocked-l1-1-0.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-kernel32-legacy-l1-1-1.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-libraryloader-l1-1-0.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-localization-l1-2-0.dll",
         "dotnet",
     ),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-memory-l1-1-0.dll", "dotnet"),
     (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-memory-l1-1-0.dll",
         "dotnet",
-    ),
-    (
-        "dotnet_info",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-namedpipe-l1-1-0.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-processenvironment-l1-1-0.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-processthreads-l1-1-0.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-processthreads-l1-1-1.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-profile-l1-1-0.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-rtlsupport-l1-1-0.dll",
         "dotnet",
     ),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-string-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-synch-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-synch-l1-2-0.dll", "dotnet"),
     (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-string-l1-1-0.dll",
         "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-synch-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-synch-l1-2-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-sysinfo-l1-1-0.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-sysinfo-l1-2-0.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-timezone-l1-1-0.dll",
         "dotnet",
     ),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-util-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-conio-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-convert-l1-1-0.dll", "dotnet"),
     (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-util-l1-1-0.dll",
         "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-conio-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-convert-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-environment-l1-1-0.dll",
         "dotnet",
     ),
     (
-        "dotnet_info",
+        "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-filesystem-l1-1-0.dll",
         "dotnet",
     ),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-heap-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-locale-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-math-l1-1-0.dll", "dotnet"),
     (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-heap-l1-1-0.dll",
         "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-locale-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-math-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-multibyte-l1-1-0.dll",
         "dotnet",
     ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-private-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-process-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-runtime-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-stdio-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-string-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-time-l1-1-0.dll",
-        "dotnet",
-    ),
-    (
-        "dotnet_info",
-        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-utility-l1-1-0.dll",
-        "dotnet",
-    ),
-    ("dotnet_info", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-private-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-process-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-runtime-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-stdio-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-string-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-time-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-utility-l1-1-0.dll", "dotnet"),
+    ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "dotnet"),
     ("java_hello", "ntdll.dll", "Windows/System32"),
     ("java_hello", "kernel32.dll", "Windows/System32"),
     ("java_hello", "advapi32.dll", "Windows/System32"),
@@ -738,6 +642,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_sync_test",
     "kernel32_locale_test",
     "kernel32_system_test",
+    "kernel32_clr_test",
     "advapi32_test",
     "win32_misc_test",
     "kernel32_pool_test",
@@ -1225,7 +1130,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &[];
+const PENDING: &[&str] = &["dotnet_hello"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -1476,6 +1381,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=advapi32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["advapi32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (.NET): what CoreCLR imports from kernel32.
+        name: "kernel32_clr_test",
+        cmdline: "qemu_exit run=kernel32_clr_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["kernel32_clr_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (JDK): memory, process, file and version functions.
@@ -1748,6 +1660,27 @@ const SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "Microsoft.NETCore.App 8.0.33 [C:\\dotnet\\shared\\Microsoft.NETCore.App]",
+            "dotnet.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // P1: a managed program (user/dotnet_hello, built by its build.sh)
+        // on the unmodified .NET 8 runtime: CoreCLR, the JIT, the GC,
+        // managed exceptions (one from an access violation), a thread.
+        name: "dotnet_hello",
+        cmdline: "qemu_exit run=dotnet.exe args=C:/gala/dotnet_hello.dll",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hello from .NET 8.0.33",
+            "os=Microsoft Windows NT 10.0.26100.0",
+            "64bit=True processors=2",
+            "the=3",
+            "sum=499999500000",
+            "caught NullReferenceException",
+            "caught boom",
+            "thread=42",
+            "gc=ok",
+            "pi=3.14159",
             "dotnet.exe finished with status 0x00000000",
         ],
     },
@@ -2186,11 +2119,16 @@ fn events_flag() -> String {
     env::var("XTASK_EVENTS").map(|e| format!(" events={e}")).unwrap_or_default()
 }
 
+/// Scenarios that ship a named set of EXTRA_MODULES instead of their own
+/// (the same set: they share a VM).
+const MODULE_SETS: &[(&str, &str)] = &[("dotnet_info", "dotnet"), ("dotnet_hello", "dotnet")];
+
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
 fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
+    let set = MODULE_SETS.iter().find(|s| s.0 == name).map_or(name, |s| s.1);
     let mut modules: Vec<_> =
-        EXTRA_MODULES.iter().filter(|m| m.0 == name).map(|m| (m.1, m.2)).collect();
+        EXTRA_MODULES.iter().filter(|m| m.0 == set).map(|m| (m.1, m.2)).collect();
     modules.sort_unstable();
     modules
 }

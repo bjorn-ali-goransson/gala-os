@@ -181,6 +181,7 @@ syscall_stubs! {
         suspended: u8
     );
     NtResumeThread = 0x52, fn(h: usize, previous: *mut u32);
+    NtQueueApcThread = 0x45, fn(h: usize, routine: usize, a1: usize, a2: usize, a3: usize);
     // Files (long-stable x64 numbers).
     NtReadFile = 0x06, fn(
         h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],

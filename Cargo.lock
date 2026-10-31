@@ -251,6 +251,10 @@ name = "kernel32"
 version = "0.1.0"
 
 [[package]]
+name = "kernel32_clr_test"
+version = "0.1.0"
+
+[[package]]
 name = "kernel32_env_test"
 version = "0.1.0"
 
