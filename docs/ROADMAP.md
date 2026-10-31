@@ -687,14 +687,47 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       name (HOSTNAME).
    5. SQL Server (asked for 2026-10-31): start with SQL Server Express
       LocalDB, the small edition that runs sqlservr.exe as an ordinary
-      process started on demand (no Windows service), queried with a
-      client of ours over a named pipe or TCP. Hurdles to survey first:
-      it ships as an MSI (gala has no Windows Installer: unpack the MSI's
-      files at build time instead, as for the zips), SQLOS uses much of
-      the Win32 surface (memory, threads, fibers, I/O completion, the
-      registry), and the download's checksum and license terms must be
-      recorded. Full Express (a service) would also need a service
-      control manager.
+      process started on demand (no Windows service). Survey done
+      (2026-10-31):
+      - Download: Microsoft's SqlLocalDB.msi, "Microsoft SQL Server 2022
+        LocalDB" 16.0.1000.6, 63.5 MB
+        (download.microsoft.com/download/3/8/d/38de7036-2433-4207-8eae-
+        06e247e17b25/SqlLocalDB.msi). Microsoft publishes no checksum for
+        it: pin the SHA-256 we measured,
+        224d483992ef60368dac70cea174dcfaf43a3ca06ada331c67dc6119a26490f6.
+        Its license (License_SqlLocalDB_1033.txt) allows installing and
+        using it "to design, develop and test your programs" and forbids
+        reverse engineering (which the clean-room rules exclude anyway).
+      - It is an MSI: gala has no Windows Installer, so xtask unpacks it
+        at build time with msitools' msiextract (as it unzips the other
+        releases; record msitools as a build dependency).
+        `LocalDB\Binn` is 280 MB (sqlservr.exe, sqlmin, sqllang, sqldk,
+        sqlos, sqltses, qds, svl, secforwarder at load time; Templates
+        holds master/model/msdb .mdf/.ldf); Shared (instapi160.dll) 1 MB.
+      - Load-time import closure (delay imports aside): MSVCP140,
+        VCRUNTIME140(_1) - the Visual C++ runtime LocalDB expects
+        installed; the JDK zip ships Microsoft's redistributable copy, to
+        place app-local as for .NET's UCRT; 13 DLLs gala lacks: netapi32,
+        pdh, shlwapi, rpcrt4, urlmon, wininet, userenv, xolehlp, odbc32,
+        authz, wintrust, webservices, dhcpcsvc; and ~540 functions of
+        DLLs gala has (crypt32 222, kernel32 72, ncrypt 58, advapi32 50,
+        ws2_32 39 incl. ordinals, bcrypt 31, oleaut32 19, winhttp 15,
+        ole32 13, secur32 8, user32 4, ntdll 4, iphlpapi 1). Missing
+        functions bind to the ledger's stub, so only those called matter;
+        missing DLLs stop the load, so the 13 come first (small DLLs with
+        what is called, the rest reported). Notable kernel32 needs:
+        fibers (ConvertThreadToFiber, CreateFiber: SQLOS can schedule on
+        fibers), NUMA (AllocateUserPhysicalPagesNuma,
+        MapViewOfFileExNuma, GetNumaNodeProcessorMaskEx), timer queues,
+        FindFirstChangeNotificationW, ReadFileScatter/WriteFileGather.
+      - Plan: a `sqllocaldb` scenario that starts sqlservr.exe directly
+        as SqlLocalDB.exe would (an instance directory with copies of the
+        Templates databases, `-c -S... -sINSTANCE` style arguments: to be
+        found from SqlLocalDB's documented behaviour and the error log
+        sqlservr writes), until its log says it is ready; then a client
+        query over the named pipe or TCP (a small client of ours speaking
+        TDS, or the Microsoft ODBC driver later). Memory: SQL Server
+        wants about 1 GB.
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to
