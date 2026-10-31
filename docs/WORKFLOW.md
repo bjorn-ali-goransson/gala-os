@@ -229,6 +229,16 @@ For a picture, Playwright's Chromium is preinstalled in the cloud
 container: `chromium.launch({args: ['--no-proxy-server']})`, because
 the agent proxy would otherwise intercept 127.0.0.1.
 
+## gala-um
+
+`cargo xtask um-test` builds `um/` for the host and runs the scenarios
+listed in xtask's `UM_SCENARIOS` as Linux processes (milliseconds each,
+no QEMU), checking the same `expect` lines as their boot scenario. Run a
+program directly with `target/debug/um user/bin/<name>.exe`; it logs
+each NT service it does not have yet. A program's code must stay below
+0x5000_0000_0000 (above is the host's, where `syscall` is not caught).
+Needs Linux 5.11+ (syscall user dispatch); `gdb`/`strace` work on it.
+
 ## Debugging
 
 - `XTASK_VERBOSE=1 cargo xtask boot-test name` prints the serial log; logs

@@ -31,6 +31,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
 user/                   freestanding Windows test programs (x86_64-pc-windows-msvc)
   ntrt/                 tiny runtime: ntdll-shaped syscall stubs, PEB access
   hello/ abi_test/ crash/
+um/                     gala-um: Windows programs in a Linux process (docs/GALA_UM.md)
 xtask/                  host tool: build ISO, run QEMU, boot test
 ```
 

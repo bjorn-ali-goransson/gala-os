@@ -1,7 +1,8 @@
 # gala-um: the NT personality as a Linux process (design draft)
 
-Status: U1 seam in place (2026-10-31): `kernel/src/nt/platform.rs`; the
-crate split and U2-U3 remain. Design written 2026-10-30.
+Status (2026-10-31): U1 seam in place (`kernel/src/nt/platform.rs`).
+U2a done: `um/` runs hello.exe (`cargo xtask um-test`, in CI) with
+bootstrap services. Next: U2b, the NT layer itself in gala-um. Design written 2026-10-30.
 
 ## Why
 
@@ -29,7 +30,7 @@ them.
 | Images at their preferred bases (exe 0x1_4000_0000, DLLs 0x1_8000_0000) | `mmap(MAP_FIXED_NOREPLACE)`; relocate (like the kernel) when taken |
 | PEB, TEB, process parameters, KUSER_SHARED_DATA (0x7ffe0000) | fixed mappings at gala's layout addresses (`nt::layout`) |
 | `gs:` = TEB | `arch_prctl(ARCH_SET_GS)` per thread (Linux user code leaves GS alone; FSGSBASE keeps it per thread) |
-| NT system calls (`syscall` with NT numbers) | Linux syscall user dispatch (`prctl(PR_SET_SYSCALL_USER_DISPATCH)`, Linux 5.11+): with the selector byte at BLOCK, a `syscall` raises SIGSYS; the handler (on `sigaltstack`) sets ALLOW, decodes rax/r10/rdx/r8/r9 and stack arguments from the `ucontext`, runs the NT service, stores rax, sets BLOCK and returns. Wine uses the same mechanism. |
+| NT system calls (`syscall` with NT numbers) | Linux syscall user dispatch (`prctl(PR_SET_SYSCALL_USER_DISPATCH)`, Linux 5.11+): with the selector byte at BLOCK, a `syscall` raises SIGSYS; the handler (on `sigaltstack`) decodes rax/r10/rdx/r8/r9 and stack arguments from the `ucontext`, runs the NT service and stores rax. Wine uses the same mechanism. gala-um's simplification (U2a): the prctl's always-allowed range is the host's half of the address space (0x5000_0000_0000 up), where this binary, libc and the vDSO live, and the program's code is always below it, so the selector stays at BLOCK for good: no ALLOW/BLOCK switching, and host system calls (rt_sigreturn too) just work. |
 | CPU exceptions (access violation, int3, divide, illegal instruction) | SIGSEGV/SIGTRAP/SIGFPE/SIGILL handlers build the EXCEPTION_RECORD and CONTEXT and redirect the thread to `KiUserExceptionDispatcher`, sharing the kernel's frame-building code |
 | Guard pages, demand commit, COW | `mprotect` and SIGSEGV, driven by the same VAD logic |
 | Threads | one host thread per NT thread; it switches to the NT-allocated stack and enters user code |
@@ -115,6 +116,42 @@ changed (all QEMU scenarios pass).
    `pub type P = <the platform>` through a cargo feature per platform
    (`kernel`, `um`), each feature pulling in that platform's crate.
 4. `ramfs` and the net stack follow nt (or the support crate).
+
+## U2a: the host mechanism (2026-10-31)
+
+`um/` (a std binary, `um <program.exe>`; `cargo xtask um-test` runs the
+`UM_SCENARIOS` and checks each QEMU scenario's `expect` lines; CI runs
+it):
+
+- `process.rs`: the image at its base (`MAP_FIXED_NOREPLACE`, laid out
+  by the kernel's own `nt/pe.rs`, shared by `#[path]`, section
+  protections as the kernel sets them); PEB, process parameters, TEB,
+  KUSER_SHARED_DATA and the stack at `nt/layout.rs`'s addresses, filled
+  like the kernel fills them (pid 4, console handles 4/8/12).
+- `host.rs`: GS = TEB (`arch_prctl`), syscall user dispatch, SIGSYS on an
+  alternate stack decoding the NT arguments (stack arguments at
+  rsp+0x28), fault signals reported; the main thread enters the program
+  with rcx = PEB and rsp as if called, like the kernel.
+- `services.rs`: bootstrap services, NtWriteFile on the console handles
+  and NtTerminateProcess, logging the kernel's exit line. Replaced by the
+  NT layer in U2b.
+
+Result: hello.exe prints the same lines as its QEMU scenario, in about
+2 ms instead of ~5 s. abi_test and file_test stop at their first service
+outside the bootstrap set (0x0fff, 0x0033), crash.exe's access
+violation is caught and reported. These need U2b.
+
+**U2b plan:** link the NT layer (the kernel lib already builds for the
+host for its unit tests). The kernel's memory model carries over almost
+unchanged if gala-um's "physical memory" is one memfd: frames are pages
+of it (the kernel's own bitmap frame allocator), the HHDM is one
+`MAP_SHARED` view of the whole memfd, and a user mapping of a frame is
+an `mmap(MAP_SHARED | MAP_FIXED)` of that page at the user address.
+`map_borrowed`, `map_private_copy` (COW), `set_flags` (mprotect) and
+`unmap_page` map one to one, so `UserSpace` becomes a trait-associated
+type with a kernel and a memfd implementation (step 2 of "Remaining for
+the split"). Threads: one host thread per NT thread, waits on a futex
+per thread behind `Threads`.
 
 ## Steps
 

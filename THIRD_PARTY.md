@@ -41,6 +41,12 @@ Rules for this file:
 
 The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `screenshot` is its own, uncompressed).
 
+## Rust crate dependencies of host tools (not in the kernel or images)
+
+| Crate | Version | License | Use |
+|---|---|---|---|
+| `libc` | 0.2.191 (pinned) | MIT OR Apache-2.0 | gala-um (`um/`): mmap, mprotect, sigaction, sigaltstack, prctl (syscall user dispatch), arch_prctl. |
+
 ## Written from third-party specifications (no code copied)
 
 | Our code | Specification | Spec license |

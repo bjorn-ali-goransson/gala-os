@@ -259,6 +259,8 @@ commands:
   serve        boot a network scenario and keep it running, its port 7
                forwarded to 127.0.0.1:<port> (for a browser):
                serve <nginx|nginx_master|nginx_tls|go_http|...> [port, default 8080]
+  um-test      run the scenarios gala-um supports (UM_SCENARIOS) in gala-um,
+               the NT layer as a Linux process (docs/GALA_UM.md)
   bench        run user/bench on gala; write target/report/bench.json and
                compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
   symbolize    resolve the kernel backtraces in a serial log to functions
@@ -284,6 +286,7 @@ fn main() -> ExitCode {
         Some("docker-test") => docker_test(&args[1..]),
         Some("screenshot") => screenshot(release, &args[1..]),
         Some("serve") => serve(release, &args[1..]),
+        Some("um-test") => um_test(release),
         Some("bench") => {
             bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
         }
@@ -1341,6 +1344,50 @@ fn run_parallel<J: Sync, T: Send>(
         .into_iter()
         .map(|r| r.unwrap_or_else(|| Err("did not run".into())))
         .collect()
+}
+
+/// Scenarios gala-um runs (docs/GALA_UM.md): their program from user/bin
+/// must print the scenario's expected lines there too.
+const UM_SCENARIOS: &[&str] = &["hello"];
+
+/// `cargo xtask um-test`: builds um/ for the host and runs each
+/// UM_SCENARIOS program in it, checking the QEMU scenario's `expect` lines
+/// (except the boot marker).
+fn um_test(release: bool) -> Result {
+    let mut build = cargo();
+    build.args(["build", "--package", "um"]);
+    if release {
+        build.arg("--release");
+    }
+    run_quiet(&mut build)?;
+    let um = target_dir().join(if release { "release" } else { "debug" }).join("um");
+    let mut failed = Vec::new();
+    for name in UM_SCENARIOS {
+        let s = SCENARIOS.iter().find(|s| s.name == *name).ok_or(format!("no scenario {name}"))?;
+        let program = scenario_program(s).ok_or(format!("{name}: not a program scenario"))?;
+        let started = Instant::now();
+        let out = Command::new(&um)
+            .arg(root().join("user/bin").join(format!("{program}.exe")))
+            .output()
+            .map_err(|e| format!("running {}: {e}", um.display()))?;
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let missing: Vec<_> =
+            s.expect.iter().filter(|e| **e != BOOT_OK_MARKER && !log.contains(**e)).collect();
+        if missing.is_empty() {
+            eprintln!(
+                "xtask: um test {name:<20} ok  ({:.1} ms)",
+                started.elapsed().as_secs_f64() * 1e3
+            );
+        } else {
+            eprintln!("xtask: um test {name:<20} FAILED, missing {missing:?}; output:\n{log}");
+            failed.push(*name);
+        }
+    }
+    if failed.is_empty() { Ok(()) } else { Err(format!("um tests failed: {failed:?}")) }
 }
 
 /// The program a scenario runs, if it is that program's own scenario.

@@ -1,0 +1,10 @@
+[package]
+name = "um"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "gala-um: gala's NT layer as a Linux process (docs/GALA_UM.md)"
+
+[dependencies]
+libc = "=0.2.191"
