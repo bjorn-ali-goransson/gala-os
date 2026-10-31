@@ -546,6 +546,8 @@ enum NetClient {
     Echo,
     /// GETs `/` and expects this body (`http_client`).
     Http(&'static str),
+    /// The page, gzip and a rewrite (`nginx_client`).
+    Nginx,
 }
 
 /// Scenarios that get a virtio-net card on QEMU's user-mode network, with
@@ -556,8 +558,8 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("net_echo", "net: echo listening on port 7", NetClient::Echo),
     ("winsock_test", "winsock_test: listening on port 7", NetClient::Echo),
     ("go_http", "go_http: listening on port 7", NetClient::Http(GO_HTTP_PAGE)),
-    ("nginx", "using the \"select\" event method", NetClient::Http(NGINX_PAGE)),
-    ("nginx_master", "start worker process", NetClient::Http(NGINX_PAGE)),
+    ("nginx", "using the \"select\" event method", NetClient::Nginx),
+    ("nginx_master", "start worker process", NetClient::Nginx),
 ];
 
 /// Scenarios whose program serves until stopped: once the net client has
@@ -1442,6 +1444,7 @@ fn run_vm(
             client = Some(thread::spawn(move || match kind {
                 NetClient::Echo => net_client(port),
                 NetClient::Http(page) => http_client(port, page),
+                NetClient::Nginx => nginx_client(port),
             }));
         }
         if stop_after_client && client.as_ref().is_some_and(|c| c.is_finished()) {
@@ -1536,12 +1539,50 @@ fn net_client(port: u16) -> Result {
 /// The host side of an HTTP scenario: GET / with HTTP/1.1, expect 200 and
 /// `page` as the body.
 fn http_client(port: u16, page: &str) -> Result {
-    // A server may log that it started before it listens (Nginx's master
-    // logs before its worker opens the socket): retry while nothing at all
-    // comes back, for up to 10 s.
+    let (head, body) = http_retrying(port, "/", "")?;
+    expect_page(&head, &body, page)
+}
+
+/// The Nginx scenarios' client: the page, the page gzip-compressed (zlib)
+/// and the page through a rewrite (PCRE2).
+fn nginx_client(port: u16) -> Result {
+    let (head, body) = http_retrying(port, "/", "")?;
+    expect_page(&head, &body, NGINX_PAGE).map_err(|e| format!("GET /: {e}"))?;
+    let (head, body) = http_request(port, "/", "Accept-Encoding: gzip\r\n")?;
+    if !head.lines().any(|l| l.eq_ignore_ascii_case("Content-Encoding: gzip")) {
+        return Err(format!("gzip: no Content-Encoding: gzip in {head:?}"));
+    }
+    // A gzip member: magic 1f 8b, method 8 (deflate), and a trailer whose
+    // last four bytes are the uncompressed length.
+    let isize =
+        body.len().checked_sub(4).map(|i| u32::from_le_bytes(body[i..].try_into().unwrap()));
+    if !body.starts_with(&[0x1f, 0x8b, 8]) || isize != Some(NGINX_PAGE.len() as u32) {
+        return Err(format!(
+            "gzip: body is not a gzip of the page: {:02x?}",
+            &body[..body.len().min(16)]
+        ));
+    }
+    let (head, body) = http_request(port, "/old", "")?;
+    expect_page(&head, &body, NGINX_PAGE).map_err(|e| format!("GET /old (rewrite): {e}"))
+}
+
+fn expect_page(head: &str, body: &[u8], page: &str) -> Result {
+    if !head.starts_with("HTTP/1.1 200 OK") {
+        return Err(format!("status line {:?}", head.lines().next()));
+    }
+    if body != page.as_bytes() {
+        return Err(format!("body {:?}", String::from_utf8_lossy(body)));
+    }
+    Ok(())
+}
+
+/// `http_request`, retried while nothing at all comes back, for up to
+/// 10 s: a server may log that it started before it listens (Nginx's
+/// master logs before its worker opens the socket).
+fn http_retrying(port: u16, path: &str, headers: &str) -> Result<(String, Vec<u8>)> {
     let mut last = String::new();
     for _ in 0..50 {
-        match http_get(port, page) {
+        match http_request(port, path, headers) {
             Err(e) if e.starts_with("no response") => {
                 last = e;
                 thread::sleep(Duration::from_millis(200));
@@ -1552,31 +1593,47 @@ fn http_client(port: u16, page: &str) -> Result {
     Err(last)
 }
 
-/// One GET for `http_client`; "no response: ..." if the connection gave
-/// nothing back.
-fn http_get(port: u16, page: &str) -> Result {
+/// One HTTP/1.1 GET (`headers`: extra header lines, CRLF-terminated);
+/// the response head and the body (de-chunked). "no response: ..." if the
+/// connection gave nothing back.
+fn http_request(port: u16, path: &str, headers: &str) -> Result<(String, Vec<u8>)> {
     use std::io::Write;
     let mut stream =
         std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect: {e}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(60))).map_err(|e| e.to_string())?;
-    stream
-        .write_all(b"GET / HTTP/1.1\r\nHost: gala\r\nConnection: close\r\n\r\n")
-        .map_err(|e| format!("send: {e}"))?;
-    let mut response = String::new();
-    let read = stream.read_to_string(&mut response);
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: gala\r\n{headers}Connection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).map_err(|e| format!("send: {e}"))?;
+    let mut response = Vec::new();
+    let read = stream.read_to_end(&mut response);
     if response.is_empty() {
         let why = read.err().map_or("closed".to_string(), |e| e.to_string());
         return Err(format!("no response: {why}"));
     }
     read.map_err(|e| format!("receive: {e}"))?;
-    let (head, body) = response.split_once("\r\n\r\n").ok_or("no end of headers")?;
-    if !head.starts_with("HTTP/1.1 200 OK") {
-        return Err(format!("status line {:?}", head.lines().next()));
+    let split = response.windows(4).position(|w| w == b"\r\n\r\n").ok_or("no end of headers")?;
+    let head = String::from_utf8_lossy(&response[..split]).into_owned();
+    let mut body = response[split + 4..].to_vec();
+    if head.lines().any(|l| l.eq_ignore_ascii_case("Transfer-Encoding: chunked")) {
+        body = dechunk(&body).ok_or("bad chunked body")?;
     }
-    if body != page {
-        return Err(format!("body {body:?}"));
+    Ok((head, body))
+}
+
+/// The data of a chunked body (sizes in hex, each chunk CRLF-terminated).
+fn dechunk(mut b: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    loop {
+        let line_end = b.windows(2).position(|w| w == b"\r\n")?;
+        let size_text = std::str::from_utf8(&b[..line_end]).ok()?;
+        let size = usize::from_str_radix(size_text.split(';').next()?.trim(), 16).ok()?;
+        b = &b[line_end + 2..];
+        if size == 0 {
+            return Some(out);
+        }
+        out.extend_from_slice(b.get(..size)?);
+        b = b.get(size + 2..)?;
     }
-    Ok(())
 }
 
 /// Judges one scenario from the exit status and its part of the log.
@@ -1857,8 +1914,13 @@ fn screenshot(release: bool, args: &[String]) -> Result {
             thread::sleep(Duration::from_millis(2500));
             for _ in 0..20 {
                 thread::sleep(Duration::from_millis(500));
-                let page = if nginx { NGINX_PAGE } else { GO_HTTP_PAGE };
-                result = if http { http_client(port, page) } else { net_client(port) };
+                result = if nginx {
+                    nginx_client(port)
+                } else if http {
+                    http_client(port, GO_HTTP_PAGE)
+                } else {
+                    net_client(port)
+                };
                 if result.is_ok() {
                     break;
                 }

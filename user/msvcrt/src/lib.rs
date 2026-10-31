@@ -480,6 +480,20 @@ unsafe fn c_str<'a>(s: *const u8) -> &'a [u8] {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn memchr(s: *const u8, c: i32, n: usize) -> *mut u8 {
+    let c = c as u8;
+    for i in 0..n {
+        // SAFETY: the caller's buffer of `n` bytes.
+        unsafe {
+            if *s.add(i) == c {
+                return s.add(i).cast_mut();
+            }
+        }
+    }
+    null_mut()
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn strchr(s: *const u8, c: i32) -> *mut u8 {
     let c = c as u8;
     let mut p = s;

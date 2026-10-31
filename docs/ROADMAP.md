@@ -193,8 +193,8 @@ to set and to argue for. Current order and why:
    data-driven.
 5. G3 (workable Go programs): done. N1 done (N1a-N1c: Go's net/http
    serves the host). N2a, N2b done: Nginx serves the host in its normal
-   master/worker mode. Next: N2c (Nginx with zlib and PCRE2: gzip and
-   rewrite; then OpenSSL for TLS), then U1 (gala-um).
+   master/worker mode, with gzip and rewrite (N2c, zlib and PCRE2).
+   Next: OpenSSL (TLS), then U1 (gala-um).
    N2a was decided 2026-10-31: Nginx is the stated
    goal and the ledger makes bring-up data-driven, so build an x64 Nginx
    with mingw-w64 and run it on gala before choosing anything larger
@@ -271,14 +271,16 @@ N2. **Nginx**: either our own 64-bit build of Nginx (cross-compiled with
         way: STATUS_OBJECT_NAME_EXISTS was 0x40000035 (it is
         0x40000000); xtask now checks every kernel NTSTATUS against
         mingw-w64's ntstatus.h.
-   N2c (next). The modules that need libraries, built from pinned sources
-        like Nginx: zlib (gzip), PCRE2 (rewrite); then OpenSSL (TLS, with
-        gala's bcrypt/crypt32 pieces as the ledger asks). Sources chosen
-        (2026-10-31): zlib 1.3.2 (zlib.net, SHA-256 bb329a0a...0119d16),
-        PCRE2 10.49 (GitHub release, SHA-256 929f0b20...e557ae). Waiting
-        for the user's permission to run third-party build scripts in
-        the session (the agent's sandbox stopped `configure`/`make` of
-        downloaded sources).
+   N2c. The modules that need libraries, built from pinned sources like
+        Nginx: zlib (gzip), PCRE2 (rewrite). **Done**: zlib 1.3.2 and
+        PCRE2 10.49 in `user/nginx/build.sh` (still reproducible); both
+        Nginx scenarios check the page, the page gzip-compressed (header,
+        gzip magic, uncompressed length in the trailer) and `/old`
+        rewritten to it. The ledger asked only for msvcrt's memchr.
+   N2d (next). OpenSSL (TLS), with gala's bcrypt/crypt32 pieces as the
+        ledger asks; the HTTP client gets a TLS mode (rustls is not
+        allowed in xtask without a dependency decision: or `openssl
+        s_client` on the host).
 
 ## Later
 SMP, ACPI (MADT/HPET), virtio devices, bindgen-generated layouts from

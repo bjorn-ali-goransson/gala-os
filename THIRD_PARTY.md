@@ -22,7 +22,9 @@ Rules for this file:
 
 | Component | Version | Source | License | How it is used |
 |---|---|---|---|---|
-| Nginx | 1.30.6 (`nginx-1.30.6.tar.gz`, SHA-256 `3cf46f5e...b8b6c8`) | nginx.org | BSD-2-Clause | `user/bin/nginx.exe`, built unmodified by `user/nginx/build.sh` with mingw-w64 (no PCRE, zlib or OpenSSL); run by the `nginx` scenario. Not part of gala itself. |
+| Nginx | 1.30.6 (`nginx-1.30.6.tar.gz`, SHA-256 `3cf46f5e...b8b6c8`) | nginx.org | BSD-2-Clause | `user/bin/nginx.exe`, built unmodified by `user/nginx/build.sh` with mingw-w64 (with zlib and PCRE2, no OpenSSL yet); run by the `nginx` and `nginx_master` scenarios. Not part of gala itself. |
+| zlib | 1.3.2 (`zlib-1.3.2.tar.gz`, SHA-256 `bb329a0a...0119d16`) | zlib.net | zlib License | Built into `user/bin/nginx.exe` by `user/nginx/build.sh` (Nginx's gzip module). |
+| PCRE2 | 10.49 (`pcre2-10.49.tar.gz`, SHA-256 `929f0b20...e557ae`) | github.com/PCRE2Project/pcre2 releases | BSD-3-Clause (with the PCRE2 exception) | Built into `user/bin/nginx.exe` by `user/nginx/build.sh` (Nginx's rewrite module). |
 | mingw-w64 runtime and GCC support code | Ubuntu 24.04 `gcc-mingw-w64-x86-64` 13.2.0 | mingw-w64.org, gcc.gnu.org | mingw-w64 CRT: ZPL/public domain; libgcc: GPL-3.0 with the GCC Runtime Library Exception | Statically linked into `nginx.exe` by the toolchain (program startup, helpers). |
 
 ## Rust crate dependencies (linked into the kernel)
