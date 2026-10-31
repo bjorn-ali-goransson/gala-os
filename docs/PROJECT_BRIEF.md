@@ -82,4 +82,5 @@ them as the primary spec.
 
 ## Open-source reuse
 Wine is LGPL and ReactOS is mostly GPL. Track what is borrowed and from
-where, because it matters if the project is ever released.
+where (in `THIRD_PARTY.md`): the repository is public, and it matters if
+the project is ever licensed.
