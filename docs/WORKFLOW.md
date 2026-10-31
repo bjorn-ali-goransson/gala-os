@@ -251,6 +251,12 @@ missing function is a `missing export`. For a program with many DLLs,
 walk the whole import closure (imports and delay imports of every DLL it
 loads, following export forwarders such as the api-ms-win-* sets) against
 the exports of gala's DLLs before booting, and fix the gaps in batches.
+A crashing JVM writes `C:\hs_err_pid<N>.log` (registers, the faulting
+instruction's neighbourhood, native frames); to read it, run busybox's
+`cat` on it after java in the same boot (`run=java.exe,busybox.exe
+args=-version,cat%20C:/hs_err_pid4.log`, busybox.exe in the scenario's
+modules). An unhandled exception's code and address are in the ledger;
+`XTASK_EVENTS=image` gives each image's base and size to map them.
 DLLs a program loads at run time (LoadLibrary: the JDK's launcher loads
 msvcp140 and jvm.dll) are not in the closure; boot and read the ledger
 for those. Exports by ordinal (ws2_32's) come from a build.rs printing

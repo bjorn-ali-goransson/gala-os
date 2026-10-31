@@ -972,3 +972,57 @@ pub extern "system" fn GetGeoInfoW(
         None => fail_with(ERROR_INVALID_PARAMETER, 0),
     }
 }
+
+// ---- Locale names (the Vista API) ----
+
+/// LCIDToLocaleName: "en-US" for gala's locale and the defaults, "" for
+/// LOCALE_INVARIANT; the count includes the NUL.
+#[unsafe(no_mangle)]
+pub extern "system" fn LCIDToLocaleName(lcid: u32, buf: *mut u16, size: i32, _flags: u32) -> i32 {
+    if !known_lcid(lcid) || size < 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    if lcid == 0x7f {
+        return put(&[], buf, size);
+    }
+    put(&b"en-US".map(u16::from), buf, size)
+}
+
+/// LocaleNameToLCID: 0x409 for "en-US" (and the default, null or "");
+/// 0 with ERROR_INVALID_PARAMETER for other names.
+#[unsafe(no_mangle)]
+pub extern "system" fn LocaleNameToLCID(name: *const u16, _flags: u32) -> u32 {
+    if name.is_null() || wide_slice(name).is_empty() || is_en_us(wide_slice(name)) {
+        return LANG_EN_US;
+    }
+    fail_with(ERROR_INVALID_PARAMETER, 0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn IsValidLocaleName(name: *const u16) -> Bool {
+    Bool::from(!name.is_null() && (wide_slice(name).is_empty() || is_en_us(wide_slice(name))))
+}
+
+type LocaleEnumProcEx = extern "system" fn(*const u16, u32, isize) -> Bool;
+
+/// EnumSystemLocalesEx: the one locale, "en-US" (LOCALE_SPECIFICDATA).
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumSystemLocalesEx(
+    f: Option<LocaleEnumProcEx>,
+    _flags: u32,
+    param: isize,
+    _reserved: *mut c_void,
+) -> Bool {
+    let Some(f) = f else { return fail_with(ERROR_INVALID_PARAMETER, FALSE) };
+    let mut name = [0u16; 6];
+    name[..5].copy_from_slice(&b"en-US".map(u16::from));
+    f(name.as_ptr(), 2, param); // LOCALE_SPECIFICDATA
+    TRUE
+}
+
+/// GetCurrentPackageId: gala's processes are not packaged (Store) apps:
+/// APPMODEL_ERROR_NO_PACKAGE, returned (not set as the last error).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCurrentPackageId(_length: *mut u32, _buffer: *mut u8) -> i32 {
+    15700
+}

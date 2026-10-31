@@ -27,6 +27,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 type Bool = i32;
 type Handle = *mut c_void;
 type LocaleEnumProc = extern "system" fn(*const u16) -> Bool;
+type LocaleEnumProcEx = extern "system" fn(*const u16, u32, isize) -> Bool;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -76,6 +77,16 @@ unsafe extern "system" {
         utc: *mut SystemTime,
     ) -> Bool;
     fn GetUserGeoID(class: u32) -> i32;
+    fn LCIDToLocaleName(lcid: u32, buf: *mut u16, n: i32, flags: u32) -> i32;
+    fn LocaleNameToLCID(name: *const u16, flags: u32) -> u32;
+    fn IsValidLocaleName(name: *const u16) -> Bool;
+    fn EnumSystemLocalesEx(
+        f: LocaleEnumProcEx,
+        flags: u32,
+        param: isize,
+        reserved: *mut c_void,
+    ) -> Bool;
+    fn GetCurrentPackageId(len: *mut u32, buf: *mut u8) -> i32;
     fn GetGeoInfoA(geo: i32, kind: u32, buf: *mut u8, n: i32, lang: u16) -> i32;
 }
 
@@ -184,6 +195,17 @@ fn w(s: &str) -> [u16; 32] {
 }
 
 static SAW_409: AtomicU32 = AtomicU32::new(0);
+static SAW_EN_US: AtomicU32 = AtomicU32::new(0);
+
+extern "system" fn on_locale_ex(name: *const u16, _flags: u32, param: isize) -> Bool {
+    let want = w("en-US");
+    // SAFETY: a NUL-terminated locale name.
+    let same = (0..6).all(|i| unsafe { *name.add(i) } == want[i]);
+    if same && param == 77 {
+        SAW_EN_US.fetch_add(1, Ordering::SeqCst);
+    }
+    1
+}
 
 extern "system" fn on_locale(name: *const u16) -> Bool {
     let want = w("00000409");
@@ -205,6 +227,21 @@ fn locales(c: &mut Checks) -> Result<(), u32> {
         c.eq(IsValidLocale(0x0012_3456, LCID_SUPPORTED) as u64, 0)?;
         c.ok(EnumSystemLocalesW(on_locale, LCID_SUPPORTED) != 0, GetLastError().into())?;
         c.eq(SAW_409.load(Ordering::SeqCst).into(), 1)?;
+        // Locale names (the Vista API the C runtime prefers).
+        let mut name = [0u16; 16];
+        c.eq(LCIDToLocaleName(0x409, name.as_mut_ptr(), 16, 0) as u64, 6)?;
+        c.ok(name[..6] == w("en-US")[..6], name[0].into())?;
+        c.eq(LocaleNameToLCID(w("en-US").as_ptr(), 0).into(), 0x409)?;
+        c.ok(IsValidLocaleName(w("en-US").as_ptr()) != 0, 0)?;
+        c.eq(IsValidLocaleName(w("xx-QQ").as_ptr()) as u64, 0)?;
+        c.ok(
+            EnumSystemLocalesEx(on_locale_ex, 0, 77, core::ptr::null_mut()) != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(SAW_EN_US.load(Ordering::SeqCst).into(), 1)?;
+        // Not a packaged (Store) app: APPMODEL_ERROR_NO_PACKAGE.
+        let mut len = 0u32;
+        c.eq(GetCurrentPackageId(&mut len, core::ptr::null_mut()) as u64, 15700)?;
 
         let mut buf = [0u16; 16];
         c.eq(GetLocaleInfoW(0x409, LOCALE_SDECIMAL, buf.as_mut_ptr(), 16) as u64, 2)?;

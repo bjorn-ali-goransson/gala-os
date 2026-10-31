@@ -423,21 +423,14 @@ pub extern "system" fn GetModuleHandleA(name: *const u8) -> Handle {
 /// GetModuleFileNameA: the executable's path (other modules: reported).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetModuleFileNameA(module: Handle, buf: *mut u8, size: u32) -> u32 {
-    if !module.is_null() && module != image_base() {
-        unsupported(b"kernel32.dll!GetModuleFileNameA(DLL)", 0);
-        return fail_with(ERROR_NOT_SUPPORTED, 0);
-    }
+    let (path, len) = match super::process::module_path(module) {
+        Ok(p) => p,
+        Err(e) => return fail_with(e, 0),
+    };
+    let path = &path[..len];
     if size == 0 {
         return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
     }
-    // RTL_USER_PROCESS_PARAMETERS.ImagePathName (UNICODE_STRING at +0x60).
-    // SAFETY: the PEB's process parameters are always set.
-    let path = unsafe {
-        let params = *((teb_u64(0x60) as usize + 0x20) as *const usize);
-        let len = usize::from(*((params + 0x60) as *const u16)) / 2;
-        let buffer = *((params + 0x68) as *const *const u16);
-        core::slice::from_raw_parts(buffer, len)
-    };
     let n = narrow_into(path, buf, size as usize);
     // SAFETY: n < size.
     unsafe { *buf.add(n) = 0 };

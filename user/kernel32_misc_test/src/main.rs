@@ -118,6 +118,8 @@ unsafe extern "system" {
     fn GetModuleHandleW(name: *const u16) -> u64;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetTickCount64() -> u64;
+    fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn FreeLibrary(module: Handle) -> Bool;
     fn CloseHandle(h: Handle) -> Bool;
     fn ExitProcess(code: u32) -> !;
 }
@@ -340,6 +342,14 @@ fn heaps(c: &mut Checks) -> Result<(), u32> {
         let (t1, ticks) = (timeGetTime(), GetTickCount64() as u32);
         let t2 = timeGetTime();
         c.ok(t2.wrapping_sub(t1) < 1000 && t1.abs_diff(ticks) < 1000, u64::from(t1))?;
+        // A DLL loaded at startup as a static import stays for the
+        // process's lifetime: FreeLibrary on its handle does not unload it.
+        let winmm = GetModuleHandleA(c"winmm.dll".as_ptr().cast());
+        c.ok(!winmm.is_null(), 0)?;
+        FreeLibrary(winmm);
+        FreeLibrary(winmm);
+        c.eq(GetModuleHandleA(c"winmm.dll".as_ptr().cast()) as u64, winmm as u64)?;
+        c.ok(timeGetTime().wrapping_sub(t2) < 1000, 0)?;
 
         // The computer's names: the DNS host name (what Go's os.Hostname
         // asks for, ComputerNamePhysicalDnsHostname) is the NetBIOS name up

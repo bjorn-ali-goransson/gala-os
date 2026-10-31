@@ -73,6 +73,7 @@ struct Dll {
 const USER_DLLS: &[Dll] = &[
     Dll { package: "testdll", file: "testdll.dll", exported_as: "testdll.dll" },
     Dll { package: "testdll2", file: "testdll2.dll", exported_as: "testdll2.dll" },
+    Dll { package: "tlsdll", file: "tlsdll.dll", exported_as: "tlsdll.dll" },
     // gala's kernel32.dll, exported under another name like ntdll.
     Dll { package: "kernel32", file: "kernel32.dll", exported_as: "testkernel32.dll" },
     Dll {
@@ -156,6 +157,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_pool_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_pool_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_pool_test", "winmm.dll", "Windows/System32"),
+    ("tls_test", "ntdll.dll", "Windows/System32"),
+    ("tls_test", "kernel32.dll", "Windows/System32"),
+    ("tls_test", "tlsdll.dll", "gala"),
     ("advapi32_test", "ntdll.dll", "Windows/System32"),
     ("advapi32_test", "kernel32.dll", "Windows/System32"),
     ("advapi32_test", "advapi32.dll", "Windows/System32"),
@@ -460,6 +464,7 @@ const USER_PROGRAMS: &[&str] = &[
     "advapi32_test",
     "win32_misc_test",
     "kernel32_pool_test",
+    "tls_test",
     "kernel32_misc_test",
     "prng_test",
     "kernel32_env_test",
@@ -908,7 +913,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &["java_version"];
+const PENDING: &[&str] = &[];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -1121,6 +1126,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_sys_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_sys_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (JDK): static TLS (the PE TLS directory) for the executable
+        // and a DLL loaded later; TLS callbacks and thread notifications.
+        name: "tls_test",
+        cmdline: "qemu_exit run=tls_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["tls_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (JDK): the thread pool and what else msvcp140 imports.
@@ -1391,6 +1404,7 @@ const SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "openjdk version \"21.0.5\" 2024-10-15 LTS",
+            "OpenJDK Runtime Environment Temurin-21.0.5+11 (build 21.0.5+11-LTS)",
             "OpenJDK 64-Bit Server VM Temurin-21.0.5+11 (build 21.0.5+11-LTS, mixed mode",
             "java.exe finished with status 0x00000000",
         ],
@@ -2812,7 +2826,16 @@ fn image_modules(
 ) -> Result<Vec<(&'static str, &'static str)>> {
     let mut modules: Vec<(&str, &str)> = USER_DLLS
         .iter()
-        .map(|d| (d.file, if d.file.starts_with("testdll") { "gala" } else { "Windows/System32" }))
+        .map(|d| {
+            (
+                d.file,
+                if d.file.starts_with("testdll") || d.file == "tlsdll.dll" {
+                    "gala"
+                } else {
+                    "Windows/System32"
+                },
+            )
+        })
         .collect();
     if cmdline.iter().any(|w| w.contains("nginx.exe")) {
         let nginx = if cmdline.iter().any(|w| w.contains("nginx-master")) {

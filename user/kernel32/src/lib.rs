@@ -2089,7 +2089,18 @@ type StartRoutine = extern "system" fn(*mut c_void) -> u32;
 /// Every thread CreateThread makes starts here (rcx = start, rdx = param),
 /// like Windows' thread start thunk: run the routine, exit with its result.
 extern "system" fn thread_start(start: StartRoutine, param: *mut c_void) -> ! {
+    // The thread's TLS blocks and DLL_THREAD_ATTACH (Windows does this in
+    // ntdll before the thread's start routine).
+    // SAFETY: a plain call.
+    unsafe { GalaInitializeThread() };
     ExitThread(start(param))
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GalaInitializeThread();
+    fn LdrShutdownThread();
+    pub(crate) fn LdrDisableThreadCalloutsForDll(module: Handle) -> u32;
 }
 
 /// Default stack reservation for new threads (Windows takes it from the
@@ -2164,6 +2175,9 @@ pub extern "system" fn CreateThread(
 #[unsafe(no_mangle)]
 pub extern "system" fn ExitThread(code: u32) -> ! {
     fls_thread_exit();
+    // DLL_THREAD_DETACH, then the thread's TLS is freed.
+    // SAFETY: a plain call.
+    unsafe { LdrShutdownThread() };
     // SAFETY: ends the current thread (-2 = the current thread).
     unsafe { NtTerminateThread(-2, code) };
     loop {

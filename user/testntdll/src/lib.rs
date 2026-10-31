@@ -17,6 +17,7 @@
 
 mod heap;
 mod seh;
+mod tls;
 
 /// "galantdl": marks the state as written by this DLL.
 const MAGIC: u64 = 0x6761_6c61_6e74_646c;
@@ -395,6 +396,24 @@ fn map_dll(dll: &[u8], search: Search) -> Result<usize, u32> {
 }
 
 /// Opens `dir` + `dll` (`dir` ends with a backslash) and maps it.
+/// The Win32 path of the DLL `open_dll` opened last (used under the
+/// loader lock, right after it returns).
+struct LastPath(core::cell::UnsafeCell<([u16; MAX_PATH], usize)>);
+
+// SAFETY: used under the loader lock.
+unsafe impl Sync for LastPath {}
+
+static LAST_PATH: LastPath = LastPath(core::cell::UnsafeCell::new(([0; MAX_PATH], 0)));
+
+/// Records `path` as the module's file (truncated to MAX_PATH).
+fn set_module_path(slot: usize, path: &[u16]) {
+    let n = path.len().min(MAX_PATH);
+    with_modules(|m| {
+        m[slot].path[..n].copy_from_slice(&path[..n]);
+        m[slot].path_len = n;
+    });
+}
+
 fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
     let mut path = [0u16; 300];
     let prefix = *b"\\??\\";
@@ -425,6 +444,13 @@ fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
     let (mut file, mut section, mut iosb) = (0usize, 0usize, [0usize; 2]);
     // GENERIC_READ | GENERIC_EXECUTE | SYNCHRONIZE; share read+delete;
     // FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE.
+    // SAFETY: under the loader lock (see `LastPath`).
+    unsafe {
+        let last = &mut *LAST_PATH.0.get();
+        let n = (total - prefix.len()).min(MAX_PATH);
+        last.0[..n].copy_from_slice(&path[prefix.len()..prefix.len() + n]);
+        last.1 = n;
+    }
     if NtOpenFile(&mut file, 0xa010_0000, &attrs, &mut iosb, 5, 0x60) != STATUS_SUCCESS {
         return Err(STATUS_DLL_NOT_FOUND);
     }
@@ -461,10 +487,13 @@ const STATUS_DLL_INIT_FAILED: u32 = 0xc000_0142;
 /// Loaded modules (the JDK alone brings about 60 DLLs, most of them the
 /// api-ms-win-* forwarders).
 const MAX_MODULES: usize = 256;
+pub(crate) const MODULE_COUNT: usize = MAX_MODULES;
 /// DLLs one module imports from (ucrtbase alone imports from about 30
 /// api-ms-win-core sets).
 const MAX_DEPENDENCIES: usize = 64;
 const MAX_NAME: usize = 64;
+/// The longest module path kept.
+const MAX_PATH: usize = 260;
 /// Reference count of modules that are never unloaded (ntdll, the exe).
 const PINNED: u32 = u32::MAX;
 
@@ -478,6 +507,11 @@ struct Module {
     name: [u8; MAX_NAME],
     name_len: usize,
     attached: bool,
+    /// DisableThreadLibraryCalls: no DLL_THREAD_* to its DllMain.
+    no_thread_calls: bool,
+    /// The file it was loaded from (a Win32 path, `C:\...`).
+    path: [u16; MAX_PATH],
+    path_len: usize,
     dependencies: [usize; MAX_DEPENDENCIES],
     dependency_count: usize,
 }
@@ -488,15 +522,55 @@ const FREE: Module = Module {
     name: [0; MAX_NAME],
     name_len: 0,
     attached: false,
+    no_thread_calls: false,
+    path: [0; MAX_PATH],
+    path_len: 0,
     dependencies: [0; MAX_DEPENDENCIES],
     dependency_count: 0,
 };
 
-// TODO: PEB->Ldr lists and the loader lock, once processes have more than
-// one thread using the loader.
+/// The loader lock: one thread at a time in the loader (loading,
+/// unloading, thread notifications), recursively (DllMain may load DLLs).
+/// The owner's thread id, and its depth (touched only by the owner).
+static LOADER_OWNER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static LOADER_DEPTH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Set while the executable's imports are bound at startup.
+static STARTUP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Runs `f` holding the loader lock.
+pub(crate) fn with_loader_lock<R>(f: impl FnOnce() -> R) -> R {
+    use core::sync::atomic::Ordering;
+    let me: u64;
+    // SAFETY: gs:[0x48] is TEB.ClientId.UniqueThread.
+    unsafe { core::arch::asm!("mov {}, gs:[0x48]", out(reg) me, options(nostack, readonly)) };
+    if LOADER_OWNER.load(Ordering::Acquire) == me {
+        LOADER_DEPTH.fetch_add(1, Ordering::Relaxed);
+        let r = f();
+        LOADER_DEPTH.fetch_sub(1, Ordering::Relaxed);
+        return r;
+    }
+    let mut spins = 0u32;
+    while LOADER_OWNER.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        spins += 1;
+        if spins < 100 {
+            core::hint::spin_loop();
+        } else {
+            NtYieldExecution();
+        }
+    }
+    LOADER_DEPTH.store(1, Ordering::Relaxed);
+    let r = f();
+    LOADER_DEPTH.store(0, Ordering::Relaxed);
+    LOADER_OWNER.store(0, Ordering::Release);
+    r
+}
+
+// TODO: PEB->Ldr lists.
 struct Modules(core::cell::UnsafeCell<[Module; MAX_MODULES]>);
 
-// SAFETY: only used single-threaded so far (see the TODO above).
+// SAFETY: used under the loader lock (`with_loader_lock`), or before a
+// second thread exists.
 unsafe impl Sync for Modules {}
 
 static MODULES: Modules = Modules(core::cell::UnsafeCell::new([FREE; MAX_MODULES]));
@@ -584,15 +658,25 @@ fn load_module(name: &[u8], search: Search) -> Result<usize, u32> {
             return Err(status);
         }
     };
-    let slot = match add_module(name, base, 1) {
+    // The executable's static imports (loaded at startup) stay for the
+    // process's lifetime, as on Windows: FreeLibrary does not unload them.
+    let refs = if STARTUP.load(core::sync::atomic::Ordering::Relaxed) { PINNED } else { 1 };
+    let slot = match add_module(name, base, refs) {
         Ok(slot) => slot,
         Err(status) => {
             NtUnmapViewOfSection(-1, base);
             return Err(status);
         }
     };
+    // SAFETY: under the loader lock; map_dll's last open_dll succeeded.
+    let (path, n) = unsafe { *LAST_PATH.0.get() };
+    set_module_path(slot, &path[..n]);
     let attach = || {
         bind_imports(base, Some(slot))?;
+        // Its TLS, then its TLS callbacks and DllMain (DLL_PROCESS_ATTACH).
+        if tls::register(base) {
+            tls::callbacks(base, tls::DLL_PROCESS_ATTACH);
+        }
         with_modules(|m| m[slot].attached = true);
         match entry_point(base) {
             Some(entry) if entry(base, 1, 0) == 0 => Err(STATUS_DLL_INIT_FAILED),
@@ -622,6 +706,7 @@ fn unload_module(slot: usize) {
     {
         entry(module.base, 0, 0); // DLL_PROCESS_DETACH
     }
+    tls::unregister(module.base);
     NtUnmapViewOfSection(-1, module.base);
     for &dependency in module.dependencies[..module.dependency_count].iter().rev() {
         unload_module(dependency);
@@ -750,8 +835,7 @@ fn unicode_name(name: *const UnicodeString, out: &mut [u8; MAX_NAME]) -> Result<
 ///
 /// # Safety
 /// `name` must be a valid UNICODE_STRING and `handle` writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn LdrLoadDll(
+unsafe extern "system" fn ldr_load_dll(
     path: *const u16,
     _characteristics: *const u32,
     name: *const UnicodeString,
@@ -807,8 +891,7 @@ fn explicit_dir(name: *const UnicodeString) -> Option<&'static [u16]> {
 ///
 /// # Safety
 /// As for `LdrLoadDll`.
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn LdrGetDllHandle(
+unsafe extern "system" fn ldr_get_dll_handle(
     _path: *const u16,
     _characteristics: *const u32,
     name: *const UnicodeString,
@@ -840,8 +923,7 @@ pub struct AnsiString {
 /// # Safety
 /// `module` must be a loaded image, `name` null or a valid ANSI_STRING,
 /// `address` writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn LdrGetProcedureAddress(
+unsafe extern "system" fn ldr_get_procedure_address(
     module: usize,
     name: *const AnsiString,
     ordinal: u32,
@@ -889,8 +971,7 @@ pub unsafe extern "system" fn LdrGetProcedureAddress(
 }
 
 /// LdrUnloadDll(DllHandle): drops a reference taken by LdrLoadDll.
-#[unsafe(no_mangle)]
-pub extern "system" fn LdrUnloadDll(module: usize) -> u32 {
+extern "system" fn ldr_unload_dll(module: usize) -> u32 {
     match with_modules(|m| m.iter().position(|m| m.base != 0 && m.base == module)) {
         Some(slot) => {
             unload_module(slot);
@@ -902,7 +983,22 @@ pub extern "system" fn LdrUnloadDll(module: usize) -> u32 {
 
 /// Records ntdll and the executable as pinned modules.
 fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
-    add_module(b"ntdll.dll", ntdll, PINNED)?;
+    let ntdll_slot = add_module(b"ntdll.dll", ntdll, PINNED)?;
+    // ntdll's file: <NtSystemRoot>\System32\ntdll.dll.
+    let mut path = [0u16; MAX_PATH];
+    let mut n = 0;
+    // SAFETY: KUSER_SHARED_DATA.NtSystemRoot (+0x30), NUL-terminated.
+    unsafe {
+        while n < 200 && *((0x7ffe_0030 + 2 * n) as *const u16) != 0 {
+            path[n] = *((0x7ffe_0030 + 2 * n) as *const u16);
+            n += 1;
+        }
+    }
+    for &b in b"\\System32\\ntdll.dll" {
+        path[n] = u16::from(b);
+        n += 1;
+    }
+    set_module_path(ntdll_slot, &path[..n]);
     // SAFETY: gs:[0x60] is the PEB; ProcessParameters->ImagePathName is
     // filled in by the kernel.
     let image_path = unsafe {
@@ -915,7 +1011,8 @@ fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
     let mut name = [0u8; MAX_NAME];
     // An executable whose name is not a plain ASCII one is just not listed.
     if let Ok(n) = normalize(image_path.iter().copied(), &mut name) {
-        add_module(&name[..n], image, PINNED)?;
+        let slot = add_module(&name[..n], image, PINNED)?;
+        set_module_path(slot, image_path);
     }
     Ok(())
 }
@@ -1088,9 +1185,19 @@ pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base:
     };
     // The process heap, before any DLL's code runs.
     heap::create_process_heap();
-    if let Err(status) = register_startup_modules(ntdll_base as usize, image)
-        .and_then(|()| bind_imports(image, None))
-    {
+    let started = with_loader_lock(|| {
+        register_startup_modules(ntdll_base as usize, image)?;
+        // The executable's TLS (and this thread's blocks) before its
+        // imports load; its TLS callbacks after their DllMains.
+        tls::process_init(image);
+        STARTUP.store(true, core::sync::atomic::Ordering::Relaxed);
+        let bound = bind_imports(image, None);
+        STARTUP.store(false, core::sync::atomic::Ordering::Relaxed);
+        bound?;
+        tls::callbacks(image, tls::DLL_PROCESS_ATTACH);
+        Ok(())
+    });
+    if let Err(status) = started {
         NtTerminateProcess(-1, status);
     }
     NtContinue(context, 0);
@@ -1425,4 +1532,100 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+// The loader's exports, each under the loader lock.
+
+/// LdrLoadDll(DllPath, DllCharacteristics, DllName, *DllHandle).
+///
+/// # Safety
+/// As for the functions it wraps: valid UNICODE_STRING and output.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn LdrLoadDll(
+    path: *const u16,
+    characteristics: *const u32,
+    name: *const UnicodeString,
+    handle: *mut usize,
+) -> u32 {
+    // SAFETY: the caller's arguments, passed on.
+    with_loader_lock(|| unsafe { ldr_load_dll(path, characteristics, name, handle) })
+}
+
+/// LdrGetDllHandle(DllPath, DllCharacteristics, DllName, *DllHandle).
+///
+/// # Safety
+/// As for `LdrLoadDll`.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn LdrGetDllHandle(
+    path: *const u16,
+    characteristics: *const u32,
+    name: *const UnicodeString,
+    handle: *mut usize,
+) -> u32 {
+    // SAFETY: as above.
+    with_loader_lock(|| unsafe { ldr_get_dll_handle(path, characteristics, name, handle) })
+}
+
+/// LdrGetProcedureAddress(DllHandle, ProcedureName, ProcedureNumber,
+/// *ProcedureAddress).
+///
+/// # Safety
+/// `module` must be a loaded image, `name` null or a valid ANSI_STRING,
+/// `address` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn LdrGetProcedureAddress(
+    module: usize,
+    name: *const AnsiString,
+    ordinal: u32,
+    address: *mut usize,
+) -> u32 {
+    // SAFETY: as above.
+    with_loader_lock(|| unsafe { ldr_get_procedure_address(module, name, ordinal, address) })
+}
+
+/// LdrUnloadDll(DllHandle).
+#[unsafe(no_mangle)]
+pub extern "system" fn LdrUnloadDll(module: usize) -> u32 {
+    with_loader_lock(|| ldr_unload_dll(module))
+}
+
+/// LdrGetDllFullName(DllHandle, *FullDllName): the file a module was
+/// loaded from (the executable's for a null handle) into the caller's
+/// UNICODE_STRING buffer; STATUS_BUFFER_TOO_SMALL (with the length
+/// needed) if it does not fit, STATUS_DLL_NOT_FOUND for an unknown handle.
+///
+/// # Safety
+/// `name` must point at a UNICODE_STRING with a writable buffer of
+/// MaximumLength bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn LdrGetDllFullName(module: usize, name: *mut UnicodeString) -> u32 {
+    let base = if module == 0 {
+        // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress is at +0x10.
+        unsafe {
+            let peb: usize;
+            core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+            rd64(peb + 0x10) as usize
+        }
+    } else {
+        module
+    };
+    with_loader_lock(|| {
+        let found = with_modules(|m| {
+            m.iter().find(|m| m.base == base && base != 0).map(|m| (m.path, m.path_len))
+        });
+        let Some((path, n)) = found else { return STATUS_DLL_NOT_FOUND };
+        // SAFETY: the caller's UNICODE_STRING and buffer.
+        unsafe {
+            let us = &mut *name;
+            us.length = (2 * n) as u16;
+            if usize::from(us.maximum_length) < 2 * n {
+                return 0xc000_0023; // STATUS_BUFFER_TOO_SMALL
+            }
+            core::ptr::copy_nonoverlapping(path.as_ptr(), us.buffer.cast_mut(), n);
+            if usize::from(us.maximum_length) >= 2 * n + 2 {
+                *us.buffer.cast_mut().add(n) = 0;
+            }
+        }
+        STATUS_SUCCESS
+    })
 }

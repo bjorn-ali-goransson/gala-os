@@ -794,7 +794,20 @@ Windows, never shadows the system's DLLs.)
   an absolute directory (`C:\jdk\bin\server\jvm.dll`) is loaded from
   that directory only; its imports are searched as usual. An unhandled
   exception's code and address are in the ledger before the process
-  ends. TODO: static TLS (IMAGE_TLS_DIRECTORY), DLL_THREAD_ATTACH.
+  ends. Each module keeps the path it was loaded from
+  (LdrGetDllFullName, for GetModuleFileName). The executable's static
+  imports (loaded at startup) are pinned: FreeLibrary never unloads them.
+  A recursive loader lock serializes loading, unloading and thread
+  notifications.
+- **Static TLS** (ntdll tls.rs): each image with a TLS directory gets an
+  index at load; each thread has an array at TEB.ThreadLocalStoragePointer
+  with a block per image (the template, then zero fill); a DLL loaded
+  later gets blocks in every existing thread. Threads started by kernel32
+  call `GalaInitializeThread` first (their blocks, then DLL_THREAD_ATTACH
+  to TLS callbacks and DllMains in load order; Windows does this in
+  LdrInitializeThunk) and ExitThread calls LdrShutdownThread
+  (DLL_THREAD_DETACH in reverse, then the blocks are freed).
+  DisableThreadLibraryCalls is LdrDisableThreadCalloutsForDll.
 - **The thread pool** (kernel32 pool.rs): worker threads (up to 8, started
   as needed) take callbacks from one completion port; each timer and
   wait object has a helper thread that sleeps until its due time or

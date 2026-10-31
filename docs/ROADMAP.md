@@ -465,7 +465,12 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
    and the forwarders (`seh_test`, `kernel32_misc_test`).
    Next, in order:
    1. A JDK: `java -version` from the unmodified Temurin 21 zip, then a
-      Java program. In progress (`java_version`, PENDING): xtask fetches
+      Java program. **`java -version` done** (`java_version`, about 23 s
+      in the kernel under TCG); the last pieces were static TLS and thread
+      notifications (`tls_test`), module paths (GetModuleFileName of a
+      DLL: the JVM finds itself so) and pinning the executable's static
+      imports. Next: a Java program (a class from a jar, then a small
+      HTTP server with com.sun.net.httpserver). The history: xtask fetches
       the JDK (PREBUILT, 170 MB of it as a directory tree). The import
       closure of java.exe, jvm.dll, java.dll and jimage.dll lacked ~80
       kernel32 functions, 21 advapi32 (security: SIDs, ACLs, tokens), 3

@@ -72,6 +72,7 @@ unsafe extern "system" {
     fn GetModuleFileNameW(module: Handle, buf: *mut u16, size: u32) -> u32;
     fn GetModuleFileNameA(module: Handle, buf: *mut u8, size: u32) -> u32;
     fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32;
     fn GetModuleHandleExA(flags: u32, name: *const u8, module: *mut Handle) -> Bool;
     fn GetEnvironmentStrings() -> *mut u8;
     fn FreeEnvironmentStringsA(block: *mut u8) -> Bool;
@@ -126,6 +127,7 @@ unsafe extern "C" {
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
     fn strlen(s: *const u8) -> usize;
+    fn __chkstk();
 }
 
 #[unsafe(no_mangle)]
@@ -328,6 +330,22 @@ fn process(c: &mut Checks) -> Result<(), u32> {
         let n = K32GetModuleFileNameExA(me, core::ptr::null_mut(), a.as_mut_ptr(), 260);
         let m = GetModuleFileNameA(core::ptr::null_mut(), b.as_mut_ptr(), 260);
         c.ok(n > 0 && n == m && a[..n as usize] == b[..m as usize], n.into())?;
+
+        // A DLL's file name: the system directory and its name (in any
+        // case: Windows reports KERNEL32.DLL).
+        let mut dll = [0u16; 260];
+        let n = GetModuleFileNameW(kernel32, dll.as_mut_ptr(), 260) as usize;
+        let mut want = [0u16; 260];
+        let m = GetSystemDirectoryW(want.as_mut_ptr(), 260) as usize;
+        let mut k = m;
+        for b in b"\\kernel32.dll" {
+            want[k] = u16::from(*b);
+            k += 1;
+        }
+        let lower = |c: u16| if (65..=90).contains(&c) { c + 32 } else { c };
+        c.ok(n == k && (0..n).all(|i| lower(dll[i]) == lower(want[i])), n as u64)?;
+        let n = K32GetModuleFileNameExA(me, kernel32, a.as_mut_ptr(), 260) as usize;
+        c.ok(n == k && (0..n).all(|i| lower(a[i].into()) == lower(want[i])), n as u64)?;
 
         let mut counters = [0u64; 10];
         counters[0] = 0;

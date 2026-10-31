@@ -366,22 +366,14 @@ pub extern "system" fn CreateProcessA(
 /// GetModuleFileNameW: the executable's path (other modules: reported).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetModuleFileNameW(module: Handle, buf: *mut u16, size: u32) -> u32 {
-    // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress at +0x10.
-    let image = unsafe { *((teb_u64(0x60) as usize + 0x10) as *const Handle) };
-    if !module.is_null() && module != image {
-        unsupported(b"kernel32.dll!GetModuleFileNameW(DLL)", 0);
-        return fail_with(ERROR_NOT_SUPPORTED, 0);
-    }
+    let (path, len) = match module_path(module) {
+        Ok(p) => p,
+        Err(e) => return fail_with(e, 0),
+    };
+    let path = &path[..len];
     if size == 0 {
         return fail_with(122, 0);
     }
-    // RTL_USER_PROCESS_PARAMETERS.ImagePathName (UNICODE_STRING at +0x60).
-    // SAFETY: the PEB's process parameters are always set.
-    let path = unsafe {
-        let params = *((teb_u64(0x60) as usize + 0x20) as *const usize);
-        let len = usize::from(*((params + 0x60) as *const u16)) / 2;
-        core::slice::from_raw_parts(*((params + 0x68) as *const *const u16), len)
-    };
     let n = path.len().min(size as usize - 1);
     // SAFETY: the caller's buffer of `size` characters.
     unsafe {
@@ -393,6 +385,40 @@ pub extern "system" fn GetModuleFileNameW(module: Handle, buf: *mut u16, size: u
         return fail_with(122, size);
     }
     n as u32
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn LdrGetDllFullName(module: Handle, name: *mut UnicodeString) -> u32;
+}
+
+/// The file a module was loaded from: the executable's ImagePathName for
+/// null or the executable, else the loader's record (LdrGetDllFullName);
+/// ERROR_MOD_NOT_FOUND for an unknown handle.
+pub(crate) fn module_path(module: Handle) -> Result<([u16; 520], usize), u32> {
+    let mut out = [0u16; 520];
+    // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress at +0x10.
+    let image = unsafe { *((teb_u64(0x60) as usize + 0x10) as *const Handle) };
+    if module.is_null() || module == image {
+        // RTL_USER_PROCESS_PARAMETERS.ImagePathName (UNICODE_STRING at +0x60).
+        // SAFETY: the PEB's process parameters are always set.
+        let path = unsafe {
+            let params = *((teb_u64(0x60) as usize + 0x20) as *const usize);
+            let len = usize::from(*((params + 0x60) as *const u16)) / 2;
+            core::slice::from_raw_parts(*((params + 0x68) as *const *const u16), len)
+        };
+        let n = path.len().min(out.len());
+        out[..n].copy_from_slice(&path[..n]);
+        return Ok((out, n));
+    }
+    let mut us =
+        UnicodeString { length: 0, maximum_length: (2 * out.len()) as u16, buffer: out.as_ptr() };
+    // SAFETY: a UNICODE_STRING over our buffer.
+    let status = unsafe { LdrGetDllFullName(module, &mut us) };
+    if status != STATUS_SUCCESS {
+        return Err(126); // ERROR_MOD_NOT_FOUND
+    }
+    Ok((out, usize::from(us.length) / 2))
 }
 
 /// gala's PROC_THREAD_ATTRIBUTE_LIST (opaque to programs, which only get
@@ -720,10 +746,13 @@ pub extern "system" fn IsThreadAFiber() -> Bool {
     FALSE
 }
 
-/// DisableThreadLibraryCalls: gala sends no thread notifications anyway.
+/// DisableThreadLibraryCalls: no DLL_THREAD_ATTACH/DETACH to the DLL's
+/// DllMain (LdrDisableThreadCalloutsForDll).
 #[unsafe(no_mangle)]
-pub extern "system" fn DisableThreadLibraryCalls(_module: Handle) -> Bool {
-    TRUE
+pub extern "system" fn DisableThreadLibraryCalls(module: Handle) -> Bool {
+    // SAFETY: a plain call.
+    let status = unsafe { super::LdrDisableThreadCalloutsForDll(module) };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 
 #[unsafe(no_mangle)]
