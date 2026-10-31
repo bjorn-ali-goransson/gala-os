@@ -454,10 +454,14 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
    CreateWaitableTimerA/W, RtlGetNtVersionNumbers, GetComputerName(Ex),
    GetSystem/WindowsDirectory, AddDllDirectory/SetDefaultDllDirectories,
    the user's profile (USERPROFILE, APPDATA, LOCALAPPDATA, ProgramData and
-   their directories), and registry calls answering "not found".
+   their directories), and registry calls answering "not found". Caddy
+   also serves a site to the host (`caddy file-server --listen :7`,
+   `caddy_http` scenario), with nothing new needed.
    Next, in order:
-   1. Caddy serving files to the host over the network (a net scenario,
-      like go_http and nginx).
+   1. Frame-based exception handling in ntdll (RtlVirtualUnwind,
+      dispatch to language handlers, RtlUnwindEx, RtlRaiseException,
+      RtlCaptureContext/RtlRestoreContext, RtlPcToFileHeader): what both
+      the JDK and .NET need first (`seh_test`).
    2. A JDK: `java -version` from the unmodified Temurin 21 zip, then a
       Java program. Surveyed: the JDK ships Microsoft's C runtime
       (ucrtbase, vcruntime140, the api-ms-win-* forwarders, which forward

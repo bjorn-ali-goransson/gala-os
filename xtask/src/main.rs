@@ -257,6 +257,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("caddy", "mswsock.dll", "Windows/System32"),
     ("caddy", "bcryptprimitives.dll", "Windows/System32"),
     ("caddy", "target/prebuilt/caddy/caddy.exe", "gala"),
+    ("caddy_http", "ntdll.dll", "Windows/System32"),
+    ("caddy_http", "kernel32.dll", "Windows/System32"),
+    ("caddy_http", "advapi32.dll", "Windows/System32"),
+    ("caddy_http", "winmm.dll", "Windows/System32"),
+    ("caddy_http", "ncrypt.dll", "Windows/System32"),
+    ("caddy_http", "crypt32.dll", "Windows/System32"),
+    ("caddy_http", "ws2_32.dll", "Windows/System32"),
+    ("caddy_http", "mswsock.dll", "Windows/System32"),
+    ("caddy_http", "bcryptprimitives.dll", "Windows/System32"),
+    ("caddy_http", "target/prebuilt/caddy/caddy.exe", "gala"),
+    ("caddy_http", "user/caddy/site/index.html", "caddy/site"),
     ("lua", "ntdll.dll", "Windows/System32"),
     ("lua", "kernel32.dll", "Windows/System32"),
     ("lua", "ws2_32.dll", "Windows/System32"),
@@ -796,6 +807,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("winsock_test", "winsock_test: listening on port 7", NetClient::Echo),
     ("go_http", "go_http: listening on port 7", NetClient::Http(GO_HTTP_PAGE)),
     ("nginx", "using the \"select\" event method", NetClient::Nginx),
+    ("caddy_http", "Caddy serving static files on :7", NetClient::Http(CADDY_PAGE)),
     ("nginx_master", "start worker process", NetClient::Nginx),
     ("nginx_tls", "using the \"select\" event method", NetClient::Tls),
 ];
@@ -816,6 +828,9 @@ const GO_HTTP_PAGE: &str = "hello from gala, a fortress for Windows programs\n";
 /// The page Nginx serves: its own start page (user/nginx/html/index.html,
 /// from the Nginx release), compared byte for byte.
 const NGINX_PAGE: &str = include_str!("../../user/nginx/html/index.html");
+
+/// The page Caddy serves in caddy_http (user/caddy/site/index.html).
+const CADDY_PAGE: &str = include_str!("../../user/caddy/site/index.html");
 
 /// Bytes the client sends through the echo server.
 const NET_ECHO_BYTES: usize = 65536;
@@ -1177,6 +1192,19 @@ const SCENARIOS: &[Scenario] = &[
             "http.handlers.file_server",
             "Standard modules: 121",
             "caddy.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // P1: the unmodified Caddy release as a static file server
+        // (`caddy file-server`), the host fetching its page; xtask stops
+        // the VM after the GET. Caddy logs JSON to stderr, as on Windows.
+        name: "caddy_http",
+        cmdline: "qemu_exit run=caddy.exe args=file-server%20--listen%20:7%20--root%20C:/caddy/site",
+        exit_status: XTASK_STOPS,
+        expect: &[
+            "\"msg\":\"server running\"",
+            "Caddy serving static files on :7",
+            "xtask: net client: http ok",
         ],
     },
     Scenario {

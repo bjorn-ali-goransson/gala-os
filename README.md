@@ -43,7 +43,7 @@ program and compares its output with what Windows gives.
 | **Lua** 5.4.7 | the unmodified source release is built on gala by its own makefile (37 compiler runs), then runs a test script | `lua` |
 | **SQLite** 3.54.1 | the 9.5 MB amalgamation compiled on gala by tcc; creates, queries and reopens a database file; two processes write it **at once**, using file locks | `sqlite` |
 | A C runtime test | gala's msvcrt.dll checked by a C program built with mingw-w64 - and also built by tcc on gala | `msvcrt_test`, `tcc_self` |
-| **Caddy** 2.8.4 | the **unmodified official Windows release** (not built by us): prints its version and lists its 121 modules | `caddy` |
+| **Caddy** 2.8.4 | the **unmodified official Windows release** (not built by us): prints its version, lists its 121 modules, and serves a site to the host (`caddy file-server`) | `caddy`, `caddy_http` |
 
 Most of these programs were built from their sources for gala's tests,
 but Caddy is the official release binary, downloaded from GitHub by
