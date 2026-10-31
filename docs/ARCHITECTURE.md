@@ -530,6 +530,41 @@ protect-from-close bit on a handle; file opens now keep OBJ_INHERIT from
 OBJECT_ATTRIBUTES. Not yet: overlapped pipe I/O, message mode, named
 pipe servers with several instances or ConnectNamedPipe.
 
+**NUL**: `\Device\Null` (with `\??\NUL` linking to it) opens as a file
+whose reads are at end of file and whose writes are discarded
+(FILE_DEVICE_NULL); kernel32 maps the DOS name `NUL` to `\??\NUL`.
+
+**Handle lists** (H2): CreateProcessW with EXTENDED_STARTUPINFO_PRESENT
+reads the STARTUPINFOEXW attribute list; PROC_THREAD_ATTRIBUTE_HANDLE_LIST
+is passed to GalaCreateProcess (flag 4, list at 120, count at 128), and
+then only listed inheritable handles are inherited (Go's os/exec relies
+on it: a child holding another pipe's write end would keep that pipe from
+ever reaching end of file). Other attributes fail (ledger). The attribute
+list's layout is gala's own (programs only see its size).
+**DuplicateHandle(..., NULL target, ..., DUPLICATE_CLOSE_SOURCE)** only
+closes the source (the docs: closed regardless of errors); a duplicate
+with nowhere to return it is not created.
+
+**Races found by go_exec** (fixed in nt; found with the hang dump below):
+- *Termination vs. thread creation*: `process::terminate` records the
+  exit status, then asks the threads it sees to exit; a thread created at
+  that moment was missed and kept the process alive. `add_thread` now
+  refuses (STATUS_PROCESS_IS_TERMINATING) once the status is set, checked
+  under the threads lock, so a new thread is refused or in the snapshot.
+- *Termination vs. sleeping*: a wait checked `is_terminating()` and then
+  marked itself waiting; a request in between woke nobody. Waits that
+  termination must end call `thread::wake_if_terminating()` right after
+  `platform::prepare_wait` (wait.rs, pipes, the suspension park loops).
+- *Timer arming*: NtSetTimer cleared the signal after arming, so a worker
+  firing in between had its signal wiped; it now clears first.
+
+**Hang dump**: when a `run=` program has not finished after a minute,
+the kernel logs every NT thread (`thread::dump`: process, suspend count,
+the system call it is in with the waited object, its signal state, a
+timer's due tick and the timeout) and every scheduler thread
+(`sched::dump`: state, deadline, affinity). The dispatcher records the
+service number with the caller's registers for this.
+
 ## Processes started by programs (N2b)
 
 kernel32's CreateProcessW/A calls `GalaCreateProcess` (service 0x7f02,

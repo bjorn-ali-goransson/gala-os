@@ -66,6 +66,7 @@ impl NtStatus {
     pub const MEMORY_NOT_ALLOCATED: NtStatus = NtStatus(0xc000_00a0);
     pub const INVALID_INFO_CLASS: NtStatus = NtStatus(0xc000_0003);
     pub const INFO_LENGTH_MISMATCH: NtStatus = NtStatus(0xc000_0004);
+    pub const PROCESS_IS_TERMINATING: NtStatus = NtStatus(0xc000_010a);
     // Named pipes.
     pub const INSTANCE_NOT_AVAILABLE: NtStatus = NtStatus(0xc000_00ab);
     pub const PIPE_NOT_AVAILABLE: NtStatus = NtStatus(0xc000_00ac);

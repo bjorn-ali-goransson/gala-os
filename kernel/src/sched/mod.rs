@@ -660,6 +660,19 @@ fn idle_loop(_: usize) {
     }
 }
 
+/// Logs every thread's scheduling state (for hangs; see `nt::thread::dump`).
+pub fn dump() {
+    let now = time::ticks();
+    with(|s| {
+        for (i, t) in s.threads.iter().enumerate() {
+            info!(
+                "sched: thread {i} ({}) {:?} affinity {:#x} (now tick {now})",
+                t.name, t.state, t.affinity
+            );
+        }
+    });
+}
+
 /// `(id, name, state)` for every thread, for diagnostics.
 pub fn for_each_thread(mut f: impl FnMut(ThreadId, &'static str, &'static str)) {
     with(|s| {

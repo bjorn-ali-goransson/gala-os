@@ -125,6 +125,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("go_os", "ntdll.dll", "Windows/System32"),
     ("go_os", "kernel32.dll", "Windows/System32"),
     ("go_os", "bcryptprimitives.dll", "Windows/System32"),
+    ("go_exec", "ntdll.dll", "Windows/System32"),
+    ("go_exec", "kernel32.dll", "Windows/System32"),
+    ("go_exec", "bcryptprimitives.dll", "Windows/System32"),
     ("go_http", "ntdll.dll", "Windows/System32"),
     ("go_http", "kernel32.dll", "Windows/System32"),
     ("go_http", "bcryptprimitives.dll", "Windows/System32"),
@@ -182,7 +185,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
 /// user/bin is used). Reproducible: -trimpath and an empty build id.
 const GO_PROGRAMS: &[&str] =
-    &["go_hello", "go_goroutines", "go_time", "go_gc", "go_os", "go_exit", "go_http"];
+    &["go_hello", "go_goroutines", "go_time", "go_gc", "go_os", "go_exit", "go_http", "go_exec"];
 const GO_TOOLCHAIN: &str = "go1.24.7";
 
 const USER_PROGRAMS: &[&str] = &[
@@ -825,6 +828,13 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["go_os: ok", "go_os.exe finished with status 0x00000000"],
     },
     Scenario {
+        // H2: os/exec with pipes (the program runs itself as children).
+        name: "go_exec",
+        cmdline: "qemu_exit run=go_exec.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["go_exec: ok", "go_exec.exe finished with status 0x00000000"],
+    },
+    Scenario {
         // N2b: CreateProcessW (the test starts itself as a child).
         name: "process_test",
         cmdline: "qemu_exit run=process_test.exe",
@@ -1363,6 +1373,7 @@ fn run_parallel<J: Sync, T: Send>(
 const NOT_IN_UM: &[(&str, &str)] = &[
     ("process_test", "child processes (one NT process per Linux process)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
+    ("go_exec", "child processes (one NT process per Linux process)"),
 ];
 
 /// Whether gala-um runs scenario `s`: a program's own scenario (its

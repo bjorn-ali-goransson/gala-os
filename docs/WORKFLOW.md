@@ -258,6 +258,17 @@ caught). Needs Linux 5.11+ (syscall user dispatch). `gdb -p` works
 `thread apply all bt` shows where NT threads are inside the NT layer:
 that is how the lock starvation and the GetContext bug were found.
 
+## Hunting a rare hang
+
+A scenario that fails once in N runs: loop `cargo xtask boot-test <name>`
+until it fails and keep that serial log. After a minute without the
+program finishing the kernel dumps every thread (see ARCHITECTURE, "Hang
+dump"): which system call each NT thread is in, on which object, with
+which timeout. Tracing (`trace`) changes the timing enough to hide such
+races, so prefer the dump. In gala-um, catch a hung instance live and
+use `gdb -p` (`thread apply all bt`); its process is named `exe` after
+gala-um re-executes itself without ASLR.
+
 ## Debugging
 
 - `XTASK_VERBOSE=1 cargo xtask boot-test name` prints the serial log; logs

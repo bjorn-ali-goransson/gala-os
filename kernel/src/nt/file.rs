@@ -85,6 +85,12 @@ pub fn init() -> Result<(), NtStatus> {
     let c_drive = namespace::new_symbolic_link(&wide(VOLUME_DEVICE)?)?;
     namespace::create(None, &wide("\\??\\C:")?, c_drive, false, false)?;
     drop(volume);
+    // The NUL device, and the DOS name for it.
+    let null =
+        KObject::with_permanence(ObjectBody::NullDevice, true).map_err(|_| NtStatus::NO_MEMORY)?;
+    namespace::create(None, &wide("\\Device\\Null")?, null, false, false)?;
+    let link = namespace::new_symbolic_link(&wide("\\Device\\Null")?)?;
+    namespace::create(None, &wide("\\??\\NUL")?, link, false, false)?;
     Ok(())
 }
 

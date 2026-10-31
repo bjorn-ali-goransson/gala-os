@@ -60,7 +60,7 @@ pub struct NtThread {
     /// While it is inside a system call: its user registers at the
     /// `syscall` (the context Windows reports for a thread suspended while
     /// blocked in one).
-    in_syscall: IrqMutex<Option<UserRegs>>,
+    in_syscall: IrqMutex<Option<(u32, UserRegs)>>,
 }
 
 /// The user state of a thread parked by suspension.
@@ -210,9 +210,9 @@ pub fn create(
     };
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
-    if process.add_thread(object.clone()).is_err() {
+    if let Err(status) = process.add_thread(object.clone()) {
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
-        return Err(NtStatus::NO_MEMORY);
+        return Err(status);
     }
     match platform::spawn_user(
         process.name,
@@ -286,6 +286,9 @@ fn thread_entry(id: usize) {
             break;
         }
         platform::prepare_wait(None);
+        if t.terminate_request.lock().is_some() {
+            platform::wake(platform::current()); // see `wake_if_terminating`
+        }
         drop(count);
         platform::wait();
     }
@@ -413,6 +416,20 @@ pub fn is_terminating() -> bool {
     current().is_some_and(|o| as_thread(&o).terminate_request.lock().is_some())
 }
 
+/// For waits that termination must end: call right after
+/// `platform::prepare_wait`. `request_termination` sets the request, then
+/// wakes the thread, which only works once it is marked waiting; checking
+/// here, after `prepare_wait`, closes the gap: a request made before this
+/// check is seen (the thread wakes itself, so `wait` returns at once), one
+/// made after finds it waiting. (Without it a thread asked to terminate
+/// just before it slept slept forever: Go's ExitProcess then never ended
+/// the process.)
+pub fn wake_if_terminating() {
+    if is_terminating() {
+        platform::wake(platform::current());
+    }
+}
+
 /// Runs on every return to user mode: acts on a pending termination.
 fn on_user_return(regs: &mut UserRegs) -> bool {
     let Some(object) = current() else { return false };
@@ -434,6 +451,9 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
             break;
         }
         platform::prepare_wait(None);
+        if t.terminate_request.lock().is_some() {
+            platform::wake(platform::current()); // see `wake_if_terminating`
+        }
         drop(count);
         platform::wait();
     }
@@ -476,7 +496,7 @@ pub fn suspend(object: &ObjectRef) -> Result<u32, NtStatus> {
 
 /// Records (or clears) the current thread's user registers while it is in
 /// a system call (the dispatcher calls this around every service).
-pub fn set_in_syscall(object: &ObjectRef, regs: Option<UserRegs>) {
+pub fn set_in_syscall(object: &ObjectRef, regs: Option<(u32, UserRegs)>) {
     *as_thread(object).in_syscall.lock() = regs;
 }
 
@@ -493,7 +513,7 @@ pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
         if *t.suspend_count.lock() == 0 || t.has_exited() {
             break;
         }
-        if let Some(regs) = *t.in_syscall.lock() {
+        if let Some((_, regs)) = *t.in_syscall.lock() {
             return Ok(Parked { regs, fx: default_fx(), changed: false });
         }
         platform::sleep_ms(1);
@@ -501,6 +521,47 @@ pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
     // TODO: the context of a thread that is not suspended (Windows
     // interrupts it with a kernel APC).
     Err(NtStatus::UNSUCCESSFUL)
+}
+
+/// Logs every NT thread: its process, suspend count, and the system call
+/// it is in (its user rip, and for a wait the object, its signal state, a
+/// timer's due tick and the timeout) or that it runs user code. For hangs
+/// (the kernel's `run=` dumps this when a program takes over a minute).
+pub fn dump() {
+    let threads = THREADS.lock().clone();
+    for object in threads.iter() {
+        let t = as_thread(object);
+        let in_syscall = *t.in_syscall.lock();
+        info!(
+            "thread: pid {} tid {} (sched {:?}) suspend {} exited {} in a system call {}",
+            t.process.id,
+            t.id,
+            *t.sched_id.lock(),
+            *t.suspend_count.lock(),
+            t.has_exited(),
+            in_syscall.is_some()
+        );
+        let Some((number, regs)) = in_syscall else { continue };
+        let name = super::syscalls::service_name(number);
+        info!("thread:   {name} from rip {:#x}", regs.rip);
+        // The first argument (r10), as a handle: what a wait is on.
+        let handle = super::object::Handle(regs.gpr[10]);
+        if let Some(e) = t.process.handles.lock().get(handle) {
+            let signal = e.object.dispatcher().map_or(-1, |d| d.signal_state());
+            info!("thread:   on handle {:#x}: {} signal {signal}", handle.0, e.object.type_name());
+            if let ObjectBody::Timer(timer) = &e.object.body {
+                info!(
+                    "thread:   timer due tick {:?} (now {})",
+                    timer.state.lock().due,
+                    platform::ticks()
+                );
+            }
+        }
+        // NtWaitForSingleObject's timeout (r8: *LARGE_INTEGER).
+        if name == "NtWaitForSingleObject" && regs.gpr[8] != 0 {
+            info!("thread:   timeout {:?}", t.process.read_u64(regs.gpr[8]).ok().map(|v| v as i64));
+        }
+    }
 }
 
 /// The floating-point state after reset (FCW 0x37f, MXCSR 0x1f80).
@@ -532,6 +593,11 @@ pub fn set_parked_state(
 
 /// Ends the current thread with `status`. If it was the last thread of its
 /// process, the process ends too.
+/// Whether the thread's process is ending (all its threads go with it).
+fn process_is_exiting(t: &NtThread) -> bool {
+    t.process.exit_status().is_some()
+}
+
 pub fn exit_current(status: NtStatus) -> ! {
     // Everything referenced here must be dropped before `platform::exit`,
     // which never returns.
@@ -544,6 +610,14 @@ pub fn exit_current(status: NtStatus) -> ! {
             format_args!(r#""pid":{},"tid":{},"status":{}"#, t.process.id, t.id, status.0),
         );
         *t.exit_time.lock() = platform::system_time();
+        if status != NtStatus::SUCCESS && !process_is_exiting(t) {
+            // A thread dying alone with an error is worth a line (a hang
+            // that follows is often its consequence).
+            info!(
+                "thread: pid {} tid {} exited with status {:#010x}",
+                t.process.id, t.id, status.0
+            );
+        }
         // Leave the process before waking waiters: once the thread object
         // is signaled, the thread must no longer count as live (e.g. for
         // ThreadAmILastThread).

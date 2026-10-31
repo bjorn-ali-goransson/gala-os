@@ -17,6 +17,7 @@ use std::process::ExitCode;
 static ALLOCATOR: kernel::hosted::memory::Allocator = kernel::hosted::memory::Allocator;
 
 fn main() -> ExitCode {
+    kernel::hosted::fix_address_space();
     let mut args = std::env::args().skip(1).peekable();
     let mut modules = Vec::new();
     while let Some(option) = args.next_if(|a| a.starts_with("--")) {

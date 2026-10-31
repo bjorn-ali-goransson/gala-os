@@ -207,6 +207,7 @@ pub fn wait_for_alertable(
         }
         super::thread::set_alertable(alertable);
         platform::prepare_wait(timeout.deadline());
+        super::thread::wake_if_terminating();
         drop(guard);
         let reason = platform::wait();
         super::thread::set_alertable(false);
@@ -250,6 +251,7 @@ pub fn delay(timeout: Timeout, alertable: bool) -> NtStatus {
             if !super::thread::is_terminating() {
                 super::thread::set_alertable(alertable);
                 platform::prepare_wait(t.deadline());
+                super::thread::wake_if_terminating();
                 drop(guard);
                 platform::wait();
                 super::thread::set_alertable(false);

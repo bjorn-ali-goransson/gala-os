@@ -325,11 +325,16 @@ fn run_program(info: &BootInfo, name: &str, args: &str) {
                 // Wait for the whole process (all threads) to end.
                 match nt::object::KObject::new(nt::object::ObjectBody::Process(process.clone())) {
                     Ok(object) => {
-                        nt::wait::wait_for(
-                            core::slice::from_ref(&object),
-                            false,
-                            nt::wait::Timeout::Infinite,
-                        );
+                        let one = core::slice::from_ref(&object);
+                        // A minute without finishing: log every thread's
+                        // state (what a hang is waiting for), then wait on.
+                        let minute = nt::wait::Timeout::Tick(time::ticks() + 60 * time::TICK_HZ);
+                        if nt::wait::wait_for(one, false, minute) == nt::status::NtStatus::TIMEOUT {
+                            warn!("run: {} still running after a minute; threads:", process.name);
+                            nt::thread::dump();
+                            sched::dump();
+                        }
+                        nt::wait::wait_for(one, false, nt::wait::Timeout::Infinite);
                     }
                     Err(_) => error!("run: out of memory"),
                 }

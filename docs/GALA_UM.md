@@ -246,6 +246,14 @@ One processor as far as programs can tell (`online_count` 1).
 - Scenarios that test the kernel itself (selftest, fault-*, trace,
   events).
 
+**Fixed layout** (2026-10-31): ASLR once put a host library on the
+process parameters page (0x7ff0_0001_0000). `hosted::fix_address_space`
+(first thing in um's main) turns randomization off with
+`personality(ADDR_NO_RANDOMIZE)` and re-executes itself (as `setarch -R`
+does); the host's libraries then sit just below 0x7fff_f7.., far from
+gala's structures, and runs are reproducible. The re-executed process's
+name is `exe`.
+
 ## Steps
 
 1. **U1**: inventory every `crate::arch`/`sched`/`mm` use in `nt/`;

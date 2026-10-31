@@ -335,6 +335,11 @@ pub enum ObjectBody {
     NamedPipeDevice,
     /// One end of a pipe.
     Pipe(super::pipe::PipeEnd),
+    /// `\Device\Null` (`\??\NUL`, the DOS device NUL).
+    NullDevice,
+    /// An open of `\Device\Null`: reads are at end of file, writes are
+    /// discarded. Signaled (waits on it return at once).
+    Null(Dispatcher),
 }
 
 /// Where a named object lives in the namespace.
@@ -393,6 +398,8 @@ impl KObject {
             ObjectBody::Socket(_) => "File",
             ObjectBody::NamedPipeDevice => "Device",
             ObjectBody::Pipe(_) => "File",
+            ObjectBody::NullDevice => "Device",
+            ObjectBody::Null(_) => "File",
         }
     }
 
@@ -423,6 +430,7 @@ impl KObject {
             ObjectBody::File(f) => Some(&f.dispatcher),
             ObjectBody::Socket(e) => Some(&e.state.dispatcher),
             ObjectBody::Pipe(p) => Some(&p.dispatcher),
+            ObjectBody::Null(d) => Some(d),
             ObjectBody::ConsoleInput
             | ObjectBody::ConsoleOutput
             | ObjectBody::Directory(_)
@@ -430,7 +438,8 @@ impl KObject {
             | ObjectBody::Section(_)
             | ObjectBody::Volume
             | ObjectBody::AfdDevice
-            | ObjectBody::NamedPipeDevice => None,
+            | ObjectBody::NamedPipeDevice
+            | ObjectBody::NullDevice => None,
         }
     }
 
@@ -450,7 +459,9 @@ impl KObject {
             | ObjectBody::AfdDevice
             | ObjectBody::Socket(_)
             | ObjectBody::NamedPipeDevice
-            | ObjectBody::Pipe(_) => FILE_MAPPING,
+            | ObjectBody::Pipe(_)
+            | ObjectBody::NullDevice
+            | ObjectBody::Null(_) => FILE_MAPPING,
             ObjectBody::Process(_) => PROCESS_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,

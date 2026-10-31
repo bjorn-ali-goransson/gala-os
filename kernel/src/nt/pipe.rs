@@ -144,6 +144,7 @@ impl PipeEnd {
             s.waiters.try_push(me).map_err(|_| NtStatus::NO_MEMORY)?;
         }
         platform::prepare_wait(None);
+        super::thread::wake_if_terminating();
         drop(s);
         platform::wait();
         if super::thread::is_terminating() {

@@ -212,6 +212,7 @@ to set and to argue for. Current order and why:
    and real programs beyond servers need it too. H1 (pipes, redirected
    child stdio) done; next H2 (a real CLI tool or shell-like program
    driving children through pipes, chosen from what the ledger shows).
+   H2 step 1 (Go's os/exec) done; next busybox-w32.
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
@@ -318,7 +319,14 @@ H1. **Pipes and redirected child stdio**: done 2026-10-31. pipe_test
    `\Device\NamedPipe`, NtCreateNamedPipeFile, client opens, FSCTL_PIPE_PEEK
    (NtFsControlFile), ObjectHandleFlagInformation (NtQueryObject,
    NtSetInformationObject), OBJ_INHERIT honoured on file opens.
-H2. **A real program driving children through pipes** (next).
+H2. **A real program driving children through pipes**: step 1 done
+   2026-10-31, go_exec (Go's os/exec: Output, CombinedOutput, exit codes,
+   streaming through a cat-like child). It needed the NUL device,
+   STARTUPINFOEX handle lists (Initialize/UpdateProcThreadAttribute),
+   DuplicateHandle's close-only form and GetProcessTimes, and it exposed
+   three races in the NT layer, fixed for both platforms (ARCHITECTURE,
+   "Races found by go_exec"). Next: busybox-w32 (sh, coreutils) as the
+   first shell.
 H3. **A toolchain on gala** (later; see "Later").
 
 ## Later

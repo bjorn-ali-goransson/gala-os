@@ -45,6 +45,9 @@ pub struct Process {
     exception_dispatcher: core::sync::atomic::AtomicU64,
     /// ntdll!KiUserApcDispatcher in this process, or 0 (no user APCs run).
     pub apc_dispatcher: core::sync::atomic::AtomicU64,
+    /// NT times (ProcessTimes); exit time 0 while it runs.
+    pub create_time: u64,
+    pub exit_time: IrqMutex<u64>,
 }
 
 impl fmt::Debug for Process {
@@ -71,8 +74,18 @@ impl Process {
         *self.exit_status.lock()
     }
 
-    pub fn add_thread(&self, thread: ObjectRef) -> Result<(), AllocError> {
-        self.threads.lock().try_push(thread)
+    /// Adds a new thread, unless the process is terminating: `terminate`
+    /// records the exit status before it snapshots the threads, so checking
+    /// it under the threads lock means a thread created concurrently is
+    /// either refused or in the snapshot (and asked to terminate). Go's
+    /// runtime creating a thread while another called ExitProcess left a
+    /// process that never ended.
+    pub fn add_thread(&self, thread: ObjectRef) -> Result<(), NtStatus> {
+        let mut threads = self.threads.lock();
+        if self.exit_status.lock().is_some() {
+            return Err(NtStatus::PROCESS_IS_TERMINATING);
+        }
+        threads.try_push(thread).map_err(|_| NtStatus::NO_MEMORY)
     }
 
     /// Removes `thread`; whether it was the last one (decided under the
@@ -544,6 +557,8 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
         image: (base, u64::from(image.size_of_image)),
         exception_dispatcher: core::sync::atomic::AtomicU64::new(0),
         apc_dispatcher: core::sync::atomic::AtomicU64::new(0),
+        create_time: platform::system_time(),
+        exit_time: IrqMutex::new(0),
     })?;
     PROCESSES.lock().try_push(process.clone())?;
 
@@ -654,6 +669,7 @@ pub fn terminate_current(status: NtStatus) {
 /// Called when the last thread of `process` has exited.
 pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     let status = *process.exit_status.lock().get_or_insert(last_status);
+    *process.exit_time.lock() = platform::system_time();
     info!("process {} (pid {}) exited with status {:#010x}", process.name, process.id, status.0);
     crate::events::emit(
         crate::events::Category::Process,

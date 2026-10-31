@@ -215,6 +215,11 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_PROTECT_VIRTUAL_MEMORY, "NtProtectVirtualMemory", 5, nt_protect_virtual_memory),
 ];
 
+/// The name of service `number` (for diagnostics).
+pub fn service_name(number: u32) -> &'static str {
+    TABLE.iter().find(|(n, ..)| *n == number).map_or("an unknown service", |&(_, name, ..)| name)
+}
+
 /// One system call in progress.
 pub struct Call<'a> {
     frame: &'a SyscallFrame,
@@ -308,7 +313,7 @@ fn dispatch(frame: &mut SyscallFrame) {
     let started =
         crate::events::enabled(crate::events::Category::Syscall).then(platform::monotonic_ns);
     let mut call = Call { frame, process };
-    thread::set_in_syscall(&me, Some(caller_regs(&call)));
+    thread::set_in_syscall(&me, Some((number, caller_regs(&call))));
     let status = match service {
         Some((.., handler)) => handler(&mut call),
         None => {
@@ -475,6 +480,10 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
     }
     if let ObjectBody::Pipe(end) = &entry.object.body {
         return pipe_io(call, &entry, end, io_status, buffer, length, true);
+    }
+    if let ObjectBody::Null(_) = &entry.object.body {
+        tri!(call.write_iosb(io_status, NtStatus::SUCCESS, u64::from(length)));
+        return NtStatus::SUCCESS;
     }
     if !matches!(entry.object.body, ObjectBody::ConsoleOutput) {
         return NtStatus::OBJECT_TYPE_MISMATCH;
@@ -1367,9 +1376,33 @@ const DUPLICATE_SAME_ATTRIBUTES: u32 = 4;
 fn nt_duplicate_object(call: &mut Call<'_>) -> NtStatus {
     tri!(call.check_current_process(Handle(arg!(call, 0))));
     let source = Handle(arg!(call, 1));
-    tri!(call.check_current_process(Handle(arg!(call, 2))));
-    let (out, access, attributes, options) =
-        (arg!(call, 3), arg!(call, 4) as u32, arg!(call, 5) as u32, arg!(call, 6) as u32);
+    let (target_process, out, access, attributes, options) = (
+        arg!(call, 2),
+        arg!(call, 3),
+        arg!(call, 4) as u32,
+        arg!(call, 5) as u32,
+        arg!(call, 6) as u32,
+    );
+    // DUPLICATE_CLOSE_SOURCE closes the source whatever else happens (the
+    // DuplicateHandle docs); with no target process or no target handle it
+    // only closes (Go's os/exec closes handles this way).
+    let close_only = target_process == 0 || out == 0;
+    if options & DUPLICATE_CLOSE_SOURCE != 0 && close_only {
+        return match call.process.handles.lock().close(source) {
+            Some(_) => NtStatus::SUCCESS,
+            None => NtStatus::INVALID_HANDLE,
+        };
+    }
+    if let Err(status) = call.check_current_process(Handle(target_process)) {
+        if options & DUPLICATE_CLOSE_SOURCE != 0 {
+            call.process.handles.lock().close(source);
+        }
+        return status;
+    }
+    if out == 0 {
+        // Nowhere to return a duplicate: nothing to do.
+        return NtStatus::SUCCESS;
+    }
     let entry = tri!(call.handle(source));
     let new = HandleEntry {
         access: if options & DUPLICATE_SAME_ACCESS != 0 {
@@ -1390,7 +1423,7 @@ fn nt_duplicate_object(call: &mut Call<'_>) -> NtStatus {
         handles.close(source);
     }
     drop(handles);
-    if out != 0 && call.write_u64(out, handle.0).is_err() {
+    if call.write_u64(out, handle.0).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS
@@ -1698,6 +1731,14 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
             // No debugger; not a WOW64 process.
             return call.return_info(&0u64.to_le_bytes(), buffer, length, ret_ptr);
         }
+        PROCESS_TIMES => {
+            // KERNEL_USER_TIMES { CreateTime, ExitTime, KernelTime,
+            // UserTime }; CPU times are not accounted yet (0).
+            let mut t = [0u8; 32];
+            t[0..8].copy_from_slice(&p.create_time.to_le_bytes());
+            t[8..16].copy_from_slice(&p.exit_time.lock().to_le_bytes());
+            return call.return_info(&t, buffer, length, ret_ptr);
+        }
         PROCESS_SESSION_INFORMATION => {
             let session = process::SESSION_ID.to_le_bytes();
             return call.return_info(&session, buffer, length, ret_ptr);
@@ -1731,6 +1772,7 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
     call.return_info(&b, buffer, length, ret_ptr)
 }
 
+const PROCESS_TIMES: u64 = 4;
 const PROCESS_DEBUG_PORT: u64 = 7;
 const PROCESS_SESSION_INFORMATION: u64 = 24;
 const PROCESS_WOW64_INFORMATION: u64 = 26;
@@ -2316,6 +2358,17 @@ impl Call<'_> {
         })
     }
 
+    /// Whether OBJECT_ATTRIBUTES name `\Device\Null` (`\??\NUL`).
+    fn names_null(&self, attrs_ptr: u64) -> Result<bool, NtStatus> {
+        let Some((0, name, attributes)) = self.raw_object_attributes(attrs_ptr)? else {
+            return Ok(false);
+        };
+        let ci = attributes & OBJ_CASE_INSENSITIVE != 0;
+        Ok(namespace::lookup_parse(None, &name, ci).is_ok_and(|(device, rest)| {
+            matches!(device.body, ObjectBody::NullDevice) && rest.is_empty()
+        }))
+    }
+
     /// The handle attributes (OBJ_INHERIT) asked for in OBJECT_ATTRIBUTES.
     fn handle_attributes(&self, attrs_ptr: u64) -> Result<u32, NtStatus> {
         Ok(self.raw_object_attributes(attrs_ptr)?.map_or(0, |(_, _, a)| a & HANDLE_ATTRIBUTES))
@@ -2342,6 +2395,11 @@ impl Call<'_> {
         let (object, information) = if tri!(self.names_afd(attrs_ptr)) {
             let ea = tri!(self.ea_buffer(ea.0, ea.1));
             (tri!(super::afd::open(&ea)), file::FILE_OPENED)
+        } else if tri!(self.names_null(attrs_ptr)) {
+            let Ok(object) = KObject::new(ObjectBody::Null(Dispatcher::new(1))) else {
+                return NtStatus::NO_MEMORY;
+            };
+            (object, file::FILE_OPENED)
         } else if let Some(name) = tri!(self.pipe_name(attrs_ptr)) {
             let end = tri!(super::pipe::open_client(&name));
             let Ok(object) = KObject::new(ObjectBody::Pipe(end)) else {
@@ -2595,6 +2653,26 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
     let directory = tri!(utf8_of(&tri!(call.read_wide(u64_at(32), u32_at(40)))));
     let environment = tri!(utf8_of(&tri!(call.read_wide(u64_at(48), u32_at(56)))));
     let std = [u64_at(64), u64_at(72), u64_at(80)];
+    // Flag 4: only the handles listed at 120 (count at 128) are inherited
+    // (PROC_THREAD_ATTRIBUTE_HANDLE_LIST).
+    let mut list: Vec<u64> = Vec::new();
+    if flags & 4 != 0 {
+        let mut ext = [0u8; 16];
+        if call.process.read(ptr + 120, &mut ext).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        let at = u64::from_le_bytes(ext[0..8].try_into().unwrap_or([0; 8]));
+        let count = u32::from_le_bytes(ext[8..12].try_into().unwrap_or([0; 4]));
+        if count > 256 {
+            return NtStatus::INVALID_PARAMETER;
+        }
+        for i in 0..u64::from(count) {
+            let h = tri!(call.read_u64(at + 8 * i));
+            if list.try_push(h).is_err() {
+                return NtStatus::NO_MEMORY;
+            }
+        }
+    }
 
     // Open and read the image (missing: STATUS_OBJECT_NAME_NOT_FOUND).
     let path = tri!(call.resolve_file_name(0, image.clone(), OBJ_CASE_INSENSITIVE));
@@ -2622,8 +2700,9 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
     {
         let parent = call.process.handles.lock();
         for (h, entry) in parent.iter() {
-            let wanted =
-                (inherit && entry.attributes & HANDLE_ATTRIBUTES != 0) || std.contains(&h.0);
+            let listed = flags & 4 == 0 || list.contains(&h.0);
+            let wanted = (inherit && listed && entry.attributes & HANDLE_ATTRIBUTES != 0)
+                || std.contains(&h.0);
             if wanted && table.insert_at(h, entry.clone()).is_err() {
                 return NtStatus::NO_MEMORY;
             }
@@ -2761,6 +2840,11 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
         (arg!(call, 4), arg!(call, 5), arg!(call, 6) as u32, arg!(call, 7));
     if let ObjectBody::Pipe(end) = &entry.object.body {
         return pipe_io(call, &entry, end, iosb, buffer, length, false);
+    }
+    if let ObjectBody::Null(_) = &entry.object.body {
+        let status = if length == 0 { NtStatus::SUCCESS } else { NtStatus::END_OF_FILE };
+        tri!(call.write_iosb(iosb, status, 0));
+        return status;
     }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     let apc = tri!(io_apc(call, file, iosb));
@@ -3297,6 +3381,7 @@ fn nt_query_volume_information_file(call: &mut Call<'_>) -> NtStatus {
     let device = match entry.object.body {
         ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => Some(0x50u32),
         ObjectBody::Pipe(_) => Some(0x11),
+        ObjectBody::Null(_) => Some(0x15), // FILE_DEVICE_NULL
         _ => None,
     };
     if let Some(device) = device

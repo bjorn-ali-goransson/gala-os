@@ -20,6 +20,11 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const IGNORED_FLAGS: u32 =
     DETACHED_PROCESS | CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
 const STARTF_USESTDHANDLES: u32 = 0x100;
+const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
+const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x2_0002;
+/// Attributes a list holds at most (enough for every documented one).
+const MAX_ATTRIBUTES: u32 = 16;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 
 /// The program's path from the application name or, without one, the
@@ -132,7 +137,11 @@ pub extern "system" fn CreateProcessW(
     if !process_attributes.is_null() || !thread_attributes.is_null() {
         unsupported(b"kernel32.dll!CreateProcessW(security attributes)", 0);
     }
-    let unknown = flags & !(CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | IGNORED_FLAGS);
+    let unknown = flags
+        & !(CREATE_SUSPENDED
+            | CREATE_UNICODE_ENVIRONMENT
+            | EXTENDED_STARTUPINFO_PRESENT
+            | IGNORED_FLAGS);
     if unknown != 0 {
         unsupported(b"kernel32.dll!CreateProcessW(flags)", unknown.into());
     }
@@ -202,7 +211,15 @@ pub extern "system" fn CreateProcessW(
             ]
         }
     };
-    let mut p = [0u8; 120];
+    // STARTUPINFOEXW: lpAttributeList after the 104-byte STARTUPINFOW.
+    let handle_list = if flags & EXTENDED_STARTUPINFO_PRESENT != 0 && !startup.is_null() {
+        // SAFETY: the caller's STARTUPINFOEXW (cb is at least 112).
+        let list = unsafe { *startup.add(104).cast::<*const AttributeList>() };
+        attribute(list, PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
+    } else {
+        None
+    };
+    let mut p = [0u8; 136];
     let mut put = |at: usize, v: u64| p[at..at + 8].copy_from_slice(&v.to_le_bytes());
     put(0, image.chars.as_ptr() as u64);
     put(16, line.as_ptr() as u64);
@@ -222,8 +239,13 @@ pub extern "system" fn CreateProcessW(
     if flags & CREATE_SUSPENDED != 0 {
         bits |= 2;
     }
+    if let Some((handles, size)) = handle_list {
+        bits |= 4;
+        p[120..128].copy_from_slice(&(handles as u64).to_le_bytes());
+        p[128..132].copy_from_slice(&((size / 8) as u32).to_le_bytes());
+    }
     p[12..16].copy_from_slice(&bits.to_le_bytes());
-    // SAFETY: the 120-byte parameter block; its pointers live through
+    // SAFETY: the 136-byte parameter block; its pointers live through
     // the call.
     let status = unsafe { GalaCreateProcess(p.as_mut_ptr()) };
     if own_env {
@@ -330,4 +352,122 @@ pub extern "system" fn GetModuleFileNameW(module: Handle, buf: *mut u16, size: u
         return fail_with(122, size);
     }
     n as u32
+}
+
+/// gala's PROC_THREAD_ATTRIBUTE_LIST (opaque to programs, which only get
+/// its size): a count and the attributes as (attribute, value, size).
+#[repr(C)]
+pub struct AttributeList {
+    capacity: u32,
+    count: u32,
+    entries: [(usize, usize, usize); MAX_ATTRIBUTES as usize],
+}
+
+/// The (value, size) of `attribute` in `list`, if it is there.
+fn attribute(list: *const AttributeList, attribute: usize) -> Option<(usize, usize)> {
+    if list.is_null() {
+        return None;
+    }
+    // SAFETY: a list initialised by InitializeProcThreadAttributeList.
+    let list = unsafe { &*list };
+    list.entries[..list.count.min(list.capacity) as usize]
+        .iter()
+        .find(|e| e.0 == attribute)
+        .map(|e| (e.1, e.2))
+}
+
+/// InitializeProcThreadAttributeList(lpAttributeList, dwAttributeCount,
+/// dwFlags, *lpSize): with a null list, the size it needs
+/// (ERROR_INSUFFICIENT_BUFFER).
+#[unsafe(no_mangle)]
+pub extern "system" fn InitializeProcThreadAttributeList(
+    list: *mut AttributeList,
+    count: u32,
+    flags: u32,
+    size: *mut usize,
+) -> Bool {
+    if flags != 0 || count > MAX_ATTRIBUTES || size.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let needed = core::mem::size_of::<AttributeList>();
+    // SAFETY: the caller's size and list (of *size bytes).
+    unsafe {
+        if list.is_null() || *size < needed {
+            *size = needed;
+            return fail_with(ERROR_INSUFFICIENT_BUFFER, FALSE);
+        }
+        list.write(AttributeList { capacity: count, count: 0, entries: [(0, 0, 0); 16] });
+    }
+    TRUE
+}
+
+/// UpdateProcThreadAttribute(lpAttributeList, dwFlags, Attribute, lpValue,
+/// cbSize, lpPreviousValue, lpReturnSize): the value is kept by pointer,
+/// as on Windows (it must live until CreateProcess).
+#[unsafe(no_mangle)]
+pub extern "system" fn UpdateProcThreadAttribute(
+    list: *mut AttributeList,
+    flags: u32,
+    attribute: usize,
+    value: usize,
+    size: usize,
+    _previous: *mut c_void,
+    _return_size: *mut usize,
+) -> Bool {
+    if list.is_null() || flags != 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if attribute == PROC_THREAD_ATTRIBUTE_HANDLE_LIST {
+        if size == 0 || !size.is_multiple_of(8) {
+            return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+        }
+    } else {
+        // Recorded so the ledger shows which attributes programs use.
+        unsupported(b"kernel32.dll!UpdateProcThreadAttribute(attribute)", attribute as u64);
+        return fail_with(ERROR_NOT_SUPPORTED, FALSE);
+    }
+    // SAFETY: a list initialised by InitializeProcThreadAttributeList.
+    let list = unsafe { &mut *list };
+    if list.count >= list.capacity {
+        return fail_with(ERROR_INSUFFICIENT_BUFFER, FALSE);
+    }
+    list.entries[list.count as usize] = (attribute, value, size);
+    list.count += 1;
+    TRUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DeleteProcThreadAttributeList(_list: *mut AttributeList) {}
+
+/// GetProcessTimes(hProcess, *lpCreationTime, *lpExitTime, *lpKernelTime,
+/// *lpUserTime): ProcessTimes (KERNEL_USER_TIMES).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetProcessTimes(
+    process: Handle,
+    creation: *mut u64,
+    exit: *mut u64,
+    kernel: *mut u64,
+    user: *mut u64,
+) -> Bool {
+    let mut t = [0u64; 4];
+    // SAFETY: a 32-byte KERNEL_USER_TIMES buffer.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process as isize,
+            4,
+            t.as_mut_ptr().cast(),
+            32,
+            core::ptr::null_mut(),
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    for (out, v) in [creation, exit, kernel, user].into_iter().zip(t) {
+        if !out.is_null() {
+            // SAFETY: the caller's FILETIME (8 bytes, maybe unaligned).
+            unsafe { out.write_unaligned(v) };
+        }
+    }
+    TRUE
 }

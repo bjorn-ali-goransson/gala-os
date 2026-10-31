@@ -33,6 +33,35 @@ use crate::sched::{SpawnError, ThreadId, WakeReason};
 /// stay below it (see entry.rs).
 pub const HOST_START: u64 = 0x5000_0000_0000;
 
+/// Makes the host's address-space layout fixed: if address randomization
+/// is on, turns it off for this process (`personality(ADDR_NO_RANDOMIZE)`,
+/// as `setarch -R` does) and executes the binary again with the same
+/// arguments. Without it the host's libraries may land on gala's fixed
+/// addresses (the PEB area at 0x7ff0_0000_0000 is inside the 0x7f... band
+/// where ASLR places them); without randomization they sit just below
+/// 0x7fff_f7.., far from it. Call first thing in `main`.
+pub fn fix_address_space() {
+    const ADDR_NO_RANDOMIZE: libc::c_ulong = 0x0040000;
+    // SAFETY: personality(0xffffffff) only reads the current persona.
+    let current = unsafe { libc::personality(0xffff_ffff) };
+    if current < 0 || current as libc::c_ulong & ADDR_NO_RANDOMIZE != 0 {
+        return;
+    }
+    // SAFETY: changes this process's persona; then replaces the process
+    // image with itself (argv from /proc/self/cmdline via std).
+    unsafe {
+        if libc::personality(current as libc::c_ulong | ADDR_NO_RANDOMIZE) < 0 {
+            return;
+        }
+    }
+    use std::os::unix::process::CommandExt;
+    let mut args = std::env::args_os();
+    let Some(_) = args.next() else { return };
+    let error = std::process::Command::new("/proc/self/exe").args(args).exec();
+    // Still here: run with randomization (collisions are rare).
+    crate::warn!("gala-um: cannot re-execute without ASLR: {error}");
+}
+
 /// gala-um, implementing `nt::platform`'s traits.
 pub struct Um;
 

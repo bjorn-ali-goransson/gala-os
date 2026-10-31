@@ -765,8 +765,15 @@ fn full_path(path: &[u16]) -> Result<PathBuf, u32> {
 
 /// The NT path (`\\??\\X:\\...`) of a Win32 path.
 fn nt_path(path: *const u16) -> Result<PathBuf, u32> {
-    let full = full_path(wide_slice(path))?;
     let mut nt = PathBuf::new();
+    // The DOS device NUL (Go's os.DevNull, `> NUL` redirections).
+    let name = wide_slice(path);
+    if name.len() == 3 && name.iter().zip(b"NUL").all(|(&c, &n)| c & !0x20 == u16::from(n)) {
+        nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
+        nt.push(&[u16::from(b'N'), u16::from(b'U'), u16::from(b'L')])?;
+        return Ok(nt);
+    }
+    let full = full_path(name)?;
     let verbatim = [BACKSLASH, BACKSLASH, u16::from(b'?'), BACKSLASH];
     if full.as_slice().starts_with(&verbatim) {
         nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
