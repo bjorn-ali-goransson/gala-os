@@ -89,6 +89,7 @@ pub fn user_what(code: u32) -> &'static str {
         1 => "missing export",
         2 => "unsupported",
         3 => "not implemented",
+        4 => "missing dll",
         _ => "other",
     }
 }

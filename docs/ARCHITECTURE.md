@@ -783,7 +783,13 @@ Windows, never shadows the system's DLLs.)
   (imported with `raw-dylib`): failures return the documented failure
   value and set the last error (TEB+0x68) from the NTSTATUS. So far:
   console output, last error, ids, memory (VirtualAlloc/Free/Query),
-  events and waits (single and multiple), Sleep and tick counts, the
+  events and waits (single and multiple), semaphores, SRW locks,
+  condition variables, InitOnce and interlocked SLists (sync.rs: the
+  lightweight ones have no kernel object and wait by spinning, yielding,
+  then sleeping 1 ms at a time, until a kernel address wait exists; every
+  wake ends every wait, which the API allows), fiber local storage (TLS
+  indexes with callbacks, run at thread exit and FlsFree), Sleep and tick
+  counts, the
   performance counter, LoadLibrary(A/W/ExW)/GetProcAddress/FreeLibrary,
   threads (CreateThread builds the stack and start CONTEXT itself and
   starts at a thunk that calls ExitThread), TLS (TEB.TlsSlots),

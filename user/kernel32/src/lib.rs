@@ -2160,6 +2160,7 @@ pub extern "system" fn CreateThread(
 /// freed (Windows frees it).
 #[unsafe(no_mangle)]
 pub extern "system" fn ExitThread(code: u32) -> ! {
+    fls_thread_exit();
     // SAFETY: ends the current thread (-2 = the current thread).
     unsafe { NtTerminateThread(-2, code) };
     loop {
@@ -2587,6 +2588,82 @@ pub extern "system" fn TlsSetValue(index: u32, value: *mut c_void) -> Bool {
         core::arch::asm!("mov gs:[{}], {}", in(reg) tls_slot(index), in(reg) value as u64, options(nostack))
     };
     TRUE
+}
+
+// ---- Fiber local storage ----
+//
+// gala has no fibers, so fiber local storage is thread local: FLS indexes
+// are TLS indexes (from the same bitmap) with an optional callback, which
+// runs for a non-null value when the thread exits and when the index is
+// freed (TODO: for the other threads' values too, as Windows does).
+
+/// The callback of each FLS index (0: none, or not an FLS index).
+static FLS_CALLBACKS: [core::sync::atomic::AtomicUsize; 64] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 64];
+/// FLS indexes in use (bit set).
+static FLS_BITMAP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+type FlsCallback = extern "system" fn(*mut c_void);
+
+/// FlsAlloc(callback): FLS_OUT_OF_INDEXES (as TLS_OUT_OF_INDEXES) when
+/// none is left.
+#[unsafe(no_mangle)]
+pub extern "system" fn FlsAlloc(callback: Option<FlsCallback>) -> u32 {
+    use core::sync::atomic::Ordering;
+    let index = TlsAlloc();
+    if index == u32::MAX {
+        return index;
+    }
+    FLS_CALLBACKS[index as usize].store(callback.map_or(0, |f| f as usize), Ordering::Release);
+    FLS_BITMAP.fetch_or(1 << index, Ordering::AcqRel);
+    index
+}
+
+/// Runs the callback of FLS index `index` for this thread's value, if
+/// both are set, and clears the value.
+fn fls_release(index: u32) {
+    use core::sync::atomic::Ordering;
+    let callback = FLS_CALLBACKS[index as usize].load(Ordering::Acquire);
+    let value = teb_u64(tls_slot(index)) as *mut c_void;
+    if callback != 0 && !value.is_null() {
+        TlsSetValue(index, core::ptr::null_mut());
+        // SAFETY: registered as an FLS callback by FlsAlloc.
+        let f: FlsCallback = unsafe { core::mem::transmute(callback) };
+        f(value);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn FlsFree(index: u32) -> Bool {
+    use core::sync::atomic::Ordering;
+    if index >= 64 || FLS_BITMAP.load(Ordering::Acquire) & 1 << index == 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    fls_release(index);
+    FLS_BITMAP.fetch_and(!(1 << index), Ordering::AcqRel);
+    FLS_CALLBACKS[index as usize].store(0, Ordering::Release);
+    TlsFree(index)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn FlsGetValue(index: u32) -> *mut c_void {
+    TlsGetValue(index)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn FlsSetValue(index: u32, value: *mut c_void) -> Bool {
+    TlsSetValue(index, value)
+}
+
+/// The FLS callbacks of the exiting thread.
+fn fls_thread_exit() {
+    use core::sync::atomic::Ordering;
+    let mut bits = FLS_BITMAP.load(Ordering::Acquire);
+    while bits != 0 {
+        let index = bits.trailing_zeros();
+        bits &= bits - 1;
+        fls_release(index);
+    }
 }
 
 /// ExitProcess. TODO: DLL_PROCESS_DETACH notifications and ending other

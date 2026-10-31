@@ -226,7 +226,7 @@ to gala's numbers. For where time goes inside the kernel:
 
 ## Prebuilt programs
 
-Unmodified releases (Caddy so far) are not kept in the repository: the
+Unmodified releases (Caddy, the JDK) are not kept in the repository: the
 `PREBUILT` table in xtask pins each one (URL, SHA-256, the files used
 from its zip), and a scenario module path `target/prebuilt/<name>/<file>`
 makes xtask download, check and unzip it on first use (curl, sha256sum,
@@ -237,6 +237,19 @@ error messages (Go programs print which DLL or procedure they could not
 find). Survey an import table first with
 `x86_64-w64-mingw32-objdump -p app.exe | grep "DLL Name"`; keep
 downloaded files in their own directory and run them only inside QEMU.
+
+Large programs (the JDK): a module path ending in `/`
+(`target/prebuilt/jdk/jdk-21.0.5+11/`) ships the whole tree as
+`C:\<dir>` with its subdirectories (under `boot/<dir>/` in the image, so
+equal file names in different directories stay apart). QEMU gets 512 MiB
+plus twice the image size when the image is over 64 MiB (boot modules stay
+in memory). A scenario still being brought up goes in `PENDING`: `cargo
+xtask boot-test <name>` runs it, `cargo xtask test` and CI do not. A DLL
+the loader cannot find is in the ledger (`"what":"missing dll"`); a
+missing function is a `missing export`. For a program with many DLLs,
+walk the whole import closure (imports and delay imports of every DLL it
+loads, following export forwarders such as the api-ms-win-* sets) against
+the exports of gala's DLLs before booting, and fix the gaps in batches.
 
 ## Bootable images and USB sticks
 

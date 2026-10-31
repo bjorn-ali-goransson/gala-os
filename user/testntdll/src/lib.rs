@@ -549,7 +549,16 @@ fn load_module(name: &[u8], system32_only: bool) -> Result<usize, u32> {
             i
         }));
     }
-    let base = map_dll(name, system32_only)?;
+    let base = match map_dll(name, system32_only) {
+        Ok(base) => base,
+        Err(status) => {
+            if status == STATUS_DLL_NOT_FOUND {
+                // Gaps are never silent: the ledger names the DLL.
+                GalaRecordMissing(name.as_ptr(), name.len(), 4, 0);
+            }
+            return Err(status);
+        }
+    };
     let slot = match add_module(name, base, 1) {
         Ok(slot) => slot,
         Err(status) => {

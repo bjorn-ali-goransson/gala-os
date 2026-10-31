@@ -49,6 +49,22 @@ unsafe extern "system" {
     fn CloseHandle(h: Handle) -> Bool;
     fn Sleep(ms: u32);
     fn ExitProcess(code: u32) -> !;
+    fn EncodePointer(p: *mut c_void) -> *mut c_void;
+    fn DecodePointer(p: *mut c_void) -> *mut c_void;
+    fn IsDebuggerPresent() -> Bool;
+    fn IsProcessorFeaturePresent(feature: u32) -> Bool;
+    fn GetCurrentProcessorNumber() -> u32;
+    fn FlushProcessWriteBuffers();
+    fn IsThreadAFiber() -> Bool;
+    fn GetThreadTimes(
+        h: Handle,
+        creation: *mut u64,
+        exit: *mut u64,
+        kernel: *mut u64,
+        user: *mut u64,
+    ) -> Bool;
+    fn OpenThread(access: u32, inherit: Bool, id: u32) -> Handle;
+    fn GetThreadId(h: Handle) -> u32;
 }
 
 #[allow(dead_code)]
@@ -165,8 +181,42 @@ extern "C" fn redirected() -> ! {
     unsafe { ExitThread(5) }
 }
 
+/// The small thread functions the C runtime and the JVM import.
+fn misc(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: plain kernel32 calls.
+    unsafe {
+        let p = 0x1234_5678_9abc_usize as *mut c_void;
+        c.eq(DecodePointer(EncodePointer(p)) as u64, p as u64)?;
+        c.eq(DecodePointer(EncodePointer(core::ptr::null_mut())) as u64, 0)?;
+        c.eq(IsDebuggerPresent() as u64, 0)?;
+        c.ok(IsProcessorFeaturePresent(10) != 0, 0)?; // PF_XMMI64 (SSE2)
+        c.ok(IsProcessorFeaturePresent(8) != 0, 0)?; // PF_RDTSC
+        c.eq(IsProcessorFeaturePresent(1000) as u64, 0)?;
+        c.ok(GetCurrentProcessorNumber() < 64, GetCurrentProcessorNumber().into())?;
+        FlushProcessWriteBuffers();
+        c.eq(IsThreadAFiber() as u64, 0)?;
+        // Times: a creation time (100 ns since 1601), no exit time yet.
+        let (mut creation, mut exit, mut kernel, mut user) = (0, 1, 0, 0);
+        c.ok(
+            GetThreadTimes(GetCurrentThread(), &mut creation, &mut exit, &mut kernel, &mut user)
+                != 0,
+            GetLastError().into(),
+        )?;
+        c.ok(creation > 0x01d0_0000_0000_0000, creation)?; // after 2014
+        c.eq(exit, 0)?;
+        // OpenThread of this thread: a real handle naming it.
+        let me = GetCurrentThreadId();
+        let h = OpenThread(0x0040, 0, me); // THREAD_QUERY_INFORMATION
+        c.ok(!h.is_null(), GetLastError().into())?;
+        c.eq(GetThreadId(h).into(), me.into())?;
+        c.ok(CloseHandle(h) != 0, 0)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    misc(&mut c)?;
     // SAFETY: documented kernel32 calls with valid arguments.
     unsafe {
         // TLS: an index, a slot in this thread's TEB.

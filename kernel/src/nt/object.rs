@@ -495,11 +495,43 @@ pub struct HandleEntry {
 impl HandleEntry {
     /// Checks that the handle grants all of `required`.
     pub fn require(&self, required: u32) -> Result<&ObjectRef, NtStatus> {
-        if self.access & required == required {
+        let kind = match self.object.body {
+            ObjectBody::Thread(_) => Some(ImpliedKind::Thread),
+            ObjectBody::Process(_) => Some(ImpliedKind::Process),
+            _ => None,
+        };
+        if with_implied(self.access, kind) & required == required {
             Ok(&self.object)
         } else {
             Err(NtStatus::ACCESS_DENIED)
         }
+    }
+}
+
+/// Objects whose full query right grants the limited one too.
+#[derive(Clone, Copy)]
+enum ImpliedKind {
+    Thread,
+    Process,
+}
+
+/// `access` with the rights it implies: THREAD_QUERY_INFORMATION grants
+/// THREAD_QUERY_LIMITED_INFORMATION, PROCESS_QUERY_INFORMATION grants
+/// PROCESS_QUERY_LIMITED_INFORMATION (documented in "Thread Security and
+/// Access Rights" and "Process Security and Access Rights").
+fn with_implied(access: u32, kind: Option<ImpliedKind>) -> u32 {
+    const THREAD_QUERY_INFORMATION: u32 = 0x0040;
+    const THREAD_QUERY_LIMITED_INFORMATION: u32 = 0x0800;
+    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    match kind {
+        Some(ImpliedKind::Thread) if access & THREAD_QUERY_INFORMATION != 0 => {
+            access | THREAD_QUERY_LIMITED_INFORMATION
+        }
+        Some(ImpliedKind::Process) if access & PROCESS_QUERY_INFORMATION != 0 => {
+            access | PROCESS_QUERY_LIMITED_INFORMATION
+        }
+        _ => access,
     }
 }
 
@@ -601,6 +633,15 @@ impl HandleTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_rights_imply_limited_query() {
+        assert_eq!(with_implied(0x40, Some(ImpliedKind::Thread)), 0x840);
+        assert_eq!(with_implied(0x400, Some(ImpliedKind::Process)), 0x1400);
+        assert_eq!(with_implied(0x40, Some(ImpliedKind::Process)), 0x40);
+        assert_eq!(with_implied(0x400, None), 0x400);
+        assert_eq!(with_implied(0x20, Some(ImpliedKind::Thread)), 0x20);
+    }
 
     #[test]
     fn completion_queue_is_fifo() {

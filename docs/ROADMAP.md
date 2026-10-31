@@ -465,7 +465,20 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
    and the forwarders (`seh_test`, `kernel32_misc_test`).
    Next, in order:
    1. A JDK: `java -version` from the unmodified Temurin 21 zip, then a
-      Java program. Surveyed: the JDK ships Microsoft's C runtime
+      Java program. In progress (`java_version`, PENDING): xtask fetches
+      the JDK (PREBUILT, 170 MB of it as a directory tree). The import
+      closure of java.exe, jvm.dll, java.dll and jimage.dll lacked ~80
+      kernel32 functions, 21 advapi32 (security: SIDs, ACLs, tokens), 3
+      user32, ws2_32 by ordinal (#111, #115), and comctl32, powrprof,
+      shell32 and version.dll. Batch A done: SRW locks, condition
+      variables, InitOnce, FLS, SLists, semaphores, and small thread
+      functions (Encode/DecodePointer, IsProcessorFeaturePresent,
+      GetCurrentProcessorNumber, GetThreadTimes, GetThreadId, OpenThread
+      of the current thread). Next batches: locale and time (GetLocaleInfo,
+      LCMapString, CompareString, date/time formats, time zones), memory
+      and system (GlobalMemoryStatusEx, NUMA, psapi K32*, large pages),
+      files (FindFirstFileExW, MoveFileExW, SetFileInformationByHandle,
+      GetVolumePathNameW), then advapi32 security and the new DLLs. Surveyed: the JDK ships Microsoft's C runtime
       (ucrtbase, vcruntime140, the api-ms-win-* forwarders, which forward
       to kernel32), so gala needs no CRT of its own; it needs ~100 more
       kernel32 functions (SRW locks, condition variables, FLS, locale,

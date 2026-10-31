@@ -329,3 +329,432 @@ pub extern "system" fn LeaveCriticalSection(cs: *mut CriticalSection) {
         cs.lock_count.store(-1, Ordering::Release);
     }
 }
+
+// --- Semaphores ----------------------------------------------------------
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtCreateSemaphore(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        initial: i32,
+        maximum: i32,
+    ) -> u32;
+    fn NtReleaseSemaphore(h: Handle, count: i32, previous: *mut i32) -> u32;
+}
+
+const SEMAPHORE_ALL_ACCESS: u32 = 0x1f_0003;
+
+/// CreateSemaphoreW: optionally named (opening an existing semaphore).
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateSemaphoreW(
+    attributes: *mut c_void,
+    initial: i32,
+    maximum: i32,
+    name: *const u16,
+) -> Handle {
+    if maximum <= 0 || initial < 0 || initial > maximum {
+        return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
+    }
+    let mut h = core::ptr::null_mut();
+    let status = with_name(name, inheritable(attributes), |oa| {
+        // SAFETY: valid output pointer and attributes.
+        unsafe { NtCreateSemaphore(&mut h, SEMAPHORE_ALL_ACCESS, oa, initial, maximum) }
+    });
+    match status {
+        Ok(status) => created(status, h),
+        Err(e) => fail_with(e, core::ptr::null_mut()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateSemaphoreA(
+    attributes: *mut c_void,
+    initial: i32,
+    maximum: i32,
+    name: *const u8,
+) -> Handle {
+    let mut buf = [0u16; 260];
+    match wide_name(name, &mut buf) {
+        Ok(name) => CreateSemaphoreW(attributes, initial, maximum, name),
+        Err(e) => fail_with(e, core::ptr::null_mut()),
+    }
+}
+
+/// CreateSemaphoreExW: CreateSemaphoreW (flags are reserved; the access
+/// mask is not narrowed).
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateSemaphoreExW(
+    attributes: *mut c_void,
+    initial: i32,
+    maximum: i32,
+    name: *const u16,
+    _flags: u32,
+    _access: u32,
+) -> Handle {
+    CreateSemaphoreW(attributes, initial, maximum, name)
+}
+
+/// ReleaseSemaphore: STATUS_SEMAPHORE_LIMIT_EXCEEDED past the maximum
+/// (ERROR_TOO_MANY_POSTS).
+#[unsafe(no_mangle)]
+pub extern "system" fn ReleaseSemaphore(h: Handle, count: i32, previous: *mut i32) -> Bool {
+    // SAFETY: the kernel validates the handle and the output pointer.
+    let status = unsafe { NtReleaseSemaphore(h, count, previous) };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+/// InitializeCriticalSectionEx: the spin count and flags do not change
+/// gala's critical sections.
+#[unsafe(no_mangle)]
+pub extern "system" fn InitializeCriticalSectionEx(
+    cs: *mut CriticalSection,
+    _spin: u32,
+    _flags: u32,
+) -> Bool {
+    InitializeCriticalSection(cs);
+    TRUE
+}
+
+// --- Waiting without a kernel object -------------------------------------
+//
+// SRW locks, condition variables and InitOnce have no kernel object: gala
+// waits by spinning, then yielding, then sleeping a millisecond at a time.
+// TODO: a kernel address wait (as WaitOnAddress) so that long waits sleep.
+
+/// One step of a wait; `spins` counts the steps so far.
+fn backoff(spins: &mut u32) {
+    *spins = spins.saturating_add(1);
+    if *spins < 64 {
+        core::hint::spin_loop();
+    } else if *spins < 256 {
+        SwitchToThread();
+    } else {
+        Sleep(1);
+    }
+}
+
+// --- Slim reader/writer locks --------------------------------------------
+//
+// SRWLOCK is one pointer: 0 when free, EXCLUSIVE when held exclusively,
+// otherwise the number of shared holders.
+
+const EXCLUSIVE: usize = 1 << 63;
+
+fn srw(lock: *mut usize) -> &'static AtomicUsize {
+    // SAFETY: the caller's pointer-sized, aligned SRWLOCK.
+    unsafe { AtomicUsize::from_ptr(lock) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn InitializeSRWLock(lock: *mut usize) {
+    srw(lock).store(0, Ordering::Release);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TryAcquireSRWLockExclusive(lock: *mut usize) -> u8 {
+    u8::from(srw(lock).compare_exchange(0, EXCLUSIVE, Ordering::Acquire, Ordering::Relaxed).is_ok())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn AcquireSRWLockExclusive(lock: *mut usize) {
+    let mut spins = 0;
+    while TryAcquireSRWLockExclusive(lock) == 0 {
+        backoff(&mut spins);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ReleaseSRWLockExclusive(lock: *mut usize) {
+    srw(lock).store(0, Ordering::Release);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TryAcquireSRWLockShared(lock: *mut usize) -> u8 {
+    let l = srw(lock);
+    let mut v = l.load(Ordering::Relaxed);
+    loop {
+        if v & EXCLUSIVE != 0 {
+            return 0;
+        }
+        match l.compare_exchange_weak(v, v + 1, Ordering::Acquire, Ordering::Relaxed) {
+            Ok(_) => return 1,
+            Err(now) => v = now,
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn AcquireSRWLockShared(lock: *mut usize) {
+    let mut spins = 0;
+    while TryAcquireSRWLockShared(lock) == 0 {
+        backoff(&mut spins);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ReleaseSRWLockShared(lock: *mut usize) {
+    srw(lock).fetch_sub(1, Ordering::Release);
+}
+
+// --- Condition variables -------------------------------------------------
+//
+// CONDITION_VARIABLE is one pointer, here a wake counter: a sleeper waits
+// for it to change. Every wake ends every current wait, which the API
+// allows (waits may end spuriously; callers re-check their condition).
+
+const ERROR_TIMEOUT: u32 = 1460;
+const CONDITION_VARIABLE_LOCKMODE_SHARED: u32 = 1;
+
+#[unsafe(no_mangle)]
+pub extern "system" fn InitializeConditionVariable(cv: *mut usize) {
+    srw(cv).store(0, Ordering::Release);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WakeConditionVariable(cv: *mut usize) {
+    srw(cv).fetch_add(1, Ordering::AcqRel);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WakeAllConditionVariable(cv: *mut usize) {
+    srw(cv).fetch_add(1, Ordering::AcqRel);
+}
+
+/// Waits until `cv` moves past `seen` or `ms` pass; whether it was woken.
+fn wait_wake(cv: *mut usize, seen: usize, ms: u32) -> bool {
+    let start = GetTickCount64();
+    let mut spins = 0;
+    loop {
+        if srw(cv).load(Ordering::Acquire) != seen {
+            return true;
+        }
+        if ms != INFINITE && GetTickCount64() - start >= u64::from(ms) {
+            return false;
+        }
+        backoff(&mut spins);
+    }
+}
+
+/// SleepConditionVariableCS: releases the critical section (all its
+/// recursion), waits, takes it back. FALSE with ERROR_TIMEOUT on timeout.
+#[unsafe(no_mangle)]
+pub extern "system" fn SleepConditionVariableCS(
+    cv: *mut usize,
+    cs: *mut CriticalSection,
+    ms: u32,
+) -> Bool {
+    let seen = srw(cv).load(Ordering::Acquire);
+    // SAFETY: the caller owns the critical section.
+    let depth = unsafe { (*cs).recursion };
+    for _ in 0..depth {
+        LeaveCriticalSection(cs);
+    }
+    let woken = wait_wake(cv, seen, ms);
+    for _ in 0..depth {
+        EnterCriticalSection(cs);
+    }
+    if woken { TRUE } else { fail_with(ERROR_TIMEOUT, FALSE) }
+}
+
+/// SleepConditionVariableSRW: as the CS form, with the lock held
+/// exclusively or (CONDITION_VARIABLE_LOCKMODE_SHARED) shared.
+#[unsafe(no_mangle)]
+pub extern "system" fn SleepConditionVariableSRW(
+    cv: *mut usize,
+    lock: *mut usize,
+    ms: u32,
+    flags: u32,
+) -> Bool {
+    let shared = flags & CONDITION_VARIABLE_LOCKMODE_SHARED != 0;
+    let seen = srw(cv).load(Ordering::Acquire);
+    if shared {
+        ReleaseSRWLockShared(lock)
+    } else {
+        ReleaseSRWLockExclusive(lock)
+    }
+    let woken = wait_wake(cv, seen, ms);
+    if shared {
+        AcquireSRWLockShared(lock)
+    } else {
+        AcquireSRWLockExclusive(lock)
+    }
+    if woken { TRUE } else { fail_with(ERROR_TIMEOUT, FALSE) }
+}
+
+// --- One-time initialization ---------------------------------------------
+//
+// INIT_ONCE is one pointer: 0 before, 1 while a callback runs, and once
+// done the context with its low two bits (INIT_ONCE_CTX_RESERVED_BITS)
+// replaced by 2.
+
+type InitOnceFn = extern "system" fn(*mut usize, *mut c_void, *mut *mut c_void) -> Bool;
+
+const ONCE_RUNNING: usize = 1;
+const ONCE_DONE: usize = 2;
+
+#[unsafe(no_mangle)]
+pub extern "system" fn InitOnceInitialize(once: *mut usize) {
+    srw(once).store(0, Ordering::Release);
+}
+
+/// InitOnceExecuteOnce: runs `f` once; other callers wait for it. A
+/// callback returning FALSE leaves the once uninitialized (and the call
+/// returns FALSE).
+#[unsafe(no_mangle)]
+pub extern "system" fn InitOnceExecuteOnce(
+    once: *mut usize,
+    f: InitOnceFn,
+    param: *mut c_void,
+    context: *mut *mut c_void,
+) -> Bool {
+    let state = srw(once);
+    let mut spins = 0;
+    loop {
+        let v = state.load(Ordering::Acquire);
+        if v & 3 == ONCE_DONE {
+            if !context.is_null() {
+                // SAFETY: the caller's output pointer.
+                unsafe { *context = (v & !3) as *mut c_void };
+            }
+            return TRUE;
+        }
+        if v == 0
+            && state.compare_exchange(0, ONCE_RUNNING, Ordering::Acquire, Ordering::Relaxed).is_ok()
+        {
+            let mut ctx: *mut c_void = core::ptr::null_mut();
+            if f(once, param, &mut ctx) == 0 {
+                state.store(0, Ordering::Release);
+                return FALSE;
+            }
+            state.store((ctx as usize & !3) | ONCE_DONE, Ordering::Release);
+            if !context.is_null() {
+                // SAFETY: as above.
+                unsafe { *context = (ctx as usize & !3) as *mut c_void };
+            }
+            return TRUE;
+        }
+        backoff(&mut spins);
+    }
+}
+
+// --- Interlocked singly linked lists -------------------------------------
+//
+// SLIST_HEADER (x64, 16 bytes): the first entry in the high quadword (bits
+// 4..63, bit 0 = HeaderType 1), depth (16 bits) and a sequence number (48
+// bits) in the low one; both change together with cmpxchg16b, so a pop
+// cannot be fooled by an entry popped and pushed again meanwhile.
+
+#[repr(C, align(16))]
+pub struct SListHeader {
+    low: u64,
+    high: u64,
+}
+
+#[repr(C)]
+pub struct SListEntry {
+    next: *mut SListEntry,
+}
+
+/// Compares the header with `old` and, if equal, stores `new`; returns
+/// the value seen.
+fn cas16(head: *mut SListHeader, old: (u64, u64), new: (u64, u64)) -> (u64, u64) {
+    let (mut low, mut high) = old;
+    // SAFETY: a 16-byte aligned SLIST_HEADER; cmpxchg16b compares rdx:rax
+    // with it and stores rcx:rbx if equal, else loads it into rdx:rax.
+    // rbx is reserved by LLVM, so it is swapped in and out around the
+    // instruction.
+    unsafe {
+        core::arch::asm!(
+            "xchg rbx, {new_low}",
+            "lock cmpxchg16b [{head}]",
+            "mov rbx, {new_low}",
+            head = in(reg) head,
+            new_low = inout(reg) new.0 => _,
+            in("rcx") new.1,
+            inout("rax") low,
+            inout("rdx") high,
+        );
+    }
+    (low, high)
+}
+
+fn read_header(head: *mut SListHeader) -> (u64, u64) {
+    // A cmpxchg16b that fails (or rewrites the same value) reads the
+    // header atomically.
+    cas16(head, (0, 0), (0, 0))
+}
+
+fn first(high: u64) -> *mut SListEntry {
+    (high & !0xf) as *mut SListEntry
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn InitializeSListHead(head: *mut SListHeader) {
+    // SAFETY: the caller's aligned header.
+    unsafe { head.write(SListHeader { low: 0, high: 1 }) };
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryDepthSList(head: *mut SListHeader) -> u16 {
+    read_header(head).0 as u16
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn InterlockedPushEntrySList(
+    head: *mut SListHeader,
+    entry: *mut SListEntry,
+) -> *mut SListEntry {
+    let mut old = read_header(head);
+    loop {
+        // SAFETY: the caller's aligned entry, not on any list.
+        unsafe { (*entry).next = first(old.1) };
+        let depth = (old.0 as u16).wrapping_add(1);
+        let sequence = (old.0 >> 16).wrapping_add(1) & 0xffff_ffff_ffff;
+        let new = (u64::from(depth) | sequence << 16, entry as u64 | 1);
+        let seen = cas16(head, old, new);
+        if seen == old {
+            return first(old.1);
+        }
+        old = seen;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn InterlockedPopEntrySList(head: *mut SListHeader) -> *mut SListEntry {
+    let mut old = read_header(head);
+    loop {
+        let top = first(old.1);
+        if top.is_null() {
+            return top;
+        }
+        // SAFETY: entries stay valid while on the list (the caller's
+        // contract); a stale read is caught by the sequence number.
+        let next = unsafe { (*top).next };
+        let depth = (old.0 as u16).wrapping_sub(1);
+        let sequence = (old.0 >> 16).wrapping_add(1) & 0xffff_ffff_ffff;
+        let new = (u64::from(depth) | sequence << 16, next as u64 | 1);
+        let seen = cas16(head, old, new);
+        if seen == old {
+            return top;
+        }
+        old = seen;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn InterlockedFlushSList(head: *mut SListHeader) -> *mut SListEntry {
+    let mut old = read_header(head);
+    loop {
+        if first(old.1).is_null() {
+            return core::ptr::null_mut();
+        }
+        let sequence = (old.0 >> 16).wrapping_add(1) & 0xffff_ffff_ffff;
+        let seen = cas16(head, old, (sequence << 16, 1));
+        if seen == old {
+            return first(old.1);
+        }
+        old = seen;
+    }
+}

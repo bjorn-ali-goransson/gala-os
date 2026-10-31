@@ -30,12 +30,33 @@ struct Prebuilt {
     members: &'static [&'static str],
 }
 
-const PREBUILT: &[Prebuilt] = &[Prebuilt {
-    name: "caddy",
-    url: "https://github.com/caddyserver/caddy/releases/download/v2.8.4/caddy_2.8.4_windows_amd64.zip",
-    sha256: "2631fbe1c4f6fb08783ed6dc6ac238d6655b4c923abe2bce1433dbd7fd079630",
-    members: &["caddy.exe"],
-}];
+const PREBUILT: &[Prebuilt] = &[
+    Prebuilt {
+        name: "caddy",
+        url: "https://github.com/caddyserver/caddy/releases/download/v2.8.4/caddy_2.8.4_windows_amd64.zip",
+        sha256: "2631fbe1c4f6fb08783ed6dc6ac238d6655b4c923abe2bce1433dbd7fd079630",
+        members: &["caddy.exe"],
+    },
+    // Eclipse Temurin (OpenJDK) 21.0.5+11; the SHA-256 is Adoptium's
+    // published one. What `java` needs: the launcher, the DLLs (with
+    // Microsoft's C runtime), the server VM, the module image and the
+    // configuration (not the class data archives, tools or sources).
+    Prebuilt {
+        name: "jdk",
+        url: "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.5%2B11/OpenJDK21U-jdk_x64_windows_hotspot_21.0.5_11.zip",
+        sha256: "6f09d4a3598542313cca1540106d537c7092a54e415d569f7b928160a90d3128",
+        members: &[
+            "jdk-21.0.5+11/bin/java.exe",
+            "jdk-21.0.5+11/bin/*.dll",
+            "jdk-21.0.5+11/lib/modules",
+            "jdk-21.0.5+11/lib/jvm.cfg",
+            "jdk-21.0.5+11/lib/tzdb.dat",
+            "jdk-21.0.5+11/lib/security/*",
+            "jdk-21.0.5+11/conf/*",
+            "jdk-21.0.5+11/release",
+        ],
+    },
+];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Freestanding Windows test programs in `user/`, shipped as boot modules.
@@ -113,6 +134,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_sys_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sys_test", "testdll.dll", "gala"),
     ("kernel32_thread_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_sync_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_sync_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_thread_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_misc_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_misc_test", "kernel32.dll", "Windows/System32"),
@@ -269,6 +292,18 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("caddy_http", "bcryptprimitives.dll", "Windows/System32"),
     ("caddy_http", "target/prebuilt/caddy/caddy.exe", "gala"),
     ("caddy_http", "user/caddy/site/index.html", "caddy/site"),
+    ("java_version", "ntdll.dll", "Windows/System32"),
+    ("java_version", "kernel32.dll", "Windows/System32"),
+    ("java_version", "advapi32.dll", "Windows/System32"),
+    ("java_version", "winmm.dll", "Windows/System32"),
+    ("java_version", "ncrypt.dll", "Windows/System32"),
+    ("java_version", "crypt32.dll", "Windows/System32"),
+    ("java_version", "ws2_32.dll", "Windows/System32"),
+    ("java_version", "mswsock.dll", "Windows/System32"),
+    ("java_version", "bcryptprimitives.dll", "Windows/System32"),
+    ("java_version", "user32.dll", "Windows/System32"),
+    ("java_version", "msvcrt.dll", "Windows/System32"),
+    ("java_version", "target/prebuilt/jdk/jdk-21.0.5+11/", "jdk"),
     ("lua", "ntdll.dll", "Windows/System32"),
     ("lua", "kernel32.dll", "Windows/System32"),
     ("lua", "ws2_32.dll", "Windows/System32"),
@@ -388,6 +423,7 @@ const USER_PROGRAMS: &[&str] = &[
     "missing_import_test",
     "kernel32_sys_test",
     "kernel32_thread_test",
+    "kernel32_sync_test",
     "kernel32_misc_test",
     "prng_test",
     "kernel32_env_test",
@@ -621,7 +657,30 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
         // A path with a slash is a file in the repository (checked-in
         // binaries, configuration); otherwise a built DLL.
         if file.starts_with("target/prebuilt/") {
-            fetch_prebuilt(file)?;
+            fetch_prebuilt(file.trim_end_matches('/'))?;
+        }
+        // A path ending in a slash is a directory tree, shipped as C:\<dir>
+        // with its subdirectories (under boot/<dir>, so that files of the
+        // same name in different directories stay apart).
+        if file.ends_with('/') {
+            let mut files = Vec::new();
+            tree_files(&root().join(file), Path::new(""), &mut files)?;
+            for rel in files {
+                let dest = boot.join(dir).join(&rel);
+                let parent = dest.parent().ok_or("tree file without a parent")?;
+                fs::create_dir_all(parent).map_err(|e| format!("creating {parent:?}: {e}"))?;
+                // Hard links: the trees are large (a JDK) and never change.
+                let source = root().join(file).join(&rel);
+                if fs::hard_link(&source, &dest).is_err() {
+                    copy(&source, &dest)?;
+                }
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                let sub = rel.rsplit_once('/').map_or(String::new(), |(d, _)| format!("/{d}"));
+                modules += &format!(
+                    "    module_path: boot():/boot/{dir}/{rel}\n    module_string: {dir}{sub}\n"
+                );
+            }
+            continue;
         }
         let (source, name) = match file.rsplit_once('/') {
             Some((_, name)) => (root().join(file), name),
@@ -657,6 +716,23 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
         eprintln!("xtask: built {}", iso.display());
     }
     Ok(iso)
+}
+
+/// The files under `dir` (paths relative to it), recursively.
+fn tree_files(dir: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> Result {
+    let entries =
+        fs::read_dir(dir.join(rel)).map_err(|e| format!("reading {dir:?}/{rel:?}: {e}"))?;
+    let mut names: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.file_name()).collect();
+    names.sort();
+    for name in names {
+        let path = rel.join(&name);
+        if dir.join(&path).is_dir() {
+            tree_files(dir, &path, out)?;
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Clones the pinned Limine binary release into the target directory once
@@ -784,6 +860,10 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
     ],
 )];
 
+/// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
+/// them, `cargo xtask test` (and CI) does not, until they pass.
+const PENDING: &[&str] = &["java_version"];
+
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
 
@@ -848,8 +928,12 @@ fn scenario_boot(name: &str) -> Boot {
 }
 
 fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
+    // 512 MiB, plus twice the image for images with large programs (the
+    // boot modules stay in memory, and programs like a JVM map them).
+    let image_mib = fs::metadata(iso).map_or(0, |m| m.len() >> 20);
+    let memory = if image_mib > 64 { 512 + 2 * image_mib } else { 512 };
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-machine", "q35", "-cpu", "max", "-m", "512M", "-smp", "2"])
+    cmd.args(["-machine", "q35", "-cpu", "max", "-m", &format!("{memory}M"), "-smp", "2"])
         // KVM when available, otherwise software emulation.
         .args(["-accel", "kvm", "-accel", "tcg"])
         .args(["-no-reboot"])
@@ -991,6 +1075,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_sys_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_sys_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (JDK): SRW locks, condition variables, InitOnce, FLS, SLists,
+        // semaphores.
+        name: "kernel32_sync_test",
+        cmdline: "qemu_exit run=kernel32_sync_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["kernel32_sync_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "kernel32_thread_test",
@@ -1207,6 +1299,18 @@ const SCENARIOS: &[Scenario] = &[
             "\"msg\":\"server running\"",
             "Caddy serving static files on :7",
             "xtask: net client: http ok",
+        ],
+    },
+    Scenario {
+        // P1: the unmodified Temurin JDK 21 (fetched and checked by xtask,
+        // PREBUILT): `java -version`, as on Windows (to stderr).
+        name: "java_version",
+        cmdline: "qemu_exit trace run=java.exe args=-version",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "openjdk version \"21.0.5\" 2024-10-15 LTS",
+            "OpenJDK 64-Bit Server VM Temurin-21.0.5+11 (build 21.0.5+11-LTS, mixed mode",
+            "java.exe finished with status 0x00000000",
         ],
     },
     Scenario {
@@ -1696,8 +1800,16 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     let t0 = Instant::now();
     build_kernel(release)?;
     let built = t0.elapsed();
-    let selected: Vec<&Scenario> =
-        SCENARIOS.iter().filter(|s| filter.is_none_or(|f| s.name.contains(f.as_str()))).collect();
+    let selected: Vec<&Scenario> = SCENARIOS
+        .iter()
+        .filter(|s| match filter {
+            // Pending scenarios run only when named exactly.
+            None => !PENDING.contains(&s.name),
+            Some(f) => {
+                s.name == f.as_str() || (s.name.contains(f.as_str()) && !PENDING.contains(&s.name))
+            }
+        })
+        .collect();
     if selected.is_empty() {
         return Err("no boot test scenario matches the filter".into());
     }

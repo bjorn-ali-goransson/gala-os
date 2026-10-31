@@ -623,3 +623,173 @@ pub extern "system" fn GetStartupInfoW(info: *mut u8) {
 pub extern "system" fn GetStartupInfoA(info: *mut u8) {
     GetStartupInfoW(info);
 }
+
+// ---- Small thread and processor functions ----
+
+/// The process's pointer-encoding secret, chosen at first use.
+static POINTER_COOKIE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn pointer_cookie() -> u64 {
+    use core::sync::atomic::Ordering;
+    let c = POINTER_COOKIE.load(Ordering::Relaxed);
+    if c != 0 {
+        return c;
+    }
+    // SAFETY: rdtsc only reads the time stamp counter.
+    let fresh = unsafe { core::arch::x86_64::_rdtsc() } | 1;
+    match POINTER_COOKIE.compare_exchange(0, fresh, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => fresh,
+        Err(other) => other,
+    }
+}
+
+/// EncodePointer: an opaque form of `p` (XOR with a per-process secret,
+/// rotated by it), undone by DecodePointer.
+#[unsafe(no_mangle)]
+pub extern "system" fn EncodePointer(p: *mut c_void) -> *mut c_void {
+    let c = pointer_cookie();
+    ((p as u64 ^ c).rotate_right((c & 63) as u32)) as *mut c_void
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DecodePointer(p: *mut c_void) -> *mut c_void {
+    let c = pointer_cookie();
+    ((p as u64).rotate_left((c & 63) as u32) ^ c) as *mut c_void
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn EncodeSystemPointer(p: *mut c_void) -> *mut c_void {
+    EncodePointer(p)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DecodeSystemPointer(p: *mut c_void) -> *mut c_void {
+    DecodePointer(p)
+}
+
+/// IsDebuggerPresent: PEB.BeingDebugged.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsDebuggerPresent() -> Bool {
+    let peb: usize;
+    // SAFETY: gs:[0x60] is TEB.ProcessEnvironmentBlock; BeingDebugged is
+    // the byte at PEB+2.
+    unsafe {
+        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        Bool::from(*((peb + 2) as *const u8))
+    }
+}
+
+/// DebugBreak: a breakpoint exception.
+#[unsafe(no_mangle)]
+pub extern "system" fn DebugBreak() {
+    // SAFETY: raises STATUS_BREAKPOINT in this thread.
+    unsafe { core::arch::asm!("int3") };
+}
+
+/// IsProcessorFeaturePresent: KUSER_SHARED_DATA.ProcessorFeatures.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsProcessorFeaturePresent(feature: u32) -> Bool {
+    if feature >= 64 {
+        return FALSE;
+    }
+    // SAFETY: KUSER_SHARED_DATA is mapped read-only at 0x7ffe0000;
+    // ProcessorFeatures[64] is at +0x274.
+    Bool::from(unsafe { *((0x7ffe_0274 + feature as usize) as *const u8) })
+}
+
+/// GetCurrentProcessorNumber: the processor number the kernel keeps in
+/// IA32_TSC_AUX (read with rdtscp).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCurrentProcessorNumber() -> u32 {
+    let mut aux = 0u32;
+    // SAFETY: rdtscp reads the time stamp counter and TSC_AUX.
+    unsafe { core::arch::x86_64::__rdtscp(&mut aux) };
+    aux & 0xfff
+}
+
+/// FlushProcessWriteBuffers: a full fence (gala's processors are kept
+/// coherent; TODO: an IPI to serialize the other processors, as Windows).
+#[unsafe(no_mangle)]
+pub extern "system" fn FlushProcessWriteBuffers() {
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// IsThreadAFiber: gala has no fibers.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsThreadAFiber() -> Bool {
+    FALSE
+}
+
+/// DisableThreadLibraryCalls: gala sends no thread notifications anyway.
+#[unsafe(no_mangle)]
+pub extern "system" fn DisableThreadLibraryCalls(_module: Handle) -> Bool {
+    TRUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn FreeLibraryAndExitThread(module: Handle, code: u32) -> ! {
+    FreeLibrary(module);
+    ExitThread(code)
+}
+
+/// GetThreadTimes: ThreadTimes (creation, exit, kernel, user).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadTimes(
+    h: Handle,
+    creation: *mut u64,
+    exit: *mut u64,
+    kernel: *mut u64,
+    user: *mut u64,
+) -> Bool {
+    let mut times = [0u64; 4];
+    let mut ret = 0;
+    // SAFETY: a 32-byte KERNEL_USER_TIMES buffer.
+    let status = unsafe { NtQueryInformationThread(h, 1, times.as_mut_ptr().cast(), 32, &mut ret) };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    for (p, v) in [creation, exit, kernel, user].into_iter().zip(times) {
+        if !p.is_null() {
+            // SAFETY: the caller's FILETIME.
+            unsafe { p.write_unaligned(v) };
+        }
+    }
+    TRUE
+}
+
+/// GetThreadId: from ThreadBasicInformation's ClientId.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadId(h: Handle) -> u32 {
+    let mut basic = [0u64; 6];
+    let mut ret = 0;
+    // SAFETY: a 48-byte THREAD_BASIC_INFORMATION buffer.
+    let status = unsafe { NtQueryInformationThread(h, 0, basic.as_mut_ptr().cast(), 48, &mut ret) };
+    if status != STATUS_SUCCESS {
+        return fail(status, 0);
+    }
+    basic[3] as u32 // ClientId.UniqueThread
+}
+
+/// OpenThread: the current thread only (a duplicate of its pseudo
+/// handle); other threads need NtOpenThread (reported).
+#[unsafe(no_mangle)]
+pub extern "system" fn OpenThread(access: u32, inherit: Bool, id: u32) -> Handle {
+    if id != GetCurrentThreadId() {
+        unsupported(b"kernel32.dll!OpenThread(another thread)", id.into());
+        return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
+    }
+    let mut h = core::ptr::null_mut();
+    if DuplicateHandle(
+        GetCurrentProcess(),
+        GetCurrentThread(),
+        GetCurrentProcess(),
+        &mut h,
+        access,
+        inherit,
+        0,
+    ) == 0
+    {
+        return core::ptr::null_mut();
+    }
+    h
+}
