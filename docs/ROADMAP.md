@@ -496,8 +496,20 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       thread pool (CreateThreadpoolWork/Timer/Wait, Submit, Set, Close,
       WaitForThreadpoolTimerCallbacks, FreeLibraryWhenCallbackReturns),
       CreateEventExW, CreateSymbolicLinkW, CreateHardLinkW, CopyFileW.
-      Next: those (test first), then the survey again with msvcp140,
-      vcruntime140(_1) and the DLLs the JVM loads, and boot again. Surveyed: the JDK ships Microsoft's C runtime
+      Done (`kernel32_pool_test`): the thread pool (work, timers, waits,
+      TrySubmitThreadpoolCallback, the *WhenCallbackReturns functions),
+      CreateEventExW, CopyFileW/ExW, CreateSymbolicLinkW (privilege not
+      held), CreateHardLinkW (reported). The loader now loads a DLL named
+      with an absolute path from that directory (the launcher loads
+      C:\jdk\bin\server\jvm.dll so), and an unhandled exception's
+      code and address are in the ledger. jvm.dll now loads and then
+      reads address 0 at jvm+0x94649c: almost certainly a C++
+      thread_local, which needs the PE static TLS the loader does not
+      do yet (IMAGE_TLS_DIRECTORY: _tls_index, per-thread blocks behind
+      TEB.ThreadLocalStoragePointer, TLS callbacks). Next: static TLS
+      (test first: a test DLL with a TLS directory and callbacks, read
+      from the main thread and new threads), and threads started by
+      kernel32 must get their TLS blocks (and DLL_THREAD_ATTACH). Surveyed: the JDK ships Microsoft's C runtime
       (ucrtbase, vcruntime140, the api-ms-win-* forwarders, which forward
       to kernel32), so gala needs no CRT of its own; it needs ~100 more
       kernel32 functions (SRW locks, condition variables, FLS, locale,

@@ -790,7 +790,17 @@ Windows, never shadows the system's DLLs.)
   (`syscall_stubs!`). DLLs are searched next to the executable, then in
   `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA). The module table
   holds 256 modules with up to 64 dependencies each; a DLL not found, a
-  full table and a full dependency list are in the ledger.
+  full table and a full dependency list are in the ledger. A name with
+  an absolute directory (`C:\jdk\bin\server\jvm.dll`) is loaded from
+  that directory only; its imports are searched as usual. An unhandled
+  exception's code and address are in the ledger before the process
+  ends. TODO: static TLS (IMAGE_TLS_DIRECTORY), DLL_THREAD_ATTACH.
+- **The thread pool** (kernel32 pool.rs): worker threads (up to 8, started
+  as needed) take callbacks from one completion port; each timer and
+  wait object has a helper thread that sleeps until its due time or
+  handle. Objects count queued and running callbacks; WaitFor*Callbacks
+  can cancel the queued ones. Callback environments are ignored and
+  closed objects are not freed (TODO).
 - **advapi32** builds and reads SIDs, ACLs and absolute security
   descriptors as documented (security.rs), knows the user "gala"
   (S-1-5-21-...-1001) and the well-known accounts, and has a stand-in

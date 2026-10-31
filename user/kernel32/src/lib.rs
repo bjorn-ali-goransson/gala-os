@@ -28,6 +28,7 @@ mod locale;
 mod mapping;
 mod messages;
 mod pipe;
+mod pool;
 mod process;
 mod sync;
 mod sysmem;

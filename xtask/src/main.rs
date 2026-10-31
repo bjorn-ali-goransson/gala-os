@@ -153,6 +153,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("win32_misc_test", "shell32.dll", "Windows/System32"),
     ("win32_misc_test", "version.dll", "Windows/System32"),
     ("win32_misc_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("kernel32_pool_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_pool_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_pool_test", "winmm.dll", "Windows/System32"),
     ("advapi32_test", "ntdll.dll", "Windows/System32"),
     ("advapi32_test", "kernel32.dll", "Windows/System32"),
     ("advapi32_test", "advapi32.dll", "Windows/System32"),
@@ -456,6 +459,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_system_test",
     "advapi32_test",
     "win32_misc_test",
+    "kernel32_pool_test",
     "kernel32_misc_test",
     "prng_test",
     "kernel32_env_test",
@@ -1117,6 +1121,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_sys_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_sys_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (JDK): the thread pool and what else msvcp140 imports.
+        name: "kernel32_pool_test",
+        cmdline: "qemu_exit run=kernel32_pool_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["kernel32_pool_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (JDK): user32, ws2_32 ordinals, comctl32, powrprof, shell32,

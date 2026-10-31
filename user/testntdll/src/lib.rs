@@ -328,7 +328,7 @@ fn export_at_depth(base: usize, name: &[u8], ordinal: u32, depth: u32) -> Option
     let (dll, function) = (&forward[..dot], &forward[dot + 1..]);
     let mut module = [0u8; MAX_NAME];
     let len = normalize(dll.iter().map(|&b| u16::from(b)), &mut module).ok()?;
-    let slot = load_module(&module[..len], false).ok()?;
+    let slot = load_module(&module[..len], Search::Default).ok()?;
     let target_base = with_modules(|m| m[slot].base);
     match function.strip_prefix(b"#") {
         Some(digits) => {
@@ -344,7 +344,23 @@ fn export_at_depth(base: usize, name: &[u8], ordinal: u32, depth: u32) -> Option
 /// Opens `dll` (an ASCII file name) from the directory of the executable
 /// (`ImagePathName`), else from `<SystemRoot>\System32` (KUSER_SHARED_DATA's
 /// NtSystemRoot), and maps it; returns its base.
-fn map_dll(dll: &[u8], system32_only: bool) -> Result<usize, u32> {
+/// Where a DLL is looked for.
+#[derive(Clone, Copy)]
+enum Search<'a> {
+    /// Next to the executable, then System32.
+    Default,
+    /// System32 only (LOAD_LIBRARY_SEARCH_SYSTEM32).
+    System32,
+    /// This directory only (a path with a directory was given; ends with
+    /// a backslash).
+    Dir(&'a [u16]),
+}
+
+fn map_dll(dll: &[u8], search: Search) -> Result<usize, u32> {
+    if let Search::Dir(dir) = search {
+        return open_dll(dir, dll);
+    }
+    let system32_only = matches!(search, Search::System32);
     // SAFETY: gs:[0x60] is the PEB; ProcessParameters and ImagePathName are
     // filled in by the kernel.
     let image_path = unsafe {
@@ -549,7 +565,7 @@ fn entry_point(base: usize) -> Option<extern "system" fn(usize, u32, usize) -> i
 /// Loads the DLL `name` (normalized) or takes another reference on it:
 /// maps it from the executable's directory, binds its imports (loading
 /// those DLLs first) and calls its DllMain with DLL_PROCESS_ATTACH once.
-fn load_module(name: &[u8], system32_only: bool) -> Result<usize, u32> {
+fn load_module(name: &[u8], search: Search) -> Result<usize, u32> {
     if let Some(i) = find_module(name) {
         return Ok(with_modules(|m| {
             if m[i].refs != PINNED {
@@ -558,7 +574,7 @@ fn load_module(name: &[u8], system32_only: bool) -> Result<usize, u32> {
             i
         }));
     }
-    let base = match map_dll(name, system32_only) {
+    let base = match map_dll(name, search) {
         Ok(base) => base,
         Err(status) => {
             if status == STATUS_DLL_NOT_FOUND {
@@ -628,7 +644,7 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
             c_str(base + rd32(desc + 12) as usize).iter().map(|&b| u16::from(b)),
             &mut name,
         )?;
-        let dependency = load_module(&name[..len], false)?;
+        let dependency = load_module(&name[..len], Search::Default)?;
         if let Some(slot) = slot {
             let recorded = with_modules(|m| {
                 let n = m[slot].dependency_count;
@@ -745,9 +761,15 @@ pub unsafe extern "system" fn LdrLoadDll(
     // in `path` with its low bit set (a real path is 2-byte aligned).
     let flags = if path as usize & 1 != 0 { path as usize & !1 } else { 0 };
     const LOAD_LIBRARY_SEARCH_SYSTEM32: usize = 0x800;
-    let system32_only = flags & LOAD_LIBRARY_SEARCH_SYSTEM32 != 0;
+    // A name with an absolute directory loads from that directory only.
+    let dir = explicit_dir(name);
+    let search = match dir {
+        Some(d) => Search::Dir(d),
+        None if flags & LOAD_LIBRARY_SEARCH_SYSTEM32 != 0 => Search::System32,
+        None => Search::Default,
+    };
     let mut buf = [0u8; MAX_NAME];
-    let loaded = unicode_name(name, &mut buf).and_then(|n| load_module(&buf[..n], system32_only));
+    let loaded = unicode_name(name, &mut buf).and_then(|n| load_module(&buf[..n], search));
     match loaded {
         Ok(slot) => {
             // SAFETY: the caller passes a writable handle.
@@ -756,6 +778,28 @@ pub unsafe extern "system" fn LdrLoadDll(
         }
         Err(status) => status,
     }
+}
+
+/// The directory of an absolute DLL path (`C:\dir\x.dll` or
+/// `\\server\...`), up to and including its last backslash; None for a
+/// bare or relative name.
+fn explicit_dir(name: *const UnicodeString) -> Option<&'static [u16]> {
+    if name.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's UNICODE_STRING.
+    let units = unsafe {
+        let n = &*name;
+        if n.buffer.is_null() {
+            return None;
+        }
+        core::slice::from_raw_parts(n.buffer, usize::from(n.length) / 2)
+    };
+    let slash = |c: u16| c == u16::from(b'\\') || c == u16::from(b'/');
+    let absolute = (units.len() > 2 && units[1] == u16::from(b':') && slash(units[2]))
+        || (units.len() > 1 && slash(units[0]) && slash(units[1]));
+    let end = units.iter().rposition(|&c| slash(c))?;
+    absolute.then(|| &units[..=end])
 }
 
 /// LdrGetDllHandle(DllPath, DllCharacteristics, DllName, DllHandle): the

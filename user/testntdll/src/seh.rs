@@ -718,8 +718,28 @@ pub extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> 
     if call_handlers(&continue_, &mut pointers) || handled {
         NtContinue(context, 0);
     }
-    // SAFETY: the record starts with its ExceptionCode.
-    let code = unsafe { (record as *const u32).read_unaligned() };
+    // SAFETY: the record starts with its ExceptionCode; ExceptionAddress
+    // is at +0x10 and the parameters at +0x20.
+    let (code, address, info) = unsafe {
+        (
+            (record as *const u32).read_unaligned(),
+            record.add(0x10).cast::<u64>().read_unaligned(),
+            record.add(0x28).cast::<u64>().read_unaligned(),
+        )
+    };
+    // Gaps are never silent: the ledger has the code and where it was
+    // raised (and for access violations, the address accessed).
+    let what = b"ntdll.dll!unhandled exception";
+    crate::GalaRecordMissing(
+        what.as_ptr(),
+        what.len(),
+        2,
+        u64::from(code) << 32 | (address & 0xffff_ffff),
+    );
+    if code == 0xc000_0005 {
+        let what = b"ntdll.dll!unhandled access violation at";
+        crate::GalaRecordMissing(what.as_ptr(), what.len(), 2, info);
+    }
     NtTerminateProcess(-1, code);
     loop {
         core::hint::spin_loop();
