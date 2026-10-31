@@ -230,7 +230,8 @@ Unmodified releases (Caddy, the JDK) are not kept in the repository: the
 `PREBUILT` table in xtask pins each one (URL, SHA-256, the files used
 from its zip), and a scenario module path `target/prebuilt/<name>/<file>`
 makes xtask download, check and unzip it on first use (curl, sha256sum,
-unzip). To try a new prebuilt program before writing its scenario:
+unzip; one fetch at a time, since ISOs are built in parallel, and a
+`.unpacked-<sha256>` marker so an interrupted unpack is redone). To try a new prebuilt program before writing its scenario:
 `cargo xtask iso --file path/to/app.exe run=app.exe "args=..."` and boot
 it with QEMU (`-cpu max`), then follow the ledger and the program's own
 error messages (Go programs print which DLL or procedure they could not

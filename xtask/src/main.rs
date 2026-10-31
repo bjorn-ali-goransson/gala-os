@@ -742,13 +742,20 @@ fn tree_files(dir: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> Result {
 /// is there: downloads its release (curl), checks the SHA-256 and unzips
 /// the members (unzip).
 fn fetch_prebuilt(path: &str) -> Result {
+    // ISOs are built in parallel, and two scenarios may need the same
+    // release: one fetch at a time, so none sees a half-written file.
+    static FETCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = FETCH.lock().unwrap_or_else(|e| e.into_inner());
     let full = root().join(path);
-    if full.exists() {
-        return Ok(());
-    }
     let name = path.split('/').nth(2).ok_or(format!("bad prebuilt path {path}"))?;
     let p = PREBUILT.iter().find(|p| p.name == name).ok_or(format!("no prebuilt {name:?}"))?;
     let dir = root().join("target/prebuilt").join(p.name);
+    // Written once the release is unpacked: a partial unpack (an
+    // interrupted run) is redone.
+    let done = dir.join(format!(".unpacked-{}", p.sha256));
+    if full.exists() && done.exists() {
+        return Ok(());
+    }
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
     let zip = dir.join("download.zip");
     eprintln!("xtask: fetching {} ({})", p.name, p.url);
@@ -764,7 +771,10 @@ fn fetch_prebuilt(path: &str) -> Result {
     cmd.args(["-q", "-o"]).arg(&zip).args(p.members).arg("-d").arg(&dir);
     run_cmd(&mut cmd)?;
     let _ = fs::remove_file(&zip);
-    if full.exists() { Ok(()) } else { Err(format!("{path} is not in {}", p.url)) }
+    if !full.exists() {
+        return Err(format!("{path} is not in {}", p.url));
+    }
+    write(&done, p.url)
 }
 
 fn fetch_limine() -> Result<PathBuf> {
