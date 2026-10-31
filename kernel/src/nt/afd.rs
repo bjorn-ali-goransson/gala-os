@@ -33,6 +33,9 @@ const AFD_INFO_BLOCKING_MODE: u32 = 2;
 pub const IOCTL_AFD_SUPER_CONNECT: u32 = 0x120c7;
 
 const AFD_DISCONNECT_SEND: u32 = 1;
+const AFD_MSG_OOB: u32 = 0x40;
+const AFD_MSG_PEEK: u32 = 0x80;
+const AFD_MSG_WAITALL: u32 = 0x4000;
 const AFD_DISCONNECT_ABORT: u32 = 4;
 
 /// The extended attribute NtCreateFile passes the open packet in.
@@ -71,8 +74,10 @@ pub struct Io {
 
 /// An operation waiting for the network (docs/ARCHITECTURE.md, "AFD").
 enum Op {
+    /// `peek`: leave the bytes in the socket (AFD_MSG_PEEK).
     Recv {
         buffers: Vec<(u64, usize)>,
+        peek: bool,
     },
     /// `done` bytes are already queued.
     Send {
@@ -261,7 +266,8 @@ fn user_write(process: &Process, addr: u64, data: &[u8]) -> Result<(), NtStatus>
 /// Tries an operation once, without waiting.
 fn attempt(state: &EndpointState, op: &mut Op, process: &Process) -> Attempt {
     let socket = *state.socket.lock();
-    match attempt_inner(socket, op, process) {
+    let non_blocking = state.non_blocking.load(Ordering::Acquire);
+    match attempt_inner(socket, op, process, non_blocking) {
         Ok(Some(information)) => Attempt::Done(NtStatus::SUCCESS, information),
         Ok(None) | Err(Failure::Net(NetError::WouldBlock)) => Attempt::Wait,
         Err(Failure::Net(e)) => Attempt::Done(status_of(e), 0),
@@ -291,17 +297,22 @@ fn attempt_inner(
     socket: Option<SocketId>,
     op: &mut Op,
     process: &Process,
+    non_blocking: bool,
 ) -> Result<Option<u64>, Failure> {
     if let Op::Poll { sockets, output, output_len, wait } = op {
         return poll_once(sockets, *output, *output_len, *wait, process);
     }
     let id = socket.ok_or(Failure::Nt(NtStatus::INVALID_CONNECTION))?;
     match op {
-        Op::Recv { buffers } => {
+        Op::Recv { buffers, peek } => {
             let capacity: usize = buffers.iter().map(|&(_, l)| l).sum();
             let mut buf = bounce()?;
             let want = capacity.min(CHUNK);
-            let got = tcp::recv(id, &mut buf[..want])?;
+            let got = if *peek {
+                tcp::peek(id, &mut buf[..want])?
+            } else {
+                tcp::recv(id, &mut buf[..want])?
+            };
             let mut copied = 0;
             for &(addr, len) in buffers.iter() {
                 if copied == got {
@@ -352,6 +363,9 @@ fn attempt_inner(
                 return Err(NtStatus::INVALID_PARAMETER.into());
             }
             let new = tcp::accept(id, sequence, accept.token)?;
+            // Like Windows, an accepted socket inherits the listener's
+            // non-blocking mode (Nginx relies on it).
+            accept.non_blocking.store(non_blocking, Ordering::Release);
             *slot = Some(new);
             drop(slot);
             let local_addr = tcp::local(new)?;
@@ -445,7 +459,16 @@ fn submit(state: &EndpointState, mut op: Op, io: Io) -> NtStatus {
         return status;
     }
     if io.context == 0 && kind != 4 && state.non_blocking.load(Ordering::Acquire) {
-        // A non-blocking socket's synchronous call: "would block".
+        // A non-blocking socket's synchronous call: a send that queued part
+        // of its bytes reports that part (as Windows does: the bytes are
+        // in the socket, the caller must not send them again); otherwise
+        // "would block".
+        if let Op::Send { done, .. } = op
+            && done > 0
+        {
+            finish(state, &io, NtStatus::SUCCESS, done as u64, true);
+            return NtStatus::SUCCESS;
+        }
         return NtStatus::DEVICE_NOT_READY;
     }
     if kind == 4 {
@@ -794,6 +817,10 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
                 return Err(NtStatus::INVALID_PARAMETER);
             }
             *slot = Some(tcp::accept(socket()?, sequence, accepting.token).map_err(status_of)?);
+            // The listener's non-blocking mode carries over (as on Windows).
+            accepting
+                .non_blocking
+                .store(ep.non_blocking.load(Ordering::Acquire), Ordering::Release);
             Immediate::Done(0)
         }
         IOCTL_AFD_SUPER_ACCEPT => {
@@ -869,7 +896,19 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
         }
         IOCTL_AFD_RECV => {
             socket()?;
-            Immediate::Async(Op::Recv { buffers: buffers(r)? })
+            // afd_recv_params.msg_flags (Wine): AFD_MSG_PEEK 0x80; OOB
+            // (0x40) and WAITALL (0x4000) are not supported yet.
+            let info: [u8; 24] = r.input()?;
+            let msg_flags = u32_at(&info, 16);
+            if msg_flags & (AFD_MSG_OOB | AFD_MSG_WAITALL) != 0 {
+                super::ledger::record(
+                    "NtDeviceIoControlFile",
+                    "afd recv flags",
+                    u64::from(msg_flags),
+                );
+                return Err(NtStatus::NOT_SUPPORTED);
+            }
+            Immediate::Async(Op::Recv { buffers: buffers(r)?, peek: msg_flags & AFD_MSG_PEEK != 0 })
         }
         IOCTL_AFD_DISCONNECT => {
             let b: [u8; 16] = r.input()?;

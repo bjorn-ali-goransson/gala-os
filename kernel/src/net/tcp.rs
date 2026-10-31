@@ -672,6 +672,16 @@ pub fn recv(id: SocketId, out: &mut [u8]) -> Result<usize, NetError> {
     })
 }
 
+/// `recv` that leaves the bytes in the socket (MSG_PEEK).
+pub fn peek(id: SocketId, out: &mut [u8]) -> Result<usize, NetError> {
+    conn(id, |t| {
+        if t.can_recv() {
+            return t.peek_slice(out).map_err(|_| NetError::Reset);
+        }
+        if t.may_recv() { Err(NetError::WouldBlock) } else { Ok(0) }
+    })
+}
+
 /// Stops sending (FIN after the queued bytes).
 pub fn shutdown_send(id: SocketId) -> Result<(), NetError> {
     conn(id, |t| {

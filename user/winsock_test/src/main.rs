@@ -2,10 +2,11 @@
 //! WSAStartup (version 2.2), socket/bind/listen/accept/connect on the
 //! loopback address, getsockname (an ephemeral port after binding port 0;
 //! accept reports the client's address), send/recv round trips in both
-//! directions, a 16 KiB transfer, a graceful close (recv returns 0),
-//! WSAECONNREFUSED for a port nobody listens on and WSAENOTSOCK for a
-//! closed socket. Prints `winsock_test: ok` or exits with the number of the
-//! failing check.
+//! directions (with MSG_PEEK), a 16 KiB transfer, a graceful close (recv
+//! returns 0), WSAECONNREFUSED for a port nobody listens on, WSAENOTSOCK
+//! for a closed socket, and non-blocking sockets (WSAEWOULDBLOCK from
+//! accept and recv; an accepted socket inherits the listener's mode).
+//! Prints `winsock_test: ok` or exits with the number of the failing check.
 //!
 //! With the argument `serve` it then listens on port 7 of every address,
 //! prints `winsock_test: listening on port 7`, echoes one connection until
@@ -27,6 +28,7 @@ unsafe extern "system" {
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn GetCommandLineW() -> *const u16;
     fn ExitProcess(code: u32) -> !;
+    fn Sleep(ms: u32);
 }
 
 #[link(name = "ws2_32", kind = "raw-dylib")]
@@ -43,6 +45,7 @@ unsafe extern "system" {
     fn recv(s: Socket, buf: *mut u8, len: i32, flags: i32) -> i32;
     fn getsockname(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> i32;
     fn closesocket(s: Socket) -> i32;
+    fn ioctlsocket(s: Socket, cmd: i32, arg: *mut u32) -> i32;
 }
 
 #[allow(dead_code)]
@@ -97,7 +100,10 @@ const SOCK_STREAM: i32 = 1;
 const IPPROTO_TCP: i32 = 6;
 const INVALID_SOCKET: Socket = !0;
 const SOCKET_ERROR: i32 = -1;
+const MSG_PEEK: i32 = 2;
 const WSAENOTSOCK: i32 = 10038;
+const WSAEWOULDBLOCK: i32 = 10035;
+const FIONBIO: i32 = 0x8004_667eu32 as i32;
 const WSAECONNREFUSED: i32 = 10061;
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
 const ADDR_LEN: i32 = size_of::<SockaddrIn>() as i32;
@@ -218,6 +224,10 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         // Round trips.
         c.eq(send(client, b"ping".as_ptr(), 4, 0) as u64, 4)?;
         let mut buf = [0u8; 64];
+        // MSG_PEEK returns the bytes and leaves them for the next recv.
+        c.eq(recv(server, buf.as_mut_ptr(), 64, MSG_PEEK) as u64, 4)?;
+        c.ok(&buf[..4] == b"ping", buf[0].into())?;
+        buf[..4].copy_from_slice(b"xxxx");
         c.eq(recv(server, buf.as_mut_ptr(), 64, 0) as u64, 4)?;
         c.ok(&buf[..4] == b"ping", buf[0].into())?;
         c.eq(send(server, b"pong!".as_ptr(), 5, 0) as u64, 5)?;
@@ -240,6 +250,40 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         c.eq(recv(client, buf.as_mut_ptr(), 64, 0) as u64, 0)?;
         c.eq(closesocket(client) as u64, 0)?;
         c.eq(closesocket(listener) as u64, 0)?;
+
+        // Non-blocking mode: accept and recv do not wait, and a socket
+        // accepted from a non-blocking listener is non-blocking too.
+        let listener2 = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        c.eq(bind(listener2, &any_port, ADDR_LEN) as u64, 0)?;
+        c.eq(listen(listener2, 5) as u64, 0)?;
+        let mut on = 1u32;
+        c.eq(ioctlsocket(listener2, FIONBIO, &mut on) as u64, 0)?;
+        len = ADDR_LEN;
+        c.eq(getsockname(listener2, &mut bound, &mut len) as u64, 0)?;
+        c.eq(
+            accept(listener2, core::ptr::null_mut(), core::ptr::null_mut()) as u64,
+            INVALID_SOCKET as u64,
+        )?;
+        c.eq(WSAGetLastError() as u64, WSAEWOULDBLOCK as u64)?;
+        let client2 = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        c.eq(
+            connect(client2, &SockaddrIn::new(LOOPBACK, u16::from_be(bound.port)), ADDR_LEN) as u64,
+            0,
+        )?;
+        let mut accepted2 = INVALID_SOCKET;
+        for _ in 0..200 {
+            accepted2 = accept(listener2, core::ptr::null_mut(), core::ptr::null_mut());
+            if accepted2 != INVALID_SOCKET {
+                break;
+            }
+            Sleep(10);
+        }
+        c.ok(accepted2 != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        c.eq(recv(accepted2, buf.as_mut_ptr(), 64, 0) as u64, SOCKET_ERROR as u64)?;
+        c.eq(WSAGetLastError() as u64, WSAEWOULDBLOCK as u64)?;
+        for s in [accepted2, client2, listener2] {
+            c.eq(closesocket(s) as u64, 0)?;
+        }
 
         // Nobody listens on the port any more.
         let refused = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);

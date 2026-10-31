@@ -24,6 +24,7 @@ mod mapping;
 mod messages;
 mod process;
 mod sync;
+mod text;
 
 type Bool = i32;
 type Handle = *mut c_void;

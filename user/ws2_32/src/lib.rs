@@ -123,6 +123,9 @@ const WSAENOPROTOOPT: u32 = 10042;
 const WSAEWOULDBLOCK: u32 = 10035;
 const WSAHOST_NOT_FOUND: i32 = 11001;
 const IOCTL_AFD_POLL: u32 = 0x12024;
+const MSG_PEEK: i32 = 2;
+/// afd_recv_params.msg_flags: peek (Wine's afd.h).
+const AFD_MSG_PEEK: u32 = 0x80;
 const IOCTL_AFD_SET_INFO: u32 = 0x1203b;
 const WSA_IO_PENDING: u32 = 997;
 const WSA_IO_INCOMPLETE: u32 = 996;
@@ -555,18 +558,23 @@ fn transfer(s: Socket, code: u32, buf: *const u8, len: i32, flags: i32) -> i32 {
     if len < 0 {
         return fail(WSAEINVAL);
     }
-    if flags != 0 {
+    // MSG_PEEK on receives; MSG_OOB, MSG_WAITALL and send flags not yet.
+    let peek = code == IOCTL_AFD_RECV && flags == MSG_PEEK;
+    if flags != 0 && !peek {
         missing(b"ws2_32.dll!send/recv(flags)", flags as u64);
         return fail(WSAEOPNOTSUPP);
     }
     // WSABUF {u32 len; char *buf}, then {WSABUF *; u32 count; u32 afd
-    // flags; u32 tdi flags}.
+    // flags; u32 message flags (AFD_MSG_PEEK)}.
     let mut wsabuf = [0u8; 16];
     wsabuf[..4].copy_from_slice(&(len as u32).to_le_bytes());
     wsabuf[8..].copy_from_slice(&(buf as u64).to_le_bytes());
     let mut info = [0u8; 24];
     info[..8].copy_from_slice(&(wsabuf.as_ptr() as u64).to_le_bytes());
     info[8..12].copy_from_slice(&1u32.to_le_bytes());
+    if peek {
+        info[16..20].copy_from_slice(&AFD_MSG_PEEK.to_le_bytes());
+    }
     match afd_call(s, code, &info, &mut []) {
         Ok(n) => n as i32,
         Err(e) => e,
@@ -668,8 +676,14 @@ pub extern "system" fn WSARecv(
     routine: usize,
 ) -> i32 {
     // SAFETY: the caller passes valid flags (in/out).
-    if !flags.is_null() && unsafe { *flags } != 0 {
+    // SAFETY: as above.
+    let peek = !flags.is_null() && unsafe { *flags } == MSG_PEEK as u32;
+    if !flags.is_null() && unsafe { *flags } != 0 && !peek {
         missing(b"ws2_32.dll!WSARecv(flags)", unsafe { *flags }.into());
+        return fail(WSAEOPNOTSUPP);
+    }
+    if peek {
+        missing(b"ws2_32.dll!WSARecv(MSG_PEEK)", 0);
         return fail(WSAEOPNOTSUPP);
     }
     let result = transfer_buffers(s, IOCTL_AFD_RECV, buffers, count, received, ov, routine);
@@ -1357,6 +1371,118 @@ fn parse_ipv4(s: &[u8]) -> Option<[u8; 4]> {
         *byte = u8::try_from(v).ok()?;
     }
     parts.next().is_none().then_some(out)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WSASocketA(
+    af: i32,
+    kind: i32,
+    protocol: i32,
+    info: *const u8,
+    group: u32,
+    flags: u32,
+) -> Socket {
+    WSASocketW(af, kind, protocol, info, group, flags)
+}
+
+/// inet_addr: a dotted IPv4 address in network order (INADDR_NONE if not
+/// one).
+#[unsafe(no_mangle)]
+pub extern "system" fn inet_addr(text: *const u8) -> u32 {
+    if text.is_null() {
+        return u32::MAX;
+    }
+    // SAFETY: the caller's NUL-terminated string.
+    let s = unsafe { core::slice::from_raw_parts(text, strlen(text)) };
+    parse_ipv4(s).map_or(u32::MAX, u32::from_ne_bytes)
+}
+
+/// inet_ntoa: dotted text of an address (network order), in a buffer the
+/// next call reuses (per process here; Windows keeps one per thread).
+#[unsafe(no_mangle)]
+pub extern "system" fn inet_ntoa(address: u32) -> *const u8 {
+    static mut TEXT: [u8; 16] = [0; 16];
+    let mut n = 0;
+    // SAFETY: our buffer: 4 * 3 digits + 3 dots + NUL fits in 16.
+    unsafe {
+        let text = &mut *(&raw mut TEXT);
+        for (i, b) in address.to_ne_bytes().iter().enumerate() {
+            if i > 0 {
+                text[n] = b'.';
+                n += 1;
+            }
+            for d in [b / 100, b / 10 % 10, b % 10].iter().skip(if *b >= 100 {
+                0
+            } else if *b >= 10 {
+                1
+            } else {
+                2
+            }) {
+                text[n] = b'0' + d;
+                n += 1;
+            }
+        }
+        text[n] = 0;
+        text.as_ptr()
+    }
+}
+
+/// The legacy resolver (gethostbyname, ...): no name service yet; they
+/// fail as they do for unknown names, reported.
+#[unsafe(no_mangle)]
+pub extern "system" fn gethostbyname(_name: *const u8) -> *const u8 {
+    missing(b"ws2_32.dll!gethostbyname", 0);
+    set_last_error(WSAHOST_NOT_FOUND as u32);
+    core::ptr::null()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn gethostbyaddr(_address: *const u8, _len: i32, _kind: i32) -> *const u8 {
+    missing(b"ws2_32.dll!gethostbyaddr", 0);
+    set_last_error(WSAHOST_NOT_FOUND as u32);
+    core::ptr::null()
+}
+
+const WSANO_DATA: u32 = 11004;
+
+#[unsafe(no_mangle)]
+pub extern "system" fn getservbyname(_name: *const u8, _proto: *const u8) -> *const u8 {
+    set_last_error(WSANO_DATA);
+    core::ptr::null()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn getservbyport(_port: i32, _proto: *const u8) -> *const u8 {
+    set_last_error(WSANO_DATA);
+    core::ptr::null()
+}
+
+/// sendto/recvfrom: datagram sockets do not exist yet (socket refuses
+/// SOCK_DGRAM), so these have nothing to work on.
+#[unsafe(no_mangle)]
+pub extern "system" fn sendto(
+    _s: Socket,
+    _buf: *const u8,
+    _len: i32,
+    _flags: i32,
+    _to: *const u8,
+    _to_len: i32,
+) -> i32 {
+    missing(b"ws2_32.dll!sendto", 0);
+    fail(WSAEOPNOTSUPP)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn recvfrom(
+    _s: Socket,
+    _buf: *mut u8,
+    _len: i32,
+    _flags: i32,
+    _from: *mut u8,
+    _from_len: *mut i32,
+) -> i32 {
+    missing(b"ws2_32.dll!recvfrom", 0);
+    fail(WSAEOPNOTSUPP)
 }
 
 #[unsafe(no_mangle)]

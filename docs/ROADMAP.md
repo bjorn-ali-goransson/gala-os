@@ -193,8 +193,8 @@ to set and to argue for. Current order and why:
    data-driven.
 5. G3 (workable Go programs): done. N1 done (N1a-N1c: Go's net/http
    serves the host). N2a, N2b done: Nginx serves the host in its normal
-   master/worker mode, with gzip and rewrite (N2c, zlib and PCRE2).
-   Next: OpenSSL (TLS), then U1 (gala-um).
+   master/worker mode, with gzip, rewrite and TLS (N2c, N2d: zlib,
+   PCRE2, OpenSSL). Next: U1 (gala-um).
    N2a was decided 2026-10-31: Nginx is the stated
    goal and the ledger makes bring-up data-driven, so build an x64 Nginx
    with mingw-w64 and run it on gala before choosing anything larger
@@ -277,10 +277,16 @@ N2. **Nginx**: either our own 64-bit build of Nginx (cross-compiled with
         Nginx scenarios check the page, the page gzip-compressed (header,
         gzip magic, uncompressed length in the trailer) and `/old`
         rewritten to it. The ledger asked only for msvcrt's memchr.
-   N2d (next). OpenSSL (TLS), with gala's bcrypt/crypt32 pieces as the
-        ledger asks; the HTTP client gets a TLS mode (rustls is not
-        allowed in xtask without a dependency decision: or `openssl
-        s_client` on the host).
+   N2d. OpenSSL (TLS). **Done**: OpenSSL 3.5.9 LTS in build.sh (target
+        mingw64, still reproducible with SOURCE_DATE_EPOCH); the
+        `nginx_tls` scenario (TLS 1.3 with a checked-in self-signed
+        ECDSA test pair; the host's `curl -k` is the client). Needed:
+        msvcrt file stdio and ~45 more C functions, kernel32 code pages,
+        system time and module queries, advapi32's CryptGenRandom (a
+        verify-context provider on RDRAND), crypt32.dll (stores that
+        fail as documented), MSG_PEEK, and two AFD fixes found by the
+        test: an accepted socket inherits the listener's non-blocking
+        mode, and a non-blocking send that queued part reports that part.
 
 ## Later
 SMP, ACPI (MADT/HPET), virtio devices, bindgen-generated layouts from

@@ -1,6 +1,9 @@
 //! gala's advapi32.dll: the registry and the event log, which gala does not
-//! have yet. The functions exist (programs import them) and fail as
-//! documented, reported to the kernel's missing-features ledger.
+//! have yet (the functions exist, as programs import them, and fail as
+//! documented, reported to the kernel's missing-features ledger), and the
+//! CryptoAPI's random number generator: a CRYPT_VERIFYCONTEXT provider
+//! whose CryptGenRandom draws from gala's ProcessPrng (what OpenSSL seeds
+//! from). Keys, hashes and signatures are not there yet (reported).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -23,6 +26,11 @@ unsafe extern "C" {
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn SetLastError(code: u32);
+}
+
+#[link(name = "bcryptprimitives", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn ProcessPrng(data: *mut u8, length: usize) -> i32;
 }
 
 const ERROR_ACCESS_DENIED: u32 = 5;
@@ -99,6 +107,118 @@ pub extern "system" fn ReportEventA(
 #[unsafe(no_mangle)]
 pub extern "system" fn DeregisterEventSource(_log: usize) -> i32 {
     1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn RegisterEventSourceW(_server: *const u16, _source: *const u16) -> usize {
+    missing(b"advapi32.dll!RegisterEventSourceW");
+    fail(ERROR_NOT_SUPPORTED, 0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ReportEventW(
+    _log: usize,
+    _kind: u16,
+    _category: u16,
+    _id: u32,
+    _sid: *mut c_void,
+    _strings: u16,
+    _size: u32,
+    _text: *const *const u16,
+    _data: *mut c_void,
+) -> i32 {
+    missing(b"advapi32.dll!ReportEventW");
+    fail(ERROR_NOT_SUPPORTED, 0)
+}
+
+fn fail<T>(error: u32, value: T) -> T {
+    // SAFETY: plain call.
+    unsafe { SetLastError(error) };
+    value
+}
+
+// ---- CryptoAPI ----
+
+const CRYPT_VERIFYCONTEXT: u32 = 0xf000_0000;
+/// The one provider handle gala hands out (a verify context: no keys).
+const PROVIDER: usize = 0x6761_6c61; // "gala"
+const NTE_BAD_KEYSET: u32 = 0x8009_0016;
+const NTE_BAD_UID: u32 = 0x8009_0001;
+const ERROR_NO_MORE_ITEMS: u32 = 259;
+
+/// CryptAcquireContextW: a CRYPT_VERIFYCONTEXT provider (random numbers);
+/// key containers are not supported (NTE_BAD_KEYSET, reported).
+#[unsafe(no_mangle)]
+pub extern "system" fn CryptAcquireContextW(
+    provider: *mut usize,
+    container: *const u16,
+    _name: *const u16,
+    _kind: u32,
+    flags: u32,
+) -> i32 {
+    if flags & CRYPT_VERIFYCONTEXT == 0 || !container.is_null() {
+        missing(b"advapi32.dll!CryptAcquireContextW(key container)");
+        return fail(NTE_BAD_KEYSET, 0);
+    }
+    if provider.is_null() {
+        return fail(87, 0);
+    }
+    // SAFETY: the caller's output pointer.
+    unsafe { *provider = PROVIDER };
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn CryptReleaseContext(provider: usize, _flags: u32) -> i32 {
+    if provider == PROVIDER { 1 } else { fail(NTE_BAD_UID, 0) }
+}
+
+/// CryptGenRandom: from ProcessPrng (RDRAND/RDSEED), which never fails.
+#[unsafe(no_mangle)]
+pub extern "system" fn CryptGenRandom(provider: usize, length: u32, buffer: *mut u8) -> i32 {
+    if provider != PROVIDER {
+        return fail(NTE_BAD_UID, 0);
+    }
+    // SAFETY: the caller's buffer of `length` bytes.
+    unsafe { ProcessPrng(buffer, length as usize) };
+    1
+}
+
+/// CryptEnumProvidersW: gala lists no named providers.
+#[unsafe(no_mangle)]
+pub extern "system" fn CryptEnumProvidersW(
+    _index: u32,
+    _reserved: *mut u32,
+    _flags: u32,
+    _kind: *mut u32,
+    _name: *mut u16,
+    _size: *mut u32,
+) -> i32 {
+    fail(ERROR_NO_MORE_ITEMS, 0)
+}
+
+/// The rest of the CryptoAPI (keys, hashes, signatures): not yet.
+macro_rules! not_yet {
+    ($($name:ident($($arg:ident: $ty:ty),*);)*) => {$(
+        #[unsafe(no_mangle)]
+        pub extern "system" fn $name($($arg: $ty),*) -> i32 {
+            $(let _ = $arg;)*
+            missing(concat!("advapi32.dll!", stringify!($name)).as_bytes());
+            fail(NTE_BAD_UID, 0)
+        }
+    )*};
+}
+
+not_yet! {
+    CryptCreateHash(provider: usize, algorithm: u32, key: usize, flags: u32, hash: *mut usize);
+    CryptDestroyHash(hash: usize);
+    CryptSetHashParam(hash: usize, param: u32, data: *const u8, flags: u32);
+    CryptSignHashW(hash: usize, key_spec: u32, description: *const u16, flags: u32, signature: *mut u8, length: *mut u32);
+    CryptDecrypt(key: usize, hash: usize, last: i32, flags: u32, data: *mut u8, length: *mut u32);
+    CryptDestroyKey(key: usize);
+    CryptExportKey(key: usize, export: usize, kind: u32, flags: u32, data: *mut u8, length: *mut u32);
+    CryptGetProvParam(provider: usize, param: u32, data: *mut u8, length: *mut u32, flags: u32);
+    CryptGetUserKey(provider: usize, key_spec: u32, key: *mut usize);
 }
 
 /// DllMain (the entry point our link flags name).

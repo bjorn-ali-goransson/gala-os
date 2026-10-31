@@ -47,6 +47,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt.dll" },
     Dll { package: "advapi32", file: "advapi32.dll", exported_as: "testadvapi32.dll" },
     Dll { package: "user32", file: "user32.dll", exported_as: "testuser32.dll" },
+    // gala's crypt32.dll (certificate stores; only what OpenSSL imports).
+    Dll { package: "crypt32", file: "crypt32.dll", exported_as: "testcrypt32.dll" },
     // gala's mswsock.dll (forwarders to ws2_32).
     Dll { package: "mswsock", file: "mswsock.dll", exported_as: "testmswsock.dll" },
     // Built as ntdll.dll (its export directory says so); exported under
@@ -133,6 +135,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("nginx", "msvcrt.dll", "Windows/System32"),
     ("nginx", "advapi32.dll", "Windows/System32"),
     ("nginx", "user32.dll", "Windows/System32"),
+    ("nginx", "crypt32.dll", "Windows/System32"),
+    ("nginx", "bcryptprimitives.dll", "Windows/System32"),
     ("nginx", "user/bin/nginx.exe", "nginx"),
     ("nginx", "user/nginx/conf/nginx.conf", "nginx/conf"),
     ("nginx", "user/nginx/html/index.html", "nginx/html"),
@@ -145,11 +149,29 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("nginx_master", "msvcrt.dll", "Windows/System32"),
     ("nginx_master", "advapi32.dll", "Windows/System32"),
     ("nginx_master", "user32.dll", "Windows/System32"),
+    ("nginx_master", "crypt32.dll", "Windows/System32"),
+    ("nginx_master", "bcryptprimitives.dll", "Windows/System32"),
     ("nginx_master", "user/bin/nginx.exe", "nginx"),
     ("nginx_master", "user/nginx/conf/nginx-master.conf", "nginx/conf"),
     ("nginx_master", "user/nginx/html/index.html", "nginx/html"),
     ("nginx_master", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
     ("nginx_master", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
+    ("nginx_tls", "ntdll.dll", "Windows/System32"),
+    ("nginx_tls", "kernel32.dll", "Windows/System32"),
+    ("nginx_tls", "ws2_32.dll", "Windows/System32"),
+    ("nginx_tls", "mswsock.dll", "Windows/System32"),
+    ("nginx_tls", "msvcrt.dll", "Windows/System32"),
+    ("nginx_tls", "advapi32.dll", "Windows/System32"),
+    ("nginx_tls", "user32.dll", "Windows/System32"),
+    ("nginx_tls", "bcryptprimitives.dll", "Windows/System32"),
+    ("nginx_tls", "crypt32.dll", "Windows/System32"),
+    ("nginx_tls", "user/bin/nginx.exe", "nginx"),
+    ("nginx_tls", "user/nginx/conf/nginx-tls.conf", "nginx/conf"),
+    ("nginx_tls", "user/nginx/conf/gala-test.crt", "nginx/conf"),
+    ("nginx_tls", "user/nginx/conf/gala-test.key", "nginx/conf"),
+    ("nginx_tls", "user/nginx/html/index.html", "nginx/html"),
+    ("nginx_tls", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
+    ("nginx_tls", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
     ("go_exit", "ntdll.dll", "Windows/System32"),
     ("go_exit", "kernel32.dll", "Windows/System32"),
     ("go_exit", "bcryptprimitives.dll", "Windows/System32"),
@@ -548,6 +570,8 @@ enum NetClient {
     Http(&'static str),
     /// The page, gzip and a rewrite (`nginx_client`).
     Nginx,
+    /// The page over TLS (`tls_client`, with the host's curl).
+    Tls,
 }
 
 /// Scenarios that get a virtio-net card on QEMU's user-mode network, with
@@ -560,6 +584,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("go_http", "go_http: listening on port 7", NetClient::Http(GO_HTTP_PAGE)),
     ("nginx", "using the \"select\" event method", NetClient::Nginx),
     ("nginx_master", "start worker process", NetClient::Nginx),
+    ("nginx_tls", "using the \"select\" event method", NetClient::Tls),
 ];
 
 /// Scenarios whose program serves until stopped: once the net client has
@@ -835,6 +860,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=nginx.exe args=-p%20C:/nginx/%20-c%20conf/nginx-master.conf",
         exit_status: XTASK_STOPS,
         expect: &["start worker process", "xtask: net client: http ok"],
+    },
+    Scenario {
+        // N2d: Nginx with TLS (OpenSSL); the host's curl GETs over HTTPS.
+        name: "nginx_tls",
+        cmdline: "qemu_exit run=nginx.exe args=-p%20C:/nginx/%20-c%20conf/nginx-tls.conf",
+        exit_status: XTASK_STOPS,
+        expect: &["xtask: net client: tls ok"],
     },
     Scenario {
         name: "go_exit",
@@ -1445,6 +1477,7 @@ fn run_vm(
                 NetClient::Echo => net_client(port),
                 NetClient::Http(page) => http_client(port, page),
                 NetClient::Nginx => nginx_client(port),
+                NetClient::Tls => tls_client(port),
             }));
         }
         if stop_after_client && client.as_ref().is_some_and(|c| c.is_finished()) {
@@ -1483,7 +1516,11 @@ fn run_vm(
         serial += &match verdict {
             Ok(()) => format!(
                 "xtask: net client: {} ok\n",
-                if kind == NetClient::Echo { "echo" } else { "http" }
+                match kind {
+                    NetClient::Echo => "echo",
+                    NetClient::Tls => "tls",
+                    _ => "http",
+                }
             ),
             Err(e) => format!("xtask: net client: {e}\n"),
         };
@@ -1564,6 +1601,42 @@ fn nginx_client(port: u16) -> Result {
     }
     let (head, body) = http_request(port, "/old", "")?;
     expect_page(&head, &body, NGINX_PAGE).map_err(|e| format!("GET /old (rewrite): {e}"))
+}
+
+/// The TLS scenario's client: GET / over HTTPS with the host's curl (the
+/// certificate is self-signed: -k), retried while the server is not
+/// listening yet (curl's connect, TLS-handshake and empty-reply errors).
+fn tls_client(port: u16) -> Result {
+    let url = format!("https://127.0.0.1:{port}/");
+    let mut last = String::new();
+    for _ in 0..50 {
+        let out = Command::new("curl")
+            .args(["-skv", "--max-time", "60", "--noproxy", "*", &url])
+            .output()
+            .map_err(|e| format!("curl: {e}"))?;
+        match out.status.code() {
+            Some(0) => {
+                return if out.stdout == NGINX_PAGE.as_bytes() {
+                    Ok(())
+                } else {
+                    Err(format!("body {:?}", String::from_utf8_lossy(&out.stdout)))
+                };
+            }
+            // Could not connect, TLS handshake failed, empty reply, reset.
+            Some(code @ (7 | 35 | 52 | 56)) => {
+                last = format!("curl exit {code}: {}", String::from_utf8_lossy(&out.stderr));
+                thread::sleep(Duration::from_millis(200));
+            }
+            code => {
+                // The end of curl's trace (-v) says where TLS stopped.
+                let trace = String::from_utf8_lossy(&out.stderr);
+                let mut tail: Vec<&str> = trace.lines().rev().take(12).collect();
+                tail.reverse();
+                return Err(format!("curl exit {code:?}:\n{}", tail.join("\n")));
+            }
+        }
+    }
+    Err(last)
 }
 
 fn expect_page(head: &str, body: &[u8], page: &str) -> Result {
@@ -1883,6 +1956,8 @@ fn screenshot(release: bool, args: &[String]) -> Result {
     if cmdline.iter().any(|w| w.contains("nginx.exe")) {
         let scenario = if cmdline.iter().any(|w| w.contains("nginx-master")) {
             "nginx_master"
+        } else if cmdline.iter().any(|w| w.contains("nginx-tls")) {
+            "nginx_tls"
         } else {
             "nginx"
         };
@@ -1905,6 +1980,7 @@ fn screenshot(release: bool, args: &[String]) -> Result {
     // connection open and the client would wait out its read timeout;
     // after that a closed port is refused at once.
     let nginx = cmdline.iter().any(|w| w.contains("nginx.exe"));
+    let tls = cmdline.iter().any(|w| w.contains("nginx-tls"));
     let http = nginx || cmdline.iter().any(|w| w.contains("go_http"));
     if cmdline.iter().any(|w| *w == "net_echo" || w.contains("serve")) || http {
         let port = free_port()?;
@@ -1914,7 +1990,9 @@ fn screenshot(release: bool, args: &[String]) -> Result {
             thread::sleep(Duration::from_millis(2500));
             for _ in 0..20 {
                 thread::sleep(Duration::from_millis(500));
-                result = if nginx {
+                result = if tls {
+                    tls_client(port)
+                } else if nginx {
                     nginx_client(port)
                 } else if http {
                     http_client(port, GO_HTTP_PAGE)

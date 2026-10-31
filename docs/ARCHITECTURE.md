@@ -733,7 +733,13 @@ Internal/InternalHigh) and the endpoint's I/O completion port.
 - Non-blocking sockets (FIONBIO through SET_INFO): a request without a
   completion context (not overlapped through a port) that would pend
   fails with STATUS_DEVICE_NOT_READY instead (ws2_32: WSAEWOULDBLOCK);
-  a connect still proceeds in the background, as on Windows.
+  a connect still proceeds in the background, as on Windows. A send
+  that queued part of its bytes succeeds with that count instead (the
+  bytes are in the socket). An accepted socket inherits the listener's
+  mode (Nginx never sets it on accepted sockets).
+- Receive flags (afd_recv_params.msg_flags, Wine's layout): AFD_MSG_PEEK
+  (0x80) leaves the bytes in the socket (Nginx peeks to tell TLS from
+  plain HTTP); OOB and WAITALL are not supported yet (ledger).
 - IOCTL_AFD_SUPER_ACCEPT (0x12083, AcceptEx: input
   `{u8 san; u8 fix; HANDLE accept; u32 receive_length; u32
   local_length; u32 remote_length}`, the output buffer receives

@@ -15,6 +15,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 mod heap;
+mod misc;
 mod stdio;
 mod time;
 
@@ -44,6 +45,7 @@ unsafe extern "C" {
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
     fn strlen(s: *const u8) -> usize;
+    fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     // Named by core's unwind tables (MSVC target); ntdll has it.
     fn __CxxFrameHandler3();
 }

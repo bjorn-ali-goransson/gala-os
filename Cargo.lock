@@ -85,6 +85,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "crypt32"
+version = "0.1.0"
+
+[[package]]
 name = "defmt"
 version = "0.3.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"

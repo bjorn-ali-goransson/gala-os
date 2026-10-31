@@ -131,6 +131,14 @@ shows it.
   the cross compiler), `cargo test -p xtask` compares every NTSTATUS in
   `kernel/src/nt/status.rs` with `ntstatus.h`; check other constants the
   same way when you add them.
+- **Non-blocking state is inherited**: Windows gives an accepted socket
+  the listener's non-blocking mode, and Nginx relies on it. Missing that
+  made gala's recv block on the TLS handshake's second flight; a request
+  that arrives in one piece hid it for plain HTTP. When a server hangs
+  mid-conversation, `XTASK_EVENTS=syscall` shows which call pended.
+- **The TLS client**: `nginx_tls` uses the host's `curl -k`; on failure
+  the end of curl's `-v` trace is in the log (where the handshake or the
+  request stopped).
 - **Servers start late**: a program may log that it started before it
   listens (Nginx's master logs, then its worker opens the socket). The
   HTTP client retries for 10 s while it gets no response at all.
