@@ -94,6 +94,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_misc_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_file_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_file_test", "kernel32.dll", "Windows/System32"),
+    ("pipe_test", "ntdll.dll", "Windows/System32"),
+    ("pipe_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_env_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_env_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "ntdll.dll", "Windows/System32"),
@@ -232,6 +234,7 @@ const USER_PROGRAMS: &[&str] = &[
     "winsock_async_test",
     "process_test",
     "kernel32_file_test",
+    "pipe_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -896,6 +899,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_file_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_file_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // H1: anonymous pipes (CreatePipe, PeekNamedPipe, EOF, inheritance).
+        name: "pipe_test",
+        cmdline: "qemu_exit run=pipe_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["pipe_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "ledger_test",

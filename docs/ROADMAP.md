@@ -205,6 +205,13 @@ to set and to argue for. Current order and why:
    benchmark that needs them.
 6. U1-U3 (gala-um): the NT layer as a Linux process, for host tools
    (perf, sanitizers, gdb) and millisecond tests; design in docs/GALA_UM.md.
+   Done.
+7. H1-H3 (toward self-hosting), decided 2026-10-31: every build tool,
+   shell and CGI-style program needs pipes and child processes with
+   redirected stdio; that is the first prerequisite of building on gala,
+   and real programs beyond servers need it too. H1 (pipes, redirected
+   child stdio) done; next H2 (a real CLI tool or shell-like program
+   driving children through pipes, chosen from what the ledger shows).
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
@@ -302,6 +309,17 @@ N2. **Nginx**: either our own 64-bit build of Nginx (cross-compiled with
         fail as documented), MSG_PEEK, and two AFD fixes found by the
         test: an accepted socket inherits the listener's non-blocking
         mode, and a non-blocking send that queued part reports that part.
+
+H1. **Pipes and redirected child stdio**: done 2026-10-31. pipe_test
+   (CreatePipe, PeekNamedPipe, EOF as ERROR_BROKEN_PIPE, writes with no
+   reader failing, GetFileType, Get/SetHandleInformation, 1 MiB between
+   threads; QEMU and gala-um) and process_test's redirected child (stdin
+   from a pipe until EOF, stdout and stderr into another). NT layer:
+   `\Device\NamedPipe`, NtCreateNamedPipeFile, client opens, FSCTL_PIPE_PEEK
+   (NtFsControlFile), ObjectHandleFlagInformation (NtQueryObject,
+   NtSetInformationObject), OBJ_INHERIT honoured on file opens.
+H2. **A real program driving children through pipes** (next).
+H3. **A toolchain on gala** (later; see "Later").
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

@@ -39,6 +39,11 @@ pub const NT_CANCEL_IO_FILE_EX: u32 = 0x7f01;
 /// gala's process creation service (docs/ARCHITECTURE.md, "Processes
 /// started by programs").
 pub const GALA_CREATE_PROCESS: u32 = 0x7f02;
+/// gala's numbers for these until verified on the pinned build (they are
+/// reached through ntdll's exports, see docs/ARCHITECTURE.md).
+pub const NT_CREATE_NAMED_PIPE_FILE: u32 = 0x7f03;
+pub const NT_FS_CONTROL_FILE: u32 = 0x7f04;
+pub const NT_SET_INFORMATION_OBJECT: u32 = 0x7f05;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -185,6 +190,9 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_RESUME_THREAD, "NtResumeThread", 2, nt_resume_thread),
     (NT_TERMINATE_THREAD, "NtTerminateThread", 2, nt_terminate_thread),
     (NT_QUERY_OBJECT, "NtQueryObject", 5, nt_query_object),
+    (NT_SET_INFORMATION_OBJECT, "NtSetInformationObject", 4, nt_set_information_object),
+    (NT_CREATE_NAMED_PIPE_FILE, "NtCreateNamedPipeFile", 14, nt_create_named_pipe_file),
+    (NT_FS_CONTROL_FILE, "NtFsControlFile", 10, nt_fs_control_file),
     (NT_OPEN_EVENT, "NtOpenEvent", 3, nt_open_event),
     (NT_OPEN_DIRECTORY_OBJECT, "NtOpenDirectoryObject", 3, nt_open_directory_object),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
@@ -465,6 +473,9 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
         post_completion(call, file, io_status, status);
         return status;
     }
+    if let ObjectBody::Pipe(end) = &entry.object.body {
+        return pipe_io(call, &entry, end, io_status, buffer, length, true);
+    }
     if !matches!(entry.object.body, ObjectBody::ConsoleOutput) {
         return NtStatus::OBJECT_TYPE_MISMATCH;
     }
@@ -485,6 +496,48 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS
+}
+
+/// NtReadFile/NtWriteFile on a pipe end: always synchronous (a read waits
+/// for data, a write until all of it is in the pipe); the event, if any,
+/// and the end itself are signaled when it completes.
+fn pipe_io(
+    call: &Call<'_>,
+    entry: &HandleEntry,
+    end: &super::pipe::PipeEnd,
+    iosb: u64,
+    buffer: u64,
+    length: u32,
+    write: bool,
+) -> NtStatus {
+    let needed = if write { file::FILE_WRITE_DATA } else { file::FILE_READ_DATA };
+    if entry.access & needed == 0 {
+        return NtStatus::ACCESS_DENIED;
+    }
+    let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
+    let result = if write {
+        let mut data = Vec::new();
+        if data.try_reserve_exact(length as usize).is_err() {
+            return NtStatus::NO_MEMORY;
+        }
+        data.resize(length as usize, 0);
+        if call.process.read(buffer, &mut data).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        end.write(&data).map(|()| u64::from(length))
+    } else {
+        end.read(length as usize).and_then(|data| {
+            call.process.write(buffer, &data).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+            Ok(data.len() as u64)
+        })
+    };
+    let (status, done) = match result {
+        Ok(n) => (NtStatus::SUCCESS, n),
+        Err(e) => (e, 0),
+    };
+    finish_io(&entry.object, event.as_ref(), None, status);
+    tri!(call.write_iosb(iosb, status, done));
+    status
 }
 
 /// NtClose(Handle)
@@ -834,6 +887,9 @@ fn nt_open_directory_object(call: &mut Call<'_>) -> NtStatus {
 
 const OBJECT_BASIC_INFORMATION: u64 = 0;
 const OBJECT_NAME_INFORMATION: u64 = 1;
+/// OBJECT_HANDLE_FLAG_INFORMATION { BOOLEAN Inherit; BOOLEAN ProtectFromClose; }
+const OBJECT_HANDLE_FLAG_INFORMATION: u64 = 4;
+const OBJ_PROTECT_CLOSE: u32 = 0x01;
 const OBJECT_BASIC_INFORMATION_SIZE: usize = 56;
 
 /// NtQueryObject(Handle, ObjectInformationClass, Buffer, Length, *ReturnLength)
@@ -859,6 +915,15 @@ fn nt_query_object(call: &mut Call<'_>) -> NtStatus {
             put(&mut out, 4, entry.access);
             put(&mut out, 8, entry.object.handle_count() as u32);
             put(&mut out, 12, KArc::strong_count(&entry.object) as u32);
+        }
+        OBJECT_HANDLE_FLAG_INFORMATION => {
+            let flags = [
+                u8::from(entry.attributes & HANDLE_ATTRIBUTES != 0),
+                u8::from(entry.attributes & OBJ_PROTECT_CLOSE != 0),
+            ];
+            if out.try_extend_from_slice(&flags).is_err() {
+                return NtStatus::NO_MEMORY;
+            }
         }
         OBJECT_NAME_INFORMATION => {
             let Ok(name) = namespace::full_name(&entry.object) else { return NtStatus::NO_MEMORY };
@@ -891,6 +956,31 @@ fn nt_query_object(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS
+}
+
+/// NtSetInformationObject(Handle, ObjectInformationClass, Buffer, Length):
+/// ObjectHandleFlagInformation (SetHandleInformation) only.
+fn nt_set_information_object(call: &mut Call<'_>) -> NtStatus {
+    let handle = Handle(arg!(call, 0));
+    let (class, buffer, length) =
+        (arg!(call, 1) as u32 as u64, arg!(call, 2), arg!(call, 3) as u32);
+    if class != OBJECT_HANDLE_FLAG_INFORMATION {
+        return NtStatus::INVALID_INFO_CLASS;
+    }
+    if length < 2 {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let mut flags = [0u8; 2];
+    if call.process.read(buffer, &mut flags).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let attributes = if flags[0] != 0 { HANDLE_ATTRIBUTES } else { 0 }
+        | if flags[1] != 0 { OBJ_PROTECT_CLOSE } else { 0 };
+    if call.process.handles.lock().set_attributes(handle, attributes) {
+        NtStatus::SUCCESS
+    } else {
+        NtStatus::INVALID_HANDLE
+    }
 }
 
 fn event_object(call: &Call<'_>, h: Handle, access: u32) -> Result<ObjectRef, NtStatus> {
@@ -2213,6 +2303,24 @@ impl Call<'_> {
             .is_ok_and(|(device, _)| matches!(device.body, ObjectBody::AfdDevice)))
     }
 
+    /// The pipe name if OBJECT_ATTRIBUTES name something below
+    /// `\Device\NamedPipe`.
+    fn pipe_name(&self, attrs_ptr: u64) -> Result<Option<Vec<u16>>, NtStatus> {
+        let Some((0, name, attributes)) = self.raw_object_attributes(attrs_ptr)? else {
+            return Ok(None);
+        };
+        let ci = attributes & OBJ_CASE_INSENSITIVE != 0;
+        Ok(match namespace::lookup_parse(None, &name, ci) {
+            Ok((device, rest)) if matches!(device.body, ObjectBody::NamedPipeDevice) => Some(rest),
+            _ => None,
+        })
+    }
+
+    /// The handle attributes (OBJ_INHERIT) asked for in OBJECT_ATTRIBUTES.
+    fn handle_attributes(&self, attrs_ptr: u64) -> Result<u32, NtStatus> {
+        Ok(self.raw_object_attributes(attrs_ptr)?.map_or(0, |(_, _, a)| a & HANDLE_ATTRIBUTES))
+    }
+
     /// Reads NtCreateFile's EA buffer (at most 4 KiB).
     fn ea_buffer(&self, ptr: u64, len: u64) -> Result<Vec<u8>, NtStatus> {
         if ptr == 0 || len == 0 {
@@ -2234,12 +2342,19 @@ impl Call<'_> {
         let (object, information) = if tri!(self.names_afd(attrs_ptr)) {
             let ea = tri!(self.ea_buffer(ea.0, ea.1));
             (tri!(super::afd::open(&ea)), file::FILE_OPENED)
+        } else if let Some(name) = tri!(self.pipe_name(attrs_ptr)) {
+            let end = tri!(super::pipe::open_client(&name));
+            let Ok(object) = KObject::new(ObjectBody::Pipe(end)) else {
+                return NtStatus::NO_MEMORY;
+            };
+            (object, file::FILE_OPENED)
         } else {
             let path = tri!(self.file_path(attrs_ptr));
             let created = tri!(file::create(&path, granted, share, disposition, options));
             (created.object, created.information)
         };
-        let entry = HandleEntry { object, access: granted, attributes: 0 };
+        let attributes = tri!(self.handle_attributes(attrs_ptr));
+        let entry = HandleEntry { object, access: granted, attributes };
         let Ok(handle) = self.process.handles.lock().insert(entry) else {
             return NtStatus::NO_MEMORY;
         };
@@ -2263,6 +2378,69 @@ struct OpenRequest {
     options: u32,
     /// EaBuffer and EaLength (NtCreateFile only; the AFD open packet).
     ea: (u64, u64),
+}
+
+/// NtCreateNamedPipeFile(*FileHandle, DesiredAccess, ObjectAttributes,
+///   *IoStatusBlock, ShareAccess, CreateDisposition, CreateOptions,
+///   NamedPipeType, ReadMode, CompletionMode, MaximumInstances,
+///   InboundQuota, OutboundQuota, *DefaultTimeout): byte-mode instances
+///   below `\Device\NamedPipe`, one per name (see nt/pipe.rs).
+fn nt_create_named_pipe_file(call: &mut Call<'_>) -> NtStatus {
+    let (out, access, attrs_ptr, iosb) =
+        (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));
+    let (inbound, outbound) = (arg!(call, 11) as u32, arg!(call, 12) as u32);
+    let Some(name) = tri!(call.pipe_name(attrs_ptr)) else {
+        return NtStatus::OBJECT_NAME_INVALID;
+    };
+    if name.is_empty() {
+        return NtStatus::OBJECT_NAME_INVALID;
+    }
+    let end = tri!(super::pipe::create_server(&name, inbound, outbound));
+    let Ok(object) = KObject::new(ObjectBody::Pipe(end)) else { return NtStatus::NO_MEMORY };
+    let attributes = tri!(call.handle_attributes(attrs_ptr));
+    let granted = super::object::FILE_MAPPING.map(access);
+    let entry = HandleEntry { object, access: granted, attributes };
+    let Ok(handle) = call.process.handles.lock().insert(entry) else {
+        return NtStatus::NO_MEMORY;
+    };
+    if call.write_u64(out, handle.0).is_err() {
+        call.process.handles.lock().close(handle);
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    tri!(call.write_iosb(iosb, NtStatus::SUCCESS, file::FILE_CREATED));
+    NtStatus::SUCCESS
+}
+
+/// FSCTL_PIPE_PEEK: FILE_PIPE_PEEK_BUFFER { NamedPipeState,
+/// ReadDataAvailable, NumberOfMessages, MessageLength, Data[] }.
+const FSCTL_PIPE_PEEK: u32 = 0x0011_400c;
+
+/// NtFsControlFile(FileHandle, Event, ApcRoutine, ApcContext,
+///   *IoStatusBlock, FsControlCode, InputBuffer, InputBufferLength,
+///   OutputBuffer, OutputBufferLength): FSCTL_PIPE_PEEK on pipes.
+fn nt_fs_control_file(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let (iosb, code, out, out_len) =
+        (arg!(call, 4), arg!(call, 5) as u32, arg!(call, 8), arg!(call, 9) as u32 as usize);
+    let ObjectBody::Pipe(end) = &entry.object.body else {
+        return NtStatus::INVALID_DEVICE_REQUEST;
+    };
+    if code != FSCTL_PIPE_PEEK {
+        return NtStatus::INVALID_DEVICE_REQUEST;
+    }
+    if out_len < 16 {
+        return NtStatus::BUFFER_TOO_SMALL;
+    }
+    let (state, available, data) = tri!(end.peek(out_len - 16));
+    let mut header = [0u8; 16];
+    header[0..4].copy_from_slice(&state.to_le_bytes());
+    header[4..8].copy_from_slice(&(available as u32).to_le_bytes());
+    if call.process.write(out, &header).is_err() || call.process.write(out + 16, &data).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let status = if data.len() < available { NtStatus::BUFFER_OVERFLOW } else { NtStatus::SUCCESS };
+    tri!(call.write_iosb(iosb, status, 16 + data.len() as u64));
+    status
 }
 
 /// NtCreateFile(*FileHandle, DesiredAccess, ObjectAttributes, *IoStatusBlock,
@@ -2581,6 +2759,9 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (iosb, buffer, length, offset_ptr) =
         (arg!(call, 4), arg!(call, 5), arg!(call, 6) as u32, arg!(call, 7));
+    if let ObjectBody::Pipe(end) = &entry.object.body {
+        return pipe_io(call, &entry, end, iosb, buffer, length, false);
+    }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     let apc = tri!(io_apc(call, file, iosb));
     let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
@@ -3111,12 +3292,18 @@ fn nt_query_volume_information_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (iosb, buffer, length, class) =
         (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4) as u32);
-    let console = matches!(entry.object.body, ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput);
-    if console && class == file::FILE_FS_DEVICE_INFORMATION {
-        // FILE_FS_DEVICE_INFORMATION { DeviceType: FILE_DEVICE_CONSOLE,
-        // Characteristics: 0 } (what console handles report on Windows).
+    // FILE_FS_DEVICE_INFORMATION { DeviceType, Characteristics: 0 } of
+    // console handles (FILE_DEVICE_CONSOLE) and pipes (FILE_DEVICE_NAMED_PIPE).
+    let device = match entry.object.body {
+        ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => Some(0x50u32),
+        ObjectBody::Pipe(_) => Some(0x11),
+        _ => None,
+    };
+    if let Some(device) = device
+        && class == file::FILE_FS_DEVICE_INFORMATION
+    {
         let mut info = [0u8; 8];
-        info[0..4].copy_from_slice(&0x50u32.to_le_bytes());
+        info[0..4].copy_from_slice(&device.to_le_bytes());
         if length < info.len() {
             return NtStatus::INFO_LENGTH_MISMATCH;
         }

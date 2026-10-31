@@ -52,6 +52,18 @@ syscall_stubs! {
     NtCancelIoFileEx = 0x7f01, fn(h: usize, request: *mut [usize; 2], iosb: *mut [usize; 2]);
     // gala's process creation (kernel32's CreateProcess; see the kernel).
     GalaCreateProcess = 0x7f02, fn(parameters: *mut u8);
+    // gala's numbers until verified on the pinned build (see the kernel).
+    NtCreateNamedPipeFile = 0x7f03, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes,
+        iosb: *mut [usize; 2], share: u32, disposition: u32, options: u32, kind: u32,
+        read_mode: u32, completion: u32, instances: u32, inbound: u32, outbound: u32,
+        timeout: *const i64
+    );
+    NtFsControlFile = 0x7f04, fn(
+        h: usize, event: usize, apc: usize, context: usize, iosb: *mut [usize; 2], code: u32,
+        input: *const u8, input_length: u32, output: *mut u8, output_length: u32
+    );
+    NtSetInformationObject = 0x7f05, fn(h: usize, class: u32, buffer: *const u8, length: u32);
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,
@@ -179,6 +191,7 @@ syscall_stubs! {
         iosb: *mut [usize; 2], allocation: *const i64, file_attributes: u32, share: u32,
         disposition: u32, options: u32, ea: *const u8, ea_length: u32
     );
+    NtQueryObject = 0x10, fn(h: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32);
     NtQueryVolumeInformationFile = 0x49, fn(
         h: usize, iosb: *mut [usize; 2], buf: *mut u8, len: u32, class: u32
     );
@@ -857,6 +870,10 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0024, 6),    // OBJECT_TYPE_MISMATCH -> ERROR_INVALID_HANDLE
     (0xc000_0033, 123),  // OBJECT_NAME_INVALID -> ERROR_INVALID_NAME
     (0xc000_0034, 2),    // OBJECT_NAME_NOT_FOUND -> ERROR_FILE_NOT_FOUND
+    (0xc000_014b, 109),  // PIPE_BROKEN -> ERROR_BROKEN_PIPE
+    (0xc000_00b1, 232),  // PIPE_CLOSING -> ERROR_NO_DATA
+    (0xc000_00ab, 231),  // INSTANCE_NOT_AVAILABLE -> ERROR_PIPE_BUSY
+    (0xc000_00ac, 231),  // PIPE_NOT_AVAILABLE -> ERROR_PIPE_BUSY
     (0xc000_0035, 183),  // OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS
     (0xc000_0039, 161),  // OBJECT_PATH_INVALID -> ERROR_BAD_PATHNAME
     (0xc000_003a, 3),    // OBJECT_PATH_NOT_FOUND -> ERROR_PATH_NOT_FOUND

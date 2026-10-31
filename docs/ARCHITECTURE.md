@@ -501,6 +501,35 @@ the TSC clock; the performance counter runs at 10 MHz.
 User-mode CPU exceptions terminate the process with the matching NTSTATUS
 (no SEH dispatch yet).
 
+## Pipes (H1)
+
+`nt/pipe.rs`. `\Device\NamedPipe` is a device object (like `\Device\Afd`):
+NtCreateNamedPipeFile (gala number 0x7f03 until verified) creates a
+byte-mode instance below it and returns its server end; NtCreateFile or
+NtOpenFile of the same name connects the client end (one instance per
+name, one client). kernel32's CreatePipe uses a unique
+`Win32Pipes.<pid>.<n>` name, reads the server end and writes the client
+end, both synchronous.
+
+A pipe is two byte queues (one per direction, bounded by the creator's
+inbound/outbound quotas, at least 4 KiB) and the open state of each end;
+an end closes when its object is dropped (its last handle: inherited and
+duplicated handles keep it open). NtReadFile returns what is there (at
+least one byte, waiting otherwise) and STATUS_PIPE_BROKEN once the other
+end is closed and the queue is empty (ERROR_BROKEN_PIPE); NtWriteFile
+completes fully, waiting while the queue is full, and fails with
+STATUS_PIPE_CLOSING (ERROR_NO_DATA; Windows' exact code for this case is
+unverified) once there is no reader. Waiting threads are on the pipe's
+waiter list and are woken on every change; they leave on termination.
+FSCTL_PIPE_PEEK (NtFsControlFile, 0x7f04) reports the state, the bytes
+available and a copy (STATUS_BUFFER_OVERFLOW if they do not all fit).
+Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
+Handle flags: NtQueryObject's ObjectHandleFlagInformation (class 4) and
+NtSetInformationObject (0x7f05) read and set OBJ_INHERIT and the
+protect-from-close bit on a handle; file opens now keep OBJ_INHERIT from
+OBJECT_ATTRIBUTES. Not yet: overlapped pipe I/O, message mode, named
+pipe servers with several instances or ConnectNamedPipe.
+
 ## Processes started by programs (N2b)
 
 kernel32's CreateProcessW/A calls `GalaCreateProcess` (service 0x7f02,

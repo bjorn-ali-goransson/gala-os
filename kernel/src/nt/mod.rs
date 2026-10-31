@@ -11,6 +11,7 @@ pub mod ntdll;
 pub mod object;
 pub mod params;
 pub mod pe;
+pub mod pipe;
 pub mod platform;
 pub mod process;
 pub mod section;
@@ -30,6 +31,9 @@ pub fn init() {
     }
     if let Err(e) = file::init() {
         panic!("file system: {e:?}");
+    }
+    if let Err(e) = pipe::init() {
+        panic!("named pipes: {e:?}");
     }
     if let Err(e) = afd::init() {
         panic!("AFD: {e:?}");

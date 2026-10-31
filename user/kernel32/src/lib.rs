@@ -22,6 +22,7 @@ use core::ffi::c_void;
 
 mod mapping;
 mod messages;
+mod pipe;
 mod process;
 mod sync;
 mod text;

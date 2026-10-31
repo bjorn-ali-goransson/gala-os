@@ -330,6 +330,11 @@ pub enum ObjectBody {
     AfdDevice,
     /// An AFD socket endpoint (a SOCKET is a handle to one).
     Socket(super::afd::Endpoint),
+    /// `\Device\NamedPipe`: NtCreateNamedPipeFile creates instances below
+    /// it, opening a name below it connects to one.
+    NamedPipeDevice,
+    /// One end of a pipe.
+    Pipe(super::pipe::PipeEnd),
 }
 
 /// Where a named object lives in the namespace.
@@ -386,6 +391,8 @@ impl KObject {
             ObjectBody::Process(_) => "Process",
             ObjectBody::AfdDevice => "Device",
             ObjectBody::Socket(_) => "File",
+            ObjectBody::NamedPipeDevice => "Device",
+            ObjectBody::Pipe(_) => "File",
         }
     }
 
@@ -415,13 +422,15 @@ impl KObject {
             ObjectBody::Process(p) => Some(&p.dispatcher),
             ObjectBody::File(f) => Some(&f.dispatcher),
             ObjectBody::Socket(e) => Some(&e.state.dispatcher),
+            ObjectBody::Pipe(p) => Some(&p.dispatcher),
             ObjectBody::ConsoleInput
             | ObjectBody::ConsoleOutput
             | ObjectBody::Directory(_)
             | ObjectBody::SymbolicLink(_)
             | ObjectBody::Section(_)
             | ObjectBody::Volume
-            | ObjectBody::AfdDevice => None,
+            | ObjectBody::AfdDevice
+            | ObjectBody::NamedPipeDevice => None,
         }
     }
 
@@ -439,7 +448,9 @@ impl KObject {
             ObjectBody::Volume
             | ObjectBody::File(_)
             | ObjectBody::AfdDevice
-            | ObjectBody::Socket(_) => FILE_MAPPING,
+            | ObjectBody::Socket(_)
+            | ObjectBody::NamedPipeDevice
+            | ObjectBody::Pipe(_) => FILE_MAPPING,
             ObjectBody::Process(_) => PROCESS_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,
@@ -535,6 +546,17 @@ impl HandleTable {
     pub fn insert_object(&mut self, object: ObjectRef) -> Result<Handle, AllocError> {
         let access = object.mapping().all;
         self.insert(HandleEntry { object, access, attributes: 0 })
+    }
+
+    /// Replaces a handle's attribute bits; false if there is no such handle.
+    pub fn set_attributes(&mut self, handle: Handle, attributes: u32) -> bool {
+        match self.entries.get_mut(slot(handle).unwrap_or(usize::MAX)) {
+            Some(Some(entry)) => {
+                entry.attributes = attributes;
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn get(&self, handle: Handle) -> Option<HandleEntry> {

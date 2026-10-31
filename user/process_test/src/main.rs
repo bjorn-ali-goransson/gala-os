@@ -5,8 +5,13 @@
 //! parent waits on the process handle and reads the exit code
 //! (STILL_ACTIVE while it runs), sees the event set, starts a child
 //! suspended (it does not run until ResumeThread) and checks that a
-//! missing program fails with ERROR_FILE_NOT_FOUND. Prints
-//! `process_test: ok` or exits with the number of the failing check.
+//! missing program fails with ERROR_FILE_NOT_FOUND. Then redirected
+//! standard handles (STARTF_USESTDHANDLES): a child (`process_test
+//! pipes`) reads its stdin from one pipe until end of file and writes its
+//! stdout and stderr into another, which the parent reads until
+//! ERROR_BROKEN_PIPE (the CreatePipe docs' pattern: the parent's ends are
+//! not inheritable, and it closes the child's ends after CreateProcess).
+//! Prints `process_test: ok` or exits with the number of the failing check.
 
 #![no_std]
 #![no_main]
@@ -66,6 +71,14 @@ unsafe extern "system" {
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetExitCodeProcess(h: Handle, code: *mut u32) -> Bool;
     fn ResumeThread(h: Handle) -> u32;
+    fn ReadFile(h: Handle, buf: *mut u8, len: u32, read: *mut u32, ov: *mut c_void) -> Bool;
+    fn CreatePipe(
+        read: *mut Handle,
+        write: *mut Handle,
+        attributes: *const SecurityAttributes,
+        size: u32,
+    ) -> Bool;
+    fn SetHandleInformation(h: Handle, mask: u32, flags: u32) -> Bool;
     fn CloseHandle(h: Handle) -> Bool;
     fn ExitProcess(code: u32) -> !;
 }
@@ -93,6 +106,11 @@ const STILL_ACTIVE: u32 = 259;
 const CREATE_SUSPENDED: u32 = 4;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const CHILD_EXIT: u32 = 0x1234;
+const PIPES_CHILD_EXIT: u32 = 0x77;
+const STARTF_USESTDHANDLES: u32 = 0x100;
+const ERROR_BROKEN_PIPE: u32 = 109;
+/// What the pipes child writes for the parent's `ping`.
+const PIPES_OUTPUT: &[u8] = b"child read 4: ping\r\nchild stderr\r\n";
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -182,6 +200,148 @@ fn child(handle: usize) -> ! {
     let ok = unsafe { SetEvent(handle as Handle) } != 0;
     // SAFETY: ends the process.
     unsafe { ExitProcess(if ok { CHILD_EXIT } else { 0xbad }) }
+}
+
+/// `process_test pipes`: reads stdin until end of file, reports it on
+/// stdout, writes a line to stderr.
+fn pipes_child() -> ! {
+    let mut data = [0u8; 64];
+    let mut total = 0usize;
+    // SAFETY: documented kernel32 calls with valid buffers.
+    unsafe {
+        let input = GetStdHandle(-10i32 as u32);
+        loop {
+            let mut n = 0;
+            let room = data.len() - total;
+            if room == 0
+                || ReadFile(
+                    input,
+                    data.as_mut_ptr().add(total),
+                    room as u32,
+                    &mut n,
+                    core::ptr::null_mut(),
+                ) == 0
+            {
+                break;
+            }
+            total += n as usize;
+        }
+        let mut line = [0u8; 96];
+        let head = b"child read ";
+        line[..head.len()].copy_from_slice(head);
+        let mut at = head.len();
+        line[at] = b'0' + (total % 10) as u8;
+        at += 1;
+        line[at..at + 2].copy_from_slice(b": ");
+        at += 2;
+        line[at..at + total].copy_from_slice(&data[..total]);
+        at += total;
+        line[at..at + 2].copy_from_slice(b"\r\n");
+        at += 2;
+        let mut written = 0;
+        WriteFile(
+            GetStdHandle(-11i32 as u32),
+            line.as_ptr(),
+            at as u32,
+            &mut written,
+            core::ptr::null_mut(),
+        );
+        let err = b"child stderr\r\n";
+        WriteFile(
+            GetStdHandle(-12i32 as u32),
+            err.as_ptr(),
+            err.len() as u32,
+            &mut written,
+            core::ptr::null_mut(),
+        );
+        ExitProcess(PIPES_CHILD_EXIT)
+    }
+}
+
+/// The redirected-stdio part (see the module comment).
+fn pipes(c: &mut Checks, path: &[u16; 260], n: usize) -> Result<(), u32> {
+    // SAFETY: documented kernel32 calls with valid arguments.
+    unsafe {
+        let inherit =
+            SecurityAttributes { length: 24, descriptor: core::ptr::null_mut(), inherit: 1 };
+        let (mut in_r, mut in_w) = (core::ptr::null_mut(), core::ptr::null_mut());
+        let (mut out_r, mut out_w) = (core::ptr::null_mut(), core::ptr::null_mut());
+        c.ok(CreatePipe(&mut in_r, &mut in_w, &inherit, 0) != 0, GetLastError().into())?;
+        c.ok(CreatePipe(&mut out_r, &mut out_w, &inherit, 0) != 0, GetLastError().into())?;
+        // The parent's ends stay here.
+        c.ok(SetHandleInformation(in_w, 1, 0) != 0, GetLastError().into())?;
+        c.ok(SetHandleInformation(out_r, 1, 0) != 0, GetLastError().into())?;
+
+        let mut line = [0u16; 400];
+        let mut at = put(&mut line, 0, b"\"");
+        line[at..at + n].copy_from_slice(&path[..n]);
+        at += n;
+        at = put(&mut line, at, b"\" pipes");
+        line[at] = 0;
+        // STARTUPINFOW: dwFlags at 60, hStdInput/Output/Error at 80/88/96.
+        let mut startup = StartupInfo { cb: 104, rest: [0; 100] };
+        startup.rest[56..60].copy_from_slice(&STARTF_USESTDHANDLES.to_le_bytes());
+        startup.rest[76..84].copy_from_slice(&(in_r as u64).to_le_bytes());
+        startup.rest[84..92].copy_from_slice(&(out_w as u64).to_le_bytes());
+        startup.rest[92..100].copy_from_slice(&(out_w as u64).to_le_bytes());
+        let mut info = ProcessInformation {
+            process: core::ptr::null_mut(),
+            thread: core::ptr::null_mut(),
+            process_id: 0,
+            thread_id: 0,
+        };
+        let ok = CreateProcessW(
+            path.as_ptr(),
+            line.as_mut_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            1,
+            0,
+            core::ptr::null(),
+            core::ptr::null(),
+            &startup,
+            &mut info,
+        );
+        c.ok(ok != 0, GetLastError().into())?;
+        // The child's ends are the child's now.
+        CloseHandle(in_r);
+        CloseHandle(out_w);
+
+        let mut written = 0;
+        c.ok(WriteFile(in_w, b"ping".as_ptr(), 4, &mut written, core::ptr::null_mut()) != 0, 0)?;
+        c.eq(written.into(), 4)?;
+        CloseHandle(in_w); // end of the child's input
+
+        let mut output = [0u8; 128];
+        let mut total = 0usize;
+        loop {
+            let mut got = 0;
+            let room = (output.len() - total) as u32;
+            if room == 0
+                || ReadFile(
+                    out_r,
+                    output.as_mut_ptr().add(total),
+                    room,
+                    &mut got,
+                    core::ptr::null_mut(),
+                ) == 0
+            {
+                break;
+            }
+            total += got as usize;
+        }
+        c.eq(GetLastError().into(), ERROR_BROKEN_PIPE.into())?;
+        c.ok(&output[..total] == PIPES_OUTPUT, total as u64)?;
+        CloseHandle(out_r);
+
+        c.eq(WaitForSingleObject(info.process, 10_000).into(), 0)?;
+        let mut code = 0;
+        c.ok(GetExitCodeProcess(info.process, &mut code) != 0, GetLastError().into())?;
+        c.eq(code.into(), PIPES_CHILD_EXIT.into())?;
+        CloseHandle(info.thread);
+        CloseHandle(info.process);
+    }
+    Ok(())
 }
 
 fn run() -> Result<(), u32> {
@@ -278,6 +438,7 @@ fn run() -> Result<(), u32> {
         c.eq(ok as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_FILE_NOT_FOUND.into())?;
         CloseHandle(event);
+        pipes(&mut c, &path, n)?;
     }
     Ok(())
 }
@@ -296,6 +457,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
     let mut args: [&[u16]; 4] = [&[]; 4];
     let argc = arguments(line, &mut args);
     let child_word: [u16; 5] = [b'c', b'h', b'i', b'l', b'd'].map(u16::from);
+    let pipes_word: [u16; 5] = [b'p', b'i', b'p', b'e', b's'].map(u16::from);
+    if argc == 1 && args[0] == pipes_word {
+        pipes_child();
+    }
     if argc == 2 && args[0] == child_word {
         child(parse_hex(args[1]).unwrap_or(0));
     }
