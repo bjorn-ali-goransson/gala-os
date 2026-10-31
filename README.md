@@ -7,7 +7,10 @@ programs. It implements the Windows NT kernel's system call interface
 (the "NT layer"), and ships its own clean-room ntdll.dll, kernel32.dll,
 msvcrt.dll, ws2_32.dll and other system DLLs, so that `.exe` files built
 for Windows - by MSVC-style toolchains, mingw-w64, Go or Rust - run on it
-as they are. Private project.
+as they are.
+
+The source is public so that it can be read; it is not open source. No
+license is granted (see [License](#license) below).
 
 It is written clean-room: from public documentation, headers, open-source
 reimplementations and black-box behaviour of Windows only, never from
@@ -375,3 +378,15 @@ there, then `cargo xtask compare windows.json` here.
 | `um/` | gala-um, the NT layer as a Linux process |
 | `xtask/` | the build and test driver (`cargo xtask ...`, scenarios) |
 | `docs/` | design, roadmap, workflow, measurements |
+
+## License
+
+No license is granted. The source code is published so that people can
+read it and follow the project, but all rights are reserved: publishing it
+does not give permission to use, copy, modify or redistribute it (GitHub's
+terms of service still allow viewing and forking on GitHub itself). The
+`license = "LicenseRef-Proprietary"` in `Cargo.toml` means the same thing.
+
+Third-party components in this repository (the programs under `user/bin`
+built from third-party source, and the crates gala links) keep their own
+licenses; [`THIRD_PARTY.md`](THIRD_PARTY.md) lists each one with its source.

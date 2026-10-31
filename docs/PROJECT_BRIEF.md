@@ -20,7 +20,9 @@ owner and its developers. It stays local by default.)
 Build a new OS kernel, written in Rust, that is binary-compatible with
 Windows at the user-mode ABI level, so unmodified Windows programs can run
 on it. The internals are our own design and will be heavily optimized and
-re-architected. This is a private project and will not be published.
+re-architected. The source is public (readable on GitHub) but not licensed:
+no license is granted and all rights are reserved (see the README's
+"License" section). It may be licensed later.
 
 ## Clean-room rules (mandatory)
 - Never use disassembly, decompiled code, or leaked Windows source.

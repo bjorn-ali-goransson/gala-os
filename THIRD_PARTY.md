@@ -1,8 +1,13 @@
 # Third-party code and provenance
 
 Every borrowed component, and every piece of code written from a third-party
-specification or source, is listed here with its origin and license. This
-matters if the project is ever released (Wine is LGPL, ReactOS mostly GPL).
+specification or source, is listed here with its origin and license. The
+repository is public, so everything checked in here is distributed: the
+third-party binaries in `user/bin` are distributed under their own licenses
+(for the GPL and LGPL ones, the corresponding source is the exact version
+named below, which the build scripts fetch and check). gala's own code is not
+licensed (see the README's "License" section); if it is ever licensed, this
+file is what that depends on (Wine is LGPL, ReactOS mostly GPL).
 
 Rules for this file:
 - Add an entry in the same commit that introduces the borrowed code or
