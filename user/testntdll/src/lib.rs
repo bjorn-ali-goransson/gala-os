@@ -442,8 +442,12 @@ const STATUS_PROCEDURE_NOT_FOUND: u32 = 0xc000_007a;
 const STATUS_ORDINAL_NOT_FOUND: u32 = 0xc000_0138;
 const STATUS_DLL_INIT_FAILED: u32 = 0xc000_0142;
 
-const MAX_MODULES: usize = 32;
-const MAX_DEPENDENCIES: usize = 16;
+/// Loaded modules (the JDK alone brings about 60 DLLs, most of them the
+/// api-ms-win-* forwarders).
+const MAX_MODULES: usize = 256;
+/// DLLs one module imports from (ucrtbase alone imports from about 30
+/// api-ms-win-core sets).
+const MAX_DEPENDENCIES: usize = 64;
 const MAX_NAME: usize = 64;
 /// Reference count of modules that are never unloaded (ntdll, the exe).
 const PINNED: u32 = u32::MAX;
@@ -499,7 +503,11 @@ fn add_module(name: &[u8], base: usize, refs: u32) -> Result<usize, u32> {
         return Err(STATUS_DLL_NOT_FOUND);
     }
     with_modules(|m| {
-        let i = m.iter().position(|m| m.base == 0).ok_or(STATUS_NO_MEMORY)?;
+        let Some(i) = m.iter().position(|m| m.base == 0) else {
+            let what = b"ntdll.dll!LdrLoadDll(module table full)";
+            GalaRecordMissing(what.as_ptr(), what.len(), 2, MAX_MODULES as u64);
+            return Err(STATUS_NO_MEMORY);
+        };
         m[i] = Module { base, refs, name_len: name.len(), ..FREE };
         m[i].name[..name.len()].copy_from_slice(name);
         Ok(i)
@@ -630,6 +638,8 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
                 Some(())
             });
             if recorded.is_none() {
+                let what = b"ntdll.dll!LdrLoadDll(too many dependencies)";
+                GalaRecordMissing(what.as_ptr(), what.len(), 2, MAX_DEPENDENCIES as u64);
                 unload_module(dependency);
                 return Err(STATUS_NO_MEMORY);
             }

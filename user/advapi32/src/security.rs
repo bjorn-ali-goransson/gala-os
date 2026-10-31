@@ -1,0 +1,985 @@
+//! Security structures (SIDs, ACLs, security descriptors) built and read
+//! as documented, the accounts gala knows, and the process token.
+//!
+//! gala has one user, "gala" (machine GALA), and enforces no security:
+//! SIDs, ACLs and descriptors are real data (programs build and read
+//! them), but files keep no descriptors (SetFileSecurity succeeds and is
+//! recorded). The process token is a stand-in: OpenProcessToken returns a
+//! duplicate of the process handle (so CloseHandle works) and the token
+//! functions describe the one user, a standard (not elevated) user with
+//! the privileges such a user holds.
+
+use core::ffi::c_void;
+
+use super::{ERROR_INSUFFICIENT_BUFFER, fail, missing, predefined};
+
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn LocalAlloc(flags: u32, bytes: usize) -> *mut u8;
+    fn GetCurrentProcess() -> usize;
+    fn DuplicateHandle(
+        source_process: usize,
+        source: usize,
+        target_process: usize,
+        target: *mut usize,
+        access: u32,
+        inherit: i32,
+        options: u32,
+    ) -> i32;
+}
+
+const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_INVALID_SID: u32 = 1337;
+const ERROR_NONE_MAPPED: u32 = 1332;
+const ERROR_ALLOTTED_SPACE_EXCEEDED: u32 = 1344;
+const ERROR_INVALID_ACL: u32 = 1336;
+const ERROR_NO_SUCH_PRIVILEGE: u32 = 1313;
+const ERROR_NOT_ALL_ASSIGNED: u32 = 1300;
+const ERROR_INVALID_SECURITY_DESCR: u32 = 1338;
+const ERROR_NO_MORE_ITEMS: u32 = 259;
+const ERROR_INVALID_HANDLE: u32 = 6;
+
+const SID_MAX_SUB_AUTHORITIES: usize = 15;
+
+// ---- SIDs ----
+//
+// SID: Revision (1), SubAuthorityCount, IdentifierAuthority (6 bytes, big
+// endian), SubAuthority[count] (DWORDs).
+
+/// The SID at `p` as (authority, sub-authorities), if valid.
+fn read_sid(p: *const u8) -> Option<(u64, [u32; SID_MAX_SUB_AUTHORITIES], usize)> {
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's SID; its length comes from its header.
+    unsafe {
+        let count = usize::from(*p.add(1));
+        if *p != 1 || count > SID_MAX_SUB_AUTHORITIES {
+            return None;
+        }
+        let mut authority = 0u64;
+        for i in 0..6 {
+            authority = authority << 8 | u64::from(*p.add(2 + i));
+        }
+        let mut subs = [0u32; SID_MAX_SUB_AUTHORITIES];
+        for (i, s) in subs.iter_mut().enumerate().take(count) {
+            *s = p.add(8 + 4 * i).cast::<u32>().read_unaligned();
+        }
+        Some((authority, subs, count))
+    }
+}
+
+/// Writes a SID at `p` (8 + 4 * subs.len() bytes).
+fn write_sid(p: *mut u8, authority: [u8; 6], subs: &[u32]) {
+    // SAFETY: the caller's buffer of the SID's length.
+    unsafe {
+        *p = 1;
+        *p.add(1) = subs.len() as u8;
+        core::ptr::copy_nonoverlapping(authority.as_ptr(), p.add(2), 6);
+        for (i, s) in subs.iter().enumerate() {
+            p.add(8 + 4 * i).cast::<u32>().write_unaligned(*s);
+        }
+    }
+}
+
+fn sid_len(count: usize) -> usize {
+    8 + 4 * count
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn IsValidSid(sid: *const u8) -> i32 {
+    i32::from(read_sid(sid).is_some())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetLengthSid(sid: *const u8) -> u32 {
+    read_sid(sid).map_or(0, |(_, _, n)| sid_len(n) as u32)
+}
+
+/// AllocateAndInitializeSid: a SID in local memory (freed by FreeSid).
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn AllocateAndInitializeSid(
+    authority: *const [u8; 6],
+    count: u8,
+    s0: u32,
+    s1: u32,
+    s2: u32,
+    s3: u32,
+    s4: u32,
+    s5: u32,
+    s6: u32,
+    s7: u32,
+    sid: *mut *mut u8,
+) -> i32 {
+    if authority.is_null() || sid.is_null() || count == 0 || count > 8 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let subs = [s0, s1, s2, s3, s4, s5, s6, s7];
+    // SAFETY: plain call.
+    let p = unsafe { LocalAlloc(0, sid_len(count.into())) };
+    if p.is_null() {
+        return fail(8, 0); // ERROR_NOT_ENOUGH_MEMORY
+    }
+    // SAFETY: the caller's authority and output.
+    unsafe {
+        write_sid(p, *authority, &subs[..count.into()]);
+        *sid = p;
+    }
+    1
+}
+
+/// FreeSid: frees a SID from AllocateAndInitializeSid; returns NULL.
+#[unsafe(no_mangle)]
+pub extern "system" fn FreeSid(sid: *mut u8) -> *mut u8 {
+    super::local_free(sid.cast());
+    core::ptr::null_mut()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn CopySid(length: u32, dst: *mut u8, src: *const u8) -> i32 {
+    let Some((_, _, n)) = read_sid(src) else { return fail(ERROR_INVALID_SID, 0) };
+    if (length as usize) < sid_len(n) || dst.is_null() {
+        return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    // SAFETY: both of at least the SID's length.
+    unsafe { core::ptr::copy_nonoverlapping(src, dst, sid_len(n)) };
+    1
+}
+
+/// Formats `v` in decimal into `out` at `*n`.
+fn push_decimal(out: &mut [u16], n: &mut usize, mut v: u64) -> Option<()> {
+    let mut digits = [0u8; 20];
+    let mut d = digits.len();
+    loop {
+        d -= 1;
+        digits[d] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    for &c in &digits[d..] {
+        *out.get_mut(*n)? = c.into();
+        *n += 1;
+    }
+    Some(())
+}
+
+/// ConvertSidToStringSidW: "S-1-<authority>-<sub>-..." in local memory
+/// (authorities of 2^32 and more in hexadecimal, as documented).
+#[unsafe(no_mangle)]
+pub extern "system" fn ConvertSidToStringSidW(sid: *const u8, out: *mut *mut u16) -> i32 {
+    let Some((authority, subs, count)) = read_sid(sid) else {
+        return fail(ERROR_INVALID_SID, 0);
+    };
+    let mut text = [0u16; 200];
+    let mut n = 0;
+    for c in "S-1-".encode_utf16() {
+        text[n] = c;
+        n += 1;
+    }
+    if authority >> 32 != 0 {
+        for c in "0x".encode_utf16() {
+            text[n] = c;
+            n += 1;
+        }
+        for shift in (0..12).rev() {
+            let d = ((authority >> (4 * shift)) & 0xf) as u8;
+            text[n] = u16::from(if d < 10 { b'0' + d } else { b'A' + d - 10 });
+            n += 1;
+        }
+    } else if push_decimal(&mut text, &mut n, authority).is_none() {
+        return fail(ERROR_INVALID_SID, 0);
+    }
+    for &s in &subs[..count] {
+        text[n] = u16::from(b'-');
+        n += 1;
+        if push_decimal(&mut text, &mut n, s.into()).is_none() {
+            return fail(ERROR_INVALID_SID, 0);
+        }
+    }
+    // SAFETY: plain call.
+    let p = unsafe { LocalAlloc(0, 2 * (n + 1)) }.cast::<u16>();
+    if p.is_null() {
+        return fail(8, 0);
+    }
+    // SAFETY: a buffer of n + 1 units; the caller's output.
+    unsafe {
+        core::ptr::copy_nonoverlapping(text.as_ptr(), p, n);
+        *p.add(n) = 0;
+        *out = p;
+    }
+    1
+}
+
+// ---- Accounts ----
+
+const SID_TYPE_USER: u32 = 1;
+const SID_TYPE_WELL_KNOWN_GROUP: u32 = 5;
+const SID_TYPE_ALIAS: u32 = 4;
+
+/// gala's user's SID: a machine SID (S-1-5-21-x-y-z) and RID 1001, the
+/// first local account's.
+const USER_SUBS: [u32; 5] = [21, 1_000_000_001, 1_000_000_002, 1_000_000_003, 1001];
+const NT: [u8; 6] = [0, 0, 0, 0, 0, 5];
+
+/// Accounts: (authority, sub-authorities, name, domain, SID_NAME_USE).
+const ACCOUNTS: &[(u64, &[u32], &str, &str, u32)] = &[
+    (5, &USER_SUBS, "gala", "GALA", SID_TYPE_USER),
+    (1, &[0], "Everyone", "", SID_TYPE_WELL_KNOWN_GROUP),
+    (3, &[0], "CREATOR OWNER", "", SID_TYPE_WELL_KNOWN_GROUP),
+    (5, &[11], "Authenticated Users", "NT AUTHORITY", SID_TYPE_WELL_KNOWN_GROUP),
+    (5, &[18], "SYSTEM", "NT AUTHORITY", SID_TYPE_WELL_KNOWN_GROUP),
+    (5, &[32, 544], "Administrators", "BUILTIN", SID_TYPE_ALIAS),
+    (5, &[32, 545], "Users", "BUILTIN", SID_TYPE_ALIAS),
+];
+
+/// Copies `text` with a NUL into `buf` of `*size` units: on success
+/// `*size` is the length without the NUL.
+fn put_name(text: &str, buf: *mut u16) {
+    for (i, c) in text.encode_utf16().enumerate() {
+        // SAFETY: the caller checked the size.
+        unsafe { *buf.add(i) = c };
+    }
+    // SAFETY: as above.
+    unsafe { *buf.add(text.len()) = 0 };
+}
+
+/// LookupAccountSidW: the name and domain of a SID gala knows; a size
+/// query (or short buffers) fails with ERROR_INSUFFICIENT_BUFFER and the
+/// sizes needed with the NUL; ERROR_NONE_MAPPED for other SIDs.
+#[unsafe(no_mangle)]
+pub extern "system" fn LookupAccountSidW(
+    _system: *const u16,
+    sid: *const u8,
+    name: *mut u16,
+    name_len: *mut u32,
+    domain: *mut u16,
+    domain_len: *mut u32,
+    kind: *mut u32,
+) -> i32 {
+    let Some((authority, subs, count)) = read_sid(sid) else {
+        return fail(ERROR_INVALID_SID, 0);
+    };
+    let Some(&(_, _, account, dom, use_)) =
+        ACCOUNTS.iter().find(|a| a.0 == authority && a.1 == &subs[..count])
+    else {
+        return fail(ERROR_NONE_MAPPED, 0);
+    };
+    if name_len.is_null() || domain_len.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's sizes and buffers of those sizes.
+    unsafe {
+        let (need_name, need_domain) = (account.len() as u32 + 1, dom.len() as u32 + 1);
+        if name.is_null() || domain.is_null() || *name_len < need_name || *domain_len < need_domain
+        {
+            *name_len = need_name;
+            *domain_len = need_domain;
+            return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        put_name(account, name);
+        put_name(dom, domain);
+        *name_len = need_name - 1;
+        *domain_len = need_domain - 1;
+        if !kind.is_null() {
+            *kind = use_;
+        }
+    }
+    1
+}
+
+/// GetUserNameW: "gala"; the size includes the NUL.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetUserNameW(buffer: *mut u16, size: *mut u32) -> i32 {
+    if size.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let needed = super::USER_NAME.len() as u32 + 1;
+    // SAFETY: the caller's size and buffer.
+    unsafe {
+        if buffer.is_null() || *size < needed {
+            *size = needed;
+            return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        for (i, &b) in super::USER_NAME.iter().enumerate() {
+            *buffer.add(i) = b.into();
+        }
+        *buffer.add(super::USER_NAME.len()) = 0;
+        *size = needed;
+    }
+    1
+}
+
+// ---- ACLs ----
+//
+// ACL: AclRevision, Sbz1, AclSize (WORD), AceCount (WORD), Sbz2; the ACEs
+// follow, each starting with ACE_HEADER (AceType, AceFlags, AceSize).
+
+fn acl_word(acl: *const u8, off: usize) -> u16 {
+    // SAFETY: inside the caller's ACL header.
+    unsafe { acl.add(off).cast::<u16>().read_unaligned() }
+}
+
+fn set_acl_word(acl: *mut u8, off: usize, v: u16) {
+    // SAFETY: as above.
+    unsafe { acl.add(off).cast::<u16>().write_unaligned(v) }
+}
+
+/// The bytes the ACL's header and ACEs use.
+fn acl_used(acl: *const u8) -> Option<usize> {
+    let mut used = 8;
+    for _ in 0..acl_word(acl, 4) {
+        // SAFETY: an ACE header inside the ACL.
+        let size = usize::from(unsafe { acl.add(used + 2).cast::<u16>().read_unaligned() });
+        if size < 4 || used + size > usize::from(acl_word(acl, 2)) {
+            return None;
+        }
+        used += size;
+    }
+    Some(used)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn InitializeAcl(acl: *mut u8, length: u32, revision: u32) -> i32 {
+    if acl.is_null() || !(2..=4).contains(&revision) || !(8..=0xffff).contains(&length) {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let length = (length & !3) as u16;
+    // SAFETY: the caller's buffer of `length` bytes.
+    unsafe { core::ptr::write_bytes(acl, 0, 8) };
+    // SAFETY: as above.
+    unsafe { *acl = revision as u8 };
+    set_acl_word(acl, 2, length);
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn IsValidAcl(acl: *const u8) -> i32 {
+    // SAFETY: the caller's ACL.
+    i32::from(!acl.is_null() && (2..=4).contains(&unsafe { *acl }) && acl_used(acl).is_some())
+}
+
+/// Inserts `count` ACEs (`bytes` long, at `list`) before ACE `index`
+/// (or at the end).
+fn insert_aces(acl: *mut u8, index: u32, list: *const u8, bytes: usize, count: u16) -> i32 {
+    let Some(used) = acl_used(acl) else { return fail(ERROR_INVALID_ACL, 0) };
+    if used + bytes > usize::from(acl_word(acl, 2)) {
+        return fail(ERROR_ALLOTTED_SPACE_EXCEEDED, 0);
+    }
+    // Where ACE `index` starts.
+    let mut at = 8;
+    for _ in 0..index.min(u32::from(acl_word(acl, 4))) {
+        // SAFETY: an ACE header inside the ACL.
+        at += usize::from(unsafe { acl.add(at + 2).cast::<u16>().read_unaligned() });
+    }
+    // SAFETY: inside the ACL's AclSize (checked above).
+    unsafe {
+        core::ptr::copy(acl.add(at), acl.add(at + bytes), used - at);
+        core::ptr::copy_nonoverlapping(list, acl.add(at), bytes);
+    }
+    set_acl_word(acl, 4, acl_word(acl, 4) + count);
+    1
+}
+
+/// AddAccessAllowedAce (and the Ex form with flags): ACCESS_ALLOWED_ACE
+/// (header, mask, SID) at the end.
+#[unsafe(no_mangle)]
+pub extern "system" fn AddAccessAllowedAce(
+    acl: *mut u8,
+    revision: u32,
+    mask: u32,
+    sid: *const u8,
+) -> i32 {
+    AddAccessAllowedAceEx(acl, revision, 0, mask, sid)
+}
+
+fn add_simple_ace(acl: *mut u8, kind: u8, flags: u32, mask: u32, sid: *const u8) -> i32 {
+    let Some((_, _, n)) = read_sid(sid) else { return fail(ERROR_INVALID_SID, 0) };
+    let size = 8 + sid_len(n);
+    let mut ace = [0u8; 8 + 8 + 4 * SID_MAX_SUB_AUTHORITIES];
+    ace[0] = kind;
+    ace[1] = flags as u8;
+    ace[2..4].copy_from_slice(&(size as u16).to_le_bytes());
+    ace[4..8].copy_from_slice(&mask.to_le_bytes());
+    // SAFETY: a valid SID of sid_len(n) bytes.
+    unsafe { core::ptr::copy_nonoverlapping(sid, ace.as_mut_ptr().add(8), sid_len(n)) };
+    insert_aces(acl, u32::MAX, ace.as_ptr(), size, 1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn AddAccessAllowedAceEx(
+    acl: *mut u8,
+    _revision: u32,
+    flags: u32,
+    mask: u32,
+    sid: *const u8,
+) -> i32 {
+    add_simple_ace(acl, 0, flags, mask, sid) // ACCESS_ALLOWED_ACE_TYPE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn AddAccessDeniedAce(
+    acl: *mut u8,
+    _revision: u32,
+    mask: u32,
+    sid: *const u8,
+) -> i32 {
+    add_simple_ace(acl, 1, 0, mask, sid) // ACCESS_DENIED_ACE_TYPE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn AddAccessDeniedAceEx(
+    acl: *mut u8,
+    _revision: u32,
+    flags: u32,
+    mask: u32,
+    sid: *const u8,
+) -> i32 {
+    add_simple_ace(acl, 1, flags, mask, sid)
+}
+
+/// AddAce: inserts a list of ACEs (`length` bytes) before `index`
+/// (MAXDWORD: at the end).
+#[unsafe(no_mangle)]
+pub extern "system" fn AddAce(
+    acl: *mut u8,
+    _revision: u32,
+    index: u32,
+    list: *const u8,
+    length: u32,
+) -> i32 {
+    if list.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // Count the ACEs in the list.
+    let (mut at, mut count) = (0usize, 0u16);
+    while at + 4 <= length as usize {
+        // SAFETY: an ACE header inside the caller's list.
+        let size = usize::from(unsafe { list.add(at + 2).cast::<u16>().read_unaligned() });
+        if size < 4 {
+            return fail(ERROR_INVALID_PARAMETER, 0);
+        }
+        at += size;
+        count += 1;
+    }
+    if at != length as usize {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    insert_aces(acl, index, list, length as usize, count)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetAce(acl: *const u8, index: u32, ace: *mut *mut u8) -> i32 {
+    if acl.is_null() || index >= u32::from(acl_word(acl, 4)) {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut at = 8;
+    for _ in 0..index {
+        // SAFETY: an ACE header inside the ACL.
+        at += usize::from(unsafe { acl.add(at + 2).cast::<u16>().read_unaligned() });
+    }
+    // SAFETY: the caller's output.
+    unsafe { *ace = acl.add(at).cast_mut() };
+    1
+}
+
+/// GetAclInformation: AclRevisionInformation (1) or AclSizeInformation
+/// (2: AceCount, AclBytesInUse, AclBytesFree).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetAclInformation(
+    acl: *const u8,
+    info: *mut u32,
+    length: u32,
+    class: u32,
+) -> i32 {
+    let Some(used) = (!acl.is_null()).then(|| acl_used(acl)).flatten() else {
+        return fail(ERROR_INVALID_ACL, 0);
+    };
+    // SAFETY: the caller's buffer of `length` bytes.
+    unsafe {
+        match class {
+            1 if length >= 4 => *info = u32::from(*acl),
+            2 if length >= 12 => {
+                *info = acl_word(acl, 4).into();
+                *info.add(1) = used as u32;
+                *info.add(2) = u32::from(acl_word(acl, 2)) - used as u32;
+            }
+            1 | 2 => return fail(ERROR_INSUFFICIENT_BUFFER, 0),
+            _ => return fail(ERROR_INVALID_PARAMETER, 0),
+        }
+    }
+    1
+}
+
+// ---- Security descriptors (absolute, x64) ----
+//
+// SECURITY_DESCRIPTOR: Revision, Sbz1, Control (WORD), Owner, Group,
+// Sacl, Dacl (pointers at 8, 16, 24, 32).
+
+const SE_DACL_PRESENT: u16 = 0x4;
+const SE_DACL_DEFAULTED: u16 = 0x8;
+const SE_SELF_RELATIVE: u16 = 0x8000;
+
+#[unsafe(no_mangle)]
+pub extern "system" fn InitializeSecurityDescriptor(sd: *mut u8, revision: u32) -> i32 {
+    if sd.is_null() || revision != 1 {
+        return fail(1305, 0); // ERROR_UNKNOWN_REVISION
+    }
+    // SAFETY: the caller's 40-byte descriptor.
+    unsafe {
+        core::ptr::write_bytes(sd, 0, 40);
+        *sd = 1;
+    }
+    1
+}
+
+fn control(sd: *const u8) -> u16 {
+    // SAFETY: the caller's descriptor.
+    unsafe { sd.add(2).cast::<u16>().read_unaligned() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn IsValidSecurityDescriptor(sd: *const u8) -> i32 {
+    // SAFETY: the caller's descriptor.
+    i32::from(!sd.is_null() && unsafe { *sd } == 1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SetSecurityDescriptorDacl(
+    sd: *mut u8,
+    present: i32,
+    dacl: *mut u8,
+    defaulted: i32,
+) -> i32 {
+    if IsValidSecurityDescriptor(sd) == 0 || control(sd) & SE_SELF_RELATIVE != 0 {
+        return fail(ERROR_INVALID_SECURITY_DESCR, 0);
+    }
+    let mut c = control(sd) & !(SE_DACL_PRESENT | SE_DACL_DEFAULTED);
+    let mut p = core::ptr::null_mut();
+    if present != 0 {
+        c |= SE_DACL_PRESENT;
+        p = dacl;
+        if defaulted != 0 {
+            c |= SE_DACL_DEFAULTED;
+        }
+    }
+    // SAFETY: the caller's absolute descriptor.
+    unsafe {
+        sd.add(2).cast::<u16>().write_unaligned(c);
+        sd.add(32).cast::<*mut u8>().write_unaligned(p);
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSecurityDescriptorDacl(
+    sd: *const u8,
+    present: *mut i32,
+    dacl: *mut *mut u8,
+    defaulted: *mut i32,
+) -> i32 {
+    if IsValidSecurityDescriptor(sd) == 0 || control(sd) & SE_SELF_RELATIVE != 0 {
+        missing(b"advapi32.dll!GetSecurityDescriptorDacl(self-relative)");
+        return fail(ERROR_INVALID_SECURITY_DESCR, 0);
+    }
+    let c = control(sd);
+    // SAFETY: the caller's descriptor and outputs.
+    unsafe {
+        *present = i32::from(c & SE_DACL_PRESENT != 0);
+        if c & SE_DACL_PRESENT != 0 {
+            *dacl = sd.add(32).cast::<*mut u8>().read_unaligned();
+            *defaulted = i32::from(c & SE_DACL_DEFAULTED != 0);
+        }
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SetSecurityDescriptorOwner(
+    sd: *mut u8,
+    owner: *mut u8,
+    defaulted: i32,
+) -> i32 {
+    if IsValidSecurityDescriptor(sd) == 0 {
+        return fail(ERROR_INVALID_SECURITY_DESCR, 0);
+    }
+    // SAFETY: the caller's absolute descriptor; SE_OWNER_DEFAULTED is 1.
+    unsafe {
+        let c = (control(sd) & !1) | u16::from(defaulted != 0);
+        sd.add(2).cast::<u16>().write_unaligned(c);
+        sd.add(8).cast::<*mut u8>().write_unaligned(owner);
+    }
+    1
+}
+
+/// SetFileSecurityA/W: gala's files keep no security descriptors; the
+/// call succeeds (recorded) and nothing is enforced.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetFileSecurityA(path: *const u8, _info: u32, sd: *const u8) -> i32 {
+    if path.is_null() || IsValidSecurityDescriptor(sd) == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    missing(b"advapi32.dll!SetFileSecurityA(not kept)");
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SetFileSecurityW(path: *const u16, _info: u32, sd: *const u8) -> i32 {
+    if path.is_null() || IsValidSecurityDescriptor(sd) == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    missing(b"advapi32.dll!SetFileSecurityW(not kept)");
+    1
+}
+
+// ---- The process token ----
+
+/// OpenProcessToken: the token handle is a duplicate of the process
+/// handle (see the module comment).
+#[unsafe(no_mangle)]
+pub extern "system" fn OpenProcessToken(process: usize, _access: u32, token: *mut usize) -> i32 {
+    if token.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: plain calls; DUPLICATE_SAME_ACCESS (2).
+    unsafe {
+        let me = GetCurrentProcess();
+        if DuplicateHandle(me, process, me, token, 0, 0, 2) == 0 {
+            return 0;
+        }
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn OpenThreadToken(
+    _thread: usize,
+    _access: u32,
+    _as_self: i32,
+    _token: *mut usize,
+) -> i32 {
+    fail(1008, 0) // ERROR_NO_TOKEN: threads do not impersonate
+}
+
+/// Privileges a standard user holds (LUIDs): SeShutdown (19),
+/// SeChangeNotify (23, enabled), SeUndock (25), SeIncreaseWorkingSet (33),
+/// SeTimeZone (34).
+const HELD: [u32; 5] = [19, 23, 25, 33, 34];
+
+/// Writes `bytes` to the caller's buffer of `length`; ERROR_INSUFFICIENT_BUFFER
+/// if it is short. The size is returned in `ret` either way.
+fn token_info(out: *mut u8, length: u32, ret: *mut u32, bytes: &[u8]) -> i32 {
+    if !ret.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *ret = bytes.len() as u32 };
+    }
+    if out.is_null() || (length as usize) < bytes.len() {
+        return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    // SAFETY: the caller's buffer of `length` >= bytes.len().
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
+    1
+}
+
+/// GetTokenInformation: TokenUser (1), TokenOwner (4), TokenPrimaryGroup
+/// (5): the user's SID after the structure; TokenPrivileges (3): the
+/// held privileges; TokenElevationType (18): default (1); TokenElevation
+/// (20): not elevated. Other classes are reported.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTokenInformation(
+    token: usize,
+    class: u32,
+    out: *mut u8,
+    length: u32,
+    ret: *mut u32,
+) -> i32 {
+    if token == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    let mut b = [0u8; 128];
+    let n = match class {
+        1 | 4 | 5 => {
+            // A pointer (and for TOKEN_USER the attributes), then the SID.
+            let head = if class == 1 { 16 } else { 8 };
+            write_sid(b[head..].as_mut_ptr(), NT, &USER_SUBS);
+            let sid = (out as usize).wrapping_add(head) as u64;
+            b[..8].copy_from_slice(&sid.to_le_bytes());
+            head + sid_len(USER_SUBS.len())
+        }
+        3 => {
+            // TOKEN_PRIVILEGES: count, then LUID_AND_ATTRIBUTES.
+            b[..4].copy_from_slice(&(HELD.len() as u32).to_le_bytes());
+            for (i, &luid) in HELD.iter().enumerate() {
+                let at = 4 + 12 * i;
+                b[at..at + 4].copy_from_slice(&luid.to_le_bytes());
+                let enabled: u32 = if luid == 23 { 3 } else { 0 }; // ENABLED_BY_DEFAULT | ENABLED
+                b[at + 8..at + 12].copy_from_slice(&enabled.to_le_bytes());
+            }
+            4 + 12 * HELD.len()
+        }
+        18 => {
+            b[..4].copy_from_slice(&1u32.to_le_bytes());
+            4
+        }
+        20 => 4,
+        _ => {
+            missing(b"advapi32.dll!GetTokenInformation(class)");
+            return fail(ERROR_INVALID_PARAMETER, 0);
+        }
+    };
+    token_info(out, length, ret, &b[..n])
+}
+
+/// Well-known privilege names and their LUIDs (SE_*_PRIVILEGE).
+const PRIVILEGES: &[(&str, u32)] = &[
+    ("SeCreateTokenPrivilege", 2),
+    ("SeAssignPrimaryTokenPrivilege", 3),
+    ("SeLockMemoryPrivilege", 4),
+    ("SeIncreaseQuotaPrivilege", 5),
+    ("SeMachineAccountPrivilege", 6),
+    ("SeTcbPrivilege", 7),
+    ("SeSecurityPrivilege", 8),
+    ("SeTakeOwnershipPrivilege", 9),
+    ("SeLoadDriverPrivilege", 10),
+    ("SeSystemProfilePrivilege", 11),
+    ("SeSystemtimePrivilege", 12),
+    ("SeProfileSingleProcessPrivilege", 13),
+    ("SeIncreaseBasePriorityPrivilege", 14),
+    ("SeCreatePagefilePrivilege", 15),
+    ("SeCreatePermanentPrivilege", 16),
+    ("SeBackupPrivilege", 17),
+    ("SeRestorePrivilege", 18),
+    ("SeShutdownPrivilege", 19),
+    ("SeDebugPrivilege", 20),
+    ("SeAuditPrivilege", 21),
+    ("SeSystemEnvironmentPrivilege", 22),
+    ("SeChangeNotifyPrivilege", 23),
+    ("SeRemoteShutdownPrivilege", 24),
+    ("SeUndockPrivilege", 25),
+    ("SeSyncAgentPrivilege", 26),
+    ("SeEnableDelegationPrivilege", 27),
+    ("SeManageVolumePrivilege", 28),
+    ("SeImpersonatePrivilege", 29),
+    ("SeCreateGlobalPrivilege", 30),
+    ("SeTrustedCredManAccessPrivilege", 31),
+    ("SeRelabelPrivilege", 32),
+    ("SeIncreaseWorkingSetPrivilege", 33),
+    ("SeTimeZonePrivilege", 34),
+    ("SeCreateSymbolicLinkPrivilege", 35),
+    ("SeDelegateSessionUserImpersonatePrivilege", 36),
+];
+
+fn privilege_luid(name: impl Iterator<Item = u16> + Clone) -> Option<u32> {
+    PRIVILEGES.iter().find_map(|&(n, luid)| {
+        let mut a = name.clone();
+        let same = n
+            .bytes()
+            .all(|b| a.next().map(|c| (c as u8).eq_ignore_ascii_case(&b) && c < 128) == Some(true))
+            && a.next().is_none();
+        same.then_some(luid)
+    })
+}
+
+fn write_luid(luid: *mut u32, v: Option<u32>) -> i32 {
+    let Some(v) = v else { return fail(ERROR_NO_SUCH_PRIVILEGE, 0) };
+    // SAFETY: the caller's LUID.
+    unsafe {
+        *luid = v;
+        *luid.add(1) = 0;
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn LookupPrivilegeValueA(
+    _system: *const u8,
+    name: *const u8,
+    luid: *mut u32,
+) -> i32 {
+    if name.is_null() || luid.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's NUL-terminated name.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(name, (0..).take_while(|&i| *name.add(i) != 0).count())
+    };
+    write_luid(luid, privilege_luid(bytes.iter().map(|&b| u16::from(b))))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn LookupPrivilegeValueW(
+    _system: *const u16,
+    name: *const u16,
+    luid: *mut u32,
+) -> i32 {
+    if name.is_null() || luid.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's NUL-terminated name.
+    let units = unsafe {
+        core::slice::from_raw_parts(name, (0..).take_while(|&i| *name.add(i) != 0).count())
+    };
+    write_luid(luid, privilege_luid(units.iter().copied()))
+}
+
+/// AdjustTokenPrivileges: succeeds; ERROR_NOT_ALL_ASSIGNED (as the last
+/// error) when a privilege the user does not hold is asked for, else 0.
+/// The previous state is reported as no privileges changed.
+#[unsafe(no_mangle)]
+pub extern "system" fn AdjustTokenPrivileges(
+    token: usize,
+    disable_all: i32,
+    new: *const u32,
+    length: u32,
+    previous: *mut u32,
+    ret: *mut u32,
+) -> i32 {
+    if token == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if !previous.is_null() {
+        if length < 4 {
+            return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        // SAFETY: the caller's TOKEN_PRIVILEGES of `length` bytes.
+        unsafe { *previous = 0 };
+    }
+    if !ret.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *ret = 4 };
+    }
+    let mut all = true;
+    if disable_all == 0 && !new.is_null() {
+        // SAFETY: the caller's TOKEN_PRIVILEGES: count, then 12-byte
+        // LUID_AND_ATTRIBUTES.
+        unsafe {
+            for i in 0..*new as usize {
+                let luid = *new.add(1 + 3 * i);
+                all &= HELD.contains(&luid);
+            }
+        }
+    }
+    fail(if all { 0 } else { ERROR_NOT_ALL_ASSIGNED }, 1)
+}
+
+// ---- CryptoAPI and registry forms the JDK imports ----
+
+/// CryptAcquireContextA: CryptAcquireContextW (a verify context only).
+#[unsafe(no_mangle)]
+pub extern "system" fn CryptAcquireContextA(
+    provider: *mut usize,
+    container: *const u8,
+    _name: *const u8,
+    kind: u32,
+    flags: u32,
+) -> i32 {
+    let container: *const u16 =
+        if container.is_null() { core::ptr::null() } else { [0u16; 1].as_ptr() };
+    super::CryptAcquireContextW(provider, container, core::ptr::null(), kind, flags)
+}
+
+/// RegEnumKeyExA/W: the registry is empty: no subkeys of the predefined
+/// keys (ERROR_NO_MORE_ITEMS); other handles are not open.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn RegEnumKeyExA(
+    key: usize,
+    _index: u32,
+    _name: *mut u8,
+    _name_len: *mut u32,
+    _reserved: *mut u32,
+    _class: *mut u8,
+    _class_len: *mut u32,
+    _time: *mut u64,
+) -> i32 {
+    (if predefined(key) { ERROR_NO_MORE_ITEMS } else { ERROR_INVALID_HANDLE }) as i32
+}
+
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn RegEnumKeyExW(
+    key: usize,
+    index: u32,
+    name: *mut u16,
+    name_len: *mut u32,
+    reserved: *mut u32,
+    class: *mut u16,
+    class_len: *mut u32,
+    time: *mut u64,
+) -> i32 {
+    RegEnumKeyExA(key, index, name.cast(), name_len, reserved, class.cast(), class_len, time)
+}
+
+/// RegQueryInfoKeyA/W: a predefined key of the empty registry: no
+/// subkeys, values or class.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn RegQueryInfoKeyA(
+    key: usize,
+    class: *mut c_void,
+    class_len: *mut u32,
+    _reserved: *mut u32,
+    subkeys: *mut u32,
+    max_subkey: *mut u32,
+    max_class: *mut u32,
+    values: *mut u32,
+    max_value_name: *mut u32,
+    max_value: *mut u32,
+    security: *mut u32,
+    time: *mut u64,
+) -> i32 {
+    if !predefined(key) {
+        return ERROR_INVALID_HANDLE as i32;
+    }
+    for p in
+        [class_len, subkeys, max_subkey, max_class, values, max_value_name, max_value, security]
+    {
+        if !p.is_null() {
+            // SAFETY: the caller's outputs.
+            unsafe { *p = 0 };
+        }
+    }
+    if !class.is_null() {
+        // SAFETY: the caller's class buffer (an empty string).
+        unsafe { *class.cast::<u16>() = 0 };
+    }
+    if !time.is_null() {
+        // SAFETY: the caller's FILETIME.
+        unsafe { *time = 0 };
+    }
+    0
+}
+
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn RegQueryInfoKeyW(
+    key: usize,
+    class: *mut c_void,
+    class_len: *mut u32,
+    reserved: *mut u32,
+    subkeys: *mut u32,
+    max_subkey: *mut u32,
+    max_class: *mut u32,
+    values: *mut u32,
+    max_value_name: *mut u32,
+    max_value: *mut u32,
+    security: *mut u32,
+    time: *mut u64,
+) -> i32 {
+    RegQueryInfoKeyA(
+        key,
+        class,
+        class_len,
+        reserved,
+        subkeys,
+        max_subkey,
+        max_class,
+        values,
+        max_value_name,
+        max_value,
+        security,
+        time,
+    )
+}

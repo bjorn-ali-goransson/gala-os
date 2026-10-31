@@ -251,6 +251,11 @@ missing function is a `missing export`. For a program with many DLLs,
 walk the whole import closure (imports and delay imports of every DLL it
 loads, following export forwarders such as the api-ms-win-* sets) against
 the exports of gala's DLLs before booting, and fix the gaps in batches.
+DLLs a program loads at run time (LoadLibrary: the JDK's launcher loads
+msvcp140 and jvm.dll) are not in the closure; boot and read the ledger
+for those. Exports by ordinal (ws2_32's) come from a build.rs printing
+`/EXPORT:name,@n`; lld warns that rustc's .def names them too and keeps
+the ordinal one (the warning cannot be silenced).
 
 ## Bootable images and USB sticks
 

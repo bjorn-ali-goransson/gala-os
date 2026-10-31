@@ -21,11 +21,32 @@ unsafe extern "system" {
 unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
+    fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    fn strlen(s: *const u8) -> usize;
+    // MSVC-target unwind tables reference it (gala's ntdll provides it).
+    fn __CxxFrameHandler3();
+    // The stack probe for frames over a page (ntdll exports it).
+    fn __chkstk();
 }
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn SetLastError(code: u32);
+    fn LocalFree(memory: *mut c_void) -> *mut c_void;
+}
+
+mod security;
+
+/// The C runtime's marker that floating point is used (the linker wants
+/// it once core's float code is linked in).
+#[unsafe(no_mangle)]
+pub static _fltused: i32 = 0;
+
+/// Frees local memory (LocalAlloc).
+fn local_free(p: *mut c_void) {
+    // SAFETY: memory from LocalAlloc (or null).
+    unsafe { LocalFree(p) };
 }
 
 #[link(name = "bcryptprimitives", kind = "raw-dylib")]
@@ -369,8 +390,6 @@ macro_rules! no_security {
 }
 
 no_security! {
-    OpenProcessToken(process: usize, access: u32, token: *mut usize);
-    GetTokenInformation(token: usize, class: u32, info: *mut u8, length: u32, ret: *mut u32);
     SetTokenInformation(token: usize, class: u32, info: *const u8, length: u32);
     DuplicateToken(token: usize, level: u32, new: *mut usize);
     CheckTokenMembership(token: usize, sid: *const u8, member: *mut i32);

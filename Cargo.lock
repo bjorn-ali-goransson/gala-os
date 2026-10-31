@@ -14,6 +14,10 @@ name = "advapi32"
 version = "0.1.0"
 
 [[package]]
+name = "advapi32_test"
+version = "0.1.0"
+
+[[package]]
 name = "apc_test"
 version = "0.1.0"
 dependencies = [
@@ -62,6 +66,10 @@ name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+
+[[package]]
+name = "comctl32"
+version = "0.1.0"
 
 [[package]]
 name = "context_test"
@@ -365,6 +373,10 @@ name = "pipe_test"
 version = "0.1.0"
 
 [[package]]
+name = "powrprof"
+version = "0.1.0"
+
+[[package]]
 name = "prng_test"
 version = "0.1.0"
 
@@ -403,6 +415,10 @@ version = "0.1.0"
 dependencies = [
  "ntrt",
 ]
+
+[[package]]
+name = "shell32"
+version = "0.1.0"
 
 [[package]]
 name = "smoltcp"
@@ -561,6 +577,10 @@ name = "user32"
 version = "0.1.0"
 
 [[package]]
+name = "version"
+version = "0.1.0"
+
+[[package]]
 name = "vm_test"
 version = "0.1.0"
 dependencies = [
@@ -573,6 +593,10 @@ version = "0.1.0"
 dependencies = [
  "ntrt",
 ]
+
+[[package]]
+name = "win32_misc_test"
+version = "0.1.0"
 
 [[package]]
 name = "winmm"

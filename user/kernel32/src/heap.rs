@@ -95,3 +95,68 @@ pub extern "system" fn HeapCompact(heap: Handle, flags: u32) -> usize {
     // SAFETY: the caller's heap.
     unsafe { RtlCompactHeap(heap, flags) }
 }
+
+// ---- Local memory (LocalAlloc and friends) ----
+//
+// On the process heap. LMEM_MOVEABLE memory is fixed too (the handle is
+// the pointer, and LocalLock returns it), which programs cannot tell
+// apart through the API.
+
+const LMEM_ZEROINIT: u32 = 0x40;
+
+#[unsafe(no_mangle)]
+pub extern "system" fn LocalAlloc(flags: u32, bytes: usize) -> *mut c_void {
+    let heap_flags = if flags & LMEM_ZEROINIT != 0 { 0x8 } else { 0 }; // HEAP_ZERO_MEMORY
+    HeapAlloc(GetProcessHeap(), heap_flags, bytes)
+}
+
+/// LocalFree: NULL on success, the memory on failure.
+#[unsafe(no_mangle)]
+pub extern "system" fn LocalFree(memory: *mut c_void) -> *mut c_void {
+    if memory.is_null() || HeapFree(GetProcessHeap(), 0, memory) != FALSE {
+        core::ptr::null_mut()
+    } else {
+        memory
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn LocalReAlloc(memory: *mut c_void, bytes: usize, flags: u32) -> *mut c_void {
+    let heap_flags = if flags & LMEM_ZEROINIT != 0 { 0x8 } else { 0 };
+    HeapReAlloc(GetProcessHeap(), heap_flags, memory, bytes)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn LocalSize(memory: *mut c_void) -> usize {
+    HeapSize(GetProcessHeap(), 0, memory)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn LocalLock(memory: *mut c_void) -> *mut c_void {
+    memory
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn LocalUnlock(_memory: *mut c_void) -> Bool {
+    FALSE // the memory is not moveable: no lock count
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GlobalAlloc(flags: u32, bytes: usize) -> *mut c_void {
+    LocalAlloc(flags, bytes)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GlobalFree(memory: *mut c_void) -> *mut c_void {
+    LocalFree(memory)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GlobalLock(memory: *mut c_void) -> *mut c_void {
+    memory
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GlobalUnlock(_memory: *mut c_void) -> Bool {
+    FALSE
+}
