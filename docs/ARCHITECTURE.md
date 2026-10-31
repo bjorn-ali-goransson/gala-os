@@ -301,9 +301,14 @@ frame; they are exported through `/EXPORT` (testntdll's build.rs).
 RtlAddFunctionTable registers unwind data for code outside images (JIT
 compilers); RtlInstallFunctionTableCallback registers a callback that
 RtlLookupFunctionEntry asks for addresses in its range (CoreCLR's code
-heaps; called without the tables' spin lock held). Not yet: nested
-exceptions and collided unwinds, unhandled exception filters, unwind
-consolidation. The #BP gate has DPL 3 so `int3` works from user mode.
+heaps; called without the tables' spin lock held). Unwind consolidation
+(STATUS_UNWIND_CONSOLIDATE, how MSVC runs C++ catch blocks, from
+RtlUnwindEx or RtlRestoreContext): the callback runs on the current
+stack (the removed frames still hold the exception object) in a frame
+whose unwind data, like KiUserExceptionDispatcher's, restores the target
+CONTEXT from a block on the stack, then the target resumes at the
+address it returned. Not yet: nested exceptions and collided unwinds,
+unhandled exception filters. The #BP gate has DPL 3 so `int3` works from user mode.
 
 **Mutants and semaphores** (`ObjectBody::Mutant/Semaphore`): a mutant is
 signaled for waiters when free or owned by the waiting thread
@@ -784,6 +789,8 @@ from the public documentation of each function (clean room):
 | powrprof.dll | `user/powrprof` | `testpowrprof.dll` | `C:\Windows\System32` |
 | shell32.dll | `user/shell32` | `testshell32.dll` | `C:\Windows\System32` |
 | version.dll | `user/version` | `testversion.dll` | `C:\Windows\System32` |
+| ole32.dll | `user/ole32` | `testole32.dll` | `C:\Windows\System32` |
+| oleaut32.dll | `user/oleaut32` | `testoleaut32.dll` | `C:\Windows\System32` |
 
 (Exported under other names so that `user/bin`, which also runs on
 Windows, never shadows the system's DLLs.)
@@ -807,7 +814,17 @@ Windows, never shadows the system's DLLs.)
   unless GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT is given, as
   documented (the JVM pairs it with FreeLibrary).
   A recursive loader lock serializes loading, unloading and thread
-  notifications.
+  notifications. API set names (`api-ms-win-*`) are resolved in name
+  normalization, as the schema does on Windows whatever files exist:
+  `crt-` sets to ucrtbase, `core-com-`/`core-winrt-` to ole32 (no
+  combase), security/eventing/registry/service sets to advapi32, other
+  `core-` sets to kernel32 (no kernelbase); unknown contracts are looked
+  up as files (and so not found). A PE32 image (image sections accept
+  them) is refused as a module (STATUS_INVALID_IMAGE_FORMAT).
+  LoadLibraryExW's AS_DATAFILE/AS_IMAGE_RESOURCE map the file as an image
+  without loading it (handles tagged 1/2 in their low bits; FreeLibrary
+  unmaps them); LOAD_WITH_ALTERED_SEARCH_PATH loads normally (TODO: the
+  DLL's own directory first for its dependencies).
 - **Static TLS** (ntdll tls.rs): each image with a TLS directory gets an
   index at load; each thread has an array at TEB.ThreadLocalStoragePointer
   with a block per image (the template, then zero fill); a DLL loaded
@@ -847,6 +864,22 @@ Windows, never shadows the system's DLLs.)
   InitCommonControlsEx. The Ex forms of GetFileVersionInfo(Size) ignore
   the MUI flags (no MUI files). user32's LoadStringW/A read RT_STRING
   blocks (16 counted strings each) through kernel32's resource functions.
+- **COM** (ole32, oleaut32; what CoreCLR imports): apartments per thread
+  behind TEB.ReservedForOle (MTA/STA with reference counts, initialize
+  spies, the error object), one MTA context object and one per STA thread
+  (CoGetContextToken, CoGetObjectContext with IComThreadingInfo), task
+  memory on the process heap, version-4 GUIDs, an IStream on heap memory
+  (CreateStreamOnHGlobal without an HGLOBAL), an aggregatable
+  free-threaded marshaler whose IMarshal methods are E_NOTIMPL, and
+  CoWaitForMultipleHandles (no message pumping). No registry: class and
+  ProgID lookups fail as unregistered (recorded); no marshaling across
+  apartments yet. oleaut32 has BSTRs, VARIANTs (clear, copy, conversions
+  between numbers, booleans, currency and strings in the en-US format;
+  dates and decimals recorded as missing), SAFEARRAYs (descriptors with
+  the VARTYPE/IRecordInfo/IID prefix, bounds stored rightmost first,
+  BSTR/interface/VARIANT elements owned), VarCyFromDec; type libraries
+  are not registered. Its exports have Windows' ordinals (build.rs, from
+  Wine's spec); Get/Set/CreateErrorInfo forward to ole32.
 - **Resources** (kernel32 resource.rs): FindResource(Ex)A/W walk the
   image's resource directory (type, name, language; ids, case-insensitive
   names, "#n"); an HRSRC is the data entry's address, LoadResource and

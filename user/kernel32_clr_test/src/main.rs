@@ -21,6 +21,12 @@
 //!   CreateMemoryResourceNotification (memory is not low),
 //!   IsWow64Process2 (native x64), IsProcessInJob, named pipes that are
 //!   not pipes (ConnectNamedPipe/DisconnectNamedPipe of an event).
+//! - API sets: LoadLibrary and GetModuleHandle of api-ms-win-* contract
+//!   names (any case, without the extension) reach the implementing DLL;
+//!   an unknown contract is ERROR_MOD_NOT_FOUND.
+//! - LoadLibraryExW with LOAD_WITH_ALTERED_SEARCH_PATH, AS_DATAFILE and
+//!   AS_IMAGE_RESOURCE; RtlDllShutdownInProgress; Set/GetThreadDescription;
+//!   GetLocaleInfoW(LOCALE_SPARENT).
 //!
 //! Prints `kernel32_clr_test: ok` or exits with the number of the failing
 //! check.
@@ -125,6 +131,17 @@ unsafe extern "system" {
     fn IsProcessInJob(process: Handle, job: Handle, result: *mut Bool) -> Bool;
     fn ConnectNamedPipe(pipe: Handle, overlapped: *mut c_void) -> Bool;
     fn DisconnectNamedPipe(pipe: Handle) -> Bool;
+    fn LoadLibraryA(name: *const u8) -> Handle;
+    fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
+    fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32) -> Handle;
+    fn GetModuleHandleW(name: *const u16) -> Handle;
+    fn FreeLibrary(module: Handle) -> Bool;
+    fn FindResourceW(module: Handle, name: *const u16, kind: *const u16) -> Handle;
+    fn SetThreadDescription(thread: Handle, text: *const u16) -> i32;
+    fn GetThreadDescription(thread: Handle, text: *mut *mut u16) -> i32;
+    fn LocalFree(p: *mut c_void) -> *mut c_void;
+    fn GetLocaleInfoW(lcid: u32, kind: u32, buf: *mut u16, size: i32) -> i32;
 }
 
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -135,6 +152,7 @@ unsafe extern "system" {
         history: *mut c_void,
     ) -> *const RuntimeFunction;
     fn RtlDeleteFunctionTable(table: *const c_void) -> u8;
+    fn RtlDllShutdownInProgress() -> u8;
 }
 
 #[allow(dead_code)]
@@ -463,13 +481,101 @@ fn threads_memory(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// API set names (what the UCRT and CoreCLR load and probe): resolved to
+/// the DLLs implementing them, whatever files exist; an unknown contract
+/// is not found (ERROR_MOD_NOT_FOUND).
+fn api_sets(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: plain calls with NUL-terminated names.
+    unsafe {
+        let h = LoadLibraryA(c"api-ms-win-core-synch-l1-2-0.dll".as_ptr().cast());
+        c.ok(!h.is_null(), GetLastError().into())?;
+        c.ok(!GetProcAddress(h, c"InitializeCriticalSectionEx".as_ptr().cast()).is_null(), 0)?;
+        c.ok(!GetModuleHandleA(c"api-ms-win-core-synch-l1-2-0.dll".as_ptr().cast()).is_null(), 0)?;
+        let h = LoadLibraryA(c"API-MS-Win-Core-ProcessThreads-L1-1-0".as_ptr().cast());
+        c.ok(
+            !h.is_null() && !GetProcAddress(h, c"GetCurrentThreadId".as_ptr().cast()).is_null(),
+            0,
+        )?;
+        let h = LoadLibraryA(c"api-ms-win-gala-no-such-contract-l1-1-0.dll".as_ptr().cast());
+        c.ok(h.is_null(), 0)?;
+        c.eq(GetLastError().into(), 126)?; // ERROR_MOD_NOT_FOUND
+    }
+    Ok(())
+}
+
+/// UTF-16 of an ASCII string, NUL-terminated.
+fn w(s: &str) -> [u16; 64] {
+    let mut b = [0u16; 64];
+    for (d, ch) in b.iter_mut().zip(s.bytes()) {
+        *d = ch.into();
+    }
+    b
+}
+
+/// The NUL-terminated UTF-16 string at `p` is `want`.
+fn same_text(p: *const u16, want: &str) -> bool {
+    // SAFETY: a NUL-terminated string the system wrote.
+    unsafe {
+        want.bytes().enumerate().all(|(i, b)| *p.add(i) == u16::from(b)) && *p.add(want.len()) == 0
+    }
+}
+
+/// LoadLibraryExW's flags: LOAD_WITH_ALTERED_SEARCH_PATH loads a module;
+/// LOAD_LIBRARY_AS_DATAFILE and AS_IMAGE_RESOURCE map the file without
+/// loading it (handles tagged in their low bits, not module handles, no
+/// DllMain); FreeLibrary unmaps them. Thread descriptions, the parent
+/// locale and RtlDllShutdownInProgress.
+fn libraries(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: plain calls with NUL-terminated names.
+    unsafe {
+        let path = w("C:\\gala\\testdll.dll");
+        let name = w("testdll.dll");
+        let data = LoadLibraryExW(path.as_ptr(), core::ptr::null_mut(), 0x2); // AS_DATAFILE
+        c.ok(!data.is_null() && data as usize & 3 == 1, data as u64)?;
+        c.ok(GetModuleHandleW(name.as_ptr()).is_null(), 0)?;
+        // MAKEINTRESOURCE(1) of RT_VERSION (16).
+        let (one, version) = (core::ptr::without_provenance(1), core::ptr::without_provenance(16));
+        c.ok(FindResourceW(data, one, version).is_null(), 0)?;
+        c.eq(GetLastError().into(), 1812)?; // ERROR_RESOURCE_DATA_NOT_FOUND
+        c.ok(FreeLibrary(data) != 0, GetLastError().into())?;
+        let image = LoadLibraryExW(path.as_ptr(), core::ptr::null_mut(), 0x20); // AS_IMAGE_RESOURCE
+        c.ok(!image.is_null() && image as usize & 3 == 2, image as u64)?;
+        c.ok(FreeLibrary(image) != 0, GetLastError().into())?;
+        let module = LoadLibraryExW(path.as_ptr(), core::ptr::null_mut(), 0x8); // ALTERED_SEARCH_PATH
+        c.ok(!module.is_null() && module == GetModuleHandleW(name.as_ptr()), module as u64)?;
+        let attached = GetProcAddress(module, c"GALA_ATTACH_COUNT".as_ptr().cast()) as *const u64;
+        c.ok(!attached.is_null() && *attached == 1, 0)?;
+        c.ok(FreeLibrary(module) != 0, 0)?;
+
+        c.eq(RtlDllShutdownInProgress().into(), 0)?;
+
+        let gala = w("gala worker");
+        c.eq(SetThreadDescription(GetCurrentThread(), gala.as_ptr()) as u64, 0)?;
+        let mut text = core::ptr::null_mut();
+        c.eq(GetThreadDescription(GetCurrentThread(), &mut text) as u64, 0)?;
+        c.ok(!text.is_null() && same_text(text, "gala worker"), 0)?;
+        LocalFree(text.cast());
+
+        let mut buf = [0u16; 16];
+        c.eq(GetLocaleInfoW(0x409, 0x6d, buf.as_mut_ptr(), 16) as u64, 3)?; // LOCALE_SPARENT
+        c.ok(same_text(buf.as_ptr(), "en"), 0)?;
+        // LOCALE_INEUTRAL as a number: en-US is a specific locale (0).
+        let mut number = [7u16; 2];
+        c.eq(GetLocaleInfoW(0x409, 0x71 | 0x2000_0000, number.as_mut_ptr(), 2) as u64, 2)?;
+        c.ok(number == [0, 0], number[0].into())?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     waits(&mut c)?;
     processors(&mut c)?;
     contexts(&mut c)?;
     code(&mut c)?;
-    threads_memory(&mut c)
+    threads_memory(&mut c)?;
+    api_sets(&mut c)?;
+    libraries(&mut c)
 }
 
 #[unsafe(no_mangle)]

@@ -26,10 +26,13 @@
 //! dispatcher's describes the CONTEXT the kernel pushed (nonvolatile
 //! registers saved in it) and the machine frame above it.
 //!
+//! - Unwind consolidation (STATUS_UNWIND_CONSOLIDATE, C++ catch blocks):
+//!   `consolidate_if_asked`.
+//!
 //! Not yet: nested exceptions and collided unwinds (dispositions 2 and 3
-//! are treated as ExceptionContinueSearch), function table callbacks,
-//! unhandled exception filters (an unhandled exception ends the process
-//! with its code), the history table.
+//! are treated as ExceptionContinueSearch), unhandled exception filters
+//! (an unhandled exception ends the process with its code), the history
+//! table.
 
 use core::arch::global_asm;
 
@@ -53,6 +56,7 @@ const STATUS_NONCONTINUABLE_EXCEPTION: u32 = 0xc000_0025;
 const STATUS_INVALID_UNWIND_TARGET: u32 = 0xc000_0029;
 const STATUS_BAD_STACK: u32 = 0xc000_0028;
 const STATUS_UNWIND: u32 = 0xc000_0027;
+const STATUS_UNWIND_CONSOLIDATE: u32 = 0x8000_0029;
 
 // CONTEXT (public x64 layout).
 const CONTEXT_SIZE: usize = 0x4d0;
@@ -917,6 +921,7 @@ extern "system" fn unwind_to(
     };
     ctx.set(CTX_RAX, return_value);
     ctx.set(CTX_RIP, target_ip);
+    consolidate_if_asked(ctx.0.as_ptr(), record);
     NtContinue(ctx.0.as_ptr(), 0);
     NtTerminateProcess(-1, STATUS_BAD_STACK);
     loop {
@@ -931,11 +936,60 @@ extern "system" fn raise(record: *mut u8, context: *mut u8) -> ! {
 }
 
 /// RtlRestoreContext(ContextRecord, ExceptionRecord): resumes the context
-/// (through NtContinue; the exception record, used for unwind
-/// consolidation, is not supported yet).
+/// (through NtContinue), after the consolidation callback if the record
+/// asks for one.
 #[unsafe(no_mangle)]
-pub extern "system" fn RtlRestoreContext(context: *const u8, _record: *mut u8) {
+pub extern "system" fn RtlRestoreContext(context: *const u8, record: *mut u8) {
+    consolidate_if_asked(context, record);
     NtContinue(context, 0);
+}
+
+/// The block a consolidation frame describes: the CONTEXT to resume, and
+/// above it a machine frame (rip, cs, rflags, rsp, ss) with its rip and
+/// rsp, laid out as the kernel's exception frame (KiUserExceptionDispatcher).
+#[repr(C, align(16))]
+struct ConsolidationBlock([u8; MACHINE_FRAME_OFFSET + 48]);
+
+/// Unwind consolidation (STATUS_UNWIND_CONSOLIDATE, how MSVC runs C++
+/// catch blocks): ExceptionInformation[0] is a callback taking the record
+/// and returning where to continue. It runs on the current stack, below
+/// the frames the unwind removed (they still hold the exception object),
+/// in a frame whose unwind data leads straight to `context` (so a walk
+/// from the catch block reaches the target frame); then `context` resumes
+/// at the address it returned.
+fn consolidate_if_asked(context: *const u8, record: *mut u8) {
+    if record.is_null() {
+        return;
+    }
+    // SAFETY: an EXCEPTION_RECORD: code, then NumberParameters at +0x18
+    // and ExceptionInformation at +0x20.
+    let (code, count, callback) = unsafe {
+        (
+            (record as *const u32).read_unaligned(),
+            (record.add(0x18) as *const u32).read_unaligned(),
+            (record.add(0x20) as *const u64).read_unaligned(),
+        )
+    };
+    if code != STATUS_UNWIND_CONSOLIDATE || count < 1 || callback == 0 {
+        return;
+    }
+    let mut block = ConsolidationBlock([0; MACHINE_FRAME_OFFSET + 48]);
+    let ctx = Context::from_ptr(context);
+    block.0[..CONTEXT_SIZE].copy_from_slice(&ctx.0);
+    let frame = [ctx.get(CTX_RIP), 0x33, u64::from(ctx.get(0x44) as u32), ctx.get(CTX_RSP), 0x2b];
+    for (i, v) in frame.iter().enumerate() {
+        let at = MACHINE_FRAME_OFFSET + 8 * i;
+        block.0[at..at + 8].copy_from_slice(&v.to_le_bytes());
+    }
+    // SAFETY: the block holds a CONTEXT and machine frame; the callback is
+    // the record's; gala_consolidate does not return.
+    unsafe { gala_consolidate(block.0.as_mut_ptr(), callback, record) }
+}
+
+unsafe extern "system" {
+    /// Moves rsp to `block`, calls `callback(record)` in the consolidation
+    /// frame, sets the block's Rip to its result and resumes the block.
+    fn gala_consolidate(block: *mut u8, callback: u64, record: *mut u8) -> !;
 }
 
 /// Where the kernel puts the EXCEPTION_RECORD relative to the CONTEXT at
@@ -1090,7 +1144,51 @@ global_asm!(
     "call {dispatch}",
     "int3",
     ".seh_endproc",
+    "",
+    // gala_consolidate(block, callback, record): rsp = the block, then the
+    // consolidation frame, described like KiUserExceptionDispatcher's (the
+    // CONTEXT at rsp, the machine frame above it).
+    ".globl gala_consolidate",
+    ".def gala_consolidate; .scl 2; .type 32; .endef",
+    "gala_consolidate:",
+    "mov rsp, rcx",
+    "jmp gala_consolidate_frame",
+    ".def gala_consolidate_frame; .scl 3; .type 32; .endef",
+    "gala_consolidate_frame:",
+    ".seh_proc gala_consolidate_frame",
+    ".seh_pushframe",
+    ".seh_stackalloc {machine_frame}",
+    ".seh_savereg rbx, 0x90",
+    ".seh_savereg rbp, 0xa0",
+    ".seh_savereg rsi, 0xa8",
+    ".seh_savereg rdi, 0xb0",
+    ".seh_savereg r12, 0xd8",
+    ".seh_savereg r13, 0xe0",
+    ".seh_savereg r14, 0xe8",
+    ".seh_savereg r15, 0xf0",
+    ".seh_savexmm xmm6, 0x200",
+    ".seh_savexmm xmm7, 0x210",
+    ".seh_savexmm xmm8, 0x220",
+    ".seh_savexmm xmm9, 0x230",
+    ".seh_savexmm xmm10, 0x240",
+    ".seh_savexmm xmm11, 0x250",
+    ".seh_savexmm xmm12, 0x260",
+    ".seh_savexmm xmm13, 0x270",
+    ".seh_savexmm xmm14, 0x280",
+    ".seh_savexmm xmm15, 0x290",
+    ".seh_endprologue",
+    // The CONTEXT's home area is the callback's shadow space.
+    "mov rax, rdx",
+    "mov rcx, r8",
+    "call rax",
+    "mov [rsp + 0xf8], rax",
+    "mov rcx, rsp",
+    "xor edx, edx",
+    "call {nt_continue}",
+    "int3",
+    ".seh_endproc",
     raise = sym raise,
+    nt_continue = sym crate::NtContinue,
     unwind_to = sym unwind_to,
     dispatch = sym dispatch_exception,
     record = const RECORD_OFFSET,

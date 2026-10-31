@@ -582,15 +582,31 @@ pub extern "system" fn LoadLibraryW(name: *const u16) -> Handle {
     load_library(name, wide_len(name), 0)
 }
 
-/// LoadLibraryExW: no data/image-resource loading yet (reported); the
-/// LOAD_LIBRARY_SEARCH_* flags choose where to look.
+/// LoadLibraryExW: the LOAD_LIBRARY_SEARCH_* flags choose where to look;
+/// data files and image resources are mapped, not loaded.
 #[unsafe(no_mangle)]
 pub extern "system" fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32) -> Handle {
     const SEARCH_FLAGS: u32 = 0x0000_1f00; // LOAD_LIBRARY_SEARCH_* (0x100..0x1000)
-    if !file.is_null() || flags & !SEARCH_FLAGS != 0 {
+    // LOAD_LIBRARY_AS_DATAFILE (2), _EXCLUSIVE (0x40), AS_IMAGE_RESOURCE
+    // (0x20): mapped, not loaded; the handle's low bits say which (1 for a
+    // data file, 2 for an image resource), as LDR_IS_DATAFILE and
+    // LDR_IS_IMAGEMAPPING test them.
+    const DATA_FLAGS: u32 = 0x2 | 0x20 | 0x40;
+    // LOAD_WITH_ALTERED_SEARCH_PATH (8): a path's DLL is loaded from there;
+    // its dependencies are looked for in the usual places (TODO: its own
+    // directory first, as Windows does).
+    const ALTERED: u32 = 0x8;
+    if !file.is_null() || flags & !(SEARCH_FLAGS | DATA_FLAGS | ALTERED) != 0 {
         unsupported(b"kernel32.dll!LoadLibraryExW(flags)", u64::from(flags));
         return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
     }
+    if flags & DATA_FLAGS != 0 {
+        return match mapping::map_image_file(name) {
+            Ok(base) => (base | if flags & 0x20 != 0 { 2 } else { 1 }) as Handle,
+            Err(e) => fail_with(e, core::ptr::null_mut()),
+        };
+    }
+    let flags = flags & !ALTERED;
     // No search flags: those of SetDefaultDllDirectories, if any.
     let flags = if flags & SEARCH_FLAGS == 0 {
         DEFAULT_DLL_DIRECTORIES.load(core::sync::atomic::Ordering::Relaxed)
@@ -650,6 +666,14 @@ pub extern "system" fn GetProcAddress(module: Handle, name: *const u8) -> *mut c
 
 #[unsafe(no_mangle)]
 pub extern "system" fn FreeLibrary(module: Handle) -> Bool {
+    // A data file or image resource mapping (LoadLibraryExW).
+    if module as usize & 3 != 0 {
+        return if mapping::unmap_image_file(module as usize & !3) {
+            TRUE
+        } else {
+            fail_with(ERROR_INVALID_HANDLE, FALSE)
+        };
+    }
     // SAFETY: the loader validates the module.
     let status = unsafe { LdrUnloadDll(module) };
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }

@@ -22,6 +22,11 @@
 //!   at the target with rax = the return value and the target frame's
 //!   nonvolatile registers.
 //! - The same for a hardware exception (an access violation).
+//! - Unwind consolidation (STATUS_UNWIND_CONSOLIDATE, how C++ catch
+//!   blocks run): after the unwind the callback in ExceptionInformation[0]
+//!   runs while the stack below the target is still intact, a walk from it
+//!   reaches the target frame, and execution continues at the address it
+//!   returns with rax = the return value.
 //!
 //! Prints `seh_test: ok` or exits with the number of the failing check.
 
@@ -43,6 +48,9 @@ const STATUS_ACCESS_VIOLATION: u32 = 0xc000_0005;
 const CODE_CONTINUE: u32 = 0xe000_0001;
 /// Raised and unwound by the outer handler.
 const CODE_UNWIND: u32 = 0xe000_0002;
+/// Unwound by the outer handler with a consolidation callback.
+const CODE_CONSOLIDATE: u32 = 0xe000_0003;
+const STATUS_UNWIND_CONSOLIDATE: u64 = 0x8000_0029;
 /// rbx in seh_outer's body, and in seh_inner's.
 const OUTER_RBX: u64 = 0x1111_0000_0000_1111;
 const INNER_RBX: u64 = 0x2222_0000_0000_2222;
@@ -192,6 +200,12 @@ static CAPTURE_RSP: AtomicU64 = AtomicU64::new(0);
 static RTL_RAISE: AtomicUsize = AtomicUsize::new(0);
 static RTL_CAPTURE: AtomicUsize = AtomicUsize::new(0);
 static RTL_UNWIND_EX: AtomicUsize = AtomicUsize::new(0);
+static RTL_LOOKUP: AtomicUsize = AtomicUsize::new(0);
+static RTL_VIRTUAL_UNWIND: AtomicUsize = AtomicUsize::new(0);
+/// What the consolidation callback saw: ran, the original record's code,
+/// whether it ran below that record, the rsp and rbx a walk from it
+/// reached at the target frame.
+static CONSOLIDATED: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 
 /// What the handlers saw. Inner: calls, flags of each call (up to 2),
 /// code, ExceptionAddress, parameter count, info[0], info[1],
@@ -282,6 +296,24 @@ extern "system" fn outer_handler(
     }
     // SAFETY: the documented signature of ntdll's RtlUnwindEx.
     let unwind: UnwindEx = unsafe { core::mem::transmute(RTL_UNWIND_EX.load(Ordering::SeqCst)) };
+    if rd32(record, ER_CODE) == CODE_CONSOLIDATE {
+        // Unwind consolidation (how C++ catch blocks run): after the
+        // unwind, the callback runs and says where to continue.
+        let mut consolidate = [0u8; RECORD_SIZE];
+        let cr = consolidate.as_mut_ptr();
+        wr(cr, ER_CODE, STATUS_UNWIND_CONSOLIDATE);
+        wr(cr, ER_NUMBER_PARAMETERS, 2);
+        wr(cr, ER_INFORMATION, consolidate_callback as *const () as u64);
+        wr(cr, ER_INFORMATION + 8, record as u64);
+        unwind(
+            frame,
+            0,
+            cr,
+            UNWIND_VALUE.load(Ordering::SeqCst),
+            rd(dispatcher, DC_CONTEXT_RECORD) as *mut u8,
+            rd(dispatcher, DC_HISTORY_TABLE) as *mut u8,
+        );
+    }
     unwind(
         frame,
         seh_outer_resume as *const () as usize,
@@ -291,6 +323,53 @@ extern "system" fn outer_handler(
         rd(dispatcher, DC_HISTORY_TABLE) as *mut u8,
     );
     EXCEPTION_CONTINUE_SEARCH // not reached
+}
+
+/// The consolidation callback: runs after the unwind to seh_outer, while
+/// the original exception record (deeper on the stack) is still intact;
+/// a walk from it reaches the target frame. Continues at seh_outer_resume.
+extern "system" fn consolidate_callback(record: *mut u8) -> u64 {
+    let original = rd(record, ER_INFORMATION + 8) as *const u8;
+    let marker = 0u8;
+    CONSOLIDATED[0].store(1, Ordering::SeqCst);
+    CONSOLIDATED[1].store(rd32(original, ER_CODE).into(), Ordering::SeqCst);
+    let below = (&raw const marker as usize) < original as usize;
+    CONSOLIDATED[2].store(below.into(), Ordering::SeqCst);
+    // SAFETY: the documented signatures of these ntdll exports.
+    let (capture, lookup, unwind) = unsafe {
+        (
+            core::mem::transmute::<usize, extern "system" fn(*mut u8)>(
+                RTL_CAPTURE.load(Ordering::SeqCst),
+            ),
+            core::mem::transmute::<usize, LookupFunctionEntry>(RTL_LOOKUP.load(Ordering::SeqCst)),
+            core::mem::transmute::<usize, VirtualUnwind>(RTL_VIRTUAL_UNWIND.load(Ordering::SeqCst)),
+        )
+    };
+    let mut ctx = Context([0; CONTEXT_SIZE]);
+    let c = ctx.0.as_mut_ptr();
+    capture(c);
+    let target = OUTER_RSP.load(Ordering::SeqCst);
+    for _ in 0..8 {
+        if rd(c, CTX_RSP) >= target {
+            break;
+        }
+        let pc = rd(c, CTX_RIP);
+        let mut base = 0u64;
+        let entry = lookup(pc, &mut base, core::ptr::null_mut());
+        if entry.is_null() {
+            // A leaf: the return address is at rsp.
+            let rsp = rd(c, CTX_RSP);
+            // SAFETY: a return address on this thread's stack.
+            wr(c, CTX_RIP, unsafe { *(rsp as *const u64) });
+            wr(c, CTX_RSP, rsp + 8);
+            continue;
+        }
+        let (mut data, mut frame) = (0u64, 0u64);
+        unwind(0, base, pc, entry, c, &mut data, &mut frame, core::ptr::null_mut());
+    }
+    CONSOLIDATED[3].store(rd(c, CTX_RSP), Ordering::SeqCst);
+    CONSOLIDATED[4].store(rd(c, CTX_RBX), Ordering::SeqCst);
+    seh_outer_resume as *const () as u64
 }
 
 /// Raises `code` with parameters 7 and 9 through seh_raise.
@@ -407,6 +486,8 @@ fn run() -> Result<(), u32> {
     RTL_CAPTURE.store(f[3], Ordering::SeqCst);
     RTL_RAISE.store(f[4], Ordering::SeqCst);
     RTL_UNWIND_EX.store(f[5], Ordering::SeqCst);
+    RTL_LOOKUP.store(f[1], Ordering::SeqCst);
+    RTL_VIRTUAL_UNWIND.store(f[2], Ordering::SeqCst);
     // SAFETY: the documented signatures of these ntdll exports.
     let (pc_to_header, fns) = unsafe {
         (
@@ -548,6 +629,23 @@ fn run() -> Result<(), u32> {
     c.eq(outer(0), 2)?;
     c.eq(outer(2), (EXCEPTION_UNWINDING | EXCEPTION_TARGET_UNWIND).into())?;
     c.eq(outer(3), STATUS_ACCESS_VIOLATION.into())?;
+    c.eq(RESUME_RBX.load(Ordering::SeqCst), OUTER_RBX)?;
+
+    // Unwind consolidation: the callback runs, then seh_outer continues
+    // where it said, with rax = 44 and its own nonvolatile registers.
+    reset();
+    UNWIND_VALUE.store(44, Ordering::SeqCst);
+    RESUME_RBX.store(0, Ordering::SeqCst);
+    // SAFETY: as above.
+    let r = unsafe { seh_outer(raise_it, CODE_CONSOLIDATE.into()) };
+    c.eq(r, 44)?;
+    let seen = |i: usize| CONSOLIDATED[i].load(Ordering::SeqCst);
+    c.eq(seen(0), 1)?;
+    c.eq(seen(1), CODE_CONSOLIDATE.into())?;
+    c.eq(seen(2), 1)?;
+    c.eq(seen(3), OUTER_RSP.load(Ordering::SeqCst))?;
+    c.eq(seen(4), OUTER_RBX)?;
+    c.eq(outer(2), (EXCEPTION_UNWINDING | EXCEPTION_TARGET_UNWIND).into())?;
     c.eq(RESUME_RBX.load(Ordering::SeqCst), OUTER_RBX)?;
     Ok(())
 }

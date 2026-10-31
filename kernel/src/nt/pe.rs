@@ -1,9 +1,13 @@
 //! PE32+ image parsing, written from Microsoft's public "PE Format"
 //! specification. Only parses and validates; mapping is done by the loader.
+//! Image sections also take 32-bit (PE32, i386) images, as 64-bit Windows
+//! maps them (WOW64, IL-only .NET assemblies); processes run only PE32+.
 
 use core::fmt;
 
 const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+const IMAGE_FILE_MACHINE_I386: u16 = 0x14c;
+const PE32_MAGIC: u16 = 0x10b;
 const PE32_PLUS_MAGIC: u16 = 0x20b;
 const IMAGE_FILE_EXECUTABLE_IMAGE: u16 = 0x0002;
 const IMAGE_FILE_DLL: u16 = 0x2000;
@@ -17,6 +21,7 @@ pub const DIRECTORY_IMPORT: usize = 1;
 pub const DIRECTORY_BASERELOC: usize = 5;
 
 const IMAGE_REL_BASED_ABSOLUTE: u16 = 0;
+const IMAGE_REL_BASED_HIGHLOW: u16 = 3;
 const IMAGE_REL_BASED_DIR64: u16 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,12 +105,17 @@ pub struct PeImage<'a> {
     pub is_dll: bool,
     /// Whether the image can be loaded away from `image_base`.
     pub relocatable: bool,
+    /// A 32-bit (PE32) image: it can be mapped, not run.
+    pub pe32: bool,
 }
 
 impl<'a> PeImage<'a> {
     /// Parses an executable (.exe) image.
     pub fn parse(data: &'a [u8]) -> Result<Self, PeError> {
         let image = Self::parse_image(data)?;
+        if image.pe32 {
+            return Err(PeError::NotPe32Plus);
+        }
         if image.is_dll {
             return Err(PeError::NotExecutable);
         }
@@ -123,7 +133,7 @@ impl<'a> PeImage<'a> {
         }
         let coff = pe + 4;
         let machine = u16_at(data, coff)?;
-        if machine != IMAGE_FILE_MACHINE_AMD64 {
+        if machine != IMAGE_FILE_MACHINE_AMD64 && machine != IMAGE_FILE_MACHINE_I386 {
             return Err(PeError::UnsupportedMachine(machine));
         }
         let section_count = usize::from(u16_at(data, coff + 2)?);
@@ -136,23 +146,31 @@ impl<'a> PeImage<'a> {
         let relocs_stripped = characteristics & IMAGE_FILE_RELOCS_STRIPPED != 0;
 
         let opt = coff + 20;
-        if u16_at(data, opt)? != PE32_PLUS_MAGIC {
-            return Err(PeError::NotPe32Plus);
-        }
+        // PE32 has a 4-byte ImageBase and stack/heap sizes and BaseOfData,
+        // so its data directories start at +96 rather than +112.
+        let pe32 = match (u16_at(data, opt)?, machine) {
+            (PE32_PLUS_MAGIC, IMAGE_FILE_MACHINE_AMD64) => false,
+            (PE32_MAGIC, IMAGE_FILE_MACHINE_I386) => true,
+            _ => return Err(PeError::NotPe32Plus),
+        };
         let entry_rva = u32_at(data, opt + 16)?;
-        let image_base = u64_at(data, opt + 24)?;
+        let image_base =
+            if pe32 { u64::from(u32_at(data, opt + 28)?) } else { u64_at(data, opt + 24)? };
         let section_alignment = u32_at(data, opt + 32)?;
         let file_alignment = u32_at(data, opt + 36)?;
         let size_of_image = u32_at(data, opt + 56)?;
         let size_of_headers = u32_at(data, opt + 60)?;
         let subsystem = u16_at(data, opt + 68)?;
         let subsystem_version = (u16_at(data, opt + 48)?, u16_at(data, opt + 50)?);
-        let stack_reserve = u64_at(data, opt + 72)?;
-        let stack_commit = u64_at(data, opt + 80)?;
-        let dir_count = (u32_at(data, opt + 108)? as usize).min(16);
+        let (stack_reserve, stack_commit, dirs_at) = if pe32 {
+            (u64::from(u32_at(data, opt + 72)?), u64::from(u32_at(data, opt + 76)?), opt + 96)
+        } else {
+            (u64_at(data, opt + 72)?, u64_at(data, opt + 80)?, opt + 112)
+        };
+        let dir_count = (u32_at(data, dirs_at - 4)? as usize).min(16);
         let mut directories = [DataDirectory::default(); 16];
         for (i, dir) in directories.iter_mut().enumerate().take(dir_count) {
-            let off = opt + 112 + 8 * i;
+            let off = dirs_at + 8 * i;
             *dir = DataDirectory { rva: u32_at(data, off)?, size: u32_at(data, off + 4)? };
         }
 
@@ -184,6 +202,7 @@ impl<'a> PeImage<'a> {
             section_count,
             is_dll,
             relocatable: false,
+            pe32,
         };
         let mut prev_end = size_of_headers;
         for i in 0..section_count {
@@ -321,6 +340,14 @@ pub fn apply_relocations(
             let (kind, offset) = (e >> 12, usize::from(e & 0xfff));
             match kind {
                 IMAGE_REL_BASED_ABSOLUTE => {}
+                // PE32 images: 32-bit addresses (the delta's low half).
+                IMAGE_REL_BASED_HIGHLOW => {
+                    let at = page + offset;
+                    let slot = image.get_mut(at..at + 4).ok_or(PeError::BadRelocation)?;
+                    let value =
+                        u32::from_le_bytes(slot.try_into().map_err(|_| PeError::BadRelocation)?);
+                    slot.copy_from_slice(&value.wrapping_add(delta as u32).to_le_bytes());
+                }
                 IMAGE_REL_BASED_DIR64 => {
                     let at = page + offset;
                     let slot = image.get_mut(at..at + 8).ok_or(PeError::BadRelocation)?;
@@ -492,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn dir64_relocations() {
+    fn dir64_and_highlow_relocations() {
         let mut image = vec![0u8; 0x2000];
         image[0x1010..0x1018].copy_from_slice(&0x1_4000_1234u64.to_le_bytes());
         // One block for page 0x1000: DIR64 at +0x10, then ABSOLUTE padding.
@@ -507,8 +534,13 @@ mod tests {
         let dir = DataDirectory { rva: 0x1800, size: 12 };
         apply_relocations(&mut image, dir, 0x1000_0000).unwrap();
         assert_eq!(u64_at(&image, 0x1010).unwrap(), 0x1_5000_1234);
+        // HIGHLOW (PE32): the delta's low 32 bits.
+        image[0x1020..0x1024].copy_from_slice(&0x0040_1000u32.to_le_bytes());
+        image[0x1808..0x180a].copy_from_slice(&0x3020u16.to_le_bytes());
+        apply_relocations(&mut image, dir, 0x1_0010_0000).unwrap();
+        assert_eq!(u32_at(&image, 0x1020).unwrap(), 0x0050_1000);
         // Unknown relocation type.
-        image[0x1808..0x180a].copy_from_slice(&0x3010u16.to_le_bytes());
+        image[0x1808..0x180a].copy_from_slice(&0x5010u16.to_le_bytes());
         assert_eq!(apply_relocations(&mut image, dir, 1), Err(PeError::BadRelocation));
     }
 

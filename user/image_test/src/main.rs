@@ -1,6 +1,7 @@
 //! Image sections (SEC_IMAGE) from a DLL file, with results expected to
 //! match real Windows. The test DLL (user/testdll) is embedded and written
-//! to `C:\Users\Public` first, so the binary is self-contained. Prints
+//! to `C:\Users\Public` first, so the binary is self-contained; so is a
+//! PE32 IL-only assembly (user/bin/dotnet_hello.dll). Prints
 //! `image_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -12,6 +13,11 @@ static TEST_DLL: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../target/x86_64-pc-windows-msvc/release/testdll.dll"
 ));
+
+/// A 32-bit (PE32, i386) IL-only .NET assembly: 64-bit Windows maps such
+/// images as image sections too (WOW64 and .NET rely on it).
+static IL_DLL: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../bin/dotnet_hello.dll"));
 
 const STATUS_IMAGE_NOT_AT_BASE: NtStatus = 0x4000_0003;
 const STATUS_INVALID_IMAGE_NOT_MZ: NtStatus = 0xc000_012f;
@@ -159,6 +165,28 @@ fn run() -> Result<(), u32> {
 
     c.eq(st(unmap_view(a)), ok)?;
     c.eq(st(unmap_view(b)), ok)?;
+    close(sec);
+    close(f);
+
+    // A PE32 IL-only image: laid out by its section table like any image.
+    let path = wide!("\\??\\C:\\Users\\Public\\gala_image_test_il.dll");
+    let path = UnicodeString::new(&path);
+    let il = ObjectAttributes::new(&path, Handle(0), OBJ_CASE_INSENSITIVE);
+    c.eq(st(write_whole_file(&il, IL_DLL)), ok)?;
+    let (s, f, _) = open_file(&il, GENERIC_READ | GENERIC_EXECUTE, FILE_SHARE_READ, opts);
+    c.eq(st(s), ok)?;
+    let (s, sec) = create_image_section(f);
+    c.eq(st(s), ok)?;
+    let (s, a, size) = map_view(sec, 0, 0, PAGE_READONLY);
+    c.ok(s == STATUS_SUCCESS || s == STATUS_IMAGE_NOT_AT_BASE, st(s))?;
+    let pe = a + read_u32(a + 0x3c) as usize;
+    c.eq(read_u32(pe + 24) as u64 & 0xffff, 0x10b)?; // PE32
+    c.eq(read_u32(pe + 24 + 56).into(), size as u64)?; // SizeOfImage
+    // The CLI header (data directory 14) at its RVA: cb = 72.
+    let cli = read_u32(pe + 24 + 96 + 14 * 8) as usize;
+    c.ok(cli != 0 && cli < size, cli as u64)?;
+    c.eq(read_u32(a + cli).into(), 72)?;
+    c.eq(st(unmap_view(a)), ok)?;
     close(sec);
     close(f);
     Ok(())

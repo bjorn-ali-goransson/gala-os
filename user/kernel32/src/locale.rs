@@ -101,6 +101,8 @@ fn locale_value(kind: u32) -> Option<&'static str> {
         0x59 => "en",              // LOCALE_SISO639LANGNAME
         0x5a => "US",              // LOCALE_SISO3166CTRYNAME
         0x5c => "en-US",           // LOCALE_SNAME
+        0x6d => "en",              // LOCALE_SPARENT
+        0x71 => "0",               // LOCALE_INEUTRAL (a specific locale)
         0x67 => "eng",             // LOCALE_SISO639LANGNAME2
         0x68 => "USA",             // LOCALE_SISO3166CTRYNAME2
         0x1001 => "English",       // LOCALE_SENGLISHLANGUAGENAME

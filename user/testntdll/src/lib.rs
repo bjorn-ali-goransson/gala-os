@@ -475,9 +475,16 @@ fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
         NtMapViewOfSection(section, -1, &mut base, 0, 0, core::ptr::null_mut(), &mut size, 1, 0, 4);
     NtClose(section);
     match st {
-        STATUS_SUCCESS | STATUS_IMAGE_NOT_AT_BASE => Ok(base),
-        _ => Err(STATUS_INVALID_IMAGE_FORMAT),
+        STATUS_SUCCESS | STATUS_IMAGE_NOT_AT_BASE => {}
+        _ => return Err(STATUS_INVALID_IMAGE_FORMAT),
     }
+    // Image sections take 32-bit images too; a 64-bit process cannot load
+    // them as modules.
+    if rd32(base + rd32(base + 0x3c) as usize + 24) & 0xffff != 0x20b {
+        NtUnmapViewOfSection(-1, base);
+        return Err(STATUS_INVALID_IMAGE_FORMAT);
+    }
+    Ok(base)
 }
 
 const STATUS_NO_MEMORY: u32 = 0xc000_0017;
@@ -625,7 +632,45 @@ fn normalize(path: impl Iterator<Item = u16>, out: &mut [u8; MAX_NAME]) -> Resul
         out.get_mut(n..n + 4).ok_or(STATUS_DLL_NOT_FOUND)?.copy_from_slice(b".dll");
         n += 4;
     }
+    if let Some(host) = api_set_host(&out[..n]) {
+        out[..host.len()].copy_from_slice(host);
+        n = host.len();
+    }
     Ok(n)
+}
+
+/// RtlDllShutdownInProgress: whether the process is shutting down (DLLs
+/// get DLL_PROCESS_DETACH with a non-null reserved argument then). gala's
+/// ExitProcess does not call DLLs back yet, so never.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlDllShutdownInProgress() -> u8 {
+    0
+}
+
+/// The DLL implementing API set `name` (`api-ms-win-...`, normalized), as
+/// Windows' API set schema maps these contract names to the DLLs that
+/// implement them (whatever files of those names exist). gala keeps the
+/// mapping coarse: the C runtime sets are ucrtbase, COM and WinRT are
+/// ole32 (gala has no combase), security, eventing, registry and services
+/// are advapi32, the other core sets are kernel32 (gala has no
+/// kernelbase); other names are looked up as files.
+fn api_set_host(name: &[u8]) -> Option<&'static [u8]> {
+    let set = name.strip_prefix(b"api-ms-win-")?;
+    let host: &[u8] = if set.starts_with(b"crt-") {
+        b"ucrtbase.dll"
+    } else if set.starts_with(b"core-com-") || set.starts_with(b"core-winrt-") {
+        b"ole32.dll"
+    } else if ["security-", "eventing-", "core-registry-", "service-"]
+        .iter()
+        .any(|p| set.starts_with(p.as_bytes()))
+    {
+        b"advapi32.dll"
+    } else if set.starts_with(b"core-") {
+        b"kernel32.dll"
+    } else {
+        return None; // not a set gala hosts: looked up as a file
+    };
+    Some(host)
 }
 
 /// The entry point of the image at `base`, if it has one.

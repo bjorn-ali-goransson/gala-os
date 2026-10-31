@@ -388,3 +388,92 @@ pub extern "system" fn FlushInstructionCache(
 ) -> Bool {
     TRUE
 }
+
+/// Thread descriptions (SetThreadDescription), by thread id: up to 64
+/// threads, 63 characters each (longer ones are cut).
+const MAX_NAMED: usize = 64;
+
+struct Names {
+    lock: AtomicBool,
+    names: core::cell::UnsafeCell<[(u32, [u16; 64]); MAX_NAMED]>,
+}
+
+// SAFETY: `names` is only touched with `lock` held.
+unsafe impl Sync for Names {}
+
+static NAMES: Names = Names {
+    lock: AtomicBool::new(false),
+    names: core::cell::UnsafeCell::new([(0, [0; 64]); MAX_NAMED]),
+};
+
+fn with_names<R>(f: impl FnOnce(&mut [(u32, [u16; 64]); MAX_NAMED]) -> R) -> R {
+    while NAMES
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: the lock is held.
+    let r = f(unsafe { &mut *NAMES.names.get() });
+    NAMES.lock.store(false, Ordering::Release);
+    r
+}
+
+/// HRESULT_FROM_WIN32 of the last error.
+fn last_hresult() -> i32 {
+    ((GetLastError() & 0xffff) | 0x8007_0000) as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SetThreadDescription(thread: Handle, text: *const u16) -> i32 {
+    let id = super::process::GetThreadId(thread);
+    if id == 0 {
+        return last_hresult();
+    }
+    if text.is_null() {
+        return 0x8007_0057u32 as i32; // E_INVALIDARG
+    }
+    let mut name = [0u16; 64];
+    // SAFETY: the caller's NUL-terminated string.
+    unsafe {
+        for (i, slot) in name.iter_mut().take(63).enumerate() {
+            let ch = *text.add(i);
+            if ch == 0 {
+                break;
+            }
+            *slot = ch;
+        }
+    }
+    let stored = with_names(|n| {
+        let slot = n.iter().position(|e| e.0 == id).or_else(|| n.iter().position(|e| e.0 == 0));
+        slot.map(|i| n[i] = (id, name)).is_some()
+    });
+    if !stored {
+        unsupported(b"kernel32.dll!SetThreadDescription(too many threads)", MAX_NAMED as u64);
+    }
+    0
+}
+
+/// GetThreadDescription: a LocalAlloc'ed copy (empty if none was set).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadDescription(thread: Handle, out: *mut *mut u16) -> i32 {
+    let id = super::process::GetThreadId(thread);
+    if id == 0 {
+        return last_hresult();
+    }
+    if out.is_null() {
+        return 0x8007_0057u32 as i32;
+    }
+    let name = with_names(|n| n.iter().find(|e| e.0 == id).map_or([0; 64], |e| e.1));
+    let p = super::heap::LocalAlloc(0, 128).cast::<u16>();
+    if p.is_null() {
+        return 0x8007_000eu32 as i32; // E_OUTOFMEMORY
+    }
+    // SAFETY: a fresh block of 64 characters; the caller's output.
+    unsafe {
+        core::ptr::copy_nonoverlapping(name.as_ptr(), p, 64);
+        *out = p;
+    }
+    0
+}

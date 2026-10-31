@@ -747,3 +747,70 @@ pub extern "system" fn GetFileTime(
     }
     TRUE
 }
+
+/// Maps the PE file `path` as an image without loading it (no imports,
+/// no DllMain, not a module): what LoadLibraryEx's AS_DATAFILE and
+/// AS_IMAGE_RESOURCE give. Windows maps a plain data file flat; gala
+/// maps both kinds in image layout (resources are found by RVA either
+/// way). The base, or the error.
+pub(crate) fn map_image_file(path: *const u16) -> Result<usize, u32> {
+    // GENERIC_READ, share read/delete, OPEN_EXISTING.
+    let file = CreateFileW(
+        path,
+        0x8000_0000,
+        0x1 | 0x4,
+        core::ptr::null_mut(),
+        3,
+        0,
+        core::ptr::null_mut(),
+    );
+    if file == INVALID_HANDLE_VALUE {
+        return Err(GetLastError());
+    }
+    let mut section = core::ptr::null_mut();
+    // SAFETY: valid pointers; SEC_IMAGE (0x1000000), PAGE_READONLY.
+    let status = unsafe {
+        NtCreateSection(
+            &mut section,
+            SECTION_ALL_ACCESS,
+            core::ptr::null(),
+            core::ptr::null(),
+            0x02,
+            0x100_0000,
+            file,
+        )
+    };
+    CloseHandle(file);
+    if status != STATUS_SUCCESS {
+        // SAFETY: plain call.
+        return Err(unsafe { RtlNtStatusToDosError(status) });
+    }
+    let (mut at, mut size) = (core::ptr::null_mut(), 0usize);
+    // SAFETY: valid in/out pointers.
+    let status = unsafe {
+        NtMapViewOfSection(
+            section,
+            CURRENT_PROCESS,
+            &mut at,
+            0,
+            0,
+            core::ptr::null(),
+            &mut size,
+            VIEW_SHARE,
+            0,
+            0x02,
+        )
+    };
+    CloseHandle(section);
+    if status != STATUS_SUCCESS && status != 0x4000_0003 {
+        // SAFETY: plain call.
+        return Err(unsafe { RtlNtStatusToDosError(status) });
+    }
+    Ok(at as usize)
+}
+
+/// Unmaps what `map_image_file` mapped.
+pub(crate) fn unmap_image_file(base: usize) -> bool {
+    // SAFETY: a view of ours.
+    unsafe { NtUnmapViewOfSection(CURRENT_PROCESS, base as *mut c_void) == STATUS_SUCCESS }
+}

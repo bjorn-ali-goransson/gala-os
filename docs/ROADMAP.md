@@ -571,12 +571,16 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       `dotnet_hello` scenario (user/dotnet_hello: C# built by build.sh
       with Mono's mcs, a distro package, since downloaded binaries only
       run inside QEMU; .NET runs it through mscorlib's type forwards):
-      coreclr.dll now fails to load on ole32.dll. Next: ole32/oleaut32
-      (new DLLs), rpcrt4 UuidCreate, api-ms-win-core-winrt; the API set
-      redirection (api-ms-win-* names to kernel32 & co., as the schema
-      does on Windows) would quiet the UCRT's probes; dotnet.exe
-      crashes (access violation) after coreclr fails to load - check
-      once it loads.
+      Since then: ole32 and oleaut32 (com_test), API set redirection in
+      the loader, image sections of PE32 (IL-only) files, LoadLibraryExW
+      data-file/image-resource loads, unwind consolidation (C++ catch
+      blocks), RtlDllShutdownInProgress, thread descriptions. CoreCLR
+      starts, JITs and runs managed code: dotnet_hello now fails fast in
+      managed code - a BadImageFormatException loading an assembly (which
+      one: its message needs a culture), and the culture lookup fails:
+      without icu.dll .NET uses the Windows NLS APIs (GetLocaleInfoEx and
+      friends), which gala has for en-US only in part. Next: the NLS
+      surface .NET's CultureData uses (test first), then the bad image.
    3. PowerShell 7 on that runtime: `pwsh -NoProfile -Command ...`. On
       top of .NET it needs the console API (modes, screen buffer info,
       reading keys for the interactive prompt), the registry (read) and

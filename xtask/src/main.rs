@@ -102,6 +102,8 @@ const USER_DLLS: &[Dll] = &[
     // comctl32, powrprof, shell32, version: what the JVM imports from them.
     Dll { package: "comctl32", file: "comctl32.dll", exported_as: "testcomctl32.dll" },
     Dll { package: "powrprof", file: "powrprof.dll", exported_as: "testpowrprof.dll" },
+    Dll { package: "ole32", file: "ole32.dll", exported_as: "testole32.dll" },
+    Dll { package: "oleaut32", file: "oleaut32.dll", exported_as: "testoleaut32.dll" },
     Dll { package: "shell32", file: "shell32.dll", exported_as: "testshell32.dll" },
     Dll { package: "version", file: "version.dll", exported_as: "testversion.dll" },
     // iphlpapi, secur32, winhttp: what the JDK's net.dll imports.
@@ -157,7 +159,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_locale_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_system_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_clr_test", "ntdll.dll", "Windows/System32"),
+    ("com_test", "ntdll.dll", "Windows/System32"),
+    ("com_test", "kernel32.dll", "Windows/System32"),
+    ("com_test", "ole32.dll", "Windows/System32"),
+    ("com_test", "oleaut32.dll", "Windows/System32"),
+    ("com_test", "advapi32.dll", "Windows/System32"),
+    ("com_test", "bcryptprimitives.dll", "Windows/System32"),
     ("kernel32_clr_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_clr_test", "testdll.dll", "gala"),
     ("win32_misc_test", "ntdll.dll", "Windows/System32"),
     ("win32_misc_test", "kernel32.dll", "Windows/System32"),
     ("win32_misc_test", "advapi32.dll", "Windows/System32"),
@@ -368,6 +377,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "mswsock.dll", "Windows/System32"),
     ("dotnet", "bcryptprimitives.dll", "Windows/System32"),
     ("dotnet", "version.dll", "Windows/System32"),
+    ("dotnet", "ole32.dll", "Windows/System32"),
+    ("dotnet", "oleaut32.dll", "Windows/System32"),
     ("dotnet", "shell32.dll", "Windows/System32"),
     ("dotnet", "winmm.dll", "Windows/System32"),
     ("dotnet", "msvcrt.dll", "Windows/System32"),
@@ -643,6 +654,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_locale_test",
     "kernel32_system_test",
     "kernel32_clr_test",
+    "com_test",
     "advapi32_test",
     "win32_misc_test",
     "kernel32_pool_test",
@@ -1381,6 +1393,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=advapi32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["advapi32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (.NET): the COM basics CoreCLR imports (ole32, oleaut32).
+        name: "com_test",
+        cmdline: "qemu_exit run=com_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["com_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (.NET): what CoreCLR imports from kernel32.
