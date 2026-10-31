@@ -9,8 +9,7 @@ msvcrt.dll, ws2_32.dll and other system DLLs, so that `.exe` files built
 for Windows - by MSVC-style toolchains, mingw-w64, Go or Rust - run on it
 as they are.
 
-The source is public so that it can be read; it is not open source. No
-license is granted (see [License](#license) below).
+The source is public so that it can be read; it is not licensed under any open source license (see [License](#license) below).
 
 It is written clean-room: from public documentation, headers, open-source
 reimplementations and black-box behaviour of Windows only, never from
