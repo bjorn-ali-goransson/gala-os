@@ -641,7 +641,17 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       (NtCreateKeyedEvent, NtWaitForKeyedEvent, NtReleaseKeyedEvent) at
       run time. Next: keyed events in the kernel (test first), then
       whatever the HTTP and transport listeners need.
-   5. FileZilla: the client is a GUI program (wxWidgets), out of reach
+   5. SQL Server (asked for 2026-10-31): start with SQL Server Express
+      LocalDB, the small edition that runs sqlservr.exe as an ordinary
+      process started on demand (no Windows service), queried with a
+      client of ours over a named pipe or TCP. Hurdles to survey first:
+      it ships as an MSI (gala has no Windows Installer: unpack the MSI's
+      files at build time instead, as for the zips), SQLOS uses much of
+      the Win32 surface (memory, threads, fibers, I/O completion, the
+      registry), and the download's checksum and license terms must be
+      recorded. Full Express (a service) would also need a service
+      control manager.
+   6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to
       browsers, so the installer has to be supplied by hand.
