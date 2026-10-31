@@ -403,6 +403,7 @@ fn main() -> ExitCode {
         Some("report") => gala_report(release),
         Some("docker-test") => docker_test(&args[1..]),
         Some("screenshot") => screenshot(release, &args[1..]),
+        Some("iso") => iso(release, &args[1..]),
         Some("serve") => serve(release, &args[1..]),
         Some("um-test") => um_test(release),
         Some("bench") => {
@@ -2486,6 +2487,89 @@ fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
     judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial)
 }
 
+/// Boot modules for an ISO with kernel command line `cmdline`: gala's
+/// system DLLs in System32 (programs may look only there), the test DLLs
+/// next to the programs, Nginx's files if it runs, and `scenario`'s files
+/// from the repository (scripts, archives) if one is named.
+fn image_modules(
+    cmdline: &[&str],
+    scenario: Option<&str>,
+) -> Result<Vec<(&'static str, &'static str)>> {
+    let mut modules: Vec<(&str, &str)> = USER_DLLS
+        .iter()
+        .map(|d| (d.file, if d.file.starts_with("testdll") { "gala" } else { "Windows/System32" }))
+        .collect();
+    if cmdline.iter().any(|w| w.contains("nginx.exe")) {
+        let nginx = if cmdline.iter().any(|w| w.contains("nginx-master")) {
+            "nginx_master"
+        } else if cmdline.iter().any(|w| w.contains("nginx-tls")) {
+            "nginx_tls"
+        } else {
+            "nginx"
+        };
+        modules.extend(extra_modules(nginx).into_iter().filter(|(file, _)| file.contains('/')));
+    }
+    if let Some(scenario) = scenario {
+        let files = extra_modules(scenario);
+        if files.is_empty() {
+            return Err(format!("no scenario {scenario:?} with extra modules"));
+        }
+        modules.extend(files.into_iter().filter(|(file, _)| file.contains('/')));
+    }
+    Ok(modules)
+}
+
+/// What `cargo xtask iso` runs without a command line: a few programs that
+/// show the C runtime-free, Rust and Go layers on any machine.
+const DEMO_CMDLINE: &str = "run=hello.exe,go_hello.exe,go_goroutines.exe";
+
+/// `cargo xtask iso [--name N] [--scenario S] [--file PATH[=DIR]]...
+/// [kernel cmdline...]`: a bootable hybrid ISO (BIOS and UEFI; written as
+/// is to a USB stick, it boots too) with every program and DLL, `S`'s
+/// files, the host files given, and the command line (`S`'s, or
+/// DEMO_CMDLINE if none). Prints where it is.
+fn iso(release: bool, args: &[String]) -> Result {
+    let mut name = String::from("demo");
+    let mut cmdline = Vec::new();
+    let mut scenario: Option<String> = None;
+    // --file PATH[=DIR]: a file of the host's, as C:\DIR\<its name> (DIR
+    // gala by default).
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut it = args.iter().filter(|a| *a != "--release");
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--name" => name = it.next().ok_or("--name needs a value")?.clone(),
+            "--scenario" => scenario = Some(it.next().ok_or("--scenario needs a name")?.clone()),
+            "--file" => {
+                let spec = it.next().ok_or("--file needs a path")?;
+                let (path, dir) = spec.split_once('=').unwrap_or((spec, "gala"));
+                let full = fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))?;
+                files.push((full.display().to_string(), dir.to_string()));
+            }
+            _ => cmdline.push(arg.as_str()),
+        }
+    }
+    if cmdline.is_empty() && scenario.is_none() {
+        cmdline.push(DEMO_CMDLINE);
+    }
+    if let Some(s) = scenario.as_deref().filter(|_| cmdline.is_empty()) {
+        // The scenario's own command line, without the test-only exit.
+        let found = SCENARIOS.iter().find(|x| x.name == s).ok_or(format!("no scenario {s:?}"))?;
+        cmdline.extend(found.cmdline.split_whitespace().filter(|w| *w != "qemu_exit"));
+    }
+    build_kernel(release)?;
+    let mut modules: Vec<(&str, &str)> = image_modules(&cmdline, scenario.as_deref())?;
+    modules.extend(files.iter().map(|(path, dir)| (path.as_str(), dir.as_str())));
+    let path = make_iso(release, &format!("gala-{name}"), &cmdline.join(" "), &modules)?;
+    println!("xtask: wrote {} (kernel command line: {})", path.display(), cmdline.join(" "));
+    println!("xtask: QEMU: qemu-system-x86_64 -cpu max -m 1G -smp 2 -cdrom {}", path.display());
+    println!(
+        "xtask: USB stick (erases it): sudo dd if={} of=/dev/sdX bs=4M conv=fsync",
+        path.display()
+    );
+    Ok(())
+}
+
 /// Boots an ISO with the given kernel command line (all test programs and
 /// test DLLs as boot modules, ntdll in System32) and saves the screen as
 /// PNG at each requested time, through QEMU's monitor (`screendump`).
@@ -2514,32 +2598,7 @@ fn screenshot(release: bool, args: &[String]) -> Result {
         }
     }
     build_kernel(release)?;
-    // gala's system DLLs in System32 (programs may look only there), the
-    // test DLLs next to the programs.
-    // Every gala DLL is a system DLL except the test DLLs (testdll*.dll).
-    let mut modules: Vec<(&str, &str)> = USER_DLLS
-        .iter()
-        .map(|d| (d.file, if d.file.starts_with("testdll") { "gala" } else { "Windows/System32" }))
-        .collect();
-    // Programs shipped from the repository (Nginx and its files).
-    if cmdline.iter().any(|w| w.contains("nginx.exe")) {
-        let scenario = if cmdline.iter().any(|w| w.contains("nginx-master")) {
-            "nginx_master"
-        } else if cmdline.iter().any(|w| w.contains("nginx-tls")) {
-            "nginx_tls"
-        } else {
-            "nginx"
-        };
-        modules.extend(extra_modules(scenario).into_iter().filter(|(file, _)| file.contains('/')));
-    }
-    // --scenario S: S's files from the repository too (scripts, archives).
-    if let Some(scenario) = &with_files {
-        let files = extra_modules(scenario);
-        if files.is_empty() {
-            return Err(format!("no scenario {scenario:?} with extra modules"));
-        }
-        modules.extend(files.into_iter().filter(|(file, _)| file.contains('/')));
-    }
+    let modules = image_modules(&cmdline, with_files.as_deref())?;
     let iso = make_iso(release, &format!("shot-{name}"), &cmdline.join(" "), &modules)?;
     let dir = target_dir().join("screenshots");
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;

@@ -212,6 +212,18 @@ to gala's numbers. For where time goes inside the kernel:
 `XTASK_EVENTS=syscall cargo xtask boot-test bench`, then group the
 `events.jsonl` lines by `name` and look at `ns`.
 
+## Bootable images and USB sticks
+
+`cargo xtask iso [--name N] [--scenario S] [--file PATH[=DIR]]... [cmdline...]`
+writes `target/<profile>/gala-<N>.iso` with every program and DLL, a
+scenario's files and command line (without `qemu_exit`), host files as
+`C:\DIR\<name>`, or a demo (hello, go_hello, go_goroutines). The ISO is
+hybrid, so `dd` to a USB stick boots on BIOS and UEFI (README.md has the
+steps). Checked by hand in QEMU: `-drive file=...,format=raw` under
+SeaBIOS and OVMF, and as `usb-storage` behind `qemu-xhci`. Use `-cpu max`
+in manual QEMU runs: QEMU's default CPU model has no RDRAND, and Go
+programs then fail fast (0xc0000409, ledger: ProcessPrng(no RDRAND)).
+
 ## Screenshots
 
 `cargo xtask screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]`
