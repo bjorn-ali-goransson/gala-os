@@ -219,6 +219,29 @@ pub extern "system" fn GetFileVersionInfoW(
     1
 }
 
+/// GetFileVersionInfoSizeExW / GetFileVersionInfoExW: the flags choose
+/// between localized (MUI) and neutral resources and whether to resolve
+/// the path; gala has no MUI files, so both read the file's own resource.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFileVersionInfoSizeExW(
+    _flags: u32,
+    path: *const u16,
+    handle: *mut u32,
+) -> u32 {
+    GetFileVersionInfoSizeW(path, handle)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFileVersionInfoExW(
+    _flags: u32,
+    path: *const u16,
+    handle: u32,
+    length: u32,
+    data: *mut u8,
+) -> i32 {
+    GetFileVersionInfoW(path, handle, length, data)
+}
+
 /// A path in UTF-16 from an ANSI (UTF-8) one; None if too long.
 fn widen(s: *const u8, out: &mut [u16; 520]) -> Option<*const u16> {
     if s.is_null() {

@@ -1273,3 +1273,36 @@ pub extern "system" fn DuplicateTokenEx(
 pub extern "system" fn SetThreadToken(_thread: *mut usize, _token: usize) -> i32 {
     1
 }
+
+/// GetSidSubAuthorityCount: the count byte inside the SID (no checks, as
+/// documented; the caller passes a valid SID).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSidSubAuthorityCount(sid: *mut u8) -> *mut u8 {
+    sid.wrapping_add(1)
+}
+
+/// GetSidSubAuthority: the subauthority's place inside the SID.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSidSubAuthority(sid: *mut u8, index: u32) -> *mut u32 {
+    sid.wrapping_add(8 + 4 * index as usize).cast()
+}
+
+/// RevertToSelf: threads never impersonate here (see SetThreadToken).
+#[unsafe(no_mangle)]
+pub extern "system" fn RevertToSelf() -> i32 {
+    1
+}
+
+/// SetKernelObjectSecurity: objects keep no security descriptors here;
+/// a valid one is accepted (recorded) and nothing is enforced.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetKernelObjectSecurity(handle: usize, _info: u32, sd: *const u8) -> i32 {
+    if handle == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if IsValidSecurityDescriptor(sd) == 0 {
+        return fail(ERROR_INVALID_SECURITY_DESCR, 0);
+    }
+    missing(b"advapi32.dll!SetKernelObjectSecurity(not kept)");
+    1
+}

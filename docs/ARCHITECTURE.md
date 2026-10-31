@@ -825,8 +825,12 @@ Windows, never shadows the system's DLLs.)
   (S-1-5-21-...-1001) and the well-known accounts, and has a stand-in
   process token (OpenProcessToken duplicates the process handle; the
   token functions describe a standard user). Nothing is enforced and
-  files keep no descriptors (SetFileSecurity succeeds, recorded). The
-  registry is empty (keys not found, predefined keys without subkeys).
+  files keep no descriptors (SetFileSecurity and SetKernelObjectSecurity
+  succeed, recorded). The registry is empty (keys not found, predefined
+  keys without subkeys; RegGetValueW checks its flags first). ETW
+  providers (etw.rs) register, but no trace session exists, so no
+  provider is ever enabled and events go nowhere, successfully (as on
+  Windows with no listener; not recorded).
 - **iphlpapi/secur32/winhttp** (what the JDK's net.dll imports): network
   adapter tables, ICMP echo, SSPI and WinHTTP sessions are not supported
   (documented failures, recorded); ConvertLengthToIpv4Mask is computed and
@@ -837,7 +841,14 @@ Windows, never shadows the system's DLLs.)
   environment (SHGetFolderPathW, SHGetKnownFolderPath), version resources
   read from PE files and walked (GetFileVersionInfo*, VerQueryValue*),
   processor power information (base frequency from CPUID 0x16), and
-  InitCommonControlsEx.
+  InitCommonControlsEx. The Ex forms of GetFileVersionInfo(Size) ignore
+  the MUI flags (no MUI files). user32's LoadStringW/A read RT_STRING
+  blocks (16 counted strings each) through kernel32's resource functions.
+- **Resources** (kernel32 resource.rs): FindResource(Ex)A/W walk the
+  image's resource directory (type, name, language; ids, case-insensitive
+  names, "#n"); an HRSRC is the data entry's address, LoadResource and
+  LockResource give the data inside the mapped image. The manifest read
+  for the reported version uses the same walk.
 - **kernel32** implements Win32 functions on top of ntdll's exports
   (imported with `raw-dylib`): failures return the documented failure
   value and set the last error (TEB+0x68) from the NTSTATUS. So far:

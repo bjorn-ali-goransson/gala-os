@@ -36,6 +36,7 @@ unsafe extern "system" {
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
 }
 
+mod etw;
 mod security;
 
 /// The C runtime's marker that floating point is used (the linker wants
@@ -178,6 +179,31 @@ pub extern "system" fn RegQueryValueExA(
     _size: *mut u32,
 ) -> i32 {
     missing(b"advapi32.dll!RegQueryValueExA");
+    if predefined(key) { ERROR_FILE_NOT_FOUND } else { ERROR_INVALID_HANDLE }
+}
+
+/// RegGetValueW: the flags must allow some type (RRF_RT_*), and data
+/// needs a size; then the key (or value) is not there, as for
+/// RegOpenKeyExW and RegQueryValueExW.
+#[unsafe(no_mangle)]
+pub extern "system" fn RegGetValueW(
+    key: usize,
+    _subkey: *const u16,
+    _value: *const u16,
+    flags: u32,
+    kind: *mut u32,
+    data: *mut c_void,
+    size: *mut u32,
+) -> i32 {
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    if flags & 0xffff == 0 || (!data.is_null() && size.is_null()) {
+        return ERROR_INVALID_PARAMETER;
+    }
+    missing(b"advapi32.dll!RegGetValueW");
+    if !kind.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *kind = 0 };
+    }
     if predefined(key) { ERROR_FILE_NOT_FOUND } else { ERROR_INVALID_HANDLE }
 }
 

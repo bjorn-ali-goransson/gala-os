@@ -16,6 +16,19 @@ unsafe extern "C" {
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn WaitForMultipleObjects(count: u32, handles: *const usize, all: i32, ms: u32) -> u32;
+    fn FindResourceExW(module: usize, kind: usize, name: usize, lang: u16) -> usize;
+    fn LoadResource(module: usize, res: usize) -> *const u16;
+    fn SizeofResource(module: usize, res: usize) -> u32;
+    fn WideCharToMultiByte(
+        cp: u32,
+        flags: u32,
+        w: *const u16,
+        n: i32,
+        s: *mut u8,
+        m: i32,
+        default: *const u8,
+        used: *mut i32,
+    ) -> i32;
 }
 
 // ---- Messages and windows: gala has no windows, so no messages ----
@@ -220,5 +233,76 @@ pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved:
 fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {
         core::hint::spin_loop();
+    }
+}
+
+/// String `id` of the module's string table: RT_STRING block id / 16 + 1
+/// holds 16 counted UTF-16 strings (ids 16 * (block - 1) and up), as the
+/// resource format documents. Its text (not terminated), or None.
+fn string_resource(module: usize, id: u32) -> Option<&'static [u16]> {
+    let block = (id >> 4) as usize + 1;
+    // SAFETY: plain calls; the resource's words inside the mapped image.
+    unsafe {
+        let res = FindResourceExW(module, 6, block & 0xffff, 0); // RT_STRING
+        if res == 0 {
+            return None;
+        }
+        let data = LoadResource(module, res);
+        let words = SizeofResource(module, res) as usize / 2;
+        let block = core::slice::from_raw_parts(data, words);
+        let mut at = 0;
+        for _ in 0..id & 15 {
+            at += 1 + usize::from(*block.get(at)?);
+        }
+        let len = usize::from(*block.get(at)?);
+        block.get(at + 1..at + 1 + len)
+    }
+}
+
+/// LoadStringW: copies the string (truncated to the buffer, terminated)
+/// and returns its length; with a zero-sized buffer, stores a read-only
+/// pointer to the resource's own text instead. 0 when there is none.
+#[unsafe(no_mangle)]
+pub extern "system" fn LoadStringW(instance: usize, id: u32, buf: *mut u16, max: i32) -> i32 {
+    if buf.is_null() {
+        return 0;
+    }
+    let text = string_resource(instance, id).unwrap_or(&[]);
+    // SAFETY: the caller's buffer of `max` characters (or a pointer's place).
+    unsafe {
+        if max == 0 {
+            *buf.cast::<*const u16>() =
+                if text.is_empty() { core::ptr::null() } else { text.as_ptr() };
+            return text.len() as i32;
+        }
+        let n = text.len().min(max as usize - 1);
+        core::ptr::copy_nonoverlapping(text.as_ptr(), buf, n);
+        *buf.add(n) = 0;
+        n as i32
+    }
+}
+
+/// LoadStringA: the string in the ANSI code page, truncated to the buffer.
+#[unsafe(no_mangle)]
+pub extern "system" fn LoadStringA(instance: usize, id: u32, buf: *mut u8, max: i32) -> i32 {
+    if buf.is_null() || max <= 0 {
+        return 0;
+    }
+    let text = string_resource(instance, id).unwrap_or(&[]);
+    // SAFETY: the caller's buffer of `max` bytes.
+    unsafe {
+        let n = WideCharToMultiByte(
+            0,
+            0,
+            text.as_ptr(),
+            text.len() as i32,
+            buf,
+            max - 1,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+        )
+        .max(0);
+        *buf.add(n as usize) = 0;
+        n
     }
 }

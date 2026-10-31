@@ -16,6 +16,12 @@
 //!   ERROR_NO_SUCH_PRIVILEGE), AdjustTokenPrivileges of a privilege a
 //!   standard user does not hold (TRUE with ERROR_NOT_ALL_ASSIGNED).
 //! - CryptAcquireContextA with CRYPT_VERIFYCONTEXT.
+//! - What the .NET runtime uses: RegGetValueW (a missing key,
+//!   ERROR_INVALID_PARAMETER without a type restriction or with data but
+//!   no size), GetSidSubAuthority(Count), RevertToSelf without
+//!   impersonation, SetKernelObjectSecurity with a NULL DACL, ETW
+//!   providers (EventRegister, EventEnabled, EventWrite(Transfer),
+//!   EventUnregister) with no session listening.
 //!
 //! Prints `advapi32_test: ok` or exits with the number of the failing
 //! check.
@@ -151,6 +157,37 @@ unsafe extern "system" {
         new: *mut Handle,
     ) -> Bool;
     fn SetThreadToken(thread: *mut Handle, token: Handle) -> Bool;
+    fn RegGetValueW(
+        key: usize,
+        subkey: *const u16,
+        value: *const u16,
+        flags: u32,
+        kind: *mut u32,
+        data: *mut c_void,
+        size: *mut u32,
+    ) -> i32;
+    fn GetSidSubAuthorityCount(sid: *const u8) -> *mut u8;
+    fn GetSidSubAuthority(sid: *const u8, index: u32) -> *mut u32;
+    fn RevertToSelf() -> Bool;
+    fn SetKernelObjectSecurity(handle: Handle, info: u32, sd: *const u8) -> Bool;
+    fn EventRegister(
+        provider: *const [u8; 16],
+        callback: *const c_void,
+        context: *mut c_void,
+        handle: *mut u64,
+    ) -> u32;
+    fn EventWrite(handle: u64, descriptor: *const [u8; 16], count: u32, data: *const c_void)
+    -> u32;
+    fn EventWriteTransfer(
+        handle: u64,
+        descriptor: *const [u8; 16],
+        activity: *const [u8; 16],
+        related: *const [u8; 16],
+        count: u32,
+        data: *const c_void,
+    ) -> u32;
+    fn EventEnabled(handle: u64, descriptor: *const [u8; 16]) -> u8;
+    fn EventUnregister(handle: u64) -> u32;
 }
 
 #[allow(dead_code)]
@@ -607,12 +644,114 @@ fn more(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// What the .NET runtime (hostfxr, CoreCLR) uses.
+fn clr(c: &mut Checks) -> Result<(), u32> {
+    const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;
+    const RRF_RT_REG_SZ: u32 = 2;
+    const ERROR_FILE_NOT_FOUND: u64 = 2;
+    const ERROR_INVALID_PARAMETER: u64 = 87;
+    // SAFETY: advapi32 calls with buffers of ours.
+    unsafe {
+        // RegGetValueW: a key that does not exist; no type restriction.
+        let key = w("SOFTWARE\\gala-test\\no-such-key");
+        let value = w("InstallLocation");
+        let mut buf = [0u16; 64];
+        let mut size = 128u32;
+        let r = RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            core::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            &mut size,
+        );
+        c.eq(r as u64, ERROR_FILE_NOT_FOUND)?;
+        let null = core::ptr::null_mut();
+        let r = RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            value.as_ptr(),
+            0,
+            null,
+            null.cast(),
+            null,
+        );
+        c.eq(r as u64, ERROR_INVALID_PARAMETER)?;
+        // Data without a size.
+        let r = RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            null,
+            buf.as_mut_ptr().cast(),
+            core::ptr::null_mut(),
+        );
+        c.eq(r as u64, ERROR_INVALID_PARAMETER)?;
+
+        // S-1-5-32-544: two subauthorities, 32 and 544.
+        let mut admins = core::ptr::null_mut();
+        AllocateAndInitializeSid(&NT_AUTHORITY, 2, 32, 544, 0, 0, 0, 0, 0, 0, &mut admins);
+        c.eq((*GetSidSubAuthorityCount(admins)).into(), 2)?;
+        c.eq((*GetSidSubAuthority(admins, 0)).into(), 32)?;
+        c.eq((*GetSidSubAuthority(admins, 1)).into(), 544)?;
+        *GetSidSubAuthority(admins, 1) = 545; // writable: it is the SID's own
+        let mut text = core::ptr::null_mut();
+        ConvertSidToStringSidW(admins, &mut text);
+        c.text(text, "S-1-5-32-545")?;
+        LocalFree(text.cast());
+        FreeSid(admins);
+
+        // Not impersonating: RevertToSelf succeeds all the same.
+        c.ok(RevertToSelf() != 0, GetLastError().into())?;
+
+        // A NULL DACL on this process (full access to everyone).
+        let mut sd = [0u64; 5];
+        InitializeSecurityDescriptor(sd.as_mut_ptr().cast(), 1);
+        SetSecurityDescriptorDacl(sd.as_mut_ptr().cast(), 1, core::ptr::null_mut(), 0);
+        c.ok(
+            SetKernelObjectSecurity(GetCurrentProcess(), 4, sd.as_ptr().cast()) != 0,
+            GetLastError().into(),
+        )?; // DACL_SECURITY_INFORMATION
+
+        // ETW: registering a provider works without a listening session;
+        // events then go nowhere, successfully.
+        let provider = [
+            0x6e, 0x2c, 0x4d, 0x52, 0x9a, 0x3b, 0x4f, 0x41, 0x8a, 0x55, 0x1c, 0x6d, 0x0e, 0x7f,
+            0x3a, 0x21,
+        ];
+        let mut handle = 0u64;
+        c.eq(
+            EventRegister(&provider, core::ptr::null(), core::ptr::null_mut(), &mut handle).into(),
+            0,
+        )?;
+        c.ok(handle != 0, 0)?;
+        let descriptor = [1, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // id 1, level 4
+        c.eq(EventEnabled(handle, &descriptor).into(), 0)?;
+        c.eq(EventWrite(handle, &descriptor, 0, core::ptr::null()).into(), 0)?;
+        let activity = [7u8; 16];
+        let r = EventWriteTransfer(
+            handle,
+            &descriptor,
+            &activity,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+        );
+        c.eq(r.into(), 0)?;
+        c.eq(EventUnregister(handle).into(), 0)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     sids(&mut c)?;
     acls(&mut c)?;
     token(&mut c)?;
-    more(&mut c)
+    more(&mut c)?;
+    clr(&mut c)
 }
 
 #[unsafe(no_mangle)]

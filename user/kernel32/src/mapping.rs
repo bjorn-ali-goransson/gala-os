@@ -389,7 +389,7 @@ pub extern "system" fn SetEnvironmentVariableA(name: *const u8, value: *const u8
 }
 
 /// The PEB's ImageBaseAddress.
-fn image_base() -> Handle {
+pub(crate) fn image_base() -> Handle {
     // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress is at +0x10.
     unsafe { *((teb_u64(0x60) as usize + 0x10) as *const Handle) }
 }
@@ -475,42 +475,10 @@ pub(crate) fn reported_version() -> (u32, u32, u32) {
     v
 }
 
-/// The text of the image's RT_MANIFEST resource 1 (empty if none), found
-/// through its resource directory (type 24, name 1, the first language).
+/// The text of the image's RT_MANIFEST resource 1 (empty if none).
 fn manifest_text(base: usize) -> &'static [u8] {
-    let rd32 = |a: usize| {
-        // SAFETY: inside the mapped image.
-        unsafe { (a as *const u32).read_unaligned() }
-    };
-    let rd16 = |a: usize| {
-        // SAFETY: as above.
-        unsafe { (a as *const u16).read_unaligned() }
-    };
-    let nt = base + rd32(base + 0x3c) as usize;
-    let rva = rd32(nt + 24 + 112 + 2 * 8) as usize; // IMAGE_DIRECTORY_ENTRY_RESOURCE
-    if rva == 0 {
-        return &[];
-    }
-    let root = base + rva;
-    // An entry of a directory: the one with `id`, or the first.
-    let find = |dir: usize, id: Option<u32>| -> Option<u32> {
-        let n = usize::from(rd16(dir + 12)) + usize::from(rd16(dir + 14));
-        (0..n).find_map(|i| {
-            let e = dir + 16 + 8 * i;
-            (id.is_none() || id == Some(rd32(e))).then(|| rd32(e + 4))
-        })
-    };
-    let Some(ty) = find(root, Some(24)) else { return &[] };
-    let Some(name) = find(root + (ty & 0x7fff_ffff) as usize, Some(1)) else { return &[] };
-    let Some(lang) = find(root + (name & 0x7fff_ffff) as usize, None) else { return &[] };
-    let data = root + lang as usize;
-    // SAFETY: the resource's bytes inside the mapped image.
-    unsafe {
-        core::slice::from_raw_parts(
-            (base + rd32(data) as usize) as *const u8,
-            rd32(data + 4) as usize,
-        )
-    }
+    use crate::resource::{Key, find_resource, resource_bytes};
+    find_resource(base, Key::Id(24), Key::Id(1), 0).map_or(&[], |e| resource_bytes(base, e))
 }
 
 /// GetVersionExA/W: the version reported to this program

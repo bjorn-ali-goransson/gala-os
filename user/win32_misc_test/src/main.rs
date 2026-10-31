@@ -11,9 +11,13 @@
 //! - shell32: SHGetFolderPathW and SHGetKnownFolderPath name the profile
 //!   folders the environment names (USERPROFILE, APPDATA, LOCALAPPDATA)
 //!   and the Windows directory; an unknown CSIDL is E_INVALIDARG.
-//! - version: GetFileVersionInfoSizeW of an image without a version
-//!   resource is 0; VerQueryValueW finds VS_FIXEDFILEINFO ("\") and a
-//!   child block in a VS_VERSION_INFO tree.
+//! - version: GetFileVersionInfo(Size)(Ex)W of this program's own version
+//!   resource (build.rs); VerQueryValueW finds VS_FIXEDFILEINFO ("\") and
+//!   a child block in a VS_VERSION_INFO tree.
+//! - Resources (build.rs): kernel32's FindResource(Ex)W (by id, by name
+//!   case-insensitively, "#n"; ERROR_RESOURCE_NAME/TYPE_NOT_FOUND),
+//!   LoadResource, LockResource, SizeofResource; user32's LoadStringW
+//!   (copied and terminated, truncated, the read-only pointer form).
 //!
 //! Prints `win32_misc_test: ok` or exits with the number of the failing
 //! check.
@@ -40,6 +44,12 @@ unsafe extern "system" {
     fn GetModuleFileNameW(module: Handle, buf: *mut u16, size: u32) -> u32;
     fn GetSystemInfo(info: *mut u8);
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+    fn GetModuleHandleW(name: *const u16) -> Handle;
+    fn FindResourceW(module: Handle, name: *const u16, kind: *const u16) -> Handle;
+    fn FindResourceExW(module: Handle, kind: *const u16, name: *const u16, lang: u16) -> Handle;
+    fn LoadResource(module: Handle, res: Handle) -> Handle;
+    fn LockResource(data: Handle) -> *const u8;
+    fn SizeofResource(module: Handle, res: Handle) -> u32;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
@@ -52,6 +62,7 @@ unsafe extern "system" {
         len: u32,
         needed: *mut u32,
     ) -> Bool;
+    fn LoadStringW(instance: Handle, id: u32, buf: *mut u16, max: i32) -> i32;
 }
 
 #[link(name = "ws2_32", kind = "raw-dylib")]
@@ -98,6 +109,14 @@ unsafe extern "system" {
 #[link(name = "version", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetFileVersionInfoSizeW(path: *const u16, handle: *mut u32) -> u32;
+    fn GetFileVersionInfoSizeExW(flags: u32, path: *const u16, handle: *mut u32) -> u32;
+    fn GetFileVersionInfoExW(
+        flags: u32,
+        path: *const u16,
+        handle: u32,
+        len: u32,
+        data: *mut c_void,
+    ) -> Bool;
     fn VerQueryValueW(
         block: *const c_void,
         sub: *const u16,
@@ -177,6 +196,17 @@ impl Checks {
 
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
+    }
+
+    /// The NUL-terminated UTF-16 string at `p` is `want`.
+    fn text(&mut self, p: *const u16, want: &str) -> Result<(), u32> {
+        // SAFETY: a NUL-terminated string the system wrote.
+        let same = unsafe {
+            want.bytes().enumerate().all(|(i, b)| *p.add(i) == u16::from(b))
+                && *p.add(want.len()) == 0
+        };
+        // SAFETY: as above.
+        self.ok(same, unsafe { *p }.into())
     }
 }
 
@@ -392,8 +422,24 @@ fn version(c: &mut Checks) -> Result<(), u32> {
     unsafe {
         let mut me = [0u16; 260];
         GetModuleFileNameW(core::ptr::null_mut(), me.as_mut_ptr(), 260);
+        // This program's own VS_VERSION_INFO (build.rs): file version 1.2.3.4.
         let mut handle = 7;
-        c.eq(GetFileVersionInfoSizeW(me.as_ptr(), &mut handle).into(), 0)?;
+        let size = GetFileVersionInfoSizeW(me.as_ptr(), &mut handle);
+        c.ok((92..=1024).contains(&size), size.into())?;
+        c.eq(handle.into(), 0)?;
+        let size_ex = GetFileVersionInfoSizeExW(2, me.as_ptr(), &mut handle); // FILE_VER_GET_NEUTRAL
+        c.eq(size_ex.into(), size.into())?;
+        let mut data = [0u32; 256];
+        c.ok(
+            GetFileVersionInfoExW(2, me.as_ptr(), 0, size, data.as_mut_ptr().cast()) != 0,
+            GetLastError().into(),
+        )?;
+        let (mut p, mut len) = (core::ptr::null_mut(), 0u32);
+        let root = w("\\");
+        c.ok(VerQueryValueW(data.as_ptr().cast(), root.as_ptr(), &mut p, &mut len) != 0, 0)?;
+        c.eq(len.into(), 52)?;
+        c.eq((*(p as *const u32).add(2)).into(), 0x0001_0002)?;
+        c.eq((*(p as *const u32).add(3)).into(), 0x0003_0004)?;
 
         let mut block = [0u16; 128];
         version_block(&mut block);
@@ -413,11 +459,65 @@ fn version(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// MAKEINTRESOURCE.
+fn int_resource(id: u16) -> *const u16 {
+    id as usize as *const u16
+}
+
+/// This program's resources (build.rs): FindResource(Ex)W, LoadResource,
+/// LockResource, SizeofResource; LoadStringW.
+fn resources(c: &mut Checks) -> Result<(), u32> {
+    const RT_STRING: u16 = 6;
+    const RT_RCDATA: u16 = 10;
+    const ERROR_RESOURCE_TYPE_NOT_FOUND: u64 = 1813;
+    const ERROR_RESOURCE_NAME_NOT_FOUND: u64 = 1814;
+    // SAFETY: plain calls with buffers of ours.
+    unsafe {
+        let me = GetModuleHandleW(core::ptr::null());
+        // A named resource of a numbered type; names match case-insensitively.
+        let name = w("GalaData");
+        let res = FindResourceW(core::ptr::null_mut(), name.as_ptr(), int_resource(RT_RCDATA));
+        c.ok(!res.is_null(), GetLastError().into())?;
+        c.eq(SizeofResource(me, res).into(), 14)?;
+        let data = LockResource(LoadResource(me, res));
+        c.ok(!data.is_null(), 0)?;
+        c.eq(memcmp(data, b"hello resource".as_ptr(), 14) as u64, 0)?;
+        // "#7" names id 7.
+        let seven = w("#7");
+        let res = FindResourceExW(me, int_resource(RT_STRING), seven.as_ptr(), 0);
+        c.ok(!res.is_null(), GetLastError().into())?;
+        // Not there.
+        let res = FindResourceW(me, int_resource(99), int_resource(RT_STRING));
+        c.ok(res.is_null(), 0)?;
+        c.eq(GetLastError().into(), ERROR_RESOURCE_NAME_NOT_FOUND)?;
+        let res = FindResourceW(me, int_resource(1), int_resource(77));
+        c.ok(res.is_null(), 0)?;
+        c.eq(GetLastError().into(), ERROR_RESOURCE_TYPE_NOT_FOUND)?;
+
+        // LoadStringW: copies and terminates; truncates to the buffer.
+        let mut buf = [0xffffu16; 32];
+        c.eq(LoadStringW(me, 101, buf.as_mut_ptr(), 32) as u64, 11)?;
+        c.text(buf.as_ptr(), "gala string")?;
+        c.eq(LoadStringW(me, 102, buf.as_mut_ptr(), 4) as u64, 3)?;
+        c.text(buf.as_ptr(), "sec")?;
+        // A zero-sized buffer: a read-only pointer to the resource's own
+        // text (not terminated), and its length.
+        let mut text: *const u16 = core::ptr::null();
+        c.eq(LoadStringW(me, 101, (&mut text as *mut *const u16).cast(), 0) as u64, 11)?;
+        c.ok(!text.is_null() && *text == u16::from(b'g') && *text.add(10) == u16::from(b'g'), 0)?;
+        // An empty or absent string: 0.
+        c.eq(LoadStringW(me, 100, buf.as_mut_ptr(), 32) as u64, 0)?;
+        c.eq(LoadStringW(me, 4000, buf.as_mut_ptr(), 32) as u64, 0)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     user32_ws2(&mut c)?;
     shell(&mut c)?;
-    version(&mut c)
+    version(&mut c)?;
+    resources(&mut c)
 }
 
 #[unsafe(no_mangle)]

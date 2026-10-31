@@ -30,6 +30,7 @@ mod messages;
 mod pipe;
 mod pool;
 mod process;
+mod resource;
 mod sync;
 mod sysmem;
 mod text;
