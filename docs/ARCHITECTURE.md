@@ -921,6 +921,13 @@ Windows, never shadows the system's DLLs.)
   "Stack overflow."). No processor time is accounted yet (TODO):
   GetSystemTimes reports every processor idle since boot, thread times
   are zero.
+- **Calendars and NLS search** (kernel32 calendar.rs, locale.rs): the
+  en-US localized Gregorian calendar (calendar 1) for GetCalendarInfoEx/W
+  and EnumCalendarInfoExEx (names, formats, eras, the two-digit year
+  window 2049), the en-US time and date format lists (EnumTimeFormatsEx,
+  EnumDateFormatsExEx), FindNLSStringEx (prefix, suffix, first and last
+  occurrence, compared code unit by code unit with simple case folding;
+  linguistic equivalences are recorded).
 - **Activation contexts** (kernel32 actctx.rs): CreateActCtxW checks
   that the manifest exists (an RT_MANIFEST resource of the module or PE
   file, or a manifest file) and returns a reference-counted handle;

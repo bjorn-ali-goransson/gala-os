@@ -246,7 +246,7 @@ pub extern "system" fn GetLocaleInfoEx(
     GetLocaleInfoW(LANG_EN_US, kind, buf, size)
 }
 
-fn is_en_us(name: &[u16]) -> bool {
+pub(crate) fn is_en_us(name: &[u16]) -> bool {
     name.len() == 5
         && name
             .iter()
@@ -1096,4 +1096,94 @@ pub extern "system" fn GetProcessPreferredUILanguages(
     len: *mut u32,
 ) -> Bool {
     preferred_ui_languages(flags, count, buf, len)
+}
+
+/// One UTF-16 code unit folded for a case-insensitive comparison (simple
+/// lowercase mapping inside the BMP).
+fn fold(c: u16) -> u16 {
+    match char::from_u32(c.into()) {
+        Some(ch) => {
+            let mut lower = ch.to_lowercase();
+            match (lower.next(), lower.next()) {
+                (Some(l), None) if (l as u32) < 0x1_0000 => l as u16,
+                _ => c,
+            }
+        }
+        None => c,
+    }
+}
+
+/// The caller's string: `len` code units, or NUL-terminated for -1.
+fn counted<'a>(p: *const u16, len: i32) -> &'a [u16] {
+    if p.is_null() {
+        return &[];
+    }
+    if len < 0 {
+        return wide_slice(p);
+    }
+    // SAFETY: the caller's `len` code units.
+    unsafe { core::slice::from_raw_parts(p, len as usize) }
+}
+
+/// FindNLSStringEx: FIND_STARTSWITH, FIND_ENDSWITH, FIND_FROMSTART or
+/// FIND_FROMEND, case-insensitively with NORM_IGNORECASE or
+/// LINGUISTIC_IGNORECASE; the index found (-1 if none) and its length.
+/// Strings are compared code unit by code unit (no linguistic
+/// equivalences; flags asking for them are recorded).
+#[unsafe(no_mangle)]
+pub extern "system" fn FindNLSStringEx(
+    locale: *const u16,
+    flags: u32,
+    source: *const u16,
+    source_len: i32,
+    value: *const u16,
+    value_len: i32,
+    found: *mut i32,
+    _version: *mut c_void,
+    _reserved: *mut c_void,
+    _handle: isize,
+) -> i32 {
+    const STARTS: u32 = 0x10_0000;
+    const ENDS: u32 = 0x20_0000;
+    const FROM_START: u32 = 0x40_0000;
+    const FROM_END: u32 = 0x80_0000;
+    const IGNORE_CASE: u32 = 0x1 | 0x10;
+    if !locale.is_null() && !is_en_us(wide_slice(locale)) && !wide_slice(locale).is_empty() {
+        return fail_with(ERROR_INVALID_PARAMETER, -1);
+    }
+    let mode = flags & (STARTS | ENDS | FROM_START | FROM_END);
+    if source.is_null() || value.is_null() || mode.count_ones() != 1 {
+        return fail_with(ERROR_INVALID_PARAMETER, -1);
+    }
+    // NORM_IGNORENONSPACE, NORM_IGNORESYMBOLS, LINGUISTIC_IGNOREDIACRITIC,
+    // kana and width: equivalences gala does not make.
+    if flags & (0x2 | 0x4 | 0x20 | 0x1_0000 | 0x2_0000) != 0 {
+        unsupported(b"kernel32.dll!FindNLSStringEx(flags)", flags.into());
+    }
+    let (src, val) = (counted(source, source_len), counted(value, value_len));
+    let fold_case = flags & IGNORE_CASE != 0;
+    let same =
+        |a: &[u16]| a.iter().zip(val).all(|(&x, &y)| x == y || (fold_case && fold(x) == fold(y)));
+    let at = if val.len() > src.len() {
+        None
+    } else {
+        let last = src.len() - val.len();
+        match mode {
+            STARTS => same(&src[..val.len()]).then_some(0),
+            ENDS => same(&src[last..]).then_some(last),
+            FROM_START => (0..=last).find(|&i| same(&src[i..i + val.len()])),
+            _ => (0..=last).rev().find(|&i| same(&src[i..i + val.len()])),
+        }
+    };
+    SetLastError(0);
+    match at {
+        Some(i) => {
+            if !found.is_null() {
+                // SAFETY: the caller's output.
+                unsafe { *found = val.len() as i32 };
+            }
+            i as i32
+        }
+        None => -1,
+    }
 }

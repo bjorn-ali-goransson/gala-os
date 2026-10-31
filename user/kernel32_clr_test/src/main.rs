@@ -174,6 +174,8 @@ unsafe extern "system" {
     ) -> *const RuntimeFunction;
     fn RtlDeleteFunctionTable(table: *const c_void) -> u8;
     fn RtlDllShutdownInProgress() -> u8;
+    fn RtlQueryProcessPlaceholderCompatibilityMode() -> i8;
+    fn RtlSetProcessPlaceholderCompatibilityMode(mode: i8) -> i8;
 }
 
 #[allow(dead_code)]
@@ -584,6 +586,11 @@ fn libraries(c: &mut Checks) -> Result<(), u32> {
         c.eq(GetLastError().into(), 193)?; // ERROR_BAD_EXE_FORMAT
 
         c.eq(RtlDllShutdownInProgress().into(), 0)?;
+        // Placeholder compatibility: the application default until set.
+        c.eq(RtlQueryProcessPlaceholderCompatibilityMode() as u64, 0)?; // PHCM_APPLICATION_DEFAULT
+        c.eq(RtlSetProcessPlaceholderCompatibilityMode(2) as u64, 0)?; // PHCM_EXPOSE_PLACEHOLDERS
+        c.eq(RtlQueryProcessPlaceholderCompatibilityMode() as u64, 2)?;
+        RtlSetProcessPlaceholderCompatibilityMode(0);
 
         let gala = w("gala worker");
         c.eq(SetThreadDescription(GetCurrentThread(), gala.as_ptr()) as u64, 0)?;

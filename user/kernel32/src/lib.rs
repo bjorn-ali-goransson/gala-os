@@ -22,6 +22,7 @@ use core::ffi::c_void;
 
 mod actctx;
 mod ansi;
+mod calendar;
 mod console;
 mod context;
 mod files;

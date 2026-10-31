@@ -663,6 +663,26 @@ pub extern "system" fn RtlDllShutdownInProgress() -> u8 {
     0
 }
 
+/// The process's placeholder compatibility mode (PHCM_*; 0 is the
+/// application default). gala's files have no placeholders, so it only
+/// matters as a value read back.
+static PLACEHOLDER_MODE: core::sync::atomic::AtomicI8 = core::sync::atomic::AtomicI8::new(0);
+
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlQueryProcessPlaceholderCompatibilityMode() -> i8 {
+    PLACEHOLDER_MODE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// RtlSetProcessPlaceholderCompatibilityMode: the previous mode, or
+/// PHCM_ERROR_INVALID_PARAMETER (-1) for a mode outside 0..=2.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlSetProcessPlaceholderCompatibilityMode(mode: i8) -> i8 {
+    if !(0..=2).contains(&mode) {
+        return -1;
+    }
+    PLACEHOLDER_MODE.swap(mode, core::sync::atomic::Ordering::Relaxed)
+}
+
 /// The DLL implementing API set `name` (`api-ms-win-...`, normalized), as
 /// Windows' API set schema maps these contract names to the DLLs that
 /// implement them (whatever files of those names exist). gala keeps the

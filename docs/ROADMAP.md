@@ -588,23 +588,25 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       top of .NET it needs the console API (modes, screen buffer info,
       reading keys for the interactive prompt), the registry (read) and
       more advapi32 security calls.
-      Status: PowerShell 7.4.22 (PREBUILT, a self-contained .NET 8 app)
-      is the pending `pwsh_hello` scenario. Its apphost needed activation
-      contexts (CreateActCtxW and friends, manifest_test) and
-      ShellExecuteW. Since then: gala's bcrypt.dll (bcrypt_test, test
-      vectors), thread stacks laid out as on Windows (header
-      reservations, a guard page below StackLimit - CoreCLR looks for it),
-      GetSystemTimes, the ETW activity id, software restriction policies
-      (none: fully trusted). PowerShell's Main now runs through policy
-      checks into its console host. Then: the console (console_test:
-      CONOUT$/CONIN$ behind the redirected standard handles), FormatMessage
-      with inserts and allocated buffers, GetCPInfoExW, CreateWellKnownSid,
-      secur32's GetUserNameExW. PowerShell now stops creating its
-      runspace: .NET's NLS calendar data (GetCalendarInfoEx missing).
-      Next: the calendar and date/time format functions .NET's NLS
-      globalization uses (GetCalendarInfoEx, EnumCalendarInfoExEx,
-      EnumTimeFormatsEx, EnumDateFormatsExEx; test first, en-US
-      Gregorian), then the registry reads (RegOpenKeyExW, 15 hits).
+      Done: PowerShell 7.4.22 (PREBUILT, a self-contained .NET 8 app)
+      runs a command: `pwsh_hello` (`pwsh -NoProfile -NonInteractive
+      -Command "Write-Output (1+2); $PSVersionTable.PSVersion.ToString()"`
+      prints 3 and 7.4.22). What it took: activation contexts,
+      ShellExecuteW, bcrypt.dll (CNG hashes and random numbers), thread
+      stacks laid out as on Windows (header reservations and a guard
+      page: CoreCLR looks for it), GetSystemTimes, the ETW activity id,
+      software restriction policies (none), a console behind the
+      redirected standard handles (CONOUT$/CONIN$), FormatMessage with
+      inserts, GetCPInfoExW, CreateWellKnownSid, GetUserNameExW, .NET's
+      NLS calendar and format data (GetCalendarInfoEx,
+      EnumCalendarInfoExEx, EnumTimeFormatsEx, EnumDateFormatsExEx),
+      FindNLSStringEx, the placeholder compatibility mode. Still in its
+      ledger: the registry (RegOpenKeyExW, 23 reads: no registry yet),
+      mpr.dll (network drives), QueryUnbiasedInterruptTime, amsi.dll and
+      wldp.dll (Windows' antimalware and lockdown policy DLLs; absent
+      means none), LOCALE_SENGLISHDISPLAYNAME/SNATIVEDISPLAYNAME-style
+      LCTYPEs 0x1006/0x100d, probes for newer APIs. Next: an interactive
+      prompt needs console input (a keyboard on the serial line).
    4. Elasticsearch on the JDK, started with java directly (its .bat
       launchers need cmd.exe, which gala does not have). As a Windows
       service it also needs a service control manager. Memory (QEMU's

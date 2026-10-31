@@ -16,6 +16,10 @@
 //! - GetUserGeoID (244, United States), GetGeoInfoA (GEO_ISO2 "US").
 //! - Get{User,System}PreferredUILanguages: en-US, by name or id.
 //! - GetCPInfoExW of CP_ACP (the ANSI code page and its name).
+//! - The en-US Gregorian calendar: GetCalendarInfoEx (names, formats, the
+//!   two-digit year window 2049, the era), EnumCalendarInfoExEx;
+//!   EnumTimeFormatsEx (with and without seconds), EnumDateFormatsExEx.
+//! - FindNLSStringEx: starts with, ends with, first and last occurrence.
 //!
 //! Prints `kernel32_locale_test: ok` or exits with the number of the
 //! failing check.
@@ -45,6 +49,47 @@ unsafe extern "system" {
         buf: *mut u16,
         len: *mut u32,
     ) -> Bool;
+    fn GetCalendarInfoEx(
+        locale: *const u16,
+        calendar: u32,
+        reserved: *const u16,
+        kind: u32,
+        data: *mut u16,
+        len: i32,
+        value: *mut u32,
+    ) -> i32;
+    fn EnumCalendarInfoExEx(
+        callback: extern "system" fn(*const u16, u32, *const u16, isize) -> Bool,
+        locale: *const u16,
+        calendar: u32,
+        reserved: *const u16,
+        kind: u32,
+        param: isize,
+    ) -> Bool;
+    fn EnumTimeFormatsEx(
+        callback: extern "system" fn(*const u16, isize) -> Bool,
+        locale: *const u16,
+        flags: u32,
+        param: isize,
+    ) -> Bool;
+    fn EnumDateFormatsExEx(
+        callback: extern "system" fn(*const u16, u32, isize) -> Bool,
+        locale: *const u16,
+        flags: u32,
+        param: isize,
+    ) -> Bool;
+    fn FindNLSStringEx(
+        locale: *const u16,
+        flags: u32,
+        source: *const u16,
+        source_len: i32,
+        value: *const u16,
+        value_len: i32,
+        found: *mut i32,
+        version: *mut c_void,
+        reserved: *mut c_void,
+        handle: isize,
+    ) -> i32;
     fn GetCPInfoExW(code_page: u32, flags: u32, info: *mut u8) -> Bool;
     fn GetACP() -> u32;
     fn GetLastError() -> u32;
@@ -452,8 +497,214 @@ fn code_page_info(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// Collected by `on_calendar_info`: the strings' first characters and
+/// their count, and the calendar ids.
+static CAL_SEEN: AtomicU32 = AtomicU32::new(0);
+static CAL_FIRST: AtomicU32 = AtomicU32::new(0);
+static CAL_ID: AtomicU32 = AtomicU32::new(0);
+
+extern "system" fn on_calendar_info(
+    text: *const u16,
+    calendar: u32,
+    _reserved: *const u16,
+    _param: isize,
+) -> Bool {
+    if CAL_SEEN.fetch_add(1, Ordering::SeqCst) == 0 {
+        // SAFETY: the NUL-terminated string the system passes.
+        CAL_FIRST.store(u32::from(unsafe { *text }), Ordering::SeqCst);
+    }
+    CAL_ID.store(calendar, Ordering::SeqCst);
+    1
+}
+
+/// The Gregorian calendar of en-US (calendar 1): its name, two-digit year
+/// window, formats, day and month names, era (GetCalendarInfoEx), and
+/// the lists EnumCalendarInfoExEx gives.
+fn calendars(c: &mut Checks) -> Result<(), u32> {
+    let en_us = w("en-US");
+    let get = |kind: u32, buf: &mut [u16; 64]| -> i32 {
+        // SAFETY: a 64-character buffer.
+        unsafe {
+            GetCalendarInfoEx(
+                en_us.as_ptr(),
+                1,
+                core::ptr::null(),
+                kind,
+                buf.as_mut_ptr(),
+                64,
+                core::ptr::null_mut(),
+            )
+        }
+    };
+    let mut buf = [0u16; 64];
+    for (kind, text) in [
+        (0x2, "Gregorian Calendar"), // CAL_SCALNAME
+        (0x5, "M/d/yyyy"),           // CAL_SSHORTDATE
+        (0x6, "dddd, MMMM d, yyyy"), // CAL_SLONGDATE
+        (0x2f, "MMMM yyyy"),         // CAL_SYEARMONTH
+        (0x38, "MMMM d"),            // CAL_SMONTHDAY
+        (0x7, "Monday"),             // CAL_SDAYNAME1
+        (0xd, "Sunday"),             // CAL_SDAYNAME7
+        (0x14, "Sun"),               // CAL_SABBREVDAYNAME7
+        (0x37, "Su"),                // CAL_SSHORTESTDAYNAME7
+        (0x15, "January"),           // CAL_SMONTHNAME1
+        (0x2e, ""),                  // CAL_SABBREVMONTHNAME13
+        (0x22, "Jan"),               // CAL_SABBREVMONTHNAME1
+        (0x39, "AD"),                // CAL_SABBREVERASTRING
+        (0x1, "1"),                  // CAL_ICALINTVALUE
+    ] {
+        let n = get(kind, &mut buf);
+        c.eq(n as u64, text.len() as u64 + 1)?;
+        c.text(&buf, text)?;
+    }
+    // CAL_ITWODIGITYEARMAX as a number: 2049.
+    let mut value = 0u32;
+    // SAFETY: CAL_RETURN_NUMBER writes the DWORD.
+    let n = unsafe {
+        GetCalendarInfoEx(
+            en_us.as_ptr(),
+            1,
+            core::ptr::null(),
+            0x30 | 0x2000_0000,
+            core::ptr::null_mut(),
+            0,
+            &mut value,
+        )
+    };
+    c.ok(n == 2 && value == 2049, value.into())?;
+    // A size query, and an unknown calendar.
+    // SAFETY: as above.
+    unsafe {
+        let n = GetCalendarInfoEx(
+            en_us.as_ptr(),
+            1,
+            core::ptr::null(),
+            0x2,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+        );
+        c.eq(n as u64, 19)?;
+        let n = GetCalendarInfoEx(
+            en_us.as_ptr(),
+            99,
+            core::ptr::null(),
+            0x2,
+            buf.as_mut_ptr(),
+            64,
+            core::ptr::null_mut(),
+        );
+        c.eq(n as u64, 0)?;
+        c.eq(GetLastError().into(), 87)?; // ERROR_INVALID_PARAMETER
+
+        // Enumerations: the calendars (ENUM_ALL_CALENDARS), the short dates.
+        CAL_SEEN.store(0, Ordering::SeqCst);
+        c.ok(
+            EnumCalendarInfoExEx(
+                on_calendar_info,
+                en_us.as_ptr(),
+                u32::MAX,
+                core::ptr::null(),
+                0x1,
+                0,
+            ) != 0,
+            0,
+        )?;
+        c.ok(CAL_SEEN.load(Ordering::SeqCst) >= 1, 0)?;
+        c.eq(CAL_FIRST.load(Ordering::SeqCst).into(), u64::from(b'1'))?;
+        CAL_SEEN.store(0, Ordering::SeqCst);
+        c.ok(
+            EnumCalendarInfoExEx(on_calendar_info, en_us.as_ptr(), 1, core::ptr::null(), 0x5, 0)
+                != 0,
+            0,
+        )?;
+        c.ok(CAL_SEEN.load(Ordering::SeqCst) >= 2, CAL_SEEN.load(Ordering::SeqCst).into())?;
+        c.eq(CAL_FIRST.load(Ordering::SeqCst).into(), u64::from(b'M'))?; // "M/d/yyyy" first
+        c.eq(CAL_ID.load(Ordering::SeqCst).into(), 1)?;
+
+        // Time formats ("h:mm:ss tt" first), without seconds ("h:mm tt").
+        FORMATS.store(0, Ordering::SeqCst);
+        c.ok(EnumTimeFormatsEx(on_time_format, en_us.as_ptr(), 0, 0) != 0, 0)?;
+        c.ok(FORMATS.load(Ordering::SeqCst) >= 2 && FORMAT_LEN.load(Ordering::SeqCst) == 10, 0)?;
+        FORMATS.store(0, Ordering::SeqCst);
+        c.ok(EnumTimeFormatsEx(on_time_format, en_us.as_ptr(), 2, 0) != 0, 0)?; // TIME_NOSECONDS
+        c.eq(FORMAT_LEN.load(Ordering::SeqCst).into(), 7)?;
+        // Long dates ("dddd, MMMM d, yyyy" first), calendar 1.
+        FORMATS.store(0, Ordering::SeqCst);
+        c.ok(EnumDateFormatsExEx(on_date_format, en_us.as_ptr(), 2, 0) != 0, 0)?; // DATE_LONGDATE
+        c.eq(FORMAT_LEN.load(Ordering::SeqCst).into(), 18)?;
+    }
+    Ok(())
+}
+
+static FORMATS: AtomicU32 = AtomicU32::new(0);
+/// The length of the first format seen.
+static FORMAT_LEN: AtomicU32 = AtomicU32::new(0);
+
+fn note_format(text: *const u16) {
+    if FORMATS.fetch_add(1, Ordering::SeqCst) == 0 {
+        let mut n = 0;
+        // SAFETY: the NUL-terminated string the system passes.
+        while unsafe { *text.add(n) } != 0 {
+            n += 1;
+        }
+        FORMAT_LEN.store(n as u32, Ordering::SeqCst);
+    }
+}
+
+extern "system" fn on_time_format(text: *const u16, _param: isize) -> Bool {
+    note_format(text);
+    1
+}
+
+extern "system" fn on_date_format(text: *const u16, calendar: u32, _param: isize) -> Bool {
+    note_format(text);
+    Bool::from(calendar == 1)
+}
+
+/// FindNLSStringEx: where a string starts, ends with or contains another
+/// (case-insensitively with LINGUISTIC_IGNORECASE), and the length found.
+fn find_strings(c: &mut Checks) -> Result<(), u32> {
+    let en_us = w("en-US");
+    let source = w("Hello World");
+    let find = |flags: u32, value: &str| -> (i32, i32) {
+        let v = w(value);
+        let mut found = -9;
+        // SAFETY: NUL-terminated strings of ours.
+        let at = unsafe {
+            FindNLSStringEx(
+                en_us.as_ptr(),
+                flags,
+                source.as_ptr(),
+                -1,
+                v.as_ptr(),
+                -1,
+                &mut found,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                0,
+            )
+        };
+        (at, found)
+    };
+    const STARTS: u32 = 0x10_0000;
+    const ENDS: u32 = 0x20_0000;
+    const FROM_START: u32 = 0x40_0000;
+    const FROM_END: u32 = 0x80_0000;
+    const IGNORE_CASE: u32 = 0x10; // LINGUISTIC_IGNORECASE
+    c.ok(find(STARTS | IGNORE_CASE, "hello") == (0, 5), 0)?;
+    c.eq(find(STARTS, "hello").0 as u64, u64::MAX)?; // case matters without the flag
+    c.ok(find(ENDS | IGNORE_CASE, "WORLD") == (6, 5), find(ENDS | IGNORE_CASE, "WORLD").0 as u64)?;
+    c.eq(find(FROM_START, "o").0 as u64, 4)?;
+    c.eq(find(FROM_END, "o").0 as u64, 7)?;
+    c.eq(find(FROM_START, "xyz").0 as u64, u64::MAX)?;
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    find_strings(&mut c)?;
+    calendars(&mut c)?;
     code_page_info(&mut c)?;
     ui_languages(&mut c)?;
     locales(&mut c)?;
