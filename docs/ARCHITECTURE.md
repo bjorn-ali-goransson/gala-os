@@ -851,7 +851,10 @@ Windows, never shadows the system's DLLs.)
   character types from Unicode properties), memory status, one NUMA
   node, psapi for the current process (modules from the address space's
   image regions; memory counters from its committed regions), version
-  checks (sysmem.rs), the
+  checks (sysmem.rs), the version reported to the program (as Windows:
+  the real version only if the executable's RT_MANIFEST declares Windows
+  10/11, 6.3.9600 for Windows 8.1, else 6.2.9200; GetVersion(Ex)A/W and
+  VerifyVersionInfoW), the
   performance counter, LoadLibrary(A/W/ExW)/GetProcAddress/FreeLibrary,
   threads (CreateThread builds the stack and start CONTEXT itself and
   starts at a thunk that calls ExitThread), TLS (TEB.TlsSlots),

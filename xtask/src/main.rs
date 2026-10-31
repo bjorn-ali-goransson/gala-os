@@ -162,6 +162,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_pool_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_pool_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_pool_test", "winmm.dll", "Windows/System32"),
+    ("manifest_test", "ntdll.dll", "Windows/System32"),
+    ("manifest_test", "kernel32.dll", "Windows/System32"),
     ("tls_test", "ntdll.dll", "Windows/System32"),
     ("tls_test", "kernel32.dll", "Windows/System32"),
     ("tls_test", "tlsdll.dll", "gala"),
@@ -493,6 +495,7 @@ const USER_PROGRAMS: &[&str] = &[
     "win32_misc_test",
     "kernel32_pool_test",
     "tls_test",
+    "manifest_test",
     "kernel32_misc_test",
     "prng_test",
     "kernel32_env_test",
@@ -1156,6 +1159,14 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["kernel32_sys_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // P1 (JDK): a compatibility manifest declaring Windows 10 gets the
+        // real version from GetVersionEx (java.exe has one).
+        name: "manifest_test",
+        cmdline: "qemu_exit run=manifest_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["manifest_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // P1 (JDK): static TLS (the PE TLS directory) for the executable
         // and a DLL loaded later; TLS callbacks and thread notifications.
         name: "tls_test",
@@ -1427,12 +1438,14 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // P1: a Java program on the unmodified JDK: `java Hello.java`
         // (the source launcher compiles it in memory with jdk.compiler).
-        // Expected as on Windows (2 processors under QEMU).
+        // Expected as on Windows 11 (2 processors under QEMU).
         name: "java_hello",
         cmdline: "qemu_exit run=java.exe args=C:/gala/Hello.java",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "Hello from Java on gala",
+            "os.name=Windows 11",
+            "os.version=10.0",
             "os.arch=amd64",
             "user.name=gala",
             "user.home=C:\\Users\\gala",

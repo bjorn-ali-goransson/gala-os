@@ -221,7 +221,8 @@ pub extern "system" fn SystemTimeToFileTime(st: *const u16, ft: *mut u64) -> Boo
 /// programs without a compatibility manifest).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetVersion() -> u32 {
-    (9200 << 16) | (2 << 8) | 6
+    let (major, minor, build) = super::mapping::reported_version();
+    (build << 16) | (minor << 8) | major
 }
 
 /// GetModuleHandleExW: by name, or (GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS)

@@ -11,14 +11,10 @@ const ERROR_NO_MORE_ITEMS: u32 = 259;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_ACCESS_DENIED: u32 = 5;
 
-/// (major, minor, build) from KUSER_SHARED_DATA (NtMajorVersion at
-/// +0x26c, NtMinorVersion at +0x270, NtBuildNumber at +0x260).
+/// (major, minor, build) as reported to this program (its compatibility
+/// manifest decides; see `reported_version`).
 fn kuser_version() -> (u32, u32, u32) {
-    let at = |o: usize| {
-        // SAFETY: KUSER_SHARED_DATA is mapped read-only at 0x7ffe0000.
-        unsafe { *((0x7ffe_0000 + o) as *const u32) }
-    };
-    (at(0x26c), at(0x270), at(0x260) & 0xffff)
+    super::mapping::reported_version()
 }
 
 /// The x64 user address space: 0x10000 up to 0x7fff_fffe_ffff.
@@ -581,8 +577,9 @@ fn version_fields(info: *const u32) -> [(u32, u64, u64); 6] {
     ]
 }
 
-/// VerifyVersionInfoW: compares the requested fields with this system
-/// (10.0, build 26100, no service pack); ERROR_OLD_WIN_VERSION when they
+/// VerifyVersionInfoW: compares the requested fields with the version
+/// reported to this program (its manifest decides, as for GetVersionEx;
+/// no service pack); ERROR_OLD_WIN_VERSION when they
 /// do not match. Major, minor and service pack are compared as one
 /// version, as documented, when several are given.
 #[unsafe(no_mangle)]

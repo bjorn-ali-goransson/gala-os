@@ -441,24 +441,109 @@ pub extern "system" fn GetModuleFileNameA(module: Handle, buf: *mut u8, size: u3
     n as u32
 }
 
-/// GetVersionExA: like Windows for a program without a compatibility
-/// manifest (Nginx has none): version 6.2, build 9200.
+/// The version Windows reports to this program: the real one (from
+/// KUSER_SHARED_DATA) if the executable's compatibility manifest
+/// (RT_MANIFEST resource) declares Windows 10/11
+/// ({8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}), 6.3.9600 if it declares
+/// Windows 8.1 ({1f676c76-80e1-4239-95bb-83d0f6d0da78}), else 6.2.9200
+/// (what Windows tells programs that declare neither). Found once.
+pub(crate) fn reported_version() -> (u32, u32, u32) {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static CACHE: AtomicU64 = AtomicU64::new(0);
+    let cached = CACHE.load(Ordering::Relaxed);
+    if cached != 0 {
+        return ((cached >> 48) as u32, (cached >> 32) as u32 & 0xffff, cached as u32);
+    }
+    let manifest = manifest_text(image_base() as usize);
+    let has = |guid: &[u8]| {
+        manifest
+            .windows(guid.len())
+            .any(|w| w.iter().zip(guid).all(|(a, b)| a.to_ascii_lowercase() == *b))
+    };
+    let v = if has(b"8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a") {
+        let at = |o: usize| {
+            // SAFETY: KUSER_SHARED_DATA is mapped read-only at 0x7ffe0000.
+            unsafe { *((0x7ffe_0000 + o) as *const u32) }
+        };
+        (at(0x26c), at(0x270), at(0x260) & 0xffff)
+    } else if has(b"1f676c76-80e1-4239-95bb-83d0f6d0da78") {
+        (6, 3, 9600)
+    } else {
+        (6, 2, 9200)
+    };
+    CACHE.store(u64::from(v.0) << 48 | u64::from(v.1) << 32 | u64::from(v.2), Ordering::Relaxed);
+    v
+}
+
+/// The text of the image's RT_MANIFEST resource 1 (empty if none), found
+/// through its resource directory (type 24, name 1, the first language).
+fn manifest_text(base: usize) -> &'static [u8] {
+    let rd32 = |a: usize| {
+        // SAFETY: inside the mapped image.
+        unsafe { (a as *const u32).read_unaligned() }
+    };
+    let rd16 = |a: usize| {
+        // SAFETY: as above.
+        unsafe { (a as *const u16).read_unaligned() }
+    };
+    let nt = base + rd32(base + 0x3c) as usize;
+    let rva = rd32(nt + 24 + 112 + 2 * 8) as usize; // IMAGE_DIRECTORY_ENTRY_RESOURCE
+    if rva == 0 {
+        return &[];
+    }
+    let root = base + rva;
+    // An entry of a directory: the one with `id`, or the first.
+    let find = |dir: usize, id: Option<u32>| -> Option<u32> {
+        let n = usize::from(rd16(dir + 12)) + usize::from(rd16(dir + 14));
+        (0..n).find_map(|i| {
+            let e = dir + 16 + 8 * i;
+            (id.is_none() || id == Some(rd32(e))).then(|| rd32(e + 4))
+        })
+    };
+    let Some(ty) = find(root, Some(24)) else { return &[] };
+    let Some(name) = find(root + (ty & 0x7fff_ffff) as usize, Some(1)) else { return &[] };
+    let Some(lang) = find(root + (name & 0x7fff_ffff) as usize, None) else { return &[] };
+    let data = root + lang as usize;
+    // SAFETY: the resource's bytes inside the mapped image.
+    unsafe {
+        core::slice::from_raw_parts(
+            (base + rd32(data) as usize) as *const u8,
+            rd32(data + 4) as usize,
+        )
+    }
+}
+
+/// GetVersionExA/W: the version reported to this program
+/// (`reported_version`); OSVERSIONINFO(EX)A is 148/156 bytes, the W
+/// forms 276/284.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetVersionExA(info: *mut u8) -> Bool {
-    // SAFETY: the caller's OSVERSIONINFOA (148 bytes) or OSVERSIONINFOEXA
-    // (156 bytes), its size in the first field.
+    version_info(info, 148, 156)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetVersionExW(info: *mut u8) -> Bool {
+    version_info(info, 276, 284)
+}
+
+fn version_info(info: *mut u8, plain: u32, ex: u32) -> Bool {
+    if info.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let (major, minor, build) = reported_version();
+    // SAFETY: the caller's structure, its size in the first field.
     unsafe {
         let size = *(info as *const u32);
-        if size != 148 && size != 156 {
+        if size != plain && size != ex {
             return fail_with(ERROR_INSUFFICIENT_BUFFER, FALSE);
         }
         core::ptr::write_bytes(info.add(4), 0, size as usize - 4);
-        let fields = [6u32, 2, 9200, 2]; // major, minor, build, VER_PLATFORM_WIN32_NT
+        let fields = [major, minor, build, 2]; // VER_PLATFORM_WIN32_NT
         for (i, v) in fields.iter().enumerate() {
             core::ptr::write_unaligned(info.add(4 + 4 * i).cast::<u32>(), *v);
         }
-        if size == 156 {
-            *info.add(154) = 1; // wProductType: VER_NT_WORKSTATION
+        if size == ex {
+            *info.add(size as usize - 2) = 1; // wProductType: VER_NT_WORKSTATION
         }
     }
     TRUE

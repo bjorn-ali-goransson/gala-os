@@ -119,6 +119,8 @@ unsafe extern "system" {
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetTickCount64() -> u64;
     fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn GetVersionExW(info: *mut u32) -> Bool;
+    fn GetVersion() -> u32;
     fn FreeLibrary(module: Handle) -> Bool;
     fn CloseHandle(h: Handle) -> Bool;
     fn ExitProcess(code: u32) -> !;
@@ -342,6 +344,14 @@ fn heaps(c: &mut Checks) -> Result<(), u32> {
         let (t1, ticks) = (timeGetTime(), GetTickCount64() as u32);
         let t2 = timeGetTime();
         c.ok(t2.wrapping_sub(t1) < 1000 && t1.abs_diff(ticks) < 1000, u64::from(t1))?;
+        // Without a compatibility manifest: version 6.2, build 9200 (as
+        // Windows answers programs that do not declare Windows 10).
+        let mut v = [0u32; 71];
+        v[0] = 284;
+        c.ok(GetVersionExW(v.as_mut_ptr()) != 0, 0)?;
+        c.ok(v[1] == 6 && v[2] == 2 && v[3] == 9200, v[1].into())?;
+        c.eq(GetVersion().into(), (9200 << 16) | (2 << 8) | 6)?;
+
         // A DLL loaded at startup as a static import stays for the
         // process's lifetime: FreeLibrary on its handle does not unload it.
         let winmm = GetModuleHandleA(c"winmm.dll".as_ptr().cast());

@@ -478,11 +478,11 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       SetThreadToken; ws2_32 WSA events; kernel32 FindFirst/NextStreamW,
       ReOpenFile; new iphlpapi, secur32 and winhttp (adapters, ICMP, SSPI
       and WinHTTP sessions not supported, recorded); mswsock TransmitFile
-      (not supported). Next: GetVersionEx must honour the executable's
-      compatibility manifest (java.exe declares Windows 10: Java should
-      report os.name "Windows 11", os.version "10.0"; gala says 6.2 as for
-      an unmanifested program), then com.sun.net.httpserver serving the
-      host (needs iphlpapi's adapters for real). The history: xtask fetches
+      (not supported). GetVersionEx now honours the executable's compatibility
+      manifest (`manifest_test`): java.exe declares Windows 10, so Java
+      reports os.name "Windows 11", os.version "10.0", as on Windows 11.
+      Later: com.sun.net.httpserver serving the host (needs iphlpapi's
+      adapters for real). The history: xtask fetches
       the JDK (PREBUILT, 170 MB of it as a directory tree). The import
       closure of java.exe, jvm.dll, java.dll and jimage.dll lacked ~80
       kernel32 functions, 21 advapi32 (security: SIDs, ACLs, tokens), 3
@@ -536,7 +536,24 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       version, powrprof, winhttp, comctl32. The largest step so far.
    2. .NET 8+ (asked for 2026-10-31): a self-contained console app from
       `dotnet publish`, then `dotnet --info` from the official runtime
-      zip. CoreCLR is MSVC-built on the same UCRT, so it shares the JDK's
+      zip. Surveyed (dotnet-runtime-8.0.33-win-x64.zip, Microsoft's
+      SHA-512 ceb56fa9...): unlike the JDK, .NET does not ship the
+      Universal C Runtime (it uses Windows' own ucrtbase.dll and the
+      api-ms-win-crt-* sets in System32). Plan: deploy Microsoft's
+      redistributable UCRT next to dotnet.exe, as .NET's self-contained
+      apps do (the JDK zip has ucrtbase.dll and the api-ms-win-crt-*
+      forwarders), rather than writing gala's own UCRT. Beyond it the
+      native parts (dotnet.exe, hostfxr, hostpolicy, coreclr, clrjit,
+      clrgc, System.IO.Compression.Native) need: ~32 kernel32 functions
+      (processor groups, XState (InitializeContext, LocateXStateFeature,
+      GetEnabledXStateFeatures, CopyContext), job objects, named pipe
+      servers, RtlInstallFunctionTableCallback, SignalObjectAndWait,
+      QueueUserAPC, FlushInstructionCache, ...), 8 advapi32 (ETW
+      EventRegister/EventWrite, RegGetValueW, GetSidSubAuthority*,
+      RevertToSelf, SetKernelObjectSecurity), COM: ole32 (19), oleaut32
+      (by ordinal, BSTR and VARIANT), rpcrt4 UuidCreate,
+      api-ms-win-core-winrt (RoInitialize), user32 LoadStringW, version
+      GetFileVersionInfo(Size)ExW. CoreCLR is MSVC-built on the same UCRT, so it shares the JDK's
       prerequisites (frame-based SEH and unwinding are central: CoreCLR
       dispatches managed exceptions through them), and adds more of the
       same: FLS, SRW locks, wait/thread-pool APIs, VirtualAlloc with

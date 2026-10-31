@@ -257,6 +257,10 @@ instruction's neighbourhood, native frames); to read it, run busybox's
 args=-version,cat%20C:/hs_err_pid4.log`, busybox.exe in the scenario's
 modules). An unhandled exception's code and address are in the ledger;
 `XTASK_EVENTS=image` gives each image's base and size to map them.
+A test program that needs a resource (a manifest: `manifest_test`) gets
+it from its build.rs, which writes a .res file (the documented compiled
+resource format) and passes it to the linker; lld-link converts it
+itself (its /MANIFEST:EMBED would need Microsoft's mt.exe).
 DLLs a program loads at run time (LoadLibrary: the JDK's launcher loads
 msvcp140 and jvm.dll) are not in the closure; boot and read the ledger
 for those. Exports by ordinal (ws2_32's) come from a build.rs printing
