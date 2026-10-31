@@ -198,6 +198,14 @@ fn run(o: *mut Object, result: u32) {
     }
 }
 
+/// Callback environments (custom pools, cleanup groups, priorities) are
+/// not supported: the default pool runs the callbacks; recorded.
+fn env_ignored(what: &[u8], env: *mut c_void) {
+    if !env.is_null() {
+        unsupported(what, 0);
+    }
+}
+
 /// A new object, or null (ERROR_NOT_ENOUGH_MEMORY).
 fn create(kind: Kind, callback: usize, context: *mut c_void) -> *mut Object {
     let o = super::heap::HeapAlloc(super::heap::GetProcessHeap(), 0, size_of::<Object>())
@@ -253,8 +261,9 @@ fn wait_callbacks(o: *mut Object, cancel: Bool) {
 pub extern "system" fn CreateThreadpoolWork(
     callback: WorkCallback,
     context: *mut c_void,
-    _env: *mut c_void,
+    env: *mut c_void,
 ) -> *mut c_void {
+    env_ignored(b"kernel32.dll!CreateThreadpoolWork(callback environment)", env);
     create(Kind::Work, callback as usize, context).cast()
 }
 
@@ -284,8 +293,9 @@ pub extern "system" fn CloseThreadpoolWork(work: *mut c_void) {
 pub extern "system" fn TrySubmitThreadpoolCallback(
     callback: SimpleCallback,
     context: *mut c_void,
-    _env: *mut c_void,
+    env: *mut c_void,
 ) -> Bool {
+    env_ignored(b"kernel32.dll!TrySubmitThreadpoolCallback(callback environment)", env);
     let o = create(Kind::Simple, callback as usize, context);
     if o.is_null() {
         return FALSE;
@@ -364,8 +374,9 @@ extern "system" fn timer_helper(param: *mut c_void) -> u32 {
 pub extern "system" fn CreateThreadpoolTimer(
     callback: WorkCallback,
     context: *mut c_void,
-    _env: *mut c_void,
+    env: *mut c_void,
 ) -> *mut c_void {
+    env_ignored(b"kernel32.dll!CreateThreadpoolTimer(callback environment)", env);
     create(Kind::Timer, callback as usize, context).cast()
 }
 
@@ -465,8 +476,9 @@ extern "system" fn wait_helper(param: *mut c_void) -> u32 {
 pub extern "system" fn CreateThreadpoolWait(
     callback: WaitCallback,
     context: *mut c_void,
-    _env: *mut c_void,
+    env: *mut c_void,
 ) -> *mut c_void {
+    env_ignored(b"kernel32.dll!CreateThreadpoolWait(callback environment)", env);
     create(Kind::Wait, callback as usize, context).cast()
 }
 

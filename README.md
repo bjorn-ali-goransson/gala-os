@@ -47,7 +47,7 @@ program and compares its output with what Windows gives.
 | **SQLite** 3.54.1 | the 9.5 MB amalgamation compiled on gala by tcc; creates, queries and reopens a database file; two processes write it **at once**, using file locks | `sqlite` |
 | A C runtime test | gala's msvcrt.dll checked by a C program built with mingw-w64 - and also built by tcc on gala | `msvcrt_test`, `tcc_self` |
 | **Caddy** 2.8.4 | the **unmodified official Windows release** (not built by us): prints its version, lists its 121 modules, and serves a site to the host (`caddy file-server`) | `caddy`, `caddy_http` |
-| **Java** (Temurin JDK 21) | the **unmodified Eclipse Temurin release**: `java -version` starts the HotSpot server VM (the launcher, Microsoft's C and C++ runtimes, jvm.dll, the module image) and prints its version | `java_version` |
+| **Java** (Temurin JDK 21) | the **unmodified Eclipse Temurin release**: `java -version` starts the HotSpot server VM (the launcher, Microsoft's C and C++ runtimes, jvm.dll, the module image); `java Hello.java` compiles a program in memory with the JDK's own compiler and runs it (system properties, collections, a thread pool, formatting) | `java_version`, `java_hello` |
 
 Most of these programs were built from their sources for gala's tests,
 but Caddy and the JDK are official release binaries, downloaded by

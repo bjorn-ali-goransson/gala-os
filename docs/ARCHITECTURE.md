@@ -824,6 +824,12 @@ Windows, never shadows the system's DLLs.)
   token functions describe a standard user). Nothing is enforced and
   files keep no descriptors (SetFileSecurity succeeds, recorded). The
   registry is empty (keys not found, predefined keys without subkeys).
+- **iphlpapi/secur32/winhttp** (what the JDK's net.dll imports): network
+  adapter tables, ICMP echo, SSPI and WinHTTP sessions are not supported
+  (documented failures, recorded); ConvertLengthToIpv4Mask is computed and
+  WinHttpGetIEProxyConfigForCurrentUser answers that there are no IE proxy
+  settings (ERROR_FILE_NOT_FOUND). The ledger holds 512 kinds of entries
+  (names up to 96 bytes): the JVM's JNI lookups miss by design and fill it.
 - **shell32/version/powrprof/comctl32**: profile folders from the
   environment (SHGetFolderPathW, SHGetKnownFolderPath), version resources
   read from PE files and walked (GetFileVersionInfo*, VerQueryValue*),

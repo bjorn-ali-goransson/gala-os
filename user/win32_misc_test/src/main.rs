@@ -39,6 +39,7 @@ unsafe extern "system" {
     fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32;
     fn GetModuleFileNameW(module: Handle, buf: *mut u16, size: u32) -> u32;
     fn GetSystemInfo(info: *mut u8);
+    fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
@@ -51,6 +52,14 @@ unsafe extern "system" {
         len: u32,
         needed: *mut u32,
     ) -> Bool;
+}
+
+#[link(name = "ws2_32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn WSACreateEvent() -> Handle;
+    fn WSACloseEvent(event: Handle) -> Bool;
+    fn WSASetEvent(event: Handle) -> Bool;
+    fn WSAResetEvent(event: Handle) -> Bool;
 }
 
 #[link(name = "comctl32", kind = "raw-dylib")]
@@ -218,6 +227,17 @@ fn user32_ws2(c: &mut Checks) -> Result<(), u32> {
             0,
         )?;
         c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
+
+        // WSA events: manual-reset events, created unsignaled.
+        let e = WSACreateEvent();
+        c.ok(!e.is_null(), 0)?;
+        c.eq(WaitForSingleObject(e, 0).into(), 258)?;
+        c.ok(WSASetEvent(e) != 0, 0)?;
+        c.eq(WaitForSingleObject(e, 0).into(), 0)?;
+        c.eq(WaitForSingleObject(e, 0).into(), 0)?; // still set
+        c.ok(WSAResetEvent(e) != 0, 0)?;
+        c.eq(WaitForSingleObject(e, 0).into(), 258)?;
+        c.ok(WSACloseEvent(e) != 0, 0)?;
 
         let ws2 = LoadLibraryA(c"ws2_32.dll".as_ptr().cast());
         c.ok(!ws2.is_null(), GetLastError().into())?;

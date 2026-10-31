@@ -36,7 +36,6 @@ unsafe extern "system" {
     fn GetLastError() -> u32;
     fn SetLastError(e: u32);
     fn GetStdHandle(which: u32) -> Handle;
-    fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn ExitProcess(code: u32) -> !;
     fn CloseHandle(h: Handle) -> Bool;
     fn GetCurrentProcess() -> Handle;
@@ -102,6 +101,11 @@ unsafe extern "system" {
         flags: u32,
     ) -> Handle;
     fn FindClose(h: Handle) -> Bool;
+    fn FindFirstStreamW(name: *const u16, level: u32, data: *mut u8, flags: u32) -> Handle;
+    fn FindNextStreamW(h: Handle, data: *mut u8) -> Bool;
+    fn ReOpenFile(h: Handle, access: u32, share: u32, flags: u32) -> Handle;
+    fn ReadFile(h: Handle, buf: *mut u8, len: u32, read: *mut u32, ov: *mut c_void) -> Bool;
+    fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn GetVolumePathNameW(path: *const u16, buf: *mut u16, size: u32) -> Bool;
     fn CreateFileMappingA(
         file: Handle,
@@ -457,6 +461,50 @@ fn files(c: &mut Checks) -> Result<(), u32> {
         )?;
         CloseHandle(h);
         c.eq(GetFileAttributesW(b.as_ptr()).into(), INVALID_FILE_ATTRIBUTES.into())?;
+
+        // Streams: a file's unnamed data stream ("::$DATA") and its size.
+        let s_path = w("C:\\gala-system-test\\streams.txt");
+        let h = CreateFileW(
+            s_path.as_ptr(),
+            GENERIC_READ_WRITE,
+            0,
+            core::ptr::null_mut(),
+            CREATE_ALWAYS,
+            0,
+            core::ptr::null_mut(),
+        );
+        c.ok(h != INVALID_HANDLE_VALUE, GetLastError().into())?;
+        let mut n = 0;
+        WriteFile(h, b"0123456789".as_ptr(), 10, &mut n, core::ptr::null_mut());
+        CloseHandle(h);
+        let mut stream = [0u8; 8 + 2 * 296];
+        let find = FindFirstStreamW(s_path.as_ptr(), 0, stream.as_mut_ptr(), 0);
+        c.ok(find != INVALID_HANDLE_VALUE, GetLastError().into())?;
+        c.eq(i64::from_le_bytes(stream[..8].try_into().unwrap()) as u64, 10)?;
+        let name: [u16; 8] =
+            core::array::from_fn(|i| u16::from_le_bytes([stream[8 + 2 * i], stream[9 + 2 * i]]));
+        c.ok(name == w("::$DATA")[..8], name[0].into())?;
+        c.eq(FindNextStreamW(find, stream.as_mut_ptr()) as u64, 0)?;
+        c.eq(GetLastError().into(), 38)?; // ERROR_HANDLE_EOF
+        FindClose(find);
+        // ReOpenFile: a second handle to the same file, its own position.
+        let h = CreateFileW(
+            s_path.as_ptr(),
+            0x8000_0000,
+            1,
+            core::ptr::null_mut(),
+            3,
+            0,
+            core::ptr::null_mut(),
+        );
+        let mut buf = [0u8; 4];
+        ReadFile(h, buf.as_mut_ptr(), 4, &mut n, core::ptr::null_mut());
+        let h2 = ReOpenFile(h, 0x8000_0000, 1, 0);
+        c.ok(h2 != INVALID_HANDLE_VALUE, GetLastError().into())?;
+        ReadFile(h2, buf.as_mut_ptr(), 4, &mut n, core::ptr::null_mut());
+        c.ok(n == 4 && &buf == b"0123", n.into())?;
+        CloseHandle(h2);
+        CloseHandle(h);
 
         let mut data = [0u16; 320];
         let pattern = w("C:\\gala-system-test\\*");

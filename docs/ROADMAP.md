@@ -469,8 +469,20 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       in the kernel under TCG); the last pieces were static TLS and thread
       notifications (`tls_test`), module paths (GetModuleFileName of a
       DLL: the JVM finds itself so) and pinning the executable's static
-      imports. Next: a Java program (a class from a jar, then a small
-      HTTP server with com.sun.net.httpserver). The history: xtask fetches
+      imports. **A Java program runs** (`java_hello`: `java Hello.java`,
+      compiled in memory by jdk.compiler, then run: properties,
+      collections, a thread pool, formatting). It needed what net.dll and
+      nio.dll import: advapi32 ConvertStringSidToSidW,
+      LookupAccountNameW, MapGenericMask, GetFileSecurityW (a synthesized
+      descriptor), GetSecurityDescriptorOwner, DuplicateTokenEx,
+      SetThreadToken; ws2_32 WSA events; kernel32 FindFirst/NextStreamW,
+      ReOpenFile; new iphlpapi, secur32 and winhttp (adapters, ICMP, SSPI
+      and WinHTTP sessions not supported, recorded); mswsock TransmitFile
+      (not supported). Next: GetVersionEx must honour the executable's
+      compatibility manifest (java.exe declares Windows 10: Java should
+      report os.name "Windows 11", os.version "10.0"; gala says 6.2 as for
+      an unmanifested program), then com.sun.net.httpserver serving the
+      host (needs iphlpapi's adapters for real). The history: xtask fetches
       the JDK (PREBUILT, 170 MB of it as a directory tree). The import
       closure of java.exe, jvm.dll, java.dll and jimage.dll lacked ~80
       kernel32 functions, 21 advapi32 (security: SIDs, ACLs, tokens), 3

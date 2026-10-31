@@ -1520,8 +1520,76 @@ pub extern "system" fn FindNextFileW(find: Handle, data: *mut u16) -> Bool {
 pub extern "system" fn FindClose(find: Handle) -> Bool {
     // SAFETY: `find` came from FindFirstFileW.
     let directory = unsafe { (*find.cast::<FindState>()).directory };
-    CloseHandle(directory);
+    if !directory.is_null() {
+        CloseHandle(directory);
+    }
     VirtualFree(find, 0, 0x8000)
+}
+
+/// FindFirstStreamW(name, FindStreamInfoStandard, *WIN32_FIND_STREAM_DATA,
+/// 0): gala's files have only their unnamed data stream, "::$DATA" with
+/// the file's size; a directory has none (ERROR_HANDLE_EOF).
+#[unsafe(no_mangle)]
+pub extern "system" fn FindFirstStreamW(
+    name: *const u16,
+    level: u32,
+    data: *mut u8,
+    _flags: u32,
+) -> Handle {
+    if level != 0 || data.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+    }
+    let mut info = [0u32; 9];
+    if GetFileAttributesExW(name, 0, info.as_mut_ptr()) == FALSE {
+        return INVALID_HANDLE_VALUE;
+    }
+    if info[0] & 0x10 != 0 {
+        return fail_with(38, INVALID_HANDLE_VALUE); // a directory: ERROR_HANDLE_EOF
+    }
+    let size = (u64::from(info[7]) << 32) | u64::from(info[8]);
+    // WIN32_FIND_STREAM_DATA: StreamSize, then cStreamName[MAX_PATH + 36].
+    // SAFETY: the caller's structure (8 + 592 bytes).
+    unsafe {
+        core::ptr::write_bytes(data, 0, 8 + 2 * 296);
+        data.cast::<u64>().write_unaligned(size);
+        for (i, c) in "::$DATA".encode_utf16().enumerate() {
+            data.add(8 + 2 * i).cast::<u16>().write_unaligned(c);
+        }
+    }
+    // A find handle FindClose takes (no directory behind it).
+    let state = VirtualAlloc(core::ptr::null_mut(), 0x1000, 0x3000, 4) as *mut FindState;
+    if state.is_null() {
+        return INVALID_HANDLE_VALUE;
+    }
+    // SAFETY: a fresh allocation.
+    unsafe { state.write(FindState { directory: core::ptr::null_mut() }) };
+    state.cast()
+}
+
+/// FindNextStreamW: the only stream was the first (ERROR_HANDLE_EOF).
+#[unsafe(no_mangle)]
+pub extern "system" fn FindNextStreamW(_find: Handle, _data: *mut u8) -> Bool {
+    fail_with(38, FALSE)
+}
+
+/// ReOpenFile: a new handle to the file `h` names (its own file
+/// position), with new access, sharing and flags.
+#[unsafe(no_mangle)]
+pub extern "system" fn ReOpenFile(h: Handle, access: u32, share: u32, flags: u32) -> Handle {
+    let mut path = [0u16; 1100];
+    let n = files::GetFinalPathNameByHandleW(h, path.as_mut_ptr(), path.len() as u32, 0);
+    if n == 0 || n as usize >= path.len() {
+        return INVALID_HANDLE_VALUE;
+    }
+    CreateFileW(
+        path.as_ptr(),
+        access,
+        share,
+        core::ptr::null_mut(),
+        3,
+        flags,
+        core::ptr::null_mut(),
+    )
 }
 
 // ---- Process-wide settings ----

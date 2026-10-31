@@ -77,6 +77,36 @@ unsafe extern "C" {
 unsafe extern "system" {
     fn VirtualAlloc(address: *mut u8, size: usize, kind: u32, protect: u32) -> *mut u8;
     fn VirtualFree(address: *mut u8, size: usize, kind: u32) -> i32;
+    fn CreateEventW(attributes: usize, manual: i32, initial: i32, name: *const u16) -> usize;
+    fn SetEvent(h: usize) -> i32;
+    fn ResetEvent(h: usize) -> i32;
+    fn CloseHandle(h: usize) -> i32;
+}
+
+/// WSACreateEvent: a manual-reset event, initially not signaled (NULL,
+/// WSA_INVALID_EVENT, on failure).
+#[unsafe(no_mangle)]
+pub extern "system" fn WSACreateEvent() -> usize {
+    // SAFETY: plain calls.
+    unsafe { CreateEventW(0, 1, 0, core::ptr::null()) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WSACloseEvent(event: usize) -> i32 {
+    // SAFETY: as above.
+    unsafe { CloseHandle(event) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WSASetEvent(event: usize) -> i32 {
+    // SAFETY: as above.
+    unsafe { SetEvent(event) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAResetEvent(event: usize) -> i32 {
+    // SAFETY: as above.
+    unsafe { ResetEvent(event) }
 }
 
 #[repr(C)]

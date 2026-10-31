@@ -17,6 +17,7 @@ use super::{ERROR_INSUFFICIENT_BUFFER, fail, missing, predefined};
 unsafe extern "system" {
     fn LocalAlloc(flags: u32, bytes: usize) -> *mut u8;
     fn GetCurrentProcess() -> usize;
+    fn GetFileAttributesW(path: *const u16) -> u32;
     fn DuplicateHandle(
         source_process: usize,
         source: usize,
@@ -580,16 +581,21 @@ pub extern "system" fn GetSecurityDescriptorDacl(
     dacl: *mut *mut u8,
     defaulted: *mut i32,
 ) -> i32 {
-    if IsValidSecurityDescriptor(sd) == 0 || control(sd) & SE_SELF_RELATIVE != 0 {
-        missing(b"advapi32.dll!GetSecurityDescriptorDacl(self-relative)");
+    if IsValidSecurityDescriptor(sd) == 0 {
         return fail(ERROR_INVALID_SECURITY_DESCR, 0);
     }
     let c = control(sd);
-    // SAFETY: the caller's descriptor and outputs.
+    // SAFETY: the caller's descriptor (absolute: a pointer at 32;
+    // self-relative: an offset at 16) and outputs.
     unsafe {
         *present = i32::from(c & SE_DACL_PRESENT != 0);
         if c & SE_DACL_PRESENT != 0 {
-            *dacl = sd.add(32).cast::<*mut u8>().read_unaligned();
+            *dacl = if c & SE_SELF_RELATIVE != 0 {
+                let off = sd.add(16).cast::<u32>().read_unaligned() as usize;
+                if off == 0 { core::ptr::null_mut() } else { sd.add(off).cast_mut() }
+            } else {
+                sd.add(32).cast::<*mut u8>().read_unaligned()
+            };
             *defaulted = i32::from(c & SE_DACL_DEFAULTED != 0);
         }
     }
@@ -982,4 +988,288 @@ pub extern "system" fn RegQueryInfoKeyW(
         security,
         time,
     )
+}
+
+// ---- What the JDK's net and nio libraries import ----
+
+/// ConvertStringSidToSidW: "S-1-<authority>-<sub>..." (decimal, or a
+/// 0x-hexadecimal authority) and the SDDL abbreviations for the
+/// well-known accounts gala knows (BA, BU, WD, SY, AU, CO); the SID in
+/// local memory (LocalFree).
+#[unsafe(no_mangle)]
+pub extern "system" fn ConvertStringSidToSidW(text: *const u16, sid: *mut *mut u8) -> i32 {
+    if text.is_null() || sid.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut chars = [0u8; 200];
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated string.
+    unsafe {
+        while *text.add(n) != 0 {
+            if n == chars.len() {
+                return fail(ERROR_INVALID_SID, 0);
+            }
+            chars[n] = u8::try_from(*text.add(n)).unwrap_or(0);
+            n += 1;
+        }
+    }
+    let s = core::str::from_utf8(&chars[..n]).unwrap_or("");
+    let (authority, subs): (u64, &[u32]) = match s {
+        "BA" => (5, &[32, 544]),
+        "BU" => (5, &[32, 545]),
+        "WD" => (1, &[0]),
+        "SY" => (5, &[18]),
+        "AU" => (5, &[11]),
+        "CO" => (3, &[0]),
+        _ => (u64::MAX, &[]),
+    };
+    let mut parsed = [0u32; SID_MAX_SUB_AUTHORITIES];
+    let (authority, count) = if authority != u64::MAX {
+        parsed[..subs.len()].copy_from_slice(subs);
+        (authority, subs.len())
+    } else {
+        let mut parts = s.split('-');
+        if parts.next() != Some("S") || parts.next() != Some("1") {
+            return fail(ERROR_INVALID_SID, 0);
+        }
+        let authority = match parts.next() {
+            Some(a) if a.starts_with("0x") || a.starts_with("0X") => {
+                u64::from_str_radix(&a[2..], 16).ok()
+            }
+            Some(a) => a.parse::<u64>().ok(),
+            None => None,
+        };
+        let Some(authority) = authority.filter(|a| *a < 1 << 48) else {
+            return fail(ERROR_INVALID_SID, 0);
+        };
+        let mut count = 0;
+        for part in parts {
+            let Some(v) = part.parse::<u32>().ok().filter(|_| count < SID_MAX_SUB_AUTHORITIES)
+            else {
+                return fail(ERROR_INVALID_SID, 0);
+            };
+            parsed[count] = v;
+            count += 1;
+        }
+        if count == 0 {
+            return fail(ERROR_INVALID_SID, 0);
+        }
+        (authority, count)
+    };
+    // SAFETY: plain call.
+    let p = unsafe { LocalAlloc(0, sid_len(count)) };
+    if p.is_null() {
+        return fail(8, 0);
+    }
+    let a = authority.to_be_bytes();
+    write_sid(p, [a[2], a[3], a[4], a[5], a[6], a[7]], &parsed[..count]);
+    // SAFETY: the caller's output.
+    unsafe { *sid = p };
+    1
+}
+
+/// LookupAccountNameW: the SID, domain and SID_NAME_USE of an account
+/// gala knows ("gala", "Administrators", "Everyone"...; "DOMAIN\\name"
+/// too); the sizes needed (the domain's with its NUL) and
+/// ERROR_INSUFFICIENT_BUFFER for a size query; ERROR_NONE_MAPPED for
+/// other names.
+#[unsafe(no_mangle)]
+pub extern "system" fn LookupAccountNameW(
+    _system: *const u16,
+    name: *const u16,
+    sid: *mut u8,
+    sid_len_io: *mut u32,
+    domain: *mut u16,
+    domain_len: *mut u32,
+    kind: *mut u32,
+) -> i32 {
+    if name.is_null() || sid_len_io.is_null() || domain_len.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut chars = [0u16; 128];
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated name.
+    unsafe {
+        while *name.add(n) != 0 && n < chars.len() {
+            chars[n] = *name.add(n);
+            n += 1;
+        }
+    }
+    let full = &chars[..n];
+    // "DOMAIN\name": the name part (the domain must match the account's).
+    let (want_domain, account) = match full.iter().position(|&c| c == u16::from(b'\\')) {
+        Some(i) => (Some(&full[..i]), &full[i + 1..]),
+        None => (None, full),
+    };
+    let same = |a: &[u16], b: &str| {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b.bytes())
+                .all(|(&x, y)| u8::try_from(x).is_ok_and(|x| x.eq_ignore_ascii_case(&y)))
+    };
+    let Some(&(authority, subs, _, dom, use_)) =
+        ACCOUNTS.iter().find(|a| same(account, a.2) && want_domain.is_none_or(|d| same(d, a.3)))
+    else {
+        return fail(ERROR_NONE_MAPPED, 0);
+    };
+    let need_sid = sid_len(subs.len()) as u32;
+    let need_domain = dom.len() as u32 + 1;
+    // SAFETY: the caller's sizes and buffers.
+    unsafe {
+        if sid.is_null() || domain.is_null() || *sid_len_io < need_sid || *domain_len < need_domain
+        {
+            *sid_len_io = need_sid;
+            *domain_len = need_domain;
+            return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        let a = authority.to_be_bytes();
+        write_sid(sid, [a[2], a[3], a[4], a[5], a[6], a[7]], subs);
+        put_name(dom, domain);
+        *sid_len_io = need_sid;
+        *domain_len = need_domain - 1;
+        if !kind.is_null() {
+            *kind = use_;
+        }
+    }
+    1
+}
+
+/// MapGenericMask: GENERIC_READ/WRITE/EXECUTE/ALL become the mapping's
+/// rights (GENERIC_MAPPING: read, write, execute, all) and are cleared.
+#[unsafe(no_mangle)]
+pub extern "system" fn MapGenericMask(mask: *mut u32, mapping: *const u32) {
+    if mask.is_null() || mapping.is_null() {
+        return;
+    }
+    // SAFETY: the caller's mask and GENERIC_MAPPING.
+    unsafe {
+        let mut m = *mask;
+        for (i, bit) in
+            [0x8000_0000u32, 0x4000_0000, 0x2000_0000, 0x1000_0000].into_iter().enumerate()
+        {
+            if m & bit != 0 {
+                m = (m & !bit) | *mapping.add(i);
+            }
+        }
+        *mask = m;
+    }
+}
+
+/// GetSecurityDescriptorOwner: absolute (a pointer at 8) or self-relative
+/// (an offset at 4) descriptors; SE_OWNER_DEFAULTED is control bit 1.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSecurityDescriptorOwner(
+    sd: *const u8,
+    owner: *mut *mut u8,
+    defaulted: *mut i32,
+) -> i32 {
+    if IsValidSecurityDescriptor(sd) == 0 || owner.is_null() {
+        return fail(ERROR_INVALID_SECURITY_DESCR, 0);
+    }
+    let c = control(sd);
+    // SAFETY: the caller's descriptor and outputs.
+    unsafe {
+        *owner = if c & SE_SELF_RELATIVE != 0 {
+            let off = sd.add(4).cast::<u32>().read_unaligned() as usize;
+            if off == 0 { core::ptr::null_mut() } else { sd.add(off).cast_mut() }
+        } else {
+            sd.add(8).cast::<*mut u8>().read_unaligned()
+        };
+        if !defaulted.is_null() {
+            *defaulted = i32::from(c & 1 != 0);
+        }
+    }
+    1
+}
+
+/// GetFileSecurityW: gala's files keep no security descriptors; the one
+/// returned (self-relative) is what a file created by the user has: the
+/// user as owner and primary group, and a DACL granting the user,
+/// Administrators and SYSTEM full access (FILE_ALL_ACCESS). Sizes as
+/// documented: ERROR_INSUFFICIENT_BUFFER with the size needed.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFileSecurityW(
+    path: *const u16,
+    info: u32,
+    sd: *mut u8,
+    length: u32,
+    needed: *mut u32,
+) -> i32 {
+    // SAFETY: a plain call.
+    if path.is_null() || unsafe { GetFileAttributesW(path) } == u32::MAX {
+        return 0; // the file's own error (ERROR_FILE_NOT_FOUND...)
+    }
+    // Build it: header (20), owner, group, DACL.
+    let mut b = [0u8; 256];
+    let mut at = 20usize;
+    let mut control_bits = SE_SELF_RELATIVE;
+    let user = |p: *mut u8| write_sid(p, NT, &USER_SUBS);
+    let user_len = sid_len(USER_SUBS.len());
+    if info & 1 != 0 {
+        user(b[at..].as_mut_ptr());
+        b[4..8].copy_from_slice(&(at as u32).to_le_bytes());
+        at += user_len;
+    }
+    if info & 2 != 0 {
+        user(b[at..].as_mut_ptr());
+        b[8..12].copy_from_slice(&(at as u32).to_le_bytes());
+        at += user_len;
+    }
+    if info & 4 != 0 {
+        let acl = b[at..].as_mut_ptr();
+        InitializeAcl(acl, 128, 2);
+        let mut sid = [0u8; 28];
+        for (auth, subs) in [(NT, &USER_SUBS[..]), (NT, &[32, 544][..]), (NT, &[18][..])] {
+            write_sid(sid.as_mut_ptr(), auth, subs);
+            add_simple_ace(acl, 0, 0, 0x1f_01ff, sid.as_ptr());
+        }
+        let used = acl_used(acl).unwrap_or(8);
+        set_acl_word(acl, 2, used as u16);
+        b[16..20].copy_from_slice(&(at as u32).to_le_bytes());
+        at += used;
+        control_bits |= SE_DACL_PRESENT;
+    }
+    b[0] = 1;
+    b[2..4].copy_from_slice(&control_bits.to_le_bytes());
+    if !needed.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *needed = at as u32 };
+    }
+    if sd.is_null() || (length as usize) < at {
+        return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    // SAFETY: the caller's buffer of `length` >= at bytes.
+    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), sd, at) };
+    1
+}
+
+/// DuplicateTokenEx: another handle on the stand-in token (any level and
+/// type).
+#[unsafe(no_mangle)]
+pub extern "system" fn DuplicateTokenEx(
+    token: usize,
+    _access: u32,
+    _attributes: *mut c_void,
+    _level: u32,
+    _kind: u32,
+    new: *mut usize,
+) -> i32 {
+    if new.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: plain calls; DUPLICATE_SAME_ACCESS (2).
+    unsafe {
+        let me = GetCurrentProcess();
+        if DuplicateHandle(me, token, me, new, 0, 0, 2) == 0 {
+            return 0;
+        }
+    }
+    1
+}
+
+/// SetThreadToken: impersonating the one user is being that user; a
+/// null token reverts. (Threads keep no tokens here.)
+#[unsafe(no_mangle)]
+pub extern "system" fn SetThreadToken(_thread: *mut usize, _token: usize) -> i32 {
+    1
 }

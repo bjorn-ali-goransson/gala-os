@@ -121,6 +121,36 @@ unsafe extern "system" {
         flags: u32,
     ) -> Bool;
     fn CryptReleaseContext(provider: usize, flags: u32) -> Bool;
+    fn ConvertStringSidToSidW(text: *const u16, sid: *mut *mut u8) -> Bool;
+    fn LookupAccountNameW(
+        system: *const u16,
+        name: *const u16,
+        sid: *mut u8,
+        sid_len: *mut u32,
+        domain: *mut u16,
+        domain_len: *mut u32,
+        kind: *mut u32,
+    ) -> Bool;
+    fn MapGenericMask(mask: *mut u32, mapping: *const [u32; 4]);
+    fn GetFileSecurityW(
+        path: *const u16,
+        info: u32,
+        sd: *mut u8,
+        len: u32,
+        needed: *mut u32,
+    ) -> Bool;
+    fn GetSecurityDescriptorOwner(sd: *const u8, owner: *mut *mut u8, defaulted: *mut Bool)
+    -> Bool;
+    fn SetSecurityDescriptorOwner(sd: *mut u8, owner: *mut u8, defaulted: Bool) -> Bool;
+    fn DuplicateTokenEx(
+        token: Handle,
+        access: u32,
+        attrs: *mut c_void,
+        level: u32,
+        kind: u32,
+        new: *mut Handle,
+    ) -> Bool;
+    fn SetThreadToken(thread: *mut Handle, token: Handle) -> Bool;
 }
 
 #[allow(dead_code)]
@@ -442,11 +472,147 @@ fn token(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// A NUL-terminated UTF-16 copy of an ASCII string.
+fn w(s: &str) -> [u16; 64] {
+    let mut b = [0u16; 64];
+    for (d, ch) in b.iter_mut().zip(s.bytes()) {
+        *d = ch.into();
+    }
+    b
+}
+
+/// What the JDK's net and nio libraries import.
+fn more(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: advapi32 calls with buffers of ours.
+    unsafe {
+        let mut sid = core::ptr::null_mut();
+        c.ok(
+            ConvertStringSidToSidW(w("S-1-5-32-544").as_ptr(), &mut sid) != 0,
+            GetLastError().into(),
+        )?;
+        let mut admins = core::ptr::null_mut();
+        AllocateAndInitializeSid(&NT_AUTHORITY, 2, 32, 544, 0, 0, 0, 0, 0, 0, &mut admins);
+        c.ok(EqualSid(sid, admins) != 0, 0)?;
+        LocalFree(sid.cast());
+        SetLastError(0);
+        c.eq(ConvertStringSidToSidW(w("X-1-5").as_ptr(), &mut sid) as u64, 0)?;
+        c.eq(GetLastError().into(), 1337)?; // ERROR_INVALID_SID
+
+        // LookupAccountNameW: a size query, then the user's SID.
+        let (mut buf, mut domain) = ([0u8; 68], [0u16; 32]);
+        let (mut n, mut d, mut kind) = (0u32, 0u32, 0u32);
+        c.eq(
+            LookupAccountNameW(
+                core::ptr::null(),
+                w("gala").as_ptr(),
+                core::ptr::null_mut(),
+                &mut n,
+                core::ptr::null_mut(),
+                &mut d,
+                &mut kind,
+            ) as u64,
+            0,
+        )?;
+        c.eq(GetLastError().into(), ERROR_INSUFFICIENT_BUFFER.into())?;
+        c.eq(n.into(), 28)?; // S-1-5-21-x-y-z-1001
+        c.eq(d.into(), 5)?; // "GALA" and its NUL
+        c.ok(
+            LookupAccountNameW(
+                core::ptr::null(),
+                w("gala").as_ptr(),
+                buf.as_mut_ptr(),
+                &mut n,
+                domain.as_mut_ptr(),
+                &mut d,
+                &mut kind,
+            ) != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(kind.into(), SID_TYPE_USER.into())?;
+        c.text(domain.as_ptr(), "GALA")?;
+        let mut text = core::ptr::null_mut();
+        ConvertSidToStringSidW(buf.as_ptr(), &mut text);
+        c.ok(*text.add(6) == u16::from(b'2') && *text.add(7) == u16::from(b'1'), 0)?; // S-1-5-21-
+        LocalFree(text.cast());
+        let (mut n, mut d) = (68u32, 32u32);
+        c.ok(
+            LookupAccountNameW(
+                core::ptr::null(),
+                w("Administrators").as_ptr(),
+                buf.as_mut_ptr(),
+                &mut n,
+                domain.as_mut_ptr(),
+                &mut d,
+                &mut kind,
+            ) != 0,
+            0,
+        )?;
+        c.ok(EqualSid(buf.as_ptr(), admins) != 0, 0)?;
+        c.eq(kind.into(), SID_TYPE_ALIAS.into())?;
+        let (mut n, mut d) = (68u32, 32u32);
+        c.eq(
+            LookupAccountNameW(
+                core::ptr::null(),
+                w("nobody-here").as_ptr(),
+                buf.as_mut_ptr(),
+                &mut n,
+                domain.as_mut_ptr(),
+                &mut d,
+                &mut kind,
+            ) as u64,
+            0,
+        )?;
+        c.eq(GetLastError().into(), 1332)?; // ERROR_NONE_MAPPED
+
+        // MapGenericMask: GENERIC_READ becomes the mapping's read rights.
+        let mut mask = 0x8000_0000u32;
+        MapGenericMask(&mut mask, &[1, 2, 4, 8]);
+        c.eq(mask.into(), 1)?;
+
+        // A file's owner.
+        let path = w("C:\\gala-advapi32-test.txt");
+        let mut needed = 0u32;
+        c.eq(GetFileSecurityW(path.as_ptr(), 1, core::ptr::null_mut(), 0, &mut needed) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_INSUFFICIENT_BUFFER.into())?;
+        let mut sd = [0u64; 32];
+        c.ok(needed > 0 && needed as usize <= 256, needed.into())?;
+        c.ok(
+            GetFileSecurityW(path.as_ptr(), 1, sd.as_mut_ptr().cast(), 256, &mut needed) != 0,
+            GetLastError().into(),
+        )?;
+        let (mut owner, mut defaulted) = (core::ptr::null_mut(), 1);
+        c.ok(GetSecurityDescriptorOwner(sd.as_ptr().cast(), &mut owner, &mut defaulted) != 0, 0)?;
+        c.ok(IsValidSid(owner) != 0, 0)?;
+        // An absolute descriptor's owner.
+        let mut abs = [0u64; 5];
+        InitializeSecurityDescriptor(abs.as_mut_ptr().cast(), 1);
+        c.ok(SetSecurityDescriptorOwner(abs.as_mut_ptr().cast(), admins, 0) != 0, 0)?;
+        c.ok(GetSecurityDescriptorOwner(abs.as_ptr().cast(), &mut owner, &mut defaulted) != 0, 0)?;
+        c.ok(owner == admins && defaulted == 0, 0)?;
+        FreeSid(admins);
+
+        // An impersonation token from the process token.
+        let mut token = core::ptr::null_mut();
+        c.ok(OpenProcessToken(GetCurrentProcess(), 0x2 | 0x8, &mut token) != 0, 0)?; // DUPLICATE | QUERY
+        let mut copy = core::ptr::null_mut();
+        c.ok(
+            DuplicateTokenEx(token, 0x0200_0000, core::ptr::null_mut(), 2, 2, &mut copy) != 0,
+            GetLastError().into(),
+        )?;
+        c.ok(SetThreadToken(core::ptr::null_mut(), copy) != 0, GetLastError().into())?;
+        c.ok(SetThreadToken(core::ptr::null_mut(), core::ptr::null_mut()) != 0, 0)?; // revert
+        CloseHandle(copy);
+        CloseHandle(token);
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     sids(&mut c)?;
     acls(&mut c)?;
-    token(&mut c)
+    token(&mut c)?;
+    more(&mut c)
 }
 
 #[unsafe(no_mangle)]

@@ -233,6 +233,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "iphlpapi"
+version = "0.1.0"
+
+[[package]]
 name = "kernel"
 version = "0.1.0"
 dependencies = [
@@ -412,6 +416,10 @@ version = "0.1.0"
 dependencies = [
  "ntrt",
 ]
+
+[[package]]
+name = "secur32"
+version = "0.1.0"
 
 [[package]]
 name = "seh_test"
@@ -608,6 +616,10 @@ dependencies = [
 
 [[package]]
 name = "win32_misc_test"
+version = "0.1.0"
+
+[[package]]
+name = "winhttp"
 version = "0.1.0"
 
 [[package]]

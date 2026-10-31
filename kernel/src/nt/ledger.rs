@@ -12,7 +12,7 @@ use core::fmt;
 
 use crate::sync::IrqMutex;
 
-const ENTRIES: usize = 64;
+const ENTRIES: usize = 512;
 
 /// Who reported the gap: a kernel service, or a name from user mode (gala's
 /// own DLLs, through `record_user`), kept in a fixed table.
@@ -22,8 +22,8 @@ enum Service {
     User(usize),
 }
 
-const USER_NAMES: usize = 128;
-const USER_NAME_LEN: usize = 64;
+const USER_NAMES: usize = 512;
+const USER_NAME_LEN: usize = 96;
 
 struct UserNames {
     names: [[u8; USER_NAME_LEN]; USER_NAMES],
