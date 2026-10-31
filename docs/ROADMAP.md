@@ -214,8 +214,8 @@ to set and to argue for. Current order and why:
    driving children through pipes, chosen from what the ledger shows).
    H2 done (Go's os/exec, busybox-w32's sh); H3 (scripts and file
    tools) done; H4 (a C compiler on gala) done; H5 (TinyCC builds
-   itself on gala) done; H6 (make on gala) done; next H7 (a real C
-   project built on gala).
+   itself on gala) done; H6 (make on gala) done; H7 (Lua built on gala)
+   done; next H8 (build speed).
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
@@ -382,11 +382,25 @@ H6. **make on gala**: done 2026-10-31. The `tcc_make` scenario
    can now be set (creation and write times, attributes; 0 or -1 keeps a
    value; FILE_WRITE_ATTRIBUTES), checked in kernel32_file_test and a
    ramfs unit test. tar now restores file times too.
-H7. **A real C project built on gala**: next. Lua (MIT, pure C99, a
-   plain Makefile) unpacked, built with make and tcc on gala, its
-   interpreter running a test script with output as on Windows. Then
-   the ledger decides (FormatMessage(FROM_SYSTEM) for busybox's error
-   text is the oldest open entry).
+H7. **A real C project built on gala**: done 2026-10-31. The `lua`
+   scenario (`user/lua/lua.sh`): the unmodified Lua 5.4.7 release
+   (`user/lua/build.sh` repacks the lua.org tarball, checked against its
+   published SHA-256) is built on gala by its own `src/Makefile` under
+   busybox's make with tcc (37 commands: 34 compiles, `tcc -ar`, two
+   links); lua.exe then runs `user/lua/test.lua` (strings, tables,
+   closures, number formatting, pcall/error, coroutines, files), output
+   as on Windows. It needed msvcrt's math library (the `libm` crate),
+   strcoll, _difftime64/32, tmpnam/tmpfile (and fopen's `D` mode),
+   _popen/_pclose (recorded failure: no command interpreter yet), and it
+   found that printf printed %e/%g as %f and mangled values above 2^64:
+   float.rs now formats from the exact expansion as msvcrt.dll does (17
+   significant digits, three-digit exponents), checked by 20 cases in
+   msvcrt_test.
+H8. **Build speed**: next. Building Lua takes about 12 s in the kernel
+   under QEMU (TCG). Profile it with the event log (`XTASK_EVENTS`):
+   process creation and image loading per tcc run, file I/O system
+   calls, page faults; cut the largest cost, with a benchmark in
+   `user/bench` that guards it.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

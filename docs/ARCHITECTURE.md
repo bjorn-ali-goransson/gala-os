@@ -550,6 +550,15 @@ rounds correctly; strtod sets ERANGE on overflow (HUGE_VAL) and on
 underflow to 0. TinyCC parses float constants with strtod, so programs
 it builds on gala get the same constants as elsewhere.
 
+**printf's floats and the math library** (H7): float.rs formats %f %e
+%g from the exact decimal expansion of the double (a 1152-bit bignum),
+rounded to 17 significant digits with zeros after them and then half
+away from zero at the requested digit, as msvcrt.dll's conversion does;
+exponents have a sign and at least three digits. inf and nan print as
+`inf`/`nan` (msvcrt.dll prints `1.#INF00`: a known difference, TODO).
+The math functions (sin, pow, floor, fmod, ...) come from the `libm`
+crate; the transcendental ones may differ from msvcrt's in the last bit.
+
 **File times** (H6): ramfs nodes keep a creation and a write time (NT
 times); FileBasicInformation reports the write time as the access and
 change times too. Setting FileBasicInformation (FILE_WRITE_ATTRIBUTES)

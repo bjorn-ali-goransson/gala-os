@@ -229,9 +229,12 @@ fn open(path: &[u16], mode: &[u8]) -> *mut u8 {
         set_errno(EINVAL);
         return null_mut();
     };
+    // 'D': a temporary file, deleted when it is closed (as msvcrt documents).
+    let (share, flags) = if mode.contains(&b'D') { (7, 0x80 | 0x0400_0000) } else { (3, 0x80) };
     // SAFETY: a NUL-terminated path.
-    let h =
-        unsafe { CreateFileW(path.as_ptr(), access, 3, null_mut(), disposition, 0x80, null_mut()) };
+    let h = unsafe {
+        CreateFileW(path.as_ptr(), access, share, null_mut(), disposition, flags, null_mut())
+    };
     if h == INVALID_HANDLE {
         set_errno(errno_of_last_error());
         return null_mut();
@@ -303,6 +306,71 @@ pub extern "C" fn freopen(path: *const u8, mode: *const u8, file: *mut u8) -> *m
     // SAFETY: the caller's stream, reset to the new file.
     unsafe { file.cast::<Stream>().write(Stream::new(h, fd)) };
     file
+}
+
+/// tmpnam(buf): a name for a temporary file in the root directory of the
+/// current drive (`\s<n>.`, as msvcrt names them) that does not exist
+/// yet; in `buf` (L_tmpnam = 14 bytes) or a static buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn tmpnam(buf: *mut u8) -> *mut u8 {
+    static mut NAME: [u8; 14] = [0; 14];
+    static NEXT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+    let out = if buf.is_null() { (&raw mut NAME).cast::<u8>() } else { buf };
+    for _ in 0..1000 {
+        let mut n = NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let mut digits = [0u8; 8];
+        let mut len = 0;
+        loop {
+            digits[len] = b"0123456789abcdefghijklmnopqrstuv"[(n % 32) as usize];
+            len += 1;
+            n /= 32;
+            if n == 0 {
+                break;
+            }
+        }
+        // SAFETY: at most 2 + 7 + 2 bytes of the 14 (L_tmpnam).
+        unsafe {
+            *out = b'\\';
+            *out.add(1) = b's';
+            for i in 0..len.min(7) {
+                *out.add(2 + i) = digits[len - 1 - i];
+            }
+            *out.add(2 + len.min(7)) = b'.';
+            *out.add(3 + len.min(7)) = 0;
+        }
+        if crate::posix::_access(out, 0) != 0 {
+            return out;
+        }
+    }
+    null_mut()
+}
+
+/// tmpfile(): a new temporary file ("w+b"), deleted when closed.
+#[unsafe(no_mangle)]
+pub extern "C" fn tmpfile() -> *mut u8 {
+    let mut name = [0u8; 14];
+    if tmpnam(name.as_mut_ptr()).is_null() {
+        set_errno(EEXIST_);
+        return null_mut();
+    }
+    fopen(name.as_ptr(), c"w+bD".as_ptr().cast())
+}
+
+const EEXIST_: i32 = 17;
+
+/// _popen(command, mode): needs a command interpreter connected through a
+/// pipe; not yet (recorded). Fails with ENOSYS.
+#[unsafe(no_mangle)]
+pub extern "C" fn _popen(_command: *const u8, _mode: *const u8) -> *mut u8 {
+    crate::missing(b"msvcrt.dll!_popen", 0);
+    set_errno(40); // ENOSYS
+    null_mut()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _pclose(_file: *mut u8) -> i32 {
+    set_errno(22); // EINVAL
+    -1
 }
 
 #[unsafe(no_mangle)]
@@ -1084,7 +1152,7 @@ impl Args {
 
 /// Formats `fmt` with the C printf rules (flags `-+ #0`, width and
 /// precision with `*`, lengths hh h l ll I I32 I64 z j t w, conversions
-/// d i u o x X c s p % and f/e/g as fixed point). With `wide`, `%s` and
+/// d i u o x X c s p %, and f e g (float.rs)). With `wide`, `%s` and
 /// `%c` take UTF-16 (and `%hs` narrow), as in the wprintf functions; the
 /// output is UTF-8 either way.
 fn format(out: &mut Out, fmt: &[u8], mut args: Args, wide: bool) {
@@ -1178,6 +1246,7 @@ fn format(out: &mut Out, fmt: &[u8], mut args: Args, wide: bool) {
             _ => false,
         };
         let mut digits = [0u8; 72];
+        let mut float_buf = [0u8; crate::float::MAX_OUT];
         let mut utf8 = [0u8; 4];
         let (body, prefix): (&[u8], &[u8]) = match conv {
             b'd' | b'i' => {
@@ -1234,8 +1303,17 @@ fn format(out: &mut Out, fmt: &[u8], mut args: Args, wide: bool) {
             }
             b'f' | b'F' | b'e' | b'E' | b'g' | b'G' => {
                 let v = f64::from_bits(args.next());
-                let (s, negative) = fixed(&mut digits, v, precision.unwrap_or(6));
-                (s, if negative { b"-" } else { b"" })
+                let (n, negative) = crate::float::format(v, conv, precision, alt, &mut float_buf);
+                let sign: &[u8] = if negative {
+                    b"-"
+                } else if plus {
+                    b"+"
+                } else if space {
+                    b" "
+                } else {
+                    b""
+                };
+                (&float_buf[..n], sign)
             }
             b'%' => (b"%".as_slice(), b""),
             b'n' => {
@@ -1251,8 +1329,12 @@ fn format(out: &mut Out, fmt: &[u8], mut args: Args, wide: bool) {
         };
         let len = prefix.len() + body.len();
         let pad = width.saturating_sub(len);
-        let zero_pad =
-            zero && !left && precision.is_none() && !matches!(conv, b's' | b'c' | b'S' | b'C');
+        // 0 pads numbers; an integer precision turns it off (not a float's).
+        let float = matches!(conv, b'f' | b'F' | b'e' | b'E' | b'g' | b'G');
+        let zero_pad = zero
+            && !left
+            && (precision.is_none() || float)
+            && !matches!(conv, b's' | b'c' | b'S' | b'C');
         if !left && !zero_pad {
             pad_with(out, b' ', pad);
         }
@@ -1323,39 +1405,6 @@ fn number(
         v /= base;
     }
     &buf[at..]
-}
-
-/// `v` in fixed point with `precision` decimals (values up to 2^64; the
-/// last digits may be off by rounding).
-fn fixed(buf: &mut [u8; 72], v: f64, precision: usize) -> (&[u8], bool) {
-    let precision = precision.min(18);
-    let negative = v.is_sign_negative();
-    let v = if negative { -v } else { v };
-    if v.is_nan() || v.is_infinite() {
-        let s: &[u8] = if v.is_nan() { b"nan" } else { b"inf" };
-        buf[..s.len()].copy_from_slice(s);
-        return (&buf[..s.len()], negative && !v.is_nan());
-    }
-    let mut scale = 1u64;
-    for _ in 0..precision {
-        scale *= 10;
-    }
-    let scaled = v * scale as f64 + 0.5;
-    let whole = (scaled / scale as f64) as u64;
-    let frac = (scaled as u64).wrapping_sub(whole.wrapping_mul(scale));
-    let mut tmp = [0u8; 72];
-    let int_part = number(&mut tmp, whole, 10, false, None);
-    let mut n = int_part.len();
-    buf[..n].copy_from_slice(int_part);
-    if precision > 0 {
-        buf[n] = b'.';
-        n += 1;
-        let mut tmp2 = [0u8; 72];
-        let f = number(&mut tmp2, frac, 10, false, Some(precision));
-        buf[n..n + f.len()].copy_from_slice(f);
-        n += f.len();
-    }
-    (&buf[..n], negative)
 }
 
 #[unsafe(no_mangle)]

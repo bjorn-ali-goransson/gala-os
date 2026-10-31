@@ -315,6 +315,21 @@ same on gala and Windows; each step's lines carry the step's name
 (`build:`, `after touch:`, `again:`, `broken:`), since a scenario's
 expected lines are only searched for.
 
+## Lua
+
+`user/lua/build.sh` repacks the Lua 5.4.7 release into `user/bin/lua.tar`
+(checked against lua.org's published SHA-256; nothing is compiled on the
+host). The `lua` scenario (`user/lua/lua.sh`) builds it on gala with
+Lua's own `src/Makefile`, overriding only its documented settings
+(`CC`, `CFLAGS`, `AR=tcc -ar rcs`, `RANLIB=:`, `LIBS=` since msvcrt has
+the math functions, `LUA_T`/`LUAC_T` with `.exe`), and runs
+`user/lua/test.lua`. Expected lines were written from Lua's and
+msvcrt.dll's documented behaviour (compiling Lua on the host to compare
+is a third-party build, which the session's permissions refuse; Windows
+itself is the reference through `run-all.ps1`). test.lua avoids output
+that depends on the script's path (`error(msg, 0)`) and exact decimal
+ties (C runtimes round them differently).
+
 ## Hunting a rare hang
 
 A scenario that fails once in N runs: loop `cargo xtask boot-test <name>`

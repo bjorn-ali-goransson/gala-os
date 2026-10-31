@@ -82,12 +82,14 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
 # tcc.tar (user/tcc/build.sh), builds TinyCC's runtime with it, compiles
 # hello.c and runs it; self.sh then has tcc compile itself (tcc2.exe), and
 # tcc2 compile hello.c and msvcrt_test's main.c; make.sh builds
-# user/tcc/make/ with busybox's make and tcc.
+# user/tcc/make/ with busybox's make and tcc; lua.sh builds Lua from
+# source with them and runs user/lua/test.lua.
 $scripts = @(
     @{ name = "busybox_files"; path = "..\busybox\files.sh"; args = @() },
     @{ name = "busybox_script"; path = "..\busybox\script.sh"; args = @() },
     @{ name = "tcc"; path = "..\tcc\tcc.sh"; args = @((Join-Path $here "tcc.tar")) },
     @{ name = "tcc_make"; path = "..\tcc\make.sh"; args = @((Join-Path $here "tcc.tar")) },
+    @{ name = "lua"; path = "..\lua\lua.sh"; args = @((Join-Path $here "tcc.tar"), (Join-Path $here "lua.tar")) },
     @{ name = "tcc_self"; path = "..\tcc\self.sh"; args = @((Join-Path $here "tcc.tar"), (Join-Path $here "..\msvcrt_test\main.c")) }
 )
 foreach ($s in $scripts) {

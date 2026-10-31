@@ -414,6 +414,23 @@ fn compare_ci(a: *const u8, b: *const u8, n: usize) -> i32 {
     0
 }
 
+/// strcoll(a, b): in the "C" locale (the only one), strcmp.
+#[unsafe(no_mangle)]
+pub extern "C" fn strcoll(a: *const u8, b: *const u8) -> i32 {
+    crate::strcmp(a, b)
+}
+
+/// _difftime64(end, start) / _difftime32: seconds between two times.
+#[unsafe(no_mangle)]
+pub extern "C" fn _difftime64(end: i64, start: i64) -> f64 {
+    end as f64 - start as f64
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _difftime32(end: i32, start: i32) -> f64 {
+    f64::from(end) - f64::from(start)
+}
+
 /// _strlwr(s): ASCII letters lowered in place; `s`.
 #[unsafe(no_mangle)]
 pub extern "C" fn _strlwr(s: *mut u8) -> *mut u8 {

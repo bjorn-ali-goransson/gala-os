@@ -9,3 +9,6 @@ publish.workspace = true
 crate-type = ["cdylib"]
 test = false
 bench = false
+
+[dependencies]
+libm = { version = "0.2.16", default-features = false }
