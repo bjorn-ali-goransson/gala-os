@@ -230,6 +230,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("tls_test", "ntdll.dll", "Windows/System32"),
     ("tls_test", "kernel32.dll", "Windows/System32"),
     ("tls_test", "tlsdll.dll", "gala"),
+    ("afd_poll_test", "ntdll.dll", "Windows/System32"),
+    ("afd_poll_test", "kernel32.dll", "Windows/System32"),
+    ("afd_poll_test", "ws2_32.dll", "Windows/System32"),
     ("iphlpapi_test", "ntdll.dll", "Windows/System32"),
     ("iphlpapi_test", "kernel32.dll", "Windows/System32"),
     ("iphlpapi_test", "iphlpapi.dll", "Windows/System32"),
@@ -704,6 +707,26 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("java_hello", "msvcrt.dll", "Windows/System32"),
     ("java_hello", "target/prebuilt/jdk/jdk-21.0.5+11/", "jdk"),
     ("java_hello", "user/java/Hello.java", "gala"),
+    ("java_http", "ntdll.dll", "Windows/System32"),
+    ("java_http", "kernel32.dll", "Windows/System32"),
+    ("java_http", "advapi32.dll", "Windows/System32"),
+    ("java_http", "winmm.dll", "Windows/System32"),
+    ("java_http", "version.dll", "Windows/System32"),
+    ("java_http", "shell32.dll", "Windows/System32"),
+    ("java_http", "powrprof.dll", "Windows/System32"),
+    ("java_http", "comctl32.dll", "Windows/System32"),
+    ("java_http", "ncrypt.dll", "Windows/System32"),
+    ("java_http", "crypt32.dll", "Windows/System32"),
+    ("java_http", "ws2_32.dll", "Windows/System32"),
+    ("java_http", "mswsock.dll", "Windows/System32"),
+    ("java_http", "bcryptprimitives.dll", "Windows/System32"),
+    ("java_http", "user32.dll", "Windows/System32"),
+    ("java_http", "iphlpapi.dll", "Windows/System32"),
+    ("java_http", "secur32.dll", "Windows/System32"),
+    ("java_http", "winhttp.dll", "Windows/System32"),
+    ("java_http", "msvcrt.dll", "Windows/System32"),
+    ("java_http", "target/prebuilt/jdk/jdk-21.0.5+11/", "jdk"),
+    ("java_http", "user/java/Http.java", "gala"),
     ("lua", "ntdll.dll", "Windows/System32"),
     ("lua", "kernel32.dll", "Windows/System32"),
     ("lua", "ws2_32.dll", "Windows/System32"),
@@ -834,6 +857,7 @@ const USER_PROGRAMS: &[&str] = &[
     "registry_test",
     "keyed_event_test",
     "iphlpapi_test",
+    "afd_poll_test",
     "win32_misc_test",
     "kernel32_pool_test",
     "tls_test",
@@ -860,7 +884,8 @@ const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// Scenarios that run whole language runtimes (a JVM, CoreCLR) under TCG:
 /// tens of seconds locally, over twice that on a slow CI runner. They get
 /// this much instead of BOOT_TEST_TIMEOUT.
-const SLOW_SCENARIOS: &[&str] = &["java_version", "java_hello", "dotnet_hello", "pwsh_hello"];
+const SLOW_SCENARIOS: &[&str] =
+    &["java_version", "java_hello", "java_http", "dotnet_hello", "pwsh_hello"];
 /// Memory for the Elasticsearch scenario's VM.
 const ELASTICSEARCH_MEMORY_MIB: u64 = 3072;
 /// Elasticsearch starts three JVMs and ~60 modules under TCG.
@@ -1390,6 +1415,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("go_http", "go_http: listening on port 7", NetClient::Http(GO_HTTP_PAGE)),
     ("nginx", "using the \"select\" event method", NetClient::Nginx),
     ("caddy_http", "Caddy serving static files on :7", NetClient::Http(CADDY_PAGE)),
+    ("java_http", "java_http: listening on port 7", NetClient::Http(JAVA_HTTP_PAGE)),
     ("nginx_master", "start worker process", NetClient::Nginx),
     ("nginx_tls", "using the \"select\" event method", NetClient::Tls),
     // Elasticsearch's root endpoint: the node's JSON description.
@@ -1416,6 +1442,8 @@ fn net_marker(name: &str) -> Option<(&'static str, NetClient)> {
 }
 
 /// The page go_http serves (user/go_http/main.go).
+/// What user/java/Http.java serves.
+const JAVA_HTTP_PAGE: &str = "hello from Java on gala\n";
 const GO_HTTP_PAGE: &str = "hello from gala, a fortress for Windows programs\n";
 /// The page Nginx serves: its own start page (user/nginx/html/index.html,
 /// from the Nginx release), compared byte for byte.
@@ -1629,6 +1657,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=advapi32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["advapi32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (Elasticsearch, Java NIO): AFD polls as wepoll makes them.
+        name: "afd_poll_test",
+        cmdline: "qemu_exit run=afd_poll_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["afd_poll_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (Elasticsearch): network interfaces and addresses (Java's
@@ -1920,6 +1955,14 @@ const SCENARIOS: &[Scenario] = &[
             "Caddy serving static files on :7",
             "xtask: net client: http ok",
         ],
+    },
+    Scenario {
+        // P1: the JDK's HTTP server (NIO selector: wepoll over AFD) serving
+        // the host; xtask stops the VM after the GET.
+        name: "java_http",
+        cmdline: "qemu_exit run=java.exe args=C:/gala/Http.java",
+        exit_status: XTASK_STOPS,
+        expect: &["java_http: listening on port 7", "xtask: net client: http ok"],
     },
     Scenario {
         // P1: a Java program on the unmodified JDK: `java Hello.java`

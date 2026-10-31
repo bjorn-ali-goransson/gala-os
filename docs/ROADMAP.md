@@ -481,8 +481,7 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       (not supported). GetVersionEx now honours the executable's compatibility
       manifest (`manifest_test`): java.exe declares Windows 10, so Java
       reports os.name "Windows 11", os.version "10.0", as on Windows 11.
-      Later: com.sun.net.httpserver serving the host (needs iphlpapi's
-      adapters for real). The history: xtask fetches
+      com.sun.net.httpserver serves the host (`java_http`). The history: xtask fetches
       the JDK (PREBUILT, 170 MB of it as a directory tree). The import
       closure of java.exe, jvm.dll, java.dll and jimage.dll lacked ~80
       kernel32 functions, 21 advapi32 (security: SIDs, ACLs, tokens), 3
@@ -672,9 +671,19 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       connection is accepted by QEMU, nothing comes back within 60 s).
       Nginx (select/AFD poll) and Caddy (IOCP) serve the host, so the
       suspect is the JDK's NIO path (wepoll over AFD) for connections
-      through the card. Next: a small Java HTTP server
-      (com.sun.net.httpserver, the same selector path, seconds instead
-      of ten minutes) serving the host, then this check again.
+      through the card. Found with a small Java HTTP server
+      (`java_http`: com.sun.net.httpserver serving the host, done): the
+      JDK's wepoll needed WSAIoctl SIO_BASE_HANDLE (winsock_test), and
+      gala's AFD held a pending poll behind an older one on the same
+      helper handle, so the listener's poll never completed
+      (`afd_poll_test`). Then Netty dropped every accepted connection:
+      getsockopt of the TCP keep-alive options failed (now kept per
+      socket with Windows' defaults, winsock_test). **Elasticsearch now
+      answers the host**: `cargo xtask boot-test elasticsearch` (3 GiB,
+      about 8 minutes in the kernel under TCG) passes, the host's GET /
+      returning the cluster name, version 8.15.3 and "You Know, for
+      Search". Still pending (too slow for CI). Left: ReadDirectoryChangesW
+      (file-settings watcher, a warning), the node name (HOSTNAME).
    5. SQL Server (asked for 2026-10-31): start with SQL Server Express
       LocalDB, the small edition that runs sqlservr.exe as an ordinary
       process started on demand (no Windows service), queried with a

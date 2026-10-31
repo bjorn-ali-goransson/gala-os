@@ -1,5 +1,7 @@
 //! Winsock TCP as programs use it, with the results real Windows gives:
-//! WSAStartup (version 2.2), getaddrinfo of the machine's own host name
+//! WSAStartup (version 2.2), TCP keep-alive socket options (defaults,
+//! set and read back), WSAIoctl's SIO_BASE_HANDLE and
+//! SIO_BSP_HANDLE(_SELECT/_POLL) (the socket itself), getaddrinfo of the machine's own host name
 //! and of "localhost" (IPv4 addresses), socket/bind/listen/accept/connect on the
 //! loopback address, getsockname (an ephemeral port after binding port 0;
 //! accept reports the client's address), send/recv round trips in both
@@ -53,7 +55,20 @@ unsafe extern "system" {
     fn send(s: Socket, buf: *const u8, len: i32, flags: i32) -> i32;
     fn recv(s: Socket, buf: *mut u8, len: i32, flags: i32) -> i32;
     fn getsockname(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> i32;
+    fn WSAIoctl(
+        s: Socket,
+        code: u32,
+        input: *const u8,
+        input_len: u32,
+        output: *mut u8,
+        output_len: u32,
+        returned: *mut u32,
+        overlapped: *mut c_void,
+        routine: usize,
+    ) -> i32;
     fn closesocket(s: Socket) -> i32;
+    fn setsockopt(s: Socket, level: i32, name: i32, value: *const u8, len: i32) -> i32;
+    fn getsockopt(s: Socket, level: i32, name: i32, value: *mut u8, len: *mut i32) -> i32;
     fn ioctlsocket(s: Socket, cmd: i32, arg: *mut u32) -> i32;
 }
 
@@ -218,6 +233,42 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         c.ok(listener != INVALID_SOCKET, WSAGetLastError() as u64)?;
         let any_port = SockaddrIn::new(LOOPBACK, 0);
         c.eq(bind(listener, &any_port, ADDR_LEN) as u64, 0)?;
+        // TCP keep-alive options (ws2ipdef.h; Netty and Java set and read
+        // them): Windows 10's defaults (count 10, interval 1 s, idle
+        // 7200 s), then what was set.
+        for (option, default, new) in [(16, 10, 5), (17, 1, 2), (3, 7200, 60)] {
+            let mut value = 0i32;
+            let mut len = 4i32;
+            let got = getsockopt(listener, IPPROTO_TCP, option, (&raw mut value).cast(), &mut len);
+            c.eq(got as u64, 0)?;
+            c.eq(value as u64, default)?;
+            c.eq(len as u64, 4)?;
+            let v: i32 = new;
+            c.eq(setsockopt(listener, IPPROTO_TCP, option, (&raw const v).cast(), 4) as u64, 0)?;
+            len = 4;
+            getsockopt(listener, IPPROTO_TCP, option, (&raw mut value).cast(), &mut len);
+            c.eq(value as u64, new as u64)?;
+        }
+        // The base provider's handle (SIO_BASE_HANDLE and the BSP forms,
+        // as wepoll asks for it): with no layered providers, the socket.
+        for code in [0x4800_0022u32, 0x4800_001b, 0x4800_001c, 0x4800_001d] {
+            let mut base: Socket = 0;
+            let mut returned = 0u32;
+            let r = WSAIoctl(
+                listener,
+                code,
+                core::ptr::null(),
+                0,
+                (&raw mut base).cast(),
+                8,
+                &mut returned,
+                core::ptr::null_mut(),
+                0,
+            );
+            c.eq(r as u64, 0)?;
+            c.eq(base as u64, listener as u64)?;
+            c.eq(returned.into(), 8)?;
+        }
         let mut bound = SockaddrIn::new([0; 4], 0);
         let mut len = ADDR_LEN;
         c.eq(getsockname(listener, &mut bound, &mut len) as u64, 0)?;

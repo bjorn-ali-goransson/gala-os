@@ -423,7 +423,10 @@ const POLL_HEADER: usize = 16;
 const POLL_ENTRY: usize = 16;
 
 /// Completes the pending requests that can finish now, oldest first
-/// (a request waits while an older one of its kind does).
+/// (a receive, send, accept or connect waits while an older one of its
+/// kind does: they consume the socket's stream in order). Polls are
+/// independent: wepoll keeps one per socket pending on the same helper
+/// handle, and each completes when its own socket is ready.
 fn try_complete(state: &EndpointState) {
     let mut pending = state.pending.lock();
     let mut blocked = [false; 5];
@@ -441,18 +444,21 @@ fn try_complete(state: &EndpointState) {
                 finish(state, &p.io, status, information, false);
             }
             Attempt::Wait => {
-                blocked[kind] = true;
+                blocked[kind] = kind != POLL_KIND;
                 i += 1;
             }
         }
     }
 }
 
+/// `Op::kind` of a poll.
+const POLL_KIND: usize = 4;
+
 /// Starts a request: done at once if possible, else pending.
 fn submit(state: &EndpointState, mut op: Op, io: Io) -> NtStatus {
     let mut pending = state.pending.lock();
     let kind = op.kind();
-    if !pending.iter().any(|p| p.op.kind() == kind)
+    if (usize::from(kind) == POLL_KIND || !pending.iter().any(|p| p.op.kind() == kind))
         && let Attempt::Done(status, information) = attempt(state, &mut op, &io.process)
     {
         finish(state, &io, status, information, true);

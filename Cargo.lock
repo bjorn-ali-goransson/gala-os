@@ -18,6 +18,10 @@ name = "advapi32_test"
 version = "0.1.0"
 
 [[package]]
+name = "afd_poll_test"
+version = "0.1.0"
+
+[[package]]
 name = "apc_test"
 version = "0.1.0"
 dependencies = [

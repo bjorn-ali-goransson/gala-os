@@ -1207,6 +1207,16 @@ the endpoint is a helper handle (what libuv/wepoll open for
 IOCTL_AFD_POLL); with one, its transport name (`\Device\Tcp`) picks TCP
 (`\Device\Udp` and raw sockets: STATUS_NOT_SUPPORTED, ledger).
 
+Pending requests on an endpoint complete in order within their kind
+(receives, sends, accepts, connects: they consume the stream in order),
+but polls are independent: wepoll (the JDK's NIO selector, libuv) keeps
+one IOCTL_AFD_POLL per socket pending on the same helper handle, and each
+completes when its own socket is ready (`afd_poll_test`; a listener's
+poll held behind a pipe socket's kept Java's HTTP servers from ever
+accepting). wepoll finds each socket's base handle with WSAIoctl
+SIO_BASE_HANDLE / SIO_BSP_HANDLE_POLL, which return the socket itself
+(no layered providers).
+
 IOCTLs (code = 0x12000 | function << 2 | method):
 
 | Code | Function | Layout source |
@@ -1322,8 +1332,12 @@ ws2_32 (also handed out by WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER));
 gala's mswsock.dll forwards its AcceptEx and GetAcceptExSockaddrs exports
 there (Go imports them from mswsock). Socket options that only tune the
 stack (TCP_NODELAY, keepalive, SO_UPDATE_*_CONTEXT, buffer sizes) are
-accepted and have no effect yet; unknown ones fail with WSAENOPROTOOPT and
-go to the ledger. getaddrinfo resolves numeric IPv4 addresses,
+accepted and have no effect yet; the integer ones (SO_REUSEADDR,
+SO_KEEPALIVE, SO_SNDBUF/RCVBUF, SO_EXCLUSIVEADDRUSE, TCP_NODELAY and the
+TCP keep-alive idle/count/interval) are kept per socket so getsockopt
+reports what was set, or Windows' defaults (Netty reads them back for
+every accepted connection); unknown ones fail with WSAENOPROTOOPT and go
+to the ledger. getaddrinfo resolves numeric IPv4 addresses,
 "localhost" and the machine's own host name (gethostname's "gala", to
 loopback: what Windows answers without network adapters, until gala
 lists its adapters); other names are reported (WSAHOST_NOT_FOUND).

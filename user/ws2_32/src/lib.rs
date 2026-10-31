@@ -669,6 +669,7 @@ pub extern "system" fn closesocket(s: Socket) -> i32 {
     if !started() {
         return fail(WSANOTINITIALISED);
     }
+    options::forget(s);
     // SAFETY: closing a handle has no memory effects here.
     match unsafe { NtClose(s) } {
         0 => 0,
@@ -931,6 +932,12 @@ const WSAID_CONNECTEX: [u8; 16] =
 const WSAID_GETACCEPTEXSOCKADDRS: [u8; 16] =
     guid(0xb536_7df2, 0xcbac, 0x11cf, [0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92]);
 
+// SIO_BASE_HANDLE and SIO_BSP_HANDLE(_SELECT/_POLL) (mswsock.h, ws2def.h).
+const SIO_BASE_HANDLE: u32 = 0x4800_0022;
+const SIO_BSP_HANDLE: u32 = 0x4800_001b;
+const SIO_BSP_HANDLE_SELECT: u32 = 0x4800_001c;
+const SIO_BSP_HANDLE_POLL: u32 = 0x4800_001d;
+
 const fn guid(a: u32, b: u16, c: u16, d: [u8; 8]) -> [u8; 16] {
     let (a, b, c) = (a.to_le_bytes(), b.to_le_bytes(), c.to_le_bytes());
     [a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]
@@ -938,11 +945,13 @@ const fn guid(a: u32, b: u16, c: u16, d: [u8; 8]) -> [u8; 16] {
 
 /// WSAIoctl(s, dwIoControlCode, lpvInBuffer, cbInBuffer, lpvOutBuffer,
 /// cbOutBuffer, lpcbBytesReturned, lpOverlapped, lpCompletionRoutine):
-/// the extension function pointers; keepalive and initial-RTO tuning are
-/// accepted without effect.
+/// the extension function pointers; the base provider's handle
+/// (SIO_BASE_HANDLE, SIO_BSP_HANDLE*: the socket itself, as there are no
+/// layered providers; wepoll asks for it); keepalive and initial-RTO
+/// tuning are accepted without effect.
 #[unsafe(no_mangle)]
 pub extern "system" fn WSAIoctl(
-    _s: Socket,
+    s: Socket,
     code: u32,
     input: *const u8,
     input_len: u32,
@@ -981,6 +990,19 @@ pub extern "system" fn WSAIoctl(
             }
             0
         }
+        SIO_BASE_HANDLE | SIO_BSP_HANDLE | SIO_BSP_HANDLE_SELECT | SIO_BSP_HANDLE_POLL => {
+            if output.is_null() || output_len < 8 {
+                return fail(WSAEFAULT);
+            }
+            // SAFETY: the caller's 8-byte output buffer and count.
+            unsafe {
+                core::ptr::write_unaligned(output.cast::<Socket>(), s);
+                if !returned.is_null() {
+                    *returned = 8;
+                }
+            }
+            0
+        }
         SIO_KEEPALIVE_VALS | SIO_TCP_INITIAL_RTO => {
             if !returned.is_null() {
                 // SAFETY: the caller's count.
@@ -997,6 +1019,90 @@ pub extern "system" fn WSAIoctl(
 
 const SOL_SOCKET: i32 = 0xffff;
 
+/// The integer socket options setsockopt keeps per socket, for getsockopt.
+mod options {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use super::{IPPROTO_TCP, SOL_SOCKET, Socket};
+
+    /// (level, name, Windows' default): SO_REUSEADDR, SO_KEEPALIVE,
+    /// SO_SNDBUF and SO_RCVBUF (gala's 64 KiB), SO_EXCLUSIVEADDRUSE,
+    /// TCP_NODELAY, TCP_KEEPALIVE (idle, 2 h), TCP_KEEPCNT (10),
+    /// TCP_KEEPINTVL (1 s).
+    const OPTIONS: [(i32, i32, i32); 9] = [
+        (SOL_SOCKET, 0x4, 0),
+        (SOL_SOCKET, 0x8, 0),
+        (SOL_SOCKET, 0x1001, 65536),
+        (SOL_SOCKET, 0x1002, 65536),
+        (SOL_SOCKET, -5, 0),
+        (IPPROTO_TCP, 1, 0),
+        (IPPROTO_TCP, 3, 7200),
+        (IPPROTO_TCP, 16, 10),
+        (IPPROTO_TCP, 17, 1),
+    ];
+    const SOCKETS: usize = 256;
+
+    struct Table {
+        sockets: [Socket; SOCKETS],
+        values: [[i32; OPTIONS.len()]; SOCKETS],
+    }
+
+    static LOCK: AtomicBool = AtomicBool::new(false);
+    static mut TABLE: Table =
+        Table { sockets: [0; SOCKETS], values: [[0; OPTIONS.len()]; SOCKETS] };
+
+    fn with<R>(f: impl FnOnce(&mut Table) -> R) -> R {
+        while LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err()
+        {
+            core::hint::spin_loop();
+        }
+        // SAFETY: LOCK gives this thread the table to itself.
+        let r = f(unsafe { &mut *(&raw mut TABLE) });
+        LOCK.store(false, Ordering::Release);
+        r
+    }
+
+    /// The option's index, if it is one that is kept.
+    pub fn slot(level: i32, name: i32) -> Option<usize> {
+        OPTIONS.iter().position(|&(l, n, _)| l == level && n == name)
+    }
+
+    pub fn get(s: Socket, slot: usize) -> i32 {
+        with(|t| match t.sockets.iter().position(|&x| x == s) {
+            Some(i) => t.values[i][slot],
+            None => OPTIONS[slot].2,
+        })
+    }
+
+    /// Records a value; false if the table is full.
+    pub fn set(s: Socket, slot: usize, value: i32) -> bool {
+        with(|t| {
+            let i = match t.sockets.iter().position(|&x| x == s) {
+                Some(i) => i,
+                None => {
+                    let Some(i) = t.sockets.iter().position(|&x| x == 0) else { return false };
+                    t.sockets[i] = s;
+                    for (v, o) in t.values[i].iter_mut().zip(OPTIONS) {
+                        *v = o.2;
+                    }
+                    i
+                }
+            };
+            t.values[i][slot] = value;
+            true
+        })
+    }
+
+    /// The socket is closed.
+    pub fn forget(s: Socket) {
+        with(|t| {
+            if let Some(i) = t.sockets.iter().position(|&x| x == s) {
+                t.sockets[i] = 0;
+            }
+        });
+    }
+}
+
 /// setsockopt(s, level, optname, optval, optlen): options that only tune
 /// the stack are accepted without effect (docs/ARCHITECTURE.md).
 #[unsafe(no_mangle)]
@@ -1010,7 +1116,6 @@ pub extern "system" fn setsockopt(
     if !started() {
         return fail(WSANOTINITIALISED);
     }
-    let _ = s;
     let accepted = match (level, name) {
         // SO_REUSEADDR, SO_KEEPALIVE, SO_LINGER, SO_SNDBUF, SO_RCVBUF,
         // SO_EXCLUSIVEADDRUSE, SO_UPDATE_ACCEPT_CONTEXT,
@@ -1028,13 +1133,26 @@ pub extern "system" fn setsockopt(
     if len > 0 && value.is_null() {
         return fail(WSAEFAULT);
     }
+    // Integer options are kept for getsockopt (a BOOL may come as 1 byte).
+    if let Some(slot) = options::slot(level, name)
+        && len >= 1
+    {
+        let mut b = [0u8; 4];
+        let n = (len as usize).min(4);
+        // SAFETY: the caller's value of `len` bytes.
+        unsafe { core::ptr::copy_nonoverlapping(value, b.as_mut_ptr(), n) };
+        if !options::set(s, slot, i32::from_le_bytes(b)) {
+            return fail(WSAENOBUFS);
+        }
+    }
     0
 }
 
-/// getsockopt: SO_ERROR (0) and SO_TYPE (stream) so far.
+/// getsockopt: SO_ERROR (0), SO_TYPE (stream), and the integer options
+/// setsockopt keeps (their Windows defaults until set).
 #[unsafe(no_mangle)]
 pub extern "system" fn getsockopt(
-    _s: Socket,
+    s: Socket,
     level: i32,
     name: i32,
     value: *mut u8,
@@ -1043,6 +1161,9 @@ pub extern "system" fn getsockopt(
     let v: i32 = match (level, name) {
         (SOL_SOCKET, 0x1007) => 0,           // SO_ERROR
         (SOL_SOCKET, 0x1008) => SOCK_STREAM, // SO_TYPE
+        _ if options::slot(level, name).is_some() => {
+            options::get(s, options::slot(level, name).unwrap_or(0))
+        }
         _ => {
             missing(b"ws2_32.dll!getsockopt", ((level as u64) << 32) | name as u32 as u64);
             return fail(WSAENOPROTOOPT);
