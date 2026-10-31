@@ -113,9 +113,14 @@ const READ_BUF: usize = 4096;
 /// `_file`, `_charbuf`, `_bufsiz`, `_tmpfname`) because mingw's inline
 /// `getc` reads `_cnt` and `_ptr`: `_cnt` stays 0, so every inline getc
 /// calls `_filbuf`, which reads through the stream.
+///
+/// After the FILE comes a CRITICAL_SECTION, as in msvcrt.dll's `_FILEX`
+/// for streams that fopen allocates: mingw's `_lock_file` enters it
+/// directly (for the console slots it calls `_lock` instead).
 #[repr(C)]
 struct Stream {
     iob: [u8; FILE_SIZE],
+    lock: CriticalSection,
     magic: u64,
     handle: *mut c_void,
     fd: i32,
@@ -137,6 +142,7 @@ impl Stream {
         iob[27] = f[3];
         Self {
             iob,
+            lock: CriticalSection::FREE,
             magic: MAGIC,
             handle,
             fd,
@@ -148,6 +154,24 @@ impl Stream {
             buf: [0; READ_BUF],
         }
     }
+}
+
+/// CRITICAL_SECTION (40 bytes): DebugInfo, LockCount, RecursionCount,
+/// OwningThread, LockSemaphore, SpinCount. FREE is what
+/// InitializeCriticalSection makes of it: unowned, LockCount -1.
+#[repr(C)]
+struct CriticalSection {
+    debug_info: usize,
+    lock_count: i32,
+    recursion: i32,
+    owner: usize,
+    semaphore: usize,
+    spin_count: usize,
+}
+
+impl CriticalSection {
+    const FREE: Self =
+        Self { debug_info: 0, lock_count: -1, recursion: 0, owner: 0, semaphore: 0, spin_count: 0 };
 }
 
 static mut STD: [Stream; 3] =

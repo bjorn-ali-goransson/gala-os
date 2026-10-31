@@ -83,13 +83,15 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
 # hello.c and runs it; self.sh then has tcc compile itself (tcc2.exe), and
 # tcc2 compile hello.c and msvcrt_test's main.c; make.sh builds
 # user/tcc/make/ with busybox's make and tcc; lua.sh builds Lua from
-# source with them and runs user/lua/test.lua.
+# source with them and runs user/lua/test.lua; sqlite.sh builds SQLite
+# with tcc and runs user/sqlite/test.sql and reopen.sql.
 $scripts = @(
     @{ name = "busybox_files"; path = "..\busybox\files.sh"; args = @() },
     @{ name = "busybox_script"; path = "..\busybox\script.sh"; args = @() },
     @{ name = "tcc"; path = "..\tcc\tcc.sh"; args = @((Join-Path $here "tcc.tar")) },
     @{ name = "tcc_make"; path = "..\tcc\make.sh"; args = @((Join-Path $here "tcc.tar")) },
     @{ name = "lua"; path = "..\lua\lua.sh"; args = @((Join-Path $here "tcc.tar"), (Join-Path $here "lua.tar")) },
+    @{ name = "sqlite"; path = "..\sqlite\sqlite.sh"; args = @((Join-Path $here "tcc.tar"), (Join-Path $here "sqlite-amalgamation.zip")) },
     @{ name = "tcc_self"; path = "..\tcc\self.sh"; args = @((Join-Path $here "tcc.tar"), (Join-Path $here "..\msvcrt_test\main.c")) }
 )
 foreach ($s in $scripts) {

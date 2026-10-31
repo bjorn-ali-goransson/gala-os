@@ -25,6 +25,21 @@ pub extern "system" fn GetDriveTypeA(root: *const u8) -> u32 {
     if c0 & !0x20 == b'C' && c1 == b':' { DRIVE_FIXED } else { DRIVE_NO_ROOT_DIR }
 }
 
+/// GetDriveTypeW: as GetDriveTypeA.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDriveTypeW(root: *const u16) -> u32 {
+    if root.is_null() {
+        return DRIVE_FIXED;
+    }
+    // SAFETY: the caller's NUL-terminated string.
+    let (c0, c1) = unsafe { (*root, if *root == 0 { 0 } else { *root.add(1) }) };
+    if c0 & !0x20 == u16::from(b'C') && c1 == u16::from(b':') {
+        DRIVE_FIXED
+    } else {
+        DRIVE_NO_ROOT_DIR
+    }
+}
+
 /// GetVolumeInformationW: of the volume with root `root` (C:\ or null),
 /// as GetVolumeInformationByHandleW reports it.
 #[unsafe(no_mangle)]

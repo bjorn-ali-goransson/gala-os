@@ -550,6 +550,20 @@ rounds correctly; strtod sets ERANGE on overflow (HUGE_VAL) and on
 underflow to 0. TinyCC parses float constants with strtod, so programs
 it builds on gala get the same constants as elsewhere.
 
+**Heaps** (H9): ntdll implements the NT heap API (`user/testntdll/src/
+heap.rs`: RtlCreateHeap, RtlDestroyHeap, RtlAllocateHeap,
+RtlReAllocateHeap, RtlFreeHeap, RtlSizeHeap, RtlValidateHeap,
+RtlCompactHeap): per heap a control page, power-of-two blocks from 32
+bytes to 64 KiB carved from 1 MiB regions, larger blocks with their own
+pages, a 16-byte header (class, size asked for), one spinlock.
+LdrInitializeThunk creates the process heap first and stores it in
+PEB.ProcessHeap (+0x30); kernel32's Heap* functions and GetProcessHeap
+are thin wrappers, as on Windows. msvcrt keeps its own allocator.
+
+**msvcrt's FILE** (H9): streams from fopen are a 48-byte FILE followed by
+a CRITICAL_SECTION, as msvcrt.dll's `_FILEX`: mingw's `_lock_file`
+enters that lock directly (for the console slots it calls `_lock`).
+
 **Image cache** (H8): `section::image_layout(node)` returns the laid-out
 image of a file, cached (16 layouts, least recently used out) by node
 and content version: ramfs gives every node a version from a global

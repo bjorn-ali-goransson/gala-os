@@ -7,7 +7,11 @@
 //! sees a breakpoint and continues past it), and RtlLookupFunctionEntry
 //! (the unwind entry of a function in this image), and FormatMessageW's
 //! system messages (English text with a CRLF; ERROR_MR_MID_NOT_FOUND for
-//! a number without one; ERROR_INSUFFICIENT_BUFFER). Prints
+//! a number without one; ERROR_INSUFFICIENT_BUFFER); heaps (GetProcessHeap
+//! is the PEB's ProcessHeap; HeapAlloc with HEAP_ZERO_MEMORY, HeapSize as
+//! asked, HeapReAlloc keeping the contents and zeroing the growth,
+//! HEAP_REALLOC_IN_PLACE_ONLY failing, a private heap from HeapCreate,
+//! HeapValidate, HeapDestroy); GetDriveTypeW, AreFileApisANSI. Prints
 //! `kernel32_misc_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -45,6 +49,16 @@ type VectoredHandler = extern "system" fn(*mut ExceptionPointers) -> i32;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetProcessHeap() -> Handle;
+    fn HeapCreate(options: u32, initial: usize, maximum: usize) -> Handle;
+    fn HeapDestroy(heap: Handle) -> Bool;
+    fn HeapAlloc(heap: Handle, flags: u32, bytes: usize) -> *mut u8;
+    fn HeapReAlloc(heap: Handle, flags: u32, p: *mut u8, bytes: usize) -> *mut u8;
+    fn HeapFree(heap: Handle, flags: u32, p: *mut u8) -> Bool;
+    fn HeapSize(heap: Handle, flags: u32, p: *const u8) -> usize;
+    fn HeapValidate(heap: Handle, flags: u32, p: *const u8) -> Bool;
+    fn GetDriveTypeW(root: *const u16) -> u32;
+    fn AreFileApisANSI() -> Bool;
     fn FormatMessageW(
         flags: u32,
         source: *const c_void,
@@ -193,6 +207,62 @@ extern "C" fn some_function() -> u64 {
     core::hint::black_box(7)
 }
 
+const HEAP_ZERO_MEMORY: u32 = 0x8;
+const HEAP_REALLOC_IN_PLACE_ONLY: u32 = 0x10;
+const DRIVE_FIXED: u32 = 3;
+const DRIVE_NO_ROOT_DIR: u32 = 1;
+
+/// Heaps: the process heap and a private one.
+fn heaps(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: documented kernel32 calls; the blocks are used within their
+    // sizes.
+    unsafe {
+        let process = GetProcessHeap();
+        let peb: usize;
+        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        c.ok(!process.is_null(), 0)?;
+        c.eq(process as u64, *((peb + 0x30) as *const u64))?; // PEB.ProcessHeap
+        let p = HeapAlloc(process, HEAP_ZERO_MEMORY, 100);
+        c.ok(!p.is_null() && (p as usize).is_multiple_of(16), p as u64)?;
+        c.ok((0..100).all(|i| *p.add(i) == 0), 0)?;
+        c.eq(HeapSize(process, 0, p) as u64, 100)?;
+        for i in 0..100 {
+            *p.add(i) = i as u8;
+        }
+        let q = HeapReAlloc(process, HEAP_ZERO_MEMORY, p, 5000);
+        c.ok(!q.is_null(), 0)?;
+        c.eq(HeapSize(process, 0, q) as u64, 5000)?;
+        c.ok((0..100).all(|i| *q.add(i) == i as u8) && (100..5000).all(|i| *q.add(i) == 0), 0)?;
+        c.ok(HeapReAlloc(process, HEAP_REALLOC_IN_PLACE_ONLY, q, 1 << 20).is_null(), 0)?;
+        c.ok(HeapValidate(process, 0, q) != 0, 0)?;
+        c.ok(HeapFree(process, 0, q) != 0, 0)?;
+        c.ok(HeapFree(process, 0, core::ptr::null_mut()) != 0, 0)?;
+
+        let private = HeapCreate(0, 0, 0);
+        c.ok(!private.is_null() && private != process, private as u64)?;
+        let mut blocks = [core::ptr::null_mut(); 64];
+        for (i, b) in blocks.iter_mut().enumerate() {
+            *b = HeapAlloc(private, 0, 16 << (i % 12)); // up to 32 KiB
+            c.ok(!b.is_null(), i as u64)?;
+            **b = i as u8;
+        }
+        let big = HeapAlloc(private, 0, 3 << 20);
+        c.ok(!big.is_null(), 0)?;
+        *big.add((3 << 20) - 1) = 7;
+        c.eq(HeapSize(private, 0, big) as u64, 3 << 20)?;
+        c.ok(blocks.iter().enumerate().all(|(i, &b)| *b == i as u8), 0)?;
+        c.ok(HeapValidate(private, 0, core::ptr::null()) != 0, 0)?;
+        c.ok(HeapDestroy(private) != 0, GetLastError().into())?;
+
+        let c_root: [u16; 4] = [b'C' as u16, b':' as u16, b'\\' as u16, 0];
+        let q_root: [u16; 4] = [b'Q' as u16, b':' as u16, b'\\' as u16, 0];
+        c.eq(GetDriveTypeW(c_root.as_ptr()).into(), DRIVE_FIXED.into())?;
+        c.eq(GetDriveTypeW(q_root.as_ptr()).into(), DRIVE_NO_ROOT_DIR.into())?;
+        c.ok(AreFileApisANSI() != 0, 0)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     // SAFETY: documented kernel32 calls with valid arguments.
@@ -315,6 +385,7 @@ fn run() -> Result<(), u32> {
         c.eq(n.into(), 0)?;
         c.eq(GetLastError().into(), 122)?; // ERROR_INSUFFICIENT_BUFFER
     }
+    heaps(&mut c)?;
     Ok(())
 }
 

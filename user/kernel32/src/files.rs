@@ -373,3 +373,87 @@ pub extern "system" fn RtlAddFunctionTable(_table: *const c_void, _count: u32, _
 pub extern "system" fn RtlDeleteFunctionTable(_table: *const c_void) -> u8 {
     1
 }
+
+/// UnlockFileEx: byte-range locks are not kept (LockFileEx grants every
+/// request and records it), so there is nothing to release.
+#[unsafe(no_mangle)]
+pub extern "system" fn UnlockFileEx(
+    _h: Handle,
+    _reserved: u32,
+    _low: u32,
+    _high: u32,
+    _overlapped: *mut c_void,
+) -> Bool {
+    TRUE
+}
+
+/// WaitForSingleObjectEx: WaitForSingleObject, alertable on request
+/// (WAIT_IO_COMPLETION when an APC ran).
+#[unsafe(no_mangle)]
+pub extern "system" fn WaitForSingleObjectEx(h: Handle, ms: u32, alertable: Bool) -> u32 {
+    let t = timeout(ms);
+    let p = t.as_ref().map_or(core::ptr::null(), |t| t as *const i64);
+    // SAFETY: valid or null timeout pointer.
+    let status = unsafe { NtWaitForSingleObject(h, u8::from(alertable != 0), p) };
+    match status {
+        0 | 0x80 | 0xc0 | STATUS_TIMEOUT => status, // 0xc0: STATUS_USER_APC
+        _ => fail(status, 0xffff_ffff),
+    }
+}
+
+/// GetOverlappedResult(file, overlapped, &bytes, wait): the result of an
+/// overlapped operation from OVERLAPPED.Internal (status) and
+/// InternalHigh (bytes), waiting for it (on hEvent, or the file) if asked.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetOverlappedResult(
+    file: Handle,
+    overlapped: *mut usize,
+    bytes: *mut u32,
+    wait: Bool,
+) -> Bool {
+    const ERROR_IO_INCOMPLETE: u32 = 996;
+    // SAFETY: the caller's OVERLAPPED (Internal, InternalHigh, offsets,
+    // hEvent at index 3).
+    unsafe {
+        let status = || core::ptr::read_volatile(overlapped) as u32;
+        if status() == STATUS_PENDING {
+            if wait == FALSE {
+                return fail_with(ERROR_IO_INCOMPLETE, FALSE);
+            }
+            let event = *overlapped.add(3) as Handle;
+            let on = if event.is_null() { file } else { event };
+            while status() == STATUS_PENDING {
+                if NtWaitForSingleObject(on, 0, core::ptr::null()) != 0 {
+                    break;
+                }
+            }
+        }
+        if !bytes.is_null() {
+            *bytes = *overlapped.add(1) as u32;
+        }
+        match status() {
+            STATUS_SUCCESS => TRUE,
+            s => fail(s, FALSE),
+        }
+    }
+}
+
+/// FlushViewOfFile: views of files are the file's own pages here, so
+/// there is nothing to write back.
+#[unsafe(no_mangle)]
+pub extern "system" fn FlushViewOfFile(_base: *const c_void, _size: usize) -> Bool {
+    TRUE
+}
+
+/// OutputDebugStringA/W: without a debugger attached, nothing happens.
+#[unsafe(no_mangle)]
+pub extern "system" fn OutputDebugStringA(_text: *const u8) {}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn OutputDebugStringW(_text: *const u16) {}
+
+/// AreFileApisANSI: the A functions use the ANSI code page (UTF-8 here).
+#[unsafe(no_mangle)]
+pub extern "system" fn AreFileApisANSI() -> Bool {
+    TRUE
+}

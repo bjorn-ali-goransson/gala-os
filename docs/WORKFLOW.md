@@ -347,6 +347,22 @@ which end up in panic locations: xtask's `user_build` remaps the cargo
 home to `/cargo` (`--remap-path-prefix`, merged into the target's
 rustflags with `--config`). A new dependency needs nothing more.
 
+## SQLite
+
+`user/sqlite/build.sh` fetches the SQLite amalgamation zip (checked
+against sqlite.org's SHA3-256) into `user/bin`; the `sqlite` scenario
+unzips it on gala and compiles it with tcc and `user/sqlite/sqlrun.c`,
+then runs `test.sql` and `reopen.sql` (expected lines computed with
+Python's sqlite3 module on the host: same SQL, another SQLite version).
+TinyCC's Windows headers and `.def` files are older than SQLite's needs:
+`tcc -impdef` makes kernel32.def from the system's kernel32.dll, and
+`tcc_win.h` (force-included) declares GetTickCount64.
+
+A program's output and the kernel's log share the serial console, so a
+line a program writes in pieces can be split by a log line ("process ...
+exited"): expect lines that are written in one piece (a shell `echo` of
+a captured value) when that matters.
+
 ## Hunting a rare hang
 
 A scenario that fails once in N runs: loop `cargo xtask boot-test <name>`

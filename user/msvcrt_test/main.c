@@ -6,7 +6,7 @@
  * startup code and tcc.exe use them); strtod (tcc parses float
  * constants with it); the math functions, strcoll, _difftime64, and
  * printf's %e/%g with msvcrt's three-digit exponents and 17 significant
- * digits (Lua prints numbers with %.14g). Built against msvcrt (not mingw's own stdio) by build.sh.
+ * digits (Lua prints numbers with %.14g); a fopen'd FILE's lock (_FILEX). Built against msvcrt (not mingw's own stdio) by build.sh.
  * Prints "msvcrt_test: ok" or exits with the number of the failing check. */
 #include <stdio.h>
 #include <stdarg.h>
@@ -123,7 +123,18 @@ int main(void) {
     char mixed[] = "MiXeD 1";
     CHECK(_strlwr(mixed) == mixed && strcmp(mixed, "mixed 1") == 0);
     FILE *tmp = fopen("msvcrt_test.tmp", "w");
-    CHECK(tmp != NULL && fputs("x", tmp) >= 0 && fclose(tmp) == 0);
+    CHECK(tmp != NULL && fputs("x", tmp) >= 0);
+#ifndef __TINYC__
+    /* mingw's _lock_file (its own: msvcrt.dll does not export one) enters
+     * the CRITICAL_SECTION that follows a fopen'd FILE in msvcrt.dll
+     * (_FILEX): it must be a real, free lock. TinyCC has no _lock_file. */
+    _lock_file(tmp);
+    _lock_file(tmp);
+    CHECK(fputs("y", tmp) >= 0);
+    _unlock_file(tmp);
+    _unlock_file(tmp);
+#endif
+    CHECK(fclose(tmp) == 0);
     CHECK(remove("msvcrt_test.tmp") == 0 && remove("msvcrt_test.tmp") == -1);
 
     /* msvcrt's own strtod (mingw's headers send strtod to libmingwex):

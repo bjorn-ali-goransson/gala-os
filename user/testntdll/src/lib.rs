@@ -9,10 +9,13 @@
 //! `startup_test` reads), binds the executable's imports and continues. It
 //! also has a small loader (LdrLoadDll and friends: DLLs from the
 //! executable's directory, reference counted), vectored exception
-//! handling, the APC dispatcher and the system call stubs tests use.
+//! handling, the APC dispatcher, the heap API (heap.rs) and the system
+//! call stubs tests use.
 
 #![no_std]
 #![allow(non_snake_case, non_upper_case_globals)]
+
+mod heap;
 
 /// "galantdl": marks the state as written by this DLL.
 const MAGIC: u64 = 0x6761_6c61_6e74_646c;
@@ -986,6 +989,8 @@ pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base:
         core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
         rd64(peb + 0x10) as usize
     };
+    // The process heap, before any DLL's code runs.
+    heap::create_process_heap();
     if let Err(status) = register_startup_modules(ntdll_base as usize, image)
         .and_then(|()| bind_imports(image, None))
     {

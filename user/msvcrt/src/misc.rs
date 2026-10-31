@@ -325,6 +325,21 @@ pub extern "C" fn ___mb_cur_max_func() -> i32 {
 }
 
 /// strerror: the CRT's texts for the common errno values.
+/// perror(s): "s: <strerror(errno)>" on stderr (just the message if `s`
+/// is NULL or empty).
+#[unsafe(no_mangle)]
+pub extern "C" fn perror(s: *const u8) {
+    // SAFETY: the caller's NUL-terminated string; strerror's static text.
+    unsafe {
+        if !s.is_null() && *s != 0 {
+            crate::stdio::write_stderr(crate::c_str(s));
+            crate::stdio::write_stderr(b": ");
+        }
+        crate::stdio::write_stderr(crate::c_str(strerror(*crate::stdio::_errno())));
+    }
+    crate::stdio::write_stderr(b"\n");
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn strerror(e: i32) -> *const u8 {
     let text: &[u8] = match e {

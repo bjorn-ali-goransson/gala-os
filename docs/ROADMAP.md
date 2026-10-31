@@ -215,7 +215,8 @@ to set and to argue for. Current order and why:
    H2 done (Go's os/exec, busybox-w32's sh); H3 (scripts and file
    tools) done; H4 (a C compiler on gala) done; H5 (TinyCC builds
    itself on gala) done; H6 (make on gala) done; H7 (Lua built on gala)
-   done; H8 (build speed) done; next H9 (SQLite built on gala).
+   done; H8 (build speed) done; H9 (SQLite built on gala) done; next
+   H10 (file locks: two processes sharing a database).
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
@@ -406,11 +407,29 @@ H8. **Build speed**: done 2026-10-31 (docs/PERF.md). Measured first:
    (copy-on-write). bench `image_load` 2.09 ms -> 0.32 ms; lua scenario
    12.7 s -> 7.9 s (shared code pages also let QEMU reuse translations);
    whole suite 64 s -> 53 s of kernel time.
-H9. **SQLite built on gala**: next. The SQLite amalgamation (public
-   domain, one 9 MB C file) compiled by tcc on gala with its shell, then
-   SQL run through it (tables, indexes, joins, transactions on a file
-   database), output as on Windows. A large compile: memory, the file
-   system and tcc's speed under gala.
+H9. **SQLite built on gala**: done 2026-10-31. The `sqlite` scenario
+   (`user/sqlite/sqlite.sh`): busybox unzips the unmodified SQLite 3.54.1
+   amalgamation (`user/sqlite/build.sh` fetches it and checks sqlite.org's
+   SHA3-256), tcc compiles sqlite3.c (9.5 MB) on gala with a small driver
+   (`sqlrun.c`; SQLite's shell.c needs MSVC or mingw's dirent, which tcc
+   linking msvcrt does not have), and two processes create, query
+   (recursive CTE, index, join, group by, rolled-back transaction,
+   printf, JSON) and reopen a database file, results as Python's SQLite
+   gives them. TinyCC needs `-impdef` of the system's kernel32.dll and a
+   declaration of GetTickCount64 (`tcc_win.h`), SQLITE_DISABLE_INTRINSIC.
+   It needed ntdll's heap API (RtlCreateHeap ... RtlCompactHeap, the
+   process heap in PEB.ProcessHeap) under kernel32's Heap* functions,
+   UnlockFileEx, WaitForSingleObjectEx, GetOverlappedResult,
+   FlushViewOfFile, GetDriveTypeW, AreFileApisANSI, OutputDebugString,
+   msvcrt's perror; and it found that a fopen'd FILE lacked the
+   CRITICAL_SECTION that follows it in msvcrt.dll (`_FILEX`): mingw's
+   `_lock_file` (in tcc.exe's -impdef) spun forever on our fields.
+   msvcrt_test and kernel32_misc_test check these. 6.9 s in the kernel.
+H10. **File locks**: next. LockFileEx grants everything (recorded in the
+   ledger). NtLockFile/NtUnlockFile with real byte-range locks (shared and
+   exclusive, LOCKFILE_FAIL_IMMEDIATELY, waiting, release on close), a
+   test program first, then two SQLite processes writing one database at
+   once: one gets SQLITE_BUSY or waits, as on Windows.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

@@ -79,3 +79,12 @@ helps the emulator as much as it saves copying.
 Next candidates: NtCreateFile path resolution (0.45 s, include
 probes), and the user time itself (tcc under TCG), which only a faster
 emulator or KVM changes.
+
+## H9: SQLite (2026-10-31)
+
+The `sqlite` scenario (tcc runtime, unzip, one tcc run compiling the
+9.5 MB sqlite3.c with the driver, three SQLite runs): 6.9 s in the
+kernel.
+
+    nt: 30254 system calls in 1970 ms (and 2928 waits, 10126 ms),
+        24443 user faults in 746 ms, 46 processes created in 95 ms

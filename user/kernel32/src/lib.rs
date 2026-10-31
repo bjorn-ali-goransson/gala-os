@@ -23,6 +23,7 @@ use core::ffi::c_void;
 mod ansi;
 mod console;
 mod files;
+mod heap;
 mod mapping;
 mod messages;
 mod pipe;
