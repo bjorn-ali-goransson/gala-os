@@ -123,6 +123,9 @@ syscall_stubs! {
     NtFreeVirtualMemory = 0x1e, fn(process: isize, base: *mut usize, size: *mut usize, kind: u32);
     NtQueryPerformanceCounter = 0x31, fn(counter: *mut i64, frequency: *mut i64);
     NtDelayExecution = 0x34, fn(alertable: u8, interval: *const i64);
+    NtOpenEvent = 0x40, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
+    NtClearEvent = 0x3e, fn(h: usize);
+    NtQuerySystemTime = 0x5a, fn(time: *mut i64);
     NtCreateEvent = 0x48, fn(
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, kind: u32,
         initial: u8

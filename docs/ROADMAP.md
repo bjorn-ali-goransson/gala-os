@@ -192,7 +192,9 @@ to set and to argue for. Current order and why:
    a platform seam. The ledger and event stream now make the Go bring-up
    data-driven.
 5. G3 (workable Go programs): done. N1 done (N1a-N1c: Go's net/http
-   serves the host). Next: N2a, decided 2026-10-31: Nginx is the stated
+   serves the host). N2a done: Nginx serves the host. Next: N2b (Nginx
+   in its normal master/worker mode: process creation from user mode).
+   N2a was decided 2026-10-31: Nginx is the stated
    goal and the ledger makes bring-up data-driven, so build an x64 Nginx
    with mingw-w64 and run it on gala before choosing anything larger
    (WoW64). gala-um (U1-U3) waits: the full suite still runs in ~20 s,
@@ -244,11 +246,24 @@ N1. **Networking (next)**, re-planned 2026-10-30 from data: the official
 N2. **Nginx**: either our own 64-bit build of Nginx (cross-compiled with
    mingw-w64) or a WoW64-style layer for 32-bit programs (much larger);
    then CreateProcess for its worker processes, advapi32/crypt32 pieces.
-   N2a (next). Cross-compile Nginx for x64 with mingw-w64 (pinned
+   N2a. Cross-compile Nginx for x64 with mingw-w64 (pinned
         version, script in the repo, binary checked in like the Go
         programs), run it on gala with a minimal config (master process
         only if possible: `master_process off`), and let the ledger list
         the work; an `nginx` net scenario GETs its default page.
+        **Done**: `user/nginx/build.sh` (Nginx 1.30.6, reproducible),
+        gala's msvcrt.dll (CRT startup, heap, printf, time, strings),
+        advapi32.dll and user32.dll (what Nginx imports), kernel32 (named
+        events and mutexes, critical sections, file mappings, ANSI
+        variants, overlapped ReadFile/WriteFile, ...), ws2_32 select
+        (IOCTL_AFD_POLL), non-blocking sockets (FIONBIO), getaddrinfo
+        (numeric/localhost), gethostname. The `nginx` scenario: xtask
+        GETs the page, then stops the VM (Nginx serves until stopped).
+   N2b (next). Nginx's normal mode: `master_process on` starts worker
+        processes with CreateProcess (NtCreateUserProcess, handle
+        inheritance, the named events and shared memory it already
+        uses), stopped with `nginx -s stop`. Then the modules that need
+        libraries: PCRE2 (rewrite), zlib (gzip), OpenSSL (TLS).
 
 ## Later
 SMP, ACPI (MADT/HPET), virtio devices, bindgen-generated layouts from

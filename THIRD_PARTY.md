@@ -18,6 +18,13 @@ Rules for this file:
 |---|---|---|---|---|
 | Limine bootloader | `v11.4.1-binary` (commit `5be26a73d7b7`) | github.com/limine-bootloader/limine | BSD-2-Clause | Prebuilt `BOOTX64.EFI`, `limine-uefi-cd.bin`, `limine-bios-cd.bin` and `limine-bios.sys`, fetched by `cargo xtask` into `target/` and copied onto the ISO; its `limine` host tool (built from `limine.c` in the same checkout) installs the BIOS stages. Not committed. |
 
+## Test programs built from third-party source (checked in as binaries)
+
+| Component | Version | Source | License | How it is used |
+|---|---|---|---|---|
+| Nginx | 1.30.6 (`nginx-1.30.6.tar.gz`, SHA-256 `3cf46f5e...b8b6c8`) | nginx.org | BSD-2-Clause | `user/bin/nginx.exe`, built unmodified by `user/nginx/build.sh` with mingw-w64 (no PCRE, zlib or OpenSSL); run by the `nginx` scenario. Not part of gala itself. |
+| mingw-w64 runtime and GCC support code | Ubuntu 24.04 `gcc-mingw-w64-x86-64` 13.2.0 | mingw-w64.org, gcc.gnu.org | mingw-w64 CRT: ZPL/public domain; libgcc: GPL-3.0 with the GCC Runtime Library Exception | Statically linked into `nginx.exe` by the toolchain (program startup, helpers). |
+
 ## Rust crate dependencies (linked into the kernel)
 
 | Crate | Version | License | Purpose |
@@ -37,6 +44,8 @@ The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `scre
 | `kernel/src/arch/x86_64/serial.rs` | Generic 16550 UART register description (public datasheets / OSDev wiki) | n/a |
 | `kernel/src/arch/x86_64/qemu.rs` | QEMU `isa-debug-exit` device documentation | n/a |
 | NtCancelIoFileEx as service 0x7f01 | gala's own number (not Windows'), until the real one is verified on the pinned build | n/a |
+| `user/msvcrt` (gala's C runtime) | The C standard (stdio, string, stdlib, time) and Microsoft's CRT documentation (`__getmainargs`, `_initterm`, `_onexit`, `__iob_func`, `_gmtime64` and the rest, the command-line parsing rules, `rand`'s documented generator); the date algorithm is the well-known days-from-civil arithmetic (public domain) | n/a |
+| `user/kernel32` named objects, critical sections, file mappings, GetVersionExA, overlapped ReadFile/WriteFile; `user/advapi32`, `user/user32`; ws2_32 select/ioctlsocket/getaddrinfo | Microsoft documentation (incl. GetVersionEx returning 6.2 to programs without a compatibility manifest, RTL_CRITICAL_SECTION layout from mingw-w64 `winnt.h`); which calls Nginx makes, from Nginx's source (BSD-2-Clause), read, not copied | n/a |
 | `user/ws2_32` overlapped API, `user/mswsock`, kernel32 CancelIoEx/SetFileCompletionNotificationModes | Microsoft documentation (WSARecv, WSASend, WSAGetOverlappedResult, WSAIoctl, AcceptEx, ConnectEx, GetAcceptExSockaddrs, WSAEnumProtocols, WSAPROTOCOL_INFOW, CancelIoEx, SetFileCompletionNotificationModes, OVERLAPPED); WSAID_* GUIDs, SIO_* and SO_*/TCP_* values from mingw-w64 `mswsock.h`/`ws2def.h`/`winsock2.h`/`mstcpip.h`; which calls Go makes and in which order from Go's own source (`internal/poll/fd_windows.go`, `net/*_windows.go`, BSD-3-Clause), read, not copied | n/a; Go: BSD-3-Clause |
 | Service number NtDeviceIoControlFile 0x07 | Publicly known black-box value (stable across Windows 10/11 x64); **to be verified** on the pinned build | n/a |
 | `kernel/src/nt/afd.rs`, `user/ws2_32` AFD IOCTL codes and buffer layouts | Wine `include/wine/afd.h` (bind, listen, recv, poll, getsockname: codes and layouts that Wine's test suite checks on Windows) and ReactOS `sdk/include/reactos/drivers/afd/shared.h` (connect, wait-for-listen, accept, send, disconnect, get-peer-name, super-accept and super-connect with their input layouts, the `AfdOpenPacketXX` open packet; marked "to be verified" in docs/ARCHITECTURE.md). Only codes, field order and sizes are used; no code was copied. Fetched 2026-10-30. | LGPL-2.1 (Wine), GPL-2.0 (ReactOS); facts about an ABI only |

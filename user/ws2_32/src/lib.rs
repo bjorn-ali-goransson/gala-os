@@ -56,6 +56,7 @@ unsafe extern "system" {
         initial: u8,
     ) -> u32;
     fn NtWaitForSingleObject(h: usize, alertable: u8, timeout: *const i64) -> u32;
+    fn NtCancelIoFileEx(h: usize, request: *mut [usize; 2], iosb: *mut [usize; 2]) -> u32;
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
@@ -65,6 +66,17 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    fn strlen(s: *const u8) -> usize;
+    // Named by core's unwind tables (MSVC target); ntdll has it.
+    fn __CxxFrameHandler3();
+    // The stack probe for select's buffers (ntdll exports it).
+    fn __chkstk();
+}
+
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn VirtualAlloc(address: *mut u8, size: usize, kind: u32, protect: u32) -> *mut u8;
+    fn VirtualFree(address: *mut u8, size: usize, kind: u32) -> i32;
 }
 
 #[repr(C)]
@@ -108,6 +120,10 @@ const WSAENOTCONN: u32 = 10057;
 const WSAECONNREFUSED: u32 = 10061;
 const WSAVERNOTSUPPORTED: u32 = 10092;
 const WSAENOPROTOOPT: u32 = 10042;
+const WSAEWOULDBLOCK: u32 = 10035;
+const WSAHOST_NOT_FOUND: i32 = 11001;
+const IOCTL_AFD_POLL: u32 = 0x12024;
+const IOCTL_AFD_SET_INFO: u32 = 0x1203b;
 const WSA_IO_PENDING: u32 = 997;
 const WSA_IO_INCOMPLETE: u32 = 996;
 const WSA_OPERATION_ABORTED: u32 = 995;
@@ -128,6 +144,10 @@ const IOCTL_AFD_GET_PEER_NAME: u32 = 0x12033;
 const IOCTL_AFD_SUPER_ACCEPT: u32 = 0x12083;
 const IOCTL_AFD_SUPER_CONNECT: u32 = 0x120c7;
 
+/// Referenced by code that uses floating point (MSVC target convention).
+#[unsafe(no_mangle)]
+pub static _fltused: i32 = 0;
+
 /// WSAStartup calls not yet matched by WSACleanup.
 static STARTED: AtomicU32 = AtomicU32::new(0);
 
@@ -147,6 +167,7 @@ fn last_error() -> u32 {
 fn wsa_error(status: u32) -> u32 {
     match status {
         0xc000_0120 => WSA_OPERATION_ABORTED,
+        0xc000_00a3 => WSAEWOULDBLOCK,
         0xc000_0236 => WSAECONNREFUSED,
         0xc000_020d => WSAECONNRESET,
         0xc000_020a => WSAEADDRINUSE,
@@ -1042,6 +1063,300 @@ pub extern "system" fn WSAEnumProtocolsW(
         }
     }
     1
+}
+
+/// fd_set (x64): u_int fd_count, then SOCKET fd_array[] at offset 8.
+#[repr(C)]
+pub struct FdSet {
+    count: u32,
+    array: [usize; 0],
+}
+
+/// The sockets of an fd_set (none for NULL).
+fn fd_slice<'a>(set: *mut FdSet) -> &'a [usize] {
+    if set.is_null() {
+        return &[];
+    }
+    // SAFETY: the caller's fd_set: `count` handles follow the header.
+    unsafe { core::slice::from_raw_parts((&raw const (*set).array).cast(), (*set).count as usize) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn __WSAFDIsSet(s: Socket, set: *mut FdSet) -> i32 {
+    i32::from(fd_slice(set).contains(&s))
+}
+
+// AFD_POLL_* events (see the kernel's nt::afd).
+const POLL_READ: u32 = 0x1 | 0x8 | 0x80; // READ, HUP, ACCEPT
+const POLL_WRITE: u32 = 0x4 | 0x40; // WRITE, CONNECT
+const POLL_EXCEPT: u32 = 0x2 | 0x100; // OOB, CONNECT_ERR
+const MAX_SELECT: usize = 512;
+
+/// select(nfds, readfds, writefds, exceptfds, timeout): one IOCTL_AFD_POLL
+/// over all the sockets; the timeout is a wait on the request, then a
+/// cancel. Returns how many set memberships are ready.
+#[unsafe(no_mangle)]
+pub extern "system" fn select(
+    _nfds: i32,
+    read: *mut FdSet,
+    write: *mut FdSet,
+    except: *mut FdSet,
+    timeout: *const [i32; 2],
+) -> i32 {
+    if !started() {
+        return fail(WSANOTINITIALISED);
+    }
+    // afd_poll_params: timeout, count, exclusive; then {SOCKET; flags;
+    // status} entries of 16 bytes.
+    let mut input = [0u8; 16 + 16 * MAX_SELECT];
+    let mut n = 0usize;
+    for (set, flags) in [(read, POLL_READ), (write, POLL_WRITE), (except, POLL_EXCEPT)] {
+        for &sock in fd_slice(set) {
+            let existing =
+                (0..n).find(|&i| input[16 + 16 * i..24 + 16 * i] == (sock as u64).to_le_bytes());
+            let i = match existing {
+                Some(i) => i,
+                None if n < MAX_SELECT => {
+                    input[16 + 16 * n..24 + 16 * n].copy_from_slice(&(sock as u64).to_le_bytes());
+                    n += 1;
+                    n - 1
+                }
+                None => return fail(WSAEINVAL),
+            };
+            let at = 24 + 16 * i;
+            let old = u32::from_le_bytes([input[at], input[at + 1], input[at + 2], input[at + 3]]);
+            input[at..at + 4].copy_from_slice(&(old | flags).to_le_bytes());
+        }
+    }
+    if n == 0 {
+        return fail(WSAEINVAL);
+    }
+    // SAFETY: the caller's optional timeval {tv_sec, tv_usec}.
+    let ms: Option<i64> = (!timeout.is_null())
+        .then(|| unsafe { i64::from((*timeout)[0]) * 1000 + i64::from((*timeout)[1]) / 1000 });
+    let poll_timeout: i64 = match ms {
+        Some(0) => 0,
+        _ => i64::MAX,
+    };
+    input[..8].copy_from_slice(&poll_timeout.to_le_bytes());
+    input[8..12].copy_from_slice(&(n as u32).to_le_bytes());
+    let first = usize::from_le_bytes(input[16..24].try_into().unwrap_or([0; 8]));
+    let mut output = [0u8; 16 + 16 * MAX_SELECT];
+    let status = poll(first, &input[..16 + 16 * n], &mut output, ms);
+    let ready = match status {
+        0 => u32::from_le_bytes([output[8], output[9], output[10], output[11]]) as usize,
+        0xc000_0120 => 0, // timed out and cancelled
+        s => return fail(wsa_error(s)),
+    };
+    // Rewrite the sets with the ready sockets.
+    let mut total = 0;
+    for (set, flags) in [(read, POLL_READ), (write, POLL_WRITE), (except, POLL_EXCEPT)] {
+        if set.is_null() {
+            continue;
+        }
+        let mut kept = 0u32;
+        let wanted = fd_slice(set);
+        let mut keep = [0usize; MAX_SELECT];
+        for e in 0..ready.min(MAX_SELECT) {
+            let at = 16 + 16 * e;
+            let sock = usize::from_le_bytes(output[at..at + 8].try_into().unwrap_or([0; 8]));
+            let events = u32::from_le_bytes([
+                output[at + 8],
+                output[at + 9],
+                output[at + 10],
+                output[at + 11],
+            ]);
+            if events & flags != 0 && wanted.contains(&sock) {
+                keep[kept as usize] = sock;
+                kept += 1;
+            }
+        }
+        // SAFETY: the caller's fd_set has room for at least its old count,
+        // which `kept` does not exceed.
+        unsafe {
+            (*set).count = kept;
+            let array = (&raw mut (*set).array).cast::<usize>();
+            for (i, &sock) in keep[..kept as usize].iter().enumerate() {
+                *array.add(i) = sock;
+            }
+        }
+        total += kept as i32;
+    }
+    total
+}
+
+/// Runs IOCTL_AFD_POLL on `s` and waits for it at most `ms` (None:
+/// forever); on timeout the request is cancelled. Returns its status.
+fn poll(s: Socket, input: &[u8], output: &mut [u8], ms: Option<i64>) -> u32 {
+    let mut event = 0usize;
+    // SAFETY: valid output pointer; EVENT_ALL_ACCESS, notification event.
+    let status = unsafe { NtCreateEvent(&mut event, 0x1f_0003, core::ptr::null(), 0, 0) };
+    if status != 0 {
+        return status;
+    }
+    let mut iosb = [0usize; 2];
+    // SAFETY: valid buffers; they live until the request completes (we
+    // wait for it, cancelling it on timeout).
+    let mut status = unsafe {
+        NtDeviceIoControlFile(
+            s,
+            event,
+            0,
+            0,
+            &mut iosb,
+            IOCTL_AFD_POLL,
+            input.as_ptr(),
+            input.len() as u32,
+            output.as_mut_ptr(),
+            output.len() as u32,
+        )
+    };
+    if status == STATUS_PENDING {
+        let relative = ms.map(|ms| -ms.max(0) * 10_000);
+        let timeout = relative.as_ref().map_or(core::ptr::null(), |t| t as *const i64);
+        // SAFETY: our event and status block.
+        unsafe {
+            if NtWaitForSingleObject(event, 0, timeout) == 0x102 {
+                NtCancelIoFileEx(s, &mut iosb, core::ptr::null_mut());
+                NtWaitForSingleObject(event, 0, core::ptr::null());
+            }
+            status = core::ptr::read_volatile(&raw const iosb[0]) as u32;
+        }
+    }
+    // SAFETY: our event.
+    unsafe { NtClose(event) };
+    status
+}
+
+const FIONBIO: u32 = 0x8004_667e;
+
+/// ioctlsocket(s, cmd, argp): FIONBIO (non-blocking mode, kept by AFD).
+#[unsafe(no_mangle)]
+pub extern "system" fn ioctlsocket(s: Socket, cmd: i32, arg: *mut u32) -> i32 {
+    if cmd as u32 != FIONBIO {
+        missing(b"ws2_32.dll!ioctlsocket", u64::from(cmd as u32));
+        return fail(WSAEOPNOTSUPP);
+    }
+    if arg.is_null() {
+        return fail(WSAEFAULT);
+    }
+    // AFD_INFO {u32 class = AFD_INFO_BLOCKING_MODE; union at 8: BOOLEAN
+    // non-blocking; u32 padding}.
+    let mut info = [0u8; 24];
+    info[..4].copy_from_slice(&2u32.to_le_bytes());
+    // SAFETY: the caller's argument.
+    info[8] = u8::from(unsafe { *arg } != 0);
+    match afd_call(s, IOCTL_AFD_SET_INFO, &info, &mut []) {
+        Ok(_) => 0,
+        Err(e) => e,
+    }
+}
+
+/// gethostname: gala's machine name.
+#[unsafe(no_mangle)]
+pub extern "system" fn gethostname(name: *mut u8, len: i32) -> i32 {
+    const NAME: &[u8] = b"gala\0";
+    if name.is_null() || len < NAME.len() as i32 {
+        return fail(WSAEFAULT);
+    }
+    // SAFETY: the caller's buffer of `len` bytes.
+    unsafe { core::ptr::copy_nonoverlapping(NAME.as_ptr(), name, NAME.len()) };
+    0
+}
+
+/// getaddrinfo(node, service, hints, result): numeric IPv4 addresses,
+/// "localhost" and a missing node (any address, or loopback) with a
+/// numeric service; no name resolution yet (reported). One result, in a
+/// page of its own (freeaddrinfo releases it).
+#[unsafe(no_mangle)]
+pub extern "system" fn getaddrinfo(
+    node: *const u8,
+    service: *const u8,
+    hints: *const i32,
+    result: *mut *mut u8,
+) -> i32 {
+    // SAFETY: the caller's NUL-terminated strings and hints (ai_flags,
+    // ai_family, ai_socktype, ai_protocol first).
+    unsafe {
+        let (flags, family, socktype, protocol) = if hints.is_null() {
+            (0, 0, 0, 0)
+        } else {
+            (*hints, *hints.add(1), *hints.add(2), *hints.add(3))
+        };
+        if family != 0 && family != AF_INET {
+            return WSAEAFNOSUPPORT as i32;
+        }
+        let ip = if node.is_null() {
+            if flags & 1 != 0 { [0, 0, 0, 0] } else { [127, 0, 0, 1] } // AI_PASSIVE
+        } else {
+            let text = core::slice::from_raw_parts(node, strlen(node));
+            if text.eq_ignore_ascii_case(b"localhost") {
+                [127, 0, 0, 1]
+            } else if let Some(ip) = parse_ipv4(text) {
+                ip
+            } else {
+                missing(b"ws2_32.dll!getaddrinfo(name resolution)", 0);
+                return WSAHOST_NOT_FOUND;
+            }
+        };
+        let port = if service.is_null() {
+            0
+        } else {
+            match parse_u16(core::slice::from_raw_parts(service, strlen(service))) {
+                Some(p) => p,
+                None => {
+                    missing(b"ws2_32.dll!getaddrinfo(service name)", 0);
+                    return 10109; // WSATYPE_NOT_FOUND
+                }
+            }
+        };
+        let page = VirtualAlloc(core::ptr::null_mut(), 4096, 0x3000, 4);
+        if page.is_null() {
+            return WSAENOBUFS as i32;
+        }
+        // ADDRINFOA (x64): flags, family, socktype, protocol, addrlen,
+        // canonname, addr, next; the SOCKADDR_IN follows it.
+        let ai = page.cast::<i32>();
+        *ai = flags;
+        *ai.add(1) = AF_INET;
+        *ai.add(2) = socktype;
+        *ai.add(3) = protocol;
+        *page.add(16).cast::<usize>() = SOCKADDR_LEN as usize;
+        let sa = page.add(48);
+        *page.add(32).cast::<*mut u8>() = sa;
+        *sa = AF_INET as u8;
+        core::ptr::copy_nonoverlapping(port.to_be_bytes().as_ptr(), sa.add(2), 2);
+        core::ptr::copy_nonoverlapping(ip.as_ptr(), sa.add(4), 4);
+        *result = page;
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn freeaddrinfo(ai: *mut u8) {
+    if !ai.is_null() {
+        // SAFETY: a page from getaddrinfo.
+        unsafe { VirtualFree(ai, 0, 0x8000) };
+    }
+}
+
+fn parse_u16(s: &[u8]) -> Option<u16> {
+    if s.is_empty() || s.len() > 5 || !s.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let v = s.iter().fold(0u32, |v, &d| v * 10 + u32::from(d - b'0'));
+    u16::try_from(v).ok()
+}
+
+fn parse_ipv4(s: &[u8]) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut parts = s.split(|&c| c == b'.');
+    for byte in out.iter_mut() {
+        let p = parts.next()?;
+        let v = parse_u16(p)?;
+        *byte = u8::try_from(v).ok()?;
+    }
+    parts.next().is_none().then_some(out)
 }
 
 #[unsafe(no_mangle)]

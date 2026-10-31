@@ -1,0 +1,1 @@
+Placeholder: creates C:\nginx\temp on gala, where nginx makes its temporary directories.

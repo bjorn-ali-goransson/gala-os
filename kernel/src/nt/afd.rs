@@ -6,7 +6,7 @@
 //! there); see THIRD_PARTY.md.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use super::object::{CompletionPacket, Handle, KObject, ObjectBody, ObjectRef};
 use super::process::Process;
@@ -27,6 +27,9 @@ pub const IOCTL_AFD_DISCONNECT: u32 = 0x1202b;
 pub const IOCTL_AFD_GETSOCKNAME: u32 = 0x1202f;
 pub const IOCTL_AFD_GET_PEER_NAME: u32 = 0x12033;
 pub const IOCTL_AFD_SUPER_ACCEPT: u32 = 0x12083;
+pub const IOCTL_AFD_POLL: u32 = 0x12024;
+pub const IOCTL_AFD_SET_INFO: u32 = 0x1203b;
+const AFD_INFO_BLOCKING_MODE: u32 = 2;
 pub const IOCTL_AFD_SUPER_CONNECT: u32 = 0x120c7;
 
 const AFD_DISCONNECT_SEND: u32 = 1;
@@ -88,6 +91,14 @@ enum Op {
         local: u32,
     },
     Connect,
+    /// IOCTL_AFD_POLL: the sockets and the events asked for; the output
+    /// buffer receives the ones that happened.
+    Poll {
+        sockets: Vec<(u64, KArc<EndpointState>, u32)>,
+        output: u64,
+        output_len: u32,
+        wait: bool,
+    },
 }
 
 impl Op {
@@ -97,6 +108,7 @@ impl Op {
             Op::Send { .. } => 1,
             Op::WaitForListen { .. } | Op::SuperAccept { .. } => 2,
             Op::Connect => 3,
+            Op::Poll { .. } => 4,
         }
     }
 }
@@ -121,6 +133,9 @@ pub struct EndpointState {
     pub completion: IrqMutex<Option<(ObjectRef, u64)>>,
     /// FILE_SKIP_* notification modes.
     pub modes: AtomicU32,
+    /// Non-blocking mode (FIONBIO): requests without a completion context
+    /// fail with STATUS_DEVICE_NOT_READY instead of pending.
+    non_blocking: AtomicBool,
     pending: IrqMutex<Vec<Pending>>,
 }
 
@@ -151,6 +166,52 @@ fn notify(token: u64) {
     if let Some(state) = state {
         try_complete(&state);
     }
+    // A poll waits on other endpoints' sockets: retry every pending poll.
+    let pollers: Vec<KArc<EndpointState>> = {
+        let mut list = POLLERS.lock();
+        let mut copy = Vec::new();
+        if copy.try_reserve(list.len()).is_ok() {
+            list.retain(|e| e.pending.lock().iter().any(|p| p.op.kind() == 4));
+            for e in list.iter() {
+                let _ = copy.try_push(e.clone());
+            }
+        }
+        copy
+    };
+    for state in pollers {
+        try_complete(&state);
+    }
+}
+
+/// Endpoints with a pending poll.
+static POLLERS: IrqMutex<Vec<KArc<EndpointState>>> = IrqMutex::new(Vec::new());
+
+// IOCTL_AFD_POLL event bits (Wine's afd.h).
+const AFD_POLL_READ: u32 = 0x1;
+const AFD_POLL_WRITE: u32 = 0x4;
+const AFD_POLL_HUP: u32 = 0x8;
+const AFD_POLL_CONNECT: u32 = 0x40;
+const AFD_POLL_ACCEPT: u32 = 0x80;
+const AFD_POLL_CONNECT_ERR: u32 = 0x100;
+
+/// The AFD_POLL_* events of one endpoint now.
+fn poll_events(state: &EndpointState) -> u32 {
+    let Some(id) = *state.socket.lock() else { return 0 };
+    let Ok(r) = tcp::readiness(id) else { return AFD_POLL_HUP };
+    let mut events = 0;
+    for (on, bit) in [
+        (r.readable, AFD_POLL_READ),
+        (r.writable, AFD_POLL_WRITE),
+        (r.hangup, AFD_POLL_HUP),
+        (r.acceptable, AFD_POLL_ACCEPT),
+        (r.connected, AFD_POLL_CONNECT),
+        (r.refused, AFD_POLL_CONNECT_ERR),
+    ] {
+        if on {
+            events |= bit;
+        }
+    }
+    events
 }
 
 /// Reports a finished request: IO_STATUS_BLOCK, event, the endpoint's own
@@ -231,6 +292,9 @@ fn attempt_inner(
     op: &mut Op,
     process: &Process,
 ) -> Result<Option<u64>, Failure> {
+    if let Op::Poll { sockets, output, output_len, wait } = op {
+        return poll_once(sockets, *output, *output_len, *wait, process);
+    }
     let id = socket.ok_or(Failure::Nt(NtStatus::INVALID_CONNECTION))?;
     match op {
         Op::Recv { buffers } => {
@@ -300,14 +364,55 @@ fn attempt_inner(
             tcp::connected(id)?;
             Ok(Some(0))
         }
+        Op::Poll { .. } => unreachable!("handled above"),
     }
 }
+
+/// One look at a poll's sockets: writes the ones with events (Wine's
+/// layout: the header, then {SOCKET; flags; status} per socket, count =
+/// how many) once any has one, or at once if the poll does not wait.
+fn poll_once(
+    sockets: &[(u64, KArc<EndpointState>, u32)],
+    output: u64,
+    output_len: u32,
+    wait: bool,
+    process: &Process,
+) -> Result<Option<u64>, Failure> {
+    let mut out = Vec::new();
+    out.try_reserve(POLL_HEADER + POLL_ENTRY * sockets.len()).map_err(|_| NtStatus::NO_MEMORY)?;
+    out.resize(POLL_HEADER, 0);
+    let mut count = 0u32;
+    for (handle, state, wanted) in sockets {
+        let events = poll_events(state) & wanted;
+        if events != 0 {
+            // Capacity is reserved above.
+            let _ = out.try_extend_from_slice(&handle.to_le_bytes());
+            let _ = out.try_extend_from_slice(&events.to_le_bytes());
+            let _ = out.try_extend_from_slice(&0u32.to_le_bytes());
+            count += 1;
+        }
+    }
+    if count == 0 && wait {
+        return Ok(None);
+    }
+    out[8..12].copy_from_slice(&count.to_le_bytes());
+    if out.len() > output_len as usize {
+        return Err(NtStatus::BUFFER_TOO_SMALL.into());
+    }
+    user_write(process, output, &out)?;
+    Ok(Some(out.len() as u64))
+}
+
+/// afd_poll_params: timeout (i64), count (u32), exclusive (u8), padding;
+/// then 16-byte entries (packed to 4).
+const POLL_HEADER: usize = 16;
+const POLL_ENTRY: usize = 16;
 
 /// Completes the pending requests that can finish now, oldest first
 /// (a request waits while an older one of its kind does).
 fn try_complete(state: &EndpointState) {
     let mut pending = state.pending.lock();
-    let mut blocked = [false; 4];
+    let mut blocked = [false; 5];
     let mut i = 0;
     while i < pending.len() {
         let kind = usize::from(pending[i].op.kind());
@@ -338,6 +443,22 @@ fn submit(state: &EndpointState, mut op: Op, io: Io) -> NtStatus {
     {
         finish(state, &io, status, information, true);
         return status;
+    }
+    if io.context == 0 && kind != 4 && state.non_blocking.load(Ordering::Acquire) {
+        // A non-blocking socket's synchronous call: "would block".
+        return NtStatus::DEVICE_NOT_READY;
+    }
+    if kind == 4 {
+        let token = state.token;
+        let mut pollers = POLLERS.lock();
+        if !pollers.iter().any(|e| e.token == token) {
+            let me = REGISTRY.lock().iter().find(|e| e.token == token).cloned();
+            if let Some(me) = me
+                && pollers.try_push(me).is_err()
+            {
+                return NtStatus::INSUFFICIENT_RESOURCES;
+            }
+        }
     }
     if pending.try_push(Pending { op, io }).is_err() {
         return NtStatus::INSUFFICIENT_RESOURCES;
@@ -445,6 +566,7 @@ pub fn open(ea: &[u8]) -> Result<ObjectRef, NtStatus> {
         socket: IrqMutex::new(None),
         completion: IrqMutex::new(None),
         modes: AtomicU32::new(0),
+        non_blocking: AtomicBool::new(false),
         pending: IrqMutex::new(Vec::new()),
     })
     .map_err(|_| NtStatus::NO_MEMORY)?;
@@ -595,7 +717,7 @@ pub fn ioctl(r: &Request<'_>, io: Io) -> NtStatus {
         return NtStatus::INVALID_DEVICE_REQUEST;
     };
     let ep = &*endpoint.state;
-    if ep.transport == Transport::None {
+    if ep.transport == Transport::None && r.code != IOCTL_AFD_POLL {
         super::ledger::record("NtDeviceIoControlFile", "afd helper ioctl", u64::from(r.code));
         return NtStatus::INVALID_DEVICE_REQUEST;
     }
@@ -699,6 +821,47 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             socket()?;
             let accept = endpoint_of(r.process, handle)?;
             Immediate::Async(Op::SuperAccept { accept, output: r.output, receive, local })
+        }
+        IOCTL_AFD_POLL => {
+            let header: [u8; POLL_HEADER] = r.input()?;
+            let timeout = u64_at(&header, 0) as i64;
+            let count = u32_at(&header, 8) as usize;
+            if count > 1024 || (r.input_len as usize) < POLL_HEADER + POLL_ENTRY * count {
+                return Err(NtStatus::INVALID_PARAMETER);
+            }
+            let mut sockets = Vec::new();
+            sockets.try_reserve(count).map_err(|_| NtStatus::NO_MEMORY)?;
+            for i in 0..count {
+                let mut entry = [0u8; POLL_ENTRY];
+                r.read(r.input + (POLL_HEADER + POLL_ENTRY * i) as u64, &mut entry)?;
+                let handle = u64_at(&entry, 0);
+                let state = endpoint_of(r.process, handle)?;
+                let _ = sockets.try_push((handle, state, u32_at(&entry, 8)));
+            }
+            // The timeout is left to the caller (a wait with a timeout,
+            // then NtCancelIoFileEx); only 0 (just look) is honoured here.
+            Immediate::Async(Op::Poll {
+                sockets,
+                output: r.output,
+                output_len: r.output_len,
+                wait: timeout != 0,
+            })
+        }
+        IOCTL_AFD_SET_INFO => {
+            // AFD_INFO {u32 class; (pad); union at 8; u32 padding}.
+            let b: [u8; 16] = r.input()?;
+            match u32_at(&b, 0) {
+                AFD_INFO_BLOCKING_MODE => ep.non_blocking.store(b[8] != 0, Ordering::Release),
+                class => {
+                    super::ledger::record(
+                        "NtDeviceIoControlFile",
+                        "afd set info",
+                        u64::from(class),
+                    );
+                    return Err(NtStatus::INVALID_PARAMETER);
+                }
+            }
+            Immediate::Done(0)
         }
         IOCTL_AFD_SEND => {
             socket()?;

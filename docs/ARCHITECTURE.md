@@ -491,6 +491,9 @@ from the public documentation of each function (clean room):
 | bcryptprimitives.dll | `user/bcryptprimitives` | `testbcryptprimitives.dll` | `C:\Windows\System32` |
 | ws2_32.dll | `user/ws2_32` | `testws2_32.dll` | `C:\Windows\System32` |
 | mswsock.dll | `user/mswsock` | `testmswsock.dll` | `C:\Windows\System32` |
+| msvcrt.dll | `user/msvcrt` | `testmsvcrt.dll` | `C:\Windows\System32` |
+| advapi32.dll | `user/advapi32` | `testadvapi32.dll` | `C:\Windows\System32` |
+| user32.dll | `user/user32` | `testuser32.dll` | `C:\Windows\System32` |
 
 (Exported under other names so that `user/bin`, which also runs on
 Windows, never shadows the system's DLLs.)
@@ -647,6 +650,8 @@ IOCTLs (code = 0x12000 | function << 2 | method):
 | 0x1202b | DISCONNECT: `{u32 type (1 send, 2 receive, 4 abort); i64 timeout}` | ReactOS, to be verified |
 | 0x1202f | GETSOCKNAME: returns the local sockaddr | Wine |
 | 0x12033 | GET_PEER_NAME: returns the remote sockaddr | ReactOS, to be verified |
+| 0x12024 | POLL (select): `{i64 timeout; u32 count; u8 exclusive; pad; {SOCKET; u32 events; u32 status}[count]}` (packed to 4); the output holds the sockets with events | Wine |
+| 0x1203b | SET_INFO: `{u32 class; union at 8; u32 pad}`; class 2 (blocking mode, the union's BOOLEAN = non-blocking) | ReactOS, to be verified |
 | 0x12083 | SUPER_ACCEPT (AcceptEx), see below | ReactOS, to be verified |
 | 0x120c7 | SUPER_CONNECT (ConnectEx), see below | ReactOS, to be verified |
 
@@ -688,6 +693,17 @@ Internal/InternalHigh) and the endpoint's I/O completion port.
   requests (all of the process's, or the one whose IO_STATUS_BLOCK is
   given) with STATUS_CANCELLED; nothing pending is STATUS_NOT_FOUND.
   Closing the endpoint's last handle cancels what is still pending.
+- Poll (select): a pending poll is retried whenever any socket's
+  readiness changes (endpoints with pending polls are listed in
+  `POLLERS`). Events: READ (bytes or end of stream), WRITE, HUP,
+  ACCEPT, CONNECT, CONNECT_ERR, from `net::tcp::readiness`. Only a zero
+  timeout (just look) is honoured by the kernel; gala's ws2_32 `select`
+  waits with its timeout and then cancels the poll (TODO: honour the
+  timeout in AFD, for programs that poll AFD directly, like libuv).
+- Non-blocking sockets (FIONBIO through SET_INFO): a request without a
+  completion context (not overlapped through a port) that would pend
+  fails with STATUS_DEVICE_NOT_READY instead (ws2_32: WSAEWOULDBLOCK);
+  a connect still proceeds in the background, as on Windows.
 - IOCTL_AFD_SUPER_ACCEPT (0x12083, AcceptEx: input
   `{u8 san; u8 fix; HANDLE accept; u32 receive_length; u32
   local_length; u32 remote_length}`, the output buffer receives

@@ -387,12 +387,17 @@ impl Stack {
 }
 
 fn with_stack<R>(f: impl FnOnce(&mut Stack) -> Result<R, NetError>) -> Result<R, NetError> {
-    let result = match STACK.lock().as_mut() {
-        Some(stack) => f(stack),
-        None => Err(NetError::Unreachable),
-    };
+    let result = with_stack_quiet(f);
     kick();
     result
+}
+
+/// `with_stack` for calls that queue nothing (no reason to poll).
+fn with_stack_quiet<R>(f: impl FnOnce(&mut Stack) -> Result<R, NetError>) -> Result<R, NetError> {
+    match STACK.lock().as_mut() {
+        Some(stack) => f(stack),
+        None => Err(NetError::Unreachable),
+    }
 }
 
 /// Wakes the net thread to poll now (something was queued).
@@ -719,6 +724,49 @@ pub fn close(id: SocketId, abort: bool) {
         }
         Ok(())
     });
+}
+
+/// What a socket's owner could do now (for select/poll).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Readiness {
+    /// Bytes to receive.
+    pub readable: bool,
+    /// Room to send.
+    pub writable: bool,
+    /// The peer closed its side (or the connection is gone).
+    pub hangup: bool,
+    /// A listener has a connection to accept.
+    pub acceptable: bool,
+    /// A connection is established.
+    pub connected: bool,
+    /// A connection attempt failed.
+    pub refused: bool,
+}
+
+pub fn readiness(id: SocketId) -> Result<Readiness, NetError> {
+    with_stack_quiet(|s| {
+        let entry = s.entry(id)?;
+        Ok(match entry.kind {
+            Kind::Bound => Readiness::default(),
+            Kind::Listener { ref ready, .. } => {
+                Readiness { acceptable: !ready.is_empty(), ..Readiness::default() }
+            }
+            Kind::Conn { sock, connected } => {
+                let t = s.tcp(sock).ok_or(NetError::NoSocket)?;
+                let state = t.state();
+                let opening = matches!(state, State::SynSent | State::SynReceived);
+                let refused = !connected && state == State::Closed;
+                Readiness {
+                    readable: t.can_recv(),
+                    writable: t.may_send() && t.can_send(),
+                    hangup: !opening && !refused && !t.may_recv(),
+                    acceptable: false,
+                    connected: !opening && !refused,
+                    refused,
+                }
+            }
+        })
+    })
 }
 
 /// Counters for the log: (polls, loopback packets, loopback drops,

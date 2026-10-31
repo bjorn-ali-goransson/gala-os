@@ -33,7 +33,8 @@ Add-Type -Namespace Gala -Name Native -MemberDefinition @'
 [void][Gala.Native]::SetErrorMode(0x0001 -bor 0x0002 -bor 0x8000)
 
 # Command lines that scenarios pass (gala: `args=` in xtask/src/main.rs).
-$arguments = @{ "args_test" = 'alpha "beta gamma"'; "go_http" = 'self' }
+# nginx.exe would serve until stopped: -v prints its version and exits.
+$arguments = @{ "args_test" = 'alpha "beta gamma"'; "go_http" = 'self'; "nginx" = '-v' }
 # smp_test takes an expected processor count (cpus=N); none on Windows.
 
 $results = @()

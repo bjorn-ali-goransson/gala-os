@@ -44,6 +44,21 @@ binary. Bring-up loop: run it (`XTASK_EVENTS=all cargo xtask boot-test
 <name>` once it has a scenario, or `cargo xtask screenshot run=<name>.exe`)
 and read the `ledger:` lines: every missing import is listed by name.
 
+## Nginx
+
+`user/nginx/build.sh` cross-compiles Nginx (pinned version and SHA-256)
+with mingw-w64 (`apt install gcc-mingw-w64-x86-64`) into
+`user/bin/nginx.exe`; the build is reproducible (fixed build directory,
+no debug info, no link timestamp: two builds give the same hash). CI
+uses the checked-in binary. Its configuration, page and placeholder
+files (boot modules only create the directories they are in) are in
+`user/nginx/` and shipped by EXTRA_MODULES entries with repository
+paths. It runs with `-p C:/nginx/ -c conf/nginx.conf`. A server never
+exits: scenarios with exit status `XTASK_STOPS` are stopped by xtask
+once their net client has finished, and pass if it succeeded.
+`cargo xtask screenshot run=nginx.exe "args=-p%20C:/nginx/%20-c%20conf/nginx.conf"`
+shows it.
+
 ## Adding a function to gala's ntdll or kernel32
 
 1. A test program that imports it (`raw-dylib` against `kernel32` or

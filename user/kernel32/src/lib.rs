@@ -20,6 +20,9 @@
 
 use core::ffi::c_void;
 
+mod mapping;
+mod sync;
+
 type Bool = i32;
 type Handle = *mut c_void;
 
@@ -69,6 +72,7 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
     fn strlen(s: *const u8) -> usize;
+    fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     // MSVC-target unwind tables reference it (gala's ntdll provides it).
     fn __CxxFrameHandler3();
     // The stack probe for frames over a page (ntdll exports it).
@@ -379,8 +383,7 @@ pub extern "system" fn WriteFile(
     overlapped: *mut c_void,
 ) -> Bool {
     if !overlapped.is_null() {
-        unsupported(b"kernel32.dll!WriteFile(overlapped)", 0);
-        return fail_with(ERROR_NOT_SUPPORTED, FALSE);
+        return overlapped_io(h, buffer.cast_mut(), length, written, overlapped, true);
     }
     let mut iosb = [0usize; 2];
     // SAFETY: the caller's buffer; a valid IO_STATUS_BLOCK.
@@ -425,35 +428,6 @@ pub extern "system" fn VirtualFree(address: *mut c_void, size: usize, kind: u32)
     // SAFETY: valid in/out pointers.
     let status = unsafe { NtFreeVirtualMemory(CURRENT_PROCESS, &mut base, &mut size, kind) };
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
-}
-
-/// CreateEventW: named events are not supported yet (reported).
-#[unsafe(no_mangle)]
-pub extern "system" fn CreateEventW(
-    attributes: *mut c_void,
-    manual_reset: Bool,
-    initial: Bool,
-    name: *const u16,
-) -> Handle {
-    if !name.is_null() || !attributes.is_null() {
-        unsupported(b"kernel32.dll!CreateEventW(name/attributes)", 0);
-        return fail_with(ERROR_NOT_SUPPORTED, core::ptr::null_mut());
-    }
-    let mut h = core::ptr::null_mut();
-    // NotificationEvent (0) for manual reset, else SynchronizationEvent (1).
-    let kind = if manual_reset != 0 { 0 } else { 1 };
-    // SAFETY: valid output pointer, no attributes.
-    let status = unsafe {
-        NtCreateEvent(&mut h, 0x1f_0003, core::ptr::null(), kind, u8::from(initial != 0))
-    };
-    match status {
-        STATUS_SUCCESS => {
-            SetLastError(0);
-            h
-        }
-        STATUS_OBJECT_NAME_EXISTS => fail_with(ERROR_ALREADY_EXISTS, h),
-        _ => fail(status, core::ptr::null_mut()),
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -975,8 +949,7 @@ pub extern "system" fn ReadFile(
     overlapped: *mut c_void,
 ) -> Bool {
     if !overlapped.is_null() {
-        unsupported(b"kernel32.dll!ReadFile(overlapped)", 0);
-        return fail_with(ERROR_NOT_SUPPORTED, FALSE);
+        return overlapped_io(h, buffer, length, read, overlapped, false);
     }
     let mut iosb = [0usize; 2];
     // SAFETY: the caller's buffer; a valid IO_STATUS_BLOCK.
@@ -997,6 +970,57 @@ pub extern "system" fn ReadFile(
     }
     match status {
         STATUS_SUCCESS | 0xc000_0011 => TRUE,
+        _ => fail(status, FALSE),
+    }
+}
+
+/// ReadFile/WriteFile with an OVERLAPPED: it is the status block, its
+/// Offset/OffsetHigh the file offset, its hEvent the event (and, unless
+/// its low bit is set, the completion packet carries it). An I/O that is
+/// still pending fails with ERROR_IO_PENDING; a read at the end of the
+/// file fails with ERROR_HANDLE_EOF.
+fn overlapped_io(
+    h: Handle,
+    buffer: *mut u8,
+    length: u32,
+    count: *mut u32,
+    ov: *mut c_void,
+    write: bool,
+) -> Bool {
+    let ov = ov.cast::<usize>();
+    // SAFETY: the caller's OVERLAPPED {Internal, InternalHigh, Offset,
+    // OffsetHigh, hEvent}, valid until the I/O completes.
+    let (offset, event) = unsafe {
+        *ov = STATUS_PENDING as usize;
+        *ov.add(1) = 0;
+        (*ov.add(2) as i64, *ov.add(3))
+    };
+    let context = if event & 1 != 0 { 0 } else { ov as usize };
+    let iosb = ov.cast::<[usize; 2]>();
+    // SAFETY: as above; the caller's buffer of `length` bytes.
+    let status = unsafe {
+        if write {
+            NtWriteFile(h, event & !1, 0, context, iosb, buffer, length, &offset, core::ptr::null())
+        } else {
+            NtReadFile(h, event & !1, 0, context, iosb, buffer, length, &offset, core::ptr::null())
+        }
+    };
+    match status {
+        STATUS_SUCCESS => {
+            if !count.is_null() {
+                // SAFETY: done: InternalHigh holds the count.
+                unsafe { *count = *ov.add(1) as u32 };
+            }
+            TRUE
+        }
+        STATUS_PENDING => fail_with(997, FALSE), // ERROR_IO_PENDING
+        0xc000_0011 => {
+            if !count.is_null() {
+                // SAFETY: the caller's count.
+                unsafe { *count = 0 };
+            }
+            fail_with(38, FALSE) // STATUS_END_OF_FILE: ERROR_HANDLE_EOF
+        }
         _ => fail(status, FALSE),
     }
 }
@@ -1888,20 +1912,6 @@ pub extern "system" fn FreeEnvironmentStringsW(block: *mut u16) -> Bool {
 }
 
 // ---- Handles, waits, memory, threads ----
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CreateEventA(
-    attributes: *mut c_void,
-    manual_reset: Bool,
-    initial: Bool,
-    name: *const u8,
-) -> Handle {
-    if !name.is_null() {
-        unsupported(b"kernel32.dll!CreateEventA(name)", 0);
-        return fail_with(ERROR_NOT_SUPPORTED, core::ptr::null_mut());
-    }
-    CreateEventW(attributes, manual_reset, initial, core::ptr::null())
-}
 
 /// WaitForMultipleObjects: index of the signaled (or abandoned + 0x80)
 /// object, WAIT_TIMEOUT, or WAIT_FAILED.

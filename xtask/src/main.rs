@@ -42,6 +42,11 @@ const USER_DLLS: &[Dll] = &[
     },
     // gala's ws2_32.dll (Winsock on AFD).
     Dll { package: "ws2_32", file: "ws2_32.dll", exported_as: "testws2_32.dll" },
+    // gala's msvcrt.dll (the C runtime of mingw-w64 programs), advapi32.dll
+    // and user32.dll (only what Nginx imports).
+    Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt.dll" },
+    Dll { package: "advapi32", file: "advapi32.dll", exported_as: "testadvapi32.dll" },
+    Dll { package: "user32", file: "user32.dll", exported_as: "testuser32.dll" },
     // gala's mswsock.dll (forwarders to ws2_32).
     Dll { package: "mswsock", file: "mswsock.dll", exported_as: "testmswsock.dll" },
     // Built as ntdll.dll (its export directory says so); exported under
@@ -49,8 +54,9 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
 ];
 
-/// Extra boot modules per scenario: (scenario, built DLL file, directory
-/// on C: that the kernel puts it in, passed as the module string).
+/// Extra boot modules per scenario: (scenario, built DLL file or repository
+/// path, directory on C: that the kernel puts it in, passed as the module
+/// string).
 const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("startup_test", "ntdll.dll", "Windows/System32"),
     ("exception_test", "ntdll.dll", "Windows/System32"),
@@ -118,6 +124,18 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("go_http", "bcryptprimitives.dll", "Windows/System32"),
     ("go_http", "ws2_32.dll", "Windows/System32"),
     ("go_http", "mswsock.dll", "Windows/System32"),
+    ("nginx", "ntdll.dll", "Windows/System32"),
+    ("nginx", "kernel32.dll", "Windows/System32"),
+    ("nginx", "ws2_32.dll", "Windows/System32"),
+    ("nginx", "mswsock.dll", "Windows/System32"),
+    ("nginx", "msvcrt.dll", "Windows/System32"),
+    ("nginx", "advapi32.dll", "Windows/System32"),
+    ("nginx", "user32.dll", "Windows/System32"),
+    ("nginx", "user/bin/nginx.exe", "nginx"),
+    ("nginx", "user/nginx/conf/nginx.conf", "nginx/conf"),
+    ("nginx", "user/nginx/html/index.html", "nginx/html"),
+    ("nginx", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
+    ("nginx", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
     ("go_exit", "ntdll.dll", "Windows/System32"),
     ("go_exit", "kernel32.dll", "Windows/System32"),
     ("go_exit", "bcryptprimitives.dll", "Windows/System32"),
@@ -369,9 +387,14 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
     }
     for (file, dir) in extra {
-        let built = target_dir().join(USER_TARGET).join("release").join(file);
-        copy(&built, &boot.join(file))?;
-        modules += &format!("    module_path: boot():/boot/{file}\n    module_string: {dir}\n");
+        // A path with a slash is a file in the repository (checked-in
+        // binaries, configuration); otherwise a built DLL.
+        let (source, name) = match file.rsplit_once('/') {
+            Some((_, name)) => (root().join(file), name),
+            None => (target_dir().join(USER_TARGET).join("release").join(file), *file),
+        };
+        copy(&source, &boot.join(name))?;
+        modules += &format!("    module_path: boot():/boot/{name}\n    module_string: {dir}\n");
     }
     copy(&limine.join("BOOTX64.EFI"), &efi_boot.join("BOOTX64.EFI"))?;
     for file in ["limine-uefi-cd.bin", "limine-bios-cd.bin", "limine-bios.sys"] {
@@ -506,8 +529,8 @@ const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
 enum NetClient {
     /// Sends NET_ECHO_BYTES and expects them back (`net_client`).
     Echo,
-    /// GETs `/` and expects HTTP_PAGE (`http_client`).
-    Http,
+    /// GETs `/` and expects this body (`http_client`).
+    Http(&'static str),
 }
 
 /// Scenarios that get a virtio-net card on QEMU's user-mode network, with
@@ -517,8 +540,15 @@ enum NetClient {
 const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("net_echo", "net: echo listening on port 7", NetClient::Echo),
     ("winsock_test", "winsock_test: listening on port 7", NetClient::Echo),
-    ("go_http", "go_http: listening on port 7", NetClient::Http),
+    ("go_http", "go_http: listening on port 7", NetClient::Http(GO_HTTP_PAGE)),
+    ("nginx", "using the \"select\" event method", NetClient::Http(NGINX_PAGE)),
 ];
+
+/// Scenarios whose program serves until stopped: once the net client has
+/// finished, xtask stops the VM (QEMU_EXIT_SUCCESS cannot come) and the
+/// scenario passes if the client succeeded.
+const XTASK_STOPS: i32 = -1;
+const STOPPED_LINE: &str = "xtask: stopped the VM after the client";
 
 /// The listening marker and client of a NET_SCENARIOS entry.
 fn net_marker(name: &str) -> Option<(&'static str, NetClient)> {
@@ -526,7 +556,9 @@ fn net_marker(name: &str) -> Option<(&'static str, NetClient)> {
 }
 
 /// The page go_http serves (user/go_http/main.go).
-const HTTP_PAGE: &str = "hello from gala, a fortress for Windows programs\n";
+const GO_HTTP_PAGE: &str = "hello from gala, a fortress for Windows programs\n";
+/// The page nginx serves (user/nginx/html/index.html).
+const NGINX_PAGE: &str = "hello from nginx on gala, a fortress for Windows programs\n";
 
 /// Bytes the client sends through the echo server.
 const NET_ECHO_BYTES: usize = 65536;
@@ -753,6 +785,18 @@ const SCENARIOS: &[Scenario] = &[
             "xtask: net client: http ok",
             "go_http: ok",
             "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // N2a: Nginx (x64, mingw-w64 build in user/bin), one process,
+        // serving a static page; xtask stops the VM after the GET.
+        name: "nginx",
+        cmdline: "qemu_exit run=nginx.exe args=-p%20C:/nginx/%20-c%20conf/nginx.conf",
+        exit_status: XTASK_STOPS,
+        expect: &[
+            "using the \"select\" event method",
+            "nginx/1.30.6",
+            "xtask: net client: http ok",
         ],
     },
     Scenario {
@@ -1326,6 +1370,7 @@ fn run_vm(
     boot: Boot,
     timeout: Duration,
     net: Option<(&'static str, NetClient)>,
+    stop_after_client: bool,
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let log = iso.with_extension("serial.log");
     let _ = fs::remove_file(&log);
@@ -1351,6 +1396,7 @@ fn run_vm(
     let start = Instant::now();
     let mut to_banner = None;
     let mut client = None;
+    let mut stopped = false;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break Some(status);
@@ -1360,8 +1406,16 @@ fn run_vm(
         {
             client = Some(thread::spawn(move || match kind {
                 NetClient::Echo => net_client(port),
-                NetClient::Http => http_client(port),
+                NetClient::Http(page) => http_client(port, page),
             }));
+        }
+        if stop_after_client && client.as_ref().is_some_and(|c| c.is_finished()) {
+            // Let the server log the request, then stop it.
+            thread::sleep(Duration::from_millis(500));
+            let _ = child.kill();
+            let _ = child.wait();
+            stopped = true;
+            break None;
         }
         if to_banner.is_none()
             && fs::read(&log).is_ok_and(|b| {
@@ -1382,12 +1436,16 @@ fn run_vm(
     if let Ok(mut f) = fs::File::open(&log) {
         let _ = f.read_to_string(&mut serial);
     }
+    if stopped {
+        serial += STOPPED_LINE;
+        serial += "\n";
+    }
     if let Some(client) = client {
         let verdict = client.join().unwrap_or_else(|_| Err("client panicked".into()));
         serial += &match verdict {
             Ok(()) => format!(
                 "xtask: net client: {} ok\n",
-                if kind == NetClient::Http { "http" } else { "echo" }
+                if kind == NetClient::Echo { "echo" } else { "http" }
             ),
             Err(e) => format!("xtask: net client: {e}\n"),
         };
@@ -1441,8 +1499,8 @@ fn net_client(port: u16) -> Result {
 }
 
 /// The host side of an HTTP scenario: GET / with HTTP/1.1, expect 200 and
-/// HTTP_PAGE as the body.
-fn http_client(port: u16) -> Result {
+/// `page` as the body.
+fn http_client(port: u16, page: &str) -> Result {
     use std::io::Write;
     let mut stream =
         std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect: {e}"))?;
@@ -1456,7 +1514,7 @@ fn http_client(port: u16) -> Result {
     if !head.starts_with("HTTP/1.1 200 OK") {
         return Err(format!("status line {:?}", head.lines().next()));
     }
-    if body != HTTP_PAGE {
+    if body != page {
         return Err(format!("body {body:?}"));
     }
     Ok(())
@@ -1466,6 +1524,13 @@ fn http_client(port: u16) -> Result {
 fn judge(scenario: &Scenario, status: Option<i32>, timed_out: bool, serial: &str) -> Result {
     let missing: Vec<&str> =
         scenario.expect.iter().copied().filter(|e| !serial.contains(e)).collect();
+    if scenario.exit_status == XTASK_STOPS && serial.contains(STOPPED_LINE) {
+        return if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("serial log lacks {missing:?}"))
+        };
+    }
     match status {
         _ if timed_out => Err(format!("timed out after {}s", BOOT_TEST_TIMEOUT.as_secs())),
         s if s != Some(scenario.exit_status) => {
@@ -1516,7 +1581,7 @@ fn bench_results(text: &str) -> Vec<(String, u64)> {
 fn bench(release: bool, windows: Option<&Path>) -> Result {
     build_kernel(release)?;
     let iso = make_iso(release, "bench", "qemu_exit noscreen run=bench.exe", &[])?;
-    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, None)?;
+    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, None, false)?;
     if status.and_then(|s| s.code()) != Some(QEMU_EXIT_SUCCESS) || !serial.contains("bench: done") {
         return Err(format!(
             "bench did not finish; see {}",
@@ -1598,7 +1663,8 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         Vm::Single(s) => net_marker(s.name),
         Vm::Batch(_) => None,
     };
-    let (status, serial, time) = match run_vm(iso, boot, timeout, net) {
+    let stop = matches!(vm, Vm::Single(s) if s.exit_status == XTASK_STOPS);
+    let (status, serial, time) = match run_vm(iso, boot, timeout, net, stop) {
         Ok(r) => r,
         Err(e) => {
             return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
@@ -1656,8 +1722,13 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
 
 /// Boots a scenario alone (for reports), without printing its log.
 fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
-    let (status, serial, _) =
-        run_vm(iso, scenario_boot(scenario.name), BOOT_TEST_TIMEOUT, net_marker(scenario.name))?;
+    let (status, serial, _) = run_vm(
+        iso,
+        scenario_boot(scenario.name),
+        BOOT_TEST_TIMEOUT,
+        net_marker(scenario.name),
+        scenario.exit_status == XTASK_STOPS,
+    )?;
     judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial)
 }
 
@@ -1688,10 +1759,14 @@ fn screenshot(release: bool, args: &[String]) -> Result {
     // gala's system DLLs in System32 (programs may look only there), the
     // test DLLs next to the programs.
     let system = ["ntdll.dll", "kernel32.dll", "bcryptprimitives.dll", "ws2_32.dll", "mswsock.dll"];
-    let modules: Vec<(&str, &str)> = USER_DLLS
+    let mut modules: Vec<(&str, &str)> = USER_DLLS
         .iter()
         .map(|d| (d.file, if system.contains(&d.file) { "Windows/System32" } else { "gala" }))
         .collect();
+    // Programs shipped from the repository (Nginx and its files).
+    if cmdline.iter().any(|w| w.contains("nginx.exe")) {
+        modules.extend(extra_modules("nginx").into_iter().filter(|(file, _)| file.contains('/')));
+    }
     let iso = make_iso(release, &format!("shot-{name}"), &cmdline.join(" "), &modules)?;
     let dir = target_dir().join("screenshots");
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
@@ -1708,7 +1783,8 @@ fn screenshot(release: bool, args: &[String]) -> Result {
     // before 3 s: until the guest's network is up, QEMU holds the host
     // connection open and the client would wait out its read timeout;
     // after that a closed port is refused at once.
-    let http = cmdline.iter().any(|w| w.contains("go_http"));
+    let nginx = cmdline.iter().any(|w| w.contains("nginx.exe"));
+    let http = nginx || cmdline.iter().any(|w| w.contains("go_http"));
     if cmdline.iter().any(|w| *w == "net_echo" || w.contains("serve")) || http {
         let port = free_port()?;
         add_net(&mut cmd, port);
@@ -1717,7 +1793,8 @@ fn screenshot(release: bool, args: &[String]) -> Result {
             thread::sleep(Duration::from_millis(2500));
             for _ in 0..20 {
                 thread::sleep(Duration::from_millis(500));
-                result = if http { http_client(port) } else { net_client(port) };
+                let page = if nginx { NGINX_PAGE } else { GO_HTTP_PAGE };
+                result = if http { http_client(port, page) } else { net_client(port) };
                 if result.is_ok() {
                     break;
                 }

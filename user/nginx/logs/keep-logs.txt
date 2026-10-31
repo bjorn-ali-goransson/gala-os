@@ -1,0 +1,1 @@
+Placeholder: creates C:\nginx\logs on gala (boot modules make only the directories they are in).
