@@ -11,6 +11,7 @@ pub mod ntdll;
 pub mod object;
 pub mod params;
 pub mod pe;
+pub mod platform;
 pub mod process;
 pub mod section;
 pub mod status;
@@ -36,7 +37,7 @@ pub fn init() {
     if let Err(e) = timer::init() {
         panic!("timers: {e:?}");
     }
-    let (_, total_frames) = crate::mm::frame_stats();
+    let (_, total_frames) = platform::frame_stats();
     if let Err(e) = kuser::init(total_frames) {
         panic!("KUSER_SHARED_DATA: {e:?}");
     }

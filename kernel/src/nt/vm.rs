@@ -1,10 +1,11 @@
 //! Virtual memory services on top of the VAD and the user page tables.
 
+use super::platform;
+use super::platform::PAGE_SIZE;
+use super::platform::{CacheMode, PageFlags};
 use super::process::Process;
 use super::status::NtStatus;
 use super::vad::{self, PageState};
-use crate::mm::PAGE_SIZE;
-use crate::mm::paging::{CacheMode, PageFlags};
 
 /// Page-table flags for a committed page with `protect`. Pages without user
 /// access (NOACCESS, GUARD) stay mapped but kernel-only, so any user access
@@ -137,7 +138,7 @@ fn copy_on_write(
     process: &Process,
     addr: u64,
     protect: u32,
-    section_frame: Option<crate::mm::frame::Frame>,
+    section_frame: Option<platform::Frame>,
 ) -> Fault {
     let page = addr / PAGE_SIZE * PAGE_SIZE;
     let writable = after_copy(protect);

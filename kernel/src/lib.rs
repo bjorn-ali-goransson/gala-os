@@ -24,6 +24,7 @@ pub mod fs;
 pub mod mm;
 pub mod net;
 pub mod nt;
+pub mod platform;
 pub mod sched;
 mod selftest;
 pub mod sync;

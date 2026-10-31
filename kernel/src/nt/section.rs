@@ -5,15 +5,16 @@
 //! a view or tearing down a process never frees them. Frames are freed with
 //! the section, i.e. when its last handle and last view are gone.
 
+use super::platform;
 use alloc::vec::Vec;
 
 use super::object::ObjectRef;
+use super::platform::Frame;
+use super::platform::PAGE_SIZE;
+use super::platform::UserSpace;
 use super::process::Process;
 use super::status::NtStatus;
 use super::vad::{self, Access};
-use crate::arch::paging::UserSpace;
-use crate::mm::PAGE_SIZE;
-use crate::mm::frame::Frame;
 use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
 
@@ -61,7 +62,7 @@ pub struct ImageLayout {
 impl Drop for ImageLayout {
     fn drop(&mut self) {
         for frame in self.shared.lock().iter().flatten() {
-            let _ = crate::mm::free_frame(*frame);
+            platform::free_frame(*frame);
         }
     }
 }
@@ -205,7 +206,7 @@ impl Section {
             // File pages are whole-page heap allocations, which live in the
             // HHDM: their physical address is their offset in it.
             let addr = super::file::with_fs(|fs| fs.page_address(f.node, index))?;
-            return Some(Frame::containing(addr as u64 - crate::mm::hhdm_offset()));
+            return Some(platform::frame_of_heap_page(addr));
         }
         let mut pages = self.pages.lock();
         let slot = pages.get_mut(index)?;
@@ -238,7 +239,7 @@ impl Drop for Section {
             super::file::with_fs(|fs| fs.unmap(f.node));
         }
         for frame in self.pages.lock().iter().flatten() {
-            let _ = crate::mm::free_frame(*frame);
+            platform::free_frame(*frame);
         }
     }
 }

@@ -1,8 +1,8 @@
 //! The x64 CONTEXT record (public layout, 0x4d0 bytes): what NtCreateThread
 //! and NtContinue read and what the kernel hands LdrInitializeThunk.
 
-use crate::arch::cpu::FxState;
-use crate::arch::syscall::UserRegs;
+use super::platform::FxState;
+use super::platform::UserRegs;
 
 pub const SIZE: usize = 0x4d0;
 const CONTEXT_FLAGS: usize = 0x30;

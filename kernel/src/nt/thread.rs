@@ -5,20 +5,21 @@
 //! system call or interrupt, or after a wait wakes up). It never exits while
 //! holding kernel locks.
 
+use super::platform;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::layout::{self, teb};
 use super::object::{KObject, ObjectBody, ObjectRef};
+use super::platform::PAGE_SIZE;
+use super::platform::PageFlags;
+use super::platform::ThreadId;
+use super::platform::UserRegs;
 use super::process::{self, Process};
 use super::status::NtStatus;
 use super::vad;
 use super::wait::{self, Dispatcher};
-use crate::arch::syscall::{self, UserRegs};
-use crate::mm::PAGE_SIZE;
 use crate::mm::heap::{KArc, TryVec};
-use crate::mm::paging::PageFlags;
-use crate::sched::{self, ThreadId};
 use crate::sync::IrqMutex;
 
 pub struct NtThread {
@@ -62,7 +63,7 @@ pub struct NtThread {
 #[derive(Clone)]
 pub struct Parked {
     pub regs: UserRegs,
-    pub fx: crate::arch::cpu::FxState,
+    pub fx: platform::FxState,
     /// Set by NtSetContextThread: resume with `regs`/`fx`.
     pub changed: bool,
 }
@@ -106,7 +107,7 @@ impl NtThread {
     fn apply_affinity(&self) {
         let tid = *self.sched_id.lock();
         if let Some(tid) = tid {
-            sched::set_affinity(tid, self.affinity());
+            platform::set_affinity(tid, self.affinity());
         }
     }
 
@@ -138,7 +139,7 @@ fn as_thread(object: &ObjectRef) -> &NtThread {
 
 /// The NT thread object of the running thread (None for kernel threads).
 pub fn current() -> Option<ObjectRef> {
-    let me = sched::current();
+    let me = platform::current();
     THREADS.lock().iter().find(|o| *as_thread(o).sched_id.lock() == Some(me)).cloned()
 }
 
@@ -186,7 +187,7 @@ pub fn create(
         teb: teb_addr,
         process: process.clone(),
         sched_id: IrqMutex::new(None),
-        affinity: core::sync::atomic::AtomicU64::new(crate::arch::smp::online_mask()),
+        affinity: core::sync::atomic::AtomicU64::new(platform::online_mask()),
         dispatcher: Dispatcher::new(0),
         exit_status: IrqMutex::new(None),
         suspend_count: IrqMutex::new(u32::from(suspended)),
@@ -194,7 +195,7 @@ pub fn create(
         start: regs,
         start_mxcsr: mxcsr,
         win32_start,
-        create_time: crate::time::system_time(),
+        create_time: platform::system_time(),
         exit_time: IrqMutex::new(0),
         priority: IrqMutex::new((PROCESS_BASE_PRIORITY, PROCESS_BASE_PRIORITY)),
         apcs: IrqMutex::new(Vec::new()),
@@ -208,7 +209,7 @@ pub fn create(
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
         return Err(NtStatus::NO_MEMORY);
     }
-    match sched::spawn_user(
+    match platform::spawn_user(
         process.name,
         thread_entry,
         id as usize,
@@ -269,9 +270,9 @@ fn allocate_teb(
 }
 
 fn thread_entry(id: usize) {
-    let Some(object) = by_id(id as u64) else { sched::exit() };
+    let Some(object) = by_id(id as u64) else { platform::exit() };
     let t = as_thread(&object);
-    *t.sched_id.lock() = Some(sched::current());
+    *t.sched_id.lock() = Some(platform::current());
     t.apply_affinity();
     // Stay here while suspended; `resume` wakes us.
     loop {
@@ -279,9 +280,9 @@ fn thread_entry(id: usize) {
         if *count == 0 || t.terminate_request.lock().is_some() {
             break;
         }
-        sched::prepare_wait(None);
+        platform::prepare_wait(None);
         drop(count);
-        sched::wait();
+        platform::wait();
     }
     let pending = *t.terminate_request.lock();
     let regs = t.start;
@@ -292,9 +293,9 @@ fn thread_entry(id: usize) {
     }
     // The kernel never touches SSE state, so this is what user mode gets.
     if let Some(value) = mxcsr {
-        crate::arch::cpu::set_mxcsr(value);
+        platform::set_mxcsr(value);
     }
-    syscall::enter_user_regs(&regs)
+    platform::enter_user(&regs)
 }
 
 /// NtResumeThread: returns the previous suspend count.
@@ -307,7 +308,7 @@ pub fn resume(object: &ObjectRef) -> u32 {
         if *count == 0
             && let Some(tid) = *t.sched_id.lock()
         {
-            sched::wake(tid);
+            platform::wake(tid);
         }
     }
     previous
@@ -321,7 +322,7 @@ pub fn request_termination(object: &ObjectRef, status: NtStatus) {
     }
     t.terminate_request.lock().get_or_insert(status);
     if let Some(tid) = *t.sched_id.lock() {
-        sched::wake(tid);
+        platform::wake(tid);
     }
 }
 
@@ -337,7 +338,7 @@ pub fn queue_user_apc(object: &ObjectRef, apc: UserApc) -> Result<(), NtStatus> 
         if t.alertable.load(Ordering::SeqCst)
             && let Some(tid) = *t.sched_id.lock()
         {
-            sched::wake(tid);
+            platform::wake(tid);
         }
         Ok(())
     })
@@ -420,15 +421,15 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
     }
     // Suspended: wait here, with the user state where other threads can
     // read and change it, until resumed (or terminated).
-    *t.parked.lock() = Some(Parked { regs: *regs, fx: crate::arch::cpu::fxsave(), changed: false });
+    *t.parked.lock() = Some(Parked { regs: *regs, fx: platform::fxsave(), changed: false });
     loop {
         let count = t.suspend_count.lock();
         if *count == 0 || t.terminate_request.lock().is_some() {
             break;
         }
-        sched::prepare_wait(None);
+        platform::prepare_wait(None);
         drop(count);
-        sched::wait();
+        platform::wait();
     }
     let parked = t.parked.lock().take();
     let terminate = *t.terminate_request.lock();
@@ -439,7 +440,7 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
     match parked {
         Some(p) if p.changed => {
             *regs = p.regs;
-            crate::arch::cpu::fxrstor(&p.fx);
+            platform::fxrstor(&p.fx);
             true
         }
         _ => false,
@@ -473,7 +474,7 @@ pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
         if *t.suspend_count.lock() == 0 || t.has_exited() {
             break;
         }
-        sched::sleep_ms(1);
+        platform::sleep_ms(1);
     }
     // TODO: the context of a thread that is not suspended, or is blocked
     // in a wait (Windows interrupts it with a kernel APC).
@@ -485,7 +486,7 @@ pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
 pub fn set_parked_state(
     object: &ObjectRef,
     regs: UserRegs,
-    fx: Option<crate::arch::cpu::FxState>,
+    fx: Option<platform::FxState>,
 ) -> Result<(), NtStatus> {
     let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     parked_state(object)?;
@@ -502,7 +503,7 @@ pub fn set_parked_state(
 /// Ends the current thread with `status`. If it was the last thread of its
 /// process, the process ends too.
 pub fn exit_current(status: NtStatus) -> ! {
-    // Everything referenced here must be dropped before `sched::exit`,
+    // Everything referenced here must be dropped before `platform::exit`,
     // which never returns.
     if let Some(object) = current() {
         let t = as_thread(&object);
@@ -512,7 +513,7 @@ pub fn exit_current(status: NtStatus) -> ! {
             "thread exit",
             format_args!(r#""pid":{},"tid":{},"status":{}"#, t.process.id, t.id, status.0),
         );
-        *t.exit_time.lock() = crate::time::system_time();
+        *t.exit_time.lock() = platform::system_time();
         // Leave the process before waking waiters: once the thread object
         // is signaled, the thread must no longer count as live (e.g. for
         // ThreadAmILastThread).
@@ -528,7 +529,7 @@ pub fn exit_current(status: NtStatus) -> ! {
             process::finish(&process, status);
         }
     }
-    sched::exit()
+    platform::exit()
 }
 
 /// Makes the current thread exit with `status` on its way back to user
@@ -540,7 +541,7 @@ pub fn exit_current_on_return(status: NtStatus) {
 }
 
 pub fn init() {
-    syscall::set_user_return_hook(on_user_return);
+    platform::set_user_return_hook(on_user_return);
 }
 
 #[cfg(test)]

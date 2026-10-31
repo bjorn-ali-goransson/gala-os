@@ -1,24 +1,25 @@
 //! Processes: a user address space, a handle table and threads. Includes
 //! the loader for freestanding PE executables (no imports yet).
 
+use super::platform;
 use alloc::vec::Vec;
 use core::fmt;
 
 use super::layout::{self, params, peb};
 use super::object::{HandleTable, KObject, ObjectBody, ObjectRef};
 use super::pe::{self, PeError, PeImage};
+use super::platform::PAGE_SIZE;
+use super::platform::PageFlags;
+use super::platform::SpawnError;
+use super::platform::TrapFrame;
+use super::platform::UserRegs;
+use super::platform::{PagingError, SharedUserSpace, UserFault, UserSpace};
 use super::status::NtStatus;
 use super::thread;
 use super::vad::{self, Vad};
 use super::vm::{self, AccessKind};
 use super::wait::{self, Dispatcher};
-use crate::arch::interrupts::{self, TrapFrame};
-use crate::arch::paging::{PagingError, SharedUserSpace, UserFault, UserSpace};
-use crate::arch::syscall::UserRegs;
-use crate::mm::PAGE_SIZE;
 use crate::mm::heap::{AllocError, KArc, TryVec};
-use crate::mm::paging::PageFlags;
-use crate::sched::SpawnError;
 use crate::sync::IrqMutex;
 
 pub struct Process {
@@ -477,7 +478,7 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
     };
 
     // RTL_USER_PROCESS_PARAMETERS.
-    let cpus = crate::arch::smp::online_count();
+    let cpus = platform::online_count();
     let mut cpus_var = [0u8; 24];
     let cpus_var = number_variable(&mut cpus_var, "NUMBER_OF_PROCESSORS=", cpus);
     let mut environment_default = [""; ENVIRONMENT.len()];
@@ -528,7 +529,7 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
     put_u32(&mut space, peb_addr + peb::IMAGE_SUBSYSTEM_MINOR_VERSION, u32::from(minor))?;
     put_u32(&mut space, peb_addr + peb::SESSION_ID, SESSION_ID)?;
 
-    let space = KArc::try_new(crate::arch::paging::SpaceLock::new(space))?;
+    let space = KArc::try_new(platform::SpaceLock::new(space))?;
     let process = KArc::try_new(Process {
         id,
         name,
@@ -719,7 +720,7 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
     }
     warn!(
         "user exception: {} at rip {:#x} (cr2 {:#x}, error {:#x})",
-        interrupts::exception_name(vector),
+        platform::exception_name(vector),
         frame.rip,
         cr2.unwrap_or(0),
         frame.error_code
@@ -786,7 +787,7 @@ fn deliver_to_user(
         rip,
         rflags: frame.rflags,
     };
-    let context = super::context::to_bytes(&regs, Some(&crate::arch::cpu::fxsave()));
+    let context = super::context::to_bytes(&regs, Some(&platform::fxsave()));
     let new_rsp = (frame.rsp.wrapping_sub(DISPATCH_FRAME_SIZE)) & !0xf;
     if new_rsp >= frame.rsp
         || process.write(new_rsp, &context).is_err()
@@ -801,7 +802,7 @@ fn deliver_to_user(
 }
 
 pub fn init() {
-    interrupts::set_user_exception_handler(on_user_exception);
+    platform::set_user_exception_handler(on_user_exception);
     thread::init();
 }
 

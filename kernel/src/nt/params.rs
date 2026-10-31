@@ -2,6 +2,7 @@
 //! into its address space (normalized: string buffers hold absolute
 //! addresses). Layout from the public x64 definition (see `layout::params`).
 
+use super::platform;
 use alloc::vec::Vec;
 
 use super::layout::params;
@@ -58,7 +59,7 @@ impl From<AllocError> for ParamsError {
 /// Builds the block to be placed at user address `base` (`PAGES` pages:
 /// structure and strings, then the environment from `ENVIRONMENT_OFFSET`).
 pub fn build(p: &ProcessParameters<'_>, base: u64) -> Result<Vec<u8>, ParamsError> {
-    let total = (params::PAGES * crate::mm::PAGE_SIZE) as usize;
+    let total = (params::PAGES * platform::PAGE_SIZE) as usize;
     let mut b = Vec::new();
     b.try_reserve_exact(total).map_err(|_| ParamsError::NoMemory)?;
     b.resize(total, 0);

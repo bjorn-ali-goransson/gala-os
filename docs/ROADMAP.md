@@ -194,7 +194,7 @@ to set and to argue for. Current order and why:
 5. G3 (workable Go programs): done. N1 done (N1a-N1c: Go's net/http
    serves the host). N2a, N2b done: Nginx serves the host in its normal
    master/worker mode, with gzip, rewrite and TLS (N2c, N2d: zlib,
-   PCRE2, OpenSSL). Next: U1 (gala-um).
+   PCRE2, OpenSSL). U1 seam done; next: the U1 crate split, then U2.
    N2a was decided 2026-10-31: Nginx is the stated
    goal and the ledger makes bring-up data-driven, so build an x64 Nginx
    with mingw-w64 and run it on gala before choosing anything larger
@@ -212,6 +212,11 @@ U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
    arch_prctl, NT system calls caught with syscall user dispatch,
    exceptions via signals, threads as host threads); a `Platform` trait
    between nt and arch (user memory, threads, waits, time).
+   Seam done 2026-10-31: inventory in docs/GALA_UM.md; `nt::platform`
+   traits (Clock, Threads, UserEntry, UserMemory) with the kernel as the
+   implementation; nt reaches the machine only through them (checked by
+   an xtask unit test). Remaining: the crate split (GALA_UM.md lists
+   the four steps).
 U2. **gala-um runs hello.exe**, then the ntrt test programs; `cargo xtask
    um-test` runs them all in seconds.
 U3. **gala-um in CI** next to the QEMU scenarios, with differences between

@@ -26,6 +26,8 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/mm/heap.rs        slab + page heap, global allocator, try_box/TryVec   [unsafe allowed]
   src/mm/mod.rs         global frame allocator instance
   src/nt/               NT personality: PE loader, processes, handles, syscalls
+  src/nt/platform.rs    the seam: traits for what nt needs from the machine
+  src/platform.rs       the kernel's implementation of nt::platform
 user/                   freestanding Windows test programs (x86_64-pc-windows-msvc)
   ntrt/                 tiny runtime: ntdll-shaped syscall stubs, PEB access
   hello/ abi_test/ crash/
@@ -191,6 +193,13 @@ startup code as its idle thread in `run_ap`), quantum, need_resched, and
   `set/take_pending_continue`).
 
 ## User mode and the NT personality (milestone 4)
+
+**Platform seam** (U1, docs/GALA_UM.md): nt reaches time, threads,
+user entry and user memory only through `nt::platform` (traits `Clock`,
+`Threads`, `UserEntry`, `UserMemory`; implementation `P` =
+`platform::Kernel`). Invariant, checked by xtask's unit tests: no file in
+`nt/` but `platform.rs` names `crate::arch`, `sched`, `time` or the
+frame allocator. New machine needs go into a trait, not around it.
 
 **Pinned build**: Windows 11 24H2, build 26100 (tentative). Only service
 numbers depend on it so far.

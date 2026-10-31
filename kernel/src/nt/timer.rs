@@ -3,16 +3,16 @@
 //! object references: it sleeps until the earliest due time, signals the
 //! timers that are due, queues their APCs and re-arms periodic ones.
 
+use super::platform;
 use alloc::vec::Vec;
 
 use super::object::{ObjectBody, ObjectRef};
+use super::platform::ThreadId;
 use super::status::NtStatus;
 use super::thread::{self, UserApc};
 use super::wait;
 use crate::mm::heap::{KArc, TryVec};
-use crate::sched::{self, ThreadId};
 use crate::sync::IrqMutex;
-use crate::time;
 
 /// Armed timers (pruned by the worker once expired or closed).
 static TIMERS: IrqMutex<Vec<ObjectRef>> = IrqMutex::new(Vec::new());
@@ -23,7 +23,7 @@ static WORKER: IrqMutex<Option<ThreadId>> = IrqMutex::new(None);
 const MAX_SLEEP_TICKS: u64 = 10;
 
 /// 100 ns units per timer tick.
-const UNITS_PER_TICK: u64 = 10_000_000 / time::TICK_HZ;
+const UNITS_PER_TICK: u64 = 10_000_000 / platform::TICK_HZ;
 
 /// The tick at which an NT due time (100 ns units: negative = relative to
 /// now, positive = absolute system time) expires: never earlier than asked,
@@ -38,18 +38,18 @@ pub fn due_tick(due: i64, now_tick: u64, now_system: u64) -> u64 {
 
 /// A period in milliseconds as ticks.
 pub fn period_ticks(period_ms: u32) -> u64 {
-    u64::from(period_ms) * time::TICK_HZ / 1000
+    u64::from(period_ms) * platform::TICK_HZ / 1000
 }
 
 pub fn init() -> Result<(), NtStatus> {
-    let tid = sched::spawn("timers", worker, 0).map_err(|_| NtStatus::NO_MEMORY)?;
+    let tid = platform::spawn("timers", worker, 0).map_err(|_| NtStatus::NO_MEMORY)?;
     *WORKER.lock() = Some(tid);
     Ok(())
 }
 
 fn wake_worker() {
     if let Some(tid) = *WORKER.lock() {
-        sched::wake(tid);
+        platform::wake(tid);
     }
 }
 
@@ -99,7 +99,7 @@ pub fn cancel(object: &ObjectRef) -> Result<bool, NtStatus> {
 pub fn remaining(object: &ObjectRef) -> i64 {
     let Some(timer) = timer_of(object) else { return 0 };
     let state = timer.state.lock();
-    state.due.map_or(0, |_| state.due_time.saturating_sub(time::system_time()) as i64)
+    state.due.map_or(0, |_| state.due_time.saturating_sub(platform::system_time()) as i64)
 }
 
 /// The absolute system time of an NT due time (negative = relative).
@@ -109,7 +109,7 @@ pub fn due_system_time(due: i64, now_system: u64) -> u64 {
 
 fn worker(_: usize) {
     loop {
-        let now = time::ticks();
+        let now = platform::ticks();
         let timers: Vec<ObjectRef> = {
             let mut list = TIMERS.lock();
             // A timer nobody has a handle to any more is dropped (Windows
@@ -162,15 +162,15 @@ fn worker(_: usize) {
                 wait::set_signal(object, 1);
                 if let Some((thread, routine, context)) = apc {
                     // TimerApcRoutine(TimerContext, TimerLowValue, TimerHighValue)
-                    let at = time::system_time();
+                    let at = platform::system_time();
                     let args = [context, at & 0xffff_ffff, at >> 32];
                     let _ = thread::queue_user_apc(&thread, UserApc { routine, args });
                 }
             }
         }
         drop(timers);
-        sched::prepare_wait(Some(next.max(now + 1)));
-        sched::wait();
+        platform::prepare_wait(Some(next.max(now + 1)));
+        platform::wait();
     }
 }
 

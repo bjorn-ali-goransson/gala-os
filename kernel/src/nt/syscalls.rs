@@ -4,6 +4,7 @@
 //! `docs/ARCHITECTURE.md`, "NT personality"). They are black-box observable
 //! values and must be verified against syscall traces from that build.
 
+use super::platform;
 use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +18,7 @@ use super::object::{
     THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME, THREAD_TERMINATE,
 };
 use super::object::{SECTION_MAP_EXECUTE, SECTION_MAP_READ, SECTION_MAP_WRITE, SECTION_QUERY};
+use super::platform::{SyscallFrame, UserRegs};
 use super::process::{self, Process};
 use super::section;
 use super::status::NtStatus;
@@ -24,7 +26,6 @@ use super::thread;
 use super::vad;
 use super::vm;
 use super::wait::{self, Dispatcher, Timeout};
-use crate::arch::syscall::{self, SyscallFrame, UserRegs};
 use crate::console;
 use crate::mm::heap::KArc;
 use crate::mm::heap::TryVec;
@@ -295,7 +296,7 @@ fn dispatch(frame: &mut SyscallFrame) {
     };
     let service = TABLE.iter().find(|(n, ..)| *n == number);
     let started =
-        crate::events::enabled(crate::events::Category::Syscall).then(crate::time::monotonic_ns);
+        crate::events::enabled(crate::events::Category::Syscall).then(platform::monotonic_ns);
     let mut call = Call { frame, process };
     let status = match service {
         Some((.., handler)) => handler(&mut call),
@@ -378,7 +379,7 @@ fn syscall_event(
             crate::events::Str(name),
             Args(call, argc),
             status.0,
-            crate::time::monotonic_ns().saturating_sub(started)
+            platform::monotonic_ns().saturating_sub(started)
         ),
     );
 }
@@ -440,7 +441,7 @@ impl fmt::Display for TraceLine<'_> {
 }
 
 pub fn init() {
-    syscall::set_handler(dispatch);
+    platform::set_syscall_handler(dispatch);
 }
 
 /// NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock,
@@ -1054,9 +1055,9 @@ fn nt_set_timer(call: &mut Call<'_>) -> NtStatus {
     }
     let (routine, context) = (arg!(call, 2), arg!(call, 3));
     let apc = (routine != 0).then_some((routine, context));
-    let now = crate::time::system_time();
+    let now = platform::system_time();
     let due_time = timer::due_system_time(due, now);
-    let due = timer::due_tick(due, crate::time::ticks(), now);
+    let due = timer::due_tick(due, platform::ticks(), now);
     let previous =
         tri!(timer::arm(&object, due, due_time, timer::period_ticks(period as u32), apc));
     let ptr = arg!(call, 6);
@@ -1140,7 +1141,7 @@ fn nt_suspend_thread(call: &mut Call<'_>) -> NtStatus {
 fn nt_get_context_thread(call: &mut Call<'_>) -> NtStatus {
     let object = tri!(thread_object(call, arg!(call, 0), THREAD_GET_CONTEXT));
     let (regs, fx) = if is_current_thread(&object) {
-        (caller_regs(call), crate::arch::cpu::fxsave())
+        (caller_regs(call), platform::fxsave())
     } else {
         let p = tri!(thread::parked_state(&object));
         (p.regs, p.fx)
@@ -1168,9 +1169,9 @@ fn nt_set_context_thread(call: &mut Call<'_>) -> NtStatus {
     let fx = super::context::float_state(&ctx);
     if is_current_thread(&object) {
         if let Some(fx) = &fx {
-            crate::arch::cpu::fxrstor(fx);
+            platform::fxrstor(fx);
         }
-        syscall::continue_with(regs);
+        platform::continue_with(regs);
         return NtStatus::SUCCESS;
     }
     match thread::set_parked_state(&object, regs, fx) {
@@ -1231,7 +1232,7 @@ fn deliver_apc_after(call: &Call<'_>, status: NtStatus) -> NtStatus {
         rip: f.rip,
         rflags: f.rflags,
     };
-    let context = super::context::to_bytes(&regs, Some(&crate::arch::cpu::fxsave()));
+    let context = super::context::to_bytes(&regs, Some(&platform::fxsave()));
     deliver_apc(call, context, f.rsp);
     status
 }
@@ -1259,7 +1260,7 @@ fn deliver_apc(call: &Call<'_>, mut context: [u8; super::context::SIZE], rsp: u6
     }
     let mut gpr = [0u64; 16];
     gpr[4] = frame;
-    syscall::continue_with(UserRegs { gpr, rip: dispatcher, rflags: 0 });
+    platform::continue_with(UserRegs { gpr, rip: dispatcher, rflags: 0 });
     true
 }
 
@@ -1301,12 +1302,12 @@ fn nt_duplicate_object(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
-use crate::time::PERFORMANCE_FREQUENCY;
+use super::platform::PERFORMANCE_FREQUENCY;
 
 /// NtQueryPerformanceCounter(*Counter, *Frequency)
 fn nt_query_performance_counter(call: &mut Call<'_>) -> NtStatus {
     let (counter, frequency) = (arg!(call, 0), arg!(call, 1));
-    tri!(call.write_u64(counter, crate::time::monotonic_ns() / 100));
+    tri!(call.write_u64(counter, platform::monotonic_ns() / 100));
     if frequency != 0 {
         tri!(call.write_u64(frequency, PERFORMANCE_FREQUENCY));
     }
@@ -1315,7 +1316,7 @@ fn nt_query_performance_counter(call: &mut Call<'_>) -> NtStatus {
 
 /// NtQuerySystemTime(*SystemTime)
 fn nt_query_system_time(call: &mut Call<'_>) -> NtStatus {
-    tri!(call.write_u64(arg!(call, 0), crate::time::system_time()));
+    tri!(call.write_u64(arg!(call, 0), platform::system_time()));
     NtStatus::SUCCESS
 }
 
@@ -1339,9 +1340,9 @@ fn nt_continue(call: &mut Call<'_>) -> NtStatus {
     // The kernel does not use x87/SSE, so the state loaded now is what the
     // thread resumes with (context switches save and restore it).
     if let Some(fx) = super::context::float_state(&ctx) {
-        crate::arch::cpu::fxrstor(&fx);
+        platform::fxrstor(&fx);
     }
-    syscall::continue_with(regs);
+    platform::continue_with(regs);
     NtStatus::SUCCESS
 }
 
@@ -1529,7 +1530,7 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
         }
         // Non-empty and within the process's affinity (all online CPUs).
         let mask = u64::from_le_bytes(v);
-        if mask == 0 || mask & !crate::arch::smp::online_mask() != 0 {
+        if mask == 0 || mask & !platform::online_mask() != 0 {
             return NtStatus::INVALID_PARAMETER;
         }
         t.set_affinity(mask);
@@ -1579,12 +1580,12 @@ fn gala_record_missing(call: &mut Call<'_>) -> NtStatus {
 /// NtGetCurrentProcessorNumber(): the caller's processor (it may move
 /// right after); the return value is the number, not a status.
 fn nt_get_current_processor_number(_call: &mut Call<'_>) -> NtStatus {
-    NtStatus(crate::sched::current_cpu())
+    NtStatus(platform::current_cpu())
 }
 
 /// NtYieldExecution(): lets another ready thread run.
 fn nt_yield_execution(_call: &mut Call<'_>) -> NtStatus {
-    crate::sched::yield_now();
+    platform::yield_now();
     NtStatus::SUCCESS
 }
 
@@ -1630,7 +1631,7 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
     let mut b = [0u8; BASIC_INFORMATION_SIZE];
     b[0..4].copy_from_slice(&p.exit_status().unwrap_or(NtStatus::PENDING).0.to_le_bytes());
     b[8..16].copy_from_slice(&super::layout::PEB_ADDRESS.to_le_bytes());
-    b[16..24].copy_from_slice(&crate::arch::smp::online_mask().to_le_bytes());
+    b[16..24].copy_from_slice(&platform::online_mask().to_le_bytes());
     b[24..28].copy_from_slice(&8u32.to_le_bytes());
     b[32..40].copy_from_slice(&p.id.to_le_bytes());
     call.return_info(&b, buffer, length, ret_ptr)
@@ -1648,16 +1649,15 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
         (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2) as u32 as u64, arg!(call, 3));
     match class {
         sysinfo::SYSTEM_BASIC_INFORMATION => {
-            let (_, total) = crate::mm::frame_stats();
+            let (_, total) = platform::frame_stats();
             // The timer ticks at TICK_HZ (100 ns units).
-            let resolution = (10_000_000 / crate::time::TICK_HZ) as u32;
-            let cpus = crate::arch::smp::online_count().min(64) as u8;
+            let resolution = (10_000_000 / platform::TICK_HZ) as u32;
+            let cpus = platform::online_count().min(64) as u8;
             let info = sysinfo::basic_information(total, cpus, resolution);
             call.return_info(&info, buffer, length, ret_ptr)
         }
         sysinfo::SYSTEM_TIME_OF_DAY_INFORMATION => {
-            let info =
-                sysinfo::time_of_day(crate::time::boot_system_time(), crate::time::system_time());
+            let info = sysinfo::time_of_day(platform::boot_system_time(), platform::system_time());
             call.return_info(&info, buffer, length, ret_ptr)
         }
         _ => NtStatus::INVALID_INFO_CLASS,
@@ -2011,7 +2011,7 @@ fn file_section(
         if entry.access & file::FILE_WRITE_DATA == 0 {
             return Err(NtStatus::SECTION_TOO_BIG);
         }
-        let now = crate::time::system_time();
+        let now = platform::system_time();
         file::with_fs(|fs| fs.set_size(f.node, size, now)).map_err(file::fs_status)?;
     }
     section::Section::new_file(entry.object.clone(), f.node, size, protect)
@@ -2558,7 +2558,7 @@ fn file_write(
         if call.process.read(buffer + done, &mut chunk[..n]).is_err() {
             return NtStatus::ACCESS_VIOLATION;
         }
-        let now = crate::time::system_time();
+        let now = platform::system_time();
         if let Err(e) = file::with_fs(|fs| fs.write(file.node, offset + done, &chunk[..n], now)) {
             return file::fs_status(e);
         }
@@ -2952,7 +2952,7 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
             if entry.access & file::FILE_WRITE_DATA == 0 {
                 return NtStatus::ACCESS_DENIED;
             }
-            let now = crate::time::system_time();
+            let now = platform::system_time();
             match file::with_fs(|fs| fs.set_size(file.node, value, now)) {
                 Ok(()) => NtStatus::SUCCESS,
                 Err(e) => file::fs_status(e),

@@ -3,6 +3,7 @@
 //! (dispositions, positions, share access, delete on close), following the
 //! documented behaviour of NtCreateFile / NtReadFile / NtWriteFile.
 
+use super::platform;
 use alloc::vec::Vec;
 
 use super::namespace;
@@ -11,7 +12,6 @@ use super::status::NtStatus;
 use crate::fs::ramfs::{self, Access, FsError, NodeId, RamFs, Share};
 use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
-use crate::time;
 
 static FS: IrqMutex<Option<RamFs>> = IrqMutex::new(None);
 
@@ -64,7 +64,7 @@ fn wide(s: &str) -> Result<Vec<u16>, NtStatus> {
 
 /// Creates the file system and the volume device.
 pub fn init() -> Result<(), NtStatus> {
-    let now = time::system_time();
+    let now = platform::system_time();
     let mut fs = RamFs::new(now).map_err(|_| NtStatus::NO_MEMORY)?;
     for path in DIRECTORIES {
         let mut parts: Vec<Vec<u16>> = Vec::new();
@@ -105,7 +105,7 @@ pub fn add_boot_file(directory: &str, name: &str, data: &'static [u8]) -> Result
     }
     let name = wide(name)?;
     with_fs(|fs| {
-        let now = time::system_time();
+        let now = platform::system_time();
         let dir = fs.mkdir_all(&refs, now).map_err(fs_status)?;
         fs.add_static_file(dir, &name, data, now).map_err(fs_status)?;
         Ok(())
@@ -269,7 +269,7 @@ pub fn create(
         write: share_mask & FILE_SHARE_WRITE != 0,
         delete: share_mask & FILE_SHARE_DELETE != 0,
     };
-    let now = time::system_time();
+    let now = platform::system_time();
     let (node, information) = with_fs(|fs| -> Result<(NodeId, u64), NtStatus> {
         let existing = match parts.last() {
             None => Some(start),
@@ -580,7 +580,7 @@ const FS_NAME: &[u8] = b"NTFS";
 /// Volume information of `class` as (bytes, minimum buffer length). Sizes
 /// are in clusters of free and total RAM (the volume lives in memory).
 pub fn volume_information(class: u32) -> Result<(Vec<u8>, usize), NtStatus> {
-    let (free, total) = crate::mm::frame_stats();
+    let (free, total) = platform::frame_stats();
     let mut b = Vec::new();
     let grow = |b: &mut Vec<u8>, n: usize| -> Result<(), NtStatus> {
         b.try_reserve_exact(n).map_err(|_| NtStatus::NO_MEMORY)?;

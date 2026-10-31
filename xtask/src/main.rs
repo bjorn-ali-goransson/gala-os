@@ -2237,6 +2237,38 @@ mod constants {
     /// mingw-w64-common; CI has none and skips). A wrong value is a
     /// silent ABI bug: STATUS_OBJECT_NAME_EXISTS was 0x40000035 here, and
     /// a test expected it, until this check found it.
+    /// The NT layer reaches the machine only through nt/platform.rs (the
+    /// gala-um seam, docs/GALA_UM.md).
+    #[test]
+    fn nt_uses_the_machine_only_through_platform() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel/src/nt");
+        let banned = [
+            "crate::arch",
+            "crate::sched",
+            "crate::time",
+            "crate::mm::PAGE_SIZE",
+            "crate::mm::frame",
+            "crate::mm::paging",
+            "crate::mm::free_frame",
+            "crate::mm::allocate_frame",
+            "crate::mm::hhdm_offset",
+        ];
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().is_some_and(|n| n == "platform.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                if banned.iter().any(|b| line.contains(b)) {
+                    found.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(found.is_empty(), "use nt::platform instead:\n{}", found.join("\n"));
+    }
+
     #[test]
     fn ntstatus_values_match_mingw() {
         let header = std::path::Path::new("/usr/share/mingw-w64/include/ntstatus.h");

@@ -5,11 +5,11 @@
 //! pinned build (Windows 11 24H2, 26100). Time fields are KSYSTEM_TIMEs,
 //! written High2Time, LowPart, High1Time so readers can detect tearing.
 
+use super::platform;
+use super::platform::PageFlags;
+use super::platform::{SharedPage, UserSpace};
 use super::vad::{self, Vad};
-use crate::arch::paging::{SharedPage, UserSpace};
-use crate::mm::paging::PageFlags;
 use crate::sync::IrqMutex;
-use crate::time;
 
 pub const ADDRESS: u64 = 0x7ffe_0000;
 
@@ -39,7 +39,7 @@ const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 const PROCESSOR_ARCHITECTURE_AMD64: u16 = 9;
 const NT_PRODUCT_WIN_NT: u32 = 1;
 /// One tick = 1 ms: ms = TickCount * multiplier >> 24.
-const TICK_MULTIPLIER: u32 = (1000 / time::TICK_HZ as u32) << 24;
+const TICK_MULTIPLIER: u32 = (1000 / platform::TICK_HZ as u32) << 24;
 const SYSTEM_ROOT: &str = "C:\\Windows";
 
 /// ProcessorFeatures[] indices (PF_* in winnt.h) we can always report.
@@ -62,7 +62,7 @@ fn write_ksystem_time(page: &SharedPage, offset: usize, value: u64) {
 }
 
 /// Creates the page and fills its constant fields.
-pub fn init(physical_pages: u64) -> Result<(), crate::arch::paging::PagingError> {
+pub fn init(physical_pages: u64) -> Result<(), platform::PagingError> {
     let page = SharedPage::new()?;
     page.write_u32(TICK_COUNT_MULTIPLIER, TICK_MULTIPLIER);
     write_ksystem_time(&page, TIME_ZONE_BIAS, 0); // UTC
@@ -87,18 +87,18 @@ pub fn init(physical_pages: u64) -> Result<(), crate::arch::paging::PagingError>
     }
     page.write_u32(NUMBER_OF_PHYSICAL_PAGES, physical_pages.min(u64::from(u32::MAX)) as u32);
     page.write(TEST_RET_INSTRUCTION, &[0xc3]); // ret
-    page.write(QPC_FREQUENCY, &time::PERFORMANCE_FREQUENCY.to_le_bytes());
-    page.write_u32(ACTIVE_PROCESSOR_COUNT, crate::arch::smp::online_count());
+    page.write(QPC_FREQUENCY, &platform::PERFORMANCE_FREQUENCY.to_le_bytes());
+    page.write_u32(ACTIVE_PROCESSOR_COUNT, platform::online_count());
     page.write(ACTIVE_GROUP_COUNT, &[1]);
-    update_page(&page, time::ticks());
+    update_page(&page, platform::ticks());
     *PAGE.lock() = Some(page);
-    time::set_tick_callback(on_tick);
+    platform::set_tick_callback(on_tick);
     Ok(())
 }
 
 fn update_page(page: &SharedPage, ticks: u64) {
-    write_ksystem_time(page, INTERRUPT_TIME, time::monotonic_ns() / 100);
-    write_ksystem_time(page, SYSTEM_TIME, time::system_time());
+    write_ksystem_time(page, INTERRUPT_TIME, platform::monotonic_ns() / 100);
+    write_ksystem_time(page, SYSTEM_TIME, platform::system_time());
     // TickCount: TickCountQuad (u64) overlapping a KSYSTEM_TIME.
     write_ksystem_time(page, TICK_COUNT, ticks);
     page.write_u32(TICK_COUNT_LOW_DEPRECATED, ticks as u32);

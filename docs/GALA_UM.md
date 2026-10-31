@@ -1,6 +1,7 @@
 # gala-um: the NT personality as a Linux process (design draft)
 
-Status: design, not started (ROADMAP U1-U3). Written 2026-10-30.
+Status: U1 seam in place (2026-10-31): `kernel/src/nt/platform.rs`; the
+crate split and U2-U3 remain. Design written 2026-10-30.
 
 ## Why
 
@@ -61,6 +62,59 @@ builds as a `no_std` + `alloc` crate (`nt/` out of `kernel/`) used by both
 the kernel and `um/` (a std binary, `cargo xtask um-test`). The traits
 encode what NT needs, not what x86 offers. Example: "a user range became
 inaccessible" is the trait call; TLB shootdown is the kernel's business.
+
+## U1: the inventory and the seam (2026-10-31)
+
+Every use of the machine by `kernel/src/nt` before U1, by area (counted
+from the sources; "→" is the seam that replaces it):
+
+| Area | What nt used | Where | → |
+|---|---|---|---|
+| Time | `time::ticks`, `monotonic_ns`, `system_time` (15 uses), `boot_system_time`, `set_tick_callback`, `TICK_HZ`, `PERFORMANCE_FREQUENCY` | wait, timer, kuser, file, thread, syscalls | `Clock` |
+| Threads and waits | `sched::spawn` (timer thread), `spawn_user`, `current`, `exit`, `yield_now`, `sleep_ms`, `prepare_wait`/`wait`/`wake`, `set_affinity`, `current_cpu`; `smp::online_count`/`online_mask`; types `ThreadId`, `WakeReason`, `SpawnError` | wait, timer, thread, process, kuser, syscalls | `Threads` |
+| User entry | `syscall::set_handler`, `set_user_return_hook`, `enter_user_regs`, `continue_with`; `interrupts::set_user_exception_handler`, `exception_name`; `cpu::fxsave`/`fxrstor`/`set_mxcsr`; types `UserRegs`, `SyscallFrame`, `TrapFrame`, `FxState` | syscalls, thread, process, context | `UserEntry` |
+| User memory | `UserSpace` methods (map_zeroed 5, write_initial 7, set_flags 4, unmap_page 3, is_mapped 3, map_borrowed 2, map_private_copy 2, map_zero_page 2, map_shared, mapping, read, write), `SpaceLock`, `SharedUserSpace`, `SharedPage` (KUSER_SHARED_DATA), `UserFault`, `PagingError`; frames for sections (`Frame`, `free_frame`, a heap page's frame through `hhdm_offset`, `UserSpace::zeroed_frame`/`frame_with`), `frame_stats`; `PageFlags`, `CacheMode`, `PAGE_SIZE` | process, section, vm, kuser, thread, params, file, syscalls | `UserMemory` (frames) + the `UserSpace` type |
+
+Not machine-specific, so not behind the traits; they travel with the NT
+layer (or into a small shared `no_std` support crate) at the split:
+
+- `mm::heap` (`KArc`, `TryVec`, `AllocError`, `try_box`) and
+  `sync::IrqMutex`: allocation and locking, used everywhere in nt. In
+  gala-um they are `alloc` plus a host mutex.
+- `events` (the event stream), `console` (the debug-print service), the
+  `log` macros: diagnostics; gala-um writes them to stderr or a file.
+- `fs::ramfs` (file.rs, section.rs, process.rs, syscalls.rs): the file
+  system the NT file objects sit on; it moves with nt.
+- `net::tcp` (afd.rs only): the TCP stack under AFD. gala-um either links
+  the same smoltcp stack on a loopback device or maps AFD onto host
+  sockets; decided in U2 when AFD tests are ported.
+
+**The seam.** `kernel/src/nt/platform.rs` holds four traits, `Clock`,
+`Threads`, `UserEntry` and `UserMemory` (frames; the per-space
+operations stay methods of the `UserSpace` type), and `P`, the type that
+implements them: `crate::platform::Kernel` (`kernel/src/platform.rs`,
+each method forwarding to the subsystem). The NT layer calls thin inlined
+functions (`platform::ticks()`, `platform::wake(id)`, ...) and gets the
+data types from the same module. No other nt file names `crate::arch`,
+`crate::sched`, `crate::time` or the frame allocator; xtask's unit test
+`nt_uses_the_machine_only_through_platform` enforces it. No behaviour
+changed (all QEMU scenarios pass).
+
+**Remaining for the split (`nt/` out of `kernel/`):**
+
+1. Move `mm::heap`, `sync` and `events` (or the parts nt uses) into a
+   `no_std` support crate that both the kernel and nt depend on.
+2. Give the platform's data types an owner the NT crate can name:
+   plain data (`UserRegs`, `FxState`, `PageFlags`, `ThreadId`,
+   `WakeReason`, `Frame`) moves into nt; the address space, the trap and
+   syscall frames become associated types of the traits
+   (`type Space: AddressSpace`, ...), with `AddressSpace` listing the
+   `UserSpace` methods above.
+3. Choose how nt names `P`. Generic code everywhere is too invasive for
+   10k lines; the plan is that nt's crate root declares
+   `pub type P = <the platform>` through a cargo feature per platform
+   (`kernel`, `um`), each feature pulling in that platform's crate.
+4. `ramfs` and the net stack follow nt (or the support crate).
 
 ## Steps
 

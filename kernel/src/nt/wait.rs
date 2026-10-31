@@ -5,14 +5,14 @@
 //! one global lock (like NT's dispatcher lock), so a multi-object wait sees
 //! a consistent picture. Lock order: DISPATCHER, then the scheduler.
 
+use super::platform;
 use alloc::vec::Vec;
 
 use super::object::{EventType, ObjectBody, ObjectRef};
+use super::platform::{ThreadId, WakeReason};
 use super::status::NtStatus;
 use crate::mm::heap::TryVec;
-use crate::sched::{self, ThreadId, WakeReason};
 use crate::sync::IrqMutex;
-use crate::time;
 
 /// Signal state and waiters of one object. Only touched under `DISPATCHER`.
 pub struct Dispatcher {
@@ -49,7 +49,7 @@ pub fn set_signal(object: &ObjectRef, signal: i32) -> i32 {
         // Wake everyone; they re-check, and auto-reset objects are consumed
         // by the first one to get there.
         for &t in &inner.waiters {
-            sched::wake(t);
+            platform::wake(t);
         }
     }
     previous
@@ -63,7 +63,7 @@ pub fn signal_dispatcher(d: &Dispatcher, signal: i32) {
     inner.signal = signal;
     if signal > 0 {
         for &t in &inner.waiters {
-            sched::wake(t);
+            platform::wake(t);
         }
     }
 }
@@ -127,14 +127,17 @@ impl Timeout {
     /// absolute system time, 0 = poll).
     pub fn from_nt(value: Option<i64>) -> Timeout {
         let Some(v) = value else { return Timeout::Infinite };
-        let relative_100ns =
-            if v < 0 { v.unsigned_abs() } else { (v as u64).saturating_sub(time::system_time()) };
+        let relative_100ns = if v < 0 {
+            v.unsigned_abs()
+        } else {
+            (v as u64).saturating_sub(platform::system_time())
+        };
         if relative_100ns == 0 {
             return Timeout::Poll;
         }
         // Round up to whole ticks, plus one so we never wake early.
-        let ticks = relative_100ns.div_ceil(10_000_000 / time::TICK_HZ) + 1;
-        Timeout::Tick(time::ticks().saturating_add(ticks))
+        let ticks = relative_100ns.div_ceil(10_000_000 / platform::TICK_HZ) + 1;
+        Timeout::Tick(platform::ticks().saturating_add(ticks))
     }
 
     fn deadline(self) -> Option<u64> {
@@ -168,7 +171,7 @@ pub fn wait_for_alertable(
     timeout: Timeout,
     alertable: bool,
 ) -> NtStatus {
-    let me = sched::current();
+    let me = platform::current();
     let mut timed_out = false;
     loop {
         let guard = DISPATCHER.lock();
@@ -203,9 +206,9 @@ pub fn wait_for_alertable(
             }
         }
         super::thread::set_alertable(alertable);
-        sched::prepare_wait(timeout.deadline());
+        platform::prepare_wait(timeout.deadline());
         drop(guard);
-        let reason = sched::wait();
+        let reason = platform::wait();
         super::thread::set_alertable(false);
         {
             let _guard = DISPATCHER.lock();
@@ -240,15 +243,15 @@ pub fn delay(timeout: Timeout, alertable: bool) -> NtStatus {
     match timeout {
         Timeout::Poll => {
             drop(guard);
-            sched::yield_now();
+            platform::yield_now();
         }
         t => {
             // Wake early if the thread is asked to terminate.
             if !super::thread::is_terminating() {
                 super::thread::set_alertable(alertable);
-                sched::prepare_wait(t.deadline());
+                platform::prepare_wait(t.deadline());
                 drop(guard);
-                sched::wait();
+                platform::wait();
                 super::thread::set_alertable(false);
             }
         }
