@@ -137,7 +137,11 @@ live in HHDM-mapped bootloader-reclaimable memory.
 power-of-two classes (objects are aligned to their class size) and larger
 or page-aligned requests from contiguous frames. Pages come from a
 `PageSource` (frames via the HHDM in the kernel, `std::alloc` in host
-tests). Slab pages are not returned to the frame allocator yet.
+tests). Slab pages are not returned to the frame allocator yet. TODO: large
+allocations need physically contiguous frames; after long runs memory
+can be too fragmented for 16 (a socket's 64 KiB buffers: Elasticsearch
+could not open its HTTP listener). Plan: single frames mapped into a
+kernel virtual area for multi-page allocations.
 
 Allocation never panics: the allocator returns null on exhaustion, and
 `kernel/clippy.toml` bans the infallible std APIs (`Box::new`, `vec!`,
@@ -356,7 +360,10 @@ tick (`due_tick`: never early) and registers the timer; a kernel thread,
 expired timers, queues their APC routine to the thread that set them and
 re-arms periodic ones. Doing this in thread context lets it allocate and
 drop references; timers whose last handle is closed are dropped.
-Synchronization timers reset when a wait is satisfied.
+Synchronization timers reset when a wait is satisfied. Invariant: NtSetTimer sets the
+timer's state (due tick) before listing it, because the worker prunes
+listed timers that are not armed; listing first lost timers now and then
+(`timer_test`).
 
 **Services with build-dependent numbers**: the low system call numbers
 used so far are long-stable on x64; others (NtCreateMutant, NtOpenMutant,

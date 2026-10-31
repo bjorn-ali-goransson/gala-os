@@ -1374,6 +1374,8 @@ enum NetClient {
     Nginx,
     /// The page over TLS (`tls_client`, with the host's curl).
     Tls,
+    /// GETs `/` and expects a 200 whose body contains all of these.
+    Contains(&'static [&'static str]),
 }
 
 /// Scenarios that get a virtio-net card on QEMU's user-mode network, with
@@ -1388,6 +1390,16 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("caddy_http", "Caddy serving static files on :7", NetClient::Http(CADDY_PAGE)),
     ("nginx_master", "start worker process", NetClient::Nginx),
     ("nginx_tls", "using the \"select\" event method", NetClient::Tls),
+    // Elasticsearch's root endpoint: the node's JSON description.
+    (
+        "elasticsearch",
+        "] started {",
+        NetClient::Contains(&[
+            "\"cluster_name\" : \"elasticsearch\"",
+            "\"number\" : \"8.15.3\"",
+            "You Know, for Search",
+        ]),
+    ),
 ];
 
 /// Scenarios whose program serves until stopped: once the net client has
@@ -1971,9 +1983,9 @@ const SCENARIOS: &[Scenario] = &[
         // which starts the server as a second java.exe. Single node, no
         // security, no machine learning; 256 MB heap (gala.options).
         name: "elasticsearch",
-        cmdline: "qemu_exit cwd=C:/es run=java.exe args=-Xms4m%20-Xmx64m%20-XX:+UseSerialGC%20-Dcli.name=server%20-Dcli.script=C:/es/bin/elasticsearch.bat%20-Dcli.libs=C:/es/lib/tools/server-cli%20-Des.path.home=C:/es%20-Des.path.conf=C:/es/config%20-Des.distribution.type=zip%20-cp%20C:/es/lib/*;C:/es/lib/cli-launcher/*%20org.elasticsearch.launcher.CliToolLauncher%20-E%20discovery.type=single-node%20-E%20xpack.security.enabled=false%20-E%20xpack.ml.enabled=false",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["] started {"],
+        cmdline: "qemu_exit cwd=C:/es run=java.exe args=-Xms4m%20-Xmx64m%20-XX:+UseSerialGC%20-Dcli.name=server%20-Dcli.script=C:/es/bin/elasticsearch.bat%20-Dcli.libs=C:/es/lib/tools/server-cli%20-Des.path.home=C:/es%20-Des.path.conf=C:/es/config%20-Des.distribution.type=zip%20-cp%20C:/es/lib/*;C:/es/lib/cli-launcher/*%20org.elasticsearch.launcher.CliToolLauncher%20-E%20discovery.type=single-node%20-E%20xpack.security.enabled=false%20-E%20xpack.ml.enabled=false%20-E%20http.host=0.0.0.0%20-E%20http.port=7",
+        exit_status: XTASK_STOPS,
+        expect: &["] started {", "xtask: net client: http ok"],
     },
     Scenario {
         // P1: the unmodified Temurin JDK 21 (fetched and checked by xtask,
@@ -2920,6 +2932,7 @@ fn run_vm(
                 NetClient::Http(page) => http_client(port, page),
                 NetClient::Nginx => nginx_client(port),
                 NetClient::Tls => tls_client(port),
+                NetClient::Contains(parts) => contains_client(port, parts),
             }));
         }
         if stop_after_client && client.as_ref().is_some_and(|c| c.is_finished()) {
@@ -3104,6 +3117,19 @@ fn tls_client(port: u16) -> Result {
         }
     }
     Err(last)
+}
+
+/// GET / and expect a 200 whose body contains each of `parts`.
+fn contains_client(port: u16, parts: &[&str]) -> Result {
+    let (head, body) = http_retrying(port, "/", "")?;
+    if !head.starts_with("HTTP/1.1 200 OK") {
+        return Err(format!("status line {:?}", head.lines().next()));
+    }
+    let text = String::from_utf8_lossy(&body);
+    match parts.iter().find(|p| !text.contains(*p)) {
+        Some(p) => Err(format!("body lacks {p:?}: {text:?}")),
+        None => Ok(()),
+    }
 }
 
 fn expect_page(head: &str, body: &[u8], page: &str) -> Result {

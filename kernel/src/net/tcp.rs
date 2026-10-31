@@ -526,6 +526,14 @@ pub fn listen(id: SocketId, backlog: usize) -> Result<(), NetError> {
                 match s.listening_socket(side, local) {
                     Ok(sock) => listening.try_push(sock).map_err(|_| NetError::NoMemory)?,
                     Err(e) => {
+                        let (free, total) = crate::mm::frame_stats();
+                        warn!(
+                            "net: listen on port {}: {e:?} (sockets: loopback {}, card {}; \
+                             frames free {free} of {total})",
+                            local.port,
+                            s.lo.count,
+                            s.eth.as_ref().map_or(0, |e| e.count)
+                        );
                         for &sock in &listening {
                             s.remove(sock);
                         }

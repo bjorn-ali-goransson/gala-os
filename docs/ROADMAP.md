@@ -654,7 +654,16 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       HOSTNAME, which elasticsearch.bat sets; gala's boot cannot set
       environment variables yet), Netty's MAC address lookup
       (GetAdaptersAddresses), and a request from the host to port 9200
-      (as caddy_http does) to show it answering.
+      (as caddy_http does) to show it answering. The scenario now asks
+      for that (HTTP on port 7 of every address, xtask GETs / and
+      expects the cluster name and version), and fails: listening on
+      0.0.0.0 needs fresh sockets whose 2 x 64 KiB buffers come from the
+      kernel heap, whose large allocations need physically contiguous
+      frames, and after ten minutes of Elasticsearch there were none
+      ("net: listen on port 7: NoMemory", logged with the socket and
+      frame counts). Next: large kernel allocations from single frames
+      mapped into a kernel virtual area (no contiguity needed), then
+      this check again.
    5. SQL Server (asked for 2026-10-31): start with SQL Server Express
       LocalDB, the small edition that runs sqlservr.exe as an ordinary
       process started on demand (no Windows service), queried with a
