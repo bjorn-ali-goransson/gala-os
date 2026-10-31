@@ -230,6 +230,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("tls_test", "ntdll.dll", "Windows/System32"),
     ("tls_test", "kernel32.dll", "Windows/System32"),
     ("tls_test", "tlsdll.dll", "gala"),
+    ("iphlpapi_test", "ntdll.dll", "Windows/System32"),
+    ("iphlpapi_test", "kernel32.dll", "Windows/System32"),
+    ("iphlpapi_test", "iphlpapi.dll", "Windows/System32"),
     ("keyed_event_test", "ntdll.dll", "Windows/System32"),
     ("keyed_event_test", "kernel32.dll", "Windows/System32"),
     ("registry_test", "ntdll.dll", "Windows/System32"),
@@ -830,6 +833,7 @@ const USER_PROGRAMS: &[&str] = &[
     "advapi32_test",
     "registry_test",
     "keyed_event_test",
+    "iphlpapi_test",
     "win32_misc_test",
     "kernel32_pool_test",
     "tls_test",
@@ -1605,6 +1609,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=advapi32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["advapi32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 (Elasticsearch): network interfaces and addresses (Java's
+        // NetworkInterface).
+        name: "iphlpapi_test",
+        cmdline: "qemu_exit run=iphlpapi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["iphlpapi_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (Elasticsearch): keyed events (the JDK's wepoll selector).

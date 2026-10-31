@@ -1,8 +1,12 @@
-//! gala's iphlpapi.dll: what the JDK's net.dll imports. gala does not
-//! enumerate its network interfaces through this API yet (TODO: the
-//! virtio card and loopback): the table and adapter functions return
-//! ERROR_NOT_SUPPORTED and are recorded in the ledger, as are ICMP echo
-//! and address-change notification. ConvertLengthToIpv4Mask is computed.
+//! gala's iphlpapi.dll: what the JDK's net.dll imports. The interface and
+//! address tables (netioapi.h: GetIfTable2, GetIfEntry2,
+//! GetUnicastIpAddressTable, ...) describe gala's real interfaces, which
+//! the kernel reports through its own NtQuerySystemInformation class
+//! (docs/ARCHITECTURE.md, "Network interfaces"): the loopback interface
+//! (index 1, 127.0.0.1/8) and the virtio-net card if there is one (index
+//! 2). IPv4 only. GetAdaptersAddresses, ICMP echo and address-change
+//! notification return ERROR_NOT_SUPPORTED and are recorded in the
+//! ledger. ConvertLengthToIpv4Mask is computed.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -60,18 +64,10 @@ macro_rules! not_supported {
 
 not_supported! {
     GetAdaptersAddresses(family: u32, flags: u32, reserved: usize, addresses: usize, size: usize);
-    GetIfTable2(table: usize);
-    GetIfEntry2(row: usize);
-    GetUnicastIpAddressTable(family: u16, table: usize);
-    GetAnycastIpAddressTable(family: u16, table: usize);
-    ConvertInterfaceLuidToNameW(luid: usize, name: usize, length: usize);
-    ConvertInterfaceNameToLuidW(name: usize, luid: usize);
     NotifyAddrChange(handle: usize, overlapped: usize);
 }
 
-/// FreeMibTable: nothing was allocated.
-#[unsafe(no_mangle)]
-pub extern "system" fn FreeMibTable(_table: usize) {}
+mod tables;
 
 /// ConvertLengthToIpv4Mask(MaskLength, *Mask): the mask in network byte
 /// order; ERROR_INVALID_PARAMETER (and INADDR_NONE) past 32.

@@ -130,6 +130,7 @@ struct Stack {
     lo: Iface<Loopback>,
     eth: Option<Iface<VirtioNet>>,
     eth_ip: Option<[u8; 4]>,
+    eth_mac: [u8; 6],
     entries: Vec<Option<Entry>>,
     /// Closed by their owner, still finishing (FIN, TIME-WAIT); removed
     /// from their set when done.
@@ -412,6 +413,13 @@ pub fn kick() {
     }
 }
 
+/// The card's IPv4 address, prefix length and MAC, if there is a card.
+pub fn ethernet() -> Option<([u8; 4], u8, [u8; 6])> {
+    let stack = STACK.lock();
+    let s = stack.as_ref()?;
+    s.eth_ip.map(|ip| (ip, super::PREFIX, s.eth_mac))
+}
+
 /// Sets the function told about readiness changes (with the token given
 /// when the socket was made).
 pub fn set_notify(hook: fn(u64)) {
@@ -424,8 +432,9 @@ pub fn start(card: Option<VirtioNet>) -> Result<(), NetError> {
     let lo =
         Iface::new(Loopback::new(), HardwareAddress::Ip, IpCidr::new(IpAddress::Ipv4(LOOPBACK), 8))
             .ok_or(NetError::NoMemory)?;
-    let (mut eth, mut eth_ip) = (None, None);
+    let (mut eth, mut eth_ip, mut eth_mac) = (None, None, [0; 6]);
     if let Some(card) = card {
+        eth_mac = card.mac;
         let mac = smoltcp::wire::EthernetAddress(card.mac);
         let mut iface =
             Iface::new(card, mac.into(), IpCidr::new(super::ADDRESS.into(), super::PREFIX))
@@ -438,6 +447,7 @@ pub fn start(card: Option<VirtioNet>) -> Result<(), NetError> {
         lo,
         eth,
         eth_ip,
+        eth_mac,
         entries: Vec::new(),
         lingering: Vec::new(),
         next_port: *EPHEMERAL.start(),

@@ -8,6 +8,71 @@ pub const SYSTEM_BASIC_INFORMATION: u32 = 0;
 pub const SYSTEM_PERFORMANCE_INFORMATION: u32 = 2;
 pub const SYSTEM_TIME_OF_DAY_INFORMATION: u32 = 3;
 pub const SYSTEM_PROCESS_INFORMATION: u32 = 5;
+/// gala's own class (not Windows'): the network interfaces, for gala's
+/// iphlpapi.dll. Windows' iphlpapi asks its NSI driver, whose interface
+/// is undocumented; this one is documented in docs/ARCHITECTURE.md
+/// ("Network interfaces"). Records of `INTERFACE_RECORD` bytes: index,
+/// IFTYPE, MTU, MAC length (u32 each), MAC (8 bytes), IPv4 address (4),
+/// prefix length (u32), NetLuidIndex (u32).
+pub const GALA_NETWORK_INTERFACES: u32 = 0x6761_0001;
+pub const INTERFACE_RECORD: usize = 36;
+
+/// One interface for GALA_NETWORK_INTERFACES.
+pub struct Interface {
+    pub index: u32,
+    pub if_type: u32,
+    pub mtu: u32,
+    pub mac: [u8; 6],
+    pub mac_len: u32,
+    pub ipv4: [u8; 4],
+    pub prefix: u32,
+    pub luid_index: u32,
+}
+
+/// The loopback interface (always) and the card's, if `ethernet` (IPv4
+/// address, prefix, MAC): index 1 and 2, as Windows numbers loopback 1.
+pub fn interfaces(ethernet: Option<([u8; 4], u8, [u8; 6])>) -> ([u8; 2 * INTERFACE_RECORD], usize) {
+    let mut list = [
+        Some(Interface {
+            index: 1,
+            if_type: 24, // IF_TYPE_SOFTWARE_LOOPBACK
+            mtu: u32::MAX,
+            mac: [0; 6],
+            mac_len: 0,
+            ipv4: [127, 0, 0, 1],
+            prefix: 8,
+            luid_index: 0,
+        }),
+        None,
+    ];
+    if let Some((ip, prefix, mac)) = ethernet {
+        list[1] = Some(Interface {
+            index: 2,
+            if_type: 6, // IF_TYPE_ETHERNET_CSMACD
+            mtu: 1500,
+            mac,
+            mac_len: 6,
+            ipv4: ip,
+            prefix: u32::from(prefix),
+            luid_index: 32768, // the first Ethernet interface's
+        });
+    }
+    let mut out = [0u8; 2 * INTERFACE_RECORD];
+    let mut n = 0;
+    for i in list.iter().flatten() {
+        let r = &mut out[n * INTERFACE_RECORD..(n + 1) * INTERFACE_RECORD];
+        r[0..4].copy_from_slice(&i.index.to_le_bytes());
+        r[4..8].copy_from_slice(&i.if_type.to_le_bytes());
+        r[8..12].copy_from_slice(&i.mtu.to_le_bytes());
+        r[12..16].copy_from_slice(&i.mac_len.to_le_bytes());
+        r[16..22].copy_from_slice(&i.mac);
+        r[24..28].copy_from_slice(&i.ipv4);
+        r[28..32].copy_from_slice(&i.prefix.to_le_bytes());
+        r[32..36].copy_from_slice(&i.luid_index.to_le_bytes());
+        n += 1;
+    }
+    (out, n * INTERFACE_RECORD)
+}
 
 /// Lowest and highest user-mode addresses reported (64 KiB null region,
 /// top 64 KiB below 2^47 reserved), as on x64 Windows.

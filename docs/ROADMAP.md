@@ -643,13 +643,18 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       loops start and the node starts its components, then binding the
       transport fails ("Failed to resolve host"): the default
       network.host `_local_` enumerates network interfaces, and Java's
-      NetworkInterface uses iphlpapi's GetIfTable2 (not there yet). Next:
-      iphlpapi's interface and address tables (GetIfTable2,
-      GetIfEntry2, GetUnicastIpAddressTable / GetAdaptersAddresses) over
-      gala's loopback and virtio adapters, test first; then the HTTP
-      (9200) and transport (9300) listeners. (elasticsearch.bat also sets
-      HOSTNAME, from which the node takes its name; gala's boot has no
-      way to set it yet.)
+      NetworkInterface uses iphlpapi's GetIfTable2. **Done: Elasticsearch
+      starts** (`iphlpapi_test`: gala's interfaces in the netioapi.h
+      tables): "publish_address {127.0.0.1:9300}", "publish_address
+      {127.0.0.1:9200}", "started {...}" - after about 10 minutes in the
+      kernel under TCG, so the scenario stays pending (`cargo xtask
+      boot-test elasticsearch`), not in CI. Left: file-settings watching
+      (sun.nio.fs.WindowsWatchService: ReadDirectoryChangesW, "The
+      request is not supported"; a warning), the node name (from
+      HOSTNAME, which elasticsearch.bat sets; gala's boot cannot set
+      environment variables yet), Netty's MAC address lookup
+      (GetAdaptersAddresses), and a request from the host to port 9200
+      (as caddy_http does) to show it answering.
    5. SQL Server (asked for 2026-10-31): start with SQL Server Express
       LocalDB, the small edition that runs sqlservr.exe as an ordinary
       process started on demand (no Windows service), queried with a

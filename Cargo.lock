@@ -317,6 +317,10 @@ name = "iphlpapi"
 version = "0.1.0"
 
 [[package]]
+name = "iphlpapi_test"
+version = "0.1.0"
+
+[[package]]
 name = "kernel"
 version = "0.1.0"
 dependencies = [

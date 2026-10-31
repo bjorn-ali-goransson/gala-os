@@ -1273,6 +1273,26 @@ Internal/InternalHigh) and the endpoint's I/O completion port.
   from ReactOS, to be verified. The address blocks hold a SOCKADDR_IN at
   their start; gala's GetAcceptExSockaddrs reads them back.
 
+### Network interfaces
+
+The kernel reports its interfaces through a class of its own,
+NtQuerySystemInformation(0x67610001, GALA_NETWORK_INTERFACES; Windows'
+iphlpapi asks the NSI driver, whose interface is undocumented): 36-byte
+records of index, IFTYPE, MTU, MAC length, MAC (8 bytes), IPv4 address,
+prefix length and NetLuidIndex. Loopback is always there (index 1,
+IF_TYPE_SOFTWARE_LOOPBACK, 127.0.0.1/8, NetLuidIndex 0, as Windows numbers
+it); the virtio-net card follows if present (index 2, Ethernet, its MAC,
+10.0.2.15/24, NetLuidIndex 32768). gala's iphlpapi builds the documented
+netioapi.h tables from them: GetIfTable2(Ex), GetIfEntry2 (MIB_IF_ROW2:
+aliases "Loopback Pseudo-Interface 1" / "Ethernet", up, connected),
+GetUnicastIpAddressTable (IPv4 rows; none for AF_INET6: no IPv6 yet),
+GetAnycastIpAddressTable (empty), FreeMibTable (tables from the process
+heap), ConvertInterfaceLuidToNameW/NameToLuidW (`loopback_0`,
+`ethernet_32768`), ConvertInterfaceLuidToIndex/IndexToLuid
+(`iphlpapi_test`). Java's NetworkInterface lists them; Elasticsearch's
+default network.host (`_local_`) needs that. GetAdaptersAddresses is not
+done yet.
+
 ### ws2_32.dll
 
 `user/ws2_32` is gala's ws2_32 (built like kernel32): the BSD-style and

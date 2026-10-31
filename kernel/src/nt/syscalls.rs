@@ -1951,6 +1951,19 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
                 Err(_) => NtStatus::ACCESS_VIOLATION,
             }
         }
+        sysinfo::GALA_NETWORK_INTERFACES => {
+            let (records, n) = sysinfo::interfaces(crate::net::tcp::ethernet());
+            if ret_ptr != 0 {
+                tri!(call.write_u32(ret_ptr, n as u32));
+            }
+            if (length as usize) < n {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            match call.process.write(buffer, &records[..n]) {
+                Ok(()) => NtStatus::SUCCESS,
+                Err(_) => NtStatus::ACCESS_VIOLATION,
+            }
+        }
         _ => NtStatus::INVALID_INFO_CLASS,
     }
 }
