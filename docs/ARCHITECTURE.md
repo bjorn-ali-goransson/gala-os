@@ -474,7 +474,10 @@ closes). It is the volume device `\Device\HarddiskVolume1`, also linked as
 reaches a non-directory object and hands it the rest of the path. File
 objects keep the granted access, share mode, synchronous flag and file
 position, and close their open in `Drop`. Boot modules appear read-only in
-`C:\gala`; `C:\Windows\System32` and `C:\Users\Public` exist.
+`C:\gala` (or the directory their module string names); a module string
+`tar:<dir>` is a USTAR archive (`fs/tar.rs`) whose regular files are added
+under `C:\<dir>` in place, without copies. `C:\Windows\System32` and
+`C:\Users\Public` exist.
 Names resolve from the volume root, or from an open directory file given
 as RootDirectory (no access needed on it). NtQueryDirectoryFile keeps a
 per-handle `DirScan` (mask fixed by the first query, "." and ".." outside

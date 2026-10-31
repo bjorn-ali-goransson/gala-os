@@ -559,6 +559,11 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       same: FLS, SRW locks, wait/thread-pool APIs, VirtualAlloc with
       reserve/commit and guard pages, and its GC's memory queries.
       Start with the import survey, as for the JDK.
+      Status: the `dotnet_info` scenario (pending) boots the runtime tree
+      as C:\dotnet (one USTAR archive module: Limine cannot load ~300
+      separate modules) with the JDK's UCRT app-local; `dotnet.exe` runs
+      and fails loading hostfxr.dll (RegGetValueW missing). Next: the
+      batch above, test first.
    3. PowerShell 7 on that runtime: `pwsh -NoProfile -Command ...`. On
       top of .NET it needs the console API (modes, screen buffer info,
       reading keys for the interactive prompt), the registry (read) and

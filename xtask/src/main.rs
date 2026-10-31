@@ -25,7 +25,8 @@ const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
 struct Prebuilt {
     name: &'static str,
     url: &'static str,
-    sha256: &'static str,
+    /// The release's SHA-256, or its SHA-512 (128 hex digits).
+    checksum: &'static str,
     /// The files used, inside the zip.
     members: &'static [&'static str],
 }
@@ -34,7 +35,7 @@ const PREBUILT: &[Prebuilt] = &[
     Prebuilt {
         name: "caddy",
         url: "https://github.com/caddyserver/caddy/releases/download/v2.8.4/caddy_2.8.4_windows_amd64.zip",
-        sha256: "2631fbe1c4f6fb08783ed6dc6ac238d6655b4c923abe2bce1433dbd7fd079630",
+        checksum: "2631fbe1c4f6fb08783ed6dc6ac238d6655b4c923abe2bce1433dbd7fd079630",
         members: &["caddy.exe"],
     },
     // Eclipse Temurin (OpenJDK) 21.0.5+11; the SHA-256 is Adoptium's
@@ -44,7 +45,7 @@ const PREBUILT: &[Prebuilt] = &[
     Prebuilt {
         name: "jdk",
         url: "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.5%2B11/OpenJDK21U-jdk_x64_windows_hotspot_21.0.5_11.zip",
-        sha256: "6f09d4a3598542313cca1540106d537c7092a54e415d569f7b928160a90d3128",
+        checksum: "6f09d4a3598542313cca1540106d537c7092a54e415d569f7b928160a90d3128",
         members: &[
             "jdk-21.0.5+11/bin/java.exe",
             "jdk-21.0.5+11/bin/*.dll",
@@ -55,6 +56,14 @@ const PREBUILT: &[Prebuilt] = &[
             "jdk-21.0.5+11/conf/*",
             "jdk-21.0.5+11/release",
         ],
+    },
+    // The .NET 8 runtime (Microsoft.NETCore.App and the dotnet host); the
+    // SHA-512 is Microsoft's published one (releases.json).
+    Prebuilt {
+        name: "dotnet",
+        url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/8.0.33/dotnet-runtime-8.0.33-win-x64.zip",
+        checksum: "ceb56fa91c15aa7c465db8cd42ee4e978589c58885cd1f164f8fcde7231ea15c3cfc0bcddb2e6b452238b3687a3e2bcb3683349b8b92a7172e03154ed280be67",
+        members: &[],
     },
 ];
 
@@ -349,6 +358,244 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("java_version", "winhttp.dll", "Windows/System32"),
     ("java_version", "msvcrt.dll", "Windows/System32"),
     ("java_version", "target/prebuilt/jdk/jdk-21.0.5+11/", "jdk"),
+    ("dotnet_info", "ntdll.dll", "Windows/System32"),
+    ("dotnet_info", "kernel32.dll", "Windows/System32"),
+    ("dotnet_info", "advapi32.dll", "Windows/System32"),
+    ("dotnet_info", "user32.dll", "Windows/System32"),
+    ("dotnet_info", "ws2_32.dll", "Windows/System32"),
+    ("dotnet_info", "mswsock.dll", "Windows/System32"),
+    ("dotnet_info", "bcryptprimitives.dll", "Windows/System32"),
+    ("dotnet_info", "version.dll", "Windows/System32"),
+    ("dotnet_info", "shell32.dll", "Windows/System32"),
+    ("dotnet_info", "winmm.dll", "Windows/System32"),
+    ("dotnet_info", "msvcrt.dll", "Windows/System32"),
+    ("dotnet_info", "target/prebuilt/dotnet/", "dotnet"),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-console-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-console-l1-2-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-datetime-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-debug-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-errorhandling-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-fibers-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-fibers-l1-1-1.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-file-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-file-l1-2-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-file-l2-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-handle-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-heap-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-interlocked-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-kernel32-legacy-l1-1-1.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-libraryloader-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-localization-l1-2-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-memory-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-namedpipe-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-processenvironment-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-processthreads-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-processthreads-l1-1-1.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-profile-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-rtlsupport-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-string-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-synch-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-synch-l1-2-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-sysinfo-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-sysinfo-l1-2-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-timezone-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-util-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-conio-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-convert-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-environment-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-filesystem-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-heap-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-locale-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-math-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-multibyte-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-private-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-process-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-runtime-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-stdio-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-string-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-time-l1-1-0.dll",
+        "dotnet",
+    ),
+    (
+        "dotnet_info",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-utility-l1-1-0.dll",
+        "dotnet",
+    ),
+    ("dotnet_info", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "dotnet"),
     ("java_hello", "ntdll.dll", "Windows/System32"),
     ("java_hello", "kernel32.dll", "Windows/System32"),
     ("java_hello", "advapi32.dll", "Windows/System32"),
@@ -732,26 +979,16 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
             fetch_prebuilt(file.trim_end_matches('/'))?;
         }
         // A path ending in a slash is a directory tree, shipped as C:\<dir>
-        // with its subdirectories (under boot/<dir>, so that files of the
-        // same name in different directories stay apart).
+        // with its subdirectories: packed into one USTAR archive the kernel
+        // unpacks (Limine runs out of memory-map entries with hundreds of
+        // modules; the .NET runtime has that many files).
         if file.ends_with('/') {
             let mut files = Vec::new();
             tree_files(&root().join(file), Path::new(""), &mut files)?;
-            for rel in files {
-                let dest = boot.join(dir).join(&rel);
-                let parent = dest.parent().ok_or("tree file without a parent")?;
-                fs::create_dir_all(parent).map_err(|e| format!("creating {parent:?}: {e}"))?;
-                // Hard links: the trees are large (a JDK) and never change.
-                let source = root().join(file).join(&rel);
-                if fs::hard_link(&source, &dest).is_err() {
-                    copy(&source, &dest)?;
-                }
-                let rel = rel.to_string_lossy().replace('\\', "/");
-                let sub = rel.rsplit_once('/').map_or(String::new(), |(d, _)| format!("/{d}"));
-                modules += &format!(
-                    "    module_path: boot():/boot/{dir}/{rel}\n    module_string: {dir}{sub}\n"
-                );
-            }
+            let archive = format!("{}.tree.tar", dir.replace('/', "_"));
+            write_tar(&root().join(file), &files, &boot.join(&archive))?;
+            modules +=
+                &format!("    module_path: boot():/boot/{archive}\n    module_string: tar:{dir}\n");
             continue;
         }
         let (source, name) = match file.rsplit_once('/') {
@@ -790,6 +1027,45 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
     Ok(iso)
 }
 
+/// Writes the files `files` (relative to `dir`) as a USTAR archive (the
+/// POSIX.1-1988 format; the kernel reads it, kernel/src/fs/tar.rs).
+fn write_tar(dir: &Path, files: &[PathBuf], out: &Path) -> Result {
+    let mut tar = Vec::new();
+    for rel in files {
+        let path = rel.to_string_lossy().replace('\\', "/");
+        let data = fs::read(dir.join(rel)).map_err(|e| format!("reading {rel:?}: {e}"))?;
+        // `prefix/name`: the name holds 100 bytes, the prefix 155.
+        let (prefix, name) = if path.len() <= 100 {
+            ("", path.as_str())
+        } else {
+            path.char_indices()
+                .filter(|&(i, c)| c == '/' && i <= 155 && path.len() - i - 1 <= 100)
+                .map(|(i, _)| (&path[..i], &path[i + 1..]))
+                .next()
+                .ok_or(format!("path too long for a tar archive: {path}"))?
+        };
+        let mut h = [0u8; 512];
+        h[..name.len()].copy_from_slice(name.as_bytes());
+        h[100..108].copy_from_slice(b"0000444\0");
+        h[108..116].copy_from_slice(b"0000000\0");
+        h[116..124].copy_from_slice(b"0000000\0");
+        h[124..136].copy_from_slice(format!("{:011o}\0", data.len()).as_bytes());
+        h[136..148].copy_from_slice(b"00000000000\0");
+        h[156] = b'0';
+        h[257..263].copy_from_slice(b"ustar\0");
+        h[263..265].copy_from_slice(b"00");
+        h[345..345 + prefix.len()].copy_from_slice(prefix.as_bytes());
+        h[148..156].copy_from_slice(b"        ");
+        let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        tar.extend_from_slice(&h);
+        tar.extend_from_slice(&data);
+        tar.resize(tar.len().div_ceil(512) * 512, 0);
+    }
+    tar.resize(tar.len() + 1024, 0);
+    fs::write(out, tar).map_err(|e| format!("writing {out:?}: {e}"))
+}
+
 /// The files under `dir` (paths relative to it), recursively.
 fn tree_files(dir: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> Result {
     let entries =
@@ -797,6 +1073,10 @@ fn tree_files(dir: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> Result {
     let mut names: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.file_name()).collect();
     names.sort();
     for name in names {
+        // xtask's own files (the .unpacked-<hash> marker).
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
         let path = rel.join(&name);
         if dir.join(&path).is_dir() {
             tree_files(dir, &path, out)?;
@@ -824,7 +1104,7 @@ fn fetch_prebuilt(path: &str) -> Result {
     let dir = root().join("target/prebuilt").join(p.name);
     // Written once the release is unpacked: a partial unpack (an
     // interrupted run) is redone.
-    let done = dir.join(format!(".unpacked-{}", p.sha256));
+    let done = dir.join(format!(".unpacked-{}", p.checksum));
     if full.exists() && done.exists() {
         return Ok(());
     }
@@ -832,10 +1112,11 @@ fn fetch_prebuilt(path: &str) -> Result {
     let zip = dir.join("download.zip");
     eprintln!("xtask: fetching {} ({})", p.name, p.url);
     run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&zip).arg(p.url))?;
-    let sum =
-        Command::new("sha256sum").arg(&zip).output().map_err(|e| format!("sha256sum: {e}"))?;
+    // SHA-256 or SHA-512 (Microsoft publishes the latter), by length.
+    let tool = if p.checksum.len() == 128 { "sha512sum" } else { "sha256sum" };
+    let sum = Command::new(tool).arg(&zip).output().map_err(|e| format!("{tool}: {e}"))?;
     let sum = String::from_utf8_lossy(&sum.stdout);
-    if sum.split_whitespace().next() != Some(p.sha256) {
+    if sum.split_whitespace().next() != Some(p.checksum) {
         let _ = fs::remove_file(&zip);
         return Err(format!("{}: SHA-256 mismatch ({sum})", p.url));
     }
@@ -944,7 +1225,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &[];
+const PENDING: &[&str] = &["dotnet_info"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -1455,6 +1736,19 @@ const SCENARIOS: &[Scenario] = &[
             "sum=499999500000",
             "pi=3.14159",
             "java.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // P1: the unmodified .NET 8 runtime (PREBUILT): the dotnet host
+        // lists its runtimes, as on Windows. Microsoft's redistributable
+        // UCRT (from the JDK) sits next to dotnet.exe, as self-contained
+        // .NET apps deploy it.
+        name: "dotnet_info",
+        cmdline: "qemu_exit run=dotnet.exe args=--list-runtimes",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "Microsoft.NETCore.App 8.0.33 [C:\\dotnet\\shared\\Microsoft.NETCore.App]",
+            "dotnet.exe finished with status 0x00000000",
         ],
     },
     Scenario {

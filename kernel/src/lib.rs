@@ -120,7 +120,12 @@ pub fn kernel_main() -> ! {
     nt::init();
     net::init();
     for module in info.modules.iter() {
-        if let Err(e) = nt::file::add_boot_file(module.cmdline, module.file_name(), module.data) {
+        // `tar:<dir>`: a directory tree packed by xtask, shipped as C:\<dir>.
+        if let Some(dir) = module.cmdline.strip_prefix("tar:") {
+            add_tree(dir, module.path, module.data);
+        } else if let Err(e) =
+            nt::file::add_boot_file(module.cmdline, module.file_name(), module.data)
+        {
             warn!("fs: cannot add {}: {e:?}", module.path);
         }
     }
@@ -311,47 +316,109 @@ fn init_timer(boot_time: Option<i64>) {
     info!("interrupts enabled, tick {} Hz", time::TICK_HZ);
 }
 
+/// Adds the regular files of the USTAR archive `data` (boot module `path`)
+/// under C:\\<dir>, in place.
+fn add_tree(dir: &str, path: &str, data: &'static [u8]) {
+    let mut entries = fs::tar::entries(data);
+    let mut count = 0;
+    loop {
+        match entries.next() {
+            Ok(Some(entry)) => {
+                let (sub, name) = entry.path.rsplit_once('/').unwrap_or(("", entry.path));
+                let mut buf = [0u8; 512];
+                let added = join_dir(&mut buf, dir, sub);
+                match added.map(|full| nt::file::add_boot_file(full, name, entry.data)) {
+                    Some(Ok(())) => count += 1,
+                    Some(Err(e)) => warn!("fs: cannot add {dir}/{}: {e:?}", entry.path),
+                    None => warn!("fs: path too long: {}", entry.path),
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                warn!("fs: archive {path}: {e:?}");
+                break;
+            }
+        }
+    }
+    info!("fs: {count} files from {path} in C:\\{dir}");
+}
+
+/// `dir/sub` (or `dir` when `sub` is empty) in `buf`.
+fn join_dir<'b>(buf: &'b mut [u8; 512], dir: &str, sub: &str) -> Option<&'b str> {
+    let mut len = 0;
+    for part in [dir, if sub.is_empty() { "" } else { "/" }, sub] {
+        buf.get_mut(len..len + part.len())?.copy_from_slice(part.as_bytes());
+        len += part.len();
+    }
+    core::str::from_utf8(&buf[..len]).ok()
+}
+
+/// The program `name`: a boot module, or a file in a `tar:` module (a
+/// directory tree); its file name, contents and directory on C: (in
+/// `buf`).
+fn find_program<'b>(
+    info: &BootInfo,
+    name: &str,
+    buf: &'b mut [u8; 512],
+) -> Option<(&'static str, &'static [u8], &'b str)> {
+    if let Some(module) = info.modules.find(name) {
+        return Some((module.file_name(), module.data, join_dir(buf, module.cmdline, "")?));
+    }
+    for module in info.modules.iter() {
+        let Some(dir) = module.cmdline.strip_prefix("tar:") else { continue };
+        let mut entries = fs::tar::entries(module.data);
+        while let Ok(Some(entry)) = entries.next() {
+            if entry.name.eq_ignore_ascii_case(name) {
+                let sub = entry.path.rsplit_once('/').map_or("", |(sub, _)| sub);
+                let (file, data) = (entry.name, entry.data);
+                return Some((file, data, join_dir(buf, dir, sub)?));
+            }
+        }
+    }
+    None
+}
+
 /// Runs the boot module `name` as a user process with command-line
 /// arguments `args` and waits for it.
 fn run_program(info: &BootInfo, name: &str, args: &str) {
-    let Some(module) = info.modules.find(name) else {
+    let mut buf = [0u8; 512];
+    let Some((file_name, data, directory)) = find_program(info, name, &mut buf) else {
         panic!("run: no boot module named {name:?}");
     };
-    info!("run: {} ({} bytes)", module.path, module.data.len());
+    info!("run: {directory}/{file_name} ({} bytes)", data.len());
     let (free_before, _) = mm::frame_stats();
-    let space =
-        match nt::process::spawn_from_pe(module.file_name(), module.cmdline, module.data, args) {
-            Ok((process, main_thread)) => {
-                drop(main_thread);
-                // Wait for the whole process (all threads) to end.
-                match nt::object::KObject::new(nt::object::ObjectBody::Process(process.clone())) {
-                    Ok(object) => {
-                        let one = core::slice::from_ref(&object);
-                        // A minute without finishing: log every thread's
-                        // state (what a hang is waiting for), then wait on.
-                        let minute = nt::wait::Timeout::Tick(time::ticks() + 60 * time::TICK_HZ);
-                        if nt::wait::wait_for(one, false, minute) == nt::status::NtStatus::TIMEOUT {
-                            warn!("run: {} still running after a minute; threads:", process.name);
-                            nt::thread::dump();
-                            sched::dump();
-                        }
-                        nt::wait::wait_for(one, false, nt::wait::Timeout::Infinite);
+    let space = match nt::process::spawn_from_pe(file_name, directory, data, args) {
+        Ok((process, main_thread)) => {
+            drop(main_thread);
+            // Wait for the whole process (all threads) to end.
+            match nt::object::KObject::new(nt::object::ObjectBody::Process(process.clone())) {
+                Ok(object) => {
+                    let one = core::slice::from_ref(&object);
+                    // A minute without finishing: log every thread's
+                    // state (what a hang is waiting for), then wait on.
+                    let minute = nt::wait::Timeout::Tick(time::ticks() + 60 * time::TICK_HZ);
+                    if nt::wait::wait_for(one, false, minute) == nt::status::NtStatus::TIMEOUT {
+                        warn!("run: {} still running after a minute; threads:", process.name);
+                        nt::thread::dump();
+                        sched::dump();
                     }
-                    Err(_) => error!("run: out of memory"),
+                    nt::wait::wait_for(one, false, nt::wait::Timeout::Infinite);
                 }
-                match process.exit_status() {
-                    Some(status) => {
-                        info!("run: {} finished with status {:#010x}", process.name, status.0)
-                    }
-                    None => warn!("run: {} ended without an exit status", process.name),
+                Err(_) => error!("run: out of memory"),
+            }
+            match process.exit_status() {
+                Some(status) => {
+                    info!("run: {} finished with status {:#010x}", process.name, status.0)
                 }
-                process.space.clone()
+                None => warn!("run: {} ended without an exit status", process.name),
             }
-            Err(e) => {
-                error!("run: cannot start {name}: {e:?}");
-                return;
-            }
-        };
+            process.space.clone()
+        }
+        Err(e) => {
+            error!("run: cannot start {name}: {e:?}");
+            return;
+        }
+    };
     // Teardown check: once the exiting threads are reaped, ours must be the
     // last reference to the address space; then its memory is returned.
     let deadline = time::ticks() + time::TICK_HZ;

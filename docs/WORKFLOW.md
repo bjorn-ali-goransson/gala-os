@@ -241,8 +241,11 @@ downloaded files in their own directory and run them only inside QEMU.
 
 Large programs (the JDK): a module path ending in `/`
 (`target/prebuilt/jdk/jdk-21.0.5+11/`) ships the whole tree as
-`C:\<dir>` with its subdirectories (under `boot/<dir>/` in the image, so
-equal file names in different directories stay apart). QEMU gets 512 MiB
+`C:\<dir>` with its subdirectories, packed into one USTAR archive
+(`boot/<dir>.tree.tar`, module string `tar:<dir>`) that the kernel unpacks
+into its ramfs in place (`kernel/src/fs/tar.rs`): Limine panics with
+"Memory map exhausted" with a few hundred modules (the .NET runtime has
+~190 files). `run=` finds a program inside an archive too. QEMU gets 512 MiB
 plus twice the image size when the image is over 64 MiB (boot modules stay
 in memory). A scenario still being brought up goes in `PENDING`: `cargo
 xtask boot-test <name>` runs it, `cargo xtask test` and CI do not. A DLL
