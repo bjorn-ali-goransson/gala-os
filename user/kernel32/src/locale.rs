@@ -1028,3 +1028,72 @@ pub extern "system" fn EnumSystemLocalesEx(
 pub extern "system" fn GetCurrentPackageId(_length: *mut u32, _buffer: *mut u8) -> i32 {
     15700
 }
+
+/// The preferred UI languages: en-US only, as a double-NUL-terminated
+/// list - names (MUI_LANGUAGE_NAME, 0x8, the default) or four-digit
+/// hexadecimal ids (MUI_LANGUAGE_ID, 0x4). A null buffer asks the size.
+fn preferred_ui_languages(flags: u32, count: *mut u32, buf: *mut u16, len: *mut u32) -> Bool {
+    if count.is_null() || len.is_null() || flags & !(0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x400) != 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    let list: &[u8] = if flags & 0x4 != 0 { b"0409\0\0" } else { b"en-US\0\0" };
+    // SAFETY: the caller's outputs and buffer of `*len` characters.
+    unsafe {
+        *count = 1;
+        if buf.is_null() {
+            *len = list.len() as u32;
+            return 1;
+        }
+        if (*len as usize) < list.len() {
+            *len = list.len() as u32;
+            return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        for (i, &b) in list.iter().enumerate() {
+            *buf.add(i) = b.into();
+        }
+        *len = list.len() as u32;
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetUserPreferredUILanguages(
+    flags: u32,
+    count: *mut u32,
+    buf: *mut u16,
+    len: *mut u32,
+) -> Bool {
+    preferred_ui_languages(flags, count, buf, len)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSystemPreferredUILanguages(
+    flags: u32,
+    count: *mut u32,
+    buf: *mut u16,
+    len: *mut u32,
+) -> Bool {
+    preferred_ui_languages(flags, count, buf, len)
+}
+
+/// GetThreadPreferredUILanguages: no thread languages are ever set, so
+/// the merged user and system fallbacks, en-US.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadPreferredUILanguages(
+    flags: u32,
+    count: *mut u32,
+    buf: *mut u16,
+    len: *mut u32,
+) -> Bool {
+    preferred_ui_languages(flags, count, buf, len)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetProcessPreferredUILanguages(
+    flags: u32,
+    count: *mut u32,
+    buf: *mut u16,
+    len: *mut u32,
+) -> Bool {
+    preferred_ui_languages(flags, count, buf, len)
+}

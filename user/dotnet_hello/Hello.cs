@@ -6,7 +6,7 @@
 //   hello from .NET 8.0.33
 //   os=Microsoft Windows NT 10.0.26100.0
 //   64bit=True processors=2
-//   the=3
+//   the=4
 //   sum=499999500000
 //   caught NullReferenceException
 //   caught boom

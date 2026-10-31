@@ -167,6 +167,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("com_test", "bcryptprimitives.dll", "Windows/System32"),
     ("kernel32_clr_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_clr_test", "testdll.dll", "gala"),
+    ("kernel32_clr_test", "user/bin/dotnet_hello.dll", "gala"),
+    ("kernel32_clr_test", "user/kernel32_clr_test/x86_native.dll", "gala"),
     ("win32_misc_test", "ntdll.dll", "Windows/System32"),
     ("win32_misc_test", "kernel32.dll", "Windows/System32"),
     ("win32_misc_test", "advapi32.dll", "Windows/System32"),
@@ -1142,7 +1144,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &["dotnet_hello"];
+const PENDING: &[&str] = &[];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -1693,7 +1695,7 @@ const SCENARIOS: &[Scenario] = &[
             "hello from .NET 8.0.33",
             "os=Microsoft Windows NT 10.0.26100.0",
             "64bit=True processors=2",
-            "the=3",
+            "the=4",
             "sum=499999500000",
             "caught NullReferenceException",
             "caught boom",
@@ -2940,10 +2942,15 @@ fn judge_log(scenario: &Scenario, status: Option<i32>, timed_out: bool, serial: 
     }
 }
 
-/// The part of a shared VM's log that belongs to `program`, and whether it
-/// ran to its end.
-fn program_section<'a>(serial: &'a str, program: &str) -> Option<(&'a str, bool)> {
-    let start = find_line(serial, &format!("run: begin {program}"))?;
+/// The part of a shared VM's log that belongs to the `nth` (from 0) run of
+/// `program`, and whether it ran to its end.
+fn program_section<'a>(serial: &'a str, program: &str, nth: usize) -> Option<(&'a str, bool)> {
+    let begin = format!("run: begin {program}");
+    let mut start = 0;
+    for k in 0..=nth {
+        let skip = if k == 0 { 0 } else { begin.len() };
+        start += skip + find_line(&serial[start + skip..], &begin)?;
+    }
     let rest = &serial[start..];
     Some(match find_line(rest, &format!("run: end {program}")) {
         Some(i) => (&rest[..i], true),
@@ -3083,11 +3090,18 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         }
         Vm::Batch(group) => group
             .iter()
-            .map(|&s| {
+            .enumerate()
+            .map(|(i, &s)| {
                 let program = batchable(s).map_or("", |(p, _)| p);
+                // Several scenarios may run the same program (dotnet.exe):
+                // the n-th of them has its n-th section.
+                let nth = group[..i]
+                    .iter()
+                    .filter(|&&o| batchable(o).map_or("", |(p, _)| p) == program)
+                    .count();
                 // Boot-time lines (before the first program) belong to all.
                 let preamble = &serial[..serial.find("run: begin ").unwrap_or(0)];
-                let verdict = match program_section(&serial, program) {
+                let verdict = match program_section(&serial, program, nth) {
                     // Finished: judge its section as if it had its own VM.
                     Some((section, true)) => {
                         judge(s, Some(QEMU_EXIT_SUCCESS), false, &format!("{preamble}{section}"))

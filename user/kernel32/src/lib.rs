@@ -2792,8 +2792,22 @@ pub extern "system" fn ExitProcess(code: u32) -> ! {
 
 /// DllMain (the entry point our link flags name).
 #[unsafe(no_mangle)]
-pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved: usize) -> i32 {
+pub extern "system" fn mainCRTStartup(_instance: usize, reason: u32, _reserved: usize) -> i32 {
+    if reason == 1 {
+        // DLL_PROCESS_ATTACH: unhandled exceptions go to
+        // UnhandledExceptionFilter (and so to SetUnhandledExceptionFilter's
+        // filter), as on Windows.
+        // SAFETY: registers a function with the documented signature.
+        unsafe {
+            RtlSetUnhandledExceptionFilter(sysmem::UnhandledExceptionFilter as *const () as usize)
+        };
+    }
     1
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RtlSetUnhandledExceptionFilter(filter: usize);
 }
 
 #[panic_handler]

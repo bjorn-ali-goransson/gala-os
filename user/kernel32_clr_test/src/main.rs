@@ -25,8 +25,12 @@
 //!   names (any case, without the extension) reach the implementing DLL;
 //!   an unknown contract is ERROR_MOD_NOT_FOUND.
 //! - LoadLibraryExW with LOAD_WITH_ALTERED_SEARCH_PATH, AS_DATAFILE and
-//!   AS_IMAGE_RESOURCE; RtlDllShutdownInProgress; Set/GetThreadDescription;
+//!   AS_IMAGE_RESOURCE; a 32-bit IL-only assembly loads as a module, a
+//!   32-bit native DLL does not (ERROR_BAD_EXE_FORMAT);
+//!   RtlDllShutdownInProgress; Set/GetThreadDescription;
 //!   GetLocaleInfoW(LOCALE_SPARENT).
+//! - An unhandled exception goes to the SetUnhandledExceptionFilter
+//!   filter; EXCEPTION_CONTINUE_EXECUTION resumes.
 //!
 //! Prints `kernel32_clr_test: ok` or exits with the number of the failing
 //! check.
@@ -135,6 +139,8 @@ unsafe extern "system" {
     fn GetModuleHandleA(name: *const u8) -> Handle;
     fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32) -> Handle;
+    fn SetUnhandledExceptionFilter(filter: usize) -> usize;
+    fn RaiseException(code: u32, flags: u32, count: u32, args: *const usize);
     fn GetModuleHandleW(name: *const u16) -> Handle;
     fn FreeLibrary(module: Handle) -> Bool;
     fn FindResourceW(module: Handle, name: *const u16, kind: *const u16) -> Handle;
@@ -547,6 +553,21 @@ fn libraries(c: &mut Checks) -> Result<(), u32> {
         c.ok(!attached.is_null() && *attached == 1, 0)?;
         c.ok(FreeLibrary(module) != 0, 0)?;
 
+        // A 32-bit IL-only .NET assembly loads as a module in a 64-bit
+        // process (how CoreCLR loads every assembly on Windows).
+        let il_path = w("C:\\gala\\dotnet_hello.dll");
+        let il_name = w("dotnet_hello.dll");
+        let il = LoadLibraryExW(il_path.as_ptr(), core::ptr::null_mut(), 0x8);
+        c.ok(!il.is_null() && il as usize & 3 == 0, GetLastError().into())?;
+        c.ok(GetModuleHandleW(il_name.as_ptr()) == il, 0)?;
+        c.eq(*(il as *const u16) as u64, 0x5a4d)?; // "MZ" at the module handle
+        c.ok(FreeLibrary(il) != 0, GetLastError().into())?;
+        c.ok(GetModuleHandleW(il_name.as_ptr()).is_null(), 0)?;
+        // A 32-bit image that is not IL-only cannot be loaded.
+        let bad = w("C:\\gala\\x86_native.dll");
+        c.ok(LoadLibraryExW(bad.as_ptr(), core::ptr::null_mut(), 0).is_null(), 0)?;
+        c.eq(GetLastError().into(), 193)?; // ERROR_BAD_EXE_FORMAT
+
         c.eq(RtlDllShutdownInProgress().into(), 0)?;
 
         let gala = w("gala worker");
@@ -567,6 +588,29 @@ fn libraries(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+static FILTERED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// A top-level filter: records the code, continues execution.
+extern "system" fn top_filter(pointers: *const *const u32) -> i32 {
+    // SAFETY: EXCEPTION_POINTERS: the record first; its code first.
+    let code = unsafe { **pointers };
+    FILTERED.store(code, core::sync::atomic::Ordering::SeqCst);
+    -1 // EXCEPTION_CONTINUE_EXECUTION
+}
+
+/// An exception no frame handles goes to the top-level filter
+/// (SetUnhandledExceptionFilter); continuing resumes after RaiseException.
+fn unhandled(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: plain calls; the filter has the documented signature.
+    unsafe {
+        let old = SetUnhandledExceptionFilter(top_filter as *const () as usize);
+        RaiseException(0xe000_1234, 0, 0, core::ptr::null());
+        c.eq(FILTERED.load(core::sync::atomic::Ordering::SeqCst).into(), 0xe000_1234)?;
+        c.eq(SetUnhandledExceptionFilter(old) as u64, top_filter as *const () as u64)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     waits(&mut c)?;
@@ -575,7 +619,8 @@ fn run() -> Result<(), u32> {
     code(&mut c)?;
     threads_memory(&mut c)?;
     api_sets(&mut c)?;
-    libraries(&mut c)
+    libraries(&mut c)?;
+    unhandled(&mut c)
 }
 
 #[unsafe(no_mangle)]

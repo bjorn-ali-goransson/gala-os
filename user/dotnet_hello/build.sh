@@ -10,9 +10,10 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 DIR="$ROOT/user/dotnet_hello"
 OUT="$ROOT/user/bin/dotnet_hello.dll"
+NATIVE="$ROOT/user/kernel32_clr_test/x86_native.dll"
 
 mcs -nologo -optimize+ -debug- -target:exe -out:"$OUT" "$DIR/Hello.cs"
-python3 -I - "$OUT" <<'PY'
+python3 -I - "$OUT" "$NATIVE" <<'PY'
 import struct, sys
 path = sys.argv[1]
 b = bytearray(open(path, 'rb').read())
@@ -45,5 +46,9 @@ for _ in range(streams):
         # The MVID: the module's only GUID (index 1).
         b[meta + off:meta + off + 16] = bytes.fromhex('6761' + '6c61' * 7)
 open(path, 'wb').write(b)
+# A 32-bit native (not .NET) image for kernel32_clr_test: the same file
+# without its CLI header directory (data directory 14).
+struct.pack_into('<II', b, dirs + 14 * 8, 0, 0)
+open(sys.argv[2], 'wb').write(b)
 PY
-sha256sum "$OUT"
+sha256sum "$OUT" "$NATIVE"

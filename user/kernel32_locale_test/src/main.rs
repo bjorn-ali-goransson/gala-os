@@ -14,6 +14,7 @@
 //! - GetLocalTime matches GetSystemTime (UTC); GetDynamicTimeZoneInformation
 //!   (UTC, TIME_ZONE_ID_UNKNOWN); SystemTimeToTzSpecificLocalTime and back.
 //! - GetUserGeoID (244, United States), GetGeoInfoA (GEO_ISO2 "US").
+//! - Get{User,System}PreferredUILanguages: en-US, by name or id.
 //!
 //! Prints `kernel32_locale_test: ok` or exits with the number of the
 //! failing check.
@@ -31,6 +32,18 @@ type LocaleEnumProcEx = extern "system" fn(*const u16, u32, isize) -> Bool;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetUserPreferredUILanguages(
+        flags: u32,
+        count: *mut u32,
+        buf: *mut u16,
+        len: *mut u32,
+    ) -> Bool;
+    fn GetSystemPreferredUILanguages(
+        flags: u32,
+        count: *mut u32,
+        buf: *mut u16,
+        len: *mut u32,
+    ) -> Bool;
     fn GetLastError() -> u32;
     fn SetLastError(e: u32);
     fn GetStdHandle(which: u32) -> Handle;
@@ -378,8 +391,37 @@ fn times(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// The preferred UI languages: one, en-US, as a double-NUL-terminated
+/// list of names (MUI_LANGUAGE_NAME) or hexadecimal ids (MUI_LANGUAGE_ID).
+fn ui_languages(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: plain calls with buffers of ours.
+    unsafe {
+        let (mut count, mut len) = (0u32, 0u32);
+        let ok = GetUserPreferredUILanguages(0x8, &mut count, core::ptr::null_mut(), &mut len);
+        c.ok(ok != 0 && count == 1 && len == 7, len.into())?;
+        let mut buf = [0xffffu16; 16];
+        let mut len = 16u32;
+        c.ok(GetUserPreferredUILanguages(0x8, &mut count, buf.as_mut_ptr(), &mut len) != 0, 0)?;
+        c.eq(len.into(), 7)?;
+        c.text(&buf, "en-US")?;
+        c.eq(buf[6].into(), 0)?;
+        let mut len = 16u32;
+        c.ok(GetUserPreferredUILanguages(0x4, &mut count, buf.as_mut_ptr(), &mut len) != 0, 0)?;
+        c.eq(len.into(), 6)?;
+        c.text(&buf, "0409")?;
+        let mut len = 3u32;
+        c.eq(GetUserPreferredUILanguages(0x8, &mut count, buf.as_mut_ptr(), &mut len) as u64, 0)?;
+        c.eq(GetLastError().into(), 122)?; // ERROR_INSUFFICIENT_BUFFER
+        let mut len = 16u32;
+        c.ok(GetSystemPreferredUILanguages(0x8, &mut count, buf.as_mut_ptr(), &mut len) != 0, 0)?;
+        c.text(&buf, "en-US")?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    ui_languages(&mut c)?;
     locales(&mut c)?;
     strings(&mut c)?;
     times(&mut c)

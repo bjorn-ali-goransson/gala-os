@@ -29,10 +29,12 @@
 //! - Unwind consolidation (STATUS_UNWIND_CONSOLIDATE, C++ catch blocks):
 //!   `consolidate_if_asked`.
 //!
+//! - An unhandled exception goes to the top-level filter
+//!   (RtlSetUnhandledExceptionFilter); unless it continues execution, the
+//!   process ends with the exception code.
+//!
 //! Not yet: nested exceptions and collided unwinds (dispositions 2 and 3
-//! are treated as ExceptionContinueSearch), unhandled exception filters
-//! (an unhandled exception ends the process with its code), the history
-//! table.
+//! are treated as ExceptionContinueSearch), the history table.
 
 use core::arch::global_asm;
 
@@ -813,6 +815,18 @@ pub extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> 
     if call_handlers(&continue_, &mut pointers) || handled {
         NtContinue(context, 0);
     }
+    // Unhandled: the top-level filter (kernel32's UnhandledExceptionFilter,
+    // which calls SetUnhandledExceptionFilter's) may continue execution;
+    // otherwise the process ends.
+    let filter = TOP_FILTER.load(core::sync::atomic::Ordering::Acquire);
+    if filter != 0 {
+        // SAFETY: a filter registered with RtlSetUnhandledExceptionFilter.
+        let f: extern "system" fn(*mut ExceptionPointers) -> i32 =
+            unsafe { core::mem::transmute(filter) };
+        if f(&mut pointers) == -1 {
+            NtContinue(context, 0);
+        }
+    }
     // SAFETY: the record starts with its ExceptionCode; ExceptionAddress
     // is at +0x10 and the parameters at +0x20.
     let (code, address, info) = unsafe {
@@ -839,6 +853,16 @@ pub extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> 
     loop {
         core::hint::spin_loop();
     }
+}
+
+/// The top-level unhandled exception filter (0: none).
+static TOP_FILTER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// RtlSetUnhandledExceptionFilter: the filter unhandled exceptions go to
+/// (kernel32 sets its UnhandledExceptionFilter).
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlSetUnhandledExceptionFilter(filter: usize) {
+    TOP_FILTER.store(filter, core::sync::atomic::Ordering::Release);
 }
 
 // --- Unwinding ---------------------------------------------------------

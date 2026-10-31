@@ -307,8 +307,12 @@ RtlUnwindEx or RtlRestoreContext): the callback runs on the current
 stack (the removed frames still hold the exception object) in a frame
 whose unwind data, like KiUserExceptionDispatcher's, restores the target
 CONTEXT from a block on the stack, then the target resumes at the
-address it returned. Not yet: nested exceptions and collided unwinds,
-unhandled exception filters. The #BP gate has DPL 3 so `int3` works from user mode.
+address it returned. An exception no handler takes goes to the
+top-level filter (RtlSetUnhandledExceptionFilter; kernel32 registers
+UnhandledExceptionFilter, which calls SetUnhandledExceptionFilter's
+filter: CoreCLR prints unhandled managed exceptions there); unless it
+continues execution the process ends with the code. Not yet: nested
+exceptions and collided unwinds. The #BP gate has DPL 3 so `int3` works from user mode.
 
 **Mutants and semaphores** (`ObjectBody::Mutant/Semaphore`): a mutant is
 signaled for waiters when free or owned by the waiting thread
@@ -820,7 +824,11 @@ Windows, never shadows the system's DLLs.)
   combase), security/eventing/registry/service sets to advapi32, other
   `core-` sets to kernel32 (no kernelbase); unknown contracts are looked
   up as files (and so not found). A PE32 image (image sections accept
-  them) is refused as a module (STATUS_INVALID_IMAGE_FORMAT).
+  them) loads as a module only if it is an IL-only .NET assembly (CLI
+  header flag COMIMAGE_FLAGS_ILONLY), as on 64-bit Windows: mapped, with
+  no imports bound, no TLS and no entry point (CoreCLR loads assemblies
+  with LoadLibraryEx); other PE32 images fail with
+  STATUS_INVALID_IMAGE_FORMAT (ERROR_BAD_EXE_FORMAT).
   LoadLibraryExW's AS_DATAFILE/AS_IMAGE_RESOURCE map the file as an image
   without loading it (handles tagged 1/2 in their low bits; FreeLibrary
   unmaps them); LOAD_WITH_ALTERED_SEARCH_PATH loads normally (TODO: the

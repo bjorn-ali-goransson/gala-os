@@ -571,16 +571,19 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       `dotnet_hello` scenario (user/dotnet_hello: C# built by build.sh
       with Mono's mcs, a distro package, since downloaded binaries only
       run inside QEMU; .NET runs it through mscorlib's type forwards):
-      Since then: ole32 and oleaut32 (com_test), API set redirection in
-      the loader, image sections of PE32 (IL-only) files, LoadLibraryExW
-      data-file/image-resource loads, unwind consolidation (C++ catch
-      blocks), RtlDllShutdownInProgress, thread descriptions. CoreCLR
-      starts, JITs and runs managed code: dotnet_hello now fails fast in
-      managed code - a BadImageFormatException loading an assembly (which
-      one: its message needs a culture), and the culture lookup fails:
-      without icu.dll .NET uses the Windows NLS APIs (GetLocaleInfoEx and
-      friends), which gala has for en-US only in part. Next: the NLS
-      surface .NET's CultureData uses (test first), then the bad image.
+      Done: a C# program runs on the unmodified .NET 8 runtime
+      (`dotnet_hello`: the JIT, the GC, a NullReferenceException from an
+      access violation, throw/catch, a thread, culture-invariant
+      formatting). The pieces: ole32/oleaut32 (com_test), API set
+      redirection in the loader, image sections of PE32 files and IL-only
+      PE32 assemblies loaded as modules (CoreCLR loads every assembly with
+      LoadLibraryEx on Windows), LoadLibraryExW data-file loads, unwind
+      consolidation (C++ catch blocks), the top-level unhandled-exception
+      filter, preferred UI languages. .NET runs without ICU (not on gala),
+      falling back to the NLS APIs (en-US only). Left in the ledger: probes
+      for newer APIs (FlsGetValue2, InitializeContext2, QueueUserAPC2), the
+      diagnostics server's named pipe (CreateNamedPipeA), job queries,
+      the registry and the event log.
    3. PowerShell 7 on that runtime: `pwsh -NoProfile -Command ...`. On
       top of .NET it needs the console API (modes, screen buffer info,
       reading keys for the interactive prompt), the registry (read) and

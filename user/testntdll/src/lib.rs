@@ -478,13 +478,29 @@ fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
         STATUS_SUCCESS | STATUS_IMAGE_NOT_AT_BASE => {}
         _ => return Err(STATUS_INVALID_IMAGE_FORMAT),
     }
-    // Image sections take 32-bit images too; a 64-bit process cannot load
-    // them as modules.
-    if rd32(base + rd32(base + 0x3c) as usize + 24) & 0xffff != 0x20b {
+    // Image sections take 32-bit images too; a 64-bit process loads one
+    // as a module only if it is an IL-only .NET assembly (no code runs).
+    if is_pe32(base) && !is_il_only(base) {
         NtUnmapViewOfSection(-1, base);
         return Err(STATUS_INVALID_IMAGE_FORMAT);
     }
     Ok(base)
+}
+
+/// Whether the image at `base` is 32-bit (PE32).
+fn is_pe32(base: usize) -> bool {
+    rd32(base + rd32(base + 0x3c) as usize + 24) & 0xffff == 0x10b
+}
+
+/// Whether the PE32 image at `base` is an IL-only .NET assembly: its CLI
+/// header (data directory 14, at +96 + 14 * 8 in a PE32 optional header)
+/// has COMIMAGE_FLAGS_ILONLY (bit 0 of Flags, at +16). Windows loads
+/// these into 64-bit processes; nothing in them runs (no imports are
+/// bound, no entry point is called).
+fn is_il_only(base: usize) -> bool {
+    let optional = base + rd32(base + 0x3c) as usize + 24;
+    let cli = rd32(optional + 96 + 14 * 8) as usize;
+    cli != 0 && rd32(base + cli + 16) & 1 != 0
 }
 
 const STATUS_NO_MEMORY: u32 = 0xc000_0017;
@@ -718,6 +734,9 @@ fn load_module(name: &[u8], search: Search) -> Result<usize, u32> {
     let (path, n) = unsafe { *LAST_PATH.0.get() };
     set_module_path(slot, &path[..n]);
     let attach = || {
+        if is_pe32(base) {
+            return Ok(()); // an IL-only assembly: mapped, nothing to run
+        }
         bind_imports(base, Some(slot))?;
         // Its TLS, then its TLS callbacks and DllMain (DLL_PROCESS_ATTACH).
         if tls::register(base) {

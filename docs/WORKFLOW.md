@@ -250,7 +250,13 @@ that ship the same large set share it through `MODULE_SETS` (and so a
 VM). Managed (.NET) test programs are C# in `user/<name>/` built by its
 `build.sh` with Mono's `mcs` (apt package `mono-mcs`) into `user/bin`
 (reproducible: the script pins the MVID and timestamp); CI does not
-rebuild them, as for the other third-party-tool builds. QEMU gets 512 MiB
+rebuild them, as for the other third-party-tool builds. In a shared VM,
+scenarios running the same program (two `dotnet.exe` runs) are judged on
+that program's n-th `run: begin`..`run: end` section, in group order.
+To see why a .NET program fails: the ledger first, then `XTASK_EVENTS=
+syscall,image,fault` (the stream lands in `target/debug/<iso>.events.jsonl`);
+CoreCLR's own source (dotnet/runtime, MIT) says what it expects of the OS
+(read only, as any application's documentation). QEMU gets 512 MiB
 plus twice the image size when the image is over 64 MiB (boot modules stay
 in memory). A scenario still being brought up goes in `PENDING`: `cargo
 xtask boot-test <name>` runs it, `cargo xtask test` and CI do not. A DLL
