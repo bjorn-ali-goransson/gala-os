@@ -173,6 +173,7 @@ pub fn kernel_main() -> ! {
         info!("events: {} written to the debug console", events::written());
     }
     net::log_stats();
+    info!("nt: {}", nt::stats::Summary);
     let (shootdowns, ipis) = arch::smp::flush_stats();
     info!(
         "stats: {shootdowns} TLB shootdowns ({ipis} IPIs), {} frames leaked by deferred frees",

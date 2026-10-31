@@ -184,6 +184,9 @@ pub struct Node {
     /// NT times (100 ns since 1601).
     pub created: u64,
     pub written: u64,
+    /// Changes with every change of the contents (and on data mapping),
+    /// unique across all nodes: what caches of the contents key on.
+    version: u64,
     opens: Opens,
     delete_pending: bool,
     /// Sections mapping the file, and the largest size they map.
@@ -191,7 +194,19 @@ pub struct Node {
     mapped_size: u64,
 }
 
+/// A new content version (see `Node::version`).
+fn next_version() -> u64 {
+    static NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
 impl Node {
+    /// The contents' version, or None while a data section maps the file
+    /// (writes through its views do not pass through here).
+    pub fn version(&self) -> Option<u64> {
+        (self.map_count == 0).then_some(self.version)
+    }
+
     pub fn is_dir(&self) -> bool {
         matches!(self.kind, Kind::Directory(_))
     }
@@ -274,6 +289,7 @@ impl RamFs {
             attributes: ATTRIBUTE_DIRECTORY,
             created: now,
             written: now,
+            version: next_version(),
             opens: Opens::default(),
             delete_pending: false,
             map_count: 0,
@@ -353,6 +369,7 @@ impl RamFs {
             attributes,
             created: now,
             written: now,
+            version: next_version(),
             opens: Opens::default(),
             delete_pending: false,
             map_count: 0,
@@ -583,6 +600,7 @@ impl RamFs {
         let start = usize::try_from(offset).map_err(|_| FsError::NoMemory)?;
         contents.write_at(start, data)?;
         node.written = now;
+        node.version = next_version();
         Ok(data.len())
     }
 
@@ -622,6 +640,7 @@ impl RamFs {
         let size = usize::try_from(size).map_err(|_| FsError::NoMemory)?;
         contents.set_len(size)?;
         node.written = now;
+        node.version = next_version();
         Ok(())
     }
 
@@ -636,6 +655,7 @@ impl RamFs {
         }
         contents.paged()?;
         node.map_count += 1;
+        node.version = next_version();
         node.mapped_size = node.mapped_size.max(size);
         Ok(())
     }
@@ -902,5 +922,23 @@ mod tests {
         let d = f.create(ROOT, &w("d"), true, 5).unwrap();
         f.set_basic(d, None, None, Some(0x02)).unwrap();
         assert_eq!(f.node(d).unwrap().attributes, 0x02 | ATTRIBUTE_DIRECTORY);
+    }
+
+    #[test]
+    fn versions_change_with_contents() {
+        let mut f = fs();
+        let a = f.create(ROOT, &w("a.dll"), false, 1).unwrap();
+        let b = f.create(ROOT, &w("b.dll"), false, 1).unwrap();
+        let v = f.node(a).unwrap().version().unwrap();
+        assert_ne!(Some(v), f.node(b).unwrap().version());
+        f.write(a, 0, b"MZ", 2).unwrap();
+        let v2 = f.node(a).unwrap().version().unwrap();
+        assert_ne!(v, v2);
+        f.set_basic(a, Some(9), Some(9), None).unwrap();
+        assert_eq!(f.node(a).unwrap().version(), Some(v2));
+        f.map(a, 2).unwrap();
+        assert_eq!(f.node(a).unwrap().version(), None);
+        f.unmap(a);
+        assert_ne!(f.node(a).unwrap().version(), Some(v2));
     }
 }

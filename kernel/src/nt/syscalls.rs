@@ -312,8 +312,7 @@ fn dispatch(frame: &mut SyscallFrame) {
     let ObjectBody::Thread(t) = &me.body else { unreachable!("thread objects are threads") };
     let process = t.process.clone();
     let service = TABLE.iter().find(|(n, ..)| *n == number);
-    let started =
-        crate::events::enabled(crate::events::Category::Syscall).then(platform::monotonic_ns);
+    let started = platform::monotonic_ns();
     let mut call = Call { frame, process };
     thread::set_in_syscall(&me, Some((number, caller_regs(&call))));
     let status = match service {
@@ -325,6 +324,10 @@ fn dispatch(frame: &mut SyscallFrame) {
         }
     };
     thread::set_in_syscall(&me, None);
+    let name = service.map_or("?", |&(_, name, ..)| name);
+    let counter =
+        if super::stats::is_wait(name) { &super::stats::WAITS } else { &super::stats::SYSCALLS };
+    counter.add_since(started);
     // Unsupported requests go to the missing-features ledger.
     if let Some(&(_, name, ..)) = service {
         match status {
@@ -338,7 +341,7 @@ fn dispatch(frame: &mut SyscallFrame) {
             _ => {}
         }
     }
-    if let Some(started) = started {
+    if crate::events::enabled(crate::events::Category::Syscall) {
         syscall_event(
             &call,
             number,
@@ -2251,8 +2254,7 @@ fn image_section(call: &Call<'_>, file: u64) -> Result<section::Section, NtStatu
     if entry.access & file::FILE_READ_DATA == 0 {
         return Err(NtStatus::ACCESS_DENIED);
     }
-    let data = file::read_all(f.node)?;
-    let mut section = section::Section::new_image(&data)?;
+    let mut section = section::Section::with_layout(section::image_layout(f.node)?);
     section.file_name = Some(file::nt_path(f.node)?);
     Ok(section)
 }
@@ -2787,7 +2789,11 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         file::FILE_NON_DIRECTORY_FILE
     ));
     let ObjectBody::File(f) = &opened.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
-    let data = tri!(file::read_all(f.node));
+    let layout = match section::image_layout(f.node) {
+        Ok(layout) => layout,
+        Err(NtStatus::NO_MEMORY) => return NtStatus::NO_MEMORY,
+        Err(_) => return NtStatus::INVALID_IMAGE_FORMAT,
+    };
 
     // Names: the Win32 path (without `\??\`) and the file name.
     let win32 = tri!(utf8_of(image.strip_prefix(&[0x5c, 0x3f, 0x3f, 0x5c][..]).unwrap_or(&image)));
@@ -2825,7 +2831,7 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
     let spawned = process::spawn(process::Spawn {
         name,
         path: path_static,
-        data: &data,
+        image: layout,
         command_line,
         current_directory: directory,
         environment: (!vars.is_empty()).then_some(&vars[..]),

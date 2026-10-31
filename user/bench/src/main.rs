@@ -1,4 +1,5 @@
-//! Micro-benchmarks that run unchanged on Windows and gala (ROADMAP P1).
+//! Micro-benchmarks that run unchanged on Windows and gala (ROADMAP P1;
+//! image_load: H8).
 //! Each prints `bench: <name> ns_per_op <n>` (wall time from the
 //! performance counter, divided by the operations); `cargo xtask bench`
 //! collects them into target/report/bench.json and user/bin/run-all.ps1
@@ -14,6 +15,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use ntrt::*;
 
 const THREAD_AFFINITY_MASK: u32 = 4;
+
+/// gala's kernel32.dll (87 KiB): the image that `image_load` loads, as
+/// the loader loads each DLL of each new process.
+static IMAGE: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../target/x86_64-pc-windows-msvc/release/kernel32.dll"
+));
 
 /// Runs `op` `n` times and prints ns per operation.
 fn bench(name: &str, n: u64, mut op: impl FnMut()) {
@@ -124,6 +132,27 @@ fn main() -> u32 {
         unmap_view(view);
     });
     close(section);
+    // Loading a DLL as the loader does: open the file, an image section,
+    // a view at its preferred base, then unmap and close everything.
+    let path = wide!("\\??\\C:\\Users\\Public\\gala_bench_image.dll");
+    let path = UnicodeString::new(&path);
+    let attrs = ObjectAttributes::new(&path, Handle(0), OBJ_CASE_INSENSITIVE);
+    let opts = FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE;
+    let (_, f, _) = create_file(&attrs, GENERIC_WRITE | DELETE, 0, FILE_OVERWRITE_IF, opts);
+    write_file_info(f, IMAGE);
+    close(f);
+    bench("image_load", 50, || {
+        let share = FILE_SHARE_READ | FILE_SHARE_DELETE;
+        let (_, f, _) = open_file(&attrs, GENERIC_READ | GENERIC_EXECUTE, share, opts);
+        let (_, section) = create_image_section(f);
+        let (_, view, _) = map_view(section, 0, 0, PAGE_EXECUTE_WRITECOPY);
+        unmap_view(view);
+        close(section);
+        close(f);
+    });
+    let (_, f, _) = open_file(&attrs, DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE, opts);
+    set_file(f, 13, &[1]); // FileDispositionInformation: delete
+    close(f);
     bench("thread_create_exit", 100, || {
         let (_, h, _) = create_thread(exit_now, 0, false);
         wait(h, None);

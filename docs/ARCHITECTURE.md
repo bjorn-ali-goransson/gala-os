@@ -550,6 +550,23 @@ rounds correctly; strtod sets ERANGE on overflow (HUGE_VAL) and on
 underflow to 0. TinyCC parses float constants with strtod, so programs
 it builds on gala get the same constants as elsewhere.
 
+**Image cache** (H8): `section::image_layout(node)` returns the laid-out
+image of a file, cached (16 layouts, least recently used out) by node
+and content version: ramfs gives every node a version from a global
+counter, renewed on each write, resize and data mapping, and reports
+none while a data section maps the file (writes through views bypass
+the file system), so a changed or replaced file is never served stale.
+NtCreateSection(SEC_IMAGE) and GalaCreateProcess both use it. A layout
+owns the shared frames of its pages; views at the preferred base and
+executables (`process::map_image`) borrow them (writable sections are
+copy-on-write), so processes of one program share its code, and the
+frames live as long as the layout (held by the cache, sections and each
+process). A relocated view still gets a private relocated copy.
+
+**Counters** (H8): `nt::stats` counts system calls (and waits apart),
+user faults the kernel resolves, and process creations with their
+time; the `nt:` line at the end of a run prints them (docs/PERF.md).
+
 **printf's floats and the math library** (H7): float.rs formats %f %e
 %g from the exact decimal expansion of the double (a 1152-bit bignum),
 rounded to 17 significant digits with zeros after them and then half

@@ -15,7 +15,7 @@ use super::platform::UserSpace;
 use super::process::Process;
 use super::status::NtStatus;
 use super::vad::{self, Access};
-use crate::mm::heap::TryVec;
+use crate::mm::heap::{KArc, TryVec};
 use crate::sync::IrqMutex;
 
 pub const SEC_RESERVE: u32 = 0x400_0000;
@@ -28,8 +28,9 @@ pub struct Section {
     pub protect: u32,
     pub attributes: u32,
     pages: IrqMutex<Vec<Option<Frame>>>,
-    /// Set for SEC_IMAGE sections.
-    pub image: Option<ImageLayout>,
+    /// Set for SEC_IMAGE sections (shared with the image cache and other
+    /// sections of the same file).
+    pub image: Option<KArc<ImageLayout>>,
     /// NT path of the backing file (MemoryMappedFilenameInformation).
     pub file_name: Option<Vec<u16>>,
     /// For a data section on a file: the file's pages back the section.
@@ -50,6 +51,8 @@ pub const SEC_FILE: u32 = 0x80_0000;
 /// sections at their RVAs), with the protection of every page.
 pub struct ImageLayout {
     pub base: u64,
+    /// Header fields a new process needs (`process::spawn`).
+    pub info: ImageInfo,
     bytes: Vec<u8>,
     page_protect: Vec<u32>,
     relocations: super::pe::DataDirectory,
@@ -57,6 +60,17 @@ pub struct ImageLayout {
     /// Frames of read-only pages, shared by every view at the preferred
     /// base (made on first use, freed with the section).
     shared: IrqMutex<Vec<Option<Frame>>>,
+}
+
+/// Header fields of an image, kept with its layout.
+#[derive(Clone, Copy, Debug)]
+pub struct ImageInfo {
+    pub size_of_image: u32,
+    pub entry_rva: u32,
+    pub subsystem: u16,
+    pub subsystem_version: (u16, u16),
+    pub is_dll: bool,
+    pub has_imports: bool,
 }
 
 impl Drop for ImageLayout {
@@ -110,8 +124,17 @@ impl ImageLayout {
         let mut shared = Vec::new();
         shared.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
         shared.resize(pages, None);
+        let info = ImageInfo {
+            size_of_image: image.size_of_image,
+            entry_rva: image.entry_rva,
+            subsystem: image.subsystem,
+            subsystem_version: image.subsystem_version,
+            is_dll: image.is_dll,
+            has_imports: image.has_imports(),
+        };
         Ok(ImageLayout {
             base: image.image_base,
+            info,
             bytes,
             page_protect,
             relocations: image.directory(super::pe::DIRECTORY_BASERELOC),
@@ -121,7 +144,7 @@ impl ImageLayout {
     }
 
     /// The shared frame of page `index` (unrelocated contents).
-    fn shared_frame(&self, index: usize) -> Option<Frame> {
+    pub fn shared_frame(&self, index: usize) -> Option<Frame> {
         let mut shared = self.shared.lock();
         let slot = shared.get_mut(index)?;
         if slot.is_none() {
@@ -136,10 +159,64 @@ impl ImageLayout {
         self.bytes.len() as u64
     }
 
+    /// The protection of each page (headers and gaps read-only).
+    pub fn page_protect(&self) -> &[u32] {
+        &self.page_protect
+    }
+
     /// The RVA of export `name`.
     pub fn export(&self, name: &[u8]) -> Option<u32> {
         super::pe::find_export(&self.bytes, name)
     }
+}
+
+/// Image layouts of recently loaded files, by (node, content version):
+/// every process loads the same DLLs, and a cached layout keeps its
+/// shared read-only frames, so later loads neither read and lay out the
+/// file again nor copy its pages (as Windows keeps a file's image section).
+/// A file changed since has a new version, so it is never served stale.
+static IMAGE_CACHE: IrqMutex<Vec<(ImageKey, KArc<ImageLayout>)>> = IrqMutex::new(Vec::new());
+/// A file and the version of its contents.
+type ImageKey = (crate::fs::ramfs::NodeId, u64);
+/// Layouts kept (the least recently used goes first).
+const IMAGE_CACHE_SIZE: usize = 16;
+
+/// The image layout of file `node`: cached, or read and laid out (and
+/// cached when the file has a stable version).
+pub fn image_layout(node: crate::fs::ramfs::NodeId) -> Result<KArc<ImageLayout>, NtStatus> {
+    let version = super::file::with_fs(|fs| fs.node(node).and_then(|n| n.version()));
+    if let Some(v) = version {
+        let mut cache = IMAGE_CACHE.lock();
+        if let Some(i) = cache.iter().position(|(key, _)| *key == (node, v)) {
+            // Most recently used last.
+            let entry = cache.remove(i);
+            let layout = entry.1.clone();
+            // Room was there a moment ago: this cannot fail.
+            let _ = cache.try_push(entry);
+            return Ok(layout);
+        }
+    }
+    let data = super::file::read_all(node)?;
+    let layout = KArc::try_new(ImageLayout::new(&data)?).map_err(|_| NtStatus::NO_MEMORY)?;
+    if let Some(v) = version {
+        let evicted = {
+            let mut cache = IMAGE_CACHE.lock();
+            // Drop older versions of this file and, when full, the oldest.
+            let mut evicted = Vec::new();
+            let _ = evicted.try_reserve(cache.len());
+            while let Some(i) = cache.iter().position(|((n, _), _)| *n == node) {
+                let _ = evicted.try_push(cache.remove(i));
+            }
+            if cache.len() >= IMAGE_CACHE_SIZE {
+                let _ = evicted.try_push(cache.remove(0));
+            }
+            let _ = cache.try_push(((node, v), layout.clone()));
+            evicted
+        };
+        // Freed outside the lock (frames go back to the allocator).
+        drop(evicted);
+    }
+    Ok(layout)
 }
 
 impl Section {
@@ -184,8 +261,13 @@ impl Section {
 
     /// A SEC_IMAGE section for the PE file contents `data`.
     pub fn new_image(data: &[u8]) -> Result<Self, NtStatus> {
-        let layout = ImageLayout::new(data)?;
-        Ok(Section {
+        let layout = KArc::try_new(ImageLayout::new(data)?).map_err(|_| NtStatus::NO_MEMORY)?;
+        Ok(Self::with_layout(layout))
+    }
+
+    /// A SEC_IMAGE section on an existing layout.
+    pub fn with_layout(layout: KArc<ImageLayout>) -> Self {
+        Section {
             size: layout.size(),
             protect: vad::PAGE_EXECUTE_WRITECOPY,
             attributes: SEC_IMAGE,
@@ -193,7 +275,7 @@ impl Section {
             image: Some(layout),
             file_name: None,
             file: None,
-        })
+        }
     }
 
     /// The frame backing page `index`: the file's page for a mapped file,
@@ -352,22 +434,27 @@ fn map_image_view(
         let _ = vad.release(view_base, 0);
         return Err(NtStatus::CONFLICTING_ADDRESSES);
     }
-    // The view's contents: the layout, relocated for this base.
+    // The view's contents: at the preferred base the layout's shared
+    // frames; elsewhere a relocated copy.
     let mut bytes = Vec::new();
-    if bytes.try_reserve_exact(image.bytes.len()).is_err() {
-        let _ = vad.release(view_base, 0);
-        return Err(NtStatus::NO_MEMORY);
-    }
-    bytes.resize(image.bytes.len(), 0);
-    bytes.copy_from_slice(&image.bytes);
-    if super::pe::apply_relocations(&mut bytes, image.relocations, delta).is_err() {
-        let _ = vad.release(view_base, 0);
-        return Err(NtStatus::INVALID_IMAGE_FORMAT);
+    if delta != 0 {
+        if bytes.try_reserve_exact(image.bytes.len()).is_err() {
+            let _ = vad.release(view_base, 0);
+            return Err(NtStatus::NO_MEMORY);
+        }
+        bytes.resize(image.bytes.len(), 0);
+        bytes.copy_from_slice(&image.bytes);
+        if super::pe::apply_relocations(&mut bytes, image.relocations, delta).is_err() {
+            let _ = vad.release(view_base, 0);
+            return Err(NtStatus::INVALID_IMAGE_FORMAT);
+        }
     }
     let mut space = process.space.lock();
     for (i, &protect) in image.page_protect.iter().enumerate() {
         let va = view_base + i as u64 * PAGE_SIZE;
-        let page = &bytes[i * PAGE_SIZE as usize..((i + 1) * PAGE_SIZE as usize).min(bytes.len())];
+        let page = bytes
+            .get(i * PAGE_SIZE as usize..((i + 1) * PAGE_SIZE as usize).min(bytes.len()))
+            .unwrap_or(&[]);
         let fail = |vad: &mut vad::Vad, space: &mut UserSpace| {
             for j in 0..i as u64 {
                 space.unmap_page(view_base + j * PAGE_SIZE);

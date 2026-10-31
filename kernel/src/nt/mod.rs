@@ -15,6 +15,7 @@ pub mod pipe;
 pub mod platform;
 pub mod process;
 pub mod section;
+pub mod stats;
 pub mod status;
 pub mod syscalls;
 pub mod sysinfo;

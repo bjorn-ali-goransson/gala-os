@@ -197,6 +197,14 @@ the boot scenarios before T1 and 14 s after, under software emulation on a
 
 ## Benchmarks
 
+Where time goes in a scenario: the `nt:` line at the end of its serial
+log (`target/<profile>/test-<scenario>.serial.log`) gives the NT layer's
+system call, fault and process creation time without disturbing the
+run; the event stream gives per-call detail but slows the run down
+(docs/PERF.md has the method and the H8 numbers). Under QEMU TCG,
+user code that sits in shared physical frames is translated once:
+copying code pages per process costs far more than the copy.
+
 `cargo xtask bench` (always a release kernel) runs `user/bench` and writes
 `target/report/bench.json`; on Windows, `user/bin/run-all.ps1` writes
 `bench-windows.txt`, which `cargo xtask bench bench-windows.txt` puts next
@@ -329,6 +337,15 @@ is a third-party build, which the session's permissions refuse; Windows
 itself is the reference through `run-all.ps1`). test.lua avoids output
 that depends on the script's path (`error(msg, 0)`) and exact decimal
 ties (C runtimes round them differently).
+
+## Reproducible user binaries
+
+`cargo xtask export-tests` output must be the same on every machine (CI
+compares it). Workspace crates get relative source paths, but crates.io
+dependencies (libm in msvcrt) get absolute paths under the cargo home,
+which end up in panic locations: xtask's `user_build` remaps the cargo
+home to `/cargo` (`--remap-path-prefix`, merged into the target's
+rustflags with `--config`). A new dependency needs nothing more.
 
 ## Hunting a rare hang
 

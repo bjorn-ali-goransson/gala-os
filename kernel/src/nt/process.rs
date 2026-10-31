@@ -7,7 +7,7 @@ use core::fmt;
 
 use super::layout::{self, params, peb};
 use super::object::{HandleTable, KObject, ObjectBody, ObjectRef};
-use super::pe::{self, PeError, PeImage};
+use super::pe::{PeError, PeImage};
 use super::platform::PAGE_SIZE;
 use super::platform::PageFlags;
 use super::platform::SpawnError;
@@ -42,6 +42,9 @@ pub struct Process {
     pub dispatcher: Dispatcher,
     /// The executable's mapping: (base, size).
     pub image: (u64, u64),
+    /// Its layout, whose shared frames back the executable's pages (held
+    /// for as long as they are mapped).
+    _layout: KArc<super::section::ImageLayout>,
     /// ntdll!KiUserExceptionDispatcher in this process, or 0: then user
     /// exceptions end the process.
     exception_dispatcher: core::sync::atomic::AtomicU64,
@@ -239,16 +242,7 @@ impl From<UserFault> for LoadError {
 
 /// Page flags for an image section: writable sections are copy-on-write,
 /// mapped read-only until written.
-fn section_flags(characteristics: u32) -> PageFlags {
-    vm::flags_for(section_protect(characteristics))
-}
-
 const USER_RW: PageFlags = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RW };
-const USER_RO: PageFlags = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RO };
-
-fn pages(bytes: u64) -> u64 {
-    bytes.div_ceil(PAGE_SIZE)
-}
 
 fn put_u64(space: &mut UserSpace, addr: u64, value: u64) -> Result<(), UserFault> {
     space.write_initial(addr, &value.to_le_bytes())
@@ -258,28 +252,19 @@ fn put_u32(space: &mut UserSpace, addr: u64, value: u32) -> Result<(), UserFault
     space.write_initial(addr, &value.to_le_bytes())
 }
 
-/// Page protection for an image section, as Windows reports it (writable
-/// image pages are copy-on-write).
-fn section_protect(characteristics: u32) -> u32 {
-    let (r, w, x) = (
-        characteristics & pe::IMAGE_SCN_MEM_READ != 0,
-        characteristics & pe::IMAGE_SCN_MEM_WRITE != 0,
-        characteristics & pe::IMAGE_SCN_MEM_EXECUTE != 0,
-    );
-    match (x, w, r) {
-        (true, true, _) => vad::PAGE_EXECUTE_WRITECOPY,
-        (true, false, true) => vad::PAGE_EXECUTE_READ,
-        (true, false, false) => vad::PAGE_EXECUTE,
-        (false, true, _) => vad::PAGE_WRITECOPY,
-        (false, false, true) => vad::PAGE_READONLY,
-        (false, false, false) => vad::PAGE_NOACCESS,
-    }
-}
-
 /// Maps the image at its preferred base.
-fn map_image(space: &mut UserSpace, vad: &mut Vad, image: &PeImage<'_>) -> Result<u64, LoadError> {
-    let base = image.image_base;
-    let end = base.checked_add(u64::from(image.size_of_image)).ok_or(LoadError::BadImageBase)?;
+/// Maps the executable at its preferred base: every page borrows the
+/// layout's shared frame (read-only, or copy-on-write for writable
+/// sections, which a first write makes private: `vm::resolve_fault`), so
+/// processes of the same program share its pages, as image views do.
+fn map_image(
+    space: &mut UserSpace,
+    vad: &mut Vad,
+    image: &super::section::ImageLayout,
+) -> Result<u64, LoadError> {
+    let base = image.base;
+    let size = image.size();
+    let end = base.checked_add(size).ok_or(LoadError::BadImageBase)?;
     // Keep the first 64 KiB free (null-pointer region) and stay clear of
     // our fixed structures.
     if base < 0x1_0000
@@ -288,26 +273,13 @@ fn map_image(space: &mut UserSpace, vad: &mut Vad, image: &PeImage<'_>) -> Resul
     {
         return Err(LoadError::BadImageBase);
     }
-    // TODO: relocate (pe::apply_relocations) when the preferred base is taken.
-    vad.reserve(
-        Some(base),
-        u64::from(image.size_of_image),
-        vad::PAGE_EXECUTE_WRITECOPY,
-        vad::MEM_IMAGE,
-        false,
-    )?;
-    vad.commit(base, u64::from(image.size_of_headers), vad::PAGE_READONLY)?;
-    space.map_zeroed(base, pages(u64::from(image.size_of_headers)), USER_RO)?;
-    space.write_initial(base, image.headers())?;
-    for section in image.sections() {
-        let va = base + u64::from(section.virtual_address);
-        let size = u64::from(section.memory_size());
-        if size == 0 {
-            continue;
-        }
-        vad.commit(va, size, section_protect(section.characteristics))?;
-        space.map_zeroed(va, pages(size), section_flags(section.characteristics))?;
-        space.write_initial(va, image.section_data(&section))?;
+    // TODO: relocate when the preferred base is taken.
+    vad.reserve(Some(base), size, vad::PAGE_EXECUTE_WRITECOPY, vad::MEM_IMAGE, false)?;
+    for (i, &protect) in image.page_protect().iter().enumerate() {
+        let va = base + i as u64 * PAGE_SIZE;
+        vad.commit(va, PAGE_SIZE, protect)?;
+        let frame = image.shared_frame(i).ok_or(LoadError::OutOfMemory)?;
+        space.map_borrowed(va, frame, vm::flags_for(protect)).map_err(LoadError::Paging)?;
     }
     Ok(base)
 }
@@ -424,10 +396,14 @@ pub fn spawn_from_pe(
         command_line.try_extend_from_slice(args.as_bytes())?;
     }
     let command_line = core::str::from_utf8(&command_line).unwrap_or(image_path);
+    // Parsed first for the precise error; boot programs are not cached.
+    PeImage::parse(data).map_err(LoadError::Pe)?;
+    let layout = super::section::ImageLayout::new(data)
+        .map_err(|_| LoadError::Pe(PeError::BadPeSignature))?;
     spawn(Spawn {
         name,
         path: intern(image_path)?,
-        data,
+        image: KArc::try_new(layout)?,
         command_line,
         current_directory: BOOT_DIRECTORY,
         environment: None,
@@ -444,7 +420,8 @@ pub struct Spawn<'a> {
     pub name: &'static str,
     /// Its Win32 path.
     pub path: &'static str,
-    pub data: &'a [u8],
+    /// The executable, laid out (`section::image_layout`, cached per file).
+    pub image: KArc<super::section::ImageLayout>,
     pub command_line: &'a str,
     /// With a trailing backslash.
     pub current_directory: &'a str,
@@ -464,10 +441,17 @@ pub struct Spawn<'a> {
 /// Creates a process from a PE executable and starts (or prepares) its
 /// main thread.
 pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
+    let started = platform::monotonic_ns();
+    let spawned = spawn_inner(spec);
+    super::stats::PROCESSES.add_since(started);
+    spawned
+}
+
+fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
     let Spawn {
         name,
         path,
-        data,
+        image,
         command_line,
         current_directory,
         environment,
@@ -476,9 +460,12 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
         runtime_data,
         parent_id,
     } = spec;
-    let image = PeImage::parse(data).map_err(LoadError::Pe)?;
+    let info = image.info;
+    if info.is_dll {
+        return Err(LoadError::Pe(PeError::NotExecutable));
+    }
     // Binding imports is the user-mode loader's job (ntdll), as on Windows.
-    if image.has_imports() && super::ntdll::get().is_none() {
+    if info.has_imports && super::ntdll::get().is_none() {
         return Err(LoadError::ImportsNotSupported);
     }
     let mut space = UserSpace::new()?;
@@ -491,7 +478,7 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
         format_args!(
             r#""pid":{id},"name":{},"base":{base},"size":{}"#,
             crate::events::Str(name),
-            image.size_of_image
+            info.size_of_image
         ),
     );
 
@@ -584,8 +571,8 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
         &(super::kuser::BUILD_NUMBER as u16).to_le_bytes(),
     )?;
     put_u32(&mut space, peb_addr + peb::OS_PLATFORM_ID, VER_PLATFORM_WIN32_NT)?;
-    put_u32(&mut space, peb_addr + peb::IMAGE_SUBSYSTEM, u32::from(image.subsystem))?;
-    let (major, minor) = image.subsystem_version;
+    put_u32(&mut space, peb_addr + peb::IMAGE_SUBSYSTEM, u32::from(info.subsystem))?;
+    let (major, minor) = info.subsystem_version;
     put_u32(&mut space, peb_addr + peb::IMAGE_SUBSYSTEM_MAJOR_VERSION, u32::from(major))?;
     put_u32(&mut space, peb_addr + peb::IMAGE_SUBSYSTEM_MINOR_VERSION, u32::from(minor))?;
     put_u32(&mut space, peb_addr + peb::SESSION_ID, SESSION_ID)?;
@@ -603,7 +590,8 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
         threads: IrqMutex::new(Vec::new()),
         exit_status: IrqMutex::new(None),
         dispatcher: Dispatcher::new(0),
-        image: (base, u64::from(image.size_of_image)),
+        image: (base, u64::from(info.size_of_image)),
+        _layout: image.clone(),
         exception_dispatcher: core::sync::atomic::AtomicU64::new(0),
         apc_dispatcher: core::sync::atomic::AtomicU64::new(0),
         create_time: platform::system_time(),
@@ -618,7 +606,7 @@ pub fn spawn(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError> {
     let mut gpr = [0u64; 16];
     gpr[1] = peb_addr;
     gpr[4] = layout::STACK_TOP - 0x28;
-    let start = UserRegs { gpr, rip: base + u64::from(image.entry_rva), rflags: 0 };
+    let start = UserRegs { gpr, rip: base + u64::from(info.entry_rva), rflags: 0 };
     let started = through_ntdll(&process, &start).and_then(|regs| {
         thread::create(
             &process,
@@ -766,7 +754,10 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
             e if e & (1 << 1) != 0 => AccessKind::Write,
             _ => AccessKind::Read,
         };
-        match vm::resolve_fault(&process, addr, kind) {
+        let started = platform::monotonic_ns();
+        let resolved = vm::resolve_fault(&process, addr, kind);
+        super::stats::FAULTS.add_since(started);
+        match resolved {
             vm::Fault::Resolved => return, // retry the instruction
             vm::Fault::Raise(status) => {
                 if !deliver_to_user(&process, frame, status, cr2) {

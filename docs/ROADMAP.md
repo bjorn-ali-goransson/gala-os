@@ -215,7 +215,7 @@ to set and to argue for. Current order and why:
    H2 done (Go's os/exec, busybox-w32's sh); H3 (scripts and file
    tools) done; H4 (a C compiler on gala) done; H5 (TinyCC builds
    itself on gala) done; H6 (make on gala) done; H7 (Lua built on gala)
-   done; next H8 (build speed).
+   done; H8 (build speed) done; next H9 (SQLite built on gala).
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
@@ -396,11 +396,21 @@ H7. **A real C project built on gala**: done 2026-10-31. The `lua`
    float.rs now formats from the exact expansion as msvcrt.dll does (17
    significant digits, three-digit exponents), checked by 20 cases in
    msvcrt_test.
-H8. **Build speed**: next. Building Lua takes about 12 s in the kernel
-   under QEMU (TCG). Profile it with the event log (`XTASK_EVENTS`):
-   process creation and image loading per tcc run, file I/O system
-   calls, page faults; cut the largest cost, with a benchmark in
-   `user/bench` that guards it.
+H8. **Build speed**: done 2026-10-31 (docs/PERF.md). Measured first:
+   an always-on `nt:` line (system calls, waits, user faults, process
+   creation) and the event stream broke the lua scenario's 12.7 s down;
+   loading images was the largest avoidable cost. Image layouts are now
+   cached per file and content version (ramfs node versions), image
+   views at the preferred base map the shared frames without copying,
+   and executables are mapped from the cached layout's shared frames
+   (copy-on-write). bench `image_load` 2.09 ms -> 0.32 ms; lua scenario
+   12.7 s -> 7.9 s (shared code pages also let QEMU reuse translations);
+   whole suite 64 s -> 53 s of kernel time.
+H9. **SQLite built on gala**: next. The SQLite amalgamation (public
+   domain, one 9 MB C file) compiled by tcc on gala with its shell, then
+   SQL run through it (tables, indexes, joins, transactions on a file
+   database), output as on Windows. A large compile: memory, the file
+   system and tcc's speed under gala.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala
