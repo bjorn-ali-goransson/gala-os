@@ -76,18 +76,25 @@ pub fn arm(
         }
         None => None,
     };
-    {
-        let mut timers = TIMERS.lock();
-        if !timers.iter().any(|t| KArc::ptr_eq(t, object)) {
-            timers.try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
-        }
-    }
     // Reset the signal before arming: the worker (on another CPU) may fire
     // the timer as soon as it is armed, and that signal must not be wiped
     // (a waiter would sleep on a timer that has already fired and been
     // disarmed; Go's runtime hung in its first short sleep that way).
     let previous = wait::set_signal(object, 0) > 0;
     *timer.state.lock() = super::object::TimerState { due: Some(due), due_time, period, apc };
+    // Then list it. Armed first: the worker prunes listed timers that are
+    // not armed, and one listed before its due time was set could be
+    // pruned in between and never fire (timer_test lost 50 ms timers so,
+    // now and then).
+    {
+        let mut timers = TIMERS.lock();
+        if !timers.iter().any(|t| KArc::ptr_eq(t, object))
+            && timers.try_push(object.clone()).is_err()
+        {
+            *timer.state.lock() = super::object::TimerState::default();
+            return Err(NtStatus::NO_MEMORY);
+        }
+    }
     wake_worker();
     Ok(previous)
 }
