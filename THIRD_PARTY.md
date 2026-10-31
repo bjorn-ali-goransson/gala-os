@@ -29,7 +29,7 @@ Rules for this file:
 | busybox-w32 | `FRP-6354-g5f09fb446` (git commit `5f09fb446adf81d005f0aad9dc47eca19ac3b74c`) | github.com/rmyorston/busybox-w32 (the maintainer's repository; releases on frippery.org/busybox) | GPL-2.0 | `user/bin/busybox.exe`, built unmodified by `user/busybox/build.sh` (its `mingw64_defconfig`, mingw-w64, reproducible); run by the `busybox` scenario. The corresponding source is that commit, which the build script fetches and checks. |
 | Nginx start page | 1.30.6 (`html/index.html` of the release) | nginx.org | BSD-2-Clause | `user/nginx/html/index.html`, unmodified: the page the Nginx scenarios serve and check. |
 | Test certificate | `user/nginx/conf/gala-test.crt/.key` | generated with `openssl req -x509` (ECDSA P-256, self-signed, CN "gala test") | test data, not secret | The `nginx_tls` scenario's server certificate. |
-| mingw-w64 runtime and GCC support code | Ubuntu 24.04 `gcc-mingw-w64-x86-64` 13.2.0 | mingw-w64.org, gcc.gnu.org | mingw-w64 CRT: ZPL/public domain; libgcc: GPL-3.0 with the GCC Runtime Library Exception | Statically linked into `nginx.exe` and `busybox.exe` by the toolchain (program startup, helpers). |
+| mingw-w64 runtime and GCC support code | Ubuntu 24.04 `gcc-mingw-w64-x86-64` 13.2.0 | mingw-w64.org, gcc.gnu.org | mingw-w64 CRT: ZPL/public domain; libgcc: GPL-3.0 with the GCC Runtime Library Exception | Statically linked into `nginx.exe`, `busybox.exe` and `msvcrt_test.exe` (our `user/msvcrt_test/main.c`) by the toolchain (program startup, helpers). |
 
 ## Rust crate dependencies (linked into the kernel)
 

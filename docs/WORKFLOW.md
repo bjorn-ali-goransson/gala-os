@@ -269,6 +269,16 @@ line; to try others, change its `args=` (percent-encoded). With the
 which a system call trace cannot show: an unhandled one ends the process
 with its status through ntdll's dispatcher.
 
+The script scenarios (`busybox_files`, `busybox_script`) run checked-in
+scripts from `user/busybox/` (boot modules in C:\gala); each prints one
+labelled line per result, which is what the scenario expects. A builtin
+or in-process applet (cd, mkdir, echo) can be tried in gala-um in
+milliseconds (`um ... user/bin/busybox.exe 'sh -c "..."'`: pass the
+command line pre-quoted, as one argument); anything that starts a child
+needs QEMU. `user/msvcrt_test/` is a C test of gala's msvcrt
+(`build.sh` rebuilds the checked-in binary with mingw against msvcrt's
+own stdio).
+
 ## Hunting a rare hang
 
 A scenario that fails once in N runs: loop `cargo xtask boot-test <name>`

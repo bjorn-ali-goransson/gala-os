@@ -776,6 +776,19 @@ pub extern "C" fn putc(c: i32, file: *mut u8) -> i32 {
     fputc(c, file)
 }
 
+/// puts(s): `s` and a newline to standard output.
+#[unsafe(no_mangle)]
+pub extern "C" fn puts(s: *const u8) -> i32 {
+    // SAFETY: stdout's slot; the caller's NUL-terminated string.
+    unsafe {
+        let out = __iob_func().add(FILE_SIZE);
+        if fputs(s, out) < 0 || fputc(i32::from(b'\n'), out) < 0 {
+            return -1;
+        }
+    }
+    0
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn putchar(c: i32) -> i32 {
     // SAFETY: stdout's slot.

@@ -212,7 +212,8 @@ to set and to argue for. Current order and why:
    and real programs beyond servers need it too. H1 (pipes, redirected
    child stdio) done; next H2 (a real CLI tool or shell-like program
    driving children through pipes, chosen from what the ledger shows).
-   H2 done (Go's os/exec, busybox-w32's sh); next H3.
+   H2 done (Go's os/exec, busybox-w32's sh); H3 (scripts and file
+   tools) done; next H4 (a toolchain).
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
@@ -335,7 +336,15 @@ H2. **A real program driving children through pipes**: step 1 done
    measures; a pipe's end is EOF for _read). Next H3.
 H3. **Scripts and tools on gala**: busybox utilities over files (ls,
    find, grep -r, tar), shell scripts from files, then a toolchain (see
-   "Later").
+   "Later"). Done 2026-10-31 for the first two: `busybox_files`
+   (mkdir, ls, find, grep -r, wc, cp -r, cmp, md5sum, tar c/t/x, rm -r)
+   and `busybox_script` (functions, loops, case, here-documents, command
+   substitution, arithmetic, subshells) from script files;
+   GetFinalPathNameByHandle (FileNameInformation); msvcrt_test (C,
+   mingw, msvcrt's documented behaviour, also in gala-um). Found: the
+   process parameters' CurrentDirectory buffer only fit the first
+   directory (Windows reserves MAX_PATH), so `cd` failed. Next H4: a
+   toolchain on gala.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

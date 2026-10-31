@@ -76,6 +76,20 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     Write-Host ("{0,-18} {1:x8}  {2}" -f $name, $code, $line)
 }
 
+# busybox scripts (the busybox_files and busybox_script scenarios): their
+# full output goes to <name>-windows.txt next to the report, to compare
+# with the scenario's expected lines.
+foreach ($script in "files", "script") {
+    $path = Join-Path $here "..\busybox\$script.sh"
+    if (-not (Test-Path $path) -or -not (Test-Path (Join-Path $here "busybox.exe"))) { continue }
+    $text = & (Join-Path $here "busybox.exe") sh $path 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    $text | Set-Content -Path (Join-Path (Split-Path -Parent $Out) "busybox_$script-windows.txt") -Encoding UTF8
+    $last = @($text -split "`r?`n" | Where-Object { $_ -ne "" }) | Select-Object -Last 1
+    $results += [ordered]@{ program = "busybox_$script"; exit = $code; line = $last }
+    Write-Host ("{0,-18} {1:x8}  {2}" -f "busybox_$script", $code, $last)
+}
+
 $os = Get-CimInstance Win32_OperatingSystem
 $report = [ordered]@{ platform = "windows " + $os.Version; results = $results }
 $report | ConvertTo-Json -Depth 4 | Set-Content -Path $Out -Encoding UTF8

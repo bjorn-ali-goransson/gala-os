@@ -149,3 +149,92 @@ pub extern "system" fn SleepEx(ms: u32, alertable: Bool) -> u32 {
     let status = unsafe { NtDelayExecution(u8::from(alertable != 0), &t) };
     if status == 0xc0 { 0xc0 } else { 0 } // STATUS_USER_APC
 }
+
+/// GetFinalPathNameByHandleW(hFile, lpszFilePath, cchFilePath, dwFlags):
+/// the file's path from FileNameInformation (from the volume root) after
+/// the volume: VOLUME_NAME_DOS (0) `\\?\C:`, VOLUME_NAME_NT (2) the
+/// volume device, VOLUME_NAME_NONE (4) nothing. Returns the length, or
+/// the size needed (with the NUL) if the buffer is too small.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFinalPathNameByHandleW(
+    h: Handle,
+    out: *mut u16,
+    size: u32,
+    flags: u32,
+) -> u32 {
+    // FILE_NAME_INFORMATION: FileNameLength, then the name.
+    let mut info = [0u16; 2 + 1024];
+    let mut iosb = [0usize; 2];
+    // SAFETY: a buffer of the given size.
+    let status = unsafe {
+        NtQueryInformationFile(h, &mut iosb, info.as_mut_ptr().cast(), (info.len() * 2) as u32, 9)
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, 0);
+    }
+    let name_len = ((u32::from(info[0]) | (u32::from(info[1]) << 16)) / 2) as usize;
+    let name = &info[2..2 + name_len.min(1024)];
+    let volume: &[u8] = match flags & 7 {
+        0 => b"\\\\?\\C:",
+        2 => b"\\Device\\HarddiskVolume1",
+        4 => b"",
+        _ => return fail_with(ERROR_INVALID_PARAMETER, 0),
+    };
+    let total = volume.len() + name.len();
+    if out.is_null() || (size as usize) <= total {
+        return total as u32 + 1;
+    }
+    // SAFETY: the caller's buffer of `size` > total characters.
+    unsafe {
+        for (i, &b) in volume.iter().enumerate() {
+            *out.add(i) = u16::from(b);
+        }
+        core::ptr::copy_nonoverlapping(name.as_ptr(), out.add(volume.len()), name.len());
+        *out.add(total) = 0;
+    }
+    total as u32
+}
+
+/// GetFinalPathNameByHandleA: the W function, converted to UTF-8.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFinalPathNameByHandleA(
+    h: Handle,
+    out: *mut u8,
+    size: u32,
+    flags: u32,
+) -> u32 {
+    let mut w = [0u16; 1100];
+    let n = GetFinalPathNameByHandleW(h, w.as_mut_ptr(), w.len() as u32, flags) as usize;
+    if n == 0 || n >= w.len() {
+        return 0;
+    }
+    let needed = super::text::WideCharToMultiByte(
+        65001,
+        0,
+        w.as_ptr(),
+        n as i32,
+        core::ptr::null_mut(),
+        0,
+        core::ptr::null(),
+        core::ptr::null_mut(),
+    );
+    if needed <= 0 {
+        return 0;
+    }
+    if out.is_null() || size as usize <= needed as usize {
+        return needed as u32 + 1;
+    }
+    super::text::WideCharToMultiByte(
+        65001,
+        0,
+        w.as_ptr(),
+        n as i32,
+        out,
+        needed,
+        core::ptr::null(),
+        core::ptr::null_mut(),
+    );
+    // SAFETY: needed < size bytes were written.
+    unsafe { *out.add(needed as usize) = 0 };
+    needed as u32
+}

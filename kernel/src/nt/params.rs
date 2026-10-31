@@ -28,19 +28,32 @@ fn put(b: &mut [u8], off: u64, v: &[u8]) {
     b[off..off + v.len()].copy_from_slice(v);
 }
 
-/// Appends `s` as a null-terminated UTF-16 string at `*cursor` and stores
-/// its UNICODE_STRING at `field`.
-fn put_string(b: &mut [u8], base: u64, field: u64, cursor: &mut u64, s: &str) -> Option<()> {
+/// Characters CurrentDirectory's buffer holds (MAX_PATH, as Windows
+/// reserves it): SetCurrentDirectory writes the new path in place.
+const CURRENT_DIRECTORY_CHARS: u64 = 260;
+
+/// Appends `s` as a null-terminated UTF-16 string at `*cursor` (in a
+/// buffer of at least `capacity` characters with the NUL) and stores its
+/// UNICODE_STRING at `field`.
+fn put_string(
+    b: &mut [u8],
+    base: u64,
+    field: u64,
+    cursor: &mut u64,
+    s: &str,
+    capacity: u64,
+) -> Option<()> {
     let units = s.len() as u64;
-    let end = *cursor + 2 * (units + 1);
-    if end > params::ENVIRONMENT_OFFSET || units * 2 + 2 > u64::from(u16::MAX) {
+    let room = (units + 1).max(capacity);
+    let end = *cursor + 2 * room;
+    if end > params::ENVIRONMENT_OFFSET || room * 2 > u64::from(u16::MAX) {
         return None;
     }
     for (i, c) in s.bytes().enumerate() {
         put(b, *cursor + 2 * i as u64, &u16::from(c).to_le_bytes());
     }
     put(b, field, &((units * 2) as u16).to_le_bytes()); // Length
-    put(b, field + 2, &((units * 2 + 2) as u16).to_le_bytes()); // MaximumLength
+    put(b, field + 2, &((room * 2) as u16).to_le_bytes()); // MaximumLength
     put(b, field + 8, &(base + *cursor).to_le_bytes());
     *cursor = end.next_multiple_of(8);
     Some(())
@@ -67,14 +80,14 @@ pub fn build(p: &ProcessParameters<'_>, base: u64) -> Result<Vec<u8>, ParamsErro
     b.resize(total, 0);
     let mut cursor = params::STRUCT_SIZE;
     let strings = [
-        (params::CURRENT_DIRECTORY, p.current_directory),
-        (params::DLL_PATH, p.dll_path),
-        (params::IMAGE_PATH_NAME, p.image_path),
-        (params::COMMAND_LINE, p.command_line),
-        (params::WINDOW_TITLE, p.image_path),
+        (params::CURRENT_DIRECTORY, p.current_directory, CURRENT_DIRECTORY_CHARS),
+        (params::DLL_PATH, p.dll_path, 0),
+        (params::IMAGE_PATH_NAME, p.image_path, 0),
+        (params::COMMAND_LINE, p.command_line, 0),
+        (params::WINDOW_TITLE, p.image_path, 0),
     ];
-    for (field, s) in strings {
-        put_string(&mut b, base, field, &mut cursor, s).ok_or(ParamsError::TooLarge)?;
+    for (field, s, capacity) in strings {
+        put_string(&mut b, base, field, &mut cursor, s, capacity).ok_or(ParamsError::TooLarge)?;
     }
     if !p.runtime_data.is_empty() {
         let n = p.runtime_data.len() as u64;
@@ -130,7 +143,7 @@ mod tests {
         let len = u64::from(u16_at(b, field));
         let ptr = u64_at(b, field + 8) - base;
         assert_eq!(u16_at(b, ptr + len), 0, "null-terminated");
-        assert_eq!(u64::from(u16_at(b, field + 2)), len + 2);
+        assert!(u64::from(u16_at(b, field + 2)) >= len + 2);
         (0..len / 2).map(|i| u16_at(b, ptr + 2 * i) as u8 as char).collect()
     }
 
@@ -151,6 +164,8 @@ mod tests {
         assert_eq!(string(&b, base, params::IMAGE_PATH_NAME), "C:\\gala\\x.exe");
         assert_eq!(string(&b, base, params::COMMAND_LINE), "C:\\gala\\x.exe arg");
         assert_eq!(string(&b, base, params::CURRENT_DIRECTORY), "C:\\gala\\");
+        // MAX_PATH characters, for SetCurrentDirectory to write in place.
+        assert_eq!(u16_at(&b, params::CURRENT_DIRECTORY + 2), 520);
         // RuntimeData: the bytes, with their length.
         assert_eq!(u16_at(&b, params::RUNTIME_DATA), 13);
         let at = (u64_at(&b, params::RUNTIME_DATA + 8) - base) as usize;

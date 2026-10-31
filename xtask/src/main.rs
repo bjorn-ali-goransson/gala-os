@@ -143,6 +143,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("nginx", "crypt32.dll", "Windows/System32"),
     ("nginx", "bcryptprimitives.dll", "Windows/System32"),
     ("nginx", "user/bin/nginx.exe", "nginx"),
+    ("msvcrt_test", "ntdll.dll", "Windows/System32"),
+    ("msvcrt_test", "kernel32.dll", "Windows/System32"),
+    ("msvcrt_test", "msvcrt.dll", "Windows/System32"),
+    ("msvcrt_test", "user/bin/msvcrt_test.exe", "gala"),
     ("busybox", "ntdll.dll", "Windows/System32"),
     ("busybox", "kernel32.dll", "Windows/System32"),
     ("busybox", "ws2_32.dll", "Windows/System32"),
@@ -152,6 +156,26 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("busybox", "user32.dll", "Windows/System32"),
     ("busybox", "bcryptprimitives.dll", "Windows/System32"),
     ("busybox", "user/bin/busybox.exe", "gala"),
+    ("busybox_files", "ntdll.dll", "Windows/System32"),
+    ("busybox_files", "kernel32.dll", "Windows/System32"),
+    ("busybox_files", "ws2_32.dll", "Windows/System32"),
+    ("busybox_files", "mswsock.dll", "Windows/System32"),
+    ("busybox_files", "msvcrt.dll", "Windows/System32"),
+    ("busybox_files", "advapi32.dll", "Windows/System32"),
+    ("busybox_files", "user32.dll", "Windows/System32"),
+    ("busybox_files", "bcryptprimitives.dll", "Windows/System32"),
+    ("busybox_files", "user/bin/busybox.exe", "gala"),
+    ("busybox_files", "user/busybox/files.sh", "gala"),
+    ("busybox_script", "ntdll.dll", "Windows/System32"),
+    ("busybox_script", "kernel32.dll", "Windows/System32"),
+    ("busybox_script", "ws2_32.dll", "Windows/System32"),
+    ("busybox_script", "mswsock.dll", "Windows/System32"),
+    ("busybox_script", "msvcrt.dll", "Windows/System32"),
+    ("busybox_script", "advapi32.dll", "Windows/System32"),
+    ("busybox_script", "user32.dll", "Windows/System32"),
+    ("busybox_script", "bcryptprimitives.dll", "Windows/System32"),
+    ("busybox_script", "user/bin/busybox.exe", "gala"),
+    ("busybox_script", "user/busybox/script.sh", "gala"),
     ("nginx", "user/nginx/conf/nginx.conf", "nginx/conf"),
     ("nginx", "user/nginx/html/index.html", "nginx/html"),
     ("nginx", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
@@ -905,6 +929,60 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // H3: gala's msvcrt against documented msvcrt behaviour
+        // (user/msvcrt_test/main.c, built by mingw against msvcrt).
+        name: "msvcrt_test",
+        cmdline: "qemu_exit run=msvcrt_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["msvcrt_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // H3: busybox utilities over files (user/busybox/files.sh): mkdir,
+        // ls, find, grep -r, wc, cp -r, cmp, md5sum, tar c/t/x, rm -r.
+        // Expected as on Windows (the same binary and script).
+        name: "busybox_files",
+        cmdline: "qemu_exit run=busybox.exe args=sh%20C:/gala/files.sh",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "ls: 1.txt b ",
+            "ls -l: 1 file",
+            "find: a a/1.txt a/b a/b/2.txt a/b/3.txt ",
+            "find -type f: 3",
+            "grep -r: a/b/3.txt:four",
+            "wc -l: 2",
+            "cp -r: c/1.txt c/b/2.txt c/b/3.txt ",
+            "cmp: same",
+            "md5sum: 5bbf5a52328e7439ae6e719dfe712200  a/1.txt",
+            "tar tf: a/ a/1.txt a/b/ a/b/2.txt a/b/3.txt ",
+            "tar xf: three four ",
+            "rm -r: []",
+            "files: ok",
+            "busybox.exe (pid 4) exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // H3: a shell script from a file (user/busybox/script.sh):
+        // functions, loops, case, here-documents, command substitution,
+        // arithmetic, subshells, exit status 4. Expected as on Windows.
+        name: "busybox_script",
+        cmdline: "qemu_exit run=busybox.exe args=sh%20C:/gala/script.sh",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hello, gala",
+            "status: 3",
+            "for: 15",
+            "while: 4",
+            "case: text number other",
+            "heredoc: 2 lines, line 2",
+            "subst: c,b,a,",
+            "args: 3 y",
+            "if: elif",
+            "subshell: 5",
+            "script: ok",
+            "busybox.exe (pid 4) exited with status 0x00000004",
+        ],
+    },
+    Scenario {
         // N2b: Nginx's normal mode: the master starts a worker process
         // (CreateProcess) that serves the page.
         name: "nginx_master",
@@ -1474,6 +1552,10 @@ fn run_um(um: &Path, s: &Scenario) -> Result<String> {
     cmd.arg(UM_TIMEOUT_SECS.to_string()).arg(um).arg("--cpus=2");
     // Its boot modules, from user/bin (checked in) as `--module=`.
     for (file, dir) in extra_modules(name) {
+        // The program itself is added by um.
+        if file.ends_with(&format!("/{program}.exe")) {
+            continue;
+        }
         let (host, file_name) = match file.rsplit_once('/') {
             Some((_, n)) => (root().join(file), n),
             None => {

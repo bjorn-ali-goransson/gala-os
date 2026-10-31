@@ -4,7 +4,8 @@
 //! FILE_FLAG_BACKUP_SEMANTICS), WriteFile/ReadFile/SetFilePointerEx,
 //! GetFileInformationByHandle, GetFileSizeEx, GetFileAttributes(Ex)W,
 //! FindFirstFileW/FindNextFileW, GetFileInformationByHandleEx's directory
-//! classes, GetVolumeInformationByHandleW, GetFullPathNameW, DeleteFileW,
+//! classes, GetVolumeInformationByHandleW, GetFinalPathNameByHandleW,
+//! GetFullPathNameW, DeleteFileW,
 //! RemoveDirectoryW, all inside the temporary directory. Prints
 //! `kernel32_file_test: ok` or exits with the number of the failing check.
 
@@ -55,6 +56,9 @@ unsafe extern "system" {
         fs_name: *mut u16,
         fs_name_len: u32,
     ) -> Bool;
+    fn GetFinalPathNameByHandleW(h: Handle, buf: *mut u16, len: u32, flags: u32) -> u32;
+    fn GetCurrentDirectoryW(len: u32, buf: *mut u16) -> u32;
+    fn SetCurrentDirectoryW(path: *const u16) -> Bool;
     fn GetFullPathNameW(path: *const u16, len: u32, buf: *mut u16, file_part: *mut *mut u16)
     -> u32;
     fn DeleteFileW(path: *const u16) -> Bool;
@@ -193,6 +197,25 @@ fn run() -> Result<(), u32> {
             core::ptr::null_mut(),
         );
         c.ok(h != INVALID_HANDLE_VALUE, 0)?;
+
+        // GetFinalPathNameByHandleW: "\\?\X:\...\gala_k32\a.txt" (the
+        // temporary directory itself may be given in short names, which
+        // the final path does not use, so only its ends are checked);
+        // VOLUME_NAME_NONE (4) without the drive; a short buffer gets the
+        // size needed (with the NUL).
+        let mut fin = [0u16; 300];
+        let n = GetFinalPathNameByHandleW(h, fin.as_mut_ptr(), 300, 0) as usize;
+        let tail: [u16; 15] = (*b"\\gala_k32\\a.txt").map(u16::from);
+        c.ok(n > 20 && n < 300, n as u64)?;
+        c.ok(fin[..4] == (*b"\\\\?\\").map(u16::from) && fin[5] == u16::from(b':'), fin[4].into())?;
+        c.ok(fin[n - 15..n] == tail && fin[n] == 0, n as u64)?;
+        c.eq(GetFinalPathNameByHandleW(h, fin.as_mut_ptr(), 4, 0).into(), (n + 1) as u64)?;
+        let none = GetFinalPathNameByHandleW(h, fin.as_mut_ptr(), 300, 4) as usize;
+        c.ok(
+            none == n - 6 && fin[0] == u16::from(b'\\') && fin[none - 15..none] == tail,
+            none as u64,
+        )?;
+
         SetLastError(0);
         let h2 = CreateFileW(
             file.ptr(),
@@ -345,6 +368,18 @@ fn run() -> Result<(), u32> {
         let expect_len = expect.buf.iter().position(|&ch| ch == 0).unwrap_or(0);
         c.ok(n == expect_len && full[..n] == expect.buf[..n], n as u64)?;
         c.ok(part == full.as_mut_ptr().add(n - 5), 0)?;
+
+        // SetCurrentDirectoryW to a longer path than the one the process
+        // started in, and back (a directory in use cannot be removed).
+        let mut before = [0u16; 300];
+        let nb = GetCurrentDirectoryW(300, before.as_mut_ptr()) as usize;
+        c.ok(nb > 0 && nb < 300, nb as u64)?;
+        c.ok(SetCurrentDirectoryW(dir.ptr()) != 0, GetLastError().into())?;
+        let mut now = [0u16; 300];
+        let nn = GetCurrentDirectoryW(300, now.as_mut_ptr()) as usize;
+        let dir_len = dir.buf.iter().position(|&ch| ch == 0).unwrap_or(0);
+        c.ok(nn == dir_len && now[..nn] == dir.buf[..nn], nn as u64)?;
+        c.ok(SetCurrentDirectoryW(before.as_ptr()) != 0, GetLastError().into())?;
 
         // Deleting.
         c.ok(DeleteFileW(file.ptr()) != 0, 0)?;

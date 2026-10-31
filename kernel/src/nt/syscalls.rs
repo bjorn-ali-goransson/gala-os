@@ -3090,6 +3090,7 @@ fn file_read(
 const FILE_BASIC_INFORMATION: u64 = 4;
 const FILE_STANDARD_INFORMATION: u64 = 5;
 const FILE_INTERNAL_INFORMATION: u64 = 6;
+const FILE_NAME_INFORMATION: u64 = 9;
 const FILE_ATTRIBUTE_TAG_INFORMATION: u64 = 35;
 const FILE_RENAME_INFORMATION: u64 = 10;
 const FILE_DISPOSITION_INFORMATION: u64 = 13;
@@ -3108,6 +3109,25 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
     // The class is a ULONG: only the low 32 bits are defined.
     let class = class as u32 as u64;
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if class == FILE_NAME_INFORMATION {
+        // FILE_NAME_INFORMATION { FileNameLength, FileName[] }: the path
+        // from the volume root; what fits, with STATUS_BUFFER_OVERFLOW.
+        if length < 4 {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        let name = tri!(file::volume_path(file.node));
+        let bytes = name.len() * 2;
+        tri!(call.write_u32(buffer, bytes as u32));
+        let fit = bytes.min(length - 4) / 2;
+        for (i, c) in name[..fit].iter().enumerate() {
+            if call.process.write(buffer + 4 + 2 * i as u64, &c.to_le_bytes()).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+        }
+        let status = if fit * 2 < bytes { NtStatus::BUFFER_OVERFLOW } else { NtStatus::SUCCESS };
+        tri!(call.write_iosb(iosb, status, 4 + 2 * fit as u64));
+        return status;
+    }
     let mut out = [0u8; 40];
     let size = match class {
         FILE_BASIC_INFORMATION => {

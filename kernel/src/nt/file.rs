@@ -126,6 +126,12 @@ pub fn nt_path(node: NodeId) -> Result<Vec<u16>, NtStatus> {
     Ok(out)
 }
 
+/// The path of `node` from the volume root (`\\dir\\name`), as
+/// FileNameInformation reports it.
+pub fn volume_path(node: NodeId) -> Result<Vec<u16>, NtStatus> {
+    with_fs(|fs| fs.path_of(node)).map_err(fs_status)
+}
+
 /// The node at `path` (`\\`-separated, from the volume root).
 pub fn lookup(path: &str) -> Result<NodeId, NtStatus> {
     let wide_path = wide(path)?;
