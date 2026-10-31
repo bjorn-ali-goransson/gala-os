@@ -781,6 +781,17 @@ const QEMU_EXIT_FAILURE: i32 = 35;
 const LEAK_MARKER: &str = "address space still referenced";
 const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Scenarios that run whole language runtimes (a JVM, CoreCLR) under TCG:
+/// tens of seconds locally, over twice that on a slow CI runner. They get
+/// this much instead of BOOT_TEST_TIMEOUT.
+const SLOW_SCENARIOS: &[&str] = &["java_version", "java_hello", "dotnet_hello", "pwsh_hello"];
+const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How long scenario `name` may run.
+fn scenario_timeout(name: &str) -> Duration {
+    if SLOW_SCENARIOS.contains(&name) { SLOW_TIMEOUT } else { BOOT_TEST_TIMEOUT }
+}
+
 type Result<T = ()> = std::result::Result<T, String>;
 
 const USAGE: &str = "\
@@ -3039,7 +3050,9 @@ fn judge_log(scenario: &Scenario, status: Option<i32>, timed_out: bool, serial: 
         };
     }
     match status {
-        _ if timed_out => Err(format!("timed out after {}s", BOOT_TEST_TIMEOUT.as_secs())),
+        _ if timed_out => {
+            Err(format!("timed out after {}s", scenario_timeout(scenario.name).as_secs()))
+        }
         s if s != Some(scenario.exit_status) => {
             Err(format!("QEMU exited with {s:?}, expected status {}", scenario.exit_status))
         }
@@ -3165,10 +3178,12 @@ fn symbolize(release: bool, serial: &str) -> String {
 /// Boots one VM and judges each of its scenarios.
 fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)>) {
     let (scenarios, timeout): (Vec<&Scenario>, Duration) = match vm {
-        Vm::Single(s) => (vec![*s], BOOT_TEST_TIMEOUT),
-        Vm::Batch(group) => {
-            (group.clone(), BOOT_TEST_TIMEOUT + Duration::from_secs(20) * group.len() as u32)
-        }
+        Vm::Single(s) => (vec![*s], scenario_timeout(s.name)),
+        Vm::Batch(group) => (
+            group.clone(),
+            group.iter().map(|s| scenario_timeout(s.name)).max().unwrap_or(BOOT_TEST_TIMEOUT)
+                + Duration::from_secs(20) * group.len() as u32,
+        ),
     };
     let boot = scenario_boot(scenarios[0].name);
     let net = match vm {
@@ -3244,7 +3259,7 @@ fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
     let (status, serial, _) = run_vm(
         iso,
         scenario_boot(scenario.name),
-        BOOT_TEST_TIMEOUT,
+        scenario_timeout(scenario.name),
         net_marker(scenario.name),
         scenario.exit_status == XTASK_STOPS,
     )?;

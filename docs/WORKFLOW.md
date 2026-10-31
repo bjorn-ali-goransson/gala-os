@@ -250,7 +250,13 @@ that ship the same large set share it through `MODULE_SETS` (and so a
 VM). Managed (.NET) test programs are C# in `user/<name>/` built by its
 `build.sh` with Mono's `mcs` (apt package `mono-mcs`) into `user/bin`
 (reproducible: the script pins the MVID and timestamp); CI does not
-rebuild them, as for the other third-party-tool builds. In a shared VM,
+rebuild them, as for the other third-party-tool builds. Whole-runtime scenarios
+(`SLOW_SCENARIOS`: the JVM ones, dotnet_hello, pwsh_hello) get 300 s
+instead of 120 s: a slow CI runner takes over twice as long as a local
+run (java_hello: ~35 s locally; it timed out at 120 s once in CI, with
+its threads still progressing - much of a JVM's time goes to gala's
+lightweight-lock waits, which sleep 1 ms at a time until a kernel address
+wait exists). In a shared VM,
 scenarios running the same program (two `dotnet.exe` runs) are judged on
 that program's n-th `run: begin`..`run: end` section, in group order.
 To see why a .NET program fails: the ledger first, then `XTASK_EVENTS=
