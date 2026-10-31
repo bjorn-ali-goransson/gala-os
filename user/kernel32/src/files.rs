@@ -19,19 +19,133 @@ pub extern "system" fn GetFileSize(h: Handle, high: *mut u32) -> u32 {
     size as u32
 }
 
-/// LockFileEx: granted at once. gala has no byte-range locks yet (they
-/// only matter between processes sharing a file); recorded.
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtLockFile(
+        h: Handle,
+        event: Handle,
+        apc: usize,
+        apc_context: usize,
+        iosb: *mut usize,
+        offset: *const u64,
+        length: *const u64,
+        key: u32,
+        fail_immediately: u8,
+        exclusive: u8,
+    ) -> u32;
+    fn NtUnlockFile(
+        h: Handle,
+        iosb: *mut usize,
+        offset: *const u64,
+        length: *const u64,
+        key: u32,
+    ) -> u32;
+}
+
+const LOCKFILE_FAIL_IMMEDIATELY: u32 = 1;
+const LOCKFILE_EXCLUSIVE_LOCK: u32 = 2;
+
+/// The byte offset in an OVERLAPPED (Offset at 16, OffsetHigh at 20).
+fn overlapped_offset(overlapped: *const c_void) -> u64 {
+    // SAFETY: the caller's OVERLAPPED.
+    unsafe {
+        let p = overlapped.cast::<u32>();
+        u64::from(*p.add(4)) | u64::from(*p.add(5)) << 32
+    }
+}
+
+/// LockFileEx: a byte-range lock at the OVERLAPPED's offset, shared or
+/// exclusive, waiting unless LOCKFILE_FAIL_IMMEDIATELY (then
+/// ERROR_LOCK_VIOLATION on a conflict). The OVERLAPPED receives the status.
 #[unsafe(no_mangle)]
 pub extern "system" fn LockFileEx(
-    _h: Handle,
+    h: Handle,
     flags: u32,
     _reserved: u32,
-    _low: u32,
-    _high: u32,
-    _overlapped: *mut c_void,
+    low: u32,
+    high: u32,
+    overlapped: *mut c_void,
 ) -> Bool {
-    unsupported(b"kernel32.dll!LockFileEx", flags.into());
-    TRUE
+    if overlapped.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let (offset, length) = (overlapped_offset(overlapped), u64::from(low) | u64::from(high) << 32);
+    // SAFETY: hEvent at 24 in the caller's OVERLAPPED, which is also the
+    // IO_STATUS_BLOCK.
+    let status = unsafe {
+        let event = *overlapped.cast::<u8>().add(24).cast::<Handle>();
+        NtLockFile(
+            h,
+            event,
+            0,
+            0,
+            overlapped.cast(),
+            &offset,
+            &length,
+            0,
+            u8::from(flags & LOCKFILE_FAIL_IMMEDIATELY != 0),
+            u8::from(flags & LOCKFILE_EXCLUSIVE_LOCK != 0),
+        )
+    };
+    if status == STATUS_SUCCESS { TRUE } else { fail(status, FALSE) }
+}
+
+/// LockFile: an exclusive lock, failing at once on a conflict.
+#[unsafe(no_mangle)]
+pub extern "system" fn LockFile(
+    h: Handle,
+    offset_low: u32,
+    offset_high: u32,
+    low: u32,
+    high: u32,
+) -> Bool {
+    let offset = u64::from(offset_low) | u64::from(offset_high) << 32;
+    let length = u64::from(low) | u64::from(high) << 32;
+    let mut iosb = [0usize; 2];
+    // SAFETY: valid pointers.
+    let status = unsafe {
+        NtLockFile(h, core::ptr::null_mut(), 0, 0, iosb.as_mut_ptr(), &offset, &length, 0, 1, 1)
+    };
+    if status == STATUS_SUCCESS { TRUE } else { fail(status, FALSE) }
+}
+
+fn unlock(h: Handle, offset: u64, length: u64) -> Bool {
+    let mut iosb = [0usize; 2];
+    // SAFETY: valid pointers.
+    let status = unsafe { NtUnlockFile(h, iosb.as_mut_ptr(), &offset, &length, 0) };
+    if status == STATUS_SUCCESS { TRUE } else { fail(status, FALSE) }
+}
+
+/// UnlockFile: releases exactly a range LockFile(Ex) took on this handle
+/// (ERROR_NOT_LOCKED otherwise).
+#[unsafe(no_mangle)]
+pub extern "system" fn UnlockFile(
+    h: Handle,
+    offset_low: u32,
+    offset_high: u32,
+    low: u32,
+    high: u32,
+) -> Bool {
+    unlock(
+        h,
+        u64::from(offset_low) | u64::from(offset_high) << 32,
+        u64::from(low) | u64::from(high) << 32,
+    )
+}
+
+/// UnlockFileEx: UnlockFile with the offset in an OVERLAPPED.
+#[unsafe(no_mangle)]
+pub extern "system" fn UnlockFileEx(
+    h: Handle,
+    _reserved: u32,
+    low: u32,
+    high: u32,
+    overlapped: *mut c_void,
+) -> Bool {
+    if overlapped.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    unlock(h, overlapped_offset(overlapped), u64::from(low) | u64::from(high) << 32)
 }
 
 /// LocalFree: gala's kernel32 has no LocalAlloc; memory programs free
@@ -121,18 +235,6 @@ pub extern "system" fn SetFilePointer(h: Handle, low: i32, high: *mut i32, metho
     }
     SetLastError(0);
     new as u32
-}
-
-/// UnlockFile: nothing is locked (see LockFileEx).
-#[unsafe(no_mangle)]
-pub extern "system" fn UnlockFile(
-    _h: Handle,
-    _low: u32,
-    _high: u32,
-    _nlow: u32,
-    _nhigh: u32,
-) -> Bool {
-    TRUE
 }
 
 /// SetSystemTime: programs may not set the clock here.
@@ -372,19 +474,6 @@ pub extern "system" fn RtlAddFunctionTable(_table: *const c_void, _count: u32, _
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlDeleteFunctionTable(_table: *const c_void) -> u8 {
     1
-}
-
-/// UnlockFileEx: byte-range locks are not kept (LockFileEx grants every
-/// request and records it), so there is nothing to release.
-#[unsafe(no_mangle)]
-pub extern "system" fn UnlockFileEx(
-    _h: Handle,
-    _reserved: u32,
-    _low: u32,
-    _high: u32,
-    _overlapped: *mut c_void,
-) -> Bool {
-    TRUE
 }
 
 /// WaitForSingleObjectEx: WaitForSingleObject, alertable on request

@@ -204,8 +204,16 @@ pub fn mode_of(options: u32) -> u32 {
     options & MODE_OPTIONS
 }
 
+impl FileObject {
+    /// The owner of its byte-range locks (`locks`): its address.
+    pub fn lock_owner(&self) -> usize {
+        self as *const Self as usize
+    }
+}
+
 impl Drop for FileObject {
     fn drop(&mut self) {
+        super::locks::release_owner(self.lock_owner());
         let (node, access, share) = (self.node, self.access, self.share);
         if let Some(fs) = FS.lock().as_mut() {
             if self.delete_on_close {

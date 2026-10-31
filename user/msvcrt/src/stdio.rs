@@ -592,7 +592,31 @@ pub const MAX_FDS: usize = 64;
 /// Handles of descriptors 3 and up (0-2 are the console's).
 static mut FDS: [usize; MAX_FDS] = [0; MAX_FDS];
 
+/// Which of descriptors 0-2 were closed (_close): free again for the
+/// next descriptor, as POSIX and msvcrt hand out the lowest free one.
+static STD_CLOSED: [core::sync::atomic::AtomicBool; 3] = [
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+];
+
+fn set_std_closed(fd: i32, closed: bool) {
+    STD_CLOSED[fd as usize].store(closed, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn std_closed(fd: i32) -> bool {
+    STD_CLOSED[fd as usize].load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// A descriptor for handle `h`: the lowest free one (a closed 0-2 becomes
+/// the process's standard handle again).
 fn new_fd(h: *mut c_void) -> i32 {
+    if let Some(fd) = (0..3).find(|&fd| std_closed(fd)) {
+        set_std_closed(fd, false);
+        // SAFETY: the process's standard handle.
+        unsafe { SetStdHandle((-10 - fd) as u32, h) };
+        return fd;
+    }
     // SAFETY: the table (descriptors are rare; races would need two
     // threads opening files at once).
     unsafe {
@@ -682,6 +706,7 @@ fn close_fd(fd: i32) {
 fn handle_of_fd(fd: i32) -> Option<*mut c_void> {
     match fd {
         // SAFETY: plain calls.
+        0..=2 if std_closed(fd) => None,
         0..=2 => Some(unsafe { GetStdHandle((-10 - fd) as u32) }),
         3.. if (fd as usize) < MAX_FDS => {
             // SAFETY: the table.
@@ -757,6 +782,7 @@ pub extern "C" fn _close(fd: i32) -> i32 {
             CloseHandle(h);
             SetStdHandle((-10 - fd) as u32, INVALID_HANDLE);
         }
+        set_std_closed(fd, true);
         return 0;
     }
     close_fd(fd);
@@ -811,6 +837,7 @@ pub extern "C" fn _dup2(fd: i32, target: i32) -> i32 {
     unsafe {
         if target <= 2 {
             SetStdHandle((-10 - target) as u32, new);
+            set_std_closed(target, false);
         } else {
             (*(&raw mut FDS))[target as usize] = new as usize;
         }

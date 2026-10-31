@@ -6,6 +6,7 @@ pub mod file;
 pub mod kuser;
 pub mod layout;
 pub mod ledger;
+pub mod locks;
 pub mod namespace;
 pub mod ntdll;
 pub mod object;

@@ -358,6 +358,11 @@ TinyCC's Windows headers and `.def` files are older than SQLite's needs:
 `tcc -impdef` makes kernel32.def from the system's kernel32.dll, and
 `tcc_win.h` (force-included) declares GetTickCount64.
 
+The scenario's last step runs two writers at once (busybox `&` and
+`wait`). To see whether they really contended, run it with
+`XTASK_EVENTS=syscall,process` and count NtLockFile results per process
+(STATUS_LOCK_NOT_GRANTED 0xc0000055 means a retry).
+
 A program's output and the kernel's log share the serial console, so a
 line a program writes in pieces can be split by a log line ("process ...
 exited"): expect lines that are written in one piece (a shell `echo` of

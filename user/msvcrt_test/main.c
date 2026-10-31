@@ -6,7 +6,8 @@
  * startup code and tcc.exe use them); strtod (tcc parses float
  * constants with it); the math functions, strcoll, _difftime64, and
  * printf's %e/%g with msvcrt's three-digit exponents and 17 significant
- * digits (Lua prints numbers with %.14g); a fopen'd FILE's lock (_FILEX). Built against msvcrt (not mingw's own stdio) by build.sh.
+ * digits (Lua prints numbers with %.14g); a fopen'd FILE's lock (_FILEX);
+ * _open taking the lowest free descriptor (0 after closing stdin). Built against msvcrt (not mingw's own stdio) by build.sh.
  * Prints "msvcrt_test: ok" or exits with the number of the failing check. */
 #include <stdio.h>
 #include <stdarg.h>
@@ -100,6 +101,16 @@ int main(void) {
     CHECK(_close(fds[1]) == 0);
     CHECK(_read(fds[0], buf, sizeof buf) == 0);
     CHECK(_close(fds[0]) == 0);
+
+    /* The lowest free descriptor: after closing fd 0, _open returns 0 (a
+     * shell's background job reopens stdin from the null device so). */
+    int saved_in = _dup(0);
+    CHECK(saved_in > 2);
+    CHECK(_close(0) == 0);
+    CHECK(_open("nul", _O_RDONLY) == 0);
+    CHECK(_read(0, buf, sizeof buf) == 0);
+    CHECK(_dup2(saved_in, 0) == 0);
+    _close(saved_in);
 
     /* Strings and numbers. */
     char list[] = "a,b,,c";

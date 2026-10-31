@@ -53,6 +53,10 @@ pub const NT_CREATE_FILE: u32 = 0x0055;
 pub const NT_QUERY_DIRECTORY_FILE: u32 = 0x0035;
 pub const NT_QUERY_VOLUME_INFORMATION_FILE: u32 = 0x0049;
 pub const NT_FLUSH_BUFFERS_FILE: u32 = 0x004b;
+// Byte-range locks: gala's own numbers, UNVERIFIED for 26100 (kernel32
+// reaches them through ntdll's exports).
+pub const NT_LOCK_FILE: u32 = 0x0123;
+pub const NT_UNLOCK_FILE: u32 = 0x01c5;
 pub const NT_CONTINUE: u32 = 0x0043;
 pub const NT_QUERY_SYSTEM_INFORMATION: u32 = 0x0036;
 pub const NT_SET_INFORMATION_THREAD: u32 = 0x000d;
@@ -144,6 +148,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
         nt_query_volume_information_file,
     ),
     (NT_FLUSH_BUFFERS_FILE, "NtFlushBuffersFile", 2, nt_flush_buffers_file),
+    (NT_LOCK_FILE, "NtLockFile", 10, nt_lock_file),
+    (NT_UNLOCK_FILE, "NtUnlockFile", 5, nt_unlock_file),
     (NT_CONTINUE, "NtContinue", 2, nt_continue),
     (NT_QUERY_SYSTEM_INFORMATION, "NtQuerySystemInformation", 4, nt_query_system_information),
     (NT_SET_INFORMATION_THREAD, "NtSetInformationThread", 4, nt_set_information_thread),
@@ -2923,6 +2929,7 @@ fn file_write(
     if entry.access & file::FILE_WRITE_DATA == 0 {
         offset = size; // append-only handles always write at the end
     }
+    tri!(super::locks::check_io(file.node, file.lock_owner(), offset, u64::from(length), true));
     let mut chunk = [0u8; 512];
     let mut done = 0u64;
     while done < u64::from(length) {
@@ -2940,6 +2947,51 @@ fn file_write(
         *file.position.lock() = offset + done;
     }
     tri!(call.write_iosb(iosb, NtStatus::SUCCESS, done));
+    NtStatus::SUCCESS
+}
+
+/// NtLockFile(FileHandle, Event, ApcRoutine, ApcContext, *IoStatusBlock,
+///            *ByteOffset, *Length, Key, FailImmediately, ExclusiveLock):
+/// a byte-range lock (`locks`). A request that has to wait sleeps in the
+/// call, whatever the handle's mode.
+fn nt_lock_file(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if file.directory {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    if entry.access & (file::FILE_READ_DATA | file::FILE_WRITE_DATA) == 0 {
+        return NtStatus::ACCESS_DENIED;
+    }
+    let iosb = arg!(call, 4);
+    let (start, len) = (tri!(call.read_u64(arg!(call, 5))), tri!(call.read_u64(arg!(call, 6))));
+    let key = arg!(call, 7) as u32;
+    let (fail_now, exclusive) = (arg!(call, 8) as u8 != 0, arg!(call, 9) as u8 != 0);
+    let apc = tri!(io_apc(call, file, iosb));
+    let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
+    let owner = file.lock_owner();
+    let status = match super::locks::lock(file.node, owner, key, start, len, exclusive, !fail_now) {
+        Ok(()) => {
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+            NtStatus::SUCCESS
+        }
+        Err(e) => e,
+    };
+    finish_io(&entry.object, event.as_ref(), apc, status);
+    post_completion(call, file, iosb, status);
+    status
+}
+
+/// NtUnlockFile(FileHandle, *IoStatusBlock, *ByteOffset, *Length, Key):
+/// releases exactly a range this file object locked with that key
+/// (STATUS_RANGE_NOT_LOCKED otherwise).
+fn nt_unlock_file(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let (start, len) = (tri!(call.read_u64(arg!(call, 2))), tri!(call.read_u64(arg!(call, 3))));
+    let key = arg!(call, 4) as u32;
+    tri!(super::locks::unlock(file.node, file.lock_owner(), key, start, len));
+    tri!(call.write_iosb(arg!(call, 1), NtStatus::SUCCESS, 0));
     NtStatus::SUCCESS
 }
 
@@ -3143,6 +3195,7 @@ fn file_read(
     }
     let size = file::with_fs(|fs| fs.node(file.node).map_or(0, |n| n.size()));
     let offset = tri!(io_offset(call, file, offset_ptr, size));
+    tri!(super::locks::check_io(file.node, file.lock_owner(), offset, u64::from(length), false));
     if offset >= size && length > 0 {
         tri!(call.write_iosb(iosb, NtStatus::END_OF_FILE, 0));
         return NtStatus::END_OF_FILE;

@@ -138,6 +138,11 @@ syscall_stubs! {
         protect: u32
     );
     NtFreeVirtualMemory = 0x1e, fn(process: isize, base: *mut usize, size: *mut usize, kind: u32);
+    NtLockFile = 0x123, fn(
+        h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
+        offset: *const i64, length: *const i64, key: u32, fail_immediately: u8, exclusive: u8
+    );
+    NtUnlockFile = 0x1c5, fn(h: usize, iosb: *mut [usize; 2], offset: *const i64, length: *const i64, key: u32);
     NtOpenProcess = 0x26, fn(
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, client_id: *const [usize; 2]
     );
@@ -867,6 +872,9 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0008, 6),    // INVALID_HANDLE
     (0xc000_000b, 87),   // INVALID_CID -> ERROR_INVALID_PARAMETER
     (0xc000_000d, 87),   // INVALID_PARAMETER
+    (0xc000_0054, 33),   // FILE_LOCK_CONFLICT -> ERROR_LOCK_VIOLATION
+    (0xc000_0055, 33),   // LOCK_NOT_GRANTED -> ERROR_LOCK_VIOLATION
+    (0xc000_007e, 158),  // RANGE_NOT_LOCKED -> ERROR_NOT_LOCKED
     (0xc000_0030, 87),   // INVALID_PARAMETER_MIX -> ERROR_INVALID_PARAMETER
     (0xc000_000f, 2),    // NO_SUCH_FILE -> ERROR_FILE_NOT_FOUND
     (0xc000_0011, 38),   // END_OF_FILE -> ERROR_HANDLE_EOF

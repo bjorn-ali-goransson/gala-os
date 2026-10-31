@@ -215,8 +215,8 @@ to set and to argue for. Current order and why:
    H2 done (Go's os/exec, busybox-w32's sh); H3 (scripts and file
    tools) done; H4 (a C compiler on gala) done; H5 (TinyCC builds
    itself on gala) done; H6 (make on gala) done; H7 (Lua built on gala)
-   done; H8 (build speed) done; H9 (SQLite built on gala) done; next
-   H10 (file locks: two processes sharing a database).
+   done; H8 (build speed) done; H9 (SQLite built on gala) done; H10
+   (file locks) done; next H11 (busybox httpd and wget over loopback).
 S4. **SMP, rest**: suspension and context of threads running on another
    CPU (IPI), per-CPU run queues with stealing, per-CPU timer bookkeeping, boot scenarios on 1, 2 and 4 CPUs.
 U1. **gala-um design and seam**: docs/GALA_UM.md (Linux process hosting
@@ -425,11 +425,25 @@ H9. **SQLite built on gala**: done 2026-10-31. The `sqlite` scenario
    CRITICAL_SECTION that follows it in msvcrt.dll (`_FILEX`): mingw's
    `_lock_file` (in tcc.exe's -impdef) spun forever on our fields.
    msvcrt_test and kernel32_misc_test check these. 6.9 s in the kernel.
-H10. **File locks**: next. LockFileEx grants everything (recorded in the
-   ledger). NtLockFile/NtUnlockFile with real byte-range locks (shared and
-   exclusive, LOCKFILE_FAIL_IMMEDIATELY, waiting, release on close), a
-   test program first, then two SQLite processes writing one database at
-   once: one gets SQLITE_BUSY or waits, as on Windows.
+H10. **File locks**: done 2026-10-31. Test first: lock_test (kernel32,
+   also in gala-um): exclusive and shared LockFileEx ranges through two
+   handles, ERROR_LOCK_VIOLATION for conflicting requests and for reads
+   and writes into locked ranges (writes into shared ranges even by
+   their owner), ERROR_NOT_LOCKED, LockFile/UnlockFile, release on close,
+   a blocked LockFileEx on another thread granted on unlock. The kernel
+   keeps byte-range locks (`nt::locks`: per file, owned by the file
+   object and key; NtLockFile/NtUnlockFile, gala's own numbers 0x123 and
+   0x1c5, UNVERIFIED) and checks reads and writes against them;
+   kernel32's lock functions sit on them. The `sqlite` scenario now runs
+   two writers at once (busybox `&`): their lifetimes overlap, they hit
+   STATUS_LOCK_NOT_GRANTED 50 and 68 times, SQLite's busy handler
+   retries, and all 80 rows arrive. It needed msvcrt's lowest-free
+   descriptor rule (ash's background job does close(0) and expects
+   open("/dev/null") to return 0), checked in msvcrt_test.
+H11. **busybox httpd and wget over loopback**: next. busybox-w32's httpd
+   serves a directory on gala and its wget (and a tcc-built Winsock
+   client) fetches files from it over 127.0.0.1, in one boot: sockets
+   from C programs and busybox's networking, output as on Windows.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

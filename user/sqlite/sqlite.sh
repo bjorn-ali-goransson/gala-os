@@ -3,7 +3,8 @@
 # (user/bin/sqlite-amalgamation.zip, unmodified from sqlite.org),
 # compiles it with tcc together with sqlrun.c (a small driver, next to
 # this script), then runs test.sql on a new database file and reopen.sql
-# on the same file from a second process.
+# on the same file from a second process, then two processes writing the
+# database at the same time.
 # Usage: sh sqlite.sh path/to/tcc.tar path/to/sqlite-amalgamation.zip
 set -e
 here=$(dirname "$0")
@@ -37,3 +38,13 @@ echo "version: [$(./sqlrun.exe -version)]"
 echo "first session status=$?"
 ./sqlrun.exe "$w/test.db" "$here/reopen.sql"
 echo "second session status=$?"
+# Two writers at once on the same database (file locks between them).
+./sqlrun.exe "$w/test.db" "$here/writer.sql" > "$w/a.out" &
+a=$!
+./sqlrun.exe "$w/test.db" "$here/writer.sql" > "$w/b.out" &
+b=$!
+wait $a
+echo "writer a status=$?"
+wait $b
+echo "writer b status=$?"
+./sqlrun.exe "$w/test.db" "$here/concurrent.sql"

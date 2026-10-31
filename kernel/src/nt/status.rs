@@ -16,6 +16,9 @@ impl NtStatus {
     pub const OBJECT_PATH_SYNTAX_BAD: NtStatus = NtStatus(0xc000_003b);
     pub const PENDING: NtStatus = NtStatus(0x0000_0103);
     pub const THREAD_IS_TERMINATING: NtStatus = NtStatus(0xc000_004b);
+    pub const FILE_LOCK_CONFLICT: NtStatus = NtStatus(0xc000_0054);
+    pub const LOCK_NOT_GRANTED: NtStatus = NtStatus(0xc000_0055);
+    pub const RANGE_NOT_LOCKED: NtStatus = NtStatus(0xc000_007e);
     pub const NOT_MAPPED_VIEW: NtStatus = NtStatus(0xc000_0019);
     pub const UNABLE_TO_DELETE_SECTION: NtStatus = NtStatus(0xc000_001b);
     pub const INVALID_VIEW_SIZE: NtStatus = NtStatus(0xc000_001f);

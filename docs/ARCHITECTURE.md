@@ -590,6 +590,26 @@ exponents have a sign and at least three digits. inf and nan print as
 The math functions (sin, pow, floor, fmod, ...) come from the `libm`
 crate; the transcendental ones may differ from msvcrt's in the last bit.
 
+**Byte-range locks** (H10): `nt::locks` keeps every lock (file node,
+owning file object and key, range, shared or exclusive) in one list. A
+request conflicts with an overlapping lock if either is exclusive,
+whoever owns it; NtLockFile fails at once (STATUS_LOCK_NOT_GRANTED) or
+sleeps until a lock is released (every release wakes the waiters, who
+check again), whatever the handle's mode - a documented simplification
+(on Windows an overlapped handle's request would pend). NtUnlockFile
+releases exactly a range the same file object took with the same key
+(STATUS_RANGE_NOT_LOCKED otherwise). A file object's locks go when it is
+destroyed (its last handle closed). Reads conflict with other owners'
+exclusive locks, writes also with any shared lock
+(STATUS_FILE_LOCK_CONFLICT; kernel32 reports ERROR_LOCK_VIOLATION).
+Zero-length ranges never conflict. NtLockFile/NtUnlockFile are gala's
+numbers (0x123, 0x1c5), UNVERIFIED for the pinned build.
+
+**msvcrt descriptors**: a new descriptor is the lowest free one; 0-2
+are free after `_close` (then the new handle becomes the standard
+handle), as POSIX shells expect (`close(0); open("/dev/null")` must
+give 0).
+
 **File times** (H6): ramfs nodes keep a creation and a write time (NT
 times); FileBasicInformation reports the write time as the access and
 change times too. Setting FileBasicInformation (FILE_WRITE_ATTRIBUTES)

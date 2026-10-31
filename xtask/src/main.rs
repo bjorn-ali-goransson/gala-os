@@ -96,6 +96,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_file_test", "kernel32.dll", "Windows/System32"),
     ("pipe_test", "ntdll.dll", "Windows/System32"),
     ("pipe_test", "kernel32.dll", "Windows/System32"),
+    ("lock_test", "ntdll.dll", "Windows/System32"),
+    ("lock_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_env_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_env_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "ntdll.dll", "Windows/System32"),
@@ -247,6 +249,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sqlite", "user/sqlite/tcc_win.h", "gala"),
     ("sqlite", "user/sqlite/test.sql", "gala"),
     ("sqlite", "user/sqlite/reopen.sql", "gala"),
+    ("sqlite", "user/sqlite/writer.sql", "gala"),
+    ("sqlite", "user/sqlite/concurrent.sql", "gala"),
     ("nginx", "user/nginx/conf/nginx.conf", "nginx/conf"),
     ("nginx", "user/nginx/html/index.html", "nginx/html"),
     ("nginx", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
@@ -342,6 +346,7 @@ const USER_PROGRAMS: &[&str] = &[
     "process_test",
     "kernel32_file_test",
     "pipe_test",
+    "lock_test",
 ];
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
@@ -1169,7 +1174,8 @@ const SCENARIOS: &[Scenario] = &[
         // H9: the SQLite amalgamation (user/sqlite/build.sh) compiled on
         // gala by tcc with a small driver (user/sqlite/sqlrun.c), which builds and queries
         // a file database (user/sqlite/test.sql), and a second process
-        // reopens it (reopen.sql). Expected as on Windows.
+        // reopens it (reopen.sql); then two processes write it at once
+        // (writer.sql, file locks). Expected as on Windows.
         name: "sqlite",
         cmdline: "qemu_exit run=busybox.exe args=sh%20C:/gala/sqlite.sh%20C:/gala/tcc.tar%20C:/gala/sqlite-amalgamation.zip",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -1190,6 +1196,10 @@ const SCENARIOS: &[Scenario] = &[
             "integrity: ok",
             "pages: 1",
             "second session status=0",
+            "writer a status=0",
+            "writer b status=0",
+            "concurrent: 80 rows, 40 distinct, sum 1640",
+            "integrity after writers: ok",
             "busybox.exe (pid 4) exited with status 0x00000000",
         ],
     },
@@ -1232,6 +1242,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=pipe_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["pipe_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // H10: byte-range file locks (LockFileEx, UnlockFileEx, LockFile).
+        name: "lock_test",
+        cmdline: "qemu_exit run=lock_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["lock_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "ledger_test",
