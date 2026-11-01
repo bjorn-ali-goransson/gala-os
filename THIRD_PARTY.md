@@ -62,6 +62,12 @@ Rules for this file:
 
 The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `screenshot` is its own, uncompressed).
 
+## Artwork
+
+- `kernel/assets/camel.png` and the `camel32.rgba`/`camel64.rgba` made
+  from it (the start button and start menu): the project owner's drawing,
+  supplied for gala on 2026-11-01; not third-party.
+
 ## Rust crate dependencies of host tools (not in the kernel or images)
 
 | Crate | Version | License | Use |
@@ -88,6 +94,7 @@ The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `scre
 |---|---|---|
 | `kernel/src/boot/limine.rs` | Limine boot protocol, `PROTOCOL.md` in github.com/limine-bootloader/limine-protocol (fetched 2026-10-30) | BSD-2-Clause (`limine.h`); request IDs and struct layouts taken from the spec |
 | `kernel/src/arch/x86_64/serial.rs` | Generic 16550 UART register description (public datasheets / OSDev wiki) | n/a |
+| `kernel/src/arch/x86_64/ps2.rs`, `kernel/src/input.rs` | The IBM PC/AT and PS/2 i8042 controller and PS/2 mouse protocol (status bits, commands 0x20/0x60/0xA8/0xD4, mouse 0xF6/0xF4, 3-byte packets), as publicly documented (OSDev wiki) | n/a |
 | `kernel/src/arch/x86_64/qemu.rs` | QEMU `isa-debug-exit` device documentation | n/a |
 | GalaCreateProcess, service 0x7f02 | gala's own service and parameter layout (docs/ARCHITECTURE.md), used by gala's kernel32 until NtCreateUserProcess is verified on the pinned build; CreateProcessW's search order and STARTUPINFO/PROCESS_INFORMATION layouts from Microsoft's documentation | n/a |
 | NtCancelIoFileEx as service 0x7f01 | gala's own number (not Windows'), until the real one is verified on the pinned build | n/a |

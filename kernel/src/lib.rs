@@ -28,6 +28,8 @@ pub mod fs;
 #[cfg(feature = "hosted")]
 #[allow(unsafe_code)]
 pub mod hosted;
+#[cfg(not(feature = "hosted"))]
+pub mod input;
 pub mod mm;
 pub mod net;
 pub mod nt;

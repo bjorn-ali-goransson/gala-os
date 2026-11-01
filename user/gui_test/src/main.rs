@@ -9,7 +9,7 @@
 //!   WM_PAINT; BeginPaint gives a DC and rcPaint covering the client
 //!   area; FillRect paints a red rectangle at (20, 20)-(200, 120) and
 //!   TextOutW blue text at (20, 140); EndPaint.
-//! - Another thread posts WM_CLOSE (PostMessageW) after two seconds;
+//! - Another thread posts WM_CLOSE (PostMessageW) after four seconds;
 //!   DefWindowProc destroys the window: WM_DESTROY, where the program
 //!   calls PostQuitMessage(7); GetMessageW then returns 0 with wParam 7;
 //!   IsWindow is FALSE afterwards.
@@ -292,7 +292,9 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
 extern "system" fn closer(_: *mut c_void) -> u32 {
     // SAFETY: plain calls; the window is the test's.
     unsafe {
-        Sleep(2000);
+        // Long enough for xtask's screen checks (a screendump, a click on the
+        // start button, another screendump).
+        Sleep(4000);
         PostMessageW(WINDOW.load(Ordering::SeqCst) as Hwnd, WM_CLOSE, 0, 0);
     }
     0

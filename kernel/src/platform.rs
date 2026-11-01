@@ -157,6 +157,10 @@ impl Display for Kernel {
         let mut screen = SCREEN.lock();
         if screen.is_none() {
             *screen = crate::console::take_framebuffer();
+            if screen.is_some() {
+                // The desktop is on the screen: its mouse.
+                crate::input::start();
+            }
         }
         screen.as_ref().map(|fb| (fb.width() as u32, fb.height() as u32))
     }

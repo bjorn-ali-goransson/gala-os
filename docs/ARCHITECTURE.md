@@ -2070,11 +2070,27 @@ A first window manager, kept small. The parts:
   the noto-sans-mono-bitmap font (16 px, basic Latin; transparent and
   opaque background modes).
 
-Invariants and limits (TODO): no input yet (W2), no child windows
+- **Shell and mouse** (in the compositor for now): the bottom 40 rows
+  are a taskbar with the start button at its left, showing the camel
+  (`kernel/assets/camel32.rgba`, alpha-blended). A left click on it opens
+  the start menu (320 x 400 above it: the 64 px camel, "gala-os" and the
+  version, and the titles of the visible windows, a snapshot taken when
+  it opens); a click on it again or anywhere outside the menu closes it.
+  The pointer is a 12 x 19 arrow drawn on top of everything; it starts in
+  the middle of the screen. Mouse input: `input.rs` starts a kernel
+  thread when the desktop takes the screen; it polls the i8042
+  (`arch::ps2`, interrupts off) every 5 ms, assembles 3-byte PS/2 packets
+  and calls `desktop::pointer_event(dx, dy, buttons)`. Keyboard bytes are
+  read and dropped.
+
+Invariants and limits (TODO): no input for programs yet (W2: messages to
+windows, the keyboard), no child windows
 (CreateWindowEx with WS_CHILD reports unimplemented), one queue per
 process rather than per thread, no window moves or z-order changes after
-creation, no non-client messages (the frame is drawn by the kernel), no
-cursor.
+creation, no non-client messages (the frame is drawn by the kernel). The
+taskbar and start menu belong in a user-mode shell (an explorer.exe of
+gala's) once programs get input; they are drawn under the desktop's lock
+with interrupts off (a full menu redraw is ~128k pixels).
 
 ## Not done yet
 

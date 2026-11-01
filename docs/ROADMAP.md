@@ -174,7 +174,8 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 - Screen console (framebuffer text mirroring the serial log, Noto Sans Mono
   bitmap font) and `cargo xtask screenshot` (PNG via the QEMU monitor)
 - Windows on the screen (W1): user32/gdi32 windows painted through a
-  kernel compositor, checked by screen pixels in a UEFI boot test
+  kernel compositor, checked by screen pixels in a UEFI boot test; a
+  taskbar with the camel start button, a PS/2 mouse and a start menu
 
 ## Next
 Direction from the project owner (2026-10-30): multiprocessor support, then
@@ -461,8 +462,12 @@ W1. **Windows on the screen**: done (2026-11-01). `gui_test` registers a
    (Gala window syscalls 0x7f30-0x7f33); user32's windows, classes and
    queue in user mode; a new gala gdi32 (stock objects, brushes, pens,
    surface DCs, PatBlt, Rectangle, TextOut).
-W2. **Input**: next. A PS/2 (or virtio-input) mouse and keyboard, a
-   cursor drawn by the compositor, WM_MOUSEMOVE/WM_LBUTTONDOWN/WM_KEYDOWN/
+   Start menu (asked for 2026-11-01: the project's camel instead of a
+   Windows logo): a taskbar with the camel as the start button, a PS/2
+   mouse (polled i8042) and pointer, and a start menu that a click opens
+   and closes; gui_test's screen check clicks it through the QEMU monitor.
+W2. **Input**: next. The keyboard (the mouse and pointer are done),
+   WM_MOUSEMOVE/WM_LBUTTONDOWN/WM_KEYDOWN/
    WM_CHAR to the window under the pointer or with the focus, moving
    windows by the caption, raising on click; tested by injecting input
    through the QEMU monitor (`mouse_move`, `sendkey`).

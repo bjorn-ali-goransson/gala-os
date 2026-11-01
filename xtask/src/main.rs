@@ -3945,9 +3945,18 @@ fn run_vm(
 }
 
 /// What a scenario's screen must show once its serial log has `marker`
-/// (screendump through QEMU's monitor; pixels on the guest's screen).
+/// (screendump through QEMU's monitor; pixels on the guest's screen), in
+/// steps: each sends its monitor commands (input), waits for the guest to
+/// draw, takes a screendump and checks its pixels.
 struct ScreenCheck {
     marker: &'static str,
+    steps: &'static [ScreenStep],
+}
+
+struct ScreenStep {
+    /// QEMU monitor commands sent first (`mouse_move`, `mouse_button`,
+    /// `sendkey`), 100 ms apart.
+    input: &'static [&'static str],
     pixels: &'static [PixelCheck],
 }
 
@@ -3956,24 +3965,44 @@ enum PixelCheck {
     /// The pixel at (x, y) is this 0xRRGGBB colour.
     At(u32, u32, u32),
     /// Some pixel in the rectangle (x, y, w, h) is close to this colour
-    /// (anti-aliased text).
+    /// (anti-aliased text, scaled images).
     AnyIn(u32, u32, u32, u32, u32),
 }
 
 /// gui_test's window: 400 x 300 at (100, 100); the desktop's frame is a
 /// 1-pixel border and a 24-pixel caption, so its client area starts at
-/// (101, 125) (kernel/src/nt/desktop.rs).
+/// (101, 125) (kernel/src/nt/desktop.rs). The screen is 1280 x 800; the
+/// taskbar is its bottom 40 rows with the start button (the camel) at the
+/// left, and the start menu opens above it (320 x 400) when it is clicked.
 const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[(
     "gui_test",
     ScreenCheck {
         marker: "gui_test: painted",
-        pixels: &[
-            PixelCheck::At(10, 10, 0x3a6ea5),               // the desktop
-            PixelCheck::At(100, 100, 0x202020),             // the border
-            PixelCheck::At(450, 112, 0x006c35),             // the caption
-            PixelCheck::At(101 + 100, 125 + 70, 0xff0000),  // FillRect's red
-            PixelCheck::At(101 + 300, 125 + 200, 0xffffff), // COLOR_WINDOW
-            PixelCheck::AnyIn(101 + 20, 125 + 140, 140, 16, 0x0000ff), // the text
+        steps: &[
+            ScreenStep {
+                input: &[],
+                pixels: &[
+                    PixelCheck::At(10, 10, 0x3a6ea5),               // the desktop
+                    PixelCheck::At(100, 100, 0x202020),             // the border
+                    PixelCheck::At(450, 112, 0x006c35),             // the caption
+                    PixelCheck::At(101 + 100, 125 + 70, 0xff0000),  // FillRect's red
+                    PixelCheck::At(101 + 300, 125 + 200, 0xffffff), // COLOR_WINDOW
+                    PixelCheck::AnyIn(101 + 20, 125 + 140, 140, 16, 0x0000ff), // the text
+                    PixelCheck::At(640, 780, 0xe6eaee),             // the taskbar
+                    PixelCheck::AnyIn(4, 764, 32, 32, 0xf09010),    // the camel's orange
+                    PixelCheck::At(300, 600, 0x3a6ea5),             // no start menu yet
+                ],
+            },
+            ScreenStep {
+                // To the bottom-left corner (the move is clamped to the
+                // screen), then a left click on the start button.
+                input: &["mouse_move -2000 2000", "mouse_button 1", "mouse_button 0"],
+                pixels: &[
+                    PixelCheck::At(300, 600, 0xf3f3f3),            // the start menu
+                    PixelCheck::AnyIn(16, 376, 64, 64, 0xf09010),  // its big camel
+                    PixelCheck::AnyIn(96, 400, 120, 16, 0x202020), // "gala-os"
+                ],
+            },
         ],
     },
 )];
@@ -3995,9 +4024,29 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
         thread::sleep(Duration::from_millis(20));
     }
     let mut monitor = monitor.ok_or("cannot connect to the QEMU monitor")?;
+    for (n, step) in check.steps.iter().enumerate() {
+        for command in step.input {
+            // Each command, then time for the guest to read the device
+            // (QEMU's PS/2 queue is short: a click queued behind a long
+            // move is dropped).
+            writeln!(monitor, "{command}").map_err(|e| e.to_string())?;
+            thread::sleep(Duration::from_millis(100));
+        }
+        check_screen_step(&mut monitor, iso, n, step).map_err(|e| format!("step {n}: {e}"))?;
+    }
+    Ok(())
+}
+
+fn check_screen_step(
+    monitor: &mut std::os::unix::net::UnixStream,
+    iso: &Path,
+    n: usize,
+    step: &ScreenStep,
+) -> Result {
+    use std::io::Write;
     // Let the guest finish drawing.
     thread::sleep(Duration::from_millis(500));
-    let ppm = iso.with_extension("screen.ppm");
+    let ppm = iso.with_extension(format!("screen{n}.ppm"));
     let _ = fs::remove_file(&ppm);
     writeln!(monitor, "screendump {}", ppm.display()).map_err(|e| e.to_string())?;
     let mut previous = 0;
@@ -4010,7 +4059,7 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
         previous = len;
     }
     let (w, h, rgb) = read_ppm(&ppm)?;
-    let _ = ppm_to_png(&ppm, &iso.with_extension("screen.png"));
+    let _ = ppm_to_png(&ppm, &iso.with_extension(format!("screen{n}.png")));
     let at = |x: u32, y: u32| -> Option<u32> {
         if x as usize >= w || y as usize >= h {
             return None;
@@ -4021,7 +4070,7 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
     let close = |a: u32, b: u32| {
         (0..3).all(|k| ((a >> (8 * k)) & 0xff).abs_diff((b >> (8 * k)) & 0xff) <= 0x40)
     };
-    for &p in check.pixels {
+    for &p in step.pixels {
         match p {
             PixelCheck::At(x, y, want) => {
                 let got = at(x, y);
