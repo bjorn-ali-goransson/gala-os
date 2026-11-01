@@ -101,6 +101,18 @@ const PREBUILT: &[Prebuilt] = &[
         ],
         excludes: &["elasticsearch-8.15.3/modules/x-pack-ml/platform/*"],
     },
+    // Win32-OpenSSH 9.8.3.0p2-Preview, Microsoft's port (OpenSSH-Win64.zip
+    // from github.com/PowerShell/Win32-OpenSSH releases). No checksum is
+    // published with the release: the SHA-256 is the one we measured
+    // (THIRD_PARTY.md). The whole directory (sshd, its session process,
+    // ssh-keygen, the client, libcrypto, the default configuration).
+    Prebuilt {
+        name: "openssh",
+        url: "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip",
+        checksum: "0ca131f3a78f404dc819a6336606caec0db1663a692ccc3af1e90232706ada54",
+        members: &["OpenSSH-Win64/*"],
+        excludes: &["OpenSSH-Win64/_manifest/*"],
+    },
     // SQL Server 2022 Express LocalDB 16.0.1000.6 (SqlLocalDB.msi).
     // Microsoft publishes no checksum for it: the SHA-256 is the one we
     // measured (ROADMAP). Its license allows use to design, develop and
@@ -508,6 +520,20 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("tcc_make", "user/tcc/make/main.c", "gala/make"),
     ("tcc_make", "user/tcc/make/add.c", "gala/make"),
     ("tcc_make", "user/tcc/make/mul.c", "gala/make"),
+    // Win32-OpenSSH, where install-sshd.ps1 puts it.
+    ("sshd", "ntdll.dll", "Windows/System32"),
+    ("sshd", "kernel32.dll", "Windows/System32"),
+    ("sshd", "advapi32.dll", "Windows/System32"),
+    ("sshd", "bcrypt.dll", "Windows/System32"),
+    ("sshd", "bcryptprimitives.dll", "Windows/System32"),
+    ("sshd", "crypt32.dll", "Windows/System32"),
+    ("sshd", "secur32.dll", "Windows/System32"),
+    ("sshd", "user32.dll", "Windows/System32"),
+    ("sshd", "userenv.dll", "Windows/System32"),
+    ("sshd", "ws2_32.dll", "Windows/System32"),
+    ("sshd", "mswsock.dll", "Windows/System32"),
+    ("sshd", "target/prebuilt/openssh/OpenSSH-Win64/", "Program Files/OpenSSH"),
+    ("sshd", "user/sshd/sshd_config", "ProgramData/ssh"),
     ("caddy", "ntdll.dll", "Windows/System32"),
     ("caddy", "kernel32.dll", "Windows/System32"),
     ("caddy", "advapi32.dll", "Windows/System32"),
@@ -1609,7 +1635,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &["elasticsearch", "sqllocaldb"];
+const PENDING: &[&str] = &["elasticsearch", "sqllocaldb", "sshd"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -2216,6 +2242,19 @@ const SCENARIOS: &[Scenario] = &[
             "argc=4 last=three len=5",
             "status=7",
             "busybox.exe (pid 4) exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // P1 (pending): Win32-OpenSSH's server, the next program for the
+        // security model (docs/SECURITY.md): ssh-keygen -A makes the host
+        // keys in %ProgramData%\ssh, sshd -t checks the configuration and
+        // the keys (their ACLs), sshd -d would serve one connection.
+        name: "sshd",
+        cmdline: "qemu_exit cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,-t",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "ssh-keygen.exe finished with status 0x00000000",
+            "sshd.exe finished with status 0x00000000",
         ],
     },
     Scenario {

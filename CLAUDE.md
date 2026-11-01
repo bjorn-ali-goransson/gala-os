@@ -4,7 +4,8 @@
   rules are mandatory: never use disassembly, decompiled code, or leaked
   Windows source. Then `docs/WORKFLOW.md` (how a chunk of work is done,
   pitfalls, where things are), `docs/ROADMAP.md` (status and agreed order)
-  and the sections of `docs/ARCHITECTURE.md` you touch.
+  and the sections of `docs/ARCHITECTURE.md` you touch (and `docs/SECURITY.md`,
+  the security model's design, for tokens, descriptors and access checks).
 - Keep the docs current in the same commit as the code: ROADMAP (done/next),
   ARCHITECTURE (design, invariants, TODOs), WORKFLOW (new conventions or
   pitfalls). The next session only knows what is written down.

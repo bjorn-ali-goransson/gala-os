@@ -4,6 +4,8 @@
 
 gala_stubs::unimplemented_exports!("kernel32.dll":
     AllocateUserPhysicalPagesNuma
+    CancelSynchronousIo
+    CancelWaitableTimer
     CheckTokenMembershipEx
     CompareStringA
     ConvertThreadToFiber
@@ -14,6 +16,7 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     FindNextChangeNotification
     GetActiveProcessorCount
     GetCurrencyFormatW
+    GetLogicalDriveStringsW
     GetNumaNodeProcessorMaskEx
     GetNumberFormatW
     GetPrivateProfileStringW
@@ -43,10 +46,11 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     PathCchRemoveExtension
     PathCchRemoveFileSpec
     PrepareTape
-
     QueueUserWorkItem
+    ReadConsoleOutputA
     RegisterWaitForSingleObject
     ReplaceFileW
+    ScrollConsoleScreenBufferA
     SetFileIoOverlappedRange
     SetFileValidData
     SetProcessAffinityMask
@@ -60,6 +64,7 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     VirtualAllocEx
     VirtualFreeEx
     WaitNamedPipeW
+    WriteConsoleOutputA
     WriteProcessMemory
     WriteTapemark
 );

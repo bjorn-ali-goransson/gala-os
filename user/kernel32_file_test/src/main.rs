@@ -8,6 +8,9 @@
 //! GetFileTime/SetFileTime, GetFullPathNameW, GetShortPathNameW,
 //! GetCompressedFileSizeW, DeleteFileW, QueryDosDeviceW (C: and NUL),
 //! WriteFileGather/ReadFileScatter (page segments, overlapped),
+//! WriteFileEx/ReadFileEx (the completion routine runs in the next
+//! alertable wait, SleepEx returning WAIT_IO_COMPLETION, with error 0, the
+//! count and the OVERLAPPED; not before),
 //! GetVolumeNameForVolumeMountPointW (C:\'s \\?\Volume{GUID}\),
 //! RemoveDirectoryW, all inside the temporary directory. Prints
 //! `kernel32_file_test: ok` or exits with the number of the failing check.
@@ -19,6 +22,19 @@ use core::ffi::c_void;
 
 type Bool = i32;
 type Handle = *mut c_void;
+type Completion = extern "system" fn(u32, u32, *mut usize);
+
+/// What the completion routine saw: calls, error, count, OVERLAPPED.
+static DONE: [core::sync::atomic::AtomicUsize; 4] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 4];
+
+extern "system" fn completed(error: u32, count: u32, ov: *mut usize) {
+    use core::sync::atomic::Ordering;
+    DONE[0].fetch_add(1, Ordering::SeqCst);
+    DONE[1].store(error as usize, Ordering::SeqCst);
+    DONE[2].store(count as usize, Ordering::SeqCst);
+    DONE[3].store(ov as usize, Ordering::SeqCst);
+}
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -27,6 +43,15 @@ unsafe extern "system" {
     fn QueryDosDeviceW(name: *const u16, target: *mut u16, max: u32) -> u32;
     fn GetVolumeNameForVolumeMountPointW(mount: *const u16, name: *mut u16, size: u32) -> Bool;
     fn SetLastError(code: u32);
+    fn WriteFileEx(
+        h: Handle,
+        buf: *const u8,
+        len: u32,
+        ov: *mut usize,
+        routine: Completion,
+    ) -> Bool;
+    fn ReadFileEx(h: Handle, buf: *mut u8, len: u32, ov: *mut usize, routine: Completion) -> Bool;
+    fn SleepEx(ms: u32, alertable: Bool) -> u32;
     fn GetTempPathW(size: u32, buf: *mut u16) -> u32;
     fn CreateDirectoryW(path: *const u16, attrs: *mut c_void) -> Bool;
     fn RemoveDirectoryW(path: *const u16) -> Bool;
@@ -492,6 +517,42 @@ fn run() -> Result<(), u32> {
         c.ok(*mem.add(8192) == 1 && *mem.add(12288) == 2 && *mem.add(16383) == 2, 0)?;
         CloseHandle(h);
         DeleteFileW(pages.ptr());
+
+        // WriteFileEx / ReadFileEx: the routine runs in an alertable wait.
+        use core::sync::atomic::Ordering;
+        let exfile = Path::new(temp, b"gala_ex.bin");
+        let h = CreateFileW(
+            exfile.ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            core::ptr::null_mut(),
+            CREATE_NEW,
+            0x4000_0000, // FILE_FLAG_OVERLAPPED
+            core::ptr::null_mut(),
+        );
+        c.ok(h != INVALID_HANDLE_VALUE, GetLastError().into())?;
+        let mut ov = [0usize, 0, 16, 0]; // at offset 16
+        c.ok(
+            WriteFileEx(h, b"completion".as_ptr(), 10, ov.as_mut_ptr(), completed) != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(DONE[0].load(Ordering::SeqCst) as u64, 0)?; // not yet
+        c.eq(SleepEx(1000, 1).into(), 0xc0)?; // WAIT_IO_COMPLETION
+        c.eq(DONE[0].load(Ordering::SeqCst) as u64, 1)?;
+        c.eq(DONE[1].load(Ordering::SeqCst) as u64, 0)?;
+        c.eq(DONE[2].load(Ordering::SeqCst) as u64, 10)?;
+        c.eq(DONE[3].load(Ordering::SeqCst) as u64, ov.as_ptr() as u64)?;
+        let mut back = [0u8; 10];
+        let mut ov = [0usize, 0, 16, 0];
+        c.ok(
+            ReadFileEx(h, back.as_mut_ptr(), 10, ov.as_mut_ptr(), completed) != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(SleepEx(1000, 1).into(), 0xc0)?;
+        c.ok(DONE[0].load(Ordering::SeqCst) == 2 && DONE[2].load(Ordering::SeqCst) == 10, 0)?;
+        c.ok(&back == b"completion", back[0].into())?;
+        CloseHandle(h);
+        DeleteFileW(exfile.ptr());
 
         // DOS device names: C: is the volume's device, NUL the null
         // device; the target is followed by two NULs (counted).

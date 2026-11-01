@@ -34,6 +34,18 @@
 //!   (a primary token with those counts and the same logon session),
 //!   TokenIntegrityLevel (S-1-16-8192), TokenLogonSid, TokenIsAppContainer
 //!   (0); sizes queried.
+//! - IsWellKnownSid: S-1-5-18 is WinLocalSystemSid (22), not
+//!   WinBuiltinAdministratorsSid (26); S-1-5-32-544 is the latter.
+//! - StartServiceCtrlDispatcherW from a console program (not started by
+//!   the service control manager): FALSE, ERROR_FAILED_SERVICE_CONTROLLER_CONNECT
+//!   (1063), as programs that run either way (sshd) expect.
+//! - SDDL (ConvertStringSecurityDescriptorToSecurityDescriptorW, the
+//!   documented "Security Descriptor String Format"): owner and group by
+//!   abbreviation, a protected auto-inherited DACL whose ACEs keep their
+//!   order, types, flags (OI, CI), rights (GA, FA, hex) and trustees (SY,
+//!   BA, WD, an S-1-... string); a self-relative descriptor of the size
+//!   returned; NO_ACCESS_CONTROL is a NULL DACL; a bad string or revision
+//!   fails.
 //! - Service SIDs ("NT SERVICE\\name": S-1-5-80 and the SHA-1 of the
 //!   upper-cased UTF-16 name as five sub-authorities, as documented):
 //!   LookupAccountNameW of a registered service (a key under
@@ -335,6 +347,18 @@ unsafe extern "system" {
     ) -> Bool;
     fn SaferCloseLevel(level: Handle) -> Bool;
     fn CreateWellKnownSid(kind: u32, domain: *const u8, sid: *mut u8, size: *mut u32) -> Bool;
+    fn IsWellKnownSid(sid: *const u8, kind: u32) -> Bool;
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl: *const u16,
+        revision: u32,
+        sd: *mut *mut u8,
+        size: *mut u32,
+    ) -> Bool;
+    fn GetSecurityDescriptorGroup(sd: *const u8, group: *mut *mut u8, defaulted: *mut Bool)
+    -> Bool;
+    fn GetSecurityDescriptorControl(sd: *const u8, control: *mut u16, revision: *mut u32) -> Bool;
+    fn GetSecurityDescriptorLength(sd: *const u8) -> u32;
+    fn StartServiceCtrlDispatcherW(table: *const [usize; 2]) -> Bool;
 }
 
 #[link(name = "secur32", kind = "raw-dylib")]
@@ -1440,8 +1464,152 @@ fn service_sids(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {}
+
+/// The ACE at `index` of `acl`: (type, flags, mask, SID).
+fn ace_at(acl: *const u8, index: u32) -> (u8, u8, u32, *const u8) {
+    let mut ace = core::ptr::null_mut();
+    // SAFETY: an ACL from advapi32.
+    unsafe {
+        GetAce(acl, index, &mut ace);
+        (*ace, *ace.add(1), ace.add(4).cast::<u32>().read_unaligned(), ace.add(8))
+    }
+}
+
+fn sddl(c: &mut Checks) -> Result<(), u32> {
+    let wide = |t: &str| {
+        let mut b = [0u16; 128];
+        for (d, ch) in b.iter_mut().zip(t.bytes()) {
+            *d = ch.into();
+        }
+        b
+    };
+    // SAFETY: advapi32 calls with buffers of ours; descriptors LocalFree'd.
+    unsafe {
+        let text = wide("O:BAG:SYD:PAI(A;;GA;;;SY)(A;OICI;FA;;;BA)(D;;0x1;;;WD)");
+        let (mut sd, mut size) = (core::ptr::null_mut(), 0u32);
+        let ok = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            text.as_ptr(),
+            1,
+            &mut sd,
+            &mut size,
+        );
+        c.ok(ok != 0, GetLastError().into())?;
+        c.ok(IsValidSecurityDescriptor(sd) != 0, 0)?;
+        c.eq(GetSecurityDescriptorLength(sd).into(), size.into())?;
+        let (mut control, mut revision) = (0u16, 0u32);
+        c.ok(GetSecurityDescriptorControl(sd, &mut control, &mut revision) != 0, 0)?;
+        // SE_SELF_RELATIVE | SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED | SE_DACL_PRESENT
+        c.eq((control & 0x9404).into(), 0x9404)?;
+        c.eq(revision.into(), 1)?;
+        let (mut owner, mut group, mut def) = (core::ptr::null_mut(), core::ptr::null_mut(), 0);
+        c.ok(GetSecurityDescriptorOwner(sd, &mut owner, &mut def) != 0, 0)?;
+        c.ok(IsWellKnownSid(owner, 26) != 0, 0)?; // BUILTIN\Administrators
+        c.ok(GetSecurityDescriptorGroup(sd, &mut group, &mut def) != 0, 0)?;
+        c.ok(IsWellKnownSid(group, 22) != 0, 0)?; // SYSTEM
+        let (mut present, mut dacl) = (0, core::ptr::null_mut());
+        c.ok(GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut def) != 0, 0)?;
+        c.ok(present != 0 && !dacl.is_null(), 0)?;
+        let mut info = [0u32; 3];
+        c.ok(GetAclInformation(dacl, info.as_mut_ptr(), 12, 2) != 0, 0)?;
+        c.eq(info[0].into(), 3)?;
+        let (t, f, m, s0) = ace_at(dacl, 0);
+        c.ok(t == 0 && f == 0 && m == 0x1000_0000 && IsWellKnownSid(s0, 22) != 0, m.into())?;
+        let (t, f, m, s1) = ace_at(dacl, 1);
+        c.ok(t == 0 && f == 3 && m == 0x1f_01ff && IsWellKnownSid(s1, 26) != 0, m.into())?;
+        let (t, f, m, s2) = ace_at(dacl, 2);
+        c.ok(t == 1 && f == 0 && m == 1 && IsWellKnownSid(s2, 1) != 0, m.into())?;
+        LocalFree(sd.cast());
+
+        // An S-1-... trustee; NO_ACCESS_CONTROL; failures.
+        let text = wide("D:(A;;FR;;;S-1-5-21-1-2-3-1001)");
+        c.ok(
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                text.as_ptr(),
+                1,
+                &mut sd,
+                core::ptr::null_mut(),
+            ) != 0,
+            GetLastError().into(),
+        )?;
+        c.ok(GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut def) != 0, 0)?;
+        let (t, _, m, s) = ace_at(dacl, 0);
+        let (x, subs, n) = sid_parts(s);
+        c.ok(t == 0 && m == 0x12_0089 && x == 5 && n == 5 && subs[4] == 1001, m.into())?;
+        LocalFree(sd.cast());
+        let text = wide("D:NO_ACCESS_CONTROL");
+        c.ok(
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                text.as_ptr(),
+                1,
+                &mut sd,
+                core::ptr::null_mut(),
+            ) != 0,
+            0,
+        )?;
+        c.ok(
+            GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut def) != 0
+                && present != 0
+                && dacl.is_null(),
+            0,
+        )?;
+        LocalFree(sd.cast());
+        let text = wide("D:(A;;FA;;;XX)");
+        c.eq(
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                text.as_ptr(),
+                1,
+                &mut sd,
+                core::ptr::null_mut(),
+            ) as u64,
+            0,
+        )?;
+        let text = wide("O:BA");
+        c.eq(
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                text.as_ptr(),
+                2,
+                &mut sd,
+                core::ptr::null_mut(),
+            ) as u64,
+            0,
+        )?;
+    }
+    Ok(())
+}
+
+fn well_known(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: advapi32 calls with buffers of ours.
+    unsafe {
+        let mut system = core::ptr::null_mut();
+        c.ok(
+            AllocateAndInitializeSid(&NT_AUTHORITY, 1, 18, 0, 0, 0, 0, 0, 0, 0, &mut system) != 0,
+            0,
+        )?;
+        c.ok(IsWellKnownSid(system, 22) != 0, 0)?;
+        c.eq(IsWellKnownSid(system, 26) as u64, 0)?;
+        let mut admins = core::ptr::null_mut();
+        c.ok(
+            AllocateAndInitializeSid(&NT_AUTHORITY, 2, 32, 544, 0, 0, 0, 0, 0, 0, &mut admins) != 0,
+            0,
+        )?;
+        c.ok(IsWellKnownSid(admins, 26) != 0, 0)?;
+        c.eq(IsWellKnownSid(admins, 22) as u64, 0)?;
+        FreeSid(system);
+        FreeSid(admins);
+
+        let name = w("gala_test");
+        let table = [[name.as_ptr() as usize, service_main as *const () as usize], [0, 0]];
+        c.eq(StartServiceCtrlDispatcherW(table.as_ptr()) as u64, 0)?;
+        c.eq(GetLastError().into(), 1063)?; // ERROR_FAILED_SERVICE_CONTROLLER_CONNECT
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    well_known(&mut c)?;
+    sddl(&mut c)?;
     token_groups(&mut c)?;
     service_sids(&mut c)?;
     // InitializeSid, then the sub-authorities: S-1-5-32-544;

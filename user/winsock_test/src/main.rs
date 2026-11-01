@@ -1,7 +1,7 @@
 //! Winsock TCP as programs use it, with the results real Windows gives:
 //! WSAStartup (version 2.2), TCP keep-alive socket options (defaults,
 //! set and read back), WSAPoll (readable, writable, hung up), WSAIoctl's SIO_BASE_HANDLE and
-//! SIO_BSP_HANDLE(_SELECT/_POLL) (the socket itself), getaddrinfo of the machine's own host name
+//! SIO_BSP_HANDLE(_SELECT/_POLL) (the socket itself), getaddrinfo (and GetAddrInfoW) of the machine's own host name
 //! and of "localhost" (IPv4 addresses), socket/bind/listen/accept/connect on the
 //! loopback address, getsockname (an ephemeral port after binding port 0;
 //! accept reports the client's address), send/recv round trips in both
@@ -46,6 +46,13 @@ unsafe extern "system" {
         out: *mut *mut u8,
     ) -> i32;
     fn freeaddrinfo(ai: *mut u8);
+    fn GetAddrInfoW(
+        node: *const u16,
+        service: *const u16,
+        hints: *const i32,
+        out: *mut *mut u8,
+    ) -> i32;
+    fn FreeAddrInfoW(ai: *mut u8);
     fn WSAGetLastError() -> i32;
     fn socket(af: i32, kind: i32, protocol: i32) -> Socket;
     fn bind(s: Socket, addr: *const SockaddrIn, len: i32) -> i32;
@@ -241,6 +248,15 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
             c.eq(u16::from_be_bytes([*sa.add(2), *sa.add(3)]).into(), 80)?;
             freeaddrinfo(ai);
         }
+        // The same in UTF-16 (ADDRINFOW has the same layout).
+        let (node, service) = (b"localhost\0".map(u16::from), b"22\0".map(u16::from));
+        let mut ai = core::ptr::null_mut();
+        c.eq(GetAddrInfoW(node.as_ptr(), service.as_ptr(), hints.as_ptr(), &mut ai) as u64, 0)?;
+        c.eq((*ai.add(4).cast::<i32>()) as u64, AF_INET as u64)?;
+        let sa = *ai.add(32).cast::<*const u8>();
+        c.eq(u16::from_be_bytes([*sa.add(2), *sa.add(3)]).into(), 22)?;
+        c.ok(*sa.add(4) == 127 && *sa.add(7) == 1, 0)?;
+        FreeAddrInfoW(ai);
 
         // A listener on an ephemeral loopback port.
         let listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);

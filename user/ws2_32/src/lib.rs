@@ -1607,6 +1607,47 @@ pub extern "system" fn getaddrinfo(
     0
 }
 
+/// GetAddrInfoW: getaddrinfo with UTF-16 strings (names are ASCII here;
+/// ADDRINFOW has ADDRINFOA's layout, and gala returns no canonical name).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetAddrInfoW(
+    node: *const u16,
+    service: *const u16,
+    hints: *const i32,
+    result: *mut *mut u8,
+) -> i32 {
+    fn narrow(w: *const u16, out: &mut [u8; 256]) -> Option<*const u8> {
+        if w.is_null() {
+            return Some(core::ptr::null());
+        }
+        let mut i = 0;
+        // SAFETY: the caller's NUL-terminated string.
+        unsafe {
+            while *w.add(i) != 0 {
+                let c = *w.add(i);
+                if c > 0x7f || i == out.len() - 1 {
+                    return None;
+                }
+                out[i] = c as u8;
+                i += 1;
+            }
+        }
+        out[i] = 0;
+        Some(out.as_ptr())
+    }
+    let (mut n, mut s) = ([0u8; 256], [0u8; 256]);
+    let (Some(node), Some(service)) = (narrow(node, &mut n), narrow(service, &mut s)) else {
+        missing(b"ws2_32.dll!GetAddrInfoW(non-ASCII name)", 0);
+        return WSAHOST_NOT_FOUND;
+    };
+    getaddrinfo(node, service, hints, result)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn FreeAddrInfoW(ai: *mut u8) {
+    freeaddrinfo(ai);
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn freeaddrinfo(ai: *mut u8) {
     if !ai.is_null() {

@@ -1055,6 +1055,14 @@ Windows, never shadows the system's DLLs.)
   accept (recorded). SetEntriesInAclW builds the new ACL as documented
   (GRANT, SET, DENY, REVOKE; SID trustees or names, CURRENT_USER; denied
   ACEs first).
+  SDDL (ConvertStringSecurityDescriptorToSecurityDescriptorW/A): O:,
+  G:, D:, S: with the documented SID and rights abbreviations, ACL flags
+  (P, AI, AR, NO_ACCESS_CONTROL) and simple ACEs (A, D, AU, AL, ML; object
+  and conditional ACEs recorded and refused), into a self-relative
+  descriptor; IsWellKnownSid compares with CreateWellKnownSid's SID.
+  StartServiceCtrlDispatcherW/A fail as for a console program
+  (ERROR_FAILED_SERVICE_CONTROLLER_CONNECT: no service control manager).
+  The security model to come is docs/SECURITY.md.
   Service SIDs: `NT SERVICE\<name>` is S-1-5-80 followed by the SHA-1 of
   the upper-cased UTF-16 name (five DWORDs; bcrypt, loaded on first
   use); LookupAccountNameW/SidW resolve them for services registered

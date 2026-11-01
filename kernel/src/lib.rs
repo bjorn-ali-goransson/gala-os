@@ -145,7 +145,8 @@ pub fn kernel_main() -> ! {
     events::set_mask(cmdline.value("events").map_or(0, events::parse_mask));
     // `run=a.exe,b.exe` runs the programs one after another; `args=` holds
     // their (percent-encoded) command-line arguments in the same order;
-    // `cwd=C:/dir` is their current directory (default C:\gala).
+    // `cwd=C:/dir` (percent-encoded) is their current directory (default
+    // C:\gala).
     if let Some(names) = cmdline.value("run") {
         let mut args = cmdline.value("args").unwrap_or("").split(',');
         for name in names.split(',').filter(|n| !n.is_empty()) {
@@ -154,7 +155,14 @@ pub fn kernel_main() -> ! {
                 panic!("run: out of memory for the arguments");
             }
             info!("run: begin {name}");
-            let cwd = cmdline.value("cwd");
+            // `cwd=` is percent-encoded too (C:/Program%20Files/...).
+            let mut cwd_decoded = alloc::vec::Vec::new();
+            let cwd = match cmdline.value("cwd") {
+                Some(c) if cmdline::percent_decode(c, &mut cwd_decoded).is_ok() => {
+                    core::str::from_utf8(&cwd_decoded).ok()
+                }
+                other => other,
+            };
             run_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""), cwd);
             nt::ledger::dump();
             info!("run: end {name}");

@@ -3,8 +3,6 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("ws2_32.dll":
-    FreeAddrInfoW
-    GetAddrInfoW
     GetNameInfoW
     InetNtopW
     InetPtonW

@@ -8,4 +8,5 @@ gala_stubs::unimplemented_exports!("secur32.dll":
     LsaFreeReturnBuffer
     LsaLogonUser
     LsaLookupAuthenticationPackage
+    LsaRegisterLogonProcess
 );

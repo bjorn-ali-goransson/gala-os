@@ -4,5 +4,6 @@
 
 gala_stubs::unimplemented_exports!("user32.dll":
     DispatchMessageW
+    GetWindowPlacement
     PeekMessageW
 );

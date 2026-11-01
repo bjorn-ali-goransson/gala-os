@@ -1053,6 +1053,83 @@ pub extern "system" fn ReadFile(
     }
 }
 
+/// LPOVERLAPPED_COMPLETION_ROUTINE(dwErrorCode, dwNumberOfBytesTransfered,
+/// lpOverlapped).
+type CompletionRoutine = extern "system" fn(u32, u32, *mut c_void);
+
+/// The I/O APC of ReadFileEx/WriteFileEx: ApcContext is the caller's
+/// completion routine, the status block its OVERLAPPED.
+extern "system" fn io_completion(context: usize, iosb: *mut [usize; 2], _reserved: u32) {
+    // SAFETY: the routine and OVERLAPPED the I/O was started with.
+    unsafe {
+        let routine = core::mem::transmute::<usize, CompletionRoutine>(context);
+        let (status, count) = ((*iosb)[0] as u32, (*iosb)[1] as u32);
+        let error = if status == STATUS_SUCCESS { 0 } else { RtlNtStatusToDosError(status) };
+        routine(error, count, iosb.cast());
+    }
+}
+
+/// ReadFileEx/WriteFileEx: an I/O at the OVERLAPPED's offset whose
+/// completion routine runs as an APC in the thread's next alertable wait
+/// (its hEvent is not used). TRUE once the I/O is under way or done.
+fn io_ex(
+    h: Handle,
+    buffer: *mut u8,
+    length: u32,
+    ov: *mut c_void,
+    routine: Option<CompletionRoutine>,
+    write: bool,
+) -> Bool {
+    let (Some(routine), false) = (routine, ov.is_null()) else {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    };
+    let ov = ov.cast::<usize>();
+    // SAFETY: the caller's OVERLAPPED {Internal, InternalHigh, Offset,
+    // OffsetHigh, hEvent}, valid until the routine has run.
+    let offset = unsafe {
+        *ov = STATUS_PENDING as usize;
+        *ov.add(1) = 0;
+        *ov.add(2) as i64
+    };
+    let iosb = ov.cast::<[usize; 2]>();
+    let (apc, context) = (io_completion as *const () as usize, routine as *const () as usize);
+    // SAFETY: the caller's buffer of `length` bytes and OVERLAPPED.
+    let status = unsafe {
+        if write {
+            NtWriteFile(h, 0, apc, context, iosb, buffer, length, &offset, core::ptr::null())
+        } else {
+            NtReadFile(h, 0, apc, context, iosb, buffer, length, &offset, core::ptr::null())
+        }
+    };
+    match status {
+        0xc000_0011 => fail_with(38, FALSE), // STATUS_END_OF_FILE: ERROR_HANDLE_EOF
+        s if s >= 0xc000_0000 => fail(s, FALSE),
+        _ => TRUE,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ReadFileEx(
+    h: Handle,
+    buffer: *mut u8,
+    length: u32,
+    ov: *mut c_void,
+    routine: Option<CompletionRoutine>,
+) -> Bool {
+    io_ex(h, buffer, length, ov, routine, false)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WriteFileEx(
+    h: Handle,
+    buffer: *const u8,
+    length: u32,
+    ov: *mut c_void,
+    routine: Option<CompletionRoutine>,
+) -> Bool {
+    io_ex(h, buffer.cast_mut(), length, ov, routine, true)
+}
+
 /// ReadFile/WriteFile with an OVERLAPPED: it is the status block, its
 /// Offset/OffsetHigh the file offset, its hEvent the event (and, unless
 /// its low bit is set, the completion packet carries it). An I/O that is

@@ -910,6 +910,22 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         notifications, NtAllocateUserPhysicalPagesEx, the RtlIpv*W
         functions, dbghelp's SymInitialize, XEGetEngine (looked for in
         every module), NtQuerySystemInformation class 5000.
+   7. Win32-OpenSSH (started 2026-11-01; the first program for the
+      security model, docs/SECURITY.md): Microsoft's 9.8.3.0p2-Preview
+      release zip (`PREBUILT` openssh, SHA-256 measured: no checksum is
+      published) in C:\Program Files\OpenSSH, our own sshd_config in
+      %ProgramData%\ssh. The pending `sshd` scenario runs `ssh-keygen -A`
+      (makes RSA, ECDSA and Ed25519 host keys) and `sshd -t` (checks the
+      configuration and the keys); both now exit 0. It needed
+      IsWellKnownSid, StartServiceCtrlDispatcherW failing as for a
+      console program (ERROR_FAILED_SERVICE_CONTROLLER_CONNECT), SDDL
+      (ConvertStringSecurityDescriptorToSecurityDescriptorW and the
+      descriptor getters), WriteFileEx/ReadFileEx, GetAddrInfoW, and
+      `cwd=` percent-decoding. The key permission check passes only
+      because gala synthesizes a descriptor for every file. Next: the
+      security model's phases S1-S4 (docs/SECURITY.md), then `sshd -d`
+      accepting a key-authenticated login from the host (xtask as the
+      client).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to

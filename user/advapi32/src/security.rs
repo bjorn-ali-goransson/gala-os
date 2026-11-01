@@ -1987,6 +1987,22 @@ pub extern "system" fn SaferComputeTokenFromLevel(
 
 /// CreateWellKnownSid: the documented well-known SIDs that need no domain
 /// (WELL_KNOWN_SID_TYPE values); others are recorded.
+/// IsWellKnownSid: whether `sid` is the well-known SID of `kind` (as
+/// CreateWellKnownSid makes it; domain-relative kinds never match here).
+#[unsafe(no_mangle)]
+pub extern "system" fn IsWellKnownSid(sid: *const u8, kind: u32) -> i32 {
+    let Some((_, _, n)) = read_sid(sid) else { return 0 };
+    let mut known = [0u8; 8 + 4 * SID_MAX_SUB_AUTHORITIES];
+    let mut size = known.len() as u32;
+    if CreateWellKnownSid(kind, core::ptr::null(), known.as_mut_ptr(), &mut size) == 0 {
+        return 0;
+    }
+    let len = sid_len(n);
+    // SAFETY: a valid SID of `len` bytes.
+    let a = unsafe { core::slice::from_raw_parts(sid, len) };
+    i32::from(size as usize == len && a == &known[..len])
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn CreateWellKnownSid(
     kind: u32,
@@ -2072,4 +2088,479 @@ pub extern "system" fn CreateWellKnownSid(
     }
     write_sid(sid, authority, subs);
     1
+}
+
+// ---- SDDL ----
+//
+// ConvertStringSecurityDescriptorToSecurityDescriptorW/A, from the
+// documented "Security Descriptor String Format": O:, G:, D: and S:
+// parts; ACL flags P (protected), AI (auto-inherited), AR (inheritance
+// required) and NO_ACCESS_CONTROL (a NULL DACL); simple ACEs
+// (A, D, AU, AL, ML) with their flags, rights (abbreviations or numbers)
+// and trustee (an abbreviation or an S-1-... string). Object ACEs (OA,
+// OD...) and conditional ones are not supported (recorded). The result is
+// a self-relative descriptor from LocalAlloc.
+
+const SE_SACL_PRESENT: u16 = 0x10;
+
+/// SID abbreviations: (text, authority, sub-authorities).
+const SDDL_SIDS: &[(&str, u8, &[u32])] = &[
+    ("AN", 5, &[7]),
+    ("AO", 5, &[32, 548]),
+    ("AU", 5, &[11]),
+    ("BA", 5, &[32, 544]),
+    ("BG", 5, &[32, 546]),
+    ("BO", 5, &[32, 551]),
+    ("BU", 5, &[32, 545]),
+    ("CG", 3, &[1]),
+    ("CO", 3, &[0]),
+    ("ED", 5, &[9]),
+    ("IU", 5, &[4]),
+    ("LS", 5, &[19]),
+    ("NO", 5, &[32, 556]),
+    ("NS", 5, &[20]),
+    ("NU", 5, &[2]),
+    ("OW", 3, &[4]),
+    ("PO", 5, &[32, 550]),
+    ("PS", 5, &[10]),
+    ("PU", 5, &[32, 547]),
+    ("RC", 5, &[12]),
+    ("RD", 5, &[32, 555]),
+    ("RE", 5, &[32, 552]),
+    ("RU", 5, &[32, 554]),
+    ("SO", 5, &[32, 549]),
+    ("SU", 5, &[6]),
+    ("SY", 5, &[18]),
+    ("WD", 1, &[0]),
+    ("LW", 16, &[4096]),
+    ("ME", 16, &[8192]),
+    ("HI", 16, &[12288]),
+    ("SI", 16, &[16384]),
+    ("AC", 15, &[2, 1]),
+];
+
+/// Access right abbreviations.
+const SDDL_RIGHTS: &[(&str, u32)] = &[
+    ("GA", 0x1000_0000),
+    ("GR", 0x8000_0000),
+    ("GW", 0x4000_0000),
+    ("GX", 0x2000_0000),
+    ("RC", 0x2_0000),
+    ("SD", 0x1_0000),
+    ("WD", 0x4_0000),
+    ("WO", 0x8_0000),
+    ("RP", 0x10),
+    ("WP", 0x20),
+    ("CC", 0x1),
+    ("DC", 0x2),
+    ("LC", 0x4),
+    ("SW", 0x8),
+    ("LO", 0x80),
+    ("DT", 0x40),
+    ("CR", 0x100),
+    ("FA", 0x1f_01ff),
+    ("FR", 0x12_0089),
+    ("FW", 0x12_0116),
+    ("FX", 0x12_00a0),
+    ("KA", 0xf_003f),
+    ("KR", 0x2_0019),
+    ("KW", 0x2_0006),
+    ("KX", 0x2_0019),
+    ("NR", 0x1),
+    ("NW", 0x2),
+    ("NX", 0x4),
+];
+
+/// A SID in a fixed buffer.
+#[derive(Clone, Copy)]
+struct SidBuf {
+    bytes: [u8; 8 + 4 * SID_MAX_SUB_AUTHORITIES],
+    len: usize,
+}
+
+impl SidBuf {
+    fn new(authority: u64, subs: &[u32]) -> SidBuf {
+        let mut b =
+            SidBuf { bytes: [0; 8 + 4 * SID_MAX_SUB_AUTHORITIES], len: sid_len(subs.len()) };
+        let a = authority.to_be_bytes();
+        write_sid(b.bytes.as_mut_ptr(), [a[2], a[3], a[4], a[5], a[6], a[7]], subs);
+        b
+    }
+    fn bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+/// Parses a trustee: an abbreviation (two letters) or S-1-...; the rest.
+fn sddl_sid(t: &[u8]) -> Option<(SidBuf, &[u8])> {
+    if t.len() >= 2 && t[0] == b'S' && t.get(1) == Some(&b'-') {
+        let end = t
+            .iter()
+            .position(|&c| !(c.is_ascii_digit() || c == b'-' || c == b'S'))
+            .unwrap_or(t.len());
+        let text = &t[..end];
+        let mut parts = text.split(|&c| c == b'-');
+        if parts.next() != Some(b"S") || parts.next() != Some(b"1") {
+            return None;
+        }
+        let num = |p: &[u8]| -> Option<u64> {
+            if p.is_empty() {
+                return None;
+            }
+            p.iter().try_fold(0u64, |a, &c| a.checked_mul(10)?.checked_add(u64::from(c - b'0')))
+        };
+        let authority = num(parts.next()?)?;
+        let mut subs = [0u32; SID_MAX_SUB_AUTHORITIES];
+        let mut n = 0;
+        for p in parts {
+            if n == SID_MAX_SUB_AUTHORITIES {
+                return None;
+            }
+            subs[n] = u32::try_from(num(p)?).ok()?;
+            n += 1;
+        }
+        return Some((SidBuf::new(authority, &subs[..n]), &t[end..]));
+    }
+    let code = t.get(..2)?;
+    if code == b"LA" || code == b"LG" {
+        // The machine's administrator and guest (RIDs 500, 501).
+        let mut subs = USER_SUBS;
+        subs[4] = if code == b"LA" { 500 } else { 501 };
+        return Some((SidBuf::new(5, &subs), &t[2..]));
+    }
+    let &(_, auth, subs) = SDDL_SIDS.iter().find(|(name, _, _)| name.as_bytes() == code)?;
+    Some((SidBuf::new(u64::from(auth), subs), &t[2..]))
+}
+
+/// The access mask of an ACE's rights field.
+fn sddl_rights(t: &[u8]) -> Option<u32> {
+    if t.starts_with(b"0x") || t.starts_with(b"0X") {
+        return u32::from_str_radix(core::str::from_utf8(&t[2..]).ok()?, 16).ok();
+    }
+    if !t.is_empty() && t.iter().all(u8::is_ascii_digit) {
+        return core::str::from_utf8(t).ok()?.parse().ok();
+    }
+    let mut mask = 0;
+    for pair in t.chunks(2) {
+        mask |= SDDL_RIGHTS.iter().find(|(n, _)| n.as_bytes() == pair)?.1;
+    }
+    Some(mask)
+}
+
+/// An ACL being built: its ACEs, back to back.
+struct AclBuf {
+    bytes: [u8; 4096],
+    len: usize,
+    count: u16,
+    null: bool,
+}
+
+/// Parses ACL flags and ACEs (after "D:" or "S:"); returns the control
+/// bits (protected, auto-inherited, inheritance required) and the rest.
+fn sddl_acl<'a>(mut t: &'a [u8], acl: &mut AclBuf, sacl: bool) -> Option<(u16, &'a [u8])> {
+    let mut control = 0u16;
+    loop {
+        if t.starts_with(b"NO_ACCESS_CONTROL") {
+            acl.null = true;
+            t = &t[17..];
+        } else if t.starts_with(b"AI") {
+            control |= if sacl { 0x800 } else { 0x400 };
+            t = &t[2..];
+        } else if t.starts_with(b"AR") {
+            control |= if sacl { 0x200 } else { 0x100 };
+            t = &t[2..];
+        } else if t.first() == Some(&b'P') {
+            control |= if sacl { 0x2000 } else { 0x1000 };
+            t = &t[1..];
+        } else {
+            break;
+        }
+    }
+    while t.first() == Some(&b'(') {
+        let end = t.iter().position(|&c| c == b')')?;
+        let body = &t[1..end];
+        t = &t[end + 1..];
+        let mut f = body.split(|&c| c == b';');
+        let kind = match f.next()? {
+            b"A" => 0u8,
+            b"D" => 1,
+            b"AU" => 2,
+            b"AL" => 3,
+            b"ML" => 0x11,
+            other => {
+                let _ = other;
+                missing(b"advapi32.dll!SDDL ACE type");
+                return None;
+            }
+        };
+        let flags_text = f.next()?;
+        let mut flags = 0u8;
+        for pair in flags_text.chunks(2) {
+            flags |= match pair {
+                b"OI" => 0x01,
+                b"CI" => 0x02,
+                b"NP" => 0x04,
+                b"IO" => 0x08,
+                b"ID" => 0x10,
+                b"SA" => 0x40,
+                b"FA" => 0x80,
+                _ => return None,
+            };
+        }
+        let mask = sddl_rights(f.next()?)?;
+        let (object, inherit) = (f.next()?, f.next()?);
+        if !object.is_empty() || !inherit.is_empty() {
+            missing(b"advapi32.dll!SDDL object ACE");
+            return None;
+        }
+        let (sid, rest) = sddl_sid(f.next()?)?;
+        if !rest.is_empty() || f.next().is_some() {
+            return None;
+        }
+        let size = 8 + sid.len;
+        if acl.len + size > acl.bytes.len() {
+            return None;
+        }
+        let a = &mut acl.bytes[acl.len..acl.len + size];
+        a[0] = kind;
+        a[1] = flags;
+        a[2..4].copy_from_slice(&(size as u16).to_le_bytes());
+        a[4..8].copy_from_slice(&mask.to_le_bytes());
+        a[8..].copy_from_slice(sid.bytes());
+        acl.len += size;
+        acl.count += 1;
+    }
+    Some((control, t))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    text: *const u16,
+    revision: u32,
+    out: *mut *mut u8,
+    size: *mut u32,
+) -> i32 {
+    if text.is_null() || out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if revision != 1 {
+        return fail(1305, 0); // ERROR_UNKNOWN_REVISION
+    }
+    // ASCII copy without blanks (SDDL is ASCII).
+    let mut chars = [0u8; 4096];
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated string.
+    unsafe {
+        let mut i = 0;
+        loop {
+            let c = *text.add(i);
+            if c == 0 {
+                break;
+            }
+            if c > 0x7f || n == chars.len() {
+                return fail(ERROR_INVALID_PARAMETER, 0);
+            }
+            if c != u16::from(b' ') {
+                chars[n] = c as u8;
+                n += 1;
+            }
+            i += 1;
+        }
+    }
+    sddl_to_descriptor(&chars[..n], out, size)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ConvertStringSecurityDescriptorToSecurityDescriptorA(
+    text: *const u8,
+    revision: u32,
+    out: *mut *mut u8,
+    size: *mut u32,
+) -> i32 {
+    if text.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut wide = [0u16; 4096];
+    // SAFETY: the caller's NUL-terminated string.
+    unsafe {
+        let mut i = 0;
+        while *text.add(i) != 0 {
+            if i == wide.len() - 1 {
+                return fail(ERROR_INVALID_PARAMETER, 0);
+            }
+            wide[i] = u16::from(*text.add(i));
+            i += 1;
+        }
+    }
+    ConvertStringSecurityDescriptorToSecurityDescriptorW(wide.as_ptr(), revision, out, size)
+}
+
+fn sddl_to_descriptor(mut t: &[u8], out: *mut *mut u8, size: *mut u32) -> i32 {
+    let (mut owner, mut group) = (None, None);
+    let mut dacl = AclBuf { bytes: [0; 4096], len: 0, count: 0, null: false };
+    let mut sacl = AclBuf { bytes: [0; 4096], len: 0, count: 0, null: false };
+    let (mut has_dacl, mut has_sacl) = (false, false);
+    let mut control: u16 = SE_SELF_RELATIVE;
+    while !t.is_empty() {
+        let tag = t.get(..2);
+        t = &t[2.min(t.len())..];
+        let parsed = match tag {
+            Some(b"O:") => sddl_sid(t).map(|(s, r)| {
+                owner = Some(s);
+                r
+            }),
+            Some(b"G:") => sddl_sid(t).map(|(s, r)| {
+                group = Some(s);
+                r
+            }),
+            Some(b"D:") => sddl_acl(t, &mut dacl, false).map(|(c, r)| {
+                has_dacl = true;
+                control |= c;
+                r
+            }),
+            Some(b"S:") => sddl_acl(t, &mut sacl, true).map(|(c, r)| {
+                has_sacl = true;
+                control |= c;
+                r
+            }),
+            _ => None,
+        };
+        match parsed {
+            Some(rest) => t = rest,
+            None => return fail(ERROR_INVALID_PARAMETER, 0),
+        }
+    }
+    // Layout: header, owner, group, SACL, DACL.
+    let mut total = 20;
+    let acl_size = |a: &AclBuf| if a.null { 0 } else { 8 + a.len };
+    total += owner.map_or(0, |s| s.len) + group.map_or(0, |s| s.len);
+    if has_sacl {
+        total += acl_size(&sacl);
+    }
+    if has_dacl {
+        total += acl_size(&dacl);
+    }
+    // SAFETY: a plain allocation (zeroed: LMEM_ZEROINIT).
+    let p = unsafe { LocalAlloc(0x40, total) };
+    if p.is_null() {
+        return fail(ERROR_NOT_ENOUGH_MEMORY, 0);
+    }
+    // SAFETY: `p` has `total` zeroed bytes laid out as computed.
+    unsafe {
+        let mut at = 20usize;
+        let put = |bytes: &[u8], field: usize, at: &mut usize| {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(*at), bytes.len());
+            p.add(field).cast::<u32>().write_unaligned(*at as u32);
+            *at += bytes.len();
+        };
+        if let Some(s) = owner {
+            put(s.bytes(), 4, &mut at);
+        }
+        if let Some(s) = group {
+            put(s.bytes(), 8, &mut at);
+        }
+        let write_acl = |a: &AclBuf, field: usize, at: &mut usize| {
+            if a.null {
+                return;
+            }
+            let base = p.add(*at);
+            *base = 2; // ACL_REVISION
+            base.add(2).cast::<u16>().write_unaligned((8 + a.len) as u16);
+            base.add(4).cast::<u16>().write_unaligned(a.count);
+            core::ptr::copy_nonoverlapping(a.bytes.as_ptr(), base.add(8), a.len);
+            p.add(field).cast::<u32>().write_unaligned(*at as u32);
+            *at += 8 + a.len;
+        };
+        if has_sacl {
+            control |= SE_SACL_PRESENT;
+            write_acl(&sacl, 12, &mut at);
+        }
+        if has_dacl {
+            control |= SE_DACL_PRESENT;
+            write_acl(&dacl, 16, &mut at);
+        }
+        *p = 1;
+        p.add(2).cast::<u16>().write_unaligned(control);
+        *out = p;
+        if !size.is_null() {
+            *size = total as u32;
+        }
+    }
+    1
+}
+
+/// GetSecurityDescriptorGroup: as GetSecurityDescriptorOwner (group
+/// pointer at 16 absolute, offset at 8 self-relative; SE_GROUP_DEFAULTED).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSecurityDescriptorGroup(
+    sd: *const u8,
+    group: *mut *mut u8,
+    defaulted: *mut i32,
+) -> i32 {
+    if IsValidSecurityDescriptor(sd) == 0 || group.is_null() {
+        return fail(ERROR_INVALID_SECURITY_DESCR, 0);
+    }
+    let c = control(sd);
+    // SAFETY: the caller's descriptor and outputs.
+    unsafe {
+        *group = if c & SE_SELF_RELATIVE != 0 {
+            let off = sd.add(8).cast::<u32>().read_unaligned() as usize;
+            if off == 0 { core::ptr::null_mut() } else { sd.add(off).cast_mut() }
+        } else {
+            sd.add(16).cast::<*mut u8>().read_unaligned()
+        };
+        if !defaulted.is_null() {
+            *defaulted = i32::from(c & 2 != 0);
+        }
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSecurityDescriptorControl(
+    sd: *const u8,
+    out: *mut u16,
+    revision: *mut u32,
+) -> i32 {
+    if IsValidSecurityDescriptor(sd) == 0 || out.is_null() || revision.is_null() {
+        return fail(ERROR_INVALID_SECURITY_DESCR, 0);
+    }
+    // SAFETY: the caller's descriptor and outputs.
+    unsafe {
+        *out = control(sd);
+        *revision = u32::from(*sd);
+    }
+    1
+}
+
+/// GetSecurityDescriptorLength: a self-relative descriptor's bytes up to
+/// the end of its last part; an absolute one's header (40).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSecurityDescriptorLength(sd: *const u8) -> u32 {
+    if IsValidSecurityDescriptor(sd) == 0 {
+        return 0;
+    }
+    if control(sd) & SE_SELF_RELATIVE == 0 {
+        return 40;
+    }
+    let mut end = 20usize;
+    // SAFETY: the offsets inside the caller's self-relative descriptor.
+    unsafe {
+        for field in [4usize, 8] {
+            let off = sd.add(field).cast::<u32>().read_unaligned() as usize;
+            if off != 0 {
+                if let Some((_, _, n)) = read_sid(sd.add(off)) {
+                    end = end.max(off + sid_len(n));
+                }
+            }
+        }
+        for field in [12usize, 16] {
+            let off = sd.add(field).cast::<u32>().read_unaligned() as usize;
+            if off != 0 {
+                let size = usize::from(sd.add(off + 2).cast::<u16>().read_unaligned());
+                end = end.max(off + size);
+            }
+        }
+    }
+    end as u32
 }
