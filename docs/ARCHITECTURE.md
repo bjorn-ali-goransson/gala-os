@@ -308,6 +308,16 @@ RtlVirtualUnwind (unwind codes; in a prologue only those that ran; an
 epilogue emulated from its instructions; leaf functions without unwind
 data pop their return address) and calls each UNW_FLAG_EHANDLER handler
 with a DISPATCHER_CONTEXT, until one returns ExceptionContinueExecution.
+The DISPATCHER_CONTEXT has its documented size and fields, with
+ControlPcIsUnwound set when the frame's ControlPc is a return address:
+RtlVirtualUnwind marks a CONTEXT it unwound to a call with
+CONTEXT_UNWOUND_TO_CALL (0x20000000, cleared after a machine frame), and
+a raised exception's CONTEXT has it (its Rip is the raise call's return
+address), a hardware exception's does not (NonVolatileRegisters is
+null). C++ exceptions as MSVC compiles them, with Microsoft's
+vcruntime140 (catch, rethrow, throw from catch, in destructors, through
+SEH __finally/__except, and /EHa structured exceptions in catch (...)),
+are checked by `cxx_eh_test`.
 RtlUnwindEx walks from its caller to the target frame calling
 UNW_FLAG_UHANDLER handlers with EXCEPTION_UNWINDING (plus
 EXCEPTION_TARGET_UNWIND for the target), then resumes the target frame's

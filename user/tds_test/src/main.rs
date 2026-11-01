@@ -14,7 +14,7 @@
 //!   prints the row;
 //! - waits for tempdb to be online (the first start upgrades model and
 //!   msdb first), disconnects and waits for sqlservr.exe to end itself
-//!   after its idle time (`-w1`);
+//!   after its idle time (`-w1`; SHUTDOWN: see ROADMAP);
 //! - then starts the same instance again as SqlLocalDB starts an existing
 //!   one (without the first-start arguments) and does the same.
 //!
@@ -763,8 +763,7 @@ fn batch(c: &mut Conn, sql: &str, step: u32) -> Result<Seen, u32> {
 
 /// One start of the instance with command line `args`: connect, log in,
 /// query, wait for tempdb, disconnect, and wait for sqlservr.exe to end
-/// itself after its idle time (`-w1`). (SHUTDOWN is accepted, but
-/// sqlservr then fails while terminating: ROADMAP.)
+/// itself after its idle time (`-w1`).
 fn session(args: &str, label: &[u8]) -> Result<(), u32> {
     out(b"tds_test: ");
     out(label);
@@ -818,6 +817,8 @@ fn session(args: &str, label: &[u8]) -> Result<(), u32> {
     if !online {
         return Err(fail(36, b"tempdb not online", 0));
     }
+    // Disconnect; the instance ends itself after its idle time (-w1).
+    // (SHUTDOWN is accepted, but sqlservr then terminates: ROADMAP.)
     // SAFETY: our handles.
     unsafe {
         CloseHandle(pipe);

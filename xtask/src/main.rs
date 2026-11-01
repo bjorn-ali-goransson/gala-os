@@ -860,6 +860,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-time-l1-1-0.dll", "dotnet"),
     ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-utility-l1-1-0.dll", "dotnet"),
     ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "dotnet"),
+    // C++ exceptions with Microsoft's C++ runtime (the JDK's
+    // redistributable copies, app-local).
+    ("cxx_eh_test", "ntdll.dll", "Windows/System32"),
+    ("cxx_eh_test", "kernel32.dll", "Windows/System32"),
+    ("cxx_eh_test", "user/bin/cxx_eh_test.exe", "gala"),
+    ("cxx_eh_test", "target/prebuilt/jdk/jdk-21.0.5+11/bin/vcruntime140.dll", "gala"),
+    ("cxx_eh_test", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "gala"),
     ("java_hello", "ntdll.dll", "Windows/System32"),
     ("java_hello", "kernel32.dll", "Windows/System32"),
     ("java_hello", "advapi32.dll", "Windows/System32"),
@@ -1743,6 +1750,14 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        // C++ exception handling as MSVC compiles it, with vcruntime140
+        // (user/cxx_eh_test: clang-built, checked-in binary).
+        name: "cxx_eh_test",
+        cmdline: "qemu_exit run=cxx_eh_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["cxx_eh_test: ok", "exited with status 0x00000000"],
+    },
     Scenario {
         name: "timer_test",
         cmdline: "qemu_exit run=timer_test.exe",

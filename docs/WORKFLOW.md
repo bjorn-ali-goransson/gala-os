@@ -104,6 +104,17 @@ shows it.
   event when they start, so a wait that never returns shows as the
   thread's last line. Do not delete the events file of a running
   VM (it is still open: `/proc/<qemu pid>/fd/` reaches it).
+- **Tracing exception dispatch in a third-party program**: a temporary
+  `GalaRecordMissing` call in gala's ntdll dispatcher (`seh.rs`: code and
+  address in the detail; one per walked frame with its pc and handler)
+  shows up in the `events=syscall` stream, in order and per thread; map
+  addresses to modules with `events=image` (base and size per process).
+  Revert before committing.
+- **C++ exception tests**: `user/cxx_eh_test` is C++ built with clang
+  for x86_64-pc-windows-msvc and lld-link (`build.sh`, import libraries
+  from .def files with llvm-dlltool), no CRT, against Microsoft's
+  vcruntime140 (the JDK's, app-local); the binary is checked in (rebuild
+  with the script; the build is reproducible).
 - **A scenario needs a server and a client at once**: `run=` starts
   programs one after another, so the client starts the server itself
   (CreateProcessW) and waits for it, as `tds_test` does with sqlservr.
@@ -225,6 +236,11 @@ shows it.
   thread running on another CPU has stopped, on Windows as on gala. A test
   that needs it stopped calls GetThreadContext first (kernel32_thread_test
   was flaky until it did).
+- **Known intermittent**: `java_http` once (2026-11-01) died with
+  EXCEPTION_ILLEGAL_INSTRUCTION in C1-compiled code (HotSpot patching
+  JIT code while another CPU runs it; cross-modifying code on 2 vCPUs,
+  possibly TCG); it passed on rerun. If it recurs, record it with
+  QEMU record/replay (OBSERVABILITY.md).
 - **Flaky boot tests** usually mean a race; rerun the one scenario a few
   times (`cargo xtask boot-test name`) before blaming CI.
 

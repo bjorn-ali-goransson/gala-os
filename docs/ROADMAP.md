@@ -445,6 +445,11 @@ H11. **busybox httpd and wget over loopback**: next. busybox-w32's httpd
    client) fetches files from it over 127.0.0.1, in one boot: sockets
    from C programs and busybox's networking, output as on Windows.
 
+Agreed order, updated (2026-11-01): SQL Server's SHUTDOWN first; then
+the security model and disk work through programs that need them, in the
+order judged best (proposed: Win32-OpenSSH's sshd, then PostgreSQL, then
+SQL Server LocalDB kept across reboots, then MinGit), self-paced.
+
 Agreed order (2026-11-01, after an outside review pointed out that the
 security model - tokens, security descriptors, access checks - is the
 hardest piece to retrofit, and that files and the registry live only in
@@ -858,17 +863,29 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         waiting for tempdb to be online, disconnecting and waiting for the
         instance to end itself after `-w1`; the second start recovers in a
         few seconds and answers too (about 150 s for the scenario).
-        **P1 step 5 is done** but for `SHUTDOWN`: it is accepted ("Server
-        shut down by request from login GALA\gala") also once the
-        instance is fully up, but then sqlservr dies with "exception
-        during stack unwinding" (ex_terminator; it starts SqlDumper, which
-        cannot load: 0xc0000135). A probe in gala's exception dispatcher
-        saw only SQL's exception 0x42AC and two C++ exceptions
-        (0xE06D7363) raised there, so a C++ exception thrown or rethrown
-        while another is in flight (in a catch block or a destructor)
-        makes vcruntime140 call terminate: to be reproduced with a C++
-        test program (clang targeting x86_64-pc-windows-msvc against
-        vcruntime140) and fixed in gala's dispatch/unwind. Also open, not
+        **P1 step 5 is done** but for `SHUTDOWN` (investigated
+        2026-11-01, not solved): it is accepted ("Server shut down by
+        request from login GALA\gala"), also once the instance is fully
+        up, but then sqlservr calls terminate ("exception during stack
+        unwinding"; SqlDumper cannot load: 0xc0000135). Ruled out: gala's
+        C++/SEH dispatch in general (`cxx_eh_test`, 12 cases with
+        vcruntime140 incl. /EHa; all pass). Fixed on the way:
+        DISPATCHER_CONTEXT's ControlPcIsUnwound and size (`seh_test`).
+        Found with temporary probes (dispatcher events through
+        GalaRecordMissing, which the syscall event stream records in
+        order): right after closing its trace file the session thread
+        throws one C++ exception (thrown from sqlDK through vcruntime140)
+        and the walk reaches sqllang+0xee3114 (a frame with
+        __CxxFrameHandler4 that does not catch it), sqllang+0xc24f, then
+        sqllang+0xc6cc, whose FH4 handler terminates (a noexcept frame,
+        judging by Wine's FH4). So either FH4 at 0xee3114 should have
+        caught it (state, frame or type matching that differs on gala),
+        or the throw itself does not happen on Windows (something earlier
+        answered differently; no failing system call or ledger entry
+        precedes it). Next idea: dump FH4's view at 0xee3114 (its
+        FuncInfo4 try blocks against the ControlPc and EstablisherFrame
+        gala passes; parsing only data, no code). The scenario ends the
+        instance by its idle time meanwhile. Also open, not
         fatal: the startup assertion HadrWsfcUtil.cpp:516 'fSuccess' (a
         dump at every start, cause unknown), the service master key
         (error 21), GetActualSectorSize on new files (error 3),

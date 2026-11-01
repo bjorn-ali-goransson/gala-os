@@ -22,6 +22,10 @@
 //!   at the target with rax = the return value and the target frame's
 //!   nonvolatile registers.
 //! - The same for a hardware exception (an access violation).
+//! - DISPATCHER_CONTEXT.ControlPcIsUnwound: TRUE for a frame whose
+//!   ControlPc is a return address (reached by unwinding a call), in the
+//!   search and the unwind (what __CxxFrameHandler4 uses to find the
+//!   state of the call).
 //! - Unwind consolidation (STATUS_UNWIND_CONSOLIDATE, how C++ catch
 //!   blocks run): after the unwind the callback in ExceptionInformation[0]
 //!   runs while the stack below the target is still intact, a walk from it
@@ -76,6 +80,8 @@ const DC_IMAGE_BASE: usize = 0x08;
 const DC_CONTEXT_RECORD: usize = 0x28;
 const DC_LANGUAGE_HANDLER: usize = 0x30;
 const DC_HISTORY_TABLE: usize = 0x40;
+/// ControlPcIsUnwound (BOOLEAN after ScopeIndex).
+const DC_CONTROL_PC_IS_UNWOUND: usize = 0x4c;
 
 // seh_outer(f, arg): pushes rbx and rsi, allocates 0x28 bytes, sets rbx,
 // records its rsp (its establisher frame) and calls seh_inner(f, arg);
@@ -215,6 +221,9 @@ static INNER: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
 static OUTER: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 /// The value the outer handler unwinds with.
 static UNWIND_VALUE: AtomicU64 = AtomicU64::new(0);
+/// ControlPcIsUnwound as each handler saw it: inner search, inner unwind,
+/// outer search, outer unwind (2: not called).
+static UNWOUND: [AtomicU64; 4] = [const { AtomicU64::new(2) }; 4];
 
 fn rd(p: *const u8, off: usize) -> u64 {
     // SAFETY: offsets inside the structures the system passes.
@@ -234,16 +243,21 @@ fn reset() {
     for a in INNER.iter().chain(OUTER.iter()) {
         a.store(0, Ordering::SeqCst);
     }
+    for a in &UNWOUND {
+        a.store(2, Ordering::SeqCst);
+    }
 }
 
 extern "system" fn inner_handler(
     record: *mut u8,
     _frame: u64,
     context: *mut u8,
-    _dispatcher: *mut u8,
+    dispatcher: *mut u8,
 ) -> u32 {
     let calls = INNER[0].fetch_add(1, Ordering::SeqCst);
     let flags = rd32(record, ER_FLAGS);
+    let unwound = u64::from(rd32(dispatcher, DC_CONTROL_PC_IS_UNWOUND) & 0xff);
+    UNWOUND[usize::from(flags & EXCEPTION_UNWINDING != 0)].store(unwound, Ordering::SeqCst);
     if calls < 2 {
         INNER[1 + calls as usize].store(u64::from(flags), Ordering::SeqCst);
     }
@@ -278,6 +292,8 @@ extern "system" fn outer_handler(
 ) -> u32 {
     let calls = OUTER[0].fetch_add(1, Ordering::SeqCst);
     let flags = rd32(record, ER_FLAGS);
+    let unwound = u64::from(rd32(dispatcher, DC_CONTROL_PC_IS_UNWOUND) & 0xff);
+    UNWOUND[2 + usize::from(flags & EXCEPTION_UNWINDING != 0)].store(unwound, Ordering::SeqCst);
     if calls < 2 {
         OUTER[1 + calls as usize].store(u64::from(flags), Ordering::SeqCst);
     }
@@ -612,6 +628,11 @@ fn run() -> Result<(), u32> {
     c.eq(outer(7), outer_handler as *const () as u64)?; // LanguageHandler
     c.eq(RESUME_RBX.load(Ordering::SeqCst), OUTER_RBX)?;
     c.eq(RESUME_RSI.load(Ordering::SeqCst), OUTER_RBX)?;
+    // Both frames' ControlPc is a return address (they called the raising
+    // function), in the search and the unwind: ControlPcIsUnwound.
+    for u in &UNWOUND {
+        c.eq(u.load(Ordering::SeqCst), 1)?;
+    }
 
     // A hardware exception: the access violation in fault_it, passed on by
     // the inner handler and unwound by the outer one with 43.
@@ -630,6 +651,11 @@ fn run() -> Result<(), u32> {
     c.eq(outer(2), (EXCEPTION_UNWINDING | EXCEPTION_TARGET_UNWIND).into())?;
     c.eq(outer(3), STATUS_ACCESS_VIOLATION.into())?;
     c.eq(RESUME_RBX.load(Ordering::SeqCst), OUTER_RBX)?;
+    // The faulting function has no handler; the frames above it were
+    // reached by unwinding calls.
+    for u in &UNWOUND {
+        c.eq(u.load(Ordering::SeqCst), 1)?;
+    }
 
     // Unwind consolidation: the callback runs, then seh_outer continues
     // where it said, with rax = 44 and its own nonvolatile registers.

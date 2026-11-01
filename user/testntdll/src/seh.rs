@@ -65,6 +65,11 @@ const CONTEXT_SIZE: usize = 0x4d0;
 const CTX_RAX: usize = 0x78;
 const CTX_RSP: usize = 0x98;
 const CTX_RIP: usize = 0xf8;
+/// CONTEXT.ContextFlags, and the flag RtlVirtualUnwind sets when it
+/// unwound a call (the new Rip is a return address), as Windows does
+/// since 8: DISPATCHER_CONTEXT.ControlPcIsUnwound comes from it.
+const CTX_FLAGS: usize = 0x30;
+const CONTEXT_UNWOUND_TO_CALL: u32 = 0x2000_0000;
 /// Integer register `n` in unwind-code numbering (rax, rcx, rdx, rbx,
 /// rsp, rbp, rsi, rdi, r8..r15): the CONTEXT keeps them in that order.
 const fn ctx_gpr(n: usize) -> usize {
@@ -98,6 +103,25 @@ impl Context {
         u64::from_le_bytes(self.0[off..off + 8].try_into().unwrap_or([0; 8]))
     }
 
+    /// Marks whether Rip was reached by unwinding a call.
+    fn set_unwound(&mut self, unwound: bool) {
+        let mut b = [0u8; 4];
+        b.copy_from_slice(&self.0[CTX_FLAGS..CTX_FLAGS + 4]);
+        let mut flags = u32::from_le_bytes(b);
+        if unwound {
+            flags |= CONTEXT_UNWOUND_TO_CALL;
+        } else {
+            flags &= !CONTEXT_UNWOUND_TO_CALL;
+        }
+        self.0[CTX_FLAGS..CTX_FLAGS + 4].copy_from_slice(&flags.to_le_bytes());
+    }
+
+    fn unwound(&self) -> bool {
+        let mut b = [0u8; 4];
+        b.copy_from_slice(&self.0[CTX_FLAGS..CTX_FLAGS + 4]);
+        u32::from_le_bytes(b) & CONTEXT_UNWOUND_TO_CALL != 0
+    }
+
     fn set(&mut self, off: usize, v: u64) {
         self.0[off..off + 8].copy_from_slice(&v.to_le_bytes());
     }
@@ -124,7 +148,11 @@ struct DispatcherContext {
     handler_data: u64,
     history_table: *mut u8,
     scope_index: u32,
-    fill0: u32,
+    /// TRUE when ControlPc is a return address (the frame was reached by
+    /// unwinding a call), FALSE for a faulting instruction.
+    control_pc_is_unwound: u8,
+    fill0: [u8; 3],
+    non_volatile_registers: *mut u8,
 }
 
 /// EXCEPTION_ROUTINE: (record, establisher frame, context, dispatcher
@@ -545,6 +573,7 @@ fn virtual_unwind(
     let frame = establisher(ctx, info, true);
 
     if !in_prologue && unwind_epilogue(ctx, pc, function, first_frame_reg, ptrs) {
+        ctx.set_unwound(true);
         return (0, 0, frame);
     }
 
@@ -609,6 +638,7 @@ fn virtual_unwind(
             ctx.set(CTX_RIP, stack64(rsp));
             ctx.set(CTX_RSP, rsp + 8);
         }
+        ctx.set_unwound(!machine_frame);
         if flags & kind & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) != 0 && !in_prologue {
             return (base + rd32(after_codes) as usize, after_codes as u64 + 4, frame);
         }
@@ -669,6 +699,7 @@ fn unwind_frame(kind: u32, ctx: &mut Context) -> (usize, u64, u64, u64, *const R
         let rsp = ctx.get(CTX_RSP);
         ctx.set(CTX_RIP, stack64(rsp));
         ctx.set(CTX_RSP, rsp + 8);
+        ctx.set_unwound(true);
         return (0, 0, rsp, 0, entry);
     }
     let (h, data, frame) = virtual_unwind(
@@ -780,7 +811,9 @@ fn dispatch_frames(record: *mut u8, context: *mut u8) -> bool {
                 handler_data: data,
                 history_table: core::ptr::null_mut(),
                 scope_index: 0,
-                fill0: 0,
+                control_pc_is_unwound: u8::from(frame_ctx.unwound()),
+                fill0: [0; 3],
+                non_volatile_registers: core::ptr::null_mut(),
             };
             // SAFETY: the image's unwind data names an EXCEPTION_ROUTINE.
             let routine: LanguageHandler = unsafe { core::mem::transmute(handler) };
@@ -919,7 +952,9 @@ extern "system" fn unwind_to(
                 handler_data: data,
                 history_table: core::ptr::null_mut(),
                 scope_index: 0,
-                fill0: 0,
+                control_pc_is_unwound: u8::from(frame_ctx.unwound()),
+                fill0: [0; 3],
+                non_volatile_registers: core::ptr::null_mut(),
             };
             // SAFETY: the image's unwind data names an EXCEPTION_ROUTINE.
             let routine: LanguageHandler = unsafe { core::mem::transmute(handler) };
@@ -956,6 +991,13 @@ extern "system" fn unwind_to(
 /// RtlRaiseException's work: dispatch the record raised with `context`
 /// (its caller's registers); resume it if a handler continued execution.
 extern "system" fn raise(record: *mut u8, context: *mut u8) -> ! {
+    // Its Rip is the return address of the call that raised: unwound to a
+    // call (a hardware exception's context, from the kernel, is not).
+    // SAFETY: the caller's CONTEXT (ContextFlags at 0x30).
+    unsafe {
+        let flags = context.add(CTX_FLAGS).cast::<u32>();
+        flags.write_unaligned(flags.read_unaligned() | CONTEXT_UNWOUND_TO_CALL);
+    }
     dispatch_exception(record, context)
 }
 
