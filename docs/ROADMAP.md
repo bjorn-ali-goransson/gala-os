@@ -1018,9 +1018,12 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       before each system call returns and replayed over the boot's files
       at the next boot; a full log area is compacted into a snapshot in
       the other half (`persist_test`, two boots of one disk; host tests of
-      the format, replay, snapshot and crash cases). Next: D3 (the
-      registry kept the same way), then LocalDB across a reboot (create a
-      database, reboot, query it). Open: the JDK's console path (GetConsoleMode succeeding
+      the format, replay, snapshot and crash cases). **D3 done
+      (2026-11-01)**: the registry's changes (keys, values, descriptors;
+      not volatile keys) are records in `C:\Windows\System32\config\
+      gala.reglog`, which D2 keeps, replayed after the seed
+      (`persist_test`'s registry part). Next: LocalDB across a reboot
+      (create a database, reboot, query it), then MinGit. Open: the JDK's console path (GetConsoleMode succeeding
       on the standard handles made java_http fail intermittently).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)

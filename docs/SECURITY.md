@@ -156,4 +156,7 @@ Then the disk: D1 a virtio-blk driver (done, 2026-11-01: `disk_test`;
 `\\.\PhysicalDrive0` for Administrators and SYSTEM only), D2 a file
 system with descriptors (done, 2026-11-01: with the boot option
 `persist` the changes to C:, descriptors included, are a log on the disk
-replayed at boot; `persist_test`), D3 registry hives on it.
+replayed at boot; `persist_test`), D3 the registry kept (done,
+2026-11-01: its changes, key descriptors included, are a log in a file
+on C:, `gala.reglog`, replayed after the seed; not Windows' hive
+format).

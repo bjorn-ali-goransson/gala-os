@@ -1956,16 +1956,37 @@ memory, and the disk is only written (never read) while running.
 - Limits and TODO: all kept files are in memory (and are read from the
   disk only at boot); a snapshot is built in memory under the file
   system's lock (twice the kept data, briefly); writes through mapped
-  views of a file (data sections) are not recorded; the registry is not
-  kept yet (D3); one change log for the whole of C: (no second volume).
+  views of a file (data sections) are not recorded; one change log for
+  the whole of C: (no second volume).
+
+### The registry kept (D3)
+
+With `persist`, the registry's changes are kept too, through the file
+system rather than a format of their own: `nt::reglog` records
+(CreateKey with class, time and a `reset` flag for snapshots, SetValue,
+DeleteValue, DeleteKey with everything below, SetSecurity; keyed by the
+full name `\REGISTRY\...`, CRC-checked like `fs::log`) are appended to
+`C:\Windows\System32\config\gala.reglog`, and D2 keeps that file.
+The `Registry` records like the ramfs (boot keys, dirty keys,
+tombstones of deleted boot keys, `apply`, `snapshot`); volatile keys are
+never recorded, so they are gone after a restart, as on Windows.
+`persist::sync` first moves the registry's records into the file (the
+registry's lock is never taken inside the file system's), then writes
+the file system's records; past 1 MiB, or when records were lost, the
+file is rewritten as a snapshot. `persist::mount` replays the file after
+the file system's log, i.e. after registry.seed and the boot's `registry`
+modules. Replayed value changes keep the key's last-write time. Tests:
+`persist_test`'s registry part (HKCU values of three types, a subkey, a
+deleted value and key, a volatile key) and host tests of the records,
+replay and snapshot.
 
 ## Not done yet
 
 suspension/context of threads running on other CPUs, ranged (invlpg)
 shootdowns and PCIDs (ROADMAP S4), a real ntdll and
 kernel32 (gala runs test stand-ins), process creation from user mode,
-security, a persistent registry (registry security, symbolic link keys,
-change notifications, WOW64 views), files on the disk read on demand
+security, registry symbolic link keys, change notifications and WOW64
+views, hive files in Windows' format, files on the disk read on demand
 (D2 keeps them in memory),
 interrupts for devices (virtio-net and virtio-blk poll), AcceptEx with
 receive data, ConnectEx with send data, UDP, IPv6,

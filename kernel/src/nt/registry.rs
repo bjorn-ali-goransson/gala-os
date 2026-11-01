@@ -9,9 +9,9 @@
 //! enumeration returns, and values in the order they were first set.
 //!
 //! The tree starts from `registry.seed` (the keys real programs read). It
-//! lives in memory only: nothing is saved across boots, so the volatile
-//! option only matters for its rule that a volatile key's children must be
-//! volatile. There are no security descriptors yet (every caller may do
+//! lives in memory; with the boot option `persist` its changes are kept
+//! across boots (D3, nt::reglog), volatile keys excepted, and a volatile
+//! key's children must be volatile. There are no security descriptors yet (every caller may do
 //! everything its handle's access allows), no symbolic link keys (the seed
 //! has `CurrentControlSet` itself), no change notifications and no
 //! WOW64 views. See docs/ARCHITECTURE.md, "Registry".
@@ -19,6 +19,7 @@
 use alloc::vec::Vec;
 
 use super::object::{GenericMapping, READ_CONTROL, STANDARD_RIGHTS_REQUIRED};
+use super::reglog::RegOp;
 use super::status::NtStatus;
 use crate::mm::heap::{AllocError, TryVec};
 use crate::sync::IrqMutex;
@@ -88,11 +89,22 @@ struct Node {
     opens: usize,
     /// Its security descriptor (self-relative; nt::security), if assigned.
     security: Option<Vec<u8>>,
+    /// Made by the boot (the seed, the boot's own keys).
+    boot: bool,
+    /// Made or changed since boot, or by the change log (`snapshot`).
+    dirty: bool,
 }
 
 /// The registry tree.
 pub struct Registry {
     nodes: Vec<Option<Node>>,
+    /// Changes are recorded (nt::reglog) while this is on.
+    pub recording: bool,
+    replaying: bool,
+    ops: Vec<RegOp>,
+    ops_lost: bool,
+    /// Full names of boot keys deleted since boot.
+    tombstones: Vec<Vec<u16>>,
 }
 
 fn upcase(c: u16) -> u16 {
@@ -116,6 +128,12 @@ fn copy(s: &[u16]) -> Result<Vec<u16>, AllocError> {
     Ok(v)
 }
 
+fn copy_bytes(s: &[u8]) -> Option<Vec<u8>> {
+    let mut v = Vec::new();
+    v.try_extend_from_slice(s).ok()?;
+    Some(v)
+}
+
 fn nomem(_: AllocError) -> NtStatus {
     NtStatus::NO_MEMORY
 }
@@ -123,7 +141,14 @@ fn nomem(_: AllocError) -> NtStatus {
 impl Registry {
     /// A tree with only `\REGISTRY`, `\REGISTRY\MACHINE` and `\REGISTRY\USER`.
     pub fn new() -> Result<Registry, AllocError> {
-        let mut r = Registry { nodes: Vec::new() };
+        let mut r = Registry {
+            nodes: Vec::new(),
+            recording: false,
+            replaying: false,
+            ops: Vec::new(),
+            ops_lost: false,
+            tombstones: Vec::new(),
+        };
         r.nodes.try_push(Some(Node {
             name: copy(&wide::<8>("REGISTRY"))?,
             parent: ROOT,
@@ -135,6 +160,8 @@ impl Registry {
             deleted: false,
             opens: 1, // never freed
             security: None,
+            boot: true,
+            dirty: false,
         }))?;
         for name in ["MACHINE", "USER"] {
             let w = wide::<8>(name);
@@ -151,6 +178,10 @@ impl Registry {
 
     pub fn set_security(&mut self, id: KeyId, sd: Vec<u8>) -> Result<(), NtStatus> {
         self.node_mut(id)?.security = Some(sd);
+        self.record(id, |key, n| {
+            let descriptor = copy_bytes(n.security.as_deref().unwrap_or(&[]))?;
+            Some(RegOp::SetSecurity { key, descriptor })
+        });
         Ok(())
     }
 
@@ -243,6 +274,8 @@ impl Registry {
             deleted: false,
             opens: 0,
             security: None,
+            boot: !self.recording && !self.replaying,
+            dirty: false,
         };
         // Room first, so that a failure leaves the tree as it was.
         self.node_mut(parent)?.children.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -266,6 +299,10 @@ impl Registry {
         let p = self.node_mut(parent)?;
         let _ = p.children.try_insert(at, id);
         p.last_write = now;
+        self.record(id, |key, n| {
+            let class = copy(&n.class).ok()?;
+            Some(RegOp::CreateKey { key, class, last_write: n.last_write, reset: false })
+        });
         Ok(id)
     }
 
@@ -320,6 +357,7 @@ impl Registry {
             return Err(CANNOT_DELETE);
         }
         let parent = node.parent;
+        self.record_delete(id);
         let p = self.node_mut(parent)?;
         p.children.retain(|&c| c != id);
         p.last_write = now;
@@ -365,10 +403,14 @@ impl Registry {
         if let Some(v) = node.values.iter_mut().find(|v| same(&v.name, name)) {
             v.kind = kind;
             v.data = bytes;
-            return Ok(());
+        } else {
+            let value = Value { name: copy(name).map_err(nomem)?, kind, data: bytes };
+            node.values.try_push(value).map_err(nomem)?;
         }
-        let value = Value { name: copy(name).map_err(nomem)?, kind, data: bytes };
-        node.values.try_push(value).map_err(nomem)
+        self.record(id, |key, _| {
+            Some(RegOp::SetValue { key, name: copy(name).ok()?, kind, data: copy_bytes(data)? })
+        });
+        Ok(())
     }
 
     /// NtDeleteValueKey.
@@ -381,6 +423,7 @@ impl Registry {
             .ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
         node.values.remove(at);
         node.last_write = now;
+        self.record(id, |key, _| Some(RegOp::DeleteValue { key, name: copy(name).ok()? }));
         Ok(())
     }
 
@@ -542,6 +585,191 @@ fn value_maxima(node: &Node) -> (u32, u32) {
 
 /// NtQueryValueKey / NtEnumerateValueKey information about `value` in
 /// class `class`: (the whole structure, the size of its fixed part).
+/// The change log (nt::reglog): recording, replay and snapshots.
+impl Registry {
+    fn push_op(&mut self, op: RegOp) {
+        if self.ops.try_push(op).is_err() {
+            self.ops_lost = true;
+        }
+    }
+
+    /// Records a change of key `id` (not of a volatile one), marking it
+    /// dirty.
+    fn record(&mut self, id: KeyId, make: impl FnOnce(Vec<u16>, &Node) -> Option<RegOp>) {
+        let active = self.recording || self.replaying;
+        let Ok(n) = self.node_mut(id) else { return };
+        if n.volatile || !active {
+            return;
+        }
+        n.dirty = true;
+        if !self.recording {
+            return;
+        }
+        let op = match (self.full_name(id), self.node(id)) {
+            (Ok(key), Ok(n)) => make(key, n),
+            _ => None,
+        };
+        match op {
+            Some(op) => self.push_op(op),
+            None => self.ops_lost = true,
+        }
+    }
+
+    /// Records that key `id` goes (a tombstone if the boot made it).
+    fn record_delete(&mut self, id: KeyId) {
+        let Ok(n) = self.node(id) else { return };
+        if n.volatile || !(self.recording || self.replaying) {
+            return;
+        }
+        let boot = n.boot;
+        let Ok(key) = self.full_name(id) else {
+            self.ops_lost = true;
+            return;
+        };
+        if boot
+            && !self.tombstones.iter().any(|t| same(t, &key))
+            && copy(&key).ok().is_none_or(|k| self.tombstones.try_push(k).is_err())
+        {
+            self.ops_lost = true;
+        }
+        if self.recording {
+            self.push_op(RegOp::DeleteKey { key });
+        }
+    }
+
+    /// The changes recorded since the last call, and whether some could
+    /// not be (then only a `snapshot` describes them).
+    pub fn take_ops(&mut self) -> (Vec<RegOp>, bool) {
+        let lost = core::mem::take(&mut self.ops_lost);
+        (core::mem::take(&mut self.ops), lost)
+    }
+
+    pub fn has_ops(&self) -> bool {
+        !self.ops.is_empty() || self.ops_lost
+    }
+
+    /// Forgets the recorded changes: the next sync writes a snapshot.
+    pub fn lose_ops(&mut self) {
+        self.ops = Vec::new();
+        self.ops_lost = true;
+    }
+
+    /// The key a full name (`\REGISTRY\...`) names.
+    fn by_name(&self, key: &[u16]) -> Result<KeyId, NtStatus> {
+        self.lookup(ROOT, Self::absolute(key)?)
+    }
+
+    /// Removes `id` and everything below it (nothing has them open while
+    /// the log is replayed; an open one stays as a deleted key).
+    fn delete_tree(&mut self, id: KeyId) -> Result<(), NtStatus> {
+        let children = {
+            let mut v = Vec::new();
+            v.try_extend_from_slice(&self.node(id)?.children).map_err(nomem)?;
+            v
+        };
+        for c in children {
+            self.delete_tree(c)?;
+        }
+        self.delete_key(id, 0)
+    }
+
+    /// Replays one change (marking what it touches dirty, recording
+    /// nothing). A change to a key that is not there is skipped.
+    pub fn apply(&mut self, op: &RegOp) -> Result<(), NtStatus> {
+        let was = core::mem::replace(&mut self.recording, false);
+        self.replaying = true;
+        let result = self.apply_inner(op);
+        self.replaying = false;
+        self.recording = was;
+        match result {
+            Err(NtStatus::OBJECT_NAME_NOT_FOUND | NtStatus::OBJECT_PATH_NOT_FOUND) => Ok(()),
+            other => other,
+        }
+    }
+
+    fn apply_inner(&mut self, op: &RegOp) -> Result<(), NtStatus> {
+        match op {
+            RegOp::CreateKey { key, class, last_write, reset } => {
+                let mut at = ROOT;
+                for component in Self::components(Self::absolute(key)?) {
+                    let component = component?;
+                    at = match self.child(at, component)? {
+                        Some(next) => next,
+                        None => self.create_child(at, component, false, class, *last_write)?,
+                    };
+                }
+                let n = self.node_mut(at)?;
+                if *reset {
+                    n.values = Vec::new();
+                }
+                n.last_write = *last_write;
+                if !n.volatile {
+                    n.dirty = true;
+                }
+                Ok(())
+            }
+            // Value changes keep the key's time (the log has no times for
+            // them; a snapshot's CreateKey carries the key's).
+            RegOp::SetValue { key, name, kind, data } => {
+                let id = self.by_name(key)?;
+                let time = self.node(id)?.last_write;
+                self.set_value(id, name, *kind, data, time)
+            }
+            RegOp::DeleteValue { key, name } => {
+                let id = self.by_name(key)?;
+                let time = self.node(id)?.last_write;
+                self.delete_value(id, name, time)
+            }
+            RegOp::DeleteKey { key } => {
+                let id = self.by_name(key)?;
+                self.delete_tree(id)
+            }
+            RegOp::SetSecurity { key, descriptor } => {
+                let id = self.by_name(key)?;
+                let sd = copy_bytes(descriptor).ok_or(NtStatus::NO_MEMORY)?;
+                self.set_security(id, sd)
+            }
+        }
+    }
+
+    /// The changes since boot from scratch: the boot keys that are gone,
+    /// then every dirty key (parents first) with its descriptor and values.
+    pub fn snapshot(&self) -> Result<Vec<RegOp>, NtStatus> {
+        let mut ops = Vec::new();
+        for t in &self.tombstones {
+            ops.try_push(RegOp::DeleteKey { key: copy(t).map_err(nomem)? }).map_err(nomem)?;
+        }
+        let mut stack = Vec::new();
+        stack.try_push(ROOT).map_err(nomem)?;
+        while let Some(id) = stack.pop() {
+            let n = self.node(id)?;
+            if n.volatile {
+                continue;
+            }
+            if n.dirty {
+                let key = self.full_name(id)?;
+                let k = || copy(&key).map_err(nomem);
+                let class = copy(&n.class).map_err(nomem)?;
+                let mut push = |op| ops.try_push(op).map_err(nomem);
+                push(RegOp::CreateKey { key: k()?, class, last_write: n.last_write, reset: true })?;
+                if let Some(sd) = &n.security {
+                    let descriptor = copy_bytes(sd).ok_or(NtStatus::NO_MEMORY)?;
+                    push(RegOp::SetSecurity { key: k()?, descriptor })?;
+                }
+                for v in &n.values {
+                    let (name, data) = (copy(&v.name).map_err(nomem)?, copy_bytes(&v.data));
+                    let data = data.ok_or(NtStatus::NO_MEMORY)?;
+                    push(RegOp::SetValue { key: k()?, name, kind: v.kind, data })?;
+                }
+            }
+            for &c in n.children.iter().rev() {
+                stack.try_push(c).map_err(nomem)?;
+            }
+        }
+        Ok(ops)
+    }
+}
+
 pub fn value_information(value: &Value, class: u32) -> Result<(Vec<u8>, usize), NtStatus> {
     let mut b = Bytes::new();
     let name_bytes = 2 * value.name.len() as u32;
@@ -850,7 +1078,13 @@ pub fn load_more(seed: &str, now: u64) -> Result<(), NtStatus> {
 /// Runs `f` on the registry.
 pub fn with<R>(f: impl FnOnce(&mut Registry) -> Result<R, NtStatus>) -> Result<R, NtStatus> {
     match REGISTRY.lock().as_mut() {
-        Some(r) => f(r),
+        Some(r) => {
+            let result = f(r);
+            if r.recording && r.has_ops() {
+                super::persist::note_pending();
+            }
+            result
+        }
         None => Err(NtStatus::OBJECT_PATH_NOT_FOUND),
     }
 }
@@ -1046,5 +1280,62 @@ mod tests {
             r.value(cv, &w("CurrentBuild")).unwrap().data,
             b"2\x006\x001\x000\x000\x00\x00\x00"
         );
+    }
+
+    /// What a program changes after boot (`reg()` is the boot's tree).
+    fn change(r: &mut Registry) {
+        r.recording = true;
+        let sw = r.lookup(ROOT, &w("MACHINE\\SOFTWARE")).unwrap();
+        let (k, _) = r.create(sw, &w("Gala"), 0, &w("cls"), 9).unwrap();
+        r.set_value(k, &w("n"), 4, &[42, 0, 0, 0], 9).unwrap();
+        r.set_value(k, &w("gone"), 1, &[0, 0], 9).unwrap();
+        r.delete_value(k, &w("gone"), 9).unwrap();
+        r.set_security(k, vec![1, 0, 4, 0x80]).unwrap();
+        let (v, _) = r.create(k, &w("Vol"), REG_OPTION_VOLATILE, &[], 9).unwrap();
+        r.set_value(v, &w("x"), 4, &[1, 0, 0, 0], 9).unwrap();
+        // A boot key changed, another deleted.
+        let ms = r.lookup(sw, &w("Microsoft")).unwrap();
+        r.set_value(ms, &w("a"), 1, &[b'y', 0], 9).unwrap();
+        let beta = r.lookup(sw, &w("Beta")).unwrap();
+        r.delete_key(beta, 9).unwrap();
+    }
+
+    fn check(r: &Registry) {
+        let k = r.lookup(ROOT, &w("MACHINE\\SOFTWARE\\Gala")).unwrap();
+        assert_eq!(r.value(k, &w("n")).unwrap().data, [42, 0, 0, 0]);
+        assert!(r.value(k, &w("gone")).is_err());
+        assert_eq!(r.security(k).unwrap().0, Some(&[1u8, 0, 4, 0x80][..]));
+        assert!(r.lookup(k, &w("Vol")).is_err(), "volatile keys are not kept");
+        let ms = r.lookup(ROOT, &w("MACHINE\\SOFTWARE\\Microsoft")).unwrap();
+        assert_eq!(r.value(ms, &w("a")).unwrap().data, [b'y', 0]);
+        assert_eq!(r.value(ms, &[]).unwrap().data, [0x10, 0, 0, 0]);
+        assert!(r.lookup(ROOT, &w("MACHINE\\SOFTWARE\\Beta")).is_err());
+    }
+
+    #[test]
+    fn registry_changes_replay_over_the_boot_keys() {
+        let mut r = reg();
+        change(&mut r);
+        let (ops, lost) = r.take_ops();
+        assert!(!lost);
+        let mut next = reg();
+        for op in &ops {
+            next.apply(op).unwrap();
+        }
+        check(&next);
+        assert!(!next.has_ops());
+    }
+
+    #[test]
+    fn a_registry_snapshot_replays_to_the_same_state() {
+        let mut r = reg();
+        change(&mut r);
+        let snap = r.snapshot().unwrap();
+        let mut next = reg();
+        for op in &snap {
+            next.apply(op).unwrap();
+        }
+        check(&next);
+        assert_eq!(next.snapshot().unwrap(), snap);
     }
 }

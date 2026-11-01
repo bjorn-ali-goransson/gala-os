@@ -22,6 +22,7 @@ pub mod pipe;
 pub mod platform;
 pub mod process;
 pub mod registry;
+pub mod reglog;
 pub mod section;
 pub mod security;
 pub mod stats;

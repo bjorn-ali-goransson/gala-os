@@ -14,7 +14,12 @@
 //! - a renamed file (MoveFileExW: only the new name exists) and a deleted
 //!   one (DeleteFileW: gone);
 //! - nested directories (sub\deep\x.txt) and FindFirstFileW's view of
-//!   C:\persist.
+//!   C:\persist;
+//! - the registry (D3): HKCU\Software\GalaPersist with a REG_SZ, a
+//!   REG_DWORD and a REG_BINARY value (RegQueryValueExW: type and data), a
+//!   subkey with a value; a value and a subkey deleted in the first boot
+//!   are gone (ERROR_FILE_NOT_FOUND), and so is a volatile subkey
+//!   (REG_OPTION_VOLATILE: volatile keys do not survive a restart).
 //!
 //! Prints `persist_test: first boot` the first time, then `persist_test:
 //! ok` or exits with the number of the failing check.
@@ -85,6 +90,43 @@ unsafe extern "system" {
 
 #[link(name = "advapi32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn RegCreateKeyExW(
+        key: Handle,
+        subkey: *const u16,
+        reserved: u32,
+        class: *const u16,
+        options: u32,
+        access: u32,
+        security: *const c_void,
+        result: *mut Handle,
+        disposition: *mut u32,
+    ) -> u32;
+    fn RegOpenKeyExW(
+        key: Handle,
+        subkey: *const u16,
+        options: u32,
+        access: u32,
+        out: *mut Handle,
+    ) -> u32;
+    fn RegSetValueExW(
+        key: Handle,
+        name: *const u16,
+        reserved: u32,
+        kind: u32,
+        data: *const u8,
+        len: u32,
+    ) -> u32;
+    fn RegQueryValueExW(
+        key: Handle,
+        name: *const u16,
+        reserved: *mut u32,
+        kind: *mut u32,
+        data: *mut u8,
+        len: *mut u32,
+    ) -> u32;
+    fn RegDeleteValueW(key: Handle, name: *const u16) -> u32;
+    fn RegDeleteKeyW(key: Handle, subkey: *const u16) -> u32;
+    fn RegCloseKey(key: Handle) -> u32;
     fn InitializeSecurityDescriptor(sd: *mut c_void, revision: u32) -> Bool;
     fn InitializeAcl(acl: *mut c_void, len: u32, revision: u32) -> Bool;
     fn AddAccessAllowedAce(acl: *mut c_void, revision: u32, mask: u32, sid: *const c_void) -> Bool;
@@ -152,6 +194,16 @@ const WIN_BUILTIN_USERS_SID: u32 = 27;
 const FILE_ALL_ACCESS: u32 = 0x001f_01ff;
 const FILE_GENERIC_READ_EXECUTE: u32 = 0x0012_00a9;
 const ERROR_FILE_NOT_FOUND: u64 = 2;
+
+const HKEY_CURRENT_USER: Handle = 0x8000_0001usize as Handle;
+const KEY_ALL_ACCESS: u32 = 0x000f_003f;
+const REG_OPTION_VOLATILE: u32 = 1;
+const REG_SZ: u32 = 1;
+const REG_BINARY: u32 = 3;
+const REG_DWORD: u32 = 4;
+/// "gala" as REG_SZ data (UTF-16 with its NUL).
+const NAME: [u8; 10] = [b'g', 0, b'a', 0, b'l', 0, b'a', 0, 0, 0];
+const BLOB: [u8; 5] = [1, 2, 3, 0xfe, 0xff];
 
 const BIG: usize = 200_000;
 const TEXT: &[u8] = b"hello from the first boot\r\n";
@@ -501,14 +553,133 @@ fn second_boot(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+fn reg_create(parent: Handle, name: &str, options: u32) -> Result<Handle, u32> {
+    let mut key = core::ptr::null_mut();
+    // SAFETY: valid name and output pointers.
+    let e = unsafe {
+        RegCreateKeyExW(
+            parent,
+            w(name).p(),
+            0,
+            core::ptr::null(),
+            options,
+            KEY_ALL_ACCESS,
+            core::ptr::null(),
+            &mut key,
+            core::ptr::null_mut(),
+        )
+    };
+    if e == 0 { Ok(key) } else { Err(e) }
+}
+
+fn reg_set(key: Handle, name: &str, kind: u32, data: &[u8]) -> u32 {
+    // SAFETY: valid name and data.
+    unsafe { RegSetValueExW(key, w(name).p(), 0, kind, data.as_ptr(), data.len() as u32) }
+}
+
+fn registry_first(c: &mut Checks) -> Result<(), u32> {
+    let key = reg_create(HKEY_CURRENT_USER, "Software\\GalaPersist", 0);
+    c.ok(key.is_ok(), key.err().unwrap_or(0).into())?;
+    let key = key.unwrap_or(core::ptr::null_mut());
+    c.eq(reg_set(key, "Name", REG_SZ, &NAME).into(), 0)?;
+    c.eq(reg_set(key, "Count", REG_DWORD, &42u32.to_le_bytes()).into(), 0)?;
+    c.eq(reg_set(key, "Blob", REG_BINARY, &BLOB).into(), 0)?;
+    c.eq(reg_set(key, "Gone", REG_DWORD, &1u32.to_le_bytes()).into(), 0)?;
+    // SAFETY: a valid key and names throughout.
+    unsafe {
+        c.eq(RegDeleteValueW(key, w("Gone").p()).into(), 0)?;
+        let sub = reg_create(key, "Sub", 0);
+        c.ok(sub.is_ok(), 0)?;
+        let sub = sub.unwrap_or(core::ptr::null_mut());
+        c.eq(reg_set(sub, "Inner", REG_DWORD, &7u32.to_le_bytes()).into(), 0)?;
+        RegCloseKey(sub);
+        let temp = reg_create(key, "Temp", 0);
+        c.ok(temp.is_ok(), 0)?;
+        RegCloseKey(temp.unwrap_or(core::ptr::null_mut()));
+        c.eq(RegDeleteKeyW(key, w("Temp").p()).into(), 0)?;
+        let volatile = reg_create(key, "Volatile", REG_OPTION_VOLATILE);
+        c.ok(volatile.is_ok(), 0)?;
+        let volatile = volatile.unwrap_or(core::ptr::null_mut());
+        c.eq(reg_set(volatile, "Lost", REG_DWORD, &1u32.to_le_bytes()).into(), 0)?;
+        RegCloseKey(volatile);
+        RegCloseKey(key);
+    }
+    Ok(())
+}
+
+/// Value `name` of `key` has type `kind` and data `want`.
+fn reg_check(c: &mut Checks, key: Handle, name: &str, kind: u32, want: &[u8]) -> Result<(), u32> {
+    let (mut got_kind, mut buf, mut len) = (0u32, [0u8; 32], 32u32);
+    // SAFETY: valid buffers.
+    let e = unsafe {
+        RegQueryValueExW(
+            key,
+            w(name).p(),
+            core::ptr::null_mut(),
+            &mut got_kind,
+            buf.as_mut_ptr(),
+            &mut len,
+        )
+    };
+    c.eq(e.into(), 0)?;
+    c.eq(got_kind.into(), kind.into())?;
+    c.ok(&buf[..len as usize] == want, len.into())
+}
+
+fn registry_second(c: &mut Checks) -> Result<(), u32> {
+    let mut key = core::ptr::null_mut();
+    // SAFETY: valid names, buffers and keys throughout.
+    unsafe {
+        let e = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w("Software\\GalaPersist").p(),
+            0,
+            KEY_ALL_ACCESS,
+            &mut key,
+        );
+        c.eq(e.into(), 0)?;
+        reg_check(c, key, "Name", REG_SZ, &NAME)?;
+        reg_check(c, key, "Count", REG_DWORD, &42u32.to_le_bytes())?;
+        reg_check(c, key, "Blob", REG_BINARY, &BLOB)?;
+        let mut len = 4u32;
+        let mut buf = [0u8; 4];
+        let e = RegQueryValueExW(
+            key,
+            w("Gone").p(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            buf.as_mut_ptr(),
+            &mut len,
+        );
+        c.eq(e.into(), ERROR_FILE_NOT_FOUND)?;
+        let mut sub = core::ptr::null_mut();
+        c.eq(RegOpenKeyExW(key, w("Sub").p(), 0, KEY_ALL_ACCESS, &mut sub).into(), 0)?;
+        reg_check(c, sub, "Inner", REG_DWORD, &7u32.to_le_bytes())?;
+        RegCloseKey(sub);
+        let mut other = core::ptr::null_mut();
+        c.eq(
+            RegOpenKeyExW(key, w("Temp").p(), 0, KEY_ALL_ACCESS, &mut other).into(),
+            ERROR_FILE_NOT_FOUND,
+        )?;
+        c.eq(
+            RegOpenKeyExW(key, w("Volatile").p(), 0, KEY_ALL_ACCESS, &mut other).into(),
+            ERROR_FILE_NOT_FOUND,
+        )?;
+        RegCloseKey(key);
+    }
+    Ok(())
+}
+
 fn run() -> Result<bool, u32> {
     let mut c = Checks(0);
     // SAFETY: a valid path.
     let exists = unsafe { GetFileAttributesW(w("C:\\persist").p()) } != INVALID_FILE_ATTRIBUTES;
     if exists {
         second_boot(&mut c)?;
+        registry_second(&mut c)?;
     } else {
         first_boot(&mut c)?;
+        registry_first(&mut c)?;
     }
     Ok(exists)
 }
