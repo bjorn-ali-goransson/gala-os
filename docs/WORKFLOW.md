@@ -124,6 +124,12 @@ shows it.
   that name binds to the DLL's own export, so the call jumps to itself
   for ever (no stack growth: a tail call). Look the target up with
   GetProcAddress instead.
+- **Win32-OpenSSH's diagnostics**: as SYSTEM (and with `-d`) sshd and
+  ssh-keygen log to the system log (ETW), not the console: pass `-e` to
+  sshd for stderr. Its source (github.com/PowerShell/openssh-portable,
+  BSD-licensed; not Windows source) says what it expects of an API, for
+  example `contrib/win32/win32compat/pwd.c` (accounts must be
+  SidTypeUser; home from ProfileList).
 - **Reading MSVC C++ EH data** (as data, from .pdata/.xdata): check the
   format before decoding. A FuncInfo starting with the magic number
   0x19930520-0x19930522 (bytes `22 05 93 19`) is the older format

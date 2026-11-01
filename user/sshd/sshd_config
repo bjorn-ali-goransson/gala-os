@@ -5,3 +5,5 @@ Port 22
 AuthorizedKeysFile .ssh/authorized_keys
 PasswordAuthentication yes
 Subsystem sftp sftp-server.exe
+# Where sshd finds its per-connection program (sshd_config(5) of 9.8).
+SshdSessionPath "C:\Program Files\OpenSSH\sshd-session.exe"

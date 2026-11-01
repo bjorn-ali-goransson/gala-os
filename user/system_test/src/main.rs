@@ -5,7 +5,8 @@
 //! option `as=system`; on Windows run it as SYSTEM (`psexec -s`). Needs
 //! the second local account `galatest` (see access_test).
 //!
-//! - The token: user S-1-5-18, owner BUILTIN\Administrators (a group it
+//! - The token: user S-1-5-18 (LookupAccountSidW: SYSTEM, a SidTypeUser
+//!   account), owner BUILTIN\Administrators (a group it
 //!   holds with SE_GROUP_OWNER), the System integrity level, the
 //!   SeTcbPrivilege enabled, SeAssignPrimaryTokenPrivilege and
 //!   SeBackupPrivilege held but disabled.
@@ -87,6 +88,15 @@ unsafe extern "system" {
         ret: *mut u32,
     ) -> Bool;
     fn EqualSid(a: *const u8, b: *const u8) -> Bool;
+    fn LookupAccountSidW(
+        system: *const u16,
+        sid: *const u8,
+        name: *mut u16,
+        name_size: *mut u32,
+        domain: *mut u16,
+        domain_size: *mut u32,
+        kind: *mut u32,
+    ) -> Bool;
     fn GetFileSecurityW(
         path: *const u16,
         info: u32,
@@ -272,6 +282,23 @@ fn run() -> Result<(), u32> {
         let mut b = Buf([0; 1024]);
         c.ok(query(token, 1, &mut b), last_error())?;
         c.ok(EqualSid(first_sid(&b), SYSTEM.as_ptr()) != 0, 0)?;
+        // LocalSystem is a user account (SidTypeUser): Win32-OpenSSH's
+        // getpwuid accepts only SidTypeUser accounts, and sshd runs as
+        // SYSTEM on Windows.
+        let (mut name, mut domain) = ([0u16; 64], [0u16; 64]);
+        let (mut name_size, mut domain_size, mut kind) = (64u32, 64u32, 0u32);
+        let r = LookupAccountSidW(
+            core::ptr::null(),
+            first_sid(&b),
+            name.as_mut_ptr(),
+            &mut name_size,
+            domain.as_mut_ptr(),
+            &mut domain_size,
+            &mut kind,
+        );
+        c.ok(r != 0, last_error())?;
+        c.eq(kind.into(), 1)?;
+        c.ok(name[..7] == w::<7>("SYSTEM\0")[..], 0)?;
         c.ok(query(token, 4, &mut b), 0)?; // TokenOwner
         c.ok(EqualSid(first_sid(&b), ADMINISTRATORS.as_ptr()) != 0, 0)?;
         c.ok(query(token, 25, &mut b), 0)?; // TokenIntegrityLevel

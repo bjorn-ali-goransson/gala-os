@@ -92,40 +92,84 @@ unsafe extern "system" {
     fn SetLastError(code: u32);
 }
 
-/// GetUserNameExW: the one user's names. NameSamCompatible (2) is
-/// "GALA\gala"; NameDisplay (3) is "gala" (no full name is set); the
-/// directory-service formats (fully qualified, principal and the like)
-/// have no mapping for a local account (ERROR_NONE_MAPPED). Returns a
-/// BOOLEAN; with too small a buffer, ERROR_MORE_DATA and the size needed
-/// (with the NUL), else the length written (without it).
+/// GetUserNameExW: the caller's user's names (advapi32's GetUserNameW,
+/// the domain from LookupAccountNameW). NameSamCompatible (2) is
+/// "DOMAIN\\name" ("GALA\\gala"); NameDisplay (3) the name (no full name
+/// is set); the directory-service formats have no mapping for a local
+/// account (ERROR_NONE_MAPPED). Returns a BOOLEAN; with too small a buffer,
+/// ERROR_MORE_DATA and the size needed (with the NUL), else the length
+/// written (without it). TODO: SYSTEM's NameSamCompatible is the machine
+/// account (WORKGROUP\\GALA$) on Windows, NT AUTHORITY\\SYSTEM here.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetUserNameExW(format: u32, buf: *mut u16, size: *mut u32) -> u8 {
-    let name: &str = match format {
-        2 => "GALA\\gala",
-        3 => "gala",
-        _ => {
-            // SAFETY: plain call.
-            unsafe { SetLastError(1332) }; // ERROR_NONE_MAPPED
-            return 0;
-        }
-    };
+    #[link(name = "advapi32", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn GetUserNameW(buffer: *mut u16, size: *mut u32) -> i32;
+        fn LookupAccountNameW(
+            system: *const u16,
+            name: *const u16,
+            sid: *mut u8,
+            sid_size: *mut u32,
+            domain: *mut u16,
+            domain_size: *mut u32,
+            kind: *mut u32,
+        ) -> i32;
+    }
+    if format != 2 && format != 3 {
+        // SAFETY: plain call.
+        unsafe { SetLastError(1332) }; // ERROR_NONE_MAPPED
+        return 0;
+    }
     if size.is_null() {
         // SAFETY: as above.
         unsafe { SetLastError(87) };
         return 0;
     }
+    let mut user = [0u16; 256];
+    let mut user_len = 256u32;
+    // SAFETY: our buffer.
+    if unsafe { GetUserNameW(user.as_mut_ptr(), &mut user_len) } == 0 {
+        return 0;
+    }
+    let user_len = user_len as usize - 1;
+    let mut text = [0u16; 330];
+    let mut n = 0;
+    if format == 2 {
+        let mut sid = [0u8; 68];
+        let (mut sid_size, mut domain_size, mut kind) = (68u32, 64u32, 0u32);
+        let mut domain = [0u16; 64];
+        // SAFETY: our buffers of those sizes.
+        let found = unsafe {
+            LookupAccountNameW(
+                core::ptr::null(),
+                user.as_ptr(),
+                sid.as_mut_ptr(),
+                &mut sid_size,
+                domain.as_mut_ptr(),
+                &mut domain_size,
+                &mut kind,
+            )
+        };
+        if found == 0 {
+            return 0;
+        }
+        let d = domain_size as usize;
+        text[..d].copy_from_slice(&domain[..d]);
+        text[d] = u16::from(b'\\');
+        n = d + 1;
+    }
+    text[n..n + user_len].copy_from_slice(&user[..user_len]);
+    n += user_len;
     // SAFETY: the caller's size and buffer of that many characters.
     unsafe {
-        if buf.is_null() || (*size as usize) < name.len() + 1 {
-            *size = name.len() as u32 + 1;
+        if buf.is_null() || (*size as usize) < n + 1 {
+            *size = n as u32 + 1;
             SetLastError(234); // ERROR_MORE_DATA
             return 0;
         }
-        for (i, b) in name.bytes().enumerate() {
-            *buf.add(i) = b.into();
-        }
-        *buf.add(name.len()) = 0;
-        *size = name.len() as u32;
+        core::ptr::copy_nonoverlapping(text.as_ptr(), buf, n);
+        *buf.add(n) = 0;
+        *size = n as u32;
     }
     1
 }

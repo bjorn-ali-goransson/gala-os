@@ -946,8 +946,21 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       now have a fixed default descriptor, as Windows' system files: it
       had been built from whoever asked). The LSA logons sshd makes work
       (`lsa_test`, as SYSTEM: S4U without a password, MSV1_0 interactive
-      with one). LoadUserProfileW (`profile_test`). Next: `sshd -d` as
-      SYSTEM with a key login from the host
+      with one). LoadUserProfileW (`profile_test`). The pending
+      `sshd_login` scenario (2026-11-01) runs `sshd -ddd -e -p 7` as
+      SYSTEM and connects the host's ssh with a test key
+      (user/sshd/client_ed25519, galatest's authorized_keys). On the way:
+      LocalSystem is a SidTypeUser account, accounts beyond gala are
+      looked up from the account key, GetUserName* follow the token,
+      ProfileList has the service accounts, console handles include
+      duplicates and FILE_DEVICE_CONSOLE handles for writing (sshd's log
+      appeared; it is written with WriteConsoleW to stderr), sshd_config
+      names SshdSessionPath. Now sshd listens and accepts the TCP
+      connection, then its socketpair-like pipes fail
+      (`CreateNamedPipe() ERROR:130`) and the client sees the connection
+      close before the key exchange. Next: that pipe error, then the
+      login. Open: the JDK's console path (GetConsoleMode succeeding on
+      the standard handles made java_http fail intermittently).
       accepting a key-authenticated login from the host (xtask as the
       client).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach

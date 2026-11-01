@@ -1117,8 +1117,16 @@ Windows, never shadows the system's DLLs.)
   window following the cursor, the cursor (moved by WriteConsole* and
   WriteFile through these handles), attributes, cursor info, the title.
   There is no keyboard: no input events, reads return nothing (recorded).
-  Console handles are those kernel32 opened by name (a table); duplicates
-  are not recognized yet (TODO).
+  Console handles are those kernel32 opened by name (a table) and their
+  duplicates (DuplicateHandle in the process registers them). The writing
+  functions (WriteConsoleW and friends) also accept any handle the kernel
+  reports as FILE_DEVICE_CONSOLE (output if a zero-length write succeeds),
+  so programs that write to a character-device stderr with WriteConsoleW
+  (Win32-OpenSSH) are seen; GetConsoleMode still fails on the standard
+  handles. (With it succeeding there, the JDK took its console path and
+  java_http failed 2 of 7 runs with a NullPointerException inside javac:
+  an open gala bug, to find before the standard handles become a real
+  console.)
 - **FormatMessage** (kernel32 messages.rs): system messages from a table
   of the documented US English texts, or the caller's string; inserts
   (%1..%99 with printf-style formats, %n %r %t %b %0 %%), IGNORE_INSERTS,
@@ -1303,7 +1311,11 @@ Windows, never shadows the system's DLLs.)
   LsaFreeReturnBuffer frees it; the logon id from TokenStatistics),
   LsaDeregisterLogonProcess; advapi32's LsaNtStatusToWinError and
   LsaManageSidNameMapping (accepted, not kept). There is no LSA process:
-  handles are tags. TODO: the account key is readable by programs;
+  handles are tags. advapi32's LookupAccountNameW/LookupAccountSidW know
+  the accounts in that key (domain GALA, SidTypeUser), and LocalSystem
+  is a SidTypeUser account (Win32-OpenSSH accepts only user accounts and
+  runs as SYSTEM on Windows); GetUserNameA/W and secur32's GetUserNameExW
+  name the caller's effective token's user. TODO: the account key is readable by programs;
   NetUserAdd; KERB_S4U_LOGON; untrusted callers' S4U tokens should be
   identification-level.
 - **Certificates** (crypt32 cert.rs): CertCreateCertificateContext

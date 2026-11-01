@@ -2463,7 +2463,24 @@ pub extern "system" fn DuplicateHandle(
             options,
         )
     };
-    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    // A duplicate of a console handle in this process is a console handle
+    // too (DUPLICATE_CLOSE_SOURCE: the source's entry goes).
+    let current = |p: Handle| p as isize == -1 || p == GetCurrentProcess();
+    if current(source_process)
+        && current(target_process)
+        && !target.is_null()
+        && let Some(input) = console::kind(source)
+    {
+        // SAFETY: the kernel wrote the new handle.
+        console::register(unsafe { *target }, input);
+        if options & 1 != 0 {
+            console::forget(source);
+        }
+    }
+    TRUE
 }
 
 /// VirtualQuery: MEMORY_BASIC_INFORMATION for `address`; returns the bytes

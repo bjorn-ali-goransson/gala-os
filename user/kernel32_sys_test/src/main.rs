@@ -1,7 +1,8 @@
 //! More of kernel32, the process-level functions the Go runtime calls at
 //! startup, with the results real Windows gives when standard output is
 //! redirected (as `run-all.ps1` runs it, and as gala's serial console is):
-//! console mode/WriteConsoleW fail with ERROR_INVALID_HANDLE; error modes,
+//! console mode fails with ERROR_INVALID_HANDLE (and WriteConsoleW, unless
+//! the handle is a character device: gala's serial console); error modes,
 //! WER flags, priority boost and console control handlers are kept;
 //! GetSystemInfo, GetSystemDirectoryA, GetProcessAffinityMask,
 //! GetEnvironmentStringsW, CreateEventA, LoadLibraryW/LoadLibraryExW (with
@@ -216,10 +217,14 @@ fn run() -> Result<(), u32> {
         SetLastError(0);
         c.eq(GetConsoleMode(stdout, &mut mode) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
-        let mut written = 0;
-        SetLastError(0);
-        c.eq(WriteConsoleW(stdout, w!("x"), 1, &mut written, core::ptr::null_mut()) as u64, 0)?;
-        c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
+        // WriteConsoleW fails on redirected output (a file or pipe); gala's
+        // serial console is a character device, which it writes to.
+        if GetFileType(stdout) != 2 {
+            let mut written = 0;
+            SetLastError(0);
+            c.eq(WriteConsoleW(stdout, w!("x"), 1, &mut written, core::ptr::null_mut()) as u64, 0)?;
+            c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
+        }
 
         // Process settings that are kept.
         let old = SetErrorMode(0x8003);

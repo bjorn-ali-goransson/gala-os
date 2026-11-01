@@ -583,6 +583,21 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sshd", "mswsock.dll", "Windows/System32"),
     ("sshd", "target/prebuilt/openssh/OpenSSH-Win64/", "Program Files/OpenSSH"),
     ("sshd", "user/sshd/sshd_config", "ProgramData/ssh"),
+    ("sshd_login", "ntdll.dll", "Windows/System32"),
+    ("sshd_login", "kernel32.dll", "Windows/System32"),
+    ("sshd_login", "advapi32.dll", "Windows/System32"),
+    ("sshd_login", "bcrypt.dll", "Windows/System32"),
+    ("sshd_login", "bcryptprimitives.dll", "Windows/System32"),
+    ("sshd_login", "crypt32.dll", "Windows/System32"),
+    ("sshd_login", "secur32.dll", "Windows/System32"),
+    ("sshd_login", "user32.dll", "Windows/System32"),
+    ("sshd_login", "userenv.dll", "Windows/System32"),
+    ("sshd_login", "ws2_32.dll", "Windows/System32"),
+    ("sshd_login", "mswsock.dll", "Windows/System32"),
+    ("sshd_login", "target/prebuilt/openssh/OpenSSH-Win64/", "Program Files/OpenSSH"),
+    ("sshd_login", "user/sshd/sshd_config", "ProgramData/ssh"),
+    ("sshd_login", "user/sshd/authorized_keys", "Users/galatest/.ssh"),
+    ("sshd_login", "user/access_test/access_test.regseed", "registry"),
     ("caddy", "ntdll.dll", "Windows/System32"),
     ("caddy", "kernel32.dll", "Windows/System32"),
     ("caddy", "advapi32.dll", "Windows/System32"),
@@ -1691,7 +1706,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &["elasticsearch", "sqllocaldb", "sshd"];
+const PENDING: &[&str] = &["elasticsearch", "sqllocaldb", "sshd", "sshd_login"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -1709,6 +1724,9 @@ enum NetClient {
     Tls,
     /// GETs `/` and expects a 200 whose body contains all of these.
     Contains(&'static [&'static str]),
+    /// Logs on with the host's ssh and user/sshd/client_ed25519 as
+    /// `galatest` and runs `echo` (`ssh_client`).
+    Ssh,
 }
 
 /// Scenarios that get a virtio-net card on QEMU's user-mode network, with
@@ -1724,6 +1742,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("java_http", "java_http: listening on port 7", NetClient::Http(JAVA_HTTP_PAGE)),
     ("nginx_master", "start worker process", NetClient::Nginx),
     ("nginx_tls", "using the \"select\" event method", NetClient::Tls),
+    ("sshd_login", "Server listening on", NetClient::Ssh),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",
@@ -2368,6 +2387,16 @@ const SCENARIOS: &[Scenario] = &[
             "ssh-keygen.exe finished with status 0x00000000",
             "sshd.exe finished with status 0x00000000",
         ],
+    },
+    Scenario {
+        // Security model S4 (pending): sshd as SYSTEM (as=system, as the
+        // service runs) serving one connection (-d) on port 7; the host's
+        // ssh logs on as galatest with a key (user/sshd/client_ed25519,
+        // its authorized_keys in the profile) and runs echo.
+        name: "sshd_login",
+        cmdline: "qemu_exit as=system cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,-ddd%20-e%20-p%207",
+        exit_status: XTASK_STOPS,
+        expect: &["xtask: net client: ssh ok"],
     },
     Scenario {
         // Unmodified prebuilt programs: Caddy 2.8.4's official Windows
@@ -3464,6 +3493,7 @@ fn run_vm(
                 NetClient::Nginx => nginx_client(port),
                 NetClient::Tls => tls_client(port),
                 NetClient::Contains(parts) => contains_client(port, parts),
+                NetClient::Ssh => ssh_client(port),
             }));
         }
         if stop_after_client && client.as_ref().is_some_and(|c| c.is_finished()) {
@@ -3505,6 +3535,7 @@ fn run_vm(
                 match kind {
                     NetClient::Echo => "echo",
                     NetClient::Tls => "tls",
+                    NetClient::Ssh => "ssh",
                     _ => "http",
                 }
             ),
@@ -3617,6 +3648,43 @@ fn nginx_client(port: u16) -> Result {
 /// The TLS scenario's client: GET / over HTTPS with the host's curl (the
 /// certificate is self-signed: -k), retried while the server is not
 /// listening yet (curl's connect, TLS-handshake and empty-reply errors).
+/// What `ssh_client` asks sshd's session to print.
+const SSH_ECHO: &str = "gala-ssh-ok";
+
+/// The host side of `sshd_login`: the host's ssh with the test key
+/// user/sshd/client_ed25519 (galatest's authorized key) logs on as
+/// `galatest` and runs `echo gala-ssh-ok`; its verbose trace says how far
+/// it got.
+fn ssh_client(port: u16) -> Result {
+    // ssh refuses a private key others may read: a 0600 copy.
+    let key = root().join("target/sshd_login_client_ed25519");
+    fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    }
+    let out = Command::new("timeout")
+        .arg("120")
+        .arg("ssh")
+        .args(["-v", "-i"])
+        .arg(&key)
+        .args(["-p", &port.to_string()])
+        .args(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"])
+        .args(["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=60"])
+        .args(["galatest@127.0.0.1", "echo", SSH_ECHO])
+        .output()
+        .map_err(|e| format!("ssh: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if out.status.success() && stdout.contains(SSH_ECHO) {
+        return Ok(());
+    }
+    let trace = String::from_utf8_lossy(&out.stderr);
+    let mut tail: Vec<&str> = trace.lines().rev().take(25).collect();
+    tail.reverse();
+    Err(format!("ssh exit {:?}, stdout {stdout:?}:\n{}", out.status.code(), tail.join("\n")))
+}
+
 fn tls_client(port: u16) -> Result {
     let url = format!("https://127.0.0.1:{port}/");
     let mut last = String::new();

@@ -234,7 +234,9 @@ const ACCOUNTS: &[(u64, &[u32], &str, &str, u32)] = &[
     (1, &[0], "Everyone", "", SID_TYPE_WELL_KNOWN_GROUP),
     (3, &[0], "CREATOR OWNER", "", SID_TYPE_WELL_KNOWN_GROUP),
     (5, &[11], "Authenticated Users", "NT AUTHORITY", SID_TYPE_WELL_KNOWN_GROUP),
-    (5, &[18], "SYSTEM", "NT AUTHORITY", SID_TYPE_WELL_KNOWN_GROUP),
+    // LocalSystem is a user account (Win32-OpenSSH, which accepts only
+    // SidTypeUser accounts, runs as SYSTEM on Windows; system_test).
+    (5, &[18], "SYSTEM", "NT AUTHORITY", SID_TYPE_USER),
     (5, &[32, 544], "Administrators", "BUILTIN", SID_TYPE_ALIAS),
     (5, &[32, 545], "Users", "BUILTIN", SID_TYPE_ALIAS),
 ];
@@ -397,6 +399,13 @@ pub extern "system" fn LookupAccountSidW(
             *d = c;
         }
         (a.len(), dom, use_)
+    } else if authority == 5
+        && count == 5
+        && subs[..4] == USER_SUBS[..4]
+        && sam_name(subs[4], &mut account).is_some()
+    {
+        let n = account.iter().position(|&c| c == 0).unwrap_or(account.len());
+        (n, "GALA", SID_TYPE_USER)
     } else if authority == 5 && count == 2 && subs[..2] == [80, 0] {
         for (d, c) in account.iter_mut().zip("ALL SERVICES".encode_utf16()) {
             *d = c;
@@ -435,26 +444,158 @@ pub extern "system" fn LookupAccountSidW(
     1
 }
 
-/// GetUserNameW: "gala"; the size includes the NUL.
+/// The name of the caller's user: its thread's impersonation token's,
+/// else its process token's (LookupAccountSidW), into `name`; its length
+/// and the domain's into `domain`.
+pub(crate) fn current_user(
+    name: &mut [u16; 256],
+    domain: &mut [u16; 64],
+) -> Option<(usize, usize)> {
+    #[link(name = "ntdll", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn NtOpenThreadToken(thread: usize, access: u32, as_self: u8, token: *mut usize) -> u32;
+        fn NtOpenProcessToken(process: usize, access: u32, token: *mut usize) -> u32;
+        fn NtQueryInformationToken(
+            token: usize,
+            class: u32,
+            buf: *mut u8,
+            len: u32,
+            ret: *mut u32,
+        ) -> u32;
+        fn NtClose(h: usize) -> u32;
+    }
+    let mut token = 0;
+    let mut b = [0u64; 32];
+    let mut n = 0;
+    // SAFETY: plain calls with our buffers (TOKEN_QUERY; TokenUser).
+    let sid = unsafe {
+        if NtOpenThreadToken(usize::MAX - 1, 8, 1, &mut token) != 0
+            && NtOpenProcessToken(usize::MAX, 8, &mut token) != 0
+        {
+            return None;
+        }
+        let status = NtQueryInformationToken(token, 1, b.as_mut_ptr().cast(), 256, &mut n);
+        NtClose(token);
+        if status != 0 {
+            return None;
+        }
+        b[0] as *const u8
+    };
+    let (mut name_len, mut domain_len, mut kind) = (256u32, 64u32, 0u32);
+    let r = LookupAccountSidW(
+        core::ptr::null(),
+        sid,
+        name.as_mut_ptr(),
+        &mut name_len,
+        domain.as_mut_ptr(),
+        &mut domain_len,
+        &mut kind,
+    );
+    (r != 0).then_some((name_len as usize, domain_len as usize))
+}
+
+/// GetUserNameW: the caller's user's name (an impersonating thread's:
+/// the client's), as documented; the size includes the NUL.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetUserNameW(buffer: *mut u16, size: *mut u32) -> i32 {
     if size.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let needed = super::USER_NAME.len() as u32 + 1;
+    let (mut name, mut domain) = ([0u16; 256], [0u16; 64]);
+    let Some((len, _)) = current_user(&mut name, &mut domain) else { return 0 };
+    let needed = len as u32 + 1;
     // SAFETY: the caller's size and buffer.
     unsafe {
         if buffer.is_null() || *size < needed {
             *size = needed;
             return fail(ERROR_INSUFFICIENT_BUFFER, 0);
         }
-        for (i, &b) in super::USER_NAME.iter().enumerate() {
-            *buffer.add(i) = b.into();
-        }
-        *buffer.add(super::USER_NAME.len()) = 0;
+        core::ptr::copy_nonoverlapping(name.as_ptr(), buffer, len);
+        *buffer.add(len) = 0;
         *size = needed;
     }
     1
+}
+
+// ---- Local accounts (the kernel's account database) ----
+//
+// The accounts beyond `gala` are the subkeys of HKLM\SAM\Gala\Users
+// (nt::accounts): their names, and their RID in the value `Rid`. SIDs are
+// the machine's (USER_SUBS without the RID) with that RID.
+
+const SAM_USERS: &str = "SAM\\Gala\\Users";
+
+/// The RID of account `name` (not `gala`, which ACCOUNTS has).
+fn sam_rid(name: &[u16]) -> Option<u32> {
+    if name.is_empty() || name.len() > 200 || name.contains(&u16::from(b'\\')) {
+        return None;
+    }
+    let mut path = [0u16; 256];
+    let mut n = 0;
+    for c in SAM_USERS
+        .encode_utf16()
+        .chain(core::iter::once(u16::from(b'\\')))
+        .chain(name.iter().copied())
+    {
+        path[n] = c;
+        n += 1;
+    }
+    let value = [b'R', b'i', b'd', 0].map(u16::from);
+    let mut rid = 0u32;
+    let mut size = 4u32;
+    // RRF_RT_REG_DWORD (0x10).
+    let r = {
+        super::registry::RegGetValueW(
+            0x8000_0002,
+            path.as_ptr(),
+            value.as_ptr(),
+            0x10,
+            core::ptr::null_mut(),
+            (&raw mut rid).cast(),
+            &mut size,
+        )
+    };
+    (r == 0).then_some(rid)
+}
+
+/// The name of the account with RID `rid` into `out` (NUL-terminated).
+fn sam_name(rid: u32, out: &mut [u16; 256]) -> Option<()> {
+    let mut users = [0u16; 32];
+    for (slot, c) in users.iter_mut().zip(SAM_USERS.encode_utf16()) {
+        *slot = c;
+    }
+    let mut key = 0;
+    // KEY_READ.
+    if super::registry::RegOpenKeyExW(0x8000_0002, users.as_ptr(), 0, 0x2_0019, &mut key) != 0 {
+        return None;
+    }
+    let mut found = None;
+    for index in 0..1024 {
+        let mut name = [0u16; 256];
+        let mut len = 256u32;
+        let r = {
+            super::registry::RegEnumKeyExW(
+                key,
+                index,
+                name.as_mut_ptr(),
+                &mut len,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
+        if r != 0 {
+            break;
+        }
+        if sam_rid(&name[..len as usize]) == Some(rid) {
+            *out = name;
+            found = Some(());
+            break;
+        }
+    }
+    super::registry::RegCloseKey(key);
+    found
 }
 
 // ---- ACLs ----
@@ -995,6 +1136,12 @@ pub extern "system" fn LookupAccountNameW(
             ACCOUNTS.iter().find(|a| same(account, a.2) && want_domain.is_none_or(|d| same(d, a.3)))
         {
             (authority, subs, dom, use_)
+        } else if want_domain.is_none_or(|d| same(d, "GALA") || same(d, "."))
+            && let Some(rid) = sam_rid(account)
+        {
+            service[..4].copy_from_slice(&USER_SUBS[..4]);
+            service[4] = rid;
+            (5, &service[..5], "GALA", SID_TYPE_USER)
         } else if want_domain.is_some_and(|d| same(d, NT_SERVICE)) && same(account, "ALL SERVICES")
         {
             (5, &[80, 0], NT_SERVICE, SID_TYPE_WELL_KNOWN_GROUP)

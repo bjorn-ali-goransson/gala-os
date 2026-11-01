@@ -12,7 +12,9 @@
 //! - GetConsoleScreenBufferInfo(Ex): a window inside the buffer; the cursor
 //!   advances by what WriteConsoleW writes; SetConsoleCursorPosition and
 //!   SetConsoleTextAttribute show in it.
-//! - WriteConsoleW of a non-console handle: ERROR_INVALID_HANDLE.
+//! - WriteConsoleW of a non-console handle: ERROR_INVALID_HANDLE; of a
+//!   duplicate of a console handle (DuplicateHandle), and of the standard
+//!   output handle when that is the console (FILE_TYPE_CHAR), it writes.
 //! - GetNumberOfConsoleInputEvents of CONIN$ succeeds.
 //!
 //! Prints `console_test: ok` or exits with the number of the failing
@@ -28,6 +30,16 @@ type Handle = *mut c_void;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn DuplicateHandle(
+        source_process: Handle,
+        source: Handle,
+        target_process: Handle,
+        target: *mut Handle,
+        access: u32,
+        inherit: i32,
+        options: u32,
+    ) -> i32;
+    fn GetCurrentProcess() -> Handle;
     fn GetLastError() -> u32;
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
@@ -196,6 +208,26 @@ fn run() -> Result<(), u32> {
         c.ok(after.cursor == [3, info.cursor[1]], after.cursor[0] as u64)?;
         let newline = w("\r\n");
         WriteConsoleW(con, newline.as_ptr(), 2, &mut written, core::ptr::null_mut());
+        // The standard output handle, when it is the console (a character
+        // device, not a pipe or file), is a console handle.
+        let stdout = GetStdHandle(-11i32 as u32);
+        if GetFileType(stdout) == 2 {
+            c.ok(
+                WriteConsoleW(stdout, newline.as_ptr(), 2, &mut written, core::ptr::null_mut())
+                    != 0,
+                GetLastError().into(),
+            )?;
+        }
+        // A duplicate of the handle is a console handle too.
+        let mut copy = core::ptr::null_mut();
+        let me = GetCurrentProcess();
+        c.ok(DuplicateHandle(me, con, me, &mut copy, 0, 0, 2) != 0, GetLastError().into())?;
+        c.ok(
+            WriteConsoleW(copy, newline.as_ptr(), 2, &mut written, core::ptr::null_mut()) != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(written.into(), 2)?;
+        CloseHandle(copy);
 
         c.ok(SetConsoleTextAttribute(con, 0x1f) != 0, 0)?;
         GetConsoleScreenBufferInfo(con, &mut after);

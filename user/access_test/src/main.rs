@@ -8,6 +8,8 @@
 //!
 //! - LogonUserW: the account's primary token (another user than the
 //!   caller's); a wrong password or unknown user is ERROR_LOGON_FAILURE.
+//!   LookupAccountNameW and LookupAccountSidW know the account (a
+//!   SidTypeUser); impersonating it, GetUserNameW names it.
 //! - As the caller, a directory whose protected DACL gives the caller
 //!   FILE_ALL_ACCESS and `galatest` FILE_GENERIC_READ (both inherited), a
 //!   file in it, a file whose DACL denies `galatest` writing before
@@ -138,6 +140,25 @@ unsafe extern "system" {
         new: *mut Handle,
     ) -> Bool;
     fn EqualSid(a: *const u8, b: *const u8) -> Bool;
+    fn GetUserNameW(buffer: *mut u16, size: *mut u32) -> Bool;
+    fn LookupAccountNameW(
+        system: *const u16,
+        name: *const u16,
+        sid: *mut u8,
+        sid_size: *mut u32,
+        domain: *mut u16,
+        domain_size: *mut u32,
+        kind: *mut u32,
+    ) -> Bool;
+    fn LookupAccountSidW(
+        system: *const u16,
+        sid: *const u8,
+        name: *mut u16,
+        name_size: *mut u32,
+        domain: *mut u16,
+        domain_size: *mut u32,
+        kind: *mut u32,
+    ) -> Bool;
     fn ConvertSidToStringSidW(sid: *const u8, text: *mut *mut u16) -> Bool;
     fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
         text: *const u16,
@@ -379,6 +400,36 @@ fn run() -> Result<(), u32> {
         let (mut b1, mut b2) = (Buf([0; 512]), Buf([0; 512]));
         let (me_sid, test_sid) = (user_of(&c, mine, &mut b1)?, user_of(&c, test, &mut b2)?);
         c.ok(EqualSid(me_sid, test_sid) == 0, 0)?;
+        // The account by name and by SID (a local user).
+        let mut sid = [0u8; 68];
+        let (mut sid_size, mut domain_size, mut kind) = (68u32, 64u32, 0u32);
+        let mut domain = [0u16; 64];
+        let r = LookupAccountNameW(
+            core::ptr::null(),
+            user.p(),
+            sid.as_mut_ptr(),
+            &mut sid_size,
+            domain.as_mut_ptr(),
+            &mut domain_size,
+            &mut kind,
+        );
+        c.ok(r != 0, last_error())?;
+        c.ok(EqualSid(sid.as_ptr(), test_sid) != 0, 0)?;
+        c.eq(kind.into(), 1)?; // SidTypeUser
+        let mut name = [0u16; 64];
+        let mut name_size = 64u32;
+        domain_size = 64;
+        let r = LookupAccountSidW(
+            core::ptr::null(),
+            test_sid,
+            name.as_mut_ptr(),
+            &mut name_size,
+            domain.as_mut_ptr(),
+            &mut domain_size,
+            &mut kind,
+        );
+        c.ok(r != 0, last_error())?;
+        c.ok(name[..9] == user.b[..9], 0)?; // "galatest" and its NUL
         let (mut me_text, mut test_text) = (null.cast(), null.cast());
         c.ok(ConvertSidToStringSidW(me_sid, &mut me_text) != 0, 0)?;
         c.ok(ConvertSidToStringSidW(test_sid, &mut test_text) != 0, 0)?;
@@ -436,6 +487,10 @@ fn run() -> Result<(), u32> {
 
         // As galatest.
         c.ok(ImpersonateLoggedOnUser(test) != 0, last_error())?;
+        let mut name = [0u16; 64];
+        let mut size = 64u32;
+        c.ok(GetUserNameW(name.as_mut_ptr(), &mut size) != 0, last_error())?;
+        c.ok(name[..9] == user.b[..9], u64::from(name[0]))?;
         let h = open(&readable, GENERIC_READ, 0);
         c.ok(!invalid(h), last_error())?;
         let mut text = [0u8; 8];

@@ -52,6 +52,13 @@
 "ProgramData"=expand:%SystemDrive%\ProgramData
 [\Registry\Machine\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-21-1000000001-1000000002-1000000003-1001]
 "ProfileImagePath"=expand:C:\Users\gala
+; The service accounts' profiles, as Windows lists them.
+[\Registry\Machine\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-18]
+"ProfileImagePath"=expand:%systemroot%\system32\config\systemprofile
+[\Registry\Machine\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-19]
+"ProfileImagePath"=expand:%systemroot%\ServiceProfiles\LocalService
+[\Registry\Machine\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-20]
+"ProfileImagePath"=expand:%systemroot%\ServiceProfiles\NetworkService
 
 [\Registry\Machine\SOFTWARE\Microsoft\Windows\CurrentVersion]
 "ProgramFilesDir"=sz:C:\Program Files

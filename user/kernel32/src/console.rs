@@ -120,16 +120,58 @@ pub(crate) fn forget(h: Handle) {
 }
 
 /// Whether `h` is a console handle, and if so whether it is the input.
-fn kind(h: Handle) -> Option<bool> {
+pub(crate) fn kind(h: Handle) -> Option<bool> {
     if h.is_null() {
         return None;
     }
     with_state(|s| s.handles.iter().find(|e| e.0 == h as usize).map(|e| e.1))
 }
 
+/// For a handle not opened as CONIN$/CONOUT$ here (a standard or inherited
+/// handle): whether the kernel says it is a console (FILE_DEVICE_CONSOLE),
+/// and then whether it is input (a zero-length write fails). The console
+/// functions that write accept such handles; GetConsoleMode keeps saying
+/// gala's standard handles are not consoles (redirected output, which the
+/// JDK and the Go runtime then treat as such).
+fn console_device(h: Handle) -> Option<bool> {
+    #[link(name = "ntdll", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn NtQueryVolumeInformationFile(
+            h: Handle,
+            iosb: *mut [usize; 2],
+            buf: *mut u8,
+            len: u32,
+            class: u32,
+        ) -> u32;
+    }
+    let mut iosb = [0usize; 2];
+    let mut device = [0u32; 2];
+    // SAFETY: our buffers (FileFsDeviceInformation, 4).
+    let status =
+        unsafe { NtQueryVolumeInformationFile(h, &mut iosb, device.as_mut_ptr().cast(), 8, 4) };
+    if status != 0 || device[0] != 0x50 {
+        return None;
+    }
+    // SAFETY: a zero-length write from our (unused) buffer.
+    let written = unsafe {
+        super::NtWriteFile(
+            h,
+            0,
+            0,
+            0,
+            &mut iosb,
+            [0u8; 1].as_ptr(),
+            0,
+            core::ptr::null(),
+            core::ptr::null(),
+        )
+    };
+    Some(written != 0)
+}
+
 /// `Some(())` for a console output handle, else the error is set.
 fn output(h: Handle) -> Option<()> {
-    match kind(h) {
+    match kind(h).or_else(|| console_device(h)) {
         Some(false) => Some(()),
         _ => {
             SetLastError(ERROR_INVALID_HANDLE);

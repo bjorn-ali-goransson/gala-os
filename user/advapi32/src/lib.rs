@@ -227,24 +227,26 @@ pub extern "system" fn SystemFunction036(buffer: *mut u8, length: u32) -> u8 {
 }
 
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
-/// The one user name gala reports (there are no accounts).
-const USER_NAME: &[u8] = b"gala";
-
-/// GetUserNameA(lpBuffer, *pcbBuffer): the size includes the NUL.
+/// GetUserNameA(lpBuffer, *pcbBuffer): GetUserNameW's name (ASCII
+/// names: gala's accounts are); the size includes the NUL.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetUserNameA(buffer: *mut u8, size: *mut u32) -> i32 {
     if size.is_null() {
         return fail(87, 0);
     }
-    let needed = USER_NAME.len() as u32 + 1;
+    let (mut name, mut domain) = ([0u16; 256], [0u16; 64]);
+    let Some((len, _)) = security::current_user(&mut name, &mut domain) else { return 0 };
+    let needed = len as u32 + 1;
     // SAFETY: the caller's size and buffer of *size bytes.
     unsafe {
         if buffer.is_null() || *size < needed {
             *size = needed;
             return fail(ERROR_INSUFFICIENT_BUFFER, 0);
         }
-        memcpy(buffer, USER_NAME.as_ptr(), USER_NAME.len());
-        *buffer.add(USER_NAME.len()) = 0;
+        for (i, &c) in name[..len].iter().enumerate() {
+            *buffer.add(i) = if c < 128 { c as u8 } else { b'?' };
+        }
+        *buffer.add(len) = 0;
         *size = needed;
     }
     1
