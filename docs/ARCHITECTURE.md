@@ -1039,6 +1039,12 @@ Windows, never shadows the system's DLLs.)
   accept (recorded). SetEntriesInAclW builds the new ACL as documented
   (GRANT, SET, DENY, REVOKE; SID trustees or names, CURRENT_USER; denied
   ACEs first).
+  Service SIDs: `NT SERVICE\<name>` is S-1-5-80 followed by the SHA-1 of
+  the upper-cased UTF-16 name (five DWORDs; bcrypt, loaded on first
+  use); LookupAccountNameW/SidW resolve them for services registered
+  under HKLM\SYSTEM\CurrentControlSet\Services (gala has no service
+  control manager: a service is its key), and S-1-5-80-0 as ALL
+  SERVICES; domain NT SERVICE, SidTypeWellKnownGroup.
 - **iphlpapi/secur32/winhttp** (what the JDK's net.dll imports): network
   adapter tables, ICMP echo, SSPI and WinHTTP sessions are not supported
   (documented failures, recorded); ConvertLengthToIpv4Mask is computed and

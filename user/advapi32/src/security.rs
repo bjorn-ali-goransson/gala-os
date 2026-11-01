@@ -20,6 +20,8 @@ unsafe extern "system" {
     fn GetCurrentThreadId() -> u32;
     fn GetThreadId(thread: usize) -> u32;
     fn GetFileAttributesW(path: *const u16) -> u32;
+    fn LoadLibraryA(name: *const u8) -> usize;
+    fn GetProcAddress(module: usize, name: *const u8) -> usize;
     fn DuplicateHandle(
         source_process: usize,
         source: usize,
@@ -254,6 +256,128 @@ const ACCOUNTS: &[(u64, &[u32], &str, &str, u32)] = &[
     (5, &[32, 545], "Users", "BUILTIN", SID_TYPE_ALIAS),
 ];
 
+// ---- Service SIDs ----
+//
+// "NT SERVICE\<name>" is S-1-5-80 followed by the SHA-1 of the service's
+// name, upper-cased, in UTF-16 (five little-endian DWORDs), as documented
+// for service SIDs; S-1-5-80-0 is "NT SERVICE\ALL SERVICES". Names resolve
+// for services the system has: the keys under
+// HKLM\SYSTEM\CurrentControlSet\Services (where the service control
+// manager keeps them). SHA-1 comes from bcrypt, loaded on first use.
+
+const NT_SERVICE: &str = "NT SERVICE";
+
+/// The five sub-authorities after 80 of service `name`'s SID.
+fn service_hash(name: &[u16]) -> Option<[u32; 5]> {
+    type HashFn =
+        unsafe extern "system" fn(usize, *const u8, u32, *const u8, u32, *mut u8, u32) -> u32;
+    let mut bytes = [0u8; 512];
+    if name.len() * 2 > bytes.len() {
+        return None;
+    }
+    for (i, &c) in name.iter().enumerate() {
+        let up = if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c };
+        bytes[2 * i..2 * i + 2].copy_from_slice(&up.to_le_bytes());
+    }
+    let mut digest = [0u8; 20];
+    // SAFETY: loading bcrypt and calling BCryptHash (documented signature)
+    // with the SHA-1 pseudo-handle and our buffers.
+    let ok = unsafe {
+        let m = LoadLibraryA(c"bcrypt.dll".as_ptr().cast());
+        let f = if m == 0 { 0 } else { GetProcAddress(m, c"BCryptHash".as_ptr().cast()) };
+        f != 0
+            && core::mem::transmute::<usize, HashFn>(f)(
+                0x31,
+                core::ptr::null(),
+                0,
+                bytes.as_ptr(),
+                (2 * name.len()) as u32,
+                digest.as_mut_ptr(),
+                20,
+            ) == 0
+    };
+    if !ok {
+        return None;
+    }
+    let mut subs = [0u32; 5];
+    for (i, s) in subs.iter_mut().enumerate() {
+        *s = u32::from_le_bytes([
+            digest[4 * i],
+            digest[4 * i + 1],
+            digest[4 * i + 2],
+            digest[4 * i + 3],
+        ]);
+    }
+    Some(subs)
+}
+
+/// Calls `f` with each registered service's name (stopping when it
+/// returns true); whether it did.
+fn any_service(mut f: impl FnMut(&[u16]) -> bool) -> bool {
+    const HKLM: usize = 0x8000_0002;
+    let path: [u16; 35] = {
+        let mut p = [0u16; 35];
+        for (d, c) in p.iter_mut().zip("SYSTEM\\CurrentControlSet\\Services".encode_utf16()) {
+            *d = c;
+        }
+        p
+    };
+    let mut key = 0usize;
+    if super::registry::RegOpenKeyExW(HKLM, path.as_ptr(), 0, 0x2_0019, &mut key) != 0 {
+        return false;
+    }
+    let mut found = false;
+    let mut index = 0;
+    loop {
+        let mut name = [0u16; 256];
+        let mut len = 256u32;
+        let r = super::registry::RegEnumKeyExW(
+            key,
+            index,
+            name.as_mut_ptr(),
+            &mut len,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        if r != 0 {
+            break;
+        }
+        if f(&name[..len as usize]) {
+            found = true;
+            break;
+        }
+        index += 1;
+    }
+    super::registry::RegCloseKey(key);
+    found
+}
+
+fn same_upper(a: &[u16], b: &[u16]) -> bool {
+    let up = |c: u16| if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c };
+    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| up(x) == up(y))
+}
+
+fn service_registered(name: &[u16]) -> bool {
+    any_service(|s| same_upper(s, name))
+}
+
+/// The registered service whose SID has sub-authorities `subs` (after
+/// 80): its name into `out`, and the length.
+fn service_named_by(subs: &[u32], out: &mut [u16; 256]) -> Option<usize> {
+    let mut n = None;
+    any_service(|s| {
+        if service_hash(s).is_some_and(|h| h[..] == *subs) {
+            out[..s.len()].copy_from_slice(s);
+            n = Some(s.len());
+            return true;
+        }
+        false
+    });
+    n
+}
+
 /// Copies `text` with a NUL into `buf` of `*size` units: on success
 /// `*size` is the length without the NUL.
 fn put_name(text: &str, buf: *mut u16) {
@@ -281,11 +405,29 @@ pub extern "system" fn LookupAccountSidW(
     let Some((authority, subs, count)) = read_sid(sid) else {
         return fail(ERROR_INVALID_SID, 0);
     };
-    let Some(&(_, _, account, dom, use_)) =
+    // The account's name (UTF-16), domain and SID_NAME_USE.
+    let mut account = [0u16; 256];
+    let (account_len, dom, use_) = if let Some(&(_, _, a, dom, use_)) =
         ACCOUNTS.iter().find(|a| a.0 == authority && a.1 == &subs[..count])
-    else {
+    {
+        for (d, c) in account.iter_mut().zip(a.encode_utf16()) {
+            *d = c;
+        }
+        (a.len(), dom, use_)
+    } else if authority == 5 && count == 2 && subs[..2] == [80, 0] {
+        for (d, c) in account.iter_mut().zip("ALL SERVICES".encode_utf16()) {
+            *d = c;
+        }
+        (12, NT_SERVICE, SID_TYPE_WELL_KNOWN_GROUP)
+    } else if authority == 5 && count == 6 && subs[0] == 80 {
+        match service_named_by(&subs[1..6], &mut account) {
+            Some(n) => (n, NT_SERVICE, SID_TYPE_WELL_KNOWN_GROUP),
+            None => return fail(ERROR_NONE_MAPPED, 0),
+        }
+    } else {
         return fail(ERROR_NONE_MAPPED, 0);
     };
+    let account = &account[..account_len];
     if name_len.is_null() || domain_len.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -298,7 +440,8 @@ pub extern "system" fn LookupAccountSidW(
             *domain_len = need_domain;
             return fail(ERROR_INSUFFICIENT_BUFFER, 0);
         }
-        put_name(account, name);
+        core::ptr::copy_nonoverlapping(account.as_ptr(), name, account.len());
+        *name.add(account.len()) = 0;
         put_name(dom, domain);
         *name_len = need_name - 1;
         *domain_len = need_domain - 1;
@@ -1028,11 +1171,23 @@ pub extern "system" fn LookupAccountNameW(
                 .zip(b.bytes())
                 .all(|(&x, y)| u8::try_from(x).is_ok_and(|x| x.eq_ignore_ascii_case(&y)))
     };
-    let Some(&(authority, subs, _, dom, use_)) =
-        ACCOUNTS.iter().find(|a| same(account, a.2) && want_domain.is_none_or(|d| same(d, a.3)))
-    else {
-        return fail(ERROR_NONE_MAPPED, 0);
-    };
+    let mut service = [0u32; 6];
+    let (authority, subs, dom, use_): (u64, &[u32], &str, u32) =
+        if let Some(&(authority, subs, _, dom, use_)) =
+            ACCOUNTS.iter().find(|a| same(account, a.2) && want_domain.is_none_or(|d| same(d, a.3)))
+        {
+            (authority, subs, dom, use_)
+        } else if want_domain.is_some_and(|d| same(d, NT_SERVICE)) && same(account, "ALL SERVICES")
+        {
+            (5, &[80, 0], NT_SERVICE, SID_TYPE_WELL_KNOWN_GROUP)
+        } else if want_domain.is_some_and(|d| same(d, NT_SERVICE)) && service_registered(account) {
+            let Some(hash) = service_hash(account) else { return fail(ERROR_NONE_MAPPED, 0) };
+            service[0] = 80;
+            service[1..].copy_from_slice(&hash);
+            (5, &service[..], NT_SERVICE, SID_TYPE_WELL_KNOWN_GROUP)
+        } else {
+            return fail(ERROR_NONE_MAPPED, 0);
+        };
     let need_sid = sid_len(subs.len()) as u32;
     let need_domain = dom.len() as u32 + 1;
     // SAFETY: the caller's sizes and buffers.

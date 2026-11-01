@@ -26,6 +26,13 @@
 //!   script is fully trusted; SaferIdentifyLevel and friends);
 //!   CreateWellKnownSid; secur32's GetUserNameExW; PerfLib V2 providers;
 //!   classic event trace providers (registered, never enabled).
+//! - Service SIDs ("NT SERVICE\\name": S-1-5-80 and the SHA-1 of the
+//!   upper-cased UTF-16 name as five sub-authorities, as documented):
+//!   LookupAccountNameW of a registered service (a key under
+//!   HKLM\\SYSTEM\\CurrentControlSet\\Services, where the service control
+//!   manager keeps services) gives that SID, domain "NT SERVICE" and
+//!   SidTypeWellKnownGroup; LookupAccountSidW gives the name back; an
+//!   unregistered name is ERROR_NONE_MAPPED; S-1-5-80-0 is "ALL SERVICES".
 //! - What SQL Server does to its pipe's security: GetSecurityInfo of a
 //!   handle (the owner is the token's user, the DACL is valid, both inside
 //!   the LocalAlloc'd descriptor), SetEntriesInAclW (SET_ACCESS on no old
@@ -232,6 +239,18 @@ unsafe extern "system" {
         kind: *mut u32,
     ) -> Bool;
     fn MapGenericMask(mask: *mut u32, mapping: *const [u32; 4]);
+    fn RegCreateKeyExW(
+        key: usize,
+        sub: *const u16,
+        reserved: u32,
+        class: *const u16,
+        options: u32,
+        access: u32,
+        attributes: *mut c_void,
+        result: *mut usize,
+        disposition: *mut u32,
+    ) -> u32;
+    fn RegCloseKey(key: usize) -> u32;
     fn GetFileSecurityW(
         path: *const u16,
         info: u32,
@@ -1214,8 +1233,103 @@ fn security_info(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// LookupAccountSidW of `sid`: (name, domain, SID_NAME_USE) as UTF-16.
+fn sid_name(c: &mut Checks, sid: *const u8) -> Result<([u16; 64], [u16; 64], u32), u32> {
+    let (mut name, mut domain) = ([0u16; 64], [0u16; 64]);
+    let (mut n, mut d, mut kind) = (64u32, 64u32, 0u32);
+    // SAFETY: our buffers.
+    let ok = unsafe {
+        LookupAccountSidW(
+            core::ptr::null(),
+            sid,
+            name.as_mut_ptr(),
+            &mut n,
+            domain.as_mut_ptr(),
+            &mut d,
+            &mut kind,
+        )
+    };
+    // SAFETY: a plain call.
+    c.ok(ok != 0, unsafe { GetLastError() }.into())?;
+    Ok((name, domain, kind))
+}
+
+fn service_sids(c: &mut Checks) -> Result<(), u32> {
+    const HKLM: usize = 0x8000_0002;
+    // The expected SID of "GalaTestSvc" (SHA-1 of "GALATESTSVC" in UTF-16).
+    const SUBS: [u32; 5] = [765_217_453, 1_555_484_622, 2_423_858_185, 2_857_057_982, 718_857_570];
+    // SAFETY: advapi32 calls with buffers of ours.
+    unsafe {
+        let mut key = 0;
+        let path = w("SYSTEM\\CurrentControlSet\\Services\\GalaTestSvc");
+        let r = RegCreateKeyExW(
+            HKLM,
+            path.as_ptr(),
+            0,
+            core::ptr::null(),
+            0,
+            0xf003f,
+            core::ptr::null_mut(),
+            &mut key,
+            core::ptr::null_mut(),
+        );
+        c.eq(r.into(), 0)?;
+        RegCloseKey(key);
+
+        let mut sid = [0u8; 68];
+        let mut domain = [0u16; 64];
+        let (mut n, mut d, mut kind) = (68u32, 64u32, 0u32);
+        let name = w("NT SERVICE\\GalaTestSvc");
+        let ok = LookupAccountNameW(
+            core::ptr::null(),
+            name.as_ptr(),
+            sid.as_mut_ptr(),
+            &mut n,
+            domain.as_mut_ptr(),
+            &mut d,
+            &mut kind,
+        );
+        c.ok(ok != 0, GetLastError().into())?;
+        c.ok(n == 32 && sid[0] == 1 && sid[1] == 6 && sid[7] == 5, n.into())?;
+        let sub = |i: usize| {
+            u32::from_le_bytes([sid[8 + 4 * i], sid[9 + 4 * i], sid[10 + 4 * i], sid[11 + 4 * i]])
+        };
+        c.eq(sub(0).into(), 80)?;
+        c.ok((0..5).all(|i| sub(i + 1) == SUBS[i]), sub(1).into())?;
+        c.text(domain.as_ptr(), "NT SERVICE")?;
+        c.eq(kind.into(), 5)?; // SidTypeWellKnownGroup
+        let (back, dom, back_kind) = sid_name(c, sid.as_ptr())?;
+        c.text(back.as_ptr(), "GalaTestSvc")?;
+        c.text(dom.as_ptr(), "NT SERVICE")?;
+        c.eq(back_kind.into(), 5)?;
+
+        let (mut n, mut d) = (68u32, 64u32);
+        let none = w("NT SERVICE\\GalaNoSuchSvc");
+        let ok = LookupAccountNameW(
+            core::ptr::null(),
+            none.as_ptr(),
+            sid.as_mut_ptr(),
+            &mut n,
+            domain.as_mut_ptr(),
+            &mut d,
+            &mut kind,
+        );
+        c.eq(ok as u64, 0)?;
+        c.eq(GetLastError().into(), 1332)?; // ERROR_NONE_MAPPED
+
+        let mut all = core::ptr::null_mut();
+        c.ok(ConvertStringSidToSidW(w("S-1-5-80-0").as_ptr(), &mut all) != 0, 0)?;
+        let (name, dom, _) = sid_name(c, all)?;
+        c.text(name.as_ptr(), "ALL SERVICES")?;
+        c.text(dom.as_ptr(), "NT SERVICE")?;
+        LocalFree(all.cast());
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    service_sids(&mut c)?;
     // InitializeSid, then the sub-authorities: S-1-5-32-544.
     // SAFETY: a SID buffer of ours.
     unsafe {

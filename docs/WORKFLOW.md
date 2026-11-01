@@ -104,6 +104,13 @@ shows it.
   event when they start, so a wait that never returns shows as the
   thread's last line. Do not delete the events file of a running
   VM (it is still open: `/proc/<qemu pid>/fd/` reaches it).
+- **A program fails without a ledger entry or a failing system call**
+  (a function returned data it did not like): add temporary probes,
+  `missing_detail(b"TRACE dll!Function", detail)` at the top of the
+  suspect DLL functions (name, class or argument as the detail, or the
+  argument text in the name), run, read the `TRACE` ledger lines, and
+  revert them before committing. That is how sqlservr's unresolved
+  `NT SERVICE\SQLWriter` SID was found.
 - **A program imports functions gala lacks**: a missing export stops the
   load (as on Windows), so add it to the DLL's `src/unimplemented.rs`
   (`gala_stubs::unimplemented_exports!`) to get the program running; the

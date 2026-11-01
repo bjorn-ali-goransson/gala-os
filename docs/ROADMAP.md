@@ -809,12 +809,27 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         instance", failing with error 15377 ("Error adding user to
         sysadmin role": which call fails is to be found, probably an
         account or token lookup), then shuts down. That first start is
-        presumably what relocates the system databases; the scenario
-        keeps the plain arguments for now (they reach "ready"). The
-        service master key still fails (ESECCrypto error 21, LastOsError
-        6; also with -K). Next: trace the user-instance configuration
-        (`events=syscall` around error 15377), then model/msdb, then a
-        client over the pipe (sqlcmd, or a test program speaking TDS). Also seen: netapi32's NetShareGetInfo and
+        what relocates the system databases. Then (seventh pass) the
+        cause, found with temporary ledger probes in advapi32: sqlservr
+        makes `NT SERVICE\SQLWriter` a sysadmin login, and that service
+        SID (S-1-5-80 and the SHA-1 of the service name) did not resolve.
+        Service SIDs now resolve for services under
+        HKLM\SYSTEM\CurrentControlSet\Services (`advapi32_test`), and the
+        scenario's registry has the SQLWriter service the MSI installs
+        (its ServiceInstall row). **The first start now completes**: the
+        scenario runs `sqlservr -m -K -T1617 -w1 -c ...` as
+        SqlUserInstance.dll would; it regenerates the SA password,
+        configures the user instance, finds msdb and model next to master
+        and upgrades them (927 to 957), creates tempdb, logs "Recovery is
+        complete" and, after -w minutes with no client, "The RANU
+        instance is terminating in response to its internal time out"
+        (the scenario expects all of these; about 75 s). Left: the
+        service master key (ESECCrypto error 21, LastOsError 6; non-fatal),
+        GetActualSectorSize for the new tempdb files (error 3; non-fatal),
+        FSCTL_FILESYSTEM_GET_STATISTICS (error 17053, noise). Next: a
+        client over the pipe (a test program speaking TDS: PRELOGIN,
+        LOGIN7 with SSPI or SQL authentication, SQL_BATCH `SELECT
+        @@VERSION`), and the plain (second) start of the instance. Also seen: netapi32's NetShareGetInfo and
         NetValidatePasswordPolicy (looked up), FSCTL_FILESYSTEM_GET_STATISTICS
         (error 17053, goes on), CoCreateInstance of a class not
         registered, NtQuerySystemInformation class 192.

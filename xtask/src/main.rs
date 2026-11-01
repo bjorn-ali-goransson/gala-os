@@ -364,6 +364,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("advapi32_test", "advapi32.dll", "Windows/System32"),
     ("advapi32_test", "secur32.dll", "Windows/System32"),
     ("advapi32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("advapi32_test", "bcrypt.dll", "Windows/System32"),
     ("kernel32_system_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_system_test", "psapi.dll", "Windows/System32"),
     ("kernel32_locale_test", "kernel32.dll", "Windows/System32"),
@@ -2303,11 +2304,22 @@ const SCENARIOS: &[Scenario] = &[
         // registered (-S), an instance name (-s), and the documented
         // startup options naming the master database's files and the
         // error log (sqlservr also echoes its log to the console), until
-        // it is ready for clients.
+        // it is ready for clients. The first start of a new instance, as
+        // SqlUserInstance.dll does it (its strings: `-m -K -T1617 -w5`
+        // before `-c`): it configures the user instance, relocates the
+        // system databases next to master and regenerates the service
+        // master key; it ends itself after -w minutes without clients
+        // ("RANU instance is terminating in response to its internal time
+        // out"), -w1 here to keep the run short.
         name: "sqllocaldb",
-        cmdline: "qemu_exit cwd=C:/sql/Binn run=sqlservr.exe args=-c%20-SMSSQL16E.LOCALDB%20-sLOCALDB#GALA0001%20-dC:\\sql\\data\\master.mdf%20-lC:\\sql\\data\\mastlog.ldf%20-eC:\\sql\\data\\ERRORLOG",
+        cmdline: "qemu_exit cwd=C:/sql/Binn run=sqlservr.exe args=-m%20-K%20-T1617%20-w1%20-c%20-SMSSQL16E.LOCALDB%20-sLOCALDB#GALA0001%20-dC:\\sql\\data\\master.mdf%20-lC:\\sql\\data\\mastlog.ldf%20-eC:\\sql\\data\\ERRORLOG",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["SQL Server is now ready for client connections"],
+        expect: &[
+            "SQL Server is now ready for client connections",
+            "Starting up database 'tempdb'",
+            "Recovery is complete",
+            "RANU instance is terminating",
+        ],
     },
     Scenario {
         // P1 step 4 (pending): Elasticsearch 8.15 on the JDK, started as its

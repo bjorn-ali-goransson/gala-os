@@ -37,3 +37,16 @@
 [\Registry\Machine\SYSTEM\CurrentControlSet\Services\EventLog\Application\SQLLocalDB 16.0]
 "EventMessageFile"=sz:C:\sql\Binn\Resources\SqlUserInstance.rll
 "TypesSupported"=dword:7
+
+; The SQL Server VSS Writer service the MSI installs (its ServiceInstall
+; row: SQLWriter, own process (16), automatic start (2), normal errors (1),
+; LocalSystem), as the service control manager keeps it. sqlservr makes
+; NT SERVICE\SQLWriter a login, so its service SID must resolve.
+[\Registry\Machine\SYSTEM\CurrentControlSet\Services\SQLWriter]
+"Type"=dword:16
+"Start"=dword:2
+"ErrorControl"=dword:1
+"ImagePath"=expand:"C:\Program Files\Microsoft SQL Server\90\Shared\sqlwriter.exe"
+"DisplayName"=sz:SQL Server VSS Writer
+"ObjectName"=sz:LocalSystem
+"Description"=sz:Provides the interface to backup/restore Microsoft SQL server through the Windows VSS infrastructure.
