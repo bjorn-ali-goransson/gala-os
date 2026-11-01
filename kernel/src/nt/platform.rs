@@ -1,12 +1,12 @@
 //! The seam between the NT layer and what runs it (docs/GALA_UM.md).
 //!
-//! The NT layer reaches the machine only through this module: four traits
+//! The NT layer reaches the machine only through this module: five traits
 //! say what it needs (time, threads and waits, entering and leaving user
-//! mode, user memory), `P` names the implementation (the kernel today,
+//! mode, user memory, the disk), `P` names the implementation (the kernel today,
 //! `crate::platform::Kernel`; gala-um's host process in U2), and the
 //! functions below are the NT layer's way to call it. No other file in
-//! `nt/` names `crate::arch`, `crate::sched`, `crate::time` or the frame
-//! allocator (xtask's unit tests check this). With the `hosted` feature,
+//! `nt/` names `crate::arch`, `crate::sched`, `crate::time`, `crate::disk`
+//! or the frame allocator (xtask's unit tests check this). With the `hosted` feature,
 //! `P` and the address-space types come from `crate::hosted` (gala-um).
 //!
 //! The data types the platform provides (thread ids, register sets, the
@@ -20,6 +20,7 @@ pub use crate::arch::paging::{PagingError, UserFault};
 #[cfg(not(feature = "hosted"))]
 pub use crate::arch::paging::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};
 pub use crate::arch::syscall::{SyscallFrame, UserRegs};
+pub use crate::disk::{DiskError, SECTOR as DISK_SECTOR};
 #[cfg(feature = "hosted")]
 pub use crate::hosted::memory::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};
 pub use crate::mm::PAGE_SIZE;
@@ -123,6 +124,14 @@ pub trait UserMemory {
     fn frame_of_heap_page(addr: usize) -> Frame;
     /// (free, total) page frames.
     fn frame_stats() -> (u64, u64);
+}
+
+/// The machine's disk, in 512-byte sectors (none: 0 sectors).
+pub trait Storage {
+    fn disk_sectors() -> u64;
+    fn disk_read(first: u64, buf: &mut [u8]) -> Result<(), DiskError>;
+    fn disk_write(first: u64, data: &[u8]) -> Result<(), DiskError>;
+    fn disk_flush() -> Result<(), DiskError>;
 }
 
 // The NT layer's calls. Thin and inlined: the kernel implementation costs
@@ -276,4 +285,21 @@ pub fn frame_of_heap_page(addr: usize) -> Frame {
 #[inline]
 pub fn frame_stats() -> (u64, u64) {
     <P as UserMemory>::frame_stats()
+}
+
+#[inline]
+pub fn disk_sectors() -> u64 {
+    <P as Storage>::disk_sectors()
+}
+#[inline]
+pub fn disk_read(first: u64, buf: &mut [u8]) -> Result<(), DiskError> {
+    <P as Storage>::disk_read(first, buf)
+}
+#[inline]
+pub fn disk_write(first: u64, data: &[u8]) -> Result<(), DiskError> {
+    <P as Storage>::disk_write(first, data)
+}
+#[inline]
+pub fn disk_flush() -> Result<(), DiskError> {
+    <P as Storage>::disk_flush()
 }

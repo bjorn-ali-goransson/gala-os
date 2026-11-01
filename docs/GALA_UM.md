@@ -94,14 +94,15 @@ layer (or into a small shared `no_std` support crate) at the split:
   the same smoltcp stack on a loopback device or maps AFD onto host
   sockets; decided in U2 when AFD tests are ported.
 
-**The seam.** `kernel/src/nt/platform.rs` holds four traits, `Clock`,
-`Threads`, `UserEntry` and `UserMemory` (frames; the per-space
-operations stay methods of the `UserSpace` type), and `P`, the type that
+**The seam.** `kernel/src/nt/platform.rs` holds five traits, `Clock`,
+`Threads`, `UserEntry`, `UserMemory` (frames; the per-space
+operations stay methods of the `UserSpace` type) and `Storage` (the
+disk; gala-um has none: 0 sectors), and `P`, the type that
 implements them: `crate::platform::Kernel` (`kernel/src/platform.rs`,
 each method forwarding to the subsystem). The NT layer calls thin inlined
 functions (`platform::ticks()`, `platform::wake(id)`, ...) and gets the
 data types from the same module. No other nt file names `crate::arch`,
-`crate::sched`, `crate::time` or the frame allocator; xtask's unit test
+`crate::sched`, `crate::time`, `crate::disk` or the frame allocator; xtask's unit test
 `nt_uses_the_machine_only_through_platform` enforces it. No behaviour
 changed (all QEMU scenarios pass).
 

@@ -482,6 +482,8 @@ fn dispatch(frame: &mut SyscallFrame) {
         }
     };
     thread::set_in_syscall(&me, None);
+    // What the call changed on C: is on the disk before it returns.
+    super::persist::sync();
     let name = service.map_or("?", |&(_, name, ..)| name);
     let counter =
         if super::stats::is_wait(name) { &super::stats::WAITS } else { &super::stats::SYSCALLS };
@@ -3150,7 +3152,7 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         if super::disk::needs_read(code) && entry.access & file::FILE_READ_DATA == 0 {
             return NtStatus::ACCESS_DENIED;
         }
-        let out = tri!(super::disk::control(code, crate::disk::sectors()));
+        let out = tri!(super::disk::control(code, platform::disk_sectors()));
         if out.len() > output_len as usize {
             return NtStatus::BUFFER_TOO_SMALL;
         }
@@ -3745,11 +3747,11 @@ fn disk_io(
     data.resize(length as usize, 0);
     let result = if write {
         match call.process.read(buffer, &mut data) {
-            Ok(()) => crate::disk::write(first, &data).map_err(super::disk::status),
+            Ok(()) => platform::disk_write(first, &data).map_err(super::disk::status),
             Err(_) => Err(NtStatus::ACCESS_VIOLATION),
         }
     } else {
-        crate::disk::read(first, &mut data).map_err(super::disk::status).and_then(|()| {
+        platform::disk_read(first, &mut data).map_err(super::disk::status).and_then(|()| {
             call.process.write(buffer, &data).map_err(|_| NtStatus::ACCESS_VIOLATION)
         })
     };
@@ -4540,7 +4542,7 @@ fn nt_flush_buffers_file(call: &mut Call<'_>) -> NtStatus {
     match &entry.object.body {
         ObjectBody::File(_) => {}
         ObjectBody::Pipe(end) => tri!(end.flush()),
-        ObjectBody::Disk(_) => tri!(crate::disk::flush().map_err(super::disk::status)),
+        ObjectBody::Disk(_) => tri!(platform::disk_flush().map_err(super::disk::status)),
         _ => return NtStatus::OBJECT_TYPE_MISMATCH,
     }
     tri!(call.write_iosb(arg!(call, 1), NtStatus::SUCCESS, 0));

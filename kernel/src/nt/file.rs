@@ -23,6 +23,9 @@ pub fn with_fs<R>(f: impl FnOnce(&mut RamFs) -> R) -> R {
         let mut guard = FS.lock();
         let fs = guard.as_mut().expect("file system initialized");
         let r = f(fs);
+        if fs.recording && fs.has_ops() {
+            super::persist::note_pending();
+        }
         (r, super::notify::collect(fs))
     };
     super::notify::deliver(events);

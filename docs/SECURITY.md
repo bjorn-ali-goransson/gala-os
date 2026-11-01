@@ -154,4 +154,6 @@ start.
    (no write up). Left: labels on objects low tokens create.
 Then the disk: D1 a virtio-blk driver (done, 2026-11-01: `disk_test`;
 `\\.\PhysicalDrive0` for Administrators and SYSTEM only), D2 a file
-system with descriptors, D3 registry hives on it.
+system with descriptors (done, 2026-11-01: with the boot option
+`persist` the changes to C:, descriptors included, are a log on the disk
+replayed at boot; `persist_test`), D3 registry hives on it.

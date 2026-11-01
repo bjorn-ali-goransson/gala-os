@@ -147,6 +147,11 @@ pub fn kernel_main() -> ! {
     if let Err(e) = nt::accounts::assign_boot_profiles() {
         warn!("profiles: {e:?}");
     }
+    // `persist`: C: is kept on the disk (changes since earlier boots are
+    // replayed now, over the boot's files).
+    if cmdline.flag("persist") {
+        nt::persist::mount();
+    }
 
     nt::syscalls::set_trace(cmdline.flag("trace"));
     events::set_mask(cmdline.value("events").map_or(0, events::parse_mask));
@@ -177,6 +182,8 @@ pub fn kernel_main() -> ! {
                 other => other,
             };
             run_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""), cwd, wait_all);
+            // What the program's end changed (delete-on-close at exit).
+            nt::persist::sync();
             nt::ledger::dump();
             info!("run: end {name}");
         }

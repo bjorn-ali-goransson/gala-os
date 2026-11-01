@@ -764,6 +764,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "persist_test"
+version = "0.1.0"
+
+[[package]]
 name = "pipe_test"
 version = "0.1.0"
 

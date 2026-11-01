@@ -1902,8 +1902,62 @@ it, D3 registry hives on it).
   (`DISK_SCENARIOS`: size, what to write into the fresh image, what the
   image must hold after the run, checked on the host); host unit tests
   for the IOCTL outputs and sector checks. gala-um has no disk.
-- TODO: device interrupts, more than one request in flight, partitions
-  (D2 decides whether the file system takes the whole disk).
+- TODO: device interrupts, more than one request in flight.
+
+### C: kept on the disk (D2)
+
+With the boot option `persist`, the disk keeps what programs change on
+C: (the whole disk; no partitions). The ramfs stays the working copy;
+the disk holds a log of the changes since the boot's files were laid
+down, replayed over them at the next boot. Files therefore still live in
+memory, and the disk is only written (never read) while running.
+
+- `fs::log`: the changes as records keyed by path (`\a\b`; node ids do
+  not survive a reboot): Create (directory or file, attributes, times;
+  a file that exists is emptied), Write (offset, data of at most 64 KiB,
+  time), SetSize, SetBasic (times, attributes), SetSecurity (the
+  self-relative descriptor), Rename, Delete (with everything below).
+  Each record carries the log's generation and a CRC-32; the first
+  record that does not check out ends the log.
+- `RamFs` records while `recording` is on: each mutator (create, write,
+  set_size, set_basic, set_security, rename, and removal when the last
+  handle of a delete-pending node closes) pushes its record, and marks
+  the node *dirty*. Nodes the boot made are *boot* nodes; when one is
+  removed or renamed away its path becomes a *tombstone* (the boot will
+  make it again). Renaming a directory marks everything below it dirty.
+  `apply` replays a record (not recording it; a missing path is
+  skipped); `snapshot` describes the same state from scratch: Delete for
+  each tombstone, then every dirty node in tree order with its
+  descriptor, contents and times. A record that cannot be made (no
+  memory) makes the next sync write a snapshot instead.
+- `fs::volume` (over a `Blocks` trait, so host tests run it on a disk in
+  memory, crashes included): sector 0 is the superblock (magic, active
+  area, generation, the disk's size, CRC); the rest is two equal areas.
+  The active area holds the log of the superblock's generation from its
+  start. `append` writes after the last record (rewriting the partial
+  last sector) and flushes. When the area is full, `compact` writes a
+  snapshot with the next generation into the other area, flushes, and
+  only then switches the superblock: a crash leaves either log complete.
+  An empty or foreign disk is formatted when mounted.
+- `nt::persist`: `mount` (after the boot's files and profiles, before
+  programs run) replays the log and turns recording on; `file::with_fs`
+  notes pending records, and `sync` runs at the end of every system call
+  (and after each program the kernel runs), so a change is on the disk
+  when the call that made it returns, as if every file were opened
+  write-through. One sync writes at a time (a turn flag; it yields while
+  the disk works).
+- Test: `persist_test`, booted twice on one disk (xtask's
+  `DiskScenario::earlier_boots`): the first boot makes files and
+  directories (a descriptor, attributes, a time, a 200,000-byte file, a
+  truncation, a rename, a delete, nested directories), the second checks
+  them. Host tests: the record format, replay and snapshot over a boot
+  tree (tombstones, a renamed boot directory), the volume (remounts,
+  compaction into either area, torn writes and cut-short compactions).
+- Limits and TODO: all kept files are in memory (and are read from the
+  disk only at boot); a snapshot is built in memory under the file
+  system's lock (twice the kept data, briefly); writes through mapped
+  views of a file (data sections) are not recorded; the registry is not
+  kept yet (D3); one change log for the whole of C: (no second volume).
 
 ## Not done yet
 
@@ -1911,7 +1965,8 @@ suspension/context of threads running on other CPUs, ranged (invlpg)
 shootdowns and PCIDs (ROADMAP S4), a real ntdll and
 kernel32 (gala runs test stand-ins), process creation from user mode,
 security, a persistent registry (registry security, symbolic link keys,
-change notifications, WOW64 views), a file system on the disk (D2),
+change notifications, WOW64 views), files on the disk read on demand
+(D2 keeps them in memory),
 interrupts for devices (virtio-net and virtio-blk poll), AcceptEx with
 receive data, ConnectEx with send data, UDP, IPv6,
 select/IOCTL_AFD_POLL, non-blocking sockets, socket options with effect, telling a reset from a FIN

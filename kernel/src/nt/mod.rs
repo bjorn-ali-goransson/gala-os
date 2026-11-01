@@ -17,6 +17,7 @@ pub mod ntdll;
 pub mod object;
 pub mod params;
 pub mod pe;
+pub mod persist;
 pub mod pipe;
 pub mod platform;
 pub mod process;

@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 
 use alloc::boxed::Box;
 
+use super::log::{self, Op};
 use crate::mm::heap::{TryVec, try_box};
 
 pub type NodeId = usize;
@@ -195,6 +196,11 @@ pub struct Node {
     /// Its security descriptor (self-relative; nt::security), if one was
     /// assigned (files gala creates at boot have none).
     pub security: Option<Vec<u8>>,
+    /// Made by the boot (modules), not by a program or the change log.
+    boot: bool,
+    /// Created or changed since boot (or by the change log): part of a
+    /// snapshot of the changes (`snapshot`).
+    dirty: bool,
 }
 
 /// A new content version (see `Node::version`).
@@ -241,6 +247,18 @@ fn same_name(a: &[u16], b: &[u16]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| fold(x) == fold(y))
 }
 
+/// Paths compare like names.
+fn same_path(a: &[u16], b: &[u16]) -> bool {
+    same_name(a, b)
+}
+
+/// A fallible copy.
+fn copy<T: Copy>(s: &[T]) -> Option<Vec<T>> {
+    let mut v = Vec::new();
+    v.try_extend_from_slice(s).ok()?;
+    Some(v)
+}
+
 /// Directory order: upcased names compared unit by unit (NTFS collation).
 pub fn collate(a: &[u16], b: &[u16]) -> core::cmp::Ordering {
     a.iter().map(|&c| fold(c)).cmp(b.iter().map(|&c| fold(c)))
@@ -280,6 +298,17 @@ pub fn has_wildcards(mask: &[u16]) -> bool {
 
 pub struct RamFs {
     nodes: Vec<Option<Node>>,
+    /// Changes are recorded for the disk (fs::log) while this is on.
+    pub recording: bool,
+    /// The change log is being replayed: what it makes is not the boot's.
+    replaying: bool,
+    /// Changes recorded since the last `take_ops`.
+    ops: Vec<Op>,
+    /// A change could not be recorded: only a snapshot is right now.
+    ops_lost: bool,
+    /// Paths of boot nodes removed or renamed away: the boot recreates
+    /// them, a snapshot deletes them again.
+    tombstones: Vec<Vec<u16>>,
     /// Changes since the last `take_changes`, recorded while `journal` is
     /// on (directory change notification: nt::notify).
     changes: Vec<Change>,
@@ -320,9 +349,21 @@ impl RamFs {
             map_count: 0,
             mapped_size: 0,
             security: None,
+            boot: true,
+            dirty: false,
         };
         nodes.try_push(Some(root)).map_err(|_| FsError::NoMemory)?;
-        Ok(Self { nodes, changes: Vec::new(), journal: false, changes_lost: false })
+        Ok(Self {
+            nodes,
+            recording: false,
+            replaying: false,
+            ops: Vec::new(),
+            ops_lost: false,
+            tombstones: Vec::new(),
+            changes: Vec::new(),
+            journal: false,
+            changes_lost: false,
+        })
     }
 
     /// Records a change (if the journal is on); the same change twice in a
@@ -387,6 +428,9 @@ impl RamFs {
     /// Sets a node's security descriptor.
     pub fn set_security(&mut self, id: NodeId, sd: Vec<u8>) -> Result<(), FsError> {
         self.node_mut(id)?.security = Some(sd);
+        self.record_node(id, |path, n| {
+            Some(Op::SetSecurity { path, descriptor: copy(n.security.as_deref().unwrap_or(&[]))? })
+        });
         Ok(())
     }
 
@@ -462,6 +506,8 @@ impl RamFs {
             map_count: 0,
             mapped_size: 0,
             security: None,
+            boot: !self.recording && !self.replaying,
+            dirty: self.recording || self.replaying,
         };
         let id = match self.nodes.iter().position(Option::is_none) {
             Some(free) => {
@@ -480,6 +526,15 @@ impl RamFs {
             return Err(FsError::NoMemory);
         }
         self.note(parent, name, directory, ACTION_ADDED);
+        self.record_node(id, |path, n| {
+            Some(Op::Create {
+                path,
+                directory,
+                attributes: n.attributes,
+                created: n.created,
+                written: n.written,
+            })
+        });
         Ok(id)
     }
 
@@ -551,6 +606,7 @@ impl RamFs {
             o.shared_delete -= u32::from(share.delete);
         }
         if node.opens.handles == 0 && node.delete_pending {
+            self.record_removal(id);
             self.remove(id);
         }
     }
@@ -638,11 +694,14 @@ impl RamFs {
                 Kind::File(_) => return Err(FsError::NotADirectory),
             }
         }
+        let from = if self.recording { self.path_of(id).ok() } else { None };
         if let Some(t) = target
             && t != id
         {
+            self.tombstone(t);
             self.remove(t);
         }
+        self.tombstone(id);
         if old_parent != parent {
             if let Kind::Directory(c) = &mut self.node_mut(old_parent)?.kind {
                 c.retain(|&x| x != id);
@@ -657,6 +716,16 @@ impl RamFs {
         let directory = node.is_dir();
         self.note(old_parent, &old_name, directory, ACTION_RENAMED_OLD_NAME);
         self.note(parent, name, directory, ACTION_RENAMED_NEW_NAME);
+        if self.recording || self.replaying {
+            // Everything below now lives at another path.
+            self.mark_tree_dirty(id);
+        }
+        if let Some(from) = from {
+            match self.path_of(id) {
+                Ok(to) => self.push_op(Op::Rename { from, to }),
+                Err(_) => self.ops_lost = true,
+            }
+        }
         Ok(())
     }
 
@@ -703,6 +772,15 @@ impl RamFs {
         if let Ok(node) = self.node_mut(id) {
             node.name = name;
         }
+        if self.recording {
+            for (i, chunk) in data.chunks(log::MAX_WRITE).enumerate() {
+                let offset = offset + (i * log::MAX_WRITE) as u64;
+                self.record_node(id, |path, _| {
+                    Some(Op::Write { path, offset, data: copy(chunk)?, written: now })
+                });
+            }
+        }
+        self.mark_dirty(id);
         Ok(data.len())
     }
 
@@ -729,6 +807,14 @@ impl RamFs {
             let dir = node.attributes & ATTRIBUTE_DIRECTORY;
             node.attributes = (a & SETTABLE) | dir;
         }
+        self.record_node(id, |path, n| {
+            Some(Op::SetBasic {
+                path,
+                created: n.created,
+                written: n.written,
+                attributes: n.attributes,
+            })
+        });
         Ok(())
     }
 
@@ -748,6 +834,8 @@ impl RamFs {
         if let Ok(node) = self.node_mut(id) {
             node.name = name;
         }
+        let size = size as u64;
+        self.record_node(id, |path, _| Some(Op::SetSize { path, size, written: now }));
         Ok(())
     }
 
@@ -785,6 +873,276 @@ impl RamFs {
             }
             _ => None,
         }
+    }
+
+    // ---- The change log (fs::log) ----
+
+    fn push_op(&mut self, op: Op) {
+        if self.ops.try_push(op).is_err() {
+            self.ops_lost = true;
+        }
+    }
+
+    fn mark_dirty(&mut self, id: NodeId) {
+        if (self.recording || self.replaying)
+            && let Ok(n) = self.node_mut(id)
+        {
+            n.dirty = true;
+        }
+    }
+
+    fn mark_tree_dirty(&mut self, id: NodeId) {
+        let mut stack = Vec::new();
+        if stack.try_push(id).is_err() {
+            self.ops_lost = true;
+            return;
+        }
+        while let Some(at) = stack.pop() {
+            let Ok(n) = self.node_mut(at) else { continue };
+            n.dirty = true;
+            if let Kind::Directory(children) = &n.kind
+                && stack.try_extend_from_slice(children).is_err()
+            {
+                self.ops_lost = true;
+            }
+        }
+    }
+
+    /// Records a change of node `id` (marking it dirty): `make` builds it
+    /// from the node's path and the node (None: out of memory).
+    fn record_node(&mut self, id: NodeId, make: impl FnOnce(Vec<u16>, &Node) -> Option<Op>) {
+        self.mark_dirty(id);
+        if !self.recording {
+            return;
+        }
+        let op = match (self.path_of(id), self.node(id)) {
+            (Ok(path), Some(n)) => make(path, n),
+            _ => None,
+        };
+        match op {
+            Some(op) => self.push_op(op),
+            None => self.ops_lost = true,
+        }
+    }
+
+    /// Remembers that boot node `id` (and what is below it) no longer has
+    /// its boot path.
+    fn tombstone(&mut self, id: NodeId) {
+        if !(self.recording || self.replaying) || !self.node(id).is_some_and(|n| n.boot) {
+            return;
+        }
+        match self.path_of(id) {
+            Ok(path) => {
+                if !self.tombstones.iter().any(|t| same_path(t, &path))
+                    && self.tombstones.try_push(path).is_err()
+                {
+                    self.ops_lost = true;
+                }
+            }
+            Err(_) => self.ops_lost = true,
+        }
+    }
+
+    /// Records the removal of `id` (before it goes).
+    fn record_removal(&mut self, id: NodeId) {
+        self.tombstone(id);
+        if self.recording {
+            match self.path_of(id) {
+                Ok(path) => self.push_op(Op::Delete { path }),
+                Err(_) => self.ops_lost = true,
+            }
+        }
+    }
+
+    /// The changes recorded since the last call, and whether some could
+    /// not be (then only a `snapshot` describes the changes).
+    pub fn take_ops(&mut self) -> (Vec<Op>, bool) {
+        let lost = core::mem::take(&mut self.ops_lost);
+        (core::mem::take(&mut self.ops), lost)
+    }
+
+    /// Forgets the recorded changes: only a snapshot will describe them
+    /// (the log could not take them).
+    pub fn lose_ops(&mut self) {
+        self.ops = Vec::new();
+        self.ops_lost = true;
+    }
+
+    pub fn has_ops(&self) -> bool {
+        !self.ops.is_empty() || self.ops_lost
+    }
+
+    /// Removes `id` and everything below it.
+    fn remove_tree(&mut self, id: NodeId) {
+        // Children first; the list is copied (fallibly) as removing edits it.
+        let children = self.children(id).ok().and_then(copy);
+        for c in children.unwrap_or_default() {
+            self.remove_tree(c);
+        }
+        self.remove(id);
+    }
+
+    /// The node at `path` (`\a\b`).
+    fn lookup(&self, path: &[u16]) -> Result<NodeId, FsError> {
+        let mut at = ROOT;
+        for part in path.split(|&u| u == u16::from(b'\\')).filter(|p| !p.is_empty()) {
+            at = self.find(at, part)?.ok_or(FsError::NotFound)?;
+        }
+        Ok(at)
+    }
+
+    /// The parent directory of `path` (made if missing) and the last name.
+    fn make_parent<'p>(
+        &mut self,
+        path: &'p [u16],
+        now: u64,
+    ) -> Result<(NodeId, &'p [u16]), FsError> {
+        let parts: Vec<&[u16]> = {
+            let mut v = Vec::new();
+            for part in path.split(|&u| u == u16::from(b'\\')).filter(|p| !p.is_empty()) {
+                v.try_push(part).map_err(|_| FsError::NoMemory)?;
+            }
+            v
+        };
+        let (last, dirs) = parts.split_last().ok_or(FsError::AccessDenied)?;
+        Ok((self.mkdir_all(dirs, now)?, last))
+    }
+
+    /// Replays one change from the log (marking what it touches dirty, not
+    /// recording it). A change whose path is missing is skipped.
+    pub fn apply(&mut self, op: &Op) -> Result<(), FsError> {
+        let was = core::mem::replace(&mut self.recording, false);
+        self.replaying = true;
+        let result = self.apply_inner(op);
+        self.replaying = false;
+        self.recording = was;
+        match result {
+            Err(FsError::NotFound | FsError::PathNotFound) => Ok(()),
+            other => other,
+        }
+    }
+
+    fn apply_inner(&mut self, op: &Op) -> Result<(), FsError> {
+        match op {
+            Op::Create { path, directory, attributes, created, written } => {
+                let (parent, name) = self.make_parent(path, *created)?;
+                let id = match self.find(parent, name)? {
+                    Some(id) if self.node(id).is_some_and(|n| n.is_dir()) == *directory => {
+                        if !directory {
+                            self.set_size(id, 0, *written)?;
+                        }
+                        id
+                    }
+                    other => {
+                        if let Some(id) = other {
+                            self.tombstone(id);
+                            self.remove_tree(id);
+                        }
+                        self.create(parent, name, *directory, *created)?
+                    }
+                };
+                self.set_basic(id, Some(*created), Some(*written), Some(*attributes))
+            }
+            Op::Write { path, offset, data, written } => {
+                let id = self.lookup(path)?;
+                self.write(id, *offset, data, *written).map(drop)
+            }
+            Op::SetSize { path, size, written } => {
+                let id = self.lookup(path)?;
+                self.set_size(id, *size, *written)
+            }
+            Op::SetBasic { path, created, written, attributes } => {
+                let id = self.lookup(path)?;
+                self.set_basic(id, Some(*created), Some(*written), Some(*attributes))
+            }
+            Op::SetSecurity { path, descriptor } => {
+                let id = self.lookup(path)?;
+                let sd = copy(descriptor).ok_or(FsError::NoMemory)?;
+                self.set_security(id, sd)
+            }
+            Op::Rename { from, to } => {
+                let id = self.lookup(from)?;
+                let (parent, name) = self.make_parent(to, 0)?;
+                if let Some(t) = self.find(parent, name)?
+                    && t != id
+                {
+                    self.tombstone(t);
+                    self.remove_tree(t);
+                }
+                self.rename(id, parent, name, true)
+            }
+            Op::Delete { path } => {
+                let id = self.lookup(path)?;
+                if id == ROOT {
+                    return Err(FsError::AccessDenied);
+                }
+                self.tombstone(id);
+                self.remove_tree(id);
+                Ok(())
+            }
+        }
+    }
+
+    /// The changes since boot as a fresh log: the boot paths that are
+    /// gone, then every dirty node (parents first) with its contents.
+    pub fn snapshot(&self) -> Result<Vec<Op>, FsError> {
+        let mut ops = Vec::new();
+        let mut push = |op: Op| ops.try_push(op).map_err(|_| FsError::NoMemory);
+        for t in &self.tombstones {
+            push(Op::Delete { path: copy(t).ok_or(FsError::NoMemory)? })?;
+        }
+        let mut stack = Vec::new();
+        stack.try_push(ROOT).map_err(|_| FsError::NoMemory)?;
+        while let Some(id) = stack.pop() {
+            let n = self.node(id).ok_or(FsError::NotFound)?;
+            if n.dirty && id != ROOT {
+                let path = self.path_of(id)?;
+                let p = || copy(&path).ok_or(FsError::NoMemory);
+                push(Op::Create {
+                    path: p()?,
+                    directory: n.is_dir(),
+                    attributes: n.attributes,
+                    created: n.created,
+                    written: n.written,
+                })?;
+                if let Some(sd) = &n.security {
+                    let descriptor = copy(sd).ok_or(FsError::NoMemory)?;
+                    push(Op::SetSecurity { path: p()?, descriptor })?;
+                }
+                if let Kind::File(data) = &n.kind {
+                    let len = data.len();
+                    let mut at = 0;
+                    while at < len {
+                        let k = (len - at).min(log::MAX_WRITE);
+                        let mut chunk = Vec::new();
+                        chunk.try_reserve_exact(k).map_err(|_| FsError::NoMemory)?;
+                        chunk.resize(k, 0);
+                        data.read_at(at, &mut chunk);
+                        push(Op::Write {
+                            path: p()?,
+                            offset: at as u64,
+                            data: chunk,
+                            written: n.written,
+                        })?;
+                        at += k;
+                    }
+                    // Writes set the time; the node's own comes last.
+                    push(Op::SetBasic {
+                        path: p()?,
+                        created: n.created,
+                        written: n.written,
+                        attributes: n.attributes,
+                    })?;
+                }
+            }
+            if let Kind::Directory(children) = &n.kind {
+                // Reversed: the stack pops them in order.
+                for &c in children.iter().rev() {
+                    stack.try_push(c).map_err(|_| FsError::NoMemory)?;
+                }
+            }
+        }
+        Ok(ops)
     }
 
     /// Creates the directories of `path` (components) that do not exist.
@@ -1099,5 +1457,110 @@ mod tests {
         assert_eq!(f.node(a).unwrap().version(), None);
         f.unmap(a);
         assert_ne!(f.node(a).unwrap().version(), Some(v2));
+    }
+
+    /// A boot tree: \\boot\\keep.txt and \\boot\\gone.txt (static files).
+    fn booted() -> RamFs {
+        let mut f = fs();
+        let b = f.create(ROOT, &w("boot"), true, 1).unwrap();
+        f.add_static_file(b, &w("keep.txt"), b"boot data", true, 1).unwrap();
+        f.add_static_file(b, &w("gone.txt"), b"bye", true, 1).unwrap();
+        f.recording = true;
+        f
+    }
+
+    fn content(f: &RamFs, path: &str) -> Option<Vec<u8>> {
+        let id = f.lookup(&w(path)).ok()?;
+        let mut buf = vec![0; f.node(id)?.size() as usize];
+        f.read(id, 0, &mut buf).ok()?;
+        Some(buf)
+    }
+
+    /// Changes a program makes after boot.
+    fn change(f: &mut RamFs) {
+        let b = f.lookup(&w("\\boot")).unwrap();
+        let d = f.create(ROOT, &w("data"), true, 5).unwrap();
+        f.set_security(d, vec![1, 0, 4, 0x80]).unwrap();
+        let a = f.create(d, &w("a.txt"), false, 5).unwrap();
+        f.write(a, 0, b"hello", 6).unwrap();
+        f.write(a, 5, &[7u8; 70_000], 7).unwrap();
+        f.set_size(a, 60_000, 8).unwrap();
+        f.set_basic(a, None, Some(42), Some(0x22)).unwrap();
+        let t = f.create(d, &w("tmp"), false, 5).unwrap();
+        f.rename(t, d, &w("renamed"), false).unwrap();
+        let keep = f.lookup(&w("\\boot\\keep.txt")).unwrap();
+        f.write(keep, 0, b"BOOT", 9).unwrap();
+        let gone = f.lookup(&w("\\boot\\gone.txt")).unwrap();
+        f.open(gone, RW, NONE).unwrap();
+        f.set_delete_pending(gone, true).unwrap();
+        f.close(gone, RW, NONE);
+        let _ = b;
+    }
+
+    fn check(f: &RamFs) {
+        let a = content(f, "\\data\\a.txt").unwrap();
+        assert_eq!(a.len(), 60_000);
+        assert_eq!(&a[..5], b"hello");
+        assert!(a[5..].iter().all(|&b| b == 7));
+        let n = f.node(f.lookup(&w("\\data\\a.txt")).unwrap()).unwrap();
+        assert_eq!((n.written, n.attributes), (42, 0x22));
+        let d = f.node(f.lookup(&w("\\data")).unwrap()).unwrap();
+        assert_eq!(d.security.as_deref(), Some(&[1u8, 0, 4, 0x80][..]));
+        assert!(f.lookup(&w("\\data\\tmp")).is_err());
+        assert_eq!(content(f, "\\data\\renamed").unwrap(), b"");
+        assert_eq!(content(f, "\\boot\\keep.txt").unwrap(), b"BOOT data");
+        assert!(f.lookup(&w("\\boot\\gone.txt")).is_err());
+    }
+
+    #[test]
+    fn recorded_changes_replay_over_the_boot_files() {
+        let mut f = booted();
+        change(&mut f);
+        check(&f);
+        let (ops, lost) = f.take_ops();
+        assert!(!lost);
+        assert!(!f.has_ops());
+        // The next boot: the same boot files, then the log.
+        let mut g = booted();
+        g.recording = false;
+        for op in &ops {
+            g.apply(op).unwrap();
+        }
+        check(&g);
+        assert!(!g.has_ops(), "replay records nothing");
+    }
+
+    #[test]
+    fn a_snapshot_replays_to_the_same_state() {
+        let mut f = booted();
+        change(&mut f);
+        let snap = f.snapshot().unwrap();
+        // Only the changes: the untouched boot files are not in it.
+        assert!(
+            !snap.iter().any(|op| matches!(op, Op::Create { path, .. } if *path == w("\\boot")))
+        );
+        let mut g = booted();
+        g.recording = false;
+        for op in &snap {
+            g.apply(op).unwrap();
+        }
+        check(&g);
+        // And a snapshot of the replayed state is the same snapshot.
+        assert_eq!(g.snapshot().unwrap(), snap);
+    }
+
+    #[test]
+    fn renaming_a_boot_directory_keeps_what_is_below_it() {
+        let mut f = booted();
+        let b = f.lookup(&w("\\boot")).unwrap();
+        f.rename(b, ROOT, &w("moved"), false).unwrap();
+        let snap = f.snapshot().unwrap();
+        let mut g = booted();
+        g.recording = false;
+        for op in &snap {
+            g.apply(op).unwrap();
+        }
+        assert!(g.lookup(&w("\\boot")).is_err());
+        assert_eq!(content(&g, "\\moved\\keep.txt").unwrap(), b"boot data");
     }
 }

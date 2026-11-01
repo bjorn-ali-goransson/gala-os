@@ -238,7 +238,12 @@ shows it.
   `target/.../<scenario>.disk.img` next to the ISO, attached as a legacy
   virtio-blk device; such scenarios boot alone and not in gala-um.
   Raw disk access needs an administrator, so their programs run
-  `as=system`.
+  `as=system`. `earlier_boots` boots the same image first (each with the
+  lines its log must have; logs kept as `<iso>.boot<n>.serial.log`):
+  that is how a test checks what survives a reboot (`persist_test`, which
+  tells the boots apart by what it finds on C:).
+- **`persist`**: with this boot option C: is kept on the disk; without
+  it a disk is left alone (D1's raw tests).
 - **Constants from headers**: values typed in by hand go wrong
   silently (STATUS_OBJECT_NAME_EXISTS was 0x40000035, and a test agreed
   with it). With mingw-w64 installed (`apt install mingw-w64-common`, or

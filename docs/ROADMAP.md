@@ -1012,9 +1012,15 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       driver (`disk`) and `\\.\PhysicalDrive0` for administrators (raw
       sector reads and writes, the length and geometry IOCTLs, flush,
       kernel32's DeviceIoControl; `disk_test` on a 16 MiB image xtask
-      checks afterwards). Next: D2, a file system with descriptors on the
-      disk, mounted where LocalDB keeps its instance; then a two-boot
-      scenario (create a database, reboot, query it). Open: the JDK's console path (GetConsoleMode succeeding
+      checks afterwards). **D2 done (2026-11-01)**: with the boot option
+      `persist`, what programs change on C: (contents, attributes, times,
+      descriptors, renames, deletes) is a change log on the disk, written
+      before each system call returns and replayed over the boot's files
+      at the next boot; a full log area is compacted into a snapshot in
+      the other half (`persist_test`, two boots of one disk; host tests of
+      the format, replay, snapshot and crash cases). Next: D3 (the
+      registry kept the same way), then LocalDB across a reboot (create a
+      database, reboot, query it). Open: the JDK's console path (GetConsoleMode succeeding
       on the standard handles made java_http fail intermittently).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)

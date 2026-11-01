@@ -344,6 +344,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("disk_test", "bcryptprimitives.dll", "Windows/System32"),
     ("disk_test", "bcrypt.dll", "Windows/System32"),
     ("disk_test", "user/access_test/access_test.regseed", "registry"),
+    ("persist_test", "ntdll.dll", "Windows/System32"),
+    ("persist_test", "kernel32.dll", "Windows/System32"),
+    ("persist_test", "advapi32.dll", "Windows/System32"),
+    ("persist_test", "secur32.dll", "Windows/System32"),
+    ("persist_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("persist_test", "bcrypt.dll", "Windows/System32"),
     ("kernel32_system_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_clr_test", "ntdll.dll", "Windows/System32"),
     ("com_test", "ntdll.dll", "Windows/System32"),
@@ -1278,6 +1284,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_sync_test",
     "kernel32_locale_test",
     "disk_test",
+    "persist_test",
     "kernel32_system_test",
     "kernel32_clr_test",
     "com_test",
@@ -2361,6 +2368,14 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["disk_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // D2: files kept across a reboot (`persist`: C: is kept on the
+        // disk); DISK_SCENARIOS boots it twice, this is the second boot.
+        name: "persist_test",
+        cmdline: "qemu_exit persist run=persist_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["persist_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // P1 (JDK): locale and time (en-US, UTC).
         name: "kernel32_locale_test",
         cmdline: "qemu_exit run=kernel32_locale_test.exe",
@@ -3206,7 +3221,7 @@ fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
         || scenario_boot(s.name) != Boot::Bios
         || s.expect.iter().any(|e| e.contains("pid "))
         || net_marker(s.name).is_some()
-        || DISK_SCENARIOS.iter().any(|d| d.0 == s.name)
+        || disk_scenario(s.name).is_some()
     {
         return None;
     }
@@ -3412,7 +3427,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
 fn runs_in_um(s: &Scenario) -> bool {
     scenario_program(s).is_some()
         && net_marker(s.name).is_none()
-        && !DISK_SCENARIOS.iter().any(|d| d.0 == s.name)
+        && disk_scenario(s.name).is_none()
         && !NOT_IN_UM.iter().any(|(n, _)| *n == s.name)
 }
 
@@ -3783,12 +3798,40 @@ fn add_disk(cmd: &mut Command, path: &Path) {
         .args(["-device", "virtio-blk-pci,drive=d0,disable-legacy=off"]);
 }
 
-/// Scenarios that get a disk: (name, size in bytes, what to put on the
-/// fresh image, what the image must hold afterwards).
-type DiskSetup = fn(&mut [u8]);
-type DiskCheck = fn(&[u8]) -> Result;
-const DISK_SCENARIOS: &[(&str, usize, DiskSetup, DiskCheck)] =
-    &[("disk_test", 16 << 20, disk_test_setup, disk_test_check)];
+/// A scenario that gets a disk.
+struct DiskScenario {
+    name: &'static str,
+    /// Bytes.
+    size: usize,
+    /// What to put on the fresh (zeroed) image.
+    setup: fn(&mut [u8]),
+    /// What the image must hold after the last boot.
+    check: fn(&[u8]) -> Result,
+    /// Boots of the same image before the judged one, each with the
+    /// lines its serial log must have (files kept across a reboot).
+    earlier_boots: &'static [&'static [&'static str]],
+}
+
+const DISK_SCENARIOS: &[DiskScenario] = &[
+    DiskScenario {
+        name: "disk_test",
+        size: 16 << 20,
+        setup: disk_test_setup,
+        check: disk_test_check,
+        earlier_boots: &[],
+    },
+    DiskScenario {
+        name: "persist_test",
+        size: 32 << 20,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[&["persist_test: first boot", "exited with status 0x00000000"]],
+    },
+];
+
+fn disk_scenario(name: &str) -> Option<&'static DiskScenario> {
+    DISK_SCENARIOS.iter().find(|d| d.name == name)
+}
 
 /// disk_test reads this at the start of sector 1.
 fn disk_test_setup(image: &mut [u8]) {
@@ -3811,11 +3854,9 @@ fn disk_test_check(image: &[u8]) -> Result {
 
 /// Makes scenario `name`'s fresh disk image next to `iso`, if it has one.
 fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
-    let Some(&(_, size, setup, _)) = DISK_SCENARIOS.iter().find(|d| d.0 == name) else {
-        return Ok(None);
-    };
-    let mut image = vec![0u8; size];
-    setup(&mut image);
+    let Some(d) = disk_scenario(name) else { return Ok(None) };
+    let mut image = vec![0u8; d.size];
+    (d.setup)(&mut image);
     let path = iso.with_extension("disk.img");
     fs::write(&path, &image).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(Some(path))
@@ -3823,9 +3864,30 @@ fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
 
 /// Checks scenario `name`'s disk image after its run.
 fn check_disk(name: &str, path: &Path) -> Result {
-    let Some(&(.., check)) = DISK_SCENARIOS.iter().find(|d| d.0 == name) else { return Ok(()) };
+    let Some(d) = disk_scenario(name) else { return Ok(()) };
     let image = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    check(&image)
+    (d.check)(&image)
+}
+
+/// Boots scenario `name`'s earlier boots on its disk (see DiskScenario),
+/// keeping each one's serial log as `<iso>.boot<n>.serial.log`.
+fn earlier_boots(name: &str, iso: &Path, boot: Boot, timeout: Duration, disk: &Path) -> Result {
+    let Some(d) = disk_scenario(name) else { return Ok(()) };
+    for (n, expect) in d.earlier_boots.iter().enumerate() {
+        let (status, serial, _) = run_vm(iso, boot, timeout, None, false, Some(disk))?;
+        let kept = iso.with_extension(format!("boot{}.serial.log", n + 1));
+        let _ = fs::write(&kept, &serial);
+        let missing: Vec<&str> = expect.iter().copied().filter(|e| !serial.contains(e)).collect();
+        if status.and_then(|s| s.code()) != Some(QEMU_EXIT_SUCCESS) || !missing.is_empty() {
+            return Err(format!(
+                "boot {} of {} failed (lacks {missing:?}; serial log: {})",
+                n + 1,
+                d.earlier_boots.len() + 1,
+                kept.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `cargo xtask serve <scenario> [port]`: boots a NET_SCENARIOS entry as
@@ -4294,6 +4356,11 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
             return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
         }
     };
+    if let (Some(name), Some(d)) = (single, disk.as_deref())
+        && let Err(e) = earlier_boots(name, iso, boot, timeout, d)
+    {
+        return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
+    }
     let (status, serial, time) = match run_vm(iso, boot, timeout, net, stop, disk.as_deref()) {
         Ok(r) => r,
         Err(e) => {
@@ -4362,6 +4429,10 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
 /// Boots a scenario alone (for reports), without printing its log.
 fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
     let disk = new_disk(scenario.name, iso)?;
+    if let Some(d) = disk.as_deref() {
+        let boot = scenario_boot(scenario.name);
+        earlier_boots(scenario.name, iso, boot, scenario_timeout(scenario.name), d)?;
+    }
     let (status, serial, _) = run_vm(
         iso,
         scenario_boot(scenario.name),
@@ -4748,6 +4819,7 @@ mod constants {
             "crate::arch",
             "crate::sched",
             "crate::time",
+            "crate::disk",
             "crate::mm::PAGE_SIZE",
             "crate::mm::frame",
             "crate::mm::paging",

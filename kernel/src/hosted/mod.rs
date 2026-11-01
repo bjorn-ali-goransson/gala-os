@@ -25,7 +25,9 @@ use crate::arch::cpu::FxState;
 use crate::arch::interrupts::TrapFrame;
 use crate::arch::syscall::{SyscallFrame, UserRegs};
 use crate::mm::frame::Frame;
-use crate::nt::platform::{Clock, SharedUserSpace, Threads, UserEntry, UserMemory};
+use crate::nt::platform::{
+    Clock, DiskError, SharedUserSpace, Storage, Threads, UserEntry, UserMemory,
+};
 use crate::sched::{SpawnError, ThreadId, WakeReason};
 
 /// Host code lives at and above this address (PIE binaries at 0x55...,
@@ -64,6 +66,22 @@ pub fn fix_address_space() {
 
 /// gala-um, implementing `nt::platform`'s traits.
 pub struct Um;
+
+/// gala-um has no disk.
+impl Storage for Um {
+    fn disk_sectors() -> u64 {
+        0
+    }
+    fn disk_read(_: u64, _: &mut [u8]) -> Result<(), DiskError> {
+        Err(DiskError::OutOfRange)
+    }
+    fn disk_write(_: u64, _: &[u8]) -> Result<(), DiskError> {
+        Err(DiskError::OutOfRange)
+    }
+    fn disk_flush() -> Result<(), DiskError> {
+        Err(DiskError::OutOfRange)
+    }
+}
 
 impl Clock for Um {
     const TICK_HZ: u64 = 1000;

@@ -1,17 +1,17 @@
 //! The disk as Windows names it (D1): `\Device\Harddisk0\DR0`, with the
 //! links `\Device\Harddisk0\Partition0` and `\??\PhysicalDrive0`, over
-//! `crate::disk`. Opening it (administrators and SYSTEM only, as on
+//! the platform's disk (`platform::disk_*`). Opening it (administrators and SYSTEM only, as on
 //! Windows) gives raw sector access: reads and writes of whole sectors at
 //! sector offsets, the disk IOCTLs below, FlushFileBuffers.
 //! Design: docs/ARCHITECTURE.md, "Disk".
 
 use super::namespace;
 use super::object::{KObject, ObjectBody};
+use super::platform::{self, DISK_SECTOR as SECTOR, DiskError};
 use super::security::{self, Descriptor, SE_DACL_PRESENT};
 use super::status::NtStatus;
 use super::token::{LOCAL_SYSTEM, Sid};
 use super::wait::Dispatcher;
-use crate::disk::{self, DiskError, SECTOR};
 use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
 use alloc::vec::Vec;
@@ -71,7 +71,7 @@ fn admin_only() -> Result<Vec<u8>, NtStatus> {
 
 /// Names the disk, if the machine has one.
 pub fn init() -> Result<(), NtStatus> {
-    if !disk::present() {
+    if platform::disk_sectors() == 0 {
         return Ok(());
     }
     namespace::create_directory(&wide("\\Device\\Harddisk0")?)?;
@@ -144,7 +144,7 @@ pub fn needs_read(code: u32) -> bool {
 /// FileStandardInformation of the disk: allocation size and end of file
 /// are its size.
 pub fn size() -> u64 {
-    disk::sectors() * SECTOR as u64
+    platform::disk_sectors() * SECTOR as u64
 }
 
 /// FILE_DEVICE_DISK, for FileFsDeviceInformation.

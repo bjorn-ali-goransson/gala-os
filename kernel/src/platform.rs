@@ -3,8 +3,8 @@
 
 use crate::arch::{cpu, interrupts, paging, smp, syscall};
 use crate::nt::platform::{
-    Clock, Frame, FxState, SharedUserSpace, SpawnError, SyscallFrame, ThreadId, Threads, TrapFrame,
-    UserEntry, UserMemory, UserRegs, WakeReason,
+    Clock, DiskError, Frame, FxState, SharedUserSpace, SpawnError, Storage, SyscallFrame, ThreadId,
+    Threads, TrapFrame, UserEntry, UserMemory, UserRegs, WakeReason,
 };
 use crate::{mm, sched, time};
 
@@ -130,5 +130,20 @@ impl UserMemory for Kernel {
     }
     fn frame_stats() -> (u64, u64) {
         mm::frame_stats()
+    }
+}
+
+impl Storage for Kernel {
+    fn disk_sectors() -> u64 {
+        crate::disk::sectors()
+    }
+    fn disk_read(first: u64, buf: &mut [u8]) -> Result<(), DiskError> {
+        crate::disk::read(first, buf)
+    }
+    fn disk_write(first: u64, data: &[u8]) -> Result<(), DiskError> {
+        crate::disk::write(first, data)
+    }
+    fn disk_flush() -> Result<(), DiskError> {
+        crate::disk::flush()
     }
 }
