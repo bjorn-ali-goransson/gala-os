@@ -505,8 +505,11 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    reporting stub (four new stub-only DLLs: uxtheme, comdlg32, oleacc,
    mpr), so filezilla.exe loads; ncrypt forwards BCryptOpen/Close/
    GenRandom to bcrypt (GnuTLS imports them from ncrypt). It now stops at
-   msvcrt's iswspace: next, msvcrt's wide-character and file functions
-   (46, test first in msvcrt_test), then whatever the ledger names.
+   msvcrt's iswspace. Then msvcrt's 46 (wide classes and conversions,
+   wide file and stream functions, _aligned_malloc, _beginthread, ...;
+   msvcrt_test). Now it stops in wxWidgets' GUI setup at user32's
+   SetWindowsHookExW: next, the user32/gdi32/comctl32 work the ledger
+   orders.
 W4. Later: a user-mode shell (the taskbar and start menu out of the
    kernel), window resizing (WM_SIZE), maximize, keyboard focus per
    window, a proportional font.

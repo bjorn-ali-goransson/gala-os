@@ -763,6 +763,24 @@ the caller with status 0, as msvcrt's exec does on Windows (no process
 replacement). `_chmod` maps the absence of `_S_IWRITE` to
 FILE_ATTRIBUTE_READONLY.
 
+**More of msvcrt** (W3, FileZilla; `wide_more.rs`): `iswctype` classifies
+ASCII by msvcrt's table (`_BLANK` only for the space, as there) and other
+characters by Unicode's properties (letters, controls, white space; other
+non-numeric printable characters are punctuation); the isw* functions are
+its masks (`iswprint` is `_BLANK|_PUNCT|_ALPHA|_DIGIT`). towupper/towlower
+map ASCII, leave 0x80-0xff alone (the C locale) and use Unicode's simple
+one-to-one mappings above. wcstol/wcstoul follow strtol's rules with a
+32-bit long (ERANGE, the end pointer at the start when nothing parsed).
+wcscoll/wcsxfrm/strxfrm are the C locale's (plain comparison and copy).
+wcsftime and the wide file functions go through the narrow ones (UTF-8);
+_wutime64 sets times with SetFileTime; _wfindfirst64 wraps
+FindFirstFileW. The wide stream functions on narrow streams read and
+write UTF-8 (as fputwc does); ungetwc pushes back ASCII only.
+_getmaxstdio starts at 512 and _setmaxstdio accepts 20-2048. `_putws`
+writes to stdout; _aligned_malloc keeps the block's start just below the
+aligned pointer; _beginthread runs the routine through a trampoline (the
+handle is not closed at the thread's end, unlike msvcrt).
+
 **msvcrt's FILE** (H9): streams from fopen are a 48-byte FILE followed by
 a CRITICAL_SECTION, as msvcrt.dll's `_FILEX`: mingw's `_lock_file`
 enters that lock directly (for the console slots it calls `_lock`).

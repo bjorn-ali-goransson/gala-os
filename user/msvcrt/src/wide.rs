@@ -16,9 +16,9 @@ unsafe extern "system" {
 }
 
 /// Characters of a path (on the stack).
-const PATH: usize = 520;
+pub(crate) const PATH: usize = 520;
 
-fn set_errno(e: i32) {
+pub(crate) fn set_errno(e: i32) {
     // SAFETY: _errno() points to the process's errno.
     unsafe { *crate::stdio::_errno() = e };
 }
@@ -27,7 +27,7 @@ fn set_errno(e: i32) {
 ///
 /// # Safety
 /// `s` is a valid NUL-terminated string.
-unsafe fn wlen(s: *const u16) -> usize {
+pub(crate) unsafe fn wlen(s: *const u16) -> usize {
     let mut n = 0;
     // SAFETY: up to the terminator.
     while unsafe { *s.add(n) } != 0 {
@@ -37,7 +37,7 @@ unsafe fn wlen(s: *const u16) -> usize {
 }
 
 /// A NUL-terminated wide string as NUL-terminated UTF-8 in `out`.
-fn utf8(w: *const u16, out: &mut [u8]) -> Option<*const u8> {
+pub(crate) fn utf8(w: *const u16, out: &mut [u8]) -> Option<*const u8> {
     if w.is_null() {
         return None;
     }
@@ -158,23 +158,30 @@ pub extern "C" fn atol(s: *const u8) -> i32 {
 }
 
 // iswctype's classes (ctype.h).
-const UPPER: u16 = 0x1;
-const LOWER: u16 = 0x2;
-const DIGIT: u16 = 0x4;
-const SPACE: u16 = 0x8;
-const PUNCT: u16 = 0x10;
-const CONTROL: u16 = 0x20;
-const BLANK: u16 = 0x40;
-const HEX: u16 = 0x80;
-const ALPHA: u16 = 0x100;
+pub(crate) const UPPER: u16 = 0x1;
+pub(crate) const LOWER: u16 = 0x2;
+pub(crate) const DIGIT: u16 = 0x4;
+pub(crate) const SPACE: u16 = 0x8;
+pub(crate) const PUNCT: u16 = 0x10;
+pub(crate) const CONTROL: u16 = 0x20;
+pub(crate) const BLANK: u16 = 0x40;
+pub(crate) const HEX: u16 = 0x80;
+pub(crate) const ALPHA: u16 = 0x100;
 
-/// iswctype(c, mask): whether `c` is in any of the classes (ASCII; other
-/// letters count as alphabetic).
+/// iswctype(c, mask): whether `c` is in any of the classes: ASCII by
+/// msvcrt's table (_BLANK only for the space), the rest by Unicode's
+/// properties (letters, numbers, white space, controls; other printable
+/// characters are punctuation), as msvcrt classifies through
+/// GetStringTypeW.
 #[unsafe(no_mangle)]
 pub extern "C" fn iswctype(c: u16, mask: u16) -> i32 {
+    i32::from(classes(c) & mask)
+}
+
+pub(crate) fn classes(c: u16) -> u16 {
     let mut classes = 0;
-    if let Ok(b) = u8::try_from(c) {
-        let b = b as char;
+    if c < 0x80 {
+        let b = c as u8 as char;
         if b.is_ascii_uppercase() {
             classes |= UPPER | ALPHA;
         }
@@ -190,7 +197,7 @@ pub extern "C" fn iswctype(c: u16, mask: u16) -> i32 {
         if matches!(b, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r') {
             classes |= SPACE;
         }
-        if b == ' ' || b == '\t' {
+        if b == ' ' {
             classes |= BLANK;
         }
         if b.is_ascii_punctuation() {
@@ -199,10 +206,25 @@ pub extern "C" fn iswctype(c: u16, mask: u16) -> i32 {
         if b.is_ascii_control() {
             classes |= CONTROL;
         }
-    } else if char::from_u32(c.into()).is_some_and(char::is_alphabetic) {
-        classes |= ALPHA;
+        return classes;
     }
-    i32::from(classes & mask)
+    let Some(ch) = char::from_u32(c.into()) else { return 0 };
+    if ch.is_alphabetic() {
+        classes |= ALPHA;
+        if ch.is_uppercase() {
+            classes |= UPPER;
+        }
+        if ch.is_lowercase() {
+            classes |= LOWER;
+        }
+    } else if ch.is_control() {
+        classes |= CONTROL;
+    } else if ch.is_whitespace() {
+        classes |= SPACE | BLANK;
+    } else if !ch.is_numeric() {
+        classes |= PUNCT;
+    }
+    classes
 }
 
 // ---- Paths ----

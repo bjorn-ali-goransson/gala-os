@@ -17,7 +17,15 @@
  * _wmkdir, _waccess, _wchdir, _wgetcwd, _wopen, _wchmod, _wunlink,
  * _wrmdir, _wmktemp, _wfreopen), __wgetmainargs and __winitenv, _commit,
  * atol, iswctype, rewind, fscanf, _flushall; and shell32's
- * CommandLineToArgvW (quotes and backslashes). Built against msvcrt
+ * CommandLineToArgvW (quotes and backslashes); what FileZilla's DLLs
+ * import: the isw* classes and towupper/towlower, wcstol/wcstoul/_wtoi,
+ * wcspbrk, wcscoll/wcsxfrm/strxfrm (the C locale), strncat, wcsftime,
+ * _wputenv/_wgetenv, _wrename/_wstat64/_wutime64/_wremove, _wfullpath,
+ * _wfindfirst64/_wfindnext64/_findclose, _filelengthi64,
+ * _getmaxstdio/_setmaxstdio, fgetpos/fsetpos, the wide stream functions
+ * on a narrow text stream (fputws, putwc, fgetwc, getwc, ungetwc),
+ * _putws, _aligned_malloc/_aligned_free, _beginthread and
+ * _getdrive/_chdrive. Built against msvcrt
  * (not mingw's own stdio) by build.sh.
  * Prints "msvcrt_test: ok" or exits with the number of the failing check. */
 #include <stdio.h>
@@ -33,6 +41,8 @@
 #include <math.h>
 #include <windows.h>
 #include <time.h>
+#include <stdint.h>
+#include <sys/utime.h>
 
 /* TinyCC's own float.h (the tcc_self scenario compiles this file) does
  * not declare msvcrt's _controlfp. */
@@ -62,7 +72,7 @@ static int __cdecl at_exit(void) { return 0; }
 #endif
 
 static int check;
-#define CHECK(cond) do { check++; if (!(cond)) { printf("msvcrt_test: check %d failed\n", check); fflush(stdout); exit(check); } } while (0)
+#define CHECK(cond) do { check++; if (!(cond)) { printf("msvcrt_test: check %d (line %d) failed\n", check, __LINE__); fflush(stdout); exit(check); } } while (0)
 
 static int measure(const char *fmt, ...) {
     va_list ap;
@@ -84,6 +94,124 @@ static jmp_buf jump;
 static void jump_back(int value) { longjmp(jump, value); }
 
 #ifndef __TINYC__
+static volatile LONG begun;
+static void __cdecl begin_thread(void *arg) { InterlockedExchange(&begun, (LONG)(INT_PTR)arg); }
+
+/* What FileZilla's DLLs (wxWidgets, libfilezilla, GnuTLS) import, as
+ * msvcrt.dll documents it. */
+static void filezilla_checks(void) {
+    CHECK(iswspace(L' ') && iswspace(L'\t') && iswspace(L'\n') && !iswspace(L'a'));
+    CHECK(iswalpha(L'a') && iswalpha(L'Z') && iswalpha(0xe9) && !iswalpha(L'1'));
+    CHECK(iswdigit(L'7') && !iswdigit(L'a'));
+    CHECK(iswalnum(L'z') && iswalnum(L'0') && !iswalnum(L'-'));
+    CHECK(iswxdigit(L'F') && iswxdigit(L'9') && !iswxdigit(L'g'));
+    CHECK(iswpunct(L'!') && !iswpunct(L'a') && !iswpunct(L' '));
+    CHECK(iswprint(L' ') && iswprint(L'x') && !iswprint(L'\n'));
+    CHECK(towupper(L'a') == L'A' && towlower(L'Q') == L'q' && towupper(L'1') == L'1');
+
+    wchar_t *end;
+    CHECK(wcstol(L"  -123xyz", &end, 10) == -123 && *end == L'x');
+    CHECK(wcstol(L"0x1f", NULL, 16) == 31 && wcstol(L"077", NULL, 0) == 63);
+    CHECK(wcstol(L"0x1F", NULL, 0) == 31);
+    errno = 0;
+    CHECK(wcstol(L"99999999999", NULL, 10) == 2147483647L && errno == ERANGE);
+    CHECK(wcstoul(L"4294967295", NULL, 10) == 4294967295UL);
+    CHECK(wcstol(L"abc", &end, 10) == 0 && *end == L'a');
+    CHECK(_wtoi(L" 42abc") == 42 && _wtoi(L"-7") == -7);
+
+    const wchar_t *hello = L"hello";
+    CHECK(wcspbrk(hello, L"ol") == hello + 2 && wcspbrk(hello, L"xyz") == NULL);
+    CHECK(wcscoll(L"a", L"b") < 0 && wcscoll(L"b", L"a") > 0 && wcscoll(L"a", L"a") == 0);
+    wchar_t wx[8];
+    CHECK(wcsxfrm(wx, L"abc", 8) == 3 && wcscmp(wx, L"abc") == 0);
+    char nx[8];
+    CHECK(strxfrm(nx, "abc", 8) == 3 && strcmp(nx, "abc") == 0);
+    char cat[16] = "abc";
+    CHECK(strncat(cat, "defgh", 2) == cat && strcmp(cat, "abcde") == 0);
+
+    struct tm tm = {0};
+    tm.tm_year = 126; tm.tm_mon = 10; tm.tm_mday = 1;
+    tm.tm_hour = 12; tm.tm_min = 34; tm.tm_sec = 56;
+    wchar_t when[64];
+    CHECK(wcsftime(when, 64, L"%Y-%m-%d %H:%M:%S", &tm) == 19);
+    CHECK(wcscmp(when, L"2026-11-01 12:34:56") == 0);
+
+    CHECK(_wputenv(L"FZ_TEST=yes") == 0);
+    CHECK(_wgetenv(L"FZ_TEST") != NULL && wcscmp(_wgetenv(L"FZ_TEST"), L"yes") == 0);
+    CHECK(_wgetenv(L"FZ_NOT_SET") == NULL);
+
+    FILE *f = fopen("fz_a.txt", "w");
+    CHECK(f != NULL && fputs("abcdef", f) >= 0);
+    fclose(f);
+    CHECK(_wrename(L"fz_a.txt", L"fz_b.txt") == 0);
+    struct _stat64 st;
+    CHECK(_wstat64(L"fz_b.txt", &st) == 0 && st.st_size == 6 && (st.st_mode & _S_IFREG));
+    struct __utimbuf64 times = {1000000000, 1000000000};
+    CHECK(_wutime64(L"fz_b.txt", &times) == 0);
+    CHECK(_wstat64(L"fz_b.txt", &st) == 0 && st.st_mtime == 1000000000);
+    int fd = _open("fz_b.txt", _O_RDONLY);
+    CHECK(fd >= 0 && _filelengthi64(fd) == 6);
+    _close(fd);
+
+    f = fopen("fz_b.txt", "r");
+    CHECK(f != NULL && fgetc(f) == 'a' && fgetc(f) == 'b');
+    fpos_t pos;
+    CHECK(fgetpos(f, &pos) == 0 && fgetc(f) == 'c' && fgetc(f) == 'd');
+    CHECK(fsetpos(f, &pos) == 0 && fgetc(f) == 'c');
+    fclose(f);
+    CHECK(_wremove(L"fz_b.txt") == 0);
+    errno = 0;
+    CHECK(_wstat64(L"fz_b.txt", &st) == -1 && errno == ENOENT);
+
+    /* Wide characters through a narrow text stream: converted. */
+    f = fopen("fz_w.txt", "w");
+    CHECK(f != NULL && fputws(L"hi", f) >= 0 && putwc(L'!', f) == L'!');
+    fclose(f);
+    f = fopen("fz_w.txt", "r");
+    CHECK(f != NULL && fgetwc(f) == L'h' && getwc(f) == L'i');
+    CHECK(ungetwc(L'i', f) == L'i' && getwc(f) == L'i' && getwc(f) == L'!');
+    CHECK(getwc(f) == WEOF);
+    fclose(f);
+    remove("fz_w.txt");
+
+    wchar_t full[260], cwd[260];
+    CHECK(_wfullpath(full, L"x\\..\\y.txt", 260) == full && _wgetcwd(cwd, 260) == cwd);
+    size_t n = wcslen(cwd);
+    CHECK(wcsncmp(full, cwd, n) == 0 && wcscmp(full + n, L"\\y.txt") == 0);
+
+    CHECK(_wmkdir(L"fz_dir") == 0);
+    fclose(fopen("fz_dir\\one.txt", "w"));
+    fclose(fopen("fz_dir\\two.txt", "w"));
+    struct _wfinddata64_t found;
+    intptr_t h = _wfindfirst64(L"fz_dir\\*.txt", &found);
+    CHECK(h != -1);
+    int files = 1;
+    while (_wfindnext64(h, &found) == 0)
+        files++;
+    CHECK(files == 2 && errno == ENOENT);
+    CHECK(_findclose(h) == 0);
+    errno = 0;
+    CHECK(_wfindfirst64(L"fz_dir\\*.none", &found) == -1 && errno == ENOENT);
+    remove("fz_dir\\one.txt");
+    remove("fz_dir\\two.txt");
+    CHECK(_wrmdir(L"fz_dir") == 0);
+
+    CHECK(_getmaxstdio() == 512);
+    CHECK(_setmaxstdio(1024) == 1024 && _getmaxstdio() == 1024);
+    CHECK(_setmaxstdio(10) == -1 && _getmaxstdio() == 1024);
+    CHECK(_setmaxstdio(512) == 512);
+
+    CHECK(_putws(L"msvcrt_test: _putws") >= 0);
+    void *aligned = _aligned_malloc(100, 64);
+    CHECK(aligned != NULL && ((uintptr_t)aligned & 63) == 0);
+    _aligned_free(aligned);
+    CHECK(_beginthread(begin_thread, 0, (void *)5) != (uintptr_t)-1);
+    for (int i = 0; i < 1000 && begun == 0; i++)
+        Sleep(10);
+    CHECK(begun == 5);
+    CHECK(_getdrive() == 3 && _chdrive(3) == 0);
+}
+
 /* What MinGit's git.exe uses (wide strings and paths, startup, a few
  * more), as msvcrt.dll documents them. */
 static void wide_checks(void) {
@@ -374,6 +502,7 @@ int main(void) {
         CHECK(end - begin == 1 && (void *)begin[0] == (void *)at_exit);
         free(begin);
         wide_checks();
+        filezilla_checks();
     }
 #endif
 

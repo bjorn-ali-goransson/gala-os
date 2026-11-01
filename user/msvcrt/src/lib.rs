@@ -14,8 +14,6 @@
 // pointers its documentation describes; Rust callers do not exist.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-mod unimplemented;
-
 mod float;
 mod heap;
 mod math;
@@ -26,6 +24,7 @@ mod setjmp;
 mod stdio;
 mod time;
 mod wide;
+mod wide_more;
 
 use core::ffi::c_void;
 use core::ptr::null_mut;

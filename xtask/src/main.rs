@@ -2668,7 +2668,7 @@ const SCENARIOS: &[Scenario] = &[
         name: "msvcrt_test",
         cmdline: "qemu_exit run=msvcrt_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["msvcrt_test: ok", "exited with status 0x00000000"],
+        expect: &["msvcrt_test: _putws", "msvcrt_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // H3: busybox utilities over files (user/busybox/files.sh): mkdir,

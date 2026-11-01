@@ -102,7 +102,7 @@ fn errno_of_last_error() -> i32 {
 /// msvcrt's FILE is 48 bytes on x64: programs index `__iob_func()` with
 /// that size, so the console streams are 48-byte slots; their state lives
 /// in STD.
-const FILE_SIZE: usize = 48;
+pub(crate) const FILE_SIZE: usize = 48;
 static mut IOB: [[u8; FILE_SIZE]; 3] = [[0; FILE_SIZE]; 3];
 
 const MAGIC: u64 = 0x656c_6966_616c_6167; // "galafile"
