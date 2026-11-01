@@ -32,6 +32,7 @@ pub const TOKEN_QUERY_SOURCE: u32 = 0x0010;
 pub const TOKEN_ADJUST_PRIVILEGES: u32 = 0x0020;
 pub const TOKEN_ADJUST_GROUPS: u32 = 0x0040;
 pub const TOKEN_ADJUST_DEFAULT: u32 = 0x0080;
+pub const TOKEN_ADJUST_SESSIONID: u32 = 0x0100;
 pub const TOKEN_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | 0x01ff;
 
 /// TOKEN_READ, TOKEN_WRITE, TOKEN_EXECUTE (winnt.h).
@@ -53,6 +54,7 @@ pub const SE_GROUP_MANDATORY: u32 = 0x0000_0001;
 pub const SE_GROUP_ENABLED_BY_DEFAULT: u32 = 0x0000_0002;
 pub const SE_GROUP_ENABLED: u32 = 0x0000_0004;
 pub const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x0000_0010;
+pub const SE_GROUP_OWNER: u32 = 0x0000_0008;
 pub const SE_GROUP_INTEGRITY: u32 = 0x0000_0020;
 pub const SE_GROUP_INTEGRITY_ENABLED: u32 = 0x0000_0040;
 pub const SE_GROUP_LOGON_ID: u32 = 0xc000_0000;
@@ -128,6 +130,14 @@ impl Sid {
         self.authority == [0, 0, 0, 0, 0, 16] && self.count == 1
     }
 }
+
+/// The integrity level (the RID) of a mandatory label SID (S-1-16-x).
+pub fn label_level(sid: &Sid) -> Option<u32> {
+    sid.is_label().then_some(sid.subs[0])
+}
+
+/// SECURITY_MANDATORY_MEDIUM_RID: the level of what has no label.
+pub const MEDIUM_LEVEL: u32 = 0x2000;
 
 /// A SID with its attributes (SID_AND_ATTRIBUTES).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -292,6 +302,25 @@ fn acl(aces: &[(u32, Sid)]) -> Result<Vec<u8>, NtStatus> {
 }
 
 impl TokenData {
+    /// The token's integrity level (its label group's RID; Medium if it
+    /// has none).
+    pub fn integrity_level(&self) -> u32 {
+        self.groups.iter().find_map(|g| label_level(&g.sid)).unwrap_or(MEDIUM_LEVEL)
+    }
+
+    /// Makes `label` the token's integrity label.
+    pub fn set_integrity(&mut self, label: Sid) -> Result<(), NtStatus> {
+        let attributes = SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED;
+        match self.groups.iter_mut().find(|g| g.sid.is_label()) {
+            Some(g) => g.sid = label,
+            None => self
+                .groups
+                .try_push(Group { sid: label, attributes })
+                .map_err(|_| NtStatus::NO_MEMORY)?,
+        }
+        Ok(())
+    }
+
     /// The boot user's primary token: the standard user's groups and
     /// privileges, owner the user, the default DACL Windows gives such a
     /// user (GENERIC_ALL to the user and SYSTEM, GENERIC_READ |
@@ -320,7 +349,6 @@ impl TokenData {
     /// in such a process.
     pub fn system() -> Result<TokenData, NtStatus> {
         const ADMINISTRATORS: Sid = Sid::new(5, &[32, 544]);
-        const SE_GROUP_OWNER: u32 = 0x8;
         let groups = [
             Group { sid: ADMINISTRATORS, attributes: SE_GROUP_OWNER | 7 },
             Group { sid: Sid::new(1, &[0]), attributes: 7 },

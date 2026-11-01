@@ -863,6 +863,10 @@ name = "registry_test"
 version = "0.1.0"
 
 [[package]]
+name = "restricted_test"
+version = "0.1.0"
+
+[[package]]
 name = "resutils"
 version = "0.1.0"
 

@@ -427,6 +427,120 @@ pub(super) fn gala_logon_user(call: &mut Call<'_>) -> NtStatus {
     call.return_handle(out, object, token::TOKEN_ALL_ACCESS, 0)
 }
 
+/// A caller's SID at `ptr`.
+fn read_sid(call: &Call<'_>, ptr: u64) -> Result<token::Sid, NtStatus> {
+    if ptr == 0 {
+        return Err(NtStatus::INVALID_SID);
+    }
+    let mut head = [0u8; 8];
+    call.read_bytes(ptr, &mut head)?;
+    if head[0] != 1 || head[1] > 15 {
+        return Err(NtStatus::INVALID_SID);
+    }
+    let bytes = call.read_vec(ptr, 8 + 4 * usize::from(head[1]))?;
+    token::Sid::parse(&bytes).ok_or(NtStatus::INVALID_SID)
+}
+
+/// NtSetInformationToken(TokenHandle, Class, Information, Length):
+/// TokenOwner (the user or a group with SE_GROUP_OWNER, else
+/// STATUS_INVALID_OWNER), TokenPrimaryGroup (the user or one of its
+/// groups, else STATUS_INVALID_PRIMARY_GROUP), TokenDefaultDacl (an ACL,
+/// or NULL for none) and TokenIntegrityLevel (lowering it; raising needs
+/// SeTcbPrivilege), with TOKEN_ADJUST_DEFAULT; TokenSessionId with
+/// SeTcbPrivilege. gala's service number until verified.
+pub(super) fn nt_set_information_token(call: &mut Call<'_>) -> NtStatus {
+    const TOKEN_OWNER: u32 = 4;
+    const TOKEN_PRIMARY_GROUP: u32 = 5;
+    const TOKEN_DEFAULT_DACL: u32 = 6;
+    const TOKEN_SESSION_ID: u32 = 12;
+    const TOKEN_INTEGRITY_LEVEL: u32 = 25;
+    const SE_TCB: u64 = 7;
+    let (h, class, info, length) =
+        (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3) as u32);
+    let needed = match class {
+        TOKEN_OWNER | TOKEN_PRIMARY_GROUP => 8,
+        TOKEN_DEFAULT_DACL => 8,
+        TOKEN_SESSION_ID => 4,
+        TOKEN_INTEGRITY_LEVEL => 16,
+        _ => {
+            super::super::ledger::record("NtSetInformationToken", "info class", class.into());
+            return NtStatus::INVALID_INFO_CLASS;
+        }
+    };
+    let access = if class == TOKEN_SESSION_ID {
+        token::TOKEN_ADJUST_SESSIONID
+    } else {
+        token::TOKEN_ADJUST_DEFAULT
+    };
+    let object = tri!(call.token(h, access));
+    let Some(t) = token_of(&object) else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if (length as usize) < needed {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    match class {
+        TOKEN_OWNER | TOKEN_PRIMARY_GROUP => {
+            let sid = tri!(read_sid(call, tri!(call.read_u64(info))));
+            let mut d = t.data.lock();
+            if class == TOKEN_OWNER {
+                let may = d.user.sid == sid
+                    || d.groups
+                        .iter()
+                        .any(|g| g.sid == sid && g.attributes & token::SE_GROUP_OWNER != 0);
+                if !may {
+                    return NtStatus::INVALID_OWNER;
+                }
+                d.owner = sid;
+            } else {
+                if d.user.sid != sid && !d.groups.iter().any(|g| g.sid == sid) {
+                    return NtStatus::INVALID_PRIMARY_GROUP;
+                }
+                d.primary_group = sid;
+            }
+            d.modified_id = token::next_luid();
+        }
+        TOKEN_DEFAULT_DACL => {
+            let acl = tri!(call.read_u64(info));
+            let bytes = if acl == 0 {
+                Vec::new()
+            } else {
+                let mut head = [0u8; 8];
+                tri!(call.read_bytes(acl, &mut head));
+                let size = usize::from(u16::from_le_bytes([head[2], head[3]]));
+                let bytes = tri!(call.read_vec(acl, size.max(8)));
+                if super::super::security::valid_acl(&bytes).is_none() {
+                    return NtStatus::INVALID_ACL;
+                }
+                bytes
+            };
+            let mut d = t.data.lock();
+            d.default_dacl = bytes;
+            d.modified_id = token::next_luid();
+        }
+        TOKEN_SESSION_ID => {
+            if !super::security_calls::effective_privilege(call, SE_TCB) {
+                return NtStatus::PRIVILEGE_NOT_HELD;
+            }
+            let session = tri!(call.read_u32_at(info));
+            let mut d = t.data.lock();
+            d.session = session;
+            d.modified_id = token::next_luid();
+        }
+        _ => {
+            // TOKEN_MANDATORY_LABEL { SID_AND_ATTRIBUTES Label }.
+            let sid = tri!(read_sid(call, tri!(call.read_u64(info))));
+            let Some(level) = token::label_level(&sid) else { return NtStatus::INVALID_SID };
+            let tcb = super::security_calls::effective_privilege(call, SE_TCB);
+            let mut d = t.data.lock();
+            if level > d.integrity_level() && !tcb {
+                return NtStatus::PRIVILEGE_NOT_HELD;
+            }
+            tri!(d.set_integrity(sid));
+            d.modified_id = token::next_luid();
+        }
+    }
+    NtStatus::SUCCESS
+}
+
 /// NtAllocateLocallyUniqueId(*Luid): a new LUID (unique until reboot).
 pub(super) fn nt_allocate_locally_unique_id(call: &mut Call<'_>) -> NtStatus {
     let out = arg!(call, 0);

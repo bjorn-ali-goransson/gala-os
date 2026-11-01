@@ -659,6 +659,45 @@ fn evaluate(
 /// WRITE_OWNER; the owner gets READ_CONTROL and WRITE_DAC (unless an
 /// OWNER RIGHTS ACE says otherwise); deny ACEs before an allowing one win;
 /// a restricted token must also be granted by its restricting SIDs.
+/// SYSTEM_MANDATORY_LABEL_ACE_TYPE and its policy bits.
+const MANDATORY_LABEL_ACE: u8 = 0x11;
+const NO_WRITE_UP: u32 = 1;
+const NO_READ_UP: u32 = 2;
+const NO_EXECUTE_UP: u32 = 4;
+
+/// The rights the mandatory label bars `token` from: none at or above the
+/// object's level (its SACL's label, else Medium with no-write-up);
+/// below it, writing (the mapping's write rights, DELETE, WRITE_DAC,
+/// WRITE_OWNER; not READ_CONTROL or SYNCHRONIZE) and what the label's
+/// policy adds (reading, executing).
+fn mandatory_barred(d: &Descriptor, token: &TokenData, mapping: &GenericMapping) -> u32 {
+    let label = d.sacl.as_deref().and_then(|sacl| {
+        aces(sacl).find_map(|(kind, _, ace)| {
+            if kind != MANDATORY_LABEL_ACE || ace.len() < 8 {
+                return None;
+            }
+            let level = super::token::label_level(&Sid::parse(&ace[8..])?)?;
+            Some((level, u32_at(ace, 4).unwrap_or(NO_WRITE_UP)))
+        })
+    });
+    let (level, policy) = label.unwrap_or((super::token::MEDIUM_LEVEL, NO_WRITE_UP));
+    if token.integrity_level() >= level {
+        return 0;
+    }
+    let keep = READ_CONTROL | super::object::SYNCHRONIZE;
+    let mut barred = 0;
+    if policy & NO_WRITE_UP != 0 {
+        barred |= (mapping.write | DELETE | WRITE_DAC | WRITE_OWNER) & !keep;
+    }
+    if policy & NO_READ_UP != 0 {
+        barred |= mapping.read & !keep;
+    }
+    if policy & NO_EXECUTE_UP != 0 {
+        barred |= mapping.execute & !keep;
+    }
+    barred
+}
+
 pub fn access_check(
     d: &Descriptor,
     token: &TokenData,
@@ -685,8 +724,14 @@ pub fn access_check(
     if (wanted & WRITE_OWNER != 0 || maximum) && enabled(token, SE_TAKE_OWNERSHIP) {
         privileged |= WRITE_OWNER;
     }
+    // The mandatory label: a token below the object's level may not
+    // write (and, if the label says so, read or execute) it.
+    let barred = mandatory_barred(d, token, mapping);
+    if wanted & barred != 0 {
+        return Err(NtStatus::ACCESS_DENIED);
+    }
     let remaining = wanted & !privileged;
-    let mut granted = evaluate(d, token, Pass::Normal, remaining, maximum, mapping);
+    let mut granted = evaluate(d, token, Pass::Normal, remaining, maximum, mapping) & !barred;
     if !token.restricted.is_empty() {
         granted &= evaluate(d, token, Pass::Restricted, remaining, maximum, mapping);
     }
@@ -823,6 +868,40 @@ mod tests {
             set(&mut d, OWNER_SECURITY_INFORMATION, owner, &token),
             Err(NtStatus::INVALID_OWNER)
         );
+    }
+
+    #[test]
+    fn mandatory_labels() {
+        let mut token = TokenData::boot_user().unwrap();
+        // Everyone may do anything; no label: Medium, no-write-up.
+        let d = parent(&[(0x1f01ff, EVERYONE, 0)]);
+        assert!(access_check(&d, &token, 0x4000_0000, &FILE_MAPPING, false).is_ok());
+        token.set_integrity(Sid::new(16, &[0x1000])).unwrap(); // Low
+        assert_eq!(token.integrity_level(), 0x1000);
+        assert_eq!(
+            access_check(&d, &token, 0x4000_0000, &FILE_MAPPING, false),
+            Err(NtStatus::ACCESS_DENIED)
+        );
+        assert_eq!(access_check(&d, &token, 0x8000_0000, &FILE_MAPPING, false), Ok(0x120089));
+        // MAXIMUM_ALLOWED leaves out what the label bars.
+        let max = access_check(&d, &token, MAXIMUM_ALLOWED, &FILE_MAPPING, false).unwrap();
+        assert_eq!(max & 0x116, 0);
+        assert_eq!(max & 0x120089, 0x120089);
+        // A High label with no-read-up bars a Medium token from reading.
+        token.set_integrity(Sid::new(16, &[0x2000])).unwrap();
+        let mut label = Vec::new();
+        push_ace(
+            &mut label,
+            MANDATORY_LABEL_ACE,
+            0,
+            NO_WRITE_UP | NO_READ_UP,
+            &Sid::new(16, &[0x3000]),
+        )
+        .unwrap();
+        let mut high = parent(&[(0x1f01ff, EVERYONE, 0)]);
+        high.sacl = Some(build_acl(2, &label, 1).unwrap());
+        assert!(access_check(&high, &token, 0x8000_0000, &FILE_MAPPING, false).is_err());
+        assert!(access_check(&high, &token, READ_CONTROL, &FILE_MAPPING, false).is_ok());
     }
 
     #[test]

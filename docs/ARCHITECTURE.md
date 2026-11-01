@@ -1271,7 +1271,7 @@ Windows, never shadows the system's DLLs.)
   CreateDirectoryW and the named-object functions. TODO: SetSecurityInfo
   of an unprotected DACL does not re-apply or propagate inheritance as
   Windows' advapi32 does; SACLs are kept but auditing does nothing;
-  mandatory labels are not separate yet (S5); descriptors live in memory
+  descriptors live in memory
   until the disk keeps them (D2, D3).
 - **Access checks** (docs/SECURITY.md phase S3; `security::access_check`):
   AccessCheck's documented algorithm. Generic rights mapped;
@@ -1294,8 +1294,21 @@ Windows, never shadows the system's DLLs.)
   named objects (the NtOpen* services and the NtCreate* ones that open an
   existing object). The handle gets the rights granted. Not checked yet:
   processes and threads (NtOpenProcess/NtOpenThread), pipes and other
-  devices, traversal (SeChangeNotify is enabled for everyone), mandatory
-  labels (S5). kernel32 asks for what Windows' kernel32 asks for:
+  devices, traversal (SeChangeNotify is enabled for everyone).
+  **Mandatory labels** (S5, `restricted_test`): before the DACL, a token
+  whose integrity level (its label group, Medium if none) is below the
+  object's (the SACL's SYSTEM_MANDATORY_LABEL_ACE, else Medium with
+  no-write-up) is barred from writing (the mapping's write rights,
+  DELETE, WRITE_DAC, WRITE_OWNER; READ_CONTROL and SYNCHRONIZE stay) and,
+  if the label asks, reading or executing; MAXIMUM_ALLOWED leaves those
+  out. Deny-only groups (CreateRestrictedToken's SidsToDisable) match
+  deny ACEs only. NtSetInformationToken (gala's number 0x7f23 until
+  verified) sets TokenOwner (the user or an SE_GROUP_OWNER group),
+  TokenPrimaryGroup (the user or one of its groups), TokenDefaultDacl,
+  TokenIntegrityLevel (lowering; raising needs SeTcbPrivilege) with
+  TOKEN_ADJUST_DEFAULT, TokenSessionId (SeTcbPrivilege). TODO: objects a
+  low-integrity token creates get no label of their own yet. kernel32
+  asks for what Windows' kernel32 asks for:
   CreateFileW adds FILE_READ_ATTRIBUTES and, for synchronous handles,
   SYNCHRONIZE; DeleteFileW/RemoveDirectoryW open with DELETE |
   FILE_READ_ATTRIBUTES (not synchronous); advapi32's descriptor functions

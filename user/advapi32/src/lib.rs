@@ -284,7 +284,6 @@ macro_rules! no_security {
 }
 
 no_security! {
-    SetTokenInformation(token: usize, class: u32, info: *const u8, length: u32);
     AccessCheck(descriptor: *const u8, token: usize, access: u32, mapping: *const u8, privileges: *mut u8, length: *mut u32, granted: *mut u32, status: *mut i32);
 }
 

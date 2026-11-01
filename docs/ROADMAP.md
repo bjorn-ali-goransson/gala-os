@@ -980,10 +980,12 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       (`sshd_login` passes, about 10 s in the kernel; the boot runs
       ssh-keygen -A, then sshd -ddd as SYSTEM). Password logins too
       (`sshd_password`: LOGON32_LOGON_NETWORK_CLEARTEXT, the client's
-      password through SSH_ASKPASS). Next for sshd: an interactive shell (a pty: ConPTY), sftp. Open: the JDK's console path (GetConsoleMode succeeding on
-      the standard handles made java_http fail intermittently).
-      accepting a key-authenticated login from the host (xtask as the
-      client).
+      password through SSH_ASKPASS). Next for sshd: an interactive shell
+      (a pty: ConPTY), sftp. Security phase S5 done (2026-11-01,
+      `restricted_test`): PostgreSQL's restricted token, deny-only groups,
+      SetTokenInformation, integrity levels with no-write-up. Next:
+      PostgreSQL. Open: the JDK's console path (GetConsoleMode succeeding
+      on the standard handles made java_http fail intermittently).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to

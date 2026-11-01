@@ -753,6 +753,25 @@ pub extern "system" fn CreateProcessAsUserW(
     )
 }
 
+/// SetTokenInformation(TokenHandle, TokenInformationClass,
+/// TokenInformation, TokenInformationLength): NtSetInformationToken
+/// (TokenOwner, TokenPrimaryGroup, TokenDefaultDacl, TokenSessionId,
+/// TokenIntegrityLevel).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetTokenInformation(
+    token: usize,
+    class: u32,
+    info: *const u8,
+    length: u32,
+) -> i32 {
+    #[link(name = "ntdll", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn NtSetInformationToken(token: usize, class: u32, info: *const u8, length: u32) -> u32;
+    }
+    // SAFETY: the caller's buffer of `length` bytes.
+    result(unsafe { NtSetInformationToken(token, class, info, length) })
+}
+
 /// AllocateLocallyUniqueId(*Luid): NtAllocateLocallyUniqueId.
 #[unsafe(no_mangle)]
 pub extern "system" fn AllocateLocallyUniqueId(luid: *mut u64) -> i32 {

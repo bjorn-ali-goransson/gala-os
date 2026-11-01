@@ -406,6 +406,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lsa_test", "bcryptprimitives.dll", "Windows/System32"),
     ("lsa_test", "bcrypt.dll", "Windows/System32"),
     ("lsa_test", "user/access_test/access_test.regseed", "registry"),
+    ("restricted_test", "ntdll.dll", "Windows/System32"),
+    ("restricted_test", "kernel32.dll", "Windows/System32"),
+    ("restricted_test", "advapi32.dll", "Windows/System32"),
+    ("restricted_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("restricted_test", "bcrypt.dll", "Windows/System32"),
     ("profile_test", "ntdll.dll", "Windows/System32"),
     ("profile_test", "kernel32.dll", "Windows/System32"),
     ("profile_test", "advapi32.dll", "Windows/System32"),
@@ -1159,6 +1164,7 @@ const USER_PROGRAMS: &[&str] = &[
     "logon_test",
     "system_test",
     "lsa_test",
+    "restricted_test",
     "profile_test",
     "registry_test",
     "keyed_event_test",
@@ -2112,6 +2118,15 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit as=system run=lsa_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["lsa_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Security model S5 (docs/SECURITY.md): restricted tokens and
+        // integrity levels as PostgreSQL uses them, run as SYSTEM
+        // (user/restricted_test).
+        name: "restricted_test",
+        cmdline: "qemu_exit as=system run=restricted_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["restricted_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // Security model S4 (docs/SECURITY.md): user profiles, loaded as
@@ -3220,6 +3235,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("logon_test", "child processes (one NT process per Linux process)"),
     ("system_test", "child processes; run as SYSTEM (a boot option)"),
     ("lsa_test", "runs as SYSTEM (a boot option)"),
+    ("restricted_test", "runs as SYSTEM (a boot option)"),
     ("profile_test", "runs as SYSTEM (a boot option)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),

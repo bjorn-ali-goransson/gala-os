@@ -166,6 +166,7 @@ syscall_stubs! {
         password: *const UnicodeString, kind: u32, token: *mut usize
     );
     NtAllocateLocallyUniqueId = 0x7f22, fn(luid: *mut u64);
+    NtSetInformationToken = 0x7f23, fn(token: usize, class: u32, info: *const u8, length: u32);
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,

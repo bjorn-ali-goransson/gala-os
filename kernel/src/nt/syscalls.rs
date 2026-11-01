@@ -91,6 +91,8 @@ pub const NT_SET_SECURITY_OBJECT: u32 = 0x7f20;
 pub const GALA_LOGON_USER: u32 = 0x7f21;
 /// NtAllocateLocallyUniqueId: gala's number until verified.
 pub const NT_ALLOCATE_LOCALLY_UNIQUE_ID: u32 = 0x7f22;
+/// NtSetInformationToken: gala's number until verified.
+pub const NT_SET_INFORMATION_TOKEN: u32 = 0x7f23;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -315,6 +317,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
         1,
         token_calls::nt_allocate_locally_unique_id,
     ),
+    (NT_SET_INFORMATION_TOKEN, "NtSetInformationToken", 4, token_calls::nt_set_information_token),
     (
         NT_ASSIGN_PROCESS_TO_JOB_OBJECT,
         "NtAssignProcessToJobObject",

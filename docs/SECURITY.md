@@ -10,8 +10,9 @@ their client's token, GetUserProfileDirectoryW; `system_test`: programs
 run as SYSTEM with the boot option `as=system`; `lsa_test`: LSA logons,
 S4U and interactive, as sshd makes them, and virtual accounts;
 `profile_test`: LoadUserProfileW, profiles placed at boot). sshd's
-key-authenticated login works (`sshd_login`, 2026-11-01);
-S5 is design. Before S1, gala had the handle half of NT
+key-authenticated login works (`sshd_login`, 2026-11-01); S5 is done
+(`restricted_test`: PostgreSQL's restricted token, deny-only groups,
+SetTokenInformation, integrity levels and no-write-up). Before S1, gala had the handle half of NT
 security (each handle carries a granted access mask, mapped through the
 object type's generic mapping, and services check it), and descriptions
 of security data in user mode: advapi32 builds and reads SIDs, ACLs and
@@ -146,6 +147,10 @@ start.
    sshd accepts a key-authenticated login from the host and runs a
    command (`sshd_login`), also with a password (`sshd_password`). Left:
    logon rights enforced for ordinary accounts, NetUserAdd.
-5. **S5 Restricted tokens and integrity** (PostgreSQL).
+5. **S5 Restricted tokens and integrity** (done, 2026-11-01;
+   `restricted_test`): pg_ctl's CreateRestrictedProcess (Administrators
+   and Power Users deny-only, privileges deleted, the default DACL
+   extended), CheckTokenMembership, SetTokenInformation, mandatory labels
+   (no write up). Left: labels on objects low tokens create.
 Then the disk: D1 a virtio-blk driver, D2 a file system with
 descriptors, D3 registry hives on it.
