@@ -64,6 +64,8 @@ pub struct Process {
     /// through ProcessPriorityClass. Recorded only: every thread runs at
     /// the normal base priority (thread.rs).
     pub priority_class: core::sync::atomic::AtomicU8,
+    /// The primary token (nt::token).
+    pub token: IrqMutex<ObjectRef>,
 }
 
 impl fmt::Debug for Process {
@@ -450,6 +452,7 @@ pub fn spawn_from_pe(
         suspended: false,
         runtime_data: &[],
         parent_id: 0,
+        token: None,
     })
 }
 
@@ -475,6 +478,8 @@ pub struct Spawn<'a> {
     pub runtime_data: &'a [u8],
     /// The creating process's id (0: the kernel).
     pub parent_id: u64,
+    /// The primary token; None: the boot user's (nt::token).
+    pub token: Option<ObjectRef>,
 }
 
 /// Creates a process from a PE executable and starts (or prepares) its
@@ -498,6 +503,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         suspended,
         runtime_data,
         parent_id,
+        token,
     } = spec;
     let info = image.info;
     if info.is_dll {
@@ -623,6 +629,10 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     put_u32(&mut space, peb_addr + peb::IMAGE_SUBSYSTEM_MINOR_VERSION, u32::from(minor))?;
     put_u32(&mut space, peb_addr + peb::SESSION_ID, SESSION_ID)?;
 
+    let token = match token {
+        Some(t) => t,
+        None => super::token::for_new_process(None).map_err(|_| LoadError::OutOfMemory)?,
+    };
     let space = KArc::try_new(platform::SpaceLock::new(space))?;
     let process = KArc::try_new(Process {
         id,
@@ -645,6 +655,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         job: IrqMutex::new(None),
         oom_logged: core::sync::atomic::AtomicBool::new(false),
         priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),
+        token: IrqMutex::new(token),
     })?;
     prune();
     PROCESSES.lock().try_push(process.clone())?;

@@ -1,6 +1,7 @@
 # Security model (design, 2026-11-01)
 
-Status: design, not built yet. gala today has the handle half of NT
+Status: phase S1 (tokens in the kernel) is done (2026-11-01; `token_test`,
+ARCHITECTURE "Access tokens"); S2-S5 are design. Before S1, gala had the handle half of NT
 security (each handle carries a granted access mask, mapped through the
 object type's generic mapping, and services check it), and descriptions
 of security data in user mode: advapi32 builds and reads SIDs, ACLs and
@@ -118,7 +119,7 @@ start.
 
 ## Phases (each from a test program with Windows' results)
 
-1. **S1 Tokens in the kernel**: `token_test` (GetTokenInformation of the
+1. **S1 Tokens in the kernel** (done): `token_test` (GetTokenInformation of the
    process token and of duplicates, impersonation and RevertToSelf,
    OpenThreadToken's ERROR_NO_TOKEN, AdjustTokenPrivileges, a filtered
    token from CreateRestrictedToken) passing on the kernel's tokens.

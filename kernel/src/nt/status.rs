@@ -81,6 +81,13 @@ impl NtStatus {
     pub const PIPE_LISTENING: NtStatus = NtStatus(0xc000_00b3);
     pub const ILLEGAL_FUNCTION: NtStatus = NtStatus(0xc000_00af);
     pub const CANNOT_IMPERSONATE: NtStatus = NtStatus(0xc000_010d);
+    // Tokens.
+    pub const NOT_ALL_ASSIGNED: NtStatus = NtStatus(0x0000_0106);
+    pub const NO_IMPERSONATION_TOKEN: NtStatus = NtStatus(0xc000_005c);
+    pub const NO_TOKEN: NtStatus = NtStatus(0xc000_007c);
+    pub const INVALID_SID: NtStatus = NtStatus(0xc000_0078);
+    pub const BAD_IMPERSONATION_LEVEL: NtStatus = NtStatus(0xc000_00a5);
+    pub const BAD_TOKEN_TYPE: NtStatus = NtStatus(0xc000_00a8);
     pub const PIPE_BROKEN: NtStatus = NtStatus(0xc000_014b);
     pub const INVALID_PARAMETER_2: NtStatus = NtStatus(0xc000_00f0);
     pub const INVALID_PARAMETER_3: NtStatus = NtStatus(0xc000_00f1);

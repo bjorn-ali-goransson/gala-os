@@ -73,6 +73,17 @@ pub const NT_RELEASE_KEYED_EVENT: u32 = 0x7f12;
 pub const NT_NOTIFY_CHANGE_DIRECTORY_FILE: u32 = 0x7f13;
 pub const NT_READ_FILE_SCATTER: u32 = 0x7f14;
 pub const NT_WRITE_FILE_GATHER: u32 = 0x7f15;
+// Tokens (docs/SECURITY.md): gala's numbers until verified (reached
+// through ntdll).
+pub const NT_OPEN_PROCESS_TOKEN: u32 = 0x7f16;
+pub const NT_OPEN_PROCESS_TOKEN_EX: u32 = 0x7f17;
+pub const NT_OPEN_THREAD_TOKEN: u32 = 0x7f18;
+pub const NT_OPEN_THREAD_TOKEN_EX: u32 = 0x7f19;
+pub const NT_QUERY_INFORMATION_TOKEN: u32 = 0x7f1a;
+pub const NT_ADJUST_PRIVILEGES_TOKEN: u32 = 0x7f1b;
+pub const NT_DUPLICATE_TOKEN: u32 = 0x7f1c;
+pub const NT_FILTER_TOKEN: u32 = 0x7f1d;
+pub const NT_PRIVILEGE_CHECK: u32 = 0x7f1e;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -264,6 +275,25 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_DELETE_VALUE_KEY, "NtDeleteValueKey", 2, registry_calls::nt_delete_value_key),
     (NT_FLUSH_KEY, "NtFlushKey", 1, registry_calls::nt_flush_key),
     (NT_CREATE_JOB_OBJECT, "NtCreateJobObject", 3, job_calls::nt_create_job_object),
+    (NT_OPEN_PROCESS_TOKEN, "NtOpenProcessToken", 3, token_calls::nt_open_process_token),
+    (NT_OPEN_PROCESS_TOKEN_EX, "NtOpenProcessTokenEx", 4, token_calls::nt_open_process_token_ex),
+    (NT_OPEN_THREAD_TOKEN, "NtOpenThreadToken", 4, token_calls::nt_open_thread_token),
+    (NT_OPEN_THREAD_TOKEN_EX, "NtOpenThreadTokenEx", 5, token_calls::nt_open_thread_token_ex),
+    (
+        NT_QUERY_INFORMATION_TOKEN,
+        "NtQueryInformationToken",
+        5,
+        token_calls::nt_query_information_token,
+    ),
+    (
+        NT_ADJUST_PRIVILEGES_TOKEN,
+        "NtAdjustPrivilegesToken",
+        6,
+        token_calls::nt_adjust_privileges_token,
+    ),
+    (NT_DUPLICATE_TOKEN, "NtDuplicateToken", 6, token_calls::nt_duplicate_token),
+    (NT_FILTER_TOKEN, "NtFilterToken", 6, token_calls::nt_filter_token),
+    (NT_PRIVILEGE_CHECK, "NtPrivilegeCheck", 3, token_calls::nt_privilege_check),
     (
         NT_ASSIGN_PROCESS_TO_JOB_OBJECT,
         "NtAssignProcessToJobObject",
@@ -419,7 +449,9 @@ fn dispatch(frame: &mut SyscallFrame) {
     // Unsupported requests go to the missing-features ledger.
     if let Some(&(_, name, ..)) = service {
         match status {
-            NtStatus::INVALID_INFO_CLASS => {
+            // (NtQueryInformationToken records its own: a primary token's
+            // TokenImpersonationLevel is an answer, not a gap.)
+            NtStatus::INVALID_INFO_CLASS if name != "NtQueryInformationToken" => {
                 let class = super::ledger::class_argument(name)
                     .and_then(|i| call.arg(i).ok())
                     .map_or(u64::MAX, |c| c & 0xffff_ffff);
@@ -1098,6 +1130,8 @@ fn nt_open_directory_object(call: &mut Call<'_>) -> NtStatus {
 
 const OBJECT_BASIC_INFORMATION: u64 = 0;
 const OBJECT_NAME_INFORMATION: u64 = 1;
+const OBJECT_TYPE_INFORMATION: u64 = 2;
+const OBJECT_TYPE_INFORMATION_SIZE: usize = 0x68;
 /// OBJECT_HANDLE_FLAG_INFORMATION { BOOLEAN Inherit; BOOLEAN ProtectFromClose; }
 const OBJECT_HANDLE_FLAG_INFORMATION: u64 = 4;
 const OBJ_PROTECT_CLOSE: u32 = 0x01;
@@ -1153,6 +1187,31 @@ fn nt_query_object(call: &mut Call<'_>) -> NtStatus {
                 for (i, c) in name.iter().enumerate() {
                     out[16 + 2 * i..18 + 2 * i].copy_from_slice(&c.to_le_bytes());
                 }
+            }
+        }
+        OBJECT_TYPE_INFORMATION => {
+            // OBJECT_TYPE_INFORMATION (0x68 bytes: TypeName, counts and
+            // pool usage, InvalidAttributes, GenericMapping at 0x44,
+            // ValidAccessMask at 0x54, ...) followed by the NUL-terminated
+            // type name TypeName.Buffer points to.
+            let name = entry.object.type_name();
+            let total = OBJECT_TYPE_INFORMATION_SIZE + 2 * name.len() + 2;
+            if out.try_reserve(total).is_err() {
+                return NtStatus::NO_MEMORY;
+            }
+            out.resize(total, 0u8);
+            let bytes = 2 * name.len() as u16;
+            out[0..2].copy_from_slice(&bytes.to_le_bytes());
+            out[2..4].copy_from_slice(&(bytes + 2).to_le_bytes());
+            let at = buffer + OBJECT_TYPE_INFORMATION_SIZE as u64;
+            out[8..16].copy_from_slice(&at.to_le_bytes());
+            let m = entry.object.mapping();
+            for (i, v) in [m.read, m.write, m.execute, m.all, m.all].iter().enumerate() {
+                out[0x44 + 4 * i..0x48 + 4 * i].copy_from_slice(&v.to_le_bytes());
+            }
+            for (i, c) in name.bytes().enumerate() {
+                let at = OBJECT_TYPE_INFORMATION_SIZE + 2 * i;
+                out[at..at + 2].copy_from_slice(&u16::from(c).to_le_bytes());
             }
         }
         _ => return NtStatus::INVALID_INFO_CLASS,
@@ -1825,6 +1884,7 @@ const THREAD_TIMES: u64 = 1;
 const THREAD_PRIORITY: u64 = 2;
 const THREAD_BASE_PRIORITY: u64 = 3;
 const THREAD_AFFINITY_MASK: u64 = 4;
+const THREAD_IMPERSONATION_TOKEN: u64 = 5;
 const THREAD_WIN32_START_ADDRESS: u64 = 9;
 const THREAD_AM_I_LAST_THREAD: u64 = 12;
 const THREAD_HIDE_FROM_DEBUGGER: u64 = 17;
@@ -1838,6 +1898,9 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (class, buffer, length) =
         (arg!(call, 1) as u32 as u64, arg!(call, 2), arg!(call, 3) as u32);
+    if class == THREAD_IMPERSONATION_TOKEN {
+        return token_calls::set_thread_token(call, &entry, buffer, length);
+    }
     let object = tri!(entry.require(THREAD_SET_INFORMATION));
     let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     let need = match class {
@@ -2865,6 +2928,10 @@ fn nt_fs_control_file(call: &mut Call<'_>) -> NtStatus {
                 NtStatus::CANNOT_IMPERSONATE
             };
             if status == NtStatus::SUCCESS {
+                let impersonated = token_calls::impersonate_pipe_client(call);
+                if impersonated != NtStatus::SUCCESS {
+                    return impersonated;
+                }
                 tri!(call.write_iosb(iosb, status, 0));
             }
             return status;
@@ -3147,6 +3214,8 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
     let directory = core::str::from_utf8(&directory).unwrap_or("C:\\");
     // The caller's job: its limit, and the job the child joins.
     let job = tri!(job_calls::job_for_child(&call.process));
+    let parent_token = call.process.token.lock().clone();
+    let token = tri!(super::token::for_new_process(Some(&parent_token)));
     let spawned = process::spawn(process::Spawn {
         name,
         path: path_static,
@@ -3158,6 +3227,7 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         suspended,
         runtime_data: &runtime_data,
         parent_id: call.process.id,
+        token: Some(token),
     });
     let (child, thread_object) = match spawned {
         Ok(p) => p,
@@ -4279,3 +4349,6 @@ fn nt_release_keyed_event(call: &mut Call<'_>) -> NtStatus {
 
 #[path = "job_calls.rs"]
 mod job_calls;
+
+#[path = "token_calls.rs"]
+mod token_calls;

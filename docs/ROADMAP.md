@@ -915,8 +915,14 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       (ConvertStringSecurityDescriptorToSecurityDescriptorW and the
       descriptor getters), WriteFileEx/ReadFileEx, GetAddrInfoW, and
       `cwd=` percent-decoding. The key permission check passes only
-      because gala synthesizes a descriptor for every file. Next: the
-      security model's phases S1-S4 (docs/SECURITY.md), then `sshd -d`
+      because gala synthesizes a descriptor for every file. S1 done
+      (2026-11-01): tokens are kernel objects (`token_test`: process and
+      thread tokens, access on token handles, AdjustTokenPrivileges,
+      DuplicateTokenEx, SetThreadToken/ImpersonateSelf/RevertToSelf,
+      PrivilegeCheck, CreateRestrictedToken, CheckTokenMembership;
+      NtQueryObject's ObjectTypeInformation on the way); SQL Server's
+      login and sshd still pass. Next: S2 (descriptors kept on objects,
+      `security_test`), S3, S4, then `sshd -d`
       accepting a key-authenticated login from the host (xtask as the
       client).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach

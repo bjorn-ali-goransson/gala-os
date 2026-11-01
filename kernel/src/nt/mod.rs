@@ -26,6 +26,7 @@ pub mod syscalls;
 pub mod sysinfo;
 pub mod thread;
 pub mod timer;
+pub mod token;
 pub mod vad;
 pub mod vm;
 pub mod wait;

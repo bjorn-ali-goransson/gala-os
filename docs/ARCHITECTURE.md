@@ -1043,9 +1043,9 @@ Windows, never shadows the system's DLLs.)
   closed objects are not freed (TODO).
 - **advapi32** builds and reads SIDs, ACLs and absolute security
   descriptors as documented (security.rs), knows the user "gala"
-  (S-1-5-21-...-1001) and the well-known accounts, and has a stand-in
-  process token (OpenProcessToken duplicates the process handle; the
-  token functions describe a standard user). Nothing is enforced and
+  (S-1-5-21-...-1001) and the well-known accounts; its token functions
+  wrap the kernel's token services (token.rs; see "Access tokens"
+  below). Nothing is enforced and
   files keep no descriptors (SetFileSecurity and SetKernelObjectSecurity
   succeed, recorded). The registry is empty (keys not found, predefined
   keys without subkeys; RegGetValueW checks its flags first). ETW
@@ -1154,15 +1154,38 @@ Windows, never shadows the system's DLLs.)
   exception to checked allocation). Key derivation fails with
   STATUS_NOT_SUPPORTED. Unknown algorithm names are recorded
   (`bcrypt.dll!algorithm <name>`).
-- **The token's groups** (advapi32 security.rs): GetTokenInformation
-  describes a standard interactive user's token: TokenGroups (Everyone,
-  LOCAL, CONSOLE LOGON, INTERACTIVE, BUILTIN\Users, Authenticated
-  Users, This Organization, a logon SID S-1-5-5-0-x, NTLM
-  Authentication, the Medium label), TokenGroupsAndPrivileges,
-  TokenStatistics (one logon session LUID), TokenSessionId 1,
-  TokenIntegrityLevel, TokenLogonSid, TokenType (primary),
-  TokenIsAppContainer (no). These are descriptions only: no access check
-  uses them yet (see ROADMAP, agreed order).
+- **Access tokens** (docs/SECURITY.md phase S1; `kernel/src/nt/token.rs`,
+  the services in `token_calls.rs`): a `Token` object type (type name
+  "Token", TOKEN_* generic mapping) holding the user, groups, privileges,
+  restricting SIDs, primary group, default DACL, logon session, type and
+  impersonation level; ids from one LUID counter. Every process has a
+  primary token (`Process::token`): the boot user's for processes the
+  kernel starts (a standard interactive user: Everyone, LOCAL, CONSOLE
+  LOGON, INTERACTIVE, BUILTIN\Users, Authenticated Users, This
+  Organization, the logon SID S-1-5-5-0-0x2a3b4, NTLM Authentication, the
+  Medium label; SeShutdown, SeChangeNotify (enabled), SeUndock,
+  SeIncreaseWorkingSet, SeTimeZone; owner the user; default DACL
+  GA to the user and SYSTEM, GR|GX to the logon SID), a copy of the
+  creator's for the processes programs create. A thread may hold an
+  impersonation token (`NtThread::impersonation`: NtSetInformationThread
+  ThreadImpersonationToken, which takes impersonation tokens only, and
+  FSCTL_PIPE_IMPERSONATE, which gives the caller a copy of its own
+  process token until pipes record their client: TODO(S4)). Services
+  (gala numbers 0x7f16-0x7f1e until verified): NtOpenProcessToken(Ex),
+  NtOpenThreadToken(Ex) (STATUS_NO_TOKEN), NtQueryInformationToken (the
+  TOKEN_* layouts with pointers into the caller's buffer;
+  STATUS_BUFFER_TOO_SMALL with the size; TokenImpersonationLevel of a
+  primary token is INVALID_INFO_CLASS and not a ledger gap),
+  NtAdjustPrivilegesToken (only held privileges change; the previous
+  state lists what changed; STATUS_NOT_ALL_ASSIGNED; a short
+  PreviousState changes nothing), NtDuplicateToken (the level from the
+  attributes' SECURITY_QUALITY_OF_SERVICE; not above the source's),
+  NtFilterToken (deny-only SIDs, deleted privileges,
+  DISABLE_MAX_PRIVILEGE, restricting SIDs intersected with existing
+  ones; the new handle has the old one's access), NtPrivilegeCheck
+  (impersonation tokens only; marks SE_PRIVILEGE_USED_FOR_ACCESS).
+  Handle checks report the wrong object type before missing access, as
+  Windows does. Nothing uses tokens for access decisions yet (S3).
 - **Certificates** (crypt32 cert.rs): CertCreateCertificateContext
   decodes DER X.509 (its own small DER reader: definite lengths, v1-v3,
   UTCTime/GeneralizedTime, unique ids, extensions) into CERT_CONTEXT and
@@ -1339,10 +1362,9 @@ Windows, never shadows the system's DLLs.)
   Credential and context handles hold a heap block and a tag; buffers
   SSPI returns are process-heap blocks for FreeContextBuffer. A lookup
   of another package records its name (`secur32.dll!package <name>`).
-  security.dll forwards to secur32. advapi32 keeps which threads
-  impersonate (ImpersonateSelf, SetThreadToken, RevertToSelf): there is
-  one user, so impersonating changes nothing but OpenThreadToken, which
-  then returns that user's token.
+  security.dll forwards to secur32. Impersonation (ImpersonateSelf,
+  SetThreadToken, RevertToSelf, ImpersonateNamedPipeClient) sets the
+  thread's kernel impersonation token (see "Access tokens").
 - **Performance counters**: advapi32's PerfLib V2 provider functions
   (`user/advapi32/src/perf.rs`) keep providers, counter-set templates and
   instances (PERF_COUNTERSET_INSTANCE, the data block at the counters'

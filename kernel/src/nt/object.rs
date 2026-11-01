@@ -346,6 +346,8 @@ pub enum ObjectBody {
     /// A job object (nt::job).
     Job(super::job::Job),
     KeyedEvent(super::keyed_event::KeyedEvent),
+    /// An access token (nt::token).
+    Token(super::token::Token),
 }
 
 /// Where a named object lives in the namespace.
@@ -409,6 +411,7 @@ impl KObject {
             ObjectBody::Key(_) => "Key",
             ObjectBody::Job(_) => "Job",
             ObjectBody::KeyedEvent(_) => "KeyedEvent",
+            ObjectBody::Token(_) => "Token",
         }
     }
 
@@ -451,7 +454,8 @@ impl KObject {
             | ObjectBody::NullDevice
             | ObjectBody::Key(_)
             | ObjectBody::Job(_)
-            | ObjectBody::KeyedEvent(_) => None,
+            | ObjectBody::KeyedEvent(_)
+            | ObjectBody::Token(_) => None,
         }
     }
 
@@ -478,6 +482,7 @@ impl KObject {
             ObjectBody::Key(_) => super::registry::KEY_MAPPING,
             ObjectBody::Job(_) => super::job::JOB_MAPPING,
             ObjectBody::KeyedEvent(_) => super::keyed_event::KEYED_EVENT_MAPPING,
+            ObjectBody::Token(_) => super::token::TOKEN_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,
                 write: READ_CONTROL | SYNCHRONIZE | 0x116,

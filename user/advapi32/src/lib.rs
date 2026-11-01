@@ -40,6 +40,7 @@ mod etw;
 mod perf;
 mod registry;
 mod security;
+mod token;
 mod unimplemented;
 
 /// The C runtime's marker that floating point is used (the linker wants
@@ -265,7 +266,7 @@ pub extern "system" fn EqualSid(a: *const u8, b: *const u8) -> i32 {
     }
 }
 
-/// Tokens, access checks and Safer levels: not yet (no security model);
+/// Setting token information and access checks: not yet (docs/SECURITY.md S2, S3);
 /// each fails with ERROR_NOT_SUPPORTED and is recorded.
 macro_rules! no_security {
     ($($name:ident($($arg:ident: $ty:ty),*);)*) => {$(
@@ -280,8 +281,6 @@ macro_rules! no_security {
 
 no_security! {
     SetTokenInformation(token: usize, class: u32, info: *const u8, length: u32);
-    DuplicateToken(token: usize, level: u32, new: *mut usize);
-    CheckTokenMembership(token: usize, sid: *const u8, member: *mut i32);
     AccessCheck(descriptor: *const u8, token: usize, access: u32, mapping: *const u8, privileges: *mut u8, length: *mut u32, granted: *mut u32, status: *mut i32);
 }
 

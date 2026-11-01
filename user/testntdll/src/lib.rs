@@ -130,6 +130,31 @@ syscall_stubs! {
         h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
         segments: *const u64, length: u32, offset: *const i64, key: *const u32
     );
+    // Tokens (gala's numbers, unverified; docs/SECURITY.md).
+    NtOpenProcessToken = 0x7f16, fn(process: isize, access: u32, token: *mut usize);
+    NtOpenProcessTokenEx = 0x7f17, fn(
+        process: isize, access: u32, attributes: u32, token: *mut usize
+    );
+    NtOpenThreadToken = 0x7f18, fn(thread: isize, access: u32, as_self: u8, token: *mut usize);
+    NtOpenThreadTokenEx = 0x7f19, fn(
+        thread: isize, access: u32, as_self: u8, attributes: u32, token: *mut usize
+    );
+    NtQueryInformationToken = 0x7f1a, fn(
+        token: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32
+    );
+    NtAdjustPrivilegesToken = 0x7f1b, fn(
+        token: usize, disable_all: u8, new: *const u8, length: u32, previous: *mut u8,
+        ret: *mut u32
+    );
+    NtDuplicateToken = 0x7f1c, fn(
+        token: usize, access: u32, attributes: *const ObjectAttributes, effective_only: u8,
+        kind: u32, new: *mut usize
+    );
+    NtFilterToken = 0x7f1d, fn(
+        token: usize, flags: u32, disable: *const u8, delete: *const u8, restrict: *const u8,
+        new: *mut usize
+    );
+    NtPrivilegeCheck = 0x7f1e, fn(token: usize, set: *mut u8, result: *mut u8);
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,
@@ -1270,6 +1295,14 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_00b2, 535),  // PIPE_CONNECTED -> ERROR_PIPE_CONNECTED
     (0xc000_00b3, 536),  // PIPE_LISTENING -> ERROR_PIPE_LISTENING
     (0xc000_010d, 1368), // CANNOT_IMPERSONATE -> ERROR_CANNOT_IMPERSONATE
+    (0x0000_0106, 1300), // NOT_ALL_ASSIGNED -> ERROR_NOT_ALL_ASSIGNED
+    (0xc000_005c, 1309), // NO_IMPERSONATION_TOKEN -> ERROR_NO_IMPERSONATION_TOKEN
+    (0xc000_0060, 1313), // NO_SUCH_PRIVILEGE -> ERROR_NO_SUCH_PRIVILEGE
+    (0xc000_0061, 1314), // PRIVILEGE_NOT_HELD -> ERROR_PRIVILEGE_NOT_HELD
+    (0xc000_0078, 1337), // INVALID_SID -> ERROR_INVALID_SID
+    (0xc000_007c, 1008), // NO_TOKEN -> ERROR_NO_TOKEN
+    (0xc000_00a5, 1346), // BAD_IMPERSONATION_LEVEL -> ERROR_BAD_IMPERSONATION_LEVEL
+    (0xc000_00a8, 1349), // BAD_TOKEN_TYPE -> ERROR_BAD_TOKEN_TYPE
     (0xc000_0035, 183),  // OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS
     (0xc000_0039, 161),  // OBJECT_PATH_INVALID -> ERROR_BAD_PATHNAME
     (0xc000_003a, 3),    // OBJECT_PATH_NOT_FOUND -> ERROR_PATH_NOT_FOUND

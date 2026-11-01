@@ -61,6 +61,8 @@ pub struct NtThread {
     /// `syscall` (the context Windows reports for a thread suspended while
     /// blocked in one).
     in_syscall: IrqMutex<Option<(u32, UserRegs)>>,
+    /// The impersonation token it acts with (nt::token), if any.
+    pub impersonation: IrqMutex<Option<ObjectRef>>,
 }
 
 /// The user state of a thread parked by suspension.
@@ -212,6 +214,7 @@ pub fn create(
         owned_mutants: IrqMutex::new(Vec::new()),
         parked: IrqMutex::new(None),
         in_syscall: IrqMutex::new(None),
+        impersonation: IrqMutex::new(None),
     };
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;

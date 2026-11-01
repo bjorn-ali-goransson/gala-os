@@ -11,7 +11,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     ControlTraceW
     ConvertSidToStringSidA
     CreateProcessAsUserW
-    CreateRestrictedToken
     CryptContextAddRef
     CryptImportKey
     CryptSetProvParam
