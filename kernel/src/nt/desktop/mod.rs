@@ -25,7 +25,7 @@ use super::status::NtStatus;
 use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
 use alloc::vec::Vec;
-use paint::{Canvas, Font, Wallpaper, blend, over, round_coverage2, shadow_alpha};
+use paint::{Canvas, Font, Picture, Wallpaper, blend, over, round_coverage2, shadow_alpha};
 
 /// Frame metrics (what user32's GetSystemMetrics reports): Windows 11's
 /// (a 1-pixel border, a 32-pixel caption, 46 x 32 caption buttons, 8-pixel
@@ -460,7 +460,8 @@ impl Desktop {
     /// puts the pointer in the middle.
     pub fn set_screen(&mut self, w: u32, h: u32) -> Result<(), NtStatus> {
         let (w, h) = (i64::from(w), i64::from(h));
-        self.wallpaper = Some(Wallpaper::new(w, h).ok_or(NtStatus::NO_MEMORY)?);
+        let wallpaper = Wallpaper::new(w, h, PICTURE.lock().as_ref());
+        self.wallpaper = Some(wallpaper.ok_or(NtStatus::NO_MEMORY)?);
         self.screen = (w, h);
         self.pointer = (w / 2, h / 2);
         self.taskbar_dirty = true;
@@ -1662,6 +1663,51 @@ fn clock(minute: u64) -> ([u8; 8], usize, [u8; 10], usize) {
 }
 
 static DESKTOP: IrqMutex<Desktop> = IrqMutex::new(Desktop::new());
+
+/// The wallpaper picture chosen at boot (`choose_wallpaper`).
+static PICTURE: IrqMutex<Option<Picture>> = IrqMutex::new(None);
+
+/// The wallpapers gala ships and their files (THIRD_PARTY.md).
+const WALLPAPERS: [(&str, &str); 4] = [
+    ("dunes", "\\Windows\\Web\\Wallpaper\\dunes.qoi"),
+    ("ribbons", "\\Windows\\Web\\Wallpaper\\ribbons.qoi"),
+    ("najdi", "\\Windows\\Web\\Wallpaper\\najdi.qoi"),
+    ("night", "\\Windows\\Web\\Wallpaper\\night.qoi"),
+];
+
+/// Chooses the desktop's wallpaper at boot: `choice` (the `wallpaper=`
+/// boot option: one of WALLPAPERS, or "drawn" for the drawn light and
+/// ribbons), else one of the shipped pictures present at random. Without
+/// any, the drawn one.
+pub fn choose_wallpaper(choice: Option<&str>) {
+    if choice == Some("drawn") {
+        return;
+    }
+    let mut present = [("", ""); WALLPAPERS.len()];
+    let mut count = 0;
+    for (name, path) in WALLPAPERS {
+        if choice.is_none_or(|c| c == name) && super::file::lookup(path).is_ok() {
+            present[count] = (name, path);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return;
+    }
+    // Random enough: the time's low bits (100 ns units).
+    let (name, path) = present[(platform::system_time() / 10 % count as u64) as usize];
+    let picture = super::file::lookup(path)
+        .and_then(super::file::read_all)
+        .ok()
+        .and_then(|data| paint::decode_qoi(&data));
+    match picture {
+        Some(p) => {
+            crate::info!("desktop: wallpaper {name} ({} x {})", p.w, p.h);
+            *PICTURE.lock() = Some(p);
+        }
+        None => crate::warn!("desktop: cannot load wallpaper {name}"),
+    }
+}
 
 /// Redraws screen area `r` from the desktop.
 fn redraw(desktop: &Desktop, r: Rect) {

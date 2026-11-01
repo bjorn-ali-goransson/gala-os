@@ -88,6 +88,8 @@ pub fn kernel_main() -> ! {
         console::attach_framebuffer(
             fb,
             concat!("gala-os ", env!("CARGO_PKG_VERSION"), "  |  qal'a  |  Built in Saudi"),
+            // `bootlog`: the log's text instead of the splash.
+            cmdline.flag("bootlog"),
         );
         kprintln!("gala-os kernel {} (screen console)", env!("CARGO_PKG_VERSION"));
     } else {
@@ -155,6 +157,8 @@ pub fn kernel_main() -> ! {
         nt::persist::mount();
     }
 
+    // The desktop's wallpaper (`wallpaper=<name>`, else one at random).
+    nt::desktop::choose_wallpaper(cmdline.value("wallpaper"));
     nt::syscalls::set_trace(cmdline.flag("trace"));
     events::set_mask(cmdline.value("events").map_or(0, events::parse_mask));
     // `run=a.exe,b.exe` runs the programs one after another; `args=` holds

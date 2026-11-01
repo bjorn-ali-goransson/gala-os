@@ -69,11 +69,20 @@ Rules for this file:
 
 ## Artwork
 
-- `kernel/assets/fortress.svg` (the start button, the start menu's avatar
-  and the wallpaper's mark) and `kernel/assets/wordmark.svg` (the
-  wordmark "قلعة" under the mark): the project owner's artwork, supplied
-  for gala on 2026-11-01; the `.alpha` files are rendered from them by
-  `cargo xtask bake-icons`. Not third-party.
+- `kernel/assets/fortress.svg` (the Masmak Fortress: the start button,
+  the start menu's avatar, the wallpaper's mark and the boot splash) and
+  `kernel/assets/wordmark.svg` (the wordmark "قلعة" under it, lettered in
+  the Saudi font released by the Ministry of Culture): the project
+  owner's artwork, supplied for gala on 2026-11-01; the `.alpha` files
+  are rendered from them by `cargo xtask bake-icons`. Not third-party.
+  The wordmark's lettering comes from that font; that its license allows
+  this use in a logo is still to be confirmed by the owner.
+- `kernel/assets/wallpapers/*.qoi` (the desktop's pictures): generated on
+  2026-11-01 at the project owner's request with OpenAI's image model
+  `gpt-image-2` through the owner's API key; prompts and conversion in
+  `kernel/assets/wallpapers/README.md`. OpenAI's terms assign the output
+  to the user who requested it. Shipped only in the images of desktop
+  scenarios (`C:\Windows\Web\Wallpaper`).
 - `kernel/assets/camel.png`: the project owner's earlier start-button
   drawing (2026-11-01), unused since the fortress replaced it.
 

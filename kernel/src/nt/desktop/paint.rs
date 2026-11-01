@@ -3,6 +3,7 @@
 //! shadows. Integer arithmetic only (the kernel has no floating point).
 //! Colours are 0x00RRGGBB on the screen and 0xAARRGGBB in layers.
 
+use crate::mm::heap::TryVec;
 use alloc::vec::Vec;
 
 /// `bg` moved toward `fg` by t/255 (alpha bits of the result: none).
@@ -376,6 +377,80 @@ pub struct Wallpaper {
     ribbons: [Vec<i64>; 3],
     /// The watermark (Gala's fortress and name, faint white) and its place.
     mark: Option<(Canvas, i64, i64)>,
+    /// A picture scaled to the screen (w x h), when one was chosen; else
+    /// the drawn light and ribbons.
+    picture: Vec<u32>,
+}
+
+/// A decoded picture: its size and 0x00RRGGBB pixels, rows top first.
+pub struct Picture {
+    pub w: i64,
+    pub h: i64,
+    pub pixels: Vec<u32>,
+}
+
+/// Decodes a QOI image (written from the specification at qoiformat.org:
+/// a 14-byte header, then chunks: RGB, RGBA, INDEX into 64 recent
+/// colours, DIFF, LUMA, RUN); None when it is malformed, larger than
+/// 8192 x 8192, or memory runs out.
+pub fn decode_qoi(data: &[u8]) -> Option<Picture> {
+    if data.len() < 14 || &data[..4] != b"qoif" {
+        return None;
+    }
+    let w = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+    let h = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+    if w == 0 || h == 0 || w > 8192 || h > 8192 {
+        return None;
+    }
+    let n = w as usize * h as usize;
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(n).ok()?;
+    let mut index = [[0u8; 4]; 64];
+    let mut px = [0u8, 0, 0, 255];
+    let mut p = 14;
+    while pixels.len() < n {
+        let b = *data.get(p)?;
+        p += 1;
+        let mut run = 1;
+        match b {
+            0xfe => {
+                px[..3].copy_from_slice(data.get(p..p + 3)?);
+                p += 3;
+            }
+            0xff => {
+                px.copy_from_slice(data.get(p..p + 4)?);
+                p += 4;
+            }
+            _ => match b >> 6 {
+                0 => px = index[usize::from(b & 63)],
+                1 => {
+                    px[0] = px[0].wrapping_add((b >> 4) & 3).wrapping_sub(2);
+                    px[1] = px[1].wrapping_add((b >> 2) & 3).wrapping_sub(2);
+                    px[2] = px[2].wrapping_add(b & 3).wrapping_sub(2);
+                }
+                2 => {
+                    let b2 = *data.get(p)?;
+                    p += 1;
+                    let dg = (b & 0x3f).wrapping_sub(32);
+                    px[0] = px[0].wrapping_add(dg).wrapping_sub(8).wrapping_add(b2 >> 4);
+                    px[1] = px[1].wrapping_add(dg);
+                    px[2] = px[2].wrapping_add(dg).wrapping_sub(8).wrapping_add(b2 & 15);
+                }
+                _ => run = usize::from(b & 63) + 1,
+            },
+        }
+        let hash = (usize::from(px[0]) * 3
+            + usize::from(px[1]) * 5
+            + usize::from(px[2]) * 7
+            + usize::from(px[3]) * 11)
+            % 64;
+        index[hash] = px;
+        let c = u32::from(px[0]) << 16 | u32::from(px[1]) << 8 | u32::from(px[2]);
+        for _ in 0..run.min(n - pixels.len()) {
+            pixels.try_push(c).ok()?;
+        }
+    }
+    Some(Picture { w: i64::from(w), h: i64::from(h), pixels })
 }
 
 /// Gala's fortress (the project owner's Masmak Fortress drawing, rendered
@@ -394,7 +469,24 @@ const RIBBONS: [(u32, i64, i64); 3] =
     [(0x00_dc_ee_ff, 9, 120), (0x00_b6_d8_ff, 6, 95), (0x00_ff_ff_ff, 3, 140)];
 
 impl Wallpaper {
-    pub fn new(w: i64, h: i64) -> Option<Wallpaper> {
+    /// The wallpaper for a w x h screen: `picture` scaled to cover it
+    /// (centred, the overflow cropped), or the drawn one.
+    pub fn new(w: i64, h: i64, picture: Option<&Picture>) -> Option<Wallpaper> {
+        let mut scaled = Vec::new();
+        if let Some(pic) = picture.filter(|p| p.w > 0 && p.h > 0 && w > 0 && h > 0) {
+            scaled.try_reserve_exact((w * h) as usize).ok()?;
+            // Cover: the larger of the two scales (as w / pic.w).
+            let (num, den) = if w * pic.h >= h * pic.w { (w, pic.w) } else { (h, pic.h) };
+            let (ox, oy) = ((pic.w * num / den - w) / 2, (pic.h * num / den - h) / 2);
+            for y in 0..h {
+                let sy = ((y + oy) * den / num).clamp(0, pic.h - 1);
+                for x in 0..w {
+                    let sx = ((x + ox) * den / num).clamp(0, pic.w - 1);
+                    let c = pic.pixels.get((sy * pic.w + sx) as usize).copied().unwrap_or(0);
+                    scaled.try_push(c).ok()?;
+                }
+            }
+        }
         // (base height, amplitude, degrees across, phase), hundredths.
         let shapes = [(58, 12, 260, 200), (66, 9, 330, 40), (61, 6, 420, 120)];
         let mut ribbons: [Vec<i64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
@@ -428,13 +520,11 @@ impl Wallpaper {
             }
         }
         let mark = mark.map(|m| (m, w - mw - 28, h - 48 - mh - 24));
-        Some(Wallpaper { w, h, ribbons, mark })
+        Some(Wallpaper { w, h, ribbons, mark, picture: scaled })
     }
 
-    pub fn pixel(&self, x: i64, y: i64) -> u32 {
-        if x < 0 || y < 0 || x >= self.w || y >= self.h {
-            return 0;
-        }
+    /// The drawn wallpaper: a radial blue light and three ribbons.
+    fn drawn(&self, x: i64, y: i64) -> u32 {
         let (cx, cy) = (self.w / 2, self.h * 58 / 100);
         let reach = isqrt(cx * cx + cy * cy).max(1);
         let d = isqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) * 1024 / reach;
@@ -447,6 +537,17 @@ impl Wallpaper {
                 c = blend(c, color, (strength * f / t * f / t).min(255) as u8);
             }
         }
+        c
+    }
+
+    pub fn pixel(&self, x: i64, y: i64) -> u32 {
+        if x < 0 || y < 0 || x >= self.w || y >= self.h {
+            return 0;
+        }
+        let mut c = match self.picture.get((y * self.w + x) as usize) {
+            Some(&c) => c,
+            None => self.drawn(x, y),
+        };
         if let Some((m, mx, my)) = &self.mark {
             let v = m.get(x - mx, y - my);
             if v >> 24 != 0 {

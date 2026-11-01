@@ -375,6 +375,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_thread_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_sync_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_locale_test", "ntdll.dll", "Windows/System32"),
+    ("gui_test", "kernel/assets/wallpapers/dunes.qoi", "Windows/Web/Wallpaper"),
+    ("gui_test", "kernel/assets/wallpapers/ribbons.qoi", "Windows/Web/Wallpaper"),
+    ("gui_test", "kernel/assets/wallpapers/najdi.qoi", "Windows/Web/Wallpaper"),
+    ("gui_test", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("gui_test", "ntdll.dll", "Windows/System32"),
     ("gui_test", "kernel32.dll", "Windows/System32"),
     ("gui_test", "user32.dll", "Windows/System32"),
@@ -866,6 +870,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gitbash", "target/prebuilt/portablegit/bin/", "git/bin"),
     ("gitbash", "target/prebuilt/portablegit/etc/", "git/etc"),
     ("gitbash", "target/prebuilt/portablegit/usr/bin/", "git/usr/bin"),
+    ("filezilla", "kernel/assets/wallpapers/dunes.qoi", "Windows/Web/Wallpaper"),
+    ("filezilla", "kernel/assets/wallpapers/ribbons.qoi", "Windows/Web/Wallpaper"),
+    ("filezilla", "kernel/assets/wallpapers/najdi.qoi", "Windows/Web/Wallpaper"),
+    ("filezilla", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("filezilla", "ntdll.dll", "Windows/System32"),
     ("filezilla", "kernel32.dll", "Windows/System32"),
     ("filezilla", "kernelbase.dll", "Windows/System32"),
@@ -1735,7 +1743,7 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
         copy(&limine.join(file), &boot.join("limine").join(file))?;
     }
     let config = format!(
-        "timeout: 0\n\n/gala-os\n    protocol: limine\n    path: boot():/boot/kernel\n    cmdline: {cmdline}\n{modules}"
+        "timeout: 0\nquiet: yes\n\n/gala-os\n    protocol: limine\n    path: boot():/boot/kernel\n    cmdline: {cmdline}\n{modules}"
     );
     write(&boot.join("limine/limine.conf"), &config)?;
 
@@ -2523,7 +2531,8 @@ const SCENARIOS: &[Scenario] = &[
         // the desktop (UEFI: a framebuffer); SCREEN_SCENARIOS checks the
         // screen.
         name: "gui_test",
-        cmdline: "qemu_exit run=gui_test.exe",
+        // The night wallpaper, so the screen check knows its colours.
+        cmdline: "qemu_exit wallpaper=night run=gui_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "gui_test: painted",
@@ -4121,7 +4130,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[(
             ScreenStep {
                 input: &[],
                 pixels: &[
-                    PixelCheck::AnyIn(4, 4, 12, 12, 0x0b2c71), // the wallpaper's edge
+                    PixelCheck::AnyIn(4, 4, 12, 12, 0x060e2b), // the night wallpaper's corner
                     PixelCheck::At(300, 110, 0xeef2f7),        // the active caption
                     PixelCheck::At(101 + 100, 133 + 70, 0xff0000), // FillRect's red
                     PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // COLOR_WINDOW
@@ -5506,7 +5515,7 @@ fn bake_fonts() -> Result {
 /// masks (the picture centred, `size` x `size` bytes) in
 /// kernel/assets/<name>-<size>.alpha; the kernel colours them.
 fn bake_icons() -> Result {
-    let icons: &[(&str, &[u32])] = &[("fortress", &[24, 96])];
+    let icons: &[(&str, &[u32])] = &[("fortress", &[24, 96, 160])];
     for &(name, sizes) in icons {
         let svg = fs::read(root().join(format!("kernel/assets/{name}.svg")))
             .map_err(|e| format!("{name}.svg: {e}"))?;
@@ -5527,31 +5536,33 @@ fn bake_icons() -> Result {
         }
     }
     // The wordmark (قلعة, "qal'a"): cropped to its letters, 112 pixels
-    // wide, as "<width u16><height u16>" then the alpha bytes.
+    // wide (the wallpaper's mark) and 220 (the boot splash), as
+    // "<width u16><height u16>" then the alpha bytes.
     let svg = fs::read(root().join("kernel/assets/wordmark.svg"))
         .map_err(|e| format!("wordmark.svg: {e}"))?;
     let tree = resvg::usvg::Tree::from_data(&svg, &resvg::usvg::Options::default())
         .map_err(|e| e.to_string())?;
     let bbox = tree.root().abs_bounding_box();
-    let width = 112u32;
-    let scale = width as f32 / bbox.width();
-    let height = (bbox.height() * scale).ceil() as u32;
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or("pixmap")?;
-    let transform = resvg::tiny_skia::Transform::from_row(
-        scale,
-        0.0,
-        0.0,
-        scale,
-        -bbox.x() * scale,
-        -bbox.y() * scale,
-    );
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-    let mut out = Vec::new();
-    out.extend_from_slice(&(width as u16).to_le_bytes());
-    out.extend_from_slice(&(height as u16).to_le_bytes());
-    out.extend(pixmap.pixels().iter().map(|p| p.alpha()));
-    let path = root().join("kernel/assets/wordmark.alpha");
-    fs::write(&path, &out).map_err(|e| format!("{path:?}: {e}"))?;
-    eprintln!("xtask: {} ({width} x {height})", path.display());
+    for (width, file) in [(112u32, "wordmark.alpha"), (220, "wordmark-220.alpha")] {
+        let scale = width as f32 / bbox.width();
+        let height = (bbox.height() * scale).ceil() as u32;
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or("pixmap")?;
+        let transform = resvg::tiny_skia::Transform::from_row(
+            scale,
+            0.0,
+            0.0,
+            scale,
+            -bbox.x() * scale,
+            -bbox.y() * scale,
+        );
+        resvg::render(&tree, transform, &mut pixmap.as_mut());
+        let mut out = Vec::new();
+        out.extend_from_slice(&(width as u16).to_le_bytes());
+        out.extend_from_slice(&(height as u16).to_le_bytes());
+        out.extend(pixmap.pixels().iter().map(|p| p.alpha()));
+        let path = root().join("kernel/assets").join(file);
+        fs::write(&path, &out).map_err(|e| format!("{path:?}: {e}"))?;
+        eprintln!("xtask: {} ({width} x {height})", path.display());
+    }
     Ok(())
 }

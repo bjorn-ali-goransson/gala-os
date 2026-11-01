@@ -2061,6 +2061,15 @@ layout, metrics and colours of its captions, taskbar and start menu,
 with gala's own artwork (the owner's fortress and wordmark) and an open
 font (Selawik); no Microsoft logo, font, wallpaper or icon file.
 
+
+- **Boot splash** (`console.rs`): from when the kernel takes the
+  framebuffer until the desktop does, the screen shows the Masmak
+  fortress (160 px) over the wordmark (220 px) on a dark gradient, with
+  a progress bar each log line advances (toward 90%, by an estimate of
+  60 lines); the log goes to the serial port only. The boot option
+  `bootlog` shows the text console instead, and a panic switches to it
+  (emergency_println). Limine runs with `quiet: yes`, so the firmware's
+  screen goes straight to the splash.
 - **Compositor** (`kernel/src/nt/desktop/`): top-level windows bottom to
   top, each with an owner process, a screen position, its outer size, a
   title, a rendered caption bar and a client pixel buffer (0x00RRGGBB).
@@ -2077,9 +2086,16 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   `Canvas` (rounded rectangles, outlines, tinted alpha masks, text in the
   baked Selawik sizes of `paint::Font`: proportional, advances in 1/16
   px, "..." truncation), the shadow falloff (quadratic in the squared
-  distance) and the wallpaper (a radial blue gradient, three translucent
-  ribbons from sines (Bhaskara's approximation), and the fortress over
-  the wordmark in faint white at the bottom right). Glyphs and masks are
+  distance) and the wallpaper: a picture chosen at boot
+  (`choose_wallpaper`: the `wallpaper=<name>` boot option, else one of
+  `C:\Windows\Web\Wallpaper\{dunes,ribbons,najdi,night}.qoi` present
+  at random, by the time's low bits), decoded by `decode_qoi` (QOI,
+  written from its specification; fallible) and scaled to cover the
+  screen (centred, nearest pixel); without one (or with
+  `wallpaper=drawn`), the drawn one: a radial blue gradient and three
+  translucent ribbons from sines (Bhaskara's approximation). Either way
+  the Masmak fortress over the wordmark sits in faint white at the bottom
+  right. Glyphs and masks are
   baked by xtask (`bake-fonts`, `bake-icons`; see WORKFLOW): the kernel
   embeds coverage bytes only. Windows of a process
   that ends are destroyed.

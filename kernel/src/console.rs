@@ -2,6 +2,11 @@
 //! test harness) and, once the bootloader's framebuffer is attached, the
 //! same text on screen.
 //!
+//! By default the screen shows a splash instead of the text: the Masmak
+//! fortress over the wordmark قلعة on a dark background, with a progress
+//! bar the log's lines advance (the boot option `bootlog` shows the text;
+//! a panic switches to it).
+//!
 //! The screen console wraps around instead of scrolling (scrolling copies
 //! the whole framebuffer for every line, which is slow under emulation):
 //! the line being written is cleared first, and the next one is marked.
@@ -27,8 +32,36 @@ const HEADER_TEXT: u32 = 0x00_ff_ff_ff;
 const HEADER_HEIGHT: u64 = 24;
 const MARGIN: u64 = 8;
 
+/// The splash's pictures (baked by `cargo xtask bake-icons`): the
+/// fortress, 160 x 160 coverage bytes; the wordmark, width and height
+/// (u16 each) then coverage bytes.
+static FORTRESS: &[u8] = include_bytes!("../assets/fortress-160.alpha");
+static WORDMARK: &[u8] = include_bytes!("../assets/wordmark-220.alpha");
+const SPLASH_TOP: u32 = 0x00_0c_16_2c;
+const SPLASH_BOTTOM: u32 = 0x00_03_07_12;
+const SPLASH_INK: u32 = 0x00_f2_f5_fa;
+const BAR_TRACK: u32 = 0x00_26_32_4c;
+const BAR_FILL: u32 = 0x00_4c_c2_ff;
+const BAR_W: u64 = 240;
+/// About how many log lines a boot writes before the desktop or the
+/// program takes over (the bar stops short of full until then).
+const BOOT_LINES: u64 = 60;
+
+/// The splash's progress bar.
+struct Splash {
+    x: u64,
+    y: u64,
+    lines: u64,
+    filled: u64,
+}
+
 struct Screen {
     fb: Framebuffer,
+    /// Some: the splash shows instead of the text.
+    splash: Option<Splash>,
+    // gala-um (`hosted`) has no screen: the panic path never reads it.
+    #[cfg_attr(feature = "hosted", allow(dead_code))]
+    title: &'static str,
     cell_w: u64,
     cell_h: u64,
     cols: u64,
@@ -69,7 +102,77 @@ impl Screen {
         self.line_len = 0;
     }
 
+    /// The splash: a dark vertical gradient, the fortress and the
+    /// wordmark centred, the progress bar's track under them.
+    fn draw_splash(&mut self) {
+        let (w, h) = (self.fb.width(), self.fb.height());
+        for y in 0..h {
+            self.fb.fill_rect(
+                0,
+                y,
+                w,
+                1,
+                mix(SPLASH_TOP, SPLASH_BOTTOM, (y * 255 / h.max(1)) as u32),
+            );
+        }
+        let (ww, wh) = (
+            u64::from(u16::from_le_bytes([WORDMARK[0], WORDMARK[1]])),
+            u64::from(u16::from_le_bytes([WORDMARK[2], WORDMARK[3]])),
+        );
+        let total = 160 + 28 + wh + 48 + 4;
+        let top = h.saturating_sub(total) / 2;
+        self.mask((w.saturating_sub(160)) / 2, top, 160, 160, FORTRESS, h);
+        let wy = top + 160 + 28;
+        self.mask(w.saturating_sub(ww) / 2, wy, ww, wh, WORDMARK.get(4..).unwrap_or(&[]), h);
+        let (bx, by) = (w.saturating_sub(BAR_W) / 2, wy + wh + 48);
+        self.fb.fill_rect(bx, by, BAR_W, 4, BAR_TRACK);
+        self.splash = Some(Splash { x: bx, y: by, lines: 0, filled: 0 });
+    }
+
+    /// Draws coverage `alpha` (w x h) at (x, y) in the splash's ink over
+    /// its gradient (of a screen `screen_h` high).
+    fn mask(&self, x: u64, y: u64, w: u64, h: u64, alpha: &[u8], screen_h: u64) {
+        let mut row = [0u32; 256];
+        let w = w.min(256);
+        for j in 0..h {
+            let bg = mix(SPLASH_TOP, SPLASH_BOTTOM, ((y + j) * 255 / screen_h.max(1)) as u32);
+            for (i, px) in row.iter_mut().enumerate().take(w as usize) {
+                let a = alpha.get((j * w + i as u64) as usize).copied().unwrap_or(0);
+                *px = mix(bg, SPLASH_INK, u32::from(a));
+            }
+            self.fb.write_row(x, y + j, &row[..w as usize]);
+        }
+    }
+
+    /// The splash's bar after one more log line.
+    fn advance(&mut self) {
+        let Some(s) = self.splash.as_mut() else { return };
+        s.lines += 1;
+        let target = (s.lines * BAR_W / BOOT_LINES).min(BAR_W * 9 / 10);
+        if target > s.filled {
+            self.fb.fill_rect(s.x + s.filled, s.y, target - s.filled, 4, BAR_FILL);
+            s.filled = target;
+        }
+    }
+
+    /// Leaves the splash for the text console (a panic).
+    #[cfg_attr(feature = "hosted", allow(dead_code))]
+    fn show_text(&mut self) {
+        if self.splash.take().is_some() {
+            self.fb.fill(BACKGROUND);
+            self.header(self.title);
+            self.col = 0;
+            self.row = 0;
+        }
+    }
+
     fn put_char(&mut self, c: char) {
+        if self.splash.is_some() {
+            if c == '\n' {
+                self.advance();
+            }
+            return;
+        }
         match c {
             '\n' => return self.newline(),
             '\r' => return,
@@ -147,15 +250,23 @@ pub fn init() {
     serial::COM1.lock().init();
 }
 
-/// Shows the console on `fb` from now on, under a header bar with `title`.
-pub fn attach_framebuffer(fb: Framebuffer, title: &str) {
+/// `a` to `b` by `t` (0-255), per channel.
+fn mix(a: u32, b: u32, t: u32) -> u32 {
+    let ch = |s: u32| ((((a >> s) & 0xff) * (255 - t) + ((b >> s) & 0xff) * t) / 255) << s;
+    ch(16) | ch(8) | ch(0)
+}
+
+/// Shows the console on `fb` from now on: the splash, or (`text`) the
+/// log under a header bar with `title`.
+pub fn attach_framebuffer(fb: Framebuffer, title: &'static str, text: bool) {
     let cell_w = get_raster_width(FONT, SIZE) as u64;
     let cell_h = SIZE.val() as u64;
     let cols = (fb.width().saturating_sub(2 * MARGIN) / cell_w).max(1);
     let rows = (fb.height().saturating_sub(HEADER_HEIGHT + 2 * MARGIN) / cell_h).max(2);
-    fb.fill(BACKGROUND);
-    let screen = Screen {
+    let mut screen = Screen {
         fb,
+        splash: None,
+        title,
         cell_w,
         cell_h,
         cols,
@@ -166,7 +277,12 @@ pub fn attach_framebuffer(fb: Framebuffer, title: &str) {
         line_start: [0; 7],
         line_len: 0,
     };
-    screen.header(title);
+    if text {
+        screen.fb.fill(BACKGROUND);
+        screen.header(title);
+    } else {
+        screen.draw_splash();
+    }
     *SCREEN.lock() = Some(screen);
 }
 
@@ -225,6 +341,7 @@ pub fn emergency_println(args: fmt::Arguments) {
     if let Some(mut guard) = SCREEN.try_lock()
         && let Some(screen) = guard.as_mut()
     {
+        screen.show_text();
         screen.newline();
         screen.color = ERROR;
         let _ = screen.write_fmt(format_args!("{args}"));

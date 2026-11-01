@@ -510,6 +510,15 @@ has no font engine or SVG renderer (both are xtask host dependencies):
   96 px, square) and `wordmark.svg` (112 px wide, cropped) with resvg
   into `.alpha` coverage masks; the compositor tints them.
 
+- The desktop's wallpapers are QOI files in `kernel/assets/wallpapers/`
+  (provenance and conversion in its README.md); scenarios that use the
+  screen list them in `EXTRA_MODULES` (`Windows/Web/Wallpaper`), and a
+  screen check pins one with `wallpaper=<name>` on the command line (the
+  default is a random one).
+- The boot splash replaces the text console on the screen; boot with
+  `bootlog` (e.g. `cargo xtask screenshot ... bootlog`) to see the log
+  there.
+
 Rerun the command and commit its output after changing a source.
 
 ## Serving to a browser

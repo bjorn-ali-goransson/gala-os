@@ -557,7 +557,10 @@ W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    rasterizes Selawik at run time (fontdue in gdi32; "Segoe UI", "MS
    Shell Dlg" and the default faces map to it, fixed-pitch faces stay on
    Noto) with Windows' metrics (gdi32_test), plus ExtTextOutW and
-   GetTextExtentExPointW. Next, step 3: uxtheme with themes on and Windows 11-style control drawing.
+   GetTextExtentExPointW. Also (2026-11-01, asked for): four
+   wallpapers generated for gala (dunes, glass ribbons, Najdi mud-brick,
+   a night sky over palms), one chosen at random per boot, and a boot
+   splash with the Masmak fortress and the wordmark. Next, step 3: uxtheme with themes on and Windows 11-style control drawing.
    Later: a user-mode shell (the taskbar and start menu out of the
    kernel), window resizing by the frame, keyboard focus per window.
 

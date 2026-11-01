@@ -178,3 +178,31 @@ fn place_resizes_keeping_the_client_pixels_and_set_title_renames() {
     d.set_title(a, 7, &title("Renamed")).unwrap();
     assert_eq!(d.window(a).unwrap().title, title("Renamed"));
 }
+
+#[test]
+fn qoi_pictures_decode_and_cover_the_screen() {
+    // 2 x 2: red (RGB chunk), red (RUN 1), green (RGB), red (INDEX of
+    // red: (255 * 3 + 255 * 11) % 64 = 50), then the end marker.
+    let mut data = Vec::new();
+    data.extend_from_slice(b"qoif");
+    data.extend_from_slice(&2u32.to_be_bytes());
+    data.extend_from_slice(&2u32.to_be_bytes());
+    data.extend_from_slice(&[3, 0, 0xfe, 255, 0, 0, 0xc0, 0xfe, 0, 255, 0, 50]);
+    data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+    let p = paint::decode_qoi(&data).unwrap();
+    assert_eq!((p.w, p.h), (2, 2));
+    assert_eq!(p.pixels, [0xff0000, 0xff0000, 0x00ff00, 0xff0000]);
+    // DIFF (+1, -2, 0 from green) and LUMA (dg +10, dr - dg = 0,
+    // db - dg = -8 from that).
+    let mut more = data[..14].to_vec();
+    more.extend_from_slice(&[0xfe, 0, 255, 0, 0x40 | 3 << 4 | 2, 0x80 | 42, 0x80, 0xc0]);
+    more.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+    let q = paint::decode_qoi(&more).unwrap();
+    assert_eq!(q.pixels, [0x00ff00, 0x01fd00, 0x0b0702, 0x0b0702]);
+    // Truncated: no picture.
+    assert!(paint::decode_qoi(&data[..16]).is_none());
+    // A 2 x 2 picture covers a 4 x 2 screen: scaled by 2, centred, the
+    // overflow rows cropped.
+    let w = Wallpaper::new(4, 2, Some(&p)).unwrap();
+    assert_eq!(w.pixel(0, 0) & 0xffffff, 0xff0000);
+}
