@@ -173,6 +173,8 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   at opt-level 1: boot tests 32 s -> 14 s
 - Screen console (framebuffer text mirroring the serial log, Noto Sans Mono
   bitmap font) and `cargo xtask screenshot` (PNG via the QEMU monitor)
+- Windows on the screen (W1): user32/gdi32 windows painted through a
+  kernel compositor, checked by screen pixels in a UEFI boot test
 
 ## Next
 Direction from the project owner (2026-10-30): multiprocessor support, then
@@ -450,6 +452,23 @@ Next, agreed 2026-11-01: finish the backlog (Git Bash to a working
 manager: windows on the screen for Win32 programs (user32/gdi32 over the
 framebuffer, mouse and keyboard input, a compositor), test first and
 checked with screenshots.
+
+W1. **Windows on the screen**: done (2026-11-01). `gui_test` registers a
+   class, creates a WS_OVERLAPPEDWINDOW, paints a red FillRect and blue
+   TextOutW in WM_PAINT, runs a message loop until a thread posts
+   WM_CLOSE, and the UEFI boot test checks the screen's pixels (desktop,
+   border, caption, rectangle, text). Kernel compositor `nt::desktop`
+   (Gala window syscalls 0x7f30-0x7f33); user32's windows, classes and
+   queue in user mode; a new gala gdi32 (stock objects, brushes, pens,
+   surface DCs, PatBlt, Rectangle, TextOut).
+W2. **Input**: next. A PS/2 (or virtio-input) mouse and keyboard, a
+   cursor drawn by the compositor, WM_MOUSEMOVE/WM_LBUTTONDOWN/WM_KEYDOWN/
+   WM_CHAR to the window under the pointer or with the focus, moving
+   windows by the caption, raising on click; tested by injecting input
+   through the QEMU monitor (`mouse_move`, `sendkey`).
+W3. Later: child windows and standard controls (buttons, edit), the
+   non-client area through WM_NCPAINT, more GDI (bitmaps, BitBlt,
+   fonts), and a real program (e.g. a small open-source Win32 app).
 
 Agreed order, updated (2026-11-01): SQL Server's SHUTDOWN first (done);
 then

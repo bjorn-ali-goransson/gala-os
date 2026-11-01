@@ -1,8 +1,8 @@
 //! The seam between the NT layer and what runs it (docs/GALA_UM.md).
 //!
-//! The NT layer reaches the machine only through this module: five traits
+//! The NT layer reaches the machine only through this module: six traits
 //! say what it needs (time, threads and waits, entering and leaving user
-//! mode, user memory, the disk), `P` names the implementation (the kernel today,
+//! mode, user memory, the disk, the screen), `P` names the implementation (the kernel today,
 //! `crate::platform::Kernel`; gala-um's host process in U2), and the
 //! functions below are the NT layer's way to call it. No other file in
 //! `nt/` names `crate::arch`, `crate::sched`, `crate::time`, `crate::disk`
@@ -132,6 +132,14 @@ pub trait Storage {
     fn disk_read(first: u64, buf: &mut [u8]) -> Result<(), DiskError>;
     fn disk_write(first: u64, data: &[u8]) -> Result<(), DiskError>;
     fn disk_flush() -> Result<(), DiskError>;
+}
+
+/// The screen the desktop draws on (none: no windows).
+pub trait Display {
+    /// Width and height in pixels, if there is a screen.
+    fn screen_size() -> Option<(u32, u32)>;
+    /// Writes `0x00RRGGBB` pixels from (x, y) to the right (clipped).
+    fn screen_write_row(x: u32, y: u32, rgb: &[u32]);
 }
 
 // The NT layer's calls. Thin and inlined: the kernel implementation costs
@@ -302,4 +310,13 @@ pub fn disk_write(first: u64, data: &[u8]) -> Result<(), DiskError> {
 #[inline]
 pub fn disk_flush() -> Result<(), DiskError> {
     <P as Storage>::disk_flush()
+}
+
+#[inline]
+pub fn screen_size() -> Option<(u32, u32)> {
+    <P as Display>::screen_size()
+}
+#[inline]
+pub fn screen_write_row(x: u32, y: u32, rgb: &[u32]) {
+    <P as Display>::screen_write_row(x, y, rgb)
 }

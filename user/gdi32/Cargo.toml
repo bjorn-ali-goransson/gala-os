@@ -1,0 +1,16 @@
+[package]
+name = "gdi32"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+bench = false
+
+
+[dependencies]
+gala_stubs = { path = "../gala_stubs" }
+noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = ["size_16", "regular", "unicode-basic-latin", "unicode-specials"] }

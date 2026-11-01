@@ -3,8 +3,8 @@
 
 use crate::arch::{cpu, interrupts, paging, smp, syscall};
 use crate::nt::platform::{
-    Clock, DiskError, Frame, FxState, SharedUserSpace, SpawnError, Storage, SyscallFrame, ThreadId,
-    Threads, TrapFrame, UserEntry, UserMemory, UserRegs, WakeReason,
+    Clock, DiskError, Display, Frame, FxState, SharedUserSpace, SpawnError, Storage, SyscallFrame,
+    ThreadId, Threads, TrapFrame, UserEntry, UserMemory, UserRegs, WakeReason,
 };
 use crate::{mm, sched, time};
 
@@ -145,5 +145,24 @@ impl Storage for Kernel {
     }
     fn disk_flush() -> Result<(), DiskError> {
         crate::disk::flush()
+    }
+}
+
+/// The framebuffer once the desktop has taken it from the console.
+static SCREEN: crate::sync::IrqMutex<Option<crate::boot::Framebuffer>> =
+    crate::sync::IrqMutex::new(None);
+
+impl Display for Kernel {
+    fn screen_size() -> Option<(u32, u32)> {
+        let mut screen = SCREEN.lock();
+        if screen.is_none() {
+            *screen = crate::console::take_framebuffer();
+        }
+        screen.as_ref().map(|fb| (fb.width() as u32, fb.height() as u32))
+    }
+    fn screen_write_row(x: u32, y: u32, rgb: &[u32]) {
+        if let Some(fb) = SCREEN.lock().as_ref() {
+            fb.write_row(x.into(), y.into(), rgb);
+        }
     }
 }

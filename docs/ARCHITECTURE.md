@@ -2033,6 +2033,49 @@ modules. Replayed value changes keep the key's last-write time. Tests:
 deleted value and key, a volatile key) and host tests of the records,
 replay and snapshot.
 
+## Windows on the screen (W1)
+
+A first window manager, kept small. The parts:
+
+- **Kernel compositor** (`kernel/src/nt/desktop.rs`): a list of top-level
+  windows, bottom to top, each with an owner process, a screen position,
+  a client size, a caption and a client pixel buffer (0x00RRGGBB). The
+  compositor draws the frame itself (1 px border, 24 px caption with the
+  title in the console's font) and fills the rest of the screen with the
+  desktop colour. Every change returns a damage rectangle which is
+  redrawn row by row through `platform::screen_write_row`; the first use
+  paints the whole screen. Windows of a process that ends are destroyed.
+- **Display seam** (`nt::platform::Display`): `screen_size` and
+  `screen_write_row`. The kernel takes the framebuffer from the screen
+  console on first use (`console::take_framebuffer`; the console then
+  only writes to the serial port). gala-um has no screen (the window
+  syscalls return STATUS_NOT_SUPPORTED). BIOS boots have no framebuffer
+  either, so screen tests are UEFI scenarios.
+- **Syscalls** (gala's own range): GalaWindowCreate(x, y, w, h, title,
+  title_len, *id) 0x7f30, GalaWindowShow(id, show) 0x7f31,
+  GalaWindowPresent(id, x, y, w, h, pixels, stride) 0x7f32 (copies a
+  client rectangle in), GalaWindowDestroy(id) 0x7f33. Only the owner
+  process may change a window.
+- **user32** (`user/user32/src/window.rs`): classes, windows
+  (HWND = 0x10000 + 16 * slot), one message queue per process (256
+  entries, an auto-reset event), WM_PAINT synthesised by GetMessage /
+  PeekMessage when a visible window is invalid and the queue is empty, as
+  on Windows. Each window owns a client pixel buffer; BeginPaint and GetDC
+  return a gdi32 surface DC over it and EndPaint / ReleaseDC present the
+  buffer. gdi32 is loaded lazily with LoadLibrary, so console programs
+  that import user32 do not need it.
+- **gdi32** (`user/gdi32`): an object table (stock objects, solid
+  brushes, pens), `GalaCreateSurfaceDC(pixels, w, h, stride)`, PatBlt,
+  FillRect support, Rectangle, TextOutW/A and GetTextExtentPoint32W with
+  the noto-sans-mono-bitmap font (16 px, basic Latin; transparent and
+  opaque background modes).
+
+Invariants and limits (TODO): no input yet (W2), no child windows
+(CreateWindowEx with WS_CHILD reports unimplemented), one queue per
+process rather than per thread, no window moves or z-order changes after
+creation, no non-client messages (the frame is drawn by the kernel), no
+cursor.
+
 ## Not done yet
 
 suspension/context of threads running on other CPUs, ranged (invlpg)

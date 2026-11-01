@@ -254,6 +254,11 @@ syscall_stubs! {
     NtOpenEvent = 0x40, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtQueryEvent = 0x56, fn(h: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32);
     NtOpenDirectoryObject = 0x58, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
+    // gala's own services: the desktop's windows (nt::desktop).
+    GalaWindowCreate = 0x7f30, fn(x: i32, y: i32, w: u32, h: u32, title: *const u16, len: usize, id: *mut u32);
+    GalaWindowShow = 0x7f31, fn(id: u32, show: u8);
+    GalaWindowPresent = 0x7f32, fn(id: u32, x: i32, y: i32, w: u32, h: u32, pixels: *const u32, stride: usize);
+    GalaWindowDestroy = 0x7f33, fn(id: u32);
     // gala's number, UNVERIFIED.
     NtCreateDirectoryObject = 0x7f24, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtClearEvent = 0x3e, fn(h: usize);

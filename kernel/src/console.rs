@@ -135,6 +135,13 @@ impl Write for Screen {
 
 static SCREEN: IrqMutex<Option<Screen>> = IrqMutex::new(None);
 
+/// Takes the framebuffer away from the console (the desktop draws on it
+/// from then on; the console keeps the serial line).
+#[cfg(not(feature = "hosted"))]
+pub fn take_framebuffer() -> Option<Framebuffer> {
+    SCREEN.lock().take().map(|s| s.fb)
+}
+
 pub fn init() {
     #[cfg(not(feature = "hosted"))]
     serial::COM1.lock().init();

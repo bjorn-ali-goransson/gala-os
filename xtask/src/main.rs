@@ -267,6 +267,7 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "wldap32", file: "wldap32.dll", exported_as: "testwldap32.dll" },
     Dll { package: "wsock32", file: "wsock32.dll", exported_as: "testwsock32.dll" },
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase.dll" },
+    Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32.dll" },
     Dll { package: "authz", file: "authz.dll", exported_as: "testauthz.dll" },
     Dll { package: "wintrust", file: "wintrust.dll", exported_as: "testwintrust.dll" },
     Dll { package: "webservices", file: "webservices.dll", exported_as: "testwebservices.dll" },
@@ -357,6 +358,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_thread_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_sync_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_locale_test", "ntdll.dll", "Windows/System32"),
+    ("gui_test", "ntdll.dll", "Windows/System32"),
+    ("gui_test", "kernel32.dll", "Windows/System32"),
+    ("gui_test", "user32.dll", "Windows/System32"),
+    ("gui_test", "gdi32.dll", "Windows/System32"),
     ("rtl_test", "ntdll.dll", "Windows/System32"),
     ("rtl_test", "kernel32.dll", "Windows/System32"),
     ("rtl_test", "kernelbase.dll", "Windows/System32"),
@@ -1342,6 +1347,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_locale_test",
     "disk_test",
     "rtl_test",
+    "gui_test",
     "persist_test",
     "kernel32_system_test",
     "kernel32_clr_test",
@@ -1941,7 +1947,7 @@ const PENDING: &[&str] =
     &["elasticsearch", "gitbash", "mingit", "sqllocaldb", "sqllocaldb_persist", "sshd"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
-const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
+const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault", "gui_test"];
 
 /// What xtask's host-side client does in a net scenario.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2427,6 +2433,20 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_system_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_system_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The window manager's first milestone: a Win32 window painted on
+        // the desktop (UEFI: a framebuffer); SCREEN_SCENARIOS checks the
+        // screen.
+        name: "gui_test",
+        cmdline: "qemu_exit run=gui_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "gui_test: painted",
+            "xtask: screen ok",
+            "gui_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // ntdll's run-time library and the calls Git Bash's msys-2.0.dll
@@ -3540,6 +3560,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("go_exec", "child processes (one NT process per Linux process)"),
     ("busybox", "child processes (pipelines are child processes)"),
     ("cmd_test", "child processes (one NT process per Linux process)"),
+    ("gui_test", "needs a screen (the desktop draws on the framebuffer)"),
 ];
 
 /// Whether gala-um runs scenario `s`: a program's own scenario (its
@@ -3806,13 +3827,20 @@ fn run_vm(
     net: Option<(&'static str, NetClient)>,
     stop_after_client: bool,
     disk: Option<&Path>,
+    screen: Option<&'static ScreenCheck>,
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let log = iso.with_extension("serial.log");
     let _ = fs::remove_file(&log);
     let events = iso.with_extension("events.jsonl");
     let _ = fs::remove_file(&events);
     let mut cmd = qemu(iso, boot)?;
-    cmd.args(["-display", "none", "-monitor", "none"])
+    let socket = iso.with_extension("monitor.sock");
+    let _ = fs::remove_file(&socket);
+    let monitor = match screen {
+        Some(_) => format!("unix:{},server,nowait", socket.display()),
+        None => "none".into(),
+    };
+    cmd.args(["-display", "none", "-monitor", &monitor])
         .arg("-serial")
         .arg(format!("file:{}", log.display()))
         // The kernel's event stream (`events=` on its command line).
@@ -3835,9 +3863,19 @@ fn run_vm(
     let mut to_banner = None;
     let mut client = None;
     let mut stopped = false;
+    let mut screen_verdict: Option<String> = None;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break Some(status);
+        }
+        if let Some(check) = screen.filter(|_| screen_verdict.is_none())
+            && fs::read(&log)
+                .is_ok_and(|b| b.windows(check.marker.len()).any(|w| w == check.marker.as_bytes()))
+        {
+            screen_verdict = Some(match check_screen(&socket, iso, check) {
+                Ok(()) => "xtask: screen ok\n".into(),
+                Err(e) => format!("xtask: screen: {e}\n"),
+            });
         }
         if let Some(port) = port.filter(|_| client.is_none())
             && fs::read(&log).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker.as_bytes()))
@@ -3884,6 +3922,9 @@ fn run_vm(
         serial += STOPPED_LINE;
         serial += "\n";
     }
+    if let Some(verdict) = screen_verdict {
+        serial += &verdict;
+    }
     if let Some(client) = client {
         let verdict = client.join().unwrap_or_else(|_| Err("client panicked".into()));
         serial += &match verdict {
@@ -3901,6 +3942,129 @@ fn run_vm(
         };
     }
     Ok((status, serial, BootTime { to_banner: to_banner.unwrap_or(total), total }))
+}
+
+/// What a scenario's screen must show once its serial log has `marker`
+/// (screendump through QEMU's monitor; pixels on the guest's screen).
+struct ScreenCheck {
+    marker: &'static str,
+    pixels: &'static [PixelCheck],
+}
+
+#[derive(Clone, Copy)]
+enum PixelCheck {
+    /// The pixel at (x, y) is this 0xRRGGBB colour.
+    At(u32, u32, u32),
+    /// Some pixel in the rectangle (x, y, w, h) is close to this colour
+    /// (anti-aliased text).
+    AnyIn(u32, u32, u32, u32, u32),
+}
+
+/// gui_test's window: 400 x 300 at (100, 100); the desktop's frame is a
+/// 1-pixel border and a 24-pixel caption, so its client area starts at
+/// (101, 125) (kernel/src/nt/desktop.rs).
+const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[(
+    "gui_test",
+    ScreenCheck {
+        marker: "gui_test: painted",
+        pixels: &[
+            PixelCheck::At(10, 10, 0x3a6ea5),               // the desktop
+            PixelCheck::At(100, 100, 0x202020),             // the border
+            PixelCheck::At(450, 112, 0x006c35),             // the caption
+            PixelCheck::At(101 + 100, 125 + 70, 0xff0000),  // FillRect's red
+            PixelCheck::At(101 + 300, 125 + 200, 0xffffff), // COLOR_WINDOW
+            PixelCheck::AnyIn(101 + 20, 125 + 140, 140, 16, 0x0000ff), // the text
+        ],
+    },
+)];
+
+fn screen_check(name: &str) -> Option<&'static ScreenCheck> {
+    SCREEN_SCENARIOS.iter().find(|(n, _)| *n == name).map(|(_, c)| c)
+}
+
+/// Takes a screendump through the monitor at `socket` (kept as
+/// `<iso>.screen.png`) and checks `check`'s pixels.
+fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
+    use std::io::Write;
+    let mut monitor = None;
+    for _ in 0..100 {
+        if let Ok(s) = std::os::unix::net::UnixStream::connect(socket) {
+            monitor = Some(s);
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let mut monitor = monitor.ok_or("cannot connect to the QEMU monitor")?;
+    // Let the guest finish drawing.
+    thread::sleep(Duration::from_millis(500));
+    let ppm = iso.with_extension("screen.ppm");
+    let _ = fs::remove_file(&ppm);
+    writeln!(monitor, "screendump {}", ppm.display()).map_err(|e| e.to_string())?;
+    let mut previous = 0;
+    for _ in 0..100 {
+        thread::sleep(Duration::from_millis(50));
+        let len = fs::metadata(&ppm).map_or(0, |m| m.len());
+        if len > 0 && len == previous {
+            break;
+        }
+        previous = len;
+    }
+    let (w, h, rgb) = read_ppm(&ppm)?;
+    let _ = ppm_to_png(&ppm, &iso.with_extension("screen.png"));
+    let at = |x: u32, y: u32| -> Option<u32> {
+        if x as usize >= w || y as usize >= h {
+            return None;
+        }
+        let i = 3 * (y as usize * w + x as usize);
+        Some(u32::from(rgb[i]) << 16 | u32::from(rgb[i + 1]) << 8 | u32::from(rgb[i + 2]))
+    };
+    let close = |a: u32, b: u32| {
+        (0..3).all(|k| ((a >> (8 * k)) & 0xff).abs_diff((b >> (8 * k)) & 0xff) <= 0x40)
+    };
+    for &p in check.pixels {
+        match p {
+            PixelCheck::At(x, y, want) => {
+                let got = at(x, y);
+                if got != Some(want) {
+                    return Err(format!("pixel ({x}, {y}) is {got:06x?}, not {want:06x}"));
+                }
+            }
+            PixelCheck::AnyIn(x, y, rw, rh, want) => {
+                let found = (y..y + rh)
+                    .any(|yy| (x..x + rw).any(|xx| at(xx, yy).is_some_and(|c| close(c, want))));
+                if !found {
+                    return Err(format!("no pixel near {want:06x} in ({x}, {y}, {rw}, {rh})"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A binary PPM (P6, 8-bit): width, height and the RGB bytes.
+fn read_ppm(ppm: &Path) -> Result<(usize, usize, Vec<u8>)> {
+    let data = fs::read(ppm).map_err(|e| format!("reading {ppm:?}: {e}"))?;
+    let mut fields = Vec::new();
+    let mut i = 0;
+    while fields.len() < 4 {
+        while data.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        let start = i;
+        while data.get(i).is_some_and(|b| !b.is_ascii_whitespace()) {
+            i += 1;
+        }
+        if start == i {
+            return Err(format!("{ppm:?}: truncated PPM header"));
+        }
+        fields.push(String::from_utf8_lossy(&data[start..i]).into_owned());
+    }
+    let (w, h): (usize, usize) = match (fields[0].as_str(), fields[1].parse(), fields[2].parse()) {
+        ("P6", Ok(w), Ok(h)) if fields[3] == "255" => (w, h),
+        _ => return Err(format!("{ppm:?}: not an 8-bit P6 PPM")),
+    };
+    let pixels = data.get(i + 1..i + 1 + w * h * 3).ok_or(format!("{ppm:?}: truncated PPM"))?;
+    Ok((w, h, pixels.to_vec()))
 }
 
 /// A virtio-net card on QEMU's user network, host `port` forwarded to the
@@ -4014,7 +4178,7 @@ fn check_disk(name: &str, path: &Path) -> Result {
 fn earlier_boots(name: &str, iso: &Path, boot: Boot, timeout: Duration, disk: &Path) -> Result {
     let Some(d) = disk_scenario(name) else { return Ok(()) };
     for (n, expect) in d.earlier_boots.iter().enumerate() {
-        let (status, serial, _) = run_vm(iso, boot, timeout, None, false, Some(disk))?;
+        let (status, serial, _) = run_vm(iso, boot, timeout, None, false, Some(disk), None)?;
         let kept = iso.with_extension(format!("boot{}.serial.log", n + 1));
         let _ = fs::write(&kept, &serial);
         let missing: Vec<&str> = expect.iter().copied().filter(|e| !serial.contains(e)).collect();
@@ -4401,7 +4565,7 @@ fn bench_results(text: &str) -> Vec<(String, u64)> {
 fn bench(release: bool, windows: Option<&Path>) -> Result {
     build_kernel(release)?;
     let iso = make_iso(release, "bench", "qemu_exit noscreen run=bench.exe", &[])?;
-    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, None, false, None)?;
+    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, None, false, None, None)?;
     if status.and_then(|s| s.code()) != Some(QEMU_EXIT_SUCCESS) || !serial.contains("bench: done") {
         return Err(format!(
             "bench did not finish; see {}",
@@ -4501,12 +4665,17 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
     {
         return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
     }
-    let (status, serial, time) = match run_vm(iso, boot, timeout, net, stop, disk.as_deref()) {
-        Ok(r) => r,
-        Err(e) => {
-            return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
-        }
-    };
+    let screen = single.and_then(screen_check);
+    let (status, serial, time) =
+        match run_vm(iso, boot, timeout, net, stop, disk.as_deref(), screen) {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    BootTime::default(),
+                    scenarios.iter().map(|&s| (s, Err(e.clone()))).collect(),
+                );
+            }
+        };
     let code = status.and_then(|s| s.code());
     let verdicts: Vec<(&Scenario, Result)> = match vm {
         Vm::Single(s) => {
@@ -4580,6 +4749,7 @@ fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
         net_marker(scenario.name),
         scenario.exit_status == XTASK_STOPS,
         disk.as_deref(),
+        screen_check(scenario.name),
     )?;
     judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial)?;
     disk.as_deref().map_or(Ok(()), |d| check_disk(scenario.name, d))

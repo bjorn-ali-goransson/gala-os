@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod afd;
 pub mod context;
+pub mod desktop;
 pub mod disk;
 pub mod file;
 pub mod job;

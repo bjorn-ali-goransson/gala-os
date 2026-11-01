@@ -58,7 +58,7 @@ Rules for this file:
 | `spin` | 0.12.3 | MIT | Spinlock for the serial console. |
 | `smoltcp` | 0.12.0 | 0BSD | TCP/IP stack (`kernel/src/net`); features `medium-ethernet`, `medium-ip` (loopback), `proto-ipv4`, `socket-tcp` and `alloc` (only so that sockets own the buffers we allocate fallibly; socket sets are pre-filled to a fixed size so smoltcp never grows them). |
 | `managed`, `heapless`, `hash32`, `byteorder`, `bitflags` 1, `cfg-if`, `stable_deref_trait` | 0.8.0, 0.8.0, 0.3.1, 1.5.0, 1.3.2, 1.0.5, 1.2.1 | 0BSD; MIT OR Apache-2.0 (byteorder: Unlicense OR MIT) | smoltcp's dependencies. |
-| `noto-sans-mono-bitmap` | 0.3.2 | MIT (crate); the glyphs are rasterized from Noto Sans Mono, SIL Open Font License 1.1 | Pre-rasterized font for the on-screen console (`console.rs`); only the regular 16 px basic-Latin subset is enabled. |
+| `noto-sans-mono-bitmap` | 0.3.2 | MIT (crate); the glyphs are rasterized from Noto Sans Mono, SIL Open Font License 1.1 | Pre-rasterized font for the on-screen console (`console.rs`), the window captions (`nt/desktop.rs`) and gala's gdi32 text output (`user/gdi32`); only the regular 16 px basic-Latin subset is enabled. |
 
 The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `screenshot` is its own, uncompressed).
 

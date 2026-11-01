@@ -114,6 +114,14 @@ impl Framebuffer {
         }
     }
 
+    /// Writes a row of `0x00RRGGBB` pixels starting at (x, y), clipped to
+    /// the screen.
+    pub fn write_row(&self, x: u64, y: u64, rgb: &[u32]) {
+        for (i, &c) in rgb.iter().enumerate() {
+            self.put(x + i as u64, y, self.encode(c));
+        }
+    }
+
     /// Fills the whole screen with `0x00RRGGBB`.
     pub fn fill(&self, rgb: u32) {
         let pixel = self.encode(rgb);

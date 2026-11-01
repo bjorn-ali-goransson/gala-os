@@ -779,6 +779,7 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
         format_args!(r#""pid":{},"status":{}"#, process.id, status.0),
     );
     wait::signal_dispatcher(&process.dispatcher, 1);
+    super::desktop::process_ended(process.id);
     // Close every handle (this breaks reference cycles through handles to
     // the process's own objects) and forget the process.
     let entries = process.handles.lock().close_all();

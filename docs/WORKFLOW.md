@@ -456,6 +456,14 @@ and panics red), so a screenshot shows what is going on. Example:
 Boot tests pass `noscreen` (serial only) except in the UEFI scenarios:
 drawing text roughly doubles kernel time under emulation.
 
+Screen checks: a scenario listed in `SCREEN_SCENARIOS` (xtask) gets a
+QEMU monitor socket; when its serial log shows the trigger line, xtask
+takes a screendump and checks pixels (exact colours, or "some pixel near
+this colour in this rectangle" for anti-aliased text) and logs
+`xtask: screen ok` or the mismatch. The screenshot is kept as
+`target/debug/test-<scenario>.screen.png`. Such scenarios must be UEFI
+ones (BIOS boots have no framebuffer).
+
 ## Serving to a browser
 
 `cargo xtask serve <scenario> [port]` boots a network scenario (nginx,

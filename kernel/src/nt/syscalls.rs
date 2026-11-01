@@ -95,6 +95,12 @@ pub const NT_ALLOCATE_LOCALLY_UNIQUE_ID: u32 = 0x7f22;
 pub const NT_SET_INFORMATION_TOKEN: u32 = 0x7f23;
 /// NtCreateDirectoryObject: gala's number, UNVERIFIED.
 pub const NT_CREATE_DIRECTORY_OBJECT: u32 = 0x7f24;
+/// gala's own services (not Windows'): the desktop's windows (nt::desktop),
+/// for gala's user32.
+pub const GALA_WINDOW_CREATE: u32 = 0x7f30;
+pub const GALA_WINDOW_SHOW: u32 = 0x7f31;
+pub const GALA_WINDOW_PRESENT: u32 = 0x7f32;
+pub const GALA_WINDOW_DESTROY: u32 = 0x7f33;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -256,6 +262,10 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_OPEN_EVENT, "NtOpenEvent", 3, nt_open_event),
     (NT_OPEN_DIRECTORY_OBJECT, "NtOpenDirectoryObject", 3, nt_open_directory_object),
     (NT_CREATE_DIRECTORY_OBJECT, "NtCreateDirectoryObject", 3, nt_create_directory_object),
+    (GALA_WINDOW_CREATE, "GalaWindowCreate", 7, gala_window_create),
+    (GALA_WINDOW_SHOW, "GalaWindowShow", 2, gala_window_show),
+    (GALA_WINDOW_PRESENT, "GalaWindowPresent", 7, gala_window_present),
+    (GALA_WINDOW_DESTROY, "GalaWindowDestroy", 1, gala_window_destroy),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1200,6 +1210,91 @@ fn nt_open_directory_object(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), |o| o.as_directory().is_some()));
     call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+}
+
+/// GalaWindowCreate(x, y, width, height, *title, title_length, *id): a
+/// hidden top-level window of that outer size on the desktop (gala's own
+/// service; its frame is the desktop's); STATUS_NOT_SUPPORTED without a
+/// screen.
+fn gala_window_create(call: &mut Call<'_>) -> NtStatus {
+    let (x, y) = (arg!(call, 0) as u32 as i32, arg!(call, 1) as u32 as i32);
+    let (w, h) = (arg!(call, 2) as u32, arg!(call, 3) as u32);
+    let (title_ptr, title_len, out) =
+        (arg!(call, 4), (arg!(call, 5) as usize).min(256), arg!(call, 6));
+    let mut bytes = [0u8; 512];
+    if call.process.read(title_ptr, &mut bytes[..2 * title_len]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let mut title = [0u16; 256];
+    for (i, t) in title[..title_len].iter_mut().enumerate() {
+        *t = u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]);
+    }
+    let owner = call.process.id;
+    let id = tri!(super::desktop::with(|d| Ok((
+        d.create(owner, x, y, w, h, &title[..title_len])?,
+        None
+    ))));
+    tri!(call.write_u32(out, id));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowShow(id, show).
+fn gala_window_show(call: &mut Call<'_>) -> NtStatus {
+    let (id, show) = (arg!(call, 0) as u32, arg!(call, 1) as u8 != 0);
+    let owner = call.process.id;
+    tri!(super::desktop::with(|d| Ok(((), Some(d.show(id, owner, show)?)))));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowPresent(id, x, y, width, height, *pixels, stride): copies that
+/// rectangle of the client area from the caller's 0x00RRGGBB pixels (rows
+/// `stride` bytes apart) and shows it.
+fn gala_window_present(call: &mut Call<'_>) -> NtStatus {
+    use super::desktop::Rect;
+    let id = arg!(call, 0) as u32;
+    let r = Rect {
+        x: i64::from(arg!(call, 1) as u32 as i32),
+        y: i64::from(arg!(call, 2) as u32 as i32),
+        w: i64::from(arg!(call, 3) as u32),
+        h: i64::from(arg!(call, 4) as u32),
+    };
+    let (ptr, stride) = (arg!(call, 5), arg!(call, 6) as usize);
+    if r.w <= 0
+        || r.h <= 0
+        || r.w > 4096
+        || r.h > 4096
+        || stride % 4 != 0
+        || stride / 4 < r.w as usize
+    {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    // The rows, read from the caller (whole rows of `stride`, the last one
+    // only as wide as the rectangle).
+    let n = (r.h as usize - 1) * stride / 4 + r.w as usize;
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(4 * n).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    bytes.resize(4 * n, 0u8);
+    if call.process.read(ptr, &mut bytes).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let mut pixels: Vec<u32> = Vec::new();
+    if pixels.try_reserve_exact(n).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    pixels.extend(bytes.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+    let owner = call.process.id;
+    tri!(super::desktop::with(|d| Ok(((), Some(d.present(id, owner, r, &pixels, stride / 4)?)))));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowDestroy(id).
+fn gala_window_destroy(call: &mut Call<'_>) -> NtStatus {
+    let id = arg!(call, 0) as u32;
+    let owner = call.process.id;
+    tri!(super::desktop::with(|d| Ok(((), Some(d.destroy(id, owner)?)))));
+    NtStatus::SUCCESS
 }
 
 /// NtCreateDirectoryObject(*DirectoryHandle, DesiredAccess,

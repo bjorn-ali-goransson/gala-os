@@ -377,6 +377,14 @@ name = "gala_stubs"
 version = "0.1.0"
 
 [[package]]
+name = "gdi32"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+ "noto-sans-mono-bitmap",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -392,6 +400,10 @@ version = "0.1.0"
 dependencies = [
  "ntrt",
 ]
+
+[[package]]
+name = "gui_test"
+version = "0.1.0"
 
 [[package]]
 name = "hash32"

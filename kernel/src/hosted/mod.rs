@@ -26,7 +26,7 @@ use crate::arch::interrupts::TrapFrame;
 use crate::arch::syscall::{SyscallFrame, UserRegs};
 use crate::mm::frame::Frame;
 use crate::nt::platform::{
-    Clock, DiskError, SharedUserSpace, Storage, Threads, UserEntry, UserMemory,
+    Clock, DiskError, Display, SharedUserSpace, Storage, Threads, UserEntry, UserMemory,
 };
 use crate::sched::{SpawnError, ThreadId, WakeReason};
 
@@ -66,6 +66,14 @@ pub fn fix_address_space() {
 
 /// gala-um, implementing `nt::platform`'s traits.
 pub struct Um;
+
+/// gala-um has no screen.
+impl Display for Um {
+    fn screen_size() -> Option<(u32, u32)> {
+        None
+    }
+    fn screen_write_row(_: u32, _: u32, _: &[u32]) {}
+}
 
 /// gala-um has no disk.
 impl Storage for Um {

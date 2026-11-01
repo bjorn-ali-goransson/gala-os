@@ -1,11 +1,12 @@
-//! gala's user32.dll: no windows or desktop, only the text helpers console
-//! programs import.
+//! gala's user32.dll: windows on the desktop, classes, messages and
+//! painting (window.rs), and the text helpers console programs import.
 
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 mod unimplemented;
+mod window;
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -13,7 +14,14 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
+    fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    fn __CxxFrameHandler3();
 }
+
+/// MSVC-target codegen references this marker symbol directly, so it cannot
+/// come from an import. (It becomes a harmless extra data export.)
+#[unsafe(no_mangle)]
+pub static _fltused: i32 = 0;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -35,25 +43,8 @@ unsafe extern "system" {
 
 // ---- Messages and windows: gala has no windows, so no messages ----
 
-/// PeekMessageA: the queue is always empty.
-#[unsafe(no_mangle)]
-pub extern "system" fn PeekMessageA(
-    _msg: *mut u8,
-    _window: usize,
-    _min: u32,
-    _max: u32,
-    _remove: u32,
-) -> i32 {
-    0
-}
-
 #[unsafe(no_mangle)]
 pub extern "system" fn TranslateMessage(_msg: *const u8) -> i32 {
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn DispatchMessageA(_msg: *const u8) -> isize {
     0
 }
 
@@ -68,17 +59,6 @@ pub extern "system" fn MsgWaitForMultipleObjects(
 ) -> u32 {
     // SAFETY: the caller's handle array.
     unsafe { WaitForMultipleObjects(count, handles, all, ms) }
-}
-
-/// ShowWindow: there is no window (returns "was not visible").
-#[unsafe(no_mangle)]
-pub extern "system" fn ShowWindow(_window: usize, _command: i32) -> i32 {
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn IsWindowVisible(_window: usize) -> i32 {
-    0
 }
 
 #[unsafe(no_mangle)]
