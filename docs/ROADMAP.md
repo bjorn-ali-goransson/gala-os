@@ -776,17 +776,24 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         it says so and goes on), and stops at its encryption hierarchy:
         error 15297 "The certificate, asymmetric key, or private key data
         is invalid" (state 85), then shuts down, having asked bcrypt for
-        AES, RC2, RC4, DES, 3DES, 3DES_112, RSA, MD2 and MD4. Next, a
-        crypto chunk: those algorithms in gala's bcrypt (symmetric
-        ciphers with BCryptGenerateSymmetricKey/Encrypt/Decrypt in ECB
-        and CBC, key import/export blobs; RSA key import, sign/verify,
-        encrypt/decrypt: RustCrypto's aes, des, rc2, cbc, rsa crates,
-        which need an allocator in bcrypt), test first with the
-        published test vectors; then the certificates in master
-        (crypt32's certificate parsing, CertCreateCertificateContext and
-        friends, if it uses them). Also seen: netapi32's NetShareGetInfo
-        (looked up), CoCreateInstance of a class not registered,
-        NtQuerySystemInformation class 192.
+        AES, RC2, RC4, DES, 3DES, 3DES_112, RSA, MD2 and MD4. Then
+        (fourth pass) the symmetric ciphers and MD2/MD4 in bcrypt (with
+        the published vectors in `bcrypt_test`), writable boot trees
+        (`tarw:`: master.mdf had been read-only), ReadFileScatter/
+        WriteFileGather, DPAPI (`dpapi_test`), GUID strings, classic ETW
+        providers. Now it gets past 15297, opens and upgrades master
+        (927 to 957), starts audits, the system_health session and the
+        default trace, logs "Server name is 'gala\LOCALDB#GALA0001'" and
+        stops at kernel32's CreateNamedPipeW (its shared-memory/named
+        pipe listener). Creating the service master key fails (ESECCrypto
+        error 21, SQL error 33095; not fatal yet), probably for RSA.
+        Next: named pipe servers (CreateNamedPipeW, ConnectNamedPipe,
+        several instances, message mode if it asks; test first in
+        `pipe_test`), then RSA in bcrypt (rsa crate; needs an allocator
+        in bcrypt). Also seen: netapi32's NetShareGetInfo and
+        NetValidatePasswordPolicy (looked up), FSCTL_FILESYSTEM_GET_STATISTICS
+        (error 17053, goes on), CoCreateInstance of a class not
+        registered, NtQuerySystemInformation class 192.
         Run it with `cargo xtask boot-test sqllocaldb` (about 2 minutes)
         and read the log after "Default collation". Probed but optional so far:
         FlsGetValue2, QueryWorkingSetEx, HeapSetInformation, bad-memory

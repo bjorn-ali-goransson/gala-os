@@ -3,7 +3,6 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("ole32.dll":
-    CLSIDFromString
     CoCreateInstanceEx
     CoImpersonateClient
     CoQueryProxyBlanket
@@ -12,9 +11,6 @@ gala_stubs::unimplemented_exports!("ole32.dll":
     CoSetProxyBlanket
     CreateBindCtx
     GetHGlobalFromStream
-    IIDFromString
     OleInitialize
     OleUninitialize
-    StringFromCLSID
-    StringFromIID
 );

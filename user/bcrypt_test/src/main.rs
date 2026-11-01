@@ -4,6 +4,9 @@
 //! test case 2 for HMAC-SHA1 and HMAC-SHA256):
 //!
 //! - BCryptGetFipsAlgorithmMode: not enforced.
+//! - Symmetric ciphers with published test vectors: AES (FIPS-197, SP
+//!   800-38A), DES, 3DES (SP 800-67), RC2 (RFC 2268), RC4; properties,
+//!   ECB/CBC, block padding, key data blobs. MD2/MD4 (RFC 1319/1320).
 //! - BCryptGenRandom with BCRYPT_USE_SYSTEM_PREFERRED_RNG, an RNG
 //!   provider and the RNG pseudo-handle; STATUS_INVALID_HANDLE without one.
 //! - BCryptOpenAlgorithmProvider / Close (STATUS_NOT_FOUND for an unknown
@@ -69,6 +72,67 @@ unsafe extern "system" {
         flags: u32,
     ) -> u32;
     fn BCryptDestroyHash(hash: Handle) -> u32;
+    fn BCryptSetProperty(
+        obj: Handle,
+        name: *const u16,
+        input: *const u8,
+        len: u32,
+        flags: u32,
+    ) -> u32;
+    fn BCryptGenerateSymmetricKey(
+        alg: Handle,
+        key: *mut Handle,
+        object: *mut u8,
+        object_len: u32,
+        secret: *const u8,
+        secret_len: u32,
+        flags: u32,
+    ) -> u32;
+    fn BCryptEncrypt(
+        key: Handle,
+        input: *const u8,
+        len: u32,
+        padding: *const c_void,
+        iv: *mut u8,
+        iv_len: u32,
+        out: *mut u8,
+        out_len: u32,
+        result: *mut u32,
+        flags: u32,
+    ) -> u32;
+    fn BCryptDecrypt(
+        key: Handle,
+        input: *const u8,
+        len: u32,
+        padding: *const c_void,
+        iv: *mut u8,
+        iv_len: u32,
+        out: *mut u8,
+        out_len: u32,
+        result: *mut u32,
+        flags: u32,
+    ) -> u32;
+    fn BCryptExportKey(
+        key: Handle,
+        export: Handle,
+        blob: *const u16,
+        out: *mut u8,
+        len: u32,
+        result: *mut u32,
+        flags: u32,
+    ) -> u32;
+    fn BCryptImportKey(
+        alg: Handle,
+        import: Handle,
+        blob: *const u16,
+        key: *mut Handle,
+        object: *mut u8,
+        object_len: u32,
+        input: *const u8,
+        len: u32,
+        flags: u32,
+    ) -> u32;
+    fn BCryptDestroyKey(key: Handle) -> u32;
     fn BCryptHash(
         alg: Handle,
         secret: *const u8,
@@ -186,6 +250,389 @@ const SHA512_ABC: &str = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eee
 const HMAC_SHA256_JEFE: &str = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
 const HMAC_SHA1_JEFE: &str = "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79";
 const JEFE_DATA: &[u8] = b"what do ya want for nothing?";
+
+/// The bytes written in hexadecimal as `text` (up to 64).
+fn hex_bytes(text: &str) -> ([u8; 64], usize) {
+    let mut out = [0u8; 64];
+    let n = text.len() / 2;
+    for (i, slot) in out.iter_mut().enumerate().take(n) {
+        *slot = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).unwrap_or(0);
+    }
+    (out, n)
+}
+
+/// Opens algorithm `name`.
+fn open(c: &mut Checks, name: &str) -> Result<Handle, u32> {
+    let mut alg = core::ptr::null_mut();
+    // SAFETY: our outputs and name.
+    let r =
+        unsafe { BCryptOpenAlgorithmProvider(&mut alg, w(name).as_ptr(), core::ptr::null(), 0) };
+    c.eq(r.into(), 0)?;
+    Ok(alg)
+}
+
+/// Encrypts `plain` with `alg` (key and IV in hexadecimal; ECB when `iv` is
+/// empty) and checks the ciphertext against `want`, then decrypts it back.
+fn cipher_vector(
+    c: &mut Checks,
+    alg: Handle,
+    key: &str,
+    iv: &str,
+    plain: &str,
+    want: &str,
+) -> Result<(), u32> {
+    let (k, kn) = hex_bytes(key);
+    let (mut v, vn) = hex_bytes(iv);
+    let (p, pn) = hex_bytes(plain);
+    let mut h = core::ptr::null_mut();
+    // SAFETY: bcrypt calls with buffers of ours.
+    unsafe {
+        let r = BCryptGenerateSymmetricKey(
+            alg,
+            &mut h,
+            core::ptr::null_mut(),
+            0,
+            k.as_ptr(),
+            kn as u32,
+            0,
+        );
+        c.eq(r.into(), 0)?;
+        let mut out = [0u8; 64];
+        let mut got = 0u32;
+        let ivp = if vn == 0 { core::ptr::null_mut() } else { v.as_mut_ptr() };
+        let r = BCryptEncrypt(
+            h,
+            p.as_ptr(),
+            pn as u32,
+            core::ptr::null(),
+            ivp,
+            vn as u32,
+            out.as_mut_ptr(),
+            64,
+            &mut got,
+            0,
+        );
+        c.eq(r.into(), 0)?;
+        c.eq(got.into(), pn as u64)?;
+        c.digest(&out[..pn], want)?;
+        BCryptDestroyKey(h);
+        // Decrypt with a fresh key and the original IV.
+        let (mut v, _) = hex_bytes(iv);
+        let ivp = if vn == 0 { core::ptr::null_mut() } else { v.as_mut_ptr() };
+        BCryptGenerateSymmetricKey(alg, &mut h, core::ptr::null_mut(), 0, k.as_ptr(), kn as u32, 0);
+        let mut back = [0u8; 64];
+        let r = BCryptDecrypt(
+            h,
+            out.as_ptr(),
+            pn as u32,
+            core::ptr::null(),
+            ivp,
+            vn as u32,
+            back.as_mut_ptr(),
+            64,
+            &mut got,
+            0,
+        );
+        c.eq(r.into(), 0)?;
+        c.digest(&back[..pn], plain)?;
+        c.eq(BCryptDestroyKey(h).into(), 0)?;
+    }
+    Ok(())
+}
+
+/// Sets a provider's chaining mode.
+fn chaining(c: &mut Checks, alg: Handle, mode: &str) -> Result<(), u32> {
+    let m = w(mode);
+    // SAFETY: our handle and string (with its NUL).
+    let r = unsafe {
+        BCryptSetProperty(
+            alg,
+            w("ChainingMode").as_ptr(),
+            m.as_ptr().cast(),
+            2 * (mode.len() as u32 + 1),
+            0,
+        )
+    };
+    c.eq(r.into(), 0)
+}
+
+/// Symmetric ciphers with the published test vectors: AES (FIPS-197
+/// C.1/C.3 in ECB, SP 800-38A F.2.1 in CBC), DES (the classic
+/// 133457799BBCDFF1 vector), 3DES (SP 800-67's three-key example), RC2
+/// (RFC 2268, 64-bit effective keys), RC4; properties (BlockLength,
+/// ChainingMode, KeyLengths), BCRYPT_BLOCK_PADDING, key data blobs.
+fn ciphers(c: &mut Checks) -> Result<(), u32> {
+    let aes = open(c, "AES")?;
+    // SAFETY: bcrypt calls with buffers of ours.
+    unsafe {
+        let mut v = [0u8; 64];
+        let mut got = 0u32;
+        c.eq(
+            BCryptGetProperty(aes, w("BlockLength").as_ptr(), v.as_mut_ptr(), 4, &mut got, 0)
+                .into(),
+            0,
+        )?;
+        c.eq(u32::from_le_bytes([v[0], v[1], v[2], v[3]]).into(), 16)?;
+        c.eq(
+            BCryptGetProperty(aes, w("ChainingMode").as_ptr(), v.as_mut_ptr(), 64, &mut got, 0)
+                .into(),
+            0,
+        )?;
+        let cbc = "ChainingModeCBC";
+        c.ok(
+            got as usize == 2 * (cbc.len() + 1)
+                && cbc.bytes().enumerate().all(|(i, b)| v[2 * i] == b),
+            got.into(),
+        )?;
+        c.eq(
+            BCryptGetProperty(aes, w("KeyLengths").as_ptr(), v.as_mut_ptr(), 12, &mut got, 0)
+                .into(),
+            0,
+        )?;
+        let lens: [u32; 3] = core::array::from_fn(|i| {
+            u32::from_le_bytes([v[4 * i], v[4 * i + 1], v[4 * i + 2], v[4 * i + 3]])
+        });
+        c.ok(lens == [128, 256, 64], lens[0].into())?;
+    }
+    cipher_vector(
+        c,
+        aes,
+        "2b7e151628aed2a6abf7158809cf4f3c",
+        "000102030405060708090a0b0c0d0e0f",
+        "6bc1bee22e409f96e93d7e117393172a",
+        "7649abac8119b246cee98e9b12e9197d",
+    )?;
+    chaining(c, aes, "ChainingModeECB")?;
+    cipher_vector(
+        c,
+        aes,
+        "000102030405060708090a0b0c0d0e0f",
+        "",
+        "00112233445566778899aabbccddeeff",
+        "69c4e0d86a7b0430d8cdb78070b4c55a",
+    )?;
+    cipher_vector(
+        c,
+        aes,
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "",
+        "00112233445566778899aabbccddeeff",
+        "8ea2b7ca516745bfeafc49904b496089",
+    )?;
+    chaining(c, aes, "ChainingModeCBC")?;
+    // Padding: 16 bytes become 32; decrypting strips it.
+    // SAFETY: bcrypt calls with buffers of ours.
+    unsafe {
+        let (k, _) = hex_bytes("2b7e151628aed2a6abf7158809cf4f3c");
+        let mut h = core::ptr::null_mut();
+        BCryptGenerateSymmetricKey(aes, &mut h, core::ptr::null_mut(), 0, k.as_ptr(), 16, 0);
+        let plain = *b"sixteen byte msg";
+        let mut iv = [0u8; 16];
+        let mut out = [0u8; 64];
+        let mut got = 0u32;
+        let r = BCryptEncrypt(
+            h,
+            plain.as_ptr(),
+            16,
+            core::ptr::null(),
+            iv.as_mut_ptr(),
+            16,
+            core::ptr::null_mut(),
+            0,
+            &mut got,
+            1,
+        );
+        c.eq(r.into(), 0)?;
+        c.eq(got.into(), 32)?; // the size needed
+        iv = [0; 16];
+        let r = BCryptEncrypt(
+            h,
+            plain.as_ptr(),
+            16,
+            core::ptr::null(),
+            iv.as_mut_ptr(),
+            16,
+            out.as_mut_ptr(),
+            64,
+            &mut got,
+            1,
+        );
+        c.eq(r.into(), 0)?;
+        c.eq(got.into(), 32)?;
+        c.ok(iv == out[16..32], 0)?; // the IV is the last ciphertext block
+        iv = [0; 16];
+        let mut back = [0u8; 64];
+        let r = BCryptDecrypt(
+            h,
+            out.as_ptr(),
+            32,
+            core::ptr::null(),
+            iv.as_mut_ptr(),
+            16,
+            back.as_mut_ptr(),
+            64,
+            &mut got,
+            1,
+        );
+        c.eq(r.into(), 0)?;
+        c.eq(got.into(), 16)?;
+        c.ok(back[..16] == plain, 0)?;
+        // Not a whole block without padding: STATUS_INVALID_BUFFER_SIZE.
+        let r = BCryptEncrypt(
+            h,
+            plain.as_ptr(),
+            15,
+            core::ptr::null(),
+            iv.as_mut_ptr(),
+            16,
+            out.as_mut_ptr(),
+            64,
+            &mut got,
+            0,
+        );
+        c.eq(r.into(), 0xc000_0206)?;
+        // A key data blob: BCRYPT_KEY_DATA_BLOB_HEADER (magic KDBM,
+        // version 1, size), then the key; imported back.
+        let blob = w("KeyDataBlob");
+        let r = BCryptExportKey(
+            h,
+            core::ptr::null_mut(),
+            blob.as_ptr(),
+            out.as_mut_ptr(),
+            64,
+            &mut got,
+            0,
+        );
+        c.eq(r.into(), 0)?;
+        c.eq(got.into(), 28)?;
+        c.eq(u32::from_le_bytes([out[0], out[1], out[2], out[3]]).into(), 0x4d42_444b)?;
+        c.ok(out[12..28] == k[..16], 0)?;
+        let mut h2 = core::ptr::null_mut();
+        let r = BCryptImportKey(
+            aes,
+            core::ptr::null_mut(),
+            blob.as_ptr(),
+            &mut h2,
+            core::ptr::null_mut(),
+            0,
+            out.as_ptr(),
+            28,
+            0,
+        );
+        c.eq(r.into(), 0)?;
+        BCryptDestroyKey(h2);
+        BCryptDestroyKey(h);
+        BCryptCloseAlgorithmProvider(aes, 0);
+    }
+    let des = open(c, "DES")?;
+    chaining(c, des, "ChainingModeECB")?;
+    cipher_vector(c, des, "133457799bbcdff1", "", "0123456789abcdef", "85e813540f0ab405")?;
+    let tdes = open(c, "3DES")?;
+    chaining(c, tdes, "ChainingModeECB")?;
+    // SP 800-67's example, its first block.
+    cipher_vector(
+        c,
+        tdes,
+        "0123456789abcdef23456789abcdef01456789abcdef0123",
+        "",
+        "5468652071756663",
+        "a826fd8ce53b855f",
+    )?;
+    let rc2 = open(c, "RC2")?;
+    chaining(c, rc2, "ChainingModeECB")?;
+    // RFC 2268's vectors use a 64-bit effective key length.
+    let bits = 64u32.to_le_bytes();
+    // SAFETY: our handle and value.
+    let r =
+        unsafe { BCryptSetProperty(rc2, w("EffectiveKeyLength").as_ptr(), bits.as_ptr(), 4, 0) };
+    c.eq(r.into(), 0)?;
+    cipher_vector(c, rc2, "ffffffffffffffff", "", "ffffffffffffffff", "278b27e42e2f0d49")?;
+    cipher_vector(c, rc2, "3000000000000000", "", "1000000000000001", "30649edf9be7d2c2")?;
+    let rc4 = open(c, "RC4")?;
+    cipher_vector(c, rc4, "4b6579", "", "506c61696e74657874", "bbf316e8d940af0ad3")?;
+    // Two-key 3DES is three-key 3DES with K3 = K1.
+    let tdes112 = open(c, "3DES_112")?;
+    chaining(c, tdes112, "ChainingModeECB")?;
+    let (k1k2, _) = hex_bytes("0123456789abcdef23456789abcdef01");
+    let (k1k2k1, _) = hex_bytes("0123456789abcdef23456789abcdef010123456789abcdef");
+    let plain = *b"8 bytes!";
+    let (mut a, mut b) = ([0u8; 8], [0u8; 8]);
+    // SAFETY: bcrypt calls with buffers of ours.
+    unsafe {
+        let (mut h2, mut h3, mut got) = (core::ptr::null_mut(), core::ptr::null_mut(), 0u32);
+        c.eq(
+            BCryptGenerateSymmetricKey(
+                tdes112,
+                &mut h2,
+                core::ptr::null_mut(),
+                0,
+                k1k2.as_ptr(),
+                16,
+                0,
+            )
+            .into(),
+            0,
+        )?;
+        c.eq(
+            BCryptGenerateSymmetricKey(
+                tdes,
+                &mut h3,
+                core::ptr::null_mut(),
+                0,
+                k1k2k1.as_ptr(),
+                24,
+                0,
+            )
+            .into(),
+            0,
+        )?;
+        BCryptEncrypt(
+            h2,
+            plain.as_ptr(),
+            8,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+            a.as_mut_ptr(),
+            8,
+            &mut got,
+            0,
+        );
+        BCryptEncrypt(
+            h3,
+            plain.as_ptr(),
+            8,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+            b.as_mut_ptr(),
+            8,
+            &mut got,
+            0,
+        );
+        c.ok(a == b && a != plain, a[0].into())?;
+        BCryptDestroyKey(h2);
+        BCryptDestroyKey(h3);
+    }
+    Ok(())
+}
+
+/// MD2 and MD4 of "abc" (RFC 1319, RFC 1320).
+fn old_hashes(c: &mut Checks) -> Result<(), u32> {
+    for (name, want) in
+        [("MD2", "da853b0d3f88d99b30283a69e6ded6bb"), ("MD4", "a448017aaf21d8525fc10ae87aa6729d")]
+    {
+        let alg = open(c, name)?;
+        let mut out = [0u8; 16];
+        // SAFETY: bcrypt calls with buffers of ours.
+        let r = unsafe {
+            BCryptHash(alg, core::ptr::null(), 0, b"abc".as_ptr(), 3, out.as_mut_ptr(), 16)
+        };
+        c.eq(r.into(), 0)?;
+        c.digest(&out, want)?;
+    }
+    Ok(())
+}
 
 fn random(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: bcrypt calls with buffers of ours.
@@ -353,6 +800,8 @@ fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     random(&mut c)?;
     fips(&mut c)?;
+    ciphers(&mut c)?;
+    old_hashes(&mut c)?;
     hashes(&mut c)
 }
 

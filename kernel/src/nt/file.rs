@@ -119,7 +119,12 @@ pub const VOLUME_DEVICE: &str = "\\Device\\HarddiskVolume1";
 
 /// Adds a boot module as a read-only file `C:\\<directory>\\<name>`; the
 /// directory (`/`-separated, created if needed) defaults to `gala`.
-pub fn add_boot_file(directory: &str, name: &str, data: &'static [u8]) -> Result<(), NtStatus> {
+pub fn add_boot_file(
+    directory: &str,
+    name: &str,
+    data: &'static [u8],
+    writable: bool,
+) -> Result<(), NtStatus> {
     let directory = if directory.is_empty() { "gala" } else { directory };
     let mut parts: Vec<Vec<u16>> = Vec::new();
     for p in directory.split(['/', '\\']).filter(|p| !p.is_empty()) {
@@ -133,7 +138,7 @@ pub fn add_boot_file(directory: &str, name: &str, data: &'static [u8]) -> Result
     with_fs(|fs| {
         let now = platform::system_time();
         let dir = fs.mkdir_all(&refs, now).map_err(fs_status)?;
-        fs.add_static_file(dir, &name, data, now).map_err(fs_status)?;
+        fs.add_static_file(dir, &name, data, writable, now).map_err(fs_status)?;
         Ok(())
     })
 }

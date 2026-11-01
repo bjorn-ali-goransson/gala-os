@@ -218,12 +218,12 @@ pub fn run(
         crate::warn!("net: not started ({e:?})");
     }
     for (directory, file, contents) in modules {
-        crate::nt::file::add_boot_file(&directory, &file, contents.leak())
+        crate::nt::file::add_boot_file(&directory, &file, contents.leak(), false)
             .map_err(|e| alloc::format!("adding {directory}/{file}: {e:?}"))?;
     }
     let name: &'static str = String::from(name).leak();
     let data: &'static [u8] = data.leak();
-    crate::nt::file::add_boot_file("", name, data)
+    crate::nt::file::add_boot_file("", name, data, false)
         .map_err(|e| alloc::format!("adding {name}: {e:?}"))?;
     let (process, main_thread) = crate::nt::process::spawn_from_pe(name, "", data, args, None)
         .map_err(|e| alloc::format!("starting {name}: {e:?}"))?;

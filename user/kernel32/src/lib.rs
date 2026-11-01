@@ -1061,6 +1061,114 @@ fn overlapped_io(
     ov: *mut c_void,
     write: bool,
 ) -> Bool {
+    overlapped_request(count, ov, |event, context, iosb, offset| {
+        // SAFETY: the caller's OVERLAPPED and buffer of `length` bytes.
+        unsafe {
+            if write {
+                NtWriteFile(h, event, 0, context, iosb, buffer, length, offset, core::ptr::null())
+            } else {
+                NtReadFile(h, event, 0, context, iosb, buffer, length, offset, core::ptr::null())
+            }
+        }
+    })
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtReadFileScatter(
+        h: Handle,
+        event: usize,
+        apc: usize,
+        apc_context: usize,
+        iosb: *mut [usize; 2],
+        segments: *const u64,
+        length: u32,
+        offset: *const i64,
+        key: *const u32,
+    ) -> u32;
+    fn NtWriteFileGather(
+        h: Handle,
+        event: usize,
+        apc: usize,
+        apc_context: usize,
+        iosb: *mut [usize; 2],
+        segments: *const u64,
+        length: u32,
+        offset: *const i64,
+        key: *const u32,
+    ) -> u32;
+}
+
+/// ReadFileScatter: an overlapped read into page-sized buffers (the
+/// FILE_SEGMENT_ELEMENT array), at the OVERLAPPED's offset.
+#[unsafe(no_mangle)]
+pub extern "system" fn ReadFileScatter(
+    h: Handle,
+    segments: *const u64,
+    length: u32,
+    _reserved: *mut u32,
+    ov: *mut c_void,
+) -> Bool {
+    if ov.is_null() || segments.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    overlapped_request(core::ptr::null_mut(), ov, |event, context, iosb, offset| {
+        // SAFETY: the caller's segment array and OVERLAPPED.
+        unsafe {
+            NtReadFileScatter(
+                h,
+                event,
+                0,
+                context,
+                iosb,
+                segments,
+                length,
+                offset,
+                core::ptr::null(),
+            )
+        }
+    })
+}
+
+/// WriteFileGather: an overlapped write from page-sized buffers.
+#[unsafe(no_mangle)]
+pub extern "system" fn WriteFileGather(
+    h: Handle,
+    segments: *const u64,
+    length: u32,
+    _reserved: *mut u32,
+    ov: *mut c_void,
+) -> Bool {
+    if ov.is_null() || segments.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    overlapped_request(core::ptr::null_mut(), ov, |event, context, iosb, offset| {
+        // SAFETY: the caller's segment array and OVERLAPPED.
+        unsafe {
+            NtWriteFileGather(
+                h,
+                event,
+                0,
+                context,
+                iosb,
+                segments,
+                length,
+                offset,
+                core::ptr::null(),
+            )
+        }
+    })
+}
+
+/// An overlapped request: the OVERLAPPED {Internal, InternalHigh, Offset,
+/// OffsetHigh, hEvent} is the IO_STATUS_BLOCK and gives the offset and
+/// event (its low bit set: no completion port packet); `issue` makes the
+/// system call.
+fn overlapped_request(
+    count: *mut u32,
+    ov: *mut c_void,
+    issue: impl FnOnce(usize, usize, *mut [usize; 2], *const i64) -> u32,
+) -> Bool {
     let ov = ov.cast::<usize>();
     // SAFETY: the caller's OVERLAPPED {Internal, InternalHigh, Offset,
     // OffsetHigh, hEvent}, valid until the I/O completes.
@@ -1071,14 +1179,7 @@ fn overlapped_io(
     };
     let context = if event & 1 != 0 { 0 } else { ov as usize };
     let iosb = ov.cast::<[usize; 2]>();
-    // SAFETY: as above; the caller's buffer of `length` bytes.
-    let status = unsafe {
-        if write {
-            NtWriteFile(h, event & !1, 0, context, iosb, buffer, length, &offset, core::ptr::null())
-        } else {
-            NtReadFile(h, event & !1, 0, context, iosb, buffer, length, &offset, core::ptr::null())
-        }
-    };
+    let status = issue(event & !1, context, iosb, &offset);
     match status {
         STATUS_SUCCESS => {
             if !count.is_null() {

@@ -11,7 +11,6 @@ gala_stubs::unimplemented_exports!("bcrypt.dll":
     BCryptDeriveKey
     BCryptDeriveKeyCapi
     BCryptDestroySecret
-    BCryptDuplicateKey
     BCryptEnumAlgorithms
     BCryptEnumContextFunctionProviders
     BCryptEnumContextFunctions

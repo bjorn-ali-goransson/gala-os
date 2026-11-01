@@ -71,6 +71,8 @@ pub const NT_WAIT_FOR_KEYED_EVENT: u32 = 0x7f11;
 pub const NT_RELEASE_KEYED_EVENT: u32 = 0x7f12;
 /// gala's number until verified (reached through ntdll).
 pub const NT_NOTIFY_CHANGE_DIRECTORY_FILE: u32 = 0x7f13;
+pub const NT_READ_FILE_SCATTER: u32 = 0x7f14;
+pub const NT_WRITE_FILE_GATHER: u32 = 0x7f15;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -291,6 +293,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
         9,
         nt_notify_change_directory_file,
     ),
+    (NT_READ_FILE_SCATTER, "NtReadFileScatter", 9, nt_read_file_scatter),
+    (NT_WRITE_FILE_GATHER, "NtWriteFileGather", 9, nt_write_file_gather),
 ];
 
 /// The name of service `number` (for diagnostics).
@@ -3097,24 +3101,135 @@ fn file_write(
         offset = size; // append-only handles always write at the end
     }
     tri!(super::locks::check_io(file.node, file.lock_owner(), offset, u64::from(length), true));
-    let mut chunk = [0u8; 512];
-    let mut done = 0u64;
-    while done < u64::from(length) {
-        let n = (u64::from(length) - done).min(chunk.len() as u64) as usize;
-        if call.process.read(buffer + done, &mut chunk[..n]).is_err() {
-            return NtStatus::ACCESS_VIOLATION;
-        }
-        let now = platform::system_time();
-        if let Err(e) = file::with_fs(|fs| fs.write(file.node, offset + done, &chunk[..n], now)) {
-            return file::fs_status(e);
-        }
-        done += n as u64;
-    }
+    let done = tri!(write_range(call, file, buffer, length, offset));
     if file.synchronous {
         *file.position.lock() = offset + done;
     }
     tri!(call.write_iosb(iosb, NtStatus::SUCCESS, done));
     NtStatus::SUCCESS
+}
+
+/// Writes `length` bytes from the caller's `buffer` at `offset`.
+fn write_range(
+    call: &Call<'_>,
+    file: &file::FileObject,
+    buffer: u64,
+    length: u32,
+    offset: u64,
+) -> Result<u64, NtStatus> {
+    let mut chunk = [0u8; 512];
+    let mut done = 0u64;
+    while done < u64::from(length) {
+        let n = (u64::from(length) - done).min(chunk.len() as u64) as usize;
+        if call.process.read(buffer + done, &mut chunk[..n]).is_err() {
+            return Err(NtStatus::ACCESS_VIOLATION);
+        }
+        let now = platform::system_time();
+        file::with_fs(|fs| fs.write(file.node, offset + done, &chunk[..n], now))
+            .map_err(file::fs_status)?;
+        done += n as u64;
+    }
+    Ok(done)
+}
+
+/// Reads up to `length` bytes at `offset` into the caller's `buffer`
+/// (fewer at the end of the file).
+fn read_range(
+    call: &Call<'_>,
+    file: &file::FileObject,
+    buffer: u64,
+    length: u32,
+    offset: u64,
+) -> Result<u64, NtStatus> {
+    let mut chunk = [0u8; 512];
+    let mut done = 0u64;
+    while done < u64::from(length) {
+        let want = (u64::from(length) - done).min(chunk.len() as u64) as usize;
+        let n = file::with_fs(|fs| fs.read(file.node, offset + done, &mut chunk[..want]))
+            .map_err(file::fs_status)?;
+        if n == 0 {
+            break;
+        }
+        if call.process.write(buffer + done, &chunk[..n]).is_err() {
+            return Err(NtStatus::ACCESS_VIOLATION);
+        }
+        done += n as u64;
+    }
+    Ok(done)
+}
+
+/// NtWriteFileGather / NtReadFileScatter(FileHandle, Event, ApcRoutine,
+/// ApcContext, *IoStatusBlock, SegmentArray, Length, *ByteOffset, *Key):
+/// NtWriteFile/NtReadFile with the data in page-sized buffers (the
+/// FILE_SEGMENT_ELEMENT array: one 64-bit pointer per page), completed the
+/// same way (IO_STATUS_BLOCK, event, APC, completion port). gala's
+/// numbers (unverified).
+fn nt_file_segments(call: &mut Call<'_>, write: bool) -> NtStatus {
+    const PAGE: u32 = 4096;
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let (iosb, segments, length, offset_ptr) =
+        (arg!(call, 4), arg!(call, 5), arg!(call, 6) as u32, arg!(call, 7));
+    if file.directory {
+        return NtStatus::INVALID_DEVICE_REQUEST;
+    }
+    let needed = if write { file::FILE_WRITE_DATA } else { file::FILE_READ_DATA };
+    if entry.access & needed == 0 {
+        return NtStatus::ACCESS_DENIED;
+    }
+    if offset_ptr == 0 || segments == 0 {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let offset = tri!(call.read_u64(offset_ptr));
+    let size = file::with_fs(|fs| fs.node(file.node).map_or(0, |n| n.size()));
+    tri!(super::locks::check_io(file.node, file.lock_owner(), offset, u64::from(length), write));
+    let apc = tri!(io_apc(call, file, iosb));
+    let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
+    let transfer = || -> Result<u64, NtStatus> {
+        if !write && offset >= size && length > 0 {
+            return Err(NtStatus::END_OF_FILE);
+        }
+        let mut done = 0u64;
+        let mut page = 0u64;
+        while done < u64::from(length) {
+            let buffer = call.read_u64(segments + 8 * page)?;
+            let n = (u64::from(length) - done).min(u64::from(PAGE)) as u32;
+            let moved = if write {
+                write_range(call, file, buffer, n, offset + done)?
+            } else {
+                read_range(call, file, buffer, n, offset + done)?
+            };
+            done += moved;
+            page += 1;
+            if moved < u64::from(n) {
+                break; // the end of the file
+            }
+        }
+        Ok(done)
+    };
+    let status = match transfer() {
+        Ok(done) => {
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, done));
+            NtStatus::SUCCESS
+        }
+        Err(e) => {
+            if e == NtStatus::END_OF_FILE {
+                tri!(call.write_iosb(iosb, e, 0));
+            }
+            e
+        }
+    };
+    finish_io(&entry.object, event.as_ref(), apc, status);
+    post_completion(call, file, iosb, status);
+    status
+}
+
+fn nt_write_file_gather(call: &mut Call<'_>) -> NtStatus {
+    nt_file_segments(call, true)
+}
+
+fn nt_read_file_scatter(call: &mut Call<'_>) -> NtStatus {
+    nt_file_segments(call, false)
 }
 
 /// NtLockFile(FileHandle, Event, ApcRoutine, ApcContext, *IoStatusBlock,
@@ -3367,22 +3482,7 @@ fn file_read(
         tri!(call.write_iosb(iosb, NtStatus::END_OF_FILE, 0));
         return NtStatus::END_OF_FILE;
     }
-    let mut chunk = [0u8; 512];
-    let mut done = 0u64;
-    while done < u64::from(length) {
-        let want = (u64::from(length) - done).min(chunk.len() as u64) as usize;
-        let n = match file::with_fs(|fs| fs.read(file.node, offset + done, &mut chunk[..want])) {
-            Ok(n) => n,
-            Err(e) => return file::fs_status(e),
-        };
-        if n == 0 {
-            break;
-        }
-        if call.process.write(buffer + done, &chunk[..n]).is_err() {
-            return NtStatus::ACCESS_VIOLATION;
-        }
-        done += n as u64;
-    }
+    let done = tri!(read_range(call, file, buffer, length, offset));
     if file.synchronous {
         *file.position.lock() = offset + done;
     }

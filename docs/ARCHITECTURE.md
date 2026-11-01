@@ -511,7 +511,11 @@ position, and close their open in `Drop`. Boot modules appear read-only in
 `tar:<dir>` is a USTAR archive (`fs/tar.rs`) whose regular files are added
 under `C:\<dir>` in place, without copies, and whose directory entries
 (typeflag 5) are created, so empty directories survive (xtask writes one
-for every directory of a tree; Elasticsearch needs its empty `logs`). `C:\Windows\System32` and
+for every directory of a tree; Elasticsearch needs its empty `logs`).
+`tarw:<dir>` is the same but its files are writable (xtask's
+`WRITABLE_TREES`, e.g. SQL Server's `sql/data` databases): their data
+stays in the module until the first write, which copies it to the heap
+(`ramfs::add_static_file(.., writable)`). `C:\Windows\System32` and
 `C:\Users\Public` exist.
 Names resolve from the volume root, or from an open directory file given
 as RootDirectory (no access needed on it). NtQueryDirectoryFile keeps a
@@ -527,6 +531,11 @@ event (and the file object) when an I/O starts and signal both when it
 completes, which is always before the system call returns; asynchronous
 handles (no FILE_SYNCHRONOUS_IO_*) need explicit offsets and keep no
 position.
+NtReadFileScatter/NtWriteFileGather (gala numbers 0x7f14/0x7f15 until
+verified; kernel32's ReadFileScatter/WriteFileGather, which SQL Server
+uses for its data files) take a FILE_SEGMENT_ELEMENT array of page
+pointers (4 KiB pages) and a length, and complete as NtReadFile and
+NtWriteFile do, on the same `read_range`/`write_range` helpers.
 
 **KUSER_SHARED_DATA** (`nt::kuser`): one kernel-owned `SharedPage`
 mapped read-only at 0x7FFE0000 into every process (`UserSpace::map_shared`
@@ -996,7 +1005,10 @@ Windows, never shadows the system's DLLs.)
   keys without subkeys; RegGetValueW checks its flags first). ETW
   providers (etw.rs) register, but no trace session exists, so no
   provider is ever enabled and events go nowhere, successfully (as on
-  Windows with no listener; not recorded).
+  Windows with no listener; not recorded). Classic (MOF) providers:
+  RegisterTraceGuidsW returns a handle and never calls back;
+  GetTraceLoggerHandle, GetTraceEnableFlags/Level and TraceEvent fail
+  with ERROR_INVALID_HANDLE, as for a provider no session enabled.
 - **iphlpapi/secur32/winhttp** (what the JDK's net.dll imports): network
   adapter tables, ICMP echo, SSPI and WinHTTP sessions are not supported
   (documented failures, recorded); ConvertLengthToIpv4Mask is computed and
@@ -1014,7 +1026,9 @@ Windows, never shadows the system's DLLs.)
   behind TEB.ReservedForOle (MTA/STA with reference counts, initialize
   spies, the error object), one MTA context object and one per STA thread
   (CoGetContextToken, CoGetObjectContext with IComThreadingInfo), task
-  memory on the process heap, version-4 GUIDs, an IStream on heap memory
+  memory on the process heap, version-4 GUIDs and their braced string
+  forms (StringFromCLSID/IID, CLSIDFromString with CO_E_CLASSSTRING,
+  IIDFromString with E_INVALIDARG), an IStream on heap memory
   (CreateStreamOnHGlobal without an HGLOBAL), an aggregatable
   free-threaded marshaler whose IMarshal methods are E_NOTIMPL, and
   CoWaitForMultipleHandles (no message pumping). No registry: class and
@@ -1046,8 +1060,31 @@ Windows, never shadows the system's DLLs.)
 - **CNG** (bcrypt): BCryptGenRandom (ProcessPrng), MD5/SHA-1/SHA-2 and
   their HMACs through providers or the documented pseudo-handles
   (incremental, duplicated, reusable, one shot), BCryptGetProperty for
-  lengths; the digests are the RustCrypto crates'. Keys, ciphers and key
-  derivation fail with STATUS_NOT_SUPPORTED (recorded).
+  lengths; the digests are the RustCrypto crates' (also MD2 and MD4).
+  Symmetric ciphers (cipher.rs): AES (128/192/256), DES, 3DES, 3DES_112,
+  RC2 (EffectiveKeyLength, default 128) and RC4, with ChainingMode
+  ECB/CBC (BCryptSetProperty on the provider or a key), the IV updated
+  in place, BCRYPT_BLOCK_PADDING (PKCS#7; bad padding is
+  STATUS_DATA_ERROR, an unpadded length that is not whole blocks
+  STATUS_INVALID_BUFFER_SIZE), RC4 as a stream whose state persists in
+  the key; BCryptGenerateSymmetricKey (key object in the caller's buffer
+  or allocated), DuplicateKey, Import/ExportKey of KeyDataBlob
+  (BCRYPT_KEY_DATA_BLOB_HEADER "KDBM" v1) and OpaqueKeyBlob (gala uses
+  the same layout). Properties: ObjectLength, BlockLength, KeyLength(s),
+  ChainingMode, AlgorithmName. RSA only opens (TODO: key pairs,
+  sign/verify, encrypt/decrypt); key derivation fails with
+  STATUS_NOT_SUPPORTED. Unknown algorithm names are recorded
+  (`bcrypt.dll!algorithm <name>`).
+- **DPAPI** (crypt32 dpapi.rs): CryptProtectData/CryptUnprotectData with
+  a per-machine master key (32 random bytes kept in
+  `HKLM\SOFTWARE\gala\DPAPI` MasterKey, made on first use). gala's own
+  blob format (not Windows'): "GDP1", a 16-byte IV, an HMAC-SHA256 of the
+  rest, then AES-256-CBC of (description length, description, data);
+  the keys are HMACs of the master key with the optional entropy, so a
+  wrong entropy or a changed byte fails (ERROR_INVALID_DATA). bcrypt and
+  advapi32 are loaded on first use (LoadLibrary), so crypt32 keeps no
+  static imports of them (caddy ships crypt32 alone). No user scope
+  (every blob is machine-bound), no prompts.
 - **Thread stacks**: laid out as Windows does - a reservation of the
   executable's SizeOfStackReserve (main thread: the kernel, placed to end
   at 0x200000 when it fits; CreateThread with size 0: kernel32 reads the

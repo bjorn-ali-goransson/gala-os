@@ -23,9 +23,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     GetSecurityDescriptorLength
     GetSidIdentifierAuthority
     GetSidLengthRequired
-    GetTraceEnableFlags
-    GetTraceEnableLevel
-    GetTraceLoggerHandle
     ImpersonateLoggedOnUser
     ImpersonateNamedPipeClient
     InitializeSid
@@ -52,7 +49,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     RegSetKeySecurity
     RegisterServiceCtrlHandlerA
     RegisterServiceCtrlHandlerExW
-    RegisterTraceGuidsW
     SetEntriesInAclW
     SetNamedSecurityInfoW
     SetSecurityDescriptorGroup
@@ -63,7 +59,5 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     StartServiceCtrlDispatcherW
     StartServiceW
     StartTraceW
-    TraceEvent
     UnlockServiceDatabase
-    UnregisterTraceGuids
 );

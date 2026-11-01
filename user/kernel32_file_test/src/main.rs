@@ -7,6 +7,7 @@
 //! classes, GetVolumeInformationByHandleW, GetFinalPathNameByHandleW,
 //! GetFileTime/SetFileTime, GetFullPathNameW, GetShortPathNameW,
 //! GetCompressedFileSizeW, DeleteFileW, QueryDosDeviceW (C: and NUL),
+//! WriteFileGather/ReadFileScatter (page segments, overlapped),
 //! GetVolumeNameForVolumeMountPointW (C:\'s \\?\Volume{GUID}\),
 //! RemoveDirectoryW, all inside the temporary directory. Prints
 //! `kernel32_file_test: ok` or exits with the number of the failing check.
@@ -76,6 +77,22 @@ unsafe extern "system" {
     -> u32;
     fn DeleteFileW(path: *const u16) -> Bool;
     fn CloseHandle(h: Handle) -> Bool;
+    fn VirtualAlloc(address: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut u8;
+    fn WriteFileGather(
+        h: Handle,
+        segments: *const u64,
+        length: u32,
+        reserved: *mut u32,
+        overlapped: *mut [usize; 4],
+    ) -> Bool;
+    fn ReadFileScatter(
+        h: Handle,
+        segments: *const u64,
+        length: u32,
+        reserved: *mut u32,
+        overlapped: *mut [usize; 4],
+    ) -> Bool;
+    fn GetOverlappedResult(h: Handle, ov: *mut [usize; 4], count: *mut u32, wait: Bool) -> Bool;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -439,6 +456,42 @@ fn run() -> Result<(), u32> {
         c.eq(GetLastError().into(), ERROR_FILE_NOT_FOUND.into())?;
         c.ok(RemoveDirectoryW(dir.ptr()) != 0, 0)?;
         c.eq(GetFileAttributesW(dir.ptr()).into(), INVALID_FILE_ATTRIBUTES.into())?;
+
+        // Gather and scatter (as SQL Server writes its pages): an
+        // overlapped handle without buffering, page-sized buffers, an
+        // offset in the OVERLAPPED; the count from GetOverlappedResult.
+        let pages = Path::new(temp, b"gala_pages.mdf");
+        let h = CreateFileW(
+            pages.ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            core::ptr::null_mut(),
+            CREATE_NEW,
+            0x4000_0000 | 0x2000_0000, // FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING
+            core::ptr::null_mut(),
+        );
+        c.ok(h != INVALID_HANDLE_VALUE, GetLastError().into())?;
+        let mem = VirtualAlloc(core::ptr::null_mut(), 4 * 4096, 0x3000, 4);
+        c.ok(!mem.is_null(), 0)?;
+        for i in 0..8192 {
+            *mem.add(i) = (i / 4096) as u8 + 1; // page 0: 1s, page 1: 2s
+        }
+        let segments = [mem as u64, mem as u64 + 4096, 0];
+        let mut ov = [0usize, 0, 8192, 0]; // Offset 8192 (OffsetHigh 0), no event
+        let wrote = WriteFileGather(h, segments.as_ptr(), 8192, core::ptr::null_mut(), &mut ov);
+        c.ok(wrote != 0 || GetLastError() == 997, GetLastError().into())?; // or ERROR_IO_PENDING
+        let mut n = 0u32;
+        c.ok(GetOverlappedResult(h, &mut ov, &mut n, 1) != 0, GetLastError().into())?;
+        c.eq(n.into(), 8192)?;
+        let back = [mem as u64 + 8192, mem as u64 + 12288, 0];
+        let mut ov = [0usize, 0, 8192, 0];
+        let read = ReadFileScatter(h, back.as_ptr(), 8192, core::ptr::null_mut(), &mut ov);
+        c.ok(read != 0 || GetLastError() == 997, GetLastError().into())?;
+        c.ok(GetOverlappedResult(h, &mut ov, &mut n, 1) != 0, GetLastError().into())?;
+        c.eq(n.into(), 8192)?;
+        c.ok(*mem.add(8192) == 1 && *mem.add(12288) == 2 && *mem.add(16383) == 2, 0)?;
+        CloseHandle(h);
+        DeleteFileW(pages.ptr());
 
         // DOS device names: C: is the volume's device, NUL the null
         // device; the target is followed by two NULs (counted).

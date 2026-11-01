@@ -121,6 +121,15 @@ syscall_stubs! {
         h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
         buffer: *mut u8, length: u32, filter: u32, tree: u8
     );
+    // Scatter/gather file I/O (gala's numbers, unverified).
+    NtReadFileScatter = 0x7f14, fn(
+        h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
+        segments: *const u64, length: u32, offset: *const i64, key: *const u32
+    );
+    NtWriteFileGather = 0x7f15, fn(
+        h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
+        segments: *const u64, length: u32, offset: *const i64, key: *const u32
+    );
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,

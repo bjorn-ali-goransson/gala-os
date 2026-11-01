@@ -236,6 +236,116 @@ pub extern "system" fn CoGetMalloc(context: u32, malloc: *mut *const Malloc) -> 
     S_OK
 }
 
+// ---- GUID strings ----
+
+/// The bytes of a GUID in string order (Data1..Data3 little-endian).
+const GUID_ORDER: [usize; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
+
+/// "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}" (38 characters, upper case).
+fn guid_text(g: &Guid) -> [u16; 38] {
+    let mut out = [u16::from(b'-'); 38];
+    out[0] = u16::from(b'{');
+    out[37] = u16::from(b'}');
+    let mut at = 1;
+    for (i, &b) in GUID_ORDER.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            at += 1;
+        }
+        let digit = |d: u8| u16::from(if d < 10 { b'0' + d } else { b'A' + d - 10 });
+        out[at] = digit(g[b] >> 4);
+        out[at + 1] = digit(g[b] & 0xf);
+        at += 2;
+    }
+    out
+}
+
+/// Parses the braced form (either case).
+fn parse_guid(text: *const u16) -> Option<Guid> {
+    // SAFETY: the caller's NUL-terminated string, read up to 39 units.
+    let units: [u16; 39] = unsafe {
+        let mut u = [0u16; 39];
+        for (i, slot) in u.iter_mut().enumerate() {
+            *slot = *text.add(i);
+            if *slot == 0 {
+                break;
+            }
+        }
+        u
+    };
+    if units[0] != u16::from(b'{') || units[37] != u16::from(b'}') || units[38] != 0 {
+        return None;
+    }
+    let mut g = [0u8; 16];
+    let mut at = 1;
+    for (i, &b) in GUID_ORDER.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            if units[at] != u16::from(b'-') {
+                return None;
+            }
+            at += 1;
+        }
+        let digit = |c: u16| char::from_u32(c.into())?.to_digit(16);
+        g[b] = (digit(units[at])? << 4 | digit(units[at + 1])?) as u8;
+        at += 2;
+    }
+    Some(g)
+}
+
+/// CLSIDFromString: the braced form (a ProgID is not looked up: no
+/// registered classes); NULL is CLSID_NULL; CO_E_CLASSSTRING otherwise.
+#[unsafe(no_mangle)]
+pub extern "system" fn CLSIDFromString(text: *const u16, clsid: *mut Guid) -> HResult {
+    if clsid.is_null() {
+        return E_INVALIDARG;
+    }
+    if text.is_null() {
+        put(clsid, [0; 16]);
+        return S_OK;
+    }
+    match parse_guid(text) {
+        Some(g) => {
+            put(clsid, g);
+            S_OK
+        }
+        None => CO_E_CLASSSTRING,
+    }
+}
+
+/// IIDFromString: as CLSIDFromString, E_INVALIDARG when malformed.
+#[unsafe(no_mangle)]
+pub extern "system" fn IIDFromString(text: *const u16, iid: *mut Guid) -> HResult {
+    match CLSIDFromString(text, iid) {
+        CO_E_CLASSSTRING => E_INVALIDARG,
+        r => r,
+    }
+}
+
+/// StringFromCLSID: the braced form in CoTaskMem memory.
+#[unsafe(no_mangle)]
+pub extern "system" fn StringFromCLSID(clsid: *const Guid, text: *mut *mut u16) -> HResult {
+    if clsid.is_null() || text.is_null() {
+        return E_INVALIDARG;
+    }
+    let t = guid_text(&guid_at(clsid));
+    let p = CoTaskMemAlloc(2 * 39).cast::<u16>();
+    if p.is_null() {
+        return E_OUTOFMEMORY;
+    }
+    // SAFETY: 39 units just allocated; the caller's output.
+    unsafe {
+        core::ptr::copy_nonoverlapping(t.as_ptr(), p, 38);
+        p.add(38).write(0);
+    }
+    put(text, p);
+    S_OK
+}
+
+/// StringFromIID: as StringFromCLSID.
+#[unsafe(no_mangle)]
+pub extern "system" fn StringFromIID(iid: *const Guid, text: *mut *mut u16) -> HResult {
+    StringFromCLSID(iid, text)
+}
+
 // ---- COM object helpers ----
 
 /// The vtable entry `i` of COM object `obj`, called as `fn(obj, args)`.

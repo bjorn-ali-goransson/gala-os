@@ -52,7 +52,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     PrepareTape
 
     QueueUserWorkItem
-    ReadFileScatter
     RegisterWaitForSingleObject
     ReplaceFileW
     SetFileIoOverlappedRange
@@ -69,7 +68,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     VirtualAllocEx
     VirtualFreeEx
     WaitNamedPipeW
-    WriteFileGather
     WriteProcessMemory
     WriteTapemark
 );

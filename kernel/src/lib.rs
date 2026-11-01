@@ -120,9 +120,12 @@ pub fn kernel_main() -> ! {
     nt::init();
     net::init();
     for module in info.modules.iter() {
-        // `tar:<dir>`: a directory tree packed by xtask, shipped as C:\<dir>.
+        // `tar:<dir>`: a directory tree packed by xtask, shipped as C:\<dir>
+        // (read-only files); `tarw:<dir>`: the same, writable (data files).
         if let Some(dir) = module.cmdline.strip_prefix("tar:") {
-            add_tree(dir, module.path, module.data);
+            add_tree(dir, module.path, module.data, false);
+        } else if let Some(dir) = module.cmdline.strip_prefix("tarw:") {
+            add_tree(dir, module.path, module.data, true);
         } else if module.cmdline == "registry" {
             // A scenario's registry keys (nt::registry::load_more).
             let loaded = core::str::from_utf8(module.data)
@@ -132,7 +135,7 @@ pub fn kernel_main() -> ! {
                 warn!("registry: cannot load {}: {e:?}", module.path);
             }
         } else if let Err(e) =
-            nt::file::add_boot_file(module.cmdline, module.file_name(), module.data)
+            nt::file::add_boot_file(module.cmdline, module.file_name(), module.data, false)
         {
             warn!("fs: cannot add {}: {e:?}", module.path);
         }
@@ -336,7 +339,7 @@ fn init_timer(boot_time: Option<i64>) {
 
 /// Adds the regular files (in place) and directories of the USTAR archive
 /// `data` (boot module `path`) under C:\\<dir>.
-fn add_tree(dir: &str, path: &str, data: &'static [u8]) {
+fn add_tree(dir: &str, path: &str, data: &'static [u8], writable: bool) {
     let mut entries = fs::tar::entries(data);
     let mut count = 0;
     loop {
@@ -353,7 +356,7 @@ fn add_tree(dir: &str, path: &str, data: &'static [u8]) {
                 let (sub, name) = entry.path.rsplit_once('/').unwrap_or(("", entry.path));
                 let mut buf = [0u8; 512];
                 let added = join_dir(&mut buf, dir, sub);
-                match added.map(|full| nt::file::add_boot_file(full, name, entry.data)) {
+                match added.map(|full| nt::file::add_boot_file(full, name, entry.data, writable)) {
                     Some(Ok(())) => count += 1,
                     Some(Err(e)) => warn!("fs: cannot add {dir}/{}: {e:?}", entry.path),
                     None => warn!("fs: path too long: {}", entry.path),

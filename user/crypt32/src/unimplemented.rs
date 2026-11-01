@@ -178,7 +178,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CryptMsgUpdate
     CryptMsgVerifyCountersignatureEncoded
     CryptMsgVerifyCountersignatureEncodedEx
-    CryptProtectData
     CryptProtectMemory
     CryptQueryObject
     CryptRegisterDefaultOIDFunction
@@ -206,7 +205,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CryptStringToBinaryA
     CryptStringToBinaryW
     CryptUninstallDefaultContext
-    CryptUnprotectData
     CryptUnprotectMemory
     CryptUnregisterDefaultOIDFunction
     CryptUnregisterOIDFunction

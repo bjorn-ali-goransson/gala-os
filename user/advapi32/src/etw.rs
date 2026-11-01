@@ -145,3 +145,74 @@ pub extern "system" fn EventActivityIdControl(code: u32, id: *mut [u8; 16]) -> u
     }
     0
 }
+
+// ---- Classic (MOF) providers: RegisterTraceGuids and friends ----
+//
+// The same: a provider registers; no trace session ever enables it, so its
+// control callback is never called, there is no logger handle to log to,
+// and logging with a session handle it could not have got fails.
+
+const ERROR_INVALID_HANDLE: u32 = 6;
+
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn SetLastError(code: u32);
+}
+
+/// RegisterTraceGuidsW: a registration handle (the control callback is not
+/// called: no session enables the provider).
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn RegisterTraceGuidsW(
+    callback: usize,
+    _context: *mut core::ffi::c_void,
+    control: *const [u8; 16],
+    _count: u32,
+    _registrations: *mut [usize; 2],
+    _resource_path: *const u16,
+    _resource_name: *const u16,
+    handle: *mut u64,
+) -> u32 {
+    if callback == 0 || control.is_null() || handle.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's output.
+    unsafe { *handle = NEXT.fetch_add(1, Ordering::Relaxed) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn UnregisterTraceGuids(_handle: u64) -> u32 {
+    0
+}
+
+/// GetTraceLoggerHandle: only the control callback's buffer names a
+/// session, and it is never called: INVALID_HANDLE_VALUE.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTraceLoggerHandle(_buffer: *mut core::ffi::c_void) -> u64 {
+    // SAFETY: plain call.
+    unsafe { SetLastError(ERROR_INVALID_HANDLE) };
+    u64::MAX
+}
+
+/// GetTraceEnableFlags / GetTraceEnableLevel of a session handle there
+/// cannot be.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTraceEnableFlags(_session: u64) -> u32 {
+    // SAFETY: plain call.
+    unsafe { SetLastError(ERROR_INVALID_HANDLE) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTraceEnableLevel(_session: u64) -> u8 {
+    // SAFETY: plain call.
+    unsafe { SetLastError(ERROR_INVALID_HANDLE) };
+    0
+}
+
+/// TraceEvent: no session to log to.
+#[unsafe(no_mangle)]
+pub extern "system" fn TraceEvent(_session: u64, _header: *mut u8) -> u32 {
+    ERROR_INVALID_HANDLE
+}

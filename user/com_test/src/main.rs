@@ -7,7 +7,8 @@
 //!   other apartment kind), CoUninitialize, CoInitializeSecurity (once:
 //!   then RPC_E_TOO_LATE), initialize spies (called
 //!   around initialization with the apartment reference counts),
-//!   CoGetMalloc (the task allocator), CoGetContextToken (CO_E_NOTINITIALIZED outside an apartment),
+//!   CoGetMalloc (the task allocator), GUID strings (CLSIDFromString,
+//!   IIDFromString, StringFromCLSID/IID), CoGetContextToken (CO_E_NOTINITIALIZED outside an apartment),
 //!   CoGetObjectContext and CoGetApartmentType (MTA), CoTaskMem*,
 //!   CoCreateGuid (random version-4 GUIDs), CoGetClassObject
 //!   (REGDB_E_CLASSNOTREG), CLSIDFromProgID (CO_E_CLASSSTRING),
@@ -66,6 +67,10 @@ unsafe extern "system" {
     fn CoTaskMemFree(p: *mut u8);
     fn CoGetMalloc(context: u32, malloc: *mut *mut c_void) -> HResult;
     fn CoCreateGuid(guid: *mut Guid) -> HResult;
+    fn CLSIDFromString(text: *const u16, clsid: *mut Guid) -> HResult;
+    fn IIDFromString(text: *const u16, iid: *mut Guid) -> HResult;
+    fn StringFromCLSID(clsid: *const Guid, text: *mut *mut u16) -> HResult;
+    fn StringFromIID(iid: *const Guid, text: *mut *mut u16) -> HResult;
     fn CoGetClassObject(
         clsid: *const Guid,
         context: u32,
@@ -665,8 +670,48 @@ fn task_allocator(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// GUID strings: "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}" (StringFromCLSID
+/// writes upper case into CoTaskMem memory; parsing takes either case);
+/// CLSIDFromString of a malformed string is CO_E_CLASSSTRING,
+/// IIDFromString's E_INVALIDARG; NULL is the null GUID.
+fn guid_strings(c: &mut Checks) -> Result<(), u32> {
+    // IID_IUnknown {00000000-0000-0000-C000-000000000046}.
+    let unknown: Guid = [0, 0, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
+    let text = "{00000000-0000-0000-C000-000000000046}";
+    let mut wide = [0u16; 40];
+    for (d, b) in wide.iter_mut().zip(text.bytes()) {
+        *d = b.into();
+    }
+    // SAFETY: ole32 calls with buffers of ours.
+    unsafe {
+        let mut g: Guid = [0xff; 16];
+        c.eq(hr(CLSIDFromString(wide.as_ptr(), &mut g)), S_OK)?;
+        c.ok(g == unknown, g[8].into())?;
+        let mut lower = wide;
+        lower[20] = u16::from(b'c');
+        c.eq(hr(IIDFromString(lower.as_ptr(), &mut g)), S_OK)?;
+        c.ok(g == unknown, 0)?;
+        let mut s = core::ptr::null_mut();
+        c.eq(hr(StringFromCLSID(&unknown, &mut s)), S_OK)?;
+        c.ok(
+            text.bytes().enumerate().all(|(i, b)| *s.add(i) == u16::from(b)) && *s.add(38) == 0,
+            0,
+        )?;
+        CoTaskMemFree(s.cast());
+        c.eq(hr(StringFromIID(&unknown, &mut s)), S_OK)?;
+        CoTaskMemFree(s.cast());
+        let bad = [0x7bu16, 0x31, 0x7d, 0]; // "{1}"
+        c.eq(hr(CLSIDFromString(bad.as_ptr(), &mut g)), 0x8004_01f3)?; // CO_E_CLASSSTRING
+        c.eq(hr(IIDFromString(bad.as_ptr(), &mut g)), 0x8007_0057)?; // E_INVALIDARG
+        c.eq(hr(CLSIDFromString(core::ptr::null(), &mut g)), S_OK)?;
+        c.ok(g == [0; 16], 0)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    guid_strings(&mut c)?;
     task_allocator(&mut c)?;
     apartments(&mut c)?;
     memory_guids_classes(&mut c)?;

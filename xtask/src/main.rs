@@ -231,6 +231,10 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
 ];
 
+/// Directory trees shipped writable (`tarw:`): data a program changes, as
+/// an installer leaves it (SQL Server's databases).
+const WRITABLE_TREES: &[&str] = &["sql/data"];
+
 /// Extra boot modules per scenario: (scenario, built DLL file or repository
 /// path, directory on C: that the kernel puts it in, passed as the module
 /// string).
@@ -262,6 +266,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_test", "testdll2.dll", "gala/lib"),
     ("missing_import_test", "ntdll.dll", "Windows/System32"),
     ("missing_import_test", "kernel32.dll", "Windows/System32"),
+    ("dpapi_test", "ntdll.dll", "Windows/System32"),
+    ("dpapi_test", "kernel32.dll", "Windows/System32"),
+    ("dpapi_test", "advapi32.dll", "Windows/System32"),
+    ("dpapi_test", "crypt32.dll", "Windows/System32"),
+    ("dpapi_test", "bcrypt.dll", "Windows/System32"),
+    ("dpapi_test", "bcryptprimitives.dll", "Windows/System32"),
     ("sspi_test", "ntdll.dll", "Windows/System32"),
     ("sspi_test", "kernel32.dll", "Windows/System32"),
     ("sspi_test", "secur32.dll", "Windows/System32"),
@@ -1001,6 +1011,7 @@ const USER_PROGRAMS: &[&str] = &[
     "netapi32_test",
     "clusapi_test",
     "sspi_test",
+    "dpapi_test",
     "kernel32_sys_test",
     "kernel32_thread_test",
     "kernel32_sync_test",
@@ -1286,8 +1297,11 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
             tree_files(&root().join(file), Path::new(""), &mut files)?;
             let archive = format!("{}.tree.tar", dir.replace('/', "_"));
             write_tar(&root().join(file), &files, &boot.join(&archive))?;
-            modules +=
-                &format!("    module_path: boot():/boot/{archive}\n    module_string: tar:{dir}\n");
+            // Data directories are writable (`tarw:`), program files not.
+            let kind = if WRITABLE_TREES.contains(dir) { "tarw" } else { "tar" };
+            modules += &format!(
+                "    module_path: boot():/boot/{archive}\n    module_string: {kind}:{dir}\n"
+            );
             continue;
         }
         let (source, name) = match file.rsplit_once('/') {
@@ -1807,6 +1821,12 @@ const SCENARIOS: &[Scenario] = &[
             r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionOne","what":"missing export""#,
             r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionTwo","what":"missing export""#,
         ],
+    },
+    Scenario {
+        name: "dpapi_test",
+        cmdline: "qemu_exit run=dpapi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["dpapi_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "sspi_test",

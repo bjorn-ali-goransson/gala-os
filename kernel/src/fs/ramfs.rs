@@ -472,18 +472,22 @@ impl RamFs {
         Ok(id)
     }
 
-    /// Adds a read-only file whose contents live elsewhere.
+    /// Adds a file whose contents live elsewhere (copied into pages when
+    /// first written): read-only (program files) unless `writable` (data
+    /// a program changes, such as database files).
     pub fn add_static_file(
         &mut self,
         parent: NodeId,
         name: &[u16],
         data: &'static [u8],
+        writable: bool,
         now: u64,
     ) -> Result<NodeId, FsError> {
         let id = self.create(parent, name, false, now)?;
         let node = self.node_mut(id)?;
         node.kind = Kind::File(Data::Static(data));
-        node.attributes = ATTRIBUTE_READONLY | ATTRIBUTE_ARCHIVE;
+        node.attributes =
+            if writable { ATTRIBUTE_ARCHIVE } else { ATTRIBUTE_READONLY | ATTRIBUTE_ARCHIVE };
         Ok(id)
     }
 
@@ -834,10 +838,23 @@ mod tests {
     }
 
     #[test]
+    fn writable_static_files_are_not_read_only() {
+        static DATA: &[u8] = b"master";
+        let mut f = fs();
+        let id = f.add_static_file(ROOT, &w("master.mdf"), DATA, true, 1).unwrap();
+        assert_eq!(f.node(id).unwrap().attributes & ATTRIBUTE_READONLY, 0);
+        f.write(id, 6, b"!", 2).unwrap();
+        let mut buf = [0u8; 7];
+        f.read(id, 0, &mut buf).unwrap();
+        assert_eq!(&buf, b"master!");
+        assert_eq!(DATA, b"master"); // the module's bytes are left alone
+    }
+
+    #[test]
     fn static_files_copy_on_write() {
         static DATA: &[u8] = b"boot module";
         let mut f = fs();
-        let id = f.add_static_file(ROOT, &w("m.exe"), DATA, 1).unwrap();
+        let id = f.add_static_file(ROOT, &w("m.exe"), DATA, false, 1).unwrap();
         assert_eq!(f.node(id).unwrap().attributes & ATTRIBUTE_READONLY, ATTRIBUTE_READONLY);
         f.write(id, 0, b"B", 2).unwrap();
         let mut buf = [0u8; 11];
@@ -1031,7 +1048,7 @@ mod tests {
     fn static_files_become_pages_when_mapped() {
         static DATA: &[u8] = b"module";
         let mut f = fs();
-        let id = f.add_static_file(ROOT, &w("s.dll"), DATA, 1).unwrap();
+        let id = f.add_static_file(ROOT, &w("s.dll"), DATA, false, 1).unwrap();
         assert_eq!(f.page_address(id, 0), None);
         f.map(id, 6).unwrap();
         assert!(f.page_address(id, 0).is_some());

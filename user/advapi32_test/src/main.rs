@@ -24,7 +24,8 @@
 //!   EventUnregister) with no session listening; the thread's activity id
 //!   (EventActivityIdControl); software restriction policies (none: a
 //!   script is fully trusted; SaferIdentifyLevel and friends);
-//!   CreateWellKnownSid; secur32's GetUserNameExW; PerfLib V2 providers.
+//!   CreateWellKnownSid; secur32's GetUserNameExW; PerfLib V2 providers;
+//!   classic event trace providers (registered, never enabled).
 //!
 //! Prints `advapi32_test: ok` or exits with the number of the failing
 //! check.
@@ -67,6 +68,19 @@ unsafe extern "system" {
         handle: *mut Handle,
     ) -> u32;
     fn PerfStopProvider(handle: Handle) -> u32;
+    fn RegisterTraceGuidsW(
+        callback: usize,
+        context: *mut c_void,
+        guid: *const [u8; 16],
+        count: u32,
+        registrations: *mut [usize; 2],
+        resource_path: *const u16,
+        resource_name: *const u16,
+        handle: *mut u64,
+    ) -> u32;
+    fn UnregisterTraceGuids(handle: u64) -> u32;
+    fn GetTraceLoggerHandle(buffer: *mut c_void) -> u64;
+    fn TraceEvent(session: u64, header: *mut u8) -> u32;
     fn PerfSetCounterSetInfo(handle: Handle, template: *const u8, size: u32) -> u32;
     fn PerfCreateInstance(
         handle: Handle,
@@ -993,6 +1007,32 @@ fn perf(c: &mut Checks) -> Result<(), u32> {
         c.eq(PerfSetULongCounterValue(h, inst, 9, 1).into(), 1168)?; // ERROR_NOT_FOUND
         c.eq(PerfDeleteInstance(h, inst).into(), 0)?;
         c.eq(PerfStopProvider(h).into(), 0)?;
+
+        // Classic event tracing: a provider registers; no session ever
+        // enables it, so there is no logger handle and no event to log
+        // (ERROR_INVALID_HANDLE).
+        let control = [0x33u8; 16];
+        let mut class = [0x44u8; 16];
+        let mut registrations = [[class.as_mut_ptr() as usize, 0]];
+        let mut reg = 0u64;
+        let r = RegisterTraceGuidsW(
+            0x1000,
+            core::ptr::null_mut(),
+            &control,
+            1,
+            registrations.as_mut_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            &mut reg,
+        );
+        c.eq(r.into(), 0)?;
+        c.ok(reg != 0, 0)?;
+        c.eq(GetTraceLoggerHandle(core::ptr::null_mut()), u64::MAX)?;
+        c.eq(GetLastError().into(), 6)?;
+        let mut header = [0u8; 48];
+        header[0..2].copy_from_slice(&48u16.to_le_bytes());
+        c.eq(TraceEvent(0x1234, header.as_mut_ptr()).into(), 6)?;
+        c.eq(UnregisterTraceGuids(reg).into(), 0)?;
     }
     Ok(())
 }
