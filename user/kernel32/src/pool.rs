@@ -695,3 +695,309 @@ fn copy_file(from: *const u16, to: *const u16, fail_if_exists: bool) -> Bool {
     }
     TRUE
 }
+
+// ---- Timer queues ----
+//
+// CreateTimerQueue and friends on top of the pool's timers: each queue
+// timer is a thread-pool timer whose callback calls the
+// WAITORTIMERCALLBACK with its parameter and TRUE. A queue keeps its
+// timers in a list (under its lock) so DeleteTimerQueueEx can delete
+// them; NULL is the default queue. WT_EXECUTE* flags other than
+// WT_EXECUTEONLYONCE only choose threads on Windows and are ignored.
+// Deleted timers and queues are not freed (as pool objects).
+
+type QueueCallback = extern "system" fn(*mut c_void, u8);
+
+const QUEUE_MAGIC: u32 = 0x6761_7471; // "galq"
+const WT_EXECUTEONLYONCE: u32 = 0x8;
+
+struct Queue {
+    magic: u32,
+    lock: usize,
+    timers: *mut QueueTimer,
+}
+
+struct QueueTimer {
+    magic: u32,
+    next: *mut QueueTimer,
+    callback: QueueCallback,
+    parameter: *mut c_void,
+    timer: *mut Object,
+}
+
+static DEFAULT_QUEUE: AtomicUsize = AtomicUsize::new(0);
+
+fn new_queue() -> *mut Queue {
+    let q = super::heap::HeapAlloc(super::heap::GetProcessHeap(), 0, size_of::<Queue>())
+        .cast::<Queue>();
+    if !q.is_null() {
+        // SAFETY: fresh memory of the queue's size.
+        unsafe { q.write(Queue { magic: QUEUE_MAGIC, lock: 0, timers: core::ptr::null_mut() }) };
+    }
+    q
+}
+
+/// The queue a handle names (NULL: the default queue), if valid.
+fn queue_of(h: Handle) -> Option<*mut Queue> {
+    if h.is_null() {
+        let mut q = DEFAULT_QUEUE.load(Ordering::Acquire);
+        if q == 0 {
+            let fresh = new_queue();
+            if fresh.is_null() {
+                return None;
+            }
+            q = match DEFAULT_QUEUE.compare_exchange(
+                0,
+                fresh as usize,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => fresh as usize,
+                Err(other) => other,
+            };
+        }
+        return Some(q as *mut Queue);
+    }
+    let q = h.cast::<Queue>();
+    // SAFETY: a handle the caller got from CreateTimerQueue (tagged).
+    (unsafe { (*q).magic } == QUEUE_MAGIC).then_some(q)
+}
+
+fn queue_timer_of(h: Handle) -> Option<*mut QueueTimer> {
+    let t = h.cast::<QueueTimer>();
+    // SAFETY: a handle the caller got from CreateTimerQueueTimer (tagged).
+    (!t.is_null() && unsafe { (*t).magic } == QUEUE_MAGIC).then_some(t)
+}
+
+extern "system" fn queue_timer_callback(
+    _instance: *mut c_void,
+    context: *mut c_void,
+    _t: *mut c_void,
+) {
+    let t = context.cast::<QueueTimer>();
+    // SAFETY: the queue timer this pool timer was created for.
+    unsafe { ((*t).callback)((*t).parameter, 1) };
+}
+
+/// Arms pool timer `o`: `due` ms from now, then every `period` ms.
+fn arm(o: *mut Object, due: u32, period: u32) {
+    let due = -10_000 * i64::from(due);
+    SetThreadpoolTimer(o.cast(), &due, period, 0);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateTimerQueue() -> Handle {
+    let q = new_queue();
+    if q.is_null() {
+        return fail_with(8, core::ptr::null_mut());
+    }
+    q.cast()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateTimerQueueTimer(
+    out: *mut Handle,
+    queue: Handle,
+    callback: QueueCallback,
+    parameter: *mut c_void,
+    due: u32,
+    period: u32,
+    flags: u32,
+) -> Bool {
+    let Some(q) = queue_of(queue) else { return fail_with(ERROR_INVALID_HANDLE, FALSE) };
+    if out.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let t = super::heap::HeapAlloc(super::heap::GetProcessHeap(), 0, size_of::<QueueTimer>())
+        .cast::<QueueTimer>();
+    if t.is_null() {
+        return fail_with(8, FALSE);
+    }
+    let o = create(Kind::Timer, queue_timer_callback as WorkCallback as usize, t.cast());
+    if o.is_null() {
+        return FALSE;
+    }
+    // SAFETY: fresh memory; the queue's list under its lock.
+    unsafe {
+        t.write(QueueTimer {
+            magic: QUEUE_MAGIC,
+            next: core::ptr::null_mut(),
+            callback,
+            parameter,
+            timer: o,
+        });
+        AcquireSRWLockExclusive(&raw mut (*q).lock);
+        (*t).next = (*q).timers;
+        (*q).timers = t;
+        ReleaseSRWLockExclusive(&raw mut (*q).lock);
+        *out = t.cast();
+    }
+    arm(o, due, if flags & WT_EXECUTEONLYONCE != 0 { 0 } else { period });
+    TRUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ChangeTimerQueueTimer(
+    queue: Handle,
+    timer: Handle,
+    due: u32,
+    period: u32,
+) -> Bool {
+    let (Some(_), Some(t)) = (queue_of(queue), queue_timer_of(timer)) else {
+        return fail_with(ERROR_INVALID_HANDLE, FALSE);
+    };
+    // SAFETY: a live queue timer.
+    arm(unsafe { (*t).timer }, due, period);
+    TRUE
+}
+
+/// Stops `t`, takes it off `q`'s list and cancels its queued callbacks;
+/// whether a callback is still running.
+fn stop(q: *mut Queue, t: *mut QueueTimer) -> bool {
+    // SAFETY: a live queue and timer; the list under the queue's lock.
+    let o = unsafe {
+        AcquireSRWLockExclusive(&raw mut (*q).lock);
+        let mut link: *mut *mut QueueTimer = &raw mut (*q).timers;
+        while !(*link).is_null() {
+            if *link == t {
+                *link = (*t).next;
+                break;
+            }
+            link = &raw mut (**link).next;
+        }
+        ReleaseSRWLockExclusive(&raw mut (*q).lock);
+        (*t).magic = 0;
+        (*t).timer
+    };
+    SetThreadpoolTimer(o.cast(), core::ptr::null(), 0, 0);
+    with_lock(o, |o| {
+        o.skip = o.pending;
+        o.running > 0
+    })
+}
+
+/// Waits for `t`'s callbacks, closes it and sets `event` (if any).
+fn finish(t: *mut QueueTimer, event: Handle) {
+    // SAFETY: a stopped queue timer (its pool timer stays allocated).
+    let o = unsafe { (*t).timer };
+    wait_callbacks(o, TRUE);
+    CloseThreadpoolTimer(o.cast());
+    if !event.is_null() && event != INVALID_HANDLE_VALUE {
+        SetEvent(event);
+    }
+}
+
+/// What a helper thread finishes: the timers (a list) and the event.
+struct Finish {
+    timers: *mut QueueTimer,
+    event: Handle,
+}
+
+extern "system" fn finisher(param: *mut c_void) -> u32 {
+    let f = param.cast::<Finish>();
+    // SAFETY: the Finish the deleting call allocated for us.
+    unsafe {
+        let mut t = (*f).timers;
+        while !t.is_null() {
+            let next = (*t).next;
+            finish(t, core::ptr::null_mut());
+            t = next;
+        }
+        if !(*f).event.is_null() {
+            SetEvent((*f).event);
+        }
+        super::heap::HeapFree(super::heap::GetProcessHeap(), 0, f.cast());
+    }
+    0
+}
+
+/// Finishes `timers` (linked by `next`) on a new thread, then sets `event`.
+fn finish_later(timers: *mut QueueTimer, event: Handle) -> bool {
+    let f = super::heap::HeapAlloc(super::heap::GetProcessHeap(), 0, size_of::<Finish>())
+        .cast::<Finish>();
+    if f.is_null() {
+        return false;
+    }
+    // SAFETY: fresh memory of its size.
+    unsafe { f.write(Finish { timers, event }) };
+    let h = CreateThread(core::ptr::null_mut(), 0, finisher, f.cast(), 0, core::ptr::null_mut());
+    if h.is_null() {
+        return false;
+    }
+    CloseHandle(h);
+    true
+}
+
+/// DeleteTimerQueueTimer: INVALID_HANDLE_VALUE waits for a running
+/// callback; otherwise the call returns at once, failing with
+/// ERROR_IO_PENDING if a callback is still running, and `event` (if any)
+/// is set once it has returned.
+#[unsafe(no_mangle)]
+pub extern "system" fn DeleteTimerQueueTimer(queue: Handle, timer: Handle, event: Handle) -> Bool {
+    let (Some(q), Some(t)) = (queue_of(queue), queue_timer_of(timer)) else {
+        return fail_with(ERROR_INVALID_HANDLE, FALSE);
+    };
+    let running = stop(q, t);
+    if event == INVALID_HANDLE_VALUE || !running {
+        finish(t, event);
+        return TRUE;
+    }
+    // SAFETY: a stopped timer, now alone.
+    unsafe { (*t).next = core::ptr::null_mut() };
+    if !finish_later(t, event) {
+        finish(t, event);
+        return TRUE;
+    }
+    fail_with(997, FALSE) // ERROR_IO_PENDING
+}
+
+/// DeleteTimerQueueEx: deletes every timer of the queue (waiting for them
+/// with INVALID_HANDLE_VALUE; otherwise on another thread, which then
+/// sets `event`).
+#[unsafe(no_mangle)]
+pub extern "system" fn DeleteTimerQueueEx(queue: Handle, event: Handle) -> Bool {
+    if queue.is_null() {
+        return fail_with(ERROR_INVALID_HANDLE, FALSE);
+    }
+    let Some(q) = queue_of(queue) else { return fail_with(ERROR_INVALID_HANDLE, FALSE) };
+    // Take the whole list, then stop each timer.
+    // SAFETY: a live queue; its list under its lock.
+    let list = unsafe {
+        AcquireSRWLockExclusive(&raw mut (*q).lock);
+        let l = (*q).timers;
+        (*q).timers = core::ptr::null_mut();
+        (*q).magic = 0;
+        ReleaseSRWLockExclusive(&raw mut (*q).lock);
+        l
+    };
+    let mut t = list;
+    while !t.is_null() {
+        // SAFETY: timers of the taken list.
+        unsafe {
+            let o = (*t).timer;
+            (*t).magic = 0;
+            SetThreadpoolTimer(o.cast(), core::ptr::null(), 0, 0);
+            with_lock(o, |o| o.skip = o.pending);
+            t = (*t).next;
+        }
+    }
+    if event == INVALID_HANDLE_VALUE {
+        let mut t = list;
+        while !t.is_null() {
+            // SAFETY: as above.
+            let next = unsafe { (*t).next };
+            finish(t, core::ptr::null_mut());
+            t = next;
+        }
+        return TRUE;
+    }
+    if !finish_later(list, event) {
+        return fail_with(8, FALSE);
+    }
+    TRUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DeleteTimerQueue(queue: Handle) -> Bool {
+    DeleteTimerQueueEx(queue, core::ptr::null_mut())
+}

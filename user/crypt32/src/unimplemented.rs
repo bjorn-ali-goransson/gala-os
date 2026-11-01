@@ -30,7 +30,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertCreateCTLContext
     CertCreateCTLEntryFromCertificateContextProperties
     CertCreateCertificateChainEngine
-    CertCreateCertificateContext
     CertCreateContext
     CertCreateSelfSignCertificate
     CertDeleteCRLFromStore
@@ -44,7 +43,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertEnumCRLsInStore
     CertEnumCTLContextProperties
     CertEnumCTLsInStore
-    CertEnumCertificateContextProperties
     CertEnumPhysicalStore
     CertEnumSubjectInSortedCTL
     CertEnumSystemStore
@@ -54,7 +52,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertFindCTLInStore
     CertFindCertificateInCRL
     CertFindChainInStore
-    CertFindExtension
     CertFindRDNAttr
     CertFindSubjectInCTL
     CertFindSubjectInSortedCTL
@@ -72,8 +69,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertGetIntendedKeyUsage
     CertGetIssuerCertificateFromStore
     CertGetNameStringA
-    CertGetNameStringW
-    CertGetPublicKeyLength
     CertGetServerOcspResponseContext
     CertGetStoreProperty
     CertGetSubjectCertificateFromStore
@@ -82,7 +77,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertIsStrongHashToSign
     CertIsValidCRLForCertificate
     CertNameToStrA
-    CertNameToStrW
     CertOIDToAlgId
     CertOpenServerOcspResponse
     CertOpenSystemStoreA
@@ -102,7 +96,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertSetCRLContextProperty
     CertSetCTLContextProperty
     CertSetCertificateContextPropertiesFromCTLEntry
-    CertSetCertificateContextProperty
     CertSetEnhancedKeyUsage
     CertSetStoreProperty
     CertStrToNameA
@@ -156,7 +149,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CryptImportPKCS8
     CryptImportPublicKeyInfo
     CryptImportPublicKeyInfoEx
-    CryptImportPublicKeyInfoEx2
     CryptInitOIDFunctionSet
     CryptInstallDefaultContext
     CryptInstallOIDFunctionAddress

@@ -794,16 +794,27 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         (`advapi32_test`), K32GetModuleBaseNameW. **It now reaches
         "SQL Server is now ready for client connections"** (the
         `sqllocaldb` scenario passes), listening on
-        `\\.\pipe\LOCALDB#GALA0001\tsql\query`. Right after, it stops
-        at crypt32's CertCreateCertificateContext (its self-signed TLS
-        certificate for encrypted connections), and msdb is not found
-        (master names its files at the build machine's path: SqlLocalDB
-        would have moved them; not fatal). Next: certificates in crypt32
-        (CertCreateCertificateContext and what follows: parsing X.509),
-        RSA in bcrypt (rsa crate; needs an allocator in bcrypt; also for
-        the service master key, ESECCrypto error 21), msdb's file paths,
-        then a client: sqlcmd or a test program speaking TDS over the
-        pipe. Also seen: netapi32's NetShareGetInfo and
+        `\\.\pipe\LOCALDB#GALA0001\tsql\query`. Then (sixth pass) RSA in
+        bcrypt (`bcrypt_test`, OpenSSL's known answers), certificate
+        contexts in crypt32 (`cert_test`: X.509 decoding, properties,
+        names, public key import), timer queues, InitializeSid. Past
+        "ready" it now gets through its certificate, starts `model` and
+        shuts down: master names model's (and msdb's) files at the build
+        machine's `D:\dbs\...` path. SqlLocalDB creates instances
+        differently: SqlUserInstance.dll's strings show its command line
+        (`"%ls\sqlservr.exe" %ls %ls -c -S%ls -s%ls -d"%ls\master.mdf"
+        -l"%ls\mastlog.ldf" -e"%ls\error.log"`) and the extra arguments
+        `-m -K -T1617 -w5` and `-T1626`. With `-m -K -T1617 -w5`,
+        sqlservr regenerates the SA password and configures the "user
+        instance", failing with error 15377 ("Error adding user to
+        sysadmin role": which call fails is to be found, probably an
+        account or token lookup), then shuts down. That first start is
+        presumably what relocates the system databases; the scenario
+        keeps the plain arguments for now (they reach "ready"). The
+        service master key still fails (ESECCrypto error 21, LastOsError
+        6; also with -K). Next: trace the user-instance configuration
+        (`events=syscall` around error 15377), then model/msdb, then a
+        client over the pipe (sqlcmd, or a test program speaking TDS). Also seen: netapi32's NetShareGetInfo and
         NetValidatePasswordPolicy (looked up), FSCTL_FILESYSTEM_GET_STATISTICS
         (error 17053, goes on), CoCreateInstance of a class not
         registered, NtQuerySystemInformation class 192.

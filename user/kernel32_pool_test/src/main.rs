@@ -8,6 +8,12 @@
 //! - Timers: a one-shot timer with a relative due time; a periodic one,
 //!   cancelled by a NULL due time (no more callbacks after
 //!   WaitForThreadpoolTimerCallbacks with cancellation).
+//! - Timer queues: CreateTimerQueue, CreateTimerQueueTimer one-shot
+//!   (WT_EXECUTEONLYONCE; the callback gets its parameter and TRUE) and
+//!   periodic, ChangeTimerQueueTimer, DeleteTimerQueueTimer waiting for
+//!   callbacks (INVALID_HANDLE_VALUE: no more runs afterwards), a timer on
+//!   the default queue (NULL), DeleteTimerQueueEx with a completion event
+//!   (set once its timers are gone).
 //! - Waits: a wait on an event runs with WAIT_OBJECT_0 when it is set and
 //!   with WAIT_TIMEOUT when its timeout passes first.
 //! - FreeLibraryWhenCallbackReturns unloads a DLL the callback loaded.
@@ -29,10 +35,24 @@ type Handle = *mut c_void;
 type WorkCallback = extern "system" fn(*mut c_void, *mut c_void, *mut c_void);
 type WaitCallback = extern "system" fn(*mut c_void, *mut c_void, *mut c_void, u32);
 type SimpleCallback = extern "system" fn(*mut c_void, *mut c_void);
+type QueueCallback = extern "system" fn(*mut c_void, u8);
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetLastError() -> u32;
+    fn CreateTimerQueue() -> Handle;
+    fn CreateTimerQueueTimer(
+        timer: *mut Handle,
+        queue: Handle,
+        callback: QueueCallback,
+        parameter: *mut c_void,
+        due: u32,
+        period: u32,
+        flags: u32,
+    ) -> Bool;
+    fn ChangeTimerQueueTimer(queue: Handle, timer: Handle, due: u32, period: u32) -> Bool;
+    fn DeleteTimerQueueTimer(queue: Handle, timer: Handle, event: Handle) -> Bool;
+    fn DeleteTimerQueueEx(queue: Handle, event: Handle) -> Bool;
     fn SetLastError(e: u32);
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
@@ -295,6 +315,91 @@ fn timers(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+static QUEUE_RUNS: AtomicU32 = AtomicU32::new(0);
+static QUEUE_BAD: AtomicU32 = AtomicU32::new(0);
+
+extern "system" fn queued(parameter: *mut c_void, fired: u8) {
+    if parameter as usize != 0x4321 || fired == 0 {
+        QUEUE_BAD.fetch_add(1, Ordering::SeqCst);
+    }
+    QUEUE_RUNS.fetch_add(1, Ordering::SeqCst);
+    done();
+}
+
+/// Sleeps until `QUEUE_RUNS` reaches `n` (or 10 s).
+fn until_runs(n: u32) -> u32 {
+    let mut waited = 0;
+    while QUEUE_RUNS.load(Ordering::SeqCst) < n && waited < 10_000 {
+        // SAFETY: a plain call.
+        unsafe { Sleep(5) };
+        waited += 5;
+    }
+    QUEUE_RUNS.load(Ordering::SeqCst)
+}
+
+fn timer_queues(c: &mut Checks) -> Result<(), u32> {
+    const WT_EXECUTEONLYONCE: u32 = 8;
+    let invalid = usize::MAX as Handle;
+    let param = 0x4321 as *mut c_void;
+    // SAFETY: kernel32 calls with objects of ours.
+    unsafe {
+        let event = DONE.load(Ordering::SeqCst) as Handle;
+        ResetEvent(event);
+        let queue = CreateTimerQueue();
+        c.ok(!queue.is_null(), GetLastError().into())?;
+        let mut t = core::ptr::null_mut();
+        c.ok(
+            CreateTimerQueueTimer(&mut t, queue, queued, param, 10, 0, WT_EXECUTEONLYONCE) != 0,
+            GetLastError().into(),
+        )?;
+        c.ok(!t.is_null(), 0)?;
+        c.eq(WaitForSingleObject(event, 10_000).into(), 0)?;
+        c.ok(DeleteTimerQueueTimer(queue, t, invalid) != 0, GetLastError().into())?;
+        c.eq(QUEUE_RUNS.load(Ordering::SeqCst).into(), 1)?;
+
+        // Periodic; changed; deleted.
+        c.ok(
+            CreateTimerQueueTimer(&mut t, queue, queued, param, 5, 5, 0) != 0,
+            GetLastError().into(),
+        )?;
+        c.ok(until_runs(4) >= 4, QUEUE_RUNS.load(Ordering::SeqCst).into())?;
+        c.ok(ChangeTimerQueueTimer(queue, t, 1, 10) != 0, GetLastError().into())?;
+        let now = QUEUE_RUNS.load(Ordering::SeqCst);
+        c.ok(until_runs(now + 2) >= now + 2, QUEUE_RUNS.load(Ordering::SeqCst).into())?;
+        c.ok(DeleteTimerQueueTimer(queue, t, invalid) != 0, GetLastError().into())?;
+        let runs = QUEUE_RUNS.load(Ordering::SeqCst);
+        Sleep(60);
+        c.eq(QUEUE_RUNS.load(Ordering::SeqCst).into(), runs.into())?;
+
+        // The default queue.
+        ResetEvent(event);
+        c.ok(
+            CreateTimerQueueTimer(&mut t, core::ptr::null_mut(), queued, param, 1, 0, 0) != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(WaitForSingleObject(event, 10_000).into(), 0)?;
+        c.ok(DeleteTimerQueueTimer(core::ptr::null_mut(), t, invalid) != 0, GetLastError().into())?;
+
+        // Deleting the queue with its periodic timer.
+        c.ok(
+            CreateTimerQueueTimer(&mut t, queue, queued, param, 5, 5, 0) != 0,
+            GetLastError().into(),
+        )?;
+        let runs = QUEUE_RUNS.load(Ordering::SeqCst);
+        c.ok(until_runs(runs + 1) > runs, 0)?;
+        let gone = CreateEventW(core::ptr::null_mut(), 1, 0, core::ptr::null());
+        let ok = DeleteTimerQueueEx(queue, gone);
+        c.ok(ok != 0 || GetLastError() == 997, GetLastError().into())?; // ERROR_IO_PENDING allowed
+        c.eq(WaitForSingleObject(gone, 10_000).into(), 0)?;
+        let runs = QUEUE_RUNS.load(Ordering::SeqCst);
+        Sleep(60);
+        c.eq(QUEUE_RUNS.load(Ordering::SeqCst).into(), runs.into())?;
+        c.eq(QUEUE_BAD.load(Ordering::SeqCst).into(), 0)?;
+        CloseHandle(gone);
+    }
+    Ok(())
+}
+
 fn waits(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: thread pool calls with objects of ours.
     unsafe {
@@ -393,6 +498,7 @@ fn run() -> Result<(), u32> {
     DONE.store(event as usize, Ordering::SeqCst);
     works(&mut c)?;
     timers(&mut c)?;
+    timer_queues(&mut c)?;
     waits(&mut c)?;
     files(&mut c)
 }

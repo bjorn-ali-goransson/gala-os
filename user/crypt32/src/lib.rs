@@ -1,12 +1,15 @@
-//! gala's crypt32.dll: certificate stores, which gala does not have yet.
-//! OpenSSL imports these to look up certificates in Windows' stores (an
-//! option Nginx does not use); they fail as documented: no store opens,
-//! and an enumeration finds nothing (CRYPT_E_NOT_FOUND).
+//! gala's crypt32.dll: certificate contexts (`cert`: X.509 decoding,
+//! properties, names, public keys), DPAPI (`dpapi`), and certificate
+//! stores, which gala does not have yet. OpenSSL imports the store
+//! functions to look up certificates in Windows' stores (an option Nginx
+//! does not use); they fail as documented: no store opens, and an
+//! enumeration finds nothing (CRYPT_E_NOT_FOUND).
 
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod cert;
 mod dpapi;
 mod unimplemented;
 
@@ -27,10 +30,26 @@ unsafe extern "system" {
 unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
+    fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    fn strlen(s: *const u8) -> usize;
+    fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    // MSVC-target unwind tables reference it (gala's ntdll provides it).
+    fn __CxxFrameHandler3();
+    // The stack probe for frames over a page (ntdll exports it).
+    fn __chkstk();
 }
+
+/// MSVC-target codegen references this marker symbol directly.
+#[unsafe(no_mangle)]
+pub static _fltused: i32 = 0;
 
 const ERROR_NOT_SUPPORTED: u32 = 50;
 const CRYPT_E_NOT_FOUND: u32 = 0x8009_2004;
+
+fn missing_detail(function: &[u8], detail: u64) {
+    // SAFETY: a valid buffer.
+    unsafe { GalaRecordMissing(function.as_ptr(), function.len(), 2, detail) };
+}
 
 fn fail<T>(function: &[u8], error: u32, value: T) -> T {
     // SAFETY: a valid buffer; a plain call.
@@ -84,28 +103,6 @@ pub extern "system" fn CertFindCertificateInStore(
     // SAFETY: plain call.
     unsafe { SetLastError(CRYPT_E_NOT_FOUND) };
     core::ptr::null()
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CertDuplicateCertificateContext(context: *const c_void) -> *const c_void {
-    context
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CertFreeCertificateContext(_context: *const c_void) -> i32 {
-    1
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CertGetCertificateContextProperty(
-    _context: *const c_void,
-    _property: u32,
-    _data: *mut c_void,
-    _size: *mut u32,
-) -> i32 {
-    // SAFETY: plain call.
-    unsafe { SetLastError(CRYPT_E_NOT_FOUND) };
-    0
 }
 
 /// DllMain (the entry point our link flags name).

@@ -16,11 +16,20 @@
 //!   duplicated; STATUS_INVALID_PARAMETER for a wrong output size),
 //!   BCryptDestroyHash; HMAC providers and secrets.
 //! - BCryptHash (one shot) with algorithm pseudo-handles.
+//! - RSA (rsa_vectors.rs): BCryptImportKeyPair of RSAFULLPRIVATEBLOB,
+//!   RSAPRIVATEBLOB and RSAPUBLICBLOB; BCryptSignHash with PKCS#1 v1.5
+//!   (SHA-256: OpenSSL's signature, the size query) and PSS;
+//!   BCryptVerifySignature (STATUS_INVALID_SIGNATURE when altered);
+//!   BCryptDecrypt of OpenSSL's OAEP and PKCS#1 ciphertexts, BCryptEncrypt
+//!   round trips; BCryptExportKey of both blobs (the imported bytes);
+//!   KeyLength; BCryptGenerateKeyPair/FinalizeKeyPair.
 //!
 //! Prints `bcrypt_test: ok` or exits with the number of the failing check.
 
 #![no_std]
 #![no_main]
+
+mod rsa_vectors;
 
 use core::ffi::c_void;
 
@@ -133,6 +142,36 @@ unsafe extern "system" {
         flags: u32,
     ) -> u32;
     fn BCryptDestroyKey(key: Handle) -> u32;
+    fn BCryptImportKeyPair(
+        alg: Handle,
+        import: Handle,
+        blob: *const u16,
+        key: *mut Handle,
+        input: *const u8,
+        len: u32,
+        flags: u32,
+    ) -> u32;
+    fn BCryptGenerateKeyPair(alg: Handle, key: *mut Handle, bits: u32, flags: u32) -> u32;
+    fn BCryptFinalizeKeyPair(key: Handle, flags: u32) -> u32;
+    fn BCryptSignHash(
+        key: Handle,
+        padding: *const c_void,
+        hash: *const u8,
+        hash_len: u32,
+        out: *mut u8,
+        out_len: u32,
+        result: *mut u32,
+        flags: u32,
+    ) -> u32;
+    fn BCryptVerifySignature(
+        key: Handle,
+        padding: *const c_void,
+        hash: *const u8,
+        hash_len: u32,
+        sig: *const u8,
+        sig_len: u32,
+        flags: u32,
+    ) -> u32;
     fn BCryptHash(
         alg: Handle,
         secret: *const u8,
@@ -796,8 +835,323 @@ fn hashes(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+const STATUS_INVALID_SIGNATURE: u64 = 0xc000_a000;
+const BCRYPT_PAD_PKCS1: u32 = 2;
+const BCRYPT_PAD_OAEP: u32 = 4;
+const BCRYPT_PAD_PSS: u32 = 8;
+
+/// BCRYPT_PKCS1_PADDING_INFO, BCRYPT_PSS_PADDING_INFO,
+/// BCRYPT_OAEP_PADDING_INFO.
+#[repr(C)]
+struct Pkcs1Info {
+    alg: *const u16,
+}
+#[repr(C)]
+struct PssInfo {
+    alg: *const u16,
+    salt: u32,
+}
+#[repr(C)]
+struct OaepInfo {
+    alg: *const u16,
+    label: *const u8,
+    label_len: u32,
+}
+
+/// Imports key blob `data` of type `blob`.
+fn import_pair(c: &mut Checks, alg: Handle, blob: &str, data: &[u8]) -> Result<Handle, u32> {
+    let mut key = core::ptr::null_mut();
+    let name = w(blob);
+    // SAFETY: our blob and outputs.
+    let r = unsafe {
+        BCryptImportKeyPair(
+            alg,
+            core::ptr::null_mut(),
+            name.as_ptr(),
+            &mut key,
+            data.as_ptr(),
+            data.len() as u32,
+            0,
+        )
+    };
+    c.eq(r.into(), 0)?;
+    Ok(key)
+}
+
+/// Exports `key` as `blob` and compares it with `want`.
+fn export_is(c: &mut Checks, key: Handle, blob: &str, want: &[u8]) -> Result<(), u32> {
+    let mut buf = [0u8; 1024];
+    let mut n = 0;
+    let name = w(blob);
+    // SAFETY: our buffer and outputs.
+    let r = unsafe {
+        BCryptExportKey(
+            key,
+            core::ptr::null_mut(),
+            name.as_ptr(),
+            buf.as_mut_ptr(),
+            1024,
+            &mut n,
+            0,
+        )
+    };
+    c.eq(r.into(), 0)?;
+    c.eq(n.into(), want.len() as u64)?;
+    c.ok(&buf[..n as usize] == want, n.into())
+}
+
+fn rsa(c: &mut Checks) -> Result<(), u32> {
+    use rsa_vectors::*;
+    let alg = open(c, "RSA")?;
+    let (hash, _) = hex_bytes(SHA256_ABC);
+    let sha256 = w("SHA256");
+    let sha1 = w("SHA1");
+    let pkcs1 = Pkcs1Info { alg: sha256.as_ptr() };
+    let pkcs1_info = (&pkcs1 as *const Pkcs1Info).cast::<c_void>();
+    // SAFETY: bcrypt calls with buffers and handles of ours.
+    unsafe {
+        let full = import_pair(c, alg, "RSAFULLPRIVATEBLOB", RSA_FULL)?;
+        let (mut v, mut got) = (0u32, 0u32);
+        let length = w("KeyLength");
+        let p = (&mut v as *mut u32).cast();
+        c.eq(BCryptGetProperty(full, length.as_ptr(), p, 4, &mut got, 0).into(), 0)?;
+        c.eq(v.into(), 1024)?;
+
+        // PKCS#1 v1.5: OpenSSL's signature.
+        let mut sig = [0u8; 128];
+        let mut n = 0;
+        let r = BCryptSignHash(
+            full,
+            pkcs1_info,
+            hash.as_ptr(),
+            32,
+            core::ptr::null_mut(),
+            0,
+            &mut n,
+            BCRYPT_PAD_PKCS1,
+        );
+        c.ok(r == 0 && n == 128, n.into())?;
+        let r = BCryptSignHash(
+            full,
+            pkcs1_info,
+            hash.as_ptr(),
+            32,
+            sig.as_mut_ptr(),
+            128,
+            &mut n,
+            BCRYPT_PAD_PKCS1,
+        );
+        c.eq(r.into(), 0)?;
+        c.ok(sig[..] == *RSA_SIG_ABC_SHA256, sig[0].into())?;
+        let public = import_pair(c, alg, "RSAPUBLICBLOB", RSA_PUBLIC)?;
+        let r = BCryptVerifySignature(
+            public,
+            pkcs1_info,
+            hash.as_ptr(),
+            32,
+            sig.as_ptr(),
+            128,
+            BCRYPT_PAD_PKCS1,
+        );
+        c.eq(r.into(), 0)?;
+        sig[5] ^= 1;
+        let r = BCryptVerifySignature(
+            public,
+            pkcs1_info,
+            hash.as_ptr(),
+            32,
+            sig.as_ptr(),
+            128,
+            BCRYPT_PAD_PKCS1,
+        );
+        c.eq(r.into(), STATUS_INVALID_SIGNATURE)?;
+
+        // The same signature from the short private blob.
+        let private = import_pair(c, alg, "RSAPRIVATEBLOB", RSA_PRIVATE)?;
+        let r = BCryptSignHash(
+            private,
+            pkcs1_info,
+            hash.as_ptr(),
+            32,
+            sig.as_mut_ptr(),
+            128,
+            &mut n,
+            BCRYPT_PAD_PKCS1,
+        );
+        c.eq(r.into(), 0)?;
+        c.ok(sig[..] == *RSA_SIG_ABC_SHA256, sig[0].into())?;
+
+        // PSS (random salt): verified with the public key.
+        let pss = PssInfo { alg: sha256.as_ptr(), salt: 32 };
+        let pss_info = (&pss as *const PssInfo).cast::<c_void>();
+        let r = BCryptSignHash(
+            full,
+            pss_info,
+            hash.as_ptr(),
+            32,
+            sig.as_mut_ptr(),
+            128,
+            &mut n,
+            BCRYPT_PAD_PSS,
+        );
+        c.ok(r == 0 && n == 128, r.into())?;
+        let r = BCryptVerifySignature(
+            public,
+            pss_info,
+            hash.as_ptr(),
+            32,
+            sig.as_ptr(),
+            128,
+            BCRYPT_PAD_PSS,
+        );
+        c.eq(r.into(), 0)?;
+        let r = BCryptVerifySignature(
+            public,
+            pkcs1_info,
+            hash.as_ptr(),
+            32,
+            sig.as_ptr(),
+            128,
+            BCRYPT_PAD_PKCS1,
+        );
+        c.eq(r.into(), STATUS_INVALID_SIGNATURE)?;
+
+        // OpenSSL's ciphertexts.
+        let mut plain = [0u8; 128];
+        let oaep = OaepInfo { alg: sha1.as_ptr(), label: core::ptr::null(), label_len: 0 };
+        let oaep_info = (&oaep as *const OaepInfo).cast::<c_void>();
+        let r = BCryptDecrypt(
+            full,
+            RSA_OAEP_SHA1.as_ptr(),
+            128,
+            oaep_info,
+            core::ptr::null_mut(),
+            0,
+            plain.as_mut_ptr(),
+            128,
+            &mut n,
+            BCRYPT_PAD_OAEP,
+        );
+        c.eq(r.into(), 0)?;
+        c.ok(&plain[..n as usize] == b"gala secret", n.into())?;
+        let r = BCryptDecrypt(
+            full,
+            RSA_PKCS1.as_ptr(),
+            128,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+            plain.as_mut_ptr(),
+            128,
+            &mut n,
+            BCRYPT_PAD_PKCS1,
+        );
+        c.eq(r.into(), 0)?;
+        c.ok(&plain[..n as usize] == b"gala secret", n.into())?;
+
+        // Round trips through the public key.
+        let mut cipher = [0u8; 128];
+        for (info, flags) in [(core::ptr::null(), BCRYPT_PAD_PKCS1), (oaep_info, BCRYPT_PAD_OAEP)] {
+            let r = BCryptEncrypt(
+                public,
+                b"round trip".as_ptr(),
+                10,
+                info,
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null_mut(),
+                0,
+                &mut n,
+                flags,
+            );
+            c.ok(r == 0 && n == 128, n.into())?;
+            let r = BCryptEncrypt(
+                public,
+                b"round trip".as_ptr(),
+                10,
+                info,
+                core::ptr::null_mut(),
+                0,
+                cipher.as_mut_ptr(),
+                128,
+                &mut n,
+                flags,
+            );
+            c.eq(r.into(), 0)?;
+            let r = BCryptDecrypt(
+                private,
+                cipher.as_ptr(),
+                128,
+                info,
+                core::ptr::null_mut(),
+                0,
+                plain.as_mut_ptr(),
+                128,
+                &mut n,
+                flags,
+            );
+            c.eq(r.into(), 0)?;
+            c.ok(&plain[..n as usize] == b"round trip", n.into())?;
+        }
+
+        // Exports give the imported bytes.
+        export_is(c, full, "RSAPUBLICBLOB", RSA_PUBLIC)?;
+        export_is(c, full, "RSAFULLPRIVATEBLOB", RSA_FULL)?;
+        export_is(c, private, "RSAPRIVATEBLOB", RSA_PRIVATE)?;
+        for k in [full, public, private] {
+            c.eq(BCryptDestroyKey(k).into(), 0)?;
+        }
+
+        // A new key pair.
+        let mut key = core::ptr::null_mut();
+        c.eq(BCryptGenerateKeyPair(alg, &mut key, 1024, 0).into(), 0)?;
+        c.eq(BCryptFinalizeKeyPair(key, 0).into(), 0)?;
+        let mut blob = [0u8; 1024];
+        let public_name = w("RSAPUBLICBLOB");
+        let r = BCryptExportKey(
+            key,
+            core::ptr::null_mut(),
+            public_name.as_ptr(),
+            blob.as_mut_ptr(),
+            1024,
+            &mut n,
+            0,
+        );
+        c.eq(r.into(), 0)?;
+        let word = |i: usize| {
+            u32::from_le_bytes([blob[4 * i], blob[4 * i + 1], blob[4 * i + 2], blob[4 * i + 3]])
+        };
+        c.ok(word(0) == 0x3141_5352 && word(1) == 1024 && word(3) == 128, word(1).into())?;
+        let r = BCryptSignHash(
+            key,
+            pkcs1_info,
+            hash.as_ptr(),
+            32,
+            sig.as_mut_ptr(),
+            128,
+            &mut n,
+            BCRYPT_PAD_PKCS1,
+        );
+        c.eq(r.into(), 0)?;
+        let r = BCryptVerifySignature(
+            key,
+            pkcs1_info,
+            hash.as_ptr(),
+            32,
+            sig.as_ptr(),
+            128,
+            BCRYPT_PAD_PKCS1,
+        );
+        c.eq(r.into(), 0)?;
+        c.eq(BCryptDestroyKey(key).into(), 0)?;
+        BCryptCloseAlgorithmProvider(alg, 0);
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    rsa(&mut c)?;
     random(&mut c)?;
     fips(&mut c)?;
     ciphers(&mut c)?;

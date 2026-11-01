@@ -1101,10 +1101,36 @@ Windows, never shadows the system's DLLs.)
   or allocated), DuplicateKey, Import/ExportKey of KeyDataBlob
   (BCRYPT_KEY_DATA_BLOB_HEADER "KDBM" v1) and OpaqueKeyBlob (gala uses
   the same layout). Properties: ObjectLength, BlockLength, KeyLength(s),
-  ChainingMode, AlgorithmName. RSA only opens (TODO: key pairs,
-  sign/verify, encrypt/decrypt); key derivation fails with
+  ChainingMode, AlgorithmName. RSA (rsa.rs, RustCrypto's `rsa` crate):
+  BCryptGenerateKeyPair/FinalizeKeyPair (exponent 65537),
+  Import/ExportKeyPair of RSAPUBLICBLOB, RSAPRIVATEBLOB (the private
+  exponent computed from the primes) and RSAFULLPRIVATEBLOB,
+  BCryptSignHash/VerifySignature with BCRYPT_PAD_PKCS1 (the DigestInfo
+  of the padding's hash: MD2, MD4, MD5, SHA-1, SHA-2; none without one)
+  and BCRYPT_PAD_PSS (STATUS_INVALID_SIGNATURE when it does not verify),
+  BCryptEncrypt/Decrypt with PKCS1, OAEP (a UTF-8 label only) and
+  PAD_NONE; KeyLength/KeyStrength/BlockLength of a key. The crate needs
+  `alloc`: `user/gala_heap` makes the process heap the global allocator
+  (in bcrypt, and in secur32 because Cargo then enables `digest`'s
+  `alloc` for the whole build); its arithmetic allocates infallibly, so
+  out of memory there ends in the DLL's panic handler (documented
+  exception to checked allocation). Key derivation fails with
   STATUS_NOT_SUPPORTED. Unknown algorithm names are recorded
   (`bcrypt.dll!algorithm <name>`).
+- **Certificates** (crypt32 cert.rs): CertCreateCertificateContext
+  decodes DER X.509 (its own small DER reader: definite lengths, v1-v3,
+  UTCTime/GeneralizedTime, unique ids, extensions) into CERT_CONTEXT and
+  CERT_INFO in one heap block with a copy of the encoding (blobs point
+  into it), the extensions and the dotted OID strings; bad encodings fail
+  with CRYPT_E_ASN1_*. Contexts are reference-counted and keep a property
+  list (data blobs, handles, CERT_KEY_CONTEXT, CRYPT_KEY_PROV_INFO
+  flattened with its strings); the SHA-1/MD5/SHA-256 hash and key
+  identifier properties are computed through bcrypt (loaded on first
+  use). CertGetNameStringW (simple and friendly display, e-mail,
+  attribute, RDN string), CertNameToStrW (X.500 keys, ", " separated,
+  REVERSE), CertFindExtension, CertGetPublicKeyLength,
+  CryptImportPublicKeyInfoEx2 (RSA: an RSAPUBLICBLOB into bcrypt). No
+  certificate stores yet (hCertStore is null).
 - **DPAPI** (crypt32 dpapi.rs): CryptProtectData/CryptUnprotectData with
   a per-machine master key (32 random bytes kept in
   `HKLM\SOFTWARE\gala\DPAPI` MasterKey, made on first use). gala's own
@@ -1125,6 +1151,14 @@ Windows, never shadows the system's DLLs.)
   "Stack overflow."). No processor time is accounted yet (TODO):
   GetSystemTimes reports every processor idle since boot, thread times
   are zero.
+- **Timer queues** (kernel32 pool.rs): CreateTimerQueue(Timer),
+  ChangeTimerQueueTimer, DeleteTimerQueueTimer, DeleteTimerQueue(Ex) on
+  the pool's timers (the WAITORTIMERCALLBACK gets its parameter and
+  TRUE; WT_EXECUTEONLYONCE makes it one-shot, other WT_ flags only
+  choose threads on Windows and are ignored; NULL is the default queue).
+  Deleting with INVALID_HANDLE_VALUE waits for a running callback;
+  otherwise a running callback makes it fail with ERROR_IO_PENDING and
+  the completion event is set by a helper thread when it returns.
 - **Calendars and NLS search** (kernel32 calendar.rs, locale.rs): the
   en-US localized Gregorian calendar (calendar 1) for GetCalendarInfoEx/W
   and EnumCalendarInfoExEx (names, formats, eras, the two-digit year

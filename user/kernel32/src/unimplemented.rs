@@ -10,10 +10,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     CreateFiber
     CreateFileMappingNumaW
     CreateMutexExW
-    CreateTimerQueue
-    CreateTimerQueueTimer
-    DeleteTimerQueueEx
-    DeleteTimerQueueTimer
     FindFirstChangeNotificationW
     FindNextChangeNotification
     GetActiveProcessorCount

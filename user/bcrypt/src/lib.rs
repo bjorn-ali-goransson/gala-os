@@ -5,19 +5,31 @@
 //! (create, hash data, finish, duplicate, reusable) or one shot. The
 //! digests come from the RustCrypto crates (THIRD_PARTY.md); MD2 and MD4
 //! too. Symmetric ciphers (AES, DES, 3DES, 3DES_112, RC2, RC4) with keys
-//! (`cipher`). RSA opens but has no key operations yet, and key
-//! derivation is not there: those fail with STATUS_NOT_SUPPORTED, recorded
+//! (`cipher`). RSA key pairs, signatures and encryption (`rsa`). Key
+//! derivation is not there: it fails with STATUS_NOT_SUPPORTED, recorded
 //! in the ledger.
 //!
-//! Objects (providers, hashes) live on the process heap and are tagged;
-//! a hash's caller-supplied object buffer is not used.
+//! Objects (providers, hashes, keys) live on the process heap and are
+//! tagged; a hash's caller-supplied object buffer is not used.
+//!
+//! The `rsa` crate needs `alloc`: the global allocator is the process
+//! heap (`gala_heap`). Its big-number arithmetic allocates infallibly, so
+//! running out of memory there ends in the panic handler (the thread
+//! spins) instead of an error status; everything else in this DLL checks
+//! its allocations.
 
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+extern crate alloc;
+
 mod cipher;
+mod rsa;
 mod unimplemented;
+
+// The global allocator (for the `rsa` crate).
+use gala_heap as _;
 
 use core::ffi::c_void;
 use hmac::{Hmac, Mac};
@@ -596,6 +608,7 @@ enum Object<'a> {
     Algorithm(Algorithm),
     Hash(&'a mut Hash),
     Key(&'a mut cipher::Key),
+    RsaKey(&'a mut rsa::RsaKey),
 }
 
 fn object<'a>(h: usize) -> Option<Object<'a>> {
@@ -604,6 +617,9 @@ fn object<'a>(h: usize) -> Option<Object<'a>> {
     }
     if let Some(x) = hash(h) {
         return Some(Object::Hash(x));
+    }
+    if let Some(k) = rsa::key(h) {
+        return Some(Object::RsaKey(k));
     }
     cipher::key(h).map(Object::Key)
 }
@@ -628,6 +644,7 @@ pub extern "system" fn BCryptGetProperty(
         Object::Algorithm(a) => (a.kind, a.mode, a.effective_bits, None),
         Object::Hash(x) => (x.alg.kind, Mode::Cbc, 0, None),
         Object::Key(k) => (k.kind, k.mode, 0, Some(k.key_bits())),
+        Object::RsaKey(k) => (Kind::Rsa, Mode::Cbc, 0, Some(k.bits())),
     };
     let mut text = [0u8; 64];
     let dword = |text: &mut [u8; 64], v: u32| {
@@ -653,8 +670,12 @@ pub extern "system" fn BCryptGetProperty(
         || (wide_is(name, "BlockLength") && kind.is_symmetric())
     {
         dword(&mut text, kind.block_len())
-    } else if wide_is(name, "KeyLength") && key_bits.is_some() {
+    } else if (wide_is(name, "KeyLength") || (wide_is(name, "KeyStrength") && kind == Kind::Rsa))
+        && key_bits.is_some()
+    {
         dword(&mut text, key_bits.unwrap_or(0))
+    } else if wide_is(name, "BlockLength") && kind == Kind::Rsa && key_bits.is_some() {
+        dword(&mut text, key_bits.unwrap_or(0).div_ceil(8))
     } else if wide_is(name, "EffectiveKeyLength") && kind == Kind::Rc2 && key_bits.is_none() {
         dword(&mut text, effective)
     } else if wide_is(name, "KeyLengths") && kind.key_lengths().is_some() {
@@ -761,35 +782,38 @@ pub extern "system" fn BCryptExportKey(
     result: *mut u32,
     _flags: u32,
 ) -> Status {
-    let Some(k) = cipher::key(key) else { return STATUS_INVALID_HANDLE };
     if export != 0 {
         missing(b"bcrypt.dll!BCryptExportKey(wrapped)", 0);
         return STATUS_NOT_SUPPORTED;
     }
+    if let Some(k) = rsa::key(key) {
+        return rsa::export(k, blob, out, len, result);
+    }
+    let Some(k) = cipher::key(key) else { return STATUS_INVALID_HANDLE };
     cipher::export(k, blob, out, len, result)
 }
 
-/// No RSA keys exist yet: a handle that is not a symmetric key is invalid.
-pub fn rsa_destroy(_h: usize) -> Status {
-    STATUS_INVALID_HANDLE
+/// A handle that is not a symmetric key: an RSA key, or invalid.
+pub fn rsa_destroy(h: usize) -> Status {
+    rsa::destroy(h)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn rsa_crypt(
-    _h: usize,
-    _encrypt: bool,
-    _input: *const u8,
-    _len: u32,
-    _padding: *const u8,
-    _out: *mut u8,
-    _out_len: u32,
-    _result: *mut u32,
-    _flags: u32,
+    h: usize,
+    encrypt: bool,
+    input: *const u8,
+    len: u32,
+    padding: *const u8,
+    out: *mut u8,
+    out_len: u32,
+    result: *mut u32,
+    flags: u32,
 ) -> Status {
-    STATUS_INVALID_HANDLE
+    rsa::crypt(h, encrypt, input, len, padding, out, out_len, result, flags)
 }
 
-/// Keys, ciphers and key derivation: not there yet (recorded).
+/// Key derivation: not there yet (recorded).
 macro_rules! not_supported {
     ($($name:ident($($arg:ident: $ty:ty),*);)*) => {$(
         #[unsafe(no_mangle)]
@@ -804,7 +828,6 @@ macro_rules! not_supported {
 not_supported! {
     BCryptKeyDerivation(key: usize, params: *const c_void, out: *mut u8, len: u32, result: *mut u32, flags: u32);
     BCryptDeriveKeyPBKDF2(prf: usize, password: *const u8, password_len: u32, salt: *const u8, salt_len: u32, iterations: u64, out: *mut u8, len: u32, flags: u32);
-    BCryptImportKeyPair(h: usize, import: usize, blob: *const u16, key: *mut usize, input: *const u8, len: u32, flags: u32);
 }
 
 /// DllMain (the entry point our link flags name).

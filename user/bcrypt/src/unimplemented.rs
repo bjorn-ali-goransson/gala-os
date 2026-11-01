@@ -17,9 +17,7 @@ gala_stubs::unimplemented_exports!("bcrypt.dll":
     BCryptEnumContexts
     BCryptEnumProviders
     BCryptEnumRegisteredProviders
-    BCryptFinalizeKeyPair
     BCryptFreeBuffer
-    BCryptGenerateKeyPair
     BCryptQueryContextConfiguration
     BCryptQueryContextFunctionConfiguration
     BCryptQueryContextFunctionProperty
@@ -29,7 +27,5 @@ gala_stubs::unimplemented_exports!("bcrypt.dll":
     BCryptResolveProviders
     BCryptSecretAgreement
     BCryptSetContextFunctionProperty
-    BCryptSignHash
     BCryptUnregisterConfigChangeNotify
-    BCryptVerifySignature
 );

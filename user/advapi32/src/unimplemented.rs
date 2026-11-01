@@ -24,7 +24,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     GetSidLengthRequired
     ImpersonateLoggedOnUser
     ImpersonateNamedPipeClient
-    InitializeSid
     IsWellKnownSid
     LockServiceDatabase
     LogonUserExW

@@ -6,6 +6,9 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+// The global allocator: `digest` has `alloc` in builds with bcrypt.
+use gala_heap as _;
+
 mod ntlm;
 mod sspi;
 mod unimplemented;

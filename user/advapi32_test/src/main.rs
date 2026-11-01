@@ -138,6 +138,7 @@ unsafe extern "system" {
         sid: *mut *mut u8,
     ) -> Bool;
     fn FreeSid(sid: *mut u8) -> *mut u8;
+    fn InitializeSid(sid: *mut u8, authority: *const [u8; 6], count: u8) -> Bool;
     fn GetSecurityInfo(
         handle: Handle,
         kind: u32,
@@ -1215,6 +1216,22 @@ fn security_info(c: &mut Checks) -> Result<(), u32> {
 
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    // InitializeSid, then the sub-authorities: S-1-5-32-544.
+    // SAFETY: a SID buffer of ours.
+    unsafe {
+        let mut buf = [0u32; 4];
+        let sid = buf.as_mut_ptr().cast::<u8>();
+        c.ok(InitializeSid(sid, &NT_AUTHORITY, 2) != 0, 0)?;
+        *GetSidSubAuthority(sid, 0) = 32;
+        *GetSidSubAuthority(sid, 1) = 544;
+        let mut admins = core::ptr::null_mut();
+        c.ok(
+            AllocateAndInitializeSid(&NT_AUTHORITY, 2, 32, 544, 0, 0, 0, 0, 0, 0, &mut admins) != 0,
+            0,
+        )?;
+        c.ok(IsValidSid(sid) != 0 && EqualSid(sid, admins) != 0 && GetLengthSid(sid) == 16, 0)?;
+        FreeSid(admins);
+    }
     security_info(&mut c)?;
     perf(&mut c)?;
     sids(&mut c)?;

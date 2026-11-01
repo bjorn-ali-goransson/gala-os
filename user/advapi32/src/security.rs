@@ -132,6 +132,22 @@ pub extern "system" fn AllocateAndInitializeSid(
     1
 }
 
+/// InitializeSid: the revision, count and authority of a SID in the
+/// caller's buffer; the sub-authorities are left for GetSidSubAuthority.
+#[unsafe(no_mangle)]
+pub extern "system" fn InitializeSid(sid: *mut u8, authority: *const [u8; 6], count: u8) -> i32 {
+    if sid.is_null() || authority.is_null() || usize::from(count) > SID_MAX_SUB_AUTHORITIES {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's buffer of at least the header (8 bytes).
+    unsafe {
+        *sid = 1;
+        *sid.add(1) = count;
+        core::ptr::copy_nonoverlapping((*authority).as_ptr(), sid.add(2), 6);
+    }
+    1
+}
+
 /// FreeSid: frees a SID from AllocateAndInitializeSid; returns NULL.
 #[unsafe(no_mangle)]
 pub extern "system" fn FreeSid(sid: *mut u8) -> *mut u8 {
