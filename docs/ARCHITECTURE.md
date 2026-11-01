@@ -1953,6 +1953,9 @@ memory, and the disk is only written (never read) while running.
   them. Host tests: the record format, replay and snapshot over a boot
   tree (tombstones, a renamed boot directory), the volume (remounts,
   compaction into either area, torn writes and cut-short compactions).
+- In use: SQL Server LocalDB keeps a database across a reboot
+  (`sqllocaldb_persist`, pending: the LocalDB download and 3 GiB);
+  its page writes make about 64 MB of log for one session.
 - Limits and TODO: all kept files are in memory (and are read from the
   disk only at boot); a snapshot is built in memory under the file
   system's lock (twice the kept data, briefly); writes through mapped

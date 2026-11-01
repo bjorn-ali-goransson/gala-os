@@ -1342,7 +1342,7 @@ const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long scenario `name` may run.
 fn scenario_timeout(name: &str) -> Duration {
-    if name == "elasticsearch" || name == "sqllocaldb" {
+    if name == "elasticsearch" || name.starts_with("sqllocaldb") {
         ELASTICSEARCH_TIMEOUT
     } else if SLOW_SCENARIOS.contains(&name) {
         SLOW_TIMEOUT
@@ -1868,7 +1868,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &["elasticsearch", "sqllocaldb", "sshd"];
+const PENDING: &[&str] = &["elasticsearch", "sqllocaldb", "sqllocaldb_persist", "sshd"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -2754,6 +2754,16 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // LocalDB across a reboot (pending, like sqllocaldb; `persist`):
+        // the first boot (DISK_SCENARIOS) creates galadb with a row and
+        // shuts the instance down, this one starts it again and reads the
+        // row back.
+        name: "sqllocaldb_persist",
+        cmdline: "qemu_exit persist run=tds_test.exe args=persist",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["tds_test: start after a reboot", "tds_test: row: [kept]", "tds_test: ok"],
+    },
+    Scenario {
         // P1 step 4 (pending): Elasticsearch 8.15 on the JDK, started as its
         // elasticsearch.bat does (gala has no cmd.exe): the CLI launcher,
         // which starts the server as a second java.exe. Single node, no
@@ -3200,8 +3210,12 @@ fn events_flag() -> String {
 
 /// Scenarios that ship a named set of EXTRA_MODULES instead of their own
 /// (the same set: they share a VM).
-const MODULE_SETS: &[(&str, &str)] =
-    &[("dotnet_info", "dotnet"), ("dotnet_hello", "dotnet"), ("pwsh_hello", "pwsh")];
+const MODULE_SETS: &[(&str, &str)] = &[
+    ("dotnet_info", "dotnet"),
+    ("dotnet_hello", "dotnet"),
+    ("pwsh_hello", "pwsh"),
+    ("sqllocaldb_persist", "sqllocaldb"),
+];
 
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
@@ -3805,7 +3819,7 @@ struct DiskScenario {
     size: usize,
     /// What to put on the fresh (zeroed) image.
     setup: fn(&mut [u8]),
-    /// What the image must hold after the last boot.
+    /// What the image must hold after the last boot (its first MiB).
     check: fn(&[u8]) -> Result,
     /// Boots of the same image before the judged one, each with the
     /// lines its serial log must have (files kept across a reboot).
@@ -3819,6 +3833,14 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         setup: disk_test_setup,
         check: disk_test_check,
         earlier_boots: &[],
+    },
+    DiskScenario {
+        // LocalDB's data files stay on the disk (twice: two log areas).
+        name: "sqllocaldb_persist",
+        size: 1 << 30,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[&["tds_test: created", "exited with status 0x00000000"]],
     },
     DiskScenario {
         name: "persist_test",
@@ -3855,17 +3877,27 @@ fn disk_test_check(image: &[u8]) -> Result {
 /// Makes scenario `name`'s fresh disk image next to `iso`, if it has one.
 fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
     let Some(d) = disk_scenario(name) else { return Ok(None) };
-    let mut image = vec![0u8; d.size];
+    // What setup writes goes in the first MiB; the rest is a sparse file.
+    let mut image = vec![0u8; d.size.min(1 << 20)];
     (d.setup)(&mut image);
     let path = iso.with_extension("disk.img");
-    fs::write(&path, &image).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    let made = fs::File::create(&path).and_then(|f| {
+        use std::io::Write;
+        f.set_len(d.size as u64)?;
+        (&f).write_all(&image)
+    });
+    made.map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(Some(path))
 }
 
 /// Checks scenario `name`'s disk image after its run.
 fn check_disk(name: &str, path: &Path) -> Result {
     let Some(d) = disk_scenario(name) else { return Ok(()) };
-    let image = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    // The first MiB (what checks look at; images can be large).
+    let mut image = vec![0u8; d.size.min(1 << 20)];
+    fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut image))
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     (d.check)(&image)
 }
 

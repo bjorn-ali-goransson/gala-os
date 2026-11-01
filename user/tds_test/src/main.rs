@@ -19,6 +19,16 @@
 //! - then starts the same instance again as SqlLocalDB starts an existing
 //!   one (without the first-start arguments) and does the same.
 //!
+//! With the argument `create` it starts the instance once (first start)
+//! and, once tempdb is online, creates database `galadb` with table
+//! `dbo.t` holding the row (1, N'kept'), then shuts down and prints
+//! `tds_test: created`. With `check` it starts the existing instance once
+//! and reads that row back (`SELECT name FROM galadb.dbo.t WHERE id = 1`:
+//! one row, `kept`): a database kept across a reboot (D2, `persist`).
+//! With `persist` it does `check` if `C:\sql\created.txt` exists, else
+//! `create` and then writes that file (the same boot command line serves
+//! both boots of the scenario).
+//!
 //! Prints `tds_test: ok` or exits with the number of the failing step.
 
 #![no_std]
@@ -66,6 +76,8 @@ struct ProcessInformation {
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
+    fn GetCommandLineW() -> *const u16;
+    fn GetFileAttributesW(name: *const u16) -> u32;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> i32;
     fn ReadFile(h: Handle, buf: *mut u8, len: u32, read: *mut u32, ov: *mut c_void) -> i32;
     fn CreateFileW(
@@ -763,9 +775,10 @@ fn batch(c: &mut Conn, sql: &str, step: u32) -> Result<Seen, u32> {
 }
 
 /// One start of the instance with command line `args`: connect, log in,
-/// query, wait for tempdb, shut the server down and wait for sqlservr.exe
-/// to end.
-fn session(args: &str, label: &[u8]) -> Result<(), u32> {
+/// query, wait for tempdb, run `extra` (each batch with the number of rows
+/// it must return), shut the server down and wait for sqlservr.exe to
+/// end.
+fn session(args: &str, label: &[u8], extra: &[(&str, u32)]) -> Result<(), u32> {
     out(b"tds_test: ");
     out(label);
     out(b"\r\n");
@@ -818,6 +831,15 @@ fn session(args: &str, label: &[u8]) -> Result<(), u32> {
     if !online {
         return Err(fail(36, b"tempdb not online", 0));
     }
+    for &(sql, rows) in extra {
+        let seen = batch(&mut c, sql, 50)?;
+        if let Some(e) = seen.error {
+            return Err(fail(52, b"batch failed", e));
+        }
+        if seen.rows != rows {
+            return Err(fail(53, b"batch rows", seen.rows));
+        }
+    }
     out(b"tds_test: shutting down\r\n");
     // The server may close the pipe before its answer is read (it is
     // ending): then only its exit tells (the scenario also checks its log).
@@ -846,9 +868,81 @@ fn session(args: &str, label: &[u8]) -> Result<(), u32> {
     Ok(())
 }
 
+/// Whether the command line has the word `word` after the program.
+fn argument(word: &str) -> bool {
+    // SAFETY: the process's command line, NUL-terminated.
+    let line = unsafe { GetCommandLineW() };
+    let mut len = 0;
+    // SAFETY: within the NUL-terminated string.
+    while unsafe { *line.add(len) } != 0 {
+        len += 1;
+    }
+    // SAFETY: `len` units are readable.
+    let line = unsafe { core::slice::from_raw_parts(line, len) };
+    let word: [u16; 16] = {
+        let mut w = [0u16; 16];
+        for (d, b) in w.iter_mut().zip(word.bytes()) {
+            *d = u16::from(b);
+        }
+        w
+    };
+    let word = &word[..word.iter().position(|&u| u == 0).unwrap_or(16)];
+    line.split(|&u| u == u16::from(b' ')).skip(1).any(|a| a == word)
+}
+
+/// C:\sql\created.txt, NUL-terminated.
+fn marker() -> [u16; 24] {
+    let mut m = [0u16; 24];
+    wide("C:\\sql\\created.txt", &mut m);
+    m
+}
+
 fn run() -> Result<(), u32> {
-    session(FIRST_START, b"first start of the instance")?;
-    session(START, b"second start")
+    let persist = argument("persist");
+    let created = persist && {
+        // SAFETY: a NUL-terminated path.
+        unsafe { GetFileAttributesW(marker().as_ptr()) != u32::MAX }
+    };
+    if argument("create") || (persist && !created) {
+        session(
+            FIRST_START,
+            b"first start of the instance",
+            &[
+                ("CREATE DATABASE galadb", 0),
+                ("CREATE TABLE galadb.dbo.t (id int, name nvarchar(20))", 0),
+                ("INSERT galadb.dbo.t VALUES (1, N'kept')", 0),
+            ],
+        )?;
+        out(b"tds_test: created\r\n");
+        if persist {
+            // SAFETY: a NUL-terminated path; the handle is closed.
+            unsafe {
+                let h = CreateFileW(
+                    marker().as_ptr(),
+                    0x4000_0000, // GENERIC_WRITE
+                    0,
+                    core::ptr::null_mut(),
+                    2, // CREATE_ALWAYS
+                    0,
+                    core::ptr::null_mut(),
+                );
+                if h as isize == -1 {
+                    return Err(fail(54, b"marker", GetLastError()));
+                }
+                CloseHandle(h);
+            }
+        }
+        return Ok(());
+    }
+    if argument("check") || created {
+        return session(
+            START,
+            b"start after a reboot",
+            &[("SELECT name FROM galadb.dbo.t WHERE id = 1", 1)],
+        );
+    }
+    session(FIRST_START, b"first start of the instance", &[])?;
+    session(START, b"second start", &[])
 }
 
 #[unsafe(no_mangle)]

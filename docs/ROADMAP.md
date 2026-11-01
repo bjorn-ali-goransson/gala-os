@@ -1022,8 +1022,16 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       (2026-11-01)**: the registry's changes (keys, values, descriptors;
       not volatile keys) are records in `C:\Windows\System32\config\
       gala.reglog`, which D2 keeps, replayed after the seed
-      (`persist_test`'s registry part). Next: LocalDB across a reboot
-      (create a database, reboot, query it), then MinGit. Open: the JDK's console path (GetConsoleMode succeeding
+      (`persist_test`'s registry part). **LocalDB across a reboot works
+      (2026-11-01)**: the pending `sqllocaldb_persist` scenario boots one
+      1 GiB disk twice with `persist`; `tds_test persist` creates `galadb`
+      with a table and a row in the first boot (the files land in
+      C:\Users\gala) and shuts the instance down, the second boot replays
+      about 109,000 file changes (64 MB of log) and 7 registry changes,
+      SQL Server starts galadb again and `SELECT name FROM galadb.dbo.t`
+      returns `kept`. Nothing needed fixing. Still seen: "unexpected error
+      while checking the sector size" for new database files (non-fatal,
+      as before). Next: MinGit. Open: the JDK's console path (GetConsoleMode succeeding
       on the standard handles made java_http fail intermittently).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
