@@ -504,6 +504,19 @@ pub extern "system" fn CoInitialize(reserved: *mut c_void) -> HResult {
     CoInitializeEx(reserved, 2)
 }
 
+/// OleInitialize(reserved): COM in a single-threaded apartment
+/// (CoInitializeEx's result: S_OK, then S_FALSE). OLE's own parts
+/// (clipboard, drag and drop) need no setup here yet.
+#[unsafe(no_mangle)]
+pub extern "system" fn OleInitialize(reserved: *mut c_void) -> HResult {
+    CoInitializeEx(reserved, 2)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn OleUninitialize() {
+    CoUninitialize();
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn CoUninitialize() {
     let Some(state) = thread_state() else { return };

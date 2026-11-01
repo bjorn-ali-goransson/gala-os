@@ -14,7 +14,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 type Handle = *mut c_void;
-type Hwnd = usize;
+pub(crate) type Hwnd = usize;
 pub type WndProc = extern "system" fn(Hwnd, u32, usize, isize) -> isize;
 
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -222,7 +222,12 @@ fn wake() {
     unsafe { SetEvent(event()) };
 }
 
-fn me() -> u32 {
+pub(crate) fn set_last_error(code: u32) {
+    // SAFETY: a plain call.
+    unsafe { SetLastError(code) };
+}
+
+pub(crate) fn me() -> u32 {
     // SAFETY: a plain call.
     unsafe { GetCurrentThreadId() }
 }
@@ -242,7 +247,7 @@ fn window(hwnd: Hwnd) -> Option<Window> {
     with(|s| s.windows[i].used.then_some(s.windows[i]))
 }
 
-fn unsupported(what: &[u8], detail: u64) {
+pub(crate) fn unsupported(what: &[u8], detail: u64) {
     // SAFETY: our string.
     unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, detail) };
 }
@@ -558,6 +563,29 @@ pub extern "system" fn CreateWindowExW(
         ex_style,
     };
     let lp = &cs as *const CreateStructW as isize;
+    // WH_CBT first: HCBT_CREATEWND with a CBT_CREATEWND (the
+    // CREATESTRUCT, the window it goes after); nonzero refuses the window,
+    // which then goes without a message.
+    if crate::hook::any(crate::hook::WH_CBT) {
+        let cbt: [isize; 2] = [lp, 0];
+        let refused = crate::hook::call(
+            crate::hook::WH_CBT,
+            crate::hook::HCBT_CREATEWND,
+            hwnd,
+            cbt.as_ptr() as isize,
+        );
+        if refused != 0 {
+            let gone = with(|s| core::mem::replace(&mut s.windows[i], NO_WINDOW));
+            // SAFETY: the window's buffer and desktop window.
+            unsafe {
+                if gone.desktop != 0 {
+                    GalaWindowDestroy(gone.desktop);
+                }
+                VirtualFree(gone.pixels.cast(), 0, 0x8000);
+            }
+            return 0;
+        }
+    }
     if SendMessageW(hwnd, WM_NCCREATE, 0, lp) == 0 || SendMessageW(hwnd, WM_CREATE, 0, lp) == -1 {
         DestroyWindow(hwnd);
         return 0;
@@ -576,9 +604,11 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
         unsafe { SetLastError(ERROR_INVALID_WINDOW_HANDLE) };
         return 0;
     }
+    crate::hook::call(crate::hook::WH_CBT, crate::hook::HCBT_DESTROYWND, hwnd, 0);
     SendMessageW(hwnd, WM_DESTROY, 0, 0);
     SendMessageW(hwnd, WM_NCDESTROY, 0, 0);
     let Some(i) = index_of(hwnd) else { return 0 };
+    crate::timer::window_destroyed(hwnd);
     let gone = with(|s| {
         let w = s.windows[i];
         s.windows[i] = NO_WINDOW;
@@ -1064,6 +1094,19 @@ pub extern "system" fn GetQueueStatus(flags: u32) -> u32 {
 /// SendMessageW: the window procedure, called now on this thread.
 #[unsafe(no_mangle)]
 pub extern "system" fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
+    // WH_CALLWNDPROC sees it first: a CWPSTRUCT (lParam, wParam, message,
+    // window), wParam nonzero (sent by this thread).
+    if crate::hook::any(crate::hook::WH_CALLWNDPROC) {
+        #[repr(C)]
+        struct CwpStruct {
+            lparam: isize,
+            wparam: usize,
+            message: u32,
+            hwnd: Hwnd,
+        }
+        let cwp = CwpStruct { lparam, wparam, message: msg, hwnd };
+        crate::hook::call(crate::hook::WH_CALLWNDPROC, 0, 1, &cwp as *const CwpStruct as isize);
+    }
     match window(hwnd) {
         Some(Window { proc_: Some(p), .. }) => p(hwnd, msg, wparam, lparam),
         Some(_) => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -1085,7 +1128,7 @@ fn post(thread: u32, msg: Msg) -> bool {
     ok
 }
 
-fn message(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> Msg {
+pub(crate) fn message(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> Msg {
     // SAFETY: a plain call.
     Msg { hwnd, message, wparam, lparam, time: unsafe { GetTickCount() }, pt: [0; 2], private: 0 }
 }
@@ -1351,6 +1394,17 @@ pub extern "system" fn GetAsyncKeyState(vk: i32) -> i16 {
 /// in order (the desktop's input first moved in), then WM_PAINT for an
 /// invalid visible window. Removed if `remove`.
 fn next(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
+    let mut m = next_raw(hwnd, min, max, remove)?;
+    // WH_GETMESSAGE sees (and may change) it: wParam PM_REMOVE or
+    // PM_NOREMOVE.
+    if crate::hook::any(crate::hook::WH_GETMESSAGE) {
+        let lp = &mut m as *mut Msg as isize;
+        crate::hook::call(crate::hook::WH_GETMESSAGE, 0, usize::from(remove), lp);
+    }
+    Some(m)
+}
+
+fn next_raw(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
     pump();
     let thread = me();
     let fits = |m: &Msg| {
@@ -1366,13 +1420,11 @@ fn next(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
             }
             return Some(q.msg);
         }
-        let i = s
-            .windows
-            .iter()
-            .position(|w| w.used && w.thread == thread && w.invalid && w.visible)?;
-        let m = message(hwnd_of(i), WM_PAINT, 0, 0);
-        fits(&m).then_some(m)
+        let i =
+            s.windows.iter().position(|w| w.used && w.thread == thread && w.invalid && w.visible);
+        i.map(|i| message(hwnd_of(i), WM_PAINT, 0, 0)).filter(|m| fits(m))
     })
+    .or_else(|| crate::timer::due(fits, remove))
 }
 
 #[unsafe(no_mangle)]
@@ -1383,8 +1435,9 @@ pub extern "system" fn GetMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32
             unsafe { *msg = m };
             return i32::from(m.message != WM_QUIT);
         }
+        // Until a message comes or the next timer is due.
         // SAFETY: our event.
-        unsafe { WaitForSingleObject(event(), 0xffff_ffff) };
+        unsafe { WaitForSingleObject(event(), crate::timer::wait_ms()) };
     }
 }
 
@@ -1427,6 +1480,15 @@ pub extern "system" fn PeekMessageA(
 pub extern "system" fn DispatchMessageW(msg: *const Msg) -> isize {
     // SAFETY: the caller's MSG.
     let m = unsafe { *msg };
+    // WM_TIMER with a TIMERPROC: the procedure, not the window's.
+    if m.message == crate::timer::WM_TIMER && m.lparam != 0 {
+        type TimerProc = extern "system" fn(Hwnd, u32, usize, u32);
+        // SAFETY: the TIMERPROC SetTimer was given (WM_TIMER's lParam).
+        let p = unsafe { core::mem::transmute::<isize, TimerProc>(m.lparam) };
+        // SAFETY: a plain call.
+        p(m.hwnd, m.message, m.wparam, unsafe { GetTickCount() });
+        return 0;
+    }
     if m.hwnd == 0 {
         return 0;
     }

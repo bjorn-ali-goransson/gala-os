@@ -39,7 +39,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     RegisterServiceCtrlHandlerExW
     RegisterServiceCtrlHandlerW
     SetEntriesInAclA
-    SetSecurityDescriptorGroup
     SetServiceBits
     SetServiceStatus
     StartServiceA
@@ -51,6 +50,4 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     CredReadW
     CredWriteW
     CryptSignHashA
-    SetSecurityDescriptorControl
-    SetSecurityDescriptorSacl
 );

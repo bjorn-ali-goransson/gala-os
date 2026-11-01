@@ -416,3 +416,33 @@ pub extern "system" fn CommandLineToArgvW(line: *const u16, count: *mut i32) -> 
         argv
     }
 }
+
+/// The process's explicit AppUserModelID (the taskbar's grouping key), up
+/// to 128 characters.
+static mut APP_ID: [u16; 129] = [0; 129];
+
+/// SetCurrentProcessExplicitAppUserModelID(id): kept for the process;
+/// S_OK, or E_INVALIDARG for NULL or more than 128 characters.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetCurrentProcessExplicitAppUserModelID(id: *const u16) -> i32 {
+    const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
+    if id.is_null() {
+        return E_INVALIDARG;
+    }
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated string, read up to 129 units.
+    while n <= 128 && unsafe { *id.add(n) } != 0 {
+        n += 1;
+    }
+    if n > 128 {
+        return E_INVALIDARG;
+    }
+    // SAFETY: a process-wide setting written as a whole; the source is the
+    // caller's string of `n` units.
+    unsafe {
+        let dst = &raw mut APP_ID;
+        core::ptr::copy_nonoverlapping(id, (*dst).as_mut_ptr(), n);
+        (*dst)[n] = 0;
+    }
+    0
+}

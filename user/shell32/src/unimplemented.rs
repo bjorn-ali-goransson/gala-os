@@ -18,7 +18,6 @@ gala_stubs::unimplemented_exports!("shell32.dll":
     SHGetMalloc
     SHGetPathFromIDListW
     SHGetSpecialFolderLocation
-    SetCurrentProcessExplicitAppUserModelID
     ShellExecuteExW
     Shell_NotifyIconW
 );

@@ -13,7 +13,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     AppendMenuW
     BeginDeferWindowPos
     BringWindowToTop
-    CallNextHookEx
     CallWindowProcW
     ChangeDisplaySettingsExW
     CheckMenuItem
@@ -115,7 +114,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     IsRectEmpty
     IsWindowEnabled
     IsZoomed
-    KillTimer
     LoadAcceleratorsW
     LoadBitmapW
     LoadCursorFromFileW
@@ -150,20 +148,17 @@ gala_stubs::unimplemented_exports!("user32.dll":
     SetRect
     SetRectEmpty
     SetScrollInfo
-    SetTimer
     SetWindowLongW
     SetWindowPlacement
     SetWindowPos
     SetWindowRgn
     SetWindowTextW
-    SetWindowsHookExW
     ShowCaret
     ShowCursor
     SystemParametersInfoW
     ToUnicode
     TrackPopupMenu
     TranslateAcceleratorW
-    UnhookWindowsHookEx
     UnionRect
     UnregisterClassW
     UnregisterHotKey

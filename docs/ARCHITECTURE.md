@@ -2136,6 +2136,23 @@ A small window manager and shell, in the kernel for now.
   BeginPaint and GetDC return a gdi32 surface DC over it and EndPaint /
   ReleaseDC present the buffer. gdi32 is loaded lazily with LoadLibrary,
   so console programs that import user32 do not need it.
+- **Hooks** (`user/user32/src/hook.rs`): per kind and thread, newest
+  first; CallNextHookEx ignores its handle (as documented) and continues
+  from the hook running on the thread. WH_CBT is called on creation
+  (HCBT_CREATEWND before any message, a nonzero result refuses the
+  window) and destruction (HCBT_DESTROYWND), WH_GETMESSAGE when
+  GetMessage/PeekMessage return a message (the hook may change it),
+  WH_CALLWNDPROC before SendMessage calls a procedure. Keyboard and mouse
+  hooks are kept but not called yet; global hooks are refused (ledger).
+- **Timers** (`user/user32/src/timer.rs`): WM_TIMER is made on demand
+  when a timer of the asking thread is due, after posted messages and
+  WM_PAINT; one per due timer (no pile-up); GetMessage waits until the
+  next timer. A TIMERPROC rides in lParam and DispatchMessage calls it.
+  Intervals clamp to 10 ms .. 0x7fffffff; a window's timers go with it.
+  Checked by `user32_test` (C, mingw), which also covers the small
+  functions wx calls on its way (OleInitialize, SetThreadLocale on the
+  TEB's CurrentLocale, SetSecurityDescriptorControl/Sacl/Group,
+  SetCurrentProcessExplicitAppUserModelID).
 - **gdi32** (`user/gdi32`): an object table (stock objects, solid
   brushes, pens), `GalaCreateSurfaceDC(pixels, w, h, stride)`, PatBlt,
   FillRect support, Rectangle, TextOutW/A and GetTextExtentPoint32W with

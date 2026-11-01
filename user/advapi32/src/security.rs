@@ -906,6 +906,55 @@ pub extern "system" fn SetSecurityDescriptorDacl(
     1
 }
 
+/// SetSecurityDescriptorSacl: as SetSecurityDescriptorDacl, for the
+/// SACL (SE_SACL_PRESENT, SE_SACL_DEFAULTED; an absolute descriptor's
+/// pointer at +24).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetSecurityDescriptorSacl(
+    sd: *mut u8,
+    present: i32,
+    sacl: *mut u8,
+    defaulted: i32,
+) -> i32 {
+    const SE_SACL_DEFAULTED: u16 = 0x20;
+    if IsValidSecurityDescriptor(sd) == 0 || control(sd) & SE_SELF_RELATIVE != 0 {
+        return fail(ERROR_INVALID_SECURITY_DESCR, 0);
+    }
+    let mut c = control(sd) & !(SE_SACL_PRESENT | SE_SACL_DEFAULTED);
+    let mut p = core::ptr::null_mut();
+    if present != 0 {
+        c |= SE_SACL_PRESENT;
+        p = sacl;
+        if defaulted != 0 {
+            c |= SE_SACL_DEFAULTED;
+        }
+    }
+    // SAFETY: the caller's absolute descriptor.
+    unsafe {
+        sd.add(2).cast::<u16>().write_unaligned(c);
+        sd.add(24).cast::<*mut u8>().write_unaligned(p);
+    }
+    1
+}
+
+/// SetSecurityDescriptorControl(sd, of_interest, to_set): only the
+/// inheritance bits may change (SE_DACL/SACL_AUTO_INHERIT_REQ,
+/// _AUTO_INHERITED, _PROTECTED); others are ERROR_INVALID_PARAMETER.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetSecurityDescriptorControl(sd: *mut u8, interest: u16, set: u16) -> i32 {
+    const SETTABLE: u16 = 0x0100 | 0x0200 | 0x0400 | 0x0800 | 0x1000 | 0x2000;
+    if (interest | set) & !SETTABLE != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if IsValidSecurityDescriptor(sd) == 0 {
+        return fail(ERROR_INVALID_SECURITY_DESCR, 0);
+    }
+    let c = (control(sd) & !interest) | (set & interest);
+    // SAFETY: the caller's descriptor.
+    unsafe { sd.add(2).cast::<u16>().write_unaligned(c) };
+    1
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSecurityDescriptorDacl(
     sd: *const u8,
@@ -948,6 +997,26 @@ pub extern "system" fn SetSecurityDescriptorOwner(
         let c = (control(sd) & !1) | u16::from(defaulted != 0);
         sd.add(2).cast::<u16>().write_unaligned(c);
         sd.add(8).cast::<*mut u8>().write_unaligned(owner);
+    }
+    1
+}
+
+/// SetSecurityDescriptorGroup: the primary group of an absolute
+/// descriptor (+16; SE_GROUP_DEFAULTED is 2).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetSecurityDescriptorGroup(
+    sd: *mut u8,
+    group: *mut u8,
+    defaulted: i32,
+) -> i32 {
+    if IsValidSecurityDescriptor(sd) == 0 || control(sd) & SE_SELF_RELATIVE != 0 {
+        return fail(ERROR_INVALID_SECURITY_DESCR, 0);
+    }
+    // SAFETY: the caller's absolute descriptor.
+    unsafe {
+        let c = (control(sd) & !2) | if defaulted != 0 { 2 } else { 0 };
+        sd.add(2).cast::<u16>().write_unaligned(c);
+        sd.add(16).cast::<*mut u8>().write_unaligned(group);
     }
     1
 }

@@ -264,9 +264,37 @@ pub extern "system" fn GetSystemDefaultLCID() -> u32 {
     LANG_EN_US
 }
 
+/// The TEB's CurrentLocale (+0x108): the thread's locale, 0 until
+/// SetThreadLocale (then the user's default, en-US, is reported).
+fn teb_locale() -> *mut u32 {
+    (crate::runtime::teb() + 0x108) as *mut u32
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn GetThreadLocale() -> u32 {
-    LANG_EN_US
+    // SAFETY: the calling thread's own TEB.
+    match unsafe { *teb_locale() } {
+        0 => LANG_EN_US,
+        lcid => lcid,
+    }
+}
+
+/// SetThreadLocale(lcid): the thread's locale (LOCALE_USER_DEFAULT and
+/// LOCALE_SYSTEM_DEFAULT are en-US here); FALSE with
+/// ERROR_INVALID_PARAMETER for an LCID without a language.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetThreadLocale(lcid: u32) -> i32 {
+    let lcid = match lcid {
+        0x0400 | 0x0800 => LANG_EN_US,
+        l => l,
+    };
+    if lcid & 0x3ff == 0 || lcid > 0x000f_ffff {
+        crate::SetLastError(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    // SAFETY: the calling thread's own TEB.
+    unsafe { *teb_locale() = lcid };
+    1
 }
 
 #[unsafe(no_mangle)]

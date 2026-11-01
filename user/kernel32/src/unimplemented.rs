@@ -117,5 +117,4 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     MulDiv
     ReadConsoleOutputCharacterA
     SetThreadExecutionState
-    SetThreadLocale
 );

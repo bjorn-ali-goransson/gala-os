@@ -582,6 +582,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("nginx", "crypt32.dll", "Windows/System32"),
     ("nginx", "bcryptprimitives.dll", "Windows/System32"),
     ("nginx", "user/bin/nginx.exe", "nginx"),
+    ("user32_test", "ntdll.dll", "Windows/System32"),
+    ("user32_test", "kernel32.dll", "Windows/System32"),
+    ("user32_test", "msvcrt.dll", "Windows/System32"),
+    ("user32_test", "user32.dll", "Windows/System32"),
+    ("user32_test", "gdi32.dll", "Windows/System32"),
+    ("user32_test", "ole32.dll", "Windows/System32"),
+    ("user32_test", "shell32.dll", "Windows/System32"),
+    ("user32_test", "oleaut32.dll", "Windows/System32"),
+    ("user32_test", "advapi32.dll", "Windows/System32"),
+    ("user32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("user32_test", "user/bin/user32_test.exe", "gala"),
     ("msvcrt_test", "ntdll.dll", "Windows/System32"),
     ("msvcrt_test", "kernel32.dll", "Windows/System32"),
     ("msvcrt_test", "msvcrt.dll", "Windows/System32"),
@@ -2661,6 +2672,14 @@ const SCENARIOS: &[Scenario] = &[
             "count=2",
             "busybox.exe (pid 4) exited with status 0x00000003",
         ],
+    },
+    Scenario {
+        // W3: gala's user32 against documented behaviour, for what
+        // wxWidgets (FileZilla) uses (user/user32_test/main.c, mingw).
+        name: "user32_test",
+        cmdline: "qemu_exit run=user32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["user32_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // H3: gala's msvcrt against documented msvcrt behaviour

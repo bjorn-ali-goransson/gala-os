@@ -77,7 +77,7 @@ pub extern "system" fn QueueUserAPC(routine: usize, thread: Handle, data: usize)
 }
 
 /// The current thread's TEB.
-fn teb() -> usize {
+pub(crate) fn teb() -> usize {
     teb_u64(0x30) as usize
 }
 

@@ -11,8 +11,6 @@ gala_stubs::unimplemented_exports!("ole32.dll":
     CoSetProxyBlanket
     CreateBindCtx
     GetHGlobalFromStream
-    OleInitialize
-    OleUninitialize
     CoFreeUnusedLibraries
     CoLockObjectExternal
     DoDragDrop
