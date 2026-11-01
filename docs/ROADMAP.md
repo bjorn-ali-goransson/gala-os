@@ -754,17 +754,26 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         SystemQueryPerformanceCounterInformation, a tick-granular
         GetSystemTimeAsFileTime (it hung after "Default collation"
         calibrating against the tick), user32's Char* functions.
-        Now (2026-11-01) it logs its banner, detects processors and
-        memory, sets up the buffer pool (40 s under TCG), and stops at
-        Service Broker: "A system cryptographic call failed"
-        (NCryptOpenStorageProvider: gala's ncrypt has no key storage
-        provider; SQL Server needs the Microsoft Software Key Storage
-        Provider). Next: that provider (RSA keys in memory), then
-        shlwapi's PathRemoveFileSpecW/PathAppendW and
-        BCryptGetFipsAlgorithmMode (missing, looked up at run time), then
-        whatever follows ("Starting up database 'master'"). Run it with
-        `cargo xtask boot-test sqllocaldb` (about 2 minutes) and read
-        the log after "Default collation". Probed but optional so far:
+        Then the Microsoft Software Key Storage Provider (opens; empty
+        key store), shlwapi's path functions, BCryptGetFipsAlgorithmMode,
+        the SSPI dispatch table (InitSecurityInterfaceW, no packages) and
+        more well-known SIDs. Now (2026-11-01) it logs its banner,
+        detects processors and memory, sets up the buffer pool (40 s
+        under TCG) and stops at Service Broker: "Could not start Service
+        Broker manager" (error 9694, state 27), because SSPI has no NTLM
+        package (the ledger: `secur32.dll!package NTLM`), and shuts down.
+        Next, a plan of its own: (a) an NTLM security package in
+        secur32 (QuerySecurityPackageInfoW/EnumerateSecurityPackagesW,
+        AcquireCredentialsHandleW, Initialize/AcceptSecurityContext with
+        NTLMv2: MD4, HMAC-MD5, RC4 for its session security; MS-NLMP is
+        the public specification), as Service Broker needs at startup and
+        Windows authentication needs for logins; (b) SQL Server encrypts
+        the login packet with TLS on its own self-signed certificate, so
+        clients need Schannel on the server side (and RSA key generation
+        in the software key storage provider for that certificate); a
+        client of ours speaking TDS with SQL authentication can test it.
+        Run it with `cargo xtask boot-test sqllocaldb` (about 2 minutes)
+        and read the log after "Default collation". Probed but optional so far:
         FlsGetValue2, QueryWorkingSetEx, HeapSetInformation, bad-memory
         notifications, NtAllocateUserPhysicalPagesEx, the RtlIpv*W
         functions, dbghelp's SymInitialize, XEGetEngine (looked for in

@@ -1,12 +1,13 @@
-//! gala's secur32.dll: the SSPI functions the JDK's net.dll imports
-//! (NTLM/Negotiate authentication for HTTP). gala has no security
-//! packages: acquiring credentials or a context fails with
+//! gala's secur32.dll: SSPI (the functions the JDK's net.dll imports, the
+//! Unicode ones and the dispatch table SQL Server uses: `sspi`). gala has
+//! no security packages: acquiring credentials or a context fails with
 //! SEC_E_SECPKG_NOT_FOUND (recorded), handles are invalid.
 
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod sspi;
 mod unimplemented;
 
 #[allow(dead_code)]

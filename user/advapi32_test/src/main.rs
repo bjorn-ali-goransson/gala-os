@@ -854,6 +854,12 @@ fn clr(c: &mut Checks) -> Result<(), u32> {
             (22, "S-1-5-18"),
             (17, "S-1-5-11"),
             (27, "S-1-5-32-545"),
+            (33, "S-1-5-32-551"), // WinBuiltinBackupOperatorsSid
+            (51, "S-1-5-64-10"),  // WinNTLMAuthenticationSid
+            (57, "S-1-5-32-558"), // WinBuiltinPerfMonitoringUsersSid
+            (62, "S-1-5-32-568"), // WinBuiltinIUsersSid
+            (63, "S-1-5-17"),     // WinIUserSid
+            (71, "S-1-3-4"),      // WinCreatorOwnerRightsSid
         ] {
             let mut sid = [0u8; 68];
             let mut size = 68u32;

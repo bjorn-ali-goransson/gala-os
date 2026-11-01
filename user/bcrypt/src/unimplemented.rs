@@ -21,7 +21,6 @@ gala_stubs::unimplemented_exports!("bcrypt.dll":
     BCryptFinalizeKeyPair
     BCryptFreeBuffer
     BCryptGenerateKeyPair
-    BCryptGetFipsAlgorithmMode
     BCryptQueryContextConfiguration
     BCryptQueryContextFunctionConfiguration
     BCryptQueryContextFunctionProperty

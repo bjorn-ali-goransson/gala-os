@@ -62,6 +62,28 @@ unsafe extern "system" {
     fn SizeofResource(module: Handle, res: Handle) -> u32;
 }
 
+#[link(name = "secur32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn InitSecurityInterfaceW() -> *const SecurityFunctionTable;
+}
+
+/// SecurityFunctionTableW's start (sspi.h): dwVersion, then the
+/// functions; QuerySecurityPackageInfoW is the 17th, FreeContextBuffer the
+/// 16th.
+#[repr(C)]
+struct SecurityFunctionTable {
+    version: u32,
+    functions: [usize; 31],
+}
+
+#[link(name = "shlwapi", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn PathRemoveFileSpecW(path: *mut u16) -> Bool;
+    fn PathAppendW(path: *mut u16, more: *const u16) -> Bool;
+    fn PathFindFileNameW(path: *const u16) -> *const u16;
+    fn PathFileExistsW(path: *const u16) -> Bool;
+}
+
 #[link(name = "user32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn CharNextExA(code_page: u16, s: *const u8, flags: u32) -> *const u8;
@@ -645,9 +667,63 @@ fn characters(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// shlwapi's path functions, as documented: PathRemoveFileSpecW drops the
+/// last component (a root keeps its backslash; FALSE when nothing is
+/// removed), PathAppendW joins with one backslash, PathFindFileNameW
+/// points at the last component, PathFileExistsW.
+fn paths(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: strings of ours (64 characters, NUL-terminated).
+    unsafe {
+        let mut p = w("C:\\sql\\Binn\\sqlservr.exe");
+        c.eq(PathRemoveFileSpecW(p.as_mut_ptr()) as u64, 1)?;
+        c.text(p.as_ptr(), "C:\\sql\\Binn")?;
+        c.eq(PathRemoveFileSpecW(p.as_mut_ptr()) as u64, 1)?;
+        c.text(p.as_ptr(), "C:\\sql")?;
+        c.eq(PathRemoveFileSpecW(p.as_mut_ptr()) as u64, 1)?;
+        c.text(p.as_ptr(), "C:\\")?;
+        c.eq(PathRemoveFileSpecW(p.as_mut_ptr()) as u64, 0)?;
+        c.text(p.as_ptr(), "C:\\")?;
+        let mut p = w("C:\\gala");
+        c.eq(PathAppendW(p.as_mut_ptr(), w("sub\\x.txt").as_ptr()) as u64, 1)?;
+        c.text(p.as_ptr(), "C:\\gala\\sub\\x.txt")?;
+        let mut p = w("C:\\gala\\");
+        c.eq(PathAppendW(p.as_mut_ptr(), w("y").as_ptr()) as u64, 1)?;
+        c.text(p.as_ptr(), "C:\\gala\\y")?;
+        let p = w("C:\\gala\\file.txt");
+        c.eq(PathFindFileNameW(p.as_ptr()) as u64, p.as_ptr().add(8) as u64)?;
+        c.ok(PathFileExistsW(w("C:\\gala").as_ptr()) != 0, 0)?;
+        c.eq(PathFileExistsW(w("C:\\gala\\no-such").as_ptr()) as u64, 0)?;
+    }
+    Ok(())
+}
+
+/// SSPI's dispatch table (InitSecurityInterfaceW): a table of version 4
+/// or later whose QuerySecurityPackageInfoW does not know a made-up
+/// package (SEC_E_SECPKG_NOT_FOUND) and whose FreeContextBuffer takes
+/// NULL.
+fn sspi(c: &mut Checks) -> Result<(), u32> {
+    type QueryInfo = extern "system" fn(*const u16, *mut *mut c_void) -> i32;
+    type FreeBuffer = extern "system" fn(*mut c_void) -> i32;
+    // SAFETY: the table secur32 returns, and its functions as declared.
+    unsafe {
+        let table = InitSecurityInterfaceW();
+        c.ok(!table.is_null(), 0)?;
+        c.ok((*table).version >= 4, (*table).version.into())?;
+        let query: QueryInfo = core::mem::transmute((*table).functions[16]);
+        let mut info = core::ptr::null_mut();
+        let r = query(w("GalaNoSuchPackage").as_ptr(), &mut info);
+        c.eq(r as u32 as u64, 0x8009_0305)?; // SEC_E_SECPKG_NOT_FOUND
+        let free: FreeBuffer = core::mem::transmute((*table).functions[15]);
+        c.eq(free(core::ptr::null_mut()) as u64, 0)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     characters(&mut c)?;
+    sspi(&mut c)?;
+    paths(&mut c)?;
     user32_ws2(&mut c)?;
     shell(&mut c)?;
     shell_execute(&mut c)?;

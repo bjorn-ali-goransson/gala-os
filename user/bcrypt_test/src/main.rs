@@ -3,6 +3,7 @@
 //! for SHA-1/SHA-2 of "abc", RFC 1321 for MD5, RFC 2202 and RFC 4231
 //! test case 2 for HMAC-SHA1 and HMAC-SHA256):
 //!
+//! - BCryptGetFipsAlgorithmMode: not enforced.
 //! - BCryptGenRandom with BCRYPT_USE_SYSTEM_PREFERRED_RNG, an RNG
 //!   provider and the RNG pseudo-handle; STATUS_INVALID_HANDLE without one.
 //! - BCryptOpenAlgorithmProvider / Close (STATUS_NOT_FOUND for an unknown
@@ -33,6 +34,7 @@ unsafe extern "system" {
 #[link(name = "bcrypt", kind = "raw-dylib")]
 unsafe extern "system" {
     fn BCryptGenRandom(alg: Handle, buf: *mut u8, len: u32, flags: u32) -> u32;
+    fn BCryptGetFipsAlgorithmMode(enabled: *mut u8) -> u32;
     fn BCryptOpenAlgorithmProvider(
         alg: *mut Handle,
         id: *const u16,
@@ -205,6 +207,14 @@ fn random(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// BCryptGetFipsAlgorithmMode: FIPS mode is not enforced (no policy).
+fn fips(c: &mut Checks) -> Result<(), u32> {
+    let mut enabled = 0xffu8;
+    // SAFETY: our output.
+    c.eq(unsafe { BCryptGetFipsAlgorithmMode(&mut enabled) }.into(), 0)?;
+    c.eq(enabled.into(), 0)
+}
+
 fn hashes(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: bcrypt calls with buffers and handles of ours.
     unsafe {
@@ -342,6 +352,7 @@ fn hashes(c: &mut Checks) -> Result<(), u32> {
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     random(&mut c)?;
+    fips(&mut c)?;
     hashes(&mut c)
 }
 

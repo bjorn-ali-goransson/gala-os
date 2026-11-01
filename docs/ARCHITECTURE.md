@@ -1166,6 +1166,14 @@ Windows, never shadows the system's DLLs.)
   ProcessPriorityClass only and records it (Get/SetPriorityClass read
   it back); the scheduler still runs every thread at the normal base
   priority.
+- **Keys and security packages**: ncrypt opens the Microsoft Software Key
+  Storage Provider (also for a null name) with an empty key store (no
+  key opens: NTE_BAD_KEYSET; creating one is not supported yet). secur32
+  has SSPI's dispatch table (InitSecurityInterfaceW, version 4) but no
+  security packages: none are enumerated, a package lookup records its
+  name (`secur32.dll!package NTLM`) and fails with
+  SEC_E_SECPKG_NOT_FOUND, functions taking handles give
+  SEC_E_INVALID_HANDLE.
 - **Message tables**: FormatMessage with FROM_HMODULE reads the module's
   RT_MESSAGETABLE (MESSAGE_RESOURCE_DATA blocks, ANSI or UTF-16 entries),
   then the system's messages if FROM_SYSTEM is also given.

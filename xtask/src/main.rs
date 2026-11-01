@@ -307,6 +307,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("win32_misc_test", "mswsock.dll", "Windows/System32"),
     ("win32_misc_test", "comctl32.dll", "Windows/System32"),
     ("win32_misc_test", "powrprof.dll", "Windows/System32"),
+    ("win32_misc_test", "shlwapi.dll", "Windows/System32"),
+    ("win32_misc_test", "secur32.dll", "Windows/System32"),
     ("win32_misc_test", "shell32.dll", "Windows/System32"),
     ("win32_misc_test", "version.dll", "Windows/System32"),
     ("win32_misc_test", "iphlpapi.dll", "Windows/System32"),

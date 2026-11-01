@@ -35,6 +35,18 @@ unsafe extern "C" {
 }
 
 /// MSVC-target codegen references this marker symbol directly.
+/// BCryptGetFipsAlgorithmMode: whether FIPS mode is enforced; gala has
+/// no such policy (the registry's FipsAlgorithmPolicy is not set).
+#[unsafe(no_mangle)]
+pub extern "system" fn BCryptGetFipsAlgorithmMode(enabled: *mut u8) -> u32 {
+    if enabled.is_null() {
+        return 0xc000_000d; // STATUS_INVALID_PARAMETER
+    }
+    // SAFETY: the caller's output (a BOOLEAN).
+    unsafe { enabled.write(0) };
+    0
+}
+
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 

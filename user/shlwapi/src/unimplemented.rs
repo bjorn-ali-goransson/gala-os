@@ -6,14 +6,11 @@ gala_stubs::unimplemented_exports!("shlwapi.dll":
     PathCanonicalizeW
     PathCombineW
     PathCreateFromUrlW
-    PathFileExistsW
     PathFindExtensionW
-    PathFindFileNameW
     PathIsRelativeW
     PathIsURLW
     PathRemoveBackslashW
     PathRemoveExtensionW
-    PathRemoveFileSpecW
     PathSearchAndQualifyW
     SHCreateStreamOnFileEx
     SHDeleteKeyW

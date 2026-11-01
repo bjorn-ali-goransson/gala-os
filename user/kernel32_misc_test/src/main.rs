@@ -18,7 +18,8 @@
 //! RtlGetNtVersionNumbers (10.0, build 26100 with the high bits); advapi32
 //! RegOpenKeyExW/A of a key that does not exist, RegCloseKey of a
 //! predefined key; GetComputerNameW/ExW; ncrypt's NCryptFreeObject of a
-//! null handle. Prints
+//! null handle, the software key storage provider (opened, no such key,
+//! freed). Prints
 //! `kernel32_misc_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -153,6 +154,14 @@ unsafe extern "system" {
 #[link(name = "ncrypt", kind = "raw-dylib")]
 unsafe extern "system" {
     fn NCryptFreeObject(object: usize) -> i32;
+    fn NCryptOpenStorageProvider(provider: *mut usize, name: *const u16, flags: u32) -> i32;
+    fn NCryptOpenKey(
+        provider: usize,
+        key: *mut usize,
+        name: *const u16,
+        spec: u32,
+        flags: u32,
+    ) -> i32;
 }
 
 #[link(name = "winmm", kind = "raw-dylib")]
@@ -384,6 +393,18 @@ fn heaps(c: &mut Checks) -> Result<(), u32> {
 
         // ncrypt: no object behind a null handle (NTE_INVALID_HANDLE).
         c.eq(NCryptFreeObject(0) as u32 as u64, 0x8009_0026)?;
+        // The software key storage provider (by name, and as the default),
+        // with no key of that name (NTE_BAD_KEYSET); freed.
+        let mut provider = 0;
+        let ksp = wide("Microsoft Software Key Storage Provider");
+        c.eq(NCryptOpenStorageProvider(&mut provider, ksp.as_ptr(), 0) as u64, 0)?;
+        c.ok(provider != 0, 0)?;
+        let mut key = 0;
+        let name = wide("gala-no-such-key");
+        c.eq(NCryptOpenKey(provider, &mut key, name.as_ptr(), 0, 0) as u32 as u64, 0x8009_0016)?;
+        c.eq(NCryptFreeObject(provider) as u64, 0)?;
+        c.eq(NCryptOpenStorageProvider(&mut provider, core::ptr::null(), 0) as u64, 0)?;
+        c.eq(NCryptFreeObject(provider) as u64, 0)?;
 
         // The registry: a key that does not exist, closing a predefined key.
         const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;

@@ -1,8 +1,8 @@
-//! gala's ncrypt.dll (CNG key storage): gala has no key storage
-//! providers yet, so opening one fails with NTE_NOT_SUPPORTED (recorded in
-//! the ledger) and no key or provider handle can exist; the functions are
-//! there because programs bind them at startup (Caddy's TPM attestation
-//! library, for one).
+//! gala's ncrypt.dll (CNG key storage): the Microsoft Software Key
+//! Storage Provider opens (also as the default), with an empty key store:
+//! no key can be opened (NTE_BAD_KEYSET) and creating one is not
+//! supported yet (recorded in the ledger). Other providers (the TPM's
+//! Platform Crypto Provider, smart cards) do not exist here.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -32,23 +32,59 @@ fn unsupported(function: &[u8]) {
     unsafe { GalaRecordMissing(function.as_ptr(), function.len(), 2, 0) };
 }
 
+const NTE_BAD_KEYSET: i32 = 0x8009_0016u32 as i32;
+const NTE_INVALID_PARAMETER: i32 = 0x8009_0027u32 as i32;
+const NTE_PROV_DLL_NOT_FOUND: i32 = 0x8009_001Eu32 as i32;
+
+/// The software provider's handle: the address of this marker (it has no
+/// state; opening it again gives the same handle).
+static SOFTWARE_PROVIDER: u8 = 0;
+
+fn software_provider() -> usize {
+    &raw const SOFTWARE_PROVIDER as usize
+}
+
+/// Whether the NUL-terminated `name` is `want` (ASCII, ignoring case).
+fn named(name: *const u16, want: &str) -> bool {
+    let mut i = 0;
+    for b in want.bytes() {
+        // SAFETY: the caller's NUL-terminated string, read up to its NUL.
+        let c = unsafe { *name.add(i) };
+        if c > 0x7f || (c as u8).to_ascii_lowercase() != b.to_ascii_lowercase() {
+            return false;
+        }
+        i += 1;
+    }
+    // SAFETY: as above.
+    unsafe { *name.add(i) == 0 }
+}
+
+/// NCryptOpenStorageProvider: the Microsoft Software Key Storage Provider
+/// (a null name means it too); no other provider is installed.
 #[unsafe(no_mangle)]
 pub extern "system" fn NCryptOpenStorageProvider(
     provider: *mut usize,
-    _name: *const u16,
+    name: *const u16,
     _flags: u32,
 ) -> i32 {
-    unsupported(b"ncrypt.dll!NCryptOpenStorageProvider");
-    if !provider.is_null() {
+    if provider.is_null() {
+        return NTE_INVALID_PARAMETER;
+    }
+    if !name.is_null() && !named(name, "Microsoft Software Key Storage Provider") {
+        unsupported(b"ncrypt.dll!NCryptOpenStorageProvider(provider)");
         // SAFETY: the caller's output pointer.
         unsafe { *provider = 0 };
+        return NTE_PROV_DLL_NOT_FOUND;
     }
-    NTE_NOT_SUPPORTED
+    // SAFETY: as above.
+    unsafe { *provider = software_provider() };
+    0
 }
 
+/// NCryptFreeObject: providers (no keys exist yet).
 #[unsafe(no_mangle)]
-pub extern "system" fn NCryptFreeObject(_object: usize) -> i32 {
-    NTE_INVALID_HANDLE
+pub extern "system" fn NCryptFreeObject(object: usize) -> i32 {
+    if object == software_provider() { 0 } else { NTE_INVALID_HANDLE }
 }
 
 #[unsafe(no_mangle)]
@@ -74,27 +110,40 @@ pub extern "system" fn NCryptSetProperty(
     NTE_INVALID_HANDLE
 }
 
+/// NCryptOpenKey: the software provider's key store is empty.
 #[unsafe(no_mangle)]
 pub extern "system" fn NCryptOpenKey(
-    _provider: usize,
-    _key: *mut usize,
+    provider: usize,
+    key: *mut usize,
     _name: *const u16,
     _spec: u32,
     _flags: u32,
 ) -> i32 {
-    NTE_INVALID_HANDLE
+    if provider != software_provider() {
+        return NTE_INVALID_HANDLE;
+    }
+    if !key.is_null() {
+        // SAFETY: the caller's output pointer.
+        unsafe { *key = 0 };
+    }
+    NTE_BAD_KEYSET
 }
 
+/// NCryptCreatePersistedKey: not supported yet (recorded).
 #[unsafe(no_mangle)]
 pub extern "system" fn NCryptCreatePersistedKey(
-    _provider: usize,
+    provider: usize,
     _key: *mut usize,
     _algorithm: *const u16,
     _name: *const u16,
     _spec: u32,
     _flags: u32,
 ) -> i32 {
-    NTE_INVALID_HANDLE
+    if provider != software_provider() {
+        return NTE_INVALID_HANDLE;
+    }
+    unsupported(b"ncrypt.dll!NCryptCreatePersistedKey");
+    NTE_NOT_SUPPORTED
 }
 
 #[unsafe(no_mangle)]
