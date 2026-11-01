@@ -768,16 +768,25 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         Now it gets through Service Broker, Query Store, the dedicated
         administrator connection setup and In-Memory OLTP ("initialized
         on lowend machine"); the CLR fails to start (mscoree.dll: not
-        fatal), and it stops at advapi32's PerfStartProviderEx
-        (performance counters). Next: the PerfLib V2 provider functions
-        (PerfStartProviderEx, PerfSetCounterSetInfo, PerfCreateInstance,
-        Perf*CounterValue: counters kept in memory, no consumer reads
-        them), ws2_32's WSAPoll (looked up), the bcrypt algorithms it
-        asks for (BCryptOpenAlgorithmProvider: record their names), then
-        on toward "SQL Server is now ready for client connections"
-        (LocalDB listens on a named pipe). Later: Schannel (TLS) for
-        client logins, SPNEGO for Negotiate, checking NTLM against a
-        Windows peer.
+        fatal). Then (third pass) PerfLib V2 counter providers (kept in
+        memory: no consumer), WSAPoll, the bcrypt algorithms it asks for
+        named in the ledger (`bcrypt.dll!algorithm <name>`). Now it
+        starts the log writer and its system sessions (spid17s), skips
+        the Authenticode checks of its DLLs (WinVerifyTrust is missing:
+        it says so and goes on), and stops at its encryption hierarchy:
+        error 15297 "The certificate, asymmetric key, or private key data
+        is invalid" (state 85), then shuts down, having asked bcrypt for
+        AES, RC2, RC4, DES, 3DES, 3DES_112, RSA, MD2 and MD4. Next, a
+        crypto chunk: those algorithms in gala's bcrypt (symmetric
+        ciphers with BCryptGenerateSymmetricKey/Encrypt/Decrypt in ECB
+        and CBC, key import/export blobs; RSA key import, sign/verify,
+        encrypt/decrypt: RustCrypto's aes, des, rc2, cbc, rsa crates,
+        which need an allocator in bcrypt), test first with the
+        published test vectors; then the certificates in master
+        (crypt32's certificate parsing, CertCreateCertificateContext and
+        friends, if it uses them). Also seen: netapi32's NetShareGetInfo
+        (looked up), CoCreateInstance of a class not registered,
+        NtQuerySystemInformation class 192.
         Run it with `cargo xtask boot-test sqllocaldb` (about 2 minutes)
         and read the log after "Default collation". Probed but optional so far:
         FlsGetValue2, QueryWorkingSetEx, HeapSetInformation, bad-memory

@@ -41,16 +41,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     OpenSCManagerW
     OpenServiceA
     OpenServiceW
-    PerfCreateInstance
-    PerfDecrementULongCounterValue
-    PerfDeleteInstance
-    PerfIncrementULongCounterValue
-    PerfIncrementULongLongCounterValue
-    PerfSetCounterSetInfo
-    PerfSetULongCounterValue
-    PerfSetULongLongCounterValue
-    PerfStartProviderEx
-    PerfStopProvider
     QueryAllTracesW
     QueryServiceConfigA
     QueryServiceConfigW

@@ -214,7 +214,17 @@ pub extern "system" fn BCryptOpenAlgorithmProvider(
     }
     let kinds = [Kind::Md5, Kind::Sha1, Kind::Sha256, Kind::Sha384, Kind::Sha512, Kind::Rng];
     let Some(&kind) = kinds.iter().find(|k| wide_is(id, k.name())) else {
-        missing(b"bcrypt.dll!BCryptOpenAlgorithmProvider(algorithm)", 0);
+        // The ledger names the algorithm: `bcrypt.dll!algorithm <name>`.
+        let mut text = [0u8; 64];
+        let prefix = b"bcrypt.dll!algorithm ";
+        text[..prefix.len()].copy_from_slice(prefix);
+        let mut n = prefix.len();
+        // SAFETY: the caller's NUL-terminated name, read up to its NUL.
+        while n < text.len() && unsafe { *id.add(n - prefix.len()) } != 0 {
+            text[n] = unsafe { *id.add(n - prefix.len()) } as u8;
+            n += 1;
+        }
+        missing(&text[..n], u64::from(flags));
         return STATUS_NOT_FOUND;
     };
     let hmac = flags & BCRYPT_ALG_HANDLE_HMAC_FLAG != 0;

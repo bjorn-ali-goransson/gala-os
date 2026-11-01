@@ -1,6 +1,6 @@
 //! Winsock TCP as programs use it, with the results real Windows gives:
 //! WSAStartup (version 2.2), TCP keep-alive socket options (defaults,
-//! set and read back), WSAIoctl's SIO_BASE_HANDLE and
+//! set and read back), WSAPoll (readable, writable, hung up), WSAIoctl's SIO_BASE_HANDLE and
 //! SIO_BSP_HANDLE(_SELECT/_POLL) (the socket itself), getaddrinfo of the machine's own host name
 //! and of "localhost" (IPv4 addresses), socket/bind/listen/accept/connect on the
 //! loopback address, getsockname (an ephemeral port after binding port 0;
@@ -53,6 +53,7 @@ unsafe extern "system" {
     fn accept(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> Socket;
     fn connect(s: Socket, addr: *const SockaddrIn, len: i32) -> i32;
     fn send(s: Socket, buf: *const u8, len: i32, flags: i32) -> i32;
+    fn WSAPoll(fds: *mut PollFd, count: u32, timeout: i32) -> i32;
     fn recv(s: Socket, buf: *mut u8, len: i32, flags: i32) -> i32;
     fn getsockname(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> i32;
     fn WSAIoctl(
@@ -106,6 +107,19 @@ struct WsaData {
 /// SOCKADDR_IN: family, port and address in network byte order.
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// WSAPOLLFD.
+#[repr(C)]
+struct PollFd {
+    fd: Socket,
+    events: i16,
+    revents: i16,
+}
+
+const POLLRDNORM: i16 = 0x100;
+const POLLWRNORM: i16 = 0x10;
+const POLLHUP: i16 = 0x2;
+
+#[repr(C)]
 struct SockaddrIn {
     family: u16,
     port: u16,
@@ -295,6 +309,22 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         c.eq(len as u64, ADDR_LEN as u64)?;
         c.ok(peer.addr == LOOPBACK && peer.port == client_name.port, peer.port.into())?;
 
+        // WSAPoll: nothing to read yet on the server, the client can
+        // write (at once, timeout 0); then data arrives.
+        let mut fds = [
+            PollFd { fd: server, events: POLLRDNORM, revents: -1 },
+            PollFd { fd: client, events: POLLWRNORM, revents: -1 },
+        ];
+        c.eq(WSAPoll(fds.as_mut_ptr(), 2, 0) as u64, 1)?;
+        c.eq(fds[0].revents as u64, 0)?;
+        c.eq(fds[1].revents as u64, POLLWRNORM as u64)?;
+        c.eq(send(client, b"p".as_ptr(), 1, 0) as u64, 1)?;
+        let mut fds = [PollFd { fd: server, events: POLLRDNORM, revents: 0 }];
+        c.eq(WSAPoll(fds.as_mut_ptr(), 1, 5000) as u64, 1)?;
+        c.eq(fds[0].revents as u64, POLLRDNORM as u64)?;
+        let mut one = [0u8; 1];
+        c.eq(recv(server, one.as_mut_ptr(), 1, 0) as u64, 1)?;
+
         // Round trips.
         c.eq(send(client, b"ping".as_ptr(), 4, 0) as u64, 4)?;
         let mut buf = [0u8; 64];
@@ -319,8 +349,12 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         let first_bad = back.iter().enumerate().position(|(i, &b)| b != pattern(i));
         c.ok(first_bad.is_none(), first_bad.unwrap_or(0) as u64)?;
 
-        // Graceful close: the other end reads end-of-stream.
+        // Graceful close: the other end reads end-of-stream (WSAPoll: the
+        // socket is readable, and hung up).
         c.eq(closesocket(server) as u64, 0)?;
+        let mut fds = [PollFd { fd: client, events: POLLRDNORM, revents: 0 }];
+        c.eq(WSAPoll(fds.as_mut_ptr(), 1, 5000) as u64, 1)?;
+        c.ok(fds[0].revents & (POLLRDNORM | POLLHUP) != 0, fds[0].revents as u64)?;
         c.eq(recv(client, buf.as_mut_ptr(), 64, 0) as u64, 0)?;
         c.eq(closesocket(client) as u64, 0)?;
         c.eq(closesocket(listener) as u64, 0)?;

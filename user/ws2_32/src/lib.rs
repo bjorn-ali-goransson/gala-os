@@ -1259,6 +1259,109 @@ const POLL_WRITE: u32 = 0x4 | 0x40; // WRITE, CONNECT
 const POLL_EXCEPT: u32 = 0x2 | 0x100; // OOB, CONNECT_ERR
 const MAX_SELECT: usize = 512;
 
+/// WSAPOLLFD.
+#[repr(C)]
+pub struct PollFd {
+    fd: Socket,
+    events: i16,
+    revents: i16,
+}
+
+const POLLRDNORM: i16 = 0x100;
+const POLLRDBAND: i16 = 0x200;
+const POLLWRNORM: i16 = 0x10;
+const POLLERR: i16 = 0x1;
+const POLLHUP: i16 = 0x2;
+const POLLNVAL: i16 = 0x4;
+
+/// WSAPoll(fdarray, nfds, timeout): one IOCTL_AFD_POLL over the sockets
+/// (a negative timeout waits for ever); revents as poll's: POLLRDNORM for
+/// data or a connection to accept, POLLRDBAND for out-of-band data,
+/// POLLWRNORM when writable, POLLHUP on a disconnect, POLLERR on a failed
+/// connect; returns how many entries have events. Entries with a negative
+/// socket are skipped.
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAPoll(fds: *mut PollFd, count: u32, timeout: i32) -> i32 {
+    if !started() {
+        return fail(WSANOTINITIALISED);
+    }
+    if fds.is_null() || count as usize > MAX_SELECT {
+        return fail(WSAEINVAL);
+    }
+    // SAFETY: the caller's array of `count` entries.
+    let fds = unsafe { core::slice::from_raw_parts_mut(fds, count as usize) };
+    let mut input = [0u8; 16 + 16 * MAX_SELECT];
+    let mut n = 0usize;
+    for f in fds.iter_mut() {
+        f.revents = 0;
+        if (f.fd as isize) < 0 {
+            continue;
+        }
+        let mut flags = 0x8 | 0x10 | 0x100; // DISCONNECT, ABORT, CONNECT_FAIL: always
+        if f.events & POLLRDNORM != 0 {
+            flags |= 0x1 | 0x80; // RECEIVE, ACCEPT
+        }
+        if f.events & POLLRDBAND != 0 {
+            flags |= 0x2; // RECEIVE_EXPEDITED
+        }
+        if f.events & POLLWRNORM != 0 {
+            flags |= 0x4 | 0x40; // SEND, CONNECT
+        }
+        let at = 16 + 16 * n;
+        input[at..at + 8].copy_from_slice(&(f.fd as u64).to_le_bytes());
+        input[at + 8..at + 12].copy_from_slice(&(flags as u32).to_le_bytes());
+        n += 1;
+    }
+    if n == 0 {
+        return fail(WSAEINVAL);
+    }
+    let ms = (timeout >= 0).then_some(i64::from(timeout));
+    let poll_timeout: i64 = if timeout == 0 { 0 } else { i64::MAX };
+    input[..8].copy_from_slice(&poll_timeout.to_le_bytes());
+    input[8..12].copy_from_slice(&(n as u32).to_le_bytes());
+    let first = usize::from_le_bytes(input[16..24].try_into().unwrap_or([0; 8]));
+    let mut output = [0u8; 16 + 16 * MAX_SELECT];
+    let ready = match poll(first, &input[..16 + 16 * n], &mut output, ms) {
+        0 => u32::from_le_bytes([output[8], output[9], output[10], output[11]]) as usize,
+        0xc000_0120 => 0, // timed out and cancelled
+        0xc000_0008 => {
+            // A handle that is not a socket.
+            for f in fds.iter_mut().filter(|f| (f.fd as isize) >= 0) {
+                f.revents = POLLNVAL;
+            }
+            return fds.len() as i32;
+        }
+        s => return fail(wsa_error(s)),
+    };
+    for e in 0..ready.min(MAX_SELECT) {
+        let at = 16 + 16 * e;
+        let sock = usize::from_le_bytes(output[at..at + 8].try_into().unwrap_or([0; 8]));
+        let events =
+            u32::from_le_bytes([output[at + 8], output[at + 9], output[at + 10], output[at + 11]]);
+        for f in fds.iter_mut().filter(|f| f.fd == sock) {
+            let mut r = 0;
+            if events & (0x1 | 0x80) != 0 {
+                r |= POLLRDNORM;
+            }
+            if events & 0x2 != 0 {
+                r |= POLLRDBAND;
+            }
+            if events & (0x4 | 0x40) != 0 {
+                r |= POLLWRNORM;
+            }
+            if events & (0x8 | 0x10) != 0 {
+                r |= POLLHUP;
+            }
+            if events & 0x100 != 0 {
+                r |= POLLERR;
+            }
+            // Only what was asked for, besides the error conditions.
+            f.revents = r & (f.events | POLLHUP | POLLERR | POLLNVAL);
+        }
+    }
+    fds.iter().filter(|f| f.revents != 0).count() as i32
+}
+
 /// select(nfds, readfds, writefds, exceptfds, timeout): one IOCTL_AFD_POLL
 /// over all the sockets; the timeout is a wait on the request, then a
 /// cancel. Returns how many set memberships are ready.

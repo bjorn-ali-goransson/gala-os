@@ -24,7 +24,7 @@
 //!   EventUnregister) with no session listening; the thread's activity id
 //!   (EventActivityIdControl); software restriction policies (none: a
 //!   script is fully trusted; SaferIdentifyLevel and friends);
-//!   CreateWellKnownSid; secur32's GetUserNameExW.
+//!   CreateWellKnownSid; secur32's GetUserNameExW; PerfLib V2 providers.
 //!
 //! Prints `advapi32_test: ok` or exits with the number of the failing
 //! check.
@@ -57,6 +57,50 @@ unsafe extern "system" {
         flags: u32,
         template: Handle,
     ) -> Handle;
+}
+
+#[link(name = "advapi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn PerfStartProviderEx(
+        provider: *const [u8; 16],
+        context: *const c_void,
+        handle: *mut Handle,
+    ) -> u32;
+    fn PerfStopProvider(handle: Handle) -> u32;
+    fn PerfSetCounterSetInfo(handle: Handle, template: *const u8, size: u32) -> u32;
+    fn PerfCreateInstance(
+        handle: Handle,
+        set: *const [u8; 16],
+        name: *const u16,
+        id: u32,
+    ) -> *mut u8;
+    fn PerfDeleteInstance(handle: Handle, instance: *mut u8) -> u32;
+    fn PerfSetULongCounterValue(handle: Handle, instance: *mut u8, counter: u32, value: u32)
+    -> u32;
+    fn PerfIncrementULongCounterValue(
+        handle: Handle,
+        instance: *mut u8,
+        counter: u32,
+        value: u32,
+    ) -> u32;
+    fn PerfDecrementULongCounterValue(
+        handle: Handle,
+        instance: *mut u8,
+        counter: u32,
+        value: u32,
+    ) -> u32;
+    fn PerfSetULongLongCounterValue(
+        handle: Handle,
+        instance: *mut u8,
+        counter: u32,
+        value: u64,
+    ) -> u32;
+    fn PerfIncrementULongLongCounterValue(
+        handle: Handle,
+        instance: *mut u8,
+        counter: u32,
+        value: u64,
+    ) -> u32;
 }
 
 #[link(name = "advapi32", kind = "raw-dylib")]
@@ -904,8 +948,58 @@ fn clr(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// PerfLib V2 providers (perflib.h), as SQL Server registers its counters:
+/// a provider, a counter set from its template (PERF_COUNTERSET_INFO and
+/// PERF_COUNTER_INFO entries), an instance (PERF_COUNTERSET_INSTANCE: the
+/// set's GUID, size, id), counter values set, incremented and decremented
+/// (ERROR_NOT_FOUND for a counter not in the set); then deleted, stopped.
+fn perf(c: &mut Checks) -> Result<(), u32> {
+    let provider = [0x11u8; 16];
+    let set = [0x22u8; 16];
+    // PERF_COUNTERSET_INFO (40 bytes): set GUID, provider GUID, 2 counters,
+    // PERF_COUNTERSET_MULTI_INSTANCES (2); two PERF_COUNTER_INFO (32 bytes
+    // each): id, type, attrib, size, detail level, scale, offset.
+    let mut template = [0u8; 104];
+    template[..16].copy_from_slice(&set);
+    template[16..32].copy_from_slice(&provider);
+    template[32..36].copy_from_slice(&2u32.to_le_bytes());
+    template[36..40].copy_from_slice(&2u32.to_le_bytes());
+    for (i, (id, kind, size, offset)) in
+        [(1u32, 0x1_0000u32, 4u32, 0u32), (2, 0x1_0100, 8, 8)].into_iter().enumerate()
+    {
+        let at = 40 + 32 * i;
+        template[at..at + 4].copy_from_slice(&id.to_le_bytes());
+        template[at + 4..at + 8].copy_from_slice(&kind.to_le_bytes());
+        template[at + 16..at + 20].copy_from_slice(&size.to_le_bytes());
+        template[at + 20..at + 24].copy_from_slice(&100u32.to_le_bytes()); // novice
+        template[at + 28..at + 32].copy_from_slice(&offset.to_le_bytes());
+    }
+    // SAFETY: perflib calls with buffers of ours.
+    unsafe {
+        let mut h = core::ptr::null_mut();
+        c.eq(PerfStartProviderEx(&provider, core::ptr::null(), &mut h).into(), 0)?;
+        c.ok(!h.is_null(), 0)?;
+        c.eq(PerfSetCounterSetInfo(h, template.as_ptr(), 104).into(), 0)?;
+        let name: [u16; 5] = [0x73, 0x71, 0x6c, 0x31, 0]; // "sql1"
+        let inst = PerfCreateInstance(h, &set, name.as_ptr(), 7);
+        c.ok(!inst.is_null(), GetLastError().into())?;
+        c.ok(*inst.cast::<[u8; 16]>() == set, 0)?;
+        c.eq((*inst.add(20).cast::<u32>()).into(), 7)?; // InstanceId
+        c.eq(PerfSetULongCounterValue(h, inst, 1, 5).into(), 0)?;
+        c.eq(PerfIncrementULongCounterValue(h, inst, 1, 3).into(), 0)?;
+        c.eq(PerfDecrementULongCounterValue(h, inst, 1, 1).into(), 0)?;
+        c.eq(PerfSetULongLongCounterValue(h, inst, 2, 1 << 40).into(), 0)?;
+        c.eq(PerfIncrementULongLongCounterValue(h, inst, 2, 1).into(), 0)?;
+        c.eq(PerfSetULongCounterValue(h, inst, 9, 1).into(), 1168)?; // ERROR_NOT_FOUND
+        c.eq(PerfDeleteInstance(h, inst).into(), 0)?;
+        c.eq(PerfStopProvider(h).into(), 0)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    perf(&mut c)?;
     sids(&mut c)?;
     acls(&mut c)?;
     token(&mut c)?;

@@ -37,6 +37,7 @@ unsafe extern "system" {
 }
 
 mod etw;
+mod perf;
 mod registry;
 mod security;
 mod unimplemented;

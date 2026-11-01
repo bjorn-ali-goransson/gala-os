@@ -1194,6 +1194,11 @@ Windows, never shadows the system's DLLs.)
   impersonate (ImpersonateSelf, SetThreadToken, RevertToSelf): there is
   one user, so impersonating changes nothing but OpenThreadToken, which
   then returns that user's token.
+- **Performance counters**: advapi32's PerfLib V2 provider functions
+  (`user/advapi32/src/perf.rs`) keep providers, counter-set templates and
+  instances (PERF_COUNTERSET_INSTANCE, the data block at the counters'
+  offsets, the name) in memory; values are updated atomically; nothing
+  reads them (gala has no counter consumers).
 - **Threads with attributes**: CreateRemoteThreadEx in the calling
   process creates the thread suspended, applies the attribute list's
   group affinity and ideal processor (a hint), then starts it
