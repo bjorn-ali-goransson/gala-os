@@ -43,11 +43,6 @@ unsafe extern "system" {
 
 // ---- Messages and windows: gala has no windows, so no messages ----
 
-#[unsafe(no_mangle)]
-pub extern "system" fn TranslateMessage(_msg: *const u8) -> i32 {
-    0
-}
-
 /// MsgWaitForMultipleObjects: a plain wait, since no message can arrive.
 #[unsafe(no_mangle)]
 pub extern "system" fn MsgWaitForMultipleObjects(

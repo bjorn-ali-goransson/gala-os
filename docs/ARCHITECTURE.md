@@ -2033,64 +2033,101 @@ modules. Replayed value changes keep the key's last-write time. Tests:
 deleted value and key, a volatile key) and host tests of the records,
 replay and snapshot.
 
-## Windows on the screen (W1)
+## Windows on the screen (W1, W2)
 
-A first window manager, kept small. The parts:
+A small window manager and shell, in the kernel for now.
 
-- **Kernel compositor** (`kernel/src/nt/desktop.rs`): a list of top-level
-  windows, bottom to top, each with an owner process, a screen position,
-  a client size, a caption and a client pixel buffer (0x00RRGGBB). The
-  compositor draws the frame itself (1 px border, 24 px caption with the
-  title in the console's font) and fills the rest of the screen with the
-  desktop colour. Every change returns a damage rectangle which is
-  redrawn row by row through `platform::screen_write_row`; the first use
-  paints the whole screen. Windows of a process that ends are destroyed.
+- **Compositor** (`kernel/src/nt/desktop/`): top-level windows bottom to
+  top, each with an owner process, a screen position, its outer size, a
+  title, a rendered caption bar and a client pixel buffer (0x00RRGGBB).
+  Every screen pixel is composed in layers (`Desktop::pixel`): the
+  wallpaper; each shown window (not hidden, not minimized) with a soft
+  shadow below it and its rounded shape (radius 8 above, 6 below,
+  anti-aliased by 4 x 4 samples) holding the outline, the caption and the
+  client area; the translucent taskbar; the start menu and its shadow;
+  the pointer. Changes collect damage rectangles; `with`, `pointer_event`,
+  `key_event` and `tick` redraw them row by row through
+  `platform::screen_write_row`; the first use paints the whole screen.
+  `paint.rs` has the drawing: integer-only blending and gradients, an ARGB
+  `Canvas` (rounded rectangles, outlines, text in Noto Sans Mono regular
+  and bold 16 px and bold 24 px, RGBA pictures), the shadow falloff
+  (quadratic in the squared distance) and the wallpaper (a sky gradient
+  with stars, a sun with a glow, three ranges of dunes from sums of sines
+  (Bhaskara's approximation), lit by their slope). Windows of a process
+  that ends are destroyed.
+- **Frame**: a 1-pixel outline and a 30-pixel caption (user32's metrics
+  match: `user/user32/src/window.rs` BORDER/CAPTION) with an accent dot,
+  the title (bold when active), minimize and close buttons (46 px; close
+  turns red under the pointer). The active window's caption is indigo,
+  the others slate.
+- **Shell**: the bottom 48 rows are the taskbar: the camel (40 px) as the
+  start button (its click area reaches the screen's corner), a button per
+  window the programs show (in creation order; the active one lit with an
+  orange bar, minimized ones dimmed), and a UTC clock with the date
+  (`tick` every second from the input thread). The start menu (380 x
+  460, above the button) shows the camel, the name and version, the
+  programs of `PROGRAMS` whose files exist (checked outside the desktop's
+  lock before a click), and how many windows are open; an item's click
+  starts its program (`process::launch`: the boot user, its directory
+  current, new console handles).
+- **Mouse** (`desktop::pointer`): a press on the start button toggles the
+  menu; with the menu open, a press elsewhere only closes it. A taskbar
+  button restores a minimized window, minimizes the active one, else
+  raises and activates. A press on a caption raises, activates and starts
+  a drag (the caption stays on the screen); the caption buttons act on
+  release over the same button: minimize, or WM_CLOSE to the program. In a
+  client area: raise, activate, WM_LBUTTONDOWN; moves and releases go to
+  the window under the pointer or the one the button went down in
+  (capture); right button likewise.
+- **Keyboard**: key events go to the active window as WM_KEYDOWN/WM_KEYUP
+  (WM_SYSKEY* with Alt held), lParam packed as Windows does (repeat 1,
+  scan code, extended bit, context and transition bits).
+- **Input to programs**: the desktop queues `InputEvent`s (owner,
+  window id, message, wParam, lParam; at most 512, a move replaces the
+  window's unread move) and signals the owner's event registered with
+  GalaWindowListen (0x7f34) after letting go of its lock. user32 creates
+  its queue event on first use and registers it; `next` (GetMessage,
+  PeekMessage) first moves input in with GalaWindowInput (0x7f35, 24-byte
+  records) to the window's thread, keeping the key state (GetKeyState,
+  GetAsyncKeyState; Caps Lock toggles). TranslateMessage posts WM_CHAR
+  (WM_SYSCHAR) for a key down, US layout with Shift, Caps Lock and Ctrl.
 - **Display seam** (`nt::platform::Display`): `screen_size` and
   `screen_write_row`. The kernel takes the framebuffer from the screen
   console on first use (`console::take_framebuffer`; the console then
-  only writes to the serial port). gala-um has no screen (the window
-  syscalls return STATUS_NOT_SUPPORTED). BIOS boots have no framebuffer
-  either, so screen tests are UEFI scenarios.
+  only writes to the serial port) and starts the input thread. gala-um
+  has no screen (the window syscalls return STATUS_NOT_SUPPORTED). BIOS
+  boots have no framebuffer either, so screen tests are UEFI scenarios.
+- **Devices** (`arch::ps2`, `input.rs`): the i8042 polled every 5 ms from
+  a kernel thread (interrupts off: IRQ 1 and 12 are not routed); the
+  configuration turns both ports on and translation to scan code set 1;
+  mouse 0xF6/0xF4, keyboard 0xF4. Mouse packets with the same buttons are
+  summed per poll; set 1 codes (E0 for extended keys) map to virtual keys.
 - **Syscalls** (gala's own range): GalaWindowCreate(x, y, w, h, title,
   title_len, *id) 0x7f30, GalaWindowShow(id, show) 0x7f31,
   GalaWindowPresent(id, x, y, w, h, pixels, stride) 0x7f32 (copies a
-  client rectangle in), GalaWindowDestroy(id) 0x7f33. Only the owner
-  process may change a window.
+  client rectangle in), GalaWindowDestroy(id) 0x7f33, GalaWindowListen
+  (event) 0x7f34, GalaWindowInput(records, max, *count) 0x7f35. Only the
+  owner process may change a window.
 - **user32** (`user/user32/src/window.rs`): classes, windows
   (HWND = 0x10000 + 16 * slot), one message queue per process (256
-  entries, an auto-reset event), WM_PAINT synthesised by GetMessage /
-  PeekMessage when a visible window is invalid and the queue is empty, as
-  on Windows. Each window owns a client pixel buffer; BeginPaint and GetDC
-  return a gdi32 surface DC over it and EndPaint / ReleaseDC present the
-  buffer. gdi32 is loaded lazily with LoadLibrary, so console programs
-  that import user32 do not need it.
+  entries, an auto-reset event) filtered by thread, WM_PAINT synthesised
+  by GetMessage / PeekMessage when a visible window is invalid and the
+  queue is empty, as on Windows. Each window owns a client pixel buffer;
+  BeginPaint and GetDC return a gdi32 surface DC over it and EndPaint /
+  ReleaseDC present the buffer. gdi32 is loaded lazily with LoadLibrary,
+  so console programs that import user32 do not need it.
 - **gdi32** (`user/gdi32`): an object table (stock objects, solid
   brushes, pens), `GalaCreateSurfaceDC(pixels, w, h, stride)`, PatBlt,
   FillRect support, Rectangle, TextOutW/A and GetTextExtentPoint32W with
   the noto-sans-mono-bitmap font (16 px, basic Latin; transparent and
   opaque background modes).
 
-- **Shell and mouse** (in the compositor for now): the bottom 40 rows
-  are a taskbar with the start button at its left, showing the camel
-  (`kernel/assets/camel32.rgba`, alpha-blended). A left click on it opens
-  the start menu (320 x 400 above it: the 64 px camel, "gala-os" and the
-  version, and the titles of the visible windows, a snapshot taken when
-  it opens); a click on it again or anywhere outside the menu closes it.
-  The pointer is a 12 x 19 arrow drawn on top of everything; it starts in
-  the middle of the screen. Mouse input: `input.rs` starts a kernel
-  thread when the desktop takes the screen; it polls the i8042
-  (`arch::ps2`, interrupts off) every 5 ms, assembles 3-byte PS/2 packets
-  and calls `desktop::pointer_event(dx, dy, buttons)`. Keyboard bytes are
-  read and dropped.
-
-Invariants and limits (TODO): no input for programs yet (W2: messages to
-windows, the keyboard), no child windows
-(CreateWindowEx with WS_CHILD reports unimplemented), one queue per
-process rather than per thread, no window moves or z-order changes after
-creation, no non-client messages (the frame is drawn by the kernel). The
-taskbar and start menu belong in a user-mode shell (an explorer.exe of
-gala's) once programs get input; they are drawn under the desktop's lock
-with interrupts off (a full menu redraw is ~128k pixels).
+Invariants and limits (TODO): composition runs under the desktop's
+IrqMutex with interrupts off (a full-screen redraw is ~1M pixels; drags
+redraw the old and new bounds); no child windows (CreateWindowEx with
+WS_CHILD reports unimplemented); no resizing or maximize; keyboard focus
+is the active top-level window; the shell belongs in a user-mode program
+(an explorer.exe of gala's) later; the clock is UTC.
 
 ## Not done yet
 

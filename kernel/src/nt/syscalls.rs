@@ -101,6 +101,8 @@ pub const GALA_WINDOW_CREATE: u32 = 0x7f30;
 pub const GALA_WINDOW_SHOW: u32 = 0x7f31;
 pub const GALA_WINDOW_PRESENT: u32 = 0x7f32;
 pub const GALA_WINDOW_DESTROY: u32 = 0x7f33;
+pub const GALA_WINDOW_LISTEN: u32 = 0x7f34;
+pub const GALA_WINDOW_INPUT: u32 = 0x7f35;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -266,6 +268,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_SHOW, "GalaWindowShow", 2, gala_window_show),
     (GALA_WINDOW_PRESENT, "GalaWindowPresent", 7, gala_window_present),
     (GALA_WINDOW_DESTROY, "GalaWindowDestroy", 1, gala_window_destroy),
+    (GALA_WINDOW_LISTEN, "GalaWindowListen", 1, gala_window_listen),
+    (GALA_WINDOW_INPUT, "GalaWindowInput", 3, gala_window_input),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1294,6 +1298,42 @@ fn gala_window_destroy(call: &mut Call<'_>) -> NtStatus {
     let id = arg!(call, 0) as u32;
     let owner = call.process.id;
     tri!(super::desktop::with(|d| Ok(((), Some(d.destroy(id, owner)?)))));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowListen(EventHandle): the desktop signals this event
+/// (EVENT_MODIFY_STATE needed) when input arrives for the calling
+/// process's windows.
+fn gala_window_listen(call: &mut Call<'_>) -> NtStatus {
+    let event = tri!(event_object(call, Handle(arg!(call, 0)), EVENT_MODIFY_STATE));
+    if super::platform::screen_size().is_none() {
+        return NtStatus::NOT_SUPPORTED;
+    }
+    tri!(super::desktop::listen(call.process.id, event));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowInput(*Records, MaxRecords, *Count): takes the input waiting
+/// for the calling process's windows, oldest first, without waiting. A
+/// record is 24 bytes: the window's id (u32), the message (u32), wParam
+/// (u64), lParam (u64).
+fn gala_window_input(call: &mut Call<'_>) -> NtStatus {
+    use super::desktop::InputEvent;
+    let (buf, max, count_ptr) =
+        (arg!(call, 0), (arg!(call, 1) as u32).min(64) as usize, arg!(call, 2));
+    let mut events = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 64];
+    let n = super::desktop::take_input(call.process.id, &mut events[..max]);
+    for (i, e) in events[..n].iter().enumerate() {
+        let mut record = [0u8; 24];
+        record[0..4].copy_from_slice(&e.window.to_le_bytes());
+        record[4..8].copy_from_slice(&e.message.to_le_bytes());
+        record[8..16].copy_from_slice(&e.wparam.to_le_bytes());
+        record[16..24].copy_from_slice(&e.lparam.to_le_bytes());
+        if call.process.write(buf + 24 * i as u64, &record).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+    }
+    tri!(call.write_u32(count_ptr, n as u32));
     NtStatus::SUCCESS
 }
 

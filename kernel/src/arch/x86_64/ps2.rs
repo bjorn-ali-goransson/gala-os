@@ -7,8 +7,8 @@
 //! input buffer full (wait before writing), bit 5 = the byte came from
 //! the auxiliary device. Command 0xA8 enables the auxiliary port, 0x20/0x60
 //! read/write the configuration byte, 0xD4 sends the next data byte to
-//! the mouse. Mouse commands 0xF6 (defaults) and 0xF4 (enable reporting)
-//! answer 0xFA.
+//! the mouse, 0xAE enables the keyboard's port. Mouse and keyboard command
+//! 0xF4 (enable reporting/scanning) and mouse 0xF6 (defaults) answer 0xFA.
 
 use super::port::Port;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -85,10 +85,16 @@ impl I8042 {
             return false;
         }
         let Some((config, _)) = self.read_wait() else { return false };
-        // No IRQ 1/12 (bits 0, 1); the auxiliary clock on (bit 5 clear).
-        let config = config & !0x23;
-        if !self.send_command(0x60) || !self.send_data(config) {
+        // No IRQ 1/12 (bits 0, 1); both clocks on (bits 4, 5 clear); the
+        // keyboard's codes translated to scan code set 1 (bit 6).
+        let config = (config & !0x33) | 0x40;
+        if !self.send_command(0x60) || !self.send_data(config) || !self.send_command(0xae) {
             return false;
+        }
+        // The keyboard scans (firmware may have stopped it); no answer is
+        // fine (no keyboard).
+        if self.send_data(0xf4) {
+            let _ = (0..4).any(|_| self.read_wait() == Some((ACK, false)));
         }
         self.mouse_command(0xf6) && self.mouse_command(0xf4)
     }

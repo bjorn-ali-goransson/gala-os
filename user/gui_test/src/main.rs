@@ -9,15 +9,22 @@
 //!   WM_PAINT; BeginPaint gives a DC and rcPaint covering the client
 //!   area; FillRect paints a red rectangle at (20, 20)-(200, 120) and
 //!   TextOutW blue text at (20, 140); EndPaint.
-//! - Another thread posts WM_CLOSE (PostMessageW) after four seconds;
-//!   DefWindowProc destroys the window: WM_DESTROY, where the program
-//!   calls PostQuitMessage(7); GetMessageW then returns 0 with wParam 7;
-//!   IsWindow is FALSE afterwards.
+//! - Input, which xtask gives through QEMU's mouse and keyboard: a left
+//!   click in the client area is WM_LBUTTONDOWN (MK_LBUTTON in wParam, the
+//!   client position in lParam) and WM_LBUTTONUP; the program paints a
+//!   green square there (GetDC/FillRect/ReleaseDC). Typing "hi" gives
+//!   WM_KEYDOWN/WM_KEYUP and, through TranslateMessage, WM_CHAR 'h' and
+//!   'i'; the program draws what was typed in black at (20, 200).
+//! - A click on the window's close button is WM_CLOSE; DefWindowProc
+//!   destroys the window: WM_DESTROY, where the program calls
+//!   PostQuitMessage(7); GetMessageW then returns 0 with wParam 7; IsWindow
+//!   is FALSE afterwards. (A thread posts WM_CLOSE after 30 seconds if no
+//!   click comes: a failure.)
 //!
 //! It prints `gui_test: painted` once it has painted (xtask then checks the
-//! screen: the red rectangle and the text inside the window's client area,
-//! its caption, the desktop) and `gui_test: ok` at the end, or exits with
-//! the number of the failing check.
+//! screen and gives the input), `gui_test: click`, `gui_test: typed hi`, and
+//! `gui_test: ok` at the end, or exits with the number of the failing
+//! check.
 
 #![no_std]
 #![no_main]
@@ -122,6 +129,8 @@ unsafe extern "system" {
     fn DispatchMessageW(msg: *const Msg) -> isize;
     fn PostMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> i32;
     fn PostQuitMessage(code: i32);
+    fn GetDC(hwnd: Hwnd) -> Handle;
+    fn ReleaseDC(hwnd: Hwnd, hdc: Handle) -> i32;
     fn LoadCursorW(instance: Handle, name: *const u16) -> Handle;
 }
 
@@ -173,6 +182,12 @@ const WM_CREATE: u32 = 0x0001;
 const WM_DESTROY: u32 = 0x0002;
 const WM_PAINT: u32 = 0x000f;
 const WM_CLOSE: u32 = 0x0010;
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_CHAR: u32 = 0x0102;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
+const MK_LBUTTON: usize = 1;
+const VK_H: usize = 0x48;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
 const SW_SHOW: i32 = 5;
 const TRANSPARENT: i32 = 1;
@@ -212,6 +227,13 @@ static CREATED: AtomicU32 = AtomicU32::new(0);
 static PAINTS: AtomicU32 = AtomicU32::new(0);
 static DESTROYED: AtomicU32 = AtomicU32::new(0);
 static WINDOW: AtomicUsize = AtomicUsize::new(0);
+static DOWNS: AtomicU32 = AtomicU32::new(0);
+static UPS: AtomicU32 = AtomicU32::new(0);
+static KEYDOWN_H: AtomicU32 = AtomicU32::new(0);
+static TIMED_OUT: AtomicU32 = AtomicU32::new(0);
+/// What was typed (WM_CHAR), as ASCII.
+static TYPED: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
+static TYPED_LEN: AtomicUsize = AtomicUsize::new(0);
 
 fn check(cond: bool, got: u64) -> Result<(), u32> {
     let n = CHECK.fetch_add(1, Ordering::SeqCst) + 1;
@@ -262,8 +284,73 @@ fn paint(hwnd: Hwnd) -> Result<(), u32> {
     Ok(())
 }
 
+/// A 12 x 12 green square centred on client point (x, y).
+fn mark(hwnd: Hwnd, x: i32, y: i32) {
+    // SAFETY: valid window and structures.
+    unsafe {
+        let hdc = GetDC(hwnd);
+        let _ = check(!hdc.is_null(), 0);
+        let green = CreateSolidBrush(0x0000_c000);
+        let r = Rect { left: x - 6, top: y - 6, right: x + 6, bottom: y + 6 };
+        let _ = check(FillRect(hdc, &r, green) != 0, 0);
+        DeleteObject(green);
+        let _ = check(ReleaseDC(hwnd, hdc) == 1, 0);
+    }
+}
+
+/// Draws what was typed at (20, 200).
+fn draw_typed(hwnd: Hwnd) {
+    let n = TYPED_LEN.load(Ordering::SeqCst).min(16);
+    let mut text = [0u16; 16];
+    for (i, t) in text.iter_mut().enumerate().take(n) {
+        *t = TYPED[i].load(Ordering::SeqCst) as u16;
+    }
+    // SAFETY: valid window and text.
+    unsafe {
+        let hdc = GetDC(hwnd);
+        SetTextColor(hdc, 0);
+        SetBkMode(hdc, TRANSPARENT);
+        TextOutW(hdc, 20, 200, text.as_ptr(), n as i32);
+        ReleaseDC(hwnd, hdc);
+    }
+}
+
 extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
     match msg {
+        WM_LBUTTONDOWN => {
+            let (x, y) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
+            let _ = check(wparam & MK_LBUTTON != 0, wparam as u64);
+            let _ = check((0..398).contains(&x) && (0..268).contains(&y), lparam as u64);
+            DOWNS.fetch_add(1, Ordering::SeqCst);
+            mark(hwnd, x, y);
+            out(b"gui_test: click\r\n");
+            0
+        }
+        WM_LBUTTONUP => {
+            let _ = check(wparam & MK_LBUTTON == 0, wparam as u64);
+            UPS.fetch_add(1, Ordering::SeqCst);
+            0
+        }
+        WM_KEYDOWN => {
+            if wparam == VK_H {
+                KEYDOWN_H.fetch_add(1, Ordering::SeqCst);
+            }
+            0
+        }
+        WM_CHAR => {
+            let n = TYPED_LEN.fetch_add(1, Ordering::SeqCst);
+            if n < 16 {
+                TYPED[n].store(wparam as u32, Ordering::SeqCst);
+            }
+            draw_typed(hwnd);
+            if n == 1
+                && TYPED[0].load(Ordering::SeqCst) == u32::from(b'h')
+                && wparam == usize::from(b'i')
+            {
+                out(b"gui_test: typed hi\r\n");
+            }
+            0
+        }
         WM_CREATE => {
             // SAFETY: WM_CREATE's lParam is the CREATESTRUCTW.
             let params = unsafe { (*(lparam as *const CreateStructW)).create_params } as usize;
@@ -292,9 +379,9 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
 extern "system" fn closer(_: *mut c_void) -> u32 {
     // SAFETY: plain calls; the window is the test's.
     unsafe {
-        // Long enough for xtask's screen checks (a screendump, a click on the
-        // start button, another screendump).
-        Sleep(4000);
+        // xtask clicks the close button long before.
+        Sleep(30_000);
+        TIMED_OUT.store(1, Ordering::SeqCst);
         PostMessageW(WINDOW.load(Ordering::SeqCst) as Hwnd, WM_CLOSE, 0, 0);
     }
     0
@@ -373,6 +460,12 @@ fn run() -> Result<(), u32> {
         check(msg.wparam == 7, msg.wparam as u64)?;
         check(DESTROYED.load(Ordering::SeqCst) == 1, 0)?;
         check(IsWindow(hwnd) == 0, 0)?;
+        // The input arrived; the close button closed it.
+        check(DOWNS.load(Ordering::SeqCst) >= 1, 0)?;
+        check(UPS.load(Ordering::SeqCst) >= 1, 0)?;
+        check(KEYDOWN_H.load(Ordering::SeqCst) == 1, 0)?;
+        check(TYPED_LEN.load(Ordering::SeqCst) == 2, TYPED_LEN.load(Ordering::SeqCst) as u64)?;
+        check(TIMED_OUT.load(Ordering::SeqCst) == 0, 0)?;
     }
     match FAILED.load(Ordering::SeqCst) {
         0 => Ok(()),

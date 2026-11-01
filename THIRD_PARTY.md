@@ -58,13 +58,13 @@ Rules for this file:
 | `spin` | 0.12.3 | MIT | Spinlock for the serial console. |
 | `smoltcp` | 0.12.0 | 0BSD | TCP/IP stack (`kernel/src/net`); features `medium-ethernet`, `medium-ip` (loopback), `proto-ipv4`, `socket-tcp` and `alloc` (only so that sockets own the buffers we allocate fallibly; socket sets are pre-filled to a fixed size so smoltcp never grows them). |
 | `managed`, `heapless`, `hash32`, `byteorder`, `bitflags` 1, `cfg-if`, `stable_deref_trait` | 0.8.0, 0.8.0, 0.3.1, 1.5.0, 1.3.2, 1.0.5, 1.2.1 | 0BSD; MIT OR Apache-2.0 (byteorder: Unlicense OR MIT) | smoltcp's dependencies. |
-| `noto-sans-mono-bitmap` | 0.3.2 | MIT (crate); the glyphs are rasterized from Noto Sans Mono, SIL Open Font License 1.1 | Pre-rasterized font for the on-screen console (`console.rs`), the window captions (`nt/desktop.rs`) and gala's gdi32 text output (`user/gdi32`); only the regular 16 px basic-Latin subset is enabled. |
+| `noto-sans-mono-bitmap` | 0.3.2 | MIT (crate); the glyphs are rasterized from Noto Sans Mono, SIL Open Font License 1.1 | Pre-rasterized font for the on-screen console (`console.rs`), the desktop's captions, taskbar and start menu (`nt/desktop/`) and gala's gdi32 text output (`user/gdi32`); the basic-Latin subset, regular and bold 16 px and bold 24 px. |
 
 The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `screenshot` is its own, uncompressed).
 
 ## Artwork
 
-- `kernel/assets/camel.png` and the `camel32.rgba`/`camel64.rgba` made
+- `kernel/assets/camel.png` and the `camel20/40/64.rgba` made
   from it (the start button and start menu): the project owner's drawing,
   supplied for gala on 2026-11-01; not third-party.
 
@@ -94,7 +94,8 @@ The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `scre
 |---|---|---|
 | `kernel/src/boot/limine.rs` | Limine boot protocol, `PROTOCOL.md` in github.com/limine-bootloader/limine-protocol (fetched 2026-10-30) | BSD-2-Clause (`limine.h`); request IDs and struct layouts taken from the spec |
 | `kernel/src/arch/x86_64/serial.rs` | Generic 16550 UART register description (public datasheets / OSDev wiki) | n/a |
-| `kernel/src/arch/x86_64/ps2.rs`, `kernel/src/input.rs` | The IBM PC/AT and PS/2 i8042 controller and PS/2 mouse protocol (status bits, commands 0x20/0x60/0xA8/0xD4, mouse 0xF6/0xF4, 3-byte packets), as publicly documented (OSDev wiki) | n/a |
+| `kernel/src/nt/desktop/` | The days-to-civil-date algorithm from Howard Hinnant's "chrono-Compatible Low-Level Date Algorithms" (the clock's date); Bhaskara I's sine approximation (the dunes) | public domain / mathematics |
+| `kernel/src/arch/x86_64/ps2.rs`, `kernel/src/input.rs` | The IBM PC/AT and PS/2 i8042 controller and PS/2 mouse protocol (status bits, commands 0x20/0x60/0xA8/0xD4, mouse 0xF6/0xF4, 3-byte packets), PS/2 scan code set 1 and Windows' virtual-key codes, as publicly documented (OSDev wiki, Microsoft's virtual-key code list) | n/a |
 | `kernel/src/arch/x86_64/qemu.rs` | QEMU `isa-debug-exit` device documentation | n/a |
 | GalaCreateProcess, service 0x7f02 | gala's own service and parameter layout (docs/ARCHITECTURE.md), used by gala's kernel32 until NtCreateUserProcess is verified on the pinned build; CreateProcessW's search order and STARTUPINFO/PROCESS_INFORMATION layouts from Microsoft's documentation | n/a |
 | NtCancelIoFileEx as service 0x7f01 | gala's own number (not Windows'), until the real one is verified on the pinned build | n/a |

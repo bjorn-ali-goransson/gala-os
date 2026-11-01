@@ -2443,6 +2443,8 @@ const SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "gui_test: painted",
+            "gui_test: click",
+            "gui_test: typed hi",
             "xtask: screen ok",
             "gui_test: ok",
             "exited with status 0x00000000",
@@ -3955,7 +3957,9 @@ struct ScreenCheck {
 
 struct ScreenStep {
     /// QEMU monitor commands sent first (`mouse_move`, `mouse_button`,
-    /// `sendkey`), 100 ms apart.
+    /// `sendkey`), 100 ms apart. Keep each move within 255 pixels per axis:
+    /// QEMU queues a few PS/2 packets of at most 255 and hands the rest of a
+    /// larger move over with later events.
     input: &'static [&'static str],
     pixels: &'static [PixelCheck],
 }
@@ -3970,10 +3974,11 @@ enum PixelCheck {
 }
 
 /// gui_test's window: 400 x 300 at (100, 100); the desktop's frame is a
-/// 1-pixel border and a 24-pixel caption, so its client area starts at
-/// (101, 125) (kernel/src/nt/desktop.rs). The screen is 1280 x 800; the
-/// taskbar is its bottom 40 rows with the start button (the camel) at the
-/// left, and the start menu opens above it (320 x 400) when it is clicked.
+/// 1-pixel outline and a 30-pixel caption, so its client area starts at
+/// (101, 131) (kernel/src/nt/desktop). The screen is 1280 x 800: a
+/// desert-dusk wallpaper, the taskbar in the bottom 48 rows with the
+/// start button (the camel) at its left; the start menu (380 x 460) opens
+/// above it at (8, 284). Shaded colours are checked as "some pixel near".
 const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[(
     "gui_test",
     ScreenCheck {
@@ -3982,26 +3987,65 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[(
             ScreenStep {
                 input: &[],
                 pixels: &[
-                    PixelCheck::At(10, 10, 0x3a6ea5),               // the desktop
-                    PixelCheck::At(100, 100, 0x202020),             // the border
-                    PixelCheck::At(450, 112, 0x006c35),             // the caption
-                    PixelCheck::At(101 + 100, 125 + 70, 0xff0000),  // FillRect's red
-                    PixelCheck::At(101 + 300, 125 + 200, 0xffffff), // COLOR_WINDOW
-                    PixelCheck::AnyIn(101 + 20, 125 + 140, 140, 16, 0x0000ff), // the text
-                    PixelCheck::At(640, 780, 0xe6eaee),             // the taskbar
-                    PixelCheck::AnyIn(4, 764, 32, 32, 0xf09010),    // the camel's orange
-                    PixelCheck::At(300, 600, 0x3a6ea5),             // no start menu yet
+                    PixelCheck::AnyIn(4, 4, 12, 12, 0x0b142e), // the night sky
+                    PixelCheck::AnyIn(300, 104, 100, 22, 0x2c3c5e), // the active caption
+                    PixelCheck::At(101 + 100, 131 + 70, 0xff0000), // FillRect's red
+                    PixelCheck::At(101 + 300, 131 + 200, 0xffffff), // COLOR_WINDOW
+                    PixelCheck::AnyIn(101 + 20, 131 + 140, 140, 16, 0x0000ff), // the text
+                    PixelCheck::AnyIn(560, 790, 40, 6, 0x141a28), // the taskbar
+                    PixelCheck::AnyIn(6, 756, 40, 40, 0xf09010), // the camel's orange
+                    PixelCheck::AnyIn(64, 784, 200, 12, 0xf5a524), // the window's button
                 ],
             },
             ScreenStep {
-                // To the bottom-left corner (the move is clamped to the
+                // To the bottom-left corner (moves are clamped to the
                 // screen), then a left click on the start button.
-                input: &["mouse_move -2000 2000", "mouse_button 1", "mouse_button 0"],
-                pixels: &[
-                    PixelCheck::At(300, 600, 0xf3f3f3),            // the start menu
-                    PixelCheck::AnyIn(16, 376, 64, 64, 0xf09010),  // its big camel
-                    PixelCheck::AnyIn(96, 400, 120, 16, 0x202020), // "gala-os"
+                input: &[
+                    "mouse_move -255 255",
+                    "mouse_move -255 255",
+                    "mouse_move -255 255",
+                    "mouse_move -255 0",
+                    "mouse_move -255 0",
+                    "mouse_button 1",
+                    "mouse_button 0",
                 ],
+                pixels: &[
+                    PixelCheck::AnyIn(300, 600, 4, 4, 0x1c2434), // the start menu
+                    PixelCheck::AnyIn(30, 306, 64, 64, 0xf09010), // its big camel
+                    PixelCheck::AnyIn(112, 312, 100, 26, 0xffffff), // "gala-os"
+                    PixelCheck::AnyIn(30, 434, 30, 32, 0x4a80f0), // "Hello window"
+                ],
+            },
+            ScreenStep {
+                // To client (250, 50) at (351, 181): the first click closes
+                // the menu, the second is the program's (a green square).
+                input: &[
+                    "mouse_move 117 -103",
+                    "mouse_move 117 -103",
+                    "mouse_move 117 -103",
+                    "mouse_move 0 -103",
+                    "mouse_move 0 -103",
+                    "mouse_move 0 -103",
+                    "mouse_button 1",
+                    "mouse_button 0",
+                    "mouse_button 1",
+                    "mouse_button 0",
+                ],
+                pixels: &[
+                    PixelCheck::AnyIn(343, 173, 16, 16, 0x00c000), // the green mark
+                    PixelCheck::AnyIn(300, 600, 4, 4, 0xc07a48),   // the menu closed
+                ],
+            },
+            ScreenStep {
+                // Typing goes to the active window: "hi" in black.
+                input: &["sendkey h", "sendkey i"],
+                pixels: &[PixelCheck::AnyIn(101 + 20, 131 + 200, 24, 16, 0x000000)],
+            },
+            ScreenStep {
+                // The close button (x 453..498 of the caption): the program
+                // ends (no screendump).
+                input: &["mouse_move 125 -65", "mouse_button 1", "mouse_button 0"],
+                pixels: &[],
             },
         ],
     },
@@ -4044,6 +4088,9 @@ fn check_screen_step(
     step: &ScreenStep,
 ) -> Result {
     use std::io::Write;
+    if step.pixels.is_empty() {
+        return Ok(());
+    }
     // Let the guest finish drawing.
     thread::sleep(Duration::from_millis(500));
     let ppm = iso.with_extension(format!("screen{n}.ppm"));
@@ -5187,8 +5234,20 @@ mod constants {
             "crate::mm::hhdm_offset",
         ];
         let mut found = Vec::new();
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
+        // nt/ and its subdirectories.
+        let mut files = Vec::new();
+        let mut dirs = vec![dir.clone()];
+        while let Some(d) = dirs.pop() {
+            for entry in std::fs::read_dir(&d).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        for path in files {
             if path.file_name().is_some_and(|n| n == "platform.rs") {
                 continue;
             }

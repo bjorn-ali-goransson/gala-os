@@ -175,7 +175,9 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   bitmap font) and `cargo xtask screenshot` (PNG via the QEMU monitor)
 - Windows on the screen (W1): user32/gdi32 windows painted through a
   kernel compositor, checked by screen pixels in a UEFI boot test; a
-  taskbar with the camel start button, a PS/2 mouse and a start menu
+  taskbar with the camel start button, a PS/2 mouse and a start menu;
+  W2: a shaded desktop (wallpaper, shadows, rounded frames, taskbar
+  buttons, clock) and mouse/keyboard input for programs
 
 ## Next
 Direction from the project owner (2026-10-30): multiprocessor support, then
@@ -466,14 +468,37 @@ W1. **Windows on the screen**: done (2026-11-01). `gui_test` registers a
    Windows logo): a taskbar with the camel as the start button, a PS/2
    mouse (polled i8042) and pointer, and a start menu that a click opens
    and closes; gui_test's screen check clicks it through the QEMU monitor.
-W2. **Input**: next. The keyboard (the mouse and pointer are done),
-   WM_MOUSEMOVE/WM_LBUTTONDOWN/WM_KEYDOWN/
-   WM_CHAR to the window under the pointer or with the focus, moving
-   windows by the caption, raising on click; tested by injecting input
-   through the QEMU monitor (`mouse_move`, `sendkey`).
-W3. Later: child windows and standard controls (buttons, edit), the
-   non-client area through WM_NCPAINT, more GDI (bitmaps, BitBlt,
-   fonts), and a real program (e.g. a small open-source Win32 app).
+W2. **A styled desktop and input**: done (2026-11-01; asked for "nice
+   looking with shading", working well with a mouse). The compositor
+   draws in layers: a desert-dusk wallpaper (stars, sun, shaded dunes),
+   windows with rounded corners, soft shadows, a gradient caption with
+   minimize and close buttons, a translucent taskbar with a button per
+   window and a clock, a start menu with a shadow, hover highlights and
+   programs it starts. The mouse raises/activates windows, drags them by
+   the caption, minimizes and closes them, restores them from the
+   taskbar. Programs get WM_MOUSEMOVE/WM_[LR]BUTTONDOWN/UP, WM_KEYDOWN/UP
+   (PS/2 keyboard, set 1), WM_CHAR through TranslateMessage and WM_CLOSE
+   from the close button (GalaWindowListen/GalaWindowInput, 0x7f34-35).
+   gui_test checks all of it through the QEMU monitor.
+W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
+   3.69.3 win64 (the official installer from SourceForge; the site's own
+   downloads are behind JavaScript): wxWidgets 3.2 over msvcrt, 987
+   imports by name, 424 missing in gala (user32 177, gdi32 95, msvcrt 47,
+   comctl32 21, shell32 18, ole32 11, kernel32 12, ...) and four DLLs
+   without a crate (uxtheme, comdlg32, oleacc, mpr); at run time wx also
+   loads msimg32, riched20/msftedit, gdiplus, d2d1, dwrite, shcore.
+   Proposed order: fzsftp.exe headless first (the engine side: wide stdio
+   in msvcrt, inet_pton/inet_ntop, bcrypt via ncrypt), then stub crates so
+   filezilla.exe loads and the ledger orders the GUI work: child windows
+   and the common controls (list and tree views, toolbars, image lists),
+   menus, more GDI (DIB sections, BitBlt, fonts, regions), file dialogs.
+   Seen once (2026-11-01, full suite under load): rtl_test timed out with
+   its thread Ready and spinning in NtYieldExecution after the other one
+   ended; it passes alone. To hunt (docs/WORKFLOW.md, "Hunting a rare
+   hang"); log in the session's notes: target/failed/rtl_test.log.
+W4. Later: a user-mode shell (the taskbar and start menu out of the
+   kernel), window resizing (WM_SIZE), maximize, keyboard focus per
+   window, a proportional font.
 
 Agreed order, updated (2026-11-01): SQL Server's SHUTDOWN first (done);
 then

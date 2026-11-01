@@ -6,7 +6,7 @@
 //! posted messages (each tagged with its thread); GetMessage takes the
 //! calling thread's, else makes WM_PAINT for one of its invalid windows,
 //! else waits on the queue's event. SendMessage calls the window
-//! procedure directly. Metrics: a 1-pixel border and a 24-pixel caption
+//! procedure directly. Metrics: a 1-pixel border and a 30-pixel caption
 //! (kernel/src/nt/desktop.rs).
 
 use core::cell::UnsafeCell;
@@ -39,6 +39,8 @@ unsafe extern "system" {
         stride: usize,
     ) -> u32;
     fn GalaWindowDestroy(id: u32) -> u32;
+    fn GalaWindowListen(event: Handle) -> u32;
+    fn GalaWindowInput(records: *mut u8, max: u32, count: *mut u32) -> u32;
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
@@ -57,7 +59,7 @@ unsafe extern "system" {
 }
 
 pub const BORDER: i32 = 1;
-pub const CAPTION: i32 = 24;
+pub const CAPTION: i32 = 30;
 const MAX_CLASSES: usize = 32;
 const MAX_WINDOWS: usize = 64;
 const QUEUE: usize = 256;
@@ -201,7 +203,13 @@ fn event() -> Handle {
     // SAFETY: a plain call.
     let new = unsafe { CreateEventW(core::ptr::null(), 0, 0, core::ptr::null()) } as usize;
     match EVENT.compare_exchange(0, new, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => new as Handle,
+        Ok(_) => {
+            // The desktop signals it when input arrives for our windows
+            // (STATUS_NOT_SUPPORTED without a screen: nothing comes).
+            // SAFETY: our event.
+            unsafe { GalaWindowListen(new as Handle) };
+            new as Handle
+        }
         Err(other) => other as Handle,
     }
 }
@@ -954,10 +962,223 @@ pub extern "system" fn PostQuitMessage(code: i32) {
     post(me(), message(0, WM_QUIT, code as usize, 0));
 }
 
+/// Keys held (by virtual key), from the input seen: GetKeyState.
+static KEYS: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+/// Caps Lock's toggle.
+static CAPS: AtomicBool = AtomicBool::new(false);
+
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_KEYUP: u32 = 0x0101;
+const WM_CHAR: u32 = 0x0102;
+const WM_SYSKEYDOWN: u32 = 0x0104;
+const WM_SYSKEYUP: u32 = 0x0105;
+const WM_SYSCHAR: u32 = 0x0106;
+const VK_SHIFT: usize = 0x10;
+const VK_CONTROL: usize = 0x11;
+const VK_MENU: usize = 0x12;
+const VK_CAPITAL: usize = 0x14;
+
+/// Moves the desktop's input for our windows into the queue (to each
+/// window's thread), keeping the key state.
+fn pump() {
+    let mut records = [0u8; 24 * 32];
+    loop {
+        let mut n = 0u32;
+        // SAFETY: our buffer of 32 records.
+        let status = unsafe { GalaWindowInput(records.as_mut_ptr(), 32, &mut n) };
+        if status != 0 || n == 0 {
+            return;
+        }
+        for r in records.chunks_exact(24).take(n as usize) {
+            let id = u32::from_le_bytes([r[0], r[1], r[2], r[3]]);
+            let message = u32::from_le_bytes([r[4], r[5], r[6], r[7]]);
+            let wparam = u64::from_le_bytes(r[8..16].try_into().unwrap_or([0; 8])) as usize;
+            let lparam = u64::from_le_bytes(r[16..24].try_into().unwrap_or([0; 8])) as isize;
+            if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP) {
+                let down = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
+                if let Some(k) = KEYS.get(wparam & 0xff) {
+                    if down && wparam == VK_CAPITAL && !k.load(Ordering::Relaxed) {
+                        CAPS.fetch_xor(true, Ordering::Relaxed);
+                    }
+                    k.store(down, Ordering::Relaxed);
+                }
+            }
+            let target = with(|s| {
+                s.windows
+                    .iter()
+                    .position(|w| w.used && w.desktop == id && id != 0)
+                    .map(|i| (i, s.windows[i].thread))
+            });
+            if let Some((i, thread)) = target {
+                post(thread, message_at(hwnd_of(i), message, wparam, lparam));
+            }
+        }
+        if n < 32 {
+            return;
+        }
+    }
+}
+
+fn message_at(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Msg {
+    message(hwnd, msg, wparam, lparam)
+}
+
+fn key_down(vk: usize) -> bool {
+    KEYS.get(vk).is_some_and(|k| k.load(Ordering::Relaxed))
+}
+
+/// The character a key makes (US layout), with Shift, Caps Lock and Ctrl.
+fn char_of(vk: usize) -> Option<u16> {
+    let shift = key_down(VK_SHIFT);
+    let ctrl = key_down(VK_CONTROL);
+    let c = match vk {
+        0x41..=0x5a => {
+            if ctrl {
+                return Some((vk - 0x40) as u16);
+            }
+            let upper = shift != CAPS.load(Ordering::Relaxed);
+            if upper { vk as u8 } else { vk as u8 + 32 }
+        }
+        0x30..=0x39 if shift => b")!@#$%^&*("[vk - 0x30],
+        0x30..=0x39 => vk as u8,
+        0x60..=0x69 => b'0' + (vk - 0x60) as u8, // keypad
+        0x20 => b' ',
+        0x0d => b'\r',
+        0x08 => 0x08,
+        0x09 => b'\t',
+        0x1b => 0x1b,
+        0x6a => b'*',
+        0x6b => b'+',
+        0x6d => b'-',
+        0x6e => b'.',
+        0x6f => b'/',
+        0xba => {
+            if shift {
+                b':'
+            } else {
+                b';'
+            }
+        }
+        0xbb => {
+            if shift {
+                b'+'
+            } else {
+                b'='
+            }
+        }
+        0xbc => {
+            if shift {
+                b'<'
+            } else {
+                b','
+            }
+        }
+        0xbd => {
+            if shift {
+                b'_'
+            } else {
+                b'-'
+            }
+        }
+        0xbe => {
+            if shift {
+                b'>'
+            } else {
+                b'.'
+            }
+        }
+        0xbf => {
+            if shift {
+                b'?'
+            } else {
+                b'/'
+            }
+        }
+        0xc0 => {
+            if shift {
+                b'~'
+            } else {
+                b'`'
+            }
+        }
+        0xdb => {
+            if shift {
+                b'{'
+            } else {
+                b'['
+            }
+        }
+        0xdc => {
+            if shift {
+                b'|'
+            } else {
+                b'\\'
+            }
+        }
+        0xdd => {
+            if shift {
+                b'}'
+            } else {
+                b']'
+            }
+        }
+        0xde => {
+            if shift {
+                b'"'
+            } else {
+                b'\''
+            }
+        }
+        _ => return None,
+    };
+    Some(u16::from(c))
+}
+
+/// TranslateMessage: WM_KEYDOWN posts the character the key makes as
+/// WM_CHAR (WM_SYSKEYDOWN: WM_SYSCHAR) to the same window; nonzero when it
+/// did.
+#[unsafe(no_mangle)]
+pub extern "system" fn TranslateMessage(msg: *const Msg) -> i32 {
+    if msg.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's MSG.
+    let m = unsafe { *msg };
+    let kind = match m.message {
+        WM_KEYDOWN => WM_CHAR,
+        WM_SYSKEYDOWN => WM_SYSCHAR,
+        _ => return 0,
+    };
+    let Some(c) = char_of(m.wparam & 0xff) else { return 0 };
+    let thread = window(m.hwnd).map_or_else(me, |w| w.thread);
+    i32::from(post(thread, message(m.hwnd, kind, usize::from(c), m.lparam)))
+}
+
+/// GetKeyState: bit 15 when the key is down (as the input seen so far
+/// says), bit 0 for Caps Lock's toggle.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetKeyState(vk: i32) -> i16 {
+    let vk = vk as usize & 0xff;
+    let held = match vk {
+        0xa0 | 0xa1 => key_down(VK_SHIFT),
+        0xa2 | 0xa3 => key_down(VK_CONTROL),
+        0xa4 | 0xa5 => key_down(VK_MENU),
+        _ => key_down(vk),
+    };
+    let toggled = vk == VK_CAPITAL && CAPS.load(Ordering::Relaxed);
+    (if held { -0x8000i32 } else { 0 } | i32::from(toggled)) as i16
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetAsyncKeyState(vk: i32) -> i16 {
+    GetKeyState(vk) & -0x8000i16
+}
+
 /// The calling thread's next message (matching the filter): posted ones
-/// in order, then WM_PAINT for an invalid visible window. Removed if
-/// `remove`.
+/// in order (the desktop's input first moved in), then WM_PAINT for an
+/// invalid visible window. Removed if `remove`.
 fn next(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
+    pump();
     let thread = me();
     let fits = |m: &Msg| {
         (hwnd == 0 || m.hwnd == hwnd || m.message == WM_QUIT)

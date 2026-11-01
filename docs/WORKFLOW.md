@@ -462,11 +462,13 @@ takes a screendump and checks pixels (exact colours, or "some pixel near
 this colour in this rectangle" for anti-aliased text) and logs
 `xtask: screen ok` or the mismatch. A check has steps: each first sends
 QEMU monitor commands (`mouse_move dx dy`, `mouse_button 1`, `sendkey`;
-100 ms apart, because QEMU's PS/2 queue is short and drops a click queued
-behind a long move), then takes a screendump, kept as
+100 ms apart), then takes a screendump (none when the step checks no
+pixels: e.g. the click that ends the program), kept as
 `target/debug/test-<scenario>.screen<step>.png`. The guest's pointer
-starts in the middle of the screen and moves are clamped, so a large
-move reaches a corner exactly. Such scenarios must be UEFI ones (BIOS
+starts in the middle of the screen and is clamped to it. Keep each
+`mouse_move` within 255 per axis: QEMU queues a few PS/2 packets of at
+most 255 and hands the rest of a larger move over with later events (a
+click then lands somewhere else); reach a corner with several moves. Such scenarios must be UEFI ones (BIOS
 boots have no framebuffer).
 
 The start button's picture: `kernel/assets/camel.png` (256 px master,
@@ -474,7 +476,7 @@ from the project owner's drawing) and the raw RGBA files the kernel
 embeds, made with Pillow:
 
     python3 -c "from PIL import Image; m=Image.open('kernel/assets/camel.png')
-    [open(f'kernel/assets/camel{n}.rgba','wb').write(m.resize((n,n),Image.LANCZOS).tobytes()) for n in (32,64)]"
+    [open(f'kernel/assets/camel{n}.rgba','wb').write(m.resize((n,n),Image.LANCZOS).tobytes()) for n in (20,40,64)]"
 
 ## Serving to a browser
 

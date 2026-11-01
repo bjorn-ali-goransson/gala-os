@@ -954,6 +954,64 @@ pub fn init() {
     thread::init();
 }
 
+/// Opens the executable at Win32 path `path` (`C:\...`) for reading.
+fn open_program(path: &str) -> Result<ObjectRef, NtStatus> {
+    use super::file;
+    let rest = path.strip_prefix("C:").or_else(|| path.strip_prefix("c:"));
+    let rest = rest.ok_or(NtStatus::OBJECT_PATH_SYNTAX_BAD)?;
+    let mut name: Vec<u16> = Vec::new();
+    for c in rest.encode_utf16() {
+        name.try_push(c).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    let path = file::FilePath { start: crate::fs::ramfs::ROOT, name };
+    let opened = file::create(
+        &path,
+        file::FILE_READ_DATA,
+        file::FILE_SHARE_READ,
+        file::FILE_OPEN,
+        file::FILE_NON_DIRECTORY_FILE,
+    )?;
+    Ok(opened.object)
+}
+
+/// Whether the program at Win32 path `path` exists (the start menu).
+pub fn program_exists(path: &str) -> bool {
+    open_program(path).is_ok()
+}
+
+/// Starts the program at Win32 path `path` as the boot user in its own
+/// directory, with new console handles (the start menu); its process id.
+pub fn launch(path: &'static str) -> Result<u64, NtStatus> {
+    let object = open_program(path)?;
+    let ObjectBody::File(f) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    let layout = super::section::image_layout(f.node)?;
+    let file_name = path.rsplit('\\').next().unwrap_or(path);
+    let directory = &path[..path.len() - file_name.len()];
+    let name = intern(file_name).map_err(|_| NtStatus::NO_MEMORY)?;
+    let mut command_line: Vec<u8> = Vec::new();
+    for b in [b"\"", path.as_bytes(), b"\""] {
+        command_line.try_extend_from_slice(b).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    let (process, _thread) = spawn(Spawn {
+        name,
+        path,
+        image: layout,
+        command_line: core::str::from_utf8(&command_line).unwrap_or(path),
+        current_directory: directory,
+        environment: None,
+        handles: None,
+        suspended: false,
+        runtime_data: &[],
+        parent_id: 0,
+        token: None,
+    })
+    .map_err(|e| match e {
+        LoadError::Pe(_) => NtStatus::INVALID_IMAGE_FORMAT,
+        _ => NtStatus::NO_MEMORY,
+    })?;
+    Ok(process.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::number_variable;
