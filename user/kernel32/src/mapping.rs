@@ -268,6 +268,53 @@ pub extern "system" fn GetSystemTimePreciseAsFileTime(time: *mut u64) {
     }
 }
 
+/// KUSER_SHARED_DATA's TimeZoneBias (+0x20, a KSYSTEM_TIME): UTC minus
+/// local time, in 100 ns units.
+fn time_zone_bias() -> i64 {
+    let p = 0x7ffe_0020 as *const u32;
+    loop {
+        // SAFETY: KUSER_SHARED_DATA is mapped read-only in every process.
+        let (high1, low, high2) = unsafe {
+            let high1 = core::ptr::read_volatile(p.add(1));
+            let low = core::ptr::read_volatile(p);
+            (high1, low, core::ptr::read_volatile(p.add(2)))
+        };
+        if high1 == high2 {
+            return ((u64::from(high1) << 32) | u64::from(low)) as i64;
+        }
+    }
+}
+
+/// FileTimeToLocalFileTime: UTC to local time (the current bias).
+#[unsafe(no_mangle)]
+pub extern "system" fn FileTimeToLocalFileTime(utc: *const u64, local: *mut u64) -> Bool {
+    if utc.is_null() || local.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's FILETIMEs.
+    unsafe { local.write_unaligned(utc.read_unaligned().wrapping_sub(time_zone_bias() as u64)) };
+    TRUE
+}
+
+/// LocalFileTimeToFileTime: local time to UTC (the current bias).
+#[unsafe(no_mangle)]
+pub extern "system" fn LocalFileTimeToFileTime(local: *const u64, utc: *mut u64) -> Bool {
+    if utc.is_null() || local.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's FILETIMEs.
+    unsafe { utc.write_unaligned(local.read_unaligned().wrapping_add(time_zone_bias() as u64)) };
+    TRUE
+}
+
+/// CompareFileTime: -1, 0 or 1.
+#[unsafe(no_mangle)]
+pub extern "system" fn CompareFileTime(a: *const u64, b: *const u64) -> i32 {
+    // SAFETY: the caller's FILETIMEs.
+    let (a, b) = unsafe { (a.read_unaligned(), b.read_unaligned()) };
+    a.cmp(&b) as i32
+}
+
 /// GetSystemTimeAsFileTime: 100 ns intervals since 1601 (UTC), as of the
 /// last clock tick: KUSER_SHARED_DATA's SystemTime (a KSYSTEM_TIME at
 /// +0x14, read until High1Time and High2Time agree), as on Windows. The

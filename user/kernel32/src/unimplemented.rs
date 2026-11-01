@@ -5,19 +5,16 @@
 gala_stubs::unimplemented_exports!("kernel32.dll":
     AllocateUserPhysicalPagesNuma
     CheckTokenMembershipEx
-    CompareFileTime
     CompareStringA
     ConvertThreadToFiber
     CreateFiber
     CreateFileMappingNumaW
     CreateMutexExW
     CreateNamedPipeW
-    CreateRemoteThreadEx
     CreateTimerQueue
     CreateTimerQueueTimer
     DeleteTimerQueueEx
     DeleteTimerQueueTimer
-    FileTimeToLocalFileTime
     FindFirstChangeNotificationW
     FindNextChangeNotification
     GetActiveProcessorCount
@@ -43,8 +40,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     K32GetModuleBaseNameA
     K32GetModuleBaseNameW
     K32GetPerformanceInfo
-    LCMapStringA
-    LocalFileTimeToFileTime
     MapUserPhysicalPagesScatter
     MapViewOfFileExNuma
     OpenJobObjectW

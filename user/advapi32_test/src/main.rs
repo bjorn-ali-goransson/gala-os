@@ -46,6 +46,7 @@ unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
     fn CloseHandle(h: Handle) -> Bool;
     fn GetCurrentProcess() -> Handle;
+    fn GetCurrentThread() -> Handle;
     fn LocalFree(p: *mut c_void) -> *mut c_void;
     fn CreateFileW(
         name: *const u16,
@@ -172,6 +173,8 @@ unsafe extern "system" {
     fn GetSidSubAuthorityCount(sid: *const u8) -> *mut u8;
     fn GetSidSubAuthority(sid: *const u8, index: u32) -> *mut u32;
     fn RevertToSelf() -> Bool;
+    fn ImpersonateSelf(level: u32) -> Bool;
+    fn OpenThreadToken(thread: Handle, access: u32, as_self: Bool, token: *mut Handle) -> Bool;
     fn SetKernelObjectSecurity(handle: Handle, info: u32, sd: *const u8) -> Bool;
     fn EventRegister(
         provider: *const [u8; 16],
@@ -734,8 +737,33 @@ fn clr(c: &mut Checks) -> Result<(), u32> {
         LocalFree(text.cast());
         FreeSid(admins);
 
-        // Not impersonating: RevertToSelf succeeds all the same.
+        // Not impersonating: no thread token (ERROR_NO_TOKEN); RevertToSelf
+        // succeeds all the same.
+        let mut thread_token = core::ptr::null_mut();
+        c.eq(OpenThreadToken(GetCurrentThread(), 8, 1, &mut thread_token) as u64, 0)?;
+        c.eq(GetLastError().into(), 1008)?;
         c.ok(RevertToSelf() != 0, GetLastError().into())?;
+        // ImpersonateSelf (SecurityImpersonation): the thread has a token,
+        // of the same user, until RevertToSelf.
+        c.ok(ImpersonateSelf(2) != 0, GetLastError().into())?;
+        c.ok(
+            OpenThreadToken(GetCurrentThread(), 8, 1, &mut thread_token) != 0,
+            GetLastError().into(),
+        )?;
+        let mut user = [0u64; 16];
+        let mut ret = 0;
+        c.ok(
+            GetTokenInformation(thread_token, 1, user.as_mut_ptr().cast(), 128, &mut ret) != 0,
+            0,
+        )?;
+        let mut text = core::ptr::null_mut();
+        ConvertSidToStringSidW(user[0] as *const u8, &mut text);
+        c.ok(*text == u16::from(b'S'), 0)?;
+        LocalFree(text.cast());
+        CloseHandle(thread_token);
+        c.ok(RevertToSelf() != 0, GetLastError().into())?;
+        c.eq(OpenThreadToken(GetCurrentThread(), 8, 1, &mut thread_token) as u64, 0)?;
+        c.eq(GetLastError().into(), 1008)?;
 
         // A NULL DACL on this process (full access to everyone).
         let mut sd = [0u64; 5];

@@ -22,6 +22,10 @@ const IGNORED_FLAGS: u32 =
 const STARTF_USESTDHANDLES: u32 = 0x100;
 const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x2_0002;
+/// GROUP_AFFINITY (16 bytes), for threads.
+const PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY: usize = 0x3_0003;
+/// PROCESSOR_NUMBER (4 bytes), for threads.
+const PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR: usize = 0x3_0005;
 /// Attributes a list holds at most (enough for every documented one).
 const MAX_ATTRIBUTES: u32 = 16;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
@@ -544,6 +548,13 @@ pub extern "system" fn UpdateProcThreadAttribute(
         if size == 0 || !size.is_multiple_of(8) {
             return fail_with(ERROR_INVALID_PARAMETER, FALSE);
         }
+    } else if attribute == PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR
+        || attribute == PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY
+    {
+        let want = if attribute == PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR { 4 } else { 16 };
+        if size != want {
+            return fail_with(24, FALSE); // ERROR_BAD_LENGTH
+        }
     } else {
         // Recorded so the ledger shows which attributes programs use.
         unsupported(b"kernel32.dll!UpdateProcThreadAttribute(attribute)", attribute as u64);
@@ -561,6 +572,81 @@ pub extern "system" fn UpdateProcThreadAttribute(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn DeleteProcThreadAttributeList(_list: *mut AttributeList) {}
+
+/// CreateRemoteThreadEx: a thread in this process (as CreateThread), with
+/// the attribute list's ideal processor (a hint) and group affinity
+/// applied before it runs. Threads in other processes are not supported
+/// (recorded).
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateRemoteThreadEx(
+    process: Handle,
+    security: *mut c_void,
+    stack_size: usize,
+    start: extern "system" fn(*mut c_void) -> u32,
+    param: *mut c_void,
+    flags: u32,
+    list: *const AttributeList,
+    thread_id: *mut u32,
+) -> Handle {
+    const CREATE_SUSPENDED: u32 = 0x4;
+    if !process.is_null()
+        && process != super::GetCurrentProcess()
+        && GetProcessId(process) != super::GetCurrentProcessId()
+    {
+        unsupported(b"kernel32.dll!CreateRemoteThreadEx(another process)", 0);
+        return fail_with(ERROR_NOT_SUPPORTED, core::ptr::null_mut());
+    }
+    if !list.is_null() {
+        // SAFETY: a list initialised by InitializeProcThreadAttributeList.
+        let l = unsafe { &*list };
+        let known = [PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR, PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY];
+        if let Some(&(other, ..)) =
+            l.entries[..l.count.min(l.capacity) as usize].iter().find(|e| !known.contains(&e.0))
+        {
+            unsupported(b"kernel32.dll!CreateRemoteThreadEx(attribute)", other as u64);
+            return fail_with(ERROR_NOT_SUPPORTED, core::ptr::null_mut());
+        }
+    }
+    // Suspended until the attributes are applied.
+    let thread = super::CreateThread(
+        security,
+        stack_size,
+        start,
+        param,
+        flags | CREATE_SUSPENDED,
+        thread_id,
+    );
+    if thread.is_null() {
+        return thread;
+    }
+    if let Some((value, _)) = attribute(list, PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY) {
+        let affinity = value as *const super::processor::GroupAffinity;
+        if super::processor::SetThreadGroupAffinity(thread, affinity, core::ptr::null_mut())
+            == FALSE
+        {
+            // SAFETY: the thread just created (suspended).
+            unsafe { super::NtTerminateThread(thread as isize, 0) };
+            CloseHandle(thread);
+            return core::ptr::null_mut();
+        }
+    }
+    if let Some((value, _)) = attribute(list, PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR) {
+        let ideal = value as *const super::processor::ProcessorNumber;
+        if super::processor::SetThreadIdealProcessorEx(thread, ideal, core::ptr::null_mut())
+            == FALSE
+        {
+            // SAFETY: the thread just created (suspended).
+            unsafe { super::NtTerminateThread(thread as isize, 0) };
+            CloseHandle(thread);
+            return core::ptr::null_mut();
+        }
+    }
+    if flags & CREATE_SUSPENDED == 0 {
+        super::ResumeThread(thread);
+    }
+    thread
+}
 
 /// GetProcessTimes(hProcess, *lpCreationTime, *lpExitTime, *lpKernelTime,
 /// *lpUserTime): ProcessTimes (KERNEL_USER_TIMES).

@@ -391,6 +391,14 @@ fn dispatch(frame: &mut SyscallFrame) {
     let started = platform::monotonic_ns();
     let mut call = Call { frame, process };
     thread::set_in_syscall(&me, Some((number, caller_regs(&call))));
+    // A wait may never return: its event is written when it starts too
+    // ("wait", status 0), so a thread blocked for good shows in the log.
+    if let Some(&(_, name, argc, _)) = service
+        && super::stats::is_wait(name)
+        && crate::events::enabled(crate::events::Category::Syscall)
+    {
+        syscall_event(&call, number, Some((name, argc)), NtStatus::SUCCESS, started, "wait");
+    }
     let status = match service {
         Some((.., handler)) => handler(&mut call),
         None => {
@@ -424,6 +432,7 @@ fn dispatch(frame: &mut SyscallFrame) {
             service.map(|&(_, name, argc, _)| (name, argc)),
             status,
             started,
+            "syscall",
         );
     }
     if TRACE.load(Ordering::Relaxed) {
@@ -451,6 +460,7 @@ fn syscall_event(
     service: Option<(&str, usize)>,
     status: NtStatus,
     started: u64,
+    event: &str,
 ) {
     struct Args<'a>(&'a Call<'a>, usize);
     impl fmt::Display for Args<'_> {
@@ -474,7 +484,7 @@ fn syscall_event(
     });
     crate::events::emit(
         crate::events::Category::Syscall,
-        "syscall",
+        event,
         format_args!(
             r#""pid":{},"tid":{},"nr":{number},"name":{},"args":[{}],"status":{},"ns":{}"#,
             call.process.id,

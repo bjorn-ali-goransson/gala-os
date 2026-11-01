@@ -28,7 +28,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     GetTraceLoggerHandle
     ImpersonateLoggedOnUser
     ImpersonateNamedPipeClient
-    ImpersonateSelf
     InitializeSid
     IsWellKnownSid
     LockServiceDatabase

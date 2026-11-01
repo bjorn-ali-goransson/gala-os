@@ -223,6 +223,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "xmllite", file: "xmllite.dll", exported_as: "testxmllite.dll" },
     // gala's clusapi.dll: no failover cluster on this machine.
     Dll { package: "clusapi", file: "clusapi.dll", exported_as: "testclusapi.dll" },
+    // security.dll: forwarders to secur32 (SSPI's older name).
+    Dll { package: "security", file: "security.dll", exported_as: "testsecurity.dll" },
     Dll { package: "resutils", file: "resutils.dll", exported_as: "testresutils.dll" },
     // Built as ntdll.dll (its export directory says so); exported under
     // another name so user/bin never holds a file called ntdll.dll.
@@ -260,6 +262,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_test", "testdll2.dll", "gala/lib"),
     ("missing_import_test", "ntdll.dll", "Windows/System32"),
     ("missing_import_test", "kernel32.dll", "Windows/System32"),
+    ("sspi_test", "ntdll.dll", "Windows/System32"),
+    ("sspi_test", "kernel32.dll", "Windows/System32"),
+    ("sspi_test", "secur32.dll", "Windows/System32"),
+    ("sspi_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("sspi_test", "advapi32.dll", "Windows/System32"),
+    ("sspi_test", "security.dll", "Windows/System32"),
     ("clusapi_test", "ntdll.dll", "Windows/System32"),
     ("clusapi_test", "kernel32.dll", "Windows/System32"),
     ("clusapi_test", "clusapi.dll", "Windows/System32"),
@@ -554,6 +562,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sqllocaldb", "xmllite.dll", "Windows/System32"),
     ("sqllocaldb", "clusapi.dll", "Windows/System32"),
     ("sqllocaldb", "resutils.dll", "Windows/System32"),
+    ("sqllocaldb", "security.dll", "Windows/System32"),
     ("sqllocaldb", "iphlpapi.dll", "Windows/System32"),
     ("sqllocaldb", "mswsock.dll", "Windows/System32"),
     ("sqllocaldb", "ncrypt.dll", "Windows/System32"),
@@ -991,6 +1000,7 @@ const USER_PROGRAMS: &[&str] = &[
     "rpcrt4_test",
     "netapi32_test",
     "clusapi_test",
+    "sspi_test",
     "kernel32_sys_test",
     "kernel32_thread_test",
     "kernel32_sync_test",
@@ -1797,6 +1807,12 @@ const SCENARIOS: &[Scenario] = &[
             r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionOne","what":"missing export""#,
             r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionTwo","what":"missing export""#,
         ],
+    },
+    Scenario {
+        name: "sspi_test",
+        cmdline: "qemu_exit run=sspi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["sspi_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "clusapi_test",

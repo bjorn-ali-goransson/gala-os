@@ -57,6 +57,7 @@ unsafe extern "system" {
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
     fn HeapReAlloc(heap: usize, flags: u32, p: *mut u8, size: usize) -> *mut u8;
     fn HeapFree(heap: usize, flags: u32, p: *mut u8) -> i32;
+    fn HeapSize(heap: usize, flags: u32, p: *const u8) -> usize;
     fn WaitForMultipleObjectsEx(
         count: u32,
         handles: *const usize,
@@ -96,6 +97,7 @@ pub const fn ole_iid(data1: u32) -> Guid {
 
 pub const IID_IUNKNOWN: Guid = ole_iid(0);
 const IID_IMARSHAL: Guid = ole_iid(3);
+const IID_IMALLOC: Guid = ole_iid(2);
 const IID_IINITIALIZESPY: Guid = ole_iid(0x34);
 const IID_ICOMTHREADINGINFO: Guid = ole_iid(0x1ce);
 
@@ -144,6 +146,94 @@ pub extern "system" fn CoTaskMemRealloc(p: *mut u8, size: usize) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "system" fn CoTaskMemFree(p: *mut u8) {
     free(p);
+}
+
+// ---- The task allocator (IMalloc over CoTaskMem*) ----
+
+/// The one IMalloc object: a pointer to its vtable (static; its reference
+/// count does not matter).
+#[repr(C)]
+pub struct Malloc {
+    vtable: *const VTable<9>,
+}
+
+// SAFETY: a pointer to a static vtable.
+unsafe impl Sync for Malloc {}
+
+static MALLOC_VTABLE: VTable<9> = VTable([
+    malloc_query as *const (),
+    malloc_add_ref as *const (),
+    malloc_release as *const (),
+    malloc_alloc as *const (),
+    malloc_realloc as *const (),
+    malloc_free as *const (),
+    malloc_get_size as *const (),
+    malloc_did_alloc as *const (),
+    malloc_heap_minimize as *const (),
+]);
+
+static MALLOC: Malloc = Malloc { vtable: &MALLOC_VTABLE };
+
+extern "system" fn malloc_query(this: usize, iid: *const Guid, out: *mut *mut c_void) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    match guid_at(iid) {
+        IID_IUNKNOWN | IID_IMALLOC => {
+            put(out, this as *mut c_void);
+            S_OK
+        }
+        _ => {
+            put(out, core::ptr::null_mut());
+            E_NOINTERFACE
+        }
+    }
+}
+extern "system" fn malloc_add_ref(_this: usize) -> u32 {
+    1
+}
+extern "system" fn malloc_release(_this: usize) -> u32 {
+    1
+}
+extern "system" fn malloc_alloc(_this: usize, size: usize) -> *mut u8 {
+    CoTaskMemAlloc(size)
+}
+extern "system" fn malloc_realloc(_this: usize, p: *mut u8, size: usize) -> *mut u8 {
+    CoTaskMemRealloc(p, size)
+}
+extern "system" fn malloc_free(_this: usize, p: *mut u8) {
+    CoTaskMemFree(p)
+}
+extern "system" fn malloc_get_size(_this: usize, p: *const u8) -> usize {
+    if p.is_null() {
+        return usize::MAX;
+    }
+    // SAFETY: a block from CoTaskMemAlloc (the caller's claim).
+    unsafe { HeapSize(GetProcessHeap(), 0, p) }
+}
+/// DidAlloc: 1 for a block of the process heap (the task allocator's), 0
+/// otherwise, -1 for NULL.
+extern "system" fn malloc_did_alloc(_this: usize, p: *const u8) -> i32 {
+    if p.is_null() {
+        return -1;
+    }
+    // SAFETY: as above.
+    i32::from(unsafe { HeapSize(GetProcessHeap(), 0, p) } != usize::MAX)
+}
+extern "system" fn malloc_heap_minimize(_this: usize) {}
+
+/// CoGetMalloc(MEMCTX_TASK): the task allocator.
+#[unsafe(no_mangle)]
+pub extern "system" fn CoGetMalloc(context: u32, malloc: *mut *const Malloc) -> HResult {
+    if malloc.is_null() {
+        return E_POINTER;
+    }
+    if context != 1 {
+        put(malloc, core::ptr::null());
+        return E_INVALIDARG;
+    }
+    put(malloc, &raw const MALLOC);
+    S_OK
 }
 
 // ---- COM object helpers ----

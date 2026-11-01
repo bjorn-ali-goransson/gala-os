@@ -100,7 +100,9 @@ shows it.
   not printed): add `events=syscall,thread` to its scenario's command
   line and read `target/debug/test-<name>.events.jsonl` while QEMU still
   runs (`grep -v` the calls it repeats; a loop of time queries means it
-  waits for a clock to move). Do not delete the events file of a running
+  waits for a clock to move). Waiting services also log a `"ev":"wait"`
+  event when they start, so a wait that never returns shows as the
+  thread's last line. Do not delete the events file of a running
   VM (it is still open: `/proc/<qemu pid>/fd/` reaches it).
 - **A program imports functions gala lacks**: a missing export stops the
   load (as on Windows), so add it to the DLL's `src/unimplemented.rs`

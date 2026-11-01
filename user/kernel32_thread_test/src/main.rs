@@ -7,7 +7,8 @@
 //! goroutines), and SetThreadPriority/GetThreadPriority (increments, the
 //! saturated values, an invalid one), GetCurrentThreadStackLimits (the
 //! reserved stack: TEB DeallocationStack to StackBase), Get/
-//! SetPriorityClass. Prints `kernel32_thread_test: ok` or
+//! SetPriorityClass, CreateRemoteThreadEx in this process with an ideal
+//! processor and a group affinity in its attribute list. Prints `kernel32_thread_test: ok` or
 //! exits with the number of the failing check.
 
 #![no_std]
@@ -60,6 +61,32 @@ unsafe extern "system" {
     fn IsThreadAFiber() -> Bool;
     fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize);
     fn GetCurrentProcess() -> Handle;
+    fn InitializeProcThreadAttributeList(
+        list: *mut u8,
+        count: u32,
+        flags: u32,
+        size: *mut usize,
+    ) -> Bool;
+    fn UpdateProcThreadAttribute(
+        list: *mut u8,
+        flags: u32,
+        attribute: usize,
+        value: *const c_void,
+        size: usize,
+        previous: *mut c_void,
+        return_size: *mut usize,
+    ) -> Bool;
+    fn DeleteProcThreadAttributeList(list: *mut u8);
+    fn CreateRemoteThreadEx(
+        process: Handle,
+        attributes: *mut c_void,
+        stack: usize,
+        start: StartRoutine,
+        param: *mut c_void,
+        flags: u32,
+        list: *mut u8,
+        thread_id: *mut u32,
+    ) -> Handle;
     fn GetPriorityClass(process: Handle) -> u32;
     fn SetPriorityClass(process: Handle, class: u32) -> Bool;
     fn GetThreadTimes(
@@ -279,6 +306,67 @@ fn run() -> Result<(), u32> {
         c.ok(GetExitCodeThread(h, &mut code) != 0, 0)?;
         c.eq(code.into(), 99)?;
         CloseHandle(h);
+
+        // CreateRemoteThreadEx in this process with an attribute list (an
+        // ideal processor and a group affinity), as SQL Server starts its
+        // workers.
+        let mut size = 0;
+        InitializeProcThreadAttributeList(core::ptr::null_mut(), 2, 0, &mut size);
+        let mut list = [0u8; 512];
+        c.ok(size <= list.len(), size as u64)?;
+        c.ok(InitializeProcThreadAttributeList(list.as_mut_ptr(), 2, 0, &mut size) != 0, 0)?;
+        let ideal: [u8; 4] = [0, 0, 0, 0]; // PROCESSOR_NUMBER: group 0, number 0
+        let r = UpdateProcThreadAttribute(
+            list.as_mut_ptr(),
+            0,
+            0x30005,
+            ideal.as_ptr().cast(),
+            4,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        c.ok(r != 0, GetLastError().into())?;
+        let affinity: [u64; 2] = [1, 0]; // GROUP_AFFINITY: processor 0, group 0
+        let r = UpdateProcThreadAttribute(
+            list.as_mut_ptr(),
+            0,
+            0x30003,
+            affinity.as_ptr().cast(),
+            16,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        c.ok(r != 0, GetLastError().into())?;
+        // A wrong size: ERROR_BAD_LENGTH.
+        let r = UpdateProcThreadAttribute(
+            list.as_mut_ptr(),
+            0,
+            0x30005,
+            ideal.as_ptr().cast(),
+            2,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        c.eq(r as u64, 0)?;
+        c.eq(GetLastError().into(), 24)?;
+        RESULT.store(0, Ordering::SeqCst);
+        let mut tid = 0;
+        let h = CreateRemoteThreadEx(
+            GetCurrentProcess(),
+            core::ptr::null_mut(),
+            0,
+            worker,
+            3 as *mut c_void,
+            0,
+            list.as_mut_ptr(),
+            &mut tid,
+        );
+        c.ok(!h.is_null() && tid != 0, GetLastError().into())?;
+        c.eq(WaitForSingleObject(h, INFINITE).into(), 0)?;
+        c.eq(RESULT.load(Ordering::SeqCst), 18)?;
+        c.eq(THREAD_ID.load(Ordering::SeqCst), tid.into())?;
+        CloseHandle(h);
+        DeleteProcThreadAttributeList(list.as_mut_ptr());
 
         // CREATE_SUSPENDED: nothing runs until ResumeThread.
         RESULT.store(0, Ordering::SeqCst);

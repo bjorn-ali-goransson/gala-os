@@ -757,21 +757,27 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         Then the Microsoft Software Key Storage Provider (opens; empty
         key store), shlwapi's path functions, BCryptGetFipsAlgorithmMode,
         the SSPI dispatch table (InitSecurityInterfaceW, no packages) and
-        more well-known SIDs. Now (2026-11-01) it logs its banner,
-        detects processors and memory, sets up the buffer pool (40 s
-        under TCG) and stops at Service Broker: "Could not start Service
-        Broker manager" (error 9694, state 27), because SSPI has no NTLM
-        package (the ledger: `secur32.dll!package NTLM`), and shuts down.
-        Next, a plan of its own: (a) an NTLM security package in
-        secur32 (QuerySecurityPackageInfoW/EnumerateSecurityPackagesW,
-        AcquireCredentialsHandleW, Initialize/AcceptSecurityContext with
-        NTLMv2: MD4, HMAC-MD5, RC4 for its session security; MS-NLMP is
-        the public specification), as Service Broker needs at startup and
-        Windows authentication needs for logins; (b) SQL Server encrypts
-        the login packet with TLS on its own self-signed certificate, so
-        clients need Schannel on the server side (and RSA key generation
-        in the software key storage provider for that certificate); a
-        client of ours speaking TDS with SQL authentication can test it.
+        more well-known SIDs. Then (2026-11-01, second pass) SSPI
+        packages: NTLM from [MS-NLMP] (`sspi_test`), Kerberos as on a
+        workgroup machine, Negotiate over NTLM, Schannel's information;
+        security.dll; LCMapStringA; UpdateProcThreadAttribute's ideal
+        processor and group affinity with CreateRemoteThreadEx (SQLOS
+        creates its workers that way: without it the main thread waited
+        forever for workers that never started); ImpersonateSelf with
+        thread tokens; FILETIME local-time conversions; CoGetMalloc.
+        Now it gets through Service Broker, Query Store, the dedicated
+        administrator connection setup and In-Memory OLTP ("initialized
+        on lowend machine"); the CLR fails to start (mscoree.dll: not
+        fatal), and it stops at advapi32's PerfStartProviderEx
+        (performance counters). Next: the PerfLib V2 provider functions
+        (PerfStartProviderEx, PerfSetCounterSetInfo, PerfCreateInstance,
+        Perf*CounterValue: counters kept in memory, no consumer reads
+        them), ws2_32's WSAPoll (looked up), the bcrypt algorithms it
+        asks for (BCryptOpenAlgorithmProvider: record their names), then
+        on toward "SQL Server is now ready for client connections"
+        (LocalDB listens on a named pipe). Later: Schannel (TLS) for
+        client logins, SPNEGO for Negotiate, checking NTLM against a
+        Windows peer.
         Run it with `cargo xtask boot-test sqllocaldb` (about 2 minutes)
         and read the log after "Default collation". Probed but optional so far:
         FlsGetValue2, QueryWorkingSetEx, HeapSetInformation, bad-memory

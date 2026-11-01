@@ -1169,11 +1169,35 @@ Windows, never shadows the system's DLLs.)
 - **Keys and security packages**: ncrypt opens the Microsoft Software Key
   Storage Provider (also for a null name) with an empty key store (no
   key opens: NTE_BAD_KEYSET; creating one is not supported yet). secur32
-  has SSPI's dispatch table (InitSecurityInterfaceW, version 4) but no
-  security packages: none are enumerated, a package lookup records its
-  name (`secur32.dll!package NTLM`) and fails with
-  SEC_E_SECPKG_NOT_FOUND, functions taking handles give
-  SEC_E_INVALID_HANDLE.
+  (`user/secur32/src/sspi.rs`, `ntlm.rs`) has SSPI's dispatch table
+  (InitSecurityInterfaceW, version 4) and these packages:
+  - NTLM, written from [MS-NLMP]: NTLMv2 with extended session security,
+    key exchange and a MIC; signing (HMAC-MD5) and sealing (RC4), a key
+    per direction, sequence numbers kept per context. The accounts a
+    server side accepts are gala's: the one user `gala` (domain GALA),
+    whose password is empty; a client uses that account or explicit
+    SEC_WINNT_AUTH_IDENTITY credentials (`sspi_test`: the whole exchange
+    in one process; interoperability with Windows' NTLM is not proven
+    yet).
+  - Kerberos as on a machine in a workgroup: the package and its
+    credentials exist, a context never starts
+    (SEC_E_NO_AUTHENTICATING_AUTHORITY: no domain controller).
+  - Negotiate: NTLM underneath, with NTLM's own tokens (Windows'
+    Negotiate accepts those); SPNEGO-wrapped tokens are not understood
+    yet (recorded).
+  - Schannel: its information only; acquiring credentials is not
+    supported yet (recorded).
+  Credential and context handles hold a heap block and a tag; buffers
+  SSPI returns are process-heap blocks for FreeContextBuffer. A lookup
+  of another package records its name (`secur32.dll!package <name>`).
+  security.dll forwards to secur32. advapi32 keeps which threads
+  impersonate (ImpersonateSelf, SetThreadToken, RevertToSelf): there is
+  one user, so impersonating changes nothing but OpenThreadToken, which
+  then returns that user's token.
+- **Threads with attributes**: CreateRemoteThreadEx in the calling
+  process creates the thread suspended, applies the attribute list's
+  group affinity and ideal processor (a hint), then starts it
+  (UpdateProcThreadAttribute takes those two and the handle list).
 - **Message tables**: FormatMessage with FROM_HMODULE reads the module's
   RT_MESSAGETABLE (MESSAGE_RESOURCE_DATA blocks, ANSI or UTF-16 entries),
   then the system's messages if FROM_SYSTEM is also given.

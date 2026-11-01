@@ -7,13 +7,14 @@
 //! - GetLocaleInfoW/A: decimal and thousands separators, ISO language and
 //!   country names, the OEM code page; counts include the NUL; a size
 //!   query; ERROR_INSUFFICIENT_BUFFER; LOCALE_RETURN_NUMBER.
-//! - LCMapStringW (upper and lower case), CompareStringW (linguistic
+//! - LCMapStringW/A (upper and lower case), CompareStringW (linguistic
 //!   order: "a" < "B", lower case first, NORM_IGNORECASE), lstrcmpW and
 //!   lstrcmpiW and their ANSI forms (the same order), lstrlenW/A (0 for a null string),
 //!   GetStringTypeW (CT_CTYPE1), IsDBCSLeadByte.
 //! - GetDateFormatW/GetTimeFormatW with pictures and the short date.
 //! - GetLocalTime matches GetSystemTime (UTC); GetDynamicTimeZoneInformation
-//!   (UTC, TIME_ZONE_ID_UNKNOWN); SystemTimeToTzSpecificLocalTime and back.
+//!   (UTC, TIME_ZONE_ID_UNKNOWN); SystemTimeToTzSpecificLocalTime and back;
+//!   FileTimeToLocalFileTime/LocalFileTimeToFileTime, CompareFileTime.
 //! - GetUserGeoID (244, United States), GetGeoInfoA (GEO_ISO2 "US").
 //! - Get{User,System}PreferredUILanguages: en-US, by name or id.
 //! - GetCPInfoExW of CP_ACP (the ANSI code page and its name).
@@ -106,6 +107,7 @@ unsafe extern "system" {
     fn GetLocaleInfoW(lcid: u32, kind: u32, buf: *mut u16, n: i32) -> i32;
     fn GetLocaleInfoA(lcid: u32, kind: u32, buf: *mut u8, n: i32) -> i32;
     fn LCMapStringW(lcid: u32, flags: u32, src: *const u16, n: i32, dst: *mut u16, m: i32) -> i32;
+    fn LCMapStringA(lcid: u32, flags: u32, src: *const u8, n: i32, dst: *mut u8, m: i32) -> i32;
     fn CompareStringW(lcid: u32, flags: u32, a: *const u16, n: i32, b: *const u16, m: i32) -> i32;
     fn lstrlenW(s: *const u16) -> i32;
     fn lstrlenA(s: *const u8) -> i32;
@@ -134,6 +136,9 @@ unsafe extern "system" {
     fn GetSystemTime(st: *mut SystemTime);
     fn GetLocalTime(st: *mut SystemTime);
     fn GetDynamicTimeZoneInformation(info: *mut u8) -> u32;
+    fn FileTimeToLocalFileTime(utc: *const u64, local: *mut u64) -> i32;
+    fn LocalFileTimeToFileTime(local: *const u64, utc: *mut u64) -> i32;
+    fn CompareFileTime(a: *const u64, b: *const u64) -> i32;
     fn SystemTimeToTzSpecificLocalTime(
         tz: *const u8,
         utc: *const SystemTime,
@@ -372,6 +377,19 @@ fn strings(c: &mut Checks) -> Result<(), u32> {
             4,
         )?;
 
+        // LCMapStringA: the same in the ANSI code page; a size query counts
+        // the NUL of a -1 length.
+        let mut out = [0u8; 16];
+        let abc = c"abc".as_ptr().cast::<u8>();
+        c.eq(LCMapStringA(0x409, LCMAP_UPPERCASE, abc, -1, out.as_mut_ptr(), 16) as u64, 4)?;
+        c.ok(&out[..4] == b"ABC\0", out[0].into())?;
+        c.eq(LCMapStringA(0x409, LCMAP_UPPERCASE, abc, -1, core::ptr::null_mut(), 0) as u64, 4)?;
+        c.eq(
+            LCMapStringA(0x409, 0x100, c"MiX".as_ptr().cast(), 2, out.as_mut_ptr(), 16) as u64,
+            2,
+        )?;
+        c.ok(&out[..2] == b"mi", out[0].into())?;
+
         let cmp = |a: &str, b: &str, flags: u32| {
             let (a, b) = (w(a), w(b));
             CompareStringW(0x409, flags, a.as_ptr(), -1, b.as_ptr(), -1)
@@ -449,6 +467,17 @@ fn times(c: &mut Checks) -> Result<(), u32> {
         c.ok(key == [b'U', 0, b'T', 0, b'C', 0, 0, 0], key[0].into())?; // TimeZoneKeyName
         let mut back = SystemTime::default();
         c.ok(SystemTimeToTzSpecificLocalTime(core::ptr::null(), &st, &mut local) != 0, 0)?;
+        // FILETIMEs in the UTC time zone: local is UTC, both ways;
+        // CompareFileTime orders them.
+        let (t, mut l, mut utc) = (0x01d9_0000_1234_5678u64, 0u64, 0u64);
+        c.ok(FileTimeToLocalFileTime(&t, &mut l) != 0, 0)?;
+        c.eq(l, t)?;
+        c.ok(LocalFileTimeToFileTime(&l, &mut utc) != 0, 0)?;
+        c.eq(utc, t)?;
+        let later = t + 1;
+        c.eq(CompareFileTime(&t, &later) as u64, u64::MAX)?; // -1
+        c.eq(CompareFileTime(&later, &t) as u64, 1)?;
+        c.eq(CompareFileTime(&t, &t) as u64, 0)?;
         c.ok(local == st, local.0[4].into())?;
         c.ok(TzSpecificLocalTimeToSystemTime(core::ptr::null(), &local, &mut back) != 0, 0)?;
         c.ok(back == st, back.0[4].into())?;

@@ -464,6 +464,62 @@ pub extern "system" fn CompareStringW(
     compare(units(a, n), units(b, m), flags)
 }
 
+/// LCMapStringA: LCMapStringW in the ANSI code page (UTF-8): the text is
+/// mapped as UTF-16 and converted back; counts are in bytes.
+#[unsafe(no_mangle)]
+pub extern "system" fn LCMapStringA(
+    lcid: u32,
+    flags: u32,
+    src: *const u8,
+    n: i32,
+    dst: *mut u8,
+    size: i32,
+) -> i32 {
+    if src.is_null() || n == 0 || size < 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    let bytes: &[u8] = if n < 0 {
+        // SAFETY: the caller's NUL-terminated string (the NUL included).
+        unsafe { core::ffi::CStr::from_ptr(src.cast()).to_bytes_with_nul() }
+    } else {
+        // SAFETY: the caller's string of `n` bytes.
+        unsafe { core::slice::from_raw_parts(src, n as usize) }
+    };
+    let Ok(text) = core::str::from_utf8(bytes) else {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    };
+    let mut wide = [0u16; 2048];
+    let mut count = 0;
+    for unit in text.encode_utf16() {
+        let Some(slot) = wide.get_mut(count) else {
+            unsupported(b"kernel32.dll!LCMapStringA(length)", bytes.len() as u64);
+            return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
+        };
+        *slot = unit;
+        count += 1;
+    }
+    let mut mapped = [0u16; 2048];
+    let m = LCMapStringW(lcid, flags, wide.as_ptr(), count as i32, mapped.as_mut_ptr(), 2048);
+    if m == 0 && count != 0 {
+        return 0;
+    }
+    let mut out = [0u8; 8192];
+    let mut len = 0;
+    for c in char::decode_utf16(mapped[..m as usize].iter().copied()) {
+        let c = c.unwrap_or(char::REPLACEMENT_CHARACTER);
+        len += c.encode_utf8(&mut out[len..]).len();
+    }
+    if size == 0 {
+        return len as i32;
+    }
+    if dst.is_null() || (size as usize) < len {
+        return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    // SAFETY: the caller's buffer of `size` >= `len` bytes.
+    unsafe { core::ptr::copy_nonoverlapping(out.as_ptr(), dst, len) };
+    len as i32
+}
+
 /// The NUL-terminated string at `s` (a null pointer is empty).
 fn c_units<'a>(s: *const u16) -> &'a [u16] {
     if s.is_null() {

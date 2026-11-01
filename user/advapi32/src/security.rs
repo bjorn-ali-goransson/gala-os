@@ -17,6 +17,8 @@ use super::{ERROR_INSUFFICIENT_BUFFER, fail, missing};
 unsafe extern "system" {
     fn LocalAlloc(flags: u32, bytes: usize) -> *mut u8;
     fn GetCurrentProcess() -> usize;
+    fn GetCurrentThreadId() -> u32;
+    fn GetThreadId(thread: usize) -> u32;
     fn GetFileAttributesW(path: *const u16) -> u32;
     fn DuplicateHandle(
         source_process: usize,
@@ -38,6 +40,7 @@ const ERROR_NO_SUCH_PRIVILEGE: u32 = 1313;
 const ERROR_NOT_ALL_ASSIGNED: u32 = 1300;
 const ERROR_INVALID_SECURITY_DESCR: u32 = 1338;
 const ERROR_INVALID_HANDLE: u32 = 6;
+const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 
 const SID_MAX_SUB_AUTHORITIES: usize = 15;
 
@@ -660,12 +663,19 @@ pub extern "system" fn OpenProcessToken(process: usize, _access: u32, token: *mu
 
 #[unsafe(no_mangle)]
 pub extern "system" fn OpenThreadToken(
-    _thread: usize,
-    _access: u32,
+    thread: usize,
+    access: u32,
     _as_self: i32,
-    _token: *mut usize,
+    token: *mut usize,
 ) -> i32 {
-    fail(1008, 0) // ERROR_NO_TOKEN: threads do not impersonate
+    // SAFETY: plain calls (GetCurrentThread is the pseudo-handle).
+    let tid = unsafe { GetThreadId(thread) };
+    if tid == 0 || !impersonating(tid) {
+        return fail(1008, 0); // ERROR_NO_TOKEN: the thread does not impersonate
+    }
+    // The token it impersonates with: the one user's.
+    // SAFETY: plain call.
+    OpenProcessToken(unsafe { GetCurrentProcess() }, access, token)
 }
 
 /// Privileges a standard user holds (LUIDs): SeShutdown (19),
@@ -1162,11 +1172,55 @@ pub extern "system" fn DuplicateTokenEx(
     1
 }
 
-/// SetThreadToken: impersonating the one user is being that user; a
-/// null token reverts. (Threads keep no tokens here.)
+/// The threads impersonating (thread ids; 0: free). There is one user, so
+/// an impersonating thread acts as that user, as it did before; what
+/// changes is that it has a thread token (OpenThreadToken).
+static IMPERSONATING: [core::sync::atomic::AtomicU32; 256] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 256];
+
+fn impersonating(tid: u32) -> bool {
+    IMPERSONATING.iter().any(|t| t.load(core::sync::atomic::Ordering::Acquire) == tid)
+}
+
+fn set_impersonating(tid: u32, on: bool) -> bool {
+    use core::sync::atomic::Ordering;
+    if on {
+        if impersonating(tid) {
+            return true;
+        }
+        IMPERSONATING
+            .iter()
+            .any(|t| t.compare_exchange(0, tid, Ordering::AcqRel, Ordering::Relaxed).is_ok())
+    } else {
+        for t in &IMPERSONATING {
+            let _ = t.compare_exchange(tid, 0, Ordering::AcqRel, Ordering::Relaxed);
+        }
+        true
+    }
+}
+
+/// The id of `thread` (a pointer to a thread handle; null: the caller).
+fn thread_id(thread: *const usize) -> u32 {
+    // SAFETY: plain calls; the caller's handle pointer.
+    unsafe { if thread.is_null() { GetCurrentThreadId() } else { GetThreadId(*thread) } }
+}
+
+/// SetThreadToken: the thread impersonates (with the one user's token) or,
+/// with a null token, reverts.
 #[unsafe(no_mangle)]
-pub extern "system" fn SetThreadToken(_thread: *mut usize, _token: usize) -> i32 {
-    1
+pub extern "system" fn SetThreadToken(thread: *mut usize, token: usize) -> i32 {
+    let tid = thread_id(thread);
+    if tid == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if set_impersonating(tid, token != 0) { 1 } else { fail(ERROR_NOT_ENOUGH_MEMORY, 0) }
+}
+
+/// ImpersonateSelf: the calling thread impersonates its own process's
+/// user (any impersonation level).
+#[unsafe(no_mangle)]
+pub extern "system" fn ImpersonateSelf(_level: u32) -> i32 {
+    SetThreadToken(core::ptr::null_mut(), 1)
 }
 
 /// GetSidSubAuthorityCount: the count byte inside the SID (no checks, as
@@ -1185,6 +1239,8 @@ pub extern "system" fn GetSidSubAuthority(sid: *mut u8, index: u32) -> *mut u32 
 /// RevertToSelf: threads never impersonate here (see SetThreadToken).
 #[unsafe(no_mangle)]
 pub extern "system" fn RevertToSelf() -> i32 {
+    // SAFETY: plain call.
+    set_impersonating(unsafe { GetCurrentThreadId() }, false);
     1
 }
 

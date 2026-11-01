@@ -12,3 +12,6 @@ bench = false
 
 [dependencies]
 gala_stubs = { path = "../gala_stubs" }
+md4 = { version = "0.10", default-features = false }
+md-5 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }

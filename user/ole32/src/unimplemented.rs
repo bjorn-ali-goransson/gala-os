@@ -5,7 +5,6 @@
 gala_stubs::unimplemented_exports!("ole32.dll":
     CLSIDFromString
     CoCreateInstanceEx
-    CoGetMalloc
     CoImpersonateClient
     CoQueryProxyBlanket
     CoRegisterMallocSpy

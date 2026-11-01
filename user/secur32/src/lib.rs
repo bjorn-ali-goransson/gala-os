@@ -1,12 +1,12 @@
-//! gala's secur32.dll: SSPI (the functions the JDK's net.dll imports, the
-//! Unicode ones and the dispatch table SQL Server uses: `sspi`). gala has
-//! no security packages: acquiring credentials or a context fails with
-//! SEC_E_SECPKG_NOT_FOUND (recorded), handles are invalid.
+//! gala's secur32.dll: SSPI (`sspi`: the Unicode functions and the
+//! dispatch table) with one security package, NTLM (`ntlm`); the ANSI
+//! functions the JDK's net.dll imports find no package (recorded).
 
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod ntlm;
 mod sspi;
 mod unimplemented;
 
@@ -38,8 +38,13 @@ const SEC_E_INVALID_HANDLE: u32 = 0x8009_0301;
 const SEC_E_SECPKG_NOT_FOUND: u32 = 0x8009_0305;
 
 fn missing(name: &[u8]) -> u32 {
+    missing_detail(name, 0)
+}
+
+/// Records an unsupported request (with a detail) in the ledger.
+fn missing_detail(name: &[u8], detail: u64) -> u32 {
     // SAFETY: a valid buffer.
-    unsafe { GalaRecordMissing(name.as_ptr(), name.len(), 2, 0) };
+    unsafe { GalaRecordMissing(name.as_ptr(), name.len(), 2, detail) };
     SEC_E_SECPKG_NOT_FOUND
 }
 
@@ -76,21 +81,6 @@ pub extern "system" fn InitializeSecurityContextA(
     _expiry: usize,
 ) -> u32 {
     missing(b"secur32.dll!InitializeSecurityContextA")
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CompleteAuthToken(_context: usize, _token: usize) -> u32 {
-    SEC_E_INVALID_HANDLE
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn DeleteSecurityContext(_context: usize) -> u32 {
-    SEC_E_INVALID_HANDLE
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn FreeCredentialsHandle(_credential: usize) -> u32 {
-    SEC_E_INVALID_HANDLE
 }
 
 #[link(name = "kernel32", kind = "raw-dylib")]

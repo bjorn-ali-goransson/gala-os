@@ -7,7 +7,7 @@
 //!   other apartment kind), CoUninitialize, CoInitializeSecurity (once:
 //!   then RPC_E_TOO_LATE), initialize spies (called
 //!   around initialization with the apartment reference counts),
-//!   CoGetContextToken (CO_E_NOTINITIALIZED outside an apartment),
+//!   CoGetMalloc (the task allocator), CoGetContextToken (CO_E_NOTINITIALIZED outside an apartment),
 //!   CoGetObjectContext and CoGetApartmentType (MTA), CoTaskMem*,
 //!   CoCreateGuid (random version-4 GUIDs), CoGetClassObject
 //!   (REGDB_E_CLASSNOTREG), CLSIDFromProgID (CO_E_CLASSSTRING),
@@ -64,6 +64,7 @@ unsafe extern "system" {
     fn CoTaskMemAlloc(size: usize) -> *mut u8;
     fn CoTaskMemRealloc(p: *mut u8, size: usize) -> *mut u8;
     fn CoTaskMemFree(p: *mut u8);
+    fn CoGetMalloc(context: u32, malloc: *mut *mut c_void) -> HResult;
     fn CoCreateGuid(guid: *mut Guid) -> HResult;
     fn CoGetClassObject(
         clsid: *const Guid,
@@ -638,8 +639,35 @@ fn automation(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// CoGetMalloc(MEMCTX_TASK): the task allocator (IMalloc: QueryInterface,
+/// AddRef, Release, Alloc, Realloc, Free, GetSize, DidAlloc,
+/// HeapMinimize), sharing its memory with CoTaskMem*; another context is
+/// E_INVALIDARG.
+fn task_allocator(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: IMalloc's vtable entries as documented.
+    unsafe {
+        let mut malloc = core::ptr::null_mut();
+        c.eq(hr(CoGetMalloc(1, &mut malloc)), S_OK)?;
+        c.ok(!malloc.is_null(), 0)?;
+        let p = call!(malloc, 3, fn(usize) -> *mut u8, 32);
+        c.ok(!p.is_null(), 0)?;
+        *p = 7;
+        c.ok(call!(malloc, 6, fn(*mut u8) -> usize, p) >= 32, 0)?; // GetSize
+        c.eq(call!(malloc, 7, fn(*mut u8) -> i32, p) as u64, 1)?; // DidAlloc
+        let q = call!(malloc, 4, fn(*mut u8, usize) -> *mut u8, p, 64); // Realloc
+        c.ok(!q.is_null() && *q == 7, 0)?;
+        CoTaskMemFree(q); // the same memory as CoTaskMem*
+        let r = CoTaskMemAlloc(8);
+        call!(malloc, 5, fn(*mut u8) -> (), r); // Free
+        release(malloc);
+        c.eq(hr(CoGetMalloc(2, &mut malloc)), 0x8007_0057)?; // E_INVALIDARG
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    task_allocator(&mut c)?;
     apartments(&mut c)?;
     memory_guids_classes(&mut c)?;
     automation(&mut c)
