@@ -134,6 +134,7 @@ const MAX_SIDE: u32 = 4096;
 const MAX_INPUT: usize = 512;
 
 /// Window messages the desktop sends to programs.
+pub const WM_MOVE: u32 = 0x0003;
 pub const WM_CLOSE: u32 = 0x0010;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
 pub const WM_LBUTTONDOWN: u32 = 0x0201;
@@ -562,6 +563,63 @@ impl Desktop {
             self.add_damage(area);
         }
         Ok(area)
+    }
+
+    /// Moves and resizes a window (outer rectangle); its client pixels
+    /// keep what fits, new ones white. The area to redraw.
+    pub fn place(
+        &mut self,
+        id: u32,
+        owner: u64,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) -> Result<Rect, NtStatus> {
+        let min_w = 2 * BORDER + 2 * CAPTION_BUTTON as u32 + 40;
+        if w < min_w || h <= 2 * BORDER + CAPTION || w > MAX_SIDE || h > MAX_SIDE {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        let win = self.find(id, owner)?;
+        let old = win.bounds();
+        if (w, h) != (win.w, win.h) {
+            let (ow, oh) = win.client_size();
+            let (nw, nh) = (w - 2 * BORDER, h - 2 * BORDER - CAPTION);
+            let mut client = Vec::new();
+            client.try_reserve_exact((nw * nh) as usize).map_err(|_| NtStatus::NO_MEMORY)?;
+            client.resize((nw * nh) as usize, 0x00_ff_ff_ff);
+            for y in 0..oh.min(nh) {
+                for x in 0..ow.min(nw) {
+                    client[(y * nw + x) as usize] = win.client[(y * ow + x) as usize];
+                }
+            }
+            win.client = client;
+            win.w = w;
+            win.h = h;
+            win.caption = None;
+            win.caption_state = None;
+        }
+        win.x = x;
+        win.y = y;
+        let new = win.bounds();
+        self.add_damage(old);
+        self.add_damage(new);
+        self.refresh();
+        Ok(new)
+    }
+
+    /// A window's new title (the caption and the taskbar show it).
+    pub fn set_title(&mut self, id: u32, owner: u64, title: &[u16]) -> Result<Rect, NtStatus> {
+        let mut name = Vec::new();
+        name.try_extend_from_slice(title).map_err(|_| NtStatus::NO_MEMORY)?;
+        let win = self.find(id, owner)?;
+        win.title = name;
+        win.caption_state = None;
+        let r = win.caption_rect();
+        self.taskbar_dirty = true;
+        self.add_damage(r);
+        self.refresh();
+        Ok(r)
     }
 
     pub fn destroy(&mut self, id: u32, owner: u64) -> Result<Rect, NtStatus> {
@@ -1033,7 +1091,15 @@ impl Desktop {
 
     fn left_up(&mut self, hit: Hit, x: i64, y: i64, keys: u64) {
         let pressed = core::mem::replace(&mut self.pressed, Hit::Nothing);
-        self.drag = None;
+        // A drag that ends tells the program where its client area went
+        // (WM_MOVE: the client area's screen position).
+        if let Some((id, _, _)) = self.drag.take()
+            && let Some(w) = self.window(id)
+        {
+            let (cx, cy) = w.client_origin();
+            let lp = u64::from(cy as i16 as u16) << 16 | u64::from(cx as i16 as u16);
+            self.send(id, WM_MOVE, 0, lp);
+        }
         match (pressed, hit) {
             (Hit::Button(a, CaptionButton::Close), Hit::Button(b, CaptionButton::Close))
                 if a == b =>

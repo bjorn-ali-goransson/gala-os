@@ -58,7 +58,7 @@ pub extern "system" fn MonitorFromPoint(point: u64, flags: u32) -> usize {
 #[unsafe(no_mangle)]
 pub extern "system" fn MonitorFromWindow(hwnd: Hwnd, flags: u32) -> usize {
     let mut r: Rect = [0; 4];
-    if crate::window::GetWindowRect(hwnd, &mut r) == 0 {
+    if crate::tree::GetWindowRect(hwnd, &mut r) == 0 {
         // Not a window: the default (Windows answers for any handle).
         return if flags != MONITOR_DEFAULTTONULL { HMONITOR } else { 0 };
     }

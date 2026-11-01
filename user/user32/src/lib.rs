@@ -10,6 +10,7 @@ mod menu;
 mod message;
 mod monitor;
 mod timer;
+mod tree;
 mod unimplemented;
 mod window;
 

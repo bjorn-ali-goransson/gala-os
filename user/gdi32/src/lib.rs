@@ -109,16 +109,29 @@ pub(crate) struct Dc {
     /// MoveToEx's position (logical).
     pub pos: (i32, i32),
     pub align: u32,
+    /// A child window's DC: its offset in the top-level window's surface
+    /// (device = logical - window origin + viewport origin + base) and the
+    /// part of the surface it may draw on (its visible rectangle).
+    pub base: (i32, i32),
+    pub bounds: [i32; 4],
 }
 
 impl Dc {
     pub fn device_point(&self, x: i32, y: i32) -> (i32, i32) {
-        (x - self.window_org.0 + self.viewport_org.0, y - self.window_org.1 + self.viewport_org.1)
+        (
+            x - self.window_org.0 + self.viewport_org.0 + self.base.0,
+            y - self.window_org.1 + self.viewport_org.1 + self.base.1,
+        )
     }
 
     /// Whether device pixel (x, y) may be drawn.
     pub fn visible(&self, x: i32, y: i32) -> bool {
+        let b = self.bounds;
         self.surface.contains(x, y)
+            && x >= b[0]
+            && y >= b[1]
+            && x < b[2]
+            && y < b[3]
             && self.clip.is_none_or(|c| x >= c[0] && y >= c[1] && x < c[2] && y < c[3])
     }
 
@@ -133,6 +146,8 @@ impl Dc {
         if let Some(clip) = self.clip {
             r = [r[0].max(clip[0]), r[1].max(clip[1]), r[2].min(clip[2]), r[3].min(clip[3])];
         }
+        let b = self.bounds;
+        r = [r[0].max(b[0]), r[1].max(b[1]), r[2].min(b[2]), r[3].min(b[3])];
         for yy in r[1]..r[3] {
             for xx in r[0]..r[2] {
                 self.surface.put(xx, yy, c);
@@ -304,6 +319,8 @@ fn new_dc(kind: DcKind, surface: Surface, bitmap: usize) -> Handle {
         clip: None,
         pos: (0, 0),
         align: 0,
+        base: (0, 0),
+        bounds: [i32::MIN, i32::MIN, i32::MAX, i32::MAX],
     }))
 }
 
@@ -328,6 +345,30 @@ pub extern "system" fn GalaCreateSurfaceDC(
         mono: false,
     };
     new_dc(DcKind::Window, surface, 0)
+}
+
+/// A child window's DC: drawing into a top-level window's client area
+/// (`width` x `height` at `pixels`, rows `stride` pixels apart) at offset
+/// (`x`, `y`), limited to the rectangle `bounds` of that area.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn GalaCreateChildDC(
+    pixels: *mut u32,
+    width: i32,
+    height: i32,
+    stride: i32,
+    x: i32,
+    y: i32,
+    bounds: *const [i32; 4],
+) -> Handle {
+    let hdc = GalaCreateSurfaceDC(pixels, width, height, stride);
+    // SAFETY: the caller's RECT.
+    let b = if bounds.is_null() { [0, 0, width, height] } else { unsafe { *bounds } };
+    with_dc(hdc, |dc, _| {
+        dc.base = (x, y);
+        dc.bounds = b;
+    });
+    hdc
 }
 
 #[unsafe(no_mangle)]

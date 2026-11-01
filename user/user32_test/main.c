@@ -25,6 +25,17 @@
  *   (the same menu each time, with SC_CLOSE).
  * - RegisterWindowMessageW: a message in 0xC000-0xFFFF, the same for the
  *   same name in any case, another for another name.
+ * - Child windows (WS_CHILD): GetParent, GetDlgCtrlID/GetDlgItem (the id
+ *   given as hMenu), IsChild, GetAncestor(GA_ROOT), GetWindow(GW_CHILD,
+ *   GW_HWNDNEXT: creation order), EnumChildWindows (every descendant);
+ *   the client area is the whole window; ClientToScreen adds the
+ *   parent's offset; SetWindowTextW/GetWindowTextW/GetWindowTextLengthW
+ *   (through WM_SETTEXT/WM_GETTEXT); GetWindowLongW(GWL_STYLE, GWL_ID);
+ *   EnableWindow returns whether it was disabled; MoveWindow and
+ *   SetWindowPos send WM_SIZE and WM_MOVE (DefWindowProc, from
+ *   WM_WINDOWPOSCHANGED), also resizing a top-level window; what a child
+ *   draws shows through its parent's DC; DestroyWindow destroys the
+ *   children too, WM_DESTROY reaching the parent first.
  * - Timers: SetTimer for a window returns its id; WM_TIMER (wParam the
  *   id) comes no sooner than the interval, after posted messages;
  *   KillTimer returns TRUE once. A window-less timer with a TIMERPROC
@@ -82,8 +93,17 @@ static LRESULT CALLBACK cbt(int code, WPARAM wparam, LPARAM lparam) {
     return CallNextHookEx(cbt_hook, code, wparam, lparam);
 }
 
+static HWND watched;
+static LPARAM last_size, last_move;
+static int destroy_order[4], destroys;
 static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     wndproc_messages++;
+    if (hwnd == watched && msg == WM_SIZE)
+        last_size = lparam;
+    if (hwnd == watched && msg == WM_MOVE)
+        last_move = lparam;
+    if (msg == WM_DESTROY && destroys < 4)
+        destroy_order[destroys++] = (int)(INT_PTR)GetWindowLongPtrW(hwnd, GWLP_ID);
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
@@ -284,11 +304,75 @@ static void menus(void) {
     DestroyWindow(w);
 }
 
+static int enumerated;
+static BOOL CALLBACK count_children(HWND hwnd, LPARAM data) {
+    if (data == 5 && IsWindow(hwnd))
+        enumerated++;
+    return TRUE;
+}
+
+static void children(void) {
+    HINSTANCE inst = GetModuleHandleW(NULL);
+    HWND p = CreateWindowExW(0, L"User32TestHooks", L"parent", WS_OVERLAPPEDWINDOW, 50, 60, 400, 300,
+                             NULL, NULL, inst, NULL);
+    CHECK(p != NULL);
+    HWND c = CreateWindowExW(0, L"User32TestHooks", L"child", WS_CHILD | WS_VISIBLE, 10, 20, 100, 50, p,
+                             (HMENU)7, inst, NULL);
+    HWND c2 = CreateWindowExW(0, L"User32TestHooks", L"second", WS_CHILD | WS_VISIBLE, 10, 100, 100, 50,
+                              p, (HMENU)8, inst, NULL);
+    CHECK(c != NULL && c2 != NULL);
+    CHECK(GetParent(c) == p && GetDlgCtrlID(c) == 7 && GetDlgItem(p, 8) == c2 && IsChild(p, c));
+    CHECK(GetAncestor(c, GA_ROOT) == p && GetWindow(p, GW_CHILD) == c && GetWindow(c, GW_HWNDNEXT) == c2);
+    CHECK(EnumChildWindows(p, count_children, 5) && enumerated == 2);
+    RECT r;
+    CHECK(GetClientRect(c, &r) && r.left == 0 && r.top == 0 && r.right == 100 && r.bottom == 50);
+    POINT pc = {0, 0}, pp = {10, 20};
+    CHECK(ClientToScreen(c, &pc) && ClientToScreen(p, &pp) && pc.x == pp.x && pc.y == pp.y);
+    CHECK(GetWindowRect(c, &r) && r.left == pc.x && r.top == pc.y && r.right - r.left == 100);
+    CHECK((GetWindowLongW(c, GWL_STYLE) & WS_CHILD) && GetWindowLongW(c, GWL_ID) == 7);
+    CHECK(SetWindowTextW(c, L"hello") && GetWindowTextLengthW(c) == 5);
+    WCHAR text[64];
+    CHECK(GetWindowTextW(c, text, 64) == 5 && wcscmp(text, L"hello") == 0);
+    CHECK(GetWindowTextW(p, text, 64) == 6 && wcscmp(text, L"parent") == 0);
+    CHECK(EnableWindow(c, FALSE) == 0 && !IsWindowEnabled(c) && EnableWindow(c, TRUE) != 0);
+    CHECK(IsWindowEnabled(c));
+
+    watched = c;
+    CHECK(MoveWindow(c, 30, 40, 120, 60, TRUE));
+    CHECK(last_size == MAKELPARAM(120, 60) && last_move == MAKELPARAM(30, 40));
+    CHECK(GetClientRect(c, &r) && r.right == 120 && r.bottom == 60);
+    watched = p;
+    CHECK(SetWindowPos(p, NULL, 0, 0, 500, 400, SWP_NOMOVE | SWP_NOZORDER));
+    CHECK(GetWindowRect(p, &r) && r.right - r.left == 500 && r.bottom - r.top == 400);
+    RECT client;
+    CHECK(GetClientRect(p, &client) && client.right > 400 && client.right <= 500);
+    CHECK(last_size == MAKELPARAM(client.right, client.bottom));
+
+    /* A child draws in its parent's area: the parent's DC sees it. */
+    ShowWindow(p, SW_SHOW);
+    HDC cdc = GetDC(c);
+    HBRUSH red = CreateSolidBrush(RGB(255, 0, 0));
+    RECT all = {0, 0, 120, 60};
+    CHECK(FillRect(cdc, &all, red));
+    ReleaseDC(c, cdc);
+    HDC pdc = GetDC(p);
+    CHECK(GetPixel(pdc, 31, 41) == RGB(255, 0, 0) && GetPixel(pdc, 29, 39) != RGB(255, 0, 0));
+    ReleaseDC(p, pdc);
+    DeleteObject(red);
+
+    watched = NULL;
+    SetWindowLongPtrW(p, GWLP_ID, 1);
+    destroys = 0;
+    CHECK(DestroyWindow(p));
+    CHECK(!IsWindow(c) && !IsWindow(c2) && destroys == 3 && destroy_order[0] == 1);
+}
+
 int main(void) {
     hooks();
     timers();
     monitors();
     menus();
+    children();
     UINT a = RegisterWindowMessageW(L"GalaTestMessage"), b = RegisterWindowMessageW(L"galatestmessage");
     CHECK(a >= 0xC000 && a <= 0xFFFF && a == b && RegisterWindowMessageW(L"Other") != a);
     ole();

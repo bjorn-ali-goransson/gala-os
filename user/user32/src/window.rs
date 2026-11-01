@@ -13,7 +13,7 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-type Handle = *mut c_void;
+pub(crate) type Handle = *mut c_void;
 pub(crate) type Hwnd = usize;
 pub type WndProc = extern "system" fn(Hwnd, u32, usize, isize) -> isize;
 
@@ -61,7 +61,7 @@ unsafe extern "system" {
 pub const BORDER: i32 = 1;
 pub const CAPTION: i32 = 30;
 const MAX_CLASSES: usize = 32;
-const MAX_WINDOWS: usize = 64;
+pub(crate) const MAX_WINDOWS: usize = 512;
 const QUEUE: usize = 256;
 const HWND_BASE: usize = 0x0001_0000;
 
@@ -81,41 +81,52 @@ const ERROR_CLASS_DOES_NOT_EXIST: u32 = 1411;
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 
 #[derive(Clone, Copy)]
-struct Class {
+pub(crate) struct Class {
     used: bool,
     atom: u16,
     name: [u16; 64],
     /// The name as registered (GetClassName).
     spelled: [u16; 64],
-    proc_: Option<WndProc>,
+    pub(crate) proc_: Option<WndProc>,
     background: usize,
     #[allow(dead_code)]
     style: u32,
 }
 
 #[derive(Clone, Copy)]
-struct Window {
-    used: bool,
-    class: usize,
-    proc_: Option<WndProc>,
+pub(crate) struct Window {
+    pub(crate) used: bool,
+    pub(crate) class: usize,
+    pub(crate) proc_: Option<WndProc>,
     /// The desktop's id (0: no screen; nothing is shown).
-    desktop: u32,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    #[allow(dead_code)]
-    style: u32,
-    visible: bool,
-    invalid: bool,
-    erase: bool,
-    thread: u32,
-    pixels: *mut u32,
-    cw: i32,
-    ch: i32,
-    user_data: isize,
+    pub(crate) desktop: u32,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) w: i32,
+    pub(crate) h: i32,
+    pub(crate) style: u32,
+    pub(crate) visible: bool,
+    pub(crate) invalid: bool,
+    pub(crate) erase: bool,
+    pub(crate) thread: u32,
+    pub(crate) pixels: *mut u32,
+    pub(crate) cw: i32,
+    pub(crate) ch: i32,
+    pub(crate) user_data: isize,
     /// The title (NUL-terminated, truncated to 127 characters).
-    title: [u16; 128],
+    pub(crate) title: [u16; 128],
+    /// A child window's parent (0: a top-level window). A child's x and y
+    /// are relative to the parent's client area and it has no frame (its
+    /// client area is the whole window).
+    pub(crate) parent: Hwnd,
+    /// A child's id (CreateWindowEx's hMenu).
+    pub(crate) id: usize,
+    pub(crate) ex_style: u32,
+    pub(crate) enabled: bool,
+    /// Z order among siblings: smaller is higher (children are added at
+    /// the bottom, top-level windows at the top).
+    pub(crate) z: i64,
+    pub(crate) instance: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -146,7 +157,7 @@ const NO_CLASS: Class = Class {
     background: 0,
     style: 0,
 };
-const NO_WINDOW: Window = Window {
+pub(crate) const NO_WINDOW: Window = Window {
     used: false,
     class: 0,
     proc_: None,
@@ -165,15 +176,21 @@ const NO_WINDOW: Window = Window {
     ch: 0,
     user_data: 0,
     title: [0; 128],
+    parent: 0,
+    id: 0,
+    ex_style: 0,
+    enabled: true,
+    z: 0,
+    instance: 0,
 };
 const NO_MSG: Msg =
     Msg { hwnd: 0, message: 0, wparam: 0, lparam: 0, time: 0, pt: [0; 2], private: 0 };
 
-struct State {
-    classes: [Class; MAX_CLASSES],
-    windows: [Window; MAX_WINDOWS],
+pub(crate) struct State {
+    pub(crate) classes: [Class; MAX_CLASSES],
+    pub(crate) windows: [Window; MAX_WINDOWS],
     queue: [Queued; QUEUE],
-    next_atom: u16,
+    pub(crate) next_atom: u16,
 }
 
 struct Shared {
@@ -197,7 +214,7 @@ static SHARED: Shared = Shared {
 /// The queue's event (auto-reset), made on first use.
 static EVENT: AtomicUsize = AtomicUsize::new(0);
 
-fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
+pub(crate) fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     while SHARED.lock.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
         core::hint::spin_loop();
     }
@@ -226,7 +243,7 @@ fn event() -> Handle {
     }
 }
 
-fn wake() {
+pub(crate) fn wake() {
     // SAFETY: our event.
     unsafe { SetEvent(event()) };
 }
@@ -241,17 +258,17 @@ pub(crate) fn me() -> u32 {
     unsafe { GetCurrentThreadId() }
 }
 
-fn index_of(hwnd: Hwnd) -> Option<usize> {
+pub(crate) fn index_of(hwnd: Hwnd) -> Option<usize> {
     let i = hwnd.checked_sub(HWND_BASE)? / 0x10;
     (hwnd == HWND_BASE + i * 0x10 && i < MAX_WINDOWS).then_some(i)
 }
 
-fn hwnd_of(i: usize) -> Hwnd {
+pub(crate) fn hwnd_of(i: usize) -> Hwnd {
     HWND_BASE + i * 0x10
 }
 
 /// The window's state, if `hwnd` is one.
-fn window(hwnd: Hwnd) -> Option<Window> {
+pub(crate) fn window(hwnd: Hwnd) -> Option<Window> {
     let i = index_of(hwnd)?;
     with(|s| s.windows[i].used.then_some(s.windows[i]))
 }
@@ -269,7 +286,10 @@ struct Gdi {
     solid_brush: extern "system" fn(u32) -> Handle,
     select: extern "system" fn(Handle, Handle) -> Handle,
     pat_blt: extern "system" fn(Handle, i32, i32, i32, i32, u32) -> i32,
+    create_child_dc: ChildDc,
 }
+
+type ChildDc = extern "system" fn(*mut u32, i32, i32, i32, i32, i32, *const [i32; 4]) -> Handle;
 
 static GDI: AtomicUsize = AtomicUsize::new(0);
 static GDI_FNS: Shared2 = Shared2(UnsafeCell::new(None));
@@ -304,7 +324,8 @@ fn gdi() -> Option<&'static Gdi> {
             f(b"SelectObject\0"),
             f(b"PatBlt\0"),
         );
-        if [a, b, c, d, e].iter().any(|p| p.is_null()) {
+        let child = f(b"GalaCreateChildDC\0");
+        if [a, b, c, d, e, child].iter().any(|p| p.is_null()) {
             return None;
         }
         if GDI.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
@@ -327,6 +348,7 @@ fn gdi() -> Option<&'static Gdi> {
                     *const c_void,
                     extern "system" fn(Handle, i32, i32, i32, i32, u32) -> i32,
                 >(e),
+                create_child_dc: core::mem::transmute::<*const c_void, ChildDc>(child),
             });
             GDI.store(2, Ordering::Release);
         }
@@ -423,7 +445,7 @@ pub extern "system" fn GetClassNameA(hwnd: Hwnd, buf: *mut u8, n: i32) -> i32 {
 }
 
 /// A class by name (or atom: a value under 0x10000).
-fn find_class(s: &State, name: *const u16) -> Option<usize> {
+pub(crate) fn find_class(s: &State, name: *const u16) -> Option<usize> {
     if (name as usize) < 0x1_0000 {
         let atom = name as usize as u16;
         return s.classes.iter().position(|c| c.used && c.atom == atom);
@@ -535,8 +557,20 @@ pub extern "system" fn CreateWindowExW(
     param: *mut c_void,
 ) -> Hwnd {
     if style & WS_CHILD != 0 {
-        unsupported(b"user32.dll!CreateWindowExW(WS_CHILD)", u64::from(style));
-        return 0;
+        return crate::tree::create_child(
+            ex_style,
+            class,
+            name,
+            style,
+            x,
+            y,
+            w,
+            h,
+            parent,
+            menu as usize,
+            instance,
+            param,
+        );
     }
     let (x, y) = if x == CW_USEDEFAULT { (60, 60) } else { (x, y) };
     let (w, h) = if w == CW_USEDEFAULT {
@@ -596,6 +630,12 @@ pub extern "system" fn CreateWindowExW(
             ch,
             user_data: 0,
             title,
+            parent: 0,
+            id: 0,
+            ex_style,
+            enabled: true,
+            z: crate::tree::next_z(false),
+            instance: instance as usize,
         };
         Some(i)
     });
@@ -610,6 +650,27 @@ pub extern "system" fn CreateWindowExW(
         }
         return 0;
     };
+    finish_create(i, ex_style, class, name, style, x, y, w, h, parent, menu, instance, param)
+}
+
+/// What CreateWindowEx does once the window exists: WH_CBT, WM_NCCREATE,
+/// WM_CREATE, WS_VISIBLE; the window or 0.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finish_create(
+    i: usize,
+    ex_style: u32,
+    class: *const u16,
+    name: *const u16,
+    style: u32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    parent: Hwnd,
+    menu: Handle,
+    instance: Handle,
+    param: *mut c_void,
+) -> Hwnd {
     let hwnd = hwnd_of(i);
     let cs = CreateStructW {
         create_params: param,
@@ -644,7 +705,9 @@ pub extern "system" fn CreateWindowExW(
                 if gone.desktop != 0 {
                     GalaWindowDestroy(gone.desktop);
                 }
-                VirtualFree(gone.pixels.cast(), 0, 0x8000);
+                if !gone.pixels.is_null() {
+                    VirtualFree(gone.pixels.cast(), 0, 0x8000);
+                }
             }
             return 0;
         }
@@ -668,8 +731,15 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
         return 0;
     }
     crate::hook::call(crate::hook::WH_CBT, crate::hook::HCBT_DESTROYWND, hwnd, 0);
+    let was_shown = IsWindowVisible(hwnd) != 0;
+    let parent = window(hwnd).map_or(0, |w| w.parent);
+    // WM_DESTROY to the window, then its children (and theirs).
     SendMessageW(hwnd, WM_DESTROY, 0, 0);
+    for child in crate::tree::children_of(hwnd).iter().copied().filter(|&c| c != 0) {
+        DestroyWindow(child);
+    }
     SendMessageW(hwnd, WM_NCDESTROY, 0, 0);
+    crate::tree::forget(hwnd);
     let Some(i) = index_of(hwnd) else { return 0 };
     crate::timer::window_destroyed(hwnd);
     crate::menu::window_destroyed(hwnd);
@@ -689,7 +759,13 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
         if gone.desktop != 0 {
             GalaWindowDestroy(gone.desktop);
         }
-        VirtualFree(gone.pixels.cast(), 0, 0x8000);
+        if !gone.pixels.is_null() {
+            VirtualFree(gone.pixels.cast(), 0, 0x8000);
+        }
+    }
+    // Its area of the parent shows the parent again.
+    if parent != 0 && was_shown {
+        InvalidateRect(parent, core::ptr::null(), 1);
     }
     1
 }
@@ -701,7 +777,9 @@ pub extern "system" fn IsWindow(hwnd: Hwnd) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn IsWindowVisible(hwnd: Hwnd) -> i32 {
-    i32::from(window(hwnd).is_some_and(|w| w.visible))
+    i32::from(with(|s| {
+        index_of(hwnd).is_some_and(|i| s.windows[i].used && crate::tree::shown(s, i))
+    }))
 }
 
 /// ShowWindow: whether it was visible before.
@@ -709,6 +787,9 @@ pub extern "system" fn IsWindowVisible(hwnd: Hwnd) -> i32 {
 pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
     let Some(i) = index_of(hwnd) else { return 0 };
     let show = cmd != 0; // SW_HIDE
+    if window(hwnd).is_some_and(|w| w.parent != 0) {
+        return crate::tree::show_child(hwnd, show);
+    }
     let (was, desktop) = with(|s| {
         let w = &mut s.windows[i];
         let was = w.visible;
@@ -727,6 +808,8 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
     }
     if show {
         FOREGROUND.store(hwnd, Ordering::Relaxed);
+        crate::tree::shown_top_level(hwnd);
+        InvalidateRect(hwnd, core::ptr::null(), 1);
         wake();
     }
     i32::from(was)
@@ -735,9 +818,16 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
 /// UpdateWindow: sends WM_PAINT now if the window needs painting.
 #[unsafe(no_mangle)]
 pub extern "system" fn UpdateWindow(hwnd: Hwnd) -> i32 {
-    let Some(w) = window(hwnd) else { return 0 };
-    if w.invalid && w.visible {
-        SendMessageW(hwnd, WM_PAINT, 0, 0);
+    if window(hwnd).is_none() {
+        return 0;
+    }
+    // The window, then its children that need painting.
+    let mut order = [0usize; 64];
+    let n = crate::tree::subtree(hwnd, &mut order);
+    for &h in &order[..n] {
+        if window(h).is_some_and(|w| w.invalid) && IsWindowVisible(h) != 0 {
+            SendMessageW(h, WM_PAINT, 0, 0);
+        }
     }
     1
 }
@@ -746,15 +836,23 @@ pub extern "system" fn UpdateWindow(hwnd: Hwnd) -> i32 {
 /// painting (the rectangle is not tracked yet).
 #[unsafe(no_mangle)]
 pub extern "system" fn InvalidateRect(hwnd: Hwnd, _rect: *const [i32; 4], erase: i32) -> i32 {
-    let Some(i) = index_of(hwnd) else { return 0 };
-    let ok = with(|s| {
-        let w = &mut s.windows[i];
-        w.invalid |= w.used;
-        w.erase |= w.used && erase != 0;
-        w.used
+    if window(hwnd).is_none() {
+        return 0;
+    }
+    // Children paint over their parent's area: they are invalid with it.
+    let mut all = [0usize; 64];
+    let n = crate::tree::subtree(hwnd, &mut all);
+    with(|s| {
+        for &h in &all[..n] {
+            if let Some(i) = index_of(h) {
+                let w = &mut s.windows[i];
+                w.invalid |= w.used;
+                w.erase |= w.used && (erase != 0 || h != hwnd);
+            }
+        }
     });
     wake();
-    i32::from(ok)
+    1
 }
 
 #[unsafe(no_mangle)]
@@ -763,60 +861,6 @@ pub extern "system" fn ValidateRect(hwnd: Hwnd, _rect: *const [i32; 4]) -> i32 {
     with(|s| {
         s.windows[i].invalid = false;
         i32::from(s.windows[i].used)
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn GetClientRect(hwnd: Hwnd, rect: *mut [i32; 4]) -> i32 {
-    let Some(w) = window(hwnd) else { return 0 };
-    // SAFETY: the caller's RECT.
-    unsafe { *rect = [0, 0, w.cw, w.ch] };
-    1
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn GetWindowRect(hwnd: Hwnd, rect: *mut [i32; 4]) -> i32 {
-    let Some(w) = window(hwnd) else { return 0 };
-    // SAFETY: the caller's RECT.
-    unsafe { *rect = [w.x, w.y, w.x + w.w, w.y + w.h] };
-    1
-}
-
-const GWLP_WNDPROC: i32 = -4;
-const GWLP_USERDATA: i32 = -21;
-
-#[unsafe(no_mangle)]
-pub extern "system" fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize {
-    let Some(w) = window(hwnd) else { return 0 };
-    match index {
-        GWLP_WNDPROC => w.proc_.map_or(0, |p| p as usize as isize),
-        GWLP_USERDATA => w.user_data,
-        _ => {
-            unsupported(b"user32.dll!GetWindowLongPtrW(index)", index as u64);
-            0
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -> isize {
-    let Some(i) = index_of(hwnd) else { return 0 };
-    with(|s| {
-        let w = &mut s.windows[i];
-        if !w.used {
-            return 0;
-        }
-        match index {
-            GWLP_WNDPROC => {
-                let old = w.proc_.map_or(0, |p| p as usize as isize);
-                // SAFETY: the caller's window procedure.
-                w.proc_ =
-                    (value != 0).then(|| unsafe { core::mem::transmute::<isize, WndProc>(value) });
-                old
-            }
-            GWLP_USERDATA => core::mem::replace(&mut w.user_data, value),
-            _ => 0,
-        }
     })
 }
 
@@ -832,30 +876,42 @@ pub struct PaintStruct {
     reserved: [u8; 32],
 }
 
-/// A DC on the window's client area.
-fn client_dc(w: &Window) -> Handle {
-    match gdi() {
-        Some(g) => (g.create_dc)(w.pixels, w.cw, w.ch, w.cw),
-        None => core::ptr::null_mut(),
+/// A DC on the window's client area (a child's: its part of the
+/// top-level window's buffer).
+fn client_dc(hwnd: Hwnd) -> Handle {
+    let Some(g) = gdi() else { return core::ptr::null_mut() };
+    let Some((root, offset, visible)) = crate::tree::placement(hwnd) else {
+        return core::ptr::null_mut();
+    };
+    if offset == (0, 0) && window(hwnd).is_some_and(|w| w.parent == 0) {
+        return (g.create_dc)(root.pixels, root.cw, root.ch, root.cw);
     }
+    (g.create_child_dc)(root.pixels, root.cw, root.ch, root.cw, offset.0, offset.1, &visible)
 }
 
-/// Shows the client area's pixels on the desktop.
-fn present(w: &Window) {
-    if w.desktop != 0 && w.visible {
-        // SAFETY: the window's own buffer.
-        unsafe {
-            GalaWindowPresent(
-                w.desktop,
-                0,
-                0,
-                w.cw as u32,
-                w.ch as u32,
-                w.pixels,
-                (w.cw * 4) as usize,
-            )
-        };
+/// Shows the window's area (of its top-level window's buffer) on the
+/// desktop.
+fn present(hwnd: Hwnd) {
+    let Some((root, _, visible)) = crate::tree::placement(hwnd) else { return };
+    if root.desktop == 0 || !root.visible || IsWindowVisible(hwnd) == 0 {
+        return;
     }
+    let [l, t, r, b] = visible;
+    if r <= l || b <= t {
+        return;
+    }
+    // SAFETY: the top-level window's own buffer; the rectangle is inside.
+    unsafe {
+        GalaWindowPresent(
+            root.desktop,
+            l,
+            t,
+            (r - l) as u32,
+            (b - t) as u32,
+            root.pixels.add((t * root.cw + l) as usize),
+            (root.cw * 4) as usize,
+        )
+    };
 }
 
 /// BeginPaint: a DC on the client area, the area to paint (all of it),
@@ -865,7 +921,7 @@ fn present(w: &Window) {
 pub extern "system" fn BeginPaint(hwnd: Hwnd, ps: *mut PaintStruct) -> Handle {
     let Some(i) = index_of(hwnd) else { return core::ptr::null_mut() };
     let Some(w) = window(hwnd) else { return core::ptr::null_mut() };
-    let hdc = client_dc(&w);
+    let hdc = client_dc(hwnd);
     if hdc.is_null() {
         return hdc;
     }
@@ -891,8 +947,10 @@ pub extern "system" fn BeginPaint(hwnd: Hwnd, ps: *mut PaintStruct) -> Handle {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn EndPaint(hwnd: Hwnd, ps: *const PaintStruct) -> i32 {
-    let Some(w) = window(hwnd) else { return 0 };
-    present(&w);
+    if window(hwnd).is_none() {
+        return 0;
+    }
+    present(hwnd);
     if let Some(g) = gdi() {
         // SAFETY: the PAINTSTRUCT BeginPaint filled.
         (g.delete_dc)(unsafe { (*ps).hdc });
@@ -903,7 +961,7 @@ pub extern "system" fn EndPaint(hwnd: Hwnd, ps: *const PaintStruct) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDC(hwnd: Hwnd) -> Handle {
     match window(hwnd) {
-        Some(w) => client_dc(&w),
+        Some(_) => client_dc(hwnd),
         None => core::ptr::null_mut(),
     }
 }
@@ -911,8 +969,10 @@ pub extern "system" fn GetDC(hwnd: Hwnd) -> Handle {
 /// ReleaseDC: what was drawn shows.
 #[unsafe(no_mangle)]
 pub extern "system" fn ReleaseDC(hwnd: Hwnd, hdc: Handle) -> i32 {
-    let Some(w) = window(hwnd) else { return 0 };
-    present(&w);
+    if window(hwnd).is_none() {
+        return 0;
+    }
+    present(hwnd);
     gdi().map_or(0, |g| (g.delete_dc)(hdc))
 }
 
@@ -971,12 +1031,10 @@ pub extern "system" fn FillRect(hdc: Handle, rect: *const [i32; 4], brush: Handl
 /// DefWindowProcW: WM_NCCREATE succeeds, WM_CLOSE destroys the window,
 /// WM_ERASEBKGND fills the class background, WM_PAINT validates.
 #[unsafe(no_mangle)]
-pub extern "system" fn DefWindowProcW(
-    hwnd: Hwnd,
-    msg: u32,
-    wparam: usize,
-    _lparam: isize,
-) -> isize {
+pub extern "system" fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
+    if let Some(r) = crate::tree::def_window_proc(hwnd, msg, wparam, lparam) {
+        return r;
+    }
     match msg {
         WM_NCCREATE => 1,
         WM_CLOSE => {
@@ -1030,6 +1088,11 @@ static CURSOR: AtomicUsize = AtomicUsize::new(0);
 #[unsafe(no_mangle)]
 pub extern "system" fn SetCapture(hwnd: Hwnd) -> Hwnd {
     CAPTURE.swap(hwnd, Ordering::Relaxed)
+}
+
+/// A window that goes no longer has the capture.
+pub(crate) fn release_capture_of(hwnd: Hwnd) {
+    let _ = CAPTURE.compare_exchange(hwnd, 0, Ordering::Relaxed, Ordering::Relaxed);
 }
 
 #[unsafe(no_mangle)]
@@ -1154,7 +1217,10 @@ pub extern "system" fn GetQueueStatus(flags: u32) -> u32 {
                 _ => QS_POSTMESSAGE,
             };
         }
-        if s.windows.iter().any(|w| w.used && w.thread == thread && w.invalid && w.visible) {
+        if (0..s.windows.len()).any(|i| {
+            let w = &s.windows[i];
+            w.used && w.thread == thread && w.invalid && crate::tree::shown(s, i)
+        }) {
             have |= QS_PAINT;
         }
         have
@@ -1295,10 +1361,18 @@ fn pump() {
                     .map(|i| (i, s.windows[i].thread))
             });
             if let Some((i, thread)) = target {
+                let top = hwnd_of(i);
                 if message == 0x0201 || message == 0x0204 {
-                    FOREGROUND.store(hwnd_of(i), Ordering::Relaxed);
+                    FOREGROUND.store(top, Ordering::Relaxed);
                 }
-                post(thread, message_at(hwnd_of(i), message, wparam, lparam));
+                // The desktop moved the window (a drag): its position.
+                if message == 0x0003 {
+                    crate::tree::moved_by_desktop(top, lparam);
+                }
+                // Mouse input goes to the child under the pointer (or the
+                // capture), keys to the focus.
+                let (to, lparam) = crate::tree::route(top, message, lparam);
+                post(thread, message_at(to, message, wparam, lparam));
             }
         }
         if n < 32 {
@@ -1492,8 +1566,16 @@ fn next_raw(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
             }
             return Some(q.msg);
         }
-        let i =
-            s.windows.iter().position(|w| w.used && w.thread == thread && w.invalid && w.visible);
+        // An invalid shown window whose ancestors are valid (parents paint
+        // before their children).
+        let i = (0..s.windows.len()).find(|&i| {
+            let w = &s.windows[i];
+            w.used
+                && w.thread == thread
+                && w.invalid
+                && crate::tree::shown(s, i)
+                && !crate::tree::ancestor_invalid(s, i)
+        });
         i.map(|i| message(hwnd_of(i), WM_PAINT, 0, 0)).filter(|m| fits(m))
     })
     .or_else(|| crate::timer::due(fits, remove))

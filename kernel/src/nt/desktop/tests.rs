@@ -100,13 +100,15 @@ fn the_caption_drags_and_its_buttons_minimize_and_close() {
     go(&mut d, 450, 210, 0);
     let w = d.window(a).unwrap();
     assert_eq!((w.x, w.y), (400, 200));
+    // The drag's end: WM_MOVE with the client area's screen position.
     // Close: WM_CLOSE for the program (on release over the button).
     let close = (400 + 400 - 20, 200 + 15);
     click(&mut d, close.0, close.1);
     let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 4];
     let n = d.take_input(7, &mut out);
-    assert_eq!(out[..n].iter().map(|e| e.message).collect::<Vec<_>>(), [WM_CLOSE]);
-    assert_eq!(out[0].window, a);
+    assert_eq!(out[..n].iter().map(|e| e.message).collect::<Vec<_>>(), [WM_MOVE, WM_CLOSE]);
+    assert_eq!(out[0].lparam, (200 + 31) << 16 | (400 + 1));
+    assert_eq!(out[1].window, a);
     // Minimize: gone from the screen, still on the taskbar; its taskbar
     // button brings it back.
     click(&mut d, 400 + 400 - 46 - 20, 215);
@@ -138,4 +140,20 @@ fn the_clock_shows_utc_time_and_date() {
     let days = 134_774 + 20_758; // 1601 -> 1970 -> 2026-11-01
     let (hh, mm, date) = clock((days * 24 * 60 + 18 * 60 + 52) as u64);
     assert_eq!((hh, mm, &date), (18, 52, b"2026-11-01"));
+}
+
+#[test]
+fn place_resizes_keeping_the_client_pixels_and_set_title_renames() {
+    let (mut d, a) = desktop_with_window();
+    let red = [0x00ff_0000u32; 4];
+    d.present(a, 7, Rect { x: 0, y: 0, w: 2, h: 2 }, &red, 2).unwrap();
+    d.place(a, 7, 100, 50, 500, 400).unwrap();
+    let w = d.window(a).unwrap();
+    assert_eq!((w.x, w.y, w.w, w.h), (100, 50, 500, 400));
+    let (ox, oy) = w.client_origin();
+    assert_eq!(d.pixel(ox + 1, oy + 1), 0x00ff_0000);
+    assert_eq!(d.pixel(ox + 450, oy + 300), 0x00ff_ffff);
+    assert_eq!(d.place(a, 8, 0, 0, 500, 400).err(), Some(NtStatus::INVALID_HANDLE));
+    d.set_title(a, 7, &title("Renamed")).unwrap();
+    assert_eq!(d.window(a).unwrap().title, title("Renamed"));
 }

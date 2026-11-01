@@ -104,6 +104,8 @@ pub const GALA_WINDOW_DESTROY: u32 = 0x7f33;
 pub const GALA_WINDOW_LISTEN: u32 = 0x7f34;
 pub const GALA_WINDOW_INPUT: u32 = 0x7f35;
 pub const GALA_SCREEN_INFO: u32 = 0x7f36;
+pub const GALA_WINDOW_PLACE: u32 = 0x7f37;
+pub const GALA_WINDOW_SET_TITLE: u32 = 0x7f38;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -272,6 +274,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_LISTEN, "GalaWindowListen", 1, gala_window_listen),
     (GALA_WINDOW_INPUT, "GalaWindowInput", 3, gala_window_input),
     (GALA_SCREEN_INFO, "GalaScreenInfo", 1, gala_screen_info),
+    (GALA_WINDOW_PLACE, "GalaWindowPlace", 5, gala_window_place),
+    (GALA_WINDOW_SET_TITLE, "GalaWindowSetTitle", 3, gala_window_set_title),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1312,6 +1316,35 @@ fn gala_window_listen(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::NOT_SUPPORTED;
     }
     tri!(super::desktop::listen(call.process.id, event));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowPlace(id, x, y, w, h): moves and resizes a window (its outer
+/// rectangle).
+fn gala_window_place(call: &mut Call<'_>) -> NtStatus {
+    let id = arg!(call, 0) as u32;
+    let (x, y) = (arg!(call, 1) as u32 as i32, arg!(call, 2) as u32 as i32);
+    let (w, h) = (arg!(call, 3) as u32, arg!(call, 4) as u32);
+    let owner = call.process.id;
+    tri!(super::desktop::with(|d| Ok(((), Some(d.place(id, owner, x, y, w, h)?)))));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowSetTitle(id, *title, length): the caption's text (UTF-16,
+/// at most 256 characters).
+fn gala_window_set_title(call: &mut Call<'_>) -> NtStatus {
+    let id = arg!(call, 0) as u32;
+    let (ptr, len) = (arg!(call, 1), (arg!(call, 2) as usize).min(256));
+    let mut bytes = [0u8; 512];
+    if call.process.read(ptr, &mut bytes[..2 * len]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let mut title = [0u16; 256];
+    for (i, t) in title.iter_mut().take(len).enumerate() {
+        *t = u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]);
+    }
+    let owner = call.process.id;
+    tri!(super::desktop::with(|d| Ok(((), Some(d.set_title(id, owner, &title[..len])?)))));
     NtStatus::SUCCESS
 }
 

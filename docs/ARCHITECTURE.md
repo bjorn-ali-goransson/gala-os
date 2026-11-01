@@ -2127,7 +2127,9 @@ A small window manager and shell, in the kernel for now.
   GalaWindowPresent(id, x, y, w, h, pixels, stride) 0x7f32 (copies a
   client rectangle in), GalaWindowDestroy(id) 0x7f33, GalaWindowListen
   (event) 0x7f34, GalaWindowInput(records, max, *count) 0x7f35,
-  GalaScreenInfo(*rects) 0x7f36. Only the
+  GalaScreenInfo(*rects) 0x7f36, GalaWindowPlace(id, x, y, w, h) 0x7f37
+  (a new client buffer keeping what fits), GalaWindowSetTitle(id, *text,
+  length) 0x7f38. Only the
   owner process may change a window.
 - **user32** (`user/user32/src/window.rs`): classes, windows
   (HWND = 0x10000 + 16 * slot), one message queue per process (256
@@ -2144,6 +2146,34 @@ A small window manager and shell, in the kernel for now.
   MonitorFromWindow/Point/Rect (off-screen: by the default flags),
   GetMonitorInfoW/A (\\.\DISPLAY1) and GetSystemMetrics' screen
   metrics come from it.
+- **Child windows** (`user/user32/src/tree.rs`): WS_CHILD windows have a
+  parent, an id (hMenu), a position in the parent's client area and no
+  frame. They have no pixels of their own: their DCs draw into the
+  top-level window's buffer at their offset, hard-clipped to their
+  visible rectangle (gdi32's GalaCreateChildDC: a hidden device offset
+  and bounds, so the program's own viewport origin and clip stay its
+  own), and presenting shows that part. Invalidating a window
+  invalidates its descendants (they paint over its area, as without
+  WS_CLIPCHILDREN); WM_PAINT picks windows whose ancestors are valid, so
+  parents paint first. Mouse input from the desktop goes to the deepest
+  visible, enabled child under the pointer, or the capture window, with
+  lParam in its client coordinates; keys go to the focus window
+  (SetFocus/GetFocus with WM_KILLFOCUS/WM_SETFOCUS; a shown top-level
+  window takes the focus). Siblings keep a z order: children are added
+  at the bottom, so GW_CHILD/GW_HWNDNEXT walk them in creation order (the
+  dialog tab order). DestroyWindow sends WM_DESTROY to the window, then
+  destroys its children. SetWindowPos/MoveWindow send
+  WM_WINDOWPOSCHANGING/CHANGED, and DefWindowProc turns the latter into
+  WM_MOVE and WM_SIZE; a top-level window's resize reallocates its buffer
+  and goes to the desktop (GalaWindowPlace, 0x7f37); its title change
+  too (WM_SETTEXT, GalaWindowSetTitle, 0x7f38). The desktop reports a
+  caption drag's end with WM_MOVE, which updates user32's idea of the
+  window's position. Window longs: GWLP_WNDPROC, HINSTANCE, HWNDPARENT,
+  ID, GWL_STYLE (with WS_VISIBLE/WS_DISABLED as they are), EXSTYLE,
+  USERDATA; extra bytes are not supported yet (ledger). Up to 512
+  windows. Not yet: WS_CLIPCHILDREN/CLIPSIBLINGS (overlapping siblings
+  paint in z order only when invalidated together), WM_PARENTNOTIFY,
+  WM_NCCALCSIZE and child borders, owned windows.
 - **Menus** (`user/user32/src/menu.rs`): HMENU objects as data, each in
   a page of its own (64 items: string, separator or popup; id, MF state,
   type, item data, bitmap), with the documented results of Append/

@@ -520,8 +520,11 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    ternary raster operations, fonts at any size from the Noto bitmaps
    with GDI metrics), MulDiv, GetClassNameW/A. It now stops at
    GetSystemMenu: menus as data (user32_test) and RegisterWindowMessageW.
-   It now stops at CreateWindowExW(WS_CHILD): next, child windows, then
-   SystemParametersInfoW and what the ledger orders.
+   Then child windows (tree.rs; user32_test): the tree, painting into
+   the top-level buffer, input routing, focus, the queries, window text
+   and longs, EnableWindow, SetWindowPos/MoveWindow with WM_MOVE/WM_SIZE,
+   top-level resizes and titles through the desktop. It now stops at
+   SystemParametersInfoW.
 W4. Later: a user-mode shell (the taskbar and start menu out of the
    kernel), window resizing (WM_SIZE), maximize, keyboard focus per
    window, a proportional font.

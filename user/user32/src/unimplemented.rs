@@ -16,7 +16,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     ChangeDisplaySettingsExW
     ChildWindowFromPoint
     ChildWindowFromPointEx
-    ClientToScreen
     CopyRect
     CreateAcceleratorTableW
     CreateCaret
@@ -51,11 +50,9 @@ gala_stubs::unimplemented_exports!("user32.dll":
     DrawTextW
     EmptyClipboard
     EnableScrollBar
-    EnableWindow
     EndDeferWindowPos
     EndDialog
     EndMenu
-    EnumChildWindows
     EnumClipboardFormats
     EnumDisplaySettingsW
     EnumThreadWindows
@@ -70,37 +67,27 @@ gala_stubs::unimplemented_exports!("user32.dll":
     GetComboBoxInfo
     GetDesktopWindow
     GetDialogBaseUnits
-    GetDlgItem
     GetDoubleClickTime
-    GetFocus
     GetIconInfo
     GetKeyboardState
     GetMessagePos
     GetMessageTime
-    GetParent
     GetProcessDefaultLayout
     GetScrollInfo
     GetUpdateRgn
-    GetWindow
     GetWindowDC
-    GetWindowLongW
-    GetWindowTextLengthW
-    GetWindowTextW
     GetWindowThreadProcessId
     HideCaret
     InflateRect
     IsClipboardFormatAvailable
     IsDialogMessageW
     IsRectEmpty
-    IsWindowEnabled
     IsZoomed
     LoadAcceleratorsW
     LoadBitmapW
     LoadCursorFromFileW
     LoadImageW
     MapVirtualKeyW
-    MapWindowPoints
-    MoveWindow
     NotifyWinEvent
     OffsetRect
     PostThreadMessageW
@@ -108,24 +95,18 @@ gala_stubs::unimplemented_exports!("user32.dll":
     RedrawWindow
     RegisterClipboardFormatW
     RegisterHotKey
-    ScreenToClient
     ScrollWindow
     SetCaretBlinkTime
     SetCaretPos
     SetCursorPos
-    SetFocus
     SetForegroundWindow
     SetLayeredWindowAttributes
     SetMenuInfo
-    SetParent
     SetRect
     SetRectEmpty
     SetScrollInfo
-    SetWindowLongW
     SetWindowPlacement
-    SetWindowPos
     SetWindowRgn
-    SetWindowTextW
     ShowCaret
     ShowCursor
     SystemParametersInfoW
