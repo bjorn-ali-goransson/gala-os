@@ -392,6 +392,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("logon_test", "bcrypt.dll", "Windows/System32"),
     ("logon_test", "userenv.dll", "Windows/System32"),
     ("logon_test", "user/access_test/access_test.regseed", "registry"),
+    ("system_test", "ntdll.dll", "Windows/System32"),
+    ("system_test", "kernel32.dll", "Windows/System32"),
+    ("system_test", "advapi32.dll", "Windows/System32"),
+    ("system_test", "secur32.dll", "Windows/System32"),
+    ("system_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("system_test", "bcrypt.dll", "Windows/System32"),
+    ("system_test", "user/access_test/access_test.regseed", "registry"),
     ("token_test", "ntdll.dll", "Windows/System32"),
     ("token_test", "kernel32.dll", "Windows/System32"),
     ("token_test", "advapi32.dll", "Windows/System32"),
@@ -1099,6 +1106,7 @@ const USER_PROGRAMS: &[&str] = &[
     "security_test",
     "access_test",
     "logon_test",
+    "system_test",
     "registry_test",
     "keyed_event_test",
     "iphlpapi_test",
@@ -2027,6 +2035,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=logon_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["logon_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Security model S4 (docs/SECURITY.md): a program started as
+        // SYSTEM (`as=system`, the services' account; user/system_test).
+        name: "system_test",
+        cmdline: "qemu_exit as=system run=system_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["system_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (Elasticsearch, Java's WatchService): directory change
@@ -3107,6 +3123,7 @@ fn run_parallel<J: Sync, T: Send>(
 const NOT_IN_UM: &[(&str, &str)] = &[
     ("process_test", "child processes (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
+    ("system_test", "child processes; run as SYSTEM (a boot option)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
     ("busybox", "child processes (pipelines are child processes)"),

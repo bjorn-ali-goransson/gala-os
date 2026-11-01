@@ -318,7 +318,7 @@ pub fn assign(
             }
             (o, given.control & SE_OWNER_DEFAULTED)
         }
-        None => (token.user.sid, SE_OWNER_DEFAULTED),
+        None => (token.owner, SE_OWNER_DEFAULTED),
     };
     let (group, group_defaulted) = match given.group {
         Some(g) => (g, given.control & SE_GROUP_DEFAULTED),

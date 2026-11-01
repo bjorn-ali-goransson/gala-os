@@ -28,6 +28,7 @@ const ACCESS_SYSTEM_SECURITY: u32 = 0x0100_0000;
 const FILE_ALL_ACCESS: u32 = 0x001f_01ff;
 const KEY_ALL_ACCESS: u32 = 0x000f_003f;
 const ADMINISTRATORS: Sid = Sid::new(5, &[32, 544]);
+const USERS: Sid = Sid::new(5, &[32, 545]);
 
 /// Runs `f` on the effective token of the caller: its thread's
 /// impersonation token, else its process's primary token.
@@ -43,52 +44,56 @@ fn with_token<R>(call: &Call<'_>, f: impl FnOnce(&TokenData) -> R) -> R {
     }
 }
 
-/// What gala gives objects without a descriptor of their own: owner and
-/// group the user, a DACL granting `all` to the user, Administrators and
-/// SYSTEM (inherited by children with `flags`), as files and keys of a
-/// user's profile have on Windows.
-fn default_for(token: &TokenData, all: u32, flags: u8) -> Result<Descriptor, NtStatus> {
-    let user = token.user.sid;
+/// What files and keys without a descriptor of their own (those the
+/// boot puts there) have: fixed, whoever asks (as Windows' system files
+/// are): owner Administrators, all access for the boot user `gala`,
+/// Administrators and SYSTEM, reading and executing for BUILTIN\\Users
+/// (inherited by children with `flags`).
+fn default_for(all: u32, read: u32, flags: u8) -> Result<Descriptor, NtStatus> {
+    let user = super::super::token::USER;
     let dacl = security::allow_acl(&[
         (all, user, flags),
         (all, ADMINISTRATORS, flags),
         (all, LOCAL_SYSTEM, flags),
+        (read, USERS, flags),
     ])?;
     Ok(Descriptor {
         control: SE_DACL_PRESENT,
-        owner: Some(user),
-        group: Some(token.primary_group),
+        owner: Some(ADMINISTRATORS),
+        group: Some(LOCAL_SYSTEM),
         dacl: Some(dacl),
         sacl: None,
     })
 }
 
-fn file_default(token: &TokenData, directory: bool) -> Result<Descriptor, NtStatus> {
+fn file_default(directory: bool) -> Result<Descriptor, NtStatus> {
+    const FILE_GENERIC_READ_EXECUTE: u32 = 0x0012_00a9;
     let flags = if directory { OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE } else { 0 };
-    default_for(token, FILE_ALL_ACCESS, flags)
+    default_for(FILE_ALL_ACCESS, FILE_GENERIC_READ_EXECUTE, flags)
 }
 
-fn key_default(token: &TokenData) -> Result<Descriptor, NtStatus> {
-    default_for(token, KEY_ALL_ACCESS, CONTAINER_INHERIT_ACE)
+fn key_default() -> Result<Descriptor, NtStatus> {
+    const KEY_READ: u32 = 0x0002_0019;
+    default_for(KEY_ALL_ACCESS, KEY_READ, CONTAINER_INHERIT_ACE)
 }
 
 /// The descriptor of file system node `node` (its own or the default).
-fn node_descriptor(token: &TokenData, node: NodeId) -> Result<Descriptor, NtStatus> {
+fn node_descriptor(_token: &TokenData, node: NodeId) -> Result<Descriptor, NtStatus> {
     let stored = file::with_fs(|fs| {
         fs.node(node).map(|n| (n.security.as_deref().map(Descriptor::parse), n.is_dir()))
     });
     match stored {
         Some((Some(d), _)) => d,
-        Some((None, directory)) => file_default(token, directory),
+        Some((None, directory)) => file_default(directory),
         None => Err(NtStatus::FILE_DELETED),
     }
 }
 
-fn key_descriptor(token: &TokenData, id: registry::KeyId) -> Result<Descriptor, NtStatus> {
+fn key_descriptor(_token: &TokenData, id: registry::KeyId) -> Result<Descriptor, NtStatus> {
     let stored = registry::with(|r| Ok(r.security(id)?.0.map(Descriptor::parse)))?;
     match stored {
         Some(d) => d,
-        None => key_default(token),
+        None => key_default(),
     }
 }
 
@@ -161,15 +166,20 @@ impl Call<'_> {
 
 /// Assigns a new kernel object (not a file or key) its descriptor: the
 /// given one completed with the creator's owner and group, else the
-/// token's default DACL (stored lazily: nothing is kept then).
+/// token's default DACL (kept for named objects, which others may open by
+/// name; an unnamed one reports it when asked).
 pub(super) fn assign_object(
     call: &Call<'_>,
     object: &KObject,
     attrs_ptr: u64,
 ) -> Result<(), NtStatus> {
-    let Some(given) = call.attributes_descriptor(attrs_ptr)? else { return Ok(()) };
+    let given = call.attributes_descriptor(attrs_ptr)?;
+    let named = attrs_ptr != 0 && call.read_u64(attrs_ptr + 16)? != 0;
+    if given.is_none() && !named {
+        return Ok(());
+    }
     let mapping = object.mapping();
-    let d = with_token(call, |t| security::assign(None, Some(given), false, t, &mapping, false))?;
+    let d = with_token(call, |t| security::assign(None, given, false, t, &mapping, false))?;
     *object.security.lock() = Some(d.to_bytes(u32::MAX)?);
     Ok(())
 }

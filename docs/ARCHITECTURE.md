@@ -1181,7 +1181,16 @@ Windows, never shadows the system's DLLs.)
   SeAssignPrimaryTokenPrivilege (STATUS_PRIVILEGE_NOT_HELD), as
   CreateProcessAsUser documents. userenv's GetUserProfileDirectoryW: the
   caller's own user's is %USERPROFILE%, another local user's
-  C:\Users\<name> (profiles are not created yet: LoadUserProfileW, TODO). Services
+  C:\Users\<name> (profiles are not created yet: LoadUserProfileW, TODO).
+  The boot option `as=system` starts the `run=` programs as SYSTEM
+  (TokenData::system: user S-1-5-18, owner BUILTIN\Administrators, an
+  owner group, Everyone, Authenticated Users, the System label; the
+  system logon session 0x3e7, session 0; LocalSystem's privileges,
+  enabled as in a service), the account services run as. Tokens have an
+  explicit owner (TokenOwner; the default owner of what they create).
+  kernel32's CreateProcessAsUserW enables SeAssignPrimaryTokenPrivilege
+  for the call and restores it (a service holds it disabled), as
+  ReactOS's does. Services
   (gala numbers 0x7f16-0x7f1e until verified): NtOpenProcessToken(Ex),
   NtOpenThreadToken(Ex) (STATUS_NO_TOKEN), NtQueryInformationToken (the
   TOKEN_* layouts with pointers into the caller's buffer;
@@ -1215,11 +1224,13 @@ Windows, never shadows the system's DLLs.)
   Named objects take the descriptor from OBJECT_ATTRIBUTES (create_object
   and NtCreateEvent), files from NtCreateFile's attributes when it
   creates the file, keys from NtCreateKey's when it creates the key.
-  Objects nothing assigned one (boot files and keys, processes, threads,
-  unnamed objects created without one) report a default: files and
-  keys the user, Administrators and SYSTEM with all access (inherited
-  OI|CI by directories' children, CI by subkeys), as a user profile's
-  have; other objects the creator's token defaults. Services (gala
+  Objects nothing assigned one report a default: boot files and keys a
+  fixed one, whoever asks, as Windows' system files have (owner
+  Administrators; all access for the boot user `gala`, Administrators and
+  SYSTEM; read and execute, KEY_READ for keys, for BUILTIN\Users;
+  inherited OI|CI by directories' children, CI by subkeys); processes,
+  threads and unnamed objects created without one the asking token's
+  defaults (named objects keep their creator's from creation on). Services (gala
   numbers 0x7f1f-0x7f20 until verified): NtQuerySecurityObject (the parts
   asked for, self-relative; READ_CONTROL, ACCESS_SYSTEM_SECURITY for the
   SACL; STATUS_BUFFER_TOO_SMALL with the size) and NtSetSecurityObject

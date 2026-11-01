@@ -147,6 +147,9 @@ pub fn kernel_main() -> ! {
     // their (percent-encoded) command-line arguments in the same order;
     // `cwd=C:/dir` (percent-encoded) is their current directory (default
     // C:\gala).
+    // `as=system`: they run as SYSTEM (the services' account), else as
+    // the boot user (nt::token).
+    nt::token::set_boot_system(cmdline.value("as") == Some("system"));
     if let Some(names) = cmdline.value("run") {
         let mut args = cmdline.value("args").unwrap_or("").split(',');
         for name in names.split(',').filter(|n| !n.is_empty()) {

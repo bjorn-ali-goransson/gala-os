@@ -160,6 +160,9 @@ pub struct TokenData {
     /// Restricting SIDs (CreateRestrictedToken); empty: not restricted.
     pub restricted: Vec<Group>,
     pub primary_group: Sid,
+    /// TokenOwner: the default owner of the objects it creates (the user,
+    /// or a group it holds with SE_GROUP_OWNER: SYSTEM's is Administrators).
+    pub owner: Sid,
     /// The default DACL (an ACL), or empty: none.
     pub default_dacl: Vec<u8>,
     pub authentication_id: u64,
@@ -202,10 +205,20 @@ pub fn for_new_process(
             data.kind = TokenType::Primary;
             Token::derived(data, t.origin)
         }
-        _ => Token::new(TokenData::boot_user()?),
+        _ => Token::new(TokenData::boot()?),
     };
     super::object::KObject::new(super::object::ObjectBody::Token(token))
         .map_err(|_| NtStatus::NO_MEMORY)
+}
+
+/// The system logon session's LUID (SYSTEM_LUID).
+pub const SYSTEM_LOGON: u64 = 0x3e7;
+
+static BOOT_SYSTEM: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The boot option `as=system`: processes the kernel starts run as SYSTEM.
+pub fn set_boot_system(on: bool) {
+    BOOT_SYSTEM.store(on, Ordering::Relaxed);
 }
 
 static NEXT_LUID: AtomicU64 = AtomicU64::new(0x0010_0000);
@@ -289,6 +302,100 @@ impl TokenData {
         TokenData::standard_user(USER, LOGON_ID, &GROUPS)
     }
 
+    /// The token processes the kernel starts get: SYSTEM's with the boot
+    /// option `as=system` (set_boot_system), else the boot user's.
+    pub fn boot() -> Result<TokenData, NtStatus> {
+        if BOOT_SYSTEM.load(Ordering::Relaxed) {
+            TokenData::system()
+        } else {
+            TokenData::boot_user()
+        }
+    }
+
+    /// LocalSystem's token, as Windows gives a service running as SYSTEM:
+    /// user S-1-5-18, groups BUILTIN\Administrators (an owner group, the
+    /// token's owner), Everyone, Authenticated Users and the System
+    /// mandatory level; the system logon session (0x3e7), session 0; the
+    /// privileges LocalSystem holds, enabled as `whoami /priv` shows them
+    /// in such a process.
+    pub fn system() -> Result<TokenData, NtStatus> {
+        const ADMINISTRATORS: Sid = Sid::new(5, &[32, 544]);
+        const SE_GROUP_OWNER: u32 = 0x8;
+        let groups = [
+            Group { sid: ADMINISTRATORS, attributes: SE_GROUP_OWNER | 7 },
+            Group { sid: Sid::new(1, &[0]), attributes: 7 },
+            Group { sid: Sid::new(5, &[11]), attributes: 7 },
+            Group {
+                sid: Sid::new(16, &[16384]),
+                attributes: SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED,
+            },
+        ];
+        // (LUID, enabled): SeAssignPrimaryToken 3, SeLockMemory 4,
+        // SeIncreaseQuota 5, SeTcb 7, SeSecurity 8, SeTakeOwnership 9,
+        // SeLoadDriver 10, SeSystemProfile 11, SeSystemtime 12,
+        // SeProfileSingleProcess 13, SeIncreaseBasePriority 14,
+        // SeCreatePagefile 15, SeCreatePermanent 16, SeBackup 17,
+        // SeRestore 18, SeShutdown 19, SeDebug 20, SeAudit 21,
+        // SeSystemEnvironment 22, SeChangeNotify 23, SeUndock 25,
+        // SeManageVolume 28, SeImpersonate 29, SeCreateGlobal 30,
+        // SeIncreaseWorkingSet 33, SeTimeZone 34, SeCreateSymbolicLink 35,
+        // SeDelegateSessionUserImpersonate 36.
+        const HELD: [(u64, bool); 28] = [
+            (3, false),
+            (4, true),
+            (5, false),
+            (7, true),
+            (8, false),
+            (9, false),
+            (10, false),
+            (11, true),
+            (12, false),
+            (13, true),
+            (14, true),
+            (15, true),
+            (16, true),
+            (17, false),
+            (18, false),
+            (19, false),
+            (20, true),
+            (21, true),
+            (22, false),
+            (23, true),
+            (25, false),
+            (28, false),
+            (29, true),
+            (30, true),
+            (33, true),
+            (34, true),
+            (35, true),
+            (36, true),
+        ];
+        let mut privileges = Vec::new();
+        for (luid, on) in HELD {
+            let attributes =
+                if on { SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED } else { 0 };
+            privileges.try_push(Privilege { luid, attributes }).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
+        Ok(TokenData {
+            kind: TokenType::Primary,
+            user: Group { sid: LOCAL_SYSTEM, attributes: 0 },
+            groups: copy(&groups)?,
+            privileges,
+            restricted: Vec::new(),
+            primary_group: LOCAL_SYSTEM,
+            owner: ADMINISTRATORS,
+            // GENERIC_ALL to SYSTEM, GENERIC_READ | GENERIC_EXECUTE |
+            // READ_CONTROL to Administrators.
+            default_dacl: acl(&[(0x1000_0000, LOCAL_SYSTEM), (0xa002_0000, ADMINISTRATORS)])?,
+            authentication_id: SYSTEM_LOGON,
+            modified_id: next_luid(),
+            session: 0,
+            elevation_type: 1,
+            source: (*b"*SYSTEM*", 0),
+            sandbox_inert: false,
+        })
+    }
+
     /// A standard user's primary token for `user` in logon session
     /// `logon` (its logon SID S-1-5-5-0-logon) with `groups` (the logon
     /// SID in them is replaced).
@@ -307,6 +414,7 @@ impl TokenData {
             privileges: copy(&PRIVILEGES)?,
             restricted: Vec::new(),
             primary_group: user,
+            owner: user,
             default_dacl: acl(&[
                 (0x1000_0000, user),
                 (0x1000_0000, LOCAL_SYSTEM),
@@ -329,6 +437,7 @@ impl TokenData {
             privileges: copy(&self.privileges)?,
             restricted: copy(&self.restricted)?,
             primary_group: self.primary_group,
+            owner: self.owner,
             default_dacl: copy(&self.default_dacl)?,
             authentication_id: self.authentication_id,
             modified_id: self.modified_id,
@@ -672,7 +781,7 @@ pub fn query(id: u64, data: &TokenData, class: u32, base: u64) -> Result<Vec<u8>
             o.u32(data.privileges.len() as u32)?;
             privileges(&mut o, &data.privileges)?;
         }
-        TOKEN_OWNER => o.sid_pointer(&data.user.sid)?,
+        TOKEN_OWNER => o.sid_pointer(&data.owner)?,
         TOKEN_PRIMARY_GROUP => o.sid_pointer(&data.primary_group)?,
         TOKEN_DEFAULT_DACL => {
             if data.default_dacl.is_empty() {

@@ -940,8 +940,12 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       LsaLookupAuthenticationPackage, LsaLogonUser (S4U for key
       logins), LsaManageSidNameMapping, LoadUserProfileW,
       CreateProcessAsUserW and job objects; sshd runs as SYSTEM on
-      Windows, so next: a boot option to start a program as SYSTEM
-      (services' account), the LSA logons, profiles, then `sshd -d`
+      Windows: the boot option `as=system` now starts programs as SYSTEM
+      (`system_test`: its token, SeBackup with backup semantics,
+      CreateProcessAsUserW of another user's token; boot files and keys
+      now have a fixed default descriptor, as Windows' system files: it
+      had been built from whoever asked). Next: the LSA logons,
+      profiles, then `sshd -d`
       accepting a key-authenticated login from the host (xtask as the
       client).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach

@@ -205,7 +205,37 @@ pub extern "system" fn CreateProcessAsUserW(
     if token.is_null() {
         return fail_with(ERROR_INVALID_HANDLE, FALSE);
     }
-    create_process(
+    // SeAssignPrimaryTokenPrivilege enabled for the call (a service holds
+    // it disabled), then restored.
+    #[link(name = "ntdll", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn NtOpenProcessToken(process: isize, access: u32, token: *mut usize) -> u32;
+        fn NtAdjustPrivilegesToken(
+            token: usize,
+            disable_all: u8,
+            new: *const u32,
+            length: u32,
+            previous: *mut u32,
+            ret: *mut u32,
+        ) -> u32;
+    }
+    let mut own = 0usize;
+    let mut previous = [0u32; 4];
+    let mut ret = 0;
+    // SAFETY: plain calls with our buffers (TOKEN_ADJUST_PRIVILEGES |
+    // TOKEN_QUERY; SeAssignPrimaryTokenPrivilege is LUID 3).
+    let adjusted = unsafe {
+        NtOpenProcessToken(-1, 0x28, &mut own) == 0
+            && NtAdjustPrivilegesToken(
+                own,
+                0,
+                [1, 3, 0, 2].as_ptr(),
+                16,
+                previous.as_mut_ptr(),
+                &mut ret,
+            ) == 0
+    };
+    let r = create_process(
         token as usize,
         application,
         command_line,
@@ -217,7 +247,25 @@ pub extern "system" fn CreateProcessAsUserW(
         directory,
         startup,
         info,
-    )
+    );
+    if own != 0 {
+        // SAFETY: our token handle; the previous state (empty when the
+        // privilege was already enabled).
+        unsafe {
+            if adjusted && previous[0] != 0 {
+                NtAdjustPrivilegesToken(
+                    own,
+                    0,
+                    previous.as_ptr(),
+                    0,
+                    core::ptr::null_mut(),
+                    &mut ret,
+                );
+            }
+            NtClose(own as Handle);
+        }
+    }
+    r
 }
 
 /// CreateProcessW and CreateProcessAsUserW (`token` 0: the caller's).
