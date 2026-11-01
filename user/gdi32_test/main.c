@@ -23,6 +23,12 @@
  *   descent = height, average width > 0, and bold weight for FW_BOLD;
  *   GetTextExtentPoint32W grows with the text and has the font's height;
  *   a bigger font measures bigger. GetTextFaceW gives the face name.
+ *   Segoe UI -12 has Windows' 16/13/3 cell and is proportional ("iiii"
+ *   much narrower than "WWWW", TMPF_FIXED_PITCH | TMPF_TRUETYPE,
+ *   FF_SWISS); extents add up; GetTextExtentExPointW gives partial
+ *   widths and the fit; TextOutW draws only inside its extent;
+ *   ExtTextOutW ETO_OPAQUE fills its rectangle; Courier New is fixed
+ *   pitch (TMPF_FIXED_PITCH clear, equal advances).
  *   GetObjectType says OBJ_FONT; GetCurrentObject(OBJ_FONT) is the font.
  *
  * - Palettes: CreatePalette keeps the entries (GetObjectType OBJ_PAL,
@@ -145,6 +151,63 @@ static void fonts(void) {
     CHECK(one.cx > 0 && two.cx > one.cx && one.cy == tm.tmHeight);
     WCHAR face[LF_FACESIZE];
     CHECK(GetTextFaceW(screen, LF_FACESIZE, face) > 0);
+    // Segoe UI at 96 DPI: a 12-pixel em gives a 16-pixel cell, 13 above
+    // the baseline and 3 below; a TrueType, variable-pitch Swiss face
+    // (TMPF_FIXED_PITCH set means variable pitch).
+    CHECK(tm.tmHeight == 16 && tm.tmAscent == 13 && tm.tmDescent == 3);
+    CHECK((tm.tmPitchAndFamily & (TMPF_FIXED_PITCH | TMPF_TRUETYPE)) == (TMPF_FIXED_PITCH | TMPF_TRUETYPE));
+    CHECK((tm.tmPitchAndFamily & 0xf0) == FF_SWISS && tm.tmMaxCharWidth > tm.tmAveCharWidth);
+    SIZE narrow, wide;
+    CHECK(GetTextExtentPoint32W(screen, L"iiii", 4, &narrow) && GetTextExtentPoint32W(screen, L"WWWW", 4, &wide));
+    CHECK(narrow.cx * 2 < wide.cx);
+    // Extents add up: "iiiiWWWW" is the two together.
+    SIZE both;
+    CHECK(GetTextExtentPoint32W(screen, L"iiiiWWWW", 8, &both) && both.cx == narrow.cx + wide.cx);
+    // GetTextExtentExPointW: the partial widths and how many fit.
+    INT fit = 0, dx[8];
+    SIZE ex;
+    CHECK(GetTextExtentExPointW(screen, L"iiiiWWWW", 8, narrow.cx + 1, &fit, dx, &ex));
+    CHECK(fit == 4 && dx[3] == narrow.cx && dx[7] == both.cx && ex.cx == both.cx && ex.cy == tm.tmHeight);
+
+    // Drawing: TextOutW and ExtTextOutW (ETO_OPAQUE fills the rectangle)
+    // into a white 32-bit DIB; black pixels only inside the text's box.
+    BITMAPINFO bi = {{sizeof(BITMAPINFOHEADER), 64, -32, 1, 32, BI_RGB}};
+    DWORD *bits;
+    HBITMAP dib = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, (void **)&bits, NULL, 0);
+    HDC mem = CreateCompatibleDC(screen);
+    HGDIOBJ oldbmp = SelectObject(mem, dib);
+    SelectObject(mem, font);
+    for (int i = 0; i < 64 * 32; i++) bits[i] = 0xffffff;
+    SetBkMode(mem, TRANSPARENT);
+    SIZE hi;
+    CHECK(GetTextExtentPoint32W(mem, L"Hi", 2, &hi) && TextOutW(mem, 4, 2, L"Hi", 2));
+    int inside = 0, outside = 0;
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 64; x++)
+            if ((bits[y * 64 + x] & 0xffffff) != 0xffffff) {
+                if (x >= 4 && x < 4 + hi.cx && y >= 2 && y < 2 + hi.cy) inside++; else outside++;
+            }
+    CHECK(inside > 10 && outside == 0);
+    RECT r = {0, 0, 64, 32};
+    SetBkColor(mem, RGB(0, 0, 255));
+    CHECK(ExtTextOutW(mem, 4, 2, ETO_OPAQUE, &r, L"Hi", 2, NULL));
+    CHECK((bits[31 * 64 + 63] & 0xffffff) == 0x0000ff);
+    SelectObject(mem, oldbmp);
+    DeleteDC(mem);
+    DeleteObject(dib);
+
+    // A fixed-pitch face: every character advances the same.
+    LOGFONTW mono = {0};
+    mono.lfHeight = -12;
+    wcscpy(mono.lfFaceName, L"Courier New");
+    HFONT fixed = CreateFontIndirectW(&mono);
+    SelectObject(screen, fixed);
+    TEXTMETRICW tm3;
+    CHECK(GetTextMetricsW(screen, &tm3) && (tm3.tmPitchAndFamily & TMPF_FIXED_PITCH) == 0);
+    CHECK(GetTextExtentPoint32W(screen, L"iiii", 4, &narrow) && GetTextExtentPoint32W(screen, L"WWWW", 4, &wide));
+    CHECK(narrow.cx == wide.cx && narrow.cx == 4 * tm3.tmAveCharWidth);
+    SelectObject(screen, font);
+    DeleteObject(fixed);
 
     lf.lfHeight = -24;
     lf.lfWeight = FW_BOLD;

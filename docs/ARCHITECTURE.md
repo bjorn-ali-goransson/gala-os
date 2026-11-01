@@ -2262,13 +2262,25 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   to the surface and the DC's clip rectangle. PatBlt, BitBlt and
   StretchBlt (nearest pixel, mirroring) evaluate any ternary raster
   operation from its truth table; overlapping copies run in the safe
-  direction. Text (`font.rs`): Noto Sans Mono's bitmaps (16/20/24/32 px,
-  regular and bold) scaled to the font's cell (4/3 of the em; a 12-pixel
-  em is the 16-pixel bitmap unscaled) with four samples per pixel; fixed
-  advance; italic slant, underline, strike-out; TextOut alignment
-  (TA_RIGHT/CENTER, TA_BOTTOM/BASELINE) and OPAQUE backgrounds;
-  GetTextMetricsW/GetTextExtentPoint32W/GetTextFaceW from the same
-  metrics. Palettes (`palette.rs`) are kept, selected and queried but
+  direction. Text (`font.rs`): two families. Proportional
+  faces (Segoe UI, MS Shell Dlg, the default, any face not known to be
+  fixed pitch) are Selawik (Segoe UI's metrics; four weights embedded in
+  gdi32.dll), rasterized at the font's em by fontdue (`no_std` + `alloc`
+  over `gala_heap`) and kept in a glyph cache (256 buckets of 16, its own
+  spin lock, taken inside the object table's, never the other way);
+  GDI's metrics: ascent and descent are the Windows ascent/descent
+  scaled and rounded each (-12 gives 16 = 13 + 3), advances the hinted
+  ones rounded to pixels and added up, no kerning; tmAveCharWidth from
+  OS/2 xAvgCharWidth; pitch-and-family 0x27 (variable pitch, TrueType,
+  FF_SWISS). Fixed-pitch faces (Courier New, Consolas, Lucida Console,
+  ..., FIXED_PITCH, or FF_MODERN without a name) are Noto Sans Mono's
+  bitmaps (16/20/24/32 px, regular and bold) scaled to the cell (4/3 of
+  the em) with four samples per pixel, one advance. Both: italic slant,
+  underline, strike-out; TextOut alignment (TA_RIGHT/CENTER,
+  TA_BOTTOM/BASELINE) and OPAQUE backgrounds; ExtTextOutW (ETO_OPAQUE,
+  ETO_CLIPPED, lpDx); GetTextMetricsW, GetTextExtentPoint32W,
+  GetTextExtentExPointW (fit and partial widths) and GetTextFaceW from
+  the same metrics. Palettes (`palette.rs`) are kept, selected and queried but
   change nothing on the true-colour display (RealizePalette maps 0
   entries, GetNearestColor is the colour); DEFAULT_PALETTE is stock. DIBs
   in program memory (`dib.rs`): GetDIBits (the header query; rows out as

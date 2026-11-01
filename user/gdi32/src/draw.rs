@@ -433,10 +433,24 @@ pub extern "system" fn GetTextAlign(hdc: Handle) -> u32 {
 
 /// Draws `text` at logical (x, y) by the alignment: OPAQUE fills the
 /// cells with the background first; each glyph's coverage blends the
-/// text colour; underline and strike-out lines.
-fn draw_text(dc: &Dc, f: &LogFont, x: i32, y: i32, text: &[char]) {
+/// text colour; underline and strike-out lines. `dx` gives each
+/// character's advance instead of the font's (ExtTextOut's lpDx); `clip`
+/// is a device rectangle the glyphs stay in (ETO_CLIPPED).
+fn draw_text(
+    dc: &Dc,
+    f: &LogFont,
+    x: i32,
+    y: i32,
+    text: &[char],
+    dx: Option<&[i32]>,
+    clip: Option<[i32; 4]>,
+) {
     let m = font::metrics(f);
-    let width = m.advance * text.len() as i32;
+    let advance = |n: usize, c: char| match dx {
+        Some(d) => d.get(n).copied().unwrap_or(0),
+        None => m.advance(c),
+    };
+    let width: i32 = text.iter().enumerate().map(|(n, &c)| advance(n, c)).sum();
     let x = match dc.align & 6 {
         2 => x - width,
         6 => x - width / 2,
@@ -448,21 +462,22 @@ fn draw_text(dc: &Dc, f: &LogFont, x: i32, y: i32, text: &[char]) {
         _ => y,
     };
     let (x, y) = dc.device_point(x, y);
+    let inside = |px: i32, py: i32| {
+        clip.is_none_or(|[l, t, r, b]| px >= l && py >= t && px < r && py < b) && dc.visible(px, py)
+    };
     if dc.mode == 2 {
         dc.fill(x, y, width, m.height, dc.background);
     }
+    let mut gx = x;
     for (n, &c) in text.iter().enumerate() {
-        let gx = x + n as i32 * m.advance;
-        for yy in 0..m.height {
-            for xx in 0..m.advance {
-                let t = m.coverage(c, xx, yy);
-                let (px, py) = (gx + xx, y + yy);
-                if t != 0 && dc.visible(px, py) {
-                    let bg = dc.surface.get(px, py).unwrap_or(0);
-                    dc.surface.put(px, py, crate::surface::blend(bg, dc.text, t));
-                }
+        m.glyph(c, |xx, yy, t| {
+            let (px, py) = (gx + xx, y + yy);
+            if inside(px, py) {
+                let bg = dc.surface.get(px, py).unwrap_or(0);
+                dc.surface.put(px, py, crate::surface::blend(bg, dc.text, t));
             }
-        }
+        });
+        gx += advance(n, c);
     }
     let thickness = (m.height / 16).max(1);
     if m.underline {
@@ -501,7 +516,7 @@ pub extern "system" fn TextOutW(hdc: Handle, x: i32, y: i32, text: *const u16, n
     let count = chars(s, &mut buf);
     with_dc(hdc, |dc, slots| {
         let f = font_of(dc, slots);
-        draw_text(dc, &f, x, y, &buf[..count]);
+        draw_text(dc, &f, x, y, &buf[..count], None, None);
         1
     })
     .unwrap_or(0)
@@ -524,7 +539,101 @@ pub extern "system" fn TextOutA(hdc: Handle, x: i32, y: i32, text: *const u8, n:
     }
     with_dc(hdc, |dc, slots| {
         let f = font_of(dc, slots);
-        draw_text(dc, &f, x, y, &buf[..count]);
+        draw_text(dc, &f, x, y, &buf[..count], None, None);
+        1
+    })
+    .unwrap_or(0)
+}
+
+/// ExtTextOutW(hdc, x, y, options, rect, text, n, dx): ETO_OPAQUE (2)
+/// fills `rect` with the background colour first, ETO_CLIPPED (4) keeps
+/// the glyphs in it; `dx` gives each character's advance (ETO_PDY's
+/// pairs are not supported). ETO_GLYPH_INDEX (0x10) text is drawn as
+/// characters.
+#[unsafe(no_mangle)]
+pub extern "system" fn ExtTextOutW(
+    hdc: Handle,
+    x: i32,
+    y: i32,
+    options: u32,
+    rect: *const [i32; 4],
+    text: *const u16,
+    n: u32,
+    dx: *const i32,
+) -> i32 {
+    let Ok(n) = i32::try_from(n) else { return 0 };
+    let Some(s) = wide(text, n) else { return 0 };
+    let mut buf = ['\0'; 512];
+    let count = chars(s, &mut buf);
+    let dx = if dx.is_null() || options & 0x2000 != 0 {
+        None
+    } else {
+        // SAFETY: the caller's array of `n` advances.
+        Some(unsafe { core::slice::from_raw_parts(dx, n as usize) })
+    };
+    if options & 0x2000 != 0 && !dx.is_some() {
+        crate::unsupported(b"gdi32.dll!ExtTextOutW ETO_PDY", u64::from(options));
+    }
+    // SAFETY: the caller's RECT when given.
+    let rect = if rect.is_null() { None } else { Some(unsafe { *rect }) };
+    with_dc(hdc, |dc, slots| {
+        let device = rect.map(|[l, t, r, b]| {
+            let (l, t) = dc.device_point(l, t);
+            let (r, b) = dc.device_point(r, b);
+            [l, t, r, b]
+        });
+        if let Some([l, t, r, b]) = device
+            && options & 2 != 0
+        {
+            dc.fill(l, t, r - l, b - t, dc.background);
+        }
+        let f = font_of(dc, slots);
+        let clip = if options & 4 != 0 { device } else { None };
+        draw_text(dc, &f, x, y, &buf[..count], dx, clip);
+        1
+    })
+    .unwrap_or(0)
+}
+
+/// GetTextExtentExPointW(hdc, text, n, max, fit, dx, size): the extent,
+/// each prefix's width in `dx`, and in `fit` how many characters fit in
+/// `max` (when `fit` is given).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTextExtentExPointW(
+    hdc: Handle,
+    text: *const u16,
+    n: i32,
+    max: i32,
+    fit: *mut i32,
+    dx: *mut i32,
+    size: *mut [i32; 2],
+) -> i32 {
+    let Some(s) = wide(text, n) else { return 0 };
+    if size.is_null() {
+        return 0;
+    }
+    let mut buf = ['\0'; 512];
+    let count = chars(s, &mut buf);
+    with_dc(hdc, |dc, slots| {
+        let m = font::metrics(&font_of(dc, slots));
+        let (mut total, mut fits) = (0, 0);
+        for (i, &c) in buf[..count].iter().enumerate() {
+            total += m.advance(c);
+            if total <= max {
+                fits = i as i32 + 1;
+            }
+            if !dx.is_null() {
+                // SAFETY: the caller's array of `n` widths.
+                unsafe { dx.add(i).write(total) };
+            }
+        }
+        // SAFETY: the caller's SIZE and count.
+        unsafe {
+            *size = [total, m.height];
+            if !fit.is_null() {
+                fit.write(fits);
+            }
+        }
         1
     })
     .unwrap_or(0)
@@ -542,11 +651,12 @@ pub extern "system" fn GetTextExtentPoint32W(
     if size.is_null() {
         return 0;
     }
-    let count = char::decode_utf16(s.iter().copied()).count() as i32;
+    let mut buf = ['\0'; 512];
+    let count = chars(s, &mut buf);
     with_dc(hdc, |dc, slots| {
         let m = font::metrics(&font_of(dc, slots));
         // SAFETY: the caller's SIZE.
-        unsafe { *size = [count * m.advance, m.height] };
+        unsafe { *size = [m.width(&buf[..count]), m.height] };
         1
     })
     .unwrap_or(0)

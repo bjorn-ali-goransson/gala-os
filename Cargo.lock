@@ -507,8 +507,11 @@ version = "0.1.0"
 name = "gdi32"
 version = "0.1.0"
 dependencies = [
+ "fontdue",
+ "gala_heap",
  "gala_stubs",
  "noto-sans-mono-bitmap",
+ "ttf-parser",
 ]
 
 [[package]]

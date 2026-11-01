@@ -178,7 +178,8 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   taskbar with the camel start button, a PS/2 mouse and a start menu;
   W2: a shaded desktop (wallpaper, shadows, rounded frames, taskbar
   buttons, clock) and mouse/keyboard input for programs; W4 step 1: the
-  Windows 11 look (Selawik text, the fortress start button, maximize)
+  Windows 11 look (Selawik text, the fortress start button, maximize);
+  W4 step 2: proportional Selawik text in gdi32
 
 ## Next
 Direction from the project owner (2026-10-30): multiprocessor support, then
@@ -545,11 +546,11 @@ W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    Recommended, the clock's format), text in Selawik baked by xtask with
    fontdue, the owner's SVGs baked with resvg, the wallpaper's mark;
    WM_SYSCOMMAND from the caption buttons with maximize/restore in
-   user32 (IsZoomed, WS_MAXIMIZE). Next: step 2, proportional text for
-   programs: gdi32 rasterizes Selawik at run time (fontdue in gdi32;
-   "Segoe UI", "MS Shell Dlg" and the default faces map to it, monospace
-   faces stay on Noto), so wx's text measures and looks as on Windows.
-   Step 3: uxtheme with themes on and Windows 11-style control drawing.
+   user32 (IsZoomed, WS_MAXIMIZE). Step 2 done (2026-11-01): proportional text for programs: gdi32
+   rasterizes Selawik at run time (fontdue in gdi32; "Segoe UI", "MS
+   Shell Dlg" and the default faces map to it, fixed-pitch faces stay on
+   Noto) with Windows' metrics (gdi32_test), plus ExtTextOutW and
+   GetTextExtentExPointW. Next, step 3: uxtheme with themes on and Windows 11-style control drawing.
    Later: a user-mode shell (the taskbar and start menu out of the
    kernel), window resizing by the frame, keyboard focus per window.
 

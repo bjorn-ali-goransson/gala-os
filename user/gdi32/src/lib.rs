@@ -15,6 +15,8 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+extern crate alloc;
+
 mod dib;
 mod draw;
 mod font;
@@ -27,6 +29,9 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, Ordering};
 use font::LogFont;
 use surface::Surface;
+
+// The global allocator (for fontdue, which rasterizes Selawik).
+use gala_heap as _;
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
 /// come from an import.
@@ -43,8 +48,10 @@ pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved:
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    fn strlen(s: *const u8) -> usize;
     // MSVC-target unwind tables reference it (gala's ntdll provides it).
     fn __CxxFrameHandler3();
     // The stack probe for frames over a page (ntdll exports it).

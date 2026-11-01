@@ -50,6 +50,7 @@ Rules for this file:
 | Nginx start page | 1.30.6 (`html/index.html` of the release) | nginx.org | BSD-2-Clause | `user/nginx/html/index.html`, unmodified: the page the Nginx scenarios serve and check. |
 | Test certificate | `user/nginx/conf/gala-test.crt/.key` | generated with `openssl req -x509` (ECDSA P-256, self-signed, CN "gala test") | test data, not secret | The `nginx_tls` scenario's server certificate. |
 | mingw-w64 runtime and GCC support code | Ubuntu 24.04 `gcc-mingw-w64-x86-64` 13.2.0 | mingw-w64.org, gcc.gnu.org | mingw-w64 CRT: ZPL/public domain; libgcc: GPL-3.0 with the GCC Runtime Library Exception | Statically linked into `nginx.exe`, `busybox.exe`, `tcc.exe` and `msvcrt_test.exe` (our `user/msvcrt_test/main.c`) by the toolchain (program startup, helpers). |
+| fontdue and ttf-parser (Rust crates `fontdue` 0.9.5 with `hashbrown` 0.15.5, `foldhash`, `equivalent`, `allocator-api2`; `ttf-parser` 0.25.1 with `core_maths` 0.1.1 and `libm`) | as in Cargo.lock | crates.io (github.com/mooman219/fontdue, github.com/harfbuzz/ttf-parser) | `fontdue`: MIT OR Apache-2.0 OR Zlib; `ttf-parser`, `hashbrown`, `foldhash`, `equivalent`, `allocator-api2`: MIT OR Apache-2.0; `core_maths`, `libm`: MIT | Linked into gala's `gdi32.dll` (`user/gdi32/src/font.rs`): TrueType parsing (metrics, advances) and glyph rasterizing of Selawik. Used without modification, `no_std` with `alloc` (the process heap, `user/gala_heap`). |
 
 ## Rust crate dependencies (linked into the kernel)
 
@@ -64,7 +65,7 @@ Rules for this file:
 
 | Font | Version | Source | License | Use |
 |---|---|---|---|---|
-| Selawik (regular, semilight, semibold, bold) | 1.01 (`Selawik_Release.zip`, SHA-256 `3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423`, measured) | github.com/microsoft/Selawik releases | SIL Open Font License 1.1, Reserved Font Name "Selawik" (`fonts/selawik/LICENSE.txt`) | `fonts/selawik/*.ttf`, unmodified. `cargo xtask bake-fonts` rasterizes them into `kernel/assets/ui-*.glyphs` (the desktop's captions, taskbar and start menu). An open replacement metric-compatible with Segoe UI; no Segoe UI file is used. |
+| Selawik (regular, semilight, semibold, bold) | 1.01 (`Selawik_Release.zip`, SHA-256 `3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423`, measured) | github.com/microsoft/Selawik releases | SIL Open Font License 1.1, Reserved Font Name "Selawik" (`fonts/selawik/LICENSE.txt`) | `fonts/selawik/*.ttf`, unmodified. Embedded in gala's `gdi32.dll` (`user/gdi32/src/font.rs`), which rasterizes them for programs' text. `cargo xtask bake-fonts` rasterizes them into `kernel/assets/ui-*.glyphs` (the desktop's captions, taskbar and start menu). An open replacement metric-compatible with Segoe UI; no Segoe UI file is used. |
 
 ## Artwork
 

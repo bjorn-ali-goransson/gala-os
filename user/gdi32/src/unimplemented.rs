@@ -26,7 +26,6 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     ExtCreateRegion
     ExtFloodFill
     ExtSelectClipRgn
-    ExtTextOutW
     GetCharABCWidthsW
     GetClipBox
     GetDIBColorTable
@@ -38,7 +37,6 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     GetRegionData
     GetRgnBox
     GetSystemPaletteEntries
-    GetTextExtentExPointW
     GetViewportExtEx
     GetWinMetaFileBits
     GetWindowExtEx
