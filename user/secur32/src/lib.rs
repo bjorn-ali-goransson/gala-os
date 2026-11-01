@@ -9,6 +9,7 @@
 // The global allocator: `digest` has `alloc` in builds with bcrypt.
 use gala_heap as _;
 
+mod lsa;
 mod ntlm;
 mod sspi;
 mod unimplemented;

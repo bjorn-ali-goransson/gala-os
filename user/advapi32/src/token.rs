@@ -686,3 +686,27 @@ pub extern "system" fn CreateProcessAsUserW(
         info,
     )
 }
+
+/// LsaNtStatusToWinError(Status): RtlNtStatusToDosError.
+#[unsafe(no_mangle)]
+pub extern "system" fn LsaNtStatusToWinError(status: u32) -> u32 {
+    // SAFETY: a plain call.
+    unsafe { RtlNtStatusToDosError(status) }
+}
+
+/// LsaManageSidNameMapping(OpType, OpInput, *OpOutput): adding or removing
+/// a SID-to-name mapping (sshd names its virtual accounts this way). gala
+/// keeps none: accepted (recorded), no output.
+#[unsafe(no_mangle)]
+pub extern "system" fn LsaManageSidNameMapping(
+    _operation: u32,
+    _input: *const c_void,
+    output: *mut *mut c_void,
+) -> u32 {
+    super::missing(b"advapi32.dll!LsaManageSidNameMapping(not kept)");
+    if !output.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *output = core::ptr::null_mut() };
+    }
+    0
+}

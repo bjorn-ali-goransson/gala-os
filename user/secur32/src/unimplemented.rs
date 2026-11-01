@@ -3,10 +3,4 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("secur32.dll":
-    LsaConnectUntrusted
-    LsaDeregisterLogonProcess
-    LsaFreeReturnBuffer
-    LsaLogonUser
-    LsaLookupAuthenticationPackage
-    LsaRegisterLogonProcess
 );

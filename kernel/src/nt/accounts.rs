@@ -151,11 +151,12 @@ pub fn user_sid(rid: u32) -> Sid {
 
 /// LogonUserW's logon: the password checked (STATUS_LOGON_FAILURE for an
 /// unknown user, a wrong password or another domain), a primary token
-/// in a new logon session.
+/// in a new logon session. With no password: an S4U logon (the caller
+/// checked SeTcbPrivilege).
 pub fn logon(
     name: &[u16],
     domain: &[u16],
-    password: &[u16],
+    password: Option<&[u16]>,
     kind: u32,
 ) -> Result<TokenData, NtStatus> {
     let local = domain.is_empty() || same_ascii(domain, ".") || same_ascii(domain, "GALA");
@@ -171,7 +172,9 @@ pub fn logon(
         _ => return Err(NtStatus::INVALID_PARAMETER),
     };
     let (rid, hash) = account(name)?;
-    if nt_hash(password)? != hash {
+    if let Some(password) = password
+        && nt_hash(password)? != hash
+    {
         return Err(LOGON_FAILURE);
     }
     // The standard user's groups, with the logon type's instead of

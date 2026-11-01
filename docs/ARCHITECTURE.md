@@ -1284,8 +1284,21 @@ Windows, never shadows the system's DLLs.)
   (STATUS_LOGON_FAILURE) and makes a primary token in a new logon session:
   the standard user's groups with the logon type's group (INTERACTIVE,
   NETWORK, BATCH or SERVICE), no CONSOLE LOGON, no LOCAL for network
-  logons. ImpersonateLoggedOnUser impersonates it. TODO: the account key
-  is readable by programs; NetUserAdd; LsaLogonUser and S4U (S4).
+  logons. ImpersonateLoggedOnUser impersonates it. With LogonType |
+  0x8000_0000 it is an S4U logon (no password), for callers with
+  SeTcbPrivilege enabled (STATUS_PRIVILEGE_NOT_HELD). secur32's LSA
+  functions (lsa.rs) are over it: LsaConnectUntrusted,
+  LsaRegisterLogonProcess (SeTcbPrivilege), LsaLookupAuthenticationPackage
+  (Negotiate 0, MSV1_0 1, Kerberos 2; STATUS_NO_SUCH_PACKAGE),
+  LsaLogonUser with MSV1_0 (or Negotiate) MSV1_0_S4U_LOGON and
+  MSV1_0_INTERACTIVE_LOGON (string buffers as addresses or offsets into
+  the block; a zeroed MSV1_0_INTERACTIVE_PROFILE as the profile buffer,
+  LsaFreeReturnBuffer frees it; the logon id from TokenStatistics),
+  LsaDeregisterLogonProcess; advapi32's LsaNtStatusToWinError and
+  LsaManageSidNameMapping (accepted, not kept). There is no LSA process:
+  handles are tags. TODO: the account key is readable by programs;
+  NetUserAdd; KERB_S4U_LOGON; untrusted callers' S4U tokens should be
+  identification-level.
 - **Certificates** (crypt32 cert.rs): CertCreateCertificateContext
   decodes DER X.509 (its own small DER reader: definite lengths, v1-v3,
   UTCTime/GeneralizedTime, unique ids, extensions) into CERT_CONTEXT and

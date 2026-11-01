@@ -944,8 +944,9 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       (`system_test`: its token, SeBackup with backup semantics,
       CreateProcessAsUserW of another user's token; boot files and keys
       now have a fixed default descriptor, as Windows' system files: it
-      had been built from whoever asked). Next: the LSA logons,
-      profiles, then `sshd -d`
+      had been built from whoever asked). The LSA logons sshd makes work
+      (`lsa_test`, as SYSTEM: S4U without a password, MSV1_0 interactive
+      with one). Next: LoadUserProfileW, then `sshd -d`
       accepting a key-authenticated login from the host (xtask as the
       client).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach

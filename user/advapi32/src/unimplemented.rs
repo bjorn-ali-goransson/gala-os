@@ -22,8 +22,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     LogonUserExW
     LsaAddAccountRights
     LsaClose
-    LsaManageSidNameMapping
-    LsaNtStatusToWinError
     LsaOpenPolicy
     OpenSCManagerA
     OpenSCManagerW

@@ -399,7 +399,16 @@ pub(super) fn gala_logon_user(call: &mut Call<'_>) -> NtStatus {
     let user = tri!(string(user));
     let domain = tri!(string(domain));
     let password = tri!(string(password));
-    let data = tri!(super::super::accounts::logon(&user, &domain, &password, kind));
+    // LogonType | GALA_LOGON_S4U: an S4U logon (no password: LsaLogonUser
+    // with MSV1_0_S4U_LOGON), for callers with SeTcbPrivilege enabled.
+    const GALA_LOGON_S4U: u32 = 0x8000_0000;
+    let s4u = kind & GALA_LOGON_S4U != 0;
+    if s4u && !super::security_calls::effective_privilege(call, 7) {
+        return NtStatus::PRIVILEGE_NOT_HELD;
+    }
+    let password = if s4u { None } else { Some(&password[..]) };
+    let data =
+        tri!(super::super::accounts::logon(&user, &domain, password, kind & !GALA_LOGON_S4U));
     let object = tri!(token::object(data));
     call.return_handle(out, object, token::TOKEN_ALL_ACCESS, 0)
 }
