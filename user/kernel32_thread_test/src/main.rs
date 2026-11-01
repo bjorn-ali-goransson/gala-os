@@ -6,7 +6,8 @@
 //! thread with GetThreadContext/SetThreadContext (how Go preempts
 //! goroutines), and SetThreadPriority/GetThreadPriority (increments, the
 //! saturated values, an invalid one), GetCurrentThreadStackLimits (the
-//! reserved stack: TEB DeallocationStack to StackBase). Prints `kernel32_thread_test: ok` or
+//! reserved stack: TEB DeallocationStack to StackBase), Get/
+//! SetPriorityClass. Prints `kernel32_thread_test: ok` or
 //! exits with the number of the failing check.
 
 #![no_std]
@@ -58,6 +59,9 @@ unsafe extern "system" {
     fn FlushProcessWriteBuffers();
     fn IsThreadAFiber() -> Bool;
     fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize);
+    fn GetCurrentProcess() -> Handle;
+    fn GetPriorityClass(process: Handle) -> u32;
+    fn SetPriorityClass(process: Handle, class: u32) -> Bool;
     fn GetThreadTimes(
         h: Handle,
         creation: *mut u64,
@@ -216,6 +220,18 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         c.ok(deallocation != 0, 0)?;
         c.eq(low as u64, deallocation as u64)?;
         c.ok(low < sp && sp < high, sp as u64)?;
+        // Process priority classes: NORMAL to start with; set and read
+        // back; an unknown class is ERROR_INVALID_PARAMETER.
+        const NORMAL: u32 = 0x20;
+        const BELOW_NORMAL: u32 = 0x4000;
+        let me = GetCurrentProcess();
+        c.eq(GetPriorityClass(me).into(), NORMAL.into())?;
+        c.eq(SetPriorityClass(me, BELOW_NORMAL) as u64, 1)?;
+        c.eq(GetPriorityClass(me).into(), BELOW_NORMAL.into())?;
+        c.eq(SetPriorityClass(me, NORMAL) as u64, 1)?;
+        c.eq(GetPriorityClass(me).into(), NORMAL.into())?;
+        c.eq(SetPriorityClass(me, 0x12345) as u64, 0)?;
+        c.eq(GetLastError().into(), 87)?;
         // Times: a creation time (100 ns since 1601), no exit time yet.
         let (mut creation, mut exit, mut kernel, mut user) = (0, 1, 0, 0);
         c.ok(

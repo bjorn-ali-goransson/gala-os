@@ -3,8 +3,6 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("user32.dll":
-    CharLowerBuffW
-    CharNextW
-    CharUpperBuffW
-    CharUpperW
+    DispatchMessageW
+    PeekMessageW
 );

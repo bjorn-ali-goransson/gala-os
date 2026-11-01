@@ -159,6 +159,90 @@ pub extern "system" fn CharNextExA(_code_page: u16, s: *const u8, _flags: u32) -
     }
 }
 
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn LCMapStringW(lcid: u32, flags: u32, src: *const u16, n: i32, dst: *mut u16, m: i32) -> i32;
+}
+
+const LCMAP_LOWERCASE: u32 = 0x100;
+const LCMAP_UPPERCASE: u32 = 0x200;
+
+/// Maps `n` characters at `s` in place (LCMapStringW of the user locale,
+/// through a buffer: source and destination may not overlap), in chunks.
+fn map_case(s: *mut u16, n: usize, flags: u32) {
+    let mut done = 0;
+    while done < n {
+        let chunk = (n - done).min(256);
+        let mut buf = [0u16; 256];
+        // SAFETY: `chunk` characters of the caller's string, and our buffer.
+        unsafe {
+            let src = s.add(done);
+            if LCMapStringW(0x0400, flags, src, chunk as i32, buf.as_mut_ptr(), 256) as usize
+                == chunk
+            {
+                core::ptr::copy_nonoverlapping(buf.as_ptr(), src, chunk);
+            }
+        }
+        done += chunk;
+    }
+}
+
+/// The length of the NUL-terminated string at `s`.
+fn wide_len(s: *const u16) -> usize {
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated string.
+    while unsafe { *s.add(n) } != 0 {
+        n += 1;
+    }
+    n
+}
+
+/// CharUpperW: a string converted in place (returned), or, when the high
+/// word of the argument is zero, the one character in its low word.
+#[unsafe(no_mangle)]
+pub extern "system" fn CharUpperW(s: *mut u16) -> *mut u16 {
+    if (s as usize) >> 16 == 0 {
+        let mut c = s as usize as u16;
+        map_case(&mut c, 1, LCMAP_UPPERCASE);
+        return c as usize as *mut u16;
+    }
+    map_case(s, wide_len(s), LCMAP_UPPERCASE);
+    s
+}
+
+/// CharUpperBuffW: `n` characters converted in place; returns `n`.
+#[unsafe(no_mangle)]
+pub extern "system" fn CharUpperBuffW(s: *mut u16, n: u32) -> u32 {
+    if s.is_null() {
+        return 0;
+    }
+    map_case(s, n as usize, LCMAP_UPPERCASE);
+    n
+}
+
+/// CharLowerBuffW: as CharUpperBuffW, to lower case.
+#[unsafe(no_mangle)]
+pub extern "system" fn CharLowerBuffW(s: *mut u16, n: u32) -> u32 {
+    if s.is_null() {
+        return 0;
+    }
+    map_case(s, n as usize, LCMAP_LOWERCASE);
+    n
+}
+
+/// CharNextW: the next character (at the NUL, the NUL itself).
+#[unsafe(no_mangle)]
+pub extern "system" fn CharNextW(s: *const u16) -> *const u16 {
+    // SAFETY: the caller's NUL-terminated string.
+    if s.is_null() || unsafe { *s } == 0 { s } else { s.wrapping_add(1) }
+}
+
+/// CharNextA: CharNextExA in the ANSI code page.
+#[unsafe(no_mangle)]
+pub extern "system" fn CharNextA(s: *const u8) -> *const u8 {
+    CharNextExA(0, s, 0)
+}
+
 /// MessageBoxA: as MessageBoxW (the text to standard error, IDOK).
 #[unsafe(no_mangle)]
 pub extern "system" fn MessageBoxA(

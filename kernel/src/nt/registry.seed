@@ -68,6 +68,10 @@
 [\Registry\Machine\SOFTWARE\Classes]
 [\Registry\Machine\SOFTWARE\WOW6432Node]
 
+; A workstation (WinNT; servers say ServerNT or LanmanNT).
+[\Registry\Machine\SYSTEM\CurrentControlSet\Control\ProductOptions]
+"ProductType"=sz:WinNT
+"ProductSuite"=multi:
 [\Registry\Machine\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName]
 "ComputerName"=sz:GALA
 [\Registry\Machine\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName]

@@ -8,6 +8,18 @@ pub const SYSTEM_BASIC_INFORMATION: u32 = 0;
 pub const SYSTEM_PERFORMANCE_INFORMATION: u32 = 2;
 pub const SYSTEM_TIME_OF_DAY_INFORMATION: u32 = 3;
 pub const SYSTEM_PROCESS_INFORMATION: u32 = 5;
+pub const SYSTEM_QUERY_PERFORMANCE_COUNTER_INFORMATION: u32 = 124;
+
+/// SYSTEM_QUERY_PERFORMANCE_COUNTER_INFORMATION: Version 1; Flags and
+/// ValidFlags (QUERY_PERFORMANCE_COUNTER_FLAGS) with KernelQpc set: gala's
+/// QueryPerformanceCounter is a system call, not a user-mode TSC read.
+pub fn query_performance_counter_information() -> [u8; 12] {
+    let mut info = [0u8; 12];
+    info[0..4].copy_from_slice(&1u32.to_le_bytes());
+    info[4..8].copy_from_slice(&1u32.to_le_bytes());
+    info[8..12].copy_from_slice(&1u32.to_le_bytes());
+    info
+}
 /// gala's own class (not Windows'): the network interfaces, for gala's
 /// iphlpapi.dll. Windows' iphlpapi asks its NSI driver, whose interface
 /// is undocumented; this one is documented in docs/ARCHITECTURE.md

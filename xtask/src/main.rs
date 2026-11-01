@@ -219,6 +219,11 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "wintrust", file: "wintrust.dll", exported_as: "testwintrust.dll" },
     Dll { package: "webservices", file: "webservices.dll", exported_as: "testwebservices.dll" },
     Dll { package: "dhcpcsvc", file: "dhcpcsvc.dll", exported_as: "testdhcpcsvc.dll" },
+    Dll { package: "dbghelp", file: "dbghelp.dll", exported_as: "testdbghelp.dll" },
+    Dll { package: "xmllite", file: "xmllite.dll", exported_as: "testxmllite.dll" },
+    // gala's clusapi.dll: no failover cluster on this machine.
+    Dll { package: "clusapi", file: "clusapi.dll", exported_as: "testclusapi.dll" },
+    Dll { package: "resutils", file: "resutils.dll", exported_as: "testresutils.dll" },
     // Built as ntdll.dll (its export directory says so); exported under
     // another name so user/bin never holds a file called ntdll.dll.
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
@@ -252,8 +257,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_test", "testdll.dll", "gala"),
+    ("kernel32_test", "testdll2.dll", "gala/lib"),
     ("missing_import_test", "ntdll.dll", "Windows/System32"),
     ("missing_import_test", "kernel32.dll", "Windows/System32"),
+    ("clusapi_test", "ntdll.dll", "Windows/System32"),
+    ("clusapi_test", "kernel32.dll", "Windows/System32"),
+    ("clusapi_test", "clusapi.dll", "Windows/System32"),
+    ("clusapi_test", "resutils.dll", "Windows/System32"),
+    ("netapi32_test", "ntdll.dll", "Windows/System32"),
+    ("netapi32_test", "kernel32.dll", "Windows/System32"),
+    ("netapi32_test", "advapi32.dll", "Windows/System32"),
+    ("netapi32_test", "netapi32.dll", "Windows/System32"),
     ("rpcrt4_test", "ntdll.dll", "Windows/System32"),
     ("rpcrt4_test", "kernel32.dll", "Windows/System32"),
     ("rpcrt4_test", "rpcrt4.dll", "Windows/System32"),
@@ -534,6 +548,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sqllocaldb", "bcryptprimitives.dll", "Windows/System32"),
     ("sqllocaldb", "crypt32.dll", "Windows/System32"),
     ("sqllocaldb", "dhcpcsvc.dll", "Windows/System32"),
+    ("sqllocaldb", "dbghelp.dll", "Windows/System32"),
+    ("sqllocaldb", "xmllite.dll", "Windows/System32"),
+    ("sqllocaldb", "clusapi.dll", "Windows/System32"),
+    ("sqllocaldb", "resutils.dll", "Windows/System32"),
     ("sqllocaldb", "iphlpapi.dll", "Windows/System32"),
     ("sqllocaldb", "mswsock.dll", "Windows/System32"),
     ("sqllocaldb", "ncrypt.dll", "Windows/System32"),
@@ -969,6 +987,8 @@ const USER_PROGRAMS: &[&str] = &[
     "missing_import_test",
     "unimplemented_test",
     "rpcrt4_test",
+    "netapi32_test",
+    "clusapi_test",
     "kernel32_sys_test",
     "kernel32_thread_test",
     "kernel32_sync_test",
@@ -1777,6 +1797,18 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        name: "clusapi_test",
+        cmdline: "qemu_exit run=clusapi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["clusapi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "netapi32_test",
+        cmdline: "qemu_exit run=netapi32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["netapi32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         name: "rpcrt4_test",
         cmdline: "qemu_exit run=rpcrt4_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -2216,11 +2248,13 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // P1 step 5 (pending): SQL Server 2022 LocalDB's database engine,
         // started directly as a console program (-c: not as a service),
-        // with the documented startup options naming the master database's
-        // files and the error log (sqlservr also echoes its log to the
-        // console), until it is ready for clients.
+        // as SqlLocalDB starts an instance: the instance ID the MSI
+        // registered (-S), an instance name (-s), and the documented
+        // startup options naming the master database's files and the
+        // error log (sqlservr also echoes its log to the console), until
+        // it is ready for clients.
         name: "sqllocaldb",
-        cmdline: "qemu_exit cwd=C:/sql/Binn run=sqlservr.exe args=-c%20-dC:\\sql\\data\\master.mdf%20-lC:\\sql\\data\\mastlog.ldf%20-eC:\\sql\\data\\ERRORLOG",
+        cmdline: "qemu_exit cwd=C:/sql/Binn run=sqlservr.exe args=-c%20-SMSSQL16E.LOCALDB%20-sLOCALDB#GALA0001%20-dC:\\sql\\data\\master.mdf%20-lC:\\sql\\data\\mastlog.ldf%20-eC:\\sql\\data\\ERRORLOG",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["SQL Server is now ready for client connections"],
     },

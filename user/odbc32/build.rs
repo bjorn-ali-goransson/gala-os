@@ -27,6 +27,17 @@ fn main() {
         ("SQLSetConnectAttrW", 139),
         ("SQLDriverConnectW", 141),
         ("SQLSetStmtAttrW", 176),
+        ("SQLFreeStmt", 16),
+        ("SQLGetDiagRec", 36),
+        ("SQLSetConnectAttr", 39),
+        ("SQLBrowseConnect", 55),
+        ("SQLGetDescFieldW", 133),
+        ("SQLGetDiagFieldW", 135),
+        ("SQLGetStmtAttrW", 138),
+        ("SQLGetInfoW", 145),
+        ("SQLBrowseConnectW", 155),
+        ("SQLDriverConnectA", 241),
+        ("SQLGetInfoA", 245),
     ];
     for (name, ordinal) in ordinals {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name},@{ordinal}");

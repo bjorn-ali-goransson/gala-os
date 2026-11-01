@@ -741,13 +741,34 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         module). It loads (every import bound) and runs into one missing
         function after another, each named by the ledger: done so far
         GetCurrentThreadStackLimits, GetProductInfo, rpcrt4's UUIDs,
-        CoInitializeSecurity, lstrlen/lstrcmp(i), GetProcAddress(NULL),
-        instapi160 and the registry keys. Next: whatever the ledger names
-        (`cargo xtask boot-test sqllocaldb`, about a minute), then the
-        error log's own messages. Probed but optional so far:
-        SetDllDirectoryW/GetDllDirectoryW, FlsGetValue2,
-        QueryWorkingSetEx, NtQuerySystemInformation classes 124
-        (SystemQueryPerformanceCounterInformation) and 5000.
+        CoInitializeSecurity, lstrlen/lstrcmp(i)(A), GetProcAddress(NULL),
+        instapi160 and the registry keys (with the MSI's Setup checksum
+        and ProductCode: without them "Unknown package id"),
+        SetDllDirectoryW, the instance ID and name on the command line
+        (`-SMSSQL16E.LOCALDB -sLOCALDB#GALA0001`, as SqlLocalDB starts
+        it), stubs for every DLL in Binn (not only sqlservr's closure:
+        sqlboot.dll is loaded later), NetWkstaGetInfo, ProductOptions,
+        QueryDosDeviceW, the volume GUID path, FormatMessage from message
+        tables (its log texts), priority classes, clusapi/resutils (no
+        cluster), Toolhelp module snapshots (its stack dumps),
+        SystemQueryPerformanceCounterInformation, a tick-granular
+        GetSystemTimeAsFileTime (it hung after "Default collation"
+        calibrating against the tick), user32's Char* functions.
+        Now (2026-11-01) it logs its banner, detects processors and
+        memory, sets up the buffer pool (40 s under TCG), and stops at
+        Service Broker: "A system cryptographic call failed"
+        (NCryptOpenStorageProvider: gala's ncrypt has no key storage
+        provider; SQL Server needs the Microsoft Software Key Storage
+        Provider). Next: that provider (RSA keys in memory), then
+        shlwapi's PathRemoveFileSpecW/PathAppendW and
+        BCryptGetFipsAlgorithmMode (missing, looked up at run time), then
+        whatever follows ("Starting up database 'master'"). Run it with
+        `cargo xtask boot-test sqllocaldb` (about 2 minutes) and read
+        the log after "Default collation". Probed but optional so far:
+        FlsGetValue2, QueryWorkingSetEx, HeapSetInformation, bad-memory
+        notifications, NtAllocateUserPhysicalPagesEx, the RtlIpv*W
+        functions, dbghelp's SymInitialize, XEGetEngine (looked for in
+        every module), NtQuerySystemInformation class 5000.
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to

@@ -1142,8 +1142,33 @@ Windows, never shadows the system's DLLs.)
   DLLs (netapi32, pdh, shlwapi, rpcrt4, urlmon, wininet, userenv,
   xolehlp, odbc32, authz, wintrust, webservices, dhcpcsvc) are nothing
   but such stubs so far, apart from rpcrt4's UUID functions
-  (`rpcrt4_test`). GetProcAddress with a null module searches the
-  executable.
+  (`rpcrt4_test`) and netapi32's NetWkstaGetInfo (`netapi32_test`).
+  GetProcAddress with a null module searches the executable. Delay-loaded
+  imports are resolved by the program's own helper through
+  GetProcAddress, so a stub shows up there as the delay-load exception
+  0xC06D007F with `dll!function` in the ledger as a missing export.
+- **Failover clustering is not installed.** clusapi.dll and resutils.dll
+  are real (not stubs: SQL Server resolves the whole API with
+  GetProcAddress): GetNodeClusterState reports ClusterStateNotInstalled;
+  functions returning handles give NULL with RPC_S_SERVER_UNAVAILABLE (no
+  cluster service), state queries the Unknown state, the rest that error;
+  resutils parses CLUSPROP property lists (`clusapi_test`).
+- **DLL search** (ntdll `map_dll`): the executable's directory,
+  SetDllDirectoryW's directory (LdrSetDllDirectory, kept under the loader
+  lock), then System32.
+- **Time**: GetSystemTimeAsFileTime is KUSER_SHARED_DATA's SystemTime, as
+  of the last clock tick (1 ms), as on Windows; the precise time
+  (NtQuerySystemTime) is GetSystemTimePreciseAsFileTime's. A program
+  calibrating against the tick (SQL Server) spins forever if the coarse
+  clock never steps. SystemQueryPerformanceCounterInformation (124) says
+  KernelQpc (QueryPerformanceCounter is a system call).
+- **Process priority classes**: NtSetInformationProcess (0x1c) takes
+  ProcessPriorityClass only and records it (Get/SetPriorityClass read
+  it back); the scheduler still runs every thread at the normal base
+  priority.
+- **Message tables**: FormatMessage with FROM_HMODULE reads the module's
+  RT_MESSAGETABLE (MESSAGE_RESOURCE_DATA blocks, ANSI or UTF-16 entries),
+  then the system's messages if FROM_SYSTEM is also given.
 
 ## Processors
 

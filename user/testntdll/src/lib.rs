@@ -215,6 +215,7 @@ syscall_stubs! {
     NtQueryInformationProcess = 0x19, fn(
         process: isize, class: u32, buf: *mut u8, len: u32, ret: *mut u32
     );
+    NtSetInformationProcess = 0x1c, fn(process: isize, class: u32, buf: *const u8, len: u32);
     NtQueryVirtualMemory = 0x23, fn(
         process: isize, address: usize, class: u32, buf: *mut u8, len: usize, ret: *mut usize
     );
@@ -469,11 +470,31 @@ fn map_dll(dll: &[u8], search: Search) -> Result<usize, u32> {
     if system32_only {
         return open_dll(&system32[..n], dll);
     }
+    // The executable's directory, then SetDllDirectory's (as documented
+    // for the standard search order), then System32.
     match open_dll(&image_path[..dir_len], dll) {
-        Err(STATUS_DLL_NOT_FOUND) => open_dll(&system32[..n], dll),
-        other => other,
+        Err(STATUS_DLL_NOT_FOUND) => {}
+        other => return other,
     }
+    // SAFETY: under the loader lock (as `map_dll` is).
+    let (dir, len) = unsafe { *DLL_DIRECTORY.0.get() };
+    if len != 0 {
+        match open_dll(&dir[..len], dll) {
+            Err(STATUS_DLL_NOT_FOUND) => {}
+            other => return other,
+        }
+    }
+    open_dll(&system32[..n], dll)
 }
+
+/// SetDllDirectory's directory (ends with a backslash; empty: none), used
+/// under the loader lock.
+struct DllDirectory(core::cell::UnsafeCell<([u16; MAX_PATH], usize)>);
+
+// SAFETY: used under the loader lock.
+unsafe impl Sync for DllDirectory {}
+
+static DLL_DIRECTORY: DllDirectory = DllDirectory(core::cell::UnsafeCell::new(([0; MAX_PATH], 0)));
 
 /// Opens `dir` + `dll` (`dir` ends with a backslash) and maps it.
 /// The Win32 path of the DLL `open_dll` opened last (used under the
@@ -1786,6 +1807,80 @@ pub unsafe extern "system" fn LdrGetProcedureAddress(
 #[unsafe(no_mangle)]
 pub extern "system" fn LdrUnloadDll(module: usize) -> u32 {
     with_loader_lock(|| ldr_unload_dll(module))
+}
+
+/// LdrSetDllDirectory(*Directory): the directory searched for DLLs after
+/// the executable's (kernel32's SetDllDirectoryW); null or empty: none.
+///
+/// # Safety
+/// `dir` must be null or point at a valid UNICODE_STRING.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn LdrSetDllDirectory(dir: *const UnicodeString) -> u32 {
+    let text: &[u16] = if dir.is_null() {
+        &[]
+    } else {
+        // SAFETY: the caller's UNICODE_STRING.
+        unsafe {
+            let us = &*dir;
+            if us.buffer.is_null() {
+                &[]
+            } else {
+                core::slice::from_raw_parts(us.buffer, usize::from(us.length) / 2)
+            }
+        }
+    };
+    // Room for a backslash after it.
+    if text.len() + 1 > MAX_PATH {
+        return 0xc000_0106; // STATUS_NAME_TOO_LONG
+    }
+    with_loader_lock(|| {
+        // SAFETY: under the loader lock.
+        let ((buf, len), given) =
+            unsafe { (&mut *DLL_DIRECTORY.0.get(), &mut *GIVEN_LENGTH.0.get()) };
+        buf[..text.len()].copy_from_slice(text);
+        *given = text.len();
+        *len = text.len();
+        // The search joins it with names: end it with a backslash.
+        if *len != 0 && buf[*len - 1] != u16::from(b'\\') {
+            buf[*len] = u16::from(b'\\');
+            *len += 1;
+        }
+    });
+    STATUS_SUCCESS
+}
+
+/// The length of the directory as LdrSetDllDirectory was given it.
+struct GivenLength(core::cell::UnsafeCell<usize>);
+
+// SAFETY: used under the loader lock.
+unsafe impl Sync for GivenLength {}
+
+static GIVEN_LENGTH: GivenLength = GivenLength(core::cell::UnsafeCell::new(0));
+
+/// LdrGetDllDirectory(*Directory): the directory LdrSetDllDirectory set
+/// (empty if none) into the caller's buffer, NUL-terminated if room;
+/// STATUS_BUFFER_TOO_SMALL (Length: what is needed) if it does not fit.
+///
+/// # Safety
+/// `dir` must point at a UNICODE_STRING with a writable buffer of
+/// MaximumLength bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn LdrGetDllDirectory(dir: *mut UnicodeString) -> u32 {
+    with_loader_lock(|| {
+        // SAFETY: under the loader lock.
+        let (buf, n) = unsafe { (&(*DLL_DIRECTORY.0.get()).0, *GIVEN_LENGTH.0.get()) };
+        // SAFETY: the caller's UNICODE_STRING and buffer.
+        unsafe {
+            let us = &mut *dir;
+            us.length = (2 * n) as u16;
+            if usize::from(us.maximum_length) < 2 * n + 2 {
+                return 0xc000_0023; // STATUS_BUFFER_TOO_SMALL
+            }
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), us.buffer.cast_mut(), n);
+            *us.buffer.cast_mut().add(n) = 0;
+        }
+        STATUS_SUCCESS
+    })
 }
 
 /// LdrGetDllFullName(DllHandle, *FullDllName): the file a module was

@@ -6,7 +6,8 @@
 //! FindFirstFileW/FindNextFileW, GetFileInformationByHandleEx's directory
 //! classes, GetVolumeInformationByHandleW, GetFinalPathNameByHandleW,
 //! GetFileTime/SetFileTime, GetFullPathNameW, GetShortPathNameW,
-//! GetCompressedFileSizeW, DeleteFileW,
+//! GetCompressedFileSizeW, DeleteFileW, QueryDosDeviceW (C: and NUL),
+//! GetVolumeNameForVolumeMountPointW (C:\'s \\?\Volume{GUID}\),
 //! RemoveDirectoryW, all inside the temporary directory. Prints
 //! `kernel32_file_test: ok` or exits with the number of the failing check.
 
@@ -22,6 +23,8 @@ type Handle = *mut c_void;
 unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
     fn GetLastError() -> u32;
+    fn QueryDosDeviceW(name: *const u16, target: *mut u16, max: u32) -> u32;
+    fn GetVolumeNameForVolumeMountPointW(mount: *const u16, name: *mut u16, size: u32) -> Bool;
     fn SetLastError(code: u32);
     fn GetTempPathW(size: u32, buf: *mut u16) -> u32;
     fn CreateDirectoryW(path: *const u16, attrs: *mut c_void) -> Bool;
@@ -436,6 +439,30 @@ fn run() -> Result<(), u32> {
         c.eq(GetLastError().into(), ERROR_FILE_NOT_FOUND.into())?;
         c.ok(RemoveDirectoryW(dir.ptr()) != 0, 0)?;
         c.eq(GetFileAttributesW(dir.ptr()).into(), INVALID_FILE_ATTRIBUTES.into())?;
+
+        // DOS device names: C: is the volume's device, NUL the null
+        // device; the target is followed by two NULs (counted).
+        let mut target = [0u16; 64];
+        let c_drive = b"C:\0".map(u16::from);
+        let n = QueryDosDeviceW(c_drive.as_ptr(), target.as_mut_ptr(), 64) as usize;
+        let volume = b"\\Device\\HarddiskVolume1\0\0".map(u16::from);
+        c.ok(n == volume.len() && target[..n] == volume, n as u64)?;
+        let null = b"NUL\0".map(u16::from);
+        let n = QueryDosDeviceW(null.as_ptr(), target.as_mut_ptr(), 64) as usize;
+        let device = b"\\Device\\Null\0\0".map(u16::from);
+        c.ok(n == device.len() && target[..n] == device, n as u64)?;
+        c.eq(QueryDosDeviceW(c_drive.as_ptr(), target.as_mut_ptr(), 8).into(), 0)?;
+        c.eq(GetLastError().into(), 122)?; // ERROR_INSUFFICIENT_BUFFER
+        // The volume's GUID path: \\?\Volume{GUID}\ (49 characters).
+        let root = b"C:\\\0".map(u16::from);
+        let mut name = [0u16; 64];
+        c.ok(GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), 64) != 0, 0)?;
+        let prefix = b"\\\\?\\Volume{".map(u16::from);
+        let len = name.iter().position(|&ch| ch == 0).unwrap_or(0);
+        c.ok(len == 49 && name[..11] == prefix && name[47..49] == [0x7d, 0x5c], len as u64)?;
+        let none = b"Q:\0".map(u16::from);
+        c.eq(QueryDosDeviceW(none.as_ptr(), target.as_mut_ptr(), 64).into(), 0)?;
+        c.eq(GetLastError().into(), ERROR_FILE_NOT_FOUND.into())?;
     }
     Ok(())
 }

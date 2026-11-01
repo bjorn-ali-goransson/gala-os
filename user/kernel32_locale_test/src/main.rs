@@ -9,7 +9,7 @@
 //!   query; ERROR_INSUFFICIENT_BUFFER; LOCALE_RETURN_NUMBER.
 //! - LCMapStringW (upper and lower case), CompareStringW (linguistic
 //!   order: "a" < "B", lower case first, NORM_IGNORECASE), lstrcmpW and
-//!   lstrcmpiW (the same order), lstrlenW/A (0 for a null string),
+//!   lstrcmpiW and their ANSI forms (the same order), lstrlenW/A (0 for a null string),
 //!   GetStringTypeW (CT_CTYPE1), IsDBCSLeadByte.
 //! - GetDateFormatW/GetTimeFormatW with pictures and the short date.
 //! - GetLocalTime matches GetSystemTime (UTC); GetDynamicTimeZoneInformation
@@ -111,6 +111,8 @@ unsafe extern "system" {
     fn lstrlenA(s: *const u8) -> i32;
     fn lstrcmpW(a: *const u16, b: *const u16) -> i32;
     fn lstrcmpiW(a: *const u16, b: *const u16) -> i32;
+    fn lstrcmpA(a: *const u8, b: *const u8) -> i32;
+    fn lstrcmpiA(a: *const u8, b: *const u8) -> i32;
     fn GetStringTypeW(kind: u32, s: *const u16, n: i32, out: *mut u16) -> Bool;
     fn IsDBCSLeadByte(b: u8) -> Bool;
     fn GetDateFormatW(
@@ -393,6 +395,9 @@ fn strings(c: &mut Checks) -> Result<(), u32> {
         c.eq(lstrlenW(w("abc").as_ptr()) as u64, 3)?;
         c.eq(lstrlenW(core::ptr::null()) as u64, 0)?;
         c.eq(lstrlenA(c"abcd".as_ptr().cast()) as u64, 4)?;
+        c.ok(lstrcmpA(c"a".as_ptr().cast(), c"B".as_ptr().cast()) < 0, 0)?;
+        c.eq(lstrcmpA(c"sqlboot".as_ptr().cast(), c"sqlboot".as_ptr().cast()) as u64, 0)?;
+        c.eq(lstrcmpiA(c"SQLBOOT.DLL".as_ptr().cast(), c"sqlboot.dll".as_ptr().cast()) as u64, 0)?;
 
         let s = w("a1 A,");
         let mut types = [0u16; 5];

@@ -260,18 +260,34 @@ pub extern "system" fn VirtualProtect(
 /// precision here already.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemTimePreciseAsFileTime(time: *mut u64) {
-    GetSystemTimeAsFileTime(time)
-}
-
-/// GetSystemTimeAsFileTime: 100 ns intervals since 1601 (UTC).
-#[unsafe(no_mangle)]
-pub extern "system" fn GetSystemTimeAsFileTime(time: *mut u64) {
     let mut t = 0i64;
     // SAFETY: valid output pointers.
     unsafe {
         NtQuerySystemTime(&mut t);
         core::ptr::write_unaligned(time, t as u64);
     }
+}
+
+/// GetSystemTimeAsFileTime: 100 ns intervals since 1601 (UTC), as of the
+/// last clock tick: KUSER_SHARED_DATA's SystemTime (a KSYSTEM_TIME at
+/// +0x14, read until High1Time and High2Time agree), as on Windows. The
+/// precise time is GetSystemTimePreciseAsFileTime's.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSystemTimeAsFileTime(time: *mut u64) {
+    let p = 0x7ffe_0014 as *const u32;
+    let t = loop {
+        // SAFETY: KUSER_SHARED_DATA is mapped read-only in every process.
+        let (high1, low, high2) = unsafe {
+            let high1 = core::ptr::read_volatile(p.add(1));
+            let low = core::ptr::read_volatile(p);
+            (high1, low, core::ptr::read_volatile(p.add(2)))
+        };
+        if high1 == high2 {
+            break (u64::from(high1) << 32) | u64::from(low);
+        }
+    };
+    // SAFETY: the caller's output.
+    unsafe { core::ptr::write_unaligned(time, t) };
 }
 
 #[unsafe(no_mangle)]

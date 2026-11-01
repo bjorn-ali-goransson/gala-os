@@ -6,7 +6,9 @@
 //! GetSystemInfo, GetSystemDirectoryA, GetProcessAffinityMask,
 //! GetEnvironmentStringsW, CreateEventA, LoadLibraryW/LoadLibraryExW (with
 //! LOAD_LIBRARY_SEARCH_SYSTEM32), DuplicateHandle, VirtualQuery,
-//! WaitForMultipleObjects and SwitchToThread. Prints `kernel32_sys_test:
+//! WaitForMultipleObjects and SwitchToThread; GetSystemTimeAsFileTime
+//! (KUSER_SHARED_DATA's tick-updated SystemTime) and the precise time.
+//! Prints `kernel32_sys_test:
 //! ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -48,6 +50,8 @@ struct MemoryBasicInformation {
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetSystemTimeAsFileTime(time: *mut u64);
+    fn GetSystemTimePreciseAsFileTime(time: *mut u64);
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn GetConsoleMode(h: Handle, mode: *mut u32) -> Bool;
@@ -374,6 +378,29 @@ fn run() -> Result<(), u32> {
         let peb: usize;
         core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
         c.eq(RtlGetCurrentPeb() as u64, peb as u64)?;
+
+        // GetSystemTimeAsFileTime is KUSER_SHARED_DATA's SystemTime
+        // (+0x14, updated each clock tick); the precise time is at least it.
+        let kuser_time = || {
+            let p = 0x7ffe_0014 as *const u32;
+            loop {
+                let high1 = core::ptr::read_volatile(p.add(1));
+                let low = core::ptr::read_volatile(p);
+                if core::ptr::read_volatile(p.add(2)) == high1 {
+                    return (u64::from(high1) << 32) | u64::from(low);
+                }
+            }
+        };
+        for _ in 0..100 {
+            let before = kuser_time();
+            let mut t = 0;
+            GetSystemTimeAsFileTime(&mut t);
+            let after = kuser_time();
+            c.ok(t == before || t == after, t)?;
+            let mut precise = 0;
+            GetSystemTimePreciseAsFileTime(&mut precise);
+            c.ok(precise >= t, precise)?;
+        }
     }
     Ok(())
 }

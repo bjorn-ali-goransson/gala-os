@@ -1,11 +1,24 @@
-//! gala's netapi32.dll (network management (users, groups, domain controllers)): for now the functions SQL Server LocalDB
-//! imports, none implemented yet. Each reports itself to the
-//! missing-features ledger and ends the process when called
-//! (`gala_stubs`), so the ledger shows which ones a program uses.
+//! gala's netapi32.dll (network management): NetWkstaGetInfo for this
+//! machine (a workstation in a workgroup, not a domain) and the buffers it
+//! returns; the other functions SQL Server LocalDB imports are not
+//! implemented yet (`gala_stubs`: each reports itself to the
+//! missing-features ledger and ends the process when called).
 
 #![no_std]
 
 mod unimplemented;
+mod wksta;
+
+#[allow(dead_code)]
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "C" {
+    fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
+    fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    // MSVC-target unwind tables reference it (gala's ntdll provides it).
+    fn __CxxFrameHandler3();
+}
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
 /// come from an import.

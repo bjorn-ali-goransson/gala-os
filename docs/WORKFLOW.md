@@ -96,6 +96,12 @@ shows it.
   directories of the installed layout, each moved to
   `target/prebuilt/<name>/<last component>`, and excludes are paths
   removed after that; unpacking needs msitools (`apt install msitools`).
+- **A program hangs without a ledger** (it never exits, so the ledger is
+  not printed): add `events=syscall,thread` to its scenario's command
+  line and read `target/debug/test-<name>.events.jsonl` while QEMU still
+  runs (`grep -v` the calls it repeats; a loop of time queries means it
+  waits for a clock to move). Do not delete the events file of a running
+  VM (it is still open: `/proc/<qemu pid>/fd/` reaches it).
 - **A program imports functions gala lacks**: a missing export stops the
   load (as on Windows), so add it to the DLL's `src/unimplemented.rs`
   (`gala_stubs::unimplemented_exports!`) to get the program running; the

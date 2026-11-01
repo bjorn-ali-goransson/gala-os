@@ -22,6 +22,9 @@ use super::wait::{self, Dispatcher};
 use crate::mm::heap::{AllocError, KArc, TryVec};
 use crate::sync::IrqMutex;
 
+/// PROCESS_PRIORITY_CLASS_NORMAL.
+pub const PRIORITY_CLASS_NORMAL: u8 = 2;
+
 pub struct Process {
     pub id: u64,
     /// The creating process's id (0: started by the kernel).
@@ -57,6 +60,10 @@ pub struct Process {
     pub job: IrqMutex<Option<ObjectRef>>,
     /// A page fault found no free frame (logged once).
     pub oom_logged: core::sync::atomic::AtomicBool,
+    /// The priority class (PROCESS_PRIORITY_CLASS_*: 2 is NORMAL), as set
+    /// through ProcessPriorityClass. Recorded only: every thread runs at
+    /// the normal base priority (thread.rs).
+    pub priority_class: core::sync::atomic::AtomicU8,
 }
 
 impl fmt::Debug for Process {
@@ -637,6 +644,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         exit_time: IrqMutex::new(0),
         job: IrqMutex::new(None),
         oom_logged: core::sync::atomic::AtomicBool::new(false),
+        priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),
     })?;
     prune();
     PROCESSES.lock().try_push(process.clone())?;

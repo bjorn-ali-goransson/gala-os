@@ -1345,7 +1345,7 @@ pub extern "system" fn CreateWellKnownSid(
         68 => (auth(16), &[0x3000]), // WinHighLabelSid
         69 => (auth(16), &[0x4000]), // WinSystemLabelSid
         _ => {
-            missing(b"advapi32.dll!CreateWellKnownSid(type)");
+            super::missing_detail(b"advapi32.dll!CreateWellKnownSid(type)", kind.into());
             return fail(ERROR_INVALID_PARAMETER, 0);
         }
     };

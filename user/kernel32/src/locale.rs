@@ -512,6 +512,37 @@ pub extern "system" fn lstrcmpiW(a: *const u16, b: *const u16) -> i32 {
     compare(c_units(a), c_units(b), NORM_IGNORECASE) - CSTR_EQUAL
 }
 
+/// The ANSI string at `s` as UTF-16 (the ANSI code page is UTF-8; up to
+/// 1024 characters compared).
+fn widen(s: *const u8, out: &mut [u16; 1024]) -> &[u16] {
+    let mut bytes: &[u8] = &[];
+    if !s.is_null() {
+        // SAFETY: the caller's NUL-terminated string.
+        bytes = unsafe { core::ffi::CStr::from_ptr(s.cast()) }.to_bytes();
+    }
+    let text = core::str::from_utf8(bytes).unwrap_or("");
+    let mut n = 0;
+    for (slot, unit) in out.iter_mut().zip(text.encode_utf16()) {
+        *slot = unit;
+        n += 1;
+    }
+    &out[..n]
+}
+
+/// lstrcmpA: lstrcmpW for ANSI strings.
+#[unsafe(no_mangle)]
+pub extern "system" fn lstrcmpA(a: *const u8, b: *const u8) -> i32 {
+    let (mut x, mut y) = ([0u16; 1024], [0u16; 1024]);
+    compare(widen(a, &mut x), widen(b, &mut y), 0) - CSTR_EQUAL
+}
+
+/// lstrcmpiA: lstrcmpiW for ANSI strings.
+#[unsafe(no_mangle)]
+pub extern "system" fn lstrcmpiA(a: *const u8, b: *const u8) -> i32 {
+    let (mut x, mut y) = ([0u16; 1024], [0u16; 1024]);
+    compare(widen(a, &mut x), widen(b, &mut y), NORM_IGNORECASE) - CSTR_EQUAL
+}
+
 /// CompareStringEx(name, ...): CompareStringW for "en-US".
 #[unsafe(no_mangle)]
 pub extern "system" fn CompareStringEx(

@@ -4,4 +4,5 @@
 
 gala_stubs::unimplemented_exports!("iphlpapi.dll":
     GetAdaptersInfo
+    GetExtendedTcpTable
 );

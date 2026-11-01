@@ -244,7 +244,7 @@ fn is_current(process: Handle) -> bool {
 }
 
 /// The loaded images, the executable first, then by address.
-fn modules(mut f: impl FnMut(usize)) {
+pub(crate) fn modules(mut f: impl FnMut(usize)) {
     let exe = super::mapping::GetModuleHandleW(core::ptr::null()) as usize;
     f(exe);
     regions(|r| {

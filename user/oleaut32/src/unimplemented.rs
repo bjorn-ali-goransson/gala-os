@@ -3,5 +3,12 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("oleaut32.dll":
+    VarBoolFromStr
+    VarBstrFromBool
+    VarCmp
+    VarCyFromStr
+    VarDateFromStr
+    VarI4FromStr
+    VarR8FromStr
     VarUI4FromStr
 );

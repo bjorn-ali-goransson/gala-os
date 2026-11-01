@@ -390,6 +390,58 @@ pub extern "system" fn GetModuleFileNameW(module: Handle, buf: *mut u16, size: u
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
     fn LdrGetDllFullName(module: Handle, name: *mut UnicodeString) -> u32;
+    fn LdrSetDllDirectory(dir: *const UnicodeString) -> u32;
+    fn LdrGetDllDirectory(dir: *mut UnicodeString) -> u32;
+}
+
+/// SetDllDirectoryW: a directory searched for DLLs after the executable's
+/// (null or empty: the default search again).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetDllDirectoryW(dir: *const u16) -> Bool {
+    let mut n = 0;
+    if !dir.is_null() {
+        // SAFETY: the caller's NUL-terminated string, read up to its NUL.
+        while unsafe { *dir.add(n) } != 0 {
+            n += 1;
+        }
+    }
+    if n >= 32767 {
+        return fail_with(206, 0); // ERROR_FILENAME_EXCED_RANGE
+    }
+    let us = UnicodeString { length: (2 * n) as u16, maximum_length: (2 * n) as u16, buffer: dir };
+    // SAFETY: a UNICODE_STRING over the caller's string.
+    match unsafe { LdrSetDllDirectory(&us) } {
+        STATUS_SUCCESS => 1,
+        _ => fail_with(206, 0),
+    }
+}
+
+/// GetDllDirectoryW: SetDllDirectoryW's directory (characters copied, no
+/// NUL counted; 0 and an empty string if none); a buffer too small gets
+/// nothing and the return value is the size needed, NUL included.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDllDirectoryW(size: u32, buffer: *mut u16) -> u32 {
+    let mut local = [0u16; 261];
+    let mut us = UnicodeString {
+        length: 0,
+        maximum_length: (2 * local.len()) as u16,
+        // ntdll writes the directory here.
+        buffer: local.as_mut_ptr().cast_const(),
+    };
+    // SAFETY: a UNICODE_STRING over our buffer.
+    if unsafe { LdrGetDllDirectory(&mut us) } != STATUS_SUCCESS {
+        return 0;
+    }
+    let n = usize::from(us.length) / 2;
+    if n + 1 > size as usize || buffer.is_null() {
+        return (n + 1) as u32;
+    }
+    // SAFETY: the caller's buffer of `size` characters (n + 1 fit).
+    unsafe {
+        core::ptr::copy_nonoverlapping(local.as_ptr(), buffer, n);
+        buffer.add(n).write(0);
+    }
+    n as u32
 }
 
 /// The file a module was loaded from: the executable's ImagePathName for
@@ -411,8 +463,12 @@ pub(crate) fn module_path(module: Handle) -> Result<([u16; 520], usize), u32> {
         out[..n].copy_from_slice(&path[..n]);
         return Ok((out, n));
     }
-    let mut us =
-        UnicodeString { length: 0, maximum_length: (2 * out.len()) as u16, buffer: out.as_ptr() };
+    // ntdll writes the path here.
+    let mut us = UnicodeString {
+        length: 0,
+        maximum_length: (2 * out.len()) as u16,
+        buffer: out.as_mut_ptr().cast_const(),
+    };
     // SAFETY: a UNICODE_STRING over our buffer.
     let status = unsafe { LdrGetDllFullName(module, &mut us) };
     if status != STATUS_SUCCESS {

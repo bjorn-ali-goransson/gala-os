@@ -208,3 +208,43 @@ pub extern "system" fn SizeofResource(module: Handle, res: Handle) -> u32 {
 pub extern "system" fn FreeResource(_data: Handle) -> Bool {
     0
 }
+
+/// Message `id` of the RT_MESSAGETABLE resource 1 of `module` (null: the
+/// executable) in language `lang` (0: any): its text bytes up to the NUL,
+/// and whether they are UTF-16 (else ANSI). MESSAGE_RESOURCE_DATA:
+/// NumberOfBlocks, then {LowId, HighId, OffsetToEntries} per block; the
+/// entries of a block follow each other, {Length (header included),
+/// Flags (1: Unicode), Text}.
+pub(crate) fn message(module: Handle, id: u32, lang: u16) -> Option<(&'static [u8], bool)> {
+    const RT_MESSAGETABLE: u32 = 11;
+    let base = module_base(module);
+    let entry = find_resource(base, Key::Id(RT_MESSAGETABLE), Key::Id(1), lang).ok()?;
+    let table = resource_bytes(base, entry);
+    let u32_at = |at: usize| Some(u32::from_le_bytes(table.get(at..at + 4)?.try_into().ok()?));
+    let u16_at = |at: usize| Some(u16::from_le_bytes(table.get(at..at + 2)?.try_into().ok()?));
+    let blocks = u32_at(0)? as usize;
+    for b in 0..blocks.min(table.len() / 12) {
+        let (low, high, offset) = (u32_at(4 + 12 * b)?, u32_at(8 + 12 * b)?, u32_at(12 + 12 * b)?);
+        if !(low..=high).contains(&id) {
+            continue;
+        }
+        let mut at = offset as usize;
+        for _ in low..id {
+            let length = usize::from(u16_at(at)?);
+            if length < 4 {
+                return None;
+            }
+            at += length;
+        }
+        let (length, flags) = (usize::from(u16_at(at)?), u16_at(at + 2)?);
+        let text = table.get(at + 4..at + length.max(4))?;
+        let unicode = flags & 1 != 0;
+        let end = if unicode {
+            text.chunks_exact(2).position(|c| c == [0, 0]).map_or(text.len() & !1, |i| 2 * i)
+        } else {
+            text.iter().position(|&c| c == 0).unwrap_or(text.len())
+        };
+        return Some((&text[..end], unicode));
+    }
+    None
+}

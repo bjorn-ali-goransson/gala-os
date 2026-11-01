@@ -34,6 +34,15 @@ type Handle = *mut c_void;
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetLastError() -> u32;
+    fn FormatMessageW(
+        flags: u32,
+        source: *const c_void,
+        id: u32,
+        language: u32,
+        buffer: *mut u16,
+        size: u32,
+        args: *const usize,
+    ) -> u32;
     fn SetLastError(e: u32);
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
@@ -56,6 +65,11 @@ unsafe extern "system" {
 #[link(name = "user32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn CharNextExA(code_page: u16, s: *const u8, flags: u32) -> *const u8;
+    fn CharUpperW(s: *mut u16) -> *mut u16;
+    fn CharUpperBuffW(s: *mut u16, n: u32) -> u32;
+    fn CharLowerBuffW(s: *mut u16, n: u32) -> u32;
+    fn CharNextW(s: *const u16) -> *const u16;
+    fn CharNextA(s: *const u8) -> *const u8;
     fn GetUserObjectInformationA(
         h: Handle,
         index: i32,
@@ -474,7 +488,8 @@ fn int_resource(id: u16) -> *const u16 {
 }
 
 /// This program's resources (build.rs): FindResource(Ex)W, LoadResource,
-/// LockResource, SizeofResource; LoadStringW.
+/// LockResource, SizeofResource; LoadStringW; FormatMessageW from the
+/// message table.
 fn resources(c: &mut Checks) -> Result<(), u32> {
     const RT_STRING: u16 = 6;
     const RT_RCDATA: u16 = 10;
@@ -517,6 +532,69 @@ fn resources(c: &mut Checks) -> Result<(), u32> {
         // An empty or absent string: 0.
         c.eq(LoadStringW(me, 100, buf.as_mut_ptr(), 32) as u64, 0)?;
         c.eq(LoadStringW(me, 4000, buf.as_mut_ptr(), 32) as u64, 0)?;
+
+        // FormatMessageW from this module's message table (a null module
+        // is the executable): inserts, ANSI entries, a second block.
+        const FROM_HMODULE: u32 = 0x800;
+        const FROM_SYSTEM: u32 = 0x1000;
+        const IGNORE_INSERTS: u32 = 0x200;
+        const ARGUMENT_ARRAY: u32 = 0x2000;
+        let gala = w("gala");
+        let args = [gala.as_ptr() as usize];
+        let mut buf = [0u16; 64];
+        let null = core::ptr::null();
+        let n = FormatMessageW(
+            FROM_HMODULE | ARGUMENT_ARRAY,
+            null,
+            100,
+            0,
+            buf.as_mut_ptr(),
+            64,
+            args.as_ptr(),
+        );
+        c.eq(n.into(), 24)?;
+        c.text(buf.as_ptr(), "Hello gala from table.\r\n")?;
+        let n = FormatMessageW(
+            FROM_HMODULE | IGNORE_INSERTS,
+            me.cast(),
+            101,
+            0,
+            buf.as_mut_ptr(),
+            64,
+            null.cast(),
+        );
+        c.eq(n.into(), 12)?;
+        c.text(buf.as_ptr(), "Plain ansi\r\n")?;
+        let args = [42usize];
+        let n = FormatMessageW(
+            FROM_HMODULE | ARGUMENT_ARRAY,
+            null,
+            0x4000_0005,
+            0,
+            buf.as_mut_ptr(),
+            64,
+            args.as_ptr(),
+        );
+        c.eq(n.into(), 13)?;
+        c.text(buf.as_ptr(), "Warning 42.\r\n")?;
+        // Not in the table: ERROR_MR_MID_NOT_FOUND, unless the system's
+        // messages are searched too.
+        c.eq(
+            FormatMessageW(FROM_HMODULE, null, 102, 0, buf.as_mut_ptr(), 64, null.cast()).into(),
+            0,
+        )?;
+        c.eq(GetLastError().into(), 317)?;
+        let n = FormatMessageW(
+            FROM_HMODULE | FROM_SYSTEM,
+            null,
+            2,
+            0,
+            buf.as_mut_ptr(),
+            64,
+            null.cast(),
+        );
+        c.eq(n.into(), 44)?;
+        c.text(buf.as_ptr(), "The system cannot find the file specified.\r\n")?;
     }
     Ok(())
 }
@@ -540,8 +618,36 @@ fn shell_execute(c: &mut Checks) -> Result<(), u32> {
     c.eq(r as u64, 2)
 }
 
+/// user32's character functions: CharUpperW on a string (in place, the
+/// same pointer back) and on one character (in the low word);
+/// CharUpper/LowerBuffW on a count of characters; CharNextW/A (stopping
+/// at the NUL).
+fn characters(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: strings of ours.
+    unsafe {
+        let mut s = w("gala Os");
+        let p = s.as_mut_ptr();
+        c.eq(CharUpperW(p) as u64, p as u64)?;
+        c.text(p, "GALA OS")?;
+        c.eq(CharUpperW(u16::from(b'q') as usize as *mut u16) as u64, u64::from(b'Q'))?;
+        let mut s = w("MiXeD");
+        c.eq(CharLowerBuffW(s.as_mut_ptr(), 3).into(), 3)?;
+        c.text(s.as_ptr(), "mixeD")?;
+        c.eq(CharUpperBuffW(s.as_mut_ptr(), 5).into(), 5)?;
+        c.text(s.as_ptr(), "MIXED")?;
+        let s = w("ab");
+        c.eq(CharNextW(s.as_ptr()) as u64, s.as_ptr().add(1) as u64)?;
+        c.eq(CharNextW(s.as_ptr().add(2)) as u64, s.as_ptr().add(2) as u64)?;
+        let a = b"x\0";
+        c.eq(CharNextA(a.as_ptr()) as u64, a.as_ptr().add(1) as u64)?;
+        c.eq(CharNextA(a.as_ptr().add(1)) as u64, a.as_ptr().add(1) as u64)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    characters(&mut c)?;
     user32_ws2(&mut c)?;
     shell(&mut c)?;
     shell_execute(&mut c)?;

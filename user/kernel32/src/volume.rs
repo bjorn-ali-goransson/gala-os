@@ -245,3 +245,132 @@ pub extern "system" fn GetComputerNameW(buf: *mut u16, size: *mut u32) -> Bool {
 pub extern "system" fn GetComputerNameA(buf: *mut u8, size: *mut u32) -> Bool {
     GetComputerNameExA(0, buf, size)
 }
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtOpenSymbolicLinkObject(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+    ) -> u32;
+    fn NtQuerySymbolicLinkObject(
+        handle: Handle,
+        target: *mut UnicodeString,
+        returned: *mut u32,
+    ) -> u32;
+}
+
+/// QueryDosDeviceW: the target of the DOS device name `name` (the symbolic
+/// link `\??\name`, such as `\Device\HarddiskVolume1` for C:), followed by
+/// two NULs; returns the characters stored, both NULs included. Listing
+/// every name (a null `name`) is not supported yet.
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryDosDeviceW(name: *const u16, target: *mut u16, max: u32) -> u32 {
+    if name.is_null() {
+        unsupported(b"kernel32.dll!QueryDosDeviceW(all names)", 0);
+        return fail_with(ERROR_NOT_SUPPORTED, 0);
+    }
+    let mut path = [0u16; 264];
+    let prefix = b"\\??\\".map(u16::from);
+    path[..4].copy_from_slice(&prefix);
+    let mut n = 4;
+    // SAFETY: the caller's NUL-terminated name, read up to its NUL.
+    while unsafe { *name.add(n - 4) } != 0 {
+        if n == path.len() {
+            return fail_with(2, 0); // ERROR_FILE_NOT_FOUND
+        }
+        path[n] = unsafe { *name.add(n - 4) };
+        n += 1;
+    }
+    let us = UnicodeString {
+        length: (2 * n) as u16,
+        maximum_length: (2 * n) as u16,
+        buffer: path.as_ptr().cast(),
+    };
+    let attributes = ObjectAttributes {
+        length: size_of::<ObjectAttributes>() as u32,
+        root_directory: 0,
+        object_name: &us,
+        attributes: 0x40, // OBJ_CASE_INSENSITIVE
+        security_descriptor: 0,
+        security_quality_of_service: 0,
+    };
+    let mut link: Handle = core::ptr::null_mut();
+    // SAFETY: our attributes and output handle; 1 = SYMBOLIC_LINK_QUERY.
+    let status = unsafe { NtOpenSymbolicLinkObject(&mut link, 1, &attributes) };
+    if status != STATUS_SUCCESS {
+        return fail(status, 0);
+    }
+    let mut buf = [0u16; 512];
+    let mut out = UnicodeString {
+        length: 0,
+        maximum_length: (2 * buf.len()) as u16,
+        buffer: buf.as_mut_ptr().cast(),
+    };
+    // SAFETY: our handle and buffer.
+    let status = unsafe { NtQuerySymbolicLinkObject(link, &mut out, core::ptr::null_mut()) };
+    // SAFETY: the handle just opened.
+    unsafe { NtClose(link) };
+    if status != STATUS_SUCCESS {
+        return fail(status, 0);
+    }
+    let len = usize::from(out.length) / 2;
+    if len + 2 > max as usize || target.is_null() {
+        return fail_with(122, 0); // ERROR_INSUFFICIENT_BUFFER
+    }
+    // SAFETY: the caller's buffer of `max` characters (len + 2 fit).
+    unsafe {
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), target, len);
+        target.add(len).write(0);
+        target.add(len + 1).write(0);
+    }
+    (len + 2) as u32
+}
+
+/// The GUID path of gala's one volume (C:), as the mount manager names
+/// volumes: `\\?\Volume{GUID}\`. The GUID is gala's own, fixed.
+pub(crate) const VOLUME_GUID_PATH: &[u8] = b"\\\\?\\Volume{9a1a0c00-0000-4000-8000-00000000c0de}\\";
+
+/// GetVolumeNameForVolumeMountPointW: the volume GUID path of the
+/// volume mounted at `mount` (a root with its trailing backslash; only
+/// C:\ here).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetVolumeNameForVolumeMountPointW(
+    mount: *const u16,
+    name: *mut u16,
+    size: u32,
+) -> Bool {
+    if mount.is_null() || name.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's NUL-terminated string (read up to 4 units).
+    let given: [u16; 4] = unsafe {
+        let mut g = [0u16; 4];
+        for (i, slot) in g.iter_mut().enumerate() {
+            *slot = *mount.add(i);
+            if *slot == 0 {
+                break;
+            }
+        }
+        g
+    };
+    let upper = |c: u16| if (0x61..=0x7a).contains(&c) { c - 32 } else { c };
+    if upper(given[0]) != u16::from(b'C') || given[1] != u16::from(b':') {
+        return fail_with(2, 0); // ERROR_FILE_NOT_FOUND: no such volume
+    }
+    if given[2] != u16::from(b'\\') || given[3] != 0 {
+        return fail_with(123, 0); // ERROR_INVALID_NAME: not a root
+    }
+    let n = VOLUME_GUID_PATH.len();
+    if (size as usize) < n + 1 {
+        return fail_with(206, 0); // ERROR_FILENAME_EXCED_RANGE
+    }
+    // SAFETY: the caller's buffer of `size` > n characters.
+    unsafe {
+        for (i, &b) in VOLUME_GUID_PATH.iter().enumerate() {
+            name.add(i).write(b.into());
+        }
+        name.add(n).write(0);
+    }
+    1
+}

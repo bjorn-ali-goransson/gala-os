@@ -10,6 +10,7 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     ConvertThreadToFiber
     CreateFiber
     CreateFileMappingNumaW
+    CreateMutexExW
     CreateNamedPipeW
     CreateRemoteThreadEx
     CreateTimerQueue
@@ -20,8 +21,9 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     FindFirstChangeNotificationW
     FindNextChangeNotification
     GetActiveProcessorCount
+    GetCurrencyFormatW
     GetNumaNodeProcessorMaskEx
-    GetPriorityClass
+    GetNumberFormatW
     GetPrivateProfileStringW
     GetProcessPriorityBoost
     GetTapeParameters
@@ -30,11 +32,14 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetTempFileNameW
     GetThreadIOPendingFlag
     GetThreadPriorityBoost
-    GetVolumeNameForVolumeMountPointW
     GetVolumePathNamesForVolumeNameW
+    GlobalFlags
+    GlobalMemoryStatus
+    GlobalReAlloc
     GlobalSize
     InitOnceBeginInitialize
     InitOnceComplete
+    K32GetMappedFileNameW
     K32GetModuleBaseNameA
     K32GetModuleBaseNameW
     K32GetPerformanceInfo
@@ -42,23 +47,22 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     LocalFileTimeToFileTime
     MapUserPhysicalPagesScatter
     MapViewOfFileExNuma
-    Module32FirstW
-    Module32NextW
     OpenJobObjectW
+    OpenSemaphoreW
+    PathCchAppend
     PathCchCombine
+    PathCchRemoveBackslash
     PathCchRemoveExtension
     PathCchRemoveFileSpec
     PrepareTape
-    QueryDosDeviceW
+
     QueueUserWorkItem
     ReadFileScatter
     RegisterWaitForSingleObject
     ReplaceFileW
-    SetDllDirectoryW
     SetFileIoOverlappedRange
     SetFileValidData
     SetNamedPipeHandleState
-    SetPriorityClass
     SetProcessAffinityMask
     SetProcessAffinityUpdateMode
     SetTapeParameters
@@ -66,7 +70,11 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     SetThreadPriorityBoost
     TerminateJobObject
     TransactNamedPipe
+    VerLanguageNameW
+    VirtualAllocEx
+    VirtualFreeEx
     WaitNamedPipeW
     WriteFileGather
+    WriteProcessMemory
     WriteTapemark
 );

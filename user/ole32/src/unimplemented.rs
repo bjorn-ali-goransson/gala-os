@@ -11,8 +11,11 @@ gala_stubs::unimplemented_exports!("ole32.dll":
     CoRegisterMallocSpy
     CoRevertToSelf
     CoSetProxyBlanket
+    CreateBindCtx
     GetHGlobalFromStream
     IIDFromString
+    OleInitialize
+    OleUninitialize
     StringFromCLSID
     StringFromIID
 );

@@ -1,7 +1,8 @@
 //! kernel32.dll basics, as a normal Windows program uses them (imported,
 //! bound by the loader): console output, last-error, process and thread
 //! ids, virtual memory, events and waits, sleeping and tick counts, the
-//! performance counter, LoadLibrary/GetProcAddress/FreeLibrary, and
+//! performance counter, LoadLibrary/GetProcAddress/FreeLibrary,
+//! SetDllDirectoryW/GetDllDirectoryW, and
 //! ExitProcess. Expected results, last-error codes included, are those of
 //! real Windows (its kernel32); on gala the test runs against gala's own
 //! kernel32.dll. Prints `kernel32_test: ok` and ends with ExitProcess(0),
@@ -36,6 +37,8 @@ unsafe extern "system" {
     fn LoadLibraryA(name: *const u8) -> Handle;
     fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn FreeLibrary(module: Handle) -> Bool;
+    fn SetDllDirectoryW(dir: *const u16) -> Bool;
+    fn GetDllDirectoryW(size: u32, buffer: *mut u16) -> u32;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -186,6 +189,23 @@ fn run() -> Result<(), u32> {
         SetLastError(0);
         c.ok(LoadLibraryA(c"no_such_dll.dll".as_ptr().cast()).is_null(), 0)?;
         c.eq(GetLastError().into(), ERROR_MOD_NOT_FOUND.into())?;
+
+        // SetDllDirectoryW adds a directory to the search, after the
+        // executable's: testdll2.dll is only in C:\gala\lib.
+        let lib = b"C:\\gala\\lib\0".map(u16::from);
+        let mut buf = [0u16; 16];
+        c.eq(GetDllDirectoryW(16, buf.as_mut_ptr()).into(), 0)?;
+        c.ok(LoadLibraryA(c"testdll2.dll".as_ptr().cast()).is_null(), 0)?;
+        c.eq(SetDllDirectoryW(lib.as_ptr()) as u64, 1)?;
+        c.eq(GetDllDirectoryW(16, buf.as_mut_ptr()).into(), 11)?;
+        c.ok(buf[..12] == lib, buf[0].into())?;
+        c.eq(GetDllDirectoryW(4, buf.as_mut_ptr()).into(), 12)?; // too small: the size needed
+        let dll2 = LoadLibraryA(c"testdll2.dll".as_ptr().cast());
+        c.ok(!dll2.is_null(), GetLastError().into())?;
+        c.eq(FreeLibrary(dll2) as u64, 1)?;
+        // NULL restores the default search.
+        c.eq(SetDllDirectoryW(core::ptr::null()) as u64, 1)?;
+        c.eq(GetDllDirectoryW(16, buf.as_mut_ptr()).into(), 0)?;
     }
     Ok(())
 }

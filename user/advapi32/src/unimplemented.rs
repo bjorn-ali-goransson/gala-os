@@ -4,16 +4,20 @@
 
 gala_stubs::unimplemented_exports!("advapi32.dll":
     AllocateLocallyUniqueId
+    ChangeServiceConfigA
+    ChangeServiceConfigW
     CloseServiceHandle
     ControlService
     ControlTraceW
     ConvertStringSecurityDescriptorToSecurityDescriptorW
     CreateProcessAsUserW
+    CreateRestrictedToken
     CryptContextAddRef
     CryptImportKey
     CryptSetProvParam
     DeleteAce
     EnableTrace
+    EnumDependentServicesW
     EnumerateTraceGuids
     GetNamedSecurityInfoW
     GetSecurityDescriptorLength
@@ -27,20 +31,38 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     ImpersonateSelf
     InitializeSid
     IsWellKnownSid
+    LockServiceDatabase
     LogonUserExW
     LogonUserW
     LsaAddAccountRights
     LsaClose
     LsaNtStatusToWinError
     LsaOpenPolicy
+    OpenSCManagerA
     OpenSCManagerW
+    OpenServiceA
     OpenServiceW
+    PerfCreateInstance
+    PerfDecrementULongCounterValue
+    PerfDeleteInstance
+    PerfIncrementULongCounterValue
+    PerfIncrementULongLongCounterValue
+    PerfSetCounterSetInfo
+    PerfSetULongCounterValue
+    PerfSetULongLongCounterValue
+    PerfStartProviderEx
+    PerfStopProvider
     QueryAllTracesW
+    QueryServiceConfigA
     QueryServiceConfigW
     QueryServiceStatus
     QueryServiceStatusEx
     RegConnectRegistryW
+    RegCopyTreeW
+    RegGetKeySecurity
+    RegSetKeySecurity
     RegisterServiceCtrlHandlerA
+    RegisterServiceCtrlHandlerExW
     RegisterTraceGuidsW
     SetEntriesInAclW
     SetNamedSecurityInfoW
@@ -48,9 +70,11 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     SetSecurityInfo
     SetServiceBits
     SetServiceStatus
+    StartServiceA
     StartServiceCtrlDispatcherW
     StartServiceW
     StartTraceW
     TraceEvent
+    UnlockServiceDatabase
     UnregisterTraceGuids
 );

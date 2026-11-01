@@ -6,23 +6,34 @@ gala_stubs::unimplemented_exports!("odbc32.dll":
     SQLAllocHandle
     SQLBindCol
     SQLBindParameter
+    SQLBrowseConnect
+    SQLBrowseConnectW
     SQLCancel
     SQLColAttributeW
     SQLDescribeColW
     SQLDisconnect
+    SQLDriverConnectA
     SQLDriverConnectW
     SQLEndTran
     SQLExecDirectW
     SQLExecute
     SQLFetch
     SQLFreeHandle
+    SQLFreeStmt
     SQLGetConnectAttrW
     SQLGetData
+    SQLGetDescFieldW
+    SQLGetDiagFieldW
+    SQLGetDiagRec
     SQLGetDiagRecW
+    SQLGetInfoA
+    SQLGetInfoW
+    SQLGetStmtAttrW
     SQLMoreResults
     SQLNumResultCols
     SQLPrepareW
     SQLRowCount
+    SQLSetConnectAttr
     SQLSetConnectAttrW
     SQLSetEnvAttr
     SQLSetStmtAttrW

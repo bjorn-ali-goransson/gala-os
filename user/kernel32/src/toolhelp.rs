@@ -1,14 +1,20 @@
-//! Toolhelp snapshots (CreateToolhelp32Snapshot, Process32*, Thread32*),
-//! as on Windows on top of NtQuerySystemInformation(SystemProcessInformation).
-//! The snapshot is a section holding a header and that list (copied from
-//! the query buffer); the First/Next functions keep their place in the
-//! header, so the handle is all a caller needs.
+//! Toolhelp snapshots (CreateToolhelp32Snapshot, Process32*, Thread32*,
+//! Module32*), as on Windows on top of
+//! NtQuerySystemInformation(SystemProcessInformation). The snapshot is a
+//! section holding a header, that list (copied from the query buffer) and
+//! the bases of the modules (this process's only); the First/Next
+//! functions keep their place in the header, so the handle is all a
+//! caller needs.
 
 use super::mapping::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile};
 use super::*;
 
 const TH32CS_SNAPPROCESS: u32 = 2;
 const TH32CS_SNAPTHREAD: u32 = 4;
+const TH32CS_SNAPMODULE: u32 = 8;
+const TH32CS_SNAPMODULE32: u32 = 0x10;
+/// The most modules a snapshot lists.
+const MAX_MODULES: usize = 512;
 const SYSTEM_PROCESS_INFORMATION: u32 = 5;
 const STATUS_INFO_LENGTH_MISMATCH: u32 = 0xc000_0004;
 const ERROR_NO_MORE_FILES: u32 = 18;
@@ -29,6 +35,9 @@ struct Header {
     /// The process entry and thread index for Thread32Next.
     thread_process: u32,
     next_thread: u32,
+    /// The module bases (after the list) and the next for Module32Next.
+    modules: u32,
+    next_module: u32,
 }
 
 const HEADER: usize = size_of::<Header>();
@@ -37,10 +46,26 @@ const PROCESS_ENTRY: usize = 0x100;
 const THREAD_ENTRY: usize = 0x50;
 
 /// CreateToolhelp32Snapshot(flags, process): the processes and threads
-/// (TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD) as they are now. Modules and
-/// heaps are not listed (their First functions find nothing).
+/// (TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD) and the modules of this
+/// process (TH32CS_SNAPMODULE; another process's are not supported) as
+/// they are now. Heaps are not listed (their First functions find
+/// nothing).
 #[unsafe(no_mangle)]
-pub extern "system" fn CreateToolhelp32Snapshot(flags: u32, _process: u32) -> Handle {
+pub extern "system" fn CreateToolhelp32Snapshot(flags: u32, process: u32) -> Handle {
+    let mut bases = [0usize; MAX_MODULES];
+    let mut modules = 0;
+    if flags & (TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32) != 0 {
+        if process != 0 && process != GetCurrentProcessId() {
+            unsupported(b"kernel32.dll!CreateToolhelp32Snapshot(modules of another)", 0);
+            return fail_with(5, INVALID_HANDLE_VALUE); // ERROR_ACCESS_DENIED
+        }
+        super::sysmem::modules(|base| {
+            if modules < MAX_MODULES {
+                bases[modules] = base;
+                modules += 1;
+            }
+        });
+    }
     // Query with a growing buffer (processes may start in between).
     let mut size = 64 * 1024usize;
     let (list, len) = loop {
@@ -62,7 +87,7 @@ pub extern "system" fn CreateToolhelp32Snapshot(flags: u32, _process: u32) -> Ha
         }
         size = (needed as usize + 4096).max(size * 2);
     };
-    let total = HEADER + len;
+    let total = HEADER + len + 8 * modules;
     let section = CreateFileMappingW(
         INVALID_HANDLE_VALUE,
         core::ptr::null_mut(),
@@ -89,11 +114,17 @@ pub extern "system" fn CreateToolhelp32Snapshot(flags: u32, _process: u32) -> Ha
         next_process: 0,
         thread_process: 0,
         next_thread: 0,
+        modules: modules as u32,
+        next_module: 0,
     };
     // SAFETY: the view holds `total` bytes; the query wrote `len`.
     unsafe {
         view.cast::<Header>().write(header);
         core::ptr::copy_nonoverlapping(list, view.add(HEADER), len);
+        let at = view.add(HEADER + len).cast::<u64>();
+        for (i, &base) in bases[..modules].iter().enumerate() {
+            at.add(i).write_unaligned(base as u64);
+        }
     }
     UnmapViewOfFile(view.cast());
     VirtualFree(list.cast(), 0, 0x8000);
@@ -112,7 +143,8 @@ fn with_snapshot<R>(snapshot: Handle, f: impl FnOnce(&mut Header, &[u8]) -> R) -
         if header.magic != MAGIC {
             None
         } else {
-            let list = core::slice::from_raw_parts(view.add(HEADER), header.len as usize);
+            let size = header.len as usize + 8 * header.modules as usize;
+            let list = core::slice::from_raw_parts(view.add(HEADER), size);
             Some(f(header, list))
         }
     };
@@ -312,4 +344,76 @@ pub extern "system" fn Thread32First(snapshot: Handle, entry: *mut u32) -> Bool 
 #[unsafe(no_mangle)]
 pub extern "system" fn Thread32Next(snapshot: Handle, entry: *mut u32) -> Bool {
     thread32(snapshot, entry, false)
+}
+
+/// The next module base of the snapshot (from the start if `first`).
+fn next_module(snapshot: Handle, first: bool) -> Option<usize> {
+    with_snapshot(snapshot, |header, list| {
+        if first {
+            header.next_module = 0;
+        }
+        if header.next_module >= header.modules {
+            return None;
+        }
+        let at = header.len as usize + 8 * header.next_module as usize;
+        header.next_module += 1;
+        Some(u64_at(list, at) as usize)
+    })
+    .flatten()
+}
+
+/// Fills MODULEENTRY32W: dwSize, th32ModuleID (4), th32ProcessID (8),
+/// GlblcntUsage (12), ProccntUsage (16), modBaseAddr (24), modBaseSize
+/// (32), hModule (40), szModule (48, 256 characters), szExePath (560,
+/// 260 characters): 1080 bytes.
+fn module32(snapshot: Handle, entry: *mut u8, first: bool) -> Bool {
+    const SIZE: usize = 1080;
+    // SAFETY: the caller's entry starts with dwSize.
+    if entry.is_null() || (unsafe { *entry.cast::<u32>() } as usize) < SIZE {
+        return fail_with(ERROR_BAD_LENGTH, FALSE);
+    }
+    let Some(base) = next_module(snapshot, first) else {
+        return fail_with(ERROR_NO_MORE_FILES, FALSE);
+    };
+    let mut path = [0u16; 260];
+    let n = super::process::GetModuleFileNameW(base as Handle, path.as_mut_ptr(), 260) as usize;
+    let name_at = path[..n].iter().rposition(|&c| c == u16::from(b'\\')).map_or(0, |i| i + 1);
+    // SizeOfImage from the image's optional header.
+    // SAFETY: a loaded image's headers.
+    let size = unsafe {
+        let nt = base + (base as *const u8).add(0x3c).cast::<u32>().read_unaligned() as usize;
+        (nt as *const u8).add(24 + 56).cast::<u32>().read_unaligned()
+    };
+    // SAFETY: the caller's MODULEENTRY32W (SIZE bytes, checked).
+    unsafe {
+        core::ptr::write_bytes(entry.add(4), 0, SIZE - 4);
+        let put = |at: usize, v: u32| entry.add(at).cast::<u32>().write_unaligned(v);
+        put(4, 1);
+        put(8, GetCurrentProcessId());
+        put(12, 0xffff);
+        put(16, 0xffff);
+        entry.add(24).cast::<u64>().write_unaligned(base as u64);
+        put(32, size);
+        entry.add(40).cast::<u64>().write_unaligned(base as u64);
+        let name = &path[name_at..n];
+        let names = entry.add(48).cast::<u16>();
+        for (i, &c) in name.iter().take(255).enumerate() {
+            names.add(i).write_unaligned(c);
+        }
+        let paths = entry.add(560).cast::<u16>();
+        for (i, &c) in path[..n].iter().take(259).enumerate() {
+            paths.add(i).write_unaligned(c);
+        }
+    }
+    TRUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Module32FirstW(snapshot: Handle, entry: *mut u8) -> Bool {
+    module32(snapshot, entry, true)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Module32NextW(snapshot: Handle, entry: *mut u8) -> Bool {
+    module32(snapshot, entry, false)
 }

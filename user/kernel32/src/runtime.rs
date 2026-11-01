@@ -657,3 +657,62 @@ pub extern "system" fn GetSystemTimes(idle: *mut u64, kernel: *mut u64, user: *m
     }
     TRUE
 }
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtSetInformationProcess(process: Handle, class: u32, buf: *const u8, len: u32) -> u32;
+}
+
+/// ProcessPriorityClass.
+const PROCESS_PRIORITY_CLASS: u32 = 18;
+/// (Win32 priority class, PROCESS_PRIORITY_CLASS_* value).
+const PRIORITY_CLASSES: [(u32, u8); 6] = [
+    (0x40, 1),   // IDLE
+    (0x20, 2),   // NORMAL
+    (0x80, 3),   // HIGH
+    (0x100, 4),  // REALTIME
+    (0x4000, 5), // BELOW_NORMAL
+    (0x8000, 6), // ABOVE_NORMAL
+];
+
+/// GetPriorityClass: the process's priority class (0 on failure).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetPriorityClass(process: Handle) -> u32 {
+    let mut info = [0u8; 2];
+    // SAFETY: our buffer of the given size.
+    let status = unsafe {
+        super::NtQueryInformationProcess(
+            process as isize,
+            PROCESS_PRIORITY_CLASS,
+            info.as_mut_ptr().cast(),
+            2,
+            core::ptr::null_mut(),
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, 0);
+    }
+    PRIORITY_CLASSES.iter().find(|&&(_, nt)| nt == info[1]).map_or(0x20, |&(win32, _)| win32)
+}
+
+/// SetPriorityClass: records the process's priority class (gala's
+/// scheduler runs every process at the normal base priority). Background
+/// mode is not supported (recorded).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetPriorityClass(process: Handle, class: u32) -> Bool {
+    if matches!(class, 0x0010_0000 | 0x0020_0000) {
+        unsupported(b"kernel32.dll!SetPriorityClass(background mode)", class.into());
+        return fail_with(super::ERROR_NOT_SUPPORTED, 0);
+    }
+    let Some(&(_, nt)) = PRIORITY_CLASSES.iter().find(|&&(win32, _)| win32 == class) else {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    };
+    let info = [0u8, nt];
+    // SAFETY: our buffer of the given size.
+    let status =
+        unsafe { NtSetInformationProcess(process, PROCESS_PRIORITY_CLASS, info.as_ptr(), 2) };
+    if status != STATUS_SUCCESS {
+        return fail(status, 0);
+    }
+    1
+}

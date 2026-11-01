@@ -1,13 +1,14 @@
 //! FormatMessageW/A: the system message texts (US English, as Microsoft
 //! documents them in "System Error Codes" and "Windows Sockets Error
 //! Codes", each ending in CRLF) of the errors programs have needed, or
-//! the caller's string, with inserts. Other numbers fail with ERROR_MR_MID_NOT_FOUND
+//! the caller's string, or a module's message table, with inserts. Other numbers fail with ERROR_MR_MID_NOT_FOUND
 //! and go to the ledger, so the table grows where it matters.
 
 use super::*;
 
 const FORMAT_MESSAGE_ALLOCATE_BUFFER: u32 = 0x100;
 const FORMAT_MESSAGE_FROM_STRING: u32 = 0x400;
+const FORMAT_MESSAGE_FROM_HMODULE: u32 = 0x800;
 const FORMAT_MESSAGE_FROM_SYSTEM: u32 = 0x1000;
 const FORMAT_MESSAGE_MAX_WIDTH_MASK: u32 = 0xff;
 const ERROR_MR_MID_NOT_FOUND: u32 = 317;
@@ -106,16 +107,35 @@ impl Out {
 /// the line-width mask is set), or the caller's string.
 enum Source {
     System(&'static str),
+    /// A module's message table entry: its bytes, UTF-16 or not.
+    Table(&'static [u8], bool),
     Wide(*const u16),
     Ansi(*const u8),
 }
 
-fn source(flags: u32, source: *const c_void, id: u32, wide: bool) -> Result<Source, u32> {
+fn source(
+    flags: u32,
+    source: *const c_void,
+    id: u32,
+    language: u32,
+    wide: bool,
+) -> Result<Source, u32> {
     if flags & FORMAT_MESSAGE_FROM_STRING != 0 {
         if source.is_null() {
             return Err(ERROR_INVALID_PARAMETER);
         }
         return Ok(if wide { Source::Wide(source.cast()) } else { Source::Ansi(source.cast()) });
+    }
+    if flags & FORMAT_MESSAGE_FROM_HMODULE != 0 {
+        // The module's message table (a null module: the executable),
+        // then the system's if asked for too.
+        let found = super::resource::message(source.cast_mut(), id, language as u16);
+        if let Some((text, unicode)) = found {
+            return Ok(Source::Table(text, unicode));
+        }
+        if flags & FORMAT_MESSAGE_FROM_SYSTEM == 0 {
+            return Err(ERROR_MR_MID_NOT_FOUND);
+        }
     }
     if flags & FORMAT_MESSAGE_FROM_SYSTEM == 0 {
         unsupported(b"kernel32.dll!FormatMessage(flags)", flags.into());
@@ -137,6 +157,18 @@ fn source_units(src: &Source, out: &mut [u16; MAX_MESSAGE]) -> usize {
         Source::System(text) => {
             for c in text.encode_utf16() {
                 out[n] = c;
+                n += 1;
+            }
+        }
+        Source::Table(bytes, true) => {
+            for pair in bytes.chunks_exact(2).take(MAX_MESSAGE) {
+                out[n] = u16::from_le_bytes([pair[0], pair[1]]);
+                n += 1;
+            }
+        }
+        Source::Table(bytes, false) => {
+            for &b in bytes.iter().take(MAX_MESSAGE) {
+                out[n] = b.into();
                 n += 1;
             }
         }
@@ -275,11 +307,12 @@ fn format(
     flags: u32,
     src: *const c_void,
     id: u32,
+    language: u32,
     args: *const c_void,
     wide: bool,
     out: &mut Out,
 ) -> Result<(), u32> {
-    let source = source(flags, src, id, wide)?;
+    let source = source(flags, src, id, language, wide)?;
     let system = matches!(source, Source::System(_));
     let mut units = [0u16; MAX_MESSAGE];
     let n = source_units(&source, &mut units);
@@ -371,14 +404,15 @@ fn deliver(flags: u32, text: &[u16], buffer: *mut c_void, size: u32, wide: bool)
 /// FormatMessageW: system messages (FORMAT_MESSAGE_FROM_SYSTEM) or the
 /// caller's string (FROM_STRING), with inserts (%1..%99 and their
 /// printf-style formats, %n %r %t %b %0 %%) unless IGNORE_INSERTS, into
-/// the caller's buffer or an allocated one (ALLOCATE_BUFFER). Message
-/// tables in modules (FROM_HMODULE) are not supported yet (recorded).
+/// the caller's buffer or an allocated one (ALLOCATE_BUFFER). With
+/// FROM_HMODULE the module's message table (RT_MESSAGETABLE) is searched
+/// first.
 #[unsafe(no_mangle)]
 pub extern "system" fn FormatMessageW(
     flags: u32,
     src: *const c_void,
     message: u32,
-    _language: u32,
+    language: u32,
     buffer: *mut u16,
     size: u32,
     args: *mut c_void,
@@ -387,7 +421,7 @@ pub extern "system" fn FormatMessageW(
         return fail_with(ERROR_INVALID_PARAMETER, 0);
     }
     let mut out = Out { text: [0; MAX_MESSAGE], len: 0 };
-    match format(flags, src, message, args, true, &mut out) {
+    match format(flags, src, message, language, args, true, &mut out) {
         Ok(()) => deliver(flags, &out.text[..out.len], buffer.cast(), size, true),
         Err(e) => fail_with(e, 0),
     }
@@ -400,7 +434,7 @@ pub extern "system" fn FormatMessageA(
     flags: u32,
     src: *const c_void,
     message: u32,
-    _language: u32,
+    language: u32,
     buffer: *mut u8,
     size: u32,
     args: *mut c_void,
@@ -409,7 +443,7 @@ pub extern "system" fn FormatMessageA(
         return fail_with(ERROR_INVALID_PARAMETER, 0);
     }
     let mut out = Out { text: [0; MAX_MESSAGE], len: 0 };
-    match format(flags, src, message, args, false, &mut out) {
+    match format(flags, src, message, language, args, false, &mut out) {
         Ok(()) => deliver(flags, &out.text[..out.len], buffer.cast(), size, false),
         Err(e) => fail_with(e, 0),
     }

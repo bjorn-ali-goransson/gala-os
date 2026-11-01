@@ -125,6 +125,9 @@ unsafe extern "system" {
     fn GetVersion() -> u32;
     fn FreeLibrary(module: Handle) -> Bool;
     fn CloseHandle(h: Handle) -> Bool;
+    fn CreateToolhelp32Snapshot(flags: u32, process: u32) -> Handle;
+    fn Module32FirstW(snapshot: Handle, entry: *mut ModuleEntry) -> Bool;
+    fn Module32NextW(snapshot: Handle, entry: *mut ModuleEntry) -> Bool;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -600,6 +603,58 @@ fn run() -> Result<(), u32> {
         c.ok(expect(b"%1 has %2!d! items (%3!x!)%%%n", &buf[..n as usize]), n.into())?;
     }
     heaps(&mut c)?;
+    modules(&mut c)?;
+    Ok(())
+}
+
+/// MODULEENTRY32W (1080 bytes on x64).
+#[repr(C)]
+struct ModuleEntry {
+    size: u32,
+    module_id: u32,
+    process_id: u32,
+    global_usage: u32,
+    process_usage: u32,
+    base: usize,
+    base_size: u32,
+    module: usize,
+    name: [u16; 256],
+    path: [u16; 260],
+}
+
+/// A Toolhelp module snapshot of this process: the executable first, with
+/// its base, size and names; kernel32.dll among the rest; then
+/// ERROR_NO_MORE_FILES. A too-small dwSize is ERROR_BAD_LENGTH.
+fn modules(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: Toolhelp calls with an entry of ours.
+    unsafe {
+        c.eq(size_of::<ModuleEntry>() as u64, 1080)?;
+        let snapshot = CreateToolhelp32Snapshot(8, 0); // TH32CS_SNAPMODULE
+        c.ok(snapshot as isize != -1, GetLastError().into())?;
+        let mut e: ModuleEntry = core::mem::zeroed();
+        e.size = 8;
+        c.eq(Module32FirstW(snapshot, &mut e) as u64, 0)?;
+        c.eq(GetLastError().into(), 24)?; // ERROR_BAD_LENGTH
+        e.size = 1080;
+        c.ok(Module32FirstW(snapshot, &mut e) != 0, GetLastError().into())?;
+        let me = GetModuleHandleW(core::ptr::null());
+        c.eq(e.module as u64, me)?;
+        c.eq(e.base as u64, me)?;
+        c.ok(e.base_size >= 0x1000, e.base_size.into())?;
+        let exe = wide("kernel32_misc_test.exe");
+        c.ok(e.name[..23] == exe[..23], e.name[0].into())?;
+        c.ok(e.path[0] == u16::from(b'C') && e.path[2] == u16::from(b'\\'), e.path[0].into())?;
+        let k32 = wide("kernel32.dll");
+        let mut seen = false;
+        let mut n = 1;
+        while Module32NextW(snapshot, &mut e) != 0 {
+            seen |= e.name[..13].iter().map(|&u| u | 0x20).eq(k32[..13].iter().map(|&u| u | 0x20));
+            n += 1;
+        }
+        c.eq(GetLastError().into(), 18)?; // ERROR_NO_MORE_FILES
+        c.ok(seen && n >= 3, n)?;
+        c.ok(CloseHandle(snapshot) != 0, 0)?;
+    }
     Ok(())
 }
 

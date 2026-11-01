@@ -3,5 +3,10 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("rpcrt4.dll":
+    NdrClientCall3
+    RpcBindingFree
+    RpcBindingFromStringBindingW
+    RpcExceptionFilter
+    RpcStringBindingComposeW
     UuidCreateSequential
 );

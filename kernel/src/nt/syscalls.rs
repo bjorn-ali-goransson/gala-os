@@ -14,8 +14,8 @@ use super::namespace;
 use super::object::{
     DIRECTORY_CREATE_OBJECT, DIRECTORY_TRAVERSE, EVENT_MODIFY_STATE, EVENT_QUERY_STATE, Event,
     EventType, Handle, HandleEntry, KObject, ObjectBody, ObjectRef, PROCESS_ALL_ACCESS,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, SYNCHRONIZE, THREAD_ALL_ACCESS,
-    THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME, THREAD_TERMINATE,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_TERMINATE, SYNCHRONIZE,
+    THREAD_ALL_ACCESS, THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME, THREAD_TERMINATE,
 };
 use super::object::{SECTION_MAP_EXECUTE, SECTION_MAP_READ, SECTION_MAP_WRITE, SECTION_QUERY};
 use super::platform::{SyscallFrame, UserRegs};
@@ -131,6 +131,7 @@ pub const NT_OPEN_SECTION: u32 = 0x0037;
 pub const NT_CREATE_SECTION: u32 = 0x004a;
 pub const NT_QUERY_SECTION: u32 = 0x0051;
 pub const NT_QUERY_INFORMATION_PROCESS: u32 = 0x0019;
+pub const NT_SET_INFORMATION_PROCESS: u32 = 0x001c;
 pub const NT_QUERY_INFORMATION_THREAD: u32 = 0x0025;
 pub const NT_CREATE_THREAD: u32 = 0x004e;
 pub const NT_RESUME_THREAD: u32 = 0x0052;
@@ -219,6 +220,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_CREATE_SECTION, "NtCreateSection", 7, nt_create_section),
     (NT_QUERY_SECTION, "NtQuerySection", 5, nt_query_section),
     (NT_QUERY_INFORMATION_PROCESS, "NtQueryInformationProcess", 5, nt_query_information_process),
+    (NT_SET_INFORMATION_PROCESS, "NtSetInformationProcess", 4, nt_set_information_process),
     (NT_QUERY_INFORMATION_THREAD, "NtQueryInformationThread", 5, nt_query_information_thread),
     (NT_CREATE_THREAD, "NtCreateThread", 8, nt_create_thread),
     (NT_RESUME_THREAD, "NtResumeThread", 2, nt_resume_thread),
@@ -1854,6 +1856,11 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
             t[8..16].copy_from_slice(&p.exit_time.lock().to_le_bytes());
             return call.return_info(&t, buffer, length, ret_ptr);
         }
+        PROCESS_PRIORITY_CLASS => {
+            // PROCESS_PRIORITY_CLASS { BOOLEAN Foreground; UCHAR PriorityClass }.
+            let class = p.priority_class.load(core::sync::atomic::Ordering::Relaxed);
+            return call.return_info(&[0, class], buffer, length, ret_ptr);
+        }
         PROCESS_SESSION_INFORMATION => {
             let session = process::SESSION_ID.to_le_bytes();
             return call.return_info(&session, buffer, length, ret_ptr);
@@ -1889,6 +1896,7 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
 
 const PROCESS_TIMES: u64 = 4;
 const PROCESS_DEBUG_PORT: u64 = 7;
+const PROCESS_PRIORITY_CLASS: u64 = 18;
 const PROCESS_SESSION_INFORMATION: u64 = 24;
 const PROCESS_WOW64_INFORMATION: u64 = 26;
 const PROCESS_IMAGE_FILE_NAME: u64 = 27;
@@ -1945,6 +1953,10 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
             let info = sysinfo::time_of_day(platform::boot_system_time(), platform::system_time());
             call.return_info(&info, buffer, length, ret_ptr)
         }
+        sysinfo::SYSTEM_QUERY_PERFORMANCE_COUNTER_INFORMATION => {
+            let info = sysinfo::query_performance_counter_information();
+            call.return_info(&info, buffer, length, ret_ptr)
+        }
         sysinfo::SYSTEM_PROCESS_INFORMATION => {
             let info = tri!(process_information(buffer));
             if ret_ptr != 0 {
@@ -1974,6 +1986,32 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
         }
         _ => NtStatus::INVALID_INFO_CLASS,
     }
+}
+
+/// NtSetInformationProcess(ProcessHandle, Class, Buffer, Length): only
+/// ProcessPriorityClass (PROCESS_PRIORITY_CLASS, classes 1-6, recorded:
+/// gala's scheduler gives every process the normal base priority); other
+/// classes are STATUS_INVALID_INFO_CLASS (and go to the ledger).
+fn nt_set_information_process(call: &mut Call<'_>) -> NtStatus {
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    let (class, buffer, length) = (arg!(call, 1) as u32 as u64, arg!(call, 2), arg!(call, 3));
+    if class != PROCESS_PRIORITY_CLASS {
+        return NtStatus::INVALID_INFO_CLASS;
+    }
+    let object = tri!(entry.require(PROCESS_SET_INFORMATION));
+    let ObjectBody::Process(p) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if length as u32 != 2 {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let mut info = [0u8; 2];
+    if call.process.read(buffer, &mut info).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    if !(1..=6).contains(&info[1]) {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    p.priority_class.store(info[1], core::sync::atomic::Ordering::Relaxed);
+    NtStatus::SUCCESS
 }
 
 /// Creates or opens-if `object` under the name in `attrs` (if named), for

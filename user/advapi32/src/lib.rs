@@ -60,8 +60,13 @@ unsafe extern "system" {
 const ERROR_NOT_SUPPORTED: u32 = 50;
 
 fn missing(function: &[u8]) {
+    missing_detail(function, 0);
+}
+
+/// `missing`, with a detail (the value that was not supported).
+fn missing_detail(function: &[u8], detail: u64) {
     // SAFETY: a valid buffer.
-    unsafe { GalaRecordMissing(function.as_ptr(), function.len(), 2, 0) };
+    unsafe { GalaRecordMissing(function.as_ptr(), function.len(), 2, detail) };
 }
 
 /// RegisterEventSourceA: no event log yet (NULL, ERROR_NOT_SUPPORTED).

@@ -1,6 +1,8 @@
 //! System and process information that ntdll/kernel32 initialization reads,
 //! with results expected to match real Windows (x64): NtQuerySystemInformation
-//! SystemBasicInformation and SystemTimeOfDayInformation, and
+//! SystemBasicInformation, SystemTimeOfDayInformation and
+//! SystemQueryPerformanceCounterInformation (version 1; the KernelQpc
+//! flag valid), and
 //! NtQueryInformationProcess ProcessImageFileName, ProcessDebugPort,
 //! ProcessWow64Information and ProcessSessionInformation. Prints
 //! `sysinfo_test: ok` or exits with the number of the failing check.
@@ -95,6 +97,15 @@ fn run() -> Result<(), u32> {
     let (boot, current) = (u64_at(&t, 0), u64_at(&t, 8));
     c.ok(boot > 0 && boot < current, boot)?;
     c.ok(current <= now as u64 && now as u64 - current < 10_000_000, current)?; // within 1 s
+
+    // SystemQueryPerformanceCounterInformation (124, 12 bytes): Version,
+    // Flags, ValidFlags (bit 0: KernelQpc).
+    let mut q = [0u8; 12];
+    let (s, ret) = query_system(124, &mut q);
+    c.eq(s.into(), ok)?;
+    c.eq(ret.into(), 12)?;
+    c.eq(u32_at(&q, 0), 1)?;
+    c.eq(u32_at(&q, 8) & 1, 1)?;
 
     // ProcessImageFileName: UNICODE_STRING + NT path of our image.
     let mut name = [0u8; 600];

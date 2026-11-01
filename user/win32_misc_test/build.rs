@@ -1,6 +1,6 @@
 //! Gives the test program resources (a compiled resource file, the .res
 //! format documented in "Resource File Formats"): a string table block,
-//! a VS_VERSION_INFO and a named RCDATA resource.
+//! a VS_VERSION_INFO, a named RCDATA resource and a message table.
 
 /// A resource name or type: an ordinal or a string.
 enum Id {
@@ -93,6 +93,42 @@ fn version() -> Vec<u8> {
     w.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
+/// A message table (MESSAGE_RESOURCE_DATA, as the Message Compiler
+/// writes it): ids 100 (Unicode, with an insert) and 101 (ANSI) in one
+/// block, 0x4000_0005 in another.
+fn message_table() -> Vec<u8> {
+    let entry = |text: &str, unicode: bool| {
+        let mut bytes: Vec<u8> = if unicode {
+            text.encode_utf16().chain([0]).flat_map(|c| c.to_le_bytes()).collect()
+        } else {
+            text.bytes().chain([0]).collect()
+        };
+        while !(bytes.len() + 4).is_multiple_of(4) {
+            bytes.push(0);
+        }
+        let mut e = Vec::new();
+        e.extend_from_slice(&((bytes.len() + 4) as u16).to_le_bytes()); // Length
+        e.extend_from_slice(&u16::from(unicode).to_le_bytes()); // Flags
+        e.extend(bytes);
+        e
+    };
+    let first = [entry("Hello %1 from table.\r\n", true), entry("Plain ansi\r\n", false)].concat();
+    let second = entry("Warning %1!d!.\r\n", true);
+    let entries_at = 4 + 2 * 12;
+    let mut out = Vec::new();
+    out.extend_from_slice(&2u32.to_le_bytes()); // NumberOfBlocks
+    for (low, high, at) in
+        [(100u32, 101u32, entries_at), (0x4000_0005, 0x4000_0005, entries_at + first.len())]
+    {
+        out.extend_from_slice(&low.to_le_bytes());
+        out.extend_from_slice(&high.to_le_bytes());
+        out.extend_from_slice(&(at as u32).to_le_bytes());
+    }
+    out.extend(first);
+    out.extend(second);
+    out
+}
+
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let mut res = Vec::new();
@@ -100,6 +136,7 @@ fn main() {
     entry(&mut res, Id::Num(6), Id::Num(7), &string_block()); // RT_STRING
     entry(&mut res, Id::Num(16), Id::Num(1), &version()); // RT_VERSION
     entry(&mut res, Id::Num(10), Id::Text("GALADATA"), b"hello resource"); // RT_RCDATA
+    entry(&mut res, Id::Num(11), Id::Num(1), &message_table()); // RT_MESSAGETABLE
     let path = format!("{out_dir}/resources.res");
     std::fs::write(&path, res).unwrap();
     println!("cargo:rerun-if-changed=build.rs");

@@ -350,6 +350,8 @@ pub extern "system" fn GetFinalPathNameByHandleW(
     let name = &info[2..2 + name_len.min(1024)];
     let volume: &[u8] = match flags & 7 {
         0 => b"\\\\?\\C:",
+        // VOLUME_NAME_GUID: the GUID path without its final backslash.
+        1 => &super::volume::VOLUME_GUID_PATH[..super::volume::VOLUME_GUID_PATH.len() - 1],
         2 => b"\\Device\\HarddiskVolume1",
         4 => b"",
         _ => return fail_with(ERROR_INVALID_PARAMETER, 0),

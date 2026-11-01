@@ -4,10 +4,12 @@
 
 gala_stubs::unimplemented_exports!("netapi32.dll":
     DsGetDcNameW
-    NetApiBufferFree
+    NetGetDCName
+    NetGroupEnum
     NetGroupGetUsers
+    NetLocalGroupEnum
     NetLocalGroupGetMembers
+    NetServerEnum
     NetUserModalsGet
     NetUserModalsSet
-    NetWkstaGetInfo
 );
