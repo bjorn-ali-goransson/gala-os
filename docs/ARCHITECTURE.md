@@ -1159,9 +1159,12 @@ Windows, never shadows the system's DLLs.)
   so programs that write to a character-device stderr with WriteConsoleW
   (Win32-OpenSSH) are seen; GetConsoleMode still fails on the standard
   handles. (With it succeeding there, the JDK took its console path and
-  java_http failed 2 of 7 runs with a NullPointerException inside javac:
-  an open gala bug, to find before the standard handles become a real
-  console.)
+  java_http once failed 2 of 7 runs with a NullPointerException inside
+  javac; retried on 2026-11-01 after the kernel fixes since, it passed 8
+  of 8, so that bug is gone. The standard handles stay non-consoles
+  because programs' output changes with it: Caddy logs differently to a
+  console, and kernel32_sys_test and winsock_test, which expect
+  redirected handles, failed.)
 - **FormatMessage** (kernel32 messages.rs): system messages from a table
   of the documented US English texts, or the caller's string; inserts
   (%1..%99 with printf-style formats, %n %r %t %b %0 %%), IGNORE_INSERTS,

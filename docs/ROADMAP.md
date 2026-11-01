@@ -1060,8 +1060,11 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       FileFsSectorSizeInformation reports the same (kernel32_file_test,
       dir_test). Still seen: FSCTL_FILESYSTEM_GET_STATISTICS (17053) and
       IOCTL_VOLUME_GET_GPT_ATTRIBUTES, both refused (ERROR_INVALID_FUNCTION
-      now, no longer error 317), non-fatal. Open: the JDK's console path (GetConsoleMode succeeding
-      on the standard handles made java_http fail intermittently).
+      now, no longer error 317), non-fatal. The JDK's console path
+      (GetConsoleMode succeeding on the standard handles) no longer fails:
+      java_http passed 8 of 8 runs that way (it failed 2 of 7 before the
+      kernel fixes since); the standard handles stay non-consoles (other
+      programs' output depends on it, see ARCHITECTURE "Console").
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to
