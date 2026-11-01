@@ -140,6 +140,16 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["cmd/*", "etc/*", "mingw64/*", "usr/*"],
         excludes: &[],
     },
+    // PortableGit 2.47.1: all of Git for Windows (Git Bash, the MSYS2
+    // runtime and tools) without its installer; SHA-256 from the release
+    // notes. What bash and git need, not Perl, Tcl/Tk or the docs.
+    Prebuilt {
+        name: "portablegit",
+        url: "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe",
+        checksum: "4f3f21f4effcb659566883ee1ed3ae403e5b3d7a0699cee455f6cd765e1ac39c",
+        members: &["bin", "cmd", "etc", "usr/bin", "mingw64/bin", "mingw64/libexec/git-core"],
+        excludes: &[],
+    },
     // SQL Server 2022 Express LocalDB 16.0.1000.6 (SqlLocalDB.msi).
     // Microsoft publishes no checksum for it: the SHA-256 is the one we
     // measured (ROADMAP). Its license allows use to design, develop and
@@ -787,6 +797,23 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sqllocaldb", "target/prebuilt/sqllocaldb/Binn/Templates/", "sql/data"),
     // PostgreSQL 17.2 as EnterpriseDB ships it, with the Visual C++ runtime
     // app-local (the JDK's redistributable copies; it expects them installed).
+    ("gitbash", "ntdll.dll", "Windows/System32"),
+    ("gitbash", "kernel32.dll", "Windows/System32"),
+    ("gitbash", "advapi32.dll", "Windows/System32"),
+    ("gitbash", "bcrypt.dll", "Windows/System32"),
+    ("gitbash", "bcryptprimitives.dll", "Windows/System32"),
+    ("gitbash", "crypt32.dll", "Windows/System32"),
+    ("gitbash", "msvcrt.dll", "Windows/System32"),
+    ("gitbash", "secur32.dll", "Windows/System32"),
+    ("gitbash", "shell32.dll", "Windows/System32"),
+    ("gitbash", "shlwapi.dll", "Windows/System32"),
+    ("gitbash", "user32.dll", "Windows/System32"),
+    ("gitbash", "ws2_32.dll", "Windows/System32"),
+    ("gitbash", "userenv.dll", "Windows/System32"),
+    ("gitbash", "netapi32.dll", "Windows/System32"),
+    ("gitbash", "target/prebuilt/portablegit/bin/", "git/bin"),
+    ("gitbash", "target/prebuilt/portablegit/etc/", "git/etc"),
+    ("gitbash", "target/prebuilt/portablegit/usr/bin/", "git/usr/bin"),
     ("mingit", "ntdll.dll", "Windows/System32"),
     ("mingit", "kernel32.dll", "Windows/System32"),
     ("mingit", "advapi32.dll", "Windows/System32"),
@@ -1755,6 +1782,17 @@ fn fetch_prebuilt(path: &str) -> Result {
     }
     if p.url.ends_with(".msi") {
         unpack_msi(p, &zip, &dir)?;
+    } else if p.url.ends_with(".7z.exe") {
+        // A 7-Zip self-extracting archive (Git for Windows' PortableGit):
+        // 7-Zip reads it without running it. Members are directories.
+        let mut cmd = Command::new("7z");
+        cmd.args(["x", "-y", "-bd", "-bso0"]).arg(format!("-o{}", dir.display())).arg(&zip);
+        cmd.args(p.members);
+        for exclude in p.excludes {
+            cmd.arg(format!("-x!{exclude}"));
+        }
+        run_cmd(&mut cmd)
+            .map_err(|e| format!("{e} (7z is in p7zip-full: apt install p7zip-full)"))?;
     } else {
         let mut cmd = Command::new("unzip");
         cmd.args(["-q", "-o"]).arg(&zip).args(p.members).arg("-d").arg(&dir);
@@ -1893,7 +1931,8 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &["elasticsearch", "mingit", "sqllocaldb", "sqllocaldb_persist", "sshd"];
+const PENDING: &[&str] =
+    &["elasticsearch", "gitbash", "mingit", "sqllocaldb", "sqllocaldb_persist", "sshd"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -2638,6 +2677,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=initdb.exe,postgres.exe args=-D%20C:/pgdata%20-U%20postgres%20-A%20trust%20-E%20UTF8%20--no-locale,-D%20C:/pgdata%20-p%207%20-c%20listen_addresses=*%20-c%20hba_file=C:/gala/pg_hba.conf",
         exit_status: XTASK_STOPS,
         expect: &["Success. You can now start the database server", "xtask: net client: psql ok"],
+    },
+    Scenario {
+        // P1 (pending): Git Bash (PortableGit 2.47.1): bash on the MSYS2
+        // runtime, a pipeline (a forked child per command).
+        name: "gitbash",
+        cmdline: "qemu_exit run=git/usr/bin/bash.exe args=-c%20%22echo%20hi%20from%20bash%20|%20cat%22",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["hi from bash"],
     },
     Scenario {
         // P1 (pending): MinGit 2.47.1, run as users run it (cmd\git.exe,

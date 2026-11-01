@@ -425,9 +425,19 @@ fn find_program<'b>(
         let Some(dir) = module.cmdline.strip_prefix("tar:") else { continue };
         let mut entries = fs::tar::entries(module.data);
         while let Ok(Some(entry)) = entries.next() {
-            // A name with `/` is a path in the tree (`cmd/git.exe`).
+            // A name with `/` is a path in the tree (`cmd/git.exe`) or
+            // below C: (`git/bin/bash.exe`: the tree's directory too).
             let matches = if name.contains('/') {
-                entry.path.eq_ignore_ascii_case(name)
+                let full = name
+                    .len()
+                    .checked_sub(entry.path.len() + 1)
+                    .filter(|&n| name.is_char_boundary(n))
+                    .is_some_and(|n| {
+                        name[..n].eq_ignore_ascii_case(dir)
+                            && name.as_bytes()[n] == b'/'
+                            && name[n + 1..].eq_ignore_ascii_case(entry.path)
+                    });
+                full || entry.path.eq_ignore_ascii_case(name)
             } else {
                 entry.name.eq_ignore_ascii_case(name)
             };

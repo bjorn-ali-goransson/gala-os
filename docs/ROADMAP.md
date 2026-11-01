@@ -1065,6 +1065,23 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       java_http passed 8 of 8 runs that way (it failed 2 of 7 before the
       kernel fixes since); the standard handles stay non-consoles (other
       programs' output depends on it, see ARCHITECTURE "Console").
+      **Git Bash (started 2026-11-01)**: PortableGit 2.47.1 (all of Git
+      for Windows, a 7-Zip self-extracting archive that xtask unpacks with
+      `7z` on the host; SHA-256 from the release notes) in C:\git; the
+      pending `gitbash` scenario runs `usr\bin\bash.exe -c "echo hi from
+      bash | cat"`. First gap: the MSYS2 runtime (msys-2.0.dll) does not
+      load: about 100 imports are missing (STATUS_ENTRYPOINT_NOT_FOUND, as
+      on Windows): ntdll's Rtl string, SID, ACL and security descriptor
+      routines and critical sections (Cygwin calls ntdll directly), a few
+      Nt calls (NtQueryEvent, NtOpen/CreateDirectoryObject, NtAccessCheck,
+      NtOpenJobObject, NtQueryTimerResolution; transactions, quotas, EAs),
+      kernel32's comm/tape/console screen functions, VirtualProtectEx,
+      TerminateThread, QueryUnbiasedInterruptTime, and user32's clipboard.
+      Plan: move the critical section and the SID/ACL/descriptor helpers
+      into ntdll as Windows layers them (kernel32 and advapi32 then call
+      ntdll), test first, and stub the rest; then the runtime's own
+      startup (shared memory, cygheap, fork emulation). Also: the
+      `bin\bash.exe` launcher exits with 1 without output (to look at).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to
