@@ -85,6 +85,8 @@ struct Class {
     used: bool,
     atom: u16,
     name: [u16; 64],
+    /// The name as registered (GetClassName).
+    spelled: [u16; 64],
     proc_: Option<WndProc>,
     background: usize,
     #[allow(dead_code)]
@@ -135,8 +137,15 @@ struct Queued {
     msg: Msg,
 }
 
-const NO_CLASS: Class =
-    Class { used: false, atom: 0, name: [0; 64], proc_: None, background: 0, style: 0 };
+const NO_CLASS: Class = Class {
+    used: false,
+    atom: 0,
+    name: [0; 64],
+    spelled: [0; 64],
+    proc_: None,
+    background: 0,
+    style: 0,
+};
 const NO_WINDOW: Window = Window {
     used: false,
     class: 0,
@@ -360,6 +369,59 @@ fn class_key(name: *const u16) -> [u16; 64] {
     out
 }
 
+/// A name as given (up to 63 characters).
+fn spelled(name: *const u16) -> [u16; 64] {
+    let mut out = [0u16; 64];
+    for (i, o) in out.iter_mut().take(63).enumerate() {
+        // SAFETY: the caller's NUL-terminated string.
+        let c = unsafe { *name.add(i) };
+        if c == 0 {
+            break;
+        }
+        *o = c;
+    }
+    out
+}
+
+/// GetClassNameW(hwnd, buf, n): the window's class name, truncated to
+/// n - 1 characters; the characters copied (without the NUL), 0 for a
+/// window that is not one.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetClassNameW(hwnd: Hwnd, buf: *mut u16, n: i32) -> i32 {
+    let Some(w) = window(hwnd) else {
+        set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    };
+    if buf.is_null() || n <= 0 {
+        return 0;
+    }
+    let name = with(|s| s.classes[w.class].spelled);
+    let len = name.iter().position(|&c| c == 0).unwrap_or(63).min(n as usize - 1);
+    // SAFETY: the caller's buffer of `n` characters.
+    unsafe {
+        core::ptr::copy_nonoverlapping(name.as_ptr(), buf, len);
+        *buf.add(len) = 0;
+    }
+    len as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetClassNameA(hwnd: Hwnd, buf: *mut u8, n: i32) -> i32 {
+    let mut w = [0u16; 64];
+    let len = GetClassNameW(hwnd, w.as_mut_ptr(), 64);
+    if buf.is_null() || n <= 0 || len == 0 {
+        return 0;
+    }
+    let k = (len as usize).min(n as usize - 1);
+    for (i, &c) in w.iter().take(k).enumerate() {
+        // SAFETY: the caller's buffer of `n` bytes.
+        unsafe { *buf.add(i) = if c < 0x80 { c as u8 } else { b'?' } };
+    }
+    // SAFETY: as above.
+    unsafe { *buf.add(k) = 0 };
+    k as i32
+}
+
 /// A class by name (or atom: a value under 0x10000).
 fn find_class(s: &State, name: *const u16) -> Option<usize> {
     if (name as usize) < 0x1_0000 {
@@ -385,6 +447,7 @@ pub extern "system" fn RegisterClassExW(wc: *const WndClassExW) -> u16 {
             used: true,
             atom,
             name: class_key(wc.class_name),
+            spelled: spelled(wc.class_name),
             proc_: wc.proc_,
             background: wc.background as usize,
             style: wc.style,

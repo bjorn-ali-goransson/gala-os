@@ -74,7 +74,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     GetActiveWindow
     GetCaretBlinkTime
     GetClassInfoW
-    GetClassNameW
     GetClipboardFormatNameW
     GetComboBoxInfo
     GetDesktopWindow

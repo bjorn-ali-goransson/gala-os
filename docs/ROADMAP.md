@@ -512,8 +512,11 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    WH_CALLWNDPROC), OleInitialize, SetCurrentProcessExplicitAppUserModelID,
    SetThreadLocale, SetSecurityDescriptorControl/Sacl/Group, timers. It
    stopped at EnumDisplayMonitors: monitors (GalaScreenInfo). It now
-   stops at gdi32's CreateDCW (wx's screen DC): next, GDI (device caps,
-   fonts and text metrics, bitmaps and DIB sections, BitBlt) as the
+   stopped at gdi32's CreateDCW: gdi32 reworked (gdi32_test: display and
+   memory DCs, device caps, DDBs and DIB sections, BitBlt/StretchBlt with
+   ternary raster operations, fonts at any size from the Noto bitmaps
+   with GDI metrics), MulDiv, GetClassNameW/A. It now stops at
+   GetSystemMenu: next, menus and child windows (WS_CHILD), then what the
    ledger orders.
 W4. Later: a user-mode shell (the taskbar and start menu out of the
    kernel), window resizing (WM_SIZE), maximize, keyboard focus per

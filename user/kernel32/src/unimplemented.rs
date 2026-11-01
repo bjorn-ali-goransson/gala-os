@@ -114,7 +114,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetSystemPowerStatus
     GlobalHandle
     IsBadReadPtr
-    MulDiv
     ReadConsoleOutputCharacterA
     SetThreadExecutionState
 );

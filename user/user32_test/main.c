@@ -12,6 +12,8 @@
  *   wParam PM_REMOVE or PM_NOREMOVE and the MSG, which the hook may
  *   change. UnhookWindowsHookEx returns TRUE, after which the hook is no
  *   longer called; unhooking again fails.
+ * - GetClassNameW: the class name as registered (its case kept),
+ *   truncated to the buffer (count without the NUL); 0 for a non-window.
  * - Timers: SetTimer for a window returns its id; WM_TIMER (wParam the
  *   id) comes no sooner than the interval, after posted messages;
  *   KillTimer returns TRUE once. A window-less timer with a TIMERPROC
@@ -108,6 +110,10 @@ static void hooks(void) {
     HWND w = CreateWindowExW(0, L"User32TestHooks", L"hooked", WS_OVERLAPPEDWINDOW, 10, 10,
                              200, 100, NULL, NULL, wc.hInstance, NULL);
     CHECK(w != NULL && cbt_creates == 1 && cbt_created == w && title_seen == 1);
+    WCHAR cls[64];
+    CHECK(GetClassNameW(w, cls, 64) == 15 && wcscmp(cls, L"User32TestHooks") == 0);
+    CHECK(GetClassNameW(w, cls, 5) == 4 && wcscmp(cls, L"User") == 0);
+    CHECK(GetClassNameW((HWND)0x1234, cls, 64) == 0);
     cbt_refuse = 1;
     HWND refused = CreateWindowExW(0, L"User32TestHooks", L"no", WS_OVERLAPPEDWINDOW, 10, 10,
                                    200, 100, NULL, NULL, wc.hInstance, NULL);

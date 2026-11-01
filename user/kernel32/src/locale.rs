@@ -1380,3 +1380,18 @@ pub extern "system" fn GetNLSVersionEx(function: u32, _locale: *const u16, info:
     }
     TRUE
 }
+
+/// MulDiv(a, b, c): a * b / c with a 64-bit product, rounded half away
+/// from zero; -1 when c is 0 or the result does not fit.
+#[unsafe(no_mangle)]
+pub extern "system" fn MulDiv(a: i32, b: i32, c: i32) -> i32 {
+    if c == 0 {
+        return -1;
+    }
+    let p = i64::from(a) * i64::from(b);
+    let c = i64::from(c);
+    let half = c.abs() / 2;
+    let q =
+        if (p < 0) == (c < 0) { (p.abs() + half) / c.abs() } else { -((p.abs() + half) / c.abs()) };
+    i32::try_from(q).unwrap_or(-1)
+}

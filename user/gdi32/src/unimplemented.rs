@@ -5,28 +5,19 @@
 gala_stubs::unimplemented_exports!("gdi32.dll":
     AddFontResourceExW
     Arc
-    BitBlt
     CloseEnhMetaFile
     CombineRgn
     CopyEnhMetaFileW
-    CreateBitmap
     CreateBitmapIndirect
-    CreateCompatibleBitmap
-    CreateCompatibleDC
-    CreateDCW
-    CreateDIBSection
     CreateDIBitmap
     CreateEnhMetaFileW
-    CreateFontIndirectW
     CreateHatchBrush
-    CreateICW
     CreatePalette
     CreatePatternBrush
     CreatePolygonRgn
     CreateRectRgn
     CreateRectRgnIndirect
     DPtoLP
-    DeleteDC
     DeleteEnhMetaFile
     Ellipse
     EnumFontFamiliesExW
@@ -38,36 +29,28 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     ExtSelectClipRgn
     ExtTextOutW
     GdiFlush
-    GetBkColor
     GetCharABCWidthsW
     GetClipBox
     GetDIBColorTable
     GetDIBits
-    GetDeviceCaps
     GetEnhMetaFileHeader
     GetEnhMetaFileW
     GetGraphicsMode
     GetMetaFileBitsEx
     GetNearestPaletteIndex
-    GetObjectType
-    GetObjectW
     GetOutlineTextMetricsW
     GetPaletteEntries
-    GetPixel
     GetRegionData
     GetRgnBox
     GetSystemPaletteEntries
     GetTextExtentExPointW
-    GetTextMetricsW
     GetViewportExtEx
     GetWinMetaFileBits
     GetWindowExtEx
     GetWorldTransform
     LPtoDP
-    LineTo
     MaskBlt
     ModifyWorldTransform
-    MoveToEx
     OffsetRgn
     Pie
     PlayEnhMetaFile
@@ -86,16 +69,12 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     SetLayout
     SetMapMode
     SetMetaFileBitsEx
-    SetPixel
     SetPolyFillMode
     SetROP2
     SetStretchBltMode
     SetViewportExtEx
-    SetViewportOrgEx
     SetWinMetaFileBits
     SetWindowExtEx
-    SetWindowOrgEx
     SetWorldTransform
-    StretchBlt
     StretchDIBits
 );

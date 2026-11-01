@@ -2161,11 +2161,28 @@ A small window manager and shell, in the kernel for now.
   functions wx calls on its way (OleInitialize, SetThreadLocale on the
   TEB's CurrentLocale, SetSecurityDescriptorControl/Sacl/Group,
   SetCurrentProcessExplicitAppUserModelID).
-- **gdi32** (`user/gdi32`): an object table (stock objects, solid
-  brushes, pens), `GalaCreateSurfaceDC(pixels, w, h, stride)`, PatBlt,
-  FillRect support, Rectangle, TextOutW/A and GetTextExtentPoint32W with
-  the noto-sans-mono-bitmap font (16 px, basic Latin; transparent and
-  opaque background modes).
+- **gdi32** (`user/gdi32`; `gdi32_test`): an object table (1024 slots;
+  brushes, pens, fonts kept as the LOGFONTW given, bitmaps, DCs; the
+  stock objects plus the default 1 x 1 monochrome bitmap memory DCs start
+  with). DCs: a window's client area (`GalaCreateSurfaceDC`), memory DCs
+  drawing on their selected bitmap, and the display DC
+  (CreateDCW("DISPLAY")), which draws nothing but answers GetDeviceCaps
+  (the screen from GalaScreenInfo, 96 dpi, 32 bpp). Bitmaps: 32-bit
+  device-dependent ones (stored top-down; a monochrome one turns what is
+  written into black or white; CreateCompatibleBitmap on a memory DC with
+  the default bitmap is monochrome, as documented) and 24/32-bit DIB
+  sections in the program's own memory and orientation (`surface.rs`).
+  Coordinates go through the window and viewport origins; drawing clips
+  to the surface and the DC's clip rectangle. PatBlt, BitBlt and
+  StretchBlt (nearest pixel, mirroring) evaluate any ternary raster
+  operation from its truth table; overlapping copies run in the safe
+  direction. Text (`font.rs`): Noto Sans Mono's bitmaps (16/20/24/32 px,
+  regular and bold) scaled to the font's cell (4/3 of the em; a 12-pixel
+  em is the 16-pixel bitmap unscaled) with four samples per pixel; fixed
+  advance; italic slant, underline, strike-out; TextOut alignment
+  (TA_RIGHT/CENTER, TA_BOTTOM/BASELINE) and OPAQUE backgrounds;
+  GetTextMetricsW/GetTextExtentPoint32W/GetTextFaceW from the same
+  metrics.
 
 Invariants and limits (TODO): composition runs under the desktop's
 IrqMutex with interrupts off (a full-screen redraw is ~1M pixels; drags

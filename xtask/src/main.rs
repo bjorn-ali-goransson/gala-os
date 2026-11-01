@@ -582,6 +582,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("nginx", "crypt32.dll", "Windows/System32"),
     ("nginx", "bcryptprimitives.dll", "Windows/System32"),
     ("nginx", "user/bin/nginx.exe", "nginx"),
+    ("gdi32_test", "ntdll.dll", "Windows/System32"),
+    ("gdi32_test", "kernel32.dll", "Windows/System32"),
+    ("gdi32_test", "msvcrt.dll", "Windows/System32"),
+    ("gdi32_test", "user32.dll", "Windows/System32"),
+    ("gdi32_test", "gdi32.dll", "Windows/System32"),
+    ("gdi32_test", "user/bin/gdi32_test.exe", "gala"),
     ("user32_test", "ntdll.dll", "Windows/System32"),
     ("user32_test", "kernel32.dll", "Windows/System32"),
     ("user32_test", "msvcrt.dll", "Windows/System32"),
@@ -2672,6 +2678,14 @@ const SCENARIOS: &[Scenario] = &[
             "count=2",
             "busybox.exe (pid 4) exited with status 0x00000003",
         ],
+    },
+    Scenario {
+        // W3: gala's gdi32 against documented behaviour, for what
+        // wxWidgets (FileZilla) uses (user/gdi32_test/main.c, mingw).
+        name: "gdi32_test",
+        cmdline: "qemu_exit run=gdi32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["gdi32_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // W3: gala's user32 against documented behaviour, for what
