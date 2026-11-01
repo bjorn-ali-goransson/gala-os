@@ -607,9 +607,10 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
-/// NtReadFile/NtWriteFile on a pipe end: always synchronous (a read waits
-/// for data, a write until all of it is in the pipe); the event, if any,
-/// and the end itself are signaled when it completes.
+/// NtReadFile/NtWriteFile on a pipe end. A write completes once all of
+/// it is in the pipe; a read on a synchronous end waits for data, on an
+/// asynchronous one it may pend (see nt/pipe.rs). The event, the end
+/// itself and (asynchronous ends) the completion port and APC report it.
 fn pipe_io(
     call: &Call<'_>,
     entry: &HandleEntry,
@@ -624,7 +625,8 @@ fn pipe_io(
         return NtStatus::ACCESS_DENIED;
     }
     let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
-    let result = if write {
+    let request = tri!(pipe_request(call, end, event.clone(), iosb, buffer, length));
+    let outcome = if write {
         let mut data = Vec::new();
         if data.try_reserve_exact(length as usize).is_err() {
             return NtStatus::NO_MEMORY;
@@ -633,20 +635,78 @@ fn pipe_io(
         if call.process.read(buffer, &mut data).is_err() {
             return NtStatus::ACCESS_VIOLATION;
         }
-        end.write(&data).map(|()| u64::from(length))
+        match end.write(&data) {
+            Ok(()) => (NtStatus::SUCCESS, data.len() as u64, Vec::new()),
+            Err(e) => (e, 0, Vec::new()),
+        }
     } else {
-        end.read(length as usize).and_then(|data| {
-            call.process.write(buffer, &data).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
-            Ok(data.len() as u64)
-        })
+        match end.read(length as usize, Some(request.clone())) {
+            Ok(super::pipe::Outcome::Pending) => return NtStatus::PENDING,
+            Ok(super::pipe::Outcome::Done(status, data)) => (status, data.len() as u64, data),
+            Err(e) => (e, 0, Vec::new()),
+        }
     };
-    let (status, done) = match result {
-        Ok(n) => (NtStatus::SUCCESS, n),
-        Err(e) => (e, 0),
-    };
-    finish_io(&entry.object, event.as_ref(), None, status);
-    tri!(call.write_iosb(iosb, status, done));
+    pipe_finish(call, entry, end, request, event.as_ref(), outcome)
+}
+
+/// Reports a pipe request that completed in its call: through the
+/// completion port and APC too on an asynchronous end (not for errors).
+fn pipe_finish(
+    call: &Call<'_>,
+    entry: &HandleEntry,
+    end: &super::pipe::PipeEnd,
+    request: super::notify::Request,
+    event: Option<&ObjectRef>,
+    (status, done, data): (NtStatus, u64, Vec<u8>),
+) -> NtStatus {
+    if !end.synchronous && status.0 < 0xc000_0000 {
+        // Writes copied nothing out; reads hand their bytes over here.
+        if data.is_empty() && done > 0 {
+            super::notify::complete_count(request, status, done);
+        } else {
+            super::notify::complete(request, status, &data);
+        }
+        return status;
+    }
+    if !data.is_empty() && call.process.write(request.buffer, &data).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    finish_io(&entry.object, event, None, status);
+    tri!(call.write_iosb(request.iosb, status, done));
     status
+}
+
+/// The request of an I/O on pipe end `end` (arguments as NtReadFile's:
+/// ApcRoutine 2, ApcContext 3).
+fn pipe_request(
+    call: &Call<'_>,
+    end: &super::pipe::PipeEnd,
+    event: Option<ObjectRef>,
+    iosb: u64,
+    buffer: u64,
+    length: u32,
+) -> Result<super::notify::Request, NtStatus> {
+    let routine = call.arg(2)?;
+    let apc = if routine == 0 {
+        None
+    } else if end.synchronous {
+        return Err(NtStatus::INVALID_PARAMETER);
+    } else {
+        let apc = thread::UserApc { routine, args: [call.arg(3)?, iosb, 0] };
+        thread::current().map(|t| (t, apc))
+    };
+    Ok(super::notify::Request {
+        process: call.process.clone(),
+        iosb,
+        buffer,
+        length,
+        event,
+        port: end.completion.lock().clone(),
+        apc_context: call.arg(3)?,
+        apc,
+        file_signal: end.dispatcher.clone(),
+        done: None,
+    })
 }
 
 /// NtClose(Handle)
@@ -2651,7 +2711,10 @@ impl Call<'_> {
             };
             (object, file::FILE_OPENED)
         } else if let Some(name) = tri!(self.pipe_name(attrs_ptr)) {
-            let end = tri!(super::pipe::open_client(&name));
+            let synchronous = options
+                & (file::FILE_SYNCHRONOUS_IO_ALERT | file::FILE_SYNCHRONOUS_IO_NONALERT)
+                != 0;
+            let end = tri!(super::pipe::open_client(&name, synchronous));
             let Ok(object) = KObject::new(ObjectBody::Pipe(end)) else {
                 return NtStatus::NO_MEMORY;
             };
@@ -2691,19 +2754,39 @@ struct OpenRequest {
 /// NtCreateNamedPipeFile(*FileHandle, DesiredAccess, ObjectAttributes,
 ///   *IoStatusBlock, ShareAccess, CreateDisposition, CreateOptions,
 ///   NamedPipeType, ReadMode, CompletionMode, MaximumInstances,
-///   InboundQuota, OutboundQuota, *DefaultTimeout): byte-mode instances
-///   below `\Device\NamedPipe`, one per name (see nt/pipe.rs).
+///   InboundQuota, OutboundQuota, *DefaultTimeout): an instance below
+///   `\Device\NamedPipe` (see nt/pipe.rs). CompletionMode
+///   (FILE_PIPE_COMPLETE_OPERATION) and the timeout are accepted and not
+///   used.
 fn nt_create_named_pipe_file(call: &mut Call<'_>) -> NtStatus {
     let (out, access, attrs_ptr, iosb) =
         (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));
+    let (disposition, create_options) = (arg!(call, 5) as u32, arg!(call, 6) as u32);
+    let (kind, read_mode) = (arg!(call, 7) as u32, arg!(call, 8) as u32);
+    let max_instances = arg!(call, 10) as u32;
     let (inbound, outbound) = (arg!(call, 11) as u32, arg!(call, 12) as u32);
+    if kind > 1 || read_mode > 1 || !(file::FILE_CREATE..=file::FILE_OPEN_IF).contains(&disposition)
+    {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let options = super::pipe::ServerOptions {
+        inbound,
+        outbound,
+        max_instances,
+        message_type: kind == 1,
+        message_reads: read_mode == 1,
+        first: disposition == file::FILE_CREATE,
+        synchronous: create_options
+            & (file::FILE_SYNCHRONOUS_IO_ALERT | file::FILE_SYNCHRONOUS_IO_NONALERT)
+            != 0,
+    };
     let Some(name) = tri!(call.pipe_name(attrs_ptr)) else {
         return NtStatus::OBJECT_NAME_INVALID;
     };
     if name.is_empty() {
         return NtStatus::OBJECT_NAME_INVALID;
     }
-    let end = tri!(super::pipe::create_server(&name, inbound, outbound));
+    let end = tri!(super::pipe::create_server(&name, &options));
     let Ok(object) = KObject::new(ObjectBody::Pipe(end)) else { return NtStatus::NO_MEMORY };
     let attributes = tri!(call.handle_attributes(attrs_ptr));
     let granted = super::object::FILE_MAPPING.map(access);
@@ -2723,9 +2806,15 @@ fn nt_create_named_pipe_file(call: &mut Call<'_>) -> NtStatus {
 /// ReadDataAvailable, NumberOfMessages, MessageLength, Data[] }.
 const FSCTL_PIPE_PEEK: u32 = 0x0011_400c;
 
+/// FSCTL_PIPE_DISCONNECT (DisconnectNamedPipe), FSCTL_PIPE_LISTEN
+/// (ConnectNamedPipe).
+const FSCTL_PIPE_DISCONNECT: u32 = 0x0011_0004;
+const FSCTL_PIPE_LISTEN: u32 = 0x0011_0008;
+
 /// NtFsControlFile(FileHandle, Event, ApcRoutine, ApcContext,
 ///   *IoStatusBlock, FsControlCode, InputBuffer, InputBufferLength,
-///   OutputBuffer, OutputBufferLength): FSCTL_PIPE_PEEK on pipes.
+///   OutputBuffer, OutputBufferLength): FSCTL_PIPE_PEEK, _LISTEN and
+///   _DISCONNECT on pipes.
 fn nt_fs_control_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (iosb, code, out, out_len) =
@@ -2733,20 +2822,42 @@ fn nt_fs_control_file(call: &mut Call<'_>) -> NtStatus {
     let ObjectBody::Pipe(end) = &entry.object.body else {
         return NtStatus::INVALID_DEVICE_REQUEST;
     };
-    if code != FSCTL_PIPE_PEEK {
-        return NtStatus::INVALID_DEVICE_REQUEST;
+    match code {
+        FSCTL_PIPE_LISTEN => {
+            let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
+            let request = tri!(pipe_request(call, end, event.clone(), iosb, 0, 0));
+            let outcome = match end.listen(Some(request.clone())) {
+                Ok(super::pipe::Outcome::Pending) => return NtStatus::PENDING,
+                Ok(super::pipe::Outcome::Done(status, _)) => (status, 0, Vec::new()),
+                Err(e) => (e, 0, Vec::new()),
+            };
+            return pipe_finish(call, &entry, end, request, event.as_ref(), outcome);
+        }
+        FSCTL_PIPE_DISCONNECT => {
+            tri!(end.disconnect());
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+            return NtStatus::SUCCESS;
+        }
+        FSCTL_PIPE_PEEK => {}
+        _ => {
+            super::ledger::record("NtFsControlFile", "pipe control", u64::from(code));
+            return NtStatus::INVALID_DEVICE_REQUEST;
+        }
     }
     if out_len < 16 {
         return NtStatus::BUFFER_TOO_SMALL;
     }
-    let (state, available, data) = tri!(end.peek(out_len - 16));
+    let (state, available, messages, message, data) = tri!(end.peek(out_len - 16));
     let mut header = [0u8; 16];
     header[0..4].copy_from_slice(&state.to_le_bytes());
     header[4..8].copy_from_slice(&(available as u32).to_le_bytes());
+    header[8..12].copy_from_slice(&(messages as u32).to_le_bytes());
+    header[12..16].copy_from_slice(&(message as u32).to_le_bytes());
     if call.process.write(out, &header).is_err() || call.process.write(out + 16, &data).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
-    let status = if data.len() < available { NtStatus::BUFFER_OVERFLOW } else { NtStatus::SUCCESS };
+    let limit = if message > 0 { message } else { available };
+    let status = if data.len() < limit { NtStatus::BUFFER_OVERFLOW } else { NtStatus::SUCCESS };
     tri!(call.write_iosb(iosb, status, 16 + data.len() as u64));
     status
 }
@@ -2849,6 +2960,7 @@ fn nt_cancel_io_file_ex(call: &mut Call<'_>) -> NtStatus {
         ObjectBody::File(f) if f.directory => {
             super::notify::cancel(f.lock_owner(), &call.process, target)
         }
+        ObjectBody::Pipe(end) => end.cancel(&call.process, target),
         _ => 0,
     };
     if cancelled == 0 {
@@ -3621,6 +3733,54 @@ fn set_socket_information(
     NtStatus::SUCCESS
 }
 
+/// FilePipeInformation (23): FILE_PIPE_INFORMATION { ReadMode,
+/// CompletionMode } (SetNamedPipeHandleState).
+const FILE_PIPE_INFORMATION: u64 = 23;
+
+/// NtSetInformationFile on a pipe end: the completion port and the read
+/// mode (the completion mode is accepted: no non-blocking pipes yet).
+fn set_pipe_information(
+    call: &Call<'_>,
+    end: &super::pipe::PipeEnd,
+    iosb: u64,
+    buffer: u64,
+    length: usize,
+    class: u64,
+) -> NtStatus {
+    match class {
+        FILE_COMPLETION_INFORMATION => {
+            if length < 16 {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            let (port, key) = (tri!(call.read_u64(buffer)), tri!(call.read_u64(buffer + 8)));
+            let port =
+                tri!(io_completion_object(call, port, super::object::IO_COMPLETION_MODIFY_STATE));
+            *end.completion.lock() = Some((port, key));
+        }
+        FILE_PIPE_INFORMATION => {
+            if length < 8 {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            let mut b = [0u8; 8];
+            if call.process.read(buffer, &mut b).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let read_mode = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            let completion = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+            if read_mode > 1 || completion > 1 {
+                return NtStatus::INVALID_PARAMETER;
+            }
+            if completion == 1 {
+                super::ledger::record("NtSetInformationFile", "pipe nowait", 1);
+            }
+            tri!(end.set_read_mode(read_mode == 1));
+        }
+        _ => return NtStatus::INVALID_INFO_CLASS,
+    }
+    tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+    NtStatus::SUCCESS
+}
+
 fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (iosb, buffer, length, class) =
@@ -3629,6 +3789,9 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
     let class = class as u32 as u64;
     if let ObjectBody::Socket(endpoint) = &entry.object.body {
         return set_socket_information(call, &endpoint.state, iosb, buffer, length, class);
+    }
+    if let ObjectBody::Pipe(end) = &entry.object.body {
+        return set_pipe_information(call, end, iosb, buffer, length, class);
     }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     if class == FILE_COMPLETION_INFORMATION {

@@ -76,6 +76,10 @@ impl NtStatus {
     pub const INSTANCE_NOT_AVAILABLE: NtStatus = NtStatus(0xc000_00ab);
     pub const PIPE_NOT_AVAILABLE: NtStatus = NtStatus(0xc000_00ac);
     pub const PIPE_CLOSING: NtStatus = NtStatus(0xc000_00b1);
+    pub const PIPE_DISCONNECTED: NtStatus = NtStatus(0xc000_00b0);
+    pub const PIPE_CONNECTED: NtStatus = NtStatus(0xc000_00b2);
+    pub const PIPE_LISTENING: NtStatus = NtStatus(0xc000_00b3);
+    pub const ILLEGAL_FUNCTION: NtStatus = NtStatus(0xc000_00af);
     pub const PIPE_BROKEN: NtStatus = NtStatus(0xc000_014b);
     pub const INVALID_PARAMETER_2: NtStatus = NtStatus(0xc000_00f0);
     pub const INVALID_PARAMETER_3: NtStatus = NtStatus(0xc000_00f1);

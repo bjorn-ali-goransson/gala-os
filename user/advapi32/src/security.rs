@@ -1087,25 +1087,11 @@ pub extern "system" fn GetSecurityDescriptorOwner(
     1
 }
 
-/// GetFileSecurityW: gala's files keep no security descriptors; the one
-/// returned (self-relative) is what a file created by the user has: the
-/// user as owner and primary group, and a DACL granting the user,
-/// Administrators and SYSTEM full access (FILE_ALL_ACCESS). Sizes as
-/// documented: ERROR_INSUFFICIENT_BUFFER with the size needed.
-#[unsafe(no_mangle)]
-pub extern "system" fn GetFileSecurityW(
-    path: *const u16,
-    info: u32,
-    sd: *mut u8,
-    length: u32,
-    needed: *mut u32,
-) -> i32 {
-    // SAFETY: a plain call.
-    if path.is_null() || unsafe { GetFileAttributesW(path) } == u32::MAX {
-        return 0; // the file's own error (ERROR_FILE_NOT_FOUND...)
-    }
-    // Build it: header (20), owner, group, DACL.
-    let mut b = [0u8; 256];
+/// The self-relative descriptor every object has here (see
+/// GetFileSecurityW) with the parts `info` asks for (OWNER, GROUP, DACL
+/// security information); returns its length.
+fn default_descriptor(info: u32, b: &mut [u8; 256]) -> usize {
+    // Header (20), owner, group, DACL.
     let mut at = 20usize;
     let mut control_bits = SE_SELF_RELATIVE;
     let user = |p: *mut u8| write_sid(p, NT, &USER_SUBS);
@@ -1136,6 +1122,319 @@ pub extern "system" fn GetFileSecurityW(
     }
     b[0] = 1;
     b[2..4].copy_from_slice(&control_bits.to_le_bytes());
+    at
+}
+
+/// GetSecurityInfo / GetNamedSecurityInfoW: the descriptor objects have
+/// here (default_descriptor), LocalAlloc'd, with pointers to its parts.
+/// No SACL (none is kept). Returns the error itself.
+fn security_info(
+    info: u32,
+    owner: *mut *mut u8,
+    group: *mut *mut u8,
+    dacl: *mut *mut u8,
+    sacl: *mut *mut u8,
+    descriptor: *mut *mut u8,
+) -> u32 {
+    let mut b = [0u8; 256];
+    let len = default_descriptor(info, &mut b);
+    // SAFETY: a plain allocation.
+    let p = unsafe { LocalAlloc(0, len) };
+    if p.is_null() {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    // SAFETY: `p` has `len` bytes; the caller's outputs.
+    unsafe {
+        core::ptr::copy_nonoverlapping(b.as_ptr(), p, len);
+        let part = |off: usize| {
+            let at = u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]) as usize;
+            if at == 0 { core::ptr::null_mut() } else { p.add(at) }
+        };
+        if !owner.is_null() && info & 1 != 0 {
+            *owner = part(4);
+        }
+        if !group.is_null() && info & 2 != 0 {
+            *group = part(8);
+        }
+        if !dacl.is_null() && info & 4 != 0 {
+            *dacl = part(16);
+        }
+        if !sacl.is_null() && info & 8 != 0 {
+            *sacl = core::ptr::null_mut();
+        }
+        if descriptor.is_null() {
+            // Nothing will free it; the parts stay valid.
+        } else {
+            *descriptor = p;
+        }
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSecurityInfo(
+    handle: usize,
+    _kind: u32,
+    info: u32,
+    owner: *mut *mut u8,
+    group: *mut *mut u8,
+    dacl: *mut *mut u8,
+    sacl: *mut *mut u8,
+    descriptor: *mut *mut u8,
+) -> u32 {
+    if handle == 0 {
+        return ERROR_INVALID_HANDLE;
+    }
+    security_info(info, owner, group, dacl, sacl, descriptor)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetNamedSecurityInfoW(
+    name: *const u16,
+    kind: u32,
+    info: u32,
+    owner: *mut *mut u8,
+    group: *mut *mut u8,
+    dacl: *mut *mut u8,
+    sacl: *mut *mut u8,
+    descriptor: *mut *mut u8,
+) -> u32 {
+    if name.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: a plain call. SE_FILE_OBJECT names must exist.
+    if kind == 1 && unsafe { GetFileAttributesW(name) } == u32::MAX {
+        return 2; // ERROR_FILE_NOT_FOUND
+    }
+    security_info(info, owner, group, dacl, sacl, descriptor)
+}
+
+/// SetSecurityInfo / SetNamedSecurityInfoW: objects keep no descriptors
+/// here; valid parts are accepted (recorded) and nothing is enforced.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetSecurityInfo(
+    handle: usize,
+    _kind: u32,
+    _info: u32,
+    owner: *const u8,
+    group: *const u8,
+    dacl: *const u8,
+    _sacl: *const u8,
+) -> u32 {
+    if handle == 0 {
+        return ERROR_INVALID_HANDLE;
+    }
+    set_security_parts(owner, group, dacl)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SetNamedSecurityInfoW(
+    name: *const u16,
+    _kind: u32,
+    _info: u32,
+    owner: *const u8,
+    group: *const u8,
+    dacl: *const u8,
+    _sacl: *const u8,
+) -> u32 {
+    if name.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    set_security_parts(owner, group, dacl)
+}
+
+fn set_security_parts(owner: *const u8, group: *const u8, dacl: *const u8) -> u32 {
+    if (!owner.is_null() && read_sid(owner).is_none())
+        || (!group.is_null() && read_sid(group).is_none())
+    {
+        return ERROR_INVALID_SID;
+    }
+    if !dacl.is_null() && IsValidAcl(dacl) == 0 {
+        return ERROR_INVALID_ACL;
+    }
+    missing(b"advapi32.dll!SetSecurityInfo(not kept)");
+    0
+}
+
+/// SetEntriesInAclW(cCountOfExplicitEntries, pListOfExplicitEntries,
+/// OldAcl, *NewAcl): a new LocalAlloc'd ACL: the old one's ACEs with
+/// each EXPLICIT_ACCESS_W applied - GRANT_ACCESS (1) adds an allowed ACE,
+/// SET_ACCESS (2) replaces the trustee's ACEs with one, DENY_ACCESS (3)
+/// adds a denied ACE, REVOKE_ACCESS (4) removes the trustee's ACEs - and
+/// denied ACEs kept before allowed ones (canonical order). Trustees are
+/// SIDs (TRUSTEE_IS_SID) or names LookupAccountNameW knows
+/// (TRUSTEE_IS_NAME, "CURRENT_USER" included). Returns the error itself.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetEntriesInAclW(
+    count: u32,
+    entries: *const u8,
+    old: *const u8,
+    new: *mut *mut u8,
+) -> u32 {
+    const ENTRY: usize = 48;
+    if new.is_null() || (count > 0 && entries.is_null()) {
+        return ERROR_INVALID_PARAMETER;
+    }
+    if !old.is_null() && IsValidAcl(old) == 0 {
+        return ERROR_INVALID_ACL;
+    }
+    // The ACEs, as (bytes), denied ones first.
+    let mut aces: [[u8; 8 + 8 + 4 * SID_MAX_SUB_AUTHORITIES]; 64] =
+        [[0; 8 + 8 + 4 * SID_MAX_SUB_AUTHORITIES]; 64];
+    let mut n = 0usize;
+    let size_of = |ace: &[u8]| usize::from(u16::from_le_bytes([ace[2], ace[3]]));
+    if !old.is_null() {
+        for i in 0..u32::from(acl_word(old, 4)) {
+            let mut ace = core::ptr::null_mut();
+            if GetAce(old, i, &mut ace) == 0 || n == aces.len() {
+                return ERROR_INVALID_ACL;
+            }
+            // SAFETY: an ACE inside the old ACL.
+            let size = usize::from(unsafe { ace.add(2).cast::<u16>().read_unaligned() });
+            if size > aces[0].len() {
+                return ERROR_INVALID_ACL;
+            }
+            // SAFETY: as above, `size` bytes.
+            unsafe { core::ptr::copy_nonoverlapping(ace, aces[n].as_mut_ptr(), size) };
+            n += 1;
+        }
+    }
+    for e in 0..count as usize {
+        // SAFETY: the caller's array of `count` EXPLICIT_ACCESS_W.
+        let (mask, mode, inherit, form, name) = unsafe {
+            let p = entries.add(e * ENTRY);
+            (
+                p.cast::<u32>().read_unaligned(),
+                p.add(4).cast::<u32>().read_unaligned(),
+                p.add(8).cast::<u32>().read_unaligned(),
+                p.add(16 + 12).cast::<u32>().read_unaligned(),
+                p.add(16 + 24).cast::<*const u8>().read_unaligned(),
+            )
+        };
+        let mut sid_buf = [0u8; 8 + 4 * SID_MAX_SUB_AUTHORITIES];
+        let sid: *const u8 = match form {
+            0 => name, // TRUSTEE_IS_SID
+            1 => {
+                // TRUSTEE_IS_NAME
+                if !trustee_name_sid(name.cast(), &mut sid_buf) {
+                    return ERROR_NONE_MAPPED;
+                }
+                sid_buf.as_ptr()
+            }
+            _ => return ERROR_INVALID_PARAMETER,
+        };
+        let Some((_, _, subs)) = read_sid(sid) else { return ERROR_INVALID_SID };
+        let slen = sid_len(subs);
+        // SAFETY: a valid SID of `slen` bytes.
+        let sid_bytes = unsafe { core::slice::from_raw_parts(sid, slen) };
+        let same = |ace: &[u8]| {
+            let size = size_of(ace);
+            size == 8 + slen && ace[0] <= 1 && &ace[8..size] == sid_bytes
+        };
+        // SET_ACCESS and REVOKE_ACCESS drop the trustee's ACEs.
+        if mode == 2 || mode == 4 {
+            let mut k = 0;
+            for i in 0..n {
+                if !same(&aces[i]) {
+                    aces[k] = aces[i];
+                    k += 1;
+                }
+            }
+            n = k;
+        }
+        let kind = match mode {
+            1 | 2 => 0u8, // ACCESS_ALLOWED_ACE_TYPE
+            3 => 1u8,     // ACCESS_DENIED_ACE_TYPE
+            4 => continue,
+            _ => return ERROR_INVALID_PARAMETER,
+        };
+        if n == aces.len() {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        let mut ace = [0u8; 8 + 8 + 4 * SID_MAX_SUB_AUTHORITIES];
+        ace[0] = kind;
+        // The inheritance flags (OBJECT_INHERIT_ACE...) are AceFlags.
+        ace[1] = (inherit & 0x1f) as u8;
+        ace[2..4].copy_from_slice(&((8 + slen) as u16).to_le_bytes());
+        ace[4..8].copy_from_slice(&mask.to_le_bytes());
+        ace[8..8 + slen].copy_from_slice(sid_bytes);
+        if kind == 1 {
+            // Before the allowed ACEs.
+            let at = (0..n).find(|&i| aces[i][0] != 1).unwrap_or(n);
+            for i in (at..n).rev() {
+                aces[i + 1] = aces[i];
+            }
+            aces[at] = ace;
+        } else {
+            aces[n] = ace;
+        }
+        n += 1;
+    }
+    let bytes: usize = 8 + aces[..n].iter().map(|a| size_of(a)).sum::<usize>();
+    // SAFETY: a plain allocation.
+    let acl = unsafe { LocalAlloc(0, bytes) };
+    if acl.is_null() {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    InitializeAcl(acl, bytes as u32, 2);
+    for a in &aces[..n] {
+        if insert_aces(acl, u32::MAX, a.as_ptr(), size_of(a), 1) == 0 {
+            return ERROR_INVALID_ACL;
+        }
+    }
+    // SAFETY: the caller's output.
+    unsafe { *new = acl };
+    0
+}
+
+/// The SID of trustee name `name` ("CURRENT_USER" or an account
+/// LookupAccountNameW knows) into `out`.
+fn trustee_name_sid(name: *const u16, out: &mut [u8; 8 + 4 * SID_MAX_SUB_AUTHORITIES]) -> bool {
+    if name.is_null() {
+        return false;
+    }
+    let current = "CURRENT_USER";
+    // SAFETY: the caller's NUL-terminated name.
+    let is_current = unsafe {
+        current.bytes().enumerate().all(|(i, b)| *name.add(i) == u16::from(b))
+            && *name.add(current.len()) == 0
+    };
+    if is_current {
+        write_sid(out.as_mut_ptr(), NT, &USER_SUBS);
+        return true;
+    }
+    let mut domain = [0u16; 64];
+    let (mut sid_len_v, mut domain_len, mut kind) = (out.len() as u32, domain.len() as u32, 0);
+    LookupAccountNameW(
+        core::ptr::null(),
+        name,
+        out.as_mut_ptr(),
+        &mut sid_len_v,
+        domain.as_mut_ptr(),
+        &mut domain_len,
+        &mut kind,
+    ) != 0
+}
+
+/// GetFileSecurityW: gala's files keep no security descriptors; the one
+/// returned (self-relative) is what a file created by the user has: the
+/// user as owner and primary group, and a DACL granting the user,
+/// Administrators and SYSTEM full access (FILE_ALL_ACCESS). Sizes as
+/// documented: ERROR_INSUFFICIENT_BUFFER with the size needed.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetFileSecurityW(
+    path: *const u16,
+    info: u32,
+    sd: *mut u8,
+    length: u32,
+    needed: *mut u32,
+) -> i32 {
+    // SAFETY: a plain call.
+    if path.is_null() || unsafe { GetFileAttributesW(path) } == u32::MAX {
+        return 0; // the file's own error (ERROR_FILE_NOT_FOUND...)
+    }
+    let mut b = [0u8; 256];
+    let at = default_descriptor(info, &mut b);
     if !needed.is_null() {
         // SAFETY: the caller's output.
         unsafe { *needed = at as u32 };

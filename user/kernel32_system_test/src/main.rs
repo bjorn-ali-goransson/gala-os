@@ -8,7 +8,8 @@
 //!   low-fragmentation heap, 2).
 //! - psapi's K32EnumProcessModules (the executable first; also through
 //!   psapi.dll's EnumProcessModules and GetModuleFileNameExA),
-//!   K32GetModuleInformation, K32GetModuleFileNameExA,
+//!   K32GetModuleInformation, K32GetModuleFileNameExA, K32GetModuleBaseNameW
+//!   (the file name's last component),
 //!   K32GetProcessMemoryInfo; QueryFullProcessImageNameW;
 //!   GetModuleHandleExA by name and by address.
 //! - GetEnvironmentStrings (ANSI block, double NUL) and
@@ -73,6 +74,7 @@ unsafe extern "system" {
     fn K32GetModuleInformation(h: Handle, module: Handle, info: *mut ModuleInfo, size: u32)
     -> Bool;
     fn K32GetModuleFileNameExA(h: Handle, module: Handle, buf: *mut u8, size: u32) -> u32;
+    fn K32GetModuleBaseNameW(h: Handle, module: Handle, buf: *mut u16, size: u32) -> u32;
     fn K32GetProcessMemoryInfo(h: Handle, counters: *mut u64, size: u32) -> Bool;
     fn QueryFullProcessImageNameW(h: Handle, flags: u32, buf: *mut u16, size: *mut u32) -> Bool;
     fn GetModuleFileNameW(module: Handle, buf: *mut u16, size: u32) -> u32;
@@ -366,6 +368,10 @@ fn process(c: &mut Checks) -> Result<(), u32> {
         c.ok(n == k && (0..n).all(|i| lower(dll[i]) == lower(want[i])), n as u64)?;
         let n = K32GetModuleFileNameExA(me, kernel32, a.as_mut_ptr(), 260) as usize;
         c.ok(n == k && (0..n).all(|i| lower(a[i].into()) == lower(want[i])), n as u64)?;
+        let mut base = [0u16; 260];
+        let n = K32GetModuleBaseNameW(me, kernel32, base.as_mut_ptr(), 260) as usize;
+        c.ok(n == 12 && (0..n).all(|i| lower(base[i]) == lower(want[m + 1 + i])), n as u64)?;
+        c.eq(base[12].into(), 0)?;
 
         let mut counters = [0u64; 10];
         counters[0] = 0;

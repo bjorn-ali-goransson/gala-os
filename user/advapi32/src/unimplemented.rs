@@ -19,7 +19,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     EnableTrace
     EnumDependentServicesW
     EnumerateTraceGuids
-    GetNamedSecurityInfoW
     GetSecurityDescriptorLength
     GetSidIdentifierAuthority
     GetSidLengthRequired
@@ -49,10 +48,7 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     RegSetKeySecurity
     RegisterServiceCtrlHandlerA
     RegisterServiceCtrlHandlerExW
-    SetEntriesInAclW
-    SetNamedSecurityInfoW
     SetSecurityDescriptorGroup
-    SetSecurityInfo
     SetServiceBits
     SetServiceStatus
     StartServiceA

@@ -10,6 +10,25 @@
 //! - 1 MiB written by one thread arrives intact at another (writes wait
 //!   while the pipe is full).
 //!
+//! Named pipe servers (the CreateNamedPipe, ConnectNamedPipe,
+//! DisconnectNamedPipe, SetNamedPipeHandleState and CreateFile docs):
+//! - opening a pipe no server created fails with ERROR_FILE_NOT_FOUND; a
+//!   client may connect before ConnectNamedPipe, which then fails with
+//!   ERROR_PIPE_CONNECTED; with every instance taken, CreateFile fails
+//!   with ERROR_PIPE_BUSY, and so does creating more than nMaxInstances
+//!   instances; FILE_FLAG_FIRST_PIPE_INSTANCE fails with
+//!   ERROR_ACCESS_DENIED once an instance exists;
+//! - message mode keeps each write a message: a read returns one, a read
+//!   into a smaller buffer fails with ERROR_MORE_DATA and the rest
+//!   follows; a client starts in byte read mode and SetNamedPipeHandleState
+//!   switches it; PeekNamedPipe reports the bytes left of the message;
+//! - after the client closes, the server's read fails with
+//!   ERROR_BROKEN_PIPE and ConnectNamedPipe with ERROR_NO_DATA until
+//!   DisconnectNamedPipe;
+//! - an overlapped server: ConnectNamedPipe and ReadFile pend
+//!   (ERROR_IO_PENDING) and complete when a client connects and writes,
+//!   through the event and the completion port.
+//!
 //! Prints `pipe_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -61,7 +80,58 @@ unsafe extern "system" {
     fn GetExitCodeThread(h: Handle, code: *mut u32) -> Bool;
     fn GetLastError() -> u32;
     fn CloseHandle(h: Handle) -> Bool;
+    fn CreateNamedPipeW(
+        name: *const u16,
+        open_mode: u32,
+        pipe_mode: u32,
+        max_instances: u32,
+        out_size: u32,
+        in_size: u32,
+        timeout: u32,
+        attributes: *const SecurityAttributes,
+    ) -> Handle;
+    fn ConnectNamedPipe(h: Handle, ov: *mut Overlapped) -> Bool;
+    fn DisconnectNamedPipe(h: Handle) -> Bool;
+    fn SetNamedPipeHandleState(
+        h: Handle,
+        mode: *const u32,
+        max_collection: *const u32,
+        timeout: *const u32,
+    ) -> Bool;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        attributes: *const SecurityAttributes,
+        disposition: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
+    fn CreateEventW(
+        attributes: *const c_void,
+        manual: Bool,
+        initial: Bool,
+        name: *const u16,
+    ) -> Handle;
+    fn GetOverlappedResult(h: Handle, ov: *mut Overlapped, n: *mut u32, wait: Bool) -> Bool;
+    fn CreateIoCompletionPort(file: Handle, port: Handle, key: usize, threads: u32) -> Handle;
+    fn GetQueuedCompletionStatus(
+        port: Handle,
+        n: *mut u32,
+        key: *mut usize,
+        ov: *mut *mut Overlapped,
+        ms: u32,
+    ) -> Bool;
     fn ExitProcess(code: u32) -> !;
+}
+
+#[repr(C)]
+struct Overlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    event: Handle,
 }
 
 #[allow(dead_code)]
@@ -82,6 +152,23 @@ pub extern "C" fn __CxxFrameHandler3() -> ! {
 }
 
 const ERROR_BROKEN_PIPE: u32 = 109;
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_ACCESS_DENIED: u32 = 5;
+const ERROR_PIPE_BUSY: u32 = 231;
+const ERROR_NO_DATA: u32 = 232;
+const ERROR_MORE_DATA: u32 = 234;
+const ERROR_PIPE_CONNECTED: u32 = 535;
+const ERROR_IO_PENDING: u32 = 997;
+const PIPE_ACCESS_DUPLEX: u32 = 3;
+const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
+const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+const PIPE_TYPE_MESSAGE: u32 = 4;
+const PIPE_READMODE_MESSAGE: u32 = 2;
+const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+const GENERIC_READ: u32 = 0x8000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const OPEN_EXISTING: u32 = 3;
+const INVALID_HANDLE: Handle = usize::MAX as Handle;
 const FILE_TYPE_PIPE: u32 = 3;
 const HANDLE_FLAG_INHERIT: u32 = 1;
 /// Bytes the writer thread sends through the pipe.
@@ -159,8 +246,198 @@ extern "system" fn writer(h: *mut c_void) -> u32 {
     0
 }
 
+/// `text` as a NUL-terminated UTF-16 string.
+fn wide(text: &str) -> [u16; 64] {
+    let mut w = [0u16; 64];
+    for (d, b) in w.iter_mut().zip(text.bytes()) {
+        *d = u16::from(b);
+    }
+    w
+}
+
+/// Opens the client end of pipe `name` (read and write, blocking).
+fn client(name: &[u16; 64], flags: u32) -> Handle {
+    // SAFETY: a NUL-terminated name; no template.
+    unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            core::ptr::null(),
+            OPEN_EXISTING,
+            flags,
+            core::ptr::null_mut(),
+        )
+    }
+}
+
+fn write(h: Handle, data: &[u8]) -> bool {
+    let mut n = 0;
+    // SAFETY: valid buffer and count.
+    let ok =
+        unsafe { WriteFile(h, data.as_ptr(), data.len() as u32, &mut n, core::ptr::null_mut()) };
+    ok != 0 && n == data.len() as u32
+}
+
+/// Named pipe servers and clients (see the module comment).
+fn named(c: &mut Checks) -> Result<(), u32> {
+    let name = wide("\\\\.\\pipe\\gala_test\\one");
+    let none = wide("\\\\.\\pipe\\gala_test\\none");
+    // SAFETY: documented kernel32 calls with valid arguments.
+    unsafe {
+        let h = client(&none, 0);
+        c.ok(h == INVALID_HANDLE, h as u64)?;
+        c.eq(GetLastError().into(), ERROR_FILE_NOT_FOUND.into())?;
+
+        let mode = PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE;
+        let server = CreateNamedPipeW(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            mode,
+            2,
+            4096,
+            4096,
+            0,
+            core::ptr::null(),
+        );
+        c.ok(server != INVALID_HANDLE, GetLastError().into())?;
+        c.eq(GetFileType(server).into(), FILE_TYPE_PIPE.into())?;
+        // A client takes the only instance; creating more is limited.
+        let cl = client(&name, 0);
+        c.ok(cl != INVALID_HANDLE, GetLastError().into())?;
+        let first = FILE_FLAG_FIRST_PIPE_INSTANCE | PIPE_ACCESS_DUPLEX;
+        let h = CreateNamedPipeW(name.as_ptr(), first, mode, 2, 4096, 4096, 0, core::ptr::null());
+        c.ok(h == INVALID_HANDLE, h as u64)?;
+        c.eq(GetLastError().into(), ERROR_ACCESS_DENIED.into())?;
+        let second = CreateNamedPipeW(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            mode,
+            2,
+            4096,
+            4096,
+            0,
+            core::ptr::null(),
+        );
+        c.ok(second != INVALID_HANDLE, GetLastError().into())?;
+        let h = CreateNamedPipeW(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            mode,
+            2,
+            4096,
+            4096,
+            0,
+            core::ptr::null(),
+        );
+        c.ok(h == INVALID_HANDLE, h as u64)?;
+        c.eq(GetLastError().into(), ERROR_PIPE_BUSY.into())?;
+        // A second client takes the second; a third finds none free.
+        let cl2 = client(&name, 0);
+        c.ok(cl2 != INVALID_HANDLE, GetLastError().into())?;
+        let h = client(&name, 0);
+        c.ok(h == INVALID_HANDLE, h as u64)?;
+        c.eq(GetLastError().into(), ERROR_PIPE_BUSY.into())?;
+        CloseHandle(cl2);
+        CloseHandle(second);
+        c.eq(ConnectNamedPipe(server, core::ptr::null_mut()) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_PIPE_CONNECTED.into())?;
+
+        // Messages towards the server.
+        c.ok(write(cl, b"one") && write(cl, b"three"), GetLastError().into())?;
+        let (mut buf, mut got) = ([0u8; 64], 0u32);
+        c.ok(ReadFile(server, buf.as_mut_ptr(), 64, &mut got, core::ptr::null_mut()) != 0, 0)?;
+        c.eq(got.into(), 3)?;
+        c.ok(&buf[..3] == b"one", buf[0].into())?;
+        let ok = ReadFile(server, buf.as_mut_ptr(), 2, &mut got, core::ptr::null_mut());
+        c.eq(ok as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_MORE_DATA.into())?;
+        c.eq(got.into(), 2)?;
+        c.ok(&buf[..2] == b"th", buf[0].into())?;
+        c.ok(ReadFile(server, buf.as_mut_ptr(), 64, &mut got, core::ptr::null_mut()) != 0, 0)?;
+        c.eq(got.into(), 3)?;
+        c.ok(&buf[..3] == b"ree", buf[0].into())?;
+
+        // Messages towards the client, once it reads in message mode.
+        let read_mode = PIPE_READMODE_MESSAGE;
+        let set = SetNamedPipeHandleState(cl, &read_mode, core::ptr::null(), core::ptr::null());
+        c.ok(set != 0, GetLastError().into())?;
+        c.ok(write(server, b"xyz") && write(server, b"ab"), GetLastError().into())?;
+        let (mut avail, mut left) = (0, 0);
+        let peeked = PeekNamedPipe(cl, buf.as_mut_ptr(), 1, &mut got, &mut avail, &mut left);
+        c.ok(peeked != 0, GetLastError().into())?;
+        c.eq(got.into(), 1)?;
+        c.eq(avail.into(), 5)?;
+        c.eq(left.into(), 2)?;
+        c.ok(ReadFile(cl, buf.as_mut_ptr(), 64, &mut got, core::ptr::null_mut()) != 0, 0)?;
+        c.eq(got.into(), 3)?;
+        c.ok(ReadFile(cl, buf.as_mut_ptr(), 64, &mut got, core::ptr::null_mut()) != 0, 0)?;
+        c.eq(got.into(), 2)?;
+        c.ok(&buf[..2] == b"ab", buf[0].into())?;
+
+        // The client leaves: broken pipe, then no data until disconnected.
+        CloseHandle(cl);
+        let ok = ReadFile(server, buf.as_mut_ptr(), 64, &mut got, core::ptr::null_mut());
+        c.eq(ok as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_BROKEN_PIPE.into())?;
+        c.eq(ConnectNamedPipe(server, core::ptr::null_mut()) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_NO_DATA.into())?;
+        c.ok(DisconnectNamedPipe(server) != 0, GetLastError().into())?;
+        CloseHandle(server);
+
+        // An overlapped server: the connection and a read pend.
+        let name = wide("\\\\.\\pipe\\gala_test\\two");
+        let open = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
+        let server = CreateNamedPipeW(
+            name.as_ptr(),
+            open,
+            0,
+            PIPE_UNLIMITED_INSTANCES,
+            4096,
+            4096,
+            0,
+            core::ptr::null(),
+        );
+        c.ok(server != INVALID_HANDLE, GetLastError().into())?;
+        let port = CreateIoCompletionPort(server, core::ptr::null_mut(), 77, 0);
+        c.ok(!port.is_null(), GetLastError().into())?;
+        let event = CreateEventW(core::ptr::null(), 1, 0, core::ptr::null());
+        let mut ov = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event };
+        c.eq(ConnectNamedPipe(server, &mut ov) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_IO_PENDING.into())?;
+        c.eq(WaitForSingleObject(event, 0).into(), 0x102)?; // WAIT_TIMEOUT
+        let cl = client(&name, 0);
+        c.ok(cl != INVALID_HANDLE, GetLastError().into())?;
+        c.eq(WaitForSingleObject(event, 5000).into(), 0)?;
+        c.ok(GetOverlappedResult(server, &mut ov, &mut got, 0) != 0, GetLastError().into())?;
+        let (mut key, mut done) = (0usize, core::ptr::null_mut());
+        let dequeued = GetQueuedCompletionStatus(port, &mut got, &mut key, &mut done, 5000);
+        c.ok(dequeued != 0, GetLastError().into())?;
+        c.eq(key as u64, 77)?;
+        c.ok(core::ptr::eq(done, &ov), done as u64)?;
+
+        let mut ov = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event };
+        let ok =
+            ReadFile(server, buf.as_mut_ptr(), 64, &mut got, (&mut ov as *mut Overlapped).cast());
+        c.eq(ok as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_IO_PENDING.into())?;
+        c.ok(write(cl, b"late"), GetLastError().into())?;
+        c.ok(GetOverlappedResult(server, &mut ov, &mut got, 1) != 0, GetLastError().into())?;
+        c.eq(got.into(), 4)?;
+        c.ok(&buf[..4] == b"late", buf[0].into())?;
+        let dequeued = GetQueuedCompletionStatus(port, &mut got, &mut key, &mut done, 5000);
+        c.ok(dequeued != 0 && got == 4, got.into())?;
+        CloseHandle(cl);
+        CloseHandle(server);
+        CloseHandle(port);
+        CloseHandle(event);
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    named(&mut c)?;
     // SAFETY: documented kernel32 calls with valid arguments.
     unsafe {
         let (mut r, mut w) = (core::ptr::null_mut(), core::ptr::null_mut());

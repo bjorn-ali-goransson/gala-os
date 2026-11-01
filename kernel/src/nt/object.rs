@@ -438,7 +438,7 @@ impl KObject {
             ObjectBody::Process(p) => Some(&p.dispatcher),
             ObjectBody::File(f) => Some(&*f.dispatcher),
             ObjectBody::Socket(e) => Some(&e.state.dispatcher),
-            ObjectBody::Pipe(p) => Some(&p.dispatcher),
+            ObjectBody::Pipe(p) => Some(&*p.dispatcher),
             ObjectBody::Null(d) => Some(d),
             ObjectBody::ConsoleInput
             | ObjectBody::ConsoleOutput

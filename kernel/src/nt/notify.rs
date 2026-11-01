@@ -36,6 +36,7 @@ const CHANGE_SIZE: u32 = 0x8;
 const CHANGE_LAST_WRITE: u32 = 0x10;
 
 /// Where and how a request completes.
+#[derive(Clone)]
 pub struct Request {
     pub process: KArc<Process>,
     pub iosb: u64,
@@ -215,7 +216,14 @@ pub fn complete(r: Request, status: NtStatus, data: &[u8]) {
     if !data.is_empty() && r.process.write(r.buffer, data).is_err() {
         status = NtStatus::ACCESS_VIOLATION;
     }
-    let information = if status == NtStatus::SUCCESS { data.len() as u64 } else { 0 };
+    complete_count(r, status, data.len() as u64);
+}
+
+/// Reports a finished request that moved `count` bytes (already copied).
+pub fn complete_count(r: Request, status: NtStatus, count: u64) {
+    // Success and warnings (STATUS_BUFFER_OVERFLOW: part of a message)
+    // report the bytes.
+    let information = if status.0 < 0xc000_0000 { count } else { 0 };
     if r.iosb != 0 {
         let mut b = [0u8; 16];
         b[0..4].copy_from_slice(&status.0.to_le_bytes());

@@ -10,7 +10,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     CreateFiber
     CreateFileMappingNumaW
     CreateMutexExW
-    CreateNamedPipeW
     CreateTimerQueue
     CreateTimerQueueTimer
     DeleteTimerQueueEx
@@ -37,8 +36,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     InitOnceBeginInitialize
     InitOnceComplete
     K32GetMappedFileNameW
-    K32GetModuleBaseNameA
-    K32GetModuleBaseNameW
     K32GetPerformanceInfo
     MapUserPhysicalPagesScatter
     MapViewOfFileExNuma
@@ -56,7 +53,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     ReplaceFileW
     SetFileIoOverlappedRange
     SetFileValidData
-    SetNamedPipeHandleState
     SetProcessAffinityMask
     SetProcessAffinityUpdateMode
     SetTapeParameters

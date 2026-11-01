@@ -451,31 +451,43 @@ unsafe extern "system" {
     ) -> u32;
 }
 
-/// A named-pipe server control (FSCTL_PIPE_*): the file system answers
-/// (gala's pipes are anonymous; other handles are not pipes).
+/// A named-pipe server control (FSCTL_PIPE_*) with no buffers. With an
+/// OVERLAPPED it may pend (ERROR_IO_PENDING); without one, a request
+/// that pends on an overlapped handle is waited for.
 fn pipe_control(pipe: Handle, code: u32, overlapped: *mut c_void) -> Bool {
-    let mut iosb = [0usize; 2];
-    let event = if overlapped.is_null() {
-        0
-    } else {
-        // SAFETY: the caller's OVERLAPPED (hEvent at offset 24).
-        unsafe { *(overlapped.cast::<u8>().add(24) as *const usize) }
+    let issue = |event: usize, context: usize, iosb: *mut [usize; 2]| {
+        // SAFETY: a status block valid until the request completes.
+        unsafe {
+            NtFsControlFile(
+                pipe,
+                event,
+                0,
+                context,
+                iosb,
+                code,
+                core::ptr::null(),
+                0,
+                core::ptr::null_mut(),
+                0,
+            )
+        }
     };
-    // SAFETY: plain call with our status block.
-    let status = unsafe {
-        NtFsControlFile(
-            pipe,
-            event,
-            0,
-            0,
-            &mut iosb,
-            code,
-            core::ptr::null(),
-            0,
+    if !overlapped.is_null() {
+        return crate::overlapped_request(
             core::ptr::null_mut(),
-            0,
-        )
-    };
+            overlapped,
+            |event, context, iosb, _| issue(event, context, iosb),
+        );
+    }
+    let mut iosb = [0usize; 2];
+    let mut status = issue(0, 0, &mut iosb);
+    if status == crate::STATUS_PENDING {
+        // SAFETY: waits on the pipe handle, signaled when it completes.
+        status = unsafe { crate::NtWaitForSingleObject(pipe, 0, core::ptr::null()) };
+        if status == STATUS_SUCCESS {
+            status = iosb[0] as u32;
+        }
+    }
     if status != STATUS_SUCCESS {
         return fail(status, FALSE);
     }

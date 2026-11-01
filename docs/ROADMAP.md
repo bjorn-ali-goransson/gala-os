@@ -787,10 +787,23 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         stops at kernel32's CreateNamedPipeW (its shared-memory/named
         pipe listener). Creating the service master key fails (ESECCrypto
         error 21, SQL error 33095; not fatal yet), probably for RSA.
-        Next: named pipe servers (CreateNamedPipeW, ConnectNamedPipe,
-        several instances, message mode if it asks; test first in
-        `pipe_test`), then RSA in bcrypt (rsa crate; needs an allocator
-        in bcrypt). Also seen: netapi32's NetShareGetInfo and
+        Then (fifth pass) named pipe servers (CreateNamedPipeW, several
+        instances, ConnectNamedPipe/DisconnectNamedPipe, message mode,
+        overlapped listens and reads with completion ports; `pipe_test`),
+        GetSecurityInfo/SetSecurityInfo/SetEntriesInAclW
+        (`advapi32_test`), K32GetModuleBaseNameW. **It now reaches
+        "SQL Server is now ready for client connections"** (the
+        `sqllocaldb` scenario passes), listening on
+        `\\.\pipe\LOCALDB#GALA0001\tsql\query`. Right after, it stops
+        at crypt32's CertCreateCertificateContext (its self-signed TLS
+        certificate for encrypted connections), and msdb is not found
+        (master names its files at the build machine's path: SqlLocalDB
+        would have moved them; not fatal). Next: certificates in crypt32
+        (CertCreateCertificateContext and what follows: parsing X.509),
+        RSA in bcrypt (rsa crate; needs an allocator in bcrypt; also for
+        the service master key, ESECCrypto error 21), msdb's file paths,
+        then a client: sqlcmd or a test program speaking TDS over the
+        pipe. Also seen: netapi32's NetShareGetInfo and
         NetValidatePasswordPolicy (looked up), FSCTL_FILESYSTEM_GET_STATISTICS
         (error 17053, goes on), CoCreateInstance of a class not
         registered, NtQuerySystemInformation class 192.

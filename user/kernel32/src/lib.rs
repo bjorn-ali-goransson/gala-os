@@ -76,6 +76,7 @@ struct AnsiString {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct ObjectAttributes {
     length: u32,
     root_directory: usize,
@@ -764,7 +765,10 @@ fn is_sep(c: u16) -> bool {
 fn full_path(path: &[u16]) -> Result<PathBuf, u32> {
     let mut out = PathBuf::new();
     let verbatim = [BACKSLASH, BACKSLASH, u16::from(b'?'), BACKSLASH];
-    if path.starts_with(&verbatim) {
+    let device = [BACKSLASH, BACKSLASH, u16::from(b'.'), BACKSLASH];
+    if path.starts_with(&verbatim) || path.starts_with(&device) {
+        // `\\?\` paths are kept as they are; `\\.\` names a device
+        // (`\\.\pipe\name`), also not normalized here.
         out.push(path)?;
         return Ok(out);
     }
@@ -851,7 +855,8 @@ fn nt_path(path: *const u16) -> Result<PathBuf, u32> {
     }
     let full = full_path(name)?;
     let verbatim = [BACKSLASH, BACKSLASH, u16::from(b'?'), BACKSLASH];
-    if full.as_slice().starts_with(&verbatim) {
+    let device = [BACKSLASH, BACKSLASH, u16::from(b'.'), BACKSLASH];
+    if full.as_slice().starts_with(&verbatim) || full.as_slice().starts_with(&device) {
         nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
         nt.push(&full.as_slice()[4..])?;
     } else {

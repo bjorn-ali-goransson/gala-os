@@ -285,22 +285,6 @@ no_security! {
     AccessCheck(descriptor: *const u8, token: usize, access: u32, mapping: *const u8, privileges: *mut u8, length: *mut u32, granted: *mut u32, status: *mut i32);
 }
 
-/// GetSecurityInfo: returns the error itself (not via GetLastError).
-#[unsafe(no_mangle)]
-pub extern "system" fn GetSecurityInfo(
-    _handle: usize,
-    _kind: u32,
-    _info: u32,
-    _owner: *mut usize,
-    _group: *mut usize,
-    _dacl: *mut usize,
-    _sacl: *mut usize,
-    _descriptor: *mut usize,
-) -> u32 {
-    missing(b"advapi32.dll!GetSecurityInfo");
-    ERROR_NOT_SUPPORTED
-}
-
 /// DllMain (the entry point our link flags name).
 #[unsafe(no_mangle)]
 pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved: usize) -> i32 {

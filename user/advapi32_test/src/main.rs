@@ -26,6 +26,11 @@
 //!   script is fully trusted; SaferIdentifyLevel and friends);
 //!   CreateWellKnownSid; secur32's GetUserNameExW; PerfLib V2 providers;
 //!   classic event trace providers (registered, never enabled).
+//! - What SQL Server does to its pipe's security: GetSecurityInfo of a
+//!   handle (the owner is the token's user, the DACL is valid, both inside
+//!   the LocalAlloc'd descriptor), SetEntriesInAclW (SET_ACCESS on no old
+//!   ACL, DENY_ACCESS ordered before the allowed ACEs, REVOKE_ACCESS
+//!   removing a trustee's ACEs), SetSecurityInfo with the new DACL.
 //!
 //! Prints `advapi32_test: ok` or exits with the number of the failing
 //! check.
@@ -133,6 +138,32 @@ unsafe extern "system" {
         sid: *mut *mut u8,
     ) -> Bool;
     fn FreeSid(sid: *mut u8) -> *mut u8;
+    fn GetSecurityInfo(
+        handle: Handle,
+        kind: u32,
+        info: u32,
+        owner: *mut *mut u8,
+        group: *mut *mut u8,
+        dacl: *mut *mut u8,
+        sacl: *mut *mut u8,
+        sd: *mut *mut u8,
+    ) -> u32;
+    fn SetSecurityInfo(
+        handle: Handle,
+        kind: u32,
+        info: u32,
+        owner: *mut u8,
+        group: *mut u8,
+        dacl: *mut u8,
+        sacl: *mut u8,
+    ) -> u32;
+    fn SetEntriesInAclW(
+        count: u32,
+        entries: *const ExplicitAccess,
+        old: *mut u8,
+        new: *mut *mut u8,
+    ) -> u32;
+    fn IsValidAcl(acl: *const u8) -> Bool;
     fn GetLengthSid(sid: *const u8) -> u32;
     fn IsValidSid(sid: *const u8) -> Bool;
     fn CopySid(len: u32, dst: *mut u8, src: *const u8) -> Bool;
@@ -308,6 +339,36 @@ struct TokenPrivileges {
 }
 
 const NT_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 5];
+const WORLD_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 1];
+
+/// EXPLICIT_ACCESS_W with its TRUSTEE_W (x64 layout).
+#[repr(C)]
+struct ExplicitAccess {
+    permissions: u32,
+    mode: u32,
+    inheritance: u32,
+    multiple: *mut c_void,
+    multiple_operation: u32,
+    form: u32,
+    kind: u32,
+    name: *mut u8,
+}
+
+impl ExplicitAccess {
+    /// An entry for SID `sid` (TRUSTEE_IS_SID).
+    fn sid(mode: u32, permissions: u32, sid: *mut u8) -> ExplicitAccess {
+        ExplicitAccess {
+            permissions,
+            mode,
+            inheritance: 0,
+            multiple: core::ptr::null_mut(),
+            multiple_operation: 0,
+            form: 0,
+            kind: 5, // TRUSTEE_IS_WELL_KNOWN_GROUP
+            name: sid,
+        }
+    }
+}
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_ALLOTTED_SPACE_EXCEEDED: u32 = 1344;
 const ERROR_NO_SUCH_PRIVILEGE: u32 = 1313;
@@ -1037,8 +1098,124 @@ fn perf(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// GetSecurityInfo, SetEntriesInAclW and SetSecurityInfo.
+fn security_info(c: &mut Checks) -> Result<(), u32> {
+    const SE_FILE_OBJECT: u32 = 1;
+    const SE_KERNEL_OBJECT: u32 = 6;
+    const OWNER: u32 = 1;
+    const DACL: u32 = 4;
+    const SET_ACCESS: u32 = 2;
+    const DENY_ACCESS: u32 = 3;
+    const REVOKE_ACCESS: u32 = 4;
+    // SAFETY: advapi32 calls with buffers of ours.
+    unsafe {
+        // The token's user.
+        let mut token = core::ptr::null_mut();
+        c.ok(OpenProcessToken(GetCurrentProcess(), 8, &mut token) != 0, GetLastError().into())?;
+        let mut user = [0u64; 16];
+        let mut len = 0;
+        let got = GetTokenInformation(token, 1, user.as_mut_ptr().cast(), 128, &mut len);
+        c.ok(got != 0, GetLastError().into())?;
+        let user_sid = user[0] as *const u8;
+        CloseHandle(token);
+
+        let (mut owner, mut dacl, mut sd) =
+            (core::ptr::null_mut(), core::ptr::null_mut(), core::ptr::null_mut());
+        let e = GetSecurityInfo(
+            GetCurrentProcess(),
+            SE_KERNEL_OBJECT,
+            OWNER | DACL,
+            &mut owner,
+            core::ptr::null_mut(),
+            &mut dacl,
+            core::ptr::null_mut(),
+            &mut sd,
+        );
+        c.eq(e.into(), 0)?;
+        c.ok(!sd.is_null() && !owner.is_null() && !dacl.is_null(), sd as u64)?;
+        c.ok(EqualSid(owner, user_sid) != 0, 0)?;
+        c.ok(IsValidAcl(dacl) != 0, 0)?;
+        c.ok(owner >= sd && dacl >= sd, owner as u64)?;
+        LocalFree(sd.cast());
+
+        let (mut everyone, mut admins) = (core::ptr::null_mut(), core::ptr::null_mut());
+        c.ok(
+            AllocateAndInitializeSid(&WORLD_AUTHORITY, 1, 0, 0, 0, 0, 0, 0, 0, 0, &mut everyone)
+                != 0,
+            0,
+        )?;
+        c.ok(
+            AllocateAndInitializeSid(&NT_AUTHORITY, 2, 32, 544, 0, 0, 0, 0, 0, 0, &mut admins) != 0,
+            0,
+        )?;
+        let mut acl = core::ptr::null_mut();
+        let set = [ExplicitAccess::sid(SET_ACCESS, 0x12_00a9, everyone)];
+        c.eq(SetEntriesInAclW(1, set.as_ptr(), core::ptr::null_mut(), &mut acl).into(), 0)?;
+        let mut info = [0u32; 3];
+        c.ok(GetAclInformation(acl, info.as_mut_ptr(), 12, 2) != 0, 0)?;
+        c.eq(info[0].into(), 1)?;
+        let mut ace = core::ptr::null_mut();
+        c.ok(GetAce(acl, 0, &mut ace) != 0, 0)?;
+        c.eq((*ace).into(), 0)?; // ACCESS_ALLOWED_ACE_TYPE
+        c.eq(
+            u32::from_le_bytes([*ace.add(4), *ace.add(5), *ace.add(6), *ace.add(7)]).into(),
+            0x12_00a9,
+        )?;
+        c.ok(EqualSid(ace.add(8), everyone) != 0, 0)?;
+
+        let deny = [ExplicitAccess::sid(DENY_ACCESS, 2, admins)];
+        let mut acl2 = core::ptr::null_mut();
+        c.eq(SetEntriesInAclW(1, deny.as_ptr(), acl, &mut acl2).into(), 0)?;
+        c.ok(GetAclInformation(acl2, info.as_mut_ptr(), 12, 2) != 0, 0)?;
+        c.eq(info[0].into(), 2)?;
+        c.ok(GetAce(acl2, 0, &mut ace) != 0, 0)?;
+        c.eq((*ace).into(), 1)?; // ACCESS_DENIED_ACE_TYPE, first
+        c.ok(EqualSid(ace.add(8), admins) != 0, 0)?;
+        c.ok(GetAce(acl2, 1, &mut ace) != 0, 0)?;
+        c.eq((*ace).into(), 0)?;
+
+        let revoke = [ExplicitAccess::sid(REVOKE_ACCESS, 0, everyone)];
+        let mut acl3 = core::ptr::null_mut();
+        c.eq(SetEntriesInAclW(1, revoke.as_ptr(), acl2, &mut acl3).into(), 0)?;
+        c.ok(GetAclInformation(acl3, info.as_mut_ptr(), 12, 2) != 0, 0)?;
+        c.eq(info[0].into(), 1)?;
+        c.ok(GetAce(acl3, 0, &mut ace) != 0, 0)?;
+        c.eq((*ace).into(), 1)?;
+
+        // The new DACL on a file handle.
+        let h = CreateFileW(
+            w("C:\\gala-advapi32-sec.txt").as_ptr(),
+            0xc000_0000,
+            0,
+            core::ptr::null_mut(),
+            2,
+            0,
+            core::ptr::null_mut(),
+        );
+        c.ok(h as isize != -1, GetLastError().into())?;
+        let e = SetSecurityInfo(
+            h,
+            SE_FILE_OBJECT,
+            DACL,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            acl,
+            core::ptr::null_mut(),
+        );
+        c.eq(e.into(), 0)?;
+        CloseHandle(h);
+        LocalFree(acl.cast());
+        LocalFree(acl2.cast());
+        LocalFree(acl3.cast());
+        FreeSid(everyone);
+        FreeSid(admins);
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    security_info(&mut c)?;
     perf(&mut c)?;
     sids(&mut c)?;
     acls(&mut c)?;

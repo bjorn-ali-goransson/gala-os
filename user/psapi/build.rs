@@ -7,6 +7,8 @@
 fn main() {
     for name in [
         "EnumProcessModules",
+        "GetModuleBaseNameA",
+        "GetModuleBaseNameW",
         "GetModuleFileNameExA",
         "GetModuleFileNameExW",
         "GetModuleInformation",

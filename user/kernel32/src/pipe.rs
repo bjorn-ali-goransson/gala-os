@@ -167,6 +167,122 @@ pub extern "system" fn CreatePipe(
     TRUE
 }
 
+/// CreateNamedPipeW(lpName, dwOpenMode, dwPipeMode, nMaxInstances,
+/// nOutBufferSize, nInBufferSize, nDefaultTimeOut, lpSecurityAttributes):
+/// an instance of `\\.\pipe\<name>` (NtCreateNamedPipeFile). The access
+/// follows PIPE_ACCESS_INBOUND/OUTBOUND (plus WRITE_DAC, WRITE_OWNER and
+/// ACCESS_SYSTEM_SECURITY); FILE_FLAG_OVERLAPPED makes it asynchronous,
+/// FILE_FLAG_FIRST_PIPE_INSTANCE asks for FILE_CREATE; PIPE_TYPE_MESSAGE,
+/// PIPE_READMODE_MESSAGE and PIPE_NOWAIT become the pipe type, read
+/// mode and completion mode; 255 instances is unlimited.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateNamedPipeW(
+    name: *const u16,
+    open_mode: u32,
+    pipe_mode: u32,
+    max_instances: u32,
+    out_size: u32,
+    in_size: u32,
+    default_timeout: u32,
+    attributes: *mut c_void,
+) -> Handle {
+    const INVALID: Handle = usize::MAX as Handle;
+    const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+    const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
+    const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
+    const FILE_OPEN_IF: u32 = 3;
+    const FILE_WRITE_THROUGH: u32 = 0x2;
+    if name.is_null() || open_mode & 3 == 0 || max_instances == 0 || max_instances > 255 {
+        return fail_with(ERROR_INVALID_PARAMETER, INVALID);
+    }
+    let mut access = SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES;
+    // WRITE_DAC, WRITE_OWNER, ACCESS_SYSTEM_SECURITY.
+    access |= open_mode & (0x0004_0000 | 0x0008_0000 | 0x0100_0000);
+    let mut share = 0;
+    if open_mode & 1 != 0 {
+        access |= GENERIC_READ;
+        share |= 2; // FILE_SHARE_WRITE: the client writes
+    }
+    if open_mode & 2 != 0 {
+        access |= GENERIC_WRITE;
+        share |= 1; // FILE_SHARE_READ: the client reads
+    }
+    let mut options = 0;
+    if open_mode & FILE_FLAG_OVERLAPPED == 0 {
+        options |= FILE_SYNCHRONOUS_IO_NONALERT;
+    }
+    if open_mode & FILE_FLAG_WRITE_THROUGH != 0 {
+        options |= FILE_WRITE_THROUGH;
+    }
+    let disposition =
+        if open_mode & FILE_FLAG_FIRST_PIPE_INSTANCE != 0 { FILE_CREATE } else { FILE_OPEN_IF };
+    let instances = if max_instances == 255 { u32::MAX } else { max_instances };
+    // The default timeout for WaitNamedPipe: 50 ms unless given.
+    let ms = if default_timeout == 0 { 50 } else { default_timeout };
+    let timeout = -10_000 * i64::from(ms);
+    let inherit = super::sync::inheritable(attributes);
+    let mut handle = core::ptr::null_mut();
+    let result = with_object_attributes(name, |object| {
+        let mut object = *object;
+        if inherit {
+            object.attributes |= OBJ_INHERIT;
+        }
+        let mut iosb = [0usize; 2];
+        // SAFETY: valid output pointers and attributes.
+        unsafe {
+            NtCreateNamedPipeFile(
+                &mut handle,
+                access,
+                &object,
+                &mut iosb,
+                share,
+                disposition,
+                options,
+                (pipe_mode >> 2) & 1,
+                (pipe_mode >> 1) & 1,
+                pipe_mode & 1,
+                instances,
+                in_size,
+                out_size,
+                &timeout,
+            )
+        }
+    });
+    match result {
+        Ok(STATUS_SUCCESS) => handle,
+        Ok(status) => fail(status, INVALID),
+        Err(e) => fail_with(e, INVALID),
+    }
+}
+
+/// SetNamedPipeHandleState(hNamedPipe, lpMode, lpMaxCollectionCount,
+/// lpCollectDataTimeout): the read and completion modes
+/// (FilePipeInformation). The collection settings only matter for
+/// remote byte pipes; they are accepted.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetNamedPipeHandleState(
+    h: Handle,
+    mode: *const u32,
+    _max_collection: *const u32,
+    _timeout: *const u32,
+) -> Bool {
+    if mode.is_null() {
+        return TRUE;
+    }
+    // SAFETY: the caller's mode.
+    let mode = unsafe { *mode };
+    if mode & !3 != 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let mut info = [0u8; 8];
+    info[0..4].copy_from_slice(&((mode >> 1) & 1).to_le_bytes());
+    info[4..8].copy_from_slice(&(mode & 1).to_le_bytes());
+    match set_file(h, 23, &info) {
+        Ok(()) => TRUE,
+        Err(e) => fail_with(e, FALSE),
+    }
+}
+
 /// PeekNamedPipe(hNamedPipe, lpBuffer, nBufferSize, *lpBytesRead,
 /// *lpTotalBytesAvail, *lpBytesLeftThisMessage): FSCTL_PIPE_PEEK.
 #[unsafe(no_mangle)]
@@ -223,8 +339,9 @@ pub extern "system" fn PeekNamedPipe(
                 *available = peek.add(4).cast::<u32>().read_unaligned();
             }
             if !left.is_null() {
-                // Byte mode: no message, so nothing is left of one.
-                *left = 0;
+                // MessageLength: the first message's (0 in byte mode).
+                let message = peek.add(12).cast::<u32>().read_unaligned();
+                *left = message.saturating_sub(copied as u32);
             }
         }
     }

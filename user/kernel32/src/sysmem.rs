@@ -327,6 +327,65 @@ pub extern "system" fn K32GetModuleFileNameExW(
     super::process::GetModuleFileNameW(module, buf, size)
 }
 
+/// K32GetModuleBaseNameW: the last component of the module's file name
+/// (truncated to the buffer, NUL-terminated); its length.
+#[unsafe(no_mangle)]
+pub extern "system" fn K32GetModuleBaseNameW(
+    process: Handle,
+    module: Handle,
+    buf: *mut u16,
+    size: u32,
+) -> u32 {
+    if !is_current(process) {
+        return fail_with(ERROR_ACCESS_DENIED, 0);
+    }
+    if buf.is_null() || size == 0 {
+        return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    let mut path = [0u16; 520];
+    let n = super::process::GetModuleFileNameW(module, path.as_mut_ptr(), path.len() as u32);
+    if n == 0 {
+        return 0;
+    }
+    let path = &path[..n as usize];
+    let start = path.iter().rposition(|&c| c == u16::from(b'\\')).map_or(0, |i| i + 1);
+    let name = &path[start..];
+    let len = name.len().min(size as usize - 1);
+    // SAFETY: the caller's buffer of `size` characters.
+    unsafe {
+        core::ptr::copy_nonoverlapping(name.as_ptr(), buf, len);
+        *buf.add(len) = 0;
+    }
+    len as u32
+}
+
+/// K32GetModuleBaseNameA: as the W form, in the ANSI code page (ASCII).
+#[unsafe(no_mangle)]
+pub extern "system" fn K32GetModuleBaseNameA(
+    process: Handle,
+    module: Handle,
+    buf: *mut u8,
+    size: u32,
+) -> u32 {
+    let mut wide = [0u16; 260];
+    let n = K32GetModuleBaseNameW(process, module, wide.as_mut_ptr(), 260) as usize;
+    if n == 0 {
+        return 0;
+    }
+    if buf.is_null() || size == 0 {
+        return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    let len = n.min(size as usize - 1);
+    // SAFETY: the caller's buffer of `size` bytes.
+    unsafe {
+        for (i, &c) in wide[..len].iter().enumerate() {
+            *buf.add(i) = if c < 0x80 { c as u8 } else { b'?' };
+        }
+        *buf.add(len) = 0;
+    }
+    len as u32
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn K32GetModuleFileNameExA(
     process: Handle,

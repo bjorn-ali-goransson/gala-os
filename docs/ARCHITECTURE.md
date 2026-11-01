@@ -630,32 +630,55 @@ functions convert names and string data through the ANSI code page
 
 ## Pipes (H1)
 
-`nt/pipe.rs`. `\Device\NamedPipe` is a device object (like `\Device\Afd`):
-NtCreateNamedPipeFile (gala number 0x7f03 until verified) creates a
-byte-mode instance below it and returns its server end; NtCreateFile or
-NtOpenFile of the same name connects the client end (one instance per
-name, one client). kernel32's CreatePipe uses a unique
+`nt/pipe.rs`. `\Device\NamedPipe` is a device object (like `\Device\Afd`),
+also `\??\PIPE` (kernel32 maps `\\.\` paths to `\??\`).
+NtCreateNamedPipeFile (gala number 0x7f03 until verified) creates an
+instance below it and returns its server end; NtCreateFile or NtOpenFile
+of the same name connects a client end to the oldest listening instance
+(STATUS_OBJECT_NAME_NOT_FOUND without instances, STATUS_PIPE_NOT_AVAILABLE
+= ERROR_PIPE_BUSY when none listens). The instances of a name share the
+first one's MaximumInstances (more: STATUS_INSTANCE_NOT_AVAILABLE);
+FILE_CREATE (FILE_FLAG_FIRST_PIPE_INSTANCE) fails with
+STATUS_ACCESS_DENIED once one exists. kernel32's CreatePipe uses a unique
 `Win32Pipes.<pid>.<n>` name, reads the server end and writes the client
-end, both synchronous.
+end; CreateNamedPipeW maps its modes to the NT arguments.
 
-A pipe is two byte queues (one per direction, bounded by the creator's
-inbound/outbound quotas, at least 4 KiB) and the open state of each end;
-an end closes when its object is dropped (its last handle: inherited and
-duplicated handles keep it open). NtReadFile returns what is there (at
-least one byte, waiting otherwise) and STATUS_PIPE_BROKEN once the other
-end is closed and the queue is empty (ERROR_BROKEN_PIPE); NtWriteFile
-completes fully, waiting while the queue is full, and fails with
-STATUS_PIPE_CLOSING (ERROR_NO_DATA; Windows' exact code for this case is
-unverified) once there is no reader. Waiting threads are on the pipe's
-waiter list and are woken on every change; they leave on termination.
-FSCTL_PIPE_PEEK (NtFsControlFile, 0x7f04) reports the state, the bytes
-available and a copy (STATUS_BUFFER_OVERFLOW if they do not all fit).
+An instance listens from its creation, so a client may connect before
+FSCTL_PIPE_LISTEN (ConnectNamedPipe: then STATUS_PIPE_CONNECTED); a
+listen after the client left is STATUS_PIPE_CLOSING (ERROR_NO_DATA);
+FSCTL_PIPE_DISCONNECT drops the queued bytes and leaves the client end
+disconnected (STATUS_PIPE_DISCONNECTED: connections are numbered and a
+client end belongs to one), and the next listen waits again. A
+connection is two byte queues (one per direction, bounded by the
+creator's inbound/outbound quotas, at least 4 KiB) plus, for a
+message-type pipe, the length of each queued message. NtReadFile returns
+what is there (at least one byte, waiting otherwise); in message read
+mode (the server's ReadMode, or FilePipeInformation from
+SetNamedPipeHandleState; clients start in byte mode) at most one message,
+STATUS_BUFFER_OVERFLOW (ERROR_MORE_DATA) with the part that fits and the
+rest left for the next read; then STATUS_PIPE_BROKEN once the other end
+is closed and the queue is empty (ERROR_BROKEN_PIPE). NtWriteFile
+completes fully, waiting while the queue is full (a message waits until
+it fits whole or the queue is empty), and fails with STATUS_PIPE_CLOSING
+(ERROR_NO_DATA; Windows' exact code for this case is unverified) once
+there is no reader. Ends opened without FILE_SYNCHRONOUS_IO_* are
+asynchronous: a listen or read that would wait pends (STATUS_PENDING)
+and completes through a `notify::Request` (status block, event, the
+end's signal, its completion port from FileCompletionInformation, APC)
+when a client connects or data arrives; immediate successes on such an
+end post a completion packet too. CancelIoEx and closing the end cancel
+pending requests (STATUS_CANCELLED). Writes on asynchronous ends still
+wait in the call (a documented simplification). Synchronous waiters are
+on the pipe's waiter list and are woken on every change; they leave on
+termination. FSCTL_PIPE_PEEK (NtFsControlFile, 0x7f04) reports the
+state, the bytes available, the message count and the first message's
+length, and a copy (STATUS_BUFFER_OVERFLOW if it does not all fit).
 Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
 Handle flags: NtQueryObject's ObjectHandleFlagInformation (class 4) and
 NtSetInformationObject (0x7f05) read and set OBJ_INHERIT and the
 protect-from-close bit on a handle; file opens now keep OBJ_INHERIT from
-OBJECT_ATTRIBUTES. Not yet: overlapped pipe I/O, message mode, named
-pipe servers with several instances or ConnectNamedPipe.
+OBJECT_ATTRIBUTES. Not yet: WaitNamedPipe (FSCTL_PIPE_WAIT),
+TransactNamedPipe, PIPE_NOWAIT (recorded), pipe security.
 
 **The C runtime's descriptor inheritance** (H2, busybox): msvcrt passes
 its open descriptors to children in STARTUPINFO cbReserved2/lpReserved2
@@ -1009,6 +1032,13 @@ Windows, never shadows the system's DLLs.)
   RegisterTraceGuidsW returns a handle and never calls back;
   GetTraceLoggerHandle, GetTraceEnableFlags/Level and TraceEvent fail
   with ERROR_INVALID_HANDLE, as for a provider no session enabled.
+  GetSecurityInfo/GetNamedSecurityInfoW return the descriptor every
+  object has here (the user as owner and group, a DACL granting the
+  user, Administrators and SYSTEM full access; LocalAlloc'd, the part
+  pointers inside it); SetSecurityInfo/SetNamedSecurityInfoW check and
+  accept (recorded). SetEntriesInAclW builds the new ACL as documented
+  (GRANT, SET, DENY, REVOKE; SID trustees or names, CURRENT_USER; denied
+  ACEs first).
 - **iphlpapi/secur32/winhttp** (what the JDK's net.dll imports): network
   adapter tables, ICMP echo, SSPI and WinHTTP sessions are not supported
   (documented failures, recorded); ConvertLengthToIpv4Mask is computed and
