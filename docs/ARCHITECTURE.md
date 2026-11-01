@@ -25,6 +25,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/mm/paging.rs      4-level page-table mapper, generic over table access (host-tested)
   src/mm/heap.rs        slab + page heap, global allocator, try_box/TryVec   [unsafe allowed]
   src/mm/mod.rs         global frame allocator instance
+  src/disk/             the disk: virtio-blk, whole-sector reads/writes/flush
   src/nt/               NT personality: PE loader, processes, handles, syscalls
   src/nt/platform.rs    the seam: traits for what nt needs from the machine
   src/platform.rs       the kernel's implementation of nt::platform
@@ -1856,14 +1857,62 @@ while reading the echo, half-closes, checks every byte and appends
 `xtask: net client: echo ok` (or the error) to the serial log, which the
 scenario expects.
 
+## Disk (D1)
+
+The first step towards files and a registry that survive a reboot
+(docs/SECURITY.md: D1 a disk driver, D2 a file system with descriptors on
+it, D3 registry hives on it).
+
+- `arch::virtio` queues can be *chained*: slot *i* then uses descriptors
+  2*i* (the device reads: header and a write's data) and 2*i*+1 (the
+  device writes: a read's data and the status), over consecutive parts
+  of the slot (`post_chain`), which is what a block request needs.
+- `disk::virtio_blk`: the first transitional virtio-blk function (legacy
+  interface, `disable-legacy=off`), capacity from its configuration,
+  features RO, FLUSH and ANY_LAYOUT; one queue with one slot of 64 KiB of
+  data. A request is the 16-byte header (type IN/OUT/FLUSH, sector), the
+  data and a status byte.
+- `disk` (the kernel's API, independent of NT): `read`/`write` of whole
+  512-byte sectors (split into 64 KiB requests), `flush`, `sectors`.
+  One request is on the device at a time: a caller takes the turn (an
+  atomic flag; others yield), posts under the device's `IrqMutex`, then
+  polls for completion with the lock dropped between polls and yields,
+  so interrupts stay enabled while the device works. No device
+  interrupts yet (as for the network card).
+- `nt::disk`: `\Device\Harddisk0\DR0`, linked from
+  `\Device\Harddisk0\Partition0` and `\??\PhysicalDrive0` (Win32
+  `\\.\PhysicalDrive0`), only when a disk exists. The device carries a
+  descriptor granting all access to Administrators and SYSTEM only (an
+  open is checked against it; a standard user gets STATUS_ACCESS_DENIED,
+  as on Windows). An open (`ObjectBody::Disk`) has a file pointer.
+  NtReadFile/NtWriteFile move whole sectors at a sector offset (the
+  explicit one, else a synchronous handle's pointer, which advances);
+  anything else is STATUS_INVALID_PARAMETER (also a transfer past the
+  end: Windows' code for that is unverified). IOCTLs:
+  IOCTL_DISK_GET_LENGTH_INFO, IOCTL_DISK_GET_DRIVE_GEOMETRY(_EX) (fixed
+  media, 255 heads, 63 sectors per track, 512-byte sectors, whole
+  cylinders; _EX without the partition and detection data Windows
+  appends); a short output buffer is STATUS_BUFFER_TOO_SMALL.
+  NtFlushBuffersFile flushes the device. FileFsDeviceInformation says
+  FILE_DEVICE_DISK (GetFileType: FILE_TYPE_DISK); FilePosition and
+  FileStandard information work. kernel32's DeviceIoControl goes to
+  NtDeviceIoControlFile (NtFsControlFile for FILE_DEVICE_FILE_SYSTEM
+  codes).
+- Tests: `disk_test` (as SYSTEM) on a 16 MiB image xtask creates for it
+  (`DISK_SCENARIOS`: size, what to write into the fresh image, what the
+  image must hold after the run, checked on the host); host unit tests
+  for the IOCTL outputs and sector checks. gala-um has no disk.
+- TODO: device interrupts, more than one request in flight, partitions
+  (D2 decides whether the file system takes the whole disk).
+
 ## Not done yet
 
 suspension/context of threads running on other CPUs, ranged (invlpg)
 shootdowns and PCIDs (ROADMAP S4), a real ntdll and
 kernel32 (gala runs test stand-ins), process creation from user mode,
 security, a persistent registry (registry security, symbolic link keys,
-change notifications, WOW64 views), storage devices, interrupts for devices (virtio-net
-polls), AcceptEx with
+change notifications, WOW64 views), a file system on the disk (D2),
+interrupts for devices (virtio-net and virtio-blk poll), AcceptEx with
 receive data, ConnectEx with send data, UDP, IPv6,
 select/IOCTL_AFD_POLL, non-blocking sockets, socket options with effect, telling a reset from a FIN
 on receive, bindgen-generated

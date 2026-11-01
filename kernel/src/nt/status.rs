@@ -5,6 +5,8 @@ pub struct NtStatus(pub u32);
 
 impl NtStatus {
     pub const SUCCESS: NtStatus = NtStatus(0x0000_0000);
+    pub const IO_DEVICE_ERROR: NtStatus = NtStatus(0xc000_0185);
+    pub const MEDIA_WRITE_PROTECTED: NtStatus = NtStatus(0xc000_00a2);
     pub const TIMEOUT: NtStatus = NtStatus(0x0000_0102);
     pub const ACCESS_DENIED: NtStatus = NtStatus(0xc000_0022);
     pub const INVALID_PARAMETER_1: NtStatus = NtStatus(0xc000_00ef);

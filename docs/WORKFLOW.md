@@ -232,6 +232,13 @@ shows it.
   it listens; the client's verdict is appended to the serial log as an
   `xtask: net client: ...` line for `expect` to check. QEMU's user network
   needs no privileges, so this works in containers and CI.
+- **Disk tests**: VMs have no disk unless the scenario is in xtask's
+  `DISK_SCENARIOS` (name, size, what xtask writes into the fresh raw
+  image, what the image must hold afterwards). The image is
+  `target/.../<scenario>.disk.img` next to the ISO, attached as a legacy
+  virtio-blk device; such scenarios boot alone and not in gala-um.
+  Raw disk access needs an administrator, so their programs run
+  `as=system`.
 - **Constants from headers**: values typed in by hand go wrong
   silently (STATUS_OBJECT_NAME_EXISTS was 0x40000035, and a test agreed
   with it). With mingw-w64 installed (`apt install mingw-w64-common`, or

@@ -653,6 +653,10 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
     if let ObjectBody::Pipe(end) = &entry.object.body {
         return pipe_io(call, &entry, end, io_status, buffer, length, true);
     }
+    if let ObjectBody::Disk(disk) = &entry.object.body {
+        let offset_ptr = arg!(call, 7);
+        return disk_io(call, &entry, disk, io_status, buffer, length, offset_ptr, true);
+    }
     if let ObjectBody::Null(_) = &entry.object.body {
         tri!(call.write_iosb(io_status, NtStatus::SUCCESS, u64::from(length)));
         return NtStatus::SUCCESS;
@@ -2834,6 +2838,24 @@ impl Call<'_> {
         })
     }
 
+    /// The disk device, if OBJECT_ATTRIBUTES name it (`\??\PhysicalDrive0`).
+    fn names_disk(&self, attrs_ptr: u64) -> Result<Option<ObjectRef>, NtStatus> {
+        let Some((0, name, attributes)) = self.raw_object_attributes(attrs_ptr)? else {
+            return Ok(None);
+        };
+        let ci = attributes & OBJ_CASE_INSENSITIVE != 0;
+        Ok(match namespace::lookup_parse(None, &name, ci) {
+            Ok((device, rest)) if matches!(device.body, ObjectBody::DiskDevice) => {
+                // Nothing below the device: it has no file system.
+                if !rest.is_empty() {
+                    return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
+                }
+                Some(device)
+            }
+            _ => None,
+        })
+    }
+
     fn names_null(&self, attrs_ptr: u64) -> Result<bool, NtStatus> {
         let Some((0, name, attributes)) = self.raw_object_attributes(attrs_ptr)? else {
             return Ok(false);
@@ -2872,6 +2894,17 @@ impl Call<'_> {
             (tri!(super::afd::open(&ea)), file::FILE_OPENED)
         } else if let Some(body) = tri!(self.names_console(attrs_ptr)) {
             let Ok(object) = KObject::new(body) else { return NtStatus::NO_MEMORY };
+            (object, file::FILE_OPENED)
+        } else if let Some(device) = tri!(self.names_disk(attrs_ptr)) {
+            // Raw disk access: the device's descriptor decides.
+            granted = tri!(security_calls::check_object(self, &device, access));
+            let synchronous = options
+                & (file::FILE_SYNCHRONOUS_IO_ALERT | file::FILE_SYNCHRONOUS_IO_NONALERT)
+                != 0;
+            let disk = super::disk::DiskFile::new(synchronous);
+            let Ok(object) = KObject::new(ObjectBody::Disk(disk)) else {
+                return NtStatus::NO_MEMORY;
+            };
             (object, file::FILE_OPENED)
         } else if tri!(self.names_null(attrs_ptr)) {
             let Ok(object) = KObject::new(ObjectBody::Null(Dispatcher::new(1))) else {
@@ -3112,6 +3145,23 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
     let (input, input_len, output, output_len) =
         (arg!(call, 6), arg!(call, 7) as u32, arg!(call, 8), arg!(call, 9) as u32);
     let entry = tri!(call.handle(Handle(handle)));
+    if matches!(entry.object.body, ObjectBody::Disk(_)) {
+        let _ = (input, input_len, apc);
+        if super::disk::needs_read(code) && entry.access & file::FILE_READ_DATA == 0 {
+            return NtStatus::ACCESS_DENIED;
+        }
+        let out = tri!(super::disk::control(code, crate::disk::sectors()));
+        if out.len() > output_len as usize {
+            return NtStatus::BUFFER_TOO_SMALL;
+        }
+        if call.process.write(output, &out).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        let event = tri!(start_io(call, &entry.object, event));
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, out.len() as u64));
+        finish_io(&entry.object, event.as_ref(), None, NtStatus::SUCCESS);
+        return NtStatus::SUCCESS;
+    }
     if !matches!(entry.object.body, ObjectBody::Socket(_)) {
         super::ledger::record("NtDeviceIoControlFile", "device", u64::from(code));
         return NtStatus::INVALID_DEVICE_REQUEST;
@@ -3644,6 +3694,9 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
     if let ObjectBody::Pipe(end) = &entry.object.body {
         return pipe_io(call, &entry, end, iosb, buffer, length, false);
     }
+    if let ObjectBody::Disk(disk) = &entry.object.body {
+        return disk_io(call, &entry, disk, iosb, buffer, length, offset_ptr, false);
+    }
     if let ObjectBody::Null(_) = &entry.object.body {
         let status = if length == 0 { NtStatus::SUCCESS } else { NtStatus::END_OF_FILE };
         tri!(call.write_iosb(iosb, status, 0));
@@ -3655,6 +3708,62 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
     let status = file_read(call, &entry, file, iosb, buffer, length, offset_ptr);
     finish_io(&entry.object, event.as_ref(), apc, status);
     post_completion(call, file, iosb, status);
+    status
+}
+
+/// NtReadFile/NtWriteFile on the disk: whole sectors at a sector offset
+/// (the explicit one, else a synchronous handle's file pointer, which
+/// moves on), done in the call.
+#[allow(clippy::too_many_arguments)]
+fn disk_io(
+    call: &Call<'_>,
+    entry: &HandleEntry,
+    disk: &super::disk::DiskFile,
+    iosb: u64,
+    buffer: u64,
+    length: u32,
+    offset_ptr: u64,
+    write: bool,
+) -> NtStatus {
+    let needed = if write { file::FILE_WRITE_DATA } else { file::FILE_READ_DATA };
+    if entry.access & needed == 0 {
+        return NtStatus::ACCESS_DENIED;
+    }
+    let explicit =
+        if offset_ptr == 0 { None } else { Some(tri!(call.read_u64(offset_ptr)) as i64) };
+    let offset = match explicit {
+        Some(FILE_USE_FILE_POINTER_POSITION) | None if disk.synchronous => *disk.position.lock(),
+        Some(o) if o >= 0 => o as u64,
+        _ => return NtStatus::INVALID_PARAMETER,
+    };
+    let first = tri!(super::disk::sector_of(offset));
+    let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
+    let mut data = Vec::new();
+    if data.try_reserve_exact(length as usize).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    data.resize(length as usize, 0);
+    let result = if write {
+        match call.process.read(buffer, &mut data) {
+            Ok(()) => crate::disk::write(first, &data).map_err(super::disk::status),
+            Err(_) => Err(NtStatus::ACCESS_VIOLATION),
+        }
+    } else {
+        crate::disk::read(first, &mut data).map_err(super::disk::status).and_then(|()| {
+            call.process.write(buffer, &data).map_err(|_| NtStatus::ACCESS_VIOLATION)
+        })
+    };
+    let status = match result {
+        Ok(()) => {
+            if disk.synchronous {
+                *disk.position.lock() = offset + u64::from(length);
+            }
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, u64::from(length)));
+            NtStatus::SUCCESS
+        }
+        Err(e) => e,
+    };
+    finish_io(&entry.object, event.as_ref(), None, status);
     status
 }
 
@@ -3869,6 +3978,32 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
         (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4));
     // The class is a ULONG: only the low 32 bits are defined.
     let class = class as u32 as u64;
+    if let ObjectBody::Disk(disk) = &entry.object.body {
+        // The file pointer, and the disk's size as its length.
+        let mut out = [0u8; 24];
+        let size = match class {
+            FILE_POSITION_INFORMATION => {
+                out[..8].copy_from_slice(&disk.position.lock().to_le_bytes());
+                8
+            }
+            FILE_STANDARD_INFORMATION => {
+                let bytes = super::disk::size().to_le_bytes();
+                out[..8].copy_from_slice(&bytes);
+                out[8..16].copy_from_slice(&bytes);
+                out[16..20].copy_from_slice(&1u32.to_le_bytes()); // NumberOfLinks
+                24
+            }
+            _ => return NtStatus::INVALID_INFO_CLASS,
+        };
+        if length < size {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        if call.process.write(buffer, &out[..size]).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, size as u64));
+        return NtStatus::SUCCESS;
+    }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     if class == FILE_NAME_INFORMATION {
         // FILE_NAME_INFORMATION { FileNameLength, FileName[] }: the path
@@ -4055,6 +4190,17 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
     }
     if let ObjectBody::Pipe(end) = &entry.object.body {
         return set_pipe_information(call, end, iosb, buffer, length, class);
+    }
+    if let ObjectBody::Disk(disk) = &entry.object.body {
+        if class != FILE_POSITION_INFORMATION {
+            return NtStatus::INVALID_INFO_CLASS;
+        }
+        if length < 8 {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        *disk.position.lock() = tri!(call.read_u64(buffer));
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+        return NtStatus::SUCCESS;
     }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     if class == FILE_COMPLETION_INFORMATION {
@@ -4351,6 +4497,7 @@ fn nt_query_volume_information_file(call: &mut Call<'_>) -> NtStatus {
         ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => Some(0x50u32),
         ObjectBody::Pipe(_) => Some(0x11),
         ObjectBody::Null(_) => Some(0x15), // FILE_DEVICE_NULL
+        ObjectBody::Disk(_) => Some(super::disk::FILE_DEVICE_DISK),
         _ => None,
     };
     if let Some(device) = device
@@ -4393,6 +4540,7 @@ fn nt_flush_buffers_file(call: &mut Call<'_>) -> NtStatus {
     match &entry.object.body {
         ObjectBody::File(_) => {}
         ObjectBody::Pipe(end) => tri!(end.flush()),
+        ObjectBody::Disk(_) => tri!(crate::disk::flush().map_err(super::disk::status)),
         _ => return NtStatus::OBJECT_TYPE_MISMATCH,
     }
     tri!(call.write_iosb(arg!(call, 1), NtStatus::SUCCESS, 0));

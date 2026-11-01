@@ -21,6 +21,30 @@ pub extern "system" fn GetFileSize(h: Handle, high: *mut u32) -> u32 {
 
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn NtDeviceIoControlFile(
+        h: Handle,
+        event: usize,
+        apc: usize,
+        context: usize,
+        iosb: *mut [usize; 2],
+        code: u32,
+        input: *const u8,
+        input_length: u32,
+        output: *mut u8,
+        output_length: u32,
+    ) -> u32;
+    fn NtFsControlFile(
+        h: Handle,
+        event: usize,
+        apc: usize,
+        context: usize,
+        iosb: *mut [usize; 2],
+        code: u32,
+        input: *const u8,
+        input_length: u32,
+        output: *mut u8,
+        output_length: u32,
+    ) -> u32;
     fn NtNotifyChangeDirectoryFile(
         h: Handle,
         event: usize,
@@ -159,20 +183,79 @@ pub extern "system" fn UnlockFileEx(
     unlock(h, overlapped_offset(overlapped), u64::from(low) | u64::from(high) << 32)
 }
 
-/// DeviceIoControl: no device control codes yet (recorded by code).
+/// DeviceIoControl: NtFsControlFile for FILE_DEVICE_FILE_SYSTEM codes,
+/// NtDeviceIoControlFile for the rest; with an OVERLAPPED it may pend
+/// (ERROR_IO_PENDING), the byte count then in its InternalHigh.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub extern "system" fn DeviceIoControl(
-    _h: Handle,
+    h: Handle,
     code: u32,
-    _input: *const c_void,
-    _input_size: u32,
-    _output: *mut c_void,
-    _output_size: u32,
-    _returned: *mut u32,
-    _overlapped: *mut c_void,
+    input: *const c_void,
+    input_size: u32,
+    output: *mut c_void,
+    output_size: u32,
+    returned: *mut u32,
+    overlapped: *mut c_void,
 ) -> Bool {
-    unsupported(b"kernel32.dll!DeviceIoControl", code.into());
-    fail_with(ERROR_NOT_SUPPORTED, FALSE)
+    // FILE_DEVICE_FILE_SYSTEM codes are file system controls.
+    let fsctl = code >> 16 == 9;
+    let issue = |event: usize, context: usize, iosb: *mut [usize; 2]| {
+        let (input, output) = (input.cast::<u8>(), output.cast::<u8>());
+        // SAFETY: the caller's buffers; a status block valid until the
+        // request completes.
+        unsafe {
+            if fsctl {
+                NtFsControlFile(
+                    h,
+                    event,
+                    0,
+                    context,
+                    iosb,
+                    code,
+                    input,
+                    input_size,
+                    output,
+                    output_size,
+                )
+            } else {
+                NtDeviceIoControlFile(
+                    h,
+                    event,
+                    0,
+                    context,
+                    iosb,
+                    code,
+                    input,
+                    input_size,
+                    output,
+                    output_size,
+                )
+            }
+        }
+    };
+    if !overlapped.is_null() {
+        return crate::overlapped_request(returned, overlapped, |event, context, iosb, _| {
+            issue(event, context, iosb)
+        });
+    }
+    let mut iosb = [0usize; 2];
+    let mut status = issue(0, 0, &mut iosb);
+    if status == crate::STATUS_PENDING {
+        // SAFETY: waits on the handle, signaled when the request completes.
+        status = unsafe { crate::NtWaitForSingleObject(h, 0, core::ptr::null()) };
+        if status == STATUS_SUCCESS {
+            status = iosb[0] as u32;
+        }
+    }
+    if !returned.is_null() {
+        // SAFETY: the caller's output pointer.
+        unsafe { *returned = iosb[1] as u32 };
+    }
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    TRUE
 }
 
 /// ReadDirectoryChangesW(hDirectory, lpBuffer, nBufferLength,

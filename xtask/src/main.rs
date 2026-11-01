@@ -337,6 +337,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_thread_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_sync_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_locale_test", "ntdll.dll", "Windows/System32"),
+    ("disk_test", "ntdll.dll", "Windows/System32"),
+    ("disk_test", "kernel32.dll", "Windows/System32"),
+    ("disk_test", "advapi32.dll", "Windows/System32"),
+    ("disk_test", "secur32.dll", "Windows/System32"),
+    ("disk_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("disk_test", "bcrypt.dll", "Windows/System32"),
+    ("disk_test", "user/access_test/access_test.regseed", "registry"),
     ("kernel32_system_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_clr_test", "ntdll.dll", "Windows/System32"),
     ("com_test", "ntdll.dll", "Windows/System32"),
@@ -1270,6 +1277,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_thread_test",
     "kernel32_sync_test",
     "kernel32_locale_test",
+    "disk_test",
     "kernel32_system_test",
     "kernel32_clr_test",
     "com_test",
@@ -2344,6 +2352,15 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["kernel32_system_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // D1: raw sector I/O on a virtio-blk disk (DISK_SCENARIOS attaches
+        // it and checks what the program wrote). As SYSTEM: raw disks are
+        // for administrators.
+        name: "disk_test",
+        cmdline: "qemu_exit as=system run=disk_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["disk_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // P1 (JDK): locale and time (en-US, UTC).
         name: "kernel32_locale_test",
         cmdline: "qemu_exit run=kernel32_locale_test.exe",
@@ -3189,6 +3206,7 @@ fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
         || scenario_boot(s.name) != Boot::Bios
         || s.expect.iter().any(|e| e.contains("pid "))
         || net_marker(s.name).is_some()
+        || DISK_SCENARIOS.iter().any(|d| d.0 == s.name)
     {
         return None;
     }
@@ -3389,10 +3407,12 @@ const NOT_IN_UM: &[(&str, &str)] = &[
 
 /// Whether gala-um runs scenario `s`: a program's own scenario (its
 /// program and expected lines, no other kernel flags), except network
-/// scenarios (they need a network card and xtask's client) and NOT_IN_UM.
+/// scenarios (they need a network card and xtask's client), disk scenarios
+/// (no virtio-blk in a Linux process) and NOT_IN_UM.
 fn runs_in_um(s: &Scenario) -> bool {
     scenario_program(s).is_some()
         && net_marker(s.name).is_none()
+        && !DISK_SCENARIOS.iter().any(|d| d.0 == s.name)
         && !NOT_IN_UM.iter().any(|(n, _)| *n == s.name)
 }
 
@@ -3648,6 +3668,7 @@ fn run_vm(
     timeout: Duration,
     net: Option<(&'static str, NetClient)>,
     stop_after_client: bool,
+    disk: Option<&Path>,
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let log = iso.with_extension("serial.log");
     let _ = fs::remove_file(&log);
@@ -3668,6 +3689,9 @@ fn run_vm(
     let (marker, kind) = net.unwrap_or(("", NetClient::Echo));
     if let Some(port) = port {
         add_net(&mut cmd, port);
+    }
+    if let Some(disk) = disk {
+        add_disk(&mut cmd, disk);
     }
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn QEMU: {e}"))?;
     let start = Instant::now();
@@ -3749,6 +3773,59 @@ fn add_net(cmd: &mut Command, port: u16) {
         .arg(format!("user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:7"))
         // The legacy (0.9.5) interface: one I/O BAR (see docs/ARCHITECTURE.md).
         .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
+}
+
+/// A virtio-blk disk backed by the raw image `path` (the legacy
+/// interface, as for the network card).
+fn add_disk(cmd: &mut Command, path: &Path) {
+    cmd.arg("-drive")
+        .arg(format!("if=none,id=d0,format=raw,file={}", path.display()))
+        .args(["-device", "virtio-blk-pci,drive=d0,disable-legacy=off"]);
+}
+
+/// Scenarios that get a disk: (name, size in bytes, what to put on the
+/// fresh image, what the image must hold afterwards).
+type DiskSetup = fn(&mut [u8]);
+type DiskCheck = fn(&[u8]) -> Result;
+const DISK_SCENARIOS: &[(&str, usize, DiskSetup, DiskCheck)] =
+    &[("disk_test", 16 << 20, disk_test_setup, disk_test_check)];
+
+/// disk_test reads this at the start of sector 1.
+fn disk_test_setup(image: &mut [u8]) {
+    let text = b"gala disk_test sector 1";
+    image[512..512 + text.len()].copy_from_slice(text);
+}
+
+/// disk_test wrote sector 2: its text, then each byte's offset (mod 256).
+fn disk_test_check(image: &[u8]) -> Result {
+    let text = b"written by disk_test";
+    let sector = &image[1024..1536];
+    let ok = sector.starts_with(text)
+        && sector.iter().enumerate().skip(text.len()).all(|(i, &b)| b == i as u8);
+    if ok {
+        Ok(())
+    } else {
+        Err("sector 2 of the disk image does not hold what disk_test wrote".into())
+    }
+}
+
+/// Makes scenario `name`'s fresh disk image next to `iso`, if it has one.
+fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
+    let Some(&(_, size, setup, _)) = DISK_SCENARIOS.iter().find(|d| d.0 == name) else {
+        return Ok(None);
+    };
+    let mut image = vec![0u8; size];
+    setup(&mut image);
+    let path = iso.with_extension("disk.img");
+    fs::write(&path, &image).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(Some(path))
+}
+
+/// Checks scenario `name`'s disk image after its run.
+fn check_disk(name: &str, path: &Path) -> Result {
+    let Some(&(.., check)) = DISK_SCENARIOS.iter().find(|d| d.0 == name) else { return Ok(()) };
+    let image = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    check(&image)
 }
 
 /// `cargo xtask serve <scenario> [port]`: boots a NET_SCENARIOS entry as
@@ -4122,7 +4199,7 @@ fn bench_results(text: &str) -> Vec<(String, u64)> {
 fn bench(release: bool, windows: Option<&Path>) -> Result {
     build_kernel(release)?;
     let iso = make_iso(release, "bench", "qemu_exit noscreen run=bench.exe", &[])?;
-    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, None, false)?;
+    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, None, false, None)?;
     if status.and_then(|s| s.code()) != Some(QEMU_EXIT_SUCCESS) || !serial.contains("bench: done") {
         return Err(format!(
             "bench did not finish; see {}",
@@ -4207,7 +4284,17 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         Vm::Batch(_) => None,
     };
     let stop = matches!(vm, Vm::Single(s) if s.exit_status == XTASK_STOPS);
-    let (status, serial, time) = match run_vm(iso, boot, timeout, net, stop) {
+    let single = match vm {
+        Vm::Single(s) => Some(s.name),
+        Vm::Batch(_) => None,
+    };
+    let disk = match single.map(|name| new_disk(name, iso)).transpose() {
+        Ok(d) => d.flatten(),
+        Err(e) => {
+            return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
+        }
+    };
+    let (status, serial, time) = match run_vm(iso, boot, timeout, net, stop, disk.as_deref()) {
         Ok(r) => r,
         Err(e) => {
             return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
@@ -4219,13 +4306,15 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
             let events = fs::read_to_string(iso.with_extension("events.jsonl")).unwrap_or_default();
             let wanted = EVENT_EXPECT.iter().filter(|(n, _)| *n == s.name).flat_map(|(_, e)| *e);
             let missing: Vec<&str> = wanted.copied().filter(|e| !events.contains(e)).collect();
-            let verdict = judge(s, code, status.is_none(), &serial).and_then(|()| {
-                if missing.is_empty() {
-                    Ok(())
-                } else {
-                    Err(format!("event stream lacks {missing:?}"))
-                }
-            });
+            let verdict = judge(s, code, status.is_none(), &serial)
+                .and_then(|()| {
+                    if missing.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(format!("event stream lacks {missing:?}"))
+                    }
+                })
+                .and_then(|()| disk.as_deref().map_or(Ok(()), |d| check_disk(s.name, d)));
             vec![(*s, verdict)]
         }
         Vm::Batch(group) => group
@@ -4272,14 +4361,17 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
 
 /// Boots a scenario alone (for reports), without printing its log.
 fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
+    let disk = new_disk(scenario.name, iso)?;
     let (status, serial, _) = run_vm(
         iso,
         scenario_boot(scenario.name),
         scenario_timeout(scenario.name),
         net_marker(scenario.name),
         scenario.exit_status == XTASK_STOPS,
+        disk.as_deref(),
     )?;
-    judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial)
+    judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial)?;
+    disk.as_deref().map_or(Ok(()), |d| check_disk(scenario.name, d))
 }
 
 /// Boot modules for an ISO with kernel command line `cmdline`: gala's

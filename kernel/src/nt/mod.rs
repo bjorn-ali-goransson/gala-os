@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod afd;
 pub mod context;
+pub mod disk;
 pub mod file;
 pub mod job;
 pub mod keyed_event;
@@ -40,6 +41,9 @@ pub fn init() {
     }
     if let Err(e) = file::init() {
         panic!("file system: {e:?}");
+    }
+    if let Err(e) = disk::init() {
+        warn!("disk: cannot name it: {e:?}");
     }
     if let Err(e) = pipe::init() {
         panic!("named pipes: {e:?}");

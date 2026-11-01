@@ -338,6 +338,10 @@ pub enum ObjectBody {
     Pipe(super::pipe::PipeEnd),
     /// `\Device\Null` (`\??\NUL`, the DOS device NUL).
     NullDevice,
+    /// `\Device\Harddisk0\DR0` (`\??\PhysicalDrive0`): the disk (nt::disk).
+    DiskDevice,
+    /// An open of the disk: raw sector access.
+    Disk(super::disk::DiskFile),
     /// An open of `\Device\Null`: reads are at end of file, writes are
     /// discarded. Signaled (waits on it return at once).
     Null(Dispatcher),
@@ -412,6 +416,8 @@ impl KObject {
             ObjectBody::Pipe(_) => "File",
             ObjectBody::NullDevice => "Device",
             ObjectBody::Null(_) => "File",
+            ObjectBody::DiskDevice => "Device",
+            ObjectBody::Disk(_) => "File",
             ObjectBody::Key(_) => "Key",
             ObjectBody::Job(_) => "Job",
             ObjectBody::KeyedEvent(_) => "KeyedEvent",
@@ -447,6 +453,7 @@ impl KObject {
             ObjectBody::Socket(e) => Some(&e.state.dispatcher),
             ObjectBody::Pipe(p) => Some(&*p.dispatcher),
             ObjectBody::Null(d) => Some(d),
+            ObjectBody::Disk(d) => Some(&d.dispatcher),
             ObjectBody::ConsoleInput
             | ObjectBody::ConsoleOutput
             | ObjectBody::Directory(_)
@@ -456,6 +463,7 @@ impl KObject {
             | ObjectBody::AfdDevice
             | ObjectBody::NamedPipeDevice
             | ObjectBody::NullDevice
+            | ObjectBody::DiskDevice
             | ObjectBody::Key(_)
             | ObjectBody::Job(_)
             | ObjectBody::KeyedEvent(_)
@@ -481,7 +489,9 @@ impl KObject {
             | ObjectBody::NamedPipeDevice
             | ObjectBody::Pipe(_)
             | ObjectBody::NullDevice
-            | ObjectBody::Null(_) => FILE_MAPPING,
+            | ObjectBody::Null(_)
+            | ObjectBody::DiskDevice
+            | ObjectBody::Disk(_) => FILE_MAPPING,
             ObjectBody::Process(_) => PROCESS_MAPPING,
             ObjectBody::Key(_) => super::registry::KEY_MAPPING,
             ObjectBody::Job(_) => super::job::JOB_MAPPING,

@@ -1007,7 +1007,14 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       cluster, postgres serves it (background processes, a backend per
       connection), the host's psql runs `select 40+2` (about 50 s in the
       kernel; the scenario gets 3 GiB like Elasticsearch). Next: persistent
-      LocalDB, MinGit, disk D1-D3. Open: the JDK's console path (GetConsoleMode succeeding
+      LocalDB, MinGit, disk D1-D3; LocalDB kept across reboots needs the
+      disk, so the disk comes first. **D1 done (2026-11-01)**: a virtio-blk
+      driver (`disk`) and `\\.\PhysicalDrive0` for administrators (raw
+      sector reads and writes, the length and geometry IOCTLs, flush,
+      kernel32's DeviceIoControl; `disk_test` on a 16 MiB image xtask
+      checks afterwards). Next: D2, a file system with descriptors on the
+      disk, mounted where LocalDB keeps its instance; then a two-boot
+      scenario (create a database, reboot, query it). Open: the JDK's console path (GetConsoleMode succeeding
       on the standard handles made java_http fail intermittently).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)

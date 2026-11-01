@@ -21,6 +21,7 @@ pub mod boot;
 pub mod cmdline;
 #[macro_use]
 pub mod console;
+pub mod disk;
 pub mod events;
 pub mod fs;
 /// gala-um's platform: the NT layer inside a Linux process.
@@ -117,6 +118,7 @@ pub fn kernel_main() -> ! {
         }
         Err(e) => warn!("smp: cannot start the other CPUs: {e:?}"),
     }
+    disk::init();
     nt::init();
     net::init();
     for module in info.modules.iter() {

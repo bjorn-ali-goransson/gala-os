@@ -29,6 +29,7 @@ const STATUS_DRIVER: u8 = 2;
 const STATUS_DRIVER_OK: u8 = 4;
 const STATUS_FAILED: u8 = 0x80;
 
+const DESC_F_NEXT: u16 = 1;
 const DESC_F_WRITE: u16 = 2;
 const AVAIL_F_NO_INTERRUPT: u16 = 1;
 const PAGE: usize = 4096;
@@ -105,8 +106,10 @@ impl Drop for DmaRegion {
     }
 }
 
-/// A split virtqueue whose descriptors each point at a fixed buffer slot
-/// (no chains): slot `i` is descriptor `i`.
+/// A split virtqueue whose descriptors each point at a fixed buffer slot:
+/// slot `i` is descriptor `i`, or, in a chained queue, descriptors `2i`
+/// (the device reads) and `2i + 1` (the device writes) over consecutive
+/// parts of slot `i`.
 pub struct Virtqueue {
     rings: DmaRegion,
     buffers: DmaRegion,
@@ -115,6 +118,7 @@ pub struct Virtqueue {
     slot_size: usize,
     slots: u16,
     device_writes: bool,
+    chained: bool,
     avail_idx: u16,
     last_used: u16,
     in_flight: u64,
@@ -130,11 +134,17 @@ fn layout(size: u16) -> (usize, usize) {
 }
 
 impl Virtqueue {
-    fn new(size: u16, slots: u16, slot_size: usize, device_writes: bool) -> Option<Self> {
+    fn new(
+        size: u16,
+        slots: u16,
+        slot_size: usize,
+        device_writes: bool,
+        chained: bool,
+    ) -> Option<Self> {
         let n = usize::from(size);
         let (used_offset, total) = layout(size);
         let rings = DmaRegion::new(total)?;
-        let slots = slots.min(size).min(64);
+        let slots = slots.min(if chained { size / 2 } else { size }).min(64);
         let buffers = DmaRegion::new(usize::from(slots) * slot_size)?;
         if rings.phys() >= MAX_QUEUE_PHYS {
             return None;
@@ -147,6 +157,7 @@ impl Virtqueue {
             slot_size,
             slots,
             device_writes,
+            chained,
             avail_idx: 0,
             last_used: 0,
             in_flight: 0,
@@ -195,18 +206,50 @@ impl Virtqueue {
     /// Gives slot `slot` (its first `len` bytes) to the device. The caller
     /// then notifies the device (`LegacyDevice::notify`).
     pub fn post(&mut self, slot: u16, len: usize) -> bool {
-        if slot >= self.slots || self.posted(slot) || len > self.slot_size {
+        if self.chained || slot >= self.slots || self.posted(slot) || len > self.slot_size {
             return false;
         }
-        let desc = 16 * usize::from(slot);
-        let addr = self.buffers.phys() + (usize::from(slot) * self.slot_size) as u64;
-        self.rings.write(desc, addr);
-        self.rings.write(desc + 8, len as u32);
-        self.rings.write(desc + 12, if self.device_writes { DESC_F_WRITE } else { 0 });
-        self.rings.write(desc + 14, 0u16);
+        let flags = if self.device_writes { DESC_F_WRITE } else { 0 };
+        self.describe(slot, 0, len, flags, None);
+        self.make_available(slot, slot)
+    }
+
+    /// Gives slot `slot` of a chained queue to the device: its first
+    /// `readable` bytes for the device to read, the `writable` bytes after
+    /// them for it to write.
+    pub fn post_chain(&mut self, slot: u16, readable: usize, writable: usize) -> bool {
+        if !self.chained
+            || slot >= self.slots
+            || self.posted(slot)
+            || readable == 0
+            || writable == 0
+            || readable + writable > self.slot_size
+        {
+            return false;
+        }
+        let (head, tail) = (2 * slot, 2 * slot + 1);
+        self.describe(head, 0, readable, DESC_F_NEXT, Some(tail));
+        self.describe(tail, readable, writable, DESC_F_WRITE, None);
+        self.make_available(slot, head)
+    }
+
+    /// Fills descriptor `desc` with `len` bytes at `offset` in the slot the
+    /// descriptor belongs to.
+    fn describe(&mut self, desc: u16, offset: usize, len: usize, flags: u16, next: Option<u16>) {
+        let slot = if self.chained { desc / 2 } else { desc };
+        let at = 16 * usize::from(desc);
+        let addr = self.buffers.phys() + (usize::from(slot) * self.slot_size + offset) as u64;
+        self.rings.write(at, addr);
+        self.rings.write(at + 8, len as u32);
+        self.rings.write(at + 12, flags);
+        self.rings.write(at + 14, next.unwrap_or(0));
+    }
+
+    /// Puts descriptor (chain) `head` of slot `slot` on the available ring.
+    fn make_available(&mut self, slot: u16, head: u16) -> bool {
         let avail = 16 * usize::from(self.size);
         let ring_entry = avail + 4 + 2 * usize::from(self.avail_idx % self.size);
-        self.rings.write(ring_entry, slot);
+        self.rings.write(ring_entry, head);
         // The descriptor and ring entry before the index the device reads.
         fence(Ordering::SeqCst);
         self.avail_idx = self.avail_idx.wrapping_add(1);
@@ -228,7 +271,9 @@ impl Virtqueue {
         let id: u32 = self.rings.read(entry);
         let len: u32 = self.rings.read(entry + 4);
         self.last_used = self.last_used.wrapping_add(1);
-        let slot = u16::try_from(id).ok().filter(|&s| s < self.slots && self.posted(s))?;
+        let head = u16::try_from(id).ok()?;
+        let slot = if self.chained { head / 2 } else { head };
+        let slot = Some(slot).filter(|&s| s < self.slots && self.posted(s))?;
         self.in_flight &= !(1 << slot);
         Some((slot, (len as usize).min(self.slot_size)))
     }
@@ -284,6 +329,11 @@ impl LegacyDevice {
         self.read(DEVICE_CONFIG + offset)
     }
 
+    /// The little-endian 32-bit field at `offset` of the configuration.
+    pub fn config_u32(&self, offset: u16) -> u32 {
+        self.read(DEVICE_CONFIG + offset)
+    }
+
     /// Sets up queue `index` with up to `slots` buffers of `slot_size` bytes
     /// (`device_writes`: receive buffers).
     pub fn setup_queue(
@@ -292,6 +342,28 @@ impl LegacyDevice {
         slots: u16,
         slot_size: usize,
         device_writes: bool,
+    ) -> Result<(), InitError> {
+        self.setup(index, slots, slot_size, device_writes, false)
+    }
+
+    /// Sets up queue `index` for requests the device both reads and
+    /// writes (`Virtqueue::post_chain`), as a block device's are.
+    pub fn setup_chained_queue(
+        &mut self,
+        index: u16,
+        slots: u16,
+        slot_size: usize,
+    ) -> Result<(), InitError> {
+        self.setup(index, slots, slot_size, false, true)
+    }
+
+    fn setup(
+        &mut self,
+        index: u16,
+        slots: u16,
+        slot_size: usize,
+        device_writes: bool,
+        chained: bool,
     ) -> Result<(), InitError> {
         let i = usize::from(index);
         if i >= MAX_QUEUES {
@@ -302,8 +374,8 @@ impl LegacyDevice {
         if size == 0 || !size.is_power_of_two() {
             return Err(InitError::NoQueue(index));
         }
-        let queue =
-            Virtqueue::new(size, slots, slot_size, device_writes).ok_or(InitError::OutOfMemory)?;
+        let queue = Virtqueue::new(size, slots, slot_size, device_writes, chained)
+            .ok_or(InitError::OutOfMemory)?;
         self.write(QUEUE_ADDRESS, (queue.rings.phys() / PAGE as u64) as u32);
         self.queues[i] = Some(queue);
         Ok(())

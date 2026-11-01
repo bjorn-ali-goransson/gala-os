@@ -244,6 +244,12 @@ pub fn lookup_parse(
     })
 }
 
+/// Creates the permanent directory object `path`.
+pub fn create_directory(path: &[u16]) -> Result<(), NtStatus> {
+    let dir = new_directory().map_err(|_| NtStatus::NO_MEMORY)?;
+    create(None, path, dir, true, false).map(drop)
+}
+
 /// A permanent symbolic link object pointing at `target`.
 pub fn new_symbolic_link(target: &[u16]) -> Result<ObjectRef, NtStatus> {
     let link = SymbolicLink { target: owned(target)? };

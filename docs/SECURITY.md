@@ -152,5 +152,6 @@ start.
    and Power Users deny-only, privileges deleted, the default DACL
    extended), CheckTokenMembership, SetTokenInformation, mandatory labels
    (no write up). Left: labels on objects low tokens create.
-Then the disk: D1 a virtio-blk driver, D2 a file system with
-descriptors, D3 registry hives on it.
+Then the disk: D1 a virtio-blk driver (done, 2026-11-01: `disk_test`;
+`\\.\PhysicalDrive0` for Administrators and SYSTEM only), D2 a file
+system with descriptors, D3 registry hives on it.
