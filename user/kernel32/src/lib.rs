@@ -2618,7 +2618,8 @@ fn default_stack_commit() -> usize {
 
 /// CreateThread: the stack is reserved and partly committed here, with a
 /// guard page (see below), then NtCreateThread starts the thread at
-/// `thread_start`. Thread attributes are not supported yet.
+/// `thread_start`. SECURITY_ATTRIBUTES give the thread's descriptor and
+/// make the handle inheritable.
 #[unsafe(no_mangle)]
 pub extern "system" fn CreateThread(
     attributes: *mut c_void,
@@ -2630,9 +2631,8 @@ pub extern "system" fn CreateThread(
 ) -> Handle {
     const CREATE_SUSPENDED: u32 = 0x4;
     const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x1_0000;
-    if !attributes.is_null() || flags & !(CREATE_SUSPENDED | STACK_SIZE_PARAM_IS_A_RESERVATION) != 0
-    {
-        unsupported(b"kernel32.dll!CreateThread(attributes/flags)", u64::from(flags));
+    if flags & !(CREATE_SUSPENDED | STACK_SIZE_PARAM_IS_A_RESERVATION) != 0 {
+        unsupported(b"kernel32.dll!CreateThread(flags)", u64::from(flags));
         return fail_with(ERROR_NOT_SUPPORTED, core::ptr::null_mut());
     }
     // A reservation given as such; otherwise the size is what to commit and
@@ -2685,18 +2685,21 @@ pub extern "system" fn CreateThread(
     let initial_teb = [0, 0, top, limit, stack];
     let (mut h, mut cid) = (core::ptr::null_mut(), [0usize; 2]);
     // SAFETY: valid pointers for the call.
-    let status = unsafe {
+    // SECURITY_ATTRIBUTES: the descriptor and inheritance, as
+    // OBJECT_ATTRIBUTES without a name.
+    let status = sync::with_name_sa(core::ptr::null(), attributes, |oa| unsafe {
         NtCreateThread(
             &mut h,
             0x1f_ffff, // THREAD_ALL_ACCESS
-            core::ptr::null(),
+            oa,
             CURRENT_PROCESS,
             &mut cid,
             &context,
             &initial_teb,
             u8::from(flags & CREATE_SUSPENDED != 0),
         )
-    };
+    })
+    .unwrap_or(0xc000_000d); // STATUS_INVALID_PARAMETER
     if status != STATUS_SUCCESS {
         VirtualFree(stack as *mut c_void, 0, 0x8000);
         return fail(status, core::ptr::null_mut());

@@ -4,7 +4,9 @@
 //! - The executable's own TLS: the template's values on every thread,
 //!   the zero fill zero, each thread with its own copy; its TLS callback
 //!   sees DLL_PROCESS_ATTACH before the entry point, DLL_THREAD_ATTACH
-//!   and DLL_THREAD_DETACH for each new thread.
+//!   and DLL_THREAD_DETACH for each new thread; a user APC it queues to
+//!   the thread during process initialization has run when the entry
+//!   point starts (the loader ends with NtContinue(TestAlert)).
 //! - A DLL with static TLS loaded later (tlsdll.dll, LoadLibrary): its
 //!   TLS callback and DllMain see DLL_PROCESS_ATTACH; a thread that
 //!   existed before the load still gets its own initialized block (no
@@ -30,6 +32,8 @@ unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn ExitProcess(code: u32) -> !;
+    fn QueueUserAPC(routine: extern "system" fn(usize), thread: Handle, data: usize) -> u32;
+    fn GetCurrentThread() -> Handle;
     fn CloseHandle(h: Handle) -> Bool;
     fn CreateThread(
         attrs: *mut c_void,
@@ -122,6 +126,20 @@ extern "system" fn tls_callback(_module: usize, reason: u32, _reserved: usize) {
     if let Some(c) = SEEN.get(reason as usize) {
         c.fetch_add(1, Ordering::SeqCst);
     }
+    if reason == 1 {
+        // An APC queued during process initialization (Cygwin's runtime
+        // starts its threads this way) runs before the entry point.
+        // SAFETY: a plain call on this thread.
+        unsafe { QueueUserAPC(early_apc, GetCurrentThread(), 7) };
+    }
+}
+
+static EARLY_APC: AtomicU32 = AtomicU32::new(0);
+/// EARLY_APC when the entry point started.
+static EARLY_APC_AT_ENTRY: AtomicU32 = AtomicU32::new(u32::MAX);
+
+extern "system" fn early_apc(data: usize) {
+    EARLY_APC.store(data as u32, Ordering::SeqCst);
 }
 
 /// This thread's copy of slot `i` (0 TLS_START, 1-2 the values, 3-4 the
@@ -270,6 +288,7 @@ fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     // The executable's TLS on the initial thread.
     c.eq(ATTACH_AT_ENTRY.load(Ordering::SeqCst).into(), 1)?; // PROCESS_ATTACH ran first
+    c.eq(EARLY_APC_AT_ENTRY.load(Ordering::SeqCst).into(), 7)?; // and its APC
     c.eq(get(0), 0x1010)?;
     c.eq(get(1), 0x1111)?;
     c.eq(get(2), 0x2222)?;
@@ -366,6 +385,7 @@ fn run() -> Result<(), u32> {
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
     ATTACH_AT_ENTRY.store(SEEN[1].load(Ordering::SeqCst), Ordering::SeqCst);
+    EARLY_APC_AT_ENTRY.store(EARLY_APC.load(Ordering::SeqCst), Ordering::SeqCst);
     let code = match run() {
         Ok(()) => {
             out(b"tls_test: ok\r\n");

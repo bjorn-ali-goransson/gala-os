@@ -20,10 +20,13 @@
 //! - a critical section initialized by kernel32 entered and left through
 //!   ntdll (RtlEnter/LeaveCriticalSection) and kernel32, recursively;
 //! - NtQueryEvent (type and state), NtCreateDirectoryObject (a second
-//!   create: STATUS_OBJECT_NAME_COLLISION) and NtOpenDirectoryObject,
+//!   create: STATUS_OBJECT_NAME_COLLISION) and NtOpenDirectoryObject, also
+//!   through `\Sessions\BNOLINKS\1` (the session's BaseNamedObjects),
 //!   NtQueryTimerResolution, RtlSetCurrentDirectory_U;
 //! - kernel32: VirtualProtectEx on this process, TerminateThread (its
-//!   exit code), QueryUnbiasedInterruptTime.
+//!   exit code), QueryUnbiasedInterruptTime; kernelbase.dll's
+//!   QueryInterruptTime(Precise), QueryUnbiasedInterruptTimePrecise and
+//!   SetThreadDescription (S_OK), found by LoadLibrary and GetProcAddress.
 //!
 //! Prints `rtl_test: ok` or exits with the number of the failing check.
 
@@ -173,6 +176,9 @@ unsafe extern "system" {
     fn QueryUnbiasedInterruptTime(t: *mut u64) -> i32;
     fn GetCurrentDirectoryW(len: u32, buf: *mut u16) -> u32;
     fn SetCurrentDirectoryW(path: *const u16) -> i32;
+    fn LoadLibraryW(name: *const u16) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *const c_void;
+    fn GetCurrentThread() -> Handle;
 }
 
 // The compiler's memcpy/memset/memcmp, from ntdll.
@@ -475,6 +481,18 @@ fn calls(c: &mut Checks) -> Result<(), u32> {
         c.eq(NtOpenDirectoryObject(&mut opened, 0x3, &oa).into(), STATUS_SUCCESS)?;
         NtClose(opened);
         NtClose(dir);
+        // \Sessions\BNOLINKS\<session> names the session's
+        // BaseNamedObjects (Cygwin keeps its per-session objects there).
+        let linked = w::<48>("\\Sessions\\BNOLINKS\\1\\gala_rtl_test");
+        let us_linked = us(&linked);
+        let oa2 = ObjectAttributes { name: &us_linked, ..oa };
+        c.eq(NtCreateDirectoryObject(&mut dir, 0xf000f, &oa2).into(), STATUS_SUCCESS)?;
+        let in_session = w::<48>("\\Sessions\\1\\BaseNamedObjects\\gala_rtl_test");
+        let us_session = us(&in_session);
+        let oa3 = ObjectAttributes { name: &us_session, ..oa };
+        c.eq(NtOpenDirectoryObject(&mut opened, 0x3, &oa3).into(), STATUS_SUCCESS)?;
+        NtClose(opened);
+        NtClose(dir);
 
         let (mut max, mut min, mut current) = (0u32, 0u32, 0u32);
         c.eq(NtQueryTimerResolution(&mut max, &mut min, &mut current).into(), STATUS_SUCCESS)?;
@@ -512,6 +530,23 @@ fn calls(c: &mut Checks) -> Result<(), u32> {
         CloseHandle(t);
         let mut time = 0u64;
         c.ok(QueryUnbiasedInterruptTime(&mut time) != 0 && time > 0, 0)?;
+
+        // kernelbase.dll (Cygwin's runtime takes these from it).
+        let kb = LoadLibraryW(w::<16>("kernelbase.dll").as_ptr());
+        c.ok(!kb.is_null(), 0)?;
+        let query = GetProcAddress(kb, c"QueryInterruptTime".as_ptr().cast());
+        c.ok(!query.is_null(), 0)?;
+        let query: extern "system" fn(*mut u64) = core::mem::transmute(query);
+        let mut t = 0u64;
+        query(&mut t);
+        c.ok(t > 0, 0)?;
+        let precise = GetProcAddress(kb, c"QueryUnbiasedInterruptTimePrecise".as_ptr().cast());
+        c.ok(!precise.is_null(), 0)?;
+        let describe = GetProcAddress(kb, c"SetThreadDescription".as_ptr().cast());
+        c.ok(!describe.is_null(), 0)?;
+        let describe: extern "system" fn(Handle, *const u16) -> i32 =
+            core::mem::transmute(describe);
+        c.eq(describe(GetCurrentThread(), w::<4>("sig").as_ptr()) as u64, 0)?; // S_OK
     }
     Ok(())
 }

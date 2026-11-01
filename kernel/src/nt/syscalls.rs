@@ -1835,7 +1835,7 @@ fn nt_continue(call: &mut Call<'_>) -> NtStatus {
 ///                ProcessHandle, *ClientId, *ThreadContext, *InitialTeb,
 ///                CreateSuspended)
 fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
-    let (out, access, _attrs) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
+    let (out, access, attrs) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
     tri!(call.check_current_process(Handle(arg!(call, 3))));
     let (cid_ptr, ctx_ptr, teb_ptr) = (arg!(call, 4), arg!(call, 5), arg!(call, 6));
     let suspended = arg!(call, 7) as u8 != 0;
@@ -1865,7 +1865,10 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
     ));
     let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     let tid = t.id;
-    let status = call.return_handle(out, object.clone(), access, 0);
+    // OBJECT_ATTRIBUTES: the thread's descriptor and OBJ_INHERIT.
+    tri!(security_calls::assign_object(call, &object, attrs));
+    let handle_attributes = tri!(call.handle_attributes(attrs));
+    let status = call.return_handle(out, object.clone(), access, handle_attributes);
     if status != NtStatus::SUCCESS {
         thread::request_termination(&object, status);
         thread::resume(&object);

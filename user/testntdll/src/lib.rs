@@ -918,8 +918,15 @@ fn load_module(name: &[u8], search: Search) -> Result<usize, u32> {
             tls::callbacks(base, tls::DLL_PROCESS_ATTACH);
         }
         with_modules(|m| m[slot].attached = true);
+        // lpvReserved: non-NULL for a DLL loaded with the program (the
+        // initial context, as Windows passes), NULL for LoadLibrary.
+        let reserved = if STARTUP.load(core::sync::atomic::Ordering::Relaxed) {
+            INITIAL_CONTEXT.load(core::sync::atomic::Ordering::Relaxed)
+        } else {
+            0
+        };
         match entry_point(base) {
-            Some(entry) if entry(base, 1, 0) == 0 => Err(STATUS_DLL_INIT_FAILED),
+            Some(entry) if entry(base, 1, reserved) == 0 => Err(STATUS_DLL_INIT_FAILED),
             _ => Ok(()),
         }
     };
@@ -1485,6 +1492,10 @@ pub extern "system" fn RtlGetNtVersionNumbers(major: *mut u32, minor: *mut u32, 
     }
 }
 
+/// The initial thread's CONTEXT while the process starts (DllMain's
+/// lpvReserved for the DLLs loaded with the program).
+static INITIAL_CONTEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 /// The initial thread's first user-mode instruction.
 ///
 /// # Safety
@@ -1507,6 +1518,7 @@ pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base:
     };
     // The process heap, before any DLL's code runs.
     heap::create_process_heap();
+    INITIAL_CONTEXT.store(context as usize, core::sync::atomic::Ordering::Relaxed);
     let started = with_loader_lock(|| {
         register_startup_modules(ntdll_base as usize, image)?;
         // The executable's TLS (and this thread's blocks) before its
@@ -1522,7 +1534,9 @@ pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base:
     if let Err(status) = started {
         NtTerminateProcess(-1, status);
     }
-    NtContinue(context, 0);
+    // TestAlert, as Windows' loader: user APCs queued during
+    // initialization (DllMain, TLS callbacks) run before the entry point.
+    NtContinue(context, 1);
     // NtContinue only returns on failure.
     loop {
         core::hint::spin_loop();

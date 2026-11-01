@@ -28,13 +28,21 @@ pub extern "C" fn gala_get_value() -> u64 {
 #[unsafe(no_mangle)]
 pub static mut GALA_ATTACH_COUNT: u64 = 0;
 
+/// DllMain's lpvReserved at the last DLL_PROCESS_ATTACH: non-NULL when
+/// the DLL was loaded with the program, NULL for LoadLibrary.
+#[unsafe(no_mangle)]
+pub static mut GALA_ATTACH_RESERVED: u64 = 0;
+
 /// Entry point required by our link flags; a DllMain that counts attaches.
 #[unsafe(no_mangle)]
-pub extern "system" fn mainCRTStartup(_instance: usize, reason: u32, _reserved: usize) -> i32 {
+pub extern "system" fn mainCRTStartup(_instance: usize, reason: u32, reserved: usize) -> i32 {
     if reason == 1 {
         // SAFETY: the loader calls DllMain with the loader lock held, so
         // nothing else touches the counter at the same time.
-        unsafe { GALA_ATTACH_COUNT += 1 };
+        unsafe {
+            GALA_ATTACH_COUNT += 1;
+            GALA_ATTACH_RESERVED = reserved as u64;
+        }
     }
     1
 }

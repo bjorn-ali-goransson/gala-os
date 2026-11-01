@@ -1152,7 +1152,13 @@ Windows, never shadows the system's DLLs.)
   RtlEnter/LeaveCriticalSection (one implementation, so a section works
   whichever DLL a program uses). NtCreateDirectoryObject (gala's number
   0x7f24) makes object directories (Cygwin keeps its shared objects in
-  one). Tested by `rtl_test`.
+  one; `\Sessions\BNOLINKS\0` and `\1` link to the sessions'
+  BaseNamedObjects). Tested by `rtl_test`. The loader passes DllMain a
+  non-NULL lpvReserved (the initial CONTEXT) for DLLs loaded with the
+  program and NULL for LoadLibrary, and ends with NtContinue(TestAlert):
+  APCs queued during initialization run before the entry point.
+  kernelbase.dll exists for what programs look up only there
+  (QueryInterruptTime and friends, SetThreadDescription).
 - **Console** (kernel32 console.rs): the standard handles are the serial
   line, a character device that is not a console (as redirected output:
   FILE_TYPE_CHAR, GetConsoleMode fails); the console itself is CONOUT$ /

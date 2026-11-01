@@ -187,6 +187,11 @@ fn run() -> Result<(), u32> {
     // SAFETY: testdll's exported counter.
     let attaches = || unsafe { core::ptr::read_volatile(count as *const u64) };
     c.eq(attaches(), 1)?;
+    // Loaded at run time: DllMain's lpvReserved was NULL.
+    let (s, reserved) = api.proc(dll, b"GALA_ATTACH_RESERVED");
+    c.eq(s.into(), STATUS_SUCCESS.into())?;
+    // SAFETY: testdll's exported value.
+    c.eq(unsafe { core::ptr::read_volatile(reserved as *const u64) }, 0)?;
 
     // Handles of loaded modules; missing DLLs.
     let (s, ntdll) = api.handle(&wide!("ntdll.dll"));

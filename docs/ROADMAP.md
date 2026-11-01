@@ -1095,8 +1095,24 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       VirtualProtectEx, TerminateThread, QueryUnbiasedInterruptTime
       (`rtl_test`); the rest of its ~100 missing imports are stubs (comm,
       tape, console screen, transactions, quotas, EAs, NtAccessCheck,
-      clipboard). Next: bash now runs but spins in a system call during
-      the runtime's startup; find which.
+      clipboard). Then the runtime's startup (from Cygwin's published
+      source): `\Sessions\BNOLINKS\<n>` links (its per-session object
+      directory; rtl_test); DllMain's lpvReserved non-NULL for DLLs loaded
+      with the program (Cygwin otherwise takes itself as dynamically loaded
+      and defers its signal thread; import_test, loader_test); the loader
+      ends with NtContinue(TestAlert), so APCs queued during initialization
+      run before the entry point (tls_test); CreateThread with
+      SECURITY_ATTRIBUTES (descriptor, inheritable handle;
+      kernel32_thread_test); a kernelbase.dll (QueryInterruptTime(Precise),
+      QueryUnbiasedInterruptTimePrecise, SetThreadDescription; rtl_test).
+      **Stopped here (timeboxed, 2026-11-01)**: bash gets past the startup
+      deadlock (two threads yielding forever) and now dies with an access
+      violation at address 0 (in bash's or the runtime's code) after
+      looking up kernelbase's VirtualAlloc2 (a stub, which GetProcAddress
+      does not return) and NtQueryInformationProcess(ProcessVmCounters, 3).
+      Next when resumed: VirtualAlloc2 (MEM_RESERVE_PLACEHOLDER and the
+      address requirements Cygwin's mmap and stacks use), ProcessVmCounters,
+      then fork. The `bin\bash.exe` launcher (exit 1) is still to look at.
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to

@@ -538,6 +538,13 @@ name = "kernel32_thread_test"
 version = "0.1.0"
 
 [[package]]
+name = "kernelbase"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
 name = "keyed_event_test"
 version = "0.1.0"
 

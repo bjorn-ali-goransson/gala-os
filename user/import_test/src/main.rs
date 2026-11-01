@@ -16,6 +16,7 @@ unsafe extern "C" {
     fn gala_add(a: u64, b: u64) -> u64;
     fn gala_get_value() -> u64;
     static GALA_VALUE: u64;
+    static GALA_ATTACH_RESERVED: u64;
 }
 
 unsafe extern "C" {
@@ -99,10 +100,14 @@ fn run() -> Result<(), u32> {
         c.eq(gala_add(2, 3), 5)?;
         c.eq(gala_get_value(), INITIAL_VALUE)?;
         c.eq(core::ptr::read_volatile(&raw const GALA_VALUE), INITIAL_VALUE)?;
+        // Loaded with the program: DllMain's lpvReserved is non-NULL (Cygwin
+        // tells static from dynamic loads by it).
+        let reserved = core::ptr::read_volatile(&raw const GALA_ATTACH_RESERVED);
+        c.ok(reserved != 0, 0)?;
     }
     let mut imports = [(&[][..], 0usize); 8];
     let n = imports_from(b"testdll.dll", &mut imports);
-    c.eq(n as u64, 3)?;
+    c.eq(n as u64, 4)?;
     let (s, mbi) = query(imports[0].1);
     c.eq(s.into(), STATUS_SUCCESS.into())?;
     c.eq(mbi.kind.into(), MEM_IMAGE.into())?;

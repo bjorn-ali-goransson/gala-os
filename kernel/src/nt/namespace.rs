@@ -29,6 +29,7 @@ const SYSTEM_DIRECTORIES: &[&str] = &[
     "Sessions",
     "Sessions\\1",
     "Sessions\\1\\BaseNamedObjects",
+    "Sessions\\BNOLINKS",
 ];
 
 fn wide(s: &str) -> Result<Vec<u16>, AllocError> {
@@ -63,8 +64,14 @@ pub fn init() -> Result<(), NtStatus> {
 }
 
 /// Symbolic links that exist at boot.
-const SYSTEM_LINKS: &[(&str, &str)] =
-    &[("\\Sessions\\1\\BaseNamedObjects\\Global", "\\BaseNamedObjects")];
+/// `\Sessions\BNOLINKS\<session>` names each session's BaseNamedObjects
+/// (session 0's are the global ones), as Windows' session manager makes
+/// them; Cygwin's runtime keeps its per-session objects there.
+const SYSTEM_LINKS: &[(&str, &str)] = &[
+    ("\\Sessions\\1\\BaseNamedObjects\\Global", "\\BaseNamedObjects"),
+    ("\\Sessions\\BNOLINKS\\0", "\\BaseNamedObjects"),
+    ("\\Sessions\\BNOLINKS\\1", "\\Sessions\\1\\BaseNamedObjects"),
+];
 
 /// Compares names, ignoring ASCII case if `ci`.
 // TODO: full Unicode upcase table, as the object manager uses.

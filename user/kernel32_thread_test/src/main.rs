@@ -38,6 +38,7 @@ unsafe extern "system" {
         id: *mut u32,
     ) -> Handle;
     fn ExitThread(code: u32) -> !;
+    fn GetHandleInformation(h: Handle, flags: *mut u32) -> Bool;
     fn GetExitCodeThread(h: Handle, code: *mut u32) -> Bool;
     fn GetCurrentThreadId() -> u32;
     fn SuspendThread(h: Handle) -> u32;
@@ -293,6 +294,19 @@ fn run() -> Result<(), u32> {
         let slot: u64;
         core::arch::asm!("mov {}, gs:[{}]", out(reg) slot, in(reg) 0x1480 + 8 * index as usize, options(nostack, readonly));
         c.eq(slot, 0x1234)?;
+
+        // SECURITY_ATTRIBUTES { nLength, lpSecurityDescriptor,
+        // bInheritHandle }: an inheritable handle (Cygwin starts its
+        // threads with one).
+        let mut sa = [24usize, 0, 1];
+        let mut inh_tid = 0;
+        let inh =
+            CreateThread(sa.as_mut_ptr().cast(), 0, worker, 7 as *mut c_void, 0, &mut inh_tid);
+        c.ok(!inh.is_null() && inh_tid != 0, inh_tid.into())?;
+        let mut flags = 0;
+        c.ok(GetHandleInformation(inh, &mut flags) != 0 && flags & 1 != 0, flags.into())?;
+        c.eq(WaitForSingleObject(inh, 10_000).into(), 0)?;
+        CloseHandle(inh);
 
         // A thread that runs at once.
         let mut tid = 0;
