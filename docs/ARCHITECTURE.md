@@ -1670,6 +1670,13 @@ Layers, bottom up (N1a: the card and TCP/IP; N1b: sockets for user mode).
   the previous poll and calls the notify hook with the socket's token for
   each change; `nt::afd` uses it to signal the endpoint (so blocked
   callers re-check).
+- Readiness reports are edge-triggered on a per-socket signature
+  (state, receive and send queue lengths). Whatever the owner does to a
+  socket (send, receive, accept) marks its signature stale, so the next
+  poll reports it: otherwise a receive queue emptied by the owner and
+  refilled to the same length looked unchanged, and a pending receive
+  waited for good (winsock_test hung about once in six loaded runs; host
+  test `a_reader_is_told_of_the_next_message_of_the_same_size`).
 - `net::tcp` (N1b), the kernel's socket API, independent of NT:
   `listen(local, backlog)`, `accept`, `connect(remote)`, `send`, `recv`,
   `shutdown`, `close`, `local`/`remote` addresses, readiness. Sockets are

@@ -94,9 +94,14 @@ struct Entry {
     token: u64,
     local: Addr,
     kind: Kind,
-    /// Readiness at the last report (see `signature`).
+    /// Readiness at the last report (see `signature`); STALE after the
+    /// owner sent, received or accepted (the next poll reports it: a queue
+    /// emptied and refilled to the same length looks unchanged).
     last: u64,
 }
+
+/// No signature: the next poll reports the entry.
+const STALE: u64 = u64::MAX;
 
 struct Iface<D: Device> {
     dev: D,
@@ -568,6 +573,7 @@ pub fn accept(id: SocketId, sequence: u32, token: u64) -> Result<SocketId, NetEr
         };
         let pos = ready.iter().position(|&(q, _)| q == sequence).ok_or(NetError::InvalidState)?;
         let (_, sock) = ready.remove(pos);
+        s.entry(id)?.last = STALE;
         let local = s.tcp(sock).and_then(|t| t.local_endpoint()).map(Addr::from_endpoint);
         match s.insert(token, local.unwrap_or_default(), Kind::Conn { sock, connected: true }) {
             Ok(new) => Ok(new),
@@ -651,6 +657,9 @@ fn conn<R>(
         let Kind::Conn { sock, connected } = s.entry(id)?.kind else {
             return Err(NetError::NotConnected);
         };
+        // What the owner does to the socket is not seen by the net thread:
+        // the next poll must report the socket whatever it finds.
+        s.entry(id)?.last = STALE;
         let socket = s.tcp(sock).ok_or(NetError::NoSocket)?;
         if !connected && matches!(socket.state(), State::SynSent | State::SynReceived) {
             return Err(NetError::NotConnected);
@@ -807,4 +816,67 @@ pub fn stats() -> (u64, u64, u64, usize) {
     let Some(s) = guard.as_ref() else { return (0, 0, 0, 0) };
     let sockets = s.lo.count + s.eth.as_ref().map_or(0, |e| e.count);
     (POLLS.load(Ordering::Relaxed), s.lo.dev.packets, s.lo.dev.dropped, sockets)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stack with only the loopback interface, as `start` makes it.
+    fn loopback_stack() {
+        let lo = Iface::new(
+            Loopback::new(),
+            HardwareAddress::Ip,
+            IpCidr::new(IpAddress::Ipv4(LOOPBACK), 8),
+        )
+        .unwrap();
+        *STACK.lock() = Some(Stack {
+            lo,
+            eth: None,
+            eth_ip: None,
+            eth_mac: [0; 6],
+            entries: Vec::new(),
+            lingering: Vec::new(),
+            next_port: *EPHEMERAL.start(),
+            next_generation: 1,
+        });
+    }
+
+    /// One poll of the net thread: the tokens it would report.
+    fn poll() -> Vec<u64> {
+        let mut changed = Vec::new();
+        with_stack_quiet(|s| {
+            s.poll(&mut changed);
+            Ok(())
+        })
+        .unwrap();
+        changed
+    }
+
+    #[test]
+    fn a_reader_is_told_of_the_next_message_of_the_same_size() {
+        loopback_stack();
+        let addr = Addr { ip: [127, 0, 0, 1], port: 4000 };
+        let listener = bind(addr, 1).unwrap();
+        listen(listener, 4).unwrap();
+        let client = connect(None, addr, 2).unwrap();
+        for _ in 0..4 {
+            poll();
+        }
+        let (sequence, _) = pending(listener).unwrap();
+        let server = accept(listener, sequence, 3).unwrap();
+        poll();
+        let mut buf = [0u8; 64];
+        for round in 0..3 {
+            assert_eq!(send(client, &[round; 24]).unwrap(), 24);
+            let changed = poll();
+            // The server's socket has 24 bytes queued: its owner is told,
+            // every round, though the queue looked the same in the last
+            // report (24 bytes, consumed since).
+            assert!(changed.contains(&3), "round {round}: {changed:?}");
+            assert_eq!(recv(server, &mut buf).unwrap(), 24);
+            assert_eq!(buf[0], round);
+        }
+        *STACK.lock() = None;
+    }
 }

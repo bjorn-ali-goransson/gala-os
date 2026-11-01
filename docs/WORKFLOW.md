@@ -281,13 +281,6 @@ shows it.
   JIT code while another CPU runs it; cross-modifying code on 2 vCPUs,
   possibly TCG); it passed on rerun. If it recurs, record it with
   QEMU record/replay (OBSERVABILITY.md).
-- **Known intermittent**: `winsock_test` hung twice in about six full
-  runs on 2026-11-01 (and passed alone 4 of 4): its only thread waits in
-  NtWaitForSingleObject on an unsignaled event (ws2_32 blocking on a
-  socket request that never completes), before any output, so the step
-  is not known. Suspect a lost wakeup in AFD (the event-select changes
-  of that day are the newest code there). To find: print each step, run
-  it in a loop.
 - **Flaky boot tests** usually mean a race; rerun the one scenario a few
   times (`cargo xtask boot-test name`) before blaming CI.
 - **Read the source of the exact version** of an open-source program
