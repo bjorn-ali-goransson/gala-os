@@ -11,7 +11,13 @@
  * what PostgreSQL's mingw-built DLLs (libintl, libiconv) use: wcschr,
  * _ultoa, __mb_cur_max (1 in the C locale), fputwc/fwprintf to a
  * narrow text stream, _beginthreadex/_endthreadex (the exit code) and
- * __dllonexit (appending to a DLL's exit table). Built against msvcrt
+ * __dllonexit (appending to a DLL's exit table); what MinGit's git.exe
+ * imports: the wide string and path functions (wcscat, wcsncat,
+ * wcsncpy, wcsspn, _wcsdup, msvcrt's own swprintf without a count,
+ * _wmkdir, _waccess, _wchdir, _wgetcwd, _wopen, _wchmod, _wunlink,
+ * _wrmdir, _wmktemp, _wfreopen), __wgetmainargs and __winitenv, _commit,
+ * atol, iswctype, rewind, fscanf, _flushall; and shell32's
+ * CommandLineToArgvW (quotes and backslashes). Built against msvcrt
  * (not mingw's own stdio) by build.sh.
  * Prints "msvcrt_test: ok" or exits with the number of the failing check. */
 #include <stdio.h>
@@ -40,6 +46,12 @@ unsigned int __cdecl _controlfp(unsigned int new_value, unsigned int mask);
 #ifndef __TINYC__
 #include <process.h>
 #include <wchar.h>
+#include <wctype.h>
+#include <shellapi.h>
+#include <sys/stat.h>
+typedef struct { int newmode; } startup_info;
+int __cdecl __wgetmainargs(int *argc, wchar_t ***argv, wchar_t ***envp, int glob,
+                           startup_info *si);
 typedef void (__cdecl *exit_fn)(void);
 _onexit_t __cdecl __dllonexit(_onexit_t func, exit_fn **begin, exit_fn **end);
 static unsigned __stdcall thread_main(void *arg) {
@@ -70,6 +82,104 @@ static int format(char *buf, size_t n, const char *fmt, ...) {
 
 static jmp_buf jump;
 static void jump_back(int value) { longjmp(jump, value); }
+
+#ifndef __TINYC__
+/* What MinGit's git.exe uses (wide strings and paths, startup, a few
+ * more), as msvcrt.dll documents them. */
+static void wide_checks(void) {
+    wchar_t w[64] = L"ab";
+    CHECK(wcscat(w, L"cd") == w && wcscmp(w, L"abcd") == 0);
+    CHECK(wcsncat(w, L"efgh", 2) == w && wcscmp(w, L"abcdef") == 0);
+    wchar_t pad[8];
+    wmemset(pad, L'#', 8);
+    CHECK(wcsncpy(pad, L"xy", 5) == pad && pad[0] == L'x' && pad[2] == 0 && pad[4] == 0
+          && pad[5] == L'#');
+    CHECK(wcsspn(L"aabbcz", L"abc") == 5);
+    wchar_t *dup = _wcsdup(L"dup");
+    CHECK(dup != NULL && wcscmp(dup, L"dup") == 0);
+    free(dup);
+    /* msvcrt.dll's swprintf takes no count (the old form). */
+    HMODULE crt = GetModuleHandleA("msvcrt.dll");
+    int (__cdecl *old_swprintf)(wchar_t *, const wchar_t *, ...) =
+        (int (__cdecl *)(wchar_t *, const wchar_t *, ...))GetProcAddress(crt, "swprintf");
+    CHECK(old_swprintf != NULL);
+    CHECK(old_swprintf(w, L"%d:%ls", 42, L"ab") == 5 && wcscmp(w, L"42:ab") == 0);
+
+    CHECK(_wmkdir(L"mtw_dir") == 0);
+    CHECK(_waccess(L"mtw_dir", 0) == 0);
+    CHECK(_wchdir(L"mtw_dir") == 0);
+    wchar_t cwd[260];
+    CHECK(_wgetcwd(cwd, 260) == cwd);
+    size_t len = wcslen(cwd);
+    CHECK(len > 8 && wcscmp(cwd + len - 8, L"\\mtw_dir") == 0);
+    wchar_t *heap_cwd = _wgetcwd(NULL, 0);
+    CHECK(heap_cwd != NULL && wcscmp(heap_cwd, cwd) == 0);
+    free(heap_cwd);
+    CHECK(_wchdir(L"..") == 0);
+    int fd = _wopen(L"mtw_dir\\f.txt", _O_CREAT | _O_WRONLY, _S_IREAD | _S_IWRITE);
+    CHECK(fd >= 0);
+    CHECK(_write(fd, "hi", 2) == 2);
+    CHECK(_commit(fd) == 0);
+    CHECK(_close(fd) == 0);
+    CHECK(_wchmod(L"mtw_dir\\f.txt", _S_IREAD) == 0);
+    CHECK(_waccess(L"mtw_dir\\f.txt", 2) == -1 && errno == EACCES);
+    CHECK(_wchmod(L"mtw_dir\\f.txt", _S_IREAD | _S_IWRITE) == 0);
+    CHECK(_waccess(L"mtw_dir\\f.txt", 2) == 0);
+    CHECK(_wunlink(L"mtw_dir\\f.txt") == 0);
+    CHECK(_wrmdir(L"mtw_dir") == 0);
+    CHECK(_waccess(L"mtw_dir", 0) == -1 && errno == ENOENT);
+    wchar_t tmpl[] = L"mtwXXXXXX";
+    CHECK(_wmktemp(tmpl) == tmpl && wcsncmp(tmpl, L"mtw", 3) == 0 && tmpl[3] != L'X');
+
+    FILE *f = fopen("mtw_a.txt", "w");
+    CHECK(f != NULL);
+    CHECK(_wfreopen(L"mtw_b.txt", L"w", f) == f);
+    CHECK(fputs("re", f) >= 0);
+    fclose(f);
+    f = fopen("mtw_b.txt", "r");
+    char got[8] = {0};
+    CHECK(f != NULL && fread(got, 1, 7, f) == 2 && strcmp(got, "re") == 0);
+    fclose(f);
+    remove("mtw_a.txt");
+    remove("mtw_b.txt");
+
+    int argc = 0;
+    wchar_t **argv = NULL, **envp = NULL;
+    startup_info si = {0};
+    CHECK(__wgetmainargs(&argc, &argv, &envp, 0, &si) == 0);
+    CHECK(argc >= 1 && argv != NULL && argv[argc] == NULL && envp != NULL);
+    CHECK(wcsstr(argv[0], L"msvcrt_test") != NULL);
+    wchar_t ***winitenv = (wchar_t ***)GetProcAddress(crt, "__winitenv");
+    CHECK(winitenv != NULL && *winitenv == envp);
+    CHECK(GetProcAddress(crt, "_wpgmptr") != NULL);
+
+    CHECK(atol("  -123x") == -123);
+    CHECK(iswctype(L'a', _ALPHA) && !iswctype(L'1', _ALPHA) && iswctype(L'1', _DIGIT));
+    CHECK(iswctype(L' ', _SPACE) && iswctype(L'F', _HEX | _UPPER) && !iswctype(L'g', _HEX));
+
+    f = fopen("mtw_scan.txt", "w+");
+    CHECK(f != NULL && fputs("12 abc\n7\n", f) >= 0);
+    rewind(f);
+    CHECK(fgetc(f) == '1');
+    rewind(f);
+    int n = 0, m = 0;
+    char word[8] = {0};
+    CHECK(fscanf(f, "%d %7s", &n, word) == 2 && n == 12 && strcmp(word, "abc") == 0);
+    CHECK(fscanf(f, "%d", &m) == 1 && m == 7);
+    CHECK(fscanf(f, "%d", &m) == EOF);
+    fclose(f);
+    remove("mtw_scan.txt");
+    CHECK(_flushall() >= 0);
+
+    int count = 0;
+    wchar_t **args = CommandLineToArgvW(L"prog.exe a \"b c\" x\\\"y \"\"", &count);
+    CHECK(args != NULL && count == 5);
+    CHECK(wcscmp(args[0], L"prog.exe") == 0 && wcscmp(args[1], L"a") == 0);
+    CHECK(wcscmp(args[2], L"b c") == 0 && wcscmp(args[3], L"x\"y") == 0);
+    CHECK(wcscmp(args[4], L"") == 0 && args[5] == NULL);
+    LocalFree(args);
+}
+#endif
 
 int main(void) {
     /* sscanf: conversions, %p round trip, scan sets. */
@@ -263,6 +373,7 @@ int main(void) {
         CHECK(__dllonexit(at_exit, &begin, &end) == at_exit);
         CHECK(end - begin == 1 && (void *)begin[0] == (void *)at_exit);
         free(begin);
+        wide_checks();
     }
 #endif
 

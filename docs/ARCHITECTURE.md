@@ -751,6 +751,18 @@ LdrInitializeThunk creates the process heap first and stores it in
 PEB.ProcessHeap (+0x30); kernel32's Heap* functions and GetProcessHeap
 are thin wrappers, as on Windows. msvcrt keeps its own allocator.
 
+**msvcrt's wide side** (MinGit): the wide path functions (`_wopen`,
+`_waccess`, `_wmkdir`, ...) convert to UTF-8 and call the narrow ones
+(gala's ANSI code page is UTF-8); `__wgetmainargs` builds wide argv and
+environment with the same splitting as `__getmainargs` and sets the data
+exports `__winitenv`, `__wargv` and `_wpgmptr`. msvcrt.dll's `swprintf`
+is the old form without a count. `fscanf` reads a line at a time and
+scans it with `vsscanf` (a conversion cannot span lines; what a line
+leaves unread is dropped). `_execl`/`_execv` start the program and end
+the caller with status 0, as msvcrt's exec does on Windows (no process
+replacement). `_chmod` maps the absence of `_S_IWRITE` to
+FILE_ATTRIBUTE_READONLY.
+
 **msvcrt's FILE** (H9): streams from fopen are a 48-byte FILE followed by
 a CRITICAL_SECTION, as msvcrt.dll's `_FILEX`: mingw's `_lock_file`
 enters that lock directly (for the console slots it calls `_lock`).

@@ -1031,7 +1031,25 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       SQL Server starts galadb again and `SELECT name FROM galadb.dbo.t`
       returns `kept`. Nothing needed fixing. Still seen: "unexpected error
       while checking the sector size" for new database files (non-fatal,
-      as before). Next: MinGit. Open: the JDK's console path (GetConsoleMode succeeding
+      as before). **MinGit works (2026-11-01)**: the pending `mingit`
+      scenario runs Git for Windows 2.47.1's MinGit unmodified (`PREBUILT`,
+      SHA-256 from the release notes) as users do (`cmd\git.exe`, which
+      starts `mingw64\bin\git.exe`): `git --version`, then `git init` of a
+      repository in the user's profile, a file written by gala's cmd.exe,
+      `git add`, `git commit` (root commit, "1 file changed") and `git log`.
+      It needed msvcrt's wide string and path functions, wide startup
+      (`__wgetmainargs`, `__winitenv`, `_wpgmptr`; a data import, so the
+      program could not even load), the old count-less `swprintf`,
+      `fscanf`, `_execl(p)`, `_commit`, `iswctype`, `rewind`, a real `_chmod`
+      (read-only), shell32's CommandLineToArgvW, and
+      STATUS_INVALID_DEVICE_REQUEST -> ERROR_INVALID_FUNCTION (msvcrt_test,
+      disk_test); NtSetEaFile, GetNamedPipeInfo, GetNamedPipeHandleStateA
+      and SetEntriesInAclA are stubs (not called). Seen on the way: git
+      refuses a repository owned by someone else ("dubious ownership"),
+      as on Windows; `git log` wants a pager on gala's console (the
+      scenario passes `--no-pager`). Looked up but optional: rand_s,
+      _localtime64_s, kernelbase.dll, NtAllocateVirtualMemoryEx,
+      GetNumaNodeProcessorMaskEx. The agreed order is done. Open: the JDK's console path (GetConsoleMode succeeding
       on the standard handles made java_http fail intermittently).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)

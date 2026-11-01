@@ -6,5 +6,5 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 x86_64-w64-mingw32-gcc -O1 -g0 -D__USE_MINGW_ANSI_STDIO=0 -s -Wl,--no-insert-timestamp \
-    -o "$ROOT/user/bin/msvcrt_test.exe" "$ROOT/user/msvcrt_test/main.c"
+    -o "$ROOT/user/bin/msvcrt_test.exe" "$ROOT/user/msvcrt_test/main.c" -lshell32
 sha256sum "$ROOT/user/bin/msvcrt_test.exe"

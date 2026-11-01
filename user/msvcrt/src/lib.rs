@@ -23,6 +23,7 @@ mod scan;
 mod setjmp;
 mod stdio;
 mod time;
+mod wide;
 
 use core::ffi::c_void;
 use core::ptr::null_mut;

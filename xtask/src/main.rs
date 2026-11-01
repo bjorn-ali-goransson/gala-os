@@ -131,6 +131,15 @@ const PREBUILT: &[Prebuilt] = &[
             "pgsql/share/locale/*",
         ],
     },
+    // MinGit 2.47.1 (Git for Windows' minimal distribution: git and the
+    // MSYS2 runtime its scripts need); SHA-256 from the release notes.
+    Prebuilt {
+        name: "mingit",
+        url: "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/MinGit-2.47.1-64-bit.zip",
+        checksum: "50b04b55425b5c465d076cdb184f63a0cd0f86f6ec8bb4d5860114a713d2c29a",
+        members: &["cmd/*", "etc/*", "mingw64/*", "usr/*"],
+        excludes: &[],
+    },
     // SQL Server 2022 Express LocalDB 16.0.1000.6 (SqlLocalDB.msi).
     // Microsoft publishes no checksum for it: the SHA-256 is the one we
     // measured (ROADMAP). Its license allows use to design, develop and
@@ -540,6 +549,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("msvcrt_test", "ntdll.dll", "Windows/System32"),
     ("msvcrt_test", "kernel32.dll", "Windows/System32"),
     ("msvcrt_test", "msvcrt.dll", "Windows/System32"),
+    ("msvcrt_test", "shell32.dll", "Windows/System32"),
     ("msvcrt_test", "user/bin/msvcrt_test.exe", "gala"),
     ("busybox", "ntdll.dll", "Windows/System32"),
     ("busybox", "kernel32.dll", "Windows/System32"),
@@ -777,6 +787,21 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sqllocaldb", "target/prebuilt/sqllocaldb/Binn/Templates/", "sql/data"),
     // PostgreSQL 17.2 as EnterpriseDB ships it, with the Visual C++ runtime
     // app-local (the JDK's redistributable copies; it expects them installed).
+    ("mingit", "ntdll.dll", "Windows/System32"),
+    ("mingit", "kernel32.dll", "Windows/System32"),
+    ("mingit", "advapi32.dll", "Windows/System32"),
+    ("mingit", "bcrypt.dll", "Windows/System32"),
+    ("mingit", "bcryptprimitives.dll", "Windows/System32"),
+    ("mingit", "crypt32.dll", "Windows/System32"),
+    ("mingit", "msvcrt.dll", "Windows/System32"),
+    ("mingit", "secur32.dll", "Windows/System32"),
+    ("mingit", "shell32.dll", "Windows/System32"),
+    ("mingit", "user32.dll", "Windows/System32"),
+    ("mingit", "ws2_32.dll", "Windows/System32"),
+    ("mingit", "userenv.dll", "Windows/System32"),
+    ("mingit", "shlwapi.dll", "Windows/System32"),
+    ("mingit", "target/prebuilt/mingit/", "git"),
+    ("mingit", "user/bin/cmd.exe", "Windows/System32"),
     ("postgres", "ntdll.dll", "Windows/System32"),
     ("postgres", "kernel32.dll", "Windows/System32"),
     ("postgres", "advapi32.dll", "Windows/System32"),
@@ -1868,7 +1893,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &["elasticsearch", "sqllocaldb", "sqllocaldb_persist", "sshd"];
+const PENDING: &[&str] = &["elasticsearch", "mingit", "sqllocaldb", "sqllocaldb_persist", "sshd"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -2613,6 +2638,28 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=initdb.exe,postgres.exe args=-D%20C:/pgdata%20-U%20postgres%20-A%20trust%20-E%20UTF8%20--no-locale,-D%20C:/pgdata%20-p%207%20-c%20listen_addresses=*%20-c%20hba_file=C:/gala/pg_hba.conf",
         exit_status: XTASK_STOPS,
         expect: &["Success. You can now start the database server", "xtask: net client: psql ok"],
+    },
+    Scenario {
+        // P1 (pending): MinGit 2.47.1, run as users run it (cmd\git.exe,
+        // which starts mingw64\bin\git.exe): its version, then a new
+        // repository in the user's profile (git checks that its user owns
+        // it): init, a file written by cmd.exe, add, commit, log (without
+        // the pager: gala's console is a terminal, and MinGit has no less).
+        name: "mingit",
+        cmdline: "qemu_exit cwd=C:/Users/gala \
+                  run=cmd/git.exe,cmd/git.exe,cmd.exe,cmd/git.exe,cmd/git.exe,cmd/git.exe \
+                  args=--version,init%20repo,/c%20echo%20hello%20from%20gala>repo\\hello.txt,\
+                  -C%20repo%20add%20hello.txt,\
+                  -C%20repo%20-c%20user.name=gala%20-c%20user.email=gala@example.com%20commit%20-m%20first,\
+                  --no-pager%20-C%20repo%20log%20--format=log:%25s",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "git version 2.47.1.windows.1",
+            "Initialized empty Git repository in C:/Users/gala/repo/.git/",
+            "(root-commit)",
+            "1 file changed, 1 insertion(+)",
+            "log:first",
+        ],
     },
     Scenario {
         // The same login with galatest's password (Win32-OpenSSH checks it

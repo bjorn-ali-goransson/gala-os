@@ -10,6 +10,7 @@ use core::ptr::null_mut;
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetFileAttributesW(path: *const u16) -> u32;
+    fn SetFileAttributesW(path: *const u16, attributes: u32) -> i32;
     fn CreateDirectoryW(path: *const u16, attributes: *mut c_void) -> i32;
     fn RemoveDirectoryW(path: *const u16) -> i32;
     fn DeleteFileW(path: *const u16) -> i32;
@@ -540,11 +541,22 @@ pub extern "C" fn _chdir(path: *const u8) -> i32 {
     by_path(path, |p| unsafe { SetCurrentDirectoryW(p) } != 0)
 }
 
-/// _chmod(path, mode): permissions are not modelled beyond read-only,
-/// which cannot be changed yet; succeeds for an existing file.
+/// _chmod(path, mode): without _S_IWRITE (0x80) the file becomes
+/// read-only, with it writable (the only permission Windows keeps).
 #[unsafe(no_mangle)]
-pub extern "C" fn _chmod(path: *const u8, _mode: i32) -> i32 {
-    _access(path, 0)
+pub extern "C" fn _chmod(path: *const u8, mode: i32) -> i32 {
+    by_path(path, |p| {
+        // SAFETY: a NUL-terminated path.
+        unsafe {
+            let a = GetFileAttributesW(p);
+            if a == u32::MAX {
+                return false;
+            }
+            let a = if mode & 0x80 != 0 { a & !1 } else { a | 1 }; // FILE_ATTRIBUTE_READONLY
+            // FILE_ATTRIBUTE_NORMAL when nothing else is left.
+            SetFileAttributesW(p, if a == 0 { 0x80 } else { a & !0x10 }) != 0
+        }
+    })
 }
 
 /// _getche: _getch, echoing the byte to standard output.

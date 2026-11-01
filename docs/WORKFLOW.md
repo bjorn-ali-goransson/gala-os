@@ -379,7 +379,9 @@ Large programs (the JDK): a module path ending in `/`
 (`boot/<dir>.tree.tar`, module string `tar:<dir>`) that the kernel unpacks
 into its ramfs in place (`kernel/src/fs/tar.rs`): Limine panics with
 "Memory map exhausted" with a few hundred modules (the .NET runtime has
-~190 files). `run=` finds a program inside an archive too. Scenarios
+~190 files). `run=` finds a program inside an archive too, by file name,
+or by its path in the archive when the name has a `/` (`run=cmd/git.exe`:
+MinGit has two git.exe). Scenarios
 that ship the same large set share it through `MODULE_SETS` (and so a
 VM). Managed (.NET) test programs are C# in `user/<name>/` built by its
 `build.sh` with Mono's `mcs` (apt package `mono-mcs`) into `user/bin`

@@ -33,6 +33,7 @@ unsafe extern "system" {
     fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32;
     fn LocalAlloc(flags: u32, bytes: usize) -> *mut u16;
     fn GetFileAttributesW(path: *const u16) -> u32;
+    fn GetModuleFileNameW(module: *mut core::ffi::c_void, buf: *mut u16, size: u32) -> u32;
 }
 
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -275,4 +276,141 @@ pub extern "system" fn ShellExecuteW(
     // SAFETY: a valid buffer.
     unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, 0) };
     31
+}
+
+/// Splits a command line as CommandLineToArgvW documents: the program
+/// name (the first word; a quoted one up to the next quote) without
+/// escapes; then words separated by spaces and tabs, where 2n backslashes
+/// before a quote are n backslashes and the quote toggles quoting, 2n+1
+/// are n and a literal quote, other backslashes are literal, and `""`
+/// inside quotes is a literal quote. `emit` gets each argument's
+/// characters, one at a time, and `None` at its end.
+fn split_command_line(line: &[u16], mut emit: impl FnMut(Option<u16>)) {
+    const QUOTE: u16 = b'"' as u16;
+    const BACKSLASH: u16 = b'\\' as u16;
+    let blank = |c: u16| c == u16::from(b' ') || c == u16::from(b'\t');
+    let mut i = 0;
+    // The program name.
+    if line.first() == Some(&QUOTE) {
+        i = 1;
+        while i < line.len() && line[i] != QUOTE {
+            emit(Some(line[i]));
+            i += 1;
+        }
+        i += 1;
+    } else {
+        while i < line.len() && !blank(line[i]) {
+            emit(Some(line[i]));
+            i += 1;
+        }
+    }
+    emit(None);
+    loop {
+        while i < line.len() && blank(line[i]) {
+            i += 1;
+        }
+        if i >= line.len() {
+            return;
+        }
+        let mut quoted = false;
+        while i < line.len() && (quoted || !blank(line[i])) {
+            let c = line[i];
+            if c == BACKSLASH {
+                let start = i;
+                while i < line.len() && line[i] == BACKSLASH {
+                    i += 1;
+                }
+                let count = i - start;
+                if i < line.len() && line[i] == QUOTE {
+                    for _ in 0..count / 2 {
+                        emit(Some(BACKSLASH));
+                    }
+                    if count % 2 == 1 {
+                        emit(Some(QUOTE));
+                        i += 1;
+                    }
+                } else {
+                    for _ in 0..count {
+                        emit(Some(BACKSLASH));
+                    }
+                }
+                continue;
+            }
+            if c == QUOTE {
+                if quoted && line.get(i + 1) == Some(&QUOTE) {
+                    emit(Some(QUOTE));
+                    i += 2;
+                    continue;
+                }
+                quoted = !quoted;
+                i += 1;
+                continue;
+            }
+            emit(Some(c));
+            i += 1;
+        }
+        emit(None);
+    }
+}
+
+/// CommandLineToArgvW(line, &count): the arguments in one LocalAlloc'd
+/// block (the pointer array, NULL-terminated, then the strings), which the
+/// caller frees with LocalFree. An empty line gives the program's path.
+#[unsafe(no_mangle)]
+pub extern "system" fn CommandLineToArgvW(line: *const u16, count: *mut i32) -> *mut *mut u16 {
+    let mut path = [0u16; 520];
+    // SAFETY: the caller's NUL-terminated line, or our own buffer.
+    let text: &[u16] = unsafe {
+        let mut n = 0;
+        if !line.is_null() {
+            while *line.add(n) != 0 {
+                n += 1;
+            }
+        }
+        if n == 0 {
+            let n = GetModuleFileNameW(core::ptr::null_mut(), path.as_mut_ptr(), 520) as usize;
+            // Quoted, so a path with spaces stays one argument.
+            path.copy_within(0..n.min(517), 1);
+            path[0] = u16::from(b'"');
+            path[n.min(517) + 1] = u16::from(b'"');
+            &path[..n.min(517) + 2]
+        } else {
+            core::slice::from_raw_parts(line, n)
+        }
+    };
+    let (mut args, mut chars) = (0usize, 0usize);
+    split_command_line(text, |c| match c {
+        Some(_) => chars += 1,
+        None => args += 1,
+    });
+    let table = (args + 1) * 8;
+    // SAFETY: a fresh block of the size computed; filled in order.
+    unsafe {
+        let block = LocalAlloc(0, table + 2 * (chars + args)).cast::<u8>();
+        if block.is_null() {
+            return core::ptr::null_mut();
+        }
+        let argv = block.cast::<*mut u16>();
+        let mut at = block.add(table).cast::<u16>();
+        let mut index = 0;
+        let mut start = at;
+        split_command_line(text, |c| match c {
+            Some(ch) => {
+                *at = ch;
+                at = at.add(1);
+            }
+            None => {
+                *at = 0;
+                at = at.add(1);
+                *argv.add(index) = start;
+                index += 1;
+                start = at;
+            }
+        });
+        *argv.add(args) = core::ptr::null_mut();
+        if !count.is_null() {
+            *count = args as i32;
+        }
+        argv
+    }
 }

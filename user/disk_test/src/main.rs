@@ -12,7 +12,8 @@
 //!   fixed media, 512-byte sectors, 255 heads and 63 sectors per track
 //!   (the geometry Windows reports for disks), a too-small buffer fails
 //!   with ERROR_INSUFFICIENT_BUFFER. IOCTL_DISK_GET_DRIVE_GEOMETRY_EX:
-//!   the same geometry and the disk size.
+//!   the same geometry and the disk size. An IOCTL the disk does not know
+//!   fails with ERROR_INVALID_FUNCTION.
 //! - Reads and writes move the file pointer (SetFilePointerEx): sector 1
 //!   holds xtask's text; a write of sector 2 reads back; a read of 64 KiB
 //!   spans sectors; transfers that are not whole sectors, or at an offset
@@ -113,6 +114,7 @@ const IOCTL_DISK_GET_DRIVE_GEOMETRY_EX: u32 = 0x0007_00a0;
 const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405c;
 const FIXED_MEDIA: u32 = 12;
 
+const ERROR_INVALID_FUNCTION: u64 = 1;
 const ERROR_FILE_NOT_FOUND: u64 = 2;
 const ERROR_ACCESS_DENIED: u64 = 5;
 const LOGON32_LOGON_INTERACTIVE: u32 = 2;
@@ -234,6 +236,11 @@ fn ioctls(c: &mut Checks, disk: Handle) -> Result<(), u32> {
         c.ok(n >= 32, n.into())?;
         check_geometry(c, &buf)?;
         c.eq(u64_at(&buf, 24), DISK_SIZE)?;
+
+        // Function 0xfff of the disk's device type, which it does not have.
+        let ok = DeviceIoControl(disk, 0x0007_3ffc, null, 0, p, 256, &mut n, none);
+        c.eq(ok as u64, 0)?;
+        c.eq(last_error(), ERROR_INVALID_FUNCTION)?;
     }
     Ok(())
 }

@@ -29,6 +29,7 @@ macro_rules! unimplemented_exports {
 }
 
 unimplemented_exports!(
+    NtSetEaFile
     RtlIpv4AddressToStringExW
     RtlIpv4StringToAddressExW
     RtlIpv6StringToAddressExW

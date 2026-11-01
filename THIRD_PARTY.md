@@ -73,6 +73,7 @@ The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `scre
 | Tool | Version | License | Use |
 |---|---|---|---|
 | msitools (`msiextract`) | Ubuntu 24.04 package `msitools` | LGPL-2.1+ / GPL-2.0+ | xtask unpacks prebuilt programs that only come as an MSI (SQL Server LocalDB's `SqlLocalDB.msi`) with it; run as a separate program, nothing of it ends up in gala. |
+| MinGit | 2.47.1 (`MinGit-2.47.1-64-bit.zip`, SHA-256 `50b04b55...4a713d2c29a`, as Git for Windows' release notes give it) | github.com/git-for-windows/git releases | GPL-2.0 (Git); the bundled MSYS2 runtime, libraries and tools under their own licenses (GPL, LGPL, BSD-style, MIT; listed in the distribution) | Not in the repository: xtask fetches the zip on first use into `target/prebuilt/mingit/` (`PREBUILT`, checksum checked) and runs `cmd\git.exe` unmodified as `C:\git` in the pending `mingit` scenario. |
 | OpenSSH client (`ssh`), PostgreSQL client (`psql`) | Ubuntu 24.04 packages `openssh-client`, `postgresql-client` | BSD-style (OpenSSH); the PostgreSQL License | xtask's network clients for the `sshd_login`/`sshd_password` and `postgres` scenarios: run on the host against the guest, nothing of them ends up in gala. |
 
 ## Written from third-party specifications (no code copied)

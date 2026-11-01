@@ -10,16 +10,24 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     ConvertThreadToFiber
     CreateFiber
     CreateFileMappingNumaW
+    CreateHardLinkA
     CreateMutexExW
+    EnumResourceLanguagesA
     FindFirstChangeNotificationW
     FindNextChangeNotification
     GetActiveProcessorCount
+    GetCurrencyFormatEx
     GetCurrencyFormatW
     GetLogicalDriveStringsW
+    GetNamedPipeHandleStateA
+    GetNamedPipeInfo
     GetNumaNodeProcessorMaskEx
+    GetNumberFormatEx
     GetNumberFormatW
     GetPrivateProfileStringW
     GetProcessPriorityBoost
+    GetShortPathNameA
+    GetSystemTimeAdjustment
     GetTapeParameters
     GetTapePosition
     GetTapeStatus
@@ -47,7 +55,9 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     PrepareTape
     QueueUserWorkItem
     ReadConsoleOutputA
+    RemoveDirectoryA
     ReplaceFileW
+    ResolveLocaleName
     ScrollConsoleScreenBufferA
     SetFileIoOverlappedRange
     SetFileValidData
@@ -63,12 +73,4 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     WriteConsoleOutputA
     WriteProcessMemory
     WriteTapemark
-    EnumResourceLanguagesA
-    GetCurrencyFormatEx
-    GetNumberFormatEx
-    GetShortPathNameA
-    GetSystemTimeAdjustment
-    ResolveLocaleName
-    CreateHardLinkA
-    RemoveDirectoryA
 );
