@@ -103,6 +103,7 @@ pub const GALA_WINDOW_PRESENT: u32 = 0x7f32;
 pub const GALA_WINDOW_DESTROY: u32 = 0x7f33;
 pub const GALA_WINDOW_LISTEN: u32 = 0x7f34;
 pub const GALA_WINDOW_INPUT: u32 = 0x7f35;
+pub const GALA_SCREEN_INFO: u32 = 0x7f36;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -270,6 +271,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_DESTROY, "GalaWindowDestroy", 1, gala_window_destroy),
     (GALA_WINDOW_LISTEN, "GalaWindowListen", 1, gala_window_listen),
     (GALA_WINDOW_INPUT, "GalaWindowInput", 3, gala_window_input),
+    (GALA_SCREEN_INFO, "GalaScreenInfo", 1, gala_screen_info),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1310,6 +1312,22 @@ fn gala_window_listen(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::NOT_SUPPORTED;
     }
     tri!(super::desktop::listen(call.process.id, event));
+    NtStatus::SUCCESS
+}
+
+/// GalaScreenInfo(*Info): the screen and its work area (without the
+/// taskbar) as two RECTs (left, top, right, bottom as i32);
+/// STATUS_NOT_SUPPORTED without a screen.
+fn gala_screen_info(call: &mut Call<'_>) -> NtStatus {
+    let Some((w, h)) = super::platform::screen_size() else { return NtStatus::NOT_SUPPORTED };
+    let work_bottom = h.saturating_sub(super::desktop::TASKBAR);
+    let mut out = [0u8; 32];
+    for (i, v) in [0, 0, w, h, 0, 0, w, work_bottom].iter().enumerate() {
+        out[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    if call.process.write(arg!(call, 0), &out).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
     NtStatus::SUCCESS
 }
 

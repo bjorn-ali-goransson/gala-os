@@ -511,7 +511,9 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    SetWindowsHookExW. Then (user32_test): hooks (WH_CBT, WH_GETMESSAGE,
    WH_CALLWNDPROC), OleInitialize, SetCurrentProcessExplicitAppUserModelID,
    SetThreadLocale, SetSecurityDescriptorControl/Sacl/Group, timers. It
-   now stops at EnumDisplayMonitors: next, monitors and the rest the
+   stopped at EnumDisplayMonitors: monitors (GalaScreenInfo). It now
+   stops at gdi32's CreateDCW (wx's screen DC): next, GDI (device caps,
+   fonts and text metrics, bitmaps and DIB sections, BitBlt) as the
    ledger orders.
 W4. Later: a user-mode shell (the taskbar and start menu out of the
    kernel), window resizing (WM_SIZE), maximize, keyboard focus per

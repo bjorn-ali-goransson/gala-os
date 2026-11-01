@@ -1517,12 +1517,16 @@ pub extern "system" fn SetCursor(_cursor: Handle) -> Handle {
 }
 
 /// GetSystemMetrics: the desktop's frame (SM_CYCAPTION, SM_CXBORDER,
-/// SM_CYBORDER) and an assumed 1280 x 800 screen.
+/// SM_CYBORDER) and the screen (crate::monitor).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemMetrics(index: i32) -> i32 {
+    let (screen, work) = crate::monitor::screen();
     match index {
-        0 => 1280, // SM_CXSCREEN
-        1 => 800,  // SM_CYSCREEN
+        0 | 78 => screen[2],     // SM_CXSCREEN, SM_CXVIRTUALSCREEN
+        1 | 79 => screen[3],     // SM_CYSCREEN, SM_CYVIRTUALSCREEN
+        16 => work[2],           // SM_CXFULLSCREEN
+        17 => work[3] - CAPTION, // SM_CYFULLSCREEN
+        80 => 1,                 // SM_CMONITORS
         4 => CAPTION,
         5 | 6 => BORDER,
         _ => 0,

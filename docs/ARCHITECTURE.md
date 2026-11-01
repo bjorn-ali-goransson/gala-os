@@ -2126,7 +2126,8 @@ A small window manager and shell, in the kernel for now.
   title_len, *id) 0x7f30, GalaWindowShow(id, show) 0x7f31,
   GalaWindowPresent(id, x, y, w, h, pixels, stride) 0x7f32 (copies a
   client rectangle in), GalaWindowDestroy(id) 0x7f33, GalaWindowListen
-  (event) 0x7f34, GalaWindowInput(records, max, *count) 0x7f35. Only the
+  (event) 0x7f34, GalaWindowInput(records, max, *count) 0x7f35,
+  GalaScreenInfo(*rects) 0x7f36. Only the
   owner process may change a window.
 - **user32** (`user/user32/src/window.rs`): classes, windows
   (HWND = 0x10000 + 16 * slot), one message queue per process (256
@@ -2136,6 +2137,13 @@ A small window manager and shell, in the kernel for now.
   BeginPaint and GetDC return a gdi32 surface DC over it and EndPaint /
   ReleaseDC present the buffer. gdi32 is loaded lazily with LoadLibrary,
   so console programs that import user32 do not need it.
+- **The display** (`user/user32/src/monitor.rs`): one monitor (a
+  constant HMONITOR), the desktop's screen; GalaScreenInfo (0x7f36) gives
+  the screen and the work area above the taskbar (STATUS_NOT_SUPPORTED
+  without a screen: user32 then assumes 1280 x 800). EnumDisplayMonitors,
+  MonitorFromWindow/Point/Rect (off-screen: by the default flags),
+  GetMonitorInfoW/A (\\.\DISPLAY1) and GetSystemMetrics' screen
+  metrics come from it.
 - **Hooks** (`user/user32/src/hook.rs`): per kind and thread, newest
   first; CallNextHookEx ignores its handle (as documented) and continues
   from the hook running on the thread. WH_CBT is called on creation

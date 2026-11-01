@@ -65,7 +65,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     EndMenu
     EnumChildWindows
     EnumClipboardFormats
-    EnumDisplayMonitors
     EnumDisplaySettingsW
     EnumThreadWindows
     EnumWindows
@@ -91,7 +90,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     GetMenuState
     GetMessagePos
     GetMessageTime
-    GetMonitorInfoW
     GetParent
     GetProcessDefaultLayout
     GetScrollInfo
@@ -121,8 +119,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     MapVirtualKeyW
     MapWindowPoints
     ModifyMenuW
-    MonitorFromPoint
-    MonitorFromWindow
     MoveWindow
     NotifyWinEvent
     OffsetRect

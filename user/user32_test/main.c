@@ -17,6 +17,12 @@
  *   KillTimer returns TRUE once. A window-less timer with a TIMERPROC
  *   gets a new id; its WM_TIMER carries the procedure in lParam and
  *   DispatchMessage calls it.
+ * - The display: EnumDisplayMonitors calls back once (one monitor) with
+ *   the screen's rectangle and the data; MonitorFromPoint finds it for a
+ *   point on the screen, and for one off it only by the default flags;
+ *   GetMonitorInfoW gives rcMonitor (the size GetSystemMetrics reports),
+ *   a work area within it, MONITORINFOF_PRIMARY and (EX) a \\.\DISPLAY
+ *   device name; MonitorFromWindow finds it for a window on it.
  * - shell32's SetCurrentProcessExplicitAppUserModelID: S_OK.
  * - kernel32's SetThreadLocale: GetThreadLocale then returns it (per
  *   thread); an LCID without a language fails with
@@ -170,9 +176,47 @@ static void timers(void) {
     CHECK(DestroyWindow(w));
 }
 
+static int monitors_seen;
+static HMONITOR monitor_seen;
+static RECT monitor_rect;
+static BOOL CALLBACK monitor_proc(HMONITOR m, HDC dc, LPRECT r, LPARAM data) {
+    if (data == 42 && dc == NULL) {
+        monitors_seen++;
+        monitor_seen = m;
+        monitor_rect = *r;
+    }
+    return TRUE;
+}
+
+static void monitors(void) {
+    int cx = GetSystemMetrics(SM_CXSCREEN), cy = GetSystemMetrics(SM_CYSCREEN);
+    CHECK(cx > 0 && cy > 0 && GetSystemMetrics(SM_CMONITORS) == 1);
+    CHECK(EnumDisplayMonitors(NULL, NULL, monitor_proc, 42));
+    CHECK(monitors_seen == 1 && monitor_seen != NULL);
+    CHECK(monitor_rect.left == 0 && monitor_rect.top == 0 && monitor_rect.right == cx
+          && monitor_rect.bottom == cy);
+    POINT on = {10, 10}, off = {-5000, -5000};
+    CHECK(MonitorFromPoint(on, MONITOR_DEFAULTTONULL) == monitor_seen);
+    CHECK(MonitorFromPoint(off, MONITOR_DEFAULTTONULL) == NULL);
+    CHECK(MonitorFromPoint(off, MONITOR_DEFAULTTOPRIMARY) == monitor_seen);
+    MONITORINFOEXW mi;
+    mi.cbSize = sizeof(MONITORINFO);
+    CHECK(GetMonitorInfoW(monitor_seen, (MONITORINFO *)&mi));
+    CHECK(mi.rcMonitor.right == cx && mi.rcMonitor.bottom == cy && (mi.dwFlags & MONITORINFOF_PRIMARY));
+    CHECK(mi.rcWork.left >= 0 && mi.rcWork.top >= 0 && mi.rcWork.right <= cx && mi.rcWork.bottom <= cy
+          && mi.rcWork.bottom > 0);
+    mi.cbSize = sizeof mi;
+    CHECK(GetMonitorInfoW(monitor_seen, (MONITORINFO *)&mi) && wcsncmp(mi.szDevice, L"\\\\.\\DISPLAY", 11) == 0);
+    HWND w = CreateWindowExW(0, L"User32TestHooks", L"monitors", WS_OVERLAPPEDWINDOW, 10, 10,
+                             200, 100, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    CHECK(MonitorFromWindow(w, MONITOR_DEFAULTTONULL) == monitor_seen);
+    DestroyWindow(w);
+}
+
 int main(void) {
     hooks();
     timers();
+    monitors();
     ole();
     CHECK(SetCurrentProcessExplicitAppUserModelID(L"Gala.Test") == S_OK);
     CHECK(SetThreadLocale(0x0407) && GetThreadLocale() == 0x0407);

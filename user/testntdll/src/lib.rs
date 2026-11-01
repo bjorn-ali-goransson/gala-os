@@ -261,6 +261,7 @@ syscall_stubs! {
     GalaWindowDestroy = 0x7f33, fn(id: u32);
     GalaWindowListen = 0x7f34, fn(event: *mut core::ffi::c_void);
     GalaWindowInput = 0x7f35, fn(records: *mut u8, max: u32, count: *mut u32);
+    GalaScreenInfo = 0x7f36, fn(info: *mut [i32; 8]);
     // gala's number, UNVERIFIED.
     NtCreateDirectoryObject = 0x7f24, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtClearEvent = 0x3e, fn(h: usize);
