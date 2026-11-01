@@ -7,7 +7,8 @@
 //! accept reports the client's address), send/recv round trips in both
 //! directions (with MSG_PEEK), a 16 KiB transfer, a graceful close (recv
 //! returns 0), WSAECONNREFUSED for a port nobody listens on, WSAENOTSOCK
-//! for a closed socket, and non-blocking sockets (WSAEWOULDBLOCK from
+//! for a closed socket, WSADuplicateSocketW and WSASocketW from its
+//! protocol information (a second socket for the connection), and non-blocking sockets (WSAEWOULDBLOCK from
 //! accept and recv; an accepted socket inherits the listener's mode).
 //! Prints `winsock_test: ok` or exits with the number of the failing check.
 //!
@@ -32,6 +33,7 @@ unsafe extern "system" {
     fn GetCommandLineW() -> *const u16;
     fn ExitProcess(code: u32) -> !;
     fn Sleep(ms: u32);
+    fn GetCurrentProcessId() -> u32;
 }
 
 #[link(name = "ws2_32", kind = "raw-dylib")]
@@ -75,6 +77,15 @@ unsafe extern "system" {
         routine: usize,
     ) -> i32;
     fn closesocket(s: Socket) -> i32;
+    fn WSADuplicateSocketW(s: Socket, process: u32, info: *mut u8) -> i32;
+    fn WSASocketW(
+        af: i32,
+        kind: i32,
+        protocol: i32,
+        info: *const u8,
+        group: u32,
+        flags: u32,
+    ) -> Socket;
     fn setsockopt(s: Socket, level: i32, name: i32, value: *const u8, len: i32) -> i32;
     fn getsockopt(s: Socket, level: i32, name: i32, value: *mut u8, len: *mut i32) -> i32;
     fn ioctlsocket(s: Socket, cmd: i32, arg: *mut u32) -> i32;
@@ -353,6 +364,33 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         c.eq(send(server, b"pong!".as_ptr(), 5, 0) as u64, 5)?;
         c.eq(recv(client, buf.as_mut_ptr(), 64, 0) as u64, 5)?;
         c.ok(&buf[..5] == b"pong!", buf[0].into())?;
+
+        // WSADuplicateSocketW for this process, then WSASocketW from the
+        // protocol information: a second socket for the same connection
+        // (Win32-OpenSSH's dup2 of a socket); closing it leaves the first.
+        let mut info = [0u8; 628];
+        c.ok(
+            WSADuplicateSocketW(server, GetCurrentProcessId(), info.as_mut_ptr()) == 0,
+            WSAGetLastError() as u64,
+        )?;
+        let field = |at: usize| i32::from_le_bytes(info[at..at + 4].try_into().unwrap_or([0; 4]));
+        c.eq(field(76) as u64, AF_INET as u64)?;
+        c.eq(field(88) as u64, SOCK_STREAM as u64)?;
+        c.eq(field(92) as u64, IPPROTO_TCP as u64)?;
+        let dup = WSASocketW(-1, -1, -1, info.as_ptr(), 0, 0);
+        c.ok(dup != INVALID_SOCKET && dup != server, WSAGetLastError() as u64)?;
+        c.eq(send(dup, b"dup".as_ptr(), 3, 0) as u64, 3)?;
+        c.eq(recv(client, buf.as_mut_ptr(), 64, 0) as u64, 3)?;
+        c.ok(&buf[..3] == b"dup", buf[0].into())?;
+        c.eq(closesocket(dup) as u64, 0)?;
+        c.ok(send(server, b"!".as_ptr(), 1, 0) == 1, WSAGetLastError() as u64)?;
+        c.eq(recv(client, buf.as_mut_ptr(), 64, 0) as u64, 1)?;
+        // A process id that names no process: WSAEINVAL.
+        c.eq(
+            WSADuplicateSocketW(server, 0x7fff_fff0, info.as_mut_ptr()) as u64,
+            SOCKET_ERROR as u64,
+        )?;
+        c.eq(WSAGetLastError() as u64, 10022)?;
 
         // A bigger transfer arrives whole and in order.
         let mut big = [0u8; 16384];

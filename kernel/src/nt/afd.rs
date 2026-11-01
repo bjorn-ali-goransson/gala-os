@@ -70,6 +70,9 @@ pub struct Io {
     /// ApcContext: the completion packet's context (the OVERLAPPED); a
     /// request with none posts no packet.
     pub context: u64,
+    /// ApcRoutine: queued to the calling thread when the request
+    /// completes (a completion routine; such a request posts no packet).
+    pub apc: Option<(ObjectRef, super::thread::UserApc)>,
 }
 
 /// An operation waiting for the network (docs/ARCHITECTURE.md, "AFD").
@@ -237,6 +240,9 @@ fn finish(state: &EndpointState, io: &Io, status: NtStatus, information: u64, im
     if let Some(e) = &io.event {
         wait::set_signal(e, 1);
     }
+    if let Some((thread, apc)) = &io.apc {
+        let _ = super::thread::queue_user_apc(thread, *apc);
+    }
     let modes = state.modes.load(Ordering::Acquire);
     if modes & FILE_SKIP_SET_EVENT_ON_HANDLE == 0 {
         wait::signal_dispatcher(&state.dispatcher, 1);
@@ -245,7 +251,7 @@ fn finish(state: &EndpointState, io: &Io, status: NtStatus, information: u64, im
         return;
     }
     let port = state.completion.lock().clone();
-    if let (Some((port, key)), true) = (port, io.context != 0) {
+    if let (Some((port, key)), true) = (port, io.context != 0 && io.apc.is_none()) {
         let packet = CompletionPacket { key, context: io.context, status: status.0, information };
         if let ObjectBody::IoCompletion(c) = &port.body
             && c.queue.lock().push(packet).is_ok()
@@ -464,7 +470,11 @@ fn submit(state: &EndpointState, mut op: Op, io: Io) -> NtStatus {
         finish(state, &io, status, information, true);
         return status;
     }
-    if io.context == 0 && kind != 4 && state.non_blocking.load(Ordering::Acquire) {
+    if io.context == 0
+        && io.apc.is_none()
+        && kind != 4
+        && state.non_blocking.load(Ordering::Acquire)
+    {
         // A non-blocking socket's synchronous call: a send that queued part
         // of its bytes reports that part (as Windows does: the bytes are
         // in the socket, the caller must not send them again); otherwise

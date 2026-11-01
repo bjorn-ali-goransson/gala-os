@@ -33,6 +33,9 @@
 //!   through the event and the completion port;
 //!   SetFileCompletionNotificationModes(FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)
 //!   leaves the port alone for a read that completes at once.
+//! - the ANSI CreateNamedPipeA and CreateFileA, as Win32-OpenSSH's pipe()
+//!   uses them: an overlapped duplex pipe whose ends are pipes (GetFileType)
+//!   and inheritable.
 //!
 //! Prints `pipe_test: ok` or exits with the number of the failing check.
 
@@ -105,6 +108,25 @@ unsafe extern "system" {
     ) -> Bool;
     fn CreateFileW(
         name: *const u16,
+        access: u32,
+        share: u32,
+        attributes: *const SecurityAttributes,
+        disposition: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
+    fn CreateNamedPipeA(
+        name: *const u8,
+        open_mode: u32,
+        pipe_mode: u32,
+        max_instances: u32,
+        out_size: u32,
+        in_size: u32,
+        timeout: u32,
+        attributes: *const SecurityAttributes,
+    ) -> Handle;
+    fn CreateFileA(
+        name: *const u8,
         access: u32,
         share: u32,
         attributes: *const SecurityAttributes,
@@ -566,6 +588,37 @@ fn run() -> Result<(), u32> {
         c.ok(GetExitCodeThread(t, &mut code) != 0 && code == 0, code.into())?;
         CloseHandle(t);
         CloseHandle(r);
+
+        // pipe() as Win32-OpenSSH makes it: an overlapped duplex byte pipe
+        // through the ANSI functions, both ends inheritable.
+        let name = b"\\\\.\\Pipe\\W32PosixPipe.00000001.00000002\0";
+        let server = CreateNamedPipeA(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            0,
+            1,
+            4096,
+            4096,
+            0,
+            &inherit,
+        );
+        c.ok(server as isize != -1, GetLastError().into())?;
+        let client = CreateFileA(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            &inherit,
+            OPEN_EXISTING,
+            0x80 | FILE_FLAG_OVERLAPPED,
+            core::ptr::null_mut(),
+        );
+        c.ok(client as isize != -1, GetLastError().into())?;
+        c.eq(GetFileType(server).into(), 3)?;
+        c.eq(GetFileType(client).into(), 3)?;
+        c.ok(GetHandleInformation(client, &mut flags) != 0, GetLastError().into())?;
+        c.eq((flags & HANDLE_FLAG_INHERIT).into(), HANDLE_FLAG_INHERIT.into())?;
+        CloseHandle(client);
+        CloseHandle(server);
     }
     Ok(())
 }

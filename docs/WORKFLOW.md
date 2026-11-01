@@ -271,6 +271,16 @@ shows it.
   QEMU record/replay (OBSERVABILITY.md).
 - **Flaky boot tests** usually mean a race; rerun the one scenario a few
   times (`cargo xtask boot-test name`) before blaming CI.
+- **Read the source of the exact version** of an open-source program
+  before deciding what it does: Win32-OpenSSH's `latestw_all` branch
+  waits for sshd-session in `sshd -d`, the shipped 9.8.3 (tag
+  `v9.8.3.0`) exits with 255 right after spawning it. Tags are listed by
+  `git ls-remote --tags`; a sparse, blob-less clone of one directory is
+  quick. A program that ends while its children work on needs the boot
+  option `wait=all`.
+- **Which handle is which** in an event stream (`XTASK_EVENTS=all`):
+  handle values are reused at once (the lowest free slot), so follow
+  NtClose and creation order rather than guessing from the value.
 
 ## Test speed and environments
 

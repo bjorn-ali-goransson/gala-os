@@ -6,7 +6,8 @@
 //! WER flags, priority boost and console control handlers are kept;
 //! GetSystemInfo, GetSystemDirectoryA, GetProcessAffinityMask,
 //! GetEnvironmentStringsW, CreateEventA, LoadLibraryW/LoadLibraryExW (with
-//! LOAD_LIBRARY_SEARCH_SYSTEM32), DuplicateHandle, VirtualQuery,
+//! LOAD_LIBRARY_SEARCH_SYSTEM32), DuplicateHandle (also through a process
+//! handle, which needs PROCESS_DUP_HANDLE), VirtualQuery,
 //! WaitForMultipleObjects and SwitchToThread; GetSystemTimeAsFileTime
 //! (KUSER_SHARED_DATA's tick-updated SystemTime) and the precise time.
 //! Prints `kernel32_sys_test:
@@ -64,6 +65,8 @@ unsafe extern "system" {
         reserved: *mut c_void,
     ) -> Bool;
     fn GetLastError() -> u32;
+    fn OpenProcess(access: u32, inherit: Bool, id: u32) -> Handle;
+    fn GetCurrentProcessId() -> u32;
     fn SetLastError(code: u32);
     fn SetErrorMode(mode: u32) -> u32;
     fn GetErrorMode() -> u32;
@@ -133,6 +136,9 @@ pub extern "C" fn __CxxFrameHandler3() -> ! {
     unsafe { ExitProcess(0xdeac) }
 }
 
+const PROCESS_DUP_HANDLE: u32 = 0x40;
+const ERROR_ACCESS_DENIED: u32 = 5;
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_MOD_NOT_FOUND: u32 = 126;
@@ -312,6 +318,20 @@ fn run() -> Result<(), u32> {
         )?;
         c.ok(!dup.is_null() && dup != e2, dup as u64)?;
         c.eq(WaitForSingleObject(dup, 0).into(), 0)?; // e2 is manual-reset, still set
+        // Through a real process handle: it needs PROCESS_DUP_HANDLE.
+        let me = OpenProcess(PROCESS_DUP_HANDLE, 0, GetCurrentProcessId());
+        c.ok(!me.is_null(), GetLastError().into())?;
+        let mut dup2 = core::ptr::null_mut();
+        c.ok(DuplicateHandle(me, e2, me, &mut dup2, 0, 0, 2) != 0, GetLastError().into())?;
+        c.eq(WaitForSingleObject(dup2, 0).into(), 0)?;
+        let limited = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, GetCurrentProcessId());
+        c.ok(!limited.is_null(), GetLastError().into())?;
+        let mut dup3 = core::ptr::null_mut();
+        c.eq(DuplicateHandle(limited, e2, me, &mut dup3, 0, 0, 2) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_ACCESS_DENIED.into())?;
+        for h in [me, limited, dup2] {
+            c.ok(CloseHandle(h) != 0, h as u64)?;
+        }
         for h in [e, e2, dup] {
             c.ok(CloseHandle(h) != 0, h as u64)?;
         }

@@ -50,6 +50,21 @@ unsafe extern "system" {
         output_length: u32,
     ) -> u32;
     fn NtClose(h: usize) -> u32;
+    fn NtOpenProcess(
+        handle: *mut usize,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        client_id: *const [usize; 2],
+    ) -> u32;
+    fn NtDuplicateObject(
+        source_process: isize,
+        source: usize,
+        target_process: usize,
+        target: *mut usize,
+        access: u32,
+        attributes: u32,
+        options: u32,
+    ) -> u32;
     fn NtCreateEvent(
         handle: *mut usize,
         access: u32,
@@ -295,19 +310,40 @@ fn afd_overlapped(
     output_len: u32,
     ov: *mut Overlapped,
 ) -> u32 {
+    afd_overlapped_apc(s, code, input, output, output_len, ov, 0)
+}
+
+/// `afd_overlapped` with a completion routine (`routine`, 0 for none): it
+/// runs on this thread as an APC when the request completes, and Winsock
+/// leaves the OVERLAPPED's event alone (the WSARecv docs).
+fn afd_overlapped_apc(
+    s: Socket,
+    code: u32,
+    input: &[u8],
+    output: *mut u8,
+    output_len: u32,
+    ov: *mut Overlapped,
+    routine: usize,
+) -> u32 {
     // SAFETY: the caller's OVERLAPPED, valid until the I/O completes.
     let event = unsafe {
         (*ov).internal = STATUS_PENDING as usize;
         (*ov).internal_high = 0;
         (*ov).event
     };
-    let context = if event & 1 != 0 { 0 } else { ov as usize };
+    let (event, apc, context) = if routine != 0 {
+        (0, completion_trampoline as usize, routine)
+    } else if event & 1 != 0 {
+        (event & !1, 0, 0)
+    } else {
+        (event, 0, ov as usize)
+    };
     // SAFETY: as above; the input is copied by the kernel during the call.
     unsafe {
         NtDeviceIoControlFile(
             s,
-            event & !1,
-            0,
+            event,
+            apc,
             context,
             ov.cast(),
             code,
@@ -316,6 +352,20 @@ fn afd_overlapped(
             output,
             output_len,
         )
+    }
+}
+
+/// The APC of a request with a completion routine: (ApcContext = the
+/// routine, IoStatusBlock = the OVERLAPPED) to the routine's (dwError,
+/// cbTransferred, lpOverlapped, dwFlags).
+extern "system" fn completion_trampoline(routine: usize, ov: *mut Overlapped, _reserved: usize) {
+    // SAFETY: the routine the caller gave and its OVERLAPPED.
+    unsafe {
+        let routine: extern "system" fn(u32, u32, *mut Overlapped, u32) =
+            core::mem::transmute(routine);
+        let status = (*ov).internal as u32;
+        let error = if status == 0 { 0 } else { wsa_error(status) };
+        routine(error, (*ov).internal_high as u32, ov, 0);
     }
 }
 
@@ -690,10 +740,79 @@ pub extern "system" fn WSASocketW(
     group: u32,
     _flags: u32,
 ) -> Socket {
-    if !info.is_null() || group != 0 {
-        missing(b"ws2_32.dll!WSASocketW(protocol info or group)", group.into());
+    if group != 0 {
+        missing(b"ws2_32.dll!WSASocketW(group)", group.into());
+    }
+    if !info.is_null() {
+        // SAFETY: the caller's WSAPROTOCOL_INFOW.
+        let field = |at: usize| unsafe { info.add(at).cast::<i32>().read_unaligned() };
+        let reserved = field(INFO_PROVIDER_RESERVED) as u32 as usize;
+        if af == FROM_PROTOCOL_INFO && kind == FROM_PROTOCOL_INFO && reserved != 0 {
+            // From WSADuplicateSocketW: the handle it made for this process.
+            return reserved;
+        }
+        let pick =
+            |given: i32, at: usize| if given == FROM_PROTOCOL_INFO { field(at) } else { given };
+        return socket(pick(af, INFO_FAMILY), pick(kind, INFO_TYPE), pick(protocol, INFO_PROTOCOL));
     }
     socket(af, kind, protocol)
+}
+
+/// WSAPROTOCOL_INFOW's iAddressFamily, iSocketType, iProtocol,
+/// dwProviderReserved and its size; FROM_PROTOCOL_INFO.
+const INFO_FAMILY: usize = 76;
+const INFO_TYPE: usize = 88;
+const INFO_PROTOCOL: usize = 92;
+const INFO_PROVIDER_RESERVED: usize = 112;
+const INFO_SIZE: usize = 628;
+const FROM_PROTOCOL_INFO: i32 = -1;
+
+/// WSADuplicateSocketW(s, dwProcessId, lpProtocolInfo): the socket's
+/// handle duplicated into the process (dwProviderReserved, as the base
+/// provider keeps it) for that process's WSASocketW(FROM_PROTOCOL_INFO).
+#[unsafe(no_mangle)]
+pub extern "system" fn WSADuplicateSocketW(s: Socket, process: u32, info: *mut u8) -> i32 {
+    const PROCESS_DUP_HANDLE: u32 = 0x40;
+    const DUPLICATE_SAME_ACCESS: u32 = 2;
+    if !started() {
+        return fail(WSANOTINITIALISED);
+    }
+    if info.is_null() {
+        return fail(WSAEFAULT);
+    }
+    let attributes = ObjectAttributes {
+        length: size_of::<ObjectAttributes>() as u32,
+        root_directory: 0,
+        object_name: core::ptr::null(),
+        attributes: 0,
+        security_descriptor: 0,
+        security_quality_of_service: 0,
+    };
+    let client = [process as usize, 0];
+    let (mut target, mut h) = (0usize, 0usize);
+    // SAFETY: our structures and outputs.
+    if unsafe { NtOpenProcess(&mut target, PROCESS_DUP_HANDLE, &attributes, &client) } != 0 {
+        return fail(WSAEINVAL);
+    }
+    // SAFETY: plain handle calls; our output.
+    let status = unsafe {
+        let status = NtDuplicateObject(-1, s, target, &mut h, 0, 0, DUPLICATE_SAME_ACCESS);
+        NtClose(target);
+        status
+    };
+    if status != 0 {
+        return fail(WSAENOTSOCK);
+    }
+    // SAFETY: the caller's WSAPROTOCOL_INFOW (INFO_SIZE bytes).
+    unsafe {
+        memset(info, 0, INFO_SIZE);
+        let put = |at: usize, v: i32| info.add(at).cast::<i32>().write_unaligned(v);
+        put(INFO_FAMILY, AF_INET);
+        put(INFO_TYPE, SOCK_STREAM);
+        put(INFO_PROTOCOL, IPPROTO_TCP);
+        put(INFO_PROVIDER_RESERVED, h as i32);
+    }
+    0
 }
 
 /// WSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags,
@@ -759,10 +878,6 @@ fn transfer_buffers(
     if !started() {
         return fail(WSANOTINITIALISED);
     }
-    if routine != 0 {
-        missing(b"ws2_32.dll!WSARecv/WSASend(completion routine)", 0);
-        return fail(WSAEOPNOTSUPP);
-    }
     let mut info = [0u8; 24];
     info[..8].copy_from_slice(&(buffers as u64).to_le_bytes());
     info[8..12].copy_from_slice(&count.to_le_bytes());
@@ -778,7 +893,8 @@ fn transfer_buffers(
             Err(status) => fail(wsa_error(status)),
         };
     }
-    let status = afd_overlapped(s, code, &info, core::ptr::null_mut(), 0, ov);
+    // A completion routine needs an OVERLAPPED; without one it is ignored.
+    let status = afd_overlapped_apc(s, code, &info, core::ptr::null_mut(), 0, ov, routine);
     if status == 0 && !bytes.is_null() {
         // SAFETY: done: the kernel wrote InternalHigh; the caller's count.
         unsafe { *bytes = (*ov).internal_high as u32 };

@@ -402,6 +402,22 @@ impl Call<'_> {
         Ok(Timeout::from_nt(value))
     }
 
+    /// The process a process handle names (the current process for
+    /// NtCurrentProcess()), if the handle grants `access`.
+    fn dup_process(&self, h: u64, access: u32) -> Result<KArc<Process>, NtStatus> {
+        if Handle(h) == Handle::CURRENT_PROCESS {
+            return Ok(self.process.clone());
+        }
+        let entry = self.handle(Handle(h))?;
+        match &entry.object.body {
+            ObjectBody::Process(p) => {
+                entry.require(access)?;
+                Ok(p.clone())
+            }
+            _ => Err(NtStatus::OBJECT_TYPE_MISMATCH),
+        }
+    }
+
     /// Only the current process can be targeted so far.
     fn check_current_process(&self, handle: Handle) -> Result<(), NtStatus> {
         if handle == Handle::CURRENT_PROCESS { Ok(()) } else { Err(NtStatus::INVALID_HANDLE) }
@@ -1662,7 +1678,8 @@ const DUPLICATE_SAME_ATTRIBUTES: u32 = 4;
 /// NtDuplicateObject(SourceProcess, SourceHandle, TargetProcess,
 ///                   *TargetHandle, DesiredAccess, HandleAttributes, Options)
 fn nt_duplicate_object(call: &mut Call<'_>) -> NtStatus {
-    tri!(call.check_current_process(Handle(arg!(call, 0))));
+    const PROCESS_DUP_HANDLE: u32 = 0x40;
+    let source_process = tri!(call.dup_process(arg!(call, 0), PROCESS_DUP_HANDLE));
     let source = Handle(arg!(call, 1));
     let (target_process, out, access, attributes, options) = (
         arg!(call, 2),
@@ -1671,27 +1688,40 @@ fn nt_duplicate_object(call: &mut Call<'_>) -> NtStatus {
         arg!(call, 5) as u32,
         arg!(call, 6) as u32,
     );
+    let close_source = |p: &KArc<Process>| {
+        let closed = p.handles.lock().close(source);
+        closed.is_some()
+    };
     // DUPLICATE_CLOSE_SOURCE closes the source whatever else happens (the
     // DuplicateHandle docs); with no target process or no target handle it
     // only closes (Go's os/exec closes handles this way).
     let close_only = target_process == 0 || out == 0;
     if options & DUPLICATE_CLOSE_SOURCE != 0 && close_only {
-        return match call.process.handles.lock().close(source) {
-            Some(_) => NtStatus::SUCCESS,
-            None => NtStatus::INVALID_HANDLE,
+        return if close_source(&source_process) {
+            NtStatus::SUCCESS
+        } else {
+            NtStatus::INVALID_HANDLE
         };
     }
-    if let Err(status) = call.check_current_process(Handle(target_process)) {
-        if options & DUPLICATE_CLOSE_SOURCE != 0 {
-            call.process.handles.lock().close(source);
+    let target = match call.dup_process(target_process, PROCESS_DUP_HANDLE) {
+        Ok(p) => p,
+        Err(status) => {
+            if options & DUPLICATE_CLOSE_SOURCE != 0 {
+                close_source(&source_process);
+            }
+            return status;
         }
-        return status;
-    }
+    };
     if out == 0 {
         // Nowhere to return a duplicate: nothing to do.
         return NtStatus::SUCCESS;
     }
-    let entry = tri!(call.handle(source));
+    // The pseudo-handles name the caller's own process and thread.
+    let entry = if KArc::ptr_eq(&source_process, &call.process) {
+        tri!(call.handle(source))
+    } else {
+        tri!(source_process.handles.lock().get(source).ok_or(NtStatus::INVALID_HANDLE))
+    };
     let new = HandleEntry {
         access: if options & DUPLICATE_SAME_ACCESS != 0 {
             entry.access
@@ -1705,12 +1735,11 @@ fn nt_duplicate_object(call: &mut Call<'_>) -> NtStatus {
         },
         object: entry.object.clone(),
     };
-    let mut handles = call.process.handles.lock();
-    let Ok(handle) = handles.insert(new) else { return NtStatus::NO_MEMORY };
+    let inserted = target.handles.lock().insert(new);
+    let Ok(handle) = inserted else { return NtStatus::NO_MEMORY };
     if options & DUPLICATE_CLOSE_SOURCE != 0 {
-        handles.close(source);
+        close_source(&source_process);
     }
-    drop(handles);
     if call.write_u64(out, handle.0).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
@@ -3059,11 +3088,14 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         super::ledger::record("NtDeviceIoControlFile", "device", u64::from(code));
         return NtStatus::INVALID_DEVICE_REQUEST;
     }
-    if apc != 0 {
-        // Completion routines (WSARecv's lpCompletionRoutine): not yet.
-        super::ledger::record("NtDeviceIoControlFile", "apc", u64::from(code));
-        return NtStatus::NOT_SUPPORTED;
-    }
+    // ApcRoutine (WSARecv's lpCompletionRoutine): queued to this thread
+    // when the request completes, with (ApcContext, IoStatusBlock).
+    let apc = if apc == 0 {
+        None
+    } else {
+        let me = tri!(thread::current().ok_or(NtStatus::INVALID_HANDLE));
+        Some((me, thread::UserApc { routine: apc, args: [arg!(call, 3), iosb, 0] }))
+    };
     let event = match event {
         0 => None,
         h => Some(tri!(event_object(call, Handle(h), EVENT_MODIFY_STATE))),
@@ -3080,7 +3112,8 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         output,
         output_len,
     };
-    let io = super::afd::Io { process: call.process.clone(), iosb, event, context: arg!(call, 3) };
+    let io =
+        super::afd::Io { process: call.process.clone(), iosb, event, context: arg!(call, 3), apc };
     super::afd::ioctl(&request, io)
 }
 

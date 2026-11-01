@@ -955,11 +955,20 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       ProfileList has the service accounts, console handles include
       duplicates and FILE_DEVICE_CONSOLE handles for writing (sshd's log
       appeared; it is written with WriteConsoleW to stderr), sshd_config
-      names SshdSessionPath. Now sshd listens and accepts the TCP
-      connection, then its socketpair-like pipes fail
-      (`CreateNamedPipe() ERROR:130`) and the client sees the connection
-      close before the key exchange. Next: that pipe error, then the
-      login. Open: the JDK's console path (GetConsoleMode succeeding on
+      names SshdSessionPath. Then (2026-11-01): CreateNamedPipeA
+      (sshd's pipe()), WSADuplicateSocketW and WSASocketW from protocol
+      information (its dup2 of a socket), NtDuplicateObject through
+      process handles (PROCESS_DUP_HANDLE), CryptBinaryToStringA and
+      CryptStringToBinaryA (the fd table it hands the child, base64),
+      completion routines for WSARecv/WSASend (APCs from AFD), and the
+      boot option `wait=all` (sshd -d of 9.8.3 hands the connection to
+      sshd-session and exits at once). Now sshd-session takes the
+      connection, the banners are exchanged and the key exchange starts;
+      then it makes the privilege-separation child's virtual account
+      (`sshd_<pid>`: LsaManageSidNameMapping, LsaOpenPolicy,
+      LsaAddAccountRights, LogonUserExExW with LOGON32_PROVIDER_VIRTUAL,
+      CreateRestrictedToken), and LsaOpenPolicy is missing. Next: virtual
+      accounts, then the login. Open: the JDK's console path (GetConsoleMode succeeding on
       the standard handles made java_http fail intermittently).
       accepting a key-authenticated login from the host (xtask as the
       client).

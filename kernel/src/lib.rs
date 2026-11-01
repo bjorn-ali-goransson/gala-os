@@ -149,7 +149,10 @@ pub fn kernel_main() -> ! {
     // C:\gala).
     // `as=system`: they run as SYSTEM (the services' account), else as
     // the boot user (nt::token).
+    // `wait=all`: a program has ended when the processes it left running
+    // have too (sshd -d hands its connection to sshd-session and exits).
     nt::token::set_boot_system(cmdline.value("as") == Some("system"));
+    let wait_all = cmdline.value("wait") == Some("all");
     if let Some(names) = cmdline.value("run") {
         let mut args = cmdline.value("args").unwrap_or("").split(',');
         for name in names.split(',').filter(|n| !n.is_empty()) {
@@ -166,7 +169,7 @@ pub fn kernel_main() -> ! {
                 }
                 other => other,
             };
-            run_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""), cwd);
+            run_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""), cwd, wait_all);
             nt::ledger::dump();
             info!("run: end {name}");
         }
@@ -420,7 +423,30 @@ fn find_program<'b>(
 
 /// Runs the boot module `name` as a user process with command-line
 /// arguments `args` and waits for it.
-fn run_program(info: &BootInfo, name: &str, args: &str, cwd: Option<&str>) {
+/// Waits until no user process is running (`wait=all`).
+fn wait_for_the_rest() {
+    loop {
+        let Ok(running) = nt::process::running() else {
+            error!("run: out of memory");
+            return;
+        };
+        let Some(next) = running.first().cloned() else { return };
+        drop(running);
+        info!("run: waiting for {} (pid {})", next.name, next.id);
+        let Ok(object) = nt::object::KObject::new(nt::object::ObjectBody::Process(next.clone()))
+        else {
+            error!("run: out of memory");
+            return;
+        };
+        nt::wait::wait_for(core::slice::from_ref(&object), false, nt::wait::Timeout::Infinite);
+        match next.exit_status() {
+            Some(status) => info!("run: {} finished with status {:#010x}", next.name, status.0),
+            None => warn!("run: {} ended without an exit status", next.name),
+        }
+    }
+}
+
+fn run_program(info: &BootInfo, name: &str, args: &str, cwd: Option<&str>, wait_all: bool) {
     let mut buf = [0u8; 512];
     let Some((file_name, data, directory)) = find_program(info, name, &mut buf) else {
         panic!("run: no boot module named {name:?}");
@@ -451,6 +477,9 @@ fn run_program(info: &BootInfo, name: &str, args: &str, cwd: Option<&str>) {
                     info!("run: {} finished with status {:#010x}", process.name, status.0)
                 }
                 None => warn!("run: {} ended without an exit status", process.name),
+            }
+            if wait_all {
+                wait_for_the_rest();
             }
             process.space.clone()
         }

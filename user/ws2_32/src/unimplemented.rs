@@ -7,7 +7,6 @@ gala_stubs::unimplemented_exports!("ws2_32.dll":
     InetNtopW
     InetPtonW
     WSAAddressToStringW
-    WSADuplicateSocketW
     WSAStringToAddressA
     WSAStringToAddressW
     inet_ntop

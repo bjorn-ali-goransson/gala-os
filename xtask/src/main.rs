@@ -2394,7 +2394,7 @@ const SCENARIOS: &[Scenario] = &[
         // ssh logs on as galatest with a key (user/sshd/client_ed25519,
         // its authorized_keys in the profile) and runs echo.
         name: "sshd_login",
-        cmdline: "qemu_exit as=system cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,-ddd%20-e%20-p%207",
+        cmdline: "qemu_exit as=system wait=all cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,-ddd%20-e%20-p%207",
         exit_status: XTASK_STOPS,
         expect: &["xtask: net client: ssh ok"],
     },

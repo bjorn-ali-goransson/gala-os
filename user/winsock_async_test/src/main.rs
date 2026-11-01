@@ -6,7 +6,9 @@
 //! SO_UPDATE_*_CONTEXT options, GetAcceptExSockaddrs (from mswsock.dll),
 //! overlapped WSARecv/WSASend, CancelIoEx (ERROR_OPERATION_ABORTED, and
 //! ERROR_NOT_FOUND when nothing is pending), WSAGetOverlappedResult and
-//! FILE_SKIP_COMPLETION_PORT_ON_SUCCESS. Prints `winsock_async_test: ok`
+//! FILE_SKIP_COMPLETION_PORT_ON_SUCCESS; completion routines (WSARecv and
+//! WSASend with lpCompletionRoutine: queued to the thread, run in SleepEx's
+//! alertable wait, also for a receive that completed at once). Prints `winsock_async_test: ok`
 //! or exits with the number of the failing check.
 
 #![no_std]
@@ -93,6 +95,7 @@ unsafe extern "system" {
     fn SetFileCompletionNotificationModes(h: Handle, flags: u8) -> Bool;
     fn CloseHandle(h: Handle) -> Bool;
     fn Sleep(ms: u32);
+    fn SleepEx(ms: u32, alertable: Bool) -> u32;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -147,6 +150,8 @@ unsafe extern "system" {
     ) -> Bool;
     fn bind(s: Socket, addr: *const SockaddrIn, len: i32) -> i32;
     fn listen(s: Socket, backlog: i32) -> i32;
+    fn connect(s: Socket, addr: *const SockaddrIn, len: i32) -> i32;
+    fn accept(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> Socket;
     fn getsockname(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> i32;
     fn setsockopt(s: Socket, level: i32, name: i32, value: *const u8, len: i32) -> i32;
     fn closesocket(s: Socket) -> i32;
@@ -288,6 +293,23 @@ fn extension<T>(s: Socket, guid: &Guid) -> Option<T> {
     };
     // SAFETY: a non-null function pointer of the documented type.
     (r == 0 && f != 0).then(|| unsafe { core::mem::transmute_copy::<usize, T>(&f) })
+}
+
+static mut DONE_COUNT: u32 = 0;
+static mut DONE_ERROR: u32 = 0;
+static mut DONE_BYTES: u32 = 0;
+static mut DONE_OV: *mut Overlapped = core::ptr::null_mut();
+const WAIT_IO_COMPLETION: u32 = 0xc0;
+
+/// The completion routine: (dwError, cbTransferred, lpOverlapped, dwFlags).
+extern "system" fn done(error: u32, bytes: u32, ov: *mut Overlapped, _flags: u32) {
+    // SAFETY: runs on the test's thread only (an APC).
+    unsafe {
+        DONE_COUNT += 1;
+        DONE_ERROR = error;
+        DONE_BYTES = bytes;
+        DONE_OV = ov;
+    }
 }
 
 fn overlapped_socket() -> Socket {
@@ -478,6 +500,56 @@ fn run() -> Result<(), u32> {
             c.eq(closesocket(s) as u64, 0)?;
         }
         c.ok(CloseHandle(port) != 0, 0)?;
+
+        // Completion routines (no port): queued to the calling thread, run
+        // in an alertable wait (SleepEx returns WAIT_IO_COMPLETION).
+        let l2 = overlapped_socket();
+        c.eq(bind(l2, &SockaddrIn::new(LOOPBACK, 0), ADDR_LEN) as u64, 0)?;
+        c.eq(listen(l2, 1) as u64, 0)?;
+        len = ADDR_LEN;
+        c.eq(getsockname(l2, &mut name, &mut len) as u64, 0)?;
+        let c2 = overlapped_socket();
+        c.eq(connect(c2, &name, ADDR_LEN) as u64, 0)?;
+        let a2 = accept(l2, core::ptr::null_mut(), core::ptr::null_mut());
+        c.ok(a2 != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        let mut rbuf2 = [0u8; 16];
+        let mut r2 = WsaBuf { len: 16, buf: rbuf2.as_mut_ptr() };
+        // A receive that has to wait: the routine runs once data came.
+        let mut ov_a = Overlapped::new();
+        flags = 0;
+        let r = WSARecv(a2, &mut r2, 1, &mut received, &mut flags, &mut ov_a, done as *const () as usize);
+        c.ok(r != 0 && WSAGetLastError() as u32 == ERROR_IO_PENDING, WSAGetLastError() as u64)?;
+        c.eq(DONE_COUNT.into(), 0)?;
+        let mut sbuf2 = *b"abc";
+        let mut s2 = WsaBuf { len: 3, buf: sbuf2.as_mut_ptr() };
+        c.eq(WSASend(c2, &mut s2, 1, &mut bytes, 0, core::ptr::null_mut(), 0) as u64, 0)?;
+        c.eq(SleepEx(5000, 1).into(), WAIT_IO_COMPLETION.into())?;
+        c.eq(DONE_COUNT.into(), 1)?;
+        c.ok(DONE_ERROR == 0 && DONE_BYTES == 3, DONE_ERROR.into())?;
+        c.ok(core::ptr::eq(DONE_OV, &raw mut ov_a), 0)?;
+        c.ok(&rbuf2[..3] == b"abc", rbuf2[0].into())?;
+        // One that completes at once returns 0, and its routine is still
+        // queued (it runs at the next alertable wait).
+        s2.len = 2;
+        c.eq(WSASend(c2, &mut s2, 1, &mut bytes, 0, core::ptr::null_mut(), 0) as u64, 0)?;
+        Sleep(200);
+        let mut ov_b = Overlapped::new();
+        let r = WSARecv(a2, &mut r2, 1, &mut received, &mut flags, &mut ov_b, done as *const () as usize);
+        c.ok(r == 0 && received == 2, WSAGetLastError() as u64)?;
+        c.eq(DONE_COUNT.into(), 1)?;
+        c.eq(SleepEx(0, 1).into(), WAIT_IO_COMPLETION.into())?;
+        c.ok(DONE_COUNT == 2 && DONE_BYTES == 2, DONE_COUNT.into())?;
+        c.ok(core::ptr::eq(DONE_OV, &raw mut ov_b), 0)?;
+        // WSASend with a routine.
+        let mut ov_c = Overlapped::new();
+        let r = WSASend(c2, &mut s2, 1, &mut bytes, 0, &mut ov_c, done as *const () as usize);
+        c.ok(r == 0 || WSAGetLastError() as u32 == ERROR_IO_PENDING, WSAGetLastError() as u64)?;
+        c.eq(SleepEx(5000, 1).into(), WAIT_IO_COMPLETION.into())?;
+        c.ok(DONE_COUNT == 3 && DONE_BYTES == 2 && DONE_ERROR == 0, DONE_COUNT.into())?;
+        c.ok(core::ptr::eq(DONE_OV, &raw mut ov_c), 0)?;
+        for s in [a2, c2, l2] {
+            c.eq(closesocket(s) as u64, 0)?;
+        }
         c.eq(WSACleanup() as u64, 0)?;
     }
     Ok(())

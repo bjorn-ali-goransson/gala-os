@@ -403,3 +403,25 @@ pub extern "system" fn MoveFileExW(from: *const u16, to: *const u16, flags: u32)
     }
     FALSE
 }
+
+/// CreateNamedPipeA: CreateNamedPipeW with the name converted.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn CreateNamedPipeA(
+    name: *const u8,
+    open_mode: u32,
+    pipe_mode: u32,
+    instances: u32,
+    out_size: u32,
+    in_size: u32,
+    timeout: u32,
+    attributes: *mut c_void,
+) -> Handle {
+    let mut buf = [0u16; MAX];
+    match wide(name, &mut buf) {
+        Ok(n) => super::pipe::CreateNamedPipeW(
+            n, open_mode, pipe_mode, instances, out_size, in_size, timeout, attributes,
+        ),
+        Err(e) => fail_with(e, INVALID_HANDLE_VALUE),
+    }
+}

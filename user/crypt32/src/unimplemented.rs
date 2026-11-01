@@ -111,8 +111,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertVerifyTimeValidity
     CertVerifyValidityNesting
     CryptAcquireCertificatePrivateKey
-    CryptBinaryToStringA
-    CryptBinaryToStringW
     CryptCreateKeyIdentifierFromCSP
     CryptDecodeMessage
     CryptDecodeObject
@@ -194,8 +192,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CryptSignCertificate
     CryptSignMessage
     CryptSignMessageWithKey
-    CryptStringToBinaryA
-    CryptStringToBinaryW
     CryptUninstallDefaultContext
     CryptUnprotectMemory
     CryptUnregisterDefaultOIDFunction

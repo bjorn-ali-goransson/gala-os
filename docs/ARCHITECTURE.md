@@ -818,7 +818,14 @@ ever reaching end of file). Other attributes fail (ledger). The attribute
 list's layout is gala's own (programs only see its size).
 **DuplicateHandle(..., NULL target, ..., DUPLICATE_CLOSE_SOURCE)** only
 closes the source (the docs: closed regardless of errors); a duplicate
-with nowhere to return it is not created.
+with nowhere to return it is not created. Source and target process are
+NtCurrentProcess() or process handles with PROCESS_DUP_HANDLE (else
+STATUS_ACCESS_DENIED); the source handle is looked up in the source
+process's table and the duplicate inserted in the target's (never both
+tables locked at once). WSADuplicateSocketW uses this: it duplicates the
+socket's handle into the target process and leaves it in
+WSAPROTOCOL_INFOW.dwProviderReserved, which that process's
+WSASocketW(FROM_PROTOCOL_INFO) returns as its socket.
 
 **Races found by go_exec** (fixed in nt; found with the hang dump below):
 - *Termination vs. thread creation*: `process::terminate` records the
@@ -1197,6 +1204,9 @@ Windows, never shadows the system's DLLs.)
   SYSTEM and Administrators, inherited), its ProfileList entry and the
   user's hive HKEY_USERS\<SID>, returned as hProfile; UnloadUserProfile
   closes it. TODO: the default profile's contents, NTUSER.DAT (D3).
+  The boot option `wait=all` makes `run=` wait, after each program,
+  for every process still running (a service that hands its work to a
+  child and exits, as sshd -d does).
   The boot option `as=system` starts the `run=` programs as SYSTEM
   (TokenData::system: user S-1-5-18, owner BUILTIN\Administrators, an
   owner group, Everyone, Authenticated Users, the System label; the
@@ -1679,6 +1689,12 @@ Internal/InternalHigh) and the endpoint's I/O completion port.
   posted to the port, unless the endpoint has
   FILE_SKIP_COMPLETION_PORT_ON_SUCCESS (what Go asks for, after
   WSAEnumProtocols reports XP1_IFS_HANDLES).
+- An ApcRoutine (WSARecv/WSASend's lpCompletionRoutine) is queued as a
+  user APC to the calling thread when the request completes, at once or
+  later, with (ApcContext, IoStatusBlock); such a request posts no packet
+  and ignores non-blocking mode. A request that fails at once queues
+  none. ws2_32 passes a trampoline as the routine and the caller's
+  routine as the context, and leaves the OVERLAPPED's event alone.
 - Cancellation (NtCancelIoFileEx, i.e. CancelIoEx; a gala service number
   until verified on the pinned build) completes the matching pending
   requests (all of the process's, or the one whose IO_STATUS_BLOCK is
@@ -1771,7 +1787,7 @@ shootdowns and PCIDs (ROADMAP S4), a real ntdll and
 kernel32 (gala runs test stand-ins), process creation from user mode,
 security, a persistent registry (registry security, symbolic link keys,
 change notifications, WOW64 views), storage devices, interrupts for devices (virtio-net
-polls), completion routines (APCs) for socket I/O, AcceptEx with
+polls), AcceptEx with
 receive data, ConnectEx with send data, UDP, IPv6,
 select/IOCTL_AFD_POLL, non-blocking sockets, socket options with effect, telling a reset from a FIN
 on receive, bindgen-generated

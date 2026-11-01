@@ -262,23 +262,6 @@ extern "system" fn io_completion_trampoline(routine: usize, iosb: *mut usize, _r
     }
 }
 
-/// CreateNamedPipeA: named pipe servers are not there yet (anonymous
-/// pipes are, see pipe.rs).
-#[unsafe(no_mangle)]
-pub extern "system" fn CreateNamedPipeA(
-    _name: *const u8,
-    _open_mode: u32,
-    _pipe_mode: u32,
-    _instances: u32,
-    _out_size: u32,
-    _in_size: u32,
-    _timeout: u32,
-    _attributes: *mut c_void,
-) -> Handle {
-    unsupported(b"kernel32.dll!CreateNamedPipeA", 0);
-    fail_with(ERROR_NOT_SUPPORTED, INVALID_HANDLE_VALUE)
-}
-
 /// SetFileAttributesA: changing attributes is not there yet; recorded.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetFileAttributesA(_path: *const u8, attributes: u32) -> Bool {

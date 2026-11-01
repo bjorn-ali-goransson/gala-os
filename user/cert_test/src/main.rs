@@ -19,7 +19,11 @@
 //! - CertGetPublicKeyLength: 1024; CertFindExtension of basic constraints;
 //! - CryptImportPublicKeyInfoEx2: a bcrypt RSA key that verifies the
 //!   certificate's own signature (BCryptVerifySignature over the SHA-256
-//!   of the TBSCertificate).
+//!   of the TBSCertificate);
+//! - base64: CryptBinaryToStringA (sizes with and without the NUL, lines of
+//!   64 characters ending in CRLF unless CRYPT_STRING_NOCRLF,
+//!   ERROR_MORE_DATA) and CryptStringToBinaryA (CRLFs skipped, the format
+//!   found, ERROR_INVALID_DATA for what is not base64).
 //!
 //! Prints `cert_test: ok` or exits with the number of the failing check.
 
@@ -27,6 +31,8 @@
 #![no_main]
 
 use core::ffi::c_void;
+
+type Bool = i32;
 
 type Handle = *mut c_void;
 
@@ -104,6 +110,22 @@ unsafe extern "system" {
 
 #[link(name = "crypt32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn CryptBinaryToStringA(
+        data: *const u8,
+        len: u32,
+        flags: u32,
+        text: *mut u8,
+        chars: *mut u32,
+    ) -> Bool;
+    fn CryptStringToBinaryA(
+        text: *const u8,
+        chars: u32,
+        flags: u32,
+        out: *mut u8,
+        len: *mut u32,
+        skipped: *mut u32,
+        format: *mut u32,
+    ) -> Bool;
     fn CertCreateCertificateContext(encoding: u32, data: *const u8, len: u32)
     -> *const CertContext;
     fn CertDuplicateCertificateContext(cert: *const CertContext) -> *const CertContext;
@@ -450,6 +472,88 @@ fn run() -> Result<(), u32> {
         c.eq(BCryptDestroyKey(key).into(), 0)?;
 
         c.ok(CertFreeCertificateContext(cert) != 0, 0)?;
+
+        // Base64 (CryptBinaryToStringA, CryptStringToBinaryA).
+        const BASE64: u32 = 1;
+        const NOCRLF: u32 = 0x4000_0000;
+        const STRICT: u32 = 0x2000_0000;
+        let data = b"hello world!!";
+        let want = b"aGVsbG8gd29ybGQhIQ==";
+        let mut n = 0u32;
+        let null = core::ptr::null_mut();
+        // The size asked for counts the NUL; the length written does not.
+        c.ok(CryptBinaryToStringA(data.as_ptr(), 13, BASE64 | NOCRLF, null, &mut n) != 0, 0)?;
+        c.eq(n.into(), 21)?;
+        let mut text = [0u8; 128];
+        c.ok(
+            CryptBinaryToStringA(data.as_ptr(), 13, BASE64 | NOCRLF, text.as_mut_ptr(), &mut n)
+                != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(n.into(), 20)?;
+        c.ok(&text[..21] == b"aGVsbG8gd29ybGQhIQ==\0", text[0].into())?;
+        // Without NOCRLF every line (64 characters at most) ends in CRLF.
+        let sixty = [0xffu8; 60];
+        n = 128;
+        c.ok(
+            CryptBinaryToStringA(sixty.as_ptr(), 60, BASE64, text.as_mut_ptr(), &mut n) != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(n.into(), 84)?;
+        c.ok(&text[62..68] == b"//\r\n//" && &text[80..85] == b"//\r\n\0", text[64].into())?;
+        // Too small a buffer: ERROR_MORE_DATA.
+        n = 10;
+        c.eq(
+            CryptBinaryToStringA(data.as_ptr(), 13, BASE64 | NOCRLF, text.as_mut_ptr(), &mut n)
+                as u64,
+            0,
+        )?;
+        c.eq(GetLastError().into(), 234)?;
+
+        let (mut skipped, mut format) = (9u32, 9u32);
+        c.ok(
+            CryptStringToBinaryA(
+                want.as_ptr(),
+                20,
+                BASE64 | STRICT,
+                null,
+                &mut n,
+                &mut skipped,
+                &mut format,
+            ) != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(n.into(), 13)?;
+        let mut back = [0u8; 32];
+        // NUL-terminated (length 0); CRLFs are skipped.
+        c.ok(
+            CryptStringToBinaryA(
+                c"aGVsbG8gd29y\r\nbGQhIQ==\r\n".as_ptr().cast(),
+                0,
+                BASE64,
+                back.as_mut_ptr(),
+                &mut n,
+                &mut skipped,
+                &mut format,
+            ) != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(n.into(), 13)?;
+        c.ok(&back[..13] == data && skipped == 0 && format == BASE64, format.into())?;
+        // Not base64: ERROR_INVALID_DATA.
+        n = 32;
+        let bad = b"aGV$bG8=";
+        let r = CryptStringToBinaryA(
+            bad.as_ptr(),
+            8,
+            BASE64,
+            back.as_mut_ptr(),
+            &mut n,
+            null.cast(),
+            null.cast(),
+        );
+        c.eq(r as u64, 0)?;
+        c.eq(GetLastError().into(), 13)?;
     }
     Ok(())
 }
