@@ -342,6 +342,9 @@ pub enum ObjectBody {
     DiskDevice,
     /// An open of the disk: raw sector access.
     Disk(super::disk::DiskFile),
+    /// An open of the volume itself (`\\.\C:`, `\??\Volume{...}` without a
+    /// path below it): its information and IOCTLs. Signaled.
+    VolumeFile(Dispatcher),
     /// An open of `\Device\Null`: reads are at end of file, writes are
     /// discarded. Signaled (waits on it return at once).
     Null(Dispatcher),
@@ -418,6 +421,7 @@ impl KObject {
             ObjectBody::Null(_) => "File",
             ObjectBody::DiskDevice => "Device",
             ObjectBody::Disk(_) => "File",
+            ObjectBody::VolumeFile(_) => "File",
             ObjectBody::Key(_) => "Key",
             ObjectBody::Job(_) => "Job",
             ObjectBody::KeyedEvent(_) => "KeyedEvent",
@@ -454,6 +458,7 @@ impl KObject {
             ObjectBody::Pipe(p) => Some(&*p.dispatcher),
             ObjectBody::Null(d) => Some(d),
             ObjectBody::Disk(d) => Some(&d.dispatcher),
+            ObjectBody::VolumeFile(d) => Some(d),
             ObjectBody::ConsoleInput
             | ObjectBody::ConsoleOutput
             | ObjectBody::Directory(_)
@@ -491,7 +496,8 @@ impl KObject {
             | ObjectBody::NullDevice
             | ObjectBody::Null(_)
             | ObjectBody::DiskDevice
-            | ObjectBody::Disk(_) => FILE_MAPPING,
+            | ObjectBody::Disk(_)
+            | ObjectBody::VolumeFile(_) => FILE_MAPPING,
             ObjectBody::Process(_) => PROCESS_MAPPING,
             ObjectBody::Key(_) => super::registry::KEY_MAPPING,
             ObjectBody::Job(_) => super::job::JOB_MAPPING,

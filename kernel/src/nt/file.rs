@@ -103,10 +103,19 @@ pub fn init() -> Result<(), NtStatus> {
     *FS.lock() = Some(fs);
     let volume =
         KObject::with_permanence(ObjectBody::Volume, true).map_err(|_| NtStatus::NO_MEMORY)?;
+    // Opening the volume itself: its attributes for everyone, the rest
+    // for administrators (as Windows' volumes).
+    const FILE_READ_ATTRIBUTES_SYNCHRONIZE_READ_CONTROL: u32 = 0x0012_0080;
+    *volume.security.lock() =
+        Some(super::disk::device_descriptor(FILE_READ_ATTRIBUTES_SYNCHRONIZE_READ_CONTROL)?);
     namespace::create(None, &wide("\\Device\\HarddiskVolume1")?, volume.clone(), false, false)?;
     // C: is a symbolic link to the volume, as on Windows.
     let c_drive = namespace::new_symbolic_link(&wide(VOLUME_DEVICE)?)?;
     namespace::create(None, &wide("\\??\\C:")?, c_drive, false, false)?;
+    // And its volume GUID name, as the mount manager makes it (kernel32's
+    // GetVolumeNameForVolumeMountPoint returns the same GUID).
+    let guid = namespace::new_symbolic_link(&wide(VOLUME_DEVICE)?)?;
+    namespace::create(None, &wide(VOLUME_GUID_LINK)?, guid, false, false)?;
     drop(volume);
     // The NUL device, and the DOS name for it.
     let null =
@@ -119,6 +128,8 @@ pub fn init() -> Result<(), NtStatus> {
 
 /// The device path of the volume.
 pub const VOLUME_DEVICE: &str = "\\Device\\HarddiskVolume1";
+/// Its volume GUID name (user/kernel32/src/volume.rs has the same GUID).
+pub const VOLUME_GUID_LINK: &str = "\\??\\Volume{9a1a0c00-0000-4000-8000-00000000c0de}";
 
 /// Adds a boot module as a read-only file `C:\\<directory>\\<name>`; the
 /// directory (`/`-separated, created if needed) defaults to `gala`.
@@ -657,6 +668,7 @@ pub const FILE_FS_SIZE_INFORMATION: u32 = 3;
 pub const FILE_FS_DEVICE_INFORMATION: u32 = 4;
 pub const FILE_FS_ATTRIBUTE_INFORMATION: u32 = 5;
 pub const FILE_FS_FULL_SIZE_INFORMATION: u32 = 7;
+pub const FILE_FS_SECTOR_SIZE_INFORMATION: u32 = 11;
 
 const FILE_DEVICE_DISK: u32 = 7;
 const FILE_DEVICE_IS_MOUNTED: u32 = 0x20;
@@ -665,6 +677,9 @@ const FILE_UNICODE_ON_DISK: u32 = 0x4;
 const VOLUME_SERIAL: u32 = 0x6a1a_0001;
 const SECTORS_PER_CLUSTER: u32 = 8;
 const BYTES_PER_SECTOR: u32 = 512;
+/// What FileFsSectorSizeInformation reports as the physical sector (a
+/// 512e disk: 512-byte logical, 4 KiB physical sectors).
+const PHYSICAL_BYTES_PER_SECTOR: u32 = 4096;
 /// The file system name reported to programs (they check for it).
 const FS_NAME: &[u8] = b"NTFS";
 
@@ -722,7 +737,23 @@ pub fn volume_information(class: u32) -> Result<(Vec<u8>, usize), NtStatus> {
             }
             16
         }
-        _ => return Err(NtStatus::INVALID_INFO_CLASS),
+        FILE_FS_SECTOR_SIZE_INFORMATION => {
+            // LogicalBytesPerSector, PhysicalBytesPerSectorForAtomicity,
+            // ...ForPerformance, FileSystemEffectivePhysicalBytesPerSector
+            // ForAtomicity, Flags (aligned device and partition), and the
+            // two alignment offsets (0).
+            grow(&mut b, 28)?;
+            put(&mut b, 0, &BYTES_PER_SECTOR.to_le_bytes());
+            for at in [4, 8, 12] {
+                put(&mut b, at, &PHYSICAL_BYTES_PER_SECTOR.to_le_bytes());
+            }
+            put(&mut b, 16, &3u32.to_le_bytes());
+            28
+        }
+        _ => {
+            super::ledger::record("NtQueryVolumeInformationFile", "info class", class.into());
+            return Err(NtStatus::INVALID_INFO_CLASS);
+        }
     };
     Ok((b, min))
 }

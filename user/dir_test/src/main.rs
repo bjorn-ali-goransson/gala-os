@@ -1,4 +1,5 @@
-//! Directory listing, volume information, flush, rename, delete on close and
+//! Directory listing, volume information (device, attributes, size, sector
+//! size, volume), flush, rename, delete on close and
 //! relative opens (RootDirectory = directory handle) under
 //! `\??\C:\Users\Public\gala_dir_test`, with results expected to match real
 //! Windows (NTFS). Prints `dir_test: ok` or exits with the number of the
@@ -24,6 +25,7 @@ const FILE_NAMES_INFORMATION: u32 = 12;
 const FILE_RENAME_INFORMATION: u32 = 10;
 const FILE_DISPOSITION_INFORMATION: u32 = 13;
 const FILE_STANDARD_INFORMATION: u32 = 5;
+const FILE_FS_SECTOR_SIZE_INFORMATION: u32 = 11;
 const FILE_FS_VOLUME_INFORMATION: u32 = 1;
 const FILE_FS_SIZE_INFORMATION: u32 = 3;
 const FILE_FS_DEVICE_INFORMATION: u32 = 4;
@@ -302,6 +304,20 @@ fn run() -> Result<(), u32> {
     let (total, free) = (u64_at(&v, 0), u64_at(&v, 8));
     c.ok(total > 0 && free <= total, free)?;
     c.eq(u64::from(u32_at(&v, 16)) * u64::from(u32_at(&v, 20)), 4096)?; // cluster size
+    // FILE_FS_SECTOR_SIZE_INFORMATION: logical sectors as above; the
+    // physical and effective sizes are hardware's, multiples of it; offsets
+    // 0 on an aligned volume.
+    let per_sector = u32_at(&v, 20);
+    let (s, info) = query_volume(b, FILE_FS_SECTOR_SIZE_INFORMATION, &mut v);
+    c.eq(st(s), ok)?;
+    c.eq(info as u64, 28)?;
+    let logical = u32_at(&v, 0);
+    c.eq(logical.into(), per_sector.into())?;
+    for at in [4, 8, 12] {
+        let size = u32_at(&v, at);
+        c.ok(size >= logical && size.is_multiple_of(logical), size.into())?;
+    }
+    c.eq(u32_at(&v, 20).into(), 0)?; // ByteOffsetForSectorAlignment
     let (s, _) = query_volume(b, FILE_FS_VOLUME_INFORMATION, &mut v);
     c.eq(st(s), ok)?;
     c.eq(u64::from(u32_at(&v, 12) % 2), 0)?; // VolumeLabelLength in bytes

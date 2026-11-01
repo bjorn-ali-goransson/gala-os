@@ -11,7 +11,11 @@
 //! WriteFileEx/ReadFileEx (the completion routine runs in the next
 //! alertable wait, SleepEx returning WAIT_IO_COMPLETION, with error 0, the
 //! count and the OVERLAPPED; not before),
-//! GetVolumeNameForVolumeMountPointW (C:\'s \\?\Volume{GUID}\),
+//! GetVolumeNameForVolumeMountPointW (C:\'s \\?\Volume{GUID}\, which opens
+//! as the volume's root directory, with paths below it; without the
+//! backslash, like \\.\C:, it is the volume itself: open for attributes,
+//! FILE_TYPE_DISK, IOCTL_STORAGE_QUERY_PROPERTY's access alignment (512-byte
+//! logical sectors), data access denied to a standard user),
 //! RemoveDirectoryW, RtlGetLastNtStatus after a failure, NtFlushBuffersFileEx, all inside the temporary directory. Prints
 //! `kernel32_file_test: ok` or exits with the number of the failing check.
 
@@ -40,6 +44,17 @@ extern "system" fn completed(error: u32, count: u32, ov: *mut usize) {
 unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
     fn GetLastError() -> u32;
+    fn GetFileType(h: Handle) -> u32;
+    fn DeviceIoControl(
+        h: Handle,
+        code: u32,
+        input: *const c_void,
+        input_size: u32,
+        output: *mut c_void,
+        output_size: u32,
+        returned: *mut u32,
+        overlapped: *mut c_void,
+    ) -> Bool;
     fn QueryDosDeviceW(name: *const u16, target: *mut u16, max: u32) -> u32;
     fn GetVolumeNameForVolumeMountPointW(mount: *const u16, name: *mut u16, size: u32) -> Bool;
     fn SetLastError(code: u32);
@@ -595,6 +610,79 @@ fn run() -> Result<(), u32> {
         let prefix = b"\\\\?\\Volume{".map(u16::from);
         let len = name.iter().position(|&ch| ch == 0).unwrap_or(0);
         c.ok(len == 49 && name[..11] == prefix && name[47..49] == [0x7d, 0x5c], len as u64)?;
+        // It names the volume: its root opens as a directory, and paths
+        // below it resolve (SQL Server opens it to find the sector size).
+        let dir = CreateFileW(
+            name.as_ptr(),
+            0,
+            7, // FILE_SHARE_READ | WRITE | DELETE
+            core::ptr::null_mut(),
+            3, // OPEN_EXISTING
+            FILE_FLAG_BACKUP_SEMANTICS,
+            core::ptr::null_mut(),
+        );
+        c.ok(dir as isize != -1, GetLastError().into())?;
+        CloseHandle(dir);
+        let mut below = [0u16; 64];
+        below[..len].copy_from_slice(&name[..len]);
+        for (d, &b) in below[len..].iter_mut().zip(b"Windows\0") {
+            *d = u16::from(b);
+        }
+        let attributes = GetFileAttributesW(below.as_ptr());
+        c.ok(attributes != u32::MAX && attributes & 0x10 != 0, attributes.into())?;
+
+        // Without the trailing backslash it names the volume itself, as
+        // \\.\C: does: anyone may open it for its attributes (a handle of
+        // type FILE_TYPE_DISK) and ask for the sector sizes (SQL Server's
+        // physical sector size check); data access needs an administrator.
+        let mut volume = [0u16; 64];
+        volume[..len - 1].copy_from_slice(&name[..len - 1]);
+        let dot_c = b"\\\\.\\C:\0".map(u16::from);
+        for path in [volume.as_ptr(), dot_c.as_ptr()] {
+            let v = CreateFileW(
+                path,
+                0x80, // FILE_READ_ATTRIBUTES
+                3,
+                core::ptr::null_mut(),
+                3,
+                0,
+                core::ptr::null_mut(),
+            );
+            c.ok(v as isize != -1, GetLastError().into())?;
+            c.eq(GetFileType(v).into(), 1)?; // FILE_TYPE_DISK
+            // STORAGE_PROPERTY_QUERY { StorageAccessAlignmentProperty,
+            // PropertyStandardQuery }; STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR.
+            let query = [6u32, 0, 0];
+            let mut out = [0u32; 7];
+            let mut n = 0;
+            let ok = DeviceIoControl(
+                v,
+                0x002d_1400, // IOCTL_STORAGE_QUERY_PROPERTY
+                query.as_ptr().cast(),
+                12,
+                out.as_mut_ptr().cast(),
+                28,
+                &mut n,
+                core::ptr::null_mut(),
+            );
+            c.ok(ok != 0, GetLastError().into())?;
+            c.eq(n.into(), 28)?;
+            c.eq(out[1].into(), 28)?; // Size
+            c.eq(out[4].into(), 512)?; // BytesPerLogicalSector
+            c.ok(out[5] >= 512 && out[5].is_multiple_of(512), out[5].into())?;
+            CloseHandle(v);
+        }
+        let denied = CreateFileW(
+            dot_c.as_ptr(),
+            0x8000_0000, // GENERIC_READ
+            3,
+            core::ptr::null_mut(),
+            3,
+            0,
+            core::ptr::null_mut(),
+        );
+        c.eq(denied as isize as u64, u64::MAX)?;
+        c.eq(GetLastError().into(), 5)?;
         let none = b"Q:\0".map(u16::from);
         c.eq(QueryDosDeviceW(none.as_ptr(), target.as_mut_ptr(), 64).into(), 0)?;
         c.eq(GetLastError().into(), ERROR_FILE_NOT_FOUND.into())?;

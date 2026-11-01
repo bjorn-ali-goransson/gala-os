@@ -53,12 +53,22 @@ fn wide(s: &str) -> Result<Vec<u16>, NtStatus> {
 /// What the disk device grants: everything to Administrators and SYSTEM,
 /// nothing to anyone else.
 fn admin_only() -> Result<Vec<u8>, NtStatus> {
+    device_descriptor(0)
+}
+
+/// A storage device's descriptor: everything to Administrators and
+/// SYSTEM, `everyone` (if not 0) to Everyone. The volume device grants
+/// Everyone what opening it for its attributes needs (nt/file.rs).
+pub fn device_descriptor(everyone: u32) -> Result<Vec<u8>, NtStatus> {
     const ADMINISTRATORS: Sid = Sid::new(5, &[32, 544]);
+    const EVERYONE: Sid = Sid::new(1, &[0]);
     const FILE_ALL_ACCESS: u32 = 0x001f_01ff;
-    let dacl = security::allow_acl(&[
-        (FILE_ALL_ACCESS, ADMINISTRATORS, 0),
-        (FILE_ALL_ACCESS, LOCAL_SYSTEM, 0),
-    ])?;
+    let all = [(FILE_ALL_ACCESS, ADMINISTRATORS, 0), (FILE_ALL_ACCESS, LOCAL_SYSTEM, 0)];
+    let dacl = if everyone == 0 {
+        security::allow_acl(&all)?
+    } else {
+        security::allow_acl(&[all[0], all[1], (everyone, EVERYONE, 0)])?
+    };
     Descriptor {
         control: SE_DACL_PRESENT,
         owner: Some(ADMINISTRATORS),
@@ -136,6 +146,38 @@ pub fn control(code: u32, sectors: u64) -> Result<Vec<u8>, NtStatus> {
     Ok(out)
 }
 
+pub const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002d_1400;
+/// STORAGE_PROPERTY_ID StorageAccessAlignmentProperty.
+const STORAGE_ACCESS_ALIGNMENT_PROPERTY: u32 = 6;
+/// What the volume reports as its physical sector (as file.rs's
+/// FileFsSectorSizeInformation: a 512e disk).
+pub const PHYSICAL_SECTOR: u32 = 4096;
+
+/// IOCTL_STORAGE_QUERY_PROPERTY's answer for STORAGE_PROPERTY_QUERY
+/// `input` { PropertyId, QueryType }: the access alignment descriptor
+/// (Version, Size, BytesPerCacheLine, BytesOffsetForCacheAlignment,
+/// BytesPerLogicalSector, BytesPerPhysicalSector,
+/// BytesOffsetForSectorAlignment) of a 512e device; for an existence query
+/// (QueryType 1) nothing. Other properties: STATUS_NOT_SUPPORTED.
+pub fn storage_property(input: &[u8]) -> Result<Vec<u8>, NtStatus> {
+    let field =
+        |at: usize| input.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let (Some(id), Some(kind)) = (field(0), field(4)) else {
+        return Err(NtStatus::INVALID_PARAMETER);
+    };
+    if id != STORAGE_ACCESS_ALIGNMENT_PROPERTY {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    let mut out = Vec::new();
+    if kind == 1 {
+        return Ok(out);
+    }
+    for v in [28u32, 28, 64, 0, SECTOR as u32, PHYSICAL_SECTOR, 0] {
+        out.try_extend_from_slice(&v.to_le_bytes()).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    Ok(out)
+}
+
 /// Whether IOCTL `code` needs read access (its RequiredAccess bits).
 pub fn needs_read(code: u32) -> bool {
     code >> 14 & 1 != 0
@@ -172,6 +214,23 @@ mod tests {
         assert_eq!(control(0x0007_0004, sectors), Err(NtStatus::INVALID_DEVICE_REQUEST));
         assert!(needs_read(IOCTL_DISK_GET_LENGTH_INFO));
         assert!(!needs_read(IOCTL_DISK_GET_DRIVE_GEOMETRY));
+    }
+
+    #[test]
+    fn the_access_alignment_of_a_512e_device() {
+        let q = |id: u32, kind: u32| {
+            let mut b = id.to_le_bytes().to_vec();
+            b.extend_from_slice(&kind.to_le_bytes());
+            b.extend_from_slice(&[0; 4]);
+            storage_property(&b)
+        };
+        let d = q(6, 0).unwrap();
+        let at = |i: usize| u32::from_le_bytes(d[4 * i..4 * i + 4].try_into().unwrap());
+        assert_eq!(d.len(), 28);
+        assert_eq!((at(0), at(1), at(4), at(5)), (28, 28, 512, 4096));
+        assert_eq!(q(6, 1), Ok(vec![]));
+        assert_eq!(q(0, 0), Err(NtStatus::NOT_SUPPORTED));
+        assert_eq!(storage_property(&[6, 0]), Err(NtStatus::INVALID_PARAMETER));
     }
 
     #[test]

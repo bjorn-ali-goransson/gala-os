@@ -2840,6 +2840,21 @@ impl Call<'_> {
         })
     }
 
+    /// The volume device, if OBJECT_ATTRIBUTES name it with nothing below
+    /// it (`\??\C:`, `\??\Volume{...}`; `\??\C:\` is the root directory).
+    fn names_volume(&self, attrs_ptr: u64) -> Result<Option<ObjectRef>, NtStatus> {
+        let Some((0, name, attributes)) = self.raw_object_attributes(attrs_ptr)? else {
+            return Ok(None);
+        };
+        let ci = attributes & OBJ_CASE_INSENSITIVE != 0;
+        Ok(match namespace::lookup_parse(None, &name, ci) {
+            Ok((device, rest)) if matches!(device.body, ObjectBody::Volume) && rest.is_empty() => {
+                Some(device)
+            }
+            _ => None,
+        })
+    }
+
     /// The disk device, if OBJECT_ATTRIBUTES name it (`\??\PhysicalDrive0`).
     fn names_disk(&self, attrs_ptr: u64) -> Result<Option<ObjectRef>, NtStatus> {
         let Some((0, name, attributes)) = self.raw_object_attributes(attrs_ptr)? else {
@@ -2896,6 +2911,13 @@ impl Call<'_> {
             (tri!(super::afd::open(&ea)), file::FILE_OPENED)
         } else if let Some(body) = tri!(self.names_console(attrs_ptr)) {
             let Ok(object) = KObject::new(body) else { return NtStatus::NO_MEMORY };
+            (object, file::FILE_OPENED)
+        } else if let Some(volume) = tri!(self.names_volume(attrs_ptr)) {
+            // The volume itself: its descriptor decides.
+            granted = tri!(security_calls::check_object(self, &volume, access));
+            let Ok(object) = KObject::new(ObjectBody::VolumeFile(Dispatcher::new(1))) else {
+                return NtStatus::NO_MEMORY;
+            };
             (object, file::FILE_OPENED)
         } else if let Some(device) = tri!(self.names_disk(attrs_ptr)) {
             // Raw disk access: the device's descriptor decides.
@@ -3031,6 +3053,7 @@ fn nt_fs_control_file(call: &mut Call<'_>) -> NtStatus {
     let (iosb, code, out, out_len) =
         (arg!(call, 4), arg!(call, 5) as u32, arg!(call, 8), arg!(call, 9) as u32 as usize);
     let ObjectBody::Pipe(end) = &entry.object.body else {
+        super::ledger::record("NtFsControlFile", "file system control", u64::from(code));
         return NtStatus::INVALID_DEVICE_REQUEST;
     };
     match code {
@@ -3147,6 +3170,31 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
     let (input, input_len, output, output_len) =
         (arg!(call, 6), arg!(call, 7) as u32, arg!(call, 8), arg!(call, 9) as u32);
     let entry = tri!(call.handle(Handle(handle)));
+    if matches!(entry.object.body, ObjectBody::VolumeFile(_)) {
+        let _ = apc;
+        if code != super::disk::IOCTL_STORAGE_QUERY_PROPERTY {
+            super::ledger::record("NtDeviceIoControlFile", "volume", u64::from(code));
+            return NtStatus::INVALID_DEVICE_REQUEST;
+        }
+        let mut query = [0u8; 12];
+        let n = (input_len as usize).min(query.len());
+        if call.process.read(input, &mut query[..n]).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        let out = tri!(super::disk::storage_property(&query[..n]));
+        // A buffer for the header only (Version, Size) gets the header.
+        let give = out.len().min(output_len as usize);
+        if give < out.len() && give < 8 {
+            return NtStatus::BUFFER_TOO_SMALL;
+        }
+        if call.process.write(output, &out[..give]).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        let event = tri!(start_io(call, &entry.object, event));
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, give as u64));
+        finish_io(&entry.object, event.as_ref(), None, NtStatus::SUCCESS);
+        return NtStatus::SUCCESS;
+    }
     if matches!(entry.object.body, ObjectBody::Disk(_)) {
         let _ = (input, input_len, apc);
         if super::disk::needs_read(code) && entry.access & file::FILE_READ_DATA == 0 {
@@ -4500,6 +4548,9 @@ fn nt_query_volume_information_file(call: &mut Call<'_>) -> NtStatus {
         ObjectBody::Pipe(_) => Some(0x11),
         ObjectBody::Null(_) => Some(0x15), // FILE_DEVICE_NULL
         ObjectBody::Disk(_) => Some(super::disk::FILE_DEVICE_DISK),
+        ObjectBody::VolumeFile(_) if class == file::FILE_FS_DEVICE_INFORMATION => {
+            Some(super::disk::FILE_DEVICE_DISK)
+        }
         _ => None,
     };
     if let Some(device) = device
@@ -4516,7 +4567,7 @@ fn nt_query_volume_information_file(call: &mut Call<'_>) -> NtStatus {
         tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 8));
         return NtStatus::SUCCESS;
     }
-    if !matches!(entry.object.body, ObjectBody::File(_)) {
+    if !matches!(entry.object.body, ObjectBody::File(_) | ObjectBody::VolumeFile(_)) {
         return NtStatus::OBJECT_TYPE_MISMATCH;
     }
     let (info, min) = tri!(file::volume_information(class));
@@ -4543,6 +4594,7 @@ fn nt_flush_buffers_file(call: &mut Call<'_>) -> NtStatus {
         ObjectBody::File(_) => {}
         ObjectBody::Pipe(end) => tri!(end.flush()),
         ObjectBody::Disk(_) => tri!(platform::disk_flush().map_err(super::disk::status)),
+        ObjectBody::VolumeFile(_) => {}
         _ => return NtStatus::OBJECT_TYPE_MISMATCH,
     }
     tri!(call.write_iosb(arg!(call, 1), NtStatus::SUCCESS, 0));

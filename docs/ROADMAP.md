@@ -1049,7 +1049,18 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       as on Windows; `git log` wants a pager on gala's console (the
       scenario passes `--no-pager`). Looked up but optional: rand_s,
       _localtime64_s, kernelbase.dll, NtAllocateVirtualMemoryEx,
-      GetNumaNodeProcessorMaskEx. The agreed order is done. Open: the JDK's console path (GetConsoleMode succeeding
+      GetNumaNodeProcessorMaskEx. The agreed order is done. Then (open
+      items): LocalDB's "unexpected error while checking the sector size"
+      (error 5177) is gone: SQL Server opens the volume by the GUID name
+      gala's kernel32 reports, so `\??\Volume{GUID}` is now a link to the
+      volume; without a trailing backslash (like `\\.\C:`) it names the
+      volume itself, which anyone may open for its attributes (data access:
+      administrators) and ask IOCTL_STORAGE_QUERY_PROPERTY's access
+      alignment (512-byte logical, 4 KiB physical sectors, as a 512e disk);
+      FileFsSectorSizeInformation reports the same (kernel32_file_test,
+      dir_test). Still seen: FSCTL_FILESYSTEM_GET_STATISTICS (17053) and
+      IOCTL_VOLUME_GET_GPT_ATTRIBUTES, both refused (ERROR_INVALID_FUNCTION
+      now, no longer error 317), non-fatal. Open: the JDK's console path (GetConsoleMode succeeding
       on the standard handles made java_http fail intermittently).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)

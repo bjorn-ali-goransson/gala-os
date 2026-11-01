@@ -1910,6 +1910,17 @@ it, D3 registry hives on it).
   FileStandard information work. kernel32's DeviceIoControl goes to
   NtDeviceIoControlFile (NtFsControlFile for FILE_DEVICE_FILE_SYSTEM
   codes).
+- The volume (C:, `\Device\HarddiskVolume1`) is also reachable as
+  `\??\Volume{9a1a0c00-0000-4000-8000-00000000c0de}` (the GUID kernel32's
+  GetVolumeNameForVolumeMountPoint reports). A name that ends at the
+  volume device (`\\.\C:`, `\\?\Volume{...}`, no trailing backslash)
+  opens the volume itself (`ObjectBody::VolumeFile`) instead of its root
+  directory, checked against the volume device's descriptor (everything
+  for Administrators and SYSTEM, attributes for Everyone): volume
+  information (FILE_DEVICE_DISK), IOCTL_STORAGE_QUERY_PROPERTY's
+  StorageAccessAlignmentProperty (512-byte logical, 4 KiB physical
+  sectors: a 512e disk, as FileFsSectorSizeInformation reports), flush.
+  Other IOCTLs go to the ledger.
 - Tests: `disk_test` (as SYSTEM) on a 16 MiB image xtask creates for it
   (`DISK_SCENARIOS`: size, what to write into the fresh image, what the
   image must hold after the run, checked on the host); host unit tests

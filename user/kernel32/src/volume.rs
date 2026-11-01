@@ -329,6 +329,7 @@ pub extern "system" fn QueryDosDeviceW(name: *const u16, target: *mut u16, max: 
 
 /// The GUID path of gala's one volume (C:), as the mount manager names
 /// volumes: `\\?\Volume{GUID}\`. The GUID is gala's own, fixed.
+/// The kernel links `\??\Volume{...}` to the volume (nt/file.rs).
 pub(crate) const VOLUME_GUID_PATH: &[u8] = b"\\\\?\\Volume{9a1a0c00-0000-4000-8000-00000000c0de}\\";
 
 /// GetVolumeNameForVolumeMountPointW: the volume GUID path of the
