@@ -1082,6 +1082,15 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       ntdll), test first, and stub the rest; then the runtime's own
       startup (shared memory, cygheap, fork emulation). Also: the
       `bin\bash.exe` launcher exits with 1 without output (to look at).
+      Then (2026-11-01): msys-2.0.dll loads. ntdll gained its run-time
+      library (strings, SIDs, ACLs, descriptors, critical sections, which
+      kernel32 now uses too), NtQueryEvent, NtOpen/CreateDirectoryObject,
+      NtQueryTimerResolution, RtlSetCurrentDirectory_U; kernel32
+      VirtualProtectEx, TerminateThread, QueryUnbiasedInterruptTime
+      (`rtl_test`); the rest of its ~100 missing imports are stubs (comm,
+      tape, console screen, transactions, quotas, EAs, NtAccessCheck,
+      clipboard). Next: bash now runs but spins in a system call during
+      the runtime's startup; find which.
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to
