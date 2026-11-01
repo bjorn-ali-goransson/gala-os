@@ -619,3 +619,58 @@ pub extern "system" fn LoadCursorA(module: Handle, name: *const u8) -> usize {
     let mut w = [0u16; 64];
     LoadCursorW(module, crate::window::ansi_into_ptr(name, &mut w))
 }
+
+/// LoadBitmapW(module, name): a DDB of the screen's depth from the
+/// module's RT_BITMAP resource (a packed DIB: header, colour table,
+/// bits), through gdi32's CreateDIBitmap; NULL when the module has no
+/// such bitmap. The predefined OBM_ bitmaps (no module) are not there
+/// yet (ledger).
+#[unsafe(no_mangle)]
+pub extern "system" fn LoadBitmapW(module: Handle, name: *const u16) -> usize {
+    if module.is_null() {
+        crate::window::unsupported(b"user32.dll!LoadBitmapW(OBM)", name as u64);
+        return 0;
+    }
+    // SAFETY: kernel32's resource functions on the caller's module; the
+    // header is read within the resource's size.
+    let (p, n) = unsafe {
+        let r = FindResourceW(module as usize, name as usize, 2);
+        if r == 0 {
+            return 0;
+        }
+        (LoadResource(module as usize, r).cast::<u8>(), SizeofResource(module as usize, r) as usize)
+    };
+    if p.is_null() || n < 40 {
+        return 0;
+    }
+    let read = |at: usize| -> u32 {
+        // SAFETY: `at + 4 <= 40 <= n`.
+        unsafe { p.add(at).cast::<u32>().read_unaligned() }
+    };
+    let header = read(0) as usize;
+    let bpp = read(12) >> 16; // biPlanes, then biBitCount
+    let compression = read(16);
+    let used = read(32) as usize;
+    let colours = if used != 0 {
+        used
+    } else if bpp <= 8 {
+        1 << bpp
+    } else {
+        0
+    };
+    let masks = if compression == 3 && header == 40 { 12 } else { 0 };
+    let bits = header + masks + 4 * colours;
+    if header < 40 || bits > n {
+        return 0;
+    }
+    type CreateDibitmap =
+        extern "system" fn(Handle, *const u8, u32, *const u8, *const u8, u32) -> usize;
+    let Some(create) = gdi_fn!("CreateDIBitmap", CreateDibitmap) else { return 0 };
+    let screen = screen_dc();
+    // SAFETY: `bits <= n`.
+    let b = create(screen, p, 4, unsafe { p.add(bits) }, p, 0);
+    if let Some(delete_dc) = gdi_fn!("DeleteDC", extern "system" fn(Handle) -> i32) {
+        delete_dc(screen);
+    }
+    b
+}

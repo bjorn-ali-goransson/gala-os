@@ -491,7 +491,8 @@ pixels: e.g. the click that ends the program), kept as
 `target/debug/test-<scenario>.screen<step>.png`. The guest's pointer
 starts in the middle of the screen and is clamped to it. A step's pixel check is retried (a new screendump every 0.5 s,
 for about 5 s) before it fails, because a redraw under load (the full
-suite) can outlast the first dump. Keep each
+suite) can outlast the first dump. A mouse press is sent 0.75 s after the
+command before it, so the moves queued ahead of it are drained first. Keep each
 `mouse_move` within 255 per axis: QEMU queues a few PS/2 packets of at
 most 255 and hands the rest of a larger move over with later events (a
 click then lands somewhere else); reach a corner with several moves. Such scenarios must be UEFI ones (BIOS

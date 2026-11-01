@@ -319,3 +319,37 @@ pub extern "system" fn SetDIBitsToDevice(
 pub extern "system" fn GdiFlush() -> i32 {
     1
 }
+
+/// CreateDIBitmap(hdc, header, init, bits, info, usage): a DDB of the
+/// header's size in `hdc`'s format (the screen's without a DC); with
+/// CBM_INIT (4), the DIB's bits set as SetDIBits does.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateDIBitmap(
+    hdc: Handle,
+    header: *const u8,
+    init: u32,
+    bits: *const u8,
+    info: *const u8,
+    usage: u32,
+) -> Handle {
+    if header.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: the caller's BITMAPINFOHEADER: biWidth at 4, biHeight at 8.
+    let (w, h) = unsafe {
+        (header.add(4).cast::<i32>().read_unaligned(), header.add(8).cast::<i32>().read_unaligned())
+    };
+    let h = h.saturating_abs();
+    if w <= 0 || h == 0 {
+        return core::ptr::null_mut();
+    }
+    let b = if hdc.is_null() {
+        crate::draw::new_ddb(w, h, 32)
+    } else {
+        crate::draw::CreateCompatibleBitmap(hdc, w, h)
+    };
+    if !b.is_null() && init & 4 != 0 && !bits.is_null() && !info.is_null() {
+        SetDIBits(hdc, b, 0, h as u32, bits, info, usage);
+    }
+    b
+}

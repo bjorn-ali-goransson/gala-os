@@ -9,14 +9,12 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     CombineRgn
     CopyEnhMetaFileW
     CreateBitmapIndirect
-    CreateDIBitmap
     CreateEnhMetaFileW
     CreateHatchBrush
     CreatePatternBrush
     CreatePolygonRgn
     CreateRectRgn
     CreateRectRgnIndirect
-    DPtoLP
     DeleteEnhMetaFile
     Ellipse
     EnumFontFamiliesExW
@@ -37,11 +35,8 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     GetRegionData
     GetRgnBox
     GetSystemPaletteEntries
-    GetViewportExtEx
     GetWinMetaFileBits
-    GetWindowExtEx
     GetWorldTransform
-    LPtoDP
     MaskBlt
     ModifyWorldTransform
     OffsetRgn
@@ -58,13 +53,9 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     SetDIBColorTable
     SetGraphicsMode
     SetLayout
-    SetMapMode
     SetMetaFileBitsEx
     SetPolyFillMode
     SetROP2
-    SetStretchBltMode
-    SetViewportExtEx
     SetWinMetaFileBits
-    SetWindowExtEx
     SetWorldTransform
 );

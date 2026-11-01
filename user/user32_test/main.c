@@ -2,6 +2,8 @@
  * wxWidgets (FileZilla) uses, added as FileZilla's missing-features
  * ledger names it:
  *
+ * - LoadBitmapW: a DDB of the screen's depth from an RT_BITMAP resource
+ *   (resources.rc, square.bmp); an unknown name gives NULL.
  * - Hooks: SetWindowsHookExW for the calling thread returns a handle;
  *   the newest hook is called first and CallNextHookEx passes on to the
  *   older one (0 after the last). WH_CBT: HCBT_CREATEWND before the
@@ -471,7 +473,28 @@ static void icons(void) {
     ReleaseDC(NULL, screen);
 }
 
+// LoadBitmapW: a DDB of the screen's depth from the module's RT_BITMAP
+// resource (named "square" in resources.rc: bottom row blue, green; top
+// row red, white); an unknown name gives NULL.
+static void bitmaps(void) {
+    HBITMAP b = LoadBitmapW(GetModuleHandleW(NULL), L"SQUARE");
+    CHECK(b != NULL);
+    BITMAP bm;
+    CHECK(GetObjectW(b, sizeof bm, &bm) == sizeof bm && bm.bmWidth == 2 && bm.bmHeight == 2 && bm.bmBitsPixel == 32);
+    HDC screen = GetDC(NULL);
+    HDC mem = CreateCompatibleDC(screen);
+    HGDIOBJ old = SelectObject(mem, b);
+    CHECK(GetPixel(mem, 0, 0) == RGB(255, 0, 0) && GetPixel(mem, 1, 0) == RGB(255, 255, 255));
+    CHECK(GetPixel(mem, 0, 1) == RGB(0, 0, 255) && GetPixel(mem, 1, 1) == RGB(0, 255, 0));
+    SelectObject(mem, old);
+    DeleteDC(mem);
+    ReleaseDC(NULL, screen);
+    CHECK(DeleteObject(b));
+    CHECK(LoadBitmapW(GetModuleHandleW(NULL), L"NOSUCH") == NULL);
+}
+
 int main(void) {
+    bitmaps();
     hooks();
     timers();
     monitors();

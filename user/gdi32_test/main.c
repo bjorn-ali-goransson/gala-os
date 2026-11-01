@@ -31,6 +31,16 @@
  *   pitch (TMPF_FIXED_PITCH clear, equal advances).
  *   GetObjectType says OBJ_FONT; GetCurrentObject(OBJ_FONT) is the font.
  *
+ * - CreateDIBitmap: a DDB of the reference DC's depth; CBM_INIT sets
+ *   the DIB's bits as SetDIBits does (bottom-up rows). SetStretchBltMode
+ *   returns the previous mode (BLACKONWHITE at first), 0 for an invalid one.
+ *
+ * - Mapping: MM_TEXT at first (extents 1 x 1, SetWindowExtEx ignored);
+ *   LPtoDP/DPtoLP through the origins; MM_ANISOTROPIC scales by viewport
+ *   extent / window extent (a zero window extent is refused), PatBlt
+ *   included; MM_ISOTROPIC shrinks the viewport extent to equal units;
+ *   back to MM_TEXT, the extents are 1 again.
+ *
  * - Palettes: CreatePalette keeps the entries (GetObjectType OBJ_PAL,
  *   GetObjectW: the entry count as a WORD, GetPaletteEntries,
  *   GetNearestPaletteIndex); SelectPalette returns the previous one (the
@@ -222,6 +232,89 @@ static void fonts(void) {
     DeleteDC(screen);
 }
 
+// CreateDIBitmap: a DDB in the reference DC's format; with CBM_INIT, the
+// DIB's bits set as SetDIBits would (row 0 of a bottom-up DIB is the
+// bottom line).
+static void dibitmap(void) {
+    HDC screen = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
+    // The stretch mode: BLACKONWHITE at first; set returns the previous.
+    CHECK(GetStretchBltMode(screen) == BLACKONWHITE && SetStretchBltMode(screen, HALFTONE) == BLACKONWHITE);
+    CHECK(GetStretchBltMode(screen) == HALFTONE && SetStretchBltMode(screen, 0) == 0);
+    BITMAPINFO bi = {{sizeof(BITMAPINFOHEADER), 2, 2, 1, 32, BI_RGB}};
+    // Bottom row: blue, green; top row: red, white (BGRX).
+    DWORD px[4] = {0x0000ff, 0x00ff00, 0xff0000, 0xffffff};
+    HBITMAP b = CreateDIBitmap(screen, &bi.bmiHeader, CBM_INIT, px, &bi, DIB_RGB_COLORS);
+    CHECK(b != NULL && GetObjectType(b) == OBJ_BITMAP);
+    BITMAP bm;
+    CHECK(GetObjectW(b, sizeof bm, &bm) == sizeof bm && bm.bmWidth == 2 && bm.bmHeight == 2 && bm.bmBitsPixel == 32);
+    HDC mem = CreateCompatibleDC(screen);
+    HGDIOBJ old = SelectObject(mem, b);
+    CHECK(GetPixel(mem, 0, 0) == RGB(255, 0, 0) && GetPixel(mem, 1, 0) == RGB(255, 255, 255));
+    CHECK(GetPixel(mem, 0, 1) == RGB(0, 0, 255) && GetPixel(mem, 1, 1) == RGB(0, 255, 0));
+    SelectObject(mem, old);
+    // Without CBM_INIT: the size only.
+    HBITMAP e = CreateDIBitmap(screen, &bi.bmiHeader, 0, NULL, NULL, 0);
+    CHECK(e != NULL && GetObjectW(e, sizeof bm, &bm) == sizeof bm && bm.bmWidth == 2 && bm.bmHeight == 2);
+    CHECK(DeleteObject(b) && DeleteObject(e));
+    DeleteDC(mem);
+    DeleteDC(screen);
+}
+
+// Coordinate mapping: MM_TEXT maps by the origins only; MM_ANISOTROPIC
+// scales by viewport extent / window extent; LPtoDP and DPtoLP convert
+// both ways; fixed modes ignore SetWindowExtEx; PatBlt in a scaled DC
+// fills the scaled rectangle.
+static void mapping(void) {
+    HDC screen = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
+    HDC dc = CreateCompatibleDC(screen);
+    HBITMAP bmp = CreateCompatibleBitmap(screen, 32, 32);
+    HGDIOBJ old = SelectObject(dc, bmp);
+    CHECK(GetMapMode(dc) == MM_TEXT);
+    SIZE ext;
+    CHECK(GetWindowExtEx(dc, &ext) && ext.cx == 1 && ext.cy == 1);
+    CHECK(GetViewportExtEx(dc, &ext) && ext.cx == 1 && ext.cy == 1);
+    SetWindowOrgEx(dc, 10, 20, NULL);
+    POINT p[2] = {{15, 25}, {10, 20}};
+    CHECK(LPtoDP(dc, p, 2) && p[0].x == 5 && p[0].y == 5 && p[1].x == 0 && p[1].y == 0);
+    CHECK(DPtoLP(dc, p, 1) && p[0].x == 15 && p[0].y == 25);
+    SetWindowOrgEx(dc, 0, 0, NULL);
+    // Fixed modes ignore the window extent.
+    CHECK(SetWindowExtEx(dc, 100, 100, NULL) && GetWindowExtEx(dc, &ext) && ext.cx == 1);
+
+    CHECK(SetMapMode(dc, MM_ANISOTROPIC) == MM_TEXT && GetMapMode(dc) == MM_ANISOTROPIC);
+    SIZE prev;
+    CHECK(SetWindowExtEx(dc, 100, 100, &prev) && prev.cx == 1 && prev.cy == 1);
+    CHECK(SetViewportExtEx(dc, 200, 50, NULL));
+    CHECK(GetWindowExtEx(dc, &ext) && ext.cx == 100 && ext.cy == 100);
+    CHECK(GetViewportExtEx(dc, &ext) && ext.cx == 200 && ext.cy == 50);
+    POINT q = {10, 10};
+    CHECK(LPtoDP(dc, &q, 1) && q.x == 20 && q.y == 5);
+    CHECK(DPtoLP(dc, &q, 1) && q.x == 10 && q.y == 10);
+    // Window ext 0 is refused.
+    CHECK(!SetWindowExtEx(dc, 0, 10, NULL));
+
+    // PatBlt of logical (2, 4, 4 x 8) at 2 x 1/2: device (4, 2) to (12, 6).
+    PatBlt(dc, 0, 0, 64, 64, WHITENESS);
+    PatBlt(dc, 2, 4, 4, 8, BLACKNESS);
+    SetMapMode(dc, MM_TEXT);
+    CHECK(GetPixel(dc, 4, 2) == 0 && GetPixel(dc, 11, 5) == 0);
+    CHECK(GetPixel(dc, 12, 5) == 0xffffff && GetPixel(dc, 11, 6) == 0xffffff && GetPixel(dc, 3, 2) == 0xffffff);
+    // Back in MM_TEXT the extents are 1 again.
+    CHECK(GetWindowExtEx(dc, &ext) && ext.cx == 1 && GetViewportExtEx(dc, &ext) && ext.cx == 1);
+
+    // MM_ISOTROPIC keeps both units the same size: the viewport extent
+    // shrinks on the axis that would scale more.
+    SetMapMode(dc, MM_ISOTROPIC);
+    SetWindowExtEx(dc, 100, 100, NULL);
+    SetViewportExtEx(dc, 200, 50, NULL);
+    CHECK(GetViewportExtEx(dc, &ext) && ext.cx == 50 && ext.cy == 50);
+
+    SelectObject(dc, old);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+    DeleteDC(screen);
+}
+
 static void palettes(void) {
     struct { WORD version, count; PALETTEENTRY entries[2]; } lp = {0x300, 2, {{255, 0, 0, 0}, {0, 255, 0, 0}}};
     HPALETTE pal = CreatePalette((LOGPALETTE *)&lp);
@@ -297,6 +390,8 @@ int main(void) {
     display_dc();
     bitmaps();
     fonts();
+    dibitmap();
+    mapping();
     palettes();
     dibs();
     printf("gdi32_test: ok\n");

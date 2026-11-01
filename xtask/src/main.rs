@@ -4182,6 +4182,11 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
             // Each command, then time for the guest to read the device
             // (QEMU's PS/2 queue is short: a click queued behind a long
             // move is dropped).
+            // A press waits longer: under load (the full suite) the guest
+            // drains the queue slowly and a press behind moves is lost.
+            if command.starts_with("mouse_button 1") {
+                thread::sleep(Duration::from_millis(750));
+            }
             writeln!(monitor, "{command}").map_err(|e| e.to_string())?;
             thread::sleep(Duration::from_millis(250));
         }

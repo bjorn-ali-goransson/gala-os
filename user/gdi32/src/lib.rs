@@ -118,6 +118,15 @@ pub(crate) struct Dc {
     /// MoveToEx's position (logical).
     pub pos: (i32, i32),
     pub align: u32,
+    /// SetStretchBltMode's mode (kept; StretchBlt samples the nearest
+    /// pixel in every mode).
+    pub stretch: i32,
+    /// The mapping mode (MM_TEXT 1 .. MM_ANISOTROPIC 8) and the window and
+    /// viewport extents: device = (logical - window origin) * viewport
+    /// extent / window extent + viewport origin.
+    pub map_mode: i32,
+    pub window_ext: (i32, i32),
+    pub viewport_ext: (i32, i32),
     /// A child window's DC: its offset in the top-level window's surface
     /// (device = logical - window origin + viewport origin + base) and the
     /// part of the surface it may draw on (its visible rectangle).
@@ -127,11 +136,44 @@ pub(crate) struct Dc {
     pub palette: usize,
 }
 
+/// v * num / den rounded to the nearest (halves away from zero).
+fn scale(v: i32, num: i32, den: i32) -> i32 {
+    if num == den {
+        return v;
+    }
+    let (p, d) = (i64::from(v) * i64::from(num), i64::from(den));
+    if d == 0 {
+        return v;
+    }
+    let q = (2 * p.abs() + d.abs()) / (2 * d.abs());
+    (if (p < 0) != (d < 0) { -q } else { q }) as i32
+}
+
 impl Dc {
+    /// Logical (x, y) in the surface's pixels (the DC's device
+    /// coordinates plus a child window's offset).
     pub fn device_point(&self, x: i32, y: i32) -> (i32, i32) {
+        let (x, y) = self.logical_to_device(x, y);
+        (x + self.base.0, y + self.base.1)
+    }
+
+    /// LPtoDP: logical to the DC's device coordinates.
+    pub fn logical_to_device(&self, x: i32, y: i32) -> (i32, i32) {
         (
-            x - self.window_org.0 + self.viewport_org.0 + self.base.0,
-            y - self.window_org.1 + self.viewport_org.1 + self.base.1,
+            scale(x - self.window_org.0, self.viewport_ext.0, self.window_ext.0)
+                + self.viewport_org.0,
+            scale(y - self.window_org.1, self.viewport_ext.1, self.window_ext.1)
+                + self.viewport_org.1,
+        )
+    }
+
+    /// DPtoLP: the DC's device coordinates to logical.
+    pub fn device_to_logical(&self, x: i32, y: i32) -> (i32, i32) {
+        (
+            scale(x - self.viewport_org.0, self.window_ext.0, self.viewport_ext.0)
+                + self.window_org.0,
+            scale(y - self.viewport_org.1, self.window_ext.1, self.viewport_ext.1)
+                + self.window_org.1,
         )
     }
 
@@ -357,6 +399,10 @@ fn new_dc(kind: DcKind, surface: Surface, bitmap: usize) -> Handle {
         base: (0, 0),
         bounds: [i32::MIN, i32::MIN, i32::MAX, i32::MAX],
         palette: with(|_, stock| stock[15]),
+        stretch: 1, // BLACKONWHITE
+        map_mode: 1,
+        window_ext: (1, 1),
+        viewport_ext: (1, 1),
     }))
 }
 
@@ -782,6 +828,21 @@ pub extern "system" fn SetBkColor(hdc: Handle, color: u32) -> u32 {
         .unwrap_or(0xffff_ffff)
 }
 
+/// SetStretchBltMode: BLACKONWHITE (1) .. HALFTONE (4); the previous
+/// mode, 0 for an invalid one.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetStretchBltMode(hdc: Handle, mode: i32) -> i32 {
+    if !(1..=4).contains(&mode) {
+        return 0;
+    }
+    with_dc(hdc, |dc, _| core::mem::replace(&mut dc.stretch, mode)).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetStretchBltMode(hdc: Handle) -> i32 {
+    with_dc(hdc, |dc, _| dc.stretch).unwrap_or(0)
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn SetBkMode(hdc: Handle, mode: i32) -> i32 {
     if mode != 1 && mode != 2 {
@@ -866,6 +927,153 @@ pub extern "system" fn GetWindowOrgEx(hdc: Handle, out: *mut [i32; 2]) -> i32 {
         1
     })
     .unwrap_or(0)
+}
+
+/// The extents of a fixed mapping mode: window (in the mode's units) and
+/// viewport (device pixels, y up except for MM_TEXT).
+fn fixed_extents(mode: i32) -> ((i32, i32), (i32, i32)) {
+    let (w, h) = screen();
+    // HORZSIZE/VERTSIZE in mm (as GetDeviceCaps) times the mode's units
+    // per mm (in thousandths).
+    let mm = |px: i32| (px * 254 + 480) / 960;
+    let per = match mode {
+        2 => 10_000,  // MM_LOMETRIC: 0.1 mm
+        3 => 100_000, // MM_HIMETRIC: 0.01 mm
+        4 => 3_937,   // MM_LOENGLISH: 0.01 inch
+        5 => 39_370,  // MM_HIENGLISH: 0.001 inch
+        6 => 56_693,  // MM_TWIPS: 1/1440 inch
+        _ => return ((1, 1), (1, 1)),
+    };
+    let units = |px: i32| (i64::from(mm(px)) * per / 1000) as i32;
+    ((units(w), units(h)), (w, -h))
+}
+
+/// MM_ISOTROPIC: the viewport extent shrinks on the axis that would
+/// scale more, so both units have the same size.
+fn isotropic(dc: &mut Dc) {
+    let ((wx, wy), (vx, vy)) = (dc.window_ext, dc.viewport_ext);
+    let (wx, wy, vx, vy) = (i64::from(wx), i64::from(wy), i64::from(vx), i64::from(vy));
+    if (vx * wy).abs() > (vy * wx).abs() {
+        dc.viewport_ext.0 = (vx.signum() * (vy * wx / wy).abs()) as i32;
+    } else {
+        dc.viewport_ext.1 = (vy.signum() * (vx * wy / wx).abs()) as i32;
+    }
+}
+
+/// SetMapMode: MM_TEXT (1) .. MM_ANISOTROPIC (8); the previous mode.
+/// Fixed modes set their extents; the scalable ones keep the current.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetMapMode(hdc: Handle, mode: i32) -> i32 {
+    if !(1..=8).contains(&mode) {
+        return 0;
+    }
+    with_dc(hdc, |dc, _| {
+        let prev = core::mem::replace(&mut dc.map_mode, mode);
+        if mode <= 6 {
+            (dc.window_ext, dc.viewport_ext) = fixed_extents(mode);
+        } else if mode == 7 {
+            isotropic(dc);
+        }
+        prev
+    })
+    .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetMapMode(hdc: Handle) -> i32 {
+    with_dc(hdc, |dc, _| dc.map_mode).unwrap_or(0)
+}
+
+fn set_extent(hdc: Handle, x: i32, y: i32, prev: *mut [i32; 2], viewport: bool) -> i32 {
+    with_dc(hdc, |dc, _| {
+        let e = if viewport { dc.viewport_ext } else { dc.window_ext };
+        if !prev.is_null() {
+            // SAFETY: the caller's SIZE.
+            unsafe { *prev = [e.0, e.1] };
+        }
+        // Fixed modes ignore the call.
+        if dc.map_mode < 7 {
+            return 1;
+        }
+        if x == 0 || y == 0 {
+            return 0;
+        }
+        if viewport {
+            dc.viewport_ext = (x, y);
+        } else {
+            dc.window_ext = (x, y);
+        }
+        if dc.map_mode == 7 {
+            isotropic(dc);
+        }
+        1
+    })
+    .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SetWindowExtEx(hdc: Handle, x: i32, y: i32, prev: *mut [i32; 2]) -> i32 {
+    set_extent(hdc, x, y, prev, false)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SetViewportExtEx(hdc: Handle, x: i32, y: i32, prev: *mut [i32; 2]) -> i32 {
+    set_extent(hdc, x, y, prev, true)
+}
+
+fn get_extent(hdc: Handle, out: *mut [i32; 2], viewport: bool) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    with_dc(hdc, |dc, _| {
+        let e = if viewport { dc.viewport_ext } else { dc.window_ext };
+        // SAFETY: the caller's SIZE.
+        unsafe { *out = [e.0, e.1] };
+        1
+    })
+    .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetWindowExtEx(hdc: Handle, out: *mut [i32; 2]) -> i32 {
+    get_extent(hdc, out, false)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetViewportExtEx(hdc: Handle, out: *mut [i32; 2]) -> i32 {
+    get_extent(hdc, out, true)
+}
+
+fn convert(hdc: Handle, points: *mut [i32; 2], n: i32, logical_to_device: bool) -> i32 {
+    if n < 0 || (points.is_null() && n > 0) {
+        return 0;
+    }
+    with_dc(hdc, |dc, _| {
+        for i in 0..n as usize {
+            // SAFETY: the caller's `n` POINTs.
+            let p = unsafe { &mut *points.add(i) };
+            let (x, y) = if logical_to_device {
+                dc.logical_to_device(p[0], p[1])
+            } else {
+                dc.device_to_logical(p[0], p[1])
+            };
+            *p = [x, y];
+        }
+        1
+    })
+    .unwrap_or(0)
+}
+
+/// LPtoDP: logical points to device points, in place.
+#[unsafe(no_mangle)]
+pub extern "system" fn LPtoDP(hdc: Handle, points: *mut [i32; 2], n: i32) -> i32 {
+    convert(hdc, points, n, true)
+}
+
+/// DPtoLP: device points to logical points, in place.
+#[unsafe(no_mangle)]
+pub extern "system" fn DPtoLP(hdc: Handle, points: *mut [i32; 2], n: i32) -> i32 {
+    convert(hdc, points, n, false)
 }
 
 #[panic_handler]

@@ -1,0 +1,2 @@
+// A 2 x 2 bitmap for LoadBitmapW: bottom row blue, green; top row red, white.
+square BITMAP "square.bmp"

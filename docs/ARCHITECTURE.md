@@ -2199,7 +2199,9 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   from the mask's halves), system icons/cursors are shared, programs' own
   load from RT_GROUP_ICON/RT_GROUP_CURSOR resources (the nearest size)
   through CreateIconFromResourceEx (BMP form, 1-32 bits; PNG entries not
-  yet). GetDC(NULL) is the display DC.
+  yet). LoadBitmapW makes a DDB from an RT_BITMAP resource (a packed
+  DIB) through gdi32's CreateDIBitmap; the predefined OBM_ bitmaps are
+  not there yet (ledger). GetDC(NULL) is the display DC.
 - **SystemParametersInfoW** (`spi.rs`): the non-client metrics with the
   GUI font, the work area, the icon title font, high contrast off, three
   wheel lines, and Windows' defaults for the visual-effect switches;
@@ -2280,7 +2282,14 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   TA_BOTTOM/BASELINE) and OPAQUE backgrounds; ExtTextOutW (ETO_OPAQUE,
   ETO_CLIPPED, lpDx); GetTextMetricsW, GetTextExtentPoint32W,
   GetTextExtentExPointW (fit and partial widths) and GetTextFaceW from
-  the same metrics. Palettes (`palette.rs`) are kept, selected and queried but
+  the same metrics. Coordinate mapping: SetMapMode (MM_TEXT .. MM_ANISOTROPIC; the fixed
+  modes' extents from the screen's size in mm, y up), window and
+  viewport origins and extents (MM_ISOTROPIC shrinks the viewport extent
+  to equal units), LPtoDP/DPtoLP; drawing maps points through them
+  (rectangles by both corners), but sizes such as pen widths, fonts and
+  blit sizes are not scaled yet. SetStretchBltMode is kept (StretchBlt
+  samples the nearest pixel). CreateDIBitmap is CreateCompatibleBitmap
+  plus SetDIBits, as documented. Palettes (`palette.rs`) are kept, selected and queried but
   change nothing on the true-colour display (RealizePalette maps 0
   entries, GetNearestColor is the colour); DEFAULT_PALETTE is stock. DIBs
   in program memory (`dib.rs`): GetDIBits (the header query; rows out as

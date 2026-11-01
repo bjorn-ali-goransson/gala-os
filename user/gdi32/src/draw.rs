@@ -61,8 +61,10 @@ pub extern "system" fn PatBlt(hdc: Handle, x: i32, y: i32, w: i32, h: i32, rop: 
     }
     with_dc(hdc, |dc, slots| {
         let p = brush(dc, slots).unwrap_or(0);
-        let (x, y, w, h) = norm(x, y, w, h);
-        let (dx, dy) = dc.device_point(x, y);
+        // Both corners mapped (the extents may scale).
+        let (x0, y0) = dc.device_point(x, y);
+        let (x1, y1) = dc.device_point(x.saturating_add(w), y.saturating_add(h));
+        let (dx, dy, w, h) = norm(x0, y0, x1 - x0, y1 - y0);
         for yy in dy..dy + h {
             for xx in dx..dx + w {
                 if dc.visible(xx, yy) {
@@ -172,7 +174,7 @@ pub extern "system" fn LineTo(hdc: Handle, x: i32, y: i32) -> i32 {
 // ---- Bitmaps ----
 
 /// A 32-bit device-dependent bitmap (shown as `bpp` deep), black.
-fn new_ddb(w: i32, h: i32, bpp: u16) -> Handle {
+pub(crate) fn new_ddb(w: i32, h: i32, bpp: u16) -> Handle {
     if w <= 0 || h <= 0 || w > 16384 || h > 16384 {
         return core::ptr::null_mut();
     }

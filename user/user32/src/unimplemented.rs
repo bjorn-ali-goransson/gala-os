@@ -71,7 +71,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     HideCaret
     IsClipboardFormatAvailable
     IsDialogMessageW
-    LoadBitmapW
     LoadCursorFromFileW
     NotifyWinEvent
     PostThreadMessageW

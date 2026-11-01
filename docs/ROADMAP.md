@@ -536,7 +536,11 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    uxtheme (themes off), ScrollWindow(Ex), palettes, DIB transfers
    (GetDIBits/SetDIBits/SetDIBitsToDevice/StretchDIBits), GdiFlush,
    SetMenuInfo, the keyboard layout, accelerators, the RECT helpers. It
-   now stops at gdi32's CreateDIBitmap.
+   now stops at gdi32's CreateDIBitmap. Then (gdi32_test, user32_test):
+   CreateDIBitmap, LoadBitmapW from RT_BITMAP resources (user32_test now
+   has a resource script), SetStretchBltMode, mapping modes with window
+   and viewport extents and LPtoDP/DPtoLP. It now stops at comctl32's
+   ImageList_Create.
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,
