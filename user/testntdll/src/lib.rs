@@ -155,6 +155,11 @@ syscall_stubs! {
         new: *mut usize
     );
     NtPrivilegeCheck = 0x7f1e, fn(token: usize, set: *mut u8, result: *mut u8);
+    // Security descriptors (gala's numbers, unverified).
+    NtQuerySecurityObject = 0x7f1f, fn(
+        h: usize, info: u32, sd: *mut u8, length: u32, needed: *mut u32
+    );
+    NtSetSecurityObject = 0x7f20, fn(h: usize, info: u32, sd: *const u8);
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,
@@ -1303,6 +1308,11 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_007c, 1008), // NO_TOKEN -> ERROR_NO_TOKEN
     (0xc000_00a5, 1346), // BAD_IMPERSONATION_LEVEL -> ERROR_BAD_IMPERSONATION_LEVEL
     (0xc000_00a8, 1349), // BAD_TOKEN_TYPE -> ERROR_BAD_TOKEN_TYPE
+    (0xc000_0058, 1305), // UNKNOWN_REVISION -> ERROR_UNKNOWN_REVISION
+    (0xc000_005a, 1307), // INVALID_OWNER -> ERROR_INVALID_OWNER
+    (0xc000_005b, 1308), // INVALID_PRIMARY_GROUP -> ERROR_INVALID_PRIMARY_GROUP
+    (0xc000_0077, 1336), // INVALID_ACL -> ERROR_INVALID_ACL
+    (0xc000_0079, 1338), // INVALID_SECURITY_DESCR -> ERROR_INVALID_SECURITY_DESCR
     (0xc000_0035, 183),  // OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS
     (0xc000_0039, 161),  // OBJECT_PATH_INVALID -> ERROR_BAD_PATHNAME
     (0xc000_003a, 3),    // OBJECT_PATH_NOT_FOUND -> ERROR_PATH_NOT_FOUND

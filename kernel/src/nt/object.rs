@@ -365,6 +365,9 @@ pub struct KObject {
     handle_count: AtomicUsize,
     /// Permanent objects stay named without handles (system directories).
     pub permanent: bool,
+    /// Its security descriptor (self-relative; nt::security), if assigned
+    /// (files and keys keep theirs on their nodes).
+    pub security: IrqMutex<Option<Vec<u8>>>,
 }
 
 pub type ObjectRef = KArc<KObject>;
@@ -380,6 +383,7 @@ impl KObject {
             name: IrqMutex::new(None),
             handle_count: AtomicUsize::new(0),
             permanent,
+            security: IrqMutex::new(None),
         })
     }
 

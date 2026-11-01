@@ -1045,9 +1045,9 @@ Windows, never shadows the system's DLLs.)
   descriptors as documented (security.rs), knows the user "gala"
   (S-1-5-21-...-1001) and the well-known accounts; its token functions
   wrap the kernel's token services (token.rs; see "Access tokens"
-  below). Nothing is enforced and
-  files keep no descriptors (SetFileSecurity and SetKernelObjectSecurity
-  succeed, recorded). The registry is empty (keys not found, predefined
+  below), its descriptor functions the kernel's descriptor services
+  (objsec.rs; see "Security descriptors" below). Nothing is enforced yet.
+  The registry is empty (keys not found, predefined
   keys without subkeys; RegGetValueW checks its flags first). ETW
   providers (etw.rs) register, but no trace session exists, so no
   provider is ever enabled and events go nowhere, successfully (as on
@@ -1186,6 +1186,46 @@ Windows, never shadows the system's DLLs.)
   (impersonation tokens only; marks SE_PRIVILEGE_USED_FOR_ACCESS).
   Handle checks report the wrong object type before missing access, as
   Windows does. Nothing uses tokens for access decisions yet (S3).
+- **Security descriptors** (docs/SECURITY.md phase S2; rules in
+  `kernel/src/nt/security.rs`, services in `security_calls.rs`): every
+  object can keep a self-relative descriptor: files and directories on
+  their ramfs node, registry keys on their node, other objects on the
+  KObject (`KObject::security`). Assigned at creation from the creator's
+  effective token (thread impersonation token, else process token):
+  owner and group given or the token's (a given owner must be the user,
+  a group with SE_GROUP_OWNER, or SeRestorePrivilege must be enabled:
+  else STATUS_INVALID_OWNER); DACL given (files and keys: automatic
+  inheritance, so an unprotected given DACL gets the parent's
+  inheritable ACEs after its own and SE_DACL_AUTO_INHERITED), else the
+  parent's inheritable ACEs (the documented OI/CI/NP/IO rules; effective
+  ACEs get INHERITED_ACE, generic rights mapped through the type's
+  mapping and CREATOR OWNER/GROUP replaced, with an inherit-only copy
+  when they also propagate), else the token's default DACL (mapped).
+  Named objects take the descriptor from OBJECT_ATTRIBUTES (create_object
+  and NtCreateEvent), files from NtCreateFile's attributes when it
+  creates the file, keys from NtCreateKey's when it creates the key.
+  Objects nothing assigned one (boot files and keys, processes, threads,
+  unnamed objects created without one) report a default: files and
+  keys the user, Administrators and SYSTEM with all access (inherited
+  OI|CI by directories' children, CI by subkeys), as a user profile's
+  have; other objects the creator's token defaults. Services (gala
+  numbers 0x7f1f-0x7f20 until verified): NtQuerySecurityObject (the parts
+  asked for, self-relative; READ_CONTROL, ACCESS_SYSTEM_SECURITY for the
+  SACL; STATUS_BUFFER_TOO_SMALL with the size) and NtSetSecurityObject
+  (WRITE_DAC for the DACL, WRITE_OWNER for owner and group; the DACL's
+  control bits come from the descriptor given, PROTECTED_/UNPROTECTED_
+  DACL_SECURITY_INFORMATION override). It captures absolute and
+  self-relative descriptors from user memory. advapi32 (objsec.rs):
+  Get/SetFileSecurity(A/W), Get/SetKernelObjectSecurity,
+  Get/SetSecurityInfo, Get/SetNamedSecurityInfoW (files; keys named
+  `CURRENT_USER\...`, `MACHINE\...`, `CLASSES_ROOT`, `USERS`),
+  RegGet/SetKeySecurity, RegCreateKeyEx's SECURITY_ATTRIBUTES; kernel32
+  passes SECURITY_ATTRIBUTES' descriptor for CreateFileW,
+  CreateDirectoryW and the named-object functions. TODO: SetSecurityInfo
+  of an unprotected DACL does not re-apply or propagate inheritance as
+  Windows' advapi32 does; SACLs are kept but auditing does nothing;
+  mandatory labels are not separate yet (S5); descriptors live in memory
+  until the disk keeps them (D2, D3).
 - **Certificates** (crypt32 cert.rs): CertCreateCertificateContext
   decodes DER X.509 (its own small DER reader: definite lengths, v1-v3,
   UTCTime/GeneralizedTime, unique ids, extensions) into CERT_CONTEXT and

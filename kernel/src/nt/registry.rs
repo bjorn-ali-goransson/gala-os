@@ -86,6 +86,8 @@ struct Node {
     deleted: bool,
     /// Key objects referring to this node.
     opens: usize,
+    /// Its security descriptor (self-relative; nt::security), if assigned.
+    security: Option<Vec<u8>>,
 }
 
 /// The registry tree.
@@ -132,12 +134,24 @@ impl Registry {
             volatile: false,
             deleted: false,
             opens: 1, // never freed
+            security: None,
         }))?;
         for name in ["MACHINE", "USER"] {
             let w = wide::<8>(name);
             r.create_child(ROOT, &w[..name.len()], false, &[], 0).map_err(|_| AllocError)?;
         }
         Ok(r)
+    }
+
+    /// A key's security descriptor (None: none assigned) and parent.
+    pub fn security(&self, id: KeyId) -> Result<(Option<&[u8]>, KeyId), NtStatus> {
+        let n = self.node(id)?;
+        Ok((n.security.as_deref(), n.parent))
+    }
+
+    pub fn set_security(&mut self, id: KeyId, sd: Vec<u8>) -> Result<(), NtStatus> {
+        self.node_mut(id)?.security = Some(sd);
+        Ok(())
     }
 
     fn node(&self, id: KeyId) -> Result<&Node, NtStatus> {
@@ -228,6 +242,7 @@ impl Registry {
             volatile,
             deleted: false,
             opens: 0,
+            security: None,
         };
         // Room first, so that a failure leaves the tree as it was.
         self.node_mut(parent)?.children.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;

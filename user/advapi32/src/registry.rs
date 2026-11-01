@@ -374,8 +374,78 @@ fn nt_open(root: usize, name: &[u16], access: u32) -> Result<usize, i32> {
     }
 }
 
+/// SECURITY_ATTRIBUTES' descriptor (0: none).
+fn descriptor_of(sa: *mut c_void) -> usize {
+    // SAFETY: the caller's SECURITY_ATTRIBUTES (or NULL).
+    if sa.is_null() {
+        0
+    } else {
+        unsafe { sa.cast::<u8>().add(8).cast::<usize>().read_unaligned() }
+    }
+}
+
+/// RegGetKeySecurity(hKey, SecurityInformation, pSecurityDescriptor,
+/// lpcbSecurityDescriptor): the key's descriptor (self-relative);
+/// ERROR_INSUFFICIENT_BUFFER with the size when it does not fit.
+#[unsafe(no_mangle)]
+pub extern "system" fn RegGetKeySecurity(
+    key: usize,
+    info: u32,
+    sd: *mut u8,
+    size: *mut u32,
+) -> i32 {
+    let h = match resolve(key) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    if size.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's size and buffer of that size.
+    let status = unsafe { super::objsec::NtQuerySecurityObject(h, info, sd, *size, size) };
+    if status == 0 { ERROR_SUCCESS } else { error(status) }
+}
+
+/// RegSetKeySecurity(hKey, SecurityInformation, pSecurityDescriptor)
+#[unsafe(no_mangle)]
+pub extern "system" fn RegSetKeySecurity(key: usize, info: u32, sd: *const u8) -> i32 {
+    let h = match resolve(key) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    // SAFETY: the caller's descriptor.
+    let status = unsafe { super::objsec::NtSetSecurityObject(h, info, sd) };
+    if status == 0 { ERROR_SUCCESS } else { error(status) }
+}
+
+/// Opens a key named as the Named*SecurityInfo functions name keys:
+/// `CLASSES_ROOT`, `CURRENT_USER`, `MACHINE` or `USERS`, then the subkey
+/// path; a new NT handle with `access`.
+pub(crate) fn open_named(name: *const u16, access: u32) -> Result<usize, i32> {
+    let name = wide_arg(name);
+    let roots: [(&str, usize); 4] = [
+        ("CLASSES_ROOT", 0x8000_0000),
+        ("CURRENT_USER", 0x8000_0001),
+        ("MACHINE", 0x8000_0002),
+        ("USERS", 0x8000_0003),
+    ];
+    for (prefix, key) in roots {
+        let n = prefix.len();
+        let same = name.len() >= n
+            && name[..n]
+                .iter()
+                .zip(prefix.bytes())
+                .all(|(&c, b)| c < 128 && (c as u8).eq_ignore_ascii_case(&b));
+        if same && (name.len() == n || name[n] == BACKSLASH) {
+            let rest = if name.len() == n { &[][..] } else { &name[n + 1..] };
+            return nt_open(resolve(key)?, rest, access);
+        }
+    }
+    Err(ERROR_INVALID_PARAMETER)
+}
+
 /// The NT handle an HKEY stands for.
-fn resolve(key: usize) -> Result<usize, i32> {
+pub(crate) fn resolve(key: usize) -> Result<usize, i32> {
     let Some(index) = predefined(key) else {
         return if key == 0 { Err(ERROR_INVALID_HANDLE) } else { Ok(key) };
     };
@@ -534,6 +604,7 @@ fn create_one(
     class: &[u16],
     options: u32,
     access: u32,
+    descriptor: usize,
 ) -> Result<(usize, u32), i32> {
     let name = unicode(name);
     let class = unicode(class);
@@ -542,7 +613,7 @@ fn create_one(
         root,
         name: &name,
         attributes: OBJ_CASE_INSENSITIVE,
-        security: 0,
+        security: descriptor,
         qos: 0,
     };
     let (mut h, mut disposition) = (0, 0);
@@ -553,7 +624,8 @@ fn create_one(
 }
 
 /// RegCreateKeyEx: creates the missing keys along `sub`, each with
-/// `options`.
+/// `options`; the last with `descriptor` (SECURITY_ATTRIBUTES', or 0).
+#[allow(clippy::too_many_arguments)]
 fn create_w(
     key: usize,
     sub: &[u16],
@@ -562,6 +634,7 @@ fn create_w(
     access: u32,
     out: *mut usize,
     disposition: *mut u32,
+    descriptor: usize,
 ) -> i32 {
     if out.is_null() {
         return ERROR_INVALID_PARAMETER;
@@ -582,7 +655,7 @@ fn create_w(
         };
     }
     // Usually the parent exists: one call.
-    match create_one(base, sub, class, options, access) {
+    match create_one(base, sub, class, options, access, descriptor) {
         Ok((h, d)) => {
             put(out, h);
             put(disposition, d);
@@ -598,7 +671,8 @@ fn create_w(
     for (i, part) in parts.enumerate() {
         let last = i + 1 == count;
         let want = if last { access } else { MAXIMUM_ALLOWED };
-        match create_one(at.h, part, if last { class } else { &[] }, options, want) {
+        let sd = if last { descriptor } else { 0 };
+        match create_one(at.h, part, if last { class } else { &[] }, options, want, sd) {
             Ok((h, d)) if last => {
                 put(out, h);
                 put(disposition, d);
@@ -620,11 +694,12 @@ pub extern "system" fn RegCreateKeyExW(
     class: *const u16,
     options: u32,
     access: u32,
-    _security: *mut c_void,
+    security: *mut c_void,
     out: *mut usize,
     disposition: *mut u32,
 ) -> i32 {
-    create_w(key, wide_arg(sub), wide_arg(class), options, access, out, disposition)
+    let sd = descriptor_of(security);
+    create_w(key, wide_arg(sub), wide_arg(class), options, access, out, disposition, sd)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -636,22 +711,23 @@ pub extern "system" fn RegCreateKeyExA(
     class: *const u8,
     options: u32,
     access: u32,
-    _security: *mut c_void,
+    security: *mut c_void,
     out: *mut usize,
     disposition: *mut u32,
 ) -> i32 {
+    let sd = descriptor_of(security);
     let (sub, class) = match (ansi_to_wide(sub, None), ansi_to_wide(class, None)) {
         (Ok(s), Ok(c)) => (s, c),
         (Err(e), _) | (_, Err(e)) => return e,
     };
     let sub = sub.as_ref().map_or(&[][..], WStr::units);
     let class = class.as_ref().map_or(&[][..], WStr::units);
-    create_w(key, sub, class, options, access, out, disposition)
+    create_w(key, sub, class, options, access, out, disposition, sd)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn RegCreateKeyW(key: usize, sub: *const u16, out: *mut usize) -> i32 {
-    create_w(key, wide_arg(sub), &[], 0, MAXIMUM_ALLOWED, out, core::ptr::null_mut())
+    create_w(key, wide_arg(sub), &[], 0, MAXIMUM_ALLOWED, out, core::ptr::null_mut(), 0)
 }
 
 #[unsafe(no_mangle)]
@@ -1016,7 +1092,7 @@ pub extern "system" fn RegSetKeyValueW(
         return set_w(key, wide_arg(name), kind, data, size);
     }
     let mut h = 0;
-    let r = create_w(key, sub, &[], 0, KEY_SET_VALUE, &mut h, core::ptr::null_mut());
+    let r = create_w(key, sub, &[], 0, KEY_SET_VALUE, &mut h, core::ptr::null_mut(), 0);
     if r != ERROR_SUCCESS {
         return r;
     }

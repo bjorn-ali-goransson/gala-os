@@ -13,7 +13,6 @@ use super::{ERROR_INSUFFICIENT_BUFFER, fail, missing};
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn LocalAlloc(flags: u32, bytes: usize) -> *mut u8;
-    fn GetFileAttributesW(path: *const u16) -> u32;
     fn LoadLibraryA(name: *const u8) -> usize;
     fn GetProcAddress(module: usize, name: *const u8) -> usize;
 }
@@ -765,26 +764,6 @@ pub extern "system" fn SetSecurityDescriptorOwner(
     1
 }
 
-/// SetFileSecurityA/W: gala's files keep no security descriptors; the
-/// call succeeds (recorded) and nothing is enforced.
-#[unsafe(no_mangle)]
-pub extern "system" fn SetFileSecurityA(path: *const u8, _info: u32, sd: *const u8) -> i32 {
-    if path.is_null() || IsValidSecurityDescriptor(sd) == 0 {
-        return fail(ERROR_INVALID_PARAMETER, 0);
-    }
-    missing(b"advapi32.dll!SetFileSecurityA(not kept)");
-    1
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn SetFileSecurityW(path: *const u16, _info: u32, sd: *const u8) -> i32 {
-    if path.is_null() || IsValidSecurityDescriptor(sd) == 0 {
-        return fail(ERROR_INVALID_PARAMETER, 0);
-    }
-    missing(b"advapi32.dll!SetFileSecurityW(not kept)");
-    1
-}
-
 /// Well-known privilege names and their LUIDs (SE_*_PRIVILEGE).
 const PRIVILEGES: &[(&str, u32)] = &[
     ("SeCreateTokenPrivilege", 2),
@@ -1097,175 +1076,6 @@ pub extern "system" fn GetSecurityDescriptorOwner(
     1
 }
 
-/// The self-relative descriptor every object has here (see
-/// GetFileSecurityW) with the parts `info` asks for (OWNER, GROUP, DACL
-/// security information); returns its length.
-fn default_descriptor(info: u32, b: &mut [u8; 256]) -> usize {
-    // Header (20), owner, group, DACL.
-    let mut at = 20usize;
-    let mut control_bits = SE_SELF_RELATIVE;
-    let user = |p: *mut u8| write_sid(p, NT, &USER_SUBS);
-    let user_len = sid_len(USER_SUBS.len());
-    if info & 1 != 0 {
-        user(b[at..].as_mut_ptr());
-        b[4..8].copy_from_slice(&(at as u32).to_le_bytes());
-        at += user_len;
-    }
-    if info & 2 != 0 {
-        user(b[at..].as_mut_ptr());
-        b[8..12].copy_from_slice(&(at as u32).to_le_bytes());
-        at += user_len;
-    }
-    if info & 4 != 0 {
-        let acl = b[at..].as_mut_ptr();
-        InitializeAcl(acl, 128, 2);
-        let mut sid = [0u8; 28];
-        for (auth, subs) in [(NT, &USER_SUBS[..]), (NT, &[32, 544][..]), (NT, &[18][..])] {
-            write_sid(sid.as_mut_ptr(), auth, subs);
-            add_simple_ace(acl, 0, 0, 0x1f_01ff, sid.as_ptr());
-        }
-        let used = acl_used(acl).unwrap_or(8);
-        set_acl_word(acl, 2, used as u16);
-        b[16..20].copy_from_slice(&(at as u32).to_le_bytes());
-        at += used;
-        control_bits |= SE_DACL_PRESENT;
-    }
-    b[0] = 1;
-    b[2..4].copy_from_slice(&control_bits.to_le_bytes());
-    at
-}
-
-/// GetSecurityInfo / GetNamedSecurityInfoW: the descriptor objects have
-/// here (default_descriptor), LocalAlloc'd, with pointers to its parts.
-/// No SACL (none is kept). Returns the error itself.
-fn security_info(
-    info: u32,
-    owner: *mut *mut u8,
-    group: *mut *mut u8,
-    dacl: *mut *mut u8,
-    sacl: *mut *mut u8,
-    descriptor: *mut *mut u8,
-) -> u32 {
-    let mut b = [0u8; 256];
-    let len = default_descriptor(info, &mut b);
-    // SAFETY: a plain allocation.
-    let p = unsafe { LocalAlloc(0, len) };
-    if p.is_null() {
-        return ERROR_NOT_ENOUGH_MEMORY;
-    }
-    // SAFETY: `p` has `len` bytes; the caller's outputs.
-    unsafe {
-        core::ptr::copy_nonoverlapping(b.as_ptr(), p, len);
-        let part = |off: usize| {
-            let at = u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]) as usize;
-            if at == 0 { core::ptr::null_mut() } else { p.add(at) }
-        };
-        if !owner.is_null() && info & 1 != 0 {
-            *owner = part(4);
-        }
-        if !group.is_null() && info & 2 != 0 {
-            *group = part(8);
-        }
-        if !dacl.is_null() && info & 4 != 0 {
-            *dacl = part(16);
-        }
-        if !sacl.is_null() && info & 8 != 0 {
-            *sacl = core::ptr::null_mut();
-        }
-        if descriptor.is_null() {
-            // Nothing will free it; the parts stay valid.
-        } else {
-            *descriptor = p;
-        }
-    }
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn GetSecurityInfo(
-    handle: usize,
-    _kind: u32,
-    info: u32,
-    owner: *mut *mut u8,
-    group: *mut *mut u8,
-    dacl: *mut *mut u8,
-    sacl: *mut *mut u8,
-    descriptor: *mut *mut u8,
-) -> u32 {
-    if handle == 0 {
-        return ERROR_INVALID_HANDLE;
-    }
-    security_info(info, owner, group, dacl, sacl, descriptor)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn GetNamedSecurityInfoW(
-    name: *const u16,
-    kind: u32,
-    info: u32,
-    owner: *mut *mut u8,
-    group: *mut *mut u8,
-    dacl: *mut *mut u8,
-    sacl: *mut *mut u8,
-    descriptor: *mut *mut u8,
-) -> u32 {
-    if name.is_null() {
-        return ERROR_INVALID_PARAMETER;
-    }
-    // SAFETY: a plain call. SE_FILE_OBJECT names must exist.
-    if kind == 1 && unsafe { GetFileAttributesW(name) } == u32::MAX {
-        return 2; // ERROR_FILE_NOT_FOUND
-    }
-    security_info(info, owner, group, dacl, sacl, descriptor)
-}
-
-/// SetSecurityInfo / SetNamedSecurityInfoW: objects keep no descriptors
-/// here; valid parts are accepted (recorded) and nothing is enforced.
-#[unsafe(no_mangle)]
-pub extern "system" fn SetSecurityInfo(
-    handle: usize,
-    _kind: u32,
-    _info: u32,
-    owner: *const u8,
-    group: *const u8,
-    dacl: *const u8,
-    _sacl: *const u8,
-) -> u32 {
-    if handle == 0 {
-        return ERROR_INVALID_HANDLE;
-    }
-    set_security_parts(owner, group, dacl)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn SetNamedSecurityInfoW(
-    name: *const u16,
-    _kind: u32,
-    _info: u32,
-    owner: *const u8,
-    group: *const u8,
-    dacl: *const u8,
-    _sacl: *const u8,
-) -> u32 {
-    if name.is_null() {
-        return ERROR_INVALID_PARAMETER;
-    }
-    set_security_parts(owner, group, dacl)
-}
-
-fn set_security_parts(owner: *const u8, group: *const u8, dacl: *const u8) -> u32 {
-    if (!owner.is_null() && read_sid(owner).is_none())
-        || (!group.is_null() && read_sid(group).is_none())
-    {
-        return ERROR_INVALID_SID;
-    }
-    if !dacl.is_null() && IsValidAcl(dacl) == 0 {
-        return ERROR_INVALID_ACL;
-    }
-    missing(b"advapi32.dll!SetSecurityInfo(not kept)");
-    0
-}
-
 /// SetEntriesInAclW(cCountOfExplicitEntries, pListOfExplicitEntries,
 /// OldAcl, *NewAcl): a new LocalAlloc'd ACL: the old one's ACEs with
 /// each EXPLICIT_ACCESS_W applied - GRANT_ACCESS (1) adds an allowed ACE,
@@ -1426,37 +1236,6 @@ fn trustee_name_sid(name: *const u16, out: &mut [u8; 8 + 4 * SID_MAX_SUB_AUTHORI
     ) != 0
 }
 
-/// GetFileSecurityW: gala's files keep no security descriptors; the one
-/// returned (self-relative) is what a file created by the user has: the
-/// user as owner and primary group, and a DACL granting the user,
-/// Administrators and SYSTEM full access (FILE_ALL_ACCESS). Sizes as
-/// documented: ERROR_INSUFFICIENT_BUFFER with the size needed.
-#[unsafe(no_mangle)]
-pub extern "system" fn GetFileSecurityW(
-    path: *const u16,
-    info: u32,
-    sd: *mut u8,
-    length: u32,
-    needed: *mut u32,
-) -> i32 {
-    // SAFETY: a plain call.
-    if path.is_null() || unsafe { GetFileAttributesW(path) } == u32::MAX {
-        return 0; // the file's own error (ERROR_FILE_NOT_FOUND...)
-    }
-    let mut b = [0u8; 256];
-    let at = default_descriptor(info, &mut b);
-    if !needed.is_null() {
-        // SAFETY: the caller's output.
-        unsafe { *needed = at as u32 };
-    }
-    if sd.is_null() || (length as usize) < at {
-        return fail(ERROR_INSUFFICIENT_BUFFER, 0);
-    }
-    // SAFETY: the caller's buffer of `length` >= at bytes.
-    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), sd, at) };
-    1
-}
-
 /// GetSidIdentifierAuthority: the SID_IDENTIFIER_AUTHORITY inside the SID
 /// (no checks, as documented).
 #[unsafe(no_mangle)]
@@ -1475,20 +1254,6 @@ pub extern "system" fn GetSidSubAuthorityCount(sid: *mut u8) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSidSubAuthority(sid: *mut u8, index: u32) -> *mut u32 {
     sid.wrapping_add(8 + 4 * index as usize).cast()
-}
-
-/// SetKernelObjectSecurity: objects keep no security descriptors here;
-/// a valid one is accepted (recorded) and nothing is enforced.
-#[unsafe(no_mangle)]
-pub extern "system" fn SetKernelObjectSecurity(handle: usize, _info: u32, sd: *const u8) -> i32 {
-    if handle == 0 {
-        return fail(ERROR_INVALID_HANDLE, 0);
-    }
-    if IsValidSecurityDescriptor(sd) == 0 {
-        return fail(ERROR_INVALID_SECURITY_DESCR, 0);
-    }
-    missing(b"advapi32.dll!SetKernelObjectSecurity(not kept)");
-    1
 }
 
 // ---- Software restriction policies (SAFER) ----

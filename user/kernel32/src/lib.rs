@@ -872,6 +872,27 @@ fn with_object_attributes<R>(
     path: *const u16,
     f: impl FnOnce(&ObjectAttributes) -> R,
 ) -> Result<R, u32> {
+    with_object_attributes_sa(path, core::ptr::null_mut(), f)
+}
+
+/// The descriptor in SECURITY_ATTRIBUTES (or 0).
+pub(crate) fn security_descriptor(sa: *mut c_void) -> usize {
+    // SAFETY: the caller's SECURITY_ATTRIBUTES (or NULL):
+    // nLength, lpSecurityDescriptor at 8, bInheritHandle.
+    if sa.is_null() {
+        0
+    } else {
+        unsafe { sa.cast::<u8>().add(8).cast::<usize>().read_unaligned() }
+    }
+}
+
+/// with_object_attributes with the SECURITY_ATTRIBUTES' descriptor and
+/// inheritance.
+fn with_object_attributes_sa<R>(
+    path: *const u16,
+    sa: *mut c_void,
+    f: impl FnOnce(&ObjectAttributes) -> R,
+) -> Result<R, u32> {
     let nt = nt_path(path)?;
     let name = UnicodeString {
         length: (nt.len * 2) as u16,
@@ -882,8 +903,9 @@ fn with_object_attributes<R>(
         length: core::mem::size_of::<ObjectAttributes>() as u32,
         root_directory: 0,
         object_name: &name,
-        attributes: 0x40, // OBJ_CASE_INSENSITIVE
-        security_descriptor: 0,
+        // OBJ_CASE_INSENSITIVE, OBJ_INHERIT
+        attributes: 0x40 | if sync::inheritable(sa) { 0x2 } else { 0 },
+        security_descriptor: security_descriptor(sa),
         security_quality_of_service: 0,
     };
     Ok(f(&attributes))
@@ -933,8 +955,21 @@ fn open_path(
     options: u32,
     attributes: u32,
 ) -> Result<(Handle, usize), u32> {
+    open_path_sa(path, access, share, disposition, options, attributes, core::ptr::null_mut())
+}
+
+/// open_path with SECURITY_ATTRIBUTES (descriptor, inheritance).
+fn open_path_sa(
+    path: *const u16,
+    access: u32,
+    share: u32,
+    disposition: u32,
+    options: u32,
+    attributes: u32,
+    sa: *mut c_void,
+) -> Result<(Handle, usize), u32> {
     let (mut h, mut iosb) = (core::ptr::null_mut(), [0usize; 2]);
-    let status = with_object_attributes(path, |oa| {
+    let status = with_object_attributes_sa(path, sa, |oa| {
         // SAFETY: valid pointers for the call.
         unsafe {
             NtCreateFile(
@@ -965,7 +1000,7 @@ pub extern "system" fn CreateFileW(
     path: *const u16,
     access: u32,
     share: u32,
-    _security: *mut c_void,
+    security: *mut c_void,
     disposition: u32,
     flags: u32,
     template: Handle,
@@ -1001,7 +1036,7 @@ pub extern "system" fn CreateFileW(
         options |= FILE_OPEN_REPARSE_POINT;
     }
     let access = access | SYNCHRONIZE | FILE_READ_ATTRIBUTES;
-    match open_path(path, access, share, nt_disposition, options, flags & 0x7fff) {
+    match open_path_sa(path, access, share, nt_disposition, options, flags & 0x7fff, security) {
         Ok((h, information)) => {
             // OPEN_ALWAYS/CREATE_ALWAYS on an existing file: success, with
             // ERROR_ALREADY_EXISTS (FILE_OPENED = 1, FILE_OVERWRITTEN = 3).
@@ -1464,14 +1499,15 @@ pub extern "system" fn GetFileAttributesExW(path: *const u16, level: u32, info: 
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn CreateDirectoryW(path: *const u16, _security: *mut c_void) -> Bool {
-    match open_path(
+pub extern "system" fn CreateDirectoryW(path: *const u16, security: *mut c_void) -> Bool {
+    match open_path_sa(
         path,
         FILE_LIST_DIRECTORY | SYNCHRONIZE,
         SHARE_ALL,
         2,
         FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
         0,
+        security,
     ) {
         Ok((h, _)) => {
             CloseHandle(h);

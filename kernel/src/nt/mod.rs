@@ -20,6 +20,7 @@ pub mod platform;
 pub mod process;
 pub mod registry;
 pub mod section;
+pub mod security;
 pub mod stats;
 pub mod status;
 pub mod syscalls;

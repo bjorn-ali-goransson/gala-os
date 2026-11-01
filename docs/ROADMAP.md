@@ -921,8 +921,11 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       DuplicateTokenEx, SetThreadToken/ImpersonateSelf/RevertToSelf,
       PrivilegeCheck, CreateRestrictedToken, CheckTokenMembership;
       NtQueryObject's ObjectTypeInformation on the way); SQL Server's
-      login and sshd still pass. Next: S2 (descriptors kept on objects,
-      `security_test`), S3, S4, then `sshd -d`
+      login and sshd still pass. S2 done (2026-11-01): descriptors kept
+      on files, keys and kernel objects, inherited at creation as
+      documented (`security_test`); advapi32_test's SetSecurityInfo on a
+      handle now needs WRITE_DAC, as on Windows. Next: S3 (access checks
+      at open), S4, then `sshd -d`
       accepting a key-authenticated login from the host (xtask as the
       client).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach

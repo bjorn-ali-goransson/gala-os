@@ -84,6 +84,9 @@ pub const NT_ADJUST_PRIVILEGES_TOKEN: u32 = 0x7f1b;
 pub const NT_DUPLICATE_TOKEN: u32 = 0x7f1c;
 pub const NT_FILTER_TOKEN: u32 = 0x7f1d;
 pub const NT_PRIVILEGE_CHECK: u32 = 0x7f1e;
+// Security descriptors (docs/SECURITY.md S2): gala's numbers until verified.
+pub const NT_QUERY_SECURITY_OBJECT: u32 = 0x7f1f;
+pub const NT_SET_SECURITY_OBJECT: u32 = 0x7f20;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -294,6 +297,13 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_DUPLICATE_TOKEN, "NtDuplicateToken", 6, token_calls::nt_duplicate_token),
     (NT_FILTER_TOKEN, "NtFilterToken", 6, token_calls::nt_filter_token),
     (NT_PRIVILEGE_CHECK, "NtPrivilegeCheck", 3, token_calls::nt_privilege_check),
+    (
+        NT_QUERY_SECURITY_OBJECT,
+        "NtQuerySecurityObject",
+        5,
+        security_calls::nt_query_security_object,
+    ),
+    (NT_SET_SECURITY_OBJECT, "NtSetSecurityObject", 3, security_calls::nt_set_security_object),
     (
         NT_ASSIGN_PROCESS_TO_JOB_OBJECT,
         "NtAssignProcessToJobObject",
@@ -1091,6 +1101,7 @@ fn nt_create_event(call: &mut Call<'_>) -> NtStatus {
     let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
     let event = Event { kind, dispatcher: Dispatcher::new(i32::from(initial)) };
     let Ok(object) = KObject::new(ObjectBody::Event(event)) else { return NtStatus::NO_MEMORY };
+    tri!(security_calls::assign_object(call, &object, attrs_ptr));
     let (object, existed, handle_attributes) = match attrs {
         Some(a) if !a.name.is_empty() || a.root.is_some() => {
             let open_if = a.attributes & OBJ_OPENIF != 0;
@@ -2203,6 +2214,7 @@ fn create_object(
     same: fn(&KObject) -> bool,
 ) -> NtStatus {
     let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
+    tri!(security_calls::assign_object(call, &object, attrs_ptr));
     let (object, existed, handle_attributes) = tri!(link_new_object(attrs, object, same));
     let status = call.return_handle(out, object, access, handle_attributes);
     if status == NtStatus::SUCCESS && existed { NtStatus::OBJECT_NAME_EXISTS } else { status }
@@ -2796,6 +2808,9 @@ impl Call<'_> {
         } else {
             let path = tri!(self.file_path(attrs_ptr));
             let created = tri!(file::create(&path, granted, share, disposition, options));
+            if created.information == file::FILE_CREATED {
+                tri!(security_calls::assign_file(self, &created.object, attrs_ptr));
+            }
             (created.object, created.information)
         };
         let attributes = tri!(self.handle_attributes(attrs_ptr));
@@ -4352,3 +4367,6 @@ mod job_calls;
 
 #[path = "token_calls.rs"]
 mod token_calls;
+
+#[path = "security_calls.rs"]
+mod security_calls;

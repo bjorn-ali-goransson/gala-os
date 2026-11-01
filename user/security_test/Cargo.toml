@@ -1,0 +1,11 @@
+[package]
+name = "security_test"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "security_test"
+test = false
+bench = false

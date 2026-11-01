@@ -39,11 +39,9 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     QueryServiceStatusEx
     RegConnectRegistryW
     RegCopyTreeW
-    RegGetKeySecurity
     RegisterServiceCtrlHandlerA
     RegisterServiceCtrlHandlerExW
     RegisterServiceCtrlHandlerW
-    RegSetKeySecurity
     SetSecurityDescriptorGroup
     SetServiceBits
     SetServiceStatus

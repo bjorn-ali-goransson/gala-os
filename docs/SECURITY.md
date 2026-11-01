@@ -1,7 +1,8 @@
 # Security model (design, 2026-11-01)
 
-Status: phase S1 (tokens in the kernel) is done (2026-11-01; `token_test`,
-ARCHITECTURE "Access tokens"); S2-S5 are design. Before S1, gala had the handle half of NT
+Status: phases S1 (tokens in the kernel; `token_test`, ARCHITECTURE
+"Access tokens") and S2 (descriptors kept; `security_test`, ARCHITECTURE
+"Security descriptors") are done (2026-11-01); S3-S5 are design. Before S1, gala had the handle half of NT
 security (each handle carries a granted access mask, mapped through the
 object type's generic mapping, and services check it), and descriptions
 of security data in user mode: advapi32 builds and reads SIDs, ACLs and
@@ -123,7 +124,7 @@ start.
    process token and of duplicates, impersonation and RevertToSelf,
    OpenThreadToken's ERROR_NO_TOKEN, AdjustTokenPrivileges, a filtered
    token from CreateRestrictedToken) passing on the kernel's tokens.
-2. **S2 Descriptors kept**: `security_test` (create with a descriptor and
+2. **S2 Descriptors kept** (done): `security_test` (create with a descriptor and
    read it back, inheritance into a directory's children, SetFileSecurity
    and SetSecurityInfo kept, registry keys, named objects); sshd's
    permission checks then see real answers.

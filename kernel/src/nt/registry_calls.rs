@@ -169,6 +169,9 @@ pub(super) fn nt_create_key(call: &mut Call<'_>) -> NtStatus {
         r.retain(id);
         Ok((id, created))
     }));
+    if created {
+        tri!(super::security_calls::assign_key(call, id, arg!(call, 2)));
+    }
     let status = call.return_key(out, id, access, attributes);
     if status == NtStatus::SUCCESS && disposition_ptr != 0 {
         let disposition = if created { REG_CREATED_NEW_KEY } else { REG_OPENED_EXISTING_KEY };

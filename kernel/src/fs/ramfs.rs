@@ -192,6 +192,9 @@ pub struct Node {
     /// Sections mapping the file, and the largest size they map.
     map_count: u32,
     mapped_size: u64,
+    /// Its security descriptor (self-relative; nt::security), if one was
+    /// assigned (files gala creates at boot have none).
+    pub security: Option<Vec<u8>>,
 }
 
 /// A new content version (see `Node::version`).
@@ -316,6 +319,7 @@ impl RamFs {
             delete_pending: false,
             map_count: 0,
             mapped_size: 0,
+            security: None,
         };
         nodes.try_push(Some(root)).map_err(|_| FsError::NoMemory)?;
         Ok(Self { nodes, changes: Vec::new(), journal: false, changes_lost: false })
@@ -378,6 +382,12 @@ impl RamFs {
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.get(id)?.as_ref()
+    }
+
+    /// Sets a node's security descriptor.
+    pub fn set_security(&mut self, id: NodeId, sd: Vec<u8>) -> Result<(), FsError> {
+        self.node_mut(id)?.security = Some(sd);
+        Ok(())
     }
 
     fn node_mut(&mut self, id: NodeId) -> Result<&mut Node, FsError> {
@@ -451,6 +461,7 @@ impl RamFs {
             delete_pending: false,
             map_count: 0,
             mapped_size: 0,
+            security: None,
         };
         let id = match self.nodes.iter().position(Option::is_none) {
             Some(free) => {

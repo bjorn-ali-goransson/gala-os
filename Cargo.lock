@@ -904,6 +904,10 @@ name = "security"
 version = "0.1.0"
 
 [[package]]
+name = "security_test"
+version = "0.1.0"
+
+[[package]]
 name = "seh_test"
 version = "0.1.0"
 dependencies = [

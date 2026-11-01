@@ -1239,7 +1239,7 @@ fn security_info(c: &mut Checks) -> Result<(), u32> {
         // The new DACL on a file handle.
         let h = CreateFileW(
             w("C:\\gala-advapi32-sec.txt").as_ptr(),
-            0xc000_0000,
+            0xc004_0000, // GENERIC_READ | GENERIC_WRITE | WRITE_DAC
             0,
             core::ptr::null_mut(),
             2,

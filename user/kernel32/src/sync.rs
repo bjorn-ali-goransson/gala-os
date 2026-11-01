@@ -56,9 +56,27 @@ pub(crate) fn with_name<R>(
     inherit: bool,
     f: impl FnOnce(*const ObjectAttributes) -> R,
 ) -> Result<R, u32> {
+    with_name_and_descriptor(name, inherit, 0, f)
+}
+
+/// with_name with SECURITY_ATTRIBUTES (descriptor and inheritance).
+pub(crate) fn with_name_sa<R>(
+    name: *const u16,
+    sa: *mut c_void,
+    f: impl FnOnce(*const ObjectAttributes) -> R,
+) -> Result<R, u32> {
+    with_name_and_descriptor(name, inheritable(sa), super::security_descriptor(sa), f)
+}
+
+fn with_name_and_descriptor<R>(
+    name: *const u16,
+    inherit: bool,
+    descriptor: usize,
+    f: impl FnOnce(*const ObjectAttributes) -> R,
+) -> Result<R, u32> {
     let inherit_bit = if inherit { OBJ_INHERIT } else { 0 };
     if name.is_null() {
-        if !inherit {
+        if !inherit && descriptor == 0 {
             return Ok(f(core::ptr::null()));
         }
         let oa = ObjectAttributes {
@@ -66,7 +84,7 @@ pub(crate) fn with_name<R>(
             root_directory: 0,
             object_name: core::ptr::null(),
             attributes: inherit_bit,
-            security_descriptor: 0,
+            security_descriptor: descriptor,
             security_quality_of_service: 0,
         };
         return Ok(f(&oa));
@@ -87,7 +105,7 @@ pub(crate) fn with_name<R>(
         root_directory: 0,
         object_name: &us,
         attributes: OBJ_OPENIF | inherit_bit,
-        security_descriptor: 0,
+        security_descriptor: descriptor,
         security_quality_of_service: 0,
     };
     Ok(f(&oa))
@@ -126,7 +144,7 @@ pub extern "system" fn CreateEventW(
     let mut h = core::ptr::null_mut();
     // NotificationEvent (0) for manual reset, else SynchronizationEvent (1).
     let kind = if manual_reset != 0 { 0 } else { 1 };
-    let status = with_name(name, inheritable(attributes), |oa| {
+    let status = with_name_sa(name, attributes, |oa| {
         // SAFETY: valid output pointer and attributes.
         unsafe { NtCreateEvent(&mut h, EVENT_ALL_ACCESS, oa.cast(), kind, u8::from(initial != 0)) }
     });
@@ -195,7 +213,7 @@ pub extern "system" fn CreateMutexW(
     name: *const u16,
 ) -> Handle {
     let mut h = core::ptr::null_mut();
-    let status = with_name(name, inheritable(attributes), |oa| {
+    let status = with_name_sa(name, attributes, |oa| {
         // SAFETY: valid output pointer and attributes.
         unsafe { NtCreateMutant(&mut h, MUTANT_ALL_ACCESS, oa, u8::from(owner != 0)) }
     });
@@ -358,7 +376,7 @@ pub extern "system" fn CreateSemaphoreW(
         return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
     }
     let mut h = core::ptr::null_mut();
-    let status = with_name(name, inheritable(attributes), |oa| {
+    let status = with_name_sa(name, attributes, |oa| {
         // SAFETY: valid output pointer and attributes.
         unsafe { NtCreateSemaphore(&mut h, SEMAPHORE_ALL_ACCESS, oa, initial, maximum) }
     });

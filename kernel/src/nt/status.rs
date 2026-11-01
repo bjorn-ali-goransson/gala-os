@@ -88,6 +88,12 @@ impl NtStatus {
     pub const INVALID_SID: NtStatus = NtStatus(0xc000_0078);
     pub const BAD_IMPERSONATION_LEVEL: NtStatus = NtStatus(0xc000_00a5);
     pub const BAD_TOKEN_TYPE: NtStatus = NtStatus(0xc000_00a8);
+    // Security descriptors.
+    pub const UNKNOWN_REVISION: NtStatus = NtStatus(0xc000_0058);
+    pub const INVALID_OWNER: NtStatus = NtStatus(0xc000_005a);
+    pub const INVALID_PRIMARY_GROUP: NtStatus = NtStatus(0xc000_005b);
+    pub const INVALID_ACL: NtStatus = NtStatus(0xc000_0077);
+    pub const INVALID_SECURITY_DESCR: NtStatus = NtStatus(0xc000_0079);
     pub const PIPE_BROKEN: NtStatus = NtStatus(0xc000_014b);
     pub const INVALID_PARAMETER_2: NtStatus = NtStatus(0xc000_00f0);
     pub const INVALID_PARAMETER_3: NtStatus = NtStatus(0xc000_00f1);

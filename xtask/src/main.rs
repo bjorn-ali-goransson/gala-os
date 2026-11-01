@@ -371,6 +371,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("registry_test", "kernel32.dll", "Windows/System32"),
     ("registry_test", "advapi32.dll", "Windows/System32"),
     ("registry_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("security_test", "ntdll.dll", "Windows/System32"),
+    ("security_test", "kernel32.dll", "Windows/System32"),
+    ("security_test", "advapi32.dll", "Windows/System32"),
+    ("security_test", "secur32.dll", "Windows/System32"),
+    ("security_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("security_test", "bcrypt.dll", "Windows/System32"),
     ("token_test", "ntdll.dll", "Windows/System32"),
     ("token_test", "kernel32.dll", "Windows/System32"),
     ("token_test", "advapi32.dll", "Windows/System32"),
@@ -1075,6 +1081,7 @@ const USER_PROGRAMS: &[&str] = &[
     "console_test",
     "advapi32_test",
     "token_test",
+    "security_test",
     "registry_test",
     "keyed_event_test",
     "iphlpapi_test",
@@ -1979,6 +1986,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=token_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["token_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Security model S2 (docs/SECURITY.md): security descriptors kept
+        // on files, keys and kernel objects (user/security_test).
+        name: "security_test",
+        cmdline: "qemu_exit run=security_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["security_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (Elasticsearch, Java's WatchService): directory change
