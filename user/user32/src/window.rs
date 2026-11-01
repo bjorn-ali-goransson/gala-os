@@ -672,6 +672,7 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
     SendMessageW(hwnd, WM_NCDESTROY, 0, 0);
     let Some(i) = index_of(hwnd) else { return 0 };
     crate::timer::window_destroyed(hwnd);
+    crate::menu::window_destroyed(hwnd);
     let gone = with(|s| {
         let w = s.windows[i];
         s.windows[i] = NO_WINDOW;
@@ -1107,6 +1108,14 @@ fn title_is(w: &Window, title: *const u16) -> bool {
         }
     }
     false
+}
+
+/// An ANSI string (or NULL, or an id below 0x10000) as UTF-16 in `buf`.
+pub(crate) fn ansi_into_ptr(s: *const u8, buf: &mut [u16]) -> *const u16 {
+    if (s as usize) < 0x10000 {
+        return s.cast();
+    }
+    ansi_into(s, buf)
 }
 
 /// `s` (ANSI, NUL-terminated) as UTF-16 in `buf` (Latin-1, truncated).

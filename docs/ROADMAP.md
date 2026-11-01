@@ -492,6 +492,9 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    filezilla.exe loads and the ledger orders the GUI work: child windows
    and the common controls (list and tree views, toolbars, image lists),
    menus, more GDI (DIB sections, BitBlt, fonts, regions), file dialogs.
+   Load-sensitive tests seen failing once each under the full suite and
+   passing alone (2026-11-01): java_http, java_hello, postgres (a psql
+   connection dropped), smpsched_test (check 0x12, a timing check).
    Seen once (2026-11-01, full suite under load): rtl_test timed out with
    its thread Ready and spinning in NtYieldExecution after the other one
    ended; it passes alone. To hunt (docs/WORKFLOW.md, "Hunting a rare
@@ -516,8 +519,9 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    memory DCs, device caps, DDBs and DIB sections, BitBlt/StretchBlt with
    ternary raster operations, fonts at any size from the Noto bitmaps
    with GDI metrics), MulDiv, GetClassNameW/A. It now stops at
-   GetSystemMenu: next, menus and child windows (WS_CHILD), then what the
-   ledger orders.
+   GetSystemMenu: menus as data (user32_test) and RegisterWindowMessageW.
+   It now stops at CreateWindowExW(WS_CHILD): next, child windows, then
+   SystemParametersInfoW and what the ledger orders.
 W4. Later: a user-mode shell (the taskbar and start menu out of the
    kernel), window resizing (WM_SIZE), maximize, keyboard focus per
    window, a proportional font.

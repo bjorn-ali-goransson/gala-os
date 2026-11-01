@@ -14,6 +14,17 @@
  *   longer called; unhooking again fails.
  * - GetClassNameW: the class name as registered (its case kept),
  *   truncated to the buffer (count without the NUL); 0 for a non-window.
+ * - Menus: CreateMenu/CreatePopupMenu give empty menus (IsMenu);
+ *   AppendMenuW adds strings, separators (id 0) and popups (GetSubMenu;
+ *   GetMenuItemID -1); MF_BYCOMMAND reaches into submenus;
+ *   EnableMenuItem and CheckMenuItem return the previous state (-1 for
+ *   no such item); InsertMenuItemW/GetMenuItemInfoW/SetMenuItemInfoW with
+ *   MENUITEMINFOW (cch: the length without the NUL when asked with no
+ *   buffer); ModifyMenuW; RemoveMenu keeps a submenu, DeleteMenu and
+ *   DestroyMenu destroy it; SetMenu/GetMenu/DrawMenuBar; GetSystemMenu
+ *   (the same menu each time, with SC_CLOSE).
+ * - RegisterWindowMessageW: a message in 0xC000-0xFFFF, the same for the
+ *   same name in any case, another for another name.
  * - Timers: SetTimer for a window returns its id; WM_TIMER (wParam the
  *   id) comes no sooner than the interval, after posted messages;
  *   KillTimer returns TRUE once. A window-less timer with a TIMERPROC
@@ -219,10 +230,67 @@ static void monitors(void) {
     DestroyWindow(w);
 }
 
+static void menus(void) {
+    HMENU bar = CreateMenu(), file = CreatePopupMenu();
+    CHECK(bar != NULL && file != NULL && IsMenu(bar) && GetMenuItemCount(bar) == 0);
+    CHECK(AppendMenuW(file, MF_STRING, 101, L"&Open"));
+    CHECK(AppendMenuW(file, MF_SEPARATOR, 0, NULL));
+    CHECK(AppendMenuW(file, MF_STRING | MF_GRAYED, 102, L"E&xit"));
+    CHECK(GetMenuItemCount(file) == 3 && GetMenuItemID(file, 0) == 101 && GetMenuItemID(file, 1) == 0);
+    CHECK(AppendMenuW(bar, MF_POPUP, (UINT_PTR)file, L"&File"));
+    CHECK(GetSubMenu(bar, 0) == file && GetMenuItemID(bar, 0) == (UINT)-1);
+    WCHAR text[64];
+    CHECK(GetMenuStringW(bar, 0, text, 64, MF_BYPOSITION) == 5 && wcscmp(text, L"&File") == 0);
+    CHECK(GetMenuStringW(bar, 102, text, 64, MF_BYCOMMAND) == 5 && wcscmp(text, L"E&xit") == 0);
+    CHECK(EnableMenuItem(bar, 102, MF_BYCOMMAND | MF_ENABLED) == MF_GRAYED);
+    CHECK((GetMenuState(file, 102, MF_BYCOMMAND) & MF_GRAYED) == 0);
+    CHECK(CheckMenuItem(file, 101, MF_BYCOMMAND | MF_CHECKED) == MF_UNCHECKED);
+    CHECK(CheckMenuItem(file, 101, MF_BYCOMMAND | MF_CHECKED) == MF_CHECKED);
+    CHECK(EnableMenuItem(file, 999, MF_BYCOMMAND | MF_GRAYED) == (UINT)-1);
+
+    MENUITEMINFOW mii = {0};
+    mii.cbSize = sizeof mii;
+    mii.fMask = MIIM_ID | MIIM_STRING;
+    mii.wID = 100;
+    mii.dwTypeData = L"New";
+    CHECK(InsertMenuItemW(file, 0, TRUE, &mii));
+    CHECK(GetMenuItemCount(file) == 4 && GetMenuItemID(file, 0) == 100);
+    MENUITEMINFOW q = {0};
+    q.cbSize = sizeof q;
+    q.fMask = MIIM_STRING;
+    CHECK(GetMenuItemInfoW(file, 100, FALSE, &q) && q.cch == 3);
+    q.dwTypeData = text;
+    q.cch = 64;
+    CHECK(GetMenuItemInfoW(file, 100, FALSE, &q) && q.cch == 3 && wcscmp(text, L"New") == 0);
+    MENUITEMINFOW st = {0};
+    st.cbSize = sizeof st;
+    st.fMask = MIIM_STATE;
+    st.fState = MFS_CHECKED;
+    CHECK(SetMenuItemInfoW(file, 100, FALSE, &st));
+    CHECK(GetMenuState(file, 100, MF_BYCOMMAND) & MF_CHECKED);
+    CHECK(ModifyMenuW(file, 100, MF_BYCOMMAND | MF_STRING, 105, L"Create"));
+    CHECK(GetMenuItemID(file, 0) == 105);
+    CHECK(RemoveMenu(file, 0, MF_BYPOSITION) && GetMenuItemCount(file) == 3);
+    CHECK(DeleteMenu(file, 102, MF_BYCOMMAND) && GetMenuItemCount(file) == 2);
+
+    HWND w = CreateWindowExW(0, L"User32TestHooks", L"menus", WS_OVERLAPPEDWINDOW, 10, 10, 300,
+                             200, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    CHECK(SetMenu(w, bar) && GetMenu(w) == bar && DrawMenuBar(w));
+    HMENU sys = GetSystemMenu(w, FALSE);
+    CHECK(sys != NULL && GetSystemMenu(w, FALSE) == sys);
+    CHECK(GetMenuState(sys, SC_CLOSE, MF_BYCOMMAND) != (UINT)-1);
+    CHECK(SetMenu(w, NULL) && GetMenu(w) == NULL);
+    CHECK(DestroyMenu(bar) && !IsMenu(bar) && !IsMenu(file));
+    DestroyWindow(w);
+}
+
 int main(void) {
     hooks();
     timers();
     monitors();
+    menus();
+    UINT a = RegisterWindowMessageW(L"GalaTestMessage"), b = RegisterWindowMessageW(L"galatestmessage");
+    CHECK(a >= 0xC000 && a <= 0xFFFF && a == b && RegisterWindowMessageW(L"Other") != a);
     ole();
     CHECK(SetCurrentProcessExplicitAppUserModelID(L"Gala.Test") == S_OK);
     CHECK(SetThreadLocale(0x0407) && GetThreadLocale() == 0x0407);

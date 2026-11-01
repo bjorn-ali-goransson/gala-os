@@ -2144,6 +2144,18 @@ A small window manager and shell, in the kernel for now.
   MonitorFromWindow/Point/Rect (off-screen: by the default flags),
   GetMonitorInfoW/A (\\.\DISPLAY1) and GetSystemMetrics' screen
   metrics come from it.
+- **Menus** (`user/user32/src/menu.rs`): HMENU objects as data, each in
+  a page of its own (64 items: string, separator or popup; id, MF state,
+  type, item data, bitmap), with the documented results of Append/
+  Insert/Modify/Remove/DeleteMenu, Enable/Check(Radio)MenuItem (the
+  previous state, -1 when absent), Get/SetMenuItemInfoW, GetMenuState,
+  GetMenuStringW, GetSubMenu; MF_BYCOMMAND searches submenus; DeleteMenu
+  and DestroyMenu destroy submenus. SetMenu/GetMenu and GetSystemMenu
+  (Restore, Move, Size, Minimize, Maximize, Close) per window, destroyed
+  with it. Not yet: drawing the menu bar (DrawMenuBar answers TRUE and
+  the client area keeps its size), TrackPopupMenu, keyboard access.
+- **Registered messages** (`message.rs`): RegisterWindowMessageW gives
+  0xC000 + an index per name (case-insensitive), process-wide.
 - **Hooks** (`user/user32/src/hook.rs`): per kind and thread, newest
   first; CallNextHookEx ignores its handle (as documented) and continues
   from the hook running on the thread. WH_CBT is called on creation

@@ -10,13 +10,10 @@ gala_stubs::unimplemented_exports!("user32.dll":
     OpenClipboard
     AdjustWindowRectEx
     AnimateWindow
-    AppendMenuW
     BeginDeferWindowPos
     BringWindowToTop
     CallWindowProcW
     ChangeDisplaySettingsExW
-    CheckMenuItem
-    CheckMenuRadioItem
     ChildWindowFromPoint
     ChildWindowFromPointEx
     ClientToScreen
@@ -27,8 +24,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     CreateDialogParamW
     CreateIconFromResourceEx
     CreateIconIndirect
-    CreateMenu
-    CreatePopupMenu
     DdeClientTransaction
     DdeConnect
     DdeCreateDataHandle
@@ -48,16 +43,13 @@ gala_stubs::unimplemented_exports!("user32.dll":
     DestroyCaret
     DestroyCursor
     DestroyIcon
-    DestroyMenu
     DrawEdge
     DrawFocusRect
     DrawFrameControl
     DrawIconEx
-    DrawMenuBar
     DrawStateW
     DrawTextW
     EmptyClipboard
-    EnableMenuItem
     EnableScrollBar
     EnableWindow
     EndDeferWindowPos
@@ -83,17 +75,11 @@ gala_stubs::unimplemented_exports!("user32.dll":
     GetFocus
     GetIconInfo
     GetKeyboardState
-    GetMenuItemCount
-    GetMenuItemID
-    GetMenuItemInfoW
-    GetMenuState
     GetMessagePos
     GetMessageTime
     GetParent
     GetProcessDefaultLayout
     GetScrollInfo
-    GetSubMenu
-    GetSystemMenu
     GetUpdateRgn
     GetWindow
     GetWindowDC
@@ -103,11 +89,8 @@ gala_stubs::unimplemented_exports!("user32.dll":
     GetWindowThreadProcessId
     HideCaret
     InflateRect
-    InsertMenuItemW
-    InsertMenuW
     IsClipboardFormatAvailable
     IsDialogMessageW
-    IsMenu
     IsRectEmpty
     IsWindowEnabled
     IsZoomed
@@ -117,7 +100,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     LoadImageW
     MapVirtualKeyW
     MapWindowPoints
-    ModifyMenuW
     MoveWindow
     NotifyWinEvent
     OffsetRect
@@ -126,8 +108,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     RedrawWindow
     RegisterClipboardFormatW
     RegisterHotKey
-    RegisterWindowMessageW
-    RemoveMenu
     ScreenToClient
     ScrollWindow
     SetCaretBlinkTime
@@ -136,9 +116,7 @@ gala_stubs::unimplemented_exports!("user32.dll":
     SetFocus
     SetForegroundWindow
     SetLayeredWindowAttributes
-    SetMenu
     SetMenuInfo
-    SetMenuItemInfoW
     SetParent
     SetRect
     SetRectEmpty
