@@ -445,6 +445,15 @@ H11. **busybox httpd and wget over loopback**: next. busybox-w32's httpd
    client) fetches files from it over 127.0.0.1, in one boot: sockets
    from C programs and busybox's networking, output as on Windows.
 
+Agreed order (2026-11-01, after an outside review pointed out that the
+security model - tokens, security descriptors, access checks - is the
+hardest piece to retrofit, and that files and the registry live only in
+memory): first finish SQL Server LocalDB (P1 step 5: a client query over
+its pipe); then choose the next programs that need those components (a
+program that sets and relies on ACLs, one that needs a persistent disk)
+and design and build the security model and disk persistence test first
+from them, before the system-call surface grows much further.
+
 P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
    files as their makers ship them, not only ones we build). Done: Caddy
    2.8.4's official Windows release (Go 1.22) - `caddy version` and
