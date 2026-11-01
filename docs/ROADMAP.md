@@ -445,6 +445,12 @@ H11. **busybox httpd and wget over loopback**: next. busybox-w32's httpd
    client) fetches files from it over 127.0.0.1, in one boot: sockets
    from C programs and busybox's networking, output as on Windows.
 
+Next, agreed 2026-11-01: finish the backlog (Git Bash to a working
+`bash -c "echo hi | cat"` or a documented blocker), then a window
+manager: windows on the screen for Win32 programs (user32/gdi32 over the
+framebuffer, mouse and keyboard input, a compositor), test first and
+checked with screenshots.
+
 Agreed order, updated (2026-11-01): SQL Server's SHUTDOWN first (done);
 then
 the security model and disk work through programs that need them, in the
