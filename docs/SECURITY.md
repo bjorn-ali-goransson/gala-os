@@ -144,8 +144,8 @@ start.
    LsaLogonUser S4U, CreateProcessAsUserW, profiles, virtual accounts
    (LsaManageSidNameMapping, account rights, LOGON32_PROVIDER_VIRTUAL);
    sshd accepts a key-authenticated login from the host and runs a
-   command (`sshd_login`). Left: logon rights enforced for ordinary
-   accounts, NetUserAdd, password logins over ssh.
+   command (`sshd_login`), also with a password (`sshd_password`). Left:
+   logon rights enforced for ordinary accounts, NetUserAdd.
 5. **S5 Restricted tokens and integrity** (PostgreSQL).
 Then the disk: D1 a virtio-blk driver, D2 a file system with
 descriptors, D3 registry hives on it.

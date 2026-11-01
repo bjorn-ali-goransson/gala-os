@@ -978,8 +978,9 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       for the command's stderr forever). **Done (2026-11-01): the host's
       ssh logs in to sshd on gala with a key and runs a command**
       (`sshd_login` passes, about 10 s in the kernel; the boot runs
-      ssh-keygen -A, then sshd -ddd as SYSTEM). Next for sshd: password
-      logins, an interactive shell (a pty: ConPTY), sftp. Open: the JDK's console path (GetConsoleMode succeeding on
+      ssh-keygen -A, then sshd -ddd as SYSTEM). Password logins too
+      (`sshd_password`: LOGON32_LOGON_NETWORK_CLEARTEXT, the client's
+      password through SSH_ASKPASS). Next for sshd: an interactive shell (a pty: ConPTY), sftp. Open: the JDK's console path (GetConsoleMode succeeding on
       the standard handles made java_http fail intermittently).
       accepting a key-authenticated login from the host (xtask as the
       client).

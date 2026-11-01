@@ -602,6 +602,23 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sshd_login", "user/sshd/sshd.regseed", "registry"),
     ("sshd_login", "user/bin/busybox.exe", "gala"),
     ("sshd_login", "msvcrt.dll", "Windows/System32"),
+    ("sshd_password", "ntdll.dll", "Windows/System32"),
+    ("sshd_password", "kernel32.dll", "Windows/System32"),
+    ("sshd_password", "advapi32.dll", "Windows/System32"),
+    ("sshd_password", "bcrypt.dll", "Windows/System32"),
+    ("sshd_password", "bcryptprimitives.dll", "Windows/System32"),
+    ("sshd_password", "crypt32.dll", "Windows/System32"),
+    ("sshd_password", "secur32.dll", "Windows/System32"),
+    ("sshd_password", "user32.dll", "Windows/System32"),
+    ("sshd_password", "userenv.dll", "Windows/System32"),
+    ("sshd_password", "ws2_32.dll", "Windows/System32"),
+    ("sshd_password", "mswsock.dll", "Windows/System32"),
+    ("sshd_password", "target/prebuilt/openssh/OpenSSH-Win64/", "Program Files/OpenSSH"),
+    ("sshd_password", "user/sshd/sshd_config", "ProgramData/ssh"),
+    ("sshd_password", "user/access_test/access_test.regseed", "registry"),
+    ("sshd_password", "user/sshd/sshd.regseed", "registry"),
+    ("sshd_password", "user/bin/busybox.exe", "gala"),
+    ("sshd_password", "msvcrt.dll", "Windows/System32"),
     ("caddy", "ntdll.dll", "Windows/System32"),
     ("caddy", "kernel32.dll", "Windows/System32"),
     ("caddy", "advapi32.dll", "Windows/System32"),
@@ -1731,6 +1748,9 @@ enum NetClient {
     /// Logs on with the host's ssh and user/sshd/client_ed25519 as
     /// `galatest` and runs `echo` (`ssh_client`).
     Ssh,
+    /// The same with galatest's password (`ssh_client`, through
+    /// SSH_ASKPASS) and no key.
+    SshPassword,
 }
 
 /// Scenarios that get a virtio-net card on QEMU's user-mode network, with
@@ -1747,6 +1767,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("nginx_master", "start worker process", NetClient::Nginx),
     ("nginx_tls", "using the \"select\" event method", NetClient::Tls),
     ("sshd_login", "Server listening on", NetClient::Ssh),
+    ("sshd_password", "Server listening on", NetClient::SshPassword),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",
@@ -2398,6 +2419,14 @@ const SCENARIOS: &[Scenario] = &[
         // ssh logs on as galatest with a key (user/sshd/client_ed25519,
         // its authorized_keys in the profile) and runs echo.
         name: "sshd_login",
+        cmdline: "qemu_exit as=system wait=all cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,-ddd%20-e%20-p%207",
+        exit_status: XTASK_STOPS,
+        expect: &["xtask: net client: ssh ok"],
+    },
+    Scenario {
+        // The same login with galatest's password (Win32-OpenSSH checks it
+        // with LogonUserExExW, LOGON32_LOGON_NETWORK_CLEARTEXT); no key.
+        name: "sshd_password",
         cmdline: "qemu_exit as=system wait=all cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,-ddd%20-e%20-p%207",
         exit_status: XTASK_STOPS,
         expect: &["xtask: net client: ssh ok"],
@@ -3497,7 +3526,8 @@ fn run_vm(
                 NetClient::Nginx => nginx_client(port),
                 NetClient::Tls => tls_client(port),
                 NetClient::Contains(parts) => contains_client(port, parts),
-                NetClient::Ssh => ssh_client(port),
+                NetClient::Ssh => ssh_client(port, false),
+                NetClient::SshPassword => ssh_client(port, true),
             }));
         }
         if stop_after_client && client.as_ref().is_some_and(|c| c.is_finished()) {
@@ -3539,7 +3569,7 @@ fn run_vm(
                 match kind {
                     NetClient::Echo => "echo",
                     NetClient::Tls => "tls",
-                    NetClient::Ssh => "ssh",
+                    NetClient::Ssh | NetClient::SshPassword => "ssh",
                     _ => "http",
                 }
             ),
@@ -3659,23 +3689,45 @@ const SSH_ECHO: &str = "gala-ssh-ok";
 /// user/sshd/client_ed25519 (galatest's authorized key) logs on as
 /// `galatest` and runs `echo gala-ssh-ok`; its verbose trace says how far
 /// it got.
-fn ssh_client(port: u16) -> Result {
-    // ssh refuses a private key others may read: a 0600 copy.
-    let key = root().join("target/sshd_login_client_ed25519");
-    fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+/// galatest's password (user/access_test/access_test.regseed has its hash).
+const SSH_PASSWORD: &str = "Gala-Test-1";
+
+fn ssh_client(port: u16, password: bool) -> Result {
+    let mut ssh = Command::new("timeout");
+    ssh.arg("120").arg("ssh").arg("-v");
+    if password {
+        // ssh asks SSH_ASKPASS (forced) for the password: a script.
+        let askpass = root().join("target/sshd_password_askpass");
+        fs::write(&askpass, format!("#!/bin/sh\necho '{SSH_PASSWORD}'\n"))
+            .map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&askpass, fs::Permissions::from_mode(0o700))
+                .map_err(|e| e.to_string())?;
+        }
+        ssh.env("SSH_ASKPASS", &askpass)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", ":0")
+            .stdin(std::process::Stdio::null())
+            .args(["-o", "PubkeyAuthentication=no", "-o", "PreferredAuthentications=password"])
+            .args(["-o", "NumberOfPasswordPrompts=1"]);
+    } else {
+        // ssh refuses a private key others may read: a 0600 copy.
+        let key = root().join("target/sshd_login_client_ed25519");
+        fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&key, fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
+        }
+        ssh.arg("-i").arg(&key).args(["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"]);
     }
-    let out = Command::new("timeout")
-        .arg("120")
-        .arg("ssh")
-        .args(["-v", "-i"])
-        .arg(&key)
+    let out = ssh
         .args(["-p", &port.to_string()])
         .args(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"])
-        .args(["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=60"])
+        .args(["-o", "ConnectTimeout=60"])
         .args(["galatest@127.0.0.1", "echo", SSH_ECHO])
         .output()
         .map_err(|e| format!("ssh: {e}"))?;
