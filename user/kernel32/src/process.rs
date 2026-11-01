@@ -168,6 +168,73 @@ pub extern "system" fn CreateProcessW(
     startup: *const u8,
     info: *mut usize,
 ) -> Bool {
+    create_process(
+        0,
+        application,
+        command_line,
+        process_attributes,
+        thread_attributes,
+        inherit,
+        flags,
+        environment,
+        directory,
+        startup,
+        info,
+    )
+}
+
+/// CreateProcessAsUserW (kernel32 exports it, as Windows' does;
+/// advapi32's forwards here): CreateProcessW with `token` as the new
+/// process's primary token. The kernel checks it (a primary token the
+/// caller may assign: ERROR_BAD_TOKEN_TYPE, ERROR_PRIVILEGE_NOT_HELD).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn CreateProcessAsUserW(
+    token: Handle,
+    application: *const u16,
+    command_line: *mut u16,
+    process_attributes: *mut c_void,
+    thread_attributes: *mut c_void,
+    inherit: Bool,
+    flags: u32,
+    environment: *mut c_void,
+    directory: *const u16,
+    startup: *const u8,
+    info: *mut usize,
+) -> Bool {
+    if token.is_null() {
+        return fail_with(ERROR_INVALID_HANDLE, FALSE);
+    }
+    create_process(
+        token as usize,
+        application,
+        command_line,
+        process_attributes,
+        thread_attributes,
+        inherit,
+        flags,
+        environment,
+        directory,
+        startup,
+        info,
+    )
+}
+
+/// CreateProcessW and CreateProcessAsUserW (`token` 0: the caller's).
+#[allow(clippy::too_many_arguments)]
+fn create_process(
+    token: usize,
+    application: *const u16,
+    command_line: *mut u16,
+    process_attributes: *mut c_void,
+    thread_attributes: *mut c_void,
+    inherit: Bool,
+    flags: u32,
+    environment: *mut c_void,
+    directory: *const u16,
+    startup: *const u8,
+    info: *mut usize,
+) -> Bool {
     if !process_attributes.is_null() || !thread_attributes.is_null() {
         unsupported(b"kernel32.dll!CreateProcessW(security attributes)", 0);
     }
@@ -180,14 +247,14 @@ pub extern "system" fn CreateProcessW(
         unsupported(b"kernel32.dll!CreateProcessW(flags)", unknown.into());
     }
     // The image: as given (with a directory), or searched for.
-    let mut token = PathBuf::new();
-    if let Err(e) = program_token(application, command_line, &mut token) {
+    let mut program_name = PathBuf::new();
+    if let Err(e) = program_token(application, command_line, &mut program_name) {
         return fail_with(e, FALSE);
     }
-    let found = if token.as_slice().iter().any(|&c| is_sep(c) || c == u16::from(b':')) {
-        Ok(token)
+    let found = if program_name.as_slice().iter().any(|&c| is_sep(c) || c == u16::from(b':')) {
+        Ok(program_name)
     } else {
-        search(&token)
+        search(&program_name)
     };
     let program = match found {
         Ok(p) => p,
@@ -255,7 +322,7 @@ pub extern "system" fn CreateProcessW(
     } else {
         None
     };
-    let mut p = [0u8; 152];
+    let mut p = [0u8; 160];
     let mut put = |at: usize, v: u64| p[at..at + 8].copy_from_slice(&v.to_le_bytes());
     put(0, image.chars.as_ptr() as u64);
     put(16, line.as_ptr() as u64);
@@ -293,8 +360,12 @@ pub extern "system" fn CreateProcessW(
         p[120..128].copy_from_slice(&(handles as u64).to_le_bytes());
         p[128..132].copy_from_slice(&((size / 8) as u32).to_le_bytes());
     }
+    if token != 0 {
+        bits |= 16;
+        p[152..160].copy_from_slice(&(token as u64).to_le_bytes());
+    }
     p[12..16].copy_from_slice(&bits.to_le_bytes());
-    // SAFETY: the 152-byte parameter block; its pointers live through
+    // SAFETY: the 160-byte parameter block; its pointers live through
     // the call.
     let status = unsafe { GalaCreateProcess(p.as_mut_ptr()) };
     if own_env {

@@ -60,6 +60,10 @@ const PIPE_CONNECTED: NtStatus = NtStatus::PIPE_CONNECTED;
 
 pub struct Pipe {
     state: IrqMutex<State>,
+    /// The connected client's security context (an impersonation token,
+    /// captured when it connected): what FSCTL_PIPE_IMPERSONATE gives the
+    /// server.
+    client_token: IrqMutex<Option<ObjectRef>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -251,6 +255,7 @@ pub fn create_server(name: &[u16], o: &ServerOptions) -> Result<PipeEnd, NtStatu
     }
     let quota = |q: u32| if q == 0 { DEFAULT_QUOTA } else { (q as usize).max(DEFAULT_QUOTA) };
     let pipe = KArc::try_new(Pipe {
+        client_token: IrqMutex::new(None),
         state: IrqMutex::new(State {
             inbox: [VecDeque::new(), VecDeque::new()],
             messages: [VecDeque::new(), VecDeque::new()],
@@ -272,7 +277,11 @@ pub fn create_server(name: &[u16], o: &ServerOptions) -> Result<PipeEnd, NtStatu
 }
 
 /// Opens a client end of pipe `name` (its oldest listening instance).
-pub fn open_client(name: &[u16], synchronous: bool) -> Result<PipeEnd, NtStatus> {
+pub fn open_client(
+    name: &[u16],
+    synchronous: bool,
+    client_token: Option<ObjectRef>,
+) -> Result<PipeEnd, NtStatus> {
     let key = upper(name)?;
     let instances = INSTANCES.lock();
     let mut found = false;
@@ -291,6 +300,7 @@ pub fn open_client(name: &[u16], synchronous: bool) -> Result<PipeEnd, NtStatus>
         let pipe = i.pipe.clone();
         drop(instances);
         report(done);
+        *pipe.client_token.lock() = client_token;
         // A client starts in byte read mode.
         return PipeEnd::new(pipe, 1, generation, synchronous, false);
     }
@@ -446,6 +456,11 @@ impl PipeEnd {
 
     fn peer(&self) -> usize {
         1 - self.end
+    }
+
+    /// The connected client's token (see Pipe::client_token).
+    pub fn client_token(&self) -> Option<ObjectRef> {
+        self.pipe.client_token.lock().clone()
     }
 
     pub fn is_server(&self) -> bool {

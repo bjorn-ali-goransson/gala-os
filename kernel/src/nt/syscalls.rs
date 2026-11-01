@@ -2825,7 +2825,8 @@ impl Call<'_> {
             let synchronous = options
                 & (file::FILE_SYNCHRONOUS_IO_ALERT | file::FILE_SYNCHRONOUS_IO_NONALERT)
                 != 0;
-            let end = tri!(super::pipe::open_client(&name, synchronous));
+            let client = tri!(token_calls::client_token(self));
+            let end = tri!(super::pipe::open_client(&name, synchronous, Some(client)));
             let Ok(object) = KObject::new(ObjectBody::Pipe(end)) else {
                 return NtStatus::NO_MEMORY;
             };
@@ -2970,7 +2971,7 @@ fn nt_fs_control_file(call: &mut Call<'_>) -> NtStatus {
                 NtStatus::CANNOT_IMPERSONATE
             };
             if status == NtStatus::SUCCESS {
-                let impersonated = token_calls::impersonate_pipe_client(call);
+                let impersonated = token_calls::impersonate_pipe_client(end);
                 if impersonated != NtStatus::SUCCESS {
                     return impersonated;
                 }
@@ -3257,7 +3258,16 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
     // The caller's job: its limit, and the job the child joins.
     let job = tri!(job_calls::job_for_child(&call.process));
     let parent_token = call.process.token.lock().clone();
-    let token = tri!(super::token::for_new_process(Some(&parent_token)));
+    // Flag 16: the primary token at 152 (CreateProcessAsUserW): TOKEN_QUERY,
+    // TOKEN_DUPLICATE and TOKEN_ASSIGN_PRIMARY on the handle, a primary
+    // token, and the caller may assign it (Token::may_assign).
+    let source = if flags & 16 != 0 {
+        let h = tri!(call.read_u64(ptr + 152));
+        tri!(token_calls::token_for_process(call, h, &parent_token))
+    } else {
+        parent_token
+    };
+    let token = tri!(super::token::for_new_process(Some(&source)));
     let spawned = process::spawn(process::Spawn {
         name,
         path: path_static,

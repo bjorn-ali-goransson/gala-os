@@ -177,6 +177,11 @@ pub struct TokenData {
 pub struct Token {
     /// TokenStatistics.TokenId.
     pub id: u64,
+    /// The id of the token this one derives from by duplication, filtering
+    /// or a new process's copy (its own id for a logon's token): a caller
+    /// may start a process with a token of its own primary token's lineage
+    /// without SeAssignPrimaryTokenPrivilege (nt::token::may_assign).
+    pub origin: u64,
     pub data: IrqMutex<TokenData>,
 }
 
@@ -191,15 +196,16 @@ pub fn object(data: TokenData) -> Result<super::object::ObjectRef, NtStatus> {
 pub fn for_new_process(
     parent: Option<&super::object::ObjectRef>,
 ) -> Result<super::object::ObjectRef, NtStatus> {
-    let data = match parent.map(|p| &p.body) {
+    let token = match parent.map(|p| &p.body) {
         Some(super::object::ObjectBody::Token(t)) => {
             let mut data = t.data.lock().try_clone()?;
             data.kind = TokenType::Primary;
-            data
+            Token::derived(data, t.origin)
         }
-        _ => TokenData::boot_user()?,
+        _ => Token::new(TokenData::boot_user()?),
     };
-    object(data)
+    super::object::KObject::new(super::object::ObjectBody::Token(token))
+        .map_err(|_| NtStatus::NO_MEMORY)
 }
 
 static NEXT_LUID: AtomicU64 = AtomicU64::new(0x0010_0000);
@@ -342,8 +348,27 @@ impl TokenData {
 }
 
 impl Token {
+    /// A token derived from one of lineage `origin`.
+    pub fn derived(data: TokenData, origin: u64) -> Token {
+        Token { id: next_luid(), origin, data: IrqMutex::new(data) }
+    }
+
     pub fn new(data: TokenData) -> Token {
-        Token { id: next_luid(), data: IrqMutex::new(data) }
+        let id = next_luid();
+        Token { id, origin: id, data: IrqMutex::new(data) }
+    }
+
+    /// Whether the holder of `caller` (a process's primary token) may make
+    /// this token a new process's primary token: one of its own lineage
+    /// (a duplicate or restricted version of it, as documented for
+    /// CreateProcessAsUser), or with SeAssignPrimaryTokenPrivilege.
+    pub fn may_assign(&self, caller: &Token) -> bool {
+        const SE_ASSIGN_PRIMARY_TOKEN: u64 = 3;
+        let privileged =
+            caller.data.lock().privileges.iter().any(|p| {
+                p.luid == SE_ASSIGN_PRIMARY_TOKEN && p.attributes & SE_PRIVILEGE_ENABLED != 0
+            });
+        privileged || self.origin == caller.origin
     }
 
     /// NtDuplicateToken's copy: of type `kind`; with `effective_only`,
@@ -366,7 +391,7 @@ impl Token {
             data.groups.retain(|g| g.attributes & SE_GROUP_ENABLED != 0 || g.sid.is_label());
             data.privileges.retain(|p| p.attributes & SE_PRIVILEGE_ENABLED != 0);
         }
-        Ok(Token::new(data))
+        Ok(Token::derived(data, self.origin))
     }
 
     /// NtFilterToken's restricted copy (same type): `disable` SIDs (the
@@ -409,7 +434,7 @@ impl Token {
         }
         data.sandbox_inert |= flags & SANDBOX_INERT != 0;
         data.modified_id = next_luid();
-        Ok(Token::new(data))
+        Ok(Token::derived(data, self.origin))
     }
 }
 

@@ -931,8 +931,17 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       now ask for the rights Windows' do; security_test fixed where it
       relied on unenforced access (SYNCHRONIZE, a key's DELETE); every
       scenario, SQL Server and sshd still pass (tds_test now tolerates the
-      pipe closing before SHUTDOWN's answer, seen once). Next: S4
-      (LsaLogonUser S4U, CreateProcessAsUserW, profiles), then `sshd -d`
+      pipe closing before SHUTDOWN's answer, seen once). S4 begun
+      (2026-11-01, `logon_test`): CreateProcessAsUserW (only tokens of the
+      caller's lineage without SeAssignPrimaryTokenPrivilege), pipes
+      recording their client's token for ImpersonateNamedPipeClient,
+      GetUserProfileDirectoryW. sshd and sshd-session import
+      LsaConnectUntrusted, LsaRegisterLogonProcess,
+      LsaLookupAuthenticationPackage, LsaLogonUser (S4U for key
+      logins), LsaManageSidNameMapping, LoadUserProfileW,
+      CreateProcessAsUserW and job objects; sshd runs as SYSTEM on
+      Windows, so next: a boot option to start a program as SYSTEM
+      (services' account), the LSA logons, profiles, then `sshd -d`
       accepting a key-authenticated login from the host (xtask as the
       client).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach

@@ -384,6 +384,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("access_test", "bcryptprimitives.dll", "Windows/System32"),
     ("access_test", "bcrypt.dll", "Windows/System32"),
     ("access_test", "user/access_test/access_test.regseed", "registry"),
+    ("logon_test", "ntdll.dll", "Windows/System32"),
+    ("logon_test", "kernel32.dll", "Windows/System32"),
+    ("logon_test", "advapi32.dll", "Windows/System32"),
+    ("logon_test", "secur32.dll", "Windows/System32"),
+    ("logon_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("logon_test", "bcrypt.dll", "Windows/System32"),
+    ("logon_test", "userenv.dll", "Windows/System32"),
+    ("logon_test", "user/access_test/access_test.regseed", "registry"),
     ("token_test", "ntdll.dll", "Windows/System32"),
     ("token_test", "kernel32.dll", "Windows/System32"),
     ("token_test", "advapi32.dll", "Windows/System32"),
@@ -1090,6 +1098,7 @@ const USER_PROGRAMS: &[&str] = &[
     "token_test",
     "security_test",
     "access_test",
+    "logon_test",
     "registry_test",
     "keyed_event_test",
     "iphlpapi_test",
@@ -2010,6 +2019,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=access_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["access_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Security model S4 (docs/SECURITY.md): per-user processes and
+        // pipe impersonation (user/logon_test; its account seeded).
+        name: "logon_test",
+        cmdline: "qemu_exit run=logon_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["logon_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (Elasticsearch, Java's WatchService): directory change
@@ -3089,6 +3106,7 @@ fn run_parallel<J: Sync, T: Send>(
 /// Program scenarios gala-um does not run, and why (docs/GALA_UM.md).
 const NOT_IN_UM: &[(&str, &str)] = &[
     ("process_test", "child processes (one NT process per Linux process)"),
+    ("logon_test", "child processes (one NT process per Linux process)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
     ("busybox", "child processes (pipelines are child processes)"),

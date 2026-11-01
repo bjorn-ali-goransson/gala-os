@@ -119,6 +119,11 @@ shows it.
   SYNCHRONIZE and READ_CONTROL (a deny ACE with FW denies reading too).
   To find a denial: gala-um's `--trace` (or `events=syscall`) shows the
   call that returned 0xc0000022.
+- **A DLL forwarding to another DLL's function of the same name**
+  (advapi32's CreateProcessAsUserW to kernel32's): a raw-dylib import of
+  that name binds to the DLL's own export, so the call jumps to itself
+  for ever (no stack growth: a tail call). Look the target up with
+  GetProcAddress instead.
 - **Reading MSVC C++ EH data** (as data, from .pdata/.xdata): check the
   format before decoding. A FuncInfo starting with the magic number
   0x19930520-0x19930522 (bytes `22 05 93 19`) is the older format

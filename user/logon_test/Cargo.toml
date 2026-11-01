@@ -1,0 +1,11 @@
+[package]
+name = "logon_test"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "logon_test"
+test = false
+bench = false

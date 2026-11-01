@@ -356,17 +356,36 @@ pub(super) fn set_thread_token(
     NtStatus::SUCCESS
 }
 
+/// A pipe client's security context when it connects: a copy of its
+/// effective token (the thread's impersonation token, else the process's
+/// primary token) at impersonation level (CreateFile without
+/// SECURITY_SQOS_PRESENT asks for SecurityImpersonation).
+pub(super) fn client_token(call: &Call<'_>) -> Result<ObjectRef, NtStatus> {
+    let impersonation = thread::current().and_then(|me| match &me.body {
+        ObjectBody::Thread(t) => t.impersonation.lock().clone(),
+        _ => None,
+    });
+    let effective = impersonation.unwrap_or_else(|| call.process.token.lock().clone());
+    let t = token_of(&effective).ok_or(NtStatus::NO_TOKEN)?;
+    let copy = t.duplicate(TokenType::Impersonation(SECURITY_IMPERSONATION), false);
+    // An identification-level client token stays at its level.
+    let copy = match copy {
+        Ok(c) => c,
+        Err(NtStatus::BAD_IMPERSONATION_LEVEL) => {
+            t.duplicate(TokenType::Impersonation(SECURITY_IDENTIFICATION), false)?
+        }
+        Err(e) => return Err(e),
+    };
+    KObject::new(ObjectBody::Token(copy)).map_err(|_| NtStatus::NO_MEMORY)
+}
+
 /// FSCTL_PIPE_IMPERSONATE: the calling thread impersonates the pipe's
-/// client at impersonation level. TODO(S4): the client's own token
-/// (captured when it connects); with one user it is the caller's.
-pub(super) fn impersonate_pipe_client(call: &Call<'_>) -> NtStatus {
+/// client (the token captured when it connected).
+pub(super) fn impersonate_pipe_client(end: &super::super::pipe::PipeEnd) -> NtStatus {
     let Some(me) = thread::current() else { return NtStatus::INVALID_HANDLE };
     let ObjectBody::Thread(t) = &me.body else { return NtStatus::INVALID_HANDLE };
-    let primary = call.process.token.lock().clone();
-    let Some(p) = token_of(&primary) else { return NtStatus::NO_TOKEN };
-    let copy = tri!(p.duplicate(TokenType::Impersonation(SECURITY_IMPERSONATION), false));
-    let Ok(copy) = KObject::new(ObjectBody::Token(copy)) else { return NtStatus::NO_MEMORY };
-    *t.impersonation.lock() = Some(copy);
+    let Some(client) = end.client_token() else { return NtStatus::CANNOT_IMPERSONATE };
+    *t.impersonation.lock() = Some(client);
     NtStatus::SUCCESS
 }
 
@@ -383,4 +402,26 @@ pub(super) fn gala_logon_user(call: &mut Call<'_>) -> NtStatus {
     let data = tri!(super::super::accounts::logon(&user, &domain, &password, kind));
     let object = tri!(token::object(data));
     call.return_handle(out, object, token::TOKEN_ALL_ACCESS, 0)
+}
+
+/// The token handle `h` given to process creation (CreateProcessAsUserW),
+/// checked: TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, a primary
+/// token (STATUS_BAD_TOKEN_TYPE), one the caller may assign
+/// (STATUS_PRIVILEGE_NOT_HELD).
+pub(super) fn token_for_process(
+    call: &Call<'_>,
+    h: u64,
+    caller: &ObjectRef,
+) -> Result<ObjectRef, NtStatus> {
+    let object = call.token(h, TOKEN_QUERY | TOKEN_DUPLICATE | token::TOKEN_ASSIGN_PRIMARY)?;
+    let (Some(t), Some(c)) = (token_of(&object), token_of(caller)) else {
+        return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+    };
+    if t.data.lock().level().is_some() {
+        return Err(NtStatus::BAD_TOKEN_TYPE);
+    }
+    if !t.may_assign(c) {
+        return Err(NtStatus::PRIVILEGE_NOT_HELD);
+    }
+    Ok(object)
 }

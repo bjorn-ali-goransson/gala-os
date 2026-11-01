@@ -1169,8 +1169,19 @@ Windows, never shadows the system's DLLs.)
   creator's for the processes programs create. A thread may hold an
   impersonation token (`NtThread::impersonation`: NtSetInformationThread
   ThreadImpersonationToken, which takes impersonation tokens only, and
-  FSCTL_PIPE_IMPERSONATE, which gives the caller a copy of its own
-  process token until pipes record their client: TODO(S4)). Services
+  FSCTL_PIPE_IMPERSONATE, which gives the server the client's token: a
+  copy of the client's effective token at impersonation level, captured
+  when it connected). Tokens carry their lineage (`Token::origin`: the
+  logon token they derive from by duplication, filtering or a new
+  process's copy); process creation with a token (GalaCreateProcess flag
+  16, kernel32's CreateProcessAsUserW, advapi32's forwarding to it) needs
+  TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, a primary token
+  (STATUS_BAD_TOKEN_TYPE) and either the caller's own lineage (a
+  restricted or duplicated version of its token) or an enabled
+  SeAssignPrimaryTokenPrivilege (STATUS_PRIVILEGE_NOT_HELD), as
+  CreateProcessAsUser documents. userenv's GetUserProfileDirectoryW: the
+  caller's own user's is %USERPROFILE%, another local user's
+  C:\Users\<name> (profiles are not created yet: LoadUserProfileW, TODO). Services
   (gala numbers 0x7f16-0x7f1e until verified): NtOpenProcessToken(Ex),
   NtOpenThreadToken(Ex) (STATUS_NO_TOKEN), NtQueryInformationToken (the
   TOKEN_* layouts with pointers into the caller's buffer;

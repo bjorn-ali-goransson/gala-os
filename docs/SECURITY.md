@@ -4,7 +4,10 @@ Status: phases S1 (tokens in the kernel; `token_test`, ARCHITECTURE
 "Access tokens"), S2 (descriptors kept; `security_test`, ARCHITECTURE
 "Security descriptors") and S3 (enforcement at open for files, keys and
 named objects, a second account; `access_test`, ARCHITECTURE "Access
-checks", "Accounts and logon") are done (2026-11-01); S4-S5 are design. Before S1, gala had the handle half of NT
+checks", "Accounts and logon") are done (2026-11-01); S4 is begun
+(`logon_test`: CreateProcessAsUserW's token rules, pipes impersonating
+their client's token, GetUserProfileDirectoryW); S4's LSA logons, a
+SYSTEM account for services and profiles, and S5, are design. Before S1, gala had the handle half of NT
 security (each handle carries a granted access mask, mapped through the
 object type's generic mapping, and services check it), and descriptions
 of security data in user mode: advapi32 builds and reads SIDs, ACLs and
