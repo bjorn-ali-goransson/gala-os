@@ -1,4 +1,5 @@
-//! Exports SQL Server LocalDB imports that gala does not implement yet:
+//! Exports programs import that gala does not implement yet (SQL Server
+//! LocalDB's, MinGit's, the MSYS2 runtime's):
 //! calling one reports `ntdll.dll!function` to the ledger and ends the
 //! process. ntdll cannot use `gala_stubs` (it would import itself), so the
 //! same stubs are made here, in the same `.gstub` section (which
@@ -33,4 +34,22 @@ unimplemented_exports!(
     RtlIpv4AddressToStringExW
     RtlIpv4StringToAddressExW
     RtlIpv6StringToAddressExW
+    NtAccessCheck
+    NtCommitTransaction
+    NtCreateTransaction
+    NtLockVirtualMemory
+    NtOpenJobObject
+    NtQueryEaFile
+    NtQueryQuotaInformationFile
+    NtRollbackTransaction
+    NtSetQuotaInformationFile
+    NtSetVolumeInformationFile
+    NtUnlockVirtualMemory
+    RtlCheckRegistryKey
+    RtlCreateQueryDebugBuffer
+    RtlDestroyQueryDebugBuffer
+    RtlGetCurrentTransaction
+    RtlQueryProcessDebugInformation
+    RtlQueryRegistryValues
+    RtlSetCurrentTransaction
 );

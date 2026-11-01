@@ -1142,6 +1142,17 @@ Windows, never shadows the system's DLLs.)
   BSTR/interface/VARIANT elements owned), VarCyFromDec; type libraries
   are not registered. Its exports have Windows' ordinals (build.rs, from
   Wine's spec); Get/Set/CreateErrorInfo forward to ole32.
+- **ntdll's run-time library** (testntdll rtl.rs; for the MSYS2
+  runtime, which calls ntdll directly): counted strings (init, compare,
+  prefix, copy, append, upcase/downcase, to ANSI as UTF-8; ASCII case
+  folding), SIDs, ACLs, absolute and self-relative security descriptors
+  (a self-relative copy takes the whole AclSize, as Windows'),
+  RtlSetCurrentDirectory_U, NtQueryTimerResolution, and the critical
+  sections: kernel32's Enter/LeaveCriticalSection now call ntdll's
+  RtlEnter/LeaveCriticalSection (one implementation, so a section works
+  whichever DLL a program uses). NtCreateDirectoryObject (gala's number
+  0x7f24) makes object directories (Cygwin keeps its shared objects in
+  one). Tested by `rtl_test`.
 - **Console** (kernel32 console.rs): the standard handles are the serial
   line, a character device that is not a console (as redirected output:
   FILE_TYPE_CHAR, GetConsoleMode fails); the console itself is CONOUT$ /

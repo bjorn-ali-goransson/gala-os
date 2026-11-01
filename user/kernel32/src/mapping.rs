@@ -256,6 +256,48 @@ pub extern "system" fn VirtualProtect(
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 
+/// VirtualProtectEx(process, ...): VirtualProtect in another process
+/// (PROCESS_VM_OPERATION) or this one.
+#[unsafe(no_mangle)]
+pub extern "system" fn VirtualProtectEx(
+    process: Handle,
+    address: *mut c_void,
+    size: usize,
+    protect: u32,
+    old: *mut u32,
+) -> Bool {
+    let (mut base, mut len) = (address, size);
+    // SAFETY: valid in/out pointers; `old` is the caller's.
+    let status =
+        unsafe { NtProtectVirtualMemory(process as isize, &mut base, &mut len, protect, old) };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+/// QueryUnbiasedInterruptTime: KUSER_SHARED_DATA's InterruptTime (100 ns
+/// since boot; gala does not sleep, so biased and unbiased agree).
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryUnbiasedInterruptTime(time: *mut u64) -> Bool {
+    const KUSER: usize = 0x7ffe_0000;
+    // SAFETY: KUSER_SHARED_DATA is mapped read-only in every process; a
+    // KSYSTEM_TIME (Low, High1, High2) read until the highs agree.
+    let t = unsafe {
+        loop {
+            let high1 = core::ptr::read_volatile((KUSER + 0x0c) as *const u32);
+            let low = core::ptr::read_volatile((KUSER + 0x08) as *const u32);
+            let high2 = core::ptr::read_volatile((KUSER + 0x10) as *const u32);
+            if high1 == high2 {
+                break u64::from(high1) << 32 | u64::from(low);
+            }
+        }
+    };
+    if time.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's output.
+    unsafe { *time = t };
+    TRUE
+}
+
 /// GetSystemTimePreciseAsFileTime: the system time has the clock's full
 /// precision here already.
 #[unsafe(no_mangle)]

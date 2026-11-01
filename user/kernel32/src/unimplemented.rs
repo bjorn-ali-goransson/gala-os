@@ -73,4 +73,38 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     WriteConsoleOutputA
     WriteProcessMemory
     WriteTapemark
+    AllocConsole
+    AttachConsole
+    ClearCommBreak
+    ClearCommError
+    CopyFileA
+    CreateDirectoryExA
+    CreateTapePartition
+    EraseTape
+    EscapeCommFunction
+    FoldStringW
+    GetBinaryTypeW
+    GetCommModemStatus
+    GetCommState
+    GetConsoleProcessList
+    GetCurrentConsoleFontEx
+    GetLogicalDriveStringsA
+    GetNamedPipeClientProcessId
+    GetNumberOfConsoleMouseButtons
+    IdnToAscii
+    IdnToUnicode
+    IsBadStringPtrA
+    PrefetchVirtualMemory
+    PurgeComm
+    ReadConsoleOutputW
+    ScrollConsoleScreenBufferW
+    SetCommBreak
+    SetCommMask
+    SetCommState
+    SetCommTimeouts
+    SetComputerNameExW
+    TransmitCommChar
+    WaitCommEvent
+    WriteConsoleInputW
+    WriteConsoleOutputW
 );

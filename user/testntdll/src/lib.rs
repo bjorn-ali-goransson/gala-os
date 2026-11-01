@@ -16,6 +16,7 @@
 #![allow(non_snake_case, non_upper_case_globals)]
 
 mod heap;
+mod rtl;
 mod seh;
 mod tls;
 mod unimplemented;
@@ -251,6 +252,10 @@ syscall_stubs! {
     NtQueryPerformanceCounter = 0x31, fn(counter: *mut i64, frequency: *mut i64);
     NtDelayExecution = 0x34, fn(alertable: u8, interval: *const i64);
     NtOpenEvent = 0x40, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
+    NtQueryEvent = 0x56, fn(h: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32);
+    NtOpenDirectoryObject = 0x58, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
+    // gala's number, UNVERIFIED.
+    NtCreateDirectoryObject = 0x7f24, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtClearEvent = 0x3e, fn(h: usize);
     NtQuerySystemTime = 0x5a, fn(time: *mut i64);
     NtCreateEvent = 0x48, fn(

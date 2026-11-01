@@ -3,7 +3,7 @@
 //! to `\BaseNamedObjects`), and critical sections.
 
 use super::*;
-use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -257,32 +257,26 @@ pub extern "system" fn ReleaseMutex(h: Handle) -> Bool {
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 
-/// RTL_CRITICAL_SECTION (x64, 40 bytes): DebugInfo, LockCount (-1 when
-/// free), RecursionCount, OwningThread, LockSemaphore, SpinCount. gala's
-/// version spins and yields while the lock is taken (no kernel wait).
+/// RTL_CRITICAL_SECTION (x64, 40 bytes): ntdll's (RtlEnterCriticalSection
+/// and friends), so sections work whichever DLL a program calls.
 #[repr(C)]
 pub struct CriticalSection {
-    debug_info: usize,
-    lock_count: AtomicI32,
-    recursion: i32,
-    owner: AtomicUsize,
-    semaphore: usize,
-    spin_count: usize,
+    words: [usize; 5],
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RtlInitializeCriticalSection(cs: *mut CriticalSection) -> u32;
+    fn RtlDeleteCriticalSection(cs: *mut CriticalSection) -> u32;
+    fn RtlEnterCriticalSection(cs: *mut CriticalSection) -> u32;
+    fn RtlTryEnterCriticalSection(cs: *mut CriticalSection) -> u8;
+    fn RtlLeaveCriticalSection(cs: *mut CriticalSection) -> u32;
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn InitializeCriticalSection(cs: *mut CriticalSection) {
     // SAFETY: the caller's CRITICAL_SECTION.
-    unsafe {
-        cs.write(CriticalSection {
-            debug_info: 0,
-            lock_count: AtomicI32::new(-1),
-            recursion: 0,
-            owner: AtomicUsize::new(0),
-            semaphore: 0,
-            spin_count: 0,
-        })
-    };
+    unsafe { RtlInitializeCriticalSection(cs) };
 }
 
 #[unsafe(no_mangle)]
@@ -295,57 +289,27 @@ pub extern "system" fn InitializeCriticalSectionAndSpinCount(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn DeleteCriticalSection(_cs: *mut CriticalSection) {}
+pub extern "system" fn DeleteCriticalSection(cs: *mut CriticalSection) {
+    // SAFETY: the caller's CRITICAL_SECTION.
+    unsafe { RtlDeleteCriticalSection(cs) };
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn EnterCriticalSection(cs: *mut CriticalSection) {
-    let me = GetCurrentThreadId() as usize;
-    // SAFETY: an initialized CRITICAL_SECTION; recursion is only touched
-    // by the owner.
-    let cs = unsafe { &mut *cs };
-    if cs.owner.load(Ordering::Acquire) == me {
-        cs.recursion += 1;
-        return;
-    }
-    let mut spins = 0u32;
-    while cs.lock_count.compare_exchange(-1, 0, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        spins += 1;
-        if spins < 100 {
-            core::hint::spin_loop();
-        } else {
-            SwitchToThread();
-        }
-    }
-    cs.owner.store(me, Ordering::Release);
-    cs.recursion = 1;
+    // SAFETY: an initialized CRITICAL_SECTION.
+    unsafe { RtlEnterCriticalSection(cs) };
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn TryEnterCriticalSection(cs: *mut CriticalSection) -> Bool {
-    let me = GetCurrentThreadId() as usize;
-    // SAFETY: as in EnterCriticalSection.
-    let cs = unsafe { &mut *cs };
-    if cs.owner.load(Ordering::Acquire) == me {
-        cs.recursion += 1;
-        return TRUE;
-    }
-    if cs.lock_count.compare_exchange(-1, 0, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        return FALSE;
-    }
-    cs.owner.store(me, Ordering::Release);
-    cs.recursion = 1;
-    TRUE
+    // SAFETY: an initialized CRITICAL_SECTION.
+    Bool::from(unsafe { RtlTryEnterCriticalSection(cs) } != 0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn LeaveCriticalSection(cs: *mut CriticalSection) {
     // SAFETY: called by the owner.
-    let cs = unsafe { &mut *cs };
-    cs.recursion -= 1;
-    if cs.recursion == 0 {
-        cs.owner.store(0, Ordering::Release);
-        cs.lock_count.store(-1, Ordering::Release);
-    }
+    unsafe { RtlLeaveCriticalSection(cs) };
 }
 
 // --- Semaphores ----------------------------------------------------------
@@ -564,8 +528,9 @@ pub extern "system" fn SleepConditionVariableCS(
     ms: u32,
 ) -> Bool {
     let seen = srw(cv).load(Ordering::Acquire);
-    // SAFETY: the caller owns the critical section.
-    let depth = unsafe { (*cs).recursion };
+    // SAFETY: the caller owns the critical section; RecursionCount is
+    // the 32-bit field at offset 12.
+    let depth = unsafe { cs.cast::<i32>().add(3).read() };
     for _ in 0..depth {
         LeaveCriticalSection(cs);
     }

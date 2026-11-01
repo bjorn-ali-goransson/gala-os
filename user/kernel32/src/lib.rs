@@ -2710,6 +2710,15 @@ pub extern "system" fn CreateThread(
 
 /// ExitThread. TODO: DLL_THREAD_DETACH notifications; the stack is not
 /// freed (Windows frees it).
+/// TerminateThread(thread, code): ends another thread (or this one) at
+/// once with `code`, without its DLL notifications.
+#[unsafe(no_mangle)]
+pub extern "system" fn TerminateThread(thread: Handle, code: u32) -> Bool {
+    // SAFETY: the kernel checks the handle.
+    let status = unsafe { NtTerminateThread(thread as isize, code) };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn ExitThread(code: u32) -> ! {
     fls_thread_exit();

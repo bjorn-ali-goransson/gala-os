@@ -356,6 +356,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_thread_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_sync_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_locale_test", "ntdll.dll", "Windows/System32"),
+    ("rtl_test", "ntdll.dll", "Windows/System32"),
+    ("rtl_test", "kernel32.dll", "Windows/System32"),
     ("disk_test", "ntdll.dll", "Windows/System32"),
     ("disk_test", "kernel32.dll", "Windows/System32"),
     ("disk_test", "advapi32.dll", "Windows/System32"),
@@ -1336,6 +1338,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_sync_test",
     "kernel32_locale_test",
     "disk_test",
+    "rtl_test",
     "persist_test",
     "kernel32_system_test",
     "kernel32_clr_test",
@@ -2421,6 +2424,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_system_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_system_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // ntdll's run-time library and the calls Git Bash's msys-2.0.dll
+        // imports.
+        name: "rtl_test",
+        cmdline: "qemu_exit run=rtl_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["rtl_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // D1: raw sector I/O on a virtio-blk disk (DISK_SCENARIOS attaches

@@ -93,6 +93,8 @@ pub const GALA_LOGON_USER: u32 = 0x7f21;
 pub const NT_ALLOCATE_LOCALLY_UNIQUE_ID: u32 = 0x7f22;
 /// NtSetInformationToken: gala's number until verified.
 pub const NT_SET_INFORMATION_TOKEN: u32 = 0x7f23;
+/// NtCreateDirectoryObject: gala's number, UNVERIFIED.
+pub const NT_CREATE_DIRECTORY_OBJECT: u32 = 0x7f24;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -253,6 +255,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_FS_CONTROL_FILE, "NtFsControlFile", 10, nt_fs_control_file),
     (NT_OPEN_EVENT, "NtOpenEvent", 3, nt_open_event),
     (NT_OPEN_DIRECTORY_OBJECT, "NtOpenDirectoryObject", 3, nt_open_directory_object),
+    (NT_CREATE_DIRECTORY_OBJECT, "NtCreateDirectoryObject", 3, nt_create_directory_object),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1197,6 +1200,16 @@ fn nt_open_directory_object(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), |o| o.as_directory().is_some()));
     call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+}
+
+/// NtCreateDirectoryObject(*DirectoryHandle, DesiredAccess,
+///   ObjectAttributes): a new object directory (gone with its last handle);
+/// an existing name is STATUS_OBJECT_NAME_COLLISION unless OBJ_OPENIF.
+fn nt_create_directory_object(call: &mut Call<'_>) -> NtStatus {
+    let (out, access, attrs_ptr) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
+    let directory = ObjectBody::Directory(super::object::Directory::default());
+    let Ok(object) = KObject::new(directory) else { return NtStatus::NO_MEMORY };
+    create_object(call, out, access, attrs_ptr, object, |o| o.as_directory().is_some())
 }
 
 const OBJECT_BASIC_INFORMATION: u64 = 0;

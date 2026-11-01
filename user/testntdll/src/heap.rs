@@ -343,7 +343,7 @@ pub extern "system" fn RtlCompactHeap(h: *mut u8, _flags: u32) -> usize {
 }
 
 /// PEB.ProcessHeap.
-fn process_heap() -> *mut u8 {
+pub(crate) fn process_heap() -> *mut u8 {
     // SAFETY: gs:[0x60] is the PEB; ProcessHeap is at +0x30.
     unsafe {
         let peb: usize;
