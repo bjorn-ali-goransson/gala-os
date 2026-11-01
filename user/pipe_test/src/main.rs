@@ -35,7 +35,10 @@
 //!   leaves the port alone for a read that completes at once.
 //! - the ANSI CreateNamedPipeA and CreateFileA, as Win32-OpenSSH's pipe()
 //!   uses them: an overlapped duplex pipe whose ends are pipes (GetFileType)
-//!   and inheritable.
+//!   and inheritable; a read pending on its server end fails with
+//!   ERROR_BROKEN_PIPE once every copy of the client end (DuplicateHandle)
+//!   is closed without writing (and ReadFileEx's completion routine runs
+//!   with that error).
 //!
 //! Prints `pipe_test: ok` or exits with the number of the failing check.
 
@@ -43,6 +46,7 @@
 #![no_main]
 
 use core::ffi::c_void;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -141,6 +145,24 @@ unsafe extern "system" {
         name: *const u16,
     ) -> Handle;
     fn GetOverlappedResult(h: Handle, ov: *mut Overlapped, n: *mut u32, wait: Bool) -> Bool;
+    fn GetCurrentProcess() -> Handle;
+    fn SleepEx(ms: u32, alertable: Bool) -> u32;
+    fn ReadFileEx(
+        h: Handle,
+        buf: *mut u8,
+        len: u32,
+        ov: *mut Overlapped,
+        routine: extern "system" fn(u32, u32, *mut Overlapped),
+    ) -> Bool;
+    fn DuplicateHandle(
+        source_process: Handle,
+        source: Handle,
+        target_process: Handle,
+        target: *mut Handle,
+        access: u32,
+        inherit: Bool,
+        options: u32,
+    ) -> Bool;
     fn SetFileCompletionNotificationModes(h: Handle, flags: u8) -> i32;
     fn CreateIoCompletionPort(file: Handle, port: Handle, key: usize, threads: u32) -> Handle;
     fn GetQueuedCompletionStatus(
@@ -617,10 +639,78 @@ fn run() -> Result<(), u32> {
         c.eq(GetFileType(client).into(), 3)?;
         c.ok(GetHandleInformation(client, &mut flags) != 0, GetLastError().into())?;
         c.eq((flags & HANDLE_FLAG_INHERIT).into(), HANDLE_FLAG_INHERIT.into())?;
-        CloseHandle(client);
+        // A read pending on the server end ends with ERROR_BROKEN_PIPE once
+        // every copy of the client end is closed, nothing written (a
+        // child's unused stderr, as sshd-session hands it out).
+        let mut copy = core::ptr::null_mut();
+        c.ok(
+            DuplicateHandle(GetCurrentProcess(), client, GetCurrentProcess(), &mut copy, 0, 1, 2)
+                != 0,
+            GetLastError().into(),
+        )?;
+        c.ok(CloseHandle(client) != 0, 0)?;
+        let event = CreateEventW(core::ptr::null(), 1, 0, core::ptr::null());
+        let mut ov = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event };
+        let mut buf = [0u8; 16];
+        let mut got = 0;
+        let r = ReadFile(server, buf.as_mut_ptr(), 16, &mut got, (&raw mut ov).cast());
+        c.ok(r == 0 && GetLastError() == ERROR_IO_PENDING, GetLastError().into())?;
+        c.ok(CloseHandle(copy) != 0, 0)?;
+        c.eq(GetOverlappedResult(server, &mut ov, &mut got, 1) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_BROKEN_PIPE.into())?;
+        CloseHandle(ov.event);
+        CloseHandle(server);
+
+        // The same with ReadFileEx: its completion routine runs (in an
+        // alertable wait) with ERROR_BROKEN_PIPE.
+        let name = b"\\\\.\\Pipe\\W32PosixPipe.00000001.00000003\0";
+        let server = CreateNamedPipeA(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            0,
+            1,
+            4096,
+            4096,
+            0,
+            &inherit,
+        );
+        let client = CreateFileA(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            &inherit,
+            OPEN_EXISTING,
+            0x80 | FILE_FLAG_OVERLAPPED,
+            core::ptr::null_mut(),
+        );
+        c.ok(server as isize != -1 && client as isize != -1, GetLastError().into())?;
+        let mut ov = Overlapped {
+            internal: 0,
+            internal_high: 0,
+            offset: 0,
+            offset_high: 0,
+            event: core::ptr::null_mut(),
+        };
+        c.ok(
+            ReadFileEx(server, buf.as_mut_ptr(), 16, &mut ov, read_done) != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(SleepEx(0, 1).into(), 0)?; // nothing yet
+        c.ok(CloseHandle(client) != 0, 0)?;
+        c.eq(SleepEx(5000, 1).into(), WAIT_IO_COMPLETION.into())?;
+        c.eq(READ_DONE_ERROR.load(Ordering::SeqCst).into(), ERROR_BROKEN_PIPE.into())?;
         CloseHandle(server);
     }
     Ok(())
+}
+
+static READ_DONE_ERROR: AtomicU32 = AtomicU32::new(0);
+const WAIT_IO_COMPLETION: u32 = 0xc0;
+
+/// ReadFileEx's completion routine: (dwErrorCode, dwNumberOfBytesTransfered,
+/// lpOverlapped).
+extern "system" fn read_done(error: u32, _bytes: u32, _ov: *mut Overlapped) {
+    READ_DONE_ERROR.store(error, Ordering::SeqCst);
 }
 
 #[unsafe(no_mangle)]

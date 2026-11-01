@@ -3,13 +3,11 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("advapi32.dll":
-    AllocateLocallyUniqueId
     ChangeServiceConfigA
     ChangeServiceConfigW
     CloseServiceHandle
     ControlService
     ControlTraceW
-    ConvertSidToStringSidA
     CryptContextAddRef
     CryptImportKey
     CryptSetProvParam
@@ -20,9 +18,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     GetSidLengthRequired
     LockServiceDatabase
     LogonUserExW
-    LsaAddAccountRights
-    LsaClose
-    LsaOpenPolicy
     OpenSCManagerA
     OpenSCManagerW
     OpenServiceA

@@ -4,7 +4,8 @@
 //!
 //! - SIDs: AllocateAndInitializeSid (BUILTIN\Administrators, S-1-5-32-544),
 //!   GetLengthSid, IsValidSid, CopySid (ERROR_INSUFFICIENT_BUFFER when
-//!   short), EqualSid, ConvertSidToStringSidW, FreeSid;
+//!   short), EqualSid, ConvertSidToStringSidW (and A), FreeSid,
+//!   AllocateLocallyUniqueId (distinct LUIDs);
 //!   LookupAccountSidW (names, domains, SID_NAME_USE, size queries).
 //! - ACLs: InitializeAcl, AddAccessAllowedAce (ERROR_ALLOTTED_SPACE_EXCEEDED
 //!   when full), AddAce, GetAce, GetAclInformation (revision, sizes).
@@ -198,6 +199,8 @@ unsafe extern "system" {
     fn CopySid(len: u32, dst: *mut u8, src: *const u8) -> Bool;
     fn EqualSid(a: *const u8, b: *const u8) -> Bool;
     fn ConvertSidToStringSidW(sid: *const u8, out: *mut *mut u16) -> Bool;
+    fn AllocateLocallyUniqueId(luid: *mut u64) -> Bool;
+    fn ConvertSidToStringSidA(sid: *const u8, out: *mut *mut u8) -> Bool;
     fn LookupAccountSidW(
         system: *const u16,
         sid: *const u8,
@@ -508,6 +511,15 @@ fn sids(c: &mut Checks) -> Result<(), u32> {
         c.ok(ConvertSidToStringSidW(sid, &mut text) != 0, GetLastError().into())?;
         c.text(text, "S-1-5-32-544")?;
         LocalFree(text.cast());
+        // AllocateLocallyUniqueId: new, distinct LUIDs.
+        let (mut l1, mut l2) = (0u64, 0u64);
+        c.ok(AllocateLocallyUniqueId(&mut l1) != 0 && AllocateLocallyUniqueId(&mut l2) != 0, 0)?;
+        c.ok(l1 != 0 && l2 != 0 && l1 != l2, l1)?;
+        let mut ansi = core::ptr::null_mut::<u8>();
+        c.ok(ConvertSidToStringSidA(sid, &mut ansi) != 0, GetLastError().into())?;
+        let want = b"S-1-5-32-544\0";
+        c.ok((0..want.len()).all(|i| *ansi.add(i) == want[i]), 0)?;
+        LocalFree(ansi.cast());
 
         // Names: a size query first.
         let (mut name, mut domain) = ([0u16; 32], [0u16; 32]);

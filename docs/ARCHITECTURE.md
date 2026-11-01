@@ -1319,9 +1319,36 @@ Windows, never shadows the system's DLLs.)
   MSV1_0_INTERACTIVE_LOGON (string buffers as addresses or offsets into
   the block; a zeroed MSV1_0_INTERACTIVE_PROFILE as the profile buffer,
   LsaFreeReturnBuffer frees it; the logon id from TokenStatistics),
-  LsaDeregisterLogonProcess; advapi32's LsaNtStatusToWinError and
-  LsaManageSidNameMapping (accepted, not kept). There is no LSA process:
-  handles are tags. advapi32's LookupAccountNameW/LookupAccountSidW know
+  LsaDeregisterLogonProcess; advapi32's LsaNtStatusToWinError. There is
+  no LSA process: LSA handles are tags (a policy handle is a small
+  LocalAlloc'd record of its granted access).
+  **Virtual accounts** (sshd's privilege-separation child runs as
+  `VIRTUAL USERS\sshd_<pid>`, S-1-5-111-...): advapi32's policy.rs keeps
+  LsaManageSidNameMapping's mappings (needs SeTcbPrivilege; a domain,
+  then accounts whose SIDs extend the domain's; NameCollision,
+  SidCollision, DomainNotFound, DomainSidPrefixMismatch,
+  MappingNotFound in an LSA_SID_NAME_MAPPING_OPERATION_GENERIC_OUTPUT)
+  under `HKLM\SAM\Gala\Mappings\<domain>[\<account>]` (value `Sid`),
+  and account rights (LsaAddAccountRights, LsaRemoveAccountRights,
+  LsaEnumerateAccountRights; privilege and logon-right names) as values
+  of `HKLM\SAM\Gala\Rights\<SID text>`. LsaOpenPolicy grants access
+  beyond lookups and viewing only to callers who may write
+  `HKLM\SAM\Gala` (Administrators, SYSTEM). LookupAccountSidW finds
+  mapped names (SidTypeDomain for a domain, SidTypeUser for an account).
+  LogonUserExExW with LOGON32_PROVIDER_VIRTUAL passes LogonType |
+  0x4000_0000 to GalaLogonUser: the kernel's `accounts::virtual_logon`
+  (SeTcbPrivilege; a service logon, empty password) reads the mapping and
+  requires SeServiceLogonRight among the SID's rights
+  (STATUS_LOGON_TYPE_NOT_GRANTED, ERROR_LOGON_TYPE_NOT_GRANTED); the token
+  is the standard user's groups with SERVICE. NtAllocateLocallyUniqueId
+  (gala's number 0x7f22 until verified) hands out LUIDs from the token
+  LUID counter.
+  **Boot profiles**: after the boot modules are in place,
+  `accounts::assign_boot_profiles` gives every ProfileList entry's
+  C:\Users\<name> directory that the boot made, and everything in it,
+  a profile's descriptor (owner the user; full control for the user,
+  SYSTEM and Administrators, inherited), so its files are the user's
+  (sshd refuses an authorized_keys others may write). advapi32's LookupAccountNameW/LookupAccountSidW know
   the accounts in that key (domain GALA, SidTypeUser), and LocalSystem
   is a SidTypeUser account (Win32-OpenSSH accepts only user accounts and
   runs as SYSTEM on Windows); GetUserNameA/W and secur32's GetUserNameExW
@@ -1689,6 +1716,10 @@ Internal/InternalHigh) and the endpoint's I/O completion port.
   posted to the port, unless the endpoint has
   FILE_SKIP_COMPLETION_PORT_ON_SUCCESS (what Go asks for, after
   WSAEnumProtocols reports XP1_IFS_HANDLES).
+- Completion routines of requests that pended run whatever the status
+  (notify::complete_count: ReadFileEx on a pipe gets ERROR_BROKEN_PIPE
+  when the other end closes, a cancelled one ERROR_OPERATION_ABORTED);
+  only a request that fails in its call queues none.
 - An ApcRoutine (WSARecv/WSASend's lpCompletionRoutine) is queued as a
   user APC to the calling thread when the request completes, at once or
   later, with (ApcContext, IoStatusBlock); such a request posts no packet

@@ -596,6 +596,72 @@ pub extern "system" fn LogonUserW(
     result(unsafe { GalaLogonUser(&u, &d, &p, kind, token) })
 }
 
+/// LogonUserExExW(lpszUsername, lpszDomain, lpszPassword, dwLogonType,
+/// dwLogonProvider, pTokenGroups, *phToken, *ppLogonSid,
+/// *ppProfileBuffer, *pdwProfileLength, pQuotaLimits): LogonUserW, and
+/// LOGON32_PROVIDER_VIRTUAL's virtual accounts (a name mapped with
+/// LsaManageSidNameMapping, a service logon, no password; it needs
+/// SeTcbPrivilege and the account's SeServiceLogonRight). The logon SID
+/// comes back in LocalAlloc'd memory; there is no profile buffer.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn LogonUserExExW(
+    user: *const u16,
+    domain: *const u16,
+    password: *const u16,
+    kind: u32,
+    provider: u32,
+    groups: *const c_void,
+    token: *mut usize,
+    logon_sid: *mut *mut u8,
+    profile: *mut *mut c_void,
+    profile_length: *mut u32,
+    _quotas: *mut c_void,
+) -> i32 {
+    /// LOGON32_PROVIDER_VIRTUAL, and GalaLogonUser's flag for it.
+    const PROVIDER_VIRTUAL: u32 = 4;
+    const GALA_LOGON_VIRTUAL: u32 = 0x4000_0000;
+    if !groups.is_null() {
+        super::missing(b"advapi32.dll!LogonUserExExW(groups)");
+    }
+    let kind = if provider == PROVIDER_VIRTUAL { kind | GALA_LOGON_VIRTUAL } else { kind };
+    let mut h = 0;
+    if LogonUserW(user, domain, password, kind, provider, &mut h) == 0 {
+        return 0;
+    }
+    // SAFETY: the caller's outputs.
+    unsafe {
+        if !profile.is_null() {
+            *profile = core::ptr::null_mut();
+        }
+        if !profile_length.is_null() {
+            *profile_length = 0;
+        }
+        if !logon_sid.is_null() {
+            *logon_sid = core::ptr::null_mut();
+            if let Ok(groups) = query_alloc(h, 2) {
+                // TOKEN_GROUPS: the logon SID has SE_GROUP_LOGON_ID.
+                let count = groups.cast::<u32>().read() as usize;
+                for i in 0..count {
+                    let e = groups.add(8 + 16 * i);
+                    let sid = e.cast::<*const u8>().read();
+                    if e.add(8).cast::<u32>().read() & 0xc000_0000 == 0xc000_0000 {
+                        let len = 8 + 4 * usize::from(*sid.add(1));
+                        let copy = LocalAlloc(0, len);
+                        if !copy.is_null() {
+                            core::ptr::copy_nonoverlapping(sid, copy, len);
+                            *logon_sid = copy;
+                        }
+                    }
+                }
+                LocalFree(groups.cast());
+            }
+        }
+        *token = h;
+    }
+    1
+}
+
 /// ImpersonateLoggedOnUser(hToken): the calling thread impersonates the
 /// token's user (a primary token is duplicated at impersonation level).
 #[unsafe(no_mangle)]
@@ -687,26 +753,20 @@ pub extern "system" fn CreateProcessAsUserW(
     )
 }
 
+/// AllocateLocallyUniqueId(*Luid): NtAllocateLocallyUniqueId.
+#[unsafe(no_mangle)]
+pub extern "system" fn AllocateLocallyUniqueId(luid: *mut u64) -> i32 {
+    #[link(name = "ntdll", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn NtAllocateLocallyUniqueId(luid: *mut u64) -> u32;
+    }
+    // SAFETY: the caller's output.
+    result(unsafe { NtAllocateLocallyUniqueId(luid) })
+}
+
 /// LsaNtStatusToWinError(Status): RtlNtStatusToDosError.
 #[unsafe(no_mangle)]
 pub extern "system" fn LsaNtStatusToWinError(status: u32) -> u32 {
     // SAFETY: a plain call.
     unsafe { RtlNtStatusToDosError(status) }
-}
-
-/// LsaManageSidNameMapping(OpType, OpInput, *OpOutput): adding or removing
-/// a SID-to-name mapping (sshd names its virtual accounts this way). gala
-/// keeps none: accepted (recorded), no output.
-#[unsafe(no_mangle)]
-pub extern "system" fn LsaManageSidNameMapping(
-    _operation: u32,
-    _input: *const c_void,
-    output: *mut *mut c_void,
-) -> u32 {
-    super::missing(b"advapi32.dll!LsaManageSidNameMapping(not kept)");
-    if !output.is_null() {
-        // SAFETY: the caller's output.
-        unsafe { *output = core::ptr::null_mut() };
-    }
-    0
 }

@@ -298,6 +298,7 @@ unsafe extern "system" {
         attributes: *const ObjectAttributes,
         kind: u32,
     ) -> u32;
+    fn NtCancelTimer(h: Handle, current: *mut u8) -> u32;
     fn NtSetTimer(
         h: Handle,
         due: *const i64,
@@ -3010,6 +3011,15 @@ pub extern "system" fn SetWaitableTimer(
     let status = unsafe {
         NtSetTimer(h, due, routine, arg, u8::from(resume != 0), period, core::ptr::null_mut())
     };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+/// CancelWaitableTimer: NtCancelTimer (the timer stays as it is, it
+/// just does not fire).
+#[unsafe(no_mangle)]
+pub extern "system" fn CancelWaitableTimer(h: Handle) -> Bool {
+    // SAFETY: a plain call.
+    let status = unsafe { NtCancelTimer(h, core::ptr::null_mut()) };
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 

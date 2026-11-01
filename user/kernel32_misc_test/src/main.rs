@@ -2,7 +2,8 @@
 //! real Windows gives: I/O completion ports (CreateIoCompletionPort,
 //! PostQueuedCompletionStatus, GetQueuedCompletionStatusEx removing
 //! several entries, WAIT_TIMEOUT when empty), waitable timers
-//! (CreateWaitableTimerExW/A/W, SetWaitableTimer with a relative due time),
+//! (CreateWaitableTimerExW/A/W, SetWaitableTimer with a relative due time,
+//! CancelWaitableTimer),
 //! vectored exception and continue handlers (AddVectoredExceptionHandler
 //! sees a breakpoint and continues past it, and RaiseException's record),
 //! RtlPcToFileHeader, and RtlLookupFunctionEntry
@@ -101,6 +102,7 @@ unsafe extern "system" {
         flags: u32,
         access: u32,
     ) -> Handle;
+    fn CancelWaitableTimer(h: Handle) -> Bool;
     fn SetWaitableTimer(
         h: Handle,
         due: *const i64,
@@ -485,6 +487,14 @@ fn run() -> Result<(), u32> {
         CloseHandle(timer);
         let timer = CreateWaitableTimerW(core::ptr::null_mut(), 0, core::ptr::null());
         c.ok(!timer.is_null(), GetLastError().into())?;
+        // CancelWaitableTimer: a set timer that is cancelled never fires.
+        let due = -200_000i64; // 20 ms
+        c.ok(
+            SetWaitableTimer(timer, &due, 0, core::ptr::null_mut(), core::ptr::null_mut(), 0) != 0,
+            0,
+        )?;
+        c.ok(CancelWaitableTimer(timer) != 0, GetLastError().into())?;
+        c.eq(WaitForSingleObject(timer, 300).into(), 0x102)?; // WAIT_TIMEOUT
         CloseHandle(timer);
 
         // Vectored handlers: a breakpoint handled, execution continues.

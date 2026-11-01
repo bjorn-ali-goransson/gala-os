@@ -278,6 +278,10 @@ shows it.
   `git ls-remote --tags`; a sparse, blob-less clone of one directory is
   quick. A program that ends while its children work on needs the boot
   option `wait=all`.
+- **A stub that ends its process** (gala_stubs' "not implemented") is
+  logged at once (`[warn ] <program>: <dll>!<function> not implemented,
+  ending the process`): the ledger is only dumped when the `run=`
+  program ends, which for a service's children may be never.
 - **Which handle is which** in an event stream (`XTASK_EVENTS=all`):
   handle values are reused at once (the lowest free slot), so follow
   NtClose and creation order rather than guessing from the value.

@@ -39,6 +39,7 @@ unsafe extern "system" {
 mod etw;
 mod objsec;
 mod perf;
+mod policy;
 mod registry;
 mod security;
 mod token;

@@ -517,7 +517,15 @@ fn run() -> Result<(), u32> {
         // A receive that has to wait: the routine runs once data came.
         let mut ov_a = Overlapped::new();
         flags = 0;
-        let r = WSARecv(a2, &mut r2, 1, &mut received, &mut flags, &mut ov_a, done as *const () as usize);
+        let r = WSARecv(
+            a2,
+            &mut r2,
+            1,
+            &mut received,
+            &mut flags,
+            &mut ov_a,
+            done as *const () as usize,
+        );
         c.ok(r != 0 && WSAGetLastError() as u32 == ERROR_IO_PENDING, WSAGetLastError() as u64)?;
         c.eq(DONE_COUNT.into(), 0)?;
         let mut sbuf2 = *b"abc";
@@ -534,7 +542,15 @@ fn run() -> Result<(), u32> {
         c.eq(WSASend(c2, &mut s2, 1, &mut bytes, 0, core::ptr::null_mut(), 0) as u64, 0)?;
         Sleep(200);
         let mut ov_b = Overlapped::new();
-        let r = WSARecv(a2, &mut r2, 1, &mut received, &mut flags, &mut ov_b, done as *const () as usize);
+        let r = WSARecv(
+            a2,
+            &mut r2,
+            1,
+            &mut received,
+            &mut flags,
+            &mut ov_b,
+            done as *const () as usize,
+        );
         c.ok(r == 0 && received == 2, WSAGetLastError() as u64)?;
         c.eq(DONE_COUNT.into(), 1)?;
         c.eq(SleepEx(0, 1).into(), WAIT_IO_COMPLETION.into())?;

@@ -1,0 +1,1 @@
+A file the boot put in gala's profile (profile_test checks its descriptor).

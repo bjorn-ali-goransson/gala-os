@@ -165,6 +165,7 @@ syscall_stubs! {
         user: *const UnicodeString, domain: *const UnicodeString,
         password: *const UnicodeString, kind: u32, token: *mut usize
     );
+    NtAllocateLocallyUniqueId = 0x7f22, fn(luid: *mut u64);
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,
@@ -1319,6 +1320,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0077, 1336), // INVALID_ACL -> ERROR_INVALID_ACL
     (0xc000_0079, 1338), // INVALID_SECURITY_DESCR -> ERROR_INVALID_SECURITY_DESCR
     (0xc000_006d, 1326), // LOGON_FAILURE -> ERROR_LOGON_FAILURE
+    (0xc000_015b, 1385), // LOGON_TYPE_NOT_GRANTED -> ERROR_LOGON_TYPE_NOT_GRANTED
     (0xc000_00fe, 1364), // NO_SUCH_PACKAGE -> ERROR_NO_SUCH_PACKAGE
     (0xc000_0035, 183),  // OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS
     (0xc000_0039, 161),  // OBJECT_PATH_INVALID -> ERROR_BAD_PATHNAME

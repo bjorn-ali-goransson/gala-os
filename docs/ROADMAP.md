@@ -967,8 +967,19 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       then it makes the privilege-separation child's virtual account
       (`sshd_<pid>`: LsaManageSidNameMapping, LsaOpenPolicy,
       LsaAddAccountRights, LogonUserExExW with LOGON32_PROVIDER_VIRTUAL,
-      CreateRestrictedToken), and LsaOpenPolicy is missing. Next: virtual
-      accounts, then the login. Open: the JDK's console path (GetConsoleMode succeeding on
+      CreateRestrictedToken). Then: virtual accounts (lsa_test), the
+      users' shell (no cmd.exe: busybox sh through Win32-OpenSSH's
+      DefaultShell, user/sshd/sshd.regseed, which also gives galatest a
+      ProfileList entry), profiles placed at boot belong to their users
+      (profile_test; sshd checks authorized_keys' permissions),
+      ConvertSidToStringSidA, CancelWaitableTimer,
+      AllocateLocallyUniqueId, and completion routines of pended requests
+      that fail (ReadFileEx gets ERROR_BROKEN_PIPE: sshd-session waited
+      for the command's stderr forever). **Done (2026-11-01): the host's
+      ssh logs in to sshd on gala with a key and runs a command**
+      (`sshd_login` passes, about 10 s in the kernel; the boot runs
+      ssh-keygen -A, then sshd -ddd as SYSTEM). Next for sshd: password
+      logins, an interactive shell (a pty: ConPTY), sftp. Open: the JDK's console path (GetConsoleMode succeeding on
       the standard handles made java_http fail intermittently).
       accepting a key-authenticated login from the host (xtask as the
       client).

@@ -17,6 +17,8 @@ use super::token::{self, Group, Sid, TokenData};
 use crate::mm::heap::TryVec;
 
 pub const LOGON_FAILURE: NtStatus = NtStatus(0xc000_006d);
+/// STATUS_LOGON_TYPE_NOT_GRANTED: the account lacks the logon right.
+pub const LOGON_TYPE_NOT_GRANTED: NtStatus = NtStatus(0xc000_015b);
 
 // LOGON32_LOGON_* (LogonUserW's dwLogonType).
 pub const INTERACTIVE: u32 = 2;
@@ -163,7 +165,21 @@ pub fn logon(
     if !local {
         return Err(LOGON_FAILURE);
     }
-    // The logon type's group: INTERACTIVE, NETWORK, BATCH or SERVICE.
+    // The logon type's groups (an unknown type is invalid).
+    let groups = logon_groups(kind)?;
+    let (rid, hash) = account(name)?;
+    if let Some(password) = password
+        && nt_hash(password)? != hash
+    {
+        return Err(LOGON_FAILURE);
+    }
+    TokenData::standard_user(user_sid(rid), token::next_luid(), &groups)
+}
+
+/// The standard user's groups, with the logon type's instead of
+/// INTERACTIVE and without CONSOLE LOGON (not the console session's
+/// logon); LOCAL only for logons on this machine's console or batch.
+fn logon_groups(kind: u32) -> Result<Vec<Group>, NtStatus> {
     let type_sid = match kind {
         INTERACTIVE => Sid::new(5, &[4]),
         NETWORK | NETWORK_CLEARTEXT => Sid::new(5, &[2]),
@@ -171,15 +187,6 @@ pub fn logon(
         SERVICE => Sid::new(5, &[6]),
         _ => return Err(NtStatus::INVALID_PARAMETER),
     };
-    let (rid, hash) = account(name)?;
-    if let Some(password) = password
-        && nt_hash(password)? != hash
-    {
-        return Err(LOGON_FAILURE);
-    }
-    // The standard user's groups, with the logon type's instead of
-    // INTERACTIVE and without CONSOLE LOGON (not the console session's
-    // logon); LOCAL only for logons on this machine's console or batch.
     let mut groups = Vec::new();
     for g in token::GROUPS {
         let console = g.sid == Sid::new(2, &[1]);
@@ -191,7 +198,218 @@ pub fn logon(
         let g = if interactive { Group { sid: type_sid, attributes: g.attributes } } else { g };
         groups.try_push(g).map_err(|_| NtStatus::NO_MEMORY)?;
     }
-    TokenData::standard_user(user_sid(rid), token::next_luid(), &groups)
+    Ok(groups)
+}
+
+/// Appends `text` (ASCII) to `out`.
+fn push_ascii(out: &mut Vec<u16>, text: &str) -> Result<(), NtStatus> {
+    for c in text.encode_utf16() {
+        out.try_push(c).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    Ok(())
+}
+
+/// Appends `v` in decimal to `out`.
+fn push_decimal(out: &mut Vec<u16>, v: u64) -> Result<(), NtStatus> {
+    let mut digits = [0u16; 20];
+    let (mut n, mut v) = (0, v);
+    loop {
+        digits[n] = u16::from(b'0') + (v % 10) as u16;
+        n += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    for &d in digits[..n].iter().rev() {
+        out.try_push(d).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    Ok(())
+}
+
+/// `sid` as text (S-1-5-...), appended to `out`.
+fn push_sid(out: &mut Vec<u16>, sid: &Sid) -> Result<(), NtStatus> {
+    let mut b = [0u8; 68];
+    sid.write(&mut b);
+    let authority = b[2..8].iter().fold(0u64, |a, &x| a << 8 | u64::from(x));
+    push_ascii(out, "S-1-")?;
+    push_decimal(out, authority)?;
+    for i in 0..usize::from(b[1]) {
+        let at = 8 + 4 * i;
+        push_ascii(out, "-")?;
+        push_decimal(out, u64::from(u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])))?;
+    }
+    Ok(())
+}
+
+/// A virtual account's service logon (LogonUserExExW with
+/// LOGON32_PROVIDER_VIRTUAL): `domain\name` must be mapped
+/// (LsaManageSidNameMapping keeps mappings under
+/// `HKLM\SAM\Gala\Mappings`), and the mapped SID must hold
+/// SeServiceLogonRight (`HKLM\SAM\Gala\Rights\<SID>`,
+/// LsaAddAccountRights) or the logon is STATUS_LOGON_TYPE_NOT_GRANTED.
+/// The token: the standard user's groups with SERVICE, no password.
+pub fn virtual_logon(name: &[u16], domain: &[u16], kind: u32) -> Result<TokenData, NtStatus> {
+    if kind != SERVICE {
+        return Err(LOGON_TYPE_NOT_GRANTED);
+    }
+    let separator = u16::from(b'\\');
+    if name.is_empty()
+        || domain.is_empty()
+        || name.contains(&separator)
+        || domain.contains(&separator)
+    {
+        return Err(LOGON_FAILURE);
+    }
+    let mut path = Vec::new();
+    push_ascii(&mut path, "\\Registry\\Machine\\SAM\\Gala\\Mappings\\")?;
+    path.try_extend_from_slice(domain).map_err(|_| NtStatus::NO_MEMORY)?;
+    path.try_push(separator).map_err(|_| NtStatus::NO_MEMORY)?;
+    path.try_extend_from_slice(name).map_err(|_| NtStatus::NO_MEMORY)?;
+    let sid_value = b"Sid".map(u16::from);
+    let sid = registry::with(|r| {
+        let relative = registry::Registry::absolute(&path)?;
+        let id = r.lookup(registry::ROOT, relative).map_err(|_| LOGON_FAILURE)?;
+        let v = r.value(id, &sid_value).map_err(|_| LOGON_FAILURE)?;
+        Sid::parse(&v.data).ok_or(LOGON_FAILURE)
+    })?;
+    let mut rights = Vec::new();
+    push_ascii(&mut rights, "\\Registry\\Machine\\SAM\\Gala\\Rights\\")?;
+    push_sid(&mut rights, &sid)?;
+    let right = b"SeServiceLogonRight".map(u16::from);
+    registry::with(|r| {
+        let relative = registry::Registry::absolute(&rights)?;
+        let id = r.lookup(registry::ROOT, relative).map_err(|_| LOGON_TYPE_NOT_GRANTED)?;
+        r.value(id, &right).map(|_| ()).map_err(|_| LOGON_TYPE_NOT_GRANTED)
+    })?;
+    let groups = logon_groups(SERVICE)?;
+    TokenData::standard_user(sid, token::next_luid(), &groups)
+}
+
+/// A SID from its text (`S-1-<authority>-<sub>...`), for authorities
+/// below 256 (all of NT's).
+fn parse_sid_text(text: &[u16]) -> Option<Sid> {
+    let head = b"S-1-".map(u16::from);
+    let rest = text.strip_prefix(&head[..])?;
+    let mut numbers = [0u32; 16];
+    let mut n = 0;
+    for part in rest.split(|&c| c == u16::from(b'-')) {
+        if part.is_empty() || part.len() > 10 {
+            return None;
+        }
+        let mut v = 0u64;
+        for &c in part {
+            let d = c.checked_sub(u16::from(b'0')).filter(|&d| d < 10)?;
+            v = v * 10 + u64::from(d);
+        }
+        *numbers.get_mut(n)? = u32::try_from(v).ok()?;
+        n += 1;
+    }
+    let authority = u8::try_from(*numbers.first()?).ok()?;
+    (n >= 1).then(|| Sid::new(authority, &numbers[1..n]))
+}
+
+/// Profiles the boot put in place: every ProfileList entry whose
+/// ProfileImagePath is a directory C:\Users\<name> that boot modules
+/// made gets the descriptor a profile has on Windows (as
+/// LoadUserProfileW makes it): owner the user, full control for the
+/// user, SYSTEM and Administrators, inherited by everything in it, so
+/// its files are the user's (sshd checks authorized_keys for that).
+pub fn assign_boot_profiles() -> Result<(), NtStatus> {
+    use super::security::{
+        self, CONTAINER_INHERIT_ACE, Descriptor, INHERITED_ACE, OBJECT_INHERIT_ACE,
+        SE_DACL_AUTO_INHERITED, SE_DACL_PRESENT,
+    };
+    use crate::fs::ramfs;
+    const FILE_ALL_ACCESS: u32 = 0x001f_01ff;
+    const ADMINISTRATORS: Sid = Sid::new(5, &[32, 544]);
+    let mut profiles: Vec<(Sid, Vec<u16>)> = Vec::new();
+    let mut list = Vec::new();
+    push_ascii(
+        &mut list,
+        "\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+    )?;
+    let image = b"ProfileImagePath".map(u16::from);
+    let prefix = b"c:\\users\\".map(u16::from);
+    let lower = |c: u16| if (0x41..=0x5a).contains(&c) { c + 0x20 } else { c };
+    registry::with(|r| {
+        let relative = registry::Registry::absolute(&list)?;
+        let Ok(id) = r.lookup(registry::ROOT, relative) else { return Ok(()) };
+        for index in 0.. {
+            let Ok(key) = r.subkey(id, index) else { break };
+            let name = r.full_name(key)?;
+            let text = name.rsplit(|&c| c == u16::from(b'\\')).next().unwrap_or(&[]);
+            let (Some(sid), Ok(v)) = (parse_sid_text(text), r.value(key, &image)) else {
+                continue;
+            };
+            // REG_SZ / REG_EXPAND_SZ: UTF-16LE, NUL-terminated.
+            let mut path = Vec::new();
+            for c in v.data.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])) {
+                if c == 0 {
+                    break;
+                }
+                path.try_push(c).map_err(|_| NtStatus::NO_MEMORY)?;
+            }
+            let same = path.len() > prefix.len()
+                && path[..prefix.len()].iter().zip(&prefix).all(|(&a, &b)| lower(a) == b);
+            let rest = &path[prefix.len().min(path.len())..];
+            if same && !rest.contains(&u16::from(b'\\')) {
+                let mut dir = Vec::new();
+                dir.try_extend_from_slice(rest).map_err(|_| NtStatus::NO_MEMORY)?;
+                profiles.try_push((sid, dir)).map_err(|_| NtStatus::NO_MEMORY)?;
+            }
+        }
+        Ok(())
+    })?;
+    let users = b"Users".map(u16::from);
+    for (sid, dir) in profiles {
+        let all = |flags: u8| {
+            security::allow_acl(&[
+                (FILE_ALL_ACCESS, sid, flags),
+                (FILE_ALL_ACCESS, token::LOCAL_SYSTEM, flags),
+                (FILE_ALL_ACCESS, ADMINISTRATORS, flags),
+            ])
+        };
+        let descriptor = |control: u16, dacl: Vec<u8>| {
+            Descriptor {
+                control: SE_DACL_PRESENT | control,
+                owner: Some(sid),
+                group: Some(token::LOCAL_SYSTEM),
+                dacl: Some(dacl),
+                sacl: None,
+            }
+            .to_bytes(u32::MAX)
+        };
+        let inherit = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+        let top = descriptor(SE_DACL_AUTO_INHERITED, all(inherit)?)?;
+        let sub_dir = descriptor(SE_DACL_AUTO_INHERITED, all(inherit | INHERITED_ACE)?)?;
+        let sub_file = descriptor(SE_DACL_AUTO_INHERITED, all(INHERITED_ACE)?)?;
+        super::file::with_fs(|fs| {
+            let Ok(root) = fs.resolve(ramfs::ROOT, &[&users, &dir]) else { return Ok(()) };
+            let mut pending = Vec::new();
+            pending.try_push(root).map_err(|_| NtStatus::NO_MEMORY)?;
+            while let Some(node) = pending.pop() {
+                let is_dir = fs.node(node).is_some_and(ramfs::Node::is_dir);
+                let bytes = if node == root {
+                    &top
+                } else if is_dir {
+                    &sub_dir
+                } else {
+                    &sub_file
+                };
+                let mut copy = Vec::new();
+                copy.try_extend_from_slice(bytes).map_err(|_| NtStatus::NO_MEMORY)?;
+                let _ = fs.set_security(node, copy);
+                if is_dir && let Ok(children) = fs.list(node) {
+                    for c in children {
+                        pending.try_push(c).map_err(|_| NtStatus::NO_MEMORY)?;
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

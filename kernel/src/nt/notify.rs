@@ -243,9 +243,10 @@ pub fn complete_count(r: Request, status: NtStatus, count: u64) {
             wait::set_signal(port, 1);
         }
     }
-    if let Some((thread, apc)) = &r.apc
-        && status.0 < 0x8000_0000
-    {
+    // The completion routine runs whatever the status (ReadFileEx's gets
+    // ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED...): a request that
+    // failed in its call never gets here (the caller reports it).
+    if let Some((thread, apc)) = &r.apc {
         let _ = thread::queue_user_apc(thread, UserApc { routine: apc.routine, args: apc.args });
     }
     if let Some(done) = &r.done {

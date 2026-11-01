@@ -17,6 +17,19 @@
 //!   ERROR_LOGON_FAILURE. The profile buffer is freed with
 //!   LsaFreeReturnBuffer.
 //!
+//! - Virtual accounts, as sshd makes one for its privilege-separation
+//!   child: LsaManageSidNameMapping maps the domain `VIRTUAL USERS`
+//!   (S-1-5-111), its group and an account under it (a second add of a
+//!   name is LsaSidNameMappingOperation_NameCollision); LookupAccountSidW
+//!   then finds the account's name, and ERROR_NONE_MAPPED once the mapping
+//!   is removed. LogonUserExExW (LOGON32_LOGON_SERVICE,
+//!   LOGON32_PROVIDER_VIRTUAL) fails with ERROR_LOGON_TYPE_NOT_GRANTED
+//!   until LsaAddAccountRights (through an LsaOpenPolicy handle) grants
+//!   SeServiceLogonRight; then the token's user is the mapped SID, with
+//!   the SERVICE group. CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)
+//!   leaves only SeChangeNotifyPrivilege. LsaRemoveAccountRights,
+//!   LsaClose.
+//!
 //! Prints `lsa_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -47,6 +60,7 @@ unsafe extern "system" {
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> i32;
     fn ExitProcess(code: u32) -> !;
     fn CloseHandle(h: Handle) -> i32;
+    fn GetLastError() -> u32;
 }
 
 #[link(name = "secur32", kind = "raw-dylib")]
@@ -81,6 +95,63 @@ unsafe extern "system" {
 
 #[link(name = "advapi32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn LsaManageSidNameMapping(op: u32, input: *const u8, output: *mut *mut u32) -> u32;
+    fn LsaFreeMemory(buffer: *mut c_void) -> u32;
+    fn LsaOpenPolicy(
+        system: *const UnicodeString,
+        attributes: *const [u64; 6],
+        access: u32,
+        policy: *mut Handle,
+    ) -> u32;
+    fn LsaAddAccountRights(
+        policy: Handle,
+        sid: *const u8,
+        rights: *const UnicodeString,
+        count: u32,
+    ) -> u32;
+    fn LsaRemoveAccountRights(
+        policy: Handle,
+        sid: *const u8,
+        all: u8,
+        rights: *const UnicodeString,
+        count: u32,
+    ) -> u32;
+    fn LsaClose(policy: Handle) -> u32;
+    #[allow(clippy::too_many_arguments)]
+    fn LogonUserExExW(
+        user: *const u16,
+        domain: *const u16,
+        password: *const u16,
+        kind: u32,
+        provider: u32,
+        groups: *const u8,
+        token: *mut Handle,
+        sid: *mut *mut u8,
+        profile: *mut *mut c_void,
+        profile_length: *mut u32,
+        quotas: *mut u8,
+    ) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn CreateRestrictedToken(
+        token: Handle,
+        flags: u32,
+        disable_count: u32,
+        disable: *const u8,
+        delete_count: u32,
+        delete: *const u8,
+        restrict_count: u32,
+        restrict: *const u8,
+        new: *mut Handle,
+    ) -> i32;
+    fn LookupAccountSidW(
+        system: *const u16,
+        sid: *const u8,
+        name: *mut u16,
+        name_len: *mut u32,
+        domain: *mut u16,
+        domain_len: *mut u32,
+        kind: *mut u32,
+    ) -> i32;
     fn LsaNtStatusToWinError(status: u32) -> u32;
     fn GetTokenInformation(token: Handle, class: u32, out: *mut u8, len: u32, ret: *mut u32)
     -> i32;
@@ -116,6 +187,8 @@ const MSV1_0_S4U_LOGON: u32 = 12;
 /// S-1-5-2 (NETWORK) and S-1-5-4 (INTERACTIVE).
 const NETWORK_SID: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 2, 0, 0, 0];
 const INTERACTIVE_SID: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 4, 0, 0, 0];
+/// S-1-5-6 (SERVICE).
+const SERVICE_SID: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 6, 0, 0, 0];
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -264,6 +337,151 @@ fn s4u(user: &[u16; 16], domain: &[u16; 8], b: &mut [u8; 256]) -> usize {
     put(b, 24, domain, end)
 }
 
+/// SID bytes: revision 1, `subs` sub-authorities under authority 5.
+fn sid5<const N: usize>(subs: &[u32]) -> [u8; N] {
+    let mut b = [0u8; N];
+    b[0] = 1;
+    b[1] = subs.len() as u8;
+    b[7] = 5;
+    for (i, s) in subs.iter().enumerate() {
+        b[8 + 4 * i..12 + 4 * i].copy_from_slice(&s.to_le_bytes());
+    }
+    b
+}
+
+/// LsaManageSidNameMapping: (status, the output's ErrorCode or 0).
+fn mapping(op: u32, domain: &[u16], account: Option<&[u16]>, sid: *const u8) -> (u32, u32) {
+    // ADD_INPUT {DomainName, AccountName, Sid, Flags}; REMOVE_INPUT is
+    // its first two fields.
+    #[repr(C)]
+    struct Input {
+        domain: UnicodeString,
+        account: UnicodeString,
+        sid: *const u8,
+        flags: u32,
+    }
+    let empty = UnicodeString { length: 0, maximum: 0, buffer: core::ptr::null() };
+    let input =
+        Input { domain: unicode(domain), account: account.map_or(empty, unicode), sid, flags: 0 };
+    let mut output = core::ptr::null_mut();
+    // SAFETY: our input; the output is LSA memory.
+    unsafe {
+        let status = LsaManageSidNameMapping(op, (&raw const input).cast(), &mut output);
+        let error = if output.is_null() { 0 } else { output.read() };
+        if !output.is_null() {
+            LsaFreeMemory(output.cast());
+        }
+        (status, error)
+    }
+}
+
+/// LookupAccountSidW: the name and domain, or the error.
+fn lookup(sid: *const u8) -> Result<([u16; 32], [u16; 32]), u32> {
+    let (mut name, mut domain) = ([0u16; 32], [0u16; 32]);
+    let (mut n, mut d, mut kind) = (32u32, 32u32, 0u32);
+    // SAFETY: our buffers.
+    let ok = unsafe {
+        LookupAccountSidW(
+            core::ptr::null(),
+            sid,
+            name.as_mut_ptr(),
+            &mut n,
+            domain.as_mut_ptr(),
+            &mut d,
+            &mut kind,
+        )
+    };
+    // SAFETY: a plain call.
+    if ok == 0 { Err(unsafe { GetLastError() }) } else { Ok((name, domain)) }
+}
+
+fn virtual_accounts(c: &Checks) -> Result<(), u32> {
+    const ADD: u32 = 0;
+    const REMOVE: u32 = 1;
+    const NAME_COLLISION: u32 = 2;
+    let domain = w::<16>("VIRTUAL USERS");
+    let group = w::<20>("ALL VIRTUAL USERS");
+    let account = w::<16>("galavirt_7");
+    let domain_sid = sid5::<12>(&[111]);
+    let group_sid = sid5::<16>(&[111, 0]);
+    let account_sid =
+        sid5::<36>(&[111, 3847866527, 469524349, 687026318, 516638107, 1125189541, 7]);
+    // The domain and its group may be mapped already (by sshd on Windows).
+    let (status, error) = mapping(ADD, &domain, None, domain_sid.as_ptr());
+    c.ok(status == 0 || error == NAME_COLLISION, status.into())?;
+    let (status, error) = mapping(ADD, &domain, None, domain_sid.as_ptr());
+    c.ok(status != 0 && error == NAME_COLLISION, error.into())?;
+    let (status, error) = mapping(ADD, &domain, Some(&group), group_sid.as_ptr());
+    c.ok(status == 0 || error == NAME_COLLISION, status.into())?;
+    c.eq(mapping(ADD, &domain, Some(&account), account_sid.as_ptr()).0.into(), 0)?;
+    let found = lookup(account_sid.as_ptr());
+    c.ok(found.is_ok_and(|(n, d)| n[..11] == account[..11] && d[..14] == domain[..14]), 0)?;
+
+    // SAFETY: plain calls with our buffers and handles.
+    unsafe {
+        let attributes = [0u64; 6];
+        let mut policy = core::ptr::null_mut();
+        // POLICY_CREATE_ACCOUNT | POLICY_LOOKUP_NAMES
+        c.eq(LsaOpenPolicy(core::ptr::null(), &attributes, 0x810, &mut policy).into(), 0)?;
+        let logon = |token: &mut Handle| {
+            let empty = [0u16; 1];
+            LogonUserExExW(
+                account.as_ptr(),
+                domain.as_ptr(),
+                empty.as_ptr(),
+                5, // LOGON32_LOGON_SERVICE
+                4, // LOGON32_PROVIDER_VIRTUAL
+                core::ptr::null(),
+                token,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
+        let mut token = core::ptr::null_mut();
+        c.eq(logon(&mut token) as u64, 0)?;
+        c.eq(GetLastError().into(), 1385)?; // ERROR_LOGON_TYPE_NOT_GRANTED
+        let right = w::<20>("SeServiceLogonRight");
+        let right = unicode(&right);
+        c.eq(LsaAddAccountRights(policy, account_sid.as_ptr(), &right, 1).into(), 0)?;
+        c.ok(logon(&mut token) != 0, GetLastError().into())?;
+        let mut b = Buf([0; 1024]);
+        let mut n = 0;
+        c.ok(GetTokenInformation(token, 1, b.0.as_mut_ptr(), 1024, &mut n) != 0, 0)?;
+        let user = b.0.as_ptr().cast::<*const u8>().read();
+        c.ok(EqualSid(user, account_sid.as_ptr()) != 0, 0)?;
+        c.ok(has_group(token, &SERVICE_SID), 0)?;
+
+        // DISABLE_MAX_PRIVILEGE: only SeChangeNotifyPrivilege (LUID 23).
+        let mut restricted = core::ptr::null_mut();
+        let ok = CreateRestrictedToken(
+            token,
+            1,
+            0,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            &mut restricted,
+        );
+        c.ok(ok != 0, GetLastError().into())?;
+        c.ok(GetTokenInformation(restricted, 3, b.0.as_mut_ptr(), 1024, &mut n) != 0, 0)?;
+        let privileges = b.0.as_ptr().cast::<u32>();
+        c.eq(privileges.read().into(), 1)?;
+        c.eq(privileges.add(1).read().into(), 23)?;
+        CloseHandle(restricted);
+        CloseHandle(token);
+
+        c.eq(LsaRemoveAccountRights(policy, account_sid.as_ptr(), 0, &right, 1).into(), 0)?;
+        c.eq(LsaClose(policy).into(), 0)?;
+    }
+    c.eq(mapping(REMOVE, &domain, Some(&account), core::ptr::null()).0.into(), 0)?;
+    c.ok(lookup(account_sid.as_ptr()) == Err(1332), 0)?; // ERROR_NONE_MAPPED
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let c = Checks(core::cell::Cell::new(0));
     let null = core::ptr::null_mut();
@@ -330,7 +548,7 @@ fn run() -> Result<(), u32> {
         c.eq(LsaNtStatusToWinError(STATUS_LOGON_FAILURE).into(), ERROR_LOGON_FAILURE.into())?;
         c.eq(LsaDeregisterLogonProcess(lsa_handle).into(), 0)?;
     }
-    Ok(())
+    virtual_accounts(&c)
 }
 
 #[unsafe(no_mangle)]

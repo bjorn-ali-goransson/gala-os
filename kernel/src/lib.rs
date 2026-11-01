@@ -141,6 +141,11 @@ pub fn kernel_main() -> ! {
         }
     }
 
+    // Profiles among the boot's files belong to their users.
+    if let Err(e) = nt::accounts::assign_boot_profiles() {
+        warn!("profiles: {e:?}");
+    }
+
     nt::syscalls::set_trace(cmdline.flag("trace"));
     events::set_mask(cmdline.value("events").map_or(0, events::parse_mask));
     // `run=a.exe,b.exe` runs the programs one after another; `args=` holds

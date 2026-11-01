@@ -8,7 +8,9 @@ checks", "Accounts and logon") are done (2026-11-01); S4 is begun
 (`logon_test`: CreateProcessAsUserW's token rules, pipes impersonating
 their client's token, GetUserProfileDirectoryW; `system_test`: programs
 run as SYSTEM with the boot option `as=system`; `lsa_test`: LSA logons,
-S4U and interactive, as sshd makes them; `profile_test`: LoadUserProfileW);
+S4U and interactive, as sshd makes them, and virtual accounts;
+`profile_test`: LoadUserProfileW, profiles placed at boot). sshd's
+key-authenticated login works (`sshd_login`, 2026-11-01);
 S5 is design. Before S1, gala had the handle half of NT
 security (each handle carries a granted access mask, mapped through the
 object type's generic mapping, and services check it), and descriptions
@@ -138,9 +140,12 @@ start.
 3. **S3 Enforcement** (done; processes, threads and pipes not yet): access checks at open, with a second account
    (LogonUserW of a test user): denied and allowed opens, privileges,
    deny ACEs, the owner's implicit rights, integrity levels.
-4. **S4 Logons and per-user processes**: LsaLogonUser S4U,
-   CreateProcessAsUserW, profiles; sshd accepts a key-authenticated
-   login from the host and runs a command.
+4. **S4 Logons and per-user processes** (sshd's login done, 2026-11-01):
+   LsaLogonUser S4U, CreateProcessAsUserW, profiles, virtual accounts
+   (LsaManageSidNameMapping, account rights, LOGON32_PROVIDER_VIRTUAL);
+   sshd accepts a key-authenticated login from the host and runs a
+   command (`sshd_login`). Left: logon rights enforced for ordinary
+   accounts, NetUserAdd, password logins over ssh.
 5. **S5 Restricted tokens and integrity** (PostgreSQL).
 Then the disk: D1 a virtio-blk driver, D2 a file system with
 descriptors, D3 registry hives on it.

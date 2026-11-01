@@ -170,6 +170,38 @@ fn push_decimal(out: &mut [u16], n: &mut usize, mut v: u64) -> Option<()> {
     Some(())
 }
 
+/// ConvertSidToStringSidA: ConvertSidToStringSidW's text (ASCII) in
+/// local memory.
+#[unsafe(no_mangle)]
+pub extern "system" fn ConvertSidToStringSidA(sid: *const u8, out: *mut *mut u8) -> i32 {
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut wide = core::ptr::null_mut::<u16>();
+    if ConvertSidToStringSidW(sid, &mut wide) == 0 {
+        return 0;
+    }
+    let mut n = 0;
+    // SAFETY: the NUL-terminated string just made.
+    while unsafe { *wide.add(n) } != 0 {
+        n += 1;
+    }
+    // SAFETY: plain calls; a buffer of n + 1 bytes for the ASCII copy.
+    unsafe {
+        let p = LocalAlloc(0, n + 1);
+        if p.is_null() {
+            super::LocalFree(wide.cast());
+            return fail(8, 0);
+        }
+        for i in 0..=n {
+            *p.add(i) = *wide.add(i) as u8;
+        }
+        super::LocalFree(wide.cast());
+        *out = p;
+    }
+    1
+}
+
 /// ConvertSidToStringSidW: "S-1-<authority>-<sub>-..." in local memory
 /// (authorities of 2^32 and more in hexadecimal, as documented).
 #[unsafe(no_mangle)]
@@ -220,6 +252,7 @@ pub extern "system" fn ConvertSidToStringSidW(sid: *const u8, out: *mut *mut u16
 // ---- Accounts ----
 
 const SID_TYPE_USER: u32 = 1;
+const SID_TYPE_DOMAIN: u32 = 3;
 const SID_TYPE_WELL_KNOWN_GROUP: u32 = 5;
 const SID_TYPE_ALIAS: u32 = 4;
 
@@ -392,34 +425,47 @@ pub extern "system" fn LookupAccountSidW(
     };
     // The account's name (UTF-16), domain and SID_NAME_USE.
     let mut account = [0u16; 256];
-    let (account_len, dom, use_) = if let Some(&(_, _, a, dom, use_)) =
-        ACCOUNTS.iter().find(|a| a.0 == authority && a.1 == &subs[..count])
-    {
-        for (d, c) in account.iter_mut().zip(a.encode_utf16()) {
+    let mut dom_buf = [0u16; 256];
+    let text = |s: &str, buf: &mut [u16; 256]| {
+        for (d, c) in buf.iter_mut().zip(s.encode_utf16()) {
             *d = c;
         }
-        (a.len(), dom, use_)
+        s.len()
+    };
+    let (account_len, dom_len, use_) = if let Some(&(_, _, a, dom, use_)) =
+        ACCOUNTS.iter().find(|a| a.0 == authority && a.1 == &subs[..count])
+    {
+        (text(a, &mut account), text(dom, &mut dom_buf), use_)
     } else if authority == 5
         && count == 5
         && subs[..4] == USER_SUBS[..4]
         && sam_name(subs[4], &mut account).is_some()
     {
         let n = account.iter().position(|&c| c == 0).unwrap_or(account.len());
-        (n, "GALA", SID_TYPE_USER)
+        (n, text("GALA", &mut dom_buf), SID_TYPE_USER)
     } else if authority == 5 && count == 2 && subs[..2] == [80, 0] {
-        for (d, c) in account.iter_mut().zip("ALL SERVICES".encode_utf16()) {
-            *d = c;
-        }
-        (12, NT_SERVICE, SID_TYPE_WELL_KNOWN_GROUP)
+        (
+            text("ALL SERVICES", &mut account),
+            text(NT_SERVICE, &mut dom_buf),
+            SID_TYPE_WELL_KNOWN_GROUP,
+        )
     } else if authority == 5 && count == 6 && subs[0] == 80 {
         match service_named_by(&subs[1..6], &mut account) {
-            Some(n) => (n, NT_SERVICE, SID_TYPE_WELL_KNOWN_GROUP),
+            Some(n) => (n, text(NT_SERVICE, &mut dom_buf), SID_TYPE_WELL_KNOWN_GROUP),
             None => return fail(ERROR_NONE_MAPPED, 0),
         }
     } else {
-        return fail(ERROR_NONE_MAPPED, 0);
+        // SAFETY: a valid SID (read_sid checked it): 8 + 4 * count bytes.
+        let bytes = unsafe { core::slice::from_raw_parts(sid, 8 + 4 * count) };
+        // LsaManageSidNameMapping's names: a domain, or an account in it.
+        match super::policy::mapped_name(bytes, &mut account, &mut dom_buf) {
+            Some((0, d)) => (0, d, SID_TYPE_DOMAIN),
+            Some((a, d)) => (a, d, SID_TYPE_USER),
+            None => return fail(ERROR_NONE_MAPPED, 0),
+        }
     };
     let account = &account[..account_len];
+    let dom = &dom_buf[..dom_len];
     if name_len.is_null() || domain_len.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -434,7 +480,8 @@ pub extern "system" fn LookupAccountSidW(
         }
         core::ptr::copy_nonoverlapping(account.as_ptr(), name, account.len());
         *name.add(account.len()) = 0;
-        put_name(dom, domain);
+        core::ptr::copy_nonoverlapping(dom.as_ptr(), domain, dom.len());
+        *domain.add(dom.len()) = 0;
         *name_len = need_name - 1;
         *domain_len = need_domain - 1;
         if !kind.is_null() {

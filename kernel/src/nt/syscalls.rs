@@ -89,6 +89,8 @@ pub const NT_QUERY_SECURITY_OBJECT: u32 = 0x7f1f;
 pub const NT_SET_SECURITY_OBJECT: u32 = 0x7f20;
 /// gala's logon service (LogonUserW; docs/SECURITY.md S3).
 pub const GALA_LOGON_USER: u32 = 0x7f21;
+/// NtAllocateLocallyUniqueId: gala's number until verified.
+pub const NT_ALLOCATE_LOCALLY_UNIQUE_ID: u32 = 0x7f22;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -307,6 +309,12 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     ),
     (NT_SET_SECURITY_OBJECT, "NtSetSecurityObject", 3, security_calls::nt_set_security_object),
     (GALA_LOGON_USER, "GalaLogonUser", 5, token_calls::gala_logon_user),
+    (
+        NT_ALLOCATE_LOCALLY_UNIQUE_ID,
+        "NtAllocateLocallyUniqueId",
+        1,
+        token_calls::nt_allocate_locally_unique_id,
+    ),
     (
         NT_ASSIGN_PROCESS_TO_JOB_OBJECT,
         "NtAssignProcessToJobObject",
@@ -2021,6 +2029,12 @@ fn gala_record_missing(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::ACCESS_VIOLATION;
     }
     let what = super::ledger::user_what(arg!(call, 2) as u32);
+    if what == "not implemented" {
+        // A stub about to end its process: say so now (the ledger is
+        // dumped when the `run=` program ends, which may be never).
+        let text = core::str::from_utf8(&name[..len]).unwrap_or("?");
+        warn!("{}: {} not implemented, ending the process", call.process.name, text);
+    }
     super::ledger::record_user(&name[..len], what, arg!(call, 3));
     NtStatus::SUCCESS
 }

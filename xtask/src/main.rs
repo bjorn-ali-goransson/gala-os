@@ -414,6 +414,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("profile_test", "bcrypt.dll", "Windows/System32"),
     ("profile_test", "userenv.dll", "Windows/System32"),
     ("profile_test", "user/access_test/access_test.regseed", "registry"),
+    ("profile_test", "user/profile_test/note.txt", "Users/gala/Documents"),
     ("token_test", "ntdll.dll", "Windows/System32"),
     ("token_test", "kernel32.dll", "Windows/System32"),
     ("token_test", "advapi32.dll", "Windows/System32"),
@@ -598,6 +599,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sshd_login", "user/sshd/sshd_config", "ProgramData/ssh"),
     ("sshd_login", "user/sshd/authorized_keys", "Users/galatest/.ssh"),
     ("sshd_login", "user/access_test/access_test.regseed", "registry"),
+    ("sshd_login", "user/sshd/sshd.regseed", "registry"),
+    ("sshd_login", "user/bin/busybox.exe", "gala"),
+    ("sshd_login", "msvcrt.dll", "Windows/System32"),
     ("caddy", "ntdll.dll", "Windows/System32"),
     ("caddy", "kernel32.dll", "Windows/System32"),
     ("caddy", "advapi32.dll", "Windows/System32"),
@@ -1706,7 +1710,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &["elasticsearch", "sqllocaldb", "sshd", "sshd_login"];
+const PENDING: &[&str] = &["elasticsearch", "sqllocaldb", "sshd"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];

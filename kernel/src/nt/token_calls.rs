@@ -406,11 +406,32 @@ pub(super) fn gala_logon_user(call: &mut Call<'_>) -> NtStatus {
     if s4u && !super::security_calls::effective_privilege(call, 7) {
         return NtStatus::PRIVILEGE_NOT_HELD;
     }
+    // LogonType | GALA_LOGON_VIRTUAL: a virtual account's logon
+    // (LogonUserExExW, LOGON32_PROVIDER_VIRTUAL), also for SeTcbPrivilege.
+    const GALA_LOGON_VIRTUAL: u32 = 0x4000_0000;
+    let virtual_account = kind & GALA_LOGON_VIRTUAL != 0;
+    if virtual_account && !super::security_calls::effective_privilege(call, 7) {
+        return NtStatus::PRIVILEGE_NOT_HELD;
+    }
     let password = if s4u { None } else { Some(&password[..]) };
-    let data =
-        tri!(super::super::accounts::logon(&user, &domain, password, kind & !GALA_LOGON_S4U));
+    let kind = kind & !(GALA_LOGON_S4U | GALA_LOGON_VIRTUAL);
+    let data = if virtual_account {
+        if !password.is_none_or(<[u16]>::is_empty) {
+            return super::super::accounts::LOGON_FAILURE;
+        }
+        tri!(super::super::accounts::virtual_logon(&user, &domain, kind))
+    } else {
+        tri!(super::super::accounts::logon(&user, &domain, password, kind))
+    };
     let object = tri!(token::object(data));
     call.return_handle(out, object, token::TOKEN_ALL_ACCESS, 0)
+}
+
+/// NtAllocateLocallyUniqueId(*Luid): a new LUID (unique until reboot).
+pub(super) fn nt_allocate_locally_unique_id(call: &mut Call<'_>) -> NtStatus {
+    let out = arg!(call, 0);
+    tri!(call.write_u64(out, token::next_luid()));
+    NtStatus::SUCCESS
 }
 
 /// The token handle `h` given to process creation (CreateProcessAsUserW),

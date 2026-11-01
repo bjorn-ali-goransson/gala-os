@@ -5,7 +5,6 @@
 gala_stubs::unimplemented_exports!("kernel32.dll":
     AllocateUserPhysicalPagesNuma
     CancelSynchronousIo
-    CancelWaitableTimer
     CheckTokenMembershipEx
     CompareStringA
     ConvertThreadToFiber

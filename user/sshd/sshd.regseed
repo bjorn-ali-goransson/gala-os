@@ -1,0 +1,14 @@
+; Win32-OpenSSH's settings for the sshd_login scenario (what an
+; administrator sets on Windows): gala has no cmd.exe, so the users'
+; shell is busybox's sh. With DefaultShellEscapeArguments 0 sshd runs
+; `"C:\gala\busybox.exe" sh -c "<command>"`. Format: see registry.seed.
+
+[\Registry\Machine\SOFTWARE\OpenSSH]
+"DefaultShell"=sz:C:\gala\busybox.exe
+"DefaultShellCommandOption"=sz:sh -c
+"DefaultShellEscapeArguments"=dword:0
+
+; galatest has logged on before (its profile, C:\Users\galatest, holds
+; .ssh\authorized_keys): sshd finds the home directory in ProfileList.
+[\Registry\Machine\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-21-1000000001-1000000002-1000000003-1002]
+"ProfileImagePath"=expand:C:\Users\galatest

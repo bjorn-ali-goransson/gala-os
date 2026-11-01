@@ -12,6 +12,10 @@
 //!   C:\Users, named after the user) and its DACL gives the user
 //!   FILE_ALL_ACCESS.
 //! - UnloadUserProfile: TRUE.
+//! - A profile the boot put in place (ProfileList's C:\Users\gala, with
+//!   Documents\note.txt in it) is its user's, as a profile on Windows:
+//!   the directory and the file give gala FILE_ALL_ACCESS and nobody but
+//!   gala, SYSTEM and Administrators any access (no BUILTIN\Users ACE).
 //!
 //! Prints `profile_test: ok` or exits with the number of the failing check.
 
@@ -298,8 +302,59 @@ fn run() -> Result<(), u32> {
         c.ok(UnloadUserProfile(token, info.profile) != 0, last_error())?;
         LocalFree(sid_text.cast());
         CloseHandle(token);
+
+        // The boot user's profile, placed by the boot.
+        let gala = sid5::<28>(&[21, 1_000_000_001, 1_000_000_002, 1_000_000_003, 1001]);
+        let system = sid5::<12>(&[18]);
+        let admins = sid5::<16>(&[32, 544]);
+        for path in [w::<64>("C:\\Users\\gala"), w::<64>("C:\\Users\\gala\\Documents\\note.txt")] {
+            let mut sd = Buf([0; 1024]);
+            c.ok(
+                GetFileSecurityW(path.as_ptr(), 4, sd.0.as_mut_ptr(), 1024, &mut n) != 0,
+                last_error(),
+            )?;
+            let (mut present, mut dacl, mut defaulted) = (0, core::ptr::null(), 0);
+            c.ok(
+                GetSecurityDescriptorDacl(sd.0.as_ptr(), &mut present, &mut dacl, &mut defaulted)
+                    != 0
+                    && present != 0
+                    && !dacl.is_null(),
+                0,
+            )?;
+            let count = usize::from(dacl.add(4).cast::<u16>().read_unaligned());
+            let mut ace = dacl.add(8);
+            let (mut gala_full, mut others) = (false, 0u32);
+            for _ in 0..count {
+                let size = usize::from(ace.add(2).cast::<u16>().read_unaligned());
+                let mask = ace.add(4).cast::<u32>().read_unaligned();
+                let who = ace.add(8);
+                if *ace == 0 && EqualSid(who, gala.as_ptr()) != 0 {
+                    gala_full |= mask & FILE_ALL_ACCESS == FILE_ALL_ACCESS;
+                } else if *ace == 0
+                    && EqualSid(who, system.as_ptr()) == 0
+                    && EqualSid(who, admins.as_ptr()) == 0
+                {
+                    others += 1;
+                }
+                ace = ace.add(size);
+            }
+            c.ok(gala_full, 0)?;
+            c.eq(others.into(), 0)?;
+        }
     }
     Ok(())
+}
+
+/// SID bytes: revision 1, `subs` under authority 5.
+fn sid5<const N: usize>(subs: &[u32]) -> [u8; N] {
+    let mut b = [0u8; N];
+    b[0] = 1;
+    b[1] = subs.len() as u8;
+    b[7] = 5;
+    for (i, s) in subs.iter().enumerate() {
+        b[8 + 4 * i..12 + 4 * i].copy_from_slice(&s.to_le_bytes());
+    }
+    b
 }
 
 #[unsafe(no_mangle)]

@@ -332,7 +332,7 @@ fn afd_overlapped_apc(
         (*ov).event
     };
     let (event, apc, context) = if routine != 0 {
-        (0, completion_trampoline as usize, routine)
+        (0, completion_trampoline as *const () as usize, routine)
     } else if event & 1 != 0 {
         (event & !1, 0, 0)
     } else {
