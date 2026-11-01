@@ -1528,6 +1528,8 @@ fn main() -> ExitCode {
         Some("report") => gala_report(release),
         Some("docker-test") => docker_test(&args[1..]),
         Some("screenshot") => screenshot(release, &args[1..]),
+        Some("bake-fonts") => bake_fonts(),
+        Some("bake-icons") => bake_icons(),
         Some("iso") => iso(release, &args[1..]),
         Some("serve") => serve(release, &args[1..]),
         Some("um-test") => um_test(release),
@@ -4089,11 +4091,12 @@ enum PixelCheck {
 }
 
 /// gui_test's window: 400 x 300 at (100, 100); the desktop's frame is a
-/// 1-pixel outline and a 30-pixel caption, so its client area starts at
-/// (101, 131) (kernel/src/nt/desktop). The screen is 1280 x 800: a
-/// desert-dusk wallpaper, the taskbar in the bottom 48 rows with the
-/// start button (the camel) at its left; the start menu (380 x 460) opens
-/// above it at (8, 284). Shaded colours are checked as "some pixel near".
+/// 1-pixel outline and a 32-pixel caption (Windows 11's metrics), so its
+/// client area starts at (101, 133) (kernel/src/nt/desktop). The screen is
+/// 1280 x 800: the wallpaper, the taskbar in the bottom 48 rows with the
+/// start button (Gala's fortress) and the window's button centred, the
+/// clock at the right; the start menu (600 x 640) opens centred above it
+/// at (340, 100). Shaded colours are checked as "some pixel near".
 const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[(
     "gui_test",
     ScreenCheck {
@@ -4102,64 +4105,55 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[(
             ScreenStep {
                 input: &[],
                 pixels: &[
-                    PixelCheck::AnyIn(4, 4, 12, 12, 0x0b142e), // the night sky
-                    PixelCheck::AnyIn(300, 104, 100, 22, 0x2c3c5e), // the active caption
-                    PixelCheck::At(101 + 100, 131 + 70, 0xff0000), // FillRect's red
-                    PixelCheck::At(101 + 300, 131 + 200, 0xffffff), // COLOR_WINDOW
-                    PixelCheck::AnyIn(101 + 20, 131 + 140, 140, 16, 0x0000ff), // the text
-                    PixelCheck::AnyIn(560, 790, 40, 6, 0x141a28), // the taskbar
-                    PixelCheck::AnyIn(6, 756, 40, 40, 0xf09010), // the camel's orange
-                    PixelCheck::AnyIn(64, 784, 200, 12, 0xf5a524), // the window's button
+                    PixelCheck::AnyIn(4, 4, 12, 12, 0x0b2c71), // the wallpaper's edge
+                    PixelCheck::At(300, 110, 0xeef2f7),        // the active caption
+                    PixelCheck::At(101 + 100, 133 + 70, 0xff0000), // FillRect's red
+                    PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // COLOR_WINDOW
+                    PixelCheck::AnyIn(101 + 20, 133 + 140, 140, 16, 0x0000ff), // the text
+                    PixelCheck::AnyIn(880, 780, 40, 12, 0xe0e7f3), // the taskbar
+                    PixelCheck::AnyIn(600, 760, 32, 30, 0x167fd6), // the fortress
+                    PixelCheck::AnyIn(640, 788, 48, 8, 0x005fb8), // the active window's pill
                 ],
             },
             ScreenStep {
-                // To the bottom-left corner (moves are clamped to the
-                // screen), then a left click on the start button.
+                // From the middle to the start button (615, 776), a click.
                 input: &[
-                    "mouse_move -255 255",
-                    "mouse_move -255 255",
-                    "mouse_move -255 255",
-                    "mouse_move -255 0",
-                    "mouse_move -255 0",
+                    "mouse_move 0 255",
+                    "mouse_move -25 121",
                     "mouse_button 1",
                     "mouse_button 0",
                 ],
                 pixels: &[
-                    PixelCheck::AnyIn(300, 600, 4, 4, 0x1c2434), // the start menu
-                    PixelCheck::AnyIn(30, 306, 64, 64, 0xf09010), // its big camel
-                    PixelCheck::AnyIn(112, 312, 100, 26, 0xffffff), // "gala-os"
-                    PixelCheck::AnyIn(30, 434, 30, 32, 0x4a80f0), // "Hello window"
+                    PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the start menu
+                    PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
+                    PixelCheck::AnyIn(398, 226, 32, 32, 0x4a80f0), // "Hello window"
                 ],
             },
             ScreenStep {
-                // To client (250, 50) at (351, 181): the first click closes
-                // the menu, the second is the program's (a green square).
+                // Escape closes the menu; to client (250, 50) at (351, 183)
+                // and a click: the program's green square.
                 input: &[
-                    "mouse_move 117 -103",
-                    "mouse_move 117 -103",
-                    "mouse_move 117 -103",
-                    "mouse_move 0 -103",
-                    "mouse_move 0 -103",
-                    "mouse_move 0 -103",
-                    "mouse_button 1",
-                    "mouse_button 0",
+                    "sendkey esc",
+                    "mouse_move -132 -198",
+                    "mouse_move -132 -198",
+                    "mouse_move 0 -197",
                     "mouse_button 1",
                     "mouse_button 0",
                 ],
                 pixels: &[
-                    PixelCheck::AnyIn(343, 173, 16, 16, 0x00c000), // the green mark
-                    PixelCheck::AnyIn(300, 600, 4, 4, 0xc07a48),   // the menu closed
+                    PixelCheck::AnyIn(343, 175, 16, 16, 0x00c000), // the green mark
+                    PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // the menu closed
                 ],
             },
             ScreenStep {
                 // Typing goes to the active window: "hi" in black.
                 input: &["sendkey h", "sendkey i"],
-                pixels: &[PixelCheck::AnyIn(101 + 20, 131 + 200, 24, 16, 0x000000)],
+                pixels: &[PixelCheck::AnyIn(101 + 20, 133 + 200, 24, 16, 0x000000)],
             },
             ScreenStep {
                 // The close button (x 453..498 of the caption): the program
-                // ends (no screendump).
-                input: &["mouse_move 125 -65", "mouse_button 1", "mouse_button 0"],
+                // ends (WM_SYSCOMMAND SC_CLOSE; no screendump).
+                input: &["mouse_move 125 -66", "mouse_button 1", "mouse_button 0"],
                 pixels: &[],
             },
         ],
@@ -4202,12 +4196,28 @@ fn check_screen_step(
     n: usize,
     step: &ScreenStep,
 ) -> Result {
-    use std::io::Write;
     if step.pixels.is_empty() {
         return Ok(());
     }
-    // Let the guest finish drawing.
-    thread::sleep(Duration::from_millis(500));
+    // Let the guest finish drawing; under load (the full suite) a redraw
+    // can take longer, so a failed check is retried for a few seconds.
+    let mut tries = 0;
+    loop {
+        thread::sleep(Duration::from_millis(500));
+        match dump_and_check(monitor, iso, n, step) {
+            Err(_) if tries < 10 => tries += 1,
+            r => return r,
+        }
+    }
+}
+
+fn dump_and_check(
+    monitor: &mut std::os::unix::net::UnixStream,
+    iso: &Path,
+    n: usize,
+    step: &ScreenStep,
+) -> Result {
+    use std::io::Write;
     let ppm = iso.with_extension(format!("screen{n}.ppm"));
     let _ = fs::remove_file(&ppm);
     writeln!(monitor, "screendump {}", ppm.display()).map_err(|e| e.to_string())?;
@@ -5414,4 +5424,113 @@ mod constants {
         }
         assert!(checked > 50, "only {checked} statuses compared");
     }
+}
+
+/// The desktop's text: Selawik (Microsoft's open-source stand-in for
+/// Segoe UI, fonts/selawik) rasterized here, on the host, so the kernel
+/// only copies coverage (no font engine in the kernel). One file per face
+/// and size in kernel/assets/ui-<size>-<weight>.glyphs:
+/// "GLY1", size, ascent, descent (i16 each, pixels), then for each
+/// character 0x20..=0xFF: advance (i16, 1/16 pixel), x and y of the
+/// bitmap's top-left from the pen at the baseline (i16, y down), width
+/// and height (u16), its offset into the coverage bytes (u32); then the
+/// coverage bytes.
+fn bake_fonts() -> Result {
+    let faces: &[(u32, &str, &str)] = &[
+        (12, "regular", "selawk.ttf"),
+        (12, "semibold", "selawksb.ttf"),
+        (14, "semibold", "selawksb.ttf"),
+        (20, "semibold", "selawksb.ttf"),
+        (28, "semilight", "selawksl.ttf"),
+    ];
+    for &(size, weight, file) in faces {
+        let ttf = fs::read(root().join("fonts/selawik").join(file))
+            .map_err(|e| format!("{file}: {e}"))?;
+        let font = fontdue::Font::from_bytes(ttf, fontdue::FontSettings::default())
+            .map_err(|e| e.to_string())?;
+        let px = size as f32;
+        let line = font.horizontal_line_metrics(px).ok_or("no line metrics")?;
+        let mut table = Vec::new();
+        let mut data = Vec::new();
+        for c in 0x20u32..=0xff {
+            let ch = char::from_u32(c).unwrap_or('?');
+            let (m, bitmap) = font.rasterize(ch, px);
+            let advance = (m.advance_width * 16.0).round() as i16;
+            // fontdue: ymin is the bitmap's bottom relative to the
+            // baseline (up); the top-left y, down from the baseline:
+            let top = -(m.ymin + m.height as i32);
+            table.extend_from_slice(&advance.to_le_bytes());
+            table.extend_from_slice(&(m.xmin as i16).to_le_bytes());
+            table.extend_from_slice(&(top as i16).to_le_bytes());
+            table.extend_from_slice(&(m.width as u16).to_le_bytes());
+            table.extend_from_slice(&(m.height as u16).to_le_bytes());
+            table.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            data.extend_from_slice(&bitmap);
+        }
+        let mut out = b"GLY1".to_vec();
+        out.extend_from_slice(&(size as i16).to_le_bytes());
+        out.extend_from_slice(&(line.ascent.round() as i16).to_le_bytes());
+        out.extend_from_slice(&((-line.descent).round() as i16).to_le_bytes());
+        out.extend_from_slice(&table);
+        out.extend_from_slice(&data);
+        let path = root().join(format!("kernel/assets/ui-{size}-{weight}.glyphs"));
+        fs::write(&path, &out).map_err(|e| format!("{path:?}: {e}"))?;
+        eprintln!("xtask: {} ({} bytes)", path.display(), out.len());
+    }
+    Ok(())
+}
+
+/// The desktop's pictures from SVG (kernel/assets/*.svg), rendered here
+/// with resvg so the kernel only blends coverage: each to square alpha
+/// masks (the picture centred, `size` x `size` bytes) in
+/// kernel/assets/<name>-<size>.alpha; the kernel colours them.
+fn bake_icons() -> Result {
+    let icons: &[(&str, &[u32])] = &[("fortress", &[24, 96])];
+    for &(name, sizes) in icons {
+        let svg = fs::read(root().join(format!("kernel/assets/{name}.svg")))
+            .map_err(|e| format!("{name}.svg: {e}"))?;
+        let tree = resvg::usvg::Tree::from_data(&svg, &resvg::usvg::Options::default())
+            .map_err(|e| e.to_string())?;
+        let view = tree.size();
+        for &size in sizes {
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).ok_or("pixmap")?;
+            let scale = size as f32 / view.width().max(view.height());
+            let dx = (size as f32 - view.width() * scale) / 2.0;
+            let dy = (size as f32 - view.height() * scale) / 2.0;
+            let transform = resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, dx, dy);
+            resvg::render(&tree, transform, &mut pixmap.as_mut());
+            let alpha: Vec<u8> = pixmap.pixels().iter().map(|p| p.alpha()).collect();
+            let path = root().join(format!("kernel/assets/{name}-{size}.alpha"));
+            fs::write(&path, &alpha).map_err(|e| format!("{path:?}: {e}"))?;
+            eprintln!("xtask: {} ({} bytes)", path.display(), alpha.len());
+        }
+    }
+    // The wordmark (قلعة, "qal'a"): cropped to its letters, 112 pixels
+    // wide, as "<width u16><height u16>" then the alpha bytes.
+    let svg = fs::read(root().join("kernel/assets/wordmark.svg"))
+        .map_err(|e| format!("wordmark.svg: {e}"))?;
+    let tree = resvg::usvg::Tree::from_data(&svg, &resvg::usvg::Options::default())
+        .map_err(|e| e.to_string())?;
+    let bbox = tree.root().abs_bounding_box();
+    let width = 112u32;
+    let scale = width as f32 / bbox.width();
+    let height = (bbox.height() * scale).ceil() as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or("pixmap")?;
+    let transform = resvg::tiny_skia::Transform::from_row(
+        scale,
+        0.0,
+        0.0,
+        scale,
+        -bbox.x() * scale,
+        -bbox.y() * scale,
+    );
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let mut out = Vec::new();
+    out.extend_from_slice(&(width as u16).to_le_bytes());
+    out.extend_from_slice(&(height as u16).to_le_bytes());
+    out.extend(pixmap.pixels().iter().map(|p| p.alpha()));
+    let path = root().join("kernel/assets/wordmark.alpha");
+    fs::write(&path, &out).map_err(|e| format!("{path:?}: {e}"))?;
+    eprintln!("xtask: {} ({width} x {height})", path.display());
+    Ok(())
 }

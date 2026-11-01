@@ -64,6 +64,9 @@
  *   (empty: zeroed, FALSE), UnionRect, InflateRect, OffsetRect, PtInRect
  *   (right and bottom edges outside), EqualRect, SubtractRect (only when
  *   a whole side is covered).
+ * - WM_SYSCOMMAND through DefWindowProc: SC_MAXIMIZE fills the work area
+ *   (IsZoomed, WS_MAXIMIZE), SC_RESTORE brings the old rectangle back,
+ *   SC_CLOSE closes (WM_CLOSE: the window is destroyed).
  * - Timers: SetTimer for a window returns its id; WM_TIMER (wParam the
  *   id) comes no sooner than the interval, after posted messages;
  *   KillTimer returns TRUE once. A window-less timer with a TIMERPROC
@@ -475,6 +478,18 @@ int main(void) {
     menus();
     children();
     icons();
+    HWND zw = CreateWindowExW(0, L"User32TestHooks", L"zoom", WS_OVERLAPPEDWINDOW, 30, 40, 300, 200, NULL, NULL,
+                              GetModuleHandleW(NULL), NULL);
+    RECT wa, zr;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    SendMessageW(zw, WM_SYSCOMMAND, SC_MAXIMIZE, 0);
+    CHECK(IsZoomed(zw) && (GetWindowLongW(zw, GWL_STYLE) & WS_MAXIMIZE));
+    CHECK(GetWindowRect(zw, &zr) && zr.left == wa.left && zr.top == wa.top && zr.right == wa.right
+          && zr.bottom == wa.bottom);
+    SendMessageW(zw, WM_SYSCOMMAND, SC_RESTORE, 0);
+    CHECK(!IsZoomed(zw) && GetWindowRect(zw, &zr) && zr.left == 30 && zr.top == 40 && zr.right == 330);
+    SendMessageW(zw, WM_SYSCOMMAND, SC_CLOSE, 0);
+    CHECK(!IsWindow(zw));
     RECT ra, rb, rc;
     CHECK(SetRect(&ra, 0, 0, 10, 10) && SetRect(&rb, 5, 5, 15, 15) && !IsRectEmpty(&ra));
     CHECK(IntersectRect(&rc, &ra, &rb) && rc.left == 5 && rc.right == 10);

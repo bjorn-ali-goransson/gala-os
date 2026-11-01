@@ -43,6 +43,13 @@ const WM_GETTEXT: u32 = 0x000d;
 const WM_GETTEXTLENGTH: u32 = 0x000e;
 const WM_WINDOWPOSCHANGING: u32 = 0x0046;
 const WM_WINDOWPOSCHANGED: u32 = 0x0047;
+const WM_CLOSE: u32 = 0x0010;
+const WM_SYSCOMMAND: u32 = 0x0112;
+const SC_MINIMIZE: usize = 0xf020;
+const SC_MAXIMIZE: usize = 0xf030;
+const SC_CLOSE: usize = 0xf060;
+const SC_RESTORE: usize = 0xf120;
+const WS_MAXIMIZE: u32 = 0x0100_0000;
 const WS_DISABLED: u32 = 0x0800_0000;
 const CW_USEDEFAULT: i32 = 0x8000_0000u32 as i32;
 const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
@@ -655,7 +662,8 @@ pub extern "system" fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize {
         GWL_STYLE => {
             (w.style
                 | if w.visible { 0x1000_0000 } else { 0 }
-                | if w.disabled { WS_DISABLED } else { 0 }) as i32 as isize
+                | if w.disabled { WS_DISABLED } else { 0 }
+                | if w.zoomed { WS_MAXIMIZE } else { 0 }) as i32 as isize
         }
         GWL_EXSTYLE => w.ex_style as i32 as isize,
         GWLP_USERDATA => w.user_data,
@@ -1018,11 +1026,55 @@ pub extern "system" fn ScrollWindowEx(
     2
 }
 
+// ---- Maximizing ----
+
+/// IsZoomed: the window is maximized.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsZoomed(hwnd: Hwnd) -> i32 {
+    i32::from(window(hwnd).is_some_and(|w| w.zoomed))
+}
+
+/// SC_MAXIMIZE/SC_RESTORE: the top-level window fills the work area, its
+/// rectangle kept for restoring.
+fn maximize(hwnd: Hwnd, on: bool) {
+    let Some(i) = index_of(hwnd) else { return };
+    let Some(w) = window(hwnd) else { return };
+    if w.parent != 0 || w.zoomed == on {
+        return;
+    }
+    let target = if on {
+        let (_, work) = crate::monitor::screen();
+        with(|s| {
+            s.windows[i].restore = [w.x, w.y, w.w, w.h];
+            s.windows[i].zoomed = true;
+        });
+        [work[0], work[1], work[2] - work[0], work[3] - work[1]]
+    } else {
+        with(|s| s.windows[i].zoomed = false);
+        w.restore
+    };
+    SetWindowPos(hwnd, 0, target[0], target[1], target[2], target[3], SWP_NOZORDER | 0x10);
+}
+
 // ---- DefWindowProc's part ----
 
 /// What DefWindowProc does for the messages of this module.
 pub fn def_window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Option<isize> {
     match msg {
+        // The window menu's commands (and the caption buttons'): close,
+        // maximize, restore; minimizing is the desktop's own.
+        WM_SYSCOMMAND => {
+            match wparam & 0xfff0 {
+                SC_CLOSE => {
+                    SendMessageW(hwnd, WM_CLOSE, 0, 0);
+                }
+                SC_MAXIMIZE => maximize(hwnd, true),
+                SC_RESTORE => maximize(hwnd, false),
+                SC_MINIMIZE => {}
+                _ => {}
+            }
+            Some(0)
+        }
         WM_SETTEXT => {
             let i = index_of(hwnd)?;
             let mut title = [0u16; 128];

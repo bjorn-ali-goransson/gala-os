@@ -177,7 +177,8 @@ implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
   kernel compositor, checked by screen pixels in a UEFI boot test; a
   taskbar with the camel start button, a PS/2 mouse and a start menu;
   W2: a shaded desktop (wallpaper, shadows, rounded frames, taskbar
-  buttons, clock) and mouse/keyboard input for programs
+  buttons, clock) and mouse/keyboard input for programs; W4 step 1: the
+  Windows 11 look (Selawik text, the fortress start button, maximize)
 
 ## Next
 Direction from the project owner (2026-10-30): multiprocessor support, then
@@ -501,6 +502,10 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    its thread Ready and spinning in NtYieldExecution after the other one
    ended; it passes alone. To hunt (docs/WORKFLOW.md, "Hunting a rare
    hang"); log in the session's notes: target/failed/rtl_test.log.
+   Seen once (2026-11-01, full suite): sshd_password's sshd.exe ended
+   with an unhandled access violation at 0xffffd0000013f948 (a
+   kernel-half address read from user mode) after ReadFileEx ERROR 38
+   lines; it passes alone. To hunt.
    Progress (2026-11-01): xtask fetches the installer (PREBUILT
    "filezilla", 7-Zip) into C:\filezilla. `fzsftp` passes: fzsftp.exe -V
    prints PuTTY's version report (needed DeleteFileA, `_acmdln`,
@@ -531,9 +536,24 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    (GetDIBits/SetDIBits/SetDIBitsToDevice/StretchDIBits), GdiFlush,
    SetMenuInfo, the keyboard layout, accelerators, the RECT helpers. It
    now stops at gdi32's CreateDIBitmap.
-W4. Later: a user-mode shell (the taskbar and start menu out of the
-   kernel), window resizing (WM_SIZE), maximize, keyboard focus per
-   window, a proportional font.
+W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
+   as we can with regards to their visuals"; and the owner's fortress as
+   the start icon and the fortress with the wordmark as the watermark,
+   so an SVG renderer): step 1 done (2026-11-01): Windows 11's shell in
+   the compositor (light captions with min/max/close, a centred
+   translucent taskbar, a centred start menu with search, Pinned and
+   Recommended, the clock's format), text in Selawik baked by xtask with
+   fontdue, the owner's SVGs baked with resvg, the wallpaper's mark;
+   WM_SYSCOMMAND from the caption buttons with maximize/restore in
+   user32 (IsZoomed, WS_MAXIMIZE). Next: step 2, proportional text for
+   programs: gdi32 rasterizes Selawik at run time (fontdue in gdi32;
+   "Segoe UI", "MS Shell Dlg" and the default faces map to it, monospace
+   faces stay on Noto), so wx's text measures and looks as on Windows.
+   Step 3: uxtheme with themes on and Windows 11-style control drawing.
+   Later: a user-mode shell (the taskbar and start menu out of the
+   kernel), window resizing by the frame, keyboard focus per window.
+
+
 
 Agreed order, updated (2026-11-01): SQL Server's SHUTDOWN first (done);
 then

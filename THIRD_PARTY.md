@@ -58,20 +58,30 @@ Rules for this file:
 | `spin` | 0.12.3 | MIT | Spinlock for the serial console. |
 | `smoltcp` | 0.12.0 | 0BSD | TCP/IP stack (`kernel/src/net`); features `medium-ethernet`, `medium-ip` (loopback), `proto-ipv4`, `socket-tcp` and `alloc` (only so that sockets own the buffers we allocate fallibly; socket sets are pre-filled to a fixed size so smoltcp never grows them). |
 | `managed`, `heapless`, `hash32`, `byteorder`, `bitflags` 1, `cfg-if`, `stable_deref_trait` | 0.8.0, 0.8.0, 0.3.1, 1.5.0, 1.3.2, 1.0.5, 1.2.1 | 0BSD; MIT OR Apache-2.0 (byteorder: Unlicense OR MIT) | smoltcp's dependencies. |
-| `noto-sans-mono-bitmap` | 0.3.2 | MIT (crate); the glyphs are rasterized from Noto Sans Mono, SIL Open Font License 1.1 | Pre-rasterized font for the on-screen console (`console.rs`), the desktop's captions, taskbar and start menu (`nt/desktop/`) and gala's gdi32 text output (`user/gdi32`); the basic-Latin subset, regular and bold 16 px and bold 24 px. |
+| `noto-sans-mono-bitmap` | 0.3.2 | MIT (crate); the glyphs are rasterized from Noto Sans Mono, SIL Open Font License 1.1 | Pre-rasterized font for the on-screen console (`console.rs`) and gala's gdi32 text output (`user/gdi32`); the basic-Latin subset, regular and bold 16 px and bold 24 px. |
 
-The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `screenshot` is its own, uncompressed).
+## Fonts
+
+| Font | Version | Source | License | Use |
+|---|---|---|---|---|
+| Selawik (regular, semilight, semibold, bold) | 1.01 (`Selawik_Release.zip`, SHA-256 `3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423`, measured) | github.com/microsoft/Selawik releases | SIL Open Font License 1.1, Reserved Font Name "Selawik" (`fonts/selawik/LICENSE.txt`) | `fonts/selawik/*.ttf`, unmodified. `cargo xtask bake-fonts` rasterizes them into `kernel/assets/ui-*.glyphs` (the desktop's captions, taskbar and start menu). An open replacement metric-compatible with Segoe UI; no Segoe UI file is used. |
 
 ## Artwork
 
-- `kernel/assets/camel.png` and the `camel20/40/64.rgba` made
-  from it (the start button and start menu): the project owner's drawing,
-  supplied for gala on 2026-11-01; not third-party.
+- `kernel/assets/fortress.svg` (the start button, the start menu's avatar
+  and the wallpaper's mark) and `kernel/assets/wordmark.svg` (the
+  wordmark "قلعة" under the mark): the project owner's artwork, supplied
+  for gala on 2026-11-01; the `.alpha` files are rendered from them by
+  `cargo xtask bake-icons`. Not third-party.
+- `kernel/assets/camel.png`: the project owner's earlier start-button
+  drawing (2026-11-01), unused since the fortress replaced it.
 
 ## Rust crate dependencies of host tools (not in the kernel or images)
 
 | Crate | Version | License | Use |
 |---|---|---|---|
+| `fontdue` | 0.9.5 (default features off, `hashbrown`) | MIT OR Apache-2.0 OR Zlib | xtask `bake-fonts`: rasterizes Selawik into the kernel's glyph files. Its dependencies: `ttf-parser` 0.25.1, `hashbrown` 0.15.5, `allocator-api2`, `equivalent`, `foldhash` (MIT OR Apache-2.0). |
+| `resvg` | 0.49.0 (default features off) | Apache-2.0 OR MIT | xtask `bake-icons`: renders the owner's SVGs into alpha masks. With `usvg` 0.49.0, `tiny-skia`/`tiny-skia-path` 0.12.0, `svgtypes` 0.16.1, `roxmltree` 0.21.2, `simplecss` 0.2.2, `kurbo` 0.13.1, `euclid` 0.22.14, `png` 0.18.1, `flate2` 1.1.10, `miniz_oxide` 0.8.9/0.9.1, `zlib-rs` 0.6.8, `fdeflate` 0.3.7, `crc32fast`, `adler2`, `simd-adler32`, `bytemuck`, `arrayref`, `arrayvec`, `bitflags` 2, `core_maths`, `data-url`, `float-cmp`, `imagesize`, `log`, `memchr`, `pico-args`, `polycool`, `rgb`, `siphasher`, `strict-num` (MIT OR Apache-2.0 for most; `tiny-skia`: BSD-3-Clause; `zlib-rs`: Zlib; `core_maths`, `imagesize`, `strict-num`, `float-cmp`, `pico-args`: MIT; none is linked into gala). |
 | `libc` | 0.2.191 (pinned) | MIT OR Apache-2.0 | gala-um: the kernel crate's optional `hosted` feature (`kernel/src/hosted`, never in the kernel binary): memfd_create, mmap, mprotect, sigaction, sigaltstack, pthread_sigmask, prctl (syscall user dispatch), arch_prctl. |
 
 ## Host tools used by the build (not linked or shipped)

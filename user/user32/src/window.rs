@@ -59,7 +59,7 @@ unsafe extern "system" {
 }
 
 pub const BORDER: i32 = 1;
-pub const CAPTION: i32 = 30;
+pub const CAPTION: i32 = 32;
 const MAX_CLASSES: usize = 32;
 pub(crate) const MAX_WINDOWS: usize = 512;
 const QUEUE: usize = 256;
@@ -129,6 +129,9 @@ pub(crate) struct Window {
     /// the bottom, top-level windows at the top).
     pub(crate) z: i64,
     pub(crate) instance: usize,
+    /// Maximized (SC_MAXIMIZE) and the rectangle SC_RESTORE goes back to.
+    pub(crate) zoomed: bool,
+    pub(crate) restore: [i32; 4],
 }
 
 #[derive(Clone, Copy)]
@@ -184,6 +187,8 @@ pub(crate) const NO_WINDOW: Window = Window {
     disabled: false,
     z: 0,
     instance: 0,
+    zoomed: false,
+    restore: [0; 4],
 };
 const NO_MSG: Msg =
     Msg { hwnd: 0, message: 0, wparam: 0, lparam: 0, time: 0, pt: [0; 2], private: 0 };
@@ -639,6 +644,8 @@ pub extern "system" fn CreateWindowExW(
             disabled: false,
             z: crate::tree::next_z(false),
             instance: instance as usize,
+            zoomed: false,
+            restore: [0; 4],
         };
         Some(i)
     });

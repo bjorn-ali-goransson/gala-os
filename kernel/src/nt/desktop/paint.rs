@@ -4,7 +4,6 @@
 //! Colours are 0x00RRGGBB on the screen and 0xAARRGGBB in layers.
 
 use alloc::vec::Vec;
-use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
 
 /// `bg` moved toward `fg` by t/255 (alpha bits of the result: none).
 pub fn blend(bg: u32, fg: u32, t: u8) -> u32 {
@@ -112,30 +111,92 @@ pub fn shadow_alpha(x: i64, y: i64, r: (i64, i64, i64, i64), reach: i64, strengt
     (strength * t / s2 * t / s2).clamp(0, 255) as u8
 }
 
-/// Fonts: the console's Noto Sans Mono bitmaps.
-#[derive(Clone, Copy)]
+/// The desktop's fonts: Selawik (an open-source stand-in for Segoe UI)
+/// rasterized at build time (`cargo xtask bake-fonts`): sizes in pixels,
+/// as Windows 11's shell uses them (12 for captions and the taskbar, 14
+/// semibold for section headings...).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)] // the larger sizes: for the shell's coming parts
 pub enum Font {
-    Regular,
-    Bold,
-    Large,
+    Ui12,
+    Ui12Semibold,
+    Ui14Semibold,
+    Ui20Semibold,
+    Ui28Semilight,
 }
 
+static UI12: &[u8] = include_bytes!("../../../assets/ui-12-regular.glyphs");
+static UI12SB: &[u8] = include_bytes!("../../../assets/ui-12-semibold.glyphs");
+static UI14SB: &[u8] = include_bytes!("../../../assets/ui-14-semibold.glyphs");
+static UI20SB: &[u8] = include_bytes!("../../../assets/ui-20-semibold.glyphs");
+static UI28SL: &[u8] = include_bytes!("../../../assets/ui-28-semilight.glyphs");
+
+/// A glyph: advance (1/16 pixel), the bitmap's top-left from the pen at
+/// the baseline, its size, its coverage.
+struct Glyph<'a> {
+    advance: i64,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    coverage: &'a [u8],
+}
+
+const TABLE: usize = 10;
+const ENTRY: usize = 14;
+
 impl Font {
-    fn parts(self) -> (FontWeight, RasterHeight) {
+    fn data(self) -> &'static [u8] {
         match self {
-            Font::Regular => (FontWeight::Regular, RasterHeight::Size16),
-            Font::Bold => (FontWeight::Bold, RasterHeight::Size16),
-            Font::Large => (FontWeight::Bold, RasterHeight::Size24),
+            Font::Ui12 => UI12,
+            Font::Ui12Semibold => UI12SB,
+            Font::Ui14Semibold => UI14SB,
+            Font::Ui20Semibold => UI20SB,
+            Font::Ui28Semilight => UI28SL,
         }
     }
 
-    pub fn advance(self) -> i64 {
-        let (w, h) = self.parts();
-        get_raster_width(w, h) as i64
+    fn i16_at(self, at: usize) -> i64 {
+        let d = self.data();
+        d.get(at..at + 2).map_or(0, |b| i64::from(i16::from_le_bytes([b[0], b[1]])))
     }
 
+    pub fn ascent(self) -> i64 {
+        self.i16_at(6)
+    }
+
+    /// The line height (ascent + descent).
     pub fn height(self) -> i64 {
-        self.parts().1.val() as i64
+        self.ascent() + self.i16_at(8)
+    }
+
+    fn glyph(self, c: char) -> Glyph<'static> {
+        let code = u32::from(c);
+        let code = if (0x20..=0xff).contains(&code) { code } else { u32::from('?') };
+        let d = self.data();
+        let e = TABLE + (code as usize - 0x20) * ENTRY;
+        let u16_at = |at: usize| {
+            d.get(at..at + 2).map_or(0, |b| i64::from(u16::from_le_bytes([b[0], b[1]])))
+        };
+        let w = u16_at(e + 6);
+        let h = u16_at(e + 8);
+        let off = d
+            .get(e + 10..e + 14)
+            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+        let start = TABLE + 224 * ENTRY + off;
+        Glyph {
+            advance: self.i16_at(e),
+            x: self.i16_at(e + 2),
+            y: self.i16_at(e + 4),
+            w,
+            h,
+            coverage: d.get(start..start + (w * h) as usize).unwrap_or(&[]),
+        }
+    }
+
+    /// The width of `text` in pixels.
+    pub fn measure(self, text: impl Iterator<Item = char>) -> i64 {
+        (text.map(|c| self.glyph(c).advance).sum::<i64>() + 8) / 16
     }
 }
 
@@ -206,9 +267,8 @@ impl Canvas {
         }
     }
 
-    /// Text at (x, y) (its top), no further right than `max_x`; where it
-    /// ended. What the font lacks shows as '?'; text that does not fit
-    /// ends with "..".
+    /// Text with its top at (x, y), no further right than `max_x` (what
+    /// does not fit ends with "..."); where it ended.
     pub fn text(
         &mut self,
         x: i64,
@@ -218,28 +278,37 @@ impl Canvas {
         font: Font,
         max_x: i64,
     ) -> i64 {
-        let adv = font.advance();
-        let (weight, size) = font.parts();
-        let count = text.clone().count() as i64;
-        let fits = x + count * adv <= max_x;
-        let room = if fits { count } else { ((max_x - x) / adv - 2).max(0) };
-        let mut cx = x;
-        let dots = if fits { 0 } else { 2 };
-        for c in text.take(room as usize).chain(core::iter::repeat_n('.', dots)) {
-            let raster = get_raster(c, weight, size).or_else(|| get_raster('?', weight, size));
-            if let Some(raster) = raster {
-                for (dy, row) in raster.raster().iter().enumerate() {
-                    for (dx, &cov) in row.iter().enumerate() {
-                        self.put(cx + dx as i64, y + dy as i64, rgb, u32::from(cov));
+        let fits = x + font.measure(text.clone()) <= max_x;
+        let dots = font.measure("...".chars());
+        let mut pen = x * 16;
+        let baseline = y + font.ascent();
+        let mut draw = |c: char, pen: &mut i64| {
+            let g = font.glyph(c);
+            let gx = (*pen + 8) / 16 + g.x;
+            for j in 0..g.h {
+                for i in 0..g.w {
+                    let a = u32::from(g.coverage[(j * g.w + i) as usize]);
+                    if a != 0 {
+                        self.put(gx + i, baseline + g.y + j, rgb, a);
                     }
                 }
             }
-            cx += adv;
+            *pen += g.advance;
+        };
+        for c in text {
+            if !fits && (pen + font.glyph(c).advance + 8) / 16 + dots > max_x {
+                for d in "...".chars() {
+                    draw(d, &mut pen);
+                }
+                return (pen + 8) / 16;
+            }
+            draw(c, &mut pen);
         }
-        cx
+        (pen + 8) / 16
     }
 
     /// A `size` x `size` RGBA picture at (x, y).
+    #[allow(dead_code)]
     pub fn image(&mut self, x: i64, y: i64, rgba: &[u8], size: i64) {
         for j in 0..size {
             for i in 0..size {
@@ -247,6 +316,21 @@ impl Canvas {
                 let Some(p) = rgba.get(k..k + 4) else { return };
                 let rgb = u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2]);
                 self.put(x + i, y + j, rgb, u32::from(p[3]));
+            }
+        }
+    }
+
+    /// A `size` x `size` alpha mask at (x, y) in `top`..`bottom` (a
+    /// vertical gradient) at most alpha `a`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mask(&mut self, x: i64, y: i64, alpha: &[u8], size: i64, top: u32, bottom: u32, a: u32) {
+        for j in 0..size {
+            let c = lerp(top, bottom, j, size - 1);
+            for i in 0..size {
+                let m = u32::from(alpha.get((j * size + i) as usize).copied().unwrap_or(0));
+                if m != 0 {
+                    self.put(x + i, y + j, c, m * a / 255);
+                }
             }
         }
     }
@@ -267,114 +351,107 @@ fn sin1024(deg: i64) -> i64 {
     sign * 4 * p * 1024 / (40500 - p)
 }
 
-/// A cheap hash of a point (the stars).
-fn hash(x: i64, y: i64) -> u32 {
-    let mut h = (x as u32).wrapping_mul(0x9e37_79b1) ^ (y as u32).wrapping_mul(0x85eb_ca77);
-    h ^= h >> 15;
-    h = h.wrapping_mul(0x2c1b_3c6d);
-    h ^= h >> 12;
-    h
+/// The integer square root.
+fn isqrt(v: i64) -> i64 {
+    if v <= 0 {
+        return 0;
+    }
+    let mut x = v;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + v / x) / 2;
+    }
+    x
 }
 
-/// The wallpaper: a desert at dusk. A night sky fading to a warm horizon,
-/// stars high up, a low sun with a glow, and three ranges of dunes, the
-/// nearer ones darker. Laid out once per screen size.
+/// The wallpaper, in the spirit of Windows 11's (its own design, not
+/// Microsoft's artwork): a deep blue lit from just below the middle, with
+/// three translucent ribbons of light flowing across. Laid out once per
+/// screen size.
 pub struct Wallpaper {
     w: i64,
     h: i64,
-    horizon: i64,
-    /// The sky's colour per row.
-    sky: Vec<u32>,
-    /// Where each dune range starts per column (far to near).
-    dunes: [Vec<i64>; 3],
-    sun: (i64, i64, i64),
+    /// Each ribbon's centre line per column.
+    ribbons: [Vec<i64>; 3],
+    /// The watermark (Gala's fortress and name, faint white) and its place.
+    mark: Option<(Canvas, i64, i64)>,
 }
 
-/// Dune ranges: (top colour, bottom colour, ridge highlight).
-const DUNES: [(u32, u32, u32); 3] = [
-    (0x00_d8_92_5a, 0x00_b7_70_44, 0x00_f0_b0_78),
-    (0x00_b6_66_3a, 0x00_8c_4a_2a, 0x00_d0_84_50),
-    (0x00_86_46_28, 0x00_52_28_18, 0x00_a4_5e_36),
-];
+/// Gala's fortress (the project owner's Masmak Fortress drawing, rendered
+/// by `cargo xtask bake-icons`) as alpha masks.
+pub static FORTRESS24: &[u8; 24 * 24] = include_bytes!("../../../assets/fortress-24.alpha");
+pub static FORTRESS96: &[u8; 96 * 96] = include_bytes!("../../../assets/fortress-96.alpha");
+/// Gala's wordmark (قلعة, "qal'a"), the owner's lettering: width and
+/// height (u16 each), then its alpha mask.
+static WORDMARK: &[u8] = include_bytes!("../../../assets/wordmark.alpha");
+
+/// The radial light: from the centre outward.
+const LIGHT: [(i64, u32); 4] =
+    [(0, 0x00_a9_d1_fb), (380, 0x00_4f_8f_e6), (700, 0x00_1f_55_b8), (1024, 0x00_0b_2a_6e)];
+/// The ribbons' colour, thickness (hundredths of the height) and strength.
+const RIBBONS: [(u32, i64, i64); 3] =
+    [(0x00_dc_ee_ff, 9, 120), (0x00_b6_d8_ff, 6, 95), (0x00_ff_ff_ff, 3, 140)];
 
 impl Wallpaper {
     pub fn new(w: i64, h: i64) -> Option<Wallpaper> {
-        let horizon = h * 62 / 100;
-        let stops = [
-            (0, 0x00_0a_12_2c),
-            (h * 28 / 100, 0x00_1c_2a_58),
-            (h * 48 / 100, 0x00_5a_48_7c),
-            (horizon, 0x00_f4_a2_58),
-        ];
-        let mut sky = Vec::new();
-        sky.try_reserve_exact(h as usize).ok()?;
-        sky.extend((0..h).map(|y| gradient(&stops, y)));
-        // (base below the horizon, amplitude, two waves: degrees across
-        // the screen and phase), all in hundredths of the screen.
-        let ranges = [
-            (3, 4, (470, 30), (1100, 50)),
-            (11, 5, (300, 120), (900, 10)),
-            (23, 6, (220, 250), (700, 200)),
-        ];
-        let mut dunes: [Vec<i64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for (k, &(base, amp, (f1, p1), (f2, p2))) in ranges.iter().enumerate() {
-            let v = &mut dunes[k];
+        // (base height, amplitude, degrees across, phase), hundredths.
+        let shapes = [(58, 12, 260, 200), (66, 9, 330, 40), (61, 6, 420, 120)];
+        let mut ribbons: [Vec<i64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for (k, &(base, amp, f, p)) in shapes.iter().enumerate() {
+            let v = &mut ribbons[k];
             v.try_reserve_exact(w as usize).ok()?;
-            let (base, amp) = (horizon + h * base / 100, h * amp / 100);
-            v.extend((0..w).map(|x| {
-                let s = 2 * sin1024(x * f1 / w.max(1) + p1) + sin1024(x * f2 / w.max(1) + p2);
-                base - amp * s / (3 * 1024)
-            }));
+            v.extend(
+                (0..w)
+                    .map(|x| h * base / 100 - h * amp / 100 * sin1024(x * f / w.max(1) + p) / 1024),
+            );
         }
-        let sun = (w * 70 / 100, horizon - h * 3 / 100, (h * 5 / 100).max(4));
-        Some(Wallpaper { w, h, horizon, sky, dunes, sun })
+        // The watermark: the fortress over the wordmark, at the bottom
+        // right above the taskbar (laid out for it), as faint white.
+        let (ww, wh) = (
+            i64::from(u16::from_le_bytes([WORDMARK[0], WORDMARK[1]])),
+            i64::from(u16::from_le_bytes([WORDMARK[2], WORDMARK[3]])),
+        );
+        let (mw, mh) = (ww.max(96), 96 + 10 + wh);
+        let mut mark = Canvas::new(mw, mh, 0);
+        if let Some(m) = mark.as_mut() {
+            m.mask((mw - 96) / 2, 0, FORTRESS96, 96, 0x00ff_ffff, 0x00ff_ffff, 255);
+            let (x0, y0) = ((mw - ww) / 2, 106);
+            for j in 0..wh {
+                for i in 0..ww {
+                    let a =
+                        u32::from(WORDMARK.get(4 + (j * ww + i) as usize).copied().unwrap_or(0));
+                    if a != 0 {
+                        m.put(x0 + i, y0 + j, 0x00ff_ffff, a);
+                    }
+                }
+            }
+        }
+        let mark = mark.map(|m| (m, w - mw - 28, h - 48 - mh - 24));
+        Some(Wallpaper { w, h, ribbons, mark })
     }
 
     pub fn pixel(&self, x: i64, y: i64) -> u32 {
         if x < 0 || y < 0 || x >= self.w || y >= self.h {
             return 0;
         }
-        // The nearest dune range covering the point.
-        for k in (0..3).rev() {
-            let top = self.dunes[k][x as usize];
-            if y >= top {
-                let (c0, c1, ridge) = DUNES[k];
-                let depth = y - top;
-                if depth < 2 {
-                    return blend(c0, ridge, if depth == 0 { 200 } else { 110 });
-                }
-                // Lit from the sun's side: lighter where the slope faces it
-                // (the slope over 24 pixels, so the light changes slowly),
-                // and the light fades with depth.
-                let ahead = self.dunes[k][(x + 12).min(self.w - 1) as usize];
-                let behind = self.dunes[k][(x - 12).max(0) as usize];
-                let slope = (ahead - behind).clamp(-24, 24);
-                let fade = (40 - depth).max(0);
-                let light = ((slope + 24) * 70 / 48) * fade / 40 + 12;
-                return blend(lerp(c0, c1, depth, self.h - top), 0x00_ff_d0_90, light as u8);
+        let (cx, cy) = (self.w / 2, self.h * 58 / 100);
+        let reach = isqrt(cx * cx + cy * cy).max(1);
+        let d = isqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) * 1024 / reach;
+        let mut c = gradient(&LIGHT, d.min(1024));
+        for (k, &(color, thick, strength)) in RIBBONS.iter().enumerate() {
+            let t = (self.h * thick / 100).max(1);
+            let off = (y - self.ribbons[k][x as usize]).abs();
+            if off < t {
+                let f = t - off;
+                c = blend(c, color, (strength * f / t * f / t).min(255) as u8);
             }
         }
-        let mut c = self.sky[y as usize];
-        // The sun and its glow.
-        let (sx, sy, r) = self.sun;
-        let d2 = (x - sx) * (x - sx) + (y - sy) * (y - sy);
-        let glow = 9 * r * r;
-        if d2 < glow {
-            let t = glow - d2;
-            c = blend(c, 0x00_ff_c0_78, (150 * t / glow * t / glow) as u8);
-        }
-        if d2 <= r * r {
-            let edge = r * r - d2;
-            let a = (edge * 255 / (2 * r).max(1)).min(255) as u8;
-            c = blend(c, 0x00_ff_ea_b8, a);
-        }
-        // Stars, fading toward the horizon.
-        let high = self.horizon * 70 / 100;
-        if y < high {
-            let hsh = hash(x, y);
-            if hsh.is_multiple_of(1400) {
-                let b = (90 + (hsh >> 20) % 166) as i64 * (high - y) / high;
-                c = blend(c, 0x00_ff_ff_ff, b as u8);
+        if let Some((m, mx, my)) = &self.mark {
+            let v = m.get(x - mx, y - my);
+            if v >> 24 != 0 {
+                // The mark's own alpha, at a fifth: barely there.
+                c = blend(c, v & 0x00ff_ffff, ((v >> 24) / 5) as u8);
             }
         }
         c

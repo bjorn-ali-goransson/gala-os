@@ -2053,49 +2053,66 @@ modules. Replayed value changes keep the key's last-write time. Tests:
 deleted value and key, a volatile key) and host tests of the records,
 replay and snapshot.
 
-## Windows on the screen (W1, W2)
+## Windows on the screen (W1, W2, W4)
 
-A small window manager and shell, in the kernel for now.
+A small window manager and shell, in the kernel for now. Since W4 it
+imitates Windows 11's look (as the project owner asked, 2026-11-01): the
+layout, metrics and colours of its captions, taskbar and start menu,
+with gala's own artwork (the owner's fortress and wordmark) and an open
+font (Selawik); no Microsoft logo, font, wallpaper or icon file.
 
 - **Compositor** (`kernel/src/nt/desktop/`): top-level windows bottom to
   top, each with an owner process, a screen position, its outer size, a
   title, a rendered caption bar and a client pixel buffer (0x00RRGGBB).
   Every screen pixel is composed in layers (`Desktop::pixel`): the
   wallpaper; each shown window (not hidden, not minimized) with a soft
-  shadow below it and its rounded shape (radius 8 above, 6 below,
+  shadow below it (none when maximized) and its rounded shape (radius 8,
+  square when maximized,
   anti-aliased by 4 x 4 samples) holding the outline, the caption and the
   client area; the translucent taskbar; the start menu and its shadow;
   the pointer. Changes collect damage rectangles; `with`, `pointer_event`,
   `key_event` and `tick` redraw them row by row through
   `platform::screen_write_row`; the first use paints the whole screen.
   `paint.rs` has the drawing: integer-only blending and gradients, an ARGB
-  `Canvas` (rounded rectangles, outlines, text in Noto Sans Mono regular
-  and bold 16 px and bold 24 px, RGBA pictures), the shadow falloff
-  (quadratic in the squared distance) and the wallpaper (a sky gradient
-  with stars, a sun with a glow, three ranges of dunes from sums of sines
-  (Bhaskara's approximation), lit by their slope). Windows of a process
+  `Canvas` (rounded rectangles, outlines, tinted alpha masks, text in the
+  baked Selawik sizes of `paint::Font`: proportional, advances in 1/16
+  px, "..." truncation), the shadow falloff (quadratic in the squared
+  distance) and the wallpaper (a radial blue gradient, three translucent
+  ribbons from sines (Bhaskara's approximation), and the fortress over
+  the wordmark in faint white at the bottom right). Glyphs and masks are
+  baked by xtask (`bake-fonts`, `bake-icons`; see WORKFLOW): the kernel
+  embeds coverage bytes only. Windows of a process
   that ends are destroyed.
-- **Frame**: a 1-pixel outline and a 30-pixel caption (user32's metrics
-  match: `user/user32/src/window.rs` BORDER/CAPTION) with an accent dot,
-  the title (bold when active), minimize and close buttons (46 px; close
-  turns red under the pointer). The active window's caption is indigo,
-  the others slate.
-- **Shell**: the bottom 48 rows are the taskbar: the camel (40 px) as the
-  start button (its click area reaches the screen's corner), a button per
-  window the programs show (in creation order; the active one lit with an
-  orange bar, minimized ones dimmed), and a UTC clock with the date
-  (`tick` every second from the input thread). The start menu (380 x
-  460, above the button) shows the camel, the name and version, the
-  programs of `PROGRAMS` whose files exist (checked outside the desktop's
-  lock before a click), and how many windows are open; an item's click
-  starts its program (`process::launch`: the boot user, its directory
-  current, new console handles).
+- **Frame**: a 1-pixel outline and a 32-pixel caption (user32's metrics
+  match: `user/user32/src/window.rs` BORDER/CAPTION), light grey, the
+  title at the left (greyed when inactive), minimize, maximize/restore
+  and close buttons (46 px each; close turns red under the pointer, the
+  others grey).
+- **Shell**: the bottom 48 rows are the translucent taskbar: centred, the
+  fortress as the start button and a 44-px button per window the
+  programs show (in creation order; a letter tile, an accent pill under
+  the active one, a grey one under the others), and at the right a UTC
+  clock over the date in 12-hour M/D/YYYY form (`tick` every second from
+  the input thread). The start menu (600 x 640, centred above the
+  taskbar) has a search box (typing filters the programs, Enter starts
+  the first, Esc or the Windows key closes; the Windows key also opens
+  it), "Pinned": a grid of tiles for the programs of `PROGRAMS` whose
+  files exist (checked outside the desktop's lock before a click),
+  "Recommended": the last four started, and a user foot with the
+  fortress as the avatar. A tile's click starts its program
+  (`process::launch`: the boot user, its directory current, new console
+  handles).
 - **Mouse** (`desktop::pointer`): a press on the start button toggles the
   menu; with the menu open, a press elsewhere only closes it. A taskbar
   button restores a minimized window, minimizes the active one, else
   raises and activates. A press on a caption raises, activates and starts
   a drag (the caption stays on the screen); the caption buttons act on
-  release over the same button: minimize, or WM_CLOSE to the program. In a
+  release over the same button: minimize (in the desktop), or
+  WM_SYSCOMMAND SC_MAXIMIZE/SC_RESTORE/SC_CLOSE to the program, as on
+  Windows; user32's DefWindowProc turns SC_CLOSE into WM_CLOSE and
+  maximizes to the work area (the screen above the taskbar) or back to
+  the kept restore rectangle with SetWindowPos, so programs see WM_SIZE.
+  The desktop marks a window maximized when it covers the work area. In a
   client area: raise, activate, WM_LBUTTONDOWN; moves and releases go to
   the window under the pointer or the one the button went down in
   (capture); right button likewise.

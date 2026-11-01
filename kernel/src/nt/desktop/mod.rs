@@ -25,59 +25,69 @@ use super::status::NtStatus;
 use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
 use alloc::vec::Vec;
-use paint::{Canvas, Font, Wallpaper, blend, lerp, over, round_coverage2, shadow_alpha};
+use paint::{Canvas, Font, Wallpaper, blend, over, round_coverage2, shadow_alpha};
 
-/// Frame metrics (what user32's GetSystemMetrics reports).
+/// Frame metrics (what user32's GetSystemMetrics reports): Windows 11's
+/// (a 1-pixel border, a 32-pixel caption, 46 x 32 caption buttons, 8-pixel
+/// rounded corners).
 pub const BORDER: u32 = 1;
-pub const CAPTION: u32 = 30;
+pub const CAPTION: u32 = 32;
 /// Corner radii of a window: above and below.
 const RADIUS: i64 = 8;
-const RADIUS_BOTTOM: i64 = 6;
+const RADIUS_BOTTOM: i64 = 8;
 /// The caption buttons' width.
 const CAPTION_BUTTON: i64 = 46;
-/// Soft shadows: how far they reach, how far down they fall, how dark.
-const SHADOW_REACH: i64 = 22;
-const SHADOW_DROP: i64 = 8;
-const SHADOW_ACTIVE: i64 = 110;
-const SHADOW_INACTIVE: i64 = 70;
+/// Soft shadows (Windows 11's are wide and light): reach, drop, darkness.
+const SHADOW_REACH: i64 = 26;
+const SHADOW_DROP: i64 = 6;
+const SHADOW_ACTIVE: i64 = 80;
+const SHADOW_INACTIVE: i64 = 45;
 /// Without a known screen (host tests of the windows alone).
 pub const DESKTOP_COLOR: u32 = 0x00_3a_6e_a5;
 
-/// The theme. Captions: the active window's deep indigo, the others
-/// slate; the outline matches.
-const CAPTION_ACTIVE: (u32, u32) = (0x00_34_47_6e, 0x00_22_30_4d);
-const CAPTION_INACTIVE: (u32, u32) = (0x00_4a_52_62, 0x00_3c_43_51);
-const CAPTION_HIGHLIGHT: u32 = 0x00_6c_80_a8;
-const OUTLINE_ACTIVE: u32 = 0x00_15_1f_33;
-const OUTLINE_INACTIVE: u32 = 0x00_2c_32_3c;
-const TITLE_ACTIVE: u32 = 0x00_f5_f7_fa;
-const TITLE_INACTIVE: u32 = 0x00_b4_bb_c8;
-const CLOSE_HOVER: u32 = 0x00_e5_48_4d;
-/// The camel's orange: the active indicators.
-const ACCENT: u32 = 0x00_f5_a5_24;
+/// The light theme, after Windows 11's: the caption takes the window's
+/// (Mica-like) background, the title is near-black on the active window
+/// and grey on the others; hovered buttons darken a little, close turns
+/// red.
+const CAPTION_ACTIVE: u32 = 0x00_ee_f2_f7;
+const CAPTION_INACTIVE: u32 = 0x00_f7_f8_fa;
+const OUTLINE_ACTIVE: u32 = 0x00_9c_a3_ad;
+const OUTLINE_INACTIVE: u32 = 0x00_cd_d1_d6;
+const TITLE_ACTIVE: u32 = 0x00_1b_1b_1b;
+const TITLE_INACTIVE: u32 = 0x00_8a_8a_8a;
+const BUTTON_HOVER: u32 = 0x00_df_e3_e9;
+const CLOSE_HOVER: u32 = 0x00_c4_2b_1c;
+/// Windows' default accent (blue): the active app's indicator.
+const ACCENT: u32 = 0x00_00_5f_b8;
+const TEXT: u32 = 0x00_1b_1b_1b;
+const TEXT_DIM: u32 = 0x00_5d_5d_5d;
 
-/// The taskbar: the bottom rows of the screen.
+/// The taskbar: the bottom rows of the screen, translucent light; the
+/// start button and the windows' buttons centred, the clock at the right.
 pub const TASKBAR: u32 = 48;
-const TASKBAR_TOP: u32 = 0x00_1e_26_38;
-const TASKBAR_BOTTOM: u32 = 0x00_11_16_22;
-const TASKBAR_ALPHA: u32 = 232;
-const TASKBAR_LINE: u32 = 0x00_3e_4b_66;
-const START: Rect = Rect { x: 4, y: 4, w: 44, h: 40 };
-const TASKS_X: i64 = 56;
-const TASK_W: i64 = 200;
-const CLOCK_W: i64 = 104;
+const TASKBAR_COLOR: u32 = 0x00_ee_f1_f6;
+const TASKBAR_ALPHA: u32 = 236;
+const TASKBAR_LINE: u32 = 0x00_d7_dc_e3;
+/// A taskbar button (the start button too) and the gap between them.
+const TASK_BUTTON: i64 = 44;
+const TASK_GAP: i64 = 4;
 
-/// The start menu: above the start button.
-pub const MENU_W: u32 = 380;
-pub const MENU_H: u32 = 460;
-const MENU_ITEMS_Y: i64 = 146;
-const MENU_ITEM_H: i64 = 44;
+/// The start menu: centred above the taskbar.
+pub const MENU_W: u32 = 600;
+pub const MENU_H: u32 = 640;
+/// The pinned programs' grid.
+const GRID_X: i64 = 32;
+const GRID_Y: i64 = 116;
+const TILE_W: i64 = 89;
+const TILE_H: i64 = 84;
+const GRID_COLUMNS: usize = 6;
+const MENU_COLOR: u32 = 0x00_f2_f4_f8;
+const MENU_BORDER: u32 = 0x00_d2_d6_dd;
 
-/// The start button's picture at 20, 40 and 64 pixels, RGBA (straight
-/// alpha), made from kernel/assets/camel.png (docs/WORKFLOW.md).
-static CAMEL40: &[u8; 40 * 40 * 4] = include_bytes!("../../../assets/camel40.rgba");
-static CAMEL64: &[u8; 64 * 64 * 4] = include_bytes!("../../../assets/camel64.rgba");
-static CAMEL20: &[u8; 20 * 20 * 4] = include_bytes!("../../../assets/camel20.rgba");
+/// The start button (where Windows has its logo) and the user's picture:
+/// Gala's fortress (paint::FORTRESS24), in a blue like Windows' logo.
+const LOGO_TOP: u32 = 0x00_2e_9b_f0;
+const LOGO_BOTTOM: u32 = 0x00_00_67_c0;
 
 /// The mouse pointer: '#' outline, '.' fill, ' ' transparent.
 const CURSOR: [&[u8; 12]; 19] = [
@@ -136,6 +146,10 @@ const MAX_INPUT: usize = 512;
 /// Window messages the desktop sends to programs.
 pub const WM_MOVE: u32 = 0x0003;
 pub const WM_CLOSE: u32 = 0x0010;
+pub const WM_SYSCOMMAND: u32 = 0x0112;
+pub const SC_CLOSE: u64 = 0xf060;
+pub const SC_MAXIMIZE: u64 = 0xf030;
+pub const SC_RESTORE: u64 = 0xf120;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
 pub const WM_LBUTTONDOWN: u32 = 0x0201;
 pub const WM_LBUTTONUP: u32 = 0x0202;
@@ -161,6 +175,7 @@ pub struct InputEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptionButton {
     Minimize,
+    Maximize,
     Close,
 }
 
@@ -191,9 +206,12 @@ pub struct Window {
     visible: bool,
     /// Minimized by the user (on the taskbar only).
     minimized: bool,
+    /// It fills the work area (square corners, no shadow; the maximize
+    /// button shows "restore").
+    maximized: bool,
     /// The caption bar's pixels (w x CAPTION) and the state they show.
     caption: Option<Canvas>,
-    caption_state: Option<(bool, Option<CaptionButton>)>,
+    caption_state: Option<(bool, Option<CaptionButton>, bool)>,
     /// The client area's pixels (client_w * client_h), white at first.
     client: Vec<u32>,
     /// The title (UTF-16).
@@ -240,21 +258,22 @@ impl Window {
 
     /// How much of window point (lx, ly) its rounded shape covers.
     fn coverage(&self, lx: i64, ly: i64) -> u8 {
-        round_coverage2(lx, ly, self.w.into(), self.h.into(), RADIUS, RADIUS_BOTTOM)
+        let (top, bottom) = if self.maximized { (0, 0) } else { (RADIUS, RADIUS_BOTTOM) };
+        round_coverage2(lx, ly, self.w.into(), self.h.into(), top, bottom)
     }
 
     /// The colour of window point (lx, ly) inside its shape.
     fn body(&self, lx: i64, ly: i64, active: bool) -> u32 {
         let (w, h) = (i64::from(self.w), i64::from(self.h));
         let b = i64::from(BORDER);
-        let inner =
-            round_coverage2(lx - b, ly - b, w - 2 * b, h - 2 * b, RADIUS - 1, RADIUS_BOTTOM - 1);
+        let (rt, rb) = if self.maximized { (0, 0) } else { (RADIUS - 1, RADIUS_BOTTOM - 1) };
+        let inner = round_coverage2(lx - b, ly - b, w - 2 * b, h - 2 * b, rt, rb);
         let outline = if active { OUTLINE_ACTIVE } else { OUTLINE_INACTIVE };
         if inner == 0 {
             return outline;
         }
         let c = if ly < b + i64::from(CAPTION) {
-            self.caption.as_ref().map_or(CAPTION_INACTIVE.0, |c| c.get(lx, ly - b) & 0x00ff_ffff)
+            self.caption.as_ref().map_or(CAPTION_INACTIVE, |c| c.get(lx, ly - b) & 0x00ff_ffff)
         } else {
             let (cw, _) = self.client_size();
             let (cx, cy) = (lx - b, ly - b - i64::from(CAPTION));
@@ -263,68 +282,67 @@ impl Window {
         blend(outline, c, inner)
     }
 
-    /// Draws the caption bar for its state.
+    /// Draws the caption bar for its state: the background, the title at
+    /// the left, minimize, maximize (or restore) and close at the right
+    /// with thin glyphs.
     fn render_caption(&mut self, active: bool, hover: Option<CaptionButton>) {
-        if self.caption_state == Some((active, hover)) && self.caption.is_some() {
+        let state = (active, hover, self.maximized);
+        if self.caption_state == Some(state) && self.caption.is_some() {
             return;
         }
         let (w, h) = (i64::from(self.w), i64::from(CAPTION));
-        let (top, bottom) = if active { CAPTION_ACTIVE } else { CAPTION_INACTIVE };
-        let Some(mut c) = Canvas::new(w, h, 0xff00_0000) else { return };
-        for y in 0..h {
-            let row = if y == 0 { CAPTION_HIGHLIGHT } else { lerp(top, bottom, y, h - 1) };
-            for x in 0..w {
-                c.put(x, y, row, 255);
-            }
-        }
-        // The buttons: minimize, close.
+        let bg = if active { CAPTION_ACTIVE } else { CAPTION_INACTIVE };
+        let Some(mut c) = Canvas::new(w, h, 0xff00_0000 | bg) else { return };
         let close_x = w - CAPTION_BUTTON - 1;
-        let min_x = close_x - CAPTION_BUTTON;
+        let max_x = close_x - CAPTION_BUTTON;
+        let min_x = max_x - CAPTION_BUTTON;
         let glyph = if active { TITLE_ACTIVE } else { TITLE_INACTIVE };
+        let fill = |c: &mut Canvas, x0: i64, color: u32| {
+            for y in 0..h {
+                for x in x0..x0 + CAPTION_BUTTON {
+                    c.put(x, y, color, 255);
+                }
+            }
+        };
         match hover {
-            Some(CaptionButton::Close) => {
-                for y in 0..h {
-                    for x in close_x..close_x + CAPTION_BUTTON {
-                        c.put(x, y, CLOSE_HOVER, 255);
-                    }
-                }
-            }
-            Some(CaptionButton::Minimize) => {
-                for y in 0..h {
-                    for x in min_x..min_x + CAPTION_BUTTON {
-                        c.put(x, y, 0x00ff_ffff, 34);
-                    }
-                }
-            }
+            Some(CaptionButton::Close) => fill(&mut c, close_x, CLOSE_HOVER),
+            Some(CaptionButton::Maximize) => fill(&mut c, max_x, BUTTON_HOVER),
+            Some(CaptionButton::Minimize) => fill(&mut c, min_x, BUTTON_HOVER),
             None => {}
         }
-        let (cx, cy) = (close_x + CAPTION_BUTTON / 2, h / 2);
+        let cy = h / 2;
+        // Close: an X of ten pixels, anti-aliased.
         let close_glyph = if hover == Some(CaptionButton::Close) { 0x00ff_ffff } else { glyph };
-        for t in -5..=5 {
-            c.put(cx + t, cy + t, close_glyph, 255);
-            c.put(cx + t, cy - t, close_glyph, 255);
-            // A little softness on the diagonals.
-            c.put(cx + t + 1, cy + t, close_glyph, 70);
-            c.put(cx + t + 1, cy - t, close_glyph, 70);
+        let cx = close_x + CAPTION_BUTTON / 2;
+        for t in -5..5 {
+            c.put(cx + t, cy + t, close_glyph, 230);
+            c.put(cx + t, cy - t - 1, close_glyph, 230);
+            c.put(cx + t + 1, cy + t, close_glyph, 60);
+            c.put(cx + t + 1, cy - t - 1, close_glyph, 60);
         }
-        let mx = min_x + CAPTION_BUTTON / 2;
-        for t in -5..=5 {
-            c.put(mx + t, cy, glyph, 255);
-        }
-        // The title, with a dot in the accent colour on the active window.
-        let mut x = 14;
-        if active {
-            c.round_rect(x, h / 2 - 4, 8, 8, 4, ACCENT, ACCENT, 255);
+        // Maximize: a ten-pixel square; restore: two overlapping ones.
+        let mx = max_x + CAPTION_BUTTON / 2 - 5;
+        if self.maximized {
+            c.round_outline(mx + 2, cy - 5, 8, 8, 1, glyph, 255);
+            for y in cy - 3..cy + 5 {
+                for x in mx..mx + 8 {
+                    c.put(x, y, bg, 255);
+                }
+            }
+            c.round_outline(mx, cy - 3, 8, 8, 1, glyph, 255);
         } else {
-            c.round_rect(x, h / 2 - 4, 8, 8, 4, TITLE_INACTIVE, TITLE_INACTIVE, 140);
+            c.round_outline(mx, cy - 5, 10, 10, 1, glyph, 255);
         }
-        x += 16;
+        // Minimize: a ten-pixel line.
+        let nx = min_x + CAPTION_BUTTON / 2 - 5;
+        for x in nx..nx + 10 {
+            c.put(x, cy, glyph, 255);
+        }
+        // The title, 12 pixels, at the left.
         let title = char::decode_utf16(self.title.iter().copied()).map(|c| c.unwrap_or('?'));
-        let font = if active { Font::Bold } else { Font::Regular };
-        let text = if active { TITLE_ACTIVE } else { TITLE_INACTIVE };
-        c.text(x, (h - font.height()) / 2, title, text, font, min_x - 8);
+        c.text(12, (h - Font::Ui12.height()) / 2, title, glyph, Font::Ui12, min_x - 8);
         self.caption = Some(c);
-        self.caption_state = Some((active, hover));
+        self.caption_state = Some(state);
     }
 }
 
@@ -386,6 +404,12 @@ pub struct Desktop {
     input: Vec<InputEvent>,
     /// A program the start menu asked to start (index into PROGRAMS).
     launch: Option<usize>,
+    /// What was typed in the start menu (ASCII, filters the programs).
+    search: [u8; 32],
+    search_len: usize,
+    /// The programs started from the menu, most recent first (PROGRAMS
+    /// indices; usize::MAX: none).
+    recent: [usize; 4],
     /// Each process's event to signal when input arrives for it
     /// (GalaWindowListen), and the processes with new input.
     listeners: Vec<(u64, ObjectRef)>,
@@ -423,6 +447,9 @@ impl Desktop {
             damage: Vec::new(),
             input: Vec::new(),
             launch: None,
+            search: [0; 32],
+            search_len: 0,
+            recent: [usize::MAX; 4],
             listeners: Vec::new(),
             woken: Vec::new(),
             alt: false,
@@ -501,6 +528,7 @@ impl Desktop {
             h,
             visible: false,
             minimized: false,
+            maximized: false,
             caption: None,
             caption_state: None,
             client,
@@ -601,6 +629,10 @@ impl Desktop {
         }
         win.x = x;
         win.y = y;
+        let work = (self.screen.0, self.screen.1 - i64::from(TASKBAR));
+        let win = self.find(id, owner)?;
+        win.maximized = (x, y) == (0, 0) && (i64::from(w), i64::from(h)) == work && work.0 > 0;
+        win.caption_state = None;
         let new = win.bounds();
         self.add_damage(old);
         self.add_damage(new);
@@ -741,6 +773,44 @@ impl Desktop {
         if vk == VK_MENU {
             self.alt = down;
         }
+        // The Windows key opens and closes the start menu.
+        if vk == 0x5b || vk == 0x5c {
+            if down {
+                if self.menu.is_some() {
+                    self.close_menu();
+                } else {
+                    self.open_menu();
+                }
+                self.refresh();
+            }
+            return;
+        }
+        // With the menu open, typing searches its programs: Enter starts
+        // the first, Escape closes it, Backspace deletes.
+        if self.menu.is_some() {
+            if down {
+                match vk {
+                    0x1b => self.close_menu(),
+                    0x0d => {
+                        self.launch = self.listed().first().copied();
+                        self.close_menu();
+                    }
+                    0x08 => self.search_len = self.search_len.saturating_sub(1),
+                    b'A'..=b'Z' | b'0'..=b'9' | b' ' if self.search_len < self.search.len() => {
+                        self.search[self.search_len] = vk.to_ascii_lowercase();
+                        self.search_len += 1;
+                    }
+                    0xbd if self.search_len < self.search.len() => {
+                        self.search[self.search_len] = b'-';
+                        self.search_len += 1;
+                    }
+                    _ => {}
+                }
+                self.menu_dirty = true;
+                self.refresh();
+            }
+            return;
+        }
         let Some(id) = self.active else { return };
         let mut lparam = 1u64 | u64::from(scan) << 16 | u64::from(extended) << 24;
         if self.alt {
@@ -833,35 +903,48 @@ impl Desktop {
         Rect { x: 0, y: self.screen.1 - h, w: self.screen.0, h }
     }
 
-    /// Where a click opens the start menu: the button and the screen's
-    /// corner around it (a flick to the corner hits it).
-    fn start_rect(&self) -> Rect {
-        let h = i64::from(TASKBAR);
-        Rect { x: 0, y: self.screen.1 - h, w: START.x + START.w + 2, h }
+    /// The centred group of taskbar buttons: the start button and one per
+    /// window the programs show; its left edge.
+    fn group_x(&self, windows: usize) -> i64 {
+        let n = 1 + windows as i64;
+        (self.screen.0 - (n * TASK_BUTTON + (n - 1) * TASK_GAP)) / 2
     }
 
-    /// The taskbar's window buttons (windows the programs show, in the
-    /// order they were made) and their rectangles.
-    fn tasks(&self) -> Vec<(u32, Rect)> {
+    fn visible_windows(&self) -> Vec<u32> {
         let mut ids: Vec<u32> = Vec::new();
         for w in self.windows.iter().filter(|w| w.visible) {
             let _ = ids.try_push(w.id);
         }
         ids.sort_unstable();
-        let room = self.screen.0 - TASKS_X - CLOCK_W - 8;
-        let n = ids.len() as i64;
-        let w = if n == 0 { TASK_W } else { (room / n - 4).clamp(48, TASK_W) };
+        ids
+    }
+
+    /// The start button (the first of the centred group).
+    fn start_rect(&self) -> Rect {
+        let top = self.screen.1 - i64::from(TASKBAR) + 4;
+        Rect { x: self.group_x(self.visible_windows().len()), y: top, w: TASK_BUTTON, h: 40 }
+    }
+
+    /// The taskbar's window buttons (in the order the windows were made)
+    /// and their rectangles, after the start button.
+    fn tasks(&self) -> Vec<(u32, Rect)> {
+        let ids = self.visible_windows();
+        let x0 = self.group_x(ids.len()) + TASK_BUTTON + TASK_GAP;
         let top = self.screen.1 - i64::from(TASKBAR) + 4;
         let mut out = Vec::new();
         for (i, id) in ids.into_iter().enumerate() {
-            let _ = out.try_push((id, Rect { x: TASKS_X + i as i64 * (w + 4), y: top, w, h: 40 }));
+            let _ = out.try_push((
+                id,
+                Rect { x: x0 + i as i64 * (TASK_BUTTON + TASK_GAP), y: top, w: TASK_BUTTON, h: 40 },
+            ));
         }
         out
     }
 
     fn menu_rect(&self) -> Rect {
-        let (w, h) = (i64::from(MENU_W), i64::from(MENU_H));
-        Rect { x: 8, y: self.screen.1 - i64::from(TASKBAR) - 8 - h, w, h }
+        let w = i64::from(MENU_W).min(self.screen.0 - 24);
+        let h = i64::from(MENU_H).min(self.screen.1 - i64::from(TASKBAR) - 24);
+        Rect { x: (self.screen.0 - w) / 2, y: self.screen.1 - i64::from(TASKBAR) - 12 - h, w, h }
     }
 
     fn menu_bounds(&self) -> Rect {
@@ -874,13 +957,15 @@ impl Desktop {
         }
     }
 
+    /// A pinned program's tile in the grid.
     fn menu_item_rect(&self, i: usize) -> Rect {
         let m = self.menu_rect();
+        let (col, row) = ((i % GRID_COLUMNS) as i64, (i / GRID_COLUMNS) as i64);
         Rect {
-            x: m.x + 12,
-            y: m.y + MENU_ITEMS_Y + i as i64 * MENU_ITEM_H,
-            w: m.w - 24,
-            h: MENU_ITEM_H - 4,
+            x: m.x + GRID_X + col * TILE_W,
+            y: m.y + GRID_Y + row * TILE_H,
+            w: TILE_W - 4,
+            h: TILE_H - 4,
         }
     }
 
@@ -906,9 +991,9 @@ impl Desktop {
             return Hit::Nothing;
         }
         if self.menu.is_some() && self.menu_rect().contains(x, y) {
-            for i in 0..self.programs.len() {
-                if self.menu_item_rect(i).contains(x, y) {
-                    return Hit::MenuItem(i);
+            for (k, _) in self.listed().iter().enumerate() {
+                if self.menu_item_rect(k).contains(x, y) {
+                    return Hit::MenuItem(k);
                 }
             }
             return Hit::Menu;
@@ -936,6 +1021,9 @@ impl Desktop {
                     return Hit::Button(w.id, CaptionButton::Close);
                 }
                 if ly >= 1 && lx >= close_x - CAPTION_BUTTON && lx < close_x {
+                    return Hit::Button(w.id, CaptionButton::Maximize);
+                }
+                if ly >= 1 && lx >= close_x - 2 * CAPTION_BUTTON && lx < close_x - CAPTION_BUTTON {
                     return Hit::Button(w.id, CaptionButton::Minimize);
                 }
                 return Hit::Caption(w.id);
@@ -1048,10 +1136,7 @@ impl Desktop {
                 if self.menu.is_some() {
                     self.close_menu();
                 } else {
-                    self.menu_dirty = true;
-                    self.menu = Canvas::new(1, 1, 0); // rendered by refresh
-                    let b = self.menu_bounds();
-                    self.add_damage(b);
+                    self.open_menu();
                 }
                 self.taskbar_dirty = true;
             }
@@ -1101,10 +1186,18 @@ impl Desktop {
             self.send(id, WM_MOVE, 0, lp);
         }
         match (pressed, hit) {
+            // As Windows: the caption buttons are WM_SYSCOMMANDs to the
+            // program (DefWindowProc closes, maximizes or restores).
             (Hit::Button(a, CaptionButton::Close), Hit::Button(b, CaptionButton::Close))
                 if a == b =>
             {
-                self.send(a, WM_CLOSE, 0, 0);
+                self.send(a, WM_SYSCOMMAND, SC_CLOSE, 0);
+            }
+            (Hit::Button(a, CaptionButton::Maximize), Hit::Button(b, CaptionButton::Maximize))
+                if a == b =>
+            {
+                let maximized = self.window(a).is_some_and(|w| w.maximized);
+                self.send(a, WM_SYSCOMMAND, if maximized { SC_RESTORE } else { SC_MAXIMIZE }, 0);
             }
             (Hit::Button(a, CaptionButton::Minimize), Hit::Button(b, CaptionButton::Minimize))
                 if a == b =>
@@ -1112,7 +1205,7 @@ impl Desktop {
                 self.minimize(a);
             }
             (Hit::MenuItem(a), Hit::MenuItem(b)) if a == b => {
-                self.launch = self.programs.get(a).copied();
+                self.launch = self.listed().get(a).copied();
                 self.close_menu();
             }
             (Hit::Client(id), _) => {
@@ -1125,6 +1218,7 @@ impl Desktop {
     }
 
     fn close_menu(&mut self) {
+        self.search_len = 0;
         if self.menu.take().is_some() {
             let b = self.menu_bounds();
             self.add_damage(b);
@@ -1132,9 +1226,45 @@ impl Desktop {
         }
     }
 
-    /// The program the start menu asked to start, once.
+    /// The program the start menu asked to start, once (it becomes the
+    /// most recent).
     pub fn take_launch(&mut self) -> Option<&'static Program> {
-        self.launch.take().and_then(|i| PROGRAMS.get(i))
+        let i = self.launch.take()?;
+        if let Some(at) = self.recent.iter().position(|&r| r == i) {
+            self.recent.copy_within(0..at, 1);
+        } else {
+            self.recent.copy_within(0..3, 1);
+        }
+        self.recent[0] = i;
+        PROGRAMS.get(i)
+    }
+
+    fn open_menu(&mut self) {
+        self.search_len = 0;
+        self.menu_dirty = true;
+        self.menu = Canvas::new(1, 1, 0); // rendered by refresh
+        let b = self.menu_bounds();
+        self.add_damage(b);
+        self.taskbar_dirty = true;
+    }
+
+    /// The programs the menu shows: the available ones matching what was
+    /// typed (case-insensitively).
+    fn listed(&self) -> Vec<usize> {
+        let q = &self.search[..self.search_len];
+        let mut out = Vec::new();
+        for &p in &self.programs {
+            let Some(prog) = PROGRAMS.get(p) else { continue };
+            let name = prog.name.as_bytes();
+            let matches = q.is_empty()
+                || name
+                    .windows(q.len())
+                    .any(|w| w.iter().zip(q).all(|(a, b)| a.eq_ignore_ascii_case(b)));
+            if matches {
+                let _ = out.try_push(p);
+            }
+        }
+        out
     }
 
     /// The clock shows `minute` (minutes since 1601, UTC).
@@ -1190,155 +1320,207 @@ impl Desktop {
         }
     }
 
+    /// The taskbar: translucent light with a line on top; the start
+    /// button (the camel) and the windows' buttons centred, each an icon
+    /// with Windows' indicator under it (the active window: a long accent
+    /// pill on a lit button; the others: a short grey one); the clock and
+    /// date at the right.
     fn render_taskbar(&self) -> Option<Canvas> {
         let (w, h) = (self.screen.0, i64::from(TASKBAR));
         let mut c = Canvas::new(w, h, 0)?;
         for y in 0..h {
-            let (row, a) = if y == 0 {
-                (TASKBAR_LINE, 255)
-            } else {
-                (lerp(TASKBAR_TOP, TASKBAR_BOTTOM, y, h - 1), TASKBAR_ALPHA)
-            };
+            let (row, a) =
+                if y == 0 { (TASKBAR_LINE, 255) } else { (TASKBAR_COLOR, TASKBAR_ALPHA) };
             for x in 0..w {
                 c.put(x, y, row, a);
             }
         }
         let top = self.screen.1 - h;
-        // The start button.
-        let s = START;
+        let s = self.start_rect();
         let glow = if self.menu.is_some() {
-            48
+            170
         } else if self.hover == Hit::Start {
-            28
+            130
         } else {
             0
         };
         if glow > 0 {
-            c.round_rect(s.x, s.y, s.w, s.h, 10, 0x00ff_ffff, 0x00ff_ffff, glow);
+            c.round_rect(s.x, s.y - top, s.w, s.h, 4, 0x00ff_ffff, 0x00ff_ffff, glow);
         }
-        c.image(s.x + (s.w - 40) / 2, s.y, CAMEL40, 40);
-        // The windows.
+        c.mask(
+            s.x + (s.w - 24) / 2,
+            s.y - top + 8,
+            paint::FORTRESS24,
+            24,
+            LOGO_TOP,
+            LOGO_BOTTOM,
+            255,
+        );
         for (id, r) in self.tasks() {
             let Some(win) = self.window(id) else { continue };
             let (x, y) = (r.x, r.y - top);
             let active = self.active == Some(id) && win.shown();
             let alpha = if active {
-                44
+                190
             } else if self.hover == Hit::Task(id) {
-                26
-            } else if win.minimized {
-                6
+                130
             } else {
-                12
+                0
             };
-            c.round_rect(x, y, r.w, r.h, 8, 0x00ff_ffff, 0x00ff_ffff, alpha);
-            // A little window as the icon.
-            c.round_rect(x + 12, y + 12, 20, 16, 3, 0x00_8a_b4_ff, 0x00_4d_7f_e0, 255);
-            c.round_rect(x + 14, y + 17, 16, 9, 1, 0x00ff_ffff, 0x00_e8_ee_f8, 235);
-            let title = char::decode_utf16(win.title.iter().copied()).map(|c| c.unwrap_or('?'));
-            let color = if active {
-                0x00ff_ffff
-            } else if win.minimized {
-                0x00_8b_93_a1
-            } else {
-                0x00_d1_d5_db
-            };
-            c.text(x + 40, y + 12, title, color, Font::Regular, x + r.w - 8);
+            if alpha > 0 {
+                c.round_rect(x, y, r.w, r.h, 4, 0x00ff_ffff, 0x00ff_ffff, alpha);
+            }
+            // The window's icon: a tile with its initial (programs' own
+            // icons come later).
+            let initial = char::decode_utf16(win.title.iter().copied())
+                .next()
+                .and_then(|c| c.ok())
+                .unwrap_or('?');
+            let (c0, c1) = tile_colors(&win.title);
+            c.round_rect(x + 10, y + 8, 24, 24, 5, c0, c1, 255);
+            let iw = Font::Ui12Semibold.measure(core::iter::once(initial));
+            c.text(
+                x + 22 - iw / 2,
+                y + 12,
+                core::iter::once(initial),
+                0x00ff_ffff,
+                Font::Ui12Semibold,
+                x + 34,
+            );
             if active {
-                c.round_rect(x + r.w / 2 - 12, y + 35, 24, 3, 1, ACCENT, ACCENT, 255);
+                c.round_rect(x + r.w / 2 - 8, y + 36, 16, 3, 1, ACCENT, ACCENT, 255);
             } else if !win.minimized {
-                c.round_rect(x + r.w / 2 - 4, y + 35, 8, 3, 1, 0x00_9c_a3_af, 0x00_9c_a3_af, 255);
+                c.round_rect(x + r.w / 2 - 3, y + 36, 6, 3, 1, 0x00_8a_8a_8a, 0x00_8a_8a_8a, 255);
             }
         }
-        // The clock (UTC).
-        let (hh, mm, date) = clock(self.minute);
-        let time = [b'0' + hh / 10, b'0' + hh % 10, b':', b'0' + mm / 10, b'0' + mm % 10];
-        let cx = w - CLOCK_W / 2 - 4;
-        let tw = 5 * Font::Bold.advance();
-        c.text(cx - tw / 2, 6, time.iter().map(|&b| b as char), 0x00_f3_f4_f6, Font::Bold, w);
-        let dw = 10 * Font::Regular.advance();
-        c.text(cx - dw / 2, 25, date.iter().map(|&b| b as char), 0x00_a7_b0_bf, Font::Regular, w);
+        // The clock: the time over the date, right-aligned.
+        let (time, tn, date, dn) = clock(self.minute);
+        let tw = Font::Ui12.measure(time[..tn].iter().map(|&b| b as char));
+        let dw = Font::Ui12.measure(date[..dn].iter().map(|&b| b as char));
+        let right = w - 14;
+        c.text(right - tw, 7, time[..tn].iter().map(|&b| b as char), TEXT, Font::Ui12, w);
+        c.text(right - dw, 25, date[..dn].iter().map(|&b| b as char), TEXT, Font::Ui12, w);
         Some(c)
     }
 
+    /// The start menu, after Windows 11's: a search box at the top, the
+    /// pinned programs in a grid, the recently started ones, the user at
+    /// the bottom.
     fn render_menu(&self) -> Option<Canvas> {
-        let (w, h) = (i64::from(MENU_W), i64::from(MENU_H));
-        let mut c = Canvas::new(w, h, 0)?;
-        c.round_rect(0, 0, w, h, 14, 0x00_24_2d_42, 0x00_15_1b_29, 246);
-        c.round_outline(0, 0, w, h, 14, 0x00_40_4d_6a, 255);
-        // A warm glow behind the camel.
-        c.round_rect(18, 18, 72, 72, 18, 0x00_f5_a5_24, 0x00_c2_5e_1a, 46);
-        c.image(22, 22, CAMEL64, 64);
-        c.text(104, 30, "gala-os".chars(), 0x00ff_ffff, Font::Large, w - 16);
-        let version = env!("CARGO_PKG_VERSION");
-        let x = c.text(104, 60, "version ".chars(), 0x00_9a_a4_b5, Font::Regular, w - 16);
-        c.text(x, 60, version.chars(), 0x00_9a_a4_b5, Font::Regular, w - 16);
-        for x in 20..w - 20 {
-            c.put(x, 104, 0x00_36_43_5e, 255);
-        }
-        c.text(22, 118, "Programs".chars(), 0x00_c9_d1_de, Font::Bold, w - 16);
         let m = self.menu_rect();
-        for (i, &p) in self.programs.iter().enumerate() {
+        let (w, h) = (m.w, m.h);
+        let mut c = Canvas::new(w, h, 0)?;
+        c.round_rect(0, 0, w, h, 8, MENU_COLOR, MENU_COLOR, 248);
+        // The foot: a little darker, under a line.
+        let foot = h - 64;
+        for y in foot..h - 1 {
+            for x in 1..w - 1 {
+                if crate::nt::desktop::paint::round_coverage(x, y, w, h, 8) == 255 {
+                    c.put(x, y, 0x00_e7_ea_ef, 255);
+                }
+            }
+        }
+        for x in 0..w {
+            c.put(x, foot, MENU_BORDER, 255);
+        }
+        c.round_outline(0, 0, w, h, 8, MENU_BORDER, 255);
+        // The search box.
+        c.round_rect(32, 24, w - 64, 36, 18, 0x00ff_ffff, 0x00ff_ffff, 255);
+        c.round_outline(32, 24, w - 64, 36, 18, 0x00_d9_dd_e3, 255);
+        // A magnifier: a ring and a handle.
+        for a in 0..64 {
+            let (dx, dy) = (ring(a, 6), ring(a + 16, 6));
+            c.put(54 + dx, 40 + dy, TEXT_DIM, 200);
+        }
+        for t in 0..5 {
+            c.put(59 + t, 45 + t, TEXT_DIM, 230);
+        }
+        if self.search_len == 0 {
+            c.text(72, 34, "Type to search programs".chars(), TEXT_DIM, Font::Ui12, w - 48);
+        } else {
+            let end = c.text(
+                72,
+                34,
+                self.search[..self.search_len].iter().map(|&b| b as char),
+                TEXT,
+                Font::Ui12,
+                w - 48,
+            );
+            for y in 33..49 {
+                c.put(end + 1, y, TEXT, 255);
+            }
+        }
+        // Pinned programs.
+        c.text(52, 84, "Pinned".chars(), TEXT, Font::Ui14Semibold, w);
+        let listed = self.listed();
+        for (k, &p) in listed.iter().enumerate() {
             let Some(program) = PROGRAMS.get(p) else { continue };
-            let r = self.menu_item_rect(i).offset(-m.x, -m.y);
-            if r.y + r.h > h - 64 {
+            let r = self.menu_item_rect(k).offset(-m.x, -m.y);
+            if r.y + r.h > foot - 120 {
                 break;
             }
-            let glow = match (self.hover, self.pressed) {
-                (Hit::MenuItem(a), Hit::MenuItem(b)) if a == i && b == i => 40,
-                (Hit::MenuItem(a), _) if a == i => 24,
+            let lit = match (self.hover, self.pressed) {
+                (Hit::MenuItem(a), Hit::MenuItem(b)) if a == k && b == k => 210,
+                (Hit::MenuItem(a), _) if a == k => 170,
                 _ => 0,
             };
-            if glow > 0 {
-                c.round_rect(r.x, r.y, r.w, r.h, 10, 0x00ff_ffff, 0x00ff_ffff, glow);
+            if lit > 0 {
+                c.round_rect(r.x, r.y, r.w, r.h, 4, 0x00ff_ffff, 0x00ff_ffff, lit);
             }
-            let (ix, iy) = (r.x + 10, r.y + (r.h - 28) / 2);
-            c.round_rect(ix, iy, 28, 28, 8, program.colors.0, program.colors.1, 255);
+            let (ix, iy) = (r.x + (r.w - 32) / 2, r.y + 10);
+            c.round_rect(ix, iy, 32, 32, 6, program.colors.0, program.colors.1, 255);
             let letter = program.name.chars().next().unwrap_or('?');
+            let lw = Font::Ui14Semibold.measure(core::iter::once(letter));
             c.text(
-                ix + (28 - Font::Bold.advance()) / 2,
-                iy + 6,
+                ix + 16 - lw / 2,
+                iy + 7,
                 core::iter::once(letter),
                 0x00ff_ffff,
-                Font::Bold,
-                ix + 28,
+                Font::Ui14Semibold,
+                ix + 32,
             );
+            let nw = Font::Ui12.measure(program.name.chars()).min(r.w - 8);
             c.text(
-                ix + 40,
-                r.y + (r.h - 16) / 2,
+                r.x + (r.w - nw) / 2,
+                r.y + 50,
                 program.name.chars(),
-                0x00_ee_f1_f6,
-                Font::Regular,
-                r.x + r.w - 8,
+                TEXT,
+                Font::Ui12,
+                r.x + r.w - 4,
             );
         }
-        if self.programs.is_empty() {
+        if listed.is_empty() {
+            let text =
+                if self.search_len == 0 { "No programs installed" } else { "No programs match" };
+            c.text(52, GRID_Y + 10, text.chars(), TEXT_DIM, Font::Ui12, w - 32);
+        }
+        // Recently started programs.
+        let rec_y = foot - 112;
+        c.text(52, rec_y, "Recommended".chars(), TEXT, Font::Ui14Semibold, w);
+        let mut y = rec_y + 32;
+        let mut any = false;
+        for &p in self.recent.iter().filter(|&&p| p != usize::MAX).take(2) {
+            let Some(program) = PROGRAMS.get(p) else { continue };
+            any = true;
+            c.round_rect(52, y, 32, 32, 6, program.colors.0, program.colors.1, 255);
+            c.text(96, y, program.name.chars(), TEXT, Font::Ui12, w - 40);
+            c.text(96, y + 16, "Recently started".chars(), TEXT_DIM, Font::Ui12, w - 40);
+            y += 40;
+        }
+        if !any {
             c.text(
-                22,
-                MENU_ITEMS_Y + 10,
-                "No programs installed".chars(),
-                0x00_8b_93_a1,
-                Font::Regular,
-                w - 16,
+                52,
+                y,
+                "Programs you start will show up here.".chars(),
+                TEXT_DIM,
+                Font::Ui12,
+                w - 40,
             );
         }
-        // The foot: who and what is running.
-        for x in 20..w - 20 {
-            c.put(x, h - 56, 0x00_36_43_5e, 255);
-        }
-        c.image(22, h - 38, CAMEL20, 20);
-        let open = self.windows.iter().filter(|w| w.visible).count();
-        let mut line = [0u8; 24];
-        let n =
-            format_count(&mut line, open, if open == 1 { " window open" } else { " windows open" });
-        c.text(
-            52,
-            h - 36,
-            line[..n].iter().map(|&b| b as char),
-            0x00_9a_a4_b5,
-            Font::Regular,
-            w - 16,
-        );
+        // The user.
+        c.round_rect(52, foot + 16, 32, 32, 16, LOGO_TOP, LOGO_BOTTOM, 255);
+        c.mask(56, foot + 20, paint::FORTRESS24, 24, 0x00ff_ffff, 0x00ff_ffff, 255);
+        c.text(96, foot + 24, "gala".chars(), TEXT, Font::Ui12, w - 40);
         Some(c)
     }
 
@@ -1352,7 +1534,7 @@ impl Desktop {
             let (lx, ly) = (x - i64::from(w.x), y - i64::from(w.y));
             let cov = w.coverage(lx, ly);
             let active = self.active == Some(w.id);
-            if cov < 255 {
+            if cov < 255 && !w.maximized {
                 let r = w.rect();
                 let rect = (r.x + 3, r.y + SHADOW_DROP, r.x + r.w - 3, r.y + r.h + SHADOW_DROP - 2);
                 let strength = if active { SHADOW_ACTIVE } else { SHADOW_INACTIVE };
@@ -1401,42 +1583,43 @@ impl Desktop {
     }
 }
 
-/// "<n><suffix>" into `out`; its length.
-fn format_count(out: &mut [u8], n: usize, suffix: &str) -> usize {
-    let mut digits = [0u8; 20];
-    let mut len = 0;
-    let mut v = n;
-    loop {
-        digits[len] = b'0' + (v % 10) as u8;
-        len += 1;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
-    }
-    let mut i = 0;
-    for &d in digits[..len].iter().rev() {
-        if i < out.len() {
-            out[i] = d;
-            i += 1;
-        }
-    }
-    for b in suffix.bytes() {
-        if i < out.len() {
-            out[i] = b;
-            i += 1;
-        }
-    }
-    i
+/// A point on a circle of radius r at a 64th-of-a-turn step: its x (its y
+/// is `ring(step + 16, r)`).
+fn ring(step: i64, r: i64) -> i64 {
+    // cos by a quarter-wave table of 17 points (x1024).
+    const COS: [i64; 17] =
+        [1024, 1019, 1004, 980, 946, 903, 851, 792, 724, 650, 569, 483, 392, 297, 200, 100, 0];
+    let s = step.rem_euclid(64);
+    let v = match s {
+        0..=16 => COS[s as usize],
+        17..=32 => -COS[(32 - s) as usize],
+        33..=48 => -COS[(s - 32) as usize],
+        _ => COS[(64 - s) as usize],
+    };
+    (v * r + 512).div_euclid(1024)
 }
 
-/// The clock: hours, minutes and "YYYY-MM-DD" of `minute` (minutes since
-/// 1601-01-01 UTC). The date: the days-to-civil algorithm from Howard
-/// Hinnant's "chrono-Compatible Low-Level Date Algorithms" (public domain).
-fn clock(minute: u64) -> (u8, u8, [u8; 10]) {
+/// A program's tile colours from its title (a stable hue).
+fn tile_colors(title: &[u16]) -> (u32, u32) {
+    const PALETTE: [(u32, u32); 6] = [
+        (0x00_4c_9a_ff, 0x00_1f_6f_e0),
+        (0x00_2e_b8_8a, 0x00_17_8a_63),
+        (0x00_f0_8a_3c, 0x00_d0_63_1d),
+        (0x00_a8_6a_f0, 0x00_7c_3f_d6),
+        (0x00_e8_4c_6a, 0x00_c0_2a_4a),
+        (0x00_3c_b4_d8, 0x00_1c_8a_b4),
+    ];
+    let h = title.iter().fold(7u32, |a, &c| a.wrapping_mul(31).wrapping_add(u32::from(c)));
+    PALETTE[(h % PALETTE.len() as u32) as usize]
+}
+
+/// The clock as Windows shows it in the US: "10:52 PM" and "11/1/2026"
+/// (and their lengths) for `minute` (minutes since 1601-01-01 UTC). The
+/// date: the days-to-civil algorithm from Howard Hinnant's
+/// "chrono-Compatible Low-Level Date Algorithms" (public domain).
+fn clock(minute: u64) -> ([u8; 8], usize, [u8; 10], usize) {
     let hh = (minute / 60 % 24) as u8;
     let mm = (minute % 60) as u8;
-    // Days since 1970-01-01 (1601 to 1970: 134774 days).
     let z = (minute / (60 * 24)) as i64 - 134_774 + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -1445,17 +1628,37 @@ fn clock(minute: u64) -> (u8, u8, [u8; 10]) {
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    let mut date = *b"0000-00-00";
-    let y = y.clamp(0, 9999) as u32;
-    for (i, div) in [1000, 100, 10, 1].iter().enumerate() {
-        date[i] = b'0' + (y / div % 10) as u8;
+    let y = (yoe + era * 400 + i64::from(m <= 2)).clamp(0, 9999) as u32;
+    let mut time = [0u8; 8];
+    let mut tn = 0;
+    let h12 = match hh % 12 {
+        0 => 12,
+        h => h,
+    };
+    let push = |buf: &mut [u8], n: &mut usize, b: u8| {
+        buf[*n] = b;
+        *n += 1;
+    };
+    if h12 >= 10 {
+        push(&mut time, &mut tn, b'1');
     }
-    date[5] = b'0' + (m / 10) as u8;
-    date[6] = b'0' + (m % 10) as u8;
-    date[8] = b'0' + (d / 10) as u8;
-    date[9] = b'0' + (d % 10) as u8;
-    (hh, mm, date)
+    push(&mut time, &mut tn, b'0' + h12 % 10);
+    for b in [b':', b'0' + mm / 10, b'0' + mm % 10, b' ', if hh < 12 { b'A' } else { b'P' }, b'M'] {
+        push(&mut time, &mut tn, b);
+    }
+    let mut date = [0u8; 10];
+    let mut dn = 0;
+    for v in [m as u32, d as u32] {
+        if v >= 10 {
+            push(&mut date, &mut dn, b'0' + (v / 10) as u8);
+        }
+        push(&mut date, &mut dn, b'0' + (v % 10) as u8);
+        push(&mut date, &mut dn, b'/');
+    }
+    for div in [1000, 100, 10, 1] {
+        push(&mut date, &mut dn, b'0' + (y / div % 10) as u8);
+    }
+    (time, tn, date, dn)
 }
 
 static DESKTOP: IrqMutex<Desktop> = IrqMutex::new(Desktop::new());

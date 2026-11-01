@@ -64,29 +64,43 @@ fn click(d: &mut Desktop, x: i64, y: i64) {
 fn the_start_button_opens_and_closes_the_start_menu() {
     let (mut d, _) = desktop_with_window();
     d.set_programs(&[0]);
-    let inside = (200, 500);
+    let start = d.start_rect();
+    let inside = (d.menu_rect().x + 20, d.menu_rect().y + d.menu_rect().h - 20);
     let before = d.pixel(inside.0, inside.1);
     // The pointer starts in the middle (its tip is drawn there).
     assert_eq!(d.pointer, (512, 384));
-    go(&mut d, 20, 740, 0);
-    go(&mut d, 20, 740, 1);
+    let (sx, sy) = (start.x + 10, start.y + 10);
+    go(&mut d, sx, sy, 0);
+    go(&mut d, sx, sy, 1);
     assert!(d.menu_open());
     assert_ne!(d.pixel(inside.0, inside.1), before);
     // Holding the button is not another click.
-    go(&mut d, 21, 740, 1);
+    go(&mut d, sx + 1, sy, 1);
     assert!(d.menu_open());
-    go(&mut d, 21, 740, 0);
+    go(&mut d, sx + 1, sy, 0);
     // A click elsewhere closes it, and does nothing else.
-    click(&mut d, 900, 300);
+    click(&mut d, 1000, 100);
     assert!(!d.menu_open());
     assert_eq!(d.pixel(inside.0, inside.1), before);
-    // Its item starts the program once.
-    click(&mut d, 20, 740);
+    // Its tile starts the program once, which becomes recent.
+    click(&mut d, sx, sy);
     let item = d.menu_item_rect(0);
     click(&mut d, item.x + 20, item.y + 10);
     assert!(!d.menu_open());
     assert_eq!(d.take_launch().map(|p| p.name), Some(PROGRAMS[0].name));
     assert!(d.take_launch().is_none());
+    assert_eq!(d.recent[0], 0);
+    // The Windows key opens it; typing filters; Escape closes.
+    d.key(0x5b, 0x5b, true, true);
+    assert!(d.menu_open());
+    for k in b"FILEZ" {
+        d.key(*k, 0, false, true);
+    }
+    assert_eq!(d.listed(), [0]);
+    d.key(b'Q', 0, false, true);
+    assert!(d.listed().is_empty());
+    d.key(0x1b, 1, false, true);
+    assert!(!d.menu_open());
 }
 
 #[test]
@@ -101,17 +115,22 @@ fn the_caption_drags_and_its_buttons_minimize_and_close() {
     let w = d.window(a).unwrap();
     assert_eq!((w.x, w.y), (400, 200));
     // The drag's end: WM_MOVE with the client area's screen position.
-    // Close: WM_CLOSE for the program (on release over the button).
+    // Close: WM_SYSCOMMAND SC_CLOSE for the program (on release over the
+    // button), as Windows sends.
     let close = (400 + 400 - 20, 200 + 15);
     click(&mut d, close.0, close.1);
     let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 4];
     let n = d.take_input(7, &mut out);
-    assert_eq!(out[..n].iter().map(|e| e.message).collect::<Vec<_>>(), [WM_MOVE, WM_CLOSE]);
-    assert_eq!(out[0].lparam, (200 + 31) << 16 | (400 + 1));
-    assert_eq!(out[1].window, a);
+    assert_eq!(out[..n].iter().map(|e| e.message).collect::<Vec<_>>(), [WM_MOVE, WM_SYSCOMMAND]);
+    assert_eq!(out[0].lparam, (200 + 33) << 16 | (400 + 1));
+    assert_eq!((out[1].window, out[1].wparam), (a, SC_CLOSE));
+    // Maximize: SC_MAXIMIZE (DefWindowProc places the window).
+    click(&mut d, 400 + 400 - 46 - 20, 215);
+    let n = d.take_input(7, &mut out);
+    assert_eq!((out[..n].len(), out[0].message, out[0].wparam), (1, WM_SYSCOMMAND, SC_MAXIMIZE));
     // Minimize: gone from the screen, still on the taskbar; its taskbar
     // button brings it back.
-    click(&mut d, 400 + 400 - 46 - 20, 215);
+    click(&mut d, 400 + 400 - 2 * 46 - 20, 215);
     assert!(d.window(a).unwrap().minimized);
     assert_eq!(d.hit(600, 300), Hit::Nothing);
     let (_, button) = d.tasks()[0];
@@ -138,8 +157,10 @@ fn clicks_in_a_client_area_go_to_its_program() {
 fn the_clock_shows_utc_time_and_date() {
     // 2026-11-01 18:52 UTC: minutes since 1601.
     let days = 134_774 + 20_758; // 1601 -> 1970 -> 2026-11-01
-    let (hh, mm, date) = clock((days * 24 * 60 + 18 * 60 + 52) as u64);
-    assert_eq!((hh, mm, &date), (18, 52, b"2026-11-01"));
+    let (time, tn, date, dn) = clock((days * 24 * 60 + 18 * 60 + 52) as u64);
+    assert_eq!((&time[..tn], &date[..dn]), (&b"6:52 PM"[..], &b"11/1/2026"[..]));
+    let (time, tn, _, _) = clock((days * 24 * 60 + 52) as u64);
+    assert_eq!(&time[..tn], b"12:52 AM");
 }
 
 #[test]

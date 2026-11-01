@@ -489,18 +489,27 @@ QEMU monitor commands (`mouse_move dx dy`, `mouse_button 1`, `sendkey`;
 loaded the host), then takes a screendump (none when the step checks no
 pixels: e.g. the click that ends the program), kept as
 `target/debug/test-<scenario>.screen<step>.png`. The guest's pointer
-starts in the middle of the screen and is clamped to it. Keep each
+starts in the middle of the screen and is clamped to it. A step's pixel check is retried (a new screendump every 0.5 s,
+for about 5 s) before it fails, because a redraw under load (the full
+suite) can outlast the first dump. Keep each
 `mouse_move` within 255 per axis: QEMU queues a few PS/2 packets of at
 most 255 and hands the rest of a larger move over with later events (a
 click then lands somewhere else); reach a corner with several moves. Such scenarios must be UEFI ones (BIOS
 boots have no framebuffer).
 
-The start button's picture: `kernel/assets/camel.png` (256 px master,
-from the project owner's drawing) and the raw RGBA files the kernel
-embeds, made with Pillow:
+The desktop's text and pictures are baked at build time, so the kernel
+has no font engine or SVG renderer (both are xtask host dependencies):
 
-    python3 -c "from PIL import Image; m=Image.open('kernel/assets/camel.png')
-    [open(f'kernel/assets/camel{n}.rgba','wb').write(m.resize((n,n),Image.LANCZOS).tobytes()) for n in (20,40,64)]"
+- `cargo xtask bake-fonts` rasterizes Selawik (`fonts/selawik/`) with
+  fontdue into `kernel/assets/ui-<px>-<weight>.glyphs` (12 regular and
+  semibold, 14 and 20 semibold, 28 semilight; chars 0x20-0xFF). The
+  format is in `bake_fonts`; `paint.rs` reads it. Add a size there and
+  in `paint::Font` together.
+- `cargo xtask bake-icons` renders `kernel/assets/fortress.svg` (24 and
+  96 px, square) and `wordmark.svg` (112 px wide, cropped) with resvg
+  into `.alpha` coverage masks; the compositor tints them.
+
+Rerun the command and commit its output after changing a source.
 
 ## Serving to a browser
 
