@@ -3083,6 +3083,10 @@ fn run_um(um: &Path, s: &Scenario) -> Result<String> {
         if file.ends_with(&format!("/{program}.exe")) {
             continue;
         }
+        if file.starts_with("target/prebuilt/") {
+            // As for the boot tests: fetched (and checked) on first use.
+            fetch_prebuilt(file.trim_end_matches('/'))?;
+        }
         let (host, file_name) = match file.rsplit_once('/') {
             Some((_, n)) => (root().join(file), n),
             None => {
