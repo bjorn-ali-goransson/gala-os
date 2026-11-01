@@ -6,6 +6,10 @@
 //!
 //! - RtlPcToFileHeader and RtlLookupFunctionEntry find this image and the
 //!   function's RUNTIME_FUNCTION.
+//! - An indirect RUNTIME_FUNCTION (UnwindData with bit 0 set: the RVA of
+//!   the entry whose unwind data it shares) is resolved: the lookup
+//!   returns the entry it names (the C++ and GS handlers read the unwind
+//!   information through DISPATCHER_CONTEXT.FunctionEntry; as Wine does).
 //! - RtlVirtualUnwind unwinds a frame from its body (restores the pushed
 //!   registers, returns the handler, its data and the establisher frame),
 //!   from inside its prologue (only what ran is undone, no handler) and
@@ -437,6 +441,19 @@ fn outer(i: usize) -> u64 {
 }
 
 type PcToFileHeader = extern "system" fn(usize, *mut usize) -> usize;
+/// A fake code region with a function table at 0x100: an indirect entry,
+/// then the entry it names (its unwind data at 0x180, never read).
+static INDIRECT: [u32; 0x50] = {
+    let mut r = [0u32; 0x50];
+    r[0x40] = 0x10;
+    r[0x41] = 0x20;
+    r[0x42] = 0x10c | 1;
+    r[0x43] = 0x40;
+    r[0x44] = 0x50;
+    r[0x45] = 0x180;
+    r
+};
+
 type LookupFunctionEntry = extern "system" fn(u64, *mut u64, *mut u8) -> *const [u32; 3];
 type VirtualUnwind =
     extern "system" fn(u32, u64, u64, *const [u32; 3], *mut u8, *mut u64, *mut u64, *mut u8) -> u64;
@@ -532,6 +549,28 @@ fn run() -> Result<(), u32> {
     // SAFETY: a RUNTIME_FUNCTION in this image's .pdata.
     let begin = unsafe { (*entry)[0] };
     c.eq(u64::from(begin), (outer_fn - image) as u64)?;
+
+    // An indirect entry in a registered table: [0x10, 0x20) names the
+    // entry at 0x10c ([0x40, 0x50)); a lookup inside it returns that one.
+    let (Some(add), Some(delete)) =
+        (find_export(ntdll, b"RtlAddFunctionTable"), find_export(ntdll, b"RtlDeleteFunctionTable"))
+    else {
+        return c.ok(false, 0);
+    };
+    // SAFETY: the documented signatures.
+    let (add, delete) = unsafe {
+        (
+            core::mem::transmute::<usize, extern "system" fn(*const [u32; 3], u32, u64) -> u8>(add),
+            core::mem::transmute::<usize, extern "system" fn(*const [u32; 3]) -> u8>(delete),
+        )
+    };
+    let region = INDIRECT.as_ptr() as u64;
+    let table = INDIRECT[0x100 / 4..].as_ptr().cast::<[u32; 3]>();
+    c.ok(add(table, 2, region) != 0, 0)?;
+    let entry = (fns.lookup)(region + 0x18, &mut base64, core::ptr::null_mut());
+    c.eq(entry as u64, region + 0x10c)?;
+    c.eq(base64, region)?;
+    c.ok(delete(table) != 0, 0)?;
 
     // RtlVirtualUnwind from seh_outer's body: a fake stack with the saved
     // rsi at +0x28, the saved rbx at +0x30 and a return address at +0x38.

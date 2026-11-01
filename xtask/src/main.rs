@@ -2367,9 +2367,8 @@ const SCENARIOS: &[Scenario] = &[
         // SqlUserInstance.dll does it (its strings: `-m -K -T1617 -w5`
         // before `-c`): it configures the user instance, relocates the
         // system databases next to master and regenerates the service
-        // master key; it ends itself after -w minutes without clients
-        // ("RANU instance is terminating in response to its internal time
-        // out"), -w1 here to keep the run short.
+        // master key (-w: it would end itself after that many minutes
+        // without clients, -w1 here).
         name: "sqllocaldb",
         // tds_test (user/tds_test) starts sqlservr.exe with those
         // arguments, connects over the named pipe with TDS, logs in with
@@ -2383,7 +2382,8 @@ const SCENARIOS: &[Scenario] = &[
             "tds_test: logged in",
             "tds_test: row: [Microsoft SQL Server 2022",
             "[GALA\\gala]",
-            "RANU instance is terminating",
+            "Server shut down by request from login GALA\\gala",
+            "SQL Server is terminating this process",
             "tds_test: second start",
             "tds_test: ok",
         ],

@@ -109,7 +109,16 @@ shows it.
   address in the detail; one per walked frame with its pc and handler)
   shows up in the `events=syscall` stream, in order and per thread; map
   addresses to modules with `events=image` (base and size per process).
-  Revert before committing.
+  Use probe names of distinct lengths (the event has the name's pointer
+  and length, not its text). Revert before committing.
+- **Reading MSVC C++ EH data** (as data, from .pdata/.xdata): check the
+  format before decoding. A FuncInfo starting with the magic number
+  0x19930520-0x19930522 (bytes `22 05 93 19`) is the older format
+  (__CxxFrameHandler3: try blocks, unwind map, an ip-to-state map with
+  absolute RVAs); FH4's FuncInfo4 starts with a one-byte header. Reading
+  FH3 data as FH4 gives plausible-looking nonsense (it misled the
+  SHUTDOWN investigation for a while). The handler data of a
+  GS-checking handler is the FuncInfo RVA, then the GS data.
 - **C++ exception tests**: `user/cxx_eh_test` is C++ built with clang
   for x86_64-pc-windows-msvc and lld-link (`build.sh`, import libraries
   from .def files with llvm-dlltool), no CRT, against Microsoft's

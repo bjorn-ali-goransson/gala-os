@@ -445,7 +445,8 @@ H11. **busybox httpd and wget over loopback**: next. busybox-w32's httpd
    client) fetches files from it over 127.0.0.1, in one boot: sockets
    from C programs and busybox's networking, output as on Windows.
 
-Agreed order, updated (2026-11-01): SQL Server's SHUTDOWN first; then
+Agreed order, updated (2026-11-01): SQL Server's SHUTDOWN first (done);
+then
 the security model and disk work through programs that need them, in the
 order judged best (proposed: Win32-OpenSSH's sshd, then PostgreSQL, then
 SQL Server LocalDB kept across reboots, then MinGit), self-paced.
@@ -863,38 +864,30 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         waiting for tempdb to be online, disconnecting and waiting for the
         instance to end itself after `-w1`; the second start recovers in a
         few seconds and answers too (about 150 s for the scenario).
-        **P1 step 5 is done** but for `SHUTDOWN` (investigated
-        2026-11-01, not solved): it is accepted ("Server shut down by
-        request from login GALA\gala"), also once the instance is fully
-        up, but then sqlservr calls terminate ("exception during stack
-        unwinding"; SqlDumper cannot load: 0xc0000135). Ruled out: gala's
-        C++/SEH dispatch in general (`cxx_eh_test`, 12 cases with
-        vcruntime140 incl. /EHa; all pass). Fixed on the way:
-        DISPATCHER_CONTEXT's ControlPcIsUnwound and size (`seh_test`).
+        **P1 step 5 is done**, `SHUTDOWN` included (fixed 2026-11-01).
+        SHUTDOWN was accepted ("Server shut down by request from login
+        GALA\gala"), but then sqlservr called terminate ("exception
+        during stack unwinding"; SqlDumper could not load: 0xc0000135).
         Found with temporary probes (dispatcher events through
         GalaRecordMissing, which the syscall event stream records in
-        order): right after closing its trace file the session thread
-        throws one C++ exception (thrown from sqlDK through vcruntime140)
-        and the walk reaches sqllang+0xee3114 (a frame with
-        __CxxFrameHandler4 that does not catch it), sqllang+0xc24f, then
-        sqllang+0xc6cc, whose FH4 handler terminates (a noexcept frame,
-        judging by Wine's FH4). So either FH4 at 0xee3114 should have
-        caught it (state, frame or type matching that differs on gala),
-        or the throw itself does not happen on Windows (something earlier
-        answered differently; no failing system call or ledger entry
-        precedes it). Then the FH4 data (decoded as data
-        only: .pdata, unwind info, FuncInfo4 as Wine's handler4.c
-        describes it): both sqllang functions (the one at +0xee3114 and
-        the one at +0xc6cc, whose RUNTIME_FUNCTION shares its unwind data
-        through an indirect entry) have FuncInfo4 headers 0x22 (separated
-        ip maps, EHs) with no try blocks and without NO_EXCEPT, and their
-        handler is a GS-checking wrapper (handler data: FuncInfo4 RVA,
-        then GS data). By FH4's logic both should continue the search, so
-        the terminate comes from a check this view does not show (the
-        separated ip-map lookup, the GS cookie against the
-        EstablisherFrame gala passes, or vcruntime state). gala passes
-        the original (unresolved) FunctionEntry, as Wine does. Left for
-        later; the scenario ends the instance by its idle time. Also open, not
+        order). After it closes its trace file, the session thread throws
+        a C++ exception; the search reaches sqllang+0xc6cc, code split off
+        its function, whose RUNTIME_FUNCTION is indirect (UnwindData bit 0:
+        the RVA of the primary entry). gala's lookup returned that entry
+        unresolved as DISPATCHER_CONTEXT.FunctionEntry, and the frame's
+        GS-checking C++ handler (FH3 data: FuncInfo magic 0x19930522; it
+        had first been misread as FH4) reads the unwind information through
+        it, so it ended the process. Wine's lookup resolves indirect
+        entries; gala's does too now (`seh_test`). With that, both starts
+        end with SHUTDOWN ("SQL Server is terminating this process"; the
+        scenario expects it), and the run takes about 40 s instead of
+        150 s. sqlservr then ends itself with exit code 0x191 (its own
+        NtTerminateProcess; Windows' value not checked). Ruled out on the way:
+        gala's C++/SEH dispatch in general (`cxx_eh_test`, 12 cases with
+        vcruntime140 incl. /EHa; all pass). Fixed on the way:
+        DISPATCHER_CONTEXT's ControlPcIsUnwound and size (`seh_test`).
+        The scenario stays pending (3 GiB of memory and the 50 MB MSI
+        download are too much for CI). Also open, not
         fatal: the startup assertion HadrWsfcUtil.cpp:516 'fSuccess' (a
         dump at every start, cause unknown), the service master key
         (error 21), GetActualSectorSize on new files (error 3),
@@ -904,7 +897,7 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         NetValidatePasswordPolicy (looked up), FSCTL_FILESYSTEM_GET_STATISTICS
         (error 17053, goes on), CoCreateInstance of a class not
         registered, NtQuerySystemInformation class 192.
-        Run it with `cargo xtask boot-test sqllocaldb` (about 2 minutes)
+        Run it with `cargo xtask boot-test sqllocaldb` (about 40 s)
         and read the log after "Default collation". Probed but optional so far:
         FlsGetValue2, QueryWorkingSetEx, HeapSetInformation, bad-memory
         notifications, NtAllocateUserPhysicalPagesEx, the RtlIpv*W

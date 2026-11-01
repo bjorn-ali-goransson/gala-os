@@ -287,6 +287,23 @@ pub unsafe extern "system" fn RtlLookupFunctionEntry(
     entry
 }
 
+/// The entry an indirect RUNTIME_FUNCTION names (its unwind field with
+/// bit 0 set is that entry's RVA), followed to a direct one: what the
+/// lookup returns, as on Wine (handlers read the unwind information
+/// through DISPATCHER_CONTEXT.FunctionEntry: SQL Server's GS and C++
+/// handlers in code split from its function end the process otherwise).
+fn resolve(base: u64, mut f: *const RuntimeFunction) -> *const RuntimeFunction {
+    for _ in 0..8 {
+        // SAFETY: an entry of the image's (or registered) table.
+        let unwind = unsafe { (*f).unwind };
+        if unwind & 1 == 0 {
+            break;
+        }
+        f = (base + u64::from(unwind & !1)) as *const RuntimeFunction;
+    }
+    f
+}
+
 fn lookup(pc: u64) -> (u64, *const RuntimeFunction) {
     if let Some(base) = image_of(pc as usize) {
         let (rva, size) = crate::directory(base, 3); // IMAGE_DIRECTORY_ENTRY_EXCEPTION
@@ -294,7 +311,7 @@ fn lookup(pc: u64) -> (u64, *const RuntimeFunction) {
             let table = (base + rva) as *const RuntimeFunction;
             let f = search(table, size / 12, (pc as usize - base) as u32);
             if !f.is_null() {
-                return (base as u64, f);
+                return (base as u64, resolve(base as u64, f));
             }
         }
     }
@@ -304,7 +321,7 @@ fn lookup(pc: u64) -> (u64, *const RuntimeFunction) {
                 return None;
             }
             let f = search(table as *const RuntimeFunction, count as usize, (pc - base) as u32);
-            (!f.is_null()).then_some((base, f))
+            (!f.is_null()).then_some((base, resolve(base, f)))
         })
     });
     if let Some(found) = found {

@@ -13,8 +13,9 @@
 //!   @@VERSION, SUSER_SNAME()`: COLMETADATA, ROW (NVARCHAR) and DONE;
 //!   prints the row;
 //! - waits for tempdb to be online (the first start upgrades model and
-//!   msdb first), disconnects and waits for sqlservr.exe to end itself
-//!   after its idle time (`-w1`; SHUTDOWN: see ROADMAP);
+//!   msdb first), then SHUTDOWN: the server answers with INFO 6006
+//!   ("Server shut down by request from login ...") and ends; waits for
+//!   sqlservr.exe to exit and prints its exit code;
 //! - then starts the same instance again as SqlLocalDB starts an existing
 //!   one (without the first-start arguments) and does the same.
 //!
@@ -762,8 +763,8 @@ fn batch(c: &mut Conn, sql: &str, step: u32) -> Result<Seen, u32> {
 }
 
 /// One start of the instance with command line `args`: connect, log in,
-/// query, wait for tempdb, disconnect, and wait for sqlservr.exe to end
-/// itself after its idle time (`-w1`).
+/// query, wait for tempdb, shut the server down and wait for sqlservr.exe
+/// to end.
 fn session(args: &str, label: &[u8]) -> Result<(), u32> {
     out(b"tds_test: ");
     out(label);
@@ -817,8 +818,11 @@ fn session(args: &str, label: &[u8]) -> Result<(), u32> {
     if !online {
         return Err(fail(36, b"tempdb not online", 0));
     }
-    // Disconnect; the instance ends itself after its idle time (-w1).
-    // (SHUTDOWN is accepted, but sqlservr then terminates: ROADMAP.)
+    out(b"tds_test: shutting down\r\n");
+    let seen = batch(&mut c, "SHUTDOWN", 40)?;
+    if let Some(e) = seen.error {
+        return Err(fail(43, b"SHUTDOWN failed", e));
+    }
     // SAFETY: our handles.
     unsafe {
         CloseHandle(pipe);

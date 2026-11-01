@@ -329,7 +329,14 @@ frame; they are exported through `/EXPORT` (testntdll's build.rs).
 RtlAddFunctionTable registers unwind data for code outside images (JIT
 compilers); RtlInstallFunctionTableCallback registers a callback that
 RtlLookupFunctionEntry asks for addresses in its range (CoreCLR's code
-heaps; called without the tables' spin lock held). Unwind consolidation
+heaps; called without the tables' spin lock held). An indirect
+RUNTIME_FUNCTION (UnwindData with bit 0 set: the RVA of the entry whose
+unwind data it shares, for code split off its function) is resolved by
+the lookup, in images and registered tables, so DISPATCHER_CONTEXT's
+FunctionEntry and RtlLookupFunctionEntry's result name the primary entry
+(as Wine does; `seh_test`): handlers read the unwind information through
+it (SQL Server's GS-checking C++ handlers ended the process otherwise).
+Unwind consolidation
 (STATUS_UNWIND_CONSOLIDATE, how MSVC runs C++ catch blocks, from
 RtlUnwindEx or RtlRestoreContext): the callback runs on the current
 stack (the removed frames still hold the exception object) in a frame
