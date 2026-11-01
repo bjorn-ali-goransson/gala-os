@@ -1410,7 +1410,7 @@ impl Desktop {
         let m = self.menu_rect();
         let (w, h) = (m.w, m.h);
         let mut c = Canvas::new(w, h, 0)?;
-        c.round_rect(0, 0, w, h, 8, MENU_COLOR, MENU_COLOR, 248);
+        c.round_rect(0, 0, w, h, 8, MENU_COLOR, MENU_COLOR, 255);
         // The foot: a little darker, under a line.
         let foot = h - 64;
         for y in foot..h - 1 {
