@@ -882,10 +882,19 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         caught it (state, frame or type matching that differs on gala),
         or the throw itself does not happen on Windows (something earlier
         answered differently; no failing system call or ledger entry
-        precedes it). Next idea: dump FH4's view at 0xee3114 (its
-        FuncInfo4 try blocks against the ControlPc and EstablisherFrame
-        gala passes; parsing only data, no code). The scenario ends the
-        instance by its idle time meanwhile. Also open, not
+        precedes it). Then the FH4 data (decoded as data
+        only: .pdata, unwind info, FuncInfo4 as Wine's handler4.c
+        describes it): both sqllang functions (the one at +0xee3114 and
+        the one at +0xc6cc, whose RUNTIME_FUNCTION shares its unwind data
+        through an indirect entry) have FuncInfo4 headers 0x22 (separated
+        ip maps, EHs) with no try blocks and without NO_EXCEPT, and their
+        handler is a GS-checking wrapper (handler data: FuncInfo4 RVA,
+        then GS data). By FH4's logic both should continue the search, so
+        the terminate comes from a check this view does not show (the
+        separated ip-map lookup, the GS cookie against the
+        EstablisherFrame gala passes, or vcruntime state). gala passes
+        the original (unresolved) FunctionEntry, as Wine does. Left for
+        later; the scenario ends the instance by its idle time. Also open, not
         fatal: the startup assertion HadrWsfcUtil.cpp:516 'fSuccess' (a
         dump at every start, cause unknown), the service master key
         (error 21), GetActualSectorSize on new files (error 3),
