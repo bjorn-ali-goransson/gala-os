@@ -21,8 +21,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     CreateCaret
     CreateDialogIndirectParamW
     CreateDialogParamW
-    CreateIconFromResourceEx
-    CreateIconIndirect
     DdeClientTransaction
     DdeConnect
     DdeCreateDataHandle
@@ -40,12 +38,9 @@ gala_stubs::unimplemented_exports!("user32.dll":
     DeferWindowPos
     DestroyAcceleratorTable
     DestroyCaret
-    DestroyCursor
-    DestroyIcon
     DrawEdge
     DrawFocusRect
     DrawFrameControl
-    DrawIconEx
     DrawStateW
     DrawTextW
     EmptyClipboard
@@ -68,7 +63,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     GetDesktopWindow
     GetDialogBaseUnits
     GetDoubleClickTime
-    GetIconInfo
     GetKeyboardState
     GetMessagePos
     GetMessageTime
@@ -86,7 +80,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     LoadAcceleratorsW
     LoadBitmapW
     LoadCursorFromFileW
-    LoadImageW
     MapVirtualKeyW
     NotifyWinEvent
     OffsetRect
@@ -95,7 +88,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     RedrawWindow
     RegisterClipboardFormatW
     RegisterHotKey
-    ScrollWindow
     SetCaretBlinkTime
     SetCaretPos
     SetCursorPos
@@ -109,7 +101,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     SetWindowRgn
     ShowCaret
     ShowCursor
-    SystemParametersInfoW
     ToUnicode
     TrackPopupMenu
     TranslateAcceleratorW

@@ -62,6 +62,29 @@ impl Surface {
         })
     }
 
+    /// The pixel with its fourth byte (a 32-bit surface's alpha; 0 for 24
+    /// bits), if inside.
+    pub fn get_raw(&self, x: i32, y: i32) -> Option<u32> {
+        if !self.contains(x, y) {
+            return None;
+        }
+        if self.bpp != 32 {
+            return self.get(x, y);
+        }
+        // SAFETY: inside the surface.
+        Some(unsafe { self.at(x, y).cast::<u32>().read_unaligned() })
+    }
+
+    /// Writes (x, y) with its fourth byte (32-bit surfaces).
+    pub fn put_raw(&self, x: i32, y: i32, c: u32) {
+        if self.contains(x, y) && self.bpp == 32 && !self.mono {
+            // SAFETY: inside the surface.
+            unsafe { self.at(x, y).cast::<u32>().write_unaligned(c) };
+        } else {
+            self.put(x, y, c);
+        }
+    }
+
     /// Writes (x, y) if inside.
     pub fn put(&self, x: i32, y: i32, c: u32) {
         if !self.contains(x, y) {

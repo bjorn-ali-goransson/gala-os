@@ -1296,9 +1296,6 @@ dependencies = [
 [[package]]
 name = "uxtheme"
 version = "0.1.0"
-dependencies = [
- "gala_stubs",
-]
 
 [[package]]
 name = "version"

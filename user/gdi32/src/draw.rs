@@ -586,3 +586,91 @@ pub extern "system" fn GetTextFaceW(hdc: Handle, n: i32, buf: *mut u16) -> i32 {
     })
     .unwrap_or(0)
 }
+
+// ---- For user32's icons ----
+
+fn bitmap(h: Handle) -> Option<Bitmap> {
+    let i = slot_of(h)?;
+    with(|slots, _| match slots[i] {
+        Object::Bitmap(b) => Some(b),
+        _ => None,
+    })
+}
+
+/// A copy of a bitmap (a device-dependent one of the same size and depth,
+/// alpha bytes kept): what GetIconInfo hands out.
+#[unsafe(no_mangle)]
+pub extern "system" fn GalaCopyBitmap(h: Handle) -> Handle {
+    let Some(b) = bitmap(h) else { return core::ptr::null_mut() };
+    let s = b.surface;
+    let copy = new_ddb(s.width, s.height, if b.bpp == 1 { 1 } else { 32 });
+    let Some(c) = bitmap(copy) else { return copy };
+    for y in 0..s.height {
+        for x in 0..s.width {
+            c.surface.put_raw(x, y, s.get_raw(x, y).unwrap_or(0));
+        }
+    }
+    copy
+}
+
+/// Draws an icon at logical (x, y), stretched to cx x cy (0: its size):
+/// with a colour bitmap that has alpha, blended by it; otherwise the
+/// destination ANDed with the mask, then XORed with the colour (a
+/// monochrome icon: the mask's top half ANDs, its bottom half XORs).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn GalaDrawIcon(
+    hdc: Handle,
+    x: i32,
+    y: i32,
+    cx: i32,
+    cy: i32,
+    color: Handle,
+    mask: Handle,
+    _flags: u32,
+) -> i32 {
+    let Some(m) = bitmap(mask) else { return 0 };
+    let c = bitmap(color);
+    let (w, h) =
+        (m.surface.width, if c.is_some() { m.surface.height } else { m.surface.height / 2 });
+    if w <= 0 || h <= 0 {
+        return 0;
+    }
+    let (cx, cy) = (if cx <= 0 { w } else { cx }, if cy <= 0 { h } else { cy });
+    let alpha = c.is_some_and(|c| {
+        c.surface.bpp == 32
+            && (0..c.surface.height).any(|yy| {
+                (0..c.surface.width).any(|xx| c.surface.get_raw(xx, yy).unwrap_or(0) >> 24 != 0)
+            })
+    });
+    with_dc(hdc, |dc, _| {
+        let (dx, dy) = dc.device_point(x, y);
+        for j in 0..cy {
+            for i in 0..cx {
+                let (px, py) = (dx + i, dy + j);
+                if !dc.visible(px, py) {
+                    continue;
+                }
+                let (sx, sy) = (i * w / cx, j * h / cy);
+                let d = dc.surface.get(px, py).unwrap_or(0);
+                let out = match c {
+                    Some(c) if alpha => {
+                        let v = c.surface.get_raw(sx, sy).unwrap_or(0);
+                        crate::surface::blend(d, v & 0x00ff_ffff, (v >> 24) as u8)
+                    }
+                    Some(c) => {
+                        let and = m.surface.get(sx, sy).unwrap_or(0);
+                        (d & and) ^ c.surface.get(sx, sy).unwrap_or(0)
+                    }
+                    None => {
+                        let and = m.surface.get(sx, sy).unwrap_or(0);
+                        (d & and) ^ m.surface.get(sx, sy + h).unwrap_or(0)
+                    }
+                };
+                dc.surface.put(px, py, out);
+            }
+        }
+        1
+    })
+    .unwrap_or(0)
+}

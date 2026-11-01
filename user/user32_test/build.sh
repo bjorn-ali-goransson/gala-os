@@ -5,5 +5,5 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 x86_64-w64-mingw32-gcc -O1 -g0 -s -Wl,--no-insert-timestamp \
-    -o "$ROOT/user/bin/user32_test.exe" "$ROOT/user/user32_test/main.c" -luser32 -lgdi32 -lole32 -lshell32 -ladvapi32
+    -o "$ROOT/user/bin/user32_test.exe" "$ROOT/user/user32_test/main.c" -luser32 -lgdi32 -lole32 -lshell32 -ladvapi32 -luxtheme
 sha256sum "$ROOT/user/bin/user32_test.exe"

@@ -34,8 +34,24 @@
  *   EnableWindow returns whether it was disabled; MoveWindow and
  *   SetWindowPos send WM_SIZE and WM_MOVE (DefWindowProc, from
  *   WM_WINDOWPOSCHANGED), also resizing a top-level window; what a child
- *   draws shows through its parent's DC; DestroyWindow destroys the
+ *   draws shows through its parent's DC; ScrollWindow with no rectangle
+ *   moves the children; DestroyWindow destroys the
  *   children too, WM_DESTROY reaching the parent first.
+ * - SystemParametersInfoW: SPI_GETNONCLIENTMETRICS (cbSize as given; the
+ *   caption height as SM_CYCAPTION; a message font with a negative height
+ *   and a face), SPI_GETWORKAREA (within the screen), SPI_GETICONTITLELOGFONT,
+ *   SPI_GETHIGHCONTRAST (off), SPI_GETWHEELSCROLLLINES (3); a wrong cbSize
+ *   fails.
+ * - Icons: CreateIconIndirect (a 32-bit colour bitmap and a mask) gives an
+ *   icon; GetIconInfo hands out copies of its bitmaps (other handles, the
+ *   same size); DrawIconEx draws its colours; a monochrome icon (no colour
+ *   bitmap, the mask twice as tall: AND then XOR) draws white where the
+ *   AND half is 0 and the XOR half 1; DestroyIcon succeeds once;
+ *   LoadIconW/LoadCursorW(NULL, IDI_APPLICATION/IDC_ARROW) give the
+ *   standard ones (GetIconInfo: fIcon TRUE/FALSE).
+ * - uxtheme with themes off (classic): IsAppThemed/IsThemeActive FALSE,
+ *   OpenThemeData NULL, GetThemeSysColor(NULL) the system colour,
+ *   SetWindowTheme S_OK.
  * - Timers: SetTimer for a window returns its id; WM_TIMER (wParam the
  *   id) comes no sooner than the interval, after posted messages;
  *   KillTimer returns TRUE once. A window-less timer with a TIMERPROC
@@ -63,6 +79,7 @@
 #include <windows.h>
 #include <ole2.h>
 #include <shobjidl.h>
+#include <uxtheme.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -360,11 +377,76 @@ static void children(void) {
     ReleaseDC(p, pdc);
     DeleteObject(red);
 
+    RECT before, after;
+    GetWindowRect(c2, &before);
+    CHECK(ScrollWindow(p, 5, -7, NULL, NULL));
+    GetWindowRect(c2, &after);
+    CHECK(after.left == before.left + 5 && after.top == before.top - 7);
     watched = NULL;
     SetWindowLongPtrW(p, GWLP_ID, 1);
     destroys = 0;
     CHECK(DestroyWindow(p));
     CHECK(!IsWindow(c) && !IsWindow(c2) && destroys == 3 && destroy_order[0] == 1);
+}
+
+static void icons(void) {
+    HDC screen = GetDC(NULL);
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = 16;
+    bi.bmiHeader.biHeight = -16;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    DWORD *bits = NULL;
+    HBITMAP color = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, (void **)&bits, NULL, 0);
+    CHECK(color != NULL && bits != NULL);
+    for (int i = 0; i < 256; i++)
+        bits[i] = 0x00ff0000; /* red, no alpha: the mask decides */
+    BYTE zeros[32] = {0};
+    HBITMAP mask = CreateBitmap(16, 16, 1, 1, zeros);
+    ICONINFO ii = {TRUE, 0, 0, mask, color};
+    HICON icon = CreateIconIndirect(&ii);
+    CHECK(icon != NULL);
+    ICONINFO back;
+    CHECK(GetIconInfo(icon, &back) && back.fIcon && back.hbmColor != NULL && back.hbmColor != color);
+    BITMAP bm;
+    CHECK(GetObjectW(back.hbmColor, sizeof bm, &bm) && bm.bmWidth == 16 && bm.bmHeight == 16);
+    DeleteObject(back.hbmColor);
+    DeleteObject(back.hbmMask);
+
+    HDC mem = CreateCompatibleDC(screen);
+    HBITMAP canvas = CreateCompatibleBitmap(screen, 40, 40);
+    HGDIOBJ old = SelectObject(mem, canvas);
+    PatBlt(mem, 0, 0, 40, 40, WHITENESS);
+    CHECK(DrawIconEx(mem, 2, 2, icon, 0, 0, 0, NULL, DI_NORMAL));
+    CHECK(GetPixel(mem, 5, 5) == RGB(255, 0, 0) && GetPixel(mem, 20, 20) == RGB(255, 255, 255));
+
+    /* Monochrome: AND half 0 (keep nothing), XOR half 1 (white). */
+    BYTE mono[64];
+    memset(mono, 0x00, 32);
+    memset(mono + 32, 0xff, 32);
+    HBITMAP mono_mask = CreateBitmap(16, 32, 1, 1, mono);
+    ICONINFO mi = {TRUE, 0, 0, mono_mask, NULL};
+    HICON mono_icon = CreateIconIndirect(&mi);
+    CHECK(mono_icon != NULL);
+    PatBlt(mem, 0, 0, 40, 40, BLACKNESS);
+    CHECK(DrawIconEx(mem, 20, 20, mono_icon, 0, 0, 0, NULL, DI_NORMAL));
+    CHECK(GetPixel(mem, 25, 25) == RGB(255, 255, 255) && GetPixel(mem, 5, 5) == RGB(0, 0, 0));
+    SelectObject(mem, old);
+    DeleteDC(mem);
+    DeleteObject(canvas);
+
+    CHECK(DestroyIcon(icon) && !DestroyIcon(icon) && DestroyIcon(mono_icon));
+    DeleteObject(color);
+    DeleteObject(mask);
+    DeleteObject(mono_mask);
+    HICON app = LoadIconW(NULL, MAKEINTRESOURCEW(32512));
+    HCURSOR arrow = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+    CHECK(app != NULL && arrow != NULL);
+    CHECK(GetIconInfo(arrow, &back) && !back.fIcon);
+    DeleteObject(back.hbmColor);
+    DeleteObject(back.hbmMask);
+    ReleaseDC(NULL, screen);
 }
 
 int main(void) {
@@ -373,6 +455,30 @@ int main(void) {
     monitors();
     menus();
     children();
+    icons();
+    CHECK(!IsAppThemed() && !IsThemeActive());
+    HWND tw = CreateWindowExW(0, L"User32TestHooks", L"themes", WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, NULL, NULL,
+                              GetModuleHandleW(NULL), NULL);
+    CHECK(OpenThemeData(tw, L"BUTTON") == NULL && SetWindowTheme(tw, L"", L"") == S_OK);
+    CHECK(GetThemeSysColor(NULL, COLOR_WINDOW) == GetSysColor(COLOR_WINDOW));
+    DestroyWindow(tw);
+    NONCLIENTMETRICSW ncm = {0};
+    ncm.cbSize = sizeof ncm;
+    CHECK(SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0));
+    CHECK(ncm.iCaptionHeight == GetSystemMetrics(SM_CYCAPTION) && ncm.lfMessageFont.lfHeight < 0);
+    CHECK(ncm.lfMessageFont.lfFaceName[0] != 0 && ncm.lfMenuFont.lfHeight != 0);
+    ncm.cbSize = 7;
+    CHECK(!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, 7, &ncm, 0));
+    RECT work;
+    CHECK(SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0));
+    CHECK(work.left == 0 && work.top == 0 && work.right == GetSystemMetrics(SM_CXSCREEN)
+          && work.bottom <= GetSystemMetrics(SM_CYSCREEN) && work.bottom > 0);
+    LOGFONTW icon;
+    CHECK(SystemParametersInfoW(SPI_GETICONTITLELOGFONT, sizeof icon, &icon, 0) && icon.lfHeight != 0);
+    HIGHCONTRASTW hc = {sizeof hc};
+    CHECK(SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof hc, &hc, 0) && !(hc.dwFlags & HCF_HIGHCONTRASTON));
+    UINT lines = 0;
+    CHECK(SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0) && lines == 3);
     UINT a = RegisterWindowMessageW(L"GalaTestMessage"), b = RegisterWindowMessageW(L"galatestmessage");
     CHECK(a >= 0xC000 && a <= 0xFFFF && a == b && RegisterWindowMessageW(L"Other") != a);
     ole();

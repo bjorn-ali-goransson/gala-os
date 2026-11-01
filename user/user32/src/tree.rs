@@ -953,6 +953,71 @@ pub extern "system" fn MoveWindow(
     SetWindowPos(hwnd, 0, x, y, w, h, SWP_NOZORDER | 0x10)
 }
 
+// ---- Scrolling ----
+
+/// Moves `hwnd`'s children by (dx, dy).
+fn offset_children(hwnd: Hwnd, dx: i32, dy: i32) {
+    for &c in children_of(hwnd).iter().take_while(|&&c| c != 0) {
+        if let Some(i) = index_of(c) {
+            with(|s| {
+                s.windows[i].x += dx;
+                s.windows[i].y += dy;
+            });
+        }
+    }
+}
+
+/// ScrollWindow(hwnd, dx, dy, rect, clip): the client area's contents move
+/// by (dx, dy); with no rectangle the children move too. gala repaints the
+/// whole client area (what scrolling shows after the uncovered part is
+/// painted).
+#[unsafe(no_mangle)]
+pub extern "system" fn ScrollWindow(
+    hwnd: Hwnd,
+    dx: i32,
+    dy: i32,
+    rect: *const [i32; 4],
+    _clip: *const [i32; 4],
+) -> i32 {
+    if window(hwnd).is_none() {
+        return 0;
+    }
+    if rect.is_null() {
+        offset_children(hwnd, dx, dy);
+    }
+    crate::window::InvalidateRect(hwnd, core::ptr::null(), 1);
+    1
+}
+
+/// ScrollWindowEx: SW_SCROLLCHILDREN (1) moves the children; the area is
+/// repainted with SW_INVALIDATE (2); the region and update rectangle are
+/// not reported (NULLREGION... SIMPLEREGION: 2).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn ScrollWindowEx(
+    hwnd: Hwnd,
+    dx: i32,
+    dy: i32,
+    _scroll: *const [i32; 4],
+    _clip: *const [i32; 4],
+    _region: Handle,
+    update: *mut [i32; 4],
+    flags: u32,
+) -> i32 {
+    let Some(w) = window(hwnd) else { return 0 };
+    if flags & 1 != 0 {
+        offset_children(hwnd, dx, dy);
+    }
+    if !update.is_null() {
+        // SAFETY: the caller's RECT.
+        unsafe { *update = [0, 0, w.cw, w.ch] };
+    }
+    if flags & 2 != 0 {
+        crate::window::InvalidateRect(hwnd, core::ptr::null(), i32::from(flags & 4 != 0));
+    }
+    2
+}
+
 // ---- DefWindowProc's part ----
 
 /// What DefWindowProc does for the messages of this module.

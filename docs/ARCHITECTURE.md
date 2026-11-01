@@ -2174,6 +2174,25 @@ A small window manager and shell, in the kernel for now.
   windows. Not yet: WS_CLIPCHILDREN/CLIPSIBLINGS (overlapping siblings
   paint in z order only when invalidated together), WM_PARENTNOTIFY,
   WM_NCCALCSIZE and child borders, owned windows.
+- **Icons and cursors** (`icon.rs`): HICON objects with a colour bitmap
+  and a mask (gdi32 bitmaps; GalaCopyBitmap keeps alpha bytes),
+  CreateIconIndirect keeps copies and GetIconInfo hands out copies,
+  DrawIconEx draws through gdi32's GalaDrawIcon (per-pixel alpha when the
+  colour bitmap has any, else AND mask then XOR colour; monochrome icons
+  from the mask's halves), system icons/cursors are shared, programs' own
+  load from RT_GROUP_ICON/RT_GROUP_CURSOR resources (the nearest size)
+  through CreateIconFromResourceEx (BMP form, 1-32 bits; PNG entries not
+  yet). GetDC(NULL) is the display DC.
+- **SystemParametersInfoW** (`spi.rs`): the non-client metrics with the
+  GUI font, the work area, the icon title font, high contrast off, three
+  wheel lines, and Windows' defaults for the visual-effect switches;
+  unknown actions fail and go to the ledger.
+- **uxtheme**: themes off, the documented classic state (IsAppThemed and
+  IsThemeActive FALSE, OpenThemeData NULL, theme-handle functions
+  E_HANDLE, GetThemeSysColor/Font the system's), so programs draw their
+  controls themselves.
+- **Scrolling**: ScrollWindow/ScrollWindowEx move the children (no
+  rectangle / SW_SCROLLCHILDREN) and repaint the client area.
 - **Menus** (`user/user32/src/menu.rs`): HMENU objects as data, each in
   a page of its own (64 items: string, separator or popup; id, MF state,
   type, item data, bitmap), with the documented results of Append/

@@ -960,6 +960,9 @@ pub extern "system" fn EndPaint(hwnd: Hwnd, ps: *const PaintStruct) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDC(hwnd: Hwnd) -> Handle {
+    if hwnd == 0 {
+        return crate::icon::screen_dc();
+    }
     match window(hwnd) {
         Some(_) => client_dc(hwnd),
         None => core::ptr::null_mut(),
@@ -969,6 +972,9 @@ pub extern "system" fn GetDC(hwnd: Hwnd) -> Handle {
 /// ReleaseDC: what was drawn shows.
 #[unsafe(no_mangle)]
 pub extern "system" fn ReleaseDC(hwnd: Hwnd, hdc: Handle) -> i32 {
+    if hwnd == 0 {
+        return gdi().map_or(0, |g| (g.delete_dc)(hdc));
+    }
     if window(hwnd).is_none() {
         return 0;
     }
@@ -1655,16 +1661,6 @@ pub extern "system" fn DispatchMessageA(msg: *const Msg) -> isize {
 }
 
 /// LoadCursorW/LoadIconW: a stand-in handle (there is no pointer yet).
-#[unsafe(no_mangle)]
-pub extern "system" fn LoadCursorW(_instance: Handle, _name: *const u16) -> Handle {
-    0x0001_0003 as Handle
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn LoadIconW(_instance: Handle, _name: *const u16) -> Handle {
-    0x0001_0005 as Handle
-}
-
 #[unsafe(no_mangle)]
 pub extern "system" fn SetCursor(_cursor: Handle) -> Handle {
     0x0001_0003 as Handle

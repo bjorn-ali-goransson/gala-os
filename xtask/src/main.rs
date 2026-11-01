@@ -594,6 +594,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("user32_test", "user32.dll", "Windows/System32"),
     ("user32_test", "gdi32.dll", "Windows/System32"),
     ("user32_test", "ole32.dll", "Windows/System32"),
+    ("user32_test", "uxtheme.dll", "Windows/System32"),
     ("user32_test", "shell32.dll", "Windows/System32"),
     ("user32_test", "oleaut32.dll", "Windows/System32"),
     ("user32_test", "advapi32.dll", "Windows/System32"),

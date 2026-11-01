@@ -6,9 +6,11 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 mod hook;
+mod icon;
 mod menu;
 mod message;
 mod monitor;
+mod spi;
 mod timer;
 mod tree;
 mod unimplemented;

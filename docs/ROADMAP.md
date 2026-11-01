@@ -493,8 +493,11 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    and the common controls (list and tree views, toolbars, image lists),
    menus, more GDI (DIB sections, BitBlt, fonts, regions), file dialogs.
    Load-sensitive tests seen failing once each under the full suite and
-   passing alone (2026-11-01): java_http, java_hello, postgres (a psql
-   connection dropped), smpsched_test (check 0x12, a timing check).
+   passing alone (2026-11-01): java_http, java_hello, postgres (twice,
+   the same way: a backend process starts, then psql's connection is
+   closed: "server closed the connection unexpectedly" - likely a real
+   race under load, to investigate), smpsched_test (check 0x12, a timing
+   check).
    Seen once (2026-11-01, full suite under load): rtl_test timed out with
    its thread Ready and spinning in NtYieldExecution after the other one
    ended; it passes alone. To hunt (docs/WORKFLOW.md, "Hunting a rare
@@ -523,8 +526,10 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    Then child windows (tree.rs; user32_test): the tree, painting into
    the top-level buffer, input routing, focus, the queries, window text
    and longs, EnableWindow, SetWindowPos/MoveWindow with WM_MOVE/WM_SIZE,
-   top-level resizes and titles through the desktop. It now stops at
-   SystemParametersInfoW.
+   top-level resizes and titles through the desktop. Then
+   SystemParametersInfoW, icons and cursors (with resources), GetDC(NULL),
+   uxtheme (themes off), ScrollWindow(Ex). It now stops at gdi32's
+   CreatePalette.
 W4. Later: a user-mode shell (the taskbar and start menu out of the
    kernel), window resizing (WM_SIZE), maximize, keyboard focus per
    window, a proportional font.
