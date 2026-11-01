@@ -406,6 +406,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lsa_test", "bcryptprimitives.dll", "Windows/System32"),
     ("lsa_test", "bcrypt.dll", "Windows/System32"),
     ("lsa_test", "user/access_test/access_test.regseed", "registry"),
+    ("profile_test", "ntdll.dll", "Windows/System32"),
+    ("profile_test", "kernel32.dll", "Windows/System32"),
+    ("profile_test", "advapi32.dll", "Windows/System32"),
+    ("profile_test", "secur32.dll", "Windows/System32"),
+    ("profile_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("profile_test", "bcrypt.dll", "Windows/System32"),
+    ("profile_test", "userenv.dll", "Windows/System32"),
+    ("profile_test", "user/access_test/access_test.regseed", "registry"),
     ("token_test", "ntdll.dll", "Windows/System32"),
     ("token_test", "kernel32.dll", "Windows/System32"),
     ("token_test", "advapi32.dll", "Windows/System32"),
@@ -1115,6 +1123,7 @@ const USER_PROGRAMS: &[&str] = &[
     "logon_test",
     "system_test",
     "lsa_test",
+    "profile_test",
     "registry_test",
     "keyed_event_test",
     "iphlpapi_test",
@@ -2059,6 +2068,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit as=system run=lsa_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["lsa_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Security model S4 (docs/SECURITY.md): user profiles, loaded as
+        // SYSTEM (user/profile_test).
+        name: "profile_test",
+        cmdline: "qemu_exit as=system run=profile_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["profile_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (Elasticsearch, Java's WatchService): directory change
@@ -3141,6 +3158,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("logon_test", "child processes (one NT process per Linux process)"),
     ("system_test", "child processes; run as SYSTEM (a boot option)"),
     ("lsa_test", "runs as SYSTEM (a boot option)"),
+    ("profile_test", "runs as SYSTEM (a boot option)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
     ("busybox", "child processes (pipelines are child processes)"),

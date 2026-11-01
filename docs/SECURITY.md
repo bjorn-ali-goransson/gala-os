@@ -8,8 +8,8 @@ checks", "Accounts and logon") are done (2026-11-01); S4 is begun
 (`logon_test`: CreateProcessAsUserW's token rules, pipes impersonating
 their client's token, GetUserProfileDirectoryW; `system_test`: programs
 run as SYSTEM with the boot option `as=system`; `lsa_test`: LSA logons,
-S4U and interactive, as sshd makes them); S4's profiles and S5 are
-design. Before S1, gala had the handle half of NT
+S4U and interactive, as sshd makes them; `profile_test`: LoadUserProfileW);
+S5 is design. Before S1, gala had the handle half of NT
 security (each handle carries a granted access mask, mapped through the
 object type's generic mapping, and services check it), and descriptions
 of security data in user mode: advapi32 builds and reads SIDs, ACLs and

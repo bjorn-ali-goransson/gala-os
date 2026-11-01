@@ -1181,7 +1181,14 @@ Windows, never shadows the system's DLLs.)
   SeAssignPrimaryTokenPrivilege (STATUS_PRIVILEGE_NOT_HELD), as
   CreateProcessAsUser documents. userenv's GetUserProfileDirectoryW: the
   caller's own user's is %USERPROFILE%, another local user's
-  C:\Users\<name> (profiles are not created yet: LoadUserProfileW, TODO).
+  the path in its ProfileList entry (HKLM\SOFTWARE\Microsoft\Windows NT\
+  CurrentVersion\ProfileList\<SID>\ProfileImagePath), else
+  C:\Users\<name>. LoadUserProfileW (callers holding SeBackup and
+  SeRestore, as services do; else ERROR_PRIVILEGE_NOT_HELD) creates the
+  profile directory C:\Users\<lpUserName> (full control for the user,
+  SYSTEM and Administrators, inherited), its ProfileList entry and the
+  user's hive HKEY_USERS\<SID>, returned as hProfile; UnloadUserProfile
+  closes it. TODO: the default profile's contents, NTUSER.DAT (D3).
   The boot option `as=system` starts the `run=` programs as SYSTEM
   (TokenData::system: user S-1-5-18, owner BUILTIN\Administrators, an
   owner group, Everyone, Authenticated Users, the System label; the

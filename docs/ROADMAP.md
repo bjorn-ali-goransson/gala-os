@@ -946,7 +946,8 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       now have a fixed default descriptor, as Windows' system files: it
       had been built from whoever asked). The LSA logons sshd makes work
       (`lsa_test`, as SYSTEM: S4U without a password, MSV1_0 interactive
-      with one). Next: LoadUserProfileW, then `sshd -d`
+      with one). LoadUserProfileW (`profile_test`). Next: `sshd -d` as
+      SYSTEM with a key login from the host
       accepting a key-authenticated login from the host (xtask as the
       client).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach

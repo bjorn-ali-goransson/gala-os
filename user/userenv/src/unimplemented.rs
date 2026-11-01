@@ -6,5 +6,4 @@ gala_stubs::unimplemented_exports!("userenv.dll":
     CreateEnvironmentBlock
     DestroyEnvironmentBlock
     ExpandEnvironmentStringsForUserW
-    LoadUserProfileW
 );
