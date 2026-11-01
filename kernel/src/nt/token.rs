@@ -219,7 +219,7 @@ pub const LOGON_SID: Sid = Sid::new(5, &[5, 0, LOGON_ID as u32]);
 /// them (SE_GROUP_MANDATORY | ENABLED_BY_DEFAULT | ENABLED = 7; the
 /// logon SID adds SE_GROUP_LOGON_ID; the label is SE_GROUP_INTEGRITY |
 /// SE_GROUP_INTEGRITY_ENABLED).
-const GROUPS: [Group; 10] = [
+pub const GROUPS: [Group; 10] = [
     Group { sid: Sid::new(1, &[0]), attributes: 7 }, // Everyone
     Group { sid: Sid::new(2, &[0]), attributes: 7 }, // LOCAL
     Group { sid: Sid::new(2, &[1]), attributes: 7 }, // CONSOLE LOGON
@@ -280,23 +280,37 @@ impl TokenData {
     /// local account is the machine's "None" (RID 513); it is the user
     /// here, as advapi32 answered before.
     pub fn boot_user() -> Result<TokenData, NtStatus> {
+        TokenData::standard_user(USER, LOGON_ID, &GROUPS)
+    }
+
+    /// A standard user's primary token for `user` in logon session
+    /// `logon` (its logon SID S-1-5-5-0-logon) with `groups` (the logon
+    /// SID in them is replaced).
+    pub fn standard_user(user: Sid, logon: u64, groups: &[Group]) -> Result<TokenData, NtStatus> {
+        let logon_sid = Sid::new(5, &[5, (logon >> 32) as u32, logon as u32]);
+        let mut groups = copy(groups)?;
+        for g in groups.iter_mut() {
+            if g.attributes & SE_GROUP_LOGON_ID == SE_GROUP_LOGON_ID {
+                g.sid = logon_sid;
+            }
+        }
         Ok(TokenData {
             kind: TokenType::Primary,
-            user: Group { sid: USER, attributes: 0 },
-            groups: copy(&GROUPS)?,
+            user: Group { sid: user, attributes: 0 },
+            groups,
             privileges: copy(&PRIVILEGES)?,
             restricted: Vec::new(),
-            primary_group: USER,
+            primary_group: user,
             default_dacl: acl(&[
-                (0x1000_0000, USER),
+                (0x1000_0000, user),
                 (0x1000_0000, LOCAL_SYSTEM),
-                (0xa000_0000, LOGON_SID),
+                (0xa000_0000, logon_sid),
             ])?,
-            authentication_id: LOGON_ID,
+            authentication_id: logon,
             modified_id: next_luid(),
             session: 1,
             elevation_type: 1,
-            source: (*b"User32 \0", LOGON_ID),
+            source: (*b"User32 \0", logon),
             sandbox_inert: false,
         })
     }

@@ -160,6 +160,11 @@ syscall_stubs! {
         h: usize, info: u32, sd: *mut u8, length: u32, needed: *mut u32
     );
     NtSetSecurityObject = 0x7f20, fn(h: usize, info: u32, sd: *const u8);
+    // gala's logon service (LogonUserW).
+    GalaLogonUser = 0x7f21, fn(
+        user: *const UnicodeString, domain: *const UnicodeString,
+        password: *const UnicodeString, kind: u32, token: *mut usize
+    );
     NtUnmapViewOfSection = 0x2a, fn(process: isize, base: usize);
     NtMapViewOfSection = 0x28, fn(
         section: usize, process: isize, base: *mut usize, zero_bits: usize, commit: usize,
@@ -1313,6 +1318,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_005b, 1308), // INVALID_PRIMARY_GROUP -> ERROR_INVALID_PRIMARY_GROUP
     (0xc000_0077, 1336), // INVALID_ACL -> ERROR_INVALID_ACL
     (0xc000_0079, 1338), // INVALID_SECURITY_DESCR -> ERROR_INVALID_SECURITY_DESCR
+    (0xc000_006d, 1326), // LOGON_FAILURE -> ERROR_LOGON_FAILURE
     (0xc000_0035, 183),  // OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS
     (0xc000_0039, 161),  // OBJECT_PATH_INVALID -> ERROR_BAD_PATHNAME
     (0xc000_003a, 3),    // OBJECT_PATH_NOT_FOUND -> ERROR_PATH_NOT_FOUND

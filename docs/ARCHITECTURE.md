@@ -1226,6 +1226,44 @@ Windows, never shadows the system's DLLs.)
   Windows' advapi32 does; SACLs are kept but auditing does nothing;
   mandatory labels are not separate yet (S5); descriptors live in memory
   until the disk keeps them (D2, D3).
+- **Access checks** (docs/SECURITY.md phase S3; `security::access_check`):
+  AccessCheck's documented algorithm. Generic rights mapped;
+  MAXIMUM_ALLOWED grants all the DACL allows; no or a NULL DACL grants
+  everything, an empty one nothing; ACEs in order (inherit-only ones
+  skipped), a deny ACE wins for the rights not yet granted; allow ACEs
+  match the user and enabled groups, deny ACEs also deny-only groups;
+  the owner gets READ_CONTROL | WRITE_DAC (unless an OWNER RIGHTS ACE
+  is there); a restricted token must also be granted by its restricting
+  SIDs; ACCESS_SYSTEM_SECURITY needs SeSecurityPrivilege; with backup
+  intent SeBackup grants reading and SeRestore writing; SeTakeOwnership
+  grants WRITE_OWNER. The token is the thread's impersonation token
+  (below impersonation level: STATUS_BAD_IMPERSONATION_LEVEL), else the
+  process's. Applied when opening existing files and directories
+  (NtCreateFile/NtOpenFile; the parent directory adds DELETE through
+  FILE_DELETE_CHILD and FILE_READ_ATTRIBUTES through FILE_LIST_DIRECTORY;
+  creating needs FILE_ADD_FILE or FILE_ADD_SUBDIRECTORY on the parent and
+  grants what was asked), registry keys (NtOpenKey(Ex), NtCreateKey of an
+  existing key; a new key needs KEY_CREATE_SUB_KEY on its parent) and
+  named objects (the NtOpen* services and the NtCreate* ones that open an
+  existing object). The handle gets the rights granted. Not checked yet:
+  processes and threads (NtOpenProcess/NtOpenThread), pipes and other
+  devices, traversal (SeChangeNotify is enabled for everyone), mandatory
+  labels (S5). kernel32 asks for what Windows' kernel32 asks for:
+  CreateFileW adds FILE_READ_ATTRIBUTES and, for synchronous handles,
+  SYNCHRONIZE; DeleteFileW/RemoveDirectoryW open with DELETE |
+  FILE_READ_ATTRIBUTES (not synchronous); advapi32's descriptor functions
+  open overlapped (no SYNCHRONIZE).
+- **Accounts and logon** (`kernel/src/nt/accounts.rs`): the boot user
+  `gala` (RID 1001, empty password) and the accounts in
+  `\Registry\Machine\SAM\Gala\Users\<name>` (`Rid`, `NtHash`: MD4 of
+  the UTF-16LE password, RFC 1320); scenarios seed accounts with a
+  `registry` module (gala-um: `--module=registry/<file>`). GalaLogonUser
+  (gala number 0x7f21; advapi32's LogonUserW) checks the password
+  (STATUS_LOGON_FAILURE) and makes a primary token in a new logon session:
+  the standard user's groups with the logon type's group (INTERACTIVE,
+  NETWORK, BATCH or SERVICE), no CONSOLE LOGON, no LOCAL for network
+  logons. ImpersonateLoggedOnUser impersonates it. TODO: the account key
+  is readable by programs; NetUserAdd; LsaLogonUser and S4U (S4).
 - **Certificates** (crypt32 cert.rs): CertCreateCertificateContext
   decodes DER X.509 (its own small DER reader: definite lengths, v1-v3,
   UTCTime/GeneralizedTime, unique ids, extensions) into CERT_CONTEXT and

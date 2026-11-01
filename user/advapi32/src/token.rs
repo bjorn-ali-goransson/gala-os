@@ -545,3 +545,81 @@ pub extern "system" fn ImpersonateNamedPipeClient(pipe: usize) -> i32 {
         )
     })
 }
+
+/// UNICODE_STRING over a NUL-terminated string (null: empty).
+#[repr(C)]
+struct UnicodeString {
+    length: u16,
+    maximum: u16,
+    buffer: *const u16,
+}
+
+fn unicode(s: *const u16) -> UnicodeString {
+    let mut n = 0;
+    if !s.is_null() {
+        // SAFETY: the caller's NUL-terminated string.
+        while unsafe { *s.add(n) } != 0 && n < 0x7fff {
+            n += 1;
+        }
+    }
+    UnicodeString { length: (2 * n) as u16, maximum: (2 * n) as u16, buffer: s }
+}
+
+/// LogonUserW(lpszUsername, lpszDomain, lpszPassword, dwLogonType,
+/// dwLogonProvider, *phToken): a primary token for the local account
+/// (gala's logon service); ERROR_LOGON_FAILURE for an unknown user or a
+/// wrong password. TODO(S4): user@domain names, LOGON32_LOGON_NEW_CREDENTIALS.
+#[unsafe(no_mangle)]
+pub extern "system" fn LogonUserW(
+    user: *const u16,
+    domain: *const u16,
+    password: *const u16,
+    kind: u32,
+    _provider: u32,
+    token: *mut usize,
+) -> i32 {
+    #[link(name = "ntdll", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn GalaLogonUser(
+            user: *const UnicodeString,
+            domain: *const UnicodeString,
+            password: *const UnicodeString,
+            kind: u32,
+            token: *mut usize,
+        ) -> u32;
+    }
+    if user.is_null() || token.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let (u, d, p) = (unicode(user), unicode(domain), unicode(password));
+    // SAFETY: our strings; the caller's output.
+    result(unsafe { GalaLogonUser(&u, &d, &p, kind, token) })
+}
+
+/// ImpersonateLoggedOnUser(hToken): the calling thread impersonates the
+/// token's user (a primary token is duplicated at impersonation level).
+#[unsafe(no_mangle)]
+pub extern "system" fn ImpersonateLoggedOnUser(token: usize) -> i32 {
+    let mut kind = 0u32;
+    let mut n = 0;
+    // SAFETY: our 4-byte output.
+    let status =
+        unsafe { NtQueryInformationToken(token, TOKEN_TYPE, (&raw mut kind).cast(), 4, &mut n) };
+    if status != 0 {
+        return result(status);
+    }
+    if kind == TOKEN_IMPERSONATION {
+        return set_thread_token(CURRENT_THREAD, token);
+    }
+    let mut copy = 0;
+    let access = TOKEN_IMPERSONATE | TOKEN_QUERY;
+    if DuplicateTokenEx(token, access, core::ptr::null_mut(), 2, TOKEN_IMPERSONATION, &mut copy)
+        == 0
+    {
+        return 0;
+    }
+    let r = set_thread_token(CURRENT_THREAD, copy);
+    // SAFETY: ours (the thread keeps its own reference).
+    unsafe { NtClose(copy) };
+    r
+}

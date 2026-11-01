@@ -111,6 +111,14 @@ shows it.
   addresses to modules with `events=image` (base and size per process).
   Use probe names of distinct lengths (the event has the name's pointer
   and length, not its text). Revert before committing.
+- **Tests and access checks** (since S3): a test that opens objects must
+  ask for exactly what it may have on Windows. kernel32's CreateFileW adds
+  SYNCHRONIZE for synchronous handles (open overlapped to avoid it), the
+  owner of an object only gets READ_CONTROL and WRITE_DAC implicitly,
+  deleting a key needs DELETE on it, and FILE_GENERIC_WRITE includes
+  SYNCHRONIZE and READ_CONTROL (a deny ACE with FW denies reading too).
+  To find a denial: gala-um's `--trace` (or `events=syscall`) shows the
+  call that returned 0xc0000022.
 - **Reading MSVC C++ EH data** (as data, from .pdata/.xdata): check the
   format before decoding. A FuncInfo starting with the magic number
   0x19930520-0x19930522 (bytes `22 05 93 19`) is the older format

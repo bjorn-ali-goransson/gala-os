@@ -90,6 +90,7 @@ impl NtStatus {
     pub const BAD_TOKEN_TYPE: NtStatus = NtStatus(0xc000_00a8);
     // Security descriptors.
     pub const UNKNOWN_REVISION: NtStatus = NtStatus(0xc000_0058);
+    pub const PRIVILEGE_NOT_HELD: NtStatus = NtStatus(0xc000_0061);
     pub const INVALID_OWNER: NtStatus = NtStatus(0xc000_005a);
     pub const INVALID_PRIMARY_GROUP: NtStatus = NtStatus(0xc000_005b);
     pub const INVALID_ACL: NtStatus = NtStatus(0xc000_0077);

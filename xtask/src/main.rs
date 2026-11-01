@@ -377,6 +377,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("security_test", "secur32.dll", "Windows/System32"),
     ("security_test", "bcryptprimitives.dll", "Windows/System32"),
     ("security_test", "bcrypt.dll", "Windows/System32"),
+    ("access_test", "ntdll.dll", "Windows/System32"),
+    ("access_test", "kernel32.dll", "Windows/System32"),
+    ("access_test", "advapi32.dll", "Windows/System32"),
+    ("access_test", "secur32.dll", "Windows/System32"),
+    ("access_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("access_test", "bcrypt.dll", "Windows/System32"),
+    ("access_test", "user/access_test/access_test.regseed", "registry"),
     ("token_test", "ntdll.dll", "Windows/System32"),
     ("token_test", "kernel32.dll", "Windows/System32"),
     ("token_test", "advapi32.dll", "Windows/System32"),
@@ -1082,6 +1089,7 @@ const USER_PROGRAMS: &[&str] = &[
     "advapi32_test",
     "token_test",
     "security_test",
+    "access_test",
     "registry_test",
     "keyed_event_test",
     "iphlpapi_test",
@@ -1994,6 +2002,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=security_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["security_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Security model S3 (docs/SECURITY.md): access checks at open,
+        // with a second account (user/access_test; its account seeded).
+        name: "access_test",
+        cmdline: "qemu_exit run=access_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["access_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (Elasticsearch, Java's WatchService): directory change

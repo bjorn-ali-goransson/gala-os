@@ -55,6 +55,21 @@ impl Call<'_> {
     }
 
     /// Makes a key object for `id` (already retained) and returns a handle.
+    /// return_key after the access check of an open of an existing key (on
+    /// failure the key is released).
+    fn return_checked_key(&self, out: u64, id: KeyId, access: u32, attributes: u32) -> NtStatus {
+        match super::security_calls::check_key(self, id, access & !KEY_WOW64_RES, false) {
+            Ok(granted) => self.return_key(out, id, granted, attributes),
+            Err(e) => {
+                let _ = registry::with(|r| {
+                    r.release(id);
+                    Ok(())
+                });
+                e
+            }
+        }
+    }
+
     fn return_key(&self, out: u64, id: KeyId, access: u32, attributes: u32) -> NtStatus {
         // On failure the key object is dropped here, outside the registry
         // lock, which releases the node.
@@ -116,7 +131,7 @@ fn open_key(call: &mut Call<'_>) -> NtStatus {
             return status;
         }
     };
-    call.return_key(out, id, access, attributes)
+    call.return_checked_key(out, id, access, attributes)
 }
 
 /// Records an absent key in the ledger ("registry:MACHINE/SOFTWARE/...",
@@ -164,6 +179,19 @@ pub(super) fn nt_create_key(call: &mut Call<'_>) -> NtStatus {
     let (_root, start, name, attributes) = tri!(call.key_attributes(arg!(call, 2)));
     let class = if class_ptr == 0 { Vec::new() } else { tri!(call.unicode_string(class_ptr)) };
     let now = platform::system_time();
+    // A new key needs KEY_CREATE_SUB_KEY on its parent (the access check,
+    // docs/SECURITY.md S3); an existing one is opened as NtOpenKey would.
+    let existing = registry::with(|r| Ok(r.lookup(start, &name).ok()));
+    if let Ok(None) = existing {
+        let split = name.iter().rposition(|&c| c == u16::from(b'\\'));
+        let parent = match split {
+            Some(i) => registry::with(|r| r.lookup(start, &name[..i])),
+            None => Ok(start),
+        };
+        if let Ok(parent) = parent {
+            tri!(super::security_calls::check_key_create(call, parent));
+        }
+    }
     let (id, created) = tri!(registry::with(|r| {
         let (id, created) = r.create(start, &name, options, &class, now)?;
         r.retain(id);
@@ -172,7 +200,11 @@ pub(super) fn nt_create_key(call: &mut Call<'_>) -> NtStatus {
     if created {
         tri!(super::security_calls::assign_key(call, id, arg!(call, 2)));
     }
-    let status = call.return_key(out, id, access, attributes);
+    let status = if created {
+        call.return_key(out, id, access, attributes)
+    } else {
+        call.return_checked_key(out, id, access, attributes)
+    };
     if status == NtStatus::SUCCESS && disposition_ptr != 0 {
         let disposition = if created { REG_CREATED_NEW_KEY } else { REG_OPENED_EXISTING_KEY };
         tri!(call.write_u32(disposition_ptr, disposition));

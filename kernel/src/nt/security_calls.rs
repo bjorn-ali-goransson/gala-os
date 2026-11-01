@@ -250,3 +250,122 @@ pub(super) fn nt_set_security_object(call: &mut Call<'_>) -> NtStatus {
     tri!(store(&entry.object, &d));
     NtStatus::SUCCESS
 }
+
+/// Runs `f` on the token opens are checked against: the thread's
+/// impersonation token (STATUS_BAD_IMPERSONATION_LEVEL below impersonation
+/// level), else the process's.
+fn with_access_token<R>(
+    call: &Call<'_>,
+    f: impl FnOnce(&TokenData) -> Result<R, NtStatus>,
+) -> Result<R, NtStatus> {
+    with_token(call, |t| {
+        if t.level().is_some_and(|l| l < super::super::token::SECURITY_IMPERSONATION) {
+            return Err(NtStatus::BAD_IMPERSONATION_LEVEL);
+        }
+        f(t)
+    })
+}
+
+/// The access an open of `object` (not a file or key) with `desired` is
+/// granted (STATUS_ACCESS_DENIED).
+pub(super) fn check_object(
+    call: &Call<'_>,
+    object: &ObjectRef,
+    desired: u32,
+) -> Result<u32, NtStatus> {
+    with_access_token(call, |t| {
+        let d = descriptor_of(t, object)?;
+        security::access_check(&d, t, desired, &object.mapping(), false)
+    })
+}
+
+/// The access an open of key `id` is granted.
+pub(super) fn check_key(
+    call: &Call<'_>,
+    id: registry::KeyId,
+    desired: u32,
+    backup: bool,
+) -> Result<u32, NtStatus> {
+    with_access_token(call, |t| {
+        let d = key_descriptor(t, id)?;
+        security::access_check(&d, t, desired, &KEY_MAPPING, backup)
+    })
+}
+
+/// Creating a subkey of `parent` needs KEY_CREATE_SUB_KEY on it.
+pub(super) fn check_key_create(call: &Call<'_>, parent: registry::KeyId) -> Result<(), NtStatus> {
+    const KEY_CREATE_SUB_KEY: u32 = 0x0004;
+    check_key(call, parent, KEY_CREATE_SUB_KEY, false).map(drop)
+}
+
+// Directory and file rights the checks use.
+const FILE_LIST_DIRECTORY: u32 = 0x0001;
+const FILE_ADD_FILE: u32 = 0x0002;
+const FILE_ADD_SUBDIRECTORY: u32 = 0x0004;
+const FILE_DELETE_CHILD: u32 = 0x0040;
+const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+const DELETE: u32 = 0x0001_0000;
+const FILE_DIRECTORY_FILE: u32 = 0x0001;
+const FILE_OPEN_FOR_BACKUP_INTENT: u32 = 0x4000;
+
+/// The access NtCreateFile/NtOpenFile of `path` with `desired` is granted:
+/// an existing file's descriptor decides, where its parent directory
+/// adds DELETE (FILE_DELETE_CHILD) and FILE_READ_ATTRIBUTES
+/// (FILE_LIST_DIRECTORY), as documented; creating one needs FILE_ADD_FILE
+/// (FILE_ADD_SUBDIRECTORY for a directory) on the parent and grants what
+/// was asked. Backup intent lets SeBackup/SeRestore grant access.
+pub(super) fn file_access(
+    call: &Call<'_>,
+    path: &file::FilePath,
+    desired: u32,
+    disposition: u32,
+    options: u32,
+) -> Result<u32, NtStatus> {
+    let (node, parent) = file::lookup_path(path)?;
+    let backup = options & FILE_OPEN_FOR_BACKUP_INTENT != 0;
+    let maximum = desired & security::MAXIMUM_ALLOWED != 0;
+    with_access_token(call, |t| {
+        let parent_grants = match parent {
+            Some(p) => {
+                let pd = node_descriptor(t, p)?;
+                security::access_check(&pd, t, security::MAXIMUM_ALLOWED, &FILE_MAPPING, backup)
+                    .unwrap_or(0)
+            }
+            None => 0,
+        };
+        let Some(node) = node else {
+            if parent.is_none() || matches!(disposition, file::FILE_OPEN | file::FILE_OVERWRITE) {
+                // Missing: the open reports it.
+                return Ok(FILE_MAPPING.map(desired));
+            }
+            let need = if options & FILE_DIRECTORY_FILE != 0 {
+                FILE_ADD_SUBDIRECTORY
+            } else {
+                FILE_ADD_FILE
+            };
+            if parent_grants & need == 0 {
+                return Err(NtStatus::ACCESS_DENIED);
+            }
+            return Ok(FILE_MAPPING.map(desired));
+        };
+        let d = node_descriptor(t, node)?;
+        let mut extra = 0;
+        if parent_grants & FILE_DELETE_CHILD != 0 {
+            extra |= DELETE;
+        }
+        if parent_grants & FILE_LIST_DIRECTORY != 0 {
+            extra |= FILE_READ_ATTRIBUTES;
+        }
+        let wanted = security::map_mask(desired & !security::MAXIMUM_ALLOWED, &FILE_MAPPING);
+        let rest = (desired & security::MAXIMUM_ALLOWED) | (wanted & !extra);
+        match security::access_check(&d, t, rest, &FILE_MAPPING, backup) {
+            Ok(g) => Ok(g | (extra & if maximum { u32::MAX } else { wanted })),
+            Err(NtStatus::ACCESS_DENIED)
+                if wanted & !extra == 0 && (extra & wanted != 0 || maximum && extra != 0) =>
+            {
+                Ok(extra & if maximum { u32::MAX } else { wanted })
+            }
+            Err(e) => Err(e),
+        }
+    })
+}

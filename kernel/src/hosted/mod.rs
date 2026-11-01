@@ -218,6 +218,15 @@ pub fn run(
         crate::warn!("net: not started ({e:?})");
     }
     for (directory, file, contents) in modules {
+        // `--module=registry/<file>`: a scenario's registry keys, as the
+        // kernel's `registry` boot modules.
+        if directory == "registry" {
+            let text =
+                core::str::from_utf8(&contents).map_err(|_| alloc::format!("{file}: not UTF-8"))?;
+            crate::nt::registry::load_more(text, crate::nt::platform::system_time())
+                .map_err(|e| alloc::format!("loading {file}: {e:?}"))?;
+            continue;
+        }
         crate::nt::file::add_boot_file(&directory, &file, contents.leak(), false)
             .map_err(|e| alloc::format!("adding {directory}/{file}: {e:?}"))?;
     }

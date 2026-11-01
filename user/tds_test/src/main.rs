@@ -819,9 +819,16 @@ fn session(args: &str, label: &[u8]) -> Result<(), u32> {
         return Err(fail(36, b"tempdb not online", 0));
     }
     out(b"tds_test: shutting down\r\n");
-    let seen = batch(&mut c, "SHUTDOWN", 40)?;
-    if let Some(e) = seen.error {
-        return Err(fail(43, b"SHUTDOWN failed", e));
+    // The server may close the pipe before its answer is read (it is
+    // ending): then only its exit tells (the scenario also checks its log).
+    match batch(&mut c, "SHUTDOWN", 40) {
+        Ok(seen) => {
+            if let Some(e) = seen.error {
+                return Err(fail(43, b"SHUTDOWN failed", e));
+            }
+        }
+        Err(41) => out(b"tds_test: no answer to SHUTDOWN (the pipe closed)\r\n"),
+        Err(step) => return Err(step),
     }
     // SAFETY: our handles.
     unsafe {

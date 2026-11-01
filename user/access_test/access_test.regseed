@@ -1,0 +1,10 @@
+; The second local account access_test logs on as (docs/SECURITY.md,
+; "Accounts and logon"): gala's account database is the registry key
+; \Registry\Machine\SAM\Gala\Users, one subkey per user with its RID and
+; NT password hash (MD4 of the UTF-16LE password; here of "Gala-Test-1").
+; Loaded after registry.seed (module string `registry`). Format: see
+; registry.seed.
+
+[\Registry\Machine\SAM\Gala\Users\galatest]
+"Rid"=dword:1002
+"NtHash"=hex:cf,21,ae,34,07,40,f8,50,6d,56,b0,bf,d8,2d,7a,8e

@@ -1,8 +1,10 @@
 # Security model (design, 2026-11-01)
 
 Status: phases S1 (tokens in the kernel; `token_test`, ARCHITECTURE
-"Access tokens") and S2 (descriptors kept; `security_test`, ARCHITECTURE
-"Security descriptors") are done (2026-11-01); S3-S5 are design. Before S1, gala had the handle half of NT
+"Access tokens"), S2 (descriptors kept; `security_test`, ARCHITECTURE
+"Security descriptors") and S3 (enforcement at open for files, keys and
+named objects, a second account; `access_test`, ARCHITECTURE "Access
+checks", "Accounts and logon") are done (2026-11-01); S4-S5 are design. Before S1, gala had the handle half of NT
 security (each handle carries a granted access mask, mapped through the
 object type's generic mapping, and services check it), and descriptions
 of security data in user mode: advapi32 builds and reads SIDs, ACLs and
@@ -128,7 +130,7 @@ start.
    read it back, inheritance into a directory's children, SetFileSecurity
    and SetSecurityInfo kept, registry keys, named objects); sshd's
    permission checks then see real answers.
-3. **S3 Enforcement**: access checks at open, with a second account
+3. **S3 Enforcement** (done; processes, threads and pipes not yet): access checks at open, with a second account
    (LogonUserW of a test user): denied and allowed opens, privileges,
    deny ACEs, the owner's implicit rights, integrity levels.
 4. **S4 Logons and per-user processes**: LsaLogonUser S4U,

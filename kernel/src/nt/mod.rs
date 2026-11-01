@@ -1,5 +1,6 @@
 //! NT personality: the Windows user-mode ABI on top of the kernel core.
 
+pub mod accounts;
 pub mod afd;
 pub mod context;
 pub mod file;

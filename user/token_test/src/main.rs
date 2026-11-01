@@ -352,7 +352,7 @@ fn run() -> Result<(), u32> {
         let length = usize::from(u16::from_le_bytes([info.0[0], info.0[1]]));
         let name = rd64(&info.0, 8) as *const u16;
         c.eq(length as u64, 10)?;
-        let expect = [b'T', b'o', b'k', b'e', b'n'];
+        let expect = b"Token";
         c.ok((0..5).all(|i| *name.add(i) == u16::from(expect[i])), 0)?;
 
         // A primary token; the same object through every open.

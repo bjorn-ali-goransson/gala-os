@@ -19,10 +19,8 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     EnumDependentServicesW
     EnumerateTraceGuids
     GetSidLengthRequired
-    ImpersonateLoggedOnUser
     LockServiceDatabase
     LogonUserExW
-    LogonUserW
     LsaAddAccountRights
     LsaClose
     LsaManageSidNameMapping

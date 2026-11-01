@@ -299,6 +299,21 @@ pub fn components(rest: &[u16], relative: bool) -> Result<Vec<&[u16]>, NtStatus>
     Ok(out)
 }
 
+/// The node `path` names, if it exists, and its parent directory (None
+/// for both when a directory on the way is missing: opening reports it).
+pub fn lookup_path(path: &FilePath) -> Result<(Option<NodeId>, Option<NodeId>), NtStatus> {
+    let start = path.start;
+    let parts = components(&path.name, start != ramfs::ROOT)?;
+    with_fs(|fs| {
+        let Some(last) = parts.last() else {
+            let parent = fs.node(start).map(ramfs::Node::parent).filter(|&p| p != start);
+            return Ok((Some(start), parent));
+        };
+        let Ok(parent) = fs.parent_of(start, &parts) else { return Ok((None, None)) };
+        Ok((fs.find(parent, last).ok().flatten(), Some(parent)))
+    })
+}
+
 /// The result of NtCreateFile.
 pub struct Created {
     pub object: ObjectRef,

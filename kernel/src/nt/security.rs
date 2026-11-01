@@ -558,10 +558,153 @@ impl Descriptor {
     }
 }
 
+/// OWNER RIGHTS (S-1-3-4): an ACE for it replaces the owner's implicit
+/// READ_CONTROL | WRITE_DAC.
+const OWNER_RIGHTS: Sid = Sid::new(3, &[4]);
+
+const READ_CONTROL: u32 = 0x0002_0000;
+const WRITE_DAC: u32 = 0x0004_0000;
+const WRITE_OWNER: u32 = 0x0008_0000;
+const DELETE: u32 = 0x0001_0000;
+pub const ACCESS_SYSTEM_SECURITY: u32 = 0x0100_0000;
+pub const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
+
+// Privilege LUIDs.
+const SE_SECURITY: u64 = 8;
+const SE_TAKE_OWNERSHIP: u64 = 9;
+const SE_BACKUP: u64 = 17;
+const SE_RESTORE: u64 = 18;
+
+fn enabled(token: &TokenData, luid: u64) -> bool {
+    token.privileges.iter().any(|p| p.luid == luid && p.attributes & 2 != 0)
+}
+
+/// Whose SIDs a pass of the access check matches: the token's user and
+/// groups, or (for a restricted token's second pass) its restricting SIDs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Normal,
+    Restricted,
+}
+
+/// Whether an ACE for `sid` applies in `pass`: allowing ACEs to the user
+/// and enabled groups, denying ones also to deny-only groups.
+fn matches(token: &TokenData, pass: Pass, sid: &Sid, deny: bool) -> bool {
+    match pass {
+        Pass::Restricted => token.restricted.iter().any(|g| g.sid == *sid),
+        Pass::Normal => {
+            let usable = |attributes: u32| {
+                (attributes & super::token::SE_GROUP_ENABLED != 0
+                    && attributes & super::token::SE_GROUP_USE_FOR_DENY_ONLY == 0)
+                    || (deny && attributes & super::token::SE_GROUP_USE_FOR_DENY_ONLY != 0)
+            };
+            let user = token.user.sid == *sid
+                && (token.user.attributes & super::token::SE_GROUP_USE_FOR_DENY_ONLY == 0 || deny);
+            user || token.groups.iter().any(|g| g.sid == *sid && usable(g.attributes))
+        }
+    }
+}
+
+/// One pass over the DACL: the rights it grants (wanting `wanted`,
+/// everything for MAXIMUM_ALLOWED), with the owner's implicit rights.
+fn evaluate(
+    d: &Descriptor,
+    token: &TokenData,
+    pass: Pass,
+    wanted: u32,
+    maximum: bool,
+    mapping: &GenericMapping,
+) -> u32 {
+    let Some(acl) = d.dacl.as_deref().filter(|_| d.control & SE_DACL_PRESENT != 0) else {
+        // No DACL, or a NULL one: everything.
+        return mapping.all | wanted;
+    };
+    let owner = d.owner.is_some_and(|o| matches(token, pass, &o, false));
+    let has_owner_rights = aces(acl).any(|(kind, flags, ace)| {
+        simple(kind)
+            && flags & INHERIT_ONLY_ACE == 0
+            && ace.len() >= 8
+            && Sid::parse(&ace[8..]) == Some(OWNER_RIGHTS)
+    });
+    let mut granted = if owner && !has_owner_rights { READ_CONTROL | WRITE_DAC } else { 0 };
+    let mut denied = 0u32;
+    for (kind, flags, ace) in aces(acl) {
+        if flags & INHERIT_ONLY_ACE != 0 || !matches!(kind, 0 | 1) || ace.len() < 8 {
+            continue;
+        }
+        let Some(sid) = Sid::parse(&ace[8..]) else { continue };
+        let deny = kind == 1;
+        let applies = if sid == OWNER_RIGHTS { owner } else { matches(token, pass, &sid, deny) };
+        if !applies {
+            continue;
+        }
+        let mask = map_mask(u32_at(ace, 4).unwrap_or(0), mapping);
+        if deny {
+            denied |= mask & !granted;
+        } else {
+            granted |= mask & !denied;
+        }
+        if !maximum && granted & wanted == wanted {
+            break;
+        }
+    }
+    granted
+}
+
+/// AccessCheck (as documented): the rights `desired` (generic rights
+/// mapped through `mapping`; MAXIMUM_ALLOWED: all that can be granted)
+/// that the descriptor grants `token`. ACCESS_SYSTEM_SECURITY needs
+/// SeSecurityPrivilege; with `backup` (a backup-intent open) SeBackup
+/// grants reading and SeRestore writing; SeTakeOwnership grants
+/// WRITE_OWNER; the owner gets READ_CONTROL and WRITE_DAC (unless an
+/// OWNER RIGHTS ACE says otherwise); deny ACEs before an allowing one win;
+/// a restricted token must also be granted by its restricting SIDs.
+pub fn access_check(
+    d: &Descriptor,
+    token: &TokenData,
+    desired: u32,
+    mapping: &GenericMapping,
+    backup: bool,
+) -> Result<u32, NtStatus> {
+    let maximum = desired & MAXIMUM_ALLOWED != 0;
+    let mut wanted = map_mask(desired & !MAXIMUM_ALLOWED, mapping);
+    let mut privileged = 0;
+    if wanted & ACCESS_SYSTEM_SECURITY != 0 {
+        if !enabled(token, SE_SECURITY) {
+            return Err(NtStatus::PRIVILEGE_NOT_HELD);
+        }
+        privileged |= ACCESS_SYSTEM_SECURITY;
+        wanted &= !ACCESS_SYSTEM_SECURITY;
+    }
+    if backup && enabled(token, SE_BACKUP) {
+        privileged |= mapping.read | mapping.execute;
+    }
+    if backup && enabled(token, SE_RESTORE) {
+        privileged |= mapping.write | WRITE_DAC | WRITE_OWNER | DELETE;
+    }
+    if (wanted & WRITE_OWNER != 0 || maximum) && enabled(token, SE_TAKE_OWNERSHIP) {
+        privileged |= WRITE_OWNER;
+    }
+    let remaining = wanted & !privileged;
+    let mut granted = evaluate(d, token, Pass::Normal, remaining, maximum, mapping);
+    if !token.restricted.is_empty() {
+        granted &= evaluate(d, token, Pass::Restricted, remaining, maximum, mapping);
+    }
+    let total = (granted | privileged) & (mapping.all | ACCESS_SYSTEM_SECURITY);
+    if total & wanted != wanted || (maximum && total == 0 && wanted == 0) {
+        return Err(NtStatus::ACCESS_DENIED);
+    }
+    Ok(if maximum {
+        total | wanted
+    } else {
+        wanted | privileged & (desired & ACCESS_SYSTEM_SECURITY)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nt::token::{TokenData, USER};
+    use crate::nt::token::{Token, TokenData, USER};
 
     const FILE_MAPPING: GenericMapping = GenericMapping {
         read: 0x0012_0089,
@@ -680,5 +823,56 @@ mod tests {
             set(&mut d, OWNER_SECURITY_INFORMATION, owner, &token),
             Err(NtStatus::INVALID_OWNER)
         );
+    }
+
+    #[test]
+    fn checking_access() {
+        let token = TokenData::boot_user().unwrap();
+        let other = Sid::new(5, &[21, 1, 2, 3, 1002]);
+        // The user may read, another user write; a deny ACE first.
+        let mut d = parent(&[(0x120089, USER, 0), (0x1f01ff, other, 0)]);
+        d.owner = Some(other);
+        assert_eq!(access_check(&d, &token, 0x8000_0000, &FILE_MAPPING, false), Ok(0x120089));
+        assert_eq!(
+            access_check(&d, &token, 0x4000_0000, &FILE_MAPPING, false),
+            Err(NtStatus::ACCESS_DENIED)
+        );
+        assert_eq!(access_check(&d, &token, MAXIMUM_ALLOWED, &FILE_MAPPING, false), Ok(0x120089));
+        // Deny before allow.
+        let mut deny = Vec::new();
+        push_ace(&mut deny, 1, 0, 0x116, &USER).unwrap();
+        push_ace(&mut deny, 0, 0, 0x1f01ff, &EVERYONE).unwrap();
+        let mut d2 = parent(&[]);
+        d2.dacl = Some(build_acl(2, &deny, 2).unwrap());
+        d2.owner = Some(other);
+        assert!(access_check(&d2, &token, 0x8000_0000, &FILE_MAPPING, false).is_ok());
+        assert!(access_check(&d2, &token, 0x4000_0000, &FILE_MAPPING, false).is_err());
+        // The owner's implicit rights; an empty DACL grants nothing else.
+        let mut empty = parent(&[]);
+        empty.owner = Some(USER);
+        assert_eq!(
+            access_check(&empty, &token, READ_CONTROL | WRITE_DAC, &FILE_MAPPING, false),
+            Ok(READ_CONTROL | WRITE_DAC)
+        );
+        assert!(access_check(&empty, &token, 0x1, &FILE_MAPPING, false).is_err());
+        // No privileges for a standard user, even with backup intent.
+        assert!(access_check(&empty, &token, 0x8000_0000, &FILE_MAPPING, true).is_err());
+        assert_eq!(
+            access_check(&empty, &token, ACCESS_SYSTEM_SECURITY, &FILE_MAPPING, false),
+            Err(NtStatus::PRIVILEGE_NOT_HELD)
+        );
+        // A NULL DACL grants all.
+        let mut null = parent(&[]);
+        null.dacl = None;
+        assert_eq!(
+            access_check(&null, &token, MAXIMUM_ALLOWED, &FILE_MAPPING, false),
+            Ok(0x1f01ff)
+        );
+        // A restricted token: both passes must grant.
+        let restricted =
+            Token::new(token.try_clone().unwrap()).filter(0, &[], &[], &[EVERYONE]).unwrap();
+        let r = restricted.data.lock();
+        assert!(access_check(&d, &r, 0x8000_0000, &FILE_MAPPING, false).is_err());
+        assert!(access_check(&d2, &r, 0x8000_0000, &FILE_MAPPING, false).is_ok());
     }
 }

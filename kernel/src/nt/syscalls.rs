@@ -87,6 +87,8 @@ pub const NT_PRIVILEGE_CHECK: u32 = 0x7f1e;
 // Security descriptors (docs/SECURITY.md S2): gala's numbers until verified.
 pub const NT_QUERY_SECURITY_OBJECT: u32 = 0x7f1f;
 pub const NT_SET_SECURITY_OBJECT: u32 = 0x7f20;
+/// gala's logon service (LogonUserW; docs/SECURITY.md S3).
+pub const GALA_LOGON_USER: u32 = 0x7f21;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -304,6 +306,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
         security_calls::nt_query_security_object,
     ),
     (NT_SET_SECURITY_OBJECT, "NtSetSecurityObject", 3, security_calls::nt_set_security_object),
+    (GALA_LOGON_USER, "GalaLogonUser", 5, token_calls::gala_logon_user),
     (
         NT_ASSIGN_PROCESS_TO_JOB_OBJECT,
         "NtAssignProcessToJobObject",
@@ -1036,6 +1039,15 @@ impl Call<'_> {
         Ok(Some((field(8), name, field(24) as u32)))
     }
 
+    /// return_handle for an open of an existing object, after the access
+    /// check (docs/SECURITY.md S3).
+    fn return_opened(&self, out: u64, object: ObjectRef, access: u32, attributes: u32) -> NtStatus {
+        match security_calls::check_object(self, &object, access) {
+            Ok(granted) => self.return_handle(out, object, granted, attributes),
+            Err(e) => e,
+        }
+    }
+
     /// Inserts a handle for `object` and stores its value at `out`.
     fn return_handle(&self, out: u64, object: ObjectRef, access: u32, attributes: u32) -> NtStatus {
         let entry = HandleEntry { access: object.mapping().map(access), object, attributes };
@@ -1120,7 +1132,11 @@ fn nt_create_event(call: &mut Call<'_>) -> NtStatus {
         Some(a) => (object, false, a.attributes & HANDLE_ATTRIBUTES),
         None => (object, false, 0),
     };
-    let status = call.return_handle(out, object, access, handle_attributes);
+    let status = if existed {
+        call.return_opened(out, object, access, handle_attributes)
+    } else {
+        call.return_handle(out, object, access, handle_attributes)
+    };
     if status == NtStatus::SUCCESS && existed { NtStatus::OBJECT_NAME_EXISTS } else { status }
 }
 
@@ -1129,14 +1145,14 @@ fn nt_open_event(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) =
         tri!(call.open_named(arg!(call, 2), |o| matches!(o.body, ObjectBody::Event(_))));
-    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtOpenDirectoryObject(*DirectoryHandle, DesiredAccess, ObjectAttributes)
 fn nt_open_directory_object(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), |o| o.as_directory().is_some()));
-    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
 }
 
 const OBJECT_BASIC_INFORMATION: u64 = 0;
@@ -1411,7 +1427,7 @@ fn nt_create_timer(call: &mut Call<'_>) -> NtStatus {
 fn nt_open_timer(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_timer));
-    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtSetTimer(TimerHandle, *DueTime, TimerApcRoutine, TimerContext,
@@ -2216,7 +2232,11 @@ fn create_object(
     let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
     tri!(security_calls::assign_object(call, &object, attrs_ptr));
     let (object, existed, handle_attributes) = tri!(link_new_object(attrs, object, same));
-    let status = call.return_handle(out, object, access, handle_attributes);
+    let status = if existed {
+        call.return_opened(out, object, access, handle_attributes)
+    } else {
+        call.return_handle(out, object, access, handle_attributes)
+    };
     if status == NtStatus::SUCCESS && existed { NtStatus::OBJECT_NAME_EXISTS } else { status }
 }
 
@@ -2242,7 +2262,7 @@ fn nt_create_mutant(call: &mut Call<'_>) -> NtStatus {
 fn nt_open_mutant(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_mutant));
-    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtReleaseMutant(MutantHandle, *PreviousCount)
@@ -2311,7 +2331,7 @@ fn nt_create_semaphore(call: &mut Call<'_>) -> NtStatus {
 fn nt_open_semaphore(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_semaphore));
-    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtReleaseSemaphore(SemaphoreHandle, ReleaseCount, *PreviousCount)
@@ -2558,8 +2578,13 @@ fn finish_create_section(
 ) -> NtStatus {
     let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
     let Ok(object) = KObject::new(ObjectBody::Section(body)) else { return NtStatus::NO_MEMORY };
+    tri!(security_calls::assign_object(call, &object, attrs_ptr));
     let (object, existed, handle_attributes) = tri!(link_new_object(attrs, object, is_section));
-    let status = call.return_handle(out, object, access, handle_attributes);
+    let status = if existed {
+        call.return_opened(out, object, access, handle_attributes)
+    } else {
+        call.return_handle(out, object, access, handle_attributes)
+    };
     if status == NtStatus::SUCCESS && existed { NtStatus::OBJECT_NAME_EXISTS } else { status }
 }
 
@@ -2567,7 +2592,7 @@ fn finish_create_section(
 fn nt_open_section(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_section));
-    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
 }
 
 const MEM_TOP_DOWN: u32 = 0x10_0000;
@@ -2784,7 +2809,7 @@ impl Call<'_> {
 
     fn open_or_create(&self, r: OpenRequest) -> NtStatus {
         let OpenRequest { out, access, attrs_ptr, iosb, share, disposition, options, ea } = r;
-        let granted = super::object::FILE_MAPPING.map(access);
+        let mut granted = super::object::FILE_MAPPING.map(access);
         let (object, information) = if tri!(self.names_afd(attrs_ptr)) {
             let ea = tri!(self.ea_buffer(ea.0, ea.1));
             (tri!(super::afd::open(&ea)), file::FILE_OPENED)
@@ -2807,6 +2832,8 @@ impl Call<'_> {
             (object, file::FILE_OPENED)
         } else {
             let path = tri!(self.file_path(attrs_ptr));
+            // The access check (docs/SECURITY.md S3).
+            granted = tri!(security_calls::file_access(self, &path, access, disposition, options));
             let created = tri!(file::create(&path, granted, share, disposition, options));
             if created.information == file::FILE_CREATED {
                 tri!(security_calls::assign_file(self, &created.object, attrs_ptr));
@@ -4333,7 +4360,7 @@ fn nt_create_keyed_event(call: &mut Call<'_>) -> NtStatus {
 fn nt_open_keyed_event(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_keyed_event));
-    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtWaitForKeyedEvent / NtReleaseKeyedEvent(KeyedEventHandle, Key,

@@ -17,7 +17,8 @@
 //!   the DACL it sets; GetSecurityInfo reads owner and DACL of a handle.
 //! - Registry keys: a key created with a DACL keeps it, a subkey inherits
 //!   its container-inherit ACE (CI kept, INHERITED_ACE), RegSetKeySecurity
-//!   replaces it; RegGetKeySecurity size queries.
+//!   replaces it (reading and DELETE, which deleting the key needs);
+//!   RegGetKeySecurity size queries.
 //! - Kernel objects: a named event created with a DACL keeps it
 //!   (GetKernelObjectSecurity); an unnamed one without gets the token's
 //!   default DACL (its first trustee is the user); a handle without
@@ -417,7 +418,9 @@ fn run() -> Result<(), u32> {
             7,
             core::ptr::null(),
             3,
-            0x80,
+            // Overlapped: no SYNCHRONIZE, which only SYSTEM's ACE could
+            // grant (the owner has READ_CONTROL and WRITE_DAC).
+            0x4000_0080,
             null,
         );
         c.ok(h as isize != -1, last_error())?;
@@ -505,11 +508,11 @@ fn run() -> Result<(), u32> {
         c.eq(RegGetKeySecurity(subkey, DACL, kb.0.as_mut_ptr(), &mut size) as u64, 0)?;
         let (dacl, _) = dacl_of(&c, kb.0.as_ptr())?;
         expect_aces(&c, dacl, &[(0x12, KEY_ALL_ACCESS, &EVERYONE)])?;
-        c.eq(RegSetKeySecurity(subkey, DACL, sddl(&c, "D:P(A;;KR;;;WD)")?) as u64, 0)?;
+        c.eq(RegSetKeySecurity(subkey, DACL, sddl(&c, "D:P(A;;KRSD;;;WD)")?) as u64, 0)?;
         size = 1024;
         c.eq(RegGetKeySecurity(subkey, DACL, kb.0.as_mut_ptr(), &mut size) as u64, 0)?;
         let (dacl, _) = dacl_of(&c, kb.0.as_ptr())?;
-        expect_aces(&c, dacl, &[(0, KEY_READ, &EVERYONE)])?;
+        expect_aces(&c, dacl, &[(0, KEY_READ | 0x0001_0000, &EVERYONE)])?;
         RegCloseKey(subkey);
         c.eq(RegDeleteKeyW(key, text_ptr(&sub_name)) as u64, 0)?;
         RegCloseKey(key);

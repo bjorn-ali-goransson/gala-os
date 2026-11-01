@@ -104,8 +104,9 @@ fn access_for(info: u32, set: bool) -> u32 {
 /// Opens a file or directory for its security (Err: the Win32 error).
 fn open_file(path: *const u16, access: u32) -> Result<usize, u32> {
     // SAFETY: the caller's path; FILE_SHARE_ALL (7), OPEN_EXISTING (3),
-    // FILE_FLAG_BACKUP_SEMANTICS (directories too).
-    let h = unsafe { CreateFileW(path, access, 7, core::ptr::null_mut(), 3, 0x0200_0000, 0) };
+    // FILE_FLAG_BACKUP_SEMANTICS (directories too) | FILE_FLAG_OVERLAPPED
+    // (no SYNCHRONIZE: only the rights the security functions need).
+    let h = unsafe { CreateFileW(path, access, 7, core::ptr::null_mut(), 3, 0x4200_0000, 0) };
     if h == INVALID_HANDLE_VALUE {
         // SAFETY: a plain call.
         return Err(unsafe { GetLastError() });

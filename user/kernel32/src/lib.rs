@@ -1035,7 +1035,10 @@ pub extern "system" fn CreateFileW(
     if flags & FILE_FLAG_OPEN_REPARSE_POINT != 0 {
         options |= FILE_OPEN_REPARSE_POINT;
     }
-    let access = access | SYNCHRONIZE | FILE_READ_ATTRIBUTES;
+    // As Windows' CreateFileW: FILE_READ_ATTRIBUTES always, SYNCHRONIZE
+    // for synchronous handles.
+    let synchronize = if flags & FILE_FLAG_OVERLAPPED == 0 { SYNCHRONIZE } else { 0 };
+    let access = access | synchronize | FILE_READ_ATTRIBUTES;
     match open_path_sa(path, access, share, nt_disposition, options, flags & 0x7fff, security) {
         Ok((h, information)) => {
             // OPEN_ALWAYS/CREATE_ALWAYS on an existing file: success, with
@@ -1519,9 +1522,12 @@ pub extern "system" fn CreateDirectoryW(path: *const u16, security: *mut c_void)
 
 /// Opens `path` for deletion and marks it (FileDispositionInformation).
 fn delete_path(path: *const u16, directory: bool) -> Bool {
+    // DELETE | FILE_READ_ATTRIBUTES, not synchronous (no SYNCHRONIZE): a
+    // file the caller has no ACE on can be deleted through its
+    // directory's FILE_DELETE_CHILD and FILE_LIST_DIRECTORY.
     let kind = if directory { FILE_DIRECTORY_FILE } else { FILE_NON_DIRECTORY_FILE };
-    let options = kind | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT;
-    let (h, _) = match open_path(path, DELETE | SYNCHRONIZE, SHARE_ALL, 1, options, 0) {
+    let options = kind | FILE_OPEN_FOR_BACKUP_INTENT;
+    let (h, _) = match open_path(path, DELETE | FILE_READ_ATTRIBUTES, SHARE_ALL, 1, options, 0) {
         Ok(o) => o,
         Err(e) => return fail_with(e, FALSE),
     };

@@ -369,3 +369,18 @@ pub(super) fn impersonate_pipe_client(call: &Call<'_>) -> NtStatus {
     *t.impersonation.lock() = Some(copy);
     NtStatus::SUCCESS
 }
+
+/// GalaLogonUser(*UserName, *Domain, *Password, LogonType, *TokenHandle):
+/// LogonUserW's logon (nt::accounts) as gala's own service: a primary
+/// token handle with TOKEN_ALL_ACCESS; STATUS_LOGON_FAILURE.
+pub(super) fn gala_logon_user(call: &mut Call<'_>) -> NtStatus {
+    let (user, domain, password) = (arg!(call, 0), arg!(call, 1), arg!(call, 2));
+    let (kind, out) = (arg!(call, 3) as u32, arg!(call, 4));
+    let string = |p: u64| if p == 0 { Ok(Vec::new()) } else { call.unicode_string(p) };
+    let user = tri!(string(user));
+    let domain = tri!(string(domain));
+    let password = tri!(string(password));
+    let data = tri!(super::super::accounts::logon(&user, &domain, &password, kind));
+    let object = tri!(token::object(data));
+    call.return_handle(out, object, token::TOKEN_ALL_ACCESS, 0)
+}
