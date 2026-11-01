@@ -69,6 +69,7 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     TerminateJobObject
     TransactNamedPipe
     VerLanguageNameW
+    WaitNamedPipeA
     WaitNamedPipeW
     WriteConsoleOutputA
     WriteProcessMemory
@@ -107,4 +108,14 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     WaitCommEvent
     WriteConsoleInputW
     WriteConsoleOutputW
+    EnumResourceNamesW
+    GetDiskFreeSpaceA
+    GetProfileStringW
+    GetSystemPowerStatus
+    GlobalHandle
+    IsBadReadPtr
+    MulDiv
+    ReadConsoleOutputCharacterA
+    SetThreadExecutionState
+    SetThreadLocale
 );

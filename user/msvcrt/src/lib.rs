@@ -14,6 +14,8 @@
 // pointers its documentation describes; Rust callers do not exist.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod unimplemented;
+
 mod float;
 mod heap;
 mod math;
@@ -100,6 +102,10 @@ pub static mut _commode: i32 = 0;
 #[unsafe(no_mangle)]
 pub static mut _fmode: i32 = 0;
 
+/// _acmdln: the command line, narrowed (set when the DLL loads; MinGW's
+/// startup code for GUI programs reads it).
+#[unsafe(no_mangle)]
+pub static mut _acmdln: *mut u8 = null_mut();
 /// __argv: the program's arguments (set by __getmainargs).
 #[unsafe(no_mangle)]
 pub static mut __argv: *mut *mut u8 = null_mut();
@@ -759,6 +765,17 @@ pub extern "system" fn mainCRTStartup(_instance: usize, reason: u32, _reserved: 
     if reason == 1 {
         // DLL_PROCESS_ATTACH: descriptors inherited from a parent's CRT.
         stdio::inherit_descriptors();
+        // SAFETY: the PEB's command line, NUL-terminated, for the
+        // process's lifetime; the static is set once, before the program
+        // runs.
+        unsafe {
+            let p = GetCommandLineW();
+            let mut n = 0;
+            while *p.add(n) != 0 {
+                n += 1;
+            }
+            _acmdln = narrow(core::slice::from_raw_parts(p, n));
+        }
     }
     1
 }

@@ -178,6 +178,16 @@ version = "0.1.0"
 [[package]]
 name = "comctl32"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
+name = "comdlg32"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "console_test"
@@ -657,9 +667,17 @@ name = "missing_import_test"
 version = "0.1.0"
 
 [[package]]
+name = "mpr"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
 name = "msvcrt"
 version = "0.1.0"
 dependencies = [
+ "gala_stubs",
  "libm",
 ]
 
@@ -762,6 +780,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "oleacc"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
 name = "oleaut32"
 version = "0.1.0"
 dependencies = [
@@ -814,6 +839,9 @@ dependencies = [
 [[package]]
 name = "powrprof"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "ppv-lite86"
@@ -998,6 +1026,9 @@ dependencies = [
 [[package]]
 name = "shell32"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "shlwapi"
@@ -1263,6 +1294,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uxtheme"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
 name = "version"
 version = "0.1.0"
 
@@ -1314,6 +1352,9 @@ dependencies = [
 [[package]]
 name = "winmm"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "winsock_async_test"

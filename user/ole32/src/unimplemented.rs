@@ -13,4 +13,15 @@ gala_stubs::unimplemented_exports!("ole32.dll":
     GetHGlobalFromStream
     OleInitialize
     OleUninitialize
+    CoFreeUnusedLibraries
+    CoLockObjectExternal
+    DoDragDrop
+    OleFlushClipboard
+    OleGetClipboard
+    OleIsCurrentClipboard
+    OleSetClipboard
+    PropVariantClear
+    RegisterDragDrop
+    ReleaseStgMedium
+    RevokeDragDrop
 );

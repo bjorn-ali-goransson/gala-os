@@ -496,6 +496,17 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    its thread Ready and spinning in NtYieldExecution after the other one
    ended; it passes alone. To hunt (docs/WORKFLOW.md, "Hunting a rare
    hang"); log in the session's notes: target/failed/rtl_test.log.
+   Progress (2026-11-01): xtask fetches the installer (PREBUILT
+   "filezilla", 7-Zip) into C:\filezilla. `fzsftp` passes: fzsftp.exe -V
+   prints PuTTY's version report (needed DeleteFileA, `_acmdln`,
+   FindWindowA/W, GetCapture/SetCapture/ReleaseCapture, GetCursorPos,
+   GetForegroundWindow, GetQueueStatus, GetClipboardOwner, SendMessageA;
+   user32 now keeps window titles). Every other import gala lacked is a
+   reporting stub (four new stub-only DLLs: uxtheme, comdlg32, oleacc,
+   mpr), so filezilla.exe loads; ncrypt forwards BCryptOpen/Close/
+   GenRandom to bcrypt (GnuTLS imports them from ncrypt). It now stops at
+   msvcrt's iswspace: next, msvcrt's wide-character and file functions
+   (46, test first in msvcrt_test), then whatever the ledger names.
 W4. Later: a user-mode shell (the taskbar and start menu out of the
    kernel), window resizing (WM_SIZE), maximize, keyboard focus per
    window, a proportional font.

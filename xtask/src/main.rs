@@ -150,6 +150,19 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["bin", "cmd", "etc", "usr/bin", "mingw64/bin", "mingw64/libexec/git-core"],
         excludes: &[],
     },
+    // FileZilla Client 3.69.3 for 64-bit Windows: the official build, from
+    // the project's SourceForge files (its own site serves downloads only
+    // through JavaScript). An NSIS installer: 7-Zip reads it without running
+    // it. SHA-256 measured (SourceForge publishes the MD5
+    // e334f2446615c7ee295c27039d372165, which matches). The programs, their
+    // DLLs and resources; not the NSIS plugins, translations or docs.
+    Prebuilt {
+        name: "filezilla",
+        url: "https://downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe",
+        checksum: "e87b878746e62c7d16ff04723199ec0ecbbea6680a814c4508b18b8b41ddcdad",
+        members: &["*.exe", "*.dll", "resources"],
+        excludes: &["$PLUGINSDIR", "uninstall.exe"],
+    },
     // SQL Server 2022 Express LocalDB 16.0.1000.6 (SqlLocalDB.msi).
     // Microsoft publishes no checksum for it: the SHA-256 is the one we
     // measured (ROADMAP). Its license allows use to design, develop and
@@ -263,6 +276,10 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "wininet", file: "wininet.dll", exported_as: "testwininet.dll" },
     Dll { package: "userenv", file: "userenv.dll", exported_as: "testuserenv.dll" },
     Dll { package: "xolehlp", file: "xolehlp.dll", exported_as: "testxolehlp.dll" },
+    Dll { package: "uxtheme", file: "uxtheme.dll", exported_as: "testuxtheme.dll" },
+    Dll { package: "comdlg32", file: "comdlg32.dll", exported_as: "testcomdlg32.dll" },
+    Dll { package: "oleacc", file: "oleacc.dll", exported_as: "testoleacc.dll" },
+    Dll { package: "mpr", file: "mpr.dll", exported_as: "testmpr.dll" },
     Dll { package: "odbc32", file: "odbc32.dll", exported_as: "testodbc32.dll" },
     Dll { package: "wldap32", file: "wldap32.dll", exported_as: "testwldap32.dll" },
     Dll { package: "wsock32", file: "wsock32.dll", exported_as: "testwsock32.dll" },
@@ -824,6 +841,36 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gitbash", "target/prebuilt/portablegit/bin/", "git/bin"),
     ("gitbash", "target/prebuilt/portablegit/etc/", "git/etc"),
     ("gitbash", "target/prebuilt/portablegit/usr/bin/", "git/usr/bin"),
+    ("filezilla", "ntdll.dll", "Windows/System32"),
+    ("filezilla", "kernel32.dll", "Windows/System32"),
+    ("filezilla", "kernelbase.dll", "Windows/System32"),
+    ("filezilla", "advapi32.dll", "Windows/System32"),
+    ("filezilla", "bcrypt.dll", "Windows/System32"),
+    ("filezilla", "bcryptprimitives.dll", "Windows/System32"),
+    ("filezilla", "crypt32.dll", "Windows/System32"),
+    ("filezilla", "msvcrt.dll", "Windows/System32"),
+    ("filezilla", "secur32.dll", "Windows/System32"),
+    ("filezilla", "shell32.dll", "Windows/System32"),
+    ("filezilla", "user32.dll", "Windows/System32"),
+    ("filezilla", "gdi32.dll", "Windows/System32"),
+    ("filezilla", "comctl32.dll", "Windows/System32"),
+    ("filezilla", "ws2_32.dll", "Windows/System32"),
+    ("filezilla", "userenv.dll", "Windows/System32"),
+    ("filezilla", "shlwapi.dll", "Windows/System32"),
+    ("filezilla", "ncrypt.dll", "Windows/System32"),
+    ("filezilla", "ole32.dll", "Windows/System32"),
+    ("filezilla", "oleaut32.dll", "Windows/System32"),
+    ("filezilla", "iphlpapi.dll", "Windows/System32"),
+    ("filezilla", "version.dll", "Windows/System32"),
+    ("filezilla", "rpcrt4.dll", "Windows/System32"),
+    ("filezilla", "netapi32.dll", "Windows/System32"),
+    ("filezilla", "powrprof.dll", "Windows/System32"),
+    ("filezilla", "winmm.dll", "Windows/System32"),
+    ("filezilla", "uxtheme.dll", "Windows/System32"),
+    ("filezilla", "comdlg32.dll", "Windows/System32"),
+    ("filezilla", "oleacc.dll", "Windows/System32"),
+    ("filezilla", "mpr.dll", "Windows/System32"),
+    ("filezilla", "target/prebuilt/filezilla/", "filezilla"),
     ("mingit", "ntdll.dll", "Windows/System32"),
     ("mingit", "kernel32.dll", "Windows/System32"),
     ("mingit", "advapi32.dll", "Windows/System32"),
@@ -1794,9 +1841,10 @@ fn fetch_prebuilt(path: &str) -> Result {
     }
     if p.url.ends_with(".msi") {
         unpack_msi(p, &zip, &dir)?;
-    } else if p.url.ends_with(".7z.exe") {
-        // A 7-Zip self-extracting archive (Git for Windows' PortableGit):
-        // 7-Zip reads it without running it. Members are directories.
+    } else if p.url.ends_with(".7z.exe") || p.url.ends_with("-setup.exe") {
+        // A 7-Zip self-extracting archive (Git for Windows' PortableGit) or
+        // an NSIS installer (FileZilla): 7-Zip reads it without running it.
+        // Members are directories or wildcards.
         let mut cmd = Command::new("7z");
         cmd.args(["x", "-y", "-bd", "-bso0"]).arg(format!("-o{}", dir.display())).arg(&zip);
         cmd.args(p.members);
@@ -1943,11 +1991,18 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] =
-    &["elasticsearch", "gitbash", "mingit", "sqllocaldb", "sqllocaldb_persist", "sshd"];
+const PENDING: &[&str] = &[
+    "elasticsearch",
+    "filezilla",
+    "gitbash",
+    "mingit",
+    "sqllocaldb",
+    "sqllocaldb_persist",
+    "sshd",
+];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
-const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault", "gui_test"];
+const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault", "gui_test", "filezilla"];
 
 /// What xtask's host-side client does in a net scenario.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2715,6 +2770,28 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["Success. You can now start the database server", "xtask: net client: psql ok"],
     },
     Scenario {
+        // W3: FileZilla 3.69.3's SFTP engine (PuTTY's psftp adapted),
+        // unmodified and headless: its version report, as psftp -V prints
+        // it.
+        name: "fzsftp",
+        cmdline: "qemu_exit run=filezilla/fzsftp.exe args=-V",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "fzSftp started, protocol_version=11",
+            "psftp: 3.69.3",
+            "Build platform: 64-bit x86 Windows",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // W3 (pending): FileZilla 3.69.3 itself (wxWidgets 3.2): its main
+        // window on the desktop.
+        name: "filezilla",
+        cmdline: "qemu_exit run=filezilla/filezilla.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["exited with status 0x00000000"],
+    },
+    Scenario {
         // P1 (pending): Git Bash (PortableGit 2.47.1): bash on the MSYS2
         // runtime, a pipeline (a forked child per command).
         name: "gitbash",
@@ -3342,6 +3419,7 @@ fn events_flag() -> String {
 /// (the same set: they share a VM).
 const MODULE_SETS: &[(&str, &str)] = &[
     ("dotnet_info", "dotnet"),
+    ("fzsftp", "filezilla"),
     ("dotnet_hello", "dotnet"),
     ("pwsh_hello", "pwsh"),
     ("sqllocaldb_persist", "sqllocaldb"),
@@ -3957,7 +4035,8 @@ struct ScreenCheck {
 
 struct ScreenStep {
     /// QEMU monitor commands sent first (`mouse_move`, `mouse_button`,
-    /// `sendkey`), 100 ms apart. Keep each move within 255 pixels per axis:
+    /// `sendkey`), 250 ms apart (time for the guest to read the device, also
+    /// when the host is busy). Keep each move within 255 pixels per axis:
     /// QEMU queues a few PS/2 packets of at most 255 and hands the rest of a
     /// larger move over with later events.
     input: &'static [&'static str],
@@ -4074,7 +4153,7 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
             // (QEMU's PS/2 queue is short: a click queued behind a long
             // move is dropped).
             writeln!(monitor, "{command}").map_err(|e| e.to_string())?;
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(250));
         }
         check_screen_step(&mut monitor, iso, n, step).map_err(|e| format!("step {n}: {e}"))?;
     }

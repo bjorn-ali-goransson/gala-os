@@ -23,6 +23,90 @@ unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
+// Windows' ncrypt.dll also exports these bcrypt.dll functions (forwarded
+// there; GnuTLS imports them from ncrypt): the same calls, through ours.
+// Found at run time: an import of the same name would bind to these
+// exports themselves.
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn LoadLibraryW(name: *const u16) -> usize;
+    fn GetProcAddress(module: usize, name: *const u8) -> usize;
+}
+
+/// bcrypt.dll's `name` (NUL-terminated), or 0.
+fn bcrypt(name: &[u8]) -> usize {
+    let dll: [u16; 11] = [
+        b'b' as u16,
+        b'c' as u16,
+        b'r' as u16,
+        b'y' as u16,
+        b'p' as u16,
+        b't' as u16,
+        b'.' as u16,
+        b'd' as u16,
+        b'l' as u16,
+        b'l' as u16,
+        0,
+    ];
+    // SAFETY: NUL-terminated names; LoadLibrary counts the reference.
+    unsafe {
+        let module = LoadLibraryW(dll.as_ptr());
+        if module == 0 { 0 } else { GetProcAddress(module, name.as_ptr()) }
+    }
+}
+
+/// STATUS_PROCEDURE_NOT_FOUND, when bcrypt.dll lacks the function.
+const STATUS_PROCEDURE_NOT_FOUND: i32 = 0xc000_007au32 as i32;
+
+#[unsafe(no_mangle)]
+pub extern "system" fn BCryptOpenAlgorithmProvider(
+    alg: *mut usize,
+    id: *const u16,
+    implementation: *const u16,
+    flags: u32,
+) -> i32 {
+    type F = extern "system" fn(*mut usize, *const u16, *const u16, u32) -> i32;
+    match bcrypt(b"BCryptOpenAlgorithmProvider\0") {
+        0 => STATUS_PROCEDURE_NOT_FOUND,
+        f => {
+            // SAFETY: bcrypt.dll's function of this signature.
+            let f = unsafe { core::mem::transmute::<usize, F>(f) };
+            f(alg, id, implementation, flags)
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn BCryptCloseAlgorithmProvider(alg: usize, flags: u32) -> i32 {
+    type F = extern "system" fn(usize, u32) -> i32;
+    match bcrypt(b"BCryptCloseAlgorithmProvider\0") {
+        0 => STATUS_PROCEDURE_NOT_FOUND,
+        f => {
+            // SAFETY: as above.
+            let f = unsafe { core::mem::transmute::<usize, F>(f) };
+            f(alg, flags)
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn BCryptGenRandom(
+    alg: usize,
+    buffer: *mut u8,
+    length: u32,
+    flags: u32,
+) -> i32 {
+    type F = extern "system" fn(usize, *mut u8, u32, u32) -> i32;
+    match bcrypt(b"BCryptGenRandom\0") {
+        0 => STATUS_PROCEDURE_NOT_FOUND,
+        f => {
+            // SAFETY: as above.
+            let f = unsafe { core::mem::transmute::<usize, F>(f) };
+            f(alg, buffer, length, flags)
+        }
+    }
+}
+
 /// SECURITY_STATUS values.
 const NTE_INVALID_HANDLE: i32 = 0x8009_0026u32 as i32;
 const NTE_NOT_SUPPORTED: i32 = 0x8009_0029u32 as i32;

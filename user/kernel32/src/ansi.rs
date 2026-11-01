@@ -271,6 +271,15 @@ fn search_path_to_ansi(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn DeleteFileA(path: *const u8) -> Bool {
+    let mut buf = [0u16; MAX];
+    match wide(path, &mut buf) {
+        Ok(p) => crate::DeleteFileW(p),
+        Err(e) => fail_with(e, FALSE),
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn CreateDirectoryA(path: *const u8, security: *mut c_void) -> Bool {
     let mut buf = [0u16; MAX];
     match wide(path, &mut buf) {

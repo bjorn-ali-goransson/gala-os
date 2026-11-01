@@ -12,3 +12,4 @@ bench = false
 
 [dependencies]
 libm = { version = "0.2.16", default-features = false }
+gala_stubs = { path = "../gala_stubs" }

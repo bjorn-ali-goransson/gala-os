@@ -46,4 +46,11 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     StartServiceW
     StartTraceW
     UnlockServiceDatabase
+    CredDeleteW
+    CredFree
+    CredReadW
+    CredWriteW
+    CryptSignHashA
+    SetSecurityDescriptorControl
+    SetSecurityDescriptorSacl
 );

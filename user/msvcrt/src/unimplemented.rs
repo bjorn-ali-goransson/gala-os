@@ -1,0 +1,52 @@
+//! Exports that programs gala runs import (SQL Server LocalDB, FileZilla)
+//! and gala does not implement yet (`gala_stubs`): calling one reports
+//! `dll!function` to the ledger and ends the process.
+
+gala_stubs::unimplemented_exports!("msvcrt.dll":
+    _aligned_free
+    _aligned_malloc
+    _beginthread
+    _chdrive
+    _filelengthi64
+    _findclose
+    _getdrive
+    _getmaxstdio
+    _putws
+    _setmaxstdio
+    _wassert
+    _wfindfirst64
+    _wfindnext64
+    _wfullpath
+    _wgetenv
+    _wperror
+    _wputenv
+    _wremove
+    _wrename
+    _wstat64
+    _wtoi
+    _wutime64
+    fgetpos
+    fgetwc
+    fputws
+    fsetpos
+    getwc
+    iswalnum
+    iswalpha
+    iswdigit
+    iswprint
+    iswpunct
+    iswspace
+    iswxdigit
+    putwc
+    strncat
+    strxfrm
+    towlower
+    towupper
+    ungetwc
+    wcscoll
+    wcsftime
+    wcspbrk
+    wcstol
+    wcstoul
+    wcsxfrm
+);

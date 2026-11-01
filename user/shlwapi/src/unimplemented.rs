@@ -25,4 +25,8 @@ gala_stubs::unimplemented_exports!("shlwapi.dll":
     UrlEscapeW
     UrlIsW
     UrlUnescapeW
+    AssocQueryStringW
+    PathMatchSpecW
+    SHAutoComplete
+    StrCmpLogicalW
 );

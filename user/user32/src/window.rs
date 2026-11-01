@@ -112,6 +112,8 @@ struct Window {
     cw: i32,
     ch: i32,
     user_data: isize,
+    /// The title (NUL-terminated, truncated to 127 characters).
+    title: [u16; 128],
 }
 
 #[derive(Clone, Copy)]
@@ -153,6 +155,7 @@ const NO_WINDOW: Window = Window {
     cw: 0,
     ch: 0,
     user_data: 0,
+    title: [0; 128],
 };
 const NO_MSG: Msg =
     Msg { hwnd: 0, message: 0, wparam: 0, lparam: 0, time: 0, pt: [0; 2], private: 0 };
@@ -492,6 +495,17 @@ pub extern "system" fn CreateWindowExW(
         let _ = GalaWindowCreate(x, y, w as u32, h as u32, name, len, &mut id);
         (pixels, id)
     };
+    let mut title = [0u16; 128];
+    if !name.is_null() {
+        // SAFETY: the caller's NUL-terminated string.
+        unsafe {
+            let mut i = 0;
+            while i < 127 && *name.add(i) != 0 {
+                title[i] = *name.add(i);
+                i += 1;
+            }
+        }
+    }
     let created = with(|s| {
         let class = find_class(s, class)?;
         let i = s.windows.iter().position(|w| !w.used)?;
@@ -513,6 +527,7 @@ pub extern "system" fn CreateWindowExW(
             cw,
             ch,
             user_data: 0,
+            title,
         };
         Some(i)
     });
@@ -617,6 +632,7 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
         unsafe { GalaWindowShow(desktop, u8::from(show)) };
     }
     if show {
+        FOREGROUND.store(hwnd, Ordering::Relaxed);
         wake();
     }
     i32::from(was)
@@ -905,6 +921,146 @@ pub extern "system" fn DefWindowProcA(hwnd: Hwnd, msg: u32, wparam: usize, lpara
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn SendMessageA(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
+    SendMessageW(hwnd, msg, wparam, lparam)
+}
+
+/// The window with the mouse capture (SetCapture), the one last shown or
+/// clicked (GetForegroundWindow), and the pointer's last known screen
+/// position (from mouse messages).
+static CAPTURE: AtomicUsize = AtomicUsize::new(0);
+static FOREGROUND: AtomicUsize = AtomicUsize::new(0);
+static CURSOR: AtomicUsize = AtomicUsize::new(0);
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SetCapture(hwnd: Hwnd) -> Hwnd {
+    CAPTURE.swap(hwnd, Ordering::Relaxed)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ReleaseCapture() -> i32 {
+    CAPTURE.store(0, Ordering::Relaxed);
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCapture() -> Hwnd {
+    CAPTURE.load(Ordering::Relaxed)
+}
+
+/// GetForegroundWindow: the window of ours last shown or clicked (gala's
+/// user32 sees only its own process's windows), else NULL.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetForegroundWindow() -> Hwnd {
+    let h = FOREGROUND.load(Ordering::Relaxed);
+    if window(h).is_some() { h } else { 0 }
+}
+
+/// GetCursorPos: where the last mouse message put the pointer (screen
+/// coordinates); (0, 0) before any.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCursorPos(point: *mut [i32; 2]) -> i32 {
+    if point.is_null() {
+        return 0;
+    }
+    let packed = CURSOR.load(Ordering::Relaxed);
+    // SAFETY: the caller's POINT.
+    unsafe { *point = [(packed & 0xffff) as i16 as i32, (packed >> 16) as i16 as i32] };
+    1
+}
+
+/// GetClipboardOwner: NULL (gala has no clipboard yet).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetClipboardOwner() -> Hwnd {
+    0
+}
+
+/// FindWindowW: a top-level window of ours with that class (NULL: any)
+/// and title (NULL: any); gala's user32 sees only its own windows, so
+/// another program's (e.g. Pageant's) is not found: NULL.
+#[unsafe(no_mangle)]
+pub extern "system" fn FindWindowW(class: *const u16, title: *const u16) -> Hwnd {
+    let want_class = (!class.is_null() && class as usize > 0xffff).then(|| class_key(class));
+    let found = with(|s| {
+        s.windows.iter().position(|w| {
+            w.used
+                && want_class.is_none_or(|k| s.classes[w.class].name == k)
+                && (title.is_null() || title_is(w, title))
+        })
+    });
+    found.map_or(0, hwnd_of)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn FindWindowA(class: *const u8, title: *const u8) -> Hwnd {
+    let mut c = [0u16; 64];
+    let mut t = [0u16; 256];
+    let wc = if class.is_null() { core::ptr::null() } else { ansi_into(class, &mut c) };
+    let wt = if title.is_null() { core::ptr::null() } else { ansi_into(title, &mut t) };
+    FindWindowW(wc, wt)
+}
+
+/// Whether window `w`'s title is `title` (NUL-terminated).
+fn title_is(w: &Window, title: *const u16) -> bool {
+    for (i, &c) in w.title.iter().enumerate() {
+        // SAFETY: the caller's NUL-terminated string, read up to its NUL.
+        let t = unsafe { *title.add(i) };
+        if t != c {
+            return false;
+        }
+        if c == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// `s` (ANSI, NUL-terminated) as UTF-16 in `buf` (Latin-1, truncated).
+fn ansi_into(s: *const u8, buf: &mut [u16]) -> *const u16 {
+    let mut i = 0;
+    // SAFETY: the caller's NUL-terminated string.
+    unsafe {
+        while i + 1 < buf.len() && *s.add(i) != 0 {
+            buf[i] = u16::from(*s.add(i));
+            i += 1;
+        }
+    }
+    buf[i] = 0;
+    buf.as_ptr()
+}
+
+const QS_KEY: u32 = 0x1;
+const QS_MOUSEMOVE: u32 = 0x2;
+const QS_MOUSEBUTTON: u32 = 0x4;
+const QS_POSTMESSAGE: u32 = 0x8;
+const QS_PAINT: u32 = 0x20;
+
+/// GetQueueStatus(flags): what is in this thread's queue (high word) and,
+/// as gala keeps no "since last call" state, the same in the low word.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetQueueStatus(flags: u32) -> u32 {
+    pump();
+    let thread = me();
+    let mut have = with(|s| {
+        let mut have = 0;
+        for q in s.queue.iter().filter(|q| q.used && q.thread == thread) {
+            have |= match q.msg.message {
+                0x0100..=0x0109 => QS_KEY,
+                0x0200 => QS_MOUSEMOVE,
+                0x0201..=0x020d => QS_MOUSEBUTTON,
+                _ => QS_POSTMESSAGE,
+            };
+        }
+        if s.windows.iter().any(|w| w.used && w.thread == thread && w.invalid && w.visible) {
+            have |= QS_PAINT;
+        }
+        have
+    });
+    have &= flags;
+    have << 16 | have
+}
+
 /// SendMessageW: the window procedure, called now on this thread.
 #[unsafe(no_mangle)]
 pub extern "system" fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
@@ -1003,6 +1159,20 @@ fn pump() {
                     k.store(down, Ordering::Relaxed);
                 }
             }
+            if (0x0200..=0x020d).contains(&message) {
+                // The pointer's screen position: the window's client origin
+                // plus the client position.
+                if let Some(w) =
+                    with(|s| s.windows.iter().find(|w| w.used && w.desktop == id).copied())
+                {
+                    let (cx, cy) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
+                    let (sx, sy) = (w.x + BORDER + cx, w.y + BORDER + CAPTION + cy);
+                    CURSOR.store(
+                        (sx as u16 as usize) | (sy as u16 as usize) << 16,
+                        Ordering::Relaxed,
+                    );
+                }
+            }
             let target = with(|s| {
                 s.windows
                     .iter()
@@ -1010,6 +1180,9 @@ fn pump() {
                     .map(|i| (i, s.windows[i].thread))
             });
             if let Some((i, thread)) = target {
+                if message == 0x0201 || message == 0x0204 {
+                    FOREGROUND.store(hwnd_of(i), Ordering::Relaxed);
+                }
                 post(thread, message_at(hwnd_of(i), message, wparam, lparam));
             }
         }

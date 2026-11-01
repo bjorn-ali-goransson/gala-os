@@ -113,7 +113,7 @@ pub struct Program {
 pub const PROGRAMS: &[Program] = &[
     Program {
         name: "FileZilla",
-        path: "C:\\Program Files\\FileZilla FTP Client\\filezilla.exe",
+        path: "C:\\filezilla\\filezilla.exe",
         colors: (0x00_e0_4f_3f, 0x00_a3_2a_20),
     },
     Program {

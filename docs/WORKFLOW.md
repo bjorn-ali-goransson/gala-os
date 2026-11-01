@@ -81,6 +81,18 @@ shows it.
 
 ## Things that are easy to get wrong
 
+- A DLL that exports a function under the name of one it calls in
+  another DLL (ncrypt's BCryptGenRandom, which Windows forwards to
+  bcrypt) cannot import that name with `raw-dylib`: the linker binds the
+  import to the export itself and the call becomes `jmp $` (a silent
+  hang). Find the other DLL's function at run time (LoadLibraryW +
+  GetProcAddress), as `user/ncrypt` does.
+- A hang in user mode with no system calls: run the program in gala-um
+  and `gdb -p` the `exe` process (gala-um re-executes itself under that
+  name); `thread apply all x/3i $pc` shows the loop, and the image's
+  export directory (read from memory at the 64 KiB-aligned base below
+  the address) names the DLL.
+
 - **A JVM crashing with access violations at odd addresses** after a
   long run may be the machine out of memory: a user page fault that finds
   no free frame becomes an access violation (no commit charge yet). Look
@@ -462,7 +474,8 @@ takes a screendump and checks pixels (exact colours, or "some pixel near
 this colour in this rectangle" for anti-aliased text) and logs
 `xtask: screen ok` or the mismatch. A check has steps: each first sends
 QEMU monitor commands (`mouse_move dx dy`, `mouse_button 1`, `sendkey`;
-100 ms apart), then takes a screendump (none when the step checks no
+250 ms apart: with 100 ms, clicks landed off target when the whole suite
+loaded the host), then takes a screendump (none when the step checks no
 pixels: e.g. the click that ends the program), kept as
 `target/debug/test-<scenario>.screen<step>.png`. The guest's pointer
 starts in the middle of the screen and is clamped to it. Keep each

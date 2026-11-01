@@ -1537,11 +1537,13 @@ Windows, never shadows the system's DLLs.)
   `.gstub` section: LdrGetProcedureAddress (GetProcAddress) treats an
   export resolving there as absent, so programs probing for optional
   functions keep taking their fallbacks; only static imports bind to
-  them. They were generated from SQL Server LocalDB's import closure; a
-  function is implemented by removing its name from the list. Thirteen
-  DLLs (netapi32, pdh, shlwapi, rpcrt4, urlmon, wininet, userenv,
-  xolehlp, odbc32, authz, wintrust, webservices, dhcpcsvc) are nothing
-  but such stubs so far, apart from rpcrt4's UUID functions
+  them. They were generated from SQL Server LocalDB's import closure and
+  then FileZilla's (W3: every import of FileZilla 3.69.3 gala lacked,
+  ~420 across user32, gdi32, msvcrt, comctl32, shell32, ole32 and
+  others); a function is implemented by removing its name from the list.
+  Seventeen DLLs (netapi32, pdh, shlwapi, rpcrt4, urlmon, wininet,
+  userenv, xolehlp, odbc32, authz, wintrust, webservices, dhcpcsvc,
+  uxtheme, comdlg32, oleacc, mpr) are nothing but such stubs so far, apart from rpcrt4's UUID functions
   (`rpcrt4_test`) and netapi32's NetWkstaGetInfo (`netapi32_test`).
   gala's cmd.exe (`user/cmd`, built as a program and placed in
   System32) implements `/c` (and switches before it): cmd's documented

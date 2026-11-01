@@ -12,4 +12,5 @@ gala_stubs::unimplemented_exports!("netapi32.dll":
     NetServerEnum
     NetUserModalsGet
     NetUserModalsSet
+    NetShareEnum
 );
