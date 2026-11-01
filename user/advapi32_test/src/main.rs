@@ -26,6 +26,14 @@
 //!   script is fully trusted; SaferIdentifyLevel and friends);
 //!   CreateWellKnownSid; secur32's GetUserNameExW; PerfLib V2 providers;
 //!   classic event trace providers (registered, never enabled).
+//! - The token's groups, as a standard interactive user's (documented
+//!   layouts): TokenGroups (Everyone, BUILTIN\\Users, INTERACTIVE,
+//!   Authenticated Users, a logon SID S-1-5-5-x-y with SE_GROUP_LOGON_ID,
+//!   the Medium integrity label), TokenGroupsAndPrivileges (the user first,
+//!   then the groups; the privileges; the logon session), TokenStatistics
+//!   (a primary token with those counts and the same logon session),
+//!   TokenIntegrityLevel (S-1-16-8192), TokenLogonSid, TokenIsAppContainer
+//!   (0); sizes queried.
 //! - Service SIDs ("NT SERVICE\\name": S-1-5-80 and the SHA-1 of the
 //!   upper-cased UTF-16 name as five sub-authorities, as documented):
 //!   LookupAccountNameW of a registered service (a key under
@@ -146,6 +154,7 @@ unsafe extern "system" {
     ) -> Bool;
     fn FreeSid(sid: *mut u8) -> *mut u8;
     fn InitializeSid(sid: *mut u8, authority: *const [u8; 6], count: u8) -> Bool;
+    fn GetSidIdentifierAuthority(sid: *mut u8) -> *mut [u8; 6];
     fn GetSecurityInfo(
         handle: Handle,
         kind: u32,
@@ -337,6 +346,7 @@ unsafe extern "system" {
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn __chkstk();
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
 }
@@ -1254,6 +1264,109 @@ fn sid_name(c: &mut Checks, sid: *const u8) -> Result<([u16; 64], [u16; 64], u32
     Ok((name, domain, kind))
 }
 
+/// The SID at `p` as (authority byte, sub-authorities).
+fn sid_parts(p: *const u8) -> (u8, [u32; 8], usize) {
+    let mut subs = [0u32; 8];
+    // SAFETY: a SID the system returned.
+    unsafe {
+        let n = usize::from(*p.add(1)).min(8);
+        for (i, s) in subs.iter_mut().enumerate().take(n) {
+            *s = p.add(8 + 4 * i).cast::<u32>().read_unaligned();
+        }
+        (*p.add(7), subs, n)
+    }
+}
+
+fn token_groups(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: advapi32 calls with buffers of ours.
+    unsafe {
+        let mut token = core::ptr::null_mut();
+        c.ok(OpenProcessToken(GetCurrentProcess(), 8, &mut token) != 0, GetLastError().into())?;
+        let mut b = [0u64; 256];
+        let buf = b.as_mut_ptr().cast::<u8>();
+        let mut ret = 0;
+        // Size queries fail with ERROR_INSUFFICIENT_BUFFER and the size.
+        c.eq(GetTokenInformation(token, 2, buf, 0, &mut ret) as u64, 0)?;
+        c.eq(GetLastError().into(), 122)?;
+        c.ok(ret > 4, ret.into())?;
+        c.ok(GetTokenInformation(token, 2, buf, 2048, &mut ret) != 0, GetLastError().into())?;
+        // TOKEN_GROUPS: GroupCount, then SID_AND_ATTRIBUTES (16 bytes).
+        let count = b[0] as u32 as usize;
+        c.ok((4..=16).contains(&count), count as u64)?;
+        let group = |i: usize| (b[1 + 2 * i] as *const u8, b[2 + 2 * i] as u32);
+        let has = |auth: u8, subs: &[u32], attrs: u32| {
+            (0..count).any(|i| {
+                let (sid, a) = group(i);
+                let (x, s, n) = sid_parts(sid);
+                x == auth && &s[..n] == subs && a & attrs == attrs
+            })
+        };
+        c.ok(has(1, &[0], 7), 1)?; // Everyone: mandatory, enabled
+        c.ok(has(5, &[32, 545], 7), 2)?; // BUILTIN\Users
+        c.ok(has(5, &[4], 7), 3)?; // INTERACTIVE
+        c.ok(has(5, &[11], 7), 4)?; // Authenticated Users
+        c.ok(has(16, &[8192], 0x60), 5)?; // Medium: SE_GROUP_INTEGRITY(_ENABLED)
+        let logon = (0..count).find(|&i| group(i).1 & 0xc000_0000 == 0xc000_0000);
+        c.ok(logon.is_some(), 6)?;
+        let (logon_sid, _) = group(logon.unwrap_or(0));
+        let (x, subs, n) = sid_parts(logon_sid);
+        c.ok(x == 5 && n == 3 && subs[0] == 5, n as u64)?;
+
+        // TOKEN_GROUPS_AND_PRIVILEGES.
+        let mut g = [0u64; 256];
+        let gb = g.as_mut_ptr().cast::<u8>();
+        c.ok(GetTokenInformation(token, 13, gb, 2048, &mut ret) != 0, GetLastError().into())?;
+        let sid_count = g[0] as u32 as usize;
+        c.eq(sid_count as u64, count as u64 + 1)?;
+        let sids = g[1] as *const u64;
+        c.ok(sids as usize >= gb as usize && (sids as usize) < gb as usize + ret as usize, 0)?;
+        let (x, subs, n) = sid_parts(*sids as *const u8);
+        c.ok(x == 5 && n == 5 && subs[0] == 21 && subs[4] == 1001, subs[4].into())?;
+        let privileges = g[4] as u32;
+        c.eq(privileges.into(), 5)?;
+        let session = g[6];
+
+        // TOKEN_STATISTICS: TokenId, AuthenticationId, ExpirationTime,
+        // TokenType, ImpersonationLevel, DynamicCharged, DynamicAvailable,
+        // GroupCount, PrivilegeCount, ModifiedId.
+        let mut st = [0u64; 8];
+        c.ok(
+            GetTokenInformation(token, 10, st.as_mut_ptr().cast(), 56, &mut ret) != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(ret.into(), 56)?;
+        c.eq(st[1], session)?;
+        c.eq(st[3] as u32 as u64, 1)?; // TokenPrimary
+        c.eq(st[5] as u32 as u64, count as u64)?;
+        c.eq((st[5] >> 32) as u32 as u64, 5)?;
+
+        // TOKEN_MANDATORY_LABEL: Medium.
+        let mut label = [0u64; 8];
+        c.ok(
+            GetTokenInformation(token, 25, label.as_mut_ptr().cast(), 64, &mut ret) != 0,
+            GetLastError().into(),
+        )?;
+        let (x, subs, n) = sid_parts(label[0] as *const u8);
+        c.ok(x == 16 && n == 1 && subs[0] == 8192, subs[0].into())?;
+        c.eq(label[1] as u32 as u64, 0x20)?; // SE_GROUP_INTEGRITY
+
+        // TokenLogonSid: TOKEN_GROUPS with the logon SID.
+        let mut l = [0u64; 8];
+        c.ok(
+            GetTokenInformation(token, 28, l.as_mut_ptr().cast(), 64, &mut ret) != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(l[0] as u32 as u64, 1)?;
+        c.ok(EqualSid(l[1] as *const u8, logon_sid) != 0, 0)?;
+        let mut app = 0xffu32;
+        let p = (&mut app as *mut u32).cast();
+        c.ok(GetTokenInformation(token, 29, p, 4, &mut ret) != 0, GetLastError().into())?;
+        c.eq(app.into(), 0)?; // TokenIsAppContainer
+        CloseHandle(token);
+    }
+    Ok(())
+}
+
 fn service_sids(c: &mut Checks) -> Result<(), u32> {
     const HKLM: usize = 0x8000_0002;
     // The expected SID of "GalaTestSvc" (SHA-1 of "GALATESTSVC" in UTF-16).
@@ -1329,8 +1442,10 @@ fn service_sids(c: &mut Checks) -> Result<(), u32> {
 
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    token_groups(&mut c)?;
     service_sids(&mut c)?;
-    // InitializeSid, then the sub-authorities: S-1-5-32-544.
+    // InitializeSid, then the sub-authorities: S-1-5-32-544;
+    // GetSidIdentifierAuthority points into the SID.
     // SAFETY: a SID buffer of ours.
     unsafe {
         let mut buf = [0u32; 4];
@@ -1344,6 +1459,8 @@ fn run() -> Result<(), u32> {
             0,
         )?;
         c.ok(IsValidSid(sid) != 0 && EqualSid(sid, admins) != 0 && GetLengthSid(sid) == 16, 0)?;
+        let authority = GetSidIdentifierAuthority(sid);
+        c.ok(authority as usize == sid as usize + 2 && *authority == NT_AUTHORITY, 0)?;
         FreeSid(admins);
     }
     security_info(&mut c)?;

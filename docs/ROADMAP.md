@@ -835,10 +835,30 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         (the scenario expects all of these; about 75 s). Left: the
         service master key (ESECCrypto error 21, LastOsError 6; non-fatal),
         GetActualSectorSize for the new tempdb files (error 3; non-fatal),
-        FSCTL_FILESYSTEM_GET_STATISTICS (error 17053, noise). Next: a
-        client over the pipe (a test program speaking TDS: PRELOGIN,
-        LOGIN7 with SSPI or SQL authentication, SQL_BATCH `SELECT
-        @@VERSION`), and the plain (second) start of the instance. Also seen: netapi32's NetShareGetInfo and
+        FSCTL_FILESYSTEM_GET_STATISTICS (error 17053, noise). Then (eighth
+        pass) **a query**: `tds_test` (user/tds_test), our TDS 7.4
+        client written from [MS-TDS], starts sqlservr as SqlUserInstance
+        does, connects to `\\.\pipe\LOCALDB#GALA0001\tsql\query`, sends
+        PRELOGIN (no encryption), LOGIN7 with integrated security
+        (Negotiate/NTLM through gala's secur32 on both sides) and
+        `SELECT @@VERSION, SUSER_SNAME()`, and gets "Microsoft SQL Server
+        2022 (RTM) - 16.0.1000.6 (X64) ... Express Edition (64-bit) on
+        Windows 10 Pro 10.0 <X64> (Build 26100: )" and `GALA\gala`; the
+        scenario runs `tds_test.exe` and expects the row. It needed
+        SetFileCompletionNotificationModes on pipes (SQL dropped the
+        connection without it), ImpersonateNamedPipeClient
+        (FSCTL_PIPE_IMPERSONATE), SECPKG_ATTR_NEGOTIATION_INFO/PACKAGE_INFO,
+        GetSidIdentifierAuthority and the token's groups
+        (TokenGroupsAndPrivileges and friends: before, the login failed
+        with error 18452 "untrusted domain"). Left: `SHUTDOWN` is accepted
+        ("Server shut down by request from login GALA\gala") but sqlservr
+        then dies with "exception during stack unwinding" (ex_terminator;
+        it starts SqlDumper, which cannot load: 0xc0000135) - to be
+        traced (exception dispatch during C++ unwinding); the plain
+        second start of an instance; the service master key (error 21);
+        GetActualSectorSize on new files; FSCTL_FILESYSTEM_GET_STATISTICS.
+        After those, P1 step 5 is done; then (agreed order) the programs
+        that need the security model and a disk. Also seen: netapi32's NetShareGetInfo and
         NetValidatePasswordPolicy (looked up), FSCTL_FILESYSTEM_GET_STATISTICS
         (error 17053, goes on), CoCreateInstance of a class not
         registered, NtQuerySystemInformation class 192.

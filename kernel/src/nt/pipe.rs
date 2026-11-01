@@ -118,6 +118,8 @@ pub struct PipeEnd {
     message_reads: AtomicBool,
     /// The completion port and key (FileCompletionInformation).
     pub completion: IrqMutex<Option<(ObjectRef, u64)>>,
+    /// FILE_SKIP_* notification modes (FileIoCompletionNotificationInformation).
+    pub modes: core::sync::atomic::AtomicU32,
     /// Signaled when an I/O on it completes (waiting on the handle).
     pub dispatcher: KArc<Dispatcher>,
 }
@@ -437,6 +439,7 @@ impl PipeEnd {
             synchronous,
             message_reads: AtomicBool::new(message_reads),
             completion: IrqMutex::new(None),
+            modes: core::sync::atomic::AtomicU32::new(0),
             dispatcher,
         })
     }

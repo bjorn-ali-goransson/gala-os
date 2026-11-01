@@ -660,6 +660,12 @@ fn pipe_finish(
     (status, done, data): (NtStatus, u64, Vec<u8>),
 ) -> NtStatus {
     if !end.synchronous && status.0 < 0xc000_0000 {
+        let mut request = request;
+        // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS: no packet for an I/O that
+        // completed in its call.
+        if end.modes.load(core::sync::atomic::Ordering::Acquire) & 1 != 0 {
+            request.port = None;
+        }
         // Writes copied nothing out; reads hand their bytes over here.
         if data.is_empty() && done > 0 {
             super::notify::complete_count(request, status, done);
@@ -704,7 +710,12 @@ fn pipe_request(
         port: end.completion.lock().clone(),
         apc_context: call.arg(3)?,
         apc,
-        file_signal: end.dispatcher.clone(),
+        // FILE_SKIP_SET_EVENT_ON_HANDLE: the end's own signal is left alone.
+        file_signal: if end.modes.load(core::sync::atomic::Ordering::Acquire) & 2 != 0 {
+            KArc::try_new(Dispatcher::new(0)).map_err(|_| NtStatus::NO_MEMORY)?
+        } else {
+            end.dispatcher.clone()
+        },
         done: None,
     })
 }
@@ -2810,11 +2821,13 @@ const FSCTL_PIPE_PEEK: u32 = 0x0011_400c;
 /// (ConnectNamedPipe).
 const FSCTL_PIPE_DISCONNECT: u32 = 0x0011_0004;
 const FSCTL_PIPE_LISTEN: u32 = 0x0011_0008;
+/// FSCTL_PIPE_IMPERSONATE (ImpersonateNamedPipeClient).
+const FSCTL_PIPE_IMPERSONATE: u32 = 0x0011_001c;
 
 /// NtFsControlFile(FileHandle, Event, ApcRoutine, ApcContext,
 ///   *IoStatusBlock, FsControlCode, InputBuffer, InputBufferLength,
-///   OutputBuffer, OutputBufferLength): FSCTL_PIPE_PEEK, _LISTEN and
-///   _DISCONNECT on pipes.
+///   OutputBuffer, OutputBufferLength): FSCTL_PIPE_PEEK, _LISTEN,
+///   _DISCONNECT and _IMPERSONATE on pipes.
 fn nt_fs_control_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (iosb, code, out, out_len) =
@@ -2837,6 +2850,24 @@ fn nt_fs_control_file(call: &mut Call<'_>) -> NtStatus {
             tri!(end.disconnect());
             tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
             return NtStatus::SUCCESS;
+        }
+        FSCTL_PIPE_IMPERSONATE => {
+            // A server end with a client (gala has one user, so there is
+            // nothing more to hand over).
+            let state = end.state();
+            let status = if !end.is_server() {
+                NtStatus::ILLEGAL_FUNCTION
+            } else if state == super::pipe::FILE_PIPE_CONNECTED_STATE
+                || state == super::pipe::FILE_PIPE_CLOSING_STATE
+            {
+                NtStatus::SUCCESS
+            } else {
+                NtStatus::CANNOT_IMPERSONATE
+            };
+            if status == NtStatus::SUCCESS {
+                tri!(call.write_iosb(iosb, status, 0));
+            }
+            return status;
         }
         FSCTL_PIPE_PEEK => {}
         _ => {
@@ -3737,8 +3768,9 @@ fn set_socket_information(
 /// CompletionMode } (SetNamedPipeHandleState).
 const FILE_PIPE_INFORMATION: u64 = 23;
 
-/// NtSetInformationFile on a pipe end: the completion port and the read
-/// mode (the completion mode is accepted: no non-blocking pipes yet).
+/// NtSetInformationFile on a pipe end: the completion port, the
+/// notification modes and the read mode (the completion mode is accepted:
+/// no non-blocking pipes yet).
 fn set_pipe_information(
     call: &Call<'_>,
     end: &super::pipe::PipeEnd,
@@ -3756,6 +3788,22 @@ fn set_pipe_information(
             let port =
                 tri!(io_completion_object(call, port, super::object::IO_COMPLETION_MODIFY_STATE));
             *end.completion.lock() = Some((port, key));
+        }
+        FILE_IO_COMPLETION_NOTIFICATION_INFORMATION => {
+            // ULONG Flags: modes can be added, not removed.
+            if length < 4 {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            let mut b = [0u8; 4];
+            if call.process.read(buffer, &mut b).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let flags = u32::from_le_bytes(b);
+            if flags & !3 != 0 {
+                super::ledger::record("NtSetInformationFile", "completion mode", u64::from(flags));
+                return NtStatus::INVALID_PARAMETER;
+            }
+            end.modes.fetch_or(flags, core::sync::atomic::Ordering::AcqRel);
         }
         FILE_PIPE_INFORMATION => {
             if length < 8 {

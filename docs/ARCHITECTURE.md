@@ -667,7 +667,13 @@ and completes through a `notify::Request` (status block, event, the
 end's signal, its completion port from FileCompletionInformation, APC)
 when a client connects or data arrives; immediate successes on such an
 end post a completion packet too. CancelIoEx and closing the end cancel
-pending requests (STATUS_CANCELLED). Writes on asynchronous ends still
+pending requests (STATUS_CANCELLED). FileIoCompletionNotificationInformation
+(SetFileCompletionNotificationModes) works on pipe ends as on sockets:
+FILE_SKIP_COMPLETION_PORT_ON_SUCCESS posts no packet for an I/O that
+completed in its call, FILE_SKIP_SET_EVENT_ON_HANDLE leaves the end's
+signal alone. FSCTL_PIPE_IMPERSONATE (ImpersonateNamedPipeClient)
+succeeds on a server end with a client (gala has one user, so the thread
+just impersonates it; STATUS_CANNOT_IMPERSONATE otherwise). Writes on asynchronous ends still
 wait in the call (a documented simplification). Synchronous waiters are
 on the pipe's waiter list and are woken on every change; they leave on
 termination. FSCTL_PIPE_PEEK (NtFsControlFile, 0x7f04) reports the
@@ -1123,6 +1129,15 @@ Windows, never shadows the system's DLLs.)
   exception to checked allocation). Key derivation fails with
   STATUS_NOT_SUPPORTED. Unknown algorithm names are recorded
   (`bcrypt.dll!algorithm <name>`).
+- **The token's groups** (advapi32 security.rs): GetTokenInformation
+  describes a standard interactive user's token: TokenGroups (Everyone,
+  LOCAL, CONSOLE LOGON, INTERACTIVE, BUILTIN\Users, Authenticated
+  Users, This Organization, a logon SID S-1-5-5-0-x, NTLM
+  Authentication, the Medium label), TokenGroupsAndPrivileges,
+  TokenStatistics (one logon session LUID), TokenSessionId 1,
+  TokenIntegrityLevel, TokenLogonSid, TokenType (primary),
+  TokenIsAppContainer (no). These are descriptions only: no access check
+  uses them yet (see ROADMAP, agreed order).
 - **Certificates** (crypt32 cert.rs): CertCreateCertificateContext
   decodes DER X.509 (its own small DER reader: definite lengths, v1-v3,
   UTCTime/GeneralizedTime, unique ids, extensions) into CERT_CONTEXT and
@@ -1291,7 +1306,9 @@ Windows, never shadows the system's DLLs.)
     (SEC_E_NO_AUTHENTICATING_AUTHORITY: no domain controller).
   - Negotiate: NTLM underneath, with NTLM's own tokens (Windows'
     Negotiate accepts those); SPNEGO-wrapped tokens are not understood
-    yet (recorded).
+    yet (recorded). Its contexts report NTLM as the negotiated package
+    (QueryContextAttributesW SECPKG_ATTR_NEGOTIATION_INFO, complete;
+    SECPKG_ATTR_PACKAGE_INFO).
   - Schannel: its information only; acquiring credentials is not
     supported yet (recorded).
   Credential and context handles hold a heap block and a tag; buffers

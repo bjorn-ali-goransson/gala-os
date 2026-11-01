@@ -664,6 +664,24 @@ pub extern "system" fn QueryContextAttributesW(
             }
             SEC_E_OK
         }
+        10 | 12 => {
+            // SECPKG_ATTR_PACKAGE_INFO: SecPkgContext_PackageInfoW { info };
+            // SECPKG_ATTR_NEGOTIATION_INFO: { info, NegotiationState }.
+            // The package that ran: NTLM (Negotiate's choice, too).
+            let p = package_info(&[Package::Ntlm]);
+            if p.is_null() {
+                return SEC_E_INSUFFICIENT_MEMORY;
+            }
+            // SAFETY: the caller's structure of that attribute.
+            unsafe {
+                buffer.cast::<*mut SecPkgInfo>().write_unaligned(p);
+                if attribute == 12 {
+                    // SECPKG_NEGOTIATION_COMPLETE.
+                    buffer.add(8).cast::<u32>().write_unaligned(0);
+                }
+            }
+            SEC_E_OK
+        }
         _ => {
             let _ = super::missing_detail(
                 b"secur32.dll!QueryContextAttributesW(attribute)",

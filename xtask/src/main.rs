@@ -380,6 +380,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_file_test", "kernel32.dll", "Windows/System32"),
     ("pipe_test", "ntdll.dll", "Windows/System32"),
     ("pipe_test", "kernel32.dll", "Windows/System32"),
+    ("pipe_test", "advapi32.dll", "Windows/System32"),
+    ("pipe_test", "secur32.dll", "Windows/System32"),
+    ("pipe_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("pipe_test", "bcrypt.dll", "Windows/System32"),
     ("lock_test", "ntdll.dll", "Windows/System32"),
     ("lock_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_env_test", "ntdll.dll", "Windows/System32"),
@@ -1020,6 +1024,7 @@ const USER_PROGRAMS: &[&str] = &[
     "sspi_test",
     "dpapi_test",
     "cert_test",
+    "tds_test",
     "kernel32_sys_test",
     "kernel32_thread_test",
     "kernel32_sync_test",
@@ -2312,13 +2317,20 @@ const SCENARIOS: &[Scenario] = &[
         // ("RANU instance is terminating in response to its internal time
         // out"), -w1 here to keep the run short.
         name: "sqllocaldb",
-        cmdline: "qemu_exit cwd=C:/sql/Binn run=sqlservr.exe args=-m%20-K%20-T1617%20-w1%20-c%20-SMSSQL16E.LOCALDB%20-sLOCALDB#GALA0001%20-dC:\\sql\\data\\master.mdf%20-lC:\\sql\\data\\mastlog.ldf%20-eC:\\sql\\data\\ERRORLOG",
+        // tds_test (user/tds_test) starts sqlservr.exe with those
+        // arguments, connects over the named pipe with TDS, logs in with
+        // integrated security, queries and shuts the instance down.
+        cmdline: "qemu_exit run=tds_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "SQL Server is now ready for client connections",
             "Starting up database 'tempdb'",
-            "Recovery is complete",
+            "tds_test: connected",
+            "tds_test: logged in",
+            "tds_test: row: [Microsoft SQL Server 2022",
+            "[GALA\\gala]",
             "RANU instance is terminating",
+            "tds_test: ok",
         ],
     },
     Scenario {

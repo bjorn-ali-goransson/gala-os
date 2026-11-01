@@ -11,6 +11,8 @@
 //! (SEC_E_LOGON_DENIED). Kerberos on a machine in a workgroup: the
 //! package (RPC id 16) and credentials exist, but a context cannot start
 //! (SEC_E_NO_AUTHENTICATING_AUTHORITY: no domain controller). Negotiate
+//! (its context reports NTLM as the negotiated package: NEGOTIATION_INFO,
+//! PACKAGE_INFO)
 //! (RPC id 9) authenticates with NTLM. Schannel's package information
 //! (RPC id 14). security.dll (the older name) forwards to the same
 //! functions.
@@ -557,6 +559,21 @@ fn run() -> Result<(), u32> {
         c.eq(r as u64, SEC_E_OK)?;
         let (status, mut ctx_c, mut ctx_s) = exchange(&mut c, &mut nc, &mut ns)?;
         c.eq(status, SEC_E_OK)?;
+        // The package Negotiate chose: NTLM, negotiation complete
+        // (SECPKG_ATTR_NEGOTIATION_INFO, SECPKG_ATTR_PACKAGE_INFO).
+        let mut negotiation: [usize; 2] = [0, 0xff];
+        let r = QueryContextAttributesW(&mut ctx_s, 12, negotiation.as_mut_ptr().cast());
+        c.eq(r as u64, SEC_E_OK)?;
+        let chosen = negotiation[0] as *mut SecPkgInfo;
+        c.ok(!chosen.is_null() && same((*chosen).name, "NTLM"), 0)?;
+        c.eq((negotiation[1] as u32).into(), 0)?; // SECPKG_NEGOTIATION_COMPLETE
+        FreeContextBuffer(chosen.cast());
+        let mut package: *mut SecPkgInfo = null.cast();
+        let r =
+            QueryContextAttributesW(&mut ctx_c, 10, (&mut package as *mut *mut SecPkgInfo).cast());
+        c.eq(r as u64, SEC_E_OK)?;
+        c.ok(same((*package).name, "NTLM"), 0)?;
+        FreeContextBuffer(package.cast());
         DeleteSecurityContext(&mut ctx_c);
         DeleteSecurityContext(&mut ctx_s);
         FreeCredentialsHandle(&mut nc);

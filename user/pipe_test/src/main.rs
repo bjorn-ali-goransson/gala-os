@@ -22,12 +22,17 @@
 //!   into a smaller buffer fails with ERROR_MORE_DATA and the rest
 //!   follows; a client starts in byte read mode and SetNamedPipeHandleState
 //!   switches it; PeekNamedPipe reports the bytes left of the message;
+//! - ImpersonateNamedPipeClient on a connected server end once it has
+//!   read: the thread gets a token (OpenThreadToken succeeds) until
+//!   RevertToSelf; on a handle that is not a pipe it fails;
 //! - after the client closes, the server's read fails with
 //!   ERROR_BROKEN_PIPE and ConnectNamedPipe with ERROR_NO_DATA until
 //!   DisconnectNamedPipe;
 //! - an overlapped server: ConnectNamedPipe and ReadFile pend
 //!   (ERROR_IO_PENDING) and complete when a client connects and writes,
-//!   through the event and the completion port.
+//!   through the event and the completion port;
+//!   SetFileCompletionNotificationModes(FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)
+//!   leaves the port alone for a read that completes at once.
 //!
 //! Prints `pipe_test: ok` or exits with the number of the failing check.
 
@@ -114,6 +119,7 @@ unsafe extern "system" {
         name: *const u16,
     ) -> Handle;
     fn GetOverlappedResult(h: Handle, ov: *mut Overlapped, n: *mut u32, wait: Bool) -> Bool;
+    fn SetFileCompletionNotificationModes(h: Handle, flags: u8) -> i32;
     fn CreateIoCompletionPort(file: Handle, port: Handle, key: usize, threads: u32) -> Handle;
     fn GetQueuedCompletionStatus(
         port: Handle,
@@ -132,6 +138,14 @@ struct Overlapped {
     offset: u32,
     offset_high: u32,
     event: Handle,
+}
+
+#[link(name = "advapi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn ImpersonateNamedPipeClient(pipe: Handle) -> i32;
+    fn RevertToSelf() -> i32;
+    fn OpenThreadToken(thread: Handle, access: u32, as_self: i32, token: *mut Handle) -> i32;
+    fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> i32;
 }
 
 #[allow(dead_code)]
@@ -358,6 +372,19 @@ fn named(c: &mut Checks) -> Result<(), u32> {
         c.eq(got.into(), 3)?;
         c.ok(&buf[..3] == b"ree", buf[0].into())?;
 
+        // The server impersonates its client (after reading from it).
+        let mut token = core::ptr::null_mut();
+        c.eq(OpenThreadToken(-2isize as Handle, 8, 1, &mut token) as u64, 0)?;
+        c.ok(ImpersonateNamedPipeClient(server) != 0, GetLastError().into())?;
+        c.ok(OpenThreadToken(-2isize as Handle, 8, 1, &mut token) != 0, GetLastError().into())?;
+        CloseHandle(token);
+        c.ok(RevertToSelf() != 0, 0)?;
+        c.eq(OpenThreadToken(-2isize as Handle, 8, 1, &mut token) as u64, 0)?;
+        let mut process_token = core::ptr::null_mut();
+        c.ok(OpenProcessToken(-1isize as Handle, 8, &mut process_token) != 0, 0)?;
+        c.eq(ImpersonateNamedPipeClient(process_token) as u64, 0)?;
+        CloseHandle(process_token);
+
         // Messages towards the client, once it reads in message mode.
         let read_mode = PIPE_READMODE_MESSAGE;
         let set = SetNamedPipeHandleState(cl, &read_mode, core::ptr::null(), core::ptr::null());
@@ -427,6 +454,18 @@ fn named(c: &mut Checks) -> Result<(), u32> {
         c.ok(&buf[..4] == b"late", buf[0].into())?;
         let dequeued = GetQueuedCompletionStatus(port, &mut got, &mut key, &mut done, 5000);
         c.ok(dequeued != 0 && got == 4, got.into())?;
+
+        // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS: a read that completes at
+        // once posts no packet.
+        c.ok(SetFileCompletionNotificationModes(server, 1) != 0, GetLastError().into())?;
+        c.ok(write(cl, b"now"), GetLastError().into())?;
+        let mut ov = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event };
+        let ok =
+            ReadFile(server, buf.as_mut_ptr(), 64, &mut got, (&mut ov as *mut Overlapped).cast());
+        c.ok(ok != 0 && got == 3, GetLastError().into())?;
+        let dequeued = GetQueuedCompletionStatus(port, &mut got, &mut key, &mut done, 0);
+        c.eq(dequeued as u64, 0)?;
+        c.eq(GetLastError().into(), 258)?; // WAIT_TIMEOUT
         CloseHandle(cl);
         CloseHandle(server);
         CloseHandle(port);

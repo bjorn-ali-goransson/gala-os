@@ -104,6 +104,9 @@ shows it.
   event when they start, so a wait that never returns shows as the
   thread's last line. Do not delete the events file of a running
   VM (it is still open: `/proc/<qemu pid>/fd/` reaches it).
+- **A scenario needs a server and a client at once**: `run=` starts
+  programs one after another, so the client starts the server itself
+  (CreateProcessW) and waits for it, as `tds_test` does with sqlservr.
 - **A program fails without a ledger entry or a failing system call**
   (a function returned data it did not like): add temporary probes,
   `missing_detail(b"TRACE dll!Function", detail)` at the top of the

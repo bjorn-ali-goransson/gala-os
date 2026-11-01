@@ -80,6 +80,7 @@ impl NtStatus {
     pub const PIPE_CONNECTED: NtStatus = NtStatus(0xc000_00b2);
     pub const PIPE_LISTENING: NtStatus = NtStatus(0xc000_00b3);
     pub const ILLEGAL_FUNCTION: NtStatus = NtStatus(0xc000_00af);
+    pub const CANNOT_IMPERSONATE: NtStatus = NtStatus(0xc000_010d);
     pub const PIPE_BROKEN: NtStatus = NtStatus(0xc000_014b);
     pub const INVALID_PARAMETER_2: NtStatus = NtStatus(0xc000_00f0);
     pub const INVALID_PARAMETER_3: NtStatus = NtStatus(0xc000_00f1);

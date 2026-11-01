@@ -857,10 +857,60 @@ fn token_info(out: *mut u8, length: u32, ret: *mut u32, bytes: &[u8]) -> i32 {
     1
 }
 
+/// The logon session of the one user (an interactive logon's LUID).
+const LOGON_ID: u32 = 0x0002_a3b4;
+
+/// The groups of a standard interactive user's token, with their
+/// attributes (SE_GROUP_MANDATORY | ENABLED_BY_DEFAULT | ENABLED = 7;
+/// the logon SID adds SE_GROUP_LOGON_ID; the label is SE_GROUP_INTEGRITY
+/// | SE_GROUP_INTEGRITY_ENABLED).
+const GROUPS: &[(u8, &[u32], u32)] = &[
+    (1, &[0], 7),                        // Everyone
+    (2, &[0], 7),                        // LOCAL
+    (2, &[1], 7),                        // CONSOLE LOGON
+    (5, &[4], 7),                        // INTERACTIVE
+    (5, &[32, 545], 7),                  // BUILTIN\Users
+    (5, &[11], 7),                       // Authenticated Users
+    (5, &[15], 7),                       // This Organization
+    (5, &[5, 0, LOGON_ID], 0xc000_0007), // the logon SID
+    (5, &[64, 10], 7),                   // NTLM Authentication
+    (16, &[8192], 0x60),                 // Medium Mandatory Level
+];
+
+/// Writes SID_AND_ATTRIBUTES entries for `sids` at `b[at..]`, the SIDs
+/// after them (pointers made from `base`, the caller's buffer); the end.
+fn put_sid_list(b: &mut [u8], at: usize, base: usize, sids: &[(u8, &[u32], u32)]) -> usize {
+    let mut sid_at = at + 16 * sids.len();
+    for (i, &(auth, subs, attrs)) in sids.iter().enumerate() {
+        let e = at + 16 * i;
+        b[e..e + 8].copy_from_slice(&((base + sid_at) as u64).to_le_bytes());
+        b[e + 8..e + 12].copy_from_slice(&attrs.to_le_bytes());
+        write_sid(b[sid_at..].as_mut_ptr(), [0, 0, 0, 0, 0, auth], subs);
+        sid_at += sid_len(subs.len());
+    }
+    sid_at
+}
+
+/// LUID_AND_ATTRIBUTES of the held privileges at `b[at..]`; the end.
+fn put_privileges(b: &mut [u8], at: usize) -> usize {
+    for (i, &luid) in HELD.iter().enumerate() {
+        let e = at + 12 * i;
+        b[e..e + 4].copy_from_slice(&luid.to_le_bytes());
+        b[e + 4..e + 8].copy_from_slice(&0u32.to_le_bytes());
+        let enabled: u32 = if luid == 23 { 3 } else { 0 }; // ENABLED_BY_DEFAULT | ENABLED
+        b[e + 8..e + 12].copy_from_slice(&enabled.to_le_bytes());
+    }
+    at + 12 * HELD.len()
+}
+
 /// GetTokenInformation: TokenUser (1), TokenOwner (4), TokenPrimaryGroup
-/// (5): the user's SID after the structure; TokenPrivileges (3): the
-/// held privileges; TokenElevationType (18): default (1); TokenElevation
-/// (20): not elevated. Other classes are reported.
+/// (5): the user's SID after the structure; TokenGroups (2) and
+/// TokenLogonSid (28); TokenPrivileges (3): the held privileges;
+/// TokenType (8): primary; TokenStatistics (10); TokenSessionId (12): 1,
+/// the console session; TokenGroupsAndPrivileges (13); TokenElevationType
+/// (18): default (1); TokenElevation (20): not elevated;
+/// TokenIntegrityLevel (25): Medium; TokenIsAppContainer (29): no.
+/// Other classes are reported.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetTokenInformation(
     token: usize,
@@ -872,8 +922,62 @@ pub extern "system" fn GetTokenInformation(
     if token == 0 {
         return fail(ERROR_INVALID_HANDLE, 0);
     }
-    let mut b = [0u8; 128];
+    let mut b = [0u8; 1024];
+    let base = out as usize;
     let n = match class {
+        2 | 28 => {
+            // TOKEN_GROUPS: GroupCount (aligned to 8), SID_AND_ATTRIBUTES.
+            let list: &[(u8, &[u32], u32)] = if class == 2 { GROUPS } else { &GROUPS[7..8] };
+            b[..4].copy_from_slice(&(list.len() as u32).to_le_bytes());
+            put_sid_list(&mut b, 8, base, list)
+        }
+        8 => {
+            b[..4].copy_from_slice(&1u32.to_le_bytes()); // TokenPrimary
+            4
+        }
+        10 => {
+            // TOKEN_STATISTICS.
+            b[..8].copy_from_slice(&u64::from(LOGON_ID + 1).to_le_bytes()); // TokenId
+            b[8..16].copy_from_slice(&u64::from(LOGON_ID).to_le_bytes()); // AuthenticationId
+            b[16..24].copy_from_slice(&i64::MAX.to_le_bytes()); // never expires
+            b[24..28].copy_from_slice(&1u32.to_le_bytes()); // TokenPrimary
+            b[28..32].copy_from_slice(&0u32.to_le_bytes()); // (not impersonation)
+            b[32..36].copy_from_slice(&4096u32.to_le_bytes()); // DynamicCharged
+            b[36..40].copy_from_slice(&3072u32.to_le_bytes()); // DynamicAvailable
+            b[40..44].copy_from_slice(&(GROUPS.len() as u32).to_le_bytes());
+            b[44..48].copy_from_slice(&(HELD.len() as u32).to_le_bytes());
+            b[48..56].copy_from_slice(&u64::from(LOGON_ID + 2).to_le_bytes()); // ModifiedId
+            56
+        }
+        12 => {
+            b[..4].copy_from_slice(&1u32.to_le_bytes());
+            4
+        }
+        13 => {
+            // TOKEN_GROUPS_AND_PRIVILEGES: SidCount, SidLength, Sids,
+            // RestrictedSidCount, RestrictedSidLength, RestrictedSids,
+            // PrivilegeCount, PrivilegeLength, Privileges, AuthenticationId.
+            let mut sids: [(u8, &[u32], u32); 11] = [(0, &[], 0); 11];
+            sids[0] = (5, &USER_SUBS, 0);
+            sids[1..].copy_from_slice(GROUPS);
+            let start = 56;
+            let end = put_sid_list(&mut b, start, base, &sids);
+            let privileges = end.next_multiple_of(4);
+            let after = put_privileges(&mut b, privileges);
+            b[..4].copy_from_slice(&(sids.len() as u32).to_le_bytes());
+            b[4..8].copy_from_slice(&((end - start) as u32).to_le_bytes());
+            b[8..16].copy_from_slice(&((base + start) as u64).to_le_bytes());
+            b[32..36].copy_from_slice(&(HELD.len() as u32).to_le_bytes());
+            b[36..40].copy_from_slice(&((after - privileges) as u32).to_le_bytes());
+            b[40..48].copy_from_slice(&((base + privileges) as u64).to_le_bytes());
+            b[48..56].copy_from_slice(&u64::from(LOGON_ID).to_le_bytes());
+            after
+        }
+        25 => {
+            // TOKEN_MANDATORY_LABEL: SID_AND_ATTRIBUTES, then the SID.
+            let end = put_sid_list(&mut b, 0, base, &[(16, &[8192], 0x20)]);
+            end
+        }
         1 | 4 | 5 => {
             // A pointer (and for TOKEN_USER the attributes), then the SID.
             let head = if class == 1 { 16 } else { 8 };
@@ -885,21 +989,15 @@ pub extern "system" fn GetTokenInformation(
         3 => {
             // TOKEN_PRIVILEGES: count, then LUID_AND_ATTRIBUTES.
             b[..4].copy_from_slice(&(HELD.len() as u32).to_le_bytes());
-            for (i, &luid) in HELD.iter().enumerate() {
-                let at = 4 + 12 * i;
-                b[at..at + 4].copy_from_slice(&luid.to_le_bytes());
-                let enabled: u32 = if luid == 23 { 3 } else { 0 }; // ENABLED_BY_DEFAULT | ENABLED
-                b[at + 8..at + 12].copy_from_slice(&enabled.to_le_bytes());
-            }
-            4 + 12 * HELD.len()
+            put_privileges(&mut b, 4)
         }
         18 => {
             b[..4].copy_from_slice(&1u32.to_le_bytes());
             4
         }
-        20 => 4,
+        20 | 29 => 4, // not elevated; TokenIsAppContainer: no
         _ => {
-            missing(b"advapi32.dll!GetTokenInformation(class)");
+            super::missing_detail(b"advapi32.dll!GetTokenInformation(class)", u64::from(class));
             return fail(ERROR_INVALID_PARAMETER, 0);
         }
     };
@@ -1691,6 +1789,63 @@ pub extern "system" fn SetThreadToken(thread: *mut usize, token: usize) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "system" fn ImpersonateSelf(_level: u32) -> i32 {
     SetThreadToken(core::ptr::null_mut(), 1)
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtFsControlFile(
+        h: usize,
+        event: usize,
+        apc: usize,
+        context: usize,
+        iosb: *mut [usize; 2],
+        code: u32,
+        input: *const u8,
+        input_length: u32,
+        output: *mut u8,
+        output_length: u32,
+    ) -> u32;
+    fn RtlNtStatusToDosError(status: u32) -> u32;
+}
+
+/// ImpersonateNamedPipeClient: FSCTL_PIPE_IMPERSONATE asks the file
+/// system whether `pipe` is a server end with a client; then the thread
+/// impersonates (the client is gala's one user: see SetThreadToken).
+#[unsafe(no_mangle)]
+pub extern "system" fn ImpersonateNamedPipeClient(pipe: usize) -> i32 {
+    let mut iosb = [0usize; 2];
+    // SAFETY: plain call with our status block.
+    let status = unsafe {
+        NtFsControlFile(
+            pipe,
+            0,
+            0,
+            0,
+            &mut iosb,
+            0x0011_001c,
+            core::ptr::null(),
+            0,
+            core::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != 0 {
+        // SAFETY: plain call.
+        return fail(unsafe { RtlNtStatusToDosError(status) }, 0);
+    }
+    // SAFETY: plain call.
+    if set_impersonating(unsafe { GetCurrentThreadId() }, true) {
+        1
+    } else {
+        fail(ERROR_NOT_ENOUGH_MEMORY, 0)
+    }
+}
+
+/// GetSidIdentifierAuthority: the SID_IDENTIFIER_AUTHORITY inside the SID
+/// (no checks, as documented).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSidIdentifierAuthority(sid: *mut u8) -> *mut [u8; 6] {
+    sid.wrapping_add(2).cast()
 }
 
 /// GetSidSubAuthorityCount: the count byte inside the SID (no checks, as
