@@ -725,6 +725,64 @@ pub extern "system" fn GalaCopyBitmap(h: Handle) -> Handle {
     copy
 }
 
+/// GalaCutImage(src, sx, sy, sw, sh, mask, mx, my, key, w, h, out): a
+/// w x h image (comctl32's image lists) from `src`'s rectangle (sx, sy,
+/// sw, sh), scaled by the nearest pixel, as a 32-bit colour bitmap (alpha
+/// bytes kept) and a monochrome mask (white: transparent). The mask comes
+/// from `mask` at (mx, my) when given, else from the colour `key` (a
+/// COLORREF; CLR_NONE: opaque); transparent pixels are black in the
+/// colour bitmap. `out` receives [colour, mask].
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn GalaCutImage(
+    src: Handle,
+    sx: i32,
+    sy: i32,
+    sw: i32,
+    sh: i32,
+    mask: Handle,
+    mx: i32,
+    my: i32,
+    key: u32,
+    w: i32,
+    h: i32,
+    out: *mut [Handle; 2],
+) -> i32 {
+    let Some(s) = bitmap(src) else { return 0 };
+    if out.is_null() || w <= 0 || h <= 0 || sw <= 0 || sh <= 0 {
+        return 0;
+    }
+    let m = if mask.is_null() { None } else { bitmap(mask) };
+    let key = (key != 0xffff_ffff).then(|| crate::pixel(key));
+    let color = new_ddb(w, h, 32);
+    let bits = new_ddb(w, h, 1);
+    let (Some(c), Some(k)) = (bitmap(color), bitmap(bits)) else {
+        crate::DeleteObject(color);
+        crate::DeleteObject(bits);
+        return 0;
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let (ox, oy) = (x * sw / w, y * sh / h);
+            let v = if s.bpp == 1 {
+                s.surface.get(sx + ox, sy + oy).unwrap_or(0)
+            } else {
+                s.surface.get_raw(sx + ox, sy + oy).unwrap_or(0)
+            };
+            let clear = match (m, key) {
+                (Some(m), _) => m.surface.get(mx + ox, my + oy).unwrap_or(0) & 0xff_ffff != 0,
+                (None, Some(key)) => v & 0x00ff_ffff == key,
+                (None, None) => false,
+            };
+            c.surface.put_raw(x, y, if clear { 0 } else { v });
+            k.surface.put(x, y, if clear { 0x00ff_ffff } else { 0 });
+        }
+    }
+    // SAFETY: the caller's two handles.
+    unsafe { *out = [color, bits] };
+    1
+}
+
 /// Draws an icon at logical (x, y), stretched to cx x cy (0: its size):
 /// with a colour bitmap that has alpha, blended by it; otherwise the
 /// destination ANDed with the mask, then XORed with the colour (a

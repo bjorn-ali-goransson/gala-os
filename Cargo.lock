@@ -215,6 +215,7 @@ version = "0.1.0"
 name = "comctl32"
 version = "0.1.0"
 dependencies = [
+ "gala_heap",
  "gala_stubs",
 ]
 

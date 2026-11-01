@@ -588,6 +588,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gdi32_test", "user32.dll", "Windows/System32"),
     ("gdi32_test", "gdi32.dll", "Windows/System32"),
     ("gdi32_test", "user/bin/gdi32_test.exe", "gala"),
+    ("comctl32_test", "ntdll.dll", "Windows/System32"),
+    ("comctl32_test", "kernel32.dll", "Windows/System32"),
+    ("comctl32_test", "msvcrt.dll", "Windows/System32"),
+    ("comctl32_test", "user32.dll", "Windows/System32"),
+    ("comctl32_test", "gdi32.dll", "Windows/System32"),
+    ("comctl32_test", "comctl32.dll", "Windows/System32"),
+    ("comctl32_test", "user/bin/comctl32_test.exe", "gala"),
     ("user32_test", "ntdll.dll", "Windows/System32"),
     ("user32_test", "kernel32.dll", "Windows/System32"),
     ("user32_test", "msvcrt.dll", "Windows/System32"),
@@ -2691,6 +2698,15 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=gdi32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["gdi32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // W3: gala's comctl32 (image lists) against documented behaviour,
+        // for what wxWidgets (FileZilla) uses (user/comctl32_test/main.c,
+        // mingw).
+        name: "comctl32_test",
+        cmdline: "qemu_exit run=comctl32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["comctl32_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // W3: gala's user32 against documented behaviour, for what

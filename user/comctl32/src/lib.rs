@@ -1,12 +1,30 @@
 //! gala's comctl32.dll: InitCommonControls(Ex), which programs call at
-//! startup to register the common control window classes. gala has no
-//! windows; the call succeeds (the JVM's launcher calls it).
+//! startup to register the common control window classes (the call
+//! succeeds; the controls themselves are not there yet), and image lists
+//! (`imagelist.rs`).
 
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+extern crate alloc;
+
+mod imagelist;
 mod unimplemented;
+
+// The global allocator (the image lists' vectors).
+use gala_heap as _;
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
+}
+
+/// Records an unsupported case in the ledger.
+pub(crate) fn unsupported(what: &[u8], detail: u64) {
+    // SAFETY: a valid buffer; "unsupported" (2).
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, detail) };
+}
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]

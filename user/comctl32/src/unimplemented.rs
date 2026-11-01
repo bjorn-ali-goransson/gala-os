@@ -4,24 +4,10 @@
 
 gala_stubs::unimplemented_exports!("comctl32.dll":
     CreateUpDownControl
-    ImageList_Add
-    ImageList_AddMasked
     ImageList_BeginDrag
-    ImageList_Copy
-    ImageList_Create
-    ImageList_Destroy
     ImageList_DragEnter
     ImageList_DragLeave
     ImageList_DragMove
-    ImageList_Draw
     ImageList_EndDrag
-    ImageList_GetIcon
-    ImageList_GetIconSize
-    ImageList_GetImageCount
-    ImageList_GetImageInfo
-    ImageList_Remove
-    ImageList_Replace
-    ImageList_ReplaceIcon
-    ImageList_SetBkColor
     ImageList_SetDragCursorImage
 );

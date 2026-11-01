@@ -2249,6 +2249,18 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   functions wx calls on its way (OleInitialize, SetThreadLocale on the
   TEB's CurrentLocale, SetSecurityDescriptorControl/Sacl/Group,
   SetCurrentProcessExplicitAppUserModelID).
+- **Image lists** (`user/comctl32/src/imagelist.rs`; `comctl32_test`):
+  HIMAGELIST is 0x1000 + 16 * slot (256 lists); each image is its own
+  pair of gdi32 bitmaps of the list's size, a 32-bit colour bitmap
+  (alpha bytes kept) and a monochrome mask (white: transparent), cut by
+  gdi32's GalaCutImage from what programs add (bitmap strips split by
+  the list's width, a mask bitmap or a colour key, icons scaled; the
+  colour is black under the mask) and drawn by GalaDrawIcon (alpha when
+  the image has any, else mask then colour); ILD_NORMAL fills the
+  background colour first. A list without ILC_MASK is opaque.
+  GetImageInfo hands out the image's own bitmaps with a rectangle of the
+  list's size. Not yet: ILD_MASK, ILD_BLEND tints, copies between two
+  lists, drag images (ledger).
 - **gdi32** (`user/gdi32`; `gdi32_test`): an object table (1024 slots;
   brushes, pens, fonts kept as the LOGFONTW given, bitmaps, DCs; the
   stock objects plus the default 1 x 1 monochrome bitmap memory DCs start

@@ -539,8 +539,11 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    now stops at gdi32's CreateDIBitmap. Then (gdi32_test, user32_test):
    CreateDIBitmap, LoadBitmapW from RT_BITMAP resources (user32_test now
    has a resource script), SetStretchBltMode, mapping modes with window
-   and viewport extents and LPtoDP/DPtoLP. It now stops at comctl32's
-   ImageList_Create.
+   and viewport extents and LPtoDP/DPtoLP. Then image lists (comctl32_test, a new
+   scenario): create, add (strips, masks, colour keys), icons, draw
+   with background colours, info, copy/swap, replace, remove, destroy.
+   It now stops at user32's RedrawWindow (and wants 1-bit DIB
+   sections).
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,
