@@ -9,7 +9,8 @@
 //! opens an exited child (while a handle keeps it), a suspended one and
 //! the caller; id 0 or an unused id fail with ERROR_INVALID_PARAMETER.
 //! A Toolhelp snapshot lists the suspended child (parent, threads, name)
-//! and its thread.
+//! and its thread. VirtualAllocEx/VirtualQueryEx/VirtualFreeEx reach the
+//! suspended child's address space (PROCESS_VM_OPERATION needed).
 //! Then redirected
 //! standard handles (STARTF_USESTDHANDLES): a child (`process_test
 //! pipes`) reads its stdin from one pipe until end of file and writes its
@@ -52,6 +53,15 @@ struct ProcessInformation {
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn VirtualAllocEx(
+        process: Handle,
+        at: *mut c_void,
+        size: usize,
+        kind: u32,
+        protect: u32,
+    ) -> *mut c_void;
+    fn VirtualFreeEx(process: Handle, at: *mut c_void, size: usize, kind: u32) -> Bool;
+    fn VirtualQueryEx(process: Handle, at: *mut c_void, info: *mut u8, length: usize) -> usize;
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn GetCommandLineW() -> *const u16;
@@ -532,6 +542,27 @@ fn run() -> Result<(), u32> {
         c.ok(!opened.is_null(), GetLastError().into())?;
         c.eq(WaitForSingleObject(opened, 0).into(), WAIT_TIMEOUT.into())?;
         toolhelp(&mut c, &info)?;
+        // Its address space through the process handle (PostgreSQL
+        // reserves its shared memory in a suspended child so): a region
+        // reserved there is there and not here; released, it is free.
+        const WANT: usize = 0x2a0_0000_0000;
+        let at = VirtualAllocEx(info.process, WANT as *mut c_void, 0x10_0000, 0x2000, 4);
+        c.eq(at as u64, WANT as u64)?;
+        let mut mbi = [0u64; 6];
+        c.eq(VirtualQueryEx(info.process, at, mbi.as_mut_ptr().cast(), 48) as u64, 48)?;
+        c.eq(mbi[4] & 0xffff_ffff, 0x2000)?; // State: MEM_RESERVE
+        c.ok(mbi[3] >= 0x10_0000, mbi[3])?; // RegionSize
+        c.eq(VirtualQueryEx(GetCurrentProcess(), at, mbi.as_mut_ptr().cast(), 48) as u64, 48)?;
+        c.eq(mbi[4] & 0xffff_ffff, 0x1_0000)?; // MEM_FREE here
+        c.ok(VirtualFreeEx(info.process, at, 0, 0x8000) != 0, GetLastError().into())?;
+        c.eq(VirtualQueryEx(info.process, at, mbi.as_mut_ptr().cast(), 48) as u64, 48)?;
+        c.eq(mbi[4] & 0xffff_ffff, 0x1_0000)?;
+        // Without PROCESS_VM_OPERATION: ERROR_ACCESS_DENIED.
+        let limited = OpenProcess(SYNCHRONIZE, 0, info.process_id);
+        let denied = VirtualAllocEx(limited, core::ptr::null_mut(), 0x1_0000, 0x2000, 4);
+        c.ok(denied.is_null(), denied as u64)?;
+        c.eq(GetLastError().into(), 5)?;
+        CloseHandle(limited);
         c.eq(ResumeThread(info.thread).into(), 1)?;
         c.eq(WaitForSingleObject(opened, INFINITE).into(), 0)?;
         CloseHandle(opened);

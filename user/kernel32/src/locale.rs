@@ -1322,3 +1322,33 @@ pub extern "system" fn FindNLSStringEx(
         None => -1,
     }
 }
+
+/// GetNLSVersionEx(function, lpLocaleName, lpVersionInformation): the
+/// version of the sorting gala's CompareString uses (one, for every
+/// locale: it does not change). NLSVERSIONINFOEX {dwNLSVersionInfoSize,
+/// dwNLSVersion, dwDefinedVersion, dwEffectiveId, guidCustomVersion}.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetNLSVersionEx(function: u32, _locale: *const u16, info: *mut u32) -> Bool {
+    const COMPARE_STRING: u32 = 1;
+    /// gala's sort version (the defined and the effective one).
+    const VERSION: u32 = 0x0001_0000;
+    if function != COMPARE_STRING {
+        return fail_with(ERROR_INVALID_FLAGS, FALSE);
+    }
+    if info.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's NLSVERSIONINFOEX (its size field first).
+    unsafe {
+        if *info != 32 {
+            return fail_with(ERROR_INSUFFICIENT_BUFFER, FALSE);
+        }
+        *info.add(1) = VERSION;
+        *info.add(2) = VERSION;
+        *info.add(3) = 0x0409; // the effective locale's LCID (en-US)
+        for k in 4..8 {
+            *info.add(k) = 0;
+        }
+    }
+    TRUE
+}

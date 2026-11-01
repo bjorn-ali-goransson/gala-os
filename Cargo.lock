@@ -164,6 +164,14 @@ name = "clusapi_test"
 version = "0.1.0"
 
 [[package]]
+name = "cmd"
+version = "0.1.0"
+
+[[package]]
+name = "cmd_test"
+version = "0.1.0"
+
+[[package]]
 name = "com_test"
 version = "0.1.0"
 

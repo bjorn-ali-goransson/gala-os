@@ -60,7 +60,21 @@ pub struct ImageLayout {
     /// Frames of read-only pages, shared by every view at the preferred
     /// base (made on first use, freed with the section).
     shared: IrqMutex<Vec<Option<Frame>>>,
+    /// The image's system-wide alternative base (as Windows' ASLR gives
+    /// each image one), taken on first need when its preferred base is in
+    /// use, and the frames relocated for it, shared by every view there.
+    dynamic: IrqMutex<Option<u64>>,
+    relocated: IrqMutex<Vec<Option<Frame>>>,
 }
+
+/// Where alternative image bases are taken from: downwards from here, in
+/// 64 KiB units (images are never given back their range). Programs do
+/// not depend on where (Windows uses 0x7ff...); this band is below
+/// gala-um's HOST_START, where guest code must stay.
+const DYNAMIC_TOP: u64 = 0x3ff8_0000_0000;
+const DYNAMIC_BOTTOM: u64 = 0x3ff0_0000_0000;
+static NEXT_DYNAMIC: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(DYNAMIC_TOP);
 
 /// Header fields of an image, kept with its layout.
 #[derive(Clone, Copy, Debug)]
@@ -79,6 +93,9 @@ pub struct ImageInfo {
 impl Drop for ImageLayout {
     fn drop(&mut self) {
         for frame in self.shared.lock().iter().flatten() {
+            platform::free_frame(*frame);
+        }
+        for frame in self.relocated.lock().iter().flatten() {
             platform::free_frame(*frame);
         }
     }
@@ -127,6 +144,9 @@ impl ImageLayout {
         let mut shared = Vec::new();
         shared.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
         shared.resize(pages, None);
+        let mut relocated = Vec::new();
+        relocated.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
+        relocated.resize(pages, None);
         let info = ImageInfo {
             size_of_image: image.size_of_image,
             entry_rva: image.entry_rva,
@@ -145,6 +165,8 @@ impl ImageLayout {
             relocations: image.directory(super::pe::DIRECTORY_BASERELOC),
             relocatable: image.relocatable,
             shared: IrqMutex::new(shared),
+            dynamic: IrqMutex::new(None),
+            relocated: IrqMutex::new(relocated),
         })
     }
 
@@ -156,6 +178,43 @@ impl ImageLayout {
             let start = index * PAGE_SIZE as usize;
             let end = (start + PAGE_SIZE as usize).min(self.bytes.len());
             *slot = Some(UserSpace::frame_with(&self.bytes[start..end])?);
+        }
+        *slot
+    }
+
+    /// The image's alternative base, taken now if it has none (None when
+    /// the region for them is used up).
+    fn dynamic_base(&self) -> Option<u64> {
+        let mut dynamic = self.dynamic.lock();
+        if dynamic.is_none() {
+            let size = self.size().next_multiple_of(0x1_0000);
+            let taken = NEXT_DYNAMIC.fetch_update(
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+                |top| top.checked_sub(size).filter(|&b| b >= DYNAMIC_BOTTOM),
+            );
+            *dynamic = taken.ok().map(|top| top - size);
+        }
+        *dynamic
+    }
+
+    /// The shared frame of page `index` relocated for the alternative base
+    /// `base` (made on first use).
+    fn relocated_frame(&self, index: usize, base: u64) -> Option<Frame> {
+        let mut relocated = self.relocated.lock();
+        let slot = relocated.get_mut(index)?;
+        if slot.is_none() {
+            let mut page = [0u8; PAGE_SIZE as usize];
+            let delta = base.wrapping_sub(self.base);
+            super::pe::relocate_page(
+                &self.bytes,
+                self.relocations,
+                delta,
+                index * PAGE_SIZE as usize,
+                &mut page,
+            )
+            .ok()?;
+            *slot = Some(UserSpace::frame_with(&page)?);
         }
         *slot
     }
@@ -405,9 +464,9 @@ pub fn map_view(
     Ok(Mapped { base, size, relocated: false })
 }
 
-/// Maps an image view: private pages copied from the layout, relocated if
-/// not at the preferred base.
-// TODO: share unmodified read-only pages between views.
+/// Maps an image view: at the preferred base or the image's alternative
+/// base, frames shared with every other view there (copy on write for
+/// writable pages); elsewhere private pages, relocated a page at a time.
 fn map_image_view(
     process: &Process,
     object: &ObjectRef,
@@ -423,52 +482,55 @@ fn map_image_view(
     views.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
     let mut vad = process.vad.lock();
     let wanted = if base != 0 { base } else { image.base };
-    let reserved =
-        match vad.reserve(Some(wanted), size, vad::PAGE_EXECUTE_WRITECOPY, vad::MEM_IMAGE, false) {
-            Ok(r) => r,
-            Err(NtStatus::CONFLICTING_ADDRESSES | NtStatus::INVALID_PARAMETER)
-                if base == 0 && image.relocatable =>
-            {
-                vad.reserve(None, size, vad::PAGE_EXECUTE_WRITECOPY, vad::MEM_IMAGE, false)?
+    // The preferred base; else the image's alternative base (shared,
+    // relocated frames); else anywhere (private relocated pages).
+    let reserve = |vad: &mut vad::Vad, at: Option<u64>| {
+        vad.reserve(at, size, vad::PAGE_EXECUTE_WRITECOPY, vad::MEM_IMAGE, false)
+    };
+    let reserved = match reserve(&mut vad, Some(wanted)) {
+        Ok(r) => r,
+        Err(NtStatus::CONFLICTING_ADDRESSES | NtStatus::INVALID_PARAMETER)
+            if base == 0 && image.relocatable =>
+        {
+            match image.dynamic_base().map(|b| reserve(&mut vad, Some(b))) {
+                Some(Ok(r)) => r,
+                _ => reserve(&mut vad, None)?,
             }
-            Err(e) => return Err(e),
-        };
+        }
+        Err(e) => return Err(e),
+    };
     let view_base = reserved.0;
     let delta = view_base.wrapping_sub(image.base);
+    let at_dynamic = delta != 0 && *image.dynamic.lock() == Some(view_base);
     if delta != 0 && !image.relocatable {
         let _ = vad.release(view_base, 0);
         return Err(NtStatus::CONFLICTING_ADDRESSES);
     }
     // The view's contents: at the preferred base the layout's shared
-    // frames; elsewhere a relocated copy.
-    let mut bytes = Vec::new();
-    if delta != 0 {
-        if bytes.try_reserve_exact(image.bytes.len()).is_err() {
-            let _ = vad.release(view_base, 0);
-            return Err(NtStatus::NO_MEMORY);
-        }
-        bytes.resize(image.bytes.len(), 0);
-        bytes.copy_from_slice(&image.bytes);
-        if super::pe::apply_relocations(&mut bytes, image.relocations, delta).is_err() {
-            let _ = vad.release(view_base, 0);
-            return Err(NtStatus::INVALID_IMAGE_FORMAT);
-        }
-    }
+    // frames; elsewhere private pages, relocated a page at a time (a large
+    // image is never copied whole).
     let mut space = process.space.lock();
+    let mut page_buf = [0u8; PAGE_SIZE as usize];
     for (i, &protect) in image.page_protect.iter().enumerate() {
         let va = view_base + i as u64 * PAGE_SIZE;
-        let page = bytes
-            .get(i * PAGE_SIZE as usize..((i + 1) * PAGE_SIZE as usize).min(bytes.len()))
-            .unwrap_or(&[]);
-        let fail = |vad: &mut vad::Vad, space: &mut UserSpace| {
+        let fail = |vad: &mut vad::Vad, space: &mut UserSpace, status: NtStatus| {
             for j in 0..i as u64 {
                 space.unmap_page(view_base + j * PAGE_SIZE);
             }
             let _ = vad.release(view_base, 0);
-            NtStatus::NO_MEMORY
+            status
         };
+        if delta != 0 && !at_dynamic {
+            let rva = i * PAGE_SIZE as usize;
+            if super::pe::relocate_page(&image.bytes, image.relocations, delta, rva, &mut page_buf)
+                .is_err()
+            {
+                return Err(fail(&mut vad, &mut space, NtStatus::INVALID_IMAGE_FORMAT));
+            }
+        }
+        let page = &page_buf[..];
         if vad.commit(va, PAGE_SIZE, protect).is_err() {
-            return Err(fail(&mut vad, &mut space));
+            return Err(fail(&mut vad, &mut space, NtStatus::NO_MEMORY));
         }
         // Pages no view writes to without a copy (read-only, or copy-on-write
         // until written) are shared, unless relocation changed them.
@@ -478,11 +540,16 @@ fn map_image_view(
                 Some(frame) => space.map_borrowed(va, frame, flags).is_ok(),
                 None => false,
             }
+        } else if at_dynamic {
+            match image.relocated_frame(i, view_base) {
+                Some(frame) => space.map_borrowed(va, frame, flags).is_ok(),
+                None => false,
+            }
         } else {
             space.map_zeroed(va, 1, flags).is_ok() && space.write_initial(va, page).is_ok()
         };
         if !mapped {
-            return Err(fail(&mut vad, &mut space));
+            return Err(fail(&mut vad, &mut space, NtStatus::NO_MEMORY));
         }
     }
     let _ = views.try_push(View { base: view_base, size, offset: 0, section: object.clone() });

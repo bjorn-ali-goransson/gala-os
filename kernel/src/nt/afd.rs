@@ -31,6 +31,9 @@ pub const IOCTL_AFD_POLL: u32 = 0x12024;
 pub const IOCTL_AFD_SET_INFO: u32 = 0x1203b;
 const AFD_INFO_BLOCKING_MODE: u32 = 2;
 pub const IOCTL_AFD_SUPER_CONNECT: u32 = 0x120c7;
+/// WSAEventSelect and WSAEnumNetworkEvents (the numbers of Wine's afd.h).
+pub const IOCTL_AFD_EVENT_SELECT: u32 = 0x12087;
+pub const IOCTL_AFD_GET_EVENTS: u32 = 0x1208b;
 
 const AFD_DISCONNECT_SEND: u32 = 1;
 const AFD_MSG_OOB: u32 = 0x40;
@@ -145,6 +148,11 @@ pub struct EndpointState {
     /// fail with STATUS_DEVICE_NOT_READY instead of pending.
     non_blocking: AtomicBool,
     pending: IrqMutex<Vec<Pending>>,
+    /// WSAEventSelect: the event and the AFD_POLL_* events it is set for.
+    select: IrqMutex<Option<(ObjectRef, u32)>>,
+    /// The selected events that happened since WSAEnumNetworkEvents last
+    /// read them.
+    recorded: AtomicU32,
 }
 
 /// A socket endpoint (`ObjectBody::Socket`).
@@ -173,6 +181,7 @@ fn notify(token: u64) {
     let state = REGISTRY.lock().iter().find(|e| e.token == token).cloned();
     if let Some(state) = state {
         try_complete(&state);
+        check_select(&state);
     }
     // A poll waits on other endpoints' sockets: retry every pending poll.
     let pollers: Vec<KArc<EndpointState>> = {
@@ -220,6 +229,41 @@ fn poll_events(state: &EndpointState) -> u32 {
         }
     }
     events
+}
+
+/// WSAEventSelect's half of a readiness change: the selected events that
+/// hold now are recorded and the event is set.
+fn check_select(state: &EndpointState) {
+    let Some((event, mask)) = state.select.lock().clone() else { return };
+    let ready = poll_events(state) & mask;
+    if ready != 0 {
+        state.recorded.fetch_or(ready, Ordering::AcqRel);
+        wait::set_signal(&event, 1);
+    }
+}
+
+/// IOCTL_AFD_EVENT_SELECT (WSAEventSelect): `event` is set when one of
+/// the AFD_POLL_* events in `mask` happens (or holds now); no event or no
+/// mask ends the selection. The socket becomes non-blocking, as
+/// documented.
+pub fn event_select(socket: &ObjectRef, event: Option<ObjectRef>, mask: u32) -> NtStatus {
+    let ObjectBody::Socket(endpoint) = &socket.body else { return NtStatus::INVALID_HANDLE };
+    let state = &endpoint.state;
+    *state.select.lock() = match event {
+        Some(e) if mask != 0 => Some((e, mask)),
+        _ => None,
+    };
+    state.recorded.store(0, Ordering::Release);
+    state.non_blocking.store(true, Ordering::Release);
+    check_select(state);
+    NtStatus::SUCCESS
+}
+
+/// IOCTL_AFD_GET_EVENTS (WSAEnumNetworkEvents): the recorded events,
+/// cleared.
+pub fn get_events(socket: &ObjectRef) -> Result<u32, NtStatus> {
+    let ObjectBody::Socket(endpoint) = &socket.body else { return Err(NtStatus::INVALID_HANDLE) };
+    Ok(endpoint.state.recorded.swap(0, Ordering::AcqRel))
 }
 
 /// Reports a finished request: IO_STATUS_BLOCK, event, the endpoint's own
@@ -607,6 +651,8 @@ pub fn open(ea: &[u8]) -> Result<ObjectRef, NtStatus> {
         modes: AtomicU32::new(0),
         non_blocking: AtomicBool::new(false),
         pending: IrqMutex::new(Vec::new()),
+        select: IrqMutex::new(None),
+        recorded: AtomicU32::new(0),
     })
     .map_err(|_| NtStatus::NO_MEMORY)?;
     REGISTRY.lock().try_push(state.clone()).map_err(|_| NtStatus::NO_MEMORY)?;

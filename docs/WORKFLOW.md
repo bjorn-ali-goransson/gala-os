@@ -278,6 +278,14 @@ shows it.
   `git ls-remote --tags`; a sparse, blob-less clone of one directory is
   quick. A program that ends while its children work on needs the boot
   option `wait=all`.
+- **Out of frames looks like a bad image**: when NtMapViewOfSection
+  cannot get a frame, the loader reports STATUS_INVALID_IMAGE_FORMAT
+  (0xC000007B) for the process. Check the free frames (`mm::frame_stats`)
+  before suspecting the image; a scenario with many processes or big data
+  may need the larger VM (`qemu()` in xtask).
+- **A failed boot test keeps its log in `target/failed/`** until the next
+  failure overwrites it: after a pass, that file is stale (the pass's own
+  log is `target/debug/test-<name>.serial.log`).
 - **A stub that ends its process** (gala_stubs' "not implemented") is
   logged at once (`[warn ] <program>: <dll>!<function> not implemented,
   ending the process`): the ledger is only dumped when the `run=`

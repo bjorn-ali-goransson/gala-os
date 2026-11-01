@@ -38,7 +38,10 @@
 //!   and inheritable; a read pending on its server end fails with
 //!   ERROR_BROKEN_PIPE once every copy of the client end (DuplicateHandle)
 //!   is closed without writing (and ReadFileEx's completion routine runs
-//!   with that error).
+//!   with that error); CallNamedPipeA writes a message to a message pipe and
+//!   reads its answer (ERROR_FILE_NOT_FOUND without a server); the
+//!   server's FlushFileBuffers waits until the client has read it, so the
+//!   DisconnectNamedPipe after it does not take the answer away.
 //!
 //! Prints `pipe_test: ok` or exits with the number of the failing check.
 
@@ -146,6 +149,16 @@ unsafe extern "system" {
     ) -> Handle;
     fn GetOverlappedResult(h: Handle, ov: *mut Overlapped, n: *mut u32, wait: Bool) -> Bool;
     fn GetCurrentProcess() -> Handle;
+    fn FlushFileBuffers(h: Handle) -> Bool;
+    fn CallNamedPipeA(
+        name: *const u8,
+        input: *const u8,
+        input_size: u32,
+        output: *mut u8,
+        output_size: u32,
+        read: *mut u32,
+        timeout: u32,
+    ) -> Bool;
     fn SleepEx(ms: u32, alertable: Bool) -> u32;
     fn ReadFileEx(
         h: Handle,
@@ -700,11 +713,78 @@ fn run() -> Result<(), u32> {
         c.eq(SleepEx(5000, 1).into(), WAIT_IO_COMPLETION.into())?;
         c.eq(READ_DONE_ERROR.load(Ordering::SeqCst).into(), ERROR_BROKEN_PIPE.into())?;
         CloseHandle(server);
+
+        // CallNamedPipeA (PostgreSQL's signals): connect to a message pipe,
+        // write a message, read the answer, close; a pipe nobody serves is
+        // ERROR_FILE_NOT_FOUND.
+        let name = b"\\\\.\\pipe\\gala_call_test\0";
+        let server = CreateNamedPipeA(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE,
+            1,
+            64,
+            64,
+            0,
+            core::ptr::null(),
+        );
+        c.ok(server as isize != -1, GetLastError().into())?;
+        let t = CreateThread(core::ptr::null_mut(), 0, answer, server, 0, core::ptr::null_mut());
+        c.ok(!t.is_null(), 0)?;
+        let mut reply = [0u8; 16];
+        let mut got = 0;
+        c.ok(
+            CallNamedPipeA(
+                name.as_ptr(),
+                b"ping".as_ptr(),
+                4,
+                reply.as_mut_ptr(),
+                16,
+                &mut got,
+                5000,
+            ) != 0,
+            GetLastError().into(),
+        )?;
+        c.ok(got == 4 && &reply[..4] == b"pong", got.into())?;
+        c.eq(WaitForSingleObject(t, 10_000).into(), 0)?;
+        let mut code = 9;
+        c.ok(GetExitCodeThread(t, &mut code) != 0 && code == 0, code.into())?;
+        CloseHandle(t);
+        CloseHandle(server);
+        let none = b"\\\\.\\pipe\\gala_nobody\0";
+        c.eq(
+            CallNamedPipeA(none.as_ptr(), b"x".as_ptr(), 1, reply.as_mut_ptr(), 16, &mut got, 100)
+                as u64,
+            0,
+        )?;
+        c.eq(GetLastError().into(), 2)?;
     }
     Ok(())
 }
 
 static READ_DONE_ERROR: AtomicU32 = AtomicU32::new(0);
+
+/// CallNamedPipeA's server: connects, reads "ping", answers "pong".
+extern "system" fn answer(server: *mut c_void) -> u32 {
+    let mut b = [0u8; 16];
+    let mut n = 0;
+    // SAFETY: plain calls with our buffer and the pipe.
+    unsafe {
+        ConnectNamedPipe(server, core::ptr::null_mut());
+        if ReadFile(server, b.as_mut_ptr(), 16, &mut n, core::ptr::null_mut()) == 0
+            || &b[..n as usize] != b"ping"
+        {
+            return 1;
+        }
+        WriteFile(server, b"pong".as_ptr(), 4, &mut n, core::ptr::null_mut());
+        // On a pipe this waits until the client has read the answer.
+        if FlushFileBuffers(server) == 0 {
+            return 2;
+        }
+        DisconnectNamedPipe(server);
+    }
+    0
+}
 const WAIT_IO_COMPLETION: u32 = 0xc0;
 
 /// ReadFileEx's completion routine: (dwErrorCode, dwNumberOfBytesTransfered,

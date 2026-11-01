@@ -16,6 +16,10 @@
 //!   (set once its timers are gone).
 //! - Waits: a wait on an event runs with WAIT_OBJECT_0 when it is set and
 //!   with WAIT_TIMEOUT when its timeout passes first.
+//!   RegisterWaitForSingleObject (WT_EXECUTEONLYONCE): the callback gets its
+//!   context and FALSE when the object is signaled, TRUE when its timeout
+//!   passes first; UnregisterWaitEx(INVALID_HANDLE_VALUE), UnregisterWait
+//!   (TRUE, or ERROR_IO_PENDING).
 //! - FreeLibraryWhenCallbackReturns unloads a DLL the callback loaded.
 //! - CreateEventExW (manual reset, initially set), CopyFileW (contents,
 //!   ERROR_FILE_EXISTS when asked to fail), CopyFileExW,
@@ -60,6 +64,16 @@ unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
     fn CloseHandle(h: Handle) -> Bool;
     fn Sleep(ms: u32);
+    fn RegisterWaitForSingleObject(
+        out: *mut Handle,
+        object: Handle,
+        callback: extern "system" fn(*mut c_void, u8),
+        context: *mut c_void,
+        ms: u32,
+        flags: u32,
+    ) -> Bool;
+    fn UnregisterWait(wait: Handle) -> Bool;
+    fn UnregisterWaitEx(wait: Handle, completion: Handle) -> Bool;
     fn GetCurrentThreadId() -> u32;
     fn CreateEventW(attrs: *mut c_void, manual: Bool, initial: Bool, name: *const u16) -> Handle;
     fn CreateEventExW(attrs: *mut c_void, name: *const u16, flags: u32, access: u32) -> Handle;
@@ -419,9 +433,52 @@ fn waits(c: &mut Checks) -> Result<(), u32> {
         c.eq(WaitForSingleObject(event, 10_000).into(), 0)?;
         c.eq(WAIT_RESULT.load(Ordering::SeqCst).into(), WAIT_TIMEOUT.into())?;
         CloseThreadpoolWait(wait);
+
+        // RegisterWaitForSingleObject (PostgreSQL watches its children so):
+        // once, when the object is signaled (TimerOrWaitFired FALSE, with
+        // the context); with a timeout first, TRUE; UnregisterWaitEx with
+        // INVALID_HANDLE_VALUE waits for a running callback.
+        REGISTERED.store(u32::MAX, Ordering::SeqCst);
+        let mut handle = core::ptr::null_mut();
+        let ok = RegisterWaitForSingleObject(
+            &mut handle,
+            target,
+            registered,
+            0x77 as *mut c_void,
+            u32::MAX,
+            8,
+        );
+        c.ok(ok != 0 && !handle.is_null(), GetLastError().into())?;
+        Sleep(10);
+        c.eq(REGISTERED.load(Ordering::SeqCst).into(), u32::MAX.into())?;
+        SetEvent(target);
+        c.eq(WaitForSingleObject(event, 10_000).into(), 0)?;
+        c.eq(REGISTERED.load(Ordering::SeqCst).into(), 0x7700)?; // context, FALSE
+        c.ok(UnregisterWaitEx(handle, -1isize as Handle) != 0, GetLastError().into())?;
+        let ok = RegisterWaitForSingleObject(
+            &mut handle,
+            target,
+            registered,
+            0x55 as *mut c_void,
+            20,
+            8,
+        );
+        c.ok(ok != 0, GetLastError().into())?;
+        c.eq(WaitForSingleObject(event, 10_000).into(), 0)?;
+        c.eq(REGISTERED.load(Ordering::SeqCst).into(), 0x5501)?; // context, TRUE
+        c.ok(UnregisterWait(handle) != 0 || GetLastError() == 997, GetLastError().into())?;
         CloseHandle(target);
     }
     Ok(())
+}
+
+static REGISTERED: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// RegisterWaitForSingleObject's callback: (context, TimerOrWaitFired).
+extern "system" fn registered(context: *mut c_void, fired: u8) {
+    REGISTERED.store(((context as u32) << 8) | u32::from(fired), Ordering::SeqCst);
+    // SAFETY: the test's event.
+    unsafe { SetEvent(DONE.load(Ordering::SeqCst) as Handle) };
 }
 
 fn files(c: &mut Checks) -> Result<(), u32> {

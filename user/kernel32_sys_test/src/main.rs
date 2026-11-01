@@ -6,7 +6,7 @@
 //! WER flags, priority boost and console control handlers are kept;
 //! GetSystemInfo, GetSystemDirectoryA, GetProcessAffinityMask,
 //! GetEnvironmentStringsW, CreateEventA, LoadLibraryW/LoadLibraryExW (with
-//! LOAD_LIBRARY_SEARCH_SYSTEM32), DuplicateHandle (also through a process
+//! LOAD_LIBRARY_SEARCH_SYSTEM32; a path with forward slashes), DuplicateHandle (also through a process
 //! handle, which needs PROCESS_DUP_HANDLE), VirtualQuery,
 //! WaitForMultipleObjects and SwitchToThread; GetSystemTimeAsFileTime
 //! (KUSER_SHARED_DATA's tick-updated SystemTime) and the precise time.
@@ -337,8 +337,13 @@ fn run() -> Result<(), u32> {
         }
 
         // LoadLibraryW, and LoadLibraryExW searching System32 only.
+        // By a full path with forward slashes first (PostgreSQL loads its
+        // modules so), then by name: the same module.
+        let by_path = LoadLibraryW(w!("C:/gala/testdll.dll"));
+        c.ok(!by_path.is_null(), GetLastError().into())?;
         let dll = LoadLibraryW(w!("testdll.dll"));
-        c.ok(!dll.is_null(), 0)?;
+        c.ok(dll == by_path, 0)?;
+        c.ok(FreeLibrary(by_path) != 0, 0)?;
         c.ok(FreeLibrary(dll) != 0, 0)?;
         let k32 =
             LoadLibraryExW(w!("kernel32.dll"), core::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32);

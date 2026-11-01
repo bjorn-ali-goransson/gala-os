@@ -688,7 +688,10 @@ pending requests (STATUS_CANCELLED). FileIoCompletionNotificationInformation
 (SetFileCompletionNotificationModes) works on pipe ends as on sockets:
 FILE_SKIP_COMPLETION_PORT_ON_SUCCESS posts no packet for an I/O that
 completed in its call, FILE_SKIP_SET_EVENT_ON_HANDLE leaves the end's
-signal alone. FSCTL_PIPE_IMPERSONATE (ImpersonateNamedPipeClient)
+signal alone. NtFlushBuffersFile (FlushFileBuffers) on a pipe end waits
+until the other end has read everything this end wrote (STATUS_PIPE_BROKEN
+if it closes first), so a server's flush-then-DisconnectNamedPipe does not
+drop its answer. FSCTL_PIPE_IMPERSONATE (ImpersonateNamedPipeClient)
 succeeds on a server end with a client (gala has one user, so the thread
 just impersonates it; STATUS_CANNOT_IMPERSONATE otherwise). Writes on asynchronous ends still
 wait in the call (a documented simplification). Synchronous waiters are
@@ -809,6 +812,18 @@ write times, tar restores them.
 whose reads are at end of file and whose writes are discarded
 (FILE_DEVICE_NULL); kernel32 maps the DOS name `NUL` to `\??\NUL`.
 
+**Image bases**: an image view goes to the image's preferred base, or,
+when that is taken (every x64 DLL MSVC links prefers 0x180000000), to the
+image's system-wide alternative base, given once per image layout from
+0x3ff0_0000_0000..0x3ff8_0000_0000 downwards (as Windows' ASLR gives each
+image one bias; below gala-um's HOST_START, where guest code must stay); views there share frames relocated a page at a time
+(`pe::relocate_page`, an entry crossing pages written in both). Only
+when that range is taken in a process is the view placed anywhere, with
+private pages relocated a page at a time (never a whole-image copy).
+**Cross-process memory**: NtAllocate/Free/ProtectVirtualMemory take a
+process handle with PROCESS_VM_OPERATION, NtQueryVirtualMemory one with
+PROCESS_QUERY_LIMITED_INFORMATION (VirtualAllocEx etc.; PostgreSQL
+reserves its shared memory in a suspended child).
 **Handle lists** (H2): CreateProcessW with EXTENDED_STARTUPINFO_PRESENT
 reads the STARTUPINFOEXW attribute list; PROC_THREAD_ATTRIBUTE_HANDLE_LIST
 is passed to GalaCreateProcess (flag 4, list at 120, count at 128), and
@@ -1495,6 +1510,13 @@ Windows, never shadows the system's DLLs.)
   xolehlp, odbc32, authz, wintrust, webservices, dhcpcsvc) are nothing
   but such stubs so far, apart from rpcrt4's UUID functions
   (`rpcrt4_test`) and netapi32's NetWkstaGetInfo (`netapi32_test`).
+  gala's cmd.exe (`user/cmd`, built as a program and placed in
+  System32) implements `/c` (and switches before it): cmd's documented
+  quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
+  the internal commands `echo`, `exit`, `rem`, and programs found with
+  .COM/.EXE in the current directory and the PATH (9009 and cmd's message
+  when not found); pipelines, command lists, batch files, `set`/`if`/
+  `for` and the prompt are recorded and end it.
   wldap32 (PostgreSQL's LDAP functions) is stubs too, exported by
   Windows' ordinals; wsock32 (Winsock 1.1) is only forwarders to ws2_32
   with the standard ordinals (libxml2 imports by ordinal).
@@ -1736,6 +1758,13 @@ Internal/InternalHigh) and the endpoint's I/O completion port.
   (notify::complete_count: ReadFileEx on a pipe gets ERROR_BROKEN_PIPE
   when the other end closes, a cancelled one ERROR_OPERATION_ABORTED);
   only a request that fails in its call queues none.
+- Event select (WSAEventSelect, IOCTL_AFD_EVENT_SELECT; Wine's numbers):
+  the endpoint keeps the event and the AFD_POLL_* events selected
+  (ws2_32 maps FD_* to them), records those that hold whenever its
+  readiness changes (and at once), and sets the event; the socket becomes
+  non-blocking. IOCTL_AFD_GET_EVENTS (WSAEnumNetworkEvents) returns and
+  clears what was recorded; ws2_32 resets the event. Level-triggered:
+  an event that still holds is recorded again at the next change.
 - An ApcRoutine (WSARecv/WSASend's lpCompletionRoutine) is queued as a
   user APC to the calling thread when the request completes, at once or
   later, with (ApcContext, IoStatusBlock); such a request posts no packet

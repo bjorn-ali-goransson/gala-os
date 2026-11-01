@@ -571,7 +571,11 @@ fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
     for (i, &b) in prefix.iter().enumerate() {
         path[i] = u16::from(b);
     }
-    path[prefix.len()..prefix.len() + dir.len()].copy_from_slice(dir);
+    // A DOS path's forward slashes are backslashes in an NT path (as
+    // RtlDosPathNameToNtPathName makes them).
+    for (slot, &c) in path[prefix.len()..prefix.len() + dir.len()].iter_mut().zip(dir) {
+        *slot = if c == u16::from(b'/') { u16::from(b'\\') } else { c };
+    }
     for (i, &b) in dll.iter().enumerate() {
         path[prefix.len() + dir.len() + i] = u16::from(b);
     }

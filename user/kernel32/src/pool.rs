@@ -1001,3 +1001,127 @@ pub extern "system" fn DeleteTimerQueueEx(queue: Handle, event: Handle) -> Bool 
 pub extern "system" fn DeleteTimerQueue(queue: Handle) -> Bool {
     DeleteTimerQueueEx(queue, core::ptr::null_mut())
 }
+
+// ---- Registered waits (RegisterWaitForSingleObject) ----
+//
+// Each one is a thread pool wait on the object; its callback calls the
+// caller's WAITORTIMERCALLBACK and, unless WT_EXECUTEONLYONCE, waits again.
+
+const REGISTERED_MAGIC: u32 = 0x6761_7277; // "galw"
+
+struct RegisteredWait {
+    magic: u32,
+    callback: QueueCallback,
+    context: *mut c_void,
+    wait: *mut c_void,
+    object: Handle,
+    /// The timeout (ms; u32::MAX: none), and whether it runs once.
+    timeout: u32,
+    once: bool,
+}
+
+/// Arms the pool wait of `r`.
+fn arm_wait(r: *mut RegisteredWait) {
+    // SAFETY: a live registered wait.
+    unsafe {
+        if (*r).timeout == u32::MAX {
+            SetThreadpoolWait((*r).wait, (*r).object, core::ptr::null());
+        } else {
+            let due = -10_000 * i64::from((*r).timeout);
+            SetThreadpoolWait((*r).wait, (*r).object, &due);
+        }
+    }
+}
+
+extern "system" fn registered_wait_callback(
+    _instance: *mut c_void,
+    context: *mut c_void,
+    _wait: *mut c_void,
+    result: u32,
+) {
+    const WAIT_TIMEOUT: u32 = 0x102;
+    let r = context.cast::<RegisteredWait>();
+    // SAFETY: the registered wait this pool wait was created for (it lives
+    // until UnregisterWait, which waits for this callback).
+    unsafe {
+        ((*r).callback)((*r).context, u8::from(result == WAIT_TIMEOUT));
+        if !(*r).once {
+            arm_wait(r);
+        }
+    }
+}
+
+/// RegisterWaitForSingleObject(phNewWaitObject, hObject, Callback, Context,
+/// dwMilliseconds, dwFlags): the callback runs on a pool thread when the
+/// object is signaled (TimerOrWaitFired FALSE) or the timeout passes
+/// (TRUE); again each time unless WT_EXECUTEONLYONCE.
+#[unsafe(no_mangle)]
+pub extern "system" fn RegisterWaitForSingleObject(
+    out: *mut Handle,
+    object: Handle,
+    callback: QueueCallback,
+    context: *mut c_void,
+    ms: u32,
+    flags: u32,
+) -> Bool {
+    if out.is_null() || object.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let r = super::heap::HeapAlloc(super::heap::GetProcessHeap(), 0, size_of::<RegisteredWait>())
+        .cast::<RegisteredWait>();
+    if r.is_null() {
+        return fail_with(8, FALSE);
+    }
+    let wait = CreateThreadpoolWait(registered_wait_callback, r.cast(), core::ptr::null_mut());
+    if wait.is_null() {
+        super::heap::HeapFree(super::heap::GetProcessHeap(), 0, r.cast());
+        return FALSE;
+    }
+    // SAFETY: fresh memory; the caller's output.
+    unsafe {
+        r.write(RegisteredWait {
+            magic: REGISTERED_MAGIC,
+            callback,
+            context,
+            wait,
+            object,
+            timeout: ms,
+            once: flags & WT_EXECUTEONLYONCE != 0,
+        });
+        *out = r.cast();
+    }
+    arm_wait(r);
+    TRUE
+}
+
+/// UnregisterWaitEx(WaitHandle, CompletionEvent): no more callbacks; it
+/// waits for one that is running (gala does whatever CompletionEvent
+/// says), then sets CompletionEvent if it is an event.
+#[unsafe(no_mangle)]
+pub extern "system" fn UnregisterWaitEx(wait: Handle, completion: Handle) -> Bool {
+    let r = wait.cast::<RegisteredWait>();
+    // SAFETY: a handle the caller got from RegisterWaitForSingleObject.
+    if r.is_null() || unsafe { (*r).magic } != REGISTERED_MAGIC {
+        return fail_with(ERROR_INVALID_HANDLE, FALSE);
+    }
+    // SAFETY: a live registered wait; freed once its callbacks are done.
+    unsafe {
+        let w = (*r).wait;
+        (*r).once = true;
+        SetThreadpoolWait(w, core::ptr::null_mut(), core::ptr::null());
+        WaitForThreadpoolWaitCallbacks(w, TRUE);
+        CloseThreadpoolWait(w);
+        (*r).magic = 0;
+        super::heap::HeapFree(super::heap::GetProcessHeap(), 0, r.cast());
+        if !completion.is_null() && completion as isize != -1 {
+            super::SetEvent(completion);
+        }
+    }
+    TRUE
+}
+
+/// UnregisterWait(WaitHandle): UnregisterWaitEx without an event.
+#[unsafe(no_mangle)]
+pub extern "system" fn UnregisterWait(wait: Handle) -> Bool {
+    UnregisterWaitEx(wait, core::ptr::null_mut())
+}

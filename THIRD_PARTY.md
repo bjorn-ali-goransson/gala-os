@@ -73,6 +73,7 @@ The `xtask` host tool has no dependencies beyond `std` (its PNG writer for `scre
 | Tool | Version | License | Use |
 |---|---|---|---|
 | msitools (`msiextract`) | Ubuntu 24.04 package `msitools` | LGPL-2.1+ / GPL-2.0+ | xtask unpacks prebuilt programs that only come as an MSI (SQL Server LocalDB's `SqlLocalDB.msi`) with it; run as a separate program, nothing of it ends up in gala. |
+| OpenSSH client (`ssh`), PostgreSQL client (`psql`) | Ubuntu 24.04 packages `openssh-client`, `postgresql-client` | BSD-style (OpenSSH); the PostgreSQL License | xtask's network clients for the `sshd_login`/`sshd_password` and `postgres` scenarios: run on the host against the guest, nothing of them ends up in gala. |
 
 ## Written from third-party specifications (no code copied)
 

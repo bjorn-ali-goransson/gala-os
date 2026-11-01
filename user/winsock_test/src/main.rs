@@ -8,7 +8,9 @@
 //! directions (with MSG_PEEK), a 16 KiB transfer, a graceful close (recv
 //! returns 0), WSAECONNREFUSED for a port nobody listens on, WSAENOTSOCK
 //! for a closed socket, WSADuplicateSocketW and WSASocketW from its
-//! protocol information (a second socket for the connection), and non-blocking sockets (WSAEWOULDBLOCK from
+//! protocol information (a second socket for the connection; also
+//! WSADuplicateSocketA with WSASocketA), WSAConnect
+//! and WSAAccept, and non-blocking sockets (WSAEWOULDBLOCK from
 //! accept and recv; an accepted socket inherits the listener's mode).
 //! Prints `winsock_test: ok` or exits with the number of the failing check.
 //!
@@ -21,6 +23,7 @@
 #![no_main]
 
 use core::ffi::c_void;
+use core::ptr::{null, null_mut};
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -78,6 +81,31 @@ unsafe extern "system" {
     ) -> i32;
     fn closesocket(s: Socket) -> i32;
     fn WSADuplicateSocketW(s: Socket, process: u32, info: *mut u8) -> i32;
+    fn WSADuplicateSocketA(s: Socket, process: u32, info: *mut u8) -> i32;
+    fn WSASocketA(
+        af: i32,
+        kind: i32,
+        protocol: i32,
+        info: *const u8,
+        group: u32,
+        flags: u32,
+    ) -> Socket;
+    fn WSAConnect(
+        s: Socket,
+        addr: *const SockaddrIn,
+        len: i32,
+        caller: *const u8,
+        callee: *mut u8,
+        sqos: *const u8,
+        gqos: *const u8,
+    ) -> i32;
+    fn WSAAccept(
+        s: Socket,
+        addr: *mut SockaddrIn,
+        len: *mut i32,
+        condition: usize,
+        data: usize,
+    ) -> Socket;
     fn WSASocketW(
         af: i32,
         kind: i32,
@@ -385,6 +413,15 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         c.eq(closesocket(dup) as u64, 0)?;
         c.ok(send(server, b"!".as_ptr(), 1, 0) == 1, WSAGetLastError() as u64)?;
         c.eq(recv(client, buf.as_mut_ptr(), 64, 0) as u64, 1)?;
+        // The ANSI form (WSAPROTOCOL_INFOA: the same fields, an ANSI name)
+        // with WSASocketA, as PostgreSQL's postmaster passes connections.
+        let mut info_a = [0u8; 372];
+        c.eq(WSADuplicateSocketA(server, GetCurrentProcessId(), info_a.as_mut_ptr()) as u64, 0)?;
+        let dup_a = WSASocketA(-1, -1, -1, info_a.as_ptr(), 0, 0);
+        c.ok(dup_a != INVALID_SOCKET && dup_a != server, WSAGetLastError() as u64)?;
+        c.eq(send(dup_a, b"a".as_ptr(), 1, 0) as u64, 1)?;
+        c.eq(recv(client, buf.as_mut_ptr(), 64, 0) as u64, 1)?;
+        c.eq(closesocket(dup_a) as u64, 0)?;
         // A process id that names no process: WSAEINVAL.
         c.eq(
             WSADuplicateSocketW(server, 0x7fff_fff0, info.as_mut_ptr()) as u64,
@@ -410,6 +447,18 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         c.eq(WSAPoll(fds.as_mut_ptr(), 1, 5000) as u64, 1)?;
         c.ok(fds[0].revents & (POLLRDNORM | POLLHUP) != 0, fds[0].revents as u64)?;
         c.eq(recv(client, buf.as_mut_ptr(), 64, 0) as u64, 0)?;
+        // WSAConnect and WSAAccept (no condition function, no QoS):
+        // connect and accept (PostgreSQL's postmaster accepts so).
+        let second = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        c.eq(WSAConnect(second, &target, ADDR_LEN, null(), null_mut(), null(), null()) as u64, 0)?;
+        len = ADDR_LEN;
+        let taken = WSAAccept(listener, &mut peer, &mut len, 0, 0);
+        c.ok(taken != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        c.ok(peer.addr == LOOPBACK, peer.port.into())?;
+        c.eq(send(second, b"w".as_ptr(), 1, 0) as u64, 1)?;
+        c.eq(recv(taken, buf.as_mut_ptr(), 64, 0) as u64, 1)?;
+        c.eq(closesocket(taken) as u64, 0)?;
+        c.eq(closesocket(second) as u64, 0)?;
         c.eq(closesocket(client) as u64, 0)?;
         c.eq(closesocket(listener) as u64, 0)?;
 

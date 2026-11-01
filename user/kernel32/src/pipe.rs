@@ -403,3 +403,81 @@ pub extern "system" fn SetHandleInformation(h: Handle, mask: u32, flags: u32) ->
         unsafe { NtSetInformationObject(h, OBJECT_HANDLE_FLAG_INFORMATION, f.as_ptr(), 2) };
     if status == STATUS_SUCCESS { TRUE } else { fail(status, FALSE) }
 }
+
+/// CallNamedPipeW(name, in, in_size, out, out_size, read, timeout):
+/// connects to a message-type pipe (waiting up to `timeout` ms while every
+/// instance is busy: NMPWAIT_WAIT_FOREVER waits for ever,
+/// NMPWAIT_USE_DEFAULT_WAIT 50 ms), switches to message reads, writes one
+/// message, reads one, closes. A longer answer: ERROR_MORE_DATA with the
+/// part that fits.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn CallNamedPipeW(
+    name: *const u16,
+    input: *const u8,
+    input_size: u32,
+    output: *mut u8,
+    output_size: u32,
+    read: *mut u32,
+    timeout: u32,
+) -> Bool {
+    const ERROR_PIPE_BUSY: u32 = 231;
+    const ERROR_SEM_TIMEOUT: u32 = 121;
+    const GENERIC_READ_WRITE: u32 = 0xc000_0000;
+    let wait = match timeout {
+        0 => 50,
+        t => t,
+    };
+    let mut waited = 0u32;
+    let h = loop {
+        let h = super::CreateFileW(
+            name,
+            GENERIC_READ_WRITE,
+            0,
+            core::ptr::null_mut(),
+            3,
+            0,
+            core::ptr::null_mut(),
+        );
+        if h != INVALID_HANDLE_VALUE {
+            break h;
+        }
+        if GetLastError() != ERROR_PIPE_BUSY {
+            return FALSE;
+        }
+        if wait != u32::MAX && waited >= wait {
+            return fail_with(ERROR_SEM_TIMEOUT, FALSE);
+        }
+        super::Sleep(10);
+        waited += 10;
+    };
+    let mode = 2u32; // PIPE_READMODE_MESSAGE
+    let ok = SetNamedPipeHandleState(h, &mode, core::ptr::null(), core::ptr::null()) != 0
+        && {
+            let mut written = 0;
+            super::WriteFile(h, input, input_size, &mut written, core::ptr::null_mut()) != 0
+        }
+        && super::ReadFile(h, output, output_size, read, core::ptr::null_mut()) != 0;
+    let error = GetLastError();
+    super::CloseHandle(h);
+    if ok { TRUE } else { fail_with(error, FALSE) }
+}
+
+/// CallNamedPipeA: CallNamedPipeW with the name converted.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn CallNamedPipeA(
+    name: *const u8,
+    input: *const u8,
+    input_size: u32,
+    output: *mut u8,
+    output_size: u32,
+    read: *mut u32,
+    timeout: u32,
+) -> Bool {
+    let mut wide = [0u16; 512];
+    if super::sync::ansi_to_wide(name, &mut wide[..511]).is_none() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    CallNamedPipeW(wide.as_ptr(), input, input_size, output, output_size, read, timeout)
+}

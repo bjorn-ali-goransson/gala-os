@@ -849,10 +849,14 @@ fn nt_open_process(call: &mut Call<'_>) -> NtStatus {
     call.return_handle(out, object, access, attributes)
 }
 
+/// PROCESS_VM_OPERATION: what changing another process's memory needs.
+const PROCESS_VM_OPERATION: u32 = 0x0008;
+
 /// NtAllocateVirtualMemory(ProcessHandle, *BaseAddress, ZeroBits,
 ///                         *RegionSize, AllocationType, Protect)
+/// (another process's with PROCESS_VM_OPERATION, as VirtualAllocEx)
 fn nt_allocate_virtual_memory(call: &mut Call<'_>) -> NtStatus {
-    tri!(call.check_current_process(Handle(arg!(call, 0))));
+    let target = tri!(call.dup_process(arg!(call, 0), PROCESS_VM_OPERATION));
     let (base_ptr, zero_bits, size_ptr) = (arg!(call, 1), arg!(call, 2), arg!(call, 3));
     let (kind, protect) = (arg!(call, 4) as u32, arg!(call, 5) as u32);
     let base = tri!(call.read_u64(base_ptr));
@@ -861,7 +865,7 @@ fn nt_allocate_virtual_memory(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::INVALID_PARAMETER_3;
     }
     // TODO: honour ZeroBits (address limit) when non-zero.
-    let (base, size) = tri!(vm::allocate(&call.process, base, size, kind, protect));
+    let (base, size) = tri!(vm::allocate(&target, base, size, kind, protect));
     tri!(call.write_u64(base_ptr, base));
     tri!(call.write_u64(size_ptr, size));
     NtStatus::SUCCESS
@@ -869,11 +873,11 @@ fn nt_allocate_virtual_memory(call: &mut Call<'_>) -> NtStatus {
 
 /// NtFreeVirtualMemory(ProcessHandle, *BaseAddress, *RegionSize, FreeType)
 fn nt_free_virtual_memory(call: &mut Call<'_>) -> NtStatus {
-    tri!(call.check_current_process(Handle(arg!(call, 0))));
+    let target = tri!(call.dup_process(arg!(call, 0), PROCESS_VM_OPERATION));
     let (base_ptr, size_ptr, free_type) = (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32);
     let base = tri!(call.read_u64(base_ptr));
     let size = tri!(call.read_u64(size_ptr));
-    let (base, size) = tri!(vm::free(&call.process, base, size, free_type));
+    let (base, size) = tri!(vm::free(&target, base, size, free_type));
     tri!(call.write_u64(base_ptr, base));
     tri!(call.write_u64(size_ptr, size));
     NtStatus::SUCCESS
@@ -882,12 +886,12 @@ fn nt_free_virtual_memory(call: &mut Call<'_>) -> NtStatus {
 /// NtProtectVirtualMemory(ProcessHandle, *BaseAddress, *NumberOfBytes,
 ///                        NewProtect, *OldProtect)
 fn nt_protect_virtual_memory(call: &mut Call<'_>) -> NtStatus {
-    tri!(call.check_current_process(Handle(arg!(call, 0))));
+    let target = tri!(call.dup_process(arg!(call, 0), PROCESS_VM_OPERATION));
     let (base_ptr, size_ptr) = (arg!(call, 1), arg!(call, 2));
     let (new, old_ptr) = (arg!(call, 3) as u32, arg!(call, 4));
     let base = tri!(call.read_u64(base_ptr));
     let size = tri!(call.read_u64(size_ptr));
-    let (old, base, size) = tri!(vm::protect(&call.process, base, size, new));
+    let (old, base, size) = tri!(vm::protect(&target, base, size, new));
     tri!(call.write_u64(base_ptr, base));
     tri!(call.write_u64(size_ptr, size));
     tri!(call.write_u32(old_ptr, old));
@@ -944,13 +948,20 @@ const MBI_SIZE: usize = 48;
 
 /// NtQueryVirtualMemory(ProcessHandle, BaseAddress, MemoryInformationClass,
 ///                      Buffer, Length, *ReturnLength)
+/// (another process's with PROCESS_QUERY_LIMITED_INFORMATION, as
+/// VirtualQueryEx)
 fn nt_query_virtual_memory(call: &mut Call<'_>) -> NtStatus {
-    tri!(call.check_current_process(Handle(arg!(call, 0))));
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    let target = tri!(call.dup_process(arg!(call, 0), PROCESS_QUERY_LIMITED_INFORMATION));
     let (addr, class, buffer, length, ret_ptr) =
         (arg!(call, 1), arg!(call, 2), arg!(call, 3), arg!(call, 4), arg!(call, 5));
     // The class is a ULONG: only the low 32 bits are defined.
     let class = class as u32 as u64;
     if class == MEMORY_MAPPED_FILENAME_INFORMATION {
+        if !KArc::ptr_eq(&target, &call.process) {
+            super::ledger::record("NtQueryVirtualMemory", "another process's file name", class);
+            return NtStatus::NOT_SUPPORTED;
+        }
         return query_mapped_file_name(call, addr, buffer, length, ret_ptr);
     }
     if class != MEMORY_BASIC_INFORMATION {
@@ -959,7 +970,7 @@ fn nt_query_virtual_memory(call: &mut Call<'_>) -> NtStatus {
     if (length as usize) < MBI_SIZE {
         return NtStatus::INFO_LENGTH_MISMATCH;
     }
-    let info = tri!(call.process.vad.lock().query(addr));
+    let info = tri!(target.vad.lock().query(addr));
     // MEMORY_BASIC_INFORMATION (x64): BaseAddress, AllocationBase,
     // AllocationProtect (u32), PartitionId (u16), pad, RegionSize, State,
     // Protect, Type (u32 each), pad.
@@ -3105,6 +3116,38 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         super::ledger::record("NtDeviceIoControlFile", "device", u64::from(code));
         return NtStatus::INVALID_DEVICE_REQUEST;
     }
+    // WSAEventSelect / WSAEnumNetworkEvents: an event handle in, or the
+    // events out (afd_event_select_params {event, mask};
+    // afd_get_events_params {flags, status[13]}); done at once.
+    if code == super::afd::IOCTL_AFD_EVENT_SELECT || code == super::afd::IOCTL_AFD_GET_EVENTS {
+        let status = if code == super::afd::IOCTL_AFD_EVENT_SELECT {
+            if input_len < 12 {
+                return NtStatus::INVALID_PARAMETER;
+            }
+            let h = tri!(call.read_u64(input));
+            let mask = tri!(call.read_u64(input + 8)) as u32;
+            let event = match h {
+                0 => None,
+                h => Some(tri!(event_object(call, Handle(h), EVENT_MODIFY_STATE))),
+            };
+            super::afd::event_select(&entry.object, event, mask)
+        } else {
+            if output_len < 56 {
+                return NtStatus::INVALID_PARAMETER;
+            }
+            let flags = tri!(super::afd::get_events(&entry.object));
+            let mut out = [0u8; 56];
+            out[0..4].copy_from_slice(&flags.to_le_bytes());
+            if call.process.write(output, &out).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            NtStatus::SUCCESS
+        };
+        if iosb != 0 {
+            tri!(call.write_iosb(iosb, status, 0));
+        }
+        return status;
+    }
     // ApcRoutine (WSARecv's lpCompletionRoutine): queued to this thread
     // when the request completes, with (ApcContext, IoStatusBlock).
     let apc = if apc == 0 {
@@ -4344,11 +4387,13 @@ fn nt_query_volume_information_file(call: &mut Call<'_>) -> NtStatus {
 /// so only the access check remains.
 fn nt_flush_buffers_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
-    if !matches!(entry.object.body, ObjectBody::File(_)) {
-        return NtStatus::OBJECT_TYPE_MISMATCH;
-    }
     if entry.access & (file::FILE_WRITE_DATA | file::FILE_APPEND_DATA) == 0 {
         return NtStatus::ACCESS_DENIED;
+    }
+    match &entry.object.body {
+        ObjectBody::File(_) => {}
+        ObjectBody::Pipe(end) => tri!(end.flush()),
+        _ => return NtStatus::OBJECT_TYPE_MISMATCH,
     }
     tri!(call.write_iosb(arg!(call, 1), NtStatus::SUCCESS, 0));
     NtStatus::SUCCESS

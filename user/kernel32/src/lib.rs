@@ -468,6 +468,41 @@ pub extern "system" fn VirtualFree(address: *mut c_void, size: usize, kind: u32)
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 
+/// VirtualAllocEx: VirtualAlloc in the process `process` names (it needs
+/// PROCESS_VM_OPERATION).
+#[unsafe(no_mangle)]
+pub extern "system" fn VirtualAllocEx(
+    process: Handle,
+    address: *mut c_void,
+    size: usize,
+    kind: u32,
+    protect: u32,
+) -> *mut c_void {
+    let (mut base, mut size) = (address as usize, size);
+    // SAFETY: valid in/out pointers.
+    let status = unsafe {
+        NtAllocateVirtualMemory(process as isize, &mut base, 0, &mut size, kind, protect)
+    };
+    if status != STATUS_SUCCESS { fail(status, core::ptr::null_mut()) } else { base as *mut c_void }
+}
+
+/// VirtualFreeEx: VirtualFree in the process `process` names.
+#[unsafe(no_mangle)]
+pub extern "system" fn VirtualFreeEx(
+    process: Handle,
+    address: *mut c_void,
+    size: usize,
+    kind: u32,
+) -> Bool {
+    if kind == 0x8000 && size != 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let (mut base, mut size) = (address as usize, size);
+    // SAFETY: valid in/out pointers.
+    let status = unsafe { NtFreeVirtualMemory(process as isize, &mut base, &mut size, kind) };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn SetEvent(h: Handle) -> Bool {
     // SAFETY: the kernel validates the handle.

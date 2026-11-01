@@ -772,6 +772,20 @@ const FROM_PROTOCOL_INFO: i32 = -1;
 /// provider keeps it) for that process's WSASocketW(FROM_PROTOCOL_INFO).
 #[unsafe(no_mangle)]
 pub extern "system" fn WSADuplicateSocketW(s: Socket, process: u32, info: *mut u8) -> i32 {
+    duplicate_socket(s, process, info, INFO_SIZE)
+}
+
+/// WSADuplicateSocketA: WSADuplicateSocketW with WSAPROTOCOL_INFOA (the same
+/// fields, an ANSI szProtocol: 372 bytes).
+#[unsafe(no_mangle)]
+pub extern "system" fn WSADuplicateSocketA(s: Socket, process: u32, info: *mut u8) -> i32 {
+    duplicate_socket(s, process, info, INFO_SIZE_A)
+}
+
+/// WSAPROTOCOL_INFOA's size.
+const INFO_SIZE_A: usize = 372;
+
+fn duplicate_socket(s: Socket, process: u32, info: *mut u8, info_size: usize) -> i32 {
     const PROCESS_DUP_HANDLE: u32 = 0x40;
     const DUPLICATE_SAME_ACCESS: u32 = 2;
     if !started() {
@@ -805,7 +819,7 @@ pub extern "system" fn WSADuplicateSocketW(s: Socket, process: u32, info: *mut u
     }
     // SAFETY: the caller's WSAPROTOCOL_INFOW (INFO_SIZE bytes).
     unsafe {
-        memset(info, 0, INFO_SIZE);
+        memset(info, 0, info_size);
         let put = |at: usize, v: i32| info.add(at).cast::<i32>().write_unaligned(v);
         put(INFO_FAMILY, AF_INET);
         put(INFO_TYPE, SOCK_STREAM);
@@ -2045,14 +2059,119 @@ pub extern "system" fn WSAAddressToStringA(
 
 /// WSAEventSelect/WSAEnumNetworkEvents: not yet (select and overlapped
 /// I/O are); recorded.
+/// WSAConnect(s, name, namelen, lpCallerData, lpCalleeData, lpSQOS,
+/// lpGQOS): connect; connect data and quality of service are not
+/// supported (recorded; WSAEOPNOTSUPP).
 #[unsafe(no_mangle)]
-pub extern "system" fn WSAEventSelect(_s: usize, _event: usize, events: i32) -> i32 {
-    missing(b"ws2_32.dll!WSAEventSelect", events as u64);
-    fail(WSAEOPNOTSUPP)
+pub extern "system" fn WSAConnect(
+    s: Socket,
+    name: *const u8,
+    len: i32,
+    caller: *const u8,
+    callee: *mut u8,
+    sqos: *const u8,
+    gqos: *const u8,
+) -> i32 {
+    if !caller.is_null() || !callee.is_null() || !sqos.is_null() || !gqos.is_null() {
+        missing(b"ws2_32.dll!WSAConnect(connect data or QoS)", 0);
+        return fail(WSAEOPNOTSUPP);
+    }
+    connect(s, name, len)
 }
 
+/// WSAAccept(s, addr, addrlen, lpfnCondition, dwCallbackData): accept;
+/// a condition function is not supported yet (recorded; WSAEOPNOTSUPP).
 #[unsafe(no_mangle)]
-pub extern "system" fn WSAEnumNetworkEvents(_s: usize, _event: usize, _out: *mut u8) -> i32 {
-    missing(b"ws2_32.dll!WSAEnumNetworkEvents", 0);
-    fail(WSAEOPNOTSUPP)
+pub extern "system" fn WSAAccept(
+    s: Socket,
+    addr: *mut u8,
+    len: *mut i32,
+    condition: usize,
+    _data: usize,
+) -> Socket {
+    if condition != 0 {
+        missing(b"ws2_32.dll!WSAAccept(condition function)", 0);
+        fail(WSAEOPNOTSUPP);
+        return INVALID_SOCKET;
+    }
+    accept(s, addr, len)
+}
+
+/// IOCTL_AFD_EVENT_SELECT and IOCTL_AFD_GET_EVENTS.
+const IOCTL_AFD_EVENT_SELECT: u32 = 0x12087;
+const IOCTL_AFD_GET_EVENTS: u32 = 0x1208b;
+
+/// The FD_* network events and the AFD_POLL_* events behind each:
+/// (FD bit index, FD bit, AFD_POLL_* bits).
+const FD_EVENTS: [(usize, i32, u32); 6] = [
+    (0, 1, 0x1),                // FD_READ: READ
+    (1, 2, 0x4),                // FD_WRITE: WRITE
+    (2, 4, 0x2),                // FD_OOB: OOB
+    (3, 8, 0x80),               // FD_ACCEPT: ACCEPT
+    (4, 16, 0x40 | 0x100),      // FD_CONNECT: CONNECT, CONNECT_ERR
+    (5, 32, 0x8 | 0x10 | 0x20), // FD_CLOSE: HUP, RESET, CLOSE
+];
+
+/// WSAEventSelect(s, hEventObject, lNetworkEvents): AFD sets the event
+/// when one of the network events happens (or holds already); the socket
+/// becomes non-blocking. No event or no events: the selection ends.
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAEventSelect(s: usize, event: usize, events: i32) -> i32 {
+    let mut mask = 0u32;
+    for &(_, fd, afd) in &FD_EVENTS {
+        if events & fd != 0 {
+            mask |= afd;
+        }
+    }
+    if events & !0x3f != 0 {
+        missing(b"ws2_32.dll!WSAEventSelect(events)", events as u64);
+    }
+    // afd_event_select_params {HANDLE event; int mask;}
+    let mut input = [0u8; 16];
+    input[..8].copy_from_slice(&(event as u64).to_le_bytes());
+    input[8..12].copy_from_slice(&mask.to_le_bytes());
+    match afd_call(s, IOCTL_AFD_EVENT_SELECT, &input, &mut []) {
+        Ok(_) => 0,
+        Err(e) => e,
+    }
+}
+
+/// WSAEnumNetworkEvents(s, hEventObject, lpNetworkEvents): the network
+/// events recorded since the last call (cleared), with their error codes;
+/// the event is reset.
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAEnumNetworkEvents(s: usize, event: usize, out: *mut u8) -> i32 {
+    #[link(name = "ntdll", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn NtClearEvent(h: usize) -> u32;
+    }
+    if out.is_null() {
+        return fail(WSAEFAULT);
+    }
+    // afd_get_events_params {int flags; int status[13];}
+    let mut got = [0u8; 56];
+    if let Err(e) = afd_call(s, IOCTL_AFD_GET_EVENTS, &[], &mut got) {
+        return e;
+    }
+    let flags = u32::from_le_bytes([got[0], got[1], got[2], got[3]]);
+    // WSANETWORKEVENTS {long lNetworkEvents; int iErrorCode[10];}
+    let mut result = [0i32; 11];
+    for &(bit, fd, afd) in &FD_EVENTS {
+        if flags & afd != 0 {
+            result[0] |= fd;
+        }
+        if bit == 4 && flags & 0x100 != 0 {
+            result[1 + bit] = WSAECONNREFUSED as i32;
+        }
+        if bit == 5 && flags & 0x10 != 0 {
+            result[1 + bit] = WSAECONNRESET as i32;
+        }
+    }
+    // SAFETY: the caller's WSANETWORKEVENTS (44 bytes).
+    unsafe { core::ptr::copy_nonoverlapping(result.as_ptr().cast::<u8>(), out, 44) };
+    if event != 0 {
+        // SAFETY: a plain call.
+        unsafe { NtClearEvent(event) };
+    }
+    0
 }

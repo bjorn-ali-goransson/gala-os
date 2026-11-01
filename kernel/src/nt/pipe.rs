@@ -553,6 +553,24 @@ impl PipeEnd {
         Ok(())
     }
 
+    /// FlushFileBuffers on a pipe end: waits until the other end has read
+    /// everything this end wrote (STATUS_PIPE_BROKEN once it is closed).
+    pub fn flush(&self) -> Result<(), NtStatus> {
+        let peer = self.peer();
+        loop {
+            let s = self.pipe.state.lock();
+            s.check_connected(self.end, self.generation)?;
+            if s.inbox[peer].is_empty() {
+                return Ok(());
+            }
+            let peer_open = if peer == 0 { s.server_open } else { s.conn == Conn::Connected };
+            if !peer_open {
+                return Err(NtStatus::PIPE_BROKEN);
+            }
+            self.wait(s)?;
+        }
+    }
+
     /// Writes all of `data`, waiting while the pipe is full.
     pub fn write(&self, mut data: &[u8]) -> Result<(), NtStatus> {
         let peer = self.peer();

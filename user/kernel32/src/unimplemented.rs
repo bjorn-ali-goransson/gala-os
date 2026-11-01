@@ -47,7 +47,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     PrepareTape
     QueueUserWorkItem
     ReadConsoleOutputA
-    RegisterWaitForSingleObject
     ReplaceFileW
     ScrollConsoleScreenBufferA
     SetFileIoOverlappedRange
@@ -60,21 +59,16 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     TerminateJobObject
     TransactNamedPipe
     VerLanguageNameW
-    VirtualAllocEx
-    VirtualFreeEx
     WaitNamedPipeW
     WriteConsoleOutputA
     WriteProcessMemory
     WriteTapemark
-    CallNamedPipeA
     EnumResourceLanguagesA
     GetCurrencyFormatEx
-    GetNLSVersionEx
     GetNumberFormatEx
     GetShortPathNameA
     GetSystemTimeAdjustment
     ResolveLocaleName
-    UnregisterWaitEx
     CreateHardLinkA
     RemoveDirectoryA
 );

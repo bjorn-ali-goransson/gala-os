@@ -22,6 +22,9 @@
 //!   two-digit year window 2049, the era), EnumCalendarInfoExEx;
 //!   EnumTimeFormatsEx (with and without seconds), EnumDateFormatsExEx.
 //! - FindNLSStringEx: starts with, ends with, first and last occurrence.
+//! - GetNLSVersionEx: a version for COMPARE_STRING; ERROR_INSUFFICIENT_BUFFER
+//!   for a wrong dwNLSVersionInfoSize, ERROR_INVALID_FLAGS for another
+//!   function.
 //!
 //! Prints `kernel32_locale_test: ok` or exits with the number of the
 //! failing check.
@@ -39,6 +42,7 @@ type LocaleEnumProcEx = extern "system" fn(*const u16, u32, isize) -> Bool;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetNLSVersionEx(function: u32, locale: *const u16, info: *mut u32) -> i32;
     fn GetUserPreferredUILanguages(
         flags: u32,
         count: *mut u32,
@@ -752,8 +756,31 @@ fn find_strings(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// GetNLSVersionEx (PostgreSQL records a collation's version): TRUE for
+/// COMPARE_STRING with NLSVERSIONINFOEX's size, a nonzero version;
+/// ERROR_INSUFFICIENT_BUFFER for another size, ERROR_INVALID_FLAGS for
+/// another function.
+fn nls_version(c: &mut Checks) -> Result<(), u32> {
+    let name: [u16; 6] = [0x65, 0x6e, 0x2d, 0x55, 0x53, 0]; // en-US
+    let mut info = [0u32; 8];
+    info[0] = 32;
+    // SAFETY: plain calls with our buffers.
+    unsafe {
+        c.ok(GetNLSVersionEx(1, name.as_ptr(), info.as_mut_ptr()) != 0, GetLastError().into())?;
+        c.ok(info[0] == 32 && info[1] != 0, info[1].into())?;
+        info[0] = 16;
+        c.eq(GetNLSVersionEx(1, name.as_ptr(), info.as_mut_ptr()) as u64, 0)?;
+        c.eq(GetLastError().into(), 122)?;
+        info[0] = 32;
+        c.eq(GetNLSVersionEx(2, name.as_ptr(), info.as_mut_ptr()) as u64, 0)?;
+        c.eq(GetLastError().into(), 1004)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    nls_version(&mut c)?;
     find_strings(&mut c)?;
     calendars(&mut c)?;
     code_page_info(&mut c)?;

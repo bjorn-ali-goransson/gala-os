@@ -8,7 +8,9 @@
 //! ERROR_NOT_FOUND when nothing is pending), WSAGetOverlappedResult and
 //! FILE_SKIP_COMPLETION_PORT_ON_SUCCESS; completion routines (WSARecv and
 //! WSASend with lpCompletionRoutine: queued to the thread, run in SleepEx's
-//! alertable wait, also for a receive that completed at once). Prints `winsock_async_test: ok`
+//! alertable wait, also for a receive that completed at once);
+//! WSAEventSelect/WSAEnumNetworkEvents (FD_ACCEPT, FD_READ, FD_CLOSE; the
+//! event reset). Prints `winsock_async_test: ok`
 //! or exits with the number of the failing check.
 
 #![no_std]
@@ -96,6 +98,13 @@ unsafe extern "system" {
     fn CloseHandle(h: Handle) -> Bool;
     fn Sleep(ms: u32);
     fn SleepEx(ms: u32, alertable: Bool) -> u32;
+    fn CreateEventW(
+        attributes: *mut c_void,
+        manual: Bool,
+        initial: Bool,
+        name: *const u16,
+    ) -> Handle;
+    fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -151,6 +160,8 @@ unsafe extern "system" {
     fn bind(s: Socket, addr: *const SockaddrIn, len: i32) -> i32;
     fn listen(s: Socket, backlog: i32) -> i32;
     fn connect(s: Socket, addr: *const SockaddrIn, len: i32) -> i32;
+    fn WSAEventSelect(s: Socket, event: Handle, events: i32) -> i32;
+    fn WSAEnumNetworkEvents(s: Socket, event: Handle, out: *mut i32) -> i32;
     fn accept(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> Socket;
     fn getsockname(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> i32;
     fn setsockopt(s: Socket, level: i32, name: i32, value: *const u8, len: i32) -> i32;
@@ -566,6 +577,53 @@ fn run() -> Result<(), u32> {
         for s in [a2, c2, l2] {
             c.eq(closesocket(s) as u64, 0)?;
         }
+
+        // WSAEventSelect / WSAEnumNetworkEvents (PostgreSQL's latches):
+        // the event is set when a selected network event happens and
+        // WSAEnumNetworkEvents reports (and clears) it and resets the event.
+        const FD_READ: i32 = 1;
+        const FD_ACCEPT: i32 = 8;
+        const FD_CLOSE: i32 = 32;
+        let ev = CreateEventW(core::ptr::null_mut(), 1, 0, core::ptr::null());
+        let l3 = overlapped_socket();
+        c.eq(bind(l3, &SockaddrIn::new(LOOPBACK, 0), ADDR_LEN) as u64, 0)?;
+        c.eq(listen(l3, 1) as u64, 0)?;
+        len = ADDR_LEN;
+        c.eq(getsockname(l3, &mut name, &mut len) as u64, 0)?;
+        c.eq(WSAEventSelect(l3, ev, FD_ACCEPT | FD_CLOSE) as u64, 0)?;
+        c.eq(WaitForSingleObject(ev, 0).into(), WAIT_TIMEOUT.into())?;
+        let c3 = overlapped_socket();
+        c.eq(connect(c3, &name, ADDR_LEN) as u64, 0)?;
+        c.eq(WaitForSingleObject(ev, 5000).into(), 0)?;
+        let mut ne = [0i32; 11];
+        c.eq(WSAEnumNetworkEvents(l3, ev, ne.as_mut_ptr()) as u64, 0)?;
+        c.ok(ne[0] & FD_ACCEPT != 0 && ne[4] == 0, ne[0] as u64)?; // iErrorCode[FD_ACCEPT_BIT]
+        c.eq(WaitForSingleObject(ev, 0).into(), WAIT_TIMEOUT.into())?;
+        let a3 = accept(l3, core::ptr::null_mut(), core::ptr::null_mut());
+        c.ok(a3 != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        c.eq(WSAEventSelect(l3, core::ptr::null_mut(), 0) as u64, 0)?;
+        c.eq(WSAEventSelect(a3, ev, FD_READ | FD_CLOSE) as u64, 0)?;
+        let mut one = *b"x";
+        let mut sb = WsaBuf { len: 1, buf: one.as_mut_ptr() };
+        c.eq(WSASend(c3, &mut sb, 1, &mut bytes, 0, core::ptr::null_mut(), 0) as u64, 0)?;
+        c.eq(WaitForSingleObject(ev, 5000).into(), 0)?;
+        c.eq(WSAEnumNetworkEvents(a3, ev, ne.as_mut_ptr()) as u64, 0)?;
+        c.ok(ne[0] & FD_READ != 0, ne[0] as u64)?;
+        let mut rb = WsaBuf { len: 16, buf: rbuf2.as_mut_ptr() };
+        flags = 0;
+        c.eq(
+            WSARecv(a3, &mut rb, 1, &mut received, &mut flags, core::ptr::null_mut(), 0) as u64,
+            0,
+        )?;
+        c.eq(received.into(), 1)?;
+        c.eq(closesocket(c3) as u64, 0)?;
+        c.eq(WaitForSingleObject(ev, 5000).into(), 0)?;
+        c.eq(WSAEnumNetworkEvents(a3, ev, ne.as_mut_ptr()) as u64, 0)?;
+        c.ok(ne[0] & FD_CLOSE != 0, ne[0] as u64)?;
+        for s in [a3, l3] {
+            c.eq(closesocket(s) as u64, 0)?;
+        }
+        CloseHandle(ev);
         c.eq(WSACleanup() as u64, 0)?;
     }
     Ok(())

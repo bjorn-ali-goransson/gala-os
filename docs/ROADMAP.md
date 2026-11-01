@@ -990,10 +990,24 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       (forwarders), msvcrt's wcschr/_ultoa/fwprintf/fputwc/
       _beginthreadex/_endthreadex/__dllonexit/__mb_cur_max,
       SHGetFolderPathA, CreateProcessAsUserA, RtlGetLastNtStatus,
-      NtFlushBuffersFileEx. Both programs now start and stop at `_popen`:
-      the UCRT runs `cmd.exe /c`, and gala has no cmd.exe. Next: gala's
-      own cmd.exe (cmd /c with its documented quoting and redirections).
-      Open: the JDK's console path (GetConsoleMode succeeding
+      NtFlushBuffersFileEx. Then gala's own cmd.exe (`user/cmd`,
+      `cmd_test`: /c with its documented quote rules, redirections, echo,
+      exit, 9009 for an unknown command; the UCRT's `_popen` runs it),
+      GetNLSVersionEx, CallNamedPipe (PostgreSQL's signals), DLLs loaded
+      by a path with forward slashes, cross-process VirtualAllocEx/
+      VirtualFreeEx/VirtualQueryEx (PROCESS_VM_OPERATION),
+      RegisterWaitForSingleObject/UnregisterWait(Ex) on the thread pool,
+      WSAEventSelect/WSAEnumNetworkEvents (AFD records the selected
+      events), WSAAccept, WSAConnect, WSADuplicateSocketA, and images at a
+      system-wide alternative base when their preferred one is taken
+      (relocated frames shared by every process, as Windows' ASLR does:
+      every x64 DLL prefers 0x180000000, and private relocated copies of
+      ICU's 28 MB data and the rest per backend ran the machine out of
+      frames). **Done (2026-11-01): `postgres` passes**: initdb makes a
+      cluster, postgres serves it (background processes, a backend per
+      connection), the host's psql runs `select 40+2` (about 50 s in the
+      kernel; the scenario gets 3 GiB like Elasticsearch). Next: persistent
+      LocalDB, MinGit, disk D1-D3. Open: the JDK's console path (GetConsoleMode succeeding
       on the standard handles made java_http fail intermittently).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)

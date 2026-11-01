@@ -431,6 +431,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("restricted_test", "advapi32.dll", "Windows/System32"),
     ("restricted_test", "bcryptprimitives.dll", "Windows/System32"),
     ("restricted_test", "bcrypt.dll", "Windows/System32"),
+    ("cmd_test", "ntdll.dll", "Windows/System32"),
+    ("cmd_test", "kernel32.dll", "Windows/System32"),
+    ("cmd_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("cmd_test", "user/bin/cmd.exe", "Windows/System32"),
     ("profile_test", "ntdll.dll", "Windows/System32"),
     ("profile_test", "kernel32.dll", "Windows/System32"),
     ("profile_test", "advapi32.dll", "Windows/System32"),
@@ -851,6 +855,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
         "pgsql/bin",
     ),
     ("postgres", "user/postgres/pg_hba.conf", "gala"),
+    ("postgres", "user/bin/cmd.exe", "Windows/System32"),
     ("dotnet", "ntdll.dll", "Windows/System32"),
     ("dotnet", "kernel32.dll", "Windows/System32"),
     ("dotnet", "advapi32.dll", "Windows/System32"),
@@ -1278,6 +1283,8 @@ const USER_PROGRAMS: &[&str] = &[
     "system_test",
     "lsa_test",
     "restricted_test",
+    "cmd",
+    "cmd_test",
     "profile_test",
     "registry_test",
     "keyed_event_test",
@@ -1846,7 +1853,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &["elasticsearch", "postgres", "sqllocaldb", "sshd"];
+const PENDING: &[&str] = &["elasticsearch", "sqllocaldb", "sshd"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -1946,9 +1953,11 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     // the files it writes on C: (in memory) need more than that; with
     // ~1.5 GiB it ran out of frames (Elastic asks for several GiB).
     // SQL Server LocalDB asks for about 1 GB, and its 280 MB of files are
-    // in memory too.
+    // in memory too. PostgreSQL: its default shared memory (128 MB of
+    // buffers), a process per backend and helper, and its cluster on C:
+    // ran the 750 MB machine out of frames.
     if iso.file_name().is_some_and(|n| {
-        ["elasticsearch", "sqllocaldb"].iter().any(|s| n.to_string_lossy().contains(s))
+        ["elasticsearch", "sqllocaldb", "postgres"].iter().any(|s| n.to_string_lossy().contains(s))
     }) {
         memory = memory.max(ELASTICSEARCH_MEMORY_MIB);
     }
@@ -2243,6 +2252,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit as=system run=restricted_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["restricted_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // gala's cmd.exe (user/cmd): /c with its quote rules,
+        // redirections, echo, an unknown command (user/cmd_test).
+        name: "cmd_test",
+        cmdline: "qemu_exit run=cmd_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["cmd_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // Security model S4 (docs/SECURITY.md): user profiles, loaded as
@@ -3367,6 +3384,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
     ("busybox", "child processes (pipelines are child processes)"),
+    ("cmd_test", "child processes (one NT process per Linux process)"),
 ];
 
 /// Whether gala-um runs scenario `s`: a program's own scenario (its
