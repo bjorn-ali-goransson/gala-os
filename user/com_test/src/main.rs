@@ -4,7 +4,8 @@
 //! GUIDs:
 //!
 //! - ole32: CoInitializeEx (S_OK, then S_FALSE; RPC_E_CHANGED_MODE for the
-//!   other apartment kind), CoUninitialize, initialize spies (called
+//!   other apartment kind), CoUninitialize, CoInitializeSecurity (once:
+//!   then RPC_E_TOO_LATE), initialize spies (called
 //!   around initialization with the apartment reference counts),
 //!   CoGetContextToken (CO_E_NOTINITIALIZED outside an apartment),
 //!   CoGetObjectContext and CoGetApartmentType (MTA), CoTaskMem*,
@@ -44,6 +45,17 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn CoInitializeEx(reserved: *mut c_void, flags: u32) -> HResult;
     fn CoUninitialize();
+    fn CoInitializeSecurity(
+        descriptor: *mut c_void,
+        auth_count: i32,
+        auth_services: *mut c_void,
+        reserved1: *mut c_void,
+        authn_level: u32,
+        imp_level: u32,
+        auth_list: *mut c_void,
+        capabilities: u32,
+        reserved3: *mut c_void,
+    ) -> HResult;
     fn CoRegisterInitializeSpy(spy: *mut c_void, cookie: *mut u64) -> HResult;
     fn CoRevokeInitializeSpy(cookie: u64) -> HResult;
     fn CoGetContextToken(token: *mut usize) -> HResult;
@@ -423,6 +435,15 @@ fn apartments(c: &mut Checks) -> Result<(), u32> {
         c.eq((*me).last_refs.into(), 2)?;
         let changed = CoInitializeEx(core::ptr::null_mut(), COINIT_APARTMENTTHREADED);
         c.eq(hr(changed), 0x8001_0106)?; // RPC_E_CHANGED_MODE
+        // Process-wide security, once (as SQL Server sets it): default
+        // authentication, RPC_C_AUTHN_LEVEL_CONNECT (2),
+        // RPC_C_IMP_LEVEL_IDENTIFY (2), EOAC_NONE; a second call is
+        // RPC_E_TOO_LATE.
+        let null = core::ptr::null_mut();
+        let first = CoInitializeSecurity(null, -1, null, null, 2, 2, null, 0, null);
+        c.eq(hr(first), S_OK)?;
+        let again = CoInitializeSecurity(null, -1, null, null, 2, 2, null, 0, null);
+        c.eq(hr(again), 0x8001_0119)?; // RPC_E_TOO_LATE
 
         c.eq(hr(CoGetContextToken(&mut token)), S_OK)?;
         c.ok(token != 0 && token != 7, 0)?;

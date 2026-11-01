@@ -1,0 +1,56 @@
+//! Exports SQL Server LocalDB imports that gala does not implement yet
+//! (`gala_stubs`): calling one reports `dll!function` to the ledger and
+//! ends the process.
+
+gala_stubs::unimplemented_exports!("advapi32.dll":
+    AllocateLocallyUniqueId
+    CloseServiceHandle
+    ControlService
+    ControlTraceW
+    ConvertStringSecurityDescriptorToSecurityDescriptorW
+    CreateProcessAsUserW
+    CryptContextAddRef
+    CryptImportKey
+    CryptSetProvParam
+    DeleteAce
+    EnableTrace
+    EnumerateTraceGuids
+    GetNamedSecurityInfoW
+    GetSecurityDescriptorLength
+    GetSidIdentifierAuthority
+    GetSidLengthRequired
+    GetTraceEnableFlags
+    GetTraceEnableLevel
+    GetTraceLoggerHandle
+    ImpersonateLoggedOnUser
+    ImpersonateNamedPipeClient
+    ImpersonateSelf
+    InitializeSid
+    IsWellKnownSid
+    LogonUserExW
+    LogonUserW
+    LsaAddAccountRights
+    LsaClose
+    LsaNtStatusToWinError
+    LsaOpenPolicy
+    OpenSCManagerW
+    OpenServiceW
+    QueryAllTracesW
+    QueryServiceConfigW
+    QueryServiceStatus
+    QueryServiceStatusEx
+    RegConnectRegistryW
+    RegisterServiceCtrlHandlerA
+    RegisterTraceGuidsW
+    SetEntriesInAclW
+    SetNamedSecurityInfoW
+    SetSecurityDescriptorGroup
+    SetSecurityInfo
+    SetServiceBits
+    SetServiceStatus
+    StartServiceCtrlDispatcherW
+    StartServiceW
+    StartTraceW
+    TraceEvent
+    UnregisterTraceGuids
+);

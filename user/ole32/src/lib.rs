@@ -26,6 +26,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 mod stream;
+mod unimplemented;
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -243,6 +244,33 @@ fn thread_state() -> Option<&'static mut ThreadState> {
 static MTA_THREADS: AtomicU32 = AtomicU32::new(0);
 
 // ---- Apartments ----
+
+/// Set by the first CoInitializeSecurity.
+static SECURITY_SET: AtomicU32 = AtomicU32::new(0);
+const RPC_E_TOO_LATE: HResult = 0x8001_0119_u32 as HResult;
+
+/// CoInitializeSecurity: the process's COM security settings, once (later
+/// calls: RPC_E_TOO_LATE). They govern calls between processes and
+/// machines, which gala's COM does not make, so they are accepted and
+/// nothing more.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn CoInitializeSecurity(
+    _descriptor: *mut c_void,
+    _auth_count: i32,
+    _auth_services: *mut c_void,
+    _reserved1: *mut c_void,
+    _authn_level: u32,
+    _imp_level: u32,
+    _auth_list: *mut c_void,
+    _capabilities: u32,
+    _reserved3: *mut c_void,
+) -> HResult {
+    if SECURITY_SET.swap(1, Ordering::AcqRel) != 0 {
+        return RPC_E_TOO_LATE;
+    }
+    S_OK
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn CoInitializeEx(_reserved: *mut c_void, flags: u32) -> HResult {

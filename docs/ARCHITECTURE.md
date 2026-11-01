@@ -600,7 +600,10 @@ NtOpenKeyEx, NtDeleteKey, NtDeleteValueKey, NtFlushKey (0x7f06-0x7f09).
 The tree is built at boot from `kernel/src/nt/registry.seed` (a small
 text format, described at its top) plus
 `HARDWARE\DESCRIPTION\System\CentralProcessor\<n>` per processor from
-CPUID (name, vendor, identifier, base MHz). Nothing is saved: writes
+CPUID (name, vendor, identifier, base MHz), then any boot module with
+the module string `registry` (same format: a scenario's keys, such as
+what an installer would write; `user/sqllocaldb/sqllocaldb.regseed` is
+SqlLocalDB.msi's Registry table). Nothing is saved: writes
 last until shutdown. NtOpenKey of a missing key records it in the ledger
 (`registry:MACHINE/...`, "absent key"), which is how the seed grows.
 
@@ -1124,6 +1127,23 @@ Windows, never shadows the system's DLLs.)
   missing-features ledger. When an import cannot be bound, the loader
   reports every missing `dll!function` before failing the process with
   STATUS_ENTRYPOINT_NOT_FOUND, as Windows does (`missing_import_test`).
+- **Exported but not implemented yet.** So that a program loads before
+  gala implements everything it imports, a DLL may export named stubs
+  (`user/<dll>/src/unimplemented.rs`, the `gala_stubs` crate's
+  `unimplemented_exports!`; ntdll has its own copy). A stub cannot fail
+  in the function's own terms (it does not know the return type), so a
+  call reports `dll!function` ("not implemented") and ends the process
+  with STATUS_NOT_IMPLEMENTED (`unimplemented_test`). The stubs live in a
+  `.gstub` section: LdrGetProcedureAddress (GetProcAddress) treats an
+  export resolving there as absent, so programs probing for optional
+  functions keep taking their fallbacks; only static imports bind to
+  them. They were generated from SQL Server LocalDB's import closure; a
+  function is implemented by removing its name from the list. Thirteen
+  DLLs (netapi32, pdh, shlwapi, rpcrt4, urlmon, wininet, userenv,
+  xolehlp, odbc32, authz, wintrust, webservices, dhcpcsvc) are nothing
+  but such stubs so far, apart from rpcrt4's UUID functions
+  (`rpcrt4_test`). GetProcAddress with a null module searches the
+  executable.
 
 ## Processors
 

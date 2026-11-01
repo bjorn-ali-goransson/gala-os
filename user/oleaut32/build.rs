@@ -43,6 +43,7 @@ fn main() {
         ("SafeArrayPtrOfIndex", 148),
         ("SysStringByteLen", 149),
         ("SysAllocStringByteLen", 150),
+        ("VarUI4FromStr", 277),
         ("LoadTypeLib", 161),
         ("LoadRegTypeLib", 162),
         ("QueryPathOfRegTypeLib", 164),

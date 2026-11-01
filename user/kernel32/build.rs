@@ -14,6 +14,7 @@ fn main() {
         "RtlDeleteFunctionTable",
         "RtlCaptureStackBackTrace",
         "RtlInstallFunctionTableCallback",
+        "VerSetConditionMask",
     ] {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=ntdll.{name}");
     }

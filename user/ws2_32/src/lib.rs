@@ -16,6 +16,8 @@
 // pointers its documentation describes; Rust callers do not exist.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod unimplemented;
+
 use core::sync::atomic::{AtomicU32, Ordering};
 
 type Socket = usize;

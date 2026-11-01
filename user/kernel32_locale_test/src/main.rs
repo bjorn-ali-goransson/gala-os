@@ -8,7 +8,8 @@
 //!   country names, the OEM code page; counts include the NUL; a size
 //!   query; ERROR_INSUFFICIENT_BUFFER; LOCALE_RETURN_NUMBER.
 //! - LCMapStringW (upper and lower case), CompareStringW (linguistic
-//!   order: "a" < "B", lower case first, NORM_IGNORECASE),
+//!   order: "a" < "B", lower case first, NORM_IGNORECASE), lstrcmpW and
+//!   lstrcmpiW (the same order), lstrlenW/A (0 for a null string),
 //!   GetStringTypeW (CT_CTYPE1), IsDBCSLeadByte.
 //! - GetDateFormatW/GetTimeFormatW with pictures and the short date.
 //! - GetLocalTime matches GetSystemTime (UTC); GetDynamicTimeZoneInformation
@@ -106,6 +107,10 @@ unsafe extern "system" {
     fn GetLocaleInfoA(lcid: u32, kind: u32, buf: *mut u8, n: i32) -> i32;
     fn LCMapStringW(lcid: u32, flags: u32, src: *const u16, n: i32, dst: *mut u16, m: i32) -> i32;
     fn CompareStringW(lcid: u32, flags: u32, a: *const u16, n: i32, b: *const u16, m: i32) -> i32;
+    fn lstrlenW(s: *const u16) -> i32;
+    fn lstrlenA(s: *const u8) -> i32;
+    fn lstrcmpW(a: *const u16, b: *const u16) -> i32;
+    fn lstrcmpiW(a: *const u16, b: *const u16) -> i32;
     fn GetStringTypeW(kind: u32, s: *const u16, n: i32, out: *mut u16) -> Bool;
     fn IsDBCSLeadByte(b: u8) -> Bool;
     fn GetDateFormatW(
@@ -376,6 +381,18 @@ fn strings(c: &mut Checks) -> Result<(), u32> {
         c.eq(cmp("a", "A", 0) as u64, CSTR_LESS_THAN as u64)?; // lower case first
         c.eq(cmp("ABC", "abc", NORM_IGNORECASE) as u64, CSTR_EQUAL as u64)?;
         c.eq(cmp("ab", "abc", 0) as u64, CSTR_LESS_THAN as u64)?;
+        // lstrcmp(i)W: the same order, as negative, zero or positive.
+        let lcmp = |a: &str, b: &str| lstrcmpW(w(a).as_ptr(), w(b).as_ptr());
+        let lcmpi = |a: &str, b: &str| lstrcmpiW(w(a).as_ptr(), w(b).as_ptr());
+        c.ok(lcmp("a", "B") < 0, 0)?;
+        c.ok(lcmp("a", "A") < 0, 0)?;
+        c.eq(lcmp("abc", "abc") as u64, 0)?;
+        c.ok(lcmp("b", "a") > 0, 0)?;
+        c.eq(lcmpi("abc", "ABC") as u64, 0)?;
+        c.ok(lcmpi("b", "A") > 0, 0)?;
+        c.eq(lstrlenW(w("abc").as_ptr()) as u64, 3)?;
+        c.eq(lstrlenW(core::ptr::null()) as u64, 0)?;
+        c.eq(lstrlenA(c"abcd".as_ptr().cast()) as u64, 4)?;
 
         let s = w("a1 A,");
         let mut types = [0u16; 5];

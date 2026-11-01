@@ -123,6 +123,14 @@ pub fn kernel_main() -> ! {
         // `tar:<dir>`: a directory tree packed by xtask, shipped as C:\<dir>.
         if let Some(dir) = module.cmdline.strip_prefix("tar:") {
             add_tree(dir, module.path, module.data);
+        } else if module.cmdline == "registry" {
+            // A scenario's registry keys (nt::registry::load_more).
+            let loaded = core::str::from_utf8(module.data)
+                .map_err(|_| nt::status::NtStatus::INVALID_PARAMETER)
+                .and_then(|text| nt::registry::load_more(text, nt::platform::system_time()));
+            if let Err(e) = loaded {
+                warn!("registry: cannot load {}: {e:?}", module.path);
+            }
         } else if let Err(e) =
             nt::file::add_boot_file(module.cmdline, module.file_name(), module.data)
         {

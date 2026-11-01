@@ -825,6 +825,13 @@ impl Registry {
     }
 }
 
+/// Adds a scenario's keys and values (a boot module with the module
+/// string `registry`, in the seed's format) to the registry: what an
+/// installer would have written, such as an MSI's Registry table.
+pub fn load_more(seed: &str, now: u64) -> Result<(), NtStatus> {
+    with(|r| r.load(seed, now))
+}
+
 /// Runs `f` on the registry.
 pub fn with<R>(f: impl FnOnce(&mut Registry) -> Result<R, NtStatus>) -> Result<R, NtStatus> {
     match REGISTRY.lock().as_mut() {
@@ -1000,6 +1007,18 @@ mod tests {
         assert_eq!(text("Identifier"), "Intel64 Family 6 Model 85 Stepping 7\0");
         assert_eq!(text("VendorIdentifier"), "GenuineIntel\0");
         assert_eq!(r.value(key, &w("~MHz")).unwrap().data, 2100u32.to_le_bytes());
+    }
+
+    #[test]
+    fn a_second_seed_adds_to_the_first() {
+        let mut r = reg();
+        r.load("[\\Registry\\Machine\\SOFTWARE\\Microsoft]\n\"b\"=dword:3\n", 8).unwrap();
+        let key = r.lookup(ROOT, &w("MACHINE\\SOFTWARE\\Microsoft")).unwrap();
+        assert_eq!(
+            r.value(key, &w("a")).unwrap().data,
+            w("x\0").iter().flat_map(|u| u.to_le_bytes()).collect::<Vec<u8>>()
+        );
+        assert_eq!(r.value(key, &w("b")).unwrap().data, 3u32.to_le_bytes());
     }
 
     #[test]

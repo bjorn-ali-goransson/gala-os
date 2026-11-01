@@ -18,6 +18,7 @@
 mod heap;
 mod seh;
 mod tls;
+mod unimplemented;
 
 /// "galantdl": marks the state as written by this DLL.
 const MAGIC: u64 = 0x6761_6c61_6e74_646c;
@@ -338,6 +339,33 @@ fn c_str(addr: usize) -> &'static [u8] {
 fn directory(base: usize, index: usize) -> (usize, usize) {
     let opt = base + rd32(base + 0x3c) as usize + 24;
     (rd32(opt + 112 + 8 * index) as usize, rd32(opt + 116 + 8 * index) as usize)
+}
+
+/// Whether `address` is code in a loaded DLL's `.gstub` section: the
+/// exports gala's DLLs define for functions not implemented yet
+/// (`gala_stubs`). Imports bind to them so that programs load, but a
+/// program probing with GetProcAddress gets "not found", as it did before
+/// the stub existed, and takes its fallback.
+fn is_unimplemented_stub(address: usize) -> bool {
+    let base = with_modules(|m| {
+        m.iter().map(|e| e.base).find(|&b| {
+            b != 0 && address >= b && {
+                let size = rd32(b + rd32(b + 0x3c) as usize + 24 + 56) as usize;
+                address < b + size
+            }
+        })
+    });
+    let Some(base) = base else { return false };
+    let nt = base + rd32(base + 0x3c) as usize;
+    let count = (rd32(nt + 4) >> 16) as usize; // NumberOfSections
+    let optional_size = (rd32(nt + 20) & 0xffff) as usize;
+    let table = nt + 24 + optional_size;
+    (0..count).any(|i| {
+        let s = table + 40 * i;
+        let start = base + rd32(s + 12) as usize;
+        rd64(s) == u64::from_le_bytes(*b".gstub\0\0")
+            && (start..start + rd32(s + 8) as usize).contains(&address)
+    })
 }
 
 /// Export `name` (or `ordinal` if `name` is empty) of the image at `base`.
@@ -1065,6 +1093,18 @@ unsafe extern "system" fn ldr_get_procedure_address(
     ordinal: u32,
     address: *mut usize,
 ) -> u32 {
+    // A null module means the executable (as on Windows, where
+    // GetProcAddress(NULL, ...) searches it).
+    let module = if module == 0 {
+        // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress is at +0x10.
+        unsafe {
+            let peb: usize;
+            core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+            rd64(peb + 0x10) as usize
+        }
+    } else {
+        module
+    };
     let found = if name.is_null() {
         export(module, &[], ordinal).ok_or(STATUS_ORDINAL_NOT_FOUND)
     } else {
@@ -1078,6 +1118,11 @@ unsafe extern "system" fn ldr_get_procedure_address(
             _ => export(module, name, 0).ok_or(STATUS_PROCEDURE_NOT_FOUND),
         }
     };
+    let found = found.and_then(|target| {
+        let missing =
+            if name.is_null() { STATUS_ORDINAL_NOT_FOUND } else { STATUS_PROCEDURE_NOT_FOUND };
+        if is_unimplemented_stub(target) { Err(missing) } else { Ok(target) }
+    });
     // Programs probe for optional functions this way: every miss goes to
     // the missing-features ledger (`dll!name`).
     if found.is_err() {
@@ -1345,6 +1390,20 @@ pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base:
     loop {
         core::hint::spin_loop();
     }
+}
+
+/// VerSetConditionMask: three condition bits for each VER_* type bit,
+/// at three times the bit's index (kernel32 forwards here, as on Windows).
+#[unsafe(no_mangle)]
+pub extern "system" fn VerSetConditionMask(mask: u64, kind: u32, condition: u8) -> u64 {
+    let mut mask = mask;
+    for bit in 0..8 {
+        if kind & (1 << bit) != 0 {
+            let shift = 3 * bit;
+            mask = (mask & !(7 << shift)) | (u64::from(condition & 7) << shift);
+        }
+    }
+    mask
 }
 
 /// NtTerminateProcess on the pinned build (to be verified).

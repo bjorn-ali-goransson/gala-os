@@ -536,18 +536,26 @@ pub extern "system" fn UnhandledExceptionFilter(pointers: *mut c_void) -> i32 {
     f(pointers)
 }
 
-/// VerSetConditionMask: three condition bits for each VER_* type bit,
-/// at three times the bit's index.
+/// PRODUCT_PROFESSIONAL: the edition gala reports (the registry's
+/// EditionID is Professional, its product type a workstation).
+const PRODUCT_PROFESSIONAL: u32 = 0x30;
+
+/// GetProductInfo: the product type of gala's edition for any Windows
+/// version from 6.0 on (the documented minimum); FALSE below that.
 #[unsafe(no_mangle)]
-pub extern "system" fn VerSetConditionMask(mask: u64, kind: u32, condition: u8) -> u64 {
-    let mut mask = mask;
-    for bit in 0..8 {
-        if kind & (1 << bit) != 0 {
-            let shift = 3 * bit;
-            mask = (mask & !(7 << shift)) | (u64::from(condition & 7) << shift);
-        }
+pub extern "system" fn GetProductInfo(
+    major: u32,
+    _minor: u32,
+    _sp_major: u32,
+    _sp_minor: u32,
+    kind: *mut u32,
+) -> i32 {
+    if major < 6 || kind.is_null() {
+        return 0;
     }
-    mask
+    // SAFETY: the caller's output (checked non-null).
+    unsafe { kind.write(PRODUCT_PROFESSIONAL) };
+    1
 }
 
 /// OSVERSIONINFOEXW's fields VerifyVersionInfoW compares, with this

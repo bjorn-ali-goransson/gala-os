@@ -12,6 +12,9 @@ dependencies = [
 [[package]]
 name = "advapi32"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "advapi32_test"
@@ -43,9 +46,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "authz"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
 name = "bcrypt"
 version = "0.1.0"
 dependencies = [
+ "gala_stubs",
  "hmac",
  "md-5",
  "sha1",
@@ -139,6 +150,9 @@ dependencies = [
 [[package]]
 name = "crypt32"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "crypto-common"
@@ -191,6 +205,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dhcpcsvc"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -239,6 +260,10 @@ version = "0.1.0"
 dependencies = [
  "ntrt",
 ]
+
+[[package]]
+name = "gala_stubs"
+version = "0.1.0"
 
 [[package]]
 name = "generic-array"
@@ -323,6 +348,9 @@ dependencies = [
 [[package]]
 name = "iphlpapi"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "iphlpapi_test"
@@ -341,6 +369,9 @@ dependencies = [
 [[package]]
 name = "kernel32"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "kernel32_clr_test"
@@ -465,6 +496,16 @@ version = "0.1.0"
 [[package]]
 name = "ncrypt"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
+name = "netapi32"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "noto-sans-mono-bitmap"
@@ -484,12 +525,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "odbc32"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
 name = "ole32"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "oleaut32"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
+name = "pdh"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "peb_test"
@@ -541,6 +602,17 @@ name = "registry_test"
 version = "0.1.0"
 
 [[package]]
+name = "rpcrt4"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
+name = "rpcrt4_test"
+version = "0.1.0"
+
+[[package]]
 name = "section_test"
 version = "0.1.0"
 dependencies = [
@@ -550,6 +622,9 @@ dependencies = [
 [[package]]
 name = "secur32"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "seh_test"
@@ -583,6 +658,13 @@ dependencies = [
 [[package]]
 name = "shell32"
 version = "0.1.0"
+
+[[package]]
+name = "shlwapi"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "smoltcp"
@@ -757,8 +839,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
+name = "unimplemented_test"
+version = "0.1.0"
+
+[[package]]
+name = "urlmon"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
 name = "user32"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
+name = "userenv"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "version"
@@ -785,12 +888,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "webservices"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
 name = "win32_misc_test"
 version = "0.1.0"
 
 [[package]]
 name = "winhttp"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
+name = "wininet"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "winmm"
@@ -805,8 +925,25 @@ name = "winsock_test"
 version = "0.1.0"
 
 [[package]]
+name = "wintrust"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
 name = "ws2_32"
 version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
+name = "xolehlp"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
 
 [[package]]
 name = "xtask"

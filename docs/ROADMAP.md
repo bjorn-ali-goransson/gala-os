@@ -711,11 +711,14 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         pdh, shlwapi, rpcrt4, urlmon, wininet, userenv, xolehlp, odbc32,
         authz, wintrust, webservices, dhcpcsvc; and ~540 functions of
         DLLs gala has (crypt32 222, kernel32 72, ncrypt 58, advapi32 50,
-        ws2_32 39 incl. ordinals, bcrypt 31, oleaut32 19, winhttp 15,
-        ole32 13, secur32 8, user32 4, ntdll 4, iphlpapi 1). Missing
-        functions bind to the ledger's stub, so only those called matter;
-        missing DLLs stop the load, so the 13 come first (small DLLs with
-        what is called, the rest reported). Notable kernel32 needs:
+        ws2_32 11, bcrypt 31, oleaut32 1 (VarUI4FromStr, ordinal 277),
+        winhttp 15, ole32 13, secur32 8, user32 4, ntdll 4, iphlpapi 1;
+        the first count of ws2_32 and oleaut32 ordinals was wrong: they
+        were exported by ordinal already). A missing export stops the load
+        (gala's loader, as Windows'), so all of them now exist as
+        `gala_stubs` exports that report and end the process when called
+        (ARCHITECTURE, "Exported but not implemented yet"). Notable
+        kernel32 needs:
         fibers (ConvertThreadToFiber, CreateFiber: SQLOS can schedule on
         fibers), NUMA (AllocateUserPhysicalPagesNuma,
         MapViewOfFileExNuma, GetNumaNodeProcessorMaskEx), timer queues,
@@ -728,6 +731,23 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         query over the named pipe or TCP (a small client of ours speaking
         TDS, or the Microsoft ODBC driver later). Memory: SQL Server
         wants about 1 GB.
+      - Started 2026-11-01: xtask unpacks the MSI (`PREBUILT`
+        sqllocaldb, msiextract; Binn with English resources, Shared), the
+        pending `sqllocaldb` scenario (3 GiB) runs `sqlservr.exe -c
+        -d<master.mdf> -l<mastlog.ldf> -e<ERRORLOG>` from C:\sql\Binn
+        with the VC++ runtime app-local, copies of the template databases
+        in C:\sql\data and the MSI's registry keys
+        (`user/sqllocaldb/sqllocaldb.regseed`, a new `registry` boot
+        module). It loads (every import bound) and runs into one missing
+        function after another, each named by the ledger: done so far
+        GetCurrentThreadStackLimits, GetProductInfo, rpcrt4's UUIDs,
+        CoInitializeSecurity, lstrlen/lstrcmp(i), GetProcAddress(NULL),
+        instapi160 and the registry keys. Next: whatever the ledger names
+        (`cargo xtask boot-test sqllocaldb`, about a minute), then the
+        error log's own messages. Probed but optional so far:
+        SetDllDirectoryW/GetDllDirectoryW, FlsGetValue2,
+        QueryWorkingSetEx, NtQuerySystemInformation classes 124
+        (SystemQueryPerformanceCounterInformation) and 5000.
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)
       is a candidate, but its download page only hands out links to

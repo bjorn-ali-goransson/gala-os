@@ -178,6 +178,11 @@ fn run() -> Result<(), u32> {
         c.ok(GetProcAddress(dll, c"no_such_function".as_ptr().cast()).is_null(), 0)?;
         c.eq(GetLastError().into(), ERROR_PROC_NOT_FOUND.into())?;
         c.eq(FreeLibrary(dll) as u64, 1)?;
+        // A null module is the executable (a failed LoadLibrary's result
+        // passed on): this one exports nothing.
+        SetLastError(0);
+        c.ok(GetProcAddress(core::ptr::null_mut(), c"gala_add".as_ptr().cast()).is_null(), 0)?;
+        c.eq(GetLastError().into(), ERROR_PROC_NOT_FOUND.into())?;
         SetLastError(0);
         c.ok(LoadLibraryA(c"no_such_dll.dll".as_ptr().cast()).is_null(), 0)?;
         c.eq(GetLastError().into(), ERROR_MOD_NOT_FOUND.into())?;

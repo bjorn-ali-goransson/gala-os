@@ -39,6 +39,7 @@ unsafe extern "system" {
 mod etw;
 mod registry;
 mod security;
+mod unimplemented;
 
 /// The C runtime's marker that floating point is used (the linker wants
 /// it once core's float code is linked in).

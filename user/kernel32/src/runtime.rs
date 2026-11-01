@@ -81,6 +81,18 @@ fn teb() -> usize {
     teb_u64(0x30) as usize
 }
 
+/// GetCurrentThreadStackLimits: the stack the system reserved for the
+/// thread, from the TEB's DeallocationStack (+0x1478, the reservation's
+/// base) to its StackBase (+0x8).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize) {
+    // SAFETY: the caller passes writable pointers, as documented.
+    unsafe {
+        low.write(teb_u64(0x1478) as usize);
+        high.write(teb_u64(0x8) as usize);
+    }
+}
+
 /// TEB.GuaranteedStackBytes (x64 offset 0x1748).
 const TEB_GUARANTEED_STACK_BYTES: usize = 0x1748;
 /// TEB.HardErrorMode (x64 offset 0x16b0).

@@ -68,6 +68,7 @@ not_supported! {
 }
 
 mod tables;
+mod unimplemented;
 
 /// ConvertLengthToIpv4Mask(MaskLength, *Mask): the mask in network byte
 /// order; ERROR_INVALID_PARAMETER (and INADDR_NONE) past 32.

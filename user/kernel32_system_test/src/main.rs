@@ -19,7 +19,7 @@
 //!   FindFirstFileExW, GetVolumePathNameW (C:\), OpenFileMappingA of a
 //!   named mapping.
 //! - RtlCaptureStackBackTrace (this function's caller first),
-//!   VerSetConditionMask and VerifyVersionInfoW, Beep.
+//!   VerSetConditionMask and VerifyVersionInfoW, Beep, GetProductInfo.
 //!
 //! Prints `kernel32_system_test: ok` or exits with the number of the
 //! failing check.
@@ -128,6 +128,8 @@ unsafe extern "system" {
     fn RtlCaptureStackBackTrace(skip: u32, count: u32, frames: *mut usize, hash: *mut u32) -> u16;
     fn VerSetConditionMask(mask: u64, kind: u32, condition: u8) -> u64;
     fn VerifyVersionInfoW(info: *mut OsVersionInfoExW, kind: u32, mask: u64) -> Bool;
+    fn GetProductInfo(major: u32, minor: u32, sp_major: u32, sp_minor: u32, kind: *mut u32)
+    -> Bool;
     fn Beep(freq: u32, ms: u32) -> Bool;
 }
 
@@ -599,6 +601,11 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         c.eq(VerifyVersionInfoW(&mut v, VER_MAJORVERSION, mask) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_OLD_WIN_VERSION.into())?;
         c.ok(Beep(750, 1) != 0, GetLastError().into())?;
+        // The edition, as the registry's EditionID (Professional) says:
+        // PRODUCT_PROFESSIONAL (0x30).
+        let mut kind = 0;
+        c.ok(GetProductInfo(10, 0, 0, 0, &mut kind) != 0, GetLastError().into())?;
+        c.eq(kind.into(), 0x30)?;
     }
     Ok(())
 }

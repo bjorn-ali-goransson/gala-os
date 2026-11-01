@@ -1,0 +1,64 @@
+//! Exports SQL Server LocalDB imports that gala does not implement yet
+//! (`gala_stubs`): calling one reports `dll!function` to the ledger and
+//! ends the process.
+
+gala_stubs::unimplemented_exports!("ncrypt.dll":
+    GetSChannelInterface
+    NCryptCloseProtectionDescriptor
+    NCryptCreateProtectionDescriptor
+    NCryptDecrypt
+    NCryptDeriveKey
+    NCryptEncrypt
+    NCryptEnumAlgorithms
+    NCryptEnumKeys
+    NCryptEnumStorageProviders
+    NCryptFreeBuffer
+    NCryptGetProtectionDescriptorInfo
+    NCryptImportKey
+    NCryptIsAlgSupported
+    NCryptIsKeyHandle
+    NCryptKeyDerivation
+    NCryptNotifyChangeKey
+    NCryptProtectSecret
+    NCryptQueryProtectionDescriptorName
+    NCryptRegisterProtectionDescriptorName
+    NCryptSecretAgreement
+    NCryptSignHash
+    NCryptStreamClose
+    NCryptStreamOpenToProtect
+    NCryptStreamOpenToUnprotect
+    NCryptStreamUpdate
+    NCryptTranslateHandle
+    NCryptUnprotectSecret
+    NCryptVerifySignature
+    SslChangeNotify
+    SslComputeClientAuthHash
+    SslComputeEapKeyBlock
+    SslComputeFinishedHash
+    SslCreateClientAuthHash
+    SslCreateEphemeralKey
+    SslCreateHandshakeHash
+    SslDecrementProviderReferenceCount
+    SslDecryptPacket
+    SslEncryptPacket
+    SslEnumCipherSuites
+    SslEnumProtocolProviders
+    SslExportKey
+    SslFreeBuffer
+    SslFreeObject
+    SslGenerateMasterKey
+    SslGenerateSessionKeys
+    SslGetCipherSuitePRFHashAlgorithm
+    SslGetKeyProperty
+    SslGetProviderProperty
+    SslHashHandshake
+    SslImportKey
+    SslImportMasterKey
+    SslIncrementProviderReferenceCount
+    SslLookupCipherLengths
+    SslLookupCipherSuiteInfo
+    SslOpenPrivateKey
+    SslOpenProvider
+    SslSignHash
+    SslVerifySignature
+);

@@ -1,0 +1,37 @@
+; The registry keys SqlLocalDB.msi writes when it installs SQL Server 2022
+; LocalDB 16.0.1000.6 (its Registry table, the 64-bit rows; msiinfo
+; export SqlLocalDB.msi Registry), with its directories where the
+; `sqllocaldb` scenario puts the files: LocalDB\Binn is C:\sql\Binn,
+; Shared is C:\sql\Shared, the version root C:\sql. Loaded after
+; registry.seed (module string `registry`). Format: see registry.seed.
+
+[\Registry\Machine\SOFTWARE\Microsoft\Microsoft SQL Server\160]
+"SharedCode"=sz:C:\sql\Shared\
+"VerSpecificRootDir"=sz:C:\sql\
+"ErrorReportingDir"=sz:C:\sql\Shared\ErrorDumps\
+
+[\Registry\Machine\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL16E.LOCALDB\MSSQLServer]
+"DefaultLogin"=sz:guest
+"LoginMode"=dword:2
+"AuditLevel"=dword:2
+
+[\Registry\Machine\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL16E.LOCALDB\MSSQLServer\CurrentVersion]
+"CurrentVersion"=sz:16.0.1000.6
+"Language"=dword:1033
+
+[\Registry\Machine\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL16E.LOCALDB\Setup]
+"Version"=sz:16.0.1000.6
+"SP"=dword:0
+"PatchLevel"=sz:16.0.1000.6
+"Edition"=sz:Express Edition
+"EditionType"=sz:Express Edition
+"SQLBinRoot"=sz:C:\sql\Binn\
+"Language"=dword:1033
+
+[\Registry\Machine\SOFTWARE\Microsoft\Microsoft SQL Server Local DB\Installed Versions\16.0]
+"ParentInstance"=sz:MSSQL16E.LOCALDB
+"InstanceAPIPath"=sz:C:\sql\Binn\SqlUserInstance.dll
+
+[\Registry\Machine\SYSTEM\CurrentControlSet\Services\EventLog\Application\SQLLocalDB 16.0]
+"EventMessageFile"=sz:C:\sql\Binn\Resources\SqlUserInstance.rll
+"TypesSupported"=dword:7

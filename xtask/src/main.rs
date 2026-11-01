@@ -27,9 +27,13 @@ struct Prebuilt {
     url: &'static str,
     /// The release's SHA-256, or its SHA-512 (128 hex digits).
     checksum: &'static str,
-    /// The files used, inside the zip.
+    /// The files used, inside the zip. For an MSI (a `.msi` URL, unpacked
+    /// with msitools' msiextract: gala has no Windows Installer), the
+    /// directories used, each moved to the release's directory under its
+    /// last component (`Program Files/X/Binn` becomes `Binn`).
     members: &'static [&'static str],
-    /// Files left out of those (unzip -x patterns).
+    /// Files left out of those (unzip -x patterns; for an MSI, paths
+    /// removed after the moves, such as `Binn/de`).
     excludes: &'static [&'static str],
 }
 
@@ -97,6 +101,55 @@ const PREBUILT: &[Prebuilt] = &[
         ],
         excludes: &["elasticsearch-8.15.3/modules/x-pack-ml/platform/*"],
     },
+    // SQL Server 2022 Express LocalDB 16.0.1000.6 (SqlLocalDB.msi).
+    // Microsoft publishes no checksum for it: the SHA-256 is the one we
+    // measured (ROADMAP). Its license allows use to design, develop and
+    // test programs (THIRD_PARTY.md). The database engine's directory
+    // (LocalDB\Binn) with its English resources only, without the
+    // secure-enclave packages.
+    Prebuilt {
+        name: "sqllocaldb",
+        url: "https://download.microsoft.com/download/3/8/d/38de7036-2433-4207-8eae-06e247e17b25/SqlLocalDB.msi",
+        checksum: "224d483992ef60368dac70cea174dcfaf43a3ca06ada331c67dc6119a26490f6",
+        members: &[
+            "Program Files/Microsoft SQL Server/160/LocalDB/Binn",
+            "Program Files/Microsoft SQL Server/160/Shared",
+        ],
+        excludes: &[
+            "Binn/aetm-enclave.sgx.pkg",
+            "Binn/aetm-enclave.vsm.pkg",
+            "Binn/de",
+            "Binn/es",
+            "Binn/fr",
+            "Binn/it",
+            "Binn/ja",
+            "Binn/ko",
+            "Binn/pt",
+            "Binn/ru",
+            "Binn/zh-Hans",
+            "Binn/zh-Hant",
+            "Binn/Resources/1028",
+            "Binn/Resources/1031",
+            "Binn/Resources/1036",
+            "Binn/Resources/1040",
+            "Binn/Resources/1041",
+            "Binn/Resources/1042",
+            "Binn/Resources/1046",
+            "Binn/Resources/1049",
+            "Binn/Resources/2052",
+            "Binn/Resources/3082",
+            "Binn/Resources/de-DE",
+            "Binn/Resources/es-ES",
+            "Binn/Resources/fr-FR",
+            "Binn/Resources/it-IT",
+            "Binn/Resources/ja-JP",
+            "Binn/Resources/ko-KR",
+            "Binn/Resources/pt-BR",
+            "Binn/Resources/ru-RU",
+            "Binn/Resources/zh-CN",
+            "Binn/Resources/zh-TW",
+        ],
+    },
 ];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -151,6 +204,21 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "crypt32", file: "crypt32.dll", exported_as: "testcrypt32.dll" },
     // gala's mswsock.dll (forwarders to ws2_32).
     Dll { package: "mswsock", file: "mswsock.dll", exported_as: "testmswsock.dll" },
+    // What SQL Server LocalDB imports from DLLs gala had no other use for
+    // (functions not implemented yet: gala_stubs).
+    Dll { package: "netapi32", file: "netapi32.dll", exported_as: "testnetapi32.dll" },
+    Dll { package: "pdh", file: "pdh.dll", exported_as: "testpdh.dll" },
+    Dll { package: "shlwapi", file: "shlwapi.dll", exported_as: "testshlwapi.dll" },
+    Dll { package: "rpcrt4", file: "rpcrt4.dll", exported_as: "testrpcrt4.dll" },
+    Dll { package: "urlmon", file: "urlmon.dll", exported_as: "testurlmon.dll" },
+    Dll { package: "wininet", file: "wininet.dll", exported_as: "testwininet.dll" },
+    Dll { package: "userenv", file: "userenv.dll", exported_as: "testuserenv.dll" },
+    Dll { package: "xolehlp", file: "xolehlp.dll", exported_as: "testxolehlp.dll" },
+    Dll { package: "odbc32", file: "odbc32.dll", exported_as: "testodbc32.dll" },
+    Dll { package: "authz", file: "authz.dll", exported_as: "testauthz.dll" },
+    Dll { package: "wintrust", file: "wintrust.dll", exported_as: "testwintrust.dll" },
+    Dll { package: "webservices", file: "webservices.dll", exported_as: "testwebservices.dll" },
+    Dll { package: "dhcpcsvc", file: "dhcpcsvc.dll", exported_as: "testdhcpcsvc.dll" },
     // Built as ntdll.dll (its export directory says so); exported under
     // another name so user/bin never holds a file called ntdll.dll.
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
@@ -186,6 +254,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_test", "testdll.dll", "gala"),
     ("missing_import_test", "ntdll.dll", "Windows/System32"),
     ("missing_import_test", "kernel32.dll", "Windows/System32"),
+    ("rpcrt4_test", "ntdll.dll", "Windows/System32"),
+    ("rpcrt4_test", "kernel32.dll", "Windows/System32"),
+    ("rpcrt4_test", "rpcrt4.dll", "Windows/System32"),
+    ("rpcrt4_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("unimplemented_test", "ntdll.dll", "Windows/System32"),
+    ("unimplemented_test", "kernel32.dll", "Windows/System32"),
+    ("unimplemented_test", "xolehlp.dll", "Windows/System32"),
     ("kernel32_sys_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_sys_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sys_test", "testdll.dll", "gala"),
@@ -451,6 +526,52 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // The JDK where Elasticsearch looks for its bundled one (C:\\es\\jdk).
     ("elasticsearch", "target/prebuilt/jdk/jdk-21.0.5+11/", "es/jdk"),
     ("elasticsearch", "user/elasticsearch/gala.options", "es/config/jvm.options.d"),
+    ("sqllocaldb", "ntdll.dll", "Windows/System32"),
+    ("sqllocaldb", "kernel32.dll", "Windows/System32"),
+    ("sqllocaldb", "advapi32.dll", "Windows/System32"),
+    ("sqllocaldb", "authz.dll", "Windows/System32"),
+    ("sqllocaldb", "bcrypt.dll", "Windows/System32"),
+    ("sqllocaldb", "bcryptprimitives.dll", "Windows/System32"),
+    ("sqllocaldb", "crypt32.dll", "Windows/System32"),
+    ("sqllocaldb", "dhcpcsvc.dll", "Windows/System32"),
+    ("sqllocaldb", "iphlpapi.dll", "Windows/System32"),
+    ("sqllocaldb", "mswsock.dll", "Windows/System32"),
+    ("sqllocaldb", "ncrypt.dll", "Windows/System32"),
+    ("sqllocaldb", "netapi32.dll", "Windows/System32"),
+    ("sqllocaldb", "odbc32.dll", "Windows/System32"),
+    ("sqllocaldb", "ole32.dll", "Windows/System32"),
+    ("sqllocaldb", "oleaut32.dll", "Windows/System32"),
+    ("sqllocaldb", "pdh.dll", "Windows/System32"),
+    ("sqllocaldb", "psapi.dll", "Windows/System32"),
+    ("sqllocaldb", "rpcrt4.dll", "Windows/System32"),
+    ("sqllocaldb", "secur32.dll", "Windows/System32"),
+    ("sqllocaldb", "shell32.dll", "Windows/System32"),
+    ("sqllocaldb", "shlwapi.dll", "Windows/System32"),
+    ("sqllocaldb", "urlmon.dll", "Windows/System32"),
+    ("sqllocaldb", "user32.dll", "Windows/System32"),
+    ("sqllocaldb", "userenv.dll", "Windows/System32"),
+    ("sqllocaldb", "version.dll", "Windows/System32"),
+    ("sqllocaldb", "webservices.dll", "Windows/System32"),
+    ("sqllocaldb", "winhttp.dll", "Windows/System32"),
+    ("sqllocaldb", "wininet.dll", "Windows/System32"),
+    ("sqllocaldb", "winmm.dll", "Windows/System32"),
+    ("sqllocaldb", "wintrust.dll", "Windows/System32"),
+    ("sqllocaldb", "ws2_32.dll", "Windows/System32"),
+    ("sqllocaldb", "xolehlp.dll", "Windows/System32"),
+    // The database engine as SqlLocalDB.msi installs it, with Microsoft's
+    // Visual C++ runtime app-local (the JDK's redistributable copies;
+    // LocalDB expects them installed system-wide).
+    ("sqllocaldb", "target/prebuilt/sqllocaldb/Binn/", "sql/Binn"),
+    ("sqllocaldb", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "sql/Binn"),
+    ("sqllocaldb", "target/prebuilt/jdk/jdk-21.0.5+11/bin/msvcp140.dll", "sql/Binn"),
+    ("sqllocaldb", "target/prebuilt/jdk/jdk-21.0.5+11/bin/vcruntime140.dll", "sql/Binn"),
+    ("sqllocaldb", "target/prebuilt/jdk/jdk-21.0.5+11/bin/vcruntime140_1.dll", "sql/Binn"),
+    ("sqllocaldb", "target/prebuilt/sqllocaldb/Shared/", "sql/Shared"),
+    // What the MSI writes to the registry.
+    ("sqllocaldb", "user/sqllocaldb/sqllocaldb.regseed", "registry"),
+    // The instance's databases: copies of the templates, as SqlLocalDB
+    // makes when it creates an instance.
+    ("sqllocaldb", "target/prebuilt/sqllocaldb/Binn/Templates/", "sql/data"),
     ("dotnet", "ntdll.dll", "Windows/System32"),
     ("dotnet", "kernel32.dll", "Windows/System32"),
     ("dotnet", "advapi32.dll", "Windows/System32"),
@@ -846,6 +967,8 @@ const USER_PROGRAMS: &[&str] = &[
     "bench",
     "kernel32_test",
     "missing_import_test",
+    "unimplemented_test",
+    "rpcrt4_test",
     "kernel32_sys_test",
     "kernel32_thread_test",
     "kernel32_sync_test",
@@ -897,7 +1020,7 @@ const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long scenario `name` may run.
 fn scenario_timeout(name: &str) -> Duration {
-    if name == "elasticsearch" {
+    if name == "elasticsearch" || name == "sqllocaldb" {
         ELASTICSEARCH_TIMEOUT
     } else if SLOW_SCENARIOS.contains(&name) {
         SLOW_TIMEOUT
@@ -1280,17 +1403,49 @@ fn fetch_prebuilt(path: &str) -> Result {
         let _ = fs::remove_file(&zip);
         return Err(format!("{}: SHA-256 mismatch ({sum})", p.url));
     }
-    let mut cmd = Command::new("unzip");
-    cmd.args(["-q", "-o"]).arg(&zip).args(p.members).arg("-d").arg(&dir);
-    if !p.excludes.is_empty() {
-        cmd.arg("-x").args(p.excludes);
+    if p.url.ends_with(".msi") {
+        unpack_msi(p, &zip, &dir)?;
+    } else {
+        let mut cmd = Command::new("unzip");
+        cmd.args(["-q", "-o"]).arg(&zip).args(p.members).arg("-d").arg(&dir);
+        if !p.excludes.is_empty() {
+            cmd.arg("-x").args(p.excludes);
+        }
+        run_cmd(&mut cmd)?;
     }
-    run_cmd(&mut cmd)?;
     let _ = fs::remove_file(&zip);
     if !full.exists() {
         return Err(format!("{path} is not in {}", p.url));
     }
     write(&done, p.url)
+}
+
+/// Unpacks the MSI `msi` (msitools' msiextract, the files laid out as
+/// Windows Installer would install them) and moves `p`'s member
+/// directories into `dir`, then removes the excludes.
+fn unpack_msi(p: &Prebuilt, msi: &Path, dir: &Path) -> Result {
+    let tree = dir.join("msi");
+    if tree.exists() {
+        fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))?;
+    }
+    fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
+    run_quiet(Command::new("msiextract").arg("-C").arg(&tree).arg(msi))
+        .map_err(|e| format!("{e} (msiextract is in msitools: apt install msitools)"))?;
+    for member in p.members {
+        let last = member.rsplit('/').next().unwrap_or(member);
+        let to = dir.join(last);
+        if to.exists() {
+            fs::remove_dir_all(&to).map_err(|e| format!("cleaning {to:?}: {e}"))?;
+        }
+        fs::rename(tree.join(member), &to).map_err(|e| format!("{member} in {}: {e}", p.url))?;
+    }
+    for exclude in p.excludes {
+        let path = dir.join(exclude);
+        let removed =
+            if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+        removed.map_err(|e| format!("excluding {exclude}: {e}"))?;
+    }
+    fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))
 }
 
 fn fetch_limine() -> Result<PathBuf> {
@@ -1388,7 +1543,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &["elasticsearch"];
+const PENDING: &[&str] = &["elasticsearch", "sqllocaldb"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -1476,7 +1631,11 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     // Elasticsearch: a 256 MiB heap pre-touched, its launcher's JVM, and
     // the files it writes on C: (in memory) need more than that; with
     // ~1.5 GiB it ran out of frames (Elastic asks for several GiB).
-    if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("elasticsearch")) {
+    // SQL Server LocalDB asks for about 1 GB, and its 280 MB of files are
+    // in memory too.
+    if iso.file_name().is_some_and(|n| {
+        ["elasticsearch", "sqllocaldb"].iter().any(|s| n.to_string_lossy().contains(s))
+    }) {
         memory = memory.max(ELASTICSEARCH_MEMORY_MIB);
     }
     let mut cmd = Command::new("qemu-system-x86_64");
@@ -1615,6 +1774,21 @@ const SCENARIOS: &[Scenario] = &[
             "missing_import_test.exe finished with status 0xc0000139",
             r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionOne","what":"missing export""#,
             r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionTwo","what":"missing export""#,
+        ],
+    },
+    Scenario {
+        name: "rpcrt4_test",
+        cmdline: "qemu_exit run=rpcrt4_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["rpcrt4_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "unimplemented_test",
+        cmdline: "qemu_exit run=unimplemented_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "unimplemented_test.exe finished with status 0xc0000002",
+            r#"ledger: {"service":"xolehlp.dll!DtcGetTransactionManagerExW","what":"not implemented""#,
         ],
     },
     Scenario {
@@ -2038,6 +2212,17 @@ const SCENARIOS: &[Scenario] = &[
             "pi=3.14159",
             "dotnet.exe finished with status 0x00000000",
         ],
+    },
+    Scenario {
+        // P1 step 5 (pending): SQL Server 2022 LocalDB's database engine,
+        // started directly as a console program (-c: not as a service),
+        // with the documented startup options naming the master database's
+        // files and the error log (sqlservr also echoes its log to the
+        // console), until it is ready for clients.
+        name: "sqllocaldb",
+        cmdline: "qemu_exit cwd=C:/sql/Binn run=sqlservr.exe args=-c%20-dC:\\sql\\data\\master.mdf%20-lC:\\sql\\data\\mastlog.ldf%20-eC:\\sql\\data\\ERRORLOG",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["SQL Server is now ready for client connections"],
     },
     Scenario {
         // P1 step 4 (pending): Elasticsearch 8.15 on the JDK, started as its

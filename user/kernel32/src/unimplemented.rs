@@ -1,0 +1,72 @@
+//! Exports SQL Server LocalDB imports that gala does not implement yet
+//! (`gala_stubs`): calling one reports `dll!function` to the ledger and
+//! ends the process.
+
+gala_stubs::unimplemented_exports!("kernel32.dll":
+    AllocateUserPhysicalPagesNuma
+    CheckTokenMembershipEx
+    CompareFileTime
+    CompareStringA
+    ConvertThreadToFiber
+    CreateFiber
+    CreateFileMappingNumaW
+    CreateNamedPipeW
+    CreateRemoteThreadEx
+    CreateTimerQueue
+    CreateTimerQueueTimer
+    DeleteTimerQueueEx
+    DeleteTimerQueueTimer
+    FileTimeToLocalFileTime
+    FindFirstChangeNotificationW
+    FindNextChangeNotification
+    GetActiveProcessorCount
+    GetNumaNodeProcessorMaskEx
+    GetPriorityClass
+    GetPrivateProfileStringW
+    GetProcessPriorityBoost
+    GetTapeParameters
+    GetTapePosition
+    GetTapeStatus
+    GetTempFileNameW
+    GetThreadIOPendingFlag
+    GetThreadPriorityBoost
+    GetVolumeNameForVolumeMountPointW
+    GetVolumePathNamesForVolumeNameW
+    GlobalSize
+    InitOnceBeginInitialize
+    InitOnceComplete
+    K32GetModuleBaseNameA
+    K32GetModuleBaseNameW
+    K32GetPerformanceInfo
+    LCMapStringA
+    LocalFileTimeToFileTime
+    MapUserPhysicalPagesScatter
+    MapViewOfFileExNuma
+    Module32FirstW
+    Module32NextW
+    OpenJobObjectW
+    PathCchCombine
+    PathCchRemoveExtension
+    PathCchRemoveFileSpec
+    PrepareTape
+    QueryDosDeviceW
+    QueueUserWorkItem
+    ReadFileScatter
+    RegisterWaitForSingleObject
+    ReplaceFileW
+    SetDllDirectoryW
+    SetFileIoOverlappedRange
+    SetFileValidData
+    SetNamedPipeHandleState
+    SetPriorityClass
+    SetProcessAffinityMask
+    SetProcessAffinityUpdateMode
+    SetTapeParameters
+    SetTapePosition
+    SetThreadPriorityBoost
+    TerminateJobObject
+    TransactNamedPipe
+    WaitNamedPipeW
+    WriteFileGather
+    WriteTapemark
+);

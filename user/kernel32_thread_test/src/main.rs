@@ -5,7 +5,8 @@
 //! thread), SuspendThread/ResumeThread counts, and redirecting a suspended
 //! thread with GetThreadContext/SetThreadContext (how Go preempts
 //! goroutines), and SetThreadPriority/GetThreadPriority (increments, the
-//! saturated values, an invalid one). Prints `kernel32_thread_test: ok` or
+//! saturated values, an invalid one), GetCurrentThreadStackLimits (the
+//! reserved stack: TEB DeallocationStack to StackBase). Prints `kernel32_thread_test: ok` or
 //! exits with the number of the failing check.
 
 #![no_std]
@@ -56,6 +57,7 @@ unsafe extern "system" {
     fn GetCurrentProcessorNumber() -> u32;
     fn FlushProcessWriteBuffers();
     fn IsThreadAFiber() -> Bool;
+    fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize);
     fn GetThreadTimes(
         h: Handle,
         creation: *mut u64,
@@ -195,6 +197,25 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         c.ok(GetCurrentProcessorNumber() < 64, GetCurrentProcessorNumber().into())?;
         FlushProcessWriteBuffers();
         c.eq(IsThreadAFiber() as u64, 0)?;
+        // The whole stack the system reserved: from the TEB's
+        // DeallocationStack (+0x1478) to its StackBase (+0x8), around
+        // the current stack pointer.
+        let (mut low, mut high) = (0usize, 0usize);
+        GetCurrentThreadStackLimits(&mut low, &mut high);
+        let (base, deallocation, sp): (usize, usize, usize);
+        core::arch::asm!(
+            "mov {b}, gs:[0x8]",
+            "mov {d}, gs:[0x1478]",
+            "mov {s}, rsp",
+            b = out(reg) base,
+            d = out(reg) deallocation,
+            s = out(reg) sp,
+            options(nostack, readonly)
+        );
+        c.eq(high as u64, base as u64)?;
+        c.ok(deallocation != 0, 0)?;
+        c.eq(low as u64, deallocation as u64)?;
+        c.ok(low < sp && sp < high, sp as u64)?;
         // Times: a creation time (100 ns since 1601), no exit time yet.
         let (mut creation, mut exit, mut kernel, mut user) = (0, 1, 0, 0);
         c.ok(

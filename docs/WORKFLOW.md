@@ -92,7 +92,20 @@ shows it.
   deleted when xorriso reports "exceeds free space".
 - **PREBUILT members** are unzip patterns (`*` crosses `/`), `excludes`
   are unzip `-x` patterns; the unpack marker includes a hash of both, so
-  changing them unpacks again.
+  changing them unpacks again. For an MSI (a `.msi` URL) members are
+  directories of the installed layout, each moved to
+  `target/prebuilt/<name>/<last component>`, and excludes are paths
+  removed after that; unpacking needs msitools (`apt install msitools`).
+- **A program imports functions gala lacks**: a missing export stops the
+  load (as on Windows), so add it to the DLL's `src/unimplemented.rs`
+  (`gala_stubs::unimplemented_exports!`) to get the program running; the
+  stub reports `dll!function` ("not implemented") and ends the process
+  with STATUS_NOT_IMPLEMENTED when called, so the ledger names the next
+  function to implement. Implementing one means removing it from that
+  list. List a program's missing imports by comparing its import tables
+  (`llvm-readobj --coff-imports`, through its own DLLs) with the
+  `--coff-exports` of `user/bin/test*.dll`, ordinals included (an export
+  with RVA 0 is an empty ordinal slot, not an export).
 
 - **Predefined registry keys are sign-extended on x64**: winreg.h
   defines HKEY_LOCAL_MACHINE as `(HKEY)(ULONG_PTR)((LONG)0x80000002)`,
@@ -255,7 +268,7 @@ Unmodified releases (Caddy, the JDK) are not kept in the repository: the
 `PREBUILT` table in xtask pins each one (URL, SHA-256, the files used
 from its zip), and a scenario module path `target/prebuilt/<name>/<file>`
 makes xtask download, check and unzip it on first use (curl, sha256sum,
-unzip; one fetch at a time, since ISOs are built in parallel, and a
+unzip, or msiextract for an MSI; one fetch at a time, since ISOs are built in parallel, and a
 `.unpacked-<sha256>` marker so an interrupted unpack is redone). To try a new prebuilt program before writing its scenario:
 `cargo xtask iso --file path/to/app.exe run=app.exe "args=..."` and boot
 it with QEMU (`-cpu max`), then follow the ledger and the program's own

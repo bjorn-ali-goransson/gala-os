@@ -464,6 +464,54 @@ pub extern "system" fn CompareStringW(
     compare(units(a, n), units(b, m), flags)
 }
 
+/// The NUL-terminated string at `s` (a null pointer is empty).
+fn c_units<'a>(s: *const u16) -> &'a [u16] {
+    if s.is_null() {
+        return &[];
+    }
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated string, read up to its NUL.
+    unsafe {
+        while *s.add(n) != 0 {
+            n += 1;
+        }
+        core::slice::from_raw_parts(s, n)
+    }
+}
+
+/// lstrlenW: the length in characters (0 for a null pointer).
+#[unsafe(no_mangle)]
+pub extern "system" fn lstrlenW(s: *const u16) -> i32 {
+    c_units(s).len() as i32
+}
+
+/// lstrlenA: the length in bytes (0 for a null pointer).
+#[unsafe(no_mangle)]
+pub extern "system" fn lstrlenA(s: *const u8) -> i32 {
+    if s.is_null() {
+        return 0;
+    }
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated string, read up to its NUL.
+    while unsafe { *s.add(n) } != 0 {
+        n += 1;
+    }
+    n as i32
+}
+
+/// lstrcmpW: the linguistic order of CompareStringW (user locale), as
+/// negative, zero or positive; a null pointer compares as empty.
+#[unsafe(no_mangle)]
+pub extern "system" fn lstrcmpW(a: *const u16, b: *const u16) -> i32 {
+    compare(c_units(a), c_units(b), 0) - CSTR_EQUAL
+}
+
+/// lstrcmpiW: lstrcmpW ignoring case.
+#[unsafe(no_mangle)]
+pub extern "system" fn lstrcmpiW(a: *const u16, b: *const u16) -> i32 {
+    compare(c_units(a), c_units(b), NORM_IGNORECASE) - CSTR_EQUAL
+}
+
 /// CompareStringEx(name, ...): CompareStringW for "en-US".
 #[unsafe(no_mangle)]
 pub extern "system" fn CompareStringEx(

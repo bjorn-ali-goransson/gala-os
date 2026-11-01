@@ -40,6 +40,7 @@ mod sync;
 mod sysmem;
 mod text;
 mod toolhelp;
+mod unimplemented;
 mod volume;
 
 type Bool = i32;
