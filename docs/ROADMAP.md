@@ -983,8 +983,17 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       password through SSH_ASKPASS). Next for sshd: an interactive shell
       (a pty: ConPTY), sftp. Security phase S5 done (2026-11-01,
       `restricted_test`): PostgreSQL's restricted token, deny-only groups,
-      SetTokenInformation, integrity levels with no-write-up. Next:
-      PostgreSQL. Open: the JDK's console path (GetConsoleMode succeeding
+      SetTokenInformation, integrity levels with no-write-up. PostgreSQL
+      17.2 begun (2026-11-01; pending `postgres` scenario: initdb, then
+      postgres on port 7, the host's psql queries it): EnterpriseDB's
+      binaries with the UCRT app-local; wldap32 (stubs) and wsock32
+      (forwarders), msvcrt's wcschr/_ultoa/fwprintf/fputwc/
+      _beginthreadex/_endthreadex/__dllonexit/__mb_cur_max,
+      SHGetFolderPathA, CreateProcessAsUserA, RtlGetLastNtStatus,
+      NtFlushBuffersFileEx. Both programs now start and stop at `_popen`:
+      the UCRT runs `cmd.exe /c`, and gala has no cmd.exe. Next: gala's
+      own cmd.exe (cmd /c with its documented quoting and redirections).
+      Open: the JDK's console path (GetConsoleMode succeeding
       on the standard handles made java_http fail intermittently).
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
       until gala has windows. FileZilla Server (mingw-built, a service)

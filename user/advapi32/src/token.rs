@@ -753,6 +753,69 @@ pub extern "system" fn CreateProcessAsUserW(
     )
 }
 
+/// CreateProcessAsUserA: kernel32's (see CreateProcessAsUserW), looked up
+/// process creation service), looked up at run time: an import of the
+/// same name would bind to this function itself.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn CreateProcessAsUserA(
+    token: usize,
+    application: *const u8,
+    command_line: *mut u8,
+    process_attributes: *mut c_void,
+    thread_attributes: *mut c_void,
+    inherit: i32,
+    flags: u32,
+    environment: *mut c_void,
+    directory: *const u8,
+    startup: *const u8,
+    info: *mut usize,
+) -> i32 {
+    #[link(name = "kernel32", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn GetModuleHandleA(name: *const u8) -> usize;
+        fn GetProcAddress(module: usize, name: *const u8) -> usize;
+    }
+    type Create = extern "system" fn(
+        usize,
+        *const u8,
+        *mut u8,
+        *mut c_void,
+        *mut c_void,
+        i32,
+        u32,
+        *mut c_void,
+        *const u8,
+        *const u8,
+        *mut usize,
+    ) -> i32;
+    // SAFETY: plain calls with NUL-terminated names.
+    let f = unsafe {
+        GetProcAddress(
+            GetModuleHandleA(c"kernel32.dll".as_ptr().cast()),
+            c"CreateProcessAsUserA".as_ptr().cast(),
+        )
+    };
+    if f == 0 {
+        return fail(127, 0); // ERROR_PROC_NOT_FOUND
+    }
+    // SAFETY: kernel32's CreateProcessAsUserA has this signature.
+    let create: Create = unsafe { core::mem::transmute(f) };
+    create(
+        token,
+        application,
+        command_line,
+        process_attributes,
+        thread_attributes,
+        inherit,
+        flags,
+        environment,
+        directory,
+        startup,
+        info,
+    )
+}
+
 /// SetTokenInformation(TokenHandle, TokenInformationClass,
 /// TokenInformation, TokenInformationLength): NtSetInformationToken
 /// (TokenOwner, TokenPrimaryGroup, TokenDefaultDacl, TokenSessionId,

@@ -8,7 +8,7 @@
 //! - comctl32: InitCommonControlsEx.
 //! - powrprof: CallNtPowerInformation(ProcessorInformation): one entry per
 //!   processor, numbered; STATUS_BUFFER_TOO_SMALL when short.
-//! - shell32: SHGetFolderPathW and SHGetKnownFolderPath name the profile
+//! - shell32: SHGetFolderPathW (and A) and SHGetKnownFolderPath name the profile
 //!   folders the environment names (USERPROFILE, APPDATA, LOCALAPPDATA)
 //!   and the Windows directory; an unknown CSIDL is E_INVALIDARG.
 //!   ShellExecuteW of a missing file: ERROR_FILE_NOT_FOUND (2).
@@ -128,6 +128,13 @@ unsafe extern "system" {
 
 #[link(name = "shell32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn SHGetFolderPathA(
+        window: Handle,
+        folder: i32,
+        token: Handle,
+        flags: u32,
+        path: *mut u8,
+    ) -> i32;
     fn SHGetFolderPathW(
         window: Handle,
         folder: i32,
@@ -384,6 +391,22 @@ fn shell(c: &mut Checks) -> Result<(), u32> {
         )?;
         GetWindowsDirectoryW(want.as_mut_ptr(), 260);
         c.ok(same(path.as_ptr(), want.as_ptr()), path[0].into())?;
+        // The ANSI one: the same path (ASCII here) in the ANSI code page.
+        let mut narrow = [0u8; 260];
+        c.eq(
+            SHGetFolderPathA(
+                core::ptr::null_mut(),
+                CSIDL_WINDOWS,
+                core::ptr::null_mut(),
+                0,
+                narrow.as_mut_ptr(),
+            ) as u64,
+            0,
+        )?;
+        c.ok(
+            (0..260).take_while(|&i| want[i] != 0).all(|i| u16::from(narrow[i]) == want[i]),
+            narrow[0].into(),
+        )?;
         c.eq(
             SHGetFolderPathW(
                 core::ptr::null_mut(),

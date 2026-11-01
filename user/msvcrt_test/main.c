@@ -7,7 +7,12 @@
  * constants with it); the math functions, strcoll, _difftime64, and
  * printf's %e/%g with msvcrt's three-digit exponents and 17 significant
  * digits (Lua prints numbers with %.14g); a fopen'd FILE's lock (_FILEX);
- * _open taking the lowest free descriptor (0 after closing stdin). Built against msvcrt (not mingw's own stdio) by build.sh.
+ * _open taking the lowest free descriptor (0 after closing stdin);
+ * what PostgreSQL's mingw-built DLLs (libintl, libiconv) use: wcschr,
+ * _ultoa, __mb_cur_max (1 in the C locale), fputwc/fwprintf to a
+ * narrow text stream, _beginthreadex/_endthreadex (the exit code) and
+ * __dllonexit (appending to a DLL's exit table). Built against msvcrt
+ * (not mingw's own stdio) by build.sh.
  * Prints "msvcrt_test: ok" or exits with the number of the failing check. */
 #include <stdio.h>
 #include <stdarg.h>
@@ -30,6 +35,18 @@
 #define _RC_NEAR 0
 #define _RC_CHOP 0x300
 unsigned int __cdecl _controlfp(unsigned int new_value, unsigned int mask);
+#endif
+
+#ifndef __TINYC__
+#include <process.h>
+#include <wchar.h>
+typedef void (__cdecl *exit_fn)(void);
+_onexit_t __cdecl __dllonexit(_onexit_t func, exit_fn **begin, exit_fn **end);
+static unsigned __stdcall thread_main(void *arg) {
+    _endthreadex(*(unsigned *)arg);
+    return 99; /* not reached */
+}
+static int __cdecl at_exit(void) { return 0; }
 #endif
 
 static int check;
@@ -217,6 +234,37 @@ int main(void) {
         }
         CHECK(strcmp(got, floats[i].want) == 0);
     }
+
+#ifndef __TINYC__
+    {
+        const wchar_t *w = L"abc";
+        CHECK(wcschr(w, L'b') == w + 1 && wcschr(w, L'z') == NULL && wcschr(w, 0) == w + 3);
+        char num[40];
+        CHECK(_ultoa(4000000000UL, num, 16) == num && strcmp(num, "ee6b2800") == 0);
+        CHECK(__mb_cur_max == 1);
+        FILE *wf = fopen("msvcrt_test_wide.txt", "w");
+        CHECK(wf != NULL);
+        CHECK(fwprintf(wf, L"%d-%ls", 5, L"x") == 3);
+        CHECK(fputwc(L'z', wf) == L'z');
+        fclose(wf);
+        wf = fopen("msvcrt_test_wide.txt", "r");
+        char back[16] = {0};
+        CHECK(wf != NULL && fread(back, 1, sizeof back - 1, wf) == 4 && strcmp(back, "5-xz") == 0);
+        fclose(wf);
+        remove("msvcrt_test_wide.txt");
+        unsigned code = 7, tid = 0;
+        HANDLE t = (HANDLE)_beginthreadex(NULL, 0, thread_main, &code, 0, &tid);
+        CHECK(t != NULL && tid != 0);
+        CHECK(WaitForSingleObject(t, 10000) == WAIT_OBJECT_0);
+        DWORD exit_code = 0;
+        CHECK(GetExitCodeThread(t, &exit_code) && exit_code == 7);
+        CloseHandle(t);
+        exit_fn *table = malloc(32 * sizeof *table), *begin = table, *end = table;
+        CHECK(__dllonexit(at_exit, &begin, &end) == at_exit);
+        CHECK(end - begin == 1 && (void *)begin[0] == (void *)at_exit);
+        free(begin);
+    }
+#endif
 
     printf("msvcrt_test: ok\n");
     return 0;

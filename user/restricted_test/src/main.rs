@@ -20,7 +20,8 @@
 //!   Administrators (D:(D;;FA;;;BA)(A;;FA;;;WD)) still denies a deny-only
 //!   Administrators.
 //! - A child started with CreateProcessAsUserW and the restricted token is
-//!   not an administrator (its CheckTokenMembership is FALSE).
+//!   not an administrator (its CheckTokenMembership is FALSE); also with
+//!   CreateProcessAsUserA.
 //! - Integrity: SetTokenInformation(TokenIntegrityLevel, Low) on a
 //!   duplicate; GetTokenInformation reads Low back; impersonating it, a
 //!   new file in C:\gala (no label: Medium) is denied (no write up) and
@@ -119,6 +120,20 @@ unsafe extern "system" {
         flags: u32,
         environment: *mut c_void,
         directory: *const u16,
+        startup: *const u8,
+        info: *mut [usize; 3],
+    ) -> Bool;
+    #[allow(clippy::too_many_arguments)]
+    fn CreateProcessAsUserA(
+        token: Handle,
+        application: *const u8,
+        command_line: *mut u8,
+        process_attributes: *mut c_void,
+        thread_attributes: *mut c_void,
+        inherit: Bool,
+        flags: u32,
+        environment: *mut c_void,
+        directory: *const u8,
         startup: *const u8,
         info: *mut [usize; 3],
     ) -> Bool;
@@ -479,6 +494,30 @@ fn run() -> Result<(), u32> {
         c.ok(r != 0, last_error())?;
         c.eq(u64::from(WaitForSingleObject(info[0] as Handle, 30_000)), 0)?;
         let mut code = 0;
+        c.ok(GetExitCodeProcess(info[0] as Handle, &mut code) != 0, 0)?;
+        c.eq(code.into(), CHILD_NOT_ADMIN.into())?;
+        CloseHandle(info[0] as Handle);
+        CloseHandle(info[1] as Handle);
+        // The same through CreateProcessAsUserA (initdb's way).
+        let mut narrow = [0u8; 300];
+        for (i, &ch) in line.iter().take_while(|&&ch| ch != 0).enumerate() {
+            narrow[i] = ch as u8;
+        }
+        let r = CreateProcessAsUserA(
+            restricted,
+            core::ptr::null(),
+            narrow.as_mut_ptr(),
+            null,
+            null,
+            0,
+            0,
+            null,
+            core::ptr::null(),
+            startup.as_ptr(),
+            &mut info,
+        );
+        c.ok(r != 0, last_error())?;
+        c.eq(u64::from(WaitForSingleObject(info[0] as Handle, 30_000)), 0)?;
         c.ok(GetExitCodeProcess(info[0] as Handle, &mut code) != 0, 0)?;
         c.eq(code.into(), CHILD_NOT_ADMIN.into())?;
         CloseHandle(info[0] as Handle);

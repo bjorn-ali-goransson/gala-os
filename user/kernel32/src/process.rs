@@ -452,6 +452,69 @@ pub extern "system" fn CreateProcessA(
     startup: *const u8,
     info: *mut usize,
 ) -> Bool {
+    create_process_a(
+        None,
+        application,
+        command_line,
+        process_attributes,
+        thread_attributes,
+        inherit,
+        flags,
+        environment,
+        directory,
+        startup,
+        info,
+    )
+}
+
+/// CreateProcessAsUserA: CreateProcessAsUserW with the strings converted.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn CreateProcessAsUserA(
+    token: Handle,
+    application: *const u8,
+    command_line: *mut u8,
+    process_attributes: *mut c_void,
+    thread_attributes: *mut c_void,
+    inherit: Bool,
+    flags: u32,
+    environment: *mut c_void,
+    directory: *const u8,
+    startup: *const u8,
+    info: *mut usize,
+) -> Bool {
+    create_process_a(
+        Some(token),
+        application,
+        command_line,
+        process_attributes,
+        thread_attributes,
+        inherit,
+        flags,
+        environment,
+        directory,
+        startup,
+        info,
+    )
+}
+
+/// The ANSI process creation functions: the strings as UTF-16, then
+/// CreateProcessW or (with a token) CreateProcessAsUserW. STARTUPINFOA has
+/// STARTUPINFOW's layout where it matters (dwFlags and the handles).
+#[allow(clippy::too_many_arguments)]
+fn create_process_a(
+    token: Option<Handle>,
+    application: *const u8,
+    command_line: *mut u8,
+    process_attributes: *mut c_void,
+    thread_attributes: *mut c_void,
+    inherit: Bool,
+    flags: u32,
+    environment: *mut c_void,
+    directory: *const u8,
+    startup: *const u8,
+    info: *mut usize,
+) -> Bool {
     let (mut app, mut line, mut dir) = ([0u16; 512], [0u16; 2048], [0u16; 512]);
     let convert = |s: *const u8, buf: &mut [u16]| -> Result<*const u16, u32> {
         if s.is_null() {
@@ -472,18 +535,33 @@ pub extern "system" fn CreateProcessA(
         Ok(p) => p,
         Err(e) => return fail_with(e, FALSE),
     };
-    CreateProcessW(
-        app_w,
-        line_w.cast_mut(),
-        process_attributes,
-        thread_attributes,
-        inherit,
-        flags,
-        environment,
-        dir_w,
-        startup,
-        info,
-    )
+    match token {
+        Some(token) => CreateProcessAsUserW(
+            token,
+            app_w,
+            line_w.cast_mut(),
+            process_attributes,
+            thread_attributes,
+            inherit,
+            flags,
+            environment,
+            dir_w,
+            startup,
+            info,
+        ),
+        None => CreateProcessW(
+            app_w,
+            line_w.cast_mut(),
+            process_attributes,
+            thread_attributes,
+            inherit,
+            flags,
+            environment,
+            dir_w,
+            startup,
+            info,
+        ),
+    }
 }
 
 /// GetModuleFileNameW: the executable's path (other modules: reported).

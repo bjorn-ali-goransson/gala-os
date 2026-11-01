@@ -12,7 +12,7 @@
 //! alertable wait, SleepEx returning WAIT_IO_COMPLETION, with error 0, the
 //! count and the OVERLAPPED; not before),
 //! GetVolumeNameForVolumeMountPointW (C:\'s \\?\Volume{GUID}\),
-//! RemoveDirectoryW, all inside the temporary directory. Prints
+//! RemoveDirectoryW, RtlGetLastNtStatus after a failure, NtFlushBuffersFileEx, all inside the temporary directory. Prints
 //! `kernel32_file_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -119,6 +119,18 @@ unsafe extern "system" {
     ) -> Bool;
     fn GetOverlappedResult(h: Handle, ov: *mut [usize; 4], count: *mut u32, wait: Bool) -> Bool;
     fn ExitProcess(code: u32) -> !;
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RtlGetLastNtStatus() -> u32;
+    fn NtFlushBuffersFileEx(
+        h: Handle,
+        flags: u32,
+        parameters: *const u8,
+        size: u32,
+        iosb: *mut [usize; 2],
+    ) -> u32;
 }
 
 #[allow(dead_code)]
@@ -326,6 +338,13 @@ fn run() -> Result<(), u32> {
         c.ok(GetFileTime(h, &mut created2, null, &mut written2) != 0, GetLastError().into())?;
         c.ok(created2 == JAN_2019 && written2 == JAN_2020, created2)?;
         c.ok(FlushFileBuffers(h) != 0, 0)?;
+        // ntdll's NtFlushBuffersFileEx (PostgreSQL's fdatasync): the data
+        // only (FLUSH_FLAGS_FILE_DATA_SYNC_ONLY); unknown flags are
+        // STATUS_INVALID_PARAMETER.
+        let mut iosb = [usize::MAX; 2];
+        c.eq(NtFlushBuffersFileEx(h, 4, core::ptr::null(), 0, &mut iosb).into(), 0)?;
+        c.eq(iosb[0] as u64, 0)?;
+        c.eq(NtFlushBuffersFileEx(h, 0x100, core::ptr::null(), 0, &mut iosb).into(), 0xc000_000d)?;
         c.ok(CloseHandle(h) != 0, 0)?;
 
         // Attributes by path.
@@ -343,6 +362,8 @@ fn run() -> Result<(), u32> {
             INVALID_FILE_ATTRIBUTES.into(),
         )?;
         c.eq(GetLastError().into(), ERROR_FILE_NOT_FOUND.into())?;
+        // The NTSTATUS behind it (TEB.LastStatusValue; PostgreSQL reads it).
+        c.eq(RtlGetLastNtStatus().into(), 0xc000_0034)?; // OBJECT_NAME_NOT_FOUND
         SetLastError(0);
         c.eq(
             GetFileAttributesW(Path::new(temp, b"gala_nodir\\missing").ptr()).into(),

@@ -113,6 +113,24 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["OpenSSH-Win64/*"],
         excludes: &["OpenSSH-Win64/_manifest/*"],
     },
+    // PostgreSQL 17.2, EnterpriseDB's Windows binaries zip. EDB publishes
+    // no checksum: the SHA-256 is the one we measured (THIRD_PARTY.md).
+    // The server and its tools, their DLLs and extension modules and the
+    // data initdb copies; not pgAdmin, StackBuilder, the documentation,
+    // headers, import libraries or translations.
+    Prebuilt {
+        name: "postgresql",
+        url: "https://get.enterprisedb.com/postgresql/postgresql-17.2-1-windows-x64-binaries.zip",
+        checksum: "115eb69fa92430f162bdda2eced073b60fed538715fb3a19ce0bb8c2d8738d01",
+        members: &["pgsql/bin/*", "pgsql/lib/*", "pgsql/share/*"],
+        excludes: &[
+            "pgsql/bin/wx*",
+            "pgsql/bin/stackbuilder.exe",
+            "pgsql/lib/*.lib",
+            "pgsql/lib/*.a",
+            "pgsql/share/locale/*",
+        ],
+    },
     // SQL Server 2022 Express LocalDB 16.0.1000.6 (SqlLocalDB.msi).
     // Microsoft publishes no checksum for it: the SHA-256 is the one we
     // measured (ROADMAP). Its license allows use to design, develop and
@@ -227,6 +245,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "userenv", file: "userenv.dll", exported_as: "testuserenv.dll" },
     Dll { package: "xolehlp", file: "xolehlp.dll", exported_as: "testxolehlp.dll" },
     Dll { package: "odbc32", file: "odbc32.dll", exported_as: "testodbc32.dll" },
+    Dll { package: "wldap32", file: "wldap32.dll", exported_as: "testwldap32.dll" },
+    Dll { package: "wsock32", file: "wsock32.dll", exported_as: "testwsock32.dll" },
     Dll { package: "authz", file: "authz.dll", exported_as: "testauthz.dll" },
     Dll { package: "wintrust", file: "wintrust.dll", exported_as: "testwintrust.dll" },
     Dll { package: "webservices", file: "webservices.dll", exported_as: "testwebservices.dll" },
@@ -738,6 +758,99 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // The instance's databases: copies of the templates, as SqlLocalDB
     // makes when it creates an instance.
     ("sqllocaldb", "target/prebuilt/sqllocaldb/Binn/Templates/", "sql/data"),
+    // PostgreSQL 17.2 as EnterpriseDB ships it, with the Visual C++ runtime
+    // app-local (the JDK's redistributable copies; it expects them installed).
+    ("postgres", "ntdll.dll", "Windows/System32"),
+    ("postgres", "kernel32.dll", "Windows/System32"),
+    ("postgres", "advapi32.dll", "Windows/System32"),
+    ("postgres", "bcrypt.dll", "Windows/System32"),
+    ("postgres", "bcryptprimitives.dll", "Windows/System32"),
+    ("postgres", "crypt32.dll", "Windows/System32"),
+    ("postgres", "msvcrt.dll", "Windows/System32"),
+    ("postgres", "secur32.dll", "Windows/System32"),
+    ("postgres", "shell32.dll", "Windows/System32"),
+    ("postgres", "user32.dll", "Windows/System32"),
+    ("postgres", "ws2_32.dll", "Windows/System32"),
+    ("postgres", "mswsock.dll", "Windows/System32"),
+    ("postgres", "userenv.dll", "Windows/System32"),
+    ("postgres", "wldap32.dll", "Windows/System32"),
+    ("postgres", "wsock32.dll", "Windows/System32"),
+    ("postgres", "target/prebuilt/postgresql/pgsql/", "pgsql"),
+    ("postgres", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "pgsql/bin"),
+    ("postgres", "target/prebuilt/jdk/jdk-21.0.5+11/bin/vcruntime140.dll", "pgsql/bin"),
+    ("postgres", "target/prebuilt/jdk/jdk-21.0.5+11/bin/vcruntime140_1.dll", "pgsql/bin"),
+    ("postgres", "target/prebuilt/jdk/jdk-21.0.5+11/bin/msvcp140.dll", "pgsql/bin"),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-convert-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-environment-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-filesystem-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-heap-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-locale-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-math-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-multibyte-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-runtime-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-stdio-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-string-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-time-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-utility-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-conio-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    (
+        "postgres",
+        "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-process-l1-1-0.dll",
+        "pgsql/bin",
+    ),
+    ("postgres", "user/postgres/pg_hba.conf", "gala"),
     ("dotnet", "ntdll.dll", "Windows/System32"),
     ("dotnet", "kernel32.dll", "Windows/System32"),
     ("dotnet", "advapi32.dll", "Windows/System32"),
@@ -1733,7 +1846,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
-const PENDING: &[&str] = &["elasticsearch", "sqllocaldb", "sshd"];
+const PENDING: &[&str] = &["elasticsearch", "postgres", "sqllocaldb", "sshd"];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault"];
@@ -1757,6 +1870,8 @@ enum NetClient {
     /// The same with galatest's password (`ssh_client`, through
     /// SSH_ASKPASS) and no key.
     SshPassword,
+    /// The host's psql runs `select 40+2` (`psql_client`).
+    Psql,
 }
 
 /// Scenarios that get a virtio-net card on QEMU's user-mode network, with
@@ -1774,6 +1889,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("nginx_tls", "using the \"select\" event method", NetClient::Tls),
     ("sshd_login", "Server listening on", NetClient::Ssh),
     ("sshd_password", "Server listening on", NetClient::SshPassword),
+    ("postgres", "database system is ready to accept connections", NetClient::Psql),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",
@@ -2437,6 +2553,17 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit as=system wait=all cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,-ddd%20-e%20-p%207",
         exit_status: XTASK_STOPS,
         expect: &["xtask: net client: ssh ok"],
+    },
+    Scenario {
+        // PostgreSQL 17.2 (EnterpriseDB's Windows binaries, PREBUILT):
+        // initdb makes a cluster in C:\\pgdata (trust authentication; it
+        // restarts itself with a restricted token, as pg_ctl does), then
+        // postgres serves it on port 7 with our pg_hba.conf (the host
+        // connects through QEMU's network); the host's psql queries it.
+        name: "postgres",
+        cmdline: "qemu_exit run=initdb.exe,postgres.exe args=-D%20C:/pgdata%20-U%20postgres%20-A%20trust%20-E%20UTF8%20--no-locale,-D%20C:/pgdata%20-p%207%20-c%20listen_addresses=*%20-c%20hba_file=C:/gala/pg_hba.conf",
+        exit_status: XTASK_STOPS,
+        expect: &["Success. You can now start the database server", "xtask: net client: psql ok"],
     },
     Scenario {
         // The same login with galatest's password (Win32-OpenSSH checks it
@@ -3544,6 +3671,7 @@ fn run_vm(
                 NetClient::Contains(parts) => contains_client(port, parts),
                 NetClient::Ssh => ssh_client(port, false),
                 NetClient::SshPassword => ssh_client(port, true),
+                NetClient::Psql => psql_client(port),
             }));
         }
         if stop_after_client && client.as_ref().is_some_and(|c| c.is_finished()) {
@@ -3586,6 +3714,7 @@ fn run_vm(
                     NetClient::Echo => "echo",
                     NetClient::Tls => "tls",
                     NetClient::Ssh | NetClient::SshPassword => "ssh",
+                    NetClient::Psql => "psql",
                     _ => "http",
                 }
             ),
@@ -3705,6 +3834,27 @@ const SSH_ECHO: &str = "gala-ssh-ok";
 /// user/sshd/client_ed25519 (galatest's authorized key) logs on as
 /// `galatest` and runs `echo gala-ssh-ok`; its verbose trace says how far
 /// it got.
+fn psql_client(port: u16) -> Result {
+    let out = Command::new("timeout")
+        .arg("120")
+        .arg("psql")
+        .args(["-h", "127.0.0.1", "-p", &port.to_string(), "-U", "postgres", "-d", "postgres"])
+        .args(["-w", "-tAc", "select 40+2"])
+        .env("PGCONNECT_TIMEOUT", "60")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("psql: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if out.status.success() && stdout.trim() == "42" {
+        return Ok(());
+    }
+    Err(format!(
+        "psql exit {:?}, stdout {stdout:?}, stderr {:?}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
 /// galatest's password (user/access_test/access_test.regseed has its hash).
 const SSH_PASSWORD: &str = "Gala-Test-1";
 

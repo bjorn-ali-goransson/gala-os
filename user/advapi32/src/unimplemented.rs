@@ -39,4 +39,10 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     StartServiceW
     StartTraceW
     UnlockServiceDatabase
+    CreateServiceA
+    CryptEncrypt
+    CryptGetHashParam
+    CryptHashData
+    DeleteService
+    LookupAccountSidA
 );

@@ -324,6 +324,11 @@ pub extern "C" fn ___mb_cur_max_func() -> i32 {
     1
 }
 
+/// __mb_cur_max: the exported variable behind MB_CUR_MAX (the C locale's:
+/// one byte).
+#[unsafe(no_mangle)]
+pub static __mb_cur_max: i32 = 1;
+
 /// strerror: the CRT's texts for the common errno values.
 /// perror(s): "s: <strerror(errno)>" on stderr (just the message if `s`
 /// is NULL or empty).
@@ -615,4 +620,111 @@ pub extern "C" fn mbstowcs(dst: *mut u16, src: *const u8, n: usize) -> usize {
         unsafe { *dst.add(count) = 0 };
     }
     count
+}
+
+/// wcschr(s, c): the first `c` in `s` (its terminator if `c` is 0).
+#[unsafe(no_mangle)]
+pub extern "C" fn wcschr(s: *const u16, c: u16) -> *mut u16 {
+    let mut i = 0;
+    loop {
+        // SAFETY: the caller's NUL-terminated wide string.
+        let x = unsafe { *s.add(i) };
+        if x == c {
+            return s.wrapping_add(i).cast_mut();
+        }
+        if x == 0 {
+            return null_mut();
+        }
+        i += 1;
+    }
+}
+
+/// _ultoa(value, buffer, radix): `value` (an unsigned long: 32 bits) in
+/// `radix` (2 to 36, lower-case digits).
+#[unsafe(no_mangle)]
+pub extern "C" fn _ultoa(value: u32, buf: *mut u8, radix: i32) -> *mut u8 {
+    if !(2..=36).contains(&radix) || buf.is_null() {
+        return buf;
+    }
+    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut tmp = [0u8; 33];
+    let (mut n, mut v) = (0, value);
+    loop {
+        tmp[n] = digits[(v % radix as u32) as usize];
+        n += 1;
+        v /= radix as u32;
+        if v == 0 {
+            break;
+        }
+    }
+    for i in 0..n {
+        // SAFETY: the caller's buffer (33 bytes suffice for any radix).
+        unsafe { *buf.add(i) = tmp[n - 1 - i] };
+    }
+    // SAFETY: as above.
+    unsafe { *buf.add(n) = 0 };
+    buf
+}
+
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn CreateThread(
+        attributes: *mut core::ffi::c_void,
+        stack: usize,
+        start: usize,
+        arg: *mut core::ffi::c_void,
+        flags: u32,
+        id: *mut u32,
+    ) -> *mut core::ffi::c_void;
+    fn ExitThread(code: u32) -> !;
+}
+
+/// _beginthreadex(security, stack_size, start_address, arglist,
+/// initflag, thrdaddr): CreateThread (the start routine has the same
+/// shape); 0 on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn _beginthreadex(
+    security: *mut core::ffi::c_void,
+    stack: u32,
+    start: usize,
+    arg: *mut core::ffi::c_void,
+    flags: u32,
+    id: *mut u32,
+) -> usize {
+    if start == 0 {
+        // SAFETY: errno.
+        unsafe { *crate::stdio::_errno() = 22 }; // EINVAL
+        return 0;
+    }
+    // SAFETY: a plain call with the caller's arguments.
+    unsafe { CreateThread(security, stack as usize, start, arg, flags, id) as usize }
+}
+
+/// _endthreadex(retval): ends the calling thread with that exit code.
+#[unsafe(no_mangle)]
+pub extern "C" fn _endthreadex(code: u32) -> ! {
+    // SAFETY: a plain call.
+    unsafe { ExitThread(code) }
+}
+
+/// __dllonexit(func, pbegin, pend): `_onexit` for a DLL's own table
+/// [*pbegin, *pend), grown with realloc; returns `func` (NULL if it
+/// cannot grow).
+#[unsafe(no_mangle)]
+pub extern "C" fn __dllonexit(func: usize, begin: *mut *mut usize, end: *mut *mut usize) -> usize {
+    if begin.is_null() || end.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's table pointers; the table came from malloc.
+    unsafe {
+        let count = ((*end) as usize - (*begin) as usize) / 8;
+        let grown = crate::heap::realloc((*begin).cast(), (count + 1) * 8).cast::<usize>();
+        if grown.is_null() {
+            return 0;
+        }
+        *grown.add(count) = func;
+        *begin = grown;
+        *end = grown.add(count + 1);
+    }
+    func
 }

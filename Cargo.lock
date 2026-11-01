@@ -1292,11 +1292,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "wldap32"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+]
+
+[[package]]
 name = "ws2_32"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
 ]
+
+[[package]]
+name = "wsock32"
+version = "0.1.0"
 
 [[package]]
 name = "xmllite"

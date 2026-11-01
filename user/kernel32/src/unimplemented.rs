@@ -66,4 +66,15 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     WriteConsoleOutputA
     WriteProcessMemory
     WriteTapemark
+    CallNamedPipeA
+    EnumResourceLanguagesA
+    GetCurrencyFormatEx
+    GetNLSVersionEx
+    GetNumberFormatEx
+    GetShortPathNameA
+    GetSystemTimeAdjustment
+    ResolveLocaleName
+    UnregisterWaitEx
+    CreateHardLinkA
+    RemoveDirectoryA
 );

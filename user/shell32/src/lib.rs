@@ -171,6 +171,41 @@ pub extern "system" fn SHGetFolderPathW(
     S_OK
 }
 
+/// SHGetFolderPathA: SHGetFolderPathW's path in the ANSI code page
+/// (UTF-8 on gala), into the caller's MAX_PATH buffer.
+#[unsafe(no_mangle)]
+pub extern "system" fn SHGetFolderPathA(
+    window: usize,
+    csidl: i32,
+    token: usize,
+    flags: u32,
+    path: *mut u8,
+) -> i32 {
+    if path.is_null() {
+        return E_INVALIDARG;
+    }
+    let mut wide = [0u16; MAX_PATH];
+    let r = SHGetFolderPathW(window, csidl, token, flags, wide.as_mut_ptr());
+    if r != S_OK {
+        return r;
+    }
+    let n = wide.iter().position(|&c| c == 0).unwrap_or(MAX_PATH);
+    let mut at = 0;
+    for c in char::decode_utf16(wide[..n].iter().copied()) {
+        let mut b = [0u8; 4];
+        let bytes = c.unwrap_or(char::REPLACEMENT_CHARACTER).encode_utf8(&mut b).as_bytes();
+        if at + bytes.len() >= MAX_PATH {
+            return E_INVALIDARG;
+        }
+        // SAFETY: inside the caller's MAX_PATH buffer.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), path.add(at), bytes.len()) };
+        at += bytes.len();
+    }
+    // SAFETY: as above.
+    unsafe { *path.add(at) = 0 };
+    S_OK
+}
+
 /// SHGetKnownFolderPath(id, flags, token, *path): the path in memory the
 /// caller frees (CoTaskMemFree; here from the process heap, which gala's
 /// CoTaskMemFree would free too).

@@ -1495,6 +1495,9 @@ Windows, never shadows the system's DLLs.)
   xolehlp, odbc32, authz, wintrust, webservices, dhcpcsvc) are nothing
   but such stubs so far, apart from rpcrt4's UUID functions
   (`rpcrt4_test`) and netapi32's NetWkstaGetInfo (`netapi32_test`).
+  wldap32 (PostgreSQL's LDAP functions) is stubs too, exported by
+  Windows' ordinals; wsock32 (Winsock 1.1) is only forwarders to ws2_32
+  with the standard ordinals (libxml2 imports by ordinal).
   GetProcAddress with a null module searches the executable. Delay-loaded
   imports are resolved by the program's own helper through
   GetProcAddress, so a stub shows up there as the delay-load exception

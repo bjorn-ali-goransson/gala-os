@@ -1552,6 +1552,40 @@ pub extern "C" fn _vsnwprintf(
     }
 }
 
+/// vfwprintf(file, fmt, args): the wide format's output written to a
+/// narrow stream in the ANSI code page (UTF-8 on gala), as msvcrt does
+/// for a stream not in a Unicode mode; the count of wide characters.
+#[unsafe(no_mangle)]
+pub extern "C" fn vfwprintf(file: *mut u8, fmt: *const u16, args: *const u64) -> i32 {
+    let mut narrow_fmt = [0u8; 1024];
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated wide format.
+    unsafe {
+        while *fmt.add(n) != 0 && n < narrow_fmt.len() - 1 {
+            narrow_fmt[n] = (*fmt.add(n)).min(0x7f) as u8;
+            n += 1;
+        }
+    }
+    let mut text = [0u8; 2048];
+    let mut out = Out { sink: Sink::Bytes { ptr: text.as_mut_ptr(), cap: text.len() }, total: 0 };
+    format(&mut out, &narrow_fmt[..n], Args(args), true);
+    let produced = out.total.min(text.len());
+    if fwrite(text.as_ptr(), 1, produced, file) != produced {
+        return -1;
+    }
+    core::str::from_utf8(&text[..produced]).map_or(produced, |s| s.encode_utf16().count()) as i32
+}
+
+/// fputwc(c, file): the character in the ANSI code page (UTF-8); `c`, or
+/// WEOF on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn fputwc(c: u16, file: *mut u8) -> u16 {
+    let ch = char::from_u32(u32::from(c)).unwrap_or(char::REPLACEMENT_CHARACTER);
+    let mut b = [0u8; 4];
+    let bytes = ch.encode_utf8(&mut b).as_bytes();
+    if fwrite(bytes.as_ptr(), 1, bytes.len(), file) == bytes.len() { c } else { 0xffff }
+}
+
 // fprintf(file, fmt, ...): rcx = file, rdx = fmt, r8/r9 and the stack =
 // the variadic arguments. Spill rdx, r8, r9 to the caller's home area, so
 // [rsp+24] (r8's slot) starts the va_list, then vfprintf(file, fmt, list).
@@ -1587,6 +1621,17 @@ core::arch::global_asm!(
     "call {_vsnprintf}",
     "add rsp, 40",
     "ret",
+    // fwprintf(file, fmt, ...): fprintf's shape.
+    ".globl fwprintf",
+    "fwprintf:",
+    "mov [rsp+16], rdx",
+    "mov [rsp+24], r8",
+    "mov [rsp+32], r9",
+    "lea r8, [rsp+24]",
+    "sub rsp, 40",
+    "call {vfwprintf}",
+    "add rsp, 40",
+    "ret",
     ".globl printf",
     "printf:",
     "mov [rsp+8], rcx",
@@ -1599,6 +1644,7 @@ core::arch::global_asm!(
     "add rsp, 40",
     "ret",
     vfprintf = sym vfprintf,
+    vfwprintf = sym vfwprintf,
     vsprintf = sym vsprintf,
     vprintf = sym vprintf,
     _vsnprintf = sym _vsnprintf,

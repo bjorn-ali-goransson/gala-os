@@ -11,4 +11,8 @@ gala_stubs::unimplemented_exports!("ws2_32.dll":
     WSAStringToAddressW
     inet_ntop
     inet_pton
+    WSAAccept
+    WSAConnect
+    WSADuplicateSocketA
+    WSAWaitForMultipleEvents
 );

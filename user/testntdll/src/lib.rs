@@ -1351,10 +1351,48 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0225, 1168), // NOT_FOUND -> ERROR_NOT_FOUND
 ];
 
+/// TEB.LastStatusValue (x64 offset 0x1250): the NTSTATUS behind the
+/// thread's last error.
+const TEB_LAST_STATUS: usize = 0x1250;
+
+/// NtFlushBuffersFileEx(FileHandle, Flags, Parameters, ParametersSize,
+/// *IoStatusBlock): NtFlushBuffersFile (gala's volume is in memory, so the
+/// FLUSH_FLAGS_FILE_DATA_ONLY / NO_SYNC / FILE_DATA_SYNC_ONLY variants are
+/// all the same); other flags or parameters are STATUS_INVALID_PARAMETER.
+#[unsafe(no_mangle)]
+pub extern "system" fn NtFlushBuffersFileEx(
+    h: usize,
+    flags: u32,
+    parameters: *const u8,
+    size: u32,
+    iosb: *mut [usize; 2],
+) -> u32 {
+    if flags & !7 != 0 || !parameters.is_null() || size != 0 {
+        return 0xc000_000d;
+    }
+    NtFlushBuffersFile(h, iosb)
+}
+
+/// RtlGetLastNtStatus(): TEB.LastStatusValue.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlGetLastNtStatus() -> u32 {
+    let v: u32;
+    // SAFETY: the current thread's TEB (gs), a 4-byte field.
+    unsafe {
+        core::arch::asm!("mov {:e}, gs:[{}]", out(reg) v, const TEB_LAST_STATUS, options(nostack, readonly))
+    };
+    v
+}
+
 /// RtlNtStatusToDosError(Status): the Win32 error for an NTSTATUS
-/// (ERROR_MR_MID_NOT_FOUND, 317, for statuses without one).
+/// (ERROR_MR_MID_NOT_FOUND, 317, for statuses without one). As Windows'
+/// does, it keeps `status` in TEB.LastStatusValue (RtlGetLastNtStatus).
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlNtStatusToDosError(status: u32) -> u32 {
+    // SAFETY: the current thread's TEB (gs), a 4-byte field.
+    unsafe {
+        core::arch::asm!("mov gs:[{}], {:e}", const TEB_LAST_STATUS, in(reg) status, options(nostack))
+    };
     if (0xc000_00ef..=0xc000_00fa).contains(&status) {
         return 87; // STATUS_INVALID_PARAMETER_1..12
     }
