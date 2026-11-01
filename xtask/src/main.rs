@@ -2330,6 +2330,7 @@ const SCENARIOS: &[Scenario] = &[
             "tds_test: row: [Microsoft SQL Server 2022",
             "[GALA\\gala]",
             "RANU instance is terminating",
+            "tds_test: second start",
             "tds_test: ok",
         ],
     },

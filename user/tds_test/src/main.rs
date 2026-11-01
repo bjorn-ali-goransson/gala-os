@@ -12,8 +12,11 @@
 //! - SQL_BATCH (with the ALL_HEADERS transaction descriptor) `SELECT
 //!   @@VERSION, SUSER_SNAME()`: COLMETADATA, ROW (NVARCHAR) and DONE;
 //!   prints the row;
-//! - disconnects and waits for sqlservr.exe to end itself after its idle
-//!   time (`-w1`).
+//! - waits for tempdb to be online (the first start upgrades model and
+//!   msdb first), disconnects and waits for sqlservr.exe to end itself
+//!   after its idle time (`-w1`);
+//! - then starts the same instance again as SqlLocalDB starts an existing
+//!   one (without the first-start arguments) and does the same.
 //!
 //! Prints `tds_test: ok` or exits with the number of the failing step.
 
@@ -191,7 +194,12 @@ fn wide(text: &str, buf: &mut [u16]) -> usize {
 
 const PIPE: &str = "\\\\.\\pipe\\LOCALDB#GALA0001\\tsql\\query";
 const SQLSERVR: &str = "C:\\sql\\Binn\\sqlservr.exe";
-const ARGS: &str = "sqlservr.exe -m -K -T1617 -w1 -c -SMSSQL16E.LOCALDB -sLOCALDB#GALA0001 \
+/// An instance's first start (SqlUserInstance.dll's extra arguments).
+const FIRST_START: &str = "sqlservr.exe -m -K -T1617 -w1 -c -SMSSQL16E.LOCALDB \
+     -sLOCALDB#GALA0001 -dC:\\sql\\data\\master.mdf -lC:\\sql\\data\\mastlog.ldf \
+     -eC:\\sql\\data\\ERRORLOG";
+/// A later start of the same instance (no -m -K -T1617; -w1 to end soon).
+const START: &str = "sqlservr.exe -w1 -c -SMSSQL16E.LOCALDB -sLOCALDB#GALA0001 \
      -dC:\\sql\\data\\master.mdf -lC:\\sql\\data\\mastlog.ldf -eC:\\sql\\data\\ERRORLOG";
 
 // TDS packet types ([MS-TDS] 2.2.3.1.1).
@@ -317,10 +325,10 @@ impl Conn {
 }
 
 /// Starts sqlservr.exe; its process handle.
-fn start_server() -> Result<Handle, u32> {
+fn start_server(args: &str) -> Result<Handle, u32> {
     let (mut app, mut cmd, mut dir) = ([0u16; 64], [0u16; 512], [0u16; 32]);
     wide(SQLSERVR, &mut app);
-    wide(ARGS, &mut cmd);
+    wide(args, &mut cmd);
     wide("C:\\sql\\Binn", &mut dir);
     let startup = StartupInfo { cb: 104, reserved: [0; 100] };
     let mut info = ProcessInformation {
@@ -753,13 +761,37 @@ fn batch(c: &mut Conn, sql: &str, step: u32) -> Result<Seen, u32> {
     tokens(r.bytes())
 }
 
-fn run() -> Result<(), u32> {
-    let server = start_server()?;
-    let pipe = connect()?;
-    out(b"tds_test: connected\r\n");
-    let mut c = Conn { pipe, packet_id: 1 };
-    prelogin(&mut c)?;
-    login(&mut c)?;
+/// One start of the instance with command line `args`: connect, log in,
+/// query, wait for tempdb, disconnect, and wait for sqlservr.exe to end
+/// itself after its idle time (`-w1`). (SHUTDOWN is accepted, but
+/// sqlservr then fails while terminating: ROADMAP.)
+fn session(args: &str, label: &[u8]) -> Result<(), u32> {
+    out(b"tds_test: ");
+    out(label);
+    out(b"\r\n");
+    let server = start_server(args)?;
+    // Until the server is ready it refuses logins (error 17187, "not
+    // ready to accept new client connections") and drops the connection:
+    // try again, as clients do.
+    let mut attempt = 0;
+    let (pipe, mut c) = loop {
+        let pipe = connect()?;
+        out(b"tds_test: connected\r\n");
+        let mut c = Conn { pipe, packet_id: 1 };
+        match prelogin(&mut c).and_then(|()| login(&mut c)) {
+            Ok(()) => break (pipe, c),
+            Err(step) if attempt < 60 => {
+                // SAFETY: our handle; a plain call.
+                unsafe {
+                    CloseHandle(pipe);
+                    Sleep(2000);
+                }
+                attempt += 1;
+                let _ = step;
+            }
+            Err(step) => return Err(step),
+        }
+    };
     let seen = batch(&mut c, "SELECT @@VERSION, SUSER_SNAME()", 30)?;
     if let Some(e) = seen.error {
         return Err(fail(32, b"query failed", e));
@@ -767,13 +799,29 @@ fn run() -> Result<(), u32> {
     if seen.rows != 1 || !seen.done {
         return Err(fail(33, b"rows", seen.rows));
     }
-    // Disconnect; the instance ends itself after its idle time (-w1).
-    // (SHUTDOWN is accepted, but sqlservr then fails while terminating:
-    // ROADMAP.)
+    // The instance has finished starting when tempdb is online (a first
+    // start upgrades model and msdb first).
+    let mut online = false;
+    for _ in 0..240 {
+        let seen = batch(
+            &mut c,
+            "SELECT name FROM sys.databases WHERE name = 'tempdb' AND state = 0",
+            34,
+        )?;
+        if seen.rows == 1 {
+            online = true;
+            break;
+        }
+        // SAFETY: a plain call.
+        unsafe { Sleep(500) };
+    }
+    if !online {
+        return Err(fail(36, b"tempdb not online", 0));
+    }
     // SAFETY: our handles.
     unsafe {
         CloseHandle(pipe);
-        if WaitForSingleObject(server, 180_000) != 0 {
+        if WaitForSingleObject(server, 240_000) != 0 {
             return Err(fail(42, b"sqlservr did not exit", 0));
         }
         let mut code = 0;
@@ -784,6 +832,11 @@ fn run() -> Result<(), u32> {
         CloseHandle(server);
     }
     Ok(())
+}
+
+fn run() -> Result<(), u32> {
+    session(FIRST_START, b"first start of the instance")?;
+    session(START, b"second start")
 }
 
 #[unsafe(no_mangle)]

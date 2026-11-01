@@ -850,15 +850,31 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
         (FSCTL_PIPE_IMPERSONATE), SECPKG_ATTR_NEGOTIATION_INFO/PACKAGE_INFO,
         GetSidIdentifierAuthority and the token's groups
         (TokenGroupsAndPrivileges and friends: before, the login failed
-        with error 18452 "untrusted domain"). Left: `SHUTDOWN` is accepted
-        ("Server shut down by request from login GALA\gala") but sqlservr
-        then dies with "exception during stack unwinding" (ex_terminator;
-        it starts SqlDumper, which cannot load: 0xc0000135) - to be
-        traced (exception dispatch during C++ unwinding); the plain
-        second start of an instance; the service master key (error 21);
-        GetActualSectorSize on new files; FSCTL_FILESYSTEM_GET_STATISTICS.
-        After those, P1 step 5 is done; then (agreed order) the programs
-        that need the security model and a disk. Also seen: netapi32's NetShareGetInfo and
+        with error 18452 "untrusted domain"). Then (ninth pass)
+        the second start: `tds_test` now starts the instance twice - its
+        first start as above, and then as SqlLocalDB starts an existing
+        instance (no `-m -K -T1617`) - each time connecting (retrying while
+        the server refuses logins with error 17187, "not ready"), querying,
+        waiting for tempdb to be online, disconnecting and waiting for the
+        instance to end itself after `-w1`; the second start recovers in a
+        few seconds and answers too (about 150 s for the scenario).
+        **P1 step 5 is done** but for `SHUTDOWN`: it is accepted ("Server
+        shut down by request from login GALA\gala") also once the
+        instance is fully up, but then sqlservr dies with "exception
+        during stack unwinding" (ex_terminator; it starts SqlDumper, which
+        cannot load: 0xc0000135). A probe in gala's exception dispatcher
+        saw only SQL's exception 0x42AC and two C++ exceptions
+        (0xE06D7363) raised there, so a C++ exception thrown or rethrown
+        while another is in flight (in a catch block or a destructor)
+        makes vcruntime140 call terminate: to be reproduced with a C++
+        test program (clang targeting x86_64-pc-windows-msvc against
+        vcruntime140) and fixed in gala's dispatch/unwind. Also open, not
+        fatal: the startup assertion HadrWsfcUtil.cpp:516 'fSuccess' (a
+        dump at every start, cause unknown), the service master key
+        (error 21), GetActualSectorSize on new files (error 3),
+        FSCTL_FILESYSTEM_GET_STATISTICS (17053), the CLR (6511: no
+        mscoree.dll). Next (agreed order): choose the programs that need
+        the security model and a disk. Also seen: netapi32's NetShareGetInfo and
         NetValidatePasswordPolicy (looked up), FSCTL_FILESYSTEM_GET_STATISTICS
         (error 17053, goes on), CoCreateInstance of a class not
         registered, NtQuerySystemInformation class 192.
