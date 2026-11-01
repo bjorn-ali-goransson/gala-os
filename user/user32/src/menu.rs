@@ -59,6 +59,12 @@ struct Menu {
     popup: bool,
     count: usize,
     items: [Item; MAX_ITEMS],
+    /// MENUINFO: style, maximum height, background brush, help id, data.
+    style: u32,
+    max_height: u32,
+    background: usize,
+    help_id: u32,
+    data: usize,
 }
 
 struct Table {
@@ -725,4 +731,95 @@ pub fn window_destroyed(hwnd: Hwnd) {
             }
         }
     });
+}
+
+/// MENUINFO (x64 layout).
+#[repr(C)]
+pub struct MenuInfo {
+    size: u32,
+    mask: u32,
+    style: u32,
+    max_height: u32,
+    background: usize,
+    help_id: u32,
+    data: usize,
+}
+
+const MIM_MAXHEIGHT: u32 = 0x1;
+const MIM_BACKGROUND: u32 = 0x2;
+const MIM_HELPID: u32 = 0x4;
+const MIM_MENUDATA: u32 = 0x8;
+const MIM_STYLE: u32 = 0x10;
+const MIM_APPLYTOSUBMENUS: u32 = 0x8000_0000;
+
+/// SetMenuInfo: the fields the mask names (MIM_APPLYTOSUBMENUS: to the
+/// submenus too).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetMenuInfo(h: usize, info: *const MenuInfo) -> i32 {
+    if info.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's MENUINFO.
+    let mi = unsafe { &*info };
+    if mi.size as usize != size_of::<MenuInfo>() {
+        crate::window::set_last_error(87);
+        return 0;
+    }
+    fn apply(s: &mut State, h: usize, mi: &MenuInfo, depth: u32) -> bool {
+        let Some(m) = s.menu(h) else { return false };
+        if mi.mask & MIM_STYLE != 0 {
+            m.style = mi.style;
+        }
+        if mi.mask & MIM_MAXHEIGHT != 0 {
+            m.max_height = mi.max_height;
+        }
+        if mi.mask & MIM_BACKGROUND != 0 {
+            m.background = mi.background;
+        }
+        if mi.mask & MIM_HELPID != 0 {
+            m.help_id = mi.help_id;
+        }
+        if mi.mask & MIM_MENUDATA != 0 {
+            m.data = mi.data;
+        }
+        if mi.mask & MIM_APPLYTOSUBMENUS != 0 && depth < 16 {
+            let count = m.count;
+            for k in 0..count {
+                let sub = s.menu(h).map_or(0, |m| m.items[k].submenu);
+                if sub != 0 {
+                    apply(s, sub, mi, depth + 1);
+                }
+            }
+        }
+        true
+    }
+    with(|s| i32::from(apply(s, h, mi, 0)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetMenuInfo(h: usize, info: *mut MenuInfo) -> i32 {
+    if info.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's MENUINFO.
+    let mi = unsafe { &mut *info };
+    with(|s| {
+        let Some(m) = s.menu(h) else { return 0 };
+        if mi.mask & MIM_STYLE != 0 {
+            mi.style = m.style;
+        }
+        if mi.mask & MIM_MAXHEIGHT != 0 {
+            mi.max_height = m.max_height;
+        }
+        if mi.mask & MIM_BACKGROUND != 0 {
+            mi.background = m.background;
+        }
+        if mi.mask & MIM_HELPID != 0 {
+            mi.help_id = m.help_id;
+        }
+        if mi.mask & MIM_MENUDATA != 0 {
+            mi.data = m.data;
+        }
+        1
+    })
 }

@@ -34,7 +34,7 @@ fn norm(x: i32, y: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
 /// A ternary raster operation's result for pattern `p`, source `s` and
 /// destination `d` (bitwise): the operation's index (bits 16-23) is the
 /// truth table over (P, S, D).
-fn rop3(rop: u32, p: u32, s: u32, d: u32) -> u32 {
+pub(crate) fn rop3(rop: u32, p: u32, s: u32, d: u32) -> u32 {
     let table = (rop >> 16) & 0xff;
     let mut out = 0;
     for i in 0..8 {

@@ -2193,6 +2193,14 @@ A small window manager and shell, in the kernel for now.
   controls themselves.
 - **Scrolling**: ScrollWindow/ScrollWindowEx move the children (no
   rectangle / SW_SCROLLCHILDREN) and repaint the client area.
+- **Keyboard layout** (`keyboard.rs`, US English): VkKeyScanW,
+  MapVirtualKeyW (virtual keys, set 1 scan codes, characters),
+  GetKeyboardLayout. **Accelerators** (`accel.rs`): HACCEL tables
+  (create, copy, destroy, RT_ACCELERATOR resources); TranslateAcceleratorW
+  turns a matching key down (with the modifiers held now) or character
+  into WM_COMMAND (high word 1). **RECT helpers** (`rect.rs`) with their
+  documented edge cases. Menus also keep MENUINFO (SetMenuInfo/
+  GetMenuInfo, MIM_APPLYTOSUBMENUS).
 - **Menus** (`user/user32/src/menu.rs`): HMENU objects as data, each in
   a page of its own (64 items: string, separator or popup; id, MF state,
   type, item data, bitmap), with the documented results of Append/
@@ -2243,7 +2251,13 @@ A small window manager and shell, in the kernel for now.
   advance; italic slant, underline, strike-out; TextOut alignment
   (TA_RIGHT/CENTER, TA_BOTTOM/BASELINE) and OPAQUE backgrounds;
   GetTextMetricsW/GetTextExtentPoint32W/GetTextFaceW from the same
-  metrics.
+  metrics. Palettes (`palette.rs`) are kept, selected and queried but
+  change nothing on the true-colour display (RealizePalette maps 0
+  entries, GetNearestColor is the colour); DEFAULT_PALETTE is stock. DIBs
+  in program memory (`dib.rs`): GetDIBits (the header query; rows out as
+  1, 24 or 32 bits), SetDIBits, SetDIBitsToDevice and StretchDIBits read
+  1/4/8 bits with palettes, 16 bits as 5-5-5, 24 and 32, either row
+  order. GdiFlush: nothing is batched.
 
 Invariants and limits (TODO): composition runs under the desktop's
 IrqMutex with interrupts off (a full-screen redraw is ~1M pixels; drags

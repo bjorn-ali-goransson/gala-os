@@ -260,7 +260,7 @@ pub fn create_child(
             parent,
             id,
             ex_style,
-            enabled: style & WS_DISABLED == 0,
+            disabled: style & WS_DISABLED != 0,
             z: next_z(true),
             instance: instance as usize,
             ..NO_WINDOW
@@ -375,7 +375,7 @@ pub fn route(top: Hwnd, message: u32, lparam: isize) -> (Hwnd, isize) {
                 let w = &s.windows[k];
                 let (l, t) = (ox + w.x, oy + w.y);
                 if w.visible && x >= l && y >= t && x < l + w.cw && y < t + w.ch {
-                    if !w.enabled {
+                    if w.disabled {
                         break 'down;
                     }
                     at = hwnd_of(k);
@@ -655,7 +655,7 @@ pub extern "system" fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize {
         GWL_STYLE => {
             (w.style
                 | if w.visible { 0x1000_0000 } else { 0 }
-                | if w.enabled { 0 } else { WS_DISABLED }) as i32 as isize
+                | if w.disabled { WS_DISABLED } else { 0 }) as i32 as isize
         }
         GWL_EXSTYLE => w.ex_style as i32 as isize,
         GWLP_USERDATA => w.user_data,
@@ -799,7 +799,7 @@ pub extern "system" fn GetWindowTextLengthA(hwnd: Hwnd) -> i32 {
 pub extern "system" fn EnableWindow(hwnd: Hwnd, enable: i32) -> i32 {
     let Some(i) = index_of(hwnd) else { return 0 };
     let Some(was) = with(|s| {
-        s.windows[i].used.then(|| core::mem::replace(&mut s.windows[i].enabled, enable != 0))
+        s.windows[i].used.then(|| !core::mem::replace(&mut s.windows[i].disabled, enable == 0))
     }) else {
         return 0;
     };
@@ -811,7 +811,7 @@ pub extern "system" fn EnableWindow(hwnd: Hwnd, enable: i32) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn IsWindowEnabled(hwnd: Hwnd) -> i32 {
-    i32::from(window(hwnd).is_some_and(|w| w.enabled))
+    i32::from(window(hwnd).is_some_and(|w| !w.disabled))
 }
 
 // ---- Position and size ----

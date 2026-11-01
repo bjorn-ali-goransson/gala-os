@@ -5,11 +5,14 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod accel;
 mod hook;
 mod icon;
+mod keyboard;
 mod menu;
 mod message;
 mod monitor;
+mod rect;
 mod spi;
 mod timer;
 mod tree;

@@ -122,7 +122,9 @@ pub(crate) struct Window {
     /// A child's id (CreateWindowEx's hMenu).
     pub(crate) id: usize,
     pub(crate) ex_style: u32,
-    pub(crate) enabled: bool,
+    /// Disabled (EnableWindow FALSE, WS_DISABLED). Kept negative so an
+    /// unused slot is all zeros (the table goes in .bss, not the DLL).
+    pub(crate) disabled: bool,
     /// Z order among siblings: smaller is higher (children are added at
     /// the bottom, top-level windows at the top).
     pub(crate) z: i64,
@@ -179,7 +181,7 @@ pub(crate) const NO_WINDOW: Window = Window {
     parent: 0,
     id: 0,
     ex_style: 0,
-    enabled: true,
+    disabled: false,
     z: 0,
     instance: 0,
 };
@@ -207,7 +209,7 @@ static SHARED: Shared = Shared {
         classes: [NO_CLASS; MAX_CLASSES],
         windows: [NO_WINDOW; MAX_WINDOWS],
         queue: [Queued { used: false, thread: 0, msg: NO_MSG }; QUEUE],
-        next_atom: 0xc000,
+        next_atom: 0,
     }),
 };
 
@@ -463,7 +465,8 @@ pub extern "system" fn RegisterClassExW(wc: *const WndClassExW) -> u16 {
             return Err(ERROR_CLASS_ALREADY_EXISTS);
         }
         let Some(i) = s.classes.iter().position(|c| !c.used) else { return Err(8) };
-        let atom = s.next_atom;
+        // Class atoms start at 0xC000 (kept as an offset: zero-initialized).
+        let atom = 0xc000 + s.next_atom;
         s.next_atom += 1;
         s.classes[i] = Class {
             used: true,
@@ -633,7 +636,7 @@ pub extern "system" fn CreateWindowExW(
             parent: 0,
             id: 0,
             ex_style,
-            enabled: true,
+            disabled: false,
             z: crate::tree::next_z(false),
             instance: instance as usize,
         };

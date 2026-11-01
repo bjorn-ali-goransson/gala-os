@@ -15,8 +15,10 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod dib;
 mod draw;
 mod font;
+mod palette;
 mod surface;
 mod unimplemented;
 
@@ -114,6 +116,8 @@ pub(crate) struct Dc {
     /// part of the surface it may draw on (its visible rectangle).
     pub base: (i32, i32),
     pub bounds: [i32; 4],
+    /// The selected palette (slot).
+    pub palette: usize,
 }
 
 impl Dc {
@@ -156,14 +160,27 @@ impl Dc {
     }
 }
 
+/// `repr(u8)` with Free first: an unused slot is all zeros, so the table
+/// goes in .bss instead of the DLL's data.
 #[derive(Clone, Copy)]
+#[repr(u8)]
 pub(crate) enum Object {
-    Free,
-    Brush { color: u32, null: bool },
-    Pen { color: u32, null: bool, width: i32, style: i32 },
+    Free = 0,
+    Brush {
+        color: u32,
+        null: bool,
+    },
+    Pen {
+        color: u32,
+        null: bool,
+        width: i32,
+        style: i32,
+    },
     Font(LogFont),
     Bitmap(Bitmap),
     Dc(Dc),
+    /// An index into the palette store.
+    Palette(usize),
 }
 
 struct Table {
@@ -182,6 +199,12 @@ static TABLE: Table = Table {
     stock: UnsafeCell::new([0; STOCK]),
     ready: UnsafeCell::new(false),
 };
+
+/// How many stock objects the table starts with (the default palette
+/// goes after them).
+const fn objects_len() -> usize {
+    17
+}
 
 /// The default bitmap's one pixel.
 static mut DEFAULT_PIXEL: u32 = 0;
@@ -235,6 +258,11 @@ pub(crate) fn with<R>(f: impl FnOnce(&mut [Object; SLOTS], &[usize; STOCK]) -> R
                 slots[slot] = object;
                 stock[index] = slot;
             }
+            // DEFAULT_PALETTE: the 20 static colours' first and last
+            // (black, white) are what matters on a true-colour display.
+            let next = objects_len();
+            slots[next] = Object::Palette(usize::MAX);
+            stock[15] = next;
             *TABLE.ready.get() = true;
         }
         f(slots, stock)
@@ -321,6 +349,7 @@ fn new_dc(kind: DcKind, surface: Surface, bitmap: usize) -> Handle {
         align: 0,
         base: (0, 0),
         bounds: [i32::MIN, i32::MIN, i32::MAX, i32::MAX],
+        palette: with(|_, stock| stock[15]),
     }))
 }
 
@@ -572,6 +601,16 @@ pub extern "system" fn DeleteObject(h: Handle) -> i32 {
         if stock.contains(&i) {
             return Some(None);
         }
+        if let Object::Palette(p) = slots[i]
+            && p != usize::MAX
+        {
+            if slots.iter().any(|o| matches!(o, Object::Dc(d) if d.palette == i)) {
+                return None;
+            }
+            slots[i] = Object::Free;
+            palette::free(p);
+            return Some(None);
+        }
         if let Object::Bitmap(b) = slots[i] {
             if slots
                 .iter()
@@ -637,6 +676,7 @@ pub extern "system" fn GetObjectType(h: Handle) -> u32 {
         Object::Dc(_) => 3,
         Object::Font(_) => 6,
         Object::Bitmap(_) => 7,
+        Object::Palette(_) => 5,
     })
 }
 
@@ -714,6 +754,10 @@ pub extern "system" fn GetObjectW(h: Handle, size: i32, out: *mut u8) -> i32 {
                 return give(out, size, &buf[..104]);
             }
             give(out, size, &buf[..32])
+        }
+        Object::Palette(p) => {
+            let count = if p == usize::MAX { 20u16 } else { palette::count(p) };
+            give(out, size, &count.to_le_bytes())
         }
         Object::Dc(_) | Object::Free => 0,
     }

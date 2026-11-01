@@ -12,7 +12,6 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     CreateDIBitmap
     CreateEnhMetaFileW
     CreateHatchBrush
-    CreatePalette
     CreatePatternBrush
     CreatePolygonRgn
     CreateRectRgn
@@ -28,18 +27,14 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     ExtFloodFill
     ExtSelectClipRgn
     ExtTextOutW
-    GdiFlush
     GetCharABCWidthsW
     GetClipBox
     GetDIBColorTable
-    GetDIBits
     GetEnhMetaFileHeader
     GetEnhMetaFileW
     GetGraphicsMode
     GetMetaFileBitsEx
-    GetNearestPaletteIndex
     GetOutlineTextMetricsW
-    GetPaletteEntries
     GetRegionData
     GetRgnBox
     GetSystemPaletteEntries
@@ -58,11 +53,9 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     Polygon
     Polyline
     PtInRegion
-    RealizePalette
     RectInRegion
     RoundRect
     SelectClipRgn
-    SelectPalette
     SetBrushOrgEx
     SetDIBColorTable
     SetGraphicsMode
@@ -76,5 +69,4 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     SetWinMetaFileBits
     SetWindowExtEx
     SetWorldTransform
-    StretchDIBits
 );

@@ -16,8 +16,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     ChangeDisplaySettingsExW
     ChildWindowFromPoint
     ChildWindowFromPointEx
-    CopyRect
-    CreateAcceleratorTableW
     CreateCaret
     CreateDialogIndirectParamW
     CreateDialogParamW
@@ -36,7 +34,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     DdeQueryStringW
     DdeUninitialize
     DeferWindowPos
-    DestroyAcceleratorTable
     DestroyCaret
     DrawEdge
     DrawFocusRect
@@ -72,19 +69,13 @@ gala_stubs::unimplemented_exports!("user32.dll":
     GetWindowDC
     GetWindowThreadProcessId
     HideCaret
-    InflateRect
     IsClipboardFormatAvailable
     IsDialogMessageW
-    IsRectEmpty
     IsZoomed
-    LoadAcceleratorsW
     LoadBitmapW
     LoadCursorFromFileW
-    MapVirtualKeyW
     NotifyWinEvent
-    OffsetRect
     PostThreadMessageW
-    PtInRect
     RedrawWindow
     RegisterClipboardFormatW
     RegisterHotKey
@@ -93,9 +84,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     SetCursorPos
     SetForegroundWindow
     SetLayeredWindowAttributes
-    SetMenuInfo
-    SetRect
-    SetRectEmpty
     SetScrollInfo
     SetWindowPlacement
     SetWindowRgn
@@ -103,12 +91,9 @@ gala_stubs::unimplemented_exports!("user32.dll":
     ShowCursor
     ToUnicode
     TrackPopupMenu
-    TranslateAcceleratorW
-    UnionRect
     UnregisterClassW
     UnregisterHotKey
     ValidateRgn
-    VkKeyScanW
     WaitForInputIdle
     WindowFromPoint
     keybd_event

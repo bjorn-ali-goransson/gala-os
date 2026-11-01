@@ -22,7 +22,8 @@
  *   MENUITEMINFOW (cch: the length without the NUL when asked with no
  *   buffer); ModifyMenuW; RemoveMenu keeps a submenu, DeleteMenu and
  *   DestroyMenu destroy it; SetMenu/GetMenu/DrawMenuBar; GetSystemMenu
- *   (the same menu each time, with SC_CLOSE).
+ *   (the same menu each time, with SC_CLOSE); SetMenuInfo/GetMenuInfo
+ *   keep the style and menu data (MIM_APPLYTOSUBMENUS reaches submenus).
  * - RegisterWindowMessageW: a message in 0xC000-0xFFFF, the same for the
  *   same name in any case, another for another name.
  * - Child windows (WS_CHILD): GetParent, GetDlgCtrlID/GetDlgItem (the id
@@ -52,6 +53,17 @@
  * - uxtheme with themes off (classic): IsAppThemed/IsThemeActive FALSE,
  *   OpenThemeData NULL, GetThemeSysColor(NULL) the system colour,
  *   SetWindowTheme S_OK.
+ * - The keyboard layout (US): VkKeyScanW gives the virtual key and the
+ *   shift state ('a' -> 'A', 'A' -> Shift+'A', '!' -> Shift+'1', none:
+ *   -1); MapVirtualKeyW between virtual keys, scan codes and characters.
+ * - Accelerators: CreateAcceleratorTableW; CopyAcceleratorTableW (the
+ *   count with no buffer, the entries back); TranslateAcceleratorW turns a
+ *   matching WM_KEYDOWN into WM_COMMAND (high word 1) and returns TRUE, a
+ *   key that needs Ctrl (not held) does not match; DestroyAcceleratorTable.
+ * - The RECT helpers: SetRect/SetRectEmpty/IsRectEmpty, IntersectRect
+ *   (empty: zeroed, FALSE), UnionRect, InflateRect, OffsetRect, PtInRect
+ *   (right and bottom edges outside), EqualRect, SubtractRect (only when
+ *   a whole side is covered).
  * - Timers: SetTimer for a window returns its id; WM_TIMER (wParam the
  *   id) comes no sooner than the interval, after posted messages;
  *   KillTimer returns TRUE once. A window-less timer with a TIMERPROC
@@ -112,6 +124,7 @@ static LRESULT CALLBACK cbt(int code, WPARAM wparam, LPARAM lparam) {
 
 static HWND watched;
 static LPARAM last_size, last_move;
+static WPARAM last_command;
 static int destroy_order[4], destroys;
 static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     wndproc_messages++;
@@ -119,6 +132,8 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpara
         last_size = lparam;
     if (hwnd == watched && msg == WM_MOVE)
         last_move = lparam;
+    if (msg == WM_COMMAND)
+        last_command = wparam;
     if (msg == WM_DESTROY && destroys < 4)
         destroy_order[destroys++] = (int)(INT_PTR)GetWindowLongPtrW(hwnd, GWLP_ID);
     return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -317,6 +332,10 @@ static void menus(void) {
     CHECK(sys != NULL && GetSystemMenu(w, FALSE) == sys);
     CHECK(GetMenuState(sys, SC_CLOSE, MF_BYCOMMAND) != (UINT)-1);
     CHECK(SetMenu(w, NULL) && GetMenu(w) == NULL);
+    MENUINFO mi = {sizeof mi, MIM_STYLE | MIM_MENUDATA | MIM_APPLYTOSUBMENUS, MNS_NOTIFYBYPOS, 0, NULL, 0, 77};
+    CHECK(SetMenuInfo(bar, &mi));
+    MENUINFO got = {sizeof got, MIM_STYLE | MIM_MENUDATA};
+    CHECK(GetMenuInfo(file, &got) && got.dwStyle == MNS_NOTIFYBYPOS && got.dwMenuData == 77);
     CHECK(DestroyMenu(bar) && !IsMenu(bar) && !IsMenu(file));
     DestroyWindow(w);
 }
@@ -456,6 +475,38 @@ int main(void) {
     menus();
     children();
     icons();
+    RECT ra, rb, rc;
+    CHECK(SetRect(&ra, 0, 0, 10, 10) && SetRect(&rb, 5, 5, 15, 15) && !IsRectEmpty(&ra));
+    CHECK(IntersectRect(&rc, &ra, &rb) && rc.left == 5 && rc.right == 10);
+    SetRect(&rb, 20, 20, 30, 30);
+    CHECK(!IntersectRect(&rc, &ra, &rb) && IsRectEmpty(&rc) && rc.left == 0 && rc.right == 0);
+    CHECK(UnionRect(&rc, &ra, &rb) && rc.left == 0 && rc.right == 30 && rc.bottom == 30);
+    CHECK(InflateRect(&ra, 2, 3) && ra.left == -2 && ra.bottom == 13 && OffsetRect(&ra, 2, 3) && ra.left == 0);
+    POINT in = {0, 0}, edge = {14, 5};
+    CHECK(PtInRect(&ra, in) && !PtInRect(&ra, edge) && EqualRect(&ra, &ra));
+    SetRect(&ra, 0, 0, 10, 10);
+    SetRect(&rb, -1, -1, 11, 4);
+    CHECK(SubtractRect(&rc, &ra, &rb) && rc.top == 4 && rc.bottom == 10 && rc.left == 0);
+    SetRect(&rb, 2, 2, 4, 4);
+    CHECK(SubtractRect(&rc, &ra, &rb) && EqualRect(&rc, &ra));
+    CHECK(SetRectEmpty(&ra) && IsRectEmpty(&ra));
+    ACCEL keys[2] = {{FVIRTKEY | FCONTROL, 'O', 100}, {FVIRTKEY, VK_F5, 101}};
+    HACCEL acc = CreateAcceleratorTableW(keys, 2);
+    CHECK(acc != NULL && CopyAcceleratorTableW(acc, NULL, 0) == 2);
+    ACCEL back[2];
+    CHECK(CopyAcceleratorTableW(acc, back, 2) == 2 && back[1].key == VK_F5 && back[1].cmd == 101);
+    HWND aw = CreateWindowExW(0, L"User32TestHooks", L"accel", WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, NULL, NULL,
+                              GetModuleHandleW(NULL), NULL);
+    MSG key = {aw, WM_KEYDOWN, VK_F5, 0};
+    CHECK(TranslateAcceleratorW(aw, acc, &key) && last_command == MAKEWPARAM(101, 1));
+    MSG ctrl_o = {aw, WM_KEYDOWN, 'O', 0};
+    CHECK(!TranslateAcceleratorW(aw, acc, &ctrl_o));
+    CHECK(DestroyAcceleratorTable(acc));
+    DestroyWindow(aw);
+    CHECK(VkKeyScanW(L'a') == 'A' && VkKeyScanW(L'A') == 0x141 && VkKeyScanW(L'!') == 0x131);
+    CHECK(VkKeyScanW(L' ') == 0x20 && VkKeyScanW(L';') == 0xba && VkKeyScanW(0x263a) == -1);
+    CHECK(MapVirtualKeyW('A', MAPVK_VK_TO_VSC) == 0x1e && MapVirtualKeyW(0x1e, MAPVK_VSC_TO_VK) == 'A');
+    CHECK(MapVirtualKeyW('A', MAPVK_VK_TO_CHAR) == 'A' && MapVirtualKeyW(VK_OEM_1, MAPVK_VK_TO_CHAR) == ';');
     CHECK(!IsAppThemed() && !IsThemeActive());
     HWND tw = CreateWindowExW(0, L"User32TestHooks", L"themes", WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, NULL, NULL,
                               GetModuleHandleW(NULL), NULL);

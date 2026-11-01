@@ -81,6 +81,17 @@ shows it.
 
 ## Things that are easy to get wrong
 
+- A DLL's static tables go in its data section (copied into every
+  process that loads it) unless their initial value is all zero bytes:
+  give "empty" slots zero fields (`disabled` rather than `enabled: true`,
+  offsets rather than a base like 0xC000) and data-carrying enums
+  `#[repr(u8)]` with the empty variant 0. `llvm-objdump -h` shows the
+  .data size (user32's was 212 KB, gdi32's 156 KB, both now ~0).
+- A scenario that runs many processes (a database, a runtime) can pass
+  alone and hit BOOT_TEST_TIMEOUT under the full suite (2-3x slower);
+  its client then reports a dropped connection, not a timeout. Look at
+  "timed out after" first; such scenarios go in SLOW_SCENARIOS.
+
 - A DLL that exports a function under the name of one it calls in
   another DLL (ncrypt's BCryptGenRandom, which Windows forwards to
   bcrypt) cannot import that name with `raw-dylib`: the linker binds the

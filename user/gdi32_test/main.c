@@ -25,6 +25,16 @@
  *   a bigger font measures bigger. GetTextFaceW gives the face name.
  *   GetObjectType says OBJ_FONT; GetCurrentObject(OBJ_FONT) is the font.
  *
+ * - Palettes: CreatePalette keeps the entries (GetObjectType OBJ_PAL,
+ *   GetObjectW: the entry count as a WORD, GetPaletteEntries,
+ *   GetNearestPaletteIndex); SelectPalette returns the previous one (the
+ *   stock DEFAULT_PALETTE first); RealizePalette does not fail;
+ *   GetNearestColor on a true-colour DC is the colour.
+ * - DIBs: GetDIBits with no buffer and biBitCount 0 fills in the header
+ *   (size, 32 bits); with a buffer it copies rows in the format asked
+ *   (bottom-up: the last line first; a negative height: top-down);
+ *   SetDIBits writes a 24-bit DIB's rows; SetDIBitsToDevice and
+ *   StretchDIBits draw a DIB (the latter scaled); GdiFlush succeeds.
  * - kernel32's MulDiv (font sizes): rounded half away from zero, -1 for a
  *   zero divisor or overflow.
  *
@@ -149,12 +159,83 @@ static void fonts(void) {
     DeleteDC(screen);
 }
 
+static void palettes(void) {
+    struct { WORD version, count; PALETTEENTRY entries[2]; } lp = {0x300, 2, {{255, 0, 0, 0}, {0, 255, 0, 0}}};
+    HPALETTE pal = CreatePalette((LOGPALETTE *)&lp);
+    CHECK(pal != NULL && GetObjectType(pal) == OBJ_PAL);
+    WORD count = 0;
+    CHECK(GetObjectW(pal, sizeof count, &count) == sizeof count && count == 2);
+    PALETTEENTRY back[2];
+    CHECK(GetPaletteEntries(pal, 0, 2, back) == 2 && back[1].peGreen == 255 && back[1].peRed == 0);
+    CHECK(GetNearestPaletteIndex(pal, RGB(0, 250, 0)) == 1 && GetNearestPaletteIndex(pal, RGB(240, 5, 5)) == 0);
+    HDC dc = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
+    HPALETTE old = SelectPalette(dc, pal, FALSE);
+    CHECK(old != NULL && old == GetStockObject(DEFAULT_PALETTE));
+    CHECK(RealizePalette(dc) != GDI_ERROR);
+    CHECK(GetNearestColor(dc, RGB(12, 34, 56)) == RGB(12, 34, 56));
+    CHECK(SelectPalette(dc, old, FALSE) == pal);
+    CHECK(DeleteObject(pal));
+    DeleteDC(dc);
+}
+
+static void dibs(void) {
+    HDC screen = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
+    HDC mem = CreateCompatibleDC(screen);
+    HBITMAP bmp = CreateCompatibleBitmap(screen, 4, 2);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    SetPixel(mem, 0, 0, RGB(10, 0, 0));
+    SetPixel(mem, 0, 1, RGB(0, 20, 0));
+    SelectObject(mem, old);
+
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    CHECK(GetDIBits(mem, bmp, 0, 2, NULL, &bi, DIB_RGB_COLORS) != 0);
+    CHECK(bi.bmiHeader.biWidth == 4 && bi.bmiHeader.biHeight == 2 && bi.bmiHeader.biBitCount == 32);
+    DWORD px[8];
+    bi.bmiHeader.biCompression = BI_RGB;
+    CHECK(GetDIBits(mem, bmp, 0, 2, px, &bi, DIB_RGB_COLORS) == 2);
+    CHECK((px[0] & 0xffffff) == 0x001400 && (px[4] & 0xffffff) == 0x0a0000); /* bottom line first */
+    bi.bmiHeader.biHeight = -2;
+    CHECK(GetDIBits(mem, bmp, 0, 2, px, &bi, DIB_RGB_COLORS) == 2);
+    CHECK((px[0] & 0xffffff) == 0x0a0000);
+
+    /* A 24-bit bottom-up DIB: rows padded to 4 bytes (4 * 3 = 12). */
+    BYTE rgb[24] = {0};
+    rgb[0] = 0xff;                      /* bottom-left: blue */
+    rgb[12 + 3 + 2] = 0xff;             /* top, second pixel: red */
+    bi.bmiHeader.biHeight = 2;
+    bi.bmiHeader.biBitCount = 24;
+    CHECK(SetDIBits(mem, bmp, 0, 2, rgb, &bi, DIB_RGB_COLORS) == 2);
+    SelectObject(mem, bmp);
+    CHECK(GetPixel(mem, 0, 1) == RGB(0, 0, 255) && GetPixel(mem, 1, 0) == RGB(255, 0, 0));
+
+    /* Drawing a DIB: 2 x 1, 32 bits. */
+    DWORD two[2] = {0x00112233, 0x00445566};
+    BITMAPINFO b2 = {0};
+    b2.bmiHeader.biSize = sizeof b2.bmiHeader;
+    b2.bmiHeader.biWidth = 2;
+    b2.bmiHeader.biHeight = 1;
+    b2.bmiHeader.biPlanes = 1;
+    b2.bmiHeader.biBitCount = 32;
+    CHECK(SetDIBitsToDevice(mem, 2, 1, 2, 1, 0, 0, 0, 1, two, &b2, DIB_RGB_COLORS) == 1);
+    CHECK(GetPixel(mem, 2, 1) == RGB(0x11, 0x22, 0x33) && GetPixel(mem, 3, 1) == RGB(0x44, 0x55, 0x66));
+    CHECK(StretchDIBits(mem, 0, 0, 4, 2, 0, 0, 2, 1, two, &b2, DIB_RGB_COLORS, SRCCOPY) != 0);
+    CHECK(GetPixel(mem, 1, 1) == RGB(0x11, 0x22, 0x33) && GetPixel(mem, 3, 0) == RGB(0x44, 0x55, 0x66));
+    CHECK(GdiFlush());
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    DeleteDC(screen);
+}
+
 int main(void) {
     CHECK(MulDiv(10, 3, 4) == 8 && MulDiv(-10, 3, 4) == -8 && MulDiv(9, 96, 72) == 12);
     CHECK(MulDiv(1, 1, 0) == -1 && MulDiv(0x7fffffff, 2, 1) == -1 && MulDiv(7, 1, 2) == 4);
     display_dc();
     bitmaps();
     fonts();
+    palettes();
+    dibs();
     printf("gdi32_test: ok\n");
     return 0;
 }
