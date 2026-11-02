@@ -1518,7 +1518,30 @@ R. **Robustness and live update, kernel included** (the owner's
    - R5. **Deterministic simulation in gala-um**: time and thread
      interleaving from a seed, so a flaky concurrency failure repeats
      from its seed (as FoundationDB and TigerBeetle do). Needs R1's
-     single clock.
+     single clock. **Built (2026-11-02)**: `um --sim=<seed>`
+     (ARCHITECTURE "Deterministic simulation"): one NT thread at a time,
+     the seed choosing at system call entry and exit, waits, yields and
+     IrqMutex releases (uniform choice on odd seeds, PCT-style
+     priorities on even ones); virtual time (the `Clock` seam, the tick
+     callback, RDTSC/RDTSCP trapped); `sim: seed S trace H` at the end;
+     deadlocks reported with the seed and every thread's wait. `cargo
+     xtask sim-test` (16 multi-threaded programs, 4 seeds, twice each;
+     `--all`: all 88 gala-um programs). Host unit tests for the
+     scheduler and the clock (`kernel/src/sim.rs`).
+     Results: same seed, same trace for every program but Go's; traces
+     differ across seeds for every program whose system calls can
+     interleave. Sweeps (88 programs x 16 seeds, and the 16
+     multi-threaded ones x 100 seeds, each twice) found no deadlock or
+     wrong result in the NT layer; what they found was in the simulation
+     itself (fixed before commit): a zero interrupt time at start (Go:
+     "nanotime returning zero"), threads spinning in program code
+     (`Sleep(1)` pollers starved: the watchdog now jumps time to the
+     next deadline and runs another thread), and starvation under
+     priorities (demotion on yields and long runs).
+     Next: RDRAND from the seed (CPUID faulting to hide it, ProcessPrng
+     fed by the kernel) so Go programs repeat; preemption in program
+     code by instruction count (perf counters, as rr) instead of the
+     host-timed watchdog.
    - R6. **Charging resources to an owner**: pages, kernel pool and
      handles charged to a process and its job: the commit limit, job
      memory limits, STATUS_QUOTA_EXCEEDED, the program using too much

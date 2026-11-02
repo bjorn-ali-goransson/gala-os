@@ -40,6 +40,9 @@ pub mod nt;
 pub mod platform;
 pub mod sched;
 mod selftest;
+/// Deterministic simulation's scheduler and clock (gala-um `--sim`).
+#[cfg(any(test, feature = "hosted"))]
+pub mod sim;
 pub mod sync;
 pub mod time;
 

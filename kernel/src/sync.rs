@@ -114,16 +114,33 @@ impl<T: Default> Default for IrqMutex<T> {
 /// fault.
 #[cfg(any(test, feature = "hosted"))]
 mod host_cpu {
+    /// gala-um's simulation (`--sim`) counts the locks a thread holds, as
+    /// the kernel's interrupt flag does: when the last is released, a
+    /// pending "timer interrupt" may preempt the thread there
+    /// (`hosted::sim::lock_point`). Otherwise nothing.
     pub fn disable_interrupts() -> bool {
+        #[cfg(feature = "hosted")]
+        if crate::hosted::sim::on() {
+            crate::hosted::sim::lock_taken();
+            return true;
+        }
         false
     }
-    pub fn enable_interrupts() {}
+    pub fn enable_interrupts() {
+        #[cfg(feature = "hosted")]
+        crate::hosted::sim::lock_released();
+    }
     /// In gala-um the holder is a host thread the host may deschedule
     /// (the kernel's holders run with interrupts off): spinning would keep
     /// it from finishing, so give the processor away.
     pub fn lock_contended() {
         #[cfg(feature = "hosted")]
-        std::thread::yield_now();
+        {
+            if crate::hosted::sim::on() {
+                crate::hosted::sim::lock_contended();
+            }
+            std::thread::yield_now();
+        }
     }
 }
 

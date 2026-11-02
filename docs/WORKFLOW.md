@@ -740,7 +740,8 @@ Run a program directly:
 `--module` adds a file to C: as a boot module would (DLLs under their
 `test*` names in user/bin), `--trace` logs every system call, `--cpus`
 caps the processors (um-test uses 2, as QEMU), `--failpoint=`,
-`--failseed=` and `--failtrace` inject failures ("Fault injection"). The kernel's log goes to
+`--failseed=` and `--failtrace` inject failures ("Fault injection"),
+`--sim=<seed>` runs it deterministically ("Deterministic simulation"). The kernel's log goes to
 stderr, the program's output to stdout. When a program passes in QEMU
 but not in gala-um, or the other way round, one of the two platforms is
 wrong; `cargo xtask report` lists such programs. Program code must stay
@@ -790,6 +791,38 @@ backtrace, and the program's own symptom (a status, a hang) follows:
   that allocates (a std collection, a thread, printing) needs the guard,
   or a sweep aborts with "memory allocation of N bytes failed" in host
   code.
+
+## Deterministic simulation (reproducing a race from its seed)
+
+`cargo xtask sim-test` runs the multi-threaded test programs in gala-um's
+simulation (`um --sim=<seed>`, ARCHITECTURE "Deterministic simulation")
+under seeds 1..4, each twice; `--seeds 40` explores more, `--all` takes
+every gala-um program, a filter picks programs. A failing run is
+reported with its seed, its log (`target/failed/sim-<program>-<seed>-
+<run>.log`) and the um command line that repeats it exactly:
+
+    target/debug/um --cpus=2 --sim=17 --module=... user/bin/pipe_test.exe ''
+
+- Add `--trace` to that line to see every system call with its thread:
+  the same seed gives the same sequence each time, so print-debugging
+  and `gdb` (`handle SIGSYS nostop noprint`, `handle SIGURG nostop
+  noprint`, `handle SIGSEGV nostop noprint`: RDTSC faults on purpose)
+  see the same interleaving. Adding log lines does not change it (the
+  NT layer's own output takes no scheduling decision).
+- Changing the NT layer changes the interleavings a seed makes (a new
+  lock, a new system call is a new decision): keep the seed in the bug
+  report, and after a fix check the seed passes and a sweep
+  (`--seeds 40`) still does.
+- `DEADLOCK` (um exits with 4): the dump lists every simulated thread
+  (state, deadline) and the NT layer's view (each thread's system call
+  and the objects it waits on). Make the smallest test program that
+  waits that way and add it to SIM_PROGRAMS.
+- "not reproducible (watchdog preemptions or RDRAND)": the program spun
+  in program code (the watchdog preempted it) or draws on RDRAND (Go):
+  such runs are reported, not failed; a hang or a wrong result in them
+  is still a failure.
+- A new multi-threaded test program: add it to SIM_PROGRAMS (`true` if
+  its system calls can interleave, so traces must differ across seeds).
 
 ## busybox
 

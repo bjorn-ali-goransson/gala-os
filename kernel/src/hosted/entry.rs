@@ -140,8 +140,16 @@ extern "C" fn on_sigsys(_sig: i32, _info: *mut libc::siginfo_t, context: *mut li
             rflags: g(gr, REG_EFL),
             rsp: g(gr, REG_RSP),
         };
+        // Simulation: scheduling points before and after the service,
+        // the system call's number and result in the trace.
+        if super::sim::on() {
+            super::sim::point(&[0, frame.rax]);
+        }
         if let Some(handler) = SYSCALL_HANDLER.get() {
             handler(&mut frame);
+        }
+        if super::sim::on() {
+            super::sim::point(&[1, frame.rax]);
         }
         // As the kernel's SYSRET: rcx = rip, r11 = rflags.
         let f = &frame;
@@ -164,6 +172,29 @@ extern "C" fn on_fault(sig: i32, info: *mut libc::siginfo_t, context: *mut libc:
         let rip = g(gr, REG_RIP);
         // SAFETY: si_addr is valid for the fault signals.
         let addr = unsafe { (*info).si_addr() } as u64;
+        // Simulation: RDTSC/RDTSCP fault (PR_TSC_SIGSEGV) and read the
+        // virtual clock, in program code and in the host's alike.
+        if super::sim::on() && sig == SIGSEGV && g(gr, REG_TRAPNO) == 13 {
+            // SAFETY: the instruction at rip was just fetched (a #GP, not
+            // a page fault), so its bytes are readable.
+            let code = unsafe { core::ptr::read_unaligned(rip as *const [u8; 3]) };
+            let length = match code {
+                [0x0f, 0x31, _] => Some(2),
+                [0x0f, 0x01, 0xf9] => Some(3),
+                _ => None,
+            };
+            if let Some(length) = length {
+                let tsc = super::sim::read_tsc();
+                set(gr, REG_RAX, tsc & 0xffff_ffff);
+                set(gr, REG_RDX, tsc >> 32);
+                if length == 3 {
+                    // TSC_AUX: Linux keeps the processor number there.
+                    set(gr, REG_RCX, u64::from(super::threads::current_cpu()));
+                }
+                set(gr, REG_RIP, rip + length);
+                return;
+            }
+        }
         if rip >= HOST_START {
             std::eprintln!(
                 "[error] gala-um: signal {sig} in the host at {rip:#x} (address {addr:#x})"
@@ -219,6 +250,11 @@ extern "C" fn on_interrupt(_sig: i32, _info: *mut libc::siginfo_t, context: *mut
         // Host code (a system call in progress, a wait): the hook runs when
         // it returns to the program anyway.
         return;
+    }
+    // Simulation: only the watchdog interrupts program code (a thread
+    // spinning without system calls); others get the processor.
+    if super::sim::on() {
+        super::sim::preempt();
     }
     with_context(context, |uc| {
         let gr = &mut uc.uc_mcontext.gregs;
@@ -277,6 +313,12 @@ pub fn init_thread() {
         let mut none: libc::sigset_t = core::mem::zeroed();
         libc::sigemptyset(&mut none);
         libc::pthread_sigmask(libc::SIG_SETMASK, &none, core::ptr::null_mut());
+    }
+    // Simulation: RDTSC and RDTSCP raise SIGSEGV, and `on_fault` answers
+    // from the virtual clock (they would read the host's).
+    if super::sim::on() {
+        // SAFETY: a plain prctl on this thread.
+        unsafe { libc::prctl(libc::PR_SET_TSC, libc::PR_TSC_SIGSEGV, 0, 0, 0) };
     }
     let stack = alloc::vec![0u8; ALT_STACK].leak();
     let ss = libc::stack_t { ss_sp: stack.as_mut_ptr().cast(), ss_flags: 0, ss_size: ALT_STACK };

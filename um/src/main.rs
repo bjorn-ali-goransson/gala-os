@@ -2,10 +2,16 @@
 //! gala's NT layer (the kernel library built with `--features hosted`) as
 //! its "kernel". The platform is `kernel::hosted` (docs/GALA_UM.md).
 //!
-//! usage: um [--trace] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] [--module=<directory on C:>/<name>=<host file>]... <program.exe> [arguments]
+//! usage: um [--trace] [--sim=<seed>] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] [--module=<directory on C:>/<name>=<host file>]... <program.exe> [arguments]
 //!
 //! `--failpoint`, `--failseed`: fault injection while the program runs,
 //! as the kernel's `failpoint=` and `failseed=` (kernel/src/failpoint.rs).
+//!
+//! `--sim=<seed>`: deterministic simulation (ROADMAP R5): one NT thread
+//! runs at a time, the seed chooses which at every system call, wait and
+//! yield, and time is virtual; the run ends with `sim: seed S trace H`,
+//! the same for the same seed (docs/GALA_UM.md). Exit status 4: a
+//! deadlock (every thread waits for ever), with the threads' waits.
 //!
 //! `--cpus`: show at most n of the host's processors (um-test: 2, as the
 //! QEMU boot tests).
@@ -37,6 +43,16 @@ fn main() -> ExitCode {
         }
         if let Some(seed) = option.strip_prefix("--failseed=") {
             failseed = Some(seed.to_string());
+            continue;
+        }
+        if let Some(seed) = option.strip_prefix("--sim=") {
+            match seed.parse() {
+                Ok(seed) => kernel::hosted::sim::enable(seed),
+                Err(_) => {
+                    eprintln!("um: --sim=<seed: a number>, not {option}");
+                    return ExitCode::from(2);
+                }
+            }
             continue;
         }
         if option == "--trace" {
@@ -79,7 +95,7 @@ fn main() -> ExitCode {
     }
     let Some(path) = args.next() else {
         eprintln!(
-            "usage: um [--trace] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] [--module=<dir>/<name>=<host file>]... <program.exe> [arguments]"
+            "usage: um [--trace] [--sim=<seed>] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] [--module=<dir>/<name>=<host file>]... <program.exe> [arguments]"
         );
         return ExitCode::from(2);
     };
