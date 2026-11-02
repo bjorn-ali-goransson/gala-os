@@ -1399,9 +1399,8 @@ R. **Robustness and live update, kernel included** (the owner's
      `Gala*` records: done for the window registry's record and the
      disk log's records, 2026-11-02; the superblock's magic already ends
      in its version),
-     drivers that survive
-     a device reset, all time through the `Clock` seam (audit time.rs and
-     the direct `platform::ticks` callers).
+     drivers that survive a device reset (next), all time through one
+     clock (audited 2026-11-02: holds; ARCHITECTURE invariant 5).
    - R2. **Fault injection**: named failure points (`heap`, `frame`,
      `disk_io`, `net_tx`...) from the command line with a seed; scenarios
      run with failures injected, mainly in gala-um; programs get an

@@ -3101,9 +3101,14 @@ has the order). Checked against the code when written: the disk log's
 records had a magic and a generation but no format version (they have
 one since: byte 17, VERSION 1; the superblock's magic ends in its
 format version, `GALAFS\0\x01`); there is no fault
-injection; lock orders are prose only; time mostly comes through the
-platform seam (`nt::platform::Clock`), but `kernel/src/time.rs` reads the
-TSC itself and about twenty places call `platform::ticks` directly.
+injection; lock orders are prose only. Time, audited 2026-11-02: the NT
+layer (`nt/`, which gala-um runs too) reads it only through the platform
+seam (`nt::platform::Clock`); in the kernel, only `kernel/src/time.rs`
+(the kernel's clock, behind that seam) and `arch` read the TSC or the
+tick count's source, and the kernel's own modules (scheduler, network,
+flight recorder, events) ask `time.rs`. So invariant 5 holds: a
+simulated clock for the NT layer means implementing `Clock` (gala-um),
+one for the whole kernel means `time.rs`.
 
 ### Invariants (new code follows them now; old code is brought in line)
 
@@ -3123,10 +3128,10 @@ TSC itself and about twenty places call `platform::ticks` directly.
    and the desktop. A reader accepts its version and the previous one.
 4. **Drivers survive a device reset** (virtio has one): they can
    re-initialize the device and resubmit what was in flight.
-5. **All kernel time comes through the `Clock` seam**: no TSC or tick
-   reads outside it (time.rs and the direct `platform::ticks` callers to
-   be audited and routed through it). Deterministic simulation (R5) and
-   time mocking (R7) depend on it.
+5. **All kernel time comes through one clock**: the NT layer through the
+   `Clock` seam, the kernel's own modules through `time.rs`; nothing else
+   reads the TSC or counts ticks (holds as of 2026-11-02). Deterministic
+   simulation (R5) and time mocking (R7) depend on it.
 
 ### Safety nets (designed here, built in R1-R4)
 
