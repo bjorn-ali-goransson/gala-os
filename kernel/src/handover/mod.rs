@@ -10,8 +10,15 @@
 //! (a marker page that survives every handover). The machine side (image
 //! loading, page tables, trampoline, parking CPUs, the jump) is
 //! `arch::handover`.
+//!
+//! Milestone (b): programs that are idle (every thread blocked in a wait)
+//! come across and go on: `carry` collects and rebuilds them, `programs`
+//! has their record formats. A program can ask for a handover
+//! (GalaRequestHandover, with `handover=`).
 
+pub mod carry;
 pub mod elf;
+pub mod programs;
 pub mod record;
 
 use alloc::vec::Vec;
@@ -45,6 +52,8 @@ pub enum HandoverError {
     CpuHoles,
     Machine(machine::HandoverError),
     RecordTooLarge,
+    /// The programs cannot be carried (the reason); they run on.
+    Refused(carry::Refusal),
 }
 
 impl From<AllocError> for HandoverError {
@@ -126,9 +135,25 @@ pub fn report(info: &BootInfo) {
         r.record_phys
     );
     for section in r.record.sections().flatten() {
-        if !matches!(section.tag, 1..=10) {
+        if !record::KNOWN.contains(&section.tag) {
             crate::warn!("handover: skipped section {} (unknown to this kernel)", section.tag);
         }
+    }
+}
+
+/// Before the clock starts: the TSC and timer rates the first kernel
+/// calibrated (calibrating again gives other values, under an emulator
+/// very different ones, and the tick count would then drift from the TSC:
+/// the deadlines of carried waits are ticks).
+pub fn carried_rates(info: &BootInfo, tsc_hz: &mut u64, timer_hz: &mut u64) {
+    let Some(r) = &info.handover else { return };
+    let Some(mut s) = r.record.section(tag::CLOCK) else { return };
+    let clock = record::Clock::read(&mut s);
+    if clock.tsc_hz != 0 {
+        *tsc_hz = clock.tsc_hz;
+    }
+    if clock.timer_hz != 0 {
+        *timer_hz = clock.timer_hz;
     }
 }
 
@@ -209,18 +234,49 @@ pub fn wanted(cmdline: &Cmdline) -> bool {
 }
 
 /// Hands the machine over to a fresh copy of the kernel (the kernel file,
-/// or the boot module `handover_image=`). Returns only on failure, before
-/// the point of no return.
+/// or the boot module `handover_image=`), with the programs that run
+/// (milestone (b): once each of their threads is blocked in a wait).
+/// Returns only on failure, before the point of no return; the programs
+/// then go on in this kernel.
 pub fn go(info: &BootInfo, cmdline: &Cmdline) -> HandoverError {
-    match prepare_and_go(info, cmdline) {
+    let programs = match carry::collect() {
+        Ok(p) => p,
+        Err(why) => return HandoverError::Refused(why),
+    };
+    if let Some(p) = &programs {
+        crate::info!(
+            "handover: carrying {} process(es), {} thread(s), {} object(s), {} user frame(s)",
+            p.process_count(),
+            p.thread_count(),
+            p.object_count(),
+            p.frame_count()
+        );
+    }
+    let e = match prepare_and_go(info, cmdline, programs.as_ref()) {
         Err(e) => e,
         Ok(never) => match never {},
+    };
+    if programs.is_some() {
+        carry::release();
+    }
+    e
+}
+
+/// After the files are there (`nt::init`, boot modules, `persist`): the
+/// programs the previous kernel handed over resume.
+pub fn resume_programs(info: &BootInfo) {
+    if let Some(r) = &info.handover {
+        carry::restore(&r.record);
     }
 }
 
 enum Never {}
 
-fn prepare_and_go(info: &BootInfo, cmdline: &Cmdline) -> Result<Never, HandoverError> {
+fn prepare_and_go(
+    info: &BootInfo,
+    cmdline: &Cmdline,
+    programs: Option<&carry::Programs>,
+) -> Result<Never, HandoverError> {
     let hhdm = info.hhdm_offset;
     let file = match cmdline.value("handover_image") {
         Some(name) => info.modules.find(name).map(|m| m.data),
@@ -279,11 +335,27 @@ fn prepare_and_go(info: &BootInfo, cmdline: &Cmdline) -> Result<Never, HandoverE
         map.try_push(r)?;
     }
     for k in received_kept(info) {
-        if matches!(k.what as u32, purpose::SCAFFOLD | purpose::RECORD | purpose::KERNEL_IMAGE) {
+        if matches!(
+            k.what as u32,
+            purpose::SCAFFOLD | purpose::RECORD | purpose::KERNEL_IMAGE | purpose::BITMAP
+        ) {
             memmap::carve(&mut map, k.base, k.len, RegionKind::Usable)?;
         }
     }
     memmap::carve(&mut map, marker.phys(), marker.len(), RegionKind::ExecutableAndModules)?;
+    // Room for the next kernel's frame bitmap, from free frames (usable
+    // memory holds the programs' pages, where `boot::take_frame_bitmap`
+    // would otherwise put it).
+    let bitmap_end = map
+        .iter()
+        .filter(|r| matches!(r.kind, RegionKind::Usable | RegionKind::BootloaderReclaimable))
+        .map(|r| r.end())
+        .max()
+        .unwrap_or(0);
+    let bitmap_bytes = crate::mm::frame::FrameAllocator::words_for(bitmap_end) as u64 * 8;
+    let bitmap = machine::OwnedPages::allocate(bitmap_bytes.div_ceil(PAGE_SIZE))
+        .ok_or(HandoverError::OutOfMemory)?;
+    memmap::carve(&mut map, bitmap.phys(), bitmap.len(), RegionKind::BootloaderReclaimable)?;
 
     let prepared = machine::prepare(&image, map.iter().copied(), &lapic_ids)?;
     memmap::carve(&mut map, prepared.area.0, prepared.area.1, RegionKind::BootloaderReclaimable)?;
@@ -302,6 +374,8 @@ fn prepare_and_go(info: &BootInfo, cmdline: &Cmdline) -> Result<Never, HandoverE
         file: (file_phys, file.len() as u64),
         next,
         bsp_lapic_id: cpus.first().map_or(0, |c| c.1),
+        bitmap: (bitmap.phys(), bitmap.len()),
+        programs,
     };
     let estimate = state.encode(&map, (0, 0))?.len() as u64;
     let pages = (estimate + 2 * PAGE_SIZE).div_ceil(PAGE_SIZE);
@@ -343,6 +417,8 @@ struct State<'a> {
     file: (u64, u64),
     next: u64,
     bsp_lapic_id: u32,
+    bitmap: (u64, u64),
+    programs: Option<&'a carry::Programs>,
 }
 
 impl State<'_> {
@@ -392,6 +468,7 @@ impl State<'_> {
             (record_at, purpose::RECORD),
             (self.prepared.image, purpose::KERNEL_IMAGE),
             (self.marker, purpose::MARKER),
+            (self.bitmap, purpose::BITMAP),
         ];
         record::write_ranges(
             &mut w,
@@ -403,6 +480,9 @@ impl State<'_> {
             tag::KERNEL_FILE,
             core::iter::once(Range { base: self.file.0, len: self.file.1, what: 0 }),
         )?;
+        if let Some(p) = self.programs {
+            p.write(&mut w)?;
+        }
         w.finish()
     }
 }

@@ -187,6 +187,11 @@ impl CompletionQueue {
         self.packets.len()
     }
 
+    /// The queued packets, oldest first.
+    pub fn packets(&self) -> &[CompletionPacket] {
+        &self.packets
+    }
+
     pub fn is_empty(&self) -> bool {
         self.packets.is_empty()
     }

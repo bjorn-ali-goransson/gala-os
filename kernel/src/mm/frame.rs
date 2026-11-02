@@ -84,6 +84,12 @@ impl<'a> FrameAllocator<'a> {
         alloc
     }
 
+    /// Marks frames `[start, end)` in use (kept by their owner: a kernel
+    /// handover's user pages).
+    pub fn claim(&mut self, start: u64, end: u64) {
+        self.claim_range(start, end);
+    }
+
     pub fn free_frames(&self) -> u64 {
         self.free_count
     }

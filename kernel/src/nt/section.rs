@@ -362,6 +362,46 @@ impl Section {
         *slot
     }
 
+    /// Whether it is pagefile-backed (neither an image nor a file's data).
+    pub fn is_anonymous(&self) -> bool {
+        self.image.is_none() && self.file.is_none()
+    }
+
+    /// The frames backing it so far, with their page index (a kernel
+    /// handover keeps them where they are).
+    pub fn allocated_pages(&self) -> Result<Vec<(usize, Frame)>, crate::mm::heap::AllocError> {
+        let pages = self.pages.lock();
+        let mut out = Vec::new();
+        for (i, f) in pages.iter().enumerate() {
+            if let Some(f) = f {
+                out.try_push((i, *f))?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// A pagefile-backed section rebuilt by a kernel handover with the
+    /// frames it had (owned again by the section). Frames past its size
+    /// are refused (and stay with the caller).
+    pub fn adopt(
+        size: u64,
+        protect: u32,
+        attributes: u32,
+        frames: impl Iterator<Item = (usize, Frame)>,
+    ) -> Result<Self, NtStatus> {
+        let section = Section::new(size, protect, attributes)?;
+        {
+            let mut pages = section.pages.lock();
+            for (i, frame) in frames {
+                match pages.get_mut(i) {
+                    Some(slot @ None) => *slot = Some(frame),
+                    _ => return Err(NtStatus::INVALID_PARAMETER),
+                }
+            }
+        }
+        Ok(section)
+    }
+
     /// Whether a view with protection `protect` fits this section's.
     pub fn allows(&self, protect: u32) -> Result<(), NtStatus> {
         let want = vad::access_of(protect)?;

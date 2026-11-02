@@ -152,6 +152,18 @@ impl Context {
         }
         Context { rsp: AtomicU64::new(rsp), fx: core::cell::UnsafeCell::new(FxArea::initial()) }
     }
+
+    /// The x87/SSE state saved by the last switch away from this context
+    /// (a kernel handover carries a blocked thread's user state).
+    ///
+    /// # Safety
+    /// The thread must not be running on any CPU (the switch writes the
+    /// area while it saves it), which the scheduler's `on_cpu` tells.
+    pub unsafe fn saved_fx(&self) -> super::cpu::FxState {
+        // SAFETY: forwarded to the caller: nothing writes the area while
+        // the thread is switched out.
+        super::cpu::FxState(unsafe { (*self.fx.get()).0 })
+    }
 }
 
 global_asm!(

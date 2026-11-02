@@ -598,6 +598,34 @@ impl UserSpace {
         Ok(())
     }
 
+    /// Maps `frame`, which the caller hands over (its contents kept), at
+    /// `virt` as an owned page of this space: a kernel handover gives a
+    /// process its own pages back in the new kernel.
+    pub fn map_adopted(
+        &mut self,
+        virt: u64,
+        frame: Frame,
+        mut flags: PageFlags,
+    ) -> Result<(), PagingError> {
+        use crate::mm::paging::PageSize;
+        flags.global = false;
+        flags.borrowed = false;
+        self.mapper.map(
+            virt / PAGE_SIZE * PAGE_SIZE,
+            frame.start(),
+            PageSize::Size4K,
+            flags,
+            &mut alloc_table,
+        )?;
+        Ok(())
+    }
+
+    /// Every user mapping: `f(virt, frame, flags)` (flags.borrowed: the
+    /// frame belongs to a section, an image or a shared page).
+    pub fn for_each_page(&mut self, mut f: impl FnMut(u64, Frame, PageFlags)) {
+        self.mapper.for_each_user_leaf(&mut |virt, t| f(virt, Frame::containing(t.phys), t.flags));
+    }
+
     /// The frame mapped at `virt` and whether it is borrowed.
     pub fn mapping(&mut self, virt: u64) -> Option<(Frame, bool)> {
         let t = self.mapper.translate(virt)?;

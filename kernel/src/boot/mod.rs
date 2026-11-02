@@ -519,6 +519,8 @@ pub fn collect(handover: Option<HandoverEntry>) -> Result<BootInfo, BootError> {
 /// is kept free for things that need it (e.g. SMP trampolines).
 pub const LOW_MEMORY_END: u64 = 0x10_0000;
 
+const USER_FRAMES: u32 = crate::handover::record::tag::USER_FRAMES;
+
 static FRAME_BITMAP_TAKEN: AtomicBool = AtomicBool::new(false);
 
 /// Carves `words` zero-initialized `u64`s out of usable RAM for the frame
@@ -532,12 +534,31 @@ pub fn take_frame_bitmap(
         return None;
     }
     let bytes = (words as u64).checked_mul(8)?.next_multiple_of(PAGE_SIZE);
-    let region = info
-        .memory_map
-        .iter()
-        .find(|r| r.kind == RegionKind::Usable && r.base >= LOW_MEMORY_END && r.len >= bytes)?;
-    let phys = region.base..region.base + bytes;
-    let virt = info.hhdm_offset.checked_add(region.base)?;
+    // After a handover, the room the previous kernel set aside (usable
+    // memory may hold the programs' pages: USER_FRAMES).
+    let kept = info.handover.as_ref().and_then(|r| {
+        let section = r.record.section(crate::handover::record::tag::KEPT)?;
+        crate::handover::record::read_ranges(&section).find(|k| {
+            k.what == u64::from(crate::handover::record::purpose::BITMAP) && k.len >= bytes
+        })
+    });
+    let base = match kept {
+        Some(k) => k.base,
+        None => {
+            if info.handover.as_ref().is_some_and(|r| r.record.section(USER_FRAMES).is_some()) {
+                // The programs' pages could be anywhere: no safe place.
+                return None;
+            }
+            info.memory_map
+                .iter()
+                .find(|r| {
+                    r.kind == RegionKind::Usable && r.base >= LOW_MEMORY_END && r.len >= bytes
+                })?
+                .base
+        }
+    };
+    let phys = base..base + bytes;
+    let virt = info.hhdm_offset.checked_add(base)?;
     // SAFETY: the range is usable RAM (so mapped in the HHDM at base revision
     // >= 3, page-aligned, and unused by anything else), the once-flag above
     // ensures it is handed out only once, and the frame allocator built on top

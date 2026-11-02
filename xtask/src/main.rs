@@ -1536,6 +1536,7 @@ const USER_PROGRAMS: &[&str] = &[
     "context_test",
     "timer_test",
     "clock_test",
+    "handover_test",
     "loader_test",
     "smp_test",
     "smpsched_test",
@@ -2354,6 +2355,7 @@ const PENDING: &[&str] = &[
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
     "handover_uefi",
+    "handover_idle_uefi",
     "server_profile",
     "gala_cli",
     "hello",
@@ -3359,6 +3361,82 @@ const SCENARIOS: &[Scenario] = &[
             "handover: generation 2 (from generation 1), record version 1",
             "handover: generation 2: 2 of 2 CPUs online again",
             "survived 2 handover(s)",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // R9 (b): a program whose threads are all blocked in waits (a
+        // sleep, a timer, an event, an alertable wait) asks for a kernel
+        // handover (GalaRequestHandover); the kernel hands over once all
+        // are blocked, the new kernel rebuilds the process (its pages
+        // kept in their frames, its handles, objects and threads) and
+        // the threads make their calls again; the program finds its
+        // memory, handles and ids as they were, the sleep ending at its
+        // deadline. `run=` does not start it again.
+        name: "handover_idle",
+        cmdline: "qemu_exit handover=1 run=handover_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "handover_test: ready",
+            "handover: carrying 1 process(es), 4 thread(s)",
+            "handover: generation 0 -> 1: record ",
+            "handover: generation 1 (from generation 0), record version 1",
+            "handover: resumed process handover_test.exe",
+            "run: handover_test.exe goes on from the previous kernel",
+            "handover_test: slept",
+            "handover_test: ok",
+            "exited with status 0x00000000",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // R9 (b), twice: the process that came across asks again (its
+        // workers have exited by then: handles to exited threads come
+        // across too) and goes on in a third kernel.
+        name: "handover_idle_twice",
+        cmdline: "qemu_exit handover=2 run=handover_test.exe args=twice",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "handover: carrying 1 process(es), 4 thread(s)",
+            "handover: generation 1 (from generation 0)",
+            "handover_test: slept 4",
+            "handover: carrying 1 process(es), 1 thread(s)",
+            "handover: generation 2 (from generation 1)",
+            "handover: resumed process handover_test.exe",
+            "handover_test: slept again",
+            "handover_test: ok",
+            "exited with status 0x00000000",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // R9 (b): what a handover cannot carry yet makes it refuse, with
+        // the reason, before anything is stopped for good: the program
+        // (holding a handle to the NUL device) goes on in the same kernel.
+        // Then the boot's own handover (no programs) is done, and the
+        // program runs again in the new kernel, which takes no requests.
+        name: "handover_refused",
+        cmdline: "qemu_exit handover=1 run=handover_test.exe args=refuse",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "handover: refused: process 4 has a device handle",
+            "handover_test: ok (refused)",
+            "handover: generation 1 (from generation 0)",
+            "handover_test: ok (no handover allowed)",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // handover_idle booted by UEFI (UEFI_SCENARIOS).
+        name: "handover_idle_uefi",
+        cmdline: "qemu_exit handover=1 run=handover_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "firmware: UEFI x86_64",
+            "handover: carrying 1 process(es), 4 thread(s)",
+            "handover: resumed process handover_test.exe",
+            "handover_test: ok",
+            "exited with status 0x00000000",
             "gala: boot ok",
         ],
     },

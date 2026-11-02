@@ -74,6 +74,11 @@ stubs! {
     ntrt_nt_cancel_io_file_ex = 0x7f01;
     ntrt_gala_create_process = 0x7f02;
     ntrt_gala_clock_control = 0x7f4c;
+    ntrt_gala_request_handover = 0x7f5a;
+    // Waitable timers: gala's numbers, UNVERIFIED for the pinned build
+    // (programs on Windows reach them through ntdll's exports).
+    ntrt_nt_create_timer = 0x00d9;
+    ntrt_nt_set_timer = 0x019e;
     ntrt_nt_query_information_file = 0x0011;
     ntrt_nt_set_information_file = 0x0027;
     ntrt_nt_open_file = 0x0033;
@@ -108,6 +113,22 @@ unsafe extern "system" {
     fn ntrt_nt_terminate_process(process: Handle, status: NtStatus) -> NtStatus;
     fn ntrt_invalid_service() -> NtStatus;
     fn ntrt_gala_clock_control(operation: u32, a: i64, b: i64, state: *mut ClockState) -> NtStatus;
+    fn ntrt_gala_request_handover() -> NtStatus;
+    fn ntrt_nt_create_timer(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        kind: u32,
+    ) -> NtStatus;
+    fn ntrt_nt_set_timer(
+        handle: Handle,
+        due: *const i64,
+        apc: *mut c_void,
+        context: *mut c_void,
+        resume: u8,
+        period: i32,
+        previous: *mut u8,
+    ) -> NtStatus;
     fn ntrt_nt_wait_for_single_object(
         handle: Handle,
         alertable: u8,
@@ -381,6 +402,34 @@ pub fn clock_control(operation: u32, a: i64, b: i64) -> (NtStatus, ClockState) {
     let st = unsafe { ntrt_gala_clock_control(operation, a, b, &mut state) };
     (st, state)
 }
+/// GalaRequestHandover(): asks gala for a kernel handover (test-only, a
+/// boot with `handover=`; ROADMAP R9): it happens once every thread of
+/// every program is blocked in a wait. STATUS_ACCESS_DENIED without
+/// `handover=`, STATUS_INVALID_SYSTEM_SERVICE on Windows.
+pub fn request_handover() -> NtStatus {
+    // SAFETY: no arguments.
+    unsafe { ntrt_gala_request_handover() }
+}
+
+pub const TIMER_ALL_ACCESS: u32 = 0x1f_0003;
+
+/// NtCreateTimer (NotificationTimer 0, SynchronizationTimer 1).
+pub fn create_timer(kind: u32) -> (NtStatus, Handle) {
+    let mut h = Handle(0);
+    // SAFETY: valid output pointer, no attributes.
+    let st = unsafe { ntrt_nt_create_timer(&mut h, TIMER_ALL_ACCESS, core::ptr::null(), kind) };
+    (st, h)
+}
+
+/// NtSetTimer with no APC: due at `due` (NT time: negative = relative),
+/// every `period` ms after (0: once).
+pub fn set_timer(h: Handle, due: i64, period: i32) -> NtStatus {
+    let mut previous = 0u8;
+    let null = core::ptr::null_mut();
+    // SAFETY: valid due time and output pointers.
+    unsafe { ntrt_nt_set_timer(h, &due, null, null, 0, period, &mut previous) }
+}
+
 pub const STATUS_ACCESS_DENIED: NtStatus = 0xc000_0022;
 pub const STATUS_INVALID_PARAMETER_4: NtStatus = 0xc000_00f2;
 pub const NOTIFICATION_EVENT: u32 = 0;

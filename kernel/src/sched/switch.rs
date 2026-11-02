@@ -33,3 +33,12 @@ pub(super) fn switch(from: *const Context, to: Target) {
         context::switch(&*from, &*to.context);
     }
 }
+
+/// The x87/SSE state `context` was saved with. The scheduler calls this
+/// with its lock held for a thread that is on no CPU (`on_cpu` false), so
+/// no switch writes the area meanwhile.
+pub(super) fn saved_fx(context: &Context) -> crate::arch::cpu::FxState {
+    // SAFETY: see above: the thread is not running and cannot start while
+    // the scheduler's lock is held.
+    unsafe { context.saved_fx() }
+}

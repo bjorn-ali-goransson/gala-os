@@ -41,7 +41,7 @@ pub enum CacheMode {
 }
 
 impl CacheMode {
-    fn from_index(i: u64) -> Self {
+    pub fn from_index(i: u64) -> Self {
         match i {
             0 => CacheMode::WriteBack,
             1 => CacheMode::WriteThrough,
@@ -478,6 +478,48 @@ impl<M: TableMemory> Mapper<M> {
         Ok(mapper)
     }
 
+    /// Calls `f(virt, translation)` for every leaf mapping of the user half,
+    /// in address order (a kernel handover lists a process's pages).
+    pub fn for_each_user_leaf(&mut self, f: &mut impl FnMut(u64, Translation)) {
+        let root = self.root;
+        self.walk_level(root, 4, 0, KERNEL_HALF_START, f);
+    }
+
+    fn walk_level(
+        &mut self,
+        table: Frame,
+        level: usize,
+        base: u64,
+        limit: usize,
+        f: &mut impl FnMut(u64, Translation),
+    ) {
+        for i in 0..limit {
+            let entry = self.mem.table(table).0[i];
+            if !entry.is_present() {
+                continue;
+            }
+            let virt = base | (i as u64) << (12 + 9 * (level - 1));
+            let size = match level {
+                1 => Some(PageSize::Size4K),
+                2 if entry.is_huge() => Some(PageSize::Size2M),
+                3 if entry.is_huge() => Some(PageSize::Size1G),
+                _ => None,
+            };
+            match size {
+                Some(size) => {
+                    let large = size != PageSize::Size4K;
+                    let phys = if large { entry.large_addr() } else { entry.addr() };
+                    let flags = PageFlags::from_leaf_bits(entry.0, large);
+                    f(virt, Translation { phys, size, flags });
+                }
+                None => {
+                    let child = Frame::containing(entry.addr());
+                    self.walk_level(child, level - 1, virt, ENTRIES, f);
+                }
+            }
+        }
+    }
+
     /// Frees every user-half page table (not the mapped frames) through
     /// `free`, then the root. Leaf frames are reported to `free_leaf`.
     pub fn destroy(
@@ -541,6 +583,23 @@ mod tests {
     }
 
     const KVIRT: u64 = 0xffff_ffff_8000_0000;
+
+    #[test]
+    fn user_leaves_are_listed_in_order() {
+        let (mut m, mut alloc) = setup();
+        let user = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RW };
+        let borrowed = PageFlags { borrowed: true, ..user };
+        m.map(0x7ffe_0000, 0x9000, PageSize::Size4K, borrowed, &mut alloc).unwrap();
+        m.map(0x40_1000, 0x5000, PageSize::Size4K, user, &mut alloc).unwrap();
+        m.map(0x40_0000, 0x6000, PageSize::Size4K, user, &mut alloc).unwrap();
+        m.map(KVIRT, 0x7000, PageSize::Size4K, PageFlags::KERNEL_RX, &mut alloc).unwrap();
+        let mut seen = Vec::new();
+        m.for_each_user_leaf(&mut |va, t| seen.push((va, t.phys, t.flags.borrowed)));
+        assert_eq!(
+            seen,
+            [(0x40_0000, 0x6000, false), (0x40_1000, 0x5000, false), (0x7ffe_0000, 0x9000, true)]
+        );
+    }
 
     #[test]
     fn map_and_translate_4k() {

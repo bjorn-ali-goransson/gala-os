@@ -107,6 +107,9 @@ impl UserEntry for Kernel {
     fn enter_user(regs: &UserRegs) -> ! {
         syscall::enter_user_regs(regs)
     }
+    fn reissue_syscall(frame: &mut SyscallFrame) -> ! {
+        syscall::reissue(frame)
+    }
     fn continue_with(regs: UserRegs) {
         syscall::continue_with(regs)
     }

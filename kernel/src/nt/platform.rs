@@ -110,6 +110,14 @@ pub trait UserEntry {
     fn exception_name(vector: u8) -> &'static str;
     /// Enters user mode with `regs` (a new thread's first entry).
     fn enter_user(regs: &UserRegs) -> !;
+    /// Makes the system call in `frame` again, as if the thread had just
+    /// made it, then returns to user mode with its result (a thread a
+    /// kernel handover carried over; ARCHITECTURE invariant 2). Only the
+    /// kernel hands over.
+    fn reissue_syscall(frame: &mut SyscallFrame) -> ! {
+        let _ = frame;
+        panic!("reissue_syscall: no kernel handover on this platform")
+    }
     /// The current system call returns to user mode with `regs` instead
     /// of its own result (NtContinue, exception dispatch).
     fn continue_with(regs: UserRegs);
@@ -283,6 +291,10 @@ pub fn exception_name(vector: u8) -> &'static str {
 #[inline]
 pub fn enter_user(regs: &UserRegs) -> ! {
     <P as UserEntry>::enter_user(regs)
+}
+#[inline]
+pub fn reissue_syscall(frame: &mut SyscallFrame) -> ! {
+    <P as UserEntry>::reissue_syscall(frame)
 }
 #[inline]
 pub fn continue_with(regs: UserRegs) {

@@ -311,6 +311,26 @@ impl UserSpace {
         self.insert(page, Page { frame, flags, borrowed: true })
     }
 
+    /// Kernel API compatibility (a kernel handover's page list; gala-um
+    /// never hands over): every page, `borrowed` in its flags.
+    pub fn for_each_page(&mut self, mut f: impl FnMut(u64, Frame, PageFlags)) {
+        for (&va, p) in &self.pages {
+            f(va, p.frame, PageFlags { borrowed: p.borrowed, ..p.flags });
+        }
+    }
+
+    /// Kernel API compatibility: maps `frame` as an owned page.
+    pub fn map_adopted(
+        &mut self,
+        virt: u64,
+        frame: Frame,
+        mut flags: PageFlags,
+    ) -> Result<(), PagingError> {
+        flags.borrowed = false;
+        let page = check_user(virt)?;
+        self.insert(page, Page { frame, flags, borrowed: false })
+    }
+
     pub fn mapping(&mut self, virt: u64) -> Option<(Frame, bool)> {
         self.pages.get(&(virt / PAGE_SIZE * PAGE_SIZE)).map(|p| (p.frame, p.borrowed))
     }

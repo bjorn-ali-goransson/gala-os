@@ -144,6 +144,10 @@ struct Scheduler {
     /// Invariant: capacity >= number of threads, so pushing never allocates.
     ready: VecDeque<ThreadId>,
     cpus: [Cpu; smp::MAX_CPUS],
+    /// A kernel handover is collecting the programs' state: threads that
+    /// run user code are not picked (they stay where they are, blocked or
+    /// queued), and a running one leaves its CPU at the next tick.
+    users_frozen: bool,
 }
 
 static SCHED: IrqMutex<Option<Scheduler>> = IrqMutex::new(None);
@@ -206,7 +210,9 @@ impl Scheduler {
     /// not still on another CPU's stack (the current thread is fine).
     fn runnable_here(&self, id: ThreadId, cpu: usize) -> bool {
         let t = &self.threads[id.0];
-        t.affinity & (1 << cpu) != 0 && (!t.on_cpu || id == self.cpus[cpu].current)
+        t.affinity & (1 << cpu) != 0
+            && (!t.on_cpu || id == self.cpus[cpu].current)
+            && !(self.users_frozen && t.user.is_some())
     }
 
     fn has_work(&self, cpu: usize) -> bool {
@@ -258,8 +264,12 @@ fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Thread {
 /// Adopts the running boot thread as thread #0 and starts the boot CPU's
 /// idle thread.
 pub fn init() -> Result<(), SpawnError> {
-    let mut sched =
-        Scheduler { threads: Vec::new(), ready: VecDeque::new(), cpus: [OFFLINE; smp::MAX_CPUS] };
+    let mut sched = Scheduler {
+        threads: Vec::new(),
+        ready: VecDeque::new(),
+        cpus: [OFFLINE; smp::MAX_CPUS],
+        users_frozen: false,
+    };
     let boot = sched.add(adopted("boot", false, ALL_CPUS))?;
     sched.cpus[0] = Cpu { online: true, current: boot, ..OFFLINE };
     *SCHED.lock() = Some(sched);
@@ -671,8 +681,14 @@ pub(crate) fn on_tick_here() {
             // It switches as soon as the reap is done (`idle_loop`).
             return;
         }
-        // A thread that must leave this CPU goes even with nothing queued.
-        let must_move = s.threads[cpu.current.0].affinity & (1 << here) == 0;
+        // A thread that must leave this CPU goes even with nothing queued
+        // (a user thread too while users are frozen).
+        let current = &s.threads[cpu.current.0];
+        let must_move =
+            current.affinity & (1 << here) == 0 || (s.users_frozen && current.user.is_some());
+        if must_move {
+            cpu.need_resched = true;
+        }
         cpu.need_resched && (has_work || must_move)
     };
     if preempt {
@@ -705,6 +721,53 @@ fn idle_loop(_: usize) {
             cpu::enable_interrupts_and_halt();
         }
     }
+}
+
+/// Stops (or lets again) the scheduler from running threads that run user
+/// code (a kernel handover: `users_quiet` then tells when none is on a
+/// CPU any more). Kernel threads go on.
+pub fn freeze_users(frozen: bool) {
+    with(|s| {
+        s.users_frozen = frozen;
+        if !frozen {
+            // Idle CPUs look at the queue again.
+            for c in 0..smp::MAX_CPUS {
+                if c != me() && s.cpus[c].online && Some(s.cpus[c].current) == s.cpus[c].idle {
+                    smp::send_reschedule(c as u32);
+                }
+            }
+        }
+    });
+}
+
+/// Whether no thread that runs user code is on a CPU (after
+/// `freeze_users`).
+pub fn users_quiet() -> bool {
+    with(|s| !s.threads.iter().any(|t| t.user.is_some() && t.on_cpu))
+}
+
+/// How a thread that runs user code stands, for a kernel handover.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserWait {
+    /// Blocked in a wait (`prepare_wait`/`wait`) until the tick, if any.
+    Waiting(Option<u64>),
+    /// Anything else: running, queued, sleeping in the kernel, ...
+    Busy,
+    Dead,
+}
+
+/// `id`'s state and, if it is off every CPU, its saved x87/SSE state.
+pub fn user_wait(id: ThreadId) -> (UserWait, Option<cpu::FxState>) {
+    with(|s| {
+        let Some(t) = s.threads.get(id.0) else { return (UserWait::Dead, None) };
+        let state = match t.state {
+            State::Waiting { until_tick } if !t.on_cpu => UserWait::Waiting(until_tick),
+            State::Dead => UserWait::Dead,
+            _ => UserWait::Busy,
+        };
+        let fx = (!t.on_cpu).then(|| switch::saved_fx(&t.context));
+        (state, fx)
+    })
 }
 
 /// Logs every thread's scheduling state (for hangs; see `nt::thread::dump`).

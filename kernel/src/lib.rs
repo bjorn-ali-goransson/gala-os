@@ -182,6 +182,23 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         nt::persist::mount();
         handover::check_volume(&info);
     }
+    // C: is made: what is older is made again by the next kernel's boot (a
+    // kernel handover reopens the programs' files).
+    nt::file::mark_boot_done();
+    // Programs the previous kernel handed over go on (ROADMAP R9 (b)).
+    handover::resume_programs(&info);
+    // `handover=<n>`: programs may ask for a handover (GalaRequestHandover).
+    let handover_requests = if handover::wanted(&cmdline) {
+        match nt::syscalls::allow_handover_requests() {
+            Ok(event) => Some(event),
+            Err(e) => {
+                error!("handover: cannot take requests: {e:?}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // The desktop's wallpaper (`wallpaper=<name>`, else one at random).
     nt::desktop::choose_wallpaper(cmdline.value("wallpaper"));
@@ -239,6 +256,10 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
                 error!("start: out of memory for {name}'s arguments");
                 continue;
             }
+            if let Some(p) = handover::carry::resumed(name) {
+                info!("start: {name} goes on from the previous kernel (pid {})", p.id);
+                continue;
+            }
             let console = console_window(&info, name, cmdline.value("console"));
             start_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""), console);
         }
@@ -264,11 +285,13 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
             let console = console_window(&info, name, cmdline.value("console"));
             run_program(
                 &info,
+                &cmdline,
                 name,
                 core::str::from_utf8(&decoded).unwrap_or(""),
                 cwd,
                 wait_all,
                 console,
+                handover_requests.as_ref(),
             );
             // What the program's end changed (delete-on-close at exit).
             nt::persist::sync();
@@ -365,20 +388,21 @@ fn configure_failpoints(cmdline: &Cmdline) {
 }
 
 /// Waits up to `secs` seconds of real time for `objects` (one of them);
-/// whether it was signaled. Under clock control the programs' clock may
-/// be frozen or jump, so the wait looks at the real clock every second of
-/// the programs' time (with no clock control: one wait).
-fn wait_real_secs(objects: &[nt::object::ObjectRef], secs: u64) -> bool {
+/// the index of the one signaled. Under clock control the programs' clock
+/// may be frozen or jump, so the wait looks at the real clock every second
+/// of the programs' time (with no clock control: one wait).
+fn wait_real_secs_any(objects: &[nt::object::ObjectRef], secs: u64) -> Option<usize> {
     use nt::wait::Timeout;
     let until = time::raw_ticks() + secs * time::TICK_HZ;
     loop {
         let step = if clockctl::armed() { time::TICK_HZ } else { secs * time::TICK_HZ };
         let timeout = Timeout::Tick(time::ticks() + step);
-        if nt::wait::wait_for(objects, false, timeout) != nt::status::NtStatus::TIMEOUT {
-            return true;
+        let status = nt::wait::wait_for(objects, false, timeout);
+        if status != nt::status::NtStatus::TIMEOUT {
+            return (status.0 < objects.len() as u32).then_some(status.0 as usize).or(Some(0));
         }
         if time::raw_ticks() >= until {
-            return false;
+            return None;
         }
     }
 }
@@ -530,10 +554,12 @@ fn init_paging(info: &BootInfo) {
 }
 
 fn init_timer(info: &BootInfo) {
-    let calibration = match arch::apic::init_bsp() {
+    let mut calibration = match arch::apic::init_bsp() {
         Ok(c) => c,
         Err(e) => panic!("local APIC: {e:?}"),
     };
+    // After a handover: the first boot's rates (one clock across kernels).
+    handover::carried_rates(info, &mut calibration.tsc_hz, &mut calibration.timer_hz);
     info!(
         "apic: id {} ({}), timer {} kHz, TSC {} MHz",
         calibration.apic_id,
@@ -782,43 +808,84 @@ impl core::fmt::Display for Lossy<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_program(
     info: &BootInfo,
+    cmdline: &Cmdline,
     name: &str,
     args: &str,
     cwd: Option<&str>,
     wait_all: bool,
     console: Option<mm::heap::KArc<nt::conhost::Session>>,
+    handover_requests: Option<&nt::object::ObjectRef>,
 ) {
     let mut buf = [0u8; 512];
     let Some((file_name, data, directory)) = find_program(info, name, &mut buf) else {
         panic!("run: no boot module named {name:?}");
     };
-    info!("run: {directory}/{file_name} ({} bytes)", data.len());
     let (free_before, _) = mm::frame_stats();
-    let space = match nt::process::spawn_from_pe(file_name, directory, data, args, cwd, console) {
-        Ok((process, main_thread)) => {
-            drop(main_thread);
+    // A program the previous kernel handed over goes on (not again).
+    let started = match handover::carry::resumed(file_name) {
+        Some(process) => {
+            info!("run: {file_name} goes on from the previous kernel (pid {})", process.id);
+            Ok(process)
+        }
+        None => {
+            info!("run: {directory}/{file_name} ({} bytes)", data.len());
+            nt::process::spawn_from_pe(file_name, directory, data, args, cwd, console)
+                .map(|(process, _main)| process)
+        }
+    };
+    let space = match started {
+        Ok(process) => {
             // Wait for the whole process (all threads) to end.
             match nt::object::KObject::new(nt::object::ObjectBody::Process(process.clone())) {
                 Ok(object) => {
-                    let one = core::slice::from_ref(&object);
-                    // A minute without finishing: log every thread's
-                    // state (what a hang is waiting for), then wait on.
-                    if !wait_real_secs(one, 60) {
-                        warn!("run: {} still running after a minute; threads:", process.name);
-                        nt::thread::dump();
-                        sched::dump();
-                        // What it has missed so far (the ledger otherwise
-                        // prints when the run ends, which a hang never
-                        // does).
-                        nt::ledger::dump();
+                    let mut objects = alloc::vec::Vec::new();
+                    let _ = mm::heap::TryVec::try_push(&mut objects, object);
+                    if let Some(r) = handover_requests
+                        && mm::heap::TryVec::try_push(&mut objects, r.clone()).is_err()
+                    {
+                        error!("run: out of memory for the handover requests");
                     }
-                    // Then what it newly missed every 30 seconds (e.g.
-                    // after a screen check's input).
-                    while !wait_real_secs(one, 30) {
-                        info!("run: {} still running; the ledger so far:", process.name);
-                        nt::ledger::dump();
+                    let mut reported = false;
+                    loop {
+                        match wait_real_secs_any(&objects, if reported { 30 } else { 60 }) {
+                            Some(0) => break,
+                            // The program asked for a kernel handover: it
+                            // happens once its threads are all blocked.
+                            Some(_) => {
+                                let e = handover::go(info, cmdline);
+                                match e {
+                                    handover::HandoverError::Refused(why) => {
+                                        warn!("handover: refused: {why}")
+                                    }
+                                    e => error!("handover: failed: {e:?}"),
+                                }
+                            }
+                            // A minute without finishing: log every
+                            // thread's state (what a hang is waiting for),
+                            // then wait on.
+                            None if !reported => {
+                                reported = true;
+                                warn!(
+                                    "run: {} still running after a minute; threads:",
+                                    process.name
+                                );
+                                nt::thread::dump();
+                                sched::dump();
+                                // What it has missed so far (the ledger
+                                // otherwise prints when the run ends, which
+                                // a hang never does).
+                                nt::ledger::dump();
+                            }
+                            // Then what it newly missed every 30 seconds
+                            // (e.g. after a screen check's input).
+                            None => {
+                                info!("run: {} still running; the ledger so far:", process.name);
+                                nt::ledger::dump();
+                            }
+                        }
                     }
                 }
                 Err(_) => error!("run: out of memory"),

@@ -147,6 +147,18 @@ extern "C" fn dispatch(frame: &mut SyscallFrame) {
     }
 }
 
+/// Runs the system call in `frame` as if the thread had just made it
+/// (`frame` as the entry path saves it: number in rax, arguments in r10,
+/// rdx, r8, r9 and on the user stack), then returns to user mode with its
+/// result as SYSRET would (rcx = rip, r11 = rflags). A kernel handover
+/// reissues a blocked system call this way in the new kernel
+/// (ARCHITECTURE invariant 2). Called on the thread's own kernel stack,
+/// with its user GS base and address space in place.
+pub fn reissue(frame: &mut SyscallFrame) -> ! {
+    dispatch(frame);
+    enter_user_regs(&syscall_regs(frame))
+}
+
 /// Starts executing user code at `entry` with stack `stack` and `rcx = arg`,
 /// using the GS base set by `percpu::set_user_gs_base`. Never returns; the
 /// thread re-enters the kernel only through syscalls and interrupts.

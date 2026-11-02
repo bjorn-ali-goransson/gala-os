@@ -1124,6 +1124,26 @@ passes alone): if it recurs, its log says which bound was missed.
 - A new kind of state goes into a new section (or new fields at the end
   of one, its version raised), never a changed meaning of an old field;
   add a round-trip test and an "older writer" test.
+- Programs across a handover (R9 (b), `cargo xtask boot-test
+  handover_idle`): `handover: refused: <reason>` says what stopped it
+  (the programs go on); a thread that "runs user code" or "is not
+  blocked yet" for 3 s never reached a wait (a busy loop, or a call not
+  in `syscalls::restartable`). `handover: carrying N process(es), ...`
+  is the last line before the record; in the new kernel `handover:
+  resumed process ...` and `... resumed, N ms after the record`; `cannot
+  resume the programs: Failed { section, index, status }` names the
+  record section and entry that could not be rebuilt (the programs are
+  then lost: the record is past the point of no return; check what the
+  old kernel wrote in `carry::Programs::write`).
+- A carried thread that faults or returns garbage right after the
+  handover: its registers come from `in_syscall` (the `syscall`'s) and
+  its x87/SSE state from the scheduler's saved context; the call is made
+  again through `arch::syscall::reissue`. A sleep that ends early or late
+  across a handover is the clock: the tick count must go on from the
+  record's (`time::resume`), at the first boot's timer rate (CLOCK v2).
+- Something new a program can hold must be carried or refused in
+  `carry::check_object` (the match is exhaustive over `ObjectBody`: a
+  new object kind does not compile until it is decided).
 
 ## Where things are
 

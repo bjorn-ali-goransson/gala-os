@@ -187,20 +187,28 @@ pub fn snapshot() -> crate::handover::record::Clock {
         ticks: TICKS.load(Ordering::Relaxed),
         monotonic_ns: raw_monotonic_ns(),
         boot_system_time: SYSTEM_TIME_AT_INIT.load(Ordering::Relaxed),
+        timer_hz: CALIBRATION.lock().map_or(0, |c| c.timer_hz),
     }
 }
 
 /// After a kernel handover: the clock goes on from the previous kernel's
 /// (same TSC rate and zero, so no jump; the tick count catches up with the
-/// time that passed). Call after `init`, before interrupts are enabled.
+/// time that passed since the record). Call after `init`, before
+/// interrupts are enabled.
+///
+/// The tick count goes on from the record's, not from the TSC: counted
+/// interrupts can lag behind the TSC (an emulator's late ticks), and the
+/// deadlines of the waits a handover carries are ticks; restarting the
+/// count from the TSC would end them early by that lag.
 pub fn resume(clock: &crate::handover::record::Clock) {
     if clock.tsc_hz == 0 {
         return;
     }
     TSC_HZ.store(clock.tsc_hz, Ordering::Relaxed);
     TSC_AT_BOOT.store(clock.tsc_at_zero, Ordering::Relaxed);
-    let ticks = raw_monotonic_ns() / (1_000_000_000 / TICK_HZ);
-    TICKS.store(ticks.max(clock.ticks), Ordering::Relaxed);
+    let passed = raw_monotonic_ns().saturating_sub(clock.monotonic_ns);
+    let ticks = clock.ticks + passed / (1_000_000_000 / TICK_HZ);
+    TICKS.store(ticks, Ordering::Relaxed);
     SYSTEM_TIME_AT_INIT.store(clock.boot_system_time, Ordering::Relaxed);
 }
 

@@ -1721,15 +1721,43 @@ R. **Robustness and live update, kernel included** (the owner's
      again, finds the marker page and the volume where they were. Host
      tests: the record's round trip, damage, versions, older and unknown
      sections; ELF checks; memory-map carving.
-     Next, for (b) (idle programs): carry processes and threads as
-     data (a REQUIRED section per object kind; threads as "user
-     registers + waiting on X until T"), user pages kept in place (a
-     frame bitmap section; the address spaces' page tables rebuilt from
-     a list of mappings), handles and objects by id, the registry's
-     volatile keys; `run=`/`start=` not run again when processes come
-     across; then a `Gala*` trigger so a program can ask for a handover
-     while it runs. Also open: freeing the first kernel's image and
-     Limine's reclaimable memory.
+     **Milestone (b) done** (2026-11-02, scenarios handover_idle,
+     handover_idle_uefi, handover_idle_twice, handover_refused; test
+     program `user/handover_test`; ARCHITECTURE "Programs across a
+     handover"): a program asks for a handover (GalaRequestHandover,
+     0x7f5a, test-only, with `handover=`); once all its threads are
+     blocked in waits (a sleep, a timer, an event another thread sets,
+     an alertable wait) the kernel stops them there and writes them
+     down as data: processes, address spaces (VAD, section views, the
+     page list: their own pages stay in their frames, a USER_FRAMES
+     section the next frame allocator claims; image pages laid out
+     again from the executable), threads as "in NtXxx with these
+     registers, x87/SSE state, until tick T", objects by id (events,
+     semaphores, mutants, timers, pagefile-backed sections, files with
+     their position, I/O completion ports, exited threads, process
+     objects, consoles) and handle tables. The new kernel rebuilds them
+     and the threads make their calls again with the same absolute
+     deadline (invariant 2); `run=` waits for the carried process
+     instead of starting it again. The program finds its memory,
+     handles, ids and time as they were (a 4000 ms sleep across the
+     handover measures 4001-4002 ticks); twice in a row too. What
+     cannot be carried yet makes the handover refuse cleanly, with the
+     reason (`handover: refused: process 4 has a device handle`), and
+     the programs go on. Clock: the first boot's TSC and timer rates
+     are carried (CLOCK version 2) and the tick count goes on from the
+     record's, so carried deadlines do not drift.
+     Next, for (c) (programs blocked in waits and I/O, and running
+     ones): threads running user code (the full register set from the
+     interrupt frame, as a suspended thread's context) and more system
+     calls made again (NtRemoveIoCompletion, keyed events,
+     NtWaitForAlertByThreadId, NtSignalAndWaitForSingleObject's wait
+     half, reads on pipes and sockets with I/O drained or resubmitted);
+     DLL and image views (laid out again from their files, like the
+     executable: programs on gala's ntdll and kernel32), file views,
+     registry keys, tokens (the primary token as data), keyed events,
+     jobs, console sessions, named objects in program-made directories;
+     the registry's volatile keys and the window registry. Also open:
+     freeing the first kernel's image and Limine's reclaimable memory.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

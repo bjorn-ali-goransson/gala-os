@@ -45,7 +45,18 @@ pub fn init(info: &BootInfo) -> Result<(), InitError> {
     let (bitmap, reserved) =
         boot::take_frame_bitmap(info, words).ok_or(InitError::NoBitmapStorage)?;
     let reserved = [0..boot::LOW_MEMORY_END, reserved];
-    let alloc = FrameAllocator::from_memory_map(bitmap, info.memory_map.iter(), &reserved);
+    let mut alloc = FrameAllocator::from_memory_map(bitmap, info.memory_map.iter(), &reserved);
+    // After a kernel handover: the programs' pages stay where they are
+    // (ROADMAP R9 (b)); nothing has been allocated yet.
+    let user = info
+        .handover
+        .as_ref()
+        .and_then(|r| r.record.section(crate::handover::record::tag::USER_FRAMES));
+    if let Some(section) = user {
+        for range in crate::handover::record::read_ranges(&section) {
+            alloc.claim(range.base / PAGE_SIZE, (range.base + range.len).div_ceil(PAGE_SIZE));
+        }
+    }
     *FRAMES.lock() = Some(alloc);
     Ok(())
 }

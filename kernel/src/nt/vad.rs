@@ -429,12 +429,127 @@ impl Vad {
     }
 }
 
+/// The VAD in a kernel handover record (ROADMAP R9, `handover::programs`):
+/// one entry, version 1: the private commit (u64), the allocation count
+/// (u32), then each allocation as an entry: base, pages (u64), kind,
+/// allocation protection (u32), the run count (u32) and its runs (start,
+/// pages: u64; committed, protect: u32). Entries may gain fields at their
+/// end.
+impl Vad {
+    pub fn write_to(&self, w: &mut crate::handover::record::Writer) -> Result<(), AllocError> {
+        let vad = w.begin_entry()?;
+        w.u64(self.private_commit)?;
+        w.u32(self.allocs.len() as u32)?;
+        for a in &self.allocs {
+            let e = w.begin_entry()?;
+            w.u64(a.base)?;
+            w.u64(a.pages)?;
+            w.u32(a.kind)?;
+            w.u32(a.alloc_protect)?;
+            w.u32(a.runs.len() as u32)?;
+            for r in &a.runs {
+                w.u64(r.start)?;
+                w.u64(r.pages)?;
+                w.u32(u32::from(r.state.committed))?;
+                w.u32(r.state.protect)?;
+            }
+            w.end_entry(e)?;
+        }
+        w.end_entry(vad)
+    }
+
+    /// Reads what `write_to` wrote, checking that allocations are sorted,
+    /// apart and inside user space, and that their runs cover them.
+    pub fn read_from(r: &mut crate::handover::record::Reader<'_>) -> Result<Vad, NtStatus> {
+        let mut r = r.entry().ok_or(NtStatus::INVALID_PARAMETER)?;
+        let private_commit = r.u64();
+        let count = r.u32() as usize;
+        let mut allocs: Vec<Allocation> = Vec::new();
+        allocs.try_reserve(count.min(4096)).map_err(|_| NtStatus::NO_MEMORY)?;
+        for _ in 0..count {
+            let mut e = r.entry().ok_or(NtStatus::INVALID_PARAMETER)?;
+            let (base, pages, kind, alloc_protect) = (e.u64(), e.u64(), e.u32(), e.u32());
+            let n = e.u32() as usize;
+            let mut runs = Vec::new();
+            runs.try_reserve(n.min(4096)).map_err(|_| NtStatus::NO_MEMORY)?;
+            let mut next = 0;
+            for _ in 0..n {
+                let (start, run_pages) = (e.u64(), e.u64());
+                let (committed, protect) = (e.u32() != 0, e.u32());
+                if start != next || run_pages == 0 {
+                    return Err(NtStatus::INVALID_PARAMETER);
+                }
+                next = start + run_pages;
+                let state = PageState { committed, protect };
+                runs.try_push(Run { start, pages: run_pages, state })
+                    .map_err(|_| NtStatus::NO_MEMORY)?;
+            }
+            let end = pages.checked_mul(PAGE).and_then(|len| base.checked_add(len));
+            let after_previous = allocs.last().is_none_or(|p| p.end() <= base);
+            if next != pages
+                || base < USER_MIN
+                || end.is_none_or(|e| e > USER_MAX)
+                || !after_previous
+            {
+                return Err(NtStatus::INVALID_PARAMETER);
+            }
+            allocs
+                .try_push(Allocation { base, pages, kind, alloc_protect, runs })
+                .map_err(|_| NtStatus::NO_MEMORY)?;
+        }
+        Ok(Vad { allocs, private_commit })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn rw() -> u32 {
         PAGE_READWRITE
+    }
+
+    #[test]
+    fn handover_round_trip() {
+        use crate::handover::record::{self, Writer, tag};
+        let mut v = Vad::default();
+        let (base, _) = v.reserve(Some(0x10_0000), 0x4_0000, rw(), MEM_PRIVATE, false).unwrap();
+        v.commit(base + 0x1000, 0x2000, rw()).unwrap();
+        v.commit(base + 0x3000, 0x1000, PAGE_READWRITE | PAGE_GUARD).unwrap();
+        v.reserve(Some(0x40_0000), 0x2000, PAGE_EXECUTE_WRITECOPY, MEM_IMAGE, false).unwrap();
+        v.commit(0x40_0000, 0x2000, PAGE_EXECUTE_READ).unwrap();
+        let encode = |v: &Vad| {
+            let mut w = Writer::new(1).unwrap();
+            w.section(tag::ADDRESS_SPACES, 1, record::REQUIRED).unwrap();
+            v.write_to(&mut w).unwrap();
+            w.finish().unwrap()
+        };
+        let bytes = encode(&v);
+        let rec = record::parse(&bytes).unwrap();
+        let back = Vad::read_from(&mut rec.section(tag::ADDRESS_SPACES).unwrap()).unwrap();
+        assert_eq!(back.private_commit(), v.private_commit());
+        for addr in [base, base + 0x1000, base + 0x3000, base + 0x3_f000, 0x40_1000, 0x50_0000] {
+            assert_eq!(back.query(addr), v.query(addr), "at {addr:#x}");
+        }
+        // Damage: allocations that overlap, or whose runs do not cover
+        // them, are refused.
+        let mut bad = Vad::default();
+        bad.reserve(Some(0x10_0000), 0x2000, rw(), MEM_PRIVATE, false).unwrap();
+        bad.allocs[0].pages = 3;
+        let bytes = encode(&bad);
+        let rec = record::parse(&bytes).unwrap();
+        assert!(Vad::read_from(&mut rec.section(tag::ADDRESS_SPACES).unwrap()).is_err());
+        let mut bad = Vad::default();
+        bad.reserve(Some(0x10_0000), 0x2_0000, rw(), MEM_PRIVATE, false).unwrap();
+        bad.reserve(Some(0x20_0000), 0x1_0000, rw(), MEM_PRIVATE, false).unwrap();
+        bad.allocs[1].base = 0x10_1000;
+        let bytes = encode(&bad);
+        let rec = record::parse(&bytes).unwrap();
+        assert!(Vad::read_from(&mut rec.section(tag::ADDRESS_SPACES).unwrap()).is_err());
+        // A truncated section reads as missing entries.
+        let mut r = rec.section(tag::ADDRESS_SPACES).unwrap();
+        let _ = r.entry();
+        assert!(Vad::read_from(&mut r).is_err());
     }
 
     #[test]

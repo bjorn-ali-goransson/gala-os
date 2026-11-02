@@ -84,6 +84,16 @@ impl fmt::Debug for Process {
 }
 
 impl Process {
+    /// The executable's layout (whose frames back its unwritten pages).
+    pub fn layout(&self) -> &KArc<super::section::ImageLayout> {
+        &self._layout
+    }
+
+    /// ntdll!KiUserExceptionDispatcher in this process, or 0.
+    pub fn exception_dispatcher(&self) -> u64 {
+        self.exception_dispatcher.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
     /// The NT path of the executable (`\\Device\\HarddiskVolume1\\gala\\x.exe`).
     pub fn image_nt_path(&self) -> Result<Vec<u16>, NtStatus> {
         let mut name = Vec::new();
@@ -1026,7 +1036,7 @@ pub fn init() {
 }
 
 /// Opens the executable at Win32 path `path` (`C:\...`) for reading.
-fn open_program(path: &str) -> Result<ObjectRef, NtStatus> {
+pub(crate) fn open_program(path: &str) -> Result<ObjectRef, NtStatus> {
     use super::file;
     let rest = path.strip_prefix("C:").or_else(|| path.strip_prefix("c:"));
     let rest = rest.ok_or(NtStatus::OBJECT_PATH_SYNTAX_BAD)?;
@@ -1043,6 +1053,76 @@ fn open_program(path: &str) -> Result<ObjectRef, NtStatus> {
         file::FILE_NON_DIRECTORY_FILE,
     )?;
     Ok(opened.object)
+}
+
+/// A process a kernel handover carried over (`handover::programs`): its
+/// address space rebuilt from the record, no threads yet.
+pub struct Adopted {
+    pub id: u64,
+    pub parent_id: u64,
+    pub name: &'static str,
+    pub path: &'static str,
+    pub space: UserSpace,
+    pub vad: Vad,
+    pub views: Vec<super::section::View>,
+    pub image: (u64, u64),
+    pub layout: KArc<super::section::ImageLayout>,
+    pub exception_dispatcher: u64,
+    pub apc_dispatcher: u64,
+    pub create_time: u64,
+    pub threads_created: u32,
+    pub priority_class: u8,
+}
+
+/// Rebuilds a process from a kernel handover's record: the boot user's
+/// token (the token is not carried yet), its commit charged again.
+pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
+    use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64};
+    let token = super::token::for_new_process(None).map_err(|_| NtStatus::NO_MEMORY)?;
+    let space =
+        KArc::try_new(platform::SpaceLock::new(a.space)).map_err(|_| NtStatus::NO_MEMORY)?;
+    let commit = a.vad.private_commit();
+    let process = KArc::try_new(Process {
+        id: a.id,
+        parent_id: a.parent_id,
+        name: a.name,
+        path: a.path,
+        space,
+        handles: IrqMutex::new(HandleTable::default()),
+        vad: IrqMutex::new(a.vad),
+        views: IrqMutex::new(a.views),
+        threads: IrqMutex::new(Vec::new()),
+        threads_created: AtomicU32::new(a.threads_created),
+        exit_status: IrqMutex::new(None),
+        dispatcher: Dispatcher::new(0),
+        image: a.image,
+        _layout: a.layout,
+        exception_dispatcher: AtomicU64::new(a.exception_dispatcher),
+        apc_dispatcher: AtomicU64::new(a.apc_dispatcher),
+        create_time: a.create_time,
+        exit_time: IrqMutex::named("process.exit_time", 0),
+        job: IrqMutex::new(None),
+        oom_logged: AtomicBool::new(false),
+        commit: AtomicU64::new(0),
+        commit_ended: AtomicBool::new(false),
+        priority_class: AtomicU8::new(a.priority_class),
+        token: IrqMutex::new(token),
+        console: None,
+    })
+    .map_err(|_| NtStatus::NO_MEMORY)?;
+    {
+        let _vad = process.vad.lock();
+        super::charge::sync(&process, commit);
+    }
+    PROCESSES.lock().try_push(process.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
+    thread::continue_ids_from(a.id + 4);
+    Ok(process)
+}
+
+/// Forgets a process `adopt` made whose threads could not be rebuilt.
+pub fn forget_adopted(process: &KArc<Process>) {
+    process.exit_status.lock().get_or_insert(NtStatus::UNSUCCESSFUL);
+    finish(process, NtStatus::UNSUCCESSFUL);
 }
 
 /// Whether the program at Win32 path `path` exists (the start menu).

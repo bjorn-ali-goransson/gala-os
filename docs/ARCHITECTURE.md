@@ -120,7 +120,7 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `clock=<items>` | clock control while the programs run (debug builds; "Clock control" below): `control` (the test-only GalaClockControl call is allowed), `freeze`, `rate:<n>[/<d>]`, `advance:<seconds>`, `system:<UNIX seconds>` (the system time when the programs start). Example: `clock=control,freeze,system:2147483648` |
 | `record` | record what the programs read from outside (random numbers, the boot time) on the debug console; xtask writes it to `<iso>.rec` ("Record/replay" below) |
 | `replay=<file>` | the programs read those inputs from the recording in the boot module of that file name |
-| `handover=<n>` | at the end of the boot (after the `run=` programs), hand the machine over to a fresh copy of the kernel, until n handovers are done ("Kernel handover" below; the command line is handed over, so each kernel sees it) |
+| `handover=<n>` | at the end of the boot (after the `run=` programs), hand the machine over to a fresh copy of the kernel, until n handovers are done ("Kernel handover" below; the command line is handed over, so each kernel sees it); while it allows one more, programs may ask for one (GalaRequestHandover, 0x7f5a): it happens once all their threads are blocked in waits, and they go on in the new kernel |
 | `handover_image=<file>` | hand over to the kernel ELF in that boot module instead of the running kernel's own file |
 
 ## Physical memory
@@ -4060,13 +4060,14 @@ delay mode; its faults stay `net_tx` drops and `netreset=`.
   calls (invariants 1, 2, 4). The disk log's snapshot and replay (D2/D3)
   is the precedent for the format. Live mocking's swap at a quiescent
   point is the trial run for this, so it comes first. Milestone (a), the
-  handover itself with no programs, is built: "Kernel handover" below.
+  handover itself with no programs, is built: "Kernel handover" below;
+  milestone (b), idle programs carried across, too.
 - Function-level live patching (as Microsoft's Hotpatch): not planned
   unless a concrete need appears.
 - **A chain of trust for updates**: designed below (R8); built after
   R7, before live update ships.
 
-### Kernel handover (R9 milestone (a), 2026-11-02)
+### Kernel handover (R9 milestones (a) and (b), 2026-11-02)
 
 The running kernel hands the machine to a fresh kernel image without the
 firmware or the bootloader: same build, no programs running (milestone
@@ -4094,11 +4095,12 @@ other unknown tags are skipped and logged. Sections (all version 1):
 | 3 | FRAMEBUFFER | Limine's framebuffer fields, physical address |
 | 4 | CMDLINE | the kernel command line |
 | 5 | MODULES | (physical address, length, path, string) of each boot module, still where the bootloader put them |
-| 6 | CLOCK | TSC rate, the TSC at the clock's zero, ticks, the clock when written, the boot system time |
+| 6 | CLOCK | TSC rate, the TSC at the clock's zero, ticks, the clock when written, the boot system time; version 2 adds the APIC timer's rate |
 | 7 | CPUS | boot CPU's LAPIC id, count, physical address of the parked CPUs' `limine_mp_info` array |
 | 8 | VOLUME | the mounted volume's size, log generation, area and length (`persist`) |
-| 9 | KEPT | (base, length, purpose): SCAFFOLD, RECORD, KERNEL_IMAGE (for the receiving kernel only), MARKER (kept for good) |
+| 9 | KEPT | (base, length, purpose): SCAFFOLD, RECORD, KERNEL_IMAGE, BITMAP (room for the next frame bitmap) (for the receiving kernel only), MARKER (kept for good) |
 | 10 | KERNEL_FILE | the kernel ELF to hand over to next time |
+| 11-25 | programs | REQUIRED, milestone (b): "Programs across a handover" below |
 
 **Memory.** The receiving kernel builds its frame allocator from the
 record's map as from Limine's: the new image is "executable and modules",
@@ -4170,19 +4172,104 @@ kept). No allocation after CPUs are parked (a TLB shootdown would wait
 for them forever). The entry convention (rdi/rsi/rdx) and the parked
 array's layout are part of the handover contract, versioned with the
 record: a newer kernel (milestone (d)) must keep them or raise the
-framing version. Clock control (`clock=`) state is not carried (no
-programs in (a)).
+framing version. Clock control (`clock=`) state is not carried: a
+handover with programs is refused while it is armed.
 
-**Not carried yet** (milestones (b)-(e)): processes, threads ("waiting on
-X until T"), handles and objects, address spaces (user pages would be
-kept frames: a frame bitmap section rather than carved ranges, so the map
-stays short), the registry's volatile keys, the window registry, console
-sessions, sockets. Programs on the command line (`run=`, `start=`) run
-again in each kernel today, as after a reboot; once processes are carried
-they continue instead. The first kernel's image and Limine's reclaimable
-memory are not freed; the scaffold of the running kernel is freed only by
-the next handover. A test-only trigger from a program (a `Gala*` call) or
-the debug console is not there yet: `handover=<n>` only.
+**Programs across a handover** (milestone (b); scenarios
+`handover_idle`, `handover_idle_uefi`, `handover_idle_twice`,
+`handover_refused`; test program `user/handover_test`). Programs whose
+threads are all blocked in waits come across and go on, their memory in
+place, without being started again. Code: `handover::carry` (collect,
+rebuild; uses the NT layer's handover helpers: `thread::snapshot/adopt`,
+`process::adopt`, `section::Section::adopt`, `timer::adopt`,
+`file::reopen`, `vad::Vad::write_to/read_from`) and `handover::programs`
+(the formats, host-tested: round trip, damage, older entries).
+
+- *Trigger*: GalaRequestHandover (0x7f5a, test-only, in user/ntrt; it
+  answers STATUS_ACCESS_DENIED unless `handover=` allows one more) sets
+  an event `run=`'s wait also waits on; the boot thread then calls
+  `handover::go`. `handover=<n>` at the end of the boot carries whatever
+  still runs (`start=` servers) the same way.
+- *Quiescence* (`carry::collect`): every NT thread must be blocked
+  (scheduler state Waiting, off every CPU) in a system call that can be
+  made again (`syscalls::restartable`: NtWaitForSingleObject,
+  NtWaitForMultipleObjects, NtDelayExecution; they only wait, so the same
+  call with the same arguments and the same absolute deadline is the
+  same call, invariant 2), not suspended, not terminating, no user APC
+  queued, not impersonating. The boot thread polls (every 2 ms, up to
+  3 s) without stopping anyone (a thread stopped in user mode on its way
+  to its wait would never get there); once all are blocked it stops the
+  scheduler from picking user threads (`sched::freeze_users`) and checks
+  again (one may have been woken in between). Stopped threads stay where
+  they are (woken ones queued, not run), so nothing a wait consumes is
+  consumed until the new kernel makes the call again. A refusal (or any
+  failure before the point of no return) lets them run again and is
+  logged: `handover: refused: thread 12 of process 4 runs user code`,
+  `... process 4 has an open socket`.
+- *What is carried* (sections, all version 1 and REQUIRED; lists are
+  entries with a length, or tables with a stride, so items gain fields at
+  their end; objects are named by ids unique in the record, one section
+  per object kind so a kernel that does not know a kind refuses the
+  record before it starts):
+
+| Tag | Section | Contents |
+|---|---|---|
+| 11 | USER_FRAMES | physical ranges of the programs' own pages and of section pages: the next frame allocator claims them before anything is allocated (`mm::init`) |
+| 12 | PROCESSES | a header entry (the next NT id), then per process: id, parent, create time, image base and size, ntdll's dispatchers, threads created, priority class, name, Win32 path of the executable |
+| 13 | ADDRESS_SPACES | per process: the VAD (`Vad::write_to`), a table of section views (base, size, offset, section id), a table of pages (address, value, kind, flags): OWNED (frame number: kept in place), IMAGE (page index: the executable is laid out again from its file and the page mapped from that layout), SHARED_DATA (KUSER_SHARED_DATA: the new kernel's), SECTION (the view's section page) |
+| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, its object id, the system call (number, the user registers at the `syscall`), its deadline (timer tick, absolute; none), its x87/SSE state (FXSAVE, from the scheduler's saved context) |
+| 15-23 | EVENTS, SEMAPHORES, MUTANTS, TIMERS, SECTIONS, FILES, IO_COMPLETIONS, EXITED_THREADS, PROCESS_OBJECTS | per object: id, name (re-linked in the namespace when its directory is a permanent one), state: signal, count and maximum, owner thread and count, due tick and period, size/protection/attributes and frames (pagefile-backed), volume path, rights, share access, options and position (opened again), queued packets, exit status and times, the process |
+| 24 | CONSOLES | console input/output objects (no state) |
+| 25 | HANDLES | per process: (handle value, object id, granted access, attributes) |
+
+- *The receiving kernel*: `mm::init` claims USER_FRAMES; the frame
+  bitmap goes in the BITMAP range the old kernel took from its free
+  frames (anywhere else in usable memory it could land on user pages);
+  after `nt::init`, the boot modules' files and `persist`,
+  `handover::resume_programs` rebuilds objects, processes (a new address
+  space: owned pages adopted, image pages from the executable's layout,
+  section pages from the sections), process objects, threads, mutant
+  ownership, handle tables, armed timers (listed again: one due in the
+  past fires at once), then starts the threads. A carried thread's first
+  run (`thread_entry` with a `Resume`) loads its x87/SSE state, keeps the
+  deadline for the call (`thread::take_restart_deadline`, taken by
+  `Call::timeout` instead of the user's relative timeout) and reissues the
+  call through the normal dispatcher (`platform::reissue_syscall`,
+  `arch::syscall::reissue`), returning to user mode as SYSRET would
+  (rcx = rip, r11 = rflags). `run=`/`start=` find the carried process by
+  name (`carry::resumed`) and wait for it instead of starting the program.
+  Ids go on from the record's counter, never reused.
+- *One clock* (invariant 5): CLOCK version 2 carries the APIC timer rate;
+  the new kernel uses the first boot's TSC and timer rates instead of
+  calibrating again (under TCG a second calibration differed by tens of
+  percent, and the tick count, which deadlines are kept in, then drifted
+  from the TSC), and its tick count goes on from the record's plus the
+  time since (`time::resume`; from the TSC it would jump by the ticks'
+  lag behind the TSC and end carried waits early). A sleep across a
+  handover ends at its tick (handover_test: 4000 ms asked, 4001-4002
+  ticks measured; the handover itself takes 200-350 ms under TCG).
+- *Files* are opened again by path in the new kernel, so they must be
+  there: with `persist`, anything on C: (written before the handover:
+  `persist::sync`); without, only what the boot made and nobody wrote
+  since (`file::survives_handover`: created before `file::mark_boot_done`,
+  files not written since).
+
+**Not carried yet** (each makes the handover refuse, with the reason):
+threads running user code or in any other system call (milestone (c):
+the full user context from an interrupt frame, I/O in flight), suspended
+or terminating threads, queued APCs, impersonation tokens; console
+windows and console sessions, jobs, DLL and image views (ntdll, kernel32:
+programs on gala's DLLs cannot be carried yet; the image section would be
+laid out again from its file like the executable), views of files;
+sockets, pipes, registry keys, tokens, keyed events, object directories
+and links, device opens (NUL, the disk, the volume), files bound to a
+completion port or deleted on close, timers with an APC; handles to
+processes or threads of programs not carried. The primary token is made
+again as the boot user's (privilege changes are lost), objects' security
+descriptors and byte-range locks are not carried; the window
+registry, the desktop and the registry's volatile keys are not carried.
+The first kernel's image and Limine's reclaimable memory are not freed;
+the scaffold of the running kernel is freed only by the next handover.
 
 ### Chain of trust (R8, design 2026-11-02)
 

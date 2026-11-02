@@ -161,6 +161,16 @@ pub fn refresh_after<R>(change: impl FnOnce() -> R) -> R {
 
 /// Maps the page read-only into a new address space and records it in
 /// the VAD.
+/// Maps the page alone (its VAD entry exists: a process a kernel handover
+/// carried over).
+pub fn map_page(space: &mut UserSpace) -> Result<(), super::status::NtStatus> {
+    use super::status::NtStatus;
+    let guard = PAGE.lock();
+    let page = guard.as_ref().ok_or(NtStatus::NO_MEMORY)?;
+    let flags = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RO };
+    space.map_shared(ADDRESS, page, flags).map_err(|_| NtStatus::NO_MEMORY)
+}
+
 pub fn map_into(space: &mut UserSpace, vad: &mut Vad) -> Result<(), super::status::NtStatus> {
     use super::status::NtStatus;
     let guard = PAGE.lock();

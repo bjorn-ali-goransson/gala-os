@@ -136,6 +136,9 @@ pub const GALA_RANDOM: u32 = 0x7f4d;
 /// The shell's named actions (nt::action; 0x7f4c-0x7f57 are another
 /// agent's).
 pub const GALA_DESKTOP_ACTION: u32 = 0x7f58;
+/// gala's test-only request for a kernel handover (ROADMAP R9 (b); allowed
+/// with `handover=` on the command line), also in user/ntrt.
+pub const GALA_REQUEST_HANDOVER: u32 = 0x7f5a;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -334,6 +337,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_CLOCK_CONTROL, "GalaClockControl", 4, gala_clock_control),
     (GALA_RANDOM, "GalaRandom", 2, gala_random),
     (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
+    (GALA_REQUEST_HANDOVER, "GalaRequestHandover", 0, gala_request_handover),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -488,8 +492,13 @@ impl Call<'_> {
         }
     }
 
-    /// Reads an optional `PLARGE_INTEGER` timeout.
+    /// Reads an optional `PLARGE_INTEGER` timeout. A call reissued after a
+    /// kernel handover keeps the deadline it had (invariant 2: the user's
+    /// relative timeout is not started again).
     fn timeout(&self, ptr: u64) -> Result<Timeout, NtStatus> {
+        if let Some(deadline) = thread::take_restart_deadline() {
+            return Ok(deadline.map_or(Timeout::Infinite, Timeout::Tick));
+        }
         let value = if ptr == 0 { None } else { Some(self.read_u64(ptr)? as i64) };
         Ok(Timeout::from_nt(value))
     }
@@ -2925,6 +2934,44 @@ fn gala_clock_control(call: &mut Call<'_>) -> NtStatus {
 /// recording: recorded; a replay: from the recording);
 /// STATUS_NOT_SUPPORTED otherwise, and the caller (gala's ProcessPrng)
 /// uses the CPU's generator itself. At most 1 MiB per call.
+/// Set when programs may ask for a kernel handover: the event that tells
+/// the kernel one did (`allow_handover_requests`).
+static HANDOVER_REQUEST: IrqMutex<Option<ObjectRef>> = IrqMutex::new(None);
+
+/// Lets programs ask for a kernel handover (GalaRequestHandover); returns
+/// the event their requests set (an auto-reset event the kernel waits on).
+pub fn allow_handover_requests() -> Result<ObjectRef, NtStatus> {
+    let event = KObject::new(ObjectBody::Event(Event {
+        kind: EventType::Synchronization,
+        dispatcher: Dispatcher::new(0),
+    }))
+    .map_err(|_| NtStatus::NO_MEMORY)?;
+    *HANDOVER_REQUEST.lock() = Some(event.clone());
+    Ok(event)
+}
+
+/// The system calls a kernel handover can carry a thread blocked in: they
+/// only wait, so making them again with the same arguments and the same
+/// absolute deadline is the same call (ARCHITECTURE invariant 2).
+pub fn restartable(number: u32) -> bool {
+    matches!(number, NT_WAIT_FOR_SINGLE_OBJECT | NT_WAIT_FOR_MULTIPLE_OBJECTS | NT_DELAY_EXECUTION)
+}
+
+/// GalaRequestHandover(): asks the kernel to hand the machine over to a
+/// fresh copy of itself (test-only, `handover=`); it happens once every
+/// thread of every program is blocked in a wait (ROADMAP R9 (b)).
+/// STATUS_ACCESS_DENIED when the kernel was not started for that.
+fn gala_request_handover(_call: &mut Call<'_>) -> NtStatus {
+    let event = HANDOVER_REQUEST.lock().clone();
+    match event {
+        Some(event) => {
+            wait::set_signal(&event, 1);
+            NtStatus::SUCCESS
+        }
+        None => NtStatus::ACCESS_DENIED,
+    }
+}
+
 fn gala_random(call: &mut Call<'_>) -> NtStatus {
     use crate::replay::{self, Kind};
     if !(platform::entropy_seeded() || replay::on()) {

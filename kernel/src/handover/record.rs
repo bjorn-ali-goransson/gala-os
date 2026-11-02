@@ -64,6 +64,34 @@ pub mod tag {
     pub const KEPT: u32 = 9;
     /// The kernel executable file (ELF) to hand over to next time.
     pub const KERNEL_FILE: u32 = 10;
+    // Programs (milestone (b); `handover::programs` has their formats).
+    // All REQUIRED: a kernel that does not know one would lose programs.
+    /// Physical ranges holding user pages and section pages (`Range`s,
+    /// `what` 0): the next kernel's frame allocator keeps them.
+    pub const USER_FRAMES: u32 = 11;
+    /// Processes (and the NT id counter).
+    pub const PROCESSES: u32 = 12;
+    /// Address spaces: VAD, section views, page mappings.
+    pub const ADDRESS_SPACES: u32 = 13;
+    /// Threads as data: "in system call N with these registers, until T".
+    pub const THREADS: u32 = 14;
+    /// Objects by kind (one tag per kind, so a kernel that does not know
+    /// a kind refuses the record before it starts).
+    pub const EVENTS: u32 = 15;
+    pub const SEMAPHORES: u32 = 16;
+    pub const MUTANTS: u32 = 17;
+    pub const TIMERS: u32 = 18;
+    pub const SECTIONS: u32 = 19;
+    pub const FILES: u32 = 20;
+    pub const IO_COMPLETIONS: u32 = 21;
+    /// Thread objects of threads that have exited (handles to them).
+    pub const EXITED_THREADS: u32 = 22;
+    /// Process objects (each an object of its own, naming a process).
+    pub const PROCESS_OBJECTS: u32 = 23;
+    /// Console input and output objects (no state).
+    pub const CONSOLES: u32 = 24;
+    /// Handle tables.
+    pub const HANDLES: u32 = 25;
 }
 
 /// What a kept physical range is (KEPT section).
@@ -77,6 +105,10 @@ pub mod purpose {
     pub const KERNEL_IMAGE: u32 = 3;
     /// A page that must survive every handover (the test's marker).
     pub const MARKER: u32 = 4;
+    /// Room for the next kernel's frame bitmap, taken from free frames so
+    /// that it cannot land on user pages (USER_FRAMES). Free once that
+    /// kernel hands over.
+    pub const BITMAP: u32 = 5;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,7 +143,7 @@ impl core::fmt::Display for RecordError {
 }
 
 /// The tags this kernel knows (unknown ones are skipped unless REQUIRED).
-const KNOWN: [u32; 10] = [
+pub const KNOWN: [u32; 25] = [
     tag::MEMORY_MAP,
     tag::PLATFORM,
     tag::FRAMEBUFFER,
@@ -122,6 +154,21 @@ const KNOWN: [u32; 10] = [
     tag::VOLUME,
     tag::KEPT,
     tag::KERNEL_FILE,
+    tag::USER_FRAMES,
+    tag::PROCESSES,
+    tag::ADDRESS_SPACES,
+    tag::THREADS,
+    tag::EVENTS,
+    tag::SEMAPHORES,
+    tag::MUTANTS,
+    tag::TIMERS,
+    tag::SECTIONS,
+    tag::FILES,
+    tag::IO_COMPLETIONS,
+    tag::EXITED_THREADS,
+    tag::PROCESS_OBJECTS,
+    tag::CONSOLES,
+    tag::HANDLES,
 ];
 
 fn get<const N: usize>(bytes: &[u8], at: usize) -> Option<[u8; N]> {
@@ -187,6 +234,43 @@ impl Writer {
 
     pub fn bytes(&mut self, v: &[u8]) -> Result<(), AllocError> {
         self.buf.try_extend_from_slice(v)
+    }
+
+    /// Starts an entry of a list section: a u32 length (filled in by
+    /// `end_entry`), then its fields. Entries let a list's items gain
+    /// fields at their end, as sections do (`Reader::entry`).
+    pub fn begin_entry(&mut self) -> Result<usize, AllocError> {
+        let at = self.buf.len();
+        self.u32(0)?;
+        Ok(at)
+    }
+
+    /// A UTF-16 string field: its length in code units (u32), the units,
+    /// padded to 4 bytes.
+    pub fn wide(&mut self, s: &[u16]) -> Result<(), AllocError> {
+        self.u32(s.len() as u32)?;
+        for &c in s {
+            self.bytes(&c.to_le_bytes())?;
+        }
+        let pad = (4 - (s.len() * 2) % 4) % 4;
+        self.bytes(&[0; 4][..pad])
+    }
+
+    /// Starts a table: `count` records of `stride` bytes each follow
+    /// (`Reader::table`). Records only gain fields at their end, the
+    /// stride telling a reader where the next one starts.
+    pub fn table(&mut self, count: u32, stride: u32) -> Result<(), AllocError> {
+        self.u32(count)?;
+        self.u32(stride)
+    }
+
+    /// Ends the entry `begin_entry` started at `at`, padded to 4.
+    pub fn end_entry(&mut self, at: usize) -> Result<(), AllocError> {
+        let pad = (4 - self.buf.len() % 4) % 4;
+        self.bytes(&[0; 4][..pad])?;
+        let len = (self.buf.len() - at - 4) as u32;
+        self.buf[at..at + 4].copy_from_slice(&len.to_le_bytes());
+        Ok(())
     }
 
     /// A string field: length (u32), bytes, padded to 4.
@@ -374,6 +458,51 @@ impl<'a> Reader<'a> {
         core::str::from_utf8(s).unwrap_or("")
     }
 
+    /// A UTF-16 string field (`Writer::wide`), as its little-endian bytes;
+    /// empty if damaged or missing.
+    pub fn wide(&mut self) -> Wide<'a> {
+        let units = self.u32() as usize;
+        let len = units.saturating_mul(2);
+        let s = self.data.get(self.at..self.at.saturating_add(len)).unwrap_or(&[]);
+        self.at = self.at.saturating_add(len.next_multiple_of(4));
+        Wide(s)
+    }
+
+    /// A table (`Writer::table`): its records, each read by a reader of
+    /// its own. Records past the section's end are not there.
+    pub fn table(&mut self) -> Table<'a> {
+        let (count, stride) = (self.u32() as usize, self.u32() as usize);
+        let len = count.saturating_mul(stride);
+        let data = self.data.get(self.at..).unwrap_or(&[]);
+        let data = &data[..len.min(data.len())];
+        self.at = self.at.saturating_add(len);
+        Table { data, stride, version: self.version }
+    }
+
+    /// Fixed-size bytes (zeros past the end).
+    pub fn array<const N: usize>(&mut self) -> [u8; N] {
+        let mut out = [0u8; N];
+        if let Some(b) = self.data.get(self.at..) {
+            let n = b.len().min(N);
+            out[..n].copy_from_slice(&b[..n]);
+        }
+        self.at = self.at.saturating_add(N);
+        out
+    }
+
+    /// The next entry (`Writer::begin_entry`) as a reader of its own
+    /// fields; None at the end. A length past the section's end is damage
+    /// (the CRC makes that unlikely): the walk ends there.
+    pub fn entry(&mut self) -> Option<Reader<'a>> {
+        if self.at_end() {
+            return None;
+        }
+        let len = self.u32() as usize;
+        let data = self.data.get(self.at..self.at.checked_add(len)?)?;
+        self.at += len;
+        Some(Reader { data, at: 0, version: self.version })
+    }
+
     /// The rest of the section.
     pub fn rest(&self) -> &'a [u8] {
         self.data.get(self.at..).unwrap_or(&[])
@@ -385,8 +514,59 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// The CLOCK section (version 1): enough for the next kernel's clock to
-/// go on from this one's (ARCHITECTURE invariant 5: one clock).
+/// A UTF-16 string in a record (little-endian bytes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Wide<'a>(pub &'a [u8]);
+
+impl Wide<'_> {
+    pub fn units(&self) -> impl Iterator<Item = u16> + '_ {
+        self.0.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.len() < 2
+    }
+
+    /// The units in a vector.
+    pub fn to_vec(&self) -> Result<Vec<u16>, AllocError> {
+        let mut v = Vec::new();
+        v.try_reserve_exact(self.0.len() / 2).map_err(|_| AllocError)?;
+        v.extend(self.units());
+        Ok(v)
+    }
+}
+
+/// Fixed-size records (`Writer::table`).
+#[derive(Clone, Copy)]
+pub struct Table<'a> {
+    data: &'a [u8],
+    stride: usize,
+    version: u16,
+}
+
+impl<'a> Table<'a> {
+    /// The whole records present.
+    pub fn len(&self) -> usize {
+        self.data.len().checked_div(self.stride).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Reader<'a>> + 'a {
+        let (data, version) = (self.data, self.version);
+        data.chunks_exact(self.stride.max(1)).take(self.len()).map(move |data| Reader {
+            data,
+            at: 0,
+            version,
+        })
+    }
+}
+
+/// The CLOCK section (version 2; version 1 had no `timer_hz`): enough
+/// for the next kernel's clock to go on from this one's (ARCHITECTURE
+/// invariant 5: one clock).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Clock {
     /// TSC ticks per second, as calibrated at the first boot.
@@ -399,17 +579,22 @@ pub struct Clock {
     pub monotonic_ns: u64,
     /// NT system time at the clock's zero.
     pub boot_system_time: u64,
+    /// The local APIC timer's rate as calibrated at the first boot (0:
+    /// unknown, version 1): the next kernel ticks at the same rate, so the
+    /// tick count (the waits' deadlines) and the TSC agree across kernels.
+    pub timer_hz: u64,
 }
 
 impl Clock {
-    pub const VERSION: u16 = 1;
+    pub const VERSION: u16 = 2;
 
     pub fn write(&self, w: &mut Writer) -> Result<(), AllocError> {
         w.section(tag::CLOCK, Self::VERSION, 0)?;
         for v in [self.tsc_hz, self.tsc_at_zero, self.ticks, self.monotonic_ns] {
             w.u64(v)?;
         }
-        w.u64(self.boot_system_time)
+        w.u64(self.boot_system_time)?;
+        w.u64(self.timer_hz)
     }
 
     pub fn read(r: &mut Reader<'_>) -> Self {
@@ -419,6 +604,7 @@ impl Clock {
             ticks: r.u64(),
             monotonic_ns: r.u64(),
             boot_system_time: r.u64(),
+            timer_hz: r.u64(),
         }
     }
 }
@@ -573,7 +759,17 @@ pub fn write_ranges(
     tag: u32,
     ranges: impl Iterator<Item = Range>,
 ) -> Result<(), AllocError> {
-    w.section(tag, 1, 0)?;
+    write_ranges_flagged(w, tag, 0, ranges)
+}
+
+/// `write_ranges` with section flags (USER_FRAMES is REQUIRED).
+pub fn write_ranges_flagged(
+    w: &mut Writer,
+    tag: u32,
+    flags: u16,
+    ranges: impl Iterator<Item = Range>,
+) -> Result<(), AllocError> {
+    w.section(tag, 1, flags)?;
     for r in ranges {
         w.u64(r.base)?;
         w.u64(r.len)?;
@@ -667,6 +863,7 @@ mod tests {
             ticks: 1500,
             monotonic_ns: 1_500_000_123,
             boot_system_time: 133_000_000_000_000_000,
+            timer_hz: 62_500_000,
         }
         .write(&mut w)
         .unwrap();
@@ -708,6 +905,7 @@ mod tests {
         let c = Clock::read(&mut rec.section(tag::CLOCK).unwrap());
         assert_eq!(c.monotonic_ns, 1_500_000_123);
         assert_eq!(c.boot_system_time, 133_000_000_000_000_000);
+        assert_eq!(c.timer_hz, 62_500_000);
         let f = Framebuffer::read(&mut rec.section(tag::FRAMEBUFFER).unwrap());
         assert_eq!((f.width, f.pitch, f.bpp, f.memory_model), (1280, 5120, 32, 1));
         assert_eq!(f.masks, [8, 16, 8, 8, 8, 0]);
@@ -716,6 +914,65 @@ mod tests {
         let v = Volume::read(&mut rec.section(tag::VOLUME).unwrap());
         assert_eq!(v, Volume { sectors: 65536, generation: 4, area: 1, tail: 9000 });
         assert!(rec.section(tag::KEPT).is_none());
+    }
+
+    #[test]
+    fn tables_and_wide_strings() {
+        let mut w = Writer::new(1).unwrap();
+        w.section(tag::HANDLES, 1, REQUIRED).unwrap();
+        w.wide(&[0x41, 0x42, 0x43]).unwrap();
+        // A newer writer's 12-byte records; this reader knows 8 bytes.
+        w.table(2, 12).unwrap();
+        for v in [5u64, 6] {
+            w.u64(v).unwrap();
+            w.u32(0xffff).unwrap();
+        }
+        w.u32(77).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = parse(&bytes).unwrap();
+        let mut r = rec.section(tag::HANDLES).unwrap();
+        let name = r.wide();
+        assert_eq!(name.to_vec().unwrap(), [0x41, 0x42, 0x43]);
+        let t = r.table();
+        assert_eq!(t.len(), 2);
+        let values: Vec<u64> = t.iter().map(|mut e| e.u64()).collect();
+        assert_eq!(values, [5, 6]);
+        assert_eq!(r.u32(), 77);
+        // A table claiming more records than there are bytes.
+        let mut w = Writer::new(1).unwrap();
+        w.section(tag::HANDLES, 1, REQUIRED).unwrap();
+        w.table(1000, 8).unwrap();
+        w.u64(1).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = parse(&bytes).unwrap();
+        assert_eq!(rec.section(tag::HANDLES).unwrap().table().len(), 1);
+    }
+
+    #[test]
+    fn entries_grow_at_their_end() {
+        // A list section of entries: an older writer's short entry reads
+        // with zeros, a newer writer's longer one skips what it adds.
+        let mut w = Writer::new(1).unwrap();
+        w.section(tag::PROCESSES, 1, REQUIRED).unwrap();
+        let e = w.begin_entry().unwrap();
+        w.u64(7).unwrap();
+        w.end_entry(e).unwrap();
+        let e = w.begin_entry().unwrap();
+        w.u64(8).unwrap();
+        w.u32(9).unwrap();
+        w.str("abc").unwrap();
+        w.u64(0xdead).unwrap();
+        w.end_entry(e).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = parse(&bytes).unwrap();
+        let mut r = rec.section(tag::PROCESSES).unwrap();
+        let mut first = r.entry().unwrap();
+        assert_eq!((first.u64(), first.u32(), first.str()), (7, 0, ""));
+        let mut second = r.entry().unwrap();
+        assert_eq!((second.u64(), second.u32(), second.str()), (8, 9, "abc"));
+        assert!(r.entry().is_none());
+        // A REQUIRED section this kernel knows is accepted.
+        assert!(parse(&bytes).is_ok());
     }
 
     #[test]
@@ -775,7 +1032,7 @@ mod tests {
         let mut r = rec.section(tag::CLOCK).unwrap();
         assert_eq!(r.version, 0);
         let c = Clock::read(&mut r);
-        assert_eq!((c.tsc_hz, c.monotonic_ns, c.boot_system_time), (10, 40, 0));
+        assert_eq!((c.tsc_hz, c.monotonic_ns, c.boot_system_time, c.timer_hz), (10, 40, 0, 0));
         let v = Volume::read(&mut rec.section(tag::VOLUME).unwrap());
         assert_eq!((v.sectors, v.generation, v.area, v.tail), (1, 2, 3, 4));
     }

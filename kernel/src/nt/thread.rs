@@ -67,6 +67,24 @@ pub struct NtThread {
     /// same on every platform and every run of a program, unlike thread
     /// ids (record/replay's streams).
     pub ordinal: u32,
+    /// A thread a kernel handover carried over: the system call it was
+    /// blocked in, made again when it starts (instead of `start`).
+    resume: IrqMutex<Option<Resume>>,
+    /// The absolute deadline of the reissued call (`take_restart_deadline`):
+    /// Some(None) = none (infinite).
+    restart_deadline: IrqMutex<Option<Option<u64>>>,
+}
+
+/// A blocked system call to make again (kernel handover, ARCHITECTURE
+/// invariant 2): its number, the user registers at the `syscall` (its
+/// arguments), the user's x87/SSE state, and the deadline (timer tick) it
+/// had, kept absolute.
+#[derive(Clone)]
+pub struct Resume {
+    pub number: u32,
+    pub regs: UserRegs,
+    pub fx: platform::FxState,
+    pub deadline: Option<u64>,
 }
 
 /// The user state of a thread parked by suspension.
@@ -231,6 +249,8 @@ pub fn create(
         in_syscall: IrqMutex::new(None),
         impersonation: IrqMutex::new(None),
         ordinal: process.threads_created.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+        resume: IrqMutex::new(None),
+        restart_deadline: IrqMutex::new(None),
     };
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -305,6 +325,35 @@ fn thread_entry(id: usize) {
     let t = as_thread(&object);
     *t.sched_id.lock() = Some(platform::current());
     t.apply_affinity();
+    let resume = t.resume.lock().take();
+    if let Some(r) = resume {
+        // Carried over by a kernel handover: the blocked call again, with
+        // its deadline (the kernel never touches the x87/SSE registers, so
+        // the user's state set here is what user mode gets back).
+        *t.restart_deadline.lock() = Some(r.deadline);
+        drop(object);
+        platform::fxrstor(&r.fx);
+        let g = &r.regs.gpr;
+        let mut frame = platform::SyscallFrame {
+            r15: g[15],
+            r14: g[14],
+            r13: g[13],
+            r12: g[12],
+            rbp: g[5],
+            rbx: g[3],
+            rsi: g[6],
+            rdi: g[7],
+            r9: g[9],
+            r8: g[8],
+            rdx: g[2],
+            r10: g[10],
+            rax: u64::from(r.number),
+            rip: r.regs.rip,
+            rflags: r.regs.rflags,
+            rsp: g[4],
+        };
+        platform::reissue_syscall(&mut frame);
+    }
     // Stay here while suspended; `resume` wakes us.
     loop {
         let count = t.suspend_count.lock();
@@ -518,6 +567,168 @@ pub fn suspend(object: &ObjectRef) -> Result<u32, NtStatus> {
         platform::interrupt(tid);
     }
     Ok(previous)
+}
+
+/// The deadline a reissued system call keeps (a kernel handover): taken by
+/// the call's timeout (`Call::timeout`) instead of its argument, once.
+/// Some(None): no deadline.
+pub fn take_restart_deadline() -> Option<Option<u64>> {
+    let object = current()?;
+    as_thread(&object).restart_deadline.lock().take()
+}
+
+/// What a kernel handover needs to know about a thread.
+#[derive(Clone)]
+pub struct Snapshot {
+    pub id: u64,
+    pub teb: u64,
+    pub process: KArc<Process>,
+    pub sched: Option<ThreadId>,
+    /// The system call it is in (number, user registers at the `syscall`).
+    pub in_syscall: Option<(u32, UserRegs)>,
+    pub suspended: u32,
+    pub terminating: bool,
+    pub apcs: usize,
+    pub impersonating: bool,
+    pub win32_start: u64,
+    pub create_time: u64,
+    pub exit_time: u64,
+    pub priority: (i32, i32),
+    pub affinity: u64,
+    pub ordinal: u32,
+    pub exit_status: Option<NtStatus>,
+}
+
+/// `object`'s state, if it is a thread.
+pub fn snapshot(object: &ObjectRef) -> Option<Snapshot> {
+    let ObjectBody::Thread(t) = &object.body else { return None };
+    // One lock at a time (see `dump`).
+    let sched = *t.sched_id.lock();
+    let in_syscall = *t.in_syscall.lock();
+    let suspended = *t.suspend_count.lock();
+    let terminating = t.terminate_request.lock().is_some();
+    let apcs = t.apcs.lock().len();
+    let impersonating = t.impersonation.lock().is_some();
+    let exit_time = *t.exit_time.lock();
+    let priority = *t.priority.lock();
+    let exit_status = *t.exit_status.lock();
+    Some(Snapshot {
+        id: t.id,
+        teb: t.teb,
+        process: t.process.clone(),
+        sched,
+        in_syscall,
+        suspended,
+        terminating,
+        apcs,
+        impersonating,
+        win32_start: t.win32_start,
+        create_time: t.create_time,
+        exit_time,
+        priority,
+        affinity: t.affinity(),
+        ordinal: t.ordinal,
+        exit_status,
+    })
+}
+
+/// Every live NT thread object.
+pub fn all() -> Result<Vec<ObjectRef>, crate::mm::heap::AllocError> {
+    let threads = THREADS.lock();
+    let mut out = Vec::new();
+    out.try_reserve(threads.len()).map_err(|_| crate::mm::heap::AllocError)?;
+    for t in threads.iter() {
+        out.try_push(t.clone())?;
+    }
+    Ok(out)
+}
+
+/// The next NT id `next_id` would hand out.
+pub fn peek_next_id() -> u64 {
+    NEXT_ID.load(Ordering::Relaxed)
+}
+
+/// Makes ids continue from at least `next` (ids carried by a handover are
+/// never handed out again).
+pub fn continue_ids_from(next: u64) {
+    NEXT_ID.fetch_max(next, Ordering::Relaxed);
+}
+
+/// A thread a kernel handover carried over (`handover::programs`).
+pub struct Adopted {
+    pub id: u64,
+    pub teb: u64,
+    pub process: KArc<Process>,
+    pub win32_start: u64,
+    pub create_time: u64,
+    pub priority: (i32, i32),
+    pub affinity: u64,
+    pub ordinal: u32,
+    /// A live thread: the call it was blocked in. None: it has exited,
+    /// with (status, exit time) (a handle still names it).
+    pub resume: Option<Resume>,
+    pub exited: Option<(NtStatus, u64)>,
+}
+
+/// Rebuilds a thread object from a kernel handover's record. A live one
+/// joins its process and the thread list; `start_adopted` runs it.
+pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
+    let live = a.exited.is_none();
+    let online = platform::online_mask();
+    let affinity = if a.affinity & online != 0 { a.affinity & online } else { online };
+    let thread = NtThread {
+        id: a.id,
+        teb: a.teb,
+        process: a.process.clone(),
+        sched_id: IrqMutex::named("thread.sched_id", None),
+        affinity: core::sync::atomic::AtomicU64::new(affinity),
+        dispatcher: Dispatcher::new(i32::from(!live)),
+        exit_status: IrqMutex::new(a.exited.map(|e| e.0)),
+        suspend_count: IrqMutex::named("thread.suspend_count", 0),
+        terminate_request: IrqMutex::new(None),
+        start: UserRegs::default(),
+        start_mxcsr: None,
+        win32_start: a.win32_start,
+        create_time: a.create_time,
+        exit_time: IrqMutex::named("thread.exit_time", a.exited.map_or(0, |e| e.1)),
+        priority: IrqMutex::new(a.priority),
+        apcs: IrqMutex::new(Vec::new()),
+        alertable: core::sync::atomic::AtomicBool::new(false),
+        owned_mutants: IrqMutex::new(Vec::new()),
+        parked: IrqMutex::new(None),
+        in_syscall: IrqMutex::new(None),
+        impersonation: IrqMutex::new(None),
+        ordinal: a.ordinal,
+        resume: IrqMutex::new(a.resume),
+        restart_deadline: IrqMutex::new(None),
+    };
+    let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
+    if live {
+        THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
+        if let Err(status) = a.process.add_thread(object.clone()) {
+            THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
+            return Err(status);
+        }
+    }
+    continue_ids_from(a.id + 4);
+    Ok(object)
+}
+
+/// Starts a thread `adopt` rebuilt: it makes its blocked call again.
+pub fn start_adopted(object: &ObjectRef) -> Result<(), NtStatus> {
+    let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    let p = &t.process;
+    let tid = platform::spawn_user(p.name, thread_entry, t.id as usize, p.space.clone(), t.teb)
+        .map_err(|_| NtStatus::NO_MEMORY)?;
+    *t.sched_id.lock() = Some(tid);
+    Ok(())
+}
+
+/// Records that thread `owner` owns `mutant` (a mutant carried over by a
+/// kernel handover; abandoned if the thread exits).
+pub fn note_owner(owner: &ObjectRef, mutant: &ObjectRef) -> Result<(), NtStatus> {
+    let ObjectBody::Thread(t) = &owner.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    t.owned_mutants.lock().try_push(mutant.clone()).map_err(|_| NtStatus::NO_MEMORY)
 }
 
 /// Records (or clears) the current thread's user registers while it is in

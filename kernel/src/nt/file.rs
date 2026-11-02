@@ -131,6 +131,47 @@ pub const VOLUME_DEVICE: &str = "\\Device\\HarddiskVolume1";
 /// Its volume GUID name (user/kernel32/src/volume.rs has the same GUID).
 pub const VOLUME_GUID_LINK: &str = "\\??\\Volume{9a1a0c00-0000-4000-8000-00000000c0de}";
 
+/// When the boot had made C: (system time; 0: not yet): what is older is
+/// made again by the next kernel's boot (`survives_handover`).
+static BOOT_DONE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The boot has made C: (called before programs start).
+pub fn mark_boot_done() {
+    BOOT_DONE.store(platform::system_time(), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether file or directory `node` will be in the next kernel's C: (a
+/// kernel handover reopens it there): kept on the disk (`persist`), or
+/// made by the boot and, for a file, not written since.
+pub fn survives_handover(node: NodeId) -> bool {
+    let mark = BOOT_DONE.load(core::sync::atomic::Ordering::Relaxed);
+    with_fs(|fs| {
+        let recording = fs.recording;
+        fs.node(node)
+            .is_some_and(|n| recording || (n.created <= mark && (n.is_dir() || n.written <= mark)))
+    })
+}
+
+/// Opens file or directory `path` (from the volume root) again as a
+/// kernel handover's record has it: same rights, share access and mode,
+/// at `position`.
+pub fn reopen(
+    path: &[u16],
+    granted: u32,
+    share: u32,
+    options: u32,
+    position: u64,
+) -> Result<ObjectRef, NtStatus> {
+    let mut name = Vec::new();
+    name.try_extend_from_slice(path).map_err(|_| NtStatus::NO_MEMORY)?;
+    let path = FilePath { start: ramfs::ROOT, name };
+    let created = create(&path, granted, share, FILE_OPEN, options)?;
+    if let ObjectBody::File(f) = &created.object.body {
+        *f.position.lock() = position;
+    }
+    Ok(created.object)
+}
+
 /// Adds a boot module as a read-only file `C:\\<directory>\\<name>`; the
 /// directory (`/`-separated, created if needed) defaults to `gala`.
 pub fn add_boot_file(
@@ -259,6 +300,18 @@ pub fn mode_of(options: u32) -> u32 {
 }
 
 impl FileObject {
+    /// The share access it was opened with (FILE_SHARE_*).
+    pub fn share_mask(&self) -> u32 {
+        (u32::from(self.share.read) * FILE_SHARE_READ)
+            | (u32::from(self.share.write) * FILE_SHARE_WRITE)
+            | (u32::from(self.share.delete) * FILE_SHARE_DELETE)
+    }
+
+    /// FILE_DELETE_ON_CLOSE was given.
+    pub fn deletes_on_close(&self) -> bool {
+        self.delete_on_close
+    }
+
     /// The owner of its byte-range locks (`locks`): its address.
     pub fn lock_owner(&self) -> usize {
         self as *const Self as usize

@@ -99,6 +99,17 @@ pub fn arm(
     Ok(previous)
 }
 
+/// Lists a timer a kernel handover carried over armed (its state set):
+/// the worker fires it at its due tick, at once if that has passed.
+pub fn adopt(object: &ObjectRef) -> Result<(), NtStatus> {
+    if timer_of(object).is_none() {
+        return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+    }
+    TIMERS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
+    wake_worker();
+    Ok(())
+}
+
 /// NtCancelTimer: disarms `object`. Returns its signal state.
 pub fn cancel(object: &ObjectRef) -> Result<bool, NtStatus> {
     let timer = timer_of(object).ok_or(NtStatus::OBJECT_TYPE_MISMATCH)?;
