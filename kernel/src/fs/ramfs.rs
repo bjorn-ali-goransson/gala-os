@@ -48,12 +48,33 @@ pub struct Page(pub [u8; PAGE]);
 enum Data {
     /// Immutable contents owned elsewhere (boot modules).
     Static(&'static [u8]),
-    /// `len` bytes in whole pages; bytes past `len` are kept zero.
-    Paged { pages: Vec<Box<Page>>, len: usize },
+    /// `len` bytes in whole pages; bytes past `len` are kept zero. A page
+    /// not made yet (`None`) holds `backing`'s bytes at its offset (zeros
+    /// past `backing`): a boot module's file turns into pages lazily, a page
+    /// at a time when it is written or mapped (copying a large file at once
+    /// held the file system for many seconds).
+    Paged { pages: Vec<Option<Box<Page>>>, len: usize, backing: &'static [u8] },
+}
+
+/// Page `i` made if it was not (from `backing`, else zero).
+fn page_mut<'a>(
+    pages: &'a mut [Option<Box<Page>>],
+    backing: &[u8],
+    i: usize,
+) -> Result<&'a mut Page, FsError> {
+    let slot = pages.get_mut(i).ok_or(FsError::NoMemory)?;
+    if slot.is_none() {
+        let mut page = try_box(Page([0; PAGE])).map_err(|_| FsError::NoMemory)?;
+        let from = (i * PAGE).min(backing.len());
+        let to = ((i + 1) * PAGE).min(backing.len());
+        page.0[..to - from].copy_from_slice(&backing[from..to]);
+        *slot = Some(page);
+    }
+    slot.as_deref_mut().ok_or(FsError::NoMemory)
 }
 
 impl Data {
-    const EMPTY: Data = Data::Paged { pages: Vec::new(), len: 0 };
+    const EMPTY: Data = Data::Paged { pages: Vec::new(), len: 0, backing: &[] };
 
     fn len(&self) -> usize {
         match self {
@@ -70,13 +91,23 @@ impl Data {
         let n = buf.len().min(len - start);
         match self {
             Data::Static(s) => buf[..n].copy_from_slice(&s[start..start + n]),
-            Data::Paged { pages, .. } => {
+            Data::Paged { pages, backing, .. } => {
                 let mut done = 0;
                 while done < n {
                     let at = start + done;
                     let (page, off) = (at / PAGE, at % PAGE);
                     let k = (PAGE - off).min(n - done);
-                    buf[done..done + k].copy_from_slice(&pages[page].0[off..off + k]);
+                    let out = &mut buf[done..done + k];
+                    match pages.get(page).and_then(|p| p.as_deref()) {
+                        Some(p) => out.copy_from_slice(&p.0[off..off + k]),
+                        None => {
+                            // Not made yet: the backing's bytes, zeros past it.
+                            let from = at.min(backing.len());
+                            let to = (at + k).min(backing.len());
+                            out[..to - from].copy_from_slice(&backing[from..to]);
+                            out[to - from..].fill(0);
+                        }
+                    }
                     done += k;
                 }
             }
@@ -84,42 +115,46 @@ impl Data {
         n
     }
 
-    /// The pages, after turning static data into pages.
-    fn paged(&mut self) -> Result<(&mut Vec<Box<Page>>, &mut usize), FsError> {
+    /// The pages, after turning static data into (lazy) pages.
+    #[allow(clippy::type_complexity)]
+    fn paged(
+        &mut self,
+    ) -> Result<(&mut Vec<Option<Box<Page>>>, &mut usize, &mut &'static [u8]), FsError> {
         if let Data::Static(s) = *self {
-            let mut d = Data::EMPTY;
-            d.write_at(0, s)?;
-            *self = d;
+            let mut pages = Vec::new();
+            let n = s.len().div_ceil(PAGE);
+            pages.try_reserve_exact(n).map_err(|_| FsError::NoMemory)?;
+            pages.extend(core::iter::repeat_with(|| None).take(n));
+            *self = Data::Paged { pages, len: s.len(), backing: s };
         }
         match self {
-            Data::Paged { pages, len } => Ok((pages, len)),
+            Data::Paged { pages, len, backing } => Ok((pages, len, backing)),
             Data::Static(_) => unreachable!(),
         }
     }
 
-    /// Makes sure the pages cover `size` bytes (new pages are zero).
-    fn cover(pages: &mut Vec<Box<Page>>, size: usize) -> Result<(), FsError> {
+    /// Makes sure the pages cover `size` bytes (new pages are zero, made
+    /// when first used).
+    fn cover(pages: &mut Vec<Option<Box<Page>>>, size: usize) -> Result<(), FsError> {
         let need = size.div_ceil(PAGE);
         if need > pages.len() {
             pages.try_reserve(need - pages.len()).map_err(|_| FsError::NoMemory)?;
-            while pages.len() < need {
-                let page = try_box(Page([0; PAGE])).map_err(|_| FsError::NoMemory)?;
-                let _ = pages.try_push(page);
-            }
+            let more = need - pages.len();
+            pages.extend(core::iter::repeat_with(|| None).take(more));
         }
         Ok(())
     }
 
     fn write_at(&mut self, start: usize, data: &[u8]) -> Result<(), FsError> {
         let end = start.checked_add(data.len()).ok_or(FsError::NoMemory)?;
-        let (pages, len) = self.paged()?;
+        let (pages, len, backing) = self.paged()?;
         Self::cover(pages, end)?;
         let mut done = 0;
         while done < data.len() {
             let at = start + done;
             let (page, off) = (at / PAGE, at % PAGE);
             let k = (PAGE - off).min(data.len() - done);
-            pages[page].0[off..off + k].copy_from_slice(&data[done..done + k]);
+            page_mut(pages, backing, page)?.0[off..off + k].copy_from_slice(&data[done..done + k]);
             done += k;
         }
         *len = (*len).max(end);
@@ -127,18 +162,32 @@ impl Data {
     }
 
     fn set_len(&mut self, size: usize) -> Result<(), FsError> {
-        let (pages, len) = self.paged()?;
+        let (pages, len, backing) = self.paged()?;
         Self::cover(pages, size)?;
         if size < *len {
-            // Keep bytes past the end zero (mapped views show them).
+            // Keep bytes past the end zero (mapped views show them): pages
+            // not made yet read from the backing, so it ends there too.
+            *backing = &backing[..size.min(backing.len())];
             let keep = size.div_ceil(PAGE);
             pages.truncate(keep);
-            if !size.is_multiple_of(PAGE) {
-                pages[keep - 1].0[size % PAGE..].fill(0);
+            if !size.is_multiple_of(PAGE)
+                && let Some(Some(last)) = pages.get_mut(keep - 1)
+            {
+                last.0[size % PAGE..].fill(0);
             }
         }
         *len = size;
         Ok(())
+    }
+
+    /// The address of page `index`, made if it was not (for mapping).
+    fn page_address(&mut self, index: usize) -> Option<usize> {
+        match self {
+            Data::Paged { pages, backing, .. } => {
+                page_mut(pages, backing, index).ok().map(|p| p as *const Page as usize)
+            }
+            Data::Static(_) => None,
+        }
     }
 }
 
@@ -866,12 +915,10 @@ impl RamFs {
     }
 
     /// The address of page `index` of mapped file `id` (see `map`).
-    pub fn page_address(&self, id: NodeId, index: usize) -> Option<usize> {
-        match &self.node(id)?.kind {
-            Kind::File(Data::Paged { pages, .. }) => {
-                pages.get(index).map(|p| &**p as *const Page as usize)
-            }
-            _ => None,
+    pub fn page_address(&mut self, id: NodeId, index: usize) -> Option<usize> {
+        match &mut self.node_mut(id).ok()?.kind {
+            Kind::File(data) => data.page_address(index),
+            Kind::Directory(_) => None,
         }
     }
 
@@ -1411,6 +1458,48 @@ mod tests {
         f.set_size(id, 6000, 4).unwrap();
         f.unmap(id);
         f.set_size(id, 100, 5).unwrap();
+    }
+
+    #[test]
+    fn large_static_files_turn_into_pages_only_where_touched() {
+        // Three pages and a bit of a boot module.
+        static BIG: [u8; 3 * PAGE + 10] = {
+            let mut b = [0u8; 3 * PAGE + 10];
+            let mut i = 0;
+            while i < b.len() {
+                b[i] = (i / PAGE) as u8 + 1;
+                i += 1;
+            }
+            b
+        };
+        let mut f = fs();
+        let id = f.add_static_file(ROOT, &w("m"), &BIG, false, 1).unwrap();
+        f.map(id, BIG.len() as u64).unwrap();
+        let made = |f: &RamFs| match &f.node(id).unwrap().kind {
+            Kind::File(Data::Paged { pages, .. }) => pages.iter().filter(|p| p.is_some()).count(),
+            _ => usize::MAX,
+        };
+        // Mapping made no page; reads come from the module.
+        assert_eq!(made(&f), 0);
+        let mut b = [0u8; 4];
+        f.read(id, 2 * PAGE as u64 - 2, &mut b).unwrap();
+        assert_eq!(b, [2, 2, 3, 3]);
+        // A write makes its page only; a mapped page is made when asked for.
+        f.write(id, PAGE as u64, b"x", 1).unwrap();
+        assert_eq!(made(&f), 1);
+        let addr = f.page_address(id, 3).unwrap();
+        assert_eq!(made(&f), 2);
+        assert_eq!(f.page_address(id, 3), Some(addr));
+        f.read(id, PAGE as u64, &mut b).unwrap();
+        assert_eq!(b, [b'x', 2, 2, 2]);
+        f.unmap(id);
+        // Shrinking ends the module's bytes there too: growing shows zeros.
+        f.set_size(id, 5, 1).unwrap();
+        f.set_size(id, 2 * PAGE as u64, 1).unwrap();
+        f.read(id, PAGE as u64, &mut b).unwrap();
+        assert_eq!(b, [0, 0, 0, 0]);
+        f.read(id, 3, &mut b).unwrap();
+        assert_eq!(b, [1, 1, 0, 0]);
     }
 
     #[test]

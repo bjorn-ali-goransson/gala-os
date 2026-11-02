@@ -133,7 +133,9 @@ counts (TCG plugins) need a QEMU built with plugins; Ubuntu's has none.
   the kernel); preemption is not progress. First finding: java.exe's
   NtCreateSection on the JDK's `modules` file stays in the kernel over
   20 s (a boot-module file is copied page by page into the ram file
-  system under its lock when first mapped). TODO: the stuck CPU's own
+  system under its lock when first mapped): fixed, such a file now turns
+  into pages lazily, a page when it is written or mapped (java_hello 38 s
+  -> 25 s). TODO: the stuck CPU's own
   stack (an NMI to it).
 - **Crash record across reboots** (done 2026-11-02, `kernel/src/crash.rs`):
   a panic writes the panic message, the backtrace and the flight
