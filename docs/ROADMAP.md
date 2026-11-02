@@ -678,7 +678,20 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    below); it runs without a screen (BIOS boot) in about a quarter of
    the time. Seen on the way: FileZilla reports "Impossible to create a
    rich edit control" (no riched20/msftedit: its message log falls back
-   to a plain edit).
+   to a plain edit; done below).
+   **Rich edit controls** (2026-11-02, `richedit_test`): msftedit.dll
+   (RICHEDIT50W) and riched20.dll (RichEdit20W/A), one crate
+   (`user/richedit`) behind both: text with CR paragraph marks (CRLF in
+   WM_GETTEXT, GT_USECRLF), the selection (EM_SETSEL/EXSETSEL,
+   EM_REPLACESEL), runs of character formats (EM_SETCHARFORMAT with
+   SCF_SELECTION/ALL/DEFAULT, EM_GETCHARFORMAT with the shared mask),
+   EM_SETBKGNDCOLOR, the event mask with EN_CHANGE/EN_UPDATE/
+   EN_SELCHANGE/EN_LINK, read-only and options, limits, lines and word
+   wrap, scrolling with a thin scroll bar of its own, text modes, URL
+   detection, tab stops and indents (EM_SETPARAFORMAT), keys and mouse.
+   FileZilla's message log is a rich edit now: tab-aligned, coloured
+   (red errors), scrolled to its end. Next: RTF streams, undo and the
+   clipboard (user32 has none yet), OLE callbacks (FileZilla's wx asks).
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,

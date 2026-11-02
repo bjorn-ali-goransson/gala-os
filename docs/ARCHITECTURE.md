@@ -1095,6 +1095,8 @@ from the public documentation of each function (clean room):
 | ole32.dll | `user/ole32` | `testole32.dll` | `C:\Windows\System32` |
 | oleaut32.dll | `user/oleaut32` | `testoleaut32.dll` | `C:\Windows\System32` |
 | bcrypt.dll | `user/bcrypt` | `testbcrypt.dll` | `C:\Windows\System32` |
+| riched20.dll | `user/riched20` (the control: `user/richedit`) | `testriched20.dll` | `C:\Windows\System32` |
+| msftedit.dll | `user/msftedit` (the control: `user/richedit`) | `testmsftedit.dll` | `C:\Windows\System32` |
 
 (Exported under other names so that `user/bin`, which also runs on
 Windows, never shadows the system's DLLs.)
@@ -2723,6 +2725,80 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   GetImageInfo hands out the image's own bitmaps with a rectangle of the
   list's size. Not yet: ILD_MASK, ILD_BLEND tints, copies between two
   lists, drag images (ledger).
+- **Rich edit** (`user/richedit`, exported by `user/riched20` as
+  "RichEdit20W"/"RichEdit20A" and by `user/msftedit` as "RICHEDIT50W";
+  `richedit_test`): one rlib crate holds the control; each DLL crate is
+  a DllMain that registers its classes (CS_GLOBALCLASS) on
+  DLL_PROCESS_ATTACH, so a program gets them by LoadLibrary, as on
+  Windows (wx tries msftedit.dll, then riched20.dll). State per window
+  in a `Store` (as comctl32's, but a thread that asks again while it
+  holds the lock gets None instead of spinning on itself: BeginPaint
+  sends WM_ERASEBKGND, and wx subclasses its controls, so nothing that
+  can send a message runs under the lock; WM_PAINT takes the DC first).
+  Text model (`doc.rs`): UTF-16 with one CR per paragraph (the last
+  paragraph has none); WM_SETTEXT, EM_REPLACESEL and EM_SETTEXTEX turn
+  CRLF and a lone LF into CR (a single-line control keeps the first
+  paragraph); WM_GETTEXT/WM_GETTEXTLENGTH give CRLF, EM_GETTEXTEX CR or
+  CRLF (GT_USECRLF), Unicode (1200) or ANSI (WideCharToMultiByte),
+  EM_GETTEXTLENGTHEX characters, CRLF characters or bytes. Formats: a
+  table of CHARFORMAT2 values (index 0 the default format, which
+  untouched text follows, so SCF_DEFAULT and WM_SETFONT reach it) and
+  runs (length, index) over the text, merged after each change.
+  EM_SETCHARFORMAT reads CHARFORMATA/W and CHARFORMAT2A/W by cbSize
+  (60, 92, 84, 116; anything else fails) and applies only the masked
+  fields: SCF_SELECTION formats the selection, or on an empty
+  selection sets the insertion format (what EM_REPLACESEL and typing
+  insert next, until the selection moves; otherwise new text takes the
+  format of the character before it: a log appends coloured lines this
+  way), SCF_ALL everything, SCF_DEFAULT the default; plain-text mode
+  (EM_SETTEXTMODE, only on an empty control) formats all text at once.
+  EM_GETCHARFORMAT gives the first character's format with a mask of
+  the attributes the whole selection shares. Automatic URL detection
+  (schemes from the documentation and "www.", at word starts) keeps a
+  list of ranges, reported as CFE_LINK, drawn underlined in the link
+  colour, and EN_LINK for mouse messages over them. Layout (`view.rs`):
+  lines are paragraphs wrapped at spaces and tabs to the format
+  rectangle (no wrapping with WS_HSCROLL or EM_SETTARGETDEVICE 1), each
+  with its character boundaries measured by GetTextExtentExPointW in
+  each run's font (a cache of 16 fonts made with CreateFontIndirectW
+  from the format: face, twips to pixels, weight, italic); line heights
+  are the tallest run's; one paragraph format for the whole control
+  (EM_SETPARAFORMAT's indents, offset, alignment and tab stops; other
+  fields are recorded): FileZilla's log uses a tab stop and a hanging
+  indent. Lines answer EM_GETLINECOUNT (display lines; a final CR
+  makes an empty last line), EM_LINEINDEX, EM_LINEFROMCHAR,
+  EM_LINELENGTH, EM_GETLINE (with the CR, no NUL), EM_POSFROMCHAR,
+  EM_CHARFROMPOS. Scrolling is in pixels (EM_LINESCROLL by lines,
+  EM_SCROLLCARET, WM_VSCROLL, the wheel, EM_GET/SETSCROLLPOS); the
+  window's SB_VERT information is kept up to date, and as user32 draws
+  no scroll bars yet, a WS_VSCROLL control draws a thin thumb of its own
+  in a 12-pixel column at its right (pressing it drags, the track
+  pages). Painting: the background (EM_SETBKGNDCOLOR, else
+  COLOR_WINDOW), a light 1-pixel border for WS_BORDER/WS_EX_CLIENTEDGE,
+  each piece of a line (split at runs, the selection and links) in its
+  font and colour (CFE_AUTOCOLOR: COLOR_WINDOWTEXT), back colours,
+  underline and strikeout as lines, the selection in the accent colour
+  (light grey without focus with ES_NOHIDESEL), the caret as a line.
+  Notifications: EN_UPDATE (visible windows) and EN_CHANGE as WM_COMMAND
+  only with ENM_UPDATE/ENM_CHANGE (ENM_CHANGE is masked off while
+  EN_CHANGE is sent, as Wine's tests observe on Windows), EN_SELCHANGE
+  and EN_LINK as WM_NOTIFY (richedit.h's structures are packed to 4
+  bytes: ENLINK's wParam is at 28), EN_SETFOCUS/EN_KILLFOCUS/EN_MAXTEXT
+  always, EN_VSCROLL for the user's scrolling with ENM_SCROLL. Keys as
+  the EDIT control (arrows with Ctrl for words, Home/End, Ctrl+Home/End,
+  Page Up/Down, Shift extending, Delete, Backspace, Enter as a
+  paragraph, Tab, Ctrl+A); the mouse places the caret, drags a
+  selection, double-clicks a word. EM_SETOPTIONS's ECO_ options are the
+  ES_ styles of the same values (ECO_READONLY is ES_READONLY).
+  "RichEdit20A" takes and gives ANSI text (gala's user32 passes
+  SendMessageA's strings unchanged and has no ANSI windows, so the
+  class's own procedure does the conversion). Not yet (each in the
+  ledger as `riched20.dll!...`): RTF (EM_STREAMIN/OUT, EM_SETTEXTEX
+  with "{\rtf"), undo, the clipboard (user32 has none), OLE
+  (EM_GETOLEINTERFACE, EM_SETOLECALLBACK: FileZilla's wx asks for both
+  and copes), zoom, per-paragraph formats, find; other EM_ and edit
+  messages are recorded as `riched20.dll!message` with the number and
+  answer 0.
 - **gdi32** (`user/gdi32`; `gdi32_test`): an object table (1024 slots;
   brushes, pens, fonts kept as the LOGFONTW given, bitmaps, DCs; the
   stock objects plus the default 1 x 1 monochrome bitmap memory DCs start

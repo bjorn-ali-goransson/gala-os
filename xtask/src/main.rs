@@ -328,6 +328,9 @@ const USER_DLLS: &[Dll] = &[
     },
     Dll { package: "mpr", file: "mpr.dll", exported_as: "testmpr.dll" },
     Dll { package: "msimg32", file: "msimg32.dll", exported_as: "testmsimg32.dll" },
+    // Rich edit controls: one crate (`richedit`) behind both DLLs.
+    Dll { package: "riched20", file: "riched20.dll", exported_as: "testriched20.dll" },
+    Dll { package: "msftedit", file: "msftedit.dll", exported_as: "testmsftedit.dll" },
     Dll { package: "odbc32", file: "odbc32.dll", exported_as: "testodbc32.dll" },
     Dll { package: "wldap32", file: "wldap32.dll", exported_as: "testwldap32.dll" },
     Dll { package: "wsock32", file: "wsock32.dll", exported_as: "testwsock32.dll" },
@@ -662,6 +665,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("controls_test", "user32.dll", "Windows/System32"),
     ("controls_test", "gdi32.dll", "Windows/System32"),
     ("controls_test", "user/bin/controls_test.exe", "gala"),
+    ("richedit_test", "ntdll.dll", "Windows/System32"),
+    ("richedit_test", "kernel32.dll", "Windows/System32"),
+    ("richedit_test", "msvcrt.dll", "Windows/System32"),
+    ("richedit_test", "user32.dll", "Windows/System32"),
+    ("richedit_test", "gdi32.dll", "Windows/System32"),
+    ("richedit_test", "msftedit.dll", "Windows/System32"),
+    ("richedit_test", "riched20.dll", "Windows/System32"),
+    ("richedit_test", "user/bin/richedit_test.exe", "gala"),
     ("user32_test", "ntdll.dll", "Windows/System32"),
     ("user32_test", "kernel32.dll", "Windows/System32"),
     ("user32_test", "msvcrt.dll", "Windows/System32"),
@@ -986,6 +997,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("filezilla", "oleacc.dll", "Windows/System32"),
     ("filezilla", "mpr.dll", "Windows/System32"),
     ("filezilla", "msimg32.dll", "Windows/System32"),
+    ("filezilla", "msftedit.dll", "Windows/System32"),
+    ("filezilla", "riched20.dll", "Windows/System32"),
     ("filezilla", "target/prebuilt/filezilla/", "filezilla"),
     ("filezilla", "target/prebuilt/filezilla-server/", "filezilla-server"),
     ("filezilla", "user/filezilla_server/fzs/", "fzs"),
@@ -2993,6 +3006,16 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=controls_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["controls_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // W3: rich edit controls (msftedit.dll's RICHEDIT50W, riched20.dll's
+        // RichEdit20W/A) against documented behaviour, for wxWidgets'
+        // wxTE_RICH2 text controls (FileZilla's message log;
+        // user/richedit_test/main.c, mingw).
+        name: "richedit_test",
+        cmdline: "qemu_exit run=richedit_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["richedit_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // W3: gala's user32 against documented behaviour, for what
