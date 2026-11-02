@@ -2732,7 +2732,8 @@ client side over Win32 windows (`uia_test`, a mingw C program).
   marshaling: every object is used on the caller's thread). Out-of-process
   contexts and unregistered classes give REGDB_E_CLASSNOTREG (recorded).
   The registry seed registers CUIAutomation
-  ({ff48dba4-60ef-4201-aa87-54103eef594e}) as
+  ({ff48dba4-60ef-4201-aa87-54103eef594e}) and CUIAutomation8
+  ({e22ad333-b25f-460c-83d0-0581107395c9}) as
   `%SystemRoot%\System32\UIAutomationCore.dll`, ThreadingModel Both.
 - **UIAutomationCore.dll** (`user/uiautomationcore`, exported to user/bin
   as `testuiautomationcore.dll`): COM objects as heap blocks with a
@@ -2746,7 +2747,35 @@ client side over Win32 windows (`uia_test`, a mingw C program).
     the condition factories (true, false, property and property-ex, and,
     or, not, the native-array forms), the raw/control/content view
     conditions and walkers, CreateTreeWalker, IntNativeArrayToSafeArray,
-    RectToVariant; the BuildCache forms ignore the cache request.
+    RectToVariant, CreateAnd/OrConditionFromArray (a SAFEARRAY of
+    VT_UNKNOWN, as .NET marshals an interface array); the BuildCache
+    forms ignore the cache request.
+  - CUIAutomation8 (`automation.rs`): the same object, a flag set by its
+    class object; it also answers QueryInterface for IUIAutomation2..6,
+    whose methods extend IUIAutomation's vtable in header order (one
+    79-entry table serves all six). IUIAutomation2's AutoSetFocus,
+    ConnectionTimeout and TransactionTimeout and IUIAutomation6's
+    ConnectionRecoveryBehavior and CoalesceEvents are kept and read back
+    (documented defaults TRUE, 2000 ms, 20000 ms; the last two start at
+    0, Disabled, unverified); the event-handler methods of 3..6 are
+    E_NOTIMPL (recorded). CUIAutomation answers IUIAutomation only.
+  - The reserved values: ReservedNotSupportedValue and
+    ReservedMixedAttributeValue are two static IUnknowns (not counted),
+    whose identity is what clients compare: FlaUI calls
+    GetCurrentPropertyValueEx(id, ignoreDefault TRUE) and compares the
+    result with ReservedNotSupportedValue (a .NET RCW per IUnknown, so
+    the same pointer gives the same object). With ignoreDefault an
+    element returns VT_UNKNOWN holding it for a property it lacks (a
+    pattern's property without the pattern, an id gala does not know);
+    without, VT_EMPTY as before. CheckNotSupported recognises it.
+  - Cache requests (`cache.rs`): IUIAutomationCacheRequest keeps its
+    properties and patterns (ids checked: 30000+ and 10000+), TreeScope
+    (Element/Children/Descendants; Parent and Ancestors E_INVALIDARG),
+    TreeFilter (one of our conditions, referenced; the control view by
+    default) and AutomationElementMode (Full by default), and clones.
+    Nothing is cached: elements read live, so the Cached getters and
+    GetCachedPropertyValue(Ex) give current values, also for properties
+    the request did not name (Windows fails those).
   - Elements (`element.rs`) are an HWND each, read live (no cache: the
     Cached getters and GetCached* return current values). The root is
     GetDesktopWindow(); its children are the visible top-level windows
@@ -2809,14 +2838,37 @@ client's own process are still direct calls;
 providers inside programs (WM_GETOBJECT answered with
 IRawElementProviderSimple via UiaReturnRawElementProvider, which wx and
 Qt implement for their widgets) are not consulted; no events
-(Add*EventHandler E_NOTIMPL); no cache requests; no IUIAutomation2+ /
-CUIAutomation8 (FlaUI's UIA3 asks for IUIAutomation2..6 first and falls
-back); no title bar or menu bar elements from the non-client area (on
+(Add*EventHandler E_NOTIMPL); cache requests cache nothing (above); no
+title bar or menu bar elements from the non-client area (on
 Windows a captioned window has a TitleBar child without an HWND, which
-`uia_test` allows for); ListBox/ComboBox items, Selection, ExpandCollapse,
-RangeValue, Text patterns. Then: FlaUI (.NET, MIT) on top as the test
-driver, running on gala's .NET support, and screen tests rewritten on
+`uia_test` allows for; FlaUI's Window.Close looks for its close button
+first, then the Window pattern, neither of which gala has: close
+programs with Application.Close); no Window, Transform,
+LegacyIAccessible patterns; ListBox/ComboBox items, Selection,
+ExpandCollapse, RangeValue, Text patterns; IUIAutomationElement2..9 are
+not answered (FlaUI reads every property through
+GetCurrentPropertyValueEx, so it has not asked). Next: screen tests
+rewritten on FlaUI (`flaui_test` shows the pattern), FileZilla driven by
 it.
+
+**FlaUI** (step 5, `flaui_test`): FlaUI.Core and FlaUI.UIA3 5.0.0 with
+Interop.UIAutomationClient 10.19041.0 run unmodified on gala's .NET 8
+(PREBUILT, shipped next to the test in C:\gala). What FlaUI.UIA3 needed
+beyond step 4: CUIAutomation8 (`new CUIAutomation8()`; without it FlaUI
+catches the COMException and falls back to CUIAutomation, but then
+IUIAutomation2's timeouts throw), the not-supported value (the first
+property read failed with NotImplementedException from
+get_ReservedNotSupportedValue: that was the first failure),
+GetCurrentPropertyValueEx returning it, CreateAndConditionFromArray
+(ByAutomationId().And(ByControlType())) and CreateCacheRequest with its
+setters (CacheRequest.Activate). .NET's built-in COM interop needed
+nothing new from ole32/oleaut32: CoreCLR activates the ComImport class
+through CoGetClassObject + IClassFactory, marshals VARIANTs, BSTRs and
+SAFEARRAYs through oleaut32 (step 4's and com_test's functions), and
+FlaUI's Application uses Process.Start (CreateProcessW), the process
+list (GetMainWindow: Process.GetProcessById and MainWindowHandle, which
+EnumWindows across processes answers) and Process.CloseMainWindow
+(PostMessage WM_CLOSE across processes).
 
 ### Plan: windows across processes (planned 2026-11-02)
 
@@ -2929,9 +2981,13 @@ steps, each test first:
    from the registry (the root's children are every visible top-level
    window), properties from it, patterns through posted/sent messages.
    uia_test grows a second process.
-5. **FlaUI**: IUIAutomation2..6 / CUIAutomation8 and cache requests
-   (what FlaUI's UIA3 asks for first), then a FlaUI test program, built
-   against the .NET runtime gala already runs, driving FileZilla.
+5. **Done for a test program (2026-11-02, `flaui_test`).**
+   IUIAutomation2..6 / CUIAutomation8, the reserved values and cache
+   requests (see "UI Automation" above); FlaUI 5.0.0 on .NET 8 launches
+   `flaui_target.exe`, finds its main window and controls by
+   AutomationId, invokes, sets a value, toggles and closes it. Next:
+   FlaUI driving FileZilla (wx: its controls are Win32 windows, but
+   list views and menus need patterns gala lacks).
 
 ## Built in early: invariants, safety nets, live update (proposed 2026-11-02)
 

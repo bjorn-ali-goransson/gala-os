@@ -427,7 +427,9 @@ from its zip), and a scenario module path `target/prebuilt/<name>/<file>`
 makes xtask download, check and unzip it on first use (curl, sha256sum,
 unzip, msiextract for an MSI, 7-Zip for an NSIS installer or 7-Zip
 self-extractor, and for a Chocolatey `.nupkg` the installer in its
-`tools/` unpacked with 7-Zip; one fetch at a time, since ISOs are built in parallel, and a
+`tools/` unpacked with 7-Zip; a nuget.org `.nupkg` (a library package,
+FlaUI) is a plain zip, its members paths such as
+`lib/net8.0-windows7.0/FlaUI.Core.dll`; one fetch at a time, since ISOs are built in parallel, and a
 `.unpacked-<sha256>` marker so an interrupted unpack is redone). To try a new prebuilt program before writing its scenario:
 `cargo xtask iso --file path/to/app.exe run=app.exe "args=..."` and boot
 it with QEMU (`-cpu max`), then follow the ledger and the program's own
@@ -488,6 +490,43 @@ msvcp140 and jvm.dll) are not in the closure; boot and read the ledger
 for those. Exports by ordinal (ws2_32's) come from a build.rs printing
 `/EXPORT:name,@n`; lld warns that rustc's .def names them too and keeps
 the ordinal one (the warning cannot be silenced).
+
+## FlaUI (UI Automation tests in .NET)
+
+`user/flaui_test/` holds a C# test (`FlaUITest.cs`) and the program it
+drives (`target.c`, a Win32 window with a button, an edit and a check
+box). `build.sh` builds both into `user/bin` (`flaui_test.dll`,
+`flaui_target.exe`; reproducible): mcs compiles against .NET 8's
+reference assemblies (Microsoft.NETCore.App.Ref, which the script
+fetches with its checksum into `target/prebuilt/dotnet-ref`) and the
+FlaUI assemblies xtask fetches (PREBUILT `flaui-core`, `flaui-uia3`,
+`uiautomation-interop`; run `cargo xtask boot-test flaui_test` once
+first, which fetches them and then fails if the test is not built).
+Pitfalls:
+
+- mcs cannot compile against the runtime's own assemblies
+  (`shared/Microsoft.NETCore.App/8.0.33`): System.Private.CoreLib's Span
+  has ref fields, which mcs's metadata reader rejects (an internal
+  error loading ReadOnlySpan). The reference pack declares them with
+  dummy fields. Mono's own mscorlib does not work with FlaUI either:
+  FlaUI's types come from System.Runtime, and mcs would see two
+  System.Objects.
+- A new test is a new `.cs` (or a new program in the directory) next to
+  FlaUITest.cs; its scenario runs `dotnet.exe C:/gala/<name>.dll` with
+  a `<name>.runtimeconfig.json` and the FlaUI assemblies in the `dotnet`
+  module set (EXTRA_MODULES), as `flaui_test` does.
+- FlaUI reads every property with GetCurrentPropertyValueEx(id, TRUE)
+  and compares the result with ReservedNotSupportedValue by reference:
+  a property UIAutomationCore cannot answer must be the not-supported
+  value, not VT_EMPTY, or FlaUI converts null and throws.
+- When FlaUI throws, the test prints the exception with its stack
+  (`flaui_test: exception:`), which names the Interop.UIAutomationClient
+  method; `UIAutomationCore.dll!...` ledger lines name gala's missing
+  methods (E_NOTIMPL becomes NotImplementedException in .NET).
+- On Windows: `dotnet flaui_test.dll` in a directory holding the test,
+  its runtimeconfig, `flaui_target.exe` and the three FlaUI assemblies
+  (the window appears for a moment). run-all.ps1 skips
+  `flaui_target.exe`, which would wait for its window to be closed.
 
 ## Bootable images and USB sticks
 

@@ -225,6 +225,34 @@ const PREBUILT: &[Prebuilt] = &[
             "Binn/Resources/zh-TW",
         ],
     },
+    // FlaUI 5.0.0 (MIT), the UI Automation test library flaui_test uses:
+    // NuGet packages (zips) from nuget.org, SHA-256 of the .nupkg as
+    // downloaded (nuget.org publishes SHA-512 of the package in its
+    // catalog; THIRD_PARTY.md). The .NET 8 builds and the license.
+    Prebuilt {
+        name: "flaui-core",
+        url: "https://api.nuget.org/v3-flatcontainer/flaui.core/5.0.0/flaui.core.5.0.0.nupkg",
+        checksum: "191cc65ea82036b77f1872e6d4ebf743d3d120895bba2fa5248d126cd6f568a7",
+        members: &["lib/net8.0-windows7.0/FlaUI.Core.dll", "LICENSE.txt"],
+        excludes: &[],
+    },
+    Prebuilt {
+        name: "flaui-uia3",
+        url: "https://api.nuget.org/v3-flatcontainer/flaui.uia3/5.0.0/flaui.uia3.5.0.0.nupkg",
+        checksum: "d5d2e083539a04bf6c9053781dfd47332854a76faeb8e9c3c68cc82109f711f2",
+        members: &["lib/net8.0-windows7.0/FlaUI.UIA3.dll", "LICENSE.txt"],
+        excludes: &[],
+    },
+    // Interop.UIAutomationClient 10.19041.0 (MIT): the COM interop
+    // assembly for UIAutomationClient (generated from Windows' type
+    // library) that FlaUI.UIA3 calls through.
+    Prebuilt {
+        name: "uiautomation-interop",
+        url: "https://api.nuget.org/v3-flatcontainer/interop.uiautomationclient/10.19041.0/interop.uiautomationclient.10.19041.0.nupkg",
+        checksum: "0d2ed17db2cb13a262f0580ab992db87577651c25a9899053df4114b4d9ff3b1",
+        members: &["lib/netcoreapp3.0/Interop.UIAutomationClient.dll", "LICENSE.txt"],
+        excludes: &[],
+    },
 ];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -1178,6 +1206,20 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "target/prebuilt/dotnet/", "dotnet"),
     ("dotnet", "user/bin/dotnet_hello.dll", "gala"),
     ("dotnet", "user/dotnet_hello/dotnet_hello.runtimeconfig.json", "gala"),
+    // flaui_test: FlaUI (PREBUILT) driving flaui_target.exe through gala's
+    // UIAutomationCore.dll.
+    ("dotnet", "uiautomationcore.dll", "Windows/System32"),
+    ("dotnet", "gdi32.dll", "Windows/System32"),
+    ("dotnet", "user/bin/flaui_test.dll", "gala"),
+    ("dotnet", "user/flaui_test/flaui_test.runtimeconfig.json", "gala"),
+    ("dotnet", "user/bin/flaui_target.exe", "gala"),
+    ("dotnet", "target/prebuilt/flaui-core/lib/net8.0-windows7.0/FlaUI.Core.dll", "gala"),
+    ("dotnet", "target/prebuilt/flaui-uia3/lib/net8.0-windows7.0/FlaUI.UIA3.dll", "gala"),
+    (
+        "dotnet",
+        "target/prebuilt/uiautomation-interop/lib/netcoreapp3.0/Interop.UIAutomationClient.dll",
+        "gala",
+    ),
     (
         "dotnet",
         "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-core-console-l1-1-0.dll",
@@ -1540,6 +1582,7 @@ const SLOW_SCENARIOS: &[&str] = &[
     "java_hello",
     "java_http",
     "dotnet_hello",
+    "flaui_test",
     "pwsh_hello",
     "postgres",
     "filezilla",
@@ -1943,8 +1986,10 @@ fn fetch_prebuilt(path: &str) -> Result {
         return Err(format!("{}: SHA-256 mismatch ({sum})", p.url));
     }
     // A Chocolatey package (a zip) that carries the installer in tools/:
-    // that installer is the archive.
-    let zip = if p.url.ends_with(".nupkg") {
+    // that installer is the archive. A NuGet library package (nuget.org)
+    // is a plain zip, unpacked as one.
+    let chocolatey = p.url.ends_with(".nupkg") && p.url.contains("chocolatey.org");
+    let zip = if chocolatey {
         let inner = dir.join("nupkg");
         let _ = fs::remove_dir_all(&inner);
         run_cmd(
@@ -1971,10 +2016,7 @@ fn fetch_prebuilt(path: &str) -> Result {
     };
     if p.url.ends_with(".msi") {
         unpack_msi(p, &zip, &dir)?;
-    } else if p.url.ends_with(".7z.exe")
-        || p.url.ends_with("-setup.exe")
-        || p.url.ends_with(".nupkg")
-    {
+    } else if p.url.ends_with(".7z.exe") || p.url.ends_with("-setup.exe") || chocolatey {
         // A 7-Zip self-extracting archive (Git for Windows' PortableGit) or
         // an NSIS installer (FileZilla): 7-Zip reads it without running it.
         // Members are directories or wildcards.
@@ -3152,6 +3194,31 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // UI Automation step 5: FlaUI 5.0.0 (FlaUI.UIA3, PREBUILT) on the
+        // .NET 8 runtime drives another program (user/flaui_test: the C#
+        // test and flaui_target.exe, built by its build.sh) through gala's
+        // UIAutomationCore.dll: CUIAutomation8, the element tree, Invoke,
+        // Value and Toggle.
+        name: "flaui_test",
+        cmdline: "qemu_exit run=dotnet.exe args=C:/gala/flaui_test.dll",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "timeouts=20000/2000",
+            "timeout=30000",
+            "window=FlaUI Target",
+            "pid=ok",
+            "cached=1 Press 101",
+            "button=Press Button",
+            "title=FlaUI Pressed",
+            "text=hello",
+            "checked=False",
+            "checked=True",
+            "closed=True",
+            "flaui_test: ok",
+            "dotnet.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
         // P1 step 5 (pending): SQL Server 2022 LocalDB's database engine,
         // started directly as a console program (-c: not as a service),
         // as SqlLocalDB starts an instance: the instance ID the MSI
@@ -3645,6 +3712,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("fzsftp", "filezilla"),
     ("filezilla_server", "filezilla"),
     ("dotnet_hello", "dotnet"),
+    ("flaui_test", "dotnet"),
     ("pwsh_hello", "pwsh"),
     ("sqllocaldb_persist", "sqllocaldb"),
 ];

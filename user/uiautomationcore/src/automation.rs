@@ -1,5 +1,9 @@
 //! The CUIAutomation object (IUIAutomation): elements from windows, the
-//! root, points and the focus; conditions; tree walkers.
+//! root, points and the focus; conditions; tree walkers; cache requests.
+//! CUIAutomation8 is the same object answering IUIAutomation2..6 too,
+//! whose methods extend IUIAutomation's vtable (one table serves all six
+//! interfaces): timeouts and options are kept and read back, the event
+//! methods are E_NOTIMPL (no events yet).
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -7,24 +11,56 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::element::{self, desktop, hwnd_of, put_element};
 use crate::{
     E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, GetFocus, Guid, HResult, Hwnd,
-    IID_IUNKNOWN, IsWindow, Point, S_OK, VT_I4, VT_R8, VTable, Variant, WindowFromPoint, boxed,
-    condition, free, guid, iid_at, put, walker,
+    IID_IUNKNOWN, IsWindow, Point, S_OK, SafeArrayAccessData, SafeArrayGetDim,
+    SafeArrayGetElemsize, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayUnaccessData, VT_I4,
+    VT_R8, VTable, Variant, WindowFromPoint, boxed, cache, condition, free, guid, iid_at,
+    is_not_supported, mixed_attribute, not_supported, put, walker,
 };
 
 const IID_IUIAUTOMATION: Guid =
     guid(0x30cbe57d, 0xd9d0, 0x452a, [0xab, 0x13, 0x7a, 0xc5, 0xac, 0x48, 0x25, 0xee]);
+/// IUIAutomation2..6 (UIAutomationClient.h), each extending the one
+/// before.
+const IID_IUIAUTOMATION_NEWER: [Guid; 5] = [
+    guid(0x34723aff, 0x0c9d, 0x49d0, [0x98, 0x96, 0x7a, 0xb5, 0x2d, 0xf8, 0xcd, 0x8a]),
+    guid(0x73d768da, 0x9b51, 0x4b89, [0x93, 0x6e, 0xc2, 0x09, 0x29, 0x09, 0x73, 0xe7]),
+    guid(0x1189c02a, 0x05f8, 0x4319, [0x8e, 0x21, 0xe8, 0x17, 0xe3, 0xdb, 0x28, 0x60]),
+    guid(0x25f700c8, 0xd816, 0x4057, [0xa9, 0xdc, 0x3c, 0xbd, 0xee, 0x77, 0xe2, 0x56]),
+    guid(0xaae072da, 0x29e3, 0x413d, [0x87, 0xa7, 0x19, 0x2d, 0xbf, 0x81, 0xed, 0x10]),
+];
 const IS_CONTROL_ELEMENT: i32 = 30016;
 const IS_CONTENT_ELEMENT: i32 = 30017;
 
+/// IUIAutomation's 58 methods and IUIAutomation2..6's 21.
+const METHODS: usize = 79;
+
 #[repr(C)]
 struct Automation {
-    vtable: *const VTable<58>,
+    vtable: *const VTable<METHODS>,
     refs: AtomicU32,
+    /// CUIAutomation8: answers IUIAutomation2..6.
+    v8: bool,
+    auto_set_focus: AtomicU32,
+    connection_timeout: AtomicU32,
+    transaction_timeout: AtomicU32,
+    connection_recovery: AtomicU32,
+    coalesce_events: AtomicU32,
 }
 
-/// A new CUIAutomation object's `iid` interface at `out`.
-pub fn create(iid: *const Guid, out: *mut *mut c_void) -> HResult {
-    let a = boxed(Automation { vtable: &VTABLE, refs: AtomicU32::new(1) });
+/// A new CUIAutomation (CUIAutomation8 with `v8`) object's `iid`
+/// interface at `out`. The documented defaults: AutoSetFocus TRUE,
+/// ConnectionTimeout 2 s, TransactionTimeout 20 s.
+pub fn create(v8: bool, iid: *const Guid, out: *mut *mut c_void) -> HResult {
+    let a = boxed(Automation {
+        vtable: &VTABLE,
+        refs: AtomicU32::new(1),
+        v8,
+        auto_set_focus: AtomicU32::new(1),
+        connection_timeout: AtomicU32::new(2000),
+        transaction_timeout: AtomicU32::new(20000),
+        connection_recovery: AtomicU32::new(0),
+        coalesce_events: AtomicU32::new(0),
+    });
     if a.is_null() {
         return E_OUTOFMEMORY;
     }
@@ -41,16 +77,19 @@ extern "system" fn query(
     if out.is_null() {
         return E_POINTER;
     }
-    match iid_at(iid) {
-        IID_IUNKNOWN | IID_IUIAUTOMATION => {
-            add_ref(this);
-            put(out, this.cast());
-            S_OK
-        }
-        _ => {
-            put(out, core::ptr::null_mut());
-            E_NOINTERFACE
-        }
+    let iid = iid_at(iid);
+    // SAFETY: our object.
+    let v8 = unsafe { (*this).v8 };
+    if iid == IID_IUNKNOWN
+        || iid == IID_IUIAUTOMATION
+        || (v8 && IID_IUIAUTOMATION_NEWER.contains(&iid))
+    {
+        add_ref(this);
+        put(out, this.cast());
+        S_OK
+    } else {
+        put(out, core::ptr::null_mut());
+        E_NOINTERFACE
     }
 }
 
@@ -153,6 +192,11 @@ extern "system" fn focused_cache(this: usize, _cache: usize, out: *mut *mut c_vo
 }
 
 // ---- Views and walkers ----
+
+/// The control view's condition (a new reference at `out`).
+pub fn control_view(out: *mut *mut c_void) -> HResult {
+    view_condition(1, out)
+}
 
 fn view_condition(kind: u32, out: *mut *mut c_void) -> HResult {
     if out.is_null() {
@@ -330,6 +374,58 @@ extern "system" fn not_condition(_this: usize, c: *mut c_void, out: *mut *mut c_
     condition::create_not(c, out)
 }
 
+/// The interface pointers of a one-dimensional SAFEARRAY of VT_UNKNOWN
+/// (or VT_DISPATCH), as the array-based condition factories take them,
+/// handed to `f` while the array's data is locked.
+fn with_unknowns(sa: *mut c_void, f: impl FnOnce(&[*mut c_void]) -> HResult) -> HResult {
+    if sa.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's SAFEARRAY; its data stays locked (accessed)
+    // while `f` reads it.
+    unsafe {
+        if SafeArrayGetDim(sa) != 1 || SafeArrayGetElemsize(sa) as usize != size_of::<usize>() {
+            return E_INVALIDARG;
+        }
+        let (mut lower, mut upper) = (0, 0);
+        if SafeArrayGetLBound(sa, 1, &mut lower) != S_OK
+            || SafeArrayGetUBound(sa, 1, &mut upper) != S_OK
+        {
+            return E_INVALIDARG;
+        }
+        let count = (i64::from(upper) - i64::from(lower) + 1).max(0) as usize;
+        let mut data = core::ptr::null_mut();
+        if SafeArrayAccessData(sa, &mut data) != S_OK {
+            return E_INVALIDARG;
+        }
+        let items: &[*mut c_void] =
+            if count == 0 { &[] } else { core::slice::from_raw_parts(data.cast(), count) };
+        let hr = f(items);
+        SafeArrayUnaccessData(sa);
+        hr
+    }
+}
+
+extern "system" fn and_from_array(_this: usize, sa: *mut c_void, out: *mut *mut c_void) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    with_unknowns(sa, |items| condition::create_and(items, out))
+}
+
+extern "system" fn or_from_array(_this: usize, sa: *mut c_void, out: *mut *mut c_void) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    with_unknowns(sa, |items| condition::create_or(items, out))
+}
+
+extern "system" fn create_cache_request(_this: usize, out: *mut *mut c_void) -> HResult {
+    cache::create(out)
+}
+
 // ---- Helpers ----
 
 extern "system" fn remove_all_event_handlers(_this: usize) -> HResult {
@@ -376,23 +472,67 @@ extern "system" fn rect_to_variant(
     if v.vt == 0 { E_OUTOFMEMORY } else { S_OK }
 }
 
-/// CheckNotSupported: gala never gives out the not-supported value.
+/// CheckNotSupported: whether the value (a VARIANT, by reference) is the
+/// not-supported value.
 extern "system" fn check_not_supported(
     _this: usize,
-    _value: *const Variant,
+    value: *const Variant,
     out: *mut i32,
 ) -> HResult {
-    if out.is_null() {
+    if out.is_null() || value.is_null() {
         return E_POINTER;
     }
-    put(out, 0);
+    // SAFETY: the caller's VARIANT.
+    put(out, i32::from(is_not_supported(unsafe { &*value })));
     S_OK
 }
 
+/// get_ReservedNotSupportedValue: the one not-supported IUnknown.
+extern "system" fn not_supported_value(_this: usize, out: *mut *mut c_void) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, not_supported());
+    S_OK
+}
+
+/// get_ReservedMixedAttributeValue: the one mixed-attribute IUnknown.
+extern "system" fn mixed_attribute_value(_this: usize, out: *mut *mut c_void) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, mixed_attribute());
+    S_OK
+}
+
+// ---- IUIAutomation2..6: options ----
+
+macro_rules! option {
+    ($get:ident, $put:ident, $field:ident) => {
+        extern "system" fn $get(this: *mut Automation, out: *mut u32) -> HResult {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            // SAFETY: our object.
+            put(out, unsafe { (*this).$field.load(Ordering::Relaxed) });
+            S_OK
+        }
+
+        extern "system" fn $put(this: *mut Automation, value: u32) -> HResult {
+            // SAFETY: our object.
+            unsafe { (*this).$field.store(value, Ordering::Relaxed) };
+            S_OK
+        }
+    };
+}
+
+option!(get_auto_set_focus, put_auto_set_focus, auto_set_focus);
+option!(get_connection_timeout, put_connection_timeout, connection_timeout);
+option!(get_transaction_timeout, put_transaction_timeout, transaction_timeout);
+option!(get_connection_recovery, put_connection_recovery, connection_recovery);
+option!(get_coalesce_events, put_coalesce_events, coalesce_events);
+
 not_impl!(compare_runtime_ids, b"UIAutomationCore.dll!IUIAutomation::CompareRuntimeIds");
-not_impl!(create_cache_request, b"UIAutomationCore.dll!IUIAutomation::CreateCacheRequest");
-not_impl!(and_from_array, b"UIAutomationCore.dll!IUIAutomation::CreateAndConditionFromArray");
-not_impl!(or_from_array, b"UIAutomationCore.dll!IUIAutomation::CreateOrConditionFromArray");
 not_impl!(add_event_handler, b"UIAutomationCore.dll!IUIAutomation::AddAutomationEventHandler");
 not_impl!(
     remove_event_handler,
@@ -441,21 +581,45 @@ not_impl!(
     poll_properties,
     b"UIAutomationCore.dll!IUIAutomation::PollForPotentialSupportedProperties"
 );
-not_impl!(
-    not_supported_value,
-    b"UIAutomationCore.dll!IUIAutomation::get_ReservedNotSupportedValue"
-);
-not_impl!(
-    mixed_attribute_value,
-    b"UIAutomationCore.dll!IUIAutomation::get_ReservedMixedAttributeValue"
-);
 not_impl!(from_iaccessible, b"UIAutomationCore.dll!IUIAutomation::ElementFromIAccessible");
 not_impl!(
     from_iaccessible_cache,
     b"UIAutomationCore.dll!IUIAutomation::ElementFromIAccessibleBuildCache"
 );
+not_impl!(
+    add_text_edit_handler,
+    b"UIAutomationCore.dll!IUIAutomation3::AddTextEditTextChangedEventHandler"
+);
+not_impl!(
+    remove_text_edit_handler,
+    b"UIAutomationCore.dll!IUIAutomation3::RemoveTextEditTextChangedEventHandler"
+);
+not_impl!(add_changes_handler, b"UIAutomationCore.dll!IUIAutomation4::AddChangesEventHandler");
+not_impl!(
+    remove_changes_handler,
+    b"UIAutomationCore.dll!IUIAutomation4::RemoveChangesEventHandler"
+);
+not_impl!(
+    add_notification_handler,
+    b"UIAutomationCore.dll!IUIAutomation5::AddNotificationEventHandler"
+);
+not_impl!(
+    remove_notification_handler,
+    b"UIAutomationCore.dll!IUIAutomation5::RemoveNotificationEventHandler"
+);
+not_impl!(create_handler_group, b"UIAutomationCore.dll!IUIAutomation6::CreateEventHandlerGroup");
+not_impl!(add_handler_group, b"UIAutomationCore.dll!IUIAutomation6::AddEventHandlerGroup");
+not_impl!(remove_handler_group, b"UIAutomationCore.dll!IUIAutomation6::RemoveEventHandlerGroup");
+not_impl!(
+    add_text_position_handler,
+    b"UIAutomationCore.dll!IUIAutomation6::AddActiveTextPositionChangedEventHandler"
+);
+not_impl!(
+    remove_text_position_handler,
+    b"UIAutomationCore.dll!IUIAutomation6::RemoveActiveTextPositionChangedEventHandler"
+);
 
-static VTABLE: VTable<58> = VTable([
+static VTABLE: VTable<METHODS> = VTable([
     query as *const (),
     add_ref as *const (),
     release as *const (),
@@ -514,4 +678,30 @@ static VTABLE: VTable<58> = VTable([
     mixed_attribute_value as *const (),
     from_iaccessible as *const (),
     from_iaccessible_cache as *const (),
+    // IUIAutomation2.
+    get_auto_set_focus as *const (),
+    put_auto_set_focus as *const (),
+    get_connection_timeout as *const (),
+    put_connection_timeout as *const (),
+    get_transaction_timeout as *const (),
+    put_transaction_timeout as *const (),
+    // IUIAutomation3.
+    add_text_edit_handler as *const (),
+    remove_text_edit_handler as *const (),
+    // IUIAutomation4.
+    add_changes_handler as *const (),
+    remove_changes_handler as *const (),
+    // IUIAutomation5.
+    add_notification_handler as *const (),
+    remove_notification_handler as *const (),
+    // IUIAutomation6.
+    create_handler_group as *const (),
+    add_handler_group as *const (),
+    remove_handler_group as *const (),
+    get_connection_recovery as *const (),
+    put_connection_recovery as *const (),
+    get_coalesce_events as *const (),
+    put_coalesce_events as *const (),
+    add_text_position_handler as *const (),
+    remove_text_position_handler as *const (),
 ]);

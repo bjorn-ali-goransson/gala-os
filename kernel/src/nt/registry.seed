@@ -80,6 +80,13 @@
 [\Registry\Machine\SOFTWARE\Classes\CLSID\{ff48dba4-60ef-4201-aa87-54103eef594e}\InprocServer32]
 @=expand:%SystemRoot%\System32\UIAutomationCore.dll
 "ThreadingModel"=sz:Both
+; CUIAutomation8 (CLSID_CUIAutomation8: IUIAutomation2..6 too; FlaUI's
+; UIA3 asks for it first).
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{e22ad333-b25f-460c-83d0-0581107395c9}]
+@=sz:CUIAutomation8 Class
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{e22ad333-b25f-460c-83d0-0581107395c9}\InprocServer32]
+@=expand:%SystemRoot%\System32\UIAutomationCore.dll
+"ThreadingModel"=sz:Both
 [\Registry\Machine\SOFTWARE\WOW6432Node]
 
 ; A workstation (WinNT; servers say ServerNT or LanmanNT).

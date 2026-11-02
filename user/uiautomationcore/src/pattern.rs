@@ -57,14 +57,18 @@ fn toggle_state(h: Hwnd) -> i32 {
     (unsafe { SendMessageW(h, BM_GETCHECK, 0, 0) } as i32).clamp(0, 2)
 }
 
-/// A pattern property's value: None if `id` is no pattern property this
-/// file knows; VT_EMPTY if the element lacks the pattern.
+/// Whether `id` is a pattern property this file knows.
+pub fn known_property(id: i32) -> bool {
+    matches!(id, VALUE_VALUE | VALUE_IS_READ_ONLY | TOGGLE_STATE)
+}
+
+/// A pattern property's value: None if the element lacks the pattern (or
+/// `id` is no pattern property this file knows).
 pub fn property(h: Hwnd, id: i32) -> Option<Variant> {
     Some(match id {
         VALUE_VALUE if supports(h, VALUE) => Variant::bstr(element::window_text(h, false)),
         VALUE_IS_READ_ONLY if supports(h, VALUE) => Variant::boolean(read_only(h)),
         TOGGLE_STATE if supports(h, TOGGLE) => Variant::int(toggle_state(h)),
-        VALUE_VALUE | VALUE_IS_READ_ONLY | TOGGLE_STATE => Variant::EMPTY,
         _ => return None,
     })
 }
