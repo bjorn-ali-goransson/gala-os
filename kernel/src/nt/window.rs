@@ -37,15 +37,24 @@ pub struct Info {
     pub class: [u16; CLASS_CHARS],
     pub text_len: u32,
     pub text: [u16; TEXT_CHARS],
+    /// Version 2: the top-level window's id on shasha's screen (the
+    /// `nt::desktop` window user32 made for it; 0: none, a child, or a
+    /// version 1 record). GalaDesktopAction names windows by HWND and
+    /// finds the screen's window through it.
+    pub desktop: u32,
 }
 
 pub const CLASS_CHARS: usize = 64;
 pub const TEXT_CHARS: usize = 256;
-pub const INFO_SIZE: usize = 88 + 2 * CLASS_CHARS + 2 * TEXT_CHARS;
+/// A version 1 record's size.
+pub const INFO_SIZE_V1: usize = 88 + 2 * CLASS_CHARS + 2 * TEXT_CHARS;
+/// A version 2 record's size: version 1, then the screen's window id
+/// (u32) and 4 reserved bytes (zero).
+pub const INFO_SIZE: usize = INFO_SIZE_V1 + 8;
 /// The record's format version (bytes 84..88; ARCHITECTURE invariant 3:
-/// everything shared is versioned). Readers accept this version only for
-/// now; a new one adds fields at the end and keeps accepting the old.
-pub const INFO_VERSION: u32 = 1;
+/// everything shared is versioned). A new version adds fields at the end;
+/// readers accept it and the previous one (version 1: no screen window).
+pub const INFO_VERSION: u32 = 2;
 pub const FLAG_VISIBLE: u32 = 1;
 pub const FLAG_ENABLED: u32 = 2;
 /// Maximized (IsZoomed) and minimized (IsIconic) top-level windows.
@@ -76,15 +85,27 @@ impl Default for Info {
             class: [0; CLASS_CHARS],
             text_len: 0,
             text: [0; TEXT_CHARS],
+            desktop: 0,
         }
     }
 }
 
 impl Info {
+    /// The record's format version, if `b` holds a whole record of one
+    /// this kernel reads (1 or 2).
+    pub fn version(b: &[u8]) -> Option<u32> {
+        let v = u32::from_le_bytes(b.get(84..88)?.try_into().ok()?);
+        let size = match v {
+            1 => INFO_SIZE_V1,
+            2 => INFO_SIZE,
+            _ => return None,
+        };
+        (b.len() >= size).then_some(v)
+    }
+
+    /// Reads a version 1 or 2 record.
     pub fn from_bytes(b: &[u8]) -> Option<Info> {
-        if b.len() < INFO_SIZE || b[84..88] != INFO_VERSION.to_le_bytes() {
-            return None;
-        }
+        let version = Self::version(b)?;
         let u64_at = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap_or([0; 8]));
         let u32_at = |at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap_or([0; 4]));
         let mut info = Info {
@@ -110,7 +131,22 @@ impl Info {
         for (i, c) in info.text.iter_mut().enumerate() {
             *c = u16::from_le_bytes([b[text + 2 * i], b[text + 1 + 2 * i]]);
         }
+        if version >= 2 {
+            info.desktop = u32_at(INFO_SIZE_V1);
+        }
         Some(info)
+    }
+
+    /// Writes the record as format `version` (1, or the current one for
+    /// anything else) into `b`; its size.
+    pub fn to_bytes_as(&self, version: u32, b: &mut [u8; INFO_SIZE]) -> usize {
+        self.to_bytes(b);
+        if version == 1 {
+            b[84..88].copy_from_slice(&1u32.to_le_bytes());
+            b[INFO_SIZE_V1..].fill(0);
+            return INFO_SIZE_V1;
+        }
+        INFO_SIZE
     }
 
     pub fn to_bytes(&self, b: &mut [u8; INFO_SIZE]) {
@@ -137,6 +173,8 @@ impl Info {
         for (i, c) in self.text.iter().enumerate() {
             b[text + 2 * i..text + 2 + 2 * i].copy_from_slice(&c.to_le_bytes());
         }
+        b[INFO_SIZE_V1..INFO_SIZE_V1 + 4].copy_from_slice(&self.desktop.to_le_bytes());
+        b[INFO_SIZE_V1 + 4..INFO_SIZE].fill(0);
     }
 }
 
@@ -390,6 +428,16 @@ pub fn query(hwnd: u64) -> Option<Info> {
     REGISTRY.lock().windows.iter().find(|w| w.hwnd == hwnd).copied()
 }
 
+/// The HWND of process `pid`'s top-level window that is window `desktop`
+/// on shasha's screen (GalaDesktopAction's window list).
+pub fn hwnd_of_desktop(pid: u32, desktop: u32) -> Option<u64> {
+    if desktop == 0 {
+        return None;
+    }
+    let r = REGISTRY.lock();
+    r.windows.iter().find(|w| w.pid == pid && w.desktop == desktop && w.parent == 0).map(|w| w.hwnd)
+}
+
 /// The windows whose parent is `parent` (0: the top-level windows), the
 /// highest first, into `out`; how many there are (more than `out` holds
 /// when it is short).
@@ -447,12 +495,21 @@ mod tests {
         };
         info.class[..3].copy_from_slice(&[u16::from(b'A'), u16::from(b'b'), u16::from(b'c')]);
         info.text[..2].copy_from_slice(&[u16::from(b'h'), u16::from(b'i')]);
+        info.desktop = 7;
         let mut bytes = [0u8; INFO_SIZE];
         info.to_bytes(&mut bytes);
         assert_eq!(Info::from_bytes(&bytes), Some(info));
-        // Another format version is refused.
-        bytes[84] = 2;
+        // A version 1 record (no screen window) is still read, also when
+        // only its own size is there.
+        assert_eq!(info.to_bytes_as(1, &mut bytes), INFO_SIZE_V1);
+        let v1 = Info::from_bytes(&bytes[..INFO_SIZE_V1]).unwrap();
+        assert_eq!(v1, Info { desktop: 0, ..info });
+        // A version 2 record cut short, and an unknown version, are refused.
+        info.to_bytes(&mut bytes);
+        assert_eq!(Info::from_bytes(&bytes[..INFO_SIZE_V1]), None);
+        bytes[84] = 3;
         assert_eq!(Info::from_bytes(&bytes), None);
+        let info = Info { desktop: 0, ..info };
 
         let top = register(901, info).unwrap();
         assert_eq!(top % HWND_STEP, 0);
@@ -461,6 +518,13 @@ mod tests {
         let a = register(901, Info { z: 1, ..child_info }).unwrap();
         assert_ne!(a, b);
         // Another process reads them.
+        // The screen's window links to its HWND (top-level windows only).
+        let shown = register(901, Info { desktop: 5, ..info }).unwrap();
+        assert_eq!(hwnd_of_desktop(901, 5), Some(shown));
+        assert_eq!(hwnd_of_desktop(902, 5), None);
+        assert_eq!(hwnd_of_desktop(901, 0), None);
+        unregister(901, shown).unwrap();
+        assert_eq!(hwnd_of_desktop(901, 5), None);
         let q = query(top).unwrap();
         assert_eq!((q.pid, q.tid, q.rect, q.text_len), (901, 77, [10, 20, 310, 220], 2));
         let mut kids = [0u64; 1];

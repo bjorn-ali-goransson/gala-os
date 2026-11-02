@@ -1563,6 +1563,8 @@ const USER_PROGRAMS: &[&str] = &[
     "restricted_test",
     "cmd",
     "cmd_test",
+    "gala",
+    "gala_cli_test",
     "profile_test",
     "registry_test",
     "keyed_event_test",
@@ -1814,7 +1816,7 @@ fn build_kernel(release: bool) -> Result {
         cmd.arg("--release");
     }
     run_cmd(&mut cmd)?;
-    // The server kernel (no `desktop` feature: ROADMAP SD), in its own
+    // The server kernel (no `shasha` feature: ROADMAP SD), in its own
     // target directory so the two builds don't replace each other.
     let mut cmd = cargo();
     cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
@@ -1873,7 +1875,7 @@ fn server_target_dir() -> PathBuf {
     target_dir().join("server")
 }
 
-/// Scenarios booted with the server kernel (no `desktop` feature).
+/// Scenarios booted with the server kernel (no `shasha` feature).
 const SERVER_KERNEL_SCENARIOS: &[&str] = &["server_kernel"];
 
 fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) -> Result<PathBuf> {
@@ -2263,6 +2265,7 @@ const PENDING: &[&str] = &[
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
     "server_profile",
+    "gala_cli",
     "hello",
     "selftest",
     "fault-pagefault",
@@ -2832,6 +2835,32 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // ROADMAP SD "CLI parity": a GUI program driven by the `gala`
+        // command alone (start, list, snap, maximize/restore, move,
+        // minimize/activate, wallpaper, ps, close, kill); SCREEN_SCENARIOS
+        // checks shasha once the window is snapped left.
+        name: "gala_cli",
+        cmdline: "qemu_exit wallpaper=night run=gala_cli_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "gala_cli_test target: up",
+            "gala_cli_test target: snapped left",
+            "xtask: screen ok",
+            "gala_cli_test target: key g",
+            "gala_cli_test target: maximized",
+            "gala_cli_test target: restored",
+            "gala_cli_test target: snapped right",
+            "gala_cli_test target: moved",
+            "gala_cli_test target: minimized",
+            "desktop: wallpaper ribbons",
+            "gala_cli_test target: SC_CLOSE",
+            "gala_cli_test target: WM_CLOSE",
+            "gala_cli_test target: ok",
+            "gala_cli_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // ntdll's run-time library and the calls Git Bash's msys-2.0.dll
         // imports.
         name: "rtl_test",
@@ -3086,12 +3115,15 @@ const SCENARIOS: &[Scenario] = &[
         // compositor in the binary), booted with a screen: GUI calls fail
         // as with no screen, windows still work, a console program runs.
         name: "server_kernel",
-        cmdline: "qemu_exit run=hello.exe,user32_test.exe",
+        // gala_cli_test server: `gala`'s window commands are not
+        // supported (exit code 3), start, ps and kill work.
+        cmdline: "qemu_exit run=hello.exe,user32_test.exe,gala_cli_test.exe args=,,server",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "desktop: not in this kernel (server build)",
             "Hello from user mode!",
             "user32_test: ok",
+            "gala_cli_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -3101,13 +3133,15 @@ const SCENARIOS: &[Scenario] = &[
         // still work (the registry, messages), nothing is drawn, and
         // `console=` starts no console window.
         name: "server_profile",
-        cmdline: "qemu_exit profile=server console=user32_test.exe run=user32_test.exe",
+        cmdline: "qemu_exit profile=server console=user32_test.exe \
+                  run=user32_test.exe,gala_cli_test.exe args=,server",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "profile: server",
             "console: no console window for user32_test.exe (server profile)",
             "desktop: not drawn (server profile)",
             "user32_test: ok",
+            "gala_cli_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -3991,6 +4025,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("kernel_watchdog", "hello"),
     ("server_profile", "user32_test"),
     ("server_kernel", "user32_test"),
+    ("gala_cli", "gui_test"),
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
     ("crash_record", "hello"),
@@ -4240,6 +4275,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("busybox", "child processes (pipelines are child processes)"),
     ("cmd_test", "child processes (one NT process per Linux process)"),
     ("gui_test", "needs a screen (the desktop draws on the framebuffer)"),
+    ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
 ];
 
@@ -5210,6 +5246,30 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     input: &["mouse_move 80 -159", "mouse_button 1", "mouse_button 0"],
                     pixels: &[],
                 },
+            ],
+        },
+    ),
+    (
+        // `gala snap left` put gala_cli_test's window (client area
+        // RGB 2e 8b 57) on the left half of the work area (640 x 752 on
+        // the 1280 x 800 screen): its caption at the top, square
+        // corners (docked); the night wallpaper on the right. Then `g`
+        // typed into it (it renames itself, which the test waits for).
+        "gala_cli",
+        ScreenCheck {
+            marker: "gala_cli_test: snapped left",
+            steps: &[
+                ScreenStep {
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::At(300, 12, 0xeef2f7),             // the active caption
+                        PixelCheck::At(0, 0, 0x9ca3ad), // a square corner: the outline
+                        PixelCheck::At(20, 60, 0x2e8b57), // the client area, top left
+                        PixelCheck::At(620, 740, 0x2e8b57), // and bottom right
+                        PixelCheck::AnyIn(900, 300, 40, 40, 0x060e2b), // the wallpaper
+                    ],
+                },
+                ScreenStep { input: &["sendkey g"], pixels: &[] },
             ],
         },
     ),

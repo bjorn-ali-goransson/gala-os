@@ -29,7 +29,7 @@ explicitly in its commit.
   SD below.
 - **The desktop is built on the command line, not beside it**: the
   desktop edition is a superset of the server edition (the server/CLI
-  edition plus a graphical shell), and
+  edition plus a graphical shell, **shasha**: Arabic شاشة, "screen"), and
   everything the desktop can do can be done from a terminal too (the
   `gala` command, item SD). A desktop feature is built as an action the
   CLI reaches first, then given a mouse and keyboard binding.
@@ -1440,8 +1440,21 @@ SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    close, snap left/right/up/down, move/resize, choose the wallpaper;
    plus `gala ps`/`gala kill` (what a task manager would do). Test
    first: a gala_cli scenario drives a GUI program by the CLI alone.
+   **CLI parity done** (2026-11-02, scenario gala_cli; server mode in
+   server_kernel and server_profile; ARCHITECTURE "Server and desktop
+   workloads"): GalaDesktopAction (0x7f58) with Start, Windows,
+   Programs, Activate, Minimize, Maximize, Restore, Close, Snap, Move,
+   Wallpaper; shasha's taskbar, caption buttons, Win+arrows and start
+   menu go through the same actions (`Desktop::act`,
+   `action::start_path`); the window registry's record is version 2
+   (the screen's window id); `gala` (user/gala) ships in every image.
+   Next: access checks on window actions and `gala start` as the
+   caller (the desktop's owner, SECURITY.md), the wallpaper kept across
+   boots, `gala` for whatever shasha gains next (WORKFLOW: the command
+   comes first).
    **Server kernel done** (2026-11-02, scenario server_kernel): the
-   kernel's `desktop` feature (on by default) leaves out the compositor,
+   kernel's `shasha` feature (named `desktop` until 2026-11-02; on by
+   default) leaves out the compositor,
    wallpapers and start menu (2.5 MB smaller); xtask builds both. A
    server image without user32/gdi32 is not planned:
    many console and server programs import them (as on Windows Server

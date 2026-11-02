@@ -1,18 +1,53 @@
-//! The desktop left out (the kernel built without the `desktop` feature:
-//! a server kernel, ROADMAP SD, ARCHITECTURE "Server and desktop
-//! workloads"). Same interface as `nt::desktop`, nothing behind it: every
-//! window call is STATUS_NOT_SUPPORTED, as on a machine without a screen,
-//! so user32 keeps its windows in the registry and draws nothing. The
-//! compositor, wallpapers, fonts and the start menu are not in the binary.
+//! The desktop left out: a server kernel, built without the `shasha`
+//! feature (the graphical shell; ROADMAP SD, ARCHITECTURE "Server and
+//! desktop workloads"). Same interface as `nt::desktop`, nothing behind
+//! it: every window call and GalaDesktopAction's window actions are
+//! STATUS_NOT_SUPPORTED, as on a machine without a screen, so user32
+//! keeps its windows in the registry and draws nothing. The compositor,
+//! wallpapers, fonts and the start menu are not in the binary.
 
 use super::object::ObjectRef;
 use super::status::NtStatus;
+use alloc::vec::Vec;
 
 pub const TASKBAR: u32 = 48;
 
 /// A start menu entry (there is no start menu).
 pub struct Program {
+    pub name: &'static str,
     pub path: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapTo {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Activate,
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+    Snap(SnapTo),
+    Place { x: i32, y: i32, w: u32, h: u32 },
+}
+
+pub const LISTED_TITLE: usize = 128;
+pub const LISTED_ACTIVE: u32 = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub id: u32,
+    pub owner: u64,
+    pub flags: u32,
+    pub rect: [i32; 4],
+    pub title: [u16; LISTED_TITLE],
+    pub title_len: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,4 +162,20 @@ pub fn tick() {}
 
 pub fn take_input(_: u64, _: &mut [InputEvent]) -> usize {
     0
+}
+
+pub fn start_menu() -> Vec<&'static Program> {
+    Vec::new()
+}
+
+pub fn window_action(_: u64, _: u32, _: Action) -> Result<(), NtStatus> {
+    Err(NtStatus::NOT_SUPPORTED)
+}
+
+pub fn list_windows() -> Result<Vec<Listed>, NtStatus> {
+    Err(NtStatus::NOT_SUPPORTED)
+}
+
+pub fn set_wallpaper(_: &str) -> Result<(), NtStatus> {
+    Err(NtStatus::NOT_SUPPORTED)
 }

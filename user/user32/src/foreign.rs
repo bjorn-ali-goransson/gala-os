@@ -37,10 +37,12 @@ unsafe extern "system" {
 
 const CLASS_CHARS: usize = 64;
 const TEXT_CHARS: usize = 256;
-/// The record's size (nt::window::INFO_SIZE).
-const INFO_SIZE: usize = 88 + 2 * CLASS_CHARS + 2 * TEXT_CHARS;
-/// The record's format version (nt::window::INFO_VERSION).
-const INFO_VERSION: u32 = 1;
+/// The record's size (nt::window::INFO_SIZE): version 1's, then the
+/// window's id on the screen (version 2) and 4 reserved bytes.
+const INFO_SIZE: usize = 88 + 2 * CLASS_CHARS + 2 * TEXT_CHARS + 8;
+/// The record's format version (nt::window::INFO_VERSION). Records read
+/// back (GalaWindowQuery, zeroed buffer) come as version 1.
+const INFO_VERSION: u32 = 2;
 const FLAG_VISIBLE: u32 = 1;
 const FLAG_ENABLED: u32 = 2;
 /// Maximized (IsZoomed) and minimized (IsIconic), for UI Automation's
@@ -87,6 +89,8 @@ pub(crate) struct Info {
     pub class_len: usize,
     pub text: [u16; TEXT_CHARS],
     pub text_len: usize,
+    /// The window's id on the screen (GalaWindowCreate's; version 2).
+    pub desktop: u32,
 }
 
 impl Info {
@@ -118,6 +122,8 @@ impl Info {
         for (k, c) in self.text.iter().enumerate() {
             b[t + 2 * k..t + 2 + 2 * k].copy_from_slice(&c.to_le_bytes());
         }
+        let d = t + 2 * TEXT_CHARS;
+        b[d..d + 4].copy_from_slice(&self.desktop.to_le_bytes());
         b
     }
 
@@ -143,6 +149,7 @@ impl Info {
             text_len: (u32_at(80) as usize).min(TEXT_CHARS),
             class: [0; CLASS_CHARS],
             text: [0; TEXT_CHARS],
+            desktop: 0,
         };
         for (k, c) in info.class.iter_mut().enumerate() {
             *c = u16::from_le_bytes([b[88 + 2 * k], b[89 + 2 * k]]);
@@ -187,11 +194,15 @@ fn local_info(i: usize) -> Option<Info> {
         class_len: 0,
         text: [0; TEXT_CHARS],
         text_len: 0,
+        desktop: 0,
     };
     info.class_len = spelled.iter().position(|&c| c == 0).unwrap_or(spelled.len());
     info.class[..info.class_len].copy_from_slice(&spelled[..info.class_len]);
     info.text_len = w.title.iter().position(|&c| c == 0).unwrap_or(w.title.len());
     info.text[..info.text_len].copy_from_slice(&w.title[..info.text_len]);
+    if w.parent == 0 {
+        info.desktop = w.desktop;
+    }
     crate::tree::GetWindowRect(hwnd, &mut info.rect);
     Some(info)
 }
@@ -220,6 +231,7 @@ pub(crate) fn assign(i: usize) -> Hwnd {
         class_len: 0,
         text: [0; TEXT_CHARS],
         text_len: 0,
+        desktop: 0,
     };
     let mut hwnd = 0u64;
     // SAFETY: our record and output.

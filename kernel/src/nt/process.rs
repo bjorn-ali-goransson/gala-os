@@ -1018,9 +1018,11 @@ pub fn program_exists(path: &str) -> bool {
     open_program(path).is_ok()
 }
 
-/// Starts the program at Win32 path `path` as the boot user in its own
-/// directory, with new console handles (the start menu); its process id.
-pub fn launch(path: &'static str) -> Result<u64, NtStatus> {
+/// Starts the program at Win32 path `path` with arguments `args` (after
+/// the quoted path on its command line) as the boot user in its own
+/// directory, with new console handles (shasha's start menu,
+/// GalaDesktopAction); its process id.
+pub fn launch(path: &'static str, args: &str) -> Result<u64, NtStatus> {
     let object = open_program(path)?;
     let ObjectBody::File(f) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     let layout = super::section::image_layout(f.node)?;
@@ -1030,6 +1032,11 @@ pub fn launch(path: &'static str) -> Result<u64, NtStatus> {
     let mut command_line: Vec<u8> = Vec::new();
     for b in [b"\"", path.as_bytes(), b"\""] {
         command_line.try_extend_from_slice(b).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    if !args.is_empty() {
+        for b in [b" ", args.as_bytes()] {
+            command_line.try_extend_from_slice(b).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
     }
     let (process, _thread) = spawn(Spawn {
         name,

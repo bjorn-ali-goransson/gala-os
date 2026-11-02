@@ -125,6 +125,9 @@ pub const GALA_WINDOW_SEND: u32 = 0x7f48;
 pub const GALA_WINDOW_SEND_WAIT: u32 = 0x7f49;
 pub const GALA_WINDOW_RECEIVE: u32 = 0x7f4a;
 pub const GALA_WINDOW_REPLY: u32 = 0x7f4b;
+/// The shell's named actions (nt::action; 0x7f4c-0x7f57 are another
+/// agent's).
+pub const GALA_DESKTOP_ACTION: u32 = 0x7f58;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -318,6 +321,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_SEND_WAIT, "GalaWindowSendWait", 5, gala_window_send_wait),
     (GALA_WINDOW_RECEIVE, "GalaWindowReceive", 4, gala_window_receive),
     (GALA_WINDOW_REPLY, "GalaWindowReply", 4, gala_window_reply),
+    (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1613,8 +1617,16 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
 
 /// A window record (nt::window::Info) from the caller.
 fn read_window_info(call: &Call<'_>, ptr: u64) -> Result<super::window::Info, NtStatus> {
-    let mut bytes = [0u8; super::window::INFO_SIZE];
-    call.process.read(ptr, &mut bytes).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+    use super::window::{INFO_SIZE, INFO_SIZE_V1};
+    // Version 1's size first (a version 1 caller's buffer is no larger),
+    // then the rest of a version 2 record.
+    let mut bytes = [0u8; INFO_SIZE];
+    call.process.read(ptr, &mut bytes[..INFO_SIZE_V1]).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+    if bytes[84..88] == 2u32.to_le_bytes() {
+        call.process
+            .read(ptr + INFO_SIZE_V1 as u64, &mut bytes[INFO_SIZE_V1..])
+            .map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+    }
     super::window::Info::from_bytes(&bytes).ok_or(NtStatus::INVALID_PARAMETER)
 }
 
@@ -1644,12 +1656,18 @@ fn gala_window_unregister(call: &mut Call<'_>) -> NtStatus {
 }
 
 /// GalaWindowQuery(Hwnd, *Info): any process's window's record;
-/// STATUS_INVALID_HANDLE when there is none.
+/// STATUS_INVALID_HANDLE when there is none. The caller names the format
+/// it reads in the buffer's version field (bytes 84..88): 2 gets a
+/// version 2 record, anything else (a zeroed buffer) version 1.
 fn gala_window_query(call: &mut Call<'_>) -> NtStatus {
     let Some(info) = super::window::query(arg!(call, 0)) else { return NtStatus::INVALID_HANDLE };
+    let mut asked = [0u8; 4];
+    if call.process.read(arg!(call, 1) + 84, &mut asked).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
     let mut bytes = [0u8; super::window::INFO_SIZE];
-    info.to_bytes(&mut bytes);
-    if call.process.write(arg!(call, 1), &bytes).is_err() {
+    let n = info.to_bytes_as(u32::from_le_bytes(asked), &mut bytes);
+    if call.process.write(arg!(call, 1), &bytes[..n]).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS
@@ -5483,6 +5501,41 @@ fn nt_release_keyed_event(call: &mut Call<'_>) -> NtStatus {
 
 #[path = "job_calls.rs"]
 mod job_calls;
+
+/// GalaDesktopAction(*Request, RequestLength, *Output, OutputLength,
+/// *ReturnLength): one of the shell's named actions (nt::action has the
+/// request's layout): start a program, list the taskbar's windows or the
+/// start menu's programs, act on a window named by its HWND, choose the
+/// wallpaper. The window actions are STATUS_NOT_SUPPORTED without shasha
+/// on the screen. Output that does not fit is cut at a whole entry
+/// (ReturnLength says how much was written).
+fn gala_desktop_action(call: &mut Call<'_>) -> NtStatus {
+    use super::action;
+    let len = (arg!(call, 1) as u32 as usize).min(action::REQUEST_HEADER + 2 * action::MAX_TEXT);
+    let request = tri!(read_vec(call, arg!(call, 0), len));
+    let request = tri!(action::Request::parse(&request));
+    let out = tri!(action::run(&request));
+    let (ptr, room, ret) = (arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4));
+    let entry = match request.action {
+        action::ACTION_WINDOWS => action::WINDOW_ENTRY,
+        action::ACTION_PROGRAMS => action::PROGRAM_ENTRY,
+        _ => out.len().max(1),
+    };
+    let n = if out.len() <= room {
+        out.len()
+    } else if entry < out.len() && room >= action::LIST_HEADER {
+        action::LIST_HEADER + (room - action::LIST_HEADER) / entry * entry
+    } else {
+        return NtStatus::BUFFER_TOO_SMALL;
+    };
+    if n > 0 && call.process.write(ptr, &out[..n]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    if ret != 0 {
+        tri!(call.write_u32(ret, n as u32));
+    }
+    NtStatus::SUCCESS
+}
 
 #[path = "token_calls.rs"]
 mod token_calls;

@@ -2199,7 +2199,10 @@ replay and snapshot.
 
 ## Windows on the screen (W1, W2, W4)
 
-A small window manager and shell, in the kernel for now. Since W4 it
+**shasha** (Arabic شاشة, "screen"; the owner, 2026-11-02) is gala's
+graphical shell: a small window manager and shell, in the kernel for
+now (the `shasha` cargo feature; the module stays `nt::desktop`, the
+screen surface it draws). Since W4 it
 imitates Windows 11's look (as the project owner asked, 2026-11-01): the
 layout, metrics and colours of its captions, taskbar and start menu,
 with gala's own artwork (the owner's fortress and wordmark) and an open
@@ -2908,7 +2911,7 @@ it holds today:
 
 **Layering (the owner, 2026-11-02)**: the desktop edition is a strict
 superset of the server edition: the server/CLI edition plus a graphical
-shell. The `desktop` cargo feature only adds (it never changes or
+shell, **shasha**. The `shasha` cargo feature only adds (it never changes or
 removes server behaviour), and every scenario a server kernel passes
 also runs on the desktop kernel (the suite boots the desktop kernel for
 all of them and the server kernel for `SERVER_KERNEL_SCENARIOS`). Every desktop action (start
@@ -2924,7 +2927,8 @@ themselves stay: many server programs import them, and loading them
 draws nothing).
 
 - **The server kernel** (2026-11-02, scenario `server_kernel`): the
-  kernel's `desktop` cargo feature is on by default; without it
+  kernel's `shasha` cargo feature (renamed from `desktop`, 2026-11-02)
+  is on by default; without it
   (`--no-default-features`) `nt::desktop` is `nt/desktop_off.rs`, the
   same interface with nothing behind it (every window call
   STATUS_NOT_SUPPORTED, as with no screen; `Desktop` is an empty enum so
@@ -2934,6 +2938,62 @@ draws nothing).
   `SERVER_KERNEL_SCENARIOS` boot it; CI runs clippy on it. A change to
   `nt::desktop`'s public interface needs the same change in
   `desktop_off.rs`.
+
+- **CLI parity: done (2026-11-02, scenario `gala_cli`).** Everything
+  shasha does to windows is a named action, `nt::desktop::Action`:
+  Activate (on top and active; a minimized window restored), Minimize,
+  Maximize (SC_MAXIMIZE), Restore (from minimized, maximized: SC_RESTORE,
+  or snapped: back to the rectangle before the snap), Close
+  (SC_CLOSE: the program decides), Snap(Left | Right | Up | Down) and
+  Place(x, y, w, h). `Desktop::act(id, action)` is the only code that
+  does them: the taskbar buttons (a click minimizes the active window
+  on top, else activates), the caption buttons and Win+arrows call it,
+  and so does the system call. The program still moves its own window
+  (WM_SYSCOMMAND, GALA_WM_PLACE, GALA_WM_MINIMIZED), as with the mouse.
+  Starting a program is `nt::action::start_path`, shared by the start
+  menu (input thread) and the system call.
+  **GalaDesktopAction**(*Request, RequestLength, *Output, OutputLength,
+  *ReturnLength), gala's service 0x7f58 (`nt/action.rs`, which has the
+  layouts): a versioned request (version 1: action, HWND, four i32
+  arguments, a UTF-16 text) for Start (a path on C:, a start menu name,
+  or a file name looked up in C:\gala, C:\ and System32, `.exe`
+  optional; the rest of the text is the arguments; output: the process
+  id), Windows (the taskbar's list: HWND, process id, screen id, flags
+  minimized/maximized/active/snapped, the outer rectangle, the title;
+  a versioned list header), Programs (the start menu's existing
+  programs), Activate, Minimize, Maximize, Restore, Close, Snap, Move
+  and Wallpaper (run time: the picture is decoded and scaled outside the
+  desktop's lock, then swapped in and the screen redrawn; "drawn" is the
+  drawn one). Windows are named by their HWND: the window registry's
+  record version 2 carries the window's id on shasha's screen (see
+  "Plan: windows across processes"), so the kernel goes from HWND to the
+  screen's window and back. Without shasha on the screen (the server
+  kernel, `profile=server`, no screen) the window actions, Windows,
+  Programs and Wallpaper are STATUS_NOT_SUPPORTED (checked before the
+  window, so a server always says so); Start works everywhere. List
+  output that does not fit is cut at a whole entry.
+  **The `gala` command** (user/gala, a console program on kernel32 and
+  ntdll, in every image as C:\gala\gala.exe): `gala start <program>
+  [arguments]`, `gala windows`, `gala programs`, `gala activate|
+  minimize|maximize|restore|close <window>`, `gala snap
+  left|right|up|down <window>`, `gala move <window> x y w h`, `gala
+  wallpaper <name>`, `gala ps` (SystemProcessInformation), `gala kill
+  <pid|name>` (OpenProcess/TerminateProcess; a name ends every process
+  of that image but gala itself), `gala help`. A window is an HWND or a
+  title (whole, or a part only one title has). Exit codes: 0 done, 1
+  usage, 2 not found, 3 not supported here (no graphical shell), 4
+  failed (status printed). Test: `gala_cli_test` (scenario gala_cli,
+  UEFI with a screen check after `gala snap left`; its server mode in
+  server_kernel and server_profile) starts a window through `gala`,
+  drives it through every action and checks what the program saw and
+  what `gala windows` and the registry (FindWindowW, GetWindowRect,
+  IsZoomed, IsIconic from another process) say; host tests in
+  `desktop/tests.rs` and `action.rs`.
+  TODO: any process may act on any window and `gala start` runs the
+  program as the boot user (not as the caller): the desktop needs an
+  owner and access checks (SECURITY.md); the chosen wallpaper is not
+  kept across boots; popups and hidden windows are not listed (the
+  registry has them: FindWindow/EnumWindows).
 
 ## UI Automation
 
@@ -3298,8 +3358,14 @@ steps, each test first:
    (*info) 0x7f42, GalaWindowUnregister(hwnd) 0x7f43, GalaWindowQuery
    (hwnd, *info) 0x7f44, GalaWindowChildren(parent, *hwnds, max,
    *count) 0x7f45 (0: every top-level window, highest first); the
-   record (`nt::window::Info`, 728 bytes, format version 1 at bytes
-   84..88: the kernel refuses another with STATUS_INVALID_PARAMETER):
+   record (`nt::window::Info`, format version at bytes 84..88:
+   version 1 is 728 bytes; version 2 (2026-11-02, CLI parity) appends
+   the top-level window's id on shasha's screen (u32, then 4 reserved
+   bytes: 736). The kernel reads versions 1 and 2 (version 1's size
+   first, the rest only for a version 2 record) and refuses others with
+   STATUS_INVALID_PARAMETER; GalaWindowQuery writes the version the
+   caller names in its buffer's version field (a zeroed buffer gets
+   version 1); user32 writes version 2):
    hwnd, parent, owner, id, pid
    (the kernel's), tid, style, ex_style, screen rectangle, visible/
    enabled/maximized (4)/minimized (8) flags, z, class name (64) and

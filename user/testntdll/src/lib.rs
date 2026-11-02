@@ -285,6 +285,8 @@ syscall_stubs! {
     GalaWindowSendWait = 0x7f49, fn(id: u64, ms: u32, result: *mut i64, out: *mut u8, out_len: *mut u32);
     GalaWindowReceive = 0x7f4a, fn(tid: u32, head: *mut u8, input: *mut u8, max: u32);
     GalaWindowReply = 0x7f4b, fn(id: u64, result: i64, out: *const u8, len: u32);
+    // The shell's named actions (nt::action; 0x7f4c-0x7f57 are taken).
+    GalaDesktopAction = 0x7f58, fn(request: *const u8, len: u32, out: *mut u8, out_len: u32, returned: *mut u32);
     // gala's number, UNVERIFIED.
     NtCreateDirectoryObject = 0x7f24, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtClearEvent = 0x3e, fn(h: usize);

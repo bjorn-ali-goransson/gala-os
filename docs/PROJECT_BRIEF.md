@@ -32,6 +32,12 @@ and every change keeps the design open for it: kernel state kept as
 versioned data, system calls that can be restarted, drivers that
 survive a device reset, one clock (ARCHITECTURE, "Built in early").
 
+**Editions** (the owner, 2026-11-02): the server edition (console
+programs and servers, no graphical interface) and the desktop edition,
+a strict superset of it: the same system plus **shasha** (Arabic شاشة,
+"screen"), gala's graphical shell. Everything shasha can do can also be
+done from a terminal with the `gala` command (ROADMAP SD).
+
 ## Clean-room rules (mandatory)
 - Never use disassembly, decompiled code, or leaked Windows source.
 - Allowed sources: Microsoft's public documentation, the "Windows Internals"

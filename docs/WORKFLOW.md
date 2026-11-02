@@ -639,6 +639,26 @@ SeaBIOS and OVMF, and as `usb-storage` behind `qemu-xhci`. Use `-cpu max`
 in manual QEMU runs: QEMU's default CPU model has no RDRAND, and Go
 programs then fail fast (0xc0000409, ledger: ProcessPrng(no RDRAND)).
 
+## shasha features: the `gala` command first
+
+**Every new shasha feature gets its `gala` command first** (the owner,
+2026-11-02: everything the graphical shell does can be done from a
+terminal). Make it a named action (`nt::desktop::Action`, or a new
+GalaDesktopAction request in `nt/action.rs` and `user/gala`), test it
+through `gala` the way `gala_cli_test` does (start the program with
+`gala start`, wait on `gala windows`, check what the program saw), and
+only then bind the mouse or a key to it, calling the same action. A
+`gala` command is also the easy way to put a screen test's window
+where its pixel checks expect it (no pointer arithmetic).
+
+- A window moved without a new size (snapped from the left half to the
+  right) gets WM_MOVE but no WM_SIZE, as on Windows: a test program
+  that watches its rectangle checks both.
+- A program's state reaches the registry after it handled the request
+  (user32 mirrors it): poll IsZoomed/IsIconic from another process
+  rather than reading them once right after `gala windows` (which is
+  shasha's own state) changed.
+
 ## Screenshots
 
 `cargo xtask screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]`

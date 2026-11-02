@@ -509,6 +509,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gala"
+version = "0.1.0"
+
+[[package]]
+name = "gala_cli_test"
+version = "0.1.0"
+
+[[package]]
 name = "gala_heap"
 version = "0.1.0"
 
