@@ -382,7 +382,10 @@ exceptions and collided unwinds. The #BP gate has DPL 3 so `int3` works from use
 signaled for waiters when free or owned by the waiting thread
 (recursive); acquiring records it in the thread's owned list, and a thread
 that exits owning one abandons it (the next acquirer gets
-STATUS_ABANDONED_WAIT_n). A semaphore's dispatcher signal is its count.
+STATUS_ABANDONED_WAIT_n). A semaphore's dispatcher signal is its count;
+NtReleaseSemaphore reads, checks and raises it in one hold of the
+dispatcher lock (`wait::update_signal`), as every read-modify-write of a
+signal state must be (see Waits).
 
 **Symbolic links** (`ObjectBody::SymbolicLink`): `namespace::walk` resolves
 every lookup (create's parent, open, and parse into a device). A link met
@@ -623,7 +626,14 @@ state + waiter list). One global dispatcher lock covers all signal changes
 and wait checks, so WaitAll sees a consistent state. A waiter registers on
 every object, calls `sched::prepare_wait(deadline)`, drops the lock and
 calls `sched::wait()`; signalling wakes all waiters, which re-check
-(auto-reset events are consumed by the first). NT timeouts (negative =
+(auto-reset events are consumed by the first). Invariant: a signal
+state that depends on its old value (a semaphore's count) is changed only
+through `wait::update_signal`, which reads and writes it under one hold of
+the lock: a `signal_state()` read followed by `set_signal` lets a wait
+satisfied in between be undone and loses one of two concurrent releases
+(`smpsem_test`; HotSpot's safepoint wait barrier is built on Windows
+semaphores: a count too many lets a Java thread run on while the GC
+moves objects, a lost release hangs the JVM). NT timeouts (negative =
 relative 100 ns, positive = absolute system time, 0 = poll) become tick
 deadlines rounded up. System time comes from Limine's boot timestamp plus
 the TSC clock; the performance counter runs at 10 MHz.

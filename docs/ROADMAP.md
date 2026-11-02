@@ -30,19 +30,52 @@ explicitly in its commit.
   page tables now change under one hold of the VAD lock everywhere
   (`smpcow_test` failed 4 of 8 boots before, 0 of 20 after). It was *not*
   shown to be the JVM's problem (a detector saw it in none of 6
-  java_http runs): **java_http/java_hello still fail about 1 run in 10**
-  with Java heap corruption right after a young GC: the hs_err report
-  (now in the log, `dump=`) shows `String.equals` reading an object whose
-  klass word holds an oop of the survivor space, i.e. a reference the GC
-  did not update or a write it lost; also a NullPointerException in
-  javac (MemberName) and hangs with threads in NtYieldExecution. Next:
-  find what the GC's stop-the-world relies on that gala gets wrong. With
-  the final version of this change java_http passed 12 of 12 and
-  java_hello 12 of 12 (two VMs at a time), against 1 corruption in 6 to
-  10 runs before; too few runs to call it fixed
-  (12 runs on one vCPU, `XTASK_QEMU_ARGS="-smp 1"`, showed no
-  corruption: 11 passed, 1 hit a lockdep panic of this change's first
-  version, since fixed; not yet conclusive).
+  java_http runs). **A second kernel race found on the way (2026-11-02),
+  the Java corruption not yet gone**: NtReleaseSemaphore read the count
+  under the dispatcher lock, let go and stored count + n under a second
+  hold. Two releases at once added one (a waiter never woke: hangs with
+  the VM thread spinning in NtYieldExecution, as HotSpot's wait barrier
+  spins until its waiters have left) and a wait satisfied in between was
+  undone (a count too many: HotSpot's safepoint wait barrier,
+  GenericWaitBarrier on Windows, is a Windows semaphore, so a thread
+  could leave the barrier while the GC was still moving objects).
+  Evidence: `smpsem_test` (two processors releasing and taking one
+  semaphore) lost 114 of 40000 releases before, passes 8 of 8 boots
+  after; a detector in the old NtReleaseSemaphore saw the JVM hit the
+  race (a lost release) in 1 of 12 java_http runs. Fixed by
+  `wait::update_signal` (one lock hold; invariant in ARCHITECTURE
+  "Waits"). **Still open**: with the fix java_http failed 1 of 30 runs
+  (four VMs at a time, host load ~11) with the same signature as before:
+  javac's NullPointerException in `String.equals` from
+  `MemberName.<init>` (`name.equals("<init>")`, a String whose fields
+  read as null: a stale reference), and java_hello failed 2 of the 18
+  boots that ran (12 more never started: QEMU exited at once on the
+  loaded host, empty logs) with the interpreter's `String.equals`
+  crash again (a reference into garbage) and an access violation in
+  jvm.dll; in every crash's hs_err the survivor space was 100% full
+  (objects promoted early). Before the fix the rate had already dropped to 0 of
+  48 after the copy-on-write fix, so the semaphore race explains the
+  hangs but not (or not all of) the corruption. The repeated site (a
+  String constant reached through a constant pool's resolved references,
+  in both the interpreter crash and the NPE) is the next lead. Ruled out:
+  extended (AVX) register state (CR4.OSXSAVE stays off, so CPUID reports
+  no OSXSAVE; the JVM's hs_err CPU line has no avx: SSE only, which FXSAVE
+  covers; the kernel binary has no SSE/x87 instruction outside
+  FXSAVE/FXRSTOR). But HotSpot 21 sets its FMA feature from CPUID.1:ECX.FMA
+  alone, without checking OSXSAVE (open-source vm_version_x86.cpp), so
+  with `-cpu max` it enables UseFMA and may emit VEX-encoded FMA
+  instructions, which fault with #UD while CR4.OSXSAVE is off: a
+  candidate for the EXCEPTION_ILLEGAL_INSTRUCTION once seen in
+  C1-compiled code (WORKFLOW "Known intermittent"); enabling XSAVE and
+  saving the extended state (as Windows does) would remove the
+  difference; the TLB shootdown and deferred frees (reviewed: fence
+  before reading CPU_ROOT, frames freed only after the flush, spurious
+  faults re-sync PTEs); gala's process heap and critical sections and
+  condition variables (reviewed, and the heap's compiled lock code read);
+  more young GCs (`-Xmn1m`, ~33 GCs a run: 0 of 12 failed); HotSpot's
+  heap verification (`-XX:+VerifyBeforeGC -XX:+VerifyAfterGC`: 15 of 16
+  java_http runs passed with no verification error, 1 timed out slowed
+  by the verification under load).
   smpsched_test's check 0x11 expected two threads to run at once, which
   Windows does not promise under load: the exchange is retried (and
   gala-um now keeps threads without an affinity on the processors the
@@ -563,8 +596,10 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    java_hello again on 2026-11-02, twice (java.exe ended with status 1
    and no output after 77 s of system calls, with other suites running
    on the host: load average 10; it passes alone in 34-41 s). Still open
-   (2026-11-02): Java heap corruption after a GC (Priorities above); the
-   JVM's hs_err report is now in the log (`dump=`).
+   (2026-11-02): Java heap corruption after a GC, now about 1 run in 10 to 30
+   (Priorities above: NtReleaseSemaphore's lost update was fixed on the
+   way, not shown to be the cause); the JVM's hs_err report is in the log
+   (`dump=`).
    rtl_test's hang (seen three times under the full suite, 2026-11-01/02:
    its thread spinning in NtYieldExecution after the other one ended) is
    fixed (2026-11-02): a race in the test, not the kernel. It terminated
