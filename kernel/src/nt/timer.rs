@@ -16,7 +16,7 @@ use crate::sync::IrqMutex;
 
 /// Armed timers (pruned by the worker once expired or closed).
 static TIMERS: IrqMutex<Vec<ObjectRef>> = IrqMutex::new(Vec::new());
-static WORKER: IrqMutex<Option<ThreadId>> = IrqMutex::new(None);
+static WORKER: IrqMutex<Option<ThreadId>> = IrqMutex::named("timer.worker", None);
 
 /// Longest the worker sleeps without looking (covers a timer armed while
 /// it was computing its next wake-up).

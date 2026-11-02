@@ -9,7 +9,7 @@ const CONFIG_ADDRESS: u16 = 0xcf8;
 const CONFIG_DATA: u16 = 0xcfc;
 
 /// Serializes the address/data port pair.
-static CONFIG: IrqMutex<()> = IrqMutex::new(());
+static CONFIG: IrqMutex<()> = IrqMutex::named("pci.config", ());
 
 /// A PCI function: bus, device, function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

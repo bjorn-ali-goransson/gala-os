@@ -3047,10 +3047,23 @@ TSC itself and about twenty places call `platform::ticks` directly.
   Scenarios run with failures injected, mostly under gala-um; the
   expected outcome is a sensible NTSTATUS for the program and a kernel
   that survives. Release images can compile the checks out.
-- **Lock-order checking (debug builds)**: each `IrqMutex` gets a class;
-  each CPU tracks the classes it holds; the first acquisition that
-  contradicts an order already seen panics with both orders (a small
-  lockdep). The prose lock orders in this document become checked ones.
+- **Lock-order checking (debug builds; done 2026-11-02, `sync::lockdep`)**:
+  a lock's class is its name (`IrqMutex::named("thread.sched_id", ..)`,
+  for locks over plain types: a number, an Option of an id) or the type
+  it protects; each CPU (each host thread in tests and gala-um) keeps the
+  classes it holds (16 slots; interrupts are off while an IrqMutex is
+  held, so the CPU doesn't change); taking B while holding A records "A
+  before B" in an open-addressed table of 8192 edges, and if "B before A"
+  was seen, panics with both class names before the deadlock it could
+  cause. try_lock is recorded but not checked; nested locks of one class
+  are not checked. On from the boot CPU's per-CPU setup (it needs the
+  CPU index); compiled out of release builds. Every debug boot test and
+  host test runs with it. Found at once: AFD's request path took POLLERS
+  under an endpoint's pending lock while `notify` took pending locks under
+  POLLERS (a real ABBA deadlock; fixed with a per-endpoint poll count,
+  order now pending -> POLLERS), and the hang dump held a thread's
+  sched_id lock (a format argument's guard lives to the end of the
+  statement) while taking suspend_count, the inverse of `resume`.
 - Flight recorder, hang watchdog and a crash record kept across reboots:
   docs/OBSERVABILITY.md §5.
 

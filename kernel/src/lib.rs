@@ -74,6 +74,8 @@ pub fn kernel_main() -> ! {
 
     arch::gdt::init_bsp();
     arch::percpu::init_bsp();
+    // Lock-order checking (debug builds) needs to know the CPU: from here.
+    sync::lockdep::enable();
     arch::cpu::enable_sse();
     interrupts::init();
     arch::syscall::init_cpu();

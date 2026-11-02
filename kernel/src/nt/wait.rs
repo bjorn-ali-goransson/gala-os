@@ -24,7 +24,7 @@ struct DispatcherInner {
     waiters: Vec<ThreadId>,
 }
 
-static DISPATCHER: IrqMutex<()> = IrqMutex::new(());
+static DISPATCHER: IrqMutex<()> = IrqMutex::named("wait.dispatcher", ());
 
 impl Dispatcher {
     pub const fn new(signal: i32) -> Self {

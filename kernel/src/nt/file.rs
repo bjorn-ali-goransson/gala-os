@@ -427,7 +427,7 @@ pub fn create(
         access,
         share,
         synchronous: options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT) != 0,
-        position: IrqMutex::new(0),
+        position: IrqMutex::named("file.position", 0),
         delete_on_close,
         scan: IrqMutex::new(None),
         mode: mode_of(options),

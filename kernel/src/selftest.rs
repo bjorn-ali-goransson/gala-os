@@ -135,7 +135,7 @@ fn timer_ticks_advance() {
 }
 
 fn irq_mutex_masks_interrupts() {
-    static M: IrqMutex<u32> = IrqMutex::new(0);
+    static M: IrqMutex<u32> = IrqMutex::named("selftest.m", 0);
     // Ticks are counted by the boot CPU: run there, so that a tick could
     // only be counted if this CPU took it.
     crate::sched::set_affinity(crate::sched::current(), 1);

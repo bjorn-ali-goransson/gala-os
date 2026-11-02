@@ -6,7 +6,7 @@
 //! there); see THIRD_PARTY.md.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use super::object::{CompletionPacket, Handle, KObject, ObjectBody, ObjectRef};
 use super::process::Process;
@@ -148,6 +148,10 @@ pub struct EndpointState {
     /// fail with STATUS_DEVICE_NOT_READY instead of pending.
     non_blocking: AtomicBool,
     pending: IrqMutex<Vec<Pending>>,
+    /// How many polls (IOCTL_AFD_POLL) are pending: `notify` keeps the
+    /// endpoint in POLLERS while there are any, without taking `pending`
+    /// under POLLERS' lock (the lock order is pending, then POLLERS).
+    polls: AtomicUsize,
     /// WSAEventSelect: the event and the AFD_POLL_* events it is set for.
     select: IrqMutex<Option<(ObjectRef, u32)>>,
     /// The selected events that happened since WSAEnumNetworkEvents last
@@ -188,7 +192,7 @@ fn notify(token: u64) {
         let mut list = POLLERS.lock();
         let mut copy = Vec::new();
         if copy.try_reserve(list.len()).is_ok() {
-            list.retain(|e| e.pending.lock().iter().any(|p| p.op.kind() == 4));
+            list.retain(|e| e.polls.load(Ordering::Acquire) > 0);
             for e in list.iter() {
                 let _ = copy.try_push(e.clone());
             }
@@ -491,6 +495,9 @@ fn try_complete(state: &EndpointState) {
         match attempt(state, &mut p.op, &p.io.process) {
             Attempt::Done(status, information) => {
                 let p = pending.remove(i);
+                if usize::from(p.op.kind()) == POLL_KIND {
+                    state.polls.fetch_sub(1, Ordering::AcqRel);
+                }
                 finish(state, &p.io, status, information, false);
             }
             Attempt::Wait => {
@@ -532,6 +539,9 @@ fn submit(state: &EndpointState, mut op: Op, io: Io) -> NtStatus {
         return NtStatus::DEVICE_NOT_READY;
     }
     if kind == 4 {
+        // Counted before it is registered, so `notify` never drops it
+        // from POLLERS in between.
+        state.polls.fetch_add(1, Ordering::AcqRel);
         let token = state.token;
         let mut pollers = POLLERS.lock();
         if !pollers.iter().any(|e| e.token == token) {
@@ -539,11 +549,15 @@ fn submit(state: &EndpointState, mut op: Op, io: Io) -> NtStatus {
             if let Some(me) = me
                 && pollers.try_push(me).is_err()
             {
+                state.polls.fetch_sub(1, Ordering::AcqRel);
                 return NtStatus::INSUFFICIENT_RESOURCES;
             }
         }
     }
     if pending.try_push(Pending { op, io }).is_err() {
+        if kind == 4 {
+            state.polls.fetch_sub(1, Ordering::AcqRel);
+        }
         return NtStatus::INSUFFICIENT_RESOURCES;
     }
     NtStatus::PENDING
@@ -560,6 +574,9 @@ pub fn cancel(state: &EndpointState, process: Option<&KArc<Process>>, iosb: Opti
         let mine = process.is_none_or(|q| KArc::ptr_eq(q, &p.io.process));
         if mine && iosb.is_none_or(|b| b == p.io.iosb) {
             let p = pending.remove(i);
+            if usize::from(p.op.kind()) == POLL_KIND {
+                state.polls.fetch_sub(1, Ordering::AcqRel);
+            }
             finish(state, &p.io, NtStatus::CANCELLED, 0, false);
             n += 1;
         } else {
@@ -653,6 +670,7 @@ pub fn open(ea: &[u8]) -> Result<ObjectRef, NtStatus> {
         pending: IrqMutex::new(Vec::new()),
         select: IrqMutex::new(None),
         recorded: AtomicU32::new(0),
+        polls: AtomicUsize::new(0),
     })
     .map_err(|_| NtStatus::NO_MEMORY)?;
     REGISTRY.lock().try_push(state.clone()).map_err(|_| NtStatus::NO_MEMORY)?;

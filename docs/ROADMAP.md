@@ -1383,9 +1383,9 @@ R. **Robustness and live update, kernel included** (the owner's
      run with failures injected, mainly in gala-um; programs get an
      NTSTATUS, the kernel survives. Every fallible allocation path is
      untested today, so this finds bugs at once.
-   - R3. **Lock-order checking** in debug builds (classes per IrqMutex,
-     held classes per CPU, panic on an inversion); the prose lock orders
-     become checked.
+   - R3. **Lock-order checking**: done (2026-11-02, `sync::lockdep`;
+     ARCHITECTURE). Found and fixed an ABBA deadlock in AFD's poll
+     registration and an inversion in the hang dump.
    - R4. **Flight recorder, hang watchdog, crash record across reboots**
      (docs/OBSERVABILITY.md §5).
    - R5. **Deterministic simulation in gala-um**: time and thread

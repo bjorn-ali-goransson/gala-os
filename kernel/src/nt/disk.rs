@@ -38,7 +38,11 @@ pub struct DiskFile {
 
 impl DiskFile {
     pub fn new(synchronous: bool) -> Self {
-        Self { position: IrqMutex::new(0), synchronous, dispatcher: Dispatcher::new(1) }
+        Self {
+            position: IrqMutex::named("disk.position", 0),
+            synchronous,
+            dispatcher: Dispatcher::new(1),
+        }
     }
 }
 

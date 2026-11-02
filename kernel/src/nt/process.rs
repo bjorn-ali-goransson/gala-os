@@ -659,7 +659,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         exception_dispatcher: core::sync::atomic::AtomicU64::new(0),
         apc_dispatcher: core::sync::atomic::AtomicU64::new(0),
         create_time: platform::system_time(),
-        exit_time: IrqMutex::new(0),
+        exit_time: IrqMutex::named("process.exit_time", 0),
         job: IrqMutex::new(None),
         oom_logged: core::sync::atomic::AtomicBool::new(false),
         priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),

@@ -812,3 +812,15 @@ passes alone): if it recurs, its log says which bound was missed.
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
 | Checked-in binaries, Windows runner | `user/bin/` |
 | Build, boot tests, reports | `xtask/` |
+
+## Lock-order checking (lockdep)
+
+Debug kernels, host tests and gala-um panic with `lockdep: X taken while
+holding Y, but Y was taken while holding X before` on the first lock-order
+inversion (docs/ARCHITECTURE.md, "Built in early"). A class is the
+protected type, so give a lock over a plain type (`u32`, `Option<id>`,
+`()`) a name with `IrqMutex::named("module.field", value)`, or unrelated
+locks of that type share a class and report false inversions. A guard
+taken inside a format macro's arguments (`info!("{}", *a.lock())`) lives
+to the end of the statement: read such values into locals first.
+

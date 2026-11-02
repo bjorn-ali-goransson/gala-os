@@ -197,17 +197,17 @@ pub fn create(
         id,
         teb: teb_addr,
         process: process.clone(),
-        sched_id: IrqMutex::new(None),
+        sched_id: IrqMutex::named("thread.sched_id", None),
         affinity: core::sync::atomic::AtomicU64::new(platform::online_mask()),
         dispatcher: Dispatcher::new(0),
         exit_status: IrqMutex::new(None),
-        suspend_count: IrqMutex::new(u32::from(suspended)),
+        suspend_count: IrqMutex::named("thread.suspend_count", u32::from(suspended)),
         terminate_request: IrqMutex::new(None),
         start: regs,
         start_mxcsr: mxcsr,
         win32_start,
         create_time: platform::system_time(),
-        exit_time: IrqMutex::new(0),
+        exit_time: IrqMutex::named("thread.exit_time", 0),
         priority: IrqMutex::new((PROCESS_BASE_PRIORITY, PROCESS_BASE_PRIORITY)),
         apcs: IrqMutex::new(Vec::new()),
         alertable: core::sync::atomic::AtomicBool::new(false),
@@ -540,12 +540,17 @@ pub fn dump() {
     for object in threads.iter() {
         let t = as_thread(object);
         let in_syscall = *t.in_syscall.lock();
+        // One lock at a time (format arguments' guards would live to the
+        // end of the statement: sched_id held while taking suspend_count,
+        // the inverse of `resume`'s order).
+        let sched = *t.sched_id.lock();
+        let suspended = *t.suspend_count.lock();
         info!(
             "thread: pid {} tid {} (sched {:?}) suspend {} exited {} in a system call {}",
             t.process.id,
             t.id,
-            *t.sched_id.lock(),
-            *t.suspend_count.lock(),
+            sched,
+            suspended,
             t.has_exited(),
             in_syscall.is_some()
         );
