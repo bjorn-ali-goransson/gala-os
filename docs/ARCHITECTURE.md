@@ -2867,7 +2867,18 @@ steps, each test first:
    typed text is not; step 3's WM_GETTEXT across processes fixes that),
    z order is per process (EnumWindows' order across processes is not
    the screen's), no owner windows yet.
-2. **Posted messages across processes**: PostMessage/PostThreadMessage
+2. **Done for PostMessage (2026-11-02, windows_across_test).** As
+   built: the registry keeps messages posted to another process's
+   windows (GalaWindowPost(hwnd, msg, wParam, lParam) 0x7f46, at most
+   4096 waiting) and each process's queue event (GalaWindowListen now
+   registers it there too, with or without a screen, and the post sets
+   it); user32's pump takes them (GalaWindowPosted(records, max, *count)
+   0x7f47, 32-byte records) into the queue of the window's thread.
+   PostMessage to another process's window of a system message that
+   carries a pointer (WM_SETTEXT, WM_GETTEXT, WM_COPYDATA, WM_NOTIFY...)
+   fails with ERROR_MESSAGE_SYNC_ONLY, as documented. TODO:
+   PostThreadMessage to another process's thread. The plan was:
+   **Posted messages across processes**: PostMessage/PostThreadMessage
    to another process's window or thread go into a kernel queue per
    thread; user32's pump moves them into its own queue as it does the
    desktop's input (GalaWindowInput). Test: BM_CLICK posted to the

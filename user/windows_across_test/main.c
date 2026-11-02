@@ -15,6 +15,14 @@
  * GetDlgCtrlID, GetDlgItem, GetParent, GetWindow(GW_CHILD). After the
  * child ends, its windows are gone (IsWindow FALSE, FindWindowW NULL).
  *
+ * Posted messages cross too: BM_CLICK posted to the child's button makes
+ * the child's window get WM_COMMAND (BN_CLICKED from id 101), WM_APP + 1
+ * posted to its window arrives with its parameters (the child shows what
+ * it got in its title, which the parent reads); a system message that
+ * carries a pointer (WM_SETTEXT) cannot be posted to another process
+ * (ERROR_MESSAGE_SYNC_ONLY), and a window that is not one gives
+ * ERROR_INVALID_WINDOW_HANDLE.
+ *
  * Prints "windows_across_test: ok" and exits 0, or the failing check's
  * number and line.
  */
@@ -36,7 +44,28 @@ static int checks;
     } while (0)
 
 static LRESULT CALLBACK child_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_COMMAND && LOWORD(w) == 101 && HIWORD(w) == BN_CLICKED) {
+        SetWindowTextW(h, L"clicked");
+        return 0;
+    }
+    if (m == WM_APP + 1) {
+        WCHAR t[64];
+        swprintf(t, 64, L"app %d %d", (int)w, (int)l);
+        SetWindowTextW(h, t);
+        return 0;
+    }
     return DefWindowProcW(h, m, w, l);
+}
+
+/* Waits (up to 10 s) for window `h`'s title to become `want`. */
+static int title_becomes(HWND h, const WCHAR *want) {
+    WCHAR t[64];
+    for (int i = 0; i < 1000; i++) {
+        if (GetWindowTextW(h, t, 64) > 0 && wcscmp(t, want) == 0)
+            return 1;
+        Sleep(10);
+    }
+    return 0;
 }
 
 static int child(void) {
@@ -163,6 +192,18 @@ int main(int argc, char **argv) {
     DWORD bpid = 0;
     CHECK(GetWindowThreadProcessId(button, &bpid) == pi.dwThreadId);
     CHECK(bpid == pi.dwProcessId);
+
+    /* Posted messages to the other process. */
+    CHECK(PostMessageW(button, BM_CLICK, 0, 0));
+    CHECK(title_becomes(top, L"clicked"));
+    CHECK(PostMessageW(top, WM_APP + 1, 7, 9));
+    CHECK(title_becomes(top, L"app 7 9"));
+    SetLastError(0);
+    CHECK(!PostMessageW(top, WM_SETTEXT, 0, (LPARAM)L"no"));
+    CHECK(GetLastError() == ERROR_MESSAGE_SYNC_ONLY);
+    SetLastError(0);
+    CHECK(!PostMessageW((HWND)(ULONG_PTR)0x7ff0, WM_APP, 0, 0));
+    CHECK(GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
 
     /* The child ends: its windows go. */
     CHECK(SetEvent(done));

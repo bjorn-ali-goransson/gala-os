@@ -6,6 +6,7 @@
 //! from here: one namespace for the desktop) and mirrors every change.
 //! See docs/ARCHITECTURE.md, "Plan: windows across processes".
 
+use super::object::ObjectRef;
 use super::status::NtStatus;
 use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
@@ -133,9 +134,76 @@ impl Info {
 struct Registry {
     windows: Vec<Info>,
     next: u64,
+    /// Messages posted to another process's window, waiting for it.
+    posted: Vec<Posted>,
+    /// Each process's queue event (GalaWindowListen), set when a message
+    /// is posted to it.
+    listeners: Vec<(u32, ObjectRef)>,
 }
 
-static REGISTRY: IrqMutex<Registry> = IrqMutex::new(Registry { windows: Vec::new(), next: 0 });
+/// A message posted to process `pid`'s window `hwnd`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Posted {
+    pub pid: u32,
+    pub hwnd: u64,
+    pub message: u32,
+    pub wparam: u64,
+    pub lparam: u64,
+}
+
+/// At most this many posted messages wait (Windows' default limit per
+/// queue is 10000; posting beyond fails).
+pub const MAX_POSTED: usize = 4096;
+
+static REGISTRY: IrqMutex<Registry> = IrqMutex::new(Registry {
+    windows: Vec::new(),
+    next: 0,
+    posted: Vec::new(),
+    listeners: Vec::new(),
+});
+
+/// `pid`'s queue event, set when messages are posted to it.
+pub fn listen(pid: u32, event: ObjectRef) -> Result<(), NtStatus> {
+    let mut r = REGISTRY.lock();
+    r.listeners.retain(|(p, _)| *p != pid);
+    r.listeners.try_push((pid, event)).map_err(|_| NtStatus::NO_MEMORY)
+}
+
+/// Posts a message to window `hwnd` (any process's); the owner's event
+/// to set (by the caller, outside the lock).
+pub fn post(
+    hwnd: u64,
+    message: u32,
+    wparam: u64,
+    lparam: u64,
+) -> Result<Option<ObjectRef>, NtStatus> {
+    let mut r = REGISTRY.lock();
+    let pid = r.windows.iter().find(|w| w.hwnd == hwnd).ok_or(NtStatus::INVALID_HANDLE)?.pid;
+    if r.posted.len() >= MAX_POSTED {
+        return Err(NtStatus::INSUFFICIENT_RESOURCES);
+    }
+    r.posted
+        .try_push(Posted { pid, hwnd, message, wparam, lparam })
+        .map_err(|_| NtStatus::NO_MEMORY)?;
+    Ok(r.listeners.iter().find(|(p, _)| *p == pid).map(|(_, e)| e.clone()))
+}
+
+/// Takes up to `out.len()` of the messages posted to `pid`'s windows,
+/// oldest first; how many.
+pub fn take_posted(pid: u32, out: &mut [Posted]) -> usize {
+    let mut r = REGISTRY.lock();
+    let mut n = 0;
+    r.posted.retain(|m| {
+        if m.pid == pid && n < out.len() {
+            out[n] = *m;
+            n += 1;
+            false
+        } else {
+            true
+        }
+    });
+    n
+}
 
 /// Registers a window of process `pid`; its new HWND.
 pub fn register(pid: u32, mut info: Info) -> Result<u64, NtStatus> {
@@ -196,7 +264,10 @@ pub fn children(parent: u64, out: &mut [u64]) -> usize {
 
 /// A process ended: its windows go.
 pub fn process_ended(pid: u32) {
-    REGISTRY.lock().windows.retain(|w| w.pid != pid);
+    let mut r = REGISTRY.lock();
+    r.windows.retain(|w| w.pid != pid);
+    r.posted.retain(|m| m.pid != pid);
+    r.listeners.retain(|(p, _)| *p != pid);
 }
 
 #[cfg(test)]
@@ -242,6 +313,14 @@ mod tests {
         assert_eq!(unregister(902, a), Err(NtStatus::INVALID_HANDLE));
         unregister(901, a).unwrap();
         assert_eq!(children(top, &mut kids), 1);
+        // A message posted to its window waits for its owner.
+        assert!(post(b, 0x8001, 7, 9).unwrap().is_none());
+        assert!(matches!(post(a, 0x8001, 0, 0), Err(NtStatus::INVALID_HANDLE)));
+        let mut got = [Posted { pid: 0, hwnd: 0, message: 0, wparam: 0, lparam: 0 }; 4];
+        assert_eq!(take_posted(902, &mut got), 0);
+        assert_eq!(take_posted(901, &mut got), 1);
+        assert_eq!(got[0], Posted { pid: 901, hwnd: b, message: 0x8001, wparam: 7, lparam: 9 });
+        assert_eq!(take_posted(901, &mut got), 0);
         process_ended(901);
         assert!(query(top).is_none() && query(b).is_none());
     }

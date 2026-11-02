@@ -1731,6 +1731,11 @@ fn post(thread: u32, msg: Msg) -> bool {
     ok
 }
 
+/// Posts `m` to our thread `thread`'s queue (for crate::foreign).
+pub(crate) fn post_to(thread: u32, m: Msg) -> bool {
+    post(thread, m)
+}
+
 pub(crate) fn message(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> Msg {
     // SAFETY: a plain call.
     let time = unsafe { GetTickCount() };
@@ -1747,11 +1752,7 @@ pub extern "system" fn PostMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam:
     } else {
         match window(hwnd) {
             Some(w) => w.thread,
-            None => {
-                // SAFETY: a plain call.
-                unsafe { SetLastError(ERROR_INVALID_WINDOW_HANDLE) };
-                return 0;
-            }
+            None => return crate::foreign::post_remote(hwnd, msg, wparam, lparam),
         }
     };
     i32::from(post(thread, message(hwnd, msg, wparam, lparam)))
@@ -1805,6 +1806,7 @@ const VK_CAPITAL: usize = 0x14;
 /// Moves the desktop's input for our windows into the queue (to each
 /// window's thread), keeping the key state.
 fn pump() {
+    crate::foreign::take_posted();
     let mut records = [0u8; 24 * 32];
     loop {
         let mut n = 0u32;

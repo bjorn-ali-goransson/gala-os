@@ -119,6 +119,8 @@ pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
 pub const GALA_WINDOW_QUERY: u32 = 0x7f44;
 pub const GALA_WINDOW_CHILDREN: u32 = 0x7f45;
+pub const GALA_WINDOW_POST: u32 = 0x7f46;
+pub const GALA_WINDOW_POSTED: u32 = 0x7f47;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -302,6 +304,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_UNREGISTER, "GalaWindowUnregister", 1, gala_window_unregister),
     (GALA_WINDOW_QUERY, "GalaWindowQuery", 2, gala_window_query),
     (GALA_WINDOW_CHILDREN, "GalaWindowChildren", 4, gala_window_children),
+    (GALA_WINDOW_POST, "GalaWindowPost", 4, gala_window_post),
+    (GALA_WINDOW_POSTED, "GalaWindowPosted", 3, gala_window_posted),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1345,6 +1349,9 @@ fn gala_window_destroy(call: &mut Call<'_>) -> NtStatus {
 /// process's windows.
 fn gala_window_listen(call: &mut Call<'_>) -> NtStatus {
     let event = tri!(event_object(call, Handle(arg!(call, 0)), EVENT_MODIFY_STATE));
+    // Messages posted from other processes arrive with or without a
+    // screen.
+    tri!(super::window::listen(call.process.id as u32, event.clone()));
     if super::platform::screen_size().is_none() {
         return NtStatus::NOT_SUPPORTED;
     }
@@ -1593,6 +1600,40 @@ fn gala_window_children(call: &mut Call<'_>) -> NtStatus {
         bytes.extend(h.to_le_bytes());
     }
     if call.process.write(ptr, &bytes).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    tri!(call.write_u32(count, n as u32));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowPost(Hwnd, Message, wParam, lParam): posts a message to any
+/// process's window (user32 posts to its own windows itself); its
+/// owner's queue event is set. STATUS_INVALID_HANDLE for no window.
+fn gala_window_post(call: &mut Call<'_>) -> NtStatus {
+    let (hwnd, message) = (arg!(call, 0), arg!(call, 1) as u32);
+    let event = tri!(super::window::post(hwnd, message, arg!(call, 2), arg!(call, 3)));
+    if let Some(e) = event {
+        wait::set_signal(&e, 1);
+    }
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowPosted(*Records, Max, *Count): takes the messages posted to
+/// the caller's windows from other processes, oldest first: 32-byte
+/// records (hwnd u64, message u32, 4 unused, wParam u64, lParam u64).
+fn gala_window_posted(call: &mut Call<'_>) -> NtStatus {
+    use super::window::Posted;
+    let (ptr, max, count) = (arg!(call, 0), (arg!(call, 1) as usize).min(64), arg!(call, 2));
+    let mut got = [Posted { pid: 0, hwnd: 0, message: 0, wparam: 0, lparam: 0 }; 64];
+    let n = super::window::take_posted(call.process.id as u32, &mut got[..max]);
+    let mut raw = [0u8; 32 * 64];
+    for (m, r) in got[..n].iter().zip(raw.chunks_exact_mut(32)) {
+        r[0..8].copy_from_slice(&m.hwnd.to_le_bytes());
+        r[8..12].copy_from_slice(&m.message.to_le_bytes());
+        r[16..24].copy_from_slice(&m.wparam.to_le_bytes());
+        r[24..32].copy_from_slice(&m.lparam.to_le_bytes());
+    }
+    if call.process.write(ptr, &raw[..32 * n]).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
     tri!(call.write_u32(count, n as u32));

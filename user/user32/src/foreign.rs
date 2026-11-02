@@ -16,6 +16,8 @@ unsafe extern "system" {
     fn GalaWindowUnregister(hwnd: u64) -> u32;
     fn GalaWindowQuery(hwnd: u64, info: *mut u8) -> u32;
     fn GalaWindowChildren(parent: u64, hwnds: *mut u64, max: u32, count: *mut u32) -> u32;
+    fn GalaWindowPost(hwnd: u64, message: u32, wparam: u64, lparam: u64) -> u32;
+    fn GalaWindowPosted(records: *mut u8, max: u32, count: *mut u32) -> u32;
 }
 
 const CLASS_CHARS: usize = 64;
@@ -350,4 +352,72 @@ pub(crate) fn find(parent: Hwnd, after: Hwnd, class: *const u16, title: *const u
         return h;
     }
     0
+}
+
+/// The system messages below WM_USER whose parameters carry pointers:
+/// they cannot be posted to another process (ERROR_MESSAGE_SYNC_ONLY), as
+/// Windows documents for the asynchronous message functions.
+fn carries_pointer(msg: u32) -> bool {
+    matches!(
+        msg,
+        0x0001 // WM_CREATE
+            | 0x000c // WM_SETTEXT
+            | 0x000d // WM_GETTEXT
+            | 0x001a // WM_SETTINGCHANGE
+            | 0x0024 // WM_GETMINMAXINFO
+            | 0x002b
+            ..=0x002d // WM_DRAWITEM, MEASUREITEM, DELETEITEM
+            | 0x0039 // WM_COMPAREITEM
+            | 0x0046 | 0x0047 // WM_WINDOWPOSCHANGING/CHANGED
+            | 0x004a // WM_COPYDATA
+            | 0x004e // WM_NOTIFY
+            | 0x0053 // WM_HELP
+            | 0x0081 // WM_NCCREATE
+            | 0x0083 // WM_NCCALCSIZE
+    )
+}
+
+/// PostMessage to another process's window `hwnd` (through the kernel).
+pub(crate) fn post_remote(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> i32 {
+    const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+    const ERROR_MESSAGE_SYNC_ONLY: u32 = 1159;
+    if remote(hwnd).is_none() {
+        crate::window::set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    }
+    if carries_pointer(msg) {
+        crate::window::set_last_error(ERROR_MESSAGE_SYNC_ONLY);
+        return 0;
+    }
+    // SAFETY: a plain call.
+    let status = unsafe { GalaWindowPost(hwnd as u64, msg, wparam as u64, lparam as u64) };
+    if status != 0 {
+        crate::window::set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    }
+    1
+}
+
+/// Moves the messages other processes posted to our windows into the
+/// queues of the windows' threads.
+pub(crate) fn take_posted() {
+    let mut raw = [0u8; 32 * 32];
+    loop {
+        let mut n = 0u32;
+        // SAFETY: our buffer of 32 records.
+        if unsafe { GalaWindowPosted(raw.as_mut_ptr(), 32, &mut n) } != 0 || n == 0 {
+            return;
+        }
+        for r in raw.chunks_exact(32).take(n as usize) {
+            let u64_at = |at: usize| u64::from_le_bytes(r[at..at + 8].try_into().unwrap_or([0; 8]));
+            let hwnd = u64_at(0) as Hwnd;
+            let msg = u32::from_le_bytes(r[8..12].try_into().unwrap_or([0; 4]));
+            let Some(w) = window(hwnd) else { continue };
+            let m = crate::window::message(hwnd, msg, u64_at(16) as usize, u64_at(24) as isize);
+            crate::window::post_to(w.thread, m);
+        }
+        if n < 32 {
+            return;
+        }
+    }
 }

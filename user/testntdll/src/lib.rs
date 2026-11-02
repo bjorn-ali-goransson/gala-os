@@ -277,6 +277,8 @@ syscall_stubs! {
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);
     GalaWindowQuery = 0x7f44, fn(hwnd: u64, info: *mut u8);
     GalaWindowChildren = 0x7f45, fn(parent: u64, hwnds: *mut u64, max: u32, count: *mut u32);
+    GalaWindowPost = 0x7f46, fn(hwnd: u64, message: u32, wparam: u64, lparam: u64);
+    GalaWindowPosted = 0x7f47, fn(records: *mut u8, max: u32, count: *mut u32);
     // gala's number, UNVERIFIED.
     NtCreateDirectoryObject = 0x7f24, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtClearEvent = 0x3e, fn(h: usize);
