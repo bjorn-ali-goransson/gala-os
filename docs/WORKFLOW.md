@@ -705,6 +705,14 @@ races, so prefer the dump. In gala-um, catch a hung instance live and
 use `gdb -p` (`thread apply all bt`); its process is named `exe` after
 gala-um re-executes itself without ASLR.
 
+To see where a thread was when it was terminated, log `regs.rip` in
+`on_user_return` (kernel/src/nt/thread.rs) and look the address up in the
+DLL (`llvm-objdump -d` on our own build in
+`target/x86_64-pc-windows-msvc/release/`). A test that terminates a thread
+must let it reach its own code first: ended during its start-up it holds
+ntdll's loader lock, and the next LoadLibrary (or DLL notification) spins
+in NtYieldExecution forever (rtl_test hung so under load).
+
 A failed boot scenario's serial log is kept in
 `target/failed/<scenario>.log` (also from `cargo xtask test`), so a rare
 failure in a full run is not lost. timer_test failed once in three full

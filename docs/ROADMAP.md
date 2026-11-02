@@ -503,10 +503,17 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    and no output after 77 s of system calls, with other suites running
    on the host: load average 10; it passes alone in 34-41 s). To hunt:
    what Java gives up on under load (a JVM startup timeout?).
-   Seen three times (2026-11-01, twice on 11-02; full suite under load): rtl_test
-   timed out with its thread spinning in NtYieldExecution after the
-   other one ended; it passes alone. To hunt (docs/WORKFLOW.md, "Hunting a rare
-   hang"); log in the session's notes: target/failed/rtl_test.log.
+   rtl_test's hang (seen three times under the full suite, 2026-11-01/02:
+   its thread spinning in NtYieldExecution after the other one ended) is
+   fixed (2026-11-02): a race in the test, not the kernel. It terminated
+   a just-created thread at once; when that thread had already started
+   (likelier under load) it died in its start-up holding ntdll's loader
+   lock (DLL_THREAD_ATTACH), and the next LoadLibraryW spun on the lock
+   forever (Windows' loader lock is a critical section: the same). Found
+   by logging the user rip at termination: inside the thread-attach
+   closure, after the loader lock's compare-exchange. The test now waits
+   for the thread to run its own code before TerminateThread (30 runs in
+   a row pass; it hung about once in seven before).
    Seen once (2026-11-01, full suite): sshd_password's sshd.exe ended
    with an unhandled access violation at 0xffffd0000013f948 (a
    kernel-half address read from user mode) after ReadFileEx ERROR 38

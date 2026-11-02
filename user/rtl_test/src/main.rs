@@ -24,7 +24,9 @@
 //!   through `\Sessions\BNOLINKS\1` (the session's BaseNamedObjects),
 //!   NtQueryTimerResolution, RtlSetCurrentDirectory_U;
 //! - kernel32: VirtualProtectEx on this process, TerminateThread (its
-//!   exit code), QueryUnbiasedInterruptTime; kernelbase.dll's
+//!   exit code; only once the thread runs its own code: one ended during
+//!   its start-up would leave the loader lock held, on Windows too),
+//!   QueryUnbiasedInterruptTime; kernelbase.dll's
 //!   QueryInterruptTime(Precise), QueryUnbiasedInterruptTimePrecise and
 //!   SetThreadDescription (S_OK), found by LoadLibrary and GetProcAddress.
 //!
@@ -34,6 +36,7 @@
 #![no_main]
 
 use core::ffi::c_void;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 type Handle = *mut c_void;
 
@@ -179,6 +182,7 @@ unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> Handle;
     fn GetProcAddress(module: Handle, name: *const u8) -> *const c_void;
     fn GetCurrentThread() -> Handle;
+    fn Sleep(ms: u32);
 }
 
 // The compiler's memcpy/memset/memcmp, from ntdll.
@@ -443,7 +447,12 @@ fn critical_sections(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// Set by `forever` once it runs: the thread is past its start-up (DLL
+/// thread notifications, under the loader lock).
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
 extern "system" fn forever(_: *mut c_void) -> u32 {
+    RUNNING.store(true, Ordering::Release);
     loop {
         core::hint::spin_loop();
     }
@@ -523,6 +532,15 @@ fn calls(c: &mut Checks) -> Result<(), u32> {
             core::ptr::null_mut(),
         );
         c.ok(!t.is_null(), 0)?;
+        // Terminated during its start-up, the thread would die holding the
+        // loader lock and LoadLibraryW below would wait for it forever
+        // (this hung under load); so only once it runs `forever`.
+        let mut waited = 0;
+        while !RUNNING.load(Ordering::Acquire) && waited < 10_000 {
+            Sleep(1);
+            waited += 1;
+        }
+        c.ok(RUNNING.load(Ordering::Acquire), 0)?;
         c.ok(TerminateThread(t, 7) != 0, 0)?;
         c.eq(WaitForSingleObject(t, 10_000).into(), 0)?;
         let mut code = 0;
