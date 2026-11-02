@@ -12,6 +12,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::element::{self, BUTTON, CHECK_BOX, EDIT, Node};
 use crate::frame::{self, TITLE};
+use crate::grid;
 use crate::items::{self, How, Kind};
 use crate::menus;
 use crate::{
@@ -62,6 +63,12 @@ const ES_READONLY: u32 = 0x0800;
 /// Whether the element has the pattern.
 pub fn supports(n: Node, id: i32) -> bool {
     let h = n.hwnd;
+    if grid::supports(n, id) {
+        return true;
+    }
+    if element::is_grid_node(n) {
+        return false;
+    }
     if n.menu == TITLE {
         // A title-bar button: Invoke.
         return id == INVOKE && n.item.is_some();
@@ -148,7 +155,7 @@ fn selection(h: Hwnd) -> Option<List<Node>> {
 /// (Selection), as UIA's client API gives them (FlaUI converts them so).
 pub fn property(n: Node, id: i32) -> Option<Variant> {
     let h = n.hwnd;
-    if n.menu == TITLE {
+    if n.menu == TITLE || element::is_grid_node(n) {
         return None;
     }
     if n.menu != 0 {
@@ -212,6 +219,7 @@ pub fn create(n: Node, id: i32) -> *mut c_void {
             IID_IUIAUTOMATIONEXPANDCOLLAPSEPATTERN,
         ),
         frame::WINDOW | frame::TRANSFORM => frame::vtable(id),
+        grid::GRID | grid::GRID_ITEM | grid::TABLE | grid::TABLE_ITEM => grid::vtable(id),
         _ => ((&TOGGLE_VTABLE as *const VTable<6>).cast(), IID_IUIAUTOMATIONTOGGLEPATTERN),
     };
     boxed(Pattern { vtable, refs: AtomicU32::new(1), node: n, iid }).cast()

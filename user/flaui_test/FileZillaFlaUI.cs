@@ -19,10 +19,18 @@
 //    virtual list view: wx answers LVN_GETDISPINFO) has an item
 //    "hello.txt";
 // 5. reads the local file list (the list view left of the remote one);
+//    reads the remote list as a grid (a report-view list view: the Grid
+//    and Table patterns, its header's columns "Filename", "Filesize",
+//    ..., hello.txt's row and its cells);
 // 6. selects hello.txt (SelectionItem) and checks that it is selected and
 //    the list's Selection names it;
 // 7. ends FileZilla through its menu bar: File (ExpandCollapse), then
 //    Exit (Invoke), and waits for the process to end.
+//
+// UI Automation events while it connects: the main window's Name (its
+// title, which names the server once connected: a Name property-changed
+// event), and the dialogs opening (Window_WindowOpened under the main
+// window, which owns them).
 //
 // Expected output (Windows 11 24H2 and gala; FileZilla's own texts):
 //
@@ -33,6 +41,9 @@
 //   dialog=Unknown certificate OK
 //   remote=..,hello.txt
 //   local=<n> ..,<the local directory's entries>
+//   grid=Filename,Filesize,Filetype,Last modified,Permissions,Owner/Group rows=2
+//   row=hello.txt <its size>
+//   events=title opened=Remember passwords?,Unknown certificate
 //   selected=hello.txt True
 //   menu=File Exit
 //   exited=True
@@ -42,6 +53,7 @@
 // window (control type, name, automation id, class) to show what there
 // was. Built by build.sh with flaui_test.
 using System;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using FlaUI.Core;
@@ -55,6 +67,9 @@ static class FileZillaFlaUI
 {
     static readonly TimeSpan Long = TimeSpan.FromSeconds(90);
     static readonly TimeSpan Poll = TimeSpan.FromMilliseconds(200);
+
+    /// What the event handlers saw (on UIA's thread).
+    static readonly ConcurrentQueue<string> Events = new ConcurrentQueue<string>();
 
     static int Fail(int n, string what)
     {
@@ -205,6 +220,22 @@ static class FileZillaFlaUI
                     Dump(window, 3);
                     return Fail(7, "no Quickconnect button");
                 }
+                // Events while it connects: the title (Name) and the
+                // dialogs opening.
+                var titles = window.RegisterPropertyChangedEvent(TreeScope.Element,
+                    (e, p, v) => Events.Enqueue("title=" + v), automation.PropertyLibrary.Element.Name);
+                var opened = window.RegisterAutomationEvent(automation.EventLibrary.Window.WindowOpenedEvent,
+                    TreeScope.Descendants, (e, id) =>
+                    {
+                        try
+                        {
+                            Events.Enqueue("opened=" + e.Name);
+                        }
+                        catch (Exception)
+                        {
+                            // Gone already.
+                        }
+                    });
                 connect.AsButton().Invoke();
 
                 // The dialogs, as they come, until the remote list shows
@@ -267,6 +298,29 @@ static class FileZillaFlaUI
                 Console.WriteLine("local=" + localItems.Length + " " + Texts(local, 8));
                 if (localItems.Length == 0 || localItems[0].Text != "..")
                     return Fail(12, "local list " + Texts(local, 8));
+
+                // The remote list as a grid: its columns (the header's
+                // items) and hello.txt's row.
+                var grid = remote.AsGrid();
+                var columns = string.Join(",", grid.ColumnHeaders.Select(h => h.Name));
+                Console.WriteLine("grid=" + columns + " rows=" + grid.RowCount);
+                if (!columns.StartsWith("Filename,Filesize,") || grid.RowCount != 2 ||
+                    grid.ColumnCount != grid.ColumnHeaders.Length)
+                    return Fail(18, "grid " + columns + " " + grid.RowCount + "x" + grid.ColumnCount);
+                var cells = grid.GetRowByIndex(1).Cells;
+                Console.WriteLine("row=" + (cells.Length > 1 ? cells[0].Name + " " + cells[1].Name : "-"));
+                if (cells.Length != grid.ColumnCount || cells[0].Name != "hello.txt" || cells[1].Name.Length == 0)
+                    return Fail(19, "hello.txt's row");
+
+                // The events seen while connecting.
+                var seen = Events.ToArray();
+                var titled = seen.Any(e => e.StartsWith("title=") && e.Contains("127.0.0.1"));
+                var dialogsOpened = string.Join(",", seen.Where(e => e.StartsWith("opened=")).Select(e => e.Substring(7)));
+                Console.WriteLine("events=" + (titled ? "title" : "-") + " opened=" + dialogsOpened);
+                if (!titled || !dialogsOpened.Contains("Remember passwords?") || !dialogsOpened.Contains("Unknown certificate"))
+                    return Fail(20, "events: " + string.Join(";", seen));
+                titles.Dispose();
+                opened.Dispose();
 
                 // Select hello.txt.
                 var hello = helloItem.AsListBoxItem();

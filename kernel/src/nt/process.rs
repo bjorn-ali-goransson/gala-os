@@ -877,6 +877,7 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     crate::flight::record(crate::flight::Kind::ProcessExit, process.id, u64::from(status.0));
     super::desktop::process_ended(process.id);
     super::window::process_ended(process.id as u32);
+    super::winevent::process_ended(process.id as u32);
     super::charge::ended(process);
     // Close every handle (this breaks reference cycles through handles to
     // the process's own objects) and forget the process.

@@ -31,6 +31,7 @@ mod track;
 mod tree;
 mod unimplemented;
 mod window;
+mod winevent;
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]

@@ -325,6 +325,11 @@ pub fn show_child(hwnd: Hwnd, show: bool) -> i32 {
     crate::foreign::sync(hwnd);
     if was != show {
         crate::window::InvalidateRect(if show { hwnd } else { parent }, core::ptr::null(), 1);
+        use crate::winevent::{
+            CHILDID_SELF, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, OBJID_WINDOW, raise,
+        };
+        let event = if show { EVENT_OBJECT_SHOW } else { EVENT_OBJECT_HIDE };
+        raise(event, hwnd, OBJID_WINDOW, CHILDID_SELF);
     }
     i32::from(was)
 }
@@ -437,6 +442,8 @@ pub extern "system" fn SetFocus(hwnd: Hwnd) -> Hwnd {
         }
         if hwnd != 0 {
             SendMessageW(hwnd, WM_SETFOCUS, old, 0);
+            use crate::winevent::{CHILDID_SELF, EVENT_OBJECT_FOCUS, OBJID_CLIENT, raise};
+            raise(EVENT_OBJECT_FOCUS, hwnd, OBJID_CLIENT, CHILDID_SELF);
         }
     }
     old
@@ -1518,6 +1525,8 @@ pub fn def_window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Op
                 // SAFETY: our desktop window; `len` characters.
                 unsafe { GalaWindowSetTitle(d, title.as_ptr(), len) };
             }
+            use crate::winevent::{CHILDID_SELF, EVENT_OBJECT_NAMECHANGE, OBJID_WINDOW, raise};
+            raise(EVENT_OBJECT_NAMECHANGE, hwnd, OBJID_WINDOW, CHILDID_SELF);
             Some(1)
         }
         WM_GETTEXT => {

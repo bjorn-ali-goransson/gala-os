@@ -289,6 +289,11 @@ syscall_stubs! {
     GalaWindowSendAbandon = 0x7f51, fn(id: u64);
     // UIPI's message filters (ChangeWindowMessageFilter(Ex)).
     GalaWindowFilter = 0x7f6a, fn(hwnd: u64, message: u32, action: u32, ext_status: *mut u32);
+    // WinEvents across processes (SetWinEventHook, NotifyWinEvent).
+    GalaWinEventHook = 0x7f70, fn(min: u32, max: u32, pid: u32, tid: u32, flags: u32, id: *mut u32);
+    GalaWinEventUnhook = 0x7f71, fn(id: u32);
+    GalaWinEventNotify = 0x7f72, fn(event: u32, hwnd: u64, object: i32, child: i32);
+    GalaWinEventTake = 0x7f73, fn(records: *mut u8, max: u32, count: *mut u32);
     // gala's test-only clock control and its mocked random source (R7).
     GalaClockControl = 0x7f4c, fn(operation: u32, a: i64, b: i64, state: *mut u8);
     GalaRandom = 0x7f4d, fn(buffer: *mut u8, length: usize);

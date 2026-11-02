@@ -662,9 +662,26 @@ pixel version. Writing one:
   leave them out; a type forwarded to an assembly not in build.sh's
   reference list (System.Threading.Thread) needs that assembly added
   there.
-- A UIA call on another process's element is a sent message to it: if
-  the program's thread is stuck (not pumping), the call waits for it
-  (gala's UIAutomationCore uses SendMessage, not SendMessageTimeout).
+- A UIA call on another process's element is a sent message to it
+  (SendMessageTimeout with SMTO_ABORTIFHUNG and the TransactionTimeout,
+  as on Windows): if the program's thread is stuck (not pumping), the
+  call waits up to the TransactionTimeout (20 s by default) or 5 s once
+  the program counts as hung, then reads empty (a ledger line
+  `UIAutomationCore.dll!SendMessageTimeout(timed out)` says so).
+- Events (FlaUI's Register*Event): the handlers run on
+  UIAutomationCore's event thread, not the test's, so collect what they
+  see in a ConcurrentQueue and wait for it with Retry (flaui_test's
+  `Event`); register before the action that raises the event (an Add
+  returns once the event thread's hook is in place). They come from
+  WinEvents that user32 and comctl32 raise: an event a control does not
+  raise yet never comes (ARCHITECTURE "Windows across processes:
+  WinEvents" lists them).
+- A native thread that calls into .NET COM objects (a handler) must be
+  in an apartment (CoInitializeEx): without it the call fails with
+  CO_E_NOTINITIALIZED (0x800401F0) and the handler never runs.
+- Grids: FlaUI's AsGrid works on a report-view list view (cells are the
+  items' children: a FindAllDescendants on a big list now visits a
+  cell per column too; search children of the list where you can).
 - **A thread's windows go when it ends** (as on Windows, since
   2026-11-02): a test or gala DLL that creates a window on a worker
   thread which then returns loses the window (IsWindow FALSE, sends fail

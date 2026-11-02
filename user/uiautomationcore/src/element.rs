@@ -16,6 +16,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::condition::{self, Condition};
 use crate::frame::{self, TITLE};
+use crate::grid;
 use crate::items::{self, Kind};
 use crate::menus;
 use crate::{
@@ -96,6 +97,8 @@ const SEPARATOR: i32 = 50038;
 pub const WINDOW: i32 = 50032;
 const TITLE_BAR: i32 = 50037;
 const PANE: i32 = 50033;
+const HEADER: i32 = 50034;
+const HEADER_ITEM: i32 = 50035;
 
 const GWL_STYLE: i32 = -16;
 const WS_CAPTION: u32 = 0x00c0_0000;
@@ -118,19 +121,27 @@ pub struct Node {
     pub hwnd: Hwnd,
     pub item: Option<u32>,
     pub menu: u8,
+    /// A cell's column (grid::CELL; 0 otherwise).
+    pub col: u32,
 }
 
 impl Node {
     pub const fn window(hwnd: Hwnd) -> Node {
-        Node { hwnd, item: None, menu: 0 }
+        Node { hwnd, item: None, menu: 0, col: 0 }
     }
 
     pub const fn item(hwnd: Hwnd, item: u32) -> Node {
-        Node { hwnd, item: Some(item), menu: 0 }
+        Node { hwnd, item: Some(item), menu: 0, col: 0 }
     }
 
     pub const fn menu(hwnd: Hwnd, item: Option<u32>, menu: u8) -> Node {
-        Node { hwnd, item, menu }
+        Node { hwnd, item, menu, col: 0 }
+    }
+
+    /// Item `row`'s cell in column `col` of report-view list view `hwnd`
+    /// (grid.rs).
+    pub const fn cell(hwnd: Hwnd, row: u32, col: u32) -> Node {
+        Node { hwnd, item: Some(row), menu: crate::grid::CELL, col }
     }
 }
 
@@ -155,6 +166,9 @@ pub fn alive(h: Hwnd) -> bool {
 /// Whether the element is still there: its window, and for an item its
 /// index within the list's count.
 pub fn exists(n: Node) -> bool {
+    if is_grid_node(n) {
+        return alive(n.hwnd) && grid::exists(n);
+    }
     if n.menu == TITLE {
         return frame::exists(n);
     }
@@ -195,6 +209,9 @@ fn tree_owner(h: Hwnd) -> Hwnd {
 /// owned window's its owner.
 pub fn parent(n: Node) -> Option<Node> {
     let h = n.hwnd;
+    if is_grid_node(n) {
+        return Some(grid::parent(n));
+    }
     if (n.menu == menus::BAR || n.menu == TITLE) && n.item.is_some() {
         return Some(Node::menu(h, None, n.menu));
     }
@@ -239,7 +256,12 @@ pub fn children(n: Node, out: &mut List<Node>) {
         frame::children(n, out);
         return;
     }
+    if is_grid_node(n) {
+        return;
+    }
     if n.item.is_some() {
+        // A report-view item: its cells.
+        grid::children(n, out);
         return;
     }
     if n.menu != 0 {
@@ -298,6 +320,19 @@ pub fn children(n: Node, out: &mut List<Node>) {
             }
         }
     }
+    // A header control: its items.
+    grid::children(n, out);
+}
+
+/// Whether the node is a cell or a header item (grid.rs).
+pub fn is_grid_node(n: Node) -> bool {
+    n.menu == grid::CELL || n.menu == grid::HEAD
+}
+
+/// Whether window `h`'s class is `name` (ASCII, any case).
+pub fn class_is(h: Hwnd, name: &str) -> bool {
+    let (buf, n) = class_name(h);
+    same_ascii(&buf[..n], name)
 }
 
 // ---- What an element is ----
@@ -339,7 +374,7 @@ pub fn control_type(h: Hwnd) -> i32 {
         // SS_ICON, SS_BITMAP.
         return if matches!(s & 0x1f, 3 | 0xe) { IMAGE } else { TEXT };
     }
-    let by_class: [(&str, i32); 12] = [
+    let by_class: [(&str, i32); 13] = [
         ("Edit", EDIT),
         ("ComboBox", COMBO_BOX),
         ("ListBox", LIST),
@@ -352,6 +387,7 @@ pub fn control_type(h: Hwnd) -> i32 {
         ("msctls_statusbar32", STATUS_BAR),
         ("ToolbarWindow32", TOOL_BAR),
         ("msctls_trackbar32", SLIDER),
+        ("SysHeader32", HEADER),
     ];
     if let Some(&(_, t)) = by_class.iter().find(|(name, _)| is(name)) {
         return t;
@@ -391,6 +427,8 @@ fn localized_control_type(t: i32) -> &'static str {
         MENU_ITEM => "menu item",
         SEPARATOR => "separator",
         TITLE_BAR => "title bar",
+        HEADER => "header",
+        HEADER_ITEM => "header item",
         _ => "pane",
     }
 }
@@ -540,6 +578,9 @@ pub fn property(n: Node, id: i32) -> Variant {
 /// A property's current value; None when the element does not support it.
 fn lookup(n: Node, id: i32) -> Option<Variant> {
     let h = n.hwnd;
+    if is_grid_node(n) {
+        return grid_lookup(n, id);
+    }
     if n.menu == TITLE {
         return title_lookup(n, id);
     }
@@ -593,6 +634,9 @@ fn lookup(n: Node, id: i32) -> Option<Variant> {
 fn other_property(n: Node, id: i32) -> Option<Variant> {
     if frame::known_property(id) {
         return frame::property(n, id);
+    }
+    if grid::known_property(id) {
+        return grid::property(n, id);
     }
     if !pattern::known_property(id) {
         missing(b"UIAutomationCore.dll!GetCurrentPropertyValue(property)", id as u64);
@@ -751,6 +795,54 @@ fn menu_lookup(n: Node, id: i32) -> Option<Variant> {
     })
 }
 
+/// A cell's or header item's properties (grid.rs): a cell is a Text
+/// element named by its text (the item's text in that column), a header
+/// item a HeaderItem named by the column's title; no HWND, AutomationId
+/// or ClassName; the list's (header's) ProcessId and IsEnabled; not
+/// focusable; RuntimeId {42, list, -5, row, column} and {42, header, -6,
+/// k} (gala's choice).
+fn grid_lookup(n: Node, id: i32) -> Option<Variant> {
+    let h = n.hwnd;
+    let i = n.item?;
+    let cell = n.menu == grid::CELL;
+    let control = if cell { TEXT } else { HEADER_ITEM };
+    let rect = grid::rect(n);
+    Some(match id {
+        RUNTIME_ID if cell => {
+            array(VT_I4, &[RUNTIME_ID_HWND, h as i32, -5, i as i32, n.col as i32])
+        }
+        RUNTIME_ID => array(VT_I4, &[RUNTIME_ID_HWND, h as i32, -6, i as i32]),
+        BOUNDING_RECTANGLE => rect_value(rect),
+        PROCESS_ID => {
+            let mut pid = 0;
+            // SAFETY: our output.
+            unsafe { GetWindowThreadProcessId(h, &mut pid) };
+            Variant::int(pid as i32)
+        }
+        CONTROL_TYPE => Variant::int(control),
+        LOCALIZED_CONTROL_TYPE => Variant::bstr(bstr_str(localized_control_type(control))),
+        NAME if cell => Variant::bstr(items::cell_text(h, i, n.col)),
+        NAME => Variant::bstr(grid::header_text(h, i)),
+        AUTOMATION_ID | ACCELERATOR_KEY | ACCESS_KEY | HELP_TEXT | ITEM_TYPE | ITEM_STATUS
+        | ARIA_ROLE | ARIA_PROPERTIES | CLASS_NAME => Variant::bstr(bstr(&[])),
+        HAS_KEYBOARD_FOCUS | IS_KEYBOARD_FOCUSABLE | IS_PASSWORD | IS_REQUIRED_FOR_FORM => {
+            Variant::boolean(false)
+        }
+        // SAFETY: a plain call.
+        IS_ENABLED => Variant::boolean(unsafe { IsWindowEnabled(h) } != 0),
+        CULTURE | ORIENTATION => Variant::int(0),
+        IS_CONTROL_ELEMENT | IS_CONTENT_ELEMENT | IS_DATA_VALID_FOR_FORM => Variant::boolean(true),
+        IS_OFFSCREEN => Variant::boolean(!visible(h) || rect == [0; 4]),
+        FRAMEWORK_ID => Variant::bstr(bstr_str("Win32")),
+        PROVIDER_DESCRIPTION => Variant::bstr(bstr_str("[gala: grid]")),
+        30027..=30044 => {
+            Variant::boolean(pattern::supports(n, PATTERN_AVAILABLE[(id - 30027) as usize]))
+        }
+        NATIVE_WINDOW_HANDLE => return None,
+        _ => return other_property(n, id),
+    })
+}
+
 /// A title bar's or title-bar button's properties (frame.rs), as
 /// Windows' Win32 window proxy is reported to give them: the bar a
 /// TitleBar named by the window's title (AutomationId "TitleBar"), the
@@ -816,6 +908,9 @@ fn menu_rect(n: Node, menu: &menus::Menu) -> Option<[i32; 4]> {
 
 /// The element's rectangle on the screen.
 fn node_rect(n: Node) -> [i32; 4] {
+    if is_grid_node(n) {
+        return grid::rect(n);
+    }
     if n.menu == TITLE {
         return frame::rect(n);
     }

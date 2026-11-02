@@ -27,16 +27,23 @@
 //!   elements).
 //! - Tree walkers (walker.rs): the raw, control and content views and
 //!   walkers with any condition.
+//! - Grids (grid.rs): report-view list views with the Grid and Table
+//!   patterns, their items' cells (GridItem, TableItem) and the header's
+//!   items.
+//! - Events (events.rs): IUIAutomation's Add/Remove*EventHandler, raised
+//!   from WinEvents (SetWinEventHook) on a thread of ours.
+//! - Messages to windows go with SendMessageTimeout (SMTO_ABORTIFHUNG):
+//!   `SendMessageW` below.
 //!
 //! - CUIAutomation8: the same object with IUIAutomation2..6 (options kept,
-//!   events E_NOTIMPL); cache requests (cache.rs) keep what they are
-//!   told, and the BuildCache forms return elements whose Cached getters
+//!   IUIAutomation3..6's events E_NOTIMPL); cache requests (cache.rs)
+//!   keep what they are told, and the BuildCache forms return elements whose Cached getters
 //!   read current values (nothing is cached). The not-supported value is
 //!   one static IUnknown, returned for properties an element lacks when
 //!   the client asks GetCurrentPropertyValueEx to ignore defaults.
 //!
 //! Not there yet (recorded in the ledger, E_NOTIMPL): providers inside
-//! programs (WM_GETOBJECT, IRawElementProviderSimple), events.
+//! programs (WM_GETOBJECT, IRawElementProviderSimple).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -60,7 +67,9 @@ mod automation;
 mod cache;
 mod condition;
 mod element;
+mod events;
 mod frame;
+mod grid;
 mod items;
 mod menus;
 mod pattern;
@@ -118,6 +127,7 @@ unsafe extern "system" {
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     pub fn GetCurrentProcessId() -> u32;
+    pub fn GetLastError() -> u32;
     pub fn OpenProcess(access: u32, inherit: i32, pid: u32) -> usize;
     pub fn CloseHandle(h: usize) -> i32;
     pub fn VirtualAllocEx(
@@ -183,7 +193,15 @@ unsafe extern "system" {
     pub fn SetForegroundWindow(hwnd: Hwnd) -> i32;
     pub fn WindowFromPoint(point: Point) -> Hwnd;
     pub fn PostMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> i32;
-    pub fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn SendMessageTimeoutW(
+        hwnd: Hwnd,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+        flags: u32,
+        ms: u32,
+        result: *mut usize,
+    ) -> isize;
     pub fn IsZoomed(hwnd: Hwnd) -> i32;
     pub fn IsIconic(hwnd: Hwnd) -> i32;
     pub fn GetSystemMetrics(index: i32) -> i32;
@@ -196,6 +214,41 @@ unsafe extern "system" {
         cy: i32,
         flags: u32,
     ) -> i32;
+}
+
+/// How long a message sent to a window waits for its answer (ms): the
+/// automation object's TransactionTimeout (IUIAutomation2, 20 s by
+/// default; the last one set by any client object of the process).
+pub static TRANSACTION_MS: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(20_000);
+
+/// A message to a window, as Windows' UIA proxies send them:
+/// SendMessageTimeout with SMTO_ABORTIFHUNG, so a hung program (a thread
+/// that has left a sent message waiting 5 s) or one that does not answer
+/// within the transaction time-out does not hang the client; then 0
+/// (recorded).
+///
+/// # Safety
+/// Pointers in `lparam` must be valid for the message: in the window's
+/// process (above WM_USER) or ours (messages user32 marshals).
+#[allow(non_snake_case)]
+pub unsafe fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
+    const SMTO_ABORTIFHUNG: u32 = 2;
+    const ERROR_TIMEOUT: u32 = 1460;
+    let mut result = 0usize;
+    let ms = TRANSACTION_MS.load(core::sync::atomic::Ordering::Relaxed);
+    // SAFETY: the caller's pointers; our result.
+    let ok = unsafe {
+        SendMessageTimeoutW(hwnd, msg, wparam, lparam, SMTO_ABORTIFHUNG, ms, &mut result)
+    };
+    if ok == 0 {
+        // SAFETY: a plain call.
+        if unsafe { GetLastError() } == ERROR_TIMEOUT {
+            missing(b"UIAutomationCore.dll!SendMessageTimeout(timed out)", u64::from(msg));
+        }
+        return 0;
+    }
+    result as isize
 }
 
 pub type HResult = i32;

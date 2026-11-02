@@ -673,8 +673,18 @@ fn click(hwnd: Hwnd) {
         }
         _ => {}
     }
+    let checks = matches!(kind, BS_AUTOCHECKBOX | BS_AUTO3STATE | BS_AUTORADIOBUTTON);
     put(&c);
     redraw(hwnd);
+    use crate::winevent::{
+        CHILDID_SELF, EVENT_OBJECT_INVOKED, EVENT_OBJECT_STATECHANGE, OBJID_CLIENT, raise,
+    };
+    if checks {
+        raise(EVENT_OBJECT_STATECHANGE, hwnd, OBJID_CLIENT, CHILDID_SELF);
+    } else if kind & 0xe == 0 {
+        // BS_PUSHBUTTON, BS_DEFPUSHBUTTON: invoked.
+        raise(EVENT_OBJECT_INVOKED, hwnd, OBJID_CLIENT, CHILDID_SELF);
+    }
     notify(hwnd, BN_CLICKED);
 }
 
@@ -702,9 +712,16 @@ extern "system" fn button_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
         BM_GETCHECK => get(hwnd, Kind::Button).check as isize,
         BM_SETCHECK => {
             let mut c = get(hwnd, Kind::Button);
+            let was = c.check;
             c.check = (wparam as u32).min(2);
             put(&c);
             redraw(hwnd);
+            if was != c.check {
+                use crate::winevent::{
+                    CHILDID_SELF, EVENT_OBJECT_STATECHANGE, OBJID_CLIENT, raise,
+                };
+                raise(EVENT_OBJECT_STATECHANGE, hwnd, OBJID_CLIENT, CHILDID_SELF);
+            }
             0
         }
         BM_GETSTATE => {
@@ -1015,8 +1032,15 @@ fn replace(c: &mut Ctl, with: &[u16]) -> (bool, bool) {
 
 fn changed(hwnd: Hwnd) {
     redraw(hwnd);
+    value_changed(hwnd);
     notify(hwnd, EN_UPDATE);
     notify(hwnd, EN_CHANGE);
+}
+
+/// An edit's text changed: EVENT_OBJECT_VALUECHANGE.
+fn value_changed(hwnd: Hwnd) {
+    use crate::winevent::{CHILDID_SELF, EVENT_OBJECT_VALUECHANGE, OBJID_CLIENT, raise};
+    raise(EVENT_OBJECT_VALUECHANGE, hwnd, OBJID_CLIENT, CHILDID_SELF);
 }
 
 /// The character position nearest x (client pixels) on a one-line edit.
@@ -1094,6 +1118,7 @@ extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
             c.modified = false;
             put(&c);
             redraw(hwnd);
+            value_changed(hwnd);
             if s & ES_MULTILINE == 0 {
                 notify(hwnd, EN_UPDATE);
                 notify(hwnd, EN_CHANGE);
