@@ -6618,6 +6618,18 @@ fn judge_log(scenario: &Scenario, status: Option<i32>, timed_out: bool, serial: 
             Err(format!("serial log lacks {missing:?}"))
         };
     }
+    // The guest may finish on its own (a server serving one connection)
+    // between the client's success and xtask stopping the VM: a clean exit
+    // with everything expected (the client's line among it) passes too.
+    if scenario.exit_status == XTASK_STOPS
+        && status == Some(QEMU_EXIT_SUCCESS)
+        && !timed_out
+        && missing.is_empty()
+        && serial.contains(BOOT_OK_MARKER)
+        && !serial.contains(LEAK_MARKER)
+    {
+        return Ok(());
+    }
     match status {
         _ if timed_out => {
             Err(format!("timed out after {}s", scenario_timeout(scenario.name).as_secs()))
@@ -7473,4 +7485,24 @@ fn bake_icons() -> Result {
         eprintln!("xtask: {} ({width} x {height})", path.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod judging {
+    use super::*;
+
+    #[test]
+    fn a_server_that_ends_after_the_client_passes() {
+        let s = Scenario {
+            name: "x",
+            cmdline: "",
+            exit_status: XTASK_STOPS,
+            expect: &["xtask: net client: ssh ok"],
+        };
+        let ok = format!("xtask: net client: ssh ok\n{BOOT_OK_MARKER}");
+        assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, &ok).is_ok());
+        // Without the client's line, or after a failure exit, it fails.
+        assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, BOOT_OK_MARKER).is_err());
+        assert!(judge_log(&s, Some(QEMU_EXIT_FAILURE), false, &ok).is_err());
+    }
 }
