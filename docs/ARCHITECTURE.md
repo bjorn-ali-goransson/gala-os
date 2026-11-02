@@ -3189,8 +3189,8 @@ client side over Win32 windows (`uia_test`, a mingw C program).
 
 Limits and TODO: other processes' windows are seen through the kernel's
 window registry and driven with posted and sent messages (see "Plan:
-windows across processes"); messages sent to another thread of the
-client's own process are still direct calls;
+windows across processes", which also covers another thread of the
+client's own process);
 providers inside programs (WM_GETOBJECT answered with
 IRawElementProviderSimple via UiaReturnRawElementProvider, which wx and
 Qt implement for their widgets) are not consulted; no events
@@ -3303,7 +3303,8 @@ steps, each test first:
    answers for any process's window. TODO: GetParent of an owned
    WS_POPUP window is its owner on Windows (gala: 0); owned windows are
    not yet destroyed or hidden with their owner.
-2. **Done for PostMessage (2026-11-02, windows_across_test).** As
+2. **Done for PostMessage and PostThreadMessage (2026-11-02,
+   windows_across_test).** As
    built: the registry keeps messages posted to another process's
    windows (GalaWindowPost(hwnd, msg, wParam, lParam) 0x7f46, at most
    4096 waiting) and each process's queue event (GalaWindowListen now
@@ -3312,14 +3313,26 @@ steps, each test first:
    0x7f47, 32-byte records) into the queue of the window's thread.
    PostMessage to another process's window of a system message that
    carries a pointer (WM_SETTEXT, WM_GETTEXT, WM_COPYDATA, WM_NOTIFY...)
-   fails with ERROR_MESSAGE_SYNC_ONLY, as documented. TODO:
-   PostThreadMessage to another process's thread. The plan was:
+   fails with ERROR_MESSAGE_SYNC_ONLY, as documented.
+   PostThreadMessage (2026-11-02, windows_across_test): the registry
+   knows which threads have a message queue (a thread gets one when it
+   registers a window or calls GalaWindowReceive, which every pump and
+   PostThreadMessage do; it loses it when it ends);
+   GalaWindowPostThread(tid, msg, wParam, lParam) 0x7f50 queues the
+   message for that thread's process (any process, ours too: user32
+   posts its own thread messages through the kernel, which alone knows
+   the queues) and sets its queue event; GalaWindowPosted's record
+   carries the thread id in bytes 12..16 (hwnd 0), and user32 moves it
+   into that thread's queue without a window. STATUS_INVALID_CID (no
+   such thread, or no queue: PostThreadMessage's ERROR_INVALID_THREAD_ID).
+   The plan was:
    **Posted messages across processes**: PostMessage/PostThreadMessage
    to another process's window or thread go into a kernel queue per
    thread; user32's pump moves them into its own queue as it does the
    desktop's input (GalaWindowInput). Test: BM_CLICK posted to the
    child's button gives the child's window WM_COMMAND.
-3. **Done across processes (2026-11-02, windows_across_test).** As
+3. **Done across threads and processes (2026-11-02,
+   windows_across_test).** As
    built: GalaWindowSend(*request, *id) 0x7f48 queues the message for
    the window's thread (the registry's tid) with its marshaled input
    and the room for its output, and sets the owner's queue event;
@@ -3336,18 +3349,59 @@ steps, each test first:
    buffer out (written straight into the sender's buffer); other
    messages as numbers. GetWindowText of another process's window
    stays the mirrored text, as documented (it does not send WM_GETTEXT
-   across processes; programs send WM_GETTEXT themselves). TODO:
-   SendMessageTimeout/SendNotifyMessage/SendMessageCallback, ReplyMessage
-   and InSendMessage, more marshaled messages (WM_COPYDATA).
+   across processes; programs send WM_GETTEXT themselves).
+   **The other send functions (2026-11-02, windows_across_test).**
+   GalaWindowSend's request has flags at bytes 44..48 (0 before:
+   SendMessage): SEND_NOTIFY (1, SendNotifyMessage: nobody waits; the
+   entry goes when the receiver replies), SEND_CALLBACK (2,
+   SendMessageCallback: the reply also sets the sender's queue event, and
+   user32's pump polls its waiting callbacks with GalaWindowSendWait(id,
+   0) and calls them: callbacks run only inside the sender's
+   GetMessage/PeekMessage/MsgWait/WaitMessage, as documented),
+   SEND_ABORT_IF_HUNG (4, SMTO_ABORTIFHUNG: STATUS_TIMEOUT at once when a
+   message sent to the receiving thread has waited untaken HUNG_MS = 5 s;
+   a thread blocked in GetMessage is woken by the send, so it is never
+   hung by this rule); GalaWindowReceive's header gives them back at
+   44..48. SendMessageTimeout waits in slices of at most 10 ms up to its
+   time-out (SMTO_BLOCK: without handling messages sent to this thread
+   meanwhile) and then calls GalaWindowSendAbandon(id) 0x7f51: the
+   receiver still handles the message, its reply goes nowhere
+   (ERROR_TIMEOUT for the caller). A sender that ends (thread or
+   process) abandons its sends the same way, so a notify message still
+   arrives. The receiving side keeps, per thread (user32's RECEIVING
+   slots), the id, kind and output buffer of the message it is handling
+   (saved and restored around nested ones): ReplyMessage replies early
+   (once; the procedure's later return goes nowhere), InSendMessageEx
+   reports ISMEX_SEND/NOTIFY/CALLBACK (| ISMEX_REPLIED), InSendMessage
+   is ISMEX_SEND without REPLIED (as Wine). All of these call a window of
+   the calling thread directly (SendNotifyMessage and SendMessageCallback
+   synchronously, the callback right away); the asynchronous ones refuse
+   a system message with a pointer for another thread
+   (ERROR_MESSAGE_SYNC_ONLY). WM_COPYDATA is marshaled: the 24-byte
+   COPYDATASTRUCT and its cbData bytes go in one block, and the receiver
+   points lpData at its copy. TODO: HWND_BROADCAST (SendMessageTimeout and
+   SendNotifyMessage succeed reaching no window), SMTO_ERRORONEXIT,
+   IsHungAppWindow; the A functions pass strings as the W ones do (as
+   SendMessageA already did).
    **Cross-thread SendMessage within a process: done (2026-11-02,
    windows_across_test's local window).** user32 sends a message for a
    window of another of its threads through the same kernel path,
    nothing marshaled (the pointers are the process's own), so the
    procedure runs on the window's thread when it next calls a message
-   function, as on Windows. For a window whose thread has ended (gala
-   does not yet destroy a thread's windows with it) GalaWindowSend fails
-   with STATUS_THREAD_IS_TERMINATING and user32 calls the procedure on
-   the caller's thread, as before. The plan was:
+   function, as on Windows. **A thread's windows are destroyed when it ends
+   (2026-11-02, windows_across_test)**, as on Windows: user32's
+   DLL_THREAD_DETACH frees the thread's window slots (no WM_DESTROY: the
+   thread is going), its queue's messages and its RECEIVING/callback
+   slots, and the kernel's thread exit (`window::thread_ended`, which
+   also covers a thread that never reaches DLL_THREAD_DETACH) drops its
+   registry entries and queue, fails the messages sent to it and
+   abandons those it sent. So a send to a dead thread's window fails
+   (ERROR_INVALID_WINDOW_HANDLE; SendMessage to no window now sets it)
+   and IsWindow/FindWindow no longer see it; the old fallback (calling
+   the procedure on the caller's thread, STATUS_THREAD_IS_TERMINATING)
+   is gone. Limit: a window of a thread killed with TerminateThread
+   keeps its user32 slot in its own process (the registry entry goes, so
+   sends to it fail). The plan was:
    **Sent messages across threads and processes**: SendMessage to a
    window of another thread queues a sent message with a reply slot in
    the kernel; the sender waits (processing messages sent to itself, as

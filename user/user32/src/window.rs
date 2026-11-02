@@ -964,8 +964,20 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
         DestroyWindow(child);
     }
     SendMessageW(hwnd, WM_NCDESTROY, 0, 0);
-    crate::tree::forget(hwnd);
     let Some(i) = index_of(hwnd) else { return 0 };
+    free_slot(i);
+    // Its area of the parent shows the parent again.
+    if parent != 0 && was_shown {
+        InvalidateRect(parent, core::ptr::null(), 1);
+    }
+    1
+}
+
+/// Window slot `i` is free: its HWND unregistered, its buffer, desktop
+/// window, timers and posted messages gone (no messages sent).
+fn free_slot(i: usize) {
+    let hwnd = hwnd_of(i);
+    crate::tree::forget(hwnd);
     crate::timer::window_destroyed(hwnd);
     crate::menu::window_destroyed(hwnd);
     crate::foreign::release(i);
@@ -989,11 +1001,28 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
             VirtualFree(buffer_base(&gone).cast(), 0, 0x8000);
         }
     }
-    // Its area of the parent shows the parent again.
-    if parent != 0 && was_shown {
-        InvalidateRect(parent, core::ptr::null(), 1);
+}
+
+/// The calling thread is ending (DLL_THREAD_DETACH): its windows are
+/// destroyed with it, as on Windows (without messages: the thread is
+/// going), and its queue's messages go.
+pub(crate) fn thread_ended() {
+    let thread = me();
+    for _ in 0..MAX_WINDOWS {
+        let next = with(|s| {
+            (0..s.windows.len()).find(|&i| s.windows[i].used && s.windows[i].thread == thread)
+        });
+        let Some(i) = next else { break };
+        free_slot(i);
     }
-    1
+    with(|s| {
+        for q in s.queue.iter_mut() {
+            if q.used && q.thread == thread {
+                q.used = false;
+            }
+        }
+    });
+    crate::foreign::thread_ended();
 }
 
 #[unsafe(no_mangle)]
@@ -1811,31 +1840,58 @@ pub extern "system" fn GetQueueStatus(flags: u32) -> u32 {
 
 /// SendMessageW: the window procedure, called now on this thread, or on
 /// the window's thread (another one of ours or another process's) through
-/// the kernel.
+/// the kernel. 0 with ERROR_INVALID_WINDOW_HANDLE for no window (a
+/// thread's windows go when it ends).
 #[unsafe(no_mangle)]
 pub extern "system" fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
+    match send_with(hwnd, msg, wparam, lparam, crate::foreign::WAIT) {
+        Ok(r) => r,
+        Err(e) => {
+            set_last_error(e);
+            0
+        }
+    }
+}
+
+/// Whether `hwnd` is a window of the calling thread, or one of ours whose
+/// message user32 itself answers on any thread.
+fn handled_here(hwnd: Hwnd, msg: u32) -> bool {
+    window(hwnd).is_some_and(|w| {
+        w.thread == me() || msg == crate::track::GALA_MENU || msg == crate::tree::GALA_SETWINDOWPOS
+    })
+}
+
+/// SendMessage the way `mode` says (crate::foreign::Mode): the result, or
+/// the error code. A window of the calling thread is called directly
+/// whatever the mode.
+pub(crate) fn send_with(
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+    mode: crate::foreign::Mode,
+) -> Result<isize, u32> {
     // Another process's window: through the kernel, the pointers
     // marshaled.
     if hwnd != 0 && index_of(hwnd).is_none() {
-        if let Some(r) = crate::foreign::send_remote(hwnd, msg, wparam, lparam) {
+        if let Some(r) = crate::foreign::send_remote(hwnd, msg, wparam, lparam, mode) {
             return r;
         }
     }
     // gala's menu message for UI Automation: user32's own.
     if msg == crate::track::GALA_MENU && window(hwnd).is_some() {
-        return crate::track::menu_message(hwnd, wparam, lparam);
+        return Ok(crate::track::menu_message(hwnd, wparam, lparam));
     }
     // Another process's SetWindowPos of our window: user32's own too.
     if msg == crate::tree::GALA_SETWINDOWPOS && window(hwnd).is_some() {
-        return crate::tree::set_window_pos_message(hwnd, lparam);
+        return Ok(crate::tree::set_window_pos_message(hwnd, lparam));
     }
     // A window of another thread of ours: its procedure runs on that
     // thread, when it next calls a message function.
     if let Some(w) = window(hwnd)
         && w.thread != me()
-        && let Some(r) = crate::foreign::send_to_thread(hwnd, msg, wparam, lparam)
     {
-        return r;
+        return crate::foreign::send_to_thread(hwnd, msg, wparam, lparam, mode);
     }
     // WH_CALLWNDPROC sees it first: a CWPSTRUCT (lParam, wParam, message,
     // window), wParam nonzero (sent by this thread).
@@ -1851,10 +1907,195 @@ pub extern "system" fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam:
         crate::hook::call(crate::hook::WH_CALLWNDPROC, 0, 1, &cwp as *const CwpStruct as isize);
     }
     match window(hwnd) {
-        Some(Window { proc_: Some(p), .. }) => p(hwnd, msg, wparam, lparam),
-        Some(_) => DefWindowProcW(hwnd, msg, wparam, lparam),
-        None => 0,
+        Some(Window { proc_: Some(p), .. }) => Ok(p(hwnd, msg, wparam, lparam)),
+        Some(_) => Ok(DefWindowProcW(hwnd, msg, wparam, lparam)),
+        None => Err(ERROR_INVALID_WINDOW_HANDLE),
     }
+}
+
+const HWND_BROADCAST: Hwnd = 0xffff;
+const ERROR_MESSAGE_SYNC_ONLY: u32 = 1159;
+
+/// SendMessageTimeoutW(hwnd, msg, wParam, lParam, flags, ms, *result):
+/// nonzero with the result in *result; 0 with ERROR_TIMEOUT when the
+/// window's thread did not answer within `ms` (it still handles the
+/// message) or is hung (SMTO_ABORTIFHUNG: a message sent to it has
+/// waited 5 s). SMTO_BLOCK: messages sent to this thread wait meanwhile.
+/// A window of this thread is called directly. HWND_BROADCAST reaches no
+/// window yet (TODO) and succeeds.
+#[unsafe(no_mangle)]
+pub extern "system" fn SendMessageTimeoutW(
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+    flags: u32,
+    ms: u32,
+    result: *mut usize,
+) -> isize {
+    const SMTO_BLOCK: u32 = 1;
+    const SMTO_ABORTIFHUNG: u32 = 2;
+    const SMTO_NOTIMEOUTIFNOTHUNG: u32 = 8;
+    let put = |r: isize| {
+        if !result.is_null() {
+            // SAFETY: the caller's result.
+            unsafe { *result = r as usize };
+        }
+    };
+    if hwnd == HWND_BROADCAST {
+        put(0);
+        return 1;
+    }
+    let ms = if flags & SMTO_NOTIMEOUTIFNOTHUNG != 0 { 0xffff_ffff } else { ms };
+    let mode = crate::foreign::Mode::Wait {
+        ms,
+        block: flags & SMTO_BLOCK != 0,
+        hung: flags & (SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG) != 0,
+    };
+    match send_with(hwnd, msg, wparam, lparam, mode) {
+        Ok(r) => {
+            put(r);
+            1
+        }
+        Err(e) => {
+            set_last_error(e);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SendMessageTimeoutA(
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+    flags: u32,
+    ms: u32,
+    result: *mut usize,
+) -> isize {
+    SendMessageTimeoutW(hwnd, msg, wparam, lparam, flags, ms, result)
+}
+
+/// The checks of the asynchronous send functions (SendNotifyMessage,
+/// SendMessageCallback) for a window of another thread: Err(code) for no
+/// window, or a system message whose parameters carry a pointer.
+fn async_target(hwnd: Hwnd, msg: u32) -> Result<(), u32> {
+    if window(hwnd).is_none() && crate::foreign::remote(hwnd).is_none() {
+        return Err(ERROR_INVALID_WINDOW_HANDLE);
+    }
+    if crate::foreign::carries_pointer(msg) {
+        return Err(ERROR_MESSAGE_SYNC_ONLY);
+    }
+    Ok(())
+}
+
+/// SendNotifyMessageW: a window of this thread is called now (returning
+/// when its procedure has); another thread's gets the message as a sent
+/// one (handled before posted ones, when that thread next calls a message
+/// function) and this returns at once.
+#[unsafe(no_mangle)]
+pub extern "system" fn SendNotifyMessageW(
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> i32 {
+    if hwnd == HWND_BROADCAST {
+        return 1;
+    }
+    if handled_here(hwnd, msg) {
+        SendMessageW(hwnd, msg, wparam, lparam);
+        return 1;
+    }
+    let sent = async_target(hwnd, msg)
+        .and_then(|()| send_with(hwnd, msg, wparam, lparam, crate::foreign::Mode::Notify));
+    match sent {
+        Ok(_) => 1,
+        Err(e) => {
+            set_last_error(e);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SendNotifyMessageA(
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> i32 {
+    SendNotifyMessageW(hwnd, msg, wparam, lparam)
+}
+
+/// SendMessageCallbackW(hwnd, msg, wParam, lParam, callback, data): a
+/// window of this thread is called now and the callback right after;
+/// another thread's gets the message as a sent one and this returns at
+/// once; the callback (window, message, data, result) runs when this
+/// thread next calls GetMessage, PeekMessage or WaitMessage after the
+/// reply.
+#[unsafe(no_mangle)]
+pub extern "system" fn SendMessageCallbackW(
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+    callback: Option<crate::foreign::SendAsyncProc>,
+    data: usize,
+) -> i32 {
+    if handled_here(hwnd, msg) {
+        let r = SendMessageW(hwnd, msg, wparam, lparam);
+        if let Some(cb) = callback {
+            cb(hwnd, msg, data, r);
+        }
+        return 1;
+    }
+    let mode = crate::foreign::Mode::Callback { callback, data };
+    let sent = async_target(hwnd, msg).and_then(|()| send_with(hwnd, msg, wparam, lparam, mode));
+    match sent {
+        Ok(_) => 1,
+        Err(e) => {
+            set_last_error(e);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SendMessageCallbackA(
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+    callback: Option<crate::foreign::SendAsyncProc>,
+    data: usize,
+) -> i32 {
+    SendMessageCallbackW(hwnd, msg, wparam, lparam, callback, data)
+}
+
+/// PostThreadMessageW(thread, msg, wParam, lParam): into the queue of any
+/// process's thread (ours too), without a window. ERROR_INVALID_THREAD_ID
+/// when it is no thread or has no message queue (a thread gets one with
+/// its first window or message function call).
+#[unsafe(no_mangle)]
+pub extern "system" fn PostThreadMessageW(
+    thread: u32,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> i32 {
+    crate::foreign::post_thread(thread, msg, wparam, lparam)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn PostThreadMessageA(
+    thread: u32,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> i32 {
+    PostThreadMessageW(thread, msg, wparam, lparam)
 }
 
 fn post(thread: u32, msg: Msg) -> bool {
@@ -1948,6 +2189,7 @@ const VK_CAPITAL: usize = 0x14;
 fn pump() {
     crate::foreign::take_posted();
     crate::foreign::take_sent();
+    crate::foreign::take_callbacks();
     let mut records = [0u8; 24 * 32];
     loop {
         let mut n = 0u32;

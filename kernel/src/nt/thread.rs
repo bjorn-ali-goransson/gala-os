@@ -654,6 +654,10 @@ pub fn exit_current(status: NtStatus) -> ! {
         // is signaled, the thread must no longer count as live (e.g. for
         // ThreadAmILastThread).
         abandon_mutants(t);
+        // Its windows are destroyed with it, as on Windows (user32 frees
+        // its own records at DLL_THREAD_DETACH; this covers threads that
+        // never got there), and messages sent to it fail.
+        super::window::thread_ended(t.process.id as u32, t.id as u32);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
         let process = t.process.clone();
         let last = process.remove_thread(&object);
