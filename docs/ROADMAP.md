@@ -1372,7 +1372,8 @@ R. **Robustness and live update, kernel included** (the owner's
    - R1. **Invariants**: state as data, restartable system calls with
      absolute deadlines, versions on everything stored or shared (first
      concrete step: a version field in the disk log's records and in the
-     `Gala*` records such as the window registry's), drivers that survive
+     `Gala*` records: done for the window registry's record, 2026-11-02),
+     drivers that survive
      a device reset, all time through the `Clock` seam (audit time.rs and
      the direct `platform::ticks` callers).
    - R2. **Fault injection**: named failure points (`heap`, `frame`,

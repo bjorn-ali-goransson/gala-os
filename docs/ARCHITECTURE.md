@@ -2850,7 +2850,9 @@ steps, each test first:
    (*info) 0x7f42, GalaWindowUnregister(hwnd) 0x7f43, GalaWindowQuery
    (hwnd, *info) 0x7f44, GalaWindowChildren(parent, *hwnds, max,
    *count) 0x7f45 (0: every top-level window, highest first); the
-   record (`nt::window::Info`, 728 bytes): hwnd, parent, owner, id, pid
+   record (`nt::window::Info`, 728 bytes, format version 1 at bytes
+   84..88: the kernel refuses another with STATUS_INVALID_PARAMETER):
+   hwnd, parent, owner, id, pid
    (the kernel's), tid, style, ex_style, screen rectangle, visible/
    enabled flags, z, class name (64) and text (256, UTF-16). HWNDs start
    at 0x20000, 16 apart. user32 (`foreign.rs`) registers a window as

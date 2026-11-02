@@ -41,6 +41,10 @@ pub struct Info {
 pub const CLASS_CHARS: usize = 64;
 pub const TEXT_CHARS: usize = 256;
 pub const INFO_SIZE: usize = 88 + 2 * CLASS_CHARS + 2 * TEXT_CHARS;
+/// The record's format version (bytes 84..88; ARCHITECTURE invariant 3:
+/// everything shared is versioned). Readers accept this version only for
+/// now; a new one adds fields at the end and keeps accepting the old.
+pub const INFO_VERSION: u32 = 1;
 pub const FLAG_VISIBLE: u32 = 1;
 pub const FLAG_ENABLED: u32 = 2;
 
@@ -74,7 +78,7 @@ impl Default for Info {
 
 impl Info {
     pub fn from_bytes(b: &[u8]) -> Option<Info> {
-        if b.len() < INFO_SIZE {
+        if b.len() < INFO_SIZE || b[84..88] != INFO_VERSION.to_le_bytes() {
             return None;
         }
         let u64_at = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap_or([0; 8]));
@@ -121,7 +125,7 @@ impl Info {
         b[68..72].copy_from_slice(&self.class_len.to_le_bytes());
         b[72..80].copy_from_slice(&self.z.to_le_bytes());
         b[80..84].copy_from_slice(&self.text_len.to_le_bytes());
-        b[84..88].fill(0);
+        b[84..88].copy_from_slice(&INFO_VERSION.to_le_bytes());
         for (i, c) in self.class.iter().enumerate() {
             b[88 + 2 * i..90 + 2 * i].copy_from_slice(&c.to_le_bytes());
         }
@@ -442,6 +446,9 @@ mod tests {
         let mut bytes = [0u8; INFO_SIZE];
         info.to_bytes(&mut bytes);
         assert_eq!(Info::from_bytes(&bytes), Some(info));
+        // Another format version is refused.
+        bytes[84] = 2;
+        assert_eq!(Info::from_bytes(&bytes), None);
 
         let top = register(901, info).unwrap();
         assert_eq!(top % HWND_STEP, 0);

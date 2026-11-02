@@ -39,6 +39,8 @@ const CLASS_CHARS: usize = 64;
 const TEXT_CHARS: usize = 256;
 /// The record's size (nt::window::INFO_SIZE).
 const INFO_SIZE: usize = 88 + 2 * CLASS_CHARS + 2 * TEXT_CHARS;
+/// The record's format version (nt::window::INFO_VERSION).
+const INFO_VERSION: u32 = 1;
 const FLAG_VISIBLE: u32 = 1;
 const FLAG_ENABLED: u32 = 2;
 
@@ -98,6 +100,7 @@ impl Info {
         b[68..72].copy_from_slice(&(self.class_len as u32).to_le_bytes());
         b[72..80].copy_from_slice(&self.z.to_le_bytes());
         b[80..84].copy_from_slice(&(self.text_len as u32).to_le_bytes());
+        b[84..88].copy_from_slice(&INFO_VERSION.to_le_bytes());
         for (k, c) in self.class.iter().enumerate() {
             b[88 + 2 * k..90 + 2 * k].copy_from_slice(&c.to_le_bytes());
         }
