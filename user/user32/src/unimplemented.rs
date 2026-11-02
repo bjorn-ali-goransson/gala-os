@@ -44,7 +44,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     HideCaret
     IsClipboardFormatAvailable
     LoadCursorFromFileW
-    NotifyWinEvent
     RegisterHotKey
     SetCaretBlinkTime
     SetCaretPos

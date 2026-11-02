@@ -637,6 +637,12 @@ pub fn listen(pid: u32, event: ObjectRef) -> Result<(), NtStatus> {
     r.listeners.try_push((pid, event)).map_err(|_| NtStatus::NO_MEMORY)
 }
 
+/// `pid`'s queue event (GalaWindowListen), if it has one: WinEvents for
+/// its hooks set it (nt::winevent).
+pub fn listener(pid: u32) -> Option<ObjectRef> {
+    REGISTRY.lock().listeners.iter().find(|(p, _)| *p == pid).map(|(_, e)| e.clone())
+}
+
 /// Thread `tid` of process `pid` has a message queue (it created a
 /// window or called a message function).
 pub fn has_queue(pid: u32, tid: u32) -> Result<(), NtStatus> {

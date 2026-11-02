@@ -1958,8 +1958,26 @@ desktop tells user32 when its own buttons minimize or restore), and
 IsIconic/IsZoomed answer for any process's window from the window
 registry. FlaUI's Window.Close (the title bar's Close button),
 Window.Move, ModalWindows and SetWindowVisualState work (flaui_test
-closes its target with Window.Close now). Next: GridItem/TableItem for
-columns, combo box and tree-view items, events, WM_GETOBJECT providers,
+closes its target with Window.Close now).
+Grids, events and SendMessageTimeout (2026-11-02, flaui_test,
+filezilla_flaui, winevent_test): report-view list views are grids (Grid
+and Table patterns on the list, the header control a Header with
+HeaderItems, each item's cells as its children with GridItem and
+TableItem; FlaUI's AsGrid reads FileZilla's remote list with its
+"Filename", "Filesize"... columns); WinEvents across processes
+(SetWinEventHook out of context, UnhookWinEvent, NotifyWinEvent through
+the kernel: GalaWinEvent* 0x7f70-0x7f73), raised by user32 and comctl32
+where Windows raises them (create, destroy, show, hide, focus,
+foreground, name, value, state, selection, invoked); UIAutomationCore's
+Add/Remove*EventHandler (automation, property-changed, structure-changed,
+focus-changed) turn them into UIA events on a thread of their own
+(WindowOpened/Closed, MenuOpened, Name/Value/ToggleState changes,
+ElementSelected/AddedToSelection/RemovedFromSelection, Invoked,
+StructureChanged); every message UIAutomationCore sends to a window is
+SendMessageTimeout with SMTO_ABORTIFHUNG (the TransactionTimeout), so a
+hung program no longer hangs the client. Next: WM_GETOBJECT providers
+(UiaReturnRawElementProvider, same process first), IUIAutomation3..6's
+event handlers and handler groups, combo box and tree-view items,
 GetParent of owned popups, the system menu in the title bar, and the
 other screen tests rewritten on FlaUI.
 

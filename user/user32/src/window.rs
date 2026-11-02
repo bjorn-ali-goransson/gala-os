@@ -329,6 +329,12 @@ fn event() -> Handle {
     }
 }
 
+/// The process's queue event exists and the kernel sets it (WinEvent
+/// hooks need it before any window is made).
+pub(crate) fn listen() {
+    event();
+}
+
 pub(crate) fn wake() {
     // SAFETY: our event.
     unsafe { SetEvent(event()) };
@@ -941,6 +947,8 @@ pub(crate) fn finish_create(
         DestroyWindow(hwnd);
         return 0;
     }
+    use crate::winevent::{CHILDID_SELF, EVENT_OBJECT_CREATE, OBJID_WINDOW, raise};
+    raise(EVENT_OBJECT_CREATE, hwnd, OBJID_WINDOW, CHILDID_SELF);
     if style & WS_VISIBLE != 0 {
         ShowWindow(hwnd, 5);
     }
@@ -958,12 +966,19 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
     crate::hook::call(crate::hook::WH_CBT, crate::hook::HCBT_DESTROYWND, hwnd, 0);
     let was_shown = IsWindowVisible(hwnd) != 0;
     let parent = window(hwnd).map_or(0, |w| w.parent);
+    use crate::winevent::{
+        CHILDID_SELF, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, OBJID_WINDOW, raise,
+    };
+    if was_shown {
+        raise(EVENT_OBJECT_HIDE, hwnd, OBJID_WINDOW, CHILDID_SELF);
+    }
     // WM_DESTROY to the window, then its children (and theirs).
     SendMessageW(hwnd, WM_DESTROY, 0, 0);
     for child in crate::tree::children_of(hwnd).iter().copied().filter(|&c| c != 0) {
         DestroyWindow(child);
     }
     SendMessageW(hwnd, WM_NCDESTROY, 0, 0);
+    raise(EVENT_OBJECT_DESTROY, hwnd, OBJID_WINDOW, CHILDID_SELF);
     let Some(i) = index_of(hwnd) else { return 0 };
     free_slot(i);
     // Its area of the parent shows the parent again.
@@ -1069,6 +1084,15 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
         (was, w.desktop, w.iconic)
     });
     crate::foreign::sync(hwnd);
+    {
+        use crate::winevent::{
+            CHILDID_SELF, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, OBJID_WINDOW, raise,
+        };
+        if show != was {
+            let event = if show { EVENT_OBJECT_SHOW } else { EVENT_OBJECT_HIDE };
+            raise(event, hwnd, OBJID_WINDOW, CHILDID_SELF);
+        }
+    }
     if desktop != 0 {
         // SAFETY: our desktop window (2: shown minimized).
         unsafe {
@@ -1091,7 +1115,7 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
         // A popup (a menu, a drop-down list) leaves the focus and the
         // foreground where they are.
         if !window(hwnd).is_some_and(|w| w.popup) {
-            FOREGROUND.store(hwnd, Ordering::Relaxed);
+            set_foreground(hwnd);
             crate::tree::shown_top_level(hwnd);
         }
         InvalidateRect(hwnd, core::ptr::null(), 1);
@@ -1586,6 +1610,15 @@ pub extern "system" fn SendMessageA(hwnd: Hwnd, msg: u32, wparam: usize, lparam:
 /// position (from mouse messages).
 static CAPTURE: AtomicUsize = AtomicUsize::new(0);
 static FOREGROUND: AtomicUsize = AtomicUsize::new(0);
+
+/// The foreground window changes: EVENT_SYSTEM_FOREGROUND when it is
+/// another.
+fn set_foreground(hwnd: Hwnd) {
+    if FOREGROUND.swap(hwnd, Ordering::Relaxed) != hwnd {
+        use crate::winevent::{CHILDID_SELF, EVENT_SYSTEM_FOREGROUND, OBJID_WINDOW, raise};
+        raise(EVENT_SYSTEM_FOREGROUND, hwnd, OBJID_WINDOW, CHILDID_SELF);
+    }
+}
 static CURSOR: AtomicUsize = AtomicUsize::new(0);
 /// The time and pointer position (packed as GetMessagePos's) of the last
 /// message GetMessage or PeekMessage retrieved.
@@ -2201,6 +2234,7 @@ fn pump() {
     crate::foreign::take_posted();
     crate::foreign::take_sent();
     crate::foreign::take_callbacks();
+    crate::winevent::deliver();
     let mut records = [0u8; 24 * 32];
     loop {
         let mut n = 0u32;
@@ -2247,7 +2281,7 @@ fn pump() {
             if let Some((i, thread)) = target {
                 let top = hwnd_of(i);
                 if message == 0x0201 || message == 0x0204 {
-                    FOREGROUND.store(top, Ordering::Relaxed);
+                    set_foreground(top);
                 }
                 // The desktop moved the window (a drag): its position.
                 if message == 0x0003 {
@@ -2880,7 +2914,7 @@ pub extern "system" fn SetForegroundWindow(hwnd: Hwnd) -> i32 {
     if window(hwnd).is_none() {
         return 0;
     }
-    FOREGROUND.store(hwnd, Ordering::Relaxed);
+    set_foreground(hwnd);
     BringWindowToTop(hwnd)
 }
 

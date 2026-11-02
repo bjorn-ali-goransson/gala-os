@@ -345,6 +345,11 @@ fn set_current(hwnd: Hwnd, i: isize) -> bool {
         show(hwnd, i);
     }
     redraw(hwnd);
+    if changed && i >= 0 {
+        // The selected item (child id: index + 1).
+        use crate::winevent::{EVENT_OBJECT_SELECTION, OBJID_CLIENT, raise};
+        raise(EVENT_OBJECT_SELECTION, hwnd, OBJID_CLIENT, i as i32 + 1);
+    }
     changed
 }
 

@@ -113,6 +113,10 @@ fn set_text(hwnd: Hwnd, wparam: usize, text: &[u16]) -> isize {
     })
     .unwrap_or(false);
     redraw(hwnd);
+    if ok {
+        // EVENT_OBJECT_NAMECHANGE for the part (child id part + 1).
+        crate::common::win_event(0x800c, hwnd, if part == SIMPLE_ID { 0 } else { part as i32 + 1 });
+    }
     isize::from(ok)
 }
 
