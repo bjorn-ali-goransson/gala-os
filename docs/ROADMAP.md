@@ -1331,6 +1331,34 @@ images plus ARM64 builds of gala's DLLs; the NT layer above is portable.
 32-bit programs need WoW64 (a 32-bit ntdll and thunks). Neither is
 planned before P1.
 
+Screen tests through UI Automation (asked for 2026-11-02): the screen
+checks click pixels and compare colours, which breaks whenever a layout
+moves. The aim is to drive programs as testers do on Windows: find
+elements by AutomationId, Name and ControlType in the element tree,
+invoke them (Invoke, Value, Toggle, ExpandCollapse patterns), and read
+their state, so the same test runs on Windows and on gala. Plan: gala's
+UIAutomationCore.dll implementing the IUIAutomation client interfaces
+over user32's window tree (HWNDs and controls: AutomationId from the
+control id, Name from the text, ControlType from the class, bounding
+rectangles), the COM activation it needs (CoCreateInstance of
+CUIAutomation, the registry entries), and then FlaUI (MIT, .NET) running
+on gala's .NET support as the test driver, with the tests themselves
+checked in and run by xtask on gala and by a script on Windows.
+Providers inside programs (wx and Qt implement IRawElementProviderSimple
+for their own widgets) come after the HWND-based tree.
+Progress (2026-11-02, `uia_test`): ole32 creates in-process classes
+registered under HKCR\CLSID (InprocServer32, DllGetClassObject); gala's
+UIAutomationCore.dll has IUIAutomation over the HWND tree (root = the
+desktop, ElementFromHandle/Point, focus), element properties
+(AutomationId, Name, ControlType, ClassName, BoundingRectangle,
+NativeWindowHandle, ProcessId, IsEnabled...), true/false/property/
+and/or/not conditions, FindFirst/FindAll (Element, Children,
+Descendants, Subtree), tree walkers, and the Invoke (buttons), Value
+(edits) and Toggle (check boxes) patterns. Next: IUIAutomation2+ and
+whatever FlaUI's UIA3 needs first (cache requests, events), then
+Selection/ExpandCollapse for list and combo boxes, title bars, and
+WM_GETOBJECT providers.
+
 Drivers: gala writes its own, against published standards (virtio,
 then AHCI/NVMe, xHCI, e1000), not hardware-specific ones. Reusing
 Windows drivers would mean implementing the kernel-mode driver API

@@ -1,6 +1,7 @@
 //! gala's ole32.dll: the COM basics language runtimes use, as documented.
-//! gala has no registry, so no classes, ProgIDs or proxies exist: class
-//! lookups fail as on a machine where nothing is registered (recorded in
+//! In-process classes registered under HKCR\CLSID (class.rs) are created
+//! from their DLLs; ProgIDs, local servers and proxies do not exist yet
+//! (lookups fail as on a machine where nothing is registered, recorded in
 //! the ledger). What works:
 //!
 //! - Apartments (CoInitializeEx/CoUninitialize, RoInitialize): per-thread
@@ -25,6 +26,7 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+mod class;
 mod stream;
 mod unimplemented;
 
@@ -87,7 +89,6 @@ pub const E_OUTOFMEMORY: HResult = 0x8007_000eu32 as i32;
 pub const E_INVALIDARG: HResult = 0x8007_0057u32 as i32;
 const CO_E_NOTINITIALIZED: HResult = 0x8004_01f0u32 as i32;
 const CO_E_CLASSSTRING: HResult = 0x8004_01f3u32 as i32;
-const REGDB_E_CLASSNOTREG: HResult = 0x8004_0154u32 as i32;
 const RPC_E_CHANGED_MODE: HResult = 0x8001_0106u32 as i32;
 const RPC_S_CALLPENDING: HResult = 0x8001_0115u32 as i32;
 
@@ -792,45 +793,6 @@ pub extern "system" fn StringFromGUID2(guid: *const Guid, out: *mut u16, max: i3
     // SAFETY: the caller's buffer of at least 39 characters.
     unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), out, 39) };
     39
-}
-
-/// CoGetClassObject / CoCreateInstance: no classes are registered.
-#[unsafe(no_mangle)]
-pub extern "system" fn CoGetClassObject(
-    _clsid: *const Guid,
-    context: u32,
-    _info: *mut c_void,
-    _iid: *const Guid,
-    out: *mut *mut c_void,
-) -> HResult {
-    if out.is_null() {
-        return E_INVALIDARG;
-    }
-    put(out, core::ptr::null_mut());
-    if apartment().is_none() {
-        return CO_E_NOTINITIALIZED;
-    }
-    missing(b"ole32.dll!CoGetClassObject(no registry)", context.into());
-    REGDB_E_CLASSNOTREG
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CoCreateInstance(
-    _clsid: *const Guid,
-    _outer: *mut c_void,
-    context: u32,
-    _iid: *const Guid,
-    out: *mut *mut c_void,
-) -> HResult {
-    if out.is_null() {
-        return E_POINTER;
-    }
-    put(out, core::ptr::null_mut());
-    if apartment().is_none() {
-        return CO_E_NOTINITIALIZED;
-    }
-    missing(b"ole32.dll!CoCreateInstance(no registry)", context.into());
-    REGDB_E_CLASSNOTREG
 }
 
 /// CLSIDFromProgID: no ProgIDs are registered.

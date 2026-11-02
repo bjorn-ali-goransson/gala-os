@@ -1153,9 +1153,10 @@ Windows, never shadows the system's DLLs.)
   IIDFromString with E_INVALIDARG), an IStream on heap memory
   (CreateStreamOnHGlobal without an HGLOBAL), an aggregatable
   free-threaded marshaler whose IMarshal methods are E_NOTIMPL, and
-  CoWaitForMultipleHandles (no message pumping). No registry: class and
-  ProgID lookups fail as unregistered (recorded); no marshaling across
-  apartments yet. oleaut32 has BSTRs, VARIANTs (clear, copy, conversions
+  CoWaitForMultipleHandles (no message pumping). In-process classes
+  registered under HKCR\CLSID are created from their DLLs (see "UI
+  Automation"); ProgIDs and out-of-process servers fail as unregistered
+  (recorded); no marshaling across apartments yet. oleaut32 has BSTRs, VARIANTs (clear, copy, conversions
   between numbers, booleans, currency and strings in the en-US format;
   dates and decimals recorded as missing), SAFEARRAYs (descriptors with
   the VARTYPE/IRecordInfo/IID prefix, bounds stored rightmost first,
@@ -2576,6 +2577,107 @@ redraw the old and new bounds); no child windows (CreateWindowEx with
 WS_CHILD reports unimplemented); no resizing or maximize; keyboard focus
 is the active top-level window; the shell belongs in a user-mode program
 (an explorer.exe of gala's) later; the clock is UTC.
+
+## UI Automation
+
+The aim is screen tests that drive programs as testers do on Windows:
+find elements by AutomationId, Name and ControlType, act on them through
+control patterns, read their state, with the same test on Windows and on
+gala (instead of clicking pixels and comparing colours). Step one is the
+client side over Win32 windows (`uia_test`, a mingw C program).
+
+- **Activation**: ole32's CoGetClassObject/CoCreateInstance
+  (`user/ole32/src/class.rs`) read `HKCR\CLSID\{clsid}\InprocServer32`
+  (the default value, REG_SZ or REG_EXPAND_SZ expanded), load the DLL and
+  call its `DllGetClassObject`; CoCreateInstance then uses the class
+  factory (index 3, CreateInstance). ThreadingModel is ignored (no
+  marshaling: every object is used on the caller's thread). Out-of-process
+  contexts and unregistered classes give REGDB_E_CLASSNOTREG (recorded).
+  The registry seed registers CUIAutomation
+  ({ff48dba4-60ef-4201-aa87-54103eef594e}) as
+  `%SystemRoot%\System32\UIAutomationCore.dll`, ThreadingModel Both.
+- **UIAutomationCore.dll** (`user/uiautomationcore`, exported to user/bin
+  as `testuiautomationcore.dll`): COM objects as heap blocks with a
+  vtable pointer and an atomic reference count (HeapAlloc, checked;
+  method tables in order of the mingw-w64 UIAutomationClient.h C
+  vtables). One object knows another by its vtable pointer (an element
+  passed in, a condition), never by trusting the caller.
+  - IUIAutomation (`automation.rs`): ElementFromHandle (E_INVALIDARG for
+    no window), GetRootElement (the desktop), ElementFromPoint
+    (WindowFromPoint, else the root), GetFocusedElement, CompareElements,
+    the condition factories (true, false, property and property-ex, and,
+    or, not, the native-array forms), the raw/control/content view
+    conditions and walkers, CreateTreeWalker, IntNativeArrayToSafeArray,
+    RectToVariant; the BuildCache forms ignore the cache request.
+  - Elements (`element.rs`) are an HWND each, read live (no cache: the
+    Cached getters and GetCached* return current values). The root is
+    GetDesktopWindow(); its children are the visible top-level windows
+    (EnumWindows), a window's children its visible child windows in z
+    order. Properties: AutomationId = the control id in decimal (none
+    for top-level windows), Name = the text with '&' mnemonics removed
+    (buttons, statics), an edit's/combo's/list's Name the static label
+    just before it in z order, a window's its title, the root "Desktop
+    1"; ControlType by class (Button by BS_ style: CheckBox, RadioButton,
+    Group, Button; Edit; Static: Text or Image; ComboBox; ListBox,
+    ComboLBox, SysListView32: List; SysTreeView32, progress, tab, scroll
+    bar, status bar, tool bar, track bar, SysLink), otherwise Window for
+    a top-level window with WS_CAPTION and Pane for the rest (the root is
+    Pane); LocalizedControlType in English; BoundingRectangle =
+    GetWindowRect (as a VARIANT: VT_R8 array left, top, width, height);
+    ClassName, NativeWindowHandle, ProcessId (GetWindowThreadProcessId),
+    IsEnabled, HasKeyboardFocus, IsKeyboardFocusable, IsOffscreen (not
+    visible), IsPassword (ES_PASSWORD), FrameworkId "Win32", RuntimeId
+    {42, hwnd}, the Is<Pattern>PatternAvailable set. Other properties
+    are VT_EMPTY and recorded (Windows gives the ReservedNotSupported
+    value). FindFirst/FindAll walk in pre-order: TreeScope_Element,
+    _Children, _Descendants (Subtree = all three); _Parent and
+    _Ancestors are E_INVALIDARG, as documented. A find with no match is
+    S_OK with NULL (FindFirst) or an empty array.
+  - Conditions (`condition.rs`): one object type with a vtable per kind
+    (IIDs of Bool/Property/And/Or/Not condition). A property condition
+    keeps a VariantCopy of its value and compares it with the element's
+    current value: BSTRs exactly, or with PropertyConditionFlags
+    IgnoreCase (ASCII) / MatchSubstring; VT_I4; VT_BOOL. Arrays never
+    match (recorded).
+  - Patterns (`pattern.rs`): Invoke on push buttons posts BM_CLICK
+    (Invoke is documented as possibly asynchronous; the parent gets
+    WM_COMMAND BN_CLICKED when the message is dispatched, so the client
+    pumps messages); Value on edits (SetValue = WM_SETTEXT, read-only
+    edits UIA_E_INVALIDOPERATION, CurrentValue the window text,
+    IsReadOnly = ES_READONLY); Toggle on check boxes (BM_GETCHECK as the
+    state, Toggle sends BM_CLICK). Disabled windows give
+    UIA_E_ELEMENTNOTENABLED, destroyed ones UIA_E_ELEMENTNOTAVAILABLE.
+    GetCurrentPattern of a pattern the element lacks is S_OK with NULL.
+  - Walkers (`walker.rs`): a view is a condition; an element outside it
+    is skipped and its children take its place; the root is in every
+    view.
+  - The provider API: UiaClientsAreListening is FALSE,
+    UiaRaiseAutomationEvent / ...PropertyChangedEvent /
+    ...StructureChangedEvent / UiaDisconnect(All)Provider(s) succeed
+    doing nothing (no client listens), UiaReturnRawElementProvider
+    returns 0 (recorded), UiaHostProviderFromHwnd is E_NOTIMPL.
+- **user32 pieces it needed**: GetDesktopWindow (a handle below the
+  window table, 0xfff0, that IsWindow accepts and whose GetWindowRect is
+  the screen; it is not yet a real parent: top-level windows still have
+  parent 0, and CreateWindowEx with it as parent is not treated as
+  top-level), GetWindowThreadProcessId, and the system classes spelled
+  as Windows reports them (GetClassName: "Button", "Edit", "Static",
+  "ComboBox").
+
+Limits and TODO: everything runs in the client's process, so only that
+process's own windows are seen (user32's window table is per process),
+and on the client's thread (user32 has no cross-thread SendMessage);
+providers inside programs (WM_GETOBJECT answered with
+IRawElementProviderSimple via UiaReturnRawElementProvider, which wx and
+Qt implement for their widgets) are not consulted; no events
+(Add*EventHandler E_NOTIMPL); no cache requests; no IUIAutomation2+ /
+CUIAutomation8 (FlaUI's UIA3 asks for IUIAutomation2..6 first and falls
+back); no title bar or menu bar elements from the non-client area (on
+Windows a captioned window has a TitleBar child without an HWND, which
+`uia_test` allows for); ListBox/ComboBox items, Selection, ExpandCollapse,
+RangeValue, Text patterns. Then: FlaUI (.NET, MIT) on top as the test
+driver, running on gala's .NET support, and screen tests rewritten on
+it.
 
 ## Not done yet
 

@@ -508,10 +508,10 @@ pub fn register_system_classes() {
     }
     let classes: [(&[u8], crate::window::WndProc); 7] = [
         (b"#32770\0", crate::dialog::DefDlgProcW),
-        (b"STATIC\0", static_proc),
-        (b"BUTTON\0", button_proc),
-        (b"EDIT\0", edit_proc),
-        (b"COMBOBOX\0", crate::combo::combo_proc),
+        (b"Static\0", static_proc),
+        (b"Button\0", button_proc),
+        (b"Edit\0", edit_proc),
+        (b"ComboBox\0", crate::combo::combo_proc),
         (b"ComboLBox\0", crate::combo::list_proc),
         (b"#32768\0", crate::track::popup_proc),
     ];

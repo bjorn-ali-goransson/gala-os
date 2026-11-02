@@ -292,6 +292,12 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "uxtheme", file: "uxtheme.dll", exported_as: "testuxtheme.dll" },
     Dll { package: "comdlg32", file: "comdlg32.dll", exported_as: "testcomdlg32.dll" },
     Dll { package: "oleacc", file: "oleacc.dll", exported_as: "testoleacc.dll" },
+    // gala's UIAutomationCore.dll (UI Automation's client over HWNDs).
+    Dll {
+        package: "uiautomationcore",
+        file: "uiautomationcore.dll",
+        exported_as: "testuiautomationcore.dll",
+    },
     Dll { package: "mpr", file: "mpr.dll", exported_as: "testmpr.dll" },
     Dll { package: "msimg32", file: "msimg32.dll", exported_as: "testmsimg32.dll" },
     Dll { package: "odbc32", file: "odbc32.dll", exported_as: "testodbc32.dll" },
@@ -639,6 +645,16 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("user32_test", "advapi32.dll", "Windows/System32"),
     ("user32_test", "bcryptprimitives.dll", "Windows/System32"),
     ("user32_test", "user/bin/user32_test.exe", "gala"),
+    ("uia_test", "ntdll.dll", "Windows/System32"),
+    ("uia_test", "kernel32.dll", "Windows/System32"),
+    ("uia_test", "msvcrt.dll", "Windows/System32"),
+    ("uia_test", "user32.dll", "Windows/System32"),
+    ("uia_test", "gdi32.dll", "Windows/System32"),
+    ("uia_test", "ole32.dll", "Windows/System32"),
+    ("uia_test", "oleaut32.dll", "Windows/System32"),
+    ("uia_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("uia_test", "uiautomationcore.dll", "Windows/System32"),
+    ("uia_test", "user/bin/uia_test.exe", "gala"),
     ("msvcrt_test", "ntdll.dll", "Windows/System32"),
     ("msvcrt_test", "kernel32.dll", "Windows/System32"),
     ("msvcrt_test", "msvcrt.dll", "Windows/System32"),
@@ -2825,6 +2841,15 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=user32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["user32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // UI Automation's client (gala's UIAutomationCore.dll) over the
+        // window tree: elements, conditions, Invoke/Value/Toggle
+        // (user/uia_test/main.c, mingw).
+        name: "uia_test",
+        cmdline: "qemu_exit run=uia_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["uia_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // H3: gala's msvcrt against documented msvcrt behaviour

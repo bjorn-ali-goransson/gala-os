@@ -198,6 +198,15 @@ shows it.
   `--coff-exports` of `user/bin/test*.dll`, ordinals included (an export
   with RVA 0 is an empty ordinal slot, not an export).
 
+- **COM interfaces written in Rust** (gala's UIAutomationCore): take the
+  method order from the C `...Vtbl` structs in the mingw-w64 header
+  (inherited methods included). On x64 a by-value argument over 8 bytes
+  (VARIANT, RECT) arrives as a pointer to the caller's copy, an 8-byte
+  POINT in one register. Tell objects apart by a field, not only by
+  vtable address: identical read-only tables may be folded by the linker.
+  mingw-w64's headers spell some names differently from the SDK
+  (`TreeScope_SubTree` for `TreeScope_Subtree`): a C test meant to build
+  with both uses the value.
 - **Predefined registry keys are sign-extended on x64**: winreg.h
   defines HKEY_LOCAL_MACHINE as `(HKEY)(ULONG_PTR)((LONG)0x80000002)`,
   0xFFFFFFFF80000002; C programs and .NET pass that form, Rust test
