@@ -2384,10 +2384,31 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   groups (every auto radio button of a parent is one group).
   COMBOBOX (`combo.rs`; user32 now has the process heap as its
   allocator, `gala_heap`): strings with data, the selection, an EDIT
-  child for CBS_DROPDOWN/CBS_SIMPLE whose text is the combo box's, a
-  hidden ComboLBox popup as its list (the desktop cannot show a
-  frameless popup yet, so a click on a drop-down list steps to the next
-  item, as do the arrows and the wheel; CBN_SELCHANGE), GetComboBoxInfo.
+  child for CBS_DROPDOWN/CBS_SIMPLE whose text is the combo box's,
+  GetComboBoxInfo. Its list is one ComboLBox window per combo box
+  (hwndList), a desktop popup that a press on the box (CBS_DROPDOWNLIST:
+  anywhere; CBS_DROPDOWN: the button), F4, Alt+Down or CB_SHOWDROPDOWN
+  places under the combo box's window rectangle (above it when the work
+  area has more room there; as wide as the box or CB_SETDROPPEDWIDTH; up
+  to CB_SETMINVISIBLE items, 30 by default, of 24 rows) and shows after
+  CBN_DROPDOWN. It is not a modal loop: while the list shows it holds
+  the desktop's capture (GalaWindowCapture) and the program's own loop
+  delivers its mouse input to `list_proc` (client coordinates, negative
+  outside): moves light the hot item, a release on an item picks it
+  (selected, CBN_SELENDOK, hidden, CBN_CLOSEUP, then CBN_SELCHANGE, in
+  Wine's order: Windows documents CBN_SELCHANGE against CBN_CLOSEUP as
+  unpredictable), a press outside closes it (CBN_SELENDCANCEL,
+  CBN_CLOSEUP), the wheel scrolls (a thin thumb shows when not every
+  item fits). Keys go to the combo box (its edit passes F4, the vertical
+  arrows, pages, and Enter/Escape while dropped, through
+  `combo::edit_key`): the arrows change the selection (CBN_SELCHANGE)
+  dropped or not, Enter keeps it, Escape restores the one the list
+  dropped with; WM_GETDLGCODE asks for every key while dropped, so
+  IsDialogMessage leaves Enter and Escape to it. Drawn light (1px
+  border, rounded hover, the selected item tinted with an accent pill).
+  Not yet: CBS_SIMPLE's always-shown list, owner-drawn items, the
+  combo box's window height (Windows keeps it to the selection field and
+  takes the creation height as the list's).
   DrawTextW (`text.rs`) splits, wraps, ellipsizes and aligns lines over
   gdi32's ExtTextOutW (1024 characters at most).
 - **Dialogs** (`dialog.rs`; `controls_test`): CreateDialogIndirectParamW

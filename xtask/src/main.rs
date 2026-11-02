@@ -2628,6 +2628,7 @@ const SCENARIOS: &[Scenario] = &[
             "gui_test: click",
             "gui_test: typed hi",
             "gui_test: menu 202",
+            "gui_test: combo picked Blue",
             "xtask: screen ok",
             "gui_test: ok",
             "exited with status 0x00000000",
@@ -4328,14 +4329,42 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
+                    // The drop-down list combo box at client (220, 20) -
+                    // (370, 46), screen (321, 153) - (471, 179): a click on
+                    // it (396, 166) drops its list, a popup under it
+                    // (y 179..257, items of 24 rows from 182): light grey,
+                    // "Red" selected (the selected item's tint and accent
+                    // pill), "Blue" in the third row.
+                    input: &["mouse_move 0 -210", "mouse_button 1", "mouse_button 0"],
+                    pixels: &[
+                        PixelCheck::At(468, 220, 0xf9f9f9),            // the list
+                        PixelCheck::At(321, 220, 0xc8c8c8),            // its border
+                        PixelCheck::AnyIn(325, 186, 4, 16, 0x005fb8),  // the pill
+                        PixelCheck::AnyIn(335, 232, 40, 20, 0x1b1b1b), // "Blue"
+                    ],
+                },
+                ScreenStep {
+                    // The pointer on "Blue" (396, 242) lights it.
+                    input: &["mouse_move 0 76"],
+                    pixels: &[
+                        PixelCheck::At(332, 242, 0xe6e8eb), // the hover
+                        PixelCheck::At(332, 194, 0xeeeff1), // "Red", selected
+                    ],
+                },
+                ScreenStep {
+                    // A click picks it: the list goes, the program paints
+                    // its magenta square at client (380, 60) - (392, 72).
+                    input: &["mouse_button 1", "mouse_button 0"],
+                    pixels: &[
+                        PixelCheck::At(487, 199, 0xff00ff),            // the mark
+                        PixelCheck::At(468, 220, 0xffffff),            // the list gone
+                        PixelCheck::AnyIn(331, 156, 40, 20, 0x1b1b1b), // "Blue" shown
+                    ],
+                },
+                ScreenStep {
                     // The close button (x 453..498 of the caption): the program
                     // ends (WM_SYSCOMMAND SC_CLOSE; no screendump).
-                    input: &[
-                        "mouse_move 80 -130",
-                        "mouse_move 0 -129",
-                        "mouse_button 1",
-                        "mouse_button 0",
-                    ],
+                    input: &["mouse_move 80 -125", "mouse_button 1", "mouse_button 0"],
                     pixels: &[],
                 },
             ],
