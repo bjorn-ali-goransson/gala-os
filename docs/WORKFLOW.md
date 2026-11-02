@@ -833,11 +833,20 @@ reported with its seed, its log (`target/failed/sim-<program>-<seed>-
   (state, deadline) and the NT layer's view (each thread's system call
   and the objects it waits on). Make the smallest test program that
   waits that way and add it to SIM_PROGRAMS.
-- "not reproducible (watchdog preemptions or RDRAND)": the program spun
-  in program code (the watchdog preempted it) or executes RDRAND
-  itself (gala's ProcessPrng does not under `--sim`: it asks the kernel,
-  so Go programs repeat): such runs are reported, not failed; a hang or
-  a wrong result in them is still a failure.
+- "not reproducible (watchdog preemptions)": a thread computed in
+  program code for ~100 ms without a system call while another could
+  run, and the watchdog preempted it where it was (a spin loop that
+  repeats exactly is preempted reproducibly instead: "N spin loops
+  preempted"). Reported, not failed, for programs outside SIM_PROGRAMS;
+  a SIM_PROGRAM must repeat. A hang or a wrong result is a failure.
+- In the simulation program code faults on purpose: CPUID (CPUID
+  faulting), RDTSC, and any read of KUSER_SHARED_DATA (its page is
+  `PROT_NONE`; the read is then single-stepped, SIGTRAP), and the spin
+  capture single-steps spinning threads. In gdb add `handle SIGTRAP
+  nostop noprint` too, and do not read 0x7ffe0000 from gdb expecting
+  data (use the NT layer's copy). A program's own single-stepping (the
+  trap flag) still works, except on an instruction that reads
+  KUSER_SHARED_DATA (that trap is taken as the simulation's).
 - A new multi-threaded test program: add it to SIM_PROGRAMS (`true` if
   its system calls can interleave, so traces must differ across seeds).
 

@@ -3641,7 +3641,10 @@ is the glue that hands one baton between host threads.
   counts held IrqMutexes as the kernel's interrupt flag; one lock point
   in 8 (by the PRNG) switches threads. Lock points interleave threads
   *inside* system calls at lock granularity, as two processors would;
-  they are not recorded in the trace and take no virtual time.
+  they are not recorded in the trace and take no virtual time. **Clock
+  reads**: a read of KUSER_SHARED_DATA in program code (below) is one in
+  16 (by the PRNG) a switch, as a timer interrupt would make it: a thread
+  polling the time for another's progress lets it run.
 - **Choice**: `pick` chooses among runnable threads. Odd seeds: uniformly
   (many short interleavings). Even seeds: by random priorities, the
   highest runs (long runs of one thread while another is stopped at an
@@ -3660,7 +3663,51 @@ is the glue that hands one baton between host threads.
   point moves time past a tick, not on a host timer thread. RDTSC and
   RDTSCP in program code fault (`PR_SET_TSC`, `PR_TSC_SIGSEGV`) and read
   the virtual clock as a 1 GHz counter, one step per read; RDTSCP's
-  TSC_AUX is the thread's simulated processor.
+  TSC_AUX is the thread's simulated processor. **KUSER_SHARED_DATA**'s
+  page is inaccessible to program code (`PROT_NONE` when mapped,
+  `entry::hide_kuser`): a read faults, takes one step of virtual time
+  (`sim::clock_read`, the tick callback if a tick passed: the page's
+  times change at ticks, as on Windows), and the instruction then runs
+  single-stepped (the trap flag) with the page readable for that one
+  instruction; the debug trap makes it inaccessible again. Only the baton
+  holder runs, so no other thread sees it readable. A program polling
+  GetTickCount or Go's `nanotime` without system calls sees time move.
+- **CPUID and random numbers**: RDRAND and RDSEED cannot be trapped on
+  Linux, so program threads run with CPUID faulting (`arch_prctl
+  (ARCH_SET_CPUID, 0)`, Intel's CPUID faulting, which KVM offers its
+  guests): CPUID raises SIGSEGV and `entry::simulated_cpuid` answers
+  with the processor's own values (faulting off for the one
+  instruction) without RDRAND (leaf 1 ECX bit 30) and RDSEED (leaf 7
+  EBX bit 18), and with the simulated processor as APIC id (leaves 1,
+  0xB, 0x1F). A program that checks CPUID before executing RDRAND
+  itself then takes another path. gala's own DLLs do not execute it in
+  the simulation: ProcessPrng (bcryptprimitives; BCryptGenRandom,
+  RtlGenRandom and CryptGenRandom go through it; no other gala DLL uses
+  RDRAND) asks the kernel first (GalaRandom, R7 "Record/replay"), which
+  in the simulation answers from the seed, so Go's runtime, which seeds
+  its scheduler and maps from ProcessPrng, repeats. Without CPUID
+  faulting on the host um says so once and RDRAND stays visible.
+- **Spinning in program code**: a thread that spins waiting for another
+  without system calls or clock reads (Go's background sweeper waits for
+  sweepers to finish, `bgsweep`: lock, test, unlock) would run for
+  ever, since nobody else runs. A host watchdog thread notices a thread
+  that used 10 ms of processor time without a scheduling point while
+  another program thread could run, and interrupts it (SIGURG). Where it
+  interrupts depends on the host's timing, so the thread is not
+  preempted there: entry.rs single-steps it, and `sim::SpinCapture` finds
+  its loop. Only one thread runs, so memory changes only by the
+  spinner's own stores, and a spin-wait comes back to exactly the same
+  registers each turn: Brent's cycle detection on (rip, rflags, the 16
+  registers) finds a repeat, one more turn finds the cycle's least state
+  (by rip, then registers), and the thread is preempted when it is there
+  next: the same state in every run, whichever turn the watchdog
+  interrupted ("N spin loops preempted" on the `sim:` line). Time then
+  jumps to the next deadline and another thread runs. A capture gives up
+  (and the thread runs on, unchanged) after 65536 steps or when the
+  instruction at Brent's mark comes back 1024 times with other registers
+  (a counting loop: a computation or a delay loop); a system call, a
+  fault or a clock read ends it too. go_gc's sweeper loop is about 800
+  instructions; a capture costs a few milliseconds.
 - **Processors**: a simulated thread runs on one processor, chosen from
   its affinity by its id, and its host thread is pinned there (RDTSCP and
   NtGetCurrentProcessorNumber agree, independent of the host).
@@ -3676,27 +3723,26 @@ is the glue that hands one baton between host threads.
   (thread, result) in order: `sim: seed S trace H (N scheduling points,
   T ms virtual)` at the end. Same seed, same hash.
 - **Cost when off**: one relaxed load of a flag at each seam call
-  (threads.rs, entry.rs, `host_cpu`); the kernel binary has none of it
-  (`sim.rs` is compiled for tests and `hosted` only).
+  (threads.rs, entry.rs, memory.rs's page insertion, `Entropy`,
+  `host_cpu`); the kernel binary has none of it (`sim.rs` is compiled
+  for tests and `hosted` only).
 - **Limits**:
-  - Program code between system calls runs unpreempted. A thread that
-    spins in program code waiting for another (no system call) would
-    run for ever, so a host watchdog thread preempts one that used
-    100 ms of processor time without a scheduling point, if another
-    program thread could run; time jumps to the next deadline (a
-    `Sleep(1)` poller gets its turn) and another thread runs. These
-    preemptions depend on the host's timing: the run's line says
-    "watchdog preemptions ...: not reproducible". Go's garbage
-    collector spins this way.
-  - RDRAND/RDSEED cannot be intercepted on Linux. gala's ProcessPrng
-    (hence Go's runtime, which seeds its scheduler from it) takes its
-    numbers from the kernel under the simulation (GalaRandom, R7:
-    "Record/replay"), so Go programs repeat from their seed; a program
-    executing RDRAND itself does not. Next: CPUID faulting
-    (`ARCH_SET_CPUID`) to hide RDRAND from such programs.
-  - KUSER_SHARED_DATA's times change only at scheduling points: program
-    code polling GetTickCount without system calls sees time stand still
-    (until the watchdog).
+  - Program code between system calls and clock reads runs
+    unpreempted. A thread that computes (no exact repeat) for 10
+    captures in a row, about 100 ms of processor time, while another
+    program thread could run is preempted where the watchdog interrupted
+    it: that depends on the host's timing, and the run's line says
+    "watchdog preemptions ...: not reproducible" (sim-test tolerates it
+    only for programs outside SIM_PROGRAMS). fpu_test's long PAUSE loops
+    come close. A spin-wait whose loop does not repeat exactly (it counts
+    its turns in a register, or changes memory each turn) is such a
+    computation. Next: preemption by instruction count (performance
+    counters, as rr), where the host has them (this one's VM does not).
+  - The spin capture compares the general registers, not the vector
+    registers or memory: a loop that differs only there would be
+    preempted at a point that need not repeat (none seen).
+  - CPUID faulting needs the host's support (Intel, or a KVM guest);
+    without it RDRAND stays visible (um warns).
   - A program thread waiting with no deadline on a timer due in more
     than 300 s of virtual time is reported as a deadlock.
   - Host allocations (glibc's arenas) and new host threads' startup

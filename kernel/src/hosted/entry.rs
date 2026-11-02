@@ -21,6 +21,7 @@ use super::HOST_START;
 use crate::arch::cpu::FxState;
 use crate::arch::interrupts::TrapFrame;
 use crate::arch::syscall::{SyscallFrame, UserRegs};
+use crate::sim::{SpinCapture, SpinState, SpinStep};
 
 const HOST_END: u64 = 0x8000_0000_0000;
 const PR_SET_SYSCALL_USER_DISPATCH: i32 = 59;
@@ -28,6 +29,19 @@ const PR_SYS_DISPATCH_ON: u64 = 1;
 const SYSCALL_DISPATCH_FILTER_BLOCK: u8 = 1;
 /// asm/prctl.h.
 const ARCH_SET_GS: i32 = 0x1001;
+/// asm/prctl.h: with 0, CPUID faults (#GP, SIGSEGV) on this thread.
+const ARCH_SET_CPUID: i32 = 0x1012;
+/// RFLAGS.TF: single-step.
+const RFLAGS_TF: u64 = 1 << 8;
+/// RFLAGS.RF: resume (set by the processor around debug traps).
+const RFLAGS_RF: u64 = 1 << 16;
+/// Spin captures of one spin episode that may give up before the
+/// watchdog preempts where it interrupted (not reproducible): with the
+/// watchdog's 10 ms between them, a thread computes for about 100 ms of
+/// processor time without a system call before that.
+const SPIN_GIVE_UPS: u32 = 10;
+/// KUSER_SHARED_DATA's page.
+const KUSER: u64 = crate::nt::kuser::ADDRESS;
 /// The signal that enters user mode (see `enter_user`).
 const SIG_ENTER: i32 = libc::SIGUSR2;
 /// The signal that sends a thread in user code through the user-return
@@ -52,6 +66,138 @@ std::thread_local! {
     static ENTER: Cell<Option<UserRegs>> = const { Cell::new(None) };
     /// This thread's user GS base (its TEB).
     static GS_BASE: Cell<u64> = const { Cell::new(0) };
+    /// Simulation: this thread is single-stepping an instruction that
+    /// reads KUSER_SHARED_DATA, whose page is readable until it is done.
+    static STEPPING: Cell<bool> = const { Cell::new(false) };
+    /// Simulation: this thread spins in program code and is being
+    /// single-stepped to its loop's canonical point (`on_interrupt`).
+    static CAPTURE: Cell<Option<SpinCapture>> = const { Cell::new(None) };
+    /// Simulation: (scheduling points as of the capture that gave up,
+    /// captures that gave up since then).
+    static GAVE_UP: Cell<(u64, u32)> = const { Cell::new((0, 0)) };
+}
+
+/// The registers a spin capture compares.
+fn spin_state(gr: &Gregs) -> SpinState {
+    use libc::*;
+    let order = [
+        REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI, REG_R8, REG_R9,
+        REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15,
+    ];
+    let mut state = [0; 18];
+    state[0] = g(gr, REG_RIP);
+    state[1] = g(gr, REG_EFL) & !(RFLAGS_TF | RFLAGS_RF);
+    for (i, reg) in order.into_iter().enumerate() {
+        state[2 + i] = g(gr, reg);
+    }
+    state
+}
+
+/// The interrupted program's registers.
+fn interrupted_regs(gr: &Gregs) -> UserRegs {
+    use libc::*;
+    let order = [
+        REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI, REG_R8, REG_R9,
+        REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15,
+    ];
+    let mut regs = UserRegs { rip: g(gr, REG_RIP), rflags: g(gr, REG_EFL), ..UserRegs::default() };
+    for (i, reg) in order.into_iter().enumerate() {
+        regs.gpr[i] = g(gr, reg);
+    }
+    regs
+}
+
+/// Simulation: the watchdog interrupted this thread spinning in program
+/// code. Rather than preempt it here (a point that depends on the host's
+/// timing), single-step it to its spin loop's canonical point
+/// (`crate::sim::SpinCapture`; the steps arrive in `on_fault`). False if
+/// captures already gave up too often in this spin episode (the thread
+/// computes, or its loop does not repeat exactly): then it is preempted
+/// where it is.
+fn begin_capture(gr: &mut Gregs) -> bool {
+    let (at, n) = GAVE_UP.with(Cell::get);
+    if at == super::sim::steps() && n >= SPIN_GIVE_UPS {
+        return false;
+    }
+    CAPTURE.with(|c| c.set(Some(SpinCapture::new(&spin_state(gr)))));
+    set(gr, libc::REG_EFL, g(gr, libc::REG_EFL) | RFLAGS_TF);
+    true
+}
+
+/// Simulation: a spin capture in progress ends (another signal came: the
+/// thread made a system call or faulted, so it was not spinning).
+fn end_capture(gr: &mut Gregs) {
+    if CAPTURE.with(Cell::take).is_some() {
+        set(gr, libc::REG_EFL, g(gr, libc::REG_EFL) & !RFLAGS_TF);
+    }
+}
+
+/// Simulation: a single step of a spin capture (`on_fault`'s debug trap).
+fn capture_step(gr: &mut Gregs, mut capture: SpinCapture) {
+    match capture.step(&spin_state(gr)) {
+        SpinStep::Continue => CAPTURE.with(|c| c.set(Some(capture))),
+        SpinStep::Preempt => {
+            set(gr, libc::REG_EFL, g(gr, libc::REG_EFL) & !RFLAGS_TF);
+            super::sim::preempt(true);
+            return_to_user(gr, interrupted_regs(gr));
+        }
+        SpinStep::GiveUp => {
+            set(gr, libc::REG_EFL, g(gr, libc::REG_EFL) & !RFLAGS_TF);
+            let steps = super::sim::steps();
+            GAVE_UP.with(|c| {
+                let (at, n) = c.get();
+                c.set((steps, if at == steps { n + 1 } else { 1 }));
+            });
+        }
+    }
+}
+
+/// Simulation: KUSER_SHARED_DATA's page is inaccessible to program code
+/// (`hide_kuser`), so reading the time from it faults and goes through
+/// `sim::clock_read` (virtual time moves; maybe another thread runs). The
+/// faulting instruction then runs with the page readable for that one
+/// instruction (the trap flag set; the debug trap that follows makes it
+/// inaccessible again). Only the baton holder runs program code, so no
+/// other thread sees the page readable.
+fn kuser_protect(prot: i32) {
+    // SAFETY: KUSER_SHARED_DATA's page is gala-um's own mapping of the
+    // shared frame (memory.rs); changing its protection affects only the
+    // program's view of it (the NT layer writes it through the HHDM).
+    unsafe { libc::mprotect(KUSER as *mut libc::c_void, 0x1000, prot) };
+}
+
+/// Simulation: makes KUSER_SHARED_DATA's page inaccessible to the program
+/// (memory.rs, when it is mapped).
+pub fn hide_kuser() {
+    kuser_protect(libc::PROT_NONE);
+}
+
+/// Simulation: CPUID in program code faults (CPUID faulting) and is
+/// answered here: the processor's own answer (CPUID faulting off for the
+/// one instruction) with RDRAND and RDSEED cleared, so programs use
+/// ProcessPrng, which draws on the seed, and with the APIC ids of the
+/// simulated processor (as RDTSCP's TSC_AUX). Returns (eax, ebx, ecx, edx).
+fn simulated_cpuid(leaf: u32, sub: u32) -> (u32, u32, u32, u32) {
+    // SAFETY: plain arch_prctl calls on this thread; CPUID has no side
+    // effects.
+    let r = unsafe {
+        libc::syscall(libc::SYS_arch_prctl, ARCH_SET_CPUID, 1);
+        let r = core::arch::x86_64::__cpuid_count(leaf, sub);
+        libc::syscall(libc::SYS_arch_prctl, ARCH_SET_CPUID, 0);
+        r
+    };
+    let cpu = super::threads::current_cpu();
+    let (eax, mut ebx, mut ecx, mut edx) = (r.eax, r.ebx, r.ecx, r.edx);
+    match leaf {
+        1 => {
+            ecx &= !(1 << 30); // RDRAND
+            ebx = (ebx & 0x00ff_ffff) | (cpu << 24); // initial APIC id
+        }
+        7 if sub == 0 => ebx &= !(1 << 18), // RDSEED
+        0xb | 0x1f => edx = cpu,            // x2APIC id
+        _ => {}
+    }
+    (eax, ebx, ecx, edx)
 }
 
 pub fn set_syscall_handler(handler: fn(&mut SyscallFrame)) {
@@ -122,6 +268,9 @@ extern "C" fn on_sigsys(_sig: i32, _info: *mut libc::siginfo_t, context: *mut li
     use libc::*;
     with_context(context, |uc| {
         let gr = &mut uc.uc_mcontext.gregs;
+        if super::sim::on() {
+            end_capture(gr);
+        }
         let mut frame = SyscallFrame {
             r15: g(gr, REG_R15),
             r14: g(gr, REG_R14),
@@ -172,12 +321,60 @@ extern "C" fn on_fault(sig: i32, info: *mut libc::siginfo_t, context: *mut libc:
         let rip = g(gr, REG_RIP);
         // SAFETY: si_addr is valid for the fault signals.
         let addr = unsafe { (*info).si_addr() } as u64;
+        // Simulation: a step of a spin capture, or (another signal) its end.
+        if super::sim::on()
+            && let Some(capture) = CAPTURE.with(Cell::take)
+        {
+            if sig == SIGTRAP && g(gr, REG_TRAPNO) == 1 {
+                capture_step(gr, capture);
+                return;
+            }
+            set(gr, REG_EFL, g(gr, REG_EFL) & !RFLAGS_TF);
+        }
+        // Simulation: the end of a single-stepped read of KUSER_SHARED_DATA
+        // (or a fault of that instruction, handled as usual below).
+        let stepped = super::sim::on() && STEPPING.with(|s| s.replace(false));
+        if stepped {
+            hide_kuser();
+            set(gr, REG_EFL, g(gr, REG_EFL) & !RFLAGS_TF);
+            if sig == SIGTRAP && g(gr, REG_TRAPNO) == 1 {
+                return;
+            }
+        }
+        // Simulation: a read of KUSER_SHARED_DATA (the time) faulted. (A
+        // write, or a fault of the stepped instruction itself, is the
+        // program's access violation, below.)
+        if super::sim::on()
+            && !stepped
+            && sig == SIGSEGV
+            && g(gr, REG_TRAPNO) == 14
+            && g(gr, REG_ERR) & 2 == 0
+            && (KUSER..KUSER + 0x1000).contains(&addr)
+        {
+            super::sim::clock_read();
+            // Another thread may have run (and suspended this one, or
+            // queued an APC): the user-return hook, as after a system call.
+            return_to_user(gr, interrupted_regs(gr));
+            kuser_protect(libc::PROT_READ);
+            set(gr, REG_EFL, g(gr, REG_EFL) | RFLAGS_TF);
+            STEPPING.with(|s| s.set(true));
+            return;
+        }
         // Simulation: RDTSC/RDTSCP fault (PR_TSC_SIGSEGV) and read the
-        // virtual clock, in program code and in the host's alike.
+        // virtual clock, and CPUID faults (CPUID faulting), in program code
+        // and in the host's alike.
         if super::sim::on() && sig == SIGSEGV && g(gr, REG_TRAPNO) == 13 {
             // SAFETY: the instruction at rip was just fetched (a #GP, not
             // a page fault), so its bytes are readable.
             let code = unsafe { core::ptr::read_unaligned(rip as *const [u8; 3]) };
+            if code[..2] == [0x0f, 0xa2] {
+                let (a, b, c, d) = simulated_cpuid(g(gr, REG_RAX) as u32, g(gr, REG_RCX) as u32);
+                for (reg, value) in [(REG_RAX, a), (REG_RBX, b), (REG_RCX, c), (REG_RDX, d)] {
+                    set(gr, reg, u64::from(value));
+                }
+                set(gr, REG_RIP, rip + 2);
+                return;
+            }
             let length = match code {
                 [0x0f, 0x31, _] => Some(2),
                 [0x0f, 0x01, 0xf9] => Some(3),
@@ -252,21 +449,25 @@ extern "C" fn on_interrupt(_sig: i32, _info: *mut libc::siginfo_t, context: *mut
         return;
     }
     // Simulation: only the watchdog interrupts program code (a thread
-    // spinning without system calls); others get the processor.
+    // spinning without system calls); others get the processor, at the
+    // spin loop's canonical point if it has one (`begin_capture`).
     if super::sim::on() {
-        super::sim::preempt();
+        if STEPPING.with(Cell::get) || CAPTURE.with(|c| c.get().is_some()) {
+            // Single-stepping (a read of KUSER_SHARED_DATA, or a capture
+            // already under way).
+            return;
+        }
+        // SAFETY: the kernel passes the interrupted thread's ucontext,
+        // valid until the handler returns.
+        let gr = unsafe { &mut (*context.cast::<ucontext_t>()).uc_mcontext.gregs };
+        if begin_capture(gr) {
+            return;
+        }
+        super::sim::preempt(false);
     }
     with_context(context, |uc| {
         let gr = &mut uc.uc_mcontext.gregs;
-        let order = [
-            REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI, REG_R8, REG_R9,
-            REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15,
-        ];
-        let mut regs = UserRegs { rip, rflags: g(gr, REG_EFL), ..UserRegs::default() };
-        for (i, reg) in order.into_iter().enumerate() {
-            regs.gpr[i] = g(gr, reg);
-        }
-        return_to_user(gr, regs);
+        return_to_user(gr, interrupted_regs(gr));
     });
 }
 
@@ -316,9 +517,22 @@ pub fn init_thread() {
     }
     // Simulation: RDTSC and RDTSCP raise SIGSEGV, and `on_fault` answers
     // from the virtual clock (they would read the host's).
+    // CPUID faults too (CPUID faulting), and `on_fault` answers it with
+    // RDRAND and RDSEED hidden (they cannot be trapped).
     if super::sim::on() {
         // SAFETY: a plain prctl on this thread.
         unsafe { libc::prctl(libc::PR_SET_TSC, libc::PR_TSC_SIGSEGV, 0, 0, 0) };
+        // SAFETY: a plain arch_prctl on this thread.
+        if unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_SET_CPUID, 0) } != 0 {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                std::eprintln!(
+                    "sim: no CPUID faulting on this host ({}): RDRAND stays visible, and \
+                     programs that use it (Go's, through ProcessPrng) are not reproducible",
+                    std::io::Error::last_os_error()
+                )
+            });
+        }
     }
     let stack = alloc::vec![0u8; ALT_STACK].leak();
     let ss = libc::stack_t { ss_sp: stack.as_mut_ptr().cast(), ss_flags: 0, ss_size: ALT_STACK };

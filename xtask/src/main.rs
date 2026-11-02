@@ -4749,28 +4749,24 @@ const SIM_PROGRAMS: &[(&str, bool)] = &[
     ("clock_test", false),
     ("ioapc_test", false),
     ("smp_test", false),
-    // Go's runtime: its random numbers (ProcessPrng) come from the seed
-    // through GalaRandom (R7), so its runs repeat too.
+    // Go: the runtime's own threads (sysmon, the garbage collector's
+    // workers) make system calls of their own. Its random numbers
+    // (ProcessPrng) come from the seed through GalaRandom (R7); its
+    // spin-waits read the time from KUSER_SHARED_DATA, which the
+    // simulation traps, and the garbage collector's spin loops are
+    // preempted at a canonical point (ARCHITECTURE "Deterministic
+    // simulation").
     ("go_hello", true),
     ("go_goroutines", true),
+    ("go_time", true),
+    ("go_gc", true),
+    ("go_os", true),
+    ("go_exit", true),
 ];
-/// Programs whose runs are not reproducible from the seed: Go's garbage
-/// collector spins in program code (watchdog preemptions). `--all` runs
-/// them; differing traces are reported, not failed. (The other Go
-/// programs used to be here: their runtime drew on RDRAND until gala's
-/// ProcessPrng took the seed's numbers from GalaRandom.)
-const SIM_UNSEEDED: &[&str] = &["go_gc"];
 /// Seeds per program by default (1..=N), each run twice.
 const SIM_SEEDS: u64 = 4;
 /// A simulated run may take this long (a hang is a failure).
 const SIM_TIMEOUT_SECS: u32 = 60;
-/// Go's garbage collector spins in program code: each watchdog preemption
-/// costs 100 ms of processor time (go_gc: ~150 of them).
-const SIM_UNSEEDED_TIMEOUT_SECS: u32 = 240;
-
-fn sim_timeout(program: &str) -> u32 {
-    if SIM_UNSEEDED.contains(&program) { SIM_UNSEEDED_TIMEOUT_SECS } else { SIM_TIMEOUT_SECS }
-}
 /// um's exit status for a deadlock found by the simulation.
 const SIM_DEADLOCK_EXIT: i32 = 4;
 
@@ -4826,7 +4822,7 @@ fn sim_test(
         .collect();
     let started = Instant::now();
     let results = run_parallel(&jobs, |(s, seed, _)| {
-        run_um_with(&um, s, &[format!("--sim={seed}")], sim_timeout(s.name))
+        run_um_with(&um, s, &[format!("--sim={seed}")], SIM_TIMEOUT_SECS)
     });
     let dir = target_dir().join("failed");
     let mut failures = Vec::new();
@@ -4841,7 +4837,7 @@ fn sim_test(
             let _ = fs::create_dir_all(&dir).and_then(|()| fs::write(&file, &log));
             let tail: Vec<&str> = log.lines().rev().take(30).collect();
             let tail: Vec<&str> = tail.into_iter().rev().collect();
-            let repeat = um_command(&um, s, &[format!("--sim={seed}")], sim_timeout(s.name))
+            let repeat = um_command(&um, s, &[format!("--sim={seed}")], SIM_TIMEOUT_SECS)
                 .map_or_else(|e| e, |c| shell_line(&c));
             failures.push(format!(
                 "{} seed {seed}: {why}; log {}; repeat with:\n    {repeat}\n    {}",
@@ -4883,12 +4879,12 @@ fn sim_test(
                     log_a.display(),
                     log_b.display()
                 );
-                // The watchdog preempted a thread spinning in program code,
-                // or the program draws on RDRAND: limits of the simulation,
-                // not bugs in the NT layer.
-                if line_a.contains("watchdog")
-                    || line_b.contains("watchdog")
-                    || SIM_UNSEEDED.contains(&s.name)
+                // The watchdog preempted a thread spinning in program code
+                // (it depends on the host's timing): a limit of the
+                // simulation, tolerated for `--all`'s other programs. The
+                // SIM_PROGRAMS must repeat.
+                if (line_a.contains("watchdog") || line_b.contains("watchdog"))
+                    && !SIM_PROGRAMS.iter().any(|(p, _)| *p == s.name)
                 {
                     warnings.push(what);
                 } else {
@@ -4911,7 +4907,7 @@ fn sim_test(
         }
     }
     for w in &warnings {
-        eprintln!("xtask: sim test: not reproducible (watchdog preemptions or RDRAND): {w}");
+        eprintln!("xtask: sim test: not reproducible (watchdog preemptions): {w}");
     }
     for f in &failures {
         eprintln!("xtask: sim test FAILED: {f}");
@@ -7049,11 +7045,21 @@ mod constants {
     #[test]
     fn sim_test_programs_and_trace_line() {
         use super::*;
-        for name in SIM_PROGRAMS.iter().map(|(p, _)| *p).chain(SIM_UNSEEDED.iter().copied()) {
+        for name in SIM_PROGRAMS.iter().map(|(p, _)| *p) {
             assert!(
                 SCENARIOS.iter().any(|s| s.name == name && runs_in_um(s)),
                 "{name} is not a gala-um scenario"
             );
+        }
+        // Every Go program gala-um runs is simulated and must repeat from
+        // its seed (Go's runtime is our most demanding threaded program).
+        for name in GO_PROGRAMS {
+            if SCENARIOS.iter().any(|s| s.name == *name && runs_in_um(s)) {
+                assert!(
+                    SIM_PROGRAMS.iter().any(|(p, threaded)| p == name && *threaded),
+                    "{name} runs in gala-um but is not in SIM_PROGRAMS"
+                );
+            }
         }
         let log = "x\nsim: seed 7 trace 3145af8e34765682 (214 scheduling points, 110 ms virtual)\n";
         assert_eq!(sim_trace(log), Some("3145af8e34765682"));

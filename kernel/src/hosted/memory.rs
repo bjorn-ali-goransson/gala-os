@@ -220,6 +220,11 @@ impl UserSpace {
 
     fn insert(&mut self, page: u64, entry: Page) -> Result<(), PagingError> {
         mmap_frame(page, entry.frame, entry.flags, self.placed.contains(&page))?;
+        // Simulation: reading the time from KUSER_SHARED_DATA faults
+        // (entry.rs, `hide_kuser`).
+        if super::sim::on() && page == crate::nt::kuser::ADDRESS {
+            super::entry::hide_kuser();
+        }
         // The page table's bookkeeping is gala-um's (std's maps allocate
         // infallibly); the kernel's tables come from fallible frames.
         let _host = super::HostCode::enter();

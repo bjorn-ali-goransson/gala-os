@@ -1558,13 +1558,23 @@ R. **Robustness and live update, kernel included** (the owner's
      (`Sleep(1)` pollers starved: the watchdog now jumps time to the
      next deadline and runs another thread), and starvation under
      priorities (demotion on yields and long runs).
-     **ProcessPrng fed by the kernel** (with R7, 2026-11-02: GalaRandom
-     serves the seed's numbers): Go programs now repeat from their seed
-     (go_hello, go_goroutines in sim-test; go_gc's spinning collector
-     still needs the watchdog). Next: CPUID faulting to hide RDRAND from
-     programs that execute it themselves; preemption in program code by
-     instruction count (perf counters, as rr) instead of the host-timed
-     watchdog.
+     **ProcessPrng fed by the kernel** (with R7: GalaRandom serves the
+     seed's numbers) made go_hello and go_goroutines repeat. **All Go
+     programs repeat (2026-11-02)**: CPUID faulting hides RDRAND/RDSEED
+     from programs that execute them themselves (CPUID answered by
+     gala-um, the APIC ids the simulated processor's); KUSER_SHARED_DATA
+     reads trap (the page is
+     inaccessible, the read runs single-stepped) and move virtual time,
+     one in 16 a switch; a thread spinning in program code is preempted
+     at its loop's canonical point (single-stepped until Brent's cycle
+     detection finds the loop, then at its least state), not where the
+     watchdog (now 10 ms) interrupted it. The six gala-um Go programs are
+     in SIM_PROGRAMS (go_gc: ~100 spin loops preempted per run, 5 s
+     instead of up to a minute); `sim-test --all` (92 programs x 4
+     seeds, twice) passes with every run repeating, and the Go programs
+     x 16 seeds too (fpu_test's long PAUSE loops come closest to the
+     timing-dependent fallback). Next: preemption by instruction count
+     (perf counters, as rr) for computations, on hosts that have them.
    - R6. **Charging resources to an owner**: pages, kernel pool and
      handles charged to a process and its job: the commit limit, job
      memory limits, STATUS_QUOTA_EXCEEDED, the program using too much
