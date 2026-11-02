@@ -98,6 +98,10 @@ fn request<R>(
     start: impl FnOnce(&mut VirtioBlk) -> Result<(), DiskError>,
     finish: impl FnOnce(&mut VirtioBlk) -> Result<R, DiskError>,
 ) -> Result<R, DiskError> {
+    // Fault injection: the request fails as a device error would.
+    if crate::failpoint::hit(crate::failpoint::Point::DiskIo) {
+        return Err(DiskError::Device);
+    }
     let _turn = Turn::take();
     {
         let mut disk = DISK.lock();

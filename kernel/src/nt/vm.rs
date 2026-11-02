@@ -79,13 +79,36 @@ pub enum Fault {
     Raise(NtStatus),
     /// Not allowed: an access violation.
     Denied,
+    /// No memory to resolve it now (`resolve_fault` retries).
+    OutOfMemory,
 }
+
+/// How often `resolve_fault` retries a fault that found no memory, 1 ms
+/// apart.
+const OOM_RETRIES: u32 = 100;
 
 /// Resolves a fault on a committed page: maps a zeroed (or section) frame
 /// on first use, and handles guard pages (one-shot
 /// STATUS_GUARD_PAGE_VIOLATION, or stack growth for the current thread's
-/// stack guard).
+/// stack guard). A fault on committed memory does not fail on Windows for
+/// lack of memory (the commit charge guarantees it; the memory manager
+/// waits for a page), so a shortage is waited out for a while before the
+/// program gets an access violation (no commit charge yet: R6). Fault
+/// injection found this: one failed allocation in a copy-on-write fault
+/// raised an access violation that exception_test's handler continued
+/// from for ever.
 pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> Fault {
+    for _ in 0..OOM_RETRIES {
+        match resolve_once(process, addr, kind) {
+            Fault::OutOfMemory => platform::sleep_ms(1),
+            other => return other,
+        }
+    }
+    out_of_memory(process, addr);
+    Fault::Denied
+}
+
+fn resolve_once(process: &Process, addr: u64, kind: AccessKind) -> Fault {
     let (protect, mapped) = {
         let vad = process.vad.lock();
         let Some(PageState { committed: true, protect }) = vad.page(addr) else {
@@ -128,12 +151,7 @@ pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> Fault {
             None => space.map_zero_page(addr, flags_for(protect)).is_ok(),
         }
     };
-    if done {
-        Fault::Resolved
-    } else {
-        out_of_memory(process, addr);
-        Fault::Denied
-    }
+    if done { Fault::Resolved } else { Fault::OutOfMemory }
 }
 
 /// A committed page could not be given a frame: the machine is out of
@@ -163,7 +181,8 @@ fn copy_on_write(
     let page = addr / PAGE_SIZE * PAGE_SIZE;
     let writable = after_copy(protect);
     if process.vad.lock().protect(page, PAGE_SIZE, writable).is_err() {
-        return Fault::Denied;
+        // Only an allocation fails here (the page is committed).
+        return Fault::OutOfMemory;
     }
     let flags = flags_for(writable);
     let mut space = process.space.lock();
@@ -175,12 +194,7 @@ fn copy_on_write(
             None => space.map_zero_page(page, flags).is_ok(),
         },
     };
-    if done {
-        Fault::Resolved
-    } else {
-        out_of_memory(process, addr);
-        Fault::Denied
-    }
+    if done { Fault::Resolved } else { Fault::OutOfMemory }
 }
 
 /// A touched guard page: the guard is removed. In the current thread's
@@ -193,7 +207,7 @@ fn guard_hit(process: &Process, addr: u64, protect: u32) -> Fault {
     let (result, new_limit) = {
         let mut vad = process.vad.lock();
         if vad.protect(page, PAGE_SIZE, protect).is_err() {
-            return Fault::Denied;
+            return Fault::OutOfMemory;
         }
         match stack {
             Some((teb, bottom, base)) if (bottom..base).contains(&page) => {

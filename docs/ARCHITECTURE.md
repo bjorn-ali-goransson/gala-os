@@ -105,6 +105,9 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |
 | `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault` or `all` |
+| `failpoint=<point>:<mode>:<n>[,...]` | fault injection while the `start=`/`run=` programs run (debug builds; "Fault injection" below). Points `heap`, `frame`, `disk_io`, `net_tx`; modes `every:<n>` (the n-th, 2n-th, ... occurrence fails), `nth:<n>` (only the n-th), `random:<per-mille>` (from `failseed=`). Example: `failpoint=heap:every:97,net_tx:random:50` |
+| `failseed=<n>` | seed of the `random` failpoints (default 0): the same seed fails the same occurrences |
+| `failtrace` | log each injected failure with a backtrace (`cargo xtask symbolize` resolves it) |
 
 ## Physical memory
 
@@ -155,7 +158,8 @@ held) and reuses the dirty ones. Before paging is set up, it falls back to
 contiguous frames. Lock order: heap, window, kernel address space, frame
 allocator.
 
-Allocation never panics: the allocator returns null on exhaustion, and
+Allocation never panics: the allocator returns null on exhaustion (or when
+the `heap` failure point fires: "Fault injection"), and
 `kernel/clippy.toml` bans the infallible std APIs (`Box::new`, `vec!`,
 `format!`, `Vec::push`, ...). Use `try_box`, `TryVec::{try_push,
 try_insert, try_extend_from_slice}` and `try_reserve`. There is no
@@ -3064,8 +3068,79 @@ TSC itself and about twenty places call `platform::ticks` directly.
   order now pending -> POLLERS), and the hang dump held a thread's
   sched_id lock (a format argument's guard lives to the end of the
   statement) while taking suspend_count, the inverse of `resume`.
+- **Fault injection** (built, R2: "Fault injection" below): named
+  failure points in the kernel (`heap`, `frame`, `disk_io`, `net_tx`)
+  checked where the fallible paths are, enabled from the command line
+  (`failpoint=heap:every:97`, `failpoint=heap:nth:1234`, with
+  `failseed=` so a run repeats). Scenarios run with failures injected,
+  mostly under gala-um; the expected outcome is a sensible NTSTATUS for
+  the program and a kernel that survives. Release images compile the
+  checks out.
+- **Lock-order checking (debug builds)**: each `IrqMutex` gets a class;
+  each CPU tracks the classes it holds; the first acquisition that
+  contradicts an order already seen panics with both orders (a small
+  lockdep). The prose lock orders in this document become checked ones.
 - Flight recorder, hang watchdog and a crash record kept across reboots:
   docs/OBSERVABILITY.md §5.
+
+### Fault injection (R2, 2026-11-02)
+
+`kernel/src/failpoint.rs`. A point is checked with
+`failpoint::hit(Point::Heap)`, true when this occurrence should fail;
+the caller then fails as it would for real:
+
+| Point | Where | What fails |
+|---|---|---|
+| `heap` | the kernel heap's `GlobalAlloc::alloc` (`mm::heap`); in gala-um `hosted::memory::Allocator`, for NT-layer code only | the allocation returns null: every `try_box`, `try_push`, `try_reserve`, `KArc::try_new` sees `AllocError` |
+| `frame` | `mm::allocate_frame`, `mm::allocate_frames` | no frame (user pages, page tables, heap pages, sections) |
+| `disk_io` | `disk::request` (each virtio-blk request) | `DiskError::Device` |
+| `net_tx` | the transmit tokens of virtio-net and the loopback device | the packet is dropped (TCP retransmits) |
+
+- **Syntax**: kernel command line `failpoint=<point>:<mode>:<n>[,...]`,
+  `failseed=<n>`, `failtrace` (table above); gala-um takes the same as
+  `um --failpoint=... --failseed=<n> --failtrace`. `random:<p>` fails an
+  occurrence when a SplitMix64 hash of (seed, point, occurrence number)
+  mod 1000 is below p: no state but the counter, so a run repeats from
+  its seed as far as the order of occurrences repeats (threads on
+  several CPUs may reorder them).
+- **Armed only while programs run**: the kernel arms the rules before
+  `start=`/`run=` and disarms them after the last `run=` program (then
+  logs `failpoint: heap <n> checked, <m> failed; ...`); gala-um arms
+  them around its program. The boot itself (which may stop on an
+  allocation failure: the frame bitmap, the scheduler) is not hit.
+- **Cost**: compiled in for debug builds (boot tests, gala-um, host
+  tests: `COMPILED_IN` is `cfg!(any(debug_assertions, feature =
+  "hosted"))`); in release builds `hit` is a constant `false` that folds
+  away, so release images have no test hook in the allocator (the live
+  mocking rule below: off in release images) and pay nothing. Compiled
+  in but not armed, a check is one relaxed load of a bit mask. Counters
+  are atomics; nothing allocates (`failtrace` prints without allocating
+  in the kernel).
+- **gala-um's heap**: gala-um shares the host's allocator with std and
+  with its own platform code, which allocate infallibly (a failure there
+  aborts the process). A thread-local flag marks NT-layer code
+  (`hosted::nt_code`: the signal handlers that run system calls and
+  exceptions, NT helper threads, `run`), and `hosted::HostCode` clears
+  it around host code inside it (thread creation, the page-table
+  bookkeeping, console output): only the NT layer's allocations fail.
+- **Tests**: host unit tests (parsing, counting, the random mode's
+  repeatability); `cargo xtask fault-test` runs FAULT_PROGRAMS (27) in
+  gala-um under FAULT_RULES (every:2..499, random with three seeds, frame
+  and net_tx rules) plus the whole heap sweep of FAULT_SWEEPS (the
+  programs that found bugs), ~3200 runs in ~40 s, and checks that each
+  run ends without a panic, an abort (an infallible allocation), a hang
+  or a valid image reported as a bad one; `--sweep[=point]` fails each
+  occurrence of a program in turn (`heap:nth:k` for every k: ~14,800
+  runs, four minutes; `frame`: ~3,500). QEMU scenarios `failpoint_heap`,
+  `failpoint_frame`, `failpoint_random` run hello, file_test,
+  kernel32_test and process_test with failures injected, and
+  `failpoint_disk` runs persist_test with every other disk request
+  failing; each requires a clean end (boot ok, every address space
+  freed).
+- **Invariant**: an operation that cannot fail on Windows (ending one's
+  own process, completing an I/O request that has finished) must not
+  allocate on its way, or must allocate beforehand. Finding the places
+  that did is what R2 is for (ROADMAP R2 lists them).
 
 ### Live mocking (a developer and test feature; R7)
 

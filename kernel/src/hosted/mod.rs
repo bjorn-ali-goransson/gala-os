@@ -64,6 +64,60 @@ pub fn fix_address_space() {
     crate::warn!("gala-um: cannot re-execute without ASLR: {error}");
 }
 
+std::thread_local! {
+    /// Whether this thread runs NT-layer code now (see `nt_code`).
+    static IN_NT: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Runs `f` as NT-layer code: the `heap` failure point applies to its
+/// allocations. gala-um shares the host's allocator with std and with
+/// its own platform code, which allocate infallibly (a failure there
+/// aborts the process); only the NT layer, which the kernel runs, is
+/// under test. Entered by the signal handlers that run NT code, by NT
+/// helper threads and by `run`; `host_code` leaves it.
+pub fn nt_code<R>(f: impl FnOnce() -> R) -> R {
+    let before = IN_NT.with(|c| c.replace(true));
+    let result = f();
+    IN_NT.with(|c| c.set(before));
+    result
+}
+
+/// gala-um's own (host) code until dropped: no injected heap failures
+/// (std and the platform's bookkeeping allocate infallibly).
+pub(crate) struct HostCode(bool);
+
+impl HostCode {
+    pub(crate) fn enter() -> Self {
+        HostCode(IN_NT.with(|c| c.replace(false)))
+    }
+}
+
+impl Drop for HostCode {
+    fn drop(&mut self) {
+        IN_NT.with(|c| c.set(self.0));
+    }
+}
+
+/// Whether this thread runs NT-layer code (no allocation: a `const`
+/// thread-local without a destructor).
+pub fn in_nt_code() -> bool {
+    IN_NT.with(core::cell::Cell::get)
+}
+
+/// `--failtrace`: where an injected failure happened (failpoint::report).
+pub fn report_failure(point: &str, n: u64) {
+    let _host = HostCode::enter();
+    let trace = std::backtrace::Backtrace::force_capture();
+    std::eprintln!("failpoint: {point} #{n} failed here:\n{trace}");
+}
+
+/// `failpoint=` and `failseed=` values, as on the kernel command line
+/// (um's `--failpoint=` and `--failseed=`); armed while the program runs.
+pub fn configure_failpoints(spec: &str, seed: Option<&str>) -> Result<(), String> {
+    crate::failpoint::configure_from(spec, seed)
+        .map_err(|e| alloc::format!("--failpoint={spec}: {e:?}"))
+}
+
 /// gala-um, implementing `nt::platform`'s traits.
 pub struct Um;
 
@@ -260,18 +314,32 @@ pub fn run(
     let data: &'static [u8] = data.leak();
     crate::nt::file::add_boot_file("", name, data, false)
         .map_err(|e| alloc::format!("adding {name}: {e:?}"))?;
-    let (process, main_thread) =
-        crate::nt::process::spawn_from_pe(name, "", data, args, None, None)
-            .map_err(|e| alloc::format!("starting {name}: {e:?}"))?;
-    drop(main_thread);
-    let object =
-        crate::nt::object::KObject::new(crate::nt::object::ObjectBody::Process(process.clone()))
-            .map_err(|_| String::from("out of memory"))?;
-    crate::nt::wait::wait_for(
-        core::slice::from_ref(&object),
-        false,
-        crate::nt::wait::Timeout::Infinite,
-    );
+    // Fault injection while the program runs, as the kernel's `run=`.
+    if crate::failpoint::configured() {
+        crate::info!("failpoint: armed while {name} runs");
+    }
+    crate::failpoint::arm();
+    let started = nt_code(|| {
+        let (process, main_thread) =
+            crate::nt::process::spawn_from_pe(name, "", data, args, None, None).map_err(Ok)?;
+        drop(main_thread);
+        let body = crate::nt::object::ObjectBody::Process(process.clone());
+        let object = crate::nt::object::KObject::new(body).map_err(Err)?;
+        crate::nt::wait::wait_for(
+            core::slice::from_ref(&object),
+            false,
+            crate::nt::wait::Timeout::Infinite,
+        );
+        Ok(process)
+    });
+    crate::failpoint::disarm();
+    if crate::failpoint::configured() {
+        crate::info!("failpoint: {}", crate::failpoint::Summary);
+    }
+    let process = started.map_err(|e| match e {
+        Ok(load) => alloc::format!("starting {name}: {load:?}"),
+        Err(_) => String::from("out of memory"),
+    })?;
     // As the kernel after each `run=` program.
     match process.exit_status() {
         Some(status) => {

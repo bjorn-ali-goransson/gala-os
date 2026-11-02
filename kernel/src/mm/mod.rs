@@ -67,11 +67,17 @@ fn with_frames<R>(f: impl FnOnce(&mut FrameAllocator<'static>) -> R) -> Option<R
 /// Allocates one physical frame, or `None` if memory is exhausted (or the
 /// allocator is not initialized yet).
 pub fn allocate_frame() -> Option<Frame> {
+    if crate::failpoint::hit(crate::failpoint::Point::Frame) {
+        return None;
+    }
     with_frames(|a| a.allocate()).flatten()
 }
 
 /// See [`FrameAllocator::allocate_contiguous`].
 pub fn allocate_frames(count: u64, align: u64) -> Option<Frame> {
+    if crate::failpoint::hit(crate::failpoint::Point::Frame) {
+        return None;
+    }
     with_frames(|a| a.allocate_contiguous(count, align)).flatten()
 }
 

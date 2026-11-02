@@ -289,7 +289,9 @@ pub fn attach_framebuffer(fb: Framebuffer, title: &'static str, text: bool) {
 #[doc(hidden)]
 #[cfg(feature = "hosted")]
 pub fn print(args: fmt::Arguments) {
-    // gala-um: the log goes to stderr.
+    // gala-um: the log goes to stderr (std allocates infallibly: no
+    // injected failures here).
+    let _host = crate::hosted::HostCode::enter();
     std::eprint!("{args}");
 }
 
@@ -297,6 +299,7 @@ pub fn print(args: fmt::Arguments) {
 #[cfg(feature = "hosted")]
 pub fn write_bytes(bytes: &[u8]) {
     use std::io::Write;
+    let _host = crate::hosted::HostCode::enter();
     let mut out = std::io::stdout().lock();
     let _ = out.write_all(bytes);
     let _ = out.flush();
@@ -304,6 +307,7 @@ pub fn write_bytes(bytes: &[u8]) {
 
 #[cfg(feature = "hosted")]
 pub fn emergency_println(args: fmt::Arguments) {
+    let _host = crate::hosted::HostCode::enter();
     std::eprintln!("\n{args}");
 }
 

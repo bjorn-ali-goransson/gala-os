@@ -53,6 +53,11 @@ impl phy::TxToken for TxToken<'_> {
         // Within the reserved capacity (smoltcp keeps to the MTU).
         packet.resize(len.min(MTU), 0);
         let result = f(&mut packet);
+        // Fault injection: the packet is lost (TCP retransmits).
+        if crate::failpoint::hit(crate::failpoint::Point::NetTx) {
+            lo.dropped += 1;
+            return result;
+        }
         let i = (lo.head + lo.count) % SLOTS;
         lo.queue[i] = Some(packet);
         lo.count += 1;

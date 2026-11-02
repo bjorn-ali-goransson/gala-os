@@ -893,6 +893,13 @@ fn nt_terminate_process(call: &mut Call<'_>) -> NtStatus {
         process::terminate(&call.process, status, false);
         return NtStatus::SUCCESS;
     }
+    if handle == Handle::CURRENT_PROCESS {
+        // Ending one's own process never returns on Windows, so it must
+        // not fail: no object for the pseudo-handle (an allocation failure
+        // there once returned STATUS_NO_MEMORY to an exiting program).
+        process::terminate(&call.process, status, true);
+        return NtStatus::SUCCESS;
+    }
     let entry = tri!(call.handle(handle));
     let object = tri!(entry.require(PROCESS_TERMINATE));
     let ObjectBody::Process(p) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
@@ -2880,7 +2887,7 @@ fn process_information(buffer: u64) -> Result<Vec<u8>, NtStatus> {
     push_process(&mut out, &idle, &[], buffer).map_err(no_memory)?;
     for p in process::running().map_err(no_memory)? {
         let mut threads = Vec::new();
-        for t in p.threads() {
+        for t in p.threads().map_err(no_memory)? {
             if let ObjectBody::Thread(t) = &t.body {
                 let record =
                     ThreadRecord { id: t.id, start: t.win32_start, create_time: t.create_time };

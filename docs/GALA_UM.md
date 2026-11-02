@@ -255,6 +255,20 @@ does); the host's libraries then sit just below 0x7fff_f7.., far from
 gala's structures, and runs are reproducible. The re-executed process's
 name is `exe`.
 
+## Fault injection (R2, 2026-11-02)
+
+`um --failpoint=<rules> --failseed=<n> --failtrace` takes the kernel's
+`failpoint=`, `failseed=` and `failtrace` (ARCHITECTURE "Fault
+injection"); they are armed while the program runs. The `heap` point is
+in `hosted::memory::Allocator` and applies only to NT-layer code: a
+thread-local flag set by `hosted::nt_code` (the signal handlers, NT
+helper threads, `run`) and cleared by `hosted::HostCode` around host
+code that allocates infallibly (thread creation, the page-table maps,
+console output). A page-sized NT allocation that finds no frame now
+fails instead of falling back to a host page, which
+`frame_of_heap_page` could not map (`um` exited with 3 under
+`frame:nth:k`). `cargo xtask fault-test` drives it.
+
 ## Steps
 
 1. **U1**: inventory every `crate::arch`/`sched`/`mm` use in `nt/`;

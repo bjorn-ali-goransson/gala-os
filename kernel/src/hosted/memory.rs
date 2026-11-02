@@ -64,11 +64,25 @@ fn in_view(addr: u64) -> bool {
 // while allocated; the rest is the system allocator's contract.
 unsafe impl core::alloc::GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        if layout.size() == PAGE_SIZE as usize
-            && layout.align() == PAGE_SIZE as usize
-            && let Some(frame) = mm::allocate_frame()
+        // Fault injection: only the NT layer's allocations (see
+        // `super::nt_code`); one relaxed load when not armed.
+        if crate::failpoint::armed(crate::failpoint::Point::Heap)
+            && super::in_nt_code()
+            && crate::failpoint::hit(crate::failpoint::Point::Heap)
         {
-            return hhdm_ptr(frame);
+            return core::ptr::null_mut();
+        }
+        if layout.size() == PAGE_SIZE as usize && layout.align() == PAGE_SIZE as usize {
+            if let Some(frame) = mm::allocate_frame() {
+                return hhdm_ptr(frame);
+            }
+            // The NT layer's page (a file page sections may map) must be a
+            // frame, as the kernel heap's are: none is a failed
+            // allocation, not a host page (`frame_of_heap_page` could not
+            // map that). Host code falls back to the system allocator.
+            if super::in_nt_code() {
+                return core::ptr::null_mut();
+            }
         }
         // SAFETY: forwarded.
         unsafe { std::alloc::System.alloc(layout) }
@@ -206,6 +220,9 @@ impl UserSpace {
 
     fn insert(&mut self, page: u64, entry: Page) -> Result<(), PagingError> {
         mmap_frame(page, entry.frame, entry.flags, self.placed.contains(&page))?;
+        // The page table's bookkeeping is gala-um's (std's maps allocate
+        // infallibly); the kernel's tables come from fallible frames.
+        let _host = super::HostCode::enter();
         self.placed.insert(page);
         if let Some(old) = self.pages.insert(page, entry)
             && !old.borrowed

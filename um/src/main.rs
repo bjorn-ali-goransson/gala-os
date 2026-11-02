@@ -2,7 +2,10 @@
 //! gala's NT layer (the kernel library built with `--features hosted`) as
 //! its "kernel". The platform is `kernel::hosted` (docs/GALA_UM.md).
 //!
-//! usage: um [--trace] [--cpus=<n>] [--module=<directory on C:>/<name>=<host file>]... <program.exe> [arguments]
+//! usage: um [--trace] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] [--module=<directory on C:>/<name>=<host file>]... <program.exe> [arguments]
+//!
+//! `--failpoint`, `--failseed`: fault injection while the program runs,
+//! as the kernel's `failpoint=` and `failseed=` (kernel/src/failpoint.rs).
 //!
 //! `--cpus`: show at most n of the host's processors (um-test: 2, as the
 //! QEMU boot tests).
@@ -20,7 +23,22 @@ fn main() -> ExitCode {
     kernel::hosted::fix_address_space();
     let mut args = std::env::args().skip(1).peekable();
     let mut modules = Vec::new();
+    let (mut failpoint, mut failseed) = (None, None);
     while let Some(option) = args.next_if(|a| a.starts_with("--")) {
+        // Fault injection, as the kernel's `failpoint=` and `failseed=`.
+        if let Some(spec) = option.strip_prefix("--failpoint=") {
+            failpoint = Some(spec.to_string());
+            continue;
+        }
+        if option == "--failtrace" {
+            // Each injected failure with a backtrace.
+            kernel::failpoint::set_trace(true);
+            continue;
+        }
+        if let Some(seed) = option.strip_prefix("--failseed=") {
+            failseed = Some(seed.to_string());
+            continue;
+        }
         if option == "--trace" {
             // Every system call on stderr, as the kernel's `trace` flag.
             kernel::nt::syscalls::set_trace(true);
@@ -53,9 +71,15 @@ fn main() -> ExitCode {
             }
         }
     }
+    if let Some(spec) = &failpoint
+        && let Err(e) = kernel::hosted::configure_failpoints(spec, failseed.as_deref())
+    {
+        eprintln!("um: {e}");
+        return ExitCode::from(2);
+    }
     let Some(path) = args.next() else {
         eprintln!(
-            "usage: um [--trace] [--cpus=<n>] [--module=<dir>/<name>=<host file>]... <program.exe> [arguments]"
+            "usage: um [--trace] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] [--module=<dir>/<name>=<host file>]... <program.exe> [arguments]"
         );
         return ExitCode::from(2);
     };
