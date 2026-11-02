@@ -121,6 +121,9 @@ struct Cpu {
     /// The thread this CPU just switched away from, whose `on_cpu` is
     /// cleared by `finish_switch` on this CPU.
     prev: Option<ThreadId>,
+    /// The idle thread is reaping: not preempted until done (see
+    /// `idle_loop`).
+    reaping: bool,
 }
 
 const OFFLINE: Cpu = Cpu {
@@ -130,6 +133,7 @@ const OFFLINE: Cpu = Cpu {
     quantum_left: QUANTUM_TICKS,
     need_resched: false,
     prev: None,
+    reaping: false,
 };
 
 struct Scheduler {
@@ -550,6 +554,15 @@ pub fn join(id: ThreadId) -> Result<(), JoinError> {
     }
 }
 
+/// Address-space references `reap` calls hold while they free (taken from
+/// dead threads, not dropped yet): diagnostics for a leak check.
+static REAPING: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// How many address-space references reaps in progress hold.
+pub fn held_by_reaps() -> usize {
+    REAPING.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Frees the stacks of dead threads that no CPU runs on any more.
 pub fn reap() -> usize {
     // Take the stacks out under the lock, drop (unmap) them outside it.
@@ -570,8 +583,11 @@ pub fn reap() -> usize {
             }
         }
     });
+    let held = spaces.iter().flatten().count();
+    REAPING.fetch_add(held, core::sync::atomic::Ordering::Relaxed);
     drop(stacks);
     drop(spaces);
+    REAPING.fetch_sub(held, core::sync::atomic::Ordering::Relaxed);
     n
 }
 
@@ -651,6 +667,10 @@ pub(crate) fn on_tick_here() {
         if cpu.quantum_left == 0 || idle_with_work {
             cpu.need_resched = true;
         }
+        if cpu.reaping && idle_with_work {
+            // It switches as soon as the reap is done (`idle_loop`).
+            return;
+        }
         // A thread that must leave this CPU goes even with nothing queued.
         let must_move = s.threads[cpu.current.0].affinity & (1 << here) == 0;
         cpu.need_resched && (has_work || must_move)
@@ -662,7 +682,15 @@ pub(crate) fn on_tick_here() {
 
 fn idle_loop(_: usize) {
     loop {
+        // Not preempted while reaping: an idle thread switched away from
+        // runs again only when its CPU has nothing else to do, and the
+        // dead threads' stacks and address spaces it has taken would stay
+        // allocated until then (on a busy CPU, for seconds: an exited
+        // process's memory looked leaked, "address space still referenced
+        // 8 times after exit": reap's batch of 8).
+        with(|s| s.cpus[me()].reaping = true);
         reap();
+        with(|s| s.cpus[me()].reaping = false);
         let has_work = {
             // Check and halt with interrupts off, so a wakeup between the
             // check and `hlt` cannot be missed (`sti; hlt` is atomic, and a
@@ -690,6 +718,32 @@ pub fn dump() {
             );
         }
     });
+}
+
+/// Logs every thread that still holds the user address space whose PML4
+/// is `root` (state, whether a CPU is on its stack, which CPU runs it):
+/// what keeps an exited process's address space alive. Returns how many.
+pub fn dump_space_holders(root: u64) -> usize {
+    let now = time::ticks();
+    let mut n = 0;
+    with(|s| {
+        for (i, t) in s.threads.iter().enumerate() {
+            if t.user.as_ref().is_some_and(|u| u.root == root) {
+                n += 1;
+                let running_on = s.cpus.iter().position(|c| c.online && c.current.0 == i);
+                info!(
+                    "sched: thread {i} ({}) {:?} on_cpu {} running on {running_on:?} \
+                     affinity {:#x} stack {} (now tick {now})",
+                    t.name,
+                    t.state,
+                    t.on_cpu,
+                    t.affinity,
+                    t.stack.is_some()
+                );
+            }
+        }
+    });
+    n
 }
 
 /// `(id, name, state)` for every thread, for diagnostics.

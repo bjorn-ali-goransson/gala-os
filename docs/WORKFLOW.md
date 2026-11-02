@@ -809,6 +809,24 @@ backtrace, and the program's own symptom (a status, a hang) follows:
         --module=Windows/System32/ntdll.dll=user/bin/testntdll.dll ... \
         user/bin/pipe_test.exe
 
+- **"KERNEL PANIC: memory allocation of N bytes failed"** (a
+  `failpoint_*` scenario, or a real out-of-memory) is an infallible
+  allocation: alloc's `handle_alloc_error` panics. The `backtrace:` line
+  under it is complete (frame pointers): failed boot tests print it
+  symbolized, and `target/failed/<scenario>.log` keeps the symbolized
+  copy at its end (addresses move with the next build; `cargo xtask
+  symbolize` only fits the build that ran). Skip the panic and liballoc
+  frames (`handle_error`, `with_capacity_in`, `to_vec`, `Clone::clone`):
+  the first kernel frame is the culprit (failpoint_heap's was
+  `gala_create_process`: `image.clone()` of a `Vec<u16>`). Then run
+  `cargo xtask alloc-audit` (also part of `cargo xtask test`): it
+  disassembles the debug kernel and lists every kernel function that
+  calls library code which can abort on out-of-memory, which clippy
+  cannot see by name (`Clone::clone` of a Vec/String/Box, `Extend`,
+  generic code); growth after `try_reserve` (`extend`, `resize`, an
+  inlined `try_push`) is excused (`--all` lists it too). Fix with the
+  fallible APIs (`mm::heap::try_to_vec` for a copy) and check the audit
+  is clean. clippy bans `collect` and `to_vec` in the kernel too.
 - **A hang under fault injection may be the test's**: a test thread that
   gives up after a failed call without closing its pipe end, or a loop
   waiting for a thread that CreateThread never made, waits for ever on
@@ -1017,6 +1035,12 @@ DLL (`llvm-objdump -d` on our own build in
 must let it reach its own code first: ended during its start-up it holds
 ntdll's loader lock, and the next LoadLibrary (or DLL notification) spins
 in NtYieldExecution forever (rtl_test hung so under load).
+
+"run: address space still referenced N times after exit" is preceded
+by the holders: the threads not reaped (state, CPU), the references
+reaps in progress hold, and the process's own references (thread
+objects, handles in other processes). Count them against N: what is
+left over is held by something else (a clone of `Process::space`).
 
 A failed boot scenario's serial log is kept in
 `target/failed/<scenario>.log` (also from `cargo xtask test`), so a rare

@@ -16,6 +16,11 @@ disallowed-methods = [
     { path = "alloc::rc::Rc::new", reason = "panics on OOM" },
     { path = "alloc::borrow::ToOwned::to_owned", reason = "panics on OOM" },
     { path = "alloc::string::ToString::to_string", reason = "panics on OOM" },
+    { path = "core::iter::Iterator::collect", reason = "panics on OOM collecting into a Vec/String/Box; use try_reserve and try_push" },
+    { path = "slice::to_vec", reason = "panics on OOM; use mm::heap::try_to_vec" },
+    # Not bannable by path, so not here: `Clone::clone` of a Vec, String or
+    # Box (use mm::heap::try_to_vec), `Extend::extend` without try_reserve
+    # first. `cargo xtask alloc-audit` finds those in the machine code.
 ]
 disallowed-macros = [
     { path = "alloc::vec", reason = "panics on OOM" },

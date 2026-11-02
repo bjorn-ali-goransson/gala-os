@@ -963,30 +963,24 @@ impl Desktop {
         Ok(bounds)
     }
 
-    /// Removes `owner`'s windows; the areas to redraw.
-    pub fn destroy_owned(&mut self, owner: u64) -> Vec<Rect> {
-        let mut gone = Vec::new();
-        let mut ids = Vec::new();
-        self.windows.retain(|w| {
-            if w.owner == owner {
-                let _ = gone.try_push(w.bounds());
-                let _ = ids.try_push(w.id);
-                false
-            } else {
-                true
+    /// Removes `owner`'s windows (and adds their areas to the damage).
+    /// A process's end: allocates nothing, so nothing is left behind
+    /// (a capture or activation of a window that is gone).
+    pub fn destroy_owned(&mut self, owner: u64) {
+        let mut i = 0;
+        while i < self.windows.len() {
+            if self.windows[i].owner != owner {
+                i += 1;
+                continue;
             }
-        });
-        for id in ids {
-            self.forget(id);
+            let w = self.windows.remove(i);
+            self.forget(w.id);
+            self.add_damage(w.bounds());
         }
         self.input.retain(|e| e.owner != owner);
         self.listeners.retain(|(o, _)| *o != owner);
         self.woken.retain(|o| *o != owner);
-        for &r in &gone {
-            self.add_damage(r);
-        }
         self.refresh();
-        gone
     }
 
     /// A window went: nothing refers to it any more.

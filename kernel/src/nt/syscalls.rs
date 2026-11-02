@@ -4300,7 +4300,8 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
     }
 
     // Open and read the image (missing: STATUS_OBJECT_NAME_NOT_FOUND).
-    let path = tri!(call.resolve_file_name(0, image.clone(), OBJ_CASE_INSENSITIVE));
+    let copy = tri!(crate::mm::heap::try_to_vec(&image).map_err(|_| NtStatus::NO_MEMORY));
+    let path = tri!(call.resolve_file_name(0, copy, OBJ_CASE_INSENSITIVE));
     let opened = tri!(file::create(
         &path,
         file::FILE_READ_DATA,
@@ -4369,7 +4370,8 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         current_directory: directory,
         environment: (!vars.is_empty()).then_some(&vars[..]),
         handles: Some((table, std)),
-        suspended,
+        // Started once the caller has its handles (below).
+        suspended: true,
         runtime_data: &runtime_data,
         parent_id: call.process.id,
         token: Some(token),
@@ -4386,25 +4388,31 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         _ => 0,
     };
     let child_id = child.id;
-    let Ok(process_object) = KObject::new(ObjectBody::Process(child)) else {
+    // The handles to the child; without memory for them, the child (which
+    // has not run yet) ends and the call fails, as if never created.
+    let handles = KObject::new(ObjectBody::Process(child.clone())).ok().and_then(|object| {
+        let mut table = call.process.handles.lock();
+        let ph =
+            table.insert(HandleEntry { object, access: PROCESS_ALL_ACCESS, attributes: 0 }).ok()?;
+        let entry =
+            HandleEntry { object: thread_object.clone(), access: THREAD_ALL_ACCESS, attributes: 0 };
+        match table.insert(entry) {
+            Ok(th) => Some((ph, th)),
+            Err(_) => {
+                let entry = table.close(ph);
+                drop(table);
+                drop(entry);
+                None
+            }
+        }
+    });
+    let Some((ph, th)) = handles else {
+        process::terminate(&child, NtStatus::NO_MEMORY, false);
         return NtStatus::NO_MEMORY;
     };
-    let mut handles = call.process.handles.lock();
-    let Ok(ph) = handles.insert(HandleEntry {
-        object: process_object,
-        access: PROCESS_ALL_ACCESS,
-        attributes: 0,
-    }) else {
-        return NtStatus::NO_MEMORY;
-    };
-    let Ok(th) = handles.insert(HandleEntry {
-        object: thread_object,
-        access: THREAD_ALL_ACCESS,
-        attributes: 0,
-    }) else {
-        return NtStatus::NO_MEMORY;
-    };
-    drop(handles);
+    if !suspended {
+        thread::resume(&thread_object);
+    }
     let mut out = [0u8; 32];
     out[0..8].copy_from_slice(&ph.0.to_le_bytes());
     out[8..16].copy_from_slice(&th.0.to_le_bytes());

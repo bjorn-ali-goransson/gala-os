@@ -1529,6 +1529,28 @@ R. **Robustness and live update, kernel included** (the owner's
         its CallNamedPipe server without disconnecting;
         kernel32_thread_test spun on a thread it never created): fixed
         in the tests (same behaviour on Windows).
+     8. failpoint_heap panicked once in a full run (timing decides
+        which allocation the `every:211` rule hits): GalaCreateProcess
+        cloned the image name (`Vec<u16>::clone`, which clippy cannot
+        ban). Fixed (`mm::heap::try_to_vec`), and the class is now
+        checked: `cargo xtask alloc-audit` (in `cargo xtask test`) finds
+        infallible allocations in the kernel's machine code (it also
+        found the hang dump's `THREADS.clone()`); clippy bans `collect`
+        and `to_vec`; failed boot logs keep their symbolized
+        backtraces. Thread and process exit no longer drop work when a
+        push fails: the window registry's failed sends wake their
+        senders in fixed batches (a failed push left a sender waiting
+        for ever), and the desktop forgets an ended process's windows
+        without a list (a failed push left a capture or activation
+        on a window that was gone).
+     9. pwsh_hello failed once under host load: "address space still
+        referenced 8 times after exit". Not a leak: the idle loop's
+        reap had taken 8 dead threads' address spaces and was
+        preempted before dropping them (an idle thread runs again only
+        when its CPU is idle; the CPU was busy freeing the process's
+        sections, ~0.5 s for pwsh, longer under load). The idle reap is
+        no longer preempted, the check waits for a second without
+        progress instead of a second in all, and it names the holders.
      Not done yet: the completion port queue and APC queue still grow
      when a completion is reported (`notify::complete`: a failed push
      loses the packet; not hit by the sweeps, since their capacity is

@@ -172,7 +172,15 @@ Allocation never panics: the allocator returns null on exhaustion (or when
 the `heap` failure point fires: "Fault injection"), and
 `kernel/clippy.toml` bans the infallible std APIs (`Box::new`, `vec!`,
 `format!`, `Vec::push`, ...). Use `try_box`, `TryVec::{try_push,
-try_insert, try_extend_from_slice}` and `try_reserve`. There is no
+try_insert, try_extend_from_slice}`, `try_to_vec` and `try_reserve`
+(clippy also bans `collect` and `to_vec`). What clippy cannot ban by
+name (`Clone::clone` of a `Vec`, `String` or `Box`, `Extend::extend`
+without a reservation) is found in the machine code: `cargo xtask
+alloc-audit` (run by `cargo xtask test`) builds the debug kernel's call
+graph from `objdump -d` and fails on every kernel function that calls
+library code from which alloc's out-of-memory abort is reachable, except
+growth that follows `try_reserve` and the pairs it allows with a reason
+(xtask `alloc_audit.rs`). There is no
 fallible `Arc` on stable Rust, so shared kernel objects will get our own
 reference-counted type.
 
@@ -494,7 +502,17 @@ When the last thread exits, the process records its exit status, closes all
 its handles (breaking reference cycles) and leaves the registry; the
 address space is freed when the last thread is reaped. `run=` checks this
 and logs "address space still referenced" otherwise, which fails the boot
-scenario. Pseudo handles: -1 = current process, -2 = current thread.
+scenario: a leak is a second without progress (each reference that goes
+restarts the second; dropping pwsh's process alone frees its sections for
+~0.5 s under TCG), and the message is preceded by who holds the space
+(`sched::dump_space_holders`: the unreaped threads with state and CPU;
+`sched::held_by_reaps`: references a reap in progress holds;
+`process::describe_holders`: the process's own references). Reaping
+(`sched::reap`) takes up to 8 dead threads' stacks and address spaces
+and drops them outside the scheduler lock; the idle loop's reap is not
+preempted (`Cpu::reaping`), since a preempted idle thread runs again
+only when its CPU is idle and kept the 8 spaces meanwhile (pwsh_hello
+failed under host load with "still referenced 8 times"). Pseudo handles: -1 = current process, -2 = current thread.
 
 **Sections** (`nt::section`): a pagefile-backed `Section` owns its frames
 (allocated zeroed on first access through any view) and is freed with its
@@ -944,7 +962,11 @@ parent's inheritable handles (OBJ_INHERIT, i.e. bInheritHandle in the
 SECURITY_ATTRIBUTES) at the same values, and the three standard handles
 at their values whatever the inherit flag (console handles are shared,
 as with Windows' console). The parent gets handles to the new process
-and thread (full access).
+and thread (full access). The main thread is always created suspended
+and resumed (unless the caller asked for it suspended) only once those
+handles exist: without memory for them the child, which has not run,
+is terminated and the call fails with STATUS_NO_MEMORY (before, the
+child ran on while its creator was told it failed).
 
 
 

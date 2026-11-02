@@ -763,18 +763,36 @@ fn run_program(
     };
     // Teardown check: once the exiting threads are reaped, ours must be the
     // last reference to the address space; then its memory is returned.
-    let deadline = time::raw_ticks() + time::TICK_HZ;
-    while mm::heap::KArc::strong_count(&space) > 1 && time::raw_ticks() < deadline {
+    // A leak is a second without progress: the teardown itself takes time
+    // (dropping the process frees its sections, ~0.5 s for pwsh under TCG,
+    // several times that on a loaded host), so the deadline moves on each
+    // reference that goes.
+    let count = || mm::heap::KArc::strong_count(&space);
+    let mut left = count();
+    let mut deadline = time::raw_ticks() + time::TICK_HZ;
+    while count() > 1 && time::raw_ticks() < deadline {
         sched::reap();
         // Exited processes nothing refers to any more (kept for OpenProcess).
         nt::process::prune();
+        if count() < left {
+            left = count();
+            deadline = time::raw_ticks() + time::TICK_HZ;
+        }
         sched::sleep_ms(1);
     }
-    if mm::heap::KArc::strong_count(&space) > 1 {
-        warn!(
-            "run: address space still referenced {} times after exit",
-            mm::heap::KArc::strong_count(&space) - 1
+    if count() > 1 {
+        // Who holds it: threads of the process not reaped yet (each holds
+        // the space), the process itself while referenced, and reaps in
+        // progress (an idle thread's batch).
+        let root = space.lock().root();
+        let threads = sched::dump_space_holders(root);
+        info!(
+            "run: {threads} threads hold the address space, {} held by reaps in progress; \
+             process {}",
+            sched::held_by_reaps(),
+            nt::process::describe_holders(&space)
         );
+        warn!("run: address space still referenced {} times after exit", count() - 1);
     }
     drop(space);
     let (free_after, _) = mm::frame_stats();

@@ -560,7 +560,10 @@ pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
 /// timer's due tick and the timeout) or that it runs user code. For hangs
 /// (the kernel's `run=` dumps this when a program takes over a minute).
 pub fn dump() {
-    let threads = THREADS.lock().clone();
+    let Ok(threads) = crate::mm::heap::try_to_vec(&THREADS.lock()) else {
+        info!("thread: no memory to list the threads");
+        return;
+    };
     for object in threads.iter() {
         let t = as_thread(object);
         let in_syscall = *t.in_syscall.lock();
