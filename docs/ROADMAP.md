@@ -1293,9 +1293,18 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       without a password, home C:\ftp) it generates its TLS
       certificates, serves the admin port and FTP, and the host logs on
       (greeting, USER, PWD, QUIT). Its IPv6 listeners retry every second
-      (gala has no IPv6) and its update check cannot resolve names. Next:
-      FileZilla (the client) connects to it inside gala and lists C:\ftp;
-      then its console in a window.
+      (gala has no IPv6) and its update check cannot resolve names.
+      **FileZilla connects to it** (2026-11-02): the `filezilla` scenario
+      starts the server first (the kernel's new `start=` option), types a
+      Quickconnect (127.0.0.1, gala, a password, port 7), answers the
+      "Remember passwords?" and "Unknown certificate" dialogs, and sees
+      the remote listing (hello.txt) over TLS 1.3 on loopback; then File >
+      Exit. It needed kernel32's SetThreadExecutionState
+      (kernel32_misc_test) and IdnToAscii (Punycode, kernel32_locale_test),
+      user32's FlashWindow(Ex) and scroll bars as data (Set/GetScrollInfo,
+      Set/GetScrollPos, Set/GetScrollRange, ShowScrollBar, EnableScrollBar;
+      user32_test), and the menu bar ignores input while its window is
+      disabled. Next: the server's console in a window.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

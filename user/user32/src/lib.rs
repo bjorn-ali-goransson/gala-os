@@ -21,6 +21,7 @@ mod menu;
 mod message;
 mod monitor;
 mod rect;
+mod scroll;
 mod spi;
 mod text;
 mod timer;

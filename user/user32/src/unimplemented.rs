@@ -33,19 +33,16 @@ gala_stubs::unimplemented_exports!("user32.dll":
     DrawFrameControl
     DrawStateW
     EmptyClipboard
-    EnableScrollBar
     EnumClipboardFormats
     EnumDisplaySettingsW
     ExitWindowsEx
     FindWindowExW
-    FlashWindowEx
     GetCaretBlinkTime
     GetClassInfoW
     GetDesktopWindow
     GetDoubleClickTime
     GetKeyboardState
     GetProcessDefaultLayout
-    GetScrollInfo
     GetWindowDC
     GetWindowThreadProcessId
     HideCaret
@@ -58,7 +55,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     SetCaretPos
     SetCursorPos
     SetLayeredWindowAttributes
-    SetScrollInfo
     SetWindowPlacement
     SetWindowRgn
     ShowCaret

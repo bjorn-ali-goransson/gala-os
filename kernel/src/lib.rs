@@ -171,6 +171,19 @@ pub fn kernel_main() -> ! {
     // have too (sshd -d hands its connection to sshd-session and exits).
     nt::token::set_boot_system(cmdline.value("as") == Some("system"));
     let wait_all = cmdline.value("wait") == Some("all");
+    // `start=a.exe,b.exe` (with `start_args=`) starts programs first and
+    // does not wait for them: a server the `run=` programs talk to. They
+    // end with the boot.
+    if let Some(names) = cmdline.value("start") {
+        let mut args = cmdline.value("start_args").unwrap_or("").split(',');
+        for name in names.split(',').filter(|n| !n.is_empty()) {
+            let mut decoded = alloc::vec::Vec::new();
+            if cmdline::percent_decode(args.next().unwrap_or(""), &mut decoded).is_err() {
+                panic!("start: out of memory for the arguments");
+            }
+            start_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""));
+        }
+    }
     if let Some(names) = cmdline.value("run") {
         let mut args = cmdline.value("args").unwrap_or("").split(',');
         for name in names.split(',').filter(|n| !n.is_empty()) {
@@ -482,6 +495,19 @@ fn wait_for_the_rest() {
     }
 }
 
+/// Starts the boot module `name` as a user process (C:\gala as its
+/// current directory) without waiting for it.
+fn start_program(info: &BootInfo, name: &str, args: &str) {
+    let mut buf = [0u8; 512];
+    let Some((file_name, data, directory)) = find_program(info, name, &mut buf) else {
+        panic!("start: no boot module named {name:?}");
+    };
+    match nt::process::spawn_from_pe(file_name, directory, data, args, None) {
+        Ok((process, _thread)) => info!("start: {} (pid {})", process.name, process.id),
+        Err(e) => error!("start: cannot start {name}: {e:?}"),
+    }
+}
+
 fn run_program(info: &BootInfo, name: &str, args: &str, cwd: Option<&str>, wait_all: bool) {
     let mut buf = [0u8; 512];
     let Some((file_name, data, directory)) = find_program(info, name, &mut buf) else {
@@ -508,7 +534,16 @@ fn run_program(info: &BootInfo, name: &str, args: &str, cwd: Option<&str>, wait_
                         // does).
                         nt::ledger::dump();
                     }
-                    nt::wait::wait_for(one, false, nt::wait::Timeout::Infinite);
+                    // Then what it newly missed every 30 seconds (e.g.
+                    // after a screen check's input).
+                    loop {
+                        let half = nt::wait::Timeout::Tick(time::ticks() + 30 * time::TICK_HZ);
+                        if nt::wait::wait_for(one, false, half) != nt::status::NtStatus::TIMEOUT {
+                            break;
+                        }
+                        info!("run: {} still running; the ledger so far:", process.name);
+                        nt::ledger::dump();
+                    }
                 }
                 Err(_) => error!("run: out of memory"),
             }

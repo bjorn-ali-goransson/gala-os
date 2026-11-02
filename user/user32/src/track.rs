@@ -256,6 +256,10 @@ pub(crate) fn bar_input(top: Hwnd, message: u32, lparam: isize) -> bool {
     if w.bar == 0 {
         return false;
     }
+    // A disabled window (a modal dialog is up) takes no input.
+    if w.disabled {
+        return true;
+    }
     let (x, y) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
     if y >= w.bar || y < 0 {
         if message == WM_MOUSEMOVE && lit(&HOT, &HOT_ITEM, top).is_some() {

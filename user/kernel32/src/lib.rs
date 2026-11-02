@@ -27,6 +27,7 @@ mod console;
 mod context;
 mod files;
 mod heap;
+mod idn;
 mod locale;
 mod mapping;
 mod messages;

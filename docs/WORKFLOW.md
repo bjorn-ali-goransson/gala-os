@@ -125,7 +125,11 @@ shows it.
   `events=image`, then `llvm-objdump -d` the DLL around it (gala's DLLs
   name their exports). A temporary `unsupported(b"PROBE", detail)` in a
   gala DLL shows up in `events=syscall` as GalaRecordMissing with its
-  detail (how FileZilla's LVM_GETNEXTITEM loop was found).
+  detail (how FileZilla's LVM_GETNEXTITEM loop was found). Probes are
+  told apart by their name's length (args[1] in the event) and their
+  detail (args[3]); remove them before committing. After the first
+  minute the kernel prints what the ledger newly recorded every 30
+  seconds, so gaps a screen check's input reaches late still show.
 - **A program hangs without a ledger** (it never exits, so the ledger is
   not printed): add `events=syscall,thread` to its scenario's command
   line and read `target/debug/test-<name>.events.jsonl` while QEMU still
@@ -508,8 +512,11 @@ loaded the host), then takes a screendump (none when the step checks no
 pixels: e.g. the click that ends the program), kept as
 `target/debug/test-<scenario>.screen<step>.png`. The guest's pointer
 starts in the middle of the screen and is clamped to it. A step's pixel check is retried (a new screendump every 0.5 s,
-for about 5 s) before it fails, because a redraw under load (the full
-suite) can outlast the first dump. A mouse press is sent 0.75 s after the
+for about 30 s) before it fails, because a redraw under load (the full
+suite) can outlast the first dump, and a step may wait for the program
+(FileZilla's TLS handshake, then its certificate dialog). Input is
+queued: the guest may still be processing typed keys when a dump is
+taken, so check for the final state. A mouse press is sent 0.75 s after the
 command before it, so the moves queued ahead of it are drained first. Keep each
 `mouse_move` within 255 per axis: QEMU queues a few PS/2 packets of at
 most 255 and hands the rest of a larger move over with later events (a

@@ -1505,8 +1505,15 @@ const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// TCG: tens of seconds locally, over twice that on a slow CI runner or
 /// under the full suite (postgres took ~45 s alone and hit 120 s there).
 /// They get this much instead of BOOT_TEST_TIMEOUT.
-const SLOW_SCENARIOS: &[&str] =
-    &["java_version", "java_hello", "java_http", "dotnet_hello", "pwsh_hello", "postgres"];
+const SLOW_SCENARIOS: &[&str] = &[
+    "java_version",
+    "java_hello",
+    "java_http",
+    "dotnet_hello",
+    "pwsh_hello",
+    "postgres",
+    "filezilla",
+];
 /// Memory for the Elasticsearch scenario's VM.
 const ELASTICSEARCH_MEMORY_MIB: u64 = 3072;
 /// Elasticsearch starts three JVMs and ~60 modules under TCG.
@@ -2932,7 +2939,9 @@ const SCENARIOS: &[Scenario] = &[
         // W3: FileZilla 3.69.3 itself (wxWidgets 3.2): its main window and
         // Welcome dialog on the desktop, clicked closed (SCREEN_SCENARIOS).
         name: "filezilla",
-        cmdline: "qemu_exit wallpaper=dunes run=filezilla/filezilla.exe",
+        cmdline: "qemu_exit wallpaper=dunes \
+                  start=filezilla-server/filezilla-server.exe start_args=--config-dir%20C:/fzs \
+                  run=filezilla/filezilla.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["xtask: screen ok", "exited with status 0x00000000"],
     },
@@ -4281,9 +4290,30 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
+                    // The edit control at client (220, 230) - (370, 256):
+                    // a click in it (396, 376) and "ok" typed show there, with
+                    // the focused edit's accent underline.
+                    input: &[
+                        "mouse_move 15 154",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                        "sendkey o",
+                        "sendkey k",
+                    ],
+                    pixels: &[
+                        PixelCheck::AnyIn(326, 368, 30, 16, 0x1b1b1b), // "ok"
+                        PixelCheck::AnyIn(323, 386, 140, 3, 0x005fb8), // the underline
+                    ],
+                },
+                ScreenStep {
                     // The close button (x 453..498 of the caption): the program
                     // ends (WM_SYSCOMMAND SC_CLOSE; no screendump).
-                    input: &["mouse_move 95 -105", "mouse_button 1", "mouse_button 0"],
+                    input: &[
+                        "mouse_move 80 -130",
+                        "mouse_move 0 -129",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
                     pixels: &[],
                 },
             ],
@@ -4318,12 +4348,80 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
+                    // Quickconnect to FileZilla Server (started first):
+                    // Host (136, 126) "127.0.0.1", Username (318) "gala",
+                    // Password (499) "gala" (the server's user needs none;
+                    // FileZilla asks for one otherwise), Port (620) "7",
+                    // then the Quickconnect button (702).
+                    input: &[
+                        "mouse_move -209 -132",
+                        "mouse_move -209 -132",
+                        "mouse_move -209 -132",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                        "sendkey 1",
+                        "sendkey 2",
+                        "sendkey 7",
+                        "sendkey dot",
+                        "sendkey 0",
+                        "sendkey dot",
+                        "sendkey 0",
+                        "sendkey dot",
+                        "sendkey 1",
+                        "mouse_move 182 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                        "sendkey g",
+                        "sendkey a",
+                        "sendkey l",
+                        "sendkey a",
+                        "mouse_move 181 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                        "sendkey g",
+                        "sendkey a",
+                        "sendkey l",
+                        "sendkey a",
+                        "mouse_move 121 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                        "sendkey 7",
+                        "mouse_move 82 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    // The first connection asks whether to remember
+                    // passwords: its OK button.
+                    pixels: &[PixelCheck::AnyIn(730, 491, 60, 20, 0x005fb8)],
+                },
+                ScreenStep {
+                    // OK (763, 501): FileZilla connects to the server.
+                    input: &[
+                        "mouse_move 61 188",
+                        "mouse_move 0 187",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    // Then, after the TLS handshake, the server's
+                    // self-signed certificate: the "Unknown certificate"
+                    // dialog's OK.
+                    pixels: &[PixelCheck::AnyIn(800, 646, 60, 18, 0x005fb8)],
+                },
+                ScreenStep {
+                    // OK (833, 655): FileZilla trusts it, logs on and lists
+                    // the remote directory (C:\ftp): "hello.txt" at the left
+                    // of the remote list.
+                    input: &["mouse_move 70 154", "mouse_button 1", "mouse_button 0"],
+                    pixels: &[PixelCheck::AnyIn(650, 405, 150, 40, 0x1b1b1b)],
+                },
+                ScreenStep {
                     // To "File" on the menu bar (61, 69) and a click: its
                     // menu opens.
                     input: &[
-                        "mouse_move -234 -151",
-                        "mouse_move -234 -151",
-                        "mouse_move -234 -151",
+                        "mouse_move -193 -147",
+                        "mouse_move -193 -147",
+                        "mouse_move -193 -147",
+                        "mouse_move -193 -145",
                         "mouse_button 1",
                         "mouse_button 0",
                     ],
@@ -4389,12 +4487,13 @@ fn check_screen_step(
         return Ok(());
     }
     // Let the guest finish drawing; under load (the full suite) a redraw
-    // can take longer, so a failed check is retried for a few seconds.
+    // can take longer, and a step may wait for the program (a TLS handshake
+    // under TCG takes seconds), so a failed check is retried for 30 s.
     let mut tries = 0;
     loop {
         thread::sleep(Duration::from_millis(500));
         match dump_and_check(monitor, iso, n, step) {
-            Err(_) if tries < 10 => tries += 1,
+            Err(_) if tries < 60 => tries += 1,
             r => return r,
         }
     }

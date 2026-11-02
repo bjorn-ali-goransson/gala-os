@@ -1122,9 +1122,6 @@ pub(crate) fn present_bar(hwnd: Hwnd) {
 /// desktop.
 fn present(hwnd: Hwnd) {
     let Some((root, _, visible)) = crate::tree::placement(hwnd) else { return };
-    if root.desktop == 0 || !root.visible || IsWindowVisible(hwnd) == 0 {
-        return;
-    }
     let [l, t, r, b] = visible;
     if r <= l || b <= t {
         return;
@@ -2206,6 +2203,26 @@ pub extern "system" fn GetActiveWindow() -> Hwnd {
         Some(w) if w.thread == me() => h,
         _ => 0,
     }
+}
+
+/// FlashWindowEx(info): whether the window's caption was active before
+/// (FLASHWINFO: cbSize, hwnd, dwFlags, uCount, dwTimeout). The desktop
+/// does not flash captions or taskbar buttons yet.
+#[unsafe(no_mangle)]
+pub extern "system" fn FlashWindowEx(info: *const u8) -> i32 {
+    if info.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+    // SAFETY: the caller's FLASHWINFO: hwnd at offset 8.
+    let hwnd = unsafe { info.add(8).cast::<Hwnd>().read_unaligned() };
+    i32::from(hwnd != 0 && GetActiveWindow() == hwnd)
+}
+
+/// FlashWindow(hwnd, invert): as FlashWindowEx.
+#[unsafe(no_mangle)]
+pub extern "system" fn FlashWindow(hwnd: Hwnd, _invert: i32) -> i32 {
+    i32::from(hwnd != 0 && GetActiveWindow() == hwnd)
 }
 
 /// SetActiveWindow: activates a top-level window of the calling thread;

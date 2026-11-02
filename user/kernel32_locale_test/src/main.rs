@@ -42,6 +42,7 @@ type LocaleEnumProcEx = extern "system" fn(*const u16, u32, isize) -> Bool;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn IdnToAscii(flags: u32, unicode: *const u16, n: i32, ascii: *mut u16, size: i32) -> i32;
     fn GetNLSVersionEx(function: u32, locale: *const u16, info: *mut u32) -> i32;
     fn GetUserPreferredUILanguages(
         flags: u32,
@@ -778,8 +779,46 @@ fn nls_version(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// IdnToAscii: ASCII labels unchanged, others in Punycode with "xn--"
+/// (RFC 3492's example: bücher -> xn--bcher-kva); the characters written
+/// (with the NUL when the input has it), or the size needed.
+fn idn(c: &mut Checks) -> Result<(), u32> {
+    let ascii: [u16; 10] = [49, 50, 55, 46, 48, 46, 48, 46, 49, 0]; // "127.0.0.1"
+    let mut out = [0u16; 64];
+    // SAFETY: valid buffers.
+    let n = unsafe { IdnToAscii(0, ascii.as_ptr(), -1, out.as_mut_ptr(), 64) };
+    c.eq(n as u64, 10)?;
+    c.ok(out[..10] == ascii, 0)?;
+    let books: Vec16 = Vec16::from("b\u{fc}cher.example");
+    // SAFETY: as above.
+    let n = unsafe { IdnToAscii(0, books.0.as_ptr(), books.1 as i32, out.as_mut_ptr(), 64) };
+    let want = Vec16::from("xn--bcher-kva.example");
+    c.eq(n as u64, want.1 as u64)?;
+    c.ok(out[..want.1] == want.0[..want.1], 0)?;
+    // The size needed, with no buffer.
+    // SAFETY: as above.
+    let n = unsafe { IdnToAscii(0, books.0.as_ptr(), books.1 as i32, core::ptr::null_mut(), 0) };
+    c.eq(n as u64, want.1 as u64)
+}
+
+/// A UTF-16 copy of a string (up to 63 units) and its length.
+struct Vec16([u16; 64], usize);
+
+impl Vec16 {
+    fn from(s: &str) -> Self {
+        let mut v = [0u16; 64];
+        let mut n = 0;
+        for u in s.encode_utf16().take(63) {
+            v[n] = u;
+            n += 1;
+        }
+        Vec16(v, n)
+    }
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    idn(&mut c)?;
     nls_version(&mut c)?;
     find_strings(&mut c)?;
     calendars(&mut c)?;

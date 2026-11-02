@@ -20,6 +20,8 @@
 //!   TrackPopupMenu with TPM_RETURNCMD at the screen point ClientToScreen
 //!   gives); clicking "Two" returns 202 (no WM_COMMAND with
 //!   TPM_RETURNCMD) and the program paints a blue square at the point.
+//! - An EDIT child at (220, 230): a click focuses it and typing "ok" shows
+//!   there (in the edit's text colour).
 //! - A click on the window's close button is WM_CLOSE; DefWindowProc
 //!   destroys the window: WM_DESTROY, where the program calls
 //!   PostQuitMessage(7); GetMessageW then returns 0 with wParam 7; IsWindow
@@ -208,6 +210,9 @@ const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONUP: u32 = 0x0205;
 const WM_COMMAND: u32 = 0x0111;
 const TPM_RETURNCMD: u32 = 0x100;
+const WS_CHILD: u32 = 0x4000_0000;
+const WS_VISIBLE: u32 = 0x1000_0000;
+const WS_EX_CLIENTEDGE: u32 = 0x200;
 const MK_LBUTTON: usize = 1;
 const VK_H: usize = 0x48;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
@@ -385,9 +390,10 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             context_menu(hwnd, x, y);
             0
         }
-        // TPM_RETURNCMD: the choice is the result, not a command.
+        // TPM_RETURNCMD: the choice is the result, not a menu command
+        // (lParam 0); the edit's notifications come with its handle.
         WM_COMMAND => {
-            let _ = check(false, wparam as u64);
+            let _ = check(lparam != 0, wparam as u64);
             0
         }
         WM_KEYDOWN => {
@@ -415,6 +421,26 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             let params = unsafe { (*(lparam as *const CreateStructW)).create_params } as usize;
             let _ = check(params == PARAM, params as u64);
             CREATED.fetch_add(1, Ordering::SeqCst);
+            // An edit control at (220, 230), 150 x 26.
+            let class: [u16; 5] = wide("EDIT");
+            // SAFETY: valid strings and parent.
+            let edit = unsafe {
+                CreateWindowExW(
+                    WS_EX_CLIENTEDGE,
+                    class.as_ptr(),
+                    [0u16].as_ptr(),
+                    WS_CHILD | WS_VISIBLE,
+                    220,
+                    230,
+                    150,
+                    26,
+                    hwnd,
+                    100 as Handle,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                )
+            };
+            let _ = check(!edit.is_null(), 0);
             0
         }
         WM_PAINT => {

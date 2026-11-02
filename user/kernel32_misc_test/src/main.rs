@@ -59,6 +59,7 @@ type VectoredHandler = extern "system" fn(*mut ExceptionPointers) -> i32;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn SetThreadExecutionState(flags: u32) -> u32;
     fn GetProcessHeap() -> Handle;
     fn HeapCreate(options: u32, initial: usize, maximum: usize) -> Handle;
     fn HeapDestroy(heap: Handle) -> Bool;
@@ -693,6 +694,16 @@ fn modules(c: &mut Checks) -> Result<(), u32> {
         c.eq(GetLastError().into(), 18)?; // ERROR_NO_MORE_FILES
         c.ok(seen && n >= 3, n)?;
         c.ok(CloseHandle(snapshot) != 0, 0)?;
+
+        // SetThreadExecutionState: the previous state (ES_CONTINUOUS keeps
+        // the new one until changed).
+        const ES_CONTINUOUS: u32 = 0x8000_0000;
+        const ES_SYSTEM_REQUIRED: u32 = 0x1;
+        c.ok(SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) != 0, 0)?;
+        c.eq(
+            SetThreadExecutionState(ES_CONTINUOUS).into(),
+            (ES_CONTINUOUS | ES_SYSTEM_REQUIRED).into(),
+        )?;
     }
     Ok(())
 }

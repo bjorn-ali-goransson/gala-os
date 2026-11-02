@@ -365,6 +365,28 @@ static void timers(void) {
     CHECK(ClientToScreen(pop, &po) && po.x == 40 && po.y == 50);
     CHECK(DestroyWindow(pop));
 
+    // Scroll bars as data: SetScrollInfo returns the new position, kept
+    // within min..max - (page - 1); GetScrollInfo gives what was set.
+    SCROLLINFO si = {sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS, 0, 100, 10, 50, 0};
+    CHECK(SetScrollInfo(w, SB_VERT, &si, FALSE) == 50);
+    SCROLLINFO got = {sizeof got, SIF_ALL};
+    CHECK(GetScrollInfo(w, SB_VERT, &got) && got.nMin == 0 && got.nMax == 100 && got.nPage == 10
+          && got.nPos == 50);
+    si.fMask = SIF_POS;
+    si.nPos = 200;
+    CHECK(SetScrollInfo(w, SB_VERT, &si, FALSE) == 91 && GetScrollPos(w, SB_VERT) == 91);
+    CHECK(SetScrollPos(w, SB_VERT, 5, FALSE) == 91 && GetScrollPos(w, SB_VERT) == 5);
+    int lo = -1, hi = -1;
+    CHECK(SetScrollRange(w, SB_HORZ, 0, 30, FALSE) && GetScrollRange(w, SB_HORZ, &lo, &hi) && lo == 0
+          && hi == 30);
+    CHECK(ShowScrollBar(w, SB_VERT, TRUE) && EnableScrollBar(w, SB_VERT, ESB_ENABLE_BOTH));
+
+    // FlashWindowEx: whether the caption was active before.
+    FLASHWINFO fw = {sizeof fw, w, FLASHW_ALL, 2, 0};
+    CHECK(!FlashWindowEx(&fw) == (GetActiveWindow() != w));
+    fw.dwFlags = FLASHW_STOP;
+    CHECK(!FlashWindowEx(&fw) == (GetActiveWindow() != w));
+
     // UnregisterClassW: not while a window of it is there; then gone.
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = DefWindowProcW;

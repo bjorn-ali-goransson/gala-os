@@ -90,7 +90,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetCurrentConsoleFontEx
     GetNamedPipeClientProcessId
     GetNumberOfConsoleMouseButtons
-    IdnToAscii
     IdnToUnicode
     IsBadStringPtrA
     PrefetchVirtualMemory
@@ -113,5 +112,4 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GlobalHandle
     IsBadReadPtr
     ReadConsoleOutputCharacterA
-    SetThreadExecutionState
 );

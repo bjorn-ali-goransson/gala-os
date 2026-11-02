@@ -98,6 +98,7 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `fault=ud`, `fault=pagefault` | provoke that exception (tests the handler) |
 | `run=<file>[,<file>...]` | run those boot modules as user processes, one after another (each between `run: begin` and `run: end` log lines) |
 | `args=<percent-encoded>[,...]` | their command-line arguments, in the same order (`%2C` for a comma) |
+| `start=<file>[,<file>...]`, `start_args=...` | start those programs first without waiting for them (a server for the `run=` programs); they end with the boot |
 | `cwd=C:/dir` | their current directory (default `C:\gala\`; Elasticsearch expects its home) |
 | `trace` | log every system call (arguments, status) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
@@ -1200,6 +1201,44 @@ Windows, never shadows the system's DLLs.)
   because programs' output changes with it: Caddy logs differently to a
   console, and kernel32_sys_test and winsock_test, which expect
   redirected handles, failed.)
+- **Console windows** (design, 2026-11-02; not built yet). Windows draws
+  a console program's console in conhost.exe; gala does the same with its
+  own `user/conhost` (a gala program, not Microsoft's), so the kernel keeps
+  no drawing code for it:
+  - A *console session* (kernel, `nt::conhost`): an output ring (64 KiB
+    of the bytes the session's processes write, oldest dropped), an input
+    queue of key records (KEY_EVENT_RECORD: down, repeat, virtual key and
+    scan code, character, control keys), the host's event and its size
+    (columns, rows). A process belongs to at most one session
+    (`Process::console`), inherited by the processes it creates;
+    `start=`/`run=` programs get one when the command line says
+    `console=window` (and the start menu's console programs will).
+  - Output: NtWriteFile on a ConsoleOutput object (the standard handles
+    and CONOUT$) still goes to the serial line, and also into the
+    writer's session ring, signalling the host's event.
+  - Input: ReadFile/ReadConsole(Input) on ConsoleInput (stdin, CONIN$)
+    take from the session's queue (waiting when it is empty; line input
+    with echo in kernel32 per ENABLE_LINE_INPUT/ENABLE_ECHO_INPUT), and
+    GetNumberOfConsoleInputEvents/PeekConsoleInput look at it; without a
+    session reads still return nothing (as today).
+  - The host: the kernel starts `C:\Windows\System32\conhost.exe` with
+    the session's id before the session's first program. Its system
+    calls: GalaConsoleHost(id, event) (become the host; the event is set
+    when output arrives or the session ends), GalaConsoleRead(id, buffer,
+    length, *count) (take output, without waiting), GalaConsoleInput(id,
+    records, count) (queue keys). It draws a window titled with the
+    program's path: a 120 x 30 grid of cells (Cascadia Mono/Consolas,
+    which gdi32 maps to its fixed-pitch Noto), light text on Windows
+    Terminal's dark background, a 1000-line scrollback, a blinking
+    cursor; it interprets UTF-8 and the VT sequences programs use (CR,
+    LF, BS, TAB, CSI m colours, CSI K, CSI J, CSI H, cursor moves). Typed
+    keys become key records (WM_KEYDOWN/WM_CHAR). It ends when the
+    session's last process has ended and the window is closed (or at
+    once with no window).
+  - Tests: kernel host tests for the ring and queue; a console_window
+    screen scenario (a test program prints lines, colours, reads a
+    typed line and echoes it; pixel checks on the grid); then the
+    FileZilla Server console next to FileZilla.
 - **FormatMessage** (kernel32 messages.rs): system messages from a table
   of the documented US English texts, or the caller's string; inserts
   (%1..%99 with printf-style formats, %n %r %t %b %0 %%), IGNORE_INSERTS,
@@ -2288,8 +2327,14 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   holds the desktop's capture, so a press outside every menu (and the bar)
   ends the loop. Keys: arrows, Enter, Escape, mnemonics. The choice is a
   posted WM_COMMAND (or TrackPopupMenu's result with TPM_RETURNCMD). One
-  loop at a time per process. Not yet: item bitmaps (hbmpItem), Alt/F10
+  loop at a time per process; a disabled window's bar takes no input (a
+  modal dialog is up). Not yet: item bitmaps (hbmpItem), Alt/F10
   keyboard access to the bar, mnemonic underlines, the system menu.
+- **Scroll bars** (`user/user32/src/scroll.rs`): data only for now: per
+  window and bar (SB_HORZ/VERT/CTL) a range (0..100 at first), page and
+  position kept within min..max - (page - 1), as Set/GetScrollInfo,
+  Set/GetScrollPos and Set/GetScrollRange document; they are not drawn
+  (ShowScrollBar/EnableScrollBar answer TRUE) and take no client area.
 - **Registered messages** (`message.rs`): RegisterWindowMessageW gives
   0xC000 + an index per name (case-insensitive), process-wide.
 - **Hooks** (`user/user32/src/hook.rs`): per kind and thread, newest

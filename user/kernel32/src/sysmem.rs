@@ -581,6 +581,24 @@ pub extern "system" fn Beep(_frequency: u32, ms: u32) -> Bool {
     TRUE
 }
 
+/// The execution state SetThreadExecutionState keeps (process-wide: gala
+/// has no power management, so it only remembers it).
+static EXECUTION_STATE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0x8000_0000); // ES_CONTINUOUS
+
+/// SetThreadExecutionState(flags): the previous state; with ES_CONTINUOUS
+/// the new one stays (gala never sleeps or turns the display off).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetThreadExecutionState(flags: u32) -> u32 {
+    const ES_CONTINUOUS: u32 = 0x8000_0000;
+    let order = core::sync::atomic::Ordering::Relaxed;
+    if flags & ES_CONTINUOUS != 0 {
+        EXECUTION_STATE.swap(flags, order)
+    } else {
+        EXECUTION_STATE.load(order)
+    }
+}
+
 /// UnhandledExceptionFilter: the filter SetUnhandledExceptionFilter set,
 /// if any; otherwise EXCEPTION_EXECUTE_HANDLER (1), so the caller ends the
 /// process (there is no error reporting to show).
