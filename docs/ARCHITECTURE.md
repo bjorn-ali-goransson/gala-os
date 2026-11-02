@@ -2883,7 +2883,29 @@ steps, each test first:
    thread; user32's pump moves them into its own queue as it does the
    desktop's input (GalaWindowInput). Test: BM_CLICK posted to the
    child's button gives the child's window WM_COMMAND.
-3. **Sent messages across threads and processes**: SendMessage to a
+3. **Done across processes (2026-11-02, windows_across_test).** As
+   built: GalaWindowSend(*request, *id) 0x7f48 queues the message for
+   the window's thread (the registry's tid) with its marshaled input
+   and the room for its output, and sets the owner's queue event;
+   GalaWindowSendWait(id, ms, *result, out, *len) 0x7f49 returns the
+   reply, STATUS_TIMEOUT while there is none (user32 waits 10 ms at a
+   time and handles messages sent to its own thread in between), or
+   STATUS_INVALID_HANDLE when the receiver ended (its process's end
+   fails the sends to it); GalaWindowReceive(tid, *head, input, max)
+   0x7f4a hands the oldest one to the window's thread (without a
+   header: only whether one waits, so the pump's check is cheap);
+   GalaWindowReply(id, result, out, len) 0x7f4b answers. user32's pump
+   (every GetMessage/PeekMessage/MsgWait...) handles them through the
+   window procedure. Marshaled so far: WM_SETTEXT's string in, WM_GETTEXT's
+   buffer out (written straight into the sender's buffer); other
+   messages as numbers. GetWindowText of another process's window
+   stays the mirrored text, as documented (it does not send WM_GETTEXT
+   across processes; programs send WM_GETTEXT themselves). TODO:
+   cross-thread SendMessage within a process (still a direct call),
+   SendMessageTimeout/SendNotifyMessage/SendMessageCallback, ReplyMessage
+   and InSendMessage, more marshaled messages (LB_/CB_ strings,
+   WM_COPYDATA). The plan was:
+   **Sent messages across threads and processes**: SendMessage to a
    window of another thread queues a sent message with a reply slot in
    the kernel; the sender waits (processing messages sent to itself, as
    Windows does) and the receiver handles it the next time it calls

@@ -1697,6 +1697,13 @@ pub extern "system" fn GetQueueStatus(flags: u32) -> u32 {
 /// SendMessageW: the window procedure, called now on this thread.
 #[unsafe(no_mangle)]
 pub extern "system" fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
+    // Another process's window: through the kernel, the pointers
+    // marshaled.
+    if hwnd != 0 && index_of(hwnd).is_none() {
+        if let Some(r) = crate::foreign::send_remote(hwnd, msg, wparam, lparam) {
+            return r;
+        }
+    }
     // WH_CALLWNDPROC sees it first: a CWPSTRUCT (lParam, wParam, message,
     // window), wParam nonzero (sent by this thread).
     if crate::hook::any(crate::hook::WH_CALLWNDPROC) {
@@ -1807,6 +1814,7 @@ const VK_CAPITAL: usize = 0x14;
 /// window's thread), keeping the key state.
 fn pump() {
     crate::foreign::take_posted();
+    crate::foreign::take_sent();
     let mut records = [0u8; 24 * 32];
     loop {
         let mut n = 0u32;

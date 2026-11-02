@@ -23,6 +23,11 @@
  * (ERROR_MESSAGE_SYNC_ONLY), and a window that is not one gives
  * ERROR_INVALID_WINDOW_HANDLE.
  *
+ * Sent messages cross as well, the system's marshaling the pointers:
+ * WM_GETTEXT reads the child's edit's text into our buffer, WM_SETTEXT
+ * gives it ours, WM_GETTEXTLENGTH counts it, and WM_APP + 2's result is
+ * what the child's procedure returned (wParam * lParam).
+ *
  * Prints "windows_across_test: ok" and exits 0, or the failing check's
  * number and line.
  */
@@ -48,6 +53,8 @@ static LRESULT CALLBACK child_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         SetWindowTextW(h, L"clicked");
         return 0;
     }
+    if (m == WM_APP + 2)
+        return (LRESULT)(w * l);
     if (m == WM_APP + 1) {
         WCHAR t[64];
         swprintf(t, 64, L"app %d %d", (int)w, (int)l);
@@ -204,6 +211,18 @@ int main(int argc, char **argv) {
     SetLastError(0);
     CHECK(!PostMessageW((HWND)(ULONG_PTR)0x7ff0, WM_APP, 0, 0));
     CHECK(GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+
+    /* Sent messages to the other process. */
+    WCHAR got[64] = {0};
+    CHECK(SendMessageW(edit, WM_GETTEXT, 64, (LPARAM)got) == 9);
+    CHECK(wcscmp(got, L"some text") == 0);
+    CHECK(SendMessageW(edit, WM_GETTEXT, 5, (LPARAM)got) == 4);
+    CHECK(wcscmp(got, L"some") == 0);
+    CHECK(SendMessageW(edit, WM_SETTEXT, 0, (LPARAM)L"changed") == TRUE);
+    CHECK(SendMessageW(edit, WM_GETTEXTLENGTH, 0, 0) == 7);
+    CHECK(SendMessageW(edit, WM_GETTEXT, 64, (LPARAM)got) == 7);
+    CHECK(wcscmp(got, L"changed") == 0);
+    CHECK(SendMessageW(top, WM_APP + 2, 6, 7) == 42);
 
     /* The child ends: its windows go. */
     CHECK(SetEvent(done));

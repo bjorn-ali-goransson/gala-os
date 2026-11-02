@@ -18,6 +18,21 @@ unsafe extern "system" {
     fn GalaWindowChildren(parent: u64, hwnds: *mut u64, max: u32, count: *mut u32) -> u32;
     fn GalaWindowPost(hwnd: u64, message: u32, wparam: u64, lparam: u64) -> u32;
     fn GalaWindowPosted(records: *mut u8, max: u32, count: *mut u32) -> u32;
+    fn GalaWindowSend(request: *const u8, id: *mut u64) -> u32;
+    fn GalaWindowSendWait(id: u64, ms: u32, result: *mut i64, out: *mut u8, len: *mut u32) -> u32;
+    fn GalaWindowReceive(tid: u32, head: *mut u8, input: *mut u8, max: u32) -> u32;
+    fn GalaWindowReply(id: u64, result: i64, out: *const u8, len: u32) -> u32;
+}
+
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn VirtualAlloc(
+        at: *mut core::ffi::c_void,
+        size: usize,
+        kind: u32,
+        protect: u32,
+    ) -> *mut core::ffi::c_void;
+    fn VirtualFree(at: *mut core::ffi::c_void, size: usize, kind: u32) -> i32;
 }
 
 const CLASS_CHARS: usize = 64;
@@ -418,6 +433,116 @@ pub(crate) fn take_posted() {
         }
         if n < 32 {
             return;
+        }
+    }
+}
+
+const WM_SETTEXT: u32 = 0x000c;
+const WM_GETTEXT: u32 = 0x000d;
+const STATUS_TIMEOUT: u32 = 0x102;
+/// The most a sent message carries each way (the kernel's limit).
+const MAX_DATA: usize = 64 * 1024;
+
+/// SendMessage to another process's window: the message goes through
+/// the kernel to the window's thread, which handles it the next time it
+/// calls a message function; meanwhile messages sent to this thread are
+/// handled (as Windows does, so two threads sending to each other don't
+/// deadlock). Marshaled: WM_SETTEXT's string (in), WM_GETTEXT's buffer
+/// (out); other messages go as numbers. None when `hwnd` is no other
+/// process's window.
+pub(crate) fn send_remote(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Option<isize> {
+    remote(hwnd)?;
+    let (mut in_ptr, mut in_len, mut out_ptr, mut out_max) = (0u64, 0usize, 0u64, 0usize);
+    match msg {
+        WM_SETTEXT if lparam != 0 => {
+            let text = lparam as *const u16;
+            let mut n = 0;
+            // SAFETY: the caller's NUL-terminated string.
+            while n < MAX_DATA / 2 - 1 && unsafe { *text.add(n) } != 0 {
+                n += 1;
+            }
+            (in_ptr, in_len) = (text as u64, 2 * (n + 1));
+        }
+        WM_GETTEXT if lparam != 0 => {
+            (out_ptr, out_max) = (lparam as u64, (2 * wparam).min(MAX_DATA));
+        }
+        _ => {}
+    }
+    let mut req = [0u8; 48];
+    req[0..8].copy_from_slice(&(hwnd as u64).to_le_bytes());
+    req[8..12].copy_from_slice(&msg.to_le_bytes());
+    req[12..16].copy_from_slice(&(out_max as u32).to_le_bytes());
+    req[16..24].copy_from_slice(&(wparam as u64).to_le_bytes());
+    req[24..32].copy_from_slice(&(lparam as u64).to_le_bytes());
+    req[32..40].copy_from_slice(&in_ptr.to_le_bytes());
+    req[40..44].copy_from_slice(&(in_len as u32).to_le_bytes());
+    let mut id = 0u64;
+    // SAFETY: our request; the input is the caller's string.
+    if unsafe { GalaWindowSend(req.as_ptr(), &mut id) } != 0 {
+        crate::window::set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
+        return Some(0);
+    }
+    loop {
+        let (mut result, mut len) = (0i64, 0u32);
+        // SAFETY: our outputs; the output goes into the caller's buffer
+        // of `out_max` bytes (WM_GETTEXT's).
+        let status =
+            unsafe { GalaWindowSendWait(id, 10, &mut result, out_ptr as *mut u8, &mut len) };
+        match status {
+            0 => return Some(result as isize),
+            STATUS_TIMEOUT => take_sent(),
+            _ => {
+                crate::window::set_last_error(1400);
+                return Some(0);
+            }
+        }
+    }
+}
+
+/// Handles the messages other processes sent to this thread's windows:
+/// each goes to its window's procedure with its marshaled buffers, and
+/// the result (and output) goes back.
+pub(crate) fn take_sent() {
+    let me = crate::window::me();
+    loop {
+        // Most of the time nothing waits: ask before allocating.
+        // SAFETY: no buffers: only whether one waits.
+        if unsafe { GalaWindowReceive(me, core::ptr::null_mut(), core::ptr::null_mut(), 0) } != 0 {
+            return;
+        }
+        // SAFETY: plain calls; the buffers are ours.
+        let buf =
+            unsafe { VirtualAlloc(core::ptr::null_mut(), 2 * MAX_DATA, 0x3000, 4) }.cast::<u8>();
+        if buf.is_null() {
+            return;
+        }
+        let mut head = [0u8; 48];
+        // SAFETY: our header and input buffer of MAX_DATA bytes.
+        let status = unsafe { GalaWindowReceive(me, head.as_mut_ptr(), buf, MAX_DATA as u32) };
+        if status != 0 {
+            // SAFETY: our allocation.
+            unsafe { VirtualFree(buf.cast(), 0, 0x8000) };
+            return;
+        }
+        let u64_at = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap_or([0; 8]));
+        let u32_at = |at: usize| u32::from_le_bytes(head[at..at + 4].try_into().unwrap_or([0; 4]));
+        let (id, hwnd, msg) = (u64_at(0), u64_at(8) as Hwnd, u32_at(16));
+        let (out_max, wparam, lparam, in_len) =
+            (u32_at(20) as usize, u64_at(24) as usize, u64_at(32) as isize, u32_at(40));
+        // SAFETY: the second half of our allocation.
+        let out = unsafe { buf.add(MAX_DATA) };
+        let lparam = if in_len > 0 {
+            buf as isize
+        } else if out_max > 0 {
+            out as isize
+        } else {
+            lparam
+        };
+        let result = crate::window::SendMessageW(hwnd, msg, wparam, lparam);
+        // SAFETY: our output buffer of `out_max` bytes; then our allocation.
+        unsafe {
+            GalaWindowReply(id, result as i64, out, out_max as u32);
+            VirtualFree(buf.cast(), 0, 0x8000);
         }
     }
 }

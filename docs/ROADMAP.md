@@ -1420,9 +1420,10 @@ posted and sent messages across processes, then UIA over them, then
 FlaUI). That plan is the next step for this item. Step 1 (the window
 registry, global HWNDs, FindWindow/EnumWindows/GetWindowText... on
 other processes' windows) is done (2026-11-02, windows_across_test);
-step 2 (PostMessage to another process's window) too; next: sent
-messages across threads and processes (SendMessage, with WM_GETTEXT and
-friends marshaled).
+step 2 (PostMessage to another process's window) and step 3
+(SendMessage to another process's window, WM_GETTEXT/WM_SETTEXT
+marshaled) too; next: UI Automation over other processes' windows
+(step 4).
 
 Drivers: gala writes its own, against published standards (virtio,
 then AHCI/NVMe, xHCI, e1000), not hardware-specific ones. Reusing
