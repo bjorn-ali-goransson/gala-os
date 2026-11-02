@@ -1426,8 +1426,12 @@ SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    off. **`profile=server` done** (2026-11-02, scenario
    server_profile): the desktop is never drawn even with a screen,
    windows still exist as without one, `console=` starts no conhost.exe.
-   Next: a server module set in xtask without the GUI DLLs and fonts; later a `desktop` cargo feature so a server kernel
-   does not contain the compositor.
+   Next: a `desktop` cargo feature so a server kernel does not contain
+   the compositor. A server image without user32/gdi32 is not planned:
+   many console and server programs import them (as on Windows Server
+   Core, which keeps them), and loading them starts nothing; only the
+   wallpapers, fonts and GUI-only programs (conhost.exe, FileZilla) can
+   stay out of a server image.
 
 R. **Robustness and live update, kernel included** (the owner's
    vision; proposed 2026-11-02 by the owner;

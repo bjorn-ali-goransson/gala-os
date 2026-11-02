@@ -2908,9 +2908,10 @@ it holds today:
 
 Rule for new code: nothing in the boot path, the console path or a
 server program's path may touch the desktop, start a GUI process or
-load a GUI DLL unless a program asked for a window. Planned (ROADMAP
-SD): a server module set without the GUI DLLs,
-then a `desktop` cargo feature that leaves the compositor out of a
+load a GUI DLL unless a program asked for a window (user32 and gdi32
+themselves stay: many server programs import them, and loading them
+draws nothing). Planned (ROADMAP SD):
+a `desktop` cargo feature that leaves the compositor out of a
 server kernel.
 
 ## UI Automation
