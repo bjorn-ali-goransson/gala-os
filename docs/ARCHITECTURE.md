@@ -2910,9 +2910,19 @@ Rule for new code: nothing in the boot path, the console path or a
 server program's path may touch the desktop, start a GUI process or
 load a GUI DLL unless a program asked for a window (user32 and gdi32
 themselves stay: many server programs import them, and loading them
-draws nothing). Planned (ROADMAP SD):
-a `desktop` cargo feature that leaves the compositor out of a
-server kernel.
+draws nothing).
+
+- **The server kernel** (2026-11-02, scenario `server_kernel`): the
+  kernel's `desktop` cargo feature is on by default; without it
+  (`--no-default-features`) `nt::desktop` is `nt/desktop_off.rs`, the
+  same interface with nothing behind it (every window call
+  STATUS_NOT_SUPPORTED, as with no screen; `Desktop` is an empty enum so
+  `with` never runs its closure). The compositor, wallpapers and start
+  menu are not in the binary (2.5 MB less in release). xtask builds it
+  into `target/server` beside the normal one; scenarios listed in
+  `SERVER_KERNEL_SCENARIOS` boot it; CI runs clippy on it. A change to
+  `nt::desktop`'s public interface needs the same change in
+  `desktop_off.rs`.
 
 ## UI Automation
 

@@ -5,6 +5,11 @@ pub mod afd;
 pub mod charge;
 pub mod conhost;
 pub mod context;
+#[cfg(feature = "desktop")]
+pub mod desktop;
+/// A server kernel (no `desktop` feature): the same interface, no desktop.
+#[cfg(not(feature = "desktop"))]
+#[path = "desktop_off.rs"]
 pub mod desktop;
 pub mod disk;
 pub mod file;

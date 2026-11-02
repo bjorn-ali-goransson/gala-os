@@ -176,6 +176,8 @@ pub fn kernel_main() -> ! {
 
     // The desktop's wallpaper (`wallpaper=<name>`, else one at random).
     nt::desktop::choose_wallpaper(cmdline.value("wallpaper"));
+    #[cfg(not(feature = "desktop"))]
+    info!("desktop: not in this kernel (server build)");
     // `profile=server` (ROADMAP SD): no graphical interface, ever.
     if cmdline.value("profile") == Some("server") {
         nt::desktop::set_server_profile();

@@ -1814,6 +1814,16 @@ fn build_kernel(release: bool) -> Result {
         cmd.arg("--release");
     }
     run_cmd(&mut cmd)?;
+    // The server kernel (no `desktop` feature: ROADMAP SD), in its own
+    // target directory so the two builds don't replace each other.
+    let mut cmd = cargo();
+    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
+        .args(["--no-default-features", "--target-dir"])
+        .arg(server_target_dir());
+    if release {
+        cmd.arg("--release");
+    }
+    run_cmd(&mut cmd)?;
     // User programs are always optimized: without a CRT there is no
     // `memcpy` etc. for unoptimized code to call. DLLs that programs embed
     // are built first.
@@ -1858,9 +1868,19 @@ fn build_go_programs() -> Result {
     Ok(())
 }
 
+/// Where the server kernel (built without the desktop) goes.
+fn server_target_dir() -> PathBuf {
+    target_dir().join("server")
+}
+
+/// Scenarios booted with the server kernel (no `desktop` feature).
+const SERVER_KERNEL_SCENARIOS: &[&str] = &["server_kernel"];
+
 fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
-    let kernel = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
+    let server = name.strip_prefix("test-").is_some_and(|n| SERVER_KERNEL_SCENARIOS.contains(&n));
+    let kernel_dir = if server { server_target_dir() } else { target_dir() };
+    let kernel = kernel_dir.join(KERNEL_TARGET).join(profile).join("kernel");
     let limine = fetch_limine()?;
     let out = target_dir().join(profile);
     let iso_root = out.join(format!("{name}-iso-root"));
@@ -3062,6 +3082,20 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["user32_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // ROADMAP SD: the server kernel, built without the desktop (no
+        // compositor in the binary), booted with a screen: GUI calls fail
+        // as with no screen, windows still work, a console program runs.
+        name: "server_kernel",
+        cmdline: "qemu_exit run=hello.exe,user32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "desktop: not in this kernel (server build)",
+            "Hello from user mode!",
+            "user32_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // ROADMAP SD: the server profile never brings up the graphical
         // interface, even with a screen (UEFI: a framebuffer): windows
         // still work (the registry, messages), nothing is drawn, and
@@ -3956,6 +3990,7 @@ fn events_flag() -> String {
 const MODULE_SETS: &[(&str, &str)] = &[
     ("kernel_watchdog", "hello"),
     ("server_profile", "user32_test"),
+    ("server_kernel", "user32_test"),
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
     ("crash_record", "hello"),
