@@ -664,6 +664,19 @@ static void icons(void) {
     DeleteDC(mem);
     DeleteObject(canvas);
 
+    /* A window's icons: WM_SETICON returns the previous one, WM_GETICON
+     * what was set (the taskbar and caption show it). */
+    HWND iw = CreateWindowExW(0, L"User32TestHooks", L"icons", WS_OVERLAPPEDWINDOW, 10, 10, 200, 100,
+                              NULL, NULL, GetModuleHandleW(NULL), NULL);
+    CHECK(iw != NULL);
+    CHECK(SendMessageW(iw, WM_SETICON, ICON_BIG, (LPARAM)icon) == 0);
+    CHECK(SendMessageW(iw, WM_SETICON, ICON_SMALL, (LPARAM)mono_icon) == 0);
+    CHECK(SendMessageW(iw, WM_GETICON, ICON_BIG, 0) == (LRESULT)icon);
+    CHECK(SendMessageW(iw, WM_GETICON, ICON_SMALL, 0) == (LRESULT)mono_icon);
+    CHECK(SendMessageW(iw, WM_SETICON, ICON_BIG, 0) == (LRESULT)icon);
+    CHECK(SendMessageW(iw, WM_GETICON, ICON_BIG, 0) == 0);
+    CHECK(DestroyWindow(iw));
+
     CHECK(DestroyIcon(icon) && !DestroyIcon(icon) && DestroyIcon(mono_icon));
     DeleteObject(color);
     DeleteObject(mask);

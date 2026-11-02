@@ -1245,7 +1245,9 @@ Windows, never shadows the system's DLLs.)
     when output arrives or the session ends), GalaConsoleRead(id, buffer,
     length, *count) (take output, without waiting), GalaConsoleInput(id,
     records, count) (queue keys). It draws a window titled with the
-    program's file name at (60, 60): a 100 x 28 grid of cells
+    program's file name at (60, 60): a 100 x 28 grid of cells at first;
+    WM_SIZE makes it as large as the client area holds (at most 240 x 80;
+    the cursor's line stays in view, lines are cut rather than rewrapped)
     (Consolas, which gdi32 maps to its fixed-pitch Noto, now with Latin-1
     Supplement), Windows Terminal's "Campbell" colours, an underline
     cursor; it interprets UTF-8 and the VT sequences programs use (CR,
@@ -1253,7 +1255,9 @@ Windows, never shadows the system's DLLs.)
     colours incl. bold as bright, CSI K, CSI J, CSI H/f, CSI A-D and G),
     scrolling at the bottom. Typed keys become key records (WM_CHAR, and
     WM_KEYDOWN/UP for keys without a character). It ends when its window
-    is closed. TODO: scrollback, resizing, closing with the session.
+    is closed. TODO: scrollback, rewrapping on resize, telling the
+    programs the new size (GetConsoleScreenBufferInfo,
+    WINDOW_BUFFER_SIZE_EVENT), closing with the session.
   - Tests: kernel host tests for the ring and queue; the console_window
     screen scenario (console_window_test prints text, VT colours and
     UTF-8, then reads what xtask types: "hi" with ReadFile (echoed in the
@@ -2167,18 +2171,31 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   others grey).
 - **Shell**: the bottom 48 rows are the translucent taskbar: centred, the
   fortress as the start button and a 44-px button per window the
-  programs show (in creation order; a letter tile, an accent pill under
+  programs show (in creation order; the window's icon - 24 x 24, scaled
+  by area average from what user32 hands over - or else a letter tile,
+  an accent pill under
   the active one, a grey one under the others), and at the right a UTC
   clock over the date in 12-hour M/D/YYYY form (`tick` every second from
   the input thread). The start menu (600 x 640, centred above the
   taskbar) has a search box (typing filters the programs, Enter starts
-  the first, Esc or the Windows key closes; the Windows key also opens
-  it), "Pinned": a grid of tiles for the programs of `PROGRAMS` whose
+  the first, Esc or the Windows key closes; the Windows key, pressed
+  and released alone, also opens it), "Pinned": a grid of tiles for the programs of `PROGRAMS` whose
   files exist (checked outside the desktop's lock before a click),
   "Recommended": the last four started, and a user foot with the
   fortress as the avatar. A tile's click starts its program
   (`process::launch`: the boot user, its directory current, new console
   handles).
+- **Snap** (`desktop::snap`, as Windows 11's keys): with the Windows key
+  held, Left and Right put the active window on that half of the work
+  area, Up maximizes it (WM_SYSCOMMAND SC_MAXIMIZE), Down restores a
+  maximized one (SC_RESTORE), gives a snapped one back its rectangle from
+  before the first snap, or else minimizes it; the Windows key's release
+  then doesn't open the start menu, and the program gets no keys. The
+  program moves its window itself: the desktop queues GALA_WM_PLACE
+  (0x10001, above any Windows message number; wParam left | top << 32,
+  lParam width | height << 32), user32's input pump posts it to the
+  window's thread and DispatchMessage calls SetWindowPos (no longer
+  maximized), so the program sees WM_SIZE.
 - **Mouse** (`desktop::pointer`): a press on the start button toggles the
   menu; with the menu open, a press elsewhere only closes it. A taskbar
   button restores a minimized window, minimizes the active one, else
@@ -2234,8 +2251,20 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   (a new client buffer keeping what fits), GalaWindowSetTitle(id, *text,
   length) 0x7f38, GalaWindowCapture(id) 0x7f39; console hosts:
   GalaConsoleHost(id, event) 0x7f3a, GalaConsoleRead(id, buf, len,
-  *count) 0x7f3b, GalaConsoleInput(id, records, count) 0x7f3c. Only the
+  *count) 0x7f3b, GalaConsoleInput(id, records, count) 0x7f3c;
+  GalaWindowSetIcon(id, *pixels, size) 0x7f3e (size x size 0xAARRGGBB,
+  straight alpha, size at most 64; none: the letter tile). Only the
   owner process may change a window.
+- **Window icons** (user32): a window has big and small icons
+  (WM_SETICON returns the previous one, WM_GETICON ICON_SMALL2 gives the
+  small one or else the big one), and its class has hIcon/hIconSm. When a
+  top-level window is created or its icon set, user32 picks the first of
+  its big, small, the class's big and small icons, reads its bitmaps
+  (GetDIBits, 32 bits; alpha from the colour bitmap, else from the mask;
+  a monochrome icon black and white), averages icons above 64 pixels
+  down to 32, and calls GalaWindowSetIcon. conhost's class has its own
+  icon (a dark square with ">_", drawn in code). TODO: the small icon in
+  the caption; conhost showing its program's icon.
 - **user32** (`user/user32/src/window.rs`): classes, windows
   (HWND = 0x10000 + 16 * slot), one message queue per process (256
   entries, an auto-reset event) filtered by thread, WM_PAINT synthesised

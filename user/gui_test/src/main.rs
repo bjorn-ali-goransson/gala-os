@@ -5,6 +5,8 @@
 //!   400 x 300 at (100, 100)) sends WM_CREATE before it returns, with the
 //!   lpCreateParams given; the client rectangle starts at (0, 0) and is
 //!   smaller than the window; the window starts hidden (IsWindowVisible).
+//! - The class's icon (CreateIconIndirect: an orange square) is the
+//!   window's: its taskbar button shows it.
 //! - ShowWindow(SW_SHOW) returns 0 (it was hidden); UpdateWindow sends
 //!   WM_PAINT; BeginPaint gives a DC and rcPaint covering the client
 //!   area; FillRect paints a red rectangle at (20, 20)-(200, 120) and
@@ -153,11 +155,23 @@ unsafe extern "system" {
     ) -> i32;
     fn DestroyMenu(menu: Handle) -> i32;
     fn ClientToScreen(hwnd: Hwnd, point: *mut [i32; 2]) -> i32;
+    fn CreateIconIndirect(info: *const IconInfo) -> Handle;
+}
+
+/// ICONINFO.
+#[repr(C)]
+struct IconInfo {
+    icon: i32,
+    x: u32,
+    y: u32,
+    mask: Handle,
+    color: Handle,
 }
 
 #[link(name = "gdi32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn CreateSolidBrush(color: u32) -> Handle;
+    fn CreateBitmap(w: i32, h: i32, planes: u32, bpp: u32, bits: *const c_void) -> Handle;
     fn DeleteObject(object: Handle) -> i32;
     fn SetTextColor(hdc: Handle, color: u32) -> u32;
     fn SetBkMode(hdc: Handle, mode: i32) -> i32;
@@ -478,6 +492,19 @@ fn run() -> Result<(), u32> {
     // SAFETY: valid structures, strings and handles throughout.
     unsafe {
         let instance = GetModuleHandleW(core::ptr::null());
+        // The class's icon: an opaque orange 32 x 32 square (its taskbar
+        // button shows it).
+        static ORANGE: [u32; 32 * 32] = [0xffff_8000; 32 * 32];
+        static MASK: [u8; 4 * 32] = [0; 4 * 32];
+        let info = IconInfo {
+            icon: 1,
+            x: 0,
+            y: 0,
+            mask: CreateBitmap(32, 32, 1, 1, MASK.as_ptr().cast()),
+            color: CreateBitmap(32, 32, 1, 32, ORANGE.as_ptr().cast()),
+        };
+        let icon = CreateIconIndirect(&info);
+        check(!icon.is_null(), 0)?;
         let wc = WndClassExW {
             size: size_of::<WndClassExW>() as u32,
             style: 0,
@@ -485,7 +512,7 @@ fn run() -> Result<(), u32> {
             class_extra: 0,
             window_extra: 0,
             instance,
-            icon: core::ptr::null_mut(),
+            icon,
             cursor: LoadCursorW(core::ptr::null_mut(), IDC_ARROW as *const u16),
             background: (COLOR_WINDOW + 1) as Handle,
             menu_name: core::ptr::null(),

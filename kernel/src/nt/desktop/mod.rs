@@ -150,6 +150,10 @@ pub const WM_SYSCOMMAND: u32 = 0x0112;
 pub const SC_CLOSE: u64 = 0xf060;
 pub const SC_MAXIMIZE: u64 = 0xf030;
 pub const SC_RESTORE: u64 = 0xf120;
+/// gala's request to a window's program to move it (Snap): wParam the
+/// left and top, lParam the width and height (low and high 32 bits).
+/// Above 0xFFFF: no Windows message has this number.
+pub const GALA_WM_PLACE: u32 = 0x0001_0001;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
 pub const WM_LBUTTONDOWN: u32 = 0x0201;
 pub const WM_LBUTTONUP: u32 = 0x0202;
@@ -234,6 +238,57 @@ pub struct Window {
     /// tooltip): all client area, above the framed windows, not on the
     /// taskbar, never active.
     popup: bool,
+    /// Its icon (GalaWindowSetIcon), ICON x ICON 0xAARRGGBB pixels
+    /// (straight alpha); empty: none (the taskbar shows a lettered tile).
+    icon: Vec<u32>,
+    /// Its rectangle before Snap put it on a half of the screen (Win+Down
+    /// gives it back).
+    unsnapped: Option<(i32, i32, u32, u32)>,
+}
+
+/// The size the taskbar draws a window's icon at.
+pub const ICON: usize = 24;
+
+/// An icon of `size` x `size` 0xAARRGGBB pixels scaled to ICON x ICON:
+/// each output pixel averages the source area it covers (box filter,
+/// weighted by alpha so transparent pixels don't darken the edges).
+pub fn scale_icon(src: &[u32], size: usize) -> Option<Vec<u32>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(ICON * ICON).ok()?;
+    if size == 0 || src.len() < size * size {
+        return None;
+    }
+    for oy in 0..ICON {
+        for ox in 0..ICON {
+            // The source span [x0, x1) in units of 1/ICON of a source pixel.
+            let (x0, x1) = (ox * size, (ox + 1) * size);
+            let (y0, y1) = (oy * size, (oy + 1) * size);
+            let (mut a, mut r, mut g, mut b, mut area) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            for sy in y0 / ICON..y1.div_ceil(ICON) {
+                let hy = ((sy + 1) * ICON).min(y1) - (sy * ICON).max(y0);
+                for sx in x0 / ICON..x1.div_ceil(ICON) {
+                    let wx = ((sx + 1) * ICON).min(x1) - (sx * ICON).max(x0);
+                    let wgt = (wx * hy) as u64;
+                    let p = src[sy * size + sx];
+                    let pa = u64::from(p >> 24);
+                    a += pa * wgt;
+                    r += u64::from((p >> 16) & 0xff) * pa * wgt;
+                    g += u64::from((p >> 8) & 0xff) * pa * wgt;
+                    b += u64::from(p & 0xff) * pa * wgt;
+                    area += wgt;
+                }
+            }
+            let pixel = if a == 0 {
+                0
+            } else {
+                let alpha = (a + area / 2) / area;
+                let c = |v: u64| ((v + a / 2) / a) as u32;
+                ((alpha as u32) << 24) | (c(r) << 16) | (c(g) << 8) | c(b)
+            };
+            out.try_push(pixel).ok()?;
+        }
+    }
+    Some(out)
 }
 
 impl Window {
@@ -453,6 +508,10 @@ pub struct Desktop {
     woken: Vec<u64>,
     /// Alt is held (WM_SYSKEYDOWN).
     alt: bool,
+    /// The Windows key is held, and whether a key went with it (then its
+    /// release doesn't open the start menu).
+    win_key: bool,
+    win_used: bool,
     /// The window with the mouse capture (GalaWindowCapture): it gets all
     /// mouse input, wherever the pointer is.
     captured: Option<u32>,
@@ -493,6 +552,8 @@ impl Desktop {
             listeners: Vec::new(),
             woken: Vec::new(),
             alt: false,
+            win_key: false,
+            win_used: false,
             captured: None,
         }
     }
@@ -579,6 +640,8 @@ impl Desktop {
             caption_state: None,
             client,
             title: name,
+            icon: Vec::new(),
+            unsnapped: None,
             popup,
         };
         self.windows.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -717,6 +780,27 @@ impl Desktop {
         self.add_damage(r);
         self.refresh();
         Ok(r)
+    }
+
+    /// `owner`'s window `id`'s icon: `size` x `size` 0xAARRGGBB pixels
+    /// (none when empty), shown on its taskbar button.
+    pub fn set_icon(
+        &mut self,
+        id: u32,
+        owner: u64,
+        pixels: &[u32],
+        size: usize,
+    ) -> Result<(), NtStatus> {
+        let icon = if pixels.is_empty() {
+            Vec::new()
+        } else {
+            scale_icon(pixels, size).ok_or(NtStatus::NO_MEMORY)?
+        };
+        let win = self.find(id, owner)?;
+        win.icon = icon;
+        self.taskbar_dirty = true;
+        self.refresh();
+        Ok(())
     }
 
     /// Gives `owner`'s window `id` the mouse capture (0: releases the
@@ -858,15 +942,25 @@ impl Desktop {
         if vk == VK_MENU {
             self.alt = down;
         }
-        // The Windows key opens and closes the start menu.
+        // The Windows key, pressed and released alone, opens and closes
+        // the start menu; with the arrows it snaps the active window.
         if vk == 0x5b || vk == 0x5c {
             if down {
+                (self.win_key, self.win_used) = (true, false);
+            } else if core::mem::take(&mut self.win_key) && !self.win_used {
                 if self.menu.is_some() {
                     self.close_menu();
                 } else {
                     self.open_menu();
                 }
                 self.refresh();
+            }
+            return;
+        }
+        if self.win_key && (0x25..=0x28).contains(&vk) {
+            self.win_used = true;
+            if down {
+                self.snap(vk);
             }
             return;
         }
@@ -914,6 +1008,43 @@ impl Desktop {
     }
 
     // ---- Window management ---------------------------------------------
+
+    /// Snap, as Windows 11 does it with the Windows key: Left and Right
+    /// put the active window on that half of the work area, Up maximizes
+    /// it, Down restores it (a maximized or snapped one) or minimizes it.
+    /// The program moves its window (GALA_WM_PLACE, WM_SYSCOMMAND).
+    fn snap(&mut self, vk: u8) {
+        let Some(id) = self.active else { return };
+        let (sw, sh) = self.screen;
+        let Some(i) = self.index(id) else { return };
+        let w = &self.windows[i];
+        if w.popup || sw <= 0 || !w.shown() {
+            return;
+        }
+        let work_h = (sh - i64::from(TASKBAR)).max(1) as u64;
+        match vk {
+            0x26 if !w.maximized => self.send(id, WM_SYSCOMMAND, SC_MAXIMIZE, 0),
+            0x28 if w.maximized => self.send(id, WM_SYSCOMMAND, SC_RESTORE, 0),
+            0x28 => match self.windows[i].unsnapped.take() {
+                Some((x, y, w, h)) => self.send(
+                    id,
+                    GALA_WM_PLACE,
+                    u64::from(x as u32) | u64::from(y as u32) << 32,
+                    u64::from(w) | u64::from(h) << 32,
+                ),
+                None => self.minimize(id),
+            },
+            0x25 | 0x27 => {
+                let half = (sw / 2) as u64;
+                let (x, width) = if vk == 0x25 { (0, half) } else { (half, sw as u64 - half) };
+                if w.unsnapped.is_none() && !w.maximized {
+                    self.windows[i].unsnapped = Some((w.x, w.y, w.w, w.h));
+                }
+                self.send(id, GALA_WM_PLACE, x, width | work_h << 32);
+            }
+            _ => {}
+        }
+    }
 
     /// To the top of its layer: framed windows stay below the popups.
     fn raise(&mut self, id: u32) {
@@ -1497,8 +1628,29 @@ impl Desktop {
             if alpha > 0 {
                 c.round_rect(x, y, r.w, r.h, 4, 0x00ff_ffff, 0x00ff_ffff, alpha);
             }
-            // The window's icon: a tile with its initial (programs' own
-            // icons come later).
+            // The window's icon, or a tile with its initial.
+            if win.icon.len() == ICON * ICON {
+                let (ix, iy) = (x + 10, y + 8);
+                for (k, &p) in win.icon.iter().enumerate() {
+                    let (px, py) = ((k % ICON) as i64, (k / ICON) as i64);
+                    c.put(ix + px, iy + py, p, p >> 24);
+                }
+                if active {
+                    c.round_rect(x + r.w / 2 - 8, y + 36, 16, 3, 1, ACCENT, ACCENT, 255);
+                } else if !win.minimized {
+                    c.round_rect(
+                        x + r.w / 2 - 3,
+                        y + 36,
+                        6,
+                        3,
+                        1,
+                        0x00_8a_8a_8a,
+                        0x00_8a_8a_8a,
+                        255,
+                    );
+                }
+                continue;
+            }
             let initial = char::decode_utf16(win.title.iter().copied())
                 .next()
                 .and_then(|c| c.ok())

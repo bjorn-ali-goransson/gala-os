@@ -111,6 +111,7 @@ pub const GALA_CONSOLE_HOST: u32 = 0x7f3a;
 pub const GALA_CONSOLE_READ: u32 = 0x7f3b;
 pub const GALA_CONSOLE_INPUT: u32 = 0x7f3c;
 pub const GALA_CONSOLE_INPUT_EVENTS: u32 = 0x7f3d;
+pub const GALA_WINDOW_SET_ICON: u32 = 0x7f3e;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -286,6 +287,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_CONSOLE_READ, "GalaConsoleRead", 4, gala_console_read),
     (GALA_CONSOLE_INPUT, "GalaConsoleInput", 3, gala_console_input),
     (GALA_CONSOLE_INPUT_EVENTS, "GalaConsoleInputEvents", 4, gala_console_input_events),
+    (GALA_WINDOW_SET_ICON, "GalaWindowSetIcon", 3, gala_window_set_icon),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1461,6 +1463,34 @@ fn gala_window_capture(call: &mut Call<'_>) -> NtStatus {
     let id = arg!(call, 0) as u32;
     let owner = call.process.id;
     tri!(super::desktop::with(|d| Ok((d.capture(id, owner)?, None))));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowSetIcon(id, *pixels, size): the window's icon, `size` x
+/// `size` 0xAARRGGBB pixels (straight alpha, at most 64; 0 or no pixels:
+/// none), shown on its taskbar button.
+fn gala_window_set_icon(call: &mut Call<'_>) -> NtStatus {
+    let id = arg!(call, 0) as u32;
+    let (ptr, size) = (arg!(call, 1), arg!(call, 2) as usize);
+    if size > 64 {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let n = if ptr == 0 { 0 } else { size * size };
+    let mut raw = Vec::new();
+    if raw.try_reserve_exact(4 * n).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    raw.resize(4 * n, 0u8);
+    if call.process.read(ptr, &mut raw).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let mut pixels = Vec::new();
+    if pixels.try_reserve_exact(n).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    pixels.extend(raw.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+    let owner = call.process.id;
+    tri!(super::desktop::with(|d| Ok((d.set_icon(id, owner, &pixels, size)?, None))));
     NtStatus::SUCCESS
 }
 

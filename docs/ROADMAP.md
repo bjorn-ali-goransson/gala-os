@@ -1314,7 +1314,14 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       the console and restores FileZilla from the taskbar); the
       console_window scenario covers text, VT colours, UTF-8 and a typed
       line (cooked input: echo, Backspace, Enter; ReadFile and ReadConsoleW
-      get it) and a raw key (ReadConsoleInputW). Next: console modes
+      get it) and a raw key (ReadConsoleInputW). **Taskbar icons**
+      (2026-11-02): a window's icon (WM_SETICON or its class's) shows on
+      its taskbar button (gui_test's orange class icon, screen-checked;
+      FileZilla's own, conhost's prompt icon). **Snap** (2026-11-02):
+      Win+Left/Right/Up/Down as on Windows 11; conhost's grid follows its
+      window; the filezilla scenario snaps FileZilla right and the
+      server's console left (the FTP session's log beside the client).
+      Next: console modes
       (raw input with SetConsoleMode, Ctrl+C), the combo boxes' drop-down
       lists and tooltips on popups.
 
@@ -1330,6 +1337,41 @@ arch port (boot, MMU, exceptions, timer, context switch) and ARM64 PE
 images plus ARM64 builds of gala's DLLs; the NT layer above is portable.
 32-bit programs need WoW64 (a 32-bit ntdll and thunks). Neither is
 planned before P1.
+
+Raspberry Pi (asked for 2026-11-02): the ARM64 port above, aimed at a
+Pi 4/5 (and QEMU's `raspi4b`/`virt` first): Limine or the Pi's firmware
+loading the kernel, the GIC and the generic timer, the PL011 UART, the
+mailbox framebuffer, then the Pi's own devices (EMMC2/SD, USB through
+xHCI on the Pi 5's RP1 or the Pi 4's VL805, GENET Ethernet), all against
+published datasheets. Then ARM64 builds of gala's DLLs run ARM64 Windows
+programs natively.
+
+x64 programs on ARM64 (asked for 2026-11-02): a translator of our own,
+documented-behaviour only (the x86-64 manuals, Arm's ARM): first an
+interpreter of user-mode x86-64 for correctness, then a block-at-a-time
+JIT to ARM64 with a translation cache, flags computed lazily, x87/SSE on
+NEON, self-modifying code caught through write-protection, x64 DLLs
+(gala's, built for x64) loaded as on x86, and the syscall boundary
+translated (the NT layer stays native). Windows' own design for this
+(ARM64EC, CHPE) is documented and could guide the interface between
+emulated and native code. A large project; after the ARM64 port runs
+native programs.
+
+Screen tests through UI Automation (asked for 2026-11-02): the screen
+checks click pixels and compare colours, which breaks whenever a layout
+moves. The aim is to drive programs as testers do on Windows: find
+elements by AutomationId, Name and ControlType in the element tree,
+invoke them (Invoke, Value, Toggle, ExpandCollapse patterns), and read
+their state, so the same test runs on Windows and on gala. Plan: gala's
+UIAutomationCore.dll implementing the IUIAutomation client interfaces
+over user32's window tree (HWNDs and controls: AutomationId from the
+control id, Name from the text, ControlType from the class, bounding
+rectangles), the COM activation it needs (CoCreateInstance of
+CUIAutomation, the registry entries), and then FlaUI (MIT, .NET) running
+on gala's .NET support as the test driver, with the tests themselves
+checked in and run by xtask on gala and by a script on Windows.
+Providers inside programs (wx and Qt implement IRawElementProviderSimple
+for their own widgets) come after the HWND-based tree.
 
 Drivers: gala writes its own, against published standards (virtio,
 then AHCI/NVMe, xHCI, e1000), not hardware-specific ones. Reusing

@@ -674,3 +674,108 @@ pub extern "system" fn LoadBitmapW(module: Handle, name: *const u16) -> usize {
     }
     b
 }
+
+// ---- Icons as pixels (for the taskbar) ----
+
+/// A bitmap's width and height (GetObjectW's BITMAP).
+fn bitmap_size(h: usize) -> Option<(i32, i32)> {
+    let f = gdi_fn!("GetObjectW", extern "system" fn(usize, i32, *mut u8) -> i32)?;
+    let mut bm = [0u8; 32];
+    if h == 0 || f(h, 32, bm.as_mut_ptr()) == 0 {
+        return None;
+    }
+    let w = i32::from_le_bytes([bm[4], bm[5], bm[6], bm[7]]);
+    let ht = i32::from_le_bytes([bm[8], bm[9], bm[10], bm[11]]);
+    (w > 0 && ht > 0 && w <= 512 && ht <= 1024).then_some((w, ht))
+}
+
+/// A bitmap's pixels, top-down, 32 bits each (the fourth byte kept).
+fn bitmap_pixels(h: usize, w: i32, ht: i32) -> Option<&'static mut [u32]> {
+    type GetDib = extern "system" fn(Handle, usize, u32, u32, *mut u8, *mut u8, u32) -> i32;
+    let f = gdi_fn!("GetDIBits", GetDib)?;
+    let px = scratch::<u32>((w * ht) as usize)?;
+    let mut bih = [0u8; 48];
+    bih[0..4].copy_from_slice(&40u32.to_le_bytes());
+    bih[4..8].copy_from_slice(&w.to_le_bytes());
+    bih[8..12].copy_from_slice(&(-ht).to_le_bytes());
+    bih[12..14].copy_from_slice(&1u16.to_le_bytes());
+    bih[14..16].copy_from_slice(&32u16.to_le_bytes());
+    if f(core::ptr::null_mut(), h, 0, ht as u32, px.as_mut_ptr().cast(), bih.as_mut_ptr(), 0) == 0 {
+        free(px);
+        return None;
+    }
+    Some(px)
+}
+
+/// The icon `h` as `size` x `size` 0xAARRGGBB pixels (straight alpha) in
+/// `out` (64 x 64 at most): its own size up to 64, larger ones averaged
+/// down to 32. Without alpha in the colour bitmap the mask gives it; a
+/// monochrome icon (no colour bitmap) is black and white. The size.
+pub(crate) fn argb(h: usize, out: &mut [u32; 64 * 64]) -> Option<usize> {
+    let icon = get(h)?;
+    let (mw, mh) = bitmap_size(icon.mask)?;
+    let mono = icon.color == 0;
+    let (w, ht) = if mono { (mw, mh / 2) } else { bitmap_size(icon.color)? };
+    let mask = bitmap_pixels(icon.mask, mw, mh)?;
+    let Some(color) = (if mono { Some(None) } else { bitmap_pixels(icon.color, w, ht).map(Some) })
+    else {
+        free(mask);
+        return None;
+    };
+    let alpha = color.as_ref().is_some_and(|c| c.iter().any(|&p| p >> 24 != 0));
+    let at = |x: i32, y: i32| -> u32 {
+        let clear = mask.get((y * mw + x) as usize).is_some_and(|&m| m & 0x00ff_ffff != 0);
+        match &color {
+            Some(c) => {
+                let p = c[(y * w + x) as usize];
+                if alpha {
+                    p
+                } else if clear {
+                    0
+                } else {
+                    p | 0xff00_0000
+                }
+            }
+            None => {
+                let white =
+                    mask.get(((y + ht) * mw + x) as usize).is_some_and(|&m| m & 0x00ff_ffff != 0);
+                match (clear, white) {
+                    (true, _) => 0,
+                    (false, true) => 0xffff_ffff,
+                    (false, false) => 0xff00_0000,
+                }
+            }
+        }
+    };
+    let side = w.min(ht);
+    let size = if side <= 64 { side } else { 32 };
+    for oy in 0..size {
+        for ox in 0..size {
+            let (x0, x1) = (ox * side / size, ((ox + 1) * side / size).max(ox * side / size + 1));
+            let (y0, y1) = (oy * side / size, ((oy + 1) * side / size).max(oy * side / size + 1));
+            let (mut a, mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let p = at(x, y);
+                    let pa = u64::from(p >> 24);
+                    a += pa;
+                    r += u64::from((p >> 16) & 0xff) * pa;
+                    g += u64::from((p >> 8) & 0xff) * pa;
+                    b += u64::from(p & 0xff) * pa;
+                    n += 1;
+                }
+            }
+            out[(oy * size + ox) as usize] = if a == 0 {
+                0
+            } else {
+                let c = |v: u64| (v / a) as u32;
+                (((a / n) as u32) << 24) | (c(r) << 16) | (c(g) << 8) | c(b)
+            };
+        }
+    }
+    free(mask);
+    if let Some(c) = color {
+        free(c);
+    }
+    Some(size as usize)
+}

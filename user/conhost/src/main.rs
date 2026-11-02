@@ -99,6 +99,7 @@ unsafe extern "system" {
     ) -> u32;
     fn AdjustWindowRectEx(rect: *mut Rect, style: u32, menu: i32, ex: u32) -> i32;
     fn LoadCursorW(instance: Handle, name: *const u16) -> Handle;
+    fn CreateIconIndirect(info: *const IconInfo) -> Handle;
     fn GetDC(hwnd: Hwnd) -> Handle;
 }
 
@@ -121,6 +122,7 @@ unsafe extern "system" {
         face: *const u16,
     ) -> Handle;
     fn SelectObject(hdc: Handle, object: Handle) -> Handle;
+    fn CreateBitmap(w: i32, h: i32, planes: u32, bpp: u32, bits: *const c_void) -> Handle;
     fn GetTextMetricsW(hdc: Handle, tm: *mut [i32; 15]) -> i32;
     fn SetTextColor(hdc: Handle, color: u32) -> u32;
     fn SetBkColor(hdc: Handle, color: u32) -> u32;
@@ -173,6 +175,7 @@ unsafe extern "C" {
 const WM_DESTROY: u32 = 0x0002;
 const WM_PAINT: u32 = 0x000f;
 const WM_ERASEBKGND: u32 = 0x0014;
+const WM_SIZE: u32 = 0x0005;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
 const WM_CHAR: u32 = 0x0102;
@@ -184,8 +187,12 @@ const QS_ALLINPUT: u32 = 0x04ff;
 const INFINITE: u32 = 0xffff_ffff;
 const IDC_ARROW: usize = 32512;
 
+/// The grid's size at first (the window follows it), and at most (the
+/// window's size decides it after a resize).
 pub const COLS: usize = 100;
 pub const ROWS: usize = 28;
+pub const MAX_COLS: usize = 240;
+pub const MAX_ROWS: usize = 80;
 const PAD: i32 = 6;
 
 /// Windows Terminal's "Campbell" scheme (COLORREF: 0x00BBGGRR), the eight
@@ -233,7 +240,10 @@ enum Parse {
 
 /// The screen: cells, the cursor, the current colours and the parser.
 pub struct Screen {
-    cells: [[Cell; COLS]; ROWS],
+    cells: [[Cell; MAX_COLS]; MAX_ROWS],
+    /// The grid's size in use.
+    cols: usize,
+    rows: usize,
     x: usize,
     y: usize,
     fg: u8,
@@ -251,7 +261,9 @@ pub struct Screen {
 impl Screen {
     pub const fn new() -> Self {
         Screen {
-            cells: [[BLANK; COLS]; ROWS],
+            cells: [[BLANK; MAX_COLS]; MAX_ROWS],
+            cols: COLS,
+            rows: ROWS,
             x: 0,
             y: 0,
             fg: DEFAULT_FG,
@@ -271,16 +283,42 @@ impl Screen {
 
     /// To the next line, scrolling the screen up at the bottom.
     fn line_feed(&mut self) {
-        if self.y + 1 < ROWS {
+        if self.y + 1 < self.rows {
             self.y += 1;
         } else {
-            self.cells.copy_within(1.., 0);
-            self.cells[ROWS - 1] = [self.blank(); COLS];
+            self.cells.copy_within(1..self.rows, 0);
+            self.cells[self.rows - 1] = [self.blank(); MAX_COLS];
         }
     }
 
+    /// A new grid size (the window's): the cursor's line stays in view
+    /// (the lines above scroll off when there are fewer rows); lines are
+    /// cut, not rewrapped, when there are fewer columns.
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        let (cols, rows) = (cols.clamp(1, MAX_COLS), rows.clamp(1, MAX_ROWS));
+        if self.y >= rows {
+            let up = self.y + 1 - rows;
+            self.cells.copy_within(up.., 0);
+            for line in &mut self.cells[MAX_ROWS - up..] {
+                *line = [BLANK; MAX_COLS];
+            }
+            self.y -= up;
+        }
+        // What was outside the old grid is blank in the new one.
+        for line in &mut self.cells[..rows] {
+            for c in &mut line[self.cols.min(cols)..cols] {
+                *c = BLANK;
+            }
+        }
+        for line in &mut self.cells[self.rows.min(rows)..rows] {
+            *line = [BLANK; MAX_COLS];
+        }
+        (self.cols, self.rows) = (cols, rows);
+        self.x = self.x.min(cols);
+    }
+
     fn put(&mut self, ch: u16) {
-        if self.x >= COLS {
+        if self.x >= self.cols {
             self.x = 0;
             self.line_feed();
         }
@@ -301,7 +339,7 @@ impl Screen {
             0x08 => self.x = self.x.saturating_sub(1),
             0x09 => {
                 let next = (self.x / 8 + 1) * 8;
-                while self.x < next.min(COLS) {
+                while self.x < next.min(self.cols) {
                     self.put(b' ' as u16);
                 }
             }
@@ -350,9 +388,9 @@ impl Screen {
             b'K' => {
                 let blank = self.blank();
                 let (from, to) = match self.param(0, 0) {
-                    1 => (0, self.x.min(COLS - 1) + 1),
-                    2 => (0, COLS),
-                    _ => (self.x.min(COLS), COLS),
+                    1 => (0, self.x.min(self.cols - 1) + 1),
+                    2 => (0, self.cols),
+                    _ => (self.x.min(self.cols), self.cols),
                 };
                 for c in &mut self.cells[self.y][from..to] {
                     *c = blank;
@@ -361,18 +399,18 @@ impl Screen {
             b'J' => {
                 if self.param(0, 0) == 2 || self.param(0, 0) == 3 {
                     let blank = self.blank();
-                    self.cells = [[blank; COLS]; ROWS];
+                    self.cells = [[blank; MAX_COLS]; MAX_ROWS];
                 }
             }
             b'H' | b'f' => {
-                self.y = (self.param(0, 1) as usize - 1).min(ROWS - 1);
-                self.x = (self.param(1, 1) as usize - 1).min(COLS - 1);
+                self.y = (self.param(0, 1) as usize - 1).min(self.rows - 1);
+                self.x = (self.param(1, 1) as usize - 1).min(self.cols - 1);
             }
             b'A' => self.y = self.y.saturating_sub(self.param(0, 1) as usize),
-            b'B' => self.y = (self.y + self.param(0, 1) as usize).min(ROWS - 1),
-            b'C' => self.x = (self.x + self.param(0, 1) as usize).min(COLS - 1),
+            b'B' => self.y = (self.y + self.param(0, 1) as usize).min(self.rows - 1),
+            b'C' => self.x = (self.x + self.param(0, 1) as usize).min(self.cols - 1),
             b'D' => self.x = self.x.saturating_sub(self.param(0, 1) as usize),
-            b'G' => self.x = (self.param(0, 1) as usize - 1).min(COLS - 1),
+            b'G' => self.x = (self.param(0, 1) as usize - 1).min(self.cols - 1),
             _ => {}
         }
     }
@@ -493,23 +531,19 @@ fn paint(hwnd: Hwnd) {
         }
         SelectObject(hdc, st.font);
         let (cw, ch) = (st.cell_w, st.cell_h);
-        // The margin around the grid.
-        let total = Rect {
-            left: 0,
-            top: 0,
-            right: 2 * PAD + cw * COLS as i32,
-            bottom: 2 * PAD + ch * ROWS as i32,
-        };
+        let (cols, rows) = (st.screen.cols, st.screen.rows);
+        // The margin around the grid and what the grid doesn't fill.
+        let total = Rect { left: 0, top: 0, right: 0x7fff, bottom: 0x7fff };
         SetBkColor(hdc, PALETTE[DEFAULT_BG as usize]);
         ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &total, core::ptr::null(), 0, core::ptr::null());
-        for (row, cells) in st.screen.cells.iter().enumerate() {
+        for (row, cells) in st.screen.cells[..rows].iter().enumerate() {
             let y = PAD + row as i32 * ch;
             let mut start = 0;
-            while start < COLS {
+            while start < cols {
                 let (fg, bg) = (cells[start].fg, cells[start].bg);
                 let mut end = start;
-                let mut text = [0u16; COLS];
-                while end < COLS && cells[end].fg == fg && cells[end].bg == bg {
+                let mut text = [0u16; MAX_COLS];
+                while end < cols && cells[end].fg == fg && cells[end].bg == bg {
                     text[end - start] = cells[end].ch;
                     end += 1;
                 }
@@ -521,7 +555,7 @@ fn paint(hwnd: Hwnd) {
                 };
                 SetTextColor(hdc, PALETTE[fg as usize & 15]);
                 SetBkColor(hdc, PALETTE[bg as usize & 15]);
-                let mut dx = [cw; COLS];
+                let mut dx = [cw; MAX_COLS];
                 dx[0] = cw;
                 ExtTextOutW(
                     hdc,
@@ -538,7 +572,7 @@ fn paint(hwnd: Hwnd) {
         }
         // The cursor: an underline in the text colour.
         let s = &st.screen;
-        if s.x < COLS {
+        if s.x < cols {
             let cx = PAD + s.x as i32 * cw;
             let cy = PAD + s.y as i32 * ch + ch - 2;
             let r = Rect { left: cx, top: cy, right: cx + cw, bottom: cy + 2 };
@@ -560,6 +594,62 @@ fn send_key(down: bool, vk: u16, ch: u16) {
     unsafe { GalaConsoleInput(state().session, r.as_ptr(), 1) };
 }
 
+/// ICONINFO.
+#[repr(C)]
+struct IconInfo {
+    icon: i32,
+    x: u32,
+    y: u32,
+    mask: Handle,
+    color: Handle,
+}
+
+/// The console's icon (32 x 32): a dark rounded square with a grey
+/// outline and a prompt, ">_", in the text colour.
+fn console_icon() -> Handle {
+    static mut PIXELS: [u32; 32 * 32] = [0; 32 * 32];
+    static MASK: [u8; 4 * 32] = [0; 4 * 32];
+    // SAFETY: one thread, before the window; plain calls on our data.
+    unsafe {
+        let px = &mut *core::ptr::addr_of_mut!(PIXELS);
+        for y in 0..32i32 {
+            for x in 0..32i32 {
+                // The corners (radius 4) are transparent.
+                let (dx, dy) = ((3 - x).max(x - 28).max(0), (3 - y).max(y - 28).max(0));
+                let p = if dx * dx + dy * dy > 16 {
+                    0
+                } else if x == 0 || y == 0 || x == 31 || y == 31 || dx * dx + dy * dy > 9 {
+                    0xff76_7676
+                } else {
+                    0xff0c_0c0c
+                };
+                px[(y * 32 + x) as usize] = p;
+            }
+        }
+        let text = 0xffcc_cccc;
+        // ">": two diagonals from (7, 9) to (14, 15) to (7, 21), 2 wide.
+        for i in 0..7 {
+            for w in 0..2 {
+                px[((9 + i) * 32 + 7 + i + w) as usize] = text;
+                px[((21 - i) * 32 + 7 + i + w) as usize] = text;
+            }
+        }
+        // "_": a bar under it.
+        for x in 16..25 {
+            px[(21 * 32 + x) as usize] = text;
+            px[(22 * 32 + x) as usize] = text;
+        }
+        let info = IconInfo {
+            icon: 1,
+            x: 0,
+            y: 0,
+            mask: CreateBitmap(32, 32, 1, 1, MASK.as_ptr().cast()),
+            color: CreateBitmap(32, 32, 1, 32, px.as_ptr().cast()),
+        };
+        CreateIconIndirect(&info)
+    }
+}
+
 extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
     match msg {
         WM_PAINT => {
@@ -567,6 +657,20 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             0
         }
         WM_ERASEBKGND => 1,
+        // The grid follows the window (Snap, maximize): as many cells as
+        // the client area holds.
+        WM_SIZE => {
+            let st = state();
+            let (w, h) = (lparam as u16 as i32, (lparam >> 16) as u16 as i32);
+            if w > 0 && h > 0 {
+                let cols = ((w - 2 * PAD) / st.cell_w.max(1)).max(1) as usize;
+                let rows = ((h - 2 * PAD) / st.cell_h.max(1)).max(1) as usize;
+                st.screen.resize(cols, rows);
+                // SAFETY: our window.
+                unsafe { InvalidateRect(hwnd, core::ptr::null(), 0) };
+            }
+            0
+        }
         WM_CHAR => {
             send_key(true, 0, wparam as u16);
             0
@@ -658,7 +762,7 @@ fn run() -> u32 {
             class_extra: 0,
             window_extra: 0,
             instance,
-            icon: core::ptr::null_mut(),
+            icon: console_icon(),
             cursor: LoadCursorW(core::ptr::null_mut(), IDC_ARROW as *const u16),
             background: core::ptr::null_mut(),
             menu_name: core::ptr::null(),

@@ -1138,6 +1138,17 @@ pub extern "system" fn IsZoomed(hwnd: Hwnd) -> i32 {
     i32::from(window(hwnd).is_some_and(|w| w.zoomed))
 }
 
+/// Snap (the desktop's GALA_WM_PLACE): the top-level window moves to the
+/// rectangle (a maximized one is no longer).
+pub(crate) fn snap(hwnd: Hwnd, x: i32, y: i32, w: i32, h: i32) {
+    let Some(i) = index_of(hwnd) else { return };
+    if window(hwnd).is_none_or(|w| w.parent != 0) || w <= 0 || h <= 0 {
+        return;
+    }
+    with(|s| s.windows[i].zoomed = false);
+    SetWindowPos(hwnd, 0, x, y, w, h, SWP_NOZORDER | 0x10);
+}
+
 /// SC_MAXIMIZE/SC_RESTORE: the top-level window fills the work area, its
 /// rectangle kept for restoring.
 fn maximize(hwnd: Hwnd, on: bool) {

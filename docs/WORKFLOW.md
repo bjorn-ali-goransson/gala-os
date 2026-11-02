@@ -109,10 +109,12 @@ shows it.
   no free frame becomes an access violation (no commit charge yet). Look
   for "vm: out of memory" in the log and the free frames on the `stats:`
   line; give the scenario more memory (xtask's `qemu`).
-- **Disk space**: ISOs of the runtime scenarios are 120-470 MB each, and
-  their `*-iso-root` copies as much again; `target/debug/*.iso`,
-  `*-iso-root` and `*.events.jsonl` are rebuilt on every run and can be
-  deleted when xorriso reports "exceeds free space".
+- **Disk space**: ISOs of the runtime scenarios are 120-470 MB each.
+  xtask deletes each `*-iso-root` once its ISO is made, and a VM's ISO
+  once all its scenarios passed (a failed one stays to boot by hand);
+  the session's disk allowance is shared with any agents' worktrees
+  (`.claude/worktrees/*/target`), so delete their `test-*` files too when
+  writes fail with "No space left on device".
 - **PREBUILT members** are unzip patterns (`*` crosses `/`), `excludes`
   are unzip `-x` patterns; the unpack marker includes a hash of both, so
   changing them unpacks again. For an MSI (a `.msi` URL) members are
@@ -511,7 +513,10 @@ left button, bit 1 the right: `mouse_button 2` is a right press), `sendkey`;
 loaded the host), then takes a screendump (none when the step checks no
 pixels: e.g. the click that ends the program), kept as
 `target/debug/test-<scenario>.screen<step>.png`. The guest's pointer
-starts in the middle of the screen and is clamped to it. A step's pixel check is retried (a new screendump every 0.5 s,
+starts in the middle of the screen and is clamped to it: moving it far
+up and left first (`mouse_move -255 -255` three times) puts it at (0, 0)
+whatever the earlier steps did. Windows-key chords are one `sendkey`
+(`sendkey meta_l-right`: Snap). A step's pixel check is retried (a new screendump every 0.5 s,
 for about 30 s) before it fails, because a redraw under load (the full
 suite) can outlast the first dump, and a step may wait for the program
 (FileZilla's TLS handshake, then its certificate dialog). Input is

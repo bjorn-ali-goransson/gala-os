@@ -43,6 +43,7 @@ unsafe extern "system" {
     fn GalaWindowListen(event: Handle) -> u32;
     fn GalaWindowInput(records: *mut u8, max: u32, count: *mut u32) -> u32;
     pub(crate) fn GalaWindowCapture(id: u32) -> u32;
+    fn GalaWindowSetIcon(id: u32, pixels: *const u32, size: usize) -> u32;
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
@@ -78,6 +79,11 @@ const WM_PAINT: u32 = 0x000f;
 const WM_CLOSE: u32 = 0x0010;
 const WM_QUIT: u32 = 0x0012;
 const WM_ERASEBKGND: u32 = 0x0014;
+const WM_GETICON: u32 = 0x007f;
+/// The desktop's request to move a window (Snap; kernel desktop
+/// GALA_WM_PLACE): wParam left | top << 32, lParam width | height << 32.
+const GALA_WM_PLACE: u32 = 0x0001_0001;
+const WM_SETICON: u32 = 0x0080;
 const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_CHILD: u32 = 0x4000_0000;
 const CW_USEDEFAULT: i32 = 0x8000_0000u32 as i32;
@@ -96,6 +102,9 @@ pub(crate) struct Class {
     background: usize,
     #[allow(dead_code)]
     style: u32,
+    /// The class's icons (WNDCLASSEX hIcon, hIconSm).
+    pub(crate) icon: usize,
+    pub(crate) icon_small: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -144,6 +153,9 @@ pub(crate) struct Window {
     /// holds the bar's rows above the client area's; `pixels` points at
     /// the client area's first row.
     pub(crate) bar: i32,
+    /// Its icons (WM_SETICON ICON_BIG, ICON_SMALL; 0: none, the class's).
+    pub(crate) icon: usize,
+    pub(crate) icon_small: usize,
 }
 
 /// A top-level window's frame: the left, right and bottom border, and the
@@ -202,6 +214,8 @@ const NO_CLASS: Class = Class {
     proc_: None,
     background: 0,
     style: 0,
+    icon: 0,
+    icon_small: 0,
 };
 pub(crate) const NO_WINDOW: Window = Window {
     used: false,
@@ -232,6 +246,8 @@ pub(crate) const NO_WINDOW: Window = Window {
     restore: [0; 4],
     popup: false,
     bar: 0,
+    icon: 0,
+    icon_small: 0,
 };
 const NO_MSG: Msg =
     Msg { hwnd: 0, message: 0, wparam: 0, lparam: 0, time: 0, pt: [0; 2], private: 0 };
@@ -604,6 +620,8 @@ pub extern "system" fn RegisterClassExW(wc: *const WndClassExW) -> u16 {
             proc_: wc.proc_,
             background: wc.background as usize,
             style: wc.style,
+            icon: wc.icon as usize,
+            icon_small: wc.icon_small as usize,
         };
         Ok(atom)
     });
@@ -780,6 +798,8 @@ pub extern "system" fn CreateWindowExW(
             restore: [0; 4],
             popup,
             bar,
+            icon: 0,
+            icon_small: 0,
         };
         Some(i)
     });
@@ -797,6 +817,7 @@ pub extern "system" fn CreateWindowExW(
     if bar != 0 {
         crate::menu::attach(hwnd_of(i), menu as usize);
     }
+    show_icon(hwnd_of(i));
     finish_create(i, ex_style, class, name, style, x, y, w, h, parent, menu, instance, param)
 }
 
@@ -1262,6 +1283,29 @@ pub extern "system" fn FillRect(hdc: Handle, rect: *const [i32; 4], brush: Handl
 
 /// DefWindowProcW: WM_NCCREATE succeeds, WM_CLOSE destroys the window,
 /// WM_ERASEBKGND fills the class background, WM_PAINT validates.
+/// Shows a top-level window's icon on its taskbar button: its own
+/// (WM_SETICON, big before small) or its class's.
+pub(crate) fn show_icon(hwnd: Hwnd) {
+    let Some(w) = window(hwnd) else { return };
+    if w.desktop == 0 || w.parent != 0 {
+        return;
+    }
+    let class = with(|s| s.classes[w.class]);
+    let h = [w.icon, w.icon_small, class.icon, class.icon_small]
+        .into_iter()
+        .find(|&h| h != 0)
+        .unwrap_or(0);
+    let mut px = [0u32; 64 * 64];
+    let size = if h == 0 { None } else { crate::icon::argb(h, &mut px) };
+    // SAFETY: our pixels, size x size of them (none: no icon).
+    unsafe {
+        match size {
+            Some(n) => GalaWindowSetIcon(w.desktop, px.as_ptr(), n),
+            None => GalaWindowSetIcon(w.desktop, core::ptr::null(), 0),
+        }
+    };
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
     if let Some(r) = crate::tree::def_window_proc(hwnd, msg, wparam, lparam) {
@@ -1269,6 +1313,27 @@ pub extern "system" fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lpara
     }
     match msg {
         WM_NCCREATE => 1,
+        // WM_SETICON: ICON_BIG (1) or ICON_SMALL (0); the previous one.
+        WM_SETICON => {
+            let Some(i) = index_of(hwnd) else { return 0 };
+            let old = with(|s| {
+                let w = &mut s.windows[i];
+                let slot = if wparam == 1 { &mut w.icon } else { &mut w.icon_small };
+                core::mem::replace(slot, lparam as usize)
+            });
+            show_icon(hwnd);
+            old as isize
+        }
+        // WM_GETICON: ICON_BIG, ICON_SMALL, or ICON_SMALL2 (2: the small
+        // one, else the big one).
+        WM_GETICON => {
+            let Some(w) = window(hwnd) else { return 0 };
+            (match wparam {
+                1 => w.icon,
+                2 if w.icon_small == 0 => w.icon,
+                _ => w.icon_small,
+            }) as isize
+        }
         // The controls' colours: text in COLOR_WINDOWTEXT on the face
         // (COLOR_3DFACE), or on COLOR_WINDOW for edits and list boxes.
         0x0132..=0x0138 => {
@@ -1692,6 +1757,11 @@ fn pump() {
                 if message == 0x0003 {
                     crate::tree::moved_by_desktop(top, lparam);
                 }
+                // Snap: the window's thread moves it (DispatchMessage).
+                if message == GALA_WM_PLACE {
+                    post(thread, message_at(top, message, wparam, lparam));
+                    continue;
+                }
                 // Mouse input goes to the child under the pointer (or the
                 // capture), keys to the focus.
                 // The menu bar (above the client area) is user32's.
@@ -2054,6 +2124,12 @@ pub extern "system" fn DispatchMessageW(msg: *const Msg) -> isize {
         return 0;
     }
     if m.hwnd == 0 {
+        return 0;
+    }
+    if m.message == GALA_WM_PLACE {
+        let (x, y) = (m.wparam as u32 as i32, (m.wparam >> 32) as u32 as i32);
+        let (w, h) = (m.lparam as u32 as i32, (m.lparam as usize >> 32) as u32 as i32);
+        crate::tree::snap(m.hwnd, x, y, w, h);
         return 0;
     }
     SendMessageW(m.hwnd, m.message, m.wparam, m.lparam)

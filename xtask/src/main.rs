@@ -1802,6 +1802,8 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
     )?;
     // Hybrid image: bootable by BIOS (Limine's stages) and UEFI.
     run_quiet(Command::new(limine.join("limine")).arg("bios-install").arg(&iso))?;
+    // The tree is in the image now (it can be as large: disk space).
+    let _ = fs::remove_dir_all(&iso_root);
     if name == "gala-os" {
         eprintln!("xtask: built {}", iso.display());
     }
@@ -3719,7 +3721,15 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     let isos_made = t1.elapsed();
     let t2 = Instant::now();
     let jobs: Vec<(&Vm, &PathBuf)> = vms.iter().zip(&isos).collect();
-    let results = run_parallel(&jobs, |(vm, iso)| Ok(boot_vm(vm, iso)));
+    let results = run_parallel(&jobs, |(vm, iso)| {
+        let result = boot_vm(vm, iso);
+        // A passing VM's image is not needed again (a failed one is kept
+        // to boot by hand); a full run's images would fill the disk.
+        if result.1.iter().all(|(_, v)| v.is_ok()) {
+            let _ = fs::remove_file(iso);
+        }
+        Ok(result)
+    });
     let booted = t2.elapsed();
     let mut failed = 0;
     let (mut firmware, mut kernel) = (Duration::ZERO, Duration::ZERO);
@@ -4257,6 +4267,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                         PixelCheck::AnyIn(880, 780, 40, 12, 0xe0e7f3), // the taskbar
                         PixelCheck::AnyIn(600, 760, 32, 30, 0x167fd6), // the fortress
                         PixelCheck::AnyIn(640, 788, 48, 8, 0x005fb8), // the active window's pill
+                        PixelCheck::AnyIn(648, 760, 32, 24, 0xff8000), // its class icon
                     ],
                 },
                 ScreenStep {
@@ -4370,6 +4381,18 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     input: &["sendkey o", "sendkey k", "sendkey ret", "sendkey x"],
                     pixels: &[PixelCheck::AnyIn(66, 250, 300, 16, 0xcccccc)],
                 },
+                ScreenStep {
+                    // Win+Right (Snap): the console fills the right half of
+                    // the work area (its black down to the taskbar), its
+                    // grid follows and keeps the text, now at the top left
+                    // of that half.
+                    input: &["sendkey meta_l-right"],
+                    pixels: &[
+                        PixelCheck::At(1250, 700, 0x0c0c0c),
+                        PixelCheck::At(660, 700, 0x0c0c0c),
+                        PixelCheck::AnyIn(646, 38, 300, 16, 0xcccccc), // "Hello from ..."
+                    ],
+                },
             ],
         },
     ),
@@ -4469,51 +4492,58 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     pixels: &[PixelCheck::AnyIn(650, 405, 150, 40, 0x1b1b1b)],
                 },
                 ScreenStep {
-                    // FileZilla's minimize button (1124, 41): under it, the
-                    // server's console window (conhost, at (60, 60)) with
-                    // its log: light grey text on Campbell black.
-                    input: &[
-                        "mouse_move 146 -205",
-                        "mouse_move 145 -205",
-                        "mouse_move 0 -204",
-                        "mouse_button 1",
-                        "mouse_button 0",
-                    ],
+                    // Win+Right (Snap): FileZilla on the right half of the
+                    // screen (its Quickconnect button there); at the left
+                    // the server's console window (conhost, at (60, 60))
+                    // shows with its log: light grey on Campbell black.
+                    input: &["sendkey meta_l-right"],
                     pixels: &[
+                        PixelCheck::AnyIn(640, 60, 640, 120, 0x005fb8),
                         PixelCheck::At(500, 400, 0x0c0c0c),
                         PixelCheck::AnyIn(66, 98, 400, 400, 0xcccccc),
                     ],
                 },
                 ScreenStep {
-                    // FileZilla's taskbar button (688, 776; after the start
-                    // button and the console's): it comes back.
+                    // A click in the console (300, 400) activates it, and
+                    // Win+Left snaps it to the left half: the server's log
+                    // next to FileZilla.
                     input: &[
-                        "mouse_move -218 245",
-                        "mouse_move -218 245",
-                        "mouse_move 0 245",
+                        "mouse_move -255 -255",
+                        "mouse_move -255 0",
+                        "mouse_move -23 0",
                         "mouse_button 1",
                         "mouse_button 0",
+                        "sendkey meta_l-left",
                     ],
-                    pixels: &[PixelCheck::AnyIn(660, 118, 80, 16, 0x005fb8)],
+                    pixels: &[
+                        PixelCheck::At(20, 700, 0x0c0c0c),
+                        PixelCheck::At(620, 700, 0x0c0c0c),
+                        PixelCheck::AnyIn(6, 38, 600, 400, 0xcccccc),
+                        PixelCheck::AnyIn(640, 60, 640, 120, 0x005fb8),
+                    ],
                 },
                 ScreenStep {
-                    // To "File" on the menu bar (61, 69) and a click: its
-                    // menu opens.
+                    // The pointer to the corner (0, 0), then to "File" on
+                    // FileZilla's menu bar (663, 44) and a click: its menu
+                    // opens.
                     input: &[
-                        "mouse_move -209 -236",
-                        "mouse_move -209 -236",
-                        "mouse_move -209 -235",
+                        "mouse_move -255 -255",
+                        "mouse_move -255 -255",
+                        "mouse_move -255 -255",
+                        "mouse_move 255 0",
+                        "mouse_move 255 0",
+                        "mouse_move 153 44",
                         "mouse_button 1",
                         "mouse_button 0",
                     ],
                     pixels: &[
-                        PixelCheck::At(300, 300, 0xf9f9f9), // the menu (over the tree)
-                        PixelCheck::AnyIn(80, 306, 24, 14, 0x1b1b1b), // "Exit"
-                        PixelCheck::AnyIn(80, 115, 60, 14, 0x9d9d9d), // a disabled item
+                        PixelCheck::At(980, 200, 0xf9f9f9),            // the menu
+                        PixelCheck::AnyIn(680, 281, 24, 14, 0x1b1b1b), // "Exit"
+                        PixelCheck::AnyIn(680, 90, 60, 14, 0x9d9d9d),  // a disabled item
                     ],
                 },
                 ScreenStep {
-                    // Down to "Exit" (90, 313) and a click: WM_COMMAND,
+                    // Down to "Exit" (692, 288) and a click: WM_COMMAND,
                     // FileZilla ends (status 0).
                     input: &["mouse_move 29 244", "mouse_button 1", "mouse_button 0"],
                     pixels: &[],

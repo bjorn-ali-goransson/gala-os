@@ -92,6 +92,8 @@ fn the_start_button_opens_and_closes_the_start_menu() {
     assert_eq!(d.recent[0], 0);
     // The Windows key opens it; typing filters; Escape closes.
     d.key(0x5b, 0x5b, true, true);
+    assert!(!d.menu_open());
+    d.key(0x5b, 0x5b, true, false);
     assert!(d.menu_open());
     for k in b"FILEZ" {
         d.key(*k, 0, false, true);
@@ -268,4 +270,74 @@ fn the_capture_gets_the_mouse_everywhere() {
     d.capture(p, 7).unwrap();
     d.destroy(p, 7).unwrap();
     assert_eq!(d.captured, None);
+}
+
+#[test]
+fn icons_scale_by_area_and_show_on_the_taskbar_button() {
+    // A 48 x 48 icon, left half opaque red, right half transparent: the
+    // 24 x 24 result keeps the halves, colours unchanged at the edges.
+    let mut src = [0u32; 48 * 48];
+    for (k, p) in src.iter_mut().enumerate() {
+        if k % 48 < 24 {
+            *p = 0xffff_0000;
+        }
+    }
+    let out = scale_icon(&src, 48).unwrap();
+    assert_eq!(out.len(), ICON * ICON);
+    assert_eq!(out[0], 0xffff_0000);
+    assert_eq!(out[11], 0xffff_0000);
+    assert_eq!(out[12], 0);
+    // A 32 x 32 one: 4 source pixels for 3 (mixed coverage averaged).
+    let opaque = [0xff00_80ffu32; 32 * 32];
+    assert!(scale_icon(&opaque, 32).unwrap().iter().all(|&p| p == 0xff00_80ff));
+    assert!(scale_icon(&opaque, 64).is_none());
+
+    let (mut d, a) = desktop_with_window();
+    let (_, r) = d.tasks()[0];
+    let (ix, iy) = (r.x + 10 + 12, r.y + 8 + 12);
+    let tile = d.pixel(ix, iy);
+    let green = [0xff00_c000u32; 32 * 32];
+    d.set_icon(a, 7, &green, 32).unwrap();
+    assert_eq!(d.pixel(ix, iy), 0x0000_c000);
+    assert_eq!(d.set_icon(a, 8, &green, 32).err(), Some(NtStatus::INVALID_HANDLE));
+    d.set_icon(a, 7, &[], 0).unwrap();
+    assert_eq!(d.pixel(ix, iy), tile);
+}
+
+#[test]
+fn the_windows_key_with_arrows_snaps_the_active_window() {
+    let (mut d, a) = desktop_with_window();
+    d.input.clear();
+    let snap = |d: &mut Desktop, vk: u8| {
+        d.key(0x5b, 0x5b, true, true);
+        d.key(vk, 0, true, true);
+        d.key(vk, 0, true, false);
+        d.key(0x5b, 0x5b, true, false);
+    };
+    // Win+Left: a request to fill the left half of the work area; no
+    // start menu, no keys for the program.
+    snap(&mut d, 0x25);
+    assert!(!d.menu_open());
+    let work_h = 768 - u64::from(TASKBAR);
+    let placed: Vec<_> =
+        d.input.iter().map(|e| (e.window, e.message, e.wparam, e.lparam)).collect();
+    assert_eq!(placed, [(a, GALA_WM_PLACE, 0, 512 | work_h << 32)]);
+    // The program moves it; Win+Right: the right half.
+    d.place(a, 7, 0, 0, 512, work_h as u32).unwrap();
+    d.input.clear();
+    snap(&mut d, 0x27);
+    assert_eq!(d.input[0].wparam, 512);
+    // Win+Down: back to where it was before the first snap.
+    d.input.clear();
+    snap(&mut d, 0x28);
+    assert_eq!(d.input[0].message, GALA_WM_PLACE);
+    assert_eq!(d.input[0].wparam, 300 | 100 << 32);
+    assert_eq!(d.input[0].lparam, 400 | 300 << 32);
+    // Win+Up maximizes; Win+Down on a window not snapped minimizes it.
+    d.input.clear();
+    snap(&mut d, 0x26);
+    assert_eq!((d.input[0].message, d.input[0].wparam), (WM_SYSCOMMAND, SC_MAXIMIZE));
+    d.input.clear();
+    snap(&mut d, 0x28);
+    assert!(d.window(a).unwrap().minimized);
 }
