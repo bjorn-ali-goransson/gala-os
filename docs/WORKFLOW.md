@@ -106,7 +106,9 @@ shows it.
 
 - **A JVM crashing with access violations at odd addresses** after a
   long run may be the machine out of memory: a user page fault that finds
-  no free frame becomes an access violation (no commit charge yet). Look
+  no free frame becomes an access violation (the commit charge, R6, covers
+private memory only; mapped and image pages and the kernel heap are not
+charged). Look
   for "vm: out of memory" in the log and the free frames on the `stats:`
   line; give the scenario more memory (xtask's `qemu`).
 - **Hover logic that waits for "the pointer left"** (tooltips): a

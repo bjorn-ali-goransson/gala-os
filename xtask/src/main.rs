@@ -604,6 +604,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winsock_async_test", "mswsock.dll", "Windows/System32"),
     ("process_test", "ntdll.dll", "Windows/System32"),
     ("process_test", "kernel32.dll", "Windows/System32"),
+    ("commit_test", "ntdll.dll", "Windows/System32"),
+    ("commit_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ntdll.dll", "Windows/System32"),
     ("winsock_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ws2_32.dll", "Windows/System32"),
@@ -1564,6 +1566,7 @@ const USER_PROGRAMS: &[&str] = &[
     "winsock_test",
     "winsock_async_test",
     "process_test",
+    "commit_test",
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
@@ -2882,6 +2885,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=go_exec.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["go_exec: ok", "go_exec.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        // R6: the commit charge, the commit limit and job memory limits.
+        name: "commit_test",
+        cmdline: "qemu_exit run=commit_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["commit_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // N2b: CreateProcessW (the test starts itself as a child).

@@ -1,5 +1,6 @@
 //! Virtual memory services on top of the VAD and the user page tables.
 
+use super::charge;
 use super::platform;
 use super::platform::PAGE_SIZE;
 use super::platform::{CacheMode, PageFlags};
@@ -93,7 +94,8 @@ const OOM_RETRIES: u32 = 100;
 /// stack guard). A fault on committed memory does not fail on Windows for
 /// lack of memory (the commit charge guarantees it; the memory manager
 /// waits for a page), so a shortage is waited out for a while before the
-/// program gets an access violation (no commit charge yet: R6). Fault
+/// program gets an access violation (the commit charge, nt::charge,
+/// covers private memory only, not the kernel's own use). Fault
 /// injection found this: one failed allocation in a copy-on-write fault
 /// raised an access violation that exception_test's handler continued
 /// from for ever.
@@ -155,8 +157,9 @@ fn resolve_once(process: &Process, addr: u64, kind: AccessKind) -> Fault {
 }
 
 /// A committed page could not be given a frame: the machine is out of
-/// memory. Windows refuses the commit instead (commit charge, not done
-/// yet), so the program sees an access violation; this is logged (once per
+/// memory. The commit charge (nt::charge) makes this rare: what is not
+/// charged (the kernel heap, section and image pages) can still use the
+/// frames up, so the program sees an access violation; this is logged (once per
 /// process) and counted in the ledger so it is not mistaken for a bug.
 fn out_of_memory(process: &Process, addr: u64) {
     let (free, total) = platform::frame_stats();
@@ -219,6 +222,7 @@ fn guard_hit(process: &Process, addr: u64, protect: u32) -> Fault {
                         Some(_) => vad.commit(next, PAGE_SIZE, protect | vad::PAGE_GUARD).is_ok(),
                         None => false,
                     };
+                charge::sync(process, vad.private_commit());
                 let result = if grown {
                     Fault::Resolved
                 } else {
@@ -286,6 +290,7 @@ pub fn allocate(
         return Ok((base / PAGE_SIZE * PAGE_SIZE, size.next_multiple_of(PAGE_SIZE)));
     }
     let mut vad = process.vad.lock();
+    charge::sync(process, vad.private_commit());
     let reserve = kind & vad::MEM_RESERVE != 0 || base == 0;
     let (base, size) = if reserve {
         let at = (base != 0).then_some(base);
@@ -294,7 +299,11 @@ pub fn allocate(
         (base, size)
     };
     if kind & vad::MEM_COMMIT != 0 {
-        match vad.commit(base, size, protect) {
+        // Charged before the VAD takes it; a failed commit is given back.
+        let charged = charge::try_charge(process, vad.commit_cost(base, size));
+        let result = charged.and_then(|()| vad.commit(base, size, protect));
+        charge::sync(process, vad.private_commit());
+        match result {
             Ok(range) => return Ok(range),
             Err(e) => {
                 if reserve {
@@ -322,10 +331,15 @@ pub fn free(
     {
         return Err(NtStatus::UNABLE_TO_DELETE_SECTION);
     }
-    let range = match free_type {
-        MEM_DECOMMIT => process.vad.lock().decommit(base, size)?,
-        MEM_RELEASE => process.vad.lock().release(base, size)?,
-        _ => return Err(NtStatus::INVALID_PARAMETER_4),
+    let range = {
+        let mut vad = process.vad.lock();
+        let range = match free_type {
+            MEM_DECOMMIT => vad.decommit(base, size)?,
+            MEM_RELEASE => vad.release(base, size)?,
+            _ => return Err(NtStatus::INVALID_PARAMETER_4),
+        };
+        charge::sync(process, vad.private_commit());
+        range
     };
     sync_range(process, range.0, range.1);
     Ok(range)

@@ -51,6 +51,15 @@ pub const EXTENDED_LIMIT_SIZE: usize = 144;
 const LIMIT_FLAGS: usize = 16;
 const ACTIVE_PROCESS_LIMIT: usize = 40;
 pub const JOB_OBJECT_LIMIT_ACTIVE_PROCESS: u32 = 0x8;
+/// JOBOBJECT_EXTENDED_LIMIT_INFORMATION after the basic part and the I/O
+/// counters: ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed,
+/// PeakJobMemoryUsed (bytes).
+const PROCESS_MEMORY_LIMIT: usize = 112;
+const JOB_MEMORY_LIMIT: usize = 120;
+const PEAK_PROCESS_MEMORY: usize = 128;
+const PEAK_JOB_MEMORY: usize = 136;
+pub const JOB_OBJECT_LIMIT_PROCESS_MEMORY: u32 = 0x100;
+pub const JOB_OBJECT_LIMIT_JOB_MEMORY: u32 = 0x200;
 
 pub struct Job {
     pub state: IrqMutex<JobState>,
@@ -61,12 +70,27 @@ pub struct JobState {
     pub limits: [u8; EXTENDED_LIMIT_SIZE],
     /// Processes ever assigned or created in the job.
     pub total_processes: u32,
+    /// The commit charge of the job's processes (pages; nt::charge).
+    pub committed: u64,
+    /// The highest commit charge of one process in the job, and of the
+    /// whole job (pages).
+    pub peak_process: u64,
+    pub peak_job: u64,
 }
 
 impl Job {
     pub fn new() -> Job {
         Job {
-            state: IrqMutex::new(JobState { limits: [0; EXTENDED_LIMIT_SIZE], total_processes: 0 }),
+            state: IrqMutex::named(
+                "job",
+                JobState {
+                    limits: [0; EXTENDED_LIMIT_SIZE],
+                    total_processes: 0,
+                    committed: 0,
+                    peak_process: 0,
+                    peak_job: 0,
+                },
+            ),
         }
     }
 }
@@ -81,12 +105,30 @@ fn u32_at(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
 
+fn u64_at(b: &[u8], at: usize) -> u64 {
+    u64::from(u32_at(b, at)) | u64::from(u32_at(b, at + 4)) << 32
+}
+
 impl JobState {
     /// The active-process limit, if one is set.
     pub fn active_limit(&self) -> Option<u32> {
         let flags = u32_at(&self.limits, LIMIT_FLAGS);
         (flags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS != 0)
             .then(|| u32_at(&self.limits, ACTIVE_PROCESS_LIMIT))
+    }
+
+    /// The commit limit of each process in the job, in bytes, if one is set
+    /// (JOB_OBJECT_LIMIT_PROCESS_MEMORY).
+    pub fn process_memory_limit(&self) -> Option<u64> {
+        let flags = u32_at(&self.limits, LIMIT_FLAGS);
+        (flags & JOB_OBJECT_LIMIT_PROCESS_MEMORY != 0)
+            .then(|| u64_at(&self.limits, PROCESS_MEMORY_LIMIT))
+    }
+
+    /// The commit limit of the whole job, in bytes (JOB_OBJECT_LIMIT_JOB_MEMORY).
+    pub fn job_memory_limit(&self) -> Option<u64> {
+        let flags = u32_at(&self.limits, LIMIT_FLAGS);
+        (flags & JOB_OBJECT_LIMIT_JOB_MEMORY != 0).then(|| u64_at(&self.limits, JOB_MEMORY_LIMIT))
     }
 
     /// NtSetInformationJobObject's limit classes; `data` must be the
@@ -128,6 +170,10 @@ impl JobState {
             }
             EXTENDED_LIMIT => {
                 out.copy_from_slice(&self.limits);
+                let bytes = |pages: u64| pages.saturating_mul(4096).to_le_bytes();
+                out[PEAK_PROCESS_MEMORY..PEAK_PROCESS_MEMORY + 8]
+                    .copy_from_slice(&bytes(self.peak_process));
+                out[PEAK_JOB_MEMORY..PEAK_JOB_MEMORY + 8].copy_from_slice(&bytes(self.peak_job));
                 Some(EXTENDED_LIMIT_SIZE)
             }
             _ => None,
@@ -159,5 +205,20 @@ mod tests {
         assert_eq!(u32_at(&out, 44), 2);
         assert_eq!(s.query(EXTENDED_LIMIT, 1, &mut out), Some(144));
         assert_eq!(u32_at(&out, 40), 1);
+        // Memory limits: flags at 16, ProcessMemoryLimit at 112,
+        // JobMemoryLimit at 120; peaks reported at 128 and 136.
+        let mut ext = [0u8; EXTENDED_LIMIT_SIZE];
+        let flags = JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_JOB_MEMORY;
+        ext[16..20].copy_from_slice(&flags.to_le_bytes());
+        ext[112..120].copy_from_slice(&(1u64 << 20).to_le_bytes());
+        ext[120..128].copy_from_slice(&(4u64 << 20).to_le_bytes());
+        s.set(EXTENDED_LIMIT, &ext).unwrap();
+        assert_eq!(
+            (s.process_memory_limit(), s.job_memory_limit()),
+            (Some(1 << 20), Some(4 << 20))
+        );
+        (s.peak_process, s.peak_job) = (3, 5);
+        s.query(EXTENDED_LIMIT, 1, &mut out);
+        assert_eq!((u64_at(&out, 128), u64_at(&out, 136)), (3 * 4096, 5 * 4096));
     }
 }

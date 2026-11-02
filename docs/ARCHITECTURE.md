@@ -996,8 +996,44 @@ JOB_OBJECT_LIMIT_ACTIVE_PROCESS is enforced: GalaCreateProcess fails with
 STATUS_QUOTA_EXCEEDED (ERROR_NOT_ENOUGH_QUOTA) when the caller's job
 already has that many running processes (counted over the process
 list). That is how Elasticsearch forbids itself child processes on
-Windows (`process_test` checks it). Other limits are kept and reported
-back, not applied; accounting has process counts but no times.
+Windows (`process_test` checks it). The memory limits are enforced too
+(next section). Other limits are kept and reported back, not applied;
+accounting has process counts but no times.
+
+### Commit charge (R6, 2026-11-02)
+
+`nt::charge`: committed private memory is charged to its process, the
+process's job and the system, and a commit over a limit fails with
+STATUS_COMMITMENT_LIMIT (ERROR_COMMITMENT_LIMIT, 1455) at
+NtAllocateVirtualMemory, so the program using too much is the one that
+fails, not whichever one faults next on an empty frame pool.
+
+- The VAD counts committed pages of MEM_PRIVATE allocations exactly
+  (`Vad::private_commit`, kept by commit, decommit and release; mapped
+  and image pages are not charged). `Process::commit` is what was
+  charged for them.
+- `vm::allocate` asks `charge::try_charge` for the commit's new pages
+  (`Vad::commit_cost`: already committed pages cost nothing) before the
+  VAD takes it, under the VAD lock; `charge::sync` then sets the charge
+  to the VAD's count, which also gives back a failed commit, a
+  decommit, a release, and charges (without a limit) what the kernel
+  commits itself (stacks, TEBs, stack growth). `charge::ended` returns a
+  finished process's charge; `charge::joined` adds a process's charge to
+  the job it joins.
+- Limits: the system commit limit is physical memory (no page file:
+  `GlobalMemoryStatusEx`'s page-file figures are the limit and what is
+  left of it; SYSTEM_PERFORMANCE_INFORMATION's CommittedPages,
+  CommitLimit, PeakCommitment); a job's JOB_OBJECT_LIMIT_PROCESS_MEMORY
+  and JOB_OBJECT_LIMIT_JOB_MEMORY (JobObjectExtendedLimitInformation,
+  which reports PeakProcessMemoryUsed and PeakJobMemoryUsed).
+- Lock order: a process's VAD, then its job pointer, then the job's
+  state. The system count is one atomic step against the limit, so
+  commits in different processes cannot both slip under it.
+- Not yet: kernel pool and handle quotas (STATUS_QUOTA_EXCEEDED per
+  process), the job's completion-port message when a limit is hit,
+  charging copy-on-write views of sections, and limits on what the kernel
+  commits itself (a thread's stack is charged but never refused).
+  `commit_test` checks the Windows behaviour.
 
 ### Process lifetime, OpenProcess and process lists (H4)
 
@@ -3421,12 +3457,76 @@ the caller then fails as it would for real:
   point is the trial run for this, so it comes first.
 - Function-level live patching (as Microsoft's Hotpatch): not planned
   unless a concrete need appears.
-- **A chain of trust for updates** (design now, build later): Secure
-  Boot, then Limine (its config hash/enrolled checksums), then the
-  kernel, then signed system images. To decide before R8: where the keys
-  live, the update manifest's format (version, image hashes, signature),
-  and rollback protection, so that live update is built around signed
-  images.
+- **A chain of trust for updates**: designed below (R8); built after
+  R7, before live update ships.
+
+### Chain of trust (R8, design 2026-11-02)
+
+What must hold: every byte of code that runs in kernel mode, and every
+system DLL and program gala ships, is what a gala release signed, on a
+cold boot and after any number of live updates; an older signed release
+cannot be put back (rollback); a machine owner can still run their own
+build by enrolling their own key. Nothing here is built yet; this fixes
+the formats and the order so live update (R9) is built around them.
+
+1. **Firmware to Limine.** UEFI Secure Boot verifies `BOOTX64.EFI`. Two
+   setups: the owner enrolls a gala key in the firmware's `db` (the
+   firmware's own setup screen, or `sbkeysync` style tooling), and
+   releases sign `BOOTX64.EFI` with it (`sbsign`); or a shim signed by
+   a key the firmware already trusts loads it (later, if ever). In QEMU,
+   OVMF with enrolled test keys (`OVMF_VARS` with our `db`) runs the
+   whole chain in a scenario.
+2. **Limine to its config.** `limine enroll-config BOOTX64.EFI <BLAKE2B
+   of limine.conf>` puts the config's hash into the signed executable
+   (Limine v11.4.1 has the command; it refuses an edited config with
+   "CHECKSUM MISMATCH FOR CONFIG FILE"). The enrollment happens before
+   signing, so the signature covers it.
+3. **Config to kernel and modules.** Every path in `limine.conf` (the
+   kernel, each boot module: the system DLLs and programs in `/boot`)
+   ends in `#<BLAKE2B>`, and the config sets `hash_mismatch_panic: yes`,
+   so Limine refuses a changed file. xtask computes the hashes when it
+   writes the config.
+4. **Kernel to everything after boot.** The kernel carries the release
+   public key(s) in its read-only data (it is itself covered by step 3).
+   What it loads later is checked against a **manifest** signed with
+   that key: a system image on the disk, a new kernel for a live
+   handover (R9), a user-mode update. The signature is Ed25519 (small,
+   fast, constant-time verification; an implementation is a dependency
+   for THIRD_PARTY.md when built, `bcrypt` already has SHA-512).
+5. **Manifest format** (versioned, invariant 3): magic `GALAMANI`,
+   format version u32, release number u64 (strictly increasing), the
+   minimum release that may run after this one (the rollback floor),
+   then entries (path, size, SHA-256), then the Ed25519 signature over
+   everything before it, with the signing key's id. A file that is not
+   in the manifest of the running release, or whose hash differs, is not
+   mapped as an image from the system tree (STATUS_INVALID_IMAGE_HASH,
+   as Windows' code integrity reports it).
+6. **Rollback protection.** The highest release number seen is kept in
+   the volume's superblock area (a monotonic field, raised only after
+   the new release booted and passed its self-check) and, where there is
+   a TPM, in an NV index the kernel can only increase. A manifest below
+   the stored floor is refused. Without a TPM, someone who can write the
+   disk offline can lower the counter: the doc says so; the disk then
+   needs its own protection (full-disk encryption, not planned).
+7. **Keys.** Release key offline (a hardware token), a separate key for
+   test builds (CI and xtask, whose kernels refuse release manifests
+   and the other way round: the key id is in both), owner keys added by
+   enrolling them in the firmware and building with them. Revocation: a
+   new release that drops a key from its kernel; the rollback floor
+   keeps the old kernel from coming back.
+
+Live update (R9) follows from it: the update is a manifest plus files;
+the running kernel verifies it (step 4) before writing a version
+directory or handing over to a new kernel, and the next cold boot goes
+through steps 1-3 with the new config (signed by the release process
+with the new hashes enrolled), so a cold boot and a live update reach
+the same state.
+
+Open questions: whether the boot modules move to the disk (then only
+the kernel and a minimal set stay in `limine.conf`, the rest checked by
+manifest), and how a developer's machine runs unsigned builds (Secure
+Boot off and a kernel built with "accept unsigned" refuses to raise the
+rollback floor).
 
 ## Not done yet
 

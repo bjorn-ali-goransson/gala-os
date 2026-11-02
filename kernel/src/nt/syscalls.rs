@@ -2933,8 +2933,10 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
             call.return_info(&info, buffer, length, ret_ptr)
         }
         sysinfo::SYSTEM_PERFORMANCE_INFORMATION => {
-            let (free, total) = platform::frame_stats();
-            let info = sysinfo::performance_information(free, total);
+            let (free, _) = platform::frame_stats();
+            let (committed, peak) = super::charge::committed();
+            let info =
+                sysinfo::performance_information(free, committed, super::charge::limit(), peak);
             call.return_info(&info, buffer, length, ret_ptr)
         }
         sysinfo::SYSTEM_TIME_OF_DAY_INFORMATION => {

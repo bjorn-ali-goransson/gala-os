@@ -66,6 +66,7 @@ pub fn join(child: &Process, job: Option<ObjectRef>) {
         j.state.lock().total_processes += 1;
     }
     *child.job.lock() = Some(job);
+    super::super::charge::joined(child);
 }
 
 /// NtCreateJobObject(*JobHandle, DesiredAccess, ObjectAttributes)

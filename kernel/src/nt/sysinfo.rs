@@ -115,16 +115,20 @@ pub const PERFORMANCE_INFORMATION_SIZE: usize = 0x158;
 
 /// SYSTEM_PERFORMANCE_INFORMATION: only the memory counts are filled in
 /// (AvailablePages at 0x2c, CommittedPages at 0x30, CommitLimit at 0x34,
-/// PeakCommitment at 0x38, after the idle time and the I/O counters); the
-/// rest is zero.
-pub fn performance_information(available: u64, total: u64) -> [u8; PERFORMANCE_INFORMATION_SIZE] {
+/// PeakCommitment at 0x38, after the idle time and the I/O counters; the
+/// commit figures are nt::charge's); the rest is zero.
+pub fn performance_information(
+    available: u64,
+    committed: u64,
+    limit: u64,
+    peak: u64,
+) -> [u8; PERFORMANCE_INFORMATION_SIZE] {
     let mut b = [0u8; PERFORMANCE_INFORMATION_SIZE];
     let pages = |v: u64| u32::try_from(v).unwrap_or(u32::MAX).to_le_bytes();
-    let committed = total.saturating_sub(available);
     b[0x2c..0x30].copy_from_slice(&pages(available));
     b[0x30..0x34].copy_from_slice(&pages(committed));
-    b[0x34..0x38].copy_from_slice(&pages(total));
-    b[0x38..0x3c].copy_from_slice(&pages(committed));
+    b[0x34..0x38].copy_from_slice(&pages(limit));
+    b[0x38..0x3c].copy_from_slice(&pages(peak));
     b
 }
 
@@ -241,9 +245,9 @@ pub fn push_process(
 mod tests {
     #[test]
     fn performance_information_has_the_memory_counts() {
-        let b = super::performance_information(100, 400);
+        let b = super::performance_information(100, 300, 400, 350);
         let at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
-        assert_eq!((at(0x2c), at(0x30), at(0x34)), (100, 300, 400));
+        assert_eq!((at(0x2c), at(0x30), at(0x34), at(0x38)), (100, 300, 400, 350));
         assert_eq!(b.len(), 0x158);
     }
 

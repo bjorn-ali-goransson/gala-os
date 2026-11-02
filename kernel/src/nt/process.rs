@@ -60,6 +60,10 @@ pub struct Process {
     pub job: IrqMutex<Option<ObjectRef>>,
     /// A page fault found no free frame (logged once).
     pub oom_logged: core::sync::atomic::AtomicBool,
+    /// Pages of committed private memory charged to the process
+    /// (nt::charge); set to 0 for good when it ends.
+    pub commit: core::sync::atomic::AtomicU64,
+    pub commit_ended: core::sync::atomic::AtomicBool,
     /// The priority class (PROCESS_PRIORITY_CLASS_*: 2 is NORMAL), as set
     /// through ProcessPriorityClass. Recorded only: every thread runs at
     /// the normal base priority (thread.rs).
@@ -684,6 +688,8 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         exit_time: IrqMutex::named("process.exit_time", 0),
         job: IrqMutex::new(None),
         oom_logged: core::sync::atomic::AtomicBool::new(false),
+        commit: core::sync::atomic::AtomicU64::new(0),
+        commit_ended: core::sync::atomic::AtomicBool::new(false),
         priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),
         token: IrqMutex::new(token),
         console,
@@ -812,6 +818,7 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     crate::flight::record(crate::flight::Kind::ProcessExit, process.id, u64::from(status.0));
     super::desktop::process_ended(process.id);
     super::window::process_ended(process.id as u32);
+    super::charge::ended(process);
     // Close every handle (this breaks reference cycles through handles to
     // the process's own objects) and forget the process.
     let entries = process.handles.lock().close_all();

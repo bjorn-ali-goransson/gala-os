@@ -87,7 +87,9 @@ pub struct MemoryStatusEx {
 
 /// Physical pages: (total, available), from SystemBasicInformation and
 /// SystemPerformanceInformation.
-fn physical_pages() -> (u64, u64) {
+/// Physical pages (total, available) and the commit charge (committed,
+/// limit), from SYSTEM_BASIC_INFORMATION and SYSTEM_PERFORMANCE_INFORMATION.
+fn memory_pages() -> (u64, u64, u64, u64) {
     let mut basic = [0u8; 64];
     let mut perf = [0u8; 0x158];
     let mut ret = 0;
@@ -98,11 +100,12 @@ fn physical_pages() -> (u64, u64) {
     }
     let at =
         |b: &[u8], o: usize| u64::from(u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]));
-    (at(&basic, 12), at(&perf, 0x2c))
+    (at(&basic, 12), at(&perf, 0x2c), at(&perf, 0x30), at(&perf, 0x34))
 }
 
-/// GlobalMemoryStatusEx: physical memory from the kernel, no page file
-/// (its figures are physical memory's), the user address space.
+/// GlobalMemoryStatusEx: physical memory from the kernel; the "page file"
+/// figures are the commit limit and what is left of it (there is no page
+/// file: the limit is physical memory); the user address space.
 #[unsafe(no_mangle)]
 pub extern "system" fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> Bool {
     // SAFETY: the caller's MEMORYSTATUSEX.
@@ -110,7 +113,7 @@ pub extern "system" fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> Bool
     if s.length != 64 {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
-    let (total, avail) = physical_pages();
+    let (total, avail, committed, limit) = memory_pages();
     let (total, avail) = (total * 4096, (avail * 4096).min(total * 4096));
     let mut reserved = 0u64;
     regions(|r| {
@@ -122,8 +125,8 @@ pub extern "system" fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> Bool
     s.load = (avail * 100).checked_div(total).map_or(0, |free| (100 - free) as u32);
     s.total_phys = total;
     s.avail_phys = avail;
-    s.total_page_file = total;
-    s.avail_page_file = avail;
+    s.total_page_file = limit * 4096;
+    s.avail_page_file = limit.saturating_sub(committed) * 4096;
     s.total_virtual = USER_SPACE;
     s.avail_virtual = USER_SPACE.saturating_sub(reserved);
     s.avail_extended_virtual = 0;

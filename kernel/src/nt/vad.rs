@@ -111,6 +111,23 @@ impl Allocation {
         (self.base..self.end()).contains(&addr)
     }
 
+    /// Committed pages among `[first, first + count)`.
+    fn committed(&self, first: u64, count: u64) -> u64 {
+        let end = first + count;
+        let i = self.runs.partition_point(|r| r.start + r.pages <= first);
+        self.runs[i..]
+            .iter()
+            .take_while(|r| r.start < end)
+            .filter(|r| r.state.committed)
+            .map(|r| (r.start + r.pages).min(end) - r.start.max(first))
+            .sum()
+    }
+
+    /// Committed pages that count towards the commit charge.
+    fn charged(&self, first: u64, count: u64) -> u64 {
+        if self.kind == MEM_PRIVATE { self.committed(first, count) } else { 0 }
+    }
+
     fn run_at(&self, page: u64) -> &Run {
         let i = self.runs.partition_point(|r| r.start + r.pages <= page);
         &self.runs[i]
@@ -181,6 +198,9 @@ pub struct RegionInfo {
 pub struct Vad {
     /// Sorted by base, non-overlapping.
     allocs: Vec<Allocation>,
+    /// Committed pages in MEM_PRIVATE allocations: what the process is
+    /// charged for (nt::charge, the commit charge).
+    private_commit: u64,
 }
 
 fn page_round(start: u64, size: u64) -> Result<(u64, u64), NtStatus> {
@@ -279,10 +299,32 @@ impl Vad {
         if end > a.end() {
             return Err(NtStatus::CONFLICTING_ADDRESSES);
         }
-        let first = (start - a.base) / PAGE;
-        a.set(first, (end - start) / PAGE, PageState { committed: true, protect })
+        let (first, count) = ((start - a.base) / PAGE, (end - start) / PAGE);
+        let before = a.charged(first, count);
+        a.set(first, count, PageState { committed: true, protect })
             .map_err(|_| NtStatus::NO_MEMORY)?;
+        let added = a.charged(first, count) - before;
+        self.private_commit += added;
         Ok((start, end - start))
+    }
+
+    /// Pages a commit of `[base, base + size)` would add to the charge
+    /// (uncommitted pages of a MEM_PRIVATE allocation; 0 if the range is
+    /// not inside one allocation, which the commit then refuses).
+    pub fn commit_cost(&self, base: u64, size: u64) -> u64 {
+        let Ok((start, end)) = page_round(base, size.max(1)) else { return 0 };
+        let Some(i) = self.index_of(start) else { return 0 };
+        let a = &self.allocs[i];
+        if end > a.end() || a.kind != MEM_PRIVATE {
+            return 0;
+        }
+        let (first, count) = ((start - a.base) / PAGE, (end - start) / PAGE);
+        count - a.committed(first, count)
+    }
+
+    /// Committed pages of MEM_PRIVATE allocations.
+    pub fn private_commit(&self) -> u64 {
+        self.private_commit
     }
 
     /// Decommits pages (MEM_DECOMMIT). Size 0 means "to the end of the
@@ -295,8 +337,10 @@ impl Vad {
         if end > a.end() {
             return Err(NtStatus::UNABLE_TO_FREE_VM);
         }
-        let first = (start - a.base) / PAGE;
-        a.set(first, (end - start) / PAGE, RESERVED).map_err(|_| NtStatus::NO_MEMORY)?;
+        let (first, count) = ((start - a.base) / PAGE, (end - start) / PAGE);
+        let before = a.charged(first, count);
+        a.set(first, count, RESERVED).map_err(|_| NtStatus::NO_MEMORY)?;
+        self.private_commit -= before;
         Ok((start, end - start))
     }
 
@@ -313,6 +357,7 @@ impl Vad {
             return Err(NtStatus::UNABLE_TO_FREE_VM);
         }
         let a = self.allocs.remove(i);
+        self.private_commit -= a.charged(0, a.pages);
         Ok((a.base, full))
     }
 
@@ -462,6 +507,27 @@ mod tests {
         assert!(v.page(b + 0x3000).unwrap().committed);
         assert_eq!(v.commit(0x900_0000, 1, rw()), Err(NtStatus::CONFLICTING_ADDRESSES));
         assert_eq!(v.commit(b + 0xf_f000, 0x2000, rw()), Err(NtStatus::CONFLICTING_ADDRESSES));
+    }
+
+    #[test]
+    fn private_commit_is_counted_once() {
+        let mut v = Vad::default();
+        let (b, _) = v.reserve(None, 0x10_0000, rw(), MEM_PRIVATE, false).unwrap();
+        assert_eq!(v.commit_cost(b, 0x4000), 4);
+        v.commit(b, 0x4000, rw()).unwrap();
+        assert_eq!(v.private_commit(), 4);
+        assert_eq!(v.commit_cost(b + 0x2000, 0x4000), 2);
+        v.commit(b + 0x2000, 0x4000, PAGE_READONLY).unwrap();
+        assert_eq!(v.private_commit(), 6);
+        v.decommit(b + 0x1000, 0x2000).unwrap();
+        assert_eq!(v.private_commit(), 4);
+        v.release(b, 0).unwrap();
+        assert_eq!(v.private_commit(), 0);
+        // Mapped and image memory is not charged here.
+        let (m, _) = v.reserve(None, 0x4000, rw(), MEM_MAPPED, false).unwrap();
+        assert_eq!(v.commit_cost(m, 0x4000), 0);
+        v.commit(m, 0x4000, rw()).unwrap();
+        assert_eq!(v.private_commit(), 0);
     }
 
     #[test]

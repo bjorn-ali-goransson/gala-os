@@ -1487,8 +1487,12 @@ R. **Robustness and live update, kernel included** (the owner's
    - R6. **Charging resources to an owner**: pages, kernel pool and
      handles charged to a process and its job: the commit limit, job
      memory limits, STATUS_QUOTA_EXCEEDED, the program using too much
-     fails instead of everyone starving ("no commit charge yet" in
-     WORKFLOW).
+     fails instead of everyone starving. **Commit charge done**
+     (2026-11-02, `nt::charge`, ARCHITECTURE "Commit charge",
+     `commit_test`): private commits charged to the process, its job and
+     the system; the system commit limit and the job's process and job
+     memory limits refuse a commit with STATUS_COMMITMENT_LIMIT. Next:
+     kernel pool and handle quotas.
    - R7. **Live mocking** at device and service boundaries (block
      devices, NIC, clock, display, input, random): wrappers for faults,
      time jumps, latency, record/replay, device events; API-level faults
@@ -1496,6 +1500,10 @@ R. **Robustness and live update, kernel included** (the owner's
      channel and a test-only `Gala*` call; off unless booted with a flag.
    - R8. **Chain of trust for updates** (design): Secure Boot -> Limine
      -> kernel -> signed system images; keys, manifest, rollback.
+     **Designed** (2026-11-02, ARCHITECTURE "Chain of trust"): Limine's
+     enrolled config hash and per-file BLAKE2B hashes, an Ed25519-signed
+     manifest checked by the kernel, a rollback floor in the volume (and
+     a TPM NV index). Building it comes after R7.
    - R9. **Live update, kernel included** (a goal, not an option): user
      mode first (versioned system images behind an atomic pointer, old
      processes restarted one at a time), then the kernel handover: the
