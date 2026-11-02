@@ -28,7 +28,8 @@ explicitly in its commit.
   interface. See "Server and desktop workloads" in ARCHITECTURE; item
   SD below.
 - **The desktop is built on the command line, not beside it**: the
-  desktop edition is the server/CLI edition plus a graphical shell, and
+  desktop edition is a superset of the server edition (the server/CLI
+  edition plus a graphical shell), and
   everything the desktop can do can be done from a terminal too (the
   `gala` command, item SD). A desktop feature is built as an action the
   CLI reaches first, then given a mouse and keyboard binding.

@@ -2906,8 +2906,12 @@ it holds today:
   GalaWindowListen and GalaScreenInfo answer as without a screen, and
   `console=` starts no conhost.exe. The screen keeps the text console.
 
-**Layering (the owner, 2026-11-02)**: the desktop edition is the
-server/CLI edition plus a graphical shell. Every desktop action (start
+**Layering (the owner, 2026-11-02)**: the desktop edition is a strict
+superset of the server edition: the server/CLI edition plus a graphical
+shell. The `desktop` cargo feature only adds (it never changes or
+removes server behaviour), and every scenario a server kernel passes
+also runs on the desktop kernel (the suite boots the desktop kernel for
+all of them and the server kernel for `SERVER_KERNEL_SCENARIOS`). Every desktop action (start
 menu, taskbar, caption buttons, Snap keys, wallpaper) is a named action
 that the CLI can also invoke (`gala` command; ROADMAP SD "CLI parity"),
 so nothing can be done only with a mouse. New desktop features are
