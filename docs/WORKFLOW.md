@@ -503,7 +503,12 @@ command before it, so the moves queued ahead of it are drained first. Keep each
 `mouse_move` within 255 per axis: QEMU queues a few PS/2 packets of at
 most 255 and hands the rest of a larger move over with later events (a
 click then lands somewhere else); reach a corner with several moves. Such scenarios must be UEFI ones (BIOS
-boots have no framebuffer).
+boots have no framebuffer). A program's trigger can be the desktop's
+`desktop: shown window '<title>'` log line. When a click seems to do
+nothing, give that step a pixel check that always passes to get its
+screendump; if the click landed, look at how the program waits (wx's
+modal loops wait in MsgWaitForMultipleObjects, which must wake for the
+input) — the hang dump shows each thread's system call.
 
 The desktop's text and pictures are baked at build time, so the kernel
 has no font engine or SVG renderer (both are xtask host dependencies):

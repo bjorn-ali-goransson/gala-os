@@ -48,7 +48,6 @@ pub static _fltused: i32 = 0;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
-    fn WaitForMultipleObjects(count: u32, handles: *const usize, all: i32, ms: u32) -> u32;
     fn FindResourceExW(module: usize, kind: usize, name: usize, lang: u16) -> usize;
     fn LoadResource(module: usize, res: usize) -> *const u16;
     fn SizeofResource(module: usize, res: usize) -> u32;
@@ -65,19 +64,6 @@ unsafe extern "system" {
 }
 
 // ---- Messages and windows: gala has no windows, so no messages ----
-
-/// MsgWaitForMultipleObjects: a plain wait, since no message can arrive.
-#[unsafe(no_mangle)]
-pub extern "system" fn MsgWaitForMultipleObjects(
-    count: u32,
-    handles: *const usize,
-    all: i32,
-    ms: u32,
-    _wake_mask: u32,
-) -> u32 {
-    // SAFETY: the caller's handle array.
-    unsafe { WaitForMultipleObjects(count, handles, all, ms) }
-}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn IsIconic(_window: usize) -> i32 {

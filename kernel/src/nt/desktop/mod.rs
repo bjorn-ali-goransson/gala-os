@@ -549,6 +549,20 @@ impl Desktop {
         win.minimized = false;
         let bounds = win.bounds();
         if visible && !was {
+            // The title, ASCII, for the log (screen checks wait for it; not
+            // in host unit tests, which have no console).
+            #[cfg(not(test))]
+            {
+                let mut text = [0u8; 64];
+                let n = win.title.len().min(text.len());
+                for (t, &c) in text.iter_mut().zip(&win.title[..n]) {
+                    *t = if (0x20..0x7f).contains(&c) { c as u8 } else { b'?' };
+                }
+                crate::info!(
+                    "desktop: shown window '{}'",
+                    core::str::from_utf8(&text[..n]).unwrap_or("?")
+                );
+            }
             self.raise(id);
             self.active = Some(id);
         }

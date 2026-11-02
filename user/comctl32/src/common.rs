@@ -20,6 +20,7 @@ unsafe extern "system" {
     pub fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
     pub fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
     pub fn GetParent(hwnd: Hwnd) -> Hwnd;
+    pub fn TrackMouseEvent(tme: *mut u8) -> i32;
     pub fn GetClientRect(hwnd: Hwnd, rect: *mut [i32; 4]) -> i32;
     pub fn SetWindowPos(
         hwnd: Hwnd,
@@ -389,4 +390,11 @@ pub fn owned(s: &[u16]) -> Vec<u16> {
         v.extend_from_slice(s);
     }
     v
+}
+
+/// _TrackMouseEvent: user32's TrackMouseEvent.
+#[unsafe(no_mangle)]
+pub extern "system" fn _TrackMouseEvent(tme: *mut u8) -> i32 {
+    // SAFETY: the caller's TRACKMOUSEEVENT, passed on.
+    unsafe { TrackMouseEvent(tme) }
 }

@@ -284,6 +284,19 @@ static void CALLBACK timer_proc(HWND hwnd, UINT msg, UINT_PTR id, DWORD time) {
         timer_proc_calls++;
 }
 
+static int enum_seen;
+static HWND enum_want;
+static BOOL CALLBACK enum_proc(HWND h, LPARAM data) {
+    if (data == 42 && h == enum_want)
+        enum_seen++;
+    return TRUE;
+}
+static BOOL CALLBACK enum_stop(HWND h, LPARAM data) {
+    (void)h;
+    (void)data;
+    return FALSE;
+}
+
 static void timers(void) {
     HWND w = CreateWindowExW(0, L"User32TestHooks", L"timers", WS_OVERLAPPEDWINDOW, 10, 10,
                              200, 100, NULL, NULL, GetModuleHandleW(NULL), NULL);
@@ -304,6 +317,60 @@ static void timers(void) {
     DispatchMessageW(&m);
     CHECK(timer_proc_calls == 1);
     CHECK(KillTimer(NULL, timer_proc_id));
+
+    // MsgWaitForMultipleObjects: WAIT_OBJECT_0 + count when a message of the
+    // wake mask is queued, a handle's index when it is signalled.
+    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    CHECK(MsgWaitForMultipleObjects(0, NULL, FALSE, 20, QS_ALLINPUT) == WAIT_TIMEOUT);
+    CHECK(MsgWaitForMultipleObjects(1, &ev, FALSE, 20, QS_ALLINPUT) == WAIT_TIMEOUT);
+    CHECK(PostMessageW(w, WM_USER + 3, 0, 0));
+    CHECK(MsgWaitForMultipleObjects(1, &ev, FALSE, 1000, QS_ALLINPUT) == WAIT_OBJECT_0 + 1);
+    CHECK(MsgWaitForMultipleObjectsEx(0, NULL, 1000, QS_POSTMESSAGE, MWMO_INPUTAVAILABLE) == WAIT_OBJECT_0);
+    CHECK(PeekMessageW(&m, w, 0, 0, PM_REMOVE) && m.message == WM_USER + 3);
+    SetEvent(ev);
+    CHECK(MsgWaitForMultipleObjects(1, &ev, FALSE, 1000, QS_ALLINPUT) == WAIT_OBJECT_0);
+    start = GetTickCount();
+    CHECK(SetTimer(w, 8, 30, NULL) == 8);
+    CHECK(MsgWaitForMultipleObjects(0, NULL, FALSE, 5000, QS_TIMER) == WAIT_OBJECT_0);
+    CHECK(GetTickCount() - start < 4000);
+    CHECK(GetMessageW(&m, w, 0, 0) == 1 && m.message == WM_TIMER && m.wParam == 8);
+    CHECK(KillTimer(w, 8));
+    CloseHandle(ev);
+
+    // GetMessageTime and GetMessagePos: those of the last message retrieved.
+    CHECK(PostMessageW(w, WM_USER + 4, 0, 0));
+    CHECK(GetMessageW(&m, w, 0, 0) == 1 && m.message == WM_USER + 4);
+    CHECK((DWORD)GetMessageTime() == m.time);
+    DWORD pos = GetMessagePos();
+    CHECK((short)LOWORD(pos) == m.pt.x && (short)HIWORD(pos) == m.pt.y);
+
+    // TrackMouseEvent (and comctl32's _TrackMouseEvent): WM_MOUSELEAVE asked.
+    TRACKMOUSEEVENT tme = {sizeof tme, TME_LEAVE, w, HOVER_DEFAULT};
+    CHECK(TrackMouseEvent(&tme));
+    CHECK(_TrackMouseEvent(&tme));
+
+    // EnumThreadWindows and EnumWindows: the top-level windows.
+    enum_want = w;
+    CHECK(EnumThreadWindows(GetCurrentThreadId(), enum_proc, 42) && enum_seen == 1);
+    CHECK(!EnumThreadWindows(GetCurrentThreadId(), enum_stop, 0));
+    CHECK(EnumWindows(enum_proc, 42) && enum_seen == 2);
+
+    // UnregisterClassW: not while a window of it is there; then gone.
+    WNDCLASSW wc = {0};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"User32TestGoing";
+    CHECK(RegisterClassW(&wc) != 0);
+    HWND going = CreateWindowExW(0, L"User32TestGoing", L"", WS_OVERLAPPED, 0, 0, 10, 10, NULL, NULL,
+                                 GetModuleHandleW(NULL), NULL);
+    CHECK(going != NULL);
+    CHECK(!UnregisterClassW(L"User32TestGoing", GetModuleHandleW(NULL))
+          && GetLastError() == ERROR_CLASS_HAS_WINDOWS);
+    CHECK(DestroyWindow(going));
+    CHECK(UnregisterClassW(L"User32TestGoing", GetModuleHandleW(NULL)));
+    CHECK(!UnregisterClassW(L"User32TestGoing", GetModuleHandleW(NULL))
+          && GetLastError() == ERROR_CLASS_DOES_NOT_EXIST);
+
     CHECK(DestroyWindow(w));
 }
 

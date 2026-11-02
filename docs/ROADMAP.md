@@ -499,9 +499,9 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    times: not a race - the scenario's 120 s limit killed the VM, which
    psql saw as a closed connection; it needs ~45 s alone, so it joined
    SLOW_SCENARIOS), smpsched_test (check 0x12, a timing check).
-   Seen once (2026-11-01, full suite under load): rtl_test timed out with
-   its thread Ready and spinning in NtYieldExecution after the other one
-   ended; it passes alone. To hunt (docs/WORKFLOW.md, "Hunting a rare
+   Seen twice (2026-11-01 and 11-02, full suite under load): rtl_test
+   timed out with its thread spinning in NtYieldExecution after the
+   other one ended; it passes alone. To hunt (docs/WORKFLOW.md, "Hunting a rare
    hang"); log in the session's notes: target/failed/rtl_test.log.
    Seen once (2026-11-01, full suite): sshd_password's sshd.exe ended
    with an unhandled access violation at 0xffffd0000013f948 (a
@@ -578,9 +578,16 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    BringWindowToTop). **FileZilla's main window shows** (2026-11-02):
    toolbar, Quickconnect bar, local tree and file list, the remote side,
    the queue and status bar, with its Welcome dialog; it then waits in
-   its message loop. Next: what looks wrong on it (the queue's tab bar,
-   the combo box's drop-down button, the tree's chevrons), the menu bar,
-   then using it (connecting to a server).
+   its message loop. **It takes clicks** (2026-11-02): its scenario is a
+   screen check (the Welcome dialog's OK closes it, the close button ends
+   FileZilla with status 0): MsgWaitForMultipleObjects(Ex) wakes for
+   messages (wx's modal loop waits there; it used to ignore the queue),
+   WaitMessage, GetMessageTime/Pos, TrackMouseEvent (and comctl32's
+   _TrackMouseEvent), EnumThreadWindows, EnumWindows, UnregisterClassW
+   (user32_test); the tree's closed chevron points right. Next: what
+   looks wrong on it (the queue's tab bar is black, the combo box's
+   drop-down button), the menu bar, then using it (connecting to a
+   server).
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,

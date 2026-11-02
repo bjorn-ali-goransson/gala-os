@@ -11,7 +11,7 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 pub(crate) type Handle = *mut c_void;
 pub(crate) type Hwnd = usize;
@@ -50,6 +50,7 @@ unsafe extern "system" {
     fn CreateEventW(sa: *const c_void, manual: i32, initial: i32, name: *const u16) -> Handle;
     fn SetEvent(h: Handle) -> i32;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+    fn WaitForMultipleObjects(count: u32, handles: *const Handle, all: i32, ms: u32) -> u32;
     fn VirtualAlloc(at: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
     fn VirtualFree(at: *mut c_void, size: usize, kind: u32) -> i32;
     fn LoadLibraryW(name: *const u16) -> Handle;
@@ -516,6 +517,29 @@ pub(crate) fn find_class(s: &State, name: *const u16) -> Option<usize> {
     }
     let key = class_key(name);
     s.classes.iter().position(|c| c.used && c.name == key)
+}
+
+/// UnregisterClassW(name, instance): the class (a name or an atom) goes;
+/// ERROR_CLASS_HAS_WINDOWS while a window of it is there. gala's classes are
+/// process-wide, so the instance is not compared.
+#[unsafe(no_mangle)]
+pub extern "system" fn UnregisterClassW(name: *const u16, _instance: usize) -> i32 {
+    const ERROR_CLASS_HAS_WINDOWS: u32 = 1412;
+    let r = with(|s| {
+        let Some(i) = find_class(s, name) else { return Err(ERROR_CLASS_DOES_NOT_EXIST) };
+        if s.windows.iter().any(|w| w.used && w.class == i) {
+            return Err(ERROR_CLASS_HAS_WINDOWS);
+        }
+        s.classes[i].used = false;
+        Ok(())
+    });
+    match r {
+        Ok(()) => 1,
+        Err(e) => {
+            set_last_error(e);
+            0
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1228,6 +1252,65 @@ pub extern "system" fn SendMessageA(hwnd: Hwnd, msg: u32, wparam: usize, lparam:
 static CAPTURE: AtomicUsize = AtomicUsize::new(0);
 static FOREGROUND: AtomicUsize = AtomicUsize::new(0);
 static CURSOR: AtomicUsize = AtomicUsize::new(0);
+/// The time and pointer position (packed as GetMessagePos's) of the last
+/// message GetMessage or PeekMessage retrieved.
+static LAST_TIME: AtomicU32 = AtomicU32::new(0);
+static LAST_POS: AtomicUsize = AtomicUsize::new(0);
+/// The window TrackMouseEvent's TME_LEAVE watches (WM_MOUSELEAVE when the
+/// pointer goes to another window).
+static TRACKED: AtomicUsize = AtomicUsize::new(0);
+
+const WM_MOUSELEAVE: u32 = 0x02a3;
+const TME_LEAVE: u32 = 0x2;
+const TME_CANCEL: u32 = 0x8000_0000;
+const TME_QUERY: u32 = 0x4000_0000;
+
+/// TrackMouseEvent(tme): TME_LEAVE, a WM_MOUSELEAVE when the pointer leaves
+/// the window (once); TME_CANCEL ends it, TME_QUERY tells it. Hover
+/// tracking (TME_HOVER) is accepted but sends nothing yet.
+#[unsafe(no_mangle)]
+pub extern "system" fn TrackMouseEvent(tme: *mut u8) -> i32 {
+    if tme.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+    // SAFETY: the caller's TRACKMOUSEEVENT: cbSize, dwFlags, hwndTrack,
+    // dwHoverTime.
+    let (flags_at, hwnd_at) = unsafe { (tme.add(4) as *mut u32, tme.add(8) as *mut Hwnd) };
+    // SAFETY: as above.
+    let (flags, hwnd) = unsafe { (flags_at.read_unaligned(), hwnd_at.read_unaligned()) };
+    if flags & TME_QUERY != 0 {
+        let t = TRACKED.load(Ordering::Relaxed);
+        // SAFETY: as above.
+        unsafe {
+            flags_at.write_unaligned(if t != 0 { TME_LEAVE } else { 0 });
+            hwnd_at.write_unaligned(t);
+        }
+        return 1;
+    }
+    if window(hwnd).is_none() {
+        set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    }
+    if flags & TME_LEAVE != 0 {
+        if flags & TME_CANCEL != 0 {
+            let _ = TRACKED.compare_exchange(hwnd, 0, Ordering::Relaxed, Ordering::Relaxed);
+        } else {
+            TRACKED.store(hwnd, Ordering::Relaxed);
+        }
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetMessageTime() -> i32 {
+    LAST_TIME.load(Ordering::Relaxed) as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetMessagePos() -> u32 {
+    LAST_POS.load(Ordering::Relaxed) as u32
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn SetCapture(hwnd: Hwnd) -> Hwnd {
@@ -1344,6 +1427,7 @@ const QS_MOUSEMOVE: u32 = 0x2;
 const QS_MOUSEBUTTON: u32 = 0x4;
 const QS_POSTMESSAGE: u32 = 0x8;
 const QS_PAINT: u32 = 0x20;
+const QS_TIMER: u32 = 0x10;
 
 /// GetQueueStatus(flags): what is in this thread's queue (high word) and,
 /// as gala keeps no "since last call" state, the same in the low word.
@@ -1369,6 +1453,9 @@ pub extern "system" fn GetQueueStatus(flags: u32) -> u32 {
         }
         have
     });
+    if crate::timer::wait_ms() == 0 {
+        have |= QS_TIMER;
+    }
     have &= flags;
     have << 16 | have
 }
@@ -1412,7 +1499,10 @@ fn post(thread: u32, msg: Msg) -> bool {
 
 pub(crate) fn message(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> Msg {
     // SAFETY: a plain call.
-    Msg { hwnd, message, wparam, lparam, time: unsafe { GetTickCount() }, pt: [0; 2], private: 0 }
+    let time = unsafe { GetTickCount() };
+    let c = CURSOR.load(Ordering::Relaxed);
+    let pt = [c as u16 as i16 as i32, (c >> 16) as u16 as i16 as i32];
+    Msg { hwnd, message, wparam, lparam, time, pt, private: 0 }
 }
 
 /// PostMessageW: to the window's thread (a null window: this thread).
@@ -1516,6 +1606,14 @@ fn pump() {
                 // Mouse input goes to the child under the pointer (or the
                 // capture), keys to the focus.
                 let (to, lparam) = crate::tree::route(top, message, lparam);
+                // The pointer left the window TrackMouseEvent watches.
+                let tracked = TRACKED.load(Ordering::Relaxed);
+                if message == 0x0200 && tracked != 0 && tracked != to {
+                    TRACKED.store(0, Ordering::Relaxed);
+                    if let Some(w) = window(tracked) {
+                        post(w.thread, message_at(tracked, WM_MOUSELEAVE, 0, 0));
+                    }
+                }
                 post(thread, message_at(to, message, wparam, lparam));
             }
         }
@@ -1691,6 +1789,8 @@ fn next(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
         let lp = &mut m as *mut Msg as isize;
         crate::hook::call(crate::hook::WH_GETMESSAGE, 0, usize::from(remove), lp);
     }
+    LAST_TIME.store(m.time, Ordering::Relaxed);
+    LAST_POS.store((m.pt[0] as u16 as usize) | (m.pt[1] as u16 as usize) << 16, Ordering::Relaxed);
     Some(m)
 }
 
@@ -1737,6 +1837,77 @@ pub extern "system" fn GetMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32
         // SAFETY: our event.
         unsafe { WaitForSingleObject(event(), crate::timer::wait_ms()) };
     }
+}
+
+/// MsgWaitForMultipleObjectsEx(count, handles, ms, mask, flags): until one
+/// of the handles is signalled (WAIT_OBJECT_0 + its index), a message of
+/// the wake mask is in the queue (WAIT_OBJECT_0 + count; gala does not tell
+/// new input from old, so it is as with MWMO_INPUTAVAILABLE), or the
+/// time-out. MWMO_WAITALL waits for all the handles alone.
+#[unsafe(no_mangle)]
+pub extern "system" fn MsgWaitForMultipleObjectsEx(
+    count: u32,
+    handles: *const Handle,
+    ms: u32,
+    mask: u32,
+    flags: u32,
+) -> u32 {
+    const MWMO_WAITALL: u32 = 1;
+    const WAIT_TIMEOUT: u32 = 258;
+    const WAIT_FAILED: u32 = 0xffff_ffff;
+    const INFINITE: u32 = 0xffff_ffff;
+    if count > 63 || (count > 0 && handles.is_null()) {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return WAIT_FAILED;
+    }
+    if flags & MWMO_WAITALL != 0 {
+        // SAFETY: the caller's array of `count` handles.
+        return unsafe { WaitForMultipleObjects(count, handles, 1, ms) };
+    }
+    let mut all = [0 as Handle; 64];
+    for (i, h) in all.iter_mut().take(count as usize).enumerate() {
+        // SAFETY: the caller's array of `count` handles.
+        *h = unsafe { *handles.add(i) };
+    }
+    all[count as usize] = event();
+    // SAFETY: a plain call.
+    let start = unsafe { GetTickCount() };
+    loop {
+        if GetQueueStatus(mask) >> 16 != 0 {
+            return count;
+        }
+        // SAFETY: a plain call.
+        let gone = unsafe { GetTickCount() }.wrapping_sub(start);
+        let left = if ms == INFINITE { INFINITE } else { ms.saturating_sub(gone) };
+        let timer = if mask & QS_TIMER != 0 { crate::timer::wait_ms() } else { INFINITE };
+        // SAFETY: our array of count + 1 handles.
+        let r = unsafe { WaitForMultipleObjects(count + 1, all.as_ptr(), 0, left.min(timer)) };
+        match r {
+            // A handle of the caller's (or abandoned: WAIT_ABANDONED_0 + i).
+            _ if r < count || (0x80..0x80 + count).contains(&r) => return r,
+            WAIT_TIMEOUT if timer >= left => return WAIT_TIMEOUT,
+            WAIT_FAILED => return r,
+            _ => {}
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn MsgWaitForMultipleObjects(
+    count: u32,
+    handles: *const Handle,
+    all: i32,
+    ms: u32,
+    mask: u32,
+) -> u32 {
+    MsgWaitForMultipleObjectsEx(count, handles, ms, mask, u32::from(all != 0))
+}
+
+/// WaitMessage: until a message is in the queue.
+#[unsafe(no_mangle)]
+pub extern "system" fn WaitMessage() -> i32 {
+    MsgWaitForMultipleObjectsEx(0, core::ptr::null(), 0xffff_ffff, 0x04ff, 0);
+    1
 }
 
 #[unsafe(no_mangle)]

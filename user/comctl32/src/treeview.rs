@@ -937,8 +937,9 @@ fn paint_tree(hwnd: Hwnd) {
                         fill(hdc, cx - i, cy + 1 - i, cx - i + 1, cy + 2 - i, TEXT_DIM);
                         fill(hdc, cx + i, cy + 1 - i, cx + i + 1, cy + 2 - i, TEXT_DIM);
                     } else {
-                        fill(hdc, cx - 1 + i, cy - i, cx + i, cy - i + 1, TEXT_DIM);
-                        fill(hdc, cx - 1 + i, cy + i, cx + i, cy + i + 1, TEXT_DIM);
+                        // ">": the strokes lean left away from the tip.
+                        fill(hdc, cx + 1 - i, cy - i, cx + 2 - i, cy - i + 1, TEXT_DIM);
+                        fill(hdc, cx + 1 - i, cy + i, cx + 2 - i, cy + i + 1, TEXT_DIM);
                     }
                 }
             }

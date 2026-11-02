@@ -2168,7 +2168,16 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   (HWND = 0x10000 + 16 * slot), one message queue per process (256
   entries, an auto-reset event) filtered by thread, WM_PAINT synthesised
   by GetMessage / PeekMessage when a visible window is invalid and the
-  queue is empty, as on Windows. Each window owns a client pixel buffer;
+  queue is empty, as on Windows. MsgWaitForMultipleObjects(Ex) and
+  WaitMessage wait on the caller's handles plus that event (and the next
+  timer for QS_TIMER) and return WAIT_OBJECT_0 + count while
+  GetQueueStatus finds a message of the wake mask; gala does not tell new
+  input from old, so it is always as with MWMO_INPUTAVAILABLE (wx's modal
+  loops wait there). GetMessageTime/Pos are the last retrieved message's
+  (pt: the pointer when it was queued). TrackMouseEvent's TME_LEAVE: one
+  watched window (process-wide) gets WM_MOUSELEAVE when the pointer's
+  next WM_MOUSEMOVE goes to another window (TODO: leaving the top-level
+  window, TME_HOVER). Each window owns a client pixel buffer;
   BeginPaint and GetDC return a gdi32 surface DC over it and EndPaint /
   ReleaseDC present the buffer. gdi32 is loaded lazily with LoadLibrary,
   so console programs that import user32 do not need it.

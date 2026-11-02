@@ -2864,12 +2864,12 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
-        // W3 (pending): FileZilla 3.69.3 itself (wxWidgets 3.2): its main
-        // window on the desktop.
+        // W3: FileZilla 3.69.3 itself (wxWidgets 3.2): its main window and
+        // Welcome dialog on the desktop, clicked closed (SCREEN_SCENARIOS).
         name: "filezilla",
-        cmdline: "qemu_exit run=filezilla/filezilla.exe",
+        cmdline: "qemu_exit wallpaper=dunes run=filezilla/filezilla.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["exited with status 0x00000000"],
+        expect: &["xtask: screen ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (pending): Git Bash (PortableGit 2.47.1): bash on the MSYS2
@@ -4139,68 +4139,109 @@ enum PixelCheck {
 /// start button (Gala's fortress) and the window's button centred, the
 /// clock at the right; the start menu (600 x 640) opens centred above it
 /// at (340, 100). Shaded colours are checked as "some pixel near".
-const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[(
-    "gui_test",
-    ScreenCheck {
-        marker: "gui_test: painted",
-        steps: &[
-            ScreenStep {
-                input: &[],
-                pixels: &[
-                    PixelCheck::AnyIn(4, 4, 12, 12, 0x060e2b), // the night wallpaper's corner
-                    PixelCheck::At(300, 110, 0xeef2f7),        // the active caption
-                    PixelCheck::At(101 + 100, 133 + 70, 0xff0000), // FillRect's red
-                    PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // COLOR_WINDOW
-                    PixelCheck::AnyIn(101 + 20, 133 + 140, 140, 16, 0x0000ff), // the text
-                    PixelCheck::AnyIn(880, 780, 40, 12, 0xe0e7f3), // the taskbar
-                    PixelCheck::AnyIn(600, 760, 32, 30, 0x167fd6), // the fortress
-                    PixelCheck::AnyIn(640, 788, 48, 8, 0x005fb8), // the active window's pill
-                ],
-            },
-            ScreenStep {
-                // From the middle to the start button (615, 776), a click.
-                input: &[
-                    "mouse_move 0 255",
-                    "mouse_move -25 121",
-                    "mouse_button 1",
-                    "mouse_button 0",
-                ],
-                pixels: &[
-                    PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the start menu
-                    PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
-                    PixelCheck::AnyIn(398, 226, 32, 32, 0x4a80f0), // "Hello window"
-                ],
-            },
-            ScreenStep {
-                // Escape closes the menu; to client (250, 50) at (351, 183)
-                // and a click: the program's green square.
-                input: &[
-                    "sendkey esc",
-                    "mouse_move -132 -198",
-                    "mouse_move -132 -198",
-                    "mouse_move 0 -197",
-                    "mouse_button 1",
-                    "mouse_button 0",
-                ],
-                pixels: &[
-                    PixelCheck::AnyIn(343, 175, 16, 16, 0x00c000), // the green mark
-                    PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // the menu closed
-                ],
-            },
-            ScreenStep {
-                // Typing goes to the active window: "hi" in black.
-                input: &["sendkey h", "sendkey i"],
-                pixels: &[PixelCheck::AnyIn(101 + 20, 133 + 200, 24, 16, 0x000000)],
-            },
-            ScreenStep {
-                // The close button (x 453..498 of the caption): the program
-                // ends (WM_SYSCOMMAND SC_CLOSE; no screendump).
-                input: &["mouse_move 125 -66", "mouse_button 1", "mouse_button 0"],
-                pixels: &[],
-            },
-        ],
-    },
-)];
+const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
+    (
+        "gui_test",
+        ScreenCheck {
+            marker: "gui_test: painted",
+            steps: &[
+                ScreenStep {
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::AnyIn(4, 4, 12, 12, 0x060e2b), // the night wallpaper's corner
+                        PixelCheck::At(300, 110, 0xeef2f7),        // the active caption
+                        PixelCheck::At(101 + 100, 133 + 70, 0xff0000), // FillRect's red
+                        PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // COLOR_WINDOW
+                        PixelCheck::AnyIn(101 + 20, 133 + 140, 140, 16, 0x0000ff), // the text
+                        PixelCheck::AnyIn(880, 780, 40, 12, 0xe0e7f3), // the taskbar
+                        PixelCheck::AnyIn(600, 760, 32, 30, 0x167fd6), // the fortress
+                        PixelCheck::AnyIn(640, 788, 48, 8, 0x005fb8), // the active window's pill
+                    ],
+                },
+                ScreenStep {
+                    // From the middle to the start button (615, 776), a click.
+                    input: &[
+                        "mouse_move 0 255",
+                        "mouse_move -25 121",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[
+                        PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the start menu
+                        PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
+                        PixelCheck::AnyIn(398, 226, 32, 32, 0x4a80f0), // "Hello window"
+                    ],
+                },
+                ScreenStep {
+                    // Escape closes the menu; to client (250, 50) at (351, 183)
+                    // and a click: the program's green square.
+                    input: &[
+                        "sendkey esc",
+                        "mouse_move -132 -198",
+                        "mouse_move -132 -198",
+                        "mouse_move 0 -197",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[
+                        PixelCheck::AnyIn(343, 175, 16, 16, 0x00c000), // the green mark
+                        PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // the menu closed
+                    ],
+                },
+                ScreenStep {
+                    // Typing goes to the active window: "hi" in black.
+                    input: &["sendkey h", "sendkey i"],
+                    pixels: &[PixelCheck::AnyIn(101 + 20, 133 + 200, 24, 16, 0x000000)],
+                },
+                ScreenStep {
+                    // The close button (x 453..498 of the caption): the program
+                    // ends (WM_SYSCOMMAND SC_CLOSE; no screendump).
+                    input: &["mouse_move 125 -66", "mouse_button 1", "mouse_button 0"],
+                    pixels: &[],
+                },
+            ],
+        },
+    ),
+    (
+        // FileZilla's main window with its Welcome dialog (wx's modal loop:
+        // MsgWaitForMultipleObjects): the accent Quickconnect and OK
+        // buttons; then OK closes the dialog and the main window's close
+        // button ends FileZilla.
+        "filezilla",
+        ScreenCheck {
+            marker: "desktop: shown window 'Welcome to FileZilla'",
+            steps: &[
+                ScreenStep {
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::AnyIn(660, 98, 80, 16, 0x005fb8), // Quickconnect
+                        PixelCheck::AnyIn(730, 512, 60, 20, 0x005fb8), // OK
+                    ],
+                },
+                ScreenStep {
+                    // To OK (763, 522) and a click: the dialog (0xf0f0f0)
+                    // goes, the file lists (white) under it show.
+                    input: &["mouse_move 122 122", "mouse_button 1", "mouse_button 0"],
+                    pixels: &[
+                        PixelCheck::At(560, 470, 0xffffff),
+                        PixelCheck::At(470, 520, 0xffffff),
+                    ],
+                },
+                ScreenStep {
+                    // The main window's close button (1216, 41): FileZilla
+                    // ends (status 0).
+                    input: &[
+                        "mouse_move 227 -240",
+                        "mouse_move 227 -241",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[],
+                },
+            ],
+        },
+    ),
+];
 
 fn screen_check(name: &str) -> Option<&'static ScreenCheck> {
     SCREEN_SCENARIOS.iter().find(|(n, _)| *n == name).map(|(_, c)| c)

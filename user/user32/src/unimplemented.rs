@@ -37,8 +37,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     EnableScrollBar
     EnumClipboardFormats
     EnumDisplaySettingsW
-    EnumThreadWindows
-    EnumWindows
     ExitWindowsEx
     FindWindowExW
     FlashWindowEx
@@ -47,8 +45,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     GetDesktopWindow
     GetDoubleClickTime
     GetKeyboardState
-    GetMessagePos
-    GetMessageTime
     GetProcessDefaultLayout
     GetScrollInfo
     GetWindowDC
@@ -70,7 +66,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     ShowCursor
     ToUnicode
     TrackPopupMenu
-    UnregisterClassW
     UnregisterHotKey
     ValidateRgn
     WaitForInputIdle

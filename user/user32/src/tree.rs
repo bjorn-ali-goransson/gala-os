@@ -554,6 +554,45 @@ pub extern "system" fn EnumChildWindows(parent: Hwnd, proc_: Option<EnumProc>, d
     1
 }
 
+/// The top-level windows (of thread `thread`, or all with 0), highest
+/// first; how many.
+fn top_levels(thread: u32, out: &mut [Hwnd; 256]) -> usize {
+    with(|s| {
+        let mut n = 0;
+        for (i, w) in s.windows.iter().enumerate() {
+            if n < out.len() && w.used && w.parent == 0 && (thread == 0 || w.thread == thread) {
+                out[n] = hwnd_of(i);
+                n += 1;
+            }
+        }
+        out[..n].sort_unstable_by_key(|&h| index_of(h).map_or(0, |i| s.windows[i].z));
+        n
+    })
+}
+
+/// EnumThreadWindows(thread, proc, data): the thread's top-level windows;
+/// FALSE when the procedure stops it or there are none.
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumThreadWindows(thread: u32, proc_: Option<EnumProc>, data: isize) -> i32 {
+    let Some(p) = proc_ else { return 0 };
+    if thread == 0 {
+        return 0;
+    }
+    let mut all = [0; 256];
+    let n = top_levels(thread, &mut all);
+    i32::from(n > 0 && all[..n].iter().all(|&h| p(h, data) != 0))
+}
+
+/// EnumWindows(proc, data): every top-level window; FALSE when the
+/// procedure stops it.
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumWindows(proc_: Option<EnumProc>, data: isize) -> i32 {
+    let Some(p) = proc_ else { return 0 };
+    let mut all = [0; 256];
+    let n = top_levels(0, &mut all);
+    i32::from(all[..n].iter().all(|&h| p(h, data) != 0))
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDlgItem(parent: Hwnd, id: i32) -> Hwnd {
     children_of(parent)
