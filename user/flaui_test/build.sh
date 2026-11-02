@@ -1,6 +1,7 @@
 #!/bin/sh
-# Builds flaui_test's two programs into user/bin:
-# - flaui_test.dll from FlaUITest.cs with Mono's C# compiler (mcs, package
+# Builds flaui_test's programs into user/bin:
+# - flaui_test.dll from FlaUITest.cs and filezilla_flaui.dll from
+#   FileZillaFlaUI.cs (the filezilla_flaui scenario's test) with Mono's C# compiler (mcs, package
 #   mono-mcs), compiled against .NET 8's reference assemblies (the
 #   Microsoft.NETCore.App.Ref package, fetched here and checked against
 #   its SHA-256; mcs cannot read the runtime's own System.Private.CoreLib,
@@ -40,13 +41,15 @@ done
 refs=""
 for a in System.Runtime System.Console System.Collections System.ComponentModel.Primitives \
     System.Diagnostics.Process System.Drawing.Primitives System.Linq \
-    System.Runtime.InteropServices netstandard; do
+    System.Runtime.InteropServices System.Threading.Thread netstandard; do
     refs="$refs -r:$REF/$a.dll"
 done
+# build <output> <source>: one test assembly.
+build() {
 # shellcheck disable=SC2086
-mcs -nologo -nowarn:1702 -nostdlib -noconfig -optimize+ -debug- -target:exe -out:"$OUT" $refs \
-    -r:"$FLAUI_CORE" -r:"$FLAUI_UIA3" -r:"$INTEROP" "$DIR/FlaUITest.cs"
-python3 -I - "$OUT" <<'PY'
+mcs -nologo -nowarn:1702 -nostdlib -noconfig -optimize+ -debug- -target:exe -out:"$1" $refs \
+    -r:"$FLAUI_CORE" -r:"$FLAUI_UIA3" -r:"$INTEROP" "$2"
+python3 -I - "$1" <<'PY'
 import struct, sys
 path = sys.argv[1]
 b = bytearray(open(path, 'rb').read())
@@ -80,6 +83,9 @@ for _ in range(streams):
         b[meta + off:meta + off + 16] = bytes.fromhex('6761' + '6c61' * 6 + '6655')
 open(path, 'wb').write(b)
 PY
+}
+build "$OUT" "$DIR/FlaUITest.cs"
+build "$ROOT/user/bin/filezilla_flaui.dll" "$DIR/FileZillaFlaUI.cs"
 x86_64-w64-mingw32-gcc -O1 -g0 -s -Wl,--no-insert-timestamp \
     -o "$ROOT/user/bin/flaui_target.exe" "$DIR/target.c" -luser32 -lcomctl32
-sha256sum "$OUT" "$ROOT/user/bin/flaui_target.exe"
+sha256sum "$OUT" "$ROOT/user/bin/filezilla_flaui.dll" "$ROOT/user/bin/flaui_target.exe"

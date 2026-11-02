@@ -2828,10 +2828,16 @@ client side over Win32 windows (`uia_test`, a mingw C program).
   - Elements (`element.rs`) are a node each, read live (no cache: the
     Cached getters and GetCached* return current values): an HWND, or a
     list control's item (`Node { hwnd, item: Some(index) }`, see "List
-    items" below). The root is GetDesktopWindow(); its children are the
-    visible top-level windows (EnumWindows), a window's children its
-    visible child windows in z order, then a list box's or list view's
-    items in index order. Properties of windows: AutomationId = the control id in decimal (none
+    items" below), or a menu bar or menu item (`Node.menu`, see "Menus"
+    below). The root is GetDesktopWindow(); its children are the
+    visible top-level windows without an owner (EnumWindows), a
+    top-level window's children its menu bar (if it has one), then the
+    visible top-level windows it owns (GetWindow GW_OWNER: its dialogs,
+    its open popup menu; UIA puts owned windows under their owner, which
+    FlaUI's Window.ModalWindows and Win32 menu handling rely on), then
+    its visible child windows in z order, then a list box's or list
+    view's items in index order (an open popup menu, class #32768: its
+    items instead). Properties of windows: AutomationId = the control id in decimal (none
     for top-level windows), Name = the text with '&' mnemonics removed
     (buttons, statics), an edit's/combo's/list's Name the static label
     just before it in z order, a window's its title, the root "Desktop
@@ -2918,6 +2924,43 @@ client side over Win32 windows (`uia_test`, a mingw C program).
     on the list, the header's columns), combo boxes' items (the
     ComboLBox list), tree-view items, ElementFromPoint finding an item,
     the Value/Toggle patterns of items (check boxes in list views).
+  - **Menus** (`menus.rs`, 2026-11-02, `uia_test`, `filezilla_flaui`): a
+    window with a menu bar has a MenuBar child (no HWND; Name
+    "Application", AutomationId "MenuBar", as Windows' Win32 menu proxy
+    is reported to give them; unverified here) whose children are its
+    items; an open popup menu is its #32768 window (ControlType Menu,
+    Name the label of the item that opened it, or "Context" for a
+    TrackPopupMenu's first level), owned by the menu's window (the bar's
+    window; TrackPopupMenu's owner for submenus; a context menu's first
+    level has none, so it is under the root), its items its children.
+    Items: MenuItem (Separator for separators), Name the label without
+    '&' and the accelerator text, AcceleratorKey that text ("Ctrl+O"),
+    IsEnabled unless grayed, RuntimeId {42, window, -2(, k)} on the bar
+    and {42, popup, -3, k} in a popup (gala's choice). Patterns: items
+    with a submenu ExpandCollapse (Expanded while their menu is open;
+    Expand opens it as a click does, Collapse closes it), the others
+    Invoke (the item is chosen: the menu loop ends and the owner gets
+    WM_COMMAND, as for the user's choice; a command on the bar itself is
+    posted WM_COMMAND). Expand and Invoke return before the program has
+    acted, as Invoke may on Windows. **How**: gala's menus live in the
+    program's user32 (Windows keeps them in win32k, where any process
+    reads them), so UIAutomationCore sends the menu's window (the bar's
+    window or the popup) gala's message GALA_MENU (0x03f0, in the system
+    range), which user32's SendMessageW answers itself, never the window
+    procedure (`track.rs`, `menu_message`): MENU_QUERY fills a buffer of
+    8 KiB (count, the popup's name, then per item its id, flags
+    (submenu, grayed, separator, checked, open), screen rectangle and
+    raw text), marshaled across processes like WM_GETTEXT's buffer
+    (`foreign::send_remote`; it cannot be posted); MENU_EXPAND,
+    MENU_INVOKE, MENU_COLLAPSE act on item k (wParam's upper bits). An
+    expand on a bar with no menu loop running posts the window
+    WM_NCLBUTTONDOWN HTMENU at the item, as the desktop's click does
+    (the modal loop must not run inside the sent message); inside a
+    running loop (the message arrives through the loop's GetMessage on
+    the window's thread) it acts on the loop's state directly and posts
+    WM_NULL to wake the loop. Not yet: system menus, AccessKey,
+    AutomationIds of items, ElementFromPoint on menus, the Toggle
+    pattern on checked items.
   - Walkers (`walker.rs`): a view is a condition; an element outside it
     is skipped and its children take its place; the root is in every
     view.
@@ -2942,7 +2985,7 @@ providers inside programs (WM_GETOBJECT answered with
 IRawElementProviderSimple via UiaReturnRawElementProvider, which wx and
 Qt implement for their widgets) are not consulted; no events
 (Add*EventHandler E_NOTIMPL); cache requests cache nothing (above); no
-title bar or menu bar elements from the non-client area (on
+title bar elements from the non-client area (on
 Windows a captioned window has a TitleBar child without an HWND, which
 `uia_test` allows for; FlaUI's Window.Close looks for its close button
 first, then the Window pattern, neither of which gala has: close
@@ -2950,9 +2993,30 @@ programs with Application.Close); no Window, Transform,
 LegacyIAccessible patterns; ComboBox and tree-view items,
 ExpandCollapse, RangeValue, Text patterns; IUIAutomationElement2..9 are
 not answered (FlaUI reads every property through
-GetCurrentPropertyValueEx, so it has not asked). Next: screen tests
-rewritten on FlaUI (`flaui_test` shows the pattern), FileZilla driven by
-it.
+GetCurrentPropertyValueEx, so it has not asked). Next: the other screen
+tests rewritten on FlaUI (`filezilla_flaui` shows the pattern), title
+bars and the Window pattern.
+
+**FileZilla through FlaUI** (`filezilla_flaui`, 2026-11-02): what the
+wx program needed beyond `flaui_test`. wx's controls are plain Win32
+windows (Edit, Button, Static, SysListView32, ToolbarWindow32,
+msctls_statusbar32; panels and splitters are wxWindowNR panes whose
+text is their wx name, "panel"); wx gives them ids from its own pool
+(negative, and 5999 for several), so the test finds them by Name and
+ControlType, not AutomationId: the Quickconnect edits by the static
+label before each ("Host:", found as a substring), the buttons by their
+text. The Welcome, "Remember passwords?" and "Unknown certificate"
+dialogs are top-level wx dialogs owned by the main frame: they were
+missing from the main window's children until user32 kept owners
+(CreateWindowEx's hWndParent of a top-level window; GetWindow GW_OWNER;
+the registry record's owner field) and UIA put owned windows under their
+owner; .NET's Process.MainWindowHandle (FlaUI's GetMainWindow) skips
+owned windows the same way. The file lists are virtual list views: the
+items' text comes from wx's LVN_GETDISPINFOW answer to comctl32 inside
+FileZilla, read through memory allocated in FileZilla's process (List
+items above) with no change needed. File > Exit needed the menu
+elements (Menus above). Nothing else was missing: the run's ledger has
+no UIAutomationCore lines.
 
 **FlaUI** (step 5, `flaui_test`): FlaUI.Core and FlaUI.UIA3 5.0.0 with
 Interop.UIAutomationClient 10.19041.0 run unmodified on gala's .NET 8
@@ -3024,7 +3088,12 @@ steps, each test first:
    it ends. Limits: the text is what user32 last mirrored (an edit's
    typed text is not; step 3's WM_GETTEXT across processes fixes that),
    z order is per process (EnumWindows' order across processes is not
-   the screen's), no owner windows yet.
+   the screen's). Owners (2026-11-02, windows_across_test): the record's
+   owner field holds a top-level window's owner (CreateWindowEx's
+   hWndParent, its top-level ancestor), which GetWindow(GW_OWNER)
+   answers for any process's window. TODO: GetParent of an owned
+   WS_POPUP window is its owner on Windows (gala: 0); owned windows are
+   not yet destroyed or hidden with their owner.
 2. **Done for PostMessage (2026-11-02, windows_across_test).** As
    built: the registry keeps messages posted to another process's
    windows (GalaWindowPost(hwnd, msg, wParam, lParam) 0x7f46, at most
@@ -3090,9 +3159,9 @@ steps, each test first:
    IUIAutomation2..6 / CUIAutomation8, the reserved values and cache
    requests (see "UI Automation" above); FlaUI 5.0.0 on .NET 8 launches
    `flaui_target.exe`, finds its main window and controls by
-   AutomationId, invokes, sets a value, toggles and closes it. Next:
-   FlaUI driving FileZilla (wx: its controls are Win32 windows, but
-   list views and menus need patterns gala lacks).
+   AutomationId, invokes, sets a value, toggles and closes it. FlaUI
+   drives FileZilla too (2026-11-02, `filezilla_flaui`: owned windows,
+   menus; see "FileZilla through FlaUI" above).
 
 ## Built in early: invariants, safety nets, live update (proposed 2026-11-02)
 

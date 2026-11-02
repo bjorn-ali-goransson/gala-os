@@ -1,16 +1,21 @@
 //! Elements (IUIAutomationElement) and element arrays: an element is a
 //! node: an HWND, or an item of a list control (the list's HWND and the
 //! item's index, items.rs). The desktop (GetDesktopWindow) is the root;
-//! its children are the visible top-level windows, a window's children
-//! its visible child windows in z order (GW_CHILD, GW_HWNDNEXT), then, for
-//! a list box or list view, its items in index order. Properties are read
-//! from the window or the list each time (nothing is cached).
+//! its children are the visible top-level windows without an owner, a
+//! window's children the visible top-level windows it owns (its dialogs:
+//! UIA puts owned windows under their owner), then its visible child
+//! windows in z order (GW_CHILD, GW_HWNDNEXT), then, for a list box or
+//! list view, its items in index order; a window with a menu
+//! bar has a MenuBar child first, and an open popup menu (a #32768 window)
+//! has its items as children (menus.rs). Properties are read from the
+//! window, the list or the menu each time (nothing is cached).
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::condition::{self, Condition};
 use crate::items::{self, Kind};
+use crate::menus;
 use crate::{
     E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, EnumWindows, GetAncestor, GetClassNameW,
     GetDesktopWindow, GetDlgCtrlID, GetFocus, GetWindow, GetWindowLongW, GetWindowRect,
@@ -72,6 +77,9 @@ const HYPERLINK: i32 = 50005;
 const IMAGE: i32 = 50006;
 const LIST_ITEM: i32 = 50007;
 const LIST: i32 = 50008;
+const MENU: i32 = 50009;
+const MENU_BAR: i32 = 50010;
+const MENU_ITEM: i32 = 50011;
 const PROGRESS_BAR: i32 = 50012;
 pub const RADIO_BUTTON: i32 = 50013;
 const SCROLL_BAR: i32 = 50014;
@@ -82,6 +90,7 @@ pub const TEXT: i32 = 50020;
 const TOOL_BAR: i32 = 50021;
 const TREE: i32 = 50023;
 const GROUP: i32 = 50026;
+const SEPARATOR: i32 = 50038;
 const WINDOW: i32 = 50032;
 const PANE: i32 = 50033;
 
@@ -91,27 +100,41 @@ const WS_TABSTOP: u32 = 0x0001_0000;
 const ES_PASSWORD: u32 = 0x20;
 const GW_HWNDNEXT: u32 = 2;
 const GW_HWNDPREV: u32 = 3;
+const GW_OWNER: u32 = 4;
 const GW_CHILD: u32 = 5;
 const GA_PARENT: u32 = 1;
 /// UiaAppendRuntimeId's first part for HWND-based elements.
 const RUNTIME_ID_HWND: i32 = 42;
 
-/// What an element stands for: a window, or item `item` of the list
-/// control `hwnd`.
+/// What an element stands for: a window, item `item` of the list
+/// control `hwnd`, or (`menu` nonzero, menus.rs) the menu bar of window
+/// `hwnd` or its item `item` (menus::BAR), item `item` of the popup menu
+/// window `hwnd` (menus::POPUP).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Node {
     pub hwnd: Hwnd,
     pub item: Option<u32>,
+    pub menu: u8,
 }
 
 impl Node {
     pub const fn window(hwnd: Hwnd) -> Node {
-        Node { hwnd, item: None }
+        Node { hwnd, item: None, menu: 0 }
     }
 
     pub const fn item(hwnd: Hwnd, item: u32) -> Node {
-        Node { hwnd, item: Some(item) }
+        Node { hwnd, item: Some(item), menu: 0 }
     }
+
+    pub const fn menu(hwnd: Hwnd, item: Option<u32>, menu: u8) -> Node {
+        Node { hwnd, item, menu }
+    }
+}
+
+/// Whether `h` is a popup menu window (class #32768).
+pub fn is_popup_menu(h: Hwnd) -> bool {
+    let (buf, n) = class_name(h);
+    same_ascii(&buf[..n], "#32768")
 }
 
 // ---- The tree ----
@@ -129,6 +152,9 @@ pub fn alive(h: Hwnd) -> bool {
 /// Whether the element is still there: its window, and for an item its
 /// index within the list's count.
 pub fn exists(n: Node) -> bool {
+    if n.menu != 0 {
+        return alive(n.hwnd) && menus::exists(n);
+    }
     alive(n.hwnd)
         && match n.item {
             None => true,
@@ -151,10 +177,22 @@ fn top_level(h: Hwnd) -> bool {
     h != desktop() && unsafe { GetAncestor(h, GA_PARENT) } == 0
 }
 
-/// The element's parent (None for the root); an item's is its list.
+/// The owner under which a top-level window is in the tree: its owner
+/// (GW_OWNER) while that is a visible window, else 0 (the root).
+fn tree_owner(h: Hwnd) -> Hwnd {
+    // SAFETY: a plain call.
+    let o = unsafe { GetWindow(h, GW_OWNER) };
+    if o != 0 && o != h && visible(o) { o } else { 0 }
+}
+
+/// The element's parent (None for the root); an item's is its list, an
+/// owned window's its owner.
 pub fn parent(n: Node) -> Option<Node> {
     let h = n.hwnd;
-    if n.item.is_some() {
+    if n.menu == menus::BAR && n.item.is_some() {
+        return Some(Node::menu(h, None, menus::BAR));
+    }
+    if n.item.is_some() || n.menu != 0 {
         return Some(Node::window(h));
     }
     if h == desktop() {
@@ -162,15 +200,26 @@ pub fn parent(n: Node) -> Option<Node> {
     }
     // SAFETY: a plain call.
     Some(Node::window(match unsafe { GetAncestor(h, GA_PARENT) } {
-        0 => desktop(),
+        0 => match tree_owner(h) {
+            0 => desktop(),
+            o => o,
+        },
         p => p,
     }))
 }
 
+/// EnumWindows' callback: the visible top-level windows whose tree
+/// owner is `owner` (0: the root's).
+struct Owned<'a> {
+    owner: Hwnd,
+    out: &'a mut List<Node>,
+}
+
 extern "system" fn collect(h: Hwnd, data: isize) -> i32 {
-    if visible(h) {
-        // SAFETY: `children` passes its list.
-        unsafe { (*(data as *mut List<Node>)).push(Node::window(h)) };
+    // SAFETY: `children` passes its Owned for the call's duration.
+    let o = unsafe { &mut *(data as *mut Owned) };
+    if visible(h) && h != o.owner && tree_owner(h) == o.owner {
+        o.out.push(Node::window(h));
     }
     1
 }
@@ -182,10 +231,39 @@ pub fn children(n: Node, out: &mut List<Node>) {
     if n.item.is_some() {
         return;
     }
-    if h == desktop() {
-        // SAFETY: the callback gets our list for the call's duration.
-        unsafe { EnumWindows(collect, out as *mut List<Node> as isize) };
+    if n.menu != 0 {
+        // The menu bar: its items.
+        let count = menus::query(h).map_or(0, |m| m.count());
+        for k in 0..count {
+            if !out.push(Node::menu(h, Some(k as u32), menus::BAR)) {
+                return;
+            }
+        }
         return;
+    }
+    if h != desktop() && top_level(h) {
+        if is_popup_menu(h) {
+            // An open popup menu: its items.
+            let count = menus::query(h).map_or(0, |m| m.count());
+            for k in 0..count {
+                if !out.push(Node::menu(h, Some(k as u32), menus::POPUP)) {
+                    return;
+                }
+            }
+            return;
+        }
+        // The menu bar first, as Windows' tree has it.
+        if menus::query(h).is_some() && !out.push(Node::menu(h, None, menus::BAR)) {
+            return;
+        }
+    }
+    if h == desktop() || top_level(h) {
+        let mut o = Owned { owner: if h == desktop() { 0 } else { h }, out: &mut *out };
+        // SAFETY: the callback gets our Owned for the call's duration.
+        unsafe { EnumWindows(collect, &mut o as *mut Owned as isize) };
+        if h == desktop() {
+            return;
+        }
     }
     // SAFETY: plain calls.
     let mut c = unsafe { GetWindow(h, GW_CHILD) };
@@ -267,6 +345,9 @@ pub fn control_type(h: Hwnd) -> i32 {
     if is("SysLink") {
         return HYPERLINK;
     }
+    if is("#32768") {
+        return MENU;
+    }
     if top_level(h) && s & WS_CAPTION == WS_CAPTION { WINDOW } else { PANE }
 }
 
@@ -291,6 +372,10 @@ fn localized_control_type(t: i32) -> &'static str {
         TREE => "tree",
         GROUP => "group",
         WINDOW => "window",
+        MENU => "menu",
+        MENU_BAR => "menu bar",
+        MENU_ITEM => "menu item",
+        SEPARATOR => "separator",
         _ => "pane",
     }
 }
@@ -347,6 +432,14 @@ fn name(h: Hwnd) -> *mut u16 {
         return bstr_str("Desktop 1");
     }
     match control_type(h) {
+        // A popup menu: named after the item that opened it.
+        MENU => match menus::query(h) {
+            Some(m) => {
+                let (t, len) = m.name();
+                bstr(&t[..len])
+            }
+            None => bstr(&[]),
+        },
         // A field's text is its value; its name is its label's.
         EDIT | COMBO_BOX | LIST | TREE | SLIDER | PROGRESS_BAR => match label_of(h) {
             0 => bstr(&[]),
@@ -432,6 +525,9 @@ pub fn property(n: Node, id: i32) -> Variant {
 /// A property's current value; None when the element does not support it.
 fn lookup(n: Node, id: i32) -> Option<Variant> {
     let h = n.hwnd;
+    if n.menu != 0 {
+        return menu_lookup(n, id);
+    }
     if let Some(i) = n.item {
         return item_lookup(h, i, id);
     }
@@ -565,8 +661,93 @@ fn item_lookup(h: Hwnd, i: u32, id: i32) -> Option<Variant> {
     })
 }
 
+/// A menu bar's or menu item's properties (menus.rs), as Windows' Win32
+/// menu proxy gives them: the bar is a MenuBar named "Application"
+/// (AutomationId "MenuBar"), its rectangle the items'; an item a
+/// MenuItem (Separator for a separator) named by its label without '&'
+/// and accelerator text, AcceleratorKey that text ("Ctrl+O"), IsEnabled
+/// unless grayed; no HWND, no ClassName; RuntimeId {42, window, -2(, k)}
+/// on the bar, {42, popup, -3, k} in a popup (gala's choice).
+fn menu_lookup(n: Node, id: i32) -> Option<Variant> {
+    let h = n.hwnd;
+    let menu = menus::query(h)?;
+    let item = match n.item {
+        Some(k) => Some(menu.item(k as usize)?),
+        None => None,
+    };
+    let kind = if n.menu == menus::BAR { -2 } else { -3 };
+    let rect = menu_rect(n, &menu)?;
+    let control = match item {
+        None => MENU_BAR,
+        Some(it) if it.flags & menus::SEPARATOR != 0 => SEPARATOR,
+        Some(_) => MENU_ITEM,
+    };
+    Some(match id {
+        RUNTIME_ID => match n.item {
+            Some(k) => array(VT_I4, &[RUNTIME_ID_HWND, h as i32, kind, k as i32]),
+            None => array(VT_I4, &[RUNTIME_ID_HWND, h as i32, kind]),
+        },
+        BOUNDING_RECTANGLE => rect_value(rect),
+        PROCESS_ID => {
+            let mut pid = 0;
+            // SAFETY: our output.
+            unsafe { GetWindowThreadProcessId(h, &mut pid) };
+            Variant::int(pid as i32)
+        }
+        CONTROL_TYPE => Variant::int(control),
+        LOCALIZED_CONTROL_TYPE => Variant::bstr(bstr_str(localized_control_type(control))),
+        NAME => Variant::bstr(match item {
+            Some(it) => menus::label(&it, false),
+            None => bstr_str("Application"),
+        }),
+        ACCELERATOR_KEY => Variant::bstr(match item {
+            Some(it) => menus::label(&it, true),
+            None => bstr(&[]),
+        }),
+        AUTOMATION_ID => {
+            Variant::bstr(if item.is_some() { bstr(&[]) } else { bstr_str("MenuBar") })
+        }
+        ACCESS_KEY | HELP_TEXT | ITEM_TYPE | ITEM_STATUS | ARIA_ROLE | ARIA_PROPERTIES
+        | CLASS_NAME => Variant::bstr(bstr(&[])),
+        HAS_KEYBOARD_FOCUS | IS_KEYBOARD_FOCUSABLE | IS_PASSWORD | IS_REQUIRED_FOR_FORM => {
+            Variant::boolean(false)
+        }
+        // SAFETY: a plain call.
+        IS_ENABLED => Variant::boolean(
+            unsafe { IsWindowEnabled(h) } != 0
+                && item.is_none_or(|it| it.flags & menus::DISABLED == 0),
+        ),
+        CULTURE | ORIENTATION => Variant::int(0),
+        IS_CONTROL_ELEMENT | IS_CONTENT_ELEMENT | IS_DATA_VALID_FOR_FORM => Variant::boolean(true),
+        IS_OFFSCREEN => Variant::boolean(!visible(h)),
+        FRAMEWORK_ID => Variant::bstr(bstr_str("Win32")),
+        PROVIDER_DESCRIPTION => Variant::bstr(bstr_str("[gala: menu]")),
+        30027..=30044 => {
+            Variant::boolean(pattern::supports(n, PATTERN_AVAILABLE[(id - 30027) as usize]))
+        }
+        NATIVE_WINDOW_HANDLE => return None,
+        _ => return other_property(n, id),
+    })
+}
+
+/// A menu node's rectangle: an item's, or for the bar the band its items
+/// are in, across the window.
+fn menu_rect(n: Node, menu: &menus::Menu) -> Option<[i32; 4]> {
+    match n.item {
+        Some(k) => Some(menu.item(k as usize)?.rect),
+        None => {
+            let w = window_rect(n.hwnd);
+            let first = menu.item(0).map_or([w[0], w[1], w[2], w[1]], |it| it.rect);
+            Some([w[0], first[1], w[2], first[3]])
+        }
+    }
+}
+
 /// The element's rectangle on the screen.
 fn node_rect(n: Node) -> [i32; 4] {
+    if n.menu != 0 {
+        return menus::query(n.hwnd).map_or([0; 4], |m| menu_rect(n, &m).unwrap_or([0; 4]));
+    }
     match n.item {
         None => window_rect(n.hwnd),
         Some(i) => items::kind(n.hwnd).and_then(|k| items::rect(n.hwnd, k, i)).unwrap_or([0; 4]),
@@ -699,7 +880,9 @@ extern "system" fn set_focus(this: *mut Element) -> HResult {
     }
     // SAFETY: plain calls.
     unsafe {
-        if n.item.is_some() {
+        if n.menu != 0 {
+            // A menu: the keyboard stays where it is.
+        } else if n.item.is_some() {
             // An item: its list takes the focus.
             SetFocus(h);
         } else if top_level(h) {
@@ -956,7 +1139,7 @@ extern "system" fn get_native_window_handle(this: *mut Element, out: *mut usize)
         return E_POINTER;
     }
     let n = this_node(this);
-    put(out, if n.item.is_some() { 0 } else { n.hwnd });
+    put(out, if n.item.is_some() || n.menu != 0 { 0 } else { n.hwnd });
     if exists(n) { S_OK } else { UIA_E_ELEMENTNOTAVAILABLE }
 }
 
@@ -981,6 +1164,7 @@ extern "system" fn get_labeled_by(this: *mut Element, out: *mut *mut c_void) -> 
     let n = this_node(this);
     let h = n.hwnd;
     if n.item.is_some()
+        || n.menu != 0
         || h == desktop()
         || !matches!(control_type(h), EDIT | COMBO_BOX | LIST | TREE)
     {

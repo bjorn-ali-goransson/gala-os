@@ -12,7 +12,12 @@
  * CreateProcess), GetWindowTextW/GetWindowTextLengthW, GetClassNameW,
  * GetWindowRect, EnumWindows (it is among the top-level windows),
  * EnumChildWindows (two children), FindWindowExW for the button,
- * GetDlgCtrlID, GetDlgItem, GetParent, GetWindow(GW_CHILD). After the
+ * GetDlgCtrlID, GetDlgItem, GetParent, GetWindow(GW_CHILD). The child's
+ * popup "across owned" (a STATIC with WS_POPUP | WS_CAPTION), created with
+ * its button as hWndParent, is owned by the button's top-level window
+ * (CreateWindowEx: an owned window's owner is the top-level window of
+ * the one given), which GetWindow(GW_OWNER) reports; the top-level window
+ * and the button have no owner. After the
  * child ends, its windows are gone (IsWindow FALSE, FindWindowW NULL).
  *
  * Posted messages cross too: BM_CLICK posted to the child's button makes
@@ -101,7 +106,10 @@ static int child(void) {
     HWND edit = CreateWindowExW(0, L"EDIT", L"some text",
                                 WS_CHILD | WS_VISIBLE | WS_BORDER, 10, 40, 150,
                                 24, top, (HMENU)102, wc.hInstance, NULL);
-    if (!top || !button || !edit)
+    HWND owned = CreateWindowExW(0, L"STATIC", L"across owned",
+                                 WS_POPUP | WS_CAPTION | WS_VISIBLE, 150, 150, 200,
+                                 100, button, NULL, wc.hInstance, NULL);
+    if (!top || !button || !edit || !owned)
         return 4;
     SetEvent(ready);
     for (;;) {
@@ -200,6 +208,13 @@ int main(int argc, char **argv) {
     CHECK(GetWindowTextW(edit, text, 64) == 9);
     CHECK(wcscmp(text, L"some text") == 0);
     CHECK(GetWindow(top, GW_CHILD) == button || GetWindow(top, GW_CHILD) == edit);
+
+    /* The owned popup: its owner is the button's top-level window. */
+    HWND owned = FindWindowW(NULL, L"across owned");
+    CHECK(owned != NULL && owned != top);
+    CHECK(GetWindow(owned, GW_OWNER) == top);
+    CHECK(GetWindow(top, GW_OWNER) == NULL);
+    CHECK(GetWindow(button, GW_OWNER) == NULL);
     CHECK(GetWindowRect(button, &r));
     CHECK(r.right - r.left == 80 && r.bottom - r.top == 24);
     DWORD bpid = 0;

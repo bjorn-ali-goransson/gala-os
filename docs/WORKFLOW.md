@@ -551,6 +551,45 @@ Pitfalls:
   (the window appears for a moment). run-all.ps1 skips
   `flaui_target.exe`, which would wait for its window to be closed.
 
+**Screen tests on FlaUI** (`filezilla_flaui`, FileZillaFlaUI.cs, is the
+example): a C# program next to FlaUITest.cs, built by the same
+build.sh (add a `build` line), shipped through the `dotnet` module set
+plus the program's own: list the scenario twice in MODULE_SETS
+(`("filezilla_flaui", "dotnet")`, `("filezilla_flaui", "filezilla")`)
+and it gets the union. The scenario starts servers with `start=` and
+runs `dotnet.exe C:/gala/<test>.dll`; the test launches the program
+itself (Application.Launch) so it can wait for it to end. No screen is
+needed (BIOS boot, `noscreen`): windows exist and are driven without
+being shown, which makes such a test several times faster than its
+pixel version. Writing one:
+
+- Find controls by what a tester sees: ControlType and Name (a field's
+  Name is its label's text, `ByName("Host", MatchSubstring)`), not
+  AutomationId, when the program numbers its controls itself (wx's ids
+  are negative pool ids, many 5999).
+- Dialogs are owned windows: they are children of the window that owns
+  them (`main.FindFirstChild(cf => cf.ByControlType(Window))`), not of
+  the desktop. Answer them in a loop with a deadline, as they come.
+- Invoke, Expand and SetValue return before the program has acted:
+  wait for the effect with `Retry.WhileNull`/`WhileTrue` (a dialog
+  gone, a list item there, a menu open), never with fixed sleeps.
+- An element can go between two reads (a dialog closing after OK, a
+  pane FileZilla rebuilds): FlaUI then throws ElementNotAvailable
+  (COMException 0x80040201) from the second read, on Windows too. Wait
+  for a dialog to go with a check that treats the exception as "gone"
+  (the test's `Showing`), and catch it in polling loops (filezilla_flaui
+  failed once in four runs before it did).
+- On failure print the tree (the test's `Dump`: control type, name,
+  automation id, class for a few levels): that is how the Welcome
+  dialog's absence (owned windows) and the missing menu bar showed.
+- mcs (C# 7-ish) rejects nullable reference annotations (`Window?`):
+  leave them out; a type forwarded to an assembly not in build.sh's
+  reference list (System.Threading.Thread) needs that assembly added
+  there.
+- A UIA call on another process's element is a sent message to it: if
+  the program's thread is stuck (not pumping), the call waits for it
+  (gala's cross-process SendMessage has no timeout yet).
+
 ## Bootable images and USB sticks
 
 `cargo xtask iso [--name N] [--scenario S] [--file PATH[=DIR]]... [cmdline...]`

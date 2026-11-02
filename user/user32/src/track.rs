@@ -453,6 +453,10 @@ fn open(level: usize, menu: usize, pos: usize, x: i32, y: i32, flags: u32, fx: i
     const WS_EX_TOOLWINDOW: u32 = 0x80;
     const WS_EX_TOPMOST: u32 = 0x8;
     let class: [u16; 7] = [35, 51, 50, 55, 54, 56, 0]; // "#32768"
+    // Owned by the window whose menu it is (the bar's window, or
+    // TrackPopupMenu's for a submenu), so UI Automation finds it under
+    // that window; a context menu's first level has no owner.
+    let owner = if level == 0 && st().bar == 0 { 0 } else { st().owner };
     let hwnd = crate::window::CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         class.as_ptr(),
@@ -462,7 +466,7 @@ fn open(level: usize, menu: usize, pos: usize, x: i32, y: i32, flags: u32, fx: i
         py,
         w,
         h,
-        0,
+        owner,
         core::ptr::null_mut(),
         core::ptr::null_mut(),
         core::ptr::null_mut(),
@@ -1039,4 +1043,244 @@ pub extern "system" fn popup_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: i
         WM_MOUSEACTIVATE => 3, // MA_NOACTIVATE
         _ => crate::window::DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+// ---- Menus for UI Automation ----
+
+/// gala's own message between UIAutomationCore and user32 (in the system
+/// range; user32 answers it itself, the window procedure never sees it):
+/// describes and drives a window's menu bar, or a popup level of the
+/// running menu loop (its #32768 window), as Windows' UIA menu proxies
+/// read menus through win32k. wParam: the operation in the low byte, an
+/// item index above it; lParam: for MENU_QUERY, a MENU_INFO_SIZE buffer
+/// (marshaled across processes by foreign::send_remote).
+pub(crate) const GALA_MENU: u32 = 0x03f0;
+pub(crate) const MENU_INFO_SIZE: usize = 8192;
+/// The description: count, name (a popup's: the item that opened it),
+/// then each item's id, flags, screen rectangle and raw text.
+const MENU_QUERY: usize = 1;
+/// Opens item k's submenu (as a click on it does).
+const MENU_EXPAND: usize = 2;
+/// Chooses item k (a command: WM_COMMAND to the owner, as the user's
+/// choice does).
+const MENU_INVOKE: usize = 3;
+/// Closes item k's submenu.
+const MENU_COLLAPSE: usize = 4;
+const HEADER: usize = 8 + 2 * 64;
+const RECORD: usize = 4 + 4 + 16 + 4 + 2 * 64;
+const MAX_RECORDS: usize = (MENU_INFO_SIZE - HEADER) / RECORD;
+const FLAG_SUBMENU: u32 = 1;
+const FLAG_DISABLED: u32 = 2;
+const FLAG_SEPARATOR: u32 = 4;
+const FLAG_CHECKED: u32 = 8;
+const FLAG_OPEN: u32 = 16;
+const WM_NULL: u32 = 0;
+const MAX_DESCRIBED: usize = if MAX_RECORDS < 48 { MAX_RECORDS } else { 48 };
+
+/// The level of the running loop whose popup is `hwnd`.
+fn level_of(hwnd: Hwnd) -> Option<usize> {
+    if hwnd == 0 || !BUSY.load(Ordering::Acquire) {
+        return None;
+    }
+    let s = st();
+    (0..s.depth).find(|&l| s.levels[l].hwnd == hwnd)
+}
+
+/// The bar items' screen rectangles of window `hwnd`; how many.
+fn bar_rects(hwnd: Hwnd, menu: usize, out: &mut [[i32; 4]; MAX_DESCRIBED]) -> usize {
+    let Some(w) = window(hwnd) else { return 0 };
+    let mut rects = [(0, 0); MAX_BAR_ITEMS];
+    let n = measuring(|hdc| bar_layout(hdc, menu, &mut rects)).unwrap_or(0);
+    let (b, t) = crate::window::desktop_frame(&w);
+    for (o, &(l, r)) in out.iter_mut().zip(&rects[..n]) {
+        *o = [w.x + b + l, w.y + t, w.x + b + r, w.y + t + w.bar];
+    }
+    n.min(MAX_DESCRIBED)
+}
+
+fn put32(buf: &mut [u8], at: usize, v: u32) {
+    buf[at..at + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+fn put_text(buf: &mut [u8], at: usize, text: &[u16]) {
+    for (k, &c) in text.iter().take(64).enumerate() {
+        buf[at + 2 * k..at + 2 * k + 2].copy_from_slice(&c.to_le_bytes());
+    }
+}
+
+/// The label of item `k` of `menu` (its text without '&' and accelerator).
+fn label_of(menu: usize, k: Option<usize>) -> ([u16; 64], usize) {
+    match k.and_then(|k| menu::view(menu, k)) {
+        Some(v) => {
+            let l = label(&v);
+            (l.text, l.len)
+        }
+        None => ([0; 64], 0),
+    }
+}
+
+/// What MENU_QUERY describes: the menu, its name, the items' screen
+/// rectangles and count, and the item whose submenu is open.
+struct Described {
+    menu: usize,
+    name: ([u16; 64], usize),
+    rects: [[i32; 4]; MAX_DESCRIBED],
+    n: usize,
+    open: Option<usize>,
+}
+
+/// The popup level `l` of the running loop.
+fn describe_level(l: usize) -> Described {
+    let s = st();
+    let lv = s.levels[l];
+    let name = if l > 0 {
+        label_of(s.levels[l - 1].menu, s.levels[l - 1].sel)
+    } else if s.bar != 0 {
+        label_of(s.bar_menu, s.bar_sel)
+    } else {
+        // A context menu (TrackPopupMenu) is named "Context".
+        let mut t = [0u16; 64];
+        for (d, c) in t.iter_mut().zip("Context".encode_utf16()) {
+            *d = c;
+        }
+        (t, 7)
+    };
+    let n = menu::count(lv.menu).min(MAX_DESCRIBED);
+    let mut rects = [[0; 4]; MAX_DESCRIBED];
+    let mut y = lv.rect[1] + PAD;
+    for (k, r) in rects.iter_mut().enumerate().take(n) {
+        let h = menu::view(lv.menu, k).map_or(0, |v| item_height(&v));
+        *r = [lv.rect[0] + 1, y, lv.rect[0] + lv.rect[2] - 1, y + h];
+        y += h;
+    }
+    let open = if s.depth > l + 1 { lv.sel } else { None };
+    Described { menu: lv.menu, name, rects, n, open }
+}
+
+/// MENU_QUERY: the bar of `hwnd` or the popup level `hwnd` shows, into
+/// `out`; the item count, or -1 for neither.
+fn describe(hwnd: Hwnd, out: &mut [u8]) -> isize {
+    let d = if let Some(l) = level_of(hwnd) {
+        describe_level(l)
+    } else {
+        let menu = menu::GetMenu(hwnd);
+        if menu == 0 || window(hwnd).is_none_or(|w| w.parent != 0) {
+            return -1;
+        }
+        let mut rects = [[0; 4]; MAX_DESCRIBED];
+        let n = bar_rects(hwnd, menu, &mut rects);
+        let open = if BUSY.load(Ordering::Acquire) && st().bar == hwnd && st().depth > 0 {
+            lit(&OPEN, &OPEN_ITEM, hwnd)
+        } else {
+            None
+        };
+        Described { menu, name: ([0; 64], 0), rects, n, open }
+    };
+    if out.len() < HEADER + d.n * RECORD {
+        return -1;
+    }
+    put32(out, 0, d.n as u32);
+    put32(out, 4, d.name.1 as u32);
+    put_text(out, 8, &d.name.0[..d.name.1]);
+    for k in 0..d.n {
+        let Some(v) = menu::view(d.menu, k) else { continue };
+        let at = HEADER + k * RECORD;
+        let flags = if v.submenu != 0 { FLAG_SUBMENU } else { 0 }
+            | if v.disabled { FLAG_DISABLED } else { 0 }
+            | if v.separator { FLAG_SEPARATOR } else { 0 }
+            | if v.checked { FLAG_CHECKED } else { 0 }
+            | if d.open == Some(k) { FLAG_OPEN } else { 0 };
+        put32(out, at, v.id);
+        put32(out, at + 4, flags);
+        for (j, &c) in d.rects[k].iter().enumerate() {
+            put32(out, at + 8 + 4 * j, c as u32);
+        }
+        let len = v.len.min(64);
+        put32(out, at + 24, len as u32);
+        put_text(out, at + 28, &v.text[..len]);
+    }
+    d.n as isize
+}
+
+/// Wakes the menu loop (its GetMessage) so it sees `done`.
+fn wake_loop() {
+    crate::window::PostMessageW(st().owner, WM_NULL, 0, 0);
+}
+
+/// GALA_MENU for window `hwnd` (a window with a menu bar, or a popup of
+/// the running loop): what the operation gave (0: it could not).
+pub(crate) fn menu_message(hwnd: Hwnd, wparam: usize, lparam: isize) -> isize {
+    let (op, k) = (wparam & 0xff, wparam >> 8);
+    if op == MENU_QUERY {
+        if lparam == 0 {
+            return -1;
+        }
+        // SAFETY: the caller's buffer of MENU_INFO_SIZE bytes (marshaled
+        // into ours for another process).
+        let out = unsafe { core::slice::from_raw_parts_mut(lparam as *mut u8, MENU_INFO_SIZE) };
+        return describe(hwnd, out);
+    }
+    if let Some(l) = level_of(hwnd) {
+        let menu = st().levels[l].menu;
+        let Some(v) = menu::view(menu, k) else { return 0 };
+        if v.separator || v.disabled {
+            return 0;
+        }
+        match op {
+            MENU_EXPAND if v.submenu != 0 => hover(l, Some(k), true),
+            MENU_INVOKE if v.submenu == 0 => {
+                hover(l, Some(k), false);
+                activate(l, k, false);
+                wake_loop();
+            }
+            MENU_COLLAPSE if v.submenu != 0 => {
+                if st().levels[l].sel == Some(k) && st().depth > l + 1 {
+                    close_from(l + 1);
+                }
+            }
+            _ => return 0,
+        }
+        return 1;
+    }
+    let menu = menu::GetMenu(hwnd);
+    let Some(v) = menu::view(menu, k) else { return 0 };
+    if v.separator || v.disabled || window(hwnd).is_none_or(|w| w.parent != 0) {
+        return 0;
+    }
+    let tracking = BUSY.load(Ordering::Acquire) && st().bar == hwnd;
+    match op {
+        MENU_EXPAND if v.submenu != 0 => {
+            if tracking {
+                open_bar(k);
+            } else {
+                // As a click on the item does: the menu loop starts when
+                // the window handles it (not inside this message).
+                let mut rects = [[0; 4]; MAX_DESCRIBED];
+                let n = bar_rects(hwnd, menu, &mut rects);
+                if k >= n {
+                    return 0;
+                }
+                let r = rects[k];
+                let (x, y) = ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2);
+                let pt = ((y as i16 as u16 as isize) << 16) | x as i16 as u16 as isize;
+                crate::window::PostMessageW(hwnd, WM_NCLBUTTONDOWN, HTMENU, pt);
+            }
+        }
+        MENU_INVOKE if v.submenu == 0 => {
+            if tracking {
+                choose(v.id);
+                wake_loop();
+            } else {
+                crate::window::PostMessageW(hwnd, WM_COMMAND, v.id as usize & 0xffff, 0);
+            }
+        }
+        MENU_COLLAPSE if v.submenu != 0 => {
+            if tracking && st().bar_sel == Some(k) {
+                st().done = true;
+                wake_loop();
+            }
+        }
+        _ => return 0,
+    }
+    1
 }

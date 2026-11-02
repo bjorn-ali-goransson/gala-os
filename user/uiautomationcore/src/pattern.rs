@@ -1,6 +1,7 @@
 //! Control patterns over standard controls: Invoke (push buttons,
 //! list-view items), Value (edits), Toggle (check boxes), Selection (list
-//! boxes and list views), SelectionItem and ScrollItem (their items). A
+//! boxes and list views), SelectionItem and ScrollItem (their items),
+//! ExpandCollapse and Invoke on menu items (menus.rs). A
 //! pattern object keeps the element's node and acts on the window with
 //! the control's messages.
 
@@ -9,6 +10,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::element::{self, BUTTON, CHECK_BOX, EDIT, Node};
 use crate::items::{self, How, Kind};
+use crate::menus;
 use crate::{
     E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid, HResult, Hwnd, IID_IUNKNOWN, IsWindowEnabled,
     List, PostMessageW, S_OK, SendMessageW, UIA_E_ELEMENTNOTAVAILABLE, UIA_E_ELEMENTNOTENABLED,
@@ -18,6 +20,7 @@ use crate::{
 pub const INVOKE: i32 = 10000;
 pub const SELECTION: i32 = 10001;
 pub const VALUE: i32 = 10002;
+pub const EXPAND_COLLAPSE: i32 = 10005;
 pub const SELECTION_ITEM: i32 = 10010;
 pub const TOGGLE: i32 = 10015;
 pub const SCROLL_ITEM: i32 = 10017;
@@ -32,6 +35,8 @@ const IID_IUIAUTOMATIONSELECTIONPATTERN: Guid =
     guid(0x5ed5202e, 0xb2ac, 0x47a6, [0xb6, 0x38, 0x4b, 0x0b, 0xf1, 0x40, 0xd7, 0x8e]);
 const IID_IUIAUTOMATIONSELECTIONITEMPATTERN: Guid =
     guid(0xa8efa66a, 0x0fda, 0x421a, [0x91, 0x94, 0x38, 0x02, 0x1f, 0x35, 0x78, 0xea]);
+const IID_IUIAUTOMATIONEXPANDCOLLAPSEPATTERN: Guid =
+    guid(0x619be086, 0x1f4e, 0x4ee4, [0xba, 0xfa, 0x21, 0x01, 0x28, 0x73, 0x87, 0x30]);
 const IID_IUIAUTOMATIONSCROLLITEMPATTERN: Guid =
     guid(0xb488300f, 0xd015, 0x4f19, [0x9c, 0x29, 0xbb, 0x59, 0x5e, 0x36, 0x45, 0xef]);
 
@@ -44,6 +49,7 @@ const SELECTION_IS_SELECTION_REQUIRED: i32 = 30061;
 const SELECTION_ITEM_IS_SELECTED: i32 = 30079;
 const SELECTION_ITEM_CONTAINER: i32 = 30080;
 const TOGGLE_STATE: i32 = 30086;
+const EXPAND_COLLAPSE_STATE: i32 = 30070;
 
 const WM_SETTEXT: u32 = 0x000c;
 const BM_GETCHECK: u32 = 0x00f0;
@@ -53,6 +59,20 @@ const ES_READONLY: u32 = 0x0800;
 /// Whether the element has the pattern.
 pub fn supports(n: Node, id: i32) -> bool {
     let h = n.hwnd;
+    if n.menu != 0 {
+        // A menu item: ExpandCollapse with a submenu, else Invoke
+        // (separators neither; the bar itself has none).
+        let Some(it) = menus::item(n) else { return false };
+        if it.flags & menus::SEPARATOR != 0 {
+            return false;
+        }
+        let sub = it.flags & menus::SUBMENU != 0;
+        return match id {
+            EXPAND_COLLAPSE => sub,
+            INVOKE => !sub,
+            _ => false,
+        };
+    }
     if n.item.is_some() {
         let Some(k) = items::kind(h) else { return false };
         return match id {
@@ -96,6 +116,7 @@ pub fn known_property(id: i32) -> bool {
             | SELECTION_IS_SELECTION_REQUIRED
             | SELECTION_ITEM_IS_SELECTED
             | SELECTION_ITEM_CONTAINER
+            | EXPAND_COLLAPSE_STATE
     )
 }
 
@@ -119,6 +140,10 @@ fn selection(h: Hwnd) -> Option<List<Node>> {
 /// (Selection), as UIA's client API gives them (FlaUI converts them so).
 pub fn property(n: Node, id: i32) -> Option<Variant> {
     let h = n.hwnd;
+    if n.menu != 0 {
+        return (id == EXPAND_COLLAPSE_STATE && supports(n, EXPAND_COLLAPSE))
+            .then(|| Variant::int(expand_state(n)));
+    }
     let list = items::kind(h);
     Some(match (id, n.item, list) {
         (SELECTION_ITEM_IS_SELECTED, Some(i), Some(k)) => {
@@ -171,6 +196,10 @@ pub fn create(n: Node, id: i32) -> *mut c_void {
         SCROLL_ITEM => {
             ((&SCROLL_ITEM_VTABLE as *const VTable<4>).cast(), IID_IUIAUTOMATIONSCROLLITEMPATTERN)
         }
+        EXPAND_COLLAPSE => (
+            (&EXPAND_COLLAPSE_VTABLE as *const VTable<7>).cast(),
+            IID_IUIAUTOMATIONEXPANDCOLLAPSEPATTERN,
+        ),
         _ => ((&TOGGLE_VTABLE as *const VTable<6>).cast(), IID_IUIAUTOMATIONTOGGLEPATTERN),
     };
     boxed(Pattern { vtable, refs: AtomicU32::new(1), node: n, iid }).cast()
@@ -264,7 +293,11 @@ extern "system" fn invoke(this: *mut Pattern) -> HResult {
         Ok(h) => h,
         Err(e) => return e,
     };
-    if let Some(i) = node(this).item {
+    let n = node(this);
+    if n.menu != 0 {
+        return menu_action(n, menus::INVOKE);
+    }
+    if let Some(i) = n.item {
         return items::activate(h, i);
     }
     // SAFETY: a plain call.
@@ -508,4 +541,65 @@ static SCROLL_ITEM_VTABLE: VTable<4> = VTable([
     pattern_add_ref as *const (),
     pattern_release as *const (),
     scroll_into_view as *const (),
+]);
+
+// ---- ExpandCollapse (a menu item with a submenu) ----
+
+/// ExpandCollapseState_Collapsed 0, _Expanded 1.
+fn expand_state(n: Node) -> i32 {
+    i32::from(menus::item(n).is_some_and(|it| it.flags & menus::OPEN != 0))
+}
+
+/// An action on a menu item (menus::act): its menu opens (as a click on
+/// it opens it), it is chosen, or its menu closes; these return before
+/// the program has acted, as Invoke may.
+fn menu_action(n: Node, op: usize) -> HResult {
+    let Some(it) = menus::item(n) else { return UIA_E_ELEMENTNOTAVAILABLE };
+    if it.flags & menus::DISABLED != 0 {
+        return UIA_E_ELEMENTNOTENABLED;
+    }
+    match n.item {
+        Some(k) if menus::act(n.hwnd, k, op) => S_OK,
+        _ => UIA_E_INVALIDOPERATION,
+    }
+}
+
+extern "system" fn expand(this: *mut Pattern) -> HResult {
+    match usable(this) {
+        Ok(_) if expand_state(node(this)) == 1 => S_OK,
+        Ok(_) => menu_action(node(this), menus::EXPAND),
+        Err(e) => e,
+    }
+}
+
+extern "system" fn collapse(this: *mut Pattern) -> HResult {
+    match usable(this) {
+        Ok(_) if expand_state(node(this)) == 0 => S_OK,
+        Ok(_) => menu_action(node(this), menus::COLLAPSE),
+        Err(e) => e,
+    }
+}
+
+extern "system" fn get_expand_state(this: *mut Pattern, out: *mut i32) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, 0);
+    match alive(this) {
+        Ok(_) => {
+            put(out, expand_state(node(this)));
+            S_OK
+        }
+        Err(e) => e,
+    }
+}
+
+static EXPAND_COLLAPSE_VTABLE: VTable<7> = VTable([
+    pattern_query as *const (),
+    pattern_add_ref as *const (),
+    pattern_release as *const (),
+    expand as *const (),
+    collapse as *const (),
+    get_expand_state as *const (),
+    get_expand_state as *const (),
 ]);

@@ -67,6 +67,7 @@ pub(crate) fn index_of(hwnd: Hwnd) -> Option<usize> {
 pub(crate) struct Info {
     pub hwnd: Hwnd,
     pub parent: Hwnd,
+    pub owner: Hwnd,
     pub id: usize,
     pub pid: u32,
     pub tid: u32,
@@ -87,6 +88,7 @@ impl Info {
         let mut b = [0u8; INFO_SIZE];
         b[0..8].copy_from_slice(&(self.hwnd as u64).to_le_bytes());
         b[8..16].copy_from_slice(&(self.parent as u64).to_le_bytes());
+        b[16..24].copy_from_slice(&(self.owner as u64).to_le_bytes());
         b[24..32].copy_from_slice(&(self.id as u64).to_le_bytes());
         b[36..40].copy_from_slice(&self.tid.to_le_bytes());
         b[40..44].copy_from_slice(&self.style.to_le_bytes());
@@ -117,6 +119,7 @@ impl Info {
         let mut info = Info {
             hwnd: u64_at(0) as Hwnd,
             parent: u64_at(8) as Hwnd,
+            owner: u64_at(16) as Hwnd,
             id: u64_at(24) as usize,
             pid: u32_at(32),
             tid: u32_at(36),
@@ -158,6 +161,7 @@ fn local_info(i: usize) -> Option<Info> {
     let mut info = Info {
         hwnd,
         parent: w.parent,
+        owner: w.owner,
         id: w.id,
         pid: 0,
         tid: w.thread,
@@ -188,6 +192,7 @@ pub(crate) fn assign(i: usize) -> Hwnd {
     let blank = Info {
         hwnd: 0,
         parent: 0,
+        owner: 0,
         id: 0,
         pid: 0,
         tid: 0,
@@ -393,6 +398,7 @@ fn carries_pointer(msg: u32) -> bool {
             | 0x0081 // WM_NCCREATE
             | 0x0083 // WM_NCCALCSIZE
     ) || in_string(msg)
+        || msg == crate::track::GALA_MENU
         || matches!(msg, LB_GETTEXT | LB_GETITEMRECT | LB_GETSELITEMS | CB_GETLBTEXT)
 }
 
@@ -501,6 +507,9 @@ pub(crate) fn send_remote(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) ->
             (out_ptr, out_max) = (lparam as u64, (2 * (n as usize + 1)).min(MAX_DATA));
         }
         LB_GETITEMRECT if lparam != 0 => (out_ptr, out_max) = (lparam as u64, 16),
+        crate::track::GALA_MENU if lparam != 0 => {
+            (out_ptr, out_max) = (lparam as u64, crate::track::MENU_INFO_SIZE);
+        }
         LB_GETSELITEMS if lparam != 0 => {
             (out_ptr, out_max) = (lparam as u64, (4 * wparam).min(MAX_DATA));
         }

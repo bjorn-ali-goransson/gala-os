@@ -161,6 +161,10 @@ pub(crate) struct Window {
     /// (GetTickCount): see `present`.
     pub(crate) dirty: [i32; 4],
     pub(crate) dirty_at: u32,
+    /// A top-level window's owner (0: none): the top-level window of
+    /// CreateWindowEx's hWndParent for a window without WS_CHILD
+    /// (GetWindow GW_OWNER).
+    pub(crate) owner: Hwnd,
 }
 
 /// A top-level window's frame: the left, right and bottom border, and the
@@ -255,6 +259,7 @@ pub(crate) const NO_WINDOW: Window = Window {
     icon_small: 0,
     dirty: [0; 4],
     dirty_at: 0,
+    owner: 0,
 };
 const NO_MSG: Msg =
     Msg { hwnd: 0, message: 0, wparam: 0, lparam: 0, time: 0, pt: [0; 2], private: 0 };
@@ -756,6 +761,14 @@ pub extern "system" fn CreateWindowExW(
         );
     }
     let (x, y) = if x == CW_USEDEFAULT { (60, 60) } else { (x, y) };
+    // A top-level window's hWndParent is its owner: the top-level window
+    // of the one named (as Windows documents; HWND_MESSAGE and the
+    // desktop give none).
+    let owner = match parent {
+        0 | crate::tree::DESKTOP => 0,
+        p if p as isize == -3 => 0,
+        p => crate::tree::GetAncestor(p, 2),
+    };
     let popup = is_popup(style);
     // A top-level window's hMenu is its menu bar.
     let bar = if !popup && !menu.is_null() && crate::menu::IsMenu(menu as usize) != 0 {
@@ -833,6 +846,7 @@ pub extern "system" fn CreateWindowExW(
             icon_small: 0,
             dirty: [0; 4],
             dirty_at: 0,
+            owner,
         };
         Some(i)
     });
@@ -1782,6 +1796,10 @@ pub extern "system" fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam:
         if let Some(r) = crate::foreign::send_remote(hwnd, msg, wparam, lparam) {
             return r;
         }
+    }
+    // gala's menu message for UI Automation: user32's own.
+    if msg == crate::track::GALA_MENU && window(hwnd).is_some() {
+        return crate::track::menu_message(hwnd, wparam, lparam);
     }
     // WH_CALLWNDPROC sees it first: a CWPSTRUCT (lParam, wParam, message,
     // window), wParam nonzero (sent by this thread).
