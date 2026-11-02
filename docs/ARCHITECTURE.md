@@ -1236,8 +1236,27 @@ Windows, never shadows the system's DLLs.)
     line through ReadFile (W: converted to UTF-16); they accept the
     standard input too (a handle the kernel reports as console input).
     Without a session they return nothing, as before ("no keyboard",
-    recorded). TODO: the console modes (SetConsoleMode switching cooked
-    input off), Ctrl+C, the CONSOLE_READCONSOLE_CONTROL wake-up keys.
+    recorded).
+  - Modes: SetConsoleMode on the input also sets the session's mode
+    (GalaConsoleMode(mode, set) 0x7f3f; set 0 only asks whether the caller
+    has a session): without ENABLE_LINE_INPUT a read returns the
+    characters typed so far at once (Enter as CR alone), nothing echoed;
+    without ENABLE_ECHO_INPUT a line is edited unseen. The mode belongs to
+    the session (all its processes), as Windows' input buffer's does.
+    GetConsoleMode/SetConsoleMode accept a console window's standard
+    handles (without a window they stay "not a console", for programs
+    that treat the serial line as redirected output).
+  - Ctrl+C: with ENABLE_PROCESSED_INPUT the key (character 3) is not
+    queued; the session counts it and sets its `ctrl_event`. kernel32
+    starts, at DLL_PROCESS_ATTACH of a process with a session, a thread
+    that waits in GalaConsoleCtrl(*seen) 0x7f40 (returns when the count
+    passes *seen and writes it; u32::MAX: the count at once) and runs the
+    SetConsoleCtrlHandler handlers for CTRL_C_EVENT, the last added
+    first, until one returns TRUE; else, unless a NULL handler made the
+    process ignore Ctrl+C, ExitProcess(STATUS_CONTROL_C_EXIT) as Windows'
+    default handler. TODO: Ctrl+Break, CTRL_CLOSE_EVENT when the window
+    closes, GenerateConsoleCtrlEvent, process groups, the
+    CONSOLE_READCONSOLE_CONTROL wake-up keys.
   - The host: the kernel starts `conhost.exe` (user/conhost, a boot
     module) with the session's id and the program's file name before the
     program. Its system
@@ -2219,9 +2238,14 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   GalaWindowListen (0x7f34) after letting go of its lock. user32 creates
   its queue event on first use and registers it; `next` (GetMessage,
   PeekMessage) first moves input in with GalaWindowInput (0x7f35, 24-byte
-  records) to the window's thread, keeping the key state (GetKeyState,
-  GetAsyncKeyState; Caps Lock toggles). TranslateMessage posts WM_CHAR
-  (WM_SYSCHAR) for a key down, US layout with Shift, Caps Lock and Ctrl.
+  records) to the window's thread. Two key states, as Windows documents:
+  GetAsyncKeyState's follows the input as it is moved in, GetKeyState's
+  (and TranslateMessage's) follows the key messages as they are taken
+  from the queue (one state per process here, per thread on Windows):
+  moving in a batch (Ctrl down, C down, C up, Ctrl up) before the C is
+  translated must still give Ctrl+C. Caps Lock toggles. TranslateMessage
+  posts WM_CHAR (WM_SYSCHAR) for a key down, US layout with Shift, Caps
+  Lock and Ctrl (Ctrl+letter: 1-26).
 - **Display seam** (`nt::platform::Display`): `screen_size` and
   `screen_write_row`. The kernel takes the framebuffer from the screen
   console on first use (`console::take_framebuffer`; the console then

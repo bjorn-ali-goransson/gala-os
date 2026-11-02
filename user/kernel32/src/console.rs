@@ -120,6 +120,14 @@ pub(crate) fn forget(h: Handle) {
 }
 
 /// Whether `h` is a console handle, and if so whether it is the input.
+/// For GetConsoleMode/SetConsoleMode: a handle opened here, or, in a
+/// process with a console window (a session), a standard handle the
+/// kernel reports as a console: whether it is input.
+fn mode_kind(h: Handle) -> Option<bool> {
+    // SAFETY: a plain call (asks only whether there is a session).
+    kind(h).or_else(|| (unsafe { GalaConsoleMode(0, 0) } == 0).then(|| console_device(h)).flatten())
+}
+
 pub(crate) fn kind(h: Handle) -> Option<bool> {
     if h.is_null() {
         return None;
@@ -219,7 +227,7 @@ pub(crate) fn wrote(h: Handle, bytes: &[u8]) {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetConsoleMode(h: Handle, mode: *mut u32) -> Bool {
-    let Some(input) = kind(h) else { return fail_with(ERROR_INVALID_HANDLE, FALSE) };
+    let Some(input) = mode_kind(h) else { return fail_with(ERROR_INVALID_HANDLE, FALSE) };
     if mode.is_null() {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
@@ -233,7 +241,7 @@ pub extern "system" fn GetConsoleMode(h: Handle, mode: *mut u32) -> Bool {
 /// no auto return, LVB grid), input modes 0x3ff.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetConsoleMode(h: Handle, mode: u32) -> Bool {
-    let Some(input) = kind(h) else { return fail_with(ERROR_INVALID_HANDLE, FALSE) };
+    let Some(input) = mode_kind(h) else { return fail_with(ERROR_INVALID_HANDLE, FALSE) };
     let valid = if input { 0x3ff } else { 0x1f };
     if mode & !valid != 0 {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
@@ -245,7 +253,130 @@ pub extern "system" fn SetConsoleMode(h: Handle, mode: u32) -> Bool {
             s.output_mode = mode;
         }
     });
+    if input {
+        // The console window's session edits and echoes by these (none
+        // without a window).
+        // SAFETY: a plain call.
+        unsafe { GalaConsoleMode(mode & 7, 1) };
+    }
     TRUE
+}
+
+// ---- Control events (Ctrl+C) ----
+
+/// A HandlerRoutine: TRUE when it handled the event.
+type HandlerRoutine = extern "system" fn(u32) -> Bool;
+
+const MAX_CTRL_HANDLERS: usize = 32;
+
+/// The handlers SetConsoleCtrlHandler added (the last added is called
+/// first), and whether Ctrl+C is ignored (a NULL handler added).
+struct CtrlHandlers {
+    lock: AtomicBool,
+    list: core::cell::UnsafeCell<([Option<HandlerRoutine>; MAX_CTRL_HANDLERS], usize, bool)>,
+}
+
+// SAFETY: `list` is only touched with `lock` held.
+unsafe impl Sync for CtrlHandlers {}
+
+static CTRL: CtrlHandlers = CtrlHandlers {
+    lock: AtomicBool::new(false),
+    list: core::cell::UnsafeCell::new(([None; MAX_CTRL_HANDLERS], 0, false)),
+};
+
+fn with_ctrl<R>(
+    f: impl FnOnce(&mut ([Option<HandlerRoutine>; MAX_CTRL_HANDLERS], usize, bool)) -> R,
+) -> R {
+    while CTRL
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: the lock is held.
+    let r = f(unsafe { &mut *CTRL.list.get() });
+    CTRL.lock.store(false, Ordering::Release);
+    r
+}
+
+/// SetConsoleCtrlHandler: adds or removes a handler; with NULL, Ctrl+C is
+/// ignored (TRUE) or handled again (FALSE).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetConsoleCtrlHandler(handler: Option<HandlerRoutine>, add: Bool) -> Bool {
+    let ok = with_ctrl(|(list, n, ignore)| {
+        let Some(h) = handler else {
+            *ignore = add != FALSE;
+            return true;
+        };
+        if add != FALSE {
+            if *n == MAX_CTRL_HANDLERS {
+                return false;
+            }
+            list[*n] = Some(h);
+            *n += 1;
+            return true;
+        }
+        // The most recently added copy goes.
+        let Some(at) = list[..*n].iter().rposition(|&x| x.map(|f| f as usize) == Some(h as usize))
+        else {
+            return false;
+        };
+        list.copy_within(at + 1..*n, at);
+        *n -= 1;
+        list[*n] = None;
+        true
+    });
+    if ok { TRUE } else { fail_with(ERROR_INVALID_PARAMETER, FALSE) }
+}
+
+/// The control-event thread of a process with a console window: waits
+/// for Ctrl+C in the window (GalaConsoleCtrl) and calls the handlers, the
+/// last added first, until one returns TRUE; when none does (and Ctrl+C
+/// isn't ignored), the default handler ends the process with
+/// STATUS_CONTROL_C_EXIT.
+extern "system" fn ctrl_thread(_: *mut c_void) -> u32 {
+    const CTRL_C_EVENT: u32 = 0;
+    const STATUS_CONTROL_C_EXIT: u32 = 0xc000_013a;
+    // From the events so far (u32::MAX asks for the count at once).
+    let mut seen = u32::MAX;
+    // SAFETY: our counter.
+    if unsafe { GalaConsoleCtrl(&mut seen) } != 0 {
+        return 0;
+    }
+    loop {
+        let before = seen;
+        // SAFETY: our counter.
+        if unsafe { GalaConsoleCtrl(&mut seen) } != 0 {
+            return 0;
+        }
+        for _ in 0..seen.wrapping_sub(before) {
+            let (handlers, n, ignore) = with_ctrl(|(list, n, ignore)| (*list, *n, *ignore));
+            let handled = handlers[..n].iter().rev().flatten().any(|h| h(CTRL_C_EVENT) != FALSE);
+            if !handled && !ignore {
+                ExitProcess(STATUS_CONTROL_C_EXIT);
+            }
+        }
+    }
+}
+
+/// Starts `ctrl_thread` when the process has a console window.
+pub(crate) fn start_ctrl_thread() {
+    // SAFETY: a plain call (asks only whether there is a session).
+    if unsafe { GalaConsoleMode(0, 0) } != 0 {
+        return;
+    }
+    let h = CreateThread(
+        core::ptr::null_mut(),
+        64 * 1024,
+        ctrl_thread,
+        core::ptr::null_mut(),
+        0,
+        core::ptr::null_mut(),
+    );
+    if !h.is_null() {
+        CloseHandle(h);
+    }
 }
 
 /// Writes UTF-8 to the console's device (the serial line).
@@ -548,6 +679,8 @@ pub extern "system" fn GetLargestConsoleWindowSize(h: Handle) -> u32 {
 
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GalaConsoleMode(mode: u32, set: u32) -> u32;
+    fn GalaConsoleCtrl(seen: *mut u32) -> u32;
     fn GalaConsoleInputEvents(records: *mut u8, max: u32, count: *mut u32, flags: u32) -> u32;
 }
 

@@ -735,12 +735,6 @@ pub extern "system" fn FreeLibrary(module: Handle) -> Bool {
 
 const ERROR_INVALID_HANDLE: u32 = 6;
 
-/// SetConsoleCtrlHandler: kept (gala raises no console control events).
-#[unsafe(no_mangle)]
-pub extern "system" fn SetConsoleCtrlHandler(_handler: usize, _add: Bool) -> Bool {
-    TRUE
-}
-
 /// GetFileType: from the device type of the handle's file object
 /// (FileFsDeviceInformation): FILE_TYPE_DISK (1), FILE_TYPE_CHAR (2),
 /// FILE_TYPE_PIPE (3), or FILE_TYPE_UNKNOWN (0) with the error set.
@@ -3268,6 +3262,9 @@ pub extern "system" fn mainCRTStartup(_instance: usize, reason: u32, _reserved: 
         unsafe {
             RtlSetUnhandledExceptionFilter(sysmem::UnhandledExceptionFilter as *const () as usize)
         };
+        // A process in a console window gets its control events (Ctrl+C)
+        // on a thread of its own, as on Windows.
+        console::start_ctrl_thread();
     }
     1
 }

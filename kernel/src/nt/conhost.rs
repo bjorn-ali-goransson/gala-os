@@ -32,7 +32,15 @@ pub struct Session {
     inner: IrqMutex<Inner>,
     /// Set while keys are queued (a reader waits on it).
     pub input_ready: ObjectRef,
+    /// Set when Ctrl+C was typed (processed input): the session's
+    /// processes' control-handler threads wait on it (GalaConsoleCtrl).
+    pub ctrl_event: ObjectRef,
 }
+
+/// The console's input modes (SetConsoleMode) the session acts on.
+pub const ENABLE_PROCESSED_INPUT: u32 = 0x1;
+pub const ENABLE_LINE_INPUT: u32 = 0x2;
+pub const ENABLE_ECHO_INPUT: u32 = 0x4;
 
 /// The longest line a cooked read collects (characters).
 pub const MAX_LINE: usize = 1024;
@@ -50,6 +58,10 @@ struct Inner {
     /// cooked read (UTF-8, each ending with CR LF).
     editing: Vec<u16>,
     ready: Vec<u8>,
+    /// The input mode (ENABLE_*_INPUT; the default: processed, line, echo).
+    mode: u32,
+    /// How many Ctrl+C events there have been.
+    ctrl_count: u32,
 }
 
 static SESSIONS: IrqMutex<Vec<KArc<Session>>> = IrqMutex::new(Vec::new());
@@ -71,6 +83,11 @@ impl Session {
             dispatcher: Dispatcher::new(0),
         }))
         .map_err(|_| NtStatus::NO_MEMORY)?;
+        let ctrl_event = KObject::new(ObjectBody::Event(Event {
+            kind: EventType::Notification,
+            dispatcher: Dispatcher::new(0),
+        }))
+        .map_err(|_| NtStatus::NO_MEMORY)?;
         let id = NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         KArc::try_new(Session {
             id,
@@ -83,8 +100,11 @@ impl Session {
                 host: 0,
                 editing,
                 ready,
+                mode: ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT,
+                ctrl_count: 0,
             }),
             input_ready,
+            ctrl_event,
         })
         .map_err(|_| NtStatus::NO_MEMORY)
     }
@@ -126,15 +146,39 @@ impl Session {
     }
 
     /// Queues keys typed in the host's window (dropped when the queue is
-    /// full); how many. The caller sets `input_ready` (outside the lock).
-    pub fn push_input(&self, keys: &[Key]) -> usize {
+    /// full): how many, and whether Ctrl+C came (with processed input it
+    /// is not a key but a CTRL_C_EVENT). The caller sets `input_ready`
+    /// and `ctrl_event` (outside the lock).
+    pub fn push_input(&self, keys: &[Key]) -> (usize, bool) {
         let mut s = self.inner.lock();
-        let room = MAX_INPUT - s.input.len();
-        let n = keys.len().min(room);
-        for &k in &keys[..n] {
-            let _ = s.input.try_push(k);
+        let (mut queued, mut ctrl) = (0, false);
+        for &k in keys {
+            if s.mode & ENABLE_PROCESSED_INPUT != 0 && k.ch == 3 {
+                if k.down {
+                    s.ctrl_count = s.ctrl_count.wrapping_add(1);
+                    ctrl = true;
+                }
+                continue;
+            }
+            if s.input.len() < MAX_INPUT && s.input.try_push(k).is_ok() {
+                queued += 1;
+            }
         }
-        n
+        (queued, ctrl)
+    }
+
+    /// The input mode (SetConsoleMode on the input).
+    pub fn set_mode(&self, mode: u32) {
+        self.inner.lock().mode = mode;
+    }
+
+    pub fn mode(&self) -> u32 {
+        self.inner.lock().mode
+    }
+
+    /// How many Ctrl+C events there have been.
+    pub fn ctrl_count(&self) -> u32 {
+        self.inner.lock().ctrl_count
     }
 
     /// A cooked read's editing, as the console's default input mode does
@@ -143,8 +187,28 @@ impl Session {
     /// the last one back, Enter finishes the line (CR LF) and stops there
     /// (keys after it wait for the next read). The host's event to set
     /// when something was echoed.
+    /// Without ENABLE_LINE_INPUT every character is ready at once (Enter
+    /// as CR alone), nothing echoed; without ENABLE_ECHO_INPUT the line is
+    /// edited unseen.
     pub fn cook(&self) -> Option<ObjectRef> {
         let mut s = self.inner.lock();
+        if s.mode & ENABLE_LINE_INPUT == 0 {
+            let mut used = 0;
+            while used < s.input.len() {
+                let k = s.input[used];
+                used += 1;
+                if !k.down || k.ch == 0 {
+                    continue;
+                }
+                let mut utf8 = [0u8; 4];
+                let ch = char::from_u32(u32::from(k.ch)).unwrap_or('?');
+                let len = ch.encode_utf8(&mut utf8).len();
+                let _ = s.ready.try_extend_from_slice(&utf8[..len]);
+            }
+            s.input.drain(..used);
+            return None;
+        }
+        let echo = s.mode & ENABLE_ECHO_INPUT != 0;
         let mut echoed = false;
         let mut used = 0;
         while used < s.input.len() {
@@ -153,7 +217,6 @@ impl Session {
             if !k.down || k.ch == 0 {
                 continue;
             }
-            echoed = true;
             match k.ch {
                 0x0d => {
                     let mut utf8 = [0u8; 4];
@@ -165,12 +228,16 @@ impl Session {
                     s.editing = line;
                     s.editing.clear();
                     let _ = s.ready.try_extend_from_slice(b"\r\n");
-                    s.append(b"\r\n");
+                    if echo {
+                        s.append(b"\r\n");
+                        echoed = true;
+                    }
                     break;
                 }
                 0x08 => {
-                    if s.editing.pop().is_some() {
+                    if s.editing.pop().is_some() && echo {
                         s.append(b"\x08 \x08");
+                        echoed = true;
                     }
                 }
                 c if c >= 0x20 && s.editing.len() < MAX_LINE => {
@@ -178,7 +245,10 @@ impl Session {
                     let mut utf8 = [0u8; 4];
                     let ch = char::from_u32(u32::from(c)).unwrap_or('?');
                     let len = ch.encode_utf8(&mut utf8).len();
-                    s.append(&utf8[..len]);
+                    if echo {
+                        s.append(&utf8[..len]);
+                        echoed = true;
+                    }
                 }
                 _ => {}
             }
@@ -283,13 +353,13 @@ mod tests {
     fn keys_queue_up_to_the_limit() {
         let s = Session::new().unwrap();
         let k = Key { down: true, vk: 0x41, ch: u16::from(b'a'), ..Key::default() };
-        assert_eq!(s.push_input(&[k, k]), 2);
+        assert_eq!(s.push_input(&[k, k]), (2, false));
         assert_eq!(s.input_count(), 2);
         let mut out = [Key::default(); 4];
         assert_eq!(s.take_input(&mut out), 2);
         assert_eq!(out[0], k);
         let many = alloc::vec![k; MAX_INPUT + 5];
-        assert_eq!(s.push_input(&many), MAX_INPUT);
+        assert_eq!(s.push_input(&many), (MAX_INPUT, false));
     }
 
     #[test]
@@ -318,5 +388,33 @@ mod tests {
         assert_eq!(s.peek_input(&mut keys), 1);
         assert_eq!(s.take_input(&mut keys), 1);
         assert_eq!(keys[0].ch, u16::from(b'z'));
+    }
+
+    #[test]
+    fn modes_turn_off_line_editing_and_echo_and_ctrl_c_is_an_event() {
+        let s = Session::new().unwrap();
+        let key = |ch: u16| Key { down: true, ch, ..Key::default() };
+        // Processed input: Ctrl+C is counted, not queued.
+        assert_eq!(s.push_input(&[key(3), key(u16::from(b'a'))]), (1, true));
+        assert_eq!(s.ctrl_count(), 1);
+        // Line input and echo off: each character at once, Enter as CR,
+        // nothing echoed.
+        s.set_mode(ENABLE_PROCESSED_INPUT);
+        s.push_input(&[key(u16::from(b'b')), key(13)]);
+        assert!(s.cook().is_none());
+        let mut out = [0u8; 8];
+        assert_eq!(s.read_line(&mut out), 3);
+        assert_eq!(&out[..3], b"ab\r");
+        assert_eq!(s.read(&mut out), 0);
+        // Echo off with line input: edited unseen, finished by Enter.
+        s.set_mode(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT);
+        s.push_input(&[key(u16::from(b'q')), key(13)]);
+        s.cook();
+        assert_eq!(s.read_line(&mut out), 3);
+        assert_eq!(s.read(&mut out), 0);
+        // Not processed: Ctrl+C is a character.
+        s.set_mode(0);
+        assert_eq!(s.push_input(&[key(3)]), (1, false));
+        assert_eq!(s.ctrl_count(), 1);
     }
 }

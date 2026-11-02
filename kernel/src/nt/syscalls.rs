@@ -112,6 +112,8 @@ pub const GALA_CONSOLE_READ: u32 = 0x7f3b;
 pub const GALA_CONSOLE_INPUT: u32 = 0x7f3c;
 pub const GALA_CONSOLE_INPUT_EVENTS: u32 = 0x7f3d;
 pub const GALA_WINDOW_SET_ICON: u32 = 0x7f3e;
+pub const GALA_CONSOLE_MODE: u32 = 0x7f3f;
+pub const GALA_CONSOLE_CTRL: u32 = 0x7f40;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -288,6 +290,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_CONSOLE_INPUT, "GalaConsoleInput", 3, gala_console_input),
     (GALA_CONSOLE_INPUT_EVENTS, "GalaConsoleInputEvents", 4, gala_console_input_events),
     (GALA_WINDOW_SET_ICON, "GalaWindowSetIcon", 3, gala_window_set_icon),
+    (GALA_CONSOLE_MODE, "GalaConsoleMode", 2, gala_console_mode),
+    (GALA_CONSOLE_CTRL, "GalaConsoleCtrl", 1, gala_console_ctrl),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1407,8 +1411,12 @@ fn gala_console_input(call: &mut Call<'_>) -> NtStatus {
             control: u32::from_le_bytes([r[12], r[13], r[14], r[15]]),
         };
     }
-    if session.push_input(&keys[..count]) > 0 {
+    let (queued, ctrl) = session.push_input(&keys[..count]);
+    if queued > 0 {
         wait::set_signal(&session.input_ready, 1);
+    }
+    if ctrl {
+        wait::set_signal(&session.ctrl_event, 1);
     }
     NtStatus::SUCCESS
 }
@@ -1436,7 +1444,11 @@ fn gala_console_input_events(call: &mut Call<'_>) -> NtStatus {
         if n > 0 || flags & 2 == 0 {
             break n;
         }
-        wait::wait_for(core::slice::from_ref(&session.input_ready), false, wait::Timeout::Infinite);
+        let ready = core::slice::from_ref(&session.input_ready);
+        let waited = wait::wait_for(ready, false, wait::Timeout::Infinite);
+        if waited == NtStatus::THREAD_IS_TERMINATING {
+            return waited;
+        }
     };
     if flags & 1 == 0 {
         session.settle();
@@ -1455,6 +1467,55 @@ fn gala_console_input_events(call: &mut Call<'_>) -> NtStatus {
     }
     tri!(call.write_u32(count, n as u32));
     NtStatus::SUCCESS
+}
+
+/// GalaConsoleMode(Mode, Set): the calling process's console session's
+/// input mode (ENABLE_PROCESSED/LINE/ECHO_INPUT; kernel32 keeps the
+/// others): set when Set is 1. STATUS_NOT_FOUND without a session.
+fn gala_console_mode(call: &mut Call<'_>) -> NtStatus {
+    let Some(session) = call.process.console.clone() else { return NtStatus::NOT_FOUND };
+    if arg!(call, 1) == 1 {
+        session.set_mode(arg!(call, 0) as u32);
+        // Keys waiting for a cooked line may be ready now.
+        wait::set_signal(&session.input_ready, 1);
+    }
+    NtStatus::SUCCESS
+}
+
+/// GalaConsoleCtrl(*Seen): waits until the calling process's console
+/// session has had more Ctrl+C events than *Seen, then writes their count
+/// there (the caller then runs its control handlers once per new event);
+/// with *Seen u32::MAX the count at once. STATUS_NOT_FOUND without a
+/// session.
+fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
+    let Some(session) = call.process.console.clone() else { return NtStatus::NOT_FOUND };
+    let seen_ptr = arg!(call, 0);
+    let mut seen = [0u8; 4];
+    if call.process.read(seen_ptr, &mut seen).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let seen = u32::from_le_bytes(seen);
+    if seen == u32::MAX {
+        // The count so far, at once.
+        tri!(call.write_u32(seen_ptr, session.ctrl_count()));
+        return NtStatus::SUCCESS;
+    }
+    loop {
+        // Reset first, then look: an event raised in between is seen in
+        // the count, one raised after sets the event again. Every waiter
+        // a set wakes looks again; the timeout is a backstop.
+        wait::set_signal(&session.ctrl_event, 0);
+        let count = session.ctrl_count();
+        if count != seen {
+            tri!(call.write_u32(seen_ptr, count));
+            return NtStatus::SUCCESS;
+        }
+        let event = core::slice::from_ref(&session.ctrl_event);
+        let waited = wait::wait_for(event, false, wait::Timeout::from_nt(Some(-10_000_000)));
+        if waited == NtStatus::THREAD_IS_TERMINATING {
+            return waited;
+        }
+    }
 }
 
 /// GalaWindowCapture(id): the caller's window gets all mouse input,
@@ -4140,7 +4201,10 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
                 return NtStatus::SUCCESS;
             }
             let ready = core::slice::from_ref(&session.input_ready);
-            wait::wait_for(ready, false, wait::Timeout::Infinite);
+            let waited = wait::wait_for(ready, false, wait::Timeout::Infinite);
+            if waited == NtStatus::THREAD_IS_TERMINATING {
+                return waited;
+            }
         }
     }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };

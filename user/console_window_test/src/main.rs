@@ -7,7 +7,14 @@
 //! prints `console_window_test: read hi`; ReadConsoleW reads the next
 //! line ("ok": `console_window_test: console ok`) and ReadConsoleInputW
 //! one key ("x", a KEY_EVENT record: `console_window_test: key x`); then
-//! no events are left. It ends 8 seconds later, so xtask sees the window.
+//! no events are left. Then, with a control handler registered
+//! (SetConsoleCtrlHandler), input without ENABLE_LINE_INPUT and
+//! ENABLE_ECHO_INPUT (SetConsoleMode, PROCESSED_INPUT only): ReadFile
+//! returns the one key typed, "z", without Enter (`console_window_test: raw
+//! z`); Ctrl+C typed in the window is not input but a CTRL_C_EVENT to the
+//! handler, on another thread (`console_window_test: ctrl-c`; the handler
+//! returns TRUE, so the process goes on). It ends 8 seconds later, so
+//! xtask sees the window.
 //! ReadFile on a console returns
 //! the line with "\r\n", as Windows' cooked mode does.
 
@@ -28,6 +35,26 @@ unsafe extern "system" {
     fn ReadConsoleW(h: Handle, buf: *mut u16, n: u32, read: *mut u32, control: *mut c_void) -> i32;
     fn ReadConsoleInputW(h: Handle, records: *mut [u16; 10], n: u32, read: *mut u32) -> i32;
     fn GetNumberOfConsoleInputEvents(h: Handle, count: *mut u32) -> i32;
+    fn GetConsoleMode(h: Handle, mode: *mut u32) -> i32;
+    fn SetConsoleMode(h: Handle, mode: u32) -> i32;
+    fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
+    fn GetCurrentThreadId() -> u32;
+}
+
+static CTRL_C: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static MAIN_THREAD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// The control handler: Ctrl+C (CTRL_C_EVENT, 0) on a thread of its own.
+extern "system" fn on_ctrl(event: u32) -> i32 {
+    use core::sync::atomic::Ordering;
+    // SAFETY: a plain call.
+    let other = unsafe { GetCurrentThreadId() } != MAIN_THREAD.load(Ordering::Relaxed);
+    if event == 0 && other {
+        CTRL_C.store(1, Ordering::Release);
+    } else {
+        CTRL_C.store(2, Ordering::Release);
+    }
+    1
 }
 
 #[unsafe(no_mangle)]
@@ -125,6 +152,41 @@ pub extern "C" fn mainCRTStartup() -> ! {
             out(b"console_window_test: keys left\n");
             ExitProcess(4);
         }
+        // Raw input: no line editing, no echo; Ctrl+C still processed.
+        MAIN_THREAD.store(GetCurrentThreadId(), core::sync::atomic::Ordering::Relaxed);
+        let mut mode = 0u32;
+        if GetConsoleMode(stdin, &mut mode) == 0
+            || mode & 7 != 7
+            || SetConsoleCtrlHandler(Some(on_ctrl), 1) == 0
+            || SetConsoleMode(stdin, 1) == 0
+            || GetConsoleMode(stdin, &mut mode) == 0
+            || mode != 1
+        {
+            out(b"console_window_test: no modes\n");
+            ExitProcess(5);
+        }
+        out(b"console_window_test: raw\n");
+        let mut key = [0u8; 8];
+        let mut got = 0u32;
+        let ok = ReadFile(stdin, key.as_mut_ptr(), 8, &mut got, core::ptr::null_mut());
+        if ok == 0 || got != 1 {
+            out(b"console_window_test: no raw key\n");
+            ExitProcess(6);
+        }
+        out(b"console_window_test: raw ");
+        out(&key[..1]);
+        out(b"\n");
+        // Ctrl+C: the handler runs on another thread.
+        let mut waited = 0;
+        while CTRL_C.load(core::sync::atomic::Ordering::Acquire) == 0 && waited < 300 {
+            Sleep(100);
+            waited += 1;
+        }
+        if CTRL_C.load(core::sync::atomic::Ordering::Acquire) != 1 {
+            out(b"console_window_test: no ctrl-c\n");
+            ExitProcess(7);
+        }
+        out(b"console_window_test: ctrl-c\n");
     }
     // Time for xtask to look at the window, then the end.
     // SAFETY: plain calls.

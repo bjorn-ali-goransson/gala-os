@@ -1690,6 +1690,25 @@ pub extern "system" fn PostQuitMessage(code: i32) {
 static KEYS: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 /// Caps Lock's toggle.
 static CAPS: AtomicBool = AtomicBool::new(false);
+/// The keys as the messages read so far say (GetKeyState, TranslateMessage):
+/// Windows documents that this state changes as the thread reads key
+/// messages, unlike GetAsyncKeyState's (KEYS, the input as it arrives).
+/// gala keeps one per process, not per thread.
+static SYNC_KEYS: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+static SYNC_CAPS: AtomicBool = AtomicBool::new(false);
+
+/// A key message taken from the queue: the synchronous key state follows.
+fn read_key(m: &Msg) {
+    if matches!(m.message, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP) {
+        let down = matches!(m.message, WM_KEYDOWN | WM_SYSKEYDOWN);
+        if let Some(k) = SYNC_KEYS.get(m.wparam & 0xff) {
+            if down && m.wparam & 0xff == VK_CAPITAL && !k.load(Ordering::Relaxed) {
+                SYNC_CAPS.fetch_xor(true, Ordering::Relaxed);
+            }
+            k.store(down, Ordering::Relaxed);
+        }
+    }
+}
 
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
@@ -1792,8 +1811,12 @@ fn message_at(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Msg {
     message(hwnd, msg, wparam, lparam)
 }
 
-fn key_down(vk: usize) -> bool {
+fn async_key_down(vk: usize) -> bool {
     KEYS.get(vk).is_some_and(|k| k.load(Ordering::Relaxed))
+}
+
+fn key_down(vk: usize) -> bool {
+    SYNC_KEYS.get(vk).is_some_and(|k| k.load(Ordering::Relaxed))
 }
 
 /// The character a key makes (US layout), with Shift, Caps Lock and Ctrl.
@@ -1805,7 +1828,7 @@ fn char_of(vk: usize) -> Option<u16> {
             if ctrl {
                 return Some((vk - 0x40) as u16);
             }
-            let upper = shift != CAPS.load(Ordering::Relaxed);
+            let upper = shift != SYNC_CAPS.load(Ordering::Relaxed);
             if upper { vk as u8 } else { vk as u8 + 32 }
         }
         0x30..=0x39 if shift => b")!@#$%^&*("[vk - 0x30],
@@ -1934,13 +1957,22 @@ pub extern "system" fn GetKeyState(vk: i32) -> i16 {
         0xa4 | 0xa5 => key_down(VK_MENU),
         _ => key_down(vk),
     };
-    let toggled = vk == VK_CAPITAL && CAPS.load(Ordering::Relaxed);
+    let toggled = vk == VK_CAPITAL && SYNC_CAPS.load(Ordering::Relaxed);
     (if held { -0x8000i32 } else { 0 } | i32::from(toggled)) as i16
 }
 
+/// GetAsyncKeyState: bit 15 when the key is down now (as the input that
+/// arrived says, read or not).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetAsyncKeyState(vk: i32) -> i16 {
-    GetKeyState(vk) & -0x8000i16
+    let vk = vk as usize & 0xff;
+    let held = match vk {
+        0xa0 | 0xa1 => async_key_down(VK_SHIFT),
+        0xa2 | 0xa3 => async_key_down(VK_CONTROL),
+        0xa4 | 0xa5 => async_key_down(VK_MENU),
+        _ => async_key_down(vk),
+    };
+    if held { -0x8000 } else { 0 }
 }
 
 /// The calling thread's next message (matching the filter): posted ones
@@ -1953,6 +1985,9 @@ fn next(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
     if crate::hook::any(crate::hook::WH_GETMESSAGE) {
         let lp = &mut m as *mut Msg as isize;
         crate::hook::call(crate::hook::WH_GETMESSAGE, 0, usize::from(remove), lp);
+    }
+    if remove {
+        read_key(&m);
     }
     LAST_TIME.store(m.time, Ordering::Relaxed);
     LAST_POS.store((m.pt[0] as u16 as usize) | (m.pt[1] as u16 as usize) << 16, Ordering::Relaxed);

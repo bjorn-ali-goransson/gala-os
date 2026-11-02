@@ -2616,6 +2616,8 @@ const SCENARIOS: &[Scenario] = &[
             "console_window_test: read hi",
             "console_window_test: console ok",
             "console_window_test: key x",
+            "console_window_test: raw z",
+            "console_window_test: ctrl-c",
             "exited with status 0x00000000",
         ],
     },
@@ -4420,6 +4422,16 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                         PixelCheck::At(1250, 700, 0x0c0c0c),
                         PixelCheck::At(660, 700, 0x0c0c0c),
                         PixelCheck::AnyIn(646, 38, 300, 16, 0xcccccc), // "Hello from ..."
+                    ],
+                },
+                ScreenStep {
+                    // Raw input: "z" without Enter, then Ctrl+C (a
+                    // CTRL_C_EVENT, not a key): the program's answers on
+                    // the 11th and 12th lines (19 pixels each).
+                    input: &["sendkey z", "sendkey ctrl-c"],
+                    pixels: &[
+                        PixelCheck::AnyIn(646, 38 + 10 * 19, 300, 16, 0xcccccc),
+                        PixelCheck::AnyIn(646, 38 + 11 * 19, 300, 16, 0xcccccc),
                     ],
                 },
             ],

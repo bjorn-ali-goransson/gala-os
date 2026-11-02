@@ -1334,9 +1334,10 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       Win+Left/Right/Up/Down as on Windows 11; conhost's grid follows its
       window; the filezilla scenario snaps FileZilla right and the
       server's console left (the FTP session's log beside the client).
-      Next: console modes
-      (raw input with SetConsoleMode, Ctrl+C) and tooltips on popups (the
-      combo boxes' drop-down lists are done).
+      **Console modes and Ctrl+C** (2026-11-02): raw input without line
+      editing or echo, Ctrl+C to the control handlers on their own thread
+      (console_window). Next: tooltips on popups (the combo boxes'
+      drop-down lists are done).
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala
