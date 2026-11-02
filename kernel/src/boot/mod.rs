@@ -570,3 +570,13 @@ pub fn take_frame_bitmap(
     };
     Some((slice, phys))
 }
+
+/// What this kernel reads of a handover record (`handover::version`), as an
+/// ELF note in a section of its own (`.gala_note`, a PT_NOTE segment:
+/// kernel/linker.ld) that a running kernel reads from the next kernel's
+/// file before handing over (ROADMAP R9 (d)).
+#[used]
+// SAFETY: plain bytes in a read-only section of their own, which nothing
+// else is placed in and the kernel only reads.
+#[cfg_attr(target_os = "none", unsafe(link_section = ".gala_note"))]
+pub static HANDOVER_NOTE: crate::handover::version::Note = crate::handover::version::NOTE_CONTENTS;

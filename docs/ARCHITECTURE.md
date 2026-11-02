@@ -4129,7 +4129,7 @@ delay mode; its faults stay `net_tx` drops and `netreset=`.
 - **A chain of trust for updates**: designed below (R8); built after
   R7, before live update ships.
 
-### Kernel handover (R9 milestones (a), (b) and (c), 2026-11-02)
+### Kernel handover (R9 milestones (a) to (d), 2026-11-02)
 
 The running kernel hands the machine to a fresh kernel image without the
 firmware or the bootloader: same build, no programs running (milestone
@@ -4143,12 +4143,16 @@ header: magic `GALAHAND`, framing version (u32, 1; readers accept
 the disk log's) over the record with the CRC field as 0, flags, the
 generation (handovers done, counting this one), the section count. Then
 8-aligned sections: tag (u32), version (u16), flags (u16), length (u32),
-data. Growth rules: new state is a new tag; a section only gains fields
-at its end (version raised); a reader takes the fields the length holds,
-0 for missing ones (older writer), ignores trailing ones (newer writer);
-a section with flag REQUIRED that the reader does not know makes it refuse
-the record (for state it would otherwise lose: processes, address spaces);
-other unknown tags are skipped and logged. Sections (all version 1):
+must_read (u16, since (d); 0 before), 0 (u16), data. Growth rules: new
+state is a new tag; a section only gains fields at its end (version
+raised); a reader takes the fields the length holds, 0 for missing ones
+(older writer), ignores trailing ones (newer writer); a section with flag
+REQUIRED that the reader does not know makes it refuse the record (for
+state it would otherwise lose: processes, address spaces); other unknown
+tags are skipped and logged; a section whose must_read is above the
+newest version the reader knows is refused (REQUIRED) or skipped (the
+rest). Versions and negotiation: below. Sections (version 1 unless
+said):
 
 | Tag | Section | Contents |
 |---|---|---|
@@ -4163,6 +4167,7 @@ other unknown tags are skipped and logged. Sections (all version 1):
 | 9 | KEPT | (base, length, purpose): SCAFFOLD, RECORD, KERNEL_IMAGE, BITMAP (room for the next frame bitmap) (for the receiving kernel only), MARKER (kept for good) |
 | 10 | KERNEL_FILE | the kernel ELF to hand over to next time |
 | 11-32 | programs | REQUIRED, milestones (b) and (c): "Programs across a handover" below |
+| 33 | WRITER | the writing kernel's build name (optional; (d): only the `handover_next` build writes and reads it so far) |
 
 **Memory.** The receiving kernel builds its frame allocator from the
 record's map as from Limine's: the new image is "executable and modules",
@@ -4233,8 +4238,9 @@ valid until every CPU runs the new kernel (they are in the scaffold,
 kept). No allocation after CPUs are parked (a TLB shootdown would wait
 for them forever). The entry convention (rdi/rsi/rdx) and the parked
 array's layout are part of the handover contract, versioned with the
-record: a newer kernel (milestone (d)) must keep them or raise the
-framing version. Clock control (`clock=`) state is not carried: a
+record: a newer kernel must keep them or raise the framing version (a
+running kernel refuses a next kernel whose note does not read its
+framing version). Clock control (`clock=`) state is not carried: a
 handover with programs is refused while it is armed.
 
 **Programs across a handover** (milestones (b) and (c); scenarios
@@ -4298,7 +4304,8 @@ host-tested: round trip, damage, older entries).
   the blocked half is carried as the plain wait (registers rewritten to
   NtWaitForSingleObject's), since the side effect is done.
 - *What is carried* (sections, all REQUIRED; version 1 but PROCESSES,
-  THREADS and TIMERS, version 2 since (c); lists are entries with a
+  THREADS and TIMERS, version 2 since (c), THREADS 3 since (d) (and
+  PROCESSES 3 in the `handover_next` build); lists are entries with a
   length, or tables with a stride, so items gain fields at their end;
   objects are named by ids unique in the record, one section per object
   kind so a kernel that does not know a kind refuses the record before
@@ -4309,7 +4316,7 @@ host-tested: round trip, damage, older entries).
 | 11 | USER_FRAMES | physical ranges of the programs' own pages and of section pages: the next frame allocator claims them before anything is allocated (`mm::init`) |
 | 12 | PROCESSES | a header entry (the next NT id), then per process: id, parent, create time, image base and size, ntdll's dispatchers, threads created, priority class, name, Win32 path of the executable; v2: the digest of the executable's layout, its primary token's object id |
 | 13 | ADDRESS_SPACES | per process: the VAD (`Vad::write_to`), a table of section views (base, size, offset, section id), a table of pages (address, value, kind, flags): OWNED (frame number: kept in place; also every written, copy-on-write-copied or privately relocated image page), IMAGE (page index: the executable is laid out again from its file and the page mapped from that layout), SHARED_DATA (KUSER_SHARED_DATA: the new kernel's), SECTION (the view's section page), IMAGE_VIEW (page index in a DLL view: the image section's shared frame for the view's base, unrelocated at the preferred base, relocated at the image's alternative base) |
-| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, its object id, the system call (number, the user registers at the `syscall`), its deadline (timer tick, absolute; none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), its suspend count, its impersonation token's id, a table of queued user APCs (routine, three arguments) |
+| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, its object id, the system call (number, the user registers at the `syscall`), its deadline (timer tick, absolute; none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), its suspend count, its impersonation token's id, a table of queued user APCs (routine, three arguments); v3: its extended state, after the APCs: the XCR0 components it covers (u64; 0 from an older writer: x87 and SSE) and a length-prefixed blob, the XSAVE area past the legacy 512 bytes (empty while gala uses FXSAVE; a writer that fills it marks the section must_read 3) |
 | 15-23 | EVENTS, SEMAPHORES, MUTANTS, TIMERS, SECTIONS, FILES, IO_COMPLETIONS, EXITED_THREADS, PROCESS_OBJECTS | per object: id, name (re-linked in the namespace when its directory is a permanent one), state: signal, count and maximum, owner thread and count, due tick and period, size/protection/attributes and frames (pagefile-backed), volume path, rights, share access, options and position (opened again), queued packets, exit status and times, the process |
 | 24 | CONSOLES | console input/output objects (no state) |
 | 25 | HANDLES | per process: (handle value, object id, granted access, attributes) |
@@ -4364,10 +4371,15 @@ host-tested: round trip, damage, older entries).
   layout of the same file only if the layout's digest is the one the
   previous kernel had (the executable: PROCESSES' digest; DLLs:
   IMAGE_SECTIONS'); base and size alone would map different bytes into a
-  running program if the file or the loader changed (milestone (d): a
-  newer build must lay images out the same, or carry image pages as
-  frames). Written, copy-on-write-copied and privately relocated image
-  pages are the process's own frames (OWNED), kept in place.
+  running program if the file or the loader changed. Since (d) the
+  layout's algorithm has a version (`nt::section::LAYOUT_VERSION`, in the
+  note): a next kernel whose loader lays images out by another version is
+  refused before the point of no return when programs are carried (the
+  digest checks after the jump would lose them); a loader change raises
+  it, and the handover across that change needs image pages carried as
+  frames (not built). Written, copy-on-write-copied and privately
+  relocated image pages are the process's own frames (OWNED), kept in
+  place.
 
 **Not carried yet** (each makes the handover refuse, with the reason):
 threads blocked for over 3 s in a system call that cannot be made again
@@ -4391,6 +4403,95 @@ security context (FSCTL_PIPE_IMPERSONATE on a carried pipe fails), the
 window registry, the desktop and the registry's volatile keys.
 The first kernel's image and Limine's reclaimable memory are not freed;
 the scaffold of the running kernel is freed only by the next handover.
+
+**Versions and negotiation** (milestone (d), 2026-11-02; scenarios
+`handover_upgrade`, `handover_upgrade_uefi`, `handover_downgrade_refused`;
+code `handover::version`, host tests there and in `record`, `programs`,
+`elf`). A kernel hands over to a newer build (or an older one) whose
+state format differs; every future format change follows these rules.
+
+- *What a build reads and writes* is one table, `version::KINDS`: per
+  section kind its tag, the version it writes (also the newest it
+  reads), the oldest it reads (`reads_from`, 0 today: every older
+  version is converted), its `must_read`, whether it is REQUIRED (the
+  programs' sections). Version history is kept in the table's comment.
+- *must_read* (section header bytes 12-13): the oldest reader version that
+  may take the section without losing state. A field a reader may
+  ignore (the APIC rate in CLOCK 2, a count, a name) keeps it; a field
+  whose loss changes what a program sees or weakens security (a primary
+  token: PROCESSES 2; how a thread stood: THREADS 2; a timer's APC:
+  TIMERS 2) raises it to the new version. It may depend on the data:
+  THREADS 3 needs a version-3 reader only when a thread's extended-state
+  blob is not empty (`programs::threads_must_read`).
+- *The note.* Each kernel image carries its read facts in an ELF note
+  (name "GALA", type 0x47410001, section `.gala_note` in a PT_NOTE segment,
+  `boot::HANDOVER_NOTE`, built at compile time from `KINDS`): note format
+  1, record framing range, image layout version, the extended state it
+  restores (XCR0 bits; 0x3 = FXSAVE), build name, then (tag, oldest,
+  newest) per kind. A kernel without a note is the milestone (c) build:
+  `version::BEFORE_NOTES` (framing 1, tags 1-32, PROCESSES, THREADS,
+  TIMERS and CLOCK at 2).
+- *Negotiation, before the point of no return* (`handover::go`): the
+  next kernel's file (the kernel file or `handover_image=`) passes R8's
+  check (`version::trusted`: a hook, accepting all until the signed
+  manifest is built), parses as a kernel ELF, its note is read and logged
+  (`handover: gala hands over to gala-next (record framing 1-1, image
+  layout 1, extended state 0x3, 33 section kinds; with programs)`); then,
+  before any thread is stopped, `version::agree`: the framing this kernel
+  writes is in the target's range; with programs, the same image layout
+  version; every REQUIRED section this kernel would write is known to the
+  target, not older than it reads, and its must_read not above the
+  newest it reads (optional ones it cannot take it skips). After the
+  threads are stopped: their extended state against the target's
+  (`agree_xstate`), then the record is encoded once as a draft (before
+  the new image and scaffold are allocated) and checked section by
+  section as written (`check_record`). Any mismatch refuses the handover
+  with the reason (`handover: refused: the next kernel (gala) reads
+  PROCESSES up to version 2; this kernel writes version 3, which needs a
+  reader of version 3`) and the programs go on.
+- *Reading* (the receiving kernel): `record::parse` refuses a REQUIRED
+  section it does not know, whose must_read is above its newest version
+  or which is older than its oldest (a backstop: negotiation made these
+  unreachable, but a kernel booted from a damaged or foreign record must
+  not lose programs silently); `Record::section` skips optional sections
+  it cannot read. Each reader converts older versions: fields the writer
+  did not have read as 0 and take their documented default (`ProcessRec::
+  read_as`, `ThreadRec::read`). The log says what was converted or
+  skipped (`handover: section PROCESSES version 2 read as version 3 (new
+  fields take their defaults)`, `handover: skipped section 33 (unknown to
+  this kernel)`) and who wrote the record (WRITER).
+- *In-memory structures are the build's own*: a record's bytes are its
+  format, the structures behind it are not (the `handover_next` build
+  lays out `record::Clock` with grouped, renamed fields behind the same
+  bytes; users go through `Clock::new` and accessors; a host test checks
+  the bytes in both builds: `cargo test -p kernel --lib --features
+  handover_next handover::`, which `cargo xtask test` runs).
+- *The `handover_next` build* (cargo feature, built by xtask into
+  `target/next`) stands in for the next release: PROCESSES 3 (the
+  handovers a process came through, a field marked must-understand to
+  stand for one), WRITER (tag 33, optional, new), the re-laid-out Clock.
+  `handover_upgrade` hands over gala -> gala-next -> gala-next with the
+  kernel32 program working (v2 read with defaults, then v3 both ways);
+  `handover_downgrade_refused` boots gala-next with gala as the module:
+  with the program running gala-next refuses (gala reads PROCESSES up to
+  2), the program finishes there, then the boot's own handover without
+  programs goes to gala, which skips WRITER. When a real format change
+  lands, it goes into the default build and `handover_next` moves one
+  step ahead again.
+- *Rules for every future change*: a new tag for new state; fields only
+  at an entry's or table record's end, version raised; never a changed
+  meaning or unit of an old field (add a new field); a reader keeps
+  reading every older version (`reads_from` raised only after a release
+  whose note says so has shipped and nothing older can hand over); set
+  must_read to the new version when ignoring the new fields would lose
+  what a program sees, else keep it; record the version in `KINDS`'
+  comment and this table; add a host test that reads the previous version
+  with defaults and one that the new version round-trips; raise the
+  framing version only for the header or section framing (and the entry
+  convention, the parked CPUs' array); raise `LAYOUT_VERSION` for any
+  loader change. A section that cannot be converted (state the new
+  kernel cannot rebuild from the old record) means the new kernel cannot
+  take programs from the old one: lower nothing, let negotiation refuse.
 
 ### Chain of trust (R8, design 2026-11-02)
 

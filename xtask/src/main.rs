@@ -1850,6 +1850,12 @@ fn run_cmd(cmd: &mut Command) -> Result {
 fn unit_tests() -> Result {
     eprintln!("xtask: running kernel and xtask unit tests on the host");
     run_cmd(cargo().args(["test", "--package", "kernel", "--lib"]))?;
+    // The handover formats as the `handover_next` build has them (R9 (d)).
+    run_cmd(
+        cargo()
+            .args(["test", "--package", "kernel", "--lib", "--features", "handover_next"])
+            .arg("handover::"),
+    )?;
     run_cmd(cargo().args(["test", "--package", "xtask"]))
 }
 
@@ -1987,11 +1993,54 @@ fn server_target_dir() -> PathBuf {
 /// Scenarios booted with the server kernel (no `shasha` feature).
 const SERVER_KERNEL_SCENARIOS: &[&str] = &["server_kernel"];
 
+/// R9 (d): scenarios that hand over between the default kernel and the
+/// `handover_next` build (a stand-in for the next release, with a changed
+/// state format), with whether they boot the next build; the other kernel
+/// is shipped as a boot module (`kernel-next`, `kernel-gala`) for
+/// `handover_image=`.
+const HANDOVER_BUILD_SCENARIOS: &[(&str, bool)] = &[
+    ("handover_upgrade", false),
+    ("handover_upgrade_uefi", false),
+    ("handover_downgrade_refused", true),
+];
+
+/// Where the `handover_next` kernel goes (its own target directory).
+fn next_target_dir() -> PathBuf {
+    target_dir().join("next")
+}
+
+/// Builds the `handover_next` kernel (R9 (d)) and returns its path.
+fn build_next_kernel(release: bool) -> Result<PathBuf> {
+    let mut cmd = cargo();
+    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
+        .args(["--features", "handover_next", "--target-dir"])
+        .arg(next_target_dir());
+    if release {
+        cmd.arg("--release");
+    }
+    run_cmd(&mut cmd)?;
+    let profile = if release { "release" } else { "debug" };
+    Ok(next_target_dir().join(KERNEL_TARGET).join(profile).join("kernel"))
+}
+
 fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
     let server = name.strip_prefix("test-").is_some_and(|n| SERVER_KERNEL_SCENARIOS.contains(&n));
     let kernel_dir = if server { server_target_dir() } else { target_dir() };
-    let kernel = kernel_dir.join(KERNEL_TARGET).join(profile).join("kernel");
+    let mut kernel = kernel_dir.join(KERNEL_TARGET).join(profile).join("kernel");
+    // R9 (d): the other build as a boot module, to hand over to.
+    let builds = name
+        .strip_prefix("test-")
+        .and_then(|n| HANDOVER_BUILD_SCENARIOS.iter().find(|s| s.0 == n).map(|s| s.1));
+    let mut other_kernel = None;
+    if let Some(boots_next) = builds {
+        let next = build_next_kernel(release)?;
+        other_kernel = Some(if boots_next {
+            ("kernel-gala", std::mem::replace(&mut kernel, next))
+        } else {
+            ("kernel-next", next)
+        });
+    }
     let limine = fetch_limine()?;
     let out = target_dir().join(profile);
     let iso_root = out.join(format!("{name}-iso-root"));
@@ -2005,6 +2054,10 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
     }
     copy(&kernel, &boot.join("kernel"))?;
     let mut modules = String::new();
+    if let Some((module, path)) = &other_kernel {
+        copy(path, &boot.join(module))?;
+        modules += &format!("    module_path: boot():/boot/{module}\n");
+    }
     for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS) {
         let exe = target_dir().join(USER_TARGET).join("release").join(format!("{program}.exe"));
         copy(&exe, &boot.join(format!("{program}.exe")))?;
@@ -2374,6 +2427,7 @@ const PENDING: &[&str] = &[
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
     "handover_uefi",
+    "handover_upgrade_uefi",
     "handover_idle_uefi",
     "handover_k32_uefi",
     "server_profile",
@@ -3513,6 +3567,89 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // R9 (d): a handover to a newer kernel build with a changed state
+        // format (the `handover_next` build, shipped as the boot module
+        // kernel-next: PROCESSES version 3 with a new field, the new WRITER
+        // section, the CLOCK record's in-memory structure laid out
+        // differently), with the kernel32 program working across it. The
+        // running kernel reads the next one's version note and checks the
+        // record against it first; the new kernel reads PROCESSES version
+        // 2 with the new field's default. The program asks again and goes
+        // on across a second handover, gala-next to gala-next (PROCESSES
+        // version 3 both ways).
+        name: "handover_upgrade",
+        cmdline: "qemu_exit handover=2 handover_image=kernel-next run=handover_k32_test.exe \
+                  args=twice",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "handover_k32_test: ready",
+            "handover: gala hands over to gala-next (record framing 1-1, image layout 1, \
+             extended state 0x3, 33 section kinds; with programs)",
+            "handover: carrying 1 process(es), 10 thread(s)",
+            "handover: generation 1 (from generation 0), record version 1",
+            "handover: this kernel is gala-next; the record was written by an older kernel \
+             (no WRITER section)",
+            "handover: section PROCESSES version 2 read as version 3 (new fields take their \
+             defaults)",
+            "handover: process handover_k32_test.exe has come through 1 handover(s) (counted \
+             from here: PROCESSES version 2)",
+            "handover: resumed process handover_k32_test.exe",
+            "handover_k32_test: writer wrote lines:",
+            "handover: gala-next hands over to gala-next",
+            "handover: generation 2 (from generation 1), record version 1",
+            "handover: this kernel is gala-next; the record was written by gala-next",
+            "handover: process handover_k32_test.exe has come through 2 handover(s)",
+            "handover_k32_test: slept again",
+            "handover_k32_test: ok",
+            "exited with status 0x00000000",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // handover_upgrade booted by UEFI (UEFI_SCENARIOS), once.
+        name: "handover_upgrade_uefi",
+        cmdline: "qemu_exit handover=1 handover_image=kernel-next run=handover_k32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "firmware: UEFI x86_64",
+            "handover: gala hands over to gala-next",
+            "handover: this kernel is gala-next",
+            "handover: section PROCESSES version 2 read as version 3",
+            "handover: resumed process handover_k32_test.exe",
+            "handover_k32_test: ok",
+            "exited with status 0x00000000",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // R9 (d): back from the newer build to the older one (the boot
+        // module kernel-gala) while the program runs: gala-next writes
+        // PROCESSES version 3, which needs a version-3 reader, and the
+        // older kernel's note says it reads version 2, so gala-next refuses
+        // before stopping anything and the program goes on in it. With no
+        // programs left, the boot's own handover to the older build is
+        // done: it skips the WRITER section it does not know.
+        name: "handover_downgrade_refused",
+        cmdline: "qemu_exit handover=1 handover_image=kernel-gala run=handover_k32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "handover_k32_test: ready",
+            "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
+             extended state 0x3, 32 section kinds; with programs)",
+            "handover: refused: the next kernel (gala) reads PROCESSES up to version 2; this \
+             kernel writes version 3, which needs a reader of version 3",
+            "handover_k32_test: slept",
+            "handover_k32_test: ok",
+            "exited with status 0x00000000",
+            "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
+             extended state 0x3, 32 section kinds)",
+            "handover: generation 1 (from generation 0), record version 1",
+            "handover: this kernel is gala; this build does not read the writer's name",
+            "handover: skipped section 33 (unknown to this kernel)",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
         // handover_k32 booted by UEFI (UEFI_SCENARIOS).
         name: "handover_k32_uefi",
         cmdline: "qemu_exit handover=1 run=handover_k32_test.exe",
@@ -4440,6 +4577,9 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("handover_k32", "handover_k32_test"),
     ("handover_k32_uefi", "handover_k32_test"),
     ("handover_k32_twice", "handover_k32_test"),
+    ("handover_upgrade", "handover_k32_test"),
+    ("handover_upgrade_uefi", "handover_k32_test"),
+    ("handover_downgrade_refused", "handover_k32_test"),
     ("crash_record", "hello"),
     ("watchdog", "busybox"),
     ("failpoint_heap", "kernel32_test"),

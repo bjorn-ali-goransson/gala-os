@@ -11,7 +11,9 @@
 //!  28  flags (u32, 0)            32 generation: handovers done (u64)
 //!  40  section count (u32)       44 reserved (20 bytes of 0)
 //! sections, each 8-aligned
-//!   0  tag (u32)   4 version (u16)   6 flags (u16)   8 length (u32)   12 0 (u32)
+//!   0  tag (u32)   4 version (u16)   6 flags (u16)   8 length (u32)
+//!  12  must_read (u16): the oldest reader version that may take it (0: any)
+//!  14  0 (u16)
 //!  16  data (length bytes, padded with 0 to 8)
 //! ```
 //!
@@ -22,9 +24,14 @@
 //! fields it knows (a newer one). A section a reader must understand to
 //! carry on safely (processes and their memory, later) sets
 //! [`REQUIRED`]: a reader that does not know its tag refuses the record;
-//! other unknown sections are skipped. The header's format version
-//! changes only if this framing changes; readers accept [`MIN_VERSION`]
-//! to [`VERSION`].
+//! other unknown sections are skipped. A section whose fields a reader of
+//! an older version would lose state by ignoring says so in `must_read`
+//! (milestone (d), `handover::version`): a reader whose newest version of
+//! the tag is older refuses the record if the section is REQUIRED, else
+//! skips it. The header's format version changes only if this framing
+//! changes; readers accept [`MIN_VERSION`] to [`VERSION`]. Which versions
+//! of which sections a kernel reads is in its image's note
+//! (`handover::version`), checked before the point of no return.
 
 use alloc::vec::Vec;
 
@@ -108,6 +115,10 @@ pub mod tag {
     /// Access tokens (processes' primary tokens, impersonation tokens,
     /// token handles) as data.
     pub const TOKENS: u32 = 32;
+    // Milestone (d).
+    /// The writing kernel's build name (optional; `handover_next` writes
+    /// it, the default build does not know it yet and skips it).
+    pub const WRITER: u32 = 33;
 }
 
 /// What a kept physical range is (KEPT section).
@@ -133,9 +144,27 @@ pub enum RecordError {
     BadMagic,
     Version(u32),
     Length,
-    Crc { stored: u32, computed: u32 },
-    Section { index: u32 },
-    UnknownRequired { tag: u32 },
+    Crc {
+        stored: u32,
+        computed: u32,
+    },
+    Section {
+        index: u32,
+    },
+    UnknownRequired {
+        tag: u32,
+    },
+    /// A REQUIRED section that needs a newer reader than this kernel.
+    TooNew {
+        tag: u32,
+        version: u16,
+        must_read: u16,
+    },
+    /// A REQUIRED section older than this kernel reads.
+    TooOld {
+        tag: u32,
+        version: u16,
+    },
 }
 
 impl core::fmt::Display for RecordError {
@@ -154,45 +183,21 @@ impl core::fmt::Display for RecordError {
             RecordError::UnknownRequired { tag } => {
                 write!(f, "section {tag} is required and this kernel does not know it")
             }
+            RecordError::TooNew { tag, version, must_read } => write!(
+                f,
+                "section {} version {version} needs a reader of version {must_read}; this \
+                 kernel reads up to {}",
+                super::version::name(*tag),
+                super::version::writes(*tag)
+            ),
+            RecordError::TooOld { tag, version } => write!(
+                f,
+                "section {} version {version} is older than this kernel reads",
+                super::version::name(*tag)
+            ),
         }
     }
 }
-
-/// The tags this kernel knows (unknown ones are skipped unless REQUIRED).
-pub const KNOWN: [u32; 32] = [
-    tag::MEMORY_MAP,
-    tag::PLATFORM,
-    tag::FRAMEBUFFER,
-    tag::CMDLINE,
-    tag::MODULES,
-    tag::CLOCK,
-    tag::CPUS,
-    tag::VOLUME,
-    tag::KEPT,
-    tag::KERNEL_FILE,
-    tag::USER_FRAMES,
-    tag::PROCESSES,
-    tag::ADDRESS_SPACES,
-    tag::THREADS,
-    tag::EVENTS,
-    tag::SEMAPHORES,
-    tag::MUTANTS,
-    tag::TIMERS,
-    tag::SECTIONS,
-    tag::FILES,
-    tag::IO_COMPLETIONS,
-    tag::EXITED_THREADS,
-    tag::PROCESS_OBJECTS,
-    tag::CONSOLES,
-    tag::HANDLES,
-    tag::IMAGE_SECTIONS,
-    tag::FILE_SECTIONS,
-    tag::PIPES,
-    tag::PIPE_ENDS,
-    tag::KEYED_EVENTS,
-    tag::SECURITY,
-    tag::TOKENS,
-];
 
 fn get<const N: usize>(bytes: &[u8], at: usize) -> Option<[u8; N]> {
     bytes.get(at..at.checked_add(N)?)?.try_into().ok()
@@ -227,12 +232,25 @@ impl Writer {
 
     /// Starts a section; its fields follow (`u32`, `u64`, `bytes`).
     pub fn section(&mut self, tag: u32, version: u16, flags: u16) -> Result<(), AllocError> {
+        self.section_needing(tag, version, flags, 0)
+    }
+
+    /// Starts a section that a reader older than version `must_read`
+    /// must not take (it would lose state by ignoring fields).
+    pub fn section_needing(
+        &mut self,
+        tag: u32,
+        version: u16,
+        flags: u16,
+        must_read: u16,
+    ) -> Result<(), AllocError> {
         self.close()?;
         self.open = Some(self.buf.len());
         let mut header = [0u8; SECTION_HEADER_LEN];
         header[0..4].copy_from_slice(&tag.to_le_bytes());
         header[4..6].copy_from_slice(&version.to_le_bytes());
         header[6..8].copy_from_slice(&flags.to_le_bytes());
+        header[12..14].copy_from_slice(&must_read.to_le_bytes());
         self.buf.try_extend_from_slice(&header)?;
         self.sections += 1;
         Ok(())
@@ -347,12 +365,42 @@ pub struct Section<'a> {
     pub tag: u32,
     pub version: u16,
     pub flags: u16,
+    /// The oldest reader version that may take it (0: any).
+    pub must_read: u16,
     pub data: &'a [u8],
 }
 
+impl Section<'_> {
+    /// Whether this kernel can read it (it knows the tag in a version not
+    /// older than the section needs, and reads the section's version).
+    pub fn readable(&self) -> bool {
+        super::version::kind_of(self.tag)
+            .is_some_and(|k| self.must_read <= k.writes && self.version >= k.reads_from)
+    }
+}
+
 /// Checks a record: magic, version, lengths, CRC, the section framing,
-/// and that every REQUIRED section is one this kernel knows.
+/// and that every REQUIRED section is one this kernel knows in a version
+/// it reads.
 pub fn parse(bytes: &[u8]) -> Result<Record<'_>, RecordError> {
+    let record = parse_framing(bytes)?;
+    for section in record.sections().flatten() {
+        if section.flags & REQUIRED == 0 || section.readable() {
+            continue;
+        }
+        let (tag, version, must_read) = (section.tag, section.version, section.must_read);
+        return Err(match super::version::kind_of(tag) {
+            None => RecordError::UnknownRequired { tag },
+            Some(k) if must_read > k.writes => RecordError::TooNew { tag, version, must_read },
+            Some(_) => RecordError::TooOld { tag, version },
+        });
+    }
+    Ok(record)
+}
+
+/// `parse` without the sections' versions checked (the framing only): a
+/// record as another kernel would see it (`version::check_record`).
+pub fn parse_framing(bytes: &[u8]) -> Result<Record<'_>, RecordError> {
     if bytes.len() < HEADER_LEN {
         return Err(RecordError::TooShort);
     }
@@ -386,10 +434,7 @@ pub fn parse(bytes: &[u8]) -> Result<Record<'_>, RecordError> {
     let count = u32_at(bytes, 40).ok_or(RecordError::TooShort)?;
     let mut seen = 0;
     for section in record.sections() {
-        let section = section?;
-        if section.flags & REQUIRED != 0 && !KNOWN.contains(&section.tag) {
-            return Err(RecordError::UnknownRequired { tag: section.tag });
-        }
+        section?;
         seen += 1;
     }
     if seen != count {
@@ -414,9 +459,13 @@ impl<'a> Record<'a> {
                 let version = get::<2>(bytes, at + 4).map(u16::from_le_bytes)?;
                 let flags = get::<2>(bytes, at + 6).map(u16::from_le_bytes)?;
                 let len = u32_at(bytes, at + 8)? as usize;
+                let must_read = get::<2>(bytes, at + 12).map(u16::from_le_bytes)?;
                 let start = at + SECTION_HEADER_LEN;
                 let data = bytes.get(start..start.checked_add(len)?)?;
-                Some((Section { tag, version, flags, data }, (start + len).next_multiple_of(8)))
+                Some((
+                    Section { tag, version, flags, must_read, data },
+                    (start + len).next_multiple_of(8),
+                ))
             })();
             index += 1;
             match parsed {
@@ -432,13 +481,13 @@ impl<'a> Record<'a> {
         })
     }
 
-    /// The first section with `tag`, as a field reader.
+    /// The first section with `tag` this kernel can read, as a field
+    /// reader (an optional section that needs a newer reader is skipped).
     pub fn section(&self, tag: u32) -> Option<Reader<'a>> {
-        self.sections().filter_map(Result::ok).find(|s| s.tag == tag).map(|s| Reader {
-            data: s.data,
-            at: 0,
-            version: s.version,
-        })
+        self.sections()
+            .filter_map(Result::ok)
+            .find(|s| s.tag == tag && s.readable())
+            .map(|s| Reader { data: s.data, at: 0, version: s.version })
     }
 
     /// Bytes of the whole record (header included are not: sections only).
@@ -604,48 +653,152 @@ impl<'a> Table<'a> {
     }
 }
 
-/// The CLOCK section (version 2; version 1 had no `timer_hz`): enough
-/// for the next kernel's clock to go on from this one's (ARCHITECTURE
+/// The CLOCK section (version 2; version 1 had no timer rate): enough for
+/// the next kernel's clock to go on from this one's (ARCHITECTURE
 /// invariant 5: one clock).
+///
+/// ```text
+/// 0 TSC rate   8 TSC at the clock's zero   16 ticks   24 the clock (ns)
+/// when written   32 NT system time at the clock's zero   40 APIC timer
+/// rate (version 2)
+/// ```
+///
+/// The in-memory structure is the build's own business: the
+/// `handover_next` build lays it out differently (grouped and renamed
+/// fields) behind the same bytes, as a later kernel may; the kernel uses
+/// it only through `new` and the accessors, and a host test checks the
+/// bytes in both builds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Clock {
-    /// TSC ticks per second, as calibrated at the first boot.
-    pub tsc_hz: u64,
-    /// The TSC value at the clock's zero (the first boot's clock start).
-    pub tsc_at_zero: u64,
-    /// Timer ticks counted so far.
-    pub ticks: u64,
-    /// The clock (ns) when the record was written.
-    pub monotonic_ns: u64,
-    /// NT system time at the clock's zero.
-    pub boot_system_time: u64,
-    /// The local APIC timer's rate as calibrated at the first boot (0:
-    /// unknown, version 1): the next kernel ticks at the same rate, so the
-    /// tick count (the waits' deadlines) and the TSC agree across kernels.
-    pub timer_hz: u64,
+    #[cfg(not(feature = "handover_next"))]
+    tsc_hz: u64,
+    #[cfg(not(feature = "handover_next"))]
+    tsc_at_zero: u64,
+    #[cfg(not(feature = "handover_next"))]
+    ticks: u64,
+    #[cfg(not(feature = "handover_next"))]
+    monotonic_ns: u64,
+    #[cfg(not(feature = "handover_next"))]
+    boot_system_time: u64,
+    #[cfg(not(feature = "handover_next"))]
+    timer_hz: u64,
+    #[cfg(feature = "handover_next")]
+    tsc: CounterNext,
+    #[cfg(feature = "handover_next")]
+    timer: CounterNext,
+    #[cfg(feature = "handover_next")]
+    written_at_ns: u64,
+    #[cfg(feature = "handover_next")]
+    system_time_at_zero: u64,
+}
+
+/// The `handover_next` build's grouping: a counter's rate and value.
+#[cfg(feature = "handover_next")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CounterNext {
+    hz: u64,
+    /// The TSC: its value at the clock's zero; the timer: ticks counted.
+    count: u64,
 }
 
 impl Clock {
     pub const VERSION: u16 = 2;
 
+    /// TSC rate (as calibrated at the first boot) and value at the clock's
+    /// zero, timer ticks so far, the clock (ns) when written, NT system
+    /// time at the clock's zero, the APIC timer's rate (0: unknown).
+    pub fn new(
+        tsc_hz: u64,
+        tsc_at_zero: u64,
+        ticks: u64,
+        monotonic_ns: u64,
+        boot_system_time: u64,
+        timer_hz: u64,
+    ) -> Self {
+        #[cfg(not(feature = "handover_next"))]
+        {
+            Clock { tsc_hz, tsc_at_zero, ticks, monotonic_ns, boot_system_time, timer_hz }
+        }
+        #[cfg(feature = "handover_next")]
+        {
+            Clock {
+                tsc: CounterNext { hz: tsc_hz, count: tsc_at_zero },
+                timer: CounterNext { hz: timer_hz, count: ticks },
+                written_at_ns: monotonic_ns,
+                system_time_at_zero: boot_system_time,
+            }
+        }
+    }
+
+    /// The fields in the record's order: TSC rate, TSC at zero, ticks,
+    /// clock when written, system time at zero, timer rate.
+    #[cfg(not(feature = "handover_next"))]
+    fn fields(&self) -> [u64; 6] {
+        [
+            self.tsc_hz,
+            self.tsc_at_zero,
+            self.ticks,
+            self.monotonic_ns,
+            self.boot_system_time,
+            self.timer_hz,
+        ]
+    }
+
+    #[cfg(feature = "handover_next")]
+    fn fields(&self) -> [u64; 6] {
+        [
+            self.tsc.hz,
+            self.tsc.count,
+            self.timer.count,
+            self.written_at_ns,
+            self.system_time_at_zero,
+            self.timer.hz,
+        ]
+    }
+
+    /// TSC ticks per second, as calibrated at the first boot.
+    pub fn tsc_hz(&self) -> u64 {
+        self.fields()[0]
+    }
+
+    /// The TSC value at the clock's zero (the first boot's clock start).
+    pub fn tsc_at_zero(&self) -> u64 {
+        self.fields()[1]
+    }
+
+    /// Timer ticks counted so far.
+    pub fn ticks(&self) -> u64 {
+        self.fields()[2]
+    }
+
+    /// The clock (ns) when the record was written.
+    pub fn monotonic_ns(&self) -> u64 {
+        self.fields()[3]
+    }
+
+    /// NT system time at the clock's zero.
+    pub fn boot_system_time(&self) -> u64 {
+        self.fields()[4]
+    }
+
+    /// The local APIC timer's rate as calibrated at the first boot (0:
+    /// unknown, version 1): the next kernel ticks at the same rate, so the
+    /// tick count (the waits' deadlines) and the TSC agree across kernels.
+    pub fn timer_hz(&self) -> u64 {
+        self.fields()[5]
+    }
+
     pub fn write(&self, w: &mut Writer) -> Result<(), AllocError> {
         w.section(tag::CLOCK, Self::VERSION, 0)?;
-        for v in [self.tsc_hz, self.tsc_at_zero, self.ticks, self.monotonic_ns] {
+        for v in self.fields() {
             w.u64(v)?;
         }
-        w.u64(self.boot_system_time)?;
-        w.u64(self.timer_hz)
+        Ok(())
     }
 
     pub fn read(r: &mut Reader<'_>) -> Self {
-        Clock {
-            tsc_hz: r.u64(),
-            tsc_at_zero: r.u64(),
-            ticks: r.u64(),
-            monotonic_ns: r.u64(),
-            boot_system_time: r.u64(),
-            timer_hz: r.u64(),
-        }
+        let (a, b, c, d, e, f) = (r.u64(), r.u64(), r.u64(), r.u64(), r.u64(), r.u64());
+        Clock::new(a, b, c, d, e, f)
     }
 }
 
@@ -897,16 +1050,9 @@ mod tests {
             .into_iter(),
         )
         .unwrap();
-        Clock {
-            tsc_hz: 2_000_000_000,
-            tsc_at_zero: 77,
-            ticks: 1500,
-            monotonic_ns: 1_500_000_123,
-            boot_system_time: 133_000_000_000_000_000,
-            timer_hz: 62_500_000,
-        }
-        .write(&mut w)
-        .unwrap();
+        Clock::new(2_000_000_000, 77, 1500, 1_500_000_123, 133_000_000_000_000_000, 62_500_000)
+            .write(&mut w)
+            .unwrap();
         Framebuffer {
             phys: 0xfd00_0000,
             width: 1280,
@@ -943,9 +1089,9 @@ mod tests {
         assert_eq!(modules[1].cmdline, "tar:x");
         assert_eq!(modules[1].len, 5);
         let c = Clock::read(&mut rec.section(tag::CLOCK).unwrap());
-        assert_eq!(c.monotonic_ns, 1_500_000_123);
-        assert_eq!(c.boot_system_time, 133_000_000_000_000_000);
-        assert_eq!(c.timer_hz, 62_500_000);
+        assert_eq!(c.monotonic_ns(), 1_500_000_123);
+        assert_eq!(c.boot_system_time(), 133_000_000_000_000_000);
+        assert_eq!(c.timer_hz(), 62_500_000);
         let f = Framebuffer::read(&mut rec.section(tag::FRAMEBUFFER).unwrap());
         assert_eq!((f.width, f.pitch, f.bpp, f.memory_model), (1280, 5120, 32, 1));
         assert_eq!(f.masks, [8, 16, 8, 8, 8, 0]);
@@ -1072,7 +1218,10 @@ mod tests {
         let mut r = rec.section(tag::CLOCK).unwrap();
         assert_eq!(r.version, 0);
         let c = Clock::read(&mut r);
-        assert_eq!((c.tsc_hz, c.monotonic_ns, c.boot_system_time, c.timer_hz), (10, 40, 0, 0));
+        assert_eq!(
+            (c.tsc_hz(), c.monotonic_ns(), c.boot_system_time(), c.timer_hz()),
+            (10, 40, 0, 0)
+        );
         let v = Volume::read(&mut rec.section(tag::VOLUME).unwrap());
         assert_eq!((v.sectors, v.generation, v.area, v.tail), (1, 2, 3, 4));
     }
@@ -1107,5 +1256,64 @@ mod tests {
         let rec = parse(&bytes).unwrap();
         assert_eq!(rec.section(tag::CMDLINE).unwrap().rest(), b"abc");
         assert_eq!(rec.section(tag::CPUS).unwrap().u32(), 1);
+    }
+
+    #[test]
+    fn clock_bytes_are_the_same_in_every_build() {
+        // The `handover_next` build lays `Clock` out differently in memory;
+        // the record's bytes are the same (this runs in both builds).
+        let mut w = Writer::new(1).unwrap();
+        Clock::new(1, 2, 3, 4, 5, 6).write(&mut w).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = parse(&bytes).unwrap();
+        let data = rec.section(tag::CLOCK).unwrap().rest();
+        let mut expected = Vec::new();
+        for v in 1u64..=6 {
+            expected.extend_from_slice(&v.to_le_bytes());
+        }
+        assert_eq!(data, &expected[..]);
+        let c = Clock::read(&mut rec.section(tag::CLOCK).unwrap());
+        assert_eq!([c.tsc_hz(), c.tsc_at_zero(), c.ticks(), c.monotonic_ns()], [1, 2, 3, 4]);
+        assert_eq!([c.boot_system_time(), c.timer_hz()], [5, 6]);
+    }
+
+    #[test]
+    fn sections_that_need_a_newer_reader() {
+        let newest = crate::handover::version::writes(tag::THREADS);
+        // REQUIRED: the record is refused.
+        let mut w = Writer::new(1).unwrap();
+        w.section_needing(tag::THREADS, newest + 1, REQUIRED, newest + 1).unwrap();
+        let bytes = w.finish().unwrap();
+        assert_eq!(
+            parse(&bytes).err(),
+            Some(RecordError::TooNew {
+                tag: tag::THREADS,
+                version: newest + 1,
+                must_read: newest + 1
+            })
+        );
+        // must_read is at bytes 12-13 of the section's header.
+        assert_eq!(bytes[HEADER_LEN + 12..HEADER_LEN + 14], (newest + 1).to_le_bytes());
+        // A newer version an older reader may take (fields added at the
+        // end): read, the new fields ignored.
+        let mut w = Writer::new(1).unwrap();
+        w.section_needing(tag::THREADS, newest + 1, REQUIRED, newest).unwrap();
+        w.u32(7).unwrap();
+        w.u32(8).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = parse(&bytes).unwrap();
+        assert_eq!(rec.section(tag::THREADS).unwrap().u32(), 7);
+        // Optional: skipped, as if it were not there.
+        let mut w = Writer::new(1).unwrap();
+        w.section_needing(tag::CLOCK, 9, 0, 9).unwrap();
+        w.u64(1).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = parse(&bytes).unwrap();
+        assert!(rec.section(tag::CLOCK).is_none());
+        // A record from a kernel before must_read (0 there): any reader.
+        let mut w = Writer::new(1).unwrap();
+        w.section(tag::THREADS, 2, REQUIRED).unwrap();
+        let bytes = w.finish().unwrap();
+        assert!(parse(&bytes).unwrap().section(tag::THREADS).is_some());
     }
 }

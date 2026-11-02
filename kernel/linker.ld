@@ -8,6 +8,7 @@ PHDRS
     rodata PT_LOAD FLAGS(4);    /* R */
     text   PT_LOAD FLAGS(5);    /* R X */
     data   PT_LOAD FLAGS(6);    /* R W */
+    note   PT_NOTE FLAGS(4);    /* what the kernel reads of a handover record */
 }
 
 SECTIONS
@@ -23,6 +24,9 @@ SECTIONS
         KEEP(*(.limine_requests_end))
     } :rodata
     .rodata : { *(.rodata .rodata.*) } :rodata
+    /* handover::version's note (R9 (d)): in the read-only segment and in a
+       PT_NOTE of its own, so a running kernel finds it in the next one's file. */
+    .gala_note : ALIGN(8) { KEEP(*(.gala_note)) } :rodata :note
     . = ALIGN(4096);
     __rodata_end = .;
 

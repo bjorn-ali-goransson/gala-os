@@ -47,6 +47,14 @@ struct FileMapping {
 /// SEC_FILE: reported for sections backed by a file.
 pub const SEC_FILE: u32 = 0x80_0000;
 
+/// The version of how `ImageLayout` lays an image out (and relocates it
+/// at an alternative base). A kernel handover maps carried programs'
+/// image pages from the next kernel's layout, and refuses a next kernel
+/// whose version differs before the point of no return
+/// (`handover::version::IMAGE_LAYOUT`): raise it with any change to the
+/// bytes a layout gives (alignment, what is zeroed, relocation).
+pub const LAYOUT_VERSION: u32 = 1;
+
 /// An executable image laid out at its preferred base (headers and
 /// sections at their RVAs), with the protection of every page.
 pub struct ImageLayout {

@@ -27,9 +27,9 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use super::programs::{
-    self, ApcRec, EventRec, ExitedThreadRec, ExtendedState, FileRec, FileSectionRec, HandleRec,
-    ImageSectionRec, MutantRec, ObjectHead, PacketRec, PageKind, PageRec, PipeEndRec, PipeRec,
-    ProcessRec, SectionRec, SemaphoreRec, ThreadRec, TimerRec, TokenRec, ViewRec, thread_state,
+    self, ApcRec, EventRec, ExitedThreadRec, FileRec, FileSectionRec, HandleRec, ImageSectionRec,
+    MutantRec, ObjectHead, PacketRec, PageKind, PageRec, PipeEndRec, PipeRec, ProcessRec,
+    SectionRec, SemaphoreRec, ThreadRec, TimerRec, TokenRec, ViewRec, thread_state,
 };
 use super::record::{self, Range, Reader, Record, Wide, Writer, tag};
 use crate::mm::PAGE_SIZE;
@@ -149,6 +149,13 @@ impl Programs {
     pub fn object_count(&self) -> usize {
         self.objects.len()
     }
+
+    /// The extended state the threads carry (XCR0 bits): what this kernel
+    /// enables (x87, SSE, AVX, AVX-512 where the CPU has it); the next
+    /// kernel's note must say it restores all of it.
+    pub fn xstate(&self) -> u64 {
+        if self.threads.is_empty() { 0 } else { platform::xstate_enabled() }
+    }
 }
 
 /// Lets the programs run again (a refused or failed handover).
@@ -213,23 +220,32 @@ fn wait_quiet() -> Result<Vec<ThreadState>, Refusal> {
     }
 }
 
-/// A carried thread's x87/SSE/AVX state: the whole XSAVE area (THREADS
-/// version 3) if it was saved under the XCR0 this kernel enables (a
-/// kernel enabling other components cannot load it: the handover's
-/// programs are refused), else (an older writer) the FXSAVE image.
-fn carried_xstate(t: &ThreadRec) -> Result<XState, NtStatus> {
-    if t.xstate.mask == 0 {
-        return Ok(XState::from_legacy(&t.fx));
+/// A carried thread's x87/SSE/AVX state: the FXSAVE part, and the XSAVE
+/// area past it (THREADS version 3's blob) when it was saved under the
+/// XCR0 this kernel enables. Other extended state cannot be restored here
+/// (the running kernel checked the note, `version::agree_xstate`, but this
+/// kernel chose its XCR0 on this CPU): the programs are refused.
+fn carried_xstate(t: &ThreadRec<'_>) -> Result<XState, NtStatus> {
+    let mut state = XState::from_legacy(&t.fx);
+    if t.xstate == programs::XSTATE_LEGACY && t.extended.is_empty() {
+        return Ok(state);
     }
     let enabled = platform::xstate_enabled();
-    if t.xstate.mask != enabled || (t.xstate.len as usize) < crate::arch::xstate::size_of(enabled) {
+    let len = crate::arch::xstate::size_of(enabled) - 512;
+    if t.xstate != enabled || t.extended.len() < len {
         warn!(
-            "handover: thread {} was saved under XCR0 {:#x} ({} bytes), this kernel enables {:#x}",
-            t.tid, t.xstate.mask, t.xstate.len, enabled
+            "handover: thread {} carried under XCR0 {:#x} ({} bytes), this kernel enables {:#x}",
+            t.tid,
+            t.xstate,
+            t.extended.len(),
+            enabled
         );
         return Err(NtStatus::NOT_SUPPORTED);
     }
-    Ok(t.xstate.state())
+    let legacy_bv = state.bv();
+    state.0[512..512 + len].copy_from_slice(&t.extended[..len]);
+    state.set_bv(state.bv() | legacy_bv);
+    Ok(state)
 }
 
 /// Every live thread as carried, or why one cannot be (yet).
@@ -700,6 +716,7 @@ impl Programs {
                 path: q.path,
                 image_digest: q.layout().digest(),
                 token: self.id(&q.token.lock().clone()),
+                handovers: handovers_of(q.id).saturating_add(1),
             }
             .write(w)?;
         }
@@ -718,22 +735,32 @@ impl Programs {
             }
             w.end_entry(e)?;
         }
-        programs::section(w, tag::THREADS)?;
+        // Each thread's whole extended state: the FXSAVE part in `fx`, the
+        // XSAVE area past it (header and components, standard format) in
+        // the blob, under this kernel's XCR0. With any blob filled, THREADS
+        // needs a version-3 reader (`programs::threads_must_read`).
+        let enabled = platform::xstate_enabled();
+        let size = crate::arch::xstate::size_of(enabled);
+        let extended = enabled & !programs::XSTATE_LEGACY != 0 && !self.threads.is_empty();
+        w.section_needing(
+            tag::THREADS,
+            programs::version_of(tag::THREADS),
+            record::REQUIRED,
+            programs::threads_must_read(extended),
+        )?;
         for t in &self.threads {
             let (state, number, regs, xs, deadline, mxcsr) = match &t.resume {
                 Resume::Syscall { number, regs, fx, deadline } => {
                     (thread_state::SYSCALL, *number, *regs, Some(fx), *deadline, None)
                 }
                 Resume::User { regs, fx } => (thread_state::USER, 0, *regs, Some(fx), None, None),
-                Resume::Start { regs, mxcsr } => {
-                    (thread_state::START, 0, *regs, None, None, *mxcsr)
-                }
+                Resume::Start { regs, mxcsr } => (thread_state::START, 0, *regs, None, None, *mxcsr),
             };
-            // The x87/SSE part alone (what a version-2 reader takes), and
-            // the whole state with the XCR0 it was saved under.
             let fx = xs.map_or([0; 512], |s| *s.legacy());
-            let xstate = xs
-                .map_or(ExtendedState::NONE, |s| ExtendedState::of(s, platform::xstate_enabled()));
+            let (xstate, blob): (u64, &[u8]) = match xs {
+                Some(s) if extended => (enabled, &s.0[512..size]),
+                _ => (programs::XSTATE_LEGACY, &[]),
+            };
             let mut apcs: Vec<ApcRec> = Vec::new();
             for a in &t.apcs {
                 apcs.try_push([a.routine, a.args[0], a.args[1], a.args[2]])?;
@@ -758,6 +785,7 @@ impl Programs {
                 mxcsr,
                 impersonation: impersonation_of(&t.object).map_or(0, |o| self.id(&o)),
                 xstate,
+                extended: blob,
             }
             .write(w, &apcs)?;
         }
@@ -1093,6 +1121,19 @@ fn frame_ranges(frames: &[u64]) -> impl Iterator<Item = Range> + '_ {
 /// starting the program again).
 static RESUMED: IrqMutex<Vec<KArc<Process>>> = IrqMutex::new(Vec::new());
 
+/// (pid, handovers come through) of the processes a handover brought, for
+/// PROCESSES version 3 (`handover_next`; the default build keeps none).
+static HANDOVERS: IrqMutex<Vec<(u64, u32)>> = IrqMutex::named("handover.counts", Vec::new());
+
+fn note_handovers(pid: u64, count: u32) -> Result<(), AllocError> {
+    HANDOVERS.lock().try_push((pid, count))
+}
+
+/// The handovers process `pid` has come through (0: started here).
+fn handovers_of(pid: u64) -> u32 {
+    HANDOVERS.lock().iter().find(|e| e.0 == pid).map_or(0, |e| e.1)
+}
+
 /// Takes the carried process named `name` (an executable's file name), if
 /// any (the list then forgets it, so its memory goes when it ends).
 pub fn resumed(name: &str) -> Option<KArc<Process>> {
@@ -1110,8 +1151,9 @@ pub fn restore(rec: &Record<'_>) {
     match restore_all(rec) {
         Ok((processes, threads)) => {
             // How long the programs were stopped (the clock at the record).
-            let at =
-                rec.section(tag::CLOCK).map_or(0, |mut c| record::Clock::read(&mut c).monotonic_ns);
+            let at = rec
+                .section(tag::CLOCK)
+                .map_or(0, |mut c| record::Clock::read(&mut c).monotonic_ns());
             let now = crate::time::raw_monotonic_ns();
             crate::info!(
                 "handover: {processes} process(es) and {threads} thread(s) resumed, {} ms after \
@@ -1401,6 +1443,17 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         }
         let p = ProcessRec::read(&mut e);
         let process = restore_process(rec, &p, &objects)?;
+        if programs::version_of(tag::PROCESSES) >= 3 {
+            // 0: an older writer did not count (this one is the first
+            // counted).
+            let count = p.handovers.max(1);
+            note_handovers(process.id, count).map_err(no_memory)?;
+            crate::info!(
+                "handover: process {} has come through {count} handover(s){}",
+                process.name,
+                if p.handovers == 0 { " (counted from here: PROCESSES version 2)" } else { "" }
+            );
+        }
         processes.try_push(process).map_err(no_memory)
     })?;
     let find = |pid: u64| processes.iter().find(|p| p.id == pid).cloned();
@@ -1414,9 +1467,9 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
     let mut live = Vec::new();
     each(rec, tag::THREADS, |mut e| {
         let (t, apc_table) = ThreadRec::read(&mut e);
+        let fx = carried_xstate(&t)?;
         let process = find(t.pid).ok_or(NtStatus::INVALID_CID)?;
         let regs = user_regs(&t.regs);
-        let fx = carried_xstate(&t)?;
         let resume = match t.state {
             thread_state::SYSCALL => {
                 if !regs.is_valid() || !syscalls::restartable(t.number) {

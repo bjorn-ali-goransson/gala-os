@@ -24,6 +24,12 @@ shasha = []
 # gala-um: the kernel library as the NT layer inside a Linux process
 # (kernel/src/hosted, docs/GALA_UM.md). Never set for the kernel binary.
 hosted = ["dep:libc"]
+# R9 (d): a stand-in for the next release, with a changed handover state
+# format (handover::version: PROCESSES version 3, the WRITER section, the
+# CLOCK record's in-memory structure laid out differently). xtask builds
+# it into its own target directory for the handover_upgrade and
+# handover_downgrade_refused scenarios. Never set for a release.
+handover_next = []
 
 [dependencies]
 libc = { version = "=0.2.191", optional = true }

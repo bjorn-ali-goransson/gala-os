@@ -1184,6 +1184,25 @@ passes alone): if it recurs, its log says which bound was missed.
   the layout differs (`INVALID_IMAGE_HASH` in `cannot resume the
   programs`) or a page was taken as shared that was private (only
   borrowed frames equal to `ImageLayout::view_frame` are IMAGE_VIEW).
+- Changing the handover record's format (R9 (d), ARCHITECTURE
+  "Versions and negotiation"): change the section's writer and reader
+  (fields at the end only), raise its version in `handover::version::
+  KINDS` (and its comment), decide `must_read` (raise it to the new
+  version only if a reader ignoring the new fields would lose what a
+  program sees), make the reader give the new fields their defaults for
+  older versions, and add host tests (the previous version read with
+  defaults, the new one round-tripped). Run `cargo test -p kernel --lib`
+  and `cargo test -p kernel --lib --features handover_next handover::`
+  (both builds), then `cargo xtask boot-test handover_upgrade` and
+  `handover_downgrade_refused` (the default build to the next and back:
+  if the default build now writes what `handover_next` writes, move
+  `handover_next` ahead so the scenarios still cross a format change).
+  `handover: refused: the next kernel (...) reads X up to version N` is
+  negotiation working; `bootloader handoff rejected: handover record:
+  section X version V needs a reader of version M` in the new kernel
+  means a record got past negotiation (a must_read the note did not
+  match): check `KINDS` against the writers (`readelf -n` on the kernel
+  shows the note).
 - A new system call that blocks: decide whether a thread blocked in it
   can be carried (`syscalls::restartable` and `restart_as`); a call with
   a side effect before its wait (signal-and-wait, alert-by-id) carries

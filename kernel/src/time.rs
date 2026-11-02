@@ -181,14 +181,14 @@ pub fn arm_clock_control() {
 /// The clock's state for a kernel handover (the next kernel goes on from
 /// it: `resume`).
 pub fn snapshot() -> crate::handover::record::Clock {
-    crate::handover::record::Clock {
-        tsc_hz: TSC_HZ.load(Ordering::Relaxed),
-        tsc_at_zero: TSC_AT_BOOT.load(Ordering::Relaxed),
-        ticks: TICKS.load(Ordering::Relaxed),
-        monotonic_ns: raw_monotonic_ns(),
-        boot_system_time: SYSTEM_TIME_AT_INIT.load(Ordering::Relaxed),
-        timer_hz: CALIBRATION.lock().map_or(0, |c| c.timer_hz),
-    }
+    crate::handover::record::Clock::new(
+        TSC_HZ.load(Ordering::Relaxed),
+        TSC_AT_BOOT.load(Ordering::Relaxed),
+        TICKS.load(Ordering::Relaxed),
+        raw_monotonic_ns(),
+        SYSTEM_TIME_AT_INIT.load(Ordering::Relaxed),
+        CALIBRATION.lock().map_or(0, |c| c.timer_hz),
+    )
 }
 
 /// After a kernel handover: the clock goes on from the previous kernel's
@@ -201,15 +201,15 @@ pub fn snapshot() -> crate::handover::record::Clock {
 /// deadlines of the waits a handover carries are ticks; restarting the
 /// count from the TSC would end them early by that lag.
 pub fn resume(clock: &crate::handover::record::Clock) {
-    if clock.tsc_hz == 0 {
+    if clock.tsc_hz() == 0 {
         return;
     }
-    TSC_HZ.store(clock.tsc_hz, Ordering::Relaxed);
-    TSC_AT_BOOT.store(clock.tsc_at_zero, Ordering::Relaxed);
-    let passed = raw_monotonic_ns().saturating_sub(clock.monotonic_ns);
-    let ticks = clock.ticks + passed / (1_000_000_000 / TICK_HZ);
+    TSC_HZ.store(clock.tsc_hz(), Ordering::Relaxed);
+    TSC_AT_BOOT.store(clock.tsc_at_zero(), Ordering::Relaxed);
+    let passed = raw_monotonic_ns().saturating_sub(clock.monotonic_ns());
+    let ticks = clock.ticks() + passed / (1_000_000_000 / TICK_HZ);
     TICKS.store(ticks, Ordering::Relaxed);
-    SYSTEM_TIME_AT_INIT.store(clock.boot_system_time, Ordering::Relaxed);
+    SYSTEM_TIME_AT_INIT.store(clock.boot_system_time(), Ordering::Relaxed);
 }
 
 /// Nanoseconds since `init`, from the TSC (0 before calibration); real
