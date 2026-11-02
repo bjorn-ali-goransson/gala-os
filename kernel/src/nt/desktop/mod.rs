@@ -241,6 +241,8 @@ pub struct Window {
     /// Its icon (GalaWindowSetIcon), ICON x ICON 0xAARRGGBB pixels
     /// (straight alpha); empty: none (the taskbar shows a lettered tile).
     icon: Vec<u32>,
+    /// The same at SMALL_ICON for the caption.
+    small_icon: Vec<u32>,
     /// Its rectangle before Snap put it on a half of the screen (Win+Down
     /// gives it back).
     unsnapped: Option<(i32, i32, u32, u32)>,
@@ -253,21 +255,29 @@ pub const ICON: usize = 24;
 /// each output pixel averages the source area it covers (box filter,
 /// weighted by alpha so transparent pixels don't darken the edges).
 pub fn scale_icon(src: &[u32], size: usize) -> Option<Vec<u32>> {
+    scale_icon_to(src, size, ICON)
+}
+
+/// The caption's icon size (Windows' small icon, SM_CXSMICON).
+pub const SMALL_ICON: usize = 16;
+
+/// `scale_icon` to `to` x `to` pixels.
+pub fn scale_icon_to(src: &[u32], size: usize, to: usize) -> Option<Vec<u32>> {
     let mut out = Vec::new();
-    out.try_reserve_exact(ICON * ICON).ok()?;
+    out.try_reserve_exact(to * to).ok()?;
     if size == 0 || src.len() < size * size {
         return None;
     }
-    for oy in 0..ICON {
-        for ox in 0..ICON {
-            // The source span [x0, x1) in units of 1/ICON of a source pixel.
+    for oy in 0..to {
+        for ox in 0..to {
+            // The source span [x0, x1) in units of 1/to of a source pixel.
             let (x0, x1) = (ox * size, (ox + 1) * size);
             let (y0, y1) = (oy * size, (oy + 1) * size);
             let (mut a, mut r, mut g, mut b, mut area) = (0u64, 0u64, 0u64, 0u64, 0u64);
-            for sy in y0 / ICON..y1.div_ceil(ICON) {
-                let hy = ((sy + 1) * ICON).min(y1) - (sy * ICON).max(y0);
-                for sx in x0 / ICON..x1.div_ceil(ICON) {
-                    let wx = ((sx + 1) * ICON).min(x1) - (sx * ICON).max(x0);
+            for sy in y0 / to..y1.div_ceil(to) {
+                let hy = ((sy + 1) * to).min(y1) - (sy * to).max(y0);
+                for sx in x0 / to..x1.div_ceil(to) {
+                    let wx = ((sx + 1) * to).min(x1) - (sx * to).max(x0);
                     let wgt = (wx * hy) as u64;
                     let p = src[sy * size + sx];
                     let pa = u64::from(p >> 24);
@@ -430,9 +440,18 @@ impl Window {
         for x in nx..nx + 10 {
             c.put(x, cy, glyph, 255);
         }
-        // The title, 12 pixels, at the left.
+        // The small icon, then the title (12 pixels), at the left.
+        let mut text_x = 12;
+        if self.small_icon.len() == SMALL_ICON * SMALL_ICON {
+            let top = (h - SMALL_ICON as i64) / 2;
+            for (k, &p) in self.small_icon.iter().enumerate() {
+                let (px, py) = ((k % SMALL_ICON) as i64, (k / SMALL_ICON) as i64);
+                c.put(12 + px, top + py, p, p >> 24);
+            }
+            text_x += SMALL_ICON as i64 + 8;
+        }
         let title = char::decode_utf16(self.title.iter().copied()).map(|c| c.unwrap_or('?'));
-        c.text(12, (h - Font::Ui12.height()) / 2, title, glyph, Font::Ui12, min_x - 8);
+        c.text(text_x, (h - Font::Ui12.height()) / 2, title, glyph, Font::Ui12, min_x - 8);
         self.caption = Some(c);
         self.caption_state = Some(state);
     }
@@ -641,6 +660,7 @@ impl Desktop {
             client,
             title: name,
             icon: Vec::new(),
+            small_icon: Vec::new(),
             unsnapped: None,
             popup,
         };
@@ -791,13 +811,20 @@ impl Desktop {
         pixels: &[u32],
         size: usize,
     ) -> Result<(), NtStatus> {
-        let icon = if pixels.is_empty() {
-            Vec::new()
+        let (icon, small) = if pixels.is_empty() {
+            (Vec::new(), Vec::new())
         } else {
-            scale_icon(pixels, size).ok_or(NtStatus::NO_MEMORY)?
+            (
+                scale_icon(pixels, size).ok_or(NtStatus::NO_MEMORY)?,
+                scale_icon_to(pixels, size, SMALL_ICON).ok_or(NtStatus::NO_MEMORY)?,
+            )
         };
         let win = self.find(id, owner)?;
         win.icon = icon;
+        win.small_icon = small;
+        win.caption_state = None;
+        let r = win.caption_rect();
+        self.add_damage(r);
         self.taskbar_dirty = true;
         self.refresh();
         Ok(())

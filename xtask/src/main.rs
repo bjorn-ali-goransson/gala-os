@@ -4271,6 +4271,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                         PixelCheck::AnyIn(600, 760, 32, 30, 0x167fd6), // the fortress
                         PixelCheck::AnyIn(640, 788, 48, 8, 0x005fb8), // the active window's pill
                         PixelCheck::AnyIn(648, 760, 32, 24, 0xff8000), // its class icon
+                        PixelCheck::At(121, 117, 0xff8000),        // and in its caption
                     ],
                 },
                 ScreenStep {

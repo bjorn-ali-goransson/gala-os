@@ -2185,7 +2185,7 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   that ends are destroyed.
 - **Frame**: a 1-pixel outline and a 32-pixel caption (user32's metrics
   match: `user/user32/src/window.rs` BORDER/CAPTION), light grey, the
-  title at the left (greyed when inactive), minimize, maximize/restore
+  window's icon (16 x 16) and the title at the left (greyed when inactive), minimize, maximize/restore
   and close buttons (46 px each; close turns red under the pointer, the
   others grey).
 - **Shell**: the bottom 48 rows are the translucent taskbar: centred, the
@@ -2287,8 +2287,11 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   (GetDIBits, 32 bits; alpha from the colour bitmap, else from the mask;
   a monochrome icon black and white), averages icons above 64 pixels
   down to 32, and calls GalaWindowSetIcon. conhost's class has its own
-  icon (a dark square with ">_", drawn in code). TODO: the small icon in
-  the caption; conhost showing its program's icon.
+  icon (a dark square with ">_", drawn in code). The desktop keeps the
+  icon at 24 x 24 for the taskbar and 16 x 16 (SM_CXSMICON) for the
+  caption's left, before the title. TODO: user32 handing over the small
+  icon itself for the caption (now the big one, scaled); conhost showing
+  its program's icon.
 - **user32** (`user/user32/src/window.rs`): classes, windows
   (HWND = 0x10000 + 16 * slot), one message queue per process (256
   entries, an auto-reset event) filtered by thread, WM_PAINT synthesised

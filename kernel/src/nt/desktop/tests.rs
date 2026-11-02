@@ -299,6 +299,9 @@ fn icons_scale_by_area_and_show_on_the_taskbar_button() {
     let green = [0xff00_c000u32; 32 * 32];
     d.set_icon(a, 7, &green, 32).unwrap();
     assert_eq!(d.pixel(ix, iy), 0x0000_c000);
+    // And at the caption's left, 16 x 16, before the title.
+    let caption = d.window(a).unwrap().caption_rect();
+    assert_eq!(d.pixel(caption.x + 12 + 8, caption.y + i64::from(CAPTION) / 2), 0x0000_c000);
     assert_eq!(d.set_icon(a, 8, &green, 32).err(), Some(NtStatus::INVALID_HANDLE));
     d.set_icon(a, 7, &[], 0).unwrap();
     assert_eq!(d.pixel(ix, iy), tile);
