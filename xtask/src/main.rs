@@ -280,6 +280,7 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "comdlg32", file: "comdlg32.dll", exported_as: "testcomdlg32.dll" },
     Dll { package: "oleacc", file: "oleacc.dll", exported_as: "testoleacc.dll" },
     Dll { package: "mpr", file: "mpr.dll", exported_as: "testmpr.dll" },
+    Dll { package: "msimg32", file: "msimg32.dll", exported_as: "testmsimg32.dll" },
     Dll { package: "odbc32", file: "odbc32.dll", exported_as: "testodbc32.dll" },
     Dll { package: "wldap32", file: "wldap32.dll", exported_as: "testwldap32.dll" },
     Dll { package: "wsock32", file: "wsock32.dll", exported_as: "testwsock32.dll" },
@@ -591,6 +592,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gdi32_test", "msvcrt.dll", "Windows/System32"),
     ("gdi32_test", "user32.dll", "Windows/System32"),
     ("gdi32_test", "gdi32.dll", "Windows/System32"),
+    ("gdi32_test", "msimg32.dll", "Windows/System32"),
     ("gdi32_test", "user/bin/gdi32_test.exe", "gala"),
     ("comctl32_test", "ntdll.dll", "Windows/System32"),
     ("comctl32_test", "kernel32.dll", "Windows/System32"),
@@ -911,6 +913,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("filezilla", "comdlg32.dll", "Windows/System32"),
     ("filezilla", "oleacc.dll", "Windows/System32"),
     ("filezilla", "mpr.dll", "Windows/System32"),
+    ("filezilla", "msimg32.dll", "Windows/System32"),
     ("filezilla", "target/prebuilt/filezilla/", "filezilla"),
     ("mingit", "ntdll.dll", "Windows/System32"),
     ("mingit", "kernel32.dll", "Windows/System32"),
@@ -4225,6 +4228,9 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     pixels: &[
                         PixelCheck::At(560, 470, 0xffffff),
                         PixelCheck::At(470, 520, 0xffffff),
+                        // The status bar's green LED (AlphaBlend; it was
+                        // on black, then washed out).
+                        PixelCheck::AnyIn(1208, 716, 10, 4, 0x015001),
                     ],
                 },
                 ScreenStep {

@@ -277,7 +277,11 @@ impl Window {
         } else {
             let (cw, _) = self.client_size();
             let (cx, cy) = (lx - b, ly - b - i64::from(CAPTION));
-            self.client.get((cy * i64::from(cw) + cx) as usize).copied().unwrap_or(0x00ff_ffff)
+            // A program's fourth byte (e.g. an alpha it copied in) is not
+            // the window's: client pixels are opaque.
+            self.client
+                .get((cy * i64::from(cw) + cx) as usize)
+                .map_or(0x00ff_ffff, |p| p & 0x00ff_ffff)
         };
         blend(outline, c, inner)
     }

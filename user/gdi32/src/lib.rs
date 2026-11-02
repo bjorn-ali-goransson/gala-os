@@ -17,6 +17,7 @@
 
 extern crate alloc;
 
+mod blend;
 mod dib;
 mod draw;
 mod font;

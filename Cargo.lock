@@ -856,6 +856,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "msimg32"
+version = "0.1.0"
+
+[[package]]
 name = "msvcrt"
 version = "0.1.0"
 dependencies = [

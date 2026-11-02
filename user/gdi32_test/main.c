@@ -614,6 +614,117 @@ static void dibs(void) {
     DeleteDC(screen);
 }
 
+static int close_to(DWORD got, DWORD want) {
+    for (int k = 0; k < 24; k += 8) {
+        int d = (int)((got >> k) & 0xff) - (int)((want >> k) & 0xff);
+        if (d < -2 || d > 2)
+            return 0;
+    }
+    return 1;
+}
+
+/* A top-down 32-bit DIB section of w x h, selected into a new memory DC. */
+static HDC dib_dc(int w, int h, DWORD **bits) {
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    HDC dc = CreateCompatibleDC(NULL);
+    HBITMAP b = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, (void **)bits, NULL, 0);
+    CHECK(dc != NULL && b != NULL);
+    SelectObject(dc, b);
+    return dc;
+}
+
+/* msimg32: AlphaBlend (premultiplied source alpha and a constant alpha),
+ * TransparentBlt (a colour key), GradientFill (rectangles). */
+static void msimg(void) {
+    DWORD *dst, *src;
+    HDC d = dib_dc(4, 1, &dst);
+    HDC s = dib_dc(4, 1, &src);
+    for (int i = 0; i < 4; i++)
+        dst[i] = 0x00ffffff;
+    src[0] = 0x00000000; /* transparent */
+    src[1] = 0xff102030; /* opaque */
+    src[2] = 0x80400000; /* half, premultiplied */
+    src[3] = 0xff000000; /* opaque black */
+    BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    CHECK(AlphaBlend(d, 0, 0, 4, 1, s, 0, 0, 4, 1, bf));
+    CHECK((dst[0] & 0xffffff) == 0xffffff && (dst[1] & 0xffffff) == 0x102030);
+    CHECK(close_to(dst[2], 0xbf7f7f) && (dst[3] & 0xffffff) == 0);
+
+    /* No per-pixel alpha: the constant alpha alone (128 of 255). */
+    for (int i = 0; i < 4; i++)
+        dst[i] = 0x00ffffff;
+    BLENDFUNCTION half = {AC_SRC_OVER, 0, 128, 0};
+    CHECK(AlphaBlend(d, 0, 0, 4, 1, s, 0, 0, 4, 1, half));
+    CHECK(close_to(dst[3], 0x7f7f7f) && close_to(dst[0], 0x7f7f7f));
+    CHECK(!AlphaBlend(d, 0, 0, 4, 1, s, 0, 0, 5, 1, bf)); /* outside the source */
+
+    /* A 32-bit device bitmap made from a DIB keeps the alpha byte (wx
+     * draws its PNGs so): CreateDIBitmap, GetDIBits, then AlphaBlend. */
+    DWORD with_alpha[2] = {0x80400000, 0x00000000};
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = 2;
+    bi.bmiHeader.biHeight = -1;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    HDC screen = GetDC(NULL);
+    HBITMAP ddb = CreateDIBitmap(screen, &bi.bmiHeader, CBM_INIT, with_alpha, &bi, DIB_RGB_COLORS);
+    CHECK(ddb != NULL);
+    DWORD back[2] = {0, 1};
+    CHECK(GetDIBits(screen, ddb, 0, 1, back, &bi, DIB_RGB_COLORS) == 1 && back[0] == 0x80400000 && back[1] == 0);
+    HDC m = CreateCompatibleDC(screen);
+    HGDIOBJ was = SelectObject(m, ddb);
+    dst[0] = dst[1] = 0x00ffffff;
+    CHECK(AlphaBlend(d, 0, 0, 2, 1, m, 0, 0, 2, 1, bf));
+    CHECK(close_to(dst[0], 0xbf7f7f) && (dst[1] & 0xffffff) == 0xffffff);
+    SelectObject(m, was);
+    DeleteObject(ddb);
+    DeleteDC(m);
+    ReleaseDC(NULL, screen);
+
+    /* BitBlt SRCCOPY between 32-bit bitmaps copies the fourth byte too
+     * (wxBitmap::GetSubBitmap cuts icons out of a strip so). */
+    HBITMAP piece = CreateBitmap(2, 1, 1, 32, NULL);
+    HDC pd = CreateCompatibleDC(NULL);
+    HGDIOBJ pwas = SelectObject(pd, piece);
+    src[0] = 0x80400000;
+    src[1] = 0x00000000;
+    CHECK(BitBlt(pd, 0, 0, 2, 1, s, 0, 0, SRCCOPY));
+    dst[0] = dst[1] = 0x00ffffff;
+    CHECK(AlphaBlend(d, 0, 0, 2, 1, pd, 0, 0, 2, 1, bf));
+    CHECK(close_to(dst[0], 0xbf7f7f) && (dst[1] & 0xffffff) == 0xffffff);
+    SelectObject(pd, pwas);
+    DeleteObject(piece);
+    DeleteDC(pd);
+
+    /* TransparentBlt: source pixels of the key colour are left out. */
+    src[0] = 0x00ff0000;
+    src[1] = 0x0000ff00;
+    dst[0] = dst[1] = 0x000000ff;
+    CHECK(TransparentBlt(d, 0, 0, 2, 1, s, 0, 0, 2, 1, RGB(255, 0, 0)));
+    CHECK((dst[0] & 0xffffff) == 0x0000ff && (dst[1] & 0xffffff) == 0x00ff00);
+
+    /* GradientFill: red to blue across 256 pixels, then top to bottom. */
+    DWORD *g;
+    HDC gd = dib_dc(256, 2, &g);
+    TRIVERTEX v[2] = {{0, 0, 0xff00, 0, 0, 0}, {256, 2, 0, 0, 0xff00, 0}};
+    GRADIENT_RECT r = {0, 1};
+    CHECK(GradientFill(gd, v, 2, &r, 1, GRADIENT_FILL_RECT_H));
+    CHECK((g[0] & 0xffffff) == 0xff0000 && close_to(g[255], 0x0000ff) && close_to(g[128], 0x7f0080));
+    CHECK((g[256] & 0xffffff) == 0xff0000);
+    v[1].x = 1;
+    CHECK(GradientFill(gd, v, 2, &r, 1, GRADIENT_FILL_RECT_V));
+    CHECK((g[0] & 0xffffff) == 0xff0000 && close_to(g[256], 0x7f0080) && close_to(g[1], 0x7f0080) == 0);
+    DeleteDC(gd);
+    DeleteDC(s);
+    DeleteDC(d);
+}
+
 int main(void) {
     CHECK(MulDiv(10, 3, 4) == 8 && MulDiv(-10, 3, 4) == -8 && MulDiv(9, 96, 72) == 12);
     CHECK(MulDiv(1, 1, 0) == -1 && MulDiv(0x7fffffff, 2, 1) == -1 && MulDiv(7, 1, 2) == 4);
@@ -628,6 +739,7 @@ int main(void) {
     shapes();
     palettes();
     dibs();
+    msimg();
     printf("gdi32_test: ok\n");
     return 0;
 }

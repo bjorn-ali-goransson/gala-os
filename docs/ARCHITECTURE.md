@@ -2432,7 +2432,15 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   (a style bit) and drawn solid; hatch and pattern brushes are drawn in
   one colour (recorded); MaskBlt picks the foreground or background
   ROP3 by the monochrome mask; Arc, Pie and ExtFloodFill are recorded
-  and not drawn. Regions (`region.rs`): HRGN objects
+  and not drawn. msimg32's functions are gdi32's (`blend.rs`, as on
+  Windows; `user/msimg32` only forwards): GdiAlphaBlend by the
+  BLENDFUNCTION formulas (premultiplied per-pixel alpha with
+  AC_SRC_ALPHA, the constant alpha otherwise; FALSE when the source
+  rectangle leaves the source surface), GdiTransparentBlt (a colour key),
+  GdiGradientFill for GRADIENT_FILL_RECT_H/_V (triangles recorded).
+  32-bit surfaces keep the fourth byte where Windows does: SRCCOPY
+  between 32-bit surfaces, and 32-bit Get/SetDIBits (so CreateDIBitmap);
+  the desktop ignores it in window pixels. Regions (`region.rs`): HRGN objects
   (`Object::Region`, an index into a store) hold non-overlapping
   rectangles in one canonical banded form (equal regions, equal lists);
   CombineRgn cuts the plane at both regions' edges and keeps the cells

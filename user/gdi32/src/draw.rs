@@ -9,6 +9,8 @@ use crate::{
     with_dc,
 };
 
+const SRCCOPY: u32 = 0x00cc_0020;
+
 /// The DC's brush colour (None: the null brush).
 pub(crate) fn brush(dc: &Dc, slots: &[Object]) -> Option<u32> {
     match slots[dc.brush] {
@@ -340,7 +342,7 @@ pub extern "system" fn CreateDIBSection(
 }
 
 /// The source DC's state for a blit (None: not a DC).
-fn source(hdc: Handle) -> Option<Dc> {
+pub(crate) fn source(hdc: Handle) -> Option<Dc> {
     let i = slot_of(hdc)?;
     with(|slots, _| match slots[i] {
         Object::Dc(d) => Some(d),
@@ -406,6 +408,10 @@ pub extern "system" fn StretchBlt(
         let backwards_y = same && dy0 > ssy;
         let backwards_x = same && dx0 > ssx;
         let (aw, ah) = (w.abs(), h.abs());
+        let raw_copy = rop == SRCCOPY
+            && dc.surface.bpp == 32
+            && !dc.surface.mono
+            && s.is_some_and(|s| s.surface.bpp == 32 && !s.surface.mono);
         for j in 0..ah {
             let j = if backwards_y { ah - 1 - j } else { j };
             let ty = if h < 0 { dy0 - 1 - j } else { dy0 + j };
@@ -419,6 +425,12 @@ pub extern "system" fn StretchBlt(
                     Some(s) => {
                         let fx = ssx + (i * sw.abs() / aw) * sw.signum();
                         let fy = ssy + (j * sh.abs() / ah) * sh.signum();
+                        // A copy between 32-bit surfaces keeps the fourth
+                        // byte (an alpha AlphaBlend reads later).
+                        if raw_copy {
+                            dc.surface.put_raw(tx, ty, s.surface.get_raw(fx, fy).unwrap_or(0));
+                            continue;
+                        }
                         s.surface.get(fx, fy).unwrap_or(0)
                     }
                     None => 0,

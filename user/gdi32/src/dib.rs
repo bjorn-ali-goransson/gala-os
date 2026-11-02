@@ -94,6 +94,24 @@ impl Dib {
         }
     }
 
+    /// A 32-bit pixel with its fourth byte (others as `get`).
+    fn get_raw(&self, x: i32, y: i32) -> u32 {
+        if self.bpp != 32 {
+            return self.get(x, y);
+        }
+        // SAFETY: (x, y) inside the DIB.
+        unsafe { self.row(y).add(4 * x as usize).cast::<u32>().read_unaligned() }
+    }
+
+    /// Writes a 32-bit pixel with its fourth byte (others as `put`).
+    fn put_raw(&self, x: i32, y: i32, c: u32) {
+        if self.bpp != 32 {
+            return self.put(x, y, c);
+        }
+        // SAFETY: (x, y) inside the DIB.
+        unsafe { self.row(y).add(4 * x as usize).cast::<u32>().write_unaligned(c) };
+    }
+
     fn put(&self, x: i32, y: i32, c: u32) {
         let p = self.row(y);
         // SAFETY: (x, y) inside the DIB.
@@ -192,7 +210,8 @@ pub extern "system" fn GetDIBits(
         let sy = s.height - 1 - line as i32;
         let dy = d.height - 1 - line as i32;
         for x in 0..d.width.min(s.width) {
-            d.put(x, dy, s.get(x, sy).unwrap_or(0));
+            // 32 bits to 32 bits keeps the fourth byte (an alpha).
+            d.put_raw(x, dy, s.get_raw(x, sy).unwrap_or(0));
         }
     }
     end.saturating_sub(start) as i32
@@ -217,7 +236,7 @@ pub extern "system" fn SetDIBits(
         let sy = s.height - 1 - line as i32;
         let dy = d.height - 1 - line as i32;
         for x in 0..d.width.min(s.width) {
-            s.put(x, sy, d.get(x, dy));
+            s.put_raw(x, sy, d.get_raw(x, dy));
         }
     }
     end.saturating_sub(start) as i32

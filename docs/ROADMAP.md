@@ -584,10 +584,12 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    messages (wx's modal loop waits there; it used to ignore the queue),
    WaitMessage, GetMessageTime/Pos, TrackMouseEvent (and comctl32's
    _TrackMouseEvent), EnumThreadWindows, EnumWindows, UnregisterClassW
-   (user32_test); the tree's closed chevron points right. Next: what
-   looks wrong on it (the queue's tab bar is black, the combo box's
-   drop-down button), the menu bar, then using it (connecting to a
-   server).
+   (user32_test); the tree's closed chevron points right. msimg32.dll
+   (AlphaBlend, TransparentBlt, GradientFill over gdi32's Gdi* forms;
+   gdi32_test) and alpha kept through SRCCOPY and 32-bit DIB copies: the
+   status bar's icons, the queue's tab bar and the combo box's drop-down
+   button draw as on Windows (they were black). Next: the menu bar, then
+   using it (connecting to a server).
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,
