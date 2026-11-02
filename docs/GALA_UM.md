@@ -41,7 +41,7 @@ them.
 | Waits, APCs, suspension | the dispatcher logic unchanged; blocking and waking on a host futex per thread (an APC or suspension is a wake plus a flag; preemption-free suspension of a running thread uses a signal) |
 | Sections (shared memory, image sharing) | `memfd` per section object, `mmap(MAP_SHARED)` per view; copy-on-write views with `MAP_PRIVATE` |
 | Files | gala's ramfs unchanged; boot modules come from a host directory |
-| Time | `clock_gettime`; the tick-driven parts (timers) on a host timer thread |
+| Time | `clock_gettime`; the tick-driven parts (timers) on a host timer thread (`--sim`: a virtual clock, see "Deterministic simulation") |
 
 **Address space.** Windows programs may allocate anywhere below
 0x7fff_ffff_0000, and Linux puts the host binary and libraries in the same
@@ -268,6 +268,33 @@ console output). A page-sized NT allocation that finds no frame now
 fails instead of falling back to a host page, which
 `frame_of_heap_page` could not map (`um` exited with 3 under
 `frame:nth:k`). `cargo xtask fault-test` drives it.
+
+## Deterministic simulation (R5, 2026-11-02)
+
+`um --sim=<seed>`: one NT thread runs at a time, the seed decides which
+at every system call entry and exit, wait, yield and lock release, and
+time is virtual (it advances only at those points, and jumps to the
+next deadline when every thread waits). The run ends with
+
+    sim: seed 7 trace 3145af8e34765682 (214 scheduling points, 110 ms virtual)
+
+and the same seed gives the same trace hash (the system calls, their
+threads and results, in order). Under another seed a multi-threaded
+program's calls interleave differently. A deadlock (every thread waits
+for ever) ends the run with exit status 4, the seed, each thread's
+state and the NT layer's thread dump. Design and limits: ARCHITECTURE
+"Deterministic simulation".
+
+`cargo xtask sim-test [filter] [--seeds N] [--seed S] [--all]` runs
+SIM_PROGRAMS (the multi-threaded tests: lock_test, kernel32_sync_test,
+pipe_test, thread_test, sync_test, keyed_event_test,
+kernel32_thread_test, smpsched_test, smpmem_test, iocp_test, apc_test,
+...) under seeds 1..N (4), each twice, and checks the scenario's
+expected lines, equal traces for a seed's two runs and, for
+multi-threaded programs, different traces across seeds. `--all` runs
+every gala-um program (88, all pass; Go's are not reproducible:
+RDRAND, and go_gc's collector spins, so it takes up to a minute). A
+failure prints the um command line that repeats it.
 
 ## Steps
 

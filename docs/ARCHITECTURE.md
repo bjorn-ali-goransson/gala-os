@@ -3233,6 +3233,99 @@ the caller then fails as it would for real:
   allocate on its way, or must allocate beforehand. Finding the places
   that did is what R2 is for (ROADMAP R2 lists them).
 
+### Deterministic simulation (R5, 2026-11-02)
+
+gala-um's `--sim=<seed>` (the FoundationDB/TigerBeetle approach): one
+NT thread runs at a time, a seeded PRNG decides which at every
+scheduling point, and time is virtual, so a concurrency failure repeats
+from its seed. `kernel/src/sim.rs` holds the decisions as plain data
+(`Scheduler`: threads, states, deadlines, the PRNG, the virtual clock,
+the trace hash; host unit tests drive it); `kernel/src/hosted/sim.rs`
+is the glue that hands one baton between host threads.
+
+- **Who is simulated**: every host thread that runs NT code: gala-um's
+  main thread (`run`, which waits for the process), the NT layer's
+  helpers (`timers`, `net`) and the program's threads. A thread is
+  registered by the baton holder that creates it (`threads::spawn`), and
+  its new host thread waits for its first turn before it runs anything
+  of the NT layer. Thread ids are the NT layer's own (assigned in that
+  serialized order); host thread ids never reach the trace.
+- **The baton**: a std mutex over the `Scheduler` and one condition
+  variable per thread. A thread that is not running waits on its own
+  condition variable at a scheduling point; handing on is setting
+  `running` and notifying the next thread's variable.
+- **Scheduling points**: system call entry and exit (entry.rs's SIGSYS
+  handler: the call's number and, after it, its result go into the trace
+  with the thread's id), `prepare_wait`/`wait` (blocks until woken or the
+  deadline), `yield_now`, `sleep_ms`, thread exit, and **lock points**:
+  the release of a thread's last IrqMutex, where the kernel's pending
+  timer interrupt would preempt it. The hosted `host_cpu` (sync.rs)
+  counts held IrqMutexes as the kernel's interrupt flag; one lock point
+  in 8 (by the PRNG) switches threads. Lock points interleave threads
+  *inside* system calls at lock granularity, as two processors would;
+  they are not recorded in the trace and take no virtual time.
+- **Choice**: `pick` chooses among runnable threads. Odd seeds: uniformly
+  (many short interleavings). Even seeds: by random priorities, the
+  highest runs (long runs of one thread while another is stopped at an
+  arbitrary point, after PCT, probabilistic concurrency testing); the
+  running thread drops below all others at one point in 32, when it
+  yields, when the watchdog preempts it, and after 8 turns in a row
+  while another could run (without this, a thread polling for another's
+  progress, as smpsched_test's ping-pong does, starved it for minutes).
+  Demoted priorities count down from 2^63, so there are no ties.
+- **Virtual time**: starts at 1 s ("nanotime returning zero" otherwise:
+  Go's runtime), advances 1 µs per scheduling point and, when every
+  thread is blocked, jumps to the earliest deadline. `Clock` in gala-um
+  (ticks, monotonic and system time, the performance counter) reads it;
+  system time starts at 2026-01-01 00:00 UTC. The tick callback
+  (KUSER_SHARED_DATA's times) runs on the baton holder when a scheduling
+  point moves time past a tick, not on a host timer thread. RDTSC and
+  RDTSCP in program code fault (`PR_SET_TSC`, `PR_TSC_SIGSEGV`) and read
+  the virtual clock as a 1 GHz counter, one step per read; RDTSCP's
+  TSC_AUX is the thread's simulated processor.
+- **Processors**: a simulated thread runs on one processor, chosen from
+  its affinity by its id, and its host thread is pinned there (RDTSCP and
+  NtGetCurrentProcessorNumber agree, independent of the host).
+- **Deadlock**: no thread runnable and none with a deadline, or the
+  program's threads all waiting with no deadline for 300 s of virtual
+  time while only helpers ran (the timer worker looks every 10 ms): um
+  prints the seed, every simulated thread's state, the NT layer's thread
+  dump (each thread's system call and wait objects) and exits with 4.
+  A thread spinning on an IrqMutex in the simulation means its holder
+  passed a scheduling point with it held (a wait with a lock: in the
+  kernel, sleeping with interrupts off): reported the same way.
+- **The trace**: an FNV-1a hash of (thread, system call number) and
+  (thread, result) in order: `sim: seed S trace H (N scheduling points,
+  T ms virtual)` at the end. Same seed, same hash.
+- **Cost when off**: one relaxed load of a flag at each seam call
+  (threads.rs, entry.rs, `host_cpu`); the kernel binary has none of it
+  (`sim.rs` is compiled for tests and `hosted` only).
+- **Limits**:
+  - Program code between system calls runs unpreempted. A thread that
+    spins in program code waiting for another (no system call) would
+    run for ever, so a host watchdog thread preempts one that used
+    100 ms of processor time without a scheduling point, if another
+    program thread could run; time jumps to the next deadline (a
+    `Sleep(1)` poller gets its turn) and another thread runs. These
+    preemptions depend on the host's timing: the run's line says
+    "watchdog preemptions ...: not reproducible". Go's garbage
+    collector spins this way.
+  - RDRAND/RDSEED (gala's ProcessPrng, hence Go's runtime, which seeds
+    its scheduler from it) cannot be intercepted on Linux: such programs
+    are not reproducible (Go's are listed in xtask's SIM_UNSEEDED).
+    Next: CPUID faulting (`ARCH_SET_CPUID`) to hide RDRAND and a
+    ProcessPrng fed by the kernel.
+  - KUSER_SHARED_DATA's times change only at scheduling points: program
+    code polling GetTickCount without system calls sees time stand still
+    (until the watchdog).
+  - A program thread waiting with no deadline on a timer due in more
+    than 300 s of virtual time is reported as a deadlock.
+  - Host allocations (glibc's arenas) and new host threads' startup
+    before their first turn are not serialized; nothing the NT layer
+    does depends on heap addresses so far (identical traces).
+  - Only the NT layer and gala-um are simulated; child processes do not
+    run in gala-um anyway. The kernel's own scheduler and SMP are QEMU's.
+
 ### Live mocking (a developer and test feature; R7)
 
 - **Swappable slots only at device and service boundaries**: block

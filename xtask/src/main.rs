@@ -1629,6 +1629,12 @@ commands:
                each must end without a panic, abort or hang:
                fault-test [program filter] [--sweep[=frame|net_tx]: fail each heap
                allocation (frame allocation, packet) of each program in turn]
+  sim-test     run multi-threaded programs in gala-um's deterministic simulation
+               (um --sim=<seed>) under several seeds, each twice: expected output,
+               the same trace for the same seed, different traces across seeds;
+               a deadlock is reported with its seed:
+               sim-test [program filter] [--seeds N (default 4)] [--seed S: only S]
+               [--all: every gala-um program, not only the multi-threaded set]
   bench        run user/bench on gala; write target/report/bench.json and
                compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
   symbolize    resolve the kernel backtraces in a serial log to functions
@@ -1644,49 +1650,72 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let release = args.iter().any(|a| a == "--release");
     let headless = args.iter().any(|a| a == "--headless");
-    let result = match args.first().map(String::as_str) {
-        Some("build") => build(release, "gala-os", "").map(drop),
-        Some("run") => build(release, "gala-os", "").and_then(|iso| run(&iso, headless)),
-        // gala-um first: it fails in seconds, before minutes of boots.
-        Some("test") => {
-            unit_tests().and_then(|()| um_test(release)).and_then(|()| boot_tests(release, None))
-        }
-        Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
-        Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
-        Some("report") => gala_report(release),
-        Some("docker-test") => docker_test(&args[1..]),
-        Some("screenshot") => screenshot(release, &args[1..]),
-        Some("bake-fonts") => bake_fonts(),
-        Some("bake-icons") => bake_icons(),
-        Some("iso") => iso(release, &args[1..]),
-        Some("serve") => serve(release, &args[1..]),
-        Some("um-test") => um_test(release),
-        Some("fault-test") => fault_test(
-            release,
-            args.get(1).filter(|a| !a.starts_with("--")),
-            args.iter().find_map(|a| match a.as_str() {
-                "--sweep" => Some("heap"),
-                _ => a.strip_prefix("--sweep="),
-            }),
-        ),
-        Some("bench") => {
-            bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
-        }
-        Some("symbolize") => match args.get(1).filter(|a| !a.starts_with("--")) {
-            Some(log) => fs::read_to_string(log)
-                .map_err(|e| format!("reading {log}: {e}"))
-                .map(|text| print!("{}", symbolize(release, &text))),
-            None => Err("usage: cargo xtask symbolize <serial log> [--release]".into()),
-        },
-        Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
-            Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
-            None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
-        },
-        _ => {
-            eprint!("{USAGE}");
-            return ExitCode::from(2);
-        }
-    };
+    let result =
+        match args.first().map(String::as_str) {
+            Some("build") => build(release, "gala-os", "").map(drop),
+            Some("run") => build(release, "gala-os", "").and_then(|iso| run(&iso, headless)),
+            // gala-um first: it fails in seconds, before minutes of boots.
+            Some("test") => unit_tests()
+                .and_then(|()| um_test(release))
+                .and_then(|()| boot_tests(release, None)),
+            Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
+            Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
+            Some("report") => gala_report(release),
+            Some("docker-test") => docker_test(&args[1..]),
+            Some("screenshot") => screenshot(release, &args[1..]),
+            Some("bake-fonts") => bake_fonts(),
+            Some("bake-icons") => bake_icons(),
+            Some("iso") => iso(release, &args[1..]),
+            Some("serve") => serve(release, &args[1..]),
+            Some("um-test") => um_test(release),
+            Some("fault-test") => fault_test(
+                release,
+                args.get(1).filter(|a| !a.starts_with("--")),
+                args.iter().find_map(|a| match a.as_str() {
+                    "--sweep" => Some("heap"),
+                    _ => a.strip_prefix("--sweep="),
+                }),
+            ),
+            Some("sim-test") => {
+                let value = |name: &str| -> Option<String> {
+                    let eq = format!("{name}=");
+                    args.iter().enumerate().find_map(|(i, a)| match a.strip_prefix(&eq) {
+                        Some(v) => Some(v.to_string()),
+                        None if a == name => args.get(i + 1).cloned(),
+                        None => None,
+                    })
+                };
+                let number = |name: &str| value(name).map(|v| v.parse::<u64>());
+                match (number("--seeds").transpose(), number("--seed").transpose()) {
+                    (Ok(seeds), Ok(seed)) => sim_test(
+                        release,
+                        args.get(1).filter(|a| !a.starts_with("--")),
+                        seeds.unwrap_or(SIM_SEEDS),
+                        seed,
+                        args.iter().any(|a| a == "--all"),
+                    ),
+                    _ => Err("usage: cargo xtask sim-test [filter] [--seeds N] [--seed S] [--all]"
+                        .into()),
+                }
+            }
+            Some("bench") => {
+                bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
+            }
+            Some("symbolize") => match args.get(1).filter(|a| !a.starts_with("--")) {
+                Some(log) => fs::read_to_string(log)
+                    .map_err(|e| format!("reading {log}: {e}"))
+                    .map(|text| print!("{}", symbolize(release, &text))),
+                None => Err("usage: cargo xtask symbolize <serial log> [--release]".into()),
+            },
+            Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
+                Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
+                None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
+            },
+            _ => {
+                eprint!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -4105,6 +4134,16 @@ fn run_um_with(
     options: &[String],
     timeout_secs: u32,
 ) -> Result<(Option<i32>, String)> {
+    let out = um_command(um, s, options, timeout_secs)?
+        .output()
+        .map_err(|e| format!("running {}: {e}", um.display()))?;
+    let log =
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    Ok((out.status.code(), log))
+}
+
+/// The command `run_um_with` runs (printed to repeat a failure by hand).
+fn um_command(um: &Path, s: &Scenario, options: &[String], timeout_secs: u32) -> Result<Command> {
     let name = s.name;
     let program = scenario_program(s).ok_or(format!("{name}: not a program scenario"))?;
     // The scenario's `args=` (percent-encoded), as one command-line string.
@@ -4136,14 +4175,23 @@ fn run_um_with(
         };
         cmd.arg(format!("--module={dir}/{file_name}={}", host.display()));
     }
-    let out = cmd
-        .arg(root().join("user/bin").join(format!("{program}.exe")))
-        .arg(percent_decode(args))
-        .output()
-        .map_err(|e| format!("running {}: {e}", um.display()))?;
-    let log =
-        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    Ok((out.status.code(), log))
+    cmd.arg(root().join("user/bin").join(format!("{program}.exe"))).arg(percent_decode(args));
+    Ok(cmd)
+}
+
+/// `cmd` as a shell command line.
+fn shell_line(cmd: &Command) -> String {
+    let quote = |a: &std::ffi::OsStr| {
+        let a = a.to_string_lossy();
+        let plain = |c: char| c.is_ascii_alphanumeric() || "-_=/.,:".contains(c);
+        if !a.is_empty() && a.chars().all(plain) {
+            a.into_owned()
+        } else {
+            format!("'{}'", a.replace('\'', r"'\''"))
+        }
+    };
+    let words = std::iter::once(cmd.get_program()).chain(cmd.get_args());
+    words.map(quote).collect::<Vec<_>>().join(" ")
 }
 
 /// Programs `cargo xtask fault-test` runs in gala-um (scenario names;
@@ -4315,6 +4363,204 @@ fn fault_test(release: bool, filter: Option<&String>, sweep: Option<&str>) -> Re
         started.elapsed().as_secs_f64()
     );
     if failed == 0 { Ok(()) } else { Err(format!("{failed} fault-test runs failed")) }
+}
+
+/// Programs `cargo xtask sim-test` runs in gala-um's deterministic
+/// simulation, and whether they are multi-threaded (their traces must
+/// then differ across seeds). Each must `runs_in_um`.
+const SIM_PROGRAMS: &[(&str, bool)] = &[
+    ("hello", false),
+    ("lock_test", true),
+    ("kernel32_sync_test", true),
+    ("pipe_test", true),
+    ("thread_test", true),
+    ("sync_test", true),
+    ("keyed_event_test", true),
+    ("kernel32_thread_test", true),
+    ("smpsched_test", true),
+    ("smpmem_test", true),
+    // Few interleavings (the second thread makes its few system calls
+    // while the first mostly waits): a few seeds may all give one trace.
+    ("iocp_test", false),
+    ("apc_test", false),
+    // System calls from one thread only (the NT layer's helper threads,
+    // which the seed also schedules, make none).
+    ("wait_test", false),
+    ("timer_test", false),
+    ("ioapc_test", false),
+    ("smp_test", false),
+];
+/// Programs whose runs are not reproducible from the seed: Go's runtime
+/// seeds its scheduler's random choices from ProcessPrng (RDRAND, which
+/// gala-um cannot intercept), and its garbage collector spins in program
+/// code (watchdog preemptions). `--all` runs them; differing traces are
+/// reported, not failed.
+const SIM_UNSEEDED: &[&str] =
+    &["go_hello", "go_goroutines", "go_time", "go_gc", "go_os", "go_exit"];
+/// Seeds per program by default (1..=N), each run twice.
+const SIM_SEEDS: u64 = 4;
+/// A simulated run may take this long (a hang is a failure).
+const SIM_TIMEOUT_SECS: u32 = 60;
+/// Go's garbage collector spins in program code: each watchdog preemption
+/// costs 100 ms of processor time (go_gc: ~150 of them).
+const SIM_UNSEEDED_TIMEOUT_SECS: u32 = 240;
+
+fn sim_timeout(program: &str) -> u32 {
+    if SIM_UNSEEDED.contains(&program) { SIM_UNSEEDED_TIMEOUT_SECS } else { SIM_TIMEOUT_SECS }
+}
+/// um's exit status for a deadlock found by the simulation.
+const SIM_DEADLOCK_EXIT: i32 = 4;
+
+/// The trace hash of a simulated run's `sim: seed S trace H` line.
+fn sim_trace(log: &str) -> Option<&str> {
+    log.lines()
+        .find_map(|l| l.strip_prefix("sim: seed ")?.split(" trace ").nth(1)?.split(' ').next())
+}
+
+/// `cargo xtask sim-test [filter] [--seeds N] [--seed S] [--all]`: runs
+/// SIM_PROGRAMS (with `--all`, every gala-um program) under gala-um's deterministic simulation with seeds
+/// 1..=N (or only S), each seed twice, and checks (a) the scenario's
+/// expected output, (b) that both runs of a seed have the same trace
+/// hash, (c) that a multi-threaded program's traces differ across seeds.
+/// A deadlock (um exits with 4) is reported with its seed and the
+/// threads' waits; `um --sim=<seed>` repeats it.
+fn sim_test(
+    release: bool,
+    filter: Option<&String>,
+    seeds: u64,
+    only: Option<u64>,
+    all: bool,
+) -> Result {
+    let um = build_um(release)?;
+    let mut programs: Vec<(&Scenario, bool)> = SIM_PROGRAMS
+        .iter()
+        .map(|&(p, threaded)| {
+            SCENARIOS
+                .iter()
+                .find(|s| s.name == p && runs_in_um(s))
+                .map(|s| (s, threaded))
+                .ok_or(format!("sim test: {p} is not a gala-um scenario"))
+        })
+        .collect::<Result<_>>()?;
+    if all {
+        // Every gala-um program (traces need not differ across seeds).
+        let more = SCENARIOS.iter().filter(|s| runs_in_um(s));
+        let more: Vec<_> =
+            more.filter(|s| !programs.iter().any(|(p, _)| p.name == s.name)).collect();
+        programs.extend(more.into_iter().map(|s| (s, false)));
+    }
+    programs.retain(|(s, _)| filter.is_none_or(|f| s.name.contains(f.as_str())));
+    if programs.is_empty() {
+        return Err("no sim-test program matches the filter".into());
+    }
+    let seed_list: Vec<u64> = match only {
+        Some(s) => vec![s],
+        None => (1..=seeds.max(1)).collect(),
+    };
+    let jobs: Vec<(&Scenario, u64, u32)> = programs
+        .iter()
+        .flat_map(|&(s, _)| seed_list.iter().flat_map(move |&seed| [(s, seed, 0), (s, seed, 1)]))
+        .collect();
+    let started = Instant::now();
+    let results = run_parallel(&jobs, |(s, seed, _)| {
+        run_um_with(&um, s, &[format!("--sim={seed}")], sim_timeout(s.name))
+    });
+    let dir = target_dir().join("failed");
+    let mut failures = Vec::new();
+    // (program, seed) -> (trace hash, its `sim:` line, log file) of its runs.
+    type Runs = Vec<(String, String, PathBuf)>;
+    let mut traces: std::collections::BTreeMap<(&str, u64), Runs> = Default::default();
+    let mut warnings = Vec::new();
+    for ((s, seed, run), result) in jobs.iter().zip(results) {
+        let (code, log) = result?;
+        let file = dir.join(format!("sim-{}-{seed}-{run}.log", s.name));
+        let mut fail = |why: String| {
+            let _ = fs::create_dir_all(&dir).and_then(|()| fs::write(&file, &log));
+            let tail: Vec<&str> = log.lines().rev().take(30).collect();
+            let tail: Vec<&str> = tail.into_iter().rev().collect();
+            let repeat = um_command(&um, s, &[format!("--sim={seed}")], sim_timeout(s.name))
+                .map_or_else(|e| e, |c| shell_line(&c));
+            failures.push(format!(
+                "{} seed {seed}: {why}; log {}; repeat with:\n    {repeat}\n    {}",
+                s.name,
+                file.display(),
+                tail.join("\n    ")
+            ));
+        };
+        if code == Some(SIM_DEADLOCK_EXIT) {
+            fail("DEADLOCK".into());
+            continue;
+        }
+        let missing: Vec<_> =
+            s.expect.iter().filter(|e| **e != BOOT_OK_MARKER && !log.contains(**e)).collect();
+        if !missing.is_empty() {
+            fail(format!("exit {code:?}, missing {missing:?}"));
+            continue;
+        }
+        match sim_trace(&log) {
+            Some(h) => {
+                let line = log.lines().find(|l| l.starts_with("sim: seed ")).unwrap_or("");
+                let _ = fs::create_dir_all(&dir).and_then(|()| fs::write(&file, &log));
+                let entry = (h.to_string(), line.to_string(), file.clone());
+                traces.entry((s.name, *seed)).or_default().push(entry);
+            }
+            None => fail("no `sim: seed S trace H` line".into()),
+        }
+    }
+    for &(s, threaded) in &programs {
+        let mut distinct = std::collections::BTreeSet::new();
+        for &seed in &seed_list {
+            let Some(runs) = traces.get(&(s.name, seed)) else { continue };
+            if let [(a, line_a, log_a), (b, line_b, log_b)] = &runs[..]
+                && a != b
+            {
+                let what = format!(
+                    "{} seed {seed}: two runs, two traces:\n    {line_a} ({})\n    {line_b} ({})",
+                    s.name,
+                    log_a.display(),
+                    log_b.display()
+                );
+                // The watchdog preempted a thread spinning in program code,
+                // or the program draws on RDRAND: limits of the simulation,
+                // not bugs in the NT layer.
+                if line_a.contains("watchdog")
+                    || line_b.contains("watchdog")
+                    || SIM_UNSEEDED.contains(&s.name)
+                {
+                    warnings.push(what);
+                } else {
+                    failures.push(format!("{what}\n    not deterministic"));
+                }
+            }
+            distinct.extend(runs.iter().map(|r| r.0.clone()));
+        }
+        eprintln!(
+            "xtask: sim test {:<20} {} seeds, {} distinct traces",
+            s.name,
+            seed_list.len(),
+            distinct.len()
+        );
+        if threaded && seed_list.len() > 1 && distinct.len() == 1 {
+            failures.push(format!(
+                "{}: the same trace under every seed: the seed does not change the interleaving",
+                s.name
+            ));
+        }
+    }
+    for w in &warnings {
+        eprintln!("xtask: sim test: not reproducible (watchdog preemptions or RDRAND): {w}");
+    }
+    for f in &failures {
+        eprintln!("xtask: sim test FAILED: {f}");
+    }
+    eprintln!(
+        "xtask: sim-test: {} runs of {} programs in {:.1} s, {} failures",
+        jobs.len(),
+        programs.len(),
+        started.elapsed().as_secs_f64(),
+        failures.len()
+    );
+    if failures.is_empty() { Ok(()) } else { Err(format!("{} sim-test failures", failures.len())) }
 }
 
 /// Decodes `%XX` escapes (the kernel's `args=` encoding).
@@ -6386,6 +6632,22 @@ mod constants {
             }
         }
         assert!(checked > 50, "only {checked} statuses compared");
+    }
+
+    /// sim-test's programs are gala-um scenarios, and it reads the trace
+    /// line um prints.
+    #[test]
+    fn sim_test_programs_and_trace_line() {
+        use super::*;
+        for name in SIM_PROGRAMS.iter().map(|(p, _)| *p).chain(SIM_UNSEEDED.iter().copied()) {
+            assert!(
+                SCENARIOS.iter().any(|s| s.name == name && runs_in_um(s)),
+                "{name} is not a gala-um scenario"
+            );
+        }
+        let log = "x\nsim: seed 7 trace 3145af8e34765682 (214 scheduling points, 110 ms virtual)\n";
+        assert_eq!(sim_trace(log), Some("3145af8e34765682"));
+        assert_eq!(sim_trace("sim: seed 7: DEADLOCK at 5 ms virtual"), None);
     }
 }
 

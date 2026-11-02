@@ -5,7 +5,8 @@
 //! (a memfd as physical memory), threads.rs (host threads, condition
 //! variables, the host clocks) and entry.rs (signals: syscall user
 //! dispatch, faults, user-mode entry). The NT layer itself is the same
-//! code as in the kernel.
+//! code as in the kernel. sim.rs is the deterministic simulation (`um
+//! --sim=<seed>`: one thread at a time, virtual time).
 //!
 //! Not yet (each reported where it matters): child processes (one NT
 //! process per Linux process), suspending a thread while it runs program
@@ -16,6 +17,7 @@
 
 pub mod entry;
 pub mod memory;
+pub mod sim;
 pub mod threads;
 
 use alloc::string::String;
@@ -168,7 +170,7 @@ impl Clock for Um {
 
 impl Threads for Um {
     fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<ThreadId, SpawnError> {
-        threads::spawn(name, entry, arg, || {})
+        threads::spawn(name, entry, arg, false, || {})
     }
     fn spawn_user(
         name: &'static str,
@@ -177,7 +179,7 @@ impl Threads for Um {
         space: SharedUserSpace,
         gs_base: u64,
     ) -> Result<ThreadId, SpawnError> {
-        threads::spawn(name, entry, arg, move || {
+        threads::spawn(name, entry, arg, true, move || {
             // The thread keeps its address space alive, as in the kernel.
             core::mem::forget(space);
             entry::init_thread();
@@ -191,9 +193,15 @@ impl Threads for Um {
         threads::exit()
     }
     fn yield_now() {
+        if sim::on() {
+            return sim::yield_now();
+        }
         std::thread::yield_now()
     }
     fn sleep_ms(ms: u64) {
+        if sim::on() {
+            return sim::sleep_ms(ms);
+        }
         std::thread::sleep(core::time::Duration::from_millis(ms))
     }
     fn prepare_wait(deadline: Option<u64>) {
@@ -288,6 +296,10 @@ pub fn run(
     args: &str,
     modules: Vec<(String, String, Vec<u8>)>,
 ) -> Result<u32, String> {
+    // Simulation: this thread holds the baton from here on.
+    if sim::on() {
+        sim::start();
+    }
     memory::init()?;
     // As the kernel's boot log (the host's processors, see threads.rs).
     crate::info!("smp: {} CPUs online (host)", threads::cpu_count());
@@ -348,5 +360,6 @@ pub fn run(
         None => crate::warn!("run: {} ended without an exit status", process.name),
     }
     crate::nt::ledger::dump();
+    sim::report();
     Ok(process.exit_status().map_or(u32::MAX, |s| s.0))
 }

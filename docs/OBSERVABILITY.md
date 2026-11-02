@@ -134,9 +134,14 @@ counts (TCG plugins) need a QEMU built with plugins; Ubuntu's has none.
   `crash_record` (two boots: `crashtest` panics on purpose, then the
   record is printed). TODO: the screen (a blue screen with the record),
   symbols in the record (addresses only now).
-- **Deterministic simulation** (planned, R5): gala-um with time and
-  thread interleaving from a seed, so a concurrency failure repeats from
-  its seed.
+- **Deterministic simulation** (done 2026-11-02, R5): `um --sim=<seed>`
+  runs one NT thread at a time, chosen by a seeded PRNG at every system
+  call, wait, yield and lock release, with a virtual clock; the run
+  ends with `sim: seed S trace H` (the same for the same seed) and a
+  deadlock is reported with the seed and every thread's wait. `cargo
+  xtask sim-test` runs the multi-threaded programs under several seeds,
+  twice each (ARCHITECTURE "Deterministic simulation", WORKFLOW).
+  TODO: RDRAND (Go's runtime) from the seed.
 
 ## 6. Live introspection — later
 
