@@ -940,7 +940,7 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn IsWindow(hwnd: Hwnd) -> i32 {
-    i32::from(window(hwnd).is_some())
+    i32::from(hwnd == crate::tree::DESKTOP || window(hwnd).is_some())
 }
 
 #[unsafe(no_mangle)]

@@ -1388,6 +1388,18 @@ on gala's .NET support as the test driver, with the tests themselves
 checked in and run by xtask on gala and by a script on Windows.
 Providers inside programs (wx and Qt implement IRawElementProviderSimple
 for their own widgets) come after the HWND-based tree.
+Progress (2026-11-02, `uia_test`): ole32 creates in-process classes
+registered under HKCR\CLSID (InprocServer32, DllGetClassObject); gala's
+UIAutomationCore.dll has IUIAutomation over the HWND tree (root = the
+desktop, ElementFromHandle/Point, focus), element properties
+(AutomationId, Name, ControlType, ClassName, BoundingRectangle,
+NativeWindowHandle, ProcessId, IsEnabled...), true/false/property/
+and/or/not conditions, FindFirst/FindAll (Element, Children,
+Descendants, Subtree), tree walkers, and the Invoke (buttons), Value
+(edits) and Toggle (check boxes) patterns. Next: IUIAutomation2+ and
+whatever FlaUI's UIA3 needs first (cache requests, events), then
+Selection/ExpandCollapse for list and combo boxes, title bars, and
+WM_GETOBJECT providers.
 
 Drivers: gala writes its own, against published standards (virtio,
 then AHCI/NVMe, xHCI, e1000), not hardware-specific ones. Reusing

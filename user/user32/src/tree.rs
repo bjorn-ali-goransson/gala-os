@@ -432,6 +432,36 @@ pub extern "system" fn GetFocus() -> Hwnd {
 
 // ---- Queries ----
 
+/// The desktop window's handle: below the window table, so no window of
+/// it. The desktop is only a name so far (GetDesktopWindow, IsWindow,
+/// GetWindowRect: the screen); top-level windows have parent 0, and a
+/// window made with it as parent is not treated as top-level yet.
+pub const DESKTOP: Hwnd = 0xfff0;
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDesktopWindow() -> Hwnd {
+    DESKTOP
+}
+
+/// GetWindowThreadProcessId: the creating thread, and this process (every
+/// window gala's user32 knows is the process's own).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32 {
+    #[link(name = "kernel32", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn GetCurrentProcessId() -> u32;
+    }
+    let Some(w) = window(hwnd) else {
+        set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    };
+    if !pid.is_null() {
+        // SAFETY: the caller's DWORD; a plain call.
+        unsafe { *pid = GetCurrentProcessId() };
+    }
+    w.thread
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn GetParent(hwnd: Hwnd) -> Hwnd {
     window(hwnd).map_or(0, |w| w.parent)
@@ -626,6 +656,11 @@ pub extern "system" fn GetClientRect(hwnd: Hwnd, rect: *mut [i32; 4]) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetWindowRect(hwnd: Hwnd, rect: *mut [i32; 4]) -> i32 {
+    if hwnd == DESKTOP {
+        // SAFETY: the caller's RECT.
+        unsafe { *rect = crate::monitor::screen().0 };
+        return 1;
+    }
     let Some(i) = index_of(hwnd) else { return 0 };
     let r = with(|s| {
         let w = s.windows[i];

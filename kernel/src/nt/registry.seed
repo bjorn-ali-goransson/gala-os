@@ -73,6 +73,13 @@
 [\Registry\Machine\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies]
 [\Registry\Machine\SOFTWARE\Policies\Microsoft\Windows]
 [\Registry\Machine\SOFTWARE\Classes]
+; In-process COM classes gala's DLLs serve (ole32's CoCreateInstance).
+; CUIAutomation (UIAutomationClient.h's CLSID_CUIAutomation).
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{ff48dba4-60ef-4201-aa87-54103eef594e}]
+@=sz:CUIAutomation Class
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{ff48dba4-60ef-4201-aa87-54103eef594e}\InprocServer32]
+@=expand:%SystemRoot%\System32\UIAutomationCore.dll
+"ThreadingModel"=sz:Both
 [\Registry\Machine\SOFTWARE\WOW6432Node]
 
 ; A workstation (WinNT; servers say ServerNT or LanmanNT).
