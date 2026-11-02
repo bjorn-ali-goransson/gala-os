@@ -287,17 +287,29 @@ for ever) ends the run with exit status 4, the seed, each thread's
 state and the NT layer's thread dump. Design and limits: ARCHITECTURE
 "Deterministic simulation".
 
+What program code does without system calls is simulated too (2026-11-02):
+RDTSC/RDTSCP and reads of KUSER_SHARED_DATA (its page is inaccessible
+in the simulation; a read faults, takes a step of virtual time and runs
+single-stepped) read the virtual clock; CPUID traps (CPUID faulting) and
+hides RDRAND/RDSEED from programs that would execute them (gala's
+ProcessPrng takes the seed's numbers from GalaRandom, R7); and a
+thread spinning in program code for another is preempted at its spin
+loop's canonical point (found by single-stepping it), not where the host
+watchdog happened to interrupt it. Go programs repeat from their seed.
+
 `cargo xtask sim-test [filter] [--seeds N] [--seed S] [--all]` runs
 SIM_PROGRAMS (the multi-threaded tests: lock_test, kernel32_sync_test,
 pipe_test, thread_test, sync_test, keyed_event_test,
 kernel32_thread_test, smpsched_test, smpmem_test, iocp_test, apc_test,
-...) under seeds 1..N (4), each twice, and checks the scenario's
-expected lines, equal traces for a seed's two runs and, for
+..., and the Go programs go_hello, go_goroutines, go_time, go_gc,
+go_os, go_exit) under seeds 1..N (4), each twice, and checks the
+scenario's expected lines, equal traces for a seed's two runs (a
+SIM_PROGRAM must repeat even if the watchdog preempted it) and, for
 multi-threaded programs, different traces across seeds. `--all` runs
-every gala-um program (all pass; go_gc is not reproducible: its
-collector spins in program code, so it takes up to a minute; the other
-Go programs repeat since gala's ProcessPrng takes the seed's numbers
-from GalaRandom). A failure prints the um command line that repeats it.
+every gala-um program (92, all pass and repeat; a timing-dependent
+watchdog preemption, which fpu_test's long PAUSE loops come close to,
+is tolerated outside SIM_PROGRAMS). A failure prints the um command
+line that repeats it.
 
 ## Clock control and record/replay (R7, 2026-11-02)
 
