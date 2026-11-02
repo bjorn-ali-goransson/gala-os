@@ -20,7 +20,7 @@ explicitly in its commit.
 - Work that speeds up development or troubleshooting comes first, as we
   are the ones who benefit: today that is R5 (deterministic simulation:
   a failure replays from its seed), then R7's record/replay and clock
-  control, then fixing the known flaky scenarios (java_http,
+  control (first part done 2026-11-02, see R7), then fixing the known flaky scenarios (java_http,
   java_hello, postgres, smpsched_test under load), before the rest of
   R6.
   Flaky scenarios (2026-11-02): a kernel race fixed: a copy-on-write
@@ -59,6 +59,12 @@ explicitly in its commit.
   console programs, the Docker image) never start the graphical
   interface. See "Server and desktop workloads" in ARCHITECTURE; item
   SD below.
+- **The desktop is built on the command line, not beside it**: the
+  desktop edition is a superset of the server edition (the server/CLI
+  edition plus a graphical shell, **shasha**: Arabic شاشة, "screen"), and
+  everything the desktop can do can be done from a terminal too (the
+  `gala` command, item SD). A desktop feature is built as an action the
+  CLI reaches first, then given a mouse and keyboard binding.
 
 ## Done
 - M1 boot, serial, memory map
@@ -1462,8 +1468,35 @@ SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    off. **`profile=server` done** (2026-11-02, scenario
    server_profile): the desktop is never drawn even with a screen,
    windows still exist as without one, `console=` starts no conhost.exe.
-   Next: a server module set in xtask without the GUI DLLs and fonts; later a `desktop` cargo feature so a server kernel
-   does not contain the compositor.
+   **CLI parity** (the owner, 2026-11-02): every desktop action is an
+   action of one kernel entry point (`GalaDesktopAction`) that the
+   desktop's mouse and keys call and that the `gala` command (a console
+   program, user/gala) calls too: start a program (the start menu),
+   list windows (the taskbar), activate, minimize, maximize, restore,
+   close, snap left/right/up/down, move/resize, choose the wallpaper;
+   plus `gala ps`/`gala kill` (what a task manager would do). Test
+   first: a gala_cli scenario drives a GUI program by the CLI alone.
+   **CLI parity done** (2026-11-02, scenario gala_cli; server mode in
+   server_kernel and server_profile; ARCHITECTURE "Server and desktop
+   workloads"): GalaDesktopAction (0x7f58) with Start, Windows,
+   Programs, Activate, Minimize, Maximize, Restore, Close, Snap, Move,
+   Wallpaper; shasha's taskbar, caption buttons, Win+arrows and start
+   menu go through the same actions (`Desktop::act`,
+   `action::start_path`); the window registry's record is version 2
+   (the screen's window id); `gala` (user/gala) ships in every image.
+   Next: access checks on window actions and `gala start` as the
+   caller (the desktop's owner, SECURITY.md), the wallpaper kept across
+   boots, `gala` for whatever shasha gains next (WORKFLOW: the command
+   comes first).
+   **Server kernel done** (2026-11-02, scenario server_kernel): the
+   kernel's `shasha` feature (named `desktop` until 2026-11-02; on by
+   default) leaves out the compositor,
+   wallpapers and start menu (2.5 MB smaller); xtask builds both. A
+   server image without user32/gdi32 is not planned:
+   many console and server programs import them (as on Windows Server
+   Core, which keeps them), and loading them starts nothing; only the
+   wallpapers, fonts and GUI-only programs (conhost.exe, FileZilla) can
+   stay out of a server image.
 
 R. **Robustness and live update, kernel included** (the owner's
    vision; proposed 2026-11-02 by the owner;
@@ -1574,10 +1607,23 @@ R. **Robustness and live update, kernel included** (the owner's
      (`Sleep(1)` pollers starved: the watchdog now jumps time to the
      next deadline and runs another thread), and starvation under
      priorities (demotion on yields and long runs).
-     Next: RDRAND from the seed (CPUID faulting to hide it, ProcessPrng
-     fed by the kernel) so Go programs repeat; preemption in program
-     code by instruction count (perf counters, as rr) instead of the
-     host-timed watchdog.
+     **ProcessPrng fed by the kernel** (with R7: GalaRandom serves the
+     seed's numbers) made go_hello and go_goroutines repeat. **All Go
+     programs repeat (2026-11-02)**: CPUID faulting hides RDRAND/RDSEED
+     from programs that execute them themselves (CPUID answered by
+     gala-um, the APIC ids the simulated processor's); KUSER_SHARED_DATA
+     reads trap (the page is
+     inaccessible, the read runs single-stepped) and move virtual time,
+     one in 16 a switch; a thread spinning in program code is preempted
+     at its loop's canonical point (single-stepped until Brent's cycle
+     detection finds the loop, then at its least state), not where the
+     watchdog (now 10 ms) interrupted it. The six gala-um Go programs are
+     in SIM_PROGRAMS (go_gc: ~100 spin loops preempted per run, 5 s
+     instead of up to a minute); `sim-test --all` (92 programs x 4
+     seeds, twice) passes with every run repeating, and the Go programs
+     x 16 seeds too (fpu_test's long PAUSE loops come closest to the
+     timing-dependent fallback). Next: preemption by instruction count
+     (perf counters, as rr) for computations, on hosts that have them.
    - R6. **Charging resources to an owner**: pages, kernel pool and
      handles charged to a process and its job: the commit limit, job
      memory limits, STATUS_QUOTA_EXCEEDED, the program using too much
@@ -1592,6 +1638,34 @@ R. **Robustness and live update, kernel included** (the owner's
      time jumps, latency, record/replay, device events; API-level faults
      in gala's DLLs (Application Verifier style); a read-write control
      channel and a test-only `Gala*` call; off unless booted with a flag.
+     **First part done (2026-11-02)**, what speeds up development and
+     troubleshooting (ARCHITECTURE "Live mocking"):
+     - **Clock control** (`kernel/src/clockctl.rs`): `clock=` / `um
+       --clock=` (`control,freeze,rate:n/d,advance:s,system:unix`) and
+       the test-only GalaClockControl (0x7f4c: query, advance, rate,
+       system time; a versioned state record); every view of the clock
+       and the deadlines of waits in progress follow, in the kernel,
+       gala-um and its simulation; the kernel's own sleeps and
+       diagnostics stay on the raw clock. Test `clock_test` (scenarios
+       clock_test, clock_off, clock_boot; um-test, sim-test).
+     - **Record/replay** (`kernel/src/replay.rs`, format version 1):
+       the boot time, gala-um's clock readings and random numbers per
+       thread, plus gala-um's settings; `um --record/--replay`, the
+       kernel's `record` (debug console, extracted to `<iso>.rec`) and
+       `replay=<module>`; recordings move between gala-um and the
+       kernel. GalaRandom (0x7f4d) feeds gala's ProcessPrng when the
+       random source is mocked (recording, replay, simulation). Tests:
+       `replay_test`, `cargo xtask replay-test` (in `cargo xtask
+       test`), scenarios record_kernel and replay_kernel.
+     - **Disk latency**: `failpoint=disk_io:delay:<ms>` (scenario
+       failpoint_disk_delay).
+     Next: record/replay of network frames, disk reads and input events
+     (needs a deterministic guest: gala-um's simulation first), the
+     display and input as swappable devices, device events (NIC removed,
+     resolution change), API-level faults in gala's DLLs, the
+     read-write control channel (OBSERVABILITY §6), a frozen clock's
+     effect on absolute timers (Windows re-evaluates them on a system
+     time change).
    - R8. **Chain of trust for updates** (design): Secure Boot -> Limine
      -> kernel -> signed system images; keys, manifest, rollback.
      **Designed** (2026-11-02, ARCHITECTURE "Chain of trust"): Limine's
@@ -1613,6 +1687,27 @@ R. **Robustness and live update, kernel included** (the owner's
      build with a changed state format (versions), (e) with open network
      connections. Live patching of single functions only if a need
      appears.
+     **Milestone (a) done** (2026-11-02, scenarios handover_same,
+     handover_uefi, handover_disk; ARCHITECTURE "Kernel handover"):
+     `handover=<n>` hands the machine to a fresh copy of the kernel n
+     times. A versioned, CRC-checked handover record (memory map with
+     the frames in use, HHDM and the new image, framebuffer, command
+     line, boot modules, clock, parked CPUs, volume log position, kept
+     pages, the kernel file); the CPUs parked in a trampoline the way
+     Limine parks them; virtio devices reset; the new kernel boots from
+     the record, keeps the clock (monotonic across), starts every CPU
+     again, finds the marker page and the volume where they were. Host
+     tests: the record's round trip, damage, versions, older and unknown
+     sections; ELF checks; memory-map carving.
+     Next, for (b) (idle programs): carry processes and threads as
+     data (a REQUIRED section per object kind; threads as "user
+     registers + waiting on X until T"), user pages kept in place (a
+     frame bitmap section; the address spaces' page tables rebuilt from
+     a list of mappings), handles and objects by id, the registry's
+     volatile keys; `run=`/`start=` not run again when processes come
+     across; then a `Gala*` trigger so a program can ask for a handover
+     while it runs. Also open: freeing the first kernel's image and
+     Limine's reclaimable memory.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala
@@ -1681,7 +1776,11 @@ registry, global HWNDs, FindWindow/EnumWindows/GetWindowText... on
 other processes' windows) is done (2026-11-02, windows_across_test);
 step 2 (PostMessage to another process's window) and step 3
 (SendMessage to another process's window, WM_GETTEXT/WM_SETTEXT
-marshaled) and step 4 (UI Automation drives another process's button,
+marshaled; 2026-11-02, windows_across_test: PostThreadMessage to any
+process's thread, SendMessageTimeout, SendNotifyMessage,
+SendMessageCallback, ReplyMessage, InSendMessage(Ex), WM_COPYDATA
+marshaled, and a thread's windows destroyed when it ends) and step 4
+(UI Automation drives another process's button,
 edit and check box: uia_test) too; step 5 (2026-11-02, flaui_test):
 FlaUI 5.0.0 (FlaUI.UIA3, PREBUILT from nuget.org) on gala's .NET 8
 drives another program through gala's UIAutomationCore.dll

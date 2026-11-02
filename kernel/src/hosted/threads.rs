@@ -4,6 +4,7 @@
 //! the waits, the clock and the processor numbers come from `sim.rs`
 //! instead (one thread at a time, virtual time).
 
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::vec::Vec;
@@ -153,8 +154,10 @@ pub fn wait() -> WakeReason {
                 if now >= d {
                     return WakeReason::TimedOut;
                 }
-                let ms = Duration::from_millis(d - now);
-                state = s.wake.wait_timeout(state, ms).unwrap().0;
+                // Under clock control the clock may run at another rate,
+                // be frozen or jump: look again every 2 ms of real time.
+                let ms = if crate::clockctl::armed() { (d - now).min(2) } else { d - now };
+                state = s.wake.wait_timeout(state, Duration::from_millis(ms)).unwrap().0;
             }
             None => state = s.wake.wait(state).unwrap(),
         }
@@ -292,16 +295,72 @@ const EPOCH_DIFFERENCE: u64 = 11_644_473_600 * 10_000_000;
 
 fn start() -> &'static (Instant, u64) {
     START.get_or_init(|| {
-        let unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-        (Instant::now(), EPOCH_DIFFERENCE + (unix.as_nanos() / 100) as u64)
+        let boot = crate::replay::u64_input(crate::replay::Kind::BootTime, 0, || {
+            let unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+            EPOCH_DIFFERENCE + (unix.as_nanos() / 100) as u64
+        });
+        (Instant::now(), boot)
     })
 }
 
+/// The programs' clock: the host's monotonic clock, through clock
+/// control (`clockctl`) when it is armed; the simulation's virtual clock
+/// under `--sim`.
 pub fn monotonic_ns() -> u64 {
     if super::sim::on() {
         return super::sim::monotonic_ns();
     }
-    start().0.elapsed().as_nanos() as u64
+    crate::clockctl::virtual_ns(raw_ns())
+}
+
+/// The host's monotonic clock (ns since start), which clock control
+/// never moves. Recorded or replayed (`crate::replay`) per NT thread;
+/// a thread whose readings the recording does not have reads the host's
+/// clock from where the replayed ones ended.
+pub fn raw_ns() -> u64 {
+    let live = || start().0.elapsed().as_nanos() as u64;
+    if !crate::replay::on() {
+        return live();
+    }
+    let stream = current_if_known().map_or(0, |t| t.as_usize() as u32);
+    let value = crate::replay::u64_input(crate::replay::Kind::Clock, stream, || {
+        let now = live();
+        if !crate::replay::replaying() {
+            return now;
+        }
+        // Not before any replayed reading.
+        now + *LIVE_OFFSET.get_or_init(|| REPLAYED_MAX.load(Relaxed).saturating_sub(now))
+    });
+    REPLAYED_MAX.fetch_max(value, Relaxed);
+    value
+}
+
+/// The latest raw clock reading handed out (replays).
+static REPLAYED_MAX: AtomicU64 = AtomicU64::new(0);
+/// What a replay adds to the host's clock once a reading is not recorded.
+static LIVE_OFFSET: OnceLock<u64> = OnceLock::new();
+
+/// Clock control (GalaClockControl): the simulation's clock, or the
+/// transform over the host's.
+pub fn clock_control(op: crate::clockctl::Op) -> crate::clockctl::State {
+    if super::sim::on() {
+        return super::sim::clock_control(op);
+    }
+    crate::clockctl::apply(op, raw_ns(), boot_system_time())
+}
+
+/// Turns clock control on (`--clock=`) as the program starts.
+pub fn arm_clock_control() {
+    if super::sim::on() {
+        let (raw, now) = super::sim::clocks();
+        let apply = |op| {
+            super::sim::clock_control(op);
+        };
+        crate::clockctl::arm(raw, now, boot_system_time(), Some(&apply));
+    } else {
+        let raw = raw_ns();
+        crate::clockctl::arm(raw, raw, boot_system_time(), None);
+    }
 }
 
 /// Milliseconds since start (TICK_HZ = 1000, as in the kernel).
@@ -317,7 +376,8 @@ pub fn boot_system_time() -> u64 {
 }
 
 pub fn system_time() -> u64 {
-    boot_system_time() + monotonic_ns() / 100
+    let t = boot_system_time() + monotonic_ns() / 100;
+    crate::clockctl::offset_system(t, crate::clockctl::system_offset())
 }
 
 /// Calls `callback(ticks)` every millisecond on a host thread.

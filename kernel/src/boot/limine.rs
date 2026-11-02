@@ -138,6 +138,13 @@ pub struct DateAtBootResponse {
     pub timestamp: i64,
 }
 
+/// The executable file feature: the kernel's own ELF file, as loaded.
+#[repr(C)]
+pub struct ExecutableFileResponse {
+    pub revision: u64,
+    pub executable_file: *const RawFile,
+}
+
 #[repr(C)]
 pub struct ExecutableAddressResponse {
     pub revision: u64,
@@ -191,6 +198,7 @@ pub struct Requests {
     pub modules: Request<ModuleResponse>,
     pub date_at_boot: Request<DateAtBootResponse>,
     pub mp: MpRequest,
+    pub executable_file: Request<ExecutableFileResponse>,
     end_marker: [u64; 2],
 }
 
@@ -217,6 +225,7 @@ pub static REQUESTS: Requests = Requests {
     modules: Request::new([0x3e7e279702be32af, 0xca1c4f3bd1280cee]),
     date_at_boot: Request::new([0x502746e184c088aa, 0xfbc5ec83e6327893]),
     mp: MpRequest { request: Request::new([0x95a67b819a1b857e, 0xa0b61b723b6a73e0]), flags: 0 },
+    executable_file: Request::new([0xad97e90e83f1ed67, 0x31eb5d1c5ff23b69]),
     end_marker: REQUESTS_END_MARKER,
 };
 

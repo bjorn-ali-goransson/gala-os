@@ -154,7 +154,8 @@ counts (TCG plugins) need a QEMU built with plugins; Ubuntu's has none.
   deadlock is reported with the seed and every thread's wait. `cargo
   xtask sim-test` runs the multi-threaded programs under several seeds,
   twice each (ARCHITECTURE "Deterministic simulation", WORKFLOW).
-  TODO: RDRAND (Go's runtime) from the seed.
+  Go programs repeat too (RDRAND hidden by CPUID faulting, ProcessPrng
+  from the seed, spin loops preempted at a canonical point).
 
 ## 6. Live introspection — later
 

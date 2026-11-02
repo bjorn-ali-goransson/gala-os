@@ -192,6 +192,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "clock_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "clusapi"
 version = "0.1.0"
 
@@ -507,6 +514,14 @@ version = "0.1.0"
 dependencies = [
  "ntrt",
 ]
+
+[[package]]
+name = "gala"
+version = "0.1.0"
+
+[[package]]
+name = "gala_cli_test"
+version = "0.1.0"
 
 [[package]]
 name = "gala_heap"
@@ -1156,6 +1171,10 @@ dependencies = [
 
 [[package]]
 name = "registry_test"
+version = "0.1.0"
+
+[[package]]
+name = "replay_test"
 version = "0.1.0"
 
 [[package]]

@@ -63,6 +63,10 @@ pub struct NtThread {
     in_syscall: IrqMutex<Option<(u32, UserRegs)>>,
     /// The impersonation token it acts with (nt::token), if any.
     pub impersonation: IrqMutex<Option<ObjectRef>>,
+    /// Its number in its process, in creation order (0: the first): the
+    /// same on every platform and every run of a program, unlike thread
+    /// ids (record/replay's streams).
+    pub ordinal: u32,
 }
 
 /// The user state of a thread parked by suspension.
@@ -149,6 +153,12 @@ pub fn current() -> Option<ObjectRef> {
     THREADS.lock().iter().find(|o| *as_thread(o).sched_id.lock() == Some(me)).cloned()
 }
 
+/// The running thread's number in its process (`NtThread::ordinal`; 0 for
+/// kernel threads).
+pub fn current_ordinal() -> u32 {
+    current().map_or(0, |t| as_thread(&t).ordinal)
+}
+
 /// The current thread's TEB and its stack reservation `[bottom, base)`
 /// (DeallocationStack, StackBase), if it is a thread of `process`.
 pub fn current_stack(process: &Process) -> Option<(u64, u64, u64)> {
@@ -220,6 +230,7 @@ pub fn create(
         parked: IrqMutex::new(None),
         in_syscall: IrqMutex::new(None),
         impersonation: IrqMutex::new(None),
+        ordinal: process.threads_created.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
     };
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -660,6 +671,10 @@ pub fn exit_current(status: NtStatus) -> ! {
         // is signaled, the thread must no longer count as live (e.g. for
         // ThreadAmILastThread).
         abandon_mutants(t);
+        // Its windows are destroyed with it, as on Windows (user32 frees
+        // its own records at DLL_THREAD_DETACH; this covers threads that
+        // never got there), and messages sent to it fail.
+        super::window::thread_ended(t.process.id as u32, t.id as u32);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
         let process = t.process.clone();
         let last = process.remove_thread(&object);

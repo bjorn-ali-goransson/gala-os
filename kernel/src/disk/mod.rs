@@ -111,6 +111,11 @@ fn request<R>(
     if crate::failpoint::hit(crate::failpoint::Point::DiskIo) {
         return Err(DiskError::Device);
     }
+    // Added latency (`failpoint=disk_io:delay:<ms>`): a slow disk.
+    let delay = crate::failpoint::delay_ms(crate::failpoint::Point::DiskIo);
+    if delay > 0 {
+        crate::sched::sleep_ms(delay);
+    }
     let _turn = Turn::take();
     let number = REQUESTS.fetch_add(1, Ordering::Relaxed) + 1;
     {

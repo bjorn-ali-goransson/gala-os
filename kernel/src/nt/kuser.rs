@@ -112,9 +112,12 @@ fn update_page(page: &SharedPage, ticks: u64) {
     page.write_u32(TICK_COUNT_LOW_DEPRECATED, ticks as u32);
 }
 
-fn on_tick(ticks: u64) {
+fn on_tick(_ticks: u64) {
+    // The tick count is read under the lock, as by `refresh_after`: a tick
+    // that read the clock before a clock-control change cannot overwrite
+    // the page after it shows the change.
     if let Some(page) = PAGE.lock().as_ref() {
-        update_page(page, ticks);
+        update_page(page, platform::ticks());
     }
 }
 
@@ -127,13 +130,33 @@ fn on_tick(ticks: u64) {
 /// the kernel the callback runs in the tick interrupt itself, so this
 /// finds the page current.
 pub fn catch_up() {
+    // Not while recording or replaying: whether the page is behind
+    // depends on timing, so the clock readings this makes on the
+    // program's thread would differ between the record and the replay.
+    if crate::replay::on() {
+        return;
+    }
     let now = platform::ticks();
     if now <= PAGE_TICKS.load(Ordering::Relaxed) {
         return;
     }
     if let Some(page) = PAGE.lock().as_ref() {
-        update_page(page, now);
+        // Read again under the lock (as `on_tick` does).
+        update_page(page, platform::ticks());
     }
+}
+
+/// Runs `change` (a clock-control request) and shows its effect on the
+/// page at once, under the page's lock.
+pub fn refresh_after<R>(change: impl FnOnce() -> R) -> R {
+    let page = PAGE.lock();
+    let result = change();
+    if let Some(page) = page.as_ref() {
+        // A clock-control change may move the clock back.
+        PAGE_TICKS.store(0, Ordering::Relaxed);
+        update_page(page, platform::ticks());
+    }
+    result
 }
 
 /// Maps the page read-only into a new address space and records it in

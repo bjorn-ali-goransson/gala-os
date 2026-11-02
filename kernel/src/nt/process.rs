@@ -40,6 +40,8 @@ pub struct Process {
     pub views: IrqMutex<Vec<super::section::View>>,
     /// Thread objects of the live threads.
     threads: IrqMutex<Vec<ObjectRef>>,
+    /// Threads created so far (each thread's `ordinal`).
+    pub threads_created: core::sync::atomic::AtomicU32,
     exit_status: IrqMutex<Option<NtStatus>>,
     /// Signaled when the process has ended.
     pub dispatcher: Dispatcher,
@@ -678,6 +680,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         vad: IrqMutex::new(vad),
         views: IrqMutex::new(Vec::new()),
         threads: IrqMutex::new(Vec::new()),
+        threads_created: core::sync::atomic::AtomicU32::new(0),
         exit_status: IrqMutex::new(None),
         dispatcher: Dispatcher::new(0),
         image: (base, u64::from(info.size_of_image)),
@@ -1018,9 +1021,11 @@ pub fn program_exists(path: &str) -> bool {
     open_program(path).is_ok()
 }
 
-/// Starts the program at Win32 path `path` as the boot user in its own
-/// directory, with new console handles (the start menu); its process id.
-pub fn launch(path: &'static str) -> Result<u64, NtStatus> {
+/// Starts the program at Win32 path `path` with arguments `args` (after
+/// the quoted path on its command line) as the boot user in its own
+/// directory, with new console handles (shasha's start menu,
+/// GalaDesktopAction); its process id.
+pub fn launch(path: &'static str, args: &str) -> Result<u64, NtStatus> {
     let object = open_program(path)?;
     let ObjectBody::File(f) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     let layout = super::section::image_layout(f.node)?;
@@ -1030,6 +1035,11 @@ pub fn launch(path: &'static str) -> Result<u64, NtStatus> {
     let mut command_line: Vec<u8> = Vec::new();
     for b in [b"\"", path.as_bytes(), b"\""] {
         command_line.try_extend_from_slice(b).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    if !args.is_empty() {
+        for b in [b" ", args.as_bytes()] {
+            command_line.try_extend_from_slice(b).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
     }
     let (process, _thread) = spawn(Spawn {
         name,

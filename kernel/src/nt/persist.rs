@@ -98,6 +98,15 @@ pub fn mount() {
     mount_registry();
 }
 
+/// Where the mounted volume's log is (for a kernel handover's record and
+/// its check after it), if a volume is mounted.
+pub fn position() -> Option<crate::handover::record::Volume> {
+    let volume = VOLUME.lock();
+    let v = volume.as_ref()?;
+    let (area, generation) = v.position();
+    Some(crate::handover::record::Volume { sectors: v.sectors(), generation, area, tail: v.used() })
+}
+
 /// The registry's change log on C:.
 const REGLOG: [&str; 4] = ["Windows", "System32", "config", "gala.reglog"];
 /// Past this size the registry's log is rewritten as a snapshot.

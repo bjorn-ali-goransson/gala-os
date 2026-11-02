@@ -143,7 +143,20 @@ pub struct Scheduler {
     /// The last demoted priority (`demote`); new threads' priorities are
     /// above DEMOTED.
     floor: u64,
+    /// Clock control (`crate::clockctl`): virtual time runs at
+    /// `rate.num / rate.den` of the "real" time below (0: frozen).
+    pub rate: crate::clockctl::Rate,
+    /// The unscaled clock: STEP_NS per scheduling point, and the jumps to
+    /// deadlines at the rate's inverse.
+    pub real_ns: u64,
+    /// Nanoseconds added by `advance`.
+    pub advanced_ns: u64,
 }
+
+/// One read of the clock in program code (KUSER_SHARED_DATA's times) in
+/// this many is a scheduling point: a thread polling the time for
+/// another's progress lets it run, as the timer interrupt would.
+pub const CLOCK_READ_ODDS: u64 = 16;
 
 /// Initial priorities have this bit; demoted ones count down below it.
 const DEMOTED: u64 = 1 << 63;
@@ -165,6 +178,27 @@ impl Scheduler {
             strategy: if seed.is_multiple_of(2) { Strategy::Priorities } else { Strategy::Uniform },
             streak: 0,
             floor: DEMOTED,
+            rate: crate::clockctl::Rate::REAL,
+            real_ns: START_NS,
+            advanced_ns: 0,
+        }
+    }
+
+    /// Clock control: virtual time jumps forward by `ns` (deadlines it
+    /// passes expire at the next scheduling point).
+    pub fn advance(&mut self, ns: u64) {
+        self.now_ns = self.now_ns.saturating_add(ns);
+        self.advanced_ns = self.advanced_ns.saturating_add(ns);
+    }
+
+    /// Moves virtual time on to `d` (not back); the unscaled clock moves
+    /// by as much as that takes at the current rate.
+    fn move_to(&mut self, d: u64) {
+        if d > self.now_ns {
+            let delta = d - self.now_ns;
+            let real = crate::clockctl::Rate { num: self.rate.den, den: self.rate.num.max(1) };
+            self.real_ns = self.real_ns.saturating_add(real.scale(delta));
+            self.now_ns = d;
         }
     }
 
@@ -299,10 +333,21 @@ impl Scheduler {
         self.rng.below(odds.max(1)) == 0
     }
 
-    /// A scheduling point: virtual time passes by STEP_NS.
+    /// Program code read the clock (KUSER_SHARED_DATA's times): a step of
+    /// virtual time passes (a loop waiting for the time to move ends), and
+    /// whether the reader should give up the processor (one read in
+    /// CLOCK_READ_ODDS, by the PRNG).
+    pub fn clock_read(&mut self) -> bool {
+        self.step();
+        self.chance(CLOCK_READ_ODDS)
+    }
+
+    /// A scheduling point: virtual time passes by STEP_NS (scaled by the
+    /// clock-control rate: none while frozen).
     pub fn step(&mut self) {
         self.steps += 1;
-        self.now_ns += STEP_NS;
+        self.real_ns += STEP_NS;
+        self.now_ns += self.rate.scale(STEP_NS);
     }
 
     /// Whether a program thread other than `id` could make progress if
@@ -320,8 +365,11 @@ impl Scheduler {
 
     /// Moves virtual time to the earliest deadline of a blocked thread (a
     /// thread spinning in program code is taken to have used the time
-    /// until then).
+    /// until then). Not while the clock is frozen.
     pub fn skip_to_next_deadline(&mut self) {
+        if self.rate.num == 0 {
+            return;
+        }
         let earliest = self
             .threads
             .iter()
@@ -330,7 +378,7 @@ impl Scheduler {
             .filter_map(|t| t.deadline)
             .min();
         if let Some(d) = earliest {
-            self.now_ns = self.now_ns.max(d);
+            self.move_to(d);
         }
     }
 
@@ -415,12 +463,138 @@ impl Scheduler {
                 self.last_user_ns = self.now_ns;
             }
             match earliest {
-                Some(d) if user_deadline || d.saturating_sub(self.last_user_ns) < IDLE_LIMIT_NS => {
-                    self.now_ns = self.now_ns.max(d);
+                // A frozen clock reaches no deadline: everyone waits for ever.
+                Some(d)
+                    if self.rate.num > 0
+                        && (user_deadline
+                            || d.saturating_sub(self.last_user_ns) < IDLE_LIMIT_NS) =>
+                {
+                    self.move_to(d);
                 }
                 _ => {
                     self.running = None;
                     return Next::Deadlock;
+                }
+            }
+        }
+    }
+}
+
+/// A thread's registers as `SpinCapture` compares them: rip, rflags
+/// (without the trap and resume flags) and the 16 general registers.
+pub type SpinState = [u64; 18];
+
+/// Single steps a capture may take before it gives up (the thread is
+/// computing, not spinning in a loop that repeats exactly).
+pub const SPIN_CAPTURE_LIMIT: u64 = 1 << 16;
+/// A capture gives up when the instruction at Brent's mark comes back
+/// this often with other registers: a loop with a counter (a computation,
+/// or a delay loop), which never repeats exactly. (A spin loop's inner
+/// loops, such as a PAUSE loop of some tens of turns, stay well below.)
+pub const SPIN_RIP_REPEATS: u32 = 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpinPhase {
+    /// Looking for a repeated state (Brent's cycle detection).
+    Find,
+    /// Walking the cycle once (`left` steps more) for its least state.
+    Least { left: u64 },
+    /// Stepping on to that least state.
+    Seek,
+}
+
+/// What `SpinCapture::step` decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpinStep {
+    /// Step another instruction.
+    Continue,
+    /// The thread is at the loop's canonical point: preempt it here.
+    Preempt,
+    /// No exact repetition within SPIN_CAPTURE_LIMIT steps, or a loop that
+    /// counts (SPIN_RIP_REPEATS).
+    GiveUp,
+}
+
+/// Deterministic preemption of a thread spinning in program code (a
+/// spin-wait on another thread). The host watchdog notices the spin at a
+/// moment that depends on the host's timing; preempting there would make
+/// the run depend on it. Instead the thread is single-stepped from there,
+/// and this finds the loop: only one thread runs in the simulation, so
+/// memory changes only by the spinner's own stores, and a spin-wait comes
+/// back to exactly the same registers each turn. Once a state repeats
+/// (Brent's algorithm: constant memory) the cycle is walked once for its
+/// least state (by rip, then registers), and the thread is preempted when
+/// it is there next: the same state in every run, whichever turn of the
+/// loop the watchdog interrupted. A thread that is computing, not
+/// spinning, does not repeat and is let go (`GiveUp`).
+#[derive(Clone, Copy, Debug)]
+pub struct SpinCapture {
+    phase: SpinPhase,
+    steps: u64,
+    /// Brent: steps since `mark`, and the window before `mark` moves on.
+    lam: u64,
+    power: u64,
+    mark: SpinState,
+    /// The mark's instruction came back with other registers this often.
+    mark_rip_hits: u32,
+    least: SpinState,
+}
+
+impl SpinCapture {
+    /// Starts with the state the watchdog interrupted.
+    pub fn new(first: &SpinState) -> Self {
+        SpinCapture {
+            phase: SpinPhase::Find,
+            steps: 0,
+            lam: 0,
+            power: 1,
+            mark: *first,
+            mark_rip_hits: 0,
+            least: *first,
+        }
+    }
+
+    /// The thread is at `state` after one more instruction.
+    pub fn step(&mut self, state: &SpinState) -> SpinStep {
+        self.steps += 1;
+        if self.steps > SPIN_CAPTURE_LIMIT {
+            return SpinStep::GiveUp;
+        }
+        match self.phase {
+            SpinPhase::Find => {
+                self.lam += 1;
+                if *state == self.mark {
+                    // A cycle of `lam` states; this is one of them.
+                    self.least = *state;
+                    self.phase = SpinPhase::Least { left: self.lam - 1 };
+                    if self.lam == 1 {
+                        self.phase = SpinPhase::Seek;
+                        return SpinStep::Preempt;
+                    }
+                } else if self.lam == self.power {
+                    self.mark = *state;
+                    self.mark_rip_hits = 0;
+                    self.power *= 2;
+                    self.lam = 0;
+                } else if state[0] == self.mark[0] {
+                    self.mark_rip_hits += 1;
+                    if self.mark_rip_hits > SPIN_RIP_REPEATS {
+                        return SpinStep::GiveUp;
+                    }
+                }
+                SpinStep::Continue
+            }
+            SpinPhase::Least { left } => {
+                self.least = self.least.min(*state);
+                self.phase =
+                    if left <= 1 { SpinPhase::Seek } else { SpinPhase::Least { left: left - 1 } };
+                SpinStep::Continue
+            }
+            SpinPhase::Seek => {
+                if *state == self.least {
+                    SpinStep::Preempt
+                } else {
+                    SpinStep::Continue
                 }
             }
         }
@@ -523,6 +697,42 @@ mod tests {
         s.block(1);
         assert_eq!(s.pick(), Next::Run(2));
         assert_eq!(s.now_ns, START_NS + 80 * NS_PER_TICK);
+    }
+
+    #[test]
+    fn clock_control_scales_freezes_and_advances() {
+        let mut s = Scheduler::new(1);
+        s.add(1, true);
+        s.add(2, true);
+        assert_eq!(s.running, Some(1));
+        s.rate = crate::clockctl::Rate { num: 1000, den: 1 };
+        s.step();
+        assert_eq!(s.now_ns, START_NS + 1000 * STEP_NS);
+        assert_eq!(s.real_ns, START_NS + STEP_NS);
+        // Frozen: steps leave virtual time alone, and a deadline is never
+        // reached by waiting.
+        s.rate = crate::clockctl::Rate::FROZEN;
+        let frozen = s.now_ns;
+        s.step();
+        assert_eq!(s.now_ns, frozen);
+        s.prepare(1, Some(frozen + 5));
+        s.block(1);
+        s.prepare(2, Some(frozen + 7));
+        s.block(2);
+        assert_eq!(s.pick(), Next::Deadlock);
+        // An advance passes the first deadline.
+        s.advance(6);
+        assert_eq!(s.pick(), Next::Run(1));
+        assert_eq!(s.wait_result(1), (false, true));
+        assert_eq!(s.advanced_ns, 6);
+        // At half speed, the jump to thread 2's deadline (1 ns away) takes
+        // 2 ns of the unscaled clock.
+        s.rate = crate::clockctl::Rate { num: 1, den: 2 };
+        s.block(1);
+        let real = s.real_ns;
+        assert_eq!(s.pick(), Next::Run(2));
+        assert_eq!(s.now_ns, frozen + 7);
+        assert_eq!(s.real_ns, real + 2);
     }
 
     #[test]
@@ -651,5 +861,115 @@ mod tests {
         b.record(&[2, 1]);
         assert_ne!(a.trace, b.trace);
         assert_ne!(a.trace, EMPTY_TRACE);
+    }
+
+    fn state(rip: u64, rax: u64) -> SpinState {
+        let mut s = [0; 18];
+        s[0] = rip;
+        s[2] = rax;
+        s
+    }
+
+    /// Runs a capture over `prefix` then `cycle` repeated, starting at
+    /// `start` (the moment the watchdog interrupted); returns the state at
+    /// which it preempts.
+    fn capture(prefix: &[SpinState], cycle: &[SpinState], start: usize) -> Option<SpinState> {
+        let at = |i: usize| {
+            if i < prefix.len() { prefix[i] } else { cycle[(i - prefix.len()) % cycle.len()] }
+        };
+        let mut c = SpinCapture::new(&at(start));
+        for i in start + 1.. {
+            match c.step(&at(i)) {
+                SpinStep::Continue => {}
+                SpinStep::Preempt => return Some(at(i)),
+                SpinStep::GiveUp => return None,
+            }
+        }
+        None
+    }
+
+    /// Wherever the watchdog interrupts a spin loop (before it or in any
+    /// turn), the thread is preempted in the same state: the loop's least.
+    #[test]
+    fn a_spin_loop_is_preempted_at_the_same_state() {
+        // A loop through lock, test, unlock (rip 0x50 the least), entered
+        // after a few other instructions; the same rip with two register
+        // states in the loop.
+        let prefix: Vec<_> = (0..7).map(|i| state(0x900 + i, i)).collect();
+        let cycle = [
+            state(0x120, 1),
+            state(0x50, 7),
+            state(0x60, 7),
+            state(0x120, 2),
+            state(0x50, 6),
+            state(0x300, 0),
+        ];
+        for start in 0..40 {
+            assert_eq!(capture(&prefix, &cycle, start), Some(state(0x50, 6)), "start {start}");
+        }
+        // A loop of one instruction (jmp $).
+        assert_eq!(capture(&[], &[state(0x10, 0)], 0), Some(state(0x10, 0)));
+        // Two states.
+        for start in 0..4 {
+            assert_eq!(capture(&[], &[state(9, 0), state(8, 0)], start), Some(state(8, 0)));
+        }
+    }
+
+    /// A counting loop (`dec; jnz`) is let go after a few thousand steps,
+    /// not SPIN_CAPTURE_LIMIT.
+    #[test]
+    fn a_counting_loop_is_let_go_early() {
+        let mut c = SpinCapture::new(&state(0x10, 1_000_000));
+        let mut steps = 0u64;
+        let mut counter = 1_000_000;
+        loop {
+            steps += 1;
+            let rip = [0x10, 0x12, 0x14][(steps % 3) as usize];
+            if rip == 0x12 {
+                counter -= 1;
+            }
+            match c.step(&state(rip, counter)) {
+                SpinStep::Continue => {}
+                verdict => {
+                    assert_eq!(verdict, SpinStep::GiveUp);
+                    break;
+                }
+            }
+        }
+        assert!(steps < 16 * u64::from(SPIN_RIP_REPEATS), "{steps} steps");
+    }
+
+    /// A computation that does not repeat is let go.
+    #[test]
+    fn a_computation_is_not_captured() {
+        let mut c = SpinCapture::new(&state(1, 0));
+        let mut verdict = SpinStep::Continue;
+        for i in 0..=SPIN_CAPTURE_LIMIT {
+            verdict = c.step(&state(1, i + 1));
+            if verdict != SpinStep::Continue {
+                break;
+            }
+        }
+        assert_eq!(verdict, SpinStep::GiveUp);
+    }
+
+    /// Clock reads advance virtual time one step each and give up the
+    /// processor about once in CLOCK_READ_ODDS, the same reads under the
+    /// same seed.
+    #[test]
+    fn clock_reads_advance_time_and_sometimes_switch() {
+        let reads = |seed| {
+            let mut s = Scheduler::new(seed);
+            let start = s.now_ns;
+            let switches: Vec<bool> = (0..4000).map(|_| s.clock_read()).collect();
+            assert_eq!(s.now_ns, start + 4000 * STEP_NS);
+            switches
+        };
+        let a = reads(9);
+        assert_eq!(a, reads(9));
+        assert_ne!(a, reads(10));
+        let n = a.iter().filter(|&&x| x).count() as u64;
+        let expected = 4000 / CLOCK_READ_ODDS;
+        assert!(n > expected / 2 && n < expected * 2, "{n} switches");
     }
 }

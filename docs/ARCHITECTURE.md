@@ -25,6 +25,8 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/mm/paging.rs      4-level page-table mapper, generic over table access (host-tested)
   src/mm/heap.rs        slab + page heap, global allocator, try_box/TryVec   [unsafe allowed]
   src/mm/mod.rs         global frame allocator instance
+  src/handover/         kernel handover (R9): the record format, ELF loading, what is carried
+  src/arch/x86_64/handover.rs  the machine side: image, page tables, trampoline, parked CPUs [unsafe allowed]
   src/disk/             the disk: virtio-blk, whole-sector reads/writes/flush
   src/nt/               NT personality: PE loader, processes, handles, syscalls
   src/nt/platform.rs    the seam: traits for what nt needs from the machine
@@ -110,10 +112,16 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `profile=server` | never bring up the graphical interface: the desktop is not drawn even with a screen (windows still exist), `console=` starts no console window (ROADMAP SD) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |
-| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault` or `all` |
+| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock` or `all` (`mock`: clock-control changes) |
 | `failpoint=<point>:<mode>:<n>[,...]` | fault injection while the `start=`/`run=` programs run (debug builds; "Fault injection" below). Points `heap`, `frame`, `disk_io`, `net_tx`; modes `every:<n>` (the n-th, 2n-th, ... occurrence fails), `nth:<n>` (only the n-th), `random:<per-mille>` (from `failseed=`). Example: `failpoint=heap:every:97,net_tx:random:50` |
 | `failseed=<n>` | seed of the `random` failpoints (default 0): the same seed fails the same occurrences |
 | `failtrace` | log each injected failure with a backtrace (`cargo xtask symbolize` resolves it) |
+| `failpoint=disk_io:delay:<ms>` | added latency: each disk request waits that long first, nothing fails (debug builds; R7) |
+| `clock=<items>` | clock control while the programs run (debug builds; "Clock control" below): `control` (the test-only GalaClockControl call is allowed), `freeze`, `rate:<n>[/<d>]`, `advance:<seconds>`, `system:<UNIX seconds>` (the system time when the programs start). Example: `clock=control,freeze,system:2147483648` |
+| `record` | record what the programs read from outside (random numbers, the boot time) on the debug console; xtask writes it to `<iso>.rec` ("Record/replay" below) |
+| `replay=<file>` | the programs read those inputs from the recording in the boot module of that file name |
+| `handover=<n>` | at the end of the boot (after the `run=` programs), hand the machine over to a fresh copy of the kernel, until n handovers are done ("Kernel handover" below; the command line is handed over, so each kernel sees it) |
+| `handover_image=<file>` | hand over to the kernel ELF in that boot module instead of the running kernel's own file |
 
 ## Physical memory
 
@@ -2217,7 +2225,10 @@ replay and snapshot.
 
 ## Windows on the screen (W1, W2, W4)
 
-A small window manager and shell, in the kernel for now. Since W4 it
+**shasha** (Arabic شاشة, "screen"; the owner, 2026-11-02) is gala's
+graphical shell: a small window manager and shell, in the kernel for
+now (the `shasha` cargo feature; the module stays `nt::desktop`, the
+screen surface it draws). Since W4 it
 imitates Windows 11's look (as the project owner asked, 2026-11-01): the
 layout, metrics and colours of its captions, taskbar and start menu,
 with gala's own artwork (the owner's fortress and wordmark) and an open
@@ -2924,12 +2935,91 @@ it holds today:
   GalaWindowListen and GalaScreenInfo answer as without a screen, and
   `console=` starts no conhost.exe. The screen keeps the text console.
 
+**Layering (the owner, 2026-11-02)**: the desktop edition is a strict
+superset of the server edition: the server/CLI edition plus a graphical
+shell, **shasha**. The `shasha` cargo feature only adds (it never changes or
+removes server behaviour), and every scenario a server kernel passes
+also runs on the desktop kernel (the suite boots the desktop kernel for
+all of them and the server kernel for `SERVER_KERNEL_SCENARIOS`). Every desktop action (start
+menu, taskbar, caption buttons, Snap keys, wallpaper) is a named action
+that the CLI can also invoke (`gala` command; ROADMAP SD "CLI parity"),
+so nothing can be done only with a mouse. New desktop features are
+built CLI-first.
+
 Rule for new code: nothing in the boot path, the console path or a
 server program's path may touch the desktop, start a GUI process or
-load a GUI DLL unless a program asked for a window. Planned (ROADMAP
-SD): a server module set without the GUI DLLs,
-then a `desktop` cargo feature that leaves the compositor out of a
-server kernel.
+load a GUI DLL unless a program asked for a window (user32 and gdi32
+themselves stay: many server programs import them, and loading them
+draws nothing).
+
+- **The server kernel** (2026-11-02, scenario `server_kernel`): the
+  kernel's `shasha` cargo feature (renamed from `desktop`, 2026-11-02)
+  is on by default; without it
+  (`--no-default-features`) `nt::desktop` is `nt/desktop_off.rs`, the
+  same interface with nothing behind it (every window call
+  STATUS_NOT_SUPPORTED, as with no screen; `Desktop` is an empty enum so
+  `with` never runs its closure). The compositor, wallpapers and start
+  menu are not in the binary (2.5 MB less in release). xtask builds it
+  into `target/server` beside the normal one; scenarios listed in
+  `SERVER_KERNEL_SCENARIOS` boot it; CI runs clippy on it. A change to
+  `nt::desktop`'s public interface needs the same change in
+  `desktop_off.rs`.
+
+- **CLI parity: done (2026-11-02, scenario `gala_cli`).** Everything
+  shasha does to windows is a named action, `nt::desktop::Action`:
+  Activate (on top and active; a minimized window restored), Minimize,
+  Maximize (SC_MAXIMIZE), Restore (from minimized, maximized: SC_RESTORE,
+  or snapped: back to the rectangle before the snap), Close
+  (SC_CLOSE: the program decides), Snap(Left | Right | Up | Down) and
+  Place(x, y, w, h). `Desktop::act(id, action)` is the only code that
+  does them: the taskbar buttons (a click minimizes the active window
+  on top, else activates), the caption buttons and Win+arrows call it,
+  and so does the system call. The program still moves its own window
+  (WM_SYSCOMMAND, GALA_WM_PLACE, GALA_WM_MINIMIZED), as with the mouse.
+  Starting a program is `nt::action::start_path`, shared by the start
+  menu (input thread) and the system call.
+  **GalaDesktopAction**(*Request, RequestLength, *Output, OutputLength,
+  *ReturnLength), gala's service 0x7f58 (`nt/action.rs`, which has the
+  layouts): a versioned request (version 1: action, HWND, four i32
+  arguments, a UTF-16 text) for Start (a path on C:, a start menu name,
+  or a file name looked up in C:\gala, C:\ and System32, `.exe`
+  optional; the rest of the text is the arguments; output: the process
+  id), Windows (the taskbar's list: HWND, process id, screen id, flags
+  minimized/maximized/active/snapped, the outer rectangle, the title;
+  a versioned list header), Programs (the start menu's existing
+  programs), Activate, Minimize, Maximize, Restore, Close, Snap, Move
+  and Wallpaper (run time: the picture is decoded and scaled outside the
+  desktop's lock, then swapped in and the screen redrawn; "drawn" is the
+  drawn one). Windows are named by their HWND: the window registry's
+  record version 2 carries the window's id on shasha's screen (see
+  "Plan: windows across processes"), so the kernel goes from HWND to the
+  screen's window and back. Without shasha on the screen (the server
+  kernel, `profile=server`, no screen) the window actions, Windows,
+  Programs and Wallpaper are STATUS_NOT_SUPPORTED (checked before the
+  window, so a server always says so); Start works everywhere. List
+  output that does not fit is cut at a whole entry.
+  **The `gala` command** (user/gala, a console program on kernel32 and
+  ntdll, in every image as C:\gala\gala.exe): `gala start <program>
+  [arguments]`, `gala windows`, `gala programs`, `gala activate|
+  minimize|maximize|restore|close <window>`, `gala snap
+  left|right|up|down <window>`, `gala move <window> x y w h`, `gala
+  wallpaper <name>`, `gala ps` (SystemProcessInformation), `gala kill
+  <pid|name>` (OpenProcess/TerminateProcess; a name ends every process
+  of that image but gala itself), `gala help`. A window is an HWND or a
+  title (whole, or a part only one title has). Exit codes: 0 done, 1
+  usage, 2 not found, 3 not supported here (no graphical shell), 4
+  failed (status printed). Test: `gala_cli_test` (scenario gala_cli,
+  UEFI with a screen check after `gala snap left`; its server mode in
+  server_kernel and server_profile) starts a window through `gala`,
+  drives it through every action and checks what the program saw and
+  what `gala windows` and the registry (FindWindowW, GetWindowRect,
+  IsZoomed, IsIconic from another process) say; host tests in
+  `desktop/tests.rs` and `action.rs`.
+  TODO: any process may act on any window and `gala start` runs the
+  program as the boot user (not as the caller): the desktop needs an
+  owner and access checks (SECURITY.md); the chosen wallpaper is not
+  kept across boots; popups and hidden windows are not listed (the
+  registry has them: FindWindow/EnumWindows).
 
 ## UI Automation
 
@@ -3206,8 +3296,8 @@ client side over Win32 windows (`uia_test`, a mingw C program).
 
 Limits and TODO: other processes' windows are seen through the kernel's
 window registry and driven with posted and sent messages (see "Plan:
-windows across processes"); messages sent to another thread of the
-client's own process are still direct calls;
+windows across processes", which also covers another thread of the
+client's own process);
 providers inside programs (WM_GETOBJECT answered with
 IRawElementProviderSimple via UiaReturnRawElementProvider, which wx and
 Qt implement for their widgets) are not consulted; no events
@@ -3294,8 +3384,14 @@ steps, each test first:
    (*info) 0x7f42, GalaWindowUnregister(hwnd) 0x7f43, GalaWindowQuery
    (hwnd, *info) 0x7f44, GalaWindowChildren(parent, *hwnds, max,
    *count) 0x7f45 (0: every top-level window, highest first); the
-   record (`nt::window::Info`, 728 bytes, format version 1 at bytes
-   84..88: the kernel refuses another with STATUS_INVALID_PARAMETER):
+   record (`nt::window::Info`, format version at bytes 84..88:
+   version 1 is 728 bytes; version 2 (2026-11-02, CLI parity) appends
+   the top-level window's id on shasha's screen (u32, then 4 reserved
+   bytes: 736). The kernel reads versions 1 and 2 (version 1's size
+   first, the rest only for a version 2 record) and refuses others with
+   STATUS_INVALID_PARAMETER; GalaWindowQuery writes the version the
+   caller names in its buffer's version field (a zeroed buffer gets
+   version 1); user32 writes version 2):
    hwnd, parent, owner, id, pid
    (the kernel's), tid, style, ex_style, screen rectangle, visible/
    enabled/maximized (4)/minimized (8) flags, z, class name (64) and
@@ -3320,7 +3416,8 @@ steps, each test first:
    answers for any process's window. TODO: GetParent of an owned
    WS_POPUP window is its owner on Windows (gala: 0); owned windows are
    not yet destroyed or hidden with their owner.
-2. **Done for PostMessage (2026-11-02, windows_across_test).** As
+2. **Done for PostMessage and PostThreadMessage (2026-11-02,
+   windows_across_test).** As
    built: the registry keeps messages posted to another process's
    windows (GalaWindowPost(hwnd, msg, wParam, lParam) 0x7f46, at most
    4096 waiting) and each process's queue event (GalaWindowListen now
@@ -3329,14 +3426,26 @@ steps, each test first:
    0x7f47, 32-byte records) into the queue of the window's thread.
    PostMessage to another process's window of a system message that
    carries a pointer (WM_SETTEXT, WM_GETTEXT, WM_COPYDATA, WM_NOTIFY...)
-   fails with ERROR_MESSAGE_SYNC_ONLY, as documented. TODO:
-   PostThreadMessage to another process's thread. The plan was:
+   fails with ERROR_MESSAGE_SYNC_ONLY, as documented.
+   PostThreadMessage (2026-11-02, windows_across_test): the registry
+   knows which threads have a message queue (a thread gets one when it
+   registers a window or calls GalaWindowReceive, which every pump and
+   PostThreadMessage do; it loses it when it ends);
+   GalaWindowPostThread(tid, msg, wParam, lParam) 0x7f50 queues the
+   message for that thread's process (any process, ours too: user32
+   posts its own thread messages through the kernel, which alone knows
+   the queues) and sets its queue event; GalaWindowPosted's record
+   carries the thread id in bytes 12..16 (hwnd 0), and user32 moves it
+   into that thread's queue without a window. STATUS_INVALID_CID (no
+   such thread, or no queue: PostThreadMessage's ERROR_INVALID_THREAD_ID).
+   The plan was:
    **Posted messages across processes**: PostMessage/PostThreadMessage
    to another process's window or thread go into a kernel queue per
    thread; user32's pump moves them into its own queue as it does the
    desktop's input (GalaWindowInput). Test: BM_CLICK posted to the
    child's button gives the child's window WM_COMMAND.
-3. **Done across processes (2026-11-02, windows_across_test).** As
+3. **Done across threads and processes (2026-11-02,
+   windows_across_test).** As
    built: GalaWindowSend(*request, *id) 0x7f48 queues the message for
    the window's thread (the registry's tid) with its marshaled input
    and the room for its output, and sets the owner's queue event;
@@ -3353,18 +3462,59 @@ steps, each test first:
    buffer out (written straight into the sender's buffer); other
    messages as numbers. GetWindowText of another process's window
    stays the mirrored text, as documented (it does not send WM_GETTEXT
-   across processes; programs send WM_GETTEXT themselves). TODO:
-   SendMessageTimeout/SendNotifyMessage/SendMessageCallback, ReplyMessage
-   and InSendMessage, more marshaled messages (WM_COPYDATA).
+   across processes; programs send WM_GETTEXT themselves).
+   **The other send functions (2026-11-02, windows_across_test).**
+   GalaWindowSend's request has flags at bytes 44..48 (0 before:
+   SendMessage): SEND_NOTIFY (1, SendNotifyMessage: nobody waits; the
+   entry goes when the receiver replies), SEND_CALLBACK (2,
+   SendMessageCallback: the reply also sets the sender's queue event, and
+   user32's pump polls its waiting callbacks with GalaWindowSendWait(id,
+   0) and calls them: callbacks run only inside the sender's
+   GetMessage/PeekMessage/MsgWait/WaitMessage, as documented),
+   SEND_ABORT_IF_HUNG (4, SMTO_ABORTIFHUNG: STATUS_TIMEOUT at once when a
+   message sent to the receiving thread has waited untaken HUNG_MS = 5 s;
+   a thread blocked in GetMessage is woken by the send, so it is never
+   hung by this rule); GalaWindowReceive's header gives them back at
+   44..48. SendMessageTimeout waits in slices of at most 10 ms up to its
+   time-out (SMTO_BLOCK: without handling messages sent to this thread
+   meanwhile) and then calls GalaWindowSendAbandon(id) 0x7f51: the
+   receiver still handles the message, its reply goes nowhere
+   (ERROR_TIMEOUT for the caller). A sender that ends (thread or
+   process) abandons its sends the same way, so a notify message still
+   arrives. The receiving side keeps, per thread (user32's RECEIVING
+   slots), the id, kind and output buffer of the message it is handling
+   (saved and restored around nested ones): ReplyMessage replies early
+   (once; the procedure's later return goes nowhere), InSendMessageEx
+   reports ISMEX_SEND/NOTIFY/CALLBACK (| ISMEX_REPLIED), InSendMessage
+   is ISMEX_SEND without REPLIED (as Wine). All of these call a window of
+   the calling thread directly (SendNotifyMessage and SendMessageCallback
+   synchronously, the callback right away); the asynchronous ones refuse
+   a system message with a pointer for another thread
+   (ERROR_MESSAGE_SYNC_ONLY). WM_COPYDATA is marshaled: the 24-byte
+   COPYDATASTRUCT and its cbData bytes go in one block, and the receiver
+   points lpData at its copy. TODO: HWND_BROADCAST (SendMessageTimeout and
+   SendNotifyMessage succeed reaching no window), SMTO_ERRORONEXIT,
+   IsHungAppWindow; the A functions pass strings as the W ones do (as
+   SendMessageA already did).
    **Cross-thread SendMessage within a process: done (2026-11-02,
    windows_across_test's local window).** user32 sends a message for a
    window of another of its threads through the same kernel path,
    nothing marshaled (the pointers are the process's own), so the
    procedure runs on the window's thread when it next calls a message
-   function, as on Windows. For a window whose thread has ended (gala
-   does not yet destroy a thread's windows with it) GalaWindowSend fails
-   with STATUS_THREAD_IS_TERMINATING and user32 calls the procedure on
-   the caller's thread, as before. The plan was:
+   function, as on Windows. **A thread's windows are destroyed when it ends
+   (2026-11-02, windows_across_test)**, as on Windows: user32's
+   DLL_THREAD_DETACH frees the thread's window slots (no WM_DESTROY: the
+   thread is going), its queue's messages and its RECEIVING/callback
+   slots, and the kernel's thread exit (`window::thread_ended`, which
+   also covers a thread that never reaches DLL_THREAD_DETACH) drops its
+   registry entries and queue, fails the messages sent to it and
+   abandons those it sent. So a send to a dead thread's window fails
+   (ERROR_INVALID_WINDOW_HANDLE; SendMessage to no window now sets it)
+   and IsWindow/FindWindow no longer see it; the old fallback (calling
+   the procedure on the caller's thread, STATUS_THREAD_IS_TERMINATING)
+   is gone. Limit: a window of a thread killed with TerminateThread
+   keeps its user32 slot in its own process (the registry entry goes, so
+   sends to it fail). The plan was:
    **Sent messages across threads and processes**: SendMessage to a
    window of another thread queues a sent message with a reply slot in
    the kernel; the sender waits (processing messages sent to itself, as
@@ -3443,7 +3593,11 @@ one for the whole kernel means `time.rs`.
 5. **All kernel time comes through one clock**: the NT layer through the
    `Clock` seam, the kernel's own modules through `time.rs`; nothing else
    reads the TSC or counts ticks (holds as of 2026-11-02). Deterministic
-   simulation (R5) and time mocking (R7) depend on it.
+   simulation (R5) and time mocking (R7) depend on it. With clock
+   control (R7) `time.rs` has two faces: the programs' clock (`ticks`,
+   `monotonic_ns`, `system_time`: virtual when `clock=` is given) and
+   the raw one (`raw_ticks`, `raw_monotonic_ns`) for the kernel's own
+   diagnostics and sleeps.
 
 ### Safety nets (designed here, built in R1-R4)
 
@@ -3575,7 +3729,10 @@ is the glue that hands one baton between host threads.
   counts held IrqMutexes as the kernel's interrupt flag; one lock point
   in 8 (by the PRNG) switches threads. Lock points interleave threads
   *inside* system calls at lock granularity, as two processors would;
-  they are not recorded in the trace and take no virtual time.
+  they are not recorded in the trace and take no virtual time. **Clock
+  reads**: a read of KUSER_SHARED_DATA in program code (below) is one in
+  16 (by the PRNG) a switch, as a timer interrupt would make it: a thread
+  polling the time for another's progress lets it run.
 - **Choice**: `pick` chooses among runnable threads. Odd seeds: uniformly
   (many short interleavings). Even seeds: by random priorities, the
   highest runs (long runs of one thread while another is stopped at an
@@ -3594,7 +3751,51 @@ is the glue that hands one baton between host threads.
   point moves time past a tick, not on a host timer thread. RDTSC and
   RDTSCP in program code fault (`PR_SET_TSC`, `PR_TSC_SIGSEGV`) and read
   the virtual clock as a 1 GHz counter, one step per read; RDTSCP's
-  TSC_AUX is the thread's simulated processor.
+  TSC_AUX is the thread's simulated processor. **KUSER_SHARED_DATA**'s
+  page is inaccessible to program code (`PROT_NONE` when mapped,
+  `entry::hide_kuser`): a read faults, takes one step of virtual time
+  (`sim::clock_read`, the tick callback if a tick passed: the page's
+  times change at ticks, as on Windows), and the instruction then runs
+  single-stepped (the trap flag) with the page readable for that one
+  instruction; the debug trap makes it inaccessible again. Only the baton
+  holder runs, so no other thread sees it readable. A program polling
+  GetTickCount or Go's `nanotime` without system calls sees time move.
+- **CPUID and random numbers**: RDRAND and RDSEED cannot be trapped on
+  Linux, so program threads run with CPUID faulting (`arch_prctl
+  (ARCH_SET_CPUID, 0)`, Intel's CPUID faulting, which KVM offers its
+  guests): CPUID raises SIGSEGV and `entry::simulated_cpuid` answers
+  with the processor's own values (faulting off for the one
+  instruction) without RDRAND (leaf 1 ECX bit 30) and RDSEED (leaf 7
+  EBX bit 18), and with the simulated processor as APIC id (leaves 1,
+  0xB, 0x1F). A program that checks CPUID before executing RDRAND
+  itself then takes another path. gala's own DLLs do not execute it in
+  the simulation: ProcessPrng (bcryptprimitives; BCryptGenRandom,
+  RtlGenRandom and CryptGenRandom go through it; no other gala DLL uses
+  RDRAND) asks the kernel first (GalaRandom, R7 "Record/replay"), which
+  in the simulation answers from the seed, so Go's runtime, which seeds
+  its scheduler and maps from ProcessPrng, repeats. Without CPUID
+  faulting on the host um says so once and RDRAND stays visible.
+- **Spinning in program code**: a thread that spins waiting for another
+  without system calls or clock reads (Go's background sweeper waits for
+  sweepers to finish, `bgsweep`: lock, test, unlock) would run for
+  ever, since nobody else runs. A host watchdog thread notices a thread
+  that used 10 ms of processor time without a scheduling point while
+  another program thread could run, and interrupts it (SIGURG). Where it
+  interrupts depends on the host's timing, so the thread is not
+  preempted there: entry.rs single-steps it, and `sim::SpinCapture` finds
+  its loop. Only one thread runs, so memory changes only by the
+  spinner's own stores, and a spin-wait comes back to exactly the same
+  registers each turn: Brent's cycle detection on (rip, rflags, the 16
+  registers) finds a repeat, one more turn finds the cycle's least state
+  (by rip, then registers), and the thread is preempted when it is there
+  next: the same state in every run, whichever turn the watchdog
+  interrupted ("N spin loops preempted" on the `sim:` line). Time then
+  jumps to the next deadline and another thread runs. A capture gives up
+  (and the thread runs on, unchanged) after 65536 steps or when the
+  instruction at Brent's mark comes back 1024 times with other registers
+  (a counting loop: a computation or a delay loop); a system call, a
+  fault or a clock read ends it too. go_gc's sweeper loop is about 800
+  instructions; a capture costs a few milliseconds.
 - **Processors**: a simulated thread runs on one processor, chosen from
   its affinity by its id, and its host thread is pinned there (RDTSCP and
   NtGetCurrentProcessorNumber agree, independent of the host).
@@ -3610,26 +3811,26 @@ is the glue that hands one baton between host threads.
   (thread, result) in order: `sim: seed S trace H (N scheduling points,
   T ms virtual)` at the end. Same seed, same hash.
 - **Cost when off**: one relaxed load of a flag at each seam call
-  (threads.rs, entry.rs, `host_cpu`); the kernel binary has none of it
-  (`sim.rs` is compiled for tests and `hosted` only).
+  (threads.rs, entry.rs, memory.rs's page insertion, `Entropy`,
+  `host_cpu`); the kernel binary has none of it (`sim.rs` is compiled
+  for tests and `hosted` only).
 - **Limits**:
-  - Program code between system calls runs unpreempted. A thread that
-    spins in program code waiting for another (no system call) would
-    run for ever, so a host watchdog thread preempts one that used
-    100 ms of processor time without a scheduling point, if another
-    program thread could run; time jumps to the next deadline (a
-    `Sleep(1)` poller gets its turn) and another thread runs. These
-    preemptions depend on the host's timing: the run's line says
-    "watchdog preemptions ...: not reproducible". Go's garbage
-    collector spins this way.
-  - RDRAND/RDSEED (gala's ProcessPrng, hence Go's runtime, which seeds
-    its scheduler from it) cannot be intercepted on Linux: such programs
-    are not reproducible (Go's are listed in xtask's SIM_UNSEEDED).
-    Next: CPUID faulting (`ARCH_SET_CPUID`) to hide RDRAND and a
-    ProcessPrng fed by the kernel.
-  - KUSER_SHARED_DATA's times change only at scheduling points: program
-    code polling GetTickCount without system calls sees time stand still
-    (until the watchdog).
+  - Program code between system calls and clock reads runs
+    unpreempted. A thread that computes (no exact repeat) for 10
+    captures in a row, about 100 ms of processor time, while another
+    program thread could run is preempted where the watchdog interrupted
+    it: that depends on the host's timing, and the run's line says
+    "watchdog preemptions ...: not reproducible" (sim-test tolerates it
+    only for programs outside SIM_PROGRAMS). fpu_test's long PAUSE loops
+    come close. A spin-wait whose loop does not repeat exactly (it counts
+    its turns in a register, or changes memory each turn) is such a
+    computation. Next: preemption by instruction count (performance
+    counters, as rr), where the host has them (this one's VM does not).
+  - The spin capture compares the general registers, not the vector
+    registers or memory: a loop that differs only there would be
+    preempted at a point that need not repeat (none seen).
+  - CPUID faulting needs the host's support (Intel, or a KVM guest);
+    without it RDRAND stays visible (um warns).
   - A program thread waiting with no deadline on a timer due in more
     than 300 s of virtual time is reported as a deadlock.
   - Host allocations (glibc's arenas) and new host threads' startup
@@ -3661,6 +3862,164 @@ is the glue that hands one baton between host threads.
   stream (a live component-swap interface is otherwise an ideal rootkit
   hook).
 
+**Built (2026-11-02)**, the parts that speed up development and
+troubleshooting first: clock control, record/replay of a run's outside
+inputs (gala-um and the kernel), the simulation's random numbers from
+its seed, and added disk latency. Not yet: the display, input and
+network frames as recorded or swappable devices, device events (a NIC
+removed), API-level faults in gala's DLLs, the read-write introspection
+channel.
+
+#### Clock control (R7, 2026-11-02)
+
+`kernel/src/clockctl.rs`. The platform's clock (the kernel's TSC and
+tick count in `time.rs`, the host's monotonic clock in gala-um's
+`threads.rs`) is the *raw* clock; what programs and wait deadlines see
+is the *virtual* clock, `Transform::at(raw) = base_virtual + (raw -
+base_raw) * num / den`, rebased at every change so it never goes
+backwards. The system time is the boot time plus the virtual clock plus
+`system_offset` (moved on its own: DST, 2038, certificate expiry).
+Invariant 5 holds: every view goes through the one transform, so
+KUSER_SHARED_DATA (interrupt time, system time, tick count),
+NtQuerySystemTime, NtQueryPerformanceCounter and the deadlines of waits
+in progress (relative timeouts are absolute virtual ticks since entry,
+invariant 2) agree at every moment.
+
+- **Flag**: `clock=` (kernel) / `um --clock=` (same items): `control`
+  allows GalaClockControl; `freeze`, `rate:<n>[/<d>]` (n, d up to 10^6),
+  `advance:<s>`, `system:<UNIX s>` set the clock when the programs start
+  (`arm`, with the failpoints: the boot itself runs on real time).
+  Without the flag the clock is unchanged and each read costs one
+  relaxed load of `ARMED`; release builds compile it out
+  (`COMPILED_IN`, as fault injection).
+- **GalaClockControl(Operation, A, B, \*State)**, gala's private
+  service 0x7f4c (test-only; STATUS_NOT_SUPPORTED without
+  `clock=control`): 0 query; 1 advance every view by A (100 ns units,
+  0 < A <= 100 years); 2 run at rate A/B (A = 0: frozen); 3 move the
+  system time alone by A (signed); 4 set the system time alone to A.
+  Bad operation, A or B: STATUS_INVALID_PARAMETER_1/2/3. State (if not
+  null) receives the **version-1 record** (40 bytes, invariant 3):
+  Version (u32, 1), Flags (u32: 1 frozen, 2 simulated), RateNum,
+  RateDen (u32), Advanced (u64, 100 ns), SystemOffset (i64, 100 ns),
+  RawTime (u64, the unscaled clock in 100 ns since it started). Every
+  change is logged (`clock: <process> asked to ...`) and is an event
+  (`events=mock`, `"ev":"clock"`). The call changes the clock under
+  KUSER_SHARED_DATA's lock and rewrites the page before returning, so
+  a timer tick cannot show the old clock after the new one.
+- **Waits**: the schedulers compare deadlines with the virtual clock.
+  The kernel's tick interrupt passes both clocks to `sched::on_tick`:
+  waiters (`State::Waiting`, the NT layer's and the kernel's own
+  timeouts) expire by the virtual tick count, `sched::sleep_ms` sleepers
+  (the kernel's housekeeping: input polling, teardown, network echo) by
+  the raw one, so a frozen clock does not stop the kernel. After an
+  advance, waits that are due end at the next tick (1 ms). gala-um's
+  waits look again every 2 ms of real time while the clock is armed.
+  The kernel's own diagnostics (flight recorder, watchdogs, event
+  timestamps, the `run=` hang dump's minute) use the raw clock
+  (`time::raw_ticks`, `raw_monotonic_ns`).
+- **The simulation** (`um --sim`): its clock is virtual already, so the
+  operations apply to it (`sim::Scheduler::advance`, `rate`): a step
+  costs `STEP_NS * rate`, an advance moves `now_ns`, and a frozen clock
+  reaches no deadline (every thread waiting on one is a deadlock, as it
+  would be). `real_ns` is the unscaled clock (RawTime).
+- **Kernel ticks under clock control** are the virtual clock's
+  milliseconds (from the TSC), not the count of timer interrupts; at
+  `arm` the virtual clock starts from the larger of the two, so neither
+  goes backwards.
+- **Test**: `clock_test` (scenarios `clock_test`, `clock_off`,
+  `clock_boot`; gala-um and sim-test too): frozen views stay equal
+  across yields and a busy loop; an advance of an hour moves every view
+  by exactly an hour, ends a 10-minute wait (STATUS_TIMEOUT) and a
+  20-minute sleep but not a 2-hour wait, which a second advance ends;
+  the system time moves alone; rate 1000 runs 30 s of program time in
+  about 30 ms of the unscaled clock; booted with
+  `clock=control,freeze,system:2147483648` the clock reads exactly
+  2038-01-19 03:14:08 UTC. Host tests: the transform, the request
+  decoding, the flag, the record's layout, the simulation's scaled and
+  frozen clock.
+- **Limits**: RDTSC in program code reads the real TSC in the kernel
+  (only the simulation virtualizes it). Absolute timeouts are converted
+  to relative ones on entry, so a later system-time change does not
+  move them (Windows re-evaluates absolute timers). Kernel threads'
+  `sleep_ms` run on real time by design.
+
+#### Record/replay (R7, 2026-11-02)
+
+`kernel/src/replay.rs`. A run's inputs from outside are written to a
+recording; a later run reads them from it, so a failure that depends on
+them repeats.
+
+- **Sources** (device boundaries): the boot time; the raw clock (gala-um
+  without `--sim`: every reading of the host's clock); random numbers
+  (GalaRandom, below); and, in gala-um, the run's settings (`info`
+  records: program, args, sim seed, processors, clock, failpoint,
+  failseed), which `--replay` restores unless given again.
+- **Format, version 1** (invariant 3): `GALAREC\0`, version (u16),
+  reserved (u16), then records of kind (u8), stream (u32), length (u32)
+  and payload. Kinds: 1 info (`key=value`), 2 boot time (u64), 3 clock
+  (u64 ns), 4 random (bytes), 0xff end (u64 count). A reader takes
+  versions 1..=VERSION and skips unknown kinds. The **stream** is the
+  thread that read the input: for random numbers its number in its
+  process (`NtThread::ordinal`, 0 the first: the same on every platform
+  and run), for gala-um's clock its platform thread id (0: a host
+  thread, the tick thread). Replay hands out each (kind, stream)'s
+  records in order: a thread gets its own inputs however the threads
+  interleave. A kind the recording has none of is live; a stream that
+  runs out (a helper thread running longer than recorded) or a request
+  of another length is a **divergence**: logged once (`replay: diverged
+  at ...`), that input is live, the end line counts them (`N inputs
+  live`). A clock reading that the recording lacks continues from the
+  last replayed one (never backwards).
+- **GalaRandom(\*Buffer, Length)** (gala's 0x7f4d): when the random
+  source is mocked (a recording, a replay, gala-um's simulation) the
+  kernel fills the buffer (hardware RDRAND recorded; replayed; the
+  simulation's own seeded stream, separate from its scheduler's);
+  otherwise STATUS_NOT_SUPPORTED and gala's ProcessPrng
+  (bcryptprimitives) uses RDRAND itself, as before; it asks once per
+  process. With this, Go programs repeat from their seed under `--sim`
+  (go_hello, go_goroutines are in sim-test; only go_gc's spinning
+  collector is still not reproducible).
+- **gala-um**: `um --record=<file>` (the file is written with write(2)
+  as the records come, so a crash keeps what was read), `um
+  --replay=<file>` (settings from the file, options given override
+  them). Combined with `--sim`, a recording is a complete repro: seed,
+  processors, flags, arguments and random numbers.
+- **The kernel**: `record` writes the recording on the debug console as
+  `{"ev":"rec","hex":...}` lines (whatever `events=` says); xtask joins
+  them into `<iso>.rec` and appends `xtask: recording <path>` to the
+  log (`XTASK_RECORD=1` records every boot). `replay=<file>` replays the
+  boot module of that name. The kernel records the boot time and random
+  numbers, not the clock (the TSC is read far too often, and the
+  kernel's timing is QEMU's: OBSERVABILITY's QEMU record/replay covers
+  the whole machine). Recordings move between platforms: a kernel
+  recording replays in gala-um and the other way round (both use the
+  thread's ordinal for random numbers).
+- **Cost when off**: one relaxed load of `MODE` per input; the off path
+  of ProcessPrng is one extra system call per process (the first call
+  asks GalaRandom).
+- **Tests**: `replay_test` (random numbers through ProcessPrng, the
+  performance counter across Sleep(5), the system time; results valid
+  on Windows); `cargo xtask replay-test` (in `cargo xtask test`)
+  records it twice live (the lines differ) and with `--sim=3` (they
+  agree), then replays each and requires the recorded lines; QEMU
+  scenarios `record_kernel` (the recording is made and extracted) and
+  `replay_kernel` (replays `user/replay_test/replay_test.rec`, recorded
+  in gala-um, and prints its random numbers); host tests for the
+  format, streams, versions and truncation.
+- **Not yet**: network frames, disk reads and input events (their
+  replay needs the guest to be at the same point when they arrive,
+  which only a deterministic kernel gives: gala-um's simulation for
+  frames over its loopback, later); the screen.
+
+#### Device latency (R7, 2026-11-02)
+
+`failpoint=disk_io:delay:<ms>`: a `delay` mode for failure points whose
+callers may sleep (`disk_io` only): nothing fails, each request waits
+`ms` of real time first (`failpoint: disk_io N checked, N delayed by
+<ms> ms`). Scenario `failpoint_disk_delay` (persist_test on a slow
+disk). The NIC's transmit path holds the stack's lock, so it gets no
+delay mode; its faults stay `net_tx` drops and `netreset=`.
+
 ### Live update, kernel included (the owner's vision; R8, R9)
 
 - **User mode first**: a versioned system image (`System/vN/`) behind
@@ -3678,11 +4037,130 @@ is the glue that hands one baton between host threads.
   the state back, resets the devices and reissues the blocked system
   calls (invariants 1, 2, 4). The disk log's snapshot and replay (D2/D3)
   is the precedent for the format. Live mocking's swap at a quiescent
-  point is the trial run for this, so it comes first.
+  point is the trial run for this, so it comes first. Milestone (a), the
+  handover itself with no programs, is built: "Kernel handover" below.
 - Function-level live patching (as Microsoft's Hotpatch): not planned
   unless a concrete need appears.
 - **A chain of trust for updates**: designed below (R8); built after
   R7, before live update ships.
+
+### Kernel handover (R9 milestone (a), 2026-11-02)
+
+The running kernel hands the machine to a fresh kernel image without the
+firmware or the bootloader: same build, no programs running (milestone
+(a); scenarios `handover_same`, `handover_uefi`, `handover_disk`). Code:
+`kernel/src/handover/` (record format, ELF parsing, what is carried; safe,
+host-tested) and `kernel/src/arch/x86_64/handover.rs` (the machine side).
+
+**The record** (`handover::record`, ARCHITECTURE invariant 3). A 64-byte
+header: magic `GALAHAND`, framing version (u32, 1; readers accept
+`MIN_VERSION..=VERSION`), header length, total length, CRC-32 (zlib's, as
+the disk log's) over the record with the CRC field as 0, flags, the
+generation (handovers done, counting this one), the section count. Then
+8-aligned sections: tag (u32), version (u16), flags (u16), length (u32),
+data. Growth rules: new state is a new tag; a section only gains fields
+at its end (version raised); a reader takes the fields the length holds,
+0 for missing ones (older writer), ignores trailing ones (newer writer);
+a section with flag REQUIRED that the reader does not know makes it refuse
+the record (for state it would otherwise lose: processes, address spaces);
+other unknown tags are skipped and logged. Sections (all version 1):
+
+| Tag | Section | Contents |
+|---|---|---|
+| 1 | MEMORY_MAP | (base, length, kind as Limine's number): the bootloader's map with the frames in use carved out (`mm::memmap::carve`) |
+| 2 | PLATFORM | HHDM offset, the new image's physical and virtual base and length, firmware type + 1, boot UNIX time + 1 (0 = unknown) |
+| 3 | FRAMEBUFFER | Limine's framebuffer fields, physical address |
+| 4 | CMDLINE | the kernel command line |
+| 5 | MODULES | (physical address, length, path, string) of each boot module, still where the bootloader put them |
+| 6 | CLOCK | TSC rate, the TSC at the clock's zero, ticks, the clock when written, the boot system time |
+| 7 | CPUS | boot CPU's LAPIC id, count, physical address of the parked CPUs' `limine_mp_info` array |
+| 8 | VOLUME | the mounted volume's size, log generation, area and length (`persist`) |
+| 9 | KEPT | (base, length, purpose): SCAFFOLD, RECORD, KERNEL_IMAGE (for the receiving kernel only), MARKER (kept for good) |
+| 10 | KERNEL_FILE | the kernel ELF to hand over to next time |
+
+**Memory.** The receiving kernel builds its frame allocator from the
+record's map as from Limine's: the new image is "executable and modules",
+the scaffold and the record "bootloader reclaimable" (never handed out:
+its boot stack is in the scaffold), the marker page "executable and
+modules"; everything the old kernel allocated (heap, page tables, stacks)
+is usable again. When it hands over in turn, the ranges it received as
+SCAFFOLD, RECORD and KERNEL_IMAGE become usable in the next map, so
+memory does not leak across handovers (the scenario's frame counts are
+equal in generations 1 and 2). The first kernel's own image (inside
+Limine's "executable and modules") and Limine's reclaimable memory are not
+returned yet (as on a cold boot).
+
+**The sequence** (`handover::go`, from the boot thread at the end of
+`kernel_main`, where `gala: boot ok` would be printed):
+1. the kernel file (Limine's executable-file response, then KERNEL_FILE)
+   is checked as an ELF64 x86-64 executable whose segments lie in the
+   kernel's window (`handover::elf`);
+2. the marker page is made (first kernel) or found (KEPT), and its
+   handover count raised; `nt::persist::sync` writes what is pending, so
+   the volume's position is final;
+3. the boot thread moves to CPU 0 (`set_affinity`); the online CPUs must
+   be 0..n with no hole;
+4. `arch::handover::prepare`: the image's segments copied into fresh
+   contiguous frames (2 MiB aligned when possible) with bss zeroed; the
+   scaffold (contiguous: trampoline page, the parked CPUs' entries, a
+   256 KiB boot stack, a 128-page pool of page tables); new page tables
+   mapping the HHDM (same offset, same rules as `paging::init`:
+   `paging::map_hhdm`), the image at its link address (RWX, not global)
+   and the trampoline page at its identity address; the same identity
+   mapping added to the running kernel's tables;
+5. the record is encoded once to size it, its frames allocated and carved
+   from the map, then encoded for good and written;
+6. `arch::handover::quiesce_and_jump`, the point of no return: interrupts
+   off and the local timer stopped; a park IPI (vector 0x33) to each
+   other CPU, whose handler stops its timer, sends EOI (an in-service
+   bit would block the next kernel's ticks), loads the kernel's tables
+   and jumps to the trampoline's park code: CR4.PGE off (flushes the old
+   kernel's global entries), the new tables, the trampoline's GDT (same
+   selectors 0x10/0x18 as gala's), the parked count raised, then a spin
+   on its entry's `goto_address`, as Limine parks a CPU. The boot CPU
+   waits for all (2 s, serving TLB-flush requests meanwhile), resets
+   every virtio device on the PCI bus (status 0: no DMA into reused
+   memory; invariant 4), and jumps to the trampoline's jump code: PGE
+   off, the new CR3, the trampoline's GDT, the new stack, then the ELF
+   entry `kmain` with rdi = `HANDOVER_MAGIC` ("GALAHAND"), rsi = the
+   record's physical address, rdx = the HHDM offset (Limine enters with
+   those registers zero).
+
+**The receiving kernel** runs the ordinary boot with `boot::collect`
+reading the record instead of Limine's responses (`collect_handover`:
+header, CRC, the sections it needs): memory map, modules (`BootModules`
+and `BootMemoryMap` read the record's entries in place), framebuffer,
+firmware, the processors (`Processors` over the parked array: `smp::start_aps`
+writes `extra_argument` and `goto_address` as with Limine, and
+`gala_ap_entry` needs no stack), the kernel file. It logs `handover:
+generation N (from generation N-1), record version V`, sets its clock from
+CLOCK right after `time::init` (`time::resume`: the first boot's TSC rate
+and zero, so `raw_monotonic_ns` and the system time go on without a jump,
+the tick count catching up; it panics if the clock went back), checks the
+marker page (`survived N handover(s)`), reports the CPUs back online,
+probes and sets up the devices again (they were reset), and with
+`persist` mounts the volume again and compares its log position with
+VOLUME (`volume continues`).
+
+**Invariants.** The trampoline page and the parked CPUs' tables stay
+valid until every CPU runs the new kernel (they are in the scaffold,
+kept). No allocation after CPUs are parked (a TLB shootdown would wait
+for them forever). The entry convention (rdi/rsi/rdx) and the parked
+array's layout are part of the handover contract, versioned with the
+record: a newer kernel (milestone (d)) must keep them or raise the
+framing version. Clock control (`clock=`) state is not carried (no
+programs in (a)).
+
+**Not carried yet** (milestones (b)-(e)): processes, threads ("waiting on
+X until T"), handles and objects, address spaces (user pages would be
+kept frames: a frame bitmap section rather than carved ranges, so the map
+stays short), the registry's volatile keys, the window registry, console
+sessions, sockets. Programs on the command line (`run=`, `start=`) run
+again in each kernel today, as after a reboot; once processes are carried
+they continue instead. The first kernel's image and Limine's reclaimable
+memory are not freed; the scaffold of the running kernel is freed only by
+the next handover. A test-only trigger from a program (a `Gala*` call) or
+the debug console is not there yet: `handover=<n>` only.
 
 ### Chain of trust (R8, design 2026-11-02)
 

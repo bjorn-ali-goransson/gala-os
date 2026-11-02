@@ -1,8 +1,8 @@
 //! The seam between the NT layer and what runs it (docs/GALA_UM.md).
 //!
-//! The NT layer reaches the machine only through this module: six traits
+//! The NT layer reaches the machine only through this module: seven traits
 //! say what it needs (time, threads and waits, entering and leaving user
-//! mode, user memory, the disk, the screen), `P` names the implementation (the kernel today,
+//! mode, user memory, random numbers, the disk, the screen), `P` names the implementation (the kernel today,
 //! `crate::platform::Kernel`; gala-um's host process in U2), and the
 //! functions below are the NT layer's way to call it. No other file in
 //! `nt/` names `crate::arch`, `crate::sched`, `crate::time`, `crate::disk`
@@ -51,6 +51,10 @@ pub trait Clock {
     fn boot_system_time() -> u64;
     /// Calls `callback(ticks)` on every tick (it must not block).
     fn set_tick_callback(callback: fn(u64));
+    /// Clock control (GalaClockControl; `crate::clockctl`): applies `op`
+    /// to the clock and returns its state. Only called when
+    /// `clockctl::control_allowed()`.
+    fn clock_control(op: crate::clockctl::Op) -> crate::clockctl::State;
 }
 
 /// Threads and waits. A wait is `prepare_wait` (under the caller's lock,
@@ -131,6 +135,16 @@ pub trait UserMemory {
     fn frame_stats() -> (u64, u64);
 }
 
+/// Random numbers (GalaRandom: what gala's ProcessPrng draws on when the
+/// random source is mocked).
+pub trait Entropy {
+    /// Whether the platform's random numbers come from a seed (gala-um's
+    /// simulation) rather than hardware.
+    fn entropy_seeded() -> bool;
+    /// Fills `buf`; false if there is no generator.
+    fn fill_entropy(buf: &mut [u8]) -> bool;
+}
+
 /// The machine's disk, in 512-byte sectors (none: 0 sectors).
 pub trait Storage {
     fn disk_sectors() -> u64;
@@ -171,6 +185,10 @@ pub fn boot_system_time() -> u64 {
 #[inline]
 pub fn set_tick_callback(callback: fn(u64)) {
     <P as Clock>::set_tick_callback(callback)
+}
+#[inline]
+pub fn clock_control(op: crate::clockctl::Op) -> crate::clockctl::State {
+    <P as Clock>::clock_control(op)
 }
 
 #[inline]
@@ -302,6 +320,15 @@ pub fn frame_of_heap_page(addr: usize) -> Frame {
 #[inline]
 pub fn frame_stats() -> (u64, u64) {
     <P as UserMemory>::frame_stats()
+}
+
+#[inline]
+pub fn entropy_seeded() -> bool {
+    <P as Entropy>::entropy_seeded()
+}
+#[inline]
+pub fn fill_entropy(buf: &mut [u8]) -> bool {
+    <P as Entropy>::fill_entropy(buf)
 }
 
 #[inline]

@@ -48,6 +48,15 @@ impl RegionKind {
         Self::KNOWN.iter().position(|&k| k == self)
     }
 
+    /// The `LIMINE_MEMMAP_*` number (the kernel handover record stores
+    /// kinds this way too).
+    pub fn to_limine(self) -> u64 {
+        match self {
+            RegionKind::Unknown(raw) => raw,
+            known => known.known_index().map_or(1, |i| i as u64),
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             RegionKind::Usable => "usable",
@@ -124,6 +133,53 @@ impl fmt::Display for MemoryMapError {
             }
         }
     }
+}
+
+/// Marks `[base, base + len)` as `kind` in the sorted map `map`: the parts
+/// of regions it overlaps are cut away (what is left of them keeps its
+/// kind), the range is inserted, and touching regions of one kind are
+/// merged. The kernel handover uses it to tell the next kernel which
+/// frames are in use (the range must be RAM the caller owns, so that it
+/// does not invent memory in a hole of the map).
+pub fn carve(
+    map: &mut alloc::vec::Vec<MemoryRegion>,
+    base: u64,
+    len: u64,
+    kind: RegionKind,
+) -> Result<(), crate::mm::heap::AllocError> {
+    use crate::mm::heap::TryVec;
+    let end = base.checked_add(len).ok_or(crate::mm::heap::AllocError)?;
+    if len == 0 {
+        return Ok(());
+    }
+    let mut out = alloc::vec::Vec::new();
+    out.try_reserve(map.len() + 2).map_err(|_| crate::mm::heap::AllocError)?;
+    for r in map.iter() {
+        if r.end() <= base || r.base >= end || r.len == 0 {
+            out.try_push(*r)?;
+            continue;
+        }
+        if r.base < base {
+            out.try_push(MemoryRegion { base: r.base, len: base - r.base, kind: r.kind })?;
+        }
+        if r.end() > end {
+            out.try_push(MemoryRegion { base: end, len: r.end() - end, kind: r.kind })?;
+        }
+    }
+    out.try_push(MemoryRegion { base, len, kind })?;
+    out.sort_unstable_by_key(|r| (r.base, r.len));
+    // Merge touching regions of one kind (the map stays short across many
+    // handovers).
+    let mut merged: alloc::vec::Vec<MemoryRegion> = alloc::vec::Vec::new();
+    merged.try_reserve(out.len()).map_err(|_| crate::mm::heap::AllocError)?;
+    for r in out {
+        match merged.last_mut() {
+            Some(last) if last.kind == r.kind && last.end() == r.base => last.len += r.len,
+            _ => merged.try_push(r)?,
+        }
+    }
+    *map = merged;
+    Ok(())
 }
 
 /// Totals over a validated memory map.
@@ -275,6 +331,43 @@ mod tests {
     fn adjacent_regions_do_not_overlap() {
         let map = [r(0x1000, 0x1000, Reserved), r(0x2000, 0x1000, Usable), r(0x3000, 1, Reserved)];
         assert!(MemorySummary::from_regions(map).is_ok());
+    }
+
+    #[test]
+    fn limine_numbers_round_trip() {
+        for kind in RegionKind::KNOWN.into_iter().chain([Unknown(77)]) {
+            assert_eq!(RegionKind::from_limine(kind.to_limine()), kind);
+        }
+    }
+
+    #[test]
+    fn carve_splits_and_merges() {
+        let mut map = vec![
+            r(0x1000, 0x9e000, Usable),
+            r(0x100000, 0x700000, Usable),
+            r(0x800000, 0x100000, ExecutableAndModules),
+        ];
+        // In the middle of a usable region: three pieces.
+        carve(&mut map, 0x200000, 0x3000, BootloaderReclaimable).unwrap();
+        assert_eq!(
+            map,
+            vec![
+                r(0x1000, 0x9e000, Usable),
+                r(0x100000, 0x100000, Usable),
+                r(0x200000, 0x3000, BootloaderReclaimable),
+                r(0x203000, 0x5fd000, Usable),
+                r(0x800000, 0x100000, ExecutableAndModules),
+            ]
+        );
+        // Back to usable: merged into one region again.
+        carve(&mut map, 0x200000, 0x3000, Usable).unwrap();
+        assert_eq!(map[1], r(0x100000, 0x700000, Usable));
+        assert_eq!(map.len(), 3);
+        // At the end of a region, touching one of the same kind: merged.
+        carve(&mut map, 0x7ff000, 0x1000, ExecutableAndModules).unwrap();
+        assert_eq!(map[1], r(0x100000, 0x6ff000, Usable));
+        assert_eq!(map[2], r(0x7ff000, 0x101000, ExecutableAndModules));
+        assert!(MemorySummary::from_regions(map.iter().copied()).is_ok());
     }
 
     #[test]

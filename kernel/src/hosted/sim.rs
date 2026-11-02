@@ -11,7 +11,10 @@
 //! threads. A thread not holding the baton waits on its own condition
 //! variable. The tick callback (KUSER_SHARED_DATA's times) runs on the
 //! baton holder when a scheduling point moves virtual time past a tick,
-//! instead of on a host timer thread.
+//! instead of on a host timer thread. Program code reading the clock
+//! (KUSER_SHARED_DATA, RDTSC) and CPUID trap (entry.rs); the program's
+//! random bytes (GalaRandom) come from the seed; a thread spinning in
+//! program code is preempted at its loop's canonical point.
 //!
 //! Off (the default), each entry point is one relaxed load of `ON`.
 
@@ -30,15 +33,21 @@ static NOW: AtomicU64 = AtomicU64::new(crate::sim::START_NS);
 static STEPS: AtomicU64 = AtomicU64::new(0);
 /// The baton holder's id (the watchdog's target).
 static RUNNING: AtomicUsize = AtomicUsize::new(0);
-/// Preemptions by the watchdog (a thread ran program code for 100 ms
+/// Preemptions by the watchdog (a thread ran program code for 10 ms
 /// of processor time without a system call): these are not reproducible.
 static PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
+/// Preemptions of spinning threads at their loop's canonical point
+/// (reproducible).
+static SPIN_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
 static TICK_CALLBACK: OnceLock<fn(u64)> = OnceLock::new();
 /// The tick the callback last saw.
 static LAST_TICK: AtomicU64 = AtomicU64::new(crate::sim::START_NS / NS_PER_TICK);
 
 struct Sim {
     sched: Scheduler,
+    /// GalaRandom's numbers: a stream of their own from the seed, so
+    /// drawing them does not change the scheduler's choices.
+    random: crate::sim::Rng,
     /// Per thread id: where it waits for the baton.
     baton: Vec<Option<Arc<Condvar>>>,
     names: Vec<&'static str>,
@@ -52,10 +61,28 @@ pub fn on() -> bool {
     ON.load(Relaxed)
 }
 
+/// Separates the random numbers' stream from the scheduler's.
+const RANDOM_STREAM: u64 = 0x5241_4e44_4f4d_2121;
+
+/// Random numbers from the seed (GalaRandom under `--sim`): only the
+/// baton holder asks, so the sequence repeats with the seed.
+pub fn fill_random(buf: &mut [u8]) {
+    let mut guard = lock();
+    let Some(sim) = guard.as_mut() else { return };
+    for chunk in buf.chunks_mut(8) {
+        chunk.copy_from_slice(&sim.random.next_u64().to_le_bytes()[..chunk.len()]);
+    }
+}
+
 /// Turns the simulation on with `seed` (before `run`; um's `--sim=`).
 pub fn enable(seed: u64) {
     let _host = super::HostCode::enter();
-    *lock() = Some(Sim { sched: Scheduler::new(seed), baton: Vec::new(), names: Vec::new() });
+    *lock() = Some(Sim {
+        sched: Scheduler::new(seed),
+        random: crate::sim::Rng::new(seed ^ RANDOM_STREAM),
+        baton: Vec::new(),
+        names: Vec::new(),
+    });
     ON.store(true, Relaxed);
 }
 
@@ -349,14 +376,17 @@ pub fn exit() {
     }
 }
 
-/// The watchdog interrupted the running thread in program code (it made
-/// no system call for 100 ms of processor time): a scheduling point that
-/// the seed does not decide. Only if another program thread could run
-/// (else the thread computes, it does not wait for anyone). Virtual time
-/// jumps to the next deadline (the spinner is taken to have used the time
-/// until then: a thread polling with Sleep(1) for its progress gets its
-/// turn) and another thread runs. Not recorded in the trace.
-pub fn preempt() {
+/// The running thread spun in program code (no system call for 10 ms
+/// of processor time, the watchdog found): it is preempted, if another
+/// program thread could run (else the thread computes, it does not wait
+/// for anyone). `reproducible`: at its spin loop's canonical point
+/// (`crate::sim::SpinCapture`, entry.rs), the same in every run; else
+/// where the watchdog interrupted it, which depends on the host's timing
+/// (counted and reported). Virtual time jumps to the next deadline (the
+/// spinner is taken to have used the time until then: a thread polling
+/// with Sleep(1) for its progress gets its turn) and another thread runs.
+/// Not recorded in the trace.
+pub fn preempt(reproducible: bool) {
     let me = me();
     {
         let mut guard = lock();
@@ -364,7 +394,11 @@ pub fn preempt() {
         if !sim.sched.others_could_run(me) {
             return;
         }
-        PREEMPTIONS.fetch_add(1, Relaxed);
+        if reproducible {
+            SPIN_PREEMPTIONS.fetch_add(1, Relaxed);
+        } else {
+            PREEMPTIONS.fetch_add(1, Relaxed);
+        }
         sim.sched.skip_to_next_deadline();
         sim.sched.step();
         sim.sched.yield_now(me);
@@ -372,6 +406,12 @@ pub fn preempt() {
         drop(switch_avoiding(guard, Some(me), Some(me)));
     }
     after_switch();
+}
+
+/// Scheduling points so far, as of the last switch: a thread's spin
+/// episode is the stretch in which this does not change.
+pub fn steps() -> u64 {
+    STEPS.load(Relaxed)
 }
 
 /// Whether the watchdog should preempt thread `id` (see `preempt`).
@@ -389,6 +429,34 @@ pub fn read_tsc() -> u64 {
     sim.sched.step();
     NOW.store(sim.sched.now_ns, Relaxed);
     sim.sched.now_ns
+}
+
+/// Program code read KUSER_SHARED_DATA (its page is inaccessible in the
+/// simulation, so every read faults; entry.rs): a step of virtual time
+/// passes and, one read in `CLOCK_READ_ODDS` (by the PRNG), another thread
+/// may run; the page's times follow when time passes a tick. A
+/// loop that polls the time without system calls (Go's spin-waits) sees
+/// it move and ends, the same way under the same seed.
+pub fn clock_read() {
+    let Some(me) = super::threads::current_if_known() else { return };
+    let me = me.as_usize();
+    {
+        let mut guard = lock();
+        let Some(sim) = guard.as_mut() else { return };
+        if sim.sched.running != Some(me) {
+            return;
+        }
+        let give_up = sim.sched.clock_read();
+        NOW.store(sim.sched.now_ns, Relaxed);
+        if give_up {
+            sim.sched.yield_now(me);
+            guard = switch(guard, Some(me));
+        }
+        drop(guard);
+    }
+    // KUSER_SHARED_DATA's times, if time passed a tick (they change at
+    // ticks, as on Windows).
+    after_switch();
 }
 
 pub fn monotonic_ns() -> u64 {
@@ -411,18 +479,65 @@ pub fn set_tick_callback(callback: fn(u64)) {
     let _ = TICK_CALLBACK.set(callback);
 }
 
+/// Clock control (`crate::clockctl`) in the simulation: the clock is
+/// virtual already, so a rate or a jump applies to it directly (a frozen
+/// clock reaches no deadline: every thread waiting for one is a
+/// deadlock); the system time's offset is clockctl's.
+pub fn clock_control(op: crate::clockctl::Op) -> crate::clockctl::State {
+    use crate::clockctl::{Op, State};
+    let (now, rate, advanced, real) = {
+        let mut guard = lock();
+        let Some(sim) = guard.as_mut() else {
+            return State {
+                rate: crate::clockctl::Rate::REAL,
+                advanced: 0,
+                system_offset: 0,
+                raw: 0,
+                simulated: true,
+            };
+        };
+        match op {
+            Op::Advance(ns) => sim.sched.advance(ns),
+            Op::SetRate(rate) => sim.sched.rate = rate,
+            _ => {}
+        }
+        NOW.store(sim.sched.now_ns, Relaxed);
+        (sim.sched.now_ns, sim.sched.rate, sim.sched.advanced_ns, sim.sched.real_ns)
+    };
+    let offset = match op {
+        Op::ShiftSystem(delta) => crate::clockctl::system_offset().saturating_add(delta),
+        Op::SetSystem(target) => target as i64 - (crate::sim::BOOT_SYSTEM_TIME + now / 100) as i64,
+        _ => crate::clockctl::system_offset(),
+    };
+    if matches!(op, Op::ShiftSystem(_) | Op::SetSystem(_)) {
+        crate::clockctl::set_system_offset(offset);
+    }
+    State { rate, advanced, system_offset: offset, raw: real, simulated: true }
+}
+
+/// The simulation's (unscaled, virtual) clocks for `clockctl::arm`.
+pub fn clocks() -> (u64, u64) {
+    lock().as_ref().map_or((0, 0), |s| (s.sched.real_ns, s.sched.now_ns))
+}
+
 /// The summary line sim-test compares: `sim: seed S trace H`, plus the
 /// number of scheduling points and the virtual time.
 pub fn report() {
     let guard = lock();
     let Some(sim) = guard.as_ref() else { return };
     let preempted = PREEMPTIONS.load(Relaxed);
+    let spins = SPIN_PREEMPTIONS.load(Relaxed);
     std::eprintln!(
-        "sim: seed {} trace {:016x} ({} scheduling points, {} ms virtual{})",
+        "sim: seed {} trace {:016x} ({} scheduling points, {} ms virtual{}{})",
         sim.sched.seed,
         sim.sched.trace,
         sim.sched.steps,
         sim.sched.now_ns / NS_PER_TICK,
+        if spins > 0 {
+            alloc::format!("; {spins} spin loops preempted")
+        } else {
+            alloc::string::String::new()
+        },
         if preempted > 0 {
             alloc::format!(
                 "; {preempted} watchdog preemptions of threads spinning in program code: \
@@ -435,8 +550,9 @@ pub fn report() {
 }
 
 /// Processor time a thread may spend in program code without a
-/// scheduling point before the watchdog preempts it.
-const WATCHDOG_CPU_NS: u64 = 100_000_000;
+/// scheduling point before the watchdog interrupts it (entry.rs then
+/// looks for its spin loop and preempts it there).
+const WATCHDOG_CPU_NS: u64 = 10_000_000;
 
 /// Exit status of um when the simulation finds a deadlock.
 pub const DEADLOCK_EXIT: i32 = 4;
@@ -476,11 +592,12 @@ fn deadlock() -> ! {
     // The NT layer's view: each thread's system call and wait objects.
     without_lock_points(|| super::nt_code(crate::nt::thread::dump));
     report();
+    crate::replay::finish();
     std::process::exit(DEADLOCK_EXIT)
 }
 
-/// A host thread (outside the simulation) that preempts a thread running
-/// program code for 100 ms of processor time without a scheduling point (a spin-wait on
+/// A host thread (outside the simulation) that interrupts a thread running
+/// program code for 10 ms of processor time without a scheduling point (a spin-wait on
 /// another thread, which would otherwise never end).
 fn start_watchdog() {
     let _host = super::HostCode::enter();

@@ -94,10 +94,12 @@ layer (or into a small shared `no_std` support crate) at the split:
   the same smoltcp stack on a loopback device or maps AFD onto host
   sockets; decided in U2 when AFD tests are ported.
 
-**The seam.** `kernel/src/nt/platform.rs` holds five traits, `Clock`,
-`Threads`, `UserEntry`, `UserMemory` (frames; the per-space
-operations stay methods of the `UserSpace` type) and `Storage` (the
-disk; gala-um has none: 0 sectors), and `P`, the type that
+**The seam.** `kernel/src/nt/platform.rs` holds the traits `Clock`
+(with clock control's requests since R7), `Threads`, `UserEntry`,
+`UserMemory` (frames; the per-space operations stay methods of the
+`UserSpace` type), `Entropy` (random numbers for GalaRandom: RDRAND, or
+the simulation's seed), `Storage` (the disk; gala-um has none: 0
+sectors) and `Display`, and `P`, the type that
 implements them: `crate::platform::Kernel` (`kernel/src/platform.rs`,
 each method forwarding to the subsystem). The NT layer calls thin inlined
 functions (`platform::ticks()`, `platform::wake(id)`, ...) and gets the
@@ -225,7 +227,10 @@ One processor as far as programs can tell (`online_count` 1).
 - **Tick count**: KUSER_SHARED_DATA's tick count (GetTickCount) is
   written by the timer thread, which a loaded host can hold back; a wait
   that ends brings it up to date (`kuser::catch_up`), so a program never
-  reads an older tick than the one its timer fired at.
+  reads an older tick than the one its timer fired at. Not while
+  recording or replaying (`--record`/`--replay`): whether the page is
+  behind depends on timing, and the clock readings it would add on the
+  program's thread would put the replay out of step.
 - **Locks**: the kernel's `IrqMutex` spins with interrupts off, where the
   holder cannot be preempted. In gala-um the host may deschedule a holder
   (one doing a futex wake under the dispatcher lock, say), and spinners
@@ -291,16 +296,56 @@ for ever) ends the run with exit status 4, the seed, each thread's
 state and the NT layer's thread dump. Design and limits: ARCHITECTURE
 "Deterministic simulation".
 
+What program code does without system calls is simulated too (2026-11-02):
+RDTSC/RDTSCP and reads of KUSER_SHARED_DATA (its page is inaccessible
+in the simulation; a read faults, takes a step of virtual time and runs
+single-stepped) read the virtual clock; CPUID traps (CPUID faulting) and
+hides RDRAND/RDSEED from programs that would execute them (gala's
+ProcessPrng takes the seed's numbers from GalaRandom, R7); and a
+thread spinning in program code for another is preempted at its spin
+loop's canonical point (found by single-stepping it), not where the host
+watchdog happened to interrupt it. Go programs repeat from their seed.
+
 `cargo xtask sim-test [filter] [--seeds N] [--seed S] [--all]` runs
 SIM_PROGRAMS (the multi-threaded tests: lock_test, kernel32_sync_test,
 pipe_test, thread_test, sync_test, keyed_event_test,
 kernel32_thread_test, smpsched_test, smpmem_test, iocp_test, apc_test,
-...) under seeds 1..N (4), each twice, and checks the scenario's
-expected lines, equal traces for a seed's two runs and, for
+..., and the Go programs go_hello, go_goroutines, go_time, go_gc,
+go_os, go_exit) under seeds 1..N (4), each twice, and checks the
+scenario's expected lines, equal traces for a seed's two runs (a
+SIM_PROGRAM must repeat even if the watchdog preempted it) and, for
 multi-threaded programs, different traces across seeds. `--all` runs
-every gala-um program (88, all pass; Go's are not reproducible:
-RDRAND, and go_gc's collector spins, so it takes up to a minute). A
-failure prints the um command line that repeats it.
+every gala-um program (92, all pass and repeat; a timing-dependent
+watchdog preemption, which fpu_test's long PAUSE loops come close to,
+is tolerated outside SIM_PROGRAMS). A failure prints the um command
+line that repeats it.
+
+## Clock control and record/replay (R7, 2026-11-02)
+
+`um --clock=<items>` is the kernel's `clock=` (ARCHITECTURE "Clock
+control"): `control` allows the test-only GalaClockControl call,
+`freeze`, `rate:<n>[/<d>]`, `advance:<s>`, `system:<UNIX s>` set the
+clock as the program starts. The transform sits on the host's monotonic
+clock (`threads::raw_ns`); waits look again every 2 ms of real time
+while it is armed. Under `--sim` the operations act on the simulation's
+own virtual clock. um-test passes a scenario's `clock=` as `--clock=`.
+
+`um --record=<file>` writes what the run reads from outside (the boot
+time, every reading of the host's clock with the reading thread, the
+random numbers GalaRandom hands out) and its settings (program,
+arguments, `--sim`, processors, `--clock`, `--failpoint`, `--failseed`)
+to `file`, record by record with write(2); `um --replay=<file>` runs
+with the recorded settings (options given override them) and inputs
+(ARCHITECTURE "Record/replay"). The end of the log says what was used:
+
+    replay: replayed 165 of 169 clock, 2 of 2 random, 1 of 1 boot time records; 0 inputs live
+
+Without `--sim` a thread gets its own recorded clock readings whatever
+the interleaving, but the threads' interleaving itself is the host's
+(helper threads may read the clock more often than recorded: those
+readings are live). With `--sim` the recording is a whole repro: seed,
+processors, flags and random numbers. `cargo xtask replay-test` checks
+both.
 
 ## Steps
 

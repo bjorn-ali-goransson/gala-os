@@ -104,6 +104,13 @@ shows it.
   export directory (read from memory at the 64 KiB-aligned base below
   the address) names the DLL.
 
+- **Changing `nt::desktop`'s public functions or types**: the server
+  kernel's stand-in `kernel/src/nt/desktop_off.rs` must follow, or the
+  `--no-default-features` clippy line in CI fails.
+- **Write each expected output line with one WriteFile call**: a test
+  that writes a line in pieces can have a kernel log line land between
+  them on the serial port, and the scenario's expected substring is then
+  missing (gala_cli once failed on "target: " + "key g").
 - **A JVM crashing with access violations at odd addresses** after a
   long run may be the machine out of memory: a user page fault that finds
   no free frame becomes an access violation (the commit charge, R6, covers
@@ -632,7 +639,20 @@ pixel version. Writing one:
   there.
 - A UIA call on another process's element is a sent message to it: if
   the program's thread is stuck (not pumping), the call waits for it
-  (gala's cross-process SendMessage has no timeout yet).
+  (gala's UIAutomationCore uses SendMessage, not SendMessageTimeout).
+- **A thread's windows go when it ends** (as on Windows, since
+  2026-11-02): a test or gala DLL that creates a window on a worker
+  thread which then returns loses the window (IsWindow FALSE, sends fail
+  with ERROR_INVALID_WINDOW_HANDLE). Keep such a thread alive and
+  pumping. A thread gets a message queue (PostThreadMessage reaches it)
+  only once it creates a window or calls a message function; post to a
+  new thread after it has called PeekMessage, as PostThreadMessage's
+  documentation says.
+- user32's queue event is one per process (auto-reset): with several
+  threads waiting in GetMessage at once, a wake can go to the wrong one,
+  which then waits again. Tests with several pumping threads keep only
+  one waiting at a time (windows_across_test waits on thread handles
+  without pumping while a worker pumps).
 - Close a window with `window.Close()`: FlaUI invokes the title bar's
   Close button (AutomationId "Close", WM_SYSCOMMAND SC_CLOSE posted),
   so it returns before the program has acted; wait for the effect
@@ -661,6 +681,26 @@ steps). Checked by hand in QEMU: `-drive file=...,format=raw` under
 SeaBIOS and OVMF, and as `usb-storage` behind `qemu-xhci`. Use `-cpu max`
 in manual QEMU runs: QEMU's default CPU model has no RDRAND, and Go
 programs then fail fast (0xc0000409, ledger: ProcessPrng(no RDRAND)).
+
+## shasha features: the `gala` command first
+
+**Every new shasha feature gets its `gala` command first** (the owner,
+2026-11-02: everything the graphical shell does can be done from a
+terminal). Make it a named action (`nt::desktop::Action`, or a new
+GalaDesktopAction request in `nt/action.rs` and `user/gala`), test it
+through `gala` the way `gala_cli_test` does (start the program with
+`gala start`, wait on `gala windows`, check what the program saw), and
+only then bind the mouse or a key to it, calling the same action. A
+`gala` command is also the easy way to put a screen test's window
+where its pixel checks expect it (no pointer arithmetic).
+
+- A window moved without a new size (snapped from the left half to the
+  right) gets WM_MOVE but no WM_SIZE, as on Windows: a test program
+  that watches its rectangle checks both.
+- A program's state reaches the registry after it handled the request
+  (user32 mirrors it): poll IsZoomed/IsIconic from another process
+  rather than reading them once right after `gala windows` (which is
+  shasha's own state) changed.
 
 ## Screenshots
 
@@ -843,12 +883,53 @@ reported with its seed, its log (`target/failed/sim-<program>-<seed>-
   (state, deadline) and the NT layer's view (each thread's system call
   and the objects it waits on). Make the smallest test program that
   waits that way and add it to SIM_PROGRAMS.
-- "not reproducible (watchdog preemptions or RDRAND)": the program spun
-  in program code (the watchdog preempted it) or draws on RDRAND (Go):
-  such runs are reported, not failed; a hang or a wrong result in them
-  is still a failure.
+- "not reproducible (watchdog preemptions)": a thread computed in
+  program code for ~100 ms without a system call while another could
+  run, and the watchdog preempted it where it was (a spin loop that
+  repeats exactly is preempted reproducibly instead: "N spin loops
+  preempted"). Reported, not failed, for programs outside SIM_PROGRAMS;
+  a SIM_PROGRAM must repeat. A hang or a wrong result is a failure.
+- In the simulation program code faults on purpose: CPUID (CPUID
+  faulting), RDTSC, and any read of KUSER_SHARED_DATA (its page is
+  `PROT_NONE`; the read is then single-stepped, SIGTRAP), and the spin
+  capture single-steps spinning threads. In gdb add `handle SIGTRAP
+  nostop noprint` too, and do not read 0x7ffe0000 from gdb expecting
+  data (use the NT layer's copy). A program's own single-stepping (the
+  trap flag) still works, except on an instruction that reads
+  KUSER_SHARED_DATA (that trap is taken as the simulation's).
 - A new multi-threaded test program: add it to SIM_PROGRAMS (`true` if
   its system calls can interleave, so traces must differ across seeds).
+
+## Clock control, record/replay, slow devices (R7)
+
+ARCHITECTURE "Live mocking" has the design and formats; how to use it:
+
+- **Tests of timeouts, timers, expiry without waiting**: boot (or run
+  in gala-um) with `clock=control` and call GalaClockControl from the
+  test (`ntrt::clock_control`: `CLOCK_SET_RATE` 0 freezes,
+  `CLOCK_ADVANCE` jumps every view of the clock, `CLOCK_SET_SYSTEM`
+  moves only the system time). Freeze first, then advance: the views
+  then move by exactly the amount, and waits in progress whose deadline
+  passed end (`clock_test` is the example). Without the call:
+  `clock=rate:1000` runs a whole program 1000 times faster,
+  `clock=system:2147483648` starts it in 2038, `clock=freeze` stops the
+  programs' clock (the kernel keeps its own).
+- **A failure that depends on outside input (timing, random numbers)**:
+  run it in gala-um with `--record=f.rec` until it fails (with `--sim`,
+  vary the seed), then `target/debug/um --replay=f.rec --module=...
+  program.exe` repeats it with the same settings and inputs; add
+  `--trace` or attach gdb to the replay. In QEMU, `XTASK_RECORD=1 cargo
+  xtask boot-test <name>` records every boot (`xtask: recording
+  target/debug/test-<name>.rec` in the log; random numbers and the boot
+  time); replay one with `cargo xtask iso --scenario <name> --file
+  target/debug/test-<name>.rec=gala replay=test-<name>.rec run=...`
+  or in gala-um (`--replay`: a kernel recording replays there too).
+  `replay: diverged at ...` names the first input the recording did not
+  have (the run took another path, or a helper thread ran longer).
+- **A slow disk**: `failpoint=disk_io:delay:<ms>` (with `persist`).
+- Keep checked-in recordings (`user/replay_test/replay_test.rec`)
+  readable: a format change bumps `replay::VERSION` and the reader
+  keeps the previous version.
 
 ## busybox
 
@@ -994,6 +1075,31 @@ passes alone): if it recurs, its log says which bound was missed.
   `cargo xtask compare windows.json` diffs against results collected on
   Windows with `user/bin/run-all.ps1`.
 - See `docs/OBSERVABILITY.md` for the planned profiling and telemetry.
+
+### Debugging a kernel handover (R9)
+
+- `XTASK_VERBOSE=1 cargo xtask boot-test handover_same`: every kernel
+  prints its banner again; `handover: generation A -> B: record ...`
+  (written by the old kernel: where the record, the new image and the
+  scaffold are) is the last line before the jump, and `handover:
+  generation B (from generation A)` the new kernel's first word about it.
+- Nothing after the jump line: the new kernel died before its console
+  came up (a triple fault resets the VM, `-no-reboot` ends QEMU).
+  `XTASK_QEMU_ARGS="-d int,cpu_reset -D qemu.log"` shows the faulting
+  RIP and CR3: a CR3 equal to the scaffold's table pool and a RIP in the
+  kernel window means the new image or its mapping is wrong (check
+  `prepare`); a RIP at the trampoline's identity address means the jump
+  code or its GDT. `XTASK_FIRMWARE=uefi` runs the same under OVMF.
+- `NotParked(n, m)` in the panic: a CPU did not take the park IPI
+  (interrupts off for 2 s: a lock held, or a CPU spinning with
+  interrupts off).
+- A refused record panics with `bootloader handoff rejected: handover
+  record: ...` (CRC, version, a REQUIRED section this kernel does not
+  know). The record's format and tests are in
+  `kernel/src/handover/record.rs`.
+- A new kind of state goes into a new section (or new fields at the end
+  of one, its version raised), never a changed meaning of an old field;
+  add a round-trip test and an "older writer" test.
 
 ## Where things are
 

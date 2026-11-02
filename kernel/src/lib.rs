@@ -18,6 +18,7 @@ extern crate std;
 pub mod arch;
 #[allow(unsafe_code)]
 pub mod boot;
+pub mod clockctl;
 pub mod cmdline;
 #[macro_use]
 pub mod console;
@@ -27,6 +28,7 @@ pub mod events;
 pub mod failpoint;
 pub mod flight;
 pub mod fs;
+pub mod handover;
 /// gala-um's platform: the NT layer inside a Linux process.
 #[cfg(feature = "hosted")]
 #[allow(unsafe_code)]
@@ -38,6 +40,7 @@ pub mod net;
 pub mod nt;
 #[cfg(not(feature = "hosted"))]
 pub mod platform;
+pub mod replay;
 pub mod sched;
 mod selftest;
 /// Deterministic simulation's scheduler and clock (gala-um `--sim`).
@@ -64,12 +67,14 @@ const QEMU_EXIT_FLAG: &str = "qemu_exit";
 /// Marker line the test harness waits for on the serial console.
 pub const BOOT_OK_MARKER: &str = "gala: boot ok";
 
-pub fn kernel_main() -> ! {
+/// The kernel's start: from Limine (`handover` is `None`), or from the
+/// previous kernel after a kernel handover (ROADMAP R9).
+pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     console::init();
     kprintln!();
     kprintln!("gala-os kernel {}", env!("CARGO_PKG_VERSION"));
 
-    let mut info = match boot::collect() {
+    let mut info = match boot::collect(handover) {
         Ok(info) => info,
         Err(e) => panic!("bootloader handoff rejected: {e}"),
     };
@@ -88,6 +93,7 @@ pub fn kernel_main() -> ! {
     info!("cpu: GDT, TSS and IDT loaded");
 
     log_boot_info(&info);
+    handover::report(&info);
     let summary = log_memory_map(&info);
     // `noscreen`: serial only (boot tests read the serial log; drawing text
     // is slow under emulation).
@@ -118,7 +124,8 @@ pub fn kernel_main() -> ! {
         free * mm::PAGE_SIZE / (1024 * 1024)
     );
     init_paging(&info);
-    init_timer(info.boot_unix_time);
+    init_timer(&info);
+    handover::check_marker(&info);
     if let Err(e) = sched::init() {
         panic!("scheduler: {e:?}");
     }
@@ -126,7 +133,8 @@ pub fn kernel_main() -> ! {
     arch::smp::init_bsp();
     match arch::smp::start_aps(&info.processors, sched::run_ap) {
         Ok(n) => {
-            info!("smp: {n} CPUs online ({} reported by the bootloader)", info.processors.len())
+            info!("smp: {n} CPUs online ({} reported by the bootloader)", info.processors.len());
+            handover::report_cpus(&info, n);
         }
         Err(e) => warn!("smp: cannot start the other CPUs: {e:?}"),
     }
@@ -172,10 +180,13 @@ pub fn kernel_main() -> ! {
     if cmdline.flag("persist") {
         nt::persist::CRASH_TEST.store(cmdline.flag("crashtest"), Ordering::Relaxed);
         nt::persist::mount();
+        handover::check_volume(&info);
     }
 
     // The desktop's wallpaper (`wallpaper=<name>`, else one at random).
     nt::desktop::choose_wallpaper(cmdline.value("wallpaper"));
+    #[cfg(not(feature = "shasha"))]
+    info!("desktop: not in this kernel (server build)");
     // `profile=server` (ROADMAP SD): no graphical interface, ever.
     if cmdline.value("profile") == Some("server") {
         nt::desktop::set_server_profile();
@@ -188,8 +199,8 @@ pub fn kernel_main() -> ! {
     // (interrupts on, never blocking).
     if cmdline.flag("spintest") {
         info!("spintest: the boot thread spins in the kernel for 25 s");
-        let until = time::monotonic_ns() + 25_000_000_000;
-        while time::monotonic_ns() < until {
+        let until = time::raw_monotonic_ns() + 25_000_000_000;
+        while time::raw_monotonic_ns() < until {
             core::hint::spin_loop();
         }
         info!("spintest: done");
@@ -209,6 +220,14 @@ pub fn kernel_main() -> ! {
     // while the programs run (kernel/src/failpoint.rs).
     configure_failpoints(&cmdline);
     failpoint::arm();
+    // `clock=control,freeze,...`: clock control (kernel/src/clockctl.rs),
+    // from the programs' start on.
+    configure_clock(&cmdline);
+    time::arm_clock_control();
+    // `record`: what the programs read from outside goes to the debug
+    // console; `replay=<boot module>`: they read it from that recording
+    // (kernel/src/replay.rs).
+    start_record_replay(&info, &cmdline);
     // `start=a.exe,b.exe` (with `start_args=`) starts programs first and
     // does not wait for them: a server the `run=` programs talk to. They
     // end with the boot.
@@ -269,6 +288,7 @@ pub fn kernel_main() -> ! {
     if failpoint::configured() {
         info!("failpoint: {}", failpoint::Summary);
     }
+    replay::finish();
 
     if let Some(name) = cmdline.value("fault") {
         match Fault::from_name(name) {
@@ -314,6 +334,12 @@ pub fn kernel_main() -> ! {
         mm::frame_stats().0,
         mm::frame_stats().1
     );
+    // `handover=<n>`: hand the machine over to a fresh copy of the kernel
+    // until n handovers are done (ROADMAP R9).
+    if handover::wanted(&cmdline) {
+        let e = handover::go(&info, &cmdline);
+        panic!("handover: failed: {e:?}");
+    }
     kprintln!("{BOOT_OK_MARKER}");
     if QEMU_EXIT.load(Ordering::Relaxed) {
         qemu::exit(QemuExitCode::Success);
@@ -338,8 +364,66 @@ fn configure_failpoints(cmdline: &Cmdline) {
     }
 }
 
+/// Waits up to `secs` seconds of real time for `objects` (one of them);
+/// whether it was signaled. Under clock control the programs' clock may
+/// be frozen or jump, so the wait looks at the real clock every second of
+/// the programs' time (with no clock control: one wait).
+fn wait_real_secs(objects: &[nt::object::ObjectRef], secs: u64) -> bool {
+    use nt::wait::Timeout;
+    let until = time::raw_ticks() + secs * time::TICK_HZ;
+    loop {
+        let step = if clockctl::armed() { time::TICK_HZ } else { secs * time::TICK_HZ };
+        let timeout = Timeout::Tick(time::ticks() + step);
+        if nt::wait::wait_for(objects, false, timeout) != nt::status::NtStatus::TIMEOUT {
+            return true;
+        }
+        if time::raw_ticks() >= until {
+            return false;
+        }
+    }
+}
+
+/// `record` / `replay=<boot module>`: starts recording the programs'
+/// inputs to the debug console, or replaying them from the boot module
+/// with that file name; the boot time is the first input.
+fn start_record_replay(info: &BootInfo, cmdline: &Cmdline) {
+    if cmdline.flag("record") {
+        replay::record_to(events::emit_record);
+        replay::info("cmdline", cmdline.as_str());
+        info!("replay: recording to the debug console");
+    } else if let Some(name) = cmdline.value("replay") {
+        let module = info.modules.iter().find(|m| m.file_name() == name);
+        match module.map(|m| replay::replay_from(m.data)) {
+            Some(Ok(())) => info!("replay: replaying {name}"),
+            Some(Err(e)) => error!("replay: {name}: not a recording this build reads ({e:?})"),
+            None => error!("replay: no boot module {name}"),
+        }
+    }
+    if replay::on() {
+        time::set_boot_system_time(replay::u64_input(
+            replay::Kind::BootTime,
+            0,
+            time::boot_system_time,
+        ));
+    }
+}
+
+/// Installs the `clock=` settings (armed when the programs start).
+fn configure_clock(cmdline: &Cmdline) {
+    let Some(spec) = cmdline.value("clock") else { return };
+    if !clockctl::COMPILED_IN {
+        warn!("clock: clock control is compiled out of release builds; {spec:?} ignored");
+        return;
+    }
+    if let Err(item) = clockctl::configure(spec) {
+        error!("clock: {spec:?}: cannot use {item:?}");
+    }
+}
+
 fn log_boot_info(info: &BootInfo) {
-    info!("limine base revision: {}", info.base_revision);
+    if info.handover.is_none() {
+        info!("limine base revision: {}", info.base_revision);
+    }
     if let Some((name, version)) = info.bootloader {
         info!("bootloader: {name} {version}");
     }
@@ -445,7 +529,7 @@ fn init_paging(info: &BootInfo) {
     }
 }
 
-fn init_timer(boot_time: Option<i64>) {
+fn init_timer(info: &BootInfo) {
     let calibration = match arch::apic::init_bsp() {
         Ok(c) => c,
         Err(e) => panic!("local APIC: {e:?}"),
@@ -458,7 +542,10 @@ fn init_timer(boot_time: Option<i64>) {
         calibration.tsc_hz / 1_000_000
     );
     time::init(&calibration);
-    if let Some(t) = boot_time {
+    if info.handover.is_some() {
+        // The clock goes on from the previous kernel's.
+        handover::resume_clock(info);
+    } else if let Some(t) = info.boot_unix_time {
         time::set_boot_time(t);
     }
     arch::cpu::enable_interrupts();
@@ -712,8 +799,7 @@ fn run_program(
                     let one = core::slice::from_ref(&object);
                     // A minute without finishing: log every thread's
                     // state (what a hang is waiting for), then wait on.
-                    let minute = nt::wait::Timeout::Tick(time::ticks() + 60 * time::TICK_HZ);
-                    if nt::wait::wait_for(one, false, minute) == nt::status::NtStatus::TIMEOUT {
+                    if !wait_real_secs(one, 60) {
                         warn!("run: {} still running after a minute; threads:", process.name);
                         nt::thread::dump();
                         sched::dump();
@@ -724,11 +810,7 @@ fn run_program(
                     }
                     // Then what it newly missed every 30 seconds (e.g.
                     // after a screen check's input).
-                    loop {
-                        let half = nt::wait::Timeout::Tick(time::ticks() + 30 * time::TICK_HZ);
-                        if nt::wait::wait_for(one, false, half) != nt::status::NtStatus::TIMEOUT {
-                            break;
-                        }
+                    while !wait_real_secs(one, 30) {
                         info!("run: {} still running; the ledger so far:", process.name);
                         nt::ledger::dump();
                     }
@@ -753,8 +835,8 @@ fn run_program(
     };
     // Teardown check: once the exiting threads are reaped, ours must be the
     // last reference to the address space; then its memory is returned.
-    let deadline = time::ticks() + time::TICK_HZ;
-    while mm::heap::KArc::strong_count(&space) > 1 && time::ticks() < deadline {
+    let deadline = time::raw_ticks() + time::TICK_HZ;
+    while mm::heap::KArc::strong_count(&space) > 1 && time::raw_ticks() < deadline {
         sched::reap();
         // Exited processes nothing refers to any more (kept for OpenProcess).
         nt::process::prune();

@@ -89,7 +89,7 @@ static RINGS: [Ring; crate::arch::smp::MAX_CPUS] =
 pub fn record(kind: Kind, a: u64, b: u64) {
     let cpu = crate::arch::percpu::cpu_index() as usize;
     if let Some(ring) = RINGS.get(cpu) {
-        ring.push(crate::time::monotonic_ns(), kind, a, b);
+        ring.push(crate::time::raw_monotonic_ns(), kind, a, b);
     }
 }
 
@@ -180,7 +180,7 @@ pub fn on_tick(_hz: u64) {
     let me = crate::arch::percpu::cpu_index() as usize;
     let Some(beat) = HEARTBEAT.get(me) else { return };
     beat.fetch_add(1, Ordering::Relaxed);
-    let now = crate::time::monotonic_ns();
+    let now = crate::time::raw_monotonic_ns();
     if now.saturating_sub(LOOKED[me].load(Ordering::Relaxed)) < NS {
         return;
     }
@@ -255,7 +255,7 @@ pub fn blocked(_id: usize) {}
 /// yields).
 #[cfg(not(any(test, feature = "hosted")))]
 pub fn progress(id: usize) {
-    PROGRESS[id % PROGRESS.len()].store(crate::time::monotonic_ns().max(1), Ordering::Relaxed);
+    PROGRESS[id % PROGRESS.len()].store(crate::time::raw_monotonic_ns().max(1), Ordering::Relaxed);
 }
 
 #[cfg(any(test, feature = "hosted"))]
@@ -268,7 +268,7 @@ pub fn progress(_id: usize) {}
 #[cfg(not(any(test, feature = "hosted")))]
 pub fn on_kernel_tick(id: usize, rip: u64) {
     let slot = &PROGRESS[id % PROGRESS.len()];
-    let now = crate::time::monotonic_ns().max(1);
+    let now = crate::time::raw_monotonic_ns().max(1);
     let (last, report) = kernel_run(now, slot.load(Ordering::Relaxed));
     slot.store(last, Ordering::Relaxed);
     if report {

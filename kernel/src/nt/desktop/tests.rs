@@ -407,3 +407,102 @@ fn a_docked_window_has_square_corners_and_no_shadow() {
     d.place(a, 7, 100, 100, 400, 300).unwrap();
     assert!(!d.window(a).unwrap().docked);
 }
+
+/// What `act` sent the program: (window, message, wParam, lParam).
+fn sent(d: &mut Desktop) -> Vec<(u32, u32, u64, u64)> {
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 8];
+    let n = d.take_input(7, &mut out);
+    out[..n].iter().map(|e| (e.window, e.message, e.wparam, e.lparam)).collect()
+}
+
+#[test]
+fn named_actions_do_what_the_mouse_and_keys_do() {
+    let (mut d, a) = desktop_with_window();
+    let b = d.create(7, 50, 60, 300, 200, &title("Other"), 0).unwrap();
+    d.show(b, 7, true).unwrap();
+    d.input.clear();
+    let work_h = 768 - u64::from(TASKBAR);
+    // Snap left a window that is not active: placed, raised, active.
+    assert_eq!(d.active, Some(b));
+    d.act(a, Action::Snap(SnapTo::Left)).unwrap();
+    assert_eq!(sent(&mut d), [(a, GALA_WM_PLACE, 0, 512 | work_h << 32)]);
+    assert_eq!(d.active, Some(a));
+    assert_eq!(d.windows.last().map(|w| w.id), Some(a));
+    // The program moves it: the list shows it snapped.
+    d.place(a, 7, 0, 0, 512, work_h as u32).unwrap();
+    let listed = d.list();
+    assert_eq!(listed.iter().map(|w| w.id).collect::<Vec<_>>(), [a, b]);
+    assert_eq!(listed[0].flags, LISTED_ACTIVE | LISTED_SNAPPED);
+    assert_eq!(listed[0].rect, [0, 0, 512, work_h as i32]);
+    assert_eq!(&listed[0].title[..listed[0].title_len], &title("Notes")[..]);
+    assert_eq!(listed[1].flags, 0);
+    // Maximize: SC_MAXIMIZE; once the program filled the work area,
+    // Restore is SC_RESTORE.
+    d.act(a, Action::Maximize).unwrap();
+    assert_eq!(sent(&mut d), [(a, WM_SYSCOMMAND, SC_MAXIMIZE, 0)]);
+    d.place(a, 7, 0, 0, 1024, work_h as u32).unwrap();
+    assert_eq!(d.list()[0].flags, LISTED_ACTIVE | LISTED_MAXIMIZED);
+    d.act(a, Action::Maximize).unwrap();
+    assert_eq!(sent(&mut d), []);
+    d.act(a, Action::Restore).unwrap();
+    assert_eq!(sent(&mut d), [(a, WM_SYSCOMMAND, SC_RESTORE, 0)]);
+    // Back in its snapped place, Restore gives it its first rectangle.
+    d.place(a, 7, 0, 0, 512, work_h as u32).unwrap();
+    d.act(a, Action::Restore).unwrap();
+    assert_eq!(sent(&mut d), [(a, GALA_WM_PLACE, 300 | 100 << 32, 400 | 300 << 32)]);
+    d.place(a, 7, 300, 100, 400, 300).unwrap();
+    // Minimize and Activate: as its taskbar button.
+    d.act(a, Action::Minimize).unwrap();
+    assert!(d.window(a).unwrap().minimized);
+    assert_eq!(d.active, Some(b));
+    assert_eq!(d.list()[0].flags, LISTED_MINIMIZED);
+    assert_eq!(sent(&mut d), [(a, GALA_WM_MINIMIZED, 1, 0)]);
+    d.act(a, Action::Activate).unwrap();
+    assert!(!d.window(a).unwrap().minimized);
+    assert_eq!(d.active, Some(a));
+    assert_eq!(sent(&mut d), [(a, GALA_WM_MINIMIZED, 0, 0)]);
+    // Move: the program places it; a size no window may have is refused.
+    d.act(b, Action::Place { x: 10, y: 20, w: 300, h: 200 }).unwrap();
+    assert_eq!(sent(&mut d), [(b, GALA_WM_PLACE, 10 | 20 << 32, 300 | 200 << 32)]);
+    assert_eq!(
+        d.act(b, Action::Place { x: 0, y: 0, w: 5, h: 5 }),
+        Err(NtStatus::INVALID_PARAMETER)
+    );
+    // Close: SC_CLOSE, the program decides.
+    d.act(b, Action::Close).unwrap();
+    assert_eq!(sent(&mut d), [(b, WM_SYSCOMMAND, SC_CLOSE, 0)]);
+    // No such window, a hidden one, a popup: not acted on.
+    assert_eq!(d.act(99, Action::Close), Err(NtStatus::INVALID_HANDLE));
+    d.show(b, 7, false).unwrap();
+    assert_eq!(d.act(b, Action::Activate), Err(NtStatus::INVALID_HANDLE));
+    let p = d.create(7, 0, 0, 50, 50, &[], STYLE_POPUP).unwrap();
+    d.show(p, 7, true).unwrap();
+    assert_eq!(d.act(p, Action::Maximize), Err(NtStatus::INVALID_HANDLE));
+    assert_eq!(d.list().len(), 1);
+}
+
+#[test]
+fn snap_down_leaves_a_minimized_window_and_up_brings_it_back() {
+    let (mut d, a) = desktop_with_window();
+    d.act(a, Action::Minimize).unwrap();
+    d.input.clear();
+    d.act(a, Action::Snap(SnapTo::Down)).unwrap();
+    assert!(d.window(a).unwrap().minimized);
+    assert_eq!(sent(&mut d), []);
+    d.act(a, Action::Snap(SnapTo::Up)).unwrap();
+    assert!(!d.window(a).unwrap().minimized);
+    assert_eq!(sent(&mut d), [(a, GALA_WM_MINIMIZED, 0, 0), (a, WM_SYSCOMMAND, SC_MAXIMIZE, 0)]);
+    assert_eq!(d.active, Some(a));
+}
+
+#[test]
+fn snapping_a_minimized_window_below_another_remembers_its_own_rectangle() {
+    let (mut d, a) = desktop_with_window();
+    let b = d.create(7, 50, 60, 300, 200, &title("Other"), 0).unwrap();
+    d.show(b, 7, true).unwrap();
+    d.act(a, Action::Minimize).unwrap();
+    // Restoring raises `a` above `b` (their places in the list change).
+    d.act(a, Action::Snap(SnapTo::Left)).unwrap();
+    assert_eq!(d.window(a).unwrap().unsnapped, Some((300, 100, 400, 300)));
+    assert_eq!(d.window(b).unwrap().unsnapped, None);
+}

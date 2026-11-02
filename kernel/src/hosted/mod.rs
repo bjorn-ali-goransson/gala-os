@@ -120,6 +120,50 @@ pub fn configure_failpoints(spec: &str, seed: Option<&str>) -> Result<(), String
         .map_err(|e| alloc::format!("--failpoint={spec}: {e:?}"))
 }
 
+/// `clock=` values, as on the kernel command line (um's `--clock=`);
+/// armed when the program starts.
+pub fn configure_clock(spec: &str) -> Result<(), String> {
+    crate::clockctl::configure(spec)
+        .map(|_| ())
+        .map_err(|item| alloc::format!("--clock={spec}: cannot use {item:?}"))
+}
+
+/// The recording's file descriptor (`--record=`).
+static RECORD_FD: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
+
+/// Writes to the recording: write(2) on the file, which is
+/// async-signal-safe and takes no host lock (it runs inside system
+/// calls, on signal stacks).
+fn write_recording(data: &[u8]) {
+    let fd = RECORD_FD.load(core::sync::atomic::Ordering::Relaxed);
+    let mut rest = data;
+    while !rest.is_empty() && fd >= 0 {
+        // SAFETY: a valid buffer of that length; fd is the recording.
+        let n = unsafe { libc::write(fd, rest.as_ptr().cast(), rest.len()) };
+        if n <= 0 {
+            return;
+        }
+        rest = &rest[n as usize..];
+    }
+}
+
+/// `--record=<file>`: what the run reads from outside goes to `path`
+/// (`crate::replay`; the settings with `replay::info`).
+pub fn record_to(path: &str) -> Result<(), String> {
+    use std::os::fd::IntoRawFd;
+    let file = std::fs::File::create(path).map_err(|e| alloc::format!("{path}: {e}"))?;
+    RECORD_FD.store(file.into_raw_fd(), core::sync::atomic::Ordering::Relaxed);
+    crate::replay::record_to(write_recording);
+    Ok(())
+}
+
+/// `--replay=<file>`: the run reads what the recording at `path` holds.
+pub fn replay_from(path: &str) -> Result<(), String> {
+    let data = std::fs::read(path).map_err(|e| alloc::format!("{path}: {e}"))?;
+    crate::replay::replay_from(data.leak())
+        .map_err(|e| alloc::format!("{path}: not a recording this build reads ({e:?})"))
+}
+
 /// gala-um, implementing `nt::platform`'s traits.
 pub struct Um;
 
@@ -129,6 +173,24 @@ impl Display for Um {
         None
     }
     fn screen_write_row(_: u32, _: u32, _: &[u32]) {}
+}
+
+/// Random numbers: the seed's under `--sim`, else the CPU's generator.
+impl crate::nt::platform::Entropy for Um {
+    fn entropy_seeded() -> bool {
+        sim::on()
+    }
+    fn fill_entropy(buf: &mut [u8]) -> bool {
+        if sim::on() {
+            sim::fill_random(buf);
+            return true;
+        }
+        for chunk in buf.chunks_mut(8) {
+            let Some(word) = crate::arch::cpu::rdrand() else { return false };
+            chunk.copy_from_slice(&word.to_le_bytes()[..chunk.len()]);
+        }
+        true
+    }
 }
 
 /// gala-um has no disk.
@@ -165,6 +227,9 @@ impl Clock for Um {
     }
     fn set_tick_callback(callback: fn(u64)) {
         threads::start_ticks(callback)
+    }
+    fn clock_control(op: crate::clockctl::Op) -> crate::clockctl::State {
+        threads::clock_control(op)
     }
 }
 
@@ -331,6 +396,8 @@ pub fn run(
         crate::info!("failpoint: armed while {name} runs");
     }
     crate::failpoint::arm();
+    // Clock control (`--clock=`) from the program's start on.
+    threads::arm_clock_control();
     let started = nt_code(|| {
         let (process, main_thread) =
             crate::nt::process::spawn_from_pe(name, "", data, args, None, None).map_err(Ok)?;
@@ -361,5 +428,6 @@ pub fn run(
     }
     crate::nt::ledger::dump();
     sim::report();
+    crate::replay::finish();
     Ok(process.exit_status().map_or(u32::MAX, |s| s.0))
 }

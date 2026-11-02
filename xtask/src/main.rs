@@ -602,6 +602,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("prng_test", "ntdll.dll", "Windows/System32"),
     ("prng_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("replay_test", "ntdll.dll", "Windows/System32"),
+    ("replay_test", "kernel32.dll", "Windows/System32"),
+    ("replay_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("record_kernel", "ntdll.dll", "Windows/System32"),
+    ("record_kernel", "kernel32.dll", "Windows/System32"),
+    ("record_kernel", "bcryptprimitives.dll", "Windows/System32"),
+    ("replay_kernel", "ntdll.dll", "Windows/System32"),
+    ("replay_kernel", "kernel32.dll", "Windows/System32"),
+    ("replay_kernel", "bcryptprimitives.dll", "Windows/System32"),
+    // Recorded in gala-um (`um --record=...`): its random numbers.
+    ("replay_kernel", "user/replay_test/replay_test.rec", "gala"),
     ("winsock_async_test", "ntdll.dll", "Windows/System32"),
     ("winsock_async_test", "kernel32.dll", "Windows/System32"),
     ("winsock_async_test", "ws2_32.dll", "Windows/System32"),
@@ -1523,6 +1534,7 @@ const USER_PROGRAMS: &[&str] = &[
     "iocp_test",
     "context_test",
     "timer_test",
+    "clock_test",
     "loader_test",
     "smp_test",
     "smpsched_test",
@@ -1565,6 +1577,8 @@ const USER_PROGRAMS: &[&str] = &[
     "restricted_test",
     "cmd",
     "cmd_test",
+    "gala",
+    "gala_cli_test",
     "profile_test",
     "registry_test",
     "keyed_event_test",
@@ -1577,6 +1591,7 @@ const USER_PROGRAMS: &[&str] = &[
     "manifest_test",
     "kernel32_misc_test",
     "prng_test",
+    "replay_test",
     "kernel32_env_test",
     "winsock_test",
     "winsock_async_test",
@@ -1636,7 +1651,8 @@ usage: cargo xtask <command> [--release]
 commands:
   build        build the kernel and a bootable UEFI ISO (target/<profile>/gala-os.iso)
   run          build, then boot in QEMU with serial on stdio [--headless]
-  test         run host unit tests, then um-test (gala-um), then the QEMU boot tests
+  test         run host unit tests, then um-test (gala-um), replay-test, then the QEMU
+               boot tests
   boot-test    only the QEMU boot tests [scenario name filter]
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
@@ -1657,6 +1673,9 @@ commands:
                a deadlock is reported with its seed:
                sim-test [program filter] [--seeds N (default 4)] [--seed S: only S]
                [--all: every gala-um program, not only the multi-threaded set]
+  replay-test  record programs' inputs in gala-um (um --record=<file>) and replay
+               them (um --replay=<file>), live and simulated: the replay must read
+               what was recorded
   bench        run user/bench on gala; write target/report/bench.json and
                compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
   symbolize    resolve the kernel backtraces in a serial log to functions
@@ -1679,6 +1698,7 @@ fn main() -> ExitCode {
             // gala-um first: it fails in seconds, before minutes of boots.
             Some("test") => unit_tests()
                 .and_then(|()| um_test(release))
+                .and_then(|()| replay_test(release))
                 .and_then(|()| boot_tests(release, None)),
             Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
             Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
@@ -1690,6 +1710,7 @@ fn main() -> ExitCode {
             Some("iso") => iso(release, &args[1..]),
             Some("serve") => serve(release, &args[1..]),
             Some("um-test") => um_test(release),
+            Some("replay-test") => replay_test(release),
             Some("fault-test") => fault_test(
                 release,
                 args.get(1).filter(|a| !a.starts_with("--")),
@@ -1816,6 +1837,16 @@ fn build_kernel(release: bool) -> Result {
         cmd.arg("--release");
     }
     run_cmd(&mut cmd)?;
+    // The server kernel (no `shasha` feature: ROADMAP SD), in its own
+    // target directory so the two builds don't replace each other.
+    let mut cmd = cargo();
+    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
+        .args(["--no-default-features", "--target-dir"])
+        .arg(server_target_dir());
+    if release {
+        cmd.arg("--release");
+    }
+    run_cmd(&mut cmd)?;
     // User programs are always optimized: without a CRT there is no
     // `memcpy` etc. for unoptimized code to call. DLLs that programs embed
     // are built first.
@@ -1860,9 +1891,19 @@ fn build_go_programs() -> Result {
     Ok(())
 }
 
+/// Where the server kernel (built without the desktop) goes.
+fn server_target_dir() -> PathBuf {
+    target_dir().join("server")
+}
+
+/// Scenarios booted with the server kernel (no `shasha` feature).
+const SERVER_KERNEL_SCENARIOS: &[&str] = &["server_kernel"];
+
 fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
-    let kernel = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
+    let server = name.strip_prefix("test-").is_some_and(|n| SERVER_KERNEL_SCENARIOS.contains(&n));
+    let kernel_dir = if server { server_target_dir() } else { target_dir() };
+    let kernel = kernel_dir.join(KERNEL_TARGET).join(profile).join("kernel");
     let limine = fetch_limine()?;
     let out = target_dir().join(profile);
     let iso_root = out.join(format!("{name}-iso-root"));
@@ -2244,7 +2285,9 @@ const PENDING: &[&str] = &[
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
+    "handover_uefi",
     "server_profile",
+    "gala_cli",
     "hello",
     "selftest",
     "fault-pagefault",
@@ -2441,6 +2484,19 @@ const SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["run: end persist_test.exe", "failpoint: disk_io ", "gala: boot ok"],
     },
+    // Added latency (live mocking, R7): every disk request waits 3 ms
+    // first; the program works as before, only slower.
+    Scenario {
+        name: "failpoint_disk_delay",
+        cmdline: "qemu_exit persist run=persist_test.exe failpoint=disk_io:delay:3",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "persist_test: first boot",
+            "exited with status 0x00000000",
+            "delayed by 3 ms",
+            "gala: boot ok",
+        ],
+    },
     Scenario {
         // C++ exception handling as MSVC compiles it, with vcruntime140
         // (user/cxx_eh_test: clang-built, checked-in binary).
@@ -2454,6 +2510,28 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=timer_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["timer_test: ok", "exited with status 0x00000000"],
+    },
+    // Clock control (ROADMAP R7; kernel/src/clockctl.rs): GalaClockControl
+    // freezes, scales and advances the clock; every view of it and the
+    // waits in progress follow. Off without `clock=control`; `clock_boot`
+    // starts frozen at 2038-01-19 03:14:08 UTC from the boot flag.
+    Scenario {
+        name: "clock_test",
+        cmdline: "qemu_exit clock=control run=clock_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["clock_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "clock_off",
+        cmdline: "qemu_exit run=clock_test.exe args=off",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["clock_test: ok (off)", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "clock_boot",
+        cmdline: "qemu_exit clock=control,freeze,system:2147483648 run=clock_test.exe args=boot",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["clock_test: ok (boot)", "exited with status 0x00000000"],
     },
     Scenario {
         name: "loader_test",
@@ -2821,6 +2899,32 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // ROADMAP SD "CLI parity": a GUI program driven by the `gala`
+        // command alone (start, list, snap, maximize/restore, move,
+        // minimize/activate, wallpaper, ps, close, kill); SCREEN_SCENARIOS
+        // checks shasha once the window is snapped left.
+        name: "gala_cli",
+        cmdline: "qemu_exit wallpaper=night run=gala_cli_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "gala_cli_test target: up",
+            "gala_cli_test target: snapped left",
+            "xtask: screen ok",
+            "gala_cli_test target: key g",
+            "gala_cli_test target: maximized",
+            "gala_cli_test target: restored",
+            "gala_cli_test target: snapped right",
+            "gala_cli_test target: moved",
+            "gala_cli_test target: minimized",
+            "desktop: wallpaper ribbons",
+            "gala_cli_test target: SC_CLOSE",
+            "gala_cli_test target: WM_CLOSE",
+            "gala_cli_test target: ok",
+            "gala_cli_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // ntdll's run-time library and the calls Git Bash's msys-2.0.dll
         // imports.
         name: "rtl_test",
@@ -2905,6 +3009,43 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=prng_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["prng_test: ok", "exited with status 0x00000000"],
+    },
+    // Record/replay's inputs (kernel/src/replay.rs): random numbers, the
+    // performance counter, the system time; `cargo xtask replay-test`
+    // records and replays it in gala-um.
+    Scenario {
+        name: "replay_test",
+        cmdline: "qemu_exit run=replay_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["replay_test: ok", "exited with status 0x00000000"],
+    },
+    // The kernel records the program's inputs on the debug console
+    // (`record`); xtask joins them into test-record_kernel.rec.
+    Scenario {
+        name: "record_kernel",
+        cmdline: "qemu_exit record run=replay_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "replay_test: ok",
+            "replay: recorded ",
+            "xtask: recording ",
+            "exited with status 0x00000000",
+        ],
+    },
+    // ... and replays a recording made in gala-um
+    // (user/replay_test/replay_test.rec): the same random numbers.
+    Scenario {
+        name: "replay_kernel",
+        cmdline: "qemu_exit replay=replay_test.rec run=replay_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "replay: replaying replay_test.rec",
+            "replay_test: random f337cbf22a6ac1871480fcd88e3bf539",
+            "replay_test: random c476c1ed3c",
+            "replay_test: ok",
+            "replay: replayed 0 of 172 clock, 2 of 2 random, 1 of 1 boot time records; 0 inputs live",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // A real Go program (user/go_hello): ROADMAP G2.
@@ -3071,18 +3212,37 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["user32_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // ROADMAP SD: the server kernel, built without the desktop (no
+        // compositor in the binary), booted with a screen: GUI calls fail
+        // as with no screen, windows still work, a console program runs.
+        name: "server_kernel",
+        // gala_cli_test server: `gala`'s window commands are not
+        // supported (exit code 3), start, ps and kill work.
+        cmdline: "qemu_exit run=hello.exe,user32_test.exe,gala_cli_test.exe args=,,server",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "desktop: not in this kernel (server build)",
+            "Hello from user mode!",
+            "user32_test: ok",
+            "gala_cli_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // ROADMAP SD: the server profile never brings up the graphical
         // interface, even with a screen (UEFI: a framebuffer): windows
         // still work (the registry, messages), nothing is drawn, and
         // `console=` starts no console window.
         name: "server_profile",
-        cmdline: "qemu_exit profile=server console=user32_test.exe run=user32_test.exe",
+        cmdline: "qemu_exit profile=server console=user32_test.exe \
+                  run=user32_test.exe,gala_cli_test.exe args=,server",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "profile: server",
             "console: no console window for user32_test.exe (server profile)",
             "desktop: not drawn (server profile)",
             "user32_test: ok",
+            "gala_cli_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -3111,6 +3271,62 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=msvcrt_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["msvcrt_test: _putws", "msvcrt_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // R9 (a): kernel handover to the same build, twice, with no
+        // programs running: each kernel writes the handover record, parks
+        // the other CPU and enters a fresh copy of itself, which starts
+        // from the record. A marker page survives both, the clock goes on
+        // without going back, every CPU comes back each time.
+        name: "handover_same",
+        cmdline: "qemu_exit handover=2",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "handover: generation 0 -> 1: record ",
+            "handover: generation 1 (from generation 0), record version 1",
+            "handover: clock monotonic",
+            "handover: generation 1: 2 of 2 CPUs online again",
+            "survived 1 handover(s)",
+            "handover: generation 1 -> 2: record ",
+            "handover: generation 2 (from generation 1), record version 1",
+            "handover: generation 2: 2 of 2 CPUs online again",
+            "survived 2 handover(s)",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // handover_same booted by UEFI (UEFI_SCENARIOS): the GOP
+        // framebuffer is handed over too, and its console goes on.
+        name: "handover_uefi",
+        cmdline: "qemu_exit handover=2",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "firmware: UEFI x86_64",
+            "handover: generation 2 (from generation 1), record version 1",
+            "framebuffer: 1280x800",
+            "handover: generation 2: 2 of 2 CPUs online again",
+            "survived 2 handover(s)",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // R9 (a) with a mounted volume (`persist`, DISK_SCENARIOS): the
+        // volume's log position is handed over and found again by the next
+        // kernel; persist_test runs in each kernel (between handovers, not
+        // across them): the first writes its files, the next ones find
+        // them on the disk.
+        name: "handover_disk",
+        cmdline: "qemu_exit persist handover=2 run=persist_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "persist_test: first boot",
+            "handover: generation 1 (from generation 0)",
+            "handover: volume continues",
+            "handover: generation 2: 2 of 2 CPUs online again",
+            "persist_test: ok",
+            "survived 2 handover(s)",
+            "gala: boot ok",
+        ],
     },
     Scenario {
         // R4: the watchdog for a thread that stays in the kernel: the boot
@@ -3956,7 +4172,11 @@ enum Vm<'a> {
 /// ` events=<list>` when `XTASK_EVENTS` asks for the event stream in every
 /// boot (written to `<iso>.events.jsonl`).
 fn events_flag() -> String {
-    env::var("XTASK_EVENTS").map(|e| format!(" events={e}")).unwrap_or_default()
+    let events = env::var("XTASK_EVENTS").map(|e| format!(" events={e}")).unwrap_or_default();
+    // `XTASK_RECORD=1`: every boot records its programs' inputs
+    // (`<iso>.rec`; kernel/src/replay.rs).
+    let record = if env::var_os("XTASK_RECORD").is_some() { " record" } else { "" };
+    format!("{events}{record}")
 }
 
 /// Scenarios that ship named sets of EXTRA_MODULES instead of their own
@@ -3965,14 +4185,18 @@ fn events_flag() -> String {
 const MODULE_SETS: &[(&str, &str)] = &[
     ("kernel_watchdog", "hello"),
     ("server_profile", "user32_test"),
+    ("server_kernel", "user32_test"),
+    ("gala_cli", "gui_test"),
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
+    ("handover_disk", "persist_test"),
     ("crash_record", "hello"),
     ("watchdog", "busybox"),
     ("failpoint_heap", "kernel32_test"),
     ("failpoint_frame", "kernel32_test"),
     ("failpoint_random", "kernel32_test"),
     ("failpoint_disk", "persist_test"),
+    ("failpoint_disk_delay", "persist_test"),
     ("dotnet_info", "dotnet"),
     ("fzsftp", "filezilla"),
     ("filezilla_server", "filezilla"),
@@ -4281,6 +4505,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("busybox", "child processes (pipelines are child processes)"),
     ("cmd_test", "child processes (one NT process per Linux process)"),
     ("gui_test", "needs a screen (the desktop draws on the framebuffer)"),
+    ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
 ];
 
@@ -4375,6 +4600,10 @@ fn um_command(um: &Path, s: &Scenario, options: &[String], timeout_secs: u32) ->
     let mut cmd = Command::new("timeout");
     // As many processors as the QEMU boot tests (-smp 2).
     cmd.arg(timeout_secs.to_string()).arg(um).arg("--cpus=2").args(options);
+    // Clock control, as the kernel's `clock=`.
+    if let Some(spec) = s.cmdline.split_whitespace().find_map(|w| w.strip_prefix("clock=")) {
+        cmd.arg(format!("--clock={spec}"));
+    }
     // Its boot modules, from user/bin (checked in) as `--module=`.
     for (file, dir) in extra_modules(name) {
         // The program itself is added by um.
@@ -4587,6 +4816,82 @@ fn fault_test(release: bool, filter: Option<&String>, sweep: Option<&str>) -> Re
     if failed == 0 { Ok(()) } else { Err(format!("{failed} fault-test runs failed")) }
 }
 
+/// Programs `cargo xtask replay-test` records and replays in gala-um
+/// (scenario names; each must `runs_in_um`), and the prefix of the lines
+/// that show their inputs (they must repeat in the replay).
+const REPLAY_PROGRAMS: &[(&str, &str)] = &[("replay_test", "replay_test: ")];
+
+/// `cargo xtask replay-test`: runs each REPLAY_PROGRAMS program in gala-um
+/// with `--record=<file>` twice (live inputs: the lines must differ),
+/// then with `--replay=<file>` (the settings and inputs from the file:
+/// the lines must be the recorded ones), without and with `--sim` (whose
+/// trace must repeat too).
+fn replay_test(release: bool) -> Result {
+    let um = build_um(release)?;
+    let started = Instant::now();
+    let mut failed = Vec::new();
+    for (program, prefix) in REPLAY_PROGRAMS {
+        let s = SCENARIOS
+            .iter()
+            .find(|s| s.name == *program && runs_in_um(s))
+            .ok_or(format!("replay-test: {program} is not a gala-um scenario"))?;
+        for sim in [None, Some(3u64)] {
+            let label = sim.map_or(String::from("live"), |seed| format!("sim {seed}"));
+            let file = |run: u32| target_dir().join(format!("replay-{program}-{label}-{run}.rec"));
+            let wanted = |log: &str| -> Vec<String> {
+                log.lines()
+                    .filter(|l| l.starts_with(prefix) || l.starts_with("sim: seed"))
+                    .map(str::to_string)
+                    .collect()
+            };
+            let mut recorded = Vec::new();
+            for run in 0..2 {
+                let mut options = vec![format!("--record={}", file(run).display())];
+                options.extend(sim.map(|seed| format!("--sim={seed}")));
+                let (code, log) = run_um_with(&um, s, &options, UM_TIMEOUT_SECS)?;
+                if code != Some(0) || !log.contains("replay: recorded") {
+                    failed.push(format!("{program} ({label}): recording failed:\n{log}"));
+                }
+                recorded.push(wanted(&log));
+            }
+            // Live inputs differ between runs (the simulation's seed fixes
+            // them, so its two recordings agree).
+            if sim.is_none() && recorded[0] == recorded[1] {
+                failed.push(format!("{program} ({label}): two live runs read the same inputs"));
+            }
+            if sim.is_some() && recorded[0] != recorded[1] {
+                failed.push(format!("{program} ({label}): one seed, different runs"));
+            }
+            let replay = format!("--replay={}", file(0).display());
+            let (code, log) = run_um_with(&um, s, &[replay], UM_TIMEOUT_SECS)?;
+            let replayed = wanted(&log);
+            if code != Some(0) || replayed != recorded[0] || !log.contains("replay: replayed") {
+                failed.push(format!(
+                    "{program} ({label}): the replay read {replayed:?}, recorded {:?}:\n{log}",
+                    recorded[0]
+                ));
+            } else {
+                eprintln!(
+                    "xtask: replay test {program:<16} {label:<6} ok ({} lines)",
+                    replayed.len()
+                );
+            }
+            for run in 0..2 {
+                let _ = fs::remove_file(file(run));
+            }
+        }
+    }
+    eprintln!("xtask: replay-test: {:.2} s", started.elapsed().as_secs_f64());
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        for f in &failed {
+            eprintln!("xtask: replay test FAILED: {f}");
+        }
+        Err(format!("{} replay tests failed", failed.len()))
+    }
+}
+
 /// Programs `cargo xtask sim-test` runs in gala-um's deterministic
 /// simulation, and whether they are multi-threaded (their traces must
 /// then differ across seeds). Each must `runs_in_um`.
@@ -4609,27 +4914,29 @@ const SIM_PROGRAMS: &[(&str, bool)] = &[
     // which the seed also schedules, make none).
     ("wait_test", false),
     ("timer_test", false),
+    // Clock control on the simulation's virtual clock (frozen, advanced,
+    // 1000 times faster) with three waiting threads.
+    ("clock_test", false),
     ("ioapc_test", false),
     ("smp_test", false),
+    // Go: the runtime's own threads (sysmon, the garbage collector's
+    // workers) make system calls of their own. Its random numbers
+    // (ProcessPrng) come from the seed through GalaRandom (R7); its
+    // spin-waits read the time from KUSER_SHARED_DATA, which the
+    // simulation traps, and the garbage collector's spin loops are
+    // preempted at a canonical point (ARCHITECTURE "Deterministic
+    // simulation").
+    ("go_hello", true),
+    ("go_goroutines", true),
+    ("go_time", true),
+    ("go_gc", true),
+    ("go_os", true),
+    ("go_exit", true),
 ];
-/// Programs whose runs are not reproducible from the seed: Go's runtime
-/// seeds its scheduler's random choices from ProcessPrng (RDRAND, which
-/// gala-um cannot intercept), and its garbage collector spins in program
-/// code (watchdog preemptions). `--all` runs them; differing traces are
-/// reported, not failed.
-const SIM_UNSEEDED: &[&str] =
-    &["go_hello", "go_goroutines", "go_time", "go_gc", "go_os", "go_exit"];
 /// Seeds per program by default (1..=N), each run twice.
 const SIM_SEEDS: u64 = 4;
 /// A simulated run may take this long (a hang is a failure).
 const SIM_TIMEOUT_SECS: u32 = 60;
-/// Go's garbage collector spins in program code: each watchdog preemption
-/// costs 100 ms of processor time (go_gc: ~150 of them).
-const SIM_UNSEEDED_TIMEOUT_SECS: u32 = 240;
-
-fn sim_timeout(program: &str) -> u32 {
-    if SIM_UNSEEDED.contains(&program) { SIM_UNSEEDED_TIMEOUT_SECS } else { SIM_TIMEOUT_SECS }
-}
 /// um's exit status for a deadlock found by the simulation.
 const SIM_DEADLOCK_EXIT: i32 = 4;
 
@@ -4685,7 +4992,7 @@ fn sim_test(
         .collect();
     let started = Instant::now();
     let results = run_parallel(&jobs, |(s, seed, _)| {
-        run_um_with(&um, s, &[format!("--sim={seed}")], sim_timeout(s.name))
+        run_um_with(&um, s, &[format!("--sim={seed}")], SIM_TIMEOUT_SECS)
     });
     let dir = target_dir().join("failed");
     let mut failures = Vec::new();
@@ -4700,7 +5007,7 @@ fn sim_test(
             let _ = fs::create_dir_all(&dir).and_then(|()| fs::write(&file, &log));
             let tail: Vec<&str> = log.lines().rev().take(30).collect();
             let tail: Vec<&str> = tail.into_iter().rev().collect();
-            let repeat = um_command(&um, s, &[format!("--sim={seed}")], sim_timeout(s.name))
+            let repeat = um_command(&um, s, &[format!("--sim={seed}")], SIM_TIMEOUT_SECS)
                 .map_or_else(|e| e, |c| shell_line(&c));
             failures.push(format!(
                 "{} seed {seed}: {why}; log {}; repeat with:\n    {repeat}\n    {}",
@@ -4742,12 +5049,12 @@ fn sim_test(
                     log_a.display(),
                     log_b.display()
                 );
-                // The watchdog preempted a thread spinning in program code,
-                // or the program draws on RDRAND: limits of the simulation,
-                // not bugs in the NT layer.
-                if line_a.contains("watchdog")
-                    || line_b.contains("watchdog")
-                    || SIM_UNSEEDED.contains(&s.name)
+                // The watchdog preempted a thread spinning in program code
+                // (it depends on the host's timing): a limit of the
+                // simulation, tolerated for `--all`'s other programs. The
+                // SIM_PROGRAMS must repeat.
+                if (line_a.contains("watchdog") || line_b.contains("watchdog"))
+                    && !SIM_PROGRAMS.iter().any(|(p, _)| *p == s.name)
                 {
                     warnings.push(what);
                 } else {
@@ -4770,7 +5077,7 @@ fn sim_test(
         }
     }
     for w in &warnings {
-        eprintln!("xtask: sim test: not reproducible (watchdog preemptions or RDRAND): {w}");
+        eprintln!("xtask: sim test: not reproducible (watchdog preemptions): {w}");
     }
     for f in &failures {
         eprintln!("xtask: sim test FAILED: {f}");
@@ -5041,6 +5348,11 @@ fn run_vm(
     if let Ok(mut f) = fs::File::open(&log) {
         let _ = f.read_to_string(&mut serial);
     }
+    // A `record` boot's recording (kernel/src/replay.rs), from the debug
+    // console's `"ev":"rec"` lines.
+    if let Some(line) = extract_recording(&events, &iso.with_extension("rec")) {
+        serial += &line;
+    }
     if stopped {
         serial += STOPPED_LINE;
         serial += "\n";
@@ -5066,6 +5378,31 @@ fn run_vm(
         };
     }
     Ok((status, serial, BootTime { to_banner: to_banner.unwrap_or(total), total }))
+}
+
+/// Joins the `{"ev":"rec","hex":...}` lines of an event stream into the
+/// recording they carry (a `record` boot; kernel/src/replay.rs), written
+/// to `out`; returns the line saying so, None without such lines.
+fn extract_recording(events: &Path, out: &Path) -> Option<String> {
+    let text = fs::read_to_string(events).ok()?;
+    let mut bytes = Vec::new();
+    for line in text.lines().filter(|l| l.contains(r#""ev":"rec""#)) {
+        let hex = line.split(r#""hex":""#).nth(1)?.split('"').next()?;
+        for i in (0..hex.len()).step_by(2) {
+            bytes.push(u8::from_str_radix(hex.get(i..i + 2)?, 16).ok()?);
+        }
+    }
+    if bytes.is_empty() {
+        return None;
+    }
+    let magic = bytes.starts_with(b"GALAREC\0");
+    fs::write(out, &bytes).ok()?;
+    Some(format!(
+        "xtask: recording {} ({} bytes{})\n",
+        out.display(),
+        bytes.len(),
+        if magic { "" } else { ", no GALAREC header" }
+    ))
 }
 
 /// What a scenario's screen must show once its serial log has `marker`
@@ -5251,6 +5588,30 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     input: &["mouse_move 80 -159", "mouse_button 1", "mouse_button 0"],
                     pixels: &[],
                 },
+            ],
+        },
+    ),
+    (
+        // `gala snap left` put gala_cli_test's window (client area
+        // RGB 2e 8b 57) on the left half of the work area (640 x 752 on
+        // the 1280 x 800 screen): its caption at the top, square
+        // corners (docked); the night wallpaper on the right. Then `g`
+        // typed into it (it renames itself, which the test waits for).
+        "gala_cli",
+        ScreenCheck {
+            marker: "gala_cli_test: snapped left",
+            steps: &[
+                ScreenStep {
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::At(300, 12, 0xeef2f7),             // the active caption
+                        PixelCheck::At(0, 0, 0x9ca3ad), // a square corner: the outline
+                        PixelCheck::At(20, 60, 0x2e8b57), // the client area, top left
+                        PixelCheck::At(620, 740, 0x2e8b57), // and bottom right
+                        PixelCheck::AnyIn(900, 300, 40, 40, 0x060e2b), // the wallpaper
+                    ],
+                },
+                ScreenStep { input: &["sendkey g"], pixels: &[] },
             ],
         },
     ),
@@ -5695,6 +6056,23 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
     },
     DiskScenario {
         name: "failpoint_disk",
+        size: 32 << 20,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "failpoint_disk_delay",
+        size: 32 << 20,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // R9 (a): the volume handed over between kernels.
+        name: "handover_disk",
         size: 32 << 20,
         setup: |_| {},
         check: |_| Ok(()),
@@ -6870,11 +7248,21 @@ mod constants {
     #[test]
     fn sim_test_programs_and_trace_line() {
         use super::*;
-        for name in SIM_PROGRAMS.iter().map(|(p, _)| *p).chain(SIM_UNSEEDED.iter().copied()) {
+        for name in SIM_PROGRAMS.iter().map(|(p, _)| *p) {
             assert!(
                 SCENARIOS.iter().any(|s| s.name == name && runs_in_um(s)),
                 "{name} is not a gala-um scenario"
             );
+        }
+        // Every Go program gala-um runs is simulated and must repeat from
+        // its seed (Go's runtime is our most demanding threaded program).
+        for name in GO_PROGRAMS {
+            if SCENARIOS.iter().any(|s| s.name == *name && runs_in_um(s)) {
+                assert!(
+                    SIM_PROGRAMS.iter().any(|(p, threaded)| p == name && *threaded),
+                    "{name} runs in gala-um but is not in SIM_PROGRAMS"
+                );
+            }
         }
         let log = "x\nsim: seed 7 trace 3145af8e34765682 (214 scheduling points, 110 ms virtual)\n";
         assert_eq!(sim_trace(log), Some("3145af8e34765682"));

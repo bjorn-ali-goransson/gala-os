@@ -278,6 +278,14 @@ extern "C" fn ap_main(start: &'static ApStart) -> ! {
     main(start.index)
 }
 
+/// (CPU index, local APIC id) of every online CPU.
+pub fn online_cpus() -> impl Iterator<Item = (u32, u32)> {
+    let mask = online_mask();
+    (0..MAX_CPUS as u32)
+        .filter(move |&i| mask & (1 << i) != 0)
+        .map(|i| (i, APIC_IDS[i as usize].load(Ordering::Relaxed)))
+}
+
 /// Interrupts CPU `index` (if online) so that it reschedules; an idle CPU
 /// leaves `hlt` and looks for work.
 pub fn send_reschedule(index: u32) {
@@ -296,6 +304,7 @@ pub fn init_bsp() {
     APIC_IDS[0].store(apic::id(), Ordering::Relaxed);
     interrupts::set_handler(RESCHEDULE_VECTOR, |_| apic::eoi());
     interrupts::set_handler(TLB_FLUSH_VECTOR, on_flush_ipi);
+    super::handover::init();
     if has_rdtscp() {
         // SAFETY: see `ap_main`.
         unsafe { cpu::wrmsr(IA32_TSC_AUX, 0) };
@@ -321,8 +330,8 @@ pub fn start_aps(processors: &Processors, main: fn(u32) -> !) -> Result<u32, Smp
         info.goto_address.store(gala_ap_entry as *const () as u64, Ordering::Release);
         started += 1;
     }
-    let deadline = crate::time::monotonic_ns() + 1_000_000_000;
-    while online_count() < started && crate::time::monotonic_ns() < deadline {
+    let deadline = crate::time::raw_monotonic_ns() + 1_000_000_000;
+    while online_count() < started && crate::time::raw_monotonic_ns() < deadline {
         core::hint::spin_loop();
     }
     Ok(online_count())
