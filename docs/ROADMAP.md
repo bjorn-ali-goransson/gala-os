@@ -20,7 +20,7 @@ explicitly in its commit.
 - Work that speeds up development or troubleshooting comes first, as we
   are the ones who benefit: today that is R5 (deterministic simulation:
   a failure replays from its seed), then R7's record/replay and clock
-  control, then fixing the known flaky scenarios (java_http,
+  control (first part done 2026-11-02, see R7), then fixing the known flaky scenarios (java_http,
   java_hello, postgres, smpsched_test under load), before the rest of
   R6.
 - **Server and desktop stay separate**: the essential workloads (servers,
@@ -1542,10 +1542,13 @@ R. **Robustness and live update, kernel included** (the owner's
      (`Sleep(1)` pollers starved: the watchdog now jumps time to the
      next deadline and runs another thread), and starvation under
      priorities (demotion on yields and long runs).
-     Next: RDRAND from the seed (CPUID faulting to hide it, ProcessPrng
-     fed by the kernel) so Go programs repeat; preemption in program
-     code by instruction count (perf counters, as rr) instead of the
-     host-timed watchdog.
+     **ProcessPrng fed by the kernel** (with R7, 2026-11-02: GalaRandom
+     serves the seed's numbers): Go programs now repeat from their seed
+     (go_hello, go_goroutines in sim-test; go_gc's spinning collector
+     still needs the watchdog). Next: CPUID faulting to hide RDRAND from
+     programs that execute it themselves; preemption in program code by
+     instruction count (perf counters, as rr) instead of the host-timed
+     watchdog.
    - R6. **Charging resources to an owner**: pages, kernel pool and
      handles charged to a process and its job: the commit limit, job
      memory limits, STATUS_QUOTA_EXCEEDED, the program using too much
@@ -1560,6 +1563,34 @@ R. **Robustness and live update, kernel included** (the owner's
      time jumps, latency, record/replay, device events; API-level faults
      in gala's DLLs (Application Verifier style); a read-write control
      channel and a test-only `Gala*` call; off unless booted with a flag.
+     **First part done (2026-11-02)**, what speeds up development and
+     troubleshooting (ARCHITECTURE "Live mocking"):
+     - **Clock control** (`kernel/src/clockctl.rs`): `clock=` / `um
+       --clock=` (`control,freeze,rate:n/d,advance:s,system:unix`) and
+       the test-only GalaClockControl (0x7f4c: query, advance, rate,
+       system time; a versioned state record); every view of the clock
+       and the deadlines of waits in progress follow, in the kernel,
+       gala-um and its simulation; the kernel's own sleeps and
+       diagnostics stay on the raw clock. Test `clock_test` (scenarios
+       clock_test, clock_off, clock_boot; um-test, sim-test).
+     - **Record/replay** (`kernel/src/replay.rs`, format version 1):
+       the boot time, gala-um's clock readings and random numbers per
+       thread, plus gala-um's settings; `um --record/--replay`, the
+       kernel's `record` (debug console, extracted to `<iso>.rec`) and
+       `replay=<module>`; recordings move between gala-um and the
+       kernel. GalaRandom (0x7f4d) feeds gala's ProcessPrng when the
+       random source is mocked (recording, replay, simulation). Tests:
+       `replay_test`, `cargo xtask replay-test` (in `cargo xtask
+       test`), scenarios record_kernel and replay_kernel.
+     - **Disk latency**: `failpoint=disk_io:delay:<ms>` (scenario
+       failpoint_disk_delay).
+     Next: record/replay of network frames, disk reads and input events
+     (needs a deterministic guest: gala-um's simulation first), the
+     display and input as swappable devices, device events (NIC removed,
+     resolution change), API-level faults in gala's DLLs, the
+     read-write control channel (OBSERVABILITY §6), a frozen clock's
+     effect on absolute timers (Windows re-evaluates them on a system
+     time change).
    - R8. **Chain of trust for updates** (design): Secure Boot -> Limine
      -> kernel -> signed system images; keys, manifest, rollback.
      **Designed** (2026-11-02, ARCHITECTURE "Chain of trust"): Limine's

@@ -143,6 +143,14 @@ pub struct Scheduler {
     /// The last demoted priority (`demote`); new threads' priorities are
     /// above DEMOTED.
     floor: u64,
+    /// Clock control (`crate::clockctl`): virtual time runs at
+    /// `rate.num / rate.den` of the "real" time below (0: frozen).
+    pub rate: crate::clockctl::Rate,
+    /// The unscaled clock: STEP_NS per scheduling point, and the jumps to
+    /// deadlines at the rate's inverse.
+    pub real_ns: u64,
+    /// Nanoseconds added by `advance`.
+    pub advanced_ns: u64,
 }
 
 /// Initial priorities have this bit; demoted ones count down below it.
@@ -165,6 +173,27 @@ impl Scheduler {
             strategy: if seed.is_multiple_of(2) { Strategy::Priorities } else { Strategy::Uniform },
             streak: 0,
             floor: DEMOTED,
+            rate: crate::clockctl::Rate::REAL,
+            real_ns: START_NS,
+            advanced_ns: 0,
+        }
+    }
+
+    /// Clock control: virtual time jumps forward by `ns` (deadlines it
+    /// passes expire at the next scheduling point).
+    pub fn advance(&mut self, ns: u64) {
+        self.now_ns = self.now_ns.saturating_add(ns);
+        self.advanced_ns = self.advanced_ns.saturating_add(ns);
+    }
+
+    /// Moves virtual time on to `d` (not back); the unscaled clock moves
+    /// by as much as that takes at the current rate.
+    fn move_to(&mut self, d: u64) {
+        if d > self.now_ns {
+            let delta = d - self.now_ns;
+            let real = crate::clockctl::Rate { num: self.rate.den, den: self.rate.num.max(1) };
+            self.real_ns = self.real_ns.saturating_add(real.scale(delta));
+            self.now_ns = d;
         }
     }
 
@@ -299,10 +328,12 @@ impl Scheduler {
         self.rng.below(odds.max(1)) == 0
     }
 
-    /// A scheduling point: virtual time passes by STEP_NS.
+    /// A scheduling point: virtual time passes by STEP_NS (scaled by the
+    /// clock-control rate: none while frozen).
     pub fn step(&mut self) {
         self.steps += 1;
-        self.now_ns += STEP_NS;
+        self.real_ns += STEP_NS;
+        self.now_ns += self.rate.scale(STEP_NS);
     }
 
     /// Whether a program thread other than `id` could make progress if
@@ -320,8 +351,11 @@ impl Scheduler {
 
     /// Moves virtual time to the earliest deadline of a blocked thread (a
     /// thread spinning in program code is taken to have used the time
-    /// until then).
+    /// until then). Not while the clock is frozen.
     pub fn skip_to_next_deadline(&mut self) {
+        if self.rate.num == 0 {
+            return;
+        }
         let earliest = self
             .threads
             .iter()
@@ -330,7 +364,7 @@ impl Scheduler {
             .filter_map(|t| t.deadline)
             .min();
         if let Some(d) = earliest {
-            self.now_ns = self.now_ns.max(d);
+            self.move_to(d);
         }
     }
 
@@ -415,8 +449,13 @@ impl Scheduler {
                 self.last_user_ns = self.now_ns;
             }
             match earliest {
-                Some(d) if user_deadline || d.saturating_sub(self.last_user_ns) < IDLE_LIMIT_NS => {
-                    self.now_ns = self.now_ns.max(d);
+                // A frozen clock reaches no deadline: everyone waits for ever.
+                Some(d)
+                    if self.rate.num > 0
+                        && (user_deadline
+                            || d.saturating_sub(self.last_user_ns) < IDLE_LIMIT_NS) =>
+                {
+                    self.move_to(d);
                 }
                 _ => {
                     self.running = None;
@@ -523,6 +562,42 @@ mod tests {
         s.block(1);
         assert_eq!(s.pick(), Next::Run(2));
         assert_eq!(s.now_ns, START_NS + 80 * NS_PER_TICK);
+    }
+
+    #[test]
+    fn clock_control_scales_freezes_and_advances() {
+        let mut s = Scheduler::new(1);
+        s.add(1, true);
+        s.add(2, true);
+        assert_eq!(s.running, Some(1));
+        s.rate = crate::clockctl::Rate { num: 1000, den: 1 };
+        s.step();
+        assert_eq!(s.now_ns, START_NS + 1000 * STEP_NS);
+        assert_eq!(s.real_ns, START_NS + STEP_NS);
+        // Frozen: steps leave virtual time alone, and a deadline is never
+        // reached by waiting.
+        s.rate = crate::clockctl::Rate::FROZEN;
+        let frozen = s.now_ns;
+        s.step();
+        assert_eq!(s.now_ns, frozen);
+        s.prepare(1, Some(frozen + 5));
+        s.block(1);
+        s.prepare(2, Some(frozen + 7));
+        s.block(2);
+        assert_eq!(s.pick(), Next::Deadlock);
+        // An advance passes the first deadline.
+        s.advance(6);
+        assert_eq!(s.pick(), Next::Run(1));
+        assert_eq!(s.wait_result(1), (false, true));
+        assert_eq!(s.advanced_ns, 6);
+        // At half speed, the jump to thread 2's deadline (1 ns away) takes
+        // 2 ns of the unscaled clock.
+        s.rate = crate::clockctl::Rate { num: 1, den: 2 };
+        s.block(1);
+        let real = s.real_ns;
+        assert_eq!(s.pick(), Next::Run(2));
+        assert_eq!(s.now_ns, frozen + 7);
+        assert_eq!(s.real_ns, real + 2);
     }
 
     #[test]

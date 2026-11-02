@@ -1,4 +1,11 @@
 //! Kernel timekeeping: a periodic tick and a TSC-based monotonic clock.
+//!
+//! `ticks`, `monotonic_ns` and `system_time` are the clock programs and
+//! wait deadlines use: with `clock=` (clock control, `clockctl`) it is the
+//! virtual clock, derived from the TSC; otherwise the real one. The
+//! kernel's own diagnostics and sleeps (watchdogs, the flight recorder,
+//! `sched::sleep_ms`) use `raw_ticks` and `raw_monotonic_ns`, which
+//! clock control never moves.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -22,6 +29,11 @@ pub fn set_boot_time(unix_secs: i64) {
     SYSTEM_TIME_AT_INIT.store(secs * 10_000_000, Ordering::Relaxed);
 }
 
+/// Sets the boot time as an NT system time (a replayed recording's).
+pub fn set_boot_system_time(t: u64) {
+    SYSTEM_TIME_AT_INIT.store(t, Ordering::Relaxed);
+}
+
 /// NT system time when the kernel's clock started (the boot time).
 pub fn boot_system_time() -> u64 {
     SYSTEM_TIME_AT_INIT.load(Ordering::Relaxed)
@@ -29,7 +41,11 @@ pub fn boot_system_time() -> u64 {
 
 /// Current NT system time (100 ns units since 1601-01-01 UTC).
 pub fn system_time() -> u64 {
-    SYSTEM_TIME_AT_INIT.load(Ordering::Relaxed) + monotonic_ns() / 100
+    let t = SYSTEM_TIME_AT_INIT.load(Ordering::Relaxed) + monotonic_ns() / 100;
+    if crate::clockctl::armed() {
+        return crate::clockctl::offset_system(t, crate::clockctl::system_offset());
+    }
+    t
 }
 
 /// Starts the periodic tick. Interrupts must be enabled by the caller.
@@ -104,8 +120,8 @@ fn on_tick(frame: &mut TrapFrame) {
         if BEATS.fetch_add(1, Ordering::Relaxed) == 3 * TICK_HZ {
             HANG_TEST.store(false, Ordering::Relaxed);
             crate::info!("hangtest: CPU 1 spins with interrupts off for 9 s");
-            let until = monotonic_ns() + 9_000_000_000;
-            while monotonic_ns() < until {
+            let until = raw_monotonic_ns() + 9_000_000_000;
+            while raw_monotonic_ns() < until {
                 core::hint::spin_loop();
             }
             crate::info!("hangtest: CPU 1 goes on");
@@ -123,22 +139,48 @@ fn on_tick(frame: &mut TrapFrame) {
         crate::sched::on_tick_here();
         return;
     }
-    let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    let raw = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     apic::eoi();
+    let now = if crate::clockctl::armed() { ticks() } else { raw };
     let callback = *TICK_CALLBACK.lock();
     if let Some(callback) = callback {
         callback(now);
     }
-    crate::sched::on_tick(now);
+    crate::sched::on_tick(now, raw);
 }
 
-/// Timer ticks since `init`.
+/// Timer ticks since `init` on the programs' clock (virtual under clock
+/// control: its milliseconds).
 pub fn ticks() -> u64 {
+    if crate::clockctl::armed() {
+        return monotonic_ns() / (1_000_000_000 / TICK_HZ);
+    }
     TICKS.load(Ordering::Relaxed)
 }
 
-/// Nanoseconds since `init`, from the TSC (0 before calibration).
+/// Timer interrupts since `init` (real time, whatever clock control does).
+pub fn raw_ticks() -> u64 {
+    TICKS.load(Ordering::Relaxed)
+}
+
+/// Nanoseconds since `init` on the programs' clock (virtual under clock
+/// control).
 pub fn monotonic_ns() -> u64 {
+    crate::clockctl::virtual_ns(raw_monotonic_ns())
+}
+
+/// Turns clock control's virtual clock on (`clock=`), continuing from
+/// the current time: the larger of the TSC's and the tick count's, so
+/// neither `monotonic_ns` nor `ticks` goes backwards.
+pub fn arm_clock_control() {
+    let raw = raw_monotonic_ns();
+    let from_ticks = TICKS.load(Ordering::Relaxed) * (1_000_000_000 / TICK_HZ);
+    crate::clockctl::arm(raw, raw.max(from_ticks), boot_system_time(), None);
+}
+
+/// Nanoseconds since `init`, from the TSC (0 before calibration); real
+/// time, whatever clock control does.
+pub fn raw_monotonic_ns() -> u64 {
     let hz = TSC_HZ.load(Ordering::Relaxed);
     if hz == 0 {
         return 0;

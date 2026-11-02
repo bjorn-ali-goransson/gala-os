@@ -509,12 +509,13 @@ pub fn yield_now() {
     schedule();
 }
 
-/// Blocks the current thread for at least `ms` milliseconds.
+/// Blocks the current thread for at least `ms` milliseconds of real time
+/// (raw ticks: clock control does not stretch the kernel's own sleeps).
 pub fn sleep_ms(ms: u64) {
     let ticks = ms.saturating_mul(time::TICK_HZ).div_ceil(1000).max(1);
     with(|s| {
         let id = s.current();
-        s.thread(id).state = State::Sleeping { until_tick: time::ticks() + ticks };
+        s.thread(id).state = State::Sleeping { until_tick: time::raw_ticks() + ticks };
     });
     schedule();
 }
@@ -612,14 +613,16 @@ pub fn wake(id: ThreadId) {
 }
 
 /// Called from the boot CPU's timer interrupt (after EOI): wakes sleepers
-/// and timed-out waiters, then does this CPU's preemption.
-pub(crate) fn on_tick(now: u64) {
+/// (by `raw`, the real tick count) and timed-out waiters (by `now`, the
+/// programs' clock: virtual under clock control), then does this CPU's
+/// preemption.
+pub(crate) fn on_tick(now: u64, raw: u64) {
     {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };
         for i in 0..s.threads.len() {
             match s.threads[i].state {
-                State::Sleeping { until_tick } if until_tick <= now => s.make_ready(ThreadId(i)),
+                State::Sleeping { until_tick } if until_tick <= raw => s.make_ready(ThreadId(i)),
                 State::Waiting { until_tick: Some(t) } if t <= now => {
                     s.threads[i].wake_reason = WakeReason::TimedOut;
                     s.make_ready(ThreadId(i));

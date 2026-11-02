@@ -51,6 +51,38 @@ pub fn cpuid(leaf: u32, subleaf: u32) -> CpuidResult {
     CpuidResult { eax: r.eax, ebx: r.ebx, ecx: r.ecx, edx: r.edx }
 }
 
+/// One random word from the CPU's generator: RDRAND (10 tries, as
+/// Intel recommends), else RDSEED; None without either.
+pub fn rdrand() -> Option<u64> {
+    if cpuid(1, 0).ecx & (1 << 30) != 0 {
+        for _ in 0..10 {
+            let (value, ok): (u64, u8);
+            // SAFETY: RDRAND exists (CPUID.1:ECX[30]); it only writes the
+            // register and the carry flag.
+            unsafe {
+                asm!("rdrand {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack))
+            };
+            if ok != 0 {
+                return Some(value);
+            }
+        }
+    }
+    if cpuid(7, 0).ebx & (1 << 18) != 0 {
+        for _ in 0..1000 {
+            let (value, ok): (u64, u8);
+            // SAFETY: RDSEED exists (CPUID.7.0:EBX[18]).
+            unsafe {
+                asm!("rdseed {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack))
+            };
+            if ok != 0 {
+                return Some(value);
+            }
+            core::hint::spin_loop();
+        }
+    }
+    None
+}
+
 pub fn read_cr3() -> u64 {
     let value;
     // SAFETY: reading CR3 has no side effects.

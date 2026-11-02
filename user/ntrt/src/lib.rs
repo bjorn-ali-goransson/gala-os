@@ -73,6 +73,7 @@ stubs! {
     ntrt_nt_device_io_control_file = 0x0007;
     ntrt_nt_cancel_io_file_ex = 0x7f01;
     ntrt_gala_create_process = 0x7f02;
+    ntrt_gala_clock_control = 0x7f4c;
     ntrt_nt_query_information_file = 0x0011;
     ntrt_nt_set_information_file = 0x0027;
     ntrt_nt_open_file = 0x0033;
@@ -106,6 +107,7 @@ unsafe extern "system" {
     fn ntrt_nt_close(handle: Handle) -> NtStatus;
     fn ntrt_nt_terminate_process(process: Handle, status: NtStatus) -> NtStatus;
     fn ntrt_invalid_service() -> NtStatus;
+    fn ntrt_gala_clock_control(operation: u32, a: i64, b: i64, state: *mut ClockState) -> NtStatus;
     fn ntrt_nt_wait_for_single_object(
         handle: Handle,
         alertable: u8,
@@ -341,6 +343,44 @@ unsafe extern "system" {
 }
 
 pub const STATUS_TIMEOUT: NtStatus = 0x0000_0102;
+
+/// GalaClockControl's state record (gala's own service, number 0x7f4c in
+/// kernel/src/nt/syscalls.rs; docs/ARCHITECTURE.md "Clock control").
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClockState {
+    /// 1.
+    pub version: u32,
+    /// CLOCK_FROZEN, CLOCK_SIMULATED.
+    pub flags: u32,
+    /// The clock runs at rate_num / rate_den of real time.
+    pub rate_num: u32,
+    pub rate_den: u32,
+    /// 100 ns added by CLOCK_ADVANCE so far.
+    pub advanced: u64,
+    /// 100 ns added to the system time only.
+    pub system_offset: i64,
+    /// The unscaled clock, 100 ns since it started.
+    pub raw_time: u64,
+}
+
+pub const CLOCK_QUERY: u32 = 0;
+pub const CLOCK_ADVANCE: u32 = 1;
+pub const CLOCK_SET_RATE: u32 = 2;
+pub const CLOCK_SHIFT_SYSTEM: u32 = 3;
+pub const CLOCK_SET_SYSTEM: u32 = 4;
+pub const CLOCK_FROZEN: u32 = 1;
+pub const CLOCK_SIMULATED: u32 = 2;
+
+/// GalaClockControl(Operation, A, B, *State): gala's test-only clock
+/// control (a boot with `clock=control`); STATUS_INVALID_SYSTEM_SERVICE on
+/// Windows.
+pub fn clock_control(operation: u32, a: i64, b: i64) -> (NtStatus, ClockState) {
+    let mut state = ClockState::default();
+    // SAFETY: a valid output record.
+    let st = unsafe { ntrt_gala_clock_control(operation, a, b, &mut state) };
+    (st, state)
+}
 pub const STATUS_ACCESS_DENIED: NtStatus = 0xc000_0022;
 pub const STATUS_INVALID_PARAMETER_4: NtStatus = 0xc000_00f2;
 pub const NOTIFICATION_EVENT: u32 = 0;

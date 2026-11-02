@@ -1,7 +1,9 @@
 //! The event stream: one JSON object per line on the debug console
 //! (`arch::debugcon`), for tools rather than people (docs/OBSERVABILITY.md
-//! section 1). Off by default; `events=syscall,image,thread,process,fault`
-//! (or `events=all`) on the kernel command line turns categories on. Each
+//! section 1). Off by default; `events=syscall,image,thread,process,fault,
+//! mock` (or `events=all`) on the kernel command line turns categories
+//! on (`mock`: live mocking's changes, such as clock control). A `record`
+//! boot's recording also goes here (`"ev":"rec"`, whatever the mask). Each
 //! line starts with `"t"` (ns since boot), `"cpu"` and `"ev"`; the rest
 //! depends on the event.
 
@@ -15,14 +17,17 @@ pub enum Category {
     Thread = 4,
     Process = 8,
     Fault = 16,
+    /// Live mocking's changes (clock control, record/replay).
+    Mock = 32,
 }
 
-const NAMES: [(&str, u32); 5] = [
+const NAMES: [(&str, u32); 6] = [
     ("syscall", Category::Syscall as u32),
     ("image", Category::Image as u32),
     ("thread", Category::Thread as u32),
     ("process", Category::Process as u32),
     ("fault", Category::Fault as u32),
+    ("mock", Category::Mock as u32),
 ];
 
 static MASK: AtomicU32 = AtomicU32::new(0);
@@ -61,7 +66,7 @@ pub fn emit(category: Category, name: &str, fields: fmt::Arguments) {
     if !enabled(category) {
         return;
     }
-    let t = crate::time::monotonic_ns();
+    let t = crate::time::raw_monotonic_ns();
     let cpu = crate::arch::percpu::cpu_index();
     let mut port = crate::arch::debugcon::DEBUGCON.lock();
     let _ = writeln!(port, r#"{{"t":{t},"cpu":{cpu},"ev":"{name}",{fields}}}"#);
@@ -71,6 +76,26 @@ pub fn emit(category: Category, name: &str, fields: fmt::Arguments) {
 /// Host unit tests and gala-um have no debug console.
 #[cfg(any(test, feature = "hosted"))]
 pub fn emit(_category: Category, _name: &str, _fields: fmt::Arguments) {}
+
+/// (gala-um records to a file instead: hosted::record_to.)
+#[cfg(any(test, feature = "hosted"))]
+pub fn emit_record(_bytes: &[u8]) {}
+
+/// A piece of a recording (`record`, kernel/src/replay.rs) on the debug
+/// console: `{"t":..,"cpu":..,"ev":"rec","hex":"<bytes>"}`, whatever the
+/// event mask; xtask joins the pieces into `<iso>.rec`. Written without
+/// allocating.
+#[cfg(not(any(test, feature = "hosted")))]
+pub fn emit_record(bytes: &[u8]) {
+    let t = crate::time::raw_monotonic_ns();
+    let cpu = crate::arch::percpu::cpu_index();
+    let mut port = crate::arch::debugcon::DEBUGCON.lock();
+    let _ = write!(port, r#"{{"t":{t},"cpu":{cpu},"ev":"rec","hex":""#);
+    for b in bytes {
+        let _ = write!(port, "{b:02x}");
+    }
+    let _ = writeln!(port, r#""}}"#);
+}
 
 /// A string escaped for JSON (quotes, backslashes, control characters).
 pub struct Str<'a>(pub &'a str);

@@ -110,10 +110,14 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `profile=server` | never bring up the graphical interface: the desktop is not drawn even with a screen (windows still exist), `console=` starts no console window (ROADMAP SD) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |
-| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault` or `all` |
+| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock` or `all` (`mock`: clock-control changes) |
 | `failpoint=<point>:<mode>:<n>[,...]` | fault injection while the `start=`/`run=` programs run (debug builds; "Fault injection" below). Points `heap`, `frame`, `disk_io`, `net_tx`; modes `every:<n>` (the n-th, 2n-th, ... occurrence fails), `nth:<n>` (only the n-th), `random:<per-mille>` (from `failseed=`). Example: `failpoint=heap:every:97,net_tx:random:50` |
 | `failseed=<n>` | seed of the `random` failpoints (default 0): the same seed fails the same occurrences |
 | `failtrace` | log each injected failure with a backtrace (`cargo xtask symbolize` resolves it) |
+| `failpoint=disk_io:delay:<ms>` | added latency: each disk request waits that long first, nothing fails (debug builds; R7) |
+| `clock=<items>` | clock control while the programs run (debug builds; "Clock control" below): `control` (the test-only GalaClockControl call is allowed), `freeze`, `rate:<n>[/<d>]`, `advance:<seconds>`, `system:<UNIX seconds>` (the system time when the programs start). Example: `clock=control,freeze,system:2147483648` |
+| `record` | record what the programs read from outside (random numbers, the boot time) on the debug console; xtask writes it to `<iso>.rec` ("Record/replay" below) |
+| `replay=<file>` | the programs read those inputs from the recording in the boot module of that file name |
 
 ## Physical memory
 
@@ -3426,7 +3430,11 @@ one for the whole kernel means `time.rs`.
 5. **All kernel time comes through one clock**: the NT layer through the
    `Clock` seam, the kernel's own modules through `time.rs`; nothing else
    reads the TSC or counts ticks (holds as of 2026-11-02). Deterministic
-   simulation (R5) and time mocking (R7) depend on it.
+   simulation (R5) and time mocking (R7) depend on it. With clock
+   control (R7) `time.rs` has two faces: the programs' clock (`ticks`,
+   `monotonic_ns`, `system_time`: virtual when `clock=` is given) and
+   the raw one (`raw_ticks`, `raw_monotonic_ns`) for the kernel's own
+   diagnostics and sleeps.
 
 ### Safety nets (designed here, built in R1-R4)
 
@@ -3605,11 +3613,12 @@ is the glue that hands one baton between host threads.
     preemptions depend on the host's timing: the run's line says
     "watchdog preemptions ...: not reproducible". Go's garbage
     collector spins this way.
-  - RDRAND/RDSEED (gala's ProcessPrng, hence Go's runtime, which seeds
-    its scheduler from it) cannot be intercepted on Linux: such programs
-    are not reproducible (Go's are listed in xtask's SIM_UNSEEDED).
-    Next: CPUID faulting (`ARCH_SET_CPUID`) to hide RDRAND and a
-    ProcessPrng fed by the kernel.
+  - RDRAND/RDSEED cannot be intercepted on Linux. gala's ProcessPrng
+    (hence Go's runtime, which seeds its scheduler from it) takes its
+    numbers from the kernel under the simulation (GalaRandom, R7:
+    "Record/replay"), so Go programs repeat from their seed; a program
+    executing RDRAND itself does not. Next: CPUID faulting
+    (`ARCH_SET_CPUID`) to hide RDRAND from such programs.
   - KUSER_SHARED_DATA's times change only at scheduling points: program
     code polling GetTickCount without system calls sees time stand still
     (until the watchdog).
@@ -3643,6 +3652,164 @@ is the glue that hands one baton between host threads.
   compiled out of release images, and every change logged to the event
   stream (a live component-swap interface is otherwise an ideal rootkit
   hook).
+
+**Built (2026-11-02)**, the parts that speed up development and
+troubleshooting first: clock control, record/replay of a run's outside
+inputs (gala-um and the kernel), the simulation's random numbers from
+its seed, and added disk latency. Not yet: the display, input and
+network frames as recorded or swappable devices, device events (a NIC
+removed), API-level faults in gala's DLLs, the read-write introspection
+channel.
+
+#### Clock control (R7, 2026-11-02)
+
+`kernel/src/clockctl.rs`. The platform's clock (the kernel's TSC and
+tick count in `time.rs`, the host's monotonic clock in gala-um's
+`threads.rs`) is the *raw* clock; what programs and wait deadlines see
+is the *virtual* clock, `Transform::at(raw) = base_virtual + (raw -
+base_raw) * num / den`, rebased at every change so it never goes
+backwards. The system time is the boot time plus the virtual clock plus
+`system_offset` (moved on its own: DST, 2038, certificate expiry).
+Invariant 5 holds: every view goes through the one transform, so
+KUSER_SHARED_DATA (interrupt time, system time, tick count),
+NtQuerySystemTime, NtQueryPerformanceCounter and the deadlines of waits
+in progress (relative timeouts are absolute virtual ticks since entry,
+invariant 2) agree at every moment.
+
+- **Flag**: `clock=` (kernel) / `um --clock=` (same items): `control`
+  allows GalaClockControl; `freeze`, `rate:<n>[/<d>]` (n, d up to 10^6),
+  `advance:<s>`, `system:<UNIX s>` set the clock when the programs start
+  (`arm`, with the failpoints: the boot itself runs on real time).
+  Without the flag the clock is unchanged and each read costs one
+  relaxed load of `ARMED`; release builds compile it out
+  (`COMPILED_IN`, as fault injection).
+- **GalaClockControl(Operation, A, B, \*State)**, gala's private
+  service 0x7f4c (test-only; STATUS_NOT_SUPPORTED without
+  `clock=control`): 0 query; 1 advance every view by A (100 ns units,
+  0 < A <= 100 years); 2 run at rate A/B (A = 0: frozen); 3 move the
+  system time alone by A (signed); 4 set the system time alone to A.
+  Bad operation, A or B: STATUS_INVALID_PARAMETER_1/2/3. State (if not
+  null) receives the **version-1 record** (40 bytes, invariant 3):
+  Version (u32, 1), Flags (u32: 1 frozen, 2 simulated), RateNum,
+  RateDen (u32), Advanced (u64, 100 ns), SystemOffset (i64, 100 ns),
+  RawTime (u64, the unscaled clock in 100 ns since it started). Every
+  change is logged (`clock: <process> asked to ...`) and is an event
+  (`events=mock`, `"ev":"clock"`). The call changes the clock under
+  KUSER_SHARED_DATA's lock and rewrites the page before returning, so
+  a timer tick cannot show the old clock after the new one.
+- **Waits**: the schedulers compare deadlines with the virtual clock.
+  The kernel's tick interrupt passes both clocks to `sched::on_tick`:
+  waiters (`State::Waiting`, the NT layer's and the kernel's own
+  timeouts) expire by the virtual tick count, `sched::sleep_ms` sleepers
+  (the kernel's housekeeping: input polling, teardown, network echo) by
+  the raw one, so a frozen clock does not stop the kernel. After an
+  advance, waits that are due end at the next tick (1 ms). gala-um's
+  waits look again every 2 ms of real time while the clock is armed.
+  The kernel's own diagnostics (flight recorder, watchdogs, event
+  timestamps, the `run=` hang dump's minute) use the raw clock
+  (`time::raw_ticks`, `raw_monotonic_ns`).
+- **The simulation** (`um --sim`): its clock is virtual already, so the
+  operations apply to it (`sim::Scheduler::advance`, `rate`): a step
+  costs `STEP_NS * rate`, an advance moves `now_ns`, and a frozen clock
+  reaches no deadline (every thread waiting on one is a deadlock, as it
+  would be). `real_ns` is the unscaled clock (RawTime).
+- **Kernel ticks under clock control** are the virtual clock's
+  milliseconds (from the TSC), not the count of timer interrupts; at
+  `arm` the virtual clock starts from the larger of the two, so neither
+  goes backwards.
+- **Test**: `clock_test` (scenarios `clock_test`, `clock_off`,
+  `clock_boot`; gala-um and sim-test too): frozen views stay equal
+  across yields and a busy loop; an advance of an hour moves every view
+  by exactly an hour, ends a 10-minute wait (STATUS_TIMEOUT) and a
+  20-minute sleep but not a 2-hour wait, which a second advance ends;
+  the system time moves alone; rate 1000 runs 30 s of program time in
+  about 30 ms of the unscaled clock; booted with
+  `clock=control,freeze,system:2147483648` the clock reads exactly
+  2038-01-19 03:14:08 UTC. Host tests: the transform, the request
+  decoding, the flag, the record's layout, the simulation's scaled and
+  frozen clock.
+- **Limits**: RDTSC in program code reads the real TSC in the kernel
+  (only the simulation virtualizes it). Absolute timeouts are converted
+  to relative ones on entry, so a later system-time change does not
+  move them (Windows re-evaluates absolute timers). Kernel threads'
+  `sleep_ms` run on real time by design.
+
+#### Record/replay (R7, 2026-11-02)
+
+`kernel/src/replay.rs`. A run's inputs from outside are written to a
+recording; a later run reads them from it, so a failure that depends on
+them repeats.
+
+- **Sources** (device boundaries): the boot time; the raw clock (gala-um
+  without `--sim`: every reading of the host's clock); random numbers
+  (GalaRandom, below); and, in gala-um, the run's settings (`info`
+  records: program, args, sim seed, processors, clock, failpoint,
+  failseed), which `--replay` restores unless given again.
+- **Format, version 1** (invariant 3): `GALAREC\0`, version (u16),
+  reserved (u16), then records of kind (u8), stream (u32), length (u32)
+  and payload. Kinds: 1 info (`key=value`), 2 boot time (u64), 3 clock
+  (u64 ns), 4 random (bytes), 0xff end (u64 count). A reader takes
+  versions 1..=VERSION and skips unknown kinds. The **stream** is the
+  thread that read the input: for random numbers its number in its
+  process (`NtThread::ordinal`, 0 the first: the same on every platform
+  and run), for gala-um's clock its platform thread id (0: a host
+  thread, the tick thread). Replay hands out each (kind, stream)'s
+  records in order: a thread gets its own inputs however the threads
+  interleave. A kind the recording has none of is live; a stream that
+  runs out (a helper thread running longer than recorded) or a request
+  of another length is a **divergence**: logged once (`replay: diverged
+  at ...`), that input is live, the end line counts them (`N inputs
+  live`). A clock reading that the recording lacks continues from the
+  last replayed one (never backwards).
+- **GalaRandom(\*Buffer, Length)** (gala's 0x7f4d): when the random
+  source is mocked (a recording, a replay, gala-um's simulation) the
+  kernel fills the buffer (hardware RDRAND recorded; replayed; the
+  simulation's own seeded stream, separate from its scheduler's);
+  otherwise STATUS_NOT_SUPPORTED and gala's ProcessPrng
+  (bcryptprimitives) uses RDRAND itself, as before; it asks once per
+  process. With this, Go programs repeat from their seed under `--sim`
+  (go_hello, go_goroutines are in sim-test; only go_gc's spinning
+  collector is still not reproducible).
+- **gala-um**: `um --record=<file>` (the file is written with write(2)
+  as the records come, so a crash keeps what was read), `um
+  --replay=<file>` (settings from the file, options given override
+  them). Combined with `--sim`, a recording is a complete repro: seed,
+  processors, flags, arguments and random numbers.
+- **The kernel**: `record` writes the recording on the debug console as
+  `{"ev":"rec","hex":...}` lines (whatever `events=` says); xtask joins
+  them into `<iso>.rec` and appends `xtask: recording <path>` to the
+  log (`XTASK_RECORD=1` records every boot). `replay=<file>` replays the
+  boot module of that name. The kernel records the boot time and random
+  numbers, not the clock (the TSC is read far too often, and the
+  kernel's timing is QEMU's: OBSERVABILITY's QEMU record/replay covers
+  the whole machine). Recordings move between platforms: a kernel
+  recording replays in gala-um and the other way round (both use the
+  thread's ordinal for random numbers).
+- **Cost when off**: one relaxed load of `MODE` per input; the off path
+  of ProcessPrng is one extra system call per process (the first call
+  asks GalaRandom).
+- **Tests**: `replay_test` (random numbers through ProcessPrng, the
+  performance counter across Sleep(5), the system time; results valid
+  on Windows); `cargo xtask replay-test` (in `cargo xtask test`)
+  records it twice live (the lines differ) and with `--sim=3` (they
+  agree), then replays each and requires the recorded lines; QEMU
+  scenarios `record_kernel` (the recording is made and extracted) and
+  `replay_kernel` (replays `user/replay_test/replay_test.rec`, recorded
+  in gala-um, and prints its random numbers); host tests for the
+  format, streams, versions and truncation.
+- **Not yet**: network frames, disk reads and input events (their
+  replay needs the guest to be at the same point when they arrive,
+  which only a deterministic kernel gives: gala-um's simulation for
+  frames over its loopback, later); the screen.
+
+#### Device latency (R7, 2026-11-02)
+
+`failpoint=disk_io:delay:<ms>`: a `delay` mode for failure points whose
+callers may sleep (`disk_io` only): nothing fails, each request waits
+`ms` of real time first (`failpoint: disk_io N checked, N delayed by
+<ms> ms`). Scenario `failpoint_disk_delay` (persist_test on a slow
+disk). The NIC's transmit path holds the stack's lock, so it gets no
+delay mode; its faults stay `net_tx` drops and `netreset=`.
 
 ### Live update, kernel included (the owner's vision; R8, R9)
 
