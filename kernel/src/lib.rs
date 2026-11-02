@@ -21,6 +21,7 @@ pub mod boot;
 pub mod cmdline;
 #[macro_use]
 pub mod console;
+pub mod crash;
 pub mod disk;
 pub mod events;
 pub mod failpoint;
@@ -158,6 +159,7 @@ pub fn kernel_main() -> ! {
     // `persist`: C: is kept on the disk (changes since earlier boots are
     // replayed now, over the boot's files).
     if cmdline.flag("persist") {
+        nt::persist::CRASH_TEST.store(cmdline.flag("crashtest"), Ordering::Relaxed);
         nt::persist::mount();
     }
 
@@ -380,6 +382,8 @@ pub fn panic(info: &core::panic::PanicInfo) -> ! {
     console::emergency_println(format_args!("{Backtrace}"));
     // What the CPUs did last (the flight recorder).
     flight::dump(u64::MAX, 48, console::emergency_println);
+    // Kept on the disk for the next boot (when a volume is mounted).
+    crash::save(info, &Backtrace);
     finish(QemuExitCode::Failure)
 }
 

@@ -9,8 +9,12 @@
 //! point leaves one complete log. A record that does not check out ends
 //! the log (a torn last write is lost, nothing before it).
 //!
-//! Superblock: `GALAFS\0\x01`, version (u32 1), active area (u32),
+//! Superblock: `GALAFS\0\x01`, version (u32), active area (u32),
 //! generation (u64), the disk's sectors (u64), CRC-32 of the above.
+//! Version 2 (new volumes) keeps the last CRASH_SECTORS sectors out of the
+//! areas for the crash record (`crate::crash`); version 1 volumes (all of
+//! the disk in the two areas) are still read as they are (ARCHITECTURE
+//! invariant 3).
 
 use super::log::{self, Decoded, NoMemory, Op};
 use crate::mm::heap::TryVec;
@@ -21,7 +25,10 @@ pub const SECTOR: usize = 512;
 /// (1), so another version is not taken for this format (ARCHITECTURE
 /// invariant 3).
 const MAGIC: &[u8; 8] = b"GALAFS\0\x01";
-const VERSION: u32 = 1;
+/// The layout's version: 2 since the crash area. Mounting reads 1 too.
+const VERSION: u32 = 2;
+/// Sectors kept at the end of a version 2 disk for the crash record.
+pub const CRASH_SECTORS: u64 = 16;
 /// How much of an area mounting reads at a time.
 const CHUNK: usize = 64 * 1024;
 
@@ -56,6 +63,8 @@ impl From<NoMemory> for VolumeError {
 
 pub struct Volume<B: Blocks> {
     dev: B,
+    /// The layout version found or made (1 or 2).
+    version: u32,
     area: u32,
     generation: u64,
     area_sectors: u64,
@@ -86,7 +95,7 @@ impl<B: Blocks> Volume<B> {
     fn superblock(&self) -> [u8; SECTOR] {
         let mut s = [0u8; SECTOR];
         s[0..8].copy_from_slice(MAGIC);
-        s[8..12].copy_from_slice(&VERSION.to_le_bytes());
+        s[8..12].copy_from_slice(&self.version.to_le_bytes());
         s[12..16].copy_from_slice(&self.area.to_le_bytes());
         s[16..24].copy_from_slice(&self.generation.to_le_bytes());
         s[24..32].copy_from_slice(&self.dev.sectors().to_le_bytes());
@@ -98,19 +107,28 @@ impl<B: Blocks> Volume<B> {
     /// Reads the volume on `dev`, or makes an empty one if it holds none.
     pub fn mount(mut dev: B) -> Result<(Self, Mounted), VolumeError> {
         let sectors = dev.sectors();
-        if sectors < 1 + 2 * 8 {
+        if sectors < 1 + 2 * 8 + CRASH_SECTORS {
             return Err(VolumeError::TooSmall);
         }
-        let area_sectors = (sectors - 1) / 2;
         let mut s = [0u8; SECTOR];
         io(dev.read(0, &mut s))?;
-        let mut v =
-            Volume { dev, area: 0, generation: 1, area_sectors, tail: 0, last: [0; SECTOR] };
         let crc = u32::from_le_bytes([s[32], s[33], s[34], s[35]]);
+        let found = u32::from_le_bytes([s[8], s[9], s[10], s[11]]);
         let valid = &s[0..8] == MAGIC
-            && u32::from_le_bytes([s[8], s[9], s[10], s[11]]) == VERSION
+            && (found == 1 || found == VERSION)
             && crc == log::crc32(0, &s[..32])
             && u64::from_le_bytes(s[24..32].try_into().unwrap_or([0; 8])) == sectors;
+        let version = if valid { found } else { VERSION };
+        let area_sectors = Self::area_sectors_of(version, sectors);
+        let mut v = Volume {
+            dev,
+            version,
+            area: 0,
+            generation: 1,
+            area_sectors,
+            tail: 0,
+            last: [0; SECTOR],
+        };
         if !valid {
             // A fresh volume: an empty log of generation 1 in area 0.
             let sb = v.superblock();
@@ -122,6 +140,16 @@ impl<B: Blocks> Volume<B> {
         v.generation = u64::from_le_bytes(s[16..24].try_into().unwrap_or([0; 8]));
         let ops = v.read_log()?;
         Ok((v, Mounted::Log(ops)))
+    }
+
+    /// Each area's sectors in layout `version` on a disk of `sectors`.
+    fn area_sectors_of(version: u32, sectors: u64) -> u64 {
+        if version >= 2 { (sectors - 1 - CRASH_SECTORS) / 2 } else { (sectors - 1) / 2 }
+    }
+
+    /// The crash record's sectors (first, count): version 2 volumes only.
+    pub fn crash_area(&self) -> Option<(u64, u64)> {
+        (self.version >= 2).then(|| (self.dev.sectors() - CRASH_SECTORS, CRASH_SECTORS))
     }
 
     /// Reads the active area's records, leaving `tail` after the last.
@@ -384,5 +412,34 @@ mod tests {
         assert_eq!(v.compact(&[write_op(1, 30_000)]), Err(VolumeError::Full));
         let (_, m) = remount(v);
         assert_eq!(m, Mounted::Log(vec![]));
+    }
+
+    #[test]
+    fn new_volumes_keep_a_crash_area_and_version_1_volumes_still_mount() {
+        // A new volume: layout 2, the last CRASH_SECTORS sectors kept.
+        let (mut v, _) = Volume::mount(disk(200)).unwrap();
+        assert_eq!(v.crash_area(), Some((200 - CRASH_SECTORS, CRASH_SECTORS)));
+        v.append(&[write_op(1, 10)]).unwrap();
+        let (v, m) = remount(v);
+        assert_eq!(m, Mounted::Log(vec![write_op(1, 10)]));
+        // A version 1 volume (from before): mounted as it is, its log read,
+        // no crash area.
+        let mut d = v.into_device();
+        d.data.fill(0);
+        let mut old = Volume {
+            dev: d,
+            version: 1,
+            area: 0,
+            generation: 1,
+            area_sectors: (200 - 1) / 2,
+            tail: 0,
+            last: [0; SECTOR],
+        };
+        let sb = old.superblock();
+        old.dev.write(0, &sb).unwrap();
+        old.append(&[write_op(2, 20)]).unwrap();
+        let (v, m) = remount(old);
+        assert_eq!(m, Mounted::Log(vec![write_op(2, 20)]));
+        assert_eq!(v.crash_area(), None);
     }
 }

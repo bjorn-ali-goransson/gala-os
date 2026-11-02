@@ -2771,6 +2771,21 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["disk_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // R4: the crash record kept across reboots (DISK_SCENARIOS: the
+        // first boot panics on purpose and leaves it; this one prints and
+        // clears it, then runs normally).
+        name: "crash_record",
+        cmdline: "qemu_exit persist crashtest run=hello.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: a record from the previous boot",
+            "crash: KERNEL PANIC",
+            "crashtest: a deliberate panic",
+            "crash: flight: the last",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // D2: files kept across a reboot (`persist`: C: is kept on the
         // disk); DISK_SCENARIOS boots it twice, this is the second boot.
         name: "persist_test",
@@ -3774,6 +3789,7 @@ fn events_flag() -> String {
 /// Scenarios that ship a named set of EXTRA_MODULES instead of their own
 /// (the same set: they share a VM).
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("crash_record", "hello"),
     ("watchdog", "busybox"),
     ("failpoint_heap", "kernel32_test"),
     ("failpoint_frame", "kernel32_test"),
@@ -5177,6 +5193,9 @@ struct DiskScenario {
     /// Boots of the same image before the judged one, each with the
     /// lines its serial log must have (files kept across a reboot).
     earlier_boots: &'static [&'static [&'static str]],
+    /// The earlier boots end with the kernel's failure status (a panic
+    /// on purpose: the crash record's scenario), not success.
+    earlier_fail: bool,
 }
 
 const DISK_SCENARIOS: &[DiskScenario] = &[
@@ -5186,6 +5205,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         setup: disk_test_setup,
         check: disk_test_check,
         earlier_boots: &[],
+        earlier_fail: false,
     },
     DiskScenario {
         // LocalDB's data files stay on the disk (twice: two log areas).
@@ -5194,6 +5214,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[&["tds_test: created", "exited with status 0x00000000"]],
+        earlier_fail: false,
     },
     DiskScenario {
         name: "failpoint_disk",
@@ -5201,6 +5222,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[],
+        earlier_fail: false,
     },
     DiskScenario {
         name: "persist_test",
@@ -5208,6 +5230,21 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[&["persist_test: first boot", "exited with status 0x00000000"]],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // R4: the first boot panics on purpose (`crashtest`, no record yet)
+        // and leaves its crash record on the disk; this boot prints it.
+        name: "crash_record",
+        size: 32 << 20,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[&[
+            "KERNEL PANIC",
+            "crashtest: a deliberate panic",
+            "crash: the record is on the disk",
+        ]],
+        earlier_fail: true,
     },
 ];
 
@@ -5270,7 +5307,8 @@ fn earlier_boots(name: &str, iso: &Path, boot: Boot, timeout: Duration, disk: &P
         let kept = iso.with_extension(format!("boot{}.serial.log", n + 1));
         let _ = fs::write(&kept, &serial);
         let missing: Vec<&str> = expect.iter().copied().filter(|e| !serial.contains(e)).collect();
-        if status.and_then(|s| s.code()) != Some(QEMU_EXIT_SUCCESS) || !missing.is_empty() {
+        let want = if d.earlier_fail { QEMU_EXIT_FAILURE } else { QEMU_EXIT_SUCCESS };
+        if status.and_then(|s| s.code()) != Some(want) || !missing.is_empty() {
             return Err(format!(
                 "boot {} of {} failed (lacks {missing:?}; serial log: {})",
                 n + 1,

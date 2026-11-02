@@ -152,6 +152,43 @@ pub fn write(first: u64, data: &[u8]) -> Result<(), DiskError> {
     Ok(())
 }
 
+/// From a panic: writes `data` at sector `first` and flushes, never
+/// waiting for anything another CPU or thread may hold (the device's turn,
+/// its lock); spins on the device (no scheduling) a bounded time. Err if
+/// the device is busy or does not finish.
+pub fn write_in_panic(first: u64, data: &[u8]) -> Result<(), DiskError> {
+    check(first, data.len())?;
+    if BUSY.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        return Err(DiskError::Device);
+    }
+    let _turn = Turn;
+    let run = |start: &dyn Fn(&mut VirtioBlk) -> Result<(), DiskError>| {
+        start(DISK.try_lock().ok_or(DiskError::Device)?.as_mut().ok_or(DiskError::Device)?)?;
+        for _ in 0..50_000_000u64 {
+            let mut disk = DISK.try_lock().ok_or(DiskError::Device)?;
+            let dev = disk.as_mut().ok_or(DiskError::Device)?;
+            if dev.done() {
+                return dev.finish();
+            }
+            if dev.failed() {
+                return Err(DiskError::Device);
+            }
+            drop(disk);
+            core::hint::spin_loop();
+        }
+        Err(DiskError::Device)
+    };
+    let mut done = 0;
+    while done < data.len() {
+        let n = (data.len() - done).min(virtio_blk::MAX_TRANSFER);
+        let sector = first + (done / SECTOR) as u64;
+        let part = &data[done..done + n];
+        run(&|dev: &mut VirtioBlk| dev.start_write(sector, part))?;
+        done += n;
+    }
+    run(&|dev: &mut VirtioBlk| dev.start_flush())
+}
+
 /// Makes what was written durable (the device's write cache).
 pub fn flush() -> Result<(), DiskError> {
     if !present() {

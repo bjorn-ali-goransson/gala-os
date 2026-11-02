@@ -37,6 +37,9 @@ impl Blocks for DiskBlocks {
 
 /// The mounted volume; taken out while a sync writes (with TURN held).
 static VOLUME: IrqMutex<Option<Volume<DiskBlocks>>> = IrqMutex::new(None);
+/// `crashtest` (kernel command line): see `mount`.
+pub static CRASH_TEST: AtomicBool = AtomicBool::new(false);
+
 /// Held by the one sync writing at a time (it may yield).
 static TURN: AtomicBool = AtomicBool::new(false);
 /// The ramfs has recorded changes not on the disk yet.
@@ -61,6 +64,12 @@ pub fn mount() {
             return;
         }
     };
+    // The crash record a panic of the previous boot left (version 2
+    // volumes); `crashtest` panics on purpose when there is none.
+    let had_record = volume.crash_area().is_some_and(|(first, _)| crate::crash::mounted(first));
+    if CRASH_TEST.load(Ordering::Relaxed) && !had_record {
+        panic!("crashtest: a deliberate panic to test the crash record");
+    }
     let (mut applied, mut skipped) = (0usize, 0usize);
     match mounted {
         Mounted::Formatted => info!("persist: formatted the disk"),

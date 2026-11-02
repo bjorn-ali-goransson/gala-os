@@ -124,9 +124,16 @@ counts (TCG plugins) need a QEMU built with plugins; Ubuntu's has none.
   stalls CPU 1). TODO: a thread in the kernel too long (a system call
   that never returns while its CPU still ticks), printing the stuck CPU's
   stack (an NMI to it).
-- **Crash record across reboots** (planned, R4): the panic record goes
-  to a reserved area of the disk and is reported at the next boot; it
-  stays local (privacy by design).
+- **Crash record across reboots** (done 2026-11-02, `kernel/src/crash.rs`):
+  a panic writes the panic message, the backtrace and the flight
+  recorder's last 48 events to the crash area (the last 16 sectors of a
+  version 2 volume: `GCRASH\0\x01`, length, CRC-32, the text), with
+  `disk::write_in_panic` (never waits: the device busy means no record);
+  the next boot that mounts the volume prints it (`crash: ...` lines)
+  and clears it. It stays on the machine (privacy by design). Scenario
+  `crash_record` (two boots: `crashtest` panics on purpose, then the
+  record is printed). TODO: the screen (a blue screen with the record),
+  symbols in the record (addresses only now).
 - **Deterministic simulation** (planned, R5): gala-um with time and
   thread interleaving from a seed, so a concurrency failure repeats from
   its seed.
