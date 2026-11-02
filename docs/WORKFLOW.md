@@ -523,6 +523,15 @@ Pitfalls:
   (`flaui_test: exception:`), which names the Interop.UIAutomationClient
   method; `UIAutomationCore.dll!...` ledger lines name gala's missing
   methods (E_NOTIMPL becomes NotImplementedException in .NET).
+- A UIA property whose value is an element or element array
+  (SelectionContainer, Selection) is VT_UNKNOWN holding our element /
+  IUIAutomationElementArray object: FlaUI casts the RCW to the
+  interface (QueryInterface), so those objects must answer it.
+- Driving another process's list view: LVM_* messages are not
+  marshaled across processes (they are above WM_USER, on Windows too);
+  pointers in them must be in the list's process (`items.rs`'s
+  `Buffer`). LB_/CB_ messages are marshaled by user32
+  (`foreign::send_remote`): pass local pointers.
 - On Windows: `dotnet flaui_test.dll` in a directory holding the test,
   its runtimeconfig, `flaui_target.exe` and the three FlaUI assemblies
   (the window appears for a moment). run-all.ps1 skips

@@ -1,13 +1,16 @@
-//! Elements (IUIAutomationElement) and element arrays: an element is an
-//! HWND. The desktop (GetDesktopWindow) is the root; its children are the
-//! visible top-level windows, a window's children its visible child
-//! windows in z order (GW_CHILD, GW_HWNDNEXT). Properties are read from
-//! the window each time (nothing is cached).
+//! Elements (IUIAutomationElement) and element arrays: an element is a
+//! node: an HWND, or an item of a list control (the list's HWND and the
+//! item's index, items.rs). The desktop (GetDesktopWindow) is the root;
+//! its children are the visible top-level windows, a window's children
+//! its visible child windows in z order (GW_CHILD, GW_HWNDNEXT), then, for
+//! a list box or list view, its items in index order. Properties are read
+//! from the window or the list each time (nothing is cached).
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::condition::{self, Condition};
+use crate::items::{self, Kind};
 use crate::{
     E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, EnumWindows, GetAncestor, GetClassNameW,
     GetDesktopWindow, GetDlgCtrlID, GetFocus, GetWindow, GetWindowLongW, GetWindowRect,
@@ -67,6 +70,7 @@ pub const COMBO_BOX: i32 = 50003;
 pub const EDIT: i32 = 50004;
 const HYPERLINK: i32 = 50005;
 const IMAGE: i32 = 50006;
+const LIST_ITEM: i32 = 50007;
 const LIST: i32 = 50008;
 const PROGRESS_BAR: i32 = 50012;
 pub const RADIO_BUTTON: i32 = 50013;
@@ -92,6 +96,24 @@ const GA_PARENT: u32 = 1;
 /// UiaAppendRuntimeId's first part for HWND-based elements.
 const RUNTIME_ID_HWND: i32 = 42;
 
+/// What an element stands for: a window, or item `item` of the list
+/// control `hwnd`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Node {
+    pub hwnd: Hwnd,
+    pub item: Option<u32>,
+}
+
+impl Node {
+    pub const fn window(hwnd: Hwnd) -> Node {
+        Node { hwnd, item: None }
+    }
+
+    pub const fn item(hwnd: Hwnd, item: u32) -> Node {
+        Node { hwnd, item: Some(item) }
+    }
+}
+
 // ---- The tree ----
 
 pub fn desktop() -> Hwnd {
@@ -102,6 +124,16 @@ pub fn desktop() -> Hwnd {
 pub fn alive(h: Hwnd) -> bool {
     // SAFETY: a plain call.
     unsafe { IsWindow(h) != 0 }
+}
+
+/// Whether the element is still there: its window, and for an item its
+/// index within the list's count.
+pub fn exists(n: Node) -> bool {
+    alive(n.hwnd)
+        && match n.item {
+            None => true,
+            Some(i) => items::kind(n.hwnd).is_some_and(|k| i < items::count(n.hwnd, k)),
+        }
 }
 
 fn visible(h: Hwnd) -> bool {
@@ -119,31 +151,40 @@ fn top_level(h: Hwnd) -> bool {
     h != desktop() && unsafe { GetAncestor(h, GA_PARENT) } == 0
 }
 
-/// The element's parent (0 for the root).
-pub fn parent(h: Hwnd) -> Hwnd {
+/// The element's parent (None for the root); an item's is its list.
+pub fn parent(n: Node) -> Option<Node> {
+    let h = n.hwnd;
+    if n.item.is_some() {
+        return Some(Node::window(h));
+    }
     if h == desktop() {
-        return 0;
+        return None;
     }
     // SAFETY: a plain call.
-    match unsafe { GetAncestor(h, GA_PARENT) } {
+    Some(Node::window(match unsafe { GetAncestor(h, GA_PARENT) } {
         0 => desktop(),
         p => p,
-    }
+    }))
 }
 
 extern "system" fn collect(h: Hwnd, data: isize) -> i32 {
     if visible(h) {
         // SAFETY: `children` passes its list.
-        unsafe { (*(data as *mut List)).push(h) };
+        unsafe { (*(data as *mut List<Node>)).push(Node::window(h)) };
     }
     1
 }
 
-/// The element's children, in order.
-pub fn children(h: Hwnd, out: &mut List) {
+/// The element's children, in order: child windows, then a list's
+/// items.
+pub fn children(n: Node, out: &mut List<Node>) {
+    let h = n.hwnd;
+    if n.item.is_some() {
+        return;
+    }
     if h == desktop() {
         // SAFETY: the callback gets our list for the call's duration.
-        unsafe { EnumWindows(collect, out as *mut List as isize) };
+        unsafe { EnumWindows(collect, out as *mut List<Node> as isize) };
         return;
     }
     // SAFETY: plain calls.
@@ -152,11 +193,18 @@ pub fn children(h: Hwnd, out: &mut List) {
         if c == 0 {
             break;
         }
-        if visible(c) && !out.push(c) {
+        if visible(c) && !out.push(Node::window(c)) {
             return;
         }
         // SAFETY: as above.
         c = unsafe { GetWindow(c, GW_HWNDNEXT) };
+    }
+    if let Some(k) = items::kind(h) {
+        for i in 0..items::count(h, k) {
+            if !out.push(Node::item(h, i)) {
+                return;
+            }
+        }
     }
 }
 
@@ -231,6 +279,7 @@ fn localized_control_type(t: i32) -> &'static str {
         HYPERLINK => "link",
         IMAGE => "image",
         LIST => "list",
+        LIST_ITEM => "list item",
         PROGRESS_BAR => "progress bar",
         RADIO_BUTTON => "radio button",
         SCROLL_BAR => "scroll bar",
@@ -369,21 +418,26 @@ fn focusable(h: Hwnd) -> bool {
         || matches!(control_type(h), EDIT | COMBO_BOX | LIST | TREE)
 }
 
-/// A property's current value (VT_EMPTY for one not supported, recorded
-/// unless it is a known pattern's property the element lacks).
-pub fn property(h: Hwnd, id: i32) -> Variant {
-    lookup(h, id).unwrap_or(Variant::EMPTY)
+/// A property's current value (for one the element does not support:
+/// the property's default, NativeWindowHandle 0, else VT_EMPTY; recorded
+/// unless it is a known property the element lacks).
+pub fn property(n: Node, id: i32) -> Variant {
+    lookup(n, id).unwrap_or(if id == NATIVE_WINDOW_HANDLE {
+        Variant::int(0)
+    } else {
+        Variant::EMPTY
+    })
 }
 
 /// A property's current value; None when the element does not support it.
-fn lookup(h: Hwnd, id: i32) -> Option<Variant> {
+fn lookup(n: Node, id: i32) -> Option<Variant> {
+    let h = n.hwnd;
+    if let Some(i) = n.item {
+        return item_lookup(h, i, id);
+    }
     Some(match id {
         RUNTIME_ID => array(VT_I4, &[RUNTIME_ID_HWND, h as i32]),
-        BOUNDING_RECTANGLE => {
-            let r = window_rect(h);
-            let v = [r[0], r[1], r[2] - r[0], r[3] - r[1]].map(f64::from);
-            array(VT_R8, &v)
-        }
+        BOUNDING_RECTANGLE => rect_value(window_rect(h)),
         PROCESS_ID => {
             let mut pid = 0;
             // SAFETY: our output.
@@ -414,15 +468,109 @@ fn lookup(h: Hwnd, id: i32) -> Option<Variant> {
         IS_REQUIRED_FOR_FORM => Variant::boolean(false),
         PROVIDER_DESCRIPTION => Variant::bstr(bstr_str("[gala: HWND element]")),
         30027..=30044 => {
-            Variant::boolean(pattern::supports(h, PATTERN_AVAILABLE[(id - 30027) as usize]))
+            Variant::boolean(pattern::supports(n, PATTERN_AVAILABLE[(id - 30027) as usize]))
         }
-        _ => {
-            if !pattern::known_property(id) {
-                missing(b"UIAutomationCore.dll!GetCurrentPropertyValue(property)", id as u64);
-            }
-            return pattern::property(h, id);
-        }
+        _ => return other_property(n, id),
     })
+}
+
+/// A pattern's property (None without the pattern; an id nobody knows
+/// is recorded).
+fn other_property(n: Node, id: i32) -> Option<Variant> {
+    if !pattern::known_property(id) {
+        missing(b"UIAutomationCore.dll!GetCurrentPropertyValue(property)", id as u64);
+    }
+    pattern::property(n, id)
+}
+
+/// `prefix` and the decimal digits of `v`, as a BSTR.
+fn numbered(prefix: &str, v: u32) -> *mut u16 {
+    let mut buf = [0u16; 64];
+    let mut n = 0;
+    for c in prefix.encode_utf16().take(40) {
+        buf[n] = c;
+        n += 1;
+    }
+    let mut digits = [0u16; 12];
+    let mut d = 0;
+    let mut x = v;
+    loop {
+        digits[d] = u16::from(b'0') + (x % 10) as u16;
+        d += 1;
+        x /= 10;
+        if x == 0 {
+            break;
+        }
+    }
+    for k in (0..d).rev() {
+        buf[n] = digits[k];
+        n += 1;
+    }
+    bstr(&buf[..n])
+}
+
+/// The rectangle as UIA's BoundingRectangle VARIANT (left, top, width,
+/// height as VT_R8).
+fn rect_value(r: [i32; 4]) -> Variant {
+    let v = [r[0], r[1], r[2] - r[0], r[3] - r[1]].map(f64::from);
+    array(VT_R8, &v)
+}
+
+/// A list item's properties, as the ListItem control type and Windows'
+/// list proxies give them: Name the item's text (a list view's column
+/// 0), AutomationId "ListViewItem-<index>" for list-view items (Windows'
+/// list-view proxy; list-box items have none: unverified), ClassName
+/// empty, no NativeWindowHandle, the list's ProcessId and IsEnabled,
+/// BoundingRectangle the part of the item's rectangle that shows (empty
+/// and IsOffscreen when none does), RuntimeId {42, list, index}.
+fn item_lookup(h: Hwnd, i: u32, id: i32) -> Option<Variant> {
+    let k = items::kind(h)?;
+    let n = Node::item(h, i);
+    Some(match id {
+        RUNTIME_ID => array(VT_I4, &[RUNTIME_ID_HWND, h as i32, i as i32]),
+        BOUNDING_RECTANGLE => rect_value(items::rect(h, k, i).unwrap_or([0; 4])),
+        PROCESS_ID => {
+            let mut pid = 0;
+            // SAFETY: our output.
+            unsafe { GetWindowThreadProcessId(h, &mut pid) };
+            Variant::int(pid as i32)
+        }
+        CONTROL_TYPE => Variant::int(LIST_ITEM),
+        LOCALIZED_CONTROL_TYPE => Variant::bstr(bstr_str(localized_control_type(LIST_ITEM))),
+        NAME => Variant::bstr(items::text(h, k, i)),
+        ACCELERATOR_KEY | ACCESS_KEY | HELP_TEXT | ITEM_TYPE | ITEM_STATUS | ARIA_ROLE
+        | ARIA_PROPERTIES | CLASS_NAME => Variant::bstr(bstr(&[])),
+        HAS_KEYBOARD_FOCUS => {
+            // SAFETY: a plain call.
+            Variant::boolean(unsafe { GetFocus() } == h && items::focused(h, k, i))
+        }
+        IS_KEYBOARD_FOCUSABLE => Variant::boolean(focusable(h)),
+        // SAFETY: a plain call.
+        IS_ENABLED => Variant::boolean(unsafe { IsWindowEnabled(h) } != 0),
+        AUTOMATION_ID => Variant::bstr(match k {
+            Kind::ListView => numbered("ListViewItem-", i),
+            Kind::ListBox => bstr(&[]),
+        }),
+        CULTURE | ORIENTATION => Variant::int(0),
+        IS_CONTROL_ELEMENT | IS_CONTENT_ELEMENT | IS_DATA_VALID_FOR_FORM => Variant::boolean(true),
+        IS_PASSWORD | IS_REQUIRED_FOR_FORM => Variant::boolean(false),
+        IS_OFFSCREEN => Variant::boolean(!visible(h) || items::rect(h, k, i).is_none()),
+        FRAMEWORK_ID => Variant::bstr(bstr_str("Win32")),
+        PROVIDER_DESCRIPTION => Variant::bstr(bstr_str("[gala: list item]")),
+        30027..=30044 => {
+            Variant::boolean(pattern::supports(n, PATTERN_AVAILABLE[(id - 30027) as usize]))
+        }
+        NATIVE_WINDOW_HANDLE => return None,
+        _ => return other_property(n, id),
+    })
+}
+
+/// The element's rectangle on the screen.
+fn node_rect(n: Node) -> [i32; 4] {
+    match n.item {
+        None => window_rect(n.hwnd),
+        Some(i) => items::kind(n.hwnd).and_then(|k| items::rect(n.hwnd, k, i)).unwrap_or([0; 4]),
+    }
 }
 
 // ---- Finding ----
@@ -430,11 +578,11 @@ fn lookup(h: Hwnd, id: i32) -> Option<Variant> {
 /// Visits `h`'s children (and with `deep` their descendants) in pre-order,
 /// adding those that match; true once the search is over.
 fn walk(
-    h: Hwnd,
+    h: Node,
     cond: *mut Condition,
     deep: bool,
     first: bool,
-    out: &mut List,
+    out: &mut List<Node>,
     depth: u32,
 ) -> bool {
     if depth > 64 {
@@ -456,12 +604,12 @@ fn walk(
 /// FindFirst/FindAll: the matches in `scope` (TreeScope_Element 1,
 /// _Children 2, _Descendants 4; _Parent and _Ancestors are not supported,
 /// as documented).
-fn find(h: Hwnd, scope: i32, cond: *mut c_void, first: bool, out: &mut List) -> HResult {
+fn find(h: Node, scope: i32, cond: *mut c_void, first: bool, out: &mut List<Node>) -> HResult {
     let Some(cond) = condition::as_condition(cond) else { return E_INVALIDARG };
     if scope & !7 != 0 || scope & 7 == 0 {
         return E_INVALIDARG;
     }
-    if !alive(h) {
+    if !exists(h) {
         return UIA_E_ELEMENTNOTAVAILABLE;
     }
     if scope & 1 != 0 && condition::matches(cond, h) && (!out.push(h) || first) {
@@ -479,30 +627,35 @@ fn find(h: Hwnd, scope: i32, cond: *mut c_void, first: bool, out: &mut List) -> 
 pub struct Element {
     vtable: *const VTable<85>,
     refs: AtomicU32,
-    hwnd: Hwnd,
+    node: Node,
 }
 
-/// The window of one of our elements (None for anything else).
-pub fn hwnd_of(p: *mut c_void) -> Option<Hwnd> {
+/// The node of one of our elements (None for anything else).
+pub fn node_of(p: *mut c_void) -> Option<Node> {
     if p.is_null() {
         return None;
     }
     let e = p.cast::<Element>();
     // SAFETY: an interface pointer, whose first field is its vtable; only
     // our elements have ours.
-    unsafe { core::ptr::eq((*e).vtable, &VTABLE).then(|| (*e).hwnd) }
+    unsafe { core::ptr::eq((*e).vtable, &VTABLE).then(|| (*e).node) }
 }
 
-/// Stores a new element for `h` at `out`.
-pub fn put_element(out: *mut *mut c_void, h: Hwnd) -> HResult {
-    let e = boxed(Element { vtable: &VTABLE, refs: AtomicU32::new(1), hwnd: h });
-    put(out, e.cast());
+/// A new element for `n` (one reference; null without memory).
+pub fn new_element(n: Node) -> *mut c_void {
+    boxed(Element { vtable: &VTABLE, refs: AtomicU32::new(1), node: n }).cast()
+}
+
+/// Stores a new element for `n` at `out`.
+pub fn put_element(out: *mut *mut c_void, n: Node) -> HResult {
+    let e = new_element(n);
+    put(out, e);
     if e.is_null() { E_OUTOFMEMORY } else { S_OK }
 }
 
-fn this_hwnd(this: *mut Element) -> Hwnd {
+fn this_node(this: *mut Element) -> Node {
     // SAFETY: our element.
-    unsafe { (*this).hwnd }
+    unsafe { (*this).node }
 }
 
 extern "system" fn query(this: *mut Element, iid: *const Guid, out: *mut *mut c_void) -> HResult {
@@ -539,13 +692,17 @@ extern "system" fn release(this: *mut Element) -> u32 {
 }
 
 extern "system" fn set_focus(this: *mut Element) -> HResult {
-    let h = this_hwnd(this);
-    if !alive(h) {
+    let n = this_node(this);
+    let h = n.hwnd;
+    if !exists(n) {
         return UIA_E_ELEMENTNOTAVAILABLE;
     }
     // SAFETY: plain calls.
     unsafe {
-        if top_level(h) {
+        if n.item.is_some() {
+            // An item: its list takes the focus.
+            SetFocus(h);
+        } else if top_level(h) {
             SetForegroundWindow(h);
         } else if h != desktop() {
             SetFocus(h);
@@ -558,7 +715,7 @@ extern "system" fn get_runtime_id(this: *mut Element, out: *mut *mut c_void) -> 
     if out.is_null() {
         return E_POINTER;
     }
-    let v = property(this_hwnd(this), RUNTIME_ID);
+    let v = property(this_node(this), RUNTIME_ID);
     put(out, v.data[0] as usize as *mut c_void);
     if v.vt == 0 { E_OUTOFMEMORY } else { S_OK }
 }
@@ -574,9 +731,9 @@ extern "system" fn find_first(
     }
     put(out, core::ptr::null_mut());
     let mut found = List::new();
-    let hr = find(this_hwnd(this), scope, cond, true, &mut found);
+    let hr = find(this_node(this), scope, cond, true, &mut found);
     match found.as_slice().first() {
-        Some(&h) if hr == S_OK => put_element(out, h),
+        Some(&n) if hr == S_OK => put_element(out, n),
         _ => hr,
     }
 }
@@ -592,7 +749,7 @@ extern "system" fn find_all(
     }
     put(out, core::ptr::null_mut());
     let mut found = List::new();
-    let hr = find(this_hwnd(this), scope, cond, false, &mut found);
+    let hr = find(this_node(this), scope, cond, false, &mut found);
     if hr != S_OK {
         return hr;
     }
@@ -637,11 +794,11 @@ extern "system" fn get_property(this: *mut Element, id: i32, out: *mut Variant) 
         return E_POINTER;
     }
     put(out, Variant::EMPTY);
-    let h = this_hwnd(this);
-    if !alive(h) {
+    let n = this_node(this);
+    if !exists(n) {
         return UIA_E_ELEMENTNOTAVAILABLE;
     }
-    put(out, property(h, id));
+    put(out, property(n, id));
     S_OK
 }
 
@@ -661,11 +818,11 @@ extern "system" fn get_property_ex(
         return E_POINTER;
     }
     put(out, Variant::EMPTY);
-    let h = this_hwnd(this);
-    if !alive(h) {
+    let n = this_node(this);
+    if !exists(n) {
         return UIA_E_ELEMENTNOTAVAILABLE;
     }
-    put(out, lookup(h, id).unwrap_or_else(Variant::not_supported));
+    put(out, lookup(n, id).unwrap_or_else(Variant::not_supported));
     S_OK
 }
 
@@ -679,11 +836,11 @@ extern "system" fn get_pattern_as(
         return E_POINTER;
     }
     put(out, core::ptr::null_mut());
-    let h = this_hwnd(this);
-    if !alive(h) {
+    let n = this_node(this);
+    if !exists(n) {
         return UIA_E_ELEMENTNOTAVAILABLE;
     }
-    let p = pattern::create(h, id);
+    let p = pattern::create(n, id);
     if p.is_null() {
         return S_OK;
     }
@@ -701,9 +858,9 @@ extern "system" fn get_parent(this: *mut Element, out: *mut *mut c_void) -> HRes
         return E_POINTER;
     }
     put(out, core::ptr::null_mut());
-    match parent(this_hwnd(this)) {
-        0 => S_OK,
-        p => put_element(out, p),
+    match parent(this_node(this)) {
+        None => S_OK,
+        Some(p) => put_element(out, p),
     }
 }
 
@@ -713,7 +870,7 @@ extern "system" fn get_children(this: *mut Element, out: *mut *mut c_void) -> HR
     }
     put(out, core::ptr::null_mut());
     let mut kids = List::new();
-    children(this_hwnd(this), &mut kids);
+    children(this_node(this), &mut kids);
     put_array(out, kids)
 }
 
@@ -722,11 +879,11 @@ fn get_bstr(this: *mut Element, id: i32, out: *mut *mut u16) -> HResult {
         return E_POINTER;
     }
     put(out, core::ptr::null_mut());
-    let h = this_hwnd(this);
-    if !alive(h) {
+    let n = this_node(this);
+    if !exists(n) {
         return UIA_E_ELEMENTNOTAVAILABLE;
     }
-    let mut v = property(h, id);
+    let mut v = property(n, id);
     if v.vt == VT_BSTR {
         put(out, v.as_bstr());
     } else {
@@ -741,11 +898,11 @@ fn get_int(this: *mut Element, id: i32, out: *mut i32) -> HResult {
         return E_POINTER;
     }
     put(out, 0);
-    let h = this_hwnd(this);
-    if !alive(h) {
+    let n = this_node(this);
+    if !exists(n) {
         return UIA_E_ELEMENTNOTAVAILABLE;
     }
-    let v = property(h, id);
+    let v = property(n, id);
     match v.vt {
         VT_I4 => put(out, v.as_int()),
         VT_BOOL => put(out, i32::from(v.as_bool())),
@@ -793,14 +950,14 @@ getters! {
     get_provider_description: get_bstr(*mut u16) = PROVIDER_DESCRIPTION;
 }
 
-/// NativeWindowHandle (a UIA_HWND, pointer-sized).
+/// NativeWindowHandle (a UIA_HWND, pointer-sized; 0 for an item).
 extern "system" fn get_native_window_handle(this: *mut Element, out: *mut usize) -> HResult {
     if out.is_null() {
         return E_POINTER;
     }
-    let h = this_hwnd(this);
-    put(out, h);
-    if alive(h) { S_OK } else { UIA_E_ELEMENTNOTAVAILABLE }
+    let n = this_node(this);
+    put(out, if n.item.is_some() { 0 } else { n.hwnd });
+    if exists(n) { S_OK } else { UIA_E_ELEMENTNOTAVAILABLE }
 }
 
 extern "system" fn get_bounding_rectangle(this: *mut Element, out: *mut [i32; 4]) -> HResult {
@@ -808,11 +965,11 @@ extern "system" fn get_bounding_rectangle(this: *mut Element, out: *mut [i32; 4]
         return E_POINTER;
     }
     put(out, [0; 4]);
-    let h = this_hwnd(this);
-    if !alive(h) {
+    let n = this_node(this);
+    if !exists(n) {
         return UIA_E_ELEMENTNOTAVAILABLE;
     }
-    put(out, window_rect(h));
+    put(out, node_rect(n));
     S_OK
 }
 
@@ -821,13 +978,17 @@ extern "system" fn get_labeled_by(this: *mut Element, out: *mut *mut c_void) -> 
         return E_POINTER;
     }
     put(out, core::ptr::null_mut());
-    let h = this_hwnd(this);
-    if h == desktop() || !matches!(control_type(h), EDIT | COMBO_BOX | LIST | TREE) {
+    let n = this_node(this);
+    let h = n.hwnd;
+    if n.item.is_some()
+        || h == desktop()
+        || !matches!(control_type(h), EDIT | COMBO_BOX | LIST | TREE)
+    {
         return S_OK;
     }
     match label_of(h) {
         0 => S_OK,
-        l => put_element(out, l),
+        l => put_element(out, Node::window(l)),
     }
 }
 
@@ -848,13 +1009,13 @@ extern "system" fn get_clickable_point(
     if point.is_null() || got.is_null() {
         return E_POINTER;
     }
-    let h = this_hwnd(this);
-    if !alive(h) {
+    let n = this_node(this);
+    if !exists(n) {
         return UIA_E_ELEMENTNOTAVAILABLE;
     }
-    let r = window_rect(h);
+    let r = node_rect(n);
     put(point, [(r[0] + r[2]) / 2, (r[1] + r[3]) / 2]);
-    put(got, i32::from(visible(h) && r[2] > r[0] && r[3] > r[1]));
+    put(got, i32::from(visible(n.hwnd) && r[2] > r[0] && r[3] > r[1]));
     S_OK
 }
 
@@ -955,13 +1116,19 @@ static VTABLE: VTable<85> = VTable([
 struct ElementArray {
     vtable: *const VTable<5>,
     refs: AtomicU32,
-    items: List,
+    items: List<Node>,
+}
+
+/// A new array of `items`' elements (one reference; null without
+/// memory).
+pub fn new_array(items: List<Node>) -> *mut c_void {
+    boxed(ElementArray { vtable: &ARRAY_VTABLE, refs: AtomicU32::new(1), items }).cast()
 }
 
 /// Stores a new array of `items`' elements at `out`.
-pub fn put_array(out: *mut *mut c_void, items: List) -> HResult {
-    let a = boxed(ElementArray { vtable: &ARRAY_VTABLE, refs: AtomicU32::new(1), items });
-    put(out, a.cast());
+pub fn put_array(out: *mut *mut c_void, items: List<Node>) -> HResult {
+    let a = new_array(items);
+    put(out, a);
     if a.is_null() { E_OUTOFMEMORY } else { S_OK }
 }
 
@@ -1023,7 +1190,7 @@ extern "system" fn array_element(
     // SAFETY: our array.
     let items = unsafe { (*this).items.as_slice() };
     match usize::try_from(index).ok().and_then(|i| items.get(i)) {
-        Some(&h) => put_element(out, h),
+        Some(&n) => put_element(out, n),
         None => E_INVALIDARG,
     }
 }

@@ -2507,6 +2507,25 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   Not yet: CBS_SIMPLE's always-shown list, owner-drawn items, the
   combo box's window height (Windows keeps it to the selection field and
   takes the creation height as the list's).
+  LISTBOX (`listbox.rs`, class "ListBox"; `controls_test`): one column
+  of strings with data; LB_ADDSTRING (LBS_SORT: case-insensitive order),
+  INSERTSTRING, DELETESTRING, RESETCONTENT, GETTEXT(LEN), FIND(EXACT),
+  SELECTSTRING, item data; the single selection (LB_SETCURSEL: -1 clears
+  and returns LB_ERR; the multiple-selection messages fail) or
+  LBS_MULTIPLESEL / LBS_EXTENDEDSEL (LB_SETSEL, GETSEL, GETSELCOUNT,
+  GETSELITEMS, SELITEMRANGE; LB_SETCURSEL fails); rows of
+  LB_GETITEMHEIGHT (18) from the top index (LB_SETTOPINDEX, the wheel,
+  WM_VSCROLL; LB_GETITEMRECT gives rows above it negative tops, as
+  Wine); a press selects (LBN_SELCHANGE on the release), a double click
+  sends LBN_DBLCLK, the arrows/pages/Home/End move the selection
+  (LBN_SELCHANGE), all with LBS_NOTIFY only; LB_SETCURSEL and the other
+  messages never notify. Not yet: owner-drawn lists (drawn as strings),
+  LBS_NODATA, multiple columns, tab stops, LB_DIR, a drag selecting.
+  Across processes user32 marshals LB_GETTEXT and CB_GETLBTEXT (sized
+  by LB_GETTEXTLEN / CB_GETLBTEXTLEN sent first), LB_GETITEMRECT,
+  LB_GETSELITEMS (out) and the LB_/CB_ string messages (in), as Windows
+  marshals system messages below WM_USER (`foreign::send_remote`);
+  posting them fails with ERROR_MESSAGE_SYNC_ONLY.
   DrawTextW (`text.rs`) splits, wraps, ellipsizes and aligns lines over
   gdi32's ExtTextOutW (1024 characters at most).
 - **Dialogs** (`dialog.rs`; `controls_test`): CreateDialogIndirectParamW
@@ -2788,11 +2807,13 @@ client side over Win32 windows (`uia_test`, a mingw C program).
     Nothing is cached: elements read live, so the Cached getters and
     GetCachedPropertyValue(Ex) give current values, also for properties
     the request did not name (Windows fails those).
-  - Elements (`element.rs`) are an HWND each, read live (no cache: the
-    Cached getters and GetCached* return current values). The root is
-    GetDesktopWindow(); its children are the visible top-level windows
-    (EnumWindows), a window's children its visible child windows in z
-    order. Properties: AutomationId = the control id in decimal (none
+  - Elements (`element.rs`) are a node each, read live (no cache: the
+    Cached getters and GetCached* return current values): an HWND, or a
+    list control's item (`Node { hwnd, item: Some(index) }`, see "List
+    items" below). The root is GetDesktopWindow(); its children are the
+    visible top-level windows (EnumWindows), a window's children its
+    visible child windows in z order, then a list box's or list view's
+    items in index order. Properties of windows: AutomationId = the control id in decimal (none
     for top-level windows), Name = the text with '&' mnemonics removed
     (buttons, statics), an edit's/combo's/list's Name the static label
     just before it in z order, a window's its title, the root "Desktop
@@ -2827,6 +2848,58 @@ client side over Win32 windows (`uia_test`, a mingw C program).
     state, Toggle sends BM_CLICK). Disabled windows give
     UIA_E_ELEMENTNOTENABLED, destroyed ones UIA_E_ELEMENTNOTAVAILABLE.
     GetCurrentPattern of a pattern the element lacks is S_OK with NULL.
+    Selection on lists, SelectionItem, ScrollItem and (list views) Invoke
+    on their items: see "List items".
+  - **List items** (`items.rs`, 2026-11-02, `uia_test`, `flaui_test`):
+    the strings of a ListBox and the items of a SysListView32 (also
+    LVS_OWNERDATA lists: the list view asks its parent with
+    LVN_GETDISPINFOW, as comctl32_test checks) are ListItem elements
+    (ControlType 50007, "list item"), children of their List after its
+    child windows (a list view's header), in index order, as Windows'
+    Win32 list proxies expose them. Name: the item's text (list views:
+    column 0; LB_GETTEXT, LVM_GETITEMTEXTW); AutomationId
+    "ListViewItem-<index>" for list-view items (what Windows' list-view
+    proxy is reported to give; unverified here), none for list-box items
+    (unverified); ClassName empty; no NativeWindowHandle (0; with
+    ignoreDefault the not-supported value); ProcessId, IsEnabled and
+    IsKeyboardFocusable the list's; HasKeyboardFocus the list's focus and
+    its caret item; BoundingRectangle the part of LB_GETITEMRECT /
+    LVM_GETITEMRECT(LVIR_BOUNDS) inside the list's client area on the
+    screen (empty and IsOffscreen when none shows; the client origin is
+    ClientToScreen's, for another process's list its window rectangle's
+    corner, which on gala is a child control's client origin); RuntimeId
+    {42, list, index} (gala's choice; distinct per item). An item exists
+    while its index is below the list's count. Patterns: the list has
+    Selection (GetCurrentSelection: LB_GETCURSEL or LB_GETSELITEMS,
+    LVM_GETNEXTITEM LVNI_SELECTED; CanSelectMultiple: LBS_MULTIPLESEL /
+    LBS_EXTENDEDSEL, not LVS_SINGLESEL; IsSelectionRequired FALSE); the
+    Selection property is VT_UNKNOWN holding an element array and
+    SelectionContainer VT_UNKNOWN holding an element (what FlaUI's
+    converters take). Items have SelectionItem (IsSelected: LB_GETSEL,
+    LVM_GETITEMSTATE; Select: LB_SETCURSEL / LB_SETSEL, LVM_SETITEMSTATE
+    clearing all then selecting and focusing the item; AddToSelection on
+    a single-selection list holding another item is
+    UIA_E_INVALIDOPERATION, as documented; a list box with LBS_NOTIFY
+    also gets WM_COMMAND LBN_SELCHANGE sent to its parent, as for the
+    user's click, so programs see it: a gala choice, unverified),
+    ScrollItem (LVM_ENSUREVISIBLE; a list box's LB_SETTOPINDEX when the
+    item does not show whole) and, for list-view items, Invoke (the
+    item is selected and shown, then WM_LBUTTONDBLCLK and WM_LBUTTONUP
+    are posted at its centre: the list view sends NM_DBLCLK and
+    LVN_ITEMACTIVATE, which FileZilla acts on; Invoke may return first).
+    **Another process's list**: list-box messages go with local pointers
+    (user32 marshals them, see LISTBOX above); list-view messages are
+    above WM_USER and go as numbers, so, as Windows' list-view proxy
+    does, a `Buffer` is allocated in the list's process (OpenProcess
+    PROCESS_VM_OPERATION | VM_READ | VM_WRITE, VirtualAllocEx), the
+    LVITEMW (88 bytes, pszText pointing into the same buffer) or RECT
+    written there, the message sent with that address, the answer read
+    back (ReadProcessMemory) and the memory freed (VirtualFreeEx,
+    CloseHandle); a list in this process gets a heap buffer instead.
+    Not yet: GridItem/TableItem for report-view subitems (and Grid/Table
+    on the list, the header's columns), combo boxes' items (the
+    ComboLBox list), tree-view items, ElementFromPoint finding an item,
+    the Value/Toggle patterns of items (check boxes in list views).
   - Walkers (`walker.rs`): a view is a condition; an element outside it
     is skipped and its children take its place; the root is in every
     view.
@@ -2856,7 +2929,7 @@ Windows a captioned window has a TitleBar child without an HWND, which
 `uia_test` allows for; FlaUI's Window.Close looks for its close button
 first, then the Window pattern, neither of which gala has: close
 programs with Application.Close); no Window, Transform,
-LegacyIAccessible patterns; ListBox/ComboBox items, Selection,
+LegacyIAccessible patterns; ComboBox and tree-view items,
 ExpandCollapse, RangeValue, Text patterns; IUIAutomationElement2..9 are
 not answered (FlaUI reads every property through
 GetCurrentPropertyValueEx, so it has not asked). Next: screen tests

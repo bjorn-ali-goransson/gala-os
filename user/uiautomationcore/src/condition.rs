@@ -7,9 +7,9 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::element;
+use crate::element::{self, Node};
 use crate::{
-    CoTaskMemAlloc, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid, HResult, Hwnd,
+    CoTaskMemAlloc, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid, HResult,
     IID_IUNKNOWN, S_OK, VT_ARRAY, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4, VTable, Variant, VariantCopy,
     alloc, boxed, bstr_chars, free, guid, iid_at, missing, put,
 };
@@ -223,7 +223,7 @@ fn child(c: *mut Condition, i: usize) -> *mut Condition {
 }
 
 /// Whether the element `h` meets the condition.
-pub fn matches(c: *mut Condition, h: Hwnd) -> bool {
+pub fn matches(c: *mut Condition, h: Node) -> bool {
     // SAFETY: our condition.
     let (kind, count) = unsafe { ((*c).kind, (*c).count) };
     match kind {

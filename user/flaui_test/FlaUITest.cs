@@ -5,14 +5,18 @@
 // controls by AutomationId (also with a cache request: FindAllBuildCache
 // and the Cached property getters), invokes the button and waits for the
 // title it sets, types into the edit through the Value pattern and reads it back,
-// toggles the check box, and closes the program (WM_CLOSE).
+// toggles the check box, reads the list view's items (AsListBox: its
+// ListItem children, their Text) and selects one (SelectionItem; the
+// list's Selection gives it back), and closes the program (WM_CLOSE).
 //
 // Expected output on Windows 11 24H2 (build 26100) with .NET 8 (FlaUI's
 // documented behaviour; UIA3 runs on CUIAutomation8, whose
 // IUIAutomation2 timeouts default to 20 s (transaction) and 2 s
 // (connection); UIA's Win32 proxies give a push button ControlType Button
 // with the control id as AutomationId and the text as Name, an edit the
-// Value pattern, an auto check box the Toggle pattern; the window's only
+// Value pattern, an auto check box the Toggle pattern, a list view's
+// items ListItem children with their column-0 text as Name and the
+// SelectionItem pattern, the list the Selection pattern; the window's only
 // Button child is "Press", the caption buttons being the title bar's):
 //
 //   timeouts=20000/2000
@@ -25,6 +29,8 @@
 //   text=hello
 //   checked=False
 //   checked=True
+//   items=3 alpha.txt,beta.txt,gamma.txt
+//   selected=beta.txt True False
 //   closed=True
 //   flaui_test: ok
 //
@@ -138,6 +144,25 @@ static class FlaUITest
                 Console.WriteLine("checked=" + checkBox.IsChecked);
                 if (!toggled.Result)
                     return Fail(11, "not checked");
+
+                // The list view: its items as a ListBox's.
+                var listElement = window.FindFirstDescendant(cf => cf.ByAutomationId("104"));
+                if (listElement == null)
+                    return Fail(14, "no list 104");
+                var list = listElement.AsListBox();
+                var items = list.Items;
+                var texts = "";
+                foreach (var item in items)
+                    texts += (texts.Length > 0 ? "," : "") + item.Text;
+                Console.WriteLine("items=" + items.Length + " " + texts);
+                if (items.Length != 3 || texts != "alpha.txt,beta.txt,gamma.txt")
+                    return Fail(15, "items");
+                items[1].Select();
+                var selected = list.SelectedItem;
+                Console.WriteLine("selected=" + (selected == null ? "-" : selected.Text) + " " +
+                    items[1].IsSelected + " " + items[0].IsSelected);
+                if (selected == null || selected.Text != "beta.txt" || !items[1].IsSelected || items[0].IsSelected)
+                    return Fail(16, "selection");
             }
             // Close: WM_CLOSE posted to the main window; the program ends.
             var closed = app.Close();

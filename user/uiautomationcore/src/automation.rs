@@ -8,7 +8,7 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::element::{self, desktop, hwnd_of, put_element};
+use crate::element::{self, Node, desktop, node_of, put_element};
 use crate::{
     E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, GetFocus, Guid, HResult, Hwnd,
     IID_IUNKNOWN, IsWindow, Point, S_OK, SafeArrayAccessData, SafeArrayGetDim,
@@ -120,7 +120,7 @@ extern "system" fn compare_elements(
     if same.is_null() {
         return E_POINTER;
     }
-    let (Some(a), Some(b)) = (hwnd_of(a), hwnd_of(b)) else {
+    let (Some(a), Some(b)) = (node_of(a), node_of(b)) else {
         put(same, 0);
         return E_INVALIDARG;
     };
@@ -132,7 +132,7 @@ fn element_or_null(out: *mut *mut c_void, h: Hwnd) -> HResult {
     if out.is_null() {
         return E_POINTER;
     }
-    put_element(out, h)
+    put_element(out, Node::window(h))
 }
 
 extern "system" fn root(_this: usize, out: *mut *mut c_void) -> HResult {
@@ -148,7 +148,7 @@ extern "system" fn from_handle(_this: usize, h: Hwnd, out: *mut *mut c_void) -> 
     if h == 0 || unsafe { IsWindow(h) } == 0 {
         return E_INVALIDARG;
     }
-    put_element(out, h)
+    put_element(out, Node::window(h))
 }
 
 /// ElementFromPoint (the POINT comes by value, in one register).
