@@ -1778,6 +1778,39 @@ R. **Robustness and live update, kernel included** (the owner's
      after the handover all results are as if nothing happened (the
      checksums recomputed match bit for bit, the 4000 ms sleep ends at
      4001 ticks), and again across a second handover.
+     **Milestone (d) done** (2026-11-02, scenarios handover_upgrade,
+     handover_upgrade_uefi, handover_downgrade_refused; ARCHITECTURE
+     "Versions and negotiation"): handover to a newer build with a
+     changed state format, with the kernel32 program working across it,
+     and back. Each kernel image carries an ELF note (what record
+     framing, section versions, image layout and extended state it
+     reads); the running kernel reads the next one's note and refuses
+     before stopping anything (then checks the record as written) if
+     the next kernel could not take it; sections carry a must_read (the
+     oldest reader that may take them without losing state); readers
+     convert every older version with defaults; THREADS 3 carries a
+     length-prefixed extended-state blob (XSAVE later without a format
+     break); the image layout has a version, so a next kernel whose
+     loader differs is refused before the point of no return. The newer
+     build is the `handover_next` cargo feature (PROCESSES 3 with a new
+     field, the new optional WRITER section, the CLOCK record's
+     in-memory structure laid out differently). Host tests: notes (ELF,
+     damaged, the build before notes), negotiation refusals, older
+     versions read with defaults, must_read refusals. Not done: R8's
+     signed-manifest check of the next image (the hook is there:
+     `version::trusted`); carrying image pages as frames across a
+     loader change (refused instead); a real XSAVE kernel.
+     **Milestone (e) needs** (open network connections): the TCP stack's
+     connection state as data (smoltcp's sockets: sequence numbers,
+     windows, timers as deadlines, buffers), sockets and AFD endpoints as
+     objects (a SOCKETS section, REQUIRED), the virtio-net device reset
+     and frames in flight resent by TCP (as `net_reset` does), threads
+     blocked in socket calls made restartable (accept, recv, send with
+     their deadlines), and the time without a NIC kept short (peers
+     retransmit). Versioning: smoltcp's structures are a dependency's,
+     so the record must hold gala's own description of a connection,
+     never a dependency's memory layout (a smoltcp upgrade is then a
+     loader-like change only if behaviour changes).
      Still refused (cleanly, with the reason), for later: threads blocked
      over 3 s in other calls (pipe writes on a full pipe, console reads,
      pipe listens, socket calls); I/O bound to completion ports and

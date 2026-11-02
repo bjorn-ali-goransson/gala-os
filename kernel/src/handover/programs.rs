@@ -5,8 +5,9 @@
 //! and rebuilds the kernel's objects from them.
 //!
 //! Every section here is REQUIRED (a kernel that does not know one would
-//! lose programs), version 1 or, for the sections milestone (c) extended,
-//! 2 (`version_of`; a version-1 entry reads with the new fields 0). Lists are entries (`Writer::begin_entry`:
+//! lose programs), at the version `handover::version::KINDS` gives (a
+//! version-1 entry reads with the newer fields 0, their defaults). Lists
+//! are entries (`Writer::begin_entry`:
 //! a length, so an entry gains fields at its end) or tables (count,
 //! stride, fixed records that gain fields at their end). Objects are named
 //! by ids (u32, unique in the record, 0 = none); each kind of object has a
@@ -28,26 +29,29 @@
 //! ```
 
 use super::record::{REQUIRED, Reader, Wide, Writer};
+use super::version;
 use crate::mm::heap::AllocError;
 use crate::mm::paging::{CacheMode, PageFlags};
 
-/// The version of the sections here that never changed.
-pub const VERSION: u16 = 1;
-
-/// The version of section `tag` this kernel writes: PROCESSES 2 (the
-/// executable's digest), THREADS 2 (threads stopped in user mode or not
-/// started, suspend counts, queued APCs), TIMERS 2 (the APC), the rest 1.
+/// The version of section `tag` this kernel writes
+/// (`handover::version::KINDS`).
 pub fn version_of(tag: u32) -> u16 {
-    use super::record::tag;
-    match tag {
-        tag::PROCESSES | tag::THREADS | tag::TIMERS => 2,
-        _ => VERSION,
-    }
+    version::writes(tag)
 }
 
-/// Starts one of this module's sections.
+/// Starts one of this module's sections, at this kernel's version and
+/// with its `must_read`.
 pub fn section(w: &mut Writer, tag: u32) -> Result<(), AllocError> {
-    w.section(tag, version_of(tag), REQUIRED)
+    let must_read = version::kind_of(tag).map_or(0, |k| k.must_read);
+    w.section_needing(tag, version_of(tag), REQUIRED, must_read)
+}
+
+/// THREADS' `must_read`: a thread whose extended state (XSAVE beyond the
+/// legacy FXSAVE area) is in its entry's blob would lose it in a reader
+/// older than version 3, which stops before the blob.
+pub fn threads_must_read(any_extended_state: bool) -> u16 {
+    let k = version::kind_of(super::record::tag::THREADS).map_or(0, |k| k.must_read);
+    if any_extended_state { k.max(3) } else { k }
 }
 
 /// A PROCESSES entry.
@@ -72,10 +76,20 @@ pub struct ProcessRec<'a> {
     /// Its primary token's object id (TOKENS; version 2, 0 from an older
     /// writer: the boot user's, made again).
     pub token: u32,
+    /// The handovers the process has come through, this one included
+    /// (version 3, the `handover_next` build: 0 from an older writer, not
+    /// counted).
+    pub handovers: u32,
 }
 
 impl<'a> ProcessRec<'a> {
+    /// The entry at this kernel's PROCESSES version.
     pub fn write(&self, w: &mut Writer) -> Result<(), AllocError> {
+        self.write_as(w, version_of(super::record::tag::PROCESSES))
+    }
+
+    /// The entry at `version` (2: no handover count).
+    pub fn write_as(&self, w: &mut Writer, version: u16) -> Result<(), AllocError> {
         let e = w.begin_entry()?;
         for v in [
             self.id,
@@ -95,11 +109,23 @@ impl<'a> ProcessRec<'a> {
         w.u64(self.image_digest)?;
         w.u32(self.token)?;
         w.u32(0)?;
+        if version >= 3 {
+            w.u32(self.handovers)?;
+            w.u32(0)?;
+        }
         w.end_entry(e)
     }
 
+    /// An entry, as this kernel reads PROCESSES.
     pub fn read(r: &mut Reader<'a>) -> Self {
-        ProcessRec {
+        Self::read_as(r, version_of(super::record::tag::PROCESSES))
+    }
+
+    /// An entry, as a kernel whose newest PROCESSES is `knows` reads it:
+    /// fields of later versions are not read; fields the writer did not
+    /// have read as 0.
+    pub fn read_as(r: &mut Reader<'a>, knows: u16) -> Self {
+        let mut p = ProcessRec {
             id: r.u64(),
             parent_id: r.u64(),
             create_time: r.u64(),
@@ -113,7 +139,13 @@ impl<'a> ProcessRec<'a> {
             path: r.str(),
             image_digest: r.u64(),
             token: r.u32(),
+            handovers: 0,
+        };
+        let _ = r.u32();
+        if knows >= 3 {
+            p.handovers = r.u32();
         }
+        p
     }
 }
 
@@ -253,7 +285,7 @@ pub type ApcRec = [u64; 4];
 
 /// A THREADS entry: a live thread.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ThreadRec {
+pub struct ThreadRec<'a> {
     pub tid: u64,
     pub pid: u64,
     pub teb: u64,
@@ -281,11 +313,32 @@ pub struct ThreadRec {
     pub mxcsr: Option<u32>,
     /// The impersonation token's object id (TOKENS), 0: none.
     pub impersonation: u32,
+    /// Version 3: the extended state's components (XCR0 bits; 0 from an
+    /// older writer: x87 and SSE, all in `fx`) and the XSAVE area past the
+    /// legacy 512 bytes (header and components, standard format; empty
+    /// while gala uses FXSAVE). Length-prefixed, so a kernel that enables
+    /// XSAVE carries AVX and later state without changing the format.
+    pub xstate: u64,
+    pub extended: &'a [u8],
 }
 
-impl ThreadRec {
-    /// The entry, then its queued APCs (a table of `ApcRec`).
+/// THREADS `xstate`: x87 and SSE, the legacy FXSAVE area.
+pub const XSTATE_LEGACY: u64 = 0b11;
+
+impl<'a> ThreadRec<'a> {
+    /// The entry, then its queued APCs (a table of `ApcRec`), then (version
+    /// 3) its extended state.
     pub fn write(&self, w: &mut Writer, apcs: &[ApcRec]) -> Result<(), AllocError> {
+        self.write_as(w, apcs, version_of(super::record::tag::THREADS))
+    }
+
+    /// The entry at `version` (2: no extended state).
+    pub fn write_as(
+        &self,
+        w: &mut Writer,
+        apcs: &[ApcRec],
+        version: u16,
+    ) -> Result<(), AllocError> {
         let e = w.begin_entry()?;
         for v in [self.tid, self.pid, self.teb, self.win32_start, self.create_time, self.affinity] {
             w.u64(v)?;
@@ -313,11 +366,15 @@ impl ThreadRec {
                 w.u64(*v)?;
             }
         }
+        if version >= 3 {
+            w.u64(self.xstate)?;
+            w.blob(self.extended)?;
+        }
         w.end_entry(e)
     }
 
     /// The entry and its APCs' table.
-    pub fn read<'a>(r: &mut Reader<'a>) -> (Self, super::record::Table<'a>) {
+    pub fn read(r: &mut Reader<'a>) -> (Self, super::record::Table<'a>) {
         let (tid, pid, teb, win32_start, create_time, affinity) =
             (r.u64(), r.u64(), r.u64(), r.u64(), r.u64(), r.u64());
         let (object, ordinal, priority, base_priority, number) =
@@ -331,6 +388,12 @@ impl ThreadRec {
         let fx = r.array();
         let (state, suspend, has_mxcsr, mxcsr) = (r.u32(), r.u32(), r.u32(), r.u32());
         let (impersonation, _) = (r.u32(), r.u32());
+        let apcs = r.table();
+        let xstate = match r.u64() {
+            0 => XSTATE_LEGACY,
+            x => x,
+        };
+        let extended = r.blob();
         let rec = ThreadRec {
             tid,
             pid,
@@ -350,8 +413,10 @@ impl ThreadRec {
             suspend,
             mxcsr: (has_mxcsr != 0).then_some(mxcsr),
             impersonation,
+            xstate,
+            extended,
         };
-        (rec, r.table())
+        (rec, apcs)
     }
 }
 
@@ -1046,6 +1111,7 @@ mod tests {
             path: "C:\\gala\\handover_test.exe",
             image_digest: 0x0123_4567_89ab_cdef,
             token: 22,
+            handovers: 2,
         }
         .write(&mut w)
         .unwrap();
@@ -1094,6 +1160,8 @@ mod tests {
             suspend: 0,
             mxcsr: None,
             impersonation: 0,
+            xstate: XSTATE_LEGACY,
+            extended: &[],
         }
         .write(&mut w, &[])
         .unwrap();
@@ -1117,6 +1185,8 @@ mod tests {
             suspend: 2,
             mxcsr: None,
             impersonation: 23,
+            xstate: XSTATE_LEGACY,
+            extended: &[],
         }
         .write(&mut w, &[[0x40_1000, 1, 2, 3], [0x40_2000, 4, 5, 6]])
         .unwrap();
@@ -1140,6 +1210,8 @@ mod tests {
             regs: [0; 18],
             deadline: None,
             fx: [0; 512],
+            xstate: XSTATE_LEGACY,
+            extended: &[],
         }
         .write(&mut w, &[])
         .unwrap();
@@ -1313,12 +1385,15 @@ mod tests {
         assert!(!pages[1].flags.executable);
 
         assert_eq!(p.image_digest, 0x0123_4567_89ab_cdef);
+        // PROCESSES 3 (the `handover_next` build) carries the count.
+        assert_eq!(p.handovers, if version::NEXT { 2 } else { 0 });
         let mut threads = rec.section(tag::THREADS).unwrap();
         let (t, apcs) = ThreadRec::read(&mut threads.entry().unwrap());
         assert_eq!((t.tid, t.pid, t.number, t.deadline), (12, 8, 0x34, Some(12_345)));
         assert_eq!((t.state, t.suspend, t.mxcsr, apcs.len()), (thread_state::SYSCALL, 0, None, 0));
         assert_eq!(t.regs[17], 51);
         assert_eq!((t.fx[24], t.fx[511]), (0x80, 9));
+        assert_eq!((t.xstate, t.extended), (XSTATE_LEGACY, &[][..]));
         let (t, apcs) = ThreadRec::read(&mut threads.entry().unwrap());
         assert_eq!((t.tid, t.state, t.suspend, t.regs[16]), (16, thread_state::USER, 2, 81));
         let apcs: Vec<_> = apcs.iter().map(|mut a| read_apc(&mut a)).collect();
@@ -1509,6 +1584,112 @@ mod tests {
         assert_eq!((p.id, p.path, p.image_digest), (8, "C:\\gala\\a.exe", 0));
         let t = TimerRec::read(&mut rec.section(tag::TIMERS).unwrap().entry().unwrap());
         assert_eq!((t.head.id, t.due, t.apc), (3, Some(1500), None));
+    }
+
+    fn process() -> ProcessRec<'static> {
+        ProcessRec {
+            id: 8,
+            image_base: 0x1_4000_0000,
+            name: "a.exe",
+            path: "C:\\gala\\a.exe",
+            image_digest: 77,
+            token: 5,
+            handovers: 3,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn processes_across_versions() {
+        // A version-2 entry (the default build's), then a version-3 one
+        // (entries carry their length, so one section can hold both here).
+        let mut w = Writer::new(1).unwrap();
+        w.section(tag::PROCESSES, 3, REQUIRED).unwrap();
+        process().write_as(&mut w, 2).unwrap();
+        process().write_as(&mut w, 3).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = record::parse(&bytes).unwrap();
+        let mut r = rec.section(tag::PROCESSES).unwrap();
+        let (v2, v3) = (r.entry().unwrap(), r.entry().unwrap());
+        // Version 2 read by a version-3 reader (the `handover_next`
+        // build): the count takes its default, 0.
+        let p = ProcessRec::read_as(&mut v2.clone(), 3);
+        assert_eq!((p.token, p.image_digest, p.handovers), (5, 77, 0));
+        assert_eq!(
+            ProcessRec::read_as(&mut v2.clone(), 2),
+            ProcessRec { handovers: 0, ..process() }
+        );
+        // Version 3 read by a version-3 reader and (ignoring the new
+        // field) by a version-2 one; the bytes before it are version 2's.
+        assert_eq!(ProcessRec::read_as(&mut v3.clone(), 3), process());
+        assert_eq!(
+            ProcessRec::read_as(&mut v3.clone(), 2),
+            ProcessRec { handovers: 0, ..process() }
+        );
+        // Version 1 (milestone (b)) by both.
+        let mut w = Writer::new(1).unwrap();
+        w.section(tag::PROCESSES, 1, REQUIRED).unwrap();
+        let e = w.begin_entry().unwrap();
+        for v in [8u64, 0, 1, 0x1_4000_0000, 0x5000, 0, 0] {
+            w.u64(v).unwrap();
+        }
+        w.u32(1).unwrap();
+        w.u32(2).unwrap();
+        w.str("a.exe").unwrap();
+        w.str("C:\\gala\\a.exe").unwrap();
+        w.end_entry(e).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = record::parse(&bytes).unwrap();
+        for knows in [2, 3] {
+            let p = ProcessRec::read_as(
+                &mut rec.section(tag::PROCESSES).unwrap().entry().unwrap(),
+                knows,
+            );
+            assert_eq!((p.id, p.name, p.image_digest, p.token, p.handovers), (8, "a.exe", 0, 0, 0));
+        }
+    }
+
+    #[test]
+    fn threads_across_versions() {
+        let t = ThreadRec {
+            tid: 12,
+            pid: 8,
+            teb: 0x7ffd_e000,
+            win32_start: 0,
+            create_time: 5,
+            affinity: 3,
+            object: 1,
+            ordinal: 0,
+            priority: 8,
+            base_priority: 8,
+            number: 0,
+            regs: [7; 18],
+            deadline: None,
+            fx: [1; 512],
+            state: thread_state::USER,
+            suspend: 0,
+            mxcsr: None,
+            impersonation: 0,
+            xstate: 0b111,
+            extended: &[9; 64 + 256],
+        };
+        let mut w = Writer::new(1).unwrap();
+        w.section(tag::THREADS, 2, REQUIRED).unwrap();
+        t.write_as(&mut w, &[[1, 2, 3, 4]], 2).unwrap();
+        t.write_as(&mut w, &[[1, 2, 3, 4]], 3).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = record::parse(&bytes).unwrap();
+        let mut r = rec.section(tag::THREADS).unwrap();
+        // Version 2: x87/SSE only, all in the FXSAVE area.
+        let (v2, apcs) = ThreadRec::read(&mut r.entry().unwrap());
+        assert_eq!((v2.xstate, v2.extended.len(), apcs.len()), (XSTATE_LEGACY, 0, 1));
+        assert_eq!(v2, ThreadRec { xstate: XSTATE_LEGACY, extended: &[], ..t.clone() });
+        // Version 3: the blob after the APCs, whatever its size.
+        let (v3, apcs) = ThreadRec::read(&mut r.entry().unwrap());
+        assert_eq!((v3, apcs.len()), (t, 1));
+        // A thread with extended state needs a version-3 reader.
+        assert_eq!(threads_must_read(true), 3);
+        assert_eq!(threads_must_read(false), 2);
     }
 
     #[test]
