@@ -3005,7 +3005,7 @@ TSC itself and about twenty places call `platform::ticks` directly.
   stream (a live component-swap interface is otherwise an ideal rootkit
   hook).
 
-### Live update (long term; R8, R9)
+### Live update, kernel included (the owner's vision; R8, R9)
 
 - **User mode first**: a versioned system image (`System/vN/`) behind
   one pointer switched atomically; the loader binds new processes to the

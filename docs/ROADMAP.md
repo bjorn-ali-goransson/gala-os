@@ -8,6 +8,14 @@ Every chunk is test-driven: first write `user/<feature>_test` (expected
 results = real Windows behaviour), its boot scenario, and see it fail; then
 implement. Export the binaries to `user/bin/` (`cargo xtask export-tests`).
 
+**Vision: live update, kernel included** (the owner, 2026-11-02). A
+running gala updates its system image and its kernel without a reboot,
+with programs kept running. Item R below is the path. Until it is built,
+every change keeps R1's invariants: state as data, restartable system
+calls, versioned formats, drivers that survive a reset, one clock. A
+change that would make the kernel handover harder is argued for
+explicitly in its commit.
+
 ## Done
 - M1 boot, serial, memory map
 - M2 (single CPU): GDT/IDT, frames, paging, heap, APIC timer, scheduler
@@ -1355,7 +1363,8 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       Next: tooltips on popups (the combo boxes'
       drop-down lists are done).
 
-R. **Robustness and live update** (proposed 2026-11-02 by the owner;
+R. **Robustness and live update, kernel included** (the owner's
+   vision; proposed 2026-11-02 by the owner;
    design: ARCHITECTURE "Built in early: invariants, safety nets, live
    update"). Order: R1 (the invariants, adopted now: new code follows
    them) -> R2 -> R3 -> R4 (alongside other work) -> R5 -> R6 -> R7 ->
@@ -1392,11 +1401,21 @@ R. **Robustness and live update** (proposed 2026-11-02 by the owner;
      channel and a test-only `Gala*` call; off unless booted with a flag.
    - R8. **Chain of trust for updates** (design): Secure Boot -> Limine
      -> kernel -> signed system images; keys, manifest, rollback.
-   - R9. **Live update**: user mode first (versioned system images behind
-     an atomic pointer, old processes restarted one at a time), then the
-     kernel handover (quiescent point, serialized versioned state, user
-     pages kept, devices reset, blocked calls reissued). Live patching
-     only if a need appears.
+   - R9. **Live update, kernel included** (a goal, not an option): user
+     mode first (versioned system images behind an atomic pointer, old
+     processes restarted one at a time), then the kernel handover: the
+     running kernel stops all threads at a quiescent point and drains
+     I/O; it serializes its state as versioned data (processes, threads
+     as "waiting on X until T", handles and objects, address spaces with
+     the user pages left in place, the window registry, the desktop,
+     console sessions, sockets, the file system's journal); the new
+     kernel starts from it, resets the devices and reissues the blocked
+     system calls, so programs carry on. Milestones: (a) handover to the
+     same kernel build in QEMU with no programs, then (b) with idle
+     programs, (c) with programs blocked in waits and I/O, (d) to a newer
+     build with a changed state format (versions), (e) with open network
+     connections. Live patching of single functions only if a need
+     appears.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

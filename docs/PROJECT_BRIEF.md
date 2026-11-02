@@ -24,6 +24,14 @@ re-architected. The source is public (readable on GitHub) but not licensed:
 no license is granted and all rights are reserved (see the README's
 "License" section). It may be licensed later.
 
+**Live update, kernel included** (the owner's vision, 2026-11-02): a
+running gala is updated without a reboot. That covers the system
+image (gala's DLLs and programs) and the kernel itself, with programs
+kept running through the change. It is built step by step (ROADMAP R),
+and every change keeps the design open for it: kernel state kept as
+versioned data, system calls that can be restarted, drivers that
+survive a device reset, one clock (ARCHITECTURE, "Built in early").
+
 ## Clean-room rules (mandatory)
 - Never use disassembly, decompiled code, or leaked Windows source.
 - Allowed sources: Microsoft's public documentation, the "Windows Internals"
