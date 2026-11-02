@@ -167,6 +167,12 @@ pub fn start_periodic_timer_here(calibration: &Calibration, hz: u64) {
     write(REG_TIMER_INITIAL, count);
 }
 
+/// Stops this CPU's timer (masked, count 0): before a kernel handover.
+pub fn stop_timer() {
+    write(REG_LVT_TIMER, LVT_MASKED);
+    write(REG_TIMER_INITIAL, 0);
+}
+
 /// Sends a fixed interrupt with `vector` to the CPU whose local APIC id is
 /// `apic_id` (physical destination mode).
 pub fn send_ipi(apic_id: u32, vector: u8) {

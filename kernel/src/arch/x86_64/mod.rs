@@ -7,6 +7,7 @@ pub mod context;
 pub mod cpu;
 pub mod debugcon;
 pub mod gdt;
+pub mod handover;
 pub mod interrupts;
 pub mod paging;
 pub mod pci;

@@ -2283,6 +2283,7 @@ const PENDING: &[&str] = &[
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
+    "handover_uefi",
     "server_profile",
     "gala_cli",
     "hello",
@@ -3263,6 +3264,62 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["msvcrt_test: _putws", "msvcrt_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // R9 (a): kernel handover to the same build, twice, with no
+        // programs running: each kernel writes the handover record, parks
+        // the other CPU and enters a fresh copy of itself, which starts
+        // from the record. A marker page survives both, the clock goes on
+        // without going back, every CPU comes back each time.
+        name: "handover_same",
+        cmdline: "qemu_exit handover=2",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "handover: generation 0 -> 1: record ",
+            "handover: generation 1 (from generation 0), record version 1",
+            "handover: clock monotonic",
+            "handover: generation 1: 2 of 2 CPUs online again",
+            "survived 1 handover(s)",
+            "handover: generation 1 -> 2: record ",
+            "handover: generation 2 (from generation 1), record version 1",
+            "handover: generation 2: 2 of 2 CPUs online again",
+            "survived 2 handover(s)",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // handover_same booted by UEFI (UEFI_SCENARIOS): the GOP
+        // framebuffer is handed over too, and its console goes on.
+        name: "handover_uefi",
+        cmdline: "qemu_exit handover=2",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "firmware: UEFI x86_64",
+            "handover: generation 2 (from generation 1), record version 1",
+            "framebuffer: 1280x800",
+            "handover: generation 2: 2 of 2 CPUs online again",
+            "survived 2 handover(s)",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // R9 (a) with a mounted volume (`persist`, DISK_SCENARIOS): the
+        // volume's log position is handed over and found again by the next
+        // kernel; persist_test runs in each kernel (between handovers, not
+        // across them): the first writes its files, the next ones find
+        // them on the disk.
+        name: "handover_disk",
+        cmdline: "qemu_exit persist handover=2 run=persist_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "persist_test: first boot",
+            "handover: generation 1 (from generation 0)",
+            "handover: volume continues",
+            "handover: generation 2: 2 of 2 CPUs online again",
+            "persist_test: ok",
+            "survived 2 handover(s)",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
         // R4: the watchdog for a thread that stays in the kernel: the boot
         // thread spins 25 s (`spintest`); it is reported after 20 s.
         name: "kernel_watchdog",
@@ -4123,6 +4180,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("gala_cli", "gui_test"),
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
+    ("handover_disk", "persist_test"),
     ("crash_record", "hello"),
     ("watchdog", "busybox"),
     ("failpoint_heap", "kernel32_test"),
@@ -5934,6 +5992,15 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
     },
     DiskScenario {
         name: "failpoint_disk_delay",
+        size: 32 << 20,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // R9 (a): the volume handed over between kernels.
+        name: "handover_disk",
         size: 32 << 20,
         setup: |_| {},
         check: |_| Ok(()),

@@ -286,6 +286,15 @@ impl<B: Blocks> Volume<B> {
         self.tail
     }
 
+    /// The active log area (0 or 1) and the log's generation.
+    pub fn position(&self) -> (u32, u64) {
+        (self.area, self.generation)
+    }
+
+    pub fn sectors(&self) -> u64 {
+        self.dev.sectors()
+    }
+
     pub fn into_device(self) -> B {
         self.dev
     }

@@ -1641,6 +1641,27 @@ R. **Robustness and live update, kernel included** (the owner's
      build with a changed state format (versions), (e) with open network
      connections. Live patching of single functions only if a need
      appears.
+     **Milestone (a) done** (2026-11-02, scenarios handover_same,
+     handover_uefi, handover_disk; ARCHITECTURE "Kernel handover"):
+     `handover=<n>` hands the machine to a fresh copy of the kernel n
+     times. A versioned, CRC-checked handover record (memory map with
+     the frames in use, HHDM and the new image, framebuffer, command
+     line, boot modules, clock, parked CPUs, volume log position, kept
+     pages, the kernel file); the CPUs parked in a trampoline the way
+     Limine parks them; virtio devices reset; the new kernel boots from
+     the record, keeps the clock (monotonic across), starts every CPU
+     again, finds the marker page and the volume where they were. Host
+     tests: the record's round trip, damage, versions, older and unknown
+     sections; ELF checks; memory-map carving.
+     Next, for (b) (idle programs): carry processes and threads as
+     data (a REQUIRED section per object kind; threads as "user
+     registers + waiting on X until T"), user pages kept in place (a
+     frame bitmap section; the address spaces' page tables rebuilt from
+     a list of mappings), handles and objects by id, the registry's
+     volatile keys; `run=`/`start=` not run again when processes come
+     across; then a `Gala*` trigger so a program can ask for a handover
+     while it runs. Also open: freeing the first kernel's image and
+     Limine's reclaimable memory.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

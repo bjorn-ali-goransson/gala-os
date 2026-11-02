@@ -435,6 +435,26 @@ impl Drop for LegacyDevice {
     }
 }
 
+/// Resets every virtio device on the PCI bus (status 0), whichever driver
+/// owns it, so that none reads or writes memory any more: before a kernel
+/// handover, when this kernel's memory is about to be reused. The drivers
+/// are not told (no CPU runs them any more). Returns how many were reset.
+pub fn reset_all() -> u32 {
+    let mut count = 0;
+    super::pci::for_each(|f| {
+        if f.vendor != 0x1af4 {
+            return;
+        }
+        if let Some(io) = f.io_bar(0) {
+            // SAFETY: the device's legacy status register; writing 0 resets
+            // the device, which then stops using its queues.
+            unsafe { Port::<u8>::new(io + DEVICE_STATUS) }.write(0);
+            count += 1;
+        }
+    });
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::layout;
