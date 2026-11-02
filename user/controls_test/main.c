@@ -21,6 +21,14 @@
  * - COMBOBOX: items (add, insert, find, delete, reset, data), the
  *   selection, a drop-down list's text; GetComboBoxInfo names its edit
  *   and list.
+ * - COMBOBOX drop-down lists: CB_SHOWDROPDOWN sends CBN_DROPDOWN before
+ *   the list (GetComboBoxInfo's hwndList, class ComboLBox) shows under
+ *   the combo box, as wide as it; CB_GETDROPPEDSTATE; CB_SHOWDROPDOWN
+ *   FALSE sends CBN_SELENDCANCEL and CBN_CLOSEUP and hides it; a press on
+ *   the combo box drops it; the arrows while dropped change the selection
+ *   (CBN_SELCHANGE), Enter keeps it (CBN_SELENDOK, CBN_CLOSEUP), F4
+ *   toggles, Escape closes; the arrows while closed change the selection;
+ *   a CBS_DROPDOWN combo box's edit passes F4 and Escape on.
  * - IsDialogMessageW: Tab to the next WS_TABSTOP control
  *   (GetNextDlgTabItem), the dialog's other messages dispatched, other
  *   windows' messages not taken.
@@ -39,10 +47,20 @@ static int check;
 
 static WPARAM last_command;
 static int commands;
+/* The combo box notifications of id 42 and 43, in order; whether the
+ * list was visible when CBN_DROPDOWN came. */
+static int notes[32], nnotes;
+static HWND drop_list;
+static int list_visible_at_dropdown = -1;
 static LRESULT CALLBACK parent_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_COMMAND) {
         last_command = wparam;
         commands++;
+        if ((LOWORD(wparam) == 42 || LOWORD(wparam) == 43) && nnotes < 32) {
+            notes[nnotes++] = HIWORD(wparam);
+            if (HIWORD(wparam) == CBN_DROPDOWN && drop_list)
+                list_visible_at_dropdown = IsWindowVisible(drop_list) != 0;
+        }
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
@@ -201,6 +219,94 @@ static void combos(HWND parent) {
     CHECK(GetWindowTextW(d, text, 32) == 5 && wcscmp(text, L"typed") == 0);
 }
 
+static int last_note(void) {
+    return nnotes > 0 ? notes[nnotes - 1] : -1;
+}
+
+static int noted(int code) {
+    int n = 0;
+    for (int i = 0; i < nnotes; i++)
+        if (notes[i] == code) n++;
+    return n;
+}
+
+/* Drop-down lists (see the top). The order of CBN_SELCHANGE against
+ * CBN_CLOSEUP is not checked: the documentation says it is not
+ * predictable. */
+static void drop_downs(HWND parent) {
+    HWND c = CreateWindowExW(0, L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 10, 20, 150, 200,
+                             parent, (HMENU)42, GetModuleHandleW(NULL), NULL);
+    CHECK(c != NULL);
+    SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"one");
+    SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"two");
+    SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"three");
+    SendMessageW(c, CB_SETCURSEL, 0, 0);
+    COMBOBOXINFO info = {sizeof info};
+    CHECK(GetComboBoxInfo(c, &info) && info.hwndList != NULL);
+    HWND list = info.hwndList;
+    WCHAR text[32];
+    CHECK(GetClassNameW(list, text, 32) && lstrcmpiW(text, L"ComboLBox") == 0);
+    CHECK(!IsWindowVisible(list) && SendMessageW(c, CB_GETDROPPEDSTATE, 0, 0) == FALSE);
+
+    drop_list = list;
+    nnotes = 0;
+    CHECK(SendMessageW(c, CB_SHOWDROPDOWN, TRUE, 0) == TRUE);
+    CHECK(nnotes == 1 && notes[0] == CBN_DROPDOWN && list_visible_at_dropdown == 0);
+    CHECK(SendMessageW(c, CB_GETDROPPEDSTATE, 0, 0) == TRUE && IsWindowVisible(list));
+    RECT rc, rl;
+    GetWindowRect(c, &rc);
+    GetWindowRect(list, &rl);
+    CHECK(rl.left == rc.left && rl.right == rc.right && rl.top == rc.bottom && rl.bottom > rl.top);
+    CHECK(SendMessageW(c, CB_SHOWDROPDOWN, TRUE, 0) == TRUE && nnotes == 1);
+    CHECK(SendMessageW(c, CB_SHOWDROPDOWN, FALSE, 0) == TRUE);
+    CHECK(nnotes == 3 && notes[1] == CBN_SELENDCANCEL && notes[2] == CBN_CLOSEUP);
+    CHECK(SendMessageW(c, CB_GETDROPPEDSTATE, 0, 0) == FALSE && !IsWindowVisible(list));
+    CHECK(SendMessageW(c, CB_GETCURSEL, 0, 0) == 0);
+
+    /* A press on the combo box drops the list; the release leaves it. */
+    nnotes = 0;
+    SendMessageW(c, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(20, 8));
+    CHECK(SendMessageW(c, CB_GETDROPPEDSTATE, 0, 0) == TRUE && noted(CBN_DROPDOWN) == 1);
+    SendMessageW(c, WM_LBUTTONUP, 0, MAKELPARAM(20, 8));
+    CHECK(SendMessageW(c, CB_GETDROPPEDSTATE, 0, 0) == TRUE);
+    /* Down while dropped: the next item, CBN_SELCHANGE; Enter keeps it. */
+    SendMessageW(c, WM_KEYDOWN, VK_DOWN, 0);
+    CHECK(SendMessageW(c, CB_GETCURSEL, 0, 0) == 1 && noted(CBN_SELCHANGE) == 1);
+    CHECK(SendMessageW(c, CB_GETDROPPEDSTATE, 0, 0) == TRUE);
+    SendMessageW(c, WM_KEYDOWN, VK_RETURN, 0);
+    CHECK(SendMessageW(c, CB_GETDROPPEDSTATE, 0, 0) == FALSE && !IsWindowVisible(list));
+    CHECK(SendMessageW(c, CB_GETCURSEL, 0, 0) == 1 && last_note() == CBN_CLOSEUP);
+    CHECK(GetWindowTextW(c, text, 32) == 3 && wcscmp(text, L"two") == 0);
+    /* F4 drops it, Escape closes it. */
+    SendMessageW(c, WM_KEYDOWN, VK_F4, 0);
+    CHECK(SendMessageW(c, CB_GETDROPPEDSTATE, 0, 0) == TRUE && last_note() == CBN_DROPDOWN);
+    SendMessageW(c, WM_KEYDOWN, VK_ESCAPE, 0);
+    CHECK(SendMessageW(c, CB_GETDROPPEDSTATE, 0, 0) == FALSE && last_note() == CBN_CLOSEUP);
+    CHECK(SendMessageW(c, CB_GETCURSEL, 0, 0) == 1);
+    /* Closed, Down selects the next item. */
+    nnotes = 0;
+    SendMessageW(c, WM_KEYDOWN, VK_DOWN, 0);
+    CHECK(SendMessageW(c, CB_GETCURSEL, 0, 0) == 2 && noted(CBN_SELCHANGE) == 1);
+    CHECK(SendMessageW(c, CB_GETDROPPEDSTATE, 0, 0) == FALSE && noted(CBN_DROPDOWN) == 0);
+    drop_list = NULL;
+    DestroyWindow(c);
+
+    /* A CBS_DROPDOWN combo box: its edit passes F4 and Escape on. */
+    HWND d = CreateWindowExW(0, L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN, 170, 20, 150, 200, parent,
+                             (HMENU)43, GetModuleHandleW(NULL), NULL);
+    CHECK(d != NULL);
+    SendMessageW(d, CB_ADDSTRING, 0, (LPARAM)L"one");
+    COMBOBOXINFO di = {sizeof di};
+    CHECK(GetComboBoxInfo(d, &di) && di.hwndItem != NULL && di.hwndItem != d);
+    nnotes = 0;
+    SendMessageW(di.hwndItem, WM_KEYDOWN, VK_F4, 0);
+    CHECK(SendMessageW(d, CB_GETDROPPEDSTATE, 0, 0) == TRUE && notes[0] == CBN_DROPDOWN);
+    CHECK(IsWindowVisible(di.hwndList));
+    SendMessageW(di.hwndItem, WM_KEYDOWN, VK_ESCAPE, 0);
+    CHECK(SendMessageW(d, CB_GETDROPPEDSTATE, 0, 0) == FALSE && last_note() == CBN_CLOSEUP);
+    DestroyWindow(d);
+}
+
 /* IsDialogMessageW: Tab moves the focus to the next WS_TABSTOP control
  * (GetNextDlgTabItem, Shift+Tab back); other messages for the dialog's
  * windows are dispatched (TRUE); messages for other windows are not its
@@ -347,6 +453,7 @@ int main(void) {
     buttons(parent);
     edits(parent);
     combos(parent);
+    drop_downs(parent);
     dialog_keys(parent);
     dialogs(parent);
     DestroyWindow(parent);

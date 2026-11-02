@@ -608,6 +608,12 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    TrackPopupMenu(Ex) (gui_test's right click); FileZilla's screen check
    opens File and chooses Exit (status 0). Next: using it (connecting to
    a server), the combo boxes' drop-down lists and tooltips on popups.
+   **Drop-down lists** (2026-11-02): a COMBOBOX's list is a desktop popup
+   under it (a click, F4, Alt+Down, CB_SHOWDROPDOWN) with the mouse
+   capture: the hot item follows the pointer, a click picks an item, a
+   press outside or Escape closes it, with CBN_DROPDOWN, CBN_SELCHANGE,
+   CBN_SELENDOK/CBN_SELENDCANCEL and CBN_CLOSEUP (controls_test;
+   gui_test's screen check opens one and picks an item).
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,
@@ -1329,8 +1335,8 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       window; the filezilla scenario snaps FileZilla right and the
       server's console left (the FTP session's log beside the client).
       Next: console modes
-      (raw input with SetConsoleMode, Ctrl+C), the combo boxes' drop-down
-      lists and tooltips on popups.
+      (raw input with SetConsoleMode, Ctrl+C) and tooltips on popups (the
+      combo boxes' drop-down lists are done).
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

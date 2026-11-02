@@ -50,6 +50,7 @@ const WM_DRAWITEM: u32 = 0x002b;
 const WM_GETDLGCODE: u32 = 0x0087;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
+const WM_SYSKEYDOWN: u32 = 0x0104;
 const WM_CHAR: u32 = 0x0102;
 const WM_COMMAND: u32 = 0x0111;
 const WM_MOUSEMOVE: u32 = 0x0200;
@@ -1253,8 +1254,12 @@ extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
         WM_GETDLGCODE => {
             // DLGC_WANTCHARS | DLGC_HASSETSEL | DLGC_WANTARROWS, and all
             // keys for several lines.
-            0x80 | 0x8 | 0x1 | if s & ES_MULTILINE != 0 { 0x4 } else { 0 }
+            // A combo box's edit also wants them while the list shows.
+            let all = s & ES_MULTILINE != 0 || crate::combo::edit_dropped(hwnd);
+            0x80 | 0x8 | 0x1 | if all { 0x4 } else { 0 }
         }
+        // A combo box's edit passes Alt+Up/Down to it.
+        WM_SYSKEYDOWN if crate::combo::edit_key(hwnd, wparam, true) => 0,
         WM_CHAR => {
             let mut c = edit(hwnd);
             let ch = wparam as u16;
@@ -1320,6 +1325,9 @@ extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
             }
             0
         }
+        // A combo box's edit passes F4, the vertical arrows and pages (and
+        // Enter and Escape while the list shows) to it.
+        WM_KEYDOWN if crate::combo::edit_key(hwnd, wparam, false) => 0,
         WM_KEYDOWN => {
             let mut c = edit(hwnd);
             let shift = crate::window::GetKeyState(0x10) < 0;

@@ -24,15 +24,22 @@
 //!   TPM_RETURNCMD) and the program paints a blue square at the point.
 //! - An EDIT child at (220, 230): a click focuses it and typing "ok" shows
 //!   there (in the edit's text colour).
+//! - A CBS_DROPDOWNLIST COMBOBOX at (220, 20), 150 wide, with "Red",
+//!   "Green" and "Blue" ("Red" selected): a click on it drops its list
+//!   (CBN_DROPDOWN), a click on "Blue" in the list selects it: CB_GETCURSEL
+//!   is 2, the parent gets CBN_SELCHANGE, CBN_SELENDOK and CBN_CLOSEUP
+//!   (CBN_SELENDOK before CBN_CLOSEUP; Windows documents CBN_SELCHANGE's
+//!   place against CBN_CLOSEUP as unpredictable), and the program paints
+//!   a magenta square at (380, 60)-(392, 72).
 //! - A click on the window's close button is WM_CLOSE; DefWindowProc
 //!   destroys the window: WM_DESTROY, where the program calls
 //!   PostQuitMessage(7); GetMessageW then returns 0 with wParam 7; IsWindow
-//!   is FALSE afterwards. (A thread posts WM_CLOSE after 30 seconds if no
+//!   is FALSE afterwards. (A thread posts WM_CLOSE after 60 seconds if no
 //!   click comes: a failure.)
 //!
 //! It prints `gui_test: painted` once it has painted (xtask then checks the
 //! screen and gives the input), `gui_test: click`, `gui_test: typed hi`,
-//! `gui_test: menu 202`, and
+//! `gui_test: menu 202`, `gui_test: combo picked Blue`, and
 //! `gui_test: ok` at the end, or exits with the number of the failing
 //! check.
 
@@ -156,6 +163,7 @@ unsafe extern "system" {
     fn DestroyMenu(menu: Handle) -> i32;
     fn ClientToScreen(hwnd: Hwnd, point: *mut [i32; 2]) -> i32;
     fn CreateIconIndirect(info: *const IconInfo) -> Handle;
+    fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
 }
 
 /// ICONINFO.
@@ -227,6 +235,16 @@ const TPM_RETURNCMD: u32 = 0x100;
 const WS_CHILD: u32 = 0x4000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_EX_CLIENTEDGE: u32 = 0x200;
+const CBS_DROPDOWNLIST: u32 = 0x3;
+const CB_ADDSTRING: u32 = 0x0143;
+const CB_GETCURSEL: u32 = 0x0147;
+const CB_SETCURSEL: u32 = 0x014e;
+const CBN_SELCHANGE: u32 = 1;
+const CBN_DROPDOWN: u32 = 7;
+const CBN_CLOSEUP: u32 = 8;
+const CBN_SELENDOK: u32 = 9;
+const CBN_SELENDCANCEL: u32 = 10;
+const COMBO_ID: usize = 300;
 const MK_LBUTTON: usize = 1;
 const VK_H: usize = 0x48;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
@@ -275,6 +293,12 @@ static TIMED_OUT: AtomicU32 = AtomicU32::new(0);
 /// What was typed (WM_CHAR), as ASCII.
 static TYPED: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
 static TYPED_LEN: AtomicUsize = AtomicUsize::new(0);
+/// The combo box, its notifications in order, and whether Blue was
+/// picked as expected.
+static COMBO: AtomicUsize = AtomicUsize::new(0);
+static NOTES: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
+static NOTES_LEN: AtomicUsize = AtomicUsize::new(0);
+static PICKED: AtomicU32 = AtomicU32::new(0);
 
 fn check(cond: bool, got: u64) -> Result<(), u32> {
     let n = CHECK.fetch_add(1, Ordering::SeqCst) + 1;
@@ -383,6 +407,50 @@ fn draw_typed(hwnd: Hwnd) {
     }
 }
 
+/// The position of `code`'s first notification in NOTES, if any.
+fn noted(code: u32) -> Option<usize> {
+    let n = NOTES_LEN.load(Ordering::SeqCst).min(16);
+    (0..n).find(|&i| NOTES[i].load(Ordering::SeqCst) == code)
+}
+
+/// A combo box notification: once the list has dropped, Blue is picked
+/// (CB_GETCURSEL 2) and SELCHANGE, SELENDOK and CLOSEUP came (SELENDOK
+/// before CLOSEUP, no SELENDCANCEL), a magenta square.
+fn combo_note(hwnd: Hwnd, code: u32) {
+    let n = NOTES_LEN.fetch_add(1, Ordering::SeqCst);
+    if n < 16 {
+        NOTES[n].store(code, Ordering::SeqCst);
+    }
+    if !matches!(code, CBN_SELCHANGE | CBN_SELENDOK | CBN_CLOSEUP)
+        || PICKED.load(Ordering::SeqCst) != 0
+    {
+        return;
+    }
+    let (Some(drop), Some(change), Some(ok), Some(close)) =
+        (noted(CBN_DROPDOWN), noted(CBN_SELCHANGE), noted(CBN_SELENDOK), noted(CBN_CLOSEUP))
+    else {
+        return;
+    };
+    let combo = COMBO.load(Ordering::SeqCst) as Hwnd;
+    // SAFETY: our combo box.
+    let current = unsafe { SendMessageW(combo, CB_GETCURSEL, 0, 0) };
+    if current != 2 || drop > change || drop > ok || ok > close || noted(CBN_SELENDCANCEL).is_some()
+    {
+        return;
+    }
+    PICKED.store(1, Ordering::SeqCst);
+    // SAFETY: valid window and structures.
+    unsafe {
+        let hdc = GetDC(hwnd);
+        let magenta = CreateSolidBrush(0x00ff_00ff);
+        let r = Rect { left: 380, top: 60, right: 392, bottom: 72 };
+        FillRect(hdc, &r, magenta);
+        DeleteObject(magenta);
+        ReleaseDC(hwnd, hdc);
+    }
+    out(b"gui_test: combo picked Blue\r\n");
+}
+
 extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
     match msg {
         WM_LBUTTONDOWN => {
@@ -408,6 +476,9 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
         // (lParam 0); the edit's notifications come with its handle.
         WM_COMMAND => {
             let _ = check(lparam != 0, wparam as u64);
+            if wparam & 0xffff == COMBO_ID {
+                combo_note(hwnd, (wparam >> 16) as u32);
+            }
             0
         }
         WM_KEYDOWN => {
@@ -455,6 +526,35 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
                 )
             };
             let _ = check(!edit.is_null(), 0);
+            // A drop-down list combo box at (220, 20), 150 x 26.
+            let class: [u16; 9] = wide("COMBOBOX");
+            // SAFETY: valid strings and parent.
+            let combo = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    core::ptr::null(),
+                    WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                    220,
+                    20,
+                    150,
+                    26,
+                    hwnd,
+                    COMBO_ID as Handle,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                )
+            };
+            let _ = check(!combo.is_null(), 0);
+            COMBO.store(combo as usize, Ordering::SeqCst);
+            let items: [[u16; 6]; 3] = [wide("Red"), wide("Green"), wide("Blue")];
+            for (i, item) in items.iter().enumerate() {
+                // SAFETY: our combo box and a NUL-terminated string.
+                let at = unsafe { SendMessageW(combo, CB_ADDSTRING, 0, item.as_ptr() as isize) };
+                let _ = check(at == i as isize, at as u64);
+            }
+            // SAFETY: our combo box.
+            let _ = check(unsafe { SendMessageW(combo, CB_SETCURSEL, 0, 0) } == 0, 0);
             0
         }
         WM_PAINT => {
@@ -479,7 +579,7 @@ extern "system" fn closer(_: *mut c_void) -> u32 {
     // SAFETY: plain calls; the window is the test's.
     unsafe {
         // xtask clicks the close button long before.
-        Sleep(30_000);
+        Sleep(60_000);
         TIMED_OUT.store(1, Ordering::SeqCst);
         PostMessageW(WINDOW.load(Ordering::SeqCst) as Hwnd, WM_CLOSE, 0, 0);
     }
@@ -578,6 +678,8 @@ fn run() -> Result<(), u32> {
         check(KEYDOWN_H.load(Ordering::SeqCst) == 1, 0)?;
         check(TYPED_LEN.load(Ordering::SeqCst) == 2, TYPED_LEN.load(Ordering::SeqCst) as u64)?;
         check(TIMED_OUT.load(Ordering::SeqCst) == 0, 0)?;
+        // The combo box's list was dropped and Blue picked in it.
+        check(PICKED.load(Ordering::SeqCst) == 1, NOTES_LEN.load(Ordering::SeqCst) as u64)?;
     }
     match FAILED.load(Ordering::SeqCst) {
         0 => Ok(()),
