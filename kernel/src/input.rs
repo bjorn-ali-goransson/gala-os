@@ -26,8 +26,9 @@ fn input_thread(_: usize) {
         crate::warn!("input: no PS/2 mouse");
         return;
     }
-    crate::info!("input: PS/2 mouse enabled");
-    let mut packet = Packet::default();
+    let wheel = controller.enable_wheel();
+    crate::info!("input: PS/2 mouse enabled (wheel: {wheel})");
+    let mut packet = Packet { size: if wheel { 4 } else { 3 }, ..Packet::default() };
     let mut keys = Keys::default();
     let mut rounds = 0u32;
     loop {
@@ -43,7 +44,13 @@ fn input_thread(_: usize) {
                 }
                 continue;
             }
-            let Some((dx, dy, buttons)) = packet.push(byte) else { continue };
+            let Some((dx, dy, buttons, dz)) = packet.push(byte) else { continue };
+            if dz != 0 {
+                if let Some((px, py, b)) = pending.take() {
+                    deliver(px, py, b);
+                }
+                crate::nt::desktop::wheel_event(dz);
+            }
             pending = match pending {
                 Some((px, py, b)) if b == buttons => Some((px + dx, py + dy, b)),
                 Some((px, py, b)) => {
@@ -76,32 +83,38 @@ fn deliver(dx: i64, dy: i64, buttons: u8) {
 
 /// A PS/2 mouse packet being assembled: flags (bit 3 always set; bits
 /// 0-2 buttons; bits 4, 5 the signs of x and y; bits 6, 7 overflow), then
-/// x and y (y up).
+/// x and y (y up), and with the wheel on a fourth byte: its movement
+/// (signed, positive towards the user).
 #[derive(Default)]
 struct Packet {
-    bytes: [u8; 3],
+    bytes: [u8; 4],
     len: usize,
+    /// 3, or 4 with the wheel.
+    size: usize,
 }
 
 impl Packet {
-    /// Adds a byte; a whole packet gives (dx, dy screen-down, buttons).
-    fn push(&mut self, byte: u8) -> Option<(i64, i64, u8)> {
+    /// Adds a byte; a whole packet gives (dx, dy screen-down, buttons,
+    /// wheel notches: positive away from the user, as WM_MOUSEWHEEL).
+    fn push(&mut self, byte: u8) -> Option<(i64, i64, u8, i64)> {
         if self.len == 0 && byte & 0x08 == 0 {
             return None; // out of step: wait for a flags byte
         }
         self.bytes[self.len] = byte;
         self.len += 1;
-        if self.len < 3 {
+        if self.len < self.size.max(3) {
             return None;
         }
         self.len = 0;
-        let [flags, x, y] = self.bytes;
+        let [flags, x, y, z] = self.bytes;
+        // The low four bits, signed (IntelliMouse).
+        let dz = if self.size == 4 { -i64::from(((z << 4) as i8) >> 4) } else { 0 };
         if flags & 0xc0 != 0 {
             return None; // overflowed
         }
         let dx = i64::from(x) - if flags & 0x10 != 0 { 256 } else { 0 };
         let dy = i64::from(y) - if flags & 0x20 != 0 { 256 } else { 0 };
-        Some((dx, -dy, flags & 7))
+        Some((dx, -dy, flags & 7, dz))
     }
 }
 
@@ -193,10 +206,21 @@ mod tests {
         assert_eq!(p.push(0x00), None);
         assert_eq!(p.push(0x09), None);
         assert_eq!(p.push(5), None);
-        assert_eq!(p.push(3), Some((5, -3, 1)));
+        assert_eq!(p.push(3), Some((5, -3, 1, 0)));
         // Negative x (sign bit 4), negative y (bit 5): left and down.
         assert_eq!(p.push(0x38), None);
         assert_eq!(p.push(0xff), None);
-        assert_eq!(p.push(0xf0), Some((-1, 16, 0)));
+        assert_eq!(p.push(0xf0), Some((-1, 16, 0, 0)));
+        // With the wheel: a fourth byte, signed in its low four bits
+        // (positive towards the user: a negative WM_MOUSEWHEEL).
+        let mut p = Packet { size: 4, ..Packet::default() };
+        for b in [0x08, 0, 0] {
+            assert_eq!(p.push(b), None);
+        }
+        assert_eq!(p.push(0x01), Some((0, 0, 0, -1)));
+        for b in [0x08, 0, 0] {
+            assert_eq!(p.push(b), None);
+        }
+        assert_eq!(p.push(0x0f), Some((0, 0, 0, 1)));
     }
 }

@@ -4435,6 +4435,20 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                         PixelCheck::AnyIn(646, 38 + 11 * 19, 300, 16, 0xcccccc),
                     ],
                 },
+                ScreenStep {
+                    // Forty more lines pushed the first ones off the top;
+                    // the wheel turned up (six notches, three lines each)
+                    // scrolls back to them: the green line shows again.
+                    input: &[
+                        "mouse_move 0 0 1",
+                        "mouse_move 0 0 1",
+                        "mouse_move 0 0 1",
+                        "mouse_move 0 0 1",
+                        "mouse_move 0 0 1",
+                        "mouse_move 0 0 1",
+                    ],
+                    pixels: &[PixelCheck::AnyIn(646, 38 + 19, 300, 16, 0x13a10e)],
+                },
             ],
         },
     ),

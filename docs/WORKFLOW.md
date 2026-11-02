@@ -516,7 +516,8 @@ pixels: e.g. the click that ends the program), kept as
 starts in the middle of the screen and is clamped to it: moving it far
 up and left first (`mouse_move -255 -255` three times) puts it at (0, 0)
 whatever the earlier steps did. Windows-key chords are one `sendkey`
-(`sendkey meta_l-right`: Snap). A step's pixel check is retried (a new screendump every 0.5 s,
+(`sendkey meta_l-right`: Snap). The wheel: `mouse_move 0 0 1` is one
+notch up (away from the user; a negative dz is down). A step's pixel check is retried (a new screendump every 0.5 s,
 for about 30 s) before it fails, because a redraw under load (the full
 suite) can outlast the first dump, and a step may wait for the program
 (FileZilla's TLS handshake, then its certificate dialog). Input is

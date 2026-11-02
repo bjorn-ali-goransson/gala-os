@@ -155,6 +155,9 @@ pub const SC_RESTORE: u64 = 0xf120;
 /// Above 0xFFFF: no Windows message has this number.
 pub const GALA_WM_PLACE: u32 = 0x0001_0001;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
+pub const WM_MOUSEWHEEL: u32 = 0x020a;
+/// One wheel notch (WHEEL_DELTA).
+pub const WHEEL_DELTA: i64 = 120;
 pub const WM_LBUTTONDOWN: u32 = 0x0201;
 pub const WM_LBUTTONUP: u32 = 0x0202;
 pub const WM_RBUTTONDOWN: u32 = 0x0204;
@@ -1032,6 +1035,26 @@ impl Desktop {
             (true, false) => WM_SYSKEYUP,
         };
         self.send(id, message, u64::from(vk), lparam);
+    }
+
+    /// The wheel turned `notches` (positive away from the user): a
+    /// WM_MOUSEWHEEL to the window under the pointer (Windows' "scroll
+    /// inactive windows when hovering"), else to the capture or the active
+    /// one: wParam's high word the distance (WHEEL_DELTA a notch), lParam
+    /// the client position (user32 makes it the screen position).
+    pub fn wheel(&mut self, notches: i64) {
+        let (x, y) = self.pointer;
+        let id = match (self.captured, self.hit(x, y)) {
+            (Some(id), _) => id,
+            (None, Hit::Client(id)) => id,
+            _ => match self.active {
+                Some(id) => id,
+                None => return,
+            },
+        };
+        let delta = (notches * WHEEL_DELTA).clamp(-0x8000, 0x7fff) as i16 as u16;
+        let lp = self.client_lparam(id, x, y);
+        self.send(id, WM_MOUSEWHEEL, u64::from(delta) << 16, lp);
     }
 
     // ---- Window management ---------------------------------------------
@@ -2128,6 +2151,18 @@ fn signal(events: Vec<ObjectRef>) {
 
 /// Keyboard input: virtual key `vk` (scan code `scan`, E0-prefixed if
 /// `extended`) went down or up.
+/// The mouse wheel (from the input thread).
+pub fn wheel_event(notches: i64) {
+    let mut d = DESKTOP.lock();
+    if !d.painted {
+        return;
+    }
+    d.wheel(notches);
+    let wakes = d.take_wakes();
+    drop(d);
+    signal(wakes);
+}
+
 pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) {
     let mut d = DESKTOP.lock();
     if !d.painted {

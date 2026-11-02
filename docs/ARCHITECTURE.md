@@ -1274,7 +1274,11 @@ Windows, never shadows the system's DLLs.)
     colours incl. bold as bright, CSI K, CSI J, CSI H/f, CSI A-D and G),
     scrolling at the bottom. Typed keys become key records (WM_CHAR, and
     WM_KEYDOWN/UP for keys without a character). It ends when its window
-    is closed. TODO: scrollback, rewrapping on resize, telling the
+    is closed. Scrollback: the lines scrolled off the top (300, a ring
+    in a zero-initialized static, so the program file stays small); the
+    wheel scrolls the view three lines a notch, a view scrolled up keeps
+    its lines while output arrives, typing goes back to the screen.
+    TODO: a scroll bar, rewrapping on resize, telling the
     programs the new size (GetConsoleScreenBufferInfo,
     WINDOW_BUFFER_SIZE_EVENT), closing with the session.
   - Tests: kernel host tests for the ring and queue; the console_window
@@ -2215,6 +2219,16 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   lParam width | height << 32), user32's input pump posts it to the
   window's thread and DispatchMessage calls SetWindowPos (no longer
   maximized), so the program sees WM_SIZE.
+- **Wheel** (`desktop::wheel`): the input thread turns on an
+  IntelliMouse-compatible wheel (the sample-rate knock 200, 100, 80, then
+  device id 3: 4-byte packets, the fourth byte's low nibble the signed
+  movement, positive towards the user). Each turn is a WM_MOUSEWHEEL
+  (wParam's high word: WHEEL_DELTA 120 a notch, positive away from the
+  user) to the window under the pointer (Windows 10's default "scroll
+  inactive windows"), else the capture or the active window; user32
+  routes it to the child under the pointer like other mouse messages,
+  makes lParam the screen position, and DefWindowProc passes it to the
+  parent.
 - **Mouse** (`desktop::pointer`): a press on the start button toggles the
   menu; with the menu open, a press elsewhere only closes it. A taskbar
   button restores a minimized window, minimizes the active one, else

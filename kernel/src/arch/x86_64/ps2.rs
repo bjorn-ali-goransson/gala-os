@@ -98,4 +98,28 @@ impl I8042 {
         }
         self.mouse_command(0xf6) && self.mouse_command(0xf4)
     }
+
+    /// Turns on the wheel of an IntelliMouse-compatible mouse (the
+    /// documented knock: sample rates 200, 100, 80, then the device id
+    /// reads 3) before reporting starts; whether it did (then packets are
+    /// 4 bytes, the fourth the wheel's movement).
+    pub fn enable_wheel(&mut self) -> bool {
+        if !self.mouse_command(0xf5) {
+            return false;
+        }
+        for rate in [200, 100, 80] {
+            if !self.mouse_command(0xf3) || !self.mouse_command(rate) {
+                return false;
+            }
+        }
+        if !self.mouse_command(0xf2) {
+            return false;
+        }
+        let id = (0..16).find_map(|_| match self.read_wait() {
+            Some((b, true)) => Some(b),
+            _ => None,
+        });
+        self.mouse_command(0xf4);
+        id == Some(3)
+    }
 }

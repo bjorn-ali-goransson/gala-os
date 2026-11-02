@@ -176,6 +176,7 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_PAINT: u32 = 0x000f;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_SIZE: u32 = 0x0005;
+const WM_MOUSEWHEEL: u32 = 0x020a;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
 const WM_CHAR: u32 = 0x0102;
@@ -231,6 +232,63 @@ struct Cell {
 
 const BLANK: Cell = Cell { ch: b' ' as u16, fg: DEFAULT_FG, bg: DEFAULT_BG };
 
+/// Lines kept above the screen (the scrollback).
+const HISTORY: usize = 300;
+
+/// The scrollback: the lines that scrolled off the top, oldest first (a
+/// ring), and how far up the view is (0: the screen itself). All zeros at
+/// first, so it costs the program file nothing (a zero cell shows as a
+/// blank).
+struct History {
+    lines: [[Cell; MAX_COLS]; HISTORY],
+    head: usize,
+    len: usize,
+    view: usize,
+}
+
+impl History {
+    fn push(&mut self, line: &[Cell; MAX_COLS]) {
+        let at = (self.head + self.len) % HISTORY;
+        self.lines[at] = *line;
+        if self.len < HISTORY {
+            self.len += 1;
+        } else {
+            self.head = (self.head + 1) % HISTORY;
+        }
+        // A view scrolled up keeps showing the same lines.
+        if self.view > 0 {
+            self.view = (self.view + 1).min(self.len);
+        }
+    }
+
+    /// The `i`th line kept (0: the oldest).
+    fn line(&self, i: usize) -> &[Cell; MAX_COLS] {
+        &self.lines[(self.head + i) % HISTORY]
+    }
+
+    /// Scrolls the view `lines` up (negative: down), within what is kept.
+    fn scroll(&mut self, lines: isize) {
+        self.view = (self.view as isize + lines).clamp(0, self.len as isize) as usize;
+    }
+}
+
+struct HistoryCell(UnsafeCell<History>);
+// SAFETY: one thread (the window's) uses it.
+unsafe impl Sync for HistoryCell {}
+
+const ZERO: Cell = Cell { ch: 0, fg: 0, bg: 0 };
+static HISTORY_LINES: HistoryCell = HistoryCell(UnsafeCell::new(History {
+    lines: [[ZERO; MAX_COLS]; HISTORY],
+    head: 0,
+    len: 0,
+    view: 0,
+}));
+
+fn history() -> &'static mut History {
+    // SAFETY: only the window's thread calls it, never across a borrow.
+    unsafe { &mut *HISTORY_LINES.0.get() }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Parse {
     Ground,
@@ -281,11 +339,13 @@ impl Screen {
         Cell { ch: b' ' as u16, fg: self.fg, bg: self.bg }
     }
 
-    /// To the next line, scrolling the screen up at the bottom.
+    /// To the next line, scrolling the screen up at the bottom (the top
+    /// line goes into the scrollback).
     fn line_feed(&mut self) {
         if self.y + 1 < self.rows {
             self.y += 1;
         } else {
+            history().push(&self.cells[0]);
             self.cells.copy_within(1..self.rows, 0);
             self.cells[self.rows - 1] = [self.blank(); MAX_COLS];
         }
@@ -298,6 +358,9 @@ impl Screen {
         let (cols, rows) = (cols.clamp(1, MAX_COLS), rows.clamp(1, MAX_ROWS));
         if self.y >= rows {
             let up = self.y + 1 - rows;
+            for line in &self.cells[..up] {
+                history().push(line);
+            }
             self.cells.copy_within(up.., 0);
             for line in &mut self.cells[MAX_ROWS - up..] {
                 *line = [BLANK; MAX_COLS];
@@ -536,7 +599,12 @@ fn paint(hwnd: Hwnd) {
         let total = Rect { left: 0, top: 0, right: 0x7fff, bottom: 0x7fff };
         SetBkColor(hdc, PALETTE[DEFAULT_BG as usize]);
         ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &total, core::ptr::null(), 0, core::ptr::null());
-        for (row, cells) in st.screen.cells[..rows].iter().enumerate() {
+        let hist = history();
+        // The view: the scrollback's last `view` lines, then the screen.
+        let first = hist.len - hist.view;
+        for row in 0..rows {
+            let i = first + row;
+            let cells = if i < hist.len { hist.line(i) } else { &st.screen.cells[i - hist.len] };
             let y = PAD + row as i32 * ch;
             let mut start = 0;
             while start < cols {
@@ -544,7 +612,8 @@ fn paint(hwnd: Hwnd) {
                 let mut end = start;
                 let mut text = [0u16; MAX_COLS];
                 while end < cols && cells[end].fg == fg && cells[end].bg == bg {
-                    text[end - start] = cells[end].ch;
+                    text[end - start] =
+                        if cells[end].ch == 0 { b' ' as u16 } else { cells[end].ch };
                     end += 1;
                 }
                 let r = Rect {
@@ -570,9 +639,10 @@ fn paint(hwnd: Hwnd) {
                 start = end;
             }
         }
-        // The cursor: an underline in the text colour.
+        // The cursor: an underline in the text colour (not when scrolled
+        // up).
         let s = &st.screen;
-        if s.x < cols {
+        if s.x < cols && hist.view == 0 {
             let cx = PAD + s.x as i32 * cw;
             let cy = PAD + s.y as i32 * ch + ch - 2;
             let r = Rect { left: cx, top: cy, right: cx + cw, bottom: cy + 2 };
@@ -671,7 +741,20 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             }
             0
         }
+        // The wheel scrolls through the scrollback, three lines a notch.
+        WM_MOUSEWHEEL => {
+            let delta = (wparam >> 16) as u16 as i16;
+            history().scroll(isize::from(delta) / 40);
+            // SAFETY: our window.
+            unsafe { InvalidateRect(hwnd, core::ptr::null(), 0) };
+            0
+        }
         WM_CHAR => {
+            // Typing goes back to the screen.
+            if core::mem::take(&mut history().view) > 0 {
+                // SAFETY: our window.
+                unsafe { InvalidateRect(hwnd, core::ptr::null(), 0) };
+            }
             send_key(true, 0, wparam as u16);
             0
         }

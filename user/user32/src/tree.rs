@@ -1180,6 +1180,12 @@ const SC_MOUSEMENU: usize = 0xf090;
 /// What DefWindowProc does for the messages of this module.
 pub fn def_window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Option<isize> {
     match msg {
+        // WM_MOUSEWHEEL/WM_MOUSEHWHEEL: on to the parent (a child that
+        // doesn't scroll leaves it to the window around it).
+        0x020a | 0x020e => {
+            let parent = window(hwnd).map_or(0, |w| w.parent);
+            Some(if parent != 0 { SendMessageW(parent, msg, wparam, lparam) } else { 0 })
+        }
         // The window menu's commands (and the caption buttons'): close,
         // maximize, restore; minimizing is the desktop's own.
         WM_SYSCOMMAND => {

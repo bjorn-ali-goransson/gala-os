@@ -344,3 +344,18 @@ fn the_windows_key_with_arrows_snaps_the_active_window() {
     snap(&mut d, 0x28);
     assert!(d.window(a).unwrap().minimized);
 }
+
+#[test]
+fn the_wheel_goes_to_the_window_under_the_pointer() {
+    let (mut d, a) = desktop_with_window();
+    go(&mut d, 500, 300, 0);
+    d.input.clear();
+    d.wheel(-2);
+    let e = &d.input[0];
+    assert_eq!((e.window, e.message), (a, WM_MOUSEWHEEL));
+    assert_eq!((e.wparam >> 16) as u16 as i16, -240);
+    let (ox, oy) = d.window(a).unwrap().client_origin();
+    assert_eq!(e.lparam, d.client_lparam(a, 500, 300));
+    assert_eq!(e.lparam & 0xffff, (500 - ox) as u64);
+    assert_eq!((e.lparam >> 16) & 0xffff, (300 - oy) as u64);
+}

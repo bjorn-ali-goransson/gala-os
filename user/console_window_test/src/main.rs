@@ -13,8 +13,9 @@
 //! returns the one key typed, "z", without Enter (`console_window_test: raw
 //! z`); Ctrl+C typed in the window is not input but a CTRL_C_EVENT to the
 //! handler, on another thread (`console_window_test: ctrl-c`; the handler
-//! returns TRUE, so the process goes on). It ends 8 seconds later, so
-//! xtask sees the window.
+//! returns TRUE, so the process goes on). Forty numbered lines follow
+//! (the window's scrollback keeps the first ones). It ends 8 seconds
+//! later, so xtask sees the window.
 //! ReadFile on a console returns
 //! the line with "\r\n", as Windows' cooked mode does.
 
@@ -187,6 +188,11 @@ pub extern "C" fn mainCRTStartup() -> ! {
             ExitProcess(7);
         }
         out(b"console_window_test: ctrl-c\n");
+        // Forty more lines: the first ones scroll into the scrollback
+        // (xtask turns the wheel to see them again).
+        for i in 0..40u8 {
+            out(&[b'l', b'i', b'n', b'e', b' ', b'0' + i / 10, b'0' + i % 10, b'\n']);
+        }
     }
     // Time for xtask to look at the window, then the end.
     // SAFETY: plain calls.

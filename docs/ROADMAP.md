@@ -1336,7 +1336,9 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       server's console left (the FTP session's log beside the client).
       **Console modes and Ctrl+C** (2026-11-02): raw input without line
       editing or echo, Ctrl+C to the control handlers on their own thread
-      (console_window). Next: tooltips on popups (the combo boxes'
+      (console_window). **Mouse wheel** (2026-11-02): PS/2 wheel,
+      WM_MOUSEWHEEL, conhost's scrollback (console_window turns it).
+      Next: tooltips on popups (the combo boxes'
       drop-down lists are done).
 
 ## Later

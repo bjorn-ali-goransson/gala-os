@@ -1790,6 +1790,12 @@ fn pump() {
                     continue;
                 }
                 let (to, lparam) = crate::tree::route(top, message, lparam);
+                // WM_MOUSEWHEEL's position is the screen's.
+                let lparam = if message == 0x020a {
+                    CURSOR.load(Ordering::Relaxed) as isize
+                } else {
+                    lparam
+                };
                 // The pointer left the window TrackMouseEvent watches.
                 let tracked = TRACKED.load(Ordering::Relaxed);
                 if message == 0x0200 && tracked != 0 && tracked != to {
