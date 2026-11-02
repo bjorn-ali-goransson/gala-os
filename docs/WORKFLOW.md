@@ -222,6 +222,22 @@ shows it.
   `--coff-exports` of `user/bin/test*.dll`, ordinals included (an export
   with RVA 0 is an empty ordinal slot, not an export).
 
+- **richedit.h packs its structures to 4 bytes** (`pshpack4.h`): a
+  pointer or WPARAM after a 4-byte field is not 8-aligned (ENLINK's
+  wParam at 28, lParam at 36, chrg at 44; GETTEXTEX's lpDefaultChar at
+  12; EDITSTREAM's callback at 12). Write such structures byte by byte;
+  EN_LINK's range read back as (0, 4) until this was found. Check other
+  SDK headers for `pshpack` before laying out a structure.
+- **Nothing that may send a message under a control's lock**:
+  BeginPaint sends WM_ERASEBKGND, SetWindowLong(GWL_STYLE) may send
+  WM_STYLECHANGING, and wx subclasses every control (its procedure may
+  send the control anything). Take the DC (or change the style) outside
+  the lock, as `user/richedit` does; its `Store` returns None to a
+  thread that asks again while holding it rather than spinning.
+- **Two DLLs with one implementation** (riched20 and msftedit): an rlib
+  crate (`user/richedit`, its own panic handler and imports) and a small
+  cdylib crate per DLL whose DllMain registers its classes; list each
+  cdylib in USER_DLLS and the rlib on the CI clippy line.
 - **COM interfaces written in Rust** (gala's UIAutomationCore): take the
   method order from the C `...Vtbl` structs in the mingw-w64 header
   (inherited methods included). On x64 a by-value argument over 8 bytes
