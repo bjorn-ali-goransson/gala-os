@@ -125,6 +125,8 @@ pub const GALA_WINDOW_SEND: u32 = 0x7f48;
 pub const GALA_WINDOW_SEND_WAIT: u32 = 0x7f49;
 pub const GALA_WINDOW_RECEIVE: u32 = 0x7f4a;
 pub const GALA_WINDOW_REPLY: u32 = 0x7f4b;
+pub const GALA_WINDOW_POST_THREAD: u32 = 0x7f50;
+pub const GALA_WINDOW_SEND_ABANDON: u32 = 0x7f51;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -318,6 +320,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_SEND_WAIT, "GalaWindowSendWait", 5, gala_window_send_wait),
     (GALA_WINDOW_RECEIVE, "GalaWindowReceive", 4, gala_window_receive),
     (GALA_WINDOW_REPLY, "GalaWindowReply", 4, gala_window_reply),
+    (GALA_WINDOW_POST_THREAD, "GalaWindowPostThread", 4, gala_window_post_thread),
+    (GALA_WINDOW_SEND_ABANDON, "GalaWindowSendAbandon", 1, gala_window_send_abandon),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1623,6 +1627,8 @@ fn read_window_info(call: &Call<'_>, ptr: u64) -> Result<super::window::Info, Nt
 fn gala_window_register(call: &mut Call<'_>) -> NtStatus {
     let info = tri!(read_window_info(call, arg!(call, 0)));
     let hwnd = tri!(super::window::register(call.process.id as u32, info));
+    // A thread that makes a window has a message queue.
+    tri!(note_queue(call));
     if call.process.write(arg!(call, 1), &hwnd.to_le_bytes()).is_err() {
         let _ = super::window::unregister(call.process.id as u32, hwnd);
         return NtStatus::ACCESS_VIOLATION;
@@ -1694,18 +1700,39 @@ fn gala_window_post(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
+/// GalaWindowPostThread(Tid, Message, wParam, lParam): posts a message
+/// to any process's thread (PostThreadMessage); its process's queue event
+/// is set. STATUS_INVALID_CID when the thread has no message queue.
+fn gala_window_post_thread(call: &mut Call<'_>) -> NtStatus {
+    let (tid, message) = (arg!(call, 0) as u32, arg!(call, 1) as u32);
+    let event = tri!(super::window::post_thread(tid, message, arg!(call, 2), arg!(call, 3)));
+    if let Some(e) = event {
+        wait::set_signal(&e, 1);
+    }
+    NtStatus::SUCCESS
+}
+
+/// The calling thread has a message queue (PostThreadMessage reaches it).
+fn note_queue(call: &Call<'_>) -> Result<(), NtStatus> {
+    let tid = thread::current_id().unwrap_or(0) as u32;
+    super::window::has_queue(call.process.id as u32, tid)
+}
+
 /// GalaWindowPosted(*Records, Max, *Count): takes the messages posted to
-/// the caller's windows from other processes, oldest first: 32-byte
-/// records (hwnd u64, message u32, 4 unused, wParam u64, lParam u64).
+/// the caller's windows and threads from other processes (and its own
+/// thread messages), oldest first: 32-byte records (hwnd u64, message
+/// u32, thread id u32 (hwnd 0: a thread message; else 0), wParam u64,
+/// lParam u64).
 fn gala_window_posted(call: &mut Call<'_>) -> NtStatus {
     use super::window::Posted;
     let (ptr, max, count) = (arg!(call, 0), (arg!(call, 1) as usize).min(64), arg!(call, 2));
-    let mut got = [Posted { pid: 0, hwnd: 0, message: 0, wparam: 0, lparam: 0 }; 64];
+    let mut got = [Posted::EMPTY; 64];
     let n = super::window::take_posted(call.process.id as u32, &mut got[..max]);
     let mut raw = [0u8; 32 * 64];
     for (m, r) in got[..n].iter().zip(raw.chunks_exact_mut(32)) {
         r[0..8].copy_from_slice(&m.hwnd.to_le_bytes());
         r[8..12].copy_from_slice(&m.message.to_le_bytes());
+        r[12..16].copy_from_slice(&m.tid.to_le_bytes());
         r[16..24].copy_from_slice(&m.wparam.to_le_bytes());
         r[24..32].copy_from_slice(&m.lparam.to_le_bytes());
     }
@@ -1728,11 +1755,15 @@ fn read_vec(call: &Call<'_>, ptr: u64, len: usize) -> Result<Vec<u8>, NtStatus> 
     Ok(v)
 }
 
-/// GalaWindowSend(*Request, *Id): sends a message to another process's
-/// window. Request (48 bytes): hwnd u64, message u32, out_max u32 (room
-/// the receiver may fill), wParam u64, lParam u64, input pointer u64,
-/// input length u32. The window's thread gets it from GalaWindowReceive;
-/// the caller waits with GalaWindowSendWait(Id).
+/// GalaWindowSend(*Request, *Id): sends a message to another thread's
+/// window (any process's). Request (48 bytes): hwnd u64, message u32,
+/// out_max u32 (room the receiver may fill), wParam u64, lParam u64,
+/// input pointer u64, input length u32, flags u32 (nt::window::SEND_*:
+/// notify, callback, abort if hung). The window's thread gets it from
+/// GalaWindowReceive; the caller waits with GalaWindowSendWait(Id) (not
+/// for SEND_NOTIFY). STATUS_INVALID_HANDLE for no window (a thread's
+/// windows go when it ends), STATUS_TIMEOUT for a hung receiver with
+/// SEND_ABORT_IF_HUNG.
 fn gala_window_send(call: &mut Call<'_>) -> NtStatus {
     let mut req = [0u8; 48];
     if call.process.read(arg!(call, 0), &mut req).is_err() {
@@ -1740,21 +1771,19 @@ fn gala_window_send(call: &mut Call<'_>) -> NtStatus {
     }
     let u64_at = |at: usize| u64::from_le_bytes(req[at..at + 8].try_into().unwrap_or([0; 8]));
     let u32_at = |at: usize| u32::from_le_bytes(req[at..at + 4].try_into().unwrap_or([0; 4]));
-    // A window whose thread has ended (it was not destroyed with it):
-    // nobody would ever handle the message.
-    if super::window::query(u64_at(0)).is_some_and(|w| !thread::is_running(w.tid.into())) {
-        return NtStatus::THREAD_IS_TERMINATING;
-    }
     let data = tri!(read_vec(call, u64_at(32), u32_at(40) as usize));
-    let (id, _, wake) = tri!(super::window::send(
-        call.process.id as u32,
-        u64_at(0),
-        u32_at(8),
-        u64_at(16),
-        u64_at(24),
+    let (id, wake) = tri!(super::window::send(super::window::Request {
+        from_pid: call.process.id as u32,
+        from_tid: thread::current_id().unwrap_or(0) as u32,
+        hwnd: u64_at(0),
+        message: u32_at(8),
+        wparam: u64_at(16),
+        lparam: u64_at(24),
         data,
-        u32_at(12),
-    ));
+        out_max: u32_at(12),
+        flags: u32_at(44),
+        now: platform::monotonic_ns() / 1_000_000,
+    }));
     if let Some(e) = wake {
         wait::set_signal(&e, 1);
     }
@@ -1798,15 +1827,24 @@ fn gala_window_send_wait(call: &mut Call<'_>) -> NtStatus {
     }
 }
 
+/// GalaWindowSendAbandon(Id): the caller stops waiting for sent message
+/// Id (SendMessageTimeout's time-out); the receiver still handles it.
+fn gala_window_send_abandon(call: &mut Call<'_>) -> NtStatus {
+    tri!(super::window::abandon(call.process.id as u32, arg!(call, 0)));
+    NtStatus::SUCCESS
+}
+
 /// GalaWindowReceive(Tid, *Header, Input, InputMax): the oldest message
-/// sent to the caller's thread Tid from another process. Header (48
-/// bytes): id u64, hwnd u64, message u32, out_max u32, wParam u64,
-/// lParam u64, input length u32; the input into Input (cut at InputMax).
-/// STATUS_NO_MORE_ENTRIES when none waits. With no Header, only whether
-/// one waits (nothing taken).
+/// sent to the caller's thread Tid by another thread. Header (48 bytes):
+/// id u64, hwnd u64, message u32, out_max u32, wParam u64, lParam u64,
+/// input length u32, flags u32 (how it was sent: nt::window::SEND_*); the
+/// input into Input (cut at InputMax). STATUS_NO_MORE_ENTRIES when none
+/// waits. With no Header, only whether one waits (nothing taken). The
+/// calling thread has a message queue from then on.
 fn gala_window_receive(call: &mut Call<'_>) -> NtStatus {
     let (tid, head, input, max) =
         (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2), arg!(call, 3) as usize);
+    tri!(note_queue(call));
     if head == 0 {
         return if super::window::sent_waiting(call.process.id as u32, tid) {
             NtStatus::SUCCESS
@@ -1814,22 +1852,21 @@ fn gala_window_receive(call: &mut Call<'_>) -> NtStatus {
             NtStatus::NO_MORE_ENTRIES
         };
     }
-    let Some((id, hwnd, message, wparam, lparam, data, out_max)) =
-        super::window::receive(call.process.id as u32, tid)
-    else {
+    let Some(m) = super::window::receive(call.process.id as u32, tid) else {
         return NtStatus::NO_MORE_ENTRIES;
     };
-    let n = data.len().min(max);
+    let n = m.data.len().min(max);
     let mut h = [0u8; 48];
-    h[0..8].copy_from_slice(&id.to_le_bytes());
-    h[8..16].copy_from_slice(&hwnd.to_le_bytes());
-    h[16..20].copy_from_slice(&message.to_le_bytes());
-    h[20..24].copy_from_slice(&out_max.to_le_bytes());
-    h[24..32].copy_from_slice(&wparam.to_le_bytes());
-    h[32..40].copy_from_slice(&lparam.to_le_bytes());
+    h[0..8].copy_from_slice(&m.id.to_le_bytes());
+    h[8..16].copy_from_slice(&m.hwnd.to_le_bytes());
+    h[16..20].copy_from_slice(&m.message.to_le_bytes());
+    h[20..24].copy_from_slice(&m.out_max.to_le_bytes());
+    h[24..32].copy_from_slice(&m.wparam.to_le_bytes());
+    h[32..40].copy_from_slice(&m.lparam.to_le_bytes());
     h[40..44].copy_from_slice(&(n as u32).to_le_bytes());
+    h[44..48].copy_from_slice(&m.flags.to_le_bytes());
     if call.process.write(head, &h).is_err()
-        || (n > 0 && call.process.write(input, &data[..n]).is_err())
+        || (n > 0 && call.process.write(input, &m.data[..n]).is_err())
     {
         return NtStatus::ACCESS_VIOLATION;
     }
@@ -1841,8 +1878,10 @@ fn gala_window_receive(call: &mut Call<'_>) -> NtStatus {
 fn gala_window_reply(call: &mut Call<'_>) -> NtStatus {
     let (id, result) = (arg!(call, 0), arg!(call, 1) as i64);
     let out = tri!(read_vec(call, arg!(call, 2), arg!(call, 3) as usize));
-    let done = tri!(super::window::reply(call.process.id as u32, id, result, out));
-    wait::set_signal(&done, 1);
+    let wake = tri!(super::window::reply(call.process.id as u32, id, result, out));
+    for e in wake.iter().flatten() {
+        wait::set_signal(e, 1);
+    }
     NtStatus::SUCCESS
 }
 

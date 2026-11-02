@@ -143,23 +143,30 @@ impl Info {
 struct Registry {
     windows: Vec<Info>,
     next: u64,
-    /// Messages posted to another process's window, waiting for it.
+    /// Messages posted to another process's window or thread, waiting
+    /// for it.
     posted: Vec<Posted>,
     /// Each process's queue event (GalaWindowListen), set when a message
     /// is posted or sent to it.
     listeners: Vec<(u32, ObjectRef)>,
-    /// Messages sent to another process's window, until their sender
-    /// has the reply.
+    /// Messages sent to another thread's window, until their sender has
+    /// the reply.
     sent: Vec<Sent>,
     next_sent: u64,
+    /// The threads that have a message queue, (pid, tid): those that
+    /// created a window or called a message function (PostThreadMessage
+    /// fails for the others, as on Windows).
+    queues: Vec<(u32, u32)>,
 }
 
 /// A message sent to window `hwnd` of process `to_pid`, thread `to_tid`
-/// (the window's), by process `from_pid`: what the receiver gets (`data`:
-/// the marshaled input, `out_max`: room for the output) and the reply.
+/// (the window's), by thread `from_tid` of process `from_pid`: what the
+/// receiver gets (`data`: the marshaled input, `out_max`: room for the
+/// output) and the reply.
 pub struct Sent {
     pub id: u64,
     pub from_pid: u32,
+    pub from_tid: u32,
     pub to_pid: u32,
     pub to_tid: u32,
     pub hwnd: u64,
@@ -168,27 +175,54 @@ pub struct Sent {
     pub lparam: u64,
     pub data: Vec<u8>,
     pub out_max: u32,
+    /// SEND_NOTIFY, SEND_CALLBACK, SEND_ABORT_IF_HUNG.
+    pub flags: u32,
+    /// When it was sent (ms, the caller's clock): a receiver that leaves
+    /// a message waiting HUNG_MS is hung.
+    pub queued_at: u64,
     /// Handed to the receiver.
     pub taken: bool,
     /// The result and the output, once replied; None while waiting.
     pub reply: Option<(i64, Vec<u8>)>,
     /// The receiver is gone without replying.
     pub failed: bool,
+    /// The sender stopped waiting (SendMessageTimeout's time-out): the
+    /// reply goes nowhere.
+    pub abandoned: bool,
     /// Set when replied or failed.
     pub done: ObjectRef,
 }
 
+/// SendNotifyMessage: nobody waits for the reply (the entry goes when
+/// the receiver is done).
+pub const SEND_NOTIFY: u32 = 1;
+/// SendMessageCallback: the reply sets the sender's queue event (its
+/// pump calls the callback).
+pub const SEND_CALLBACK: u32 = 2;
+/// SendMessageTimeout's SMTO_ABORTIFHUNG: fails at once (STATUS_TIMEOUT)
+/// when the receiver is hung.
+pub const SEND_ABORT_IF_HUNG: u32 = 4;
+/// A thread that leaves a sent message waiting this long is hung (Windows
+/// documents 5 seconds for IsHungAppWindow and SMTO_ABORTIFHUNG).
+pub const HUNG_MS: u64 = 5000;
+
 /// The most input or output a sent message carries (bytes).
 pub const MAX_SENT_DATA: usize = 64 * 1024;
 
-/// A message posted to process `pid`'s window `hwnd`.
+/// A message posted to process `pid`'s window `hwnd`, or to its thread
+/// `tid` (hwnd 0: PostThreadMessage).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Posted {
     pub pid: u32,
+    pub tid: u32,
     pub hwnd: u64,
     pub message: u32,
     pub wparam: u64,
     pub lparam: u64,
+}
+
+impl Posted {
+    pub const EMPTY: Posted = Posted { pid: 0, tid: 0, hwnd: 0, message: 0, wparam: 0, lparam: 0 };
 }
 
 /// At most this many posted messages wait (Windows' default limit per
@@ -202,20 +236,29 @@ static REGISTRY: IrqMutex<Registry> = IrqMutex::new(Registry {
     listeners: Vec::new(),
     sent: Vec::new(),
     next_sent: 1,
+    queues: Vec::new(),
 });
 
-/// Queues a message sent by process `from_pid` to window `hwnd`: its id,
-/// the reply event to wait on, and the receiver's queue event to set.
-#[allow(clippy::too_many_arguments)]
-pub fn send(
-    from_pid: u32,
-    hwnd: u64,
-    message: u32,
-    wparam: u64,
-    lparam: u64,
-    data: Vec<u8>,
-    out_max: u32,
-) -> Result<(u64, ObjectRef, Option<ObjectRef>), NtStatus> {
+/// A message to send (GalaWindowSend): from thread `from_tid` of process
+/// `from_pid` to window `hwnd`, its marshaled input and the room for its
+/// output; `now` is the caller's clock (ms).
+pub struct Request {
+    pub from_pid: u32,
+    pub from_tid: u32,
+    pub hwnd: u64,
+    pub message: u32,
+    pub wparam: u64,
+    pub lparam: u64,
+    pub data: Vec<u8>,
+    pub out_max: u32,
+    pub flags: u32,
+    pub now: u64,
+}
+
+/// Queues a sent message for its window's thread: its id and the
+/// receiver's queue event to set. STATUS_INVALID_HANDLE for no window,
+/// STATUS_TIMEOUT for a hung receiver with SEND_ABORT_IF_HUNG.
+pub fn send(req: Request) -> Result<(u64, Option<ObjectRef>), NtStatus> {
     let done = KObject::new(ObjectBody::Event(Event {
         kind: EventType::Notification,
         dispatcher: Dispatcher::new(0),
@@ -225,33 +268,47 @@ pub fn send(
     let (to_pid, to_tid) = r
         .windows
         .iter()
-        .find(|w| w.hwnd == hwnd)
+        .find(|w| w.hwnd == req.hwnd)
         .map(|w| (w.pid, w.tid))
         .ok_or(NtStatus::INVALID_HANDLE)?;
+    if req.flags & SEND_ABORT_IF_HUNG != 0
+        && r.sent.iter().any(|m| {
+            m.to_pid == to_pid
+                && m.to_tid == to_tid
+                && !m.taken
+                && req.now.saturating_sub(m.queued_at) >= HUNG_MS
+        })
+    {
+        return Err(NtStatus::TIMEOUT);
+    }
     r.sent.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
     let id = r.next_sent;
     r.next_sent += 1;
-    let out_max = out_max.min(MAX_SENT_DATA as u32);
+    let out_max = req.out_max.min(MAX_SENT_DATA as u32);
     r.sent
         .try_push(Sent {
             id,
-            from_pid,
+            from_pid: req.from_pid,
+            from_tid: req.from_tid,
             to_pid,
             to_tid,
-            hwnd,
-            message,
-            wparam,
-            lparam,
-            data,
+            hwnd: req.hwnd,
+            message: req.message,
+            wparam: req.wparam,
+            lparam: req.lparam,
+            data: req.data,
             out_max,
+            flags: req.flags,
+            queued_at: req.now,
             taken: false,
             reply: None,
             failed: false,
-            done: done.clone(),
+            abandoned: false,
+            done,
         })
         .map_err(|_| NtStatus::NO_MEMORY)?;
     let wake = r.listeners.iter().find(|(p, _)| *p == to_pid).map(|(_, e)| e.clone());
-    Ok((id, done, wake))
+    Ok((id, wake))
 }
 
 /// The reply event of `from_pid`'s sent message `id`.
@@ -277,19 +334,57 @@ pub fn take_reply(from_pid: u32, id: u64) -> Option<Result<(i64, Vec<u8>), NtSta
     m.reply.map(Ok)
 }
 
-/// A sent message as its receiver gets it: (id, hwnd, message, wParam,
-/// lParam, input, room for output).
-pub type Received = (u64, u64, u32, u64, u64, Vec<u8>, u32);
+/// `from_pid` stops waiting for its sent message `id` (a time-out): it
+/// goes now if answered, else once its receiver replies (the receiver
+/// still handles it, as on Windows).
+pub fn abandon(from_pid: u32, id: u64) -> Result<(), NtStatus> {
+    let mut r = REGISTRY.lock();
+    let at = r
+        .sent
+        .iter()
+        .position(|m| m.id == id && m.from_pid == from_pid)
+        .ok_or(NtStatus::INVALID_HANDLE)?;
+    let m = &mut r.sent[at];
+    if m.reply.is_some() || m.failed {
+        r.sent.remove(at);
+    } else {
+        m.abandoned = true;
+    }
+    Ok(())
+}
+
+/// A sent message as its receiver gets it.
+pub struct Received {
+    pub id: u64,
+    pub hwnd: u64,
+    pub message: u32,
+    pub wparam: u64,
+    pub lparam: u64,
+    /// The marshaled input.
+    pub data: Vec<u8>,
+    /// Room for the output.
+    pub out_max: u32,
+    /// How it was sent (SEND_NOTIFY, SEND_CALLBACK, ...).
+    pub flags: u32,
+}
 
 /// Hands the oldest message sent to thread `tid` of process `pid` to it
-/// (taken: it replies with `reply`): (id, hwnd, message, wParam, lParam,
-/// input, room for output).
+/// (taken: it replies with `reply`).
 pub fn receive(pid: u32, tid: u32) -> Option<Received> {
     let mut r = REGISTRY.lock();
     let m = r.sent.iter_mut().find(|m| m.to_pid == pid && m.to_tid == tid && !m.taken)?;
     m.taken = true;
     let data = core::mem::take(&mut m.data);
-    Some((m.id, m.hwnd, m.message, m.wparam, m.lparam, data, m.out_max))
+    Some(Received {
+        id: m.id,
+        hwnd: m.hwnd,
+        message: m.message,
+        wparam: m.wparam,
+        lparam: m.lparam,
+        data,
+        out_max: m.out_max,
+        flags: m.flags,
+    })
 }
 
 /// Whether a message sent to thread `tid` of process `pid` waits.
@@ -297,16 +392,35 @@ pub fn sent_waiting(pid: u32, tid: u32) -> bool {
     REGISTRY.lock().sent.iter().any(|m| m.to_pid == pid && m.to_tid == tid && !m.taken)
 }
 
-/// Process `pid` replies to sent message `id`; the sender's event to set.
-pub fn reply(pid: u32, id: u64, result: i64, out: Vec<u8>) -> Result<ObjectRef, NtStatus> {
+/// Process `pid` replies to sent message `id`: the events to set (the
+/// sender's reply event; its queue event for SEND_CALLBACK). A notify
+/// message or one whose sender stopped waiting goes.
+pub fn reply(
+    pid: u32,
+    id: u64,
+    result: i64,
+    out: Vec<u8>,
+) -> Result<[Option<ObjectRef>; 2], NtStatus> {
     let mut r = REGISTRY.lock();
-    let m = r
+    let at = r
         .sent
-        .iter_mut()
-        .find(|m| m.id == id && m.to_pid == pid && m.taken && m.reply.is_none())
+        .iter()
+        .position(|m| m.id == id && m.to_pid == pid && m.taken && m.reply.is_none())
         .ok_or(NtStatus::INVALID_PARAMETER)?;
+    if r.sent[at].flags & SEND_NOTIFY != 0 || r.sent[at].abandoned {
+        r.sent.remove(at);
+        return Ok([None, None]);
+    }
+    let callback = r.sent[at].flags & SEND_CALLBACK != 0;
+    let from = r.sent[at].from_pid;
+    let wake = if callback {
+        r.listeners.iter().find(|(p, _)| *p == from).map(|(_, e)| e.clone())
+    } else {
+        None
+    };
+    let m = &mut r.sent[at];
     m.reply = Some((result, out));
-    Ok(m.done.clone())
+    Ok([Some(m.done.clone()), wake])
 }
 
 /// `pid`'s queue event, set when messages are posted to it.
@@ -314,6 +428,16 @@ pub fn listen(pid: u32, event: ObjectRef) -> Result<(), NtStatus> {
     let mut r = REGISTRY.lock();
     r.listeners.retain(|(p, _)| *p != pid);
     r.listeners.try_push((pid, event)).map_err(|_| NtStatus::NO_MEMORY)
+}
+
+/// Thread `tid` of process `pid` has a message queue (it created a
+/// window or called a message function).
+pub fn has_queue(pid: u32, tid: u32) -> Result<(), NtStatus> {
+    let mut r = REGISTRY.lock();
+    if r.queues.iter().any(|&(p, t)| p == pid && t == tid) {
+        return Ok(());
+    }
+    r.queues.try_push((pid, tid)).map_err(|_| NtStatus::NO_MEMORY)
 }
 
 /// Posts a message to window `hwnd` (any process's); the owner's event
@@ -330,13 +454,33 @@ pub fn post(
         return Err(NtStatus::INSUFFICIENT_RESOURCES);
     }
     r.posted
-        .try_push(Posted { pid, hwnd, message, wparam, lparam })
+        .try_push(Posted { pid, tid: 0, hwnd, message, wparam, lparam })
         .map_err(|_| NtStatus::NO_MEMORY)?;
     Ok(r.listeners.iter().find(|(p, _)| *p == pid).map(|(_, e)| e.clone()))
 }
 
-/// Takes up to `out.len()` of the messages posted to `pid`'s windows,
-/// oldest first; how many.
+/// Posts a message to thread `tid` (any process's: PostThreadMessage);
+/// its process's event to set. STATUS_INVALID_CID when the thread has no
+/// message queue (or is none).
+pub fn post_thread(
+    tid: u32,
+    message: u32,
+    wparam: u64,
+    lparam: u64,
+) -> Result<Option<ObjectRef>, NtStatus> {
+    let mut r = REGISTRY.lock();
+    let pid = r.queues.iter().find(|&&(_, t)| t == tid).ok_or(NtStatus::INVALID_CID)?.0;
+    if r.posted.len() >= MAX_POSTED {
+        return Err(NtStatus::INSUFFICIENT_RESOURCES);
+    }
+    r.posted
+        .try_push(Posted { pid, tid, hwnd: 0, message, wparam, lparam })
+        .map_err(|_| NtStatus::NO_MEMORY)?;
+    Ok(r.listeners.iter().find(|(p, _)| *p == pid).map(|(_, e)| e.clone()))
+}
+
+/// Takes up to `out.len()` of the messages posted to `pid`'s windows and
+/// threads, oldest first; how many.
 pub fn take_posted(pid: u32, out: &mut [Posted]) -> usize {
     let mut r = REGISTRY.lock();
     let mut n = 0;
@@ -409,6 +553,35 @@ pub fn children(parent: u64, out: &mut [u64]) -> usize {
     found.len()
 }
 
+/// The sends `to` matches fail (their waiting senders wake: the events
+/// to set go into `wake`); notify messages and those nobody waits for go.
+fn fail_sends(r: &mut Registry, to: impl Fn(&Sent) -> bool, wake: &mut Vec<ObjectRef>) {
+    r.sent.retain_mut(|m| {
+        if !to(m) || m.reply.is_some() {
+            return true;
+        }
+        if m.flags & SEND_NOTIFY != 0 || m.abandoned {
+            return false;
+        }
+        m.failed = true;
+        let _ = wake.try_push(m.done.clone());
+        true
+    });
+}
+
+/// The sends `from` matches lose their sender: answered ones go, the
+/// others are still handled (a notify message reaches its window after its
+/// sender ended, as on Windows) and go when replied.
+fn abandon_sends(r: &mut Registry, from: impl Fn(&Sent) -> bool) {
+    r.sent.retain_mut(|m| {
+        if !from(m) {
+            return true;
+        }
+        m.abandoned = true;
+        m.reply.is_none() && !m.failed
+    });
+}
+
 /// A process ended: its windows go.
 pub fn process_ended(pid: u32) {
     let mut wake: Vec<ObjectRef> = Vec::new();
@@ -416,12 +589,26 @@ pub fn process_ended(pid: u32) {
     r.windows.retain(|w| w.pid != pid);
     r.posted.retain(|m| m.pid != pid);
     r.listeners.retain(|(p, _)| *p != pid);
+    r.queues.retain(|&(p, _)| p != pid);
     // Its own sends go; sends to it fail (their senders wake).
-    r.sent.retain(|m| m.from_pid != pid);
-    for m in r.sent.iter_mut().filter(|m| m.to_pid == pid) {
-        m.failed = true;
-        let _ = wake.try_push(m.done.clone());
+    abandon_sends(&mut r, |m| m.from_pid == pid);
+    fail_sends(&mut r, |m| m.to_pid == pid, &mut wake);
+    drop(r);
+    for e in &wake {
+        super::wait::set_signal(e, 1);
     }
+}
+
+/// A thread ended: its windows are destroyed with it (as on Windows), its
+/// queue goes, and the messages sent to it fail.
+pub fn thread_ended(pid: u32, tid: u32) {
+    let mut wake: Vec<ObjectRef> = Vec::new();
+    let mut r = REGISTRY.lock();
+    r.windows.retain(|w| !(w.pid == pid && w.tid == tid));
+    r.posted.retain(|m| !(m.pid == pid && m.tid == tid && m.tid != 0));
+    r.queues.retain(|&(p, t)| !(p == pid && t == tid));
+    abandon_sends(&mut r, |m| m.from_pid == pid && m.from_tid == tid);
+    fail_sends(&mut r, |m| m.to_pid == pid && m.to_tid == tid, &mut wake);
     drop(r);
     for e in &wake {
         super::wait::set_signal(e, 1);
@@ -477,29 +664,106 @@ mod tests {
         // A message posted to its window waits for its owner.
         assert!(post(b, 0x8001, 7, 9).unwrap().is_none());
         assert!(matches!(post(a, 0x8001, 0, 0), Err(NtStatus::INVALID_HANDLE)));
-        let mut got = [Posted { pid: 0, hwnd: 0, message: 0, wparam: 0, lparam: 0 }; 4];
+        let mut got = [Posted::EMPTY; 4];
         assert_eq!(take_posted(902, &mut got), 0);
         assert_eq!(take_posted(901, &mut got), 1);
-        assert_eq!(got[0], Posted { pid: 901, hwnd: b, message: 0x8001, wparam: 7, lparam: 9 });
+        assert_eq!(
+            got[0],
+            Posted { pid: 901, tid: 0, hwnd: b, message: 0x8001, wparam: 7, lparam: 9 }
+        );
         assert_eq!(take_posted(901, &mut got), 0);
         // A sent message: handed to the window's thread, replied to.
-        let (id, done, wake) = send(902, b, 0x000d, 4, 0, Vec::new(), 8).unwrap();
+        let (id, wake) = send(request(902, 1, b, 0x000d, 8, 0)).unwrap();
         assert!(wake.is_none());
         assert!(take_reply(902, id).is_none());
         assert!(receive(901, 76).is_none()); // another thread
         let got = receive(901, 0).unwrap();
-        assert_eq!((got.0, got.1, got.2, got.6), (id, b, 0x000d, 8));
+        assert_eq!((got.id, got.hwnd, got.message, got.out_max), (id, b, 0x000d, 8));
         assert!(receive(901, 0).is_none());
         let mut out = Vec::new();
         out.try_extend_from_slice(b"hi").unwrap();
-        reply(901, id, 2, out).unwrap();
-        drop(done);
+        let [done, wake] = reply(901, id, 2, out).unwrap();
+        assert!(done.is_some() && wake.is_none());
         let (result, data) = take_reply(902, id).unwrap().unwrap();
         assert_eq!((result, &data[..]), (2, &b"hi"[..]));
         // A receiver that ends fails its senders.
-        let (id, _, _) = send(902, b, 0x8001, 0, 0, Vec::new(), 0).unwrap();
+        let (id, _) = send(request(902, 1, b, 0x8001, 0, 0)).unwrap();
         process_ended(901);
         assert_eq!(take_reply(902, id).map(|r| r.is_err()), Some(true));
         assert!(query(top).is_none() && query(b).is_none());
+    }
+
+    fn request(
+        from_pid: u32,
+        from_tid: u32,
+        hwnd: u64,
+        message: u32,
+        out_max: u32,
+        flags: u32,
+    ) -> Request {
+        Request {
+            from_pid,
+            from_tid,
+            hwnd,
+            message,
+            wparam: 4,
+            lparam: 0,
+            data: Vec::new(),
+            out_max,
+            flags,
+            now: 1000,
+        }
+    }
+
+    #[test]
+    fn thread_messages_notify_timeouts_and_thread_ends() {
+        let w = register(911, Info { tid: 5, ..Info::default() }).unwrap();
+        let other = register(911, Info { tid: 9, ..Info::default() }).unwrap();
+        // PostThreadMessage needs a thread with a queue.
+        assert!(matches!(post_thread(5, 0x8000, 1, 2), Err(NtStatus::INVALID_CID)));
+        has_queue(911, 5).unwrap();
+        has_queue(911, 5).unwrap();
+        post_thread(5, 0x8000, 1, 2).unwrap();
+        let mut got = [Posted::EMPTY; 2];
+        assert_eq!(take_posted(911, &mut got), 1);
+        assert_eq!(
+            got[0],
+            Posted { pid: 911, tid: 5, hwnd: 0, message: 0x8000, wparam: 1, lparam: 2 }
+        );
+        // A notify message goes once handled; nobody gets its reply.
+        let (id, _) = send(request(912, 1, w, 0x8001, 0, SEND_NOTIFY)).unwrap();
+        let got = receive(911, 5).unwrap();
+        assert_eq!(got.flags, SEND_NOTIFY);
+        assert!(reply(911, id, 1, Vec::new()).unwrap()[0].is_none());
+        assert_eq!(take_reply(912, id).map(|r| r.is_err()), Some(true));
+        // A timed-out send is still handled; its reply goes nowhere.
+        let (id, _) = send(request(912, 1, w, 0x8002, 0, 0)).unwrap();
+        abandon(912, id).unwrap();
+        assert!(receive(911, 5).is_some());
+        assert!(reply(911, id, 1, Vec::new()).unwrap()[0].is_none());
+        assert!(sent_event(912, id).is_none());
+        // A receiver that leaves a message waiting HUNG_MS is hung.
+        let (_, _) = send(request(912, 1, w, 0x8003, 0, 0)).unwrap();
+        let mut hung = request(912, 1, w, 0x8004, 0, SEND_ABORT_IF_HUNG);
+        hung.now = 1000 + HUNG_MS - 1;
+        let (late, _) = send(hung).unwrap();
+        let mut hung = request(912, 1, w, 0x8004, 0, SEND_ABORT_IF_HUNG);
+        hung.now = 1000 + HUNG_MS;
+        assert!(matches!(send(hung), Err(NtStatus::TIMEOUT)));
+        // The thread ends: its windows and queue go, sends to it fail;
+        // the other thread's window stays.
+        thread_ended(911, 5);
+        assert!(query(w).is_none() && query(other).is_some());
+        assert_eq!(take_reply(912, late).map(|r| r.is_err()), Some(true));
+        assert!(matches!(post_thread(5, 0x8000, 1, 2), Err(NtStatus::INVALID_CID)));
+        assert!(matches!(send(request(912, 1, w, 0x8001, 0, 0)), Err(NtStatus::INVALID_HANDLE)));
+        // A message whose sender thread ended is still handled; its reply
+        // goes nowhere.
+        let (id, _) = send(request(912, 3, other, 0x8001, 0, SEND_NOTIFY)).unwrap();
+        thread_ended(912, 3);
+        assert_eq!(receive(911, 9).map(|m| m.id), Some(id));
+        assert!(reply(911, id, 0, Vec::new()).unwrap()[0].is_none());
+        assert!(sent_event(912, id).is_none());
+        process_ended(911);
     }
 }

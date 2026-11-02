@@ -47,6 +47,33 @@
  * returns the thread it ran on, WM_APP + 3 writes through lParam,
  * WM_SETTEXT and WM_GETTEXT go through DefWindowProc.
  *
+ * The other message functions, as documented: PostThreadMessageW to the
+ * child's main thread arrives there with hwnd NULL; to an id that is no
+ * thread (the child's process id: process and thread ids share one
+ * namespace), to a thread that has no message queue yet (one that has
+ * not called a User function; PeekMessage creates it, as PostThreadMessage's
+ * remarks say) or to one that has ended it fails with
+ * ERROR_INVALID_THREAD_ID; to our own thread it is in our queue.
+ * SendMessageTimeoutW/A give the procedure's result through lpdwResult
+ * (SMTO_NORMAL, SMTO_BLOCK, SMTO_ABORTIFHUNG) and return nonzero; when the
+ * receiver takes longer than the time-out they return 0 with
+ * ERROR_TIMEOUT (the message is still handled); a window of our own
+ * thread is called directly. ReplyMessage in the receiver returns the
+ * sender's result before the procedure ends (the procedure's own return
+ * is then ignored); InSendMessageEx says ISMEX_SEND, then ISMEX_SEND |
+ * ISMEX_REPLIED, ISMEX_NOTIFY for SendNotifyMessage, ISMEX_CALLBACK for
+ * SendMessageCallback and ISMEX_NOSEND (InSendMessage FALSE, ReplyMessage
+ * FALSE) outside a message sent by another thread. SendNotifyMessageW
+ * returns at once for another thread's window (its procedure runs when
+ * that thread next calls a message function) and calls our own thread's
+ * procedure before returning; a system message with a pointer cannot be
+ * sent that way (ERROR_MESSAGE_SYNC_ONLY). SendMessageCallbackW's callback
+ * gets the window, message, data and result, only when we next call
+ * PeekMessage (not before). WM_COPYDATA's COPYDATASTRUCT and its buffer
+ * reach the other process. A thread's windows are destroyed when it ends:
+ * IsWindow is FALSE, FindWindow does not find them and SendMessage fails
+ * with ERROR_INVALID_WINDOW_HANDLE.
+ *
  * Prints "windows_across_test: ok" and exits 0, or the failing check's
  * number and line.
  */
@@ -79,6 +106,37 @@ static LRESULT CALLBACK child_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         swprintf(t, 64, L"app %d %d", (int)w, (int)l);
         SetWindowTextW(h, t);
         return 0;
+    }
+    if (m == WM_APP + 5) {
+        /* Longer than the parent's time-out; handled all the same. */
+        Sleep(500);
+        SetWindowTextW(h, L"slept");
+        return 5;
+    }
+    if (m == WM_APP + 9) {
+        /* The sender gets 123 now, not this procedure's 0. */
+        ReplyMessage(123);
+        Sleep(300);
+        return 0;
+    }
+    if (m == WM_APP + 13)
+        return (LRESULT)InSendMessageEx(NULL);
+    if (m == WM_APP + 14) {
+        WCHAR t[64];
+        swprintf(t, 64, L"notify %d", (int)InSendMessageEx(NULL));
+        SetWindowTextW(h, t);
+        return 0;
+    }
+    if (m == WM_COPYDATA) {
+        const COPYDATASTRUCT *cds = (const COPYDATASTRUCT *)l;
+        WCHAR t[64];
+        int n = swprintf(t, 64, L"copy %d ", (int)cds->dwData);
+        const char *data = (const char *)cds->lpData;
+        for (DWORD i = 0; i < cds->cbData && data[i] && n < 63; i++)
+            t[n++] = (WCHAR)(unsigned char)data[i];
+        t[n] = 0;
+        SetWindowTextW(h, t);
+        return (LRESULT)cds->cbData;
     }
     return DefWindowProcW(h, m, w, l);
 }
@@ -126,6 +184,13 @@ static int child(void) {
             break;
         MSG msg;
         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.hwnd == NULL && msg.message == WM_APP + 10) {
+                /* A thread message (PostThreadMessage): no window. */
+                WCHAR t[64];
+                swprintf(t, 64, L"thread %d %d", (int)msg.wParam, (int)msg.lParam);
+                SetWindowTextW(top, t);
+                continue;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -136,7 +201,12 @@ static int child(void) {
 
 /* The main thread's window and what the other thread saw. */
 static HWND local_window;
-static DWORD local_results[6];
+static DWORD local_results[9];
+/* What the main thread's procedure saw of WM_APP + 7 (ReplyMessage). */
+static DWORD in_send, ex_before, replied, ex_after;
+/* SendNotifyMessage's calls of the procedure and what InSendMessageEx said. */
+static volatile LONG notify_calls;
+static DWORD notify_ex;
 
 static LRESULT CALLBACK local_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_APP + 3) {
@@ -145,7 +215,68 @@ static LRESULT CALLBACK local_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     if (m == WM_APP + 4)
         return GetCurrentThreadId();
+    if (m == WM_APP + 7) {
+        in_send = InSendMessage();
+        ex_before = InSendMessageEx(NULL);
+        replied = ReplyMessage(77);
+        ex_after = InSendMessageEx(NULL);
+        return 5;
+    }
+    if (m == WM_APP + 8)
+        return (LRESULT)InSendMessageEx(NULL);
+    if (m == WM_APP + 15) {
+        notify_ex = InSendMessageEx(NULL);
+        InterlockedIncrement(&notify_calls);
+        return 0;
+    }
     return DefWindowProcW(h, m, w, l);
+}
+
+static DWORD WINAPI notifier(void *arg) {
+    (void)arg;
+    /* Returns at once: the main thread is not in a message function. */
+    return SendNotifyMessageW(local_window, WM_APP + 15, 0, 0) ? 0 : 1;
+}
+
+/* A thread that has no message queue until told to make one. */
+static HANDLE make_queue, queue_made;
+static MSG thread_msg;
+
+static DWORD WINAPI queue_thread(void *arg) {
+    (void)arg;
+    WaitForSingleObject(make_queue, 20000);
+    MSG m;
+    PeekMessageW(&m, NULL, WM_USER, WM_USER, PM_NOREMOVE);
+    SetEvent(queue_made);
+    if (GetMessageW(&m, NULL, 0, 0) <= 0)
+        return 1;
+    thread_msg = m;
+    return 0;
+}
+
+/* A thread that makes a window and ends: the window goes with it. */
+static HWND doomed;
+
+static DWORD WINAPI window_thread(void *arg) {
+    (void)arg;
+    doomed = CreateWindowExW(0, L"GalaAcrossLocal", L"doomed", WS_OVERLAPPEDWINDOW, 0, 0, 100, 50,
+                             NULL, NULL, GetModuleHandleW(NULL), NULL);
+    return doomed ? 0 : 1;
+}
+
+/* SendMessageCallback's callback. */
+static int cb_calls;
+static HWND cb_hwnd;
+static UINT cb_msg;
+static ULONG_PTR cb_data;
+static LRESULT cb_result;
+
+static VOID CALLBACK on_result(HWND h, UINT m, ULONG_PTR data, LRESULT result) {
+    cb_calls++;
+    cb_hwnd = h;
+    cb_msg = m;
+    cb_data = data;
+    cb_result = result;
 }
 
 static DWORD WINAPI sender(void *arg) {
@@ -158,6 +289,11 @@ static DWORD WINAPI sender(void *arg) {
     local_results[3] = (DWORD)SendMessageW(local_window, WM_SETTEXT, 0, (LPARAM)L"from thread");
     local_results[4] = (DWORD)SendMessageW(local_window, WM_GETTEXT, 32, (LPARAM)text);
     local_results[5] = wcscmp(text, L"from thread") == 0;
+    local_results[6] = (DWORD)SendMessageW(local_window, WM_APP + 7, 0, 0);
+    DWORD_PTR r = 0;
+    local_results[7] =
+        SendMessageTimeoutW(local_window, WM_APP + 4, 0, 0, SMTO_NORMAL, 5000, &r) != 0;
+    local_results[8] = (DWORD)r;
     return 0;
 }
 
@@ -280,6 +416,73 @@ int main(int argc, char **argv) {
     CHECK(wcscmp(got, L"changed") == 0);
     CHECK(SendMessageW(top, WM_APP + 2, 6, 7) == 42);
 
+    /* WM_COPYDATA: the structure and its buffer are copied across. */
+    COPYDATASTRUCT cds = {0x1234, 11, (void *)"hello copy"};
+    CHECK(SendMessageW(top, WM_COPYDATA, 0, (LPARAM)&cds) == 11);
+    CHECK(title_becomes(top, L"copy 4660 hello copy"));
+
+    /* PostThreadMessage to the child's main thread: a message without a
+     * window. A process id is no thread id. */
+    CHECK(PostThreadMessageW(pi.dwThreadId, WM_APP + 10, 5, 6));
+    CHECK(title_becomes(top, L"thread 5 6"));
+    CHECK(PostThreadMessageA(pi.dwThreadId, WM_APP + 10, 8, 9));
+    CHECK(title_becomes(top, L"thread 8 9"));
+    SetLastError(0);
+    CHECK(!PostThreadMessageW(pi.dwProcessId, WM_APP + 10, 0, 0));
+    CHECK(GetLastError() == ERROR_INVALID_THREAD_ID);
+
+    /* SendMessageTimeout: the result through lpdwResult. */
+    DWORD_PTR res = 0;
+    CHECK(SendMessageTimeoutW(top, WM_APP + 2, 6, 7, SMTO_NORMAL, 5000, &res) != 0);
+    CHECK(res == 42);
+    res = 0;
+    CHECK(SendMessageTimeoutW(top, WM_APP + 2, 3, 5, SMTO_ABORTIFHUNG | SMTO_BLOCK, 5000, &res) !=
+          0);
+    CHECK(res == 15);
+    res = 0;
+    CHECK(SendMessageTimeoutA(top, WM_APP + 2, 2, 2, SMTO_NORMAL, 5000, &res) != 0);
+    CHECK(res == 4);
+    res = 0;
+    CHECK(SendMessageTimeoutW(edit, WM_GETTEXT, 64, (LPARAM)got, SMTO_BLOCK, 5000, &res) != 0);
+    CHECK(res == 7 && wcscmp(got, L"changed") == 0);
+    /* The child's procedure takes 500 ms: the time-out comes first. */
+    SetLastError(0);
+    CHECK(SendMessageTimeoutW(top, WM_APP + 5, 0, 0, SMTO_NORMAL, 50, &res) == 0);
+    CHECK(GetLastError() == ERROR_TIMEOUT);
+    /* ReplyMessage answers before the procedure returns 0. */
+    res = 0;
+    CHECK(SendMessageTimeoutW(top, WM_APP + 9, 0, 0, SMTO_NORMAL, 5000, &res) != 0);
+    CHECK(res == 123);
+    /* The timed-out message was handled all the same (before this one). */
+    CHECK(title_becomes(top, L"slept"));
+    SetLastError(0);
+    CHECK(SendMessageTimeoutW((HWND)(ULONG_PTR)0x7ff0, WM_APP, 0, 0, SMTO_NORMAL, 100, &res) == 0);
+    CHECK(GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+
+    /* What the receiver's InSendMessageEx says. */
+    CHECK(SendMessageW(top, WM_APP + 13, 0, 0) == ISMEX_SEND);
+    CHECK(SendNotifyMessageW(top, WM_APP + 14, 0, 0));
+    CHECK(title_becomes(top, L"notify 2")); /* ISMEX_NOTIFY */
+    SetLastError(0);
+    CHECK(!SendNotifyMessageW(top, WM_SETTEXT, 0, (LPARAM)L"no"));
+    CHECK(GetLastError() == ERROR_MESSAGE_SYNC_ONLY);
+
+    /* SendMessageCallback: the callback runs when we next pump. */
+    CHECK(SendMessageCallbackW(top, WM_APP + 13, 0, 0, on_result, 99));
+    CHECK(cb_calls == 0);
+    for (int i = 0; i < 1000 && cb_calls == 0; i++) {
+        MSG m;
+        PeekMessageW(&m, NULL, 0, 0, PM_NOREMOVE);
+        if (cb_calls == 0)
+            Sleep(10);
+    }
+    CHECK(cb_calls == 1);
+    CHECK(cb_hwnd == top && cb_msg == WM_APP + 13 && cb_data == 99);
+    CHECK(cb_result == ISMEX_CALLBACK);
+    SetLastError(0);
+    CHECK(!SendMessageCallbackW(top, WM_COPYDATA, 0, (LPARAM)&cds, on_result, 0));
+    CHECK(GetLastError() == ERROR_MESSAGE_SYNC_ONLY);
+
     /* The child's memory. */
     HANDLE proc = OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE, FALSE,
                               pi.dwProcessId);
@@ -333,6 +536,90 @@ int main(int argc, char **argv) {
     CHECK(local_results[4] == 11);
     CHECK(local_results[5]);
     CHECK(GetWindowTextW(local_window, text, 64) == 11);
+    /* ReplyMessage and InSendMessage(Ex) in the main thread's procedure. */
+    CHECK(local_results[6] == 77);
+    CHECK(in_send == TRUE);
+    CHECK(ex_before == ISMEX_SEND);
+    CHECK(replied == TRUE);
+    CHECK(ex_after == (ISMEX_SEND | ISMEX_REPLIED));
+    CHECK(local_results[7] == TRUE && local_results[8] == GetCurrentThreadId());
+    /* Not in a message sent by another thread. */
+    CHECK(SendMessageW(local_window, WM_APP + 8, 0, 0) == ISMEX_NOSEND);
+    CHECK(!InSendMessage());
+    CHECK(!ReplyMessage(1));
+    /* SendMessageTimeout to our own window: called directly. */
+    DWORD_PTR own = 0;
+    CHECK(SendMessageTimeoutW(local_window, WM_APP + 4, 0, 0, SMTO_NORMAL, 100, &own) != 0);
+    CHECK(own == GetCurrentThreadId());
+
+    /* SendNotifyMessage from another thread returns before the procedure
+     * runs (we do not pump while it runs); ours runs it at once. */
+    thread = CreateThread(NULL, 0, notifier, NULL, 0, NULL);
+    CHECK(thread != NULL);
+    CHECK(WaitForSingleObject(thread, 20000) == WAIT_OBJECT_0);
+    DWORD code = 1;
+    CHECK(GetExitCodeThread(thread, &code) && code == 0);
+    CloseHandle(thread);
+    CHECK(notify_calls == 0);
+    {
+        MSG m;
+        PeekMessageW(&m, NULL, 0, 0, PM_NOREMOVE);
+    }
+    CHECK(notify_calls == 1);
+    CHECK(notify_ex == ISMEX_NOTIFY);
+    CHECK(SendNotifyMessageW(local_window, WM_APP + 15, 0, 0));
+    CHECK(notify_calls == 2);
+    CHECK(notify_ex == ISMEX_NOSEND);
+
+    /* SendMessageCallback to our own window: the callback at once. */
+    cb_calls = 0;
+    CHECK(SendMessageCallbackW(local_window, WM_APP + 4, 0, 0, on_result, 7));
+    CHECK(cb_calls == 1 && cb_hwnd == local_window && cb_msg == WM_APP + 4 && cb_data == 7);
+    CHECK(cb_result == (LRESULT)GetCurrentThreadId());
+
+    /* PostThreadMessage to a thread without a message queue fails; once
+     * it has one (PeekMessage) the message arrives without a window. */
+    make_queue = CreateEventW(NULL, TRUE, FALSE, NULL);
+    queue_made = CreateEventW(NULL, TRUE, FALSE, NULL);
+    CHECK(make_queue && queue_made);
+    DWORD qtid = 0;
+    thread = CreateThread(NULL, 0, queue_thread, NULL, 0, &qtid);
+    CHECK(thread != NULL);
+    SetLastError(0);
+    CHECK(!PostThreadMessageW(qtid, WM_APP + 11, 1, 2));
+    CHECK(GetLastError() == ERROR_INVALID_THREAD_ID);
+    CHECK(SetEvent(make_queue));
+    CHECK(WaitForSingleObject(queue_made, 20000) == WAIT_OBJECT_0);
+    CHECK(PostThreadMessageW(qtid, WM_APP + 11, 1, 2));
+    CHECK(WaitForSingleObject(thread, 20000) == WAIT_OBJECT_0);
+    CHECK(GetExitCodeThread(thread, &code) && code == 0);
+    CloseHandle(thread);
+    CHECK(thread_msg.hwnd == NULL && thread_msg.message == WM_APP + 11);
+    CHECK(thread_msg.wParam == 1 && thread_msg.lParam == 2);
+    /* The thread has ended. */
+    SetLastError(0);
+    CHECK(!PostThreadMessageW(qtid, WM_APP + 11, 1, 2));
+    CHECK(GetLastError() == ERROR_INVALID_THREAD_ID);
+    /* Our own thread: in our queue, without a window. */
+    CHECK(PostThreadMessageW(GetCurrentThreadId(), WM_APP + 12, 3, 4));
+    {
+        MSG m;
+        CHECK(PeekMessageW(&m, NULL, WM_APP + 12, WM_APP + 12, PM_REMOVE));
+        CHECK(m.hwnd == NULL && m.wParam == 3 && m.lParam == 4);
+    }
+
+    /* A thread's windows are destroyed when it ends. */
+    thread = CreateThread(NULL, 0, window_thread, NULL, 0, NULL);
+    CHECK(thread != NULL);
+    CHECK(WaitForSingleObject(thread, 20000) == WAIT_OBJECT_0);
+    CloseHandle(thread);
+    CHECK(doomed != NULL);
+    CHECK(!IsWindow(doomed));
+    CHECK(FindWindowW(L"GalaAcrossLocal", L"doomed") == NULL);
+    SetLastError(0);
+    CHECK(SendMessageW(doomed, WM_APP + 4, 0, 0) == 0);
+    CHECK(GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+
     CHECK(DestroyWindow(local_window));
 
     /* The child ends: its windows go. */

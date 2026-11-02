@@ -1665,7 +1665,11 @@ registry, global HWNDs, FindWindow/EnumWindows/GetWindowText... on
 other processes' windows) is done (2026-11-02, windows_across_test);
 step 2 (PostMessage to another process's window) and step 3
 (SendMessage to another process's window, WM_GETTEXT/WM_SETTEXT
-marshaled) and step 4 (UI Automation drives another process's button,
+marshaled; 2026-11-02, windows_across_test: PostThreadMessage to any
+process's thread, SendMessageTimeout, SendNotifyMessage,
+SendMessageCallback, ReplyMessage, InSendMessage(Ex), WM_COPYDATA
+marshaled, and a thread's windows destroyed when it ends) and step 4
+(UI Automation drives another process's button,
 edit and check box: uia_test) too; step 5 (2026-11-02, flaui_test):
 FlaUI 5.0.0 (FlaUI.UIA3, PREBUILT from nuget.org) on gala's .NET 8
 drives another program through gala's UIAutomationCore.dll

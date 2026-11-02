@@ -609,7 +609,20 @@ pixel version. Writing one:
   there.
 - A UIA call on another process's element is a sent message to it: if
   the program's thread is stuck (not pumping), the call waits for it
-  (gala's cross-process SendMessage has no timeout yet).
+  (gala's UIAutomationCore uses SendMessage, not SendMessageTimeout).
+- **A thread's windows go when it ends** (as on Windows, since
+  2026-11-02): a test or gala DLL that creates a window on a worker
+  thread which then returns loses the window (IsWindow FALSE, sends fail
+  with ERROR_INVALID_WINDOW_HANDLE). Keep such a thread alive and
+  pumping. A thread gets a message queue (PostThreadMessage reaches it)
+  only once it creates a window or calls a message function; post to a
+  new thread after it has called PeekMessage, as PostThreadMessage's
+  documentation says.
+- user32's queue event is one per process (auto-reset): with several
+  threads waiting in GetMessage at once, a wake can go to the wrong one,
+  which then waits again. Tests with several pumping threads keep only
+  one waiting at a time (windows_across_test waits on thread handles
+  without pumping while a worker pumps).
 - Close a window with `window.Close()`: FlaUI invokes the title bar's
   Close button (AutomationId "Close", WM_SYSCOMMAND SC_CLOSE posted),
   so it returns before the program has acted; wait for the effect

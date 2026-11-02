@@ -292,9 +292,14 @@ pub extern "system" fn MessageBoxW(
     1 // IDOK
 }
 
-/// DllMain (the entry point our link flags name).
+/// DllMain (the entry point our link flags name). DLL_THREAD_DETACH: the
+/// ending thread's windows are destroyed with it, as on Windows.
 #[unsafe(no_mangle)]
-pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved: usize) -> i32 {
+pub extern "system" fn mainCRTStartup(_instance: usize, reason: u32, _reserved: usize) -> i32 {
+    const DLL_THREAD_DETACH: u32 = 3;
+    if reason == DLL_THREAD_DETACH {
+        window::thread_ended();
+    }
     1
 }
 
