@@ -2,7 +2,8 @@
 //! - two threads exchange 1000 messages through shared memory without any
 //!   system call; with one processor that would need ~1000 preemptions
 //!   (seconds), with two it is quick, and the processor numbers (RDTSCP)
-//!   seen by the two sides differ;
+//!   seen by the two sides differ (in one of up to five attempts: other
+//!   load on the machine may hold one side back for a while);
 //! - ThreadAffinityMask (NtSetInformationThread class 4) pins the thread:
 //!   RDTSCP and ntdll's NtGetCurrentProcessorNumber then report that
 //!   processor; a mask of no or unknown processors is STATUS_INVALID_PARAMETER,
@@ -180,19 +181,35 @@ fn run() -> Result<(), u32> {
         return Ok(());
     }
 
-    // Two threads running at the same time.
-    GIVE_UP.store(deadline(10) as u64, Ordering::Relaxed);
-    let (s, h, _) = create_thread(partner, 0, false);
-    c.eq(s.into(), ok)?;
-    let start = performance_counter().0;
-    let (rounds, different) = ping_pong();
-    let (end, freq) = performance_counter();
-    c.eq(rounds.into(), ROUNDS.into())?;
-    c.ok(different, 0)?;
-    // Far below the ~1000 quanta one processor would need.
-    c.ok(end - start < 2 * freq, (end - start) as u64)?;
-    c.eq(wait(h, Some(-50_000_000)).into(), ok)?;
-    close(h);
+    // Two threads running at the same time. Windows does not promise that
+    // two ready threads run at once at any given moment (other work on
+    // the machine, or a virtual machine's processors not being scheduled
+    // by its host, can put them on one processor for a while): the
+    // exchange is tried up to five times and must once be quick, and seen
+    // on two processors. Each attempt must complete.
+    let mut attempts = Checks(c.0);
+    let mut concurrent = (false, 0);
+    for _ in 0..5 {
+        attempts.0 = c.0;
+        BALL.store(0, Ordering::Relaxed);
+        PARTNER_CPU.store(u32::MAX, Ordering::Relaxed);
+        GIVE_UP.store(deadline(10) as u64, Ordering::Relaxed);
+        let (s, h, _) = create_thread(partner, 0, false);
+        attempts.eq(s.into(), ok)?;
+        let start = performance_counter().0;
+        let (rounds, different) = ping_pong();
+        let (end, freq) = performance_counter();
+        attempts.eq(rounds.into(), ROUNDS.into())?;
+        attempts.eq(wait(h, Some(-50_000_000)).into(), ok)?;
+        close(h);
+        // Far below the ~1000 quanta one processor would need.
+        concurrent = (different && end - start < 2 * freq, (end - start) as u64);
+        if concurrent.0 {
+            break;
+        }
+    }
+    c.0 = attempts.0;
+    c.ok(concurrent.0, concurrent.1)?;
 
     // Event round trips between threads pinned to processors 0 and 1.
     c.eq(pin(CURRENT_THREAD, 1).into(), ok)?;

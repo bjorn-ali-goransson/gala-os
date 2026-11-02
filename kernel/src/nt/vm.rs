@@ -111,14 +111,26 @@ pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> Fault {
 }
 
 fn resolve_once(process: &Process, addr: u64, kind: AccessKind) -> Fault {
-    let (protect, mapped) = {
-        let vad = process.vad.lock();
-        let Some(PageState { committed: true, protect }) = vad.page(addr) else {
-            return Fault::Denied;
-        };
-        let mapped = vad.query(addr).is_ok_and(|q| q.kind == vad::MEM_MAPPED);
-        (protect, mapped)
+    // The VAD and the page tables change together: the locks (in their
+    // order: views, VAD, space) are held from reading the page's state to
+    // mapping it, as in every service that changes either. A second
+    // thread faulting on the page, or a protect, free or unmap on another
+    // processor, then sees the state before or after, never between: with
+    // the VAD read first and the page mapped later, a copy-on-write fault
+    // that had made the page private in the VAD let another thread's fault
+    // find it "read/write and mapped" and make the shared frame writable
+    // (smpcow_test).
+    // A data section's page is looked up first, with no lock held (making
+    // a file's page may deliver change notifications, which write user
+    // memory); it is used only if the view is still there below.
+    let looked_up = !process.space.lock().is_mapped(addr);
+    let section_page = if looked_up { super::section::frame_for(process, addr) } else { None };
+    let views = process.views.lock();
+    let mut vad = process.vad.lock();
+    let Some(PageState { committed: true, protect }) = vad.page(addr) else {
+        return Fault::Denied;
     };
+    let mapped = vad.query(addr).is_ok_and(|q| q.kind == vad::MEM_MAPPED);
     let Ok(access) = vad::access_of(protect) else { return Fault::Denied };
     let allowed = match kind {
         AccessKind::Read => access.read,
@@ -129,23 +141,33 @@ fn resolve_once(process: &Process, addr: u64, kind: AccessKind) -> Fault {
         return Fault::Denied;
     }
     if protect & vad::PAGE_GUARD != 0 {
-        return guard_hit(process, addr, protect & !vad::PAGE_GUARD);
+        return guard_hit(process, &mut vad, addr, protect & !vad::PAGE_GUARD);
     }
-    // Section pages come from the section (views lock before space lock).
     let section_frame = if mapped && !process.space.lock().is_mapped(addr) {
-        match super::section::frame_for(process, addr) {
-            Some(f) => Some(f),
-            None => return Fault::Denied,
+        match &section_page {
+            Some((section, frame)) if super::section::in_view_of(&views, addr, section) => {
+                Some(*frame)
+            }
+            // No page there (past the section's end).
+            None if looked_up => return Fault::Denied,
+            // The page or view changed since the lookup: look again (the
+            // retry of a fault that found no memory).
+            _ => return Fault::OutOfMemory,
         }
     } else {
         None
     };
+    // `views` stays held to the end: IrqMutex guards must go in the
+    // reverse order of taking (dropping it first turned interrupts back on
+    // with the VAD lock still held; lockdep then saw that lock held across
+    // a preemption).
     if kind == AccessKind::Write && is_write_copy(protect) {
-        return copy_on_write(process, addr, protect, section_frame);
+        return copy_on_write(process, &mut vad, addr, protect, section_frame);
     }
     let mut space = process.space.lock();
     let done = if space.is_mapped(addr) {
-        // Present and allowed by the VAD: the PTE is stale. Re-sync it.
+        // Present and allowed by the VAD: the PTE is stale (another
+        // processor's fault on the page mapped it first). Re-sync it.
         space.set_flags(addr, flags_for(protect)).is_ok()
     } else {
         match section_frame {
@@ -177,17 +199,17 @@ fn out_of_memory(process: &Process, addr: u64) {
 /// reported as PAGE_READWRITE (or PAGE_EXECUTE_READWRITE) from now on.
 fn copy_on_write(
     process: &Process,
+    vad: &mut vad::Vad,
     addr: u64,
     protect: u32,
     section_frame: Option<platform::Frame>,
 ) -> Fault {
     let page = addr / PAGE_SIZE * PAGE_SIZE;
     let writable = after_copy(protect);
-    if process.vad.lock().protect(page, PAGE_SIZE, writable).is_err() {
-        // Only an allocation fails here (the page is committed).
-        return Fault::OutOfMemory;
-    }
     let flags = flags_for(writable);
+    // The copy first, the VAD after: a page the VAD calls private is never
+    // the shared frame (after a failed copy the page is still
+    // copy-on-write, and the retry copies it).
     let mut space = process.space.lock();
     let done = match space.mapping(page) {
         Some((frame, true)) => space.map_private_copy(page, frame, flags).is_ok(),
@@ -197,18 +219,24 @@ fn copy_on_write(
             None => space.map_zero_page(page, flags).is_ok(),
         },
     };
-    if done { Fault::Resolved } else { Fault::OutOfMemory }
+    drop(space);
+    // Only an allocation fails in the VAD (the page is committed); the
+    // private page stays mapped and the retry finds it.
+    if done && vad.protect(page, PAGE_SIZE, writable).is_ok() {
+        Fault::Resolved
+    } else {
+        Fault::OutOfMemory
+    }
 }
 
 /// A touched guard page: the guard is removed. In the current thread's
 /// stack, the guard moves one page down and StackLimit follows, silently;
 /// with no room left (the bottom page stays reserved) the stack overflows.
 /// Elsewhere the program gets STATUS_GUARD_PAGE_VIOLATION.
-fn guard_hit(process: &Process, addr: u64, protect: u32) -> Fault {
+fn guard_hit(process: &Process, vad: &mut vad::Vad, addr: u64, protect: u32) -> Fault {
     let page = addr / PAGE_SIZE * PAGE_SIZE;
     let stack = super::thread::current_stack(process);
     let (result, new_limit) = {
-        let mut vad = process.vad.lock();
         if vad.protect(page, PAGE_SIZE, protect).is_err() {
             return Fault::OutOfMemory;
         }
@@ -248,9 +276,9 @@ fn guard_hit(process: &Process, addr: u64, protect: u32) -> Fault {
 }
 
 /// Re-applies VAD state to the page tables for `[start, start + size)`:
-/// committed pages get their flags, others lose their frame.
-fn sync_range(process: &Process, start: u64, size: u64) {
-    let vad = process.vad.lock();
+/// committed pages get their flags, others lose their frame. The caller
+/// holds the VAD lock from its change to this (see `resolve_once`).
+fn sync_range(process: &Process, vad: &vad::Vad, start: u64, size: u64) {
     let mut space = process.space.lock();
     let mut addr = start;
     while addr < start + size {
@@ -304,7 +332,12 @@ pub fn allocate(
         let result = charged.and_then(|()| vad.commit(base, size, protect));
         charge::sync(process, vad.private_commit());
         match result {
-            Ok(range) => return Ok(range),
+            Ok(range) => {
+                // Pages committed already take the new protection: their
+                // mappings follow (as NtProtectVirtualMemory's do).
+                sync_range(process, &vad, range.0, range.1);
+                return Ok(range);
+            }
             Err(e) => {
                 if reserve {
                     let _ = vad.release(base, 0);
@@ -331,17 +364,16 @@ pub fn free(
     {
         return Err(NtStatus::UNABLE_TO_DELETE_SECTION);
     }
-    let range = {
-        let mut vad = process.vad.lock();
-        let range = match free_type {
-            MEM_DECOMMIT => vad.decommit(base, size)?,
-            MEM_RELEASE => vad.release(base, size)?,
-            _ => return Err(NtStatus::INVALID_PARAMETER_4),
-        };
-        charge::sync(process, vad.private_commit());
-        range
+    let mut vad = process.vad.lock();
+    let range = match free_type {
+        MEM_DECOMMIT => vad.decommit(base, size)?,
+        MEM_RELEASE => vad.release(base, size)?,
+        _ => return Err(NtStatus::INVALID_PARAMETER_4),
     };
-    sync_range(process, range.0, range.1);
+    charge::sync(process, vad.private_commit());
+    // Before the VAD lock goes: memory allocated at once at the same place
+    // must not find these frames still mapped (and their old contents).
+    sync_range(process, &vad, range.0, range.1);
     Ok(range)
 }
 
@@ -352,12 +384,10 @@ pub fn protect(
     size: u64,
     new: u32,
 ) -> Result<(u32, u64, u64), NtStatus> {
-    let result = {
-        let mut vad = process.vad.lock();
-        let image = vad.query(base).is_ok_and(|q| q.kind == vad::MEM_IMAGE);
-        vad.protect(base, size, if image { image_protection(new) } else { new })?
-    };
-    sync_range(process, result.1, result.2);
+    let mut vad = process.vad.lock();
+    let image = vad.query(base).is_ok_and(|q| q.kind == vad::MEM_IMAGE);
+    let result = vad.protect(base, size, if image { image_protection(new) } else { new })?;
+    sync_range(process, &vad, result.1, result.2);
     Ok(result)
 }
 

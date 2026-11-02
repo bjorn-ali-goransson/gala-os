@@ -96,10 +96,11 @@ pub fn spawn(
                 super::sim::enter(id);
             }
             if let Some(s) = slot(id) {
+                // Always: with no affinity of its own the thread still runs
+                // only on the processors the program sees (`--cpus`), so
+                // RDTSCP never reports one it does not have.
                 let mask = *s.affinity.lock().unwrap();
-                if mask != 0 || super::sim::on() {
-                    pin(id, &s, mask);
-                }
+                pin(id, &s, mask);
             }
             setup();
             super::nt_code(|| entry(arg));
@@ -266,7 +267,11 @@ fn pin(id: ThreadId, s: &Slot, mask: u64) {
     let pthread = *s.pthread.lock().unwrap();
     // Simulation: one processor per thread (RDTSCP's TSC_AUX then agrees
     // with `current_cpu`).
-    let mask = if super::sim::on() { 1 << sim_cpu(id, mask) } else { mask };
+    let mask = match mask {
+        _ if super::sim::on() => 1 << sim_cpu(id, mask),
+        0 => online_mask(),
+        m => m,
+    };
     // SAFETY: a zeroed cpu_set_t with bits set; a host thread that never
     // exits.
     unsafe {

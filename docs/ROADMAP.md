@@ -23,6 +23,38 @@ explicitly in its commit.
   control, then fixing the known flaky scenarios (java_http,
   java_hello, postgres, smpsched_test under load), before the rest of
   R6.
+  Flaky scenarios (2026-11-02): a kernel race fixed: a copy-on-write
+  fault changed the VAD before mapping the copy, so a second thread's
+  write fault in between made the shared frame writable (writes reached
+  the image's or file's page, some were lost from the copy); the VAD and
+  page tables now change under one hold of the VAD lock everywhere
+  (`smpcow_test` failed 4 of 8 boots before, 0 of 20 after). It was *not*
+  shown to be the JVM's problem (a detector saw it in none of 6
+  java_http runs): **java_http/java_hello still fail about 1 run in 10**
+  with Java heap corruption right after a young GC: the hs_err report
+  (now in the log, `dump=`) shows `String.equals` reading an object whose
+  klass word holds an oop of the survivor space, i.e. a reference the GC
+  did not update or a write it lost; also a NullPointerException in
+  javac (MemberName) and hangs with threads in NtYieldExecution. Next:
+  find what the GC's stop-the-world relies on that gala gets wrong. With
+  the final version of this change java_http passed 12 of 12 and
+  java_hello 12 of 12 (two VMs at a time), against 1 corruption in 6 to
+  10 runs before; too few runs to call it fixed
+  (12 runs on one vCPU, `XTASK_QEMU_ARGS="-smp 1"`, showed no
+  corruption: 11 passed, 1 hit a lockdep panic of this change's first
+  version, since fixed; not yet conclusive).
+  smpsched_test's check 0x11 expected two threads to run at once, which
+  Windows does not promise under load: the exchange is retried (and
+  gala-um now keeps threads without an affinity on the processors the
+  program sees). kernel32_misc_test's check 0x12: gala-um's tick count
+  (GetTickCount) lagged its timers when the host held back the tick
+  thread; a wait now brings it up to date. context_test's check 0x1c:
+  NtGetContextThread gave up after a second waiting for a suspended
+  thread to stop (now 30 s, as Windows waits), and the test now lets
+  its waiter reach the wait first. `XTASK_REPEAT=n` repeats a boot test.
+  Also seen once in a full suite: java_http listening but xtask's client
+  getting "Connection refused" from the host port forward (not
+  retried; a host port taken by another VM? unexplained).
 - **Server and desktop stay separate**: the essential workloads (servers,
   console programs, the Docker image) never start the graphical
   interface. See "Server and desktop workloads" in ARCHITECTURE; item
@@ -152,6 +184,9 @@ explicitly in its commit.
   locks held), shootdown counters in the boot log; `smpmem_test` (free,
   decommit, protect and unmap under a thread on another CPU; interlocked
   counts; event storms)
+- VAD and page tables change under one hold of the VAD lock (faults,
+  copy-on-write, guard pages, free, protect, unmap); `smpcow_test`
+  (first writes to copy-on-write pages from two CPUs at once)
 - Test speed (T1): per-phase timing in xtask; hybrid BIOS/UEFI ISOs with
   SeaBIOS by default (OVMF was 83% of boot-test time); several programs per
   boot (`run=a.exe,b.exe`) with xtask grouping compatible scenarios and
@@ -521,8 +556,9 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    SLOW_SCENARIOS), smpsched_test (check 0x12, a timing check);
    java_hello again on 2026-11-02, twice (java.exe ended with status 1
    and no output after 77 s of system calls, with other suites running
-   on the host: load average 10; it passes alone in 34-41 s). To hunt:
-   what Java gives up on under load (a JVM startup timeout?).
+   on the host: load average 10; it passes alone in 34-41 s). Still open
+   (2026-11-02): Java heap corruption after a GC (Priorities above); the
+   JVM's hs_err report is now in the log (`dump=`).
    rtl_test's hang (seen three times under the full suite, 2026-11-01/02:
    its thread spinning in NtYieldExecution after the other one ended) is
    fixed (2026-11-02): a race in the test, not the kernel. It terminated

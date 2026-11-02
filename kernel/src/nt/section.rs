@@ -558,21 +558,28 @@ fn map_image_view(
 
 /// Unmaps the view containing `addr`.
 pub fn unmap_view(process: &Process, addr: u64) -> Result<(), NtStatus> {
-    let view = {
-        let mut views = process.views.lock();
-        let i = views
-            .iter()
-            .position(|v| (v.base..v.base + v.size).contains(&addr))
-            .ok_or(NtStatus::NOT_MAPPED_VIEW)?;
-        views.swap_remove(i)
-    };
-    process.vad.lock().release(view.base, 0)?;
+    // The view, its VAD range and its pages go together, under the locks
+    // (in their order: views, VAD, space): a view mapped at once at the
+    // same place, or a fault there, never finds this one's pages.
+    let mut views = process.views.lock();
+    let i = views
+        .iter()
+        .position(|v| (v.base..v.base + v.size).contains(&addr))
+        .ok_or(NtStatus::NOT_MAPPED_VIEW)?;
+    let mut vad = process.vad.lock();
+    vad.release(views[i].base, 0)?;
+    let view = views.swap_remove(i);
     let mut space = process.space.lock();
     let mut page = view.base;
     while page < view.base + view.size {
         space.unmap_page(page); // borrowed: frames stay with the section
         page += PAGE_SIZE;
     }
+    drop(space);
+    drop(vad);
+    drop(views);
+    // The section reference goes last (its drop may take other locks).
+    drop(view);
     Ok(())
 }
 
@@ -585,10 +592,29 @@ pub fn mapped_file_name(process: &Process, addr: u64) -> Option<Result<Vec<u16>,
     Some(out.try_extend_from_slice(name).map(|()| out).map_err(|_| NtStatus::NO_MEMORY))
 }
 
-/// The section frame backing user address `addr`, if it is in a view.
-pub fn frame_for(process: &Process, addr: u64) -> Option<Frame> {
-    let views = process.views.lock();
-    let v = views.iter().find(|v| (v.base..v.base + v.size).contains(&addr))?;
-    let index = usize::try_from((addr - v.base + v.offset) / PAGE_SIZE).ok()?;
-    section_of(&v.section).frame(index)
+/// The data section frame backing user address `addr`, if it is in a
+/// view of a data section, with that section (keep it while the frame is
+/// used). Called with no lock held: a file's page may be made now, and
+/// the file system then delivers change notifications, which write user
+/// memory (and may fault).
+pub fn frame_for(process: &Process, addr: u64) -> Option<(ObjectRef, Frame)> {
+    let (section, index) = {
+        let views = process.views.lock();
+        let v = views.iter().find(|v| (v.base..v.base + v.size).contains(&addr))?;
+        let index = usize::try_from((addr - v.base + v.offset) / PAGE_SIZE).ok()?;
+        (v.section.clone(), index)
+    };
+    if section_of(&section).image.is_some() {
+        return None;
+    }
+    let frame = section_of(&section).frame(index)?;
+    Some((section, frame))
+}
+
+/// Whether `addr` is in one of `views` (the process's, locked by the
+/// caller) of `section`.
+pub fn in_view_of(views: &[View], addr: u64, section: &ObjectRef) -> bool {
+    views.iter().any(|v| {
+        (v.base..v.base + v.size).contains(&addr) && core::ptr::eq(&*v.section, &**section)
+    })
 }

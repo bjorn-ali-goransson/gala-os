@@ -47,6 +47,8 @@ unsafe extern "C" {
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 static REDIRECTED: AtomicU64 = AtomicU64::new(0);
 static WAITER_DONE: AtomicU64 = AtomicU64::new(0);
+/// Set by the waiter just before its wait.
+static WAITER_STARTED: AtomicU64 = AtomicU64::new(0);
 static WAITER_EVENT: AtomicU64 = AtomicU64::new(0);
 
 extern "C" fn spinner(_: usize) -> ! {
@@ -61,6 +63,7 @@ extern "C" fn redirected(arg: usize) -> ! {
 }
 
 extern "C" fn waiter(_: usize) -> ! {
+    WAITER_STARTED.store(1, Ordering::SeqCst);
     let s = wait(Handle(WAITER_EVENT.load(Ordering::SeqCst) as usize), None);
     WAITER_DONE.store(1 + u64::from(s), Ordering::SeqCst);
     exit_thread(0)
@@ -210,6 +213,10 @@ fn run() -> Result<(), u32> {
     WAITER_EVENT.store(event.0 as u64, Ordering::SeqCst);
     let (s, w, _) = create_thread(waiter, 0, false);
     c.st(s, ok)?;
+    // In its wait by then (a loaded machine may start it late).
+    while WAITER_STARTED.load(Ordering::SeqCst) == 0 {
+        yield_execution();
+    }
     delay(SECOND / 50);
     c.st(suspend(w, &mut prev), ok)?;
     // Its context while blocked in the wait: the user state at the system

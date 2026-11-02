@@ -257,6 +257,14 @@ pub fn kernel_main() -> ! {
             info!("run: end {name}");
         }
     }
+    // `dump=C:/hs_err_pid4.log,...` (percent-encoded): files the programs
+    // left in the ramfs, printed to the log once they have ended (a
+    // crashing JVM's error report would otherwise be lost with the VM).
+    if let Some(paths) = cmdline.value("dump") {
+        for path in paths.split(',').filter(|p| !p.is_empty()) {
+            dump_file(path);
+        }
+    }
     failpoint::disarm();
     if failpoint::configured() {
         info!("failpoint: {}", failpoint::Summary);
@@ -632,6 +640,52 @@ fn start_program(
     match nt::process::spawn_from_pe(file_name, directory, data, args, None, console) {
         Ok((process, _thread)) => info!("start: {} (pid {})", process.name, process.id),
         Err(e) => error!("start: cannot start {name}: {e:?}"),
+    }
+}
+
+/// Prints file `path` (`C:/dir/name`, percent-encoded) to the log, one
+/// `dump:` line per line of text; a missing file is one line saying so.
+fn dump_file(path: &str) {
+    let mut decoded = alloc::vec::Vec::new();
+    if cmdline::percent_decode(path, &mut decoded).is_err() {
+        error!("dump: out of memory");
+        return;
+    }
+    let text = core::str::from_utf8(&decoded).unwrap_or("");
+    let rest = text.strip_prefix("C:").or_else(|| text.strip_prefix("c:")).unwrap_or(text);
+    let mut volume_path = alloc::string::String::new();
+    if volume_path.try_reserve(rest.len()).is_err() {
+        error!("dump: out of memory");
+        return;
+    }
+    volume_path.extend(rest.chars().map(|c| if c == '/' { '\\' } else { c }));
+    let data = match nt::file::lookup(&volume_path).and_then(nt::file::read_all) {
+        Ok(data) => data,
+        Err(e) => {
+            info!("dump: {text}: none ({e:?})");
+            return;
+        }
+    };
+    info!("dump: begin {text} ({} bytes)", data.len());
+    for line in data.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        info!("dump: {}", Lossy(line));
+    }
+    info!("dump: end {text}");
+}
+
+/// Text that may not be UTF-8, shown with U+FFFD for bad bytes.
+struct Lossy<'a>(&'a [u8]);
+
+impl core::fmt::Display for Lossy<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for chunk in self.0.utf8_chunks() {
+            f.write_str(chunk.valid())?;
+            if !chunk.invalid().is_empty() {
+                f.write_str("\u{fffd}")?;
+            }
+        }
+        Ok(())
     }
 }
 

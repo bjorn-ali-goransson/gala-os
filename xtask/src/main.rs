@@ -379,6 +379,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("loader_test", "testdll2.dll", "gala"),
     ("smpsched_test", "ntdll.dll", "Windows/System32"),
     ("smpmem_test", "ntdll.dll", "Windows/System32"),
+    ("smpcow_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
     ("events", "testdll.dll", "gala"),
     ("kernel32_test", "ntdll.dll", "Windows/System32"),
@@ -1526,6 +1527,7 @@ const USER_PROGRAMS: &[&str] = &[
     "smp_test",
     "smpsched_test",
     "smpmem_test",
+    "smpcow_test",
     "ledger_test",
     "bench",
     "kernel32_test",
@@ -2479,6 +2481,13 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["smpmem_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // Copy-on-write faults on one page from two processors at once.
+        name: "smpcow_test",
+        cmdline: "qemu_exit run=smpcow_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["smpcow_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // N1a: a kernel TCP echo server on port 7 behind QEMU's user-mode
         // network; xtask connects through a host port forward (see
         // `net_client`) and appends its verdict to the log.
@@ -3362,7 +3371,7 @@ const SCENARIOS: &[Scenario] = &[
         // P1: the JDK's HTTP server (NIO selector: wepoll over AFD) serving
         // the host; xtask stops the VM after the GET.
         name: "java_http",
-        cmdline: "qemu_exit run=java.exe args=C:/gala/Http.java",
+        cmdline: "qemu_exit run=java.exe args=C:/gala/Http.java dump=C:/hs_err_pid4.log",
         exit_status: XTASK_STOPS,
         expect: &["java_http: listening on port 7", "xtask: net client: http ok"],
     },
@@ -3371,7 +3380,7 @@ const SCENARIOS: &[Scenario] = &[
         // (the source launcher compiles it in memory with jdk.compiler).
         // Expected as on Windows 11 (2 processors under QEMU).
         name: "java_hello",
-        cmdline: "qemu_exit run=java.exe args=C:/gala/Hello.java",
+        cmdline: "qemu_exit run=java.exe args=C:/gala/Hello.java dump=C:/hs_err_pid4.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "Hello from Java on gala",
@@ -4092,6 +4101,9 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
         }
     });
     let isos: Vec<PathBuf> = isos.into_iter().collect::<Result<_>>()?;
+    if let Some(times) = env::var("XTASK_REPEAT").ok().and_then(|n| n.parse::<usize>().ok()) {
+        return repeat_boots(&vms, &isos, times);
+    }
     let isos_made = t1.elapsed();
     let t2 = Instant::now();
     let jobs: Vec<(&Vm, &PathBuf)> = vms.iter().zip(&isos).collect();
@@ -4156,6 +4168,61 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     }
 }
 
+/// `XTASK_REPEAT=<n> cargo xtask boot-test <name>`: boots one scenario's
+/// image `n` times, one VM per two host CPUs at once (`XTASK_REPEAT_JOBS`
+/// sets how many; more load brings races out, and time limits too). Each boot has its own copy of the image (a hard
+/// link) and log; a failed boot keeps its log as
+/// `test-<name>.r<i>.serial.log` (its error report is printed), a passed
+/// one is deleted. Ends with the count of failures.
+fn repeat_boots(vms: &[Vm], isos: &[PathBuf], times: usize) -> Result {
+    let ([vm @ Vm::Single(s)], [iso]) = (vms, isos) else {
+        return Err("XTASK_REPEAT needs a filter that selects one scenario of its own VM".into());
+    };
+    let copies: Vec<PathBuf> = (0..times.max(1))
+        .map(|i| {
+            let copy = iso.with_extension(format!("r{i}.iso"));
+            let _ = fs::remove_file(&copy);
+            fs::hard_link(iso, &copy).or_else(|_| fs::copy(iso, &copy).map(drop))?;
+            Ok(copy)
+        })
+        .collect::<std::io::Result<_>>()
+        .map_err(|e| format!("copying {}: {e}", iso.display()))?;
+    let t = Instant::now();
+    // One VM per two host CPUs (each has two processors): more only
+    // queue, and a JVM then runs into its scenario's time limit.
+    let jobs = env::var("XTASK_REPEAT_JOBS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| thread::available_parallelism().map_or(1, |n| n.get().div_ceil(2)));
+    let results = run_parallel_on(jobs, &copies, |copy| {
+        let (_, verdicts) = boot_vm(vm, copy);
+        let verdict = verdicts.into_iter().next().map_or(Ok(()), |(_, v)| v);
+        let _ = fs::remove_file(copy);
+        match &verdict {
+            Ok(()) => {
+                let _ = fs::remove_file(copy.with_extension("serial.log"));
+                let _ = fs::remove_file(copy.with_extension("events.jsonl"));
+                eprintln!("xtask: repeat {}: ok", copy.display());
+            }
+            Err(e) => eprintln!(
+                "xtask: repeat {}: FAILED: {e} (log {})",
+                copy.display(),
+                copy.with_extension("serial.log").display()
+            ),
+        }
+        Ok(verdict)
+    });
+    let failed = results.iter().filter(|r| !matches!(r, Ok(Ok(())))).count();
+    eprintln!(
+        "xtask: {}: {failed} of {} boots failed ({:.0}s)",
+        s.name,
+        copies.len(),
+        t.elapsed().as_secs_f64()
+    );
+    let _ = fs::remove_file(iso);
+    if failed == 0 { Ok(()) } else { Err(format!("{failed} of {} boots failed", copies.len())) }
+}
+
 /// Runs `f` on every job, at most one per host CPU at a time (each job is
 /// an emulator that needs a CPU: running them all at once starves them on
 /// small CI machines). Results are in job order.
@@ -4163,9 +4230,18 @@ fn run_parallel<J: Sync, T: Send>(
     jobs: &[J],
     f: impl Fn(&J) -> Result<T> + Sync,
 ) -> Vec<Result<T>> {
+    run_parallel_on(thread::available_parallelism().map_or(2, |n| n.get()), jobs, f)
+}
+
+/// `run_parallel` with at most `workers` jobs at a time.
+fn run_parallel_on<J: Sync, T: Send>(
+    workers: usize,
+    jobs: &[J],
+    f: impl Fn(&J) -> Result<T> + Sync,
+) -> Vec<Result<T>> {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let workers = thread::available_parallelism().map_or(2, |n| n.get()).min(jobs.len().max(1));
+    let workers = workers.clamp(1, jobs.len().max(1));
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Option<Result<T>>>> = Mutex::new(jobs.iter().map(|_| None).collect());
     thread::scope(|scope| {

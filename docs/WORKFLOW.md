@@ -365,9 +365,34 @@ charged). Look
   EXCEPTION_ILLEGAL_INSTRUCTION in C1-compiled code (HotSpot patching
   JIT code while another CPU runs it; cross-modifying code on 2 vCPUs,
   possibly TCG); it passed on rerun. If it recurs, record it with
-  QEMU record/replay (OBSERVABILITY.md).
+  QEMU record/replay (OBSERVABILITY.md). Still open (2026-11-02):
+  java_http/java_hello fail about 1 run in 10 under load with Java heap
+  corruption right after a young GC (access violations in jvm.dll or the
+  interpreter reading a bogus klass, NullPointerExceptions in javac,
+  hangs); the hs_err report is in the failed log (`dump:` lines). The
+  copy-on-write race below was not it.
 - **Flaky boot tests** usually mean a race; rerun the one scenario a few
-  times (`cargo xtask boot-test name`) before blaming CI.
+  times before blaming CI: `XTASK_REPEAT=12 cargo xtask boot-test name`
+  boots one scenario's image 12 times, as many at once as the host has
+  CPUs (the load brings races out), keeps each failed boot's log
+  (`target/debug/test-<name>.r<i>.serial.log`) and ends with "n of 12
+  boots failed". A race between processors is best caught by a test
+  program that makes the two sides meet often (threads pinned to
+  processors 0 and 1, kept in step: `smpcow_test`), repeated this way.
+- **Lock gaps in the memory manager**: a VAD change and the matching
+  page-table change must happen under one hold of the VAD lock (views,
+  VAD, space; ARCHITECTURE "Virtual memory"). Reading the VAD, dropping
+  its lock and then mapping lets a fault or service on the other processor
+  act on the state in between: two threads' first writes to one
+  copy-on-write page made its shared frame writable (`smpcow_test`).
+  Nothing that may write user memory (with_fs, which delivers directory
+  change notifications) may run under those locks: lockdep panics.
+- **IrqMutex guards go in reverse order**: each guard restores the
+  interrupt flag it found, so dropping an outer guard before an inner one
+  turns interrupts back on while the inner lock is still held (the thread
+  can then be preempted holding it; lockdep reported "X taken while
+  holding Vad" from a user fault). Let guards drop at scope end, or drop
+  them innermost first.
 - **Read the source of the exact version** of an open-source program
   before deciding what it does: Win32-OpenSSH's `latestw_all` branch
   waits for sshd-session in `sshd -d`, the shipped 9.8.3 (tag
@@ -508,10 +533,11 @@ walk the whole import closure (imports and delay imports of every DLL it
 loads, following export forwarders such as the api-ms-win-* sets) against
 the exports of gala's DLLs before booting, and fix the gaps in batches.
 A crashing JVM writes `C:\hs_err_pid<N>.log` (registers, the faulting
-instruction's neighbourhood, native frames); to read it, run busybox's
-`cat` on it after java in the same boot (`run=java.exe,busybox.exe
-args=-version,cat%20C:/hs_err_pid4.log`, busybox.exe in the scenario's
-modules). An unhandled exception's code and address are in the ledger;
+address, the thread's stack, the memory map); the boot option
+`dump=C:/hs_err_pid4.log` (comma-separated, percent-encoded paths) prints
+such files to the serial log as `dump:` lines once the `run=` programs
+have ended, and the Java scenarios have it, so a flaky crash's report is
+in `target/failed/<name>.log` (or the repeat's log, below). An unhandled exception's code and address are in the ledger;
 `XTASK_EVENTS=image` gives each image's base and size to map them.
 A test program that needs a resource (a manifest: `manifest_test`) gets
 it from its build.rs, which writes a .res file (the documented compiled

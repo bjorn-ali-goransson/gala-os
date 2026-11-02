@@ -10,6 +10,7 @@ use super::platform::PageFlags;
 use super::platform::{SharedPage, UserSpace};
 use super::vad::{self, Vad};
 use crate::sync::IrqMutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 pub const ADDRESS: u64 = 0x7ffe_0000;
 
@@ -53,6 +54,8 @@ pub const MINOR_VERSION: u32 = 0;
 pub const BUILD_NUMBER: u32 = 26100;
 
 static PAGE: IrqMutex<Option<SharedPage>> = IrqMutex::new(None);
+/// The tick count the page holds (written under PAGE's lock).
+static PAGE_TICKS: AtomicU64 = AtomicU64::new(0);
 
 fn write_ksystem_time(page: &SharedPage, offset: usize, value: u64) {
     let (low, high) = (value as u32, (value >> 32) as u32);
@@ -97,6 +100,11 @@ pub fn init(physical_pages: u64) -> Result<(), platform::PagingError> {
 }
 
 fn update_page(page: &SharedPage, ticks: u64) {
+    // Never backwards (`catch_up` may have written a later tick first).
+    if ticks < PAGE_TICKS.load(Ordering::Relaxed) {
+        return;
+    }
+    PAGE_TICKS.store(ticks, Ordering::Relaxed);
     write_ksystem_time(page, INTERRUPT_TIME, platform::monotonic_ns() / 100);
     write_ksystem_time(page, SYSTEM_TIME, platform::system_time());
     // TickCount: TickCountQuad (u64) overlapping a KSYSTEM_TIME.
@@ -107,6 +115,24 @@ fn update_page(page: &SharedPage, ticks: u64) {
 fn on_tick(ticks: u64) {
     if let Some(page) = PAGE.lock().as_ref() {
         update_page(page, ticks);
+    }
+}
+
+/// Brings the page's clocks up to date if the tick callback is late, as
+/// a thread ends a wait. In gala-um the callback runs on a host thread
+/// that load can hold back for tens of milliseconds, so a program that
+/// waited 30 ms for a timer could then read an older tick count
+/// (GetTickCount64) than the one its wait ended at (kernel32_misc_test's
+/// check 0x12 under load); Windows' tick count never lags its timers. In
+/// the kernel the callback runs in the tick interrupt itself, so this
+/// finds the page current.
+pub fn catch_up() {
+    let now = platform::ticks();
+    if now <= PAGE_TICKS.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Some(page) = PAGE.lock().as_ref() {
+        update_page(page, now);
     }
 }
 

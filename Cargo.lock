@@ -1376,6 +1376,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "smpcow_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "smpmem_test"
 version = "0.1.0"
 dependencies = [

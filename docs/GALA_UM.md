@@ -219,7 +219,13 @@ One processor as far as programs can tell (`online_count` 1).
   n, for the contiguous start of the process's affinity), so RDTSCP's
   TSC_AUX and NtGetCurrentProcessorNumber agree; affinity is
   `pthread_setaffinity_np`. `um --cpus=n` caps the count; um-test uses 2,
-  as the QEMU tests (`-smp 2`).
+  as the QEMU tests (`-smp 2`). A thread without an affinity of its own
+  is pinned to those processors too (before 2026-11-02 it could run on
+  host CPU 3 under `--cpus=2`, where NtGetCurrentProcessorNumber said 0).
+- **Tick count**: KUSER_SHARED_DATA's tick count (GetTickCount) is
+  written by the timer thread, which a loaded host can hold back; a wait
+  that ends brings it up to date (`kuser::catch_up`), so a program never
+  reads an older tick than the one its timer fired at.
 - **Locks**: the kernel's `IrqMutex` spins with interrupts off, where the
   holder cannot be preempted. In gala-um the host may deschedule a holder
   (one doing a futex wake under the dispatcher lock, say), and spinners

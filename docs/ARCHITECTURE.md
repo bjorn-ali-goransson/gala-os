@@ -461,6 +461,24 @@ but kernel-only, so user accesses fault while contents survive. The loader
 registers the image (MEM_IMAGE, sections with Windows-style protections
 such as WRITECOPY), the 1 MiB demand-zero stack with an uncommitted guard
 page below it, and PEB/params/TEB.
+Invariant: **the VAD and the page tables change together.** Every path
+that reads or changes a page's VAD state and then its mapping (a fault in
+`resolve_once`, copy-on-write, guard pages, NtFreeVirtualMemory,
+NtProtectVirtualMemory, NtUnmapViewOfSection) holds the process's locks
+from the one to the other, in their order: views, VAD, space. Releasing
+the VAD lock in between let another processor act on the half-done state:
+a copy-on-write fault that had made the page private in the VAD but not
+yet mapped the copy let a second thread's write fault find "read/write,
+mapped" and make the *shared* frame writable, so writes reached the file's
+(or image cache's) page and some were lost from the copy (`smpcow_test`);
+a free
+followed at once by an allocation at the same address could find the old
+frames still mapped. Copy-on-write maps the copy before changing the VAD,
+so a failed copy is retried as copy-on-write. Nothing that may write user
+memory runs under these locks: a data section's page is looked up before
+them (making a file's page may deliver directory change notifications,
+which write user buffers and may fault), and used only if the view is
+still there (lockdep caught the inverse order on a single-CPU run).
 
 **Objects and handles** (`nt::object`): kernel objects are `KArc<KObject>`
 (an `ObjectBody` enum: console in/out, event, ...). A handle entry holds the

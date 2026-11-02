@@ -210,6 +210,7 @@ pub fn wait_for_alertable(
         super::thread::wake_if_terminating();
         drop(guard);
         let reason = platform::wait();
+        super::kuser::catch_up();
         super::thread::set_alertable(false);
         {
             let _guard = DISPATCHER.lock();
@@ -254,6 +255,7 @@ pub fn delay(timeout: Timeout, alertable: bool) -> NtStatus {
                 super::thread::wake_if_terminating();
                 drop(guard);
                 platform::wait();
+                super::kuser::catch_up();
                 super::thread::set_alertable(false);
             }
         }

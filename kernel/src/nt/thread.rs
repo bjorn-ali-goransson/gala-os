@@ -272,10 +272,12 @@ fn allocate_teb(
             }
         }
         vad.commit(addr, size, vad::PAGE_READWRITE)?;
+        // Mapped under the VAD lock (ARCHITECTURE "Virtual memory").
+        let flags = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RW };
+        let mapped = process.space.lock().map_zeroed(addr, teb::PAGES, flags);
+        mapped.map_err(|_| NtStatus::NO_MEMORY)?;
         addr
     };
-    let flags = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RW };
-    process.space.lock().map_zeroed(addr, teb::PAGES, flags).map_err(|_| NtStatus::NO_MEMORY)?;
     let put = |off: u64, v: u64| process.write_u64(addr + off, v).map_err(|_| NtStatus::NO_MEMORY);
     put(teb::STACK_BASE, stack_base)?;
     put(teb::STACK_LIMIT, stack_limit)?;
@@ -524,10 +526,14 @@ pub fn set_in_syscall(object: &ObjectRef, regs: Option<(u32, UserRegs)>) {
 /// The user state of a suspended thread: parked on its way to user mode,
 /// or, while it is inside a system call (blocked in a wait, say), its
 /// registers at the `syscall` with the default floating-point state.
-/// Waits up to about a second for one of the two.
+/// Waits for one of the two, as Windows does (up to 30 s: a thread just
+/// created or held back by a loaded host may take long to get there; a
+/// one-second limit failed context_test's GetThreadContext under load
+/// with STATUS_UNSUCCESSFUL).
 pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
     let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
-    for _ in 0..1000 {
+    let give_up = platform::monotonic_ns().saturating_add(30_000_000_000);
+    while platform::monotonic_ns() < give_up {
         if let Some(p) = t.parked.lock().clone() {
             return Ok(p);
         }
