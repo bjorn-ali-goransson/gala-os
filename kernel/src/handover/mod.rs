@@ -15,6 +15,12 @@
 //! come across and go on: `carry` collects and rebuilds them, `programs`
 //! has their record formats. A program can ask for a handover
 //! (GalaRequestHandover, with `handover=`).
+//!
+//! Milestone (c): busy programs and programs on gala's DLLs: threads are
+//! brought to safe points (held on their way back to user mode, with
+//! their full user context, or blocked in a call that can be made
+//! again), DLL views are laid out again and checked by digest, pipes,
+//! keyed events, tokens, APC queues and security descriptors are carried.
 
 pub mod carry;
 pub mod elf;
@@ -245,9 +251,11 @@ pub fn go(info: &BootInfo, cmdline: &Cmdline) -> HandoverError {
     };
     if let Some(p) = &programs {
         crate::info!(
-            "handover: carrying {} process(es), {} thread(s), {} object(s), {} user frame(s)",
+            "handover: carrying {} process(es), {} thread(s) ({} stopped in user mode), {} \
+             object(s), {} user frame(s)",
             p.process_count(),
             p.thread_count(),
+            p.user_mode_count(),
             p.object_count(),
             p.frame_count()
         );

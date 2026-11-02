@@ -1144,6 +1144,25 @@ passes alone): if it recurs, its log says which bound was missed.
 - Something new a program can hold must be carried or refused in
   `carry::check_object` (the match is exhaustive over `ObjectBody`: a
   new object kind does not compile until it is decided).
+- Busy programs (R9 (c), `cargo xtask boot-test handover_k32`): the
+  carrying line says how many threads were stopped in user mode
+  (`(3 stopped in user mode)`). A thread that "runs user code" for 3 s
+  never reached the user-return hook (it is not taking timer ticks: a
+  CPU with interrupts off) or is in `thread_entry` without having
+  entered user mode; "is in a system call that cannot be made again
+  (NtXxx)" names a call blocked for 3 s that is not in
+  `syscalls::restart_as` (make it restartable only if it has done
+  nothing while blocked: the reissue does it all again). A carried
+  thread that misbehaves only after the handover: USER threads come
+  back through `thread_entry`'s parked path (IRETQ with every register,
+  `fxrstor` of the held FXSAVE); a DLL page with wrong contents means
+  the layout differs (`INVALID_IMAGE_HASH` in `cannot resume the
+  programs`) or a page was taken as shared that was private (only
+  borrowed frames equal to `ImageLayout::view_frame` are IMAGE_VIEW).
+- A new system call that blocks: decide whether a thread blocked in it
+  can be carried (`syscalls::restartable` and `restart_as`); a call with
+  a side effect before its wait (signal-and-wait, alert-by-id) carries
+  its blocked half as the plain wait.
 
 ## Where things are
 

@@ -1072,13 +1072,19 @@ pub struct Adopted {
     pub create_time: u64,
     pub threads_created: u32,
     pub priority_class: u8,
+    /// Its primary token (None: an older record without one: the boot
+    /// user's, made again).
+    pub token: Option<ObjectRef>,
 }
 
-/// Rebuilds a process from a kernel handover's record: the boot user's
-/// token (the token is not carried yet), its commit charged again.
+/// Rebuilds a process from a kernel handover's record, its commit charged
+/// again.
 pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
     use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64};
-    let token = super::token::for_new_process(None).map_err(|_| NtStatus::NO_MEMORY)?;
+    let token = match a.token {
+        Some(t) => t,
+        None => super::token::for_new_process(None).map_err(|_| NtStatus::NO_MEMORY)?,
+    };
     let space =
         KArc::try_new(platform::SpaceLock::new(a.space)).map_err(|_| NtStatus::NO_MEMORY)?;
     let commit = a.vad.private_commit();

@@ -92,6 +92,22 @@ pub mod tag {
     pub const CONSOLES: u32 = 24;
     /// Handle tables.
     pub const HANDLES: u32 = 25;
+    // Milestone (c), all REQUIRED.
+    /// Image sections (DLLs, executables), laid out again from their files
+    /// and checked by digest.
+    pub const IMAGE_SECTIONS: u32 = 26;
+    /// Data sections on files, mapped again from the files.
+    pub const FILE_SECTIONS: u32 = 27;
+    /// Pipes (their state and queued bytes), then the pipe ends' objects.
+    pub const PIPES: u32 = 28;
+    pub const PIPE_ENDS: u32 = 29;
+    /// Keyed event objects (their waiters make their calls again).
+    pub const KEYED_EVENTS: u32 = 30;
+    /// Objects' security descriptors (self-relative, as assigned).
+    pub const SECURITY: u32 = 31;
+    /// Access tokens (processes' primary tokens, impersonation tokens,
+    /// token handles) as data.
+    pub const TOKENS: u32 = 32;
 }
 
 /// What a kept physical range is (KEPT section).
@@ -143,7 +159,7 @@ impl core::fmt::Display for RecordError {
 }
 
 /// The tags this kernel knows (unknown ones are skipped unless REQUIRED).
-pub const KNOWN: [u32; 25] = [
+pub const KNOWN: [u32; 32] = [
     tag::MEMORY_MAP,
     tag::PLATFORM,
     tag::FRAMEBUFFER,
@@ -169,6 +185,13 @@ pub const KNOWN: [u32; 25] = [
     tag::PROCESS_OBJECTS,
     tag::CONSOLES,
     tag::HANDLES,
+    tag::IMAGE_SECTIONS,
+    tag::FILE_SECTIONS,
+    tag::PIPES,
+    tag::PIPE_ENDS,
+    tag::KEYED_EVENTS,
+    tag::SECURITY,
+    tag::TOKENS,
 ];
 
 fn get<const N: usize>(bytes: &[u8], at: usize) -> Option<[u8; N]> {
@@ -247,6 +270,14 @@ impl Writer {
 
     /// A UTF-16 string field: its length in code units (u32), the units,
     /// padded to 4 bytes.
+    /// A byte string field: length (u32), bytes, padded to 4.
+    pub fn blob(&mut self, v: &[u8]) -> Result<(), AllocError> {
+        self.u32(v.len() as u32)?;
+        self.bytes(v)?;
+        let pad = (4 - v.len() % 4) % 4;
+        self.bytes(&[0; 4][..pad])
+    }
+
     pub fn wide(&mut self, s: &[u16]) -> Result<(), AllocError> {
         self.u32(s.len() as u32)?;
         for &c in s {
@@ -460,6 +491,15 @@ impl<'a> Reader<'a> {
 
     /// A UTF-16 string field (`Writer::wide`), as its little-endian bytes;
     /// empty if damaged or missing.
+    /// A byte string (`Writer::blob`); what lies past the end is cut.
+    pub fn blob(&mut self) -> &'a [u8] {
+        let len = self.u32() as usize;
+        let s = self.data.get(self.at..).unwrap_or(&[]);
+        let s = &s[..len.min(s.len())];
+        self.at = self.at.saturating_add(len.next_multiple_of(4));
+        s
+    }
+
     pub fn wide(&mut self) -> Wide<'a> {
         let units = self.u32() as usize;
         let len = units.saturating_mul(2);

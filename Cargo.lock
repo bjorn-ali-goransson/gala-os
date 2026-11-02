@@ -564,6 +564,10 @@ name = "gui_test"
 version = "0.1.0"
 
 [[package]]
+name = "handover_k32_test"
+version = "0.1.0"
+
+[[package]]
 name = "handover_test"
 version = "0.1.0"
 dependencies = [

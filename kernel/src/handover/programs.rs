@@ -1,11 +1,12 @@
-//! Programs across a kernel handover (ROADMAP R9 milestone (b),
+//! Programs across a kernel handover (ROADMAP R9 milestones (b) and (c),
 //! ARCHITECTURE "Kernel handover"): the record's formats for processes,
 //! their address spaces, threads as data, objects and handle tables.
 //! Plain data, host-tested; `carry` fills them from the running kernel
 //! and rebuilds the kernel's objects from them.
 //!
 //! Every section here is REQUIRED (a kernel that does not know one would
-//! lose programs) and version 1. Lists are entries (`Writer::begin_entry`:
+//! lose programs), version 1 or, for the sections milestone (c) extended,
+//! 2 (`version_of`; a version-1 entry reads with the new fields 0). Lists are entries (`Writer::begin_entry`:
 //! a length, so an entry gains fields at its end) or tables (count,
 //! stride, fixed records that gain fields at their end). Objects are named
 //! by ids (u32, unique in the record, 0 = none); each kind of object has a
@@ -17,8 +18,11 @@
 //!                process (ProcessRec)
 //! ADDRESS_SPACES an entry per process: pid, its VAD (nt::vad), a table of
 //!                section views (ViewRec), a table of pages (PageRec)
-//! THREADS        an entry per live thread (ThreadRec)
-//! EVENTS ...     an entry per object (EventRec, SemaphoreRec, ...)
+//! THREADS        an entry per live thread (ThreadRec, its APCs' table)
+//! EVENTS ...     an entry per object (EventRec, SemaphoreRec, ...,
+//!                ImageSectionRec, FileSectionRec, PipeEndRec, TokenRec)
+//! PIPES          an entry per pipe the pipe ends share (PipeRec)
+//! SECURITY       an entry per object with a security descriptor
 //! HANDLES        an entry per process: pid, a table of handles (HandleRec)
 //! USER_FRAMES    ranges of the frames of OWNED pages and section pages
 //! ```
@@ -27,12 +31,23 @@ use super::record::{REQUIRED, Reader, Wide, Writer};
 use crate::mm::heap::AllocError;
 use crate::mm::paging::{CacheMode, PageFlags};
 
-/// The version of every section here.
+/// The version of the sections here that never changed.
 pub const VERSION: u16 = 1;
+
+/// The version of section `tag` this kernel writes: PROCESSES 2 (the
+/// executable's digest), THREADS 2 (threads stopped in user mode or not
+/// started, suspend counts, queued APCs), TIMERS 2 (the APC), the rest 1.
+pub fn version_of(tag: u32) -> u16 {
+    use super::record::tag;
+    match tag {
+        tag::PROCESSES | tag::THREADS | tag::TIMERS => 2,
+        _ => VERSION,
+    }
+}
 
 /// Starts one of this module's sections.
 pub fn section(w: &mut Writer, tag: u32) -> Result<(), AllocError> {
-    w.section(tag, VERSION, REQUIRED)
+    w.section(tag, version_of(tag), REQUIRED)
 }
 
 /// A PROCESSES entry.
@@ -51,6 +66,12 @@ pub struct ProcessRec<'a> {
     pub name: &'a str,
     /// The executable's Win32 path (the next kernel lays it out again).
     pub path: &'a str,
+    /// The digest of its layout (`ImageLayout::digest`; version 2, 0 from
+    /// an older writer: not checked).
+    pub image_digest: u64,
+    /// Its primary token's object id (TOKENS; version 2, 0 from an older
+    /// writer: the boot user's, made again).
+    pub token: u32,
 }
 
 impl<'a> ProcessRec<'a> {
@@ -71,6 +92,9 @@ impl<'a> ProcessRec<'a> {
         w.u32(self.priority_class)?;
         w.str(self.name)?;
         w.str(self.path)?;
+        w.u64(self.image_digest)?;
+        w.u32(self.token)?;
+        w.u32(0)?;
         w.end_entry(e)
     }
 
@@ -87,6 +111,8 @@ impl<'a> ProcessRec<'a> {
             priority_class: r.u32(),
             name: r.str(),
             path: r.str(),
+            image_digest: r.u64(),
+            token: r.u32(),
         }
     }
 }
@@ -131,6 +157,10 @@ pub enum PageKind {
     SharedData,
     /// A page of a section view (the frame is the section's).
     Section,
+    /// An unwritten page of an image view (a DLL): the image section's
+    /// shared frame for the view's base, laid out again by the next
+    /// kernel (value: the page's index in the view).
+    ImageView,
 }
 
 impl PageKind {
@@ -140,6 +170,7 @@ impl PageKind {
             PageKind::Image => 1,
             PageKind::SharedData => 2,
             PageKind::Section => 3,
+            PageKind::ImageView => 4,
         }
     }
 
@@ -149,6 +180,7 @@ impl PageKind {
             1 => PageKind::Image,
             2 => PageKind::SharedData,
             3 => PageKind::Section,
+            4 => PageKind::ImageView,
             _ => return None,
         })
     }
@@ -205,7 +237,21 @@ impl PageRec {
 /// of `UserRegs` (16 general-purpose registers, rip, rflags).
 pub type Regs = [u64; 18];
 
-/// A THREADS entry: a live thread blocked in a system call.
+/// How a carried thread stood (ThreadRec::state).
+pub mod thread_state {
+    /// Blocked in system call `number`, made again (version 1's only kind).
+    pub const SYSCALL: u32 = 0;
+    /// Stopped in user mode: goes on with `regs` and `fx`.
+    pub const USER: u32 = 1;
+    /// Created suspended, never run: starts with `regs` (and `mxcsr`).
+    pub const START: u32 = 2;
+}
+
+/// A queued user APC in a THREADS entry (32-byte records): routine, then
+/// its three arguments.
+pub type ApcRec = [u64; 4];
+
+/// A THREADS entry: a live thread.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThreadRec {
     pub tid: u64,
@@ -225,12 +271,21 @@ pub struct ThreadRec {
     pub regs: Regs,
     /// The call's deadline (timer tick), kept absolute; None: none.
     pub deadline: Option<u64>,
-    /// Its x87/SSE state (FXSAVE layout).
+    /// Its x87/SSE state (FXSAVE layout): the whole extended state, as
+    /// gala does not enable AVX (XSAVE).
     pub fx: [u8; 512],
+    /// Version 2: `thread_state` (0 from an older writer: SYSCALL).
+    pub state: u32,
+    pub suspend: u32,
+    /// START: the MXCSR it starts with, if set.
+    pub mxcsr: Option<u32>,
+    /// The impersonation token's object id (TOKENS), 0: none.
+    pub impersonation: u32,
 }
 
 impl ThreadRec {
-    pub fn write(&self, w: &mut Writer) -> Result<(), AllocError> {
+    /// The entry, then its queued APCs (a table of `ApcRec`).
+    pub fn write(&self, w: &mut Writer, apcs: &[ApcRec]) -> Result<(), AllocError> {
         let e = w.begin_entry()?;
         for v in [self.tid, self.pid, self.teb, self.win32_start, self.create_time, self.affinity] {
             w.u64(v)?;
@@ -246,10 +301,23 @@ impl ThreadRec {
         }
         w.u64(self.deadline.map_or(0, |d| d.saturating_add(1)))?;
         w.bytes(&self.fx)?;
+        w.u32(self.state)?;
+        w.u32(self.suspend)?;
+        w.u32(u32::from(self.mxcsr.is_some()))?;
+        w.u32(self.mxcsr.unwrap_or(0))?;
+        w.u32(self.impersonation)?;
+        w.u32(0)?;
+        w.table(apcs.len() as u32, 32)?;
+        for apc in apcs {
+            for v in apc {
+                w.u64(*v)?;
+            }
+        }
         w.end_entry(e)
     }
 
-    pub fn read(r: &mut Reader<'_>) -> Self {
+    /// The entry and its APCs' table.
+    pub fn read<'a>(r: &mut Reader<'a>) -> (Self, super::record::Table<'a>) {
         let (tid, pid, teb, win32_start, create_time, affinity) =
             (r.u64(), r.u64(), r.u64(), r.u64(), r.u64(), r.u64());
         let (object, ordinal, priority, base_priority, number) =
@@ -260,7 +328,10 @@ impl ThreadRec {
             *v = r.u64();
         }
         let deadline = r.u64().checked_sub(1);
-        ThreadRec {
+        let fx = r.array();
+        let (state, suspend, has_mxcsr, mxcsr) = (r.u32(), r.u32(), r.u32(), r.u32());
+        let (impersonation, _) = (r.u32(), r.u32());
+        let rec = ThreadRec {
             tid,
             pid,
             teb,
@@ -274,9 +345,19 @@ impl ThreadRec {
             number,
             regs,
             deadline,
-            fx: r.array(),
-        }
+            fx,
+            state,
+            suspend,
+            mxcsr: (has_mxcsr != 0).then_some(mxcsr),
+            impersonation,
+        };
+        (rec, r.table())
     }
+}
+
+/// Reads an `ApcRec` from a table record.
+pub fn read_apc(r: &mut Reader<'_>) -> ApcRec {
+    [r.u64(), r.u64(), r.u64(), r.u64()]
 }
 
 /// The start of every object entry: its id and its name in the object
@@ -336,6 +417,9 @@ pub struct TimerRec<'a> {
     /// NT system time it was set for; period in ticks.
     pub due_time: u64,
     pub period: u64,
+    /// Version 2: the APC queued when it expires: (thread object id,
+    /// routine, context); None from an older writer.
+    pub apc: Option<(u32, u64, u64)>,
 }
 
 /// A SECTIONS entry (a pagefile-backed section) and its frames.
@@ -478,6 +562,11 @@ impl<'a> TimerRec<'a> {
         w.u64(self.due.map_or(0, |d| d.saturating_add(1)))?;
         w.u64(self.due_time)?;
         w.u64(self.period)?;
+        let (thread, routine, context) = self.apc.unwrap_or((0, 0, 0));
+        w.u32(thread)?;
+        w.u32(0)?;
+        w.u64(routine)?;
+        w.u64(context)?;
         w.end_entry(e)
     }
 
@@ -489,6 +578,10 @@ impl<'a> TimerRec<'a> {
             due: r.u64().checked_sub(1),
             due_time: r.u64(),
             period: r.u64(),
+            apc: {
+                let (thread, _, routine, context) = (r.u32(), r.u32(), r.u64(), r.u64());
+                (thread != 0).then_some((thread, routine, context))
+            },
         }
     }
 }
@@ -601,6 +694,329 @@ pub fn read_console(r: &mut Reader<'_>) -> (u32, bool) {
     (r.u32(), r.u32() != 0)
 }
 
+/// An IMAGE_SECTIONS entry: an image section (an executable or DLL),
+/// laid out again by the next kernel from its file and checked against
+/// `digest`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageSectionRec<'a> {
+    pub head: ObjectHead<'a>,
+    /// `ImageLayout::digest` of the laid-out image.
+    pub digest: u64,
+    pub size: u64,
+    /// The image's alternative base, where views share relocated frames
+    /// (0: none taken).
+    pub dynamic: u64,
+    /// The file, from the volume root.
+    pub path: Wide<'a>,
+}
+
+impl<'a> ImageSectionRec<'a> {
+    pub fn write(&self, w: &mut Writer, name: &[u16], path: &[u16]) -> Result<(), AllocError> {
+        let e = w.begin_entry()?;
+        self.head.write(w, name)?;
+        w.u64(self.digest)?;
+        w.u64(self.size)?;
+        w.u64(self.dynamic)?;
+        w.wide(path)?;
+        w.end_entry(e)
+    }
+
+    pub fn read(r: &mut Reader<'a>) -> Self {
+        ImageSectionRec {
+            head: ObjectHead::read(r),
+            digest: r.u64(),
+            size: r.u64(),
+            dynamic: r.u64(),
+            path: r.wide(),
+        }
+    }
+}
+
+/// A FILE_SECTIONS entry: a data section on a file (a FILES object),
+/// mapped again from the file by the next kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileSectionRec<'a> {
+    pub head: ObjectHead<'a>,
+    pub size: u64,
+    pub protect: u32,
+    /// The file object's id.
+    pub file: u32,
+}
+
+impl<'a> FileSectionRec<'a> {
+    pub fn write(&self, w: &mut Writer, name: &[u16]) -> Result<(), AllocError> {
+        let e = w.begin_entry()?;
+        self.head.write(w, name)?;
+        w.u64(self.size)?;
+        w.u32(self.protect)?;
+        w.u32(self.file)?;
+        w.end_entry(e)
+    }
+
+    pub fn read(r: &mut Reader<'a>) -> Self {
+        FileSectionRec { head: ObjectHead::read(r), size: r.u64(), protect: r.u32(), file: r.u32() }
+    }
+}
+
+/// A PIPES entry: a pipe (both directions' queued bytes and message
+/// lengths), numbered `index` (PipeEndRec::pipe) in the record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PipeRec<'a> {
+    pub index: u32,
+    /// The instance's name (upper case) if a client can still find it
+    /// (its server end is open); empty: none.
+    pub name: Wide<'a>,
+    /// MaximumInstances of the name.
+    pub max_instances: u32,
+    pub message_type: bool,
+    pub quota: [u64; 2],
+    /// `pipe::Conn` as a number (0 listening, 1 connected, 2 closing, 3
+    /// disconnected).
+    pub conn: u32,
+    pub server_open: bool,
+    pub generation: u64,
+    /// Bytes waiting for the server end (0) and the client end (1).
+    pub inbox: [&'a [u8]; 2],
+}
+
+impl<'a> PipeRec<'a> {
+    /// The entry, then each direction's message lengths (two tables of
+    /// u64).
+    pub fn write(
+        &self,
+        w: &mut Writer,
+        name: &[u16],
+        messages: [&[u64]; 2],
+    ) -> Result<(), AllocError> {
+        let e = w.begin_entry()?;
+        w.u32(self.index)?;
+        w.wide(name)?;
+        w.u32(self.max_instances)?;
+        w.u32(u32::from(self.message_type))?;
+        w.u64(self.quota[0])?;
+        w.u64(self.quota[1])?;
+        w.u32(self.conn)?;
+        w.u32(u32::from(self.server_open))?;
+        w.u64(self.generation)?;
+        w.blob(self.inbox[0])?;
+        w.blob(self.inbox[1])?;
+        for m in messages {
+            w.table(m.len() as u32, 8)?;
+            for &len in m {
+                w.u64(len)?;
+            }
+        }
+        w.end_entry(e)
+    }
+
+    /// The entry and its two message-length tables.
+    pub fn read(r: &mut Reader<'a>) -> (Self, [super::record::Table<'a>; 2]) {
+        let index = r.u32();
+        let name = r.wide();
+        let (max_instances, message_type) = (r.u32(), r.u32() != 0);
+        let quota = [r.u64(), r.u64()];
+        let (conn, server_open, generation) = (r.u32(), r.u32() != 0, r.u64());
+        let inbox = [r.blob(), r.blob()];
+        let rec = PipeRec {
+            index,
+            name,
+            max_instances,
+            message_type,
+            quota,
+            conn,
+            server_open,
+            generation,
+            inbox,
+        };
+        (rec, [r.table(), r.table()])
+    }
+}
+
+/// A PIPE_ENDS entry: object `id` is end `end` (0 server, 1 client) of
+/// pipe `pipe`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PipeEndRec {
+    pub id: u32,
+    pub pipe: u32,
+    pub end: u32,
+    pub synchronous: bool,
+    pub message_reads: bool,
+    /// FILE_SKIP_* notification modes.
+    pub modes: u32,
+    /// The connection a client end belongs to.
+    pub generation: u64,
+}
+
+impl PipeEndRec {
+    pub fn write(&self, w: &mut Writer) -> Result<(), AllocError> {
+        let e = w.begin_entry()?;
+        w.u32(self.id)?;
+        w.u32(self.pipe)?;
+        w.u32(self.end)?;
+        w.u32(u32::from(self.synchronous))?;
+        w.u32(u32::from(self.message_reads))?;
+        w.u32(self.modes)?;
+        w.u64(self.generation)?;
+        w.end_entry(e)
+    }
+
+    pub fn read(r: &mut Reader<'_>) -> Self {
+        PipeEndRec {
+            id: r.u32(),
+            pipe: r.u32(),
+            end: r.u32(),
+            synchronous: r.u32() != 0,
+            message_reads: r.u32() != 0,
+            modes: r.u32(),
+            generation: r.u64(),
+        }
+    }
+}
+
+/// A KEYED_EVENTS entry (its id and name; the threads waiting on it make
+/// their calls again).
+pub fn write_keyed_event(w: &mut Writer, id: u32, name: &[u16]) -> Result<(), AllocError> {
+    let e = w.begin_entry()?;
+    ObjectHead { id, name: Wide(&[]) }.write(w, name)?;
+    w.end_entry(e)
+}
+
+pub fn read_keyed_event<'a>(r: &mut Reader<'a>) -> ObjectHead<'a> {
+    ObjectHead::read(r)
+}
+
+/// The most bytes a SID takes (15 sub-authorities).
+pub const SID_BYTES: usize = 68;
+
+/// A SID with its attributes in a TOKENS entry's table (72-byte records:
+/// the SID padded to `SID_BYTES`, then the attributes).
+pub type GroupRec = ([u8; SID_BYTES], u32);
+
+/// A TOKENS entry: an access token as data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenRec<'a> {
+    pub id: u32,
+    /// 0 primary, 1 impersonation (with `level`).
+    pub kind: u32,
+    pub level: u32,
+    /// TokenStatistics.TokenId, and its lineage's (`Token::origin`).
+    pub token_id: u64,
+    pub origin: u64,
+    pub user: GroupRec,
+    pub primary_group: [u8; SID_BYTES],
+    pub owner: [u8; SID_BYTES],
+    /// The default DACL (an ACL), empty: none.
+    pub default_dacl: &'a [u8],
+    pub authentication_id: u64,
+    pub modified_id: u64,
+    pub session: u32,
+    pub elevation_type: u32,
+    pub source_name: [u8; 8],
+    pub source_id: u64,
+    pub sandbox_inert: bool,
+}
+
+impl<'a> TokenRec<'a> {
+    /// The entry, then three tables: groups and restricting SIDs
+    /// (`GroupRec`), privileges (16-byte records: LUID, attributes).
+    pub fn write(
+        &self,
+        w: &mut Writer,
+        groups: &[GroupRec],
+        privileges: &[(u64, u32)],
+        restricted: &[GroupRec],
+    ) -> Result<(), AllocError> {
+        let e = w.begin_entry()?;
+        w.u32(self.id)?;
+        w.u32(self.kind)?;
+        w.u32(self.level)?;
+        w.u32(0)?;
+        w.u64(self.token_id)?;
+        w.u64(self.origin)?;
+        w.bytes(&self.user.0)?;
+        w.u32(self.user.1)?;
+        w.bytes(&self.primary_group)?;
+        w.bytes(&self.owner)?;
+        w.blob(self.default_dacl)?;
+        w.u64(self.authentication_id)?;
+        w.u64(self.modified_id)?;
+        w.u32(self.session)?;
+        w.u32(self.elevation_type)?;
+        w.bytes(&self.source_name)?;
+        w.u64(self.source_id)?;
+        w.u32(u32::from(self.sandbox_inert))?;
+        w.u32(0)?;
+        for table in [groups, restricted] {
+            w.table(table.len() as u32, 72)?;
+            for (sid, attributes) in table {
+                w.bytes(sid)?;
+                w.u32(*attributes)?;
+            }
+        }
+        w.table(privileges.len() as u32, 16)?;
+        for &(luid, attributes) in privileges {
+            w.u64(luid)?;
+            w.u32(attributes)?;
+            w.u32(0)?;
+        }
+        w.end_entry(e)
+    }
+
+    /// The entry and its groups', restricting SIDs' and privileges'
+    /// tables.
+    pub fn read(r: &mut Reader<'a>) -> (Self, [super::record::Table<'a>; 3]) {
+        let (id, kind, level, _) = (r.u32(), r.u32(), r.u32(), r.u32());
+        let (token_id, origin) = (r.u64(), r.u64());
+        let user = (r.array(), r.u32());
+        let (primary_group, owner) = (r.array(), r.array());
+        let default_dacl = r.blob();
+        let rec = TokenRec {
+            id,
+            kind,
+            level,
+            token_id,
+            origin,
+            user,
+            primary_group,
+            owner,
+            default_dacl,
+            authentication_id: r.u64(),
+            modified_id: r.u64(),
+            session: r.u32(),
+            elevation_type: r.u32(),
+            source_name: r.array(),
+            source_id: r.u64(),
+            sandbox_inert: {
+                let (v, _) = (r.u32(), r.u32());
+                v != 0
+            },
+        };
+        (rec, [r.table(), r.table(), r.table()])
+    }
+}
+
+/// A `GroupRec` from a table record.
+pub fn read_group(r: &mut Reader<'_>) -> GroupRec {
+    (r.array(), r.u32())
+}
+
+/// A privilege (LUID, attributes) from a table record.
+pub fn read_privilege(r: &mut Reader<'_>) -> (u64, u32) {
+    (r.u64(), r.u32())
+}
+
+/// A SECURITY entry: object `id`'s security descriptor (self-relative).
+pub fn write_security(w: &mut Writer, id: u32, descriptor: &[u8]) -> Result<(), AllocError> {
+    let e = w.begin_entry()?;
+    w.u32(id)?;
+    w.blob(descriptor)?;
+    w.end_entry(e)
+}
+
+pub fn read_security<'a>(r: &mut Reader<'a>) -> (u32, &'a [u8]) {
+    (r.u32(), r.blob())
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::record::{self, Writer, tag};
@@ -628,6 +1044,8 @@ mod tests {
             priority_class: 2,
             name: "handover_test.exe",
             path: "C:\\gala\\handover_test.exe",
+            image_digest: 0x0123_4567_89ab_cdef,
+            token: 22,
         }
         .write(&mut w)
         .unwrap();
@@ -672,8 +1090,58 @@ mod tests {
             regs: core::array::from_fn(|i| i as u64 * 3),
             deadline: Some(12_345),
             fx,
+            state: thread_state::SYSCALL,
+            suspend: 0,
+            mxcsr: None,
+            impersonation: 0,
         }
-        .write(&mut w)
+        .write(&mut w, &[])
+        .unwrap();
+        // A thread stopped in user mode, suspended twice, two APCs queued.
+        ThreadRec {
+            tid: 16,
+            pid: 8,
+            teb: 0x7ffd_c000,
+            win32_start: 0x1_4000_2000,
+            create_time: 6,
+            affinity: 1,
+            object: 20,
+            ordinal: 1,
+            priority: 8,
+            base_priority: 8,
+            number: 0,
+            regs: core::array::from_fn(|i| i as u64 * 5 + 1),
+            deadline: None,
+            fx,
+            state: thread_state::USER,
+            suspend: 2,
+            mxcsr: None,
+            impersonation: 23,
+        }
+        .write(&mut w, &[[0x40_1000, 1, 2, 3], [0x40_2000, 4, 5, 6]])
+        .unwrap();
+        // One created suspended that never ran.
+        ThreadRec {
+            tid: 24,
+            pid: 8,
+            state: thread_state::START,
+            suspend: 1,
+            mxcsr: Some(0x1f80),
+            impersonation: 0,
+            teb: 0x7ffd_a000,
+            win32_start: 0,
+            create_time: 7,
+            affinity: 3,
+            object: 21,
+            ordinal: 2,
+            priority: 8,
+            base_priority: 8,
+            number: 0,
+            regs: [0; 18],
+            deadline: None,
+            fx: [0; 512],
+        }
+        .write(&mut w, &[])
         .unwrap();
         section(&mut w, tag::EVENTS).unwrap();
         let name = wide("\\BaseNamedObjects\\go");
@@ -693,6 +1161,7 @@ mod tests {
             due: Some(1500),
             due_time: 9,
             period: 0,
+            apc: Some((20, 0x40_3000, 0x77)),
         }
         .write(&mut w, &[])
         .unwrap();
@@ -703,6 +1172,7 @@ mod tests {
             due: None,
             due_time: 0,
             period: 0,
+            apc: None,
         }
         .write(&mut w, &[])
         .unwrap();
@@ -736,6 +1206,73 @@ mod tests {
         section(&mut w, tag::CONSOLES).unwrap();
         write_console(&mut w, 14, true).unwrap();
         write_console(&mut w, 15, false).unwrap();
+        section(&mut w, tag::IMAGE_SECTIONS).unwrap();
+        ImageSectionRec {
+            head: head(16),
+            digest: 0xfeed_beef,
+            size: 0x9_0000,
+            dynamic: 0x3ff7_fff0_0000,
+            path: Wide(&[]),
+        }
+        .write(&mut w, &[], &wide("\\Windows\\System32\\kernel32.dll"))
+        .unwrap();
+        section(&mut w, tag::FILE_SECTIONS).unwrap();
+        FileSectionRec { head: head(17), size: 0x1234, protect: 2, file: 9 }
+            .write(&mut w, &[])
+            .unwrap();
+        section(&mut w, tag::PIPES).unwrap();
+        PipeRec {
+            index: 1,
+            name: Wide(&[]),
+            max_instances: 1,
+            message_type: true,
+            quota: [4096, 8192],
+            conn: 1,
+            server_open: true,
+            generation: 3,
+            inbox: [b"abc", b""],
+        }
+        .write(&mut w, &wide("\\GALA\\PIPE"), [&[1, 2], &[]])
+        .unwrap();
+        section(&mut w, tag::PIPE_ENDS).unwrap();
+        PipeEndRec {
+            id: 18,
+            pipe: 1,
+            end: 1,
+            synchronous: true,
+            message_reads: false,
+            modes: 1,
+            generation: 3,
+        }
+        .write(&mut w)
+        .unwrap();
+        section(&mut w, tag::KEYED_EVENTS).unwrap();
+        write_keyed_event(&mut w, 19, &wide("\\BaseNamedObjects\\k")).unwrap();
+        section(&mut w, tag::TOKENS).unwrap();
+        let mut sid = [0u8; SID_BYTES];
+        sid[..12].copy_from_slice(&[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0]);
+        TokenRec {
+            id: 22,
+            kind: 0,
+            level: 0,
+            token_id: 0x10_0005,
+            origin: 0x10_0001,
+            user: (sid, 0),
+            primary_group: sid,
+            owner: sid,
+            default_dacl: &[2, 0, 8, 0, 0, 0, 0, 0],
+            authentication_id: 0x3e7,
+            modified_id: 9,
+            session: 1,
+            elevation_type: 1,
+            source_name: *b"gala\0\0\0\0",
+            source_id: 0,
+            sandbox_inert: true,
+        }
+        .write(&mut w, &[(sid, 7), (sid, 0xc000_0007)], &[(23, 3)], &[])
+        .unwrap();
+        section(&mut w, tag::SECURITY).unwrap();
+        write_security(&mut w, 2, &[1, 0, 4, 0x80, 0x14, 0, 0]).unwrap();
         section(&mut w, tag::HANDLES).unwrap();
         let e = w.begin_entry().unwrap();
         w.u64(8).unwrap();
@@ -775,10 +1312,23 @@ mod tests {
         assert_eq!(pages[2].flags.cache, CacheMode::Uncached);
         assert!(!pages[1].flags.executable);
 
-        let t = ThreadRec::read(&mut rec.section(tag::THREADS).unwrap().entry().unwrap());
+        assert_eq!(p.image_digest, 0x0123_4567_89ab_cdef);
+        let mut threads = rec.section(tag::THREADS).unwrap();
+        let (t, apcs) = ThreadRec::read(&mut threads.entry().unwrap());
         assert_eq!((t.tid, t.pid, t.number, t.deadline), (12, 8, 0x34, Some(12_345)));
+        assert_eq!((t.state, t.suspend, t.mxcsr, apcs.len()), (thread_state::SYSCALL, 0, None, 0));
         assert_eq!(t.regs[17], 51);
         assert_eq!((t.fx[24], t.fx[511]), (0x80, 9));
+        let (t, apcs) = ThreadRec::read(&mut threads.entry().unwrap());
+        assert_eq!((t.tid, t.state, t.suspend, t.regs[16]), (16, thread_state::USER, 2, 81));
+        let apcs: Vec<_> = apcs.iter().map(|mut a| read_apc(&mut a)).collect();
+        assert_eq!(apcs, [[0x40_1000, 1, 2, 3], [0x40_2000, 4, 5, 6]]);
+        let (t, _) = ThreadRec::read(&mut threads.entry().unwrap());
+        assert_eq!(
+            (t.tid, t.state, t.suspend, t.mxcsr),
+            (24, thread_state::START, 1, Some(0x1f80))
+        );
+        assert!(threads.entry().is_none());
 
         let ev = EventRec::read(&mut rec.section(tag::EVENTS).unwrap().entry().unwrap());
         assert_eq!((ev.head.id, ev.kind, ev.signal), (2, 1, 0));
@@ -792,7 +1342,8 @@ mod tests {
         let t1 = TimerRec::read(&mut timers.entry().unwrap());
         let t2 = TimerRec::read(&mut timers.entry().unwrap());
         assert_eq!((t1.due, t1.synchronization), (Some(1500), true));
-        assert_eq!((t2.due, t2.signal), (None, 1));
+        assert_eq!(t1.apc, Some((20, 0x40_3000, 0x77)));
+        assert_eq!((t2.due, t2.signal, t2.apc), (None, 1, None));
         let (sec, frames) =
             SectionRec::read(&mut rec.section(tag::SECTIONS).unwrap().entry().unwrap());
         assert_eq!((sec.head.id, sec.size, sec.protect), (3, 0x1_0000, 4));
@@ -814,6 +1365,64 @@ mod tests {
         let mut consoles = rec.section(tag::CONSOLES).unwrap();
         assert_eq!(read_console(&mut consoles.entry().unwrap()), (14, true));
         assert_eq!(read_console(&mut consoles.entry().unwrap()), (15, false));
+        let i =
+            ImageSectionRec::read(&mut rec.section(tag::IMAGE_SECTIONS).unwrap().entry().unwrap());
+        assert_eq!(
+            (i.head.id, i.digest, i.size, i.dynamic),
+            (16, 0xfeed_beef, 0x9_0000, 0x3ff7_fff0_0000)
+        );
+        assert_eq!(i.path.to_vec().unwrap(), wide("\\Windows\\System32\\kernel32.dll"));
+        let f =
+            FileSectionRec::read(&mut rec.section(tag::FILE_SECTIONS).unwrap().entry().unwrap());
+        assert_eq!((f.head.id, f.size, f.protect, f.file), (17, 0x1234, 2, 9));
+        let (pipe, messages) =
+            PipeRec::read(&mut rec.section(tag::PIPES).unwrap().entry().unwrap());
+        assert_eq!((pipe.index, pipe.conn, pipe.generation, pipe.quota), (1, 1, 3, [4096, 8192]));
+        assert!(pipe.message_type && pipe.server_open);
+        assert_eq!(pipe.inbox, [&b"abc"[..], &b""[..]]);
+        assert_eq!(pipe.name.to_vec().unwrap(), wide("\\GALA\\PIPE"));
+        let lengths: Vec<_> = messages[0].iter().map(|mut m| m.u64()).collect();
+        assert_eq!((lengths, messages[1].len()), (vec![1, 2], 0));
+        let end = PipeEndRec::read(&mut rec.section(tag::PIPE_ENDS).unwrap().entry().unwrap());
+        assert_eq!(
+            end,
+            PipeEndRec {
+                id: 18,
+                pipe: 1,
+                end: 1,
+                synchronous: true,
+                message_reads: false,
+                modes: 1,
+                generation: 3
+            }
+        );
+        let k = read_keyed_event(&mut rec.section(tag::KEYED_EVENTS).unwrap().entry().unwrap());
+        assert_eq!((k.id, k.name.to_vec().unwrap()), (19, wide("\\BaseNamedObjects\\k")));
+        let (tok, tables) = TokenRec::read(&mut rec.section(tag::TOKENS).unwrap().entry().unwrap());
+        assert_eq!((tok.id, tok.token_id, tok.origin, tok.session), (22, 0x10_0005, 0x10_0001, 1));
+        assert_eq!((tok.user.0[7], tok.default_dacl.len(), tok.sandbox_inert), (5, 8, true));
+        assert_eq!(&tok.source_name[..4], b"gala");
+        let groups: Vec<_> = tables[0].iter().map(|mut g| read_group(&mut g).1).collect();
+        assert_eq!((groups, tables[1].len()), (vec![7, 0xc000_0007], 0));
+        let privileges: Vec<_> = tables[2].iter().map(|mut p| read_privilege(&mut p)).collect();
+        assert_eq!(privileges, [(23, 3)]);
+        let (t2, _) = {
+            let mut threads = rec.section(tag::THREADS).unwrap();
+            threads.entry();
+            ThreadRec::read(&mut threads.entry().unwrap())
+        };
+        assert_eq!(t2.impersonation, 23);
+        assert_eq!(
+            ProcessRec::read(&mut {
+                let mut r = rec.section(tag::PROCESSES).unwrap();
+                r.entry();
+                r.entry().unwrap()
+            })
+            .token,
+            22
+        );
+        let sd = read_security(&mut rec.section(tag::SECURITY).unwrap().entry().unwrap());
+        assert_eq!(sd, (2, &[1, 0, 4, 0x80, 0x14, 0, 0][..]));
         let mut h = rec.section(tag::HANDLES).unwrap().entry().unwrap();
         assert_eq!(h.u64(), 8);
         let handles: Vec<_> = h.table().iter().map(|mut x| HandleRec::read(&mut x)).collect();
@@ -832,7 +1441,7 @@ mod tests {
         for s in rec.sections() {
             let s = s.unwrap();
             assert_eq!(s.flags & REQUIRED, REQUIRED, "section {}", s.tag);
-            assert_eq!(s.version, VERSION);
+            assert_eq!(s.version, version_of(s.tag));
         }
         // Damage anywhere is caught by the record's CRC.
         for i in (record::HEADER_LEN..bytes.len()).step_by(97) {
@@ -860,12 +1469,70 @@ mod tests {
         w.u32(0).unwrap();
         let bytes = w.finish().unwrap();
         let rec = record::parse(&bytes).unwrap();
-        let t = ThreadRec::read(&mut rec.section(tag::THREADS).unwrap().entry().unwrap());
+        let (t, apcs) = ThreadRec::read(&mut rec.section(tag::THREADS).unwrap().entry().unwrap());
         assert_eq!((t.tid, t.pid, t.teb, t.deadline, t.number), (12, 8, 0, None, 0));
         assert!(t.fx.iter().all(|&b| b == 0));
+        // Version 1 had blocked system calls only: no APCs, not suspended.
+        assert_eq!((t.state, t.suspend, t.mxcsr, apcs.len()), (thread_state::SYSCALL, 0, None, 0));
         let mut r = rec.section(tag::ADDRESS_SPACES).unwrap();
         let page = r.table().iter().next().map(|mut p| PageRec::read(&mut p));
         assert_eq!(page, Some(None));
+    }
+
+    #[test]
+    fn version_1_entries_read_with_defaults() {
+        // A process and a timer as milestone (b)'s kernel wrote them: no
+        // digest (not checked), no APC.
+        let mut w = Writer::new(1).unwrap();
+        w.section(tag::PROCESSES, 1, REQUIRED).unwrap();
+        let e = w.begin_entry().unwrap();
+        for v in [8u64, 0, 1, 0x1_4000_0000, 0x5000, 0, 0] {
+            w.u64(v).unwrap();
+        }
+        w.u32(1).unwrap();
+        w.u32(2).unwrap();
+        w.str("a.exe").unwrap();
+        w.str("C:\\gala\\a.exe").unwrap();
+        w.end_entry(e).unwrap();
+        w.section(tag::TIMERS, 1, REQUIRED).unwrap();
+        let e = w.begin_entry().unwrap();
+        ObjectHead { id: 3, name: Wide(&[]) }.write(&mut w, &[]).unwrap();
+        w.u32(1).unwrap();
+        w.u32(0).unwrap();
+        w.u64(1501).unwrap();
+        w.u64(9).unwrap();
+        w.u64(0).unwrap();
+        w.end_entry(e).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = record::parse(&bytes).unwrap();
+        let p = ProcessRec::read(&mut rec.section(tag::PROCESSES).unwrap().entry().unwrap());
+        assert_eq!((p.id, p.path, p.image_digest), (8, "C:\\gala\\a.exe", 0));
+        let t = TimerRec::read(&mut rec.section(tag::TIMERS).unwrap().entry().unwrap());
+        assert_eq!((t.head.id, t.due, t.apc), (3, Some(1500), None));
+    }
+
+    #[test]
+    fn damaged_new_entries_read_safely() {
+        // A pipe entry cut short (an inbox longer than the entry): the
+        // bytes stop at the entry's end, the tables are empty.
+        let mut w = Writer::new(1).unwrap();
+        section(&mut w, tag::PIPES).unwrap();
+        let e = w.begin_entry().unwrap();
+        w.u32(1).unwrap();
+        w.wide(&[]).unwrap();
+        for _ in 0..8 {
+            w.u32(0).unwrap();
+        }
+        w.u32(0).unwrap();
+        w.u32(0).unwrap();
+        w.u32(1000).unwrap(); // inbox 0: 1000 bytes claimed
+        w.bytes(b"xy").unwrap();
+        w.end_entry(e).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = record::parse(&bytes).unwrap();
+        let (p, m) = PipeRec::read(&mut rec.section(tag::PIPES).unwrap().entry().unwrap());
+        assert!(p.inbox[0].len() <= 4 && p.inbox[1].is_empty());
+        assert_eq!((m[0].len(), m[1].len()), (0, 0));
     }
 
     #[test]

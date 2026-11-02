@@ -60,6 +60,15 @@ pub fn system() -> Result<ObjectRef, NtStatus> {
     Ok(o)
 }
 
+/// How many threads of process `process` wait on keyed event `object` for
+/// `key` (as releasers if `release`) and have not been paired yet: a
+/// kernel handover makes such a call again; a paired one has finished.
+pub fn unpaired(object: &ObjectRef, key: u64, release: bool, process: u64) -> usize {
+    let ObjectBody::KeyedEvent(k) = &object.body else { return 0 };
+    let pending = k.pending.lock();
+    pending.iter().filter(|p| p.key == key && p.release == release && p.process == process).count()
+}
+
 /// NtWaitForKeyedEvent (`release` false) or NtReleaseKeyedEvent (true) on
 /// `object` for `key`, by a thread of process `process`.
 pub fn meet(

@@ -4067,7 +4067,7 @@ delay mode; its faults stay `net_tx` drops and `netreset=`.
 - **A chain of trust for updates**: designed below (R8); built after
   R7, before live update ships.
 
-### Kernel handover (R9 milestones (a) and (b), 2026-11-02)
+### Kernel handover (R9 milestones (a), (b) and (c), 2026-11-02)
 
 The running kernel hands the machine to a fresh kernel image without the
 firmware or the bootloader: same build, no programs running (milestone
@@ -4100,7 +4100,7 @@ other unknown tags are skipped and logged. Sections (all version 1):
 | 8 | VOLUME | the mounted volume's size, log generation, area and length (`persist`) |
 | 9 | KEPT | (base, length, purpose): SCAFFOLD, RECORD, KERNEL_IMAGE, BITMAP (room for the next frame bitmap) (for the receiving kernel only), MARKER (kept for good) |
 | 10 | KERNEL_FILE | the kernel ELF to hand over to next time |
-| 11-25 | programs | REQUIRED, milestone (b): "Programs across a handover" below |
+| 11-32 | programs | REQUIRED, milestones (b) and (c): "Programs across a handover" below |
 
 **Memory.** The receiving kernel builds its frame allocator from the
 record's map as from Limine's: the new image is "executable and modules",
@@ -4175,68 +4175,112 @@ record: a newer kernel (milestone (d)) must keep them or raise the
 framing version. Clock control (`clock=`) state is not carried: a
 handover with programs is refused while it is armed.
 
-**Programs across a handover** (milestone (b); scenarios
+**Programs across a handover** (milestones (b) and (c); scenarios
 `handover_idle`, `handover_idle_uefi`, `handover_idle_twice`,
-`handover_refused`; test program `user/handover_test`). Programs whose
-threads are all blocked in waits come across and go on, their memory in
-place, without being started again. Code: `handover::carry` (collect,
-rebuild; uses the NT layer's handover helpers: `thread::snapshot/adopt`,
-`process::adopt`, `section::Section::adopt`, `timer::adopt`,
-`file::reopen`, `vad::Vad::write_to/read_from`) and `handover::programs`
-(the formats, host-tested: round trip, damage, older entries).
+`handover_refused` (test program `user/handover_test`, on ntrt), and
+`handover_k32`, `handover_k32_uefi`, `handover_k32_twice` (test program
+`user/handover_k32_test`, on gala's ntdll and kernel32)). Programs come
+across and go on, their memory in place, without being started again:
+idle ones (b), and (c) busy ones (threads computing in user mode),
+threads blocked in waits, in ReadFile on a pipe, in keyed events, with
+APCs queued, suspended or not started yet, programs on gala's DLLs.
+Code: `handover::carry` (collect, rebuild; uses the NT layer's handover
+helpers: `thread::snapshot/adopt/hold_for_handover/queued_apcs`,
+`process::adopt`, `section::Section::adopt`, `ImageLayout::digest/
+view_frame/adopt_dynamic`, `pipe::carry/adopt/adopt_end`,
+`keyed_event::unpaired`, `token::Token::adopt`, `timer::adopt`,
+`file::reopen`, `vad::Vad::write_to/read_from`,
+`syscalls::restart_as`) and `handover::programs` (the formats,
+host-tested: round trip, damage, older entries).
 
 - *Trigger*: GalaRequestHandover (0x7f5a, test-only, in user/ntrt; it
   answers STATUS_ACCESS_DENIED unless `handover=` allows one more) sets
   an event `run=`'s wait also waits on; the boot thread then calls
   `handover::go`. `handover=<n>` at the end of the boot carries whatever
   still runs (`start=` servers) the same way.
-- *Quiescence* (`carry::collect`): every NT thread must be blocked
-  (scheduler state Waiting, off every CPU) in a system call that can be
-  made again (`syscalls::restartable`: NtWaitForSingleObject,
-  NtWaitForMultipleObjects, NtDelayExecution; they only wait, so the same
-  call with the same arguments and the same absolute deadline is the
-  same call, invariant 2), not suspended, not terminating, no user APC
-  queued, not impersonating. The boot thread polls (every 2 ms, up to
-  3 s) without stopping anyone (a thread stopped in user mode on its way
-  to its wait would never get there); once all are blocked it stops the
+- *Safe points* (`carry::collect`, milestone (c)): the boot thread sets
+  `thread::hold_for_handover(true)`: every thread returning to user mode
+  (from a system call or an interrupt: the user-return hook) waits on
+  the way, its full user context kept as data (every register as the
+  interrupt or SYSRET frame has it, and its FXSAVE image: gala does not
+  enable AVX/XSAVE, so that is the whole extended state). A thread
+  running user code gets there at its next timer tick (1 ms); one in a
+  system call when the call returns, so a call with side effects is
+  finished, never cut (bounded: the boot thread gives up after 3 s); the
+  hold is after the call, nothing is held there. The other safe points:
+  blocked in a call that has done nothing yet (`syscalls::restart_as`:
+  NtWaitForSingleObject, NtWaitForMultipleObjects, NtDelayExecution,
+  NtRemoveIoCompletion (the packet is taken after the wait), the keyed
+  event calls, NtReadFile on a synchronous pipe end (it waits for data in
+  the call and takes none until it returns)); suspended on the way back
+  to user mode (its parked context); created suspended and never run
+  (its start context). A keyed event call whose partner already came
+  (paired, woken, not run) has finished: it is carried as returning
+  STATUS_SUCCESS (`keyed_event::unpaired` tells; if several threads of
+  the same process wait for the same key and some were paired, which
+  ones cannot be told: refused). The boot thread polls (every 2 ms, up
+  to 3 s) without freezing anyone (a thread frozen on its way to its
+  safe point would never get there); once all are at one it stops the
   scheduler from picking user threads (`sched::freeze_users`) and checks
-  again (one may have been woken in between). Stopped threads stay where
+  again (one may have been woken in between). Frozen threads stay where
   they are (woken ones queued, not run), so nothing a wait consumes is
-  consumed until the new kernel makes the call again. A refusal (or any
-  failure before the point of no return) lets them run again and is
-  logged: `handover: refused: thread 12 of process 4 runs user code`,
-  `... process 4 has an open socket`.
-- *What is carried* (sections, all version 1 and REQUIRED; lists are
-  entries with a length, or tables with a stride, so items gain fields at
-  their end; objects are named by ids unique in the record, one section
-  per object kind so a kernel that does not know a kind refuses the
-  record before it starts):
+  consumed until the new kernel makes the call again. Timers' states are
+  taken then too (the timer worker runs until the jump: a timer firing
+  after that fires again, at once, in the next kernel). A refusal (or
+  any failure before the point of no return) lets the held threads go
+  and unfreezes the scheduler, and is logged: `handover: refused: thread
+  12 of process 4 is in a system call that cannot be made again
+  (NtWriteFile)`, `... process 4 has an open socket`. The calls Windows
+  splits into a side effect and a wait (NtSignalAndWaitForSingleObject,
+  NtWaitForAlertByThreadId) do not exist in gala yet; when they come,
+  the blocked half is carried as the plain wait (registers rewritten to
+  NtWaitForSingleObject's), since the side effect is done.
+- *What is carried* (sections, all REQUIRED; version 1 but PROCESSES,
+  THREADS and TIMERS, version 2 since (c); lists are entries with a
+  length, or tables with a stride, so items gain fields at their end;
+  objects are named by ids unique in the record, one section per object
+  kind so a kernel that does not know a kind refuses the record before
+  it starts):
 
 | Tag | Section | Contents |
 |---|---|---|
 | 11 | USER_FRAMES | physical ranges of the programs' own pages and of section pages: the next frame allocator claims them before anything is allocated (`mm::init`) |
-| 12 | PROCESSES | a header entry (the next NT id), then per process: id, parent, create time, image base and size, ntdll's dispatchers, threads created, priority class, name, Win32 path of the executable |
-| 13 | ADDRESS_SPACES | per process: the VAD (`Vad::write_to`), a table of section views (base, size, offset, section id), a table of pages (address, value, kind, flags): OWNED (frame number: kept in place), IMAGE (page index: the executable is laid out again from its file and the page mapped from that layout), SHARED_DATA (KUSER_SHARED_DATA: the new kernel's), SECTION (the view's section page) |
-| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, its object id, the system call (number, the user registers at the `syscall`), its deadline (timer tick, absolute; none), its x87/SSE state (FXSAVE, from the scheduler's saved context) |
+| 12 | PROCESSES | a header entry (the next NT id), then per process: id, parent, create time, image base and size, ntdll's dispatchers, threads created, priority class, name, Win32 path of the executable; v2: the digest of the executable's layout, its primary token's object id |
+| 13 | ADDRESS_SPACES | per process: the VAD (`Vad::write_to`), a table of section views (base, size, offset, section id), a table of pages (address, value, kind, flags): OWNED (frame number: kept in place; also every written, copy-on-write-copied or privately relocated image page), IMAGE (page index: the executable is laid out again from its file and the page mapped from that layout), SHARED_DATA (KUSER_SHARED_DATA: the new kernel's), SECTION (the view's section page), IMAGE_VIEW (page index in a DLL view: the image section's shared frame for the view's base, unrelocated at the preferred base, relocated at the image's alternative base) |
+| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, its object id, the system call (number, the user registers at the `syscall`), its deadline (timer tick, absolute; none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), its suspend count, its impersonation token's id, a table of queued user APCs (routine, three arguments) |
 | 15-23 | EVENTS, SEMAPHORES, MUTANTS, TIMERS, SECTIONS, FILES, IO_COMPLETIONS, EXITED_THREADS, PROCESS_OBJECTS | per object: id, name (re-linked in the namespace when its directory is a permanent one), state: signal, count and maximum, owner thread and count, due tick and period, size/protection/attributes and frames (pagefile-backed), volume path, rights, share access, options and position (opened again), queued packets, exit status and times, the process |
 | 24 | CONSOLES | console input/output objects (no state) |
 | 25 | HANDLES | per process: (handle value, object id, granted access, attributes) |
+| 26 | IMAGE_SECTIONS | per image section (an executable or DLL): id, name, the digest of its layout (`ImageLayout::digest`, FNV-1a over the laid-out bytes and the base), size, the image's alternative base (0: none), the file's volume path. The next kernel lays the file out again (the image cache; the system ntdll's own section when it is that file) and refuses a different digest (STATUS_INVALID_IMAGE_HASH); it takes the alternative base again (`adopt_dynamic`: later ones are handed out below it) |
+| 27 | FILE_SECTIONS | per data section on a file: id, name, size, protection, the file object's id (FILES): mapped again from the file. Only read-only or copy-on-write sections (a writable view's writes are in the file's pages, which the next kernel reads again from the disk or the boot module) |
+| 28, 29 | PIPES, PIPE_ENDS | per pipe: its number, the instance's name if clients can still open it, max instances, type, quotas, connection state and generation, both directions' queued bytes and message lengths; per end object: the pipe, server or client, its connection, synchronous, read mode, notification modes. Waiting threads make their calls again; asynchronous I/O in flight is refused |
+| 30 | KEYED_EVENTS | keyed event objects (id, name); their unpaired waiters make their calls again |
+| 31 | SECURITY | objects' assigned security descriptors (id, self-relative bytes) |
+| 32 | TOKENS | access tokens as data: id, primary or impersonation (level), token id and lineage, user, groups, privileges, restricting SIDs, primary group, owner, default DACL, logon id, modified id, session, elevation type, source, sandbox-inert. Processes' primary tokens (their privilege changes kept), threads' impersonation tokens, token handles |
 
 - *The receiving kernel*: `mm::init` claims USER_FRAMES; the frame
   bitmap goes in the BITMAP range the old kernel took from its free
   frames (anywhere else in usable memory it could land on user pages);
   after `nt::init`, the boot modules' files and `persist`,
-  `handover::resume_programs` rebuilds objects, processes (a new address
-  space: owned pages adopted, image pages from the executable's layout,
-  section pages from the sections), process objects, threads, mutant
-  ownership, handle tables, armed timers (listed again: one due in the
-  past fires at once), then starts the threads. A carried thread's first
-  run (`thread_entry` with a `Resume`) loads its x87/SSE state, keeps the
-  deadline for the call (`thread::take_restart_deadline`, taken by
-  `Call::timeout` instead of the user's relative timeout) and reissues the
-  call through the normal dispatcher (`platform::reissue_syscall`,
-  `arch::syscall::reissue`), returning to user mode as SYSRET would
-  (rcx = rip, r11 = rflags). `run=`/`start=` find the carried process by
+  `handover::resume_programs` rebuilds objects (tokens, image sections
+  laid out again and checked, file sections, pipes and their ends, keyed
+  events, ...), processes (a new address space: owned pages adopted,
+  image pages from the executable's layout, DLL pages from their image
+  sections' layouts, section pages from the sections), process objects,
+  threads (with their suspend counts, queued APCs and impersonation
+  tokens), mutant ownership, timers' APC threads, handle tables, security
+  descriptors, armed timers (listed again: one due in the past fires at
+  once), then starts the threads. A carried thread's first run
+  (`thread_entry` with a `thread::Resume`): SYSCALL loads its x87/SSE
+  state, keeps the deadline for the call (`thread::take_restart_deadline`,
+  taken by `Call::timeout` instead of the user's relative timeout) and
+  reissues the call through the normal dispatcher
+  (`platform::reissue_syscall`, `arch::syscall::reissue`), returning to
+  user mode as SYSRET would (rcx = rip, r11 = rflags); USER is parked as
+  a suspended thread is (NtGetContextThread sees it while its suspend
+  count holds it), then enters user mode with every register and its
+  x87/SSE state (IRETQ); START waits for its resume like any thread
+  created suspended. `run=`/`start=` find the carried process by
   name (`carry::resumed`) and wait for it instead of starting the program.
   Ids go on from the record's counter, never reused.
 - *One clock* (invariant 5): CLOCK version 2 carries the APIC timer rate;
@@ -4254,20 +4298,35 @@ rebuild; uses the NT layer's handover helpers: `thread::snapshot/adopt`,
   since (`file::survives_handover`: created before `file::mark_boot_done`,
   files not written since).
 
+- *Image identity*: an image page is mapped from the next kernel's
+  layout of the same file only if the layout's digest is the one the
+  previous kernel had (the executable: PROCESSES' digest; DLLs:
+  IMAGE_SECTIONS'); base and size alone would map different bytes into a
+  running program if the file or the loader changed (milestone (d): a
+  newer build must lay images out the same, or carry image pages as
+  frames). Written, copy-on-write-copied and privately relocated image
+  pages are the process's own frames (OWNED), kept in place.
+
 **Not carried yet** (each makes the handover refuse, with the reason):
-threads running user code or in any other system call (milestone (c):
-the full user context from an interrupt frame, I/O in flight), suspended
-or terminating threads, queued APCs, impersonation tokens; console
-windows and console sessions, jobs, DLL and image views (ntdll, kernel32:
-programs on gala's DLLs cannot be carried yet; the image section would be
-laid out again from its file like the executable), views of files;
-sockets, pipes, registry keys, tokens, keyed events, object directories
-and links, device opens (NUL, the disk, the volume), files bound to a
-completion port or deleted on close, timers with an APC; handles to
-processes or threads of programs not carried. The primary token is made
-again as the boot user's (privilege changes are lost), objects' security
-descriptors and byte-range locks are not carried; the window
-registry, the desktop and the registry's volatile keys are not carried.
+threads blocked for over 3 s in a system call that cannot be made again
+(NtWriteFile on a full pipe, a console read, NtFsControlFile's pipe
+listen, socket calls, NtWaitForDebugEvent...), terminating threads,
+threads not started by the scheduler yet; I/O in flight: asynchronous
+pipe requests pending, files or pipes bound to a completion port (their
+packets would need the request's state), sockets (milestone (e));
+console windows and console sessions (conhost: the session's screen
+buffer and input queue are kernel state; console input and output
+objects without a window are carried), jobs, registry keys (a key the
+program created or changed would need the registry's volatile state and,
+without `persist`, its unsaved changes), object directories and
+symbolic links made by programs (and named objects in them), the
+system's keyed event handle, device opens (NUL, the disk, the volume),
+the pipe device, writable views of files, files deleted on close or
+written since boot (without `persist`); handles to processes or threads
+of programs not carried; timers whose APC goes to a thread not carried.
+Not carried and not refused: byte-range locks, a pipe client's captured
+security context (FSCTL_PIPE_IMPERSONATE on a carried pipe fails), the
+window registry, the desktop and the registry's volatile keys.
 The first kernel's image and Limine's reclaimable memory are not freed;
 the scaffold of the running kernel is freed only by the next handover.
 

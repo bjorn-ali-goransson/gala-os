@@ -2950,11 +2950,50 @@ pub fn allow_handover_requests() -> Result<ObjectRef, NtStatus> {
     Ok(event)
 }
 
-/// The system calls a kernel handover can carry a thread blocked in: they
-/// only wait, so making them again with the same arguments and the same
-/// absolute deadline is the same call (ARCHITECTURE invariant 2).
+/// The system calls a kernel handover can carry a thread blocked in: while
+/// they are blocked they have done nothing yet, so making them again with
+/// the same arguments and the same absolute deadline is the same call
+/// (ARCHITECTURE invariant 2). The waits; NtRemoveIoCompletion (the
+/// packet is taken after the wait); the keyed event calls (the pairing is
+/// done by the partner: `handover::carry` checks the thread is still
+/// unpaired); NtReadFile on a synchronous pipe end (`restart_as`).
 pub fn restartable(number: u32) -> bool {
-    matches!(number, NT_WAIT_FOR_SINGLE_OBJECT | NT_WAIT_FOR_MULTIPLE_OBJECTS | NT_DELAY_EXECUTION)
+    matches!(
+        number,
+        NT_WAIT_FOR_SINGLE_OBJECT
+            | NT_WAIT_FOR_MULTIPLE_OBJECTS
+            | NT_DELAY_EXECUTION
+            | NT_REMOVE_IO_COMPLETION
+            | NT_WAIT_FOR_KEYED_EVENT
+            | NT_RELEASE_KEYED_EVENT
+            | NT_READ_FILE
+    )
+}
+
+/// Whether a thread of `process` blocked in system call `number` (user
+/// registers `regs` at the `syscall`) can be carried by making the call
+/// again: `restartable`, and for NtReadFile a read of a synchronous pipe
+/// end (it waits in the call for data, and takes none until it returns).
+/// A read of anything else may have done part of its work.
+pub fn restart_as(process: &Process, number: u32, regs: &UserRegs) -> bool {
+    if !restartable(number) {
+        return false;
+    }
+    if number != NT_READ_FILE {
+        return true;
+    }
+    let entry = process.handles.lock().get(Handle(regs.gpr[10]));
+    matches!(entry.map(|e| e.object), Some(o) if matches!(&o.body, ObjectBody::Pipe(end) if end.synchronous))
+}
+
+/// Whether system call `number` is NtWaitForKeyedEvent (false) or
+/// NtReleaseKeyedEvent (true).
+pub fn keyed_event_kind(number: u32) -> Option<bool> {
+    match number {
+        NT_WAIT_FOR_KEYED_EVENT => Some(false),
+        NT_RELEASE_KEYED_EVENT => Some(true),
+        _ => None,
+    }
 }
 
 /// GalaRequestHandover(): asks the kernel to hand the machine over to a

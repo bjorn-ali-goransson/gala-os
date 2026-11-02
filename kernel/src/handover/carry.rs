@@ -1,26 +1,35 @@
-//! Carrying programs across a kernel handover (ROADMAP R9 milestone (b),
-//! ARCHITECTURE "Kernel handover"): the running kernel stops its programs
-//! at a point where every thread is blocked in a wait it can make again,
-//! writes them down as data (`programs`' formats), and the next kernel
+//! Carrying programs across a kernel handover (ROADMAP R9 milestones (b)
+//! and (c), ARCHITECTURE "Programs across a handover"): the running kernel
+//! brings every thread of every program to a safe point, writes the
+//! programs down as data (`programs`' formats), and the next kernel
 //! rebuilds the objects, the address spaces (the user pages stay in their
-//! frames) and the threads, which make their blocked system call again
-//! with the same arguments and the same absolute deadline (ARCHITECTURE
-//! invariants 1 and 2).
+//! frames, image pages are laid out again from their files) and the
+//! threads (ARCHITECTURE invariants 1 and 2).
+//!
+//! Safe points: a thread returning to user mode waits on the way
+//! (`thread::hold_for_handover`; one in user mode gets there at its next
+//! timer tick, one in a system call when the call returns) with its full
+//! user context (every register, the x87/SSE state) kept as data; a thread
+//! blocked in a call that has done nothing yet (a wait, a synchronous pipe
+//! read, `syscalls::restart_as`) stays blocked and makes the call again in
+//! the next kernel with its absolute deadline; a suspended thread, or one
+//! created suspended, is carried as it is.
 //!
 //! What cannot be carried yet makes the handover refuse, before the point
-//! of no return, with the reason (`Refusal`): threads that run, or are in
-//! another system call; suspended or terminating threads, queued APCs,
-//! impersonation; consoles windows, jobs, DLL and file views; sockets,
-//! pipes, registry keys, tokens, keyed events and the other object kinds
-//! not listed in `programs`; timers with an APC; files a program wrote
-//! (without `persist`) or that complete to a port.
+//! of no return, with the reason (`Refusal`): threads blocked in other
+//! system calls (or that never get to a safe point), terminating threads,
+//! impersonation; console windows, jobs; sockets, registry keys, tokens,
+//! object directories and the other object kinds not listed in
+//! `programs`; asynchronous pipe I/O in flight, writable views of files;
+//! files a program wrote (without `persist`) or that complete to a port.
 
 use alloc::vec::Vec;
 use core::fmt;
 
 use super::programs::{
-    self, EventRec, ExitedThreadRec, FileRec, HandleRec, MutantRec, ObjectHead, PacketRec,
-    PageKind, PageRec, ProcessRec, SectionRec, SemaphoreRec, ThreadRec, TimerRec, ViewRec,
+    self, ApcRec, EventRec, ExitedThreadRec, FileRec, FileSectionRec, HandleRec, ImageSectionRec,
+    MutantRec, ObjectHead, PacketRec, PageKind, PageRec, PipeEndRec, PipeRec, ProcessRec,
+    SectionRec, SemaphoreRec, ThreadRec, TimerRec, TokenRec, ViewRec, thread_state,
 };
 use super::record::{self, Range, Reader, Record, Wide, Writer, tag};
 use crate::mm::PAGE_SIZE;
@@ -32,14 +41,19 @@ use crate::nt::object::{
 };
 use crate::nt::platform::{FxState, UserRegs};
 use crate::nt::process::{self, Process};
+use crate::nt::section::ImageLayout;
 use crate::nt::status::NtStatus;
+use crate::nt::thread::{Resume, UserApc};
 use crate::nt::wait::Dispatcher;
-use crate::nt::{file, kuser, namespace, section, syscalls, thread, vad};
+use crate::nt::{file, keyed_event, kuser, namespace, pipe, section, syscalls, thread, vad};
 use crate::sched::{self, UserWait};
 use crate::sync::IrqMutex;
 
-/// How long the programs may take to be all blocked in waits.
+/// How long the programs may take to reach safe points.
 const QUIET_MS: u64 = 3000;
+
+/// STATUS_SUCCESS, as a finished system call returns it (rax).
+const SUCCESS: u64 = 0;
 
 /// Why programs cannot be carried (the handover is not done).
 #[derive(Clone, Copy, Debug)]
@@ -87,10 +101,8 @@ impl From<AllocError> for Refusal {
 struct ThreadState {
     object: ObjectRef,
     snap: thread::Snapshot,
-    number: u32,
-    regs: UserRegs,
-    fx: FxState,
-    deadline: Option<u64>,
+    resume: Resume,
+    apcs: Vec<UserApc>,
 }
 
 struct ProcessState {
@@ -106,6 +118,12 @@ pub struct Programs {
     threads: Vec<ThreadState>,
     /// Object `id` is `objects[id - 1]`.
     objects: Vec<ObjectRef>,
+    /// Timers' states as they were when the threads stopped (the timer
+    /// worker goes on until the jump: a timer firing after this fires
+    /// again, at once, in the next kernel).
+    timers: Vec<(u32, TimerState)>,
+    /// The pipes the pipe ends reach (PipeRec::index is the place + 1).
+    pipes: Vec<KArc<pipe::Pipe>>,
     /// Frames of owned pages and section pages, sorted.
     frames: Vec<u64>,
 }
@@ -117,6 +135,11 @@ impl Programs {
 
     pub fn thread_count(&self) -> usize {
         self.threads.len()
+    }
+
+    /// Threads stopped in user mode (interrupted or on their way back).
+    pub fn user_mode_count(&self) -> usize {
+        self.threads.iter().filter(|t| matches!(t.resume, Resume::User { .. })).count()
     }
 
     pub fn frame_count(&self) -> usize {
@@ -131,6 +154,7 @@ impl Programs {
 /// Lets the programs run again (a refused or failed handover).
 pub fn release() {
     sched::freeze_users(false);
+    thread::hold_for_handover(false);
 }
 
 /// Stops the programs and collects them: Ok(None) if there are none;
@@ -145,26 +169,26 @@ pub fn collect() -> Result<Option<Programs>, Refusal> {
     if crate::clockctl::armed() {
         return Err(Refusal::Kernel("clock control is on (its state is not carried)"));
     }
-    let threads = wait_quiet()?;
-    let collected = collect_stopped(&processes, threads);
+    let collected = wait_quiet().and_then(|threads| collect_stopped(&processes, threads));
     if collected.is_err() {
         release();
     }
     collected.map(Some)
 }
 
-/// Waits until every thread of a program is blocked in a wait that can be
-/// made again, then stops them there (they stay stopped on success) and
-/// returns them as they were then. Threads are not stopped while they get
-/// there: a thread stopped in user mode on its way to its wait would never
-/// reach it. Once stopped, a thread can still be woken (a timer, an
-/// event): it is queued but does not run, so its wait has consumed
-/// nothing and making the call again is still right.
+/// Brings every thread of a program to a safe point and stops it there
+/// (they stay stopped on success), returning them as they were then.
+/// Threads returning to user mode wait on the way (`hold_for_handover`);
+/// the rest must be blocked in a call that can be made again. The
+/// scheduler is only frozen once all are there (a thread frozen on its
+/// way to its safe point would never reach it); a thread woken in between
+/// is caught by the check after freezing. Once frozen, a thread can still
+/// be woken (a timer, an event): it is queued but does not run, so its
+/// wait has consumed nothing.
 fn wait_quiet() -> Result<Vec<ThreadState>, Refusal> {
+    thread::hold_for_handover(true);
     let until = crate::time::raw_monotonic_ns() + QUIET_MS * 1_000_000;
     loop {
-        // All blocked now? Then stop them, and check again (one may have
-        // been woken in between and be on its way back to user mode).
         let mut check = check_threads().map(drop);
         if check.is_ok() {
             sched::freeze_users(true);
@@ -173,7 +197,7 @@ fn wait_quiet() -> Result<Vec<ThreadState>, Refusal> {
                 Ok(threads) => return Ok(threads),
                 Err(why) => check = Err(why),
             }
-            release();
+            sched::freeze_users(false);
         }
         match check {
             Err(why) if crate::time::raw_monotonic_ns() >= until => {
@@ -189,7 +213,7 @@ fn wait_quiet() -> Result<Vec<ThreadState>, Refusal> {
     }
 }
 
-/// Every live thread as carried, or why one cannot be.
+/// Every live thread as carried, or why one cannot be (yet).
 fn check_threads() -> Result<Vec<ThreadState>, Option<Refusal>> {
     let mut out = Vec::new();
     for object in thread::all().map_err(|_| Some(Refusal::NoMemory))? {
@@ -197,34 +221,89 @@ fn check_threads() -> Result<Vec<ThreadState>, Option<Refusal>> {
         let refuse =
             |why, call| Some(Refusal::Thread { pid: snap.process.id, tid: snap.id, why, call });
         let Some(sched_id) = snap.sched else { return Err(refuse("has not started", None)) };
-        if snap.suspended > 0 {
-            return Err(refuse("is suspended", None));
-        }
         if snap.terminating {
             return Err(refuse("is terminating", None));
         }
-        if snap.apcs > 0 {
-            return Err(refuse("has user APCs queued", None));
-        }
-        if snap.impersonating {
-            return Err(refuse("impersonates", None));
-        }
         let (state, fx) = sched::user_wait(sched_id);
-        let Some((number, regs)) = snap.in_syscall else {
+        let resume = if let Some(h) = &snap.held {
+            // On its way back to user mode: every register.
+            Resume::User { regs: h.regs, fx: h.fx.clone() }
+        } else if let (Some(p), true) = (&snap.parked, snap.suspended > 0) {
+            // Suspended on its way back to user mode.
+            Resume::User { regs: p.regs, fx: p.fx.clone() }
+        } else if let Some((number, regs)) = snap.in_syscall {
+            let call = Some(syscalls::service_name(number));
+            if !syscalls::restart_as(&snap.process, number, &regs) {
+                return Err(refuse("is in a system call that cannot be made again", call));
+            }
+            let (UserWait::Waiting(deadline), Some(fx)) = (state, fx) else {
+                return Err(refuse("is not blocked yet", call));
+            };
+            Resume::Syscall { number, regs, fx: FxState(fx.0), deadline }
+        } else if !snap.entered && snap.suspended > 0 && matches!(state, UserWait::Waiting(_)) {
+            Resume::Start { regs: snap.start, mxcsr: snap.start_mxcsr }
+        } else {
             return Err(refuse("runs user code", None));
         };
-        let call = Some(syscalls::service_name(number));
-        if !syscalls::restartable(number) {
-            return Err(refuse("is in a system call that cannot be made again", call));
-        }
-        let (UserWait::Waiting(deadline), Some(fx)) = (state, fx) else {
-            return Err(refuse("is not blocked yet", call));
-        };
+        let apcs = thread::queued_apcs(&object).map_err(|_| Some(Refusal::NoMemory))?;
         let object = object.clone();
-        out.try_push(ThreadState { object, snap, number, regs, fx, deadline })
+        out.try_push(ThreadState { object, snap, resume, apcs })
             .map_err(|_| Some(Refusal::NoMemory))?;
     }
+    keyed_event_waits(&mut out)?;
     Ok(out)
+}
+
+/// Threads blocked in a keyed event call whose partner has already come
+/// (paired, woken, not yet run) have finished their call: they are
+/// carried as returning STATUS_SUCCESS, not as making it again. A thread
+/// still unpaired makes its call again.
+fn keyed_event_waits(threads: &mut [ThreadState]) -> Result<(), Option<Refusal>> {
+    for i in 0..threads.len() {
+        let Resume::Syscall { number, regs, ref fx, .. } = threads[i].resume else { continue };
+        let Some(release) = syscalls::keyed_event_kind(number) else { continue };
+        let process = threads[i].snap.process.clone();
+        let (handle, key) = (regs.gpr[10], regs.gpr[2]);
+        let object = if handle == 0 {
+            keyed_event::system().map_err(|_| Some(Refusal::NoMemory))?
+        } else {
+            let entry = process.handles.lock().get(crate::nt::object::Handle(handle));
+            match entry {
+                Some(e) => e.object,
+                None => continue, // the call fails again the same way
+            }
+        };
+        // The same call by other threads of the process.
+        let same = threads
+            .iter()
+            .filter(|t| {
+                KArc::ptr_eq(&t.snap.process, &process)
+                    && matches!(t.resume, Resume::Syscall { number: n, regs: r, .. }
+                        if n == number && r.gpr[10] == handle && r.gpr[2] == key)
+            })
+            .count();
+        let unpaired = keyed_event::unpaired(&object, key, release, process.id);
+        if unpaired == same {
+            continue;
+        }
+        if unpaired != 0 {
+            // Which of them was paired cannot be told.
+            return Err(Some(Refusal::Thread {
+                pid: process.id,
+                tid: threads[i].snap.id,
+                why: "was paired in a keyed event with others still waiting",
+                call: Some(syscalls::service_name(number)),
+            }));
+        }
+        // Finished: returns as SYSRET would (rcx = rip, r11 = rflags).
+        let mut done = regs;
+        done.gpr[0] = SUCCESS;
+        done.gpr[1] = regs.rip;
+        done.gpr[11] = regs.rflags;
+        let fx = fx.clone();
+        threads[i].resume = Resume::User { regs: done, fx };
+    }
+    Ok(())
 }
 
 fn collect_stopped(
@@ -235,6 +314,8 @@ fn collect_stopped(
         processes: Vec::new(),
         threads: Vec::new(),
         objects: Vec::new(),
+        timers: Vec::new(),
+        pipes: Vec::new(),
         frames: Vec::new(),
     };
     // Live threads' objects first (handles to them name these ids).
@@ -244,23 +325,72 @@ fn collect_stopped(
         }
         id_of(&mut p.objects, &t.object)?;
     }
+    for t in &threads {
+        if let Some(token) = impersonation_of(&t.object) {
+            id_of(&mut p.objects, &token)?;
+        }
+    }
     p.threads = threads;
     for process in processes {
         let state = collect_process(&mut p, process)?;
         p.processes.try_push(state)?;
     }
-    // Every object reached: what it needs, and its frames.
-    for object in &p.objects {
+    // Every object reached: what it needs (objects it names get ids too,
+    // so the list grows while it is walked), and its frames.
+    let mut i = 0;
+    while let Some(object) = p.objects.get(i).cloned() {
+        i += 1;
+        for needed in needs(&object)? {
+            id_of(&mut p.objects, &needed)?;
+        }
         let mut frames = Vec::new();
-        match check_object(&p, object, &mut frames) {
+        match check_object(&p, &object, &mut frames) {
             Ok(()) => p.frames.try_extend_from_slice(&frames)?,
-            Err(Some(what)) => return Err(Refusal::Process { pid: owner_of(&p, object), what }),
+            Err(Some(what)) => return Err(Refusal::Process { pid: owner_of(&p, &object), what }),
             Err(None) => return Err(Refusal::NoMemory),
+        }
+        if let ObjectBody::Timer(t) = &object.body {
+            let state = t.state.lock().clone();
+            p.timers.try_push((i as u32, state))?;
+        }
+        if let ObjectBody::Pipe(end) = &object.body
+            && !p.pipes.iter().any(|q| KArc::ptr_eq(q, end.pipe()))
+        {
+            p.pipes.try_push(end.pipe().clone())?;
         }
     }
     p.frames.sort_unstable();
     p.frames.dedup();
     Ok(p)
+}
+
+/// The objects `object` names that must be carried with it: a data
+/// section's file, the thread a timer's APC goes to.
+fn needs(object: &ObjectRef) -> Result<Vec<ObjectRef>, AllocError> {
+    let mut out = Vec::new();
+    match &object.body {
+        ObjectBody::Section(s) => {
+            if let Some((f, _)) = s.mapped_file() {
+                out.try_push(f.clone())?;
+            }
+        }
+        ObjectBody::Timer(t) => {
+            let apc = t.state.lock().apc.as_ref().map(|a| a.0.clone());
+            if let Some(thread) = apc {
+                out.try_push(thread)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
+/// The impersonation token thread `object` acts with, if any.
+fn impersonation_of(object: &ObjectRef) -> Option<ObjectRef> {
+    match &object.body {
+        ObjectBody::Thread(t) => t.impersonation.lock().clone(),
+        _ => None,
+    }
 }
 
 /// The id of `object` (assigned on first sight).
@@ -270,6 +400,21 @@ fn id_of(objects: &mut Vec<ObjectRef>, object: &ObjectRef) -> Result<u32, AllocE
     }
     objects.try_push(object.clone())?;
     Ok(objects.len() as u32)
+}
+
+/// The node of the file an image section was made from.
+fn image_file(s: &section::Section) -> Option<crate::fs::ramfs::NodeId> {
+    let name = s.file_name.as_ref()?;
+    let device: Vec<u16> = {
+        let mut v = Vec::new();
+        for c in file::VOLUME_DEVICE.encode_utf16() {
+            v.try_push(c).ok()?;
+        }
+        v
+    };
+    let rest = name.strip_prefix(device.as_slice())?;
+    let parts = file::components(rest, false).ok()?;
+    file::with_fs(|fs| fs.resolve(crate::fs::ramfs::ROOT, &parts)).ok()
 }
 
 fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessState, Refusal> {
@@ -287,17 +432,10 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
         return Err(refuse("an executable that the next kernel would not find"));
     }
     drop(exe);
-    // Section views (pagefile-backed only).
+    // Section views (their sections are checked with the other objects).
     let mut views = Vec::new();
     let mut view_sections = Vec::new();
     for v in process.views.lock().iter() {
-        match &v.section.body {
-            ObjectBody::Section(s) if s.is_anonymous() => {}
-            ObjectBody::Section(s) if s.image.is_some() => {
-                return Err(refuse("a DLL or image view"));
-            }
-            _ => return Err(refuse("a view of a file")),
-        }
         view_sections.try_push(v.section.clone())?;
         views.try_push((v.base, v.size, v.offset))?;
     }
@@ -306,6 +444,14 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
         let section = id_of(&mut p.objects, s)?;
         view_recs.try_push(ViewRec { base: *base, size: *size, offset: *offset, section })?;
     }
+    // The image layout of the view at `va`, and the view's base.
+    let image_view = |va: u64| -> Option<(&KArc<ImageLayout>, u64)> {
+        let i = views.iter().position(|&(b, s, _)| (b..b + s).contains(&va))?;
+        match &view_sections[i].body {
+            ObjectBody::Section(s) => s.image.as_ref().map(|l| (l, views[i].0)),
+            _ => None,
+        }
+    };
     // The pages, as the page tables have them.
     let mut raw: Vec<(u64, Frame, crate::mm::paging::PageFlags)> = Vec::new();
     let mut full = false;
@@ -331,6 +477,12 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
             && layout.shared_frame(((va - image_base) / PAGE_SIZE) as usize) == Some(frame)
         {
             PageRec { va, value: (va - image_base) / PAGE_SIZE, kind: PageKind::Image, flags }
+        } else if let Some((l, base)) = image_view(va) {
+            let index = ((va - base) / PAGE_SIZE) as usize;
+            if l.view_frame(index, base, false) != Some(frame) {
+                return Err(refuse("a DLL page the handover cannot carry"));
+            }
+            PageRec { va, value: index as u64, kind: PageKind::ImageView, flags }
         } else if section::frame_for(process, va).is_some_and(|(_, f)| f == frame) {
             PageRec { va, value: 0, kind: PageKind::Section, flags }
         } else {
@@ -338,6 +490,9 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
         };
         let _ = pages.try_push(page);
     }
+    // The primary token.
+    let token = process.token.lock().clone();
+    id_of(&mut p.objects, &token)?;
     // Handles.
     let mut entries: Vec<(u64, HandleEntry)> = Vec::new();
     for (h, e) in process.handles.lock().iter() {
@@ -365,6 +520,11 @@ fn owner_of(p: &Programs, object: &ObjectRef) -> u64 {
         .map_or(0, |s| s.process.id)
 }
 
+/// Whether section protection `protect` lets a view write the file.
+fn writes_file(protect: u32) -> bool {
+    matches!(protect, vad::PAGE_READWRITE | vad::PAGE_EXECUTE_READWRITE)
+}
+
 /// Checks that `object` can be carried (Err(Some(what)): not; Err(None):
 /// out of memory); adds the frames it holds to `frames`.
 fn check_object(
@@ -383,18 +543,35 @@ fn check_object(
         ObjectBody::Event(_) | ObjectBody::Semaphore(_) | ObjectBody::Mutant(_) => {}
         ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => {}
         ObjectBody::IoCompletion(_) => {}
+        ObjectBody::KeyedEvent(_) => {
+            if keyed_event::system().is_ok_and(|s| KArc::ptr_eq(&s, object)) {
+                return Err(refuse("a handle to the system's keyed event"));
+            }
+        }
         ObjectBody::Timer(t) => {
-            let apc = t.state.lock().apc.is_some();
-            if apc {
-                return Err(refuse("a timer with an APC"));
+            let apc = t.state.lock().apc.as_ref().map(|a| a.0.clone());
+            if let Some(thread) = apc
+                && !p.threads.iter().any(|t| KArc::ptr_eq(&t.object, &thread))
+            {
+                return Err(refuse("a timer whose APC goes to a thread not carried"));
             }
         }
         ObjectBody::Section(s) => {
-            if !s.is_anonymous() {
-                return Err(refuse("a file or image section"));
-            }
-            for (_, frame) in s.allocated_pages().map_err(|_| None)? {
-                frames.try_push(frame.number()).map_err(|_| None)?;
+            if s.image.is_some() {
+                if !image_file(s).is_some_and(file::survives_handover) {
+                    return Err(refuse("an image the next kernel would not find"));
+                }
+            } else if let Some((_, node)) = s.mapped_file() {
+                if writes_file(s.protect) {
+                    return Err(refuse("a writable view of a file"));
+                }
+                if !file::survives_handover(node) {
+                    return Err(refuse("a view of a file the next kernel would not find"));
+                }
+            } else {
+                for (_, frame) in s.allocated_pages().map_err(|_| None)? {
+                    frames.try_push(frame.number()).map_err(|_| None)?;
+                }
             }
         }
         ObjectBody::File(f) => {
@@ -407,6 +584,15 @@ fn check_object(
             if !file::survives_handover(f.node) {
                 return Err(refuse("a file the next kernel would not find (written since boot)"));
             }
+        }
+        ObjectBody::Pipe(end) => {
+            if end.completion.lock().is_some() {
+                return Err(refuse("a pipe bound to a completion port"));
+            }
+            // Asynchronous I/O in flight is checked when the pipe is
+            // written down (`pipe::carry`); checked here too, before the
+            // point of no return.
+            pipe::carry(end.pipe())?;
         }
         ObjectBody::Thread(_) => {
             let snap = thread::snapshot(object).ok_or(None)?;
@@ -423,11 +609,10 @@ fn check_object(
             }
         }
         ObjectBody::Socket(_) | ObjectBody::AfdDevice => return Err(refuse("an open socket")),
-        ObjectBody::Pipe(_) | ObjectBody::NamedPipeDevice => return Err(refuse("a pipe")),
+        ObjectBody::NamedPipeDevice => return Err(refuse("a handle to the pipe device")),
         ObjectBody::Key(_) => return Err(refuse("an open registry key")),
         ObjectBody::Job(_) => return Err(refuse("a job object")),
-        ObjectBody::KeyedEvent(_) => return Err(refuse("a keyed event")),
-        ObjectBody::Token(_) => return Err(refuse("a token handle")),
+        ObjectBody::Token(_) => {}
         ObjectBody::Directory(_) | ObjectBody::SymbolicLink(_) => {
             return Err(refuse("an object directory or link handle"));
         }
@@ -447,6 +632,22 @@ fn name_of(object: &ObjectRef) -> Result<Vec<u16>, AllocError> {
         return Ok(Vec::new());
     }
     namespace::full_name(object)
+}
+
+/// The user registers in a record's order (16 general-purpose, rip,
+/// rflags).
+fn regs_of(r: &UserRegs) -> programs::Regs {
+    let mut regs = [0u64; 18];
+    regs[..16].copy_from_slice(&r.gpr);
+    regs[16] = r.rip;
+    regs[17] = r.rflags;
+    regs
+}
+
+fn user_regs(r: &programs::Regs) -> UserRegs {
+    let mut gpr = [0u64; 16];
+    gpr.copy_from_slice(&r[..16]);
+    UserRegs { gpr, rip: r[16], rflags: r[17] }
 }
 
 impl Programs {
@@ -478,6 +679,8 @@ impl Programs {
                 ),
                 name: q.name,
                 path: q.path,
+                image_digest: q.layout().digest(),
+                token: self.id(&q.token.lock().clone()),
             }
             .write(w)?;
         }
@@ -498,11 +701,19 @@ impl Programs {
         }
         programs::section(w, tag::THREADS)?;
         for t in &self.threads {
-            let g = &t.regs.gpr;
-            let mut regs = [0u64; 18];
-            regs[..16].copy_from_slice(g);
-            regs[16] = t.regs.rip;
-            regs[17] = t.regs.rflags;
+            let (state, number, regs, fx, deadline, mxcsr) = match &t.resume {
+                Resume::Syscall { number, regs, fx, deadline } => {
+                    (thread_state::SYSCALL, *number, *regs, fx.0, *deadline, None)
+                }
+                Resume::User { regs, fx } => (thread_state::USER, 0, *regs, fx.0, None, None),
+                Resume::Start { regs, mxcsr } => {
+                    (thread_state::START, 0, *regs, [0; 512], None, *mxcsr)
+                }
+            };
+            let mut apcs: Vec<ApcRec> = Vec::new();
+            for a in &t.apcs {
+                apcs.try_push([a.routine, a.args[0], a.args[1], a.args[2]])?;
+            }
             ThreadRec {
                 tid: t.snap.id,
                 pid: t.snap.process.id,
@@ -514,12 +725,16 @@ impl Programs {
                 ordinal: t.snap.ordinal,
                 priority: t.snap.priority.0,
                 base_priority: t.snap.priority.1,
-                number: t.number,
-                regs,
-                deadline: t.deadline,
-                fx: t.fx.0,
+                number,
+                regs: regs_of(&regs),
+                deadline,
+                fx,
+                state,
+                suspend: t.snap.suspended,
+                mxcsr,
+                impersonation: impersonation_of(&t.object).map_or(0, |o| self.id(&o)),
             }
-            .write(w)?;
+            .write(w, &apcs)?;
         }
         self.write_objects(w)?;
         programs::section(w, tag::HANDLES)?;
@@ -541,6 +756,23 @@ impl Programs {
     }
 
     fn write_objects(&self, w: &mut Writer) -> Result<(), AllocError> {
+        // The pipes first (their ends name them).
+        programs::section(w, tag::PIPES)?;
+        for (i, pipe) in self.pipes.iter().enumerate() {
+            let c = pipe::carry(pipe).map_err(|_| AllocError)?;
+            PipeRec {
+                index: i as u32 + 1,
+                name: Wide(&[]),
+                max_instances: c.max_instances,
+                message_type: c.message_type,
+                quota: c.quota,
+                conn: c.conn,
+                server_open: c.server_open,
+                generation: c.generation,
+                inbox: [&c.inbox[0], &c.inbox[1]],
+            }
+            .write(w, &c.name, [&c.messages[0], &c.messages[1]])?;
+        }
         // One pass per kind, in the order of their tags.
         let kinds = [
             tag::EVENTS,
@@ -553,124 +785,267 @@ impl Programs {
             tag::EXITED_THREADS,
             tag::PROCESS_OBJECTS,
             tag::CONSOLES,
+            tag::IMAGE_SECTIONS,
+            tag::FILE_SECTIONS,
+            tag::PIPE_ENDS,
+            tag::KEYED_EVENTS,
+            tag::TOKENS,
         ];
         for kind in kinds {
             programs::section(w, kind)?;
             for (i, object) in self.objects.iter().enumerate() {
                 let id = i as u32 + 1;
-                let head = ObjectHead { id, name: Wide(&[]) };
-                match (&object.body, kind) {
-                    (ObjectBody::Event(e), tag::EVENTS) => {
-                        let kind = u32::from(e.kind == EventType::Synchronization);
-                        let signal = e.dispatcher.signal_state();
-                        EventRec { head, kind, signal }.write(w, &name_of(object)?)?;
-                    }
-                    (ObjectBody::Semaphore(s), tag::SEMAPHORES) => {
-                        let count = s.dispatcher.signal_state();
-                        SemaphoreRec { head, count, maximum: s.maximum }
-                            .write(w, &name_of(object)?)?;
-                    }
-                    (ObjectBody::Mutant(m), tag::MUTANTS) => {
-                        let st = *m.state.lock();
-                        MutantRec {
-                            head,
-                            owner: st.owner.unwrap_or(0),
-                            count: st.count,
-                            abandoned: st.abandoned,
-                        }
-                        .write(w, &name_of(object)?)?;
-                    }
-                    (ObjectBody::Timer(t), tag::TIMERS) => {
-                        let st = t.state.lock().clone();
-                        TimerRec {
-                            head,
-                            synchronization: t.synchronization,
-                            signal: t.dispatcher.signal_state(),
-                            due: st.due,
-                            due_time: st.due_time,
-                            period: st.period,
-                        }
-                        .write(w, &name_of(object)?)?;
-                    }
-                    (ObjectBody::Section(s), tag::SECTIONS) => {
-                        let pages = s.allocated_pages()?;
-                        let rec = SectionRec {
-                            head,
-                            size: s.size,
-                            protect: s.protect,
-                            attributes: s.attributes,
-                        };
-                        let frames = pages.iter().map(|&(i, f)| (i as u64, f.number()));
-                        rec.write(w, &name_of(object)?, pages.len() as u32, frames)?;
-                    }
-                    (ObjectBody::File(f), tag::FILES) => {
-                        let path = file::volume_path(f.node).map_err(|_| AllocError)?;
-                        let shape = if f.directory {
-                            file::FILE_DIRECTORY_FILE
-                        } else {
-                            file::FILE_NON_DIRECTORY_FILE
-                        };
-                        FileRec {
-                            id,
-                            granted: f.granted,
-                            share: f.share_mask(),
-                            options: f.mode | shape,
-                            position: *f.position.lock(),
-                            path: Wide(&[]),
-                        }
-                        .write(w, &path)?;
-                    }
-                    (ObjectBody::IoCompletion(c), tag::IO_COMPLETIONS) => {
-                        let e = w.begin_entry()?;
-                        let name = name_of(object)?;
-                        w.u32(id)?;
-                        w.wide(&name)?;
-                        let queue = c.queue.lock();
-                        w.table(queue.len() as u32, PacketRec::STRIDE)?;
-                        for p in queue.packets() {
-                            PacketRec {
-                                key: p.key,
-                                context: p.context,
-                                information: p.information,
-                                status: p.status,
-                            }
-                            .write(w)?;
-                        }
-                        drop(queue);
-                        w.end_entry(e)?;
-                    }
-                    (ObjectBody::Thread(_), tag::EXITED_THREADS) => {
-                        if self.threads.iter().any(|t| KArc::ptr_eq(&t.object, object)) {
-                            continue;
-                        }
-                        let Some(s) = thread::snapshot(object) else { continue };
-                        ExitedThreadRec {
-                            id,
-                            exit_status: s.exit_status.map_or(0, |x| x.0),
-                            tid: s.id,
-                            pid: s.process.id,
-                            teb: s.teb,
-                            win32_start: s.win32_start,
-                            create_time: s.create_time,
-                            exit_time: s.exit_time,
-                        }
-                        .write(w)?;
-                    }
-                    (ObjectBody::Process(q), tag::PROCESS_OBJECTS) => {
-                        programs::write_process_object(w, id, q.id)?;
-                    }
-                    (ObjectBody::ConsoleInput, tag::CONSOLES) => {
-                        programs::write_console(w, id, true)?
-                    }
-                    (ObjectBody::ConsoleOutput, tag::CONSOLES) => {
-                        programs::write_console(w, id, false)?
-                    }
-                    _ => {}
-                }
+                self.write_object(w, kind, id, object)?;
+            }
+        }
+        programs::section(w, tag::SECURITY)?;
+        for (i, object) in self.objects.iter().enumerate() {
+            let sd = object.security.lock();
+            if let Some(sd) = sd.as_ref() {
+                programs::write_security(w, i as u32 + 1, sd)?;
             }
         }
         Ok(())
     }
+
+    fn write_object(
+        &self,
+        w: &mut Writer,
+        kind: u32,
+        id: u32,
+        object: &ObjectRef,
+    ) -> Result<(), AllocError> {
+        let head = ObjectHead { id, name: Wide(&[]) };
+        match (&object.body, kind) {
+            (ObjectBody::Event(e), tag::EVENTS) => {
+                let kind = u32::from(e.kind == EventType::Synchronization);
+                let signal = e.dispatcher.signal_state();
+                EventRec { head, kind, signal }.write(w, &name_of(object)?)?;
+            }
+            (ObjectBody::Semaphore(s), tag::SEMAPHORES) => {
+                let count = s.dispatcher.signal_state();
+                SemaphoreRec { head, count, maximum: s.maximum }.write(w, &name_of(object)?)?;
+            }
+            (ObjectBody::Mutant(m), tag::MUTANTS) => {
+                let st = *m.state.lock();
+                MutantRec {
+                    head,
+                    owner: st.owner.unwrap_or(0),
+                    count: st.count,
+                    abandoned: st.abandoned,
+                }
+                .write(w, &name_of(object)?)?;
+            }
+            (ObjectBody::Timer(t), tag::TIMERS) => {
+                let st = match self.timers.iter().find(|(i, _)| *i == id) {
+                    Some((_, st)) => st.clone(),
+                    None => t.state.lock().clone(),
+                };
+                let apc = st
+                    .apc
+                    .as_ref()
+                    .map(|(thread, routine, context)| (self.id(thread), *routine, *context));
+                TimerRec {
+                    head,
+                    synchronization: t.synchronization,
+                    signal: t.dispatcher.signal_state(),
+                    due: st.due,
+                    due_time: st.due_time,
+                    period: st.period,
+                    apc,
+                }
+                .write(w, &name_of(object)?)?;
+            }
+            (ObjectBody::Section(s), tag::SECTIONS) if s.is_anonymous() => {
+                let pages = s.allocated_pages()?;
+                let rec =
+                    SectionRec { head, size: s.size, protect: s.protect, attributes: s.attributes };
+                let frames = pages.iter().map(|&(i, f)| (i as u64, f.number()));
+                rec.write(w, &name_of(object)?, pages.len() as u32, frames)?;
+            }
+            (ObjectBody::Section(s), tag::IMAGE_SECTIONS) => {
+                let Some(layout) = &s.image else { return Ok(()) };
+                let node = image_file(s).ok_or(AllocError)?;
+                let path = file::volume_path(node).map_err(|_| AllocError)?;
+                ImageSectionRec {
+                    head,
+                    digest: layout.digest(),
+                    size: layout.size(),
+                    dynamic: layout.dynamic().unwrap_or(0),
+                    path: Wide(&[]),
+                }
+                .write(w, &name_of(object)?, &path)?;
+            }
+            (ObjectBody::Section(s), tag::FILE_SECTIONS) => {
+                let Some((f, _)) = s.mapped_file() else { return Ok(()) };
+                FileSectionRec { head, size: s.size, protect: s.protect, file: self.id(f) }
+                    .write(w, &name_of(object)?)?;
+            }
+            (ObjectBody::File(f), tag::FILES) => {
+                let path = file::volume_path(f.node).map_err(|_| AllocError)?;
+                let shape = if f.directory {
+                    file::FILE_DIRECTORY_FILE
+                } else {
+                    file::FILE_NON_DIRECTORY_FILE
+                };
+                FileRec {
+                    id,
+                    granted: f.granted,
+                    share: f.share_mask(),
+                    options: f.mode | shape,
+                    position: *f.position.lock(),
+                    path: Wide(&[]),
+                }
+                .write(w, &path)?;
+            }
+            (ObjectBody::IoCompletion(c), tag::IO_COMPLETIONS) => {
+                let e = w.begin_entry()?;
+                let name = name_of(object)?;
+                w.u32(id)?;
+                w.wide(&name)?;
+                let queue = c.queue.lock();
+                w.table(queue.len() as u32, PacketRec::STRIDE)?;
+                for p in queue.packets() {
+                    PacketRec {
+                        key: p.key,
+                        context: p.context,
+                        information: p.information,
+                        status: p.status,
+                    }
+                    .write(w)?;
+                }
+                drop(queue);
+                w.end_entry(e)?;
+            }
+            (ObjectBody::Thread(_), tag::EXITED_THREADS) => {
+                if self.threads.iter().any(|t| KArc::ptr_eq(&t.object, object)) {
+                    return Ok(());
+                }
+                let Some(s) = thread::snapshot(object) else { return Ok(()) };
+                ExitedThreadRec {
+                    id,
+                    exit_status: s.exit_status.map_or(0, |x| x.0),
+                    tid: s.id,
+                    pid: s.process.id,
+                    teb: s.teb,
+                    win32_start: s.win32_start,
+                    create_time: s.create_time,
+                    exit_time: s.exit_time,
+                }
+                .write(w)?;
+            }
+            (ObjectBody::Process(q), tag::PROCESS_OBJECTS) => {
+                programs::write_process_object(w, id, q.id)?;
+            }
+            (ObjectBody::ConsoleInput, tag::CONSOLES) => programs::write_console(w, id, true)?,
+            (ObjectBody::ConsoleOutput, tag::CONSOLES) => programs::write_console(w, id, false)?,
+            (ObjectBody::Pipe(end), tag::PIPE_ENDS) => {
+                let c = end.carried();
+                let pipe = self.pipes.iter().position(|q| KArc::ptr_eq(q, end.pipe()));
+                PipeEndRec {
+                    id,
+                    pipe: pipe.map_or(0, |i| i as u32 + 1),
+                    end: c.end,
+                    synchronous: c.synchronous,
+                    message_reads: c.message_reads,
+                    modes: c.modes,
+                    generation: c.generation,
+                }
+                .write(w)?;
+            }
+            (ObjectBody::KeyedEvent(_), tag::KEYED_EVENTS) => {
+                programs::write_keyed_event(w, id, &name_of(object)?)?;
+            }
+            (ObjectBody::Token(t), tag::TOKENS) => write_token(w, id, t)?,
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// A TOKENS entry for token `t`.
+fn write_token(w: &mut Writer, id: u32, t: &crate::nt::token::Token) -> Result<(), AllocError> {
+    use crate::nt::token::TokenType;
+    let d = t.data.lock().try_clone().map_err(|_| AllocError)?;
+    let (kind, level) = match d.kind {
+        TokenType::Primary => (0, 0),
+        TokenType::Impersonation(level) => (1, level),
+    };
+    let mut groups = Vec::new();
+    for g in &d.groups {
+        groups.try_push((g.sid.to_padded(), g.attributes))?;
+    }
+    let mut restricted = Vec::new();
+    for g in &d.restricted {
+        restricted.try_push((g.sid.to_padded(), g.attributes))?;
+    }
+    let mut privileges = Vec::new();
+    for p in &d.privileges {
+        privileges.try_push((p.luid, p.attributes))?;
+    }
+    TokenRec {
+        id,
+        kind,
+        level,
+        token_id: t.id,
+        origin: t.origin,
+        user: (d.user.sid.to_padded(), d.user.attributes),
+        primary_group: d.primary_group.to_padded(),
+        owner: d.owner.to_padded(),
+        default_dacl: &d.default_dacl,
+        authentication_id: d.authentication_id,
+        modified_id: d.modified_id,
+        session: d.session,
+        elevation_type: d.elevation_type,
+        source_name: d.source.0,
+        source_id: d.source.1,
+        sandbox_inert: d.sandbox_inert,
+    }
+    .write(w, &groups, &privileges, &restricted)
+}
+
+/// A token object from a TOKENS entry.
+fn read_token(e: &mut Reader<'_>) -> Result<(u32, ObjectRef), NtStatus> {
+    use crate::nt::token::{Group, Privilege, Sid, Token, TokenData, TokenType};
+    let (t, tables) = TokenRec::read(e);
+    let sid = |b: &[u8]| Sid::parse(b).ok_or(NtStatus::INVALID_SID);
+    let groups_of = |table: &record::Table<'_>| -> Result<Vec<Group>, NtStatus> {
+        let mut v = Vec::new();
+        for mut g in table.iter() {
+            let (s, attributes) = programs::read_group(&mut g);
+            v.try_push(Group { sid: sid(&s)?, attributes }).map_err(no_memory)?;
+        }
+        Ok(v)
+    };
+    let mut privileges = Vec::new();
+    for mut p in tables[2].iter() {
+        let (luid, attributes) = programs::read_privilege(&mut p);
+        privileges.try_push(Privilege { luid, attributes }).map_err(no_memory)?;
+    }
+    let mut default_dacl = Vec::new();
+    default_dacl.try_extend_from_slice(t.default_dacl).map_err(no_memory)?;
+    let data = TokenData {
+        kind: match t.kind {
+            0 => TokenType::Primary,
+            1 => TokenType::Impersonation(t.level),
+            _ => return Err(NtStatus::INVALID_PARAMETER),
+        },
+        user: Group { sid: sid(&t.user.0)?, attributes: t.user.1 },
+        groups: groups_of(&tables[0])?,
+        privileges,
+        restricted: groups_of(&tables[1])?,
+        primary_group: sid(&t.primary_group)?,
+        owner: sid(&t.owner)?,
+        default_dacl,
+        authentication_id: t.authentication_id,
+        modified_id: t.modified_id,
+        session: t.session,
+        elevation_type: t.elevation_type,
+        source: (t.source_name, t.source_id),
+        sandbox_inert: t.sandbox_inert,
+    };
+    let token = Token::adopt(t.token_id, t.origin, data);
+    Ok((t.id, new_object(ObjectBody::Token(token))?))
 }
 
 /// Sorted frame numbers as physical ranges.
@@ -702,7 +1077,7 @@ pub fn resumed(name: &str) -> Option<KArc<Process>> {
 }
 
 /// Rebuilds the programs a handover record carries and lets their threads
-/// make their blocked calls again. After `nt::init` and C:'s files.
+/// go on. After `nt::init` and C:'s files.
 pub fn restore(rec: &Record<'_>) {
     if rec.section(tag::PROCESSES).is_none() {
         return;
@@ -793,6 +1168,30 @@ fn new_object(body: ObjectBody) -> Result<ObjectRef, NtStatus> {
     KObject::new(body).map_err(no_memory)
 }
 
+/// The layout of the image file at `path` (from the volume root) in this
+/// kernel, checked against the previous kernel's digest.
+fn image_layout_at(path: &[u16], digest: u64) -> Result<KArc<ImageLayout>, NtStatus> {
+    let parts = file::components(path, false)?;
+    let node =
+        file::with_fs(|fs| fs.resolve(crate::fs::ramfs::ROOT, &parts)).map_err(file::fs_status)?;
+    let layout = section::image_layout(node)?;
+    if digest != 0 && layout.digest() != digest {
+        return Err(NtStatus::INVALID_IMAGE_HASH);
+    }
+    Ok(layout)
+}
+
+/// The system ntdll's section object, if `path` is its file and its layout
+/// has `digest` (every process shares that one section).
+fn system_ntdll(path: &[u16], digest: u64) -> Option<ObjectRef> {
+    let ntdll = crate::nt::ntdll::get()?;
+    let ObjectBody::Section(s) = &ntdll.section.body else { return None };
+    let node = image_file(s)?;
+    let same_file = file::volume_path(node).is_ok_and(|p| p == path);
+    let same_bytes = s.image.as_ref().is_some_and(|l| l.digest() == digest);
+    (same_file && same_bytes).then_some(ntdll.section)
+}
+
 fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
     let mut objects = Objects(Vec::new());
     if let Some(mut header) = rec.section(tag::PROCESSES).and_then(|mut r| r.entry()) {
@@ -817,6 +1216,7 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         objects.set(s.head.id, o)
     })?;
     let mut timers = Vec::new();
+    let mut timer_apcs = Vec::new();
     each(rec, tag::TIMERS, |mut e| {
         let t = TimerRec::read(&mut e);
         let state = TimerState { due: t.due, due_time: t.due_time, period: t.period, apc: None };
@@ -829,6 +1229,9 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         if t.due.is_some() {
             timers.try_push(o.clone()).map_err(no_memory)?;
         }
+        if let Some(apc) = t.apc {
+            timer_apcs.try_push((o.clone(), apc)).map_err(no_memory)?;
+        }
         objects.set(t.head.id, o)
     })?;
     each(rec, tag::SECTIONS, |mut e| {
@@ -839,11 +1242,102 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         name(&o, s.head.name)?;
         objects.set(s.head.id, o)
     })?;
+    each(rec, tag::IMAGE_SECTIONS, |mut e| {
+        let s = ImageSectionRec::read(&mut e);
+        let path = s.path.to_vec().map_err(no_memory)?;
+        let o = match system_ntdll(&path, s.digest) {
+            Some(o) => o,
+            None => {
+                let layout = image_layout_at(&path, s.digest)?;
+                let mut section = section::Section::with_layout(layout);
+                let parts = file::components(&path, false)?;
+                let node = file::with_fs(|fs| fs.resolve(crate::fs::ramfs::ROOT, &parts))
+                    .map_err(file::fs_status)?;
+                section.file_name = Some(file::nt_path(node)?);
+                new_object(ObjectBody::Section(section))?
+            }
+        };
+        let ObjectBody::Section(section) = &o.body else { return Err(NtStatus::INTERNAL_ERROR) };
+        let layout = section.image.as_ref().ok_or(NtStatus::INTERNAL_ERROR)?;
+        if layout.size() != s.size {
+            return Err(NtStatus::INVALID_IMAGE_FORMAT);
+        }
+        if s.dynamic != 0 {
+            layout.adopt_dynamic(s.dynamic)?;
+        }
+        name(&o, s.head.name)?;
+        objects.set(s.head.id, o)
+    })?;
     each(rec, tag::FILES, |mut e| {
         let f = FileRec::read(&mut e);
         let path = f.path.to_vec().map_err(no_memory)?;
         let o = file::reopen(&path, f.granted, f.share, f.options, f.position)?;
         objects.set(f.id, o)
+    })?;
+    each(rec, tag::FILE_SECTIONS, |mut e| {
+        let s = FileSectionRec::read(&mut e);
+        let f = objects.get(s.file).ok_or(NtStatus::INVALID_HANDLE)?.clone();
+        let ObjectBody::File(file_body) = &f.body else {
+            return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+        };
+        let node = file_body.node;
+        let section = section::Section::new_file(f.clone(), node, s.size, s.protect)?;
+        let o = new_object(ObjectBody::Section(section))?;
+        name(&o, s.head.name)?;
+        objects.set(s.head.id, o)
+    })?;
+    let mut pipes: Vec<(u32, KArc<pipe::Pipe>)> = Vec::new();
+    each(rec, tag::PIPES, |mut e| {
+        let (p, messages) = PipeRec::read(&mut e);
+        let copy = |b: &[u8]| -> Result<Vec<u8>, NtStatus> {
+            let mut v = Vec::new();
+            v.try_extend_from_slice(b).map_err(no_memory)?;
+            Ok(v)
+        };
+        let lengths = |t: &record::Table<'_>| -> Result<Vec<u64>, NtStatus> {
+            let mut v = Vec::new();
+            for mut m in t.iter() {
+                v.try_push(m.u64()).map_err(no_memory)?;
+            }
+            Ok(v)
+        };
+        let carried = pipe::Carried {
+            name: p.name.to_vec().map_err(no_memory)?,
+            max_instances: p.max_instances,
+            message_type: p.message_type,
+            quota: p.quota,
+            conn: p.conn,
+            server_open: p.server_open,
+            generation: p.generation,
+            inbox: [copy(p.inbox[0])?, copy(p.inbox[1])?],
+            messages: [lengths(&messages[0])?, lengths(&messages[1])?],
+        };
+        pipes.try_push((p.index, pipe::adopt(carried)?)).map_err(no_memory)
+    })?;
+    each(rec, tag::PIPE_ENDS, |mut e| {
+        let r = PipeEndRec::read(&mut e);
+        let (_, p) = pipes.iter().find(|(i, _)| *i == r.pipe).ok_or(NtStatus::INVALID_HANDLE)?;
+        let end = pipe::adopt_end(
+            p.clone(),
+            pipe::CarriedEnd {
+                end: r.end,
+                generation: r.generation,
+                synchronous: r.synchronous,
+                message_reads: r.message_reads,
+                modes: r.modes,
+            },
+        )?;
+        objects.set(r.id, new_object(ObjectBody::Pipe(end))?)
+    })?;
+    each(rec, tag::TOKENS, |mut e| {
+        let (id, o) = read_token(&mut e)?;
+        objects.set(id, o)
+    })?;
+    each(rec, tag::KEYED_EVENTS, |mut e| {
+        let head = programs::read_keyed_event(&mut e);
+        let o = new_object(ObjectBody::KeyedEvent(keyed_event::KeyedEvent::default()))?;
+        name(&o, head.name)?;
+        objects.set(head.id, o)
     })?;
     each(rec, tag::IO_COMPLETIONS, |mut e| {
         let head_id = e.u32();
@@ -894,13 +1388,34 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
     // Threads: objects first, started last.
     let mut live = Vec::new();
     each(rec, tag::THREADS, |mut e| {
-        let t = ThreadRec::read(&mut e);
+        let (t, apc_table) = ThreadRec::read(&mut e);
         let process = find(t.pid).ok_or(NtStatus::INVALID_CID)?;
-        let mut gpr = [0u64; 16];
-        gpr.copy_from_slice(&t.regs[..16]);
-        let regs = UserRegs { gpr, rip: t.regs[16], rflags: t.regs[17] };
-        if !regs.is_valid() || !syscalls::restartable(t.number) {
-            return Err(NtStatus::INVALID_PARAMETER);
+        let regs = user_regs(&t.regs);
+        let resume = match t.state {
+            thread_state::SYSCALL => {
+                if !regs.is_valid() || !syscalls::restartable(t.number) {
+                    return Err(NtStatus::INVALID_PARAMETER);
+                }
+                Resume::Syscall { number: t.number, regs, fx: FxState(t.fx), deadline: t.deadline }
+            }
+            thread_state::USER => {
+                if !regs.is_valid() {
+                    return Err(NtStatus::INVALID_PARAMETER);
+                }
+                Resume::User { regs, fx: FxState(t.fx) }
+            }
+            thread_state::START => {
+                if !regs.is_valid() {
+                    return Err(NtStatus::INVALID_PARAMETER);
+                }
+                Resume::Start { regs, mxcsr: t.mxcsr }
+            }
+            _ => return Err(NtStatus::INVALID_PARAMETER),
+        };
+        let mut apcs = Vec::new();
+        for mut a in apc_table.iter() {
+            let [routine, a0, a1, a2] = programs::read_apc(&mut a);
+            apcs.try_push(UserApc { routine, args: [a0, a1, a2] }).map_err(no_memory)?;
         }
         let o = thread::adopt(thread::Adopted {
             id: t.tid,
@@ -911,14 +1426,17 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
             priority: (t.priority, t.base_priority),
             affinity: t.affinity,
             ordinal: t.ordinal,
-            resume: Some(thread::Resume {
-                number: t.number,
-                regs,
-                fx: FxState(t.fx),
-                deadline: t.deadline,
-            }),
+            resume: Some(resume),
             exited: None,
+            suspend: t.suspend,
+            apcs,
         })?;
+        if t.impersonation != 0 {
+            let token = objects.get(t.impersonation).ok_or(NtStatus::INVALID_HANDLE)?.clone();
+            if let ObjectBody::Thread(nt) = &o.body {
+                *nt.impersonation.lock() = Some(token);
+            }
+        }
         live.try_push((t.tid, o.clone())).map_err(no_memory)?;
         objects.set(t.object, o)
     })?;
@@ -936,6 +1454,8 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
             ordinal: 0,
             resume: None,
             exited: Some((NtStatus(x.exit_status), x.exit_time)),
+            suspend: 0,
+            apcs: Vec::new(),
         })?;
         objects.set(x.id, o)
     })?;
@@ -954,6 +1474,13 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         name(&o, m.head.name)?;
         objects.set(m.head.id, o)
     })?;
+    // Timers' APCs go to threads rebuilt now.
+    for (timer, (thread_id, routine, context)) in &timer_apcs {
+        let thread = objects.get(*thread_id).ok_or(NtStatus::INVALID_HANDLE)?.clone();
+        if let ObjectBody::Timer(t) = &timer.body {
+            t.state.lock().apc = Some((thread, *routine, *context));
+        }
+    }
 
     // Handle tables.
     each(rec, tag::HANDLES, |mut e| {
@@ -968,6 +1495,14 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
                 .insert_at(crate::nt::object::Handle(h.handle), entry)
                 .map_err(|_| NtStatus::INVALID_HANDLE)?;
         }
+        Ok(())
+    })?;
+    each(rec, tag::SECURITY, |mut e| {
+        let (id, sd) = programs::read_security(&mut e);
+        let object = objects.get(id).ok_or(NtStatus::INVALID_HANDLE)?;
+        let mut copy = Vec::new();
+        copy.try_extend_from_slice(sd).map_err(no_memory)?;
+        *object.security.lock() = Some(copy);
         Ok(())
     })?;
     for t in &timers {
@@ -1012,6 +1547,9 @@ fn restore_process(
     if layout.base != p.image_base || layout.size() != p.image_size {
         return Err(NtStatus::INVALID_IMAGE_FORMAT);
     }
+    if p.image_digest != 0 && layout.digest() != p.image_digest {
+        return Err(NtStatus::INVALID_IMAGE_HASH);
+    }
     let vad = vad::Vad::read_from(&mut e)?;
     let mut views = Vec::new();
     for mut v in e.table().iter() {
@@ -1024,27 +1562,35 @@ fn restore_process(
     let mut space = crate::nt::platform::UserSpace::new().map_err(|_| NtStatus::NO_MEMORY)?;
     for mut page in e.table().iter() {
         let page = PageRec::read(&mut page).ok_or(NtStatus::INVALID_PARAMETER)?;
-        let mapped = match page.kind {
+        let view = views.iter().find(|v| (v.base..v.base + v.size).contains(&page.va));
+        let frame = match page.kind {
             PageKind::Owned => {
-                space.map_adopted(page.va, Frame::from_number(page.value), page.flags).is_ok()
+                let frame = Frame::from_number(page.value);
+                if space.map_adopted(page.va, frame, page.flags).is_err() {
+                    return Err(NtStatus::NO_MEMORY);
+                }
+                continue;
             }
-            PageKind::Image => match layout.shared_frame(page.value as usize) {
-                Some(frame) => space.map_borrowed(page.va, frame, page.flags).is_ok(),
-                None => false,
-            },
-            PageKind::SharedData => kuser::map_page(&mut space).is_ok(),
-            PageKind::Section => {
-                let view = views.iter().find(|v| (v.base..v.base + v.size).contains(&page.va));
-                let frame = view.and_then(|v| {
-                    let index = (page.va - v.base + v.offset) / PAGE_SIZE;
-                    match &v.section.body {
-                        ObjectBody::Section(s) => s.frame(index as usize),
-                        _ => None,
-                    }
-                });
-                frame.is_some_and(|f| space.map_borrowed(page.va, f, page.flags).is_ok())
+            PageKind::SharedData => {
+                kuser::map_page(&mut space).map_err(|_| NtStatus::NO_MEMORY)?;
+                continue;
             }
+            PageKind::Image => layout.shared_frame(page.value as usize),
+            PageKind::Section => view.and_then(|v| {
+                let index = (page.va - v.base + v.offset) / PAGE_SIZE;
+                match &v.section.body {
+                    ObjectBody::Section(s) => s.frame(index as usize),
+                    _ => None,
+                }
+            }),
+            PageKind::ImageView => view.and_then(|v| match &v.section.body {
+                ObjectBody::Section(s) => {
+                    s.image.as_ref()?.view_frame(page.value as usize, v.base, true)
+                }
+                _ => None,
+            }),
         };
+        let mapped = frame.is_some_and(|f| space.map_borrowed(page.va, f, page.flags).is_ok());
         if !mapped {
             return Err(NtStatus::NO_MEMORY);
         }
@@ -1064,6 +1610,10 @@ fn restore_process(
         create_time: p.create_time,
         threads_created: p.threads_created,
         priority_class: p.priority_class as u8,
+        token: match p.token {
+            0 => None,
+            id => Some(objects.get(id).ok_or(NtStatus::INVALID_HANDLE)?.clone()),
+        },
     })
 }
 
@@ -1077,5 +1627,13 @@ mod tests {
         let r: Vec<_> = frame_ranges(&frames).map(|r| (r.base, r.len)).collect();
         assert_eq!(r, [(0x1000, 0x3000), (0x7000, 0x1000), (0x9000, 0x2000)]);
         assert_eq!(frame_ranges(&[]).count(), 0);
+    }
+
+    #[test]
+    fn registers_round_trip() {
+        let r =
+            UserRegs { gpr: core::array::from_fn(|i| i as u64 * 7), rip: 0x40_1000, rflags: 0x202 };
+        let back = user_regs(&regs_of(&r));
+        assert_eq!((back.gpr, back.rip, back.rflags), (r.gpr, r.rip, r.rflags));
     }
 }

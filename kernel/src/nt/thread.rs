@@ -67,25 +67,38 @@ pub struct NtThread {
     /// same on every platform and every run of a program, unlike thread
     /// ids (record/replay's streams).
     pub ordinal: u32,
-    /// A thread a kernel handover carried over: the system call it was
-    /// blocked in, made again when it starts (instead of `start`).
+    /// A thread a kernel handover carried over: how it goes on when it
+    /// starts (instead of `start`).
     resume: IrqMutex<Option<Resume>>,
+    /// While a kernel handover holds it on its way back to user mode
+    /// (`hold_for_handover`): its full user state.
+    held: IrqMutex<Option<Parked>>,
+    /// Set once it has entered user mode (a thread created suspended has
+    /// not, until resumed).
+    entered: core::sync::atomic::AtomicBool,
     /// The absolute deadline of the reissued call (`take_restart_deadline`):
     /// Some(None) = none (infinite).
     restart_deadline: IrqMutex<Option<Option<u64>>>,
 }
 
-/// A blocked system call to make again (kernel handover, ARCHITECTURE
-/// invariant 2): its number, the user registers at the `syscall` (its
-/// arguments), the user's x87/SSE state, and the deadline (timer tick) it
-/// had, kept absolute.
+/// How a thread a kernel handover carried goes on (ARCHITECTURE
+/// invariants 1 and 2).
 #[derive(Clone)]
-pub struct Resume {
-    pub number: u32,
-    pub regs: UserRegs,
-    pub fx: platform::FxState,
-    pub deadline: Option<u64>,
+pub enum Resume {
+    /// Blocked in a system call: made again with the user registers at
+    /// the `syscall` (its arguments), the user's x87/SSE state, and the
+    /// deadline (timer tick) it had, kept absolute.
+    Syscall { number: u32, regs: UserRegs, fx: platform::FxState, deadline: Option<u64> },
+    /// Stopped in user mode (interrupted, or on its way back from a system
+    /// call): goes on with exactly these registers and x87/SSE state.
+    User { regs: UserRegs, fx: platform::FxState },
+    /// Created suspended and never run: starts with `regs` once resumed.
+    Start { regs: UserRegs, mxcsr: Option<u32> },
 }
+
+/// Set while a kernel handover stops the programs: every thread that
+/// returns to user mode waits on the way (`hold_for_handover`).
+static HOLD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// The user state of a thread parked by suspension.
 #[derive(Clone)]
@@ -251,6 +264,8 @@ pub fn create(
         ordinal: process.threads_created.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
         resume: IrqMutex::new(None),
         restart_deadline: IrqMutex::new(None),
+        held: IrqMutex::new(None),
+        entered: core::sync::atomic::AtomicBool::new(false),
     };
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -326,33 +341,48 @@ fn thread_entry(id: usize) {
     *t.sched_id.lock() = Some(platform::current());
     t.apply_affinity();
     let resume = t.resume.lock().take();
-    if let Some(r) = resume {
-        // Carried over by a kernel handover: the blocked call again, with
-        // its deadline (the kernel never touches the x87/SSE registers, so
-        // the user's state set here is what user mode gets back).
-        *t.restart_deadline.lock() = Some(r.deadline);
-        drop(object);
-        platform::fxrstor(&r.fx);
-        let g = &r.regs.gpr;
-        let mut frame = platform::SyscallFrame {
-            r15: g[15],
-            r14: g[14],
-            r13: g[13],
-            r12: g[12],
-            rbp: g[5],
-            rbx: g[3],
-            rsi: g[6],
-            rdi: g[7],
-            r9: g[9],
-            r8: g[8],
-            rdx: g[2],
-            r10: g[10],
-            rax: u64::from(r.number),
-            rip: r.regs.rip,
-            rflags: r.regs.rflags,
-            rsp: g[4],
-        };
-        platform::reissue_syscall(&mut frame);
+    let (mut regs, mut mxcsr) = (t.start, t.start_mxcsr);
+    match resume {
+        Some(Resume::Syscall { number, regs, fx, deadline }) => {
+            // Carried over by a kernel handover: the blocked call again,
+            // with its deadline (the kernel never touches the x87/SSE
+            // registers, so the user's state set here is what user mode
+            // gets back).
+            *t.restart_deadline.lock() = Some(deadline);
+            t.entered.store(true, Ordering::SeqCst);
+            drop(object);
+            platform::fxrstor(&fx);
+            let g = &regs.gpr;
+            let mut frame = platform::SyscallFrame {
+                r15: g[15],
+                r14: g[14],
+                r13: g[13],
+                r12: g[12],
+                rbp: g[5],
+                rbx: g[3],
+                rsi: g[6],
+                rdi: g[7],
+                r9: g[9],
+                r8: g[8],
+                rdx: g[2],
+                r10: g[10],
+                rax: u64::from(number),
+                rip: regs.rip,
+                rflags: regs.rflags,
+                rsp: g[4],
+            };
+            platform::reissue_syscall(&mut frame);
+        }
+        Some(Resume::User { regs, fx }) => {
+            // Stopped in user mode by a handover: parked as a suspended
+            // thread is (NtGetContextThread sees it while it stays
+            // suspended), then on with every register.
+            *t.parked.lock() = Some(Parked { regs, fx, changed: false });
+        }
+        Some(Resume::Start { regs: start, mxcsr: start_mxcsr }) => {
+            (regs, mxcsr) = (start, start_mxcsr);
+        }
+        None => {}
     }
     // Stay here while suspended; `resume` wakes us.
     loop {
@@ -368,11 +398,15 @@ fn thread_entry(id: usize) {
         platform::wait();
     }
     let pending = *t.terminate_request.lock();
-    let regs = t.start;
-    let mxcsr = t.start_mxcsr;
+    let parked = t.parked.lock().take();
+    t.entered.store(true, Ordering::SeqCst);
     drop(object);
     if let Some(status) = pending {
         exit_current(status);
+    }
+    if let Some(p) = parked {
+        platform::fxrstor(&p.fx);
+        platform::enter_user(&p.regs);
     }
     // The kernel never touches SSE state, so this is what user mode gets.
     if let Some(value) = mxcsr {
@@ -514,6 +548,14 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
         drop(object);
         exit_current(status);
     }
+    if HOLD.load(Ordering::SeqCst) {
+        hold(t, regs);
+        let terminate = *t.terminate_request.lock();
+        if let Some(status) = terminate {
+            drop(object);
+            exit_current(status);
+        }
+    }
     if *t.suspend_count.lock() == 0 {
         return false;
     }
@@ -545,6 +587,44 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// Waits on the way back to user mode while a kernel handover stops the
+/// programs, with its user state where the handover reads it
+/// (`snapshot`). Nothing is held here: the system call or interrupt is
+/// over, so the thread is at a safe point.
+fn hold(t: &NtThread, regs: &UserRegs) {
+    *t.held.lock() = Some(Parked { regs: *regs, fx: platform::fxsave(), changed: false });
+    loop {
+        if !HOLD.load(Ordering::SeqCst) || t.terminate_request.lock().is_some() {
+            break;
+        }
+        platform::prepare_wait(None);
+        if !HOLD.load(Ordering::SeqCst) || t.terminate_request.lock().is_some() {
+            platform::wake(platform::current()); // see `wake_if_terminating`
+        }
+        platform::wait();
+    }
+    *t.held.lock() = None;
+}
+
+/// A kernel handover stops (true) or lets go (false) the programs: with
+/// `on`, every thread waits at its next return to user mode (one in user
+/// mode gets there at its next timer tick, one in a system call when the
+/// call returns); with false the held threads go on.
+pub fn hold_for_handover(on: bool) {
+    HOLD.store(on, Ordering::SeqCst);
+    // Under the list's lock: nothing to allocate, so none is left held.
+    for object in THREADS.lock().iter() {
+        let t = as_thread(object);
+        let sched = *t.sched_id.lock();
+        let Some(id) = sched else { continue };
+        if on {
+            platform::interrupt(id);
+        } else if t.held.lock().is_some() {
+            platform::wake(id);
+        }
     }
 }
 
@@ -597,6 +677,15 @@ pub struct Snapshot {
     pub affinity: u64,
     pub ordinal: u32,
     pub exit_status: Option<NtStatus>,
+    /// Held on its way back to user mode by a handover: its user state.
+    pub held: Option<Parked>,
+    /// Parked by suspension on its way back to user mode.
+    pub parked: Option<Parked>,
+    /// Whether it has entered user mode (not: created suspended).
+    pub entered: bool,
+    /// What it starts with if it has not entered user mode yet.
+    pub start: UserRegs,
+    pub start_mxcsr: Option<u32>,
 }
 
 /// `object`'s state, if it is a thread.
@@ -612,6 +701,8 @@ pub fn snapshot(object: &ObjectRef) -> Option<Snapshot> {
     let exit_time = *t.exit_time.lock();
     let priority = *t.priority.lock();
     let exit_status = *t.exit_status.lock();
+    let held = t.held.lock().clone();
+    let parked = t.parked.lock().clone();
     Some(Snapshot {
         id: t.id,
         teb: t.teb,
@@ -629,7 +720,21 @@ pub fn snapshot(object: &ObjectRef) -> Option<Snapshot> {
         affinity: t.affinity(),
         ordinal: t.ordinal,
         exit_status,
+        held,
+        parked,
+        entered: t.entered.load(Ordering::SeqCst),
+        start: t.start,
+        start_mxcsr: t.start_mxcsr,
     })
+}
+
+/// The user APCs queued to thread `object`, oldest first.
+pub fn queued_apcs(object: &ObjectRef) -> Result<Vec<UserApc>, crate::mm::heap::AllocError> {
+    let ObjectBody::Thread(t) = &object.body else { return Ok(Vec::new()) };
+    let apcs = t.apcs.lock();
+    let mut out = Vec::new();
+    out.try_extend_from_slice(&apcs)?;
+    Ok(out)
 }
 
 /// Every live NT thread object.
@@ -668,6 +773,9 @@ pub struct Adopted {
     /// with (status, exit time) (a handle still names it).
     pub resume: Option<Resume>,
     pub exited: Option<(NtStatus, u64)>,
+    /// Its suspend count and queued user APCs (oldest first).
+    pub suspend: u32,
+    pub apcs: Vec<UserApc>,
 }
 
 /// Rebuilds a thread object from a kernel handover's record. A live one
@@ -684,7 +792,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         affinity: core::sync::atomic::AtomicU64::new(affinity),
         dispatcher: Dispatcher::new(i32::from(!live)),
         exit_status: IrqMutex::new(a.exited.map(|e| e.0)),
-        suspend_count: IrqMutex::named("thread.suspend_count", 0),
+        suspend_count: IrqMutex::named("thread.suspend_count", a.suspend),
         terminate_request: IrqMutex::new(None),
         start: UserRegs::default(),
         start_mxcsr: None,
@@ -692,7 +800,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         create_time: a.create_time,
         exit_time: IrqMutex::named("thread.exit_time", a.exited.map_or(0, |e| e.1)),
         priority: IrqMutex::new(a.priority),
-        apcs: IrqMutex::new(Vec::new()),
+        apcs: IrqMutex::new(a.apcs),
         alertable: core::sync::atomic::AtomicBool::new(false),
         owned_mutants: IrqMutex::new(Vec::new()),
         parked: IrqMutex::new(None),
@@ -701,6 +809,8 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         ordinal: a.ordinal,
         resume: IrqMutex::new(a.resume),
         restart_deadline: IrqMutex::new(None),
+        held: IrqMutex::new(None),
+        entered: core::sync::atomic::AtomicBool::new(false),
     };
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     if live {

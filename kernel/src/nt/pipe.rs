@@ -710,4 +710,150 @@ impl PipeEnd {
         report(&self.pipe);
         n
     }
+
+    /// The pipe (shared by its ends).
+    pub fn pipe(&self) -> &KArc<Pipe> {
+        &self.pipe
+    }
+
+    /// What a kernel handover carries of this end.
+    pub fn carried(&self) -> CarriedEnd {
+        CarriedEnd {
+            end: self.end as u32,
+            generation: self.generation,
+            synchronous: self.synchronous,
+            message_reads: self.message_reads.load(Ordering::Acquire),
+            modes: self.modes.load(Ordering::Acquire),
+        }
+    }
+}
+
+/// A pipe as a kernel handover carries it (`handover::programs::PipeRec`):
+/// its connection and both directions' queued bytes. The waiting threads
+/// are not part of it (they make their calls again), nor is the client's
+/// security context (FSCTL_PIPE_IMPERSONATE on a carried pipe fails).
+pub struct Carried {
+    /// The instance's name if it is listed (clients can open it).
+    pub name: Vec<u16>,
+    pub max_instances: u32,
+    pub message_type: bool,
+    pub quota: [u64; 2],
+    /// 0 listening, 1 connected, 2 closing, 3 disconnected.
+    pub conn: u32,
+    pub server_open: bool,
+    pub generation: u64,
+    pub inbox: [Vec<u8>; 2],
+    pub messages: [Vec<u64>; 2],
+}
+
+/// What a kernel handover carries of a pipe end.
+#[derive(Clone, Copy, Debug)]
+pub struct CarriedEnd {
+    pub end: u32,
+    pub generation: u64,
+    pub synchronous: bool,
+    pub message_reads: bool,
+    pub modes: u32,
+}
+
+/// `pipe` as a handover carries it; Err(Some(why)) if it cannot be (an
+/// asynchronous request is pending on it), Err(None) out of memory.
+pub fn carry(pipe: &KArc<Pipe>) -> Result<Carried, Option<&'static str>> {
+    let mut name = Vec::new();
+    let mut max_instances = 1;
+    for i in INSTANCES.lock().iter().filter(|i| KArc::ptr_eq(&i.pipe, pipe)) {
+        name.try_extend_from_slice(&i.name).map_err(|_| None)?;
+        max_instances = i.max;
+    }
+    let s = pipe.state.lock();
+    if !s.pending.is_empty() {
+        return Err(Some("a pipe with asynchronous I/O in flight"));
+    }
+    let mut inbox = [Vec::new(), Vec::new()];
+    let mut messages = [Vec::new(), Vec::new()];
+    for end in 0..2 {
+        inbox[end].try_reserve_exact(s.inbox[end].len()).map_err(|_| None)?;
+        inbox[end].extend(s.inbox[end].iter().copied());
+        messages[end].try_reserve_exact(s.messages[end].len()).map_err(|_| None)?;
+        messages[end].extend(s.messages[end].iter().map(|&m| m as u64));
+    }
+    let conn = match s.conn {
+        Conn::Listening => 0,
+        Conn::Connected => 1,
+        Conn::Closing => 2,
+        Conn::Disconnected => 3,
+    };
+    Ok(Carried {
+        name,
+        max_instances,
+        message_type: s.message_type,
+        quota: [s.quota[0] as u64, s.quota[1] as u64],
+        conn,
+        server_open: s.server_open,
+        generation: s.generation,
+        inbox,
+        messages,
+    })
+}
+
+/// A pipe rebuilt by a kernel handover (listed again under its name if it
+/// was).
+pub fn adopt(c: Carried) -> Result<KArc<Pipe>, NtStatus> {
+    let conn = match c.conn {
+        0 => Conn::Listening,
+        1 => Conn::Connected,
+        2 => Conn::Closing,
+        3 => Conn::Disconnected,
+        _ => return Err(NtStatus::INVALID_PARAMETER),
+    };
+    let mut inbox = [VecDeque::new(), VecDeque::new()];
+    let mut messages = [VecDeque::new(), VecDeque::new()];
+    for end in 0..2 {
+        inbox[end].try_reserve_exact(c.inbox[end].len()).map_err(|_| NtStatus::NO_MEMORY)?;
+        inbox[end].extend(c.inbox[end].iter().copied());
+        messages[end].try_reserve_exact(c.messages[end].len()).map_err(|_| NtStatus::NO_MEMORY)?;
+        for &m in &c.messages[end] {
+            messages[end].push_back(usize::try_from(m).map_err(|_| NtStatus::INVALID_PARAMETER)?);
+        }
+    }
+    let quota = |q: u64| usize::try_from(q).map_err(|_| NtStatus::INVALID_PARAMETER);
+    let pipe = KArc::try_new(Pipe {
+        client_token: IrqMutex::new(None),
+        state: IrqMutex::new(State {
+            inbox,
+            messages,
+            message_type: c.message_type,
+            quota: [quota(c.quota[0])?, quota(c.quota[1])?],
+            conn,
+            server_open: c.server_open,
+            generation: c.generation,
+            waiters: Vec::new(),
+            pending: Vec::new(),
+        }),
+    })
+    .map_err(|_| NtStatus::NO_MEMORY)?;
+    if !c.name.is_empty() {
+        INSTANCES
+            .lock()
+            .try_push(Instance { name: c.name, max: c.max_instances, pipe: pipe.clone() })
+            .map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    Ok(pipe)
+}
+
+/// An end of a pipe `adopt` rebuilt.
+pub fn adopt_end(pipe: KArc<Pipe>, c: CarriedEnd) -> Result<PipeEnd, NtStatus> {
+    if c.end > 1 {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    let end = PipeEnd::new(
+        pipe,
+        c.end as usize,
+        c.generation,
+        c.synchronous,
+        c.message_reads,
+        new_dispatcher()?,
+    );
+    end.modes.store(c.modes, Ordering::Release);
+    Ok(end)
 }

@@ -223,6 +223,58 @@ impl ImageLayout {
         self.bytes.len() as u64
     }
 
+    /// A digest of the laid-out image (FNV-1a, 64 bits): a kernel handover
+    /// checks that the next kernel lays the file out to the same bytes
+    /// before it maps them into a carried process.
+    pub fn digest(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for &b in &self.bytes {
+            h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+        }
+        h ^ self.base.rotate_left(17)
+    }
+
+    /// The image's alternative base, if one was taken.
+    pub fn dynamic(&self) -> Option<u64> {
+        *self.dynamic.lock()
+    }
+
+    /// Takes `base` as the image's alternative base (a kernel handover:
+    /// the previous kernel's views there come across); the next ones are
+    /// handed out below it. Err if it already has another.
+    pub fn adopt_dynamic(&self, base: u64) -> Result<(), NtStatus> {
+        if !(DYNAMIC_BOTTOM..DYNAMIC_TOP).contains(&base) {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        let mut dynamic = self.dynamic.lock();
+        match *dynamic {
+            Some(b) if b != base => return Err(NtStatus::CONFLICTING_ADDRESSES),
+            _ => *dynamic = Some(base),
+        }
+        NEXT_DYNAMIC.fetch_min(base, core::sync::atomic::Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// The shared frame a view at `view_base` maps for page `index` (at the
+    /// preferred base the unrelocated one, at the alternative base the
+    /// relocated one), made now if `make`; None for a view elsewhere
+    /// (its pages are private).
+    pub fn view_frame(&self, index: usize, view_base: u64, make: bool) -> Option<Frame> {
+        if view_base == self.base {
+            if make {
+                return self.shared_frame(index);
+            }
+            return *self.shared.lock().get(index)?;
+        }
+        if self.dynamic() != Some(view_base) {
+            return None;
+        }
+        if make {
+            return self.relocated_frame(index, view_base);
+        }
+        *self.relocated.lock().get(index)?
+    }
+
     /// The protection of each page (headers and gaps read-only).
     pub fn page_protect(&self) -> &[u32] {
         &self.page_protect
@@ -360,6 +412,12 @@ impl Section {
             *slot = Some(UserSpace::zeroed_frame()?);
         }
         *slot
+    }
+
+    /// For a data section on a file: the file object it was made from and
+    /// the file's node.
+    pub fn mapped_file(&self) -> Option<(&ObjectRef, crate::fs::ramfs::NodeId)> {
+        self.file.as_ref().map(|f| (&f._object, f.node))
     }
 
     /// Whether it is pagefile-backed (neither an image nor a file's data).

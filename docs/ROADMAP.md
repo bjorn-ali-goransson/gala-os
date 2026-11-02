@@ -1746,18 +1746,54 @@ R. **Robustness and live update, kernel included** (the owner's
      the programs go on. Clock: the first boot's TSC and timer rates
      are carried (CLOCK version 2) and the tick count goes on from the
      record's, so carried deadlines do not drift.
-     Next, for (c) (programs blocked in waits and I/O, and running
-     ones): threads running user code (the full register set from the
-     interrupt frame, as a suspended thread's context) and more system
-     calls made again (NtRemoveIoCompletion, keyed events,
-     NtWaitForAlertByThreadId, NtSignalAndWaitForSingleObject's wait
-     half, reads on pipes and sockets with I/O drained or resubmitted);
-     DLL and image views (laid out again from their files, like the
-     executable: programs on gala's ntdll and kernel32), file views,
-     registry keys, tokens (the primary token as data), keyed events,
-     jobs, console sessions, named objects in program-made directories;
-     the registry's volatile keys and the window registry. Also open:
+     **Milestone (c) done** (2026-11-02, scenarios handover_k32,
+     handover_k32_uefi, handover_k32_twice; test program
+     `user/handover_k32_test`, on gala's ntdll and kernel32; ARCHITECTURE
+     "Programs across a handover"): busy programs on gala's DLLs come
+     across. Every thread is brought to a safe point first: threads
+     returning to user mode wait on the way (`thread::hold_for_handover`:
+     one computing in user mode gets there at its next tick, one in a
+     system call when the call returns, so calls with side effects finish
+     instead of being cut), their full user context (registers, FXSAVE:
+     the whole extended state, gala enables no AVX) carried as data and
+     restored with IRETQ; threads blocked in calls that have done nothing
+     yet make them again (waits, NtRemoveIoCompletion, keyed events
+     (a paired one returns SUCCESS instead), NtReadFile on a synchronous
+     pipe); suspended threads and threads created suspended keep their
+     state and suspend count; queued user APCs, timers with APCs. DLL
+     views (ntdll, kernel32, any image section): laid out again from
+     their files and checked by a digest of the layout (also the
+     executable's now), at the same base (the image's alternative base
+     taken again), written/copy-on-write pages kept in their frames;
+     read-only and copy-on-write views of files; pipes (state and queued
+     bytes; asynchronous I/O in flight refused); keyed events; tokens as
+     data (the real primary token, impersonation tokens, token handles);
+     objects' security descriptors. The test: two threads computing a
+     checksum (integer and SSE) in user mode, one suspended across;
+     a thread in ReadFile on a pipe and bytes left in another pipe; a
+     thread writing to the console between sleeps; an APC queued to a
+     non-alertable waiter; a waitable timer's completion routine due
+     after; a thread spinning for a critical section; a keyed event
+     waiter; a thread created suspended; environment, TLS and memory;
+     after the handover all results are as if nothing happened (the
+     checksums recomputed match bit for bit, the 4000 ms sleep ends at
+     4001 ticks), and again across a second handover.
+     Still refused (cleanly, with the reason), for later: threads blocked
+     over 3 s in other calls (pipe writes on a full pipe, console reads,
+     pipe listens, socket calls); I/O bound to completion ports and
+     asynchronous pipe requests in flight (carry the request: status
+     block, event, port, APC); console windows and conhost sessions,
+     jobs, registry keys, program-made object directories and links;
+     writable file views; sockets (milestone (e)). Not carried and not
+     refused: byte-range locks, a pipe client's security context, the
+     window registry, the desktop, volatile registry keys. Also open:
      freeing the first kernel's image and Limine's reclaimable memory.
+     For (d): every format is versioned (PROCESSES, THREADS, TIMERS at
+     version 2, read from version-1 writers by a host test); image pages
+     depend on the next kernel laying images out to the same bytes (the
+     digest catches a difference, but only after the point of no return:
+     a newer loader must keep the layout or the record must carry image
+     pages as frames).
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

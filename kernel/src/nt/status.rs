@@ -108,6 +108,9 @@ impl NtStatus {
     pub const INVALID_PARAMETER_6: NtStatus = NtStatus(0xc000_00f4);
     pub const INVALID_IMAGE_FORMAT: NtStatus = NtStatus(0xc000_007b);
     pub const INVALID_IMAGE_NOT_MZ: NtStatus = NtStatus(0xc000_012f);
+    /// The file is not the image it was (a kernel handover checks digests).
+    pub const INVALID_IMAGE_HASH: NtStatus = NtStatus(0xc000_0428);
+    pub const INTERNAL_ERROR: NtStatus = NtStatus(0xc000_00e5);
     pub const INVALID_FILE_FOR_SECTION: NtStatus = NtStatus(0xc000_0020);
     pub const IMAGE_NOT_AT_BASE: NtStatus = NtStatus(0x4000_0003);
     // Network (AFD) statuses.

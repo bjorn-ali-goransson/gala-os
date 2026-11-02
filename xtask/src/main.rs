@@ -426,6 +426,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_sys_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sys_test", "testdll.dll", "gala"),
     ("kernel32_thread_test", "ntdll.dll", "Windows/System32"),
+    ("handover_k32_test", "ntdll.dll", "Windows/System32"),
+    ("handover_k32_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sync_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_locale_test", "ntdll.dll", "Windows/System32"),
     ("gui_test", "kernel/assets/wallpapers/dunes.qoi", "Windows/Web/Wallpaper"),
@@ -1537,6 +1539,7 @@ const USER_PROGRAMS: &[&str] = &[
     "timer_test",
     "clock_test",
     "handover_test",
+    "handover_k32_test",
     "loader_test",
     "smp_test",
     "smpsched_test",
@@ -2356,6 +2359,7 @@ const PENDING: &[&str] = &[
 const UEFI_SCENARIOS: &[&str] = &[
     "handover_uefi",
     "handover_idle_uefi",
+    "handover_k32_uefi",
     "server_profile",
     "gala_cli",
     "hello",
@@ -3427,6 +3431,63 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // R9 (c): a program on gala's ntdll and kernel32 (DLL views) asks
+        // for a handover while it works: two threads compute in user mode
+        // (interrupted, their full user context carried), one is blocked
+        // in ReadFile on a pipe, one writes to the console between short
+        // sleeps, one waits with a user APC queued, one sleeps alertably
+        // for a timer's completion routine, one spins for a critical
+        // section. Every thread is stopped at a safe point; the new kernel
+        // goes on with all of them and the program finds its results as
+        // if nothing had happened.
+        name: "handover_k32",
+        cmdline: "qemu_exit handover=1 run=handover_k32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "handover_k32_test: ready",
+            "handover: carrying 1 process(es), 10 thread(s)",
+            "handover: generation 1 (from generation 0)",
+            "handover: resumed process handover_k32_test.exe",
+            "handover_k32_test: slept",
+            "handover_k32_test: writer wrote lines:",
+            "handover_k32_test: ok",
+            "exited with status 0x00000000",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // R9 (c), twice: the kernel32 program goes on across a second
+        // handover (its DLL views, pipes and kernel32 state again).
+        name: "handover_k32_twice",
+        cmdline: "qemu_exit handover=2 run=handover_k32_test.exe args=twice",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "handover: carrying 1 process(es), 10 thread(s)",
+            "handover: generation 1 (from generation 0)",
+            "handover_k32_test: writer wrote lines:",
+            "handover: carrying 1 process(es), 1 thread(s)",
+            "handover: generation 2 (from generation 1)",
+            "handover_k32_test: slept again",
+            "handover_k32_test: ok",
+            "exited with status 0x00000000",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // handover_k32 booted by UEFI (UEFI_SCENARIOS).
+        name: "handover_k32_uefi",
+        cmdline: "qemu_exit handover=1 run=handover_k32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "firmware: UEFI x86_64",
+            "handover: carrying 1 process(es), 10 thread(s)",
+            "handover: resumed process handover_k32_test.exe",
+            "handover_k32_test: ok",
+            "exited with status 0x00000000",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
         // handover_idle booted by UEFI (UEFI_SCENARIOS).
         name: "handover_idle_uefi",
         cmdline: "qemu_exit handover=1 run=handover_test.exe",
@@ -4336,6 +4397,9 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
     ("handover_disk", "persist_test"),
+    ("handover_k32", "handover_k32_test"),
+    ("handover_k32_uefi", "handover_k32_test"),
+    ("handover_k32_twice", "handover_k32_test"),
     ("crash_record", "hello"),
     ("watchdog", "busybox"),
     ("failpoint_heap", "kernel32_test"),

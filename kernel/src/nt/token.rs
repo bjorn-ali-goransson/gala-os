@@ -112,6 +112,13 @@ impl Sid {
         }
     }
 
+    /// The SID's bytes, zero-padded to the largest SID (68 bytes).
+    pub fn to_padded(&self) -> [u8; 68] {
+        let mut out = [0u8; 68];
+        self.write(&mut out);
+        out
+    }
+
     /// A SID from its bytes (the start of `b`), if valid.
     pub fn parse(b: &[u8]) -> Option<Sid> {
         if b.len() < 8 || b[0] != 1 || b[1] > 15 || b.len() < 8 + 4 * usize::from(b[1]) {
@@ -493,6 +500,13 @@ impl Token {
     pub fn new(data: TokenData) -> Token {
         let id = next_luid();
         Token { id, origin: id, data: IrqMutex::new(data) }
+    }
+
+    /// A token a kernel handover carried over, with its id and lineage
+    /// (LUIDs go on above them).
+    pub fn adopt(id: u64, origin: u64, data: TokenData) -> Token {
+        NEXT_LUID.fetch_max(id.max(origin).saturating_add(1), Ordering::Relaxed);
+        Token { id, origin, data: IrqMutex::new(data) }
     }
 
     /// Whether the holder of `caller` (a process's primary token) may make
