@@ -62,6 +62,26 @@ unsafe extern "system" {
     pub fn DestroyWindow(hwnd: Hwnd) -> i32;
     pub fn SetFocus(hwnd: Hwnd) -> Hwnd;
     pub fn GetFocus() -> Hwnd;
+    pub fn SetTimer(hwnd: Hwnd, id: usize, ms: u32, proc_: usize) -> usize;
+    pub fn KillTimer(hwnd: Hwnd, id: usize) -> i32;
+    pub fn GetCursorPos(point: *mut [i32; 2]) -> i32;
+    pub fn GetWindowRect(hwnd: Hwnd, rect: *mut [i32; 4]) -> i32;
+    pub fn ClientToScreen(hwnd: Hwnd, point: *mut [i32; 2]) -> i32;
+    pub fn IsWindow(hwnd: Hwnd) -> i32;
+    pub fn IsWindowVisible(hwnd: Hwnd) -> i32;
+    pub fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32;
+    pub fn SystemParametersInfoW(action: u32, param: u32, out: *mut c_void, ini: u32) -> i32;
+    pub fn LoadStringW(instance: usize, id: u32, out: *mut u16, max: i32) -> i32;
+    pub fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -> isize;
+    pub fn CallWindowProcW(
+        proc_: isize,
+        hwnd: Hwnd,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> isize;
+    pub fn GetMessageTime() -> i32;
+    pub fn GetDoubleClickTime() -> u32;
 }
 
 /// WNDCLASSEXW.
@@ -89,6 +109,7 @@ pub const WM_SETFONT: u32 = 0x0030;
 pub const WM_GETFONT: u32 = 0x0031;
 pub const WM_NOTIFY: u32 = 0x004e;
 pub const WM_COMMAND: u32 = 0x0111;
+pub const WM_TIMER: u32 = 0x0113;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
 pub const WM_LBUTTONDOWN: u32 = 0x0201;
 pub const WM_LBUTTONUP: u32 = 0x0202;
@@ -229,6 +250,12 @@ impl<T> Store<T> {
             };
             Some(f(&mut items[i].1))
         })
+    }
+
+    /// Runs `f` on the window's state if it has one (none is made).
+    /// The lock is held: `f` must not send messages.
+    pub fn find<R>(&self, hwnd: Hwnd, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        self.locked(|items| items.iter_mut().find(|e| e.0 == hwnd).map(|e| f(&mut e.1)))
     }
 
     pub fn remove(&self, hwnd: Hwnd) -> Option<T> {

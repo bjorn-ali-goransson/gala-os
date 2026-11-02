@@ -2549,8 +2549,7 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   message is sent), drawing helpers (rounded fills, text through
   DrawTextW) and the Windows 11 colours. The status bar (bottom or top
   of its parent, full width, placed again on WM_SIZE; parts with
-  texts; simple mode), tooltips (tools kept, counted, updated, read
-  back; nothing shows on hover yet), the toolbar (TBBUTTONs with image,
+  texts; simple mode), tooltips (below), the toolbar (TBBUTTONs with image,
   id, state, style, text; separators; normal, hot and disabled image
   lists, TB_ADDBITMAP strips into its own; list or text-below layout;
   TB_AUTOSIZE; hot and pressed highlights; check buttons and groups; a
@@ -2575,6 +2574,50 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   images and child counts (TVN_GETDISPINFOW), deletion (TVN_DELETEITEMW,
   children first), sorting (by text or a callback), mouse and keys;
   chevrons instead of plus boxes, no lines yet, no label editing.
+- **Tooltips** (`user/comctl32/src/tooltips.rs`; `comctl32_test`,
+  `gui_test`'s screen check): tools are (hwnd, uId) pairs, a rectangle of
+  hwnd's client area or with TTF_IDISHWND the window uId, with a text, a
+  resource string (hinst) or LPSTR_TEXTCALLBACK. The tip is the tooltip
+  window itself, a desktop popup: user32's CreateWindowExW makes every
+  `tooltips_class32` window WS_POPUP without WS_CHILD/WS_CAPTION (Windows'
+  class does that at creation; gala picks the frame before WM_NCCREATE,
+  and wx creates its shared tooltip with neither style). Mouse input
+  arrives as TTM_RELAYEVENT (an MSG: the window and client point find
+  the tool), sent by the program, by the toolbar, or by the subclass a
+  TTF_SUBCLASS tool's window gets (`subclass.rs`: SetWindowSubclass and
+  friends, a per-window chain newest first behind one window procedure,
+  DefSubclassProc walking it, gone at WM_NCDESTROY). State per tooltip:
+  the tool under the pointer (`current`), the shown one, `quiet` (a
+  click or the autopop hid the tip: none until the pointer leaves).
+  Timers on the tooltip window: SHOW (the initial delay, restarted by a
+  move to a new point on the tool; the reshow delay when switching
+  tools while a tip shows), POP (autopop, restarted by moves on the
+  shown tool) and LEAVE (every 100 ms while the pointer is on a tool:
+  GetCursorPos against the tool's screen rectangle, since moves over
+  windows that are not tools are never relayed). Delays default to
+  GetDoubleClickTime() (initial), 10x (autopop), 1/5 (reshow); TTDT_
+  AUTOMATIC sets the three from one value. Showing: TTN_GETDISPINFOW to
+  the tool's hwnd for callback texts (lpszText, szText or a resource id;
+  TTF_DI_SETITEM keeps it), nothing for an empty text, the size from
+  DrawTextW's DT_CALCRECT (one line; wrapped at TTM_SETMAXTIPWIDTH's
+  width once set) plus 8 x 4 padding and a 1-pixel border, placed 20 rows
+  below the pointer's hot spot (under the tool with TTF_CENTERTIP; at
+  TTM_TRACKPOSITION's point for TTM_TRACKACTIVATE), moved into the work
+  area (above the pointer when there is no room below); TTN_SHOW to the
+  tool's hwnd before ShowWindow(SW_SHOWNOACTIVATE), TTN_POP before
+  hiding. Drawn light: 0xf9f9f9 face, 0xc8c8c8 border, dark text in the
+  GUI font (WM_SETFONT's), TTM_SETTIPBKCOLOR/TEXTCOLOR when given. The
+  toolbar (TBSTYLE_TOOLTIPS) creates its tooltip with TTS_ALWAYSTIP,
+  keeps one callback tool per visible button (id: the command id; made
+  again when the pointer moves onto another button), relays its mouse
+  messages, and passes the tooltip's WM_NOTIFY to its parent (wx answers
+  TTN_NEEDTEXT in its subclass of the toolbar before that); a button
+  whose text is not shown gives its text when the parent gives none.
+  TODO: rounded corners (desktop popups are square), balloons and
+  titles, TTS_ALWAYSTIP's absence (tips show for inactive windows too),
+  TTM_HITTEST/WINDOWFROMPOINT/GETBUBBLESIZE, the pointer leaving to the
+  desktop or another program (user32's GetCursorPos only follows moves
+  over the program's windows: the autopop hides the tip then).
 - **Image lists** (`user/comctl32/src/imagelist.rs`; `comctl32_test`):
   HIMAGELIST is 0x1000 + 16 * slot (256 lists); each image is its own
   pair of gdi32 bitmaps of the list's size, a 32-bit colour bitmap

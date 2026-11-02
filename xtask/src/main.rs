@@ -403,6 +403,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gui_test", "kernel32.dll", "Windows/System32"),
     ("gui_test", "user32.dll", "Windows/System32"),
     ("gui_test", "gdi32.dll", "Windows/System32"),
+    ("gui_test", "comctl32.dll", "Windows/System32"),
     ("console_window", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("console_window", "ntdll.dll", "Windows/System32"),
     ("console_window", "kernel32.dll", "Windows/System32"),
@@ -4403,9 +4404,27 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
+                    // The pointer rests on the edit (396, 376): after the
+                    // initial delay its tooltip shows 20 rows below the
+                    // pointer, at (396, 396): a grey border, a light face,
+                    // "Type here" in dark text from (405, 401).
+                    input: &["mouse_move 0 134"],
+                    pixels: &[
+                        PixelCheck::At(396, 405, 0xc8c8c8),            // the border
+                        PixelCheck::At(398, 398, 0xf9f9f9),            // the face
+                        PixelCheck::AnyIn(405, 400, 50, 18, 0x1b1b1b), // "Type here"
+                    ],
+                },
+                ScreenStep {
+                    // Off the edit, into the client area (396, 276): the
+                    // tip goes (the window's white under it again).
+                    input: &["mouse_move 0 -100"],
+                    pixels: &[PixelCheck::At(398, 398, 0xffffff)],
+                },
+                ScreenStep {
                     // The close button (x 453..498 of the caption): the program
                     // ends (WM_SYSCOMMAND SC_CLOSE; no screendump).
-                    input: &["mouse_move 80 -125", "mouse_button 1", "mouse_button 0"],
+                    input: &["mouse_move 80 -159", "mouse_button 1", "mouse_button 0"],
                     pixels: &[],
                 },
             ],
@@ -4504,6 +4523,20 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                         // on black, then washed out).
                         PixelCheck::AnyIn(1208, 716, 10, 4, 0x015001),
                     ],
+                },
+                ScreenStep {
+                    // From OK (763, 522) to the toolbar's Refresh button
+                    // (206, 93): after the initial delay its tooltip (the
+                    // toolbar's tooltip control, the text from wx's
+                    // TTN_NEEDTEXT) shows 20 rows below the pointer: the
+                    // tip's light face inside its border.
+                    input: &["mouse_move -255 -255", "mouse_move -255 -174", "mouse_move -47 0"],
+                    pixels: &[PixelCheck::At(208, 115, 0xf9f9f9)],
+                },
+                ScreenStep {
+                    // Back to (763, 522), where the next step starts.
+                    input: &["mouse_move 255 255", "mouse_move 255 174", "mouse_move 47 0"],
+                    pixels: &[],
                 },
                 ScreenStep {
                     // Quickconnect to FileZilla Server (started first):

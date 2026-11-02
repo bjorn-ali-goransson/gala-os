@@ -39,7 +39,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     FindWindowExW
     GetCaretBlinkTime
     GetClassInfoW
-    GetDoubleClickTime
     GetKeyboardState
     GetProcessDefaultLayout
     GetWindowDC

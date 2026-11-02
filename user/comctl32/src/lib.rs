@@ -3,7 +3,7 @@
 //! (`statusbar.rs`), tooltips (`tooltips.rs`), the toolbar
 //! (`toolbar.rs`), the header (`header.rs`), the list view
 //! (`listview.rs`) and the tree view (`treeview.rs`), drawn in the Windows 11 style (`common.rs`); and image
-//! lists (`imagelist.rs`).
+//! lists (`imagelist.rs`); window subclassing (`subclass.rs`).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -16,6 +16,7 @@ mod header;
 mod imagelist;
 mod listview;
 mod statusbar;
+mod subclass;
 mod toolbar;
 mod tooltips;
 mod treeview;

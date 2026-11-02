@@ -113,6 +113,8 @@ struct Bar {
     text_rows: i32,
     notify: usize,
     tooltips: usize,
+    /// The buttons' tools in the tooltip control (command ids).
+    tips: Vec<i32>,
     hot: i32,
     pressed: i32,
     font: usize,
@@ -133,6 +135,7 @@ fn new_bar() -> Bar {
         text_rows: 1,
         notify: 0,
         tooltips: 0,
+        tips: Vec::new(),
         hot: -1,
         pressed: -1,
         font: 0,
@@ -424,7 +427,82 @@ fn paint_bar(hwnd: Hwnd) {
     });
 }
 
+/// The tooltip control's tools: one per visible button (its command id
+/// and rectangle, the text asked with TTN_GETDISPINFOW), made again when
+/// the pointer moves onto another button.
+fn sync_tips(hwnd: Hwnd) {
+    let Some((tt, buttons, old)) =
+        with(hwnd, |b| (b.tooltips, b.buttons.clone(), core::mem::take(&mut b.tips)))
+    else {
+        return;
+    };
+    if tt == 0 {
+        return;
+    }
+    let rects = layout(hwnd);
+    let mut ids = Vec::new();
+    if ids.try_reserve(buttons.len()).is_err() {
+        return;
+    }
+    for (b, r) in buttons.iter().zip(&rects) {
+        if b.style & BTNS_SEP == 0 && b.state & TBSTATE_HIDDEN == 0 {
+            ids.push(b.id);
+            crate::tooltips::add_callback_tool(tt, hwnd, b.id as u32 as usize, *r);
+        }
+    }
+    for id in old.iter().filter(|id| !ids.contains(id)) {
+        crate::tooltips::delete_tool(tt, hwnd, *id as u32 as usize);
+    }
+    with(hwnd, |b| b.tips = ids);
+}
+
+/// WM_NOTIFY from the tooltip control: passed to the notify window; a
+/// button whose text is not shown (TB_SETMAXTEXTROWS 0,
+/// TBSTYLE_EX_MIXEDBUTTONS without BTNS_SHOWTEXT) gives its text when the
+/// program gives none.
+fn tip_note(hwnd: Hwnd, wparam: usize, lparam: isize) -> isize {
+    let Some((target, rows, ex)) = with(hwnd, |b| (b.notify, b.text_rows, b.ex_style)) else {
+        return 0;
+    };
+    // SAFETY: plain call.
+    let target = if target != 0 { target } else { unsafe { GetParent(hwnd) } };
+    // SAFETY: plain call; the sender's NMHDR passed on.
+    let r = unsafe { SendMessageW(target, WM_NOTIFY, wparam, lparam) };
+    // SAFETY: the sender's NMHDR: idFrom at 8, code at 16.
+    let (id, code) = unsafe {
+        let p = lparam as *const u8;
+        (p.add(8).cast::<usize>().read_unaligned(), p.add(16).cast::<u32>().read_unaligned())
+    };
+    if code == crate::tooltips::GETDISPINFOW {
+        let text = with(hwnd, |b| {
+            b.buttons
+                .iter()
+                .find(|x| x.id as u32 as usize == id)
+                .filter(|x| {
+                    rows == 0 || (ex & TBSTYLE_EX_MIXEDBUTTONS != 0 && x.style & BTNS_SHOWTEXT == 0)
+                })
+                .map(|x| x.text.clone())
+        })
+        .flatten()
+        .unwrap_or_default();
+        crate::tooltips::fill_disp_text(lparam, &text);
+    }
+    r
+}
+
 pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
+    if (WM_MOUSEMOVE..=0x0209).contains(&msg) {
+        let (tt, hot) = with(hwnd, |b| (b.tooltips, b.hot)).unwrap_or((0, -1));
+        if tt != 0 && msg == WM_MOUSEMOVE {
+            // Onto another button: the tools follow the buttons first.
+            let (x, y) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
+            let at = hit(hwnd, x, y).map_or(-1, |i| i as i32);
+            if at != hot && at >= 0 {
+                sync_tips(hwnd);
+            }
+        }
+        crate::tooltips::relay(tt, hwnd, msg, wparam, lparam);
+    }
     match msg {
         0x0001 => {
             // WM_CREATE: a tooltip control for TBSTYLE_TOOLTIPS.
@@ -439,7 +517,7 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
                         0,
                         class.as_ptr(),
                         core::ptr::null(),
-                        0x8000_0000,
+                        0x8000_0001, // WS_POPUP | TTS_ALWAYSTIP
                         0,
                         0,
                         0,
@@ -813,6 +891,17 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
         WM_PAINT => {
             paint_bar(hwnd);
             0
+        }
+        WM_NOTIFY
+            if lparam != 0
+                // SAFETY: the sender's NMHDR: hwndFrom at 0, code at 16.
+                && unsafe {
+                    let p = lparam as *const u8;
+                    p.cast::<usize>().read_unaligned() == with(hwnd, |b| b.tooltips).unwrap_or(0)
+                        && crate::tooltips::is_tip_note(p.add(16).cast::<u32>().read_unaligned())
+                } =>
+        {
+            tip_note(hwnd, wparam, lparam)
         }
         // SAFETY: plain call.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
