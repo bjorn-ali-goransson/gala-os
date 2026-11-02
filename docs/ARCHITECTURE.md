@@ -102,8 +102,9 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `console=<program>` | that `start=`/`run=` program gets a console window (a console session hosted by gala's conhost.exe) |
 | `cwd=C:/dir` | their current directory (default `C:\gala\`; Elasticsearch expects its home) |
 | `trace` | log every system call (arguments, status) |
+| `diskreset=<n>` | the n-th disk request has the device reset under the driver just after it is posted (the driver's recovery test) |
 | `crashtest` | with `persist`: panic on purpose after mounting when the disk holds no crash record (the crash record's scenario) |
-| `hangtest` | CPU 1 spins with interrupts off for 7 s, 3 s after its timer starts (the hang watchdog's scenario) |
+| `hangtest` | CPU 1 spins with interrupts off for 9 s, 3 s after its timer starts (the hang watchdog's scenario) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |
 | `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault` or `all` |
@@ -3127,7 +3128,12 @@ one for the whole kernel means `time.rs`.
    and other shared sections, the window-manager protocol between user32
    and the desktop. A reader accepts its version and the previous one.
 4. **Drivers survive a device reset** (virtio has one): they can
-   re-initialize the device and resubmit what was in flight.
+   re-initialize the device and resubmit what was in flight. Done for
+   virtio-blk (2026-11-02): a request whose device gave up (FAILED,
+   NEEDS_RESET) or lost DRIVER_OK (reset under the driver) re-initializes
+   it in place (`LegacyDevice::reinit`: a second device value would reset
+   it again when dropped) and posts the request again, up to 3 times
+   (scenario `disk_reset`). TODO: virtio-net.
 5. **All kernel time comes through one clock**: the NT layer through the
    `Clock` seam, the kernel's own modules through `time.rs`; nothing else
    reads the TSC or counts ticks (holds as of 2026-11-02). Deterministic

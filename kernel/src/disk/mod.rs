@@ -92,10 +92,19 @@ fn check(first: u64, len: usize) -> Result<(), DiskError> {
     }
 }
 
-/// Runs one request: `start` posts it (false: nothing posted), then waits
-/// for the device and lets `finish` read the result.
+/// `diskreset=<n>`: the n-th request has the device reset under it just
+/// after it is posted (the driver's recovery test; 0: never).
+pub static RESET_AT: AtomicU64 = AtomicU64::new(0);
+static REQUESTS: AtomicU64 = AtomicU64::new(0);
+/// Times the device was set up again after a reset.
+pub static RESETS: AtomicU64 = AtomicU64::new(0);
+
+/// Runs one request: `start` posts it, then waits for the device and lets
+/// `finish` read the result. A device that gave up or was reset under the
+/// driver is set up again and the request posted again (ARCHITECTURE
+/// invariant 4), up to 3 times.
 fn request<R>(
-    start: impl FnOnce(&mut VirtioBlk) -> Result<(), DiskError>,
+    start: impl Fn(&mut VirtioBlk) -> Result<(), DiskError>,
     finish: impl FnOnce(&mut VirtioBlk) -> Result<R, DiskError>,
 ) -> Result<R, DiskError> {
     // Fault injection: the request fails as a device error would.
@@ -103,19 +112,33 @@ fn request<R>(
         return Err(DiskError::Device);
     }
     let _turn = Turn::take();
+    let number = REQUESTS.fetch_add(1, Ordering::Relaxed) + 1;
     {
         let mut disk = DISK.lock();
-        start(disk.as_mut().ok_or(DiskError::OutOfRange)?)?;
+        let dev = disk.as_mut().ok_or(DiskError::OutOfRange)?;
+        start(dev)?;
+        if RESET_AT.load(Ordering::Relaxed) == number {
+            dev.reset_now();
+        }
     }
+    let mut resets = 0;
     loop {
         {
             let mut disk = DISK.lock();
             let dev = disk.as_mut().ok_or(DiskError::Device)?;
+            if dev.needs_reset() {
+                if resets == 3 {
+                    return Err(DiskError::Device);
+                }
+                resets += 1;
+                warn!("disk: the device was reset or gave up; setting it up again");
+                dev.reset().map_err(|_| DiskError::Device)?;
+                RESETS.fetch_add(1, Ordering::Relaxed);
+                start(dev)?;
+                continue;
+            }
             if dev.done() {
                 return finish(dev);
-            }
-            if dev.failed() {
-                return Err(DiskError::Device);
             }
         }
         sched::yield_now();

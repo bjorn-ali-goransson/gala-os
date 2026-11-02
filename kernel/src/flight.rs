@@ -132,44 +132,59 @@ pub fn dump(_cpus: u64, _max: usize, _print: impl FnMut(core::fmt::Arguments)) {
 
 // ---- The hang watchdog ----
 
-/// Each CPU's timer interrupts so far, and what the watchdog saw last
-/// time it looked (with how many looks in a row it stayed the same).
+/// Per CPU: its timer interrupts so far; for the CPU watching it, the
+/// heartbeat it saw last, since when (ns) it has not moved, and whether
+/// that stall was reported.
 #[cfg(not(any(test, feature = "hosted")))]
 static HEARTBEAT: [AtomicU64; crate::arch::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
 #[cfg(not(any(test, feature = "hosted")))]
-static SEEN: [AtomicU64; crate::arch::smp::MAX_CPUS] =
+static SEEN: [[AtomicU64; 3]; crate::arch::smp::MAX_CPUS] =
+    [const { [const { AtomicU64::new(0) }; 3] }; crate::arch::smp::MAX_CPUS];
+/// Per CPU: when (ns) it last looked at the CPU it watches.
+#[cfg(not(any(test, feature = "hosted")))]
+static LOOKED: [AtomicU64; crate::arch::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
 
 /// Seconds without a timer interrupt before a CPU is reported.
 pub const STUCK_SECONDS: u64 = 5;
+const NS: u64 = 1_000_000_000;
 
-/// The watchdog's view of one CPU: given its heartbeat now, what was seen
-/// last second (the heartbeat and the seconds it has not moved, packed
-/// as `beat << 8 | seconds`), the new packed value and whether to report
-/// it (once, when it reaches STUCK_SECONDS).
-pub fn watch(beat: u64, seen: u64) -> (u64, bool) {
-    let (last, seconds) = (seen >> 8, seen & 0xff);
-    if beat != last {
-        return (beat << 8, false);
-    }
-    let seconds = (seconds + 1).min(0xff);
-    (beat << 8 | seconds, seconds == STUCK_SECONDS)
+/// What the watcher knows of one CPU: the heartbeat seen, since when it
+/// has not moved (ns), whether that stall was reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Seen {
+    pub beat: u64,
+    pub since: u64,
+    pub reported: bool,
 }
 
-/// From every CPU's timer interrupt, `ticks` its tick count: counts this
-/// CPU's heartbeat; once a second (by this CPU's ticks) looks at the next
-/// online CPU's and reports it if it stopped (a CPU spinning with
-/// interrupts off: a lock never released, a loop in an interrupt
-/// handler).
+/// Looks at a CPU whose heartbeat is `beat` at time `now` (ns, the TSC
+/// clock: timer ticks themselves may come late when the host is busy):
+/// the new view and whether to report it (once per stall, when it has
+/// not moved for STUCK_SECONDS).
+pub fn watch(beat: u64, now: u64, seen: Seen) -> (Seen, bool) {
+    if beat != seen.beat {
+        return (Seen { beat, since: now, reported: false }, false);
+    }
+    let stuck = !seen.reported && now.saturating_sub(seen.since) >= STUCK_SECONDS * NS;
+    (Seen { reported: seen.reported || stuck, ..seen }, stuck)
+}
+
+/// From every CPU's timer interrupt: counts this CPU's heartbeat; about
+/// once a second (by the TSC clock) looks at the next online CPU's and
+/// reports it if it stopped (a CPU spinning with interrupts off: a lock
+/// never released, a loop in an interrupt handler).
 #[cfg(not(any(test, feature = "hosted")))]
-pub fn on_tick(hz: u64) {
+pub fn on_tick(_hz: u64) {
     let me = crate::arch::percpu::cpu_index() as usize;
     let Some(beat) = HEARTBEAT.get(me) else { return };
-    let mine = beat.fetch_add(1, Ordering::Relaxed) + 1;
-    if hz == 0 || !mine.is_multiple_of(hz) {
+    beat.fetch_add(1, Ordering::Relaxed);
+    let now = crate::time::monotonic_ns();
+    if now.saturating_sub(LOOKED[me].load(Ordering::Relaxed)) < NS {
         return;
     }
+    LOOKED[me].store(now, Ordering::Relaxed);
     let online = crate::arch::smp::online_mask();
     if online.count_ones() < 2 {
         return;
@@ -177,11 +192,19 @@ pub fn on_tick(hz: u64) {
     // The next online CPU after this one (round the mask).
     let next = (1..64).map(|k| (me + k) % 64).find(|&c| online & (1 << c) != 0);
     let Some(next) = next else { return };
-    let now = HEARTBEAT[next].load(Ordering::Relaxed);
-    let (seen, report) = watch(now, SEEN[next].load(Ordering::Relaxed));
-    SEEN[next].store(seen, Ordering::Relaxed);
+    let slot = &SEEN[next];
+    let seen = Seen {
+        beat: slot[0].load(Ordering::Relaxed),
+        since: slot[1].load(Ordering::Relaxed),
+        reported: slot[2].load(Ordering::Relaxed) != 0,
+    };
+    let current = HEARTBEAT[next].load(Ordering::Relaxed);
+    let (seen, report) = watch(current, now, seen);
+    slot[0].store(seen.beat, Ordering::Relaxed);
+    slot[1].store(seen.since, Ordering::Relaxed);
+    slot[2].store(u64::from(seen.reported), Ordering::Relaxed);
     if report {
-        record(Kind::Watchdog, next as u64, now);
+        record(Kind::Watchdog, next as u64, current);
         crate::console::emergency_println(format_args!(
             "watchdog: CPU {next} has taken no timer interrupt for {STUCK_SECONDS} s \
              (interrupts off: a lock never released?); its last events:"
@@ -211,30 +234,27 @@ mod tests {
 
     #[test]
     fn the_watchdog_reports_a_heartbeat_stopped_for_five_seconds_once() {
-        let mut seen = 0;
+        let mut seen = Seen { beat: 0, since: 0, reported: false };
         let mut reports = 0;
         // Moving: never reported.
-        for beat in 1..10 {
-            let (s, r) = watch(beat * 1000, seen);
+        for k in 1..10u64 {
+            let (s, r) = watch(k * 1000, k * NS, seen);
             seen = s;
             reports += usize::from(r);
         }
         assert_eq!(reports, 0);
-        // Stopped: reported at the fifth second, not again.
-        for _ in 0..12 {
-            let (s, r) = watch(9000, seen);
+        // Stopped at 9 s: reported once 5 s later, not again.
+        for k in 10..30u64 {
+            let (s, r) = watch(9000, k * NS, seen);
             seen = s;
             reports += usize::from(r);
+            assert_eq!(r, k == 14);
         }
         assert_eq!(reports, 1);
         // Moving again, then stopping again: reported again.
-        let (s, _) = watch(9001, seen);
+        let (s, _) = watch(9001, 30 * NS, seen);
         seen = s;
-        for _ in 0..STUCK_SECONDS {
-            let (s, r) = watch(9001, seen);
-            seen = s;
-            reports += usize::from(r);
-        }
-        assert_eq!(reports, 2);
+        let (_, r) = watch(9001, 35 * NS, seen);
+        assert!(r);
     }
 }

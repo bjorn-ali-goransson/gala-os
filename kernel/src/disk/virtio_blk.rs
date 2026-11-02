@@ -98,6 +98,29 @@ impl VirtioBlk {
         self.dev.failed()
     }
 
+    /// Whether the device must be set up again (`reset`).
+    pub fn needs_reset(&self) -> bool {
+        self.dev.needs_reset()
+    }
+
+    /// Sets the device up again after it gave up or was reset (ARCHITECTURE
+    /// invariant 4): the same function, features and queue; the request
+    /// that was in flight is forgotten (the caller posts it again).
+    pub fn reset(&mut self) -> Result<(), Error> {
+        // In place: a second device value would reset the device again
+        // when the old one is dropped.
+        self.dev.reinit(F_RO | F_FLUSH | F_ANY_LAYOUT);
+        self.dev.setup_chained_queue(QUEUE, 1, SLOT)?;
+        self.dev.start();
+        self.in_flight = InFlight::None;
+        Ok(())
+    }
+
+    /// For `diskreset=`: resets the device under the driver.
+    pub fn reset_now(&mut self) {
+        self.dev.reset_now();
+    }
+
     fn post(
         &mut self,
         kind: u32,

@@ -391,6 +391,33 @@ impl LegacyDevice {
         self.read::<u8>(DEVICE_STATUS) & (STATUS_FAILED | 0x40) != 0
     }
 
+    /// Whether the device must be set up again: it gave up, or it was
+    /// reset under the driver (DRIVER_OK gone: its queues are forgotten).
+    pub fn needs_reset(&self) -> bool {
+        let status = self.read::<u8>(DEVICE_STATUS);
+        status & (STATUS_FAILED | 0x40) != 0 || status & STATUS_DRIVER_OK == 0
+    }
+
+    /// Sets the device up again in place (after it gave up or was reset):
+    /// reset, the old queues freed (the device no longer uses them),
+    /// `wanted & offered` features negotiated again; set up the queues and
+    /// `start` again. The negotiated features.
+    pub fn reinit(&mut self, wanted: u32) -> u32 {
+        self.write(DEVICE_STATUS, 0u8);
+        self.queues = [const { None }; MAX_QUEUES];
+        self.write(DEVICE_STATUS, STATUS_ACKNOWLEDGE);
+        self.write(DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
+        let features = self.read::<u32>(DEVICE_FEATURES) & wanted;
+        self.write(GUEST_FEATURES, features);
+        features
+    }
+
+    /// Resets the device now (status 0), as a test of the driver's
+    /// recovery does (`diskreset=`): what was in flight is lost.
+    pub fn reset_now(&mut self) {
+        self.write(DEVICE_STATUS, 0u8);
+    }
+
     pub fn queue(&mut self, index: u16) -> Option<&mut Virtqueue> {
         self.queues.get_mut(usize::from(index))?.as_mut()
     }

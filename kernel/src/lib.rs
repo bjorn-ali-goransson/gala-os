@@ -128,6 +128,10 @@ pub fn kernel_main() -> ! {
         Err(e) => warn!("smp: cannot start the other CPUs: {e:?}"),
     }
     disk::init();
+    // The disk driver's recovery test: the n-th request's device is reset.
+    if let Some(n) = cmdline.value("diskreset").and_then(|v| v.parse().ok()) {
+        disk::RESET_AT.store(n, Ordering::Relaxed);
+    }
     nt::init();
     net::init();
     for module in info.modules.iter() {

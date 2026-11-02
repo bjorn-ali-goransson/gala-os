@@ -2771,6 +2771,19 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["disk_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // R1 invariant 4: disk_test with the device reset under the
+        // driver at the third request; the driver sets it up again and
+        // posts the request again (DISK_SCENARIOS checks the sectors).
+        name: "disk_reset",
+        cmdline: "qemu_exit diskreset=3 as=system run=disk_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "disk: the device was reset or gave up; setting it up again",
+            "disk_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // R4: the crash record kept across reboots (DISK_SCENARIOS: the
         // first boot panics on purpose and leaves it; this one prints and
         // clears it, then runs normally).
@@ -2987,7 +3000,7 @@ const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         // R4: the hang watchdog. `hangtest` makes CPU 1 spin with
-        // interrupts off for 7 s, 3 s after its timer starts; another CPU
+        // interrupts off for 9 s, 3 s after its timer starts; another CPU
         // reports it after 5 s with its flight-recorder events, and the
         // system goes on (busybox sleeps through it).
         name: "watchdog",
@@ -3789,6 +3802,7 @@ fn events_flag() -> String {
 /// Scenarios that ship a named set of EXTRA_MODULES instead of their own
 /// (the same set: they share a VM).
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("disk_reset", "disk_test"),
     ("crash_record", "hello"),
     ("watchdog", "busybox"),
     ("failpoint_heap", "kernel32_test"),
@@ -5201,6 +5215,15 @@ struct DiskScenario {
 const DISK_SCENARIOS: &[DiskScenario] = &[
     DiskScenario {
         name: "disk_test",
+        size: 16 << 20,
+        setup: disk_test_setup,
+        check: disk_test_check,
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // R1 invariant 4: the device is reset under the driver mid-test.
+        name: "disk_reset",
         size: 16 << 20,
         setup: disk_test_setup,
         check: disk_test_check,
