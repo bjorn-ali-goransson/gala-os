@@ -607,13 +607,27 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    user32_test) and popup menus with their modal loop, also
    TrackPopupMenu(Ex) (gui_test's right click); FileZilla's screen check
    opens File and chooses Exit (status 0). Next: using it (connecting to
-   a server), the combo boxes' drop-down lists and tooltips on popups.
+   a server), the combo boxes' drop-down lists and tooltips on popups
+   (both done below).
    **Drop-down lists** (2026-11-02): a COMBOBOX's list is a desktop popup
    under it (a click, F4, Alt+Down, CB_SHOWDROPDOWN) with the mouse
    capture: the hot item follows the pointer, a click picks an item, a
    press outside or Escape closes it, with CBN_DROPDOWN, CBN_SELCHANGE,
    CBN_SELENDOK/CBN_SELENDCANCEL and CBN_CLOSEUP (controls_test;
    gui_test's screen check opens one and picks an item).
+   **Tooltips on popups** (2026-11-02): comctl32's tooltips show their
+   tip on hover as a desktop popup (user32 makes every tooltips_class32
+   window a WS_POPUP, as wx creates its own without the style): tools get
+   mouse input by TTM_RELAYEVENT or TTF_SUBCLASS (SetWindowSubclass,
+   GetWindowSubclass, RemoveWindowSubclass, DefSubclassProc are new in
+   comctl32), the initial/autopop/reshow delays from GetDoubleClickTime
+   (now in user32: 500 ms), TTN_GETDISPINFOW for callback texts,
+   TTN_SHOW/TTN_POP, hiding on leaving the tool, a click, the autopop,
+   TTM_POP and TTM_ACTIVATE FALSE; tracking tips. The toolbar keeps a tool
+   per button and relays its mouse input, so FileZilla's toolbar buttons
+   show their tips (comctl32_test hover checks; gui_test's screen check
+   hovers an edit with a tooltip; FileZilla's screen check hovers the
+   Refresh button).
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,

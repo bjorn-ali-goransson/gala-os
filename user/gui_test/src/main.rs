@@ -31,6 +31,11 @@
 //!   (CBN_SELENDOK before CBN_CLOSEUP; Windows documents CBN_SELCHANGE's
 //!   place against CBN_CLOSEUP as unpredictable), and the program paints
 //!   a magenta square at (380, 60)-(392, 72).
+//! - A tooltip (comctl32's tooltips_class32) with a tool for the edit
+//!   (TTF_IDISHWND | TTF_SUBCLASS, "Type here"): resting the pointer on
+//!   the edit shows the tip below and right of the pointer after the
+//!   initial delay (a light face, a grey border, dark text); moving off
+//!   the edit hides it.
 //! - A click on the window's close button is WM_CLOSE; DefWindowProc
 //!   destroys the window: WM_DESTROY, where the program calls
 //!   PostQuitMessage(7); GetMessageW then returns 0 with wParam 7; IsWindow
@@ -166,6 +171,25 @@ unsafe extern "system" {
     fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
 }
 
+#[link(name = "comctl32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn InitCommonControlsEx(icc: *const [u32; 2]) -> i32;
+}
+
+/// TOOLINFOW.
+#[repr(C)]
+struct ToolInfoW {
+    size: u32,
+    flags: u32,
+    hwnd: Hwnd,
+    id: usize,
+    rect: Rect,
+    instance: Handle,
+    text: *const u16,
+    lparam: isize,
+    reserved: *mut c_void,
+}
+
 /// ICONINFO.
 #[repr(C)]
 struct IconInfo {
@@ -245,6 +269,8 @@ const CBN_CLOSEUP: u32 = 8;
 const CBN_SELENDOK: u32 = 9;
 const CBN_SELENDCANCEL: u32 = 10;
 const COMBO_ID: usize = 300;
+const TTM_ADDTOOLW: u32 = 0x0400 + 50;
+const CW_USEDEFAULT: i32 = i32::MIN;
 const MK_LBUTTON: usize = 1;
 const VK_H: usize = 0x48;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
@@ -526,6 +552,54 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
                 )
             };
             let _ = check(!edit.is_null(), 0);
+            // A tooltip for the edit.
+            let icc = [8u32, 0x4]; // ICC_BAR_CLASSES (tooltips)
+            // SAFETY: our INITCOMMONCONTROLSEX.
+            let _ = check(unsafe { InitCommonControlsEx(&icc) } != 0, 0);
+            let class: [u16; 17] = wide("tooltips_class32");
+            // SAFETY: valid strings and owner.
+            let tip = unsafe {
+                CreateWindowExW(
+                    0x8, // WS_EX_TOPMOST
+                    class.as_ptr(),
+                    core::ptr::null(),
+                    0x8000_0001, // WS_POPUP | TTS_ALWAYSTIP
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    hwnd,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                )
+            };
+            let _ = check(!tip.is_null(), 0);
+            static TIP_TEXT: [u16; 10] = {
+                let t = *b"Type here\0";
+                let mut w = [0u16; 10];
+                let mut i = 0;
+                while i < 10 {
+                    w[i] = t[i] as u16;
+                    i += 1;
+                }
+                w
+            };
+            let ti = ToolInfoW {
+                size: size_of::<ToolInfoW>() as u32,
+                flags: 0x1 | 0x10, // TTF_IDISHWND | TTF_SUBCLASS
+                hwnd,
+                id: edit as usize,
+                rect: Rect::default(),
+                instance: core::ptr::null_mut(),
+                text: TIP_TEXT.as_ptr(),
+                lparam: 0,
+                reserved: core::ptr::null_mut(),
+            };
+            // SAFETY: our tooltip and TOOLINFOW.
+            let added =
+                unsafe { SendMessageW(tip, TTM_ADDTOOLW, 0, &ti as *const ToolInfoW as isize) };
+            let _ = check(added != 0, 0);
             // A drop-down list combo box at (220, 20), 150 x 26.
             let class: [u16; 9] = wide("COMBOBOX");
             // SAFETY: valid strings and parent.

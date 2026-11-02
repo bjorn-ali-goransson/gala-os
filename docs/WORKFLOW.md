@@ -109,6 +109,14 @@ shows it.
   no free frame becomes an access violation (no commit charge yet). Look
   for "vm: out of memory" in the log and the free frames on the `stats:`
   line; give the scenario more memory (xtask's `qemu`).
+- **Hover logic that waits for "the pointer left"** (tooltips): a
+  window only gets WM_MOUSEMOVE while the pointer is over it, so code fed
+  by one window's moves (a subclass, TTM_RELAYEVENT) never sees it leave
+  across other windows; poll GetCursorPos against the rectangle on a
+  timer while the pointer is on it. gala's GetCursorPos follows moves
+  over the program's own windows only. Tests that hover without a screen
+  (cursor at (0, 0) under gala) put their window under GetCursorPos's
+  point, so the same check holds on Windows (comctl32_test).
 - **Disk space**: ISOs of the runtime scenarios are 120-470 MB each.
   xtask deletes each `*-iso-root` once its ISO is made, and a VM's ISO
   once all its scenarios passed (a failed one stays to boot by hand);

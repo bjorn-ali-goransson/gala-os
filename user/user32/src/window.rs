@@ -689,6 +689,18 @@ struct CreateStructW {
     ex_style: u32,
 }
 
+/// comctl32's tooltip class.
+const TOOLTIPS: [u16; 17] = {
+    let name = b"tooltips_class32\0";
+    let mut w = [0u16; 17];
+    let mut i = 0;
+    while i < 17 {
+        w[i] = name[i] as u16;
+        i += 1;
+    }
+    w
+};
+
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub extern "system" fn CreateWindowExW(
@@ -708,6 +720,14 @@ pub extern "system" fn CreateWindowExW(
     if !class_known(class) {
         return 0;
     }
+    // A tooltip is always a popup (Windows' tooltip class makes itself
+    // WS_POPUP when created: wx creates one with neither WS_POPUP nor
+    // WS_CHILD); gala chooses the frame before WM_NCCREATE, so here.
+    let style = if class as usize >= 0x1_0000 && class_key(class) == class_key(TOOLTIPS.as_ptr()) {
+        (style | 0x8000_0000) & !(WS_CHILD | 0x00c0_0000)
+    } else {
+        style
+    };
     if style & WS_CHILD != 0 {
         return crate::tree::create_child(
             ex_style,
@@ -2179,6 +2199,13 @@ pub extern "system" fn DispatchMessageA(msg: *const Msg) -> isize {
 #[unsafe(no_mangle)]
 pub extern "system" fn SetCursor(_cursor: Handle) -> Handle {
     0x0001_0003 as Handle
+}
+
+/// GetDoubleClickTime: Windows' default, 500 ms (gala has no setting to
+/// change it; comctl32's tooltips derive their delays from it).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDoubleClickTime() -> u32 {
+    500
 }
 
 /// GetSystemMetrics: the desktop's frame (SM_CYCAPTION, SM_CXBORDER,

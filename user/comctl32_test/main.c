@@ -16,7 +16,14 @@
  *   all). ImageList_Destroy.
  * - The status bar: at the bottom of its parent, full width (and after
  *   WM_SIZE); parts, their texts and rectangles.
- * - Tooltips: tools added, counted, deleted; TTM_SETMAXTIPWIDTH.
+ * - Tooltips: tools added, counted, deleted; TTM_SETMAXTIPWIDTH. Hover
+ *   (TTF_SUBCLASS on a button under the pointer): the delay times'
+ *   documented defaults (initial = GetDoubleClickTime(), autopop 10x,
+ *   reshow 1/5); TTM_ACTIVATE FALSE keeps the tip hidden; a WM_MOUSEMOVE
+ *   on the tool and the initial delay show it (TTN_SHOW to the tool's
+ *   hwnd, from the tooltip, idFrom the tool's uId), near the pointer and
+ *   on the screen; a click hides it (TTN_POP); LPSTR_TEXTCALLBACK asks
+ *   TTN_GETDISPINFOW; TTM_POP hides it; the autopop delay hides it.
  * - The toolbar: buttons added and counted, enabled, checked, side by
  *   side; TB_AUTOSIZE at the top, full width; a click sends WM_COMMAND
  *   with the button's id; TB_DELETEBUTTON; TB_ADDBITMAP with a bitmap
@@ -65,6 +72,9 @@ static int item_changes, last_changed_item, clicks, dispinfo_requests;
 static int tv_expanding, tv_selchanged, tv_children_asked;
 static HTREEITEM tv_new_selection;
 static UINT last_new_state;
+static int tt_shows, tt_pops, tt_dispinfo;
+static HWND tt_from;
+static UINT_PTR tt_id;
 static LRESULT CALLBACK parent_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_COMMAND) {
         last_command = wparam;
@@ -90,6 +100,16 @@ static LRESULT CALLBACK parent_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
                 tv_children_asked++;
                 di->item.cChildren = 1;
             }
+        } else if (h->code == TTN_SHOW) {
+            tt_shows++;
+            tt_from = h->hwndFrom;
+            tt_id = h->idFrom;
+        } else if (h->code == TTN_POP) {
+            tt_pops++;
+        } else if (h->code == TTN_GETDISPINFOW) {
+            NMTTDISPINFOW *di = (NMTTDISPINFOW *)lparam;
+            tt_dispinfo++;
+            di->lpszText = L"Callback tip";
         } else if (h->code == LVN_GETDISPINFOW) {
             NMLVDISPINFOW *di = (NMLVDISPINFOW *)lparam;
             dispinfo_requests++;
@@ -256,6 +276,112 @@ static void tooltips(HWND parent) {
     SendMessageW(tt, TTM_DELTOOLW, 0, (LPARAM)&ti);
     CHECK(SendMessageW(tt, TTM_GETTOOLCOUNT, 0, 0) == 0);
     DestroyWindow(tt);
+}
+
+/* Dispatches this thread's messages for `ms` milliseconds, or until the
+ * window's visibility is `visible` (then TRUE). */
+static BOOL pump_until(HWND hwnd, BOOL visible, DWORD ms) {
+    DWORD start = GetTickCount();
+    for (;;) {
+        MSG m;
+        while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+        if (hwnd != NULL && !!IsWindowVisible(hwnd) == !!visible) return TRUE;
+        if (GetTickCount() - start >= ms) return FALSE;
+        Sleep(10);
+    }
+}
+
+/* A tooltip on hover: a window is made under the pointer with a button
+ * centred on it (so the tool is where the pointer really rests, also on
+ * Windows); the tool (TTF_IDISHWND | TTF_SUBCLASS) gets WM_MOUSEMOVE as
+ * the pointer would give it, and the messages are dispatched. */
+static void tooltip_hover(void) {
+    POINT cur;
+    CHECK(GetCursorPos(&cur));
+    HWND win = CreateWindowExW(0, L"Comctl32TestParent", L"tips", WS_OVERLAPPEDWINDOW | WS_VISIBLE, cur.x - 150,
+                               cur.y - 100, 300, 200, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    CHECK(win != NULL);
+    POINT c = cur;
+    CHECK(ScreenToClient(win, &c));
+    HWND button = CreateWindowExW(0, L"BUTTON", L"hover", WS_CHILD | WS_VISIBLE, c.x - 60, c.y - 20, 120, 40, win,
+                                  (HMENU)70, GetModuleHandleW(NULL), NULL);
+    CHECK(button != NULL);
+    HWND tt = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL, WS_POPUP | TTS_ALWAYSTIP, CW_USEDEFAULT,
+                              CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, win, NULL, GetModuleHandleW(NULL), NULL);
+    CHECK(tt != NULL);
+    // The documented defaults, from the double-click time.
+    UINT dbl = GetDoubleClickTime();
+    CHECK(SendMessageW(tt, TTM_GETDELAYTIME, TTDT_INITIAL, 0) == dbl);
+    CHECK(SendMessageW(tt, TTM_GETDELAYTIME, TTDT_AUTOPOP, 0) == dbl * 10);
+    CHECK(SendMessageW(tt, TTM_GETDELAYTIME, TTDT_RESHOW, 0) == dbl / 5);
+    SendMessageW(tt, TTM_SETDELAYTIME, TTDT_INITIAL, MAKELPARAM(50, 0));
+    CHECK(SendMessageW(tt, TTM_GETDELAYTIME, TTDT_INITIAL, 0) == 50);
+
+    TOOLINFOW ti = {0};
+    ti.cbSize = sizeof ti;
+    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd = win;
+    ti.uId = (UINT_PTR)button;
+    ti.lpszText = L"Tip text";
+    CHECK(SendMessageW(tt, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+    CHECK(!IsWindowVisible(tt));
+    // The pointer in the button's client coordinates (its centre).
+    LPARAM at = MAKELPARAM(60, 20), at2 = MAKELPARAM(61, 20), at3 = MAKELPARAM(60, 21);
+
+    // Inactive: the pointer rests on the tool, nothing shows.
+    SendMessageW(tt, TTM_ACTIVATE, FALSE, 0);
+    SendMessageW(button, WM_MOUSEMOVE, 0, at);
+    CHECK(!pump_until(tt, TRUE, 400));
+    CHECK(tt_shows == 0);
+
+    // Active: after the initial delay the tip shows (TTN_SHOW first).
+    SendMessageW(tt, TTM_ACTIVATE, TRUE, 0);
+    SendMessageW(button, WM_MOUSEMOVE, 0, at2);
+    CHECK(pump_until(tt, TRUE, 3000));
+    CHECK(tt_shows == 1 && tt_from == tt && tt_id == (UINT_PTR)button);
+    RECT r;
+    CHECK(GetWindowRect(tt, &r));
+    CHECK(r.right - r.left > 16 && r.bottom - r.top > 8);
+    // Near the pointer, and on the screen.
+    CHECK(r.left - 64 <= cur.x && cur.x <= r.right + 64 && r.top - 64 <= cur.y && cur.y <= r.bottom + 64);
+    CHECK(r.left >= 0 && r.top >= 0 && r.right <= GetSystemMetrics(SM_CXSCREEN) &&
+          r.bottom <= GetSystemMetrics(SM_CYSCREEN));
+
+    // A click hides it.
+    SendMessageW(button, WM_LBUTTONDOWN, MK_LBUTTON, at2);
+    SendMessageW(button, WM_LBUTTONUP, 0, at2);
+    CHECK(pump_until(tt, FALSE, 1000));
+    CHECK(tt_pops == 1);
+
+    // A callback text: TTN_GETDISPINFOW asked of the tool's hwnd; TTM_POP
+    // hides the tip.
+    SendMessageW(tt, TTM_DELTOOLW, 0, (LPARAM)&ti);
+    ti.lpszText = LPSTR_TEXTCALLBACKW;
+    CHECK(SendMessageW(tt, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+    SendMessageW(button, WM_MOUSEMOVE, 0, at3);
+    CHECK(pump_until(tt, TRUE, 3000));
+    CHECK(tt_dispinfo >= 1 && tt_shows == 2);
+    SendMessageW(tt, TTM_POP, 0, 0);
+    CHECK(!IsWindowVisible(tt) && tt_pops == 2);
+
+    // The autopop delay hides it.
+    SendMessageW(tt, TTM_DELTOOLW, 0, (LPARAM)&ti);
+    ti.lpszText = L"Tip text";
+    CHECK(SendMessageW(tt, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+    SendMessageW(tt, TTM_SETDELAYTIME, TTDT_AUTOPOP, MAKELPARAM(300, 0));
+    CHECK(SendMessageW(tt, TTM_GETDELAYTIME, TTDT_AUTOPOP, 0) == 300);
+    SendMessageW(button, WM_MOUSEMOVE, 0, at);
+    CHECK(pump_until(tt, TRUE, 3000));
+    CHECK(tt_shows == 3);
+    CHECK(pump_until(tt, FALSE, 3000));
+    CHECK(tt_pops == 3);
+
+    DestroyWindow(tt);
+    DestroyWindow(win);
+    pump_until(NULL, FALSE, 50);
 }
 
 /* The toolbar: buttons added (TB_ADDBUTTONSW after TB_BUTTONSTRUCTSIZE),
@@ -467,6 +593,7 @@ int main(void) {
     CHECK(ImageList_Remove(il, -1) && ImageList_GetImageCount(il) == 0);
     status_bar(parent);
     tooltips(parent);
+    tooltip_hover();
     CHECK(ImageList_Add(il, two, NULL) == 0);
     toolbar(parent, il);
     list_view(parent, il);
