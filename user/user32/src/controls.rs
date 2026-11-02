@@ -502,18 +502,19 @@ pub(crate) fn chevron(hdc: Handle, x: i32, y: i32) {
 
 static REGISTERED: AtomicBool = AtomicBool::new(false);
 
-/// Registers STATIC, BUTTON and EDIT (once).
+/// Registers the system control classes (once).
 pub fn register_system_classes() {
     if REGISTERED.swap(true, Ordering::AcqRel) {
         return;
     }
-    let classes: [(&[u8], crate::window::WndProc); 7] = [
+    let classes: [(&[u8], crate::window::WndProc); 8] = [
         (b"#32770\0", crate::dialog::DefDlgProcW),
         (b"Static\0", static_proc),
         (b"Button\0", button_proc),
         (b"Edit\0", edit_proc),
         (b"ComboBox\0", crate::combo::combo_proc),
         (b"ComboLBox\0", crate::combo::list_proc),
+        (b"ListBox\0", crate::listbox::proc_),
         (b"#32768\0", crate::track::popup_proc),
     ];
     for (name, proc_) in classes {

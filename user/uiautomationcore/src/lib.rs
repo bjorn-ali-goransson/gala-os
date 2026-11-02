@@ -6,7 +6,10 @@
 //! - `CUIAutomation` (CoCreateInstance through ole32 and the HKCR\CLSID
 //!   entry in the registry seed): the IUIAutomation object
 //!   (automation.rs).
-//! - Elements (element.rs) wrap an HWND; the root is the desktop
+//! - Elements (element.rs) wrap a node: an HWND, or a list control's
+//!   item (items.rs: list boxes' strings and list views' items, read
+//!   with the controls' messages, through memory allocated in the list's
+//!   process when it is another's); the root is the desktop
 //!   (GetDesktopWindow), whose children are the visible top-level
 //!   windows, and a window's children are its visible child windows in z
 //!   order. Properties come from the window: AutomationId the control id,
@@ -15,9 +18,10 @@
 //! - Conditions (condition.rs): true, false, property (VARIANT compare,
 //!   IgnoreCase and MatchSubstring), and, or, not.
 //! - Patterns (pattern.rs): Invoke (push buttons: BM_CLICK posted, as
-//!   Invoke may return before the click is handled), Value (edits:
-//!   WM_SETTEXT, the window text), Toggle (check boxes: BM_GETCHECK,
-//!   BM_CLICK).
+//!   Invoke may return before the click is handled; list-view items: a
+//!   double click posted), Value (edits: WM_SETTEXT, the window text),
+//!   Toggle (check boxes: BM_GETCHECK, BM_CLICK), Selection (lists),
+//!   SelectionItem and ScrollItem (list items).
 //! - Tree walkers (walker.rs): the raw, control and content views and
 //!   walkers with any condition.
 //!
@@ -53,6 +57,7 @@ mod automation;
 mod cache;
 mod condition;
 mod element;
+mod items;
 mod pattern;
 mod walker;
 
@@ -105,6 +110,35 @@ unsafe extern "system" {
     pub fn SafeArrayUnaccessData(sa: *mut c_void) -> HResult;
 }
 
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    pub fn GetCurrentProcessId() -> u32;
+    pub fn OpenProcess(access: u32, inherit: i32, pid: u32) -> usize;
+    pub fn CloseHandle(h: usize) -> i32;
+    pub fn VirtualAllocEx(
+        process: usize,
+        address: *mut c_void,
+        size: usize,
+        kind: u32,
+        protect: u32,
+    ) -> *mut c_void;
+    pub fn VirtualFreeEx(process: usize, address: *mut c_void, size: usize, kind: u32) -> i32;
+    pub fn ReadProcessMemory(
+        process: usize,
+        address: *const c_void,
+        buf: *mut c_void,
+        size: usize,
+        done: *mut usize,
+    ) -> i32;
+    pub fn WriteProcessMemory(
+        process: usize,
+        address: *mut c_void,
+        buf: *const c_void,
+        size: usize,
+        done: *mut usize,
+    ) -> i32;
+}
+
 #[link(name = "ole32", kind = "raw-dylib")]
 unsafe extern "system" {
     pub fn CoTaskMemAlloc(size: usize) -> *mut u8;
@@ -135,6 +169,9 @@ unsafe extern "system" {
     pub fn GetDlgCtrlID(hwnd: Hwnd) -> i32;
     pub fn GetWindowLongW(hwnd: Hwnd, index: i32) -> i32;
     pub fn GetWindowRect(hwnd: Hwnd, rect: *mut [i32; 4]) -> i32;
+    pub fn GetClientRect(hwnd: Hwnd, rect: *mut [i32; 4]) -> i32;
+    pub fn ClientToScreen(hwnd: Hwnd, point: *mut [i32; 2]) -> i32;
+    pub fn GetParent(hwnd: Hwnd) -> Hwnd;
     pub fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
     pub fn GetFocus() -> Hwnd;
     pub fn SetFocus(hwnd: Hwnd) -> Hwnd;
@@ -239,22 +276,23 @@ pub struct VTable<const N: usize>(pub [*const (); N]);
 // SAFETY: function addresses only.
 unsafe impl<const N: usize> Sync for VTable<N> {}
 
-/// A list of handles on the heap (grows; a failed push reports false).
-pub struct List {
-    p: *mut usize,
+/// A list of plain values (handles, ids, elements' nodes) on the heap
+/// (grows; a failed push reports false).
+pub struct List<T: Copy = usize> {
+    p: *mut T,
     len: usize,
     cap: usize,
 }
 
-impl List {
-    pub const fn new() -> List {
+impl<T: Copy> List<T> {
+    pub const fn new() -> List<T> {
         List { p: core::ptr::null_mut(), len: 0, cap: 0 }
     }
 
-    pub fn push(&mut self, value: usize) -> bool {
+    pub fn push(&mut self, value: T) -> bool {
         if self.len == self.cap {
             let cap = (self.cap * 2).max(16);
-            let p = realloc(self.p.cast(), cap * size_of::<usize>()).cast::<usize>();
+            let p = realloc(self.p.cast(), cap * size_of::<T>()).cast::<T>();
             if p.is_null() {
                 return false;
             }
@@ -267,7 +305,7 @@ impl List {
         true
     }
 
-    pub fn as_slice(&self) -> &[usize] {
+    pub fn as_slice(&self) -> &[T] {
         if self.p.is_null() {
             return &[];
         }
@@ -276,13 +314,13 @@ impl List {
     }
 }
 
-impl Default for List {
-    fn default() -> List {
+impl<T: Copy> Default for List<T> {
+    fn default() -> List<T> {
         List::new()
     }
 }
 
-impl Drop for List {
+impl<T: Copy> Drop for List<T> {
     fn drop(&mut self) {
         free(self.p.cast());
     }
@@ -333,6 +371,14 @@ impl Variant {
 
     pub fn as_bool(&self) -> bool {
         self.data[0] as u16 != 0
+    }
+
+    /// Takes ownership of one reference to `p` (EMPTY when null).
+    pub fn unknown(p: *mut c_void) -> Variant {
+        if p.is_null() {
+            return Variant::EMPTY;
+        }
+        Variant { vt: VT_UNKNOWN, reserved: [0; 3], data: [p as u64, 0] }
     }
 
     pub fn as_bstr(&self) -> *mut u16 {

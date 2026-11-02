@@ -29,6 +29,15 @@
  *   (CBN_SELCHANGE), Enter keeps it (CBN_SELENDOK, CBN_CLOSEUP), F4
  *   toggles, Escape closes; the arrows while closed change the selection;
  *   a CBS_DROPDOWN combo box's edit passes F4 and Escape on.
+ * - LISTBOX: strings added (LBS_SORT: in order), inserted, found,
+ *   deleted, reset, with item data; GetClassName "ListBox"; the
+ *   selection of a single-selection list (LB_SETCURSEL, LB_GETCURSEL,
+ *   LB_GETSEL; LB_SETSEL fails) and of a multiple-selection one
+ *   (LB_SETSEL, LB_GETSELCOUNT, LB_GETSELITEMS; LB_SETCURSEL fails);
+ *   item rectangles one under the other (LB_GETITEMRECT,
+ *   LB_GETITEMHEIGHT), the top index (LB_SETTOPINDEX); a click selects
+ *   (LBN_SELCHANGE with LBS_NOTIFY), a double click sends LBN_DBLCLK;
+ *   LB_SETCURSEL sends no notification; the arrows move the selection.
  * - IsDialogMessageW: Tab to the next WS_TABSTOP control
  *   (GetNextDlgTabItem), the dialog's other messages dispatched, other
  *   windows' messages not taken.
@@ -51,11 +60,15 @@ static int commands;
  * list was visible when CBN_DROPDOWN came. */
 static int notes[32], nnotes;
 static HWND drop_list;
+/* The list box (id 44) notifications, in order. */
+static int lb_notes[32], nlb_notes;
 static int list_visible_at_dropdown = -1;
 static LRESULT CALLBACK parent_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_COMMAND) {
         last_command = wparam;
         commands++;
+        if (LOWORD(wparam) == 44 && nlb_notes < 32)
+            lb_notes[nlb_notes++] = HIWORD(wparam);
         if ((LOWORD(wparam) == 42 || LOWORD(wparam) == 43) && nnotes < 32) {
             notes[nnotes++] = HIWORD(wparam);
             if (HIWORD(wparam) == CBN_DROPDOWN && drop_list)
@@ -217,6 +230,100 @@ static void combos(HWND parent) {
     CHECK(info.hwndItem != NULL && GetParent(info.hwndItem) == d && info.hwndList != NULL);
     CHECK(SetWindowTextW(d, L"typed") && GetWindowTextW(info.hwndItem, text, 32) == 5);
     CHECK(GetWindowTextW(d, text, 32) == 5 && wcscmp(text, L"typed") == 0);
+}
+
+/* LISTBOX (see the top). */
+static void list_boxes(HWND parent) {
+    HWND lb = CreateWindowExW(0, L"LISTBOX", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY, 200, 10, 150, 100,
+                              parent, (HMENU)44, GetModuleHandleW(NULL), NULL);
+    CHECK(lb != NULL);
+    WCHAR text[32];
+    CHECK(GetClassNameW(lb, text, 32) == 7 && wcscmp(text, L"ListBox") == 0);
+    CHECK(SendMessageW(lb, LB_GETCOUNT, 0, 0) == 0 && SendMessageW(lb, LB_GETCURSEL, 0, 0) == LB_ERR);
+    CHECK(SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)L"one") == 0);
+    CHECK(SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)L"three") == 1);
+    CHECK(SendMessageW(lb, LB_INSERTSTRING, 1, (LPARAM)L"two") == 1);
+    CHECK(SendMessageW(lb, LB_GETCOUNT, 0, 0) == 3);
+    CHECK(SendMessageW(lb, LB_GETTEXTLEN, 2, 0) == 5);
+    CHECK(SendMessageW(lb, LB_GETTEXT, 2, (LPARAM)text) == 5 && wcscmp(text, L"three") == 0);
+    CHECK(SendMessageW(lb, LB_GETTEXTLEN, 3, 0) == LB_ERR && SendMessageW(lb, LB_GETTEXT, 3, (LPARAM)text) == LB_ERR);
+    CHECK(SendMessageW(lb, LB_FINDSTRINGEXACT, -1, (LPARAM)L"TWO") == 1);
+    CHECK(SendMessageW(lb, LB_FINDSTRING, -1, (LPARAM)L"th") == 2);
+    CHECK(SendMessageW(lb, LB_FINDSTRING, -1, (LPARAM)L"four") == LB_ERR);
+    CHECK(SendMessageW(lb, LB_SETITEMDATA, 1, 77) != LB_ERR && SendMessageW(lb, LB_GETITEMDATA, 1, 0) == 77);
+
+    // Selection (single): no notification for LB_SETCURSEL.
+    nlb_notes = 0;
+    CHECK(SendMessageW(lb, LB_SETCURSEL, 2, 0) == 2 && SendMessageW(lb, LB_GETCURSEL, 0, 0) == 2);
+    CHECK(SendMessageW(lb, LB_GETSEL, 2, 0) > 0 && SendMessageW(lb, LB_GETSEL, 0, 0) == 0);
+    CHECK(SendMessageW(lb, LB_SETSEL, TRUE, 0) == LB_ERR);
+    CHECK(SendMessageW(lb, LB_SETCURSEL, -1, 0) == LB_ERR && SendMessageW(lb, LB_GETCURSEL, 0, 0) == LB_ERR);
+    CHECK(nlb_notes == 0);
+
+    // Items one under the other.
+    RECT a, b, client;
+    int h = (int)SendMessageW(lb, LB_GETITEMHEIGHT, 0, 0);
+    CHECK(h > 0);
+    CHECK(SendMessageW(lb, LB_GETITEMRECT, 0, (LPARAM)&a) != LB_ERR);
+    CHECK(SendMessageW(lb, LB_GETITEMRECT, 1, (LPARAM)&b) != LB_ERR);
+    CHECK(a.top == 0 && a.bottom - a.top == h && b.top == a.bottom && a.left == 0);
+    GetClientRect(lb, &client);
+    CHECK(a.right == client.right);
+    CHECK(SendMessageW(lb, LB_GETITEMRECT, 5, (LPARAM)&a) == LB_ERR);
+
+    // A click selects and notifies; a double click too.
+    SendMessageW(lb, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(10, b.top + 2));
+    SendMessageW(lb, WM_LBUTTONUP, 0, MAKELPARAM(10, b.top + 2));
+    CHECK(SendMessageW(lb, LB_GETCURSEL, 0, 0) == 1);
+    CHECK(nlb_notes >= 1 && lb_notes[nlb_notes - 1] == LBN_SELCHANGE);
+    SendMessageW(lb, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELPARAM(10, b.top + 2));
+    CHECK(lb_notes[nlb_notes - 1] == LBN_DBLCLK);
+    // The arrows.
+    nlb_notes = 0;
+    SendMessageW(lb, WM_KEYDOWN, VK_DOWN, 0);
+    CHECK(SendMessageW(lb, LB_GETCURSEL, 0, 0) == 2 && nlb_notes == 1 && lb_notes[0] == LBN_SELCHANGE);
+    SendMessageW(lb, WM_KEYDOWN, VK_HOME, 0);
+    CHECK(SendMessageW(lb, LB_GETCURSEL, 0, 0) == 0);
+
+    // The top index.
+    for (int i = 0; i < 20; i++)
+        SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)L"more");
+    CHECK(SendMessageW(lb, LB_GETTOPINDEX, 0, 0) == 0);
+    CHECK(SendMessageW(lb, LB_SETTOPINDEX, 10, 0) != LB_ERR && SendMessageW(lb, LB_GETTOPINDEX, 0, 0) == 10);
+    CHECK(SendMessageW(lb, LB_GETITEMRECT, 10, (LPARAM)&a) != LB_ERR && a.top == 0);
+    CHECK(SendMessageW(lb, LB_GETITEMRECT, 9, (LPARAM)&a) != LB_ERR && a.top == -h);
+
+    CHECK(SendMessageW(lb, LB_DELETESTRING, 0, 0) == 22 && SendMessageW(lb, LB_GETCOUNT, 0, 0) == 22);
+    CHECK(SendMessageW(lb, LB_RESETCONTENT, 0, 0) == 0 || SendMessageW(lb, LB_GETCOUNT, 0, 0) == 0);
+    CHECK(SendMessageW(lb, LB_GETCOUNT, 0, 0) == 0);
+    DestroyWindow(lb);
+
+    // Sorted.
+    HWND s = CreateWindowExW(0, L"LISTBOX", NULL, WS_CHILD | WS_VISIBLE | LBS_SORT, 200, 120, 150, 80, parent,
+                             (HMENU)45, GetModuleHandleW(NULL), NULL);
+    CHECK(s != NULL);
+    CHECK(SendMessageW(s, LB_ADDSTRING, 0, (LPARAM)L"pear") == 0);
+    CHECK(SendMessageW(s, LB_ADDSTRING, 0, (LPARAM)L"apple") == 0);
+    CHECK(SendMessageW(s, LB_ADDSTRING, 0, (LPARAM)L"zucchini") == 2);
+    CHECK(SendMessageW(s, LB_GETTEXT, 1, (LPARAM)text) == 4 && wcscmp(text, L"pear") == 0);
+    DestroyWindow(s);
+
+    // Multiple selection.
+    HWND m = CreateWindowExW(0, L"LISTBOX", NULL, WS_CHILD | WS_VISIBLE | LBS_MULTIPLESEL, 200, 120, 150, 80, parent,
+                             (HMENU)46, GetModuleHandleW(NULL), NULL);
+    CHECK(m != NULL);
+    for (int i = 0; i < 4; i++)
+        SendMessageW(m, LB_ADDSTRING, 0, (LPARAM)L"item");
+    CHECK(SendMessageW(m, LB_SETCURSEL, 1, 0) == LB_ERR);
+    CHECK(SendMessageW(m, LB_GETSELCOUNT, 0, 0) == 0);
+    CHECK(SendMessageW(m, LB_SETSEL, TRUE, 1) != LB_ERR && SendMessageW(m, LB_SETSEL, TRUE, 3) != LB_ERR);
+    int sel[4] = {-1, -1, -1, -1};
+    CHECK(SendMessageW(m, LB_GETSELCOUNT, 0, 0) == 2);
+    CHECK(SendMessageW(m, LB_GETSELITEMS, 4, (LPARAM)sel) == 2 && sel[0] == 1 && sel[1] == 3);
+    CHECK(SendMessageW(m, LB_GETSEL, 3, 0) > 0 && SendMessageW(m, LB_GETSEL, 2, 0) == 0);
+    CHECK(SendMessageW(m, LB_SETSEL, FALSE, -1) != LB_ERR && SendMessageW(m, LB_GETSELCOUNT, 0, 0) == 0);
+    CHECK(SendMessageW(m, LB_SETSEL, TRUE, -1) != LB_ERR && SendMessageW(m, LB_GETSELCOUNT, 0, 0) == 4);
+    DestroyWindow(m);
 }
 
 static int last_note(void) {
@@ -453,6 +560,7 @@ int main(void) {
     buttons(parent);
     edits(parent);
     combos(parent);
+    list_boxes(parent);
     drop_downs(parent);
     dialog_keys(parent);
     dialogs(parent);

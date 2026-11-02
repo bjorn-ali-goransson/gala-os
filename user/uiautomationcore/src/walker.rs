@@ -6,10 +6,10 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::condition::{self, Condition};
-use crate::element::{self, children, desktop, hwnd_of, parent, put_element};
+use crate::element::{self, Node, children, desktop, node_of, parent, put_element};
 use crate::{
-    E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid, HResult, Hwnd, IID_IUNKNOWN, List,
-    S_OK, VTable, boxed, free, guid, iid_at, put,
+    E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid, HResult, IID_IUNKNOWN, List, S_OK,
+    VTable, boxed, free, guid, iid_at, put,
 };
 
 const IID_IUIAUTOMATIONTREEWALKER: Guid =
@@ -43,22 +43,22 @@ fn cond_of(this: *mut Walker) -> *mut Condition {
     unsafe { (*this).cond }
 }
 
-fn in_view(c: *mut Condition, h: Hwnd) -> bool {
-    h == desktop() || condition::matches(c, h)
+fn in_view(c: *mut Condition, h: Node) -> bool {
+    h == Node::window(desktop()) || condition::matches(c, h)
 }
 
-fn view_parent(c: *mut Condition, h: Hwnd) -> Hwnd {
+fn view_parent(c: *mut Condition, h: Node) -> Option<Node> {
     let mut p = parent(h);
     for _ in 0..64 {
-        if p == 0 || in_view(c, p) {
-            break;
+        match p {
+            Some(q) if !in_view(c, q) => p = parent(q),
+            _ => break,
         }
-        p = parent(p);
     }
     p
 }
 
-fn view_children(c: *mut Condition, h: Hwnd, out: &mut List, depth: u32) {
+fn view_children(c: *mut Condition, h: Node, out: &mut List<Node>, depth: u32) {
     if depth > 64 {
         return;
     }
@@ -81,57 +81,54 @@ fn navigate(
     this: *mut Walker,
     el: *mut c_void,
     out: *mut *mut c_void,
-    step: fn(*mut Condition, Hwnd) -> Hwnd,
+    step: fn(*mut Condition, Node) -> Option<Node>,
 ) -> HResult {
     if out.is_null() {
         return E_POINTER;
     }
     put(out, core::ptr::null_mut());
-    let Some(h) = hwnd_of(el) else { return E_INVALIDARG };
-    if !element::alive(h) {
+    let Some(h) = node_of(el) else { return E_INVALIDARG };
+    if !element::exists(h) {
         return crate::UIA_E_ELEMENTNOTAVAILABLE;
     }
     match step(cond_of(this), h) {
-        0 => S_OK,
-        found => put_element(out, found),
+        None => S_OK,
+        Some(found) => put_element(out, found),
     }
 }
 
-fn first_child(c: *mut Condition, h: Hwnd) -> Hwnd {
+fn first_child(c: *mut Condition, h: Node) -> Option<Node> {
     let mut list = List::new();
     view_children(c, h, &mut list, 0);
-    list.as_slice().first().copied().unwrap_or(0)
+    list.as_slice().first().copied()
 }
 
-fn last_child(c: *mut Condition, h: Hwnd) -> Hwnd {
+fn last_child(c: *mut Condition, h: Node) -> Option<Node> {
     let mut list = List::new();
     view_children(c, h, &mut list, 0);
-    list.as_slice().last().copied().unwrap_or(0)
+    list.as_slice().last().copied()
 }
 
-fn sibling(c: *mut Condition, h: Hwnd, next: bool) -> Hwnd {
-    let p = view_parent(c, h);
-    if p == 0 {
-        return 0;
-    }
+fn sibling(c: *mut Condition, h: Node, next: bool) -> Option<Node> {
+    let p = view_parent(c, h)?;
     let mut list = List::new();
     view_children(c, p, &mut list, 0);
     let items = list.as_slice();
-    let Some(at) = items.iter().position(|&x| x == h) else { return 0 };
+    let at = items.iter().position(|&x| x == h)?;
     let to = if next { at.checked_add(1) } else { at.checked_sub(1) };
-    to.and_then(|i| items.get(i)).copied().unwrap_or(0)
+    to.and_then(|i| items.get(i)).copied()
 }
 
-fn next_sibling(c: *mut Condition, h: Hwnd) -> Hwnd {
+fn next_sibling(c: *mut Condition, h: Node) -> Option<Node> {
     sibling(c, h, true)
 }
 
-fn previous_sibling(c: *mut Condition, h: Hwnd) -> Hwnd {
+fn previous_sibling(c: *mut Condition, h: Node) -> Option<Node> {
     sibling(c, h, false)
 }
 
-fn normalize(c: *mut Condition, h: Hwnd) -> Hwnd {
-    if in_view(c, h) { h } else { view_parent(c, h) }
+fn normalize(c: *mut Condition, h: Node) -> Option<Node> {
+    if in_view(c, h) { Some(h) } else { view_parent(c, h) }
 }
 
 extern "system" fn get_parent(

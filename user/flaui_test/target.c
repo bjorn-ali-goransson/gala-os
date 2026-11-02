@@ -1,10 +1,12 @@
 /* The program flaui_test drives (FlaUI, through UI Automation): a window
  * "FlaUI Target" with a push button (control id 101, "Press": clicking it
  * sets the window's title to "FlaUI Pressed"), an edit (102) and a check
- * box (103, "Option"). It ends when its window is closed (WM_CLOSE, which
+ * box (103, "Option") and a report-view list view (104, columns "Name"
+ * and "Size", items "alpha.txt", "beta.txt", "gamma.txt"). It ends when its window is closed (WM_CLOSE, which
  * FlaUI's Application.Close posts through Process.CloseMainWindow).
  * Built by build.sh with mingw-w64 into user/bin/flaui_target.exe. */
 #include <windows.h>
+#include <commctrl.h>
 
 static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
@@ -40,6 +42,32 @@ int main(void) {
                     (HMENU)102, instance, NULL);
     CreateWindowExW(0, L"BUTTON", L"Option", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 10, 76, 150, 20,
                     top, (HMENU)103, instance, NULL);
+    INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_LISTVIEW_CLASSES};
+    InitCommonControlsEx(&icc);
+    HWND lv = CreateWindowExW(0, WC_LISTVIEWW, NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | LVS_REPORT,
+                              180, 10, 120, 110, top, (HMENU)104, instance, NULL);
+    if (!lv)
+        return 4;
+    LVCOLUMNW col = {0};
+    col.mask = LVCF_TEXT | LVCF_WIDTH;
+    col.cx = 70;
+    col.pszText = L"Name";
+    SendMessageW(lv, LVM_INSERTCOLUMNW, 0, (LPARAM)&col);
+    col.cx = 40;
+    col.pszText = L"Size";
+    SendMessageW(lv, LVM_INSERTCOLUMNW, 1, (LPARAM)&col);
+    const wchar_t *names[3] = {L"alpha.txt", L"beta.txt", L"gamma.txt"};
+    const wchar_t *sizes[3] = {L"1", L"22", L"333"};
+    for (int i = 0; i < 3; i++) {
+        LVITEMW item = {0};
+        item.mask = LVIF_TEXT;
+        item.iItem = i;
+        item.pszText = (wchar_t *)names[i];
+        SendMessageW(lv, LVM_INSERTITEMW, 0, (LPARAM)&item);
+        item.iSubItem = 1;
+        item.pszText = (wchar_t *)sizes[i];
+        SendMessageW(lv, LVM_SETITEMTEXTW, i, (LPARAM)&item);
+    }
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0) > 0) {
         TranslateMessage(&m);

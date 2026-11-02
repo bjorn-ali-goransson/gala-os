@@ -32,7 +32,10 @@
  *   subitems, selection (LVM_SETITEMSTATE, LVN_ITEMCHANGED,
  *   LVM_GETNEXTITEM: -1 when none), item rectangles, hit testing, a
  *   click (NM_CLICK), extended styles, image lists, deletion; a virtual
- *   list (LVS_OWNERDATA) asks for texts with LVN_GETDISPINFOW.
+ *   list (LVS_OWNERDATA) asks for texts with LVN_GETDISPINFOW
+ *   (LVM_GETITEMTEXTW too), selects (LVM_SETITEMSTATE, LVM_GETNEXTITEM,
+ *   LVM_GETITEMSTATE), gives item rectangles; a double click on an item
+ *   sends NM_DBLCLK and LVN_ITEMACTIVATE (NMITEMACTIVATE.iItem).
  * - The tree view: items inserted (first, last), counted, walked, read
  *   back; expanding (TVN_ITEMEXPANDINGW, TVIS_EXPANDED), selecting
  *   (TVN_SELCHANGEDW, the caret), children asked of the parent
@@ -69,6 +72,7 @@ static COLORREF rgb(DWORD c) { return RGB(c >> 16, (c >> 8) & 0xff, c & 0xff); }
 static WPARAM last_command;
 static int commands;
 static int item_changes, last_changed_item, clicks, dispinfo_requests;
+static int double_clicks, activations, activated_item = -2;
 static int tv_expanding, tv_selchanged, tv_children_asked;
 static HTREEITEM tv_new_selection;
 static UINT last_new_state;
@@ -89,6 +93,11 @@ static LRESULT CALLBACK parent_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
             last_new_state = lv->uNewState;
         } else if (h->code == NM_CLICK) {
             clicks++;
+        } else if (h->code == NM_DBLCLK) {
+            double_clicks++;
+        } else if (h->code == LVN_ITEMACTIVATE) {
+            activations++;
+            activated_item = ((NMITEMACTIVATE *)lparam)->iItem;
         } else if (h->code == TVN_ITEMEXPANDINGW) {
             tv_expanding++;
         } else if (h->code == TVN_SELCHANGEDW) {
@@ -114,7 +123,7 @@ static LRESULT CALLBACK parent_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
             NMLVDISPINFOW *di = (NMLVDISPINFOW *)lparam;
             dispinfo_requests++;
             if (di->item.mask & LVIF_TEXT) {
-                wcscpy(di->item.pszText, L"row");
+                swprintf(di->item.pszText, di->item.cchTextMax, L"row %d", di->item.iItem);
             }
         }
     }
@@ -221,6 +230,32 @@ static void list_view(HWND parent, HIMAGELIST il) {
     InvalidateRect(v, NULL, TRUE);
     UpdateWindow(v);
     CHECK(dispinfo_requests > 0);
+    CHECK(SendMessageW(v, LVM_GETNEXTITEM, -1, LVNI_SELECTED) == -1);
+    // What UI Automation's list proxy sends a virtual list: an item's
+    // text (asked of the parent), its rectangle, its selection.
+    WCHAR vtext[32] = {0};
+    LVITEMW vi = {0};
+    vi.iSubItem = 0;
+    vi.pszText = vtext;
+    vi.cchTextMax = 32;
+    CHECK(SendMessageW(v, LVM_GETITEMTEXTW, 500, (LPARAM)&vi) == 7 && wcscmp(vtext, L"row 500") == 0);
+    RECT vr = {LVIR_BOUNDS};
+    CHECK(SendMessageW(v, LVM_GETITEMRECT, 1, (LPARAM)&vr) && vr.bottom > vr.top);
+    st.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+    st.state = LVIS_SELECTED | LVIS_FOCUSED;
+    item_changes = 0;
+    CHECK(SendMessageW(v, LVM_SETITEMSTATE, 1, (LPARAM)&st));
+    CHECK(item_changes >= 1 && last_changed_item == 1);
+    CHECK(SendMessageW(v, LVM_GETNEXTITEM, -1, LVNI_SELECTED) == 1);
+    CHECK(SendMessageW(v, LVM_GETNEXTITEM, -1, LVNI_FOCUSED) == 1);
+    CHECK(SendMessageW(v, LVM_GETITEMSTATE, 1, LVIS_SELECTED) == LVIS_SELECTED);
+    CHECK(SendMessageW(v, LVM_GETSELECTEDCOUNT, 0, 0) == 1);
+    // A double click on an item: NM_DBLCLK, then LVN_ITEMACTIVATE for it.
+    double_clicks = activations = 0;
+    SendMessageW(v, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELPARAM(20, (vr.top + vr.bottom) / 2));
+    CHECK(double_clicks == 1 && activations == 1 && activated_item == 1);
+    st.state = 0;
+    CHECK(SendMessageW(v, LVM_SETITEMSTATE, -1, (LPARAM)&st));
     CHECK(SendMessageW(v, LVM_GETNEXTITEM, -1, LVNI_SELECTED) == -1);
     DestroyWindow(v);
 }

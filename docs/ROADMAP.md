@@ -1575,10 +1575,18 @@ drives another program through gala's UIAutomationCore.dll
 (CUIAutomation8 with IUIAutomation2..6, the reserved not-supported
 value, array conditions, cache requests): Application.Launch,
 GetMainWindow, FindFirstDescendant by AutomationId, Invoke, the Value
-pattern, Toggle, a cache request, Application.Close. Next: a FlaUI test
-driving FileZilla (list view items, menus: Selection/ExpandCollapse,
-title bars, WM_GETOBJECT providers), then screen tests rewritten on
-FlaUI.
+pattern, Toggle, a cache request, Application.Close. List items
+(2026-11-02, uia_test, flaui_test): list boxes' strings (user32 now has
+a LISTBOX control, controls_test) and list views' items (also virtual
+ones) are ListItem elements with SelectionItem/ScrollItem (list views:
+Invoke = activate), the lists have Selection; another process's list
+view is read through memory allocated in it (VirtualAllocEx,
+Read/WriteProcessMemory), as Windows' proxy does; FlaUI's AsListBox()
+Items/Text/Select/IsSelected/SelectedItem work on a list view. Next: a
+FlaUI test driving FileZilla's file lists (find the local/remote list
+views, read names, select and Invoke a directory to open it), then
+menus (ExpandCollapse), title bars, GridItem/TableItem for columns,
+WM_GETOBJECT providers, and screen tests rewritten on FlaUI.
 
 Drivers: gala writes its own, against published standards (virtio,
 then AHCI/NVMe, xHCI, e1000), not hardware-specific ones. Reusing

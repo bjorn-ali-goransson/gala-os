@@ -5,5 +5,5 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 x86_64-w64-mingw32-gcc -O1 -g0 -s -Wl,--no-insert-timestamp \
-    -o "$ROOT/user/bin/uia_test.exe" "$ROOT/user/uia_test/main.c" -luser32 -lole32 -loleaut32
+    -o "$ROOT/user/bin/uia_test.exe" "$ROOT/user/uia_test/main.c" -luser32 -lole32 -loleaut32 -lcomctl32
 sha256sum "$ROOT/user/bin/uia_test.exe"

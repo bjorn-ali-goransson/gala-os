@@ -392,6 +392,38 @@ fn carries_pointer(msg: u32) -> bool {
             | 0x0053 // WM_HELP
             | 0x0081 // WM_NCCREATE
             | 0x0083 // WM_NCCALCSIZE
+    ) || in_string(msg)
+        || matches!(msg, LB_GETTEXT | LB_GETITEMRECT | LB_GETSELITEMS | CB_GETLBTEXT)
+}
+
+use crate::listbox::{
+    LB_ADDSTRING, LB_FINDSTRING, LB_FINDSTRINGEXACT, LB_GETITEMRECT, LB_GETSELITEMS, LB_GETTEXT,
+    LB_GETTEXTLEN, LB_INSERTSTRING, LB_SELECTSTRING,
+};
+const CB_ADDSTRING: u32 = 0x0143;
+const CB_GETLBTEXT: u32 = 0x0148;
+const CB_GETLBTEXTLEN: u32 = 0x0149;
+const CB_INSERTSTRING: u32 = 0x014a;
+const CB_FINDSTRING: u32 = 0x014c;
+const CB_SELECTSTRING: u32 = 0x014d;
+const CB_FINDSTRINGEXACT: u32 = 0x0158;
+
+/// The messages whose lParam is a string going in (marshaled across
+/// processes, as Windows marshals the system messages below WM_USER).
+fn in_string(msg: u32) -> bool {
+    matches!(
+        msg,
+        WM_SETTEXT
+            | LB_ADDSTRING
+            | LB_INSERTSTRING
+            | LB_FINDSTRING
+            | LB_FINDSTRINGEXACT
+            | LB_SELECTSTRING
+            | CB_ADDSTRING
+            | CB_INSERTSTRING
+            | CB_FINDSTRING
+            | CB_SELECTSTRING
+            | CB_FINDSTRINGEXACT
     )
 }
 
@@ -451,13 +483,28 @@ const MAX_DATA: usize = 64 * 1024;
 /// calls a message function; meanwhile messages sent to this thread are
 /// handled (as Windows does, so two threads sending to each other don't
 /// deadlock). Marshaled: WM_SETTEXT's string (in), WM_GETTEXT's buffer
-/// (out); other messages go as numbers. None when `hwnd` is no other
-/// process's window.
+/// (out), the list box's and combo box's strings (in: LB_ADDSTRING and
+/// the like; out: LB_GETTEXT and CB_GETLBTEXT, sized by asking
+/// LB_GETTEXTLEN / CB_GETLBTEXTLEN first), LB_GETITEMRECT's RECT and
+/// LB_GETSELITEMS's array (out); other messages go as numbers. None when
+/// `hwnd` is no other process's window.
 pub(crate) fn send_remote(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Option<isize> {
     remote(hwnd)?;
     let (mut in_ptr, mut in_len, mut out_ptr, mut out_max) = (0u64, 0usize, 0u64, 0usize);
     match msg {
-        WM_SETTEXT if lparam != 0 => {
+        LB_GETTEXT | CB_GETLBTEXT if lparam != 0 => {
+            let len_msg = if msg == LB_GETTEXT { LB_GETTEXTLEN } else { CB_GETLBTEXTLEN };
+            let n = send_remote(hwnd, len_msg, wparam, 0)?;
+            if n < 0 {
+                return Some(n);
+            }
+            (out_ptr, out_max) = (lparam as u64, (2 * (n as usize + 1)).min(MAX_DATA));
+        }
+        LB_GETITEMRECT if lparam != 0 => (out_ptr, out_max) = (lparam as u64, 16),
+        LB_GETSELITEMS if lparam != 0 => {
+            (out_ptr, out_max) = (lparam as u64, (4 * wparam).min(MAX_DATA));
+        }
+        _ if in_string(msg) && lparam != 0 => {
             let text = lparam as *const u16;
             let mut n = 0;
             // SAFETY: the caller's NUL-terminated string.

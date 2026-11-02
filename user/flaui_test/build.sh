@@ -81,5 +81,5 @@ for _ in range(streams):
 open(path, 'wb').write(b)
 PY
 x86_64-w64-mingw32-gcc -O1 -g0 -s -Wl,--no-insert-timestamp \
-    -o "$ROOT/user/bin/flaui_target.exe" "$DIR/target.c" -luser32
+    -o "$ROOT/user/bin/flaui_target.exe" "$DIR/target.c" -luser32 -lcomctl32
 sha256sum "$OUT" "$ROOT/user/bin/flaui_target.exe"
