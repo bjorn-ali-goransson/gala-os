@@ -1809,7 +1809,9 @@ pub extern "system" fn GetQueueStatus(flags: u32) -> u32 {
     have << 16 | have
 }
 
-/// SendMessageW: the window procedure, called now on this thread.
+/// SendMessageW: the window procedure, called now on this thread, or on
+/// the window's thread (another one of ours or another process's) through
+/// the kernel.
 #[unsafe(no_mangle)]
 pub extern "system" fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
     // Another process's window: through the kernel, the pointers
@@ -1826,6 +1828,14 @@ pub extern "system" fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam:
     // Another process's SetWindowPos of our window: user32's own too.
     if msg == crate::tree::GALA_SETWINDOWPOS && window(hwnd).is_some() {
         return crate::tree::set_window_pos_message(hwnd, lparam);
+    }
+    // A window of another thread of ours: its procedure runs on that
+    // thread, when it next calls a message function.
+    if let Some(w) = window(hwnd)
+        && w.thread != me()
+        && let Some(r) = crate::foreign::send_to_thread(hwnd, msg, wparam, lparam)
+    {
+        return r;
     }
     // WH_CALLWNDPROC sees it first: a CWPSTRUCT (lParam, wParam, message,
     // window), wParam nonzero (sent by this thread).

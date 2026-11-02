@@ -16,6 +16,18 @@ calls, versioned formats, drivers that survive a reset, one clock. A
 change that would make the kernel handover harder is argued for
 explicitly in its commit.
 
+**Priorities** (the owner, 2026-11-02):
+- Work that speeds up development or troubleshooting comes first, as we
+  are the ones who benefit: today that is R5 (deterministic simulation:
+  a failure replays from its seed), then R7's record/replay and clock
+  control, then fixing the known flaky scenarios (java_http,
+  java_hello, postgres, smpsched_test under load), before the rest of
+  R6.
+- **Server and desktop stay separate**: the essential workloads (servers,
+  console programs, the Docker image) never start the graphical
+  interface. See "Server and desktop workloads" in ARCHITECTURE; item
+  SD below.
+
 ## Done
 - M1 boot, serial, memory map
 - M2 (single CPU): GDT/IDT, frames, paging, heap, APIC timer, scheduler
@@ -1393,6 +1405,16 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       WM_MOUSEWHEEL, conhost's scrollback (console_window turns it).
       Next: tooltips on popups (the combo boxes'
       drop-down lists are done).
+
+SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
+   ARCHITECTURE "Server and desktop workloads"). Already true: nothing
+   is drawn until a program creates a window on a machine with a screen;
+   console windows only with `console=`; `noscreen` keeps the framebuffer
+   off. Next: a `profile=server` boot option (window creation fails as
+   with no screen, conhost.exe is never started, the desktop's input and
+   clock ticks are off) and a server module set in xtask without the GUI
+   DLLs and fonts; later a `desktop` cargo feature so a server kernel
+   does not contain the compositor.
 
 R. **Robustness and live update, kernel included** (the owner's
    vision; proposed 2026-11-02 by the owner;

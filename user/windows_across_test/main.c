@@ -39,6 +39,14 @@
  * handle without PROCESS_VM_READ is refused (ERROR_ACCESS_DENIED); an
  * unmapped address fails.
  *
+ * Sent messages also cross threads of one process: SendMessageW from
+ * another thread to a window of the main thread runs the window
+ * procedure on the main thread ("the system switches to that thread",
+ * while it is in GetMessage/PeekMessage/MsgWaitForMultipleObjects), with
+ * the result and pointers (this process's memory) as they are: WM_APP + 4
+ * returns the thread it ran on, WM_APP + 3 writes through lParam,
+ * WM_SETTEXT and WM_GETTEXT go through DefWindowProc.
+ *
  * Prints "windows_across_test: ok" and exits 0, or the failing check's
  * number and line.
  */
@@ -123,6 +131,33 @@ static int child(void) {
         }
     }
     DestroyWindow(top);
+    return 0;
+}
+
+/* The main thread's window and what the other thread saw. */
+static HWND local_window;
+static DWORD local_results[6];
+
+static LRESULT CALLBACK local_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_APP + 3) {
+        *(int *)l = (int)w * 2;
+        return 5;
+    }
+    if (m == WM_APP + 4)
+        return GetCurrentThreadId();
+    return DefWindowProcW(h, m, w, l);
+}
+
+static DWORD WINAPI sender(void *arg) {
+    (void)arg;
+    WCHAR text[32] = {0};
+    int value = 0;
+    local_results[0] = (DWORD)SendMessageW(local_window, WM_APP + 4, 0, 0);
+    local_results[1] = (DWORD)SendMessageW(local_window, WM_APP + 3, 21, (LPARAM)&value);
+    local_results[2] = (DWORD)value;
+    local_results[3] = (DWORD)SendMessageW(local_window, WM_SETTEXT, 0, (LPARAM)L"from thread");
+    local_results[4] = (DWORD)SendMessageW(local_window, WM_GETTEXT, 32, (LPARAM)text);
+    local_results[5] = wcscmp(text, L"from thread") == 0;
     return 0;
 }
 
@@ -269,6 +304,36 @@ int main(int argc, char **argv) {
     CHECK(!ReadProcessMemory(weak, remote, back, 4, NULL));
     CHECK(GetLastError() == ERROR_ACCESS_DENIED);
     CloseHandle(weak);
+
+    /* Sent messages across threads of this process. */
+    WNDCLASSW lc = {0};
+    lc.lpfnWndProc = local_proc;
+    lc.hInstance = GetModuleHandleW(NULL);
+    lc.lpszClassName = L"GalaAcrossLocal";
+    CHECK(RegisterClassW(&lc));
+    local_window = CreateWindowExW(0, L"GalaAcrossLocal", L"local", WS_OVERLAPPEDWINDOW, 0, 0, 200,
+                                   100, NULL, NULL, lc.hInstance, NULL);
+    CHECK(local_window != NULL);
+    HANDLE thread = CreateThread(NULL, 0, sender, NULL, 0, NULL);
+    CHECK(thread != NULL);
+    for (;;) {
+        MSG m;
+        while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE))
+            DispatchMessageW(&m);
+        DWORD w = MsgWaitForMultipleObjects(1, &thread, FALSE, 20000, QS_ALLINPUT);
+        if (w == WAIT_OBJECT_0)
+            break;
+        CHECK(w == WAIT_OBJECT_0 + 1);
+    }
+    CloseHandle(thread);
+    CHECK(local_results[0] == GetCurrentThreadId());
+    CHECK(local_results[1] == 5);
+    CHECK(local_results[2] == 42);
+    CHECK(local_results[3] == TRUE);
+    CHECK(local_results[4] == 11);
+    CHECK(local_results[5]);
+    CHECK(GetWindowTextW(local_window, text, 64) == 11);
+    CHECK(DestroyWindow(local_window));
 
     /* The child ends: its windows go. */
     CHECK(SetEvent(done));

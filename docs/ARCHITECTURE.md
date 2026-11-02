@@ -2807,6 +2807,29 @@ WS_CHILD reports unimplemented); no resizing or maximize; keyboard focus
 is the active top-level window; the shell belongs in a user-mode program
 (an explorer.exe of gala's) later; the clock is UTC.
 
+### Server and desktop workloads (the owner, 2026-11-02)
+
+Servers and console programs (nginx, PostgreSQL, Elasticsearch, Go and
+Java services, the Docker image) must never bring up the graphical
+interface; GUI programs on a machine with a screen get the desktop. How
+it holds today:
+
+- The desktop is drawn lazily: `desktop::with` paints it the first time
+  a program creates a window, and only when there is a screen
+  (`platform::screen_size()`); without one, desktop calls are
+  STATUS_NOT_SUPPORTED and the window registry still works (UI
+  Automation and cross-process windows need no screen).
+- A console window (conhost.exe) is started only for the program named
+  by `console=`; otherwise console output goes to the boot console.
+- `noscreen` keeps the framebuffer off (boot tests use it).
+
+Rule for new code: nothing in the boot path, the console path or a
+server program's path may touch the desktop, start a GUI process or
+load a GUI DLL unless a program asked for a window. Planned (ROADMAP
+SD): `profile=server` and a server module set without the GUI DLLs,
+then a `desktop` cargo feature that leaves the compositor out of a
+server kernel.
+
 ## UI Automation
 
 The aim is screen tests that drive programs as testers do on Windows:
@@ -3230,10 +3253,17 @@ steps, each test first:
    messages as numbers. GetWindowText of another process's window
    stays the mirrored text, as documented (it does not send WM_GETTEXT
    across processes; programs send WM_GETTEXT themselves). TODO:
-   cross-thread SendMessage within a process (still a direct call),
    SendMessageTimeout/SendNotifyMessage/SendMessageCallback, ReplyMessage
-   and InSendMessage, more marshaled messages (LB_/CB_ strings,
-   WM_COPYDATA). The plan was:
+   and InSendMessage, more marshaled messages (WM_COPYDATA).
+   **Cross-thread SendMessage within a process: done (2026-11-02,
+   windows_across_test's local window).** user32 sends a message for a
+   window of another of its threads through the same kernel path,
+   nothing marshaled (the pointers are the process's own), so the
+   procedure runs on the window's thread when it next calls a message
+   function, as on Windows. For a window whose thread has ended (gala
+   does not yet destroy a thread's windows with it) GalaWindowSend fails
+   with STATUS_THREAD_IS_TERMINATING and user32 calls the procedure on
+   the caller's thread, as before. The plan was:
    **Sent messages across threads and processes**: SendMessage to a
    window of another thread queues a sent message with a reply slot in
    the kernel; the sender waits (processing messages sent to itself, as

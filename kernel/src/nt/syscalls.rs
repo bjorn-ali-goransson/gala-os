@@ -1740,6 +1740,11 @@ fn gala_window_send(call: &mut Call<'_>) -> NtStatus {
     }
     let u64_at = |at: usize| u64::from_le_bytes(req[at..at + 8].try_into().unwrap_or([0; 8]));
     let u32_at = |at: usize| u32::from_le_bytes(req[at..at + 4].try_into().unwrap_or([0; 4]));
+    // A window whose thread has ended (it was not destroyed with it):
+    // nobody would ever handle the message.
+    if super::window::query(u64_at(0)).is_some_and(|w| !thread::is_running(w.tid.into())) {
+        return NtStatus::THREAD_IS_TERMINATING;
+    }
     let data = tri!(read_vec(call, u64_at(32), u32_at(40) as usize));
     let (id, _, wake) = tri!(super::window::send(
         call.process.id as u32,

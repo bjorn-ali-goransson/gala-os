@@ -171,6 +171,11 @@ fn by_id(id: u64) -> Option<ObjectRef> {
     THREADS.lock().iter().find(|o| as_thread(o).id == id).cloned()
 }
 
+/// Whether thread `id` exists and has not exited.
+pub fn is_running(id: u64) -> bool {
+    by_id(id).is_some_and(|t| !as_thread(&t).has_exited())
+}
+
 /// The process of the thread with id `id`.
 pub fn process_of(id: u64) -> Option<KArc<Process>> {
     by_id(id).map(|t| as_thread(&t).process.clone())

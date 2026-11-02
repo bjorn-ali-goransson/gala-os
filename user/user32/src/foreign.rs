@@ -496,6 +496,7 @@ pub(crate) fn take_posted() {
 const WM_SETTEXT: u32 = 0x000c;
 const WM_GETTEXT: u32 = 0x000d;
 const STATUS_TIMEOUT: u32 = 0x102;
+const STATUS_THREAD_IS_TERMINATING: u32 = 0xc000_004b;
 /// The most a sent message carries each way (the kernel's limit).
 const MAX_DATA: usize = 64 * 1024;
 
@@ -545,6 +546,29 @@ pub(crate) fn send_remote(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) ->
         }
         _ => {}
     }
+    send_through_kernel(hwnd, msg, wparam, lparam, (in_ptr, in_len), (out_ptr, out_max))
+}
+
+/// SendMessage to a window of another thread of this process: as across
+/// processes, the message goes to the window's thread and runs there the
+/// next time it calls a message function, but nothing is marshaled (the
+/// pointers are this process's). None when the window's thread has ended
+/// (the caller then calls the procedure itself, as before).
+pub(crate) fn send_to_thread(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Option<isize> {
+    send_through_kernel(hwnd, msg, wparam, lparam, (0, 0), (0, 0))
+}
+
+/// Sends through the kernel (GalaWindowSend) with the input `(pointer,
+/// length)` copied in and up to `(pointer, max)` copied out, and waits for
+/// the reply, handling messages sent to this thread meanwhile.
+fn send_through_kernel(
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+    (in_ptr, in_len): (u64, usize),
+    (out_ptr, out_max): (u64, usize),
+) -> Option<isize> {
     let mut req = [0u8; 48];
     req[0..8].copy_from_slice(&(hwnd as u64).to_le_bytes());
     req[8..12].copy_from_slice(&msg.to_le_bytes());
@@ -555,7 +579,12 @@ pub(crate) fn send_remote(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) ->
     req[40..44].copy_from_slice(&(in_len as u32).to_le_bytes());
     let mut id = 0u64;
     // SAFETY: our request; the input is the caller's string.
-    if unsafe { GalaWindowSend(req.as_ptr(), &mut id) } != 0 {
+    let status = unsafe { GalaWindowSend(req.as_ptr(), &mut id) };
+    if status == STATUS_THREAD_IS_TERMINATING && in_len == 0 && out_max == 0 {
+        // The window's thread has ended: nobody handles it there.
+        return None;
+    }
+    if status != 0 {
         crate::window::set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
         return Some(0);
     }
