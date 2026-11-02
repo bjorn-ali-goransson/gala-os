@@ -75,7 +75,7 @@ fn input_thread(_: usize) {
 fn deliver(dx: i64, dy: i64, buttons: u8) {
     if let Some(program) = crate::nt::desktop::pointer_event(dx, dy, buttons) {
         // The same path as GalaDesktopAction's Start (logged there).
-        let _ = crate::nt::action::start_path(program.path, "");
+        let _ = crate::nt::action::start_path(program.path, "", None);
     }
 }
 

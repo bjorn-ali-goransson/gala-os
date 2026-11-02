@@ -122,8 +122,24 @@ pub fn window_action(r: &Request) -> Result<Option<Action>, NtStatus> {
     }))
 }
 
-/// Runs request `r` from process `pid`; what it writes to the caller.
-pub fn run(r: &Request) -> Result<Vec<u8>, NtStatus> {
+/// Who asks (GalaDesktopAction's caller): its process and integrity
+/// level for UIPI, and the primary token Start gives the program (a copy
+/// of the caller's).
+pub struct Caller {
+    pub pid: u32,
+    pub level: u32,
+    pub token: Option<super::object::ObjectRef>,
+}
+
+/// Runs request `r` for `caller`; what it writes to the caller. A window
+/// action needs the caller to pass UIPI against the window's process (an
+/// equal or higher integrity level: STATUS_ACCESS_DENIED otherwise);
+/// `level_of` gives a process's level (None: it has ended).
+pub fn run(
+    r: &Request,
+    caller: &Caller,
+    level_of: impl Fn(u32) -> Option<u32>,
+) -> Result<Vec<u8>, NtStatus> {
     let mut out = Vec::new();
     if let Some(action) = window_action(r)? {
         // Without shasha nothing is on the screen to act on (checked
@@ -135,12 +151,17 @@ pub fn run(r: &Request) -> Result<Vec<u8>, NtStatus> {
         if info.desktop == 0 {
             return Err(NtStatus::INVALID_HANDLE);
         }
+        let level = level_of(info.pid).ok_or(NtStatus::INVALID_HANDLE)?;
+        let from = super::window::Sender { pid: caller.pid, level: caller.level };
+        if !super::window::may_act_on(from, info.pid, level) {
+            return Err(NtStatus::ACCESS_DENIED);
+        }
         desktop::window_action(u64::from(info.pid), info.desktop, action)?;
         return Ok(out);
     }
     match r.action {
         ACTION_START => {
-            let pid = start(&r.text)?;
+            let pid = start(&r.text, caller.token.clone())?;
             out.try_extend_from_slice(&pid.to_le_bytes()).map_err(|_| NtStatus::NO_MEMORY)?;
         }
         ACTION_WINDOWS => {
@@ -243,9 +264,10 @@ const SEARCH: [&str; 3] = ["C:\\gala\\", "C:\\", "C:\\Windows\\System32\\"];
 
 /// Starts the program `text` names (a path on C:, a start menu name, or a
 /// file name found in SEARCH, `.exe` added if missing), with the rest of
-/// `text` as its arguments; its process id. STATUS_OBJECT_NAME_NOT_FOUND
-/// when there is no such program.
-pub fn start(text: &[u16]) -> Result<u64, NtStatus> {
+/// `text` as its arguments, under primary token `token` (see
+/// `start_path`); its process id. STATUS_OBJECT_NAME_NOT_FOUND when there
+/// is no such program.
+pub fn start(text: &[u16], token: Option<super::object::ObjectRef>) -> Result<u64, NtStatus> {
     let mut buf = [0u8; MAX_TEXT];
     let text = ascii(text, &mut buf).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
     let (program, args) = split_program(text);
@@ -253,13 +275,18 @@ pub fn start(text: &[u16]) -> Result<u64, NtStatus> {
         return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
     }
     let path = resolve(program)?;
-    start_path(path, args)
+    start_path(path, args, token)
 }
 
-/// Starts the program at `path` (shasha's start menu, `gala start`); its
+/// Starts the program at `path` (shasha's start menu: `token` None, the
+/// boot user; `gala start`: a copy of the caller's primary token); its
 /// process id, logged.
-pub fn start_path(path: &'static str, args: &str) -> Result<u64, NtStatus> {
-    match super::process::launch(path, args) {
+pub fn start_path(
+    path: &'static str,
+    args: &str,
+    token: Option<super::object::ObjectRef>,
+) -> Result<u64, NtStatus> {
+    match super::process::launch(path, args, token) {
         Ok(pid) => {
             crate::info!("desktop: started {path} (pid {pid})");
             Ok(pid)

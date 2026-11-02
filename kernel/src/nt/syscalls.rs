@@ -127,6 +127,8 @@ pub const GALA_WINDOW_RECEIVE: u32 = 0x7f4a;
 pub const GALA_WINDOW_REPLY: u32 = 0x7f4b;
 pub const GALA_WINDOW_POST_THREAD: u32 = 0x7f50;
 pub const GALA_WINDOW_SEND_ABANDON: u32 = 0x7f51;
+/// UIPI's message filters (ChangeWindowMessageFilter(Ex)).
+pub const GALA_WINDOW_FILTER: u32 = 0x7f6a;
 /// gala's test-only clock control (`clock=control`; ARCHITECTURE "Clock
 /// control"), also in user/ntrt.
 pub const GALA_CLOCK_CONTROL: u32 = 0x7f4c;
@@ -334,6 +336,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_REPLY, "GalaWindowReply", 4, gala_window_reply),
     (GALA_WINDOW_POST_THREAD, "GalaWindowPostThread", 4, gala_window_post_thread),
     (GALA_WINDOW_SEND_ABANDON, "GalaWindowSendAbandon", 1, gala_window_send_abandon),
+    (GALA_WINDOW_FILTER, "GalaWindowFilter", 4, gala_window_filter),
     (GALA_CLOCK_CONTROL, "GalaClockControl", 4, gala_clock_control),
     (GALA_RANDOM, "GalaRandom", 2, gala_random),
     (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
@@ -1723,12 +1726,29 @@ fn gala_window_children(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
+/// The caller as UIPI sees it: its process and its primary token's
+/// integrity level.
+fn uipi_sender(call: &Call<'_>) -> super::window::Sender {
+    super::window::Sender { pid: call.process.id as u32, level: call.process.integrity_level() }
+}
+
+/// The integrity level of process `pid` (UIPI's receiver; 0 for one that
+/// has ended: its windows are going, and the call fails on them anyway).
+fn uipi_level(pid: Option<u32>) -> u32 {
+    pid.and_then(|p| process::integrity_level(u64::from(p))).unwrap_or(0)
+}
+
 /// GalaWindowPost(Hwnd, Message, wParam, lParam): posts a message to any
 /// process's window (user32 posts to its own windows itself); its
-/// owner's queue event is set. STATUS_INVALID_HANDLE for no window.
+/// owner's queue event is set. STATUS_INVALID_HANDLE for no window,
+/// STATUS_ACCESS_DENIED when UIPI blocks it (a lower integrity level than
+/// the window's process, a message no filter lets through).
 fn gala_window_post(call: &mut Call<'_>) -> NtStatus {
     let (hwnd, message) = (arg!(call, 0), arg!(call, 1) as u32);
-    let event = tri!(super::window::post(hwnd, message, arg!(call, 2), arg!(call, 3)));
+    let to_level = uipi_level(super::window::owner_pid(hwnd));
+    let from = uipi_sender(call);
+    let event =
+        tri!(super::window::post(from, to_level, hwnd, message, arg!(call, 2), arg!(call, 3)));
     if let Some(e) = event {
         wait::set_signal(&e, 1);
     }
@@ -1737,10 +1757,20 @@ fn gala_window_post(call: &mut Call<'_>) -> NtStatus {
 
 /// GalaWindowPostThread(Tid, Message, wParam, lParam): posts a message
 /// to any process's thread (PostThreadMessage); its process's queue event
-/// is set. STATUS_INVALID_CID when the thread has no message queue.
+/// is set. STATUS_INVALID_CID when the thread has no message queue,
+/// STATUS_ACCESS_DENIED when UIPI blocks it.
 fn gala_window_post_thread(call: &mut Call<'_>) -> NtStatus {
     let (tid, message) = (arg!(call, 0) as u32, arg!(call, 1) as u32);
-    let event = tri!(super::window::post_thread(tid, message, arg!(call, 2), arg!(call, 3)));
+    let to_level = uipi_level(super::window::queue_owner(tid));
+    let from = uipi_sender(call);
+    let event = tri!(super::window::post_thread(
+        from,
+        to_level,
+        tid,
+        message,
+        arg!(call, 2),
+        arg!(call, 3)
+    ));
     if let Some(e) = event {
         wait::set_signal(&e, 1);
     }
@@ -1797,8 +1827,8 @@ fn read_vec(call: &Call<'_>, ptr: u64, len: usize) -> Result<Vec<u8>, NtStatus> 
 /// notify, callback, abort if hung). The window's thread gets it from
 /// GalaWindowReceive; the caller waits with GalaWindowSendWait(Id) (not
 /// for SEND_NOTIFY). STATUS_INVALID_HANDLE for no window (a thread's
-/// windows go when it ends), STATUS_TIMEOUT for a hung receiver with
-/// SEND_ABORT_IF_HUNG.
+/// windows go when it ends), STATUS_ACCESS_DENIED when UIPI blocks it,
+/// STATUS_TIMEOUT for a hung receiver with SEND_ABORT_IF_HUNG.
 fn gala_window_send(call: &mut Call<'_>) -> NtStatus {
     let mut req = [0u8; 48];
     if call.process.read(arg!(call, 0), &mut req).is_err() {
@@ -1807,8 +1837,11 @@ fn gala_window_send(call: &mut Call<'_>) -> NtStatus {
     let u64_at = |at: usize| u64::from_le_bytes(req[at..at + 8].try_into().unwrap_or([0; 8]));
     let u32_at = |at: usize| u32::from_le_bytes(req[at..at + 4].try_into().unwrap_or([0; 4]));
     let data = tri!(read_vec(call, u64_at(32), u32_at(40) as usize));
+    let to_level = uipi_level(super::window::owner_pid(u64_at(0)));
     let (id, wake) = tri!(super::window::send(super::window::Request {
         from_pid: call.process.id as u32,
+        from_level: call.process.integrity_level(),
+        to_level,
         from_tid: thread::current_id().unwrap_or(0) as u32,
         hwnd: u64_at(0),
         message: u32_at(8),
@@ -1860,6 +1893,24 @@ fn gala_window_send_wait(call: &mut Call<'_>) -> NtStatus {
             NtStatus::SUCCESS
         }
     }
+}
+
+/// GalaWindowFilter(Hwnd, Message, Action, *ExtStatus): UIPI's message
+/// filter of the caller's window Hwnd (ChangeWindowMessageFilterEx), or
+/// with Hwnd 0 the caller's process-wide one (ChangeWindowMessageFilter):
+/// Action 0 resets the window's, 1 allows Message from lower integrity
+/// levels, 2 disallows it; ExtStatus (may be 0) gets CHANGEFILTERSTRUCT's
+/// value. STATUS_ACCESS_DENIED for a caller at or below Low or another
+/// process's window, STATUS_INVALID_HANDLE for no window.
+fn gala_window_filter(call: &mut Call<'_>) -> NtStatus {
+    let (hwnd, message, action, ext) =
+        (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2) as u32, arg!(call, 3));
+    let from = uipi_sender(call);
+    let status = tri!(super::window::change_filter(from.pid, from.level, hwnd, message, action));
+    if ext != 0 {
+        tri!(call.write_u32(ext, status));
+    }
+    NtStatus::SUCCESS
 }
 
 /// GalaWindowSendAbandon(Id): the caller stops waiting for sent message
@@ -5733,7 +5784,21 @@ fn gala_desktop_action(call: &mut Call<'_>) -> NtStatus {
     let len = (arg!(call, 1) as u32 as usize).min(action::REQUEST_HEADER + 2 * action::MAX_TEXT);
     let request = tri!(read_vec(call, arg!(call, 0), len));
     let request = tri!(action::Request::parse(&request));
-    let out = tri!(action::run(&request));
+    // Start runs the program as the caller (a copy of its primary token,
+    // as CreateProcess); window actions pass UIPI against the window's
+    // process.
+    let token = if request.action == action::ACTION_START {
+        let own = call.process.token.lock().clone();
+        Some(tri!(super::token::for_new_process(Some(&own))))
+    } else {
+        None
+    };
+    let caller = action::Caller {
+        pid: call.process.id as u32,
+        level: call.process.integrity_level(),
+        token,
+    };
+    let out = tri!(action::run(&request, &caller, |pid| process::integrity_level(u64::from(pid))));
     let (ptr, room, ret) = (arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4));
     let entry = match request.action {
         action::ACTION_WINDOWS => action::WINDOW_ENTRY,

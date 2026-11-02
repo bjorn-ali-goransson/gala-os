@@ -708,6 +708,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("windows_across_test", "user32.dll", "Windows/System32"),
     ("windows_across_test", "gdi32.dll", "Windows/System32"),
     ("windows_across_test", "user/bin/windows_across_test.exe", "gala"),
+    // gala_cli_test lowers a token (advapi32) to run `gala` at Low.
+    ("gala_cli_test", "advapi32.dll", "Windows/System32"),
+    ("gala_cli_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("uipi_test", "ntdll.dll", "Windows/System32"),
+    ("uipi_test", "kernel32.dll", "Windows/System32"),
+    ("uipi_test", "msvcrt.dll", "Windows/System32"),
+    ("uipi_test", "user32.dll", "Windows/System32"),
+    ("uipi_test", "gdi32.dll", "Windows/System32"),
+    ("uipi_test", "advapi32.dll", "Windows/System32"),
+    ("uipi_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("uipi_test", "user/bin/uipi_test.exe", "gala"),
     ("uia_test", "ntdll.dll", "Windows/System32"),
     ("uia_test", "kernel32.dll", "Windows/System32"),
     ("uia_test", "msvcrt.dll", "Windows/System32"),
@@ -3330,6 +3341,16 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["windows_across_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // User Interface Privilege Isolation: a Low integrity child's
+        // messages to its Medium parent's window are blocked but those
+        // that always pass and those ChangeWindowMessageFilter(Ex) opens
+        // (user/uipi_test/main.c, mingw).
+        name: "uipi_test",
+        cmdline: "qemu_exit run=uipi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["uipi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // UI Automation's client (gala's UIAutomationCore.dll) over the
         // window tree: elements, conditions, Invoke/Value/Toggle
         // (user/uia_test/main.c, mingw).
@@ -4394,6 +4415,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("server_profile", "user32_test"),
     ("server_kernel", "user32_test"),
     ("gala_cli", "gui_test"),
+    ("gala_cli", "gala_cli_test"),
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
     ("handover_disk", "persist_test"),
@@ -4712,6 +4734,7 @@ fn run_parallel_on<J: Sync, T: Send>(
 const NOT_IN_UM: &[(&str, &str)] = &[
     ("process_test", "child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
+    ("uipi_test", "a child process (one NT process per Linux process)"),
     ("uia_test", "a child process (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
     ("system_test", "child processes; run as SYSTEM (a boot option)"),

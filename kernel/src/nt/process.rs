@@ -77,6 +77,17 @@ pub struct Process {
     pub console: Option<KArc<super::conhost::Session>>,
 }
 
+impl Process {
+    /// Its primary token's integrity level (Medium if it has no label).
+    pub fn integrity_level(&self) -> u32 {
+        let token = self.token.lock().clone();
+        match &token.body {
+            ObjectBody::Token(t) => t.data.lock().integrity_level(),
+            _ => super::token::MEDIUM_LEVEL,
+        }
+    }
+}
+
 impl fmt::Debug for Process {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Process({} pid {})", self.name, self.id)
@@ -264,6 +275,12 @@ pub fn running() -> Result<Vec<KArc<Process>>, AllocError> {
 pub fn by_id(id: u64) -> Option<KArc<Process>> {
     prune();
     PROCESSES.lock().iter().find(|p| p.id == id).cloned()
+}
+
+/// The integrity level of process `id`'s primary token (UIPI; None: no
+/// such process).
+pub fn integrity_level(id: u64) -> Option<u32> {
+    by_id(id).map(|p| p.integrity_level())
 }
 
 /// The process owning the current thread, if it is a user thread.
@@ -1137,10 +1154,11 @@ pub fn program_exists(path: &str) -> bool {
 }
 
 /// Starts the program at Win32 path `path` with arguments `args` (after
-/// the quoted path on its command line) as the boot user in its own
-/// directory, with new console handles (shasha's start menu,
-/// GalaDesktopAction); its process id.
-pub fn launch(path: &'static str, args: &str) -> Result<u64, NtStatus> {
+/// the quoted path on its command line) in its own directory, with new
+/// console handles, under primary token `token` (None: the boot user's,
+/// shasha's start menu; GalaDesktopAction's Start passes a copy of the
+/// caller's, as CreateProcess would); its process id.
+pub fn launch(path: &'static str, args: &str, token: Option<ObjectRef>) -> Result<u64, NtStatus> {
     let object = open_program(path)?;
     let ObjectBody::File(f) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     let layout = super::section::image_layout(f.node)?;
@@ -1167,7 +1185,7 @@ pub fn launch(path: &'static str, args: &str) -> Result<u64, NtStatus> {
         suspended: false,
         runtime_data: &[],
         parent_id: 0,
-        token: None,
+        token,
         console: None,
     })
     .map_err(|e| match e {

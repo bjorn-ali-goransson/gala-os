@@ -24,7 +24,13 @@ unsafe extern "system" {
     fn GalaWindowReply(id: u64, result: i64, out: *const u8, len: u32) -> u32;
     fn GalaWindowPostThread(tid: u32, message: u32, wparam: u64, lparam: u64) -> u32;
     fn GalaWindowSendAbandon(id: u64) -> u32;
+    fn GalaWindowFilter(hwnd: u64, message: u32, action: u32, ext: *mut u32) -> u32;
 }
+
+/// The kernel's answer when UIPI blocks a message (a lower integrity
+/// level than the receiver's), and the error Windows documents for it.
+const STATUS_ACCESS_DENIED: u32 = 0xc000_0022;
+const ERROR_ACCESS_DENIED: u32 = 5;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -478,7 +484,13 @@ pub(crate) fn post_remote(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) ->
     // SAFETY: a plain call.
     let status = unsafe { GalaWindowPost(hwnd as u64, msg, wparam as u64, lparam as u64) };
     if status != 0 {
-        crate::window::set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        // "When a message is blocked by UIPI the last error is set to 5
+        // (access denied)."
+        crate::window::set_last_error(if status == STATUS_ACCESS_DENIED {
+            ERROR_ACCESS_DENIED
+        } else {
+            ERROR_INVALID_WINDOW_HANDLE
+        });
         return 0;
     }
     1
@@ -530,6 +542,10 @@ pub(crate) fn post_thread(tid: u32, msg: u32, wparam: usize, lparam: isize) -> i
         0 => 1,
         STATUS_INSUFFICIENT_RESOURCES => {
             crate::window::set_last_error(ERROR_NOT_ENOUGH_QUOTA);
+            0
+        }
+        STATUS_ACCESS_DENIED => {
+            crate::window::set_last_error(ERROR_ACCESS_DENIED);
             0
         }
         _ => {
@@ -744,10 +760,10 @@ fn send_through_kernel(
         if let Some(c) = slot {
             free_callback(c);
         }
-        return Err(if status == STATUS_TIMEOUT {
-            ERROR_TIMEOUT
-        } else {
-            ERROR_INVALID_WINDOW_HANDLE
+        return Err(match status {
+            STATUS_TIMEOUT => ERROR_TIMEOUT,
+            STATUS_ACCESS_DENIED => ERROR_ACCESS_DENIED,
+            _ => ERROR_INVALID_WINDOW_HANDLE,
         });
     }
     let (ms, block) = match mode {
@@ -1046,4 +1062,82 @@ pub(crate) fn thread_ended() {
         r.ismex.store(0, Ordering::Relaxed);
         r.thread.store(0, Ordering::Release);
     }
+}
+
+// ---- UIPI's message filters -------------------------------------------
+
+/// CHANGEFILTERSTRUCT: cbSize, ExtStatus.
+#[repr(C)]
+pub struct ChangeFilterStruct {
+    size: u32,
+    ext_status: u32,
+}
+
+/// The kernel's filter call's status as the functions' result.
+fn filter_result(status: u32) -> i32 {
+    const STATUS_INVALID_HANDLE: u32 = 0xc000_0008;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    match status {
+        0 => 1,
+        STATUS_ACCESS_DENIED => {
+            crate::window::set_last_error(ERROR_ACCESS_DENIED);
+            0
+        }
+        STATUS_INVALID_HANDLE => {
+            crate::window::set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+            0
+        }
+        _ => {
+            crate::window::set_last_error(ERROR_INVALID_PARAMETER);
+            0
+        }
+    }
+}
+
+/// ChangeWindowMessageFilterEx: lets `message` reach `hwnd` (one of ours)
+/// from processes of lower integrity (MSGFLT_ALLOW 1), blocks it again
+/// (MSGFLT_DISALLOW 2) or resets the window's filter (MSGFLT_RESET 0);
+/// CHANGEFILTERSTRUCT's ExtStatus says what was already so (its cbSize
+/// must be right: ERROR_INVALID_PARAMETER). Another process's window or a
+/// caller at Low integrity: ERROR_ACCESS_DENIED.
+#[unsafe(no_mangle)]
+pub extern "system" fn ChangeWindowMessageFilterEx(
+    hwnd: Hwnd,
+    message: u32,
+    action: u32,
+    change: *mut ChangeFilterStruct,
+) -> i32 {
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    // SAFETY: the caller's structure, if any.
+    if !change.is_null() && unsafe { (*change).size } as usize != size_of::<ChangeFilterStruct>() {
+        crate::window::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if hwnd == 0 {
+        crate::window::set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    }
+    let mut ext = 0u32;
+    // SAFETY: our output.
+    let status = unsafe { GalaWindowFilter(hwnd as u64, message, action, &mut ext) };
+    let ok = filter_result(status);
+    if ok != 0 && !change.is_null() {
+        // SAFETY: the caller's structure (its size checked above).
+        unsafe { (*change).ext_status = ext };
+    }
+    ok
+}
+
+/// ChangeWindowMessageFilter: the process-wide filter (MSGFLT_ADD 1 lets
+/// `message` through from lower integrity levels, MSGFLT_REMOVE 2 blocks
+/// it again). Fails at Low integrity.
+#[unsafe(no_mangle)]
+pub extern "system" fn ChangeWindowMessageFilter(message: u32, flag: u32) -> i32 {
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    if flag != 1 && flag != 2 {
+        crate::window::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    // SAFETY: no output.
+    filter_result(unsafe { GalaWindowFilter(0, message, flag, core::ptr::null_mut()) })
 }

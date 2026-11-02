@@ -1484,10 +1484,20 @@ SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    menu go through the same actions (`Desktop::act`,
    `action::start_path`); the window registry's record is version 2
    (the screen's window id); `gala` (user/gala) ships in every image.
-   Next: access checks on window actions and `gala start` as the
-   caller (the desktop's owner, SECURITY.md), the wallpaper kept across
-   boots, `gala` for whatever shasha gains next (WORKFLOW: the command
-   comes first).
+   **UIPI and `gala start` as the caller done** (2026-11-02, scenarios
+   uipi_test and gala_cli; ARCHITECTURE "Windows across processes: UIPI",
+   SECURITY.md "S6"): User Interface Privilege Isolation on
+   cross-process PostMessage, PostThreadMessage, SendMessage (and its
+   Timeout/Notify/Callback forms), SetWindowPos and ShowWindow
+   (ERROR_ACCESS_DENIED from a lower integrity level, the messages that
+   always pass let through), ChangeWindowMessageFilter(Ex) with
+   CHANGEFILTERSTRUCT's ExtStatus; GalaDesktopAction's window actions
+   pass the same check (a Low `gala` gets "access denied", exit 4, on a
+   Medium window); `gala start` runs the program under a copy of the
+   caller's token. Next: the wallpaper kept across boots, `gala` for
+   whatever shasha gains next (WORKFLOW: the command comes first);
+   sessions/desktops (a service in session 0 cannot reach the user's
+   windows) when gala has more than one.
    **Server kernel done** (2026-11-02, scenario server_kernel): the
    kernel's `shasha` feature (named `desktop` until 2026-11-02; on by
    default) leaves out the compositor,

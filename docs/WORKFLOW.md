@@ -81,6 +81,13 @@ shows it.
 
 ## Things that are easy to get wrong
 
+- A test that runs a process at Low integrity (uipi_test, gala_cli_test)
+  cannot signal or open the parent's named events (no write up: a
+  Medium object's default label): pass inherited handles instead. A
+  program importing advapi32 needs `bcryptprimitives.dll` in its
+  scenario's modules too (advapi32 imports it), or it ends with
+  0xc0000135 (the ledger names the missing DLL).
+
 - A DLL's static tables go in its data section (copied into every
   process that loads it) unless their initial value is all zero bytes:
   give "empty" slots zero fields (`disabled` rather than `enabled: true`,

@@ -1482,7 +1482,9 @@ Windows, never shadows the system's DLLs.)
   NtAdjustPrivilegesToken (only held privileges change; the previous
   state lists what changed; STATUS_NOT_ALL_ASSIGNED; a short
   PreviousState changes nothing), NtDuplicateToken (the level from the
-  attributes' SECURITY_QUALITY_OF_SERVICE; not above the source's),
+  attributes' SECURITY_QUALITY_OF_SERVICE; not above the source's;
+  DesiredAccess 0 gives the source handle's access, as DuplicateTokenEx
+  documents, 2026-11-02, uipi_test),
   NtFilterToken (deny-only SIDs, deleted privileges,
   DISABLE_MAX_PRIVILEGE, restricting SIDs intersected with existing
   ones; the new handle has the old one's access), NtPrivilegeCheck
@@ -3037,11 +3039,61 @@ draws nothing).
   what `gala windows` and the registry (FindWindowW, GetWindowRect,
   IsZoomed, IsIconic from another process) say; host tests in
   `desktop/tests.rs` and `action.rs`.
-  TODO: any process may act on any window and `gala start` runs the
-  program as the boot user (not as the caller): the desktop needs an
-  owner and access checks (SECURITY.md); the chosen wallpaper is not
-  kept across boots; popups and hidden windows are not listed (the
-  registry has them: FindWindow/EnumWindows).
+  **Access (2026-11-02, uipi_test, gala_cli_test)**: the window actions
+  pass UIPI against the window's process (the caller's integrity level
+  at least the window's: `window::may_act_on`; STATUS_ACCESS_DENIED,
+  `gala` prints "access denied" and exits 4; the filters do not apply:
+  these are no messages); shasha's own mouse and keys are not checked
+  (Windows' taskbar acts on elevated windows too). Start runs the program
+  under a copy of the caller's primary token (`token::for_new_process`
+  of it, as NtCreateUserProcess: `process::launch`'s token argument;
+  the start menu passes None, the boot user); its parent id stays 0.
+  TODO: the chosen wallpaper is not kept across boots; popups and
+  hidden windows are not listed (the registry has them:
+  FindWindow/EnumWindows).
+
+### Windows across processes: UIPI (2026-11-02, `uipi_test`)
+
+User Interface Privilege Isolation, as PostMessage, PostThreadMessage,
+SendMessage and ChangeWindowMessageFilter(Ex) document it, is checked by
+the window registry (`nt::window`), where every cross-process post and
+send already goes: `window::post`, `post_thread` and `send` take the
+sender (`Sender`: process id and its primary token's integrity level,
+`Process::integrity_level`) and the receiver's level (the syscall layer
+looks up the window's or queue's process first: `owner_pid`,
+`queue_owner`, `process::integrity_level`; a process gone is level 0)
+and refuse with STATUS_ACCESS_DENIED unless `passes`: the same process,
+a level at least the receiver's, a message in `always_passes`, or one
+the receiver's filters let through. user32 maps STATUS_ACCESS_DENIED to
+ERROR_ACCESS_DENIED for PostMessage, PostThreadMessage, SendMessage(Timeout,
+Notify, Callback). Messages within a process never reach the kernel's
+check (one level).
+
+The filters live in the registry (`Filter { pid, hwnd, message }`, hwnd
+0 process-wide): GalaWindowFilter(Hwnd, Message, Action, *ExtStatus)
+0x7f6a (MSGFLT_RESET 0, ALLOW 1, DISALLOW 2) is ChangeWindowMessageFilterEx
+(Hwnd: the caller's window) and ChangeWindowMessageFilter (Hwnd 0;
+MSGFLT_ADD/REMOVE are ALLOW/DISALLOW); ExtStatus follows
+CHANGEFILTERSTRUCT's table (ALREADYALLOWED_FORWND, ALREADYDISALLOWED_FORWND,
+ALLOWED_HIGHER when the message is allowed process-wide or always). A
+caller at or below Low, or another process's window: STATUS_ACCESS_DENIED.
+Filters go with their window (unregister, its thread's end) and process.
+The always-passing messages and gala's own messages (0x3f0..0x3ff:
+GALA_MENU, GALA_SETWINDOWPOS, GALA_SHOWWINDOW) are never stored: the
+first always pass, the second never do from a lower level.
+
+SetWindowPos and ShowWindow of another process's window are sent to it
+as GALA_SETWINDOWPOS (before) and GALA_SHOWWINDOW (0x3f2, 2026-11-02:
+ShowWindow of another process's window used to do nothing), which
+user32 answers itself on any thread; UIPI blocks them like any message
+(SetWindowPos: FALSE, ERROR_ACCESS_DENIED). Integrity levels come from
+the token's label group (S5: SetTokenInformation(TokenIntegrityLevel)
+lowers it; CreateProcessAsUserW gives a child the low token).
+GalaDesktopAction's window actions use the same levels without the
+filters (`window::may_act_on`; "Server and desktop workloads").
+Not done: sessions and desktops (one of each), uiAccess, hooks across
+levels; the always-passing list is not documented by Microsoft (to
+verify on Windows).
 
 ## UI Automation
 
