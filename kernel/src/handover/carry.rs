@@ -754,7 +754,9 @@ impl Programs {
                     (thread_state::SYSCALL, *number, *regs, Some(fx), *deadline, None)
                 }
                 Resume::User { regs, fx } => (thread_state::USER, 0, *regs, Some(fx), None, None),
-                Resume::Start { regs, mxcsr } => (thread_state::START, 0, *regs, None, None, *mxcsr),
+                Resume::Start { regs, mxcsr } => {
+                    (thread_state::START, 0, *regs, None, None, *mxcsr)
+                }
             };
             let fx = xs.map_or([0; 512], |s| *s.legacy());
             let (xstate, blob): (u64, &[u8]) = match xs {

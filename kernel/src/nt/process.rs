@@ -1038,31 +1038,39 @@ fn deliver_to_user(
     };
     use super::context as c;
     let state = platform::xsave();
-    let mut context = c::to_bytes(&regs, Some(&state));
-    let xlen = c::xstate_len();
-    let size = if xlen == 0 { DISPATCH_FRAME_SIZE } else { XSTATE_OFFSET + xlen as u64 };
-    if xlen != 0 {
-        let flags = c::flags(&context) | c::CONTEXT_XSTATE;
-        c::set_flags(&mut context, flags);
-    }
-    let new_rsp = (frame.rsp.wrapping_sub(size)) & !0x3f;
-    let extended = |at: u64| {
-        if xlen == 0 {
-            return Ok(());
+    let context = c::to_bytes(&regs, Some(&state));
+    let machine = machine_frame(rip, frame);
+    // The frame without the XSTATE area if there is no room for it (a
+    // stack overflow's last page: an AVX-512 area makes the frame 3.6 KiB).
+    let push = |xlen: usize| -> Option<u64> {
+        let mut context = context;
+        let size = if xlen == 0 { DISPATCH_FRAME_SIZE } else { XSTATE_OFFSET + xlen as u64 };
+        if xlen != 0 {
+            let flags = c::flags(&context) | c::CONTEXT_XSTATE;
+            c::set_flags(&mut context, flags);
         }
-        let area = c::xstate_bytes(&state, u64::MAX, xlen);
-        process.write(at + c::SIZE as u64, &c::context_ex(XSTATE_OFFSET as usize, xlen))?;
-        process.write(at + XSTATE_OFFSET, &area[..xlen])
+        let at = (frame.rsp.wrapping_sub(size)) & !0x3f;
+        if at >= frame.rsp {
+            return None;
+        }
+        if xlen != 0 {
+            let area = c::xstate_bytes(&state, u64::MAX, xlen);
+            process.write(at + XSTATE_OFFSET, &area[..xlen]).ok()?;
+            process
+                .write(at + c::SIZE as u64, &c::context_ex(XSTATE_OFFSET as usize, xlen))
+                .ok()?;
+        }
+        process.write(at, &context).ok()?;
+        process.write(at + RECORD_OFFSET, &record).ok()?;
+        process.write(at + MACHINE_FRAME_OFFSET, &machine).ok()?;
+        Some(at)
     };
-    if new_rsp >= frame.rsp
-        || process.write(new_rsp, &context).is_err()
-        || process.write(new_rsp + RECORD_OFFSET, &record).is_err()
-        || process.write(new_rsp + MACHINE_FRAME_OFFSET, &machine_frame(rip, frame)).is_err()
-        || extended(new_rsp).is_err()
-    {
+    let xlen = c::xstate_len();
+    let pushed = push(xlen).or_else(|| if xlen == 0 { None } else { push(0) });
+    let Some(new_rsp) = pushed else {
         warn!("user exception: cannot push the dispatcher frame (rsp {:#x})", frame.rsp);
         return false;
-    }
+    };
     frame.rip = dispatcher;
     frame.rsp = new_rsp;
     true
