@@ -121,8 +121,19 @@ counts (TCG plugins) need a QEMU built with plugins; Ubuntu's has none.
   the next online one's, and one that has not moved for 5 s (interrupts
   off: a lock never released, a loop in a handler) is reported once,
   with its last flight-recorder events (scenario `watchdog`: `hangtest`
-  stalls CPU 1). TODO: a thread in the kernel too long (a system call
-  that never returns while its CPU still ticks), printing the stuck CPU's
+  stalls CPU 1). And a thread that stays in the kernel: each thread's
+  last progress (it blocked in `schedule`, or a tick found it in user
+  mode) is kept; a tick that finds a thread in kernel code with no
+  progress for 20 s (preemption is not progress) reports it with its
+  name, rip and the CPU's last events, again every 20 s while it stays
+  (scenario `kernel_watchdog`: `spintest` makes the boot thread spin
+  25 s). Progress is: returning from a system call, a tick in user mode,
+  a voluntary yield (a polling wait); blocking marks the thread so that
+  its count starts afresh when it runs again (a long wait is not time in
+  the kernel); preemption is not progress. First finding: java.exe's
+  NtCreateSection on the JDK's `modules` file stays in the kernel over
+  20 s (a boot-module file is copied page by page into the ram file
+  system under its lock when first mapped). TODO: the stuck CPU's own
   stack (an NMI to it).
 - **Crash record across reboots** (done 2026-11-02, `kernel/src/crash.rs`):
   a panic writes the panic message, the backtrace and the flight

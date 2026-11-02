@@ -90,6 +90,15 @@ pub fn set_hang_test(on: bool) {
 
 fn on_tick(frame: &mut TrapFrame) {
     crate::flight::on_tick(TICK_HZ);
+    // A thread that stays in the kernel without blocking (the watchdog);
+    // user mode is progress.
+    if let Some((id, idle)) = crate::sched::current_if_running() {
+        if frame.from_user_mode() {
+            crate::flight::progress(id.as_usize());
+        } else if !idle {
+            crate::flight::on_kernel_tick(id.as_usize(), frame.rip);
+        }
+    }
     if crate::arch::percpu::cpu_index() == 1 && HANG_TEST.load(Ordering::Relaxed) {
         static BEATS: AtomicU64 = AtomicU64::new(0);
         if BEATS.fetch_add(1, Ordering::Relaxed) == 3 * TICK_HZ {

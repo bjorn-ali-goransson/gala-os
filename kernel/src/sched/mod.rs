@@ -381,6 +381,15 @@ pub fn current() -> ThreadId {
     with(|s| s.current())
 }
 
+/// This CPU's current thread and whether it is its idle thread; None
+/// before the scheduler exists (early timer ticks).
+pub fn current_if_running() -> Option<(ThreadId, bool)> {
+    let guard = SCHED.lock();
+    let s = guard.as_ref()?;
+    let id = s.cpus[me()].current;
+    Some((id, s.threads.get(id.as_usize()).is_some_and(|t| t.is_idle)))
+}
+
 pub fn current_name() -> &'static str {
     with(|s| {
         let id = s.current();
@@ -456,6 +465,10 @@ fn schedule() {
         let cur = s.cpus[here].current;
         if s.thread(cur).state == State::Running {
             s.make_ready(cur);
+        } else {
+            // It blocks (waits, sleeps, ends): the watchdog counts afresh
+            // when it runs again.
+            crate::flight::blocked(cur.as_usize());
         }
         let next = s.pick(here).or(s.cpus[here].idle).unwrap_or(cur);
         s.thread(next).state = State::Running;
@@ -490,6 +503,9 @@ fn schedule() {
 
 /// Gives up the CPU to another ready thread, if any.
 pub fn yield_now() {
+    // A voluntary yield is a polling wait, not a spin: progress for the
+    // watchdog (preemption is not).
+    crate::flight::progress(current().as_usize());
     schedule();
 }
 

@@ -1478,8 +1478,8 @@ R. **Robustness and live update, kernel included** (the owner's
      (docs/OBSERVABILITY.md §5): the flight recorder and the watchdog for
      stuck CPUs are done (2026-11-02, scenario `watchdog`), and the crash
      record kept across reboots (scenario `crash_record`; volumes are
-     layout version 2 for it, version 1 still read); next: the watchdog
-     for threads stuck in the kernel.
+     layout version 2 for it, version 1 still read), and the watchdog for
+     threads stuck in the kernel (scenario `kernel_watchdog`). R4 done.
    - R5. **Deterministic simulation in gala-um**: time and thread
      interleaving from a seed, so a flaky concurrency failure repeats
      from its seed (as FoundationDB and TigerBeetle do). Needs R1's

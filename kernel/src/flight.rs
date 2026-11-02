@@ -216,6 +216,76 @@ pub fn on_tick(_hz: u64) {
 #[cfg(any(test, feature = "hosted"))]
 pub fn on_tick(_hz: u64) {}
 
+/// Seconds a thread may stay in the kernel without blocking or reaching
+/// user mode before the watchdog reports it (a loop in the kernel; being
+/// preempted does not count as progress).
+pub const KERNEL_RUN_SECONDS: u64 = 20;
+
+/// Whether a thread whose last progress (blocking, user mode) was at
+/// `last` (ns; 0: never seen) and that a tick at `now` finds in the
+/// kernel is reported: the new last-progress time and the verdict
+/// (reported again KERNEL_RUN_SECONDS later if it still has not moved).
+pub fn kernel_run(now: u64, last: u64) -> (u64, bool) {
+    // Never seen, or it blocked since: counted from now.
+    if last == 0 || last == BLOCKED {
+        return (now, false);
+    }
+    if now.saturating_sub(last) >= KERNEL_RUN_SECONDS * NS { (now, true) } else { (last, false) }
+}
+
+/// Per thread (by id, modulo the table): when it last made progress.
+#[cfg(not(any(test, feature = "hosted")))]
+static PROGRESS: [AtomicU64; 4096] = [const { AtomicU64::new(0) }; 4096];
+
+/// A thread's last progress while it is blocked: the first tick that finds
+/// it running again starts its count (a long wait is not time in the
+/// kernel).
+pub const BLOCKED: u64 = u64::MAX;
+
+/// Thread `id` blocks (waits, sleeps): counted afresh when it runs again.
+#[cfg(not(any(test, feature = "hosted")))]
+pub fn blocked(id: usize) {
+    PROGRESS[id % PROGRESS.len()].store(BLOCKED, Ordering::Relaxed);
+}
+
+#[cfg(any(test, feature = "hosted"))]
+pub fn blocked(_id: usize) {}
+
+/// Thread `id` made progress (returned from a system call, runs user code,
+/// yields).
+#[cfg(not(any(test, feature = "hosted")))]
+pub fn progress(id: usize) {
+    PROGRESS[id % PROGRESS.len()].store(crate::time::monotonic_ns().max(1), Ordering::Relaxed);
+}
+
+#[cfg(any(test, feature = "hosted"))]
+pub fn progress(_id: usize) {}
+
+/// From the timer interrupt: thread `id` was found running kernel code
+/// (not idle) at `rip`; one that has neither blocked nor reached user mode
+/// for KERNEL_RUN_SECONDS is reported with its name and this CPU's last
+/// events.
+#[cfg(not(any(test, feature = "hosted")))]
+pub fn on_kernel_tick(id: usize, rip: u64) {
+    let slot = &PROGRESS[id % PROGRESS.len()];
+    let now = crate::time::monotonic_ns().max(1);
+    let (last, report) = kernel_run(now, slot.load(Ordering::Relaxed));
+    slot.store(last, Ordering::Relaxed);
+    if report {
+        let me = crate::arch::percpu::cpu_index();
+        record(Kind::Watchdog, u64::from(me), id as u64);
+        crate::console::emergency_println(format_args!(
+            "watchdog: thread {id} ({}) has been in the kernel for {KERNEL_RUN_SECONDS} s \
+             without blocking or reaching user mode (CPU {me}, rip {rip:#x}); this CPU's last events:",
+            crate::sched::current_name()
+        ));
+        dump(1 << me, 32, crate::console::emergency_println);
+    }
+}
+
+#[cfg(any(test, feature = "hosted"))]
+pub fn on_kernel_tick(_id: usize, _rip: u64) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +300,19 @@ mod tests {
         assert_eq!(all.len(), PER_CPU);
         assert_eq!(all[0], (110, Kind::Syscall as u8, 10, 0));
         assert_eq!(all[PER_CPU - 1].2, PER_CPU as u64 + 9);
+    }
+
+    #[test]
+    fn a_thread_in_the_kernel_without_progress_is_reported_every_twenty_seconds() {
+        // First seen: no verdict.
+        assert_eq!(kernel_run(5 * NS, 0), (5 * NS, false));
+        // Still within the limit: last progress kept.
+        assert_eq!(kernel_run(24 * NS, 5 * NS), (5 * NS, false));
+        // Blocked since: counted afresh, however long ago.
+        assert_eq!(kernel_run(90 * NS, BLOCKED), (90 * NS, false));
+        // At the limit: reported, counted again from now.
+        assert_eq!(kernel_run(25 * NS, 5 * NS), (25 * NS, true));
+        assert_eq!(kernel_run(30 * NS, 25 * NS), (25 * NS, false));
     }
 
     #[test]

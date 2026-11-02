@@ -505,7 +505,15 @@ pub fn suspend(object: &ObjectRef) -> Result<u32, NtStatus> {
 /// Records (or clears) the current thread's user registers while it is in
 /// a system call (the dispatcher calls this around every service).
 pub fn set_in_syscall(object: &ObjectRef, regs: Option<(u32, UserRegs)>) {
-    *as_thread(object).in_syscall.lock() = regs;
+    let t = as_thread(object);
+    // A system call that ends is progress for the hang watchdog (a thread
+    // that calls the kernel in a loop is mostly in kernel code).
+    if regs.is_none()
+        && let Some(id) = *t.sched_id.lock()
+    {
+        crate::flight::progress(id.as_usize());
+    }
+    *t.in_syscall.lock() = regs;
 }
 
 /// The user state of a suspended thread: parked on its way to user mode,

@@ -105,6 +105,7 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `netreset=<n>` | the network card is reset under the driver after the n-th frame sent (the driver's recovery test) |
 | `diskreset=<n>` | the n-th disk request has the device reset under the driver just after it is posted (the driver's recovery test) |
 | `crashtest` | with `persist`: panic on purpose after mounting when the disk holds no crash record (the crash record's scenario) |
+| `spintest` | the boot thread spins in the kernel for 25 s (the kernel-thread watchdog's scenario) |
 | `hangtest` | CPU 1 spins with interrupts off for 9 s, 3 s after its timer starts (the hang watchdog's scenario) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |

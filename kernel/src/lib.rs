@@ -176,6 +176,16 @@ pub fn kernel_main() -> ! {
     nt::syscalls::set_trace(cmdline.flag("trace"));
     // The watchdog's test: CPU 1 stops taking timer interrupts for a while.
     time::set_hang_test(cmdline.flag("hangtest"));
+    // The kernel watchdog's test: this thread stays in the kernel 25 s
+    // (interrupts on, never blocking).
+    if cmdline.flag("spintest") {
+        info!("spintest: the boot thread spins in the kernel for 25 s");
+        let until = time::monotonic_ns() + 25_000_000_000;
+        while time::monotonic_ns() < until {
+            core::hint::spin_loop();
+        }
+        info!("spintest: done");
+    }
     events::set_mask(cmdline.value("events").map_or(0, events::parse_mask));
     // `run=a.exe,b.exe` runs the programs one after another; `args=` holds
     // their (percent-encoded) command-line arguments in the same order;

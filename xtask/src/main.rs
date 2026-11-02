@@ -3019,6 +3019,19 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["msvcrt_test: _putws", "msvcrt_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // R4: the watchdog for a thread that stays in the kernel: the boot
+        // thread spins 25 s (`spintest`); it is reported after 20 s.
+        name: "kernel_watchdog",
+        cmdline: "qemu_exit spintest run=hello.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "spintest: the boot thread spins",
+            "has been in the kernel for 20 s without blocking or reaching user mode",
+            "spintest: done",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // R4: the hang watchdog. `hangtest` makes CPU 1 spin with
         // interrupts off for 9 s, 3 s after its timer starts; another CPU
         // reports it after 5 s with its flight-recorder events, and the
@@ -3850,6 +3863,7 @@ fn events_flag() -> String {
 /// (the same set: they share a VM); a scenario listed more than once
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("kernel_watchdog", "hello"),
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
     ("crash_record", "hello"),
