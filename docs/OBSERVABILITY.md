@@ -103,6 +103,10 @@ counts (TCG plugins) need a QEMU built with plugins; Ubuntu's has none.
 - `cargo xtask debug name` boots a scenario with QEMU's gdbstub (`-s -S`)
   and a gdb script, so an agent can get backtraces and inspect memory in
   batch mode.
+- Fault injection (ROADMAP R2, `failpoint=`): `failtrace` prints a
+  backtrace at each injected failure, so the code that mishandled it is
+  named even when the symptom (a hang, a wrong status) comes much later
+  (WORKFLOW "Fault injection").
 - Flaky SMP bugs: QEMU record/replay (`-icount shift=auto,rr=record`)
   makes a failing run reproducible.
 - **Flight recorder** (planned, ROADMAP R4): an always-on per-CPU ring of

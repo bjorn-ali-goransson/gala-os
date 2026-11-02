@@ -123,15 +123,23 @@ impl Process {
     }
 
     /// A snapshot of the live threads.
-    pub fn threads(&self) -> Vec<ObjectRef> {
+    pub fn threads(&self) -> Result<Vec<ObjectRef>, crate::mm::heap::AllocError> {
         let threads = self.threads.lock();
         let mut out = Vec::new();
-        if out.try_reserve(threads.len()).is_ok() {
-            for t in threads.iter() {
-                let _ = out.try_push(t.clone());
-            }
+        out.try_reserve(threads.len()).map_err(|_| crate::mm::heap::AllocError)?;
+        for t in threads.iter() {
+            out.try_push(t.clone())?;
         }
-        out
+        Ok(out)
+    }
+
+    /// Calls `f` on each live thread under the threads lock, without
+    /// allocating (terminating a process must not fail: a snapshot that
+    /// could not be made once left the other threads running).
+    pub fn for_each_thread(&self, mut f: impl FnMut(&ObjectRef)) {
+        for t in self.threads.lock().iter() {
+            f(t);
+        }
     }
 
     /// Runs a user-memory copy, resolving demand-zero faults on the way
@@ -245,8 +253,20 @@ impl From<PagingError> for LoadError {
 }
 
 impl From<NtStatus> for LoadError {
-    fn from(_: NtStatus) -> Self {
-        LoadError::BadImageBase
+    fn from(status: NtStatus) -> Self {
+        if status == NtStatus::NO_MEMORY || status == NtStatus::INSUFFICIENT_RESOURCES {
+            LoadError::OutOfMemory
+        } else {
+            LoadError::BadImageBase
+        }
+    }
+}
+
+impl LoadError {
+    /// `self` if it is out of memory, else `other` (a more precise error
+    /// for a failed status).
+    fn or(self, other: LoadError) -> LoadError {
+        if matches!(self, LoadError::OutOfMemory) { self } else { other }
     }
 }
 
@@ -443,8 +463,10 @@ pub fn spawn_from_pe(
     let command_line = core::str::from_utf8(&command_line).unwrap_or(image_path);
     // Parsed first for the precise error; boot programs are not cached.
     PeImage::parse(data).map_err(LoadError::Pe)?;
+    // (Out of memory is not a bad image: fault injection showed hello.exe
+    // failing to start with BadPeSignature.)
     let layout = super::section::ImageLayout::new(data)
-        .map_err(|_| LoadError::Pe(PeError::BadPeSignature))?;
+        .map_err(|e| LoadError::from(e).or(LoadError::Pe(PeError::BadPeSignature)))?;
     spawn(Spawn {
         name,
         path: intern(image_path)?,
@@ -753,12 +775,11 @@ fn through_ntdll(
 pub fn terminate(process: &KArc<Process>, status: NtStatus, include_caller: bool) {
     process.exit_status.lock().get_or_insert(status);
     let me = thread::current();
-    for t in process.threads() {
-        if me.as_ref().is_some_and(|m| KArc::ptr_eq(m, &t)) {
-            continue;
+    process.for_each_thread(|t| {
+        if !me.as_ref().is_some_and(|m| KArc::ptr_eq(m, t)) {
+            thread::request_termination(t, status);
         }
-        thread::request_termination(&t, status);
-    }
+    });
     if include_caller
         && me.is_some_and(
             |m| matches!(&m.body, ObjectBody::Thread(t) if KArc::ptr_eq(&t.process, process)),
@@ -844,7 +865,7 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
                 }
                 return;
             }
-            vm::Fault::Denied => {}
+            vm::Fault::Denied | vm::Fault::OutOfMemory => {}
         }
     }
     let status = match vector {

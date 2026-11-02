@@ -326,6 +326,10 @@ mod global {
     // aligned for `layout`, or null; the mutex serializes access.
     unsafe impl GlobalAlloc for KernelHeap {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // Fault injection: every fallible allocation path ends here.
+            if crate::failpoint::hit(crate::failpoint::Point::Heap) {
+                return ptr::null_mut();
+            }
             self.0.lock().alloc(layout).map_or(ptr::null_mut(), NonNull::as_ptr)
         }
 

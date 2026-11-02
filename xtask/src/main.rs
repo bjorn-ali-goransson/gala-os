@@ -1580,6 +1580,10 @@ commands:
                serve <nginx|nginx_master|nginx_tls|go_http|...> [port, default 8080]
   um-test      run the program scenarios gala-um supports (runs_in_um) in gala-um,
                the NT layer as a Linux process (docs/GALA_UM.md)
+  fault-test   run programs in gala-um with failures injected (failpoint=);
+               each must end without a panic, abort or hang:
+               fault-test [program filter] [--sweep[=frame|net_tx]: fail each heap
+               allocation (frame allocation, packet) of each program in turn]
   bench        run user/bench on gala; write target/report/bench.json and
                compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
   symbolize    resolve the kernel backtraces in a serial log to functions
@@ -1612,6 +1616,14 @@ fn main() -> ExitCode {
         Some("iso") => iso(release, &args[1..]),
         Some("serve") => serve(release, &args[1..]),
         Some("um-test") => um_test(release),
+        Some("fault-test") => fault_test(
+            release,
+            args.get(1).filter(|a| !a.starts_with("--")),
+            args.iter().find_map(|a| match a.as_str() {
+                "--sweep" => Some("heap"),
+                _ => a.strip_prefix("--sweep="),
+            }),
+        ),
         Some("bench") => {
             bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
         }
@@ -2291,6 +2303,40 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    // Fault injection (kernel/src/failpoint.rs): programs run while every
+    // n-th kernel heap allocation (or frame allocation) fails. They end
+    // however they end; the kernel must survive (no panic, no hang, every
+    // address space freed). `cargo xtask fault-test` does the same in
+    // gala-um, with many more rules.
+    Scenario {
+        name: "failpoint_heap",
+        cmdline: "qemu_exit run=hello.exe,file_test.exe,kernel32_test.exe,process_test.exe \
+                  failpoint=heap:every:211",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["run: end process_test.exe", "failpoint: heap ", "gala: boot ok"],
+    },
+    Scenario {
+        name: "failpoint_frame",
+        cmdline: "qemu_exit run=hello.exe,file_test.exe,kernel32_test.exe,process_test.exe \
+                  failpoint=frame:every:53",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["run: end process_test.exe", "failpoint: frame ", "gala: boot ok"],
+    },
+    Scenario {
+        name: "failpoint_random",
+        cmdline: "qemu_exit run=hello.exe,file_test.exe,kernel32_test.exe,process_test.exe \
+                  failpoint=heap:random:5,frame:random:10 failseed=7",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["run: end process_test.exe", "failpoint: heap ", "gala: boot ok"],
+    },
+    Scenario {
+        // Every other disk request fails while persist_test runs and its
+        // changes are written to the disk log (`persist`).
+        name: "failpoint_disk",
+        cmdline: "qemu_exit persist run=persist_test.exe failpoint=disk_io:every:2",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["run: end persist_test.exe", "failpoint: disk_io ", "gala: boot ok"],
+    },
     Scenario {
         // C++ exception handling as MSVC compiles it, with vcruntime140
         // (user/cxx_eh_test: clang-built, checked-in binary).
@@ -3641,6 +3687,10 @@ fn events_flag() -> String {
 /// Scenarios that ship a named set of EXTRA_MODULES instead of their own
 /// (the same set: they share a VM).
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("failpoint_heap", "kernel32_test"),
+    ("failpoint_frame", "kernel32_test"),
+    ("failpoint_random", "kernel32_test"),
+    ("failpoint_disk", "persist_test"),
     ("dotnet_info", "dotnet"),
     ("fzsftp", "filezilla"),
     ("filezilla_server", "filezilla"),
@@ -3938,6 +3988,17 @@ fn build_um(release: bool) -> Result<PathBuf> {
 /// would run: its boot modules from user/bin, its `args=`, two
 /// processors; returns stdout and stderr.
 fn run_um(um: &Path, s: &Scenario) -> Result<String> {
+    run_um_with(um, s, &[], UM_TIMEOUT_SECS).map(|(_, log)| log)
+}
+
+/// `run_um` with more options for um (`--failpoint=...`) and a timeout;
+/// returns the exit status (None if a signal ended it) and the output.
+fn run_um_with(
+    um: &Path,
+    s: &Scenario,
+    options: &[String],
+    timeout_secs: u32,
+) -> Result<(Option<i32>, String)> {
     let name = s.name;
     let program = scenario_program(s).ok_or(format!("{name}: not a program scenario"))?;
     // The scenario's `args=` (percent-encoded), as one command-line string.
@@ -3946,7 +4007,7 @@ fn run_um(um: &Path, s: &Scenario) -> Result<String> {
     // gala-um itself).
     let mut cmd = Command::new("timeout");
     // As many processors as the QEMU boot tests (-smp 2).
-    cmd.arg(UM_TIMEOUT_SECS.to_string()).arg(um).arg("--cpus=2");
+    cmd.arg(timeout_secs.to_string()).arg(um).arg("--cpus=2").args(options);
     // Its boot modules, from user/bin (checked in) as `--module=`.
     for (file, dir) in extra_modules(name) {
         // The program itself is added by um.
@@ -3974,7 +4035,180 @@ fn run_um(um: &Path, s: &Scenario) -> Result<String> {
         .arg(percent_decode(args))
         .output()
         .map_err(|e| format!("running {}: {e}", um.display()))?;
-    Ok(format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    let log =
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    Ok((out.status.code(), log))
+}
+
+/// Programs `cargo xtask fault-test` runs in gala-um (scenario names;
+/// each must `runs_in_um`). Add programs as they pass.
+const FAULT_PROGRAMS: &[&str] = &[
+    "hello",
+    "abi_test",
+    "file_test",
+    "kernel32_test",
+    "thread_test",
+    "wait_test",
+    "object_test",
+    "section_test",
+    "vm_test",
+    "registry_test",
+    "pipe_test",
+    "winsock_async_test",
+    "iocp_test",
+    "ioapc_test",
+    "async_test",
+    "apc_test",
+    "timer_test",
+    "sync_test",
+    "dir_test",
+    "filemap_test",
+    "cow_test",
+    "guard_test",
+    "exception_test",
+    "loader_test",
+    "kernel32_thread_test",
+    "kernel32_file_test",
+    "go_hello",
+];
+
+/// Programs whose whole heap sweep is part of a plain `fault-test` (each
+/// found a bug: hello NtTerminateProcess failing, pipe_test lost pipe
+/// completions, exception_test the copy-on-write access violation).
+const FAULT_SWEEPS: &[&str] = &["hello", "pipe_test", "exception_test"];
+
+/// Rules each fault-test program runs under (`random` ones once per
+/// seed in FAULT_SEEDS).
+const FAULT_RULES: &[&str] = &[
+    "heap:every:2",
+    "heap:every:3",
+    "heap:every:7",
+    "heap:every:31",
+    "heap:every:97",
+    "heap:every:499",
+    "heap:random:20",
+    "frame:every:3",
+    "frame:every:61",
+    "frame:random:20",
+    "net_tx:every:3",
+    "heap:random:5,frame:random:5,net_tx:random:100",
+];
+const FAULT_SEEDS: &[u64] = &[1, 2, 3];
+/// A fault-test run may take this long (a hang is a failure).
+const FAULT_TIMEOUT_SECS: u32 = 10;
+
+/// What a fault-test run must not show: the NT layer panicked, or an
+/// infallible allocation failed (Rust's message for it).
+const FAULT_CRASH_MARKERS: &[&str] = &["panicked at", "KERNEL PANIC", "memory allocation of"];
+
+/// Load errors a valid program must not get from an injected failure.
+const FAULT_MISREPORTS: &[&str] = &[": Pe(", ": BadImageBase"];
+
+/// Judges one gala-um run with failures injected: the program ends (any
+/// exit status: 0 or 1 from the program, 2 when um could not start it),
+/// the NT layer neither panics, aborts nor hangs.
+fn judge_fault_run(code: Option<i32>, log: &str) -> Result {
+    if let Some(m) = FAULT_CRASH_MARKERS.iter().find(|m| log.contains(**m)) {
+        return Err(format!("crashed ({m:?})"));
+    }
+    // The programs are valid images: an injected failure reported as a bad
+    // one is a wrong status (hello.exe once failed with BadPeSignature).
+    if let Some(m) = FAULT_MISREPORTS.iter().find(|m| log.contains(**m)) {
+        return Err(format!("out of memory reported as {m:?}"));
+    }
+    match code {
+        Some(0..=2) => Ok(()),
+        Some(124) => Err(format!("hung (killed after {FAULT_TIMEOUT_SECS} s)")),
+        Some(c) if c > 128 => Err(format!("killed by signal {}", c - 128)),
+        Some(c) => Err(format!("um exited with {c}")),
+        None => Err("killed by a signal".into()),
+    }
+}
+
+/// `cargo xtask fault-test [program filter] [--sweep[=<point>]]`: runs
+/// FAULT_PROGRAMS in gala-um under each of FAULT_RULES
+/// (kernel/src/failpoint.rs) and checks that each run ends without a
+/// panic, an abort or a hang. With `--sweep`, each program instead runs
+/// once per occurrence of the point (`heap` by default, or `frame`...),
+/// with only that one failing (`<point>:nth:k` for every k).
+fn fault_test(release: bool, filter: Option<&String>, sweep: Option<&str>) -> Result {
+    let um = build_um(release)?;
+    let programs: Vec<&Scenario> = FAULT_PROGRAMS
+        .iter()
+        .filter(|p| filter.is_none_or(|f| p.contains(f.as_str())))
+        .map(|p| {
+            SCENARIOS
+                .iter()
+                .find(|s| s.name == *p && runs_in_um(s))
+                .ok_or(format!("fault test: {p} is not a gala-um scenario"))
+        })
+        .collect::<Result<_>>()?;
+    if programs.is_empty() {
+        return Err("no fault-test program matches the filter".into());
+    }
+    // `point:nth:k` for every occurrence k of `point` in a clean run of `s`.
+    let sweep_jobs = |s: &'static Scenario, point: &str| -> Result<Vec<(&Scenario, String, u64)>> {
+        // Count the occurrences (a rule that never fires).
+        let count = vec![format!("--failpoint={point}:nth:{}", u64::MAX)];
+        let (_, log) = run_um_with(&um, s, &count, FAULT_TIMEOUT_SECS)?;
+        let n: u64 = log
+            .split(&format!("failpoint: {point} "))
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .ok_or(format!("{}: no {point} count in its output:\n{log}", s.name))?;
+        eprintln!("xtask: fault test {}: {n} {point} occurrences to fail one by one", s.name);
+        Ok((1..=n).map(|k| (s, format!("{point}:nth:{k}"), 0)).collect())
+    };
+    let mut jobs: Vec<(&Scenario, String, u64)> = Vec::new();
+    for &s in &programs {
+        if let Some(point) = sweep {
+            jobs.extend(sweep_jobs(s, point)?);
+            continue;
+        }
+        for rule in FAULT_RULES {
+            if rule.contains("random") {
+                jobs.extend(FAULT_SEEDS.iter().map(|&seed| (s, rule.to_string(), seed)));
+            } else {
+                jobs.push((s, rule.to_string(), 0));
+            }
+        }
+        // The sweeps that found bugs, kept as their regression tests.
+        if FAULT_SWEEPS.contains(&s.name) {
+            jobs.extend(sweep_jobs(s, "heap")?);
+        }
+    }
+    let started = Instant::now();
+    let results = run_parallel(&jobs, |(s, rule, seed)| {
+        let options = [format!("--failpoint={rule}"), format!("--failseed={seed}")];
+        let (code, log) = run_um_with(&um, s, &options, FAULT_TIMEOUT_SECS)?;
+        Ok(judge_fault_run(code, &log).map_err(|e| (e, log)))
+    });
+    let mut failed = 0;
+    let dir = target_dir().join("failed");
+    for ((s, rule, seed), result) in jobs.iter().zip(results) {
+        let verdict = result.and_then(|r| {
+            r.map_err(|(e, log)| {
+                let file =
+                    dir.join(format!("fault-{}-{}-{seed}.log", s.name, rule.replace(':', "_")));
+                let _ = fs::create_dir_all(&dir).and_then(|()| fs::write(&file, &log));
+                let tail: Vec<&str> = log.lines().rev().take(12).collect();
+                let tail: Vec<&str> = tail.into_iter().rev().collect();
+                format!("{e}; log {}:\n    {}", file.display(), tail.join("\n    "))
+            })
+        });
+        if let Err(e) = verdict {
+            failed += 1;
+            eprintln!("xtask: fault test {:<16} {rule} seed {seed}: FAILED: {e}", s.name);
+        }
+    }
+    eprintln!(
+        "xtask: fault-test: {} runs of {} programs in {:.1} s, {failed} failed",
+        jobs.len(),
+        programs.len(),
+        started.elapsed().as_secs_f64()
+    );
+    if failed == 0 { Ok(()) } else { Err(format!("{failed} fault-test runs failed")) }
 }
 
 /// Decodes `%XX` escapes (the kernel's `args=` encoding).
@@ -4863,6 +5097,13 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[&["tds_test: created", "exited with status 0x00000000"]],
+    },
+    DiskScenario {
+        name: "failpoint_disk",
+        size: 32 << 20,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
     },
     DiskScenario {
         name: "persist_test",

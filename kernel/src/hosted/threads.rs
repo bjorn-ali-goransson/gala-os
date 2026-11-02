@@ -35,6 +35,8 @@ std::thread_local! {
 }
 
 fn new_id() -> ThreadId {
+    // Host code: std allocates infallibly (no injected heap failures).
+    let _host = super::HostCode::enter();
     let mut slots = SLOTS.lock().unwrap();
     slots.push(Arc::new(Slot::default()));
     // Id 0 is never used (the kernel's boot thread).
@@ -66,6 +68,7 @@ pub fn spawn(
     setup: impl FnOnce() + Send + 'static,
 ) -> Result<ThreadId, SpawnError> {
     let id = new_id();
+    let _host = super::HostCode::enter();
     std::thread::Builder::new()
         .name(name.into())
         .stack_size(HOST_STACK)
@@ -80,7 +83,7 @@ pub fn spawn(
                 }
             }
             setup();
-            entry(arg);
+            super::nt_code(|| entry(arg));
             exit()
         })
         .map_err(|_| SpawnError::OutOfMemory)?;
@@ -238,10 +241,11 @@ pub fn system_time() -> u64 {
 
 /// Calls `callback(ticks)` every millisecond on a host thread.
 pub fn start_ticks(callback: fn(u64)) {
+    let _host = super::HostCode::enter();
     let _ = std::thread::Builder::new().name("tick".into()).spawn(move || {
         loop {
             std::thread::sleep(Duration::from_millis(1));
-            callback(ticks());
+            super::nt_code(|| callback(ticks()));
         }
     });
 }

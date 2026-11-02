@@ -110,9 +110,11 @@ fn return_to_user(gregs: &mut Gregs, mut regs: UserRegs) {
 fn with_context(context: *mut libc::c_void, f: impl FnOnce(&mut libc::ucontext_t)) {
     let uc = context.cast::<libc::ucontext_t>();
     CONTEXT.with(|c| c.set(uc));
+    // The handlers run NT-layer code (system calls, exceptions, the
+    // user-return hook): injected heap failures apply.
     // SAFETY: the kernel passes the interrupted thread's ucontext, valid
     // until the handler returns.
-    f(unsafe { &mut *uc });
+    super::nt_code(|| f(unsafe { &mut *uc }));
     CONTEXT.with(|c| c.set(core::ptr::null_mut()));
 }
 

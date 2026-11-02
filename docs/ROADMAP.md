@@ -1371,6 +1371,60 @@ R. **Robustness and live update** (proposed 2026-11-02 by the owner;
      run with failures injected, mainly in gala-um; programs get an
      NTSTATUS, the kernel survives. Every fallible allocation path is
      untested today, so this finds bugs at once.
+     **Built (2026-11-02)**: `kernel/src/failpoint.rs` (ARCHITECTURE
+     "Fault injection"): `failpoint=heap:every:97,frame:nth:12,
+     net_tx:random:50 failseed=7 failtrace` on the kernel command line,
+     `um --failpoint=... --failseed=... --failtrace` in gala-um; host
+     unit tests; `cargo xtask fault-test [filter] [--sweep[=point]]`
+     (27 programs in gala-um under 12 rules, or every heap allocation,
+     frame allocation or packet of each program failed in turn: about
+     15,000 heap and 3,500 frame runs, all ending cleanly now); QEMU
+     scenarios `failpoint_heap`, `failpoint_frame`, `failpoint_random`
+     (hello, file_test, kernel32_test, process_test) and
+     `failpoint_disk` (persist_test, every other disk request failing).
+     Found and fixed:
+     1. NtTerminateProcess(NtCurrentProcess()) made an object for the
+        pseudo-handle and returned STATUS_NO_MEMORY to the exiting
+        program when that failed (hello.exe then spun for ever); ending
+        oneself no longer allocates, and `process::terminate` no longer
+        snapshots the threads into a Vec (a failed snapshot left the
+        other threads running): it walks them under the lock.
+     2. Pipes lost finished requests: completions were collected in a
+        Vec under the pipe lock, and one that could not be pushed was
+        dropped (its overlapped reader waited for ever; pipe_test's IOCP
+        read). A finished request now keeps its result in its own
+        pending entry until reported (no allocation). A server end's or
+        client end's dispatcher is allocated before the instance is
+        listed or connected (a failure after it left a listed instance
+        without a server end, or a server connected to no client).
+     3. A copy-on-write fault that could not allocate raised an access
+        violation (exception_test's handler then continued for ever).
+        Faults on committed memory now wait out a shortage (100 retries,
+        1 ms apart) before the access violation, as Windows waits for a
+        page instead of failing a committed access.
+     4. Image loads reported running out of memory as a bad image
+        (`Pe(BadPeSignature)`, `BadImageBase`); fault-test now fails a
+        run that shows them.
+     5. The kernel's `run=`/`start=` panicked when decoding a program's
+        arguments ran out of memory; it logs and goes on.
+     6. gala-um: a page-sized NT allocation that found no frame fell
+        back to a host page that sections cannot map (`um` exited with
+        3 under `frame:nth:k`); it now fails.
+     7. Test programs that waited for ever after an injected failure
+        (pipe_test's writer thread returned without closing its end and
+        its CallNamedPipe server without disconnecting;
+        kernel32_thread_test spun on a thread it never created): fixed
+        in the tests (same behaviour on Windows).
+     Not done yet: the completion port queue and APC queue still grow
+     when a completion is reported (`notify::complete`: a failed push
+     loses the packet; not hit by the sweeps, since their capacity is
+     kept); out-of-memory in gala's ntdll loader shows as
+     STATUS_DLL_NOT_FOUND (kernel32_test under `failpoint_heap`) and in
+     child process creation as STATUS_INVALID_IMAGE_FORMAT (known, see
+     WORKFLOW); a QEMU sweep of the kernel-only paths (child processes,
+     the scheduler, vmap) in the style of `--sweep`; a `disk_io` sweep
+     (the disk scenarios do not run in gala-um); more programs in
+     FAULT_PROGRAMS (Go's runtime beyond go_hello, the AFD tests).
    - R3. **Lock-order checking** in debug builds (classes per IrqMutex,
      held classes per CPU, panic on an inversion); the prose lock orders
      become checked.

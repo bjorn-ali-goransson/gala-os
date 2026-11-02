@@ -604,7 +604,8 @@ Run a program directly:
 
 `--module` adds a file to C: as a boot module would (DLLs under their
 `test*` names in user/bin), `--trace` logs every system call, `--cpus`
-caps the processors (um-test uses 2, as QEMU). The kernel's log goes to
+caps the processors (um-test uses 2, as QEMU), `--failpoint=`,
+`--failseed=` and `--failtrace` inject failures ("Fault injection"). The kernel's log goes to
 stderr, the program's output to stdout. When a program passes in QEMU
 but not in gala-um, or the other way round, one of the two platforms is
 wrong; `cargo xtask report` lists such programs. Program code must stay
@@ -613,6 +614,47 @@ caught). Needs Linux 5.11+ (syscall user dispatch). `gdb -p` works
 (`handle SIGSYS nostop noprint`, `handle SIGURG nostop noprint`), and
 `thread apply all bt` shows where NT threads are inside the NT layer:
 that is how the lock starvation and the GetContext bug were found.
+
+## Fault injection
+
+`cargo xtask fault-test` runs FAULT_PROGRAMS (xtask) in gala-um under
+FAULT_RULES (`heap:every:7`, `frame:random:20`, ...; ARCHITECTURE "Fault
+injection") in a few seconds; each run must end without a panic, an
+abort, a hang (10 s) or a valid image reported as a bad one.
+`--sweep` fails each heap allocation of each program in turn
+(`heap:nth:k`), `--sweep=frame` each frame allocation, `--sweep=net_tx`
+each packet; a filter picks programs (`cargo xtask fault-test pipe_test
+--sweep`). A failed run's whole log is in
+`target/failed/fault-<program>-<rule>-<seed>.log`. QEMU: the
+`failpoint_*` boot scenarios. Add a program to FAULT_PROGRAMS once its
+sweep passes.
+
+To find the code behind a failure, rerun the one rule by hand with
+`--failtrace` (kernel: `failtrace`): each injected failure prints a
+backtrace, and the program's own symptom (a status, a hang) follows:
+
+    target/debug/um --failtrace --trace --failpoint=heap:nth:976 \
+        --module=Windows/System32/ntdll.dll=user/bin/testntdll.dll ... \
+        user/bin/pipe_test.exe
+
+- **A hang under fault injection may be the test's**: a test thread that
+  gives up after a failed call without closing its pipe end, or a loop
+  waiting for a thread that CreateThread never made, waits for ever on
+  Windows too. Check every result before waiting on what it should have
+  produced, and release what the other side waits for on the error
+  path. Tell it from a kernel bug with the trace: the kernel's bug is a
+  call that returned success (or nothing) while dropping work.
+- **What must not fail must not allocate on its way**: ending one's
+  own process, reporting a finished I/O request, waking a waiter.
+  Allocate beforehand (when the request is made) or keep the state in
+  what already exists (the pending entry). `let _ = v.try_push(x)` on
+  such a path is the bug pattern to look for.
+- **gala-um's host code allocates infallibly** (std, the platform's
+  bookkeeping): it runs under `hosted::HostCode`, so injected heap
+  failures only reach the NT layer. New host code reached from NT code
+  that allocates (a std collection, a thread, printing) needs the guard,
+  or a sweep aborts with "memory allocation of N bytes failed" in host
+  code.
 
 ## busybox
 

@@ -106,6 +106,11 @@ struct Pending {
     generation: u64,
     op: Op,
     request: Request,
+    /// Set when it has finished: reported (and removed) by `report`
+    /// after the pipe's lock is released. Finishing a request needs no
+    /// allocation, so none is ever lost (a list of finished requests that
+    /// could not grow once dropped one, and its waiter waited for ever).
+    result: Option<(NtStatus, Vec<u8>)>,
 }
 
 /// One end of a pipe: the body of its file object.
@@ -128,13 +133,26 @@ pub struct PipeEnd {
     pub dispatcher: KArc<Dispatcher>,
 }
 
-/// Completions collected under the pipe's lock, reported after it.
-type Done = Vec<(Request, NtStatus, Vec<u8>)>;
-
-fn report(done: Done) {
-    for (r, status, data) in done {
-        notify::complete(r, status, &data);
+/// Reports the finished requests (oldest first), each outside the
+/// pipe's lock (completing one writes user memory and signals objects).
+fn report(pipe: &Pipe) {
+    loop {
+        let finished = {
+            let mut s = pipe.state.lock();
+            match s.pending.iter().position(|p| p.result.is_some()) {
+                Some(i) => s.pending.remove(i),
+                None => return,
+            }
+        };
+        if let Some((status, data)) = finished.result {
+            notify::complete(finished.request, status, &data);
+        }
     }
+}
+
+/// Marks pending request `i` cancelled (reported by `report`).
+fn cancel_pending(s: &mut State, i: usize) {
+    s.pending[i].result = Some((notify::CANCELLED, Vec::new()));
 }
 
 impl Drop for PipeEnd {
@@ -143,7 +161,6 @@ impl Drop for PipeEnd {
             // No client can connect to a closed instance any more.
             INSTANCES.lock().retain(|i| !KArc::ptr_eq(&i.pipe, &self.pipe));
         }
-        let mut done = Vec::new();
         {
             let mut s = self.pipe.state.lock();
             if self.end == 0 {
@@ -155,20 +172,16 @@ impl Drop for PipeEnd {
             // looked at again (broken pipe).
             let end = self.end;
             let generation = self.generation;
-            let mut i = 0;
-            while i < s.pending.len() {
+            for i in 0..s.pending.len() {
                 let p = &s.pending[i];
-                if p.end == end && (end == 0 || p.generation == generation) {
-                    let p = s.pending.remove(i);
-                    let _ = done.try_push((p.request, notify::CANCELLED, Vec::new()));
-                } else {
-                    i += 1;
+                if p.result.is_none() && p.end == end && (end == 0 || p.generation == generation) {
+                    cancel_pending(&mut s, i);
                 }
             }
-            try_complete(&mut s, &mut done);
+            try_complete(&mut s);
             wake_all(&mut s);
         }
-        report(done);
+        report(&self.pipe);
     }
 }
 
@@ -240,6 +253,9 @@ pub fn create_server(name: &[u16], o: &ServerOptions) -> Result<PipeEnd, NtStatu
         return Err(NtStatus::INVALID_PARAMETER);
     }
     let key = upper(name)?;
+    // Allocated before the instance is listed: a failure after it left an
+    // instance without a server end.
+    let dispatcher = new_dispatcher()?;
     let mut instances = INSTANCES.lock();
     let mut count = 0u32;
     let mut max = o.max_instances;
@@ -273,7 +289,12 @@ pub fn create_server(name: &[u16], o: &ServerOptions) -> Result<PipeEnd, NtStatu
         .try_push(Instance { name: key, max, pipe: pipe.clone() })
         .map_err(|_| NtStatus::NO_MEMORY)?;
     drop(instances);
-    PipeEnd::new(pipe, 0, 0, o.synchronous, o.message_reads)
+    Ok(PipeEnd::new(pipe, 0, 0, o.synchronous, o.message_reads, dispatcher))
+}
+
+/// The signal of a new end's file object.
+fn new_dispatcher() -> Result<KArc<Dispatcher>, NtStatus> {
+    KArc::try_new(Dispatcher::new(1)).map_err(|_| NtStatus::NO_MEMORY)
 }
 
 /// Opens a client end of pipe `name` (its oldest listening instance).
@@ -283,6 +304,9 @@ pub fn open_client(
     client_token: Option<ObjectRef>,
 ) -> Result<PipeEnd, NtStatus> {
     let key = upper(name)?;
+    // Allocated before connecting: a failure after it left the server
+    // connected to a client end that did not exist.
+    let dispatcher = new_dispatcher()?;
     let instances = INSTANCES.lock();
     let mut found = false;
     for i in instances.iter().filter(|i| i.name == key) {
@@ -293,16 +317,15 @@ pub fn open_client(
         }
         s.conn = Conn::Connected;
         let generation = s.generation;
-        let mut done = Vec::new();
-        try_complete(&mut s, &mut done);
+        try_complete(&mut s);
         wake_all(&mut s);
         drop(s);
         let pipe = i.pipe.clone();
         drop(instances);
-        report(done);
+        report(&pipe);
         *pipe.client_token.lock() = client_token;
         // A client starts in byte read mode.
-        return PipeEnd::new(pipe, 1, generation, synchronous, false);
+        return Ok(PipeEnd::new(pipe, 1, generation, synchronous, false, dispatcher));
     }
     Err(if found { NtStatus::PIPE_NOT_AVAILABLE } else { NtStatus::OBJECT_NAME_NOT_FOUND })
 }
@@ -337,32 +360,29 @@ fn attempt(
     }
 }
 
-/// Completes the pending requests that can finish now, oldest first.
-fn try_complete(s: &mut State, done: &mut Done) {
-    let mut i = 0;
-    while i < s.pending.len() {
+/// Finishes the pending requests that can finish now, oldest first;
+/// returns how many (`report` reports them).
+fn try_complete(s: &mut State) -> usize {
+    let mut finished = 0;
+    for i in 0..s.pending.len() {
+        if s.pending[i].result.is_some() {
+            continue;
+        }
         let (end, generation) = (s.pending[i].end, s.pending[i].generation);
         // Take the op out to borrow the state mutably.
         let op = core::mem::replace(&mut s.pending[i].op, Op::Listen);
         match attempt(s, end, generation, &op) {
-            None => {
-                s.pending[i].op = op;
-                i += 1;
-            }
+            None => s.pending[i].op = op,
             Some(result) => {
-                let p = s.pending.remove(i);
-                let (status, data) = match result {
+                s.pending[i].result = Some(match result {
                     Ok((data, status)) => (status, data),
                     Err(e) => (e, Vec::new()),
-                };
-                if done.try_push((p.request, status, data)).is_err() {
-                    // Out of memory: the request is lost rather than the
-                    // kernel; its waiter would wait forever, so this is
-                    // as far as fallibility goes here.
-                }
+                });
+                finished += 1;
             }
         }
     }
+    finished
 }
 
 impl State {
@@ -440,9 +460,9 @@ impl PipeEnd {
         generation: u64,
         synchronous: bool,
         message_reads: bool,
-    ) -> Result<PipeEnd, NtStatus> {
-        let dispatcher = KArc::try_new(Dispatcher::new(1)).map_err(|_| NtStatus::NO_MEMORY)?;
-        Ok(PipeEnd {
+        dispatcher: KArc<Dispatcher>,
+    ) -> PipeEnd {
+        PipeEnd {
             pipe,
             end,
             generation,
@@ -451,7 +471,7 @@ impl PipeEnd {
             completion: IrqMutex::new(None),
             modes: core::sync::atomic::AtomicU32::new(0),
             dispatcher,
-        })
+        }
     }
 
     fn peer(&self) -> usize {
@@ -497,7 +517,13 @@ impl PipeEnd {
             if !self.synchronous
                 && let Some(request) = request.take()
             {
-                let p = Pending { end: self.end, generation: self.generation, op, request };
+                let p = Pending {
+                    end: self.end,
+                    generation: self.generation,
+                    op,
+                    request,
+                    result: None,
+                };
                 s.pending.try_push(p).map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)?;
                 return Ok(Outcome::Pending);
             }
@@ -534,7 +560,6 @@ impl PipeEnd {
         if self.end != 0 {
             return Err(NtStatus::ILLEGAL_FUNCTION);
         }
-        let mut done = Vec::new();
         {
             let mut s = self.pipe.state.lock();
             if s.conn == Conn::Disconnected {
@@ -546,10 +571,10 @@ impl PipeEnd {
                 s.inbox[e].clear();
                 s.messages[e].clear();
             }
-            try_complete(&mut s, &mut done);
+            try_complete(&mut s);
             wake_all(&mut s);
         }
-        report(done);
+        report(&self.pipe);
         Ok(())
     }
 
@@ -576,7 +601,7 @@ impl PipeEnd {
         let peer = self.peer();
         let mut first = true;
         loop {
-            let mut done = Vec::new();
+            let mut finished = 0;
             let mut s = self.pipe.state.lock();
             s.check_connected(self.end, self.generation)?;
             let peer_open = if peer == 0 { s.server_open } else { s.conn == Conn::Connected };
@@ -599,17 +624,17 @@ impl PipeEnd {
                 s.inbox[peer].extend(&data[..n]);
                 data = &data[n..];
                 first = false;
-                try_complete(&mut s, &mut done);
+                finished = try_complete(&mut s);
                 wake_all(&mut s); // readers waiting for data
             }
             if data.is_empty() {
                 drop(s);
-                report(done);
+                report(&self.pipe);
                 return Ok(());
             }
-            if !done.is_empty() {
+            if finished > 0 {
                 drop(s);
-                report(done);
+                report(&self.pipe);
                 continue;
             }
             self.wait(s)?;
@@ -666,26 +691,23 @@ impl PipeEnd {
     /// Cancels this end's pending requests of `process` whose status
     /// block is `iosb` (any if None); returns how many.
     pub fn cancel(&self, process: &KArc<Process>, iosb: Option<u64>) -> usize {
-        let mut done = Vec::new();
+        let mut n = 0;
         {
             let mut s = self.pipe.state.lock();
-            let mut i = 0;
-            while i < s.pending.len() {
+            for i in 0..s.pending.len() {
                 let p = &s.pending[i];
-                if p.end == self.end
+                if p.result.is_none()
+                    && p.end == self.end
                     && p.generation == self.generation
                     && KArc::ptr_eq(&p.request.process, process)
                     && iosb.is_none_or(|b| b == p.request.iosb)
                 {
-                    let p = s.pending.remove(i);
-                    let _ = done.try_push((p.request, notify::CANCELLED, Vec::new()));
-                } else {
-                    i += 1;
+                    cancel_pending(&mut s, i);
+                    n += 1;
                 }
             }
         }
-        let n = done.len();
-        report(done);
+        report(&self.pipe);
         n
     }
 }

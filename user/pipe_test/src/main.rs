@@ -294,7 +294,9 @@ fn pattern(i: u32) -> u8 {
     (i.wrapping_mul(2_654_435_761) >> 24) as u8
 }
 
-/// Writes BULK bytes of `pattern` in uneven pieces, then closes the end.
+/// Writes BULK bytes of `pattern` in uneven pieces, then closes the end
+/// (also after a failed write, so the reader sees the end of the pipe
+/// instead of waiting for ever: fault injection makes writes fail).
 extern "system" fn writer(h: *mut c_void) -> u32 {
     let mut buf = [0u8; 3000];
     let mut sent = 0u32;
@@ -308,6 +310,8 @@ extern "system" fn writer(h: *mut c_void) -> u32 {
         if unsafe { WriteFile(h, buf.as_ptr(), n, &mut written, core::ptr::null_mut()) } == 0
             || written != n
         {
+            // SAFETY: the write end, no longer used.
+            unsafe { CloseHandle(h) };
             return 1;
         }
         sent += n;
@@ -774,6 +778,9 @@ extern "system" fn answer(server: *mut c_void) -> u32 {
         if ReadFile(server, b.as_mut_ptr(), 16, &mut n, core::ptr::null_mut()) == 0
             || &b[..n as usize] != b"ping"
         {
+            // The client's read of the answer then ends (broken pipe)
+            // instead of waiting for ever.
+            DisconnectNamedPipe(server);
             return 1;
         }
         WriteFile(server, b"pong".as_ptr(), 4, &mut n, core::ptr::null_mut());

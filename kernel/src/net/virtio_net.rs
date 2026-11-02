@@ -113,6 +113,11 @@ impl phy::TxToken for TxToken<'_> {
         let len = len.min(MTU);
         let result = f(&mut frame[HEADER..HEADER + len]);
         let net = self.0;
+        // Fault injection: the frame is lost (TCP retransmits).
+        if crate::failpoint::hit(crate::failpoint::Point::NetTx) {
+            TX_FULL.fetch_add(1, Ordering::Relaxed);
+            return result;
+        }
         let sent = net.dev.queue(TX).is_some_and(|tx| {
             tx.free_slot().is_some_and(|slot| {
                 tx.write_slot(slot, 0, &frame[..HEADER + len]) && tx.post(slot, HEADER + len)

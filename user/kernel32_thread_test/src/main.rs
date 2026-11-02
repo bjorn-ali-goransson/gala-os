@@ -403,6 +403,9 @@ fn run() -> Result<(), u32> {
 
         // Suspend a running thread, read and change its registers.
         let h = CreateThread(core::ptr::null_mut(), 0, spinner, core::ptr::null_mut(), 0, &mut tid);
+        // (Checked before waiting for it: with failures injected, a thread
+        // that was never created would be waited for for ever.)
+        c.ok(!h.is_null(), 0)?;
         while SPINS.load(Ordering::SeqCst) < 1000 {
             Sleep(1);
         }
