@@ -565,7 +565,22 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    report view, virtual lists (LVN_GETDISPINFOW), selection and its
    notifications; FileZilla gets past its LVM_GETNEXTITEM loop. Then COMBOBOX and GetComboBoxInfo (controls_test) and the
    tree view (comctl32_test); every control FileZilla creates exists now.
-   It now stops at gdi32's regions (CreateRectRgn).
+   Then gdi32's regions and region clipping (gdi32_test),
+   GetUpdateRgn/GetUpdateRect, IsDialogMessageW and GetNextDlgTabItem,
+   WindowFromPoint (user32_test, controls_test): FileZilla runs its
+   message loop. Then gdi32's drawing primitives (gdi32_test: ROP2 and fill
+   modes, Polygon/PolyPolygon/Polyline, Ellipse, RoundRect, the brush
+   origin, graphics mode and world transform (kept), ExtCreatePen,
+   SetLayout, MaskBlt; hatch and pattern brushes drawn solid, Arc/Pie/
+   ExtFloodFill recorded), GetDialogBaseUnits, strftime's %x/%X. Then dialogs from templates (CreateDialogIndirectParamW,
+   CreateDialogParamW, DefDlgProcW, MapDialogRect, EndDialog), EndMenu,
+   activation (GetActiveWindow, SetActiveWindow, SetForegroundWindow,
+   BringWindowToTop). **FileZilla's main window shows** (2026-11-02):
+   toolbar, Quickconnect bar, local tree and file list, the remote side,
+   the queue and status bar, with its Welcome dialog; it then waits in
+   its message loop. Next: what looks wrong on it (the queue's tab bar,
+   the combo box's drop-down button, the tree's chevrons), the menu bar,
+   then using it (connecting to a server).
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,

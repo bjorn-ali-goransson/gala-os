@@ -10,14 +10,14 @@ use crate::{
 };
 
 /// The DC's brush colour (None: the null brush).
-fn brush(dc: &Dc, slots: &[Object]) -> Option<u32> {
+pub(crate) fn brush(dc: &Dc, slots: &[Object]) -> Option<u32> {
     match slots[dc.brush] {
         Object::Brush { color, null: false } => Some(color),
         _ => None,
     }
 }
 
-fn pen(dc: &Dc, slots: &[Object]) -> Option<(u32, i32)> {
+pub(crate) fn pen(dc: &Dc, slots: &[Object]) -> Option<(u32, i32)> {
     match slots[dc.pen] {
         Object::Pen { color, null: false, width, .. } => Some((color, width)),
         _ => None,
@@ -151,21 +151,7 @@ pub extern "system" fn LineTo(hdc: Handle, x: i32, y: i32) -> i32 {
         let (x1, y1) = dc.device_point(x, y);
         dc.pos = (x, y);
         let Some((c, w)) = pen(dc, slots) else { return 1 };
-        let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
-        let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
-        let (mut px, mut py, mut err) = (x0, y0, dx + dy);
-        while (px, py) != (x1, y1) {
-            dc.fill(px - (w - 1) / 2, py - (w - 1) / 2, w, w, c);
-            let e2 = 2 * err;
-            if e2 >= dy {
-                err += dy;
-                px += sx;
-            }
-            if e2 <= dx {
-                err += dx;
-                py += sy;
-            }
-        }
+        crate::shapes::line(dc, x0, y0, x1, y1, c, w);
         1
     })
     .unwrap_or(0)

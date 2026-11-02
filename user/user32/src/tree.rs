@@ -667,10 +667,16 @@ pub extern "system" fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize {
         }
         GWL_EXSTYLE => w.ex_style as i32 as isize,
         GWLP_USERDATA => w.user_data,
-        _ => {
-            crate::window::unsupported(b"user32.dll!GetWindowLongPtrW(extra bytes)", index as u64);
-            0
-        }
+        _ => match crate::dialog::get_long(hwnd, index) {
+            Some(v) => v,
+            None => {
+                crate::window::unsupported(
+                    b"user32.dll!GetWindowLongPtrW(extra bytes)",
+                    index as u64,
+                );
+                0
+            }
+        },
     }
 }
 
@@ -706,10 +712,16 @@ pub extern "system" fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -
             set_last_error(ERROR_INVALID_WINDOW_HANDLE);
             0
         }
-        Some(isize::MIN) => {
-            crate::window::unsupported(b"user32.dll!SetWindowLongPtrW(extra bytes)", index as u64);
-            0
-        }
+        Some(isize::MIN) => match crate::dialog::set_long(hwnd, index, value) {
+            Some(old) => old,
+            None => {
+                crate::window::unsupported(
+                    b"user32.dll!SetWindowLongPtrW(extra bytes)",
+                    index as u64,
+                );
+                0
+            }
+        },
         Some(old) => old,
     }
 }
@@ -1275,4 +1287,160 @@ pub extern "system" fn EndDeferWindowPos(list: usize) -> i32 {
     }
     with_defer(|used, _, _| used[i] = false);
     1
+}
+
+// ---- Dialog navigation ----
+
+/// The dialog's direct children that take the focus by Tab: visible,
+/// enabled, WS_TABSTOP; in sibling order.
+fn tab_stops(dlg: Hwnd) -> ([Hwnd; 128], usize) {
+    let mut out = [0; 128];
+    let mut n = 0;
+    let mut c = GetWindow(dlg, 5); // GW_CHILD
+    while c != 0 && n < out.len() {
+        let s = GetWindowLongW(c, -16) as u32;
+        if s & 0x0001_0000 != 0 && s & 0x1000_0000 != 0 && s & 0x0800_0000 == 0 {
+            out[n] = c;
+            n += 1;
+        }
+        c = GetWindow(c, 2); // GW_HWNDNEXT
+    }
+    (out, n)
+}
+
+/// GetNextDlgTabItem(dlg, control, previous): the next (or previous)
+/// WS_TABSTOP control after `control`, wrapping; the first (last) for
+/// NULL.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetNextDlgTabItem(dlg: Hwnd, control: Hwnd, previous: i32) -> Hwnd {
+    let (stops, n) = tab_stops(dlg);
+    if n == 0 {
+        return control;
+    }
+    let at = stops[..n].iter().position(|&h| h == control);
+    let i = match (at, previous != 0) {
+        (Some(i), false) => (i + 1) % n,
+        (Some(i), true) => (i + n - 1) % n,
+        (None, false) => 0,
+        (None, true) => n - 1,
+    };
+    stops[i]
+}
+
+/// IsDialogMessageW(dlg, msg): the dialog's keyboard: Tab (Shift+Tab)
+/// moves the focus between its WS_TABSTOP controls, Enter sends IDOK and
+/// Esc IDCANCEL (unless the focused control wants the key, by
+/// WM_GETDLGCODE); its windows' other messages are translated and
+/// dispatched. TRUE when the message was the dialog's.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsDialogMessageW(dlg: Hwnd, msg: *mut crate::window::Msg) -> i32 {
+    if msg.is_null() || dlg == 0 {
+        return 0;
+    }
+    // SAFETY: the caller's MSG.
+    let m = unsafe { *msg };
+    if m.hwnd != dlg && IsChild(dlg, m.hwnd) == 0 {
+        return 0;
+    }
+    const WM_KEYDOWN: u32 = 0x0100;
+    const WM_GETDLGCODE: u32 = 0x0087;
+    if m.message == WM_KEYDOWN {
+        let code = SendMessageW(m.hwnd, WM_GETDLGCODE, m.wparam, msg as isize) as u32;
+        let wants_all = code & 0x4 != 0; // DLGC_WANTALLKEYS / DLGC_WANTMESSAGE
+        match m.wparam {
+            0x09 if code & 0x2 == 0 && !wants_all => {
+                // VK_TAB (not DLGC_WANTTAB)
+                let shift = crate::window::GetKeyState(0x10) < 0;
+                let focus = GetFocus();
+                let next = GetNextDlgTabItem(
+                    dlg,
+                    if focus != 0 { focus } else { m.hwnd },
+                    i32::from(shift),
+                );
+                if next != 0 {
+                    SetFocus(next);
+                }
+                return 1;
+            }
+            0x0d if !wants_all => {
+                // VK_RETURN: the default button (DM_GETDEFID), else IDOK.
+                let def = SendMessageW(dlg, 0x0400, 0, 0) as usize;
+                let id = if def >> 16 == 0x534b { def & 0xffff } else { 1 };
+                SendMessageW(dlg, 0x0111, id, GetDlgItem(dlg, id as i32) as isize);
+                return 1;
+            }
+            0x1b if !wants_all => {
+                // VK_ESCAPE: IDCANCEL.
+                SendMessageW(dlg, 0x0111, 2, GetDlgItem(dlg, 2) as isize);
+                return 1;
+            }
+            _ => {}
+        }
+    }
+    crate::window::TranslateMessage(msg);
+    crate::window::DispatchMessageW(msg);
+    1
+}
+
+/// IsDialogMessageA: as IsDialogMessageW (the ANSI code page is UTF-8).
+#[unsafe(no_mangle)]
+pub extern "system" fn IsDialogMessageA(dlg: Hwnd, msg: *mut crate::window::Msg) -> i32 {
+    IsDialogMessageW(dlg, msg)
+}
+
+/// POINT, passed by value.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Point {
+    x: i32,
+    y: i32,
+}
+
+/// WindowFromPoint(point): the deepest visible window at a screen point:
+/// the topmost top-level window containing it (its frame included), then
+/// the topmost visible child containing it, and so on; NULL if none.
+#[unsafe(no_mangle)]
+pub extern "system" fn WindowFromPoint(point: Point) -> Hwnd {
+    let Point { x, y } = point;
+    with(|s| {
+        let inside_top = |i: usize| {
+            let w = &s.windows[i];
+            x >= w.x && y >= w.y && x < w.x + w.w && y < w.y + w.h
+        };
+        let inside_child = |i: usize| {
+            let w = &s.windows[i];
+            let (ox, oy) = screen_origin(s, i);
+            x >= ox && y >= oy && x < ox + w.w && y < oy + w.h
+        };
+        let shown = |i: usize| s.windows[i].used && s.windows[i].visible;
+        let mut best: Option<usize> = None;
+        for i in 0..s.windows.len() {
+            if shown(i)
+                && s.windows[i].parent == 0
+                && inside_top(i)
+                && best.is_none_or(|b| s.windows[i].z > s.windows[b].z)
+            {
+                best = Some(i);
+            }
+        }
+        let mut at = best?;
+        loop {
+            let me = crate::window::hwnd_of(at);
+            let mut next: Option<usize> = None;
+            for i in 0..s.windows.len() {
+                if shown(i)
+                    && s.windows[i].parent == me
+                    && inside_child(i)
+                    && next.is_none_or(|b| s.windows[i].z > s.windows[b].z)
+                {
+                    next = Some(i);
+                }
+            }
+            match next {
+                Some(n) => at = n,
+                None => return Some(me),
+            }
+        }
+    })
+    .unwrap_or(0)
 }

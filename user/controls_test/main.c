@@ -21,6 +21,12 @@
  * - COMBOBOX: items (add, insert, find, delete, reset, data), the
  *   selection, a drop-down list's text; GetComboBoxInfo names its edit
  *   and list.
+ * - IsDialogMessageW: Tab to the next WS_TABSTOP control
+ *   (GetNextDlgTabItem), the dialog's other messages dispatched, other
+ *   windows' messages not taken.
+ * - Dialogs from templates: CreateDialogIndirectParamW (controls, their
+ *   places in dialog units, WM_INITDIALOG), DWLP_USER, the dialog
+ *   procedure's messages, WM_CLOSE as IDCANCEL, EndDialog.
  *
  * Prints "controls_test: ok" or exits with the number of the failing
  * check. */
@@ -195,6 +201,136 @@ static void combos(HWND parent) {
     CHECK(GetWindowTextW(d, text, 32) == 5 && wcscmp(text, L"typed") == 0);
 }
 
+/* IsDialogMessageW: Tab moves the focus to the next WS_TABSTOP control
+ * (GetNextDlgTabItem, Shift+Tab back); other messages for the dialog's
+ * windows are dispatched (TRUE); messages for other windows are not its
+ * (FALSE). */
+static void dialog_keys(HWND parent) {
+    HWND a = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 200, 150, 80, 24, parent, (HMENU)70,
+                             GetModuleHandleW(NULL), NULL);
+    HWND b = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 200, 180, 80, 24, parent, (HMENU)71,
+                             GetModuleHandleW(NULL), NULL);
+    CHECK(GetNextDlgTabItem(parent, a, FALSE) == b);
+    CHECK(GetNextDlgTabItem(parent, b, TRUE) == a);
+    SetFocus(a);
+    MSG m = {a, WM_KEYDOWN, VK_TAB, 0};
+    CHECK(IsDialogMessageW(parent, &m) && GetFocus() == b);
+    MSG c = {b, WM_CHAR, 'q', 1};
+    CHECK(IsDialogMessageW(parent, &c));
+    WCHAR text[8];
+    CHECK(GetWindowTextW(b, text, 8) == 1 && text[0] == 'q');
+    HWND other = CreateWindowExW(0, L"STATIC", L"", WS_OVERLAPPEDWINDOW, 0, 0, 50, 50, NULL, NULL,
+                                 GetModuleHandleW(NULL), NULL);
+    MSG o = {other, WM_CHAR, 'q', 1};
+    CHECK(!IsDialogMessageW(parent, &o));
+    DestroyWindow(other);
+    DestroyWindow(a);
+    DestroyWindow(b);
+}
+
+/* Dialogs from a template in memory (DLGTEMPLATE with DS_SETFONT and two
+ * items, a STATIC and a BUTTON by class atom): CreateDialogIndirectParamW
+ * creates the dialog and its controls (their ids, classes, texts, places:
+ * MapDialogRect of their dialog units), sends WM_INITDIALOG with the
+ * parameter to the dialog procedure; DWLP_USER is the procedure's to
+ * keep; messages reach the procedure (WM_COMMAND), and WM_CLOSE by
+ * default becomes WM_COMMAND IDCANCEL; EndDialog ends it. */
+static int init_dialogs, dialog_commands;
+static WPARAM dialog_last_command;
+static LPARAM init_param;
+static INT_PTR CALLBACK dialog_proc(HWND dlg, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_INITDIALOG) {
+        init_dialogs++;
+        init_param = lparam;
+        return TRUE;
+    }
+    if (msg == WM_COMMAND) {
+        dialog_commands++;
+        dialog_last_command = wparam;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static WORD *put_text(WORD *p, const WCHAR *s) {
+    while ((*p++ = *s++) != 0) {
+    }
+    return p;
+}
+
+static WORD *align4(WORD *p) {
+    return (WORD *)(((ULONG_PTR)p + 3) & ~(ULONG_PTR)3);
+}
+
+static void dialogs(HWND parent) {
+    static DWORD buf[256];
+    memset(buf, 0, sizeof buf);
+    DLGTEMPLATE *t = (DLGTEMPLATE *)buf;
+    t->style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_SETFONT | DS_MODALFRAME;
+    t->cdit = 2;
+    t->x = 10;
+    t->y = 10;
+    t->cx = 200;
+    t->cy = 100;
+    WORD *p = (WORD *)(t + 1);
+    *p++ = 0; /* no menu */
+    *p++ = 0; /* the dialog class */
+    p = put_text(p, L"Gala dialog");
+    *p++ = 9; /* 9 point */
+    p = put_text(p, L"Segoe UI");
+    p = align4(p);
+    DLGITEMTEMPLATE *it = (DLGITEMTEMPLATE *)p;
+    it->style = WS_CHILD | WS_VISIBLE | SS_LEFT;
+    it->x = 7;
+    it->y = 7;
+    it->cx = 100;
+    it->cy = 10;
+    it->id = 100;
+    p = (WORD *)(it + 1);
+    *p++ = 0xffff;
+    *p++ = 0x0082; /* STATIC */
+    p = put_text(p, L"Label");
+    *p++ = 0;
+    p = align4(p);
+    it = (DLGITEMTEMPLATE *)p;
+    it->style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON;
+    it->x = 140;
+    it->y = 80;
+    it->cx = 50;
+    it->cy = 14;
+    it->id = IDOK;
+    p = (WORD *)(it + 1);
+    *p++ = 0xffff;
+    *p++ = 0x0080; /* BUTTON */
+    p = put_text(p, L"OK");
+    *p++ = 0;
+
+    init_dialogs = 0;
+    HWND dlg = CreateDialogIndirectParamW(GetModuleHandleW(NULL), t, parent, dialog_proc, 1234);
+    CHECK(dlg != NULL && init_dialogs == 1 && init_param == 1234);
+    WCHAR text[32];
+    CHECK(GetWindowTextW(dlg, text, 32) == 11 && wcscmp(text, L"Gala dialog") == 0);
+    HWND label = GetDlgItem(dlg, 100), ok = GetDlgItem(dlg, IDOK);
+    CHECK(label != NULL && ok != NULL && GetDlgCtrlID(ok) == IDOK);
+    CHECK(GetClassNameW(label, text, 32) && lstrcmpiW(text, L"Static") == 0);
+    CHECK(GetClassNameW(ok, text, 32) && lstrcmpiW(text, L"Button") == 0);
+    CHECK(GetWindowTextW(ok, text, 32) == 2 && wcscmp(text, L"OK") == 0);
+    RECT du = {140, 80, 190, 94}, wr;
+    CHECK(MapDialogRect(dlg, &du));
+    GetWindowRect(ok, &wr);
+    MapWindowPoints(NULL, dlg, (POINT *)&wr, 2);
+    CHECK(wr.left == du.left && wr.top == du.top && wr.right == du.right && wr.bottom == du.bottom);
+    CHECK(SetWindowLongPtrW(dlg, DWLP_USER, 77) == 0 && GetWindowLongPtrW(dlg, DWLP_USER) == 77);
+    dialog_commands = 0;
+    SendMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), (LPARAM)ok);
+    CHECK(dialog_commands == 1 && LOWORD(dialog_last_command) == IDOK);
+    SendMessageW(dlg, WM_CLOSE, 0, 0);
+    CHECK(dialog_commands == 2 && LOWORD(dialog_last_command) == IDCANCEL && IsWindow(dlg));
+    CHECK(EndDialog(dlg, 5));
+    DestroyWindow(dlg);
+    CHECK(!IsWindow(dlg));
+}
+
 int main(void) {
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = parent_proc;
@@ -211,6 +347,8 @@ int main(void) {
     buttons(parent);
     edits(parent);
     combos(parent);
+    dialog_keys(parent);
+    dialogs(parent);
     DestroyWindow(parent);
     printf("controls_test: ok\n");
     return 0;

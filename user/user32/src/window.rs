@@ -1848,3 +1848,86 @@ pub extern "system" fn CallWindowProcA(
 ) -> isize {
     CallWindowProcW(proc_, hwnd, msg, wparam, lparam)
 }
+
+/// GetUpdateRgn(hwnd, rgn, erase): the region to paint in `rgn` (client
+/// coordinates). gala invalidates whole windows, so it is the client area
+/// while the window is invalid and empty otherwise; SIMPLEREGION or
+/// NULLREGION.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetUpdateRgn(hwnd: Hwnd, rgn: Handle, _erase: i32) -> i32 {
+    let Some(w) = window(hwnd) else { return 0 };
+    static SET_RECT_RGN: AtomicUsize = AtomicUsize::new(0);
+    let f = crate::icon::gdi_proc(&SET_RECT_RGN, b"SetRectRgn\0");
+    if f == 0 {
+        return 0;
+    }
+    type SetRectRgn = extern "system" fn(Handle, i32, i32, i32, i32) -> i32;
+    // SAFETY: gdi32's SetRectRgn.
+    let set: SetRectRgn = unsafe { core::mem::transmute::<usize, SetRectRgn>(f) };
+    if w.invalid {
+        set(rgn, 0, 0, w.cw, w.ch);
+        2 // SIMPLEREGION
+    } else {
+        set(rgn, 0, 0, 0, 0);
+        1 // NULLREGION
+    }
+}
+
+/// GetUpdateRect(hwnd, rect, erase): whether the window needs painting,
+/// and the client area as the rectangle (or an empty one).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetUpdateRect(hwnd: Hwnd, rect: *mut [i32; 4], _erase: i32) -> i32 {
+    let Some(w) = window(hwnd) else { return 0 };
+    if !rect.is_null() {
+        // SAFETY: the caller's RECT.
+        unsafe { *rect = if w.invalid { [0, 0, w.cw, w.ch] } else { [0; 4] } };
+    }
+    i32::from(w.invalid)
+}
+
+/// GetDialogBaseUnits: the system font's average character width (low
+/// word) and height (high word): 8 and 16 at 96 dpi.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDialogBaseUnits() -> i32 {
+    8 | 16 << 16
+}
+
+/// GetActiveWindow: the foreground window, if it is the calling thread's
+/// (the active window is per thread; gala's desktop activates one window
+/// at a time).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetActiveWindow() -> Hwnd {
+    let h = GetForegroundWindow();
+    match window(h) {
+        Some(w) if w.thread == me() => h,
+        _ => 0,
+    }
+}
+
+/// SetActiveWindow: activates a top-level window of the calling thread;
+/// the previous active window.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetActiveWindow(hwnd: Hwnd) -> Hwnd {
+    let previous = GetActiveWindow();
+    if window(hwnd).is_some() {
+        SetForegroundWindow(hwnd);
+    }
+    previous
+}
+
+/// SetForegroundWindow: the window becomes the foreground (and active)
+/// window, raised on the desktop.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetForegroundWindow(hwnd: Hwnd) -> i32 {
+    if window(hwnd).is_none() {
+        return 0;
+    }
+    FOREGROUND.store(hwnd, Ordering::Relaxed);
+    BringWindowToTop(hwnd)
+}
+
+/// BringWindowToTop: to the top of the z order (SetWindowPos HWND_TOP).
+#[unsafe(no_mangle)]
+pub extern "system" fn BringWindowToTop(hwnd: Hwnd) -> i32 {
+    crate::tree::SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x1 | 0x2 | 0x10) // NOSIZE | NOMOVE | NOACTIVATE
+}

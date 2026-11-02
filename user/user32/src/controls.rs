@@ -506,7 +506,8 @@ pub fn register_system_classes() {
     if REGISTERED.swap(true, Ordering::AcqRel) {
         return;
     }
-    let classes: [(&[u8], crate::window::WndProc); 5] = [
+    let classes: [(&[u8], crate::window::WndProc); 6] = [
+        (b"#32770\0", crate::dialog::DefDlgProcW),
         (b"STATIC\0", static_proc),
         (b"BUTTON\0", button_proc),
         (b"EDIT\0", edit_proc),

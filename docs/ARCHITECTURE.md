@@ -2288,6 +2288,27 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   item, as do the arrows and the wheel; CBN_SELCHANGE), GetComboBoxInfo.
   DrawTextW (`text.rs`) splits, wraps, ellipsizes and aligns lines over
   gdi32's ExtTextOutW (1024 characters at most).
+- **Dialogs** (`dialog.rs`; `controls_test`): CreateDialogIndirectParamW
+  reads DLGTEMPLATE or DLGTEMPLATEEX (style, place in dialog units,
+  menu, class, title, the DS_SETFONT font, items with classes by name
+  or atom and creation data), makes the dialog (the template's class or
+  "#32770", whose procedure is DefDlgProcW), sizes it from the font's
+  base units (average letter width, height), creates the controls at
+  MapDialogRect places with the font, and sends WM_INITDIALOG (TRUE:
+  the first tab stop gets the focus). DefDlgProcW asks the dialog
+  procedure first (DWLP_MSGRESULT, or the result itself for the
+  messages that return one), then defaults: WM_CLOSE is IDCANCEL,
+  DM_GETDEFID/SETDEFID, the face colour. DWLP_MSGRESULT/DLGPROC/USER
+  live in the dialog table (no window extra bytes yet). EndDialog hides
+  a modeless dialog; modal DialogBox* is not there yet.
+- **Dialog keys and hit testing** (`tree.rs`; `controls_test`,
+  `user32_test`): IsDialogMessageW (Tab/Shift+Tab between WS_TABSTOP
+  children via GetNextDlgTabItem, Enter: DM_GETDEFID's button or IDOK,
+  Esc: IDCANCEL, unless WM_GETDLGCODE asks for the key; the dialog's
+  other messages translated and dispatched), WindowFromPoint (the
+  topmost visible top-level window at the point, then its topmost
+  visible child, recursively), GetUpdateRgn/GetUpdateRect (the client
+  area while invalid: gala invalidates whole windows).
 - **Smaller user32/ole32 pieces wx needs** (`user32_test`): an
   unregistered class makes CreateWindowExW fail with
   ERROR_CANNOT_FIND_WND_CLASS and records `user32.dll!CreateWindowExW
@@ -2392,7 +2413,26 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   TA_BOTTOM/BASELINE) and OPAQUE backgrounds; ExtTextOutW (ETO_OPAQUE,
   ETO_CLIPPED, lpDx); GetTextMetricsW, GetTextExtentPoint32W,
   GetTextExtentExPointW (fit and partial widths) and GetTextFaceW from
-  the same metrics. 1-bit DIB sections keep their two-colour palette
+  the same metrics. Drawing primitives (`shapes.rs`): pen
+  pixels go through the DC's ROP2 mix; polygons fill row by row
+  (ALTERNATE or WINDING crossings), then their outline; ellipses and
+  rounded rectangles fill rows by integer square roots and outline
+  from row and column scans; the brush origin, graphics mode, world
+  transform (not applied; a non-identity one is recorded) and layout
+  (right-to-left recorded) are kept; ExtCreatePen pens are OBJ_EXTPEN
+  (a style bit) and drawn solid; hatch and pattern brushes are drawn in
+  one colour (recorded); MaskBlt picks the foreground or background
+  ROP3 by the monochrome mask; Arc, Pie and ExtFloodFill are recorded
+  and not drawn. Regions (`region.rs`): HRGN objects
+  (`Object::Region`, an index into a store) hold non-overlapping
+  rectangles in one canonical banded form (equal regions, equal lists);
+  CombineRgn cuts the plane at both regions' edges and keeps the cells
+  the operation keeps; polygons fill row by row (even-odd). A DC's clip
+  is up to 8 device rectangles inline in the DC (more become their
+  bounding box, recorded); SelectClipRgn/ExtSelectClipRgn,
+  ExcludeClipRect, IntersectClipRect, GetClipBox, GetClipRgn; drawing
+  and GetPixel respect it (GetPixel outside: CLR_INVALID); FillRgn,
+  PaintRgn, GetRegionData/ExtCreateRegion. 1-bit DIB sections keep their two-colour palette
   in the surface: reads give the entry's colour, writes pick the nearer
   entry. Coordinate mapping: SetMapMode (MM_TEXT .. MM_ANISOTROPIC; the fixed
   modes' extents from the screen's size in mm, y up), window and

@@ -13,6 +13,7 @@ use gala_heap as _;
 mod accel;
 mod combo;
 mod controls;
+mod dialog;
 mod hook;
 mod icon;
 mod keyboard;

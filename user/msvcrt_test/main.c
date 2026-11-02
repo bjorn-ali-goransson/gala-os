@@ -134,6 +134,9 @@ static void filezilla_checks(void) {
     tm.tm_hour = 12; tm.tm_min = 34; tm.tm_sec = 56;
     wchar_t when[64];
     CHECK(wcsftime(when, 64, L"%Y-%m-%d %H:%M:%S", &tm) == 19);
+    /* %x and %X in the C locale: "%m/%d/%y" and "%H:%M:%S". */
+    WCHAR xx[32];
+    CHECK(wcsftime(xx, 32, L"%x|%X", &tm) == 17 && xx[2] == L'/' && xx[8] == L'|' && xx[11] == L':');
     CHECK(wcscmp(when, L"2026-11-01 12:34:56") == 0);
 
     CHECK(_wputenv(L"FZ_TEST=yes") == 0);

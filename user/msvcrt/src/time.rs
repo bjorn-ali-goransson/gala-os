@@ -191,6 +191,22 @@ pub extern "C" fn strftime(buf: *mut u8, max: usize, fmt: *const u8, tm: *const 
                         && put(b":")
                         && put(&two(t.sec))
                 }
+                b'x' => {
+                    // "%m/%d/%y" in the C locale.
+                    put(&two(t.mon + 1))
+                        && put(b"/")
+                        && put(&two(t.mday))
+                        && put(b"/")
+                        && put(&two(year % 100))
+                }
+                b'X' => {
+                    // "%H:%M:%S" in the C locale.
+                    put(&two(t.hour))
+                        && put(b":")
+                        && put(&two(t.min))
+                        && put(b":")
+                        && put(&two(t.sec))
+                }
                 b'%' => put(b"%"),
                 other => {
                     crate::missing(b"msvcrt.dll!strftime(conversion)", u64::from(other));

@@ -47,6 +47,14 @@
  *
  * - CreateBitmapIndirect: CreateBitmap with the BITMAP's fields.
  *
+ * - Regions: types, combining, testing, moving, clipping (SelectClipRgn,
+ *   GetClipBox, ExcludeClipRect, IntersectClipRect), FillRgn,
+ *   GetRegionData/ExtCreateRegion.
+ *
+ * - Drawing: fill and ROP2 modes, Polygon, Polyline, Ellipse, RoundRect,
+ *   the brush origin, graphics mode and world transform (identity),
+ *   ExtCreatePen, SetLayout, MaskBlt.
+ *
  * - Palettes: CreatePalette keeps the entries (GetObjectType OBJ_PAL,
  *   GetObjectW: the entry count as a WORD, GetPaletteEntries,
  *   GetNearestPaletteIndex); SelectPalette returns the previous one (the
@@ -374,6 +382,169 @@ static void mono_dib(void) {
     CHECK(DeleteObject(b));
 }
 
+/* Regions: rectangles and their types (NULLREGION, SIMPLEREGION,
+ * COMPLEXREGION), combined (AND, OR, XOR, DIFF, COPY), tested (points,
+ * rectangles, equality), moved; as a DC's clip they limit drawing
+ * (SelectClipRgn, GetClipBox, ExcludeClipRect, IntersectClipRect);
+ * FillRgn paints them; GetRegionData lists the rectangles and
+ * ExtCreateRegion makes the region back. */
+static void regions(void) {
+    HRGN a = CreateRectRgn(0, 0, 10, 10);
+    CHECK(a != NULL && GetObjectType(a) == OBJ_REGION);
+    RECT box;
+    CHECK(GetRgnBox(a, &box) == SIMPLEREGION && box.left == 0 && box.right == 10 && box.bottom == 10);
+    RECT r20 = {5, 5, 20, 20};
+    HRGN b = CreateRectRgnIndirect(&r20);
+    HRGN d = CreateRectRgn(0, 0, 0, 0);
+    CHECK(GetRgnBox(d, &box) == NULLREGION);
+    CHECK(CombineRgn(d, a, b, RGN_AND) == SIMPLEREGION && GetRgnBox(d, &box) == SIMPLEREGION);
+    CHECK(box.left == 5 && box.top == 5 && box.right == 10 && box.bottom == 10);
+    CHECK(CombineRgn(d, a, b, RGN_OR) == COMPLEXREGION && GetRgnBox(d, &box) == COMPLEXREGION);
+    CHECK(box.left == 0 && box.right == 20 && box.bottom == 20);
+    CHECK(PtInRegion(d, 15, 15) && PtInRegion(d, 2, 2) && !PtInRegion(d, 15, 2));
+    RECT probe = {12, 0, 14, 4};
+    CHECK(!RectInRegion(d, &probe));
+    probe.bottom = 6;
+    CHECK(RectInRegion(d, &probe));
+    CHECK(CombineRgn(d, a, b, RGN_DIFF) == COMPLEXREGION && !PtInRegion(d, 7, 7) && PtInRegion(d, 2, 7));
+    CHECK(CombineRgn(d, a, b, RGN_XOR) == COMPLEXREGION && !PtInRegion(d, 7, 7) && PtInRegion(d, 15, 15));
+    CHECK(CombineRgn(d, a, NULL, RGN_COPY) == SIMPLEREGION && EqualRgn(d, a));
+    /* Two rectangles that make one are one. */
+    HRGN left = CreateRectRgn(0, 0, 5, 10), right = CreateRectRgn(5, 0, 10, 10);
+    CHECK(CombineRgn(d, left, right, RGN_OR) == SIMPLEREGION && EqualRgn(d, a));
+    CHECK(OffsetRgn(d, 3, 4) == SIMPLEREGION && GetRgnBox(d, &box) && box.left == 3 && box.top == 4);
+    CHECK(!EqualRgn(d, a));
+
+    /* RGNDATA round trip. */
+    CHECK(CombineRgn(d, a, b, RGN_OR) == COMPLEXREGION);
+    DWORD size = GetRegionData(d, 0, NULL);
+    CHECK(size >= sizeof(RGNDATAHEADER) + 2 * sizeof(RECT));
+    RGNDATA *data = (RGNDATA *)HeapAlloc(GetProcessHeap(), 0, size);
+    CHECK(GetRegionData(d, size, data) == size && data->rdh.iType == RDH_RECTANGLES && data->rdh.nCount >= 2);
+    HRGN e = ExtCreateRegion(NULL, size, data);
+    CHECK(e != NULL && EqualRgn(e, d));
+    HeapFree(GetProcessHeap(), 0, data);
+
+    /* Clipping a memory DC. */
+    HDC screen = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
+    HDC mem = CreateCompatibleDC(screen);
+    HBITMAP bmp = CreateCompatibleBitmap(screen, 32, 32);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    PatBlt(mem, 0, 0, 32, 32, WHITENESS);
+    CHECK(GetClipBox(mem, &box) == SIMPLEREGION && box.right == 32 && box.bottom == 32);
+    CHECK(SelectClipRgn(mem, a) == SIMPLEREGION);
+    CHECK(GetClipBox(mem, &box) == SIMPLEREGION && box.right == 10);
+    PatBlt(mem, 0, 0, 32, 32, BLACKNESS);
+    /* Outside the clip GetPixel answers CLR_INVALID. */
+    CHECK(GetPixel(mem, 5, 5) == 0 && GetPixel(mem, 15, 15) == CLR_INVALID);
+    SelectClipRgn(mem, NULL);
+    CHECK(GetPixel(mem, 15, 15) == RGB(255, 255, 255));
+    SelectClipRgn(mem, a);
+    CHECK(ExcludeClipRect(mem, 2, 2, 4, 4) == COMPLEXREGION);
+    PatBlt(mem, 0, 0, 32, 32, WHITENESS);
+    SelectClipRgn(mem, NULL);
+    CHECK(GetPixel(mem, 3, 3) == 0 && GetPixel(mem, 8, 8) == RGB(255, 255, 255));
+    CHECK(GetClipBox(mem, &box) == SIMPLEREGION && box.right == 32);
+    CHECK(IntersectClipRect(mem, 20, 20, 30, 30) == SIMPLEREGION);
+    PatBlt(mem, 0, 0, 32, 32, BLACKNESS);
+    SelectClipRgn(mem, NULL);
+    CHECK(GetPixel(mem, 25, 25) == 0 && GetPixel(mem, 3, 3) == 0 && GetPixel(mem, 8, 8) == RGB(255, 255, 255));
+    /* FillRgn paints the region with a brush. */
+    PatBlt(mem, 0, 0, 32, 32, WHITENESS);
+    HBRUSH red = CreateSolidBrush(RGB(255, 0, 0));
+    CHECK(FillRgn(mem, b, red));
+    CHECK(GetPixel(mem, 10, 10) == RGB(255, 0, 0) && GetPixel(mem, 2, 2) == RGB(255, 255, 255));
+    DeleteObject(red);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    DeleteDC(screen);
+    CHECK(DeleteObject(a) && DeleteObject(b) && DeleteObject(d) && DeleteObject(e));
+    DeleteObject(left);
+    DeleteObject(right);
+}
+
+/* Drawing primitives on a white 64 x 64 memory DC with a red brush and a
+ * blue pen: modes (polygon fill, ROP2: R2_NOT inverts), Polygon,
+ * Polyline, Ellipse, RoundRect (insides in the brush, the far corners
+ * untouched), SetBrushOrgEx, the graphics mode and world transform
+ * (identity), ExtCreatePen, SetLayout; MaskBlt copies the source where
+ * the mask is set, keeps the destination where it is not. */
+static void shapes(void) {
+    HDC screen = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
+    HDC dc = CreateCompatibleDC(screen);
+    HBITMAP bmp = CreateCompatibleBitmap(screen, 64, 64);
+    HGDIOBJ oldb = SelectObject(dc, bmp);
+    PatBlt(dc, 0, 0, 64, 64, WHITENESS);
+    HBRUSH red = CreateSolidBrush(RGB(255, 0, 0));
+    HPEN blue = CreatePen(PS_SOLID, 1, RGB(0, 0, 255));
+    HGDIOBJ oldbr = SelectObject(dc, red), oldp = SelectObject(dc, blue);
+    CHECK(GetPolyFillMode(dc) == ALTERNATE && SetPolyFillMode(dc, WINDING) == ALTERNATE);
+    CHECK(GetPolyFillMode(dc) == WINDING);
+    CHECK(GetROP2(dc) == R2_COPYPEN);
+    POINT tri[3] = {{2, 2}, {30, 2}, {2, 30}};
+    CHECK(Polygon(dc, tri, 3));
+    CHECK(GetPixel(dc, 8, 8) == RGB(255, 0, 0) && GetPixel(dc, 28, 28) == RGB(255, 255, 255));
+    CHECK(GetPixel(dc, 15, 2) == RGB(0, 0, 255));
+    POINT line[3] = {{40, 2}, {60, 2}, {60, 20}};
+    CHECK(Polyline(dc, line, 3));
+    CHECK(GetPixel(dc, 50, 2) == RGB(0, 0, 255) && GetPixel(dc, 60, 10) == RGB(0, 0, 255));
+    CHECK(GetPixel(dc, 50, 10) == RGB(255, 255, 255));
+    CHECK(Ellipse(dc, 34, 34, 62, 62));
+    CHECK(GetPixel(dc, 48, 48) == RGB(255, 0, 0) && GetPixel(dc, 35, 35) == RGB(255, 255, 255));
+    PatBlt(dc, 0, 0, 64, 64, WHITENESS);
+    CHECK(RoundRect(dc, 2, 2, 40, 40, 16, 16));
+    CHECK(GetPixel(dc, 20, 20) == RGB(255, 0, 0) && GetPixel(dc, 2, 2) == RGB(255, 255, 255));
+    CHECK(GetPixel(dc, 20, 2) == RGB(0, 0, 255));
+    /* R2_NOT: the pen inverts what it crosses. */
+    CHECK(SetROP2(dc, R2_NOT) == R2_COPYPEN);
+    MoveToEx(dc, 0, 50, NULL);
+    LineTo(dc, 30, 50);
+    CHECK(GetPixel(dc, 10, 50) == RGB(0, 0, 0) && GetPixel(dc, 20, 20) == RGB(255, 0, 0));
+    SetROP2(dc, R2_COPYPEN);
+    POINT org;
+    CHECK(SetBrushOrgEx(dc, 3, 4, &org) && org.x == 0 && org.y == 0);
+    CHECK(GetGraphicsMode(dc) == GM_COMPATIBLE && SetGraphicsMode(dc, GM_ADVANCED) == GM_COMPATIBLE);
+    XFORM xf;
+    CHECK(GetWorldTransform(dc, &xf) && xf.eM11 == 1.0f && xf.eM22 == 1.0f && xf.eDx == 0.0f);
+    CHECK(ModifyWorldTransform(dc, NULL, MWT_IDENTITY));
+    SetGraphicsMode(dc, GM_COMPATIBLE);
+    CHECK(SetLayout(dc, 0) == 0);
+    LOGBRUSH lb = {BS_SOLID, RGB(0, 255, 0), 0};
+    HPEN green = ExtCreatePen(PS_GEOMETRIC | PS_SOLID, 3, &lb, 0, NULL);
+    CHECK(green != NULL && GetObjectType(green) == OBJ_EXTPEN);
+    SelectObject(dc, green);
+    MoveToEx(dc, 0, 60, NULL);
+    LineTo(dc, 63, 60);
+    CHECK(GetPixel(dc, 30, 60) == RGB(0, 255, 0));
+    SelectObject(dc, oldp);
+    DeleteObject(green);
+
+    /* MaskBlt: the source where the mask's bit is 1 (SRCCOPY), the
+     * destination where it is 0. */
+    HDC src = CreateCompatibleDC(screen);
+    HBITMAP sb = CreateCompatibleBitmap(screen, 8, 8);
+    HGDIOBJ olds = SelectObject(src, sb);
+    PatBlt(src, 0, 0, 8, 8, BLACKNESS);
+    BYTE bits[16] = {0xf0, 0, 0xf0, 0, 0xf0, 0, 0xf0, 0, 0xf0, 0, 0xf0, 0, 0xf0, 0, 0xf0, 0};
+    HBITMAP mask = CreateBitmap(8, 8, 1, 1, bits);
+    PatBlt(dc, 0, 0, 64, 64, WHITENESS);
+    CHECK(MaskBlt(dc, 0, 0, 8, 8, src, 0, 0, mask, 0, 0, MAKEROP4(SRCCOPY, 0x00AA0029)));
+    CHECK(GetPixel(dc, 1, 1) == RGB(0, 0, 0) && GetPixel(dc, 6, 1) == RGB(255, 255, 255));
+    SelectObject(src, olds);
+    DeleteObject(sb);
+    DeleteObject(mask);
+    DeleteDC(src);
+
+    SelectObject(dc, oldbr);
+    SelectObject(dc, oldb);
+    DeleteObject(red);
+    DeleteObject(blue);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+    DeleteDC(screen);
+}
+
 static void palettes(void) {
     struct { WORD version, count; PALETTEENTRY entries[2]; } lp = {0x300, 2, {{255, 0, 0, 0}, {0, 255, 0, 0}}};
     HPALETTE pal = CreatePalette((LOGPALETTE *)&lp);
@@ -453,6 +624,8 @@ int main(void) {
     mapping();
     mono_dib();
     bitmap_indirect();
+    regions();
+    shapes();
     palettes();
     dibs();
     printf("gdi32_test: ok\n");

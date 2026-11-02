@@ -21,6 +21,8 @@ mod dib;
 mod draw;
 mod font;
 mod palette;
+mod region;
+mod shapes;
 mod surface;
 mod unimplemented;
 
@@ -114,10 +116,20 @@ pub(crate) struct Dc {
     pub window_org: (i32, i32),
     pub viewport_org: (i32, i32),
     /// The clip rectangle in device coordinates (none: the surface).
-    pub clip: Option<[i32; 4]>,
+    pub clip: Option<region::Clip>,
     /// MoveToEx's position (logical).
     pub pos: (i32, i32),
     pub align: u32,
+    /// SetROP2's mix (R2_COPYPEN 13), SetPolyFillMode's mode (ALTERNATE
+    /// 1), the brush origin, the graphics mode (GM_COMPATIBLE 1), the
+    /// layout, and the world transform (eM11, eM12, eM21, eM22, eDx, eDy;
+    /// kept, not applied).
+    pub rop2: i32,
+    pub poly_fill: i32,
+    pub brush_org: (i32, i32),
+    pub graphics_mode: i32,
+    pub layout: u32,
+    pub xform: [f32; 6],
     /// SetStretchBltMode's mode (kept; StretchBlt samples the nearest
     /// pixel in every mode).
     pub stretch: i32,
@@ -185,7 +197,7 @@ impl Dc {
             && y >= b[1]
             && x < b[2]
             && y < b[3]
-            && self.clip.is_none_or(|c| x >= c[0] && y >= c[1] && x < c[2] && y < c[3])
+            && self.clip.is_none_or(|c| c.contains(x, y))
     }
 
     /// Fills a device rectangle (clipped).
@@ -196,14 +208,19 @@ impl Dc {
             x.saturating_add(w).min(self.surface.width),
             y.saturating_add(h).min(self.surface.height),
         ];
-        if let Some(clip) = self.clip {
-            r = [r[0].max(clip[0]), r[1].max(clip[1]), r[2].min(clip[2]), r[3].min(clip[3])];
-        }
         let b = self.bounds;
         r = [r[0].max(b[0]), r[1].max(b[1]), r[2].min(b[2]), r[3].min(b[3])];
-        for yy in r[1]..r[3] {
-            for xx in r[0]..r[2] {
-                self.surface.put(xx, yy, c);
+        let whole = [r];
+        let parts: &[[i32; 4]] = match &self.clip {
+            Some(clip) => &clip.rects[..clip.count],
+            None => &whole,
+        };
+        for p in parts {
+            let q = [r[0].max(p[0]), r[1].max(p[1]), r[2].min(p[2]), r[3].min(p[3])];
+            for yy in q[1]..q[3] {
+                for xx in q[0]..q[2] {
+                    self.surface.put(xx, yy, c);
+                }
             }
         }
     }
@@ -213,6 +230,9 @@ impl Dc {
 /// goes in .bss instead of the DLL's data.
 #[derive(Clone, Copy)]
 #[repr(u8)]
+// A DC (with its clip rectangles) is the largest; the table is a fixed
+// array of these, so boxing would only add allocations.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Object {
     Free = 0,
     Brush {
@@ -230,6 +250,8 @@ pub(crate) enum Object {
     Dc(Dc),
     /// An index into the palette store.
     Palette(usize),
+    /// An index into the region store.
+    Region(usize),
 }
 
 struct Table {
@@ -401,6 +423,12 @@ fn new_dc(kind: DcKind, surface: Surface, bitmap: usize) -> Handle {
         bounds: [i32::MIN, i32::MIN, i32::MAX, i32::MAX],
         palette: with(|_, stock| stock[15]),
         stretch: 1, // BLACKONWHITE
+        rop2: 13,
+        poly_fill: 1,
+        brush_org: (0, 0),
+        graphics_mode: 1,
+        layout: 0,
+        xform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         map_mode: 1,
         window_ext: (1, 1),
         viewport_ext: (1, 1),
@@ -666,6 +694,11 @@ pub extern "system" fn DeleteObject(h: Handle) -> i32 {
             palette::free(p);
             return Some(None);
         }
+        if let Object::Region(id) = slots[i] {
+            slots[i] = Object::Free;
+            region::free(id);
+            return Some(None);
+        }
         if let Object::Bitmap(b) = slots[i] {
             if slots
                 .iter()
@@ -725,6 +758,7 @@ pub extern "system" fn GetObjectType(h: Handle) -> u32 {
     let Some(i) = slot_of(h) else { return 0 };
     with(|slots, _| match slots[i] {
         Object::Free => 0,
+        Object::Pen { style, .. } if style & shapes::EXT_PEN != 0 => 11,
         Object::Pen { .. } => 1,
         Object::Brush { .. } => 2,
         Object::Dc(d) if d.kind == DcKind::Memory => 10,
@@ -732,6 +766,7 @@ pub extern "system" fn GetObjectType(h: Handle) -> u32 {
         Object::Font(_) => 6,
         Object::Bitmap(_) => 7,
         Object::Palette(_) => 5,
+        Object::Region(_) => 8,
     })
 }
 
@@ -814,7 +849,7 @@ pub extern "system" fn GetObjectW(h: Handle, size: i32, out: *mut u8) -> i32 {
             let count = if p == usize::MAX { 20u16 } else { palette::count(p) };
             give(out, size, &count.to_le_bytes())
         }
-        Object::Dc(_) | Object::Free => 0,
+        Object::Dc(_) | Object::Free | Object::Region(_) => 0,
     }
 }
 

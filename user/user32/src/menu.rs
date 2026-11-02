@@ -823,3 +823,10 @@ pub extern "system" fn GetMenuInfo(h: usize, info: *mut MenuInfo) -> i32 {
         1
     })
 }
+
+/// EndMenu: closes the active menu; gala does not track menus on the
+/// screen yet, so there is none to close.
+#[unsafe(no_mangle)]
+pub extern "system" fn EndMenu() -> i32 {
+    1
+}

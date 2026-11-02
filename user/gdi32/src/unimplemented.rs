@@ -4,55 +4,19 @@
 
 gala_stubs::unimplemented_exports!("gdi32.dll":
     AddFontResourceExW
-    Arc
     CloseEnhMetaFile
-    CombineRgn
     CopyEnhMetaFileW
     CreateEnhMetaFileW
-    CreateHatchBrush
-    CreatePatternBrush
-    CreatePolygonRgn
-    CreateRectRgn
-    CreateRectRgnIndirect
     DeleteEnhMetaFile
-    Ellipse
     EnumFontFamiliesExW
-    EqualRgn
-    ExcludeClipRect
-    ExtCreatePen
-    ExtCreateRegion
-    ExtFloodFill
-    ExtSelectClipRgn
     GetCharABCWidthsW
-    GetClipBox
     GetEnhMetaFileHeader
     GetEnhMetaFileW
-    GetGraphicsMode
     GetMetaFileBitsEx
     GetOutlineTextMetricsW
-    GetRegionData
-    GetRgnBox
     GetSystemPaletteEntries
     GetWinMetaFileBits
-    GetWorldTransform
-    MaskBlt
-    ModifyWorldTransform
-    OffsetRgn
-    Pie
     PlayEnhMetaFile
-    PolyPolygon
-    Polygon
-    Polyline
-    PtInRegion
-    RectInRegion
-    RoundRect
-    SelectClipRgn
-    SetBrushOrgEx
-    SetGraphicsMode
-    SetLayout
     SetMetaFileBitsEx
-    SetPolyFillMode
-    SetROP2
     SetWinMetaFileBits
-    SetWorldTransform
 );

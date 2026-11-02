@@ -6,6 +6,8 @@
  *   (resources.rc, square.bmp); an unknown name gives NULL.
  * - CreateWindowExW of an unregistered class: NULL,
  *   ERROR_CANNOT_FIND_WND_CLASS.
+ * - GetUpdateRgn/GetUpdateRect: the client area while invalid, nothing
+ *   once valid.
  * - RedrawWindow: RDW_INVALIDATE defers the WM_PAINT, RDW_UPDATENOW sends
  *   it before returning, RDW_VALIDATE takes the invalidation back.
  * - RegisterClipboardFormatW: 0xC000..0xFFFF, one per name, case-
@@ -13,7 +15,8 @@
  *   for predefined formats).
  * - BeginDeferWindowPos/DeferWindowPos/EndDeferWindowPos: nothing moves
  *   until EndDeferWindowPos, which applies every position and size;
- *   SetWindowPos to the same size sends no WM_SIZE.
+ *   SetWindowPos to the same size sends no WM_SIZE; WindowFromPoint finds
+ *   the deepest visible window at a screen point.
  * - shell32's SHGetFileInfoW (SHGFI_USEFILEATTRIBUTES): the system image
  *   lists (small and large icon sizes) and type indexes, type names
  *   ("File folder", "<EXT> File"), display names, icons.
@@ -550,6 +553,23 @@ static void bitmaps(void) {
 // RedrawWindow: RDW_INVALIDATE marks the window for painting (WM_PAINT
 // comes later), RDW_UPDATENOW paints it before returning, RDW_VALIDATE
 // takes the invalidation back.
+/* GetDialogBaseUnits: the system font's average width (low word) and
+ * height (high word), both positive. */
+static void dialog_units(void) {
+    LONG u = GetDialogBaseUnits();
+    CHECK(LOWORD(u) > 0 && HIWORD(u) > LOWORD(u));
+    /* EndMenu with no menu open succeeds. */
+    CHECK(EndMenu());
+    /* Activation: SetForegroundWindow makes a window the foreground and
+     * (its thread's) active one; SetActiveWindow returns the previous
+     * active window; BringWindowToTop succeeds. */
+    HWND w = CreateWindowExW(0, L"User32TestHooks", L"active", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 100, 100, NULL,
+                             NULL, GetModuleHandleW(NULL), NULL);
+    CHECK(SetForegroundWindow(w) && GetForegroundWindow() == w && GetActiveWindow() == w);
+    CHECK(SetActiveWindow(w) == w && BringWindowToTop(w));
+    DestroyWindow(w);
+}
+
 static void unknown_class(void) {
     SetLastError(0);
     CHECK(CreateWindowExW(0, L"GalaNoSuchClass", L"x", WS_OVERLAPPEDWINDOW, 0, 0, 10, 10, NULL, NULL,
@@ -565,6 +585,18 @@ static void redraw(void) {
     CHECK(RedrawWindow(w, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW) && paints == before + 1);
     CHECK(RedrawWindow(w, NULL, NULL, RDW_INVALIDATE | RDW_ERASE) && paints == before + 1);
     CHECK(RedrawWindow(w, NULL, NULL, RDW_VALIDATE) && UpdateWindow(w) && paints == before + 1);
+    /* The update region: the client area while invalid (gala keeps no
+     * finer one), empty once valid; GetUpdateRect alike. */
+    HRGN upd = CreateRectRgn(0, 0, 0, 0);
+    RECT cr, ur, box;
+    GetClientRect(w, &cr);
+    CHECK(GetUpdateRgn(w, upd, FALSE) == NULLREGION && !GetUpdateRect(w, &ur, FALSE));
+    InvalidateRect(w, NULL, FALSE);
+    CHECK(GetUpdateRgn(w, upd, FALSE) == SIMPLEREGION && GetRgnBox(upd, &box) == SIMPLEREGION);
+    CHECK(box.right == cr.right && box.bottom == cr.bottom);
+    CHECK(GetUpdateRect(w, &ur, FALSE) && ur.right == cr.right);
+    ValidateRect(w, NULL);
+    DeleteObject(upd);
     RECT r = {0, 0, 20, 20};
     CHECK(RedrawWindow(w, &r, NULL, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW));
     CHECK(paints == before + 2);
@@ -687,6 +719,7 @@ int main(void) {
     hooks();
     redraw();
     unknown_class();
+    dialog_units();
     deferred();
     timers();
     monitors();
