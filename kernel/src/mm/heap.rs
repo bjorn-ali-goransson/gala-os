@@ -186,6 +186,14 @@ pub fn try_box<T>(value: T) -> Result<alloc::boxed::Box<T>, AllocError> {
     }
 }
 
+/// Fallible `<[T]>::to_vec` (and `Vec::clone`, which allocates
+/// infallibly and which clippy cannot ban).
+pub fn try_to_vec<T: Clone>(items: &[T]) -> Result<alloc::vec::Vec<T>, AllocError> {
+    let mut out = alloc::vec::Vec::new();
+    out.try_extend_from_slice(items)?;
+    Ok(out)
+}
+
 /// Fallible growth for `Vec`; the growing methods themselves are banned.
 pub trait TryVec<T> {
     fn try_push(&mut self, value: T) -> Result<(), AllocError>;

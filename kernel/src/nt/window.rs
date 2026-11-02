@@ -601,20 +601,41 @@ pub fn children(parent: u64, out: &mut [u64]) -> usize {
     found.len()
 }
 
-/// The sends `to` matches fail (their waiting senders wake: the events
-/// to set go into `wake`); notify messages and those nobody waits for go.
-fn fail_sends(r: &mut Registry, to: impl Fn(&Sent) -> bool, wake: &mut Vec<ObjectRef>) {
-    r.sent.retain_mut(|m| {
-        if !to(m) || m.reply.is_some() {
-            return true;
+/// How many failed sends' senders one round of [`fail_sends`] wakes.
+const WAKE_BATCH: usize = 16;
+
+/// The sends `to` matches fail and their waiting senders wake; notify
+/// messages and those nobody waits for go. A thread's or a process's end:
+/// nothing is allocated (a sender left waiting would wait for ever), so the
+/// events are set in rounds of WAKE_BATCH outside the registry's lock.
+fn fail_sends(to: impl Fn(&Sent) -> bool) {
+    loop {
+        let mut wake: [Option<ObjectRef>; WAKE_BATCH] = Default::default();
+        let mut n = 0;
+        let mut more = false;
+        REGISTRY.lock().sent.retain_mut(|m| {
+            if !to(m) || m.reply.is_some() || m.failed {
+                return true;
+            }
+            if m.flags & SEND_NOTIFY != 0 || m.abandoned {
+                return false;
+            }
+            if n == WAKE_BATCH {
+                more = true;
+                return true;
+            }
+            m.failed = true;
+            wake[n] = Some(m.done.clone());
+            n += 1;
+            true
+        });
+        for e in wake.iter().flatten() {
+            super::wait::set_signal(e, 1);
         }
-        if m.flags & SEND_NOTIFY != 0 || m.abandoned {
-            return false;
+        if !more {
+            return;
         }
-        m.failed = true;
-        let _ = wake.try_push(m.done.clone());
-        true
-    });
+    }
 }
 
 /// The sends `from` matches lose their sender: answered ones go, the
@@ -632,35 +653,29 @@ fn abandon_sends(r: &mut Registry, from: impl Fn(&Sent) -> bool) {
 
 /// A process ended: its windows go.
 pub fn process_ended(pid: u32) {
-    let mut wake: Vec<ObjectRef> = Vec::new();
-    let mut r = REGISTRY.lock();
-    r.windows.retain(|w| w.pid != pid);
-    r.posted.retain(|m| m.pid != pid);
-    r.listeners.retain(|(p, _)| *p != pid);
-    r.queues.retain(|&(p, _)| p != pid);
-    // Its own sends go; sends to it fail (their senders wake).
-    abandon_sends(&mut r, |m| m.from_pid == pid);
-    fail_sends(&mut r, |m| m.to_pid == pid, &mut wake);
-    drop(r);
-    for e in &wake {
-        super::wait::set_signal(e, 1);
+    {
+        let mut r = REGISTRY.lock();
+        r.windows.retain(|w| w.pid != pid);
+        r.posted.retain(|m| m.pid != pid);
+        r.listeners.retain(|(p, _)| *p != pid);
+        r.queues.retain(|&(p, _)| p != pid);
+        // Its own sends go; sends to it fail (their senders wake).
+        abandon_sends(&mut r, |m| m.from_pid == pid);
     }
+    fail_sends(|m| m.to_pid == pid);
 }
 
 /// A thread ended: its windows are destroyed with it (as on Windows), its
 /// queue goes, and the messages sent to it fail.
 pub fn thread_ended(pid: u32, tid: u32) {
-    let mut wake: Vec<ObjectRef> = Vec::new();
-    let mut r = REGISTRY.lock();
-    r.windows.retain(|w| !(w.pid == pid && w.tid == tid));
-    r.posted.retain(|m| !(m.pid == pid && m.tid == tid && m.tid != 0));
-    r.queues.retain(|&(p, t)| !(p == pid && t == tid));
-    abandon_sends(&mut r, |m| m.from_pid == pid && m.from_tid == tid);
-    fail_sends(&mut r, |m| m.to_pid == pid && m.to_tid == tid, &mut wake);
-    drop(r);
-    for e in &wake {
-        super::wait::set_signal(e, 1);
+    {
+        let mut r = REGISTRY.lock();
+        r.windows.retain(|w| !(w.pid == pid && w.tid == tid));
+        r.posted.retain(|m| !(m.pid == pid && m.tid == tid && m.tid != 0));
+        r.queues.retain(|&(p, t)| !(p == pid && t == tid));
+        abandon_sends(&mut r, |m| m.from_pid == pid && m.from_tid == tid);
     }
+    fail_sends(|m| m.to_pid == pid && m.to_tid == tid);
 }
 
 #[cfg(test)]
@@ -829,5 +844,23 @@ mod tests {
         assert!(reply(911, id, 0, Vec::new()).unwrap()[0].is_none());
         assert!(sent_event(912, id).is_none());
         process_ended(911);
+    }
+
+    /// More waiting senders than one wake round: every one wakes (the
+    /// events are set in rounds, nothing is allocated on the way).
+    #[test]
+    fn a_thread_end_wakes_every_waiting_sender() {
+        let w = register(921, Info { tid: 4, ..Info::default() }).unwrap();
+        let mut waiting = Vec::new();
+        for _ in 0..3 * WAKE_BATCH + 1 {
+            let (id, _) = send(request(922, 1, w, 0x8001, 0, 0)).unwrap();
+            waiting.push((id, sent_event(922, id).unwrap()));
+        }
+        thread_ended(921, 4);
+        for (id, done) in &waiting {
+            assert_eq!(done.dispatcher().map(|d| d.signal_state()), Some(1));
+            assert_eq!(take_reply(922, *id).map(|r| r.is_err()), Some(true));
+        }
+        process_ended(921);
     }
 }

@@ -210,6 +210,35 @@ pub fn prune() {
     }
 }
 
+/// For a leaked address space: whether its process is still known and
+/// what refers to it (its references besides PROCESSES' own: thread
+/// objects, handles in other processes; its live threads).
+pub fn describe_holders(space: &SharedUserSpace) -> impl core::fmt::Display {
+    // One lock at a time (the list's, then the process's own).
+    let found = PROCESSES.lock().iter().find(|p| KArc::ptr_eq(&p.space, space)).cloned();
+    DescribeHolders(found.map(|p| {
+        // Besides the list's and `found`'s own.
+        let refs = KArc::strong_count(&p) - 2;
+        let exited = *p.exit_time.lock() != 0;
+        (p.id, refs, p.thread_count(), exited)
+    }))
+}
+
+struct DescribeHolders(Option<(u64, usize, usize, bool)>);
+
+impl core::fmt::Display for DescribeHolders {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            None => write!(f, "forgotten (not in the process list)"),
+            Some((id, refs, threads, exited)) => write!(
+                f,
+                "pid {id} still listed: {refs} other references, {threads} live threads, \
+                 exited {exited}"
+            ),
+        }
+    }
+}
+
 /// The running processes (for SystemProcessInformation).
 pub fn running() -> Result<Vec<KArc<Process>>, AllocError> {
     let list = PROCESSES.lock();

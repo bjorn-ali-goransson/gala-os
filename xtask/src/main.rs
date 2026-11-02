@@ -11,6 +11,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod alloc_audit;
 mod report;
 
 /// Pinned Limine release (prebuilt binary branch tag) and its expected commit.
@@ -1678,6 +1679,9 @@ commands:
                what was recorded
   bench        run user/bench on gala; write target/report/bench.json and
                compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
+  alloc-audit  find infallible allocations in the kernel's machine code (calls that
+               abort on out-of-memory: Vec::clone, collect, ...; clippy cannot see
+               them): alloc-audit [kernel ELF] [--all: also growth after try_reserve]
   symbolize    resolve the kernel backtraces in a serial log to functions
                and source lines: symbolize <log> [--release]
   docker-test  build the test image (docker/test.Dockerfile) and run
@@ -1697,6 +1701,7 @@ fn main() -> ExitCode {
             Some("run") => build(release, "gala-os", "").and_then(|iso| run(&iso, headless)),
             // gala-um first: it fails in seconds, before minutes of boots.
             Some("test") => unit_tests()
+                .and_then(|()| alloc_audit(release, None, false))
                 .and_then(|()| um_test(release))
                 .and_then(|()| replay_test(release))
                 .and_then(|()| boot_tests(release, None)),
@@ -1744,6 +1749,11 @@ fn main() -> ExitCode {
             Some("bench") => {
                 bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
             }
+            Some("alloc-audit") => alloc_audit(
+                release,
+                args.get(1).filter(|a| !a.starts_with("--")).map(Path::new),
+                args.iter().any(|a| a == "--all"),
+            ),
             Some("symbolize") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(log) => fs::read_to_string(log)
                     .map_err(|e| format!("reading {log}: {e}"))
@@ -1821,6 +1831,64 @@ fn unit_tests() -> Result {
     eprintln!("xtask: running kernel and xtask unit tests on the host");
     run_cmd(cargo().args(["test", "--package", "kernel", "--lib"]))?;
     run_cmd(cargo().args(["test", "--package", "xtask"]))
+}
+
+/// `cargo xtask alloc-audit`: disassembles the kernel (the debug build
+/// unless `elf` names one) and fails on infallible allocations
+/// (`alloc_audit`). Skipped with a warning without `objdump`.
+fn alloc_audit(release: bool, elf: Option<&Path>, all: bool) -> Result {
+    let elf = match elf {
+        Some(path) => path.to_path_buf(),
+        None => {
+            let mut cmd = cargo();
+            cmd.args([
+                "build",
+                "--package",
+                "kernel",
+                "--bin",
+                "kernel",
+                "--target",
+                KERNEL_TARGET,
+            ]);
+            if release {
+                cmd.arg("--release");
+            }
+            run_cmd(&mut cmd)?;
+            let profile = if release { "release" } else { "debug" };
+            target_dir().join(KERNEL_TARGET).join(profile).join("kernel")
+        }
+    };
+    let output = match Command::new("objdump")
+        .args(["-d", "--no-show-raw-insn", "-C"])
+        .arg(&elf)
+        .stderr(Stdio::inherit())
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => return Err(format!("objdump {} failed: {}", elf.display(), o.status)),
+        Err(e) => {
+            eprintln!("xtask: alloc-audit skipped (no objdump: {e})");
+            return Ok(());
+        }
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let findings = alloc_audit::audit(&text);
+    let failing = findings.iter().filter(|f| !f.excused).count();
+    print!("{}", alloc_audit::describe(&findings, all));
+    eprintln!(
+        "xtask: alloc-audit {}: {} kernel calls into library code that may abort on \
+         out-of-memory, {failing} not reserved for first",
+        elf.display(),
+        findings.len()
+    );
+    if failing == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "alloc-audit: {failing} infallible allocations in the kernel (listed above; \
+             use the fallible APIs, docs/WORKFLOW.md \"Fault injection\")"
+        ))
+    }
 }
 
 /// Builds the kernel and packs it with Limine into a UEFI-bootable ISO named
@@ -6525,12 +6593,15 @@ fn dechunk(mut b: &[u8]) -> Option<Vec<u8>> {
 
 /// Judges one scenario from the exit status and its part of the log.
 /// Judges a run; on failure the serial log is kept in
-/// `target/failed/<scenario>.log` (rare failures need it).
+/// `target/failed/<scenario>.log` (rare failures need it), with its
+/// backtraces symbolized now (a later build moves the addresses).
 fn judge(scenario: &Scenario, status: Option<i32>, timed_out: bool, serial: &str) -> Result {
     judge_log(scenario, status, timed_out, serial).map_err(|e| {
         let dir = target_dir().join("failed");
         let path = dir.join(format!("{}.log", scenario.name));
-        match fs::create_dir_all(&dir).and_then(|()| fs::write(&path, serial)) {
+        let symbols = symbolize(RELEASE.load(std::sync::atomic::Ordering::Relaxed), serial);
+        let kept = format!("{serial}\n{symbols}");
+        match fs::create_dir_all(&dir).and_then(|()| fs::write(&path, kept)) {
             Ok(()) => format!("{e} (serial log: {})", path.display()),
             Err(_) => e,
         }
