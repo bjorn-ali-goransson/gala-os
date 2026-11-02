@@ -40,6 +40,7 @@ unsafe extern "system" {
     fn GetCommandLineW() -> *const u16;
     fn OpenProcess(access: u32, inherit: Bool, id: u32) -> Handle;
     fn TerminateProcess(h: Handle, code: u32) -> Bool;
+    fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetLastError() -> u32;
     fn GetCurrentProcessId() -> u32;
 }
@@ -795,7 +796,10 @@ fn kill(a: &Args) -> u32 {
     for &pid in &pids[..n] {
         // SAFETY: plain calls; the handle is closed.
         unsafe {
-            let h = OpenProcess(1, 0, pid); // PROCESS_TERMINATE
+            // PROCESS_TERMINATE | SYNCHRONIZE: it is ended and waited for,
+            // so `gala kill` returns once the process is gone
+            // (TerminateProcess itself does not wait).
+            let h = OpenProcess(0x0010_0001, 0, pid);
             if h.is_null() {
                 let error = GetLastError();
                 let mut l = Line::new();
@@ -818,6 +822,7 @@ fn kill(a: &Args) -> u32 {
                     .dec(i64::from(GetLastError()));
                 code = fail(EXIT_FAILED, &[core::str::from_utf8(&l.b[..l.n]).unwrap_or("")]);
             } else {
+                WaitForSingleObject(h, 10_000);
                 Line::new().s("ended process ").dec(i64::from(pid)).print();
             }
             CloseHandle(h);
