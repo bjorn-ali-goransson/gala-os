@@ -3584,7 +3584,7 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "handover_k32_test: ready",
             "handover: gala hands over to gala-next (record framing 1-1, image layout 1, \
-             extended state 0x3, 33 section kinds; with programs)",
+             extended state 0xe7, 33 section kinds; with programs)",
             "handover: carrying 1 process(es), 10 thread(s)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala-next; the record was written by an older kernel \
@@ -3635,14 +3635,14 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "handover_k32_test: ready",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0x3, 32 section kinds; with programs)",
+             extended state 0xe7, 32 section kinds; with programs)",
             "handover: refused: the next kernel (gala) reads PROCESSES up to version 2; this \
              kernel writes version 3, which needs a reader of version 3",
             "handover_k32_test: slept",
             "handover_k32_test: ok",
             "exited with status 0x00000000",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0x3, 32 section kinds)",
+             extended state 0xe7, 32 section kinds)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala; this build does not read the writer's name",
             "handover: skipped section 33 (unknown to this kernel)",

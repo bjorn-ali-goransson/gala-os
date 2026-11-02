@@ -166,6 +166,20 @@ explicitly in its commit.
 - x87/SSE state in exceptions: CONTEXT.FltSave/MxCsr filled on delivery,
   restored by NtContinue, MxCsr honoured by NtCreateThread; threads keep
   XMM registers across preemption; `fpu_test`
+- XSAVE and the AVX state (2026-11-02, `xstate_test`, also in gala-um):
+  CR4.OSXSAVE and XCR0 (x87, SSE, AVX, AVX-512 when the CPU has it) on
+  every CPU and after a handover; per-thread XSAVE areas (size from CPUID,
+  fallible, XSAVEOPT/XRSTOR on switch); CONTEXT_EX and the XSTATE area in
+  exception and APC frames, NtContinue, NtGet/SetContextThread (which now
+  honour ContextFlags); KUSER_SHARED_DATA's XState configuration and
+  PF_XSAVE/AVX/AVX2/AVX512F; kernel32's InitializeContext2,
+  Get/SetXStateFeaturesMask, LocateXStateFeature and CopyContext with
+  CONTEXT_XSTATE; THREADS 3's extended-state blob filled (XCR0 checked on
+  both sides of a handover). The test: OSXSAVE/XGETBV, FMA and AVX2
+  execute, YMM registers across preemption on 2 CPUs, NtDelayExecution,
+  an APC, an exception whose handler changes the CONTEXT's YMM and uses
+  AVX itself, and GetThreadContext/SetThreadContext with CONTEXT_XSTATE on
+  a suspended thread.
 - System/process information: NtQuerySystemInformation (0x36) basic and
   time-of-day classes; NtQueryInformationProcess image file name, debug
   port, WOW64, session (`nt::sysinfo` encoders); `sysinfo_test`
@@ -1844,7 +1858,8 @@ R. **Robustness and live update, kernel included** (the owner's
      versions read with defaults, must_read refusals. Not done: R8's
      signed-manifest check of the next image (the hook is there:
      `version::trusted`); carrying image pages as frames across a
-     loader change (refused instead); a real XSAVE kernel.
+     loader change (refused instead). XSAVE came 2026-11-02 (the blob is
+     filled, `version::XSTATE` = 0xe7).
      **Milestone (e) needs** (open network connections): the TCP stack's
      connection state as data (smoltcp's sockets: sequence numbers,
      windows, timers as deadlines, buffers), sockets and AFD endpoints as

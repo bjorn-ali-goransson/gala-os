@@ -282,8 +282,9 @@ with the Windows selectors (CS 0x33, SS 0x2b) and `rcx = PEB`. SYSCALL
 enters at `gala_syscall_entry`, which swaps GS, switches to the thread's
 kernel stack (per-CPU area, updated with TSS.rsp0 on every switch), saves a
 `SyscallFrame` and calls the NT dispatcher with interrupts enabled. User
-GS base is the TEB. FXSAVE state is switched with every thread; CR4.OSFXSR
-is enabled for user SSE code.
+GS base is the TEB. The x87/SSE/AVX state (XSAVE) is switched with every
+thread; CR4.OSFXSR and CR4.OSXSAVE are enabled for user SSE/AVX code (see
+"x87/SSE/AVX state" below).
 
 **Loader** (`nt::process::spawn_from_pe`): maps headers and sections at the
 preferred base with section permissions (no relocation or imports yet),
@@ -406,7 +407,7 @@ ApcContext). NtRemoveIoCompletion pops one, waiting with a timeout.
 return to user mode, from system calls and interrupts) receives the user
 registers it returns with and may change them (system calls then return
 through IRETQ). A thread with a suspend count parks there, publishing its
-registers and FXSAVE state; NtGetContextThread/NtSetContextThread on it
+registers and XSAVE state; NtGetContextThread/NtSetContextThread on it
 read and replace them (the change applies when it resumes). A thread that
 is spinning in user mode parks at the next timer tick; one blocked in a
 wait keeps waiting and parks when the wait ends. The caller's own context
@@ -445,13 +446,64 @@ I/O completion routines use the same queue: a read or write on an
 asynchronous handle with an ApcRoutine queues ApcRoutine(ApcContext,
 IoStatusBlock, 0) to the caller when it completes successfully.
 
-**x87/SSE state**: the kernel target uses no SSE, so in a trap or system
-call the CPU still holds the user's x87/SSE registers. Context switches
-FXSAVE/FXRSTOR them per thread; exception delivery puts an FXSAVE image in
-CONTEXT.FltSave (Xmm0 at 0x1a0) and MxCsr; NtContinue loads FltSave with
-MxCsr from the CONTEXT (reserved MXCSR bits cleared, as FXRSTOR would
-fault on them); NtCreateThread applies the CONTEXT's MxCsr when the thread
-first enters user mode.
+**x87/SSE/AVX state** (`arch::xstate`, `xstate_test`, `fpu_test`): the
+kernel target is soft-float and uses no x87/SSE/AVX register (keep it so:
+the kernel's own code must never touch them), so in a trap or system call
+the CPU still holds the user's registers.
+- *Enabling* (as Windows 11 does): every CPU in its own setup path
+  (`cpu::enable_sse`: the boot CPU in `kernel_main`, each AP in `ap_main`,
+  after a kernel handover too) sets CR4.OSXSAVE and XCR0. The boot CPU
+  chooses XCR0 once from CPUID leaf 0xD (`xstate::usable`): x87, SSE, AVX
+  and, when the CPU has all three, the AVX-512 components (opmask,
+  ZMM_Hi256, Hi16_ZMM), each only if CPUID puts it at its architectural
+  standard-format offset (`xstate::COMPONENTS`); MPX, PKRU, AMX and the
+  supervisor components stay off. Without XSAVE it falls back to FXSAVE
+  (x87/SSE). CPUID then reports OSXSAVE, so programs see AVX as usable
+  (XGETBV); features whose state is not enabled are left for programs to
+  find off the usual way (OSXSAVE/XGETBV), CPUID cannot be masked without
+  CPUID faulting. Under QEMU TCG (`-cpu max`): XCR0 = 7, 832 bytes.
+- *Per thread*: `arch::context::Context` holds an `XArea`, `xstate::size()`
+  bytes (from XCR0), 64-byte aligned, allocated fallibly when the thread is
+  made (spawn fails with OutOfMemory). `gala_context_switch` saves with
+  XSAVEOPT (XSAVE without it; FXSAVE without XSAVE: `GALA_XSAVE_MODE`) and
+  loads with XRSTOR; `Context::saved_xstate` is the one accessor that
+  reads it as data (`XArea::load`, normalized). XSAVEOPT may skip
+  components in their initial state or unmodified since the XRSTOR from
+  the same area, so: nothing but the switch writes a thread's area, and
+  the state is read as data only through `normalize` (initial values for
+  components XSTATE_BV marks initial). `enable_here` ends with an XRSTOR
+  from a temporary buffer so a previous kernel's areas never match.
+- *As a value*: `XState` (standard format, `MAX_SIZE` = 2688 bytes, the
+  first `size()` used): `xstate::save` (XSAVE of the current state) and
+  `xstate::restore` (sanitized first: only enabled components in
+  XSTATE_BV, XCOMP_BV and reserved header bytes zero, MXCSR with
+  supported bits only, x87/SSE always loaded from the bytes). The NT layer
+  reaches them through `platform::xsave/xrstor/xstate_enabled`; gala-um
+  reads and writes the signal frame's XSAVE area (Linux's `_fpx_sw_bytes`,
+  host XCR0 as `usable`, Linux's own header bits kept).
+- *CONTEXT_EX* (`nt::context`): exception delivery's frame is the CONTEXT
+  (CONTEXT_FULL | SEGMENTS | XSTATE), its CONTEXT_EX at 0x4d0 (chunks
+  All, Legacy, XState), the record at 0x4f0, the machine frame at 0x590
+  and the XSTATE area at 0x5c0 (XSAVE header: Mask = the extended
+  features not in their initial state, CompactionMask 0; components at
+  their standard offset less 512), rsp 64-byte aligned; when the frame
+  does not fit (a stack overflow's last page: 3.6 KiB with AVX-512) the
+  frame without the XSTATE part. APC delivery: CONTEXT, CONTEXT_EX, XSTATE
+  at 0x500. NtContinue and NtSetContextThread apply FltSave
+  (CONTEXT_FLOATING_POINT, MxCsr winning) and, with CONTEXT_XSTATE and a
+  CONTEXT_EX that describes one, the XSTATE area: features in its Mask take
+  its bytes, the others their initial state (as XRSTOR). NtGetContextThread
+  fills only the parts ContextFlags names (ContextFlags kept) and, with
+  CONTEXT_XSTATE, the features its Mask asks for, Mask then saying which
+  hold values. gala's ntdll copies of a CONTEXT (unwinding) drop
+  CONTEXT_XSTATE, since the copy has no CONTEXT_EX.
+- *KUSER_SHARED_DATA* XState (0x3d8): EnabledFeatures and
+  EnabledVolatileFeatures = XCR0, Size, ControlFlags (OptimizedSave;
+  CompactionEnabled 0), Features[] (standard offsets and sizes),
+  AllFeatureSize/AllFeatures, AllNonLargeFeatureSize; PF_XSAVE_ENABLED,
+  PF_AVX/AVX2/AVX512F_INSTRUCTIONS_AVAILABLE as enabled.
+- NtCreateThread applies the CONTEXT's MxCsr only (TODO: the rest of
+  FltSave and the XSTATE area).
 
 **Thread information**: each NtThread records its create/exit times, its
 Win32 start address (the image entry point for main threads; CONTEXT.Rax
@@ -1739,8 +1791,11 @@ Windows, never shadows the system's DLLs.)
   WER registration as a no-op); processor groups and topology
   (processor.rs: one group, one NUMA node, one package, a core per
   processor, caches from CPUID leaf 4); CONTEXT buffers (context.rs:
-  InitializeContext, CopyContext by flag group; x87 and SSE are the only
-  XState features, as gala saves FXSAVE state only). Names ntdll also exports (the
+  InitializeContext/InitializeContext2 (with CONTEXT_XSTATE: CONTEXT_EX
+  and a 64-byte aligned XSTATE area for every enabled feature),
+  CopyContext by flag group and XState features, Get/SetXStateFeaturesMask,
+  LocateXStateFeature, GetEnabledXStateFeatures, all from KUSER's XState
+  configuration). Names ntdll also exports (the
   `Rtl*` unwind functions) are export forwarders (`build.rs`), as on
   Windows: defining them in kernel32 would shadow the ntdll imports.
 - **Gaps are never silent.** Unsupported parts of a function fail
@@ -4270,8 +4325,7 @@ host-tested: round trip, damage, older entries).
   `thread::hold_for_handover(true)`: every thread returning to user mode
   (from a system call or an interrupt: the user-return hook) waits on
   the way, its full user context kept as data (every register as the
-  interrupt or SYSRET frame has it, and its FXSAVE image: gala does not
-  enable AVX/XSAVE, so that is the whole extended state). A thread
+  interrupt or SYSRET frame has it, and its whole XSAVE state). A thread
   running user code gets there at its next timer tick (1 ms); one in a
   system call when the call returns, so a call with side effects is
   finished, never cut (bounded: the boot thread gives up after 3 s); the
@@ -4316,7 +4370,7 @@ host-tested: round trip, damage, older entries).
 | 11 | USER_FRAMES | physical ranges of the programs' own pages and of section pages: the next frame allocator claims them before anything is allocated (`mm::init`) |
 | 12 | PROCESSES | a header entry (the next NT id), then per process: id, parent, create time, image base and size, ntdll's dispatchers, threads created, priority class, name, Win32 path of the executable; v2: the digest of the executable's layout, its primary token's object id |
 | 13 | ADDRESS_SPACES | per process: the VAD (`Vad::write_to`), a table of section views (base, size, offset, section id), a table of pages (address, value, kind, flags): OWNED (frame number: kept in place; also every written, copy-on-write-copied or privately relocated image page), IMAGE (page index: the executable is laid out again from its file and the page mapped from that layout), SHARED_DATA (KUSER_SHARED_DATA: the new kernel's), SECTION (the view's section page), IMAGE_VIEW (page index in a DLL view: the image section's shared frame for the view's base, unrelocated at the preferred base, relocated at the image's alternative base) |
-| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, its object id, the system call (number, the user registers at the `syscall`), its deadline (timer tick, absolute; none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), its suspend count, its impersonation token's id, a table of queued user APCs (routine, three arguments); v3: its extended state, after the APCs: the XCR0 components it covers (u64; 0 from an older writer: x87 and SSE) and a length-prefixed blob, the XSAVE area past the legacy 512 bytes (empty while gala uses FXSAVE; a writer that fills it marks the section must_read 3) |
+| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, its object id, the system call (number, the user registers at the `syscall`), its deadline (timer tick, absolute; none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), its suspend count, its impersonation token's id, a table of queued user APCs (routine, three arguments); v3: its extended state, after the APCs: the XCR0 components it covers (u64; 0 from an older writer: x87 and SSE) and a length-prefixed blob, the XSAVE area past the legacy 512 bytes (header and components, standard format, `xstate::size_of(XCR0)` - 512 bytes; filled since XSAVE (2026-11-02), so the section is must_read 3 whenever threads with extended state are carried; empty without XSAVE). The receiving kernel takes the blob only if the XCR0 matches its own (`carry::carried_xstate`; otherwise the programs are refused, NOT_SUPPORTED); the running kernel refuses beforehand a next kernel whose note lacks one of its XCR0 bits (`version::agree_xstate` with `Programs::xstate` = its XCR0) |
 | 15-23 | EVENTS, SEMAPHORES, MUTANTS, TIMERS, SECTIONS, FILES, IO_COMPLETIONS, EXITED_THREADS, PROCESS_OBJECTS | per object: id, name (re-linked in the namespace when its directory is a permanent one), state: signal, count and maximum, owner thread and count, due tick and period, size/protection/attributes and frames (pagefile-backed), volume path, rights, share access, options and position (opened again), queued packets, exit status and times, the process |
 | 24 | CONSOLES | console input/output objects (no state) |
 | 25 | HANDLES | per process: (handle value, object id, granted access, attributes) |
@@ -4422,12 +4476,14 @@ state format differs; every future format change follows these rules.
   token: PROCESSES 2; how a thread stood: THREADS 2; a timer's APC:
   TIMERS 2) raises it to the new version. It may depend on the data:
   THREADS 3 needs a version-3 reader only when a thread's extended-state
-  blob is not empty (`programs::threads_must_read`).
+  blob is not empty (`programs::threads_must_read`; with XSAVE enabled
+  and threads carried it is).
 - *The note.* Each kernel image carries its read facts in an ELF note
   (name "GALA", type 0x47410001, section `.gala_note` in a PT_NOTE segment,
   `boot::HANDOVER_NOTE`, built at compile time from `KINDS`): note format
   1, record framing range, image layout version, the extended state it
-  restores (XCR0 bits; 0x3 = FXSAVE), build name, then (tag, oldest,
+  restores (XCR0 bits: `arch::xstate::SUPPORTED`, 0xe7; 0x3 = FXSAVE
+  only, the builds before XSAVE), build name, then (tag, oldest,
   newest) per kind. A kernel without a note is the milestone (c) build:
   `version::BEFORE_NOTES` (framing 1, tags 1-32, PROCESSES, THREADS,
   TIMERS and CLOCK at 2).
@@ -4436,7 +4492,7 @@ state format differs; every future format change follows these rules.
   check (`version::trusted`: a hook, accepting all until the signed
   manifest is built), parses as a kernel ELF, its note is read and logged
   (`handover: gala hands over to gala-next (record framing 1-1, image
-  layout 1, extended state 0x3, 33 section kinds; with programs)`); then,
+  layout 1, extended state 0xe7, 33 section kinds; with programs)`); then,
   before any thread is stopped, `version::agree`: the framing this kernel
   writes is in the target's range; with programs, the same image layout
   version; every REQUIRED section this kernel would write is known to the

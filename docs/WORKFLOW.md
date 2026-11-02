@@ -380,6 +380,22 @@ charged). Look
   thread running on another CPU has stopped, on Windows as on gala. A test
   that needs it stopped calls GetThreadContext first (kernel32_thread_test
   was flaky until it did).
+- **Vector state (XSAVE, since 2026-11-02)**: the kernel stays
+  soft-float; never add code that uses x87/SSE/AVX registers in the
+  kernel (the user's state is live in them during system calls and
+  traps). Read a thread's saved state only through
+  `Context::saved_xstate` or `xstate::save` (both `normalize`: XSAVEOPT
+  leaves components in their initial state unwritten), never write a
+  thread's switch area, and load user-supplied state only through
+  `xstate::restore` (it sanitizes: a bad XSTATE_BV or MXCSR bit makes
+  XRSTOR fault in the kernel). `XState` is 2.7 KiB: keep copies off deep
+  kernel stacks. A test that looks at YMM registers must declare the xmm
+  registers clobbered (Rust has no ymm operands without the avx target
+  feature) and check only what Windows keeps across a system call (the
+  upper halves, and ymm6-15 whole: xmm0-5 are volatile). gala's ntdll
+  drops CONTEXT_XSTATE from its own CONTEXT copies (they have no
+  CONTEXT_EX); a copy that keeps the flag makes NtContinue read whatever
+  follows it as a CONTEXT_EX (it is validated, then ignored if wrong).
 - **Known intermittent**: `java_http` once (2026-11-01) died with
   EXCEPTION_ILLEGAL_INSTRUCTION in C1-compiled code (HotSpot patching
   JIT code while another CPU runs it; cross-modifying code on 2 vCPUs,

@@ -126,7 +126,7 @@ pub fn init(physical_pages: u64) -> Result<(), platform::PagingError> {
 /// the processor features that depend on it: the components the platform
 /// enables (XCR0), in the standard XSAVE layout.
 fn write_xstate(page: &SharedPage) {
-    use crate::arch::xstate::{AVX, AVX512, COMPONENTS, LEGACY, size_of};
+    use platform::xstate::{AVX, AVX512, COMPONENTS, LEGACY, size_of};
     let enabled = platform::xstate_enabled();
     let size = size_of(enabled) as u32;
     page.write(XSTATE_ENABLED_FEATURES, &enabled.to_le_bytes());

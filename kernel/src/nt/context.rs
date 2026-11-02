@@ -11,8 +11,8 @@
 //! the extended components at their standard offsets less 512 (x87 and
 //! SSE live in CONTEXT.FltSave).
 
+use super::platform::xstate::{self, LEGACY, LEGACY_SIZE};
 use super::platform::{UserRegs, XState};
-use crate::arch::xstate::{self, LEGACY, LEGACY_SIZE};
 
 pub const SIZE: usize = 0x4d0;
 /// sizeof(CONTEXT_EX).
@@ -288,9 +288,7 @@ mod tests {
 
     #[test]
     fn parts_follow_the_flags() {
-        let mut regs = UserRegs::default();
-        regs.gpr = [7; 16];
-        regs.rip = 0x1234;
+        let regs = UserRegs { gpr: [7; 16], rip: 0x1234, ..Default::default() };
         let mut b = [0xeeu8; SIZE];
         fill(&mut b, CONTEXT_CONTROL, &regs, None);
         assert_eq!(u64_at(&b, RIP), 0x1234);
