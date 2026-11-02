@@ -83,6 +83,10 @@ const WM_GETICON: u32 = 0x007f;
 /// The desktop's request to move a window (Snap; kernel desktop
 /// GALA_WM_PLACE): wParam left | top << 32, lParam width | height << 32.
 const GALA_WM_PLACE: u32 = 0x0001_0001;
+/// The desktop minimized (wParam 1) or restored (0) the window itself
+/// (its caption button, its taskbar button, Win+Down): user32 keeps
+/// IsIconic.
+const GALA_WM_MINIMIZED: u32 = 0x0001_0002;
 const WM_SETICON: u32 = 0x0080;
 const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_CHILD: u32 = 0x4000_0000;
@@ -146,6 +150,9 @@ pub(crate) struct Window {
     /// Maximized (SC_MAXIMIZE) and the rectangle SC_RESTORE goes back to.
     pub(crate) zoomed: bool,
     pub(crate) restore: [i32; 4],
+    /// Minimized (SC_MINIMIZE, ShowWindow SW_MINIMIZE, or the desktop's
+    /// minimize button): IsIconic.
+    pub(crate) iconic: bool,
     /// A frameless desktop popup (a top-level WS_POPUP window without
     /// WS_CAPTION: menus, drop-down lists, tooltips): all client area.
     pub(crate) popup: bool,
@@ -253,6 +260,7 @@ pub(crate) const NO_WINDOW: Window = Window {
     instance: 0,
     zoomed: false,
     restore: [0; 4],
+    iconic: false,
     popup: false,
     bar: 0,
     icon: 0,
@@ -840,6 +848,7 @@ pub extern "system" fn CreateWindowExW(
             instance: instance as usize,
             zoomed: false,
             restore: [0; 4],
+            iconic: false,
             popup,
             bar,
             icon: 0,
@@ -1014,7 +1023,7 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
     if window(hwnd).is_some_and(|w| w.parent != 0) {
         return crate::tree::show_child(hwnd, show);
     }
-    let (was, desktop) = with(|s| {
+    let (was, desktop, iconic) = with(|s| {
         let w = &mut s.windows[i];
         let was = w.visible;
         if w.used {
@@ -1024,12 +1033,23 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
                 w.erase = true;
             }
         }
-        (was, w.desktop)
+        (was, w.desktop, w.iconic)
     });
     crate::foreign::sync(hwnd);
     if desktop != 0 {
-        // SAFETY: our desktop window.
-        unsafe { GalaWindowShow(desktop, u8::from(show)) };
+        // SAFETY: our desktop window (2: shown minimized).
+        unsafe {
+            GalaWindowShow(
+                desktop,
+                if !show {
+                    0
+                } else if iconic {
+                    2
+                } else {
+                    1
+                },
+            )
+        };
         if show {
             crate::track::draw_bar(hwnd);
         }
@@ -1043,6 +1063,8 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
         }
         InvalidateRect(hwnd, core::ptr::null(), 1);
         wake();
+        // SW_MINIMIZE, SW_SHOWMAXIMIZED, SW_RESTORE...
+        crate::tree::show_state(hwnd, cmd);
     }
     i32::from(was)
 }
@@ -1801,6 +1823,10 @@ pub extern "system" fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam:
     if msg == crate::track::GALA_MENU && window(hwnd).is_some() {
         return crate::track::menu_message(hwnd, wparam, lparam);
     }
+    // Another process's SetWindowPos of our window: user32's own too.
+    if msg == crate::tree::GALA_SETWINDOWPOS && window(hwnd).is_some() {
+        return crate::tree::set_window_pos_message(hwnd, lparam);
+    }
     // WH_CALLWNDPROC sees it first: a CWPSTRUCT (lParam, wParam, message,
     // window), wParam nonzero (sent by this thread).
     if crate::hook::any(crate::hook::WH_CALLWNDPROC) {
@@ -1965,7 +1991,7 @@ fn pump() {
                     crate::tree::moved_by_desktop(top, lparam);
                 }
                 // Snap: the window's thread moves it (DispatchMessage).
-                if message == GALA_WM_PLACE {
+                if message == GALA_WM_PLACE || message == GALA_WM_MINIMIZED {
                     post(thread, message_at(top, message, wparam, lparam));
                     continue;
                 }
@@ -2390,6 +2416,10 @@ pub extern "system" fn DispatchMessageW(msg: *const Msg) -> isize {
         crate::tree::snap(m.hwnd, x, y, w, h);
         return 0;
     }
+    if m.message == GALA_WM_MINIMIZED {
+        crate::tree::minimize(m.hwnd, m.wparam != 0, false);
+        return 0;
+    }
     SendMessageW(m.hwnd, m.message, m.wparam, m.lparam)
 }
 
@@ -2412,7 +2442,8 @@ pub extern "system" fn GetDoubleClickTime() -> u32 {
 }
 
 /// GetSystemMetrics: the desktop's frame (SM_CYCAPTION, SM_CXBORDER,
-/// SM_CYBORDER) and the screen (crate::monitor).
+/// SM_CYBORDER, the caption buttons' SM_CXSIZE and SM_CYSIZE) and the
+/// screen (crate::monitor).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemMetrics(index: i32) -> i32 {
     let (screen, work) = crate::monitor::screen();
@@ -2425,6 +2456,8 @@ pub extern "system" fn GetSystemMetrics(index: i32) -> i32 {
         4 => CAPTION,
         15 => MENU_BAR, // SM_CYMENU
         5 | 6 => BORDER,
+        30 => 46,                // SM_CXSIZE: the desktop's caption buttons
+        31 => CAPTION,           // SM_CYSIZE
         11 | 12 | 13 | 14 => 32, // SM_CXICON, SM_CYICON, SM_CXCURSOR, SM_CYCURSOR
         49 | 50 => 16,           // SM_CXSMICON, SM_CYSMICON
         _ => 0,

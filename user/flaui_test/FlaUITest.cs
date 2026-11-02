@@ -7,7 +7,11 @@
 // title it sets, types into the edit through the Value pattern and reads it back,
 // toggles the check box, reads the list view's items (AsListBox: its
 // ListItem children, their Text) and selects one (SelectionItem; the
-// list's Selection gives it back), and closes the program (WM_CLOSE).
+// list's Selection gives it back), uses FlaUI's Window API (the Window
+// pattern's properties, ModalWindows, the TitleBar and its buttons,
+// Window.Move through the Transform pattern, SetWindowVisualState
+// Maximized and Normal) and closes the program with Window.Close (the
+// title bar's Close button: WM_SYSCOMMAND SC_CLOSE, then WM_CLOSE).
 //
 // Expected output on Windows 11 24H2 (build 26100) with .NET 8 (FlaUI's
 // documented behaviour; UIA3 runs on CUIAutomation8, whose
@@ -31,6 +35,11 @@
 //   checked=True
 //   items=3 alpha.txt,beta.txt,gamma.txt
 //   selected=beta.txt True False
+//   window=True True False False Normal modal=0
+//   titlebar=FlaUI Pressed Minimize,Maximize,Close
+//   moved=100,80
+//   state=Maximized
+//   state=Normal 100,80
 //   closed=True
 //   flaui_test: ok
 //
@@ -163,12 +172,57 @@ static class FlaUITest
                     items[1].IsSelected + " " + items[0].IsSelected);
                 if (selected == null || selected.Text != "beta.txt" || !items[1].IsSelected || items[0].IsSelected)
                     return Fail(16, "selection");
+
+                // The Window pattern (a WS_OVERLAPPEDWINDOW: it can be
+                // maximized and minimized; not modal, not topmost).
+                var pattern = window.Patterns.Window.Pattern;
+                Console.WriteLine("window=" + pattern.CanMaximize.Value + " " + pattern.CanMinimize.Value + " " +
+                    pattern.IsModal.Value + " " + pattern.IsTopmost.Value + " " + pattern.WindowVisualState.Value +
+                    " modal=" + window.ModalWindows.Length);
+                if (!pattern.CanMaximize.Value || !pattern.CanMinimize.Value || pattern.IsModal.Value ||
+                    pattern.WindowVisualState.Value != WindowVisualState.Normal || window.ModalWindows.Length != 0)
+                    return Fail(17, "window pattern");
+                // The title bar (named by the title) and its buttons.
+                var titleBar = window.TitleBar;
+                var names = "";
+                if (titleBar != null)
+                    foreach (var c in titleBar.FindAllChildren())
+                        names += (names.Length > 0 ? "," : "") + c.AutomationId;
+                Console.WriteLine("titlebar=" + (titleBar == null ? "-" : titleBar.Name) + " " + names);
+                if (titleBar == null || titleBar.Name != "FlaUI Pressed" || titleBar.CloseButton == null ||
+                    titleBar.MinimizeButton == null || titleBar.MaximizeButton == null)
+                    return Fail(18, "title bar");
+                // Window.Move: the Transform pattern.
+                window.Move(100, 80);
+                var moved = Retry.WhileFalse(() => window.BoundingRectangle.Left == 100 &&
+                    window.BoundingRectangle.Top == 80, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(50));
+                Console.WriteLine("moved=" + window.BoundingRectangle.Left + "," + window.BoundingRectangle.Top);
+                if (!moved.Result)
+                    return Fail(19, "not moved");
+                // SetWindowVisualState: maximized, then back.
+                pattern.SetWindowVisualState(WindowVisualState.Maximized);
+                var maximized = Retry.WhileFalse(() => pattern.WindowVisualState.Value == WindowVisualState.Maximized,
+                    TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(50));
+                Console.WriteLine("state=" + pattern.WindowVisualState.Value);
+                if (!maximized.Result || titleBar.RestoreButton == null)
+                    return Fail(20, "not maximized");
+                pattern.SetWindowVisualState(WindowVisualState.Normal);
+                var normal = Retry.WhileFalse(() => pattern.WindowVisualState.Value == WindowVisualState.Normal,
+                    TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(50));
+                Console.WriteLine("state=" + pattern.WindowVisualState.Value + " " +
+                    window.BoundingRectangle.Left + "," + window.BoundingRectangle.Top);
+                if (!normal.Result || window.BoundingRectangle.Left != 100 || window.BoundingRectangle.Top != 80)
+                    return Fail(21, "not restored");
+
+                // Window.Close: the title bar's Close button; the program
+                // ends.
+                window.Close();
+                var closed = Retry.WhileFalse(() => app.HasExited, TimeSpan.FromSeconds(10),
+                    TimeSpan.FromMilliseconds(50));
+                Console.WriteLine("closed=" + closed.Result);
+                if (!closed.Result)
+                    return Fail(12, "not closed");
             }
-            // Close: WM_CLOSE posted to the main window; the program ends.
-            var closed = app.Close();
-            Console.WriteLine("closed=" + closed);
-            if (!closed)
-                return Fail(12, "not closed");
         }
         finally
         {

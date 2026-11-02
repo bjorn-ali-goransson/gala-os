@@ -2253,11 +2253,14 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   button restores a minimized window, minimizes the active one, else
   raises and activates. A press on a caption raises, activates and starts
   a drag (the caption stays on the screen); the caption buttons act on
-  release over the same button: minimize (in the desktop), or
-  WM_SYSCOMMAND SC_MAXIMIZE/SC_RESTORE/SC_CLOSE to the program, as on
-  Windows; user32's DefWindowProc turns SC_CLOSE into WM_CLOSE and
-  maximizes to the work area (the screen above the taskbar) or back to
-  the kept restore rectangle with SetWindowPos, so programs see WM_SIZE.
+  release over the same button: minimize (in the desktop, which tells the
+  program GALA_WM_MINIMIZED so IsIconic follows; the taskbar's restore
+  too), or WM_SYSCOMMAND SC_MAXIMIZE/SC_RESTORE/SC_CLOSE to the program,
+  as on Windows; a program's own SC_MINIMIZE shows its window minimized
+  with GalaWindowShow(id, 2) (see "UI Automation", title bars);
+  user32's DefWindowProc turns SC_CLOSE into WM_CLOSE and maximizes to
+  the work area (the screen above the taskbar) or back to the kept
+  restore rectangle with SetWindowPos, so programs see WM_SIZE.
   The desktop marks a window maximized when it covers the work area. In a
   client area: raise, activate, WM_LBUTTONDOWN; moves and releases go to
   the window under the pointer or the one the button went down in
@@ -2305,7 +2308,8 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   is; captions, the taskbar and the start menu get nothing meanwhile. It
   ends with GalaWindowCapture(0) from its owner or with the window.
 - **Syscalls** (gala's own range): GalaWindowCreate(x, y, w, h, title,
-  title_len, *id, style) 0x7f30, GalaWindowShow(id, show) 0x7f31,
+  title_len, *id, style) 0x7f30, GalaWindowShow(id, show: 0 hide, 1
+  show, 2 shown minimized) 0x7f31,
   GalaWindowPresent(id, x, y, w, h, pixels, stride) 0x7f32 (copies a
   client rectangle in), GalaWindowDestroy(id) 0x7f33, GalaWindowListen
   (event) 0x7f34, GalaWindowInput(records, max, *count) 0x7f35,
@@ -2963,6 +2967,67 @@ client side over Win32 windows (`uia_test`, a mingw C program).
     WM_NULL to wake the loop. Not yet: system menus, AccessKey,
     AutomationIds of items, ElementFromPoint on menus, the Toggle
     pattern on checked items.
+  - **Window, Transform, title bars** (`frame.rs`, 2026-11-02,
+    `uia_test`, `flaui_test`): a top-level window with a caption
+    (ControlType Window) has the Window pattern: Close posts
+    WM_SYSCOMMAND SC_CLOSE (as the close button does; posted, so a
+    "save changes?" dialog cannot block the client);
+    SetWindowVisualState sends SC_RESTORE / SC_MAXIMIZE / SC_MINIMIZE
+    (sent: the state can be read back at once; Maximized without
+    WS_MAXIMIZEBOX and Minimized without WS_MINIMIZEBOX are
+    UIA_E_INVALIDOPERATION, as IWindowProvider documents for an
+    unsupported state); CanMaximize/CanMinimize = those styles; IsModal =
+    owned (GW_OWNER) by a disabled window; IsTopmost = WS_EX_TOPMOST;
+    WindowVisualState from IsIconic/IsZoomed; WindowInteractionState
+    BlockedByModalWindow while disabled, else ReadyForUserInteraction
+    (gala's reading; unverified); WaitForInputIdle answers TRUE at once
+    (gala does not track input idleness). The Transform pattern: Move
+    and Resize are SetWindowPos (SWP_NOZORDER | SWP_NOACTIVATE); CanMove
+    unless maximized or minimized, CanResize also needs WS_THICKFRAME;
+    CanRotate FALSE and Rotate UIA_E_INVALIDOPERATION (ITransformProvider
+    documents InvalidOperation when CanRotate is FALSE). Its properties
+    (30073-30078, 30087-30089) are read on any element (not-supported
+    without the pattern), which FlaUI's Window.ModalWindows relies on: a
+    FindAllDescendants with an IsModal condition. **Title bar**: such a
+    window's first child (before the MenuBar) is a TitleBar element (no
+    HWND; `Node.menu` = frame::TITLE, item None), Name the window's
+    title, AutomationId "TitleBar", the caption band as its rectangle
+    (SM_CYCAPTION below the border); with WS_SYSMENU its children are
+    Buttons (items 0-2): Minimize and Maximize when the window has
+    WS_MINIMIZEBOX or WS_MAXIMIZEBOX (each enabled by its own style),
+    Close always; the maximize button is named and identified "Restore"
+    while the window is maximized; AutomationId = Name = "Minimize",
+    "Maximize"/"Restore", "Close" (what FlaUI's TitleBar looks them up by
+    with a ControlType Button condition; reported to be Windows' proxy's
+    ids, unverified here: Windows also puts a "System" menu bar in the
+    title bar, gala does not yet); rectangles SM_CXSIZE wide from the
+    right; RuntimeId {42, window, -4(, k)} (gala's choice). Invoke on a
+    button posts its SC_ command (SC_RESTORE for Restore). FlaUI's
+    Window.Close invokes the title bar's CloseButton first (the Window
+    pattern's Close otherwise). **What user32 needed**: minimizing (it
+    had none: the desktop minimized on its own, unseen by the program):
+    SC_MINIMIZE (a hidden window is shown minimized, as ShowWindow
+    SW_MINIMIZE), ShowWindow SW_MINIMIZE / SW_SHOWMINIMIZED /
+    SW_SHOWMINNOACTIVE / SW_FORCEMINIMIZE, SW_SHOWMAXIMIZED, SW_RESTORE
+    and SW_SHOWNORMAL (a minimized window back as it was, else a
+    maximized one unmaximized), SC_RESTORE of a minimized window, IsIconic
+    (it was a stub returning 0) and WS_MINIMIZE in GWL_STYLE; WM_SIZE
+    SIZE_MINIMIZED (0 x 0), then SIZE_RESTORED or SIZE_MAXIMIZED. A
+    minimized window stays visible and keeps its rectangle (Windows moves
+    it to -32000, -32000: not done). The desktop learns it through
+    GalaWindowShow(id, 2) (shown minimized: on the taskbar only); its
+    own minimize (caption button, taskbar, Win+Down) and its taskbar
+    restore send the program GALA_WM_MINIMIZED (0x0001_0002, wParam 1 or
+    0; above 0xFFFF like GALA_WM_PLACE), which user32 turns into its
+    state without asking the desktop back. The window registry's record
+    carries FLAG_ZOOMED (4) and FLAG_ICONIC (8), so IsZoomed and IsIconic
+    answer for another process's window. SetWindowPos of another
+    process's window is sent to it as GALA_SETWINDOWPOS (0x03f1, in the
+    system range like GALA_MENU: user32's SendMessageW answers it
+    itself; its 28-byte request (hwnd-after, x, y, cx, cy, flags) is
+    marshaled in, it cannot be posted), so Move/Resize work across
+    processes as on Windows. GetSystemMetrics gives the caption buttons'
+    SM_CXSIZE (46) and SM_CYSIZE.
   - Walkers (`walker.rs`): a view is a condition; an element outside it
     is skipped and its children take its place; the root is in every
     view.
@@ -2986,18 +3051,13 @@ client's own process are still direct calls;
 providers inside programs (WM_GETOBJECT answered with
 IRawElementProviderSimple via UiaReturnRawElementProvider, which wx and
 Qt implement for their widgets) are not consulted; no events
-(Add*EventHandler E_NOTIMPL); cache requests cache nothing (above); no
-title bar elements from the non-client area (on
-Windows a captioned window has a TitleBar child without an HWND, which
-`uia_test` allows for; FlaUI's Window.Close looks for its close button
-first, then the Window pattern, neither of which gala has: close
-programs with Application.Close); no Window, Transform,
-LegacyIAccessible patterns; ComboBox and tree-view items,
-ExpandCollapse, RangeValue, Text patterns; IUIAutomationElement2..9 are
-not answered (FlaUI reads every property through
+(Add*EventHandler E_NOTIMPL); cache requests cache nothing (above); the
+title bar has no system menu (Windows' has a "System" menu bar in it);
+no LegacyIAccessible pattern; ComboBox and tree-view items,
+ExpandCollapse on them, RangeValue, Text patterns; IUIAutomationElement2..9
+are not answered (FlaUI reads every property through
 GetCurrentPropertyValueEx, so it has not asked). Next: the other screen
-tests rewritten on FlaUI (`filezilla_flaui` shows the pattern), title
-bars and the Window pattern.
+tests rewritten on FlaUI (`filezilla_flaui` shows the pattern).
 
 **FileZilla through FlaUI** (`filezilla_flaui`, 2026-11-02): what the
 wx program needed beyond `flaui_test`. wx's controls are plain Win32
@@ -3037,7 +3097,10 @@ SAFEARRAYs through oleaut32 (step 4's and com_test's functions), and
 FlaUI's Application uses Process.Start (CreateProcessW), the process
 list (GetMainWindow: Process.GetProcessById and MainWindowHandle, which
 EnumWindows across processes answers) and Process.CloseMainWindow
-(PostMessage WM_CLOSE across processes).
+(PostMessage WM_CLOSE across processes). Since the Window pattern and
+title bars, flaui_test closes its target with Window.Close (the title
+bar's Close button) and moves, maximizes and restores it through FlaUI's
+Window API.
 
 ### Plan: windows across processes (planned 2026-11-02)
 
@@ -3075,7 +3138,8 @@ steps, each test first:
    84..88: the kernel refuses another with STATUS_INVALID_PARAMETER):
    hwnd, parent, owner, id, pid
    (the kernel's), tid, style, ex_style, screen rectangle, visible/
-   enabled flags, z, class name (64) and text (256, UTF-16). HWNDs start
+   enabled/maximized (4)/minimized (8) flags, z, class name (64) and
+   text (256, UTF-16). HWNDs start
    at 0x20000, 16 apart. user32 (`foreign.rs`) registers a window as
    its slot is taken and syncs the record after create, SetWindowPos
    (with its descendants: their screen rectangles move), the desktop's

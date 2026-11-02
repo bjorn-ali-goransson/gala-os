@@ -5,8 +5,9 @@
 //! window's children the visible top-level windows it owns (its dialogs:
 //! UIA puts owned windows under their owner), then its visible child
 //! windows in z order (GW_CHILD, GW_HWNDNEXT), then, for a list box or
-//! list view, its items in index order; a window with a menu
-//! bar has a MenuBar child first, and an open popup menu (a #32768 window)
+//! list view, its items in index order; a top-level window with a
+//! caption has a TitleBar child first (frame.rs), a window with a menu
+//! bar a MenuBar child next, and an open popup menu (a #32768 window)
 //! has its items as children (menus.rs). Properties are read from the
 //! window, the list or the menu each time (nothing is cached).
 
@@ -14,6 +15,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::condition::{self, Condition};
+use crate::frame::{self, TITLE};
 use crate::items::{self, Kind};
 use crate::menus;
 use crate::{
@@ -91,7 +93,8 @@ const TOOL_BAR: i32 = 50021;
 const TREE: i32 = 50023;
 const GROUP: i32 = 50026;
 const SEPARATOR: i32 = 50038;
-const WINDOW: i32 = 50032;
+pub const WINDOW: i32 = 50032;
+const TITLE_BAR: i32 = 50037;
 const PANE: i32 = 50033;
 
 const GWL_STYLE: i32 = -16;
@@ -152,6 +155,9 @@ pub fn alive(h: Hwnd) -> bool {
 /// Whether the element is still there: its window, and for an item its
 /// index within the list's count.
 pub fn exists(n: Node) -> bool {
+    if n.menu == TITLE {
+        return frame::exists(n);
+    }
     if n.menu != 0 {
         return alive(n.hwnd) && menus::exists(n);
     }
@@ -189,8 +195,8 @@ fn tree_owner(h: Hwnd) -> Hwnd {
 /// owned window's its owner.
 pub fn parent(n: Node) -> Option<Node> {
     let h = n.hwnd;
-    if n.menu == menus::BAR && n.item.is_some() {
-        return Some(Node::menu(h, None, menus::BAR));
+    if (n.menu == menus::BAR || n.menu == TITLE) && n.item.is_some() {
+        return Some(Node::menu(h, None, n.menu));
     }
     if n.item.is_some() || n.menu != 0 {
         return Some(Node::window(h));
@@ -228,6 +234,11 @@ extern "system" fn collect(h: Hwnd, data: isize) -> i32 {
 /// items.
 pub fn children(n: Node, out: &mut List<Node>) {
     let h = n.hwnd;
+    if n.menu == TITLE {
+        // The title bar: its buttons.
+        frame::children(n, out);
+        return;
+    }
     if n.item.is_some() {
         return;
     }
@@ -252,7 +263,10 @@ pub fn children(n: Node, out: &mut List<Node>) {
             }
             return;
         }
-        // The menu bar first, as Windows' tree has it.
+        // The title bar, then the menu bar, as Windows' tree has them.
+        if frame::is_frame(n) && !out.push(Node::menu(h, None, TITLE)) {
+            return;
+        }
         if menus::query(h).is_some() && !out.push(Node::menu(h, None, menus::BAR)) {
             return;
         }
@@ -376,6 +390,7 @@ fn localized_control_type(t: i32) -> &'static str {
         MENU_BAR => "menu bar",
         MENU_ITEM => "menu item",
         SEPARATOR => "separator",
+        TITLE_BAR => "title bar",
         _ => "pane",
     }
 }
@@ -525,6 +540,9 @@ pub fn property(n: Node, id: i32) -> Variant {
 /// A property's current value; None when the element does not support it.
 fn lookup(n: Node, id: i32) -> Option<Variant> {
     let h = n.hwnd;
+    if n.menu == TITLE {
+        return title_lookup(n, id);
+    }
     if n.menu != 0 {
         return menu_lookup(n, id);
     }
@@ -573,6 +591,9 @@ fn lookup(n: Node, id: i32) -> Option<Variant> {
 /// A pattern's property (None without the pattern; an id nobody knows
 /// is recorded).
 fn other_property(n: Node, id: i32) -> Option<Variant> {
+    if frame::known_property(id) {
+        return frame::property(n, id);
+    }
     if !pattern::known_property(id) {
         missing(b"UIAutomationCore.dll!GetCurrentPropertyValue(property)", id as u64);
     }
@@ -730,6 +751,56 @@ fn menu_lookup(n: Node, id: i32) -> Option<Variant> {
     })
 }
 
+/// A title bar's or title-bar button's properties (frame.rs), as
+/// Windows' Win32 window proxy is reported to give them: the bar a
+/// TitleBar named by the window's title (AutomationId "TitleBar"), the
+/// buttons Buttons named and identified "Minimize", "Maximize" (or
+/// "Restore"), "Close"; no HWND, no ClassName; not focusable; RuntimeId
+/// {42, window, -4(, k)} (gala's choice).
+fn title_lookup(n: Node, id: i32) -> Option<Variant> {
+    let h = n.hwnd;
+    let control = if n.item.is_some() { BUTTON } else { TITLE_BAR };
+    Some(match id {
+        RUNTIME_ID => match n.item {
+            Some(k) => array(VT_I4, &[RUNTIME_ID_HWND, h as i32, -4, k as i32]),
+            None => array(VT_I4, &[RUNTIME_ID_HWND, h as i32, -4]),
+        },
+        BOUNDING_RECTANGLE => rect_value(frame::rect(n)),
+        PROCESS_ID => {
+            let mut pid = 0;
+            // SAFETY: our output.
+            unsafe { GetWindowThreadProcessId(h, &mut pid) };
+            Variant::int(pid as i32)
+        }
+        CONTROL_TYPE => Variant::int(control),
+        LOCALIZED_CONTROL_TYPE => Variant::bstr(bstr_str(localized_control_type(control))),
+        NAME => Variant::bstr(match n.item {
+            Some(_) => bstr_str(frame::button_name(n)),
+            None => window_text(h, false),
+        }),
+        AUTOMATION_ID => Variant::bstr(match n.item {
+            Some(_) => bstr_str(frame::button_name(n)),
+            None => bstr_str("TitleBar"),
+        }),
+        ACCELERATOR_KEY | ACCESS_KEY | HELP_TEXT | ITEM_TYPE | ITEM_STATUS | ARIA_ROLE
+        | ARIA_PROPERTIES | CLASS_NAME => Variant::bstr(bstr(&[])),
+        HAS_KEYBOARD_FOCUS | IS_KEYBOARD_FOCUSABLE | IS_PASSWORD | IS_REQUIRED_FOR_FORM => {
+            Variant::boolean(false)
+        }
+        IS_ENABLED => Variant::boolean(frame::is_enabled(n)),
+        CULTURE | ORIENTATION => Variant::int(0),
+        IS_CONTROL_ELEMENT | IS_CONTENT_ELEMENT | IS_DATA_VALID_FOR_FORM => Variant::boolean(true),
+        IS_OFFSCREEN => Variant::boolean(!visible(h) || frame::visual_state(h) == 2),
+        FRAMEWORK_ID => Variant::bstr(bstr_str("Win32")),
+        PROVIDER_DESCRIPTION => Variant::bstr(bstr_str("[gala: title bar]")),
+        30027..=30044 => {
+            Variant::boolean(pattern::supports(n, PATTERN_AVAILABLE[(id - 30027) as usize]))
+        }
+        NATIVE_WINDOW_HANDLE => return None,
+        _ => return other_property(n, id),
+    })
+}
+
 /// A menu node's rectangle: an item's, or for the bar the band its items
 /// are in, across the window.
 fn menu_rect(n: Node, menu: &menus::Menu) -> Option<[i32; 4]> {
@@ -745,6 +816,9 @@ fn menu_rect(n: Node, menu: &menus::Menu) -> Option<[i32; 4]> {
 
 /// The element's rectangle on the screen.
 fn node_rect(n: Node) -> [i32; 4] {
+    if n.menu == TITLE {
+        return frame::rect(n);
+    }
     if n.menu != 0 {
         return menus::query(n.hwnd).map_or([0; 4], |m| menu_rect(n, &m).unwrap_or([0; 4]));
     }

@@ -1,7 +1,9 @@
 //! Control patterns over standard controls: Invoke (push buttons,
 //! list-view items), Value (edits), Toggle (check boxes), Selection (list
 //! boxes and list views), SelectionItem and ScrollItem (their items),
-//! ExpandCollapse and Invoke on menu items (menus.rs). A
+//! ExpandCollapse and Invoke on menu items (menus.rs), Window and
+//! Transform on top-level windows and Invoke on title-bar buttons
+//! (frame.rs). A
 //! pattern object keeps the element's node and acts on the window with
 //! the control's messages.
 
@@ -9,6 +11,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::element::{self, BUTTON, CHECK_BOX, EDIT, Node};
+use crate::frame::{self, TITLE};
 use crate::items::{self, How, Kind};
 use crate::menus;
 use crate::{
@@ -59,6 +62,10 @@ const ES_READONLY: u32 = 0x0800;
 /// Whether the element has the pattern.
 pub fn supports(n: Node, id: i32) -> bool {
     let h = n.hwnd;
+    if n.menu == TITLE {
+        // A title-bar button: Invoke.
+        return id == INVOKE && n.item.is_some();
+    }
     if n.menu != 0 {
         // A menu item: ExpandCollapse with a submenu, else Invoke
         // (separators neither; the bar itself has none).
@@ -89,6 +96,7 @@ pub fn supports(n: Node, id: i32) -> bool {
         VALUE => element::control_type(h) == EDIT,
         TOGGLE => element::control_type(h) == CHECK_BOX,
         SELECTION => items::kind(h).is_some(),
+        frame::WINDOW | frame::TRANSFORM => frame::is_frame(n),
         _ => false,
     }
 }
@@ -140,6 +148,9 @@ fn selection(h: Hwnd) -> Option<List<Node>> {
 /// (Selection), as UIA's client API gives them (FlaUI converts them so).
 pub fn property(n: Node, id: i32) -> Option<Variant> {
     let h = n.hwnd;
+    if n.menu == TITLE {
+        return None;
+    }
     if n.menu != 0 {
         return (id == EXPAND_COLLAPSE_STATE && supports(n, EXPAND_COLLAPSE))
             .then(|| Variant::int(expand_state(n)));
@@ -170,7 +181,7 @@ pub fn property(n: Node, id: i32) -> Option<Variant> {
 }
 
 #[repr(C)]
-struct Pattern {
+pub(crate) struct Pattern {
     vtable: *const (),
     refs: AtomicU32,
     node: Node,
@@ -200,6 +211,7 @@ pub fn create(n: Node, id: i32) -> *mut c_void {
             (&EXPAND_COLLAPSE_VTABLE as *const VTable<7>).cast(),
             IID_IUIAUTOMATIONEXPANDCOLLAPSEPATTERN,
         ),
+        frame::WINDOW | frame::TRANSFORM => frame::vtable(id),
         _ => ((&TOGGLE_VTABLE as *const VTable<6>).cast(), IID_IUIAUTOMATIONTOGGLEPATTERN),
     };
     boxed(Pattern { vtable, refs: AtomicU32::new(1), node: n, iid }).cast()
@@ -213,7 +225,7 @@ pub fn release(p: *mut c_void) {
     pattern_release(p.cast());
 }
 
-extern "system" fn pattern_query(
+pub(crate) extern "system" fn pattern_query(
     this: *mut Pattern,
     iid: *const Guid,
     out: *mut *mut c_void,
@@ -233,12 +245,12 @@ extern "system" fn pattern_query(
     }
 }
 
-extern "system" fn pattern_add_ref(this: *mut Pattern) -> u32 {
+pub(crate) extern "system" fn pattern_add_ref(this: *mut Pattern) -> u32 {
     // SAFETY: our pattern.
     unsafe { (*this).refs.fetch_add(1, Ordering::Relaxed) + 1 }
 }
 
-extern "system" fn pattern_release(this: *mut Pattern) -> u32 {
+pub(crate) extern "system" fn pattern_release(this: *mut Pattern) -> u32 {
     // SAFETY: our pattern, freed with its last reference.
     unsafe {
         let left = (*this).refs.fetch_sub(1, Ordering::AcqRel) - 1;
@@ -249,7 +261,7 @@ extern "system" fn pattern_release(this: *mut Pattern) -> u32 {
     }
 }
 
-fn node(this: *mut Pattern) -> Node {
+pub(crate) fn node(this: *mut Pattern) -> Node {
     // SAFETY: our pattern.
     unsafe { (*this).node }
 }
@@ -267,7 +279,7 @@ fn usable(this: *mut Pattern) -> Result<Hwnd, HResult> {
     Ok(n.hwnd)
 }
 
-fn alive(this: *mut Pattern) -> Result<Hwnd, HResult> {
+pub(crate) fn alive(this: *mut Pattern) -> Result<Hwnd, HResult> {
     let n = node(this);
     if element::exists(n) { Ok(n.hwnd) } else { Err(UIA_E_ELEMENTNOTAVAILABLE) }
 }
@@ -294,6 +306,9 @@ extern "system" fn invoke(this: *mut Pattern) -> HResult {
         Err(e) => return e,
     };
     let n = node(this);
+    if n.menu == TITLE {
+        return frame::invoke(n);
+    }
     if n.menu != 0 {
         return menu_action(n, menus::INVOKE);
     }

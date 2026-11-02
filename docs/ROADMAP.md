@@ -1611,11 +1611,25 @@ under their owner in the UIA tree (wx's dialogs); menus as UIA elements
 (MenuBar, MenuItem, the #32768 popup as a Menu, ExpandCollapse and
 Invoke), read and driven through a message user32 answers itself. The
 pixel scenario `filezilla` stays as it is. Both are PENDING (not in
-`cargo xtask test`/CI): run them with `cargo xtask boot-test`. Next:
-title bars (FlaUI's Window.Close), the Window pattern (IsModal:
-ModalWindows), GridItem/TableItem for columns, combo box and tree-view
-items, events, WM_GETOBJECT providers, GetParent of owned popups, and
-the other screen tests rewritten on FlaUI.
+`cargo xtask test`/CI): run them with `cargo xtask boot-test`.
+Window and Transform patterns and title bars (2026-11-02, uia_test,
+flaui_test, user32_test): a top-level window with a caption has the
+Window pattern (Close = WM_SYSCOMMAND SC_CLOSE posted,
+SetWindowVisualState = SC_RESTORE/SC_MAXIMIZE/SC_MINIMIZE, CanMaximize,
+CanMinimize, IsModal, IsTopmost, WindowVisualState,
+WindowInteractionState, WaitForInputIdle), the Transform pattern
+(Move/Resize = SetWindowPos, which user32 now does on another process's
+window too; Rotate fails) and a TitleBar child with
+Minimize/Maximize(Restore)/Close buttons (Invoke = their SC_ command);
+user32 minimizes (SC_MINIMIZE, ShowWindow SW_MINIMIZE..., IsIconic; the
+desktop tells user32 when its own buttons minimize or restore), and
+IsIconic/IsZoomed answer for any process's window from the window
+registry. FlaUI's Window.Close (the title bar's Close button),
+Window.Move, ModalWindows and SetWindowVisualState work (flaui_test
+closes its target with Window.Close now). Next: GridItem/TableItem for
+columns, combo box and tree-view items, events, WM_GETOBJECT providers,
+GetParent of owned popups, the system menu in the title bar, and the
+other screen tests rewritten on FlaUI.
 
 Drivers: gala writes its own, against published standards (virtio,
 then AHCI/NVMe, xHCI, e1000), not hardware-specific ones. Reusing

@@ -589,6 +589,22 @@ pixel version. Writing one:
 - A UIA call on another process's element is a sent message to it: if
   the program's thread is stuck (not pumping), the call waits for it
   (gala's cross-process SendMessage has no timeout yet).
+- Close a window with `window.Close()`: FlaUI invokes the title bar's
+  Close button (AutomationId "Close", WM_SYSCOMMAND SC_CLOSE posted),
+  so it returns before the program has acted; wait for the effect
+  (`app.HasExited`, the window gone). Its Window/Transform calls need a
+  top-level window with a caption: SetWindowVisualState(Maximized) on a
+  window without WS_MAXIMIZEBOX is UIA_E_INVALIDOPERATION (an
+  InvalidOperationException in .NET), Move on a maximized one too.
+- A window's first UIA child is now its TitleBar (no HWND): count a
+  window's controls with a NativeWindowHandle condition, or by
+  ControlType, not by position among all children.
+- user32 calls on another process's window that change it (SetWindowPos,
+  menus) go there as a message user32 answers itself (GALA_SETWINDOWPOS,
+  GALA_MENU, in the system range below WM_USER); a new one needs its
+  buffer marshaled in `foreign::send_remote` and an entry in
+  `carries_pointer` (it cannot be posted), and its answer in
+  `SendMessageW` before the window procedure.
 
 ## Bootable images and USB sticks
 

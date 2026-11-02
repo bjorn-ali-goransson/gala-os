@@ -154,6 +154,9 @@ pub const SC_RESTORE: u64 = 0xf120;
 /// left and top, lParam the width and height (low and high 32 bits).
 /// Above 0xFFFF: no Windows message has this number.
 pub const GALA_WM_PLACE: u32 = 0x0001_0001;
+/// gala's notice to a window's program that the desktop minimized
+/// (wParam 1) or restored (0) its window itself (user32 keeps IsIconic).
+pub const GALA_WM_MINIMIZED: u32 = 0x0001_0002;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
 pub const WM_MOUSEWHEEL: u32 = 0x020a;
 /// One wheel notch (WHEEL_DELTA).
@@ -689,6 +692,7 @@ impl Desktop {
     pub fn show(&mut self, id: u32, owner: u64, visible: bool) -> Result<Rect, NtStatus> {
         let win = self.find(id, owner)?;
         let was = win.visible;
+        let was_minimized = win.minimized;
         win.visible = visible;
         win.minimized = false;
         let bounds = win.bounds();
@@ -713,11 +717,28 @@ impl Desktop {
                 self.active = Some(id);
             }
         }
+        if visible && was && was_minimized {
+            // Restored (SC_RESTORE of a minimized window): on top and
+            // active again.
+            self.raise(id);
+            self.activate(Some(id));
+        }
         if !visible && self.active == Some(id) {
             self.activate_top();
         }
         self.taskbar_dirty = true;
         self.add_damage(bounds);
+        self.refresh();
+        Ok(bounds)
+    }
+
+    /// Shows a window minimized (GalaWindowShow 2: the program's
+    /// SC_MINIMIZE or ShowWindow SW_MINIMIZE): on the taskbar only.
+    pub fn show_minimized(&mut self, id: u32, owner: u64) -> Result<Rect, NtStatus> {
+        let win = self.find(id, owner)?;
+        win.visible = true;
+        let bounds = win.bounds();
+        self.set_minimized(id);
         self.refresh();
         Ok(bounds)
     }
@@ -1144,7 +1165,14 @@ impl Desktop {
         self.activate(top);
     }
 
+    /// The user minimizes a window: its program is told
+    /// (GALA_WM_MINIMIZED), so IsIconic says so.
     fn minimize(&mut self, id: u32) {
+        self.set_minimized(id);
+        self.send(id, GALA_WM_MINIMIZED, 1, 0);
+    }
+
+    fn set_minimized(&mut self, id: u32) {
         let Some(i) = self.index(id) else { return };
         self.windows[i].minimized = true;
         let bounds = self.windows[i].bounds();
@@ -1155,8 +1183,10 @@ impl Desktop {
         self.taskbar_dirty = true;
     }
 
+    /// The user restores a minimized window (its taskbar button).
     fn restore(&mut self, id: u32) {
         let Some(i) = self.index(id) else { return };
+        self.send(id, GALA_WM_MINIMIZED, 0, 0);
         self.windows[i].minimized = false;
         let bounds = self.windows[i].bounds();
         self.add_damage(bounds);

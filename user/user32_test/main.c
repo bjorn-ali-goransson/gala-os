@@ -94,7 +94,11 @@
  *   a whole side is covered).
  * - WM_SYSCOMMAND through DefWindowProc: SC_MAXIMIZE fills the work area
  *   (IsZoomed, WS_MAXIMIZE), SC_RESTORE brings the old rectangle back,
- *   SC_CLOSE closes (WM_CLOSE: the window is destroyed).
+ *   SC_MINIMIZE minimizes (IsIconic, WS_MINIMIZE, WM_SIZE SIZE_MINIMIZED,
+ *   still visible) and SC_RESTORE restores it, SC_CLOSE closes (WM_CLOSE:
+ *   the window is destroyed). ShowWindow SW_SHOWMAXIMIZED maximizes,
+ *   SW_MINIMIZE minimizes, SW_RESTORE gives a minimized window back as
+ *   it was (maximized) and a maximized one its rectangle.
  * - Timers: SetTimer for a window returns its id; WM_TIMER (wParam the
  *   id) comes no sooner than the interval, after posted messages;
  *   KillTimer returns TRUE once. A window-less timer with a TIMERPROC
@@ -845,6 +849,23 @@ static void positions(void) {
     SendMessageW(w, WM_SYSCOMMAND, SC_RESTORE, 0);
     CHECK(!IsZoomed(w) && pos_size_wparam == SIZE_RESTORED);
     CHECK(GetWindowRect(w, &r) && r.right - r.left == 260);
+    /* SC_MINIMIZE: IsIconic, WS_MINIMIZE, WM_SIZE SIZE_MINIMIZED; still
+       visible. SC_RESTORE: back (SIZE_RESTORED). */
+    SendMessageW(w, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+    CHECK(IsIconic(w) && !IsZoomed(w) && pos_size_wparam == SIZE_MINIMIZED);
+    CHECK((GetWindowLongW(w, GWL_STYLE) & WS_MINIMIZE) && IsWindowVisible(w));
+    SendMessageW(w, WM_SYSCOMMAND, SC_RESTORE, 0);
+    CHECK(!IsIconic(w) && pos_size_wparam == SIZE_RESTORED && !(GetWindowLongW(w, GWL_STYLE) & WS_MINIMIZE));
+    /* ShowWindow's state commands: SW_SHOWMAXIMIZED, SW_MINIMIZE (a
+       maximized window comes back maximized), SW_RESTORE twice. */
+    ShowWindow(w, SW_SHOWMAXIMIZED);
+    CHECK(IsZoomed(w) && !IsIconic(w));
+    ShowWindow(w, SW_MINIMIZE);
+    CHECK(IsIconic(w));
+    ShowWindow(w, SW_RESTORE);
+    CHECK(!IsIconic(w) && IsZoomed(w) && pos_size_wparam == SIZE_MAXIMIZED);
+    ShowWindow(w, SW_RESTORE);
+    CHECK(!IsZoomed(w) && GetWindowRect(w, &r) && r.right - r.left == 260);
     DestroyWindow(w);
 }
 
