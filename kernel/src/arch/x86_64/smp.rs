@@ -321,8 +321,8 @@ pub fn start_aps(processors: &Processors, main: fn(u32) -> !) -> Result<u32, Smp
         info.goto_address.store(gala_ap_entry as *const () as u64, Ordering::Release);
         started += 1;
     }
-    let deadline = crate::time::monotonic_ns() + 1_000_000_000;
-    while online_count() < started && crate::time::monotonic_ns() < deadline {
+    let deadline = crate::time::raw_monotonic_ns() + 1_000_000_000;
+    while online_count() < started && crate::time::raw_monotonic_ns() < deadline {
         core::hint::spin_loop();
     }
     Ok(online_count())

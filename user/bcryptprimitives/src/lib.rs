@@ -4,6 +4,12 @@
 //! retried as Intel's guidance recommends. Like the real one, it never
 //! fails: a CPU without either instruction ends the process (reported to
 //! the missing-features ledger first), rather than return non-random data.
+//!
+//! When the kernel's random source is mocked (a recording or a replay,
+//! gala-um's simulation; ARCHITECTURE "Record/replay") the bytes come
+//! from the kernel instead (GalaRandom), so a run's random numbers can
+//! be recorded and replayed or follow the simulation's seed. The first
+//! call asks; the answer holds for the process.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -14,6 +20,39 @@
 unsafe extern "system" {
     fn NtTerminateProcess(process: isize, status: u32) -> u32;
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
+    fn GalaRandom(buffer: *mut u8, length: usize) -> u32;
+}
+
+use core::sync::atomic::{AtomicU8, Ordering};
+
+/// Whether the kernel serves random numbers: 0 not asked yet, 1 yes, 2 no.
+static FROM_KERNEL: AtomicU8 = AtomicU8::new(0);
+const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
+
+/// Fills `data` from the kernel if its random source is mocked.
+fn from_kernel(data: *mut u8, length: usize) -> bool {
+    if FROM_KERNEL.load(Ordering::Relaxed) == 2 {
+        return false;
+    }
+    let mut done = 0;
+    while done < length || (done == 0 && length == 0) {
+        let n = (length - done).min(1 << 20);
+        // SAFETY: the caller's buffer holds `length` bytes.
+        let status = unsafe { GalaRandom(data.wrapping_add(done), n) };
+        if status == STATUS_NOT_SUPPORTED {
+            FROM_KERNEL.store(2, Ordering::Relaxed);
+            return false;
+        }
+        if status != 0 {
+            return false;
+        }
+        FROM_KERNEL.store(1, Ordering::Relaxed);
+        if length == 0 {
+            break;
+        }
+        done += n;
+    }
+    true
 }
 
 #[allow(dead_code)]
@@ -59,6 +98,9 @@ fn random_word() -> Option<u64> {
 /// ProcessPrng(Data, Length): fills `data` with random bytes; always TRUE.
 #[unsafe(no_mangle)]
 pub extern "system" fn ProcessPrng(data: *mut u8, length: usize) -> i32 {
+    if from_kernel(data, length) {
+        return 1;
+    }
     let mut i = 0;
     while i < length {
         let Some(word) = random_word() else {

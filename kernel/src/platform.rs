@@ -30,6 +30,9 @@ impl Clock for Kernel {
     fn set_tick_callback(callback: fn(u64)) {
         time::set_tick_callback(callback)
     }
+    fn clock_control(op: crate::clockctl::Op) -> crate::clockctl::State {
+        crate::clockctl::apply(op, time::raw_monotonic_ns(), time::boot_system_time())
+    }
 }
 
 impl Threads for Kernel {
@@ -134,6 +137,24 @@ impl UserMemory for Kernel {
     }
     fn frame_stats() -> (u64, u64) {
         mm::frame_stats()
+    }
+}
+
+/// Fills `buf` from the CPU's generator (RDRAND/RDSEED).
+pub fn fill_from_cpu(buf: &mut [u8]) -> bool {
+    for chunk in buf.chunks_mut(8) {
+        let Some(word) = cpu::rdrand() else { return false };
+        chunk.copy_from_slice(&word.to_le_bytes()[..chunk.len()]);
+    }
+    true
+}
+
+impl crate::nt::platform::Entropy for Kernel {
+    fn entropy_seeded() -> bool {
+        false
+    }
+    fn fill_entropy(buf: &mut [u8]) -> bool {
+        fill_from_cpu(buf)
     }
 }
 

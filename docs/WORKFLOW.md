@@ -834,11 +834,43 @@ reported with its seed, its log (`target/failed/sim-<program>-<seed>-
   and the objects it waits on). Make the smallest test program that
   waits that way and add it to SIM_PROGRAMS.
 - "not reproducible (watchdog preemptions or RDRAND)": the program spun
-  in program code (the watchdog preempted it) or draws on RDRAND (Go):
-  such runs are reported, not failed; a hang or a wrong result in them
-  is still a failure.
+  in program code (the watchdog preempted it) or executes RDRAND
+  itself (gala's ProcessPrng does not under `--sim`: it asks the kernel,
+  so Go programs repeat): such runs are reported, not failed; a hang or
+  a wrong result in them is still a failure.
 - A new multi-threaded test program: add it to SIM_PROGRAMS (`true` if
   its system calls can interleave, so traces must differ across seeds).
+
+## Clock control, record/replay, slow devices (R7)
+
+ARCHITECTURE "Live mocking" has the design and formats; how to use it:
+
+- **Tests of timeouts, timers, expiry without waiting**: boot (or run
+  in gala-um) with `clock=control` and call GalaClockControl from the
+  test (`ntrt::clock_control`: `CLOCK_SET_RATE` 0 freezes,
+  `CLOCK_ADVANCE` jumps every view of the clock, `CLOCK_SET_SYSTEM`
+  moves only the system time). Freeze first, then advance: the views
+  then move by exactly the amount, and waits in progress whose deadline
+  passed end (`clock_test` is the example). Without the call:
+  `clock=rate:1000` runs a whole program 1000 times faster,
+  `clock=system:2147483648` starts it in 2038, `clock=freeze` stops the
+  programs' clock (the kernel keeps its own).
+- **A failure that depends on outside input (timing, random numbers)**:
+  run it in gala-um with `--record=f.rec` until it fails (with `--sim`,
+  vary the seed), then `target/debug/um --replay=f.rec --module=...
+  program.exe` repeats it with the same settings and inputs; add
+  `--trace` or attach gdb to the replay. In QEMU, `XTASK_RECORD=1 cargo
+  xtask boot-test <name>` records every boot (`xtask: recording
+  target/debug/test-<name>.rec` in the log; random numbers and the boot
+  time); replay one with `cargo xtask iso --scenario <name> --file
+  target/debug/test-<name>.rec=gala replay=test-<name>.rec run=...`
+  or in gala-um (`--replay`: a kernel recording replays there too).
+  `replay: diverged at ...` names the first input the recording did not
+  have (the run took another path, or a helper thread ran longer).
+- **A slow disk**: `failpoint=disk_io:delay:<ms>` (with `persist`).
+- Keep checked-in recordings (`user/replay_test/replay_test.rec`)
+  readable: a format change bumps `replay::VERSION` and the reader
+  keeps the previous version.
 
 ## busybox
 

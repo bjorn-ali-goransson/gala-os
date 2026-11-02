@@ -127,6 +127,12 @@ pub const GALA_WINDOW_RECEIVE: u32 = 0x7f4a;
 pub const GALA_WINDOW_REPLY: u32 = 0x7f4b;
 pub const GALA_WINDOW_POST_THREAD: u32 = 0x7f50;
 pub const GALA_WINDOW_SEND_ABANDON: u32 = 0x7f51;
+/// gala's test-only clock control (`clock=control`; ARCHITECTURE "Clock
+/// control"), also in user/ntrt.
+pub const GALA_CLOCK_CONTROL: u32 = 0x7f4c;
+/// gala's random numbers when the random source is mocked (record/replay,
+/// the simulation; ARCHITECTURE "Record/replay"), for gala's ProcessPrng.
+pub const GALA_RANDOM: u32 = 0x7f4d;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -322,6 +328,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_REPLY, "GalaWindowReply", 4, gala_window_reply),
     (GALA_WINDOW_POST_THREAD, "GalaWindowPostThread", 4, gala_window_post_thread),
     (GALA_WINDOW_SEND_ABANDON, "GalaWindowSendAbandon", 1, gala_window_send_abandon),
+    (GALA_CLOCK_CONTROL, "GalaClockControl", 4, gala_clock_control),
+    (GALA_RANDOM, "GalaRandom", 2, gala_random),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -2850,6 +2858,84 @@ fn gala_record_missing(call: &mut Call<'_>) -> NtStatus {
         warn!("{}: {} not implemented, ending the process", call.process.name, text);
     }
     super::ledger::record_user(&name[..len], what, arg!(call, 3));
+    NtStatus::SUCCESS
+}
+
+/// GalaClockControl(Operation, A, B, *State): gala's test-only clock
+/// control (ARCHITECTURE "Clock control"; `crate::clockctl`). Operations:
+/// 0 query, 1 advance by A (100 ns units, > 0), 2 run at rate A/B (A = 0:
+/// frozen), 3 move the system time alone by A (100 ns, signed), 4 set
+/// the system time alone to A. Writes the version-1 state record (40
+/// bytes) to State if it is not null. STATUS_NOT_SUPPORTED unless booted
+/// with `clock=control`. Every change is logged (and an event `clock`).
+fn gala_clock_control(call: &mut Call<'_>) -> NtStatus {
+    use crate::clockctl;
+    if !clockctl::control_allowed() {
+        return NtStatus::NOT_SUPPORTED;
+    }
+    let (op, a, b, out) =
+        (arg!(call, 0) as u32, arg!(call, 1) as i64, arg!(call, 2) as i64, arg!(call, 3));
+    let op = match clockctl::Op::decode(op, a, b) {
+        Ok(op) => op,
+        Err(1) => return NtStatus::INVALID_PARAMETER_1,
+        Err(2) => return NtStatus::INVALID_PARAMETER_2,
+        Err(_) => return NtStatus::INVALID_PARAMETER_3,
+    };
+    // Under the shared page's lock, so a timer tick cannot write the
+    // clock as it was before the change after the page shows it after.
+    let state = super::kuser::refresh_after(|| platform::clock_control(op));
+    if op != clockctl::Op::Query {
+        info!("clock: {} asked to {op}: now {state}", call.process.name);
+        crate::events::emit(
+            crate::events::Category::Mock,
+            "clock",
+            format_args!(
+                r#""process":{},"op":{},"a":{a},"b":{b}"#,
+                crate::events::Str(call.process.name),
+                arg!(call, 0) as u32
+            ),
+        );
+    }
+    if out != 0 && call.process.write(out, &state.encode()).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    NtStatus::SUCCESS
+}
+
+/// GalaRandom(*Buffer, Length): random bytes from the kernel when its
+/// random source is mocked (gala-um's simulation: from the seed; a
+/// recording: recorded; a replay: from the recording);
+/// STATUS_NOT_SUPPORTED otherwise, and the caller (gala's ProcessPrng)
+/// uses the CPU's generator itself. At most 1 MiB per call.
+fn gala_random(call: &mut Call<'_>) -> NtStatus {
+    use crate::replay::{self, Kind};
+    if !(platform::entropy_seeded() || replay::on()) {
+        return NtStatus::NOT_SUPPORTED;
+    }
+    let (buffer, length) = (arg!(call, 0), arg!(call, 1) as usize);
+    if length > 1 << 20 {
+        return NtStatus::INVALID_PARAMETER_2;
+    }
+    let mut chunk = [0u8; 256];
+    let mut done = 0;
+    // A thread's requests replay in order whatever the others do; threads
+    // are told apart by their number in the process (the same on every
+    // run and platform).
+    let stream = thread::current_ordinal();
+    while done < length {
+        let n = (length - done).min(chunk.len());
+        let mut ok = true;
+        replay::bytes_input(Kind::Random, stream, &mut chunk[..n], |b| {
+            ok = platform::fill_entropy(b)
+        });
+        if !ok {
+            return NtStatus::NOT_SUPPORTED;
+        }
+        if call.process.write(buffer + done as u64, &chunk[..n]).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        done += n;
+    }
     NtStatus::SUCCESS
 }
 

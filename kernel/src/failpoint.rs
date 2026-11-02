@@ -13,6 +13,9 @@
 //!   probability 5/1000, decided by a hash of `failseed=<n>` (default 0),
 //!   the point and the occurrence's number, so a run repeats from its
 //!   seed (as far as the order of occurrences repeats);
+//! - `failpoint=disk_io:delay:5`: nothing fails, each disk request waits
+//!   5 ms first (added latency, live mocking R7; `disk_io` only, whose
+//!   callers may sleep);
 //! - several, comma-separated: `failpoint=heap:every:97,disk_io:nth:3`.
 //!
 //! Points: `heap` (the kernel heap's global allocator: every fallible
@@ -75,6 +78,10 @@ pub enum Mode {
     Nth(u64),
     /// Each occurrence with probability n/1000 (n <= 1000), from the seed.
     Random(u64),
+    /// Nothing fails; each occurrence waits n milliseconds first (added
+    /// latency, live mocking R7). Only for points whose callers may
+    /// sleep: `disk_io`.
+    Delay(u64),
 }
 
 /// A configuration: the mode of each point (by `Point as usize`).
@@ -107,7 +114,9 @@ pub fn parse(spec: &str) -> Result<Config, ParseError> {
             "every" if n > 0 => Mode::Every(n),
             "nth" if n > 0 => Mode::Nth(n),
             "random" if n <= 1000 => Mode::Random(n),
-            "every" | "nth" | "random" => return Err(ParseError::BadNumber),
+            "delay" if point != Point::DiskIo => return Err(ParseError::UnknownMode),
+            "delay" if n <= 10_000 => Mode::Delay(n),
+            "every" | "nth" | "random" | "delay" => return Err(ParseError::BadNumber),
             _ => return Err(ParseError::UnknownMode),
         };
         config[point as usize] = Some(mode);
@@ -131,6 +140,7 @@ pub fn decide(mode: Mode, point: Point, n: u64, seed: u64) -> bool {
             let h = mix(seed ^ mix(n ^ ((point as u64) << 56)).wrapping_add(0x9e37_79b9_7f4a_7c15));
             h % 1000 < per_mille
         }
+        Mode::Delay(_) => false,
     }
 }
 
@@ -139,6 +149,7 @@ const NONE: u8 = 0;
 const EVERY: u8 = 1;
 const NTH: u8 = 2;
 const RANDOM: u8 = 3;
+const DELAY: u8 = 4;
 
 /// The configured rules (stored by `configure`).
 static KIND: [AtomicU8; POINTS] = [const { AtomicU8::new(NONE) }; POINTS];
@@ -165,6 +176,7 @@ pub fn configure(config: &Config, seed: u64) {
             Some(Mode::Every(n)) => (EVERY, n),
             Some(Mode::Nth(n)) => (NTH, n),
             Some(Mode::Random(n)) => (RANDOM, n),
+            Some(Mode::Delay(n)) => (DELAY, n),
         };
         KIND[i].store(kind, Relaxed);
         ARG[i].store(arg, Relaxed);
@@ -240,6 +252,19 @@ fn hit_armed(point: Point) -> bool {
     fail
 }
 
+/// Milliseconds the caller should wait before this occurrence of `point`
+/// (`delay` mode; 0 otherwise). Counted as a delayed occurrence (the
+/// caller has counted it as checked with `hit` first).
+#[inline]
+pub fn delay_ms(point: Point) -> u64 {
+    if !armed(point) || KIND[point as usize].load(Relaxed) != DELAY {
+        return 0;
+    }
+    let i = point as usize;
+    FAILED[i].fetch_add(1, Relaxed);
+    ARG[i].load(Relaxed)
+}
+
 /// `failtrace` on the kernel command line (um: `--failtrace`): each
 /// injected failure is logged with a backtrace, to find the code that
 /// mishandled it (the failure itself may surface much later).
@@ -297,19 +322,44 @@ impl core::fmt::Display for Summary {
             first = false;
             write!(
                 f,
-                "{} {} checked, {} failed",
+                "{} {} checked, {} {}",
                 p.name(),
                 COUNT[i].load(Relaxed),
-                FAILED[i].load(Relaxed)
+                FAILED[i].load(Relaxed),
+                if KIND[i].load(Relaxed) == DELAY {
+                    DelayText(Some(ARG[i].load(Relaxed)))
+                } else {
+                    DelayText(None)
+                }
             )?;
         }
         Ok(())
     }
 }
 
+/// "failed", or "delayed by <n> ms" for a `delay` rule (no allocation).
+struct DelayText(Option<u64>);
+
+impl core::fmt::Display for DelayText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(ms) => write!(f, "delayed by {ms} ms"),
+            None => f.write_str("failed"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delay_rules() {
+        assert_eq!(parse("disk_io:delay:5").unwrap()[2], Some(Mode::Delay(5)));
+        assert_eq!(parse("net_tx:delay:5"), Err(ParseError::UnknownMode));
+        assert_eq!(parse("disk_io:delay:20000"), Err(ParseError::BadNumber));
+        assert!(!decide(Mode::Delay(5), Point::DiskIo, 1, 0));
+    }
 
     #[test]
     fn parses_rules() {

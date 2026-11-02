@@ -18,6 +18,7 @@ extern crate std;
 pub mod arch;
 #[allow(unsafe_code)]
 pub mod boot;
+pub mod clockctl;
 pub mod cmdline;
 #[macro_use]
 pub mod console;
@@ -38,6 +39,7 @@ pub mod net;
 pub mod nt;
 #[cfg(not(feature = "hosted"))]
 pub mod platform;
+pub mod replay;
 pub mod sched;
 mod selftest;
 /// Deterministic simulation's scheduler and clock (gala-um `--sim`).
@@ -190,8 +192,8 @@ pub fn kernel_main() -> ! {
     // (interrupts on, never blocking).
     if cmdline.flag("spintest") {
         info!("spintest: the boot thread spins in the kernel for 25 s");
-        let until = time::monotonic_ns() + 25_000_000_000;
-        while time::monotonic_ns() < until {
+        let until = time::raw_monotonic_ns() + 25_000_000_000;
+        while time::raw_monotonic_ns() < until {
             core::hint::spin_loop();
         }
         info!("spintest: done");
@@ -211,6 +213,14 @@ pub fn kernel_main() -> ! {
     // while the programs run (kernel/src/failpoint.rs).
     configure_failpoints(&cmdline);
     failpoint::arm();
+    // `clock=control,freeze,...`: clock control (kernel/src/clockctl.rs),
+    // from the programs' start on.
+    configure_clock(&cmdline);
+    time::arm_clock_control();
+    // `record`: what the programs read from outside goes to the debug
+    // console; `replay=<boot module>`: they read it from that recording
+    // (kernel/src/replay.rs).
+    start_record_replay(&info, &cmdline);
     // `start=a.exe,b.exe` (with `start_args=`) starts programs first and
     // does not wait for them: a server the `run=` programs talk to. They
     // end with the boot.
@@ -263,6 +273,7 @@ pub fn kernel_main() -> ! {
     if failpoint::configured() {
         info!("failpoint: {}", failpoint::Summary);
     }
+    replay::finish();
 
     if let Some(name) = cmdline.value("fault") {
         match Fault::from_name(name) {
@@ -329,6 +340,62 @@ fn configure_failpoints(cmdline: &Cmdline) {
     match failpoint::configure_from(spec, cmdline.value("failseed")) {
         Ok(()) => info!("failpoint: {spec} (seed {})", cmdline.value("failseed").unwrap_or("0")),
         Err(e) => error!("failpoint: {spec:?}: {e:?}"),
+    }
+}
+
+/// Waits up to `secs` seconds of real time for `objects` (one of them);
+/// whether it was signaled. Under clock control the programs' clock may
+/// be frozen or jump, so the wait looks at the real clock every second of
+/// the programs' time (with no clock control: one wait).
+fn wait_real_secs(objects: &[nt::object::ObjectRef], secs: u64) -> bool {
+    use nt::wait::Timeout;
+    let until = time::raw_ticks() + secs * time::TICK_HZ;
+    loop {
+        let step = if clockctl::armed() { time::TICK_HZ } else { secs * time::TICK_HZ };
+        let timeout = Timeout::Tick(time::ticks() + step);
+        if nt::wait::wait_for(objects, false, timeout) != nt::status::NtStatus::TIMEOUT {
+            return true;
+        }
+        if time::raw_ticks() >= until {
+            return false;
+        }
+    }
+}
+
+/// `record` / `replay=<boot module>`: starts recording the programs'
+/// inputs to the debug console, or replaying them from the boot module
+/// with that file name; the boot time is the first input.
+fn start_record_replay(info: &BootInfo, cmdline: &Cmdline) {
+    if cmdline.flag("record") {
+        replay::record_to(events::emit_record);
+        replay::info("cmdline", cmdline.as_str());
+        info!("replay: recording to the debug console");
+    } else if let Some(name) = cmdline.value("replay") {
+        let module = info.modules.iter().find(|m| m.file_name() == name);
+        match module.map(|m| replay::replay_from(m.data)) {
+            Some(Ok(())) => info!("replay: replaying {name}"),
+            Some(Err(e)) => error!("replay: {name}: not a recording this build reads ({e:?})"),
+            None => error!("replay: no boot module {name}"),
+        }
+    }
+    if replay::on() {
+        time::set_boot_system_time(replay::u64_input(
+            replay::Kind::BootTime,
+            0,
+            time::boot_system_time,
+        ));
+    }
+}
+
+/// Installs the `clock=` settings (armed when the programs start).
+fn configure_clock(cmdline: &Cmdline) {
+    let Some(spec) = cmdline.value("clock") else { return };
+    if !clockctl::COMPILED_IN {
+        warn!("clock: clock control is compiled out of release builds; {spec:?} ignored");
+        return;
+    }
+    if let Err(item) = clockctl::configure(spec) {
+        error!("clock: {spec:?}: cannot use {item:?}");
     }
 }
 
@@ -660,8 +727,7 @@ fn run_program(
                     let one = core::slice::from_ref(&object);
                     // A minute without finishing: log every thread's
                     // state (what a hang is waiting for), then wait on.
-                    let minute = nt::wait::Timeout::Tick(time::ticks() + 60 * time::TICK_HZ);
-                    if nt::wait::wait_for(one, false, minute) == nt::status::NtStatus::TIMEOUT {
+                    if !wait_real_secs(one, 60) {
                         warn!("run: {} still running after a minute; threads:", process.name);
                         nt::thread::dump();
                         sched::dump();
@@ -672,11 +738,7 @@ fn run_program(
                     }
                     // Then what it newly missed every 30 seconds (e.g.
                     // after a screen check's input).
-                    loop {
-                        let half = nt::wait::Timeout::Tick(time::ticks() + 30 * time::TICK_HZ);
-                        if nt::wait::wait_for(one, false, half) != nt::status::NtStatus::TIMEOUT {
-                            break;
-                        }
+                    while !wait_real_secs(one, 30) {
                         info!("run: {} still running; the ledger so far:", process.name);
                         nt::ledger::dump();
                     }
@@ -701,8 +763,8 @@ fn run_program(
     };
     // Teardown check: once the exiting threads are reaped, ours must be the
     // last reference to the address space; then its memory is returned.
-    let deadline = time::ticks() + time::TICK_HZ;
-    while mm::heap::KArc::strong_count(&space) > 1 && time::ticks() < deadline {
+    let deadline = time::raw_ticks() + time::TICK_HZ;
+    while mm::heap::KArc::strong_count(&space) > 1 && time::raw_ticks() < deadline {
         sched::reap();
         // Exited processes nothing refers to any more (kept for OpenProcess).
         nt::process::prune();

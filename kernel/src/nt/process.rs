@@ -40,6 +40,8 @@ pub struct Process {
     pub views: IrqMutex<Vec<super::section::View>>,
     /// Thread objects of the live threads.
     threads: IrqMutex<Vec<ObjectRef>>,
+    /// Threads created so far (each thread's `ordinal`).
+    pub threads_created: core::sync::atomic::AtomicU32,
     exit_status: IrqMutex<Option<NtStatus>>,
     /// Signaled when the process has ended.
     pub dispatcher: Dispatcher,
@@ -678,6 +680,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         vad: IrqMutex::new(vad),
         views: IrqMutex::new(Vec::new()),
         threads: IrqMutex::new(Vec::new()),
+        threads_created: core::sync::atomic::AtomicU32::new(0),
         exit_status: IrqMutex::new(None),
         dispatcher: Dispatcher::new(0),
         image: (base, u64::from(info.size_of_image)),

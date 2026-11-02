@@ -287,6 +287,9 @@ syscall_stubs! {
     GalaWindowReply = 0x7f4b, fn(id: u64, result: i64, out: *const u8, len: u32);
     GalaWindowPostThread = 0x7f50, fn(tid: u32, message: u32, wparam: u64, lparam: u64);
     GalaWindowSendAbandon = 0x7f51, fn(id: u64);
+    // gala's test-only clock control and its mocked random source (R7).
+    GalaClockControl = 0x7f4c, fn(operation: u32, a: i64, b: i64, state: *mut u8);
+    GalaRandom = 0x7f4d, fn(buffer: *mut u8, length: usize);
     // gala's number, UNVERIFIED.
     NtCreateDirectoryObject = 0x7f24, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtClearEvent = 0x3e, fn(h: usize);

@@ -39,6 +39,9 @@ static LAST_TICK: AtomicU64 = AtomicU64::new(crate::sim::START_NS / NS_PER_TICK)
 
 struct Sim {
     sched: Scheduler,
+    /// GalaRandom's numbers: a stream of their own from the seed, so
+    /// drawing them does not change the scheduler's choices.
+    random: crate::sim::Rng,
     /// Per thread id: where it waits for the baton.
     baton: Vec<Option<Arc<Condvar>>>,
     names: Vec<&'static str>,
@@ -52,10 +55,28 @@ pub fn on() -> bool {
     ON.load(Relaxed)
 }
 
+/// Separates the random numbers' stream from the scheduler's.
+const RANDOM_STREAM: u64 = 0x5241_4e44_4f4d_2121;
+
+/// Random numbers from the seed (GalaRandom under `--sim`): only the
+/// baton holder asks, so the sequence repeats with the seed.
+pub fn fill_random(buf: &mut [u8]) {
+    let mut guard = lock();
+    let Some(sim) = guard.as_mut() else { return };
+    for chunk in buf.chunks_mut(8) {
+        chunk.copy_from_slice(&sim.random.next_u64().to_le_bytes()[..chunk.len()]);
+    }
+}
+
 /// Turns the simulation on with `seed` (before `run`; um's `--sim=`).
 pub fn enable(seed: u64) {
     let _host = super::HostCode::enter();
-    *lock() = Some(Sim { sched: Scheduler::new(seed), baton: Vec::new(), names: Vec::new() });
+    *lock() = Some(Sim {
+        sched: Scheduler::new(seed),
+        random: crate::sim::Rng::new(seed ^ RANDOM_STREAM),
+        baton: Vec::new(),
+        names: Vec::new(),
+    });
     ON.store(true, Relaxed);
 }
 
@@ -411,6 +432,47 @@ pub fn set_tick_callback(callback: fn(u64)) {
     let _ = TICK_CALLBACK.set(callback);
 }
 
+/// Clock control (`crate::clockctl`) in the simulation: the clock is
+/// virtual already, so a rate or a jump applies to it directly (a frozen
+/// clock reaches no deadline: every thread waiting for one is a
+/// deadlock); the system time's offset is clockctl's.
+pub fn clock_control(op: crate::clockctl::Op) -> crate::clockctl::State {
+    use crate::clockctl::{Op, State};
+    let (now, rate, advanced, real) = {
+        let mut guard = lock();
+        let Some(sim) = guard.as_mut() else {
+            return State {
+                rate: crate::clockctl::Rate::REAL,
+                advanced: 0,
+                system_offset: 0,
+                raw: 0,
+                simulated: true,
+            };
+        };
+        match op {
+            Op::Advance(ns) => sim.sched.advance(ns),
+            Op::SetRate(rate) => sim.sched.rate = rate,
+            _ => {}
+        }
+        NOW.store(sim.sched.now_ns, Relaxed);
+        (sim.sched.now_ns, sim.sched.rate, sim.sched.advanced_ns, sim.sched.real_ns)
+    };
+    let offset = match op {
+        Op::ShiftSystem(delta) => crate::clockctl::system_offset().saturating_add(delta),
+        Op::SetSystem(target) => target as i64 - (crate::sim::BOOT_SYSTEM_TIME + now / 100) as i64,
+        _ => crate::clockctl::system_offset(),
+    };
+    if matches!(op, Op::ShiftSystem(_) | Op::SetSystem(_)) {
+        crate::clockctl::set_system_offset(offset);
+    }
+    State { rate, advanced, system_offset: offset, raw: real, simulated: true }
+}
+
+/// The simulation's (unscaled, virtual) clocks for `clockctl::arm`.
+pub fn clocks() -> (u64, u64) {
+    lock().as_ref().map_or((0, 0), |s| (s.sched.real_ns, s.sched.now_ns))
+}
+
 /// The summary line sim-test compares: `sim: seed S trace H`, plus the
 /// number of scheduling points and the virtual time.
 pub fn report() {
@@ -476,6 +538,7 @@ fn deadlock() -> ! {
     // The NT layer's view: each thread's system call and wait objects.
     without_lock_points(|| super::nt_code(crate::nt::thread::dump));
     report();
+    crate::replay::finish();
     std::process::exit(DEADLOCK_EXIT)
 }
 
