@@ -1202,8 +1202,8 @@ Windows, never shadows the system's DLLs.)
   because programs' output changes with it: Caddy logs differently to a
   console, and kernel32_sys_test and winsock_test, which expect
   redirected handles, failed.)
-- **Console windows** (2026-11-02: output and cooked line input; raw
-  input through ReadConsoleInput not yet). Windows draws
+- **Console windows** (2026-11-02: output, cooked line input and raw
+  key records). Windows draws
   a console program's console in conhost.exe; gala does the same with its
   own `user/conhost` (a gala program, not Microsoft's), so the kernel keeps
   no drawing code for it:
@@ -1219,15 +1219,25 @@ Windows, never shadows the system's DLLs.)
   - Output: NtWriteFile on a ConsoleOutput object (the standard handles
     and CONOUT$) still goes to the serial line, and also into the
     writer's session ring, signalling the host's event.
-  - Input: the keys the host queues are kept as records and also edited
-    into a line as the console's default mode does (ENABLE_LINE_INPUT,
+  - Input: the host queues key records (the session's `input_ready`
+    event is set while any are queued). A cooked read (NtReadFile on
+    ConsoleInput - stdin, CONIN$ - of a process with a session) consumes
+    them as the console's default mode does (ENABLE_LINE_INPUT,
     ECHO_INPUT, PROCESSED_INPUT): characters are echoed into the output,
-    Backspace takes one back, Enter finishes the line with CR LF.
-    NtReadFile on ConsoleInput (stdin, CONIN$) of a process with a session
-    waits for a finished line (the session's line-ready event) and returns
-    it as UTF-8. TODO: kernel32's ReadConsoleW/A and ReadConsoleInputW/
-    GetNumberOfConsoleInputEvents/PeekConsoleInput over the session
-    (still "no keyboard"), the console modes (raw input), Ctrl+C.
+    Backspace takes one back, Enter finishes the line with CR LF and stops
+    there (later keys wait for the next read); it waits until a line is
+    finished and returns it as UTF-8. Raw readers take the records:
+    GalaConsoleInputEvents(records, max, *count, flags) 0x7f3d (taken,
+    peeked with flag 1, waiting with flag 2; max 0: the count) for the
+    calling process's session, STATUS_NOT_FOUND without one. kernel32's
+    ReadConsoleInputW/A, PeekConsoleInputW/A,
+    GetNumberOfConsoleInputEvents and FlushConsoleInputBuffer use it
+    (INPUT_RECORD: KEY_EVENT and the record), ReadConsoleW/A read a cooked
+    line through ReadFile (W: converted to UTF-16); they accept the
+    standard input too (a handle the kernel reports as console input).
+    Without a session they return nothing, as before ("no keyboard",
+    recorded). TODO: the console modes (SetConsoleMode switching cooked
+    input off), Ctrl+C, the CONSOLE_READCONSOLE_CONTROL wake-up keys.
   - The host: the kernel starts `conhost.exe` (user/conhost, a boot
     module) with the session's id and the program's file name before the
     program. Its system
@@ -1246,8 +1256,9 @@ Windows, never shadows the system's DLLs.)
     is closed. TODO: scrollback, resizing, closing with the session.
   - Tests: kernel host tests for the ring and queue; the console_window
     screen scenario (console_window_test prints text, VT colours and
-    UTF-8, then reads a line xtask types: "hi" echoed in the window, the
-    program gets "hi\r\n"); the
+    UTF-8, then reads what xtask types: "hi" with ReadFile (echoed in the
+    window, the program gets "hi\r\n"), "ok" with ReadConsoleW and the key
+    "x" with ReadConsoleInputW); the
     filezilla scenario shows FileZilla Server's console (minimizing
     FileZilla, then restoring it from the taskbar).
 - **FormatMessage** (kernel32 messages.rs): system messages from a table

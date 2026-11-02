@@ -546,35 +546,88 @@ pub extern "system" fn GetLargestConsoleWindowSize(h: Handle) -> u32 {
     (WIDTH as u32) | (60 << 16)
 }
 
-/// `Some(())` for the console input handle, else the error is set.
-fn input(h: Handle) -> Option<()> {
-    match kind(h) {
-        Some(true) => Some(()),
-        _ => {
-            SetLastError(ERROR_INVALID_HANDLE);
-            None
-        }
-    }
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GalaConsoleInputEvents(records: *mut u8, max: u32, count: *mut u32, flags: u32) -> u32;
 }
 
-/// No keyboard: there are never input events.
+/// A console input handle: one opened here, or one the kernel reports as
+/// console input (the standard input of a console window's program).
+fn input_any(h: Handle) -> bool {
+    kind(h) == Some(true) || (kind(h).is_none() && console_device(h) == Some(true))
+}
+
+/// The calling process's console session's key records (16 bytes each)
+/// into `out`: taken, peeked (flag 1), waited for (flag 2); how many, or
+/// None without a session (a console with no keyboard).
+fn session_keys(out: &mut [u8], flags: u32) -> Option<usize> {
+    let mut n = 0u32;
+    let max = (out.len() / 16) as u32;
+    // SAFETY: our buffer of `max` records.
+    let status = unsafe { GalaConsoleInputEvents(out.as_mut_ptr(), max, &mut n, flags) };
+    (status == 0).then_some(n as usize)
+}
+
+/// GetNumberOfConsoleInputEvents: the keys queued in the console window
+/// (none without one).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetNumberOfConsoleInputEvents(h: Handle, count: *mut u32) -> Bool {
-    if input(h).is_none() {
+    if !input_any(h) {
+        SetLastError(ERROR_INVALID_HANDLE);
         return FALSE;
     }
+    let mut n = 0u32;
+    // SAFETY: Max 0 asks for the count.
+    let queued = unsafe { GalaConsoleInputEvents(core::ptr::null_mut(), 0, &mut n, 0) } == 0;
     // SAFETY: the caller's output.
-    unsafe { *count = 0 };
+    unsafe { *count = if queued { n } else { 0 } };
     TRUE
 }
 
-fn no_events(h: Handle, read: *mut u32) -> Bool {
-    if input(h).is_none() {
+/// INPUT_RECORDs (20 bytes: EventType KEY_EVENT, then KEY_EVENT_RECORD)
+/// from the session's key records: taken (`flags` 2: waiting for one) or
+/// peeked (1). `ansi`: the character as one byte ('?' beyond ASCII).
+fn key_events(
+    h: Handle,
+    buffer: *mut u8,
+    length: u32,
+    read: *mut u32,
+    flags: u32,
+    ansi: bool,
+) -> Bool {
+    if !input_any(h) {
+        SetLastError(ERROR_INVALID_HANDLE);
         return FALSE;
+    }
+    let mut keys = [0u8; 16 * 32];
+    let want = (length as usize).min(32);
+    let n = if want == 0 { Some(0) } else { session_keys(&mut keys[..16 * want], flags) };
+    let Some(n) = n else {
+        // No console window: no keyboard (recorded for the reads).
+        if flags & 2 != 0 {
+            unsupported(b"kernel32.dll!ReadConsoleInput(no keyboard)", 0);
+        }
+        if !read.is_null() {
+            // SAFETY: the caller's output.
+            unsafe { *read = 0 };
+        }
+        return TRUE;
+    };
+    for (i, k) in keys.chunks_exact(16).take(n).enumerate() {
+        let mut record = [0u8; 20];
+        record[0] = 1; // KEY_EVENT
+        record[4..20].copy_from_slice(k);
+        if ansi {
+            let ch = u16::from_le_bytes([k[10], k[11]]);
+            record[14] = if ch < 0x80 { ch as u8 } else { b'?' };
+            record[15] = 0;
+        }
+        // SAFETY: the caller's array of `length` INPUT_RECORDs.
+        unsafe { core::ptr::copy_nonoverlapping(record.as_ptr(), buffer.add(20 * i), 20) };
     }
     if !read.is_null() {
         // SAFETY: the caller's output.
-        unsafe { *read = 0 };
+        unsafe { *read = n as u32 };
     }
     TRUE
 }
@@ -582,74 +635,132 @@ fn no_events(h: Handle, read: *mut u32) -> Bool {
 #[unsafe(no_mangle)]
 pub extern "system" fn PeekConsoleInputW(
     h: Handle,
-    _buffer: *mut u8,
-    _length: u32,
+    buffer: *mut u8,
+    length: u32,
     read: *mut u32,
 ) -> Bool {
-    no_events(h, read)
+    key_events(h, buffer, length, read, 1, false)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn PeekConsoleInputA(
     h: Handle,
-    _buffer: *mut u8,
-    _length: u32,
+    buffer: *mut u8,
+    length: u32,
     read: *mut u32,
 ) -> Bool {
-    no_events(h, read)
+    key_events(h, buffer, length, read, 1, true)
 }
 
-/// ReadConsoleInput/ReadConsole wait for input on Windows; there is no
-/// keyboard here, so they return nothing at once (recorded).
+/// ReadConsoleInput: waits for a key typed in the console window and takes
+/// the records queued; without a window (no keyboard) none at once.
 #[unsafe(no_mangle)]
 pub extern "system" fn ReadConsoleInputW(
     h: Handle,
-    _buffer: *mut u8,
-    _length: u32,
+    buffer: *mut u8,
+    length: u32,
     read: *mut u32,
 ) -> Bool {
-    unsupported(b"kernel32.dll!ReadConsoleInputW(no keyboard)", 0);
-    no_events(h, read)
+    key_events(h, buffer, length, read, 2, false)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn ReadConsoleInputA(
     h: Handle,
-    _buffer: *mut u8,
-    _length: u32,
+    buffer: *mut u8,
+    length: u32,
     read: *mut u32,
 ) -> Bool {
-    unsupported(b"kernel32.dll!ReadConsoleInputA(no keyboard)", 0);
-    no_events(h, read)
+    key_events(h, buffer, length, read, 2, true)
 }
 
+/// Whether the caller has a console window (a session); without one the
+/// reads return nothing (recorded as `what`).
+fn has_session(what: &[u8], read: *mut u32) -> bool {
+    if session_keys(&mut [], 1).is_some() {
+        return true;
+    }
+    unsupported(what, 0);
+    if !read.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *read = 0 };
+    }
+    false
+}
+
+/// ReadConsoleW: a line typed in the console window (the console's cooked
+/// input, as ReadFile gets it) in UTF-16, CR LF included; `len` and `read`
+/// count characters. Without a window nothing (recorded).
 #[unsafe(no_mangle)]
 pub extern "system" fn ReadConsoleW(
     h: Handle,
-    _buf: *mut c_void,
-    _len: u32,
+    buf: *mut c_void,
+    len: u32,
     read: *mut u32,
     _control: *mut c_void,
 ) -> Bool {
-    unsupported(b"kernel32.dll!ReadConsoleW(no keyboard)", 0);
-    no_events(h, read)
+    if !input_any(h) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    if !has_session(b"kernel32.dll!ReadConsoleW(no keyboard)", read) {
+        return TRUE;
+    }
+    // At most `len` characters: a UTF-8 line of up to 3 bytes each.
+    let mut bytes = [0u8; 1024];
+    let take = ((len as usize) * 3).min(bytes.len()) as u32;
+    let mut got = 0u32;
+    if super::ReadFile(h, bytes.as_mut_ptr().cast(), take, &mut got, core::ptr::null_mut()) == FALSE
+    {
+        return FALSE;
+    }
+    let text = core::str::from_utf8(&bytes[..got as usize]).unwrap_or("");
+    let out = buf.cast::<u16>();
+    let mut n = 0usize;
+    for u in text.encode_utf16() {
+        if n == len as usize {
+            break;
+        }
+        // SAFETY: the caller's buffer of `len` characters.
+        unsafe { *out.add(n) = u };
+        n += 1;
+    }
+    if !read.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *read = n as u32 };
+    }
+    TRUE
 }
 
+/// ReadConsoleA: as ReadConsoleW, in the ANSI code page (UTF-8 here).
 #[unsafe(no_mangle)]
 pub extern "system" fn ReadConsoleA(
     h: Handle,
-    _buf: *mut c_void,
-    _len: u32,
+    buf: *mut c_void,
+    len: u32,
     read: *mut u32,
     _control: *mut c_void,
 ) -> Bool {
-    unsupported(b"kernel32.dll!ReadConsoleA(no keyboard)", 0);
-    no_events(h, read)
+    if !input_any(h) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    if !has_session(b"kernel32.dll!ReadConsoleA(no keyboard)", read) {
+        return TRUE;
+    }
+    super::ReadFile(h, buf.cast(), len, read, core::ptr::null_mut())
 }
 
+/// FlushConsoleInputBuffer: the queued keys are dropped.
 #[unsafe(no_mangle)]
 pub extern "system" fn FlushConsoleInputBuffer(h: Handle) -> Bool {
-    if input(h).is_none() { FALSE } else { TRUE }
+    if !input_any(h) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    let mut keys = [0u8; 16 * 32];
+    while session_keys(&mut keys, 0).is_some_and(|n| n > 0) {}
+    TRUE
 }
 
 /// GenerateConsoleCtrlEvent: no console process groups to signal.

@@ -4,8 +4,11 @@
 //! console programs do on Windows 10 and later, prints
 //! `console_window_test: printed`, then reads a line from standard input
 //! (xtask types "hi" and Enter in the window; the console echoes it) and
-//! prints `console_window_test: read hi` (and ends 8 seconds later, so
-//! xtask sees the window). ReadFile on a console returns
+//! prints `console_window_test: read hi`; ReadConsoleW reads the next
+//! line ("ok": `console_window_test: console ok`) and ReadConsoleInputW
+//! one key ("x", a KEY_EVENT record: `console_window_test: key x`); then
+//! no events are left. It ends 8 seconds later, so xtask sees the window.
+//! ReadFile on a console returns
 //! the line with "\r\n", as Windows' cooked mode does.
 
 #![no_std]
@@ -22,6 +25,9 @@ unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
     fn ReadFile(h: Handle, buf: *mut u8, len: u32, read: *mut u32, ov: *mut c_void) -> i32;
     fn Sleep(ms: u32);
+    fn ReadConsoleW(h: Handle, buf: *mut u16, n: u32, read: *mut u32, control: *mut c_void) -> i32;
+    fn ReadConsoleInputW(h: Handle, records: *mut [u16; 10], n: u32, read: *mut u32) -> i32;
+    fn GetNumberOfConsoleInputEvents(h: Handle, count: *mut u32) -> i32;
 }
 
 #[unsafe(no_mangle)]
@@ -82,6 +88,44 @@ pub extern "C" fn mainCRTStartup() -> ! {
     out(b"console_window_test: read ");
     out(&line[..n - 2]);
     out(b"\n");
+    // SAFETY: our buffers; the standard input handle.
+    unsafe {
+        let stdin = GetStdHandle(-10i32 as u32);
+        // ReadConsoleW: the next typed line in UTF-16, with CR LF.
+        let mut wide = [0u16; 32];
+        let mut chars = 0u32;
+        let ok = ReadConsoleW(stdin, wide.as_mut_ptr(), 32, &mut chars, core::ptr::null_mut());
+        let c = chars as usize;
+        if ok == 0 || c < 2 || wide[c - 2] != 13 || wide[c - 1] != 10 {
+            out(b"console_window_test: no console line\n");
+            ExitProcess(2);
+        }
+        let mut narrow = [0u8; 32];
+        for (d, &w) in narrow.iter_mut().zip(&wide[..c - 2]) {
+            *d = w as u8;
+        }
+        out(b"console_window_test: console ");
+        out(&narrow[..c - 2]);
+        out(b"\n");
+        // ReadConsoleInputW: one key record (KEY_EVENT 1; the character
+        // at u16 index 7 of the INPUT_RECORD).
+        let mut record = [[0u16; 10]; 1];
+        let mut got = 0u32;
+        let ok = ReadConsoleInputW(stdin, record.as_mut_ptr(), 1, &mut got);
+        if ok == 0 || got != 1 || record[0][0] != 1 {
+            out(b"console_window_test: no key\n");
+            ExitProcess(3);
+        }
+        out(b"console_window_test: key ");
+        out(&[record[0][7] as u8]);
+        out(b"\n");
+        let mut left = 99u32;
+        GetNumberOfConsoleInputEvents(stdin, &mut left);
+        if left != 0 {
+            out(b"console_window_test: keys left\n");
+            ExitProcess(4);
+        }
+    }
     // Time for xtask to look at the window, then the end.
     // SAFETY: plain calls.
     unsafe {

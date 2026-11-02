@@ -2612,6 +2612,8 @@ const SCENARIOS: &[Scenario] = &[
             "console_window_test: printed",
             "xtask: screen ok",
             "console_window_test: read hi",
+            "console_window_test: console ok",
+            "console_window_test: key x",
             "exited with status 0x00000000",
         ],
     },
@@ -4361,6 +4363,12 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     // (y 174..190) by the console's cooked input.
                     input: &["sendkey h", "sendkey i", "sendkey ret"],
                     pixels: &[PixelCheck::AnyIn(66, 174, 30, 16, 0xcccccc)],
+                },
+                ScreenStep {
+                    // "ok" and Enter (ReadConsoleW), then "x" (one raw key
+                    // record): the program's answer on the ninth line.
+                    input: &["sendkey o", "sendkey k", "sendkey ret", "sendkey x"],
+                    pixels: &[PixelCheck::AnyIn(66, 250, 300, 16, 0xcccccc)],
                 },
             ],
         },

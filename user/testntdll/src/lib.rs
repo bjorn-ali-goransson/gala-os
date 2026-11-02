@@ -268,6 +268,7 @@ syscall_stubs! {
     GalaConsoleHost = 0x7f3a, fn(id: u32, event: *mut core::ffi::c_void);
     GalaConsoleRead = 0x7f3b, fn(id: u32, buf: *mut u8, len: u32, count: *mut u32);
     GalaConsoleInput = 0x7f3c, fn(id: u32, records: *const u8, count: u32);
+    GalaConsoleInputEvents = 0x7f3d, fn(records: *mut u8, max: u32, count: *mut u32, flags: u32);
     // gala's number, UNVERIFIED.
     NtCreateDirectoryObject = 0x7f24, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtClearEvent = 0x3e, fn(h: usize);

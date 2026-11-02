@@ -110,6 +110,7 @@ pub const GALA_WINDOW_CAPTURE: u32 = 0x7f39;
 pub const GALA_CONSOLE_HOST: u32 = 0x7f3a;
 pub const GALA_CONSOLE_READ: u32 = 0x7f3b;
 pub const GALA_CONSOLE_INPUT: u32 = 0x7f3c;
+pub const GALA_CONSOLE_INPUT_EVENTS: u32 = 0x7f3d;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -284,6 +285,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_CONSOLE_HOST, "GalaConsoleHost", 2, gala_console_host),
     (GALA_CONSOLE_READ, "GalaConsoleRead", 4, gala_console_read),
     (GALA_CONSOLE_INPUT, "GalaConsoleInput", 3, gala_console_input),
+    (GALA_CONSOLE_INPUT_EVENTS, "GalaConsoleInputEvents", 4, gala_console_input_events),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1403,13 +1405,53 @@ fn gala_console_input(call: &mut Call<'_>) -> NtStatus {
             control: u32::from_le_bytes([r[12], r[13], r[14], r[15]]),
         };
     }
-    let (_, echo, line_done) = session.push_input(&keys[..count]);
-    if let Some(event) = echo {
-        wait::set_signal(&event, 1);
+    if session.push_input(&keys[..count]) > 0 {
+        wait::set_signal(&session.input_ready, 1);
     }
-    if line_done {
-        wait::set_signal(&session.line_ready, 1);
+    NtStatus::SUCCESS
+}
+
+/// GalaConsoleInputEvents(*Records, Max, *Count, Flags): the calling
+/// process's console session's key records (KEY_EVENT_RECORD, 16 bytes):
+/// taken, or copied with flag 1 (peek); flag 2 waits for one; with Max 0
+/// the number queued. STATUS_NOT_FOUND without a session.
+fn gala_console_input_events(call: &mut Call<'_>) -> NtStatus {
+    use super::conhost::Key;
+    let Some(session) = call.process.console.clone() else { return NtStatus::NOT_FOUND };
+    let (ptr, max, count, flags) =
+        (arg!(call, 0), (arg!(call, 1) as usize).min(64), arg!(call, 2), arg!(call, 3));
+    if max == 0 {
+        tri!(call.write_u32(count, session.input_count() as u32));
+        return NtStatus::SUCCESS;
     }
+    let mut keys = [Key::default(); 64];
+    let n = loop {
+        let n = if flags & 1 != 0 {
+            session.peek_input(&mut keys[..max])
+        } else {
+            session.take_input(&mut keys[..max])
+        };
+        if n > 0 || flags & 2 == 0 {
+            break n;
+        }
+        wait::wait_for(core::slice::from_ref(&session.input_ready), false, wait::Timeout::Infinite);
+    };
+    if flags & 1 == 0 {
+        session.settle();
+    }
+    let mut raw = [0u8; 16 * 64];
+    for (k, r) in keys[..n].iter().zip(raw.chunks_exact_mut(16)) {
+        r[0..4].copy_from_slice(&u32::from(k.down).to_le_bytes());
+        r[4..6].copy_from_slice(&k.repeat.to_le_bytes());
+        r[6..8].copy_from_slice(&k.vk.to_le_bytes());
+        r[8..10].copy_from_slice(&k.scan.to_le_bytes());
+        r[10..12].copy_from_slice(&k.ch.to_le_bytes());
+        r[12..16].copy_from_slice(&k.control.to_le_bytes());
+    }
+    if call.process.write(ptr, &raw[..16 * n]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    tri!(call.write_u32(count, n as u32));
     NtStatus::SUCCESS
 }
 
@@ -4054,6 +4096,11 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
         let mut bytes = [0u8; 4096];
         let want = (length as usize).min(bytes.len());
         loop {
+            // The keys typed so far are edited (and echoed) now.
+            if let Some(event) = session.cook() {
+                wait::set_signal(&event, 1);
+            }
+            session.settle();
             let n = session.read_line(&mut bytes[..want]);
             if n > 0 || want == 0 {
                 if call.process.write(buffer, &bytes[..n]).is_err() {
@@ -4062,7 +4109,7 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
                 tri!(call.write_iosb(iosb, NtStatus::SUCCESS, n as u64));
                 return NtStatus::SUCCESS;
             }
-            let ready = core::slice::from_ref(&session.line_ready);
+            let ready = core::slice::from_ref(&session.input_ready);
             wait::wait_for(ready, false, wait::Timeout::Infinite);
         }
     }

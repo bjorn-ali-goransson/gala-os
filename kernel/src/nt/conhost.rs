@@ -30,8 +30,8 @@ pub struct Key {
 pub struct Session {
     pub id: u32,
     inner: IrqMutex<Inner>,
-    /// Set while a whole line is ready for a cooked read.
-    pub line_ready: ObjectRef,
+    /// Set while keys are queued (a reader waits on it).
+    pub input_ready: ObjectRef,
 }
 
 /// The longest line a cooked read collects (characters).
@@ -66,7 +66,7 @@ impl Session {
         editing.try_reserve_exact(MAX_LINE).map_err(|_| NtStatus::NO_MEMORY)?;
         let mut ready = Vec::new();
         ready.try_reserve_exact(4 * MAX_LINE + 2).map_err(|_| NtStatus::NO_MEMORY)?;
-        let line_ready = KObject::new(ObjectBody::Event(Event {
+        let input_ready = KObject::new(ObjectBody::Event(Event {
             kind: EventType::Notification,
             dispatcher: Dispatcher::new(0),
         }))
@@ -84,7 +84,7 @@ impl Session {
                 editing,
                 ready,
             }),
-            line_ready,
+            input_ready,
         })
         .map_err(|_| NtStatus::NO_MEMORY)
     }
@@ -126,21 +126,34 @@ impl Session {
     }
 
     /// Queues keys typed in the host's window (dropped when the queue is
-    /// full) and edits the cooked line with them, as the console's default
-    /// input mode does (ENABLE_LINE_INPUT, ECHO_INPUT, PROCESSED_INPUT):
-    /// characters are echoed into the output, Backspace takes the last one
-    /// back, Enter finishes the line (CR LF). What to signal (outside the
-    /// lock): the host's event (for the echo) and whether a line is ready.
-    pub fn push_input(&self, keys: &[Key]) -> (usize, Option<ObjectRef>, bool) {
+    /// full); how many. The caller sets `input_ready` (outside the lock).
+    pub fn push_input(&self, keys: &[Key]) -> usize {
         let mut s = self.inner.lock();
         let room = MAX_INPUT - s.input.len();
         let n = keys.len().min(room);
-        let mut line_done = false;
         for &k in &keys[..n] {
             let _ = s.input.try_push(k);
+        }
+        n
+    }
+
+    /// A cooked read's editing, as the console's default input mode does
+    /// it (ENABLE_LINE_INPUT, ECHO_INPUT, PROCESSED_INPUT): the queued keys
+    /// are consumed; characters are echoed into the output, Backspace takes
+    /// the last one back, Enter finishes the line (CR LF) and stops there
+    /// (keys after it wait for the next read). The host's event to set
+    /// when something was echoed.
+    pub fn cook(&self) -> Option<ObjectRef> {
+        let mut s = self.inner.lock();
+        let mut echoed = false;
+        let mut used = 0;
+        while used < s.input.len() {
+            let k = s.input[used];
+            used += 1;
             if !k.down || k.ch == 0 {
                 continue;
             }
+            echoed = true;
             match k.ch {
                 0x0d => {
                     let mut utf8 = [0u8; 4];
@@ -153,7 +166,7 @@ impl Session {
                     s.editing.clear();
                     let _ = s.ready.try_extend_from_slice(b"\r\n");
                     s.append(b"\r\n");
-                    line_done = true;
+                    break;
                 }
                 0x08 => {
                     if s.editing.pop().is_some() {
@@ -170,22 +183,35 @@ impl Session {
                 _ => {}
             }
         }
-        (n, s.event.clone(), line_done)
+        s.input.drain(..used);
+        if echoed { s.event.clone() } else { None }
     }
 
     /// Takes up to `out.len()` bytes of finished lines (a cooked read);
-    /// how many. The line-ready event is reset when none are left.
+    /// how many.
     pub fn read_line(&self, out: &mut [u8]) -> usize {
-        let (n, empty) = {
-            let mut s = self.inner.lock();
-            let n = out.len().min(s.ready.len());
-            out[..n].copy_from_slice(&s.ready[..n]);
-            s.ready.drain(..n);
-            (n, s.ready.is_empty())
-        };
+        let mut s = self.inner.lock();
+        let n = out.len().min(s.ready.len());
+        out[..n].copy_from_slice(&s.ready[..n]);
+        s.ready.drain(..n);
+        n
+    }
+
+    /// Resets `input_ready` if no key is queued (after the queue was
+    /// emptied; checked again under the lock).
+    pub fn settle(&self) {
+        let empty = self.inner.lock().input.is_empty();
         if empty {
-            super::wait::set_signal(&self.line_ready, 0);
+            super::wait::set_signal(&self.input_ready, 0);
         }
+    }
+
+    /// Copies up to `out.len()` queued keys, oldest first, without taking
+    /// them (PeekConsoleInput); how many.
+    pub fn peek_input(&self, out: &mut [Key]) -> usize {
+        let s = self.inner.lock();
+        let n = out.len().min(s.input.len());
+        out[..n].copy_from_slice(&s.input[..n]);
         n
     }
 
@@ -257,13 +283,13 @@ mod tests {
     fn keys_queue_up_to_the_limit() {
         let s = Session::new().unwrap();
         let k = Key { down: true, vk: 0x41, ch: u16::from(b'a'), ..Key::default() };
-        assert_eq!(s.push_input(&[k, k]).0, 2);
+        assert_eq!(s.push_input(&[k, k]), 2);
         assert_eq!(s.input_count(), 2);
         let mut out = [Key::default(); 4];
         assert_eq!(s.take_input(&mut out), 2);
         assert_eq!(out[0], k);
         let many = alloc::vec![k; MAX_INPUT + 5];
-        assert_eq!(s.push_input(&many).0, MAX_INPUT);
+        assert_eq!(s.push_input(&many), MAX_INPUT);
     }
 
     #[test]
@@ -272,17 +298,25 @@ mod tests {
         let key = |ch: u8| Key { down: true, ch: u16::from(ch), ..Key::default() };
         let up = Key { down: false, ch: u16::from(b'x'), ..Key::default() };
         // "hx", Backspace, "i", a key release (ignored): no line yet.
-        let (_, _, done) = s.push_input(&[key(b'h'), key(b'x'), key(8), key(b'i'), up]);
-        assert!(!done);
+        s.push_input(&[key(b'h'), key(b'x'), key(8), key(b'i'), up]);
+        s.cook();
         let mut line = [0u8; 16];
         assert_eq!(s.read_line(&mut line), 0);
-        // Enter finishes it.
-        assert!(s.push_input(&[key(b'\r')]).2);
+        assert_eq!(s.input_count(), 0);
+        // Enter finishes it; what follows waits for the next read.
+        s.push_input(&[key(b'\r'), key(b'z')]);
+        s.cook();
         assert_eq!(s.read_line(&mut line), 4);
         assert_eq!(&line[..4], b"hi\r\n");
+        assert_eq!(s.input_count(), 1);
         // The echo: the characters, the Backspace undoing "x", CR LF.
         let mut echo = [0u8; 16];
         let n = s.read(&mut echo);
         assert_eq!(&echo[..n], b"hx\x08 \x08i\r\n");
+        // Raw readers see the records (PeekConsoleInput keeps them).
+        let mut keys = [Key::default(); 4];
+        assert_eq!(s.peek_input(&mut keys), 1);
+        assert_eq!(s.take_input(&mut keys), 1);
+        assert_eq!(keys[0].ch, u16::from(b'z'));
     }
 }
