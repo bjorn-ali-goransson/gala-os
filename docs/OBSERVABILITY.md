@@ -109,13 +109,21 @@ counts (TCG plugins) need a QEMU built with plugins; Ubuntu's has none.
   (WORKFLOW "Fault injection").
 - Flaky SMP bugs: QEMU record/replay (`-icount shift=auto,rr=record`)
   makes a failing run reproducible.
-- **Flight recorder** (planned, ROADMAP R4): an always-on per-CPU ring of
-  the last few thousand events, kept in memory even when the event
-  stream is off, dumped on a panic (this is the "last N events in the
-  panic output" above).
-- **Hang watchdog** (planned, R4): on the timer tick, notice a CPU that
-  has stopped scheduling or a thread that has been in the kernel too
-  long, and print that CPU's stack and what the thread waits on.
+- **Flight recorder** (done 2026-11-02, `kernel/src/flight.rs`): an
+  always-on ring per CPU of the last 256 records (time << 8 | kind, two
+  values; one atomic increment and three stores each), kept whether the
+  event stream is on or not: system calls (number | pid << 32, thread
+  id) and their status, process exits, the watchdog's marks. A panic
+  prints the last 48 across CPUs, merged by time (`flight: ...` lines
+  after the backtrace). TODO: context switches, page faults, interrupts.
+- **Hang watchdog** (done 2026-11-02 for stuck CPUs): every timer
+  interrupt counts its CPU's heartbeat; once a second each CPU looks at
+  the next online one's, and one that has not moved for 5 s (interrupts
+  off: a lock never released, a loop in a handler) is reported once,
+  with its last flight-recorder events (scenario `watchdog`: `hangtest`
+  stalls CPU 1). TODO: a thread in the kernel too long (a system call
+  that never returns while its CPU still ticks), printing the stuck CPU's
+  stack (an NMI to it).
 - **Crash record across reboots** (planned, R4): the panic record goes
   to a reserved area of the disk and is reported at the next boot; it
   stays local (privacy by design).

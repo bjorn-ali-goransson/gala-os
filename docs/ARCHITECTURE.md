@@ -102,6 +102,7 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `console=<program>` | that `start=`/`run=` program gets a console window (a console session hosted by gala's conhost.exe) |
 | `cwd=C:/dir` | their current directory (default `C:\gala\`; Elasticsearch expects its home) |
 | `trace` | log every system call (arguments, status) |
+| `hangtest` | CPU 1 spins with interrupts off for 7 s, 3 s after its timer starts (the hang watchdog's scenario) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |
 | `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault` or `all` |

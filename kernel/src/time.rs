@@ -80,7 +80,28 @@ pub fn last_user_rip(thread: crate::sched::ThreadId) -> Option<u64> {
         .map(|(_, rip)| rip.load(Ordering::Relaxed))
 }
 
+/// `hangtest`: CPU 1 spins with interrupts off for 7 s, 3 s after its
+/// timer starts (the hang watchdog's scenario).
+static HANG_TEST: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn set_hang_test(on: bool) {
+    HANG_TEST.store(on, Ordering::Relaxed);
+}
+
 fn on_tick(frame: &mut TrapFrame) {
+    crate::flight::on_tick(TICK_HZ);
+    if crate::arch::percpu::cpu_index() == 1 && HANG_TEST.load(Ordering::Relaxed) {
+        static BEATS: AtomicU64 = AtomicU64::new(0);
+        if BEATS.fetch_add(1, Ordering::Relaxed) == 3 * TICK_HZ {
+            HANG_TEST.store(false, Ordering::Relaxed);
+            crate::info!("hangtest: CPU 1 spins with interrupts off for 7 s");
+            let until = monotonic_ns() + 7_000_000_000;
+            while monotonic_ns() < until {
+                core::hint::spin_loop();
+            }
+            crate::info!("hangtest: CPU 1 goes on");
+        }
+    }
     if frame.from_user_mode() {
         let cpu = crate::arch::percpu::cpu_index() as usize;
         if let Some((t, rip)) = USER_RIP.get(cpu) {

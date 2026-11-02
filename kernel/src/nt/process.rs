@@ -809,6 +809,7 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
         format_args!(r#""pid":{},"status":{}"#, process.id, status.0),
     );
     wait::signal_dispatcher(&process.dispatcher, 1);
+    crate::flight::record(crate::flight::Kind::ProcessExit, process.id, u64::from(status.0));
     super::desktop::process_ended(process.id);
     super::window::process_ended(process.id as u32);
     // Close every handle (this breaks reference cycles through handles to

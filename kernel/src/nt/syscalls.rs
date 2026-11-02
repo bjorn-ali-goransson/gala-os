@@ -528,6 +528,11 @@ fn dispatch(frame: &mut SyscallFrame) {
     let process = t.process.clone();
     let service = TABLE.iter().find(|(n, ..)| *n == number);
     let started = platform::monotonic_ns();
+    crate::flight::record(
+        crate::flight::Kind::Syscall,
+        u64::from(number) | (process.id << 32),
+        t.id,
+    );
     let mut call = Call { frame, process };
     thread::set_in_syscall(&me, Some((number, caller_regs(&call))));
     // A wait may never return: its event is written when it starts too
@@ -547,6 +552,7 @@ fn dispatch(frame: &mut SyscallFrame) {
         }
     };
     thread::set_in_syscall(&me, None);
+    crate::flight::record(crate::flight::Kind::SyscallDone, u64::from(number), u64::from(status.0));
     // What the call changed on C: is on the disk before it returns.
     super::persist::sync();
     let name = service.map_or("?", |&(_, name, ..)| name);

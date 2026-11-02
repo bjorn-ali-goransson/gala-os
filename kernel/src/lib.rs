@@ -24,6 +24,7 @@ pub mod console;
 pub mod disk;
 pub mod events;
 pub mod failpoint;
+pub mod flight;
 pub mod fs;
 /// gala-um's platform: the NT layer inside a Linux process.
 #[cfg(feature = "hosted")]
@@ -163,6 +164,8 @@ pub fn kernel_main() -> ! {
     // The desktop's wallpaper (`wallpaper=<name>`, else one at random).
     nt::desktop::choose_wallpaper(cmdline.value("wallpaper"));
     nt::syscalls::set_trace(cmdline.flag("trace"));
+    // The watchdog's test: CPU 1 stops taking timer interrupts for a while.
+    time::set_hang_test(cmdline.flag("hangtest"));
     events::set_mask(cmdline.value("events").map_or(0, events::parse_mask));
     // `run=a.exe,b.exe` runs the programs one after another; `args=` holds
     // their (percent-encoded) command-line arguments in the same order;
@@ -375,6 +378,8 @@ pub fn panic(info: &core::panic::PanicInfo) -> ! {
         }
     }
     console::emergency_println(format_args!("{Backtrace}"));
+    // What the CPUs did last (the flight recorder).
+    flight::dump(u64::MAX, 48, console::emergency_println);
     finish(QemuExitCode::Failure)
 }
 

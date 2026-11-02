@@ -2971,6 +2971,22 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["msvcrt_test: _putws", "msvcrt_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // R4: the hang watchdog. `hangtest` makes CPU 1 spin with
+        // interrupts off for 7 s, 3 s after its timer starts; another CPU
+        // reports it after 5 s with its flight-recorder events, and the
+        // system goes on (busybox sleeps through it).
+        name: "watchdog",
+        cmdline: "qemu_exit hangtest run=busybox.exe args=sleep%2012",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hangtest: CPU 1 spins with interrupts off",
+            "watchdog: CPU 1 has taken no timer interrupt for 5 s",
+            "flight: the last",
+            "hangtest: CPU 1 goes on",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // H3: busybox utilities over files (user/busybox/files.sh): mkdir,
         // ls, find, grep -r, wc, cp -r, cmp, md5sum, tar c/t/x, rm -r.
         // Expected as on Windows (the same binary and script).
@@ -3758,6 +3774,7 @@ fn events_flag() -> String {
 /// Scenarios that ship a named set of EXTRA_MODULES instead of their own
 /// (the same set: they share a VM).
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("watchdog", "busybox"),
     ("failpoint_heap", "kernel32_test"),
     ("failpoint_frame", "kernel32_test"),
     ("failpoint_random", "kernel32_test"),
