@@ -614,6 +614,30 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    press outside or Escape closes it, with CBN_DROPDOWN, CBN_SELCHANGE,
    CBN_SELENDOK/CBN_SELENDCANCEL and CBN_CLOSEUP (controls_test;
    gui_test's screen check opens one and picks an item).
+   **Snap repaints in time** (2026-11-02): after Win+Right FileZilla's
+   screendump sometimes showed the old layout (local pane 600 wide, the
+   remote one squeezed to the right edge). Probes showed the layout was
+   right every time (local 0-319, remote 322-638 of the 638-pixel
+   client, sash gravity 0.5) and every pane repainted; what lagged was
+   the screen: user32 copied each EndPaint's and each ReleaseDC's area
+   to the desktop at once (also the many GetDC/ReleaseDC pairs wx uses to
+   measure text), about 200 copies of 15 million pixels for one snap,
+   which took 5-9 s under emulation, so a dump taken as soon as a step's
+   checks passed caught it half done. user32 now collects what was drawn
+   per top-level window and shows it when the thread goes idle (or every
+   50 ms of drawing without a break); the scenario takes about half the
+   time. With it (user32_test): WM_WINDOWPOSCHANGING may change the
+   WINDOWPOS (honoured; not sent with SWP_NOSENDCHANGING, which wx's
+   status bar relies on, as it answers WM_WINDOWPOSCHANGING with the
+   rectangle it had), WM_SIZE's wParam SIZE_MAXIMIZED for a maximized
+   window. The filezilla screen check now also finds the remote list's
+   "Filename" header and "hello.txt" in the right quarter after the snap.
+   Not done (documented, seen on the way): DefWindowProc's
+   WM_WINDOWPOSCHANGING sends WM_GETMINMAXINFO and keeps a thick-framed
+   window within its track sizes (FileZilla's minimum is 700 x 500, so
+   on Windows a snapped half of 640 would be 700 wide; the desktop's
+   docking test and the scenario's checks would change with it), and
+   SetWindowPos's WM_NCCALCSIZE.
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,

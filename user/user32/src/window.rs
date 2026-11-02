@@ -156,6 +156,11 @@ pub(crate) struct Window {
     /// Its icons (WM_SETICON ICON_BIG, ICON_SMALL; 0: none, the class's).
     pub(crate) icon: usize,
     pub(crate) icon_small: usize,
+    /// A top-level window's part (client coordinates) drawn since it was
+    /// last shown on the desktop (empty: right <= left), and since when
+    /// (GetTickCount): see `present`.
+    pub(crate) dirty: [i32; 4],
+    pub(crate) dirty_at: u32,
 }
 
 /// A top-level window's frame: the left, right and bottom border, and the
@@ -248,6 +253,8 @@ pub(crate) const NO_WINDOW: Window = Window {
     bar: 0,
     icon: 0,
     icon_small: 0,
+    dirty: [0; 4],
+    dirty_at: 0,
 };
 const NO_MSG: Msg =
     Msg { hwnd: 0, message: 0, wparam: 0, lparam: 0, time: 0, pt: [0; 2], private: 0 };
@@ -800,6 +807,8 @@ pub extern "system" fn CreateWindowExW(
             bar,
             icon: 0,
             icon_small: 0,
+            dirty: [0; 4],
+            dirty_at: 0,
         };
         Some(i)
     });
@@ -1139,12 +1148,59 @@ pub(crate) fn present_bar(hwnd: Hwnd) {
     };
 }
 
+/// How long drawing that goes on without a break (no idle moment) may
+/// stay off the screen, in ms.
+const PRESENT_LAG: u32 = 50;
+
 /// Shows the window's area (of its top-level window's buffer) on the
-/// desktop.
+/// desktop: not at once, but at the thread's next idle moment (`flush`:
+/// no message to retrieve, or about to wait), so the many draws of one
+/// change reach the desktop as one copy. A resize repaints every child,
+/// and every GetDC/ReleaseDC pair ends here, also one that only measured
+/// text (wx does that often); copying and composing each of them on its
+/// own made FileZilla's repaint after a snap take seconds under emulation
+/// (a screendump then caught it half done). Drawing that goes on without
+/// a break still shows every PRESENT_LAG ms.
 fn present(hwnd: Hwnd) {
-    let Some((root, _, visible)) = crate::tree::placement(hwnd) else { return };
-    let [l, t, r, b] = visible;
-    if r <= l || b <= t {
+    let Some(i) = index_of(hwnd) else { return };
+    // SAFETY: a plain call.
+    let now = unsafe { GetTickCount() };
+    let due = with(|s| {
+        if !s.windows[i].used {
+            return None;
+        }
+        let (root, _, [l, t, r, b]) = crate::tree::place_in(s, i);
+        if r <= l || b <= t {
+            return None;
+        }
+        let w = &mut s.windows[root];
+        w.dirty = if w.dirty[2] <= w.dirty[0] {
+            w.dirty_at = now;
+            [l, t, r, b]
+        } else {
+            crate::rect::union(w.dirty, [l, t, r, b])
+        };
+        Some((root, now.wrapping_sub(w.dirty_at) >= PRESENT_LAG))
+    });
+    if let Some((root, true)) = due {
+        flush_window(root);
+    }
+}
+
+/// Copies top-level window `i`'s drawn part to the desktop.
+fn flush_window(i: usize) {
+    let taken = with(|s| {
+        let w = &mut s.windows[i];
+        if !w.used || w.dirty[2] <= w.dirty[0] {
+            return None;
+        }
+        let d = core::mem::take(&mut w.dirty);
+        Some((*w, d))
+    });
+    let Some((root, d)) = taken else { return };
+    // Within the buffer (it may have shrunk since).
+    let [l, t, r, b] = [d[0].max(0), d[1].max(0), d[2].min(root.cw), d[3].min(root.ch)];
+    if r <= l || b <= t || root.desktop == 0 || root.pixels.is_null() {
         return;
     }
     // SAFETY: the top-level window's own buffer; the rectangle is inside.
@@ -1159,6 +1215,29 @@ fn present(hwnd: Hwnd) {
             (root.cw * 4) as usize,
         )
     };
+}
+
+/// Shows what was drawn and not yet shown, for every window (`present`).
+pub(crate) fn flush() {
+    let mut pending = [0u64; MAX_WINDOWS / 64];
+    let any = with(|s| {
+        let mut any = false;
+        for (i, w) in s.windows.iter().enumerate() {
+            if w.used && w.dirty[2] > w.dirty[0] {
+                pending[i / 64] |= 1 << (i % 64);
+                any = true;
+            }
+        }
+        any
+    });
+    if !any {
+        return;
+    }
+    for i in 0..MAX_WINDOWS {
+        if pending[i / 64] & (1 << (i % 64)) != 0 {
+            flush_window(i);
+        }
+    }
 }
 
 /// BeginPaint: a DC on the client area, the area to paint (all of it),
@@ -2001,6 +2080,15 @@ fn next(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
 }
 
 fn next_raw(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
+    let m = next_raw_inner(hwnd, min, max, remove);
+    // Nothing to do: an idle moment, what was drawn shows.
+    if m.is_none() {
+        flush();
+    }
+    m
+}
+
+fn next_raw_inner(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
     pump();
     let thread = me();
     let fits = |m: &Msg| {
@@ -2066,6 +2154,8 @@ pub extern "system" fn MsgWaitForMultipleObjectsEx(
         set_last_error(87); // ERROR_INVALID_PARAMETER
         return WAIT_FAILED;
     }
+    // About to wait: what was drawn shows.
+    flush();
     if flags & MWMO_WAITALL != 0 {
         // SAFETY: the caller's array of `count` handles.
         return unsafe { WaitForMultipleObjects(count, handles, 1, ms) };
