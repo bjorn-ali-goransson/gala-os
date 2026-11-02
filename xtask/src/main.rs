@@ -1215,6 +1215,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "user/bin/flaui_test.dll", "gala"),
     ("dotnet", "user/flaui_test/flaui_test.runtimeconfig.json", "gala"),
     ("dotnet", "user/bin/flaui_target.exe", "gala"),
+    // filezilla_flaui's test (with the filezilla set: MODULE_SETS).
+    ("dotnet", "user/bin/filezilla_flaui.dll", "gala"),
+    ("dotnet", "user/flaui_test/filezilla_flaui.runtimeconfig.json", "gala"),
     ("dotnet", "target/prebuilt/flaui-core/lib/net8.0-windows7.0/FlaUI.Core.dll", "gala"),
     ("dotnet", "target/prebuilt/flaui-uia3/lib/net8.0-windows7.0/FlaUI.UIA3.dll", "gala"),
     (
@@ -1585,6 +1588,7 @@ const SLOW_SCENARIOS: &[&str] = &[
     "java_http",
     "dotnet_hello",
     "flaui_test",
+    "filezilla_flaui",
     "pwsh_hello",
     "postgres",
     "filezilla",
@@ -2183,6 +2187,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 const PENDING: &[&str] = &[
     "elasticsearch",
     "filezilla",
+    "filezilla_flaui",
     "gitbash",
     "mingit",
     "sqllocaldb",
@@ -3105,6 +3110,33 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xtask: screen ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // W3 and UI Automation: FileZilla 3.69.3 driven by FlaUI 5.0.0 on
+        // .NET 8 (user/flaui_test/FileZillaFlaUI.cs) through gala's
+        // UIAutomationCore, with FileZilla Server started first: the
+        // Welcome dialog, Quickconnect, the connection's dialogs, the
+        // remote and local file lists, File > Exit. No pixels: the same
+        // test runs on Windows.
+        name: "filezilla_flaui",
+        cmdline: "qemu_exit \
+                  start=filezilla-server/filezilla-server.exe start_args=--config-dir%20C:/fzs \
+                  console=filezilla-server.exe run=dotnet.exe args=C:/gala/filezilla_flaui.dll",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "window=FileZilla",
+            "welcome=Welcome to FileZilla OK",
+            "quickconnect=127.0.0.1 gala 7",
+            "dialog=Remember passwords? OK",
+            "dialog=Unknown certificate OK",
+            "remote=..,hello.txt",
+            "local=2 ..,",
+            "selected=hello.txt True",
+            "menu=File Exit",
+            "exited=True",
+            "filezilla_flaui: ok",
+            "dotnet.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
         // P1 (pending): Git Bash (PortableGit 2.47.1): bash on the MSYS2
         // runtime, a pipeline (a forked child per command).
         name: "gitbash",
@@ -3755,8 +3787,9 @@ fn events_flag() -> String {
     env::var("XTASK_EVENTS").map(|e| format!(" events={e}")).unwrap_or_default()
 }
 
-/// Scenarios that ship a named set of EXTRA_MODULES instead of their own
-/// (the same set: they share a VM).
+/// Scenarios that ship named sets of EXTRA_MODULES instead of their own
+/// (the same set: they share a VM); a scenario listed more than once
+/// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
     ("failpoint_heap", "kernel32_test"),
     ("failpoint_frame", "kernel32_test"),
@@ -3767,6 +3800,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("filezilla_server", "filezilla"),
     ("dotnet_hello", "dotnet"),
     ("flaui_test", "dotnet"),
+    ("filezilla_flaui", "dotnet"),
+    ("filezilla_flaui", "filezilla"),
     ("pwsh_hello", "pwsh"),
     ("sqllocaldb_persist", "sqllocaldb"),
 ];
@@ -3774,10 +3809,14 @@ const MODULE_SETS: &[(&str, &str)] = &[
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
 fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
-    let set = MODULE_SETS.iter().find(|s| s.0 == name).map_or(name, |s| s.1);
+    let mut sets: Vec<&str> = MODULE_SETS.iter().filter(|s| s.0 == name).map(|s| s.1).collect();
+    if sets.is_empty() {
+        sets.push(name);
+    }
     let mut modules: Vec<_> =
-        EXTRA_MODULES.iter().filter(|m| m.0 == set).map(|m| (m.1, m.2)).collect();
+        EXTRA_MODULES.iter().filter(|m| sets.contains(&m.0)).map(|m| (m.1, m.2)).collect();
     modules.sort_unstable();
+    modules.dedup();
     modules
 }
 

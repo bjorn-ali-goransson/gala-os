@@ -660,6 +660,13 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    on Windows a snapped half of 640 would be 700 wide; the desktop's
    docking test and the scenario's checks would change with it), and
    SetWindowPos's WM_NCCALCSIZE.
+   **FileZilla driven by FlaUI** (2026-11-02, `filezilla_flaui`): the
+   same Quickconnect session as the pixel scenario, but found and driven
+   through UI Automation (see "Screen tests through UI Automation"
+   below); it runs without a screen (BIOS boot) in about a quarter of
+   the time. Seen on the way: FileZilla reports "Impossible to create a
+   rich edit control" (no riched20/msftedit: its message log falls back
+   to a plain edit).
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,
@@ -1582,11 +1589,29 @@ ones) are ListItem elements with SelectionItem/ScrollItem (list views:
 Invoke = activate), the lists have Selection; another process's list
 view is read through memory allocated in it (VirtualAllocEx,
 Read/WriteProcessMemory), as Windows' proxy does; FlaUI's AsListBox()
-Items/Text/Select/IsSelected/SelectedItem work on a list view. Next: a
-FlaUI test driving FileZilla's file lists (find the local/remote list
-views, read names, select and Invoke a directory to open it), then
-menus (ExpandCollapse), title bars, GridItem/TableItem for columns,
-WM_GETOBJECT providers, and screen tests rewritten on FlaUI.
+Items/Text/Select/IsSelected/SelectedItem work on a list view.
+FileZilla driven by FlaUI (2026-11-02, `filezilla_flaui`): the first
+real program driven through UI Automation, with no pixels or
+coordinates. FlaUI on .NET 8 launches FileZilla 3.69.3 (FileZilla
+Server started first), closes the Welcome dialog by its OK button, fills
+Quickconnect's Host/Username/Password/Port edits (found by the labels in
+front of them) and invokes Quickconnect, answers "Remember passwords?"
+and "Unknown certificate" with their OK buttons, waits until the remote
+list (a virtual wx list view) shows hello.txt, reads the local list,
+selects hello.txt, and ends FileZilla with File > Exit (ExpandCollapse,
+then Invoke); ~25 s in the kernel against ~100 s for the pixel
+scenario. What it needed (uia_test, windows_across_test): owner windows
+in user32 (CreateWindowEx's hWndParent for a top-level window,
+GetWindow GW_OWNER, mirrored in the window registry) and owned windows
+under their owner in the UIA tree (wx's dialogs); menus as UIA elements
+(MenuBar, MenuItem, the #32768 popup as a Menu, ExpandCollapse and
+Invoke), read and driven through a message user32 answers itself. The
+pixel scenario `filezilla` stays as it is. Both are PENDING (not in
+`cargo xtask test`/CI): run them with `cargo xtask boot-test`. Next:
+title bars (FlaUI's Window.Close), the Window pattern (IsModal:
+ModalWindows), GridItem/TableItem for columns, combo box and tree-view
+items, events, WM_GETOBJECT providers, GetParent of owned popups, and
+the other screen tests rewritten on FlaUI.
 
 Drivers: gala writes its own, against published standards (virtio,
 then AHCI/NVMe, xHCI, e1000), not hardware-specific ones. Reusing

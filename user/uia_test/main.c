@@ -26,6 +26,23 @@
  *   item activates it (its parent gets LVN_ITEMACTIVATE). The child
  *   process's list view and list box are read and selected the same
  *   way, across processes.
+ * - Owned windows: the child's "UIA Owned" (WS_POPUP | WS_CAPTION, its
+ *   main window as owner, as a program's dialog) is a child of its owner
+ *   in the UIA tree, not of the root (UIA places owned top-level windows
+ *   under their owner; FlaUI's Window.ModalWindows and its Win32 menu
+ *   handling rely on it): FindFirst from the root's children does not
+ *   find it, from the owner's children does; its parent is the owner;
+ *   its "OK" button is found by Name below it.
+ * - Menus (UIA's Win32 menu proxy): the child's window "UIA Menus" has a
+ *   menu bar (&File: "&Open\tCtrl+O", a separator, "E&xit"). Its MenuBar
+ *   child holds one MenuItem "File" (mnemonic removed) with the
+ *   ExpandCollapse pattern, Collapsed; Expand opens the menu (as a click
+ *   does): the item becomes Expanded and a Menu element named "File" (the
+ *   popup, a window of class #32768 owned by the menu's window) appears
+ *   under the window, its MenuItems "Open" (AcceleratorKey "Ctrl+O") and
+ *   "Exit"; Invoke on Exit chooses it (the window gets WM_COMMAND 202 and
+ *   retitles itself "exit chosen"), the menu closes and File is Collapsed
+ *   again.
  * - CoCreateInstance(CLSID_CUIAutomation, IID_IUIAutomation) in an STA.
  * - ElementFromHandle(top-level window): Name is the title, ControlType
  *   Window (it has a caption), ClassName the window class,
@@ -191,6 +208,10 @@ static LRESULT CALLBACK child_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         SetWindowTextW(hwnd, L"pressed");
         return 0;
     }
+    if (msg == WM_COMMAND && LOWORD(wparam) == 202 && HIWORD(wparam) == 0) {
+        SetWindowTextW(hwnd, L"exit chosen");
+        return 0;
+    }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
@@ -220,6 +241,19 @@ static int child(void) {
                               (HMENU)105, wc.hInstance, NULL);
     if (!lv || !lb)
         return 4;
+    HWND owned = CreateWindowExW(0, L"UiaChildWindow", L"UIA Owned", WS_POPUP | WS_CAPTION | WS_VISIBLE, 260,
+                                 200, 200, 100, top, NULL, wc.hInstance, NULL);
+    if (!owned || !CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 10, 80, 24,
+                                   owned, (HMENU)1, wc.hInstance, NULL))
+        return 5;
+    HMENU bar = CreateMenu(), file = CreatePopupMenu();
+    AppendMenuW(file, MF_STRING, 201, L"&Open\tCtrl+O");
+    AppendMenuW(file, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(file, MF_STRING, 202, L"E&xit");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)file, L"&File");
+    if (!CreateWindowExW(0, L"UiaChildWindow", L"UIA Menus", WS_OVERLAPPED | WS_CAPTION | WS_VISIBLE, 520, 150,
+                         300, 200, NULL, bar, wc.hInstance, NULL))
+        return 6;
     SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)L"r-one");
     SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)L"r-two");
     SetEvent(ready);
@@ -488,6 +522,90 @@ static int name_becomes(IUIAutomationElement *e, const wchar_t *want) {
     return 0;
 }
 
+static enum ExpandCollapseState expand_state(IUIAutomationExpandCollapsePattern *p) {
+    enum ExpandCollapseState state = ExpandCollapseState_LeafNode;
+    CHECK(IUIAutomationExpandCollapsePattern_get_CurrentExpandCollapseState(p, &state) == S_OK);
+    return state;
+}
+
+static int state_becomes(IUIAutomationExpandCollapsePattern *p, enum ExpandCollapseState want) {
+    for (int i = 0; i < 500; i++) {
+        if (expand_state(p) == want)
+            return 1;
+        Sleep(10);
+    }
+    return 0;
+}
+
+/* The child's menu bar: File expanded, Exit invoked. */
+static void menus(IUIAutomation *uia, IUIAutomationElement *root) {
+    IUIAutomationCondition *named = prop_str(uia, UIA_NamePropertyId, L"UIA Menus");
+    IUIAutomationElement *win = NULL;
+    CHECK(IUIAutomationElement_FindFirst(root, TreeScope_Children, named, &win) == S_OK && win);
+    IUIAutomationCondition *is_bar = prop_int(uia, UIA_ControlTypePropertyId, UIA_MenuBarControlTypeId);
+    IUIAutomationElement *bar = NULL;
+    CHECK(IUIAutomationElement_FindFirst(win, TreeScope_Children, is_bar, &bar) == S_OK && bar);
+    IUIAutomationCondition *is_item = prop_int(uia, UIA_ControlTypePropertyId, UIA_MenuItemControlTypeId);
+    IUIAutomationElementArray *bar_items = NULL;
+    CHECK(IUIAutomationElement_FindAll(bar, TreeScope_Children, is_item, &bar_items) == S_OK && bar_items);
+    int n = 0;
+    CHECK(IUIAutomationElementArray_get_Length(bar_items, &n) == S_OK && n == 1);
+    IUIAutomationElement *file = NULL;
+    CHECK(IUIAutomationElementArray_GetElement(bar_items, 0, &file) == S_OK && file);
+    CHECK(name_is(file, L"File"));
+    IUIAutomationExpandCollapsePattern *ec = (IUIAutomationExpandCollapsePattern *)pattern_of(
+        file, UIA_ExpandCollapsePatternId, &IID_IUIAutomationExpandCollapsePattern);
+    CHECK(ec != NULL);
+    CHECK(expand_state(ec) == ExpandCollapseState_Collapsed);
+    CHECK(IUIAutomationExpandCollapsePattern_Expand(ec) == S_OK);
+    CHECK(state_becomes(ec, ExpandCollapseState_Expanded));
+
+    // The popup: a Menu named "File" under the window.
+    IUIAutomationCondition *is_menu = prop_int(uia, UIA_ControlTypePropertyId, UIA_MenuControlTypeId);
+    IUIAutomationElement *menu = NULL;
+    for (int i = 0; i < 500 && !menu; i++) {
+        CHECK(IUIAutomationElement_FindFirst(win, TreeScope_Children, is_menu, &menu) == S_OK);
+        if (!menu)
+            Sleep(10);
+    }
+    CHECK(menu != NULL);
+    CHECK(name_is(menu, L"File"));
+    CHECK(class_is(menu, L"#32768"));
+    IUIAutomationCondition *open_name = prop_str(uia, UIA_NamePropertyId, L"Open");
+    IUIAutomationElement *open = NULL;
+    CHECK(IUIAutomationElement_FindFirst(menu, TreeScope_Children, open_name, &open) == S_OK && open);
+    CHECK(control_type(open) == UIA_MenuItemControlTypeId);
+    BSTR accel = NULL;
+    CHECK(IUIAutomationElement_get_CurrentAcceleratorKey(open, &accel) == S_OK && bstr_is(accel, L"Ctrl+O"));
+    SysFreeString(accel);
+    IUIAutomationCondition *exit_name = prop_str(uia, UIA_NamePropertyId, L"Exit");
+    IUIAutomationElement *exit_item = NULL;
+    CHECK(IUIAutomationElement_FindFirst(menu, TreeScope_Children, exit_name, &exit_item) == S_OK && exit_item);
+    CHECK(control_type(exit_item) == UIA_MenuItemControlTypeId);
+    IUIAutomationInvokePattern *invoke = (IUIAutomationInvokePattern *)pattern_of(
+        exit_item, UIA_InvokePatternId, &IID_IUIAutomationInvokePattern);
+    CHECK(invoke != NULL);
+    CHECK(IUIAutomationInvokePattern_Invoke(invoke) == S_OK);
+    CHECK(name_becomes(win, L"exit chosen"));
+    CHECK(state_becomes(ec, ExpandCollapseState_Collapsed));
+
+    IUIAutomationInvokePattern_Release(invoke);
+    IUIAutomationElement_Release(exit_item);
+    IUIAutomationCondition_Release(exit_name);
+    IUIAutomationElement_Release(open);
+    IUIAutomationCondition_Release(open_name);
+    IUIAutomationElement_Release(menu);
+    IUIAutomationCondition_Release(is_menu);
+    IUIAutomationExpandCollapsePattern_Release(ec);
+    IUIAutomationElement_Release(file);
+    IUIAutomationElementArray_Release(bar_items);
+    IUIAutomationCondition_Release(is_item);
+    IUIAutomationElement_Release(bar);
+    IUIAutomationCondition_Release(is_bar);
+    IUIAutomationElement_Release(win);
+    IUIAutomationCondition_Release(named);
+}
+
 /* UI Automation over another process's windows: found from the root by
  * Name, its controls by AutomationId, driven by Invoke, Value and Toggle. */
 static void other_process(IUIAutomation *uia, IUIAutomationElement *root) {
@@ -582,6 +700,30 @@ static void other_process(IUIAutomation *uia, IUIAutomationElement *root) {
     release_all(items, 2);
     IUIAutomationElement_Release(list);
     IUIAutomationCondition_Release(id105);
+
+    menus(uia, root);
+
+    // The owned window: under its owner, not the root.
+    IUIAutomationCondition *owned_name = prop_str(uia, UIA_NamePropertyId, L"UIA Owned");
+    IUIAutomationElement *owned = NULL;
+    CHECK(IUIAutomationElement_FindFirst(root, TreeScope_Children, owned_name, &owned) == S_OK && !owned);
+    CHECK(IUIAutomationElement_FindFirst(win, TreeScope_Children, owned_name, &owned) == S_OK && owned);
+    CHECK(control_type(owned) == UIA_WindowControlTypeId);
+    IUIAutomationTreeWalker *raw = NULL;
+    CHECK(IUIAutomation_get_RawViewWalker(uia, &raw) == S_OK && raw);
+    IUIAutomationElement *owner = NULL;
+    CHECK(IUIAutomationTreeWalker_GetParentElement(raw, owned, &owner) == S_OK && owner);
+    CHECK(same_element(uia, owner, win));
+    IUIAutomationCondition *ok_name = prop_str(uia, UIA_NamePropertyId, L"OK");
+    IUIAutomationElement *ok = NULL;
+    CHECK(IUIAutomationElement_FindFirst(owned, TreeScope_Descendants, ok_name, &ok) == S_OK && ok);
+    CHECK(control_type(ok) == UIA_ButtonControlTypeId);
+    IUIAutomationElement_Release(ok);
+    IUIAutomationCondition_Release(ok_name);
+    IUIAutomationElement_Release(owner);
+    IUIAutomationTreeWalker_Release(raw);
+    IUIAutomationElement_Release(owned);
+    IUIAutomationCondition_Release(owned_name);
 
     IUIAutomationElement_Release(box);
     IUIAutomationCondition_Release(id103);

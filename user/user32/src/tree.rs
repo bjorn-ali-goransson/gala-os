@@ -608,7 +608,10 @@ pub extern "system" fn GetWindow(hwnd: Hwnd, cmd: u32) -> Hwnd {
         return children_of(hwnd)[0];
     }
     if cmd == 4 {
-        return 0;
+        return match window(hwnd) {
+            Some(w) => w.owner,
+            None => crate::foreign::remote(hwnd).map_or(0, |i| i.owner),
+        };
     }
     let Some((list, n, at)) = siblings(hwnd) else { return 0 };
     match cmd {

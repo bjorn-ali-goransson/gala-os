@@ -58,6 +58,7 @@ mod cache;
 mod condition;
 mod element;
 mod items;
+mod menus;
 mod pattern;
 mod walker;
 
