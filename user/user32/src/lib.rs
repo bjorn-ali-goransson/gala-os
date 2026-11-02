@@ -24,6 +24,7 @@ mod rect;
 mod spi;
 mod text;
 mod timer;
+mod track;
 mod tree;
 mod unimplemented;
 mod window;

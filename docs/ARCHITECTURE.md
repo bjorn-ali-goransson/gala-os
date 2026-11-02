@@ -2264,8 +2264,32 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   GetMenuStringW, GetSubMenu; MF_BYCOMMAND searches submenus; DeleteMenu
   and DestroyMenu destroy submenus. SetMenu/GetMenu and GetSystemMenu
   (Restore, Move, Size, Minimize, Maximize, Close) per window, destroyed
-  with it. Not yet: drawing the menu bar (DrawMenuBar answers TRUE and
-  the client area keeps its size), TrackPopupMenu, keyboard access.
+  with it (also CreateWindowEx's hMenu for a top-level window).
+- **Menus on the screen** (`user/user32/src/track.rs`): a top-level
+  window with a menu has a menu bar of MENU_BAR (20, SM_CYMENU) rows
+  between the desktop's caption and its client area: its buffer holds
+  the bar's rows first (`Window::bar`; `pixels` points at the client
+  area's first row, `buffer_base` at the bar's), so `window::frame` (the
+  program's view: caption + bar) differs from `desktop_frame` (the
+  desktop's: caption only), and mouse input from the desktop is shifted
+  by the bar before routing. SetMenu relays the window out (the client
+  area gives up or takes back the bar's rows: WM_SIZE, a repaint);
+  AdjustWindowRect(Ex) counts the bar. user32 draws the bar (light, a
+  rounded highlight for the hot or open item) and presents its rows;
+  moves over it light items, a press is WM_NCLBUTTONDOWN HTMENU, which
+  DefWindowProc turns into WM_SYSCOMMAND SC_MOUSEMENU and the menu
+  loop. The loop (also TrackPopupMenu(Ex)) sends WM_ENTERMENULOOP,
+  WM_INITMENU, WM_INITMENUPOPUP before each popup (the program enables
+  and checks items then), WM_MENUSELECT, WM_UNINITMENUPOPUP and
+  WM_EXITMENULOOP (none with TPM_NONOTIFY); popups are #32768 desktop
+  popups (rounded item highlights, check and radio marks, accelerator
+  text after a tab at the right, a chevron and a cascade for submenus,
+  owner-drawn items through WM_MEASUREITEM/WM_DRAWITEM); the first one
+  holds the desktop's capture, so a press outside every menu (and the bar)
+  ends the loop. Keys: arrows, Enter, Escape, mnemonics. The choice is a
+  posted WM_COMMAND (or TrackPopupMenu's result with TPM_RETURNCMD). One
+  loop at a time per process. Not yet: item bitmaps (hbmpItem), Alt/F10
+  keyboard access to the bar, mnemonic underlines, the system menu.
 - **Registered messages** (`message.rs`): RegisterWindowMessageW gives
   0xC000 + an index per name (case-insensitive), process-wide.
 - **Hooks** (`user/user32/src/hook.rs`): per kind and thread, newest

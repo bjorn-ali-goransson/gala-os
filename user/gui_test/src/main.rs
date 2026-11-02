@@ -15,6 +15,11 @@
 //!   green square there (GetDC/FillRect/ReleaseDC). Typing "hi" gives
 //!   WM_KEYDOWN/WM_KEYUP and, through TranslateMessage, WM_CHAR 'h' and
 //!   'i'; the program draws what was typed in black at (20, 200).
+//! - A right click is WM_RBUTTONUP; the program shows a popup menu there
+//!   (CreatePopupMenu, AppendMenuW "One" 201 and "Two" 202,
+//!   TrackPopupMenu with TPM_RETURNCMD at the screen point ClientToScreen
+//!   gives); clicking "Two" returns 202 (no WM_COMMAND with
+//!   TPM_RETURNCMD) and the program paints a blue square at the point.
 //! - A click on the window's close button is WM_CLOSE; DefWindowProc
 //!   destroys the window: WM_DESTROY, where the program calls
 //!   PostQuitMessage(7); GetMessageW then returns 0 with wParam 7; IsWindow
@@ -22,7 +27,8 @@
 //!   click comes: a failure.)
 //!
 //! It prints `gui_test: painted` once it has painted (xtask then checks the
-//! screen and gives the input), `gui_test: click`, `gui_test: typed hi`, and
+//! screen and gives the input), `gui_test: click`, `gui_test: typed hi`,
+//! `gui_test: menu 202`, and
 //! `gui_test: ok` at the end, or exits with the number of the failing
 //! check.
 
@@ -132,6 +138,19 @@ unsafe extern "system" {
     fn GetDC(hwnd: Hwnd) -> Handle;
     fn ReleaseDC(hwnd: Hwnd, hdc: Handle) -> i32;
     fn LoadCursorW(instance: Handle, name: *const u16) -> Handle;
+    fn CreatePopupMenu() -> Handle;
+    fn AppendMenuW(menu: Handle, flags: u32, id: usize, text: *const u16) -> i32;
+    fn TrackPopupMenu(
+        menu: Handle,
+        flags: u32,
+        x: i32,
+        y: i32,
+        reserved: i32,
+        hwnd: Hwnd,
+        rect: *const Rect,
+    ) -> i32;
+    fn DestroyMenu(menu: Handle) -> i32;
+    fn ClientToScreen(hwnd: Hwnd, point: *mut [i32; 2]) -> i32;
 }
 
 #[link(name = "gdi32", kind = "raw-dylib")]
@@ -186,6 +205,9 @@ const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
+const WM_RBUTTONUP: u32 = 0x0205;
+const WM_COMMAND: u32 = 0x0111;
+const TPM_RETURNCMD: u32 = 0x100;
 const MK_LBUTTON: usize = 1;
 const VK_H: usize = 0x48;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
@@ -298,6 +320,33 @@ fn mark(hwnd: Hwnd, x: i32, y: i32) {
     }
 }
 
+/// A popup menu at client point (x, y): "Two" paints a blue square there.
+fn context_menu(hwnd: Hwnd, x: i32, y: i32) {
+    let (one, two): ([u16; 4], [u16; 4]) = (wide("One"), wide("Two"));
+    // SAFETY: valid window, menu and strings.
+    unsafe {
+        let menu = CreatePopupMenu();
+        let _ = check(!menu.is_null(), 0);
+        let _ = check(AppendMenuW(menu, 0, 201, one.as_ptr()) != 0, 0);
+        let _ = check(AppendMenuW(menu, 0, 202, two.as_ptr()) != 0, 0);
+        let mut p = [x, y];
+        let _ = check(ClientToScreen(hwnd, &mut p) != 0, 0);
+        let chosen = TrackPopupMenu(menu, TPM_RETURNCMD, p[0], p[1], 0, hwnd, core::ptr::null());
+        DestroyMenu(menu);
+        if chosen == 202 {
+            let hdc = GetDC(hwnd);
+            let blue = CreateSolidBrush(0x00ff_0000);
+            let r = Rect { left: x - 6, top: y - 6, right: x + 6, bottom: y + 6 };
+            FillRect(hdc, &r, blue);
+            DeleteObject(blue);
+            ReleaseDC(hwnd, hdc);
+            out(b"gui_test: menu 202\r\n");
+        } else {
+            out(b"gui_test: menu dismissed\r\n");
+        }
+    }
+}
+
 /// Draws what was typed at (20, 200).
 fn draw_typed(hwnd: Hwnd) {
     let n = TYPED_LEN.load(Ordering::SeqCst).min(16);
@@ -329,6 +378,16 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
         WM_LBUTTONUP => {
             let _ = check(wparam & MK_LBUTTON == 0, wparam as u64);
             UPS.fetch_add(1, Ordering::SeqCst);
+            0
+        }
+        WM_RBUTTONUP => {
+            let (x, y) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
+            context_menu(hwnd, x, y);
+            0
+        }
+        // TPM_RETURNCMD: the choice is the result, not a command.
+        WM_COMMAND => {
+            let _ = check(false, wparam as u64);
             0
         }
         WM_KEYDOWN => {

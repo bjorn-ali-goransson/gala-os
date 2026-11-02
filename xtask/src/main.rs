@@ -2549,6 +2549,7 @@ const SCENARIOS: &[Scenario] = &[
             "gui_test: painted",
             "gui_test: click",
             "gui_test: typed hi",
+            "gui_test: menu 202",
             "xtask: screen ok",
             "gui_test: ok",
             "exited with status 0x00000000",
@@ -4197,9 +4198,28 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     pixels: &[PixelCheck::AnyIn(101 + 20, 133 + 200, 24, 16, 0x000000)],
                 },
                 ScreenStep {
+                    // A right click at client (250, 50): the popup menu
+                    // (One, Two) at (351, 183), over the window.
+                    input: &["mouse_button 2", "mouse_button 0"],
+                    pixels: &[
+                        PixelCheck::At(470, 200, 0xf9f9f9),            // the menu
+                        PixelCheck::AnyIn(386, 190, 30, 14, 0x1b1b1b), // "One"
+                    ],
+                },
+                ScreenStep {
+                    // Down to "Two" (381, 222) and a click: TrackPopupMenu
+                    // returns 202, a blue square at the point; the menu
+                    // goes.
+                    input: &["mouse_move 30 39", "mouse_button 1", "mouse_button 0"],
+                    pixels: &[
+                        PixelCheck::AnyIn(345, 177, 12, 12, 0x0000ff), // the blue mark
+                        PixelCheck::At(470, 200, 0xffffff),            // the menu gone
+                    ],
+                },
+                ScreenStep {
                     // The close button (x 453..498 of the caption): the program
                     // ends (WM_SYSCOMMAND SC_CLOSE; no screendump).
-                    input: &["mouse_move 125 -66", "mouse_button 1", "mouse_button 0"],
+                    input: &["mouse_move 95 -105", "mouse_button 1", "mouse_button 0"],
                     pixels: &[],
                 },
             ],
@@ -4208,8 +4228,8 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     (
         // FileZilla's main window with its Welcome dialog (wx's modal loop:
         // MsgWaitForMultipleObjects): the accent Quickconnect and OK
-        // buttons; then OK closes the dialog and the main window's close
-        // button ends FileZilla.
+        // buttons; then OK closes the dialog, File on the menu bar opens
+        // its menu and Exit ends FileZilla.
         "filezilla",
         ScreenCheck {
             marker: "desktop: shown window 'Welcome to FileZilla'",
@@ -4217,7 +4237,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                 ScreenStep {
                     input: &[],
                     pixels: &[
-                        PixelCheck::AnyIn(660, 98, 80, 16, 0x005fb8), // Quickconnect
+                        PixelCheck::AnyIn(660, 118, 80, 16, 0x005fb8), // Quickconnect
                         PixelCheck::AnyIn(730, 512, 60, 20, 0x005fb8), // OK
                     ],
                 },
@@ -4234,14 +4254,25 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
-                    // The main window's close button (1216, 41): FileZilla
-                    // ends (status 0).
+                    // To "File" on the menu bar (61, 69) and a click: its
+                    // menu opens.
                     input: &[
-                        "mouse_move 227 -240",
-                        "mouse_move 227 -241",
+                        "mouse_move -234 -151",
+                        "mouse_move -234 -151",
+                        "mouse_move -234 -151",
                         "mouse_button 1",
                         "mouse_button 0",
                     ],
+                    pixels: &[
+                        PixelCheck::At(300, 300, 0xf9f9f9), // the menu (over the tree)
+                        PixelCheck::AnyIn(80, 306, 24, 14, 0x1b1b1b), // "Exit"
+                        PixelCheck::AnyIn(80, 115, 60, 14, 0x9d9d9d), // a disabled item
+                    ],
+                },
+                ScreenStep {
+                    // Down to "Exit" (90, 313) and a click: WM_COMMAND,
+                    // FileZilla ends (status 0).
+                    input: &["mouse_move 29 244", "mouse_button 1", "mouse_button 0"],
                     pixels: &[],
                 },
             ],

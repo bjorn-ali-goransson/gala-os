@@ -152,7 +152,7 @@ const EDIT_CAP: usize = 32767;
 const EDIT_DEFAULT_LIMIT: usize = 30000;
 
 /// Colours (COLORREF: 0x00BBGGRR).
-const fn rgb(r: u32, g: u32, b: u32) -> u32 {
+pub(crate) const fn rgb(r: u32, g: u32, b: u32) -> u32 {
     r | g << 8 | b << 16
 }
 const ACCENT: u32 = rgb(0x00, 0x5f, 0xb8);
@@ -333,28 +333,28 @@ macro_rules! gdi {
     }};
 }
 
-fn select(hdc: Handle, object: usize) -> usize {
+pub(crate) fn select(hdc: Handle, object: usize) -> usize {
     gdi!("SelectObject", extern "system" fn(Handle, usize) -> usize).map_or(0, |f| f(hdc, object))
 }
 
-fn text_color(hdc: Handle, color: u32) {
+pub(crate) fn text_color(hdc: Handle, color: u32) {
     if let Some(f) = gdi!("SetTextColor", extern "system" fn(Handle, u32) -> u32) {
         f(hdc, color);
     }
 }
 
-fn transparent(hdc: Handle) {
+pub(crate) fn transparent(hdc: Handle) {
     if let Some(f) = gdi!("SetBkMode", extern "system" fn(Handle, i32) -> i32) {
         f(hdc, 1);
     }
 }
 
-fn default_font() -> usize {
+pub(crate) fn default_font() -> usize {
     // DEFAULT_GUI_FONT (Segoe UI, here Selawik).
     gdi!("GetStockObject", extern "system" fn(i32) -> usize).map_or(0, |f| f(17))
 }
 
-fn fill(hdc: Handle, l: i32, t: i32, r: i32, b: i32, color: u32) {
+pub(crate) fn fill(hdc: Handle, l: i32, t: i32, r: i32, b: i32, color: u32) {
     if r <= l || b <= t {
         return;
     }
@@ -378,7 +378,7 @@ fn isqrt(v: i32) -> i32 {
 }
 
 /// A rectangle with corners of `radius`, in `color`.
-fn round_fill(hdc: Handle, r: [i32; 4], radius: i32, color: u32) {
+pub(crate) fn round_fill(hdc: Handle, r: [i32; 4], radius: i32, color: u32) {
     let [l, t, rr, b] = r;
     let radius = radius.min((rr - l) / 2).min((b - t) / 2).max(0);
     for y in t..b {
@@ -437,7 +437,7 @@ fn draw_text(hdc: Handle, text: &[u16], r: [i32; 4], format: u32) {
     crate::text::DrawTextW(hdc, text.as_ptr(), text.len() as i32, &mut r, format);
 }
 
-fn text_width(hdc: Handle, s: &[u16]) -> i32 {
+pub(crate) fn text_width(hdc: Handle, s: &[u16]) -> i32 {
     if s.is_empty() {
         return 0;
     }
@@ -451,7 +451,7 @@ fn text_width(hdc: Handle, s: &[u16]) -> i32 {
     size[0]
 }
 
-fn text_height(hdc: Handle) -> i32 {
+pub(crate) fn text_height(hdc: Handle) -> i32 {
     let mut tm = [0i32; 15];
     if let Some(f) = gdi!("GetTextMetricsW", extern "system" fn(Handle, *mut [i32; 15]) -> i32) {
         f(hdc, &mut tm);
@@ -459,7 +459,7 @@ fn text_height(hdc: Handle) -> i32 {
     tm[0].max(1)
 }
 
-fn text_out(hdc: Handle, x: i32, y: i32, s: &[u16]) {
+pub(crate) fn text_out(hdc: Handle, x: i32, y: i32, s: &[u16]) {
     if let Some(f) = gdi!("TextOutW", extern "system" fn(Handle, i32, i32, *const u16, i32) -> i32)
     {
         f(hdc, x, y, s.as_ptr(), s.len() as i32);
@@ -506,13 +506,14 @@ pub fn register_system_classes() {
     if REGISTERED.swap(true, Ordering::AcqRel) {
         return;
     }
-    let classes: [(&[u8], crate::window::WndProc); 6] = [
+    let classes: [(&[u8], crate::window::WndProc); 7] = [
         (b"#32770\0", crate::dialog::DefDlgProcW),
         (b"STATIC\0", static_proc),
         (b"BUTTON\0", button_proc),
         (b"EDIT\0", edit_proc),
         (b"COMBOBOX\0", crate::combo::combo_proc),
         (b"ComboLBox\0", crate::combo::list_proc),
+        (b"#32768\0", crate::track::popup_proc),
     ];
     for (name, proc_) in classes {
         let mut wide = [0u16; 12];

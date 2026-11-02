@@ -42,6 +42,7 @@ unsafe extern "system" {
     fn GalaWindowDestroy(id: u32) -> u32;
     fn GalaWindowListen(event: Handle) -> u32;
     fn GalaWindowInput(records: *mut u8, max: u32, count: *mut u32) -> u32;
+    pub(crate) fn GalaWindowCapture(id: u32) -> u32;
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
@@ -62,6 +63,8 @@ unsafe extern "system" {
 
 pub const BORDER: i32 = 1;
 pub const CAPTION: i32 = 32;
+/// A menu bar's height (SM_CYMENU).
+pub const MENU_BAR: i32 = 20;
 const MAX_CLASSES: usize = 32;
 pub(crate) const MAX_WINDOWS: usize = 512;
 const QUEUE: usize = 256;
@@ -137,12 +140,32 @@ pub(crate) struct Window {
     /// A frameless desktop popup (a top-level WS_POPUP window without
     /// WS_CAPTION: menus, drop-down lists, tooltips): all client area.
     pub(crate) popup: bool,
+    /// The menu bar's height (0: no menu). A top-level window's buffer
+    /// holds the bar's rows above the client area's; `pixels` points at
+    /// the client area's first row.
+    pub(crate) bar: i32,
 }
 
-/// A top-level window's frame on the desktop: the left, right and bottom
-/// border, and the height above the client area.
+/// A top-level window's frame: the left, right and bottom border, and the
+/// height above the client area (the caption and the menu bar).
 pub(crate) fn frame(w: &Window) -> (i32, i32) {
+    let (b, top) = desktop_frame(w);
+    (b, top + w.bar)
+}
+
+/// The frame the desktop draws (the menu bar is in the desktop's client
+/// area, drawn by user32).
+pub(crate) fn desktop_frame(w: &Window) -> (i32, i32) {
     if w.popup { (0, 0) } else { (BORDER, BORDER + CAPTION) }
+}
+
+/// The start of a top-level window's buffer (the menu bar's first row).
+pub(crate) fn buffer_base(w: &Window) -> *mut u32 {
+    if w.pixels.is_null() {
+        return w.pixels;
+    }
+    // SAFETY: the buffer holds `bar` rows of `cw` before the client area.
+    unsafe { w.pixels.sub((w.bar * w.cw) as usize) }
 }
 
 /// Whether a top-level window of `style` is a frameless popup.
@@ -208,6 +231,7 @@ pub(crate) const NO_WINDOW: Window = Window {
     zoomed: false,
     restore: [0; 4],
     popup: false,
+    bar: 0,
 };
 const NO_MSG: Msg =
     Msg { hwnd: 0, message: 0, wparam: 0, lparam: 0, time: 0, pt: [0; 2], private: 0 };
@@ -684,17 +708,24 @@ pub extern "system" fn CreateWindowExW(
     }
     let (x, y) = if x == CW_USEDEFAULT { (60, 60) } else { (x, y) };
     let popup = is_popup(style);
+    // A top-level window's hMenu is its menu bar.
+    let bar = if !popup && !menu.is_null() && crate::menu::IsMenu(menu as usize) != 0 {
+        MENU_BAR
+    } else {
+        0
+    };
     let (b, top) = if popup { (0, 0) } else { (BORDER, BORDER + CAPTION) };
     let (w, h) =
-        if w == CW_USEDEFAULT { (640, 480) } else { (w.max(2 * b + 1), h.max(top + b + 1)) };
-    let (cw, ch) = (w - 2 * b, h - top - b);
+        if w == CW_USEDEFAULT { (640, 480) } else { (w.max(2 * b + 1), h.max(top + bar + b + 1)) };
+    let (cw, ch) = (w - 2 * b, h - top - bar - b);
     // SAFETY: plain calls; the title is the caller's NUL-terminated string.
     let (pixels, desktop) = unsafe {
-        let pixels =
-            VirtualAlloc(core::ptr::null_mut(), (cw * ch * 4) as usize, 0x3000, 4).cast::<u32>();
-        if pixels.is_null() {
+        let base = VirtualAlloc(core::ptr::null_mut(), (cw * (ch + bar) * 4) as usize, 0x3000, 4)
+            .cast::<u32>();
+        if base.is_null() {
             return 0;
         }
+        let pixels = base.add((bar * cw) as usize);
         let mut len = 0;
         if !name.is_null() {
             while len < 256 && *name.add(len) != 0 {
@@ -748,13 +779,14 @@ pub extern "system" fn CreateWindowExW(
             zoomed: false,
             restore: [0; 4],
             popup,
+            bar,
         };
         Some(i)
     });
     let Some(i) = created else {
         // SAFETY: our buffer and window.
         unsafe {
-            VirtualFree(pixels.cast(), 0, 0x8000);
+            VirtualFree(pixels.sub((bar * cw) as usize).cast(), 0, 0x8000);
             if desktop != 0 {
                 GalaWindowDestroy(desktop);
             }
@@ -762,6 +794,9 @@ pub extern "system" fn CreateWindowExW(
         }
         return 0;
     };
+    if bar != 0 {
+        crate::menu::attach(hwnd_of(i), menu as usize);
+    }
     finish_create(i, ex_style, class, name, style, x, y, w, h, parent, menu, instance, param)
 }
 
@@ -818,7 +853,7 @@ pub(crate) fn finish_create(
                     GalaWindowDestroy(gone.desktop);
                 }
                 if !gone.pixels.is_null() {
-                    VirtualFree(gone.pixels.cast(), 0, 0x8000);
+                    VirtualFree(buffer_base(&gone).cast(), 0, 0x8000);
                 }
             }
             return 0;
@@ -872,7 +907,7 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
             GalaWindowDestroy(gone.desktop);
         }
         if !gone.pixels.is_null() {
-            VirtualFree(gone.pixels.cast(), 0, 0x8000);
+            VirtualFree(buffer_base(&gone).cast(), 0, 0x8000);
         }
     }
     // Its area of the parent shows the parent again.
@@ -917,10 +952,17 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
     if desktop != 0 {
         // SAFETY: our desktop window.
         unsafe { GalaWindowShow(desktop, u8::from(show)) };
+        if show {
+            crate::track::draw_bar(hwnd);
+        }
     }
     if show {
-        FOREGROUND.store(hwnd, Ordering::Relaxed);
-        crate::tree::shown_top_level(hwnd);
+        // A popup (a menu, a drop-down list) leaves the focus and the
+        // foreground where they are.
+        if !window(hwnd).is_some_and(|w| w.popup) {
+            FOREGROUND.store(hwnd, Ordering::Relaxed);
+            crate::tree::shown_top_level(hwnd);
+        }
         InvalidateRect(hwnd, core::ptr::null(), 1);
         wake();
     }
@@ -1045,6 +1087,37 @@ fn client_dc(hwnd: Hwnd) -> Handle {
     (g.create_child_dc)(root.pixels, root.cw, root.ch, root.cw, offset.0, offset.1, &visible)
 }
 
+/// A DC over `pixels` (w x h, rows `stride` pixels apart), or null.
+pub(crate) fn surface_dc(pixels: *mut u32, w: i32, h: i32, stride: i32) -> Handle {
+    gdi().map_or(core::ptr::null_mut(), |g| (g.create_dc)(pixels, w, h, stride))
+}
+
+pub(crate) fn free_surface_dc(hdc: Handle) {
+    if let Some(g) = gdi() {
+        (g.delete_dc)(hdc);
+    }
+}
+
+/// Shows a top-level window's menu bar rows on the desktop.
+pub(crate) fn present_bar(hwnd: Hwnd) {
+    let Some(w) = window(hwnd) else { return };
+    if w.desktop == 0 || !w.visible || w.bar == 0 || w.pixels.is_null() {
+        return;
+    }
+    // SAFETY: the window's own buffer: `bar` rows of `cw` pixels first.
+    unsafe {
+        GalaWindowPresent(
+            w.desktop,
+            0,
+            0,
+            w.cw as u32,
+            w.bar as u32,
+            buffer_base(&w),
+            (w.cw * 4) as usize,
+        )
+    };
+}
+
 /// Shows the window's area (of its top-level window's buffer) on the
 /// desktop.
 fn present(hwnd: Hwnd) {
@@ -1061,7 +1134,7 @@ fn present(hwnd: Hwnd) {
         GalaWindowPresent(
             root.desktop,
             l,
-            t,
+            t + root.bar,
             (r - l) as u32,
             (b - t) as u32,
             root.pixels.add((t * root.cw + l) as usize),
@@ -1599,7 +1672,7 @@ fn pump() {
                     with(|s| s.windows.iter().find(|w| w.used && w.desktop == id).copied())
                 {
                     let (cx, cy) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
-                    let (b, top) = frame(&w);
+                    let (b, top) = desktop_frame(&w);
                     let (sx, sy) = (w.x + b + cx, w.y + top + cy);
                     CURSOR.store(
                         (sx as u16 as usize) | (sy as u16 as usize) << 16,
@@ -1624,6 +1697,12 @@ fn pump() {
                 }
                 // Mouse input goes to the child under the pointer (or the
                 // capture), keys to the focus.
+                // The menu bar (above the client area) is user32's.
+                if (0x0200..=0x020d).contains(&message)
+                    && crate::track::bar_input(top, message, lparam)
+                {
+                    continue;
+                }
                 let (to, lparam) = crate::tree::route(top, message, lparam);
                 // The pointer left the window TrackMouseEvent watches.
                 let tracked = TRACKED.load(Ordering::Relaxed);
@@ -2006,11 +2085,46 @@ pub extern "system" fn GetSystemMetrics(index: i32) -> i32 {
         17 => work[3] - CAPTION, // SM_CYFULLSCREEN
         80 => 1,                 // SM_CMONITORS
         4 => CAPTION,
+        15 => MENU_BAR, // SM_CYMENU
         5 | 6 => BORDER,
         11 | 12 | 13 | 14 => 32, // SM_CXICON, SM_CYICON, SM_CXCURSOR, SM_CYCURSOR
         49 | 50 => 16,           // SM_CXSMICON, SM_CYSMICON
         _ => 0,
     }
+}
+
+/// AdjustWindowRectEx(rect, style, menu, ex_style): the window rectangle
+/// for that client rectangle: gala's frame (none for a child or a popup
+/// without a caption) and the menu bar.
+#[unsafe(no_mangle)]
+pub extern "system" fn AdjustWindowRectEx(
+    rect: *mut [i32; 4],
+    style: u32,
+    menu: i32,
+    _ex: u32,
+) -> i32 {
+    if rect.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+    const WS_CHILD: u32 = 0x4000_0000;
+    let framed = style & WS_CHILD == 0 && !is_popup(style);
+    let (b, top) = if framed { (BORDER, BORDER + CAPTION) } else { (0, 0) };
+    let bar = if framed && menu != 0 { MENU_BAR } else { 0 };
+    // SAFETY: the caller's RECT.
+    unsafe {
+        let r = &mut *rect;
+        r[0] -= b;
+        r[1] -= top + bar;
+        r[2] += b;
+        r[3] += b;
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn AdjustWindowRect(rect: *mut [i32; 4], style: u32, menu: i32) -> i32 {
+    AdjustWindowRectEx(rect, style, menu, 0)
 }
 
 /// CallWindowProcW(proc, hwnd, msg, wparam, lparam): calls the procedure

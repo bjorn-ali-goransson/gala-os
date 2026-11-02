@@ -491,7 +491,8 @@ QEMU monitor socket; when its serial log shows the trigger line, xtask
 takes a screendump and checks pixels (exact colours, or "some pixel near
 this colour in this rectangle" for anti-aliased text) and logs
 `xtask: screen ok` or the mismatch. A check has steps: each first sends
-QEMU monitor commands (`mouse_move dx dy`, `mouse_button 1`, `sendkey`;
+QEMU monitor commands (`mouse_move dx dy`, `mouse_button 1` (bit 0 the
+left button, bit 1 the right: `mouse_button 2` is a right press), `sendkey`;
 250 ms apart: with 100 ms, clicks landed off target when the whole suite
 loaded the host), then takes a screendump (none when the step checks no
 pixels: e.g. the click that ends the program), kept as

@@ -384,6 +384,54 @@ static void timers(void) {
     CHECK(DestroyWindow(w));
 }
 
+static int sizes_seen;
+static LRESULT CALLBACK size_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_SIZE)
+        sizes_seen++;
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+/* A window's menu bar is part of its frame: SM_CYMENU high. */
+static void menu_bar(void) {
+    int bar = GetSystemMetrics(SM_CYMENU);
+    CHECK(bar > 0);
+    RECT plain = {0, 0, 100, 100}, with_menu = {0, 0, 100, 100};
+    CHECK(AdjustWindowRectEx(&plain, WS_OVERLAPPEDWINDOW, FALSE, 0));
+    CHECK(AdjustWindowRectEx(&with_menu, WS_OVERLAPPEDWINDOW, TRUE, 0));
+    CHECK(plain.top < 0 && plain.right > 100 && with_menu.top == plain.top - bar);
+    CHECK(with_menu.bottom == plain.bottom && with_menu.left == plain.left);
+    RECT popup = {10, 10, 50, 50};
+    CHECK(AdjustWindowRectEx(&popup, WS_POPUP, FALSE, 0) && popup.left == 10 && popup.bottom == 50);
+
+    WNDCLASSW wc = {0};
+    wc.lpfnWndProc = size_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"User32TestMenuBar";
+    CHECK(RegisterClassW(&wc) != 0);
+    HMENU file = CreatePopupMenu(), bar_menu = CreateMenu();
+    CHECK(AppendMenuW(file, MF_STRING, 100, L"E&xit") && AppendMenuW(bar_menu, MF_POPUP, (UINT_PTR)file, L"&File"));
+    // A window made with the menu's frame size and the menu: 100 x 100 inside.
+    HWND w = CreateWindowExW(0, L"User32TestMenuBar", L"menu", WS_OVERLAPPEDWINDOW, 0, 0,
+                             with_menu.right - with_menu.left, with_menu.bottom - with_menu.top, NULL,
+                             bar_menu, GetModuleHandleW(NULL), NULL);
+    RECT c;
+    CHECK(w != NULL && GetMenu(w) == bar_menu);
+    CHECK(GetClientRect(w, &c) && c.right == 100 && c.bottom == 100);
+    // Without it the client area grows by the bar, with WM_SIZE.
+    sizes_seen = 0;
+    CHECK(SetMenu(w, NULL) && GetMenu(w) == NULL);
+    CHECK(GetClientRect(w, &c) && c.right == 100 && c.bottom == 100 + bar && sizes_seen > 0);
+    POINT o = {0, 0};
+    CHECK(ClientToScreen(w, &o) && o.y == -plain.top);
+    CHECK(SetMenu(w, bar_menu) && GetClientRect(w, &c) && c.bottom == 100);
+    o.x = o.y = 0;
+    CHECK(ClientToScreen(w, &o) && o.y == -with_menu.top);
+    CHECK(DrawMenuBar(w));
+    CHECK(DestroyWindow(w));
+    // The menu went with the window.
+    CHECK(!IsMenu(bar_menu) && !IsMenu(file));
+}
+
 static int monitors_seen;
 static HMONITOR monitor_seen;
 static RECT monitor_rect;
@@ -799,6 +847,7 @@ int main(void) {
     dialog_units();
     deferred();
     timers();
+    menu_bar();
     monitors();
     menus();
     children();

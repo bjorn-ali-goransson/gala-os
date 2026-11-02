@@ -8,7 +8,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     GetClipboardData
     MessageBeep
     OpenClipboard
-    AdjustWindowRectEx
     AnimateWindow
     ChangeDisplaySettingsExW
     ChildWindowFromPoint
@@ -65,7 +64,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     ShowCaret
     ShowCursor
     ToUnicode
-    TrackPopupMenu
     UnregisterHotKey
     ValidateRgn
     WaitForInputIdle

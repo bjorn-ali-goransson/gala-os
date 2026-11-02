@@ -338,7 +338,7 @@ pub fn moved_by_desktop(top: Hwnd, lparam: isize) {
     let (cx, cy) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
     if let Some(i) = index_of(top) {
         with(|s| {
-            let (b, top) = crate::window::frame(&s.windows[i]);
+            let (b, top) = crate::window::desktop_frame(&s.windows[i]);
             s.windows[i].x = cx - b;
             s.windows[i].y = cy - top;
         });
@@ -358,7 +358,9 @@ pub fn route(top: Hwnd, message: u32, lparam: isize) -> (Hwnd, isize) {
     if !(0x0200..=0x020d).contains(&message) {
         return (top, lparam);
     }
-    let (x, y) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
+    // The desktop's client area starts with the menu bar.
+    let bar = window(top).map_or(0, |w| w.bar);
+    let (x, y) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32 - bar);
     let pack = |x: i32, y: i32| ((y as i16 as u16 as isize) << 16) | (x as i16 as u16 as isize);
     // The capture (a window of this top-level window) gets it all.
     let capture = crate::window::GetCapture();
@@ -897,18 +899,28 @@ const SWP_NOZORDER: u32 = 0x4;
 const SWP_SHOWWINDOW: u32 = 0x40;
 const SWP_HIDEWINDOW: u32 = 0x80;
 
-/// A top-level window's new client size: a buffer of that size with what
-/// fits of the old pixels (white elsewhere); the old one is freed.
+/// A top-level window's new client size (and menu bar height): a buffer
+/// of that size with what fits of the old client pixels (white
+/// elsewhere); the old one is freed.
 fn resize_buffer(i: usize, cw: i32, ch: i32) {
-    let (old, ow, oh) = with(|s| (s.windows[i].pixels, s.windows[i].cw, s.windows[i].ch));
+    let bar = with(|s| s.windows[i].bar);
+    relayout(i, cw, ch, bar);
+}
+
+fn relayout(i: usize, cw: i32, ch: i32, bar: i32) {
+    let w = with(|s| s.windows[i]);
+    let (old, ow, oh) = (w.pixels, w.cw, w.ch);
+    let old_base = crate::window::buffer_base(&w);
+    let (cw, ch) = (cw.max(1), ch.max(1));
     // SAFETY: a plain call.
-    let new = unsafe {
-        VirtualAlloc(core::ptr::null_mut(), (cw.max(1) * ch.max(1) * 4) as usize, 0x3000, 4)
-    }
-    .cast::<u32>();
-    if new.is_null() {
+    let base =
+        unsafe { VirtualAlloc(core::ptr::null_mut(), (cw * (ch + bar) * 4) as usize, 0x3000, 4) }
+            .cast::<u32>();
+    if base.is_null() {
         return;
     }
+    // SAFETY: the bar's rows come first.
+    let new = unsafe { base.add((bar * cw) as usize) };
     for y in 0..ch {
         for x in 0..cw {
             let v = if x < ow && y < oh && !old.is_null() {
@@ -925,11 +937,35 @@ fn resize_buffer(i: usize, cw: i32, ch: i32) {
         s.windows[i].pixels = new;
         s.windows[i].cw = cw;
         s.windows[i].ch = ch;
+        s.windows[i].bar = bar;
     });
-    if !old.is_null() {
+    if !old_base.is_null() {
         // SAFETY: the window's former buffer, no longer used.
-        unsafe { VirtualFree(old.cast(), 0, 0x8000) };
+        unsafe { VirtualFree(old_base.cast(), 0, 0x8000) };
     }
+    if bar != 0 {
+        crate::track::draw_bar(hwnd_of(i));
+    }
+}
+
+/// SetMenu's part: a top-level window gets (or loses) its menu bar, which
+/// takes (or gives back) the top of its client area: WM_SIZE, a repaint.
+pub fn set_menu_bar(hwnd: Hwnd, on: bool) {
+    let Some(i) = index_of(hwnd) else { return };
+    let w = with(|s| s.windows[i]);
+    if !w.used || w.parent != 0 || w.popup {
+        return;
+    }
+    let bar = if on { crate::window::MENU_BAR } else { 0 };
+    if bar == w.bar {
+        crate::track::draw_bar(hwnd);
+        return;
+    }
+    let ch = (w.ch + w.bar - bar).max(1);
+    relayout(i, w.cw, ch, bar);
+    let (cw, ch) = with(|s| (s.windows[i].cw, s.windows[i].ch));
+    SendMessageW(hwnd, WM_SIZE, 0, ((ch as isize) << 16) | cw as isize);
+    crate::window::InvalidateRect(hwnd, core::ptr::null(), 1);
 }
 
 /// SetWindowPos: moves, sizes, reorders, shows or hides; WM_WINDOWPOSCHANGING
@@ -981,6 +1017,8 @@ pub extern "system" fn SetWindowPos(
         if w.desktop != 0 {
             // SAFETY: our desktop window.
             unsafe { GalaWindowPlace(w.desktop, nx, ny, nw as u32, nh as u32) };
+            // The desktop's new buffer needs the bar again.
+            crate::track::draw_bar(hwnd);
         }
         crate::window::InvalidateRect(hwnd, core::ptr::null(), 1);
     } else {
@@ -1124,6 +1162,10 @@ fn maximize(hwnd: Hwnd, on: bool) {
 
 // ---- DefWindowProc's part ----
 
+const WM_NCLBUTTONDOWN: u32 = 0x00a1;
+const HTMENU: usize = 5;
+const SC_MOUSEMENU: usize = 0xf090;
+
 /// What DefWindowProc does for the messages of this module.
 pub fn def_window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Option<isize> {
     match msg {
@@ -1137,8 +1179,21 @@ pub fn def_window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Op
                 SC_MAXIMIZE => maximize(hwnd, true),
                 SC_RESTORE => maximize(hwnd, false),
                 SC_MINIMIZE => {}
+                // A click on the menu bar (lParam: the screen point).
+                SC_MOUSEMENU => {
+                    crate::track::track_bar(
+                        hwnd,
+                        lparam as i16 as i32,
+                        (lparam >> 16) as i16 as i32,
+                    );
+                }
                 _ => {}
             }
+            Some(0)
+        }
+        // A press on the menu bar: the menu (WM_SYSCOMMAND SC_MOUSEMENU).
+        WM_NCLBUTTONDOWN if wparam == HTMENU => {
+            SendMessageW(hwnd, WM_SYSCOMMAND, SC_MOUSEMENU | HTMENU, lparam);
             Some(0)
         }
         WM_SETTEXT => {

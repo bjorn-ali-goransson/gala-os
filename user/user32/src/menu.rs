@@ -3,8 +3,8 @@
 //! documented results of the menu functions. MF_BYCOMMAND reaches into
 //! submenus. A window's menu (SetMenu/GetMenu) and its system menu
 //! (GetSystemMenu: Restore, Move, Size, Minimize, Maximize, a separator,
-//! Close) go with it. Drawing a menu bar and tracking popups come later
-//! (DrawMenuBar only answers TRUE; the client area keeps its size).
+//! Close) go with it. The menu bar takes the top of the window's client
+//! area (`tree::set_menu_bar`); `track` draws it and the popups.
 
 use crate::window::Hwnd;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -637,11 +637,19 @@ fn entry<'a>(s: &'a mut State, hwnd: Hwnd) -> Option<&'a mut (Hwnd, usize, usize
     Some(&mut s.windows[i])
 }
 
+/// SetMenu: the window's menu bar (NULL: none); the client area gives
+/// the bar its room (or takes it back).
 #[unsafe(no_mangle)]
 pub extern "system" fn SetMenu(hwnd: Hwnd, menu: usize) -> i32 {
-    if crate::window::IsWindow(hwnd) == 0 {
+    if crate::window::IsWindow(hwnd) == 0 || attach(hwnd, menu) == 0 {
         return 0;
     }
+    crate::tree::set_menu_bar(hwnd, menu != 0);
+    1
+}
+
+/// The menu goes with the window (no layout).
+pub(crate) fn attach(hwnd: Hwnd, menu: usize) -> i32 {
     with(|s| {
         if menu != 0 && s.menu(menu).is_none() {
             return 0;
@@ -656,15 +664,60 @@ pub extern "system" fn SetMenu(hwnd: Hwnd, menu: usize) -> i32 {
     })
 }
 
+/// An item as the menu tracker draws it.
+#[derive(Clone, Copy)]
+pub(crate) struct View {
+    pub id: u32,
+    pub separator: bool,
+    pub disabled: bool,
+    pub checked: bool,
+    pub radio: bool,
+    pub owner_draw: bool,
+    pub submenu: usize,
+    pub data: usize,
+    pub text: [u16; TEXT],
+    pub len: usize,
+}
+
+/// How many items `h` has (0 for no menu).
+pub(crate) fn count(h: usize) -> usize {
+    with(|s| s.menu(h).map_or(0, |m| m.count))
+}
+
+/// Item `k` of `h`.
+pub(crate) fn view(h: usize, k: usize) -> Option<View> {
+    const MFT_RADIOCHECK: u32 = 0x200;
+    with(|s| {
+        let m = s.menu(h)?;
+        let it = *m.items.get(k).filter(|_| k < m.count)?;
+        Some(View {
+            id: it.id,
+            separator: it.kind & MF_SEPARATOR != 0,
+            disabled: it.state & (MF_GRAYED | MF_DISABLED) != 0,
+            checked: it.state & MF_CHECKED != 0,
+            radio: it.kind & MFT_RADIOCHECK != 0,
+            owner_draw: it.kind & MF_OWNERDRAW != 0,
+            submenu: it.submenu,
+            data: it.data,
+            text: it.text,
+            len: text_len(&it.text),
+        })
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn GetMenu(hwnd: Hwnd) -> usize {
     with(|s| s.windows.iter().find(|e| e.0 == hwnd && hwnd != 0).map_or(0, |e| e.1))
 }
 
-/// DrawMenuBar: TRUE for a window (the bar is not drawn yet).
+/// DrawMenuBar: the window's menu bar again (after its items changed).
 #[unsafe(no_mangle)]
 pub extern "system" fn DrawMenuBar(hwnd: Hwnd) -> i32 {
-    crate::window::IsWindow(hwnd)
+    if crate::window::IsWindow(hwnd) == 0 {
+        return 0;
+    }
+    crate::track::draw_bar(hwnd);
+    1
 }
 
 /// GetSystemMenu(hwnd, revert): the window's own copy of the window menu
