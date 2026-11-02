@@ -107,6 +107,10 @@ shows it.
 - **Changing `nt::desktop`'s public functions or types**: the server
   kernel's stand-in `kernel/src/nt/desktop_off.rs` must follow, or the
   `--no-default-features` clippy line in CI fails.
+- **Write each expected output line with one WriteFile call**: a test
+  that writes a line in pieces can have a kernel log line land between
+  them on the serial port, and the scenario's expected substring is then
+  missing (gala_cli once failed on "target: " + "key g").
 - **A JVM crashing with access violations at odd addresses** after a
   long run may be the machine out of memory: a user page fault that finds
   no free frame becomes an access violation (the commit charge, R6, covers

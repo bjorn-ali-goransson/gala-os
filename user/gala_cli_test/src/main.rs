@@ -282,9 +282,15 @@ static SAW: AtomicU32 = AtomicU32::new(0);
 
 fn saw(bit: u32, what: &[u8]) {
     if SAW.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
-        out(b"gala_cli_test target: ");
-        out(what);
-        out(b"\r\n");
+        // One write per line, so the kernel's log cannot split it.
+        let mut line = [0u8; 96];
+        let prefix = b"gala_cli_test target: ";
+        let n = what.len().min(line.len() - prefix.len() - 2);
+        line[..prefix.len()].copy_from_slice(prefix);
+        line[prefix.len()..prefix.len() + n].copy_from_slice(&what[..n]);
+        let end = prefix.len() + n;
+        line[end..end + 2].copy_from_slice(b"\r\n");
+        out(&line[..end + 2]);
     }
 }
 
