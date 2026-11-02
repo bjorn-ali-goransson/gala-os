@@ -740,12 +740,18 @@ fn dump_file(path: &str) {
     }
     let text = core::str::from_utf8(&decoded).unwrap_or("");
     let rest = text.strip_prefix("C:").or_else(|| text.strip_prefix("c:")).unwrap_or(text);
-    let mut volume_path = alloc::string::String::new();
-    if volume_path.try_reserve(rest.len()).is_err() {
+    // The volume's separators (an ASCII byte for an ASCII byte: the text
+    // stays UTF-8), copied into room reserved first.
+    use crate::mm::heap::TryVec;
+    let mut bytes = alloc::vec::Vec::new();
+    if bytes.try_extend_from_slice(rest.as_bytes()).is_err() {
         error!("dump: out of memory");
         return;
     }
-    volume_path.extend(rest.chars().map(|c| if c == '/' { '\\' } else { c }));
+    for b in bytes.iter_mut().filter(|b| **b == b'/') {
+        *b = b'\\';
+    }
+    let Ok(volume_path) = alloc::string::String::from_utf8(bytes) else { return };
     let data = match nt::file::lookup(&volume_path).and_then(nt::file::read_all) {
         Ok(data) => data,
         Err(e) => {

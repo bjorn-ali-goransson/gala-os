@@ -87,7 +87,7 @@ fn parse_marker(m: &[u8; 28]) -> Option<(u64, u64)> {
 /// The kept ranges the previous kernel listed.
 fn received_kept(info: &BootInfo) -> impl Iterator<Item = Range> + '_ {
     let section = info.handover.as_ref().and_then(|r| r.record.section(tag::KEPT));
-    section.into_iter().flat_map(|s| record::read_ranges(&s).collect::<KeptList>())
+    section.into_iter().flat_map(|s| KeptList::from_iter(record::read_ranges(&s)))
 }
 
 /// A small fixed list (no allocation while reading the record).
