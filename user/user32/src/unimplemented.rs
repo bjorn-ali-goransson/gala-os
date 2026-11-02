@@ -50,7 +50,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     GetActiveWindow
     GetCaretBlinkTime
     GetClassInfoW
-    GetComboBoxInfo
     GetDesktopWindow
     GetDialogBaseUnits
     GetDoubleClickTime

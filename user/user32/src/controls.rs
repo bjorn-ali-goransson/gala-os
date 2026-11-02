@@ -466,6 +466,37 @@ fn text_out(hdc: Handle, x: i32, y: i32, s: &[u16]) {
     }
 }
 
+// ---- Shared with COMBOBOX ----
+
+/// Paints a control (its font selected).
+pub(crate) fn paint_box(hwnd: Hwnd, font: usize, f: impl FnOnce(Handle, [i32; 4])) {
+    paint(hwnd, font, f);
+}
+
+/// A combo box's face: a rounded light box, the accent underline when
+/// focused.
+pub(crate) fn combo_face(hdc: Handle, r: [i32; 4], focused: bool) {
+    round_box(hdc, r, 4, if focused { WHITE } else { BUTTON_FACE }, BUTTON_BORDER);
+    if focused {
+        fill(hdc, r[0] + 2, r[3] - 2, r[2] - 2, r[3], ACCENT);
+    }
+}
+
+/// One line of text, vertically centred, in the text colour.
+pub(crate) fn draw_label(hdc: Handle, text: &[u16], r: [i32; 4]) {
+    transparent(hdc);
+    text_color(hdc, TEXT);
+    draw_text(hdc, text, r, 0x24 | 0x800 | 0x8000);
+}
+
+/// A small downward chevron centred at (x, y).
+pub(crate) fn chevron(hdc: Handle, x: i32, y: i32) {
+    for k in 0..4 {
+        fill(hdc, x - k, y + 1 - k, x - k + 1, y + 2 - k, TEXT);
+        fill(hdc, x + k, y + 1 - k, x + k + 1, y + 2 - k, TEXT);
+    }
+}
+
 // ---- Registration ----
 
 static REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -475,10 +506,15 @@ pub fn register_system_classes() {
     if REGISTERED.swap(true, Ordering::AcqRel) {
         return;
     }
-    let classes: [(&[u8], crate::window::WndProc); 3] =
-        [(b"STATIC\0", static_proc), (b"BUTTON\0", button_proc), (b"EDIT\0", edit_proc)];
+    let classes: [(&[u8], crate::window::WndProc); 5] = [
+        (b"STATIC\0", static_proc),
+        (b"BUTTON\0", button_proc),
+        (b"EDIT\0", edit_proc),
+        (b"COMBOBOX\0", crate::combo::combo_proc),
+        (b"ComboLBox\0", crate::combo::list_proc),
+    ];
     for (name, proc_) in classes {
-        let mut wide = [0u16; 8];
+        let mut wide = [0u16; 12];
         for (w, &b) in wide.iter_mut().zip(name) {
             *w = u16::from(b);
         }

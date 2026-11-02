@@ -18,6 +18,9 @@
  *   caret and notify the parent with EN_CHANGE; ES_READONLY ignores
  *   them; EM_LIMITTEXT caps the length; ES_PASSWORD shows '*'
  *   (EM_GETPASSWORDCHAR).
+ * - COMBOBOX: items (add, insert, find, delete, reset, data), the
+ *   selection, a drop-down list's text; GetComboBoxInfo names its edit
+ *   and list.
  *
  * Prints "controls_test: ok" or exits with the number of the failing
  * check. */
@@ -155,6 +158,43 @@ static void edits(HWND parent) {
     CHECK(p != NULL && SendMessageW(p, EM_GETPASSWORDCHAR, 0, 0) != 0);
 }
 
+/* COMBOBOX: items added, inserted, found, deleted, counted, with data;
+ * the selection (CB_SETCURSEL, -1 at first and for an index past the
+ * end); a drop-down list's text is the selected item's; GetComboBoxInfo
+ * names the combo box, its edit (a child, for CBS_DROPDOWN) and its
+ * list. */
+static void combos(HWND parent) {
+    HWND c = CreateWindowExW(0, L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 10, 210, 150, 200,
+                             parent, (HMENU)40, GetModuleHandleW(NULL), NULL);
+    CHECK(c != NULL);
+    CHECK(SendMessageW(c, CB_GETCURSEL, 0, 0) == CB_ERR && SendMessageW(c, CB_GETCOUNT, 0, 0) == 0);
+    CHECK(SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"alpha") == 0);
+    CHECK(SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"gamma") == 1);
+    CHECK(SendMessageW(c, CB_INSERTSTRING, 1, (LPARAM)L"beta") == 1);
+    CHECK(SendMessageW(c, CB_GETCOUNT, 0, 0) == 3);
+    WCHAR text[32];
+    CHECK(SendMessageW(c, CB_GETLBTEXTLEN, 2, 0) == 5);
+    CHECK(SendMessageW(c, CB_GETLBTEXT, 2, (LPARAM)text) == 5 && wcscmp(text, L"gamma") == 0);
+    CHECK(SendMessageW(c, CB_FINDSTRINGEXACT, -1, (LPARAM)L"BETA") == 1);
+    CHECK(SendMessageW(c, CB_FINDSTRING, -1, (LPARAM)L"gam") == 2);
+    CHECK(SendMessageW(c, CB_FINDSTRINGEXACT, -1, (LPARAM)L"delta") == CB_ERR);
+    CHECK(SendMessageW(c, CB_SETITEMDATA, 1, 1234) != CB_ERR && SendMessageW(c, CB_GETITEMDATA, 1, 0) == 1234);
+    CHECK(SendMessageW(c, CB_SETCURSEL, 1, 0) == 1 && SendMessageW(c, CB_GETCURSEL, 0, 0) == 1);
+    CHECK(GetWindowTextW(c, text, 32) == 4 && wcscmp(text, L"beta") == 0);
+    CHECK(SendMessageW(c, CB_SETCURSEL, 7, 0) == CB_ERR && SendMessageW(c, CB_GETCURSEL, 0, 0) == CB_ERR);
+    CHECK(SendMessageW(c, CB_DELETESTRING, 0, 0) == 2);
+    CHECK(SendMessageW(c, CB_RESETCONTENT, 0, 0) == CB_OKAY && SendMessageW(c, CB_GETCOUNT, 0, 0) == 0);
+
+    HWND d = CreateWindowExW(0, L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN, 10, 240, 150, 200, parent,
+                             (HMENU)41, GetModuleHandleW(NULL), NULL);
+    CHECK(d != NULL);
+    COMBOBOXINFO info = {sizeof info};
+    CHECK(GetComboBoxInfo(d, &info) && info.hwndCombo == d);
+    CHECK(info.hwndItem != NULL && GetParent(info.hwndItem) == d && info.hwndList != NULL);
+    CHECK(SetWindowTextW(d, L"typed") && GetWindowTextW(info.hwndItem, text, 32) == 5);
+    CHECK(GetWindowTextW(d, text, 32) == 5 && wcscmp(text, L"typed") == 0);
+}
+
 int main(void) {
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = parent_proc;
@@ -170,6 +210,7 @@ int main(void) {
     subclass(parent);
     buttons(parent);
     edits(parent);
+    combos(parent);
     DestroyWindow(parent);
     printf("controls_test: ok\n");
     return 0;

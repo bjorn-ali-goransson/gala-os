@@ -21,6 +21,16 @@
  *   side; TB_AUTOSIZE at the top, full width; a click sends WM_COMMAND
  *   with the button's id; TB_DELETEBUTTON; TB_ADDBITMAP with a bitmap
  *   strip returns its first image's index.
+ * - The list view (report view): its header and columns, items and
+ *   subitems, selection (LVM_SETITEMSTATE, LVN_ITEMCHANGED,
+ *   LVM_GETNEXTITEM: -1 when none), item rectangles, hit testing, a
+ *   click (NM_CLICK), extended styles, image lists, deletion; a virtual
+ *   list (LVS_OWNERDATA) asks for texts with LVN_GETDISPINFOW.
+ * - The tree view: items inserted (first, last), counted, walked, read
+ *   back; expanding (TVN_ITEMEXPANDINGW, TVIS_EXPANDED), selecting
+ *   (TVN_SELCHANGEDW, the caret), children asked of the parent
+ *   (I_CHILDRENCALLBACK), rectangles, hit testing, image lists, deleting
+ *   (with children; TVI_ROOT: all).
  *
  * Prints "comctl32_test: ok" or exits with the number of the failing
  * check. */
@@ -51,12 +61,148 @@ static COLORREF rgb(DWORD c) { return RGB(c >> 16, (c >> 8) & 0xff, c & 0xff); }
 
 static WPARAM last_command;
 static int commands;
+static int item_changes, last_changed_item, clicks, dispinfo_requests;
+static int tv_expanding, tv_selchanged, tv_children_asked;
+static HTREEITEM tv_new_selection;
+static UINT last_new_state;
 static LRESULT CALLBACK parent_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_COMMAND) {
         last_command = wparam;
         commands++;
     }
+    if (msg == WM_NOTIFY) {
+        NMHDR *h = (NMHDR *)lparam;
+        if (h->code == LVN_ITEMCHANGED) {
+            NMLISTVIEW *lv = (NMLISTVIEW *)lparam;
+            item_changes++;
+            last_changed_item = lv->iItem;
+            last_new_state = lv->uNewState;
+        } else if (h->code == NM_CLICK) {
+            clicks++;
+        } else if (h->code == TVN_ITEMEXPANDINGW) {
+            tv_expanding++;
+        } else if (h->code == TVN_SELCHANGEDW) {
+            tv_selchanged++;
+            tv_new_selection = ((NMTREEVIEWW *)lparam)->itemNew.hItem;
+        } else if (h->code == TVN_GETDISPINFOW) {
+            NMTVDISPINFOW *di = (NMTVDISPINFOW *)lparam;
+            if (di->item.mask & TVIF_CHILDREN) {
+                tv_children_asked++;
+                di->item.cChildren = 1;
+            }
+        } else if (h->code == LVN_GETDISPINFOW) {
+            NMLVDISPINFOW *di = (NMLVDISPINFOW *)lparam;
+            dispinfo_requests++;
+            if (di->item.mask & LVIF_TEXT) {
+                wcscpy(di->item.pszText, L"row");
+            }
+        }
+    }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+/* The list view in report view: a header (LVM_GETHEADER) with the
+ * columns; columns inserted, sized and read back; items with subitem
+ * texts; selection by LVM_SETITEMSTATE (LVN_ITEMCHANGED to the parent;
+ * LVM_GETNEXTITEM with LVNI_SELECTED finds it, -1 when none), removal;
+ * item rectangles one under the other below the header; hit testing; a
+ * click selects (NM_CLICK); extended styles and image lists are kept; a
+ * virtual list (LVS_OWNERDATA) has LVM_SETITEMCOUNT's count and asks the
+ * parent for texts (LVN_GETDISPINFOW). */
+static void list_view(HWND parent, HIMAGELIST il) {
+    HWND lv = CreateWindowExW(0, WC_LISTVIEWW, NULL, WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS, 0, 0,
+                              300, 200, parent, (HMENU)50, GetModuleHandleW(NULL), NULL);
+    CHECK(lv != NULL);
+    HWND header = (HWND)SendMessageW(lv, LVM_GETHEADER, 0, 0);
+    CHECK(header != NULL);
+    LVCOLUMNW col = {0};
+    col.mask = LVCF_TEXT | LVCF_WIDTH;
+    col.cx = 100;
+    col.pszText = L"Name";
+    CHECK(SendMessageW(lv, LVM_INSERTCOLUMNW, 0, (LPARAM)&col) == 0);
+    col.pszText = L"Size";
+    col.cx = 60;
+    CHECK(SendMessageW(lv, LVM_INSERTCOLUMNW, 1, (LPARAM)&col) == 1);
+    CHECK(SendMessageW(header, HDM_GETITEMCOUNT, 0, 0) == 2);
+    CHECK(SendMessageW(lv, LVM_GETCOLUMNWIDTH, 1, 0) == 60);
+    CHECK(SendMessageW(lv, LVM_SETCOLUMNWIDTH, 0, 120) && SendMessageW(lv, LVM_GETCOLUMNWIDTH, 0, 0) == 120);
+    WCHAR text[32];
+    LVCOLUMNW back = {0};
+    back.mask = LVCF_TEXT;
+    back.pszText = text;
+    back.cchTextMax = 32;
+    CHECK(SendMessageW(lv, LVM_GETCOLUMNW, 1, (LPARAM)&back) && wcscmp(text, L"Size") == 0);
+
+    LVITEMW item = {0};
+    item.mask = LVIF_TEXT;
+    item.pszText = L"a";
+    CHECK(SendMessageW(lv, LVM_INSERTITEMW, 0, (LPARAM)&item) == 0);
+    item.iItem = 1;
+    item.pszText = L"b";
+    CHECK(SendMessageW(lv, LVM_INSERTITEMW, 0, (LPARAM)&item) == 1);
+    CHECK(SendMessageW(lv, LVM_GETITEMCOUNT, 0, 0) == 2);
+    LVITEMW sub = {0};
+    sub.iSubItem = 1;
+    sub.pszText = L"x";
+    CHECK(SendMessageW(lv, LVM_SETITEMTEXTW, 0, (LPARAM)&sub));
+    sub.pszText = text;
+    sub.cchTextMax = 32;
+    CHECK(SendMessageW(lv, LVM_GETITEMTEXTW, 0, (LPARAM)&sub) == 1 && wcscmp(text, L"x") == 0);
+    sub.iSubItem = 0;
+    CHECK(SendMessageW(lv, LVM_GETITEMTEXTW, 1, (LPARAM)&sub) == 1 && wcscmp(text, L"b") == 0);
+
+    CHECK(SendMessageW(lv, LVM_GETNEXTITEM, -1, LVNI_SELECTED) == -1);
+    LVITEMW st = {0};
+    st.stateMask = LVIS_SELECTED;
+    st.state = LVIS_SELECTED;
+    item_changes = 0;
+    CHECK(SendMessageW(lv, LVM_SETITEMSTATE, 1, (LPARAM)&st));
+    CHECK(item_changes == 1 && last_changed_item == 1 && (last_new_state & LVIS_SELECTED));
+    CHECK(SendMessageW(lv, LVM_GETNEXTITEM, -1, LVNI_SELECTED) == 1);
+    CHECK(SendMessageW(lv, LVM_GETITEMSTATE, 1, LVIS_SELECTED) == LVIS_SELECTED);
+    CHECK(SendMessageW(lv, LVM_GETSELECTEDCOUNT, 0, 0) == 1);
+    st.state = 0;
+    CHECK(SendMessageW(lv, LVM_SETITEMSTATE, -1, (LPARAM)&st));
+    CHECK(SendMessageW(lv, LVM_GETNEXTITEM, -1, LVNI_SELECTED) == -1);
+
+    RECT hr, a, b;
+    GetWindowRect(header, &hr);
+    MapWindowPoints(NULL, lv, (POINT *)&hr, 2);
+    a.left = b.left = LVIR_BOUNDS;
+    CHECK(SendMessageW(lv, LVM_GETITEMRECT, 0, (LPARAM)&a) && SendMessageW(lv, LVM_GETITEMRECT, 1, (LPARAM)&b));
+    CHECK(a.top >= hr.bottom && b.top == a.bottom && a.bottom > a.top);
+    LVHITTESTINFO ht = {{20, (b.top + b.bottom) / 2}, 0, 0, 0, 0};
+    CHECK(SendMessageW(lv, LVM_HITTEST, 0, (LPARAM)&ht) == 1 && (ht.flags & LVHT_ONITEM));
+    clicks = 0;
+    LPARAM at = MAKELPARAM(20, (a.top + a.bottom) / 2);
+    SendMessageW(lv, WM_LBUTTONDOWN, MK_LBUTTON, at);
+    SendMessageW(lv, WM_LBUTTONUP, 0, at);
+    CHECK(SendMessageW(lv, LVM_GETNEXTITEM, -1, LVNI_SELECTED) == 0 && clicks >= 1);
+
+    CHECK(SendMessageW(lv, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT) == 0);
+    CHECK(SendMessageW(lv, LVM_GETEXTENDEDLISTVIEWSTYLE, 0, 0) == LVS_EX_FULLROWSELECT);
+    CHECK(SendMessageW(lv, LVM_SETIMAGELIST, LVSIL_SMALL, (LPARAM)il) == 0);
+    CHECK((HIMAGELIST)SendMessageW(lv, LVM_GETIMAGELIST, LVSIL_SMALL, 0) == il);
+    CHECK(SendMessageW(lv, LVM_GETCOUNTPERPAGE, 0, 0) > 0 && SendMessageW(lv, LVM_GETTOPINDEX, 0, 0) == 0);
+    CHECK(SendMessageW(lv, LVM_ENSUREVISIBLE, 1, FALSE));
+
+    CHECK(SendMessageW(lv, LVM_DELETEITEM, 0, 0) && SendMessageW(lv, LVM_GETITEMCOUNT, 0, 0) == 1);
+    CHECK(SendMessageW(lv, LVM_DELETEALLITEMS, 0, 0) && SendMessageW(lv, LVM_GETITEMCOUNT, 0, 0) == 0);
+    DestroyWindow(lv);
+
+    HWND v = CreateWindowExW(0, WC_LISTVIEWW, NULL, WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_OWNERDATA, 0, 0, 300,
+                             200, parent, (HMENU)51, GetModuleHandleW(NULL), NULL);
+    CHECK(v != NULL);
+    col.pszText = L"Name";
+    col.cx = 150;
+    SendMessageW(v, LVM_INSERTCOLUMNW, 0, (LPARAM)&col);
+    CHECK(SendMessageW(v, LVM_SETITEMCOUNT, 1000, 0) && SendMessageW(v, LVM_GETITEMCOUNT, 0, 0) == 1000);
+    dispinfo_requests = 0;
+    InvalidateRect(v, NULL, TRUE);
+    UpdateWindow(v);
+    CHECK(dispinfo_requests > 0);
+    CHECK(SendMessageW(v, LVM_GETNEXTITEM, -1, LVNI_SELECTED) == -1);
+    DestroyWindow(v);
 }
 
 /* The status bar sits at the bottom of its parent, full width; parts
@@ -164,6 +310,90 @@ static void toolbar(HWND parent, HIMAGELIST il) {
     DestroyWindow(tb2);
 }
 
+/* The tree view: items inserted under the root and under each other
+ * (TVM_INSERTITEMW returns their handles), counted, walked
+ * (TVM_GETNEXTITEM: root, child, next, previous, parent), read back
+ * (TVM_GETITEMW); expanding sends TVN_ITEMEXPANDINGW and sets
+ * TVIS_EXPANDED; selecting sends TVN_SELCHANGEDW and is the caret;
+ * I_CHILDRENCALLBACK asks the parent (TVN_GETDISPINFOW); item
+ * rectangles, hit testing, image lists; deleting an item deletes its
+ * children; TVI_ROOT deletes everything. */
+static void tree_view(HWND parent, HIMAGELIST il) {
+    HWND tv = CreateWindowExW(0, WC_TREEVIEWW, NULL,
+                              WS_CHILD | WS_VISIBLE | TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT, 0, 0, 300, 200,
+                              parent, (HMENU)60, GetModuleHandleW(NULL), NULL);
+    CHECK(tv != NULL);
+    TVINSERTSTRUCTW ins = {0};
+    ins.hParent = TVI_ROOT;
+    ins.hInsertAfter = TVI_LAST;
+    ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+    ins.item.pszText = L"C:";
+    ins.item.lParam = 7;
+    HTREEITEM c = (HTREEITEM)SendMessageW(tv, TVM_INSERTITEMW, 0, (LPARAM)&ins);
+    ins.item.pszText = L"D:";
+    HTREEITEM d = (HTREEITEM)SendMessageW(tv, TVM_INSERTITEMW, 0, (LPARAM)&ins);
+    CHECK(c != NULL && d != NULL && c != d);
+    ins.hParent = c;
+    ins.item.pszText = L"Users";
+    HTREEITEM users = (HTREEITEM)SendMessageW(tv, TVM_INSERTITEMW, 0, (LPARAM)&ins);
+    ins.item.pszText = L"Windows";
+    HTREEITEM windows = (HTREEITEM)SendMessageW(tv, TVM_INSERTITEMW, 0, (LPARAM)&ins);
+    ins.hInsertAfter = TVI_FIRST;
+    ins.item.pszText = L"Apps";
+    HTREEITEM apps = (HTREEITEM)SendMessageW(tv, TVM_INSERTITEMW, 0, (LPARAM)&ins);
+    CHECK(users && windows && apps);
+    CHECK(SendMessageW(tv, TVM_GETCOUNT, 0, 0) == 5);
+    CHECK((HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_ROOT, 0) == c);
+    CHECK((HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_NEXT, (LPARAM)c) == d);
+    CHECK((HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_NEXT, (LPARAM)d) == NULL);
+    CHECK((HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_CHILD, (LPARAM)c) == apps);
+    CHECK((HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_NEXT, (LPARAM)apps) == users);
+    CHECK((HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_PREVIOUS, (LPARAM)windows) == users);
+    CHECK((HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_PARENT, (LPARAM)windows) == c);
+    WCHAR text[32];
+    TVITEMW it = {0};
+    it.mask = TVIF_TEXT | TVIF_PARAM;
+    it.hItem = c;
+    it.pszText = text;
+    it.cchTextMax = 32;
+    CHECK(SendMessageW(tv, TVM_GETITEMW, 0, (LPARAM)&it) && wcscmp(text, L"C:") == 0 && it.lParam == 7);
+
+    tv_expanding = 0;
+    CHECK(SendMessageW(tv, TVM_EXPAND, TVE_EXPAND, (LPARAM)c) && tv_expanding == 1);
+    CHECK(SendMessageW(tv, TVM_GETITEMSTATE, (WPARAM)c, TVIS_EXPANDED) & TVIS_EXPANDED);
+    tv_selchanged = 0;
+    CHECK(SendMessageW(tv, TVM_SELECTITEM, TVGN_CARET, (LPARAM)users));
+    CHECK(tv_selchanged == 1 && tv_new_selection == users);
+    CHECK((HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_CARET, 0) == users);
+
+    RECT a, b;
+    *(HTREEITEM *)&a = c;
+    *(HTREEITEM *)&b = apps;
+    CHECK(SendMessageW(tv, TVM_GETITEMRECT, FALSE, (LPARAM)&a) && SendMessageW(tv, TVM_GETITEMRECT, FALSE, (LPARAM)&b));
+    CHECK(b.top == a.bottom && b.bottom > b.top);
+    TVHITTESTINFO ht = {{20, (b.top + b.bottom) / 2}, 0, 0};
+    CHECK((HTREEITEM)SendMessageW(tv, TVM_HITTEST, 0, (LPARAM)&ht) == apps && ht.hItem == apps);
+
+    CHECK(SendMessageW(tv, TVM_SETIMAGELIST, TVSIL_NORMAL, (LPARAM)il) == 0);
+    CHECK((HIMAGELIST)SendMessageW(tv, TVM_GETIMAGELIST, TVSIL_NORMAL, 0) == il);
+
+    /* I_CHILDRENCALLBACK: the parent says whether there are children. */
+    ins.hParent = d;
+    ins.hInsertAfter = TVI_LAST;
+    ins.item.mask = TVIF_TEXT | TVIF_CHILDREN;
+    ins.item.pszText = L"lazy";
+    ins.item.cChildren = I_CHILDRENCALLBACK;
+    HTREEITEM lazy = (HTREEITEM)SendMessageW(tv, TVM_INSERTITEMW, 0, (LPARAM)&ins);
+    tv_children_asked = 0;
+    it.mask = TVIF_CHILDREN;
+    it.hItem = lazy;
+    CHECK(SendMessageW(tv, TVM_GETITEMW, 0, (LPARAM)&it) && it.cChildren == 1 && tv_children_asked >= 1);
+
+    CHECK(SendMessageW(tv, TVM_DELETEITEM, 0, (LPARAM)c) && SendMessageW(tv, TVM_GETCOUNT, 0, 0) == 2);
+    CHECK(SendMessageW(tv, TVM_DELETEITEM, 0, (LPARAM)TVI_ROOT) && SendMessageW(tv, TVM_GETCOUNT, 0, 0) == 0);
+    DestroyWindow(tv);
+}
+
 int main(void) {
     INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_WIN95_CLASSES | ICC_BAR_CLASSES};
     CHECK(InitCommonControlsEx(&icc));
@@ -239,6 +469,8 @@ int main(void) {
     tooltips(parent);
     CHECK(ImageList_Add(il, two, NULL) == 0);
     toolbar(parent, il);
+    list_view(parent, il);
+    tree_view(parent, il);
     CHECK(ImageList_Destroy(il));
 
     DeleteObject(two);

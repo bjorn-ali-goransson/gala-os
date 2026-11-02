@@ -5,7 +5,13 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+extern crate alloc;
+
+// The global allocator (combo boxes' item lists).
+use gala_heap as _;
+
 mod accel;
+mod combo;
 mod controls;
 mod hook;
 mod icon;

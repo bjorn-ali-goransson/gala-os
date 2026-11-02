@@ -561,8 +561,11 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    CallWindowProcW (wx subclasses its controls). Then comctl32's status bar, tooltips (kept,
    not shown yet) and toolbar (comctl32_test), and SetWindowPos marks an
    unchanged size/position SWP_NOSIZE/SWP_NOMOVE as Windows does (no
-   WM_SIZE: self-placing controls do not loop). Next: the list view
-   (with its header) and the tree view.
+   WM_SIZE: self-placing controls do not loop). Then the header and the list view (comctl32_test):
+   report view, virtual lists (LVN_GETDISPINFOW), selection and its
+   notifications; FileZilla gets past its LVM_GETNEXTITEM loop. Then COMBOBOX and GetComboBoxInfo (controls_test) and the
+   tree view (comctl32_test); every control FileZilla creates exists now.
+   It now stops at gdi32's regions (CreateRectRgn).
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,

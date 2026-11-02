@@ -12,3 +12,4 @@ bench = false
 
 [dependencies]
 gala_stubs = { path = "../gala_stubs" }
+gala_heap = { path = "../gala_heap" }

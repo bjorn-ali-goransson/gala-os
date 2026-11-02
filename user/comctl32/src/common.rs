@@ -59,6 +59,8 @@ unsafe extern "system" {
         param: *mut c_void,
     ) -> Hwnd;
     pub fn DestroyWindow(hwnd: Hwnd) -> i32;
+    pub fn SetFocus(hwnd: Hwnd) -> Hwnd;
+    pub fn GetFocus() -> Hwnd;
 }
 
 /// WNDCLASSEXW.

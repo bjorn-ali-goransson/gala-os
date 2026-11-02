@@ -1,7 +1,8 @@
 //! gala's comctl32.dll: InitCommonControls(Ex), which programs call at
 //! startup to register the common control window classes: the status bar
-//! (`statusbar.rs`), tooltips (`tooltips.rs`) and the toolbar
-//! (`toolbar.rs`), drawn in the Windows 11 style (`common.rs`); and image
+//! (`statusbar.rs`), tooltips (`tooltips.rs`), the toolbar
+//! (`toolbar.rs`), the header (`header.rs`), the list view
+//! (`listview.rs`) and the tree view (`treeview.rs`), drawn in the Windows 11 style (`common.rs`); and image
 //! lists (`imagelist.rs`).
 
 #![no_std]
@@ -11,10 +12,13 @@
 extern crate alloc;
 
 mod common;
+mod header;
 mod imagelist;
+mod listview;
 mod statusbar;
 mod toolbar;
 mod tooltips;
+mod treeview;
 mod unimplemented;
 
 /// Registers the controls' classes (once).
@@ -26,6 +30,9 @@ fn register_classes() {
     common::register(b"msctls_statusbar32\0", statusbar::proc_);
     common::register(b"tooltips_class32\0", tooltips::proc_);
     common::register(b"ToolbarWindow32\0", toolbar::proc_);
+    common::register(b"SysHeader32\0", header::proc_);
+    common::register(b"SysListView32\0", listview::proc_);
+    common::register(b"SysTreeView32\0", treeview::proc_);
 }
 
 // The global allocator (the image lists' vectors).

@@ -2280,6 +2280,12 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   notify EN_UPDATE/EN_CHANGE/EN_MAXTEXT/EN_SETFOCUS/EN_KILLFOCUS. Not
   yet: the clipboard, undo, multi-line selection and scrolling, radio
   groups (every auto radio button of a parent is one group).
+  COMBOBOX (`combo.rs`; user32 now has the process heap as its
+  allocator, `gala_heap`): strings with data, the selection, an EDIT
+  child for CBS_DROPDOWN/CBS_SIMPLE whose text is the combo box's, a
+  hidden ComboLBox popup as its list (the desktop cannot show a
+  frameless popup yet, so a click on a drop-down list steps to the next
+  item, as do the arrows and the wheel; CBN_SELCHANGE), GetComboBoxInfo.
   DrawTextW (`text.rs`) splits, wraps, ellipsizes and aligns lines over
   gdi32's ExtTextOutW (1024 characters at most).
 - **Smaller user32/ole32 pieces wx needs** (`user32_test`): an
@@ -2320,7 +2326,27 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   id, state, style, text; separators; normal, hot and disabled image
   lists, TB_ADDBITMAP strips into its own; list or text-below layout;
   TB_AUTOSIZE; hot and pressed highlights; check buttons and groups; a
-  click sends WM_COMMAND to the parent or TB_SETPARENT's window).
+  click sends WM_COMMAND to the parent or TB_SETPARENT's window). The
+  header (SysHeader32) owns columns (HDITEMW, display order, sort
+  chevrons, divider dragging, HDN_* to its parent); the list view
+  (SysListView32) keeps its columns there (LVM_*COLUMN become HDM_*)
+  and draws every view as rows (report): items with subitem texts,
+  images, parameters and states, or for LVS_OWNERDATA only a count and
+  states with texts and images asked of the parent (LVN_GETDISPINFOW, as
+  for LPSTR_TEXTCALLBACK); selection by mouse and keys with
+  LVN_ITEMCHANGING/CHANGED, NM_CLICK/DBLCLK/RCLICK/RETURN,
+  LVN_ITEMACTIVATE/KEYDOWN/COLUMNCLICK (header clicks; other header
+  notifications are passed to the parent), sorting, finding, the wheel;
+  a rounded light-blue selection, a hover tint and a thin scroll
+  indicator. Not yet: label editing, groups, custom draw, the icon
+  views' layouts, horizontal scrolling. The tree view (SysTreeView32):
+  items (HTREEITEM 0x10000 + a serial) under the root and each other,
+  inserted first, last, sorted or after a sibling; walking (TVGN_*),
+  expanding (TVN_ITEMEXPANDINGW/EXPANDEDW, TVE_COLLAPSERESET), the caret
+  (TVN_SELCHANGINGW/CHANGEDW; its ancestors open), callback texts,
+  images and child counts (TVN_GETDISPINFOW), deletion (TVN_DELETEITEMW,
+  children first), sorting (by text or a callback), mouse and keys;
+  chevrons instead of plus boxes, no lines yet, no label editing.
 - **Image lists** (`user/comctl32/src/imagelist.rs`; `comctl32_test`):
   HIMAGELIST is 0x1000 + 16 * slot (256 lists); each image is its own
   pair of gdi32 bitmaps of the list's size, a 32-bit colour bitmap
