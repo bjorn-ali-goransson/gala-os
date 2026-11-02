@@ -21,11 +21,15 @@
 //! - Tree walkers (walker.rs): the raw, control and content views and
 //!   walkers with any condition.
 //!
+//! - CUIAutomation8: the same object with IUIAutomation2..6 (options kept,
+//!   events E_NOTIMPL); cache requests (cache.rs) keep what they are
+//!   told, and the BuildCache forms return elements whose Cached getters
+//!   read current values (nothing is cached). The not-supported value is
+//!   one static IUnknown, returned for properties an element lacks when
+//!   the client asks GetCurrentPropertyValueEx to ignore defaults.
+//!
 //! Not there yet (recorded in the ledger, E_NOTIMPL): providers inside
-//! programs (WM_GETOBJECT, IRawElementProviderSimple), events, cache
-//! requests (the BuildCache forms ignore the request and the Cached
-//! getters read current values), the IUIAutomation2+ interfaces
-//! (CUIAutomation8), other processes' windows.
+//! programs (WM_GETOBJECT, IRawElementProviderSimple), events.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -46,6 +50,7 @@ macro_rules! not_impl {
 }
 
 mod automation;
+mod cache;
 mod condition;
 mod element;
 mod pattern;
@@ -92,6 +97,12 @@ unsafe extern "system" {
     pub fn SafeArrayCreateVector(vt: u16, lower: i32, count: u32) -> *mut c_void;
     pub fn SafeArrayPutElement(sa: *mut c_void, index: *const i32, value: *const c_void)
     -> HResult;
+    pub fn SafeArrayGetDim(sa: *mut c_void) -> u32;
+    pub fn SafeArrayGetElemsize(sa: *mut c_void) -> u32;
+    pub fn SafeArrayGetLBound(sa: *mut c_void, dim: u32, out: *mut i32) -> HResult;
+    pub fn SafeArrayGetUBound(sa: *mut c_void, dim: u32, out: *mut i32) -> HResult;
+    pub fn SafeArrayAccessData(sa: *mut c_void, out: *mut *mut c_void) -> HResult;
+    pub fn SafeArrayUnaccessData(sa: *mut c_void) -> HResult;
 }
 
 #[link(name = "ole32", kind = "raw-dylib")]
@@ -165,6 +176,10 @@ const IID_ICLASSFACTORY: Guid = guid(1, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 /// CLSID_CUIAutomation {ff48dba4-60ef-4201-aa87-54103eef594e}.
 const CLSID_CUIAUTOMATION: Guid =
     guid(0xff48dba4, 0x60ef, 0x4201, [0xaa, 0x87, 0x54, 0x10, 0x3e, 0xef, 0x59, 0x4e]);
+/// CLSID_CUIAutomation8 {e22ad333-b25f-460c-83d0-0581107395c9}: the same
+/// object with IUIAutomation2..6 too (Windows 8 and later).
+const CLSID_CUIAUTOMATION8: Guid =
+    guid(0xe22ad333, 0xb25f, 0x460c, [0x83, 0xd0, 0x05, 0x81, 0x10, 0x73, 0x95, 0xc9]);
 
 /// Reports an unsupported case to the missing-features ledger.
 pub fn missing(function: &[u8], detail: u64) {
@@ -280,6 +295,7 @@ pub const VT_I4: u16 = 3;
 pub const VT_R8: u16 = 5;
 pub const VT_BSTR: u16 = 8;
 pub const VT_BOOL: u16 = 11;
+pub const VT_UNKNOWN: u16 = 13;
 pub const VT_ARRAY: u16 = 0x2000;
 
 /// VARIANT (24 bytes on x64): the type, three reserved words, the value.
@@ -393,7 +409,7 @@ extern "system" fn factory_release(_this: *mut c_void) -> u32 {
 }
 
 extern "system" fn factory_create(
-    _this: *mut c_void,
+    this: *mut Factory,
     outer: *mut c_void,
     iid: *const Guid,
     out: *mut *mut c_void,
@@ -405,7 +421,8 @@ extern "system" fn factory_create(
     if !outer.is_null() {
         return CLASS_E_NOAGGREGATION;
     }
-    automation::create(iid, out)
+    // SAFETY: one of our two class objects.
+    automation::create(unsafe { (*this).v8 }, iid, out)
 }
 
 extern "system" fn factory_lock(_this: *mut c_void, _lock: i32) -> HResult {
@@ -420,12 +437,17 @@ static FACTORY_VTABLE: VTable<5> = VTable([
     factory_lock as *const (),
 ]);
 
-/// The class object: only its vtable pointer, which callers read.
-#[allow(dead_code)]
-struct Factory(*const VTable<5>);
+/// A class object: its vtable pointer, which callers read, and which
+/// class it makes (CUIAutomation8 answers IUIAutomation2..6 too).
+#[repr(C)]
+struct Factory {
+    vtable: *const VTable<5>,
+    v8: bool,
+}
 // SAFETY: an immutable pointer to a static.
 unsafe impl Sync for Factory {}
-static FACTORY: Factory = Factory(&FACTORY_VTABLE);
+static FACTORY: Factory = Factory { vtable: &FACTORY_VTABLE, v8: false };
+static FACTORY8: Factory = Factory { vtable: &FACTORY_VTABLE, v8: true };
 
 /// DllGetClassObject: the class object of CUIAutomation.
 #[unsafe(no_mangle)]
@@ -438,11 +460,86 @@ pub extern "system" fn DllGetClassObject(
         return E_POINTER;
     }
     put(out, core::ptr::null_mut());
-    if iid_at(clsid) != CLSID_CUIAUTOMATION {
-        missing(b"UIAutomationCore.dll!DllGetClassObject(class)", u64::from(iid_at(clsid)[0]));
-        return CLASS_E_CLASSNOTAVAILABLE;
+    let factory = match iid_at(clsid) {
+        CLSID_CUIAUTOMATION => &FACTORY,
+        CLSID_CUIAUTOMATION8 => &FACTORY8,
+        other => {
+            missing(b"UIAutomationCore.dll!DllGetClassObject(class)", u64::from(other[0]));
+            return CLASS_E_CLASSNOTAVAILABLE;
+        }
+    };
+    factory_query(factory as *const Factory as *mut c_void, iid, out)
+}
+
+// ---- The reserved values ----
+
+/// The not-supported and mixed-attribute values (IUIAutomation's
+/// ReservedNotSupportedValue and ReservedMixedAttributeValue): one static
+/// IUnknown each, whose identity is what clients compare (FlaUI compares
+/// a property's value with the not-supported object). Their references
+/// are not counted.
+#[repr(C)]
+pub struct Reserved {
+    vtable: *const VTable<3>,
+}
+// SAFETY: an immutable pointer to a static.
+unsafe impl Sync for Reserved {}
+
+extern "system" fn reserved_query(
+    this: *mut Reserved,
+    iid: *const Guid,
+    out: *mut *mut c_void,
+) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
     }
-    factory_query(&FACTORY as *const Factory as *mut c_void, iid, out)
+    if iid_at(iid) == IID_IUNKNOWN {
+        put(out, this.cast());
+        S_OK
+    } else {
+        put(out, core::ptr::null_mut());
+        E_NOINTERFACE
+    }
+}
+
+extern "system" fn reserved_add_ref(_this: *mut Reserved) -> u32 {
+    2
+}
+
+extern "system" fn reserved_release(_this: *mut Reserved) -> u32 {
+    1
+}
+
+static RESERVED_VTABLE: VTable<3> = VTable([
+    reserved_query as *const (),
+    reserved_add_ref as *const (),
+    reserved_release as *const (),
+]);
+// Two statics: two addresses, so two identities.
+static NOT_SUPPORTED: Reserved = Reserved { vtable: &RESERVED_VTABLE };
+static MIXED_ATTRIBUTE: Reserved = Reserved { vtable: &RESERVED_VTABLE };
+
+/// The not-supported value's IUnknown.
+pub fn not_supported() -> *mut c_void {
+    &NOT_SUPPORTED as *const Reserved as *mut c_void
+}
+
+/// The mixed-attribute value's IUnknown.
+pub fn mixed_attribute() -> *mut c_void {
+    &MIXED_ATTRIBUTE as *const Reserved as *mut c_void
+}
+
+/// Whether `v` is the not-supported value (VT_UNKNOWN holding it).
+pub fn is_not_supported(v: &Variant) -> bool {
+    v.vt == VT_UNKNOWN && v.data[0] as usize == not_supported() as usize
+}
+
+impl Variant {
+    /// The not-supported value as a VARIANT (VT_UNKNOWN; its reference
+    /// needs no release).
+    pub fn not_supported() -> Variant {
+        Variant { vt: VT_UNKNOWN, reserved: [0; 3], data: [not_supported() as u64, 0] }
+    }
 }
 
 /// DllCanUnloadNow: S_FALSE (the DLL stays loaded).

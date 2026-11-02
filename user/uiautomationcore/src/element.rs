@@ -369,9 +369,15 @@ fn focusable(h: Hwnd) -> bool {
         || matches!(control_type(h), EDIT | COMBO_BOX | LIST | TREE)
 }
 
-/// A property's current value (VT_EMPTY for one not supported, recorded).
+/// A property's current value (VT_EMPTY for one not supported, recorded
+/// unless it is a known pattern's property the element lacks).
 pub fn property(h: Hwnd, id: i32) -> Variant {
-    match id {
+    lookup(h, id).unwrap_or(Variant::EMPTY)
+}
+
+/// A property's current value; None when the element does not support it.
+fn lookup(h: Hwnd, id: i32) -> Option<Variant> {
+    Some(match id {
         RUNTIME_ID => array(VT_I4, &[RUNTIME_ID_HWND, h as i32]),
         BOUNDING_RECTANGLE => {
             let r = window_rect(h);
@@ -410,14 +416,13 @@ pub fn property(h: Hwnd, id: i32) -> Variant {
         30027..=30044 => {
             Variant::boolean(pattern::supports(h, PATTERN_AVAILABLE[(id - 30027) as usize]))
         }
-        _ => match pattern::property(h, id) {
-            Some(v) => v,
-            None => {
+        _ => {
+            if !pattern::known_property(id) {
                 missing(b"UIAutomationCore.dll!GetCurrentPropertyValue(property)", id as u64);
-                Variant::EMPTY
             }
-        },
-    }
+            return pattern::property(h, id);
+        }
+    })
 }
 
 // ---- Finding ----
@@ -640,13 +645,28 @@ extern "system" fn get_property(this: *mut Element, id: i32, out: *mut Variant) 
     S_OK
 }
 
+/// GetCurrentPropertyValueEx: with `ignore_default`, a property the
+/// element does not support gives the not-supported value (FlaUI asks so
+/// and compares the result with ReservedNotSupportedValue).
 extern "system" fn get_property_ex(
     this: *mut Element,
     id: i32,
-    _ignore_default: i32,
+    ignore_default: i32,
     out: *mut Variant,
 ) -> HResult {
-    get_property(this, id, out)
+    if ignore_default == 0 {
+        return get_property(this, id, out);
+    }
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, Variant::EMPTY);
+    let h = this_hwnd(this);
+    if !alive(h) {
+        return UIA_E_ELEMENTNOTAVAILABLE;
+    }
+    put(out, lookup(h, id).unwrap_or_else(Variant::not_supported));
+    S_OK
 }
 
 extern "system" fn get_pattern_as(

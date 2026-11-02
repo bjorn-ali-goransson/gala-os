@@ -1,0 +1,155 @@
+// flaui_test: FlaUI (FlaUI.Core and FlaUI.UIA3 5.0.0, MIT) driving another
+// program's window through UI Automation, as a screen test would: it
+// starts flaui_target.exe (next to this assembly) with
+// Application.Launch, gets its main window with GetMainWindow, finds the
+// controls by AutomationId (also with a cache request: FindAllBuildCache
+// and the Cached property getters), invokes the button and waits for the
+// title it sets, types into the edit through the Value pattern and reads it back,
+// toggles the check box, and closes the program (WM_CLOSE).
+//
+// Expected output on Windows 11 24H2 (build 26100) with .NET 8 (FlaUI's
+// documented behaviour; UIA3 runs on CUIAutomation8, whose
+// IUIAutomation2 timeouts default to 20 s (transaction) and 2 s
+// (connection); UIA's Win32 proxies give a push button ControlType Button
+// with the control id as AutomationId and the text as Name, an edit the
+// Value pattern, an auto check box the Toggle pattern; the window's only
+// Button child is "Press", the caption buttons being the title bar's):
+//
+//   timeouts=20000/2000
+//   timeout=30000
+//   window=FlaUI Target
+//   pid=ok
+//   cached=1 Press 101
+//   button=Press Button
+//   title=FlaUI Pressed
+//   text=hello
+//   checked=False
+//   checked=True
+//   closed=True
+//   flaui_test: ok
+//
+// Built by build.sh (Mono's mcs against the .NET 8 runtime's assemblies
+// and FlaUI's; xtask fetches FlaUI). Each check that fails prints what it
+// saw and returns its number.
+using System;
+using System.IO;
+using FlaUI.Core;
+using FlaUI.Core.AutomationElements;
+using FlaUI.Core.Definitions;
+using FlaUI.Core.Tools;
+using FlaUI.UIA3;
+
+static class FlaUITest
+{
+    static int Fail(int n, string what)
+    {
+        Console.WriteLine("flaui_test: check " + n + " failed: " + what);
+        return n;
+    }
+
+    static int Main()
+    {
+        try
+        {
+            return Run();
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("flaui_test: exception: " + e);
+            return 99;
+        }
+    }
+
+    static int Run()
+    {
+        var target = Path.Combine(AppContext.BaseDirectory, "flaui_target.exe");
+        var app = Application.Launch(target);
+        try
+        {
+            using (var automation = new UIA3Automation())
+            {
+                // CUIAutomation8's IUIAutomation2 (FlaUI throws if it is missing).
+                Console.WriteLine("timeouts=" + automation.TransactionTimeout.TotalMilliseconds + "/" +
+                    automation.ConnectionTimeout.TotalMilliseconds);
+                automation.TransactionTimeout = TimeSpan.FromSeconds(30);
+                Console.WriteLine("timeout=" + automation.TransactionTimeout.TotalMilliseconds);
+                var window = app.GetMainWindow(automation, TimeSpan.FromSeconds(30));
+                if (window == null)
+                    return Fail(1, "no main window");
+                Console.WriteLine("window=" + window.Title);
+                if (window.Title != "FlaUI Target")
+                    return Fail(2, window.Title);
+                if (window.Properties.ProcessId.Value != app.ProcessId)
+                    return Fail(3, "process id " + window.Properties.ProcessId.Value);
+                Console.WriteLine("pid=ok");
+
+                // A cache request: the window's Button children with their
+                // Name and AutomationId cached.
+                var request = new CacheRequest();
+                request.TreeScope = TreeScope.Element;
+                request.AutomationElementMode = AutomationElementMode.Full;
+                request.Add(automation.PropertyLibrary.Element.Name);
+                request.Add(automation.PropertyLibrary.Element.AutomationId);
+                using (request.Activate())
+                {
+                    var buttons = window.FindAllChildren(cf => cf.ByControlType(ControlType.Button));
+                    Console.WriteLine("cached=" + buttons.Length + " " +
+                        (buttons.Length > 0 ? buttons[0].Name + " " + buttons[0].AutomationId : "-"));
+                    if (buttons.Length != 1 || buttons[0].Name != "Press" || buttons[0].AutomationId != "101")
+                        return Fail(13, "cached buttons");
+                }
+
+                // The button: found by AutomationId (the control id).
+                var element = window.FindFirstDescendant(cf => cf.ByAutomationId("101"));
+                if (element == null)
+                    return Fail(4, "no element 101");
+                var button = element.AsButton();
+                Console.WriteLine("button=" + button.Name + " " + button.ControlType);
+                if (button.Name != "Press" || button.ControlType != ControlType.Button)
+                    return Fail(5, "button");
+                button.Invoke();
+                var pressed = Retry.WhileFalse(() => window.Title == "FlaUI Pressed", TimeSpan.FromSeconds(10),
+                    TimeSpan.FromMilliseconds(50));
+                Console.WriteLine("title=" + window.Title);
+                if (!pressed.Result)
+                    return Fail(6, "title not set");
+
+                // The edit: the Value pattern.
+                var edit = window.FindFirstDescendant(cf => cf.ByAutomationId("102"));
+                if (edit == null)
+                    return Fail(7, "no element 102");
+                var textBox = edit.AsTextBox();
+                textBox.Text = "hello";
+                Console.WriteLine("text=" + textBox.Text);
+                if (textBox.Text != "hello")
+                    return Fail(8, "text");
+
+                // The check box: the Toggle pattern.
+                var box = window.FindFirstDescendant(cf => cf.ByAutomationId("103").And(cf.ByControlType(ControlType.CheckBox)));
+                if (box == null)
+                    return Fail(9, "no check box 103");
+                var checkBox = box.AsCheckBox();
+                Console.WriteLine("checked=" + checkBox.IsChecked);
+                if (checkBox.IsChecked != false)
+                    return Fail(10, "initially checked");
+                checkBox.Toggle();
+                var toggled = Retry.WhileFalse(() => checkBox.IsChecked == true, TimeSpan.FromSeconds(10),
+                    TimeSpan.FromMilliseconds(50));
+                Console.WriteLine("checked=" + checkBox.IsChecked);
+                if (!toggled.Result)
+                    return Fail(11, "not checked");
+            }
+            // Close: WM_CLOSE posted to the main window; the program ends.
+            var closed = app.Close();
+            Console.WriteLine("closed=" + closed);
+            if (!closed)
+                return Fail(12, "not closed");
+        }
+        finally
+        {
+            app.Dispose();
+        }
+        Console.WriteLine("flaui_test: ok");
+        return 0;
+    }
+}

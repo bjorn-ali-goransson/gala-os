@@ -40,6 +40,9 @@ $arguments = @{ "args_test" = 'alpha "beta gamma"'; "go_http" = 'self'; "nginx" 
 $results = @()
 foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     $name = [IO.Path]::GetFileNameWithoutExtension($exe.Name)
+    # Driven by flaui_test (a .NET program: docs/WORKFLOW.md, "FlaUI");
+    # alone it waits for its window to be closed.
+    if ($name -eq "flaui_target") { continue }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exe.FullName
     # import_test and loader_test load testdll*.dll from the executable's

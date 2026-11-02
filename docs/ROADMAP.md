@@ -1488,8 +1488,16 @@ other processes' windows) is done (2026-11-02, windows_across_test);
 step 2 (PostMessage to another process's window) and step 3
 (SendMessage to another process's window, WM_GETTEXT/WM_SETTEXT
 marshaled) and step 4 (UI Automation drives another process's button,
-edit and check box: uia_test) too; next: step 5, FlaUI (IUIAutomation2+
-/ CUIAutomation8, cache requests), then a FlaUI test driving FileZilla.
+edit and check box: uia_test) too; step 5 (2026-11-02, flaui_test):
+FlaUI 5.0.0 (FlaUI.UIA3, PREBUILT from nuget.org) on gala's .NET 8
+drives another program through gala's UIAutomationCore.dll
+(CUIAutomation8 with IUIAutomation2..6, the reserved not-supported
+value, array conditions, cache requests): Application.Launch,
+GetMainWindow, FindFirstDescendant by AutomationId, Invoke, the Value
+pattern, Toggle, a cache request, Application.Close. Next: a FlaUI test
+driving FileZilla (list view items, menus: Selection/ExpandCollapse,
+title bars, WM_GETOBJECT providers), then screen tests rewritten on
+FlaUI.
 
 Drivers: gala writes its own, against published standards (virtio,
 then AHCI/NVMe, xHCI, e1000), not hardware-specific ones. Reusing
