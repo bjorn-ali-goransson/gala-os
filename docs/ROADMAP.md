@@ -1465,8 +1465,9 @@ registry, global HWNDs, FindWindow/EnumWindows/GetWindowText... on
 other processes' windows) is done (2026-11-02, windows_across_test);
 step 2 (PostMessage to another process's window) and step 3
 (SendMessage to another process's window, WM_GETTEXT/WM_SETTEXT
-marshaled) too; next: UI Automation over other processes' windows
-(step 4).
+marshaled) and step 4 (UI Automation drives another process's button,
+edit and check box: uia_test) too; next: step 5, FlaUI (IUIAutomation2+
+/ CUIAutomation8, cache requests), then a FlaUI test driving FileZilla.
 
 Drivers: gala writes its own, against published standards (virtio,
 then AHCI/NVMe, xHCI, e1000), not hardware-specific ones. Reusing

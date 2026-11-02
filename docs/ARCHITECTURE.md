@@ -2802,9 +2802,10 @@ client side over Win32 windows (`uia_test`, a mingw C program).
   as Windows reports them (GetClassName: "Button", "Edit", "Static",
   "ComboBox").
 
-Limits and TODO: everything runs in the client's process, so only that
-process's own windows are seen (user32's window table is per process),
-and on the client's thread (user32 has no cross-thread SendMessage);
+Limits and TODO: other processes' windows are seen through the kernel's
+window registry and driven with posted and sent messages (see "Plan:
+windows across processes"); messages sent to another thread of the
+client's own process are still direct calls;
 providers inside programs (WM_GETOBJECT answered with
 IRawElementProviderSimple via UiaReturnRawElementProvider, which wx and
 Qt implement for their widgets) are not consulted; no events
@@ -2918,7 +2919,13 @@ steps, each test first:
    kernel, as Windows marshals messages below WM_USER; others go as
    numbers. This also gives user32 cross-thread SendMessage within a
    process (today it calls the procedure on the caller's thread).
-4. **UI Automation over other processes' windows**: the element tree
+4. **Done (2026-11-02, uia_test's second process).** UIAutomationCore
+   reads names and values with WM_GETTEXT(LENGTH) (as Windows' Win32
+   proxies do; across processes it is marshaled), and user32's
+   GetAncestor and GetWindow's sibling walk answer for other processes'
+   windows from the registry, so the element tree, properties and the
+   Invoke/Value/Toggle patterns work on another program's windows. The
+   plan was: **UI Automation over other processes' windows**: the element tree
    from the registry (the root's children are every visible top-level
    window), properties from it, patterns through posted/sent messages.
    uia_test grows a second process.

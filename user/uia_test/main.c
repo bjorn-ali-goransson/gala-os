@@ -3,6 +3,11 @@
  * first step towards screen tests that find and drive controls by
  * AutomationId, Name and ControlType on Windows and gala alike.
  *
+ * - Another process (the program again, "child"): its window is found
+ *   from the root by Name ("UIA Child"), its ProcessId is the child's,
+ *   its button found by AutomationId and invoked (the child's window
+ *   gets BN_CLICKED and retitles itself "pressed"), its edit's Value set
+ *   and read back, its check box toggled.
  * - CoCreateInstance(CLSID_CUIAutomation, IID_IUIAutomation) in an STA.
  * - ElementFromHandle(top-level window): Name is the title, ControlType
  *   Window (it has a caption), ClassName the window class,
@@ -123,7 +128,145 @@ static int class_is(IUIAutomationElement *e, const wchar_t *s) {
     return same;
 }
 
-int main(void) {
+/* The second process: a window "UIA Child" with a button (101,
+ * "Press": clicking it sets the title to "pressed"), an edit (102) and a
+ * check box (103), until the parent sets "UiaChildDone". */
+static LRESULT CALLBACK child_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_COMMAND && LOWORD(wparam) == 101 && HIWORD(wparam) == BN_CLICKED) {
+        SetWindowTextW(hwnd, L"pressed");
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static int child(void) {
+    HANDLE ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, L"UiaChildReady");
+    HANDLE done = OpenEventW(SYNCHRONIZE, FALSE, L"UiaChildDone");
+    if (!ready || !done)
+        return 2;
+    WNDCLASSW wc = {0};
+    wc.lpfnWndProc = child_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"UiaChildWindow";
+    if (!RegisterClassW(&wc))
+        return 3;
+    HWND top = CreateWindowExW(0, L"UiaChildWindow", L"UIA Child", WS_OVERLAPPED | WS_CAPTION | WS_VISIBLE, 200,
+                               150, 300, 200, NULL, NULL, wc.hInstance, NULL);
+    CreateWindowExW(0, L"BUTTON", L"Press", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 10, 80, 24, top,
+                    (HMENU)101, wc.hInstance, NULL);
+    CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_LEFT, 10, 40, 150, 22, top,
+                    (HMENU)102, wc.hInstance, NULL);
+    CreateWindowExW(0, L"BUTTON", L"Remote option", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 10, 70, 150, 20,
+                    top, (HMENU)103, wc.hInstance, NULL);
+    SetEvent(ready);
+    for (;;) {
+        DWORD r = MsgWaitForMultipleObjects(1, &done, FALSE, 30000, QS_ALLINPUT);
+        if (r == WAIT_OBJECT_0 || r == WAIT_TIMEOUT)
+            break;
+        MSG m;
+        while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+    }
+    DestroyWindow(top);
+    return 0;
+}
+
+/* Waits (up to 10 s) for element `e`'s Name to become `want`. */
+static int name_becomes(IUIAutomationElement *e, const wchar_t *want) {
+    for (int i = 0; i < 1000; i++) {
+        if (name_is(e, want))
+            return 1;
+        Sleep(10);
+    }
+    return 0;
+}
+
+/* UI Automation over another process's windows: found from the root by
+ * Name, its controls by AutomationId, driven by Invoke, Value and Toggle. */
+static void other_process(IUIAutomation *uia, IUIAutomationElement *root) {
+    HANDLE ready = CreateEventW(NULL, TRUE, FALSE, L"UiaChildReady");
+    HANDLE done = CreateEventW(NULL, TRUE, FALSE, L"UiaChildDone");
+    CHECK(ready && done);
+    WCHAR self[MAX_PATH], cmd[MAX_PATH + 16];
+    CHECK(GetModuleFileNameW(NULL, self, MAX_PATH) > 0);
+    swprintf(cmd, MAX_PATH + 16, L"\"%ls\" child", self);
+    STARTUPINFOW si = {sizeof si};
+    PROCESS_INFORMATION pi;
+    CHECK(CreateProcessW(self, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi));
+    HANDLE wait[2] = {ready, pi.hProcess};
+    CHECK(WaitForMultipleObjects(2, wait, FALSE, 20000) == WAIT_OBJECT_0);
+
+    IUIAutomationCondition *named = prop_str(uia, UIA_NamePropertyId, L"UIA Child");
+    IUIAutomationElement *win = NULL;
+    CHECK(IUIAutomationElement_FindFirst(root, TreeScope_Children, named, &win) == S_OK && win != NULL);
+    CHECK(control_type(win) == UIA_WindowControlTypeId);
+    CHECK(class_is(win, L"UiaChildWindow"));
+    int pid = 0;
+    CHECK(IUIAutomationElement_get_CurrentProcessId(win, &pid) == S_OK && pid == (int)pi.dwProcessId);
+
+    // Invoke the button: the child's window gets BN_CLICKED.
+    IUIAutomationCondition *id101 = prop_str(uia, UIA_AutomationIdPropertyId, L"101");
+    IUIAutomationElement *press = NULL;
+    CHECK(IUIAutomationElement_FindFirst(win, TreeScope_Descendants, id101, &press) == S_OK && press);
+    CHECK(control_type(press) == UIA_ButtonControlTypeId && name_is(press, L"Press"));
+    IUnknown *unk = NULL;
+    CHECK(IUIAutomationElement_GetCurrentPattern(press, UIA_InvokePatternId, &unk) == S_OK && unk);
+    IUIAutomationInvokePattern *invoke = NULL;
+    CHECK(IUnknown_QueryInterface(unk, &IID_IUIAutomationInvokePattern, (void **)&invoke) == S_OK && invoke);
+    IUnknown_Release(unk);
+    CHECK(IUIAutomationInvokePattern_Invoke(invoke) == S_OK);
+    CHECK(name_becomes(win, L"pressed"));
+    IUIAutomationInvokePattern_Release(invoke);
+
+    // Value: set and read the child's edit.
+    IUIAutomationCondition *id102 = prop_str(uia, UIA_AutomationIdPropertyId, L"102");
+    IUIAutomationElement *field = NULL;
+    CHECK(IUIAutomationElement_FindFirst(win, TreeScope_Children, id102, &field) == S_OK && field);
+    CHECK(control_type(field) == UIA_EditControlTypeId);
+    CHECK(IUIAutomationElement_GetCurrentPattern(field, UIA_ValuePatternId, &unk) == S_OK && unk);
+    IUIAutomationValuePattern *value = NULL;
+    CHECK(IUnknown_QueryInterface(unk, &IID_IUIAutomationValuePattern, (void **)&value) == S_OK && value);
+    IUnknown_Release(unk);
+    BSTR remote = SysAllocString(L"remote");
+    CHECK(IUIAutomationValuePattern_SetValue(value, remote) == S_OK);
+    SysFreeString(remote);
+    BSTR current = NULL;
+    CHECK(IUIAutomationValuePattern_get_CurrentValue(value, &current) == S_OK && bstr_is(current, L"remote"));
+    SysFreeString(current);
+    IUIAutomationValuePattern_Release(value);
+
+    // Toggle the child's check box.
+    IUIAutomationCondition *id103 = prop_str(uia, UIA_AutomationIdPropertyId, L"103");
+    IUIAutomationElement *box = NULL;
+    CHECK(IUIAutomationElement_FindFirst(win, TreeScope_Children, id103, &box) == S_OK && box);
+    CHECK(control_type(box) == UIA_CheckBoxControlTypeId);
+    CHECK(IUIAutomationElement_GetCurrentPattern(box, UIA_TogglePatternId, &unk) == S_OK && unk);
+    IUIAutomationTogglePattern *toggle = NULL;
+    CHECK(IUnknown_QueryInterface(unk, &IID_IUIAutomationTogglePattern, (void **)&toggle) == S_OK && toggle);
+    IUnknown_Release(unk);
+    enum ToggleState state = ToggleState_Indeterminate;
+    CHECK(IUIAutomationTogglePattern_get_CurrentToggleState(toggle, &state) == S_OK && state == ToggleState_Off);
+    CHECK(IUIAutomationTogglePattern_Toggle(toggle) == S_OK);
+    CHECK(IUIAutomationTogglePattern_get_CurrentToggleState(toggle, &state) == S_OK && state == ToggleState_On);
+    IUIAutomationTogglePattern_Release(toggle);
+
+    IUIAutomationElement_Release(box);
+    IUIAutomationCondition_Release(id103);
+    IUIAutomationElement_Release(field);
+    IUIAutomationCondition_Release(id102);
+    IUIAutomationElement_Release(press);
+    IUIAutomationCondition_Release(id101);
+    IUIAutomationElement_Release(win);
+    IUIAutomationCondition_Release(named);
+    CHECK(SetEvent(done));
+    CHECK(WaitForSingleObject(pi.hProcess, 20000) == WAIT_OBJECT_0);
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "child") == 0)
+        return child();
     CHECK(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED) == S_OK);
 
     WNDCLASSW wc = {0};
@@ -345,6 +488,7 @@ int main(void) {
     IUIAutomationCondition_Release(is_edit);
     IUIAutomationElement_Release(press);
     IUIAutomationCondition_Release(id101);
+    other_process(uia, root);
     IUIAutomationElement_Release(root);
     IUIAutomationElement_Release(win);
     IUIAutomation_Release(uia);

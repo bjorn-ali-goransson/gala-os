@@ -11,11 +11,10 @@ use crate::condition::{self, Condition};
 use crate::{
     E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, EnumWindows, GetAncestor, GetClassNameW,
     GetDesktopWindow, GetDlgCtrlID, GetFocus, GetWindow, GetWindowLongW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, Guid, HResult, Hwnd,
-    IID_IUNKNOWN, IsWindow, IsWindowEnabled, IsWindowVisible, List, S_OK, SafeArrayCreateVector,
-    SafeArrayPutElement, SetFocus, SetForegroundWindow, UIA_E_ELEMENTNOTAVAILABLE, VT_BOOL,
-    VT_BSTR, VT_I4, VT_R8, VTable, Variant, alloc, boxed, bstr, bstr_str, free, guid, iid_at,
-    missing, pattern, put,
+    GetWindowThreadProcessId, Guid, HResult, Hwnd, IID_IUNKNOWN, IsWindow, IsWindowEnabled,
+    IsWindowVisible, List, S_OK, SafeArrayCreateVector, SafeArrayPutElement, SendMessageW,
+    SetFocus, SetForegroundWindow, UIA_E_ELEMENTNOTAVAILABLE, VT_BOOL, VT_BSTR, VT_I4, VT_R8,
+    VTable, Variant, alloc, boxed, bstr, bstr_str, free, guid, iid_at, missing, pattern, put,
 };
 
 pub const IID_IUIAUTOMATIONELEMENT: Guid =
@@ -249,15 +248,21 @@ fn localized_control_type(t: i32) -> &'static str {
 
 /// The window's text as a BSTR; with `strip`, '&' mnemonic markers are
 /// removed ("&&" is a literal '&').
+const WM_GETTEXT: u32 = 0x000d;
+const WM_GETTEXTLENGTH: u32 = 0x000e;
+
 pub fn window_text(h: Hwnd, strip: bool) -> *mut u16 {
     // SAFETY: plain calls; the buffer holds `n + 1` characters.
     unsafe {
-        let n = GetWindowTextLengthW(h).max(0) as usize;
+        // WM_GETTEXT(LENGTH), as Windows' Win32 proxies read a control:
+        // the control's current text, also in another process (where
+        // GetWindowText gives only the window's own text).
+        let n = SendMessageW(h, WM_GETTEXTLENGTH, 0, 0).max(0) as usize;
         let buf = alloc((n + 1) * 2).cast::<u16>();
         if buf.is_null() {
             return core::ptr::null_mut();
         }
-        let got = (GetWindowTextW(h, buf, n as i32 + 1).max(0) as usize).min(n);
+        let got = (SendMessageW(h, WM_GETTEXT, n + 1, buf as isize).max(0) as usize).min(n);
         let s = core::slice::from_raw_parts_mut(buf, got);
         let mut len = got;
         if strip {

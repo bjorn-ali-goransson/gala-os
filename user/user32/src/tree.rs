@@ -527,7 +527,24 @@ pub extern "system" fn IsChild(parent: Hwnd, hwnd: Hwnd) -> i32 {
 /// GetAncestor(hwnd, GA_PARENT 1 / GA_ROOT 2 / GA_ROOTOWNER 3).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetAncestor(hwnd: Hwnd, flags: u32) -> Hwnd {
-    let Some(i) = index_of(hwnd) else { return 0 };
+    let Some(i) = index_of(hwnd) else {
+        // Another process's window: up its parents in the registry.
+        let Some(info) = crate::foreign::remote(hwnd) else { return 0 };
+        return match flags {
+            1 => info.parent,
+            2 | 3 => {
+                let mut cur = info;
+                for _ in 0..64 {
+                    match crate::foreign::query(cur.parent) {
+                        Some(p) if cur.parent != 0 => cur = p,
+                        _ => break,
+                    }
+                }
+                cur.hwnd
+            }
+            _ => 0,
+        };
+    };
     with(|s| {
         if !s.windows[i].used {
             return 0;
@@ -542,7 +559,16 @@ pub extern "system" fn GetAncestor(hwnd: Hwnd, flags: u32) -> Hwnd {
 
 /// The siblings of `hwnd` (with it) in z order, and its position.
 fn siblings(hwnd: Hwnd) -> Option<([Hwnd; 64], usize, usize)> {
-    let w = window(hwnd)?;
+    let Some(w) = window(hwnd) else {
+        // Another process's window: its siblings from the registry.
+        let info = crate::foreign::remote(hwnd)?;
+        let mut all = [0; 256];
+        let n = crate::foreign::children(info.parent, &mut all).min(64);
+        let mut out = [0; 64];
+        out[..n].copy_from_slice(&all[..n]);
+        let at = out[..n].iter().position(|&h| h == hwnd)?;
+        return Some((out, n, at));
+    };
     let mut out = [0; 64];
     let n = with(|s| {
         let mut idx = [0usize; 64];
