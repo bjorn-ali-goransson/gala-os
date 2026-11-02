@@ -230,6 +230,9 @@ pub struct Window {
     /// It fills the work area (square corners, no shadow; the maximize
     /// button shows "restore").
     maximized: bool,
+    /// It fills the work area's height against its left or right edge
+    /// (docked, as Snap puts it): square corners and no shadow too.
+    docked: bool,
     /// The caption bar's pixels (w x CAPTION) and the state they show.
     caption: Option<Canvas>,
     caption_state: Option<(bool, Option<CaptionButton>, bool)>,
@@ -325,8 +328,16 @@ impl Window {
     }
 
     /// With its shadow.
+    /// Square corners and no shadow: maximized or docked.
+    fn square(&self) -> bool {
+        self.maximized || self.docked
+    }
+
     fn bounds(&self) -> Rect {
         let r = self.rect();
+        if self.square() || self.popup {
+            return r;
+        }
         Rect {
             x: r.x - SHADOW_REACH,
             y: r.y - SHADOW_REACH,
@@ -351,7 +362,7 @@ impl Window {
 
     /// How much of window point (lx, ly) its rounded shape covers.
     fn coverage(&self, lx: i64, ly: i64) -> u8 {
-        let square = self.maximized || self.popup;
+        let square = self.square() || self.popup;
         let (top, bottom) = if square { (0, 0) } else { (RADIUS, RADIUS_BOTTOM) };
         round_coverage2(lx, ly, self.w.into(), self.h.into(), top, bottom)
     }
@@ -367,7 +378,7 @@ impl Window {
         }
         let (w, h) = (i64::from(self.w), i64::from(self.h));
         let b = i64::from(BORDER);
-        let (rt, rb) = if self.maximized { (0, 0) } else { (RADIUS - 1, RADIUS_BOTTOM - 1) };
+        let (rt, rb) = if self.square() { (0, 0) } else { (RADIUS - 1, RADIUS_BOTTOM - 1) };
         let inner = round_coverage2(lx - b, ly - b, w - 2 * b, h - 2 * b, rt, rb);
         let outline = if active { OUTLINE_ACTIVE } else { OUTLINE_INACTIVE };
         if inner == 0 {
@@ -658,6 +669,7 @@ impl Desktop {
             visible: false,
             minimized: false,
             maximized: false,
+            docked: false,
             caption: None,
             caption_state: None,
             client,
@@ -783,6 +795,11 @@ impl Desktop {
         let work = (self.screen.0, self.screen.1 - i64::from(TASKBAR));
         let win = self.find(id, owner)?;
         win.maximized = (x, y) == (0, 0) && (i64::from(w), i64::from(h)) == work && work.0 > 0;
+        win.docked = !win.maximized
+            && work.0 > 0
+            && y == 0
+            && i64::from(h) == work.1
+            && (x == 0 || i64::from(x) + i64::from(w) == work.0);
         win.caption_state = None;
         let new = win.bounds();
         self.add_damage(old);
@@ -1863,7 +1880,7 @@ impl Desktop {
             let (lx, ly) = (x - i64::from(w.x), y - i64::from(w.y));
             let cov = w.coverage(lx, ly);
             let active = self.active == Some(w.id);
-            if cov < 255 && !w.maximized {
+            if cov < 255 && !w.square() {
                 let r = w.rect();
                 let rect = (r.x + 3, r.y + SHADOW_DROP, r.x + r.w - 3, r.y + r.h + SHADOW_DROP - 2);
                 let strength = if active { SHADOW_ACTIVE } else { SHADOW_INACTIVE };

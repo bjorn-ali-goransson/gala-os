@@ -359,3 +359,27 @@ fn the_wheel_goes_to_the_window_under_the_pointer() {
     assert_eq!(e.lparam & 0xffff, (500 - ox) as u64);
     assert_eq!((e.lparam >> 16) & 0xffff, (300 - oy) as u64);
 }
+
+#[test]
+fn a_docked_window_has_square_corners_and_no_shadow() {
+    let (mut d, a) = desktop_with_window();
+    let work_h = 768 - TASKBAR;
+    // The desktop alone at the points looked at.
+    d.place(a, 7, 700, 450, 300, 200).unwrap();
+    let (corner, beside, near) = (d.pixel(0, 0), d.pixel(515, 200), d.pixel(503, 200));
+    // Floating: the shadow darkens the desktop just right of it.
+    d.place(a, 7, 100, 0, 400, work_h).unwrap();
+    assert_ne!(d.pixel(503, 200), near);
+    // Docked left: the top-left corner is the window's outline, not the
+    // desktop showing through a rounding, and no shadow beside it.
+    d.place(a, 7, 0, 0, 512, work_h).unwrap();
+    assert!(d.window(a).unwrap().docked);
+    assert_ne!(d.pixel(0, 0), corner);
+    assert_eq!(d.pixel(0, 0), d.pixel(0, 1));
+    assert_eq!(d.pixel(515, 200), beside);
+    // Docked right too; floating again rounds it.
+    d.place(a, 7, 512, 0, 512, work_h).unwrap();
+    assert!(d.window(a).unwrap().docked);
+    d.place(a, 7, 100, 100, 400, 300).unwrap();
+    assert!(!d.window(a).unwrap().docked);
+}

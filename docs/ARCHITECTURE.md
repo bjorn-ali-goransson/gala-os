@@ -2219,7 +2219,9 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   (0x10001, above any Windows message number; wParam left | top << 32,
   lParam width | height << 32), user32's input pump posts it to the
   window's thread and DispatchMessage calls SetWindowPos (no longer
-  maximized), so the program sees WM_SIZE.
+  maximized), so the program sees WM_SIZE. A window that fills the work area's height
+  against its left or right edge is docked: like a maximized one it has
+  square corners and no shadow (`Window::square`).
 - **Wheel** (`desktop::wheel`): the input thread turns on an
   IntelliMouse-compatible wheel (the sample-rate knock 200, 100, 80, then
   device id 3: 4-byte packets, the fourth byte's low nibble the signed
