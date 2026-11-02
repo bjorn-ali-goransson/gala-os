@@ -2359,7 +2359,15 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   top-level window's buffer at their offset, hard-clipped to their
   visible rectangle (gdi32's GalaCreateChildDC: a hidden device offset
   and bounds, so the program's own viewport origin and clip stay its
-  own), and presenting shows that part. Invalidating a window
+  own), and presenting shows that part. Presenting (EndPaint, ReleaseDC)
+  is deferred: the area joins the top-level window's `dirty` rectangle,
+  which goes to the desktop (GalaWindowPresent) when a thread goes idle
+  (no message to retrieve, or MsgWaitForMultipleObjects about to wait)
+  or once drawing has gone on for 50 ms without a break. One change (a
+  resize repaints every child; wx calls GetDC/ReleaseDC to measure text)
+  is one copy, not hundreds (FileZilla's snap took seconds to show).
+  TODO: a thread that draws and then blocks outside user32 shows its
+  last 50 ms only when it next draws or pumps. Invalidating a window
   invalidates its descendants (they paint over its area, as without
   WS_CLIPCHILDREN); WM_PAINT picks windows whose ancestors are valid, so
   parents paint first. Mouse input from the desktop goes to the deepest
@@ -2370,8 +2378,11 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   at the bottom, so GW_CHILD/GW_HWNDNEXT walk them in creation order (the
   dialog tab order). DestroyWindow sends WM_DESTROY to the window, then
   destroys its children. SetWindowPos/MoveWindow send
-  WM_WINDOWPOSCHANGING/CHANGED, and DefWindowProc turns the latter into
-  WM_MOVE and WM_SIZE; a top-level window's resize reallocates its buffer
+  WM_WINDOWPOSCHANGING (not with SWP_NOSENDCHANGING; the window gets the
+  WINDOWPOS as the procedure leaves it) and WM_WINDOWPOSCHANGED, which
+  DefWindowProc turns into WM_MOVE and WM_SIZE (wParam SIZE_MAXIMIZED
+  for a maximized window, else SIZE_RESTORED; an unchanged size or
+  position sends none); a top-level window's resize reallocates its buffer
   and goes to the desktop (GalaWindowPlace, 0x7f37); its title change
   too (WM_SETTEXT, GalaWindowSetTitle, 0x7f38). The desktop reports a
   caption drag's end with WM_MOVE, which updates user32's idea of the

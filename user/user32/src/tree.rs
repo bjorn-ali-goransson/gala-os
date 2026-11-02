@@ -205,6 +205,12 @@ fn place(s: &State, i: usize) -> (usize, (i32, i32), [i32; 4]) {
     (root, origin, visible)
 }
 
+/// `place` for code that holds the state: the top-level window's index,
+/// `i`'s client origin in its client area and the part it shows in.
+pub fn place_in(s: &State, i: usize) -> (usize, (i32, i32), [i32; 4]) {
+    place(s, i)
+}
+
 /// For drawing: the top-level window, the offset and the visible part.
 pub fn placement(hwnd: Hwnd) -> Option<(Window, (i32, i32), [i32; 4])> {
     let i = index_of(hwnd)?;
@@ -1012,6 +1018,7 @@ const SWP_NOMOVE: u32 = 0x2;
 const SWP_NOZORDER: u32 = 0x4;
 const SWP_SHOWWINDOW: u32 = 0x40;
 const SWP_HIDEWINDOW: u32 = 0x80;
+const SWP_NOSENDCHANGING: u32 = 0x400;
 
 /// A top-level window's new client size (and menu bar height): a buffer
 /// of that size with what fits of the old client pixels (white
@@ -1113,7 +1120,25 @@ pub extern "system" fn SetWindowPos(
         flags |= SWP_NOMOVE;
     }
     let mut pos = WindowPos { hwnd, after, x: nx, y: ny, cx: nw, cy: nh, flags };
-    SendMessageW(hwnd, WM_WINDOWPOSCHANGING, 0, &mut pos as *mut WindowPos as isize);
+    // The window procedure may change the WINDOWPOS: the window gets what
+    // it says then (a size it does not allow, say). Not asked with
+    // SWP_NOSENDCHANGING (wx's status bar moves itself so: it answers
+    // WM_WINDOWPOSCHANGING with the rectangle it had).
+    if flags & SWP_NOSENDCHANGING == 0 {
+        SendMessageW(hwnd, WM_WINDOWPOSCHANGING, 0, &mut pos as *mut WindowPos as isize);
+    }
+    let (nx, ny) = if pos.flags & SWP_NOMOVE != 0 { (w.x, w.y) } else { (pos.x, pos.y) };
+    let (nw, nh) =
+        if pos.flags & SWP_NOSIZE != 0 { (w.w, w.h) } else { (pos.cx.max(0), pos.cy.max(0)) };
+    let mut flags = pos.flags;
+    if (nw, nh) == (w.w, w.h) {
+        flags |= SWP_NOSIZE;
+    }
+    if (nx, ny) == (w.x, w.y) {
+        flags |= SWP_NOMOVE;
+    }
+    let mut pos = WindowPos { hwnd, after: pos.after, x: nx, y: ny, cx: nw, cy: nh, flags };
+    let after = pos.after;
     let top_level = w.parent == 0;
     if top_level {
         let (b, top) = crate::window::frame(&w);
@@ -1390,7 +1415,10 @@ pub fn def_window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Op
             }
             if flags & SWP_NOSIZE == 0 {
                 let lp = ((size.1 as u16 as isize) << 16) | (size.0 as u16 as isize);
-                SendMessageW(hwnd, WM_SIZE, 0, lp);
+                // SIZE_MAXIMIZED (2) for a maximized window, else
+                // SIZE_RESTORED.
+                let kind = if window(hwnd).is_some_and(|w| w.zoomed) { 2 } else { 0 };
+                SendMessageW(hwnd, WM_SIZE, kind, lp);
             }
             Some(0)
         }

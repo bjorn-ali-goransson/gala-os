@@ -4929,11 +4929,18 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     // screen (its Quickconnect button there); at the left
                     // the server's console window (conhost, at (60, 60))
                     // shows with its log: light grey on Campbell black.
+                    // FileZilla lays itself out again: its local and remote
+                    // panes split the half (sash gravity 0.5), so the remote
+                    // list's "Filename" header and "hello.txt" are in the
+                    // right quarter (with the old layout, or a repaint not
+                    // yet shown, nothing dark is there).
                     input: &["sendkey meta_l-right"],
                     pixels: &[
                         PixelCheck::AnyIn(640, 60, 640, 120, 0x005fb8),
                         PixelCheck::At(500, 400, 0x0c0c0c),
                         PixelCheck::AnyIn(66, 98, 400, 400, 0xcccccc),
+                        PixelCheck::AnyIn(966, 356, 44, 14, 0x1b1b1b),
+                        PixelCheck::AnyIn(970, 405, 40, 15, 0x1b1b1b),
                     ],
                 },
                 ScreenStep {

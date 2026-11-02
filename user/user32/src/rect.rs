@@ -10,6 +10,17 @@ fn empty(r: &Rect) -> bool {
     r[2] <= r[0] || r[3] <= r[1]
 }
 
+/// The smallest rectangle around both (an empty one adds nothing; zeroed
+/// when both are empty).
+pub(crate) fn union(a: Rect, b: Rect) -> Rect {
+    match (empty(&a), empty(&b)) {
+        (true, true) => [0; 4],
+        (true, false) => b,
+        (false, true) => a,
+        (false, false) => [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])],
+    }
+}
+
 /// Runs `f` on the caller's RECT if it is not NULL.
 fn rect<R>(p: *mut Rect, f: impl FnOnce(&mut Rect) -> R) -> Option<R> {
     // SAFETY: the caller's RECT.
@@ -79,12 +90,7 @@ pub extern "system" fn IntersectRect(dst: *mut Rect, a: *const Rect, b: *const R
 #[unsafe(no_mangle)]
 pub extern "system" fn UnionRect(dst: *mut Rect, a: *const Rect, b: *const Rect) -> i32 {
     let (Some(a), Some(b)) = (read(a), read(b)) else { return 0 };
-    let r = match (empty(&a), empty(&b)) {
-        (true, true) => [0; 4],
-        (true, false) => b,
-        (false, true) => a,
-        (false, false) => [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])],
-    };
+    let r = union(a, b);
     rect(dst, |d| *d = r);
     i32::from(!empty(&r))
 }

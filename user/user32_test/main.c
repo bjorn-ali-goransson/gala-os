@@ -13,6 +13,12 @@
  * - RegisterClipboardFormatW: 0xC000..0xFFFF, one per name, case-
  *   insensitive; GetClipboardFormatNameW (truncated to the buffer; none
  *   for predefined formats).
+ * - SetWindowPos's messages: WM_WINDOWPOSCHANGING, WM_WINDOWPOSCHANGED,
+ *   WM_SIZE in that order; a WINDOWPOS changed in WM_WINDOWPOSCHANGING is
+ *   what the window gets (not asked with SWP_NOSENDCHANGING);
+ *   GetWindowRect/GetClientRect are the new ones
+ *   in WM_WINDOWPOSCHANGED and WM_SIZE; WM_SIZE's wParam is
+ *   SIZE_MAXIMIZED after SC_MAXIMIZE and SIZE_RESTORED otherwise.
  * - BeginDeferWindowPos/DeferWindowPos/EndDeferWindowPos: nothing moves
  *   until EndDeferWindowPos, which applies every position and size;
  *   SetWindowPos to the same size sends no WM_SIZE; WindowFromPoint finds
@@ -776,6 +782,72 @@ static void clipboard_formats(void) {
     CHECK(GetClipboardFormatNameW(CF_TEXT, name, 64) == 0);
 }
 
+// SetWindowPos's messages (what wx's layout relies on when a window is
+// resized, e.g. snapped): WM_WINDOWPOSCHANGING may change the WINDOWPOS
+// and the window gets what it says; WM_WINDOWPOSCHANGED and then WM_SIZE
+// (DefWindowProc) see the new rectangle; WM_SIZE's wParam is
+// SIZE_MAXIMIZED after SC_MAXIMIZE, else SIZE_RESTORED.
+static int pos_force_cx, pos_seq[8], pos_n, pos_changed_w, pos_size_client_w;
+static WPARAM pos_size_wparam;
+static LRESULT CALLBACK pos_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    RECT r;
+    if (msg == WM_WINDOWPOSCHANGING) {
+        WINDOWPOS *p = (WINDOWPOS *)lparam;
+        if (pos_n < 8)
+            pos_seq[pos_n++] = 1;
+        if (pos_force_cx && !(p->flags & SWP_NOSIZE))
+            p->cx = pos_force_cx;
+    } else if (msg == WM_WINDOWPOSCHANGED) {
+        if (pos_n < 8)
+            pos_seq[pos_n++] = 2;
+        GetWindowRect(hwnd, &r);
+        pos_changed_w = r.right - r.left;
+    } else if (msg == WM_SIZE) {
+        if (pos_n < 8)
+            pos_seq[pos_n++] = 3;
+        pos_size_wparam = wparam;
+        GetClientRect(hwnd, &r);
+        pos_size_client_w = r.right;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static void positions(void) {
+    WNDCLASSW wc = {0};
+    wc.lpfnWndProc = pos_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"User32TestPos";
+    CHECK(RegisterClassW(&wc));
+    HWND w = CreateWindowExW(0, L"User32TestPos", L"pos", WS_OVERLAPPEDWINDOW, 30, 40, 300, 200, NULL, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    CHECK(w != NULL);
+    RECT r, c;
+    pos_n = 0;
+    pos_size_wparam = 99;
+    CHECK(SetWindowPos(w, NULL, 0, 0, 320, 220, SWP_NOMOVE | SWP_NOZORDER));
+    CHECK(pos_n == 3 && pos_seq[0] == 1 && pos_seq[1] == 2 && pos_seq[2] == 3);
+    CHECK(pos_changed_w == 320 && pos_size_wparam == SIZE_RESTORED);
+    CHECK(GetClientRect(w, &c) && pos_size_client_w == c.right);
+    /* The window procedure narrows it in WM_WINDOWPOSCHANGING. */
+    pos_force_cx = 260;
+    CHECK(SetWindowPos(w, NULL, 0, 0, 400, 220, SWP_NOMOVE | SWP_NOZORDER));
+    CHECK(GetWindowRect(w, &r) && r.right - r.left == 260 && r.left == 30 && pos_changed_w == 260);
+    CHECK(GetClientRect(w, &c) && pos_size_client_w == c.right && c.right < 260);
+    /* SWP_NOSENDCHANGING: no WM_WINDOWPOSCHANGING, so no say in it. */
+    pos_n = 0;
+    CHECK(SetWindowPos(w, NULL, 0, 0, 280, 220, SWP_NOMOVE | SWP_NOZORDER | SWP_NOSENDCHANGING));
+    CHECK(pos_n == 2 && pos_seq[0] == 2 && pos_seq[1] == 3);
+    CHECK(GetWindowRect(w, &r) && r.right - r.left == 280 && pos_changed_w == 280);
+    pos_force_cx = 0;
+    CHECK(SetWindowPos(w, NULL, 0, 0, 260, 220, SWP_NOMOVE | SWP_NOZORDER));
+    SendMessageW(w, WM_SYSCOMMAND, SC_MAXIMIZE, 0);
+    CHECK(IsZoomed(w) && pos_size_wparam == SIZE_MAXIMIZED);
+    SendMessageW(w, WM_SYSCOMMAND, SC_RESTORE, 0);
+    CHECK(!IsZoomed(w) && pos_size_wparam == SIZE_RESTORED);
+    CHECK(GetWindowRect(w, &r) && r.right - r.left == 260);
+    DestroyWindow(w);
+}
+
 // Deferred positioning: DeferWindowPos records, EndDeferWindowPos moves
 // every window at once.
 static void deferred(void) {
@@ -887,6 +959,7 @@ int main(void) {
     unknown_class();
     dialog_units();
     deferred();
+    positions();
     timers();
     menu_bar();
     monitors();

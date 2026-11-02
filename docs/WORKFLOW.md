@@ -140,6 +140,20 @@ shows it.
   detail (args[3]); remove them before committing. After the first
   minute the kernel prints what the ledger newly recorded every 30
   seconds, so gaps a screen check's input reaches late still show.
+  When `events=syscall` slows a screen scenario too much (FileZilla's
+  steps then time out), write the probe's sequence number and detail
+  into its name instead (a stack buffer, e.g. `0012 PROBE_SWP <hex>`):
+  each call is then its own ledger line, in order once sorted, without
+  the event stream. Put `GetTickCount` differences in the detail to see
+  how long things take.
+- **A screendump shows a stale or half-drawn window** although the
+  step's checks passed: a step's dump is taken as soon as its pixels
+  match, which may be while the program is still repainting (FileZilla
+  after a snap). Check the final state with pixels that only it has
+  (text in the new place), and to tell a wrong layout from a late
+  repaint, probe SetWindowPos (the sizes the program set) and present a
+  window's whole buffer again a few seconds later: if the dump is right
+  then, the layout was.
 - **A program hangs without a ledger** (it never exits, so the ledger is
   not printed): add `events=syscall,thread` to its scenario's command
   line and read `target/debug/test-<name>.events.jsonl` while QEMU still
