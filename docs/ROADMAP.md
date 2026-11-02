@@ -1304,7 +1304,13 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       user32's FlashWindow(Ex) and scroll bars as data (Set/GetScrollInfo,
       Set/GetScrollPos, Set/GetScrollRange, ShowScrollBar, EnableScrollBar;
       user32_test), and the menu bar ignores input while its window is
-      disabled. Next: the server's console in a window.
+      disabled. **Console windows** (2026-11-02): gala's own conhost.exe
+      draws a console session (`console=<program>`): the server's log
+      shows next to FileZilla (the scenario minimizes FileZilla, checks
+      the console and restores FileZilla from the taskbar); the
+      console_window scenario covers text, VT colours and UTF-8. Next:
+      console input (programs reading the keys the window queues), then
+      the combo boxes' drop-down lists and tooltips on popups.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

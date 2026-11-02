@@ -99,6 +99,7 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `run=<file>[,<file>...]` | run those boot modules as user processes, one after another (each between `run: begin` and `run: end` log lines) |
 | `args=<percent-encoded>[,...]` | their command-line arguments, in the same order (`%2C` for a comma) |
 | `start=<file>[,<file>...]`, `start_args=...` | start those programs first without waiting for them (a server for the `run=` programs); they end with the boot |
+| `console=<program>` | that `start=`/`run=` program gets a console window (a console session hosted by gala's conhost.exe) |
 | `cwd=C:/dir` | their current directory (default `C:\gala\`; Elasticsearch expects its home) |
 | `trace` | log every system call (arguments, status) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
@@ -1201,7 +1202,8 @@ Windows, never shadows the system's DLLs.)
   because programs' output changes with it: Caddy logs differently to a
   console, and kernel32_sys_test and winsock_test, which expect
   redirected handles, failed.)
-- **Console windows** (design, 2026-11-02; not built yet). Windows draws
+- **Console windows** (2026-11-02: output built; keyboard input queued
+  by the host but not yet read by programs). Windows draws
   a console program's console in conhost.exe; gala does the same with its
   own `user/conhost` (a gala program, not Microsoft's), so the kernel keeps
   no drawing code for it:
@@ -1210,35 +1212,40 @@ Windows, never shadows the system's DLLs.)
     queue of key records (KEY_EVENT_RECORD: down, repeat, virtual key and
     scan code, character, control keys), the host's event and its size
     (columns, rows). A process belongs to at most one session
-    (`Process::console`), inherited by the processes it creates;
-    `start=`/`run=` programs get one when the command line says
-    `console=window` (and the start menu's console programs will).
+    (`Process::console`), inherited by the processes it creates
+    (NtCreateUserProcess); a `start=`/`run=` program gets one when the
+    command line names it in `console=<program>` (its module or file
+    name; the start menu's console programs will too).
   - Output: NtWriteFile on a ConsoleOutput object (the standard handles
     and CONOUT$) still goes to the serial line, and also into the
     writer's session ring, signalling the host's event.
-  - Input: ReadFile/ReadConsole(Input) on ConsoleInput (stdin, CONIN$)
-    take from the session's queue (waiting when it is empty; line input
-    with echo in kernel32 per ENABLE_LINE_INPUT/ENABLE_ECHO_INPUT), and
-    GetNumberOfConsoleInputEvents/PeekConsoleInput look at it; without a
-    session reads still return nothing (as today).
-  - The host: the kernel starts `C:\Windows\System32\conhost.exe` with
-    the session's id before the session's first program. Its system
+  - Input (TODO): ReadFile/ReadConsole(Input) on ConsoleInput (stdin,
+    CONIN$) will take from the session's queue (waiting when it is empty;
+    line input with echo in kernel32 per ENABLE_LINE_INPUT/
+    ENABLE_ECHO_INPUT), and GetNumberOfConsoleInputEvents/
+    PeekConsoleInput look at it; until then reads return nothing (as
+    without a session).
+  - The host: the kernel starts `conhost.exe` (user/conhost, a boot
+    module) with the session's id and the program's file name before the
+    program. Its system
     calls: GalaConsoleHost(id, event) (become the host; the event is set
     when output arrives or the session ends), GalaConsoleRead(id, buffer,
     length, *count) (take output, without waiting), GalaConsoleInput(id,
     records, count) (queue keys). It draws a window titled with the
-    program's path: a 120 x 30 grid of cells (Cascadia Mono/Consolas,
-    which gdi32 maps to its fixed-pitch Noto), light text on Windows
-    Terminal's dark background, a 1000-line scrollback, a blinking
+    program's file name at (60, 60): a 100 x 28 grid of cells
+    (Consolas, which gdi32 maps to its fixed-pitch Noto, now with Latin-1
+    Supplement), Windows Terminal's "Campbell" colours, an underline
     cursor; it interprets UTF-8 and the VT sequences programs use (CR,
-    LF, BS, TAB, CSI m colours, CSI K, CSI J, CSI H, cursor moves). Typed
-    keys become key records (WM_KEYDOWN/WM_CHAR). It ends when the
-    session's last process has ended and the window is closed (or at
-    once with no window).
-  - Tests: kernel host tests for the ring and queue; a console_window
-    screen scenario (a test program prints lines, colours, reads a
-    typed line and echoes it; pixel checks on the grid); then the
-    FileZilla Server console next to FileZilla.
+    LF as a new line as the console's default mode does, BS, TAB, CSI m
+    colours incl. bold as bright, CSI K, CSI J, CSI H/f, CSI A-D and G),
+    scrolling at the bottom. Typed keys become key records (WM_CHAR, and
+    WM_KEYDOWN/UP for keys without a character). It ends when its window
+    is closed. TODO: scrollback, resizing, closing with the session.
+  - Tests: kernel host tests for the ring and queue; the console_window
+    screen scenario (console_window_test prints text, VT colours and
+    UTF-8; pixel checks on the grid; reading a typed line is next); the
+    filezilla scenario shows FileZilla Server's console (minimizing
+    FileZilla, then restoring it from the taskbar).
 - **FormatMessage** (kernel32 messages.rs): system messages from a table
   of the documented US English texts, or the caller's string; inserts
   (%1..%99 with printf-style formats, %n %r %t %b %0 %%), IGNORE_INSERTS,
@@ -2210,7 +2217,9 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   (event) 0x7f34, GalaWindowInput(records, max, *count) 0x7f35,
   GalaScreenInfo(*rects) 0x7f36, GalaWindowPlace(id, x, y, w, h) 0x7f37
   (a new client buffer keeping what fits), GalaWindowSetTitle(id, *text,
-  length) 0x7f38, GalaWindowCapture(id) 0x7f39. Only the
+  length) 0x7f38, GalaWindowCapture(id) 0x7f39; console hosts:
+  GalaConsoleHost(id, event) 0x7f3a, GalaConsoleRead(id, buf, len,
+  *count) 0x7f3b, GalaConsoleInput(id, records, count) 0x7f3c. Only the
   owner process may change a window.
 - **user32** (`user/user32/src/window.rs`): classes, windows
   (HWND = 0x10000 + 16 * slot), one message queue per process (256

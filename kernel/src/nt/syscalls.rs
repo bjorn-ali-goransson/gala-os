@@ -107,6 +107,9 @@ pub const GALA_SCREEN_INFO: u32 = 0x7f36;
 pub const GALA_WINDOW_PLACE: u32 = 0x7f37;
 pub const GALA_WINDOW_SET_TITLE: u32 = 0x7f38;
 pub const GALA_WINDOW_CAPTURE: u32 = 0x7f39;
+pub const GALA_CONSOLE_HOST: u32 = 0x7f3a;
+pub const GALA_CONSOLE_READ: u32 = 0x7f3b;
+pub const GALA_CONSOLE_INPUT: u32 = 0x7f3c;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -278,6 +281,9 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_PLACE, "GalaWindowPlace", 5, gala_window_place),
     (GALA_WINDOW_SET_TITLE, "GalaWindowSetTitle", 3, gala_window_set_title),
     (GALA_WINDOW_CAPTURE, "GalaWindowCapture", 1, gala_window_capture),
+    (GALA_CONSOLE_HOST, "GalaConsoleHost", 2, gala_console_host),
+    (GALA_CONSOLE_READ, "GalaConsoleRead", 4, gala_console_read),
+    (GALA_CONSOLE_INPUT, "GalaConsoleInput", 3, gala_console_input),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -699,6 +705,12 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
             return NtStatus::ACCESS_VIOLATION;
         }
         console::write_bytes(&chunk[..n]);
+        // A console window's session sees it too.
+        if let Some(session) = &call.process.console
+            && let Some(event) = session.write(&chunk[..n])
+        {
+            wait::set_signal(&event, 1);
+        }
         done += n as u64;
     }
     // IO_STATUS_BLOCK { union { NTSTATUS Status; PVOID Pointer; }; ULONG_PTR Information; }
@@ -1330,6 +1342,68 @@ fn gala_window_place(call: &mut Call<'_>) -> NtStatus {
     let (w, h) = (arg!(call, 3) as u32, arg!(call, 4) as u32);
     let owner = call.process.id;
     tri!(super::desktop::with(|d| Ok(((), Some(d.place(id, owner, x, y, w, h)?)))));
+    NtStatus::SUCCESS
+}
+
+/// GalaConsoleHost(id, EventHandle): the caller hosts console session
+/// `id` (draws it: gala's conhost.exe); the event is set when output
+/// arrives. Another process than the first host is refused.
+fn gala_console_host(call: &mut Call<'_>) -> NtStatus {
+    let id = arg!(call, 0) as u32;
+    let event = tri!(event_object(call, Handle(arg!(call, 1)), EVENT_MODIFY_STATE));
+    let Some(session) = super::conhost::find(id) else { return NtStatus::INVALID_PARAMETER };
+    if let Some(e) = tri!(session.set_host(call.process.id, event)) {
+        wait::set_signal(&e, 1);
+    }
+    NtStatus::SUCCESS
+}
+
+/// The session `id` if the caller hosts it.
+fn hosted_session(call: &Call<'_>, id: u32) -> Result<KArc<super::conhost::Session>, NtStatus> {
+    let session = super::conhost::find(id).ok_or(NtStatus::INVALID_PARAMETER)?;
+    if session.host() != call.process.id {
+        return Err(NtStatus::ACCESS_DENIED);
+    }
+    Ok(session)
+}
+
+/// GalaConsoleRead(id, *Buffer, Length, *Count): takes the session's
+/// output (UTF-8 as its programs wrote it, oldest first) without waiting.
+fn gala_console_read(call: &mut Call<'_>) -> NtStatus {
+    let session = tri!(hosted_session(call, arg!(call, 0) as u32));
+    let (buf, length, count) = (arg!(call, 1), (arg!(call, 2) as usize).min(4096), arg!(call, 3));
+    let mut bytes = [0u8; 4096];
+    let n = session.read(&mut bytes[..length]);
+    if n > 0 && call.process.write(buf, &bytes[..n]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    tri!(call.write_u32(count, n as u32));
+    NtStatus::SUCCESS
+}
+
+/// GalaConsoleInput(id, *Records, Count): queues key records
+/// (KEY_EVENT_RECORD, 16 bytes each) typed in the host's window.
+fn gala_console_input(call: &mut Call<'_>) -> NtStatus {
+    use super::conhost::Key;
+    let session = tri!(hosted_session(call, arg!(call, 0) as u32));
+    let (ptr, count) = (arg!(call, 1), (arg!(call, 2) as usize).min(64));
+    let mut raw = [0u8; 16 * 64];
+    if call.process.read(ptr, &mut raw[..16 * count]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let mut keys = [Key::default(); 64];
+    for (k, r) in keys.iter_mut().zip(raw.chunks_exact(16)).take(count) {
+        let w = |at: usize| u16::from_le_bytes([r[at], r[at + 1]]);
+        *k = Key {
+            down: u32::from_le_bytes([r[0], r[1], r[2], r[3]]) != 0,
+            repeat: w(4),
+            vk: w(6),
+            scan: w(8),
+            ch: w(10),
+            control: u32::from_le_bytes([r[12], r[13], r[14], r[15]]),
+        };
+    }
+    session.push_input(&keys[..count]);
     NtStatus::SUCCESS
 }
 
@@ -3687,6 +3761,7 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         runtime_data: &runtime_data,
         parent_id: call.process.id,
         token: Some(token),
+        console: call.process.console.clone(),
     });
     let (child, thread_object) = match spawned {
         Ok(p) => p,

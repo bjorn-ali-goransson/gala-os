@@ -397,6 +397,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gui_test", "kernel32.dll", "Windows/System32"),
     ("gui_test", "user32.dll", "Windows/System32"),
     ("gui_test", "gdi32.dll", "Windows/System32"),
+    ("console_window", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("console_window", "ntdll.dll", "Windows/System32"),
+    ("console_window", "kernel32.dll", "Windows/System32"),
+    ("console_window", "user32.dll", "Windows/System32"),
+    ("console_window", "gdi32.dll", "Windows/System32"),
     ("rtl_test", "ntdll.dll", "Windows/System32"),
     ("rtl_test", "kernel32.dll", "Windows/System32"),
     ("rtl_test", "kernelbase.dll", "Windows/System32"),
@@ -1455,6 +1460,8 @@ const USER_PROGRAMS: &[&str] = &[
     "disk_test",
     "rtl_test",
     "gui_test",
+    "conhost",
+    "console_window_test",
     "persist_test",
     "kernel32_system_test",
     "kernel32_clr_test",
@@ -2103,7 +2110,8 @@ const PENDING: &[&str] = &[
 ];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
-const UEFI_SCENARIOS: &[&str] = &["hello", "selftest", "fault-pagefault", "gui_test", "filezilla"];
+const UEFI_SCENARIOS: &[&str] =
+    &["hello", "selftest", "fault-pagefault", "gui_test", "filezilla", "console_window"];
 
 /// What xtask's host-side client does in a net scenario.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2595,6 +2603,18 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["kernel32_system_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // A console program in a console window (gala's conhost.exe draws
+        // its session): plain text, VT colours and UTF-8.
+        name: "console_window",
+        cmdline: "qemu_exit wallpaper=night run=console_window_test.exe console=console_window_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "console_window_test: printed",
+            "xtask: screen ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // The window manager's first milestone: a Win32 window painted on
         // the desktop (UEFI: a framebuffer); SCREEN_SCENARIOS checks the
         // screen.
@@ -2941,7 +2961,7 @@ const SCENARIOS: &[Scenario] = &[
         name: "filezilla",
         cmdline: "qemu_exit wallpaper=dunes \
                   start=filezilla-server/filezilla-server.exe start_args=--config-dir%20C:/fzs \
-                  run=filezilla/filezilla.exe",
+                  console=filezilla-server.exe run=filezilla/filezilla.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["xtask: screen ok", "exited with status 0x00000000"],
     },
@@ -3796,6 +3816,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("busybox", "child processes (pipelines are child processes)"),
     ("cmd_test", "child processes (one NT process per Linux process)"),
     ("gui_test", "needs a screen (the desktop draws on the framebuffer)"),
+    ("console_window", "needs a screen (the console window is on the desktop)"),
 ];
 
 /// Whether gala-um runs scenario `s`: a program's own scenario (its
@@ -4320,6 +4341,22 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
         },
     ),
     (
+        // The console window: conhost's grid at (60, 60) with the
+        // program's lines: light grey text, Campbell green and bright red.
+        "console_window",
+        ScreenCheck {
+            marker: "console_window_test: printed",
+            steps: &[ScreenStep {
+                input: &[],
+                pixels: &[
+                    PixelCheck::AnyIn(66, 98, 300, 14, 0xcccccc), // "Hello from ..."
+                    PixelCheck::AnyIn(66, 112, 300, 22, 0x13a10e), // green
+                    PixelCheck::AnyIn(66, 112, 400, 22, 0xe74856), // bright red
+                ],
+            }],
+        },
+    ),
+    (
         // FileZilla's main window with its Welcome dialog (wx's modal loop:
         // MsgWaitForMultipleObjects): the accent Quickconnect and OK
         // buttons; then OK closes the dialog, File on the menu bar opens
@@ -4415,13 +4452,40 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     pixels: &[PixelCheck::AnyIn(650, 405, 150, 40, 0x1b1b1b)],
                 },
                 ScreenStep {
+                    // FileZilla's minimize button (1124, 41): under it, the
+                    // server's console window (conhost, at (60, 60)) with
+                    // its log: light grey text on Campbell black.
+                    input: &[
+                        "mouse_move 146 -205",
+                        "mouse_move 145 -205",
+                        "mouse_move 0 -204",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[
+                        PixelCheck::At(500, 400, 0x0c0c0c),
+                        PixelCheck::AnyIn(66, 98, 400, 400, 0xcccccc),
+                    ],
+                },
+                ScreenStep {
+                    // FileZilla's taskbar button (688, 776; after the start
+                    // button and the console's): it comes back.
+                    input: &[
+                        "mouse_move -218 245",
+                        "mouse_move -218 245",
+                        "mouse_move 0 245",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[PixelCheck::AnyIn(660, 118, 80, 16, 0x005fb8)],
+                },
+                ScreenStep {
                     // To "File" on the menu bar (61, 69) and a click: its
                     // menu opens.
                     input: &[
-                        "mouse_move -193 -147",
-                        "mouse_move -193 -147",
-                        "mouse_move -193 -147",
-                        "mouse_move -193 -145",
+                        "mouse_move -209 -236",
+                        "mouse_move -209 -236",
+                        "mouse_move -209 -235",
                         "mouse_button 1",
                         "mouse_button 0",
                     ],

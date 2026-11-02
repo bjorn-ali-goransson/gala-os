@@ -66,6 +66,9 @@ pub struct Process {
     pub priority_class: core::sync::atomic::AtomicU8,
     /// The primary token (nt::token).
     pub token: IrqMutex<ObjectRef>,
+    /// The console session its console output also goes to (a console
+    /// window's), inherited by the processes it creates.
+    pub console: Option<KArc<super::conhost::Session>>,
 }
 
 impl fmt::Debug for Process {
@@ -391,6 +394,7 @@ pub fn spawn_from_pe(
     data: &[u8],
     args: &str,
     cwd: Option<&str>,
+    console: Option<KArc<super::conhost::Session>>,
 ) -> Result<(KArc<Process>, ObjectRef), LoadError> {
     // The current directory with backslashes and a trailing one, as the
     // process parameters keep it.
@@ -453,6 +457,7 @@ pub fn spawn_from_pe(
         runtime_data: &[],
         parent_id: 0,
         token: None,
+        console,
     })
 }
 
@@ -480,6 +485,8 @@ pub struct Spawn<'a> {
     pub parent_id: u64,
     /// The primary token; None: the boot user's (nt::token).
     pub token: Option<ObjectRef>,
+    /// The console session (nt::conhost), if any.
+    pub console: Option<KArc<super::conhost::Session>>,
 }
 
 /// Creates a process from a PE executable and starts (or prepares) its
@@ -504,6 +511,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         runtime_data,
         parent_id,
         token,
+        console,
     } = spec;
     let info = image.info;
     if info.is_dll {
@@ -656,6 +664,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         oom_logged: core::sync::atomic::AtomicBool::new(false),
         priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),
         token: IrqMutex::new(token),
+        console,
     })?;
     prune();
     PROCESSES.lock().try_push(process.clone())?;
@@ -1004,6 +1013,7 @@ pub fn launch(path: &'static str) -> Result<u64, NtStatus> {
         runtime_data: &[],
         parent_id: 0,
         token: None,
+        console: None,
     })
     .map_err(|e| match e {
         LoadError::Pe(_) => NtStatus::INVALID_IMAGE_FORMAT,

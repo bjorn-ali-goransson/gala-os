@@ -181,7 +181,8 @@ pub fn kernel_main() -> ! {
             if cmdline::percent_decode(args.next().unwrap_or(""), &mut decoded).is_err() {
                 panic!("start: out of memory for the arguments");
             }
-            start_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""));
+            let console = console_window(&info, name, cmdline.value("console"));
+            start_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""), console);
         }
     }
     if let Some(names) = cmdline.value("run") {
@@ -200,7 +201,15 @@ pub fn kernel_main() -> ! {
                 }
                 other => other,
             };
-            run_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""), cwd, wait_all);
+            let console = console_window(&info, name, cmdline.value("console"));
+            run_program(
+                &info,
+                name,
+                core::str::from_utf8(&decoded).unwrap_or(""),
+                cwd,
+                wait_all,
+                console,
+            );
             // What the program's end changed (delete-on-close at exit).
             nt::persist::sync();
             nt::ledger::dump();
@@ -495,27 +504,84 @@ fn wait_for_the_rest() {
     }
 }
 
+/// `console=<program>`: that program (a `start=` or `run=` module name)
+/// gets a console window: a console session, hosted by gala's conhost.exe
+/// (started here with the session's id and the program's name).
+fn console_window(
+    info: &BootInfo,
+    name: &str,
+    wanted: Option<&str>,
+) -> Option<mm::heap::KArc<nt::conhost::Session>> {
+    // The module's name or its file name (`dir/x.exe` or `x.exe`).
+    let file = name.rsplit('/').next().unwrap_or(name);
+    if !wanted.is_some_and(|w| w.eq_ignore_ascii_case(name) || w.eq_ignore_ascii_case(file)) {
+        return None;
+    }
+    let session = match nt::conhost::create() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("console: no session: {e:?}");
+            return None;
+        }
+    };
+    let mut args = [0u8; 160];
+    let mut w = Cursor { buf: &mut args, at: 0 };
+    let _ = core::fmt::write(&mut w, format_args!("{} {}", session.id, file));
+    let at = w.at;
+    let text = core::str::from_utf8(&args[..at]).unwrap_or("");
+    start_program(info, "conhost.exe", text, None);
+    Some(session)
+}
+
+/// A fixed buffer to format into.
+struct Cursor<'a> {
+    buf: &'a mut [u8],
+    at: usize,
+}
+
+impl core::fmt::Write for Cursor<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let end = self.at + s.len();
+        let dst = self.buf.get_mut(self.at..end).ok_or(core::fmt::Error)?;
+        dst.copy_from_slice(s.as_bytes());
+        self.at = end;
+        Ok(())
+    }
+}
+
 /// Starts the boot module `name` as a user process (C:\gala as its
 /// current directory) without waiting for it.
-fn start_program(info: &BootInfo, name: &str, args: &str) {
+fn start_program(
+    info: &BootInfo,
+    name: &str,
+    args: &str,
+    console: Option<mm::heap::KArc<nt::conhost::Session>>,
+) {
     let mut buf = [0u8; 512];
     let Some((file_name, data, directory)) = find_program(info, name, &mut buf) else {
         panic!("start: no boot module named {name:?}");
     };
-    match nt::process::spawn_from_pe(file_name, directory, data, args, None) {
+    match nt::process::spawn_from_pe(file_name, directory, data, args, None, console) {
         Ok((process, _thread)) => info!("start: {} (pid {})", process.name, process.id),
         Err(e) => error!("start: cannot start {name}: {e:?}"),
     }
 }
 
-fn run_program(info: &BootInfo, name: &str, args: &str, cwd: Option<&str>, wait_all: bool) {
+fn run_program(
+    info: &BootInfo,
+    name: &str,
+    args: &str,
+    cwd: Option<&str>,
+    wait_all: bool,
+    console: Option<mm::heap::KArc<nt::conhost::Session>>,
+) {
     let mut buf = [0u8; 512];
     let Some((file_name, data, directory)) = find_program(info, name, &mut buf) else {
         panic!("run: no boot module named {name:?}");
     };
     info!("run: {directory}/{file_name} ({} bytes)", data.len());
     let (free_before, _) = mm::frame_stats();
-    let space = match nt::process::spawn_from_pe(file_name, directory, data, args, cwd) {
+    let space = match nt::process::spawn_from_pe(file_name, directory, data, args, cwd, console) {
         Ok((process, main_thread)) => {
             drop(main_thread);
             // Wait for the whole process (all threads) to end.

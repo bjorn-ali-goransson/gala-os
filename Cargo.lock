@@ -227,7 +227,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "conhost"
+version = "0.1.0"
+
+[[package]]
 name = "console_test"
+version = "0.1.0"
+
+[[package]]
+name = "console_window_test"
 version = "0.1.0"
 
 [[package]]

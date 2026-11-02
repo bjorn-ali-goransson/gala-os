@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod afd;
+pub mod conhost;
 pub mod context;
 pub mod desktop;
 pub mod disk;
