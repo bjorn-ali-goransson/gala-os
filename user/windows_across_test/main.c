@@ -28,6 +28,12 @@
  * gives it ours, WM_GETTEXTLENGTH counts it, and WM_APP + 2's result is
  * what the child's procedure returned (wParam * lParam).
  *
+ * The child's memory (what UI Automation's list proxies use to read
+ * list-view items across processes): VirtualAllocEx in it,
+ * WriteProcessMemory and ReadProcessMemory with the bytes copied; a
+ * handle without PROCESS_VM_READ is refused (ERROR_ACCESS_DENIED); an
+ * unmapped address fails.
+ *
  * Prints "windows_across_test: ok" and exits 0, or the failing check's
  * number and line.
  */
@@ -223,6 +229,31 @@ int main(int argc, char **argv) {
     CHECK(SendMessageW(edit, WM_GETTEXT, 64, (LPARAM)got) == 7);
     CHECK(wcscmp(got, L"changed") == 0);
     CHECK(SendMessageW(top, WM_APP + 2, 6, 7) == 42);
+
+    /* The child's memory. */
+    HANDLE proc = OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE, FALSE,
+                              pi.dwProcessId);
+    CHECK(proc != NULL);
+    char *remote = VirtualAllocEx(proc, NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    CHECK(remote != NULL);
+    SIZE_T copied = 0;
+    CHECK(WriteProcessMemory(proc, remote + 100, "across", 7, &copied));
+    CHECK(copied == 7);
+    char back[16] = {0};
+    copied = 0;
+    CHECK(ReadProcessMemory(proc, remote + 100, back, 7, &copied));
+    CHECK(copied == 7 && strcmp(back, "across") == 0);
+    CHECK(ReadProcessMemory(proc, remote, back, 4, NULL));
+    CHECK(back[0] == 0 && back[3] == 0); /* fresh pages are zero */
+    CHECK(!ReadProcessMemory(proc, (void *)0x1000, back, 4, NULL));
+    CHECK(VirtualFreeEx(proc, remote, 0, MEM_RELEASE));
+    CloseHandle(proc);
+    HANDLE weak = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pi.dwProcessId);
+    CHECK(weak != NULL);
+    SetLastError(0);
+    CHECK(!ReadProcessMemory(weak, remote, back, 4, NULL));
+    CHECK(GetLastError() == ERROR_ACCESS_DENIED);
+    CloseHandle(weak);
 
     /* The child ends: its windows go. */
     CHECK(SetEvent(done));

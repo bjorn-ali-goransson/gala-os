@@ -856,7 +856,14 @@ private pages relocated a page at a time (never a whole-image copy).
 **Cross-process memory**: NtAllocate/Free/ProtectVirtualMemory take a
 process handle with PROCESS_VM_OPERATION, NtQueryVirtualMemory one with
 PROCESS_QUERY_LIMITED_INFORMATION (VirtualAllocEx etc.; PostgreSQL
-reserves its shared memory in a suspended child).
+reserves its shared memory in a suspended child). NtReadVirtualMemory
+(0x3f) and NtWriteVirtualMemory (0x3a) copy between the caller's memory
+and another process's (PROCESS_VM_READ / PROCESS_VM_WRITE), 4 KiB at a
+time through the target's page tables (faults resolved as for its own
+accesses); stopping part of the way is STATUS_PARTIAL_COPY, copying
+nothing STATUS_ACCESS_VIOLATION; kernel32's ReadProcessMemory/
+WriteProcessMemory report the bytes copied either way
+(windows_across_test).
 **Handle lists** (H2): CreateProcessW with EXTENDED_STARTUPINFO_PRESENT
 reads the STARTUPINFOEXW attribute list; PROC_THREAD_ATTRIBUTE_HANDLE_LIST
 is passed to GalaCreateProcess (flag 4, list at 120, count at 128), and

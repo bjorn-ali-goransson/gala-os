@@ -931,17 +931,65 @@ pub extern "system" fn OpenProcess(access: u32, inherit: Bool, id: u32) -> Handl
     h as Handle
 }
 
-/// Other processes' memory and threads: not yet; recorded.
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtReadVirtualMemory(
+        p: Handle,
+        base: usize,
+        buf: *mut u8,
+        size: usize,
+        done: *mut usize,
+    ) -> u32;
+    fn NtWriteVirtualMemory(
+        p: Handle,
+        base: usize,
+        buf: *const u8,
+        size: usize,
+        done: *mut usize,
+    ) -> u32;
+}
+
+/// ReadProcessMemory: copies from another process's memory (the handle
+/// needs PROCESS_VM_READ); *read (optional) gets the bytes copied, also
+/// when it fails part of the way (ERROR_PARTIAL_COPY).
 #[unsafe(no_mangle)]
 pub extern "system" fn ReadProcessMemory(
-    _process: Handle,
-    _address: *const c_void,
-    _buffer: *mut c_void,
-    _size: usize,
-    _read: *mut usize,
+    process: Handle,
+    address: *const c_void,
+    buffer: *mut c_void,
+    size: usize,
+    read: *mut usize,
 ) -> Bool {
-    unsupported(b"kernel32.dll!ReadProcessMemory", 0);
-    fail_with(ERROR_NOT_SUPPORTED, FALSE)
+    let mut done = 0usize;
+    // SAFETY: the caller's buffer of `size` bytes; the kernel checks both.
+    let status =
+        unsafe { NtReadVirtualMemory(process, address as usize, buffer.cast(), size, &mut done) };
+    if !read.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *read = done };
+    }
+    if status != 0 { fail(status, FALSE) } else { TRUE }
+}
+
+/// WriteProcessMemory: copies into another process's memory (the handle
+/// needs PROCESS_VM_WRITE).
+#[unsafe(no_mangle)]
+pub extern "system" fn WriteProcessMemory(
+    process: Handle,
+    address: *mut c_void,
+    buffer: *const c_void,
+    size: usize,
+    written: *mut usize,
+) -> Bool {
+    let mut done = 0usize;
+    // SAFETY: the caller's buffer of `size` bytes; the kernel checks both.
+    let status =
+        unsafe { NtWriteVirtualMemory(process, address as usize, buffer.cast(), size, &mut done) };
+    if !written.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *written = done };
+    }
+    if status != 0 { fail(status, FALSE) } else { TRUE }
 }
 
 #[unsafe(no_mangle)]

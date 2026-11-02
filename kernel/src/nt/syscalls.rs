@@ -192,6 +192,8 @@ pub const NT_RESUME_THREAD: u32 = 0x0052;
 pub const NT_TERMINATE_THREAD: u32 = 0x0053;
 pub const NT_QUERY_OBJECT: u32 = 0x0010;
 pub const NT_OPEN_EVENT: u32 = 0x0040;
+pub const NT_WRITE_VIRTUAL_MEMORY: u32 = 0x003a;
+pub const NT_READ_VIRTUAL_MEMORY: u32 = 0x003f;
 pub const NT_OPEN_DIRECTORY_OBJECT: u32 = 0x0058;
 pub const NT_SET_EVENT: u32 = 0x000e;
 pub const NT_QUERY_PERFORMANCE_COUNTER: u32 = 0x0031;
@@ -284,6 +286,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_CREATE_NAMED_PIPE_FILE, "NtCreateNamedPipeFile", 14, nt_create_named_pipe_file),
     (NT_FS_CONTROL_FILE, "NtFsControlFile", 10, nt_fs_control_file),
     (NT_OPEN_EVENT, "NtOpenEvent", 3, nt_open_event),
+    (NT_READ_VIRTUAL_MEMORY, "NtReadVirtualMemory", 5, nt_read_virtual_memory),
+    (NT_WRITE_VIRTUAL_MEMORY, "NtWriteVirtualMemory", 5, nt_write_virtual_memory),
     (NT_OPEN_DIRECTORY_OBJECT, "NtOpenDirectoryObject", 3, nt_open_directory_object),
     (NT_CREATE_DIRECTORY_OBJECT, "NtCreateDirectoryObject", 3, nt_create_directory_object),
     (GALA_WINDOW_CREATE, "GalaWindowCreate", 8, gala_window_create),
@@ -928,6 +932,51 @@ const PROCESS_VM_OPERATION: u32 = 0x0008;
 /// NtAllocateVirtualMemory(ProcessHandle, *BaseAddress, ZeroBits,
 ///                         *RegionSize, AllocationType, Protect)
 /// (another process's with PROCESS_VM_OPERATION, as VirtualAllocEx)
+const PROCESS_VM_READ: u32 = 0x0010;
+const PROCESS_VM_WRITE: u32 = 0x0020;
+
+/// NtReadVirtualMemory/NtWriteVirtualMemory: copies between the caller's
+/// memory and process `ProcessHandle`'s (PROCESS_VM_READ / PROCESS_VM_WRITE),
+/// 4 KiB at a time; *NumberOfBytes (optional) gets how much was copied.
+/// A copy that stops part of the way is STATUS_PARTIAL_COPY, one that
+/// copies nothing STATUS_ACCESS_VIOLATION.
+fn copy_virtual_memory(call: &mut Call<'_>, write: bool) -> NtStatus {
+    let access = if write { PROCESS_VM_WRITE } else { PROCESS_VM_READ };
+    let target = tri!(call.dup_process(arg!(call, 0), access));
+    let (base, buffer, size, done_ptr) =
+        (arg!(call, 1), arg!(call, 2), arg!(call, 3), arg!(call, 4));
+    let mut chunk = [0u8; 4096];
+    let mut done = 0u64;
+    let mut status = NtStatus::SUCCESS;
+    while done < size {
+        let n = (size - done).min(4096) as usize;
+        let ok = if write {
+            call.process.read(buffer + done, &mut chunk[..n]).is_ok()
+                && target.write(base + done, &chunk[..n]).is_ok()
+        } else {
+            target.read(base + done, &mut chunk[..n]).is_ok()
+                && call.process.write(buffer + done, &chunk[..n]).is_ok()
+        };
+        if !ok {
+            status = if done == 0 { NtStatus::ACCESS_VIOLATION } else { NtStatus::PARTIAL_COPY };
+            break;
+        }
+        done += n as u64;
+    }
+    if done_ptr != 0 {
+        tri!(call.write_u64(done_ptr, done));
+    }
+    status
+}
+
+fn nt_read_virtual_memory(call: &mut Call<'_>) -> NtStatus {
+    copy_virtual_memory(call, false)
+}
+
+fn nt_write_virtual_memory(call: &mut Call<'_>) -> NtStatus {
+    copy_virtual_memory(call, true)
+}
+
 fn nt_allocate_virtual_memory(call: &mut Call<'_>) -> NtStatus {
     let target = tri!(call.dup_process(arg!(call, 0), PROCESS_VM_OPERATION));
     let (base_ptr, zero_bits, size_ptr) = (arg!(call, 1), arg!(call, 2), arg!(call, 3));

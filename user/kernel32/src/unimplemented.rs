@@ -71,7 +71,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     WaitNamedPipeA
     WaitNamedPipeW
     WriteConsoleOutputA
-    WriteProcessMemory
     WriteTapemark
     AllocConsole
     AttachConsole

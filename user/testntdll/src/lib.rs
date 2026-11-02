@@ -240,6 +240,8 @@ syscall_stubs! {
         protect: u32
     );
     NtFreeVirtualMemory = 0x1e, fn(process: isize, base: *mut usize, size: *mut usize, kind: u32);
+    NtReadVirtualMemory = 0x3f, fn(process: isize, base: usize, buffer: *mut u8, size: usize, done: *mut usize);
+    NtWriteVirtualMemory = 0x3a, fn(process: isize, base: usize, buffer: *const u8, size: usize, done: *mut usize);
     NtSetInformationThread = 0x0d, fn(h: usize, class: u32, buf: *const u8, len: u32);
     NtLockFile = 0x123, fn(
         h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
