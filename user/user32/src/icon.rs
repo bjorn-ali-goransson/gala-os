@@ -90,7 +90,7 @@ fn get(h: usize) -> Option<Icon> {
 }
 
 /// gdi32's function `name` (NUL-terminated), resolved once per slot.
-fn gdi(cache: &AtomicUsize, name: &[u8]) -> usize {
+pub(crate) fn gdi_proc(cache: &AtomicUsize, name: &[u8]) -> usize {
     let f = cache.load(Ordering::Acquire);
     if f != 0 {
         return f;
@@ -108,7 +108,7 @@ fn gdi(cache: &AtomicUsize, name: &[u8]) -> usize {
 macro_rules! gdi_fn {
     ($name:literal, $ty:ty) => {{
         static CACHE: AtomicUsize = AtomicUsize::new(0);
-        let f = gdi(&CACHE, concat!($name, "\0").as_bytes());
+        let f = gdi_proc(&CACHE, concat!($name, "\0").as_bytes());
         // SAFETY: gdi32's function of that name has this signature.
         (f != 0).then(|| unsafe { core::mem::transmute::<usize, $ty>(f) })
     }};

@@ -384,6 +384,27 @@ pub struct WndClassExW {
     icon_small: Handle,
 }
 
+impl WndClassExW {
+    /// A system class (user32's controls): its name, its procedure, the
+    /// arrow cursor's class style, no background (the control paints it).
+    pub(crate) fn system(name: *const u16, proc_: WndProc) -> WndClassExW {
+        WndClassExW {
+            size: core::mem::size_of::<WndClassExW>() as u32,
+            style: 0x8 | 0x4000, // CS_DBLCLKS | CS_GLOBALCLASS
+            proc_: Some(proc_),
+            class_extra: 0,
+            window_extra: 0,
+            instance: core::ptr::null_mut(),
+            icon: core::ptr::null_mut(),
+            cursor: core::ptr::null_mut(),
+            background: core::ptr::null_mut(),
+            menu_name: core::ptr::null(),
+            class_name: name,
+            icon_small: core::ptr::null_mut(),
+        }
+    }
+}
+
 /// The NUL-terminated name, case-folded, in a fixed buffer.
 fn class_key(name: *const u16) -> [u16; 64] {
     let mut out = [0u16; 64];
@@ -456,6 +477,7 @@ pub extern "system" fn GetClassNameA(hwnd: Hwnd, buf: *mut u8, n: i32) -> i32 {
 /// classes show by name) and the last error is
 /// ERROR_CANNOT_FIND_WND_CLASS.
 fn class_known(class: *const u16) -> bool {
+    crate::controls::register_system_classes();
     if with(|s| find_class(s, class).is_some()) {
         return true;
     }
@@ -956,6 +978,18 @@ pub struct PaintStruct {
     reserved: [u8; 32],
 }
 
+impl PaintStruct {
+    /// For BeginPaint to fill.
+    pub(crate) const EMPTY: PaintStruct = PaintStruct {
+        hdc: core::ptr::null_mut(),
+        erase: 0,
+        paint: [0; 4],
+        restore: 0,
+        inc_update: 0,
+        reserved: [0; 32],
+    };
+}
+
 /// A DC on the window's client area (a child's: its part of the
 /// top-level window's buffer).
 fn client_dc(hwnd: Hwnd) -> Handle {
@@ -1123,6 +1157,30 @@ pub extern "system" fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lpara
     }
     match msg {
         WM_NCCREATE => 1,
+        // The controls' colours: text in COLOR_WINDOWTEXT on the face
+        // (COLOR_3DFACE), or on COLOR_WINDOW for edits and list boxes.
+        0x0132..=0x0138 => {
+            let face = if msg == 0x0133 || msg == 0x0134 { 5 } else { 15 };
+            static SET_TEXT: AtomicUsize = AtomicUsize::new(0);
+            static SET_BK: AtomicUsize = AtomicUsize::new(0);
+            let (t, b) = (
+                crate::icon::gdi_proc(&SET_TEXT, b"SetTextColor\0"),
+                crate::icon::gdi_proc(&SET_BK, b"SetBkColor\0"),
+            );
+            if t != 0 && b != 0 {
+                type SetColor = extern "system" fn(Handle, u32) -> u32;
+                // SAFETY: gdi32's functions of those names.
+                let (t, b) = unsafe {
+                    (
+                        core::mem::transmute::<usize, SetColor>(t),
+                        core::mem::transmute::<usize, SetColor>(b),
+                    )
+                };
+                t(wparam as Handle, GetSysColor(8));
+                b(wparam as Handle, GetSysColor(face));
+            }
+            GetSysColorBrush(face) as isize
+        }
         WM_CLOSE => {
             DestroyWindow(hwnd);
             0
@@ -1763,4 +1821,30 @@ pub extern "system" fn GetSystemMetrics(index: i32) -> i32 {
         49 | 50 => 16,           // SM_CXSMICON, SM_CYSMICON
         _ => 0,
     }
+}
+
+/// CallWindowProcW(proc, hwnd, msg, wparam, lparam): calls the procedure
+/// (a subclassed window's previous one); 0 for none.
+#[unsafe(no_mangle)]
+pub extern "system" fn CallWindowProcW(
+    proc_: Option<WndProc>,
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    proc_.map_or(0, |p| p(hwnd, msg, wparam, lparam))
+}
+
+/// CallWindowProcA: as CallWindowProcW (the ANSI code page is UTF-8 and
+/// gala's procedures are all wide).
+#[unsafe(no_mangle)]
+pub extern "system" fn CallWindowProcA(
+    proc_: Option<WndProc>,
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    CallWindowProcW(proc_, hwnd, msg, wparam, lparam)
 }

@@ -6,6 +6,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 mod accel;
+mod controls;
 mod hook;
 mod icon;
 mod keyboard;
@@ -14,6 +15,7 @@ mod message;
 mod monitor;
 mod rect;
 mod spi;
+mod text;
 mod timer;
 mod tree;
 mod unimplemented;
@@ -26,7 +28,10 @@ unsafe extern "C" {
     fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    fn strlen(s: *const u8) -> usize;
     fn __CxxFrameHandler3();
+    // The stack probe for frames over a page (ntdll exports it).
+    fn __chkstk();
 }
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot

@@ -2265,6 +2265,23 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   functions wx calls on its way (OleInitialize, SetThreadLocale on the
   TEB's CurrentLocale, SetSecurityDescriptorControl/Sacl/Group,
   SetCurrentProcessExplicitAppUserModelID).
+- **Controls** (`user/user32/src/controls.rs`, `text.rs`;
+  `controls_test`): STATIC, BUTTON and EDIT are system classes user32
+  registers on the first CreateWindowExW; their state is in a table of
+  512 controls (an edit's text in a 64 KiB block of its own). They draw
+  in the Windows 11 style: light rounded push buttons (the default one
+  in the accent colour), accent check boxes and radio buttons, rounded
+  text boxes whose underline turns accent when focused, a selection in
+  the highlight colour and a caret line; backgrounds come from the
+  parent's WM_CTLCOLOR* brush (DefWindowProc answers COLOR_3DFACE, or
+  COLOR_WINDOW for edits). Buttons click by mouse, space or BM_CLICK
+  (BN_CLICKED; auto check boxes and radio buttons change first); edits
+  take WM_CHAR, the arrows, Home/End, Delete, Backspace and Ctrl+A and
+  notify EN_UPDATE/EN_CHANGE/EN_MAXTEXT/EN_SETFOCUS/EN_KILLFOCUS. Not
+  yet: the clipboard, undo, multi-line selection and scrolling, radio
+  groups (every auto radio button of a parent is one group).
+  DrawTextW (`text.rs`) splits, wraps, ellipsizes and aligns lines over
+  gdi32's ExtTextOutW (1024 characters at most).
 - **Smaller user32/ole32 pieces wx needs** (`user32_test`): an
   unregistered class makes CreateWindowExW fail with
   ERROR_CANNOT_FIND_WND_CLASS and records `user32.dll!CreateWindowExW

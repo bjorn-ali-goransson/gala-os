@@ -556,9 +556,10 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    STATIC, EDIT, BUTTON from user32; msctls_statusbar32,
    ToolbarWindow32, tooltips_class32, SysListView32, SysTreeView32 from
    comctl32), and wx loops sending LVM_GETNEXTITEM to the NULL list view
-   (0 forever, never -1). Next: those controls, drawn in the Windows 11
-   style (user32's built-ins first, then the status bar, toolbar, list
-   and tree views).
+   (0 forever, never -1). Then (controls_test, a new scenario): DrawTextW and
+   user32's STATIC, BUTTON and EDIT in the Windows 11 style,
+   CallWindowProcW (wx subclasses its controls). Next: comctl32's status
+   bar, tooltips, toolbar, list view (with its header) and tree view.
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,

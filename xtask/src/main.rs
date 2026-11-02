@@ -599,6 +599,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("comctl32_test", "gdi32.dll", "Windows/System32"),
     ("comctl32_test", "comctl32.dll", "Windows/System32"),
     ("comctl32_test", "user/bin/comctl32_test.exe", "gala"),
+    ("controls_test", "ntdll.dll", "Windows/System32"),
+    ("controls_test", "kernel32.dll", "Windows/System32"),
+    ("controls_test", "msvcrt.dll", "Windows/System32"),
+    ("controls_test", "user32.dll", "Windows/System32"),
+    ("controls_test", "gdi32.dll", "Windows/System32"),
+    ("controls_test", "user/bin/controls_test.exe", "gala"),
     ("user32_test", "ntdll.dll", "Windows/System32"),
     ("user32_test", "kernel32.dll", "Windows/System32"),
     ("user32_test", "msvcrt.dll", "Windows/System32"),
@@ -2718,6 +2724,15 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=comctl32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["comctl32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // W3: user32's built-in controls (STATIC, BUTTON, EDIT) and
+        // DrawTextW against documented behaviour, for what wxWidgets
+        // (FileZilla) creates (user/controls_test/main.c, mingw).
+        name: "controls_test",
+        cmdline: "qemu_exit run=controls_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["controls_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // W3: gala's user32 against documented behaviour, for what

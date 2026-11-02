@@ -11,7 +11,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     AdjustWindowRectEx
     AnimateWindow
     BringWindowToTop
-    CallWindowProcW
     ChangeDisplaySettingsExW
     ChildWindowFromPoint
     ChildWindowFromPointEx
@@ -37,7 +36,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     DrawFocusRect
     DrawFrameControl
     DrawStateW
-    DrawTextW
     EmptyClipboard
     EnableScrollBar
     EndDialog
