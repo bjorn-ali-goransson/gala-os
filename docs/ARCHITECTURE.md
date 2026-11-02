@@ -25,6 +25,8 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/mm/paging.rs      4-level page-table mapper, generic over table access (host-tested)
   src/mm/heap.rs        slab + page heap, global allocator, try_box/TryVec   [unsafe allowed]
   src/mm/mod.rs         global frame allocator instance
+  src/handover/         kernel handover (R9): the record format, ELF loading, what is carried
+  src/arch/x86_64/handover.rs  the machine side: image, page tables, trampoline, parked CPUs [unsafe allowed]
   src/disk/             the disk: virtio-blk, whole-sector reads/writes/flush
   src/nt/               NT personality: PE loader, processes, handles, syscalls
   src/nt/platform.rs    the seam: traits for what nt needs from the machine
@@ -118,6 +120,8 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `clock=<items>` | clock control while the programs run (debug builds; "Clock control" below): `control` (the test-only GalaClockControl call is allowed), `freeze`, `rate:<n>[/<d>]`, `advance:<seconds>`, `system:<UNIX seconds>` (the system time when the programs start). Example: `clock=control,freeze,system:2147483648` |
 | `record` | record what the programs read from outside (random numbers, the boot time) on the debug console; xtask writes it to `<iso>.rec` ("Record/replay" below) |
 | `replay=<file>` | the programs read those inputs from the recording in the boot module of that file name |
+| `handover=<n>` | at the end of the boot (after the `run=` programs), hand the machine over to a fresh copy of the kernel, until n handovers are done ("Kernel handover" below; the command line is handed over, so each kernel sees it) |
+| `handover_image=<file>` | hand over to the kernel ELF in that boot module instead of the running kernel's own file |
 
 ## Physical memory
 
@@ -4015,11 +4019,130 @@ delay mode; its faults stay `net_tx` drops and `netreset=`.
   the state back, resets the devices and reissues the blocked system
   calls (invariants 1, 2, 4). The disk log's snapshot and replay (D2/D3)
   is the precedent for the format. Live mocking's swap at a quiescent
-  point is the trial run for this, so it comes first.
+  point is the trial run for this, so it comes first. Milestone (a), the
+  handover itself with no programs, is built: "Kernel handover" below.
 - Function-level live patching (as Microsoft's Hotpatch): not planned
   unless a concrete need appears.
 - **A chain of trust for updates**: designed below (R8); built after
   R7, before live update ships.
+
+### Kernel handover (R9 milestone (a), 2026-11-02)
+
+The running kernel hands the machine to a fresh kernel image without the
+firmware or the bootloader: same build, no programs running (milestone
+(a); scenarios `handover_same`, `handover_uefi`, `handover_disk`). Code:
+`kernel/src/handover/` (record format, ELF parsing, what is carried; safe,
+host-tested) and `kernel/src/arch/x86_64/handover.rs` (the machine side).
+
+**The record** (`handover::record`, ARCHITECTURE invariant 3). A 64-byte
+header: magic `GALAHAND`, framing version (u32, 1; readers accept
+`MIN_VERSION..=VERSION`), header length, total length, CRC-32 (zlib's, as
+the disk log's) over the record with the CRC field as 0, flags, the
+generation (handovers done, counting this one), the section count. Then
+8-aligned sections: tag (u32), version (u16), flags (u16), length (u32),
+data. Growth rules: new state is a new tag; a section only gains fields
+at its end (version raised); a reader takes the fields the length holds,
+0 for missing ones (older writer), ignores trailing ones (newer writer);
+a section with flag REQUIRED that the reader does not know makes it refuse
+the record (for state it would otherwise lose: processes, address spaces);
+other unknown tags are skipped and logged. Sections (all version 1):
+
+| Tag | Section | Contents |
+|---|---|---|
+| 1 | MEMORY_MAP | (base, length, kind as Limine's number): the bootloader's map with the frames in use carved out (`mm::memmap::carve`) |
+| 2 | PLATFORM | HHDM offset, the new image's physical and virtual base and length, firmware type + 1, boot UNIX time + 1 (0 = unknown) |
+| 3 | FRAMEBUFFER | Limine's framebuffer fields, physical address |
+| 4 | CMDLINE | the kernel command line |
+| 5 | MODULES | (physical address, length, path, string) of each boot module, still where the bootloader put them |
+| 6 | CLOCK | TSC rate, the TSC at the clock's zero, ticks, the clock when written, the boot system time |
+| 7 | CPUS | boot CPU's LAPIC id, count, physical address of the parked CPUs' `limine_mp_info` array |
+| 8 | VOLUME | the mounted volume's size, log generation, area and length (`persist`) |
+| 9 | KEPT | (base, length, purpose): SCAFFOLD, RECORD, KERNEL_IMAGE (for the receiving kernel only), MARKER (kept for good) |
+| 10 | KERNEL_FILE | the kernel ELF to hand over to next time |
+
+**Memory.** The receiving kernel builds its frame allocator from the
+record's map as from Limine's: the new image is "executable and modules",
+the scaffold and the record "bootloader reclaimable" (never handed out:
+its boot stack is in the scaffold), the marker page "executable and
+modules"; everything the old kernel allocated (heap, page tables, stacks)
+is usable again. When it hands over in turn, the ranges it received as
+SCAFFOLD, RECORD and KERNEL_IMAGE become usable in the next map, so
+memory does not leak across handovers (the scenario's frame counts are
+equal in generations 1 and 2). The first kernel's own image (inside
+Limine's "executable and modules") and Limine's reclaimable memory are not
+returned yet (as on a cold boot).
+
+**The sequence** (`handover::go`, from the boot thread at the end of
+`kernel_main`, where `gala: boot ok` would be printed):
+1. the kernel file (Limine's executable-file response, then KERNEL_FILE)
+   is checked as an ELF64 x86-64 executable whose segments lie in the
+   kernel's window (`handover::elf`);
+2. the marker page is made (first kernel) or found (KEPT), and its
+   handover count raised; `nt::persist::sync` writes what is pending, so
+   the volume's position is final;
+3. the boot thread moves to CPU 0 (`set_affinity`); the online CPUs must
+   be 0..n with no hole;
+4. `arch::handover::prepare`: the image's segments copied into fresh
+   contiguous frames (2 MiB aligned when possible) with bss zeroed; the
+   scaffold (contiguous: trampoline page, the parked CPUs' entries, a
+   256 KiB boot stack, a 128-page pool of page tables); new page tables
+   mapping the HHDM (same offset, same rules as `paging::init`:
+   `paging::map_hhdm`), the image at its link address (RWX, not global)
+   and the trampoline page at its identity address; the same identity
+   mapping added to the running kernel's tables;
+5. the record is encoded once to size it, its frames allocated and carved
+   from the map, then encoded for good and written;
+6. `arch::handover::quiesce_and_jump`, the point of no return: interrupts
+   off and the local timer stopped; a park IPI (vector 0x33) to each
+   other CPU, whose handler stops its timer, sends EOI (an in-service
+   bit would block the next kernel's ticks), loads the kernel's tables
+   and jumps to the trampoline's park code: CR4.PGE off (flushes the old
+   kernel's global entries), the new tables, the trampoline's GDT (same
+   selectors 0x10/0x18 as gala's), the parked count raised, then a spin
+   on its entry's `goto_address`, as Limine parks a CPU. The boot CPU
+   waits for all (2 s, serving TLB-flush requests meanwhile), resets
+   every virtio device on the PCI bus (status 0: no DMA into reused
+   memory; invariant 4), and jumps to the trampoline's jump code: PGE
+   off, the new CR3, the trampoline's GDT, the new stack, then the ELF
+   entry `kmain` with rdi = `HANDOVER_MAGIC` ("GALAHAND"), rsi = the
+   record's physical address, rdx = the HHDM offset (Limine enters with
+   those registers zero).
+
+**The receiving kernel** runs the ordinary boot with `boot::collect`
+reading the record instead of Limine's responses (`collect_handover`:
+header, CRC, the sections it needs): memory map, modules (`BootModules`
+and `BootMemoryMap` read the record's entries in place), framebuffer,
+firmware, the processors (`Processors` over the parked array: `smp::start_aps`
+writes `extra_argument` and `goto_address` as with Limine, and
+`gala_ap_entry` needs no stack), the kernel file. It logs `handover:
+generation N (from generation N-1), record version V`, sets its clock from
+CLOCK right after `time::init` (`time::resume`: the first boot's TSC rate
+and zero, so `raw_monotonic_ns` and the system time go on without a jump,
+the tick count catching up; it panics if the clock went back), checks the
+marker page (`survived N handover(s)`), reports the CPUs back online,
+probes and sets up the devices again (they were reset), and with
+`persist` mounts the volume again and compares its log position with
+VOLUME (`volume continues`).
+
+**Invariants.** The trampoline page and the parked CPUs' tables stay
+valid until every CPU runs the new kernel (they are in the scaffold,
+kept). No allocation after CPUs are parked (a TLB shootdown would wait
+for them forever). The entry convention (rdi/rsi/rdx) and the parked
+array's layout are part of the handover contract, versioned with the
+record: a newer kernel (milestone (d)) must keep them or raise the
+framing version. Clock control (`clock=`) state is not carried (no
+programs in (a)).
+
+**Not carried yet** (milestones (b)-(e)): processes, threads ("waiting on
+X until T"), handles and objects, address spaces (user pages would be
+kept frames: a frame bitmap section rather than carved ranges, so the map
+stays short), the registry's volatile keys, the window registry, console
+sessions, sockets. Programs on the command line (`run=`, `start=`) run
+again in each kernel today, as after a reboot; once processes are carried
+they continue instead. The first kernel's image and Limine's reclaimable
+memory are not freed; the scaffold of the running kernel is freed only by
+the next handover. A test-only trigger from a program (a `Gala*` call) or
+the debug console is not there yet: `handover=<n>` only.
 
 ### Chain of trust (R8, design 2026-11-02)
 

@@ -178,6 +178,32 @@ pub fn arm_clock_control() {
     crate::clockctl::arm(raw, raw.max(from_ticks), boot_system_time(), None);
 }
 
+/// The clock's state for a kernel handover (the next kernel goes on from
+/// it: `resume`).
+pub fn snapshot() -> crate::handover::record::Clock {
+    crate::handover::record::Clock {
+        tsc_hz: TSC_HZ.load(Ordering::Relaxed),
+        tsc_at_zero: TSC_AT_BOOT.load(Ordering::Relaxed),
+        ticks: TICKS.load(Ordering::Relaxed),
+        monotonic_ns: raw_monotonic_ns(),
+        boot_system_time: SYSTEM_TIME_AT_INIT.load(Ordering::Relaxed),
+    }
+}
+
+/// After a kernel handover: the clock goes on from the previous kernel's
+/// (same TSC rate and zero, so no jump; the tick count catches up with the
+/// time that passed). Call after `init`, before interrupts are enabled.
+pub fn resume(clock: &crate::handover::record::Clock) {
+    if clock.tsc_hz == 0 {
+        return;
+    }
+    TSC_HZ.store(clock.tsc_hz, Ordering::Relaxed);
+    TSC_AT_BOOT.store(clock.tsc_at_zero, Ordering::Relaxed);
+    let ticks = raw_monotonic_ns() / (1_000_000_000 / TICK_HZ);
+    TICKS.store(ticks.max(clock.ticks), Ordering::Relaxed);
+    SYSTEM_TIME_AT_INIT.store(clock.boot_system_time, Ordering::Relaxed);
+}
+
 /// Nanoseconds since `init`, from the TSC (0 before calibration); real
 /// time, whatever clock control does.
 pub fn raw_monotonic_ns() -> u64 {

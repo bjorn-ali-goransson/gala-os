@@ -44,6 +44,13 @@ pub struct HhdmTables {
     offset: u64,
 }
 
+impl HhdmTables {
+    /// Tables whose frames the caller owns (see `table`).
+    pub(super) fn new(offset: u64) -> Self {
+        HhdmTables { offset }
+    }
+}
+
 impl TableMemory for HhdmTables {
     fn table(&mut self, frame: Frame) -> &mut PageTable {
         let virt = self.offset + frame.start();
@@ -128,6 +135,34 @@ fn hhdm_flags(kind: RegionKind) -> Option<PageFlags> {
     }
 }
 
+/// Maps the HHDM at `offset` for every region of `regions` (sorted) that
+/// Limine maps there; returns the pages mapped per size (4K, 2M, 1G).
+pub(super) fn map_hhdm(
+    mapper: &mut Mapper<HhdmTables>,
+    offset: u64,
+    regions: impl Iterator<Item = MemoryRegion>,
+    alloc: &mut impl FnMut() -> Option<Frame>,
+) -> Result<[u64; 3], PagingError> {
+    // Regions are sorted; round outward to pages but never map a page
+    // twice (non-RAM regions may share pages).
+    let mut pages = [0; 3];
+    let mut mapped_until = 0;
+    for region in regions {
+        let Some(flags) = hhdm_flags(region.kind) else { continue };
+        let start = (region.base / PAGE_SIZE * PAGE_SIZE).max(mapped_until);
+        let end = region.end().next_multiple_of(PAGE_SIZE);
+        if start >= end {
+            continue;
+        }
+        let counts = mapper.map_range(offset + start, start, end - start, flags, alloc)?;
+        for (total, n) in pages.iter_mut().zip(counts) {
+            *total += n;
+        }
+        mapped_until = end;
+    }
+    Ok(pages)
+}
+
 /// Builds the kernel address space (kernel image with per-section
 /// permissions, plus the HHDM for every region Limine maps there) and loads
 /// it. Must be called once, after the frame allocator is initialized.
@@ -135,29 +170,8 @@ pub fn init(layout: KernelLayout<'_>) -> Result<BuildStats, PagingError> {
     enable_cpu_features()?;
     let mut stats = BuildStats::default();
     let mut mapper = Mapper::new(HhdmTables { offset: layout.hhdm_offset }, &mut alloc_table)?;
-
-    // HHDM. Regions are sorted; round outward to pages but never map a page
-    // twice (non-RAM regions may share pages).
-    let mut mapped_until = 0;
-    for region in layout.memory_map {
-        let Some(flags) = hhdm_flags(region.kind) else { continue };
-        let start = (region.base / PAGE_SIZE * PAGE_SIZE).max(mapped_until);
-        let end = region.end().next_multiple_of(PAGE_SIZE);
-        if start >= end {
-            continue;
-        }
-        let counts = mapper.map_range(
-            layout.hhdm_offset + start,
-            start,
-            end - start,
-            flags,
-            &mut alloc_table,
-        )?;
-        for (total, n) in stats.hhdm_pages.iter_mut().zip(counts) {
-            *total += n;
-        }
-        mapped_until = end;
-    }
+    stats.hhdm_pages =
+        map_hhdm(&mut mapper, layout.hhdm_offset, layout.memory_map, &mut alloc_table)?;
 
     // Kernel image.
     // SAFETY: these are linker-script symbols; only their addresses are used.

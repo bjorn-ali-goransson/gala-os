@@ -1050,6 +1050,31 @@ passes alone): if it recurs, its log says which bound was missed.
   Windows with `user/bin/run-all.ps1`.
 - See `docs/OBSERVABILITY.md` for the planned profiling and telemetry.
 
+### Debugging a kernel handover (R9)
+
+- `XTASK_VERBOSE=1 cargo xtask boot-test handover_same`: every kernel
+  prints its banner again; `handover: generation A -> B: record ...`
+  (written by the old kernel: where the record, the new image and the
+  scaffold are) is the last line before the jump, and `handover:
+  generation B (from generation A)` the new kernel's first word about it.
+- Nothing after the jump line: the new kernel died before its console
+  came up (a triple fault resets the VM, `-no-reboot` ends QEMU).
+  `XTASK_QEMU_ARGS="-d int,cpu_reset -D qemu.log"` shows the faulting
+  RIP and CR3: a CR3 equal to the scaffold's table pool and a RIP in the
+  kernel window means the new image or its mapping is wrong (check
+  `prepare`); a RIP at the trampoline's identity address means the jump
+  code or its GDT. `XTASK_FIRMWARE=uefi` runs the same under OVMF.
+- `NotParked(n, m)` in the panic: a CPU did not take the park IPI
+  (interrupts off for 2 s: a lock held, or a CPU spinning with
+  interrupts off).
+- A refused record panics with `bootloader handoff rejected: handover
+  record: ...` (CRC, version, a REQUIRED section this kernel does not
+  know). The record's format and tests are in
+  `kernel/src/handover/record.rs`.
+- A new kind of state goes into a new section (or new fields at the end
+  of one, its version raised), never a changed meaning of an old field;
+  add a round-trip test and an "older writer" test.
+
 ## Where things are
 
 | Area | Path |

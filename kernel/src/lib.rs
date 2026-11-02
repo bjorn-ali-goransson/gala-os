@@ -28,6 +28,7 @@ pub mod events;
 pub mod failpoint;
 pub mod flight;
 pub mod fs;
+pub mod handover;
 /// gala-um's platform: the NT layer inside a Linux process.
 #[cfg(feature = "hosted")]
 #[allow(unsafe_code)]
@@ -66,12 +67,14 @@ const QEMU_EXIT_FLAG: &str = "qemu_exit";
 /// Marker line the test harness waits for on the serial console.
 pub const BOOT_OK_MARKER: &str = "gala: boot ok";
 
-pub fn kernel_main() -> ! {
+/// The kernel's start: from Limine (`handover` is `None`), or from the
+/// previous kernel after a kernel handover (ROADMAP R9).
+pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     console::init();
     kprintln!();
     kprintln!("gala-os kernel {}", env!("CARGO_PKG_VERSION"));
 
-    let mut info = match boot::collect() {
+    let mut info = match boot::collect(handover) {
         Ok(info) => info,
         Err(e) => panic!("bootloader handoff rejected: {e}"),
     };
@@ -90,6 +93,7 @@ pub fn kernel_main() -> ! {
     info!("cpu: GDT, TSS and IDT loaded");
 
     log_boot_info(&info);
+    handover::report(&info);
     let summary = log_memory_map(&info);
     // `noscreen`: serial only (boot tests read the serial log; drawing text
     // is slow under emulation).
@@ -120,7 +124,8 @@ pub fn kernel_main() -> ! {
         free * mm::PAGE_SIZE / (1024 * 1024)
     );
     init_paging(&info);
-    init_timer(info.boot_unix_time);
+    init_timer(&info);
+    handover::check_marker(&info);
     if let Err(e) = sched::init() {
         panic!("scheduler: {e:?}");
     }
@@ -128,7 +133,8 @@ pub fn kernel_main() -> ! {
     arch::smp::init_bsp();
     match arch::smp::start_aps(&info.processors, sched::run_ap) {
         Ok(n) => {
-            info!("smp: {n} CPUs online ({} reported by the bootloader)", info.processors.len())
+            info!("smp: {n} CPUs online ({} reported by the bootloader)", info.processors.len());
+            handover::report_cpus(&info, n);
         }
         Err(e) => warn!("smp: cannot start the other CPUs: {e:?}"),
     }
@@ -174,6 +180,7 @@ pub fn kernel_main() -> ! {
     if cmdline.flag("persist") {
         nt::persist::CRASH_TEST.store(cmdline.flag("crashtest"), Ordering::Relaxed);
         nt::persist::mount();
+        handover::check_volume(&info);
     }
 
     // The desktop's wallpaper (`wallpaper=<name>`, else one at random).
@@ -319,6 +326,12 @@ pub fn kernel_main() -> ! {
         mm::frame_stats().0,
         mm::frame_stats().1
     );
+    // `handover=<n>`: hand the machine over to a fresh copy of the kernel
+    // until n handovers are done (ROADMAP R9).
+    if handover::wanted(&cmdline) {
+        let e = handover::go(&info, &cmdline);
+        panic!("handover: failed: {e:?}");
+    }
     kprintln!("{BOOT_OK_MARKER}");
     if QEMU_EXIT.load(Ordering::Relaxed) {
         qemu::exit(QemuExitCode::Success);
@@ -400,7 +413,9 @@ fn configure_clock(cmdline: &Cmdline) {
 }
 
 fn log_boot_info(info: &BootInfo) {
-    info!("limine base revision: {}", info.base_revision);
+    if info.handover.is_none() {
+        info!("limine base revision: {}", info.base_revision);
+    }
     if let Some((name, version)) = info.bootloader {
         info!("bootloader: {name} {version}");
     }
@@ -506,7 +521,7 @@ fn init_paging(info: &BootInfo) {
     }
 }
 
-fn init_timer(boot_time: Option<i64>) {
+fn init_timer(info: &BootInfo) {
     let calibration = match arch::apic::init_bsp() {
         Ok(c) => c,
         Err(e) => panic!("local APIC: {e:?}"),
@@ -519,7 +534,10 @@ fn init_timer(boot_time: Option<i64>) {
         calibration.tsc_hz / 1_000_000
     );
     time::init(&calibration);
-    if let Some(t) = boot_time {
+    if info.handover.is_some() {
+        // The clock goes on from the previous kernel's.
+        handover::resume_clock(info);
+    } else if let Some(t) = info.boot_unix_time {
         time::set_boot_time(t);
     }
     arch::cpu::enable_interrupts();
