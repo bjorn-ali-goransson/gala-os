@@ -558,8 +558,11 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    comctl32), and wx loops sending LVM_GETNEXTITEM to the NULL list view
    (0 forever, never -1). Then (controls_test, a new scenario): DrawTextW and
    user32's STATIC, BUTTON and EDIT in the Windows 11 style,
-   CallWindowProcW (wx subclasses its controls). Next: comctl32's status
-   bar, tooltips, toolbar, list view (with its header) and tree view.
+   CallWindowProcW (wx subclasses its controls). Then comctl32's status bar, tooltips (kept,
+   not shown yet) and toolbar (comctl32_test), and SetWindowPos marks an
+   unchanged size/position SWP_NOSIZE/SWP_NOMOVE as Windows does (no
+   WM_SIZE: self-placing controls do not loop). Next: the list view
+   (with its header) and the tree view.
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,

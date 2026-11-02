@@ -897,6 +897,16 @@ pub extern "system" fn SetWindowPos(
     };
     let (nx, ny) = if flags & SWP_NOMOVE != 0 { (w.x, w.y) } else { (x, y) };
     let (nw, nh) = if flags & SWP_NOSIZE != 0 { (w.w, w.h) } else { (cx.max(0), cy.max(0)) };
+    // As on Windows, an unchanged size or position counts as not asked
+    // for (no WM_SIZE or WM_MOVE follows): a control that places itself
+    // on WM_SIZE does not loop.
+    let mut flags = flags;
+    if (nw, nh) == (w.w, w.h) {
+        flags |= SWP_NOSIZE;
+    }
+    if (nx, ny) == (w.x, w.y) {
+        flags |= SWP_NOMOVE;
+    }
     let mut pos = WindowPos { hwnd, after, x: nx, y: ny, cx: nw, cy: nh, flags };
     SendMessageW(hwnd, WM_WINDOWPOSCHANGING, 0, &mut pos as *mut WindowPos as isize);
     let top_level = w.parent == 0;

@@ -2307,6 +2307,20 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   a path) or the empty list (the desktop); CSIDL_DRIVES is virtual.
   shell32, ole32 and comctl32 load the GUI DLLs they call on first use
   (LoadLibraryW): programs without windows use them too.
+- **Common controls** (`user/comctl32/src/`; `comctl32_test`):
+  InitCommonControls(Ex) registers the classes (once). comctl32 imports
+  user32 (the controls are windows) but loads gdi32 on first use (the
+  JVM loads comctl32 without gdi32). `common.rs`: each control's state
+  in a `Store` (by window, under a spin lock that is never held while a
+  message is sent), drawing helpers (rounded fills, text through
+  DrawTextW) and the Windows 11 colours. The status bar (bottom or top
+  of its parent, full width, placed again on WM_SIZE; parts with
+  texts; simple mode), tooltips (tools kept, counted, updated, read
+  back; nothing shows on hover yet), the toolbar (TBBUTTONs with image,
+  id, state, style, text; separators; normal, hot and disabled image
+  lists, TB_ADDBITMAP strips into its own; list or text-below layout;
+  TB_AUTOSIZE; hot and pressed highlights; check buttons and groups; a
+  click sends WM_COMMAND to the parent or TB_SETPARENT's window).
 - **Image lists** (`user/comctl32/src/imagelist.rs`; `comctl32_test`):
   HIMAGELIST is 0x1000 + 16 * slot (256 lists); each image is its own
   pair of gdi32 bitmaps of the list's size, a 32-bit colour bitmap

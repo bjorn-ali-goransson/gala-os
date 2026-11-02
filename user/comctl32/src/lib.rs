@@ -1,7 +1,8 @@
 //! gala's comctl32.dll: InitCommonControls(Ex), which programs call at
-//! startup to register the common control window classes (the call
-//! succeeds; the controls themselves are not there yet), and image lists
-//! (`imagelist.rs`).
+//! startup to register the common control window classes: the status bar
+//! (`statusbar.rs`), tooltips (`tooltips.rs`) and the toolbar
+//! (`toolbar.rs`), drawn in the Windows 11 style (`common.rs`); and image
+//! lists (`imagelist.rs`).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -9,8 +10,23 @@
 
 extern crate alloc;
 
+mod common;
 mod imagelist;
+mod statusbar;
+mod toolbar;
+mod tooltips;
 mod unimplemented;
+
+/// Registers the controls' classes (once).
+fn register_classes() {
+    static DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    common::register(b"msctls_statusbar32\0", statusbar::proc_);
+    common::register(b"tooltips_class32\0", tooltips::proc_);
+    common::register(b"ToolbarWindow32\0", toolbar::proc_);
+}
 
 // The global allocator (the image lists' vectors).
 use gala_heap as _;
@@ -50,11 +66,17 @@ pub static _fltused: i32 = 0;
 #[unsafe(no_mangle)]
 pub extern "system" fn InitCommonControlsEx(icc: *const u32) -> i32 {
     // SAFETY: the caller's structure; dwSize first.
-    i32::from(!icc.is_null() && unsafe { *icc } == 8)
+    let ok = !icc.is_null() && unsafe { *icc } == 8;
+    if ok {
+        register_classes();
+    }
+    i32::from(ok)
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn InitCommonControls() {}
+pub extern "system" fn InitCommonControls() {
+    register_classes();
+}
 
 /// DllMain (the entry point our link flags name).
 #[unsafe(no_mangle)]

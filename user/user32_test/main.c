@@ -12,7 +12,8 @@
  *   insensitive; GetClipboardFormatNameW (truncated to the buffer; none
  *   for predefined formats).
  * - BeginDeferWindowPos/DeferWindowPos/EndDeferWindowPos: nothing moves
- *   until EndDeferWindowPos, which applies every position and size.
+ *   until EndDeferWindowPos, which applies every position and size;
+ *   SetWindowPos to the same size sends no WM_SIZE.
  * - shell32's SHGetFileInfoW (SHGFI_USEFILEATTRIBUTES): the system image
  *   lists (small and large icon sizes) and type indexes, type names
  *   ("File folder", "<EXT> File"), display names, icons.

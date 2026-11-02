@@ -63,7 +63,7 @@ fn with<R>(h: usize, f: impl FnOnce(&mut List) -> R) -> Option<R> {
 
 /// `dll`'s function `name` (both NUL-terminated), resolved once per
 /// call site.
-fn resolve(cache: &AtomicUsize, dll: &[u8], name: &[u8]) -> usize {
+pub(crate) fn resolve(cache: &AtomicUsize, dll: &[u8], name: &[u8]) -> usize {
     let f = cache.load(Ordering::Acquire);
     if f != 0 {
         return f;
