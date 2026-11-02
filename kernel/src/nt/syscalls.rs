@@ -1403,7 +1403,13 @@ fn gala_console_input(call: &mut Call<'_>) -> NtStatus {
             control: u32::from_le_bytes([r[12], r[13], r[14], r[15]]),
         };
     }
-    session.push_input(&keys[..count]);
+    let (_, echo, line_done) = session.push_input(&keys[..count]);
+    if let Some(event) = echo {
+        wait::set_signal(&event, 1);
+    }
+    if line_done {
+        wait::set_signal(&session.line_ready, 1);
+    }
     NtStatus::SUCCESS
 }
 
@@ -4040,6 +4046,25 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
         let status = if length == 0 { NtStatus::SUCCESS } else { NtStatus::END_OF_FILE };
         tri!(call.write_iosb(iosb, status, 0));
         return status;
+    }
+    // A console window's input: a cooked line (waits for Enter).
+    if matches!(entry.object.body, ObjectBody::ConsoleInput)
+        && let Some(session) = call.process.console.clone()
+    {
+        let mut bytes = [0u8; 4096];
+        let want = (length as usize).min(bytes.len());
+        loop {
+            let n = session.read_line(&mut bytes[..want]);
+            if n > 0 || want == 0 {
+                if call.process.write(buffer, &bytes[..n]).is_err() {
+                    return NtStatus::ACCESS_VIOLATION;
+                }
+                tri!(call.write_iosb(iosb, NtStatus::SUCCESS, n as u64));
+                return NtStatus::SUCCESS;
+            }
+            let ready = core::slice::from_ref(&session.line_ready);
+            wait::wait_for(ready, false, wait::Timeout::Infinite);
+        }
     }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     let apc = tri!(io_apc(call, file, iosb));

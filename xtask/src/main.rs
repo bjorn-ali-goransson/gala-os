@@ -2611,6 +2611,7 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "console_window_test: printed",
             "xtask: screen ok",
+            "console_window_test: read hi",
             "exited with status 0x00000000",
         ],
     },
@@ -4346,14 +4347,22 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
         "console_window",
         ScreenCheck {
             marker: "console_window_test: printed",
-            steps: &[ScreenStep {
-                input: &[],
-                pixels: &[
-                    PixelCheck::AnyIn(66, 98, 300, 14, 0xcccccc), // "Hello from ..."
-                    PixelCheck::AnyIn(66, 112, 300, 22, 0x13a10e), // green
-                    PixelCheck::AnyIn(66, 112, 400, 22, 0xe74856), // bright red
-                ],
-            }],
+            steps: &[
+                ScreenStep {
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::AnyIn(66, 98, 300, 14, 0xcccccc), // "Hello from ..."
+                        PixelCheck::AnyIn(66, 112, 300, 22, 0x13a10e), // green
+                        PixelCheck::AnyIn(66, 112, 400, 22, 0xe74856), // bright red
+                    ],
+                },
+                ScreenStep {
+                    // "hi" and Enter in the window: echoed on the fifth line
+                    // (y 174..190) by the console's cooked input.
+                    input: &["sendkey h", "sendkey i", "sendkey ret"],
+                    pixels: &[PixelCheck::AnyIn(66, 174, 30, 16, 0xcccccc)],
+                },
+            ],
         },
     ),
     (

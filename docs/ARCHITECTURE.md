@@ -1202,8 +1202,8 @@ Windows, never shadows the system's DLLs.)
   because programs' output changes with it: Caddy logs differently to a
   console, and kernel32_sys_test and winsock_test, which expect
   redirected handles, failed.)
-- **Console windows** (2026-11-02: output built; keyboard input queued
-  by the host but not yet read by programs). Windows draws
+- **Console windows** (2026-11-02: output and cooked line input; raw
+  input through ReadConsoleInput not yet). Windows draws
   a console program's console in conhost.exe; gala does the same with its
   own `user/conhost` (a gala program, not Microsoft's), so the kernel keeps
   no drawing code for it:
@@ -1219,12 +1219,15 @@ Windows, never shadows the system's DLLs.)
   - Output: NtWriteFile on a ConsoleOutput object (the standard handles
     and CONOUT$) still goes to the serial line, and also into the
     writer's session ring, signalling the host's event.
-  - Input (TODO): ReadFile/ReadConsole(Input) on ConsoleInput (stdin,
-    CONIN$) will take from the session's queue (waiting when it is empty;
-    line input with echo in kernel32 per ENABLE_LINE_INPUT/
-    ENABLE_ECHO_INPUT), and GetNumberOfConsoleInputEvents/
-    PeekConsoleInput look at it; until then reads return nothing (as
-    without a session).
+  - Input: the keys the host queues are kept as records and also edited
+    into a line as the console's default mode does (ENABLE_LINE_INPUT,
+    ECHO_INPUT, PROCESSED_INPUT): characters are echoed into the output,
+    Backspace takes one back, Enter finishes the line with CR LF.
+    NtReadFile on ConsoleInput (stdin, CONIN$) of a process with a session
+    waits for a finished line (the session's line-ready event) and returns
+    it as UTF-8. TODO: kernel32's ReadConsoleW/A and ReadConsoleInputW/
+    GetNumberOfConsoleInputEvents/PeekConsoleInput over the session
+    (still "no keyboard"), the console modes (raw input), Ctrl+C.
   - The host: the kernel starts `conhost.exe` (user/conhost, a boot
     module) with the session's id and the program's file name before the
     program. Its system
@@ -1243,7 +1246,8 @@ Windows, never shadows the system's DLLs.)
     is closed. TODO: scrollback, resizing, closing with the session.
   - Tests: kernel host tests for the ring and queue; the console_window
     screen scenario (console_window_test prints text, VT colours and
-    UTF-8; pixel checks on the grid; reading a typed line is next); the
+    UTF-8, then reads a line xtask types: "hi" echoed in the window, the
+    program gets "hi\r\n"); the
     filezilla scenario shows FileZilla Server's console (minimizing
     FileZilla, then restoring it from the taskbar).
 - **FormatMessage** (kernel32 messages.rs): system messages from a table

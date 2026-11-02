@@ -498,7 +498,9 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    passing alone (2026-11-01): java_http, java_hello, postgres (three
    times: not a race - the scenario's 120 s limit killed the VM, which
    psql saw as a closed connection; it needs ~45 s alone, so it joined
-   SLOW_SCENARIOS), smpsched_test (check 0x12, a timing check).
+   SLOW_SCENARIOS), smpsched_test (check 0x12, a timing check);
+   java_hello again on 2026-11-02 (java.exe ended with status 1 and no
+   output after 77 s of system calls; it passes alone in 41 s).
    Seen three times (2026-11-01, twice on 11-02; full suite under load): rtl_test
    timed out with its thread spinning in NtYieldExecution after the
    other one ended; it passes alone. To hunt (docs/WORKFLOW.md, "Hunting a rare
@@ -1308,9 +1310,10 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       draws a console session (`console=<program>`): the server's log
       shows next to FileZilla (the scenario minimizes FileZilla, checks
       the console and restores FileZilla from the taskbar); the
-      console_window scenario covers text, VT colours and UTF-8. Next:
-      console input (programs reading the keys the window queues), then
-      the combo boxes' drop-down lists and tooltips on popups.
+      console_window scenario covers text, VT colours, UTF-8 and a typed
+      line (cooked input: echo, Backspace, Enter; ReadFile gets it). Next:
+      ReadConsoleW and raw console input through the session, then the
+      combo boxes' drop-down lists and tooltips on popups.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala
