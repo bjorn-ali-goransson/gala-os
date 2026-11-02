@@ -1355,6 +1355,49 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       Next: tooltips on popups (the combo boxes'
       drop-down lists are done).
 
+R. **Robustness and live update** (proposed 2026-11-02 by the owner;
+   design: ARCHITECTURE "Built in early: invariants, safety nets, live
+   update"). Order: R1 (the invariants, adopted now: new code follows
+   them) -> R2 -> R3 -> R4 (alongside other work) -> R5 -> R6 -> R7 ->
+   R8 (design) -> R9.
+   - R1. **Invariants**: state as data, restartable system calls with
+     absolute deadlines, versions on everything stored or shared (first
+     concrete step: a version field in the disk log's records and in the
+     `Gala*` records such as the window registry's), drivers that survive
+     a device reset, all time through the `Clock` seam (audit time.rs and
+     the direct `platform::ticks` callers).
+   - R2. **Fault injection**: named failure points (`heap`, `frame`,
+     `disk_io`, `net_tx`...) from the command line with a seed; scenarios
+     run with failures injected, mainly in gala-um; programs get an
+     NTSTATUS, the kernel survives. Every fallible allocation path is
+     untested today, so this finds bugs at once.
+   - R3. **Lock-order checking** in debug builds (classes per IrqMutex,
+     held classes per CPU, panic on an inversion); the prose lock orders
+     become checked.
+   - R4. **Flight recorder, hang watchdog, crash record across reboots**
+     (docs/OBSERVABILITY.md §5).
+   - R5. **Deterministic simulation in gala-um**: time and thread
+     interleaving from a seed, so a flaky concurrency failure repeats
+     from its seed (as FoundationDB and TigerBeetle do). Needs R1's
+     single clock.
+   - R6. **Charging resources to an owner**: pages, kernel pool and
+     handles charged to a process and its job: the commit limit, job
+     memory limits, STATUS_QUOTA_EXCEEDED, the program using too much
+     fails instead of everyone starving ("no commit charge yet" in
+     WORKFLOW).
+   - R7. **Live mocking** at device and service boundaries (block
+     devices, NIC, clock, display, input, random): wrappers for faults,
+     time jumps, latency, record/replay, device events; API-level faults
+     in gala's DLLs (Application Verifier style); a read-write control
+     channel and a test-only `Gala*` call; off unless booted with a flag.
+   - R8. **Chain of trust for updates** (design): Secure Boot -> Limine
+     -> kernel -> signed system images; keys, manifest, rollback.
+   - R9. **Live update**: user mode first (versioned system images behind
+     an atomic pointer, old processes restarted one at a time), then the
+     kernel handover (quiescent point, serialized versioned state, user
+     pages kept, devices reset, blocked calls reissued). Live patching
+     only if a need appears.
+
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala
 itself. It needs pipes and the remaining process creation (cargo and the

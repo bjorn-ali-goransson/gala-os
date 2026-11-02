@@ -2926,6 +2926,105 @@ steps, each test first:
    (what FlaUI's UIA3 asks for first), then a FlaUI test program, built
    against the .NET runtime gala already runs, driving FileZilla.
 
+## Built in early: invariants, safety nets, live update (proposed 2026-11-02)
+
+Some properties are cheap to keep from the start and very expensive to
+retrofit; the owner asked for them to be designed in now (ROADMAP R1-R9
+has the order). Checked against the code when written: the disk log has a
+magic and a generation but no format version; there is no fault
+injection; lock orders are prose only; time mostly comes through the
+platform seam (`nt::platform::Clock`), but `kernel/src/time.rs` reads the
+TSC itself and about twenty places call `platform::ticks` directly.
+
+### Invariants (new code follows them now; old code is brought in line)
+
+1. **State that outlives a system call is data.** A blocked thread is
+   "waiter on object X until deadline T" in kernel structures, not
+   something only its kernel stack knows. (Today's waits mostly already
+   are: dispatcher waiters with deadlines.)
+2. **Blocking system calls can be restarted.** Relative timeouts become
+   absolute deadlines on entry, so a call can be reissued by rewinding the
+   user RIP to the `syscall` instruction with the same arguments (what a
+   kernel handover or a device reset needs).
+3. **Everything stored or shared has a version and an upgrade path**:
+   the disk format (superblock/log records: add a version field next to
+   the magic), the registry journal, the private `Gala*` system calls
+   (their records: window records, console records...), KUSER_SHARED_DATA
+   and other shared sections, the window-manager protocol between user32
+   and the desktop. A reader accepts its version and the previous one.
+4. **Drivers survive a device reset** (virtio has one): they can
+   re-initialize the device and resubmit what was in flight.
+5. **All kernel time comes through the `Clock` seam**: no TSC or tick
+   reads outside it (time.rs and the direct `platform::ticks` callers to
+   be audited and routed through it). Deterministic simulation (R5) and
+   time mocking (R7) depend on it.
+
+### Safety nets (designed here, built in R1-R4)
+
+- **Fault injection**: named failure points in the kernel (`heap`,
+  `frame`, `disk_io`, `net_tx`, ...) checked where the fallible paths
+  are, enabled from the command line (`failpoint=heap:every:97`,
+  `failpoint=heap:nth:1234`, with `failseed=` so a run repeats).
+  Scenarios run with failures injected, mostly under gala-um; the
+  expected outcome is a sensible NTSTATUS for the program and a kernel
+  that survives. Release images can compile the checks out.
+- **Lock-order checking (debug builds)**: each `IrqMutex` gets a class;
+  each CPU tracks the classes it holds; the first acquisition that
+  contradicts an order already seen panics with both orders (a small
+  lockdep). The prose lock orders in this document become checked ones.
+- Flight recorder, hang watchdog and a crash record kept across reboots:
+  docs/OBSERVABILITY.md §5.
+
+### Live mocking (a developer and test feature; R7)
+
+- **Swappable slots only at device and service boundaries**: block
+  devices (`fs::volume::Blocks`), the network card (`net`'s devices), the
+  clock, the display, input and the random source. The swap happens at a
+  quiescent point; hot paths (paging, the scheduler, the dispatcher) keep
+  static dispatch.
+- **Mostly wrappers around the real component**: faults ("the disk is
+  full from now on", dropped or reset packets), time jumps and skew (DST,
+  2038, certificate expiry), added latency, recording a component's
+  traffic and replaying it, device events (a NIC removed, a resolution
+  change). This makes fault injection configurable at run time.
+- **Per-process faults at the API level in gala's DLLs**, as Windows'
+  Application Verifier does (CreateFileW failing for given paths, heap
+  allocations failing at a set rate).
+- **Control**: OBSERVABILITY §6's introspection channel made
+  read-write, plus a test-only private `Gala*` call so a test program can
+  trigger a fault at an exact moment.
+- **Security**: off unless booted with an explicit flag, preferably
+  compiled out of release images, and every change logged to the event
+  stream (a live component-swap interface is otherwise an ideal rootkit
+  hook).
+
+### Live update (long term; R8, R9)
+
+- **User mode first**: a versioned system image (`System/vN/`) behind
+  one pointer switched atomically; the loader binds new processes to the
+  current version, running processes keep their mappings (an image in
+  use is never overwritten: the updater never writes a file in place, so
+  Windows' rule for mapped images still holds for programs). After an
+  update, the processes still running old code are listed and restarted
+  one at a time. Shared formats stay compatible across one version
+  (invariant 3).
+- **Kernel handover** (as kexec with Linux's Kexec HandOver / Live
+  Update Orchestrator): all threads stop at a quiescent point and
+  in-flight I/O drains; kernel state is serialized as versioned data;
+  user memory stays in its physical pages; the new kernel starts, reads
+  the state back, resets the devices and reissues the blocked system
+  calls (invariants 1, 2, 4). The disk log's snapshot and replay (D2/D3)
+  is the precedent for the format. Live mocking's swap at a quiescent
+  point is the trial run for this, so it comes first.
+- Function-level live patching (as Microsoft's Hotpatch): not planned
+  unless a concrete need appears.
+- **A chain of trust for updates** (design now, build later): Secure
+  Boot, then Limine (its config hash/enrolled checksums), then the
+  kernel, then signed system images. To decide before R8: where the keys
+  live, the update manifest's format (version, image hashes, signature),
+  and rollback protection, so that live update is built around signed
+  images.
+
 ## Not done yet
 
 suspension/context of threads running on other CPUs, ranged (invlpg)

@@ -105,13 +105,29 @@ counts (TCG plugins) need a QEMU built with plugins; Ubuntu's has none.
   batch mode.
 - Flaky SMP bugs: QEMU record/replay (`-icount shift=auto,rr=record`)
   makes a failing run reproducible.
+- **Flight recorder** (planned, ROADMAP R4): an always-on per-CPU ring of
+  the last few thousand events, kept in memory even when the event
+  stream is off, dumped on a panic (this is the "last N events in the
+  panic output" above).
+- **Hang watchdog** (planned, R4): on the timer tick, notice a CPU that
+  has stopped scheduling or a thread that has been in the kernel too
+  long, and print that CPU's stack and what the thread waits on.
+- **Crash record across reboots** (planned, R4): the panic record goes
+  to a reserved area of the disk and is reported at the next boot; it
+  stays local (privacy by design).
+- **Deterministic simulation** (planned, R5): gala-um with time and
+  thread interleaving from a seed, so a concurrency failure repeats from
+  its seed.
 
 ## 6. Live introspection — later
 
 A command channel (second serial port or virtio-vsock) with read-only
 queries: threads and their states/CPUs, a process's handle table and VADs,
 object namespace, counters. Agents can ask a hung system what it is
-waiting on instead of guessing.
+waiting on instead of guessing. Later read-write for tests (ROADMAP R7,
+live mocking): inject a fault, jump the clock, swap a device for a
+wrapper; off unless booted with an explicit flag, every change logged
+to the event stream.
 
 ## 6b. Screen — done
 
