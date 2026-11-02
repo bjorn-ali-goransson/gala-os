@@ -106,6 +106,7 @@ pub const GALA_WINDOW_INPUT: u32 = 0x7f35;
 pub const GALA_SCREEN_INFO: u32 = 0x7f36;
 pub const GALA_WINDOW_PLACE: u32 = 0x7f37;
 pub const GALA_WINDOW_SET_TITLE: u32 = 0x7f38;
+pub const GALA_WINDOW_CAPTURE: u32 = 0x7f39;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -267,7 +268,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_OPEN_EVENT, "NtOpenEvent", 3, nt_open_event),
     (NT_OPEN_DIRECTORY_OBJECT, "NtOpenDirectoryObject", 3, nt_open_directory_object),
     (NT_CREATE_DIRECTORY_OBJECT, "NtCreateDirectoryObject", 3, nt_create_directory_object),
-    (GALA_WINDOW_CREATE, "GalaWindowCreate", 7, gala_window_create),
+    (GALA_WINDOW_CREATE, "GalaWindowCreate", 8, gala_window_create),
     (GALA_WINDOW_SHOW, "GalaWindowShow", 2, gala_window_show),
     (GALA_WINDOW_PRESENT, "GalaWindowPresent", 7, gala_window_present),
     (GALA_WINDOW_DESTROY, "GalaWindowDestroy", 1, gala_window_destroy),
@@ -276,6 +277,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_SCREEN_INFO, "GalaScreenInfo", 1, gala_screen_info),
     (GALA_WINDOW_PLACE, "GalaWindowPlace", 5, gala_window_place),
     (GALA_WINDOW_SET_TITLE, "GalaWindowSetTitle", 3, gala_window_set_title),
+    (GALA_WINDOW_CAPTURE, "GalaWindowCapture", 1, gala_window_capture),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1222,15 +1224,16 @@ fn nt_open_directory_object(call: &mut Call<'_>) -> NtStatus {
     call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
 }
 
-/// GalaWindowCreate(x, y, width, height, *title, title_length, *id): a
-/// hidden top-level window of that outer size on the desktop (gala's own
-/// service; its frame is the desktop's); STATUS_NOT_SUPPORTED without a
-/// screen.
+/// GalaWindowCreate(x, y, width, height, *title, title_length, *id, style):
+/// a hidden top-level window of that outer size on the desktop (gala's own
+/// service; its frame is the desktop's; style 1: a frameless popup, all
+/// client area); STATUS_NOT_SUPPORTED without a screen.
 fn gala_window_create(call: &mut Call<'_>) -> NtStatus {
     let (x, y) = (arg!(call, 0) as u32 as i32, arg!(call, 1) as u32 as i32);
     let (w, h) = (arg!(call, 2) as u32, arg!(call, 3) as u32);
     let (title_ptr, title_len, out) =
         (arg!(call, 4), (arg!(call, 5) as usize).min(256), arg!(call, 6));
+    let style = arg!(call, 7) as u32;
     let mut bytes = [0u8; 512];
     if call.process.read(title_ptr, &mut bytes[..2 * title_len]).is_err() {
         return NtStatus::ACCESS_VIOLATION;
@@ -1241,7 +1244,7 @@ fn gala_window_create(call: &mut Call<'_>) -> NtStatus {
     }
     let owner = call.process.id;
     let id = tri!(super::desktop::with(|d| Ok((
-        d.create(owner, x, y, w, h, &title[..title_len])?,
+        d.create(owner, x, y, w, h, &title[..title_len], style)?,
         None
     ))));
     tri!(call.write_u32(out, id));
@@ -1327,6 +1330,15 @@ fn gala_window_place(call: &mut Call<'_>) -> NtStatus {
     let (w, h) = (arg!(call, 3) as u32, arg!(call, 4) as u32);
     let owner = call.process.id;
     tri!(super::desktop::with(|d| Ok(((), Some(d.place(id, owner, x, y, w, h)?)))));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowCapture(id): the caller's window gets all mouse input,
+/// wherever the pointer is (0: the caller's capture ends).
+fn gala_window_capture(call: &mut Call<'_>) -> NtStatus {
+    let id = arg!(call, 0) as u32;
+    let owner = call.process.id;
+    tri!(super::desktop::with(|d| Ok((d.capture(id, owner)?, None))));
     NtStatus::SUCCESS
 }
 

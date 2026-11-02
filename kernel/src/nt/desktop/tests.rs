@@ -8,7 +8,7 @@ fn title(s: &str) -> Vec<u16> {
 fn windows_composite_in_z_order_with_their_frames() {
     let mut d = Desktop::new();
     let t = title("Hi");
-    let a = d.create(1, 10, 10, 200, 80, &t).unwrap();
+    let a = d.create(1, 10, 10, 200, 80, &t, 0).unwrap();
     // Hidden until shown.
     assert_eq!(d.pixel(50, 50), DESKTOP_COLOR);
     d.show(a, 1, true).unwrap();
@@ -25,7 +25,7 @@ fn windows_composite_in_z_order_with_their_frames() {
     assert_eq!(d.pixel(client.0 + 4, client.1 + 5), 0x00ff_0000);
     // Another owner's window on top covers it; only its owner may present
     // to the first.
-    let b = d.create(2, 0, 0, 160, 80, &t).unwrap();
+    let b = d.create(2, 0, 0, 160, 80, &t, 0).unwrap();
     d.show(b, 2, true).unwrap();
     assert_eq!(d.pixel(30, 50), 0x00ff_ffff);
     assert_eq!(
@@ -42,7 +42,7 @@ fn windows_composite_in_z_order_with_their_frames() {
 fn desktop_with_window() -> (Desktop, u32) {
     let mut d = Desktop::new();
     d.set_screen(1024, 768).unwrap();
-    let a = d.create(7, 300, 100, 400, 300, &title("Notes")).unwrap();
+    let a = d.create(7, 300, 100, 400, 300, &title("Notes"), 0).unwrap();
     d.show(a, 7, true).unwrap();
     d.damage.clear();
     (d, a)
@@ -205,4 +205,67 @@ fn qoi_pictures_decode_and_cover_the_screen() {
     // overflow rows cropped.
     let w = Wallpaper::new(4, 2, Some(&p)).unwrap();
     assert_eq!(w.pixel(0, 0) & 0xffffff, 0xff0000);
+}
+
+#[test]
+fn a_popup_has_no_frame_stays_on_top_and_does_not_activate() {
+    let (mut d, a) = desktop_with_window();
+    let p = d.create(7, 320, 150, 100, 60, &title("menu"), STYLE_POPUP).unwrap();
+    // The whole window is its client area.
+    let w = d.window(p).unwrap();
+    assert_eq!((w.client_size(), w.client_origin()), ((100, 60), (320, 150)));
+    let green = [0x0000_ff00u32; 1];
+    d.present(p, 7, Rect { x: 0, y: 0, w: 1, h: 1 }, &green, 1).unwrap();
+    d.show(p, 7, true).unwrap();
+    assert_eq!(d.pixel(320, 150), 0x0000_ff00);
+    // Not active, not on the taskbar.
+    assert_eq!(d.active, Some(a));
+    assert_eq!(d.tasks().len(), 1);
+    // Raising the frame keeps the popup above it.
+    let (ox, oy) = d.window(a).unwrap().client_origin();
+    click(&mut d, ox + 5, oy + 200);
+    assert_eq!(d.pixel(320, 150), 0x0000_ff00);
+    // A click on it goes to it, in its coordinates.
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
+    d.take_input(7, &mut out);
+    click(&mut d, 330, 160);
+    let n = d.take_input(7, &mut out);
+    let down = out[..n].iter().find(|e| e.message == WM_LBUTTONDOWN).unwrap();
+    assert_eq!((down.window, down.lparam), (p, 10 << 16 | 10));
+    assert_eq!(d.active, Some(a));
+    // Too small for a frame is fine for a popup; unknown styles are not.
+    assert!(d.create(7, 0, 0, 2, 2, &title(""), STYLE_POPUP).is_ok());
+    assert!(d.create(7, 0, 0, 2, 2, &title(""), 0).is_err());
+    assert!(d.create(7, 0, 0, 200, 200, &title(""), 0x8).is_err());
+}
+
+#[test]
+fn the_capture_gets_the_mouse_everywhere() {
+    let (mut d, a) = desktop_with_window();
+    let p = d.create(7, 320, 150, 100, 60, &title("menu"), STYLE_POPUP).unwrap();
+    d.show(p, 7, true).unwrap();
+    assert!(d.capture(p, 8).is_err());
+    d.capture(p, 7).unwrap();
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
+    d.take_input(7, &mut out);
+    // A click on the desktop, left of and above the popup: to the popup,
+    // with negative coordinates; nothing else happens (no start menu).
+    let start = d.start_rect();
+    click(&mut d, 300, 140);
+    let n = d.take_input(7, &mut out);
+    let msgs: Vec<(u32, u32)> = out[..n].iter().map(|e| (e.window, e.message)).collect();
+    assert_eq!(msgs, [(p, WM_MOUSEMOVE), (p, WM_LBUTTONDOWN), (p, WM_LBUTTONUP)]);
+    assert_eq!(out[1].lparam, u64::from((-10i16) as u16) << 16 | u64::from((-20i16) as u16));
+    click(&mut d, start.x + 5, start.y + 5);
+    assert!(!d.menu_open());
+    // Released: the frame's caption works again.
+    d.capture(0, 7).unwrap();
+    let (ox, oy) = d.window(a).unwrap().client_origin();
+    click(&mut d, ox + 5, oy + 200);
+    let n = d.take_input(7, &mut out);
+    assert!(out[..n].iter().any(|e| e.window == a && e.message == WM_LBUTTONDOWN));
+    // A destroyed window loses it.
+    d.capture(p, 7).unwrap();
+    d.destroy(p, 7).unwrap();
+    assert_eq!(d.captured, None);
 }

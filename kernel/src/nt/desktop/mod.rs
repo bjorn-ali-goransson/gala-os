@@ -161,6 +161,20 @@ pub const WM_SYSKEYDOWN: u32 = 0x0104;
 pub const WM_SYSKEYUP: u32 = 0x0105;
 const VK_MENU: u8 = 0x12;
 
+/// GalaWindowCreate's style: a frameless popup.
+pub const STYLE_POPUP: u32 = 0x1;
+
+/// Whether an outer size suits a window (a framed one needs room for its
+/// caption and buttons).
+fn size_fits(w: u32, h: u32, popup: bool) -> bool {
+    let (min_w, min_h) = if popup {
+        (1, 1)
+    } else {
+        (2 * BORDER + 2 * CAPTION_BUTTON as u32 + 40, 2 * BORDER + CAPTION + 1)
+    };
+    w >= min_w && h >= min_h && w <= MAX_SIDE && h <= MAX_SIDE
+}
+
 /// Input for a program's window: a window message and its parameters
 /// (mouse positions in client coordinates).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,11 +230,21 @@ pub struct Window {
     client: Vec<u32>,
     /// The title (UTF-16).
     title: Vec<u16>,
+    /// A frameless popup (STYLE_POPUP: a menu, a drop-down list, a
+    /// tooltip): all client area, above the framed windows, not on the
+    /// taskbar, never active.
+    popup: bool,
 }
 
 impl Window {
+    /// The frame's left/right/bottom width and its top (caption) height.
+    fn frame(&self) -> (u32, u32) {
+        if self.popup { (0, 0) } else { (BORDER, BORDER + CAPTION) }
+    }
+
     fn client_size(&self) -> (u32, u32) {
-        (self.w - 2 * BORDER, self.h - 2 * BORDER - CAPTION)
+        let (b, top) = self.frame();
+        (self.w - 2 * b, self.h - top - b)
     }
 
     fn shown(&self) -> bool {
@@ -244,7 +268,8 @@ impl Window {
     }
 
     fn client_origin(&self) -> (i64, i64) {
-        (i64::from(self.x) + i64::from(BORDER), i64::from(self.y) + i64::from(BORDER + CAPTION))
+        let (b, top) = self.frame();
+        (i64::from(self.x) + i64::from(b), i64::from(self.y) + i64::from(top))
     }
 
     fn caption_rect(&self) -> Rect {
@@ -258,12 +283,20 @@ impl Window {
 
     /// How much of window point (lx, ly) its rounded shape covers.
     fn coverage(&self, lx: i64, ly: i64) -> u8 {
-        let (top, bottom) = if self.maximized { (0, 0) } else { (RADIUS, RADIUS_BOTTOM) };
+        let square = self.maximized || self.popup;
+        let (top, bottom) = if square { (0, 0) } else { (RADIUS, RADIUS_BOTTOM) };
         round_coverage2(lx, ly, self.w.into(), self.h.into(), top, bottom)
     }
 
     /// The colour of window point (lx, ly) inside its shape.
     fn body(&self, lx: i64, ly: i64, active: bool) -> u32 {
+        if self.popup {
+            let (cw, _) = self.client_size();
+            return self
+                .client
+                .get((ly * i64::from(cw) + lx) as usize)
+                .map_or(0x00ff_ffff, |p| p & 0x00ff_ffff);
+        }
         let (w, h) = (i64::from(self.w), i64::from(self.h));
         let b = i64::from(BORDER);
         let (rt, rb) = if self.maximized { (0, 0) } else { (RADIUS - 1, RADIUS_BOTTOM - 1) };
@@ -420,6 +453,9 @@ pub struct Desktop {
     woken: Vec<u64>,
     /// Alt is held (WM_SYSKEYDOWN).
     alt: bool,
+    /// The window with the mouse capture (GalaWindowCapture): it gets all
+    /// mouse input, wherever the pointer is.
+    captured: Option<u32>,
 }
 
 impl Default for Desktop {
@@ -457,6 +493,7 @@ impl Desktop {
             listeners: Vec::new(),
             woken: Vec::new(),
             alt: false,
+            captured: None,
         }
     }
 
@@ -503,7 +540,9 @@ impl Desktop {
 
     // ---- What programs do ----------------------------------------------
 
-    /// A new hidden window of outer size w x h at (x, y) titled `title`.
+    /// A new hidden window of outer size w x h at (x, y) titled `title`;
+    /// `style` STYLE_POPUP: a frameless popup.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &mut self,
         owner: u64,
@@ -512,13 +551,15 @@ impl Desktop {
         w: u32,
         h: u32,
         title: &[u16],
+        style: u32,
     ) -> Result<u32, NtStatus> {
-        let min_w = 2 * BORDER + 2 * CAPTION_BUTTON as u32 + 40;
-        if w < min_w || h <= 2 * BORDER + CAPTION || w > MAX_SIDE || h > MAX_SIDE {
+        let popup = style & STYLE_POPUP != 0;
+        if style & !STYLE_POPUP != 0 || !size_fits(w, h, popup) {
             return Err(NtStatus::INVALID_PARAMETER);
         }
+        let (b, top) = if popup { (0, 0) } else { (BORDER, BORDER + CAPTION) };
         let mut client = Vec::new();
-        let n = ((w - 2 * BORDER) * (h - 2 * BORDER - CAPTION)) as usize;
+        let n = ((w - 2 * b) * (h - top - b)) as usize;
         client.try_reserve_exact(n).map_err(|_| NtStatus::NO_MEMORY)?;
         client.resize(n, 0x00_ff_ff_ff);
         let mut name = Vec::new();
@@ -538,6 +579,7 @@ impl Desktop {
             caption_state: None,
             client,
             title: name,
+            popup,
         };
         self.windows.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
         self.windows.try_push(window).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -567,8 +609,11 @@ impl Desktop {
                     core::str::from_utf8(&text[..n]).unwrap_or("?")
                 );
             }
+            let popup = self.window(id).is_some_and(|w| w.popup);
             self.raise(id);
-            self.active = Some(id);
+            if !popup {
+                self.active = Some(id);
+            }
         }
         if !visible && self.active == Some(id) {
             self.activate_top();
@@ -623,15 +668,16 @@ impl Desktop {
         w: u32,
         h: u32,
     ) -> Result<Rect, NtStatus> {
-        let min_w = 2 * BORDER + 2 * CAPTION_BUTTON as u32 + 40;
-        if w < min_w || h <= 2 * BORDER + CAPTION || w > MAX_SIDE || h > MAX_SIDE {
+        let popup = self.find(id, owner)?.popup;
+        if !size_fits(w, h, popup) {
             return Err(NtStatus::INVALID_PARAMETER);
         }
         let win = self.find(id, owner)?;
         let old = win.bounds();
         if (w, h) != (win.w, win.h) {
             let (ow, oh) = win.client_size();
-            let (nw, nh) = (w - 2 * BORDER, h - 2 * BORDER - CAPTION);
+            let (b, top) = win.frame();
+            let (nw, nh) = (w - 2 * b, h - top - b);
             let mut client = Vec::new();
             client.try_reserve_exact((nw * nh) as usize).map_err(|_| NtStatus::NO_MEMORY)?;
             client.resize((nw * nh) as usize, 0x00_ff_ff_ff);
@@ -673,6 +719,23 @@ impl Desktop {
         Ok(r)
     }
 
+    /// Gives `owner`'s window `id` the mouse capture (0: releases the
+    /// capture if one of `owner`'s windows has it).
+    pub fn capture(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
+        if id == 0 {
+            if self.captured.and_then(|c| self.window(c)).is_some_and(|w| w.owner == owner) {
+                self.captured = None;
+            }
+            return Ok(());
+        }
+        self.find(id, owner)?;
+        self.captured = Some(id);
+        // No caption drag or press carries on underneath.
+        self.drag = None;
+        self.pressed = Hit::Nothing;
+        Ok(())
+    }
+
     pub fn destroy(&mut self, id: u32, owner: u64) -> Result<Rect, NtStatus> {
         let i = self.windows.iter().position(|w| w.id == id && w.owner == owner);
         let i = i.ok_or(NtStatus::INVALID_HANDLE)?;
@@ -711,6 +774,9 @@ impl Desktop {
 
     /// A window went: nothing refers to it any more.
     fn forget(&mut self, id: u32) {
+        if self.captured == Some(id) {
+            self.captured = None;
+        }
         if self.active == Some(id) {
             self.activate_top();
         }
@@ -849,13 +915,20 @@ impl Desktop {
 
     // ---- Window management ---------------------------------------------
 
+    /// To the top of its layer: framed windows stay below the popups.
     fn raise(&mut self, id: u32) {
-        if let Some(i) = self.index(id)
-            && i + 1 != self.windows.len()
-        {
-            let w = self.windows.remove(i);
-            let bounds = w.bounds();
-            let _ = self.windows.try_push(w);
+        let Some(i) = self.index(id) else { return };
+        let w = self.windows.remove(i);
+        let bounds = w.bounds();
+        let at = if w.popup {
+            self.windows.len()
+        } else {
+            self.windows.iter().position(|o| o.popup).unwrap_or(self.windows.len())
+        };
+        // Back in (the capacity it left), then into place.
+        let _ = self.windows.try_push(w);
+        self.windows[at..].rotate_right(1);
+        if at != i {
             self.add_damage(bounds);
         }
     }
@@ -869,7 +942,7 @@ impl Desktop {
 
     /// The topmost shown window becomes active (or none).
     fn activate_top(&mut self) {
-        let top = self.windows.iter().rev().find(|w| w.shown()).map(|w| w.id);
+        let top = self.windows.iter().rev().find(|w| w.shown() && !w.popup).map(|w| w.id);
         self.activate(top);
     }
 
@@ -931,7 +1004,7 @@ impl Desktop {
 
     fn visible_windows(&self) -> Vec<u32> {
         let mut ids: Vec<u32> = Vec::new();
-        for w in self.windows.iter().filter(|w| w.visible) {
+        for w in self.windows.iter().filter(|w| w.visible && !w.popup) {
             let _ = ids.try_push(w.id);
         }
         ids.sort_unstable();
@@ -1033,6 +1106,9 @@ impl Desktop {
             if !w.rect().contains(x, y) || w.coverage(lx, ly) < 128 {
                 continue;
             }
+            if w.popup {
+                return Hit::Client(w.id);
+            }
             let ww = i64::from(w.w);
             if ly < i64::from(BORDER + CAPTION) {
                 let close_x = ww - CAPTION_BUTTON - 1;
@@ -1074,6 +1150,31 @@ impl Desktop {
             let c = self.cursor_rect();
             self.add_damage(c);
         }
+        // The capture gets every mouse message, in its client coordinates.
+        if let Some(id) = self.captured
+            && self.window(id).is_some()
+        {
+            let keys = u64::from(buttons & 1) | u64::from(buttons & 2);
+            let lp = self.client_lparam(id, x, y);
+            let pressed = buttons & !self.buttons;
+            let released = self.buttons & !buttons;
+            self.buttons = buttons;
+            if (dx, dy) != (0, 0) {
+                self.send(id, WM_MOUSEMOVE, keys, lp);
+            }
+            for (bit, down, up) in
+                [(1, WM_LBUTTONDOWN, WM_LBUTTONUP), (2, WM_RBUTTONDOWN, WM_RBUTTONUP)]
+            {
+                if pressed & bit != 0 {
+                    self.send(id, down, keys, lp);
+                }
+                if released & bit != 0 {
+                    self.send(id, up, keys, lp);
+                }
+            }
+            self.refresh();
+            return core::mem::take(&mut self.damage);
+        }
         if let Some((id, gx, gy)) = self.drag {
             self.move_to(id, x - gx, y - gy);
         }
@@ -1107,7 +1208,9 @@ impl Desktop {
             && let Hit::Client(id) = hit
         {
             self.raise(id);
-            self.activate(Some(id));
+            if !self.window(id).is_some_and(|w| w.popup) {
+                self.activate(Some(id));
+            }
             let lp = self.client_lparam(id, x, y);
             self.send(id, WM_RBUTTONDOWN, keys, lp);
         }
@@ -1184,7 +1287,9 @@ impl Desktop {
             }
             Hit::Client(id) => {
                 self.raise(id);
-                self.activate(Some(id));
+                if !self.window(id).is_some_and(|w| w.popup) {
+                    self.activate(Some(id));
+                }
                 let lp = self.client_lparam(id, x, y);
                 self.send(id, WM_LBUTTONDOWN, keys, lp);
             }
@@ -1303,7 +1408,7 @@ impl Desktop {
         if self.screen.0 == 0 {
             // Windows alone (host tests): captions only.
             let active = self.active;
-            for w in self.windows.iter_mut() {
+            for w in self.windows.iter_mut().filter(|w| !w.popup) {
                 w.render_caption(active == Some(w.id), None);
             }
             return;
@@ -1316,6 +1421,9 @@ impl Desktop {
                 Hit::Button(id, b) if id == w.id => Some(b),
                 _ => None,
             };
+            if w.popup {
+                continue;
+            }
             let before = w.caption_state;
             w.render_caption(active == Some(w.id), button);
             if before != w.caption_state && w.shown() {

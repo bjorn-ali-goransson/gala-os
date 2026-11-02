@@ -27,6 +27,7 @@ unsafe extern "system" {
         title: *const u16,
         len: usize,
         id: *mut u32,
+        style: u32,
     ) -> u32;
     fn GalaWindowShow(id: u32, show: u8) -> u32;
     fn GalaWindowPresent(
@@ -133,6 +134,22 @@ pub(crate) struct Window {
     /// Maximized (SC_MAXIMIZE) and the rectangle SC_RESTORE goes back to.
     pub(crate) zoomed: bool,
     pub(crate) restore: [i32; 4],
+    /// A frameless desktop popup (a top-level WS_POPUP window without
+    /// WS_CAPTION: menus, drop-down lists, tooltips): all client area.
+    pub(crate) popup: bool,
+}
+
+/// A top-level window's frame on the desktop: the left, right and bottom
+/// border, and the height above the client area.
+pub(crate) fn frame(w: &Window) -> (i32, i32) {
+    if w.popup { (0, 0) } else { (BORDER, BORDER + CAPTION) }
+}
+
+/// Whether a top-level window of `style` is a frameless popup.
+pub(crate) fn is_popup(style: u32) -> bool {
+    const WS_POPUP: u32 = 0x8000_0000;
+    const WS_CAPTION: u32 = 0x00c0_0000;
+    style & WS_POPUP != 0 && style & WS_CAPTION != WS_CAPTION
 }
 
 #[derive(Clone, Copy)]
@@ -190,6 +207,7 @@ pub(crate) const NO_WINDOW: Window = Window {
     instance: 0,
     zoomed: false,
     restore: [0; 4],
+    popup: false,
 };
 const NO_MSG: Msg =
     Msg { hwnd: 0, message: 0, wparam: 0, lparam: 0, time: 0, pt: [0; 2], private: 0 };
@@ -665,12 +683,11 @@ pub extern "system" fn CreateWindowExW(
         );
     }
     let (x, y) = if x == CW_USEDEFAULT { (60, 60) } else { (x, y) };
-    let (w, h) = if w == CW_USEDEFAULT {
-        (640, 480)
-    } else {
-        (w.max(2 * BORDER + 1), h.max(2 * BORDER + CAPTION + 1))
-    };
-    let (cw, ch) = (w - 2 * BORDER, h - 2 * BORDER - CAPTION);
+    let popup = is_popup(style);
+    let (b, top) = if popup { (0, 0) } else { (BORDER, BORDER + CAPTION) };
+    let (w, h) =
+        if w == CW_USEDEFAULT { (640, 480) } else { (w.max(2 * b + 1), h.max(top + b + 1)) };
+    let (cw, ch) = (w - 2 * b, h - top - b);
     // SAFETY: plain calls; the title is the caller's NUL-terminated string.
     let (pixels, desktop) = unsafe {
         let pixels =
@@ -686,7 +703,7 @@ pub extern "system" fn CreateWindowExW(
         }
         let mut id = 0;
         // Without a screen the window exists but is never shown.
-        let _ = GalaWindowCreate(x, y, w as u32, h as u32, name, len, &mut id);
+        let _ = GalaWindowCreate(x, y, w as u32, h as u32, name, len, &mut id, u32::from(popup));
         (pixels, id)
     };
     let mut title = [0u16; 128];
@@ -730,6 +747,7 @@ pub extern "system" fn CreateWindowExW(
             instance: instance as usize,
             zoomed: false,
             restore: [0; 4],
+            popup,
         };
         Some(i)
     });
@@ -1581,7 +1599,8 @@ fn pump() {
                     with(|s| s.windows.iter().find(|w| w.used && w.desktop == id).copied())
                 {
                     let (cx, cy) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
-                    let (sx, sy) = (w.x + BORDER + cx, w.y + BORDER + CAPTION + cy);
+                    let (b, top) = frame(&w);
+                    let (sx, sy) = (w.x + b + cx, w.y + top + cy);
                     CURSOR.store(
                         (sx as u16 as usize) | (sy as u16 as usize) << 16,
                         Ordering::Relaxed,

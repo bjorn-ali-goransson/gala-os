@@ -2155,20 +2155,31 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   configuration turns both ports on and translation to scan code set 1;
   mouse 0xF6/0xF4, keyboard 0xF4. Mouse packets with the same buttons are
   summed per poll; set 1 codes (E0 for extended keys) map to virtual keys.
+- **Popups**: a window created with style 1 (STYLE_POPUP) is frameless,
+  all client area (any size from 1 x 1), square with a shadow, kept above
+  the framed windows (raising a framed window puts it below them), not on
+  the taskbar and never activated (showing or clicking it leaves the
+  active window as it was): menus, drop-down lists and tooltips.
+- **Capture** (GalaWindowCapture): the window gets every mouse message
+  in its client coordinates (negative outside it) wherever the pointer
+  is; captions, the taskbar and the start menu get nothing meanwhile. It
+  ends with GalaWindowCapture(0) from its owner or with the window.
 - **Syscalls** (gala's own range): GalaWindowCreate(x, y, w, h, title,
-  title_len, *id) 0x7f30, GalaWindowShow(id, show) 0x7f31,
+  title_len, *id, style) 0x7f30, GalaWindowShow(id, show) 0x7f31,
   GalaWindowPresent(id, x, y, w, h, pixels, stride) 0x7f32 (copies a
   client rectangle in), GalaWindowDestroy(id) 0x7f33, GalaWindowListen
   (event) 0x7f34, GalaWindowInput(records, max, *count) 0x7f35,
   GalaScreenInfo(*rects) 0x7f36, GalaWindowPlace(id, x, y, w, h) 0x7f37
   (a new client buffer keeping what fits), GalaWindowSetTitle(id, *text,
-  length) 0x7f38. Only the
+  length) 0x7f38, GalaWindowCapture(id) 0x7f39. Only the
   owner process may change a window.
 - **user32** (`user/user32/src/window.rs`): classes, windows
   (HWND = 0x10000 + 16 * slot), one message queue per process (256
   entries, an auto-reset event) filtered by thread, WM_PAINT synthesised
   by GetMessage / PeekMessage when a visible window is invalid and the
-  queue is empty, as on Windows. MsgWaitForMultipleObjects(Ex) and
+  queue is empty, as on Windows. A top-level WS_POPUP window without
+  WS_CAPTION is a desktop popup (`window::is_popup`; `window::frame`
+  gives each top-level window's frame: none for these). MsgWaitForMultipleObjects(Ex) and
   WaitMessage wait on the caller's handles plus that event (and the next
   timer for QS_TIMER) and return WAIT_OBJECT_0 + count while
   GetQueueStatus finds a message of the wake mask; gala does not tell new

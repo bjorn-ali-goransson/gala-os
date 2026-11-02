@@ -588,8 +588,12 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    (AlphaBlend, TransparentBlt, GradientFill over gdi32's Gdi* forms;
    gdi32_test) and alpha kept through SRCCOPY and 32-bit DIB copies: the
    status bar's icons, the queue's tab bar and the combo box's drop-down
-   button draw as on Windows (they were black). Next: the menu bar, then
-   using it (connecting to a server).
+   button draw as on Windows (they were black). Frameless popups on the
+   desktop (2026-11-02; above framed windows, never active, off the
+   taskbar) and a mouse capture for them: a top-level WS_POPUP window
+   without a caption is one (desktop unit tests, user32_test). Next: the
+   menu bar and popup menus on them, then using it (connecting to a
+   server).
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,

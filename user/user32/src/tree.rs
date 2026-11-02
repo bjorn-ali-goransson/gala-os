@@ -15,8 +15,8 @@
 //! with WM_WINDOWPOSCHANGED and DefWindowProc's WM_MOVE/WM_SIZE.
 
 use crate::window::{
-    BORDER, CAPTION, Handle, Hwnd, MAX_WINDOWS, NO_WINDOW, SendMessageW, State, Window, WndProc,
-    find_class, finish_create, hwnd_of, index_of, me, set_last_error, window, with,
+    Handle, Hwnd, MAX_WINDOWS, NO_WINDOW, SendMessageW, State, Window, WndProc, find_class,
+    finish_create, hwnd_of, index_of, me, set_last_error, window, with,
 };
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
@@ -154,7 +154,10 @@ pub fn subtree(hwnd: Hwnd, out: &mut [usize; 64]) -> usize {
 fn screen_origin(s: &State, i: usize) -> (i32, i32) {
     let w = &s.windows[i];
     match parent_index(s, i) {
-        None => (w.x + BORDER, w.y + BORDER + CAPTION),
+        None => {
+            let (b, top) = crate::window::frame(w);
+            (w.x + b, w.y + top)
+        }
         Some(p) => {
             let (px, py) = screen_origin(s, p);
             (px + w.x, py + w.y)
@@ -335,8 +338,9 @@ pub fn moved_by_desktop(top: Hwnd, lparam: isize) {
     let (cx, cy) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
     if let Some(i) = index_of(top) {
         with(|s| {
-            s.windows[i].x = cx - BORDER;
-            s.windows[i].y = cy - BORDER - CAPTION;
+            let (b, top) = crate::window::frame(&s.windows[i]);
+            s.windows[i].x = cx - b;
+            s.windows[i].y = cy - top;
         });
     }
 }
@@ -962,7 +966,8 @@ pub extern "system" fn SetWindowPos(
     SendMessageW(hwnd, WM_WINDOWPOSCHANGING, 0, &mut pos as *mut WindowPos as isize);
     let top_level = w.parent == 0;
     if top_level {
-        let (ncw, nch) = ((nw - 2 * BORDER).max(1), (nh - 2 * BORDER - CAPTION).max(1));
+        let (b, top) = crate::window::frame(&w);
+        let (ncw, nch) = ((nw - 2 * b).max(1), (nh - top - b).max(1));
         if (nw, nh) != (w.w, w.h) {
             resize_buffer(i, ncw, nch);
         }

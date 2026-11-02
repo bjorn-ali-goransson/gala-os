@@ -355,6 +355,16 @@ static void timers(void) {
     CHECK(!EnumThreadWindows(GetCurrentThreadId(), enum_stop, 0));
     CHECK(EnumWindows(enum_proc, 42) && enum_seen == 2);
 
+    // A WS_POPUP window without a caption has no frame: all client area.
+    HWND pop = CreateWindowExW(0, L"User32TestHooks", L"", WS_POPUP, 40, 50, 120, 70, NULL, NULL,
+                               GetModuleHandleW(NULL), NULL);
+    RECT pr;
+    POINT po = {0, 0};
+    CHECK(pop != NULL && GetClientRect(pop, &pr) && pr.right == 120 && pr.bottom == 70);
+    CHECK(GetWindowRect(pop, &pr) && pr.left == 40 && pr.top == 50 && pr.right == 160);
+    CHECK(ClientToScreen(pop, &po) && po.x == 40 && po.y == 50);
+    CHECK(DestroyWindow(pop));
+
     // UnregisterClassW: not while a window of it is there; then gone.
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = DefWindowProcW;
