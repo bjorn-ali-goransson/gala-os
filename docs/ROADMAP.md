@@ -1423,10 +1423,10 @@ SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing
    is drawn until a program creates a window on a machine with a screen;
    console windows only with `console=`; `noscreen` keeps the framebuffer
-   off. Next: a `profile=server` boot option (window creation fails as
-   with no screen, conhost.exe is never started, the desktop's input and
-   clock ticks are off) and a server module set in xtask without the GUI
-   DLLs and fonts; later a `desktop` cargo feature so a server kernel
+   off. **`profile=server` done** (2026-11-02, scenario
+   server_profile): the desktop is never drawn even with a screen,
+   windows still exist as without one, `console=` starts no conhost.exe.
+   Next: a server module set in xtask without the GUI DLLs and fonts; later a `desktop` cargo feature so a server kernel
    does not contain the compositor.
 
 R. **Robustness and live update, kernel included** (the owner's

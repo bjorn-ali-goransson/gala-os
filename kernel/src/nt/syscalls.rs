@@ -1428,7 +1428,7 @@ fn gala_window_listen(call: &mut Call<'_>) -> NtStatus {
     // Messages posted from other processes arrive with or without a
     // screen.
     tri!(super::window::listen(call.process.id as u32, event.clone()));
-    if super::platform::screen_size().is_none() {
+    if super::desktop::screen().is_none() {
         return NtStatus::NOT_SUPPORTED;
     }
     tri!(super::desktop::listen(call.process.id, event));
@@ -1905,7 +1905,7 @@ fn gala_window_set_title(call: &mut Call<'_>) -> NtStatus {
 /// taskbar) as two RECTs (left, top, right, bottom as i32);
 /// STATUS_NOT_SUPPORTED without a screen.
 fn gala_screen_info(call: &mut Call<'_>) -> NtStatus {
-    let Some((w, h)) = super::platform::screen_size() else { return NtStatus::NOT_SUPPORTED };
+    let Some((w, h)) = super::desktop::screen() else { return NtStatus::NOT_SUPPORTED };
     let work_bottom = h.saturating_sub(super::desktop::TASKBAR);
     let mut out = [0u8; 32];
     for (i, v) in [0, 0, w, h, 0, 0, w, work_bottom].iter().enumerate() {

@@ -2107,6 +2107,33 @@ fn redraw_damage(d: &mut Desktop) {
 }
 
 /// The desktop on the screen, painted once.
+/// `profile=server` (ROADMAP SD, ARCHITECTURE "Server and desktop
+/// workloads"): the desktop is never drawn, even with a screen; windows
+/// still exist (the registry, messages), as without a screen.
+static SERVER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SERVER_NOTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Boots in the server profile (before any program runs).
+pub fn set_server_profile() {
+    SERVER.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn server_profile() -> bool {
+    SERVER.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The screen the desktop may draw on: none in the server profile (noted
+/// once in the log the first time a program asks for it).
+pub fn screen() -> Option<(u32, u32)> {
+    if server_profile() {
+        if !SERVER_NOTED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            crate::info!("desktop: not drawn (server profile)");
+        }
+        return None;
+    }
+    platform::screen_size()
+}
+
 fn ensure_painted(d: &mut Desktop) -> Result<(), NtStatus> {
     if !d.painted
         && let Some((w, h)) = platform::screen_size()
@@ -2125,7 +2152,7 @@ fn ensure_painted(d: &mut Desktop) -> Result<(), NtStatus> {
 pub fn with<R>(
     f: impl FnOnce(&mut Desktop) -> Result<(R, Option<Rect>), NtStatus>,
 ) -> Result<R, NtStatus> {
-    if platform::screen_size().is_none() {
+    if screen().is_none() {
         return Err(NtStatus::NOT_SUPPORTED);
     }
     let mut d = DESKTOP.lock();
@@ -2140,7 +2167,7 @@ pub fn with<R>(
 
 /// A process ended: its windows go.
 pub fn process_ended(owner: u64) {
-    if platform::screen_size().is_none() {
+    if server_profile() || platform::screen_size().is_none() {
         return;
     }
     let mut d = DESKTOP.lock();

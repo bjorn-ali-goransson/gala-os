@@ -2212,8 +2212,15 @@ const PENDING: &[&str] = &[
 ];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
-const UEFI_SCENARIOS: &[&str] =
-    &["hello", "selftest", "fault-pagefault", "gui_test", "filezilla", "console_window"];
+const UEFI_SCENARIOS: &[&str] = &[
+    "server_profile",
+    "hello",
+    "selftest",
+    "fault-pagefault",
+    "gui_test",
+    "filezilla",
+    "console_window",
+];
 
 /// What xtask's host-side client does in a net scenario.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -3024,6 +3031,22 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=user32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["user32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // ROADMAP SD: the server profile never brings up the graphical
+        // interface, even with a screen (UEFI: a framebuffer): windows
+        // still work (the registry, messages), nothing is drawn, and
+        // `console=` starts no console window.
+        name: "server_profile",
+        cmdline: "qemu_exit profile=server console=user32_test.exe run=user32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "profile: server",
+            "console: no console window for user32_test.exe (server profile)",
+            "desktop: not drawn (server profile)",
+            "user32_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // Windows across processes (the kernel's window registry): a
@@ -3903,6 +3926,7 @@ fn events_flag() -> String {
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
     ("kernel_watchdog", "hello"),
+    ("server_profile", "user32_test"),
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
     ("crash_record", "hello"),

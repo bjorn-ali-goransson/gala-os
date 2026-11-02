@@ -108,6 +108,7 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `spintest` | the boot thread spins in the kernel for 25 s (the kernel-thread watchdog's scenario) |
 | `hangtest` | CPU 1 spins with interrupts off for 9 s, 3 s after its timer starts (the hang watchdog's scenario) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
+| `profile=server` | never bring up the graphical interface: the desktop is not drawn even with a screen (windows still exist), `console=` starts no console window (ROADMAP SD) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |
 | `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault` or `all` |
 | `failpoint=<point>:<mode>:<n>[,...]` | fault injection while the `start=`/`run=` programs run (debug builds; "Fault injection" below). Points `heap`, `frame`, `disk_io`, `net_tx`; modes `every:<n>` (the n-th, 2n-th, ... occurrence fails), `nth:<n>` (only the n-th), `random:<per-mille>` (from `failseed=`). Example: `failpoint=heap:every:97,net_tx:random:50` |
@@ -2899,10 +2900,16 @@ it holds today:
   by `console=`; otherwise console output goes to the boot console.
 - `noscreen` keeps the framebuffer off (boot tests use it).
 
+- `profile=server` (2026-11-02, scenario `server_profile`, by UEFI so
+  there is a screen): the desktop is never drawn (`desktop::screen()` is
+  None; logged once as "desktop: not drawn (server profile)"),
+  GalaWindowListen and GalaScreenInfo answer as without a screen, and
+  `console=` starts no conhost.exe. The screen keeps the text console.
+
 Rule for new code: nothing in the boot path, the console path or a
 server program's path may touch the desktop, start a GUI process or
 load a GUI DLL unless a program asked for a window. Planned (ROADMAP
-SD): `profile=server` and a server module set without the GUI DLLs,
+SD): a server module set without the GUI DLLs,
 then a `desktop` cargo feature that leaves the compositor out of a
 server kernel.
 

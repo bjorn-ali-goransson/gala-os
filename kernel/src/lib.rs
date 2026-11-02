@@ -173,6 +173,11 @@ pub fn kernel_main() -> ! {
 
     // The desktop's wallpaper (`wallpaper=<name>`, else one at random).
     nt::desktop::choose_wallpaper(cmdline.value("wallpaper"));
+    // `profile=server` (ROADMAP SD): no graphical interface, ever.
+    if cmdline.value("profile") == Some("server") {
+        nt::desktop::set_server_profile();
+        info!("profile: server (no desktop, no console windows)");
+    }
     nt::syscalls::set_trace(cmdline.flag("trace"));
     // The watchdog's test: CPU 1 stops taking timer interrupts for a while.
     time::set_hang_test(cmdline.flag("hangtest"));
@@ -571,6 +576,10 @@ fn console_window(
     // The module's name or its file name (`dir/x.exe` or `x.exe`).
     let file = name.rsplit('/').next().unwrap_or(name);
     if !wanted.is_some_and(|w| w.eq_ignore_ascii_case(name) || w.eq_ignore_ascii_case(file)) {
+        return None;
+    }
+    if nt::desktop::server_profile() {
+        info!("console: no console window for {file} (server profile)");
         return None;
     }
     let session = match nt::conhost::create() {
