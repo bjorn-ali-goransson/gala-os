@@ -88,10 +88,10 @@ pub enum Resume {
     /// Blocked in a system call: made again with the user registers at
     /// the `syscall` (its arguments), the user's x87/SSE state, and the
     /// deadline (timer tick) it had, kept absolute.
-    Syscall { number: u32, regs: UserRegs, fx: platform::FxState, deadline: Option<u64> },
+    Syscall { number: u32, regs: UserRegs, fx: platform::XState, deadline: Option<u64> },
     /// Stopped in user mode (interrupted, or on its way back from a system
     /// call): goes on with exactly these registers and x87/SSE state.
-    User { regs: UserRegs, fx: platform::FxState },
+    User { regs: UserRegs, fx: platform::XState },
     /// Created suspended and never run: starts with `regs` once resumed.
     Start { regs: UserRegs, mxcsr: Option<u32> },
 }
@@ -104,7 +104,7 @@ static HOLD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::ne
 #[derive(Clone)]
 pub struct Parked {
     pub regs: UserRegs,
-    pub fx: platform::FxState,
+    pub fx: platform::XState,
     /// Set by NtSetContextThread: resume with `regs`/`fx`.
     pub changed: bool,
 }
@@ -351,7 +351,7 @@ fn thread_entry(id: usize) {
             *t.restart_deadline.lock() = Some(deadline);
             t.entered.store(true, Ordering::SeqCst);
             drop(object);
-            platform::fxrstor(&fx);
+            platform::xrstor(&fx);
             let g = &regs.gpr;
             let mut frame = platform::SyscallFrame {
                 r15: g[15],
@@ -405,7 +405,7 @@ fn thread_entry(id: usize) {
         exit_current(status);
     }
     if let Some(p) = parked {
-        platform::fxrstor(&p.fx);
+        platform::xrstor(&p.fx);
         platform::enter_user(&p.regs);
     }
     // The kernel never touches SSE state, so this is what user mode gets.
@@ -561,7 +561,7 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
     }
     // Suspended: wait here, with the user state where other threads can
     // read and change it, until resumed (or terminated).
-    *t.parked.lock() = Some(Parked { regs: *regs, fx: platform::fxsave(), changed: false });
+    *t.parked.lock() = Some(Parked { regs: *regs, fx: platform::xsave(), changed: false });
     loop {
         let count = t.suspend_count.lock();
         if *count == 0 || t.terminate_request.lock().is_some() {
@@ -583,7 +583,7 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
     match parked {
         Some(p) if p.changed => {
             *regs = p.regs;
-            platform::fxrstor(&p.fx);
+            platform::xrstor(&p.fx);
             true
         }
         _ => false,
@@ -595,7 +595,7 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
 /// (`snapshot`). Nothing is held here: the system call or interrupt is
 /// over, so the thread is at a safe point.
 fn hold(t: &NtThread, regs: &UserRegs) {
-    *t.held.lock() = Some(Parked { regs: *regs, fx: platform::fxsave(), changed: false });
+    *t.held.lock() = Some(Parked { regs: *regs, fx: platform::xsave(), changed: false });
     loop {
         if !HOLD.load(Ordering::SeqCst) || t.terminate_request.lock().is_some() {
             break;
@@ -938,11 +938,8 @@ pub fn dump() {
 }
 
 /// The floating-point state after reset (FCW 0x37f, MXCSR 0x1f80).
-fn default_fx() -> platform::FxState {
-    let mut fx = platform::FxState([0; 512]);
-    fx.0[0..2].copy_from_slice(&0x37fu16.to_le_bytes());
-    fx.0[24..28].copy_from_slice(&0x1f80u32.to_le_bytes());
-    fx
+fn default_fx() -> platform::XState {
+    platform::XState::initial()
 }
 
 /// Replaces the parked user state of a suspended thread (applied when it
@@ -950,7 +947,7 @@ fn default_fx() -> platform::FxState {
 pub fn set_parked_state(
     object: &ObjectRef,
     regs: UserRegs,
-    fx: Option<platform::FxState>,
+    fx: Option<platform::XState>,
 ) -> Result<(), NtStatus> {
     let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     parked_state(object)?;

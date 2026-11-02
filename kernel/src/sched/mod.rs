@@ -25,6 +25,7 @@ use core::fmt;
 use crate::arch::context::{Context, KernelStack, StackError};
 use crate::arch::paging::{self, SharedUserSpace};
 use crate::arch::syscall::UserRegs;
+use crate::arch::xstate::XState;
 use crate::arch::{cpu, percpu, smp};
 use crate::mm::heap::{AllocError, TryVec, try_box};
 use crate::sync::IrqMutex;
@@ -244,11 +245,11 @@ impl Scheduler {
 }
 
 /// A thread record for code that is already running on this CPU.
-fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Thread {
-    Thread {
+fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Result<Thread, SpawnError> {
+    Ok(Thread {
         name,
         state: State::Running,
-        context: Context::current(),
+        context: Context::current().map_err(|_| SpawnError::OutOfMemory)?,
         stack: None,
         entry: None,
         joiners: Vec::new(),
@@ -258,7 +259,7 @@ fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Thread {
         affinity,
         is_idle,
         pending_continue: None,
-    }
+    })
 }
 
 /// Adopts the running boot thread as thread #0 and starts the boot CPU's
@@ -270,7 +271,7 @@ pub fn init() -> Result<(), SpawnError> {
         cpus: [OFFLINE; smp::MAX_CPUS],
         users_frozen: false,
     };
-    let boot = sched.add(adopted("boot", false, ALL_CPUS))?;
+    let boot = sched.add(adopted("boot", false, ALL_CPUS)?)?;
     sched.cpus[0] = Cpu { online: true, current: boot, ..OFFLINE };
     *SCHED.lock() = Some(sched);
     let idle = spawn("idle", idle_loop, 0)?;
@@ -289,8 +290,10 @@ pub fn init() -> Result<(), SpawnError> {
 /// running code as the CPU's idle thread and starts scheduling there.
 pub fn run_ap(index: u32) -> ! {
     let cpu = index as usize;
+    // The record (and its save area) is allocated outside the lock.
+    let record = adopted("idle", true, 1 << cpu);
     let added = with(|s| {
-        let id = s.add(adopted("idle", true, 1 << cpu))?;
+        let id = s.add(record?)?;
         s.cpus[cpu] = Cpu { online: true, current: id, idle: Some(id), ..OFFLINE };
         Ok::<_, SpawnError>(())
     });
@@ -332,7 +335,7 @@ fn spawn_inner(
 ) -> Result<ThreadId, SpawnError> {
     // Allocate outside the scheduler lock.
     let stack = KernelStack::new().map_err(SpawnError::Stack)?;
-    let context = Context::new_thread(&stack, thread_start);
+    let context = Context::new_thread(&stack, thread_start).map_err(|_| SpawnError::OutOfMemory)?;
     let thread = Thread {
         name,
         state: State::Ready,
@@ -756,8 +759,8 @@ pub enum UserWait {
     Dead,
 }
 
-/// `id`'s state and, if it is off every CPU, its saved x87/SSE state.
-pub fn user_wait(id: ThreadId) -> (UserWait, Option<cpu::FxState>) {
+/// `id`'s state and, if it is off every CPU, its saved x87/SSE/AVX state.
+pub fn user_wait(id: ThreadId) -> (UserWait, Option<XState>) {
     with(|s| {
         let Some(t) = s.threads.get(id.0) else { return (UserWait::Dead, None) };
         let state = match t.state {
@@ -765,7 +768,7 @@ pub fn user_wait(id: ThreadId) -> (UserWait, Option<cpu::FxState>) {
             State::Dead => UserWait::Dead,
             _ => UserWait::Busy,
         };
-        let fx = (!t.on_cpu).then(|| switch::saved_fx(&t.context));
+        let fx = (!t.on_cpu).then(|| switch::saved_xstate(&t.context));
         (state, fx)
     })
 }

@@ -21,3 +21,4 @@ pub mod smp;
 mod sync;
 pub mod syscall;
 pub mod virtio;
+pub mod xstate;

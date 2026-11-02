@@ -127,10 +127,14 @@ impl Context {
     }
 
     /// A copy of the CONTEXT at `p`.
+    /// A copy of the CONTEXT at `p`, without CONTEXT_XSTATE: its
+    /// CONTEXT_EX and XSTATE area (after the original) are not copied, so
+    /// NtContinue of the copy keeps the current extended state.
     fn from_ptr(p: *const u8) -> Self {
         let mut c = Context([0; CONTEXT_SIZE]);
         // SAFETY: callers pass a CONTEXT.
         unsafe { core::ptr::copy_nonoverlapping(p, c.0.as_mut_ptr(), CONTEXT_SIZE) };
+        c.0[CTX_FLAGS] &= !0x40; // CONTEXT_XSTATE's own bit
         c
     }
 }

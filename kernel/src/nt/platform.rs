@@ -14,12 +14,12 @@
 //! become trait-associated or NT-owned types when `nt/` leaves the kernel
 //! crate (see "Remaining" in docs/GALA_UM.md).
 
-pub use crate::arch::cpu::FxState;
 pub use crate::arch::interrupts::TrapFrame;
 pub use crate::arch::paging::{PagingError, UserFault};
 #[cfg(not(feature = "hosted"))]
 pub use crate::arch::paging::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};
 pub use crate::arch::syscall::{SyscallFrame, UserRegs};
+pub use crate::arch::xstate::XState;
 pub use crate::disk::{DiskError, SECTOR as DISK_SECTOR};
 #[cfg(feature = "hosted")]
 pub use crate::hosted::memory::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};
@@ -121,9 +121,15 @@ pub trait UserEntry {
     /// The current system call returns to user mode with `regs` instead
     /// of its own result (NtContinue, exception dispatch).
     fn continue_with(regs: UserRegs);
-    fn fxsave() -> FxState;
-    fn fxrstor(state: &FxState);
+    /// The user's x87/SSE/AVX state now (in a system call or trap), with
+    /// the bytes of components in their initial state filled in.
+    fn xsave() -> XState;
+    /// Replaces it (sanitized: only enabled components, valid MXCSR).
+    fn xrstor(state: &XState);
     fn set_mxcsr(value: u32);
+    /// The state components programs can use (XCR0's user features:
+    /// x87, SSE, AVX, AVX-512), as KUSER_SHARED_DATA reports them.
+    fn xstate_enabled() -> u64;
 }
 
 /// User memory: the address space of a process (`UserSpace`, whose
@@ -301,12 +307,16 @@ pub fn continue_with(regs: UserRegs) {
     <P as UserEntry>::continue_with(regs)
 }
 #[inline]
-pub fn fxsave() -> FxState {
-    <P as UserEntry>::fxsave()
+pub fn xsave() -> XState {
+    <P as UserEntry>::xsave()
 }
 #[inline]
-pub fn fxrstor(state: &FxState) {
-    <P as UserEntry>::fxrstor(state)
+pub fn xrstor(state: &XState) {
+    <P as UserEntry>::xrstor(state)
+}
+#[inline]
+pub fn xstate_enabled() -> u64 {
+    <P as UserEntry>::xstate_enabled()
 }
 #[inline]
 pub fn set_mxcsr(value: u32) {

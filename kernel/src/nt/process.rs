@@ -971,6 +971,10 @@ const RECORD_SIZE: u64 = 0x98;
 /// (UWOP_PUSH_MACHFRAME), so unwinding continues into the faulting frame.
 const MACHINE_FRAME_OFFSET: u64 = 0x590;
 const DISPATCH_FRAME_SIZE: u64 = MACHINE_FRAME_OFFSET + 0x30;
+/// With extended features (AVX): the CONTEXT has CONTEXT_XSTATE, its
+/// CONTEXT_EX follows it (at 0x4d0, before the record) and the XSTATE
+/// area starts here, 64-byte aligned (the frame is).
+const XSTATE_OFFSET: u64 = DISPATCH_FRAME_SIZE;
 
 /// EXCEPTION_RECORD (x64) for `status` raised at `address`.
 fn exception_record(status: NtStatus, address: u64, info: &[u64]) -> [u8; RECORD_SIZE as usize] {
@@ -1032,12 +1036,29 @@ fn deliver_to_user(
         rip,
         rflags: frame.rflags,
     };
-    let context = super::context::to_bytes(&regs, Some(&platform::fxsave()));
-    let new_rsp = (frame.rsp.wrapping_sub(DISPATCH_FRAME_SIZE)) & !0xf;
+    use super::context as c;
+    let state = platform::xsave();
+    let mut context = c::to_bytes(&regs, Some(&state));
+    let xlen = c::xstate_len();
+    let size = if xlen == 0 { DISPATCH_FRAME_SIZE } else { XSTATE_OFFSET + xlen as u64 };
+    if xlen != 0 {
+        let flags = c::flags(&context) | c::CONTEXT_XSTATE;
+        c::set_flags(&mut context, flags);
+    }
+    let new_rsp = (frame.rsp.wrapping_sub(size)) & !0x3f;
+    let extended = |at: u64| {
+        if xlen == 0 {
+            return Ok(());
+        }
+        let area = c::xstate_bytes(&state, u64::MAX, xlen);
+        process.write(at + c::SIZE as u64, &c::context_ex(XSTATE_OFFSET as usize, xlen))?;
+        process.write(at + XSTATE_OFFSET, &area[..xlen])
+    };
     if new_rsp >= frame.rsp
         || process.write(new_rsp, &context).is_err()
         || process.write(new_rsp + RECORD_OFFSET, &record).is_err()
         || process.write(new_rsp + MACHINE_FRAME_OFFSET, &machine_frame(rip, frame)).is_err()
+        || extended(new_rsp).is_err()
     {
         warn!("user exception: cannot push the dispatcher frame (rsp {:#x})", frame.rsp);
         return false;

@@ -18,9 +18,9 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 use super::HOST_START;
-use crate::arch::cpu::FxState;
 use crate::arch::interrupts::TrapFrame;
 use crate::arch::syscall::{SyscallFrame, UserRegs};
+use crate::arch::xstate::{self, XState};
 use crate::sim::{SpinCapture, SpinState, SpinStep};
 
 const HOST_END: u64 = 0x8000_0000_0000;
@@ -584,25 +584,99 @@ fn fpstate() -> Option<*mut u8> {
     (!fp.is_null()).then_some(fp.cast())
 }
 
-pub fn fxsave() -> FxState {
-    let mut state = FxState([0; 512]);
-    match fpstate() {
-        // SAFETY: the 512-byte legacy FXSAVE area of the signal frame.
-        Some(fp) => unsafe { core::ptr::copy_nonoverlapping(fp, state.0.as_mut_ptr(), 512) },
-        None => {
-            // Default state: FCW 0x37f, MXCSR 0x1f80.
-            state.0[0..2].copy_from_slice(&0x37fu16.to_le_bytes());
-            state.0[24..28].copy_from_slice(&0x1f80u32.to_le_bytes());
+/// Linux's signal-frame extension of the FXSAVE area (`_fpx_sw_bytes`
+/// in its software-reserved bytes 464..512): magic1, extended_size,
+/// xfeatures, xstate_size. With the magic, the XSAVE header and the
+/// extended components follow the legacy area (standard format).
+const SW_BYTES: usize = 464;
+const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
+
+/// The XSAVE area's size in the signal frame (0: FXSAVE only).
+fn frame_xstate_size(fp: *const u8) -> usize {
+    // SAFETY: the 512-byte legacy area of the signal frame.
+    let (magic, size) = unsafe {
+        (
+            fp.add(SW_BYTES).cast::<u32>().read_unaligned(),
+            fp.add(SW_BYTES + 16).cast::<u32>().read_unaligned(),
+        )
+    };
+    if magic == FP_XSTATE_MAGIC1 { size as usize } else { 0 }
+}
+
+/// The components programs can use under gala-um: the host's XCR0 (Linux
+/// enables XSAVE) as gala would enable it (`xstate::usable`).
+pub fn xstate_enabled() -> u64 {
+    static ENABLED: OnceLock<u64> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        if crate::arch::cpu::cpuid(1, 0).ecx & (1 << 27) == 0 {
+            return xstate::LEGACY;
         }
+        let (lo, hi): (u32, u32);
+        // SAFETY: XGETBV(0) is allowed in user mode with CR4.OSXSAVE set
+        // (CPUID.1:ECX.OSXSAVE, checked above).
+        unsafe {
+            core::arch::asm!("xgetbv", in("ecx") 0, out("eax") lo, out("edx") hi,
+                             options(nomem, nostack))
+        };
+        xstate::usable(u64::from(hi) << 32 | u64::from(lo))
+    })
+}
+
+/// The program's x87/SSE/AVX state: the interrupted context's area in
+/// the signal frame (the handler itself runs with a fresh one).
+pub fn xsave() -> XState {
+    let mut state = XState::initial();
+    let enabled = xstate_enabled();
+    if let Some(fp) = fpstate() {
+        // SAFETY: the 512-byte legacy FXSAVE area of the signal frame.
+        unsafe { core::ptr::copy_nonoverlapping(fp, state.0.as_mut_ptr(), xstate::LEGACY_SIZE) };
+        let size = frame_xstate_size(fp).min(xstate::size_of(enabled));
+        if size > xstate::LEGACY_SIZE {
+            // SAFETY: Linux's frame has `xstate_size` bytes of XSAVE area.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    fp.add(xstate::LEGACY_SIZE),
+                    state.0.as_mut_ptr().add(xstate::LEGACY_SIZE),
+                    size - xstate::LEGACY_SIZE,
+                )
+            };
+            state.sanitize(enabled, u32::MAX);
+        } else {
+            state.set_bv(xstate::LEGACY);
+        }
+        state.0[SW_BYTES..xstate::LEGACY_SIZE].fill(0);
     }
+    state.normalize(enabled);
     state
 }
 
-pub fn fxrstor(state: &FxState) {
-    if let Some(fp) = fpstate() {
-        // SAFETY: as in `fxsave`; MXCSR reserved bits are masked by the
-        // kernel's NtContinue path before this.
-        unsafe { core::ptr::copy_nonoverlapping(state.0.as_ptr(), fp, 512) };
+/// Makes `state` what the program resumes with: the signal frame's area
+/// (the return from the handler loads it). Linux's own bytes (the
+/// software-reserved part, the header's other components) stay.
+pub fn xrstor(state: &XState) {
+    let Some(fp) = fpstate() else { return };
+    let enabled = xstate_enabled();
+    let mut s = state.clone();
+    s.normalize(enabled);
+    // SAFETY: the legacy area of the signal frame, up to Linux's bytes;
+    // MXCSR reserved bits are masked by the kernel's NtContinue path.
+    unsafe { core::ptr::copy_nonoverlapping(s.0.as_ptr(), fp, SW_BYTES) };
+    let size = frame_xstate_size(fp);
+    if size < xstate::size_of(enabled) {
+        return;
+    }
+    let ext = enabled & !xstate::LEGACY;
+    // SAFETY: the frame's XSAVE header and components, `size` bytes in all;
+    // each component lies within `size_of(enabled)`.
+    unsafe {
+        let bv = fp.add(xstate::LEGACY_SIZE).cast::<u64>();
+        let old = bv.read_unaligned();
+        bv.write_unaligned((old & !ext) | (s.bv() & ext) | xstate::LEGACY);
+        for (i, &(offset, len)) in xstate::COMPONENTS.iter().enumerate().skip(2) {
+            if ext & (1 << i) != 0 {
+                core::ptr::copy_nonoverlapping(s.0.as_ptr().add(offset), fp.add(offset), len);
+            }
+        }
     }
 }
 

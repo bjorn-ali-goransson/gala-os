@@ -4,6 +4,7 @@ use core::arch::global_asm;
 use core::sync::atomic::AtomicU64;
 
 use super::paging;
+use super::xstate::{NoMemory, XArea, XState};
 use crate::mm::paging::PageFlags;
 use crate::mm::{self, PAGE_SIZE};
 use crate::sync::IrqMutex;
@@ -93,28 +94,14 @@ impl Drop for KernelStack {
     }
 }
 
-/// FXSAVE area: x87/SSE state (512 bytes, 16-byte aligned).
-#[repr(C, align(16))]
-struct FxArea([u8; 512]);
-
-impl FxArea {
-    /// Power-on defaults: FCW = 0x037f, MXCSR = 0x1f80 (all exceptions masked).
-    const fn initial() -> Self {
-        let mut a = [0; 512];
-        a[0] = 0x7f;
-        a[1] = 0x03;
-        a[24] = 0x80;
-        a[25] = 0x1f;
-        FxArea(a)
-    }
-}
-
-/// Saved state of a switched-out thread: stack pointer and FPU/SSE state.
-/// Layout is used by `gala_context_switch` (rsp at 0, FXSAVE area at 16).
-#[repr(C, align(16))]
+/// Saved state of a switched-out thread: stack pointer and its x87/SSE/
+/// AVX state (an `XArea`: `xstate::size()` bytes on the heap, 64-byte
+/// aligned). Layout used by `gala_context_switch`: rsp at 0, the area's
+/// address at 8.
+#[repr(C)]
 pub struct Context {
     rsp: AtomicU64,
-    fx: core::cell::UnsafeCell<FxArea>,
+    area: XArea,
 }
 
 impl core::fmt::Debug for Context {
@@ -129,13 +116,14 @@ const SAVED_REGS: usize = 6;
 impl Context {
     /// Context for the thread that is already running (its state is saved
     /// by the first switch away from it).
-    pub const fn current() -> Self {
-        Context { rsp: AtomicU64::new(0), fx: core::cell::UnsafeCell::new(FxArea::initial()) }
+    pub fn current() -> Result<Self, NoMemory> {
+        Ok(Context { rsp: AtomicU64::new(0), area: XArea::new()? })
     }
 
     /// A context that starts executing `entry` on `stack` when switched to.
     /// `entry` runs with interrupts disabled and must not return.
-    pub fn new_thread(stack: &KernelStack, entry: extern "C" fn() -> !) -> Self {
+    pub fn new_thread(stack: &KernelStack, entry: extern "C" fn() -> !) -> Result<Self, NoMemory> {
+        let area = XArea::new()?;
         // Frame popped by the switch, lowest address first: r15, r14, r13,
         // r12, rbx, rbp, return address, then two padding words so that
         // after the `ret` (rsp = top - 16) the trampoline's `call` leaves
@@ -150,28 +138,48 @@ impl Context {
             let p = core::ptr::with_exposed_provenance_mut::<u64>(rsp as usize);
             p.copy_from_nonoverlapping(frame.as_ptr(), frame.len());
         }
-        Context { rsp: AtomicU64::new(rsp), fx: core::cell::UnsafeCell::new(FxArea::initial()) }
+        Ok(Context { rsp: AtomicU64::new(rsp), area })
     }
 
-    /// The x87/SSE state saved by the last switch away from this context
-    /// (a kernel handover carries a blocked thread's user state).
+    /// The x87/SSE/AVX state saved by the last switch away from this
+    /// context (a kernel handover carries a blocked thread's user state).
+    /// The one accessor for the save area (its size: `xstate::size()`).
     ///
     /// # Safety
     /// The thread must not be running on any CPU (the switch writes the
     /// area while it saves it), which the scheduler's `on_cpu` tells.
-    pub unsafe fn saved_fx(&self) -> super::cpu::FxState {
+    pub unsafe fn saved_xstate(&self) -> XState {
         // SAFETY: forwarded to the caller: nothing writes the area while
         // the thread is switched out.
-        super::cpu::FxState(unsafe { (*self.fx.get()).0 })
+        unsafe { self.area.load() }
     }
 }
 
+// The save instruction follows `xstate::GALA_XSAVE_MODE` (0 FXSAVE,
+// 1 XSAVE, 2 XSAVEOPT); EDX:EAX = all ones asks for every component XCR0
+// enables. rax, rcx, rdx and r8 are caller-saved, so free here; ecx keeps
+// the mode across the switch.
 global_asm!(
     r#"
     .section .text.context, "ax"
     .global gala_context_switch
 gala_context_switch:
-    fxsave64 [rdi + 16]
+    mov r8, [rdi + 8]
+    movzx ecx, byte ptr [rip + {mode}]
+    mov eax, -1
+    mov edx, -1
+    cmp ecx, 2
+    jne 1f
+    xsaveopt64 [r8]
+    jmp 3f
+1:
+    cmp ecx, 1
+    jne 2f
+    xsave64 [r8]
+    jmp 3f
+2:
+    fxsave64 [r8]
+3:
     push rbp
     push rbx
     push r12
@@ -186,14 +194,23 @@ gala_context_switch:
     pop r12
     pop rbx
     pop rbp
-    fxrstor64 [rsi + 16]
+    mov r8, [rsi + 8]
+    mov eax, -1
+    mov edx, -1
+    test ecx, ecx
+    jz 4f
+    xrstor64 [r8]
+    ret
+4:
+    fxrstor64 [r8]
     ret
 
     .global gala_thread_trampoline
 gala_thread_trampoline:
     call r13
     ud2
-    "#
+    "#,
+    mode = sym super::xstate::GALA_XSAVE_MODE,
 );
 
 unsafe extern "C" {
@@ -210,7 +227,8 @@ unsafe extern "C" {
 /// which is not running anywhere else. `from` must stay alive until it is
 /// switched back to (or never be resumed).
 pub unsafe fn switch(from: &Context, to: &Context) {
-    // SAFETY: forwarded to the caller. The asm writes `from.rsp` and
-    // `from.fx` (interior-mutable) and reads `to`.
+    // SAFETY: forwarded to the caller. The asm writes `from.rsp`
+    // (atomic) and the bytes of `from`'s save area (owned by the context,
+    // written only here), and reads `to`.
     unsafe { gala_context_switch(from, to) }
 }

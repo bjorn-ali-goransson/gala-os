@@ -27,9 +27,9 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use super::programs::{
-    self, ApcRec, EventRec, ExitedThreadRec, FileRec, FileSectionRec, HandleRec, ImageSectionRec,
-    MutantRec, ObjectHead, PacketRec, PageKind, PageRec, PipeEndRec, PipeRec, ProcessRec,
-    SectionRec, SemaphoreRec, ThreadRec, TimerRec, TokenRec, ViewRec, thread_state,
+    self, ApcRec, EventRec, ExitedThreadRec, ExtendedState, FileRec, FileSectionRec, HandleRec,
+    ImageSectionRec, MutantRec, ObjectHead, PacketRec, PageKind, PageRec, PipeEndRec, PipeRec,
+    ProcessRec, SectionRec, SemaphoreRec, ThreadRec, TimerRec, TokenRec, ViewRec, thread_state,
 };
 use super::record::{self, Range, Reader, Record, Wide, Writer, tag};
 use crate::mm::PAGE_SIZE;
@@ -39,7 +39,7 @@ use crate::nt::object::{
     CompletionPacket, CompletionQueue, Event, EventType, HandleEntry, IoCompletion, KObject,
     Mutant, MutantState, ObjectBody, ObjectRef, Semaphore, Timer, TimerState,
 };
-use crate::nt::platform::{FxState, UserRegs};
+use crate::nt::platform::{self, UserRegs, XState};
 use crate::nt::process::{self, Process};
 use crate::nt::section::ImageLayout;
 use crate::nt::status::NtStatus;
@@ -213,6 +213,25 @@ fn wait_quiet() -> Result<Vec<ThreadState>, Refusal> {
     }
 }
 
+/// A carried thread's x87/SSE/AVX state: the whole XSAVE area (THREADS
+/// version 3) if it was saved under the XCR0 this kernel enables (a
+/// kernel enabling other components cannot load it: the handover's
+/// programs are refused), else (an older writer) the FXSAVE image.
+fn carried_xstate(t: &ThreadRec) -> Result<XState, NtStatus> {
+    if t.xstate.mask == 0 {
+        return Ok(XState::from_legacy(&t.fx));
+    }
+    let enabled = platform::xstate_enabled();
+    if t.xstate.mask != enabled || (t.xstate.len as usize) < crate::arch::xstate::size_of(enabled) {
+        warn!(
+            "handover: thread {} was saved under XCR0 {:#x} ({} bytes), this kernel enables {:#x}",
+            t.tid, t.xstate.mask, t.xstate.len, enabled
+        );
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    Ok(t.xstate.state())
+}
+
 /// Every live thread as carried, or why one cannot be (yet).
 fn check_threads() -> Result<Vec<ThreadState>, Option<Refusal>> {
     let mut out = Vec::new();
@@ -239,7 +258,7 @@ fn check_threads() -> Result<Vec<ThreadState>, Option<Refusal>> {
             let (UserWait::Waiting(deadline), Some(fx)) = (state, fx) else {
                 return Err(refuse("is not blocked yet", call));
             };
-            Resume::Syscall { number, regs, fx: FxState(fx.0), deadline }
+            Resume::Syscall { number, regs, fx, deadline }
         } else if !snap.entered && snap.suspended > 0 && matches!(state, UserWait::Waiting(_)) {
             Resume::Start { regs: snap.start, mxcsr: snap.start_mxcsr }
         } else {
@@ -701,15 +720,20 @@ impl Programs {
         }
         programs::section(w, tag::THREADS)?;
         for t in &self.threads {
-            let (state, number, regs, fx, deadline, mxcsr) = match &t.resume {
+            let (state, number, regs, xs, deadline, mxcsr) = match &t.resume {
                 Resume::Syscall { number, regs, fx, deadline } => {
-                    (thread_state::SYSCALL, *number, *regs, fx.0, *deadline, None)
+                    (thread_state::SYSCALL, *number, *regs, Some(fx), *deadline, None)
                 }
-                Resume::User { regs, fx } => (thread_state::USER, 0, *regs, fx.0, None, None),
+                Resume::User { regs, fx } => (thread_state::USER, 0, *regs, Some(fx), None, None),
                 Resume::Start { regs, mxcsr } => {
-                    (thread_state::START, 0, *regs, [0; 512], None, *mxcsr)
+                    (thread_state::START, 0, *regs, None, None, *mxcsr)
                 }
             };
+            // The x87/SSE part alone (what a version-2 reader takes), and
+            // the whole state with the XCR0 it was saved under.
+            let fx = xs.map_or([0; 512], |s| *s.legacy());
+            let xstate = xs
+                .map_or(ExtendedState::NONE, |s| ExtendedState::of(s, platform::xstate_enabled()));
             let mut apcs: Vec<ApcRec> = Vec::new();
             for a in &t.apcs {
                 apcs.try_push([a.routine, a.args[0], a.args[1], a.args[2]])?;
@@ -733,6 +757,7 @@ impl Programs {
                 suspend: t.snap.suspended,
                 mxcsr,
                 impersonation: impersonation_of(&t.object).map_or(0, |o| self.id(&o)),
+                xstate,
             }
             .write(w, &apcs)?;
         }
@@ -1391,18 +1416,19 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         let (t, apc_table) = ThreadRec::read(&mut e);
         let process = find(t.pid).ok_or(NtStatus::INVALID_CID)?;
         let regs = user_regs(&t.regs);
+        let fx = carried_xstate(&t)?;
         let resume = match t.state {
             thread_state::SYSCALL => {
                 if !regs.is_valid() || !syscalls::restartable(t.number) {
                     return Err(NtStatus::INVALID_PARAMETER);
                 }
-                Resume::Syscall { number: t.number, regs, fx: FxState(t.fx), deadline: t.deadline }
+                Resume::Syscall { number: t.number, regs, fx, deadline: t.deadline }
             }
             thread_state::USER => {
                 if !regs.is_valid() {
                     return Err(NtStatus::INVALID_PARAMETER);
                 }
-                Resume::User { regs, fx: FxState(t.fx) }
+                Resume::User { regs, fx }
             }
             thread_state::START => {
                 if !regs.is_valid() {

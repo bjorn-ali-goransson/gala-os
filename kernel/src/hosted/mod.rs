@@ -23,9 +23,9 @@ pub mod threads;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::arch::cpu::FxState;
 use crate::arch::interrupts::TrapFrame;
 use crate::arch::syscall::{SyscallFrame, UserRegs};
+use crate::arch::xstate::XState;
 use crate::mm::frame::Frame;
 use crate::nt::platform::{
     Clock, DiskError, Display, SharedUserSpace, Storage, Threads, UserEntry, UserMemory,
@@ -315,11 +315,14 @@ impl UserEntry for Um {
     fn continue_with(regs: UserRegs) {
         entry::continue_with(regs)
     }
-    fn fxsave() -> FxState {
-        entry::fxsave()
+    fn xsave() -> XState {
+        entry::xsave()
     }
-    fn fxrstor(state: &FxState) {
-        entry::fxrstor(state)
+    fn xrstor(state: &XState) {
+        entry::xrstor(state)
+    }
+    fn xstate_enabled() -> u64 {
+        entry::xstate_enabled()
     }
     fn set_mxcsr(value: u32) {
         entry::set_mxcsr(value)

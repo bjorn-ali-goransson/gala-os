@@ -1,10 +1,10 @@
 //! The kernel as the NT layer's platform (`nt::platform`): each trait
 //! method forwards to the kernel subsystem that provides it.
 
-use crate::arch::{cpu, interrupts, paging, smp, syscall};
+use crate::arch::{cpu, interrupts, paging, smp, syscall, xstate};
 use crate::nt::platform::{
-    Clock, DiskError, Display, Frame, FxState, SharedUserSpace, SpawnError, Storage, SyscallFrame,
-    ThreadId, Threads, TrapFrame, UserEntry, UserMemory, UserRegs, WakeReason,
+    Clock, DiskError, Display, Frame, SharedUserSpace, SpawnError, Storage, SyscallFrame, ThreadId,
+    Threads, TrapFrame, UserEntry, UserMemory, UserRegs, WakeReason, XState,
 };
 use crate::{mm, sched, time};
 
@@ -113,14 +113,17 @@ impl UserEntry for Kernel {
     fn continue_with(regs: UserRegs) {
         syscall::continue_with(regs)
     }
-    fn fxsave() -> FxState {
-        cpu::fxsave()
+    fn xsave() -> XState {
+        xstate::save()
     }
-    fn fxrstor(state: &FxState) {
-        cpu::fxrstor(state)
+    fn xrstor(state: &XState) {
+        xstate::restore(state)
     }
     fn set_mxcsr(value: u32) {
-        cpu::set_mxcsr(value)
+        xstate::set_mxcsr(value)
+    }
+    fn xstate_enabled() -> u64 {
+        xstate::enabled()
     }
 }
 

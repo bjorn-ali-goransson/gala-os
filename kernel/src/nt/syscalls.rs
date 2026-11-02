@@ -2448,45 +2448,115 @@ fn nt_suspend_thread(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
-/// NtGetContextThread(ThreadHandle, *Context): the user registers of the
-/// caller, or of a suspended thread once it has stopped.
+/// Where the CONTEXT at `ctx_ptr` (with CONTEXT_XSTATE) has its XSTATE
+/// area, from the CONTEXT_EX after it: (address, length), the length at
+/// most what gala reads or writes. None without extended features or with
+/// a CONTEXT_EX that does not describe one.
+fn user_xstate_area(call: &Call<'_>, ctx_ptr: u64, flags: u32) -> Option<(u64, usize)> {
+    use super::context::{self as ctx, CONTEXT_XSTATE};
+    if !ctx::has(flags, CONTEXT_XSTATE) || ctx::xstate_len() == 0 {
+        return None;
+    }
+    let mut ex = [0u8; ctx::EX_SIZE];
+    call.process.read(ctx_ptr.checked_add(ctx::SIZE as u64)?, &mut ex).ok()?;
+    let (offset, len) = ctx::xstate_area(&ex)?;
+    Some((ctx_ptr.checked_add(offset)?, len.min(ctx::xstate_len())))
+}
+
+/// The x87/SSE/AVX state a thread resumes with when given the CONTEXT
+/// `ctx` (read from `ctx_ptr`): `base` with the CONTEXT's FltSave
+/// (CONTEXT_FLOATING_POINT) and XSTATE area (CONTEXT_XSTATE) applied.
+/// Whether anything was applied, too.
+fn resume_state(
+    call: &Call<'_>,
+    ctx_ptr: u64,
+    ctx: &[u8],
+    mut state: platform::XState,
+) -> Result<(platform::XState, bool), NtStatus> {
+    use super::context as c;
+    let mut changed = false;
+    if let Some(legacy) = c::float_state(ctx) {
+        state.set_legacy(&legacy);
+        changed = true;
+    }
+    if let Some((addr, len)) = user_xstate_area(call, ctx_ptr, c::flags(ctx)) {
+        let mut area = [0u8; c::MAX_XSTATE];
+        let area = &mut area[..len];
+        call.process.read(addr, area).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+        c::apply_xstate(&mut state, area);
+        changed = true;
+    }
+    Ok((state, changed))
+}
+
+/// NtGetContextThread(ThreadHandle, *Context): the parts of the user
+/// registers that ContextFlags names, of the caller or of a suspended
+/// thread once it has stopped; with CONTEXT_XSTATE, the features the
+/// XSTATE area's Mask asks for (the Mask then says which of them hold
+/// values, the rest being in their initial state).
 fn nt_get_context_thread(call: &mut Call<'_>) -> NtStatus {
+    use super::context as c;
     let object = tri!(thread_object(call, arg!(call, 0), THREAD_GET_CONTEXT));
+    let ptr = arg!(call, 1);
+    let mut ctx = [0u8; c::SIZE];
+    if call.process.read(ptr, &mut ctx).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let flags = c::flags(&ctx);
     let (regs, fx) = if is_current_thread(&object) {
-        (caller_regs(call), platform::fxsave())
+        (caller_regs(call), platform::xsave())
     } else {
         let p = tri!(thread::parked_state(&object));
         (p.regs, p.fx)
     };
-    // TODO: honour ContextFlags (only the requested parts).
-    let context = super::context::to_bytes(&regs, Some(&fx));
-    match call.process.write(arg!(call, 1), &context) {
-        Ok(()) => NtStatus::SUCCESS,
-        Err(_) => NtStatus::ACCESS_VIOLATION,
-    }
-}
-
-/// NtSetContextThread(ThreadHandle, *Context): for the caller it takes
-/// effect on return (as NtContinue); for a suspended thread, on resume.
-fn nt_set_context_thread(call: &mut Call<'_>) -> NtStatus {
-    let object = tri!(thread_object(call, arg!(call, 0), THREAD_SET_CONTEXT));
-    let mut ctx = [0u8; super::context::SIZE];
-    if call.process.read(arg!(call, 1), &mut ctx).is_err() {
+    c::fill(&mut ctx, flags, &regs, Some(&fx));
+    if call.process.write(ptr, &ctx).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
-    let regs = super::context::from_bytes(&ctx);
-    if !regs.is_valid() {
-        return NtStatus::INVALID_PARAMETER;
+    if let Some((addr, len)) = user_xstate_area(call, ptr, flags) {
+        let Ok(wanted) = call.process.read_u64(addr) else { return NtStatus::ACCESS_VIOLATION };
+        let area = c::xstate_bytes(&fx, wanted, len);
+        if call.process.write(addr, &area[..len]).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
     }
-    let fx = super::context::float_state(&ctx);
+    NtStatus::SUCCESS
+}
+
+/// NtSetContextThread(ThreadHandle, *Context): the parts ContextFlags
+/// names; for the caller it takes effect on return (as NtContinue), for
+/// a suspended thread on resume. CONTEXT_XSTATE: the features in the
+/// XSTATE area's Mask take its values, the others their initial state.
+fn nt_set_context_thread(call: &mut Call<'_>) -> NtStatus {
+    use super::context as c;
+    let object = tri!(thread_object(call, arg!(call, 0), THREAD_SET_CONTEXT));
+    let ptr = arg!(call, 1);
+    let mut ctx = [0u8; c::SIZE];
+    if call.process.read(ptr, &mut ctx).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let flags = c::flags(&ctx);
     if is_current_thread(&object) {
-        if let Some(fx) = &fx {
-            platform::fxrstor(fx);
+        let mut regs = caller_regs(call);
+        c::apply(&mut regs, &ctx, flags);
+        if !regs.is_valid() {
+            return NtStatus::INVALID_PARAMETER;
+        }
+        let (state, changed) = tri!(resume_state(call, ptr, &ctx, platform::xsave()));
+        if changed {
+            platform::xrstor(&state);
         }
         platform::continue_with(regs);
         return NtStatus::SUCCESS;
     }
-    match thread::set_parked_state(&object, regs, fx) {
+    let parked = tri!(thread::parked_state(&object));
+    let mut regs = parked.regs;
+    c::apply(&mut regs, &ctx, flags);
+    if !regs.is_valid() {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let (state, changed) = tri!(resume_state(call, ptr, &ctx, parked.fx));
+    match thread::set_parked_state(&object, regs, changed.then_some(state)) {
         Ok(()) => NtStatus::SUCCESS,
         Err(e) => e,
     }
@@ -2544,20 +2614,34 @@ fn deliver_apc_after(call: &Call<'_>, status: NtStatus) -> NtStatus {
         rip: f.rip,
         rflags: f.rflags,
     };
-    let context = super::context::to_bytes(&regs, Some(&platform::fxsave()));
-    deliver_apc(call, context, f.rsp);
+    let state = platform::xsave();
+    let context = super::context::to_bytes(&regs, Some(&state));
+    deliver_apc(call, context, f.rsp, &state);
     status
 }
 
+/// Where an APC frame has its XSTATE area: after the CONTEXT and its
+/// CONTEXT_EX, 64-byte aligned (the frame is).
+const APC_XSTATE_AT: usize = 0x500;
+
 /// Runs the next user APC, if any, by resuming the thread in
 /// ntdll!KiUserApcDispatcher with `context` (the state to return to, with
-/// stack pointer `rsp`) at the top of a new frame below `rsp`. The x64
-/// contract (Windows Internals): rsp points to the CONTEXT, whose P1Home..
-/// P4Home hold NormalContext, SystemArgument1, SystemArgument2 and
-/// NormalRoutine; the dispatcher calls the routine and NtContinues the
-/// CONTEXT with TestAlert set, which delivers the next APC.
+/// stack pointer `rsp`, and extended state `state`) at the top of a new
+/// frame below `rsp`. The x64 contract (Windows Internals): rsp points to
+/// the CONTEXT, whose P1Home..P4Home hold NormalContext, SystemArgument1,
+/// SystemArgument2 and NormalRoutine; the dispatcher calls the routine and
+/// NtContinues the CONTEXT with TestAlert set, which delivers the next
+/// APC. With extended features the CONTEXT has CONTEXT_XSTATE, its
+/// CONTEXT_EX after it and the XSTATE area at APC_XSTATE_AT, so the
+/// routine's use of the YMM registers does not reach the resumed code.
 // TODO: verify the frame against the pinned build's ntdll.
-fn deliver_apc(call: &Call<'_>, mut context: [u8; super::context::SIZE], rsp: u64) -> bool {
+fn deliver_apc(
+    call: &Call<'_>,
+    mut context: [u8; super::context::SIZE],
+    rsp: u64,
+    state: &platform::XState,
+) -> bool {
+    use super::context as c;
     let dispatcher = call.process.apc_dispatcher.load(Ordering::Relaxed);
     if dispatcher == 0 {
         return false;
@@ -2566,9 +2650,24 @@ fn deliver_apc(call: &Call<'_>, mut context: [u8; super::context::SIZE], rsp: u6
     for (i, v) in [apc.args[0], apc.args[1], apc.args[2], apc.routine].iter().enumerate() {
         context[8 * i..8 * i + 8].copy_from_slice(&v.to_le_bytes());
     }
-    let frame = (rsp.wrapping_sub(super::context::SIZE as u64)) & !0xf;
+    let xlen = c::xstate_len();
+    let size = if xlen == 0 { c::SIZE } else { APC_XSTATE_AT + xlen };
+    let frame = (rsp.wrapping_sub(size as u64)) & !0x3f;
+    if xlen != 0 {
+        let flags = c::flags(&context) | c::CONTEXT_XSTATE;
+        c::set_flags(&mut context, flags);
+    }
     if frame >= rsp || call.process.write(frame, &context).is_err() {
         return false;
+    }
+    if xlen != 0 {
+        let ex = c::context_ex(APC_XSTATE_AT, xlen);
+        let area = c::xstate_bytes(state, u64::MAX, xlen);
+        if call.process.write(frame + c::SIZE as u64, &ex).is_err()
+            || call.process.write(frame + APC_XSTATE_AT as u64, &area[..xlen]).is_err()
+        {
+            return false;
+        }
     }
     let mut gpr = [0u64; 16];
     gpr[4] = frame;
@@ -2682,14 +2781,18 @@ fn nt_continue(call: &mut Call<'_>) -> NtStatus {
     if !regs.is_valid() {
         return NtStatus::INVALID_PARAMETER;
     }
+    let (state, changed) = tri!(resume_state(call, ctx_ptr, &ctx, platform::xsave()));
     // TestAlert: run the next queued user APC before resuming the context.
-    if arg!(call, 1) as u8 != 0 && thread::has_user_apc() && deliver_apc(call, ctx, regs.gpr[4]) {
+    if arg!(call, 1) as u8 != 0
+        && thread::has_user_apc()
+        && deliver_apc(call, ctx, regs.gpr[4], &state)
+    {
         return NtStatus::SUCCESS;
     }
-    // The kernel does not use x87/SSE, so the state loaded now is what the
-    // thread resumes with (context switches save and restore it).
-    if let Some(fx) = super::context::float_state(&ctx) {
-        platform::fxrstor(&fx);
+    // The kernel does not use x87/SSE/AVX, so the state loaded now is what
+    // the thread resumes with (context switches save and restore it).
+    if changed {
+        platform::xrstor(&state);
     }
     platform::continue_with(regs);
     NtStatus::SUCCESS

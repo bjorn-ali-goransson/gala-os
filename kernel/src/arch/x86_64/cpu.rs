@@ -138,11 +138,14 @@ pub fn rdtsc() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
-/// Enables SSE for code that uses it (user mode; the kernel is soft-float):
-/// CR0.EM off, CR0.MP on, CR4.OSFXSR and CR4.OSXMMEXCPT on.
+/// Enables the x87/SSE/AVX state for code that uses it (user mode; the
+/// kernel is soft-float): CR0.EM off, CR0.MP on, CR4.OSFXSR and
+/// CR4.OSXMMEXCPT on, then XSAVE (CR4.OSXSAVE, XCR0: `xstate`). Every
+/// CPU runs this in its own setup path (after a kernel handover too).
 pub fn enable_sse() {
     // SAFETY: these control bits only affect how SSE/x87 instructions
-    // behave; the kernel itself executes none outside FXSAVE/FXRSTOR.
+    // behave; the kernel itself executes none outside the state saves and
+    // loads (`xstate`).
     unsafe {
         let mut cr0: u64;
         asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
@@ -152,45 +155,5 @@ pub fn enable_sse() {
         asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
         asm!("fninit", options(nomem, nostack));
     }
-}
-
-/// An FXSAVE image of the x87/SSE state (the layout of CONTEXT.FltSave).
-#[repr(C, align(16))]
-#[derive(Clone)]
-pub struct FxState(pub [u8; 512]);
-
-/// MXCSR bits the CPU supports (FXSAVE's MXCSR_MASK; 0 means the default).
-fn mxcsr_mask(state: &FxState) -> u32 {
-    match u32::from_le_bytes([state.0[28], state.0[29], state.0[30], state.0[31]]) {
-        0 => 0xffbf,
-        m => m,
-    }
-}
-
-/// The current x87/SSE register state. The kernel itself never uses
-/// these registers, so in a trap or system call they hold the user's.
-pub fn fxsave() -> FxState {
-    let mut state = FxState([0; 512]);
-    // SAFETY: FXSAVE writes 512 bytes to a 16-byte aligned buffer.
-    unsafe { asm!("fxsave64 [{}]", in(reg) state.0.as_mut_ptr(), options(nostack)) };
-    state
-}
-
-/// Loads `state` (as user code may supply it: reserved MXCSR bits are
-/// cleared, since FXRSTOR would fault on them).
-pub fn fxrstor(state: &FxState) {
-    let mask = mxcsr_mask(&fxsave());
-    let mut s = state.clone();
-    let mxcsr = u32::from_le_bytes([s.0[24], s.0[25], s.0[26], s.0[27]]) & mask;
-    s.0[24..28].copy_from_slice(&mxcsr.to_le_bytes());
-    // SAFETY: FXRSTOR reads 512 bytes from a 16-byte aligned buffer whose
-    // MXCSR has only supported bits set.
-    unsafe { asm!("fxrstor64 [{}]", in(reg) s.0.as_ptr(), options(nostack, readonly)) };
-}
-
-/// Sets MXCSR (reserved bits cleared).
-pub fn set_mxcsr(value: u32) {
-    let mut state = fxsave();
-    state.0[24..28].copy_from_slice(&value.to_le_bytes());
-    fxrstor(&state);
+    super::xstate::enable_here();
 }

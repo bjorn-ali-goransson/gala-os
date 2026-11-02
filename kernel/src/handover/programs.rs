@@ -28,6 +28,7 @@
 //! ```
 
 use super::record::{REQUIRED, Reader, Wide, Writer};
+use crate::arch::xstate;
 use crate::mm::heap::AllocError;
 use crate::mm::paging::{CacheMode, PageFlags};
 
@@ -35,12 +36,14 @@ use crate::mm::paging::{CacheMode, PageFlags};
 pub const VERSION: u16 = 1;
 
 /// The version of section `tag` this kernel writes: PROCESSES 2 (the
-/// executable's digest), THREADS 2 (threads stopped in user mode or not
-/// started, suspend counts, queued APCs), TIMERS 2 (the APC), the rest 1.
+/// executable's digest), THREADS 3 (2: threads stopped in user mode or not
+/// started, suspend counts, queued APCs; 3: the whole extended state, with
+/// the XCR0 it was saved under), TIMERS 2 (the APC), the rest 1.
 pub fn version_of(tag: u32) -> u16 {
     use super::record::tag;
     match tag {
-        tag::PROCESSES | tag::THREADS | tag::TIMERS => 2,
+        tag::THREADS => 3,
+        tag::PROCESSES | tag::TIMERS => 2,
         _ => VERSION,
     }
 }
@@ -251,6 +254,34 @@ pub mod thread_state {
 /// its three arguments.
 pub type ApcRec = [u64; 4];
 
+/// A thread's whole x87/SSE/AVX state (THREADS version 3): the XCR0 it
+/// was saved under (0: none recorded, an older writer: `fx` is all) and
+/// its XSAVE area (standard format; `len` bytes, the size XCR0 gives).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtendedState {
+    pub mask: u64,
+    pub len: u32,
+    pub bytes: [u8; xstate::MAX_SIZE],
+}
+
+impl ExtendedState {
+    pub const NONE: ExtendedState = ExtendedState { mask: 0, len: 0, bytes: [0; xstate::MAX_SIZE] };
+
+    /// `state` as saved under XCR0 `mask` (its first `size_of(mask)` bytes).
+    pub fn of(state: &xstate::XState, mask: u64) -> Self {
+        let len = xstate::size_of(mask) as u32;
+        ExtendedState { mask, len, bytes: state.0 }
+    }
+
+    /// The state as written (bytes past `len` zero).
+    pub fn state(&self) -> xstate::XState {
+        let mut s = xstate::XState([0; xstate::MAX_SIZE]);
+        let len = (self.len as usize).min(xstate::MAX_SIZE);
+        s.0[..len].copy_from_slice(&self.bytes[..len]);
+        s
+    }
+}
+
 /// A THREADS entry: a live thread.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThreadRec {
@@ -271,8 +302,8 @@ pub struct ThreadRec {
     pub regs: Regs,
     /// The call's deadline (timer tick), kept absolute; None: none.
     pub deadline: Option<u64>,
-    /// Its x87/SSE state (FXSAVE layout): the whole extended state, as
-    /// gala does not enable AVX (XSAVE).
+    /// Its x87/SSE state (FXSAVE layout; version 3 has it in `xstate`
+    /// too, which a reader of version 3 takes instead).
     pub fx: [u8; 512],
     /// Version 2: `thread_state` (0 from an older writer: SYSCALL).
     pub state: u32,
@@ -281,6 +312,9 @@ pub struct ThreadRec {
     pub mxcsr: Option<u32>,
     /// The impersonation token's object id (TOKENS), 0: none.
     pub impersonation: u32,
+    /// Version 3: the whole extended state (after the APCs' table: the
+    /// XCR0 mask, then the XSAVE area as a blob).
+    pub xstate: ExtendedState,
 }
 
 impl ThreadRec {
@@ -313,6 +347,9 @@ impl ThreadRec {
                 w.u64(*v)?;
             }
         }
+        w.u64(self.xstate.mask)?;
+        let len = (self.xstate.len as usize).min(xstate::MAX_SIZE);
+        w.blob(&self.xstate.bytes[..len])?;
         w.end_entry(e)
     }
 
@@ -331,6 +368,13 @@ impl ThreadRec {
         let fx = r.array();
         let (state, suspend, has_mxcsr, mxcsr) = (r.u32(), r.u32(), r.u32(), r.u32());
         let (impersonation, _) = (r.u32(), r.u32());
+        let apcs = r.table();
+        let mut xstate = ExtendedState::NONE;
+        xstate.mask = r.u64();
+        let blob = r.blob();
+        let len = blob.len().min(xstate::MAX_SIZE);
+        xstate.bytes[..len].copy_from_slice(&blob[..len]);
+        xstate.len = len as u32;
         let rec = ThreadRec {
             tid,
             pid,
@@ -350,8 +394,9 @@ impl ThreadRec {
             suspend,
             mxcsr: (has_mxcsr != 0).then_some(mxcsr),
             impersonation,
+            xstate,
         };
-        (rec, r.table())
+        (rec, apcs)
     }
 }
 
@@ -1075,6 +1120,8 @@ mod tests {
         let mut fx = [0u8; 512];
         fx[24] = 0x80;
         fx[511] = 9;
+        let mut avx_state = xstate::XState::from_legacy(&fx);
+        avx_state.component_mut(2)[255] = 0x77;
         ThreadRec {
             tid: 12,
             pid: 8,
@@ -1094,6 +1141,7 @@ mod tests {
             suspend: 0,
             mxcsr: None,
             impersonation: 0,
+            xstate: ExtendedState::NONE,
         }
         .write(&mut w, &[])
         .unwrap();
@@ -1117,6 +1165,7 @@ mod tests {
             suspend: 2,
             mxcsr: None,
             impersonation: 23,
+            xstate: ExtendedState::of(&avx_state, 7),
         }
         .write(&mut w, &[[0x40_1000, 1, 2, 3], [0x40_2000, 4, 5, 6]])
         .unwrap();
@@ -1140,6 +1189,7 @@ mod tests {
             regs: [0; 18],
             deadline: None,
             fx: [0; 512],
+            xstate: ExtendedState::NONE,
         }
         .write(&mut w, &[])
         .unwrap();
@@ -1319,8 +1369,12 @@ mod tests {
         assert_eq!((t.state, t.suspend, t.mxcsr, apcs.len()), (thread_state::SYSCALL, 0, None, 0));
         assert_eq!(t.regs[17], 51);
         assert_eq!((t.fx[24], t.fx[511]), (0x80, 9));
+        assert_eq!(t.xstate.mask, 0, "written without an extended state");
         let (t, apcs) = ThreadRec::read(&mut threads.entry().unwrap());
         assert_eq!((t.tid, t.state, t.suspend, t.regs[16]), (16, thread_state::USER, 2, 81));
+        assert_eq!((t.xstate.mask, t.xstate.len), (7, 832));
+        let carried = t.xstate.state();
+        assert_eq!((carried.bv(), carried.0[576 + 255], carried.0[511]), (7, 0x77, 9));
         let apcs: Vec<_> = apcs.iter().map(|mut a| read_apc(&mut a)).collect();
         assert_eq!(apcs, [[0x40_1000, 1, 2, 3], [0x40_2000, 4, 5, 6]]);
         let (t, _) = ThreadRec::read(&mut threads.entry().unwrap());
