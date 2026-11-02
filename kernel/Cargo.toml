@@ -15,11 +15,12 @@ test = false
 bench = false
 
 [features]
-# The desktop (the compositor, wallpapers, fonts, start menu): on by
-# default; a server kernel leaves it out (`--no-default-features`;
-# ROADMAP SD, ARCHITECTURE "Server and desktop workloads").
-default = ["desktop"]
-desktop = []
+# shasha, the graphical shell (the compositor, wallpapers, fonts, start
+# menu, taskbar): on by default; a server kernel leaves it out
+# (`--no-default-features`; ROADMAP SD, ARCHITECTURE "Server and desktop
+# workloads").
+default = ["shasha"]
+shasha = []
 # gala-um: the kernel library as the NT layer inside a Linux process
 # (kernel/src/hosted, docs/GALA_UM.md). Never set for the kernel binary.
 hosted = ["dep:libc"]

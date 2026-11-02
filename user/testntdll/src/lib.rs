@@ -290,6 +290,8 @@ syscall_stubs! {
     // gala's test-only clock control and its mocked random source (R7).
     GalaClockControl = 0x7f4c, fn(operation: u32, a: i64, b: i64, state: *mut u8);
     GalaRandom = 0x7f4d, fn(buffer: *mut u8, length: usize);
+    // The shell's named actions (nt::action; 0x7f4c-0x7f57 are taken).
+    GalaDesktopAction = 0x7f58, fn(request: *const u8, len: u32, out: *mut u8, out_len: u32, returned: *mut u32);
     // gala's number, UNVERIFIED.
     NtCreateDirectoryObject = 0x7f24, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtClearEvent = 0x3e, fn(h: usize);

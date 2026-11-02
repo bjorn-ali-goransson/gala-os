@@ -1,14 +1,15 @@
 //! NT personality: the Windows user-mode ABI on top of the kernel core.
 
 pub mod accounts;
+pub mod action;
 pub mod afd;
 pub mod charge;
 pub mod conhost;
 pub mod context;
-#[cfg(feature = "desktop")]
+#[cfg(feature = "shasha")]
 pub mod desktop;
-/// A server kernel (no `desktop` feature): the same interface, no desktop.
-#[cfg(not(feature = "desktop"))]
+/// A server kernel (no `shasha` feature): the same interface, no desktop.
+#[cfg(not(feature = "shasha"))]
 #[path = "desktop_off.rs"]
 pub mod desktop;
 pub mod disk;

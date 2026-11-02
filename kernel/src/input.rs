@@ -74,10 +74,8 @@ fn input_thread(_: usize) {
 /// Hands mouse input to the desktop; starts what its start menu chose.
 fn deliver(dx: i64, dy: i64, buttons: u8) {
     if let Some(program) = crate::nt::desktop::pointer_event(dx, dy, buttons) {
-        match crate::nt::process::launch(program.path) {
-            Ok(pid) => crate::info!("desktop: started {} (pid {pid})", program.path),
-            Err(e) => crate::warn!("desktop: cannot start {}: {e:?}", program.path),
-        }
+        // The same path as GalaDesktopAction's Start (logged there).
+        let _ = crate::nt::action::start_path(program.path, "");
     }
 }
 

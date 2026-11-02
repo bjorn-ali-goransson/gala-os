@@ -1,5 +1,6 @@
-//! The desktop: top-level windows of Win32 programs, composited on the
-//! screen, with a small shell (taskbar, start menu) and the mouse.
+//! The desktop of shasha, gala's graphical shell: top-level windows of
+//! Win32 programs, composited on the screen, with the shell's taskbar and
+//! start menu and the mouse.
 //!
 //! The kernel keeps each window's frame (rounded corners, a shaded caption
 //! with the title and minimize/close buttons, drawn here) and a copy of its
@@ -15,7 +16,13 @@
 //! program), the taskbar's buttons restore, activate or minimize windows,
 //! the start button opens the start menu, whose items start programs.
 //! Clicks and moves in a client area become input for its program.
-//! Design: docs/ARCHITECTURE.md, "Windows on the screen".
+//!
+//! What the shell does to windows is a named [`Action`] (`act`): the
+//! taskbar, the caption buttons and the Snap keys call it, and so does
+//! GalaDesktopAction (`nt::action`, the `gala` command): everything shasha
+//! does with the mouse can be done from a terminal.
+//! Design: docs/ARCHITECTURE.md, "Windows on the screen" and "Server and
+//! desktop workloads".
 
 mod paint;
 
@@ -195,6 +202,64 @@ pub struct InputEvent {
     pub wparam: u64,
     pub lparam: u64,
 }
+
+/// Where Snap puts a window (Win+arrow keys, `gala snap`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapTo {
+    /// The left or right half of the work area.
+    Left,
+    Right,
+    /// Maximized.
+    Up,
+    /// Back from maximized or snapped, else minimized.
+    Down,
+}
+
+/// The shell's named actions on a top-level window: what the taskbar,
+/// the caption buttons and the Snap keys do, and what GalaDesktopAction
+/// asks for (ARCHITECTURE "Server and desktop workloads": CLI parity).
+/// The program moves its own window (WM_SYSCOMMAND, GALA_WM_PLACE), as
+/// with the mouse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// On top and active (a minimized one restored): a taskbar click.
+    Activate,
+    Minimize,
+    /// SC_MAXIMIZE (a minimized one restored first).
+    Maximize,
+    /// Back from minimized, maximized (SC_RESTORE) or snapped.
+    Restore,
+    /// SC_CLOSE (the program decides).
+    Close,
+    Snap(SnapTo),
+    /// To this outer rectangle.
+    Place {
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    },
+}
+
+/// A window as the taskbar lists it (GalaDesktopAction's window list).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub id: u32,
+    pub owner: u64,
+    /// LISTED_MINIMIZED, LISTED_MAXIMIZED, LISTED_ACTIVE, LISTED_SNAPPED.
+    pub flags: u32,
+    /// The outer rectangle: x, y, width, height.
+    pub rect: [i32; 4],
+    pub title: [u16; LISTED_TITLE],
+    pub title_len: usize,
+}
+
+pub const LISTED_TITLE: usize = 128;
+pub const LISTED_MINIMIZED: u32 = 1;
+pub const LISTED_MAXIMIZED: u32 = 2;
+pub const LISTED_ACTIVE: u32 = 4;
+/// Against the left or right edge, the work area's height (Snap).
+pub const LISTED_SNAPPED: u32 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptionButton {
@@ -1027,8 +1092,14 @@ impl Desktop {
         }
         if self.win_key && (0x25..=0x28).contains(&vk) {
             self.win_used = true;
-            if down {
-                self.snap(vk);
+            let to = match vk {
+                0x25 => SnapTo::Left,
+                0x26 => SnapTo::Up,
+                0x27 => SnapTo::Right,
+                _ => SnapTo::Down,
+            };
+            if down && let Some(id) = self.active {
+                let _ = self.act(id, Action::Snap(to));
             }
             return;
         }
@@ -1097,41 +1168,159 @@ impl Desktop {
 
     // ---- Window management ---------------------------------------------
 
-    /// Snap, as Windows 11 does it with the Windows key: Left and Right
-    /// put the active window on that half of the work area, Up maximizes
-    /// it, Down restores it (a maximized or snapped one) or minimizes it.
-    /// The program moves its window (GALA_WM_PLACE, WM_SYSCOMMAND).
-    fn snap(&mut self, vk: u8) {
-        let Some(id) = self.active else { return };
-        let (sw, sh) = self.screen;
-        let Some(i) = self.index(id) else { return };
+    /// Does `action` to window `id` (a framed window its program shows):
+    /// the one path for the taskbar, the caption buttons, the Snap keys
+    /// and GalaDesktopAction. STATUS_INVALID_HANDLE for another window
+    /// (none, a popup, a hidden one), STATUS_INVALID_PARAMETER for a size
+    /// no window may have.
+    pub fn act(&mut self, id: u32, action: Action) -> Result<(), NtStatus> {
+        let i = self.index(id).ok_or(NtStatus::INVALID_HANDLE)?;
         let w = &self.windows[i];
-        if w.popup || sw <= 0 || !w.shown() {
-            return;
+        if w.popup || !w.visible {
+            return Err(NtStatus::INVALID_HANDLE);
         }
-        let work_h = (sh - i64::from(TASKBAR)).max(1) as u64;
-        match vk {
-            0x26 if !w.maximized => self.send(id, WM_SYSCOMMAND, SC_MAXIMIZE, 0),
-            0x28 if w.maximized => self.send(id, WM_SYSCOMMAND, SC_RESTORE, 0),
-            0x28 => match self.windows[i].unsnapped.take() {
-                Some((x, y, w, h)) => self.send(
-                    id,
-                    GALA_WM_PLACE,
-                    u64::from(x as u32) | u64::from(y as u32) << 32,
-                    u64::from(w) | u64::from(h) << 32,
-                ),
+        let (minimized, maximized) = (w.minimized, w.maximized);
+        match action {
+            Action::Activate if minimized => self.restore(id),
+            Action::Activate => {
+                self.raise(id);
+                self.activate(Some(id));
+            }
+            Action::Minimize => {
+                if !minimized {
+                    self.minimize(id);
+                }
+            }
+            Action::Maximize => {
+                if minimized {
+                    self.restore(id);
+                }
+                if !maximized {
+                    self.send(id, WM_SYSCOMMAND, SC_MAXIMIZE, 0);
+                }
+                self.raise(id);
+                self.activate(Some(id));
+            }
+            Action::Restore if minimized => self.restore(id),
+            Action::Restore if maximized => self.send(id, WM_SYSCOMMAND, SC_RESTORE, 0),
+            Action::Restore => {
+                if let Some(r) = self.windows[i].unsnapped.take() {
+                    self.send_place(id, r);
+                }
+            }
+            Action::Close => self.send(id, WM_SYSCOMMAND, SC_CLOSE, 0),
+            Action::Snap(to) => self.snap(id, to)?,
+            Action::Place { x, y, w, h } => {
+                if !size_fits(w, h, false) {
+                    return Err(NtStatus::INVALID_PARAMETER);
+                }
+                if minimized {
+                    self.restore(id);
+                }
+                // restore() raises it: its index may have changed.
+                let i = self.index(id).ok_or(NtStatus::INVALID_HANDLE)?;
+                self.windows[i].unsnapped = None;
+                self.send_place(id, (x, y, w, h));
+            }
+        }
+        self.refresh();
+        Ok(())
+    }
+
+    /// GALA_WM_PLACE: the program moves its window to (x, y, w, h).
+    fn send_place(&mut self, id: u32, (x, y, w, h): (i32, i32, u32, u32)) {
+        self.send(
+            id,
+            GALA_WM_PLACE,
+            u64::from(x as u32) | u64::from(y as u32) << 32,
+            u64::from(w) | u64::from(h) << 32,
+        );
+    }
+
+    /// Snap, as Windows 11 does it with the Windows key: Left and Right
+    /// put the window on that half of the work area, Up maximizes it,
+    /// Down restores it (a maximized or snapped one) or minimizes it.
+    /// The program moves its window (GALA_WM_PLACE, WM_SYSCOMMAND).
+    fn snap(&mut self, id: u32, to: SnapTo) -> Result<(), NtStatus> {
+        let (sw, sh) = self.screen;
+        let i = self.index(id).ok_or(NtStatus::INVALID_HANDLE)?;
+        if sw <= 0 {
+            return Err(NtStatus::NOT_SUPPORTED);
+        }
+        let w = &self.windows[i];
+        let (minimized, maximized) = (w.minimized, w.maximized);
+        if minimized {
+            // Down leaves a minimized window alone; the others bring it
+            // back first.
+            if to == SnapTo::Down {
+                return Ok(());
+            }
+            self.restore(id);
+        }
+        // restore() raises it: its index may have changed.
+        let i = self.index(id).ok_or(NtStatus::INVALID_HANDLE)?;
+        let work_h = (sh - i64::from(TASKBAR)).max(1) as u32;
+        match to {
+            SnapTo::Up if !maximized => self.send(id, WM_SYSCOMMAND, SC_MAXIMIZE, 0),
+            SnapTo::Up => {}
+            SnapTo::Down if maximized => self.send(id, WM_SYSCOMMAND, SC_RESTORE, 0),
+            SnapTo::Down => match self.windows[i].unsnapped.take() {
+                Some(r) => self.send_place(id, r),
                 None => self.minimize(id),
             },
-            0x25 | 0x27 => {
-                let half = (sw / 2) as u64;
-                let (x, width) = if vk == 0x25 { (0, half) } else { (half, sw as u64 - half) };
-                if w.unsnapped.is_none() && !w.maximized {
+            SnapTo::Left | SnapTo::Right => {
+                let half = (sw / 2) as u32;
+                let (x, width) =
+                    if to == SnapTo::Left { (0, half) } else { (half as i32, sw as u32 - half) };
+                let w = &self.windows[i];
+                if w.unsnapped.is_none() && !maximized {
                     self.windows[i].unsnapped = Some((w.x, w.y, w.w, w.h));
                 }
-                self.send(id, GALA_WM_PLACE, x, width | work_h << 32);
+                self.send_place(id, (x, 0, width, work_h));
             }
-            _ => {}
         }
+        if to != SnapTo::Down {
+            self.raise(id);
+            self.activate(Some(id));
+        }
+        Ok(())
+    }
+
+    /// The windows the taskbar shows (in its order).
+    pub fn list(&self) -> Vec<Listed> {
+        let mut out = Vec::new();
+        let work = (self.screen.0, self.screen.1 - i64::from(TASKBAR));
+        for id in self.visible_windows() {
+            let Some(w) = self.window(id) else { continue };
+            let mut flags = 0;
+            if w.minimized {
+                flags |= LISTED_MINIMIZED;
+            }
+            if w.maximized {
+                flags |= LISTED_MAXIMIZED;
+            }
+            if self.active == Some(id) {
+                flags |= LISTED_ACTIVE;
+            }
+            if w.docked && work.0 > 0 {
+                flags |= LISTED_SNAPPED;
+            }
+            let mut title = [0u16; LISTED_TITLE];
+            let n = w.title.len().min(LISTED_TITLE);
+            title[..n].copy_from_slice(&w.title[..n]);
+            let entry = Listed {
+                id,
+                owner: w.owner,
+                flags,
+                rect: [w.x, w.y, w.w as i32, w.h as i32],
+                title,
+                title_len: n,
+            };
+            if out.try_push(entry).is_err() {
+                break;
+            }
+        }
+        out
     }
 
     /// To the top of its layer: framed windows stay below the popups.
@@ -1491,16 +1680,16 @@ impl Desktop {
                 self.taskbar_dirty = true;
             }
             Hit::Task(id) => {
+                // A click minimizes the active window on top, else
+                // activates (restores) it.
                 let minimized = self.window(id).is_some_and(|w| w.minimized);
                 let top = self.windows.iter().rev().find(|w| w.shown()).map(|w| w.id);
-                if minimized {
-                    self.restore(id);
-                } else if self.active == Some(id) && top == Some(id) {
-                    self.minimize(id);
+                let action = if !minimized && self.active == Some(id) && top == Some(id) {
+                    Action::Minimize
                 } else {
-                    self.raise(id);
-                    self.activate(Some(id));
-                }
+                    Action::Activate
+                };
+                let _ = self.act(id, action);
             }
             Hit::Caption(id) => {
                 self.raise(id);
@@ -1543,18 +1732,18 @@ impl Desktop {
             (Hit::Button(a, CaptionButton::Close), Hit::Button(b, CaptionButton::Close))
                 if a == b =>
             {
-                self.send(a, WM_SYSCOMMAND, SC_CLOSE, 0);
+                let _ = self.act(a, Action::Close);
             }
             (Hit::Button(a, CaptionButton::Maximize), Hit::Button(b, CaptionButton::Maximize))
                 if a == b =>
             {
                 let maximized = self.window(a).is_some_and(|w| w.maximized);
-                self.send(a, WM_SYSCOMMAND, if maximized { SC_RESTORE } else { SC_MAXIMIZE }, 0);
+                let _ = self.act(a, if maximized { Action::Restore } else { Action::Maximize });
             }
             (Hit::Button(a, CaptionButton::Minimize), Hit::Button(b, CaptionButton::Minimize))
                 if a == b =>
             {
-                self.minimize(a);
+                let _ = self.act(a, Action::Minimize);
             }
             (Hit::MenuItem(a), Hit::MenuItem(b)) if a == b => {
                 self.launch = self.listed().get(a).copied();
@@ -2183,21 +2372,7 @@ pub fn process_ended(owner: u64) {
 /// Returns the program the start menu asked to start, if any.
 pub fn pointer_event(dx: i64, dy: i64, buttons: u8) -> Option<&'static Program> {
     // Which programs exist (outside the desktop's lock: the file system).
-    let mut available: [usize; 8] = [0; 8];
-    let mut n = 0;
-    if buttons & 1 != 0 {
-        let mut seen: [&str; 8] = [""; 8];
-        for (i, p) in PROGRAMS.iter().enumerate() {
-            if n < available.len()
-                && !seen[..n].contains(&p.name)
-                && super::process::program_exists(p.path)
-            {
-                available[n] = i;
-                seen[n] = p.name;
-                n += 1;
-            }
-        }
-    }
+    let (available, n) = if buttons & 1 != 0 { available_programs() } else { ([0; 8], 0) };
     let mut d = DESKTOP.lock();
     if !d.painted {
         return None;
@@ -2214,6 +2389,110 @@ pub fn pointer_event(dx: i64, dy: i64, buttons: u8) -> Option<&'static Program> 
     drop(d);
     signal(wakes);
     launch
+}
+
+/// The start menu's programs that exist (indices into PROGRAMS, one per
+/// name) and how many. Reads the file system: not under the desktop's
+/// lock.
+fn available_programs() -> ([usize; 8], usize) {
+    let mut available: [usize; 8] = [0; 8];
+    let mut n = 0;
+    let mut seen: [&str; 8] = [""; 8];
+    for (i, p) in PROGRAMS.iter().enumerate() {
+        if n < available.len()
+            && !seen[..n].contains(&p.name)
+            && super::process::program_exists(p.path)
+        {
+            available[n] = i;
+            seen[n] = p.name;
+            n += 1;
+        }
+    }
+    (available, n)
+}
+
+/// The start menu's programs that exist (GalaDesktopAction's program
+/// list and `gala start <name>`).
+pub fn start_menu() -> Vec<&'static Program> {
+    let (available, n) = available_programs();
+    let mut out = Vec::new();
+    for &i in &available[..n] {
+        if out.try_push(&PROGRAMS[i]).is_err() {
+            break;
+        }
+    }
+    out
+}
+
+/// GalaDesktopAction on window `id` of process `owner` (the desktop's
+/// ids; the caller found it from the window's HWND):
+/// STATUS_NOT_SUPPORTED without shasha on the screen (no screen, the
+/// server profile), STATUS_INVALID_HANDLE when there is no such window.
+pub fn window_action(owner: u64, id: u32, action: Action) -> Result<(), NtStatus> {
+    if screen().is_none() {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    let mut d = DESKTOP.lock();
+    if d.window(id).is_none_or(|w| w.owner != owner) {
+        return Err(NtStatus::INVALID_HANDLE);
+    }
+    let result = d.act(id, action);
+    redraw_damage(&mut d);
+    let wakes = d.take_wakes();
+    drop(d);
+    signal(wakes);
+    result
+}
+
+/// The windows the taskbar shows (GalaDesktopAction): none before the
+/// desktop is drawn; STATUS_NOT_SUPPORTED without shasha on the screen.
+pub fn list_windows() -> Result<Vec<Listed>, NtStatus> {
+    if screen().is_none() {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    Ok(DESKTOP.lock().list())
+}
+
+/// Shows wallpaper `name` (one of WALLPAPERS, or "drawn") from now on
+/// (GalaDesktopAction): STATUS_OBJECT_NAME_NOT_FOUND for another name or
+/// a missing file, STATUS_NOT_SUPPORTED without shasha on the screen.
+pub fn set_wallpaper(name: &str) -> Result<(), NtStatus> {
+    if screen().is_none() {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    let picture = if name.eq_ignore_ascii_case("drawn") {
+        None
+    } else {
+        let (_, path) = WALLPAPERS
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
+        let data = super::file::lookup(path)
+            .and_then(super::file::read_all)
+            .map_err(|_| NtStatus::OBJECT_NAME_NOT_FOUND)?;
+        Some(paint::decode_qoi(&data).ok_or(NtStatus::INVALID_IMAGE_FORMAT)?)
+    };
+    // The new layout is made outside the desktop's lock (it scales the
+    // picture to the screen), then swapped in.
+    let screen = DESKTOP.lock().screen;
+    let layout = if screen.0 > 0 {
+        Some(Wallpaper::new(screen.0, screen.1, picture.as_ref()).ok_or(NtStatus::NO_MEMORY)?)
+    } else {
+        None
+    };
+    *PICTURE.lock() = picture;
+    let mut d = DESKTOP.lock();
+    if let Some(layout) = layout
+        && d.painted
+        && d.screen == screen
+    {
+        d.wallpaper = Some(layout);
+        d.add_damage(Rect { x: 0, y: 0, w: screen.0, h: screen.1 });
+        redraw_damage(&mut d);
+    }
+    drop(d);
+    crate::info!("desktop: wallpaper {name}");
+    Ok(())
 }
 
 /// Signals input events (outside the desktop's lock).
@@ -2243,6 +2522,7 @@ pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) {
         return;
     }
     d.key(vk, scan, extended, down);
+    redraw_damage(&mut d);
     let wakes = d.take_wakes();
     drop(d);
     signal(wakes);
