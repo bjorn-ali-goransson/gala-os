@@ -860,6 +860,9 @@ fn run_program(
                                     handover::HandoverError::Refused(why) => {
                                         warn!("handover: refused: {why}")
                                     }
+                                    handover::HandoverError::Incompatible(why) => {
+                                        warn!("handover: refused: {why}")
+                                    }
                                     e => error!("handover: failed: {e:?}"),
                                 }
                             }

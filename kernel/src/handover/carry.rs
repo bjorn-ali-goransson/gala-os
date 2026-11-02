@@ -149,6 +149,11 @@ impl Programs {
     pub fn object_count(&self) -> usize {
         self.objects.len()
     }
+
+    /// The extended state the threads carry (XCR0 bits): x87 and SSE.
+    pub fn xstate(&self) -> u64 {
+        if self.threads.is_empty() { 0 } else { programs::XSTATE_LEGACY }
+    }
 }
 
 /// Lets the programs run again (a refused or failed handover).
@@ -681,6 +686,7 @@ impl Programs {
                 path: q.path,
                 image_digest: q.layout().digest(),
                 token: self.id(&q.token.lock().clone()),
+                handovers: handovers_of(q.id).saturating_add(1),
             }
             .write(w)?;
         }
@@ -699,6 +705,9 @@ impl Programs {
             }
             w.end_entry(e)?;
         }
+        // No thread has extended state past FXSAVE yet (gala does not
+        // enable XSAVE): the blob is empty and THREADS keeps its
+        // `must_read` (`programs::threads_must_read`).
         programs::section(w, tag::THREADS)?;
         for t in &self.threads {
             let (state, number, regs, fx, deadline, mxcsr) = match &t.resume {
@@ -733,6 +742,8 @@ impl Programs {
                 suspend: t.snap.suspended,
                 mxcsr,
                 impersonation: impersonation_of(&t.object).map_or(0, |o| self.id(&o)),
+                xstate: programs::XSTATE_LEGACY,
+                extended: &[],
             }
             .write(w, &apcs)?;
         }
@@ -1068,6 +1079,19 @@ fn frame_ranges(frames: &[u64]) -> impl Iterator<Item = Range> + '_ {
 /// starting the program again).
 static RESUMED: IrqMutex<Vec<KArc<Process>>> = IrqMutex::new(Vec::new());
 
+/// (pid, handovers come through) of the processes a handover brought, for
+/// PROCESSES version 3 (`handover_next`; the default build keeps none).
+static HANDOVERS: IrqMutex<Vec<(u64, u32)>> = IrqMutex::named("handover.counts", Vec::new());
+
+fn note_handovers(pid: u64, count: u32) -> Result<(), AllocError> {
+    HANDOVERS.lock().try_push((pid, count))
+}
+
+/// The handovers process `pid` has come through (0: started here).
+fn handovers_of(pid: u64) -> u32 {
+    HANDOVERS.lock().iter().find(|e| e.0 == pid).map_or(0, |e| e.1)
+}
+
 /// Takes the carried process named `name` (an executable's file name), if
 /// any (the list then forgets it, so its memory goes when it ends).
 pub fn resumed(name: &str) -> Option<KArc<Process>> {
@@ -1085,8 +1109,9 @@ pub fn restore(rec: &Record<'_>) {
     match restore_all(rec) {
         Ok((processes, threads)) => {
             // How long the programs were stopped (the clock at the record).
-            let at =
-                rec.section(tag::CLOCK).map_or(0, |mut c| record::Clock::read(&mut c).monotonic_ns);
+            let at = rec
+                .section(tag::CLOCK)
+                .map_or(0, |mut c| record::Clock::read(&mut c).monotonic_ns());
             let now = crate::time::raw_monotonic_ns();
             crate::info!(
                 "handover: {processes} process(es) and {threads} thread(s) resumed, {} ms after \
@@ -1376,6 +1401,17 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         }
         let p = ProcessRec::read(&mut e);
         let process = restore_process(rec, &p, &objects)?;
+        if programs::version_of(tag::PROCESSES) >= 3 {
+            // 0: an older writer did not count (this one is the first
+            // counted).
+            let count = p.handovers.max(1);
+            note_handovers(process.id, count).map_err(no_memory)?;
+            crate::info!(
+                "handover: process {} has come through {count} handover(s){}",
+                process.name,
+                if p.handovers == 0 { " (counted from here: PROCESSES version 2)" } else { "" }
+            );
+        }
         processes.try_push(process).map_err(no_memory)
     })?;
     let find = |pid: u64| processes.iter().find(|p| p.id == pid).cloned();
@@ -1389,6 +1425,11 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
     let mut live = Vec::new();
     each(rec, tag::THREADS, |mut e| {
         let (t, apc_table) = ThreadRec::read(&mut e);
+        // Extended state this kernel does not restore (the running kernel
+        // checked the note: `version::agree_xstate`).
+        if t.xstate & !super::version::XSTATE != 0 || !t.extended.is_empty() {
+            return Err(NtStatus::NOT_SUPPORTED);
+        }
         let process = find(t.pid).ok_or(NtStatus::INVALID_CID)?;
         let regs = user_regs(&t.regs);
         let resume = match t.state {

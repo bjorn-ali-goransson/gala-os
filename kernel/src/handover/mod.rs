@@ -21,11 +21,20 @@
 //! their full user context, or blocked in a call that can be made
 //! again), DLL views are laid out again and checked by digest, pipes,
 //! keyed events, tokens, APC queues and security descriptors are carried.
+//!
+//! Milestone (d): a newer kernel build with a changed state format.
+//! `version` has what this build writes and reads of each section, in a
+//! note in its image; before stopping anything the running kernel reads
+//! the next kernel's note and refuses a handover whose record it could
+//! not take (`version::agree`, then the record as written:
+//! `version::check_record`), and readers convert older sections (new
+//! fields take their defaults).
 
 pub mod carry;
 pub mod elf;
 pub mod programs;
 pub mod record;
+pub mod version;
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -60,6 +69,9 @@ pub enum HandoverError {
     RecordTooLarge,
     /// The programs cannot be carried (the reason); they run on.
     Refused(carry::Refusal),
+    /// The next kernel cannot take this kernel's record (versions); the
+    /// programs run on.
+    Incompatible(version::Mismatch),
 }
 
 impl From<AllocError> for HandoverError {
@@ -128,7 +140,8 @@ impl IntoIterator for KeptList {
     }
 }
 
-/// Early in boot (console up): says where this kernel came from.
+/// Early in boot (console up): says where this kernel came from, which
+/// build wrote the record and which sections were converted or skipped.
 pub fn report(info: &BootInfo) {
     let Some(r) = &info.handover else { return };
     GENERATION.store(r.generation, Ordering::Relaxed);
@@ -140,9 +153,40 @@ pub fn report(info: &BootInfo) {
         r.record_len,
         r.record_phys
     );
+    match r.record.section(tag::WRITER).map(|mut s| s.str()) {
+        Some(writer) => crate::info!(
+            "handover: this kernel is {}; the record was written by {writer}",
+            version::BUILD
+        ),
+        None if version::known(tag::WRITER) => crate::info!(
+            "handover: this kernel is {}; the record was written by an older kernel (no \
+             WRITER section)",
+            version::BUILD
+        ),
+        None => crate::info!(
+            "handover: this kernel is {}; this build does not read the writer's name",
+            version::BUILD
+        ),
+    }
     for section in r.record.sections().flatten() {
-        if !record::KNOWN.contains(&section.tag) {
-            crate::warn!("handover: skipped section {} (unknown to this kernel)", section.tag);
+        match version::kind_of(section.tag) {
+            None => {
+                crate::warn!("handover: skipped section {} (unknown to this kernel)", section.tag)
+            }
+            Some(_) if !section.readable() => crate::warn!(
+                "handover: skipped section {} version {} (it needs a reader of version {})",
+                version::name(section.tag),
+                section.version,
+                section.must_read
+            ),
+            Some(k) if section.version < k.writes => crate::info!(
+                "handover: section {} version {} read as version {} (new fields take their \
+                 defaults)",
+                k.name,
+                section.version,
+                k.writes
+            ),
+            Some(_) => {}
         }
     }
 }
@@ -155,11 +199,11 @@ pub fn carried_rates(info: &BootInfo, tsc_hz: &mut u64, timer_hz: &mut u64) {
     let Some(r) = &info.handover else { return };
     let Some(mut s) = r.record.section(tag::CLOCK) else { return };
     let clock = record::Clock::read(&mut s);
-    if clock.tsc_hz != 0 {
-        *tsc_hz = clock.tsc_hz;
+    if clock.tsc_hz() != 0 {
+        *tsc_hz = clock.tsc_hz();
     }
-    if clock.timer_hz != 0 {
-        *timer_hz = clock.timer_hz;
+    if clock.timer_hz() != 0 {
+        *timer_hz = clock.timer_hz();
     }
 }
 
@@ -173,14 +217,14 @@ pub fn resume_clock(info: &BootInfo) {
     let clock = record::Clock::read(&mut s);
     crate::time::resume(&clock);
     let now = crate::time::raw_monotonic_ns();
-    if now < clock.monotonic_ns {
-        panic!("handover: the clock went back from {} ns to {now} ns", clock.monotonic_ns);
+    if now < clock.monotonic_ns() {
+        panic!("handover: the clock went back from {} ns to {now} ns", clock.monotonic_ns());
     }
     crate::info!(
         "handover: clock monotonic: {} ms at the record, {} ms now (+{} us)",
-        clock.monotonic_ns / 1_000_000,
+        clock.monotonic_ns() / 1_000_000,
         now / 1_000_000,
-        (now - clock.monotonic_ns) / 1000
+        (now - clock.monotonic_ns()) / 1000
     );
 }
 
@@ -245,6 +289,44 @@ pub fn wanted(cmdline: &Cmdline) -> bool {
 /// Returns only on failure, before the point of no return; the programs
 /// then go on in this kernel.
 pub fn go(info: &BootInfo, cmdline: &Cmdline) -> HandoverError {
+    // The next kernel: its file, checked as a kernel image, and what it
+    // reads, before anything is stopped.
+    let hhdm = info.hhdm_offset;
+    let file = match cmdline.value("handover_image") {
+        Some(name) => info.modules.find(name).map(|m| m.data),
+        None => info.kernel_file,
+    };
+    let Some(file) = file else { return HandoverError::NoKernelFile };
+    if let Err(m) = version::trusted(file) {
+        return HandoverError::Incompatible(m);
+    }
+    let image = match elf::parse(file, KERNEL_VIRT, KERNEL_MAX_SPAN) {
+        Ok(image) => image,
+        Err(e) => return HandoverError::Elf(e),
+    };
+    let target = match version::of_image(&image) {
+        Ok(t) => t,
+        Err(m) => return HandoverError::Incompatible(m),
+    };
+    let running = match crate::nt::process::running() {
+        Ok(p) => !p.is_empty(),
+        Err(_) => return HandoverError::OutOfMemory,
+    };
+    crate::info!(
+        "handover: {} hands over to {} (record framing {}-{}, image layout {}, extended state \
+         {:#x}, {} section kinds{})",
+        version::BUILD,
+        target.build(),
+        target.framing.0,
+        target.framing.1,
+        target.image_layout,
+        target.xstate,
+        target.kinds(),
+        if running { "; with programs" } else { "" }
+    );
+    if let Err(m) = version::agree(&target, running) {
+        return HandoverError::Incompatible(m);
+    }
     let programs = match carry::collect() {
         Ok(p) => p,
         Err(why) => return HandoverError::Refused(why),
@@ -260,7 +342,8 @@ pub fn go(info: &BootInfo, cmdline: &Cmdline) -> HandoverError {
             p.frame_count()
         );
     }
-    let e = match prepare_and_go(info, cmdline, programs.as_ref()) {
+    let next = Next { file, image: &image, target: &target, hhdm };
+    let e = match prepare_and_go(info, cmdline, &next, programs.as_ref()) {
         Err(e) => e,
         Ok(never) => match never {},
     };
@@ -280,18 +363,24 @@ pub fn resume_programs(info: &BootInfo) {
 
 enum Never {}
 
+/// The kernel to hand over to.
+struct Next<'a> {
+    file: &'a [u8],
+    image: &'a elf::KernelImage<'a>,
+    target: &'a version::Reads<'a>,
+    hhdm: u64,
+}
+
 fn prepare_and_go(
     info: &BootInfo,
     cmdline: &Cmdline,
+    to: &Next<'_>,
     programs: Option<&carry::Programs>,
 ) -> Result<Never, HandoverError> {
-    let hhdm = info.hhdm_offset;
-    let file = match cmdline.value("handover_image") {
-        Some(name) => info.modules.find(name).map(|m| m.data),
-        None => info.kernel_file,
-    };
-    let file = file.ok_or(HandoverError::NoKernelFile)?;
-    let image = elf::parse(file, KERNEL_VIRT, KERNEL_MAX_SPAN).map_err(HandoverError::Elf)?;
+    let (file, image, hhdm) = (to.file, to.image, to.hhdm);
+    if let Some(p) = programs {
+        version::agree_xstate(to.target, p.xstate()).map_err(HandoverError::Incompatible)?;
+    }
     let next = generation() + 1;
 
     // The marker: made at the first handover, counted at each.
@@ -365,18 +454,15 @@ fn prepare_and_go(
         .ok_or(HandoverError::OutOfMemory)?;
     memmap::carve(&mut map, bitmap.phys(), bitmap.len(), RegionKind::BootloaderReclaimable)?;
 
-    let prepared = machine::prepare(&image, map.iter().copied(), &lapic_ids)?;
-    memmap::carve(&mut map, prepared.area.0, prepared.area.1, RegionKind::BootloaderReclaimable)?;
-    memmap::carve(&mut map, prepared.image.0, prepared.image.1, RegionKind::ExecutableAndModules)?;
-
-    // The record: sized with a first encoding, then written for good into
-    // its own frames (which the map then shows in use).
+    // The record as it will be (the placement of the new image and the
+    // scaffold aside), checked against what the next kernel reads before
+    // anything is allocated for it; its size sizes the record's frames.
     let file_phys = (file.as_ptr() as u64).wrapping_sub(hhdm);
-    let state = State {
+    let mut state = State {
         info,
         cmdline,
-        image: &image,
-        prepared: &prepared,
+        image,
+        placed: Placed::default(),
         volume,
         marker: (marker.phys(), marker.len()),
         file: (file_phys, file.len() as u64),
@@ -385,7 +471,22 @@ fn prepare_and_go(
         bitmap: (bitmap.phys(), bitmap.len()),
         programs,
     };
-    let estimate = state.encode(&map, (0, 0))?.len() as u64;
+    let draft = state.encode(&map, (0, 0))?;
+    if let Err(m) = version::check_record(&draft, to.target) {
+        bitmap.free();
+        return Err(HandoverError::Incompatible(m));
+    }
+    // Up to 4 more map entries come from the carving below.
+    let estimate = draft.len() as u64 + 4 * 24;
+    drop(draft);
+
+    let prepared = machine::prepare(image, map.iter().copied(), &lapic_ids)?;
+    memmap::carve(&mut map, prepared.area.0, prepared.area.1, RegionKind::BootloaderReclaimable)?;
+    memmap::carve(&mut map, prepared.image.0, prepared.image.1, RegionKind::ExecutableAndModules)?;
+    state.placed = Placed { area: prepared.area, image: prepared.image, parked: prepared.parked };
+
+    // The record, written for good into its own frames (which the map
+    // then shows in use).
     let pages = (estimate + 2 * PAGE_SIZE).div_ceil(PAGE_SIZE);
     let mut record_pages =
         machine::OwnedPages::allocate(pages).ok_or(HandoverError::OutOfMemory)?;
@@ -414,12 +515,21 @@ fn prepare_and_go(
     Err(machine::quiesce_and_jump(&prepared, record_at.0, others).into())
 }
 
+/// Where `arch::handover::prepare` put the new image and the scaffold
+/// (zero in the draft record).
+#[derive(Clone, Copy, Default)]
+struct Placed {
+    area: (u64, u64),
+    image: (u64, u64),
+    parked: (u64, u32),
+}
+
 /// What goes into the record.
 struct State<'a> {
     info: &'a BootInfo,
     cmdline: &'a Cmdline<'a>,
     image: &'a elf::KernelImage<'a>,
-    prepared: &'a machine::Prepared,
+    placed: Placed,
     volume: Option<record::Volume>,
     marker: (u64, u64),
     file: (u64, u64),
@@ -440,9 +550,9 @@ impl State<'_> {
         )?;
         record::Platform {
             hhdm_offset: info.hhdm_offset,
-            kernel_phys: self.prepared.image.0,
+            kernel_phys: self.placed.image.0,
             kernel_virt: self.image.base,
-            kernel_len: self.prepared.image.1,
+            kernel_len: self.placed.image.1,
             firmware: info.firmware.map_or(0, |f| f.to_limine() + 1),
             boot_unix_time: info.boot_unix_time.map_or(0, |t| t.max(0) as u64 + 1),
         }
@@ -464,17 +574,17 @@ impl State<'_> {
         crate::time::snapshot().write(&mut w)?;
         record::Cpus {
             bsp_lapic_id: self.bsp_lapic_id,
-            count: self.prepared.parked.1,
-            parked_phys: self.prepared.parked.0,
+            count: self.placed.parked.1,
+            parked_phys: self.placed.parked.0,
         }
         .write(&mut w)?;
         if let Some(v) = self.volume {
             v.write(&mut w)?;
         }
         let kept = [
-            (self.prepared.area, purpose::SCAFFOLD),
+            (self.placed.area, purpose::SCAFFOLD),
             (record_at, purpose::RECORD),
-            (self.prepared.image, purpose::KERNEL_IMAGE),
+            (self.placed.image, purpose::KERNEL_IMAGE),
             (self.marker, purpose::MARKER),
             (self.bitmap, purpose::BITMAP),
         ];
@@ -490,6 +600,10 @@ impl State<'_> {
         )?;
         if let Some(p) = self.programs {
             p.write(&mut w)?;
+        }
+        if version::known(tag::WRITER) {
+            w.section(tag::WRITER, version::writes(tag::WRITER), 0)?;
+            w.str(version::BUILD)?;
         }
         w.finish()
     }

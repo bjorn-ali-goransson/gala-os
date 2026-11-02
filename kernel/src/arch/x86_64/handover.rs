@@ -292,6 +292,12 @@ impl OwnedPages {
         Some(owned)
     }
 
+    /// Gives frames `allocate` made back (a handover refused before
+    /// they were handed on).
+    pub fn free(self) {
+        free_run(Frame::from_number(self.phys / PAGE_SIZE), self.len / PAGE_SIZE);
+    }
+
     /// A page range the previous kernel kept for this one (see the type).
     pub fn kept(phys: u64, len: u64) -> Self {
         OwnedPages { phys, len }

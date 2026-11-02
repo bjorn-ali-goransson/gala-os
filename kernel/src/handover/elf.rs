@@ -38,6 +38,32 @@ pub struct KernelImage<'a> {
 }
 
 const PT_LOAD: u32 = 1;
+const PT_NOTE: u32 = 4;
+
+/// Walks a note segment's entries (namesz, descsz, type, name, desc, each
+/// padded to `align`) for the one named `name` of type `note_type`.
+fn find_note<'a>(
+    mut notes: &'a [u8],
+    align: usize,
+    name: &[u8],
+    note_type: u32,
+) -> Option<&'a [u8]> {
+    while notes.len() >= 12 {
+        let namesz = u32_at(notes, 0)? as usize;
+        let descsz = u32_at(notes, 4)? as usize;
+        let ty = u32_at(notes, 8)?;
+        let name_at = 12;
+        let desc_at = name_at + namesz.next_multiple_of(align);
+        let end = desc_at.checked_add(descsz.next_multiple_of(align))?;
+        let this_name = notes.get(name_at..name_at + namesz)?;
+        let desc = notes.get(desc_at..desc_at + descsz)?;
+        if this_name == name && ty == note_type {
+            return Some(desc);
+        }
+        notes = notes.get(end..)?;
+    }
+    None
+}
 
 fn u16_at(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
@@ -109,6 +135,23 @@ impl<'a> KernelImage<'a> {
         })
     }
 
+    /// The description of the first note named `name` (without padding,
+    /// e.g. `b"GALA\0"`) of type `note_type` in a PT_NOTE segment, if any
+    /// (`handover::version`: what the kernel reads of a handover record).
+    pub fn note(&self, name: &[u8], note_type: u32) -> Option<&'a [u8]> {
+        (0..self.phnum).find_map(|i| {
+            let at = self.phoff + i * self.phentsize;
+            if u32_at(self.file, at)? != PT_NOTE {
+                return None;
+            }
+            let offset = usize::try_from(u64_at(self.file, at + 8)?).ok()?;
+            let len = usize::try_from(u64_at(self.file, at + 32)?).ok()?;
+            let align = if u64_at(self.file, at + 48)? == 8 { 8 } else { 4 };
+            let notes = self.file.get(offset..offset.checked_add(len)?)?;
+            find_note(notes, align, name, note_type)
+        })
+    }
+
     /// The bytes of the file `seg` loads (checked by `parse`).
     pub fn file_bytes(&self, seg: &Segment) -> &'a [u8] {
         let start = seg.file_offset as usize;
@@ -158,6 +201,41 @@ mod tests {
         assert_eq!(segs.len(), 2);
         assert_eq!(img.file_bytes(&segs[1]), b"code");
         assert_eq!(segs[1].mem_len, 0x3000);
+    }
+
+    #[test]
+    fn finds_notes() {
+        // Two notes: another vendor's, then GALA's (namesz 5, padded to 8).
+        let mut notes = Vec::new();
+        for (name, ty, desc) in [(&b"GNU\0"[..], 3u32, &b"abcd"[..]), (b"GALA\0", 7, b"12345678")] {
+            notes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            notes.extend_from_slice(&(desc.len() as u32).to_le_bytes());
+            notes.extend_from_slice(&ty.to_le_bytes());
+            notes.extend_from_slice(name);
+            notes.resize(notes.len().next_multiple_of(4), 0);
+            notes.extend_from_slice(desc);
+        }
+        let mut f = elf(&[(BASE, 0x10, b"x")], BASE);
+        // A third program header: PT_NOTE over the notes.
+        let off = f.len();
+        f.extend_from_slice(&notes);
+        let mut ph = [0u8; 56];
+        ph[0..4].copy_from_slice(&PT_NOTE.to_le_bytes());
+        ph[8..16].copy_from_slice(&(off as u64 + 56).to_le_bytes());
+        ph[32..40].copy_from_slice(&(notes.len() as u64).to_le_bytes());
+        ph[48..56].copy_from_slice(&4u64.to_le_bytes());
+        // Insert it after the first header (contents move by 56).
+        f.splice(120..120, ph);
+        f[56..58].copy_from_slice(&2u16.to_le_bytes());
+        let seg_off = u64::from_le_bytes(f[72..80].try_into().unwrap()) + 56;
+        f[72..80].copy_from_slice(&seg_off.to_le_bytes());
+        let img = parse(&f, BASE, 1 << 30).unwrap();
+        assert_eq!(img.note(b"GALA\0", 7), Some(&b"12345678"[..]));
+        assert_eq!(img.note(b"GNU\0", 3), Some(&b"abcd"[..]));
+        assert_eq!(img.note(b"GALA\0", 8), None);
+        // No PT_NOTE: none.
+        let plain = elf(&[(BASE, 0x10, b"x")], BASE);
+        assert_eq!(parse(&plain, BASE, 1 << 30).unwrap().note(b"GALA\0", 7), None);
     }
 
     #[test]
