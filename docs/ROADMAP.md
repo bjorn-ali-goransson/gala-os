@@ -1399,7 +1399,11 @@ Descendants, Subtree), tree walkers, and the Invoke (buttons), Value
 (edits) and Toggle (check boxes) patterns. Next: IUIAutomation2+ and
 whatever FlaUI's UIA3 needs first (cache requests, events), then
 Selection/ExpandCollapse for list and combo boxes, title bars, and
-WM_GETOBJECT providers.
+WM_GETOBJECT providers. Before UI Automation can drive another
+program, windows must work across processes: ARCHITECTURE's "Plan:
+windows across processes" (a kernel window registry with global HWNDs,
+posted and sent messages across processes, then UIA over them, then
+FlaUI). That plan is the next step for this item.
 
 Drivers: gala writes its own, against published standards (virtio,
 then AHCI/NVMe, xHCI, e1000), not hardware-specific ones. Reusing

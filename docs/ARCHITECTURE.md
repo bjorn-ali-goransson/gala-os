@@ -2772,6 +2772,59 @@ RangeValue, Text patterns. Then: FlaUI (.NET, MIT) on top as the test
 driver, running on gala's .NET support, and screen tests rewritten on
 it.
 
+### Plan: windows across processes (planned 2026-11-02)
+
+A test program driving another program (FlaUI driving FileZilla), and
+every Win32 call that names another process's window (FindWindow,
+EnumWindows, GetWindowText, PostMessage/SendMessage to it), need what
+Windows keeps in win32k: one HWND namespace for the whole desktop, and
+message queues the kernel can reach. Today user32 hands out HWNDs from a
+per-process table (0x10000 + 16 * slot: the same values in every
+process) and the kernel knows only top-level windows (desktop ids). The
+steps, each test first:
+
+1. **A kernel window registry** (`nt::window`): every window, top-level
+   and child, is registered when user32 creates it and gets its HWND
+   from the kernel (one counter for the desktop, never reused soon, the
+   low bits clear like Windows' handles). The entry holds what other
+   processes may ask about: owner process and thread, parent, owner
+   window, class name, text (truncated), window rectangle (screen), style
+   and extended style, control id, visible/enabled, z order among
+   siblings. user32 keeps its own table as the fast path and mirrors
+   every change (create, destroy, SetWindowText, SetWindowPos/move,
+   ShowWindow, EnableWindow, SetParent, style changes) with one call;
+   the kernel drops a process's entries when it ends. Test: a program
+   starts a child process that creates windows; the parent finds them
+   (FindWindowW, EnumWindows, EnumChildWindows, GetWindowTextW,
+   GetClassNameW, GetWindowRect, GetWindowThreadProcessId, IsWindow,
+   IsWindowVisible, GetDlgCtrlID, GetParent/GetWindow) as Windows
+   documents.
+2. **Posted messages across processes**: PostMessage/PostThreadMessage
+   to another process's window or thread go into a kernel queue per
+   thread; user32's pump moves them into its own queue as it does the
+   desktop's input (GalaWindowInput). Test: BM_CLICK posted to the
+   child's button gives the child's window WM_COMMAND.
+3. **Sent messages across threads and processes**: SendMessage to a
+   window of another thread queues a sent message with a reply slot in
+   the kernel; the sender waits (processing messages sent to itself, as
+   Windows does) and the receiver handles it the next time it calls
+   GetMessage/PeekMessage/WaitMessage/SendMessage, as documented
+   ("sent messages are processed only when the receiving thread calls a
+   message function"); SendMessageTimeout and SendNotifyMessage follow.
+   The system messages that carry pointers (WM_GETTEXT, WM_SETTEXT,
+   WM_GETTEXTLENGTH and the control messages UIA uses: BM_GETCHECK,
+   LB_/CB_GETTEXT...) are marshaled by copying their buffers through the
+   kernel, as Windows marshals messages below WM_USER; others go as
+   numbers. This also gives user32 cross-thread SendMessage within a
+   process (today it calls the procedure on the caller's thread).
+4. **UI Automation over other processes' windows**: the element tree
+   from the registry (the root's children are every visible top-level
+   window), properties from it, patterns through posted/sent messages.
+   uia_test grows a second process.
+5. **FlaUI**: IUIAutomation2..6 / CUIAutomation8 and cache requests
+   (what FlaUI's UIA3 asks for first), then a FlaUI test program, built
+   against the .NET runtime gala already runs, driving FileZilla.
+
 ## Not done yet
 
 suspension/context of threads running on other CPUs, ranged (invlpg)
