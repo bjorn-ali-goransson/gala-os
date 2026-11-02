@@ -28,7 +28,8 @@ pub struct Info {
     pub ex_style: u32,
     /// The window rectangle on the screen: left, top, right, bottom.
     pub rect: [i32; 4],
-    /// FLAG_VISIBLE, FLAG_ENABLED.
+    /// FLAG_VISIBLE, FLAG_ENABLED, FLAG_ZOOMED, FLAG_ICONIC (kept as
+    /// user32 writes them).
     pub flags: u32,
     /// Z order among siblings: smaller is higher.
     pub z: i64,
@@ -47,6 +48,9 @@ pub const INFO_SIZE: usize = 88 + 2 * CLASS_CHARS + 2 * TEXT_CHARS;
 pub const INFO_VERSION: u32 = 1;
 pub const FLAG_VISIBLE: u32 = 1;
 pub const FLAG_ENABLED: u32 = 2;
+/// Maximized (IsZoomed) and minimized (IsIconic) top-level windows.
+pub const FLAG_ZOOMED: u32 = 4;
+pub const FLAG_ICONIC: u32 = 8;
 
 /// The first HWND handed out and the step between them (Windows' handles
 /// are even; user32's own pseudo handles, such as the desktop's, stay

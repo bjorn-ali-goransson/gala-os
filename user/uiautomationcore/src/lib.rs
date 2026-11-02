@@ -19,9 +19,12 @@
 //!   IgnoreCase and MatchSubstring), and, or, not.
 //! - Patterns (pattern.rs): Invoke (push buttons: BM_CLICK posted, as
 //!   Invoke may return before the click is handled; list-view items: a
-//!   double click posted), Value (edits: WM_SETTEXT, the window text),
-//!   Toggle (check boxes: BM_GETCHECK, BM_CLICK), Selection (lists),
-//!   SelectionItem and ScrollItem (list items).
+//!   double click posted; title-bar buttons: their WM_SYSCOMMAND),
+//!   Value (edits: WM_SETTEXT, the window text), Toggle (check boxes:
+//!   BM_GETCHECK, BM_CLICK), Selection (lists), SelectionItem and
+//!   ScrollItem (list items), Window and Transform (top-level windows
+//!   with a caption, frame.rs, which also makes their TitleBar
+//!   elements).
 //! - Tree walkers (walker.rs): the raw, control and content views and
 //!   walkers with any condition.
 //!
@@ -57,6 +60,7 @@ mod automation;
 mod cache;
 mod condition;
 mod element;
+mod frame;
 mod items;
 mod menus;
 mod pattern;
@@ -180,6 +184,18 @@ unsafe extern "system" {
     pub fn WindowFromPoint(point: Point) -> Hwnd;
     pub fn PostMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> i32;
     pub fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+    pub fn IsZoomed(hwnd: Hwnd) -> i32;
+    pub fn IsIconic(hwnd: Hwnd) -> i32;
+    pub fn GetSystemMetrics(index: i32) -> i32;
+    pub fn SetWindowPos(
+        hwnd: Hwnd,
+        after: Hwnd,
+        x: i32,
+        y: i32,
+        cx: i32,
+        cy: i32,
+        flags: u32,
+    ) -> i32;
 }
 
 pub type HResult = i32;

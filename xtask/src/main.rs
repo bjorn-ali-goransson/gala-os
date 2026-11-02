@@ -3337,7 +3337,8 @@ const SCENARIOS: &[Scenario] = &[
         // .NET 8 runtime drives another program (user/flaui_test: the C#
         // test and flaui_target.exe, built by its build.sh) through gala's
         // UIAutomationCore.dll: CUIAutomation8, the element tree, Invoke,
-        // Value and Toggle.
+        // Value and Toggle; FlaUI's Window API (the Window and Transform
+        // patterns, the title bar, Window.Close).
         name: "flaui_test",
         cmdline: "qemu_exit run=dotnet.exe args=C:/gala/flaui_test.dll",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -3354,6 +3355,11 @@ const SCENARIOS: &[Scenario] = &[
             "checked=True",
             "items=3 alpha.txt,beta.txt,gamma.txt",
             "selected=beta.txt True False",
+            "window=True True False False Normal modal=0",
+            "titlebar=FlaUI Pressed Minimize,Maximize,Close",
+            "moved=100,80",
+            "state=Maximized",
+            "state=Normal 100,80",
             "closed=True",
             "flaui_test: ok",
             "dotnet.exe finished with status 0x00000000",

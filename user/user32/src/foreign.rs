@@ -43,6 +43,10 @@ const INFO_SIZE: usize = 88 + 2 * CLASS_CHARS + 2 * TEXT_CHARS;
 const INFO_VERSION: u32 = 1;
 const FLAG_VISIBLE: u32 = 1;
 const FLAG_ENABLED: u32 = 2;
+/// Maximized (IsZoomed) and minimized (IsIconic), for UI Automation's
+/// Window pattern in other processes.
+const FLAG_ZOOMED: u32 = 4;
+const FLAG_ICONIC: u32 = 8;
 
 /// Each window slot's HWND (0: free), read without user32's lock.
 static HWNDS: [AtomicUsize; MAX_WINDOWS] = [const { AtomicUsize::new(0) }; MAX_WINDOWS];
@@ -76,6 +80,8 @@ pub(crate) struct Info {
     pub rect: [i32; 4],
     pub visible: bool,
     pub enabled: bool,
+    pub zoomed: bool,
+    pub iconic: bool,
     pub z: i64,
     pub class: [u16; CLASS_CHARS],
     pub class_len: usize,
@@ -97,7 +103,9 @@ impl Info {
             b[48 + 4 * k..52 + 4 * k].copy_from_slice(&v.to_le_bytes());
         }
         let flags = if self.visible { FLAG_VISIBLE } else { 0 }
-            | if self.enabled { FLAG_ENABLED } else { 0 };
+            | if self.enabled { FLAG_ENABLED } else { 0 }
+            | if self.zoomed { FLAG_ZOOMED } else { 0 }
+            | if self.iconic { FLAG_ICONIC } else { 0 };
         b[64..68].copy_from_slice(&flags.to_le_bytes());
         b[68..72].copy_from_slice(&(self.class_len as u32).to_le_bytes());
         b[72..80].copy_from_slice(&self.z.to_le_bytes());
@@ -128,6 +136,8 @@ impl Info {
             rect: [u32_at(48) as i32, u32_at(52) as i32, u32_at(56) as i32, u32_at(60) as i32],
             visible: u32_at(64) & FLAG_VISIBLE != 0,
             enabled: u32_at(64) & FLAG_ENABLED != 0,
+            zoomed: u32_at(64) & FLAG_ZOOMED != 0,
+            iconic: u32_at(64) & FLAG_ICONIC != 0,
             class_len: (u32_at(68) as usize).min(CLASS_CHARS),
             z: u64_at(72) as i64,
             text_len: (u32_at(80) as usize).min(TEXT_CHARS),
@@ -170,6 +180,8 @@ fn local_info(i: usize) -> Option<Info> {
         rect: [0; 4],
         visible: w.visible,
         enabled: !w.disabled,
+        zoomed: w.zoomed,
+        iconic: w.iconic,
         z: w.z,
         class: [0; CLASS_CHARS],
         class_len: 0,
@@ -201,6 +213,8 @@ pub(crate) fn assign(i: usize) -> Hwnd {
         rect: [0; 4],
         visible: false,
         enabled: true,
+        zoomed: false,
+        iconic: false,
         z: 0,
         class: [0; CLASS_CHARS],
         class_len: 0,
@@ -399,6 +413,7 @@ fn carries_pointer(msg: u32) -> bool {
             | 0x0083 // WM_NCCALCSIZE
     ) || in_string(msg)
         || msg == crate::track::GALA_MENU
+        || msg == crate::tree::GALA_SETWINDOWPOS
         || matches!(msg, LB_GETTEXT | LB_GETITEMRECT | LB_GETSELITEMS | CB_GETLBTEXT)
 }
 
@@ -509,6 +524,9 @@ pub(crate) fn send_remote(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) ->
         LB_GETITEMRECT if lparam != 0 => (out_ptr, out_max) = (lparam as u64, 16),
         crate::track::GALA_MENU if lparam != 0 => {
             (out_ptr, out_max) = (lparam as u64, crate::track::MENU_INFO_SIZE);
+        }
+        crate::tree::GALA_SETWINDOWPOS if lparam != 0 => {
+            (in_ptr, in_len) = (lparam as u64, crate::tree::SETWINDOWPOS_SIZE);
         }
         LB_GETSELITEMS if lparam != 0 => {
             (out_ptr, out_max) = (lparam as u64, (4 * wparam).min(MAX_DATA));

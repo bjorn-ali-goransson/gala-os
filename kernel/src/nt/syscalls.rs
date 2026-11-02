@@ -1355,11 +1355,17 @@ fn gala_window_create(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
-/// GalaWindowShow(id, show).
+/// GalaWindowShow(id, show): 0 hides, 1 shows, 2 shows minimized (on the
+/// taskbar only: user32's SC_MINIMIZE).
 fn gala_window_show(call: &mut Call<'_>) -> NtStatus {
-    let (id, show) = (arg!(call, 0) as u32, arg!(call, 1) as u8 != 0);
+    let (id, show) = (arg!(call, 0) as u32, arg!(call, 1) as u8);
     let owner = call.process.id;
-    tri!(super::desktop::with(|d| Ok(((), Some(d.show(id, owner, show)?)))));
+    // 2: shown minimized (user32's SC_MINIMIZE).
+    tri!(super::desktop::with(|d| {
+        let r =
+            if show == 2 { d.show_minimized(id, owner)? } else { d.show(id, owner, show != 0)? };
+        Ok(((), Some(r)))
+    }));
     NtStatus::SUCCESS
 }
 

@@ -69,11 +69,6 @@ unsafe extern "system" {
 
 // ---- Messages and windows: gala has no windows, so no messages ----
 
-#[unsafe(no_mangle)]
-pub extern "system" fn IsIconic(_window: usize) -> i32 {
-    0
-}
-
 /// CharToOemBuffA(src, dst, length): ANSI to the OEM code page. gala's
 /// code pages are the same (UTF-8 for ANSI text), so this copies.
 #[unsafe(no_mangle)]

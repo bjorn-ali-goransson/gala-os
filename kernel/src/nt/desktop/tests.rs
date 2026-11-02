@@ -135,8 +135,32 @@ fn the_caption_drags_and_its_buttons_minimize_and_close() {
     click(&mut d, 400 + 400 - 2 * 46 - 20, 215);
     assert!(d.window(a).unwrap().minimized);
     assert_eq!(d.hit(600, 300), Hit::Nothing);
+    // The program is told (IsIconic), and again when it comes back.
+    let n = d.take_input(7, &mut out);
+    assert_eq!((n, out[0].window, out[0].message, out[0].wparam), (1, a, GALA_WM_MINIMIZED, 1));
     let (_, button) = d.tasks()[0];
     click(&mut d, button.x + 10, button.y + 10);
+    assert!(!d.window(a).unwrap().minimized);
+    assert_eq!(d.active, Some(a));
+    let n = d.take_input(7, &mut out);
+    assert_eq!((n, out[0].message, out[0].wparam), (1, GALA_WM_MINIMIZED, 0));
+}
+
+#[test]
+fn a_program_minimizes_and_restores_its_window() {
+    let (mut d, a) = desktop_with_window();
+    // GalaWindowShow 2 (user32's SC_MINIMIZE): on the taskbar only, not
+    // active, and nothing is sent back.
+    d.show_minimized(a, 7).unwrap();
+    assert!(d.window(a).unwrap().minimized);
+    assert_eq!(d.hit(600, 300), Hit::Nothing);
+    assert_ne!(d.active, Some(a));
+    assert_eq!(d.tasks().len(), 1);
+    assert!(d.input.is_empty());
+    // Another process may not.
+    assert!(d.show_minimized(a, 8).is_err());
+    // GalaWindowShow 1 (SC_RESTORE): back.
+    d.show(a, 7, true).unwrap();
     assert!(!d.window(a).unwrap().minimized);
     assert_eq!(d.active, Some(a));
 }

@@ -65,10 +65,31 @@
  *   CurrentValue reads it, not read-only. Toggle on an auto check box:
  *   Off, then On after Toggle (BM_GETCHECK agrees).
  *
- * The window has WS_CAPTION but no system menu: on Windows its UIA
- * children then include a TitleBar element (no HWND of its own) besides
- * the three controls, so the children with a NativeWindowHandle are
- * counted exactly and all children only as at least three.
+ * - Title bars (Windows' Win32 window proxy): a top-level window with a
+ *   caption has a TitleBar child first (no HWND of its own, Name the
+ *   title, AutomationId "TitleBar"): "UIA Test" (WS_CAPTION, no system
+ *   menu) has four children, the TitleBar (without buttons) and the
+ *   three controls. A WS_OVERLAPPEDWINDOW window's title bar has three
+ *   Buttons, AutomationId and Name "Minimize", "Maximize" ("Restore"
+ *   while maximized), "Close" (what FlaUI's TitleBar looks them up by;
+ *   unverified on Windows); a WS_SYSMENU dialog's only "Close".
+ * - Window and Transform patterns (framed windows of this process and of
+ *   the child's): CanMaximize/CanMinimize (the styles), IsModal (FALSE;
+ *   TRUE for a window owned by a disabled window, which FindAll with an
+ *   IsModal condition finds below the owner, as FlaUI's
+ *   Window.ModalWindows does; the owner is BlockedByModalWindow),
+ *   IsTopmost (WS_EX_TOPMOST), WindowVisualState, WaitForInputIdle;
+ *   Transform.Move and Resize change GetWindowRect (and
+ *   BoundingRectangle), Rotate fails (CanRotate FALSE).
+ *   SetWindowVisualState Maximized: IsZoomed, another rectangle, the
+ *   title bar's Restore button, CanMove FALSE; Normal: the rectangle
+ *   back; Minimized: IsIconic (any process's window). The title bar's
+ *   Maximize, Restore and Minimize buttons do the same through Invoke.
+ *   Window.Close (or Invoke on the title bar's Close button): the window
+ *   gets WM_CLOSE (counted; in the child signalled by an event) and is
+ *   destroyed (IsWindow FALSE); its pattern then reports
+ *   UIA_E_ELEMENTNOTAVAILABLE. Maximized on a window without
+ *   WS_MAXIMIZEBOX is UIA_E_INVALIDOPERATION.
  *
  * Prints "uia_test: ok" or exits with the number of the failing check. */
 #define COBJMACROS
@@ -169,6 +190,52 @@ static int class_is(IUIAutomationElement *e, const wchar_t *s) {
     return same;
 }
 
+/* Framed windows (WS_OVERLAPPEDWINDOW) for the Window and Transform
+ * patterns and title bars: their WM_CLOSE is counted (and, in the child
+ * process, signalled with the event "UiaFrameClosed") before
+ * DefWindowProc destroys them. */
+static volatile int frame_closes;
+static HANDLE frame_closed;
+static LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_CLOSE) {
+        frame_closes++;
+        if (frame_closed)
+            SetEvent(frame_closed);
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static ATOM register_frame_class(void) {
+    WNDCLASSW wc = {0};
+    wc.lpfnWndProc = frame_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"UiaFrameWindow";
+    return RegisterClassW(&wc);
+}
+
+static HWND make_frame(const wchar_t *title, int x, int y, HWND owner, DWORD style) {
+    return CreateWindowExW(0, L"UiaFrameWindow", title, style | WS_VISIBLE, x, y, 320, 240, owner, NULL,
+                           GetModuleHandleW(NULL), NULL);
+}
+
+/* Dispatches this thread's messages once, then sleeps 10 ms. */
+static void pump_once(void) {
+    MSG m;
+    while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&m);
+        DispatchMessageW(&m);
+    }
+    Sleep(10);
+}
+
+/* Waits (pumping messages, up to 5 s) for `cond`. */
+#define WAIT(cond)                                                                                            \
+    do {                                                                                                      \
+        DWORD t0_ = GetTickCount();                                                                           \
+        while (!(cond) && GetTickCount() - t0_ < 5000)                                                        \
+            pump_once();                                                                                      \
+    } while (0)
+
 /* The second process: a window "UIA Child" with a button (101,
  * "Press": clicking it sets the title to "pressed"), an edit (102) and a
  * check box (103), until the parent sets "UiaChildDone". */
@@ -256,6 +323,11 @@ static int child(void) {
         return 6;
     SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)L"r-one");
     SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)L"r-two");
+    // Framed windows for the Window and Transform patterns.
+    frame_closed = OpenEventW(EVENT_MODIFY_STATE, FALSE, L"UiaFrameClosed");
+    if (!frame_closed || !register_frame_class() || !make_frame(L"UIA Frame", 300, 300, NULL, WS_OVERLAPPEDWINDOW) ||
+        !make_frame(L"UIA Closable", 340, 340, NULL, WS_OVERLAPPEDWINDOW))
+        return 7;
     SetEvent(ready);
     for (;;) {
         DWORD r = MsgWaitForMultipleObjects(1, &done, FALSE, 30000, QS_ALLINPUT);
@@ -606,12 +678,282 @@ static void menus(IUIAutomation *uia, IUIAutomationElement *root) {
     IUIAutomationCondition_Release(named);
 }
 
+static IUIAutomationWindowPattern *window_pattern(IUIAutomationElement *e) {
+    return (IUIAutomationWindowPattern *)pattern_of(e, UIA_WindowPatternId, &IID_IUIAutomationWindowPattern);
+}
+
+static enum WindowVisualState visual_state(IUIAutomationWindowPattern *w) {
+    enum WindowVisualState state = (enum WindowVisualState)-1;
+    CHECK(IUIAutomationWindowPattern_get_CurrentWindowVisualState(w, &state) == S_OK);
+    return state;
+}
+
+static int automation_id_is(IUIAutomationElement *e, const wchar_t *s) {
+    BSTR b = NULL;
+    CHECK(IUIAutomationElement_get_CurrentAutomationId(e, &b) == S_OK);
+    int same = bstr_is(b, s);
+    SysFreeString(b);
+    return same;
+}
+
+static int rect_is(HWND h, int x, int y, int w, int hgt) {
+    RECT r;
+    return GetWindowRect(h, &r) && r.left == x && r.top == y && r.right - r.left == w && r.bottom - r.top == hgt;
+}
+
+/* The title bar of `win` (titled `title`): its first child, a TitleBar
+ * without a window, named by the title, AutomationId "TitleBar"; its
+ * buttons (Minimize, Maximize, Close) in `buttons`. */
+static IUIAutomationElement *title_bar(IUIAutomation *uia, IUIAutomationElement *win, const wchar_t *title,
+                                       IUIAutomationElement *buttons[3]) {
+    IUIAutomationCondition *is_bar = prop_int(uia, UIA_ControlTypePropertyId, UIA_TitleBarControlTypeId);
+    IUIAutomationElement *bar = NULL;
+    CHECK(IUIAutomationElement_FindFirst(win, TreeScope_Children, is_bar, &bar) == S_OK && bar);
+    IUIAutomationCondition_Release(is_bar);
+    IUIAutomationTreeWalker *raw = NULL;
+    CHECK(IUIAutomation_get_RawViewWalker(uia, &raw) == S_OK && raw);
+    IUIAutomationElement *first = NULL;
+    CHECK(IUIAutomationTreeWalker_GetFirstChildElement(raw, win, &first) == S_OK && first);
+    CHECK(same_element(uia, first, bar));
+    IUIAutomationElement_Release(first);
+    IUIAutomationTreeWalker_Release(raw);
+    CHECK(name_is(bar, title) && automation_id_is(bar, L"TitleBar") && element_hwnd(bar) == NULL);
+    IUIAutomationCondition *all = NULL;
+    CHECK(IUIAutomation_CreateTrueCondition(uia, &all) == S_OK);
+    IUIAutomationElementArray *kids = NULL;
+    int n = 0;
+    CHECK(IUIAutomationElement_FindAll(bar, TreeScope_Children, all, &kids) == S_OK && kids);
+    CHECK(IUIAutomationElementArray_get_Length(kids, &n) == S_OK && n == 3);
+    const wchar_t *ids[3] = {L"Minimize", L"Maximize", L"Close"};
+    for (int i = 0; i < 3; i++) {
+        CHECK(IUIAutomationElementArray_GetElement(kids, i, &buttons[i]) == S_OK && buttons[i]);
+        CHECK(control_type(buttons[i]) == UIA_ButtonControlTypeId);
+        CHECK(automation_id_is(buttons[i], ids[i]) && name_is(buttons[i], ids[i]));
+        CHECK(element_hwnd(buttons[i]) == NULL);
+    }
+    IUIAutomationElementArray_Release(kids);
+    IUIAutomationCondition_Release(all);
+    return bar;
+}
+
+static void invoke(IUIAutomationElement *e) {
+    IUIAutomationInvokePattern *p =
+        (IUIAutomationInvokePattern *)pattern_of(e, UIA_InvokePatternId, &IID_IUIAutomationInvokePattern);
+    CHECK(IUIAutomationInvokePattern_Invoke(p) == S_OK);
+    IUIAutomationInvokePattern_Release(p);
+}
+
+/* The Window and Transform patterns and the title bar of a framed window
+ * (WS_OVERLAPPEDWINDOW, titled `title`, in this process or the child's):
+ * its state, Move and Resize, the visual states and the title bar's
+ * Maximize/Restore and Minimize buttons; then Window.Close (`by_button`:
+ * the title bar's Close button instead) closes it: WM_CLOSE (`closes()`
+ * grows), the window gone. */
+static void frame_window(IUIAutomation *uia, IUIAutomationElement *win, const wchar_t *title, int by_button,
+                         int (*closes)(void)) {
+    HWND h = element_hwnd(win);
+    CHECK(IsWindow(h) && control_type(win) == UIA_WindowControlTypeId);
+    IUIAutomationElement *buttons[3];
+    IUIAutomationElement *bar = title_bar(uia, win, title, buttons);
+
+    IUIAutomationWindowPattern *w = window_pattern(win);
+    BOOL b = -1;
+    CHECK(IUIAutomationWindowPattern_get_CurrentCanMaximize(w, &b) == S_OK && b == TRUE);
+    CHECK(IUIAutomationWindowPattern_get_CurrentCanMinimize(w, &b) == S_OK && b == TRUE);
+    CHECK(IUIAutomationWindowPattern_get_CurrentIsModal(w, &b) == S_OK && b == FALSE);
+    CHECK(IUIAutomationWindowPattern_get_CurrentIsTopmost(w, &b) == S_OK && b == FALSE);
+    CHECK(visual_state(w) == WindowVisualState_Normal);
+    enum WindowInteractionState is = (enum WindowInteractionState)-1;
+    CHECK(IUIAutomationWindowPattern_get_CurrentWindowInteractionState(w, &is) == S_OK &&
+          is == WindowInteractionState_ReadyForUserInteraction);
+    BOOL idle = FALSE;
+    CHECK(IUIAutomationWindowPattern_WaitForInputIdle(w, 1000, &idle) == S_OK && idle);
+    VARIANT v;
+    VariantInit(&v);
+    CHECK(IUIAutomationElement_GetCurrentPropertyValue(win, UIA_WindowWindowVisualStatePropertyId, &v) == S_OK &&
+          v.vt == VT_I4 && v.lVal == WindowVisualState_Normal);
+    CHECK(IUIAutomationElement_GetCurrentPropertyValue(win, UIA_IsWindowPatternAvailablePropertyId, &v) == S_OK &&
+          v.vt == VT_BOOL && v.boolVal == VARIANT_TRUE);
+
+    // Transform: Move and Resize change the window rectangle.
+    IUIAutomationTransformPattern *t = (IUIAutomationTransformPattern *)pattern_of(
+        win, UIA_TransformPatternId, &IID_IUIAutomationTransformPattern);
+    CHECK(IUIAutomationTransformPattern_get_CurrentCanMove(t, &b) == S_OK && b == TRUE);
+    CHECK(IUIAutomationTransformPattern_get_CurrentCanResize(t, &b) == S_OK && b == TRUE);
+    CHECK(IUIAutomationTransformPattern_get_CurrentCanRotate(t, &b) == S_OK && b == FALSE);
+    CHECK(IUIAutomationTransformPattern_Move(t, 150, 120) == S_OK);
+    WAIT(rect_is(h, 150, 120, 320, 240));
+    CHECK(rect_is(h, 150, 120, 320, 240));
+    CHECK(IUIAutomationTransformPattern_Resize(t, 360, 260) == S_OK);
+    WAIT(rect_is(h, 150, 120, 360, 260));
+    CHECK(rect_is(h, 150, 120, 360, 260));
+    CHECK(FAILED(IUIAutomationTransformPattern_Rotate(t, 90)));
+    RECT r;
+    CHECK(IUIAutomationElement_get_CurrentBoundingRectangle(win, &r) == S_OK && r.left == 150 && r.top == 120 &&
+          r.right == 510 && r.bottom == 380);
+
+    // Maximized: IsZoomed, another rectangle, the title bar's middle
+    // button is Restore, the window cannot move; Normal: back.
+    CHECK(IUIAutomationWindowPattern_SetWindowVisualState(w, WindowVisualState_Maximized) == S_OK);
+    WAIT(visual_state(w) == WindowVisualState_Maximized);
+    CHECK(visual_state(w) == WindowVisualState_Maximized && IsZoomed(h) && !IsIconic(h));
+    CHECK(!rect_is(h, 150, 120, 360, 260));
+    CHECK(automation_id_is(buttons[1], L"Restore") && name_is(buttons[1], L"Restore"));
+    CHECK(IUIAutomationTransformPattern_get_CurrentCanMove(t, &b) == S_OK && b == FALSE);
+    CHECK(IUIAutomationWindowPattern_SetWindowVisualState(w, WindowVisualState_Normal) == S_OK);
+    WAIT(visual_state(w) == WindowVisualState_Normal);
+    CHECK(!IsZoomed(h) && rect_is(h, 150, 120, 360, 260));
+    CHECK(automation_id_is(buttons[1], L"Maximize"));
+    // Minimized: IsIconic; Normal: back.
+    CHECK(IUIAutomationWindowPattern_SetWindowVisualState(w, WindowVisualState_Minimized) == S_OK);
+    WAIT(IsIconic(h));
+    CHECK(IsIconic(h) && visual_state(w) == WindowVisualState_Minimized);
+    CHECK(IUIAutomationWindowPattern_SetWindowVisualState(w, WindowVisualState_Normal) == S_OK);
+    WAIT(!IsIconic(h));
+    CHECK(!IsIconic(h) && visual_state(w) == WindowVisualState_Normal && rect_is(h, 150, 120, 360, 260));
+    // The title bar's buttons (Invoke posts their commands): Maximize,
+    // then Restore, then Minimize.
+    invoke(buttons[1]);
+    WAIT(IsZoomed(h));
+    CHECK(IsZoomed(h));
+    invoke(buttons[1]);
+    WAIT(!IsZoomed(h));
+    CHECK(!IsZoomed(h) && rect_is(h, 150, 120, 360, 260));
+    invoke(buttons[0]);
+    WAIT(IsIconic(h));
+    CHECK(IsIconic(h));
+    CHECK(IUIAutomationWindowPattern_SetWindowVisualState(w, WindowVisualState_Normal) == S_OK);
+    WAIT(!IsIconic(h));
+    CHECK(!IsIconic(h));
+
+    // Close: WM_CLOSE, then the window is gone.
+    int before = closes();
+    if (by_button)
+        invoke(buttons[2]);
+    else
+        CHECK(IUIAutomationWindowPattern_Close(w) == S_OK);
+    WAIT(closes() > before && !IsWindow(h));
+    CHECK(closes() > before && !IsWindow(h));
+    CHECK(IUIAutomationWindowPattern_get_CurrentCanMaximize(w, &b) == UIA_E_ELEMENTNOTAVAILABLE);
+
+    IUIAutomationTransformPattern_Release(t);
+    IUIAutomationWindowPattern_Release(w);
+    for (int i = 0; i < 3; i++)
+        IUIAutomationElement_Release(buttons[i]);
+    IUIAutomationElement_Release(bar);
+}
+
+static int local_closes(void) {
+    return frame_closes;
+}
+
+/* Framed windows of this process: the Window and Transform patterns,
+ * title bars; a modal window (owned by a disabled window, topmost). */
+static void frames(IUIAutomation *uia) {
+    CHECK(register_frame_class());
+    HWND h = make_frame(L"UIA Frame Local", 200, 200, NULL, WS_OVERLAPPEDWINDOW);
+    CHECK(h != NULL);
+    IUIAutomationElement *win = NULL;
+    CHECK(IUIAutomation_ElementFromHandle(uia, h, &win) == S_OK && win);
+    frame_window(uia, win, L"UIA Frame Local", 0, local_closes);
+    IUIAutomationElement_Release(win);
+    h = make_frame(L"UIA Closable Local", 220, 220, NULL, WS_OVERLAPPEDWINDOW);
+    CHECK(h != NULL);
+    CHECK(IUIAutomation_ElementFromHandle(uia, h, &win) == S_OK && win);
+    frame_window(uia, win, L"UIA Closable Local", 1, local_closes);
+    IUIAutomationElement_Release(win);
+
+    // A dialog-like window: owned by a disabled window (modal), topmost,
+    // a system menu but no minimize/maximize boxes: only Close on its
+    // title bar, and the Window pattern refuses Maximized.
+    HWND owner = make_frame(L"UIA Owner", 240, 240, NULL, WS_OVERLAPPEDWINDOW);
+    HWND modal = CreateWindowExW(WS_EX_TOPMOST, L"UiaFrameWindow", L"UIA Modal",
+                                 WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, 260, 260, 200, 120, owner, NULL,
+                                 GetModuleHandleW(NULL), NULL);
+    CHECK(owner && modal);
+    EnableWindow(owner, FALSE);
+    IUIAutomationElement *o = NULL, *m = NULL;
+    CHECK(IUIAutomation_ElementFromHandle(uia, owner, &o) == S_OK && o);
+    CHECK(IUIAutomation_ElementFromHandle(uia, modal, &m) == S_OK && m);
+    IUIAutomationWindowPattern *w = window_pattern(m);
+    BOOL b = -1;
+    CHECK(IUIAutomationWindowPattern_get_CurrentIsModal(w, &b) == S_OK && b == TRUE);
+    CHECK(IUIAutomationWindowPattern_get_CurrentIsTopmost(w, &b) == S_OK && b == TRUE);
+    CHECK(IUIAutomationWindowPattern_get_CurrentCanMaximize(w, &b) == S_OK && b == FALSE);
+    CHECK(IUIAutomationWindowPattern_SetWindowVisualState(w, WindowVisualState_Maximized) ==
+          UIA_E_INVALIDOPERATION);
+    IUIAutomationWindowPattern *ow = window_pattern(o);
+    enum WindowInteractionState is = (enum WindowInteractionState)-1;
+    CHECK(IUIAutomationWindowPattern_get_CurrentWindowInteractionState(ow, &is) == S_OK &&
+          is == WindowInteractionState_BlockedByModalWindow);
+    // FlaUI's Window.ModalWindows: the owner's descendants that are
+    // modal windows.
+    VARIANT v;
+    VariantInit(&v);
+    v.vt = VT_BOOL;
+    v.boolVal = VARIANT_TRUE;
+    IUIAutomationCondition *is_modal = NULL;
+    CHECK(IUIAutomation_CreatePropertyCondition(uia, UIA_WindowIsModalPropertyId, v, &is_modal) == S_OK);
+    IUIAutomationElementArray *found = NULL;
+    int n = 0;
+    CHECK(IUIAutomationElement_FindAll(o, TreeScope_Descendants, is_modal, &found) == S_OK && found);
+    CHECK(IUIAutomationElementArray_get_Length(found, &n) == S_OK && n == 1);
+    IUIAutomationElement *e = NULL;
+    CHECK(IUIAutomationElementArray_GetElement(found, 0, &e) == S_OK && element_hwnd(e) == modal);
+    IUIAutomationElement_Release(e);
+    IUIAutomationElementArray_Release(found);
+    IUIAutomationCondition_Release(is_modal);
+    // Its title bar: Close only.
+    IUIAutomationCondition *is_bar = prop_int(uia, UIA_ControlTypePropertyId, UIA_TitleBarControlTypeId);
+    IUIAutomationElement *bar = NULL;
+    CHECK(IUIAutomationElement_FindFirst(m, TreeScope_Children, is_bar, &bar) == S_OK && bar);
+    IUIAutomationCondition *all = NULL;
+    CHECK(IUIAutomation_CreateTrueCondition(uia, &all) == S_OK);
+    CHECK(IUIAutomationElement_FindAll(bar, TreeScope_Children, all, &found) == S_OK && found);
+    CHECK(IUIAutomationElementArray_get_Length(found, &n) == S_OK && n == 1);
+    CHECK(IUIAutomationElementArray_GetElement(found, 0, &e) == S_OK && automation_id_is(e, L"Close"));
+    IUIAutomationElement_Release(e);
+    IUIAutomationElementArray_Release(found);
+    IUIAutomationCondition_Release(all);
+    IUIAutomationElement_Release(bar);
+    IUIAutomationCondition_Release(is_bar);
+    IUIAutomationWindowPattern_Release(ow);
+    IUIAutomationWindowPattern_Release(w);
+    IUIAutomationElement_Release(m);
+    IUIAutomationElement_Release(o);
+    DestroyWindow(modal);
+    DestroyWindow(owner);
+}
+
+static HANDLE remote_closed;
+static int remote_close_count;
+static int remote_closes(void) {
+    if (WaitForSingleObject(remote_closed, 0) == WAIT_OBJECT_0)
+        remote_close_count++;
+    return remote_close_count;
+}
+
+/* The child's framed windows: the same, across processes. */
+static void remote_frames(IUIAutomation *uia, IUIAutomationElement *root) {
+    const wchar_t *titles[2] = {L"UIA Frame", L"UIA Closable"};
+    for (int i = 0; i < 2; i++) {
+        IUIAutomationCondition *named = prop_str(uia, UIA_NamePropertyId, titles[i]);
+        IUIAutomationElement *win = NULL;
+        CHECK(IUIAutomationElement_FindFirst(root, TreeScope_Children, named, &win) == S_OK && win);
+        frame_window(uia, win, titles[i], i, remote_closes);
+        IUIAutomationElement_Release(win);
+        IUIAutomationCondition_Release(named);
+    }
+}
+
 /* UI Automation over another process's windows: found from the root by
  * Name, its controls by AutomationId, driven by Invoke, Value and Toggle. */
 static void other_process(IUIAutomation *uia, IUIAutomationElement *root) {
     HANDLE ready = CreateEventW(NULL, TRUE, FALSE, L"UiaChildReady");
     HANDLE done = CreateEventW(NULL, TRUE, FALSE, L"UiaChildDone");
     CHECK(ready && done);
+    remote_closed = CreateEventW(NULL, FALSE, FALSE, L"UiaFrameClosed");
+    CHECK(remote_closed != NULL);
     WCHAR self[MAX_PATH], cmd[MAX_PATH + 16];
     CHECK(GetModuleFileNameW(NULL, self, MAX_PATH) > 0);
     swprintf(cmd, MAX_PATH + 16, L"\"%ls\" child", self);
@@ -724,6 +1066,8 @@ static void other_process(IUIAutomation *uia, IUIAutomationElement *root) {
     IUIAutomationTreeWalker_Release(raw);
     IUIAutomationElement_Release(owned);
     IUIAutomationCondition_Release(owned_name);
+
+    remote_frames(uia, root);
 
     IUIAutomationElement_Release(box);
     IUIAutomationCondition_Release(id103);
@@ -888,7 +1232,17 @@ int main(int argc, char **argv) {
     IUIAutomationElementArray *list = NULL;
     int n = 0;
     CHECK(IUIAutomationElement_FindAll(win, TreeScope_Children, all, &list) == S_OK && list != NULL);
-    CHECK(IUIAutomationElementArray_get_Length(list, &n) == S_OK && n >= 3);
+    CHECK(IUIAutomationElementArray_get_Length(list, &n) == S_OK && n == 4);
+    IUIAutomationElement *first = NULL;
+    CHECK(IUIAutomationElementArray_GetElement(list, 0, &first) == S_OK && first != NULL);
+    CHECK(control_type(first) == UIA_TitleBarControlTypeId && name_is(first, L"UIA Test") &&
+          element_hwnd(first) == NULL);
+    // No system menu: a title bar without buttons.
+    IUIAutomationElementArray *bar_kids = NULL;
+    CHECK(IUIAutomationElement_FindAll(first, TreeScope_Children, all, &bar_kids) == S_OK && bar_kids != NULL);
+    CHECK(IUIAutomationElementArray_get_Length(bar_kids, &n) == S_OK && n == 0);
+    IUIAutomationElementArray_Release(bar_kids);
+    IUIAutomationElement_Release(first);
     IUIAutomationElementArray_Release(list);
     IUIAutomationCondition *no_hwnd = prop_int(uia, UIA_NativeWindowHandlePropertyId, 0);
     IUIAutomationCondition *has_hwnd = NULL;
@@ -964,6 +1318,7 @@ int main(int argc, char **argv) {
     IUIAutomationElement_Release(press);
     IUIAutomationCondition_Release(id101);
     lists(uia);
+    frames(uia);
     other_process(uia, root);
     IUIAutomationElement_Release(root);
     IUIAutomationElement_Release(win);

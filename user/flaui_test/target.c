@@ -2,8 +2,9 @@
  * "FlaUI Target" with a push button (control id 101, "Press": clicking it
  * sets the window's title to "FlaUI Pressed"), an edit (102) and a check
  * box (103, "Option") and a report-view list view (104, columns "Name"
- * and "Size", items "alpha.txt", "beta.txt", "gamma.txt"). It ends when its window is closed (WM_CLOSE, which
- * FlaUI's Application.Close posts through Process.CloseMainWindow).
+ * and "Size", items "alpha.txt", "beta.txt", "gamma.txt"). The window is a WS_OVERLAPPEDWINDOW (minimize,
+ * maximize and close buttons, a sizing frame) for FlaUI's Window API. It ends when its window is closed
+ * (FlaUI's Window.Close: the title bar's Close button, WM_SYSCOMMAND SC_CLOSE, then WM_CLOSE).
  * Built by build.sh with mingw-w64 into user/bin/flaui_target.exe. */
 #include <windows.h>
 #include <commctrl.h>
@@ -32,7 +33,7 @@ int main(void) {
     wc.lpszClassName = L"FlaUiTarget";
     if (!RegisterClassW(&wc))
         return 2;
-    HWND top = CreateWindowExW(0, L"FlaUiTarget", L"FlaUI Target", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+    HWND top = CreateWindowExW(0, L"FlaUiTarget", L"FlaUI Target", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                                240, 160, 320, 200, NULL, NULL, instance, NULL);
     if (!top)
         return 3;

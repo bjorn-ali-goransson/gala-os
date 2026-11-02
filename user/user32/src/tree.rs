@@ -25,6 +25,7 @@ use core::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 unsafe extern "system" {
     fn GalaWindowPlace(id: u32, x: i32, y: i32, w: u32, h: u32) -> u32;
     fn GalaWindowSetTitle(id: u32, title: *const u16, len: usize) -> u32;
+    fn GalaWindowShow(id: u32, show: u8) -> u32;
 }
 
 #[link(name = "kernel32", kind = "raw-dylib")]
@@ -50,6 +51,7 @@ const SC_MAXIMIZE: usize = 0xf030;
 const SC_CLOSE: usize = 0xf060;
 const SC_RESTORE: usize = 0xf120;
 const WS_MAXIMIZE: u32 = 0x0100_0000;
+const WS_MINIMIZE: u32 = 0x2000_0000;
 const WS_DISABLED: u32 = 0x0800_0000;
 const CW_USEDEFAULT: i32 = 0x8000_0000u32 as i32;
 const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
@@ -821,7 +823,8 @@ pub extern "system" fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize {
             (w.style
                 | if w.visible { 0x1000_0000 } else { 0 }
                 | if w.disabled { WS_DISABLED } else { 0 }
-                | if w.zoomed { WS_MAXIMIZE } else { 0 }) as i32 as isize
+                | if w.zoomed { WS_MAXIMIZE } else { 0 }
+                | if w.iconic { WS_MINIMIZE } else { 0 }) as i32 as isize
         }
         GWL_EXSTYLE => w.ex_style as i32 as isize,
         GWLP_USERDATA => w.user_data,
@@ -1105,6 +1108,9 @@ pub extern "system" fn SetWindowPos(
     cy: i32,
     flags: u32,
 ) -> i32 {
+    if hwnd != 0 && index_of(hwnd).is_none() && crate::foreign::remote(hwnd).is_some() {
+        return set_window_pos_remote(hwnd, after, x, y, cx, cy, flags);
+    }
     let Some(i) = index_of(hwnd) else { return 0 };
     let Some(w) = window(hwnd) else {
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
@@ -1273,12 +1279,25 @@ pub extern "system" fn ScrollWindowEx(
     2
 }
 
-// ---- Maximizing ----
+// ---- Maximizing and minimizing ----
 
-/// IsZoomed: the window is maximized.
+/// IsZoomed: the window is maximized (any process's: the registry's
+/// record says so for another's).
 #[unsafe(no_mangle)]
 pub extern "system" fn IsZoomed(hwnd: Hwnd) -> i32 {
+    if let Some(info) = crate::foreign::remote(hwnd) {
+        return i32::from(info.zoomed);
+    }
     i32::from(window(hwnd).is_some_and(|w| w.zoomed))
+}
+
+/// IsIconic: the window is minimized (any process's, as IsZoomed).
+#[unsafe(no_mangle)]
+pub extern "system" fn IsIconic(hwnd: Hwnd) -> i32 {
+    if let Some(info) = crate::foreign::remote(hwnd) {
+        return i32::from(info.iconic);
+    }
+    i32::from(window(hwnd).is_some_and(|w| w.iconic))
 }
 
 /// Snap (the desktop's GALA_WM_PLACE): the top-level window moves to the
@@ -1294,7 +1313,7 @@ pub(crate) fn snap(hwnd: Hwnd, x: i32, y: i32, w: i32, h: i32) {
 
 /// SC_MAXIMIZE/SC_RESTORE: the top-level window fills the work area, its
 /// rectangle kept for restoring.
-fn maximize(hwnd: Hwnd, on: bool) {
+pub(crate) fn maximize(hwnd: Hwnd, on: bool) {
     let Some(i) = index_of(hwnd) else { return };
     let Some(w) = window(hwnd) else { return };
     if w.parent != 0 || w.zoomed == on {
@@ -1312,6 +1331,103 @@ fn maximize(hwnd: Hwnd, on: bool) {
         w.restore
     };
     SetWindowPos(hwnd, 0, target[0], target[1], target[2], target[3], SWP_NOZORDER | 0x10);
+    crate::foreign::sync(hwnd);
+}
+
+/// SIZE_MINIMIZED, SIZE_RESTORED, SIZE_MAXIMIZED (WM_SIZE's wParam).
+const SIZE_RESTORED: usize = 0;
+const SIZE_MINIMIZED: usize = 1;
+const SIZE_MAXIMIZED: usize = 2;
+
+/// SC_MINIMIZE (`on`) and SC_RESTORE of a minimized window: the
+/// top-level window leaves the screen (the desktop keeps it on the
+/// taskbar) or comes back as it was (maximized or not); it stays
+/// visible (IsWindowVisible), as on Windows. Its rectangle is kept
+/// (Windows moves a minimized window to -32000, -32000: not done here).
+/// WM_SIZE SIZE_MINIMIZED (0 x 0), then SIZE_RESTORED or SIZE_MAXIMIZED
+/// with the client size, tell the program. `tell_desktop` is false when
+/// the desktop did it itself (its minimize button).
+pub(crate) fn minimize(hwnd: Hwnd, on: bool, tell_desktop: bool) {
+    let Some(i) = index_of(hwnd) else { return };
+    let Some(w) = window(hwnd) else { return };
+    if w.parent != 0 || w.iconic == on {
+        return;
+    }
+    with(|s| s.windows[i].iconic = on);
+    crate::foreign::sync(hwnd);
+    if tell_desktop && w.desktop != 0 && w.visible {
+        // SAFETY: our desktop window; 2 shows it minimized.
+        unsafe { GalaWindowShow(w.desktop, if on { 2 } else { 1 }) };
+    }
+    if on {
+        SendMessageW(hwnd, WM_SIZE, SIZE_MINIMIZED, 0);
+    } else {
+        let lp = ((w.ch as u16 as isize) << 16) | (w.cw as u16 as isize);
+        SendMessageW(hwnd, WM_SIZE, if w.zoomed { SIZE_MAXIMIZED } else { SIZE_RESTORED }, lp);
+        crate::window::InvalidateRect(hwnd, core::ptr::null(), 1);
+    }
+}
+
+/// ShowWindow's commands that change the window's state: SW_SHOWNORMAL
+/// and SW_RESTORE restore a minimized or maximized window,
+/// SW_SHOWMINIMIZED, SW_MINIMIZE, SW_SHOWMINNOACTIVE and SW_FORCEMINIMIZE
+/// minimize it, SW_SHOWMAXIMIZED maximizes it (top-level windows).
+pub(crate) fn show_state(hwnd: Hwnd, cmd: i32) {
+    match cmd {
+        1 | 9 => {
+            if window(hwnd).is_some_and(|w| w.iconic) {
+                minimize(hwnd, false, true);
+            } else {
+                maximize(hwnd, false);
+            }
+        }
+        2 | 6 | 7 | 11 => minimize(hwnd, true, true),
+        3 => {
+            minimize(hwnd, false, true);
+            maximize(hwnd, true);
+        }
+        _ => {}
+    }
+}
+
+/// gala's SetWindowPos message (0x03f1, in the system range): another
+/// process's SetWindowPos of one of our windows (lParam: hwnd-after, x,
+/// y, cx, cy, flags as 8 + 5 * 4 bytes, marshaled by `foreign`); user32
+/// answers it itself, never the window procedure.
+pub(crate) const GALA_SETWINDOWPOS: u32 = 0x03f1;
+pub(crate) const SETWINDOWPOS_SIZE: usize = 28;
+
+pub(crate) fn set_window_pos_message(hwnd: Hwnd, lparam: isize) -> isize {
+    if lparam == 0 {
+        return 0;
+    }
+    let mut b = [0u8; SETWINDOWPOS_SIZE];
+    // SAFETY: the marshaled request (SETWINDOWPOS_SIZE bytes).
+    unsafe { core::ptr::copy_nonoverlapping(lparam as *const u8, b.as_mut_ptr(), b.len()) };
+    let i32_at = |at: usize| i32::from_le_bytes(b[at..at + 4].try_into().unwrap_or([0; 4]));
+    let after = u64::from_le_bytes(b[0..8].try_into().unwrap_or([0; 8])) as Hwnd;
+    SetWindowPos(hwnd, after, i32_at(8), i32_at(12), i32_at(16), i32_at(20), i32_at(24) as u32)
+        as isize
+}
+
+/// SetWindowPos of another process's window: sent to it as
+/// GALA_SETWINDOWPOS (Windows moves any process's window; gala's windows
+/// live in their program's user32).
+fn set_window_pos_remote(
+    hwnd: Hwnd,
+    after: Hwnd,
+    x: i32,
+    y: i32,
+    cx: i32,
+    cy: i32,
+    flags: u32,
+) -> i32 {
+    let mut b = [0u8; SETWINDOWPOS_SIZE];
+    b[0..8].copy_from_slice(&(after as u64).to_le_bytes());
+    for (k, v) in [x, y, cx, cy, flags as i32].iter().enumerate() {
+        b[8 + 4 * k..12 + 4 * k].copy_from_slice(&v.to_le_bytes());
+    }
+    i32::from(SendMessageW(hwnd, GALA_SETWINDOWPOS, 0, b.as_ptr() as isize) != 0)
 }
 
 // ---- DefWindowProc's part ----
@@ -1329,16 +1445,32 @@ pub fn def_window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Op
             let parent = window(hwnd).map_or(0, |w| w.parent);
             Some(if parent != 0 { SendMessageW(parent, msg, wparam, lparam) } else { 0 })
         }
-        // The window menu's commands (and the caption buttons'): close,
-        // maximize, restore; minimizing is the desktop's own.
+        // The window menu's commands (and the caption buttons' and UI
+        // Automation's): close, maximize, minimize, restore.
         WM_SYSCOMMAND => {
             match wparam & 0xfff0 {
                 SC_CLOSE => {
                     SendMessageW(hwnd, WM_CLOSE, 0, 0);
                 }
-                SC_MAXIMIZE => maximize(hwnd, true),
-                SC_RESTORE => maximize(hwnd, false),
-                SC_MINIMIZE => {}
+                SC_MAXIMIZE => {
+                    minimize(hwnd, false, true);
+                    maximize(hwnd, true);
+                }
+                // A minimized window comes back as it was; a maximized
+                // one gets its rectangle back.
+                SC_RESTORE => {
+                    if window(hwnd).is_some_and(|w| w.iconic) {
+                        minimize(hwnd, false, true);
+                    } else {
+                        maximize(hwnd, false);
+                    }
+                }
+                // As ShowWindow SW_MINIMIZE: a hidden window is shown
+                // minimized.
+                SC_MINIMIZE if window(hwnd).is_some_and(|w| !w.visible) => {
+                    crate::window::ShowWindow(hwnd, 6);
+                }
+                SC_MINIMIZE => minimize(hwnd, true, true),
                 // A click on the menu bar (lParam: the screen point).
                 SC_MOUSEMENU => {
                     crate::track::track_bar(
