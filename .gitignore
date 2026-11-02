@@ -1,2 +1,5 @@
 /target
 /docker/extra-ca/*.crt
+
+# Agent worktrees (Claude Code)
+.claude/worktrees/
