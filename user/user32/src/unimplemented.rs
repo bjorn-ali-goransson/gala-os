@@ -36,7 +36,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     EnumClipboardFormats
     EnumDisplaySettingsW
     ExitWindowsEx
-    FindWindowExW
     GetCaretBlinkTime
     GetClassInfoW
     GetKeyboardState

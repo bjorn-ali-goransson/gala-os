@@ -37,6 +37,7 @@ pub mod token;
 pub mod vad;
 pub mod vm;
 pub mod wait;
+pub mod window;
 
 /// Installs the syscall entry and user exception handling.
 pub fn init() {

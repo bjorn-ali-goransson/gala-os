@@ -119,6 +119,13 @@ fn children(s: &State, parent: Hwnd, out: &mut [usize; 64]) -> usize {
 /// The children of `hwnd` (handles; 0 after the last), top first.
 pub fn children_of(hwnd: Hwnd) -> [Hwnd; 64] {
     let mut out = [0; 64];
+    // Another process's window: its children from the registry.
+    if hwnd != 0 && index_of(hwnd).is_none() && crate::foreign::remote(hwnd).is_some() {
+        let mut all = [0; 256];
+        let n = crate::foreign::children(hwnd, &mut all).min(64);
+        out[..n].copy_from_slice(&all[..n]);
+        return out;
+    }
     with(|s| {
         let mut idx = [0usize; 64];
         let n = children(s, hwnd, &mut idx);
@@ -281,6 +288,7 @@ pub fn create_child(
         set_last_error(1411); // ERROR_CLASS_DOES_NOT_EXIST
         return 0;
     };
+    crate::foreign::assign(i);
     finish_create(
         i,
         ex_style,
@@ -306,6 +314,7 @@ pub fn show_child(hwnd: Hwnd, show: bool) -> i32 {
         let w = &mut s.windows[i];
         (core::mem::replace(&mut w.visible, show), w.parent)
     });
+    crate::foreign::sync(hwnd);
     if was != show {
         crate::window::InvalidateRect(if show { hwnd } else { parent }, core::ptr::null(), 1);
     }
@@ -342,6 +351,7 @@ pub fn moved_by_desktop(top: Hwnd, lparam: isize) {
             s.windows[i].x = cx - b;
             s.windows[i].y = cy - top;
         });
+        crate::foreign::sync_tree(top);
     }
 }
 
@@ -452,6 +462,14 @@ pub extern "system" fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u3
         fn GetCurrentProcessId() -> u32;
     }
     let Some(w) = window(hwnd) else {
+        // Another process's window.
+        if let Some(info) = crate::foreign::remote(hwnd) {
+            if !pid.is_null() {
+                // SAFETY: the caller's DWORD.
+                unsafe { *pid = info.pid };
+            }
+            return info.tid;
+        }
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
     };
@@ -464,7 +482,10 @@ pub extern "system" fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u3
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetParent(hwnd: Hwnd) -> Hwnd {
-    window(hwnd).map_or(0, |w| w.parent)
+    match window(hwnd) {
+        Some(w) => w.parent,
+        None => crate::foreign::remote(hwnd).map_or(0, |i| i.parent),
+    }
 }
 
 /// SetParent(child, new): the old parent (0 for none: top-level windows
@@ -481,6 +502,7 @@ pub extern "system" fn SetParent(hwnd: Hwnd, parent: Hwnd) -> Hwnd {
         w.z = next_z(true);
         core::mem::replace(&mut w.parent, parent)
     });
+    crate::foreign::sync_tree(hwnd);
     crate::window::InvalidateRect(old, core::ptr::null(), 1);
     crate::window::InvalidateRect(hwnd, core::ptr::null(), 1);
     old
@@ -624,6 +646,10 @@ pub extern "system" fn EnumThreadWindows(thread: u32, proc_: Option<EnumProc>, d
 #[unsafe(no_mangle)]
 pub extern "system" fn EnumWindows(proc_: Option<EnumProc>, data: isize) -> i32 {
     let Some(p) = proc_ else { return 0 };
+    // Every process's top-level windows (the kernel's registry).
+    if let Some(r) = crate::foreign::enum_top_levels(p, data) {
+        return r;
+    }
     let mut all = [0; 256];
     let n = top_levels(0, &mut all);
     i32::from(all[..n].iter().all(|&h| p(h, data) != 0))
@@ -635,13 +661,16 @@ pub extern "system" fn GetDlgItem(parent: Hwnd, id: i32) -> Hwnd {
         .iter()
         .copied()
         .take_while(|&c| c != 0)
-        .find(|&c| window(c).is_some_and(|w| w.id == id as usize))
+        .find(|&c| GetDlgCtrlID(c) == id)
         .unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDlgCtrlID(hwnd: Hwnd) -> i32 {
-    window(hwnd).map_or(0, |w| w.id as i32)
+    match window(hwnd) {
+        Some(w) => w.id as i32,
+        None => crate::foreign::remote(hwnd).map_or(0, |i| i.id as i32),
+    }
 }
 
 // ---- Coordinates ----
@@ -661,7 +690,12 @@ pub extern "system" fn GetWindowRect(hwnd: Hwnd, rect: *mut [i32; 4]) -> i32 {
         unsafe { *rect = crate::monitor::screen().0 };
         return 1;
     }
-    let Some(i) = index_of(hwnd) else { return 0 };
+    let Some(i) = index_of(hwnd) else {
+        let Some(info) = crate::foreign::remote(hwnd) else { return 0 };
+        // SAFETY: the caller's RECT.
+        unsafe { *rect = info.rect };
+        return 1;
+    };
     let r = with(|s| {
         let w = s.windows[i];
         if !w.used {
@@ -731,6 +765,15 @@ const GWLP_USERDATA: i32 = -21;
 #[unsafe(no_mangle)]
 pub extern "system" fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize {
     let Some(w) = window(hwnd) else {
+        if let Some(info) = crate::foreign::remote(hwnd) {
+            return match index {
+                GWLP_HWNDPARENT => info.parent as isize,
+                GWLP_ID => info.id as isize,
+                GWL_STYLE => info.style as i32 as isize,
+                GWL_EXSTYLE => info.ex_style as i32 as isize,
+                _ => 0,
+            };
+        }
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
     };
@@ -855,7 +898,13 @@ pub extern "system" fn SetWindowTextA(hwnd: Hwnd, text: *const u8) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetWindowTextW(hwnd: Hwnd, buf: *mut u16, n: i32) -> i32 {
-    if window(hwnd).is_none() || buf.is_null() || n <= 0 {
+    if window(hwnd).is_none() {
+        // Another process's window: its text as last mirrored. TODO:
+        // WM_GETTEXT sent across processes (controls keep their own).
+        return crate::foreign::remote(hwnd)
+            .map_or(0, |i| crate::foreign::copy_out(i.text(), buf, n));
+    }
+    if buf.is_null() || n <= 0 {
         return 0;
     }
     SendMessageW(hwnd, WM_GETTEXT, n as usize, buf as isize) as i32
@@ -881,7 +930,7 @@ pub extern "system" fn GetWindowTextA(hwnd: Hwnd, buf: *mut u8, n: i32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "system" fn GetWindowTextLengthW(hwnd: Hwnd) -> i32 {
     if window(hwnd).is_none() {
-        return 0;
+        return crate::foreign::remote(hwnd).map_or(0, |i| i.text_len as i32);
     }
     SendMessageW(hwnd, WM_GETTEXTLENGTH, 0, 0) as i32
 }
@@ -904,6 +953,7 @@ pub extern "system" fn EnableWindow(hwnd: Hwnd, enable: i32) -> i32 {
         return 0;
     };
     if was != (enable != 0) {
+        crate::foreign::sync(hwnd);
         SendMessageW(hwnd, WM_ENABLE, usize::from(enable != 0), 0);
     }
     i32::from(!was)
@@ -911,6 +961,9 @@ pub extern "system" fn EnableWindow(hwnd: Hwnd, enable: i32) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn IsWindowEnabled(hwnd: Hwnd) -> i32 {
+    if let Some(info) = crate::foreign::remote(hwnd) {
+        return i32::from(info.enabled);
+    }
     i32::from(window(hwnd).is_some_and(|w| !w.disabled))
 }
 
@@ -1084,6 +1137,7 @@ pub extern "system" fn SetWindowPos(
     if flags & SWP_HIDEWINDOW != 0 {
         crate::window::ShowWindow(hwnd, 0);
     }
+    crate::foreign::sync_tree(hwnd);
     SendMessageW(hwnd, WM_WINDOWPOSCHANGED, 0, &mut pos as *mut WindowPos as isize);
     1
 }
@@ -1268,6 +1322,7 @@ pub fn def_window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Op
                 s.windows[i].title = title;
                 (s.windows[i].parent == 0).then_some(s.windows[i].desktop)
             });
+            crate::foreign::sync(hwnd);
             if let Some(d) = desktop.filter(|&d| d != 0) {
                 // SAFETY: our desktop window; `len` characters.
                 unsafe { GalaWindowSetTitle(d, title.as_ptr(), len) };

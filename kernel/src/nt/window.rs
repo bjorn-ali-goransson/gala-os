@@ -1,0 +1,248 @@
+//! The window registry: every window of every process (top-level and
+//! child), as Windows' win32k keeps them, so that one process can find
+//! and ask about another's windows (FindWindow, EnumWindows,
+//! GetWindowText, UI Automation). user32 keeps its own table as the fast
+//! path, registers each window here when it creates it (the HWND comes
+//! from here: one namespace for the desktop) and mirrors every change.
+//! See docs/ARCHITECTURE.md, "Plan: windows across processes".
+
+use super::status::NtStatus;
+use crate::mm::heap::TryVec;
+use crate::sync::IrqMutex;
+use alloc::vec::Vec;
+
+/// A window's record as user32 hands it over and reads it back
+/// (GalaWindowRegister/Update/Query): little-endian, INFO_SIZE bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Info {
+    pub hwnd: u64,
+    pub parent: u64,
+    pub owner: u64,
+    /// The control id (a child's), or the menu handle (a top-level's).
+    pub id: u64,
+    pub pid: u32,
+    pub tid: u32,
+    pub style: u32,
+    pub ex_style: u32,
+    /// The window rectangle on the screen: left, top, right, bottom.
+    pub rect: [i32; 4],
+    /// FLAG_VISIBLE, FLAG_ENABLED.
+    pub flags: u32,
+    /// Z order among siblings: smaller is higher.
+    pub z: i64,
+    pub class_len: u32,
+    pub class: [u16; CLASS_CHARS],
+    pub text_len: u32,
+    pub text: [u16; TEXT_CHARS],
+}
+
+pub const CLASS_CHARS: usize = 64;
+pub const TEXT_CHARS: usize = 256;
+pub const INFO_SIZE: usize = 88 + 2 * CLASS_CHARS + 2 * TEXT_CHARS;
+pub const FLAG_VISIBLE: u32 = 1;
+pub const FLAG_ENABLED: u32 = 2;
+
+/// The first HWND handed out and the step between them (Windows' handles
+/// are even; user32's own pseudo handles, such as the desktop's, stay
+/// below).
+const FIRST_HWND: u64 = 0x0002_0000;
+const HWND_STEP: u64 = 0x10;
+
+impl Default for Info {
+    fn default() -> Self {
+        Info {
+            hwnd: 0,
+            parent: 0,
+            owner: 0,
+            id: 0,
+            pid: 0,
+            tid: 0,
+            style: 0,
+            ex_style: 0,
+            rect: [0; 4],
+            flags: 0,
+            z: 0,
+            class_len: 0,
+            class: [0; CLASS_CHARS],
+            text_len: 0,
+            text: [0; TEXT_CHARS],
+        }
+    }
+}
+
+impl Info {
+    pub fn from_bytes(b: &[u8]) -> Option<Info> {
+        if b.len() < INFO_SIZE {
+            return None;
+        }
+        let u64_at = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap_or([0; 8]));
+        let u32_at = |at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap_or([0; 4]));
+        let mut info = Info {
+            hwnd: u64_at(0),
+            parent: u64_at(8),
+            owner: u64_at(16),
+            id: u64_at(24),
+            pid: u32_at(32),
+            tid: u32_at(36),
+            style: u32_at(40),
+            ex_style: u32_at(44),
+            rect: [u32_at(48) as i32, u32_at(52) as i32, u32_at(56) as i32, u32_at(60) as i32],
+            flags: u32_at(64),
+            class_len: u32_at(68).min(CLASS_CHARS as u32),
+            z: u64_at(72) as i64,
+            text_len: u32_at(80).min(TEXT_CHARS as u32),
+            ..Info::default()
+        };
+        for (i, c) in info.class.iter_mut().enumerate() {
+            *c = u16::from_le_bytes([b[88 + 2 * i], b[89 + 2 * i]]);
+        }
+        let text = 88 + 2 * CLASS_CHARS;
+        for (i, c) in info.text.iter_mut().enumerate() {
+            *c = u16::from_le_bytes([b[text + 2 * i], b[text + 1 + 2 * i]]);
+        }
+        Some(info)
+    }
+
+    pub fn to_bytes(&self, b: &mut [u8; INFO_SIZE]) {
+        b[0..8].copy_from_slice(&self.hwnd.to_le_bytes());
+        b[8..16].copy_from_slice(&self.parent.to_le_bytes());
+        b[16..24].copy_from_slice(&self.owner.to_le_bytes());
+        b[24..32].copy_from_slice(&self.id.to_le_bytes());
+        b[32..36].copy_from_slice(&self.pid.to_le_bytes());
+        b[36..40].copy_from_slice(&self.tid.to_le_bytes());
+        b[40..44].copy_from_slice(&self.style.to_le_bytes());
+        b[44..48].copy_from_slice(&self.ex_style.to_le_bytes());
+        for (i, v) in self.rect.iter().enumerate() {
+            b[48 + 4 * i..52 + 4 * i].copy_from_slice(&v.to_le_bytes());
+        }
+        b[64..68].copy_from_slice(&self.flags.to_le_bytes());
+        b[68..72].copy_from_slice(&self.class_len.to_le_bytes());
+        b[72..80].copy_from_slice(&self.z.to_le_bytes());
+        b[80..84].copy_from_slice(&self.text_len.to_le_bytes());
+        b[84..88].fill(0);
+        for (i, c) in self.class.iter().enumerate() {
+            b[88 + 2 * i..90 + 2 * i].copy_from_slice(&c.to_le_bytes());
+        }
+        let text = 88 + 2 * CLASS_CHARS;
+        for (i, c) in self.text.iter().enumerate() {
+            b[text + 2 * i..text + 2 + 2 * i].copy_from_slice(&c.to_le_bytes());
+        }
+    }
+}
+
+struct Registry {
+    windows: Vec<Info>,
+    next: u64,
+}
+
+static REGISTRY: IrqMutex<Registry> = IrqMutex::new(Registry { windows: Vec::new(), next: 0 });
+
+/// Registers a window of process `pid`; its new HWND.
+pub fn register(pid: u32, mut info: Info) -> Result<u64, NtStatus> {
+    let mut r = REGISTRY.lock();
+    r.windows.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
+    let hwnd = FIRST_HWND + r.next * HWND_STEP;
+    r.next += 1;
+    info.hwnd = hwnd;
+    info.pid = pid;
+    r.windows.try_push(info).map_err(|_| NtStatus::NO_MEMORY)?;
+    Ok(hwnd)
+}
+
+/// Replaces the record of `pid`'s window `info.hwnd`.
+pub fn update(pid: u32, mut info: Info) -> Result<(), NtStatus> {
+    let mut r = REGISTRY.lock();
+    let w = r
+        .windows
+        .iter_mut()
+        .find(|w| w.hwnd == info.hwnd && w.pid == pid)
+        .ok_or(NtStatus::INVALID_HANDLE)?;
+    info.pid = pid;
+    *w = info;
+    Ok(())
+}
+
+/// `pid`'s window `hwnd` is gone.
+pub fn unregister(pid: u32, hwnd: u64) -> Result<(), NtStatus> {
+    let mut r = REGISTRY.lock();
+    let before = r.windows.len();
+    r.windows.retain(|w| !(w.hwnd == hwnd && w.pid == pid));
+    if r.windows.len() == before { Err(NtStatus::INVALID_HANDLE) } else { Ok(()) }
+}
+
+/// Any process's window `hwnd`.
+pub fn query(hwnd: u64) -> Option<Info> {
+    REGISTRY.lock().windows.iter().find(|w| w.hwnd == hwnd).copied()
+}
+
+/// The windows whose parent is `parent` (0: the top-level windows), the
+/// highest first, into `out`; how many there are (more than `out` holds
+/// when it is short).
+pub fn children(parent: u64, out: &mut [u64]) -> usize {
+    let r = REGISTRY.lock();
+    let mut found: Vec<(i64, u64)> = Vec::new();
+    for w in r.windows.iter().filter(|w| w.parent == parent) {
+        if found.try_push((w.z, w.hwnd)).is_err() {
+            break;
+        }
+    }
+    drop(r);
+    found.sort_unstable();
+    for (o, (_, h)) in out.iter_mut().zip(&found) {
+        *o = *h;
+    }
+    found.len()
+}
+
+/// A process ended: its windows go.
+pub fn process_ended(pid: u32) {
+    REGISTRY.lock().windows.retain(|w| w.pid != pid);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn records_round_trip_and_windows_are_found_by_anyone() {
+        let mut info = Info {
+            parent: 0,
+            style: 0x10cf_0000,
+            rect: [10, 20, 310, 220],
+            flags: FLAG_VISIBLE | FLAG_ENABLED,
+            z: -5,
+            class_len: 3,
+            text_len: 2,
+            tid: 77,
+            ..Info::default()
+        };
+        info.class[..3].copy_from_slice(&[u16::from(b'A'), u16::from(b'b'), u16::from(b'c')]);
+        info.text[..2].copy_from_slice(&[u16::from(b'h'), u16::from(b'i')]);
+        let mut bytes = [0u8; INFO_SIZE];
+        info.to_bytes(&mut bytes);
+        assert_eq!(Info::from_bytes(&bytes), Some(info));
+
+        let top = register(901, info).unwrap();
+        assert_eq!(top % HWND_STEP, 0);
+        let child_info = Info { parent: top, id: 101, z: 2, ..Info::default() };
+        let b = register(901, child_info).unwrap();
+        let a = register(901, Info { z: 1, ..child_info }).unwrap();
+        assert_ne!(a, b);
+        // Another process reads them.
+        let q = query(top).unwrap();
+        assert_eq!((q.pid, q.tid, q.rect, q.text_len), (901, 77, [10, 20, 310, 220], 2));
+        let mut kids = [0u64; 1];
+        assert_eq!(children(top, &mut kids), 2);
+        assert_eq!(kids[0], a); // the higher (smaller z) first
+        // Only the owner changes or removes them.
+        let moved = Info { rect: [0, 0, 5, 5], ..q };
+        assert_eq!(update(902, moved), Err(NtStatus::INVALID_HANDLE));
+        update(901, moved).unwrap();
+        assert_eq!(query(top).unwrap().rect, [0, 0, 5, 5]);
+        assert_eq!(unregister(902, a), Err(NtStatus::INVALID_HANDLE));
+        unregister(901, a).unwrap();
+        assert_eq!(children(top, &mut kids), 1);
+        process_ended(901);
+        assert!(query(top).is_none() && query(b).is_none());
+    }
+}

@@ -646,6 +646,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("user32_test", "advapi32.dll", "Windows/System32"),
     ("user32_test", "bcryptprimitives.dll", "Windows/System32"),
     ("user32_test", "user/bin/user32_test.exe", "gala"),
+    ("windows_across_test", "ntdll.dll", "Windows/System32"),
+    ("windows_across_test", "kernel32.dll", "Windows/System32"),
+    ("windows_across_test", "msvcrt.dll", "Windows/System32"),
+    ("windows_across_test", "user32.dll", "Windows/System32"),
+    ("windows_across_test", "gdi32.dll", "Windows/System32"),
+    ("windows_across_test", "user/bin/windows_across_test.exe", "gala"),
     ("uia_test", "ntdll.dll", "Windows/System32"),
     ("uia_test", "kernel32.dll", "Windows/System32"),
     ("uia_test", "msvcrt.dll", "Windows/System32"),
@@ -2849,6 +2855,15 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["user32_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // Windows across processes (the kernel's window registry): a
+        // child process's windows found and read by its parent
+        // (user/windows_across_test/main.c, mingw).
+        name: "windows_across_test",
+        cmdline: "qemu_exit run=windows_across_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["windows_across_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // UI Automation's client (gala's UIAutomationCore.dll) over the
         // window tree: elements, conditions, Invoke/Value/Toggle
         // (user/uia_test/main.c, mingw).
@@ -3848,6 +3863,7 @@ fn run_parallel<J: Sync, T: Send>(
 /// Program scenarios gala-um does not run, and why (docs/GALA_UM.md).
 const NOT_IN_UM: &[(&str, &str)] = &[
     ("process_test", "child processes (one NT process per Linux process)"),
+    ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
     ("system_test", "child processes; run as SYSTEM (a boot option)"),
     ("lsa_test", "runs as SYSTEM (a boot option)"),

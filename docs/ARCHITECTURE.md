@@ -2310,7 +2310,9 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   icon itself for the caption (now the big one, scaled); conhost showing
   its program's icon.
 - **user32** (`user/user32/src/window.rs`): classes, windows
-  (HWND = 0x10000 + 16 * slot), one message queue per process (256
+  (HWNDs from the kernel's window registry, unique on the desktop;
+  `foreign::HWNDS` maps slots to them without the lock), one message
+  queue per process (256
   entries, an auto-reset event) filtered by thread, WM_PAINT synthesised
   by GetMessage / PeekMessage when a visible window is invalid and the
   queue is empty, as on Windows. A top-level WS_POPUP window without
@@ -2826,7 +2828,8 @@ per-process table (0x10000 + 16 * slot: the same values in every
 process) and the kernel knows only top-level windows (desktop ids). The
 steps, each test first:
 
-1. **A kernel window registry** (`nt::window`): every window, top-level
+1. **Done (2026-11-02, `windows_across_test`).** A kernel window
+   registry (`nt::window`): every window, top-level
    and child, is registered when user32 creates it and gets its HWND
    from the kernel (one counter for the desktop, never reused soon, the
    low bits clear like Windows' handles). The entry holds what other
@@ -2842,6 +2845,28 @@ steps, each test first:
    GetClassNameW, GetWindowRect, GetWindowThreadProcessId, IsWindow,
    IsWindowVisible, GetDlgCtrlID, GetParent/GetWindow) as Windows
    documents.
+   As built: GalaWindowRegister(*info, *hwnd) 0x7f41, GalaWindowUpdate
+   (*info) 0x7f42, GalaWindowUnregister(hwnd) 0x7f43, GalaWindowQuery
+   (hwnd, *info) 0x7f44, GalaWindowChildren(parent, *hwnds, max,
+   *count) 0x7f45 (0: every top-level window, highest first); the
+   record (`nt::window::Info`, 728 bytes): hwnd, parent, owner, id, pid
+   (the kernel's), tid, style, ex_style, screen rectangle, visible/
+   enabled flags, z, class name (64) and text (256, UTF-16). HWNDs start
+   at 0x20000, 16 apart. user32 (`foreign.rs`) registers a window as
+   its slot is taken and syncs the record after create, SetWindowPos
+   (with its descendants: their screen rectangles move), the desktop's
+   moves, ShowWindow, EnableWindow, SetParent and SetWindowText;
+   another process's HWND is answered from the registry by IsWindow,
+   IsWindowVisible (ancestors too), IsWindowEnabled,
+   GetWindowThreadProcessId, GetParent, GetWindowText(Length),
+   GetClassName, GetWindowRect, GetDlgCtrlID, GetDlgItem,
+   GetWindowLongPtr (style, ex style, id, parent), GW_CHILD and
+   EnumChildWindows; EnumWindows, FindWindow and FindWindowEx search
+   every process's windows. The kernel drops a process's windows when
+   it ends. Limits: the text is what user32 last mirrored (an edit's
+   typed text is not; step 3's WM_GETTEXT across processes fixes that),
+   z order is per process (EnumWindows' order across processes is not
+   the screen's), no owner windows yet.
 2. **Posted messages across processes**: PostMessage/PostThreadMessage
    to another process's window or thread go into a kernel queue per
    thread; user32's pump moves them into its own queue as it does the

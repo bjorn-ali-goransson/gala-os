@@ -1417,7 +1417,10 @@ WM_GETOBJECT providers. Before UI Automation can drive another
 program, windows must work across processes: ARCHITECTURE's "Plan:
 windows across processes" (a kernel window registry with global HWNDs,
 posted and sent messages across processes, then UIA over them, then
-FlaUI). That plan is the next step for this item.
+FlaUI). That plan is the next step for this item. Step 1 (the window
+registry, global HWNDs, FindWindow/EnumWindows/GetWindowText... on
+other processes' windows) is done (2026-11-02, windows_across_test);
+next: posted messages across processes.
 
 Drivers: gala writes its own, against published standards (virtio,
 then AHCI/NVMe, xHCI, e1000), not hardware-specific ones. Reusing

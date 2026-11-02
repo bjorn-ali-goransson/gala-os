@@ -97,7 +97,7 @@ pub(crate) struct Class {
     atom: u16,
     name: [u16; 64],
     /// The name as registered (GetClassName).
-    spelled: [u16; 64],
+    pub(crate) spelled: [u16; 64],
     pub(crate) proc_: Option<WndProc>,
     background: usize,
     #[allow(dead_code)]
@@ -324,13 +324,14 @@ pub(crate) fn me() -> u32 {
     unsafe { GetCurrentThreadId() }
 }
 
+/// The window slot of `hwnd` (HWNDs come from the kernel's registry:
+/// crate::foreign).
 pub(crate) fn index_of(hwnd: Hwnd) -> Option<usize> {
-    let i = hwnd.checked_sub(HWND_BASE)? / 0x10;
-    (hwnd == HWND_BASE + i * 0x10 && i < MAX_WINDOWS).then_some(i)
+    crate::foreign::index_of(hwnd)
 }
 
 pub(crate) fn hwnd_of(i: usize) -> Hwnd {
-    HWND_BASE + i * 0x10
+    crate::foreign::hwnd_of(i)
 }
 
 /// The window's state, if `hwnd` is one.
@@ -498,6 +499,9 @@ fn spelled(name: *const u16) -> [u16; 64] {
 #[unsafe(no_mangle)]
 pub extern "system" fn GetClassNameW(hwnd: Hwnd, buf: *mut u16, n: i32) -> i32 {
     let Some(w) = window(hwnd) else {
+        if let Some(info) = crate::foreign::remote(hwnd) {
+            return crate::foreign::copy_out(info.class(), buf, n);
+        }
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
     };
@@ -834,6 +838,7 @@ pub extern "system" fn CreateWindowExW(
         }
         return 0;
     };
+    crate::foreign::assign(i);
     if bar != 0 {
         crate::menu::attach(hwnd_of(i), menu as usize);
     }
@@ -931,6 +936,7 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
     let Some(i) = index_of(hwnd) else { return 0 };
     crate::timer::window_destroyed(hwnd);
     crate::menu::window_destroyed(hwnd);
+    crate::foreign::release(i);
     let gone = with(|s| {
         let w = s.windows[i];
         s.windows[i] = NO_WINDOW;
@@ -960,11 +966,18 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn IsWindow(hwnd: Hwnd) -> i32 {
-    i32::from(hwnd == crate::tree::DESKTOP || window(hwnd).is_some())
+    i32::from(
+        hwnd == crate::tree::DESKTOP
+            || window(hwnd).is_some()
+            || crate::foreign::remote(hwnd).is_some(),
+    )
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn IsWindowVisible(hwnd: Hwnd) -> i32 {
+    if let Some(info) = crate::foreign::remote(hwnd) {
+        return i32::from(crate::foreign::remote_shown(&info));
+    }
     i32::from(with(|s| {
         index_of(hwnd).is_some_and(|i| s.windows[i].used && crate::tree::shown(s, i))
     }))
@@ -990,6 +1003,7 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
         }
         (was, w.desktop)
     });
+    crate::foreign::sync(hwnd);
     if desktop != 0 {
         // SAFETY: our desktop window.
         unsafe { GalaWindowShow(desktop, u8::from(show)) };
@@ -1538,6 +1552,11 @@ pub extern "system" fn GetClipboardOwner() -> Hwnd {
 /// another program's (e.g. Pageant's) is not found: NULL.
 #[unsafe(no_mangle)]
 pub extern "system" fn FindWindowW(class: *const u16, title: *const u16) -> Hwnd {
+    // Every process's top-level windows (the kernel's registry).
+    let mut probe = [0; 256];
+    if crate::foreign::children(0, &mut probe) > 0 {
+        return crate::foreign::find(0, 0, class, title);
+    }
     let want_class = (!class.is_null() && class as usize > 0xffff).then(|| class_key(class));
     let found = with(|s| {
         s.windows.iter().position(|w| {
@@ -1547,6 +1566,48 @@ pub extern "system" fn FindWindowW(class: *const u16, title: *const u16) -> Hwnd
         })
     });
     found.map_or(0, hwnd_of)
+}
+
+/// FindWindowExW(parent, after, class, title): the next child of
+/// `parent` (NULL: the desktop's top-level windows; HWND_MESSAGE: none
+/// here) after `after` with that class and title.
+#[unsafe(no_mangle)]
+pub extern "system" fn FindWindowExW(
+    parent: Hwnd,
+    after: Hwnd,
+    class: *const u16,
+    title: *const u16,
+) -> Hwnd {
+    const HWND_MESSAGE: Hwnd = -3isize as Hwnd;
+    if parent == HWND_MESSAGE {
+        return 0;
+    }
+    let parent = if parent == crate::tree::DESKTOP { 0 } else { parent };
+    crate::foreign::find(parent, after, class, title)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn FindWindowExA(
+    parent: Hwnd,
+    after: Hwnd,
+    class: *const u8,
+    title: *const u8,
+) -> Hwnd {
+    let mut c = [0u16; 64];
+    let mut t = [0u16; 256];
+    let wc = if class.is_null() || (class as usize) <= 0xffff {
+        class.cast()
+    } else {
+        ansi_into(class, &mut c)
+    };
+    let wt = if title.is_null() { core::ptr::null() } else { ansi_into(title, &mut t) };
+    FindWindowExW(parent, after, wc, wt)
+}
+
+/// The class atom of our window `hwnd`.
+pub(crate) fn class_atom_of(hwnd: Hwnd) -> Option<u16> {
+    let w = window(hwnd)?;
+    Some(with(|s| s.classes[w.class].atom))
 }
 
 #[unsafe(no_mangle)]

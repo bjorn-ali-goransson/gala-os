@@ -3251,6 +3251,21 @@ pub extern "system" fn ExitProcess(code: u32) -> ! {
     }
 }
 
+/// __C_specific_handler: the language handler of SEH __try blocks
+/// (kernel32 exports it on Windows; mingw's runtime imports it from
+/// here). gala does not run __except filters yet: the exception keeps
+/// searching (recorded), as msvcrt's.
+#[unsafe(no_mangle)]
+pub extern "C" fn __C_specific_handler(
+    _record: *mut c_void,
+    _frame: usize,
+    _context: *mut c_void,
+    _dispatcher: *mut c_void,
+) -> i32 {
+    unsupported(b"kernel32.dll!__C_specific_handler", 0);
+    1 // ExceptionContinueSearch
+}
+
 /// DllMain (the entry point our link flags name).
 #[unsafe(no_mangle)]
 pub extern "system" fn mainCRTStartup(_instance: usize, reason: u32, _reserved: usize) -> i32 {

@@ -114,6 +114,11 @@ pub const GALA_CONSOLE_INPUT_EVENTS: u32 = 0x7f3d;
 pub const GALA_WINDOW_SET_ICON: u32 = 0x7f3e;
 pub const GALA_CONSOLE_MODE: u32 = 0x7f3f;
 pub const GALA_CONSOLE_CTRL: u32 = 0x7f40;
+pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
+pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
+pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
+pub const GALA_WINDOW_QUERY: u32 = 0x7f44;
+pub const GALA_WINDOW_CHILDREN: u32 = 0x7f45;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -292,6 +297,11 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_SET_ICON, "GalaWindowSetIcon", 3, gala_window_set_icon),
     (GALA_CONSOLE_MODE, "GalaConsoleMode", 2, gala_console_mode),
     (GALA_CONSOLE_CTRL, "GalaConsoleCtrl", 1, gala_console_ctrl),
+    (GALA_WINDOW_REGISTER, "GalaWindowRegister", 2, gala_window_register),
+    (GALA_WINDOW_UPDATE, "GalaWindowUpdate", 1, gala_window_update),
+    (GALA_WINDOW_UNREGISTER, "GalaWindowUnregister", 1, gala_window_unregister),
+    (GALA_WINDOW_QUERY, "GalaWindowQuery", 2, gala_window_query),
+    (GALA_WINDOW_CHILDREN, "GalaWindowChildren", 4, gala_window_children),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1516,6 +1526,77 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
             return waited;
         }
     }
+}
+
+/// A window record (nt::window::Info) from the caller.
+fn read_window_info(call: &Call<'_>, ptr: u64) -> Result<super::window::Info, NtStatus> {
+    let mut bytes = [0u8; super::window::INFO_SIZE];
+    call.process.read(ptr, &mut bytes).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+    super::window::Info::from_bytes(&bytes).ok_or(NtStatus::INVALID_PARAMETER)
+}
+
+/// GalaWindowRegister(*Info, *Hwnd): registers one of the caller's
+/// windows (its record: the process id is the caller's); its HWND.
+fn gala_window_register(call: &mut Call<'_>) -> NtStatus {
+    let info = tri!(read_window_info(call, arg!(call, 0)));
+    let hwnd = tri!(super::window::register(call.process.id as u32, info));
+    if call.process.write(arg!(call, 1), &hwnd.to_le_bytes()).is_err() {
+        let _ = super::window::unregister(call.process.id as u32, hwnd);
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowUpdate(*Info): the caller's window Info.hwnd's new record.
+fn gala_window_update(call: &mut Call<'_>) -> NtStatus {
+    let info = tri!(read_window_info(call, arg!(call, 0)));
+    tri!(super::window::update(call.process.id as u32, info));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowUnregister(Hwnd): the caller's window is gone.
+fn gala_window_unregister(call: &mut Call<'_>) -> NtStatus {
+    tri!(super::window::unregister(call.process.id as u32, arg!(call, 0)));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowQuery(Hwnd, *Info): any process's window's record;
+/// STATUS_INVALID_HANDLE when there is none.
+fn gala_window_query(call: &mut Call<'_>) -> NtStatus {
+    let Some(info) = super::window::query(arg!(call, 0)) else { return NtStatus::INVALID_HANDLE };
+    let mut bytes = [0u8; super::window::INFO_SIZE];
+    info.to_bytes(&mut bytes);
+    if call.process.write(arg!(call, 1), &bytes).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowChildren(Parent, *Hwnds, Max, *Count): the windows whose
+/// parent is Parent (0: the top-level windows of every process), the
+/// highest first; Count says how many there are (more than Max when the
+/// array is short).
+fn gala_window_children(call: &mut Call<'_>) -> NtStatus {
+    let (parent, ptr, max, count) =
+        (arg!(call, 0), arg!(call, 1), (arg!(call, 2) as usize).min(1024), arg!(call, 3));
+    let mut hwnds = Vec::new();
+    if hwnds.try_reserve_exact(max).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    hwnds.resize(max, 0u64);
+    let n = super::window::children(parent, &mut hwnds);
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(8 * max).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    for h in &hwnds[..n.min(max)] {
+        bytes.extend(h.to_le_bytes());
+    }
+    if call.process.write(ptr, &bytes).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    tri!(call.write_u32(count, n as u32));
+    NtStatus::SUCCESS
 }
 
 /// GalaWindowCapture(id): the caller's window gets all mouse input,

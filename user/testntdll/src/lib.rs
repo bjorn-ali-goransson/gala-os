@@ -272,6 +272,11 @@ syscall_stubs! {
     GalaWindowSetIcon = 0x7f3e, fn(id: u32, pixels: *const u32, size: usize);
     GalaConsoleMode = 0x7f3f, fn(mode: u32, set: u32);
     GalaConsoleCtrl = 0x7f40, fn(seen: *mut u32);
+    GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
+    GalaWindowUpdate = 0x7f42, fn(info: *const u8);
+    GalaWindowUnregister = 0x7f43, fn(hwnd: u64);
+    GalaWindowQuery = 0x7f44, fn(hwnd: u64, info: *mut u8);
+    GalaWindowChildren = 0x7f45, fn(parent: u64, hwnds: *mut u64, max: u32, count: *mut u32);
     // gala's number, UNVERIFIED.
     NtCreateDirectoryObject = 0x7f24, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtClearEvent = 0x3e, fn(h: usize);
