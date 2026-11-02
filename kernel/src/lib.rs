@@ -128,6 +128,10 @@ pub fn kernel_main() -> ! {
         Err(e) => warn!("smp: cannot start the other CPUs: {e:?}"),
     }
     disk::init();
+    // The network driver's recovery test: reset after the n-th frame sent.
+    if let Some(n) = cmdline.value("netreset").and_then(|v| v.parse().ok()) {
+        net::virtio_net::RESET_AT.store(n, Ordering::Relaxed);
+    }
     // The disk driver's recovery test: the n-th request's device is reset.
     if let Some(n) = cmdline.value("diskreset").and_then(|v| v.parse().ok()) {
         disk::RESET_AT.store(n, Ordering::Relaxed);

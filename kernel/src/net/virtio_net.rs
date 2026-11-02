@@ -28,6 +28,11 @@ const SLOTS: u16 = 32;
 pub static RX_FRAMES: AtomicU64 = AtomicU64::new(0);
 pub static TX_FRAMES: AtomicU64 = AtomicU64::new(0);
 pub static TX_FULL: AtomicU64 = AtomicU64::new(0);
+/// `netreset=<n>`: the device is reset under the driver after the n-th
+/// frame sent (the driver's recovery test; 0: never).
+pub static RESET_AT: AtomicU64 = AtomicU64::new(0);
+/// Times the device was set up again.
+pub static RESETS: AtomicU64 = AtomicU64::new(0);
 
 pub struct VirtioNet {
     dev: LegacyDevice,
@@ -61,7 +66,7 @@ impl VirtioNet {
             }
         });
         let function = found.ok_or(Error::NotFound)?;
-        let (mut dev, features) = LegacyDevice::new(&function, F_MAC | F_ANY_LAYOUT)?;
+        let (dev, features) = LegacyDevice::new(&function, F_MAC | F_ANY_LAYOUT)?;
         if features & F_MAC == 0 {
             return Err(Error::NoMac);
         }
@@ -69,17 +74,39 @@ impl VirtioNet {
         for (i, byte) in mac.iter_mut().enumerate() {
             *byte = dev.config_u8(i as u16);
         }
-        dev.setup_queue(RX, SLOTS, SLOT, true)?;
-        dev.setup_queue(TX, SLOTS, SLOT, false)?;
         let mut net = Self { dev, mac, at: function.address };
-        net.dev.start();
-        if let Some(rx) = net.dev.queue(RX) {
+        net.setup()?;
+        Ok(net)
+    }
+
+    /// The queues, the device started, every receive buffer posted.
+    fn setup(&mut self) -> Result<(), InitError> {
+        self.dev.setup_queue(RX, SLOTS, SLOT, true)?;
+        self.dev.setup_queue(TX, SLOTS, SLOT, false)?;
+        self.dev.start();
+        if let Some(rx) = self.dev.queue(RX) {
             for slot in 0..rx.slots() {
                 rx.post(slot, SLOT);
             }
         }
-        net.dev.notify(RX);
-        Ok(net)
+        self.dev.notify(RX);
+        Ok(())
+    }
+
+    /// Sets the device up again if it gave up or was reset under the
+    /// driver (ARCHITECTURE invariant 4): in place, the queues new; frames
+    /// in flight are lost (TCP sends them again).
+    fn recover(&mut self) {
+        if !self.dev.needs_reset() {
+            return;
+        }
+        crate::warn!("net: the device was reset or gave up; setting it up again");
+        let features = self.dev.reinit(F_MAC | F_ANY_LAYOUT);
+        if features & F_MAC == 0 || self.setup().is_err() {
+            crate::warn!("net: the device could not be set up again");
+            return;
+        }
+        RESETS.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn failed(&self) -> bool {
@@ -125,7 +152,10 @@ impl phy::TxToken for TxToken<'_> {
         });
         if sent {
             net.dev.notify(TX);
-            TX_FRAMES.fetch_add(1, Ordering::Relaxed);
+            let n = TX_FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+            if RESET_AT.load(Ordering::Relaxed) == n {
+                net.dev.reset_now();
+            }
         } else {
             TX_FULL.fetch_add(1, Ordering::Relaxed);
         }
@@ -138,6 +168,7 @@ impl phy::Device for VirtioNet {
     type TxToken<'a> = TxToken<'a>;
 
     fn receive(&mut self, _now: Instant) -> Option<(RxToken, TxToken<'_>)> {
+        self.recover();
         self.reclaim_tx();
         let rx = self.dev.queue(RX)?;
         let (slot, written) = rx.pop_used()?;
@@ -150,6 +181,7 @@ impl phy::Device for VirtioNet {
     }
 
     fn transmit(&mut self, _now: Instant) -> Option<TxToken<'_>> {
+        self.recover();
         self.reclaim_tx();
         self.dev.queue(TX)?.free_slot()?;
         Some(TxToken(self))

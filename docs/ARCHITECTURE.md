@@ -102,6 +102,7 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `console=<program>` | that `start=`/`run=` program gets a console window (a console session hosted by gala's conhost.exe) |
 | `cwd=C:/dir` | their current directory (default `C:\gala\`; Elasticsearch expects its home) |
 | `trace` | log every system call (arguments, status) |
+| `netreset=<n>` | the network card is reset under the driver after the n-th frame sent (the driver's recovery test) |
 | `diskreset=<n>` | the n-th disk request has the device reset under the driver just after it is posted (the driver's recovery test) |
 | `crashtest` | with `persist`: panic on purpose after mounting when the disk holds no crash record (the crash record's scenario) |
 | `hangtest` | CPU 1 spins with interrupts off for 9 s, 3 s after its timer starts (the hang watchdog's scenario) |
@@ -3202,7 +3203,11 @@ one for the whole kernel means `time.rs`.
    NEEDS_RESET) or lost DRIVER_OK (reset under the driver) re-initializes
    it in place (`LegacyDevice::reinit`: a second device value would reset
    it again when dropped) and posts the request again, up to 3 times
-   (scenario `disk_reset`). TODO: virtio-net.
+   (scenario `disk_reset`). virtio-net too: before receiving or
+   sending it checks the device and sets it up again in place (new
+   queues, every receive buffer posted again); frames in flight are lost
+   and TCP sends them again (scenario `net_reset`: go_http with the card
+   reset after its 3rd frame).
 5. **All kernel time comes through one clock**: the NT layer through the
    `Clock` seam, the kernel's own modules through `time.rs`; nothing else
    reads the TSC or counts ticks (holds as of 2026-11-02). Deterministic

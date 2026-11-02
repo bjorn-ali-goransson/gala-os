@@ -2233,6 +2233,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("net_echo", "net: echo listening on port 7", NetClient::Echo),
     ("winsock_test", "winsock_test: listening on port 7", NetClient::Echo),
     ("go_http", "go_http: listening on port 7", NetClient::Http(GO_HTTP_PAGE)),
+    ("net_reset", "go_http: listening on port 7", NetClient::Http(GO_HTTP_PAGE)),
     ("nginx", "using the \"select\" event method", NetClient::Nginx),
     ("caddy_http", "Caddy serving static files on :7", NetClient::Http(CADDY_PAGE)),
     ("java_http", "java_http: listening on port 7", NetClient::Http(JAVA_HTTP_PAGE)),
@@ -2899,6 +2900,20 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=winsock_async_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["winsock_async_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // R1 invariant 4: go_http with the network card reset under the
+        // driver after the 3rd frame it sent; the driver sets it up again
+        // (lost frames are TCP's to send again) and the page still comes.
+        name: "net_reset",
+        cmdline: "qemu_exit netreset=3 run=go_http.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "net: the device was reset or gave up; setting it up again",
+            "xtask: net client: http ok",
+            "go_http: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // N1c: net/http on gala: a loopback GET, then a page for the host.
@@ -3835,6 +3850,7 @@ fn events_flag() -> String {
 /// (the same set: they share a VM); a scenario listed more than once
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
     ("crash_record", "hello"),
     ("watchdog", "busybox"),
