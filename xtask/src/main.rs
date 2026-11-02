@@ -4503,14 +4503,13 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
         return Err("no boot test scenario matches the filter".into());
     }
     let vms = plan_vms(&selected);
-    let t1 = Instant::now();
     // Tests read the serial log; the screen console stays on only where
     // the scenario boots by UEFI, which keeps that code covered.
     let screen = |s: &Scenario| {
         let screen = if scenario_boot(s.name) == Boot::Uefi { "" } else { " noscreen" };
         format!("{screen}{}", events_flag())
     };
-    let isos = run_parallel(&vms, |vm| match vm {
+    let make = |vm: &Vm| match vm {
         Vm::Single(s) => make_iso(
             release,
             &format!("test-{}", s.name),
@@ -4533,23 +4532,32 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
                 &extra_modules(group[0].name),
             )
         }
-    });
-    let isos: Vec<PathBuf> = isos.into_iter().collect::<Result<_>>()?;
+    };
     if let Some(times) = env::var("XTASK_REPEAT").ok().and_then(|n| n.parse::<usize>().ok()) {
+        let isos = run_parallel(&vms, |vm| make(vm));
+        let isos: Vec<PathBuf> = isos.into_iter().collect::<Result<_>>()?;
         return repeat_boots(&vms, &isos, times);
     }
-    let isos_made = t1.elapsed();
+    // Each VM's image is made just before it boots and deleted after a
+    // pass, so only the images of the VMs running at once are on the disk
+    // (making them all first filled the disk: about 50 MB each).
+    let iso_time = std::sync::Mutex::new(Duration::ZERO);
     let t2 = Instant::now();
-    let jobs: Vec<(&Vm, &PathBuf)> = vms.iter().zip(&isos).collect();
-    let results = run_parallel(&jobs, |(vm, iso)| {
-        let result = boot_vm(vm, iso);
+    let results = run_parallel(&vms, |vm| {
+        let t = Instant::now();
+        let iso = make(vm)?;
+        if let Ok(mut total) = iso_time.lock() {
+            *total += t.elapsed();
+        }
+        let result = boot_vm(vm, &iso);
         // A passing VM's image is not needed again (a failed one is kept
-        // to boot by hand); a full run's images would fill the disk.
+        // to boot by hand).
         if result.1.iter().all(|(_, v)| v.is_ok()) {
-            let _ = fs::remove_file(iso);
+            let _ = fs::remove_file(&iso);
         }
         Ok(result)
     });
+    let isos_made = iso_time.into_inner().unwrap_or_default();
     let booted = t2.elapsed();
     let mut failed = 0;
     let (mut firmware, mut kernel) = (Duration::ZERO, Duration::ZERO);
@@ -4583,7 +4591,7 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
         }
     }
     let summary = format!(
-        "build {:.1}s, ISOs {:.1}s, boots {:.1}s wall ({} scenarios in {} VMs; summed: {:.1}s firmware+bootloader, {:.1}s kernel)",
+        "build {:.1}s, ISOs {:.1}s summed, boots {:.1}s wall (with the ISOs) ({} scenarios in {} VMs; summed: {:.1}s firmware+bootloader, {:.1}s kernel)",
         built.as_secs_f64(),
         isos_made.as_secs_f64(),
         booted.as_secs_f64(),

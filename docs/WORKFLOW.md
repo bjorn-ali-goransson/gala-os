@@ -107,6 +107,11 @@ shows it.
 - **Changing `nt::desktop`'s public functions or types**: the server
   kernel's stand-in `kernel/src/nt/desktop_off.rs` must follow, or the
   `--no-default-features` clippy line in CI fails.
+- **Boot-test images are made per VM**: `cargo xtask test` makes each
+  VM's ISO just before it boots and deletes it after a pass (a failed
+  one stays to boot by hand), so only the running VMs' images use disk;
+  making all ~170 first (about 50 MB each) filled the shared disk.
+  `XTASK_REPEAT` still makes its images first.
 - **Write each expected output line with one WriteFile call**: a test
   that writes a line in pieces can have a kernel log line land between
   them on the serial port, and the scenario's expected substring is then
