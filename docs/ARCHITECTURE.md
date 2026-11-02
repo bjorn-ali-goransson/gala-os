@@ -2906,6 +2906,13 @@ it holds today:
   GalaWindowListen and GalaScreenInfo answer as without a screen, and
   `console=` starts no conhost.exe. The screen keeps the text console.
 
+**Layering (the owner, 2026-11-02)**: the desktop edition is the
+server/CLI edition plus a graphical shell. Every desktop action (start
+menu, taskbar, caption buttons, Snap keys, wallpaper) is a named action
+that the CLI can also invoke (`gala` command; ROADMAP SD "CLI parity"),
+so nothing can be done only with a mouse. New desktop features are
+built CLI-first.
+
 Rule for new code: nothing in the boot path, the console path or a
 server program's path may touch the desktop, start a GUI process or
 load a GUI DLL unless a program asked for a window (user32 and gdi32

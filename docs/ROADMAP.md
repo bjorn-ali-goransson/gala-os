@@ -27,6 +27,11 @@ explicitly in its commit.
   console programs, the Docker image) never start the graphical
   interface. See "Server and desktop workloads" in ARCHITECTURE; item
   SD below.
+- **The desktop is built on the command line, not beside it**: the
+  desktop edition is the server/CLI edition plus a graphical shell, and
+  everything the desktop can do can be done from a terminal too (the
+  `gala` command, item SD). A desktop feature is built as an action the
+  CLI reaches first, then given a mouse and keyboard binding.
 
 ## Done
 - M1 boot, serial, memory map
@@ -1426,6 +1431,14 @@ SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    off. **`profile=server` done** (2026-11-02, scenario
    server_profile): the desktop is never drawn even with a screen,
    windows still exist as without one, `console=` starts no conhost.exe.
+   **CLI parity** (the owner, 2026-11-02): every desktop action is an
+   action of one kernel entry point (`GalaDesktopAction`) that the
+   desktop's mouse and keys call and that the `gala` command (a console
+   program, user/gala) calls too: start a program (the start menu),
+   list windows (the taskbar), activate, minimize, maximize, restore,
+   close, snap left/right/up/down, move/resize, choose the wallpaper;
+   plus `gala ps`/`gala kill` (what a task manager would do). Test
+   first: a gala_cli scenario drives a GUI program by the CLI alone.
    **Server kernel done** (2026-11-02, scenario server_kernel): the
    kernel's `desktop` feature (on by default) leaves out the compositor,
    wallpapers and start menu (2.5 MB smaller); xtask builds both. A
