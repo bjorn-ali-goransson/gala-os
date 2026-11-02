@@ -21,7 +21,10 @@
 //! title (whole, or a part only one window's title has; any case).
 //! Exit codes: 0 done, 1 usage, 2 no such window, program or process,
 //! 3 not supported here (no graphical shell: the server kernel or
-//! `profile=server`), 4 failed (the status is printed).
+//! `profile=server`), 4 failed (the status is printed; "access denied"
+//! for a window of a process of higher integrity level than gala's, as
+//! UIPI rules for messages). `gala start` runs the program as gala's
+//! caller (a copy of its token, as CreateProcess).
 
 #![no_std]
 #![no_main]
@@ -127,6 +130,7 @@ const STATUS_SUCCESS: u32 = 0;
 const STATUS_INVALID_HANDLE: u32 = 0xc000_0008;
 const STATUS_OBJECT_NAME_NOT_FOUND: u32 = 0xc000_0034;
 const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
+const STATUS_ACCESS_DENIED: u32 = 0xc000_0022;
 const STATUS_INFO_LENGTH_MISMATCH: u32 = 0xc000_0004;
 const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
 
@@ -255,6 +259,11 @@ fn status_error(status: u32, what: &str) -> u32 {
         STATUS_INVALID_HANDLE => fail(EXIT_NOT_FOUND, &["no such window on the screen"]),
         STATUS_OBJECT_NAME_NOT_FOUND => fail(EXIT_NOT_FOUND, &["not found: ", what]),
         STATUS_INVALID_PARAMETER => fail(EXIT_USAGE, &["not a valid request: ", what]),
+        // UIPI: the window's process has a higher integrity level.
+        STATUS_ACCESS_DENIED => fail(
+            EXIT_FAILED,
+            &["access denied (the window's program runs at a higher integrity level): not ", what],
+        ),
         _ => {
             let mut l = Line::new();
             l.s("gala: ").s(what).s(" failed with status ").hex(u64::from(status), 8);

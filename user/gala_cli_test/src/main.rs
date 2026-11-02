@@ -18,6 +18,15 @@
 //! - `gala ps` lists the program, `gala kill <pid>` and `gala kill
 //!   <name>` end processes; the exit codes say what went wrong (1 usage,
 //!   2 not found, 3 no graphical shell).
+//! - UIPI (User Interface Privilege Isolation): `gala` run at Low
+//!   integrity (a copy of our token lowered with SetTokenInformation(
+//!   TokenIntegrityLevel), CreateProcessAsUserW) lists the windows but
+//!   may not act on the Medium target: "access denied", exit code 4, and
+//!   the window is untouched (a lower integrity level cannot drive a
+//!   higher one's windows, as PostMessage and SendMessage document).
+//! - `gala start` runs the program as its caller, as CreateProcess would:
+//!   started from a Low `gala` the program's token is Low, from ours it
+//!   is ours (the same user and level), not the boot user's.
 //!
 //! Modes: no argument: the above, on shasha (scenario gala_cli, UEFI:
 //! xtask checks the screen once it prints `gala_cli_test: snapped left`
@@ -25,6 +34,7 @@
 //! on the server kernel or with `profile=server` the window commands fail
 //! with exit code 3 and start, ps and kill work (scenarios server_kernel,
 //! server_profile). `target`: the GUI program (the window "CLI target").
+//! `idle`: waits 30 s (a program to look at the token of).
 //!
 //! Prints `gala_cli_test: ok` (the target `gala_cli_test target: ok`) or
 //! exits with the number of the failing check.
@@ -128,6 +138,8 @@ unsafe extern "system" {
     fn Sleep(ms: u32);
     fn GetTickCount() -> u32;
     fn GetModuleHandleW(name: *const u16) -> Handle;
+    fn GetCurrentProcess() -> Handle;
+    fn TerminateProcess(h: Handle, code: u32) -> Bool;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
@@ -165,6 +177,41 @@ unsafe extern "system" {
     fn IsWindow(hwnd: Hwnd) -> i32;
     fn FindWindowW(class: *const u16, name: *const u16) -> Hwnd;
     fn GetSystemMetrics(index: i32) -> i32;
+}
+
+#[link(name = "advapi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> Bool;
+    fn DuplicateTokenEx(
+        token: Handle,
+        access: u32,
+        attributes: *mut c_void,
+        level: u32,
+        kind: u32,
+        new: *mut Handle,
+    ) -> Bool;
+    fn SetTokenInformation(token: Handle, class: u32, info: *const u8, len: u32) -> Bool;
+    fn GetTokenInformation(
+        token: Handle,
+        class: u32,
+        info: *mut u8,
+        len: u32,
+        returned: *mut u32,
+    ) -> Bool;
+    #[allow(clippy::too_many_arguments)]
+    fn CreateProcessAsUserW(
+        token: Handle,
+        application: *const u16,
+        command_line: *mut u16,
+        process_attributes: *mut c_void,
+        thread_attributes: *mut c_void,
+        inherit: Bool,
+        flags: u32,
+        environment: *mut c_void,
+        directory: *const u16,
+        startup: *const u8,
+        info: *mut [usize; 3],
+    ) -> Bool;
 }
 
 #[link(name = "gdi32", kind = "raw-dylib")]
@@ -461,6 +508,11 @@ fn contains(hay: &[u8], what: &[u8]) -> bool {
 
 /// Runs `gala <args>`: its exit code and output.
 fn gala(args: &str) -> (u32, Output) {
+    gala_as(core::ptr::null_mut(), args)
+}
+
+/// Runs `gala <args>` under primary token `token` (null: ours).
+fn gala_as(token: Handle, args: &str) -> (u32, Output) {
     let mut o = Output { b: [0; 8192], n: 0 };
     let null = core::ptr::null_mut();
     let sa = SecurityAttributes { length: 24, descriptor: null, inherit: 1 };
@@ -481,18 +533,34 @@ fn gala(args: &str) -> (u32, Output) {
         startup[88..96].copy_from_slice(&(w as u64).to_le_bytes());
         startup[96..104].copy_from_slice(&(w as u64).to_le_bytes());
         let mut info = [0usize; 3];
-        let ok = CreateProcessW(
-            exe.ptr(),
-            line.ptr(),
-            null,
-            null,
-            1,
-            0,
-            null,
-            core::ptr::null(),
-            startup.as_ptr(),
-            &mut info,
-        );
+        let ok = if token.is_null() {
+            CreateProcessW(
+                exe.ptr(),
+                line.ptr(),
+                null,
+                null,
+                1,
+                0,
+                null,
+                core::ptr::null(),
+                startup.as_ptr(),
+                &mut info,
+            )
+        } else {
+            CreateProcessAsUserW(
+                token,
+                exe.ptr(),
+                line.ptr(),
+                null,
+                null,
+                1,
+                0,
+                null,
+                core::ptr::null(),
+                startup.as_ptr(),
+                &mut info,
+            )
+        };
         CloseHandle(w);
         if ok == 0 {
             CloseHandle(r);
@@ -533,7 +601,12 @@ impl Checks {
 
     /// `gala <args>` exits with `code` and its output has `has`.
     fn run(&self, args: &str, code: u32, has: &[u8]) -> Result<Output, u32> {
-        let (got, o) = gala(args);
+        self.run_as(core::ptr::null_mut(), args, code, has)
+    }
+
+    /// The same, `gala` run under primary token `token` (null: ours).
+    fn run_as(&self, token: Handle, args: &str, code: u32, has: &[u8]) -> Result<Output, u32> {
+        let (got, o) = gala_as(token, args);
         if got != code || !o.has(has) {
             out(b"gala_cli_test: gala ");
             out(args.as_bytes());
@@ -744,6 +817,114 @@ fn ps_has(pid: u32) -> bool {
     })
 }
 
+const TOKEN_ASSIGN_PRIMARY: u32 = 0x0001;
+const TOKEN_DUPLICATE: u32 = 0x0002;
+const TOKEN_QUERY: u32 = 0x0008;
+const TOKEN_ADJUST_DEFAULT: u32 = 0x0080;
+const TOKEN_USER: u32 = 1;
+const TOKEN_INTEGRITY_LEVEL: u32 = 25;
+const SECURITY_IMPERSONATION: u32 = 2;
+const TOKEN_PRIMARY: u32 = 1;
+const SE_GROUP_INTEGRITY: u32 = 0x20;
+const LOW_RID: u32 = 0x1000;
+
+/// A copy of our primary token at Low integrity (SetTokenInformation's
+/// TokenIntegrityLevel with the label S-1-16-4096), or null.
+fn low_token() -> Handle {
+    let null = core::ptr::null_mut();
+    let (mut token, mut low) = (null, null);
+    // SAFETY: plain calls with our handles and buffers.
+    unsafe {
+        let access = TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY;
+        if OpenProcessToken(GetCurrentProcess(), access, &mut token) == 0 {
+            return null;
+        }
+        let ok = DuplicateTokenEx(token, 0, null, SECURITY_IMPERSONATION, TOKEN_PRIMARY, &mut low);
+        CloseHandle(token);
+        if ok == 0 {
+            return null;
+        }
+        // TOKEN_MANDATORY_LABEL: the SID's pointer and attributes, then
+        // the SID S-1-16-4096 itself.
+        let mut label = [0u8; 16 + 12];
+        let sid = label.as_ptr() as u64 + 16;
+        label[0..8].copy_from_slice(&sid.to_le_bytes());
+        label[8..12].copy_from_slice(&SE_GROUP_INTEGRITY.to_le_bytes());
+        label[16..28].copy_from_slice(&[1, 1, 0, 0, 0, 0, 0, 16, 0, 0x10, 0, 0]);
+        if SetTokenInformation(low, TOKEN_INTEGRITY_LEVEL, label.as_ptr(), 28) == 0 {
+            CloseHandle(low);
+            return null;
+        }
+    }
+    low
+}
+
+/// Process `h`'s (null: ours) token's user SID (its bytes) and
+/// integrity level.
+fn identity(h: Handle) -> Option<([u8; 68], u32)> {
+    let mut token = core::ptr::null_mut();
+    let mut buf = [0u8; 128];
+    let mut got = 0;
+    // SAFETY: plain calls with our handles and buffers.
+    unsafe {
+        let process = if h.is_null() { GetCurrentProcess() } else { h };
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let mut user = [0u8; 68];
+        let ok = GetTokenInformation(token, TOKEN_USER, buf.as_mut_ptr(), 128, &mut got) != 0;
+        if ok {
+            // TOKEN_USER: a SID pointer (into buf), its attributes.
+            let sid = u64::from_le_bytes(buf[0..8].try_into().unwrap_or([0; 8])) as *const u8;
+            let n = 8 + 4 * usize::from(*sid.add(1));
+            core::ptr::copy_nonoverlapping(sid, user.as_mut_ptr(), n.min(68));
+        }
+        let level_ok =
+            GetTokenInformation(token, TOKEN_INTEGRITY_LEVEL, buf.as_mut_ptr(), 128, &mut got) != 0;
+        CloseHandle(token);
+        if !ok || !level_ok {
+            return None;
+        }
+        // TOKEN_MANDATORY_LABEL: the label SID's last sub-authority.
+        let sid = u64::from_le_bytes(buf[0..8].try_into().unwrap_or([0; 8])) as *const u8;
+        let count = usize::from(*sid.add(1));
+        let level = sid.add(8 + 4 * (count - 1)).cast::<u32>().read_unaligned();
+        Some((user, level))
+    }
+}
+
+/// `gala start` runs the program as its caller: from `gala` at Low, a
+/// Low program; from ours, our user and level. A Low `gala` may still
+/// list the windows (with a screen).
+fn start_as_caller(c: &Checks, screen: bool) -> Result<(), u32> {
+    let mine = identity(core::ptr::null_mut());
+    c.ok(mine.is_some_and(|(_, level)| level > LOW_RID), 0)?;
+    let (user, level) = mine.unwrap_or(([0; 68], 0));
+    let low = low_token();
+    c.ok(!low.is_null(), 0)?;
+    if screen {
+        c.run_as(low, "windows", 0, b"HWND")?;
+    }
+    for (token, want) in [(low, LOW_RID), (core::ptr::null_mut(), level)] {
+        let o = c.run_as(token, "start gala_cli_test.exe idle", 0, b"(pid ")?;
+        let pid = started_pid(&o).unwrap_or(0);
+        let process = open_process(pid);
+        c.ok(!process.is_null(), pid.into())?;
+        let started = identity(process);
+        c.ok(started.is_some_and(|(u, _)| u == user), pid.into())?;
+        let got = started.map_or(0, |(_, l)| l);
+        c.ok(got == want, got.into())?;
+        // SAFETY: our handle.
+        unsafe {
+            TerminateProcess(process, 0);
+            CloseHandle(process);
+        }
+    }
+    // SAFETY: our handle.
+    unsafe { CloseHandle(low) };
+    Ok(())
+}
+
 fn desktop() -> Result<(), u32> {
     let c = Checks(core::cell::Cell::new(0));
     let mut buf = [0u8; 128];
@@ -771,6 +952,18 @@ fn desktop() -> Result<(), u32> {
     let found = unsafe { FindWindowW(W::new(CLASS).ptr(), core::ptr::null()) };
     c.ok(found as usize == first.hwnd_value() && found as usize != 0, found as u64)?;
     c.ok(first.rect == [200, 150, 480, 320], first.rect[0] as u64)?;
+
+    // UIPI: a Low integrity `gala` may not act on the Medium window.
+    let low = low_token();
+    c.ok(!low.is_null(), 0)?;
+    c.run_as(low, cmd(&mut buf, "minimize", hwnd, ""), 4, b"access denied")?;
+    c.run_as(low, "close CLI target", 4, b"access denied")?;
+    // SAFETY: our handle.
+    unsafe { CloseHandle(low) };
+    // SAFETY: a plain call: the window was left as it was.
+    c.ok(unsafe { IsIconic(found) } == 0, 0)?;
+    c.ok(find_target().is_some_and(|l| !has_state(&l, b"minimized")), 0)?;
+    start_as_caller(&c, true)?;
 
     // Snap left by title: the left half of the work area.
     // SAFETY: plain calls.
@@ -888,6 +1081,8 @@ fn server() -> Result<(), u32> {
     c.run("programs", 3, b"no graphical shell")?;
     // A window by title needs the list: not supported either.
     c.run("close CLI target", 3, b"no graphical shell")?;
+    // Start works everywhere, as the caller.
+    start_as_caller(&c, false)?;
     let o = c.run("start gala_cli_test.exe target", 0, b"started gala_cli_test.exe (pid ")?;
     let pid = started_pid(&o).unwrap_or(0);
     let process = open_process(pid);
@@ -949,6 +1144,13 @@ fn mode() -> [u8; 8] {
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
     let mode = mode();
+    if mode.starts_with(b"idle\0") {
+        // SAFETY: plain calls.
+        unsafe {
+            Sleep(30_000);
+            ExitProcess(0)
+        }
+    }
     let code = if mode.starts_with(b"target\0") {
         let code = target();
         if code == 0 {

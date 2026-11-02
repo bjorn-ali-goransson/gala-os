@@ -195,6 +195,166 @@ struct Registry {
     /// created a window or called a message function (PostThreadMessage
     /// fails for the others, as on Windows).
     queues: Vec<(u32, u32)>,
+    /// UIPI's message filters (ChangeWindowMessageFilter(Ex)): messages a
+    /// process lets through from lower integrity levels, process-wide or
+    /// for one of its windows.
+    filters: Vec<Filter>,
+}
+
+/// A message process `pid` lets through UIPI's filter: for its window
+/// `hwnd`, or process-wide (hwnd 0: ChangeWindowMessageFilter).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Filter {
+    pid: u32,
+    hwnd: u64,
+    message: u32,
+}
+
+/// Who sends or posts a message, for UIPI (User Interface Privilege
+/// Isolation): the process and its integrity level (its primary token's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sender {
+    pub pid: u32,
+    pub level: u32,
+}
+
+/// ChangeWindowMessageFilterEx's actions (ChangeWindowMessageFilter's
+/// MSGFLT_ADD and MSGFLT_REMOVE are ALLOW and DISALLOW).
+pub const MSGFLT_RESET: u32 = 0;
+pub const MSGFLT_ALLOW: u32 = 1;
+pub const MSGFLT_DISALLOW: u32 = 2;
+/// CHANGEFILTERSTRUCT's ExtStatus.
+pub const MSGFLTINFO_NONE: u32 = 0;
+pub const MSGFLTINFO_ALREADYALLOWED_FORWND: u32 = 1;
+pub const MSGFLTINFO_ALREADYDISALLOWED_FORWND: u32 = 2;
+pub const MSGFLTINFO_ALLOWED_HIGHER: u32 = 3;
+/// SECURITY_MANDATORY_LOW_RID: processes at or below it may not change
+/// the message filter.
+pub const LOW_LEVEL: u32 = 0x1000;
+
+/// The messages UIPI lets through whatever the levels and the filters
+/// ("certain messages whose value is smaller than WM_USER are required to
+/// pass through the filter"; Microsoft does not list them: this is the
+/// list commonly given for Windows, to verify on Windows): WM_NULL,
+/// WM_MOVE, WM_SIZE, WM_GETTEXT, WM_GETTEXTLENGTH, WM_GETHOTKEY,
+/// WM_GETICON, WM_RENDERFORMAT, WM_DRAWCLIPBOARD, WM_CHANGECBCHAIN,
+/// WM_THEMECHANGED.
+pub fn always_passes(message: u32) -> bool {
+    matches!(
+        message,
+        0x0000
+            | 0x0003
+            | 0x0005
+            | 0x000d
+            | 0x000e
+            | 0x0033
+            | 0x007f
+            | 0x0305
+            | 0x0308
+            | 0x030d
+            | 0x031a
+    )
+}
+
+/// gala's own messages below WM_USER (user32's GALA_MENU,
+/// GALA_SETWINDOWPOS, GALA_SHOWWINDOW: another process's menu walk,
+/// SetWindowPos and ShowWindow of the window): UIPI applies to them as to
+/// the functions they stand for, and no filter opens them.
+fn gala_private(message: u32) -> bool {
+    (0x03f0..=0x03ff).contains(&message)
+}
+
+/// UIPI: whether a message from `from` reaches process `to_pid` (at
+/// integrity level `to_level`), its window `hwnd` (0: a thread message):
+/// the same process, a sender of equal or higher level, a message that
+/// always passes, or one the receiver's filters let through (for that
+/// window or process-wide).
+fn passes(r: &Registry, from: Sender, to_pid: u32, to_level: u32, hwnd: u64, message: u32) -> bool {
+    if from.pid == to_pid || from.level >= to_level || always_passes(message) {
+        return true;
+    }
+    !gala_private(message)
+        && r.filters
+            .iter()
+            .any(|f| f.pid == to_pid && f.message == message && (f.hwnd == 0 || f.hwnd == hwnd))
+}
+
+/// ChangeWindowMessageFilterEx (`hwnd` nonzero) and
+/// ChangeWindowMessageFilter (`hwnd` 0: process-wide) for process `pid` at
+/// integrity level `level`: the ExtStatus (CHANGEFILTERSTRUCT's table).
+/// STATUS_ACCESS_DENIED for a process at or below Low or another
+/// process's window, STATUS_INVALID_HANDLE for no window,
+/// STATUS_INVALID_PARAMETER for another action. Messages that always
+/// pass (and gala's own) stay as they are, as documented ("no effect").
+pub fn change_filter(
+    pid: u32,
+    level: u32,
+    hwnd: u64,
+    message: u32,
+    action: u32,
+) -> Result<u32, NtStatus> {
+    if action > MSGFLT_DISALLOW {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    if level <= LOW_LEVEL {
+        return Err(NtStatus::ACCESS_DENIED);
+    }
+    let mut r = REGISTRY.lock();
+    if hwnd != 0 {
+        let owner = r.windows.iter().find(|w| w.hwnd == hwnd).ok_or(NtStatus::INVALID_HANDLE)?.pid;
+        if owner != pid {
+            return Err(NtStatus::ACCESS_DENIED);
+        }
+    }
+    let at = |r: &Registry, h: u64, m: u32| {
+        r.filters.iter().position(|f| f.pid == pid && f.hwnd == h && f.message == m)
+    };
+    if action == MSGFLT_RESET {
+        if hwnd != 0 {
+            r.filters.retain(|f| !(f.pid == pid && f.hwnd == hwnd));
+        }
+        return Ok(MSGFLTINFO_NONE);
+    }
+    let mine = at(&r, hwnd, message);
+    // Allowed above the window: process-wide, or always.
+    let higher = hwnd != 0 && (at(&r, 0, message).is_some() || always_passes(message));
+    if action == MSGFLT_ALLOW {
+        if mine.is_some() {
+            return Ok(MSGFLTINFO_ALREADYALLOWED_FORWND);
+        }
+        if !always_passes(message) && !gala_private(message) {
+            r.filters.try_push(Filter { pid, hwnd, message }).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
+        return Ok(MSGFLTINFO_NONE);
+    }
+    // MSGFLT_DISALLOW.
+    let status = match (higher, mine) {
+        (true, _) => MSGFLTINFO_ALLOWED_HIGHER,
+        (false, Some(_)) => MSGFLTINFO_NONE,
+        (false, None) => MSGFLTINFO_ALREADYDISALLOWED_FORWND,
+    };
+    if let Some(i) = mine {
+        r.filters.remove(i);
+    }
+    Ok(status)
+}
+
+/// The process of window `hwnd` (UIPI's receiver).
+pub fn owner_pid(hwnd: u64) -> Option<u32> {
+    REGISTRY.lock().windows.iter().find(|w| w.hwnd == hwnd).map(|w| w.pid)
+}
+
+/// The process of thread `tid`'s message queue (PostThreadMessage's
+/// receiver).
+pub fn queue_owner(tid: u32) -> Option<u32> {
+    REGISTRY.lock().queues.iter().find(|&&(_, t)| t == tid).map(|&(p, _)| p)
+}
+
+/// UIPI for what is no message (gala's desktop actions on a window): the
+/// caller passes where a message would without the filters (the same
+/// process, or an equal or higher integrity level).
+pub fn may_act_on(from: Sender, to_pid: u32, to_level: u32) -> bool {
+    from.pid == to_pid || from.level >= to_level
 }
 
 /// A message sent to window `hwnd` of process `to_pid`, thread `to_tid`
@@ -275,6 +435,7 @@ static REGISTRY: IrqMutex<Registry> = IrqMutex::new(Registry {
     sent: Vec::new(),
     next_sent: 1,
     queues: Vec::new(),
+    filters: Vec::new(),
 });
 
 /// A message to send (GalaWindowSend): from thread `from_tid` of process
@@ -282,6 +443,9 @@ static REGISTRY: IrqMutex<Registry> = IrqMutex::new(Registry {
 /// output; `now` is the caller's clock (ms).
 pub struct Request {
     pub from_pid: u32,
+    /// The sender's integrity level and the receiver's (UIPI).
+    pub from_level: u32,
+    pub to_level: u32,
     pub from_tid: u32,
     pub hwnd: u64,
     pub message: u32,
@@ -295,7 +459,8 @@ pub struct Request {
 
 /// Queues a sent message for its window's thread: its id and the
 /// receiver's queue event to set. STATUS_INVALID_HANDLE for no window,
-/// STATUS_TIMEOUT for a hung receiver with SEND_ABORT_IF_HUNG.
+/// STATUS_ACCESS_DENIED when UIPI blocks it (`passes`), STATUS_TIMEOUT
+/// for a hung receiver with SEND_ABORT_IF_HUNG.
 pub fn send(req: Request) -> Result<(u64, Option<ObjectRef>), NtStatus> {
     let done = KObject::new(ObjectBody::Event(Event {
         kind: EventType::Notification,
@@ -309,6 +474,10 @@ pub fn send(req: Request) -> Result<(u64, Option<ObjectRef>), NtStatus> {
         .find(|w| w.hwnd == req.hwnd)
         .map(|w| (w.pid, w.tid))
         .ok_or(NtStatus::INVALID_HANDLE)?;
+    let from = Sender { pid: req.from_pid, level: req.from_level };
+    if !passes(&r, from, to_pid, req.to_level, req.hwnd, req.message) {
+        return Err(NtStatus::ACCESS_DENIED);
+    }
     if req.flags & SEND_ABORT_IF_HUNG != 0
         && r.sent.iter().any(|m| {
             m.to_pid == to_pid
@@ -478,9 +647,12 @@ pub fn has_queue(pid: u32, tid: u32) -> Result<(), NtStatus> {
     r.queues.try_push((pid, tid)).map_err(|_| NtStatus::NO_MEMORY)
 }
 
-/// Posts a message to window `hwnd` (any process's); the owner's event
-/// to set (by the caller, outside the lock).
+/// Posts a message from `from` to window `hwnd` (any process's, at
+/// integrity level `to_level`); the owner's event to set (by the caller,
+/// outside the lock). STATUS_ACCESS_DENIED when UIPI blocks it.
 pub fn post(
+    from: Sender,
+    to_level: u32,
     hwnd: u64,
     message: u32,
     wparam: u64,
@@ -488,6 +660,9 @@ pub fn post(
 ) -> Result<Option<ObjectRef>, NtStatus> {
     let mut r = REGISTRY.lock();
     let pid = r.windows.iter().find(|w| w.hwnd == hwnd).ok_or(NtStatus::INVALID_HANDLE)?.pid;
+    if !passes(&r, from, pid, to_level, hwnd, message) {
+        return Err(NtStatus::ACCESS_DENIED);
+    }
     if r.posted.len() >= MAX_POSTED {
         return Err(NtStatus::INSUFFICIENT_RESOURCES);
     }
@@ -497,10 +672,13 @@ pub fn post(
     Ok(r.listeners.iter().find(|(p, _)| *p == pid).map(|(_, e)| e.clone()))
 }
 
-/// Posts a message to thread `tid` (any process's: PostThreadMessage);
-/// its process's event to set. STATUS_INVALID_CID when the thread has no
-/// message queue (or is none).
+/// Posts a message from `from` to thread `tid` (any process's, at
+/// integrity level `to_level`: PostThreadMessage); its process's event to
+/// set. STATUS_INVALID_CID when the thread has no message queue (or is
+/// none), STATUS_ACCESS_DENIED when UIPI blocks it.
 pub fn post_thread(
+    from: Sender,
+    to_level: u32,
     tid: u32,
     message: u32,
     wparam: u64,
@@ -508,6 +686,9 @@ pub fn post_thread(
 ) -> Result<Option<ObjectRef>, NtStatus> {
     let mut r = REGISTRY.lock();
     let pid = r.queues.iter().find(|&&(_, t)| t == tid).ok_or(NtStatus::INVALID_CID)?.0;
+    if !passes(&r, from, pid, to_level, 0, message) {
+        return Err(NtStatus::ACCESS_DENIED);
+    }
     if r.posted.len() >= MAX_POSTED {
         return Err(NtStatus::INSUFFICIENT_RESOURCES);
     }
@@ -564,7 +745,11 @@ pub fn unregister(pid: u32, hwnd: u64) -> Result<(), NtStatus> {
     let mut r = REGISTRY.lock();
     let before = r.windows.len();
     r.windows.retain(|w| !(w.hwnd == hwnd && w.pid == pid));
-    if r.windows.len() == before { Err(NtStatus::INVALID_HANDLE) } else { Ok(()) }
+    if r.windows.len() == before {
+        return Err(NtStatus::INVALID_HANDLE);
+    }
+    r.filters.retain(|f| !(f.pid == pid && f.hwnd == hwnd));
+    Ok(())
 }
 
 /// Any process's window `hwnd`.
@@ -659,6 +844,7 @@ pub fn process_ended(pid: u32) {
         r.posted.retain(|m| m.pid != pid);
         r.listeners.retain(|(p, _)| *p != pid);
         r.queues.retain(|&(p, _)| p != pid);
+        r.filters.retain(|f| f.pid != pid);
         // Its own sends go; sends to it fail (their senders wake).
         abandon_sends(&mut r, |m| m.from_pid == pid);
     }
@@ -670,6 +856,12 @@ pub fn process_ended(pid: u32) {
 pub fn thread_ended(pid: u32, tid: u32) {
     {
         let mut r = REGISTRY.lock();
+        let Registry { windows, filters, .. } = &mut *r;
+        filters.retain(|f| {
+            f.pid != pid
+                || f.hwnd == 0
+                || windows.iter().any(|w| w.hwnd == f.hwnd && !(w.pid == pid && w.tid == tid))
+        });
         r.windows.retain(|w| !(w.pid == pid && w.tid == tid));
         r.posted.retain(|m| !(m.pid == pid && m.tid == tid && m.tid != 0));
         r.queues.retain(|&(p, t)| !(p == pid && t == tid));
@@ -741,8 +933,13 @@ mod tests {
         unregister(901, a).unwrap();
         assert_eq!(children(top, &mut kids), 1);
         // A message posted to its window waits for its owner.
-        assert!(post(b, 0x8001, 7, 9).unwrap().is_none());
-        assert!(matches!(post(a, 0x8001, 0, 0), Err(NtStatus::INVALID_HANDLE)));
+        assert!(
+            post(Sender { pid: 902, level: 0x2000 }, 0x2000, b, 0x8001, 7, 9).unwrap().is_none()
+        );
+        assert!(matches!(
+            post(Sender { pid: 902, level: 0x2000 }, 0x2000, a, 0x8001, 0, 0),
+            Err(NtStatus::INVALID_HANDLE)
+        ));
         let mut got = [Posted::EMPTY; 4];
         assert_eq!(take_posted(902, &mut got), 0);
         assert_eq!(take_posted(901, &mut got), 1);
@@ -782,6 +979,8 @@ mod tests {
     ) -> Request {
         Request {
             from_pid,
+            from_level: 0x2000,
+            to_level: 0x2000,
             from_tid,
             hwnd,
             message,
@@ -799,10 +998,13 @@ mod tests {
         let w = register(911, Info { tid: 5, ..Info::default() }).unwrap();
         let other = register(911, Info { tid: 9, ..Info::default() }).unwrap();
         // PostThreadMessage needs a thread with a queue.
-        assert!(matches!(post_thread(5, 0x8000, 1, 2), Err(NtStatus::INVALID_CID)));
+        assert!(matches!(
+            post_thread(Sender { pid: 912, level: 0x2000 }, 0x2000, 5, 0x8000, 1, 2),
+            Err(NtStatus::INVALID_CID)
+        ));
         has_queue(911, 5).unwrap();
         has_queue(911, 5).unwrap();
-        post_thread(5, 0x8000, 1, 2).unwrap();
+        post_thread(Sender { pid: 912, level: 0x2000 }, 0x2000, 5, 0x8000, 1, 2).unwrap();
         let mut got = [Posted::EMPTY; 2];
         assert_eq!(take_posted(911, &mut got), 1);
         assert_eq!(
@@ -834,7 +1036,10 @@ mod tests {
         thread_ended(911, 5);
         assert!(query(w).is_none() && query(other).is_some());
         assert_eq!(take_reply(912, late).map(|r| r.is_err()), Some(true));
-        assert!(matches!(post_thread(5, 0x8000, 1, 2), Err(NtStatus::INVALID_CID)));
+        assert!(matches!(
+            post_thread(Sender { pid: 912, level: 0x2000 }, 0x2000, 5, 0x8000, 1, 2),
+            Err(NtStatus::INVALID_CID)
+        ));
         assert!(matches!(send(request(912, 1, w, 0x8001, 0, 0)), Err(NtStatus::INVALID_HANDLE)));
         // A message whose sender thread ended is still handled; its reply
         // goes nowhere.
@@ -844,6 +1049,78 @@ mod tests {
         assert!(reply(911, id, 0, Vec::new()).unwrap()[0].is_none());
         assert!(sent_event(912, id).is_none());
         process_ended(911);
+    }
+
+    /// UIPI: a lower integrity level reaches a higher one's windows only
+    /// with the messages that always pass and those its filters allow
+    /// (ChangeWindowMessageFilterEx, ChangeWindowMessageFilter's table of
+    /// ExtStatus values).
+    #[test]
+    fn uipi_blocks_lower_senders_but_what_filters_allow() {
+        const MEDIUM: u32 = 0x2000;
+        const WM_APP: u32 = 0x8000;
+        let w = register(931, Info { tid: 6, ..Info::default() }).unwrap();
+        let v = register(931, Info { tid: 6, ..Info::default() }).unwrap();
+        has_queue(931, 6).unwrap();
+        let low = Sender { pid: 932, level: LOW_LEVEL };
+        let high = Sender { pid: 933, level: 0x3000 };
+        let denied =
+            |r: Result<Option<ObjectRef>, NtStatus>| matches!(r, Err(NtStatus::ACCESS_DENIED));
+        // Lower: blocked, but WM_NULL and WM_GETTEXT; equal or higher, or
+        // the same process: everything.
+        assert!(denied(post(low, MEDIUM, w, WM_APP, 0, 0)));
+        assert!(denied(post_thread(low, MEDIUM, 6, WM_APP, 0, 0)));
+        assert!(post(low, MEDIUM, w, 0, 0, 0).is_ok());
+        assert!(post(high, MEDIUM, w, WM_APP, 0, 0).is_ok());
+        assert!(post(Sender { pid: 931, level: 0 }, MEDIUM, w, WM_APP, 0, 0).is_ok());
+        let mut req = request(932, 1, w, WM_APP, 0, 0);
+        req.from_level = LOW_LEVEL;
+        req.to_level = MEDIUM;
+        assert!(matches!(send(req), Err(NtStatus::ACCESS_DENIED)));
+        let mut req = request(932, 1, w, 0x000d, 8, 0);
+        req.from_level = LOW_LEVEL;
+        req.to_level = MEDIUM;
+        assert!(send(req).is_ok());
+        // gala's SetWindowPos message is never let through.
+        assert!(denied(post(low, MEDIUM, w, 0x03f1, 0, 0)));
+        // A window's filter: that window only; the ExtStatus values.
+        let ex = |h, m, a| change_filter(931, MEDIUM, h, m, a);
+        assert_eq!(ex(w, WM_APP, MSGFLT_ALLOW), Ok(MSGFLTINFO_NONE));
+        assert_eq!(ex(w, WM_APP, MSGFLT_ALLOW), Ok(MSGFLTINFO_ALREADYALLOWED_FORWND));
+        assert!(post(low, MEDIUM, w, WM_APP, 0, 0).is_ok());
+        assert!(denied(post(low, MEDIUM, v, WM_APP, 0, 0)));
+        assert!(denied(post_thread(low, MEDIUM, 6, WM_APP, 0, 0)));
+        assert_eq!(ex(w, WM_APP, MSGFLT_DISALLOW), Ok(MSGFLTINFO_NONE));
+        assert_eq!(ex(w, WM_APP, MSGFLT_DISALLOW), Ok(MSGFLTINFO_ALREADYDISALLOWED_FORWND));
+        assert!(denied(post(low, MEDIUM, w, WM_APP, 0, 0)));
+        assert_eq!(ex(w, 0x03f1, MSGFLT_ALLOW), Ok(MSGFLTINFO_NONE));
+        assert!(denied(post(low, MEDIUM, w, 0x03f1, 0, 0)));
+        // Process-wide (ChangeWindowMessageFilter): every window and the
+        // threads; a window cannot take it back (ALLOWED_HIGHER).
+        assert_eq!(ex(0, WM_APP + 1, MSGFLT_ALLOW), Ok(MSGFLTINFO_NONE));
+        assert!(post(low, MEDIUM, v, WM_APP + 1, 0, 0).is_ok());
+        assert!(post_thread(low, MEDIUM, 6, WM_APP + 1, 0, 0).is_ok());
+        assert_eq!(ex(v, WM_APP + 1, MSGFLT_DISALLOW), Ok(MSGFLTINFO_ALLOWED_HIGHER));
+        assert!(post(low, MEDIUM, v, WM_APP + 1, 0, 0).is_ok());
+        assert_eq!(ex(v, 0x000d, MSGFLT_DISALLOW), Ok(MSGFLTINFO_ALLOWED_HIGHER));
+        // MSGFLT_RESET drops the window's own filter.
+        assert_eq!(ex(w, WM_APP + 2, MSGFLT_ALLOW), Ok(MSGFLTINFO_NONE));
+        assert_eq!(ex(w, 0, MSGFLT_RESET), Ok(MSGFLTINFO_NONE));
+        assert!(denied(post(low, MEDIUM, w, WM_APP + 2, 0, 0)));
+        // Low (or lower) may not change filters; nor another process's
+        // window; a window must exist; actions are 0..=2.
+        assert_eq!(change_filter(931, LOW_LEVEL, w, WM_APP, 1), Err(NtStatus::ACCESS_DENIED));
+        assert_eq!(change_filter(932, MEDIUM, w, WM_APP, 1), Err(NtStatus::ACCESS_DENIED));
+        assert_eq!(change_filter(931, MEDIUM, 0x10, WM_APP, 1), Err(NtStatus::INVALID_HANDLE));
+        assert_eq!(change_filter(931, MEDIUM, w, WM_APP, 3), Err(NtStatus::INVALID_PARAMETER));
+        // The desktop's actions: no filters, levels only.
+        assert!(!may_act_on(low, 931, MEDIUM));
+        assert!(may_act_on(high, 931, MEDIUM));
+        assert!(may_act_on(Sender { pid: 931, level: 0 }, 931, MEDIUM));
+        assert_eq!((owner_pid(w), queue_owner(6)), (Some(931), Some(931)));
+        // The process's end drops its filters with its windows.
+        process_ended(931);
+        assert!(REGISTRY.lock().filters.iter().all(|f| f.pid != 931));
     }
 
     /// More waiting senders than one wake round: every one wakes (the

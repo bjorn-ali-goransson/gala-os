@@ -1047,6 +1047,10 @@ pub extern "system" fn IsWindowVisible(hwnd: Hwnd) -> i32 {
 /// ShowWindow: whether it was visible before.
 #[unsafe(no_mangle)]
 pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
+    if hwnd != 0 && index_of(hwnd).is_none() && crate::foreign::remote(hwnd).is_some() {
+        // Another process's window: it shows it (GALA_SHOWWINDOW).
+        return SendMessageW(hwnd, crate::tree::GALA_SHOWWINDOW, cmd as u32 as usize, 0) as i32;
+    }
     let Some(i) = index_of(hwnd) else { return 0 };
     let show = cmd != 0; // SW_HIDE
     if window(hwnd).is_some_and(|w| w.parent != 0) {
@@ -1857,7 +1861,10 @@ pub extern "system" fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam:
 /// message user32 itself answers on any thread.
 fn handled_here(hwnd: Hwnd, msg: u32) -> bool {
     window(hwnd).is_some_and(|w| {
-        w.thread == me() || msg == crate::track::GALA_MENU || msg == crate::tree::GALA_SETWINDOWPOS
+        w.thread == me()
+            || msg == crate::track::GALA_MENU
+            || msg == crate::tree::GALA_SETWINDOWPOS
+            || msg == crate::tree::GALA_SHOWWINDOW
     })
 }
 
@@ -1885,6 +1892,10 @@ pub(crate) fn send_with(
     // Another process's SetWindowPos of our window: user32's own too.
     if msg == crate::tree::GALA_SETWINDOWPOS && window(hwnd).is_some() {
         return Ok(crate::tree::set_window_pos_message(hwnd, lparam));
+    }
+    // And its ShowWindow of our window.
+    if msg == crate::tree::GALA_SHOWWINDOW && window(hwnd).is_some() {
+        return Ok(ShowWindow(hwnd, wparam as u32 as i32) as isize);
     }
     // A window of another thread of ours: its procedure runs on that
     // thread, when it next calls a message function.

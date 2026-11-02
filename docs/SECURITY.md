@@ -12,7 +12,10 @@ S4U and interactive, as sshd makes them, and virtual accounts;
 `profile_test`: LoadUserProfileW, profiles placed at boot). sshd's
 key-authenticated login works (`sshd_login`, 2026-11-01); S5 is done
 (`restricted_test`: PostgreSQL's restricted token, deny-only groups,
-SetTokenInformation, integrity levels and no-write-up). Before S1, gala had the handle half of NT
+SetTokenInformation, integrity levels and no-write-up); S6's UIPI is
+done (`uipi_test`: integrity levels between processes' windows,
+ChangeWindowMessageFilter(Ex); `gala` acts and starts as its caller).
+Before S1, gala had the handle half of NT
 security (each handle carries a granted access mask, mapped through the
 object type's generic mapping, and services check it), and descriptions
 of security data in user mode: advapi32 builds and reads SIDs, ACLs and
@@ -152,6 +155,35 @@ start.
    and Power Users deny-only, privileges deleted, the default DACL
    extended), CheckTokenMembership, SetTokenInformation, mandatory labels
    (no write up). Left: labels on objects low tokens create.
+6. **S6 The desktop's windows** (UIPI done, 2026-11-02; `uipi_test`,
+   `gala_cli_test`): User Interface Privilege Isolation as Microsoft
+   documents it for PostMessage, PostThreadMessage, SendMessage and
+   ChangeWindowMessageFilter(Ex): a process may post or send to another
+   process's windows and threads only at an equal or higher integrity
+   level (its primary token's label; Medium without one), except the
+   messages that always pass (WM_NULL, WM_MOVE, WM_SIZE, WM_GETTEXT,
+   WM_GETTEXTLENGTH, WM_GETHOTKEY, WM_GETICON, WM_RENDERFORMAT,
+   WM_DRAWCLIPBOARD, WM_CHANGECBCHAIN, WM_THEMECHANGED: Microsoft says
+   only "certain messages below WM_USER"; this commonly given list is to
+   verify on Windows) and those the receiver lets through, for one window
+   (ChangeWindowMessageFilterEx) or process-wide
+   (ChangeWindowMessageFilter); a blocked message fails with
+   ERROR_ACCESS_DENIED. SetWindowPos and ShowWindow of another process's
+   window (gala sends them as user32's own messages) are blocked the same
+   way and no filter opens them. Processes at or below Low may not change
+   filters (ERROR_ACCESS_DENIED), nor may anyone change another process's
+   window's. The shell's actions for other programs (GalaDesktopAction:
+   activate, minimize, close, snap, move...) need the same level as the
+   window's process (STATUS_ACCESS_DENIED; `gala` says "access denied",
+   exit 4), while shasha's own mouse and keys act on any window, as
+   Windows' taskbar does. `gala start` (GalaDesktopAction's Start) runs
+   the program under a copy of the caller's primary token, as
+   CreateProcess would; shasha's start menu still starts programs as the
+   boot user. Left: sessions and desktops (gala has one of each: a
+   service in session 0 cannot reach the user's windows on Windows),
+   uiAccess, hooks (SetWindowsHookEx across levels), window handle
+   validation from lower levels (IsWindow, FindWindow see every window).
+
 Then the disk: D1 a virtio-blk driver (done, 2026-11-01: `disk_test`;
 `\\.\PhysicalDrive0` for Administrators and SYSTEM only), D2 a file
 system with descriptors (done, 2026-11-01: with the boot option

@@ -256,6 +256,14 @@ pub(super) fn nt_duplicate_token(call: &mut Call<'_>) -> NtStatus {
         (arg!(call, 3) as u8 != 0, arg!(call, 4) as u32, arg!(call, 5));
     let object = tri!(call.token(h, TOKEN_DUPLICATE));
     let Some(t) = token_of(&object) else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    // DesiredAccess 0: the existing handle's access ("to request the same
+    // access rights as the existing token, specify zero": DuplicateTokenEx).
+    let access = if access == 0 {
+        let entry: HandleEntry = tri!(call.handle(Handle(h)));
+        entry.access
+    } else {
+        access
+    };
     let (attributes, level, qos_effective) = tri!(attributes_and_quality(call, attrs_ptr));
     if level > SECURITY_DELEGATION {
         return NtStatus::INVALID_PARAMETER;

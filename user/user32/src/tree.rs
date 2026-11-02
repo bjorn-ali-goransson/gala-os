@@ -1396,6 +1396,11 @@ pub(crate) fn show_state(hwnd: Hwnd, cmd: i32) {
 /// answers it itself, never the window procedure.
 pub(crate) const GALA_SETWINDOWPOS: u32 = 0x03f1;
 pub(crate) const SETWINDOWPOS_SIZE: usize = 28;
+/// ShowWindow of another process's window: sent to it as GALA_SHOWWINDOW
+/// (wParam the SW_ command); user32 answers it itself (ShowWindow's
+/// result), never the window procedure. UIPI applies (the kernel lets no
+/// filter open gala's messages).
+pub(crate) const GALA_SHOWWINDOW: u32 = 0x03f2;
 
 pub(crate) fn set_window_pos_message(hwnd: Hwnd, lparam: isize) -> isize {
     if lparam == 0 {
