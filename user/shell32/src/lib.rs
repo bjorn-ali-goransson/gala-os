@@ -211,6 +211,30 @@ pub extern "system" fn SHGetFolderPathA(
     S_OK
 }
 
+/// SHGetSpecialFolderPathW(window, path, csidl, create): SHGetFolderPathW's
+/// path (CSIDL_FLAG_CREATE when `create`); TRUE on success.
+#[unsafe(no_mangle)]
+pub extern "system" fn SHGetSpecialFolderPathW(
+    window: usize,
+    path: *mut u16,
+    csidl: i32,
+    create: i32,
+) -> i32 {
+    let flag = if create != 0 { 0x8000 } else { 0 };
+    i32::from(SHGetFolderPathW(window, csidl | flag, 0, 0, path) == S_OK)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SHGetSpecialFolderPathA(
+    window: usize,
+    path: *mut u8,
+    csidl: i32,
+    create: i32,
+) -> i32 {
+    let flag = if create != 0 { 0x8000 } else { 0 };
+    i32::from(SHGetFolderPathA(window, csidl | flag, 0, 0, path) == S_OK)
+}
+
 /// SHGetKnownFolderPath(id, flags, token, *path): the path in memory the
 /// caller frees (CoTaskMemFree; here from the process heap, which gala's
 /// CoTaskMemFree would free too).

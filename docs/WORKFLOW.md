@@ -390,11 +390,21 @@ to gala's numbers. For where time goes inside the kernel:
 
 ## Prebuilt programs
 
+A program's own configuration lives under `user/<program>/` (e.g.
+`user/filezilla_server/fzs`): a directory module (`dir/` path) becomes a
+tree on C:, read-only unless its directory is in `WRITABLE_TREES`
+(programs that rewrite their settings, such as FileZilla Server, need
+that). To see the configuration a program writes by default, run it and
+then `busybox.exe cat` on the files (`run=a.exe,busybox.exe
+args=...,cat%20C:/dir/file`; gala's cmd has no `type` or `&` lists).
+
 Unmodified releases (Caddy, the JDK) are not kept in the repository: the
 `PREBUILT` table in xtask pins each one (URL, SHA-256, the files used
 from its zip), and a scenario module path `target/prebuilt/<name>/<file>`
 makes xtask download, check and unzip it on first use (curl, sha256sum,
-unzip, or msiextract for an MSI; one fetch at a time, since ISOs are built in parallel, and a
+unzip, msiextract for an MSI, 7-Zip for an NSIS installer or 7-Zip
+self-extractor, and for a Chocolatey `.nupkg` the installer in its
+`tools/` unpacked with 7-Zip; one fetch at a time, since ISOs are built in parallel, and a
 `.unpacked-<sha256>` marker so an interrupted unpack is redone). To try a new prebuilt program before writing its scenario:
 `cargo xtask iso --file path/to/app.exe run=app.exe "args=..."` and boot
 it with QEMU (`-cpu max`), then follow the ledger and the program's own

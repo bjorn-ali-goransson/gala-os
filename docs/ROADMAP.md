@@ -499,7 +499,7 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    times: not a race - the scenario's 120 s limit killed the VM, which
    psql saw as a closed connection; it needs ~45 s alone, so it joined
    SLOW_SCENARIOS), smpsched_test (check 0x12, a timing check).
-   Seen twice (2026-11-01 and 11-02, full suite under load): rtl_test
+   Seen three times (2026-11-01, twice on 11-02; full suite under load): rtl_test
    timed out with its thread spinning in NtYieldExecution after the
    other one ended; it passes alone. To hunt (docs/WORKFLOW.md, "Hunting a rare
    hang"); log in the session's notes: target/failed/rtl_test.log.
@@ -1282,9 +1282,20 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       address requirements Cygwin's mmap and stacks use), ProcessVmCounters,
       then fork. The `bin\bash.exe` launcher (exit 1) is still to look at.
    6. FileZilla: the client is a GUI program (wxWidgets), out of reach
-      until gala has windows. FileZilla Server (mingw-built, a service)
-      is a candidate, but its download page only hands out links to
-      browsers, so the installer has to be supplied by hand.
+      until gala has windows. FileZilla Server 1.12.6 runs (2026-11-02;
+      the `filezilla_server` scenario): the official installer comes from
+      Chocolatey's package (the project's site hands links only to
+      browsers); it needed msvcrt's _findfirst64/_findnext64/_spawnv,
+      shell32's SHGetSpecialFolderPathA/W, mpr's WNetAddConnection2W/
+      WNetCancelConnection2W and ws2_32's WSAWaitForMultipleEvents
+      (msvcrt_test, user32_test, winsock_async_test). With gala's test
+      configuration (FTP on port 7, plain FTP allowed, a user `gala`
+      without a password, home C:\ftp) it generates its TLS
+      certificates, serves the admin port and FTP, and the host logs on
+      (greeting, USER, PWD, QUIT). Its IPv6 listeners retry every second
+      (gala has no IPv6) and its update check cannot resolve names. Next:
+      FileZilla (the client) connects to it inside gala and lists C:\ftp;
+      then its console in a window.
 
 ## Later
 Self-hosting: building gala's test programs (and then Nginx) on gala

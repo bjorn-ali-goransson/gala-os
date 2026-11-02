@@ -2097,6 +2097,9 @@ pub extern "system" fn WSAAccept(
     accept(s, addr, len)
 }
 
+const WSA_INVALID_PARAMETER: u32 = 87;
+const WSA_INVALID_HANDLE: u32 = 6;
+
 /// IOCTL_AFD_EVENT_SELECT and IOCTL_AFD_GET_EVENTS.
 const IOCTL_AFD_EVENT_SELECT: u32 = 0x12087;
 const IOCTL_AFD_GET_EVENTS: u32 = 0x1208b;
@@ -2134,6 +2137,39 @@ pub extern "system" fn WSAEventSelect(s: usize, event: usize, events: i32) -> i3
         Ok(_) => 0,
         Err(e) => e,
     }
+}
+
+/// WSAWaitForMultipleEvents(count, events, all, ms, alertable): a wait on
+/// the event objects (WSA_WAIT_EVENT_0 + i, WSA_WAIT_TIMEOUT,
+/// WSA_WAIT_IO_COMPLETION; WSA_WAIT_FAILED with the error set).
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAWaitForMultipleEvents(
+    count: u32,
+    events: *const usize,
+    all: i32,
+    ms: u32,
+    alertable: i32,
+) -> u32 {
+    #[link(name = "kernel32", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn WaitForMultipleObjectsEx(
+            count: u32,
+            handles: *const usize,
+            all: i32,
+            ms: u32,
+            alertable: i32,
+        ) -> u32;
+    }
+    if count == 0 || count > 64 || events.is_null() {
+        fail(WSA_INVALID_PARAMETER);
+        return 0xffff_ffff;
+    }
+    // SAFETY: the caller's array of `count` event handles.
+    let r = unsafe { WaitForMultipleObjectsEx(count, events, all, ms, alertable) };
+    if r == 0xffff_ffff {
+        fail(WSA_INVALID_HANDLE);
+    }
+    r
 }
 
 /// WSAEnumNetworkEvents(s, hEventObject, lpNetworkEvents): the network

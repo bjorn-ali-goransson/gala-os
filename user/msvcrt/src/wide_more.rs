@@ -514,12 +514,12 @@ pub struct FindData {
 /// struct _wfinddata64_t.
 #[repr(C)]
 pub struct WFindData64 {
-    attrib: u32,
-    time_create: i64,
-    time_access: i64,
-    time_write: i64,
-    size: i64,
-    name: [u16; 260],
+    pub(crate) attrib: u32,
+    pub(crate) time_create: i64,
+    pub(crate) time_access: i64,
+    pub(crate) time_write: i64,
+    pub(crate) size: i64,
+    pub(crate) name: [u16; 260],
 }
 
 fn fill(out: *mut WFindData64, d: &FindData) {

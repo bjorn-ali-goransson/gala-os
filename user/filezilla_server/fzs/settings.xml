@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<filezilla xmlns:fz="https://filezilla-project.org" xmlns="https://filezilla-project.org" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" fz:product_flavour="standard" fz:product_version="1.12.6">
+	<ftp_server>
+		<listener>
+			<address>0.0.0.0</address>
+			<port>7</port>
+			<tls_mode>0</tls_mode>
+		</listener>
+	</ftp_server>
+	<admin>
+		<local_port>14148</local_port>
+		<enable_local_ipv6>false</enable_local_ipv6>
+	</admin>
+	<update_checker>
+		<allowed_type>0</allowed_type>
+		<frequency>0</frequency>
+	</update_checker>
+</filezilla>

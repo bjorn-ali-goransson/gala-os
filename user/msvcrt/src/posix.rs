@@ -572,6 +572,70 @@ pub extern "C" fn _getche() -> i32 {
     c
 }
 
+/// _spawnv(mode, cmdname, argv): _spawnve with our environment.
+#[unsafe(no_mangle)]
+pub extern "C" fn _spawnv(mode: i32, cmdname: *const u8, argv: *const *const u8) -> isize {
+    _spawnve(mode, cmdname, argv, core::ptr::null())
+}
+
+/// struct __finddata64_t: _wfinddata64_t with the name in the ANSI code
+/// page (UTF-8 on gala).
+#[repr(C)]
+pub struct FindData64 {
+    attrib: u32,
+    time_create: i64,
+    time_access: i64,
+    time_write: i64,
+    size: i64,
+    name: [u8; 260],
+}
+
+fn found(w: &crate::wide_more::WFindData64, out: *mut FindData64) -> bool {
+    let n = w.name.iter().position(|&c| c == 0).unwrap_or(w.name.len());
+    // SAFETY: the caller's structure.
+    unsafe {
+        (*out).attrib = w.attrib;
+        (*out).time_create = w.time_create;
+        (*out).time_access = w.time_access;
+        (*out).time_write = w.time_write;
+        (*out).size = w.size;
+        narrow(&w.name[..n], (*out).name.as_mut_ptr(), 260).is_some()
+    }
+}
+
+/// _findfirst64: _wfindfirst64 for an ANSI pattern.
+#[unsafe(no_mangle)]
+pub extern "C" fn _findfirst64(pattern: *const u8, out: *mut FindData64) -> isize {
+    let mut buf = [0u16; PATH];
+    let Some(w) = wide(pattern, &mut buf) else {
+        set_errno(EINVAL);
+        return -1;
+    };
+    // SAFETY: zeroed is a valid _wfinddata64_t.
+    let mut data: crate::wide_more::WFindData64 = unsafe { core::mem::zeroed() };
+    let h = crate::wide_more::_wfindfirst64(w, &mut data);
+    if h != -1 && !found(&data, out) {
+        crate::wide_more::_findclose(h);
+        set_errno(EINVAL);
+        return -1;
+    }
+    h
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _findnext64(h: isize, out: *mut FindData64) -> i32 {
+    // SAFETY: as above.
+    let mut data: crate::wide_more::WFindData64 = unsafe { core::mem::zeroed() };
+    if crate::wide_more::_wfindnext64(h, &mut data) != 0 {
+        return -1;
+    }
+    if !found(&data, out) {
+        set_errno(EINVAL);
+        return -1;
+    }
+    0
+}
+
 /// _spawnvp(mode, cmdname, argv): _spawnve with our environment, the
 /// program searched for (with ".exe" if it has no extension) in the
 /// current directory and PATH, as SearchPath does.

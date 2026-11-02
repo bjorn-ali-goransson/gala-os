@@ -52,3 +52,24 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
         core::hint::spin_loop();
     }
 }
+
+const ERROR_NO_NETWORK: u32 = 1222;
+
+/// WNetAddConnection2W(resource, password, user, flags): gala has no
+/// network provider (ERROR_NO_NETWORK).
+#[unsafe(no_mangle)]
+pub extern "system" fn WNetAddConnection2W(
+    _resource: *const u8,
+    _password: *const u16,
+    _user: *const u16,
+    _flags: u32,
+) -> u32 {
+    ERROR_NO_NETWORK
+}
+
+/// WNetCancelConnection2W(name, flags, force): nothing is connected
+/// (ERROR_NOT_CONNECTED).
+#[unsafe(no_mangle)]
+pub extern "system" fn WNetCancelConnection2W(_name: *const u16, _flags: u32, _force: i32) -> u32 {
+    ERROR_NOT_CONNECTED
+}

@@ -36,6 +36,7 @@
 #include <io.h>
 #include <fcntl.h>
 #include <direct.h>
+#include <process.h>
 #include <float.h>
 #include <errno.h>
 #include <math.h>
@@ -195,6 +196,15 @@ static void filezilla_checks(void) {
     CHECK(_findclose(h) == 0);
     errno = 0;
     CHECK(_wfindfirst64(L"fz_dir\\*.none", &found) == -1 && errno == ENOENT);
+    /* The ANSI forms. */
+    struct __finddata64_t afound;
+    h = _findfirst64("fz_dir\\t*.txt", &afound);
+    CHECK(h != -1 && strcmp(afound.name, "two.txt") == 0 && afound.size == 0);
+    CHECK(_findnext64(h, &afound) == -1 && errno == ENOENT && _findclose(h) == 0);
+    /* _spawnv: a program that is not there. */
+    const char *spawn_args[] = {"nothing-here.exe", NULL};
+    errno = 0;
+    CHECK(_spawnv(_P_WAIT, "C:\\nothing-here.exe", spawn_args) == -1 && errno == ENOENT);
     remove("fz_dir\\one.txt");
     remove("fz_dir\\two.txt");
     CHECK(_wrmdir(L"fz_dir") == 0);

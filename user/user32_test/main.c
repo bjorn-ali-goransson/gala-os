@@ -808,6 +808,11 @@ static void item_ids(void) {
     WCHAR want[MAX_PATH], got[MAX_PATH];
     CHECK(SHGetSpecialFolderLocation(NULL, CSIDL_APPDATA, &pidl) == S_OK && pidl != NULL);
     CHECK(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, want) == S_OK);
+    char want_a[MAX_PATH], got_a[MAX_PATH];
+    CHECK(SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, want_a) == S_OK);
+    CHECK(SHGetSpecialFolderPathA(NULL, got_a, CSIDL_APPDATA, FALSE) && strcmp(got_a, want_a) == 0);
+    WCHAR got_w[MAX_PATH];
+    CHECK(SHGetSpecialFolderPathW(NULL, got_w, CSIDL_APPDATA, FALSE) && wcscmp(got_w, want) == 0);
     CHECK(SHGetPathFromIDListW(pidl, got) && wcscmp(got, want) == 0);
     CoTaskMemFree(pidl);
     CHECK(SHGetSpecialFolderLocation(NULL, CSIDL_DESKTOP, &pidl) == S_OK && pidl->mkid.cb == 0);
@@ -833,6 +838,7 @@ static void wnet(void) {
     CHECK(WNetGetConnectionW(L"C:", remote, &n) == ERROR_NOT_CONNECTED);
     n = MAX_PATH;
     CHECK(WNetGetConnectionW(L"nothing", remote, &n) == ERROR_BAD_DEVICE);
+    CHECK(WNetCancelConnection2W(L"Z:", 0, FALSE) == ERROR_NOT_CONNECTED);
 }
 
 int main(void) {

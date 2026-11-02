@@ -162,6 +162,13 @@ unsafe extern "system" {
     fn connect(s: Socket, addr: *const SockaddrIn, len: i32) -> i32;
     fn WSAEventSelect(s: Socket, event: Handle, events: i32) -> i32;
     fn WSAEnumNetworkEvents(s: Socket, event: Handle, out: *mut i32) -> i32;
+    fn WSAWaitForMultipleEvents(
+        count: u32,
+        events: *const Handle,
+        all: Bool,
+        ms: u32,
+        alertable: Bool,
+    ) -> u32;
     fn accept(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> Socket;
     fn getsockname(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> i32;
     fn setsockopt(s: Socket, level: i32, name: i32, value: *const u8, len: i32) -> i32;
@@ -605,8 +612,14 @@ fn run() -> Result<(), u32> {
         c.eq(WSAEventSelect(a3, ev, FD_READ | FD_CLOSE) as u64, 0)?;
         let mut one = *b"x";
         let mut sb = WsaBuf { len: 1, buf: one.as_mut_ptr() };
+        // WSAWaitForMultipleEvents: WSA_WAIT_TIMEOUT (258) before, the
+        // event's index (WSA_WAIT_EVENT_0 + 1) once set.
+        let other = CreateEventW(core::ptr::null_mut(), 1, 0, core::ptr::null());
+        let both = [other, ev];
+        c.eq(WSAWaitForMultipleEvents(2, both.as_ptr(), 0, 0, 0).into(), 258)?;
         c.eq(WSASend(c3, &mut sb, 1, &mut bytes, 0, core::ptr::null_mut(), 0) as u64, 0)?;
-        c.eq(WaitForSingleObject(ev, 5000).into(), 0)?;
+        c.eq(WSAWaitForMultipleEvents(2, both.as_ptr(), 0, 5000, 0).into(), 1)?;
+        CloseHandle(other);
         c.eq(WSAEnumNetworkEvents(a3, ev, ne.as_mut_ptr()) as u64, 0)?;
         c.ok(ne[0] & FD_READ != 0, ne[0] as u64)?;
         let mut rb = WsaBuf { len: 16, buf: rbuf2.as_mut_ptr() };

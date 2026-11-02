@@ -163,6 +163,19 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["*.exe", "*.dll", "resources"],
         excludes: &["$PLUGINSDIR", "uninstall.exe"],
     },
+    // FileZilla Server 1.12.6 for 64-bit Windows: the official installer,
+    // as Chocolatey's package carries it (the project's site hands out
+    // download links only to browsers). The package's SHA-256 is the one
+    // Scoop's manifest pins; the installer inside is the project's
+    // (SHA-256 40b1526d...63ba, in the package's VERIFICATION.txt). An
+    // NSIS installer, read by 7-Zip: the server, its tools and DLLs.
+    Prebuilt {
+        name: "filezilla-server",
+        url: "https://packages.chocolatey.org/filezilla.server.1.12.6.nupkg",
+        checksum: "af04bfcc64aa7140ad92cd9f602f52714d1ffcee5cc1803e3c80c45ac019fe39",
+        members: &["*.exe", "*.dll"],
+        excludes: &["$PLUGINSDIR", "uninstall.exe"],
+    },
     // SQL Server 2022 Express LocalDB 16.0.1000.6 (SqlLocalDB.msi).
     // Microsoft publishes no checksum for it: the SHA-256 is the one we
     // measured (ROADMAP). Its license allows use to design, develop and
@@ -304,7 +317,7 @@ const USER_DLLS: &[Dll] = &[
 
 /// Directory trees shipped writable (`tarw:`): data a program changes, as
 /// an installer leaves it (SQL Server's databases).
-const WRITABLE_TREES: &[&str] = &["sql/data"];
+const WRITABLE_TREES: &[&str] = &["sql/data", "fzs", "ftp"];
 
 /// Extra boot modules per scenario: (scenario, built DLL file or repository
 /// path, directory on C: that the kernel puts it in, passed as the module
@@ -915,6 +928,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("filezilla", "mpr.dll", "Windows/System32"),
     ("filezilla", "msimg32.dll", "Windows/System32"),
     ("filezilla", "target/prebuilt/filezilla/", "filezilla"),
+    ("filezilla", "target/prebuilt/filezilla-server/", "filezilla-server"),
+    ("filezilla", "user/filezilla_server/fzs/", "fzs"),
+    ("filezilla", "user/filezilla_server/ftp/", "ftp"),
     ("mingit", "ntdll.dll", "Windows/System32"),
     ("mingit", "kernel32.dll", "Windows/System32"),
     ("mingit", "advapi32.dll", "Windows/System32"),
@@ -1887,9 +1903,39 @@ fn fetch_prebuilt(path: &str) -> Result {
         let _ = fs::remove_file(&zip);
         return Err(format!("{}: SHA-256 mismatch ({sum})", p.url));
     }
+    // A Chocolatey package (a zip) that carries the installer in tools/:
+    // that installer is the archive.
+    let zip = if p.url.ends_with(".nupkg") {
+        let inner = dir.join("nupkg");
+        let _ = fs::remove_dir_all(&inner);
+        run_cmd(
+            Command::new("unzip")
+                .args(["-q", "-o"])
+                .arg(&zip)
+                .arg("tools/*.exe")
+                .arg("-d")
+                .arg(&inner),
+        )?;
+        let _ = fs::remove_file(&zip);
+        let tools = inner.join("tools");
+        let exe = fs::read_dir(&tools)
+            .map_err(|e| format!("reading {tools:?}: {e}"))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .find(|p| p.extension().is_some_and(|x| x == "exe"))
+            .ok_or(format!("{}: no installer in tools/", p.url))?;
+        let moved = dir.join("download.exe");
+        fs::rename(&exe, &moved).map_err(|e| format!("moving {exe:?}: {e}"))?;
+        let _ = fs::remove_dir_all(&inner);
+        moved
+    } else {
+        zip
+    };
     if p.url.ends_with(".msi") {
         unpack_msi(p, &zip, &dir)?;
-    } else if p.url.ends_with(".7z.exe") || p.url.ends_with("-setup.exe") {
+    } else if p.url.ends_with(".7z.exe")
+        || p.url.ends_with("-setup.exe")
+        || p.url.ends_with(".nupkg")
+    {
         // A 7-Zip self-extracting archive (Git for Windows' PortableGit) or
         // an NSIS installer (FileZilla): 7-Zip reads it without running it.
         // Members are directories or wildcards.
@@ -2073,6 +2119,9 @@ enum NetClient {
     SshPassword,
     /// The host's psql runs `select 40+2` (`psql_client`).
     Psql,
+    /// Logs on to an FTP server as `gala` and asks for the directory
+    /// (`ftp_client`: the control connection only).
+    Ftp,
 }
 
 /// Scenarios that get a virtio-net card on QEMU's user-mode network, with
@@ -2091,6 +2140,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("sshd_login", "Server listening on", NetClient::Ssh),
     ("sshd_password", "Server listening on", NetClient::SshPassword),
     ("postgres", "database system is ready to accept connections", NetClient::Psql),
+    ("filezilla_server", "[FTP Server] Listening on 0.0.0.0:7", NetClient::Ftp),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",
@@ -2854,6 +2904,17 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["Success. You can now start the database server", "xtask: net client: psql ok"],
     },
     Scenario {
+        // FileZilla Server 1.12.6, a console program, with its settings in
+        // C:\fzs (user/filezilla_server: FTP on port 7, plain FTP allowed,
+        // a user `gala` without a password whose home is C:\ftp); it
+        // serves until stopped. The host logs on and lists nothing more
+        // (QEMU forwards one port: no data connections).
+        name: "filezilla_server",
+        cmdline: "qemu_exit run=filezilla-server/filezilla-server.exe args=--config-dir%20C:/fzs",
+        exit_status: XTASK_STOPS,
+        expect: &["xtask: net client: ftp ok"],
+    },
+    Scenario {
         // W3: FileZilla 3.69.3's SFTP engine (PuTTY's psftp adapted),
         // unmodified and headless: its version report, as psftp -V prints
         // it.
@@ -3504,6 +3565,7 @@ fn events_flag() -> String {
 const MODULE_SETS: &[(&str, &str)] = &[
     ("dotnet_info", "dotnet"),
     ("fzsftp", "filezilla"),
+    ("filezilla_server", "filezilla"),
     ("dotnet_hello", "dotnet"),
     ("pwsh_hello", "pwsh"),
     ("sqllocaldb_persist", "sqllocaldb"),
@@ -4053,6 +4115,7 @@ fn run_vm(
                 NetClient::Ssh => ssh_client(port, false),
                 NetClient::SshPassword => ssh_client(port, true),
                 NetClient::Psql => psql_client(port),
+                NetClient::Ftp => ftp_client(port),
             }));
         }
         if stop_after_client && client.as_ref().is_some_and(|c| c.is_finished()) {
@@ -4099,6 +4162,7 @@ fn run_vm(
                     NetClient::Tls => "tls",
                     NetClient::Ssh | NetClient::SshPassword => "ssh",
                     NetClient::Psql => "psql",
+                    NetClient::Ftp => "ftp",
                     _ => "http",
                 }
             ),
@@ -4660,6 +4724,64 @@ fn psql_client(port: u16) -> Result {
         out.status.code(),
         String::from_utf8_lossy(&out.stderr)
     ))
+}
+
+/// The host side of `filezilla_server`: the FTP control connection (RFC
+/// 959): the greeting (220), USER gala (230 at once: no password, or 331
+/// then PASS), PWD (257 "/"), QUIT (221).
+fn ftp_client(port: u16) -> Result {
+    use std::io::{BufRead, BufReader, Write};
+    let stream = (0..60)
+        .find_map(|_| {
+            std::net::TcpStream::connect(("127.0.0.1", port))
+                .map_err(|_| thread::sleep(Duration::from_millis(500)))
+                .ok()
+        })
+        .ok_or("connect: refused for 30 s")?;
+    stream.set_read_timeout(Some(Duration::from_secs(60))).map_err(|e| e.to_string())?;
+    let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(stream);
+    // A reply: its code and last line (multi-line replies end with "ddd ").
+    let mut reply = || -> std::result::Result<(u32, String), String> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).map_err(|e| format!("read: {e}"))? == 0 {
+                return Err("connection closed".into());
+            }
+            let b = line.as_bytes();
+            if b.len() >= 4 && b[..3].iter().all(u8::is_ascii_digit) && b[3] == b' ' {
+                return Ok((line[..3].parse().unwrap_or(0), line.trim_end().to_string()));
+            }
+        }
+    };
+    let (code, text) = reply()?;
+    if code != 220 {
+        return Err(format!("greeting: {text}"));
+    }
+    let mut send = |cmd: &str| {
+        writer.write_all(format!("{cmd}\r\n").as_bytes()).map_err(|e| format!("send: {e}"))
+    };
+    send("USER gala")?;
+    let (mut code, mut text) = reply()?;
+    if code == 331 {
+        send("PASS gala")?;
+        (code, text) = reply()?;
+    }
+    if code != 230 {
+        return Err(format!("login: {text}"));
+    }
+    send("PWD")?;
+    let (code, text) = reply()?;
+    if code != 257 || !text.contains("\"/\"") {
+        return Err(format!("PWD: {text}"));
+    }
+    send("QUIT")?;
+    let (code, text) = reply()?;
+    if code != 221 {
+        return Err(format!("QUIT: {text}"));
+    }
+    Ok(())
 }
 
 /// galatest's password (user/access_test/access_test.regseed has its hash).
