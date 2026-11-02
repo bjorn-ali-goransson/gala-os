@@ -451,6 +451,41 @@ pub extern "system" fn GetClassNameA(hwnd: Hwnd, buf: *mut u8, n: i32) -> i32 {
     k as i32
 }
 
+/// Whether `class` is registered; if not, the ledger gets
+/// `user32.dll!CreateWindowExW(<class>)` (so a program's missing control
+/// classes show by name) and the last error is
+/// ERROR_CANNOT_FIND_WND_CLASS.
+fn class_known(class: *const u16) -> bool {
+    if with(|s| find_class(s, class).is_some()) {
+        return true;
+    }
+    let mut text = [0u8; 96];
+    let prefix = b"user32.dll!CreateWindowExW(";
+    text[..prefix.len()].copy_from_slice(prefix);
+    let mut n = prefix.len();
+    if (class as usize) < 0x1_0000 {
+        for &b in b"atom" {
+            text[n] = b;
+            n += 1;
+        }
+    } else {
+        let mut i = 0;
+        // SAFETY: the caller's NUL-terminated class name.
+        while n < text.len() - 1 && unsafe { *class.add(i) } != 0 {
+            let c = unsafe { *class.add(i) };
+            text[n] = if c < 0x80 { c as u8 } else { b'?' };
+            n += 1;
+            i += 1;
+        }
+    }
+    text[n] = b')';
+    // The atom as the detail (0 for a name: one line per class).
+    let atom = if (class as usize) < 0x1_0000 { class as usize as u64 } else { 0 };
+    unsupported(&text[..=n], atom);
+    set_last_error(1407); // ERROR_CANNOT_FIND_WND_CLASS
+    false
+}
+
 /// A class by name (or atom: a value under 0x10000).
 pub(crate) fn find_class(s: &State, name: *const u16) -> Option<usize> {
     if (name as usize) < 0x1_0000 {
@@ -564,6 +599,9 @@ pub extern "system" fn CreateWindowExW(
     instance: Handle,
     param: *mut c_void,
 ) -> Hwnd {
+    if !class_known(class) {
+        return 0;
+    }
     if style & WS_CHILD != 0 {
         return crate::tree::create_child(
             ex_style,
@@ -872,6 +910,38 @@ pub extern "system" fn ValidateRect(hwnd: Hwnd, _rect: *const [i32; 4]) -> i32 {
         s.windows[i].invalid = false;
         i32::from(s.windows[i].used)
     })
+}
+
+/// RedrawWindow(hwnd, rect, region, flags): RDW_INVALIDATE (1) or
+/// RDW_INTERNALPAINT (2) invalidate the window (with its children, as
+/// InvalidateRect here; RDW_ERASE (4) asks for WM_ERASEBKGND),
+/// RDW_VALIDATE (8) validates it, RDW_UPDATENOW (0x100) paints what is
+/// invalid before returning. The rectangle and region are not kept:
+/// the whole window is (in)validated. A NULL window is the desktop's,
+/// which the compositor repaints itself.
+#[unsafe(no_mangle)]
+pub extern "system" fn RedrawWindow(
+    hwnd: Hwnd,
+    rect: *const [i32; 4],
+    _region: Handle,
+    flags: u32,
+) -> i32 {
+    if hwnd == 0 {
+        return 1;
+    }
+    if window(hwnd).is_none() {
+        return 0;
+    }
+    if flags & 3 != 0 {
+        InvalidateRect(hwnd, rect, i32::from(flags & 4 != 0));
+    }
+    if flags & 8 != 0 {
+        ValidateRect(hwnd, rect);
+    }
+    if flags & 0x100 != 0 {
+        UpdateWindow(hwnd);
+    }
+    1
 }
 
 // ---- Painting ----
@@ -1689,6 +1759,8 @@ pub extern "system" fn GetSystemMetrics(index: i32) -> i32 {
         80 => 1,                 // SM_CMONITORS
         4 => CAPTION,
         5 | 6 => BORDER,
+        11 | 12 | 13 | 14 => 32, // SM_CXICON, SM_CYICON, SM_CXCURSOR, SM_CYCURSOR
+        49 | 50 => 16,           // SM_CXSMICON, SM_CYSMICON
         _ => 0,
     }
 }

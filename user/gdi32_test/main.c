@@ -41,6 +41,12 @@
  *   included; MM_ISOTROPIC shrinks the viewport extent to equal units;
  *   back to MM_TEXT, the extents are 1 again.
  *
+ * - 1-bit DIB sections: 4-byte rows, bottom-up, bit 7 leftmost; pixels
+ *   read as their palette colour, drawing picks the nearer entry;
+ *   Get/SetDIBColorTable read and change the table (the count done).
+ *
+ * - CreateBitmapIndirect: CreateBitmap with the BITMAP's fields.
+ *
  * - Palettes: CreatePalette keeps the entries (GetObjectType OBJ_PAL,
  *   GetObjectW: the entry count as a WORD, GetPaletteEntries,
  *   GetNearestPaletteIndex); SelectPalette returns the previous one (the
@@ -315,6 +321,59 @@ static void mapping(void) {
     DeleteDC(screen);
 }
 
+// 1-bit DIB sections: rows padded to 4 bytes, bottom-up, bit 7 the
+// leftmost pixel; pixels read as their palette colour, and drawing picks
+// the nearer of the two.
+// CreateBitmapIndirect: CreateBitmap with the BITMAP's fields (1-bit rows
+// padded to 16 bits; set bits are white).
+static void bitmap_indirect(void) {
+    BYTE rows[4] = {0x80, 0, 0x01, 0};
+    BITMAP bm = {0, 8, 2, 2, 1, 1, rows};
+    HBITMAP b = CreateBitmapIndirect(&bm);
+    CHECK(b != NULL);
+    BITMAP back;
+    CHECK(GetObjectW(b, sizeof back, &back) == sizeof back && back.bmWidth == 8 && back.bmBitsPixel == 1);
+    HDC dc = CreateCompatibleDC(NULL);
+    HGDIOBJ old = SelectObject(dc, b);
+    CHECK(GetPixel(dc, 0, 0) == RGB(255, 255, 255) && GetPixel(dc, 1, 0) == 0);
+    CHECK(GetPixel(dc, 7, 1) == RGB(255, 255, 255) && GetPixel(dc, 0, 1) == 0);
+    SelectObject(dc, old);
+    DeleteDC(dc);
+    CHECK(DeleteObject(b));
+}
+
+static void mono_dib(void) {
+    struct { BITMAPINFOHEADER h; RGBQUAD c[2]; } bi = {
+        {sizeof(BITMAPINFOHEADER), 16, 2, 1, 1, BI_RGB}, {{0, 0, 255, 0}, {255, 0, 0, 0}}};
+    BYTE *bits = NULL;
+    HBITMAP b = CreateDIBSection(NULL, (BITMAPINFO *)&bi, DIB_RGB_COLORS, (void **)&bits, NULL, 0);
+    CHECK(b != NULL && bits != NULL);
+    BITMAP bm;
+    CHECK(GetObjectW(b, sizeof bm, &bm) == sizeof bm && bm.bmBitsPixel == 1 && bm.bmWidthBytes == 4);
+    CHECK(bm.bmWidth == 16 && bm.bmHeight == 2 && bm.bmBits == bits);
+    HDC dc = CreateCompatibleDC(NULL);
+    HGDIOBJ old = SelectObject(dc, b);
+    // Palette: 0 red, 1 blue. Memory row 0 is the bottom line (y = 1).
+    bits[0] = 0x80;
+    CHECK(GetPixel(dc, 0, 1) == RGB(0, 0, 255) && GetPixel(dc, 1, 1) == RGB(255, 0, 0));
+    CHECK(GetPixel(dc, 0, 0) == RGB(255, 0, 0));
+    // Nearer to blue: bit set; nearer to red: clear.
+    SetPixel(dc, 3, 0, RGB(20, 0, 230));
+    CHECK(bits[4] == 0x10);
+    SetPixel(dc, 0, 1, RGB(200, 30, 0));
+    CHECK(bits[0] == 0);
+    // The colour table: read, then entry 1 changed to green.
+    RGBQUAD q[2];
+    CHECK(GetDIBColorTable(dc, 0, 2, q) == 2 && q[0].rgbRed == 255 && q[1].rgbBlue == 255);
+    RGBQUAD green = {0, 255, 0, 0};
+    CHECK(SetDIBColorTable(dc, 1, 1, &green) == 1);
+    CHECK(GetPixel(dc, 3, 0) == RGB(0, 255, 0));
+    CHECK(GetDIBColorTable(dc, 1, 4, q) == 1 && q[0].rgbGreen == 255);
+    SelectObject(dc, old);
+    DeleteDC(dc);
+    CHECK(DeleteObject(b));
+}
+
 static void palettes(void) {
     struct { WORD version, count; PALETTEENTRY entries[2]; } lp = {0x300, 2, {{255, 0, 0, 0}, {0, 255, 0, 0}}};
     HPALETTE pal = CreatePalette((LOGPALETTE *)&lp);
@@ -392,6 +451,8 @@ int main(void) {
     fonts();
     dibitmap();
     mapping();
+    mono_dib();
+    bitmap_indirect();
     palettes();
     dibs();
     printf("gdi32_test: ok\n");

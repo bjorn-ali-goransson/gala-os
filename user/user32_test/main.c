@@ -4,6 +4,22 @@
  *
  * - LoadBitmapW: a DDB of the screen's depth from an RT_BITMAP resource
  *   (resources.rc, square.bmp); an unknown name gives NULL.
+ * - CreateWindowExW of an unregistered class: NULL,
+ *   ERROR_CANNOT_FIND_WND_CLASS.
+ * - RedrawWindow: RDW_INVALIDATE defers the WM_PAINT, RDW_UPDATENOW sends
+ *   it before returning, RDW_VALIDATE takes the invalidation back.
+ * - RegisterClipboardFormatW: 0xC000..0xFFFF, one per name, case-
+ *   insensitive; GetClipboardFormatNameW (truncated to the buffer; none
+ *   for predefined formats).
+ * - BeginDeferWindowPos/DeferWindowPos/EndDeferWindowPos: nothing moves
+ *   until EndDeferWindowPos, which applies every position and size.
+ * - shell32's SHGetFileInfoW (SHGFI_USEFILEATTRIBUTES): the system image
+ *   lists (small and large icon sizes) and type indexes, type names
+ *   ("File folder", "<EXT> File"), display names, icons.
+ * - Item ID lists: SHGetSpecialFolderLocation (the desktop's is empty),
+ *   SHGetPathFromIDListW (none for CSIDL_DRIVES), SHGetMalloc.
+ * - mpr's WNetGetConnectionW: ERROR_NOT_CONNECTED for C:, ERROR_BAD_DEVICE
+ *   for a name that is no device.
  * - Hooks: SetWindowsHookExW for the calling thread returns a handle;
  *   the newest hook is called first and CallNextHookEx passes on to the
  *   older one (0 after the last). WH_CBT: HCBT_CREATEWND before the
@@ -88,12 +104,19 @@
  *   (SE_DACL_PROTECTED here) change, others are ERROR_INVALID_PARAMETER;
  *   SetSecurityDescriptorSacl sets SE_SACL_PRESENT; SetSecurityDescriptorGroup
  *   sets the group GetSecurityDescriptorGroup returns (SE_GROUP_DEFAULTED).
+ * - ole32's CoLockObjectExternal (a reference while locked) and
+ *   RegisterDragDrop/RevokeDragDrop (a reference while registered;
+ *   DRAGDROP_E_ALREADYREGISTERED, _NOTREGISTERED, _INVALIDHWND).
  * - ole32's OleInitialize (wx initializes OLE first): S_OK, then S_FALSE
  *   on the same thread; OleUninitialize once per call.
  *
  * Prints "user32_test: ok" or exits with the number of the failing
  * check. */
 #include <windows.h>
+#include <shellapi.h>
+#include <winnetwk.h>
+#include <shlobj.h>
+#include <commctrl.h>
 #include <ole2.h>
 #include <shobjidl.h>
 #include <uxtheme.h>
@@ -130,9 +153,11 @@ static LRESULT CALLBACK cbt(int code, WPARAM wparam, LPARAM lparam) {
 static HWND watched;
 static LPARAM last_size, last_move;
 static WPARAM last_command;
-static int destroy_order[4], destroys;
+static int destroy_order[4], destroys, paints;
 static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     wndproc_messages++;
+    if (msg == WM_PAINT)
+        paints++;
     if (hwnd == watched && msg == WM_SIZE)
         last_size = lparam;
     if (hwnd == watched && msg == WM_MOVE)
@@ -213,9 +238,37 @@ static void hooks(void) {
     CHECK(CallNextHookEx(NULL, HC_ACTION, 0, 0) == 0);
 }
 
+/* A drop target that only counts its references. */
+static LONG target_refs = 1;
+static HRESULT STDMETHODCALLTYPE dt_query(IDropTarget *t, REFIID iid, void **out) {
+    *out = t;
+    target_refs++;
+    return S_OK;
+}
+static ULONG STDMETHODCALLTYPE dt_addref(IDropTarget *t) { return ++target_refs; }
+static ULONG STDMETHODCALLTYPE dt_release(IDropTarget *t) { return --target_refs; }
+static HRESULT STDMETHODCALLTYPE dt_enter(IDropTarget *t, IDataObject *d, DWORD k, POINTL p, DWORD *e) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE dt_over(IDropTarget *t, DWORD k, POINTL p, DWORD *e) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE dt_leave(IDropTarget *t) { return S_OK; }
+static HRESULT STDMETHODCALLTYPE dt_drop(IDropTarget *t, IDataObject *d, DWORD k, POINTL p, DWORD *e) { return S_OK; }
+static IDropTargetVtbl dt_vtbl = {dt_query, dt_addref, dt_release, dt_enter, dt_over, dt_leave, dt_drop};
+static IDropTarget drop_target = {&dt_vtbl};
+
 static void ole(void) {
     CHECK(OleInitialize(NULL) == S_OK);
     CHECK(OleInitialize(NULL) == S_FALSE);
+    /* CoLockObjectExternal holds a reference while locked. */
+    CHECK(CoLockObjectExternal((IUnknown *)&drop_target, TRUE, TRUE) == S_OK && target_refs >= 2);
+    CHECK(CoLockObjectExternal((IUnknown *)&drop_target, FALSE, TRUE) == S_OK && target_refs == 1);
+    /* RegisterDragDrop keeps a reference until RevokeDragDrop. */
+    HWND w = CreateWindowExW(0, L"User32TestHooks", L"drop", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    CHECK(RegisterDragDrop(w, &drop_target) == S_OK && target_refs >= 2);
+    CHECK(RegisterDragDrop(w, &drop_target) == DRAGDROP_E_ALREADYREGISTERED);
+    CHECK(RevokeDragDrop(w) == S_OK && target_refs == 1);
+    CHECK(RevokeDragDrop(w) == DRAGDROP_E_NOTREGISTERED);
+    CHECK(RegisterDragDrop((HWND)(UINT_PTR)0x7ff0, &drop_target) == DRAGDROP_E_INVALIDHWND);
+    DestroyWindow(w);
     OleUninitialize();
     OleUninitialize();
 }
@@ -493,9 +546,147 @@ static void bitmaps(void) {
     CHECK(LoadBitmapW(GetModuleHandleW(NULL), L"NOSUCH") == NULL);
 }
 
+// RedrawWindow: RDW_INVALIDATE marks the window for painting (WM_PAINT
+// comes later), RDW_UPDATENOW paints it before returning, RDW_VALIDATE
+// takes the invalidation back.
+static void unknown_class(void) {
+    SetLastError(0);
+    CHECK(CreateWindowExW(0, L"GalaNoSuchClass", L"x", WS_OVERLAPPEDWINDOW, 0, 0, 10, 10, NULL, NULL,
+                          GetModuleHandleW(NULL), NULL) == NULL);
+    CHECK(GetLastError() == ERROR_CANNOT_FIND_WND_CLASS);
+}
+
+static void redraw(void) {
+    HWND w = CreateWindowExW(0, L"User32TestHooks", L"redraw", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 10, 10, 200, 100,
+                             NULL, NULL, GetModuleHandleW(NULL), NULL);
+    CHECK(w != NULL && UpdateWindow(w));
+    int before = paints;
+    CHECK(RedrawWindow(w, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW) && paints == before + 1);
+    CHECK(RedrawWindow(w, NULL, NULL, RDW_INVALIDATE | RDW_ERASE) && paints == before + 1);
+    CHECK(RedrawWindow(w, NULL, NULL, RDW_VALIDATE) && UpdateWindow(w) && paints == before + 1);
+    RECT r = {0, 0, 20, 20};
+    CHECK(RedrawWindow(w, &r, NULL, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW));
+    CHECK(paints == before + 2);
+    CHECK(DestroyWindow(w));
+}
+
+// Registered clipboard formats: one value in 0xC000..0xFFFF per name,
+// case-insensitive; GetClipboardFormatNameW gives the name as first
+// registered; the predefined formats have none.
+static void clipboard_formats(void) {
+    UINT f = RegisterClipboardFormatW(L"Gala Format");
+    CHECK(f >= 0xC000 && f <= 0xFFFF && RegisterClipboardFormatW(L"GALA FORMAT") == f);
+    CHECK(RegisterClipboardFormatW(L"Another") != f);
+    WCHAR name[64];
+    CHECK(GetClipboardFormatNameW(f, name, 64) == 11 && wcscmp(name, L"Gala Format") == 0);
+    CHECK(GetClipboardFormatNameW(f, name, 5) == 4 && wcscmp(name, L"Gala") == 0);
+    CHECK(GetClipboardFormatNameW(CF_TEXT, name, 64) == 0);
+}
+
+// Deferred positioning: DeferWindowPos records, EndDeferWindowPos moves
+// every window at once.
+static void deferred(void) {
+    HWND top = CreateWindowExW(0, L"User32TestHooks", L"defer", WS_OVERLAPPEDWINDOW, 0, 0, 300, 200, NULL, NULL,
+                               GetModuleHandleW(NULL), NULL);
+    HWND a = CreateWindowExW(0, L"User32TestHooks", L"a", WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, top, (HMENU)1,
+                             GetModuleHandleW(NULL), NULL);
+    HWND b = CreateWindowExW(0, L"User32TestHooks", L"b", WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, top, (HMENU)2,
+                             GetModuleHandleW(NULL), NULL);
+    HDWP d = BeginDeferWindowPos(2);
+    CHECK(d != NULL);
+    d = DeferWindowPos(d, a, NULL, 5, 6, 20, 30, SWP_NOZORDER);
+    CHECK(d != NULL);
+    d = DeferWindowPos(d, b, NULL, 40, 50, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
+    CHECK(d != NULL);
+    RECT r;
+    GetClientRect(a, &r);
+    CHECK(r.right == 10); // nothing moved yet
+    CHECK(EndDeferWindowPos(d));
+    POINT p = {0, 0};
+    CHECK(GetClientRect(a, &r) && r.right == 20 && r.bottom == 30);
+    CHECK(MapWindowPoints(a, top, &p, 1) || p.x == 5);
+    CHECK(p.x == 5 && p.y == 6);
+    p.x = p.y = 0;
+    MapWindowPoints(b, top, &p, 1);
+    CHECK(GetClientRect(b, &r) && r.right == 10 && p.x == 40 && p.y == 50);
+    CHECK(DestroyWindow(top));
+}
+
+// shell32's SHGetFileInfoW with SHGFI_USEFILEATTRIBUTES (no file needed):
+// SHGFI_SYSICONINDEX returns the system image list (small: the small
+// icon size) and the type's index in it; folders and files differ;
+// SHGFI_TYPENAME gives "File folder" for a folder and "<EXT> File" for
+// an extension nothing describes; SHGFI_DISPLAYNAME the name part;
+// SHGFI_ICON an icon.
+static void file_info(void) {
+    SHFILEINFOW fi;
+    UINT flags = SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES;
+    HIMAGELIST small = (HIMAGELIST)SHGetFileInfoW(L"a.zzq", FILE_ATTRIBUTE_NORMAL, &fi, sizeof fi, flags);
+    CHECK(small != NULL);
+    int file = fi.iIcon;
+    int cx = 0, cy = 0;
+    CHECK(ImageList_GetIconSize(small, &cx, &cy) && cx == GetSystemMetrics(SM_CXSMICON) && cy == cx);
+    CHECK(file >= 0 && file < ImageList_GetImageCount(small));
+    CHECK((HIMAGELIST)SHGetFileInfoW(L"dir", FILE_ATTRIBUTE_DIRECTORY, &fi, sizeof fi, flags) == small);
+    CHECK(fi.iIcon >= 0 && fi.iIcon != file);
+    HIMAGELIST large = (HIMAGELIST)SHGetFileInfoW(L"a.zzq", FILE_ATTRIBUTE_NORMAL, &fi, sizeof fi,
+                                                  SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES);
+    CHECK(large != NULL && large != small && ImageList_GetIconSize(large, &cx, &cy) && cx == GetSystemMetrics(SM_CXICON));
+    CHECK(SHGetFileInfoW(L"dir", FILE_ATTRIBUTE_DIRECTORY, &fi, sizeof fi, SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES));
+    CHECK(wcscmp(fi.szTypeName, L"File folder") == 0);
+    CHECK(SHGetFileInfoW(L"C:\\x\\a.zzq", FILE_ATTRIBUTE_NORMAL, &fi, sizeof fi,
+                         SHGFI_TYPENAME | SHGFI_DISPLAYNAME | SHGFI_USEFILEATTRIBUTES));
+    CHECK(wcscmp(fi.szTypeName, L"ZZQ File") == 0 && wcscmp(fi.szDisplayName, L"a.zzq") == 0);
+    CHECK(SHGetFileInfoW(L"a.zzq", FILE_ATTRIBUTE_NORMAL, &fi, sizeof fi,
+                         SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES));
+    CHECK(fi.hIcon != NULL && DestroyIcon(fi.hIcon));
+}
+
+// Item ID lists: SHGetSpecialFolderLocation gives a folder's list (the
+// desktop's is empty, the root), SHGetPathFromIDListW its path (none for
+// a virtual folder such as CSIDL_DRIVES); SHGetMalloc the task allocator.
+static void item_ids(void) {
+    LPITEMIDLIST pidl = NULL;
+    WCHAR want[MAX_PATH], got[MAX_PATH];
+    CHECK(SHGetSpecialFolderLocation(NULL, CSIDL_APPDATA, &pidl) == S_OK && pidl != NULL);
+    CHECK(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, want) == S_OK);
+    CHECK(SHGetPathFromIDListW(pidl, got) && wcscmp(got, want) == 0);
+    CoTaskMemFree(pidl);
+    CHECK(SHGetSpecialFolderLocation(NULL, CSIDL_DESKTOP, &pidl) == S_OK && pidl->mkid.cb == 0);
+    CHECK(SHGetFolderPathW(NULL, CSIDL_DESKTOPDIRECTORY, NULL, 0, want) == S_OK);
+    CHECK(SHGetPathFromIDListW(pidl, got) && wcscmp(got, want) == 0);
+    CoTaskMemFree(pidl);
+    CHECK(SHGetSpecialFolderLocation(NULL, CSIDL_DRIVES, &pidl) == S_OK && pidl->mkid.cb != 0);
+    CHECK(!SHGetPathFromIDListW(pidl, got));
+    CoTaskMemFree(pidl);
+    IMalloc *m = NULL;
+    CHECK(SHGetMalloc(&m) == S_OK && m != NULL);
+    void *p = m->lpVtbl->Alloc(m, 16);
+    CHECK(p != NULL);
+    m->lpVtbl->Free(m, p);
+    m->lpVtbl->Release(m);
+}
+
+// mpr's WNetGetConnectionW: a local drive is not a network connection
+// (ERROR_NOT_CONNECTED); a name that is no device, ERROR_BAD_DEVICE.
+static void wnet(void) {
+    WCHAR remote[MAX_PATH];
+    DWORD n = MAX_PATH;
+    CHECK(WNetGetConnectionW(L"C:", remote, &n) == ERROR_NOT_CONNECTED);
+    n = MAX_PATH;
+    CHECK(WNetGetConnectionW(L"nothing", remote, &n) == ERROR_BAD_DEVICE);
+}
+
 int main(void) {
     bitmaps();
+    wnet();
+    item_ids();
+    file_info();
+    clipboard_formats();
     hooks();
+    redraw();
+    unknown_class();
+    deferred();
     timers();
     monitors();
     menus();

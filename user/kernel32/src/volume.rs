@@ -14,6 +14,32 @@ pub extern "system" fn GetLogicalDrives() -> u32 {
     1 << 2
 }
 
+/// GetLogicalDriveStringsW(size, buffer): "C:\\" then the list's final
+/// NUL; the characters copied without that NUL (4), or, when `size` is
+/// too small, the size needed (5).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetLogicalDriveStringsW(size: u32, buf: *mut u16) -> u32 {
+    const DRIVES: [u16; 5] = [b'C' as u16, b':' as u16, b'\\' as u16, 0, 0];
+    if buf.is_null() || (size as usize) < DRIVES.len() {
+        return DRIVES.len() as u32;
+    }
+    // SAFETY: the caller's buffer of `size` characters.
+    unsafe { core::ptr::copy_nonoverlapping(DRIVES.as_ptr(), buf, DRIVES.len()) };
+    DRIVES.len() as u32 - 1
+}
+
+/// GetLogicalDriveStringsA: as the W form.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetLogicalDriveStringsA(size: u32, buf: *mut u8) -> u32 {
+    const DRIVES: [u8; 5] = *b"C:\\\0\0";
+    if buf.is_null() || (size as usize) < DRIVES.len() {
+        return DRIVES.len() as u32;
+    }
+    // SAFETY: the caller's buffer of `size` bytes.
+    unsafe { core::ptr::copy_nonoverlapping(DRIVES.as_ptr(), buf, DRIVES.len()) };
+    DRIVES.len() as u32 - 1
+}
+
 /// GetDriveTypeA: C: (or the current drive, for null) is fixed.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDriveTypeA(root: *const u8) -> u32 {

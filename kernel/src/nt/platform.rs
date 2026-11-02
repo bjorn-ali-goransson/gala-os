@@ -56,6 +56,11 @@ pub trait Clock {
 /// Threads and waits. A wait is `prepare_wait` (under the caller's lock,
 /// so a `wake` in between is not lost), then `wait`.
 pub trait Threads {
+    /// Where `thread` last ran user code when a timer tick interrupted it
+    /// (thread dumps: a thread spinning in user mode); None if unknown.
+    fn last_user_rip(_thread: ThreadId) -> Option<u64> {
+        None
+    }
     /// A helper thread of the NT layer (no user mode), e.g. timers.
     fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<ThreadId, SpawnError>;
     /// A thread of a process: runs `entry(arg)` in the address space
@@ -168,6 +173,10 @@ pub fn set_tick_callback(callback: fn(u64)) {
     <P as Clock>::set_tick_callback(callback)
 }
 
+#[inline]
+pub fn last_user_rip(thread: ThreadId) -> Option<u64> {
+    <P as Threads>::last_user_rip(thread)
+}
 #[inline]
 pub fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<ThreadId, SpawnError> {
     <P as Threads>::spawn(name, entry, arg)

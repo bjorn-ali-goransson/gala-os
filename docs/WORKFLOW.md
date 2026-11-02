@@ -119,6 +119,13 @@ shows it.
   directories of the installed layout, each moved to
   `target/prebuilt/<name>/<last component>`, and excludes are paths
   removed after that; unpacking needs msitools (`apt install msitools`).
+- **A thread spinning in user mode** (no system calls): the one-minute
+  hang dump prints `in user mode at rip ...` (the last timer tick that
+  caught it) and the ledger so far; map the rip to a module with
+  `events=image`, then `llvm-objdump -d` the DLL around it (gala's DLLs
+  name their exports). A temporary `unsupported(b"PROBE", detail)` in a
+  gala DLL shows up in `events=syscall` as GalaRecordMissing with its
+  detail (how FileZilla's LVM_GETNEXTITEM loop was found).
 - **A program hangs without a ledger** (it never exits, so the ledger is
   not printed): add `events=syscall,thread` to its scenario's command
   line and read `target/debug/test-<name>.events.jsonl` while QEMU still

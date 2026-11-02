@@ -2,11 +2,13 @@
 //! user's profile folders (the JVM's user.home). The answers come from the
 //! same place as the environment's: USERPROFILE, APPDATA, LOCALAPPDATA,
 //! ProgramData, ProgramFiles, and the Windows and system directories.
+//! Also SHGetFileInfoW with gala's system image lists (`fileinfo.rs`).
 
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod fileinfo;
 mod unimplemented;
 
 #[allow(dead_code)]

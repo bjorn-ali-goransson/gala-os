@@ -8,7 +8,6 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     CloseEnhMetaFile
     CombineRgn
     CopyEnhMetaFileW
-    CreateBitmapIndirect
     CreateEnhMetaFileW
     CreateHatchBrush
     CreatePatternBrush
@@ -26,7 +25,6 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     ExtSelectClipRgn
     GetCharABCWidthsW
     GetClipBox
-    GetDIBColorTable
     GetEnhMetaFileHeader
     GetEnhMetaFileW
     GetGraphicsMode
@@ -50,7 +48,6 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     RoundRect
     SelectClipRgn
     SetBrushOrgEx
-    SetDIBColorTable
     SetGraphicsMode
     SetLayout
     SetMetaFileBitsEx

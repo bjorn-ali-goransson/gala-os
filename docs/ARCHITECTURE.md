@@ -2265,6 +2265,31 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   functions wx calls on its way (OleInitialize, SetThreadLocale on the
   TEB's CurrentLocale, SetSecurityDescriptorControl/Sacl/Group,
   SetCurrentProcessExplicitAppUserModelID).
+- **Smaller user32/ole32 pieces wx needs** (`user32_test`): an
+  unregistered class makes CreateWindowExW fail with
+  ERROR_CANNOT_FIND_WND_CLASS and records `user32.dll!CreateWindowExW
+  (<class>)` in the ledger (the kernel also prints the ledger in its
+  one-minute hang dump, and the thread dump gives a spinning thread's
+  user rip from the last timer tick); RedrawWindow
+  over InvalidateRect/ValidateRect/UpdateWindow (whole windows; regions
+  and rectangles are not kept); deferred positioning (HDWP 0x2000 + 16 *
+  list, eight lists of 256; EndDeferWindowPos applies them in order with
+  SetWindowPos); registered clipboard formats share the registered
+  messages' table (`message.rs`, names as first spelled); ole32 keeps
+  drop targets per window with a reference (RegisterDragDrop/
+  RevokeDragDrop; IsWindow loaded from user32 on first use), but nothing
+  drags yet (DoDragDrop).
+- **shell32's file information** (`user/shell32/src/fileinfo.rs`;
+  `user32_test`): SHGetFileInfoW answers from the attributes (or
+  GetFileAttributesW): system image lists (small 16 px and large 32 px
+  comctl32 lists of gala's own icons, `user/shell32/assets/*.svg` baked
+  to straight-alpha BGRA by `cargo xtask bake-icons`: document, folder,
+  open folder, program, drive), type names ("File folder",
+  "Application", "<EXT> File": no file-type registry yet), display
+  names, icons. Item ID lists are gala's own: one item (b"gala", a kind,
+  a path) or the empty list (the desktop); CSIDL_DRIVES is virtual.
+  shell32, ole32 and comctl32 load the GUI DLLs they call on first use
+  (LoadLibraryW): programs without windows use them too.
 - **Image lists** (`user/comctl32/src/imagelist.rs`; `comctl32_test`):
   HIMAGELIST is 0x1000 + 16 * slot (256 lists); each image is its own
   pair of gdi32 bitmaps of the list's size, a 32-bit colour bitmap
@@ -2310,7 +2335,9 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   TA_BOTTOM/BASELINE) and OPAQUE backgrounds; ExtTextOutW (ETO_OPAQUE,
   ETO_CLIPPED, lpDx); GetTextMetricsW, GetTextExtentPoint32W,
   GetTextExtentExPointW (fit and partial widths) and GetTextFaceW from
-  the same metrics. Coordinate mapping: SetMapMode (MM_TEXT .. MM_ANISOTROPIC; the fixed
+  the same metrics. 1-bit DIB sections keep their two-colour palette
+  in the surface: reads give the entry's colour, writes pick the nearer
+  entry. Coordinate mapping: SetMapMode (MM_TEXT .. MM_ANISOTROPIC; the fixed
   modes' extents from the screen's size in mm, y up), window and
   viewport origins and extents (MM_ISOTROPIC shrinks the viewport extent
   to equal units), LPtoDP/DPtoLP; drawing maps points through them

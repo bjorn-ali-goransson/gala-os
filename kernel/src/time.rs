@@ -64,7 +64,30 @@ pub fn set_tick_callback(callback: fn(u64)) {
     *TICK_CALLBACK.lock() = Some(callback);
 }
 
-fn on_tick(_frame: &mut TrapFrame) {
+/// Per CPU: the thread (its id + 1; 0 for none) and the user rip its last
+/// tick interrupted in user mode, for thread dumps (where a thread
+/// spinning in user mode is).
+static USER_RIP: [(AtomicU64, AtomicU64); crate::arch::smp::MAX_CPUS] =
+    [const { (AtomicU64::new(0), AtomicU64::new(0)) }; crate::arch::smp::MAX_CPUS];
+
+/// Where `thread` was in user mode at the last tick that interrupted it
+/// there, if a CPU's latest such tick was its.
+pub fn last_user_rip(thread: crate::sched::ThreadId) -> Option<u64> {
+    let want = thread.as_usize() as u64 + 1;
+    USER_RIP
+        .iter()
+        .find(|(t, _)| t.load(Ordering::Relaxed) == want)
+        .map(|(_, rip)| rip.load(Ordering::Relaxed))
+}
+
+fn on_tick(frame: &mut TrapFrame) {
+    if frame.from_user_mode() {
+        let cpu = crate::arch::percpu::cpu_index() as usize;
+        if let Some((t, rip)) = USER_RIP.get(cpu) {
+            t.store(crate::sched::current().as_usize() as u64 + 1, Ordering::Relaxed);
+            rip.store(frame.rip, Ordering::Relaxed);
+        }
+    }
     if crate::arch::percpu::cpu_index() != 0 {
         apic::eoi();
         crate::sched::on_tick_here();

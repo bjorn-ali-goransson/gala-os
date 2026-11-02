@@ -66,6 +66,8 @@ unsafe extern "system" {
         alertable: i32,
     ) -> u32;
     fn GetLastError() -> u32;
+    fn LoadLibraryW(name: *const u16) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, name: *const u8) -> *const c_void;
 }
 
 #[link(name = "bcryptprimitives", kind = "raw-dylib")]
@@ -1085,5 +1087,121 @@ pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved:
 fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {
         core::hint::spin_loop();
+    }
+}
+
+/// CoLockObjectExternal(object, lock, last_unlock_releases): a strong
+/// reference held while locked (AddRef on lock, Release on unlock).
+#[unsafe(no_mangle)]
+pub extern "system" fn CoLockObjectExternal(object: *mut c_void, lock: i32, _last: i32) -> HResult {
+    if object.is_null() {
+        return E_INVALIDARG;
+    }
+    if lock != 0 {
+        add_ref(object);
+    } else {
+        release(object);
+    }
+    S_OK
+}
+
+const DRAGDROP_E_NOTREGISTERED: HResult = 0x8004_0100_u32 as HResult;
+const DRAGDROP_E_ALREADYREGISTERED: HResult = 0x8004_0101_u32 as HResult;
+const DRAGDROP_E_INVALIDHWND: HResult = 0x8004_0102_u32 as HResult;
+
+/// Windows registered as drop targets: (window, IDropTarget), each
+/// holding a reference. Nothing drags yet (DoDragDrop is not there), so
+/// the targets are only kept.
+struct DropTargets {
+    lock: core::sync::atomic::AtomicBool,
+    entries: core::cell::UnsafeCell<[(usize, usize); 64]>,
+}
+
+// SAFETY: `entries` is only touched under `lock`.
+unsafe impl Sync for DropTargets {}
+
+static DROP_TARGETS: DropTargets = DropTargets {
+    lock: core::sync::atomic::AtomicBool::new(false),
+    entries: core::cell::UnsafeCell::new([(0, 0); 64]),
+};
+
+fn with_drop_targets<R>(f: impl FnOnce(&mut [(usize, usize); 64]) -> R) -> R {
+    while DROP_TARGETS
+        .lock
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: under the lock.
+    let r = f(unsafe { &mut *DROP_TARGETS.entries.get() });
+    DROP_TARGETS.lock.store(false, Ordering::Release);
+    r
+}
+
+/// user32's IsWindow, loaded on first use (ole32 does not import user32:
+/// programs without windows use it too).
+fn is_window(hwnd: usize) -> bool {
+    static IS_WINDOW: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let mut f = IS_WINDOW.load(Ordering::Acquire);
+    if f == 0 {
+        let name: [u16; 11] =
+            core::array::from_fn(|i| u16::from(*b"user32.dll\0".get(i).unwrap_or(&0)));
+        // SAFETY: NUL-terminated names.
+        f = unsafe {
+            let m = LoadLibraryW(name.as_ptr());
+            if m.is_null() { 0 } else { GetProcAddress(m, c"IsWindow".as_ptr().cast()) as usize }
+        };
+        IS_WINDOW.store(f, Ordering::Release);
+    }
+    if f == 0 {
+        return false;
+    }
+    // SAFETY: user32's IsWindow(HWND) -> BOOL.
+    let is_window: extern "system" fn(usize) -> i32 = unsafe { core::mem::transmute(f) };
+    is_window(hwnd) != 0
+}
+
+/// RegisterDragDrop(hwnd, target): keeps the target (with a reference)
+/// for the window; DRAGDROP_E_ALREADYREGISTERED for a second one,
+/// DRAGDROP_E_INVALIDHWND for no window.
+#[unsafe(no_mangle)]
+pub extern "system" fn RegisterDragDrop(hwnd: usize, target: *mut c_void) -> HResult {
+    if target.is_null() {
+        return E_INVALIDARG;
+    }
+    if !is_window(hwnd) {
+        return DRAGDROP_E_INVALIDHWND;
+    }
+    let r = with_drop_targets(|t| {
+        if t.iter().any(|e| e.0 == hwnd) {
+            return DRAGDROP_E_ALREADYREGISTERED;
+        }
+        match t.iter_mut().find(|e| e.0 == 0) {
+            Some(e) => {
+                *e = (hwnd, target as usize);
+                S_OK
+            }
+            None => E_OUTOFMEMORY,
+        }
+    });
+    if r == S_OK {
+        add_ref(target);
+    }
+    r
+}
+
+/// RevokeDragDrop(hwnd): forgets the window's target and releases it.
+#[unsafe(no_mangle)]
+pub extern "system" fn RevokeDragDrop(hwnd: usize) -> HResult {
+    let target = with_drop_targets(|t| {
+        t.iter_mut().find(|e| e.0 == hwnd && hwnd != 0).map(|e| core::mem::take(e).1)
+    });
+    match target {
+        Some(p) => {
+            release(p as *mut c_void);
+            S_OK
+        }
+        None => DRAGDROP_E_NOTREGISTERED,
     }
 }

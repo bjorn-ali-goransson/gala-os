@@ -353,3 +353,49 @@ pub extern "system" fn CreateDIBitmap(
     }
     b
 }
+
+/// Get/SetDIBColorTable on the DIB section selected into `hdc`: entries
+/// `start..start + n` of its colour table (RGBQUADs, which read as
+/// 0x00RRGGBB) copied out or in; the number done (0 for a bitmap
+/// without a table: only 1-bit DIB sections have one here).
+fn color_table(hdc: Handle, start: u32, n: u32, table: *mut u32, set: bool) -> u32 {
+    if table.is_null() {
+        return 0;
+    }
+    with_dc(hdc, |dc, slots| {
+        let Object::Bitmap(mut b) = slots[dc.bitmap] else { return 0 };
+        if !b.dib || b.surface.bpp != 1 {
+            return 0;
+        }
+        let first = start as usize;
+        let count = (n as usize).min(2usize.saturating_sub(first));
+        for i in 0..count {
+            // SAFETY: the caller's array of `n` RGBQUADs.
+            unsafe {
+                let e = table.add(i);
+                if set {
+                    b.surface.palette[first + i] = e.read_unaligned() & 0x00ff_ffff;
+                } else {
+                    e.write_unaligned(b.surface.palette[first + i]);
+                }
+            }
+        }
+        if set {
+            // The DC draws through its own copy of the surface.
+            dc.surface.palette = b.surface.palette;
+            slots[dc.bitmap] = Object::Bitmap(b);
+        }
+        count as u32
+    })
+    .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDIBColorTable(hdc: Handle, start: u32, n: u32, table: *mut u32) -> u32 {
+    color_table(hdc, start, n, table, false)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn SetDIBColorTable(hdc: Handle, start: u32, n: u32, table: *const u32) -> u32 {
+    color_table(hdc, start, n, table.cast_mut(), true)
+}

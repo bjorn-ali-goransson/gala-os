@@ -33,6 +33,10 @@ impl Clock for Kernel {
 }
 
 impl Threads for Kernel {
+    fn last_user_rip(thread: ThreadId) -> Option<u64> {
+        crate::time::last_user_rip(thread)
+    }
+
     fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<ThreadId, SpawnError> {
         sched::spawn(name, entry, arg)
     }

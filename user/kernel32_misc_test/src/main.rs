@@ -14,7 +14,8 @@
 //! is the PEB's ProcessHeap; HeapAlloc with HEAP_ZERO_MEMORY, HeapSize as
 //! asked, HeapReAlloc keeping the contents and zeroing the growth,
 //! HEAP_REALLOC_IN_PLACE_ONLY failing, a private heap from HeapCreate,
-//! HeapValidate, HeapDestroy); GetDriveTypeW, AreFileApisANSI; winmm's
+//! HeapValidate, HeapDestroy); GetDriveTypeW, GetLogicalDriveStringsW,
+//! AreFileApisANSI; winmm's
 //! timeBeginPeriod/timeEndPeriod/timeGetTime; ntdll's
 //! RtlGetNtVersionNumbers (10.0, build 26100 with the high bits); advapi32
 //! RegOpenKeyExW/A of a key that does not exist, RegCloseKey of a
@@ -67,6 +68,7 @@ unsafe extern "system" {
     fn HeapSize(heap: Handle, flags: u32, p: *const u8) -> usize;
     fn HeapValidate(heap: Handle, flags: u32, p: *const u8) -> Bool;
     fn GetDriveTypeW(root: *const u16) -> u32;
+    fn GetLogicalDriveStringsW(size: u32, buf: *mut u16) -> u32;
     fn GetComputerNameExW(kind: u32, buf: *mut u16, size: *mut u32) -> Bool;
     fn GetComputerNameW(buf: *mut u16, size: *mut u32) -> Bool;
     fn AreFileApisANSI() -> Bool;
@@ -351,6 +353,12 @@ fn heaps(c: &mut Checks) -> Result<(), u32> {
         c.eq(GetDriveTypeW(c_root.as_ptr()).into(), DRIVE_FIXED.into())?;
         c.eq(GetDriveTypeW(q_root.as_ptr()).into(), DRIVE_NO_ROOT_DIR.into())?;
         c.ok(AreFileApisANSI() != 0, 0)?;
+        // GetLogicalDriveStringsW: "C:\\" and a second NUL; the length
+        // without the last NUL, or (buffer too small) the size needed.
+        let mut drives = [0xffffu16; 8];
+        c.eq(GetLogicalDriveStringsW(8, drives.as_mut_ptr()).into(), 4)?;
+        c.ok(drives[..5] == [b'C' as u16, b':' as u16, b'\\' as u16, 0, 0], 0)?;
+        c.eq(GetLogicalDriveStringsW(2, drives.as_mut_ptr()).into(), 5)?;
 
         // winmm: timer resolution requests and the millisecond clock.
         const TIMERR_NOCANDO: u32 = 97;

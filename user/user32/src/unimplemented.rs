@@ -10,7 +10,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     OpenClipboard
     AdjustWindowRectEx
     AnimateWindow
-    BeginDeferWindowPos
     BringWindowToTop
     CallWindowProcW
     ChangeDisplaySettingsExW
@@ -33,7 +32,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     DdePostAdvise
     DdeQueryStringW
     DdeUninitialize
-    DeferWindowPos
     DestroyCaret
     DrawEdge
     DrawFocusRect
@@ -42,7 +40,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     DrawTextW
     EmptyClipboard
     EnableScrollBar
-    EndDeferWindowPos
     EndDialog
     EndMenu
     EnumClipboardFormats
@@ -55,7 +52,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     GetActiveWindow
     GetCaretBlinkTime
     GetClassInfoW
-    GetClipboardFormatNameW
     GetComboBoxInfo
     GetDesktopWindow
     GetDialogBaseUnits
@@ -74,8 +70,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     LoadCursorFromFileW
     NotifyWinEvent
     PostThreadMessageW
-    RedrawWindow
-    RegisterClipboardFormatW
     RegisterHotKey
     SetCaretBlinkTime
     SetCaretPos

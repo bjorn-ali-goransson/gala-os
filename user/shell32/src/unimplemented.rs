@@ -13,11 +13,7 @@ gala_stubs::unimplemented_exports!("shell32.dll":
     SHChangeNotify
     SHDefExtractIconW
     SHFileOperationW
-    SHGetFileInfoW
     SHGetIconOverlayIndexW
-    SHGetMalloc
-    SHGetPathFromIDListW
-    SHGetSpecialFolderLocation
     ShellExecuteExW
     Shell_NotifyIconW
 );

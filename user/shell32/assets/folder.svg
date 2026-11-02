@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- gala's folder icon (original artwork, Windows 11 style) -->
+  <defs>
+    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFD866"/>
+      <stop offset="1" stop-color="#F4B52A"/>
+    </linearGradient>
+  </defs>
+  <path d="M3 8.5 C3 7.1 4.1 6 5.5 6 H12 L15 9 H26.5 C27.9 9 29 10.1 29 11.5 V24.5 C29 25.9 27.9 27 26.5 27 H5.5 C4.1 27 3 25.9 3 24.5 Z" fill="#E09F1F"/>
+  <rect x="3" y="11" width="26" height="16" rx="2.5" fill="url(#front)"/>
+  <rect x="3" y="11" width="26" height="1.2" rx="0.6" fill="#FFE9A8"/>
+</svg>

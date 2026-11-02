@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- gala's drive icon (original artwork, Windows 11 style) -->
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E9ECF0"/>
+      <stop offset="1" stop-color="#BFC6CF"/>
+    </linearGradient>
+  </defs>
+  <path d="M7 9 H25 L29 19 H3 Z" fill="#D5DAE0" stroke="#8A939E" stroke-width="1" stroke-linejoin="round"/>
+  <rect x="3" y="18.5" width="26" height="8" rx="2" fill="url(#body)" stroke="#8A939E" stroke-width="1"/>
+  <rect x="22" y="21.5" width="4" height="2" rx="1" fill="#2FB84E"/>
+</svg>

@@ -18,7 +18,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetActiveProcessorCount
     GetCurrencyFormatEx
     GetCurrencyFormatW
-    GetLogicalDriveStringsW
     GetNamedPipeHandleStateA
     GetNamedPipeInfo
     GetNumaNodeProcessorMaskEx
@@ -89,7 +88,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetCommState
     GetConsoleProcessList
     GetCurrentConsoleFontEx
-    GetLogicalDriveStringsA
     GetNamedPipeClientProcessId
     GetNumberOfConsoleMouseButtons
     IdnToAscii

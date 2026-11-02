@@ -542,8 +542,23 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    and viewport extents and LPtoDP/DPtoLP. Then image lists (comctl32_test, a new
    scenario): create, add (strips, masks, colour keys), icons, draw
    with background colours, info, copy/swap, replace, remove, destroy.
-   It now stops at user32's RedrawWindow (and wants 1-bit DIB
-   sections).
+   Then (user32_test, gdi32_test): RedrawWindow, 1-bit DIB
+   sections, registered clipboard formats (RegisterClipboardFormatW,
+   GetClipboardFormatNameW), ole32's CoLockObjectExternal and
+   RegisterDragDrop/RevokeDragDrop, deferred window positioning
+   (Begin/Defer/EndDeferWindowPos). Then SHGetFileInfoW with system image
+   lists of gala's own file icons (folder, open folder, document,
+   program, drive; SVGs baked by bake-icons), SHGetSpecialFolderLocation/
+   SHGetPathFromIDListW/SHGetMalloc (gala's item ID lists),
+   GetLogicalDriveStringsW, mpr's WNetGetConnectionW, CreateBitmapIndirect,
+   Get/SetDIBColorTable. FileZilla now runs without stopping, but spins:
+   its controls' classes do not exist (CreateWindowExW records them:
+   STATIC, EDIT, BUTTON from user32; msctls_statusbar32,
+   ToolbarWindow32, tooltips_class32, SysListView32, SysTreeView32 from
+   comctl32), and wx loops sending LVM_GETNEXTITEM to the NULL list view
+   (0 forever, never -1). Next: those controls, drawn in the Windows 11
+   style (user32's built-ins first, then the status bar, toolbar, list
+   and tree views).
 W4. **The Windows look** (asked for 2026-11-01: "imitate Windows as much
    as we can with regards to their visuals"; and the owner's fortress as
    the start icon and the fortress with the wordmark as the watermark,

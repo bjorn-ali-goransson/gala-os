@@ -1143,3 +1143,126 @@ pub fn def_window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Op
         _ => None,
     }
 }
+
+// ---- Deferred positioning ----
+
+/// One recorded DeferWindowPos: window, insert-after, x, y, cx, cy, flags.
+#[derive(Clone, Copy)]
+struct Deferred {
+    hwnd: Hwnd,
+    after: Hwnd,
+    rect: [i32; 4],
+    flags: u32,
+}
+
+const DEFER_LISTS: usize = 8;
+const DEFER_ENTRIES: usize = 256;
+
+/// HDWP is 0x2000 + 16 * list; a list in use has `used` set.
+struct DeferTable {
+    lock: core::sync::atomic::AtomicBool,
+    used: core::cell::UnsafeCell<[bool; DEFER_LISTS]>,
+    counts: core::cell::UnsafeCell<[usize; DEFER_LISTS]>,
+    entries: core::cell::UnsafeCell<[[Deferred; DEFER_ENTRIES]; DEFER_LISTS]>,
+}
+
+// SAFETY: the cells are only touched under `lock`.
+unsafe impl Sync for DeferTable {}
+
+static DEFER: DeferTable = DeferTable {
+    lock: core::sync::atomic::AtomicBool::new(false),
+    used: core::cell::UnsafeCell::new([false; DEFER_LISTS]),
+    counts: core::cell::UnsafeCell::new([0; DEFER_LISTS]),
+    entries: core::cell::UnsafeCell::new(
+        [[Deferred { hwnd: 0, after: 0, rect: [0; 4], flags: 0 }; DEFER_ENTRIES]; DEFER_LISTS],
+    ),
+};
+
+fn with_defer<R>(
+    f: impl FnOnce(
+        &mut [bool; DEFER_LISTS],
+        &mut [usize; DEFER_LISTS],
+        &mut [[Deferred; DEFER_ENTRIES]; DEFER_LISTS],
+    ) -> R,
+) -> R {
+    use core::sync::atomic::Ordering;
+    while DEFER.lock.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        core::hint::spin_loop();
+    }
+    // SAFETY: under the lock.
+    let r =
+        unsafe { f(&mut *DEFER.used.get(), &mut *DEFER.counts.get(), &mut *DEFER.entries.get()) };
+    DEFER.lock.store(false, Ordering::Release);
+    r
+}
+
+fn defer_list(h: usize) -> Option<usize> {
+    h.checked_sub(0x2000).filter(|v| v % 16 == 0).map(|v| v / 16).filter(|&i| i < DEFER_LISTS)
+}
+
+/// BeginDeferWindowPos(n): an empty list of positions (up to 256 each;
+/// eight lists at a time).
+#[unsafe(no_mangle)]
+pub extern "system" fn BeginDeferWindowPos(n: i32) -> usize {
+    if n < 0 {
+        crate::window::set_last_error(87);
+        return 0;
+    }
+    with_defer(|used, counts, _| match used.iter().position(|u| !u) {
+        Some(i) => {
+            used[i] = true;
+            counts[i] = 0;
+            0x2000 + 16 * i
+        }
+        None => {
+            crate::window::set_last_error(8); // ERROR_NOT_ENOUGH_MEMORY
+            0
+        }
+    })
+}
+
+/// DeferWindowPos: records SetWindowPos's arguments; the list (NULL, and
+/// the list freed, when the window is not one or the list is full).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn DeferWindowPos(
+    list: usize,
+    hwnd: Hwnd,
+    after: Hwnd,
+    x: i32,
+    y: i32,
+    cx: i32,
+    cy: i32,
+    flags: u32,
+) -> usize {
+    let Some(i) = defer_list(list) else { return 0 };
+    let valid = crate::window::IsWindow(hwnd) != 0;
+    with_defer(|used, counts, entries| {
+        if !used[i] {
+            return 0;
+        }
+        if !valid || counts[i] == DEFER_ENTRIES {
+            used[i] = false;
+            return 0;
+        }
+        entries[i][counts[i]] = Deferred { hwnd, after, rect: [x, y, cx, cy], flags };
+        counts[i] += 1;
+        list
+    })
+}
+
+/// EndDeferWindowPos: applies every recorded position (SetWindowPos, in
+/// order) and frees the list.
+#[unsafe(no_mangle)]
+pub extern "system" fn EndDeferWindowPos(list: usize) -> i32 {
+    let Some(i) = defer_list(list) else { return 0 };
+    let Some(n) = with_defer(|used, counts, _| used[i].then_some(counts[i])) else { return 0 };
+    // One entry at a time (the list stays in use until the end).
+    for k in 0..n {
+        let m = with_defer(|_, _, entries| entries[i][k]);
+        let [x, y, cx, cy] = m.rect;
+        SetWindowPos(m.hwnd, m.after, x, y, cx, cy, m.flags);
+    }
+    with_defer(|used, _, _| used[i] = false);
+    1
+}

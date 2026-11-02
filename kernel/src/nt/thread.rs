@@ -549,7 +549,13 @@ pub fn dump() {
             t.has_exited(),
             in_syscall.is_some()
         );
-        let Some((number, regs)) = in_syscall else { continue };
+        let Some((number, regs)) = in_syscall else {
+            // Running user code: where a tick last caught it.
+            if let Some(rip) = (*t.sched_id.lock()).and_then(platform::last_user_rip) {
+                info!("thread:   in user mode at rip {rip:#x} (last tick)");
+            }
+            continue;
+        };
         let name = super::syscalls::service_name(number);
         info!("thread:   {name} from rip {:#x}", regs.rip);
         // The first argument (r10), as a handle: what a wait is on.

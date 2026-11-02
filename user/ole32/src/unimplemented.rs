@@ -12,14 +12,11 @@ gala_stubs::unimplemented_exports!("ole32.dll":
     CreateBindCtx
     GetHGlobalFromStream
     CoFreeUnusedLibraries
-    CoLockObjectExternal
     DoDragDrop
     OleFlushClipboard
     OleGetClipboard
     OleIsCurrentClipboard
     OleSetClipboard
     PropVariantClear
-    RegisterDragDrop
     ReleaseStgMedium
-    RevokeDragDrop
 );

@@ -503,6 +503,10 @@ fn run_program(info: &BootInfo, name: &str, args: &str, cwd: Option<&str>, wait_
                         warn!("run: {} still running after a minute; threads:", process.name);
                         nt::thread::dump();
                         sched::dump();
+                        // What it has missed so far (the ledger otherwise
+                        // prints when the run ends, which a hang never
+                        // does).
+                        nt::ledger::dump();
                     }
                     nt::wait::wait_for(one, false, nt::wait::Timeout::Infinite);
                 }

@@ -275,6 +275,7 @@ pub(crate) fn with<R>(f: impl FnOnce(&mut [Object; SLOTS], &[usize; STOCK]) -> R
                 height: 1,
                 stride: 4,
                 bpp: 32,
+                palette: [0, 0x00ff_ffff],
                 bottom_up: false,
                 mono: true,
             };
@@ -423,6 +424,7 @@ pub extern "system" fn GalaCreateSurfaceDC(
         height,
         stride: stride * 4,
         bpp: 32,
+        palette: [0, 0x00ff_ffff],
         bottom_up: false,
         mono: false,
     };

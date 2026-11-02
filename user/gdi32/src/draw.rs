@@ -188,6 +188,7 @@ pub(crate) fn new_ddb(w: i32, h: i32, bpp: u16) -> Handle {
         height: h,
         stride: w * 4,
         bpp: 32,
+        palette: [0, 0x00ff_ffff],
         bottom_up: false,
         mono: bpp == 1,
     };
@@ -206,6 +207,26 @@ pub extern "system" fn CreateCompatibleBitmap(hdc: Handle, w: i32, h: i32) -> Ha
         return new_ddb(1, 1, 1);
     }
     new_ddb(w, h, if is_mono { 1 } else { 32 })
+}
+
+/// CreateBitmapIndirect(BITMAP): CreateBitmap with its width, height,
+/// planes, bits per pixel and bits.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateBitmapIndirect(bm: *const u8) -> Handle {
+    if bm.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: the caller's BITMAP: bmType, bmWidth, bmHeight (i32 at 0,
+    // 4, 8), bmWidthBytes (12), bmPlanes, bmBitsPixel (u16 at 16, 18),
+    // bmBits (a pointer at 24).
+    unsafe {
+        let w = bm.add(4).cast::<i32>().read_unaligned();
+        let h = bm.add(8).cast::<i32>().read_unaligned();
+        let planes = bm.add(16).cast::<u16>().read_unaligned();
+        let bpp = bm.add(18).cast::<u16>().read_unaligned();
+        let bits = bm.add(24).cast::<*const u8>().read_unaligned();
+        CreateBitmap(w, h, u32::from(planes), u32::from(bpp), bits)
+    }
 }
 
 /// CreateBitmap(w, h, planes, bpp, bits): 1-bit (rows padded to 16 bits,
@@ -267,8 +288,8 @@ pub struct BitmapInfoHeader {
     clr_important: u32,
 }
 
-/// CreateDIBSection(hdc, info, usage, &bits, section, offset): a 24- or
-/// 32-bit DIB (BI_RGB, or BI_BITFIELDS with the usual masks) in memory of
+/// CreateDIBSection(hdc, info, usage, &bits, section, offset): a 1-, 24-
+/// or 32-bit DIB (1-bit: with its two-colour palette) (BI_RGB, or BI_BITFIELDS with the usual masks) in memory of
 /// its own (file mappings are not supported); `bits` receives it.
 #[unsafe(no_mangle)]
 pub extern "system" fn CreateDIBSection(
@@ -288,7 +309,7 @@ pub extern "system" fn CreateDIBSection(
         unsupported(b"gdi32.dll!CreateDIBSection(section)", 0);
         return core::ptr::null_mut();
     }
-    if (h.bit_count != 24 && h.bit_count != 32) || (h.compression != 0 && h.compression != 3) {
+    if ![1, 24, 32].contains(&h.bit_count) || (h.compression != 0 && h.compression != 3) {
         unsupported(b"gdi32.dll!CreateDIBSection(format)", u64::from(h.bit_count));
         return core::ptr::null_mut();
     }
@@ -297,6 +318,18 @@ pub extern "system" fn CreateDIBSection(
         return core::ptr::null_mut();
     }
     let stride = ((w * i32::from(h.bit_count) + 31) / 32) * 4;
+    // A 1-bit DIB's two colours (RGBQUADs after the header: blue, green,
+    // red, reserved, which read as 0x00RRGGBB).
+    let mut palette = [0, 0x00ff_ffff];
+    if h.bit_count == 1 {
+        let entries = if h.clr_used == 0 { 2 } else { (h.clr_used as usize).min(2) };
+        for (i, e) in palette.iter_mut().enumerate().take(entries) {
+            // SAFETY: the caller's colour table after the header.
+            *e = unsafe {
+                info.cast::<u8>().add(h.size as usize + 4 * i).cast::<u32>().read_unaligned()
+            } & 0x00ff_ffff;
+        }
+    }
     let memory = alloc(stride as usize * height as usize);
     if memory.is_null() {
         return core::ptr::null_mut();
@@ -307,6 +340,7 @@ pub extern "system" fn CreateDIBSection(
         height,
         stride,
         bpp: h.bit_count,
+        palette,
         bottom_up: h.height > 0,
         mono: false,
     };

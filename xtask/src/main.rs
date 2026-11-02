@@ -605,6 +605,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("user32_test", "user32.dll", "Windows/System32"),
     ("user32_test", "gdi32.dll", "Windows/System32"),
     ("user32_test", "ole32.dll", "Windows/System32"),
+    ("user32_test", "comctl32.dll", "Windows/System32"),
+    ("user32_test", "mpr.dll", "Windows/System32"),
     ("user32_test", "uxtheme.dll", "Windows/System32"),
     ("user32_test", "shell32.dll", "Windows/System32"),
     ("user32_test", "oleaut32.dll", "Windows/System32"),
@@ -5533,6 +5535,29 @@ fn bake_icons() -> Result {
             let path = root().join(format!("kernel/assets/{name}-{size}.alpha"));
             fs::write(&path, &alpha).map_err(|e| format!("{path:?}: {e}"))?;
             eprintln!("xtask: {} ({} bytes)", path.display(), alpha.len());
+        }
+    }
+    // shell32's file icons (the system image list): colour, as 32-bit
+    // pixels with straight alpha (B, G, R, A bytes), 16 and 32 px.
+    for name in ["document", "folder", "folder-open", "program", "drive"] {
+        let svg = fs::read(root().join(format!("user/shell32/assets/{name}.svg")))
+            .map_err(|e| format!("{name}.svg: {e}"))?;
+        let tree = resvg::usvg::Tree::from_data(&svg, &resvg::usvg::Options::default())
+            .map_err(|e| e.to_string())?;
+        let view = tree.size();
+        for size in [16u32, 32] {
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).ok_or("pixmap")?;
+            let scale = size as f32 / view.width().max(view.height());
+            let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+            resvg::render(&tree, transform, &mut pixmap.as_mut());
+            let mut out = Vec::with_capacity((size * size * 4) as usize);
+            for p in pixmap.pixels() {
+                let c = p.demultiply();
+                out.extend_from_slice(&[c.blue(), c.green(), c.red(), c.alpha()]);
+            }
+            let path = root().join(format!("user/shell32/assets/{name}-{size}.bgra"));
+            fs::write(&path, &out).map_err(|e| format!("{path:?}: {e}"))?;
+            eprintln!("xtask: {} ({} bytes)", path.display(), out.len());
         }
     }
     // The wordmark (قلعة, "qal'a"): cropped to its letters, 112 pixels
