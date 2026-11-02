@@ -381,6 +381,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("smpsched_test", "ntdll.dll", "Windows/System32"),
     ("smpmem_test", "ntdll.dll", "Windows/System32"),
     ("smpcow_test", "ntdll.dll", "Windows/System32"),
+    ("smpsem_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
     ("events", "testdll.dll", "gala"),
     ("kernel32_test", "ntdll.dll", "Windows/System32"),
@@ -1556,6 +1557,7 @@ const USER_PROGRAMS: &[&str] = &[
     "smpsched_test",
     "smpmem_test",
     "smpcow_test",
+    "smpsem_test",
     "ledger_test",
     "bench",
     "kernel32_test",
@@ -2649,6 +2651,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=smpcow_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["smpcow_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // A semaphore released and waited on from two processors at once.
+        name: "smpsem_test",
+        cmdline: "qemu_exit run=smpsem_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["smpsem_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // N1a: a kernel TCP echo server on port 7 behind QEMU's user-mode

@@ -3441,9 +3441,9 @@ fn nt_release_semaphore(call: &mut Call<'_>) -> NtStatus {
     let object = tri!(entry.require(SEMAPHORE_MODIFY_STATE)).clone();
     let ObjectBody::Semaphore(s) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     let release = arg!(call, 1) as u32 as i32;
-    let previous = s.dispatcher.signal_state();
-    let next = tri!(semaphore_release(previous, s.maximum, release));
-    wait::set_signal(&object, next);
+    // Read, checked and changed under one hold of the dispatcher lock.
+    let previous =
+        tri!(wait::update_signal(&object, |count| semaphore_release(count, s.maximum, release)));
     let ptr = arg!(call, 2);
     if ptr != 0 {
         tri!(call.write_u32(ptr, previous as u32));

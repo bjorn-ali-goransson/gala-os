@@ -55,6 +55,30 @@ pub fn set_signal(object: &ObjectRef, signal: i32) -> i32 {
     previous
 }
 
+/// Changes an object's signal state to `f(current)` in one hold of the
+/// dispatcher lock, waking its waiters if it becomes signaled; returns the
+/// previous state (or `f`'s error, the state unchanged). A read and a
+/// later `set_signal` would let a wait satisfied in between be undone,
+/// and two changes at once lose one (NtReleaseSemaphore did that:
+/// smpsem_test).
+pub fn update_signal<E>(
+    object: &ObjectRef,
+    f: impl FnOnce(i32) -> Result<i32, E>,
+) -> Result<i32, E> {
+    let Some(d) = object.dispatcher() else { return f(0).map(|_| 0) };
+    let _guard = DISPATCHER.lock();
+    let mut inner = d.inner.lock();
+    let previous = inner.signal;
+    let signal = f(previous)?;
+    inner.signal = signal;
+    if signal > 0 {
+        for &t in &inner.waiters {
+            platform::wake(t);
+        }
+    }
+    Ok(previous)
+}
+
 /// Sets a dispatcher's signal state directly (for objects reached without
 /// an `ObjectRef`, e.g. a process from its own code).
 pub fn signal_dispatcher(d: &Dispatcher, signal: i32) {

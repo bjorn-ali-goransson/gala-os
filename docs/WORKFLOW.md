@@ -385,11 +385,12 @@ charged). Look
   JIT code while another CPU runs it; cross-modifying code on 2 vCPUs,
   possibly TCG); it passed on rerun. If it recurs, record it with
   QEMU record/replay (OBSERVABILITY.md). Still open (2026-11-02):
-  java_http/java_hello fail about 1 run in 10 under load with Java heap
-  corruption right after a young GC (access violations in jvm.dll or the
-  interpreter reading a bogus klass, NullPointerExceptions in javac,
-  hangs); the hs_err report is in the failed log (`dump:` lines). The
-  copy-on-write race below was not it.
+  java_http/java_hello fail about 1 run in 10 to 30 under load with Java heap
+  corruption (a stale String reference: `String.equals` reading a bogus
+  klass, or a NullPointerException in javac's MemberName); the hs_err
+  report is in the failed log (`dump:` lines). Neither the copy-on-write
+  race nor NtReleaseSemaphore's lost update (both below, fixed) was
+  shown to be it.
 - **Flaky boot tests** usually mean a race; rerun the one scenario a few
   times before blaming CI: `XTASK_REPEAT=12 cargo xtask boot-test name`
   boots one scenario's image 12 times, as many at once as the host has
@@ -406,6 +407,18 @@ charged). Look
   copy-on-write page made its shared frame writable (`smpcow_test`).
   Nothing that may write user memory (with_fs, which delivers directory
   change notifications) may run under those locks: lockdep panics.
+- **Read-modify-write of shared kernel state in one lock hold**: reading
+  a value under a lock, dropping it and storing a value computed from it
+  under a second hold loses whatever happened in between.
+  NtReleaseSemaphore did that with a semaphore's count: two releases at
+  once added one (a waiter never woke: the JVM hung with its VM thread
+  spinning in NtYieldExecution) and a wait satisfied in between was
+  undone (a count too many, which lets a Java thread leave the JVM's
+  safepoint wait barrier while the garbage collector is still moving
+  objects). A heap corruption in a program with its own garbage collector is worth
+  checking against the synchronization services its stop-the-world uses
+  (for HotSpot on Windows: semaphores, events, critical sections), not
+  only the memory manager; `smpsem_test` is the pattern for such a test.
 - **IrqMutex guards go in reverse order**: each guard restores the
   interrupt flag it found, so dropping an outer guard before an inner one
   turns interrupts back on while the inner lock is still held (the thread
