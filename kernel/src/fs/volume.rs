@@ -17,6 +17,9 @@ use crate::mm::heap::TryVec;
 use alloc::vec::Vec;
 
 pub const SECTOR: usize = 512;
+/// The superblock's magic; its last byte is the volume format's version
+/// (1), so another version is not taken for this format (ARCHITECTURE
+/// invariant 3).
 const MAGIC: &[u8; 8] = b"GALAFS\0\x01";
 const VERSION: u32 = 1;
 /// How much of an area mounting reads at a time.

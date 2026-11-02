@@ -4,7 +4,9 @@
 //! over the boot's files (`RamFs::apply`) brings the changes back.
 //!
 //! A record: magic `GLOG`, payload length (u32), the log's generation
-//! (u64), the kind (u8, 3 reserved bytes), a CRC-32 of the header (CRC
+//! (u64), the kind (u8), the record format's version (u8: VERSION; 0 in
+//! records written before it existed reads as 1, the same layout), 2
+//! reserved bytes, a CRC-32 of the header (CRC
 //! field zero) and payload, then the payload, padded to 8 bytes. A record
 //! whose magic, generation or CRC does not match ends the log (a torn
 //! write, or older contents of the disk). Paths are u32 length + UTF-16
@@ -56,6 +58,11 @@ pub enum Op {
 }
 
 const MAGIC: u32 = u32::from_le_bytes(*b"GLOG");
+/// The record format's version (ARCHITECTURE invariant 3). A reader takes
+/// this one and the ones before it; a record of a newer version ends the
+/// log for it (as an unknown record would), so an older kernel never
+/// misreads a newer one's records.
+pub const VERSION: u8 = 1;
 pub const HEADER: usize = 24;
 /// The largest payload a record may have (a Write's data is split).
 pub const MAX_PAYLOAD: usize = 128 * 1024;
@@ -169,6 +176,7 @@ impl Op {
         header[4..8].copy_from_slice(&(len as u32).to_le_bytes());
         header[8..16].copy_from_slice(&generation.to_le_bytes());
         header[16] = self.kind();
+        header[17] = VERSION;
         let crc = crc32(0, &out[start..]);
         out[start + 20..start + 24].copy_from_slice(&crc.to_le_bytes());
         while !(out.len() - start).is_multiple_of(8) {
@@ -241,6 +249,7 @@ pub fn decode(bytes: &[u8], generation: u64) -> Decoded {
     if field(0) != MAGIC
         || u64::from_le_bytes(bytes[8..16].try_into().unwrap_or([0; 8])) != generation
         || len > MAX_PAYLOAD
+        || bytes[17] > VERSION
     {
         return Decoded::End;
     }
@@ -315,6 +324,28 @@ fn parse(kind: u8, r: &mut Reader<'_>) -> Option<Result<Op, NoMemory>> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn records_carry_their_format_version() {
+        let op = Op::Delete { path: alloc::vec![u16::from(b'a')] };
+        let mut out = Vec::new();
+        op.encode(5, &mut out).unwrap();
+        assert_eq!(out[17], VERSION);
+        assert!(matches!(decode(&out, 5), Decoded::Record(..)));
+        // A record from before the version (0) reads the same.
+        let mut old = out.clone();
+        old[17] = 0;
+        old[20..24].fill(0);
+        let crc =
+            crc32(0, &old[..HEADER + u32::from_le_bytes(old[4..8].try_into().unwrap()) as usize]);
+        old[20..24].copy_from_slice(&crc.to_le_bytes());
+        assert!(matches!(decode(&old, 5), Decoded::Record(..)));
+        // A newer version ends the log here.
+        let mut newer = out.clone();
+        newer[17] = VERSION + 1;
+        assert_eq!(decode(&newer, 5), Decoded::End);
+    }
+
     use super::*;
 
     fn w(s: &str) -> Vec<u16> {

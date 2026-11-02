@@ -1895,6 +1895,15 @@ fn pump() {
                         post(w.thread, message_at(tracked, WM_MOUSELEAVE, 0, 0));
                     }
                 }
+                // Keys go to the focus as it is when the message is taken
+                // (a click queued just before may move the focus first):
+                // `next` routes them.
+                if (0x0100..=0x0109).contains(&message) {
+                    let mut m = message_at(top, message, wparam, lparam);
+                    m.private = ROUTE_KEY;
+                    post(thread, m);
+                    continue;
+                }
                 post(thread, message_at(to, message, wparam, lparam));
             }
         }
@@ -2075,8 +2084,17 @@ pub extern "system" fn GetAsyncKeyState(vk: i32) -> i16 {
 /// The calling thread's next message (matching the filter): posted ones
 /// in order (the desktop's input first moved in), then WM_PAINT for an
 /// invalid visible window. Removed if `remove`.
+/// Marks (in MSG's private field) a key message whose window is the
+/// focus at the time it is taken from the queue; `hwnd` holds its
+/// top-level window until then.
+const ROUTE_KEY: u32 = 0x6761_6b01;
+
 fn next(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
     let mut m = next_raw(hwnd, min, max, remove)?;
+    if m.private == ROUTE_KEY {
+        m.hwnd = crate::tree::route(m.hwnd, m.message, m.lparam).0;
+        m.private = 0;
+    }
     // WH_GETMESSAGE sees (and may change) it: wParam PM_REMOVE or
     // PM_NOREMOVE.
     if crate::hook::any(crate::hook::WH_GETMESSAGE) {

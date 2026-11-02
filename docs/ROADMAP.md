@@ -1372,7 +1372,9 @@ R. **Robustness and live update, kernel included** (the owner's
    - R1. **Invariants**: state as data, restartable system calls with
      absolute deadlines, versions on everything stored or shared (first
      concrete step: a version field in the disk log's records and in the
-     `Gala*` records: done for the window registry's record, 2026-11-02),
+     `Gala*` records: done for the window registry's record and the
+     disk log's records, 2026-11-02; the superblock's magic already ends
+     in its version),
      drivers that survive
      a device reset, all time through the `Clock` seam (audit time.rs and
      the direct `platform::ticks` callers).

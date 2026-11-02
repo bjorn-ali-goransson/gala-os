@@ -2260,7 +2260,12 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   (and TranslateMessage's) follows the key messages as they are taken
   from the queue (one state per process here, per thread on Windows):
   moving in a batch (Ctrl down, C down, C up, Ctrl up) before the C is
-  translated must still give Ctrl+C. Caps Lock toggles. TranslateMessage
+  translated must still give Ctrl+C. Keys likewise go to the focus as it
+  is when GetMessage/PeekMessage takes them (queued for the top-level
+  window with a mark in MSG's private field): a click queued just before
+  them may move the focus first (gui_test's click into its edit, then
+  "ok"). TODO: a GetMessage filtered by a child HWND doesn't see keys
+  still addressed to its top-level window. Caps Lock toggles. TranslateMessage
   posts WM_CHAR (WM_SYSCHAR) for a key down, US layout with Shift, Caps
   Lock and Ctrl (Ctrl+letter: 1-26).
 - **Display seam** (`nt::platform::Display`): `screen_size` and
@@ -2939,8 +2944,10 @@ steps, each test first:
 
 Some properties are cheap to keep from the start and very expensive to
 retrofit; the owner asked for them to be designed in now (ROADMAP R1-R9
-has the order). Checked against the code when written: the disk log has a
-magic and a generation but no format version; there is no fault
+has the order). Checked against the code when written: the disk log's
+records had a magic and a generation but no format version (they have
+one since: byte 17, VERSION 1; the superblock's magic ends in its
+format version, `GALAFS\0\x01`); there is no fault
 injection; lock orders are prose only; time mostly comes through the
 platform seam (`nt::platform::Clock`), but `kernel/src/time.rs` reads the
 TSC itself and about twenty places call `platform::ticks` directly.

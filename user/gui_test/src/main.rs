@@ -326,6 +326,7 @@ static NOTES: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
 static NOTES_LEN: AtomicUsize = AtomicUsize::new(0);
 static PICKED: AtomicU32 = AtomicU32::new(0);
 
+#[track_caller]
 fn check(cond: bool, got: u64) -> Result<(), u32> {
     let n = CHECK.fetch_add(1, Ordering::SeqCst) + 1;
     if cond {
@@ -333,6 +334,9 @@ fn check(cond: bool, got: u64) -> Result<(), u32> {
     }
     out(b"gui_test: check ");
     out(&hex(n));
+    // The failing check's line in this file.
+    out(b" line ");
+    out(&hex(core::panic::Location::caller().line()));
     out(b" got ");
     out(&hex(got as u32));
     out(b"\r\n");
