@@ -626,7 +626,10 @@ fn run() -> Result<&'static str, u32> {
             Sleep(1000);
             let slept = GetTickCount64() - before;
             say_n(b"slept again", slept);
-            check((1000..1000 + SLACK_MS).contains(&slept), 58)?;
+            // This sleep spans the handover itself, during which the thread
+            // is frozen and the clock goes on (under a loaded host the
+            // handover alone took 232 ms): never short, at most a second late.
+            check((1000..2000 + SLACK_MS).contains(&slept), 58)?;
             check(ReadFile(r2, buf.as_mut_ptr(), 32, &mut n, core::ptr::null_mut()) != 0, 59)?;
             check(&buf[..n as usize] == b"again", 60)?;
             check(GetEnvironmentVariableW(name.as_ptr(), got.as_mut_ptr(), 8) == 3, 61)?;

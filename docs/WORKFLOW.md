@@ -482,6 +482,11 @@ charged). Look
   Passed alone twice after. Open; look at the second handover's request
   path (GalaRequestHandover while threads are already carried) if it
   recurs.
+- **A sleep that spans a handover (2026-11-03)**: handover_upgrade failed
+  twice in full suites (load about 6) with "slept again 1248", check 58:
+  the second Sleep(1000) spans the handover, the thread is frozen and the
+  monotonic clock goes on (that handover alone moved it 232 ms). Timing
+  checks across a handover bound only the short side tightly.
 - **Java hang with a state dump (2026-11-03)**: the first timeout with a
   state dump (correct clock): java_http hung with three JVM threads in
   NtYieldExecution and two waiting on semaphores with count 0
