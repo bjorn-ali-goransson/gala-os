@@ -71,6 +71,7 @@ pub const BOOT_OK_MARKER: &str = "gala: boot ok";
 /// The kernel's start: from Limine (`handover` is `None`), or from the
 /// previous kernel after a kernel handover (ROADMAP R9).
 pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
+    arch::bootphase::mark("entry");
     console::init();
     kprintln!();
     kprintln!("gala-os kernel {}", env!("CARGO_PKG_VERSION"));
@@ -79,6 +80,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         Ok(info) => info,
         Err(e) => panic!("bootloader handoff rejected: {e}"),
     };
+    arch::bootphase::mark("boot_info");
     let cmdline = Cmdline::new(info.cmdline);
     if cmdline.flag(QEMU_EXIT_FLAG) {
         QEMU_EXIT.store(true, Ordering::Relaxed);
@@ -89,13 +91,16 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // Lock-order checking (debug builds) needs to know the CPU: from here.
     sync::lockdep::enable();
     arch::cpu::enable_sse();
+    arch::bootphase::mark("xsave");
     interrupts::init();
     arch::syscall::init_cpu();
+    arch::bootphase::mark("gdt_idt");
     info!("cpu: GDT, TSS and IDT loaded");
 
     log_boot_info(&info);
     handover::report(&info);
     let summary = log_memory_map(&info);
+    arch::bootphase::mark("memory_map");
     // `noscreen`: serial only (boot tests read the serial log; drawing text
     // is slow under emulation).
     if let Some(fb) = info.framebuffer.take().filter(|_| !cmdline.flag("noscreen")) {
@@ -117,6 +122,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Err(e) = mm::init(&info) {
         panic!("frame allocator: {e:?}");
     }
+    arch::bootphase::mark("frames");
     let (free, total) = mm::frame_stats();
     info!(
         "frames: {} free of {} tracked ({} MiB free)",
@@ -125,20 +131,19 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         free * mm::PAGE_SIZE / (1024 * 1024)
     );
     init_paging(&info);
+    arch::bootphase::mark("paging");
     init_timer(&info);
+    arch::bootphase::mark("apic");
     handover::check_marker(&info);
     if let Err(e) = sched::init() {
         panic!("scheduler: {e:?}");
     }
+    arch::bootphase::mark("sched");
     info!("sched: boot thread {} running, idle thread started", sched::current());
     arch::smp::init_bsp();
-    match arch::smp::start_aps(&info.processors, sched::run_ap) {
-        Ok(n) => {
-            info!("smp: {n} CPUs online ({} reported by the bootloader)", info.processors.len());
-            handover::report_cpus(&info, n);
-        }
-        Err(e) => warn!("smp: cannot start the other CPUs: {e:?}"),
-    }
+    arch::bootphase::mark("smp_start");
+    start_cpus(&info, &cmdline);
+    arch::bootphase::mark("smp_done");
     disk::init();
     // The network driver's recovery test: reset after the n-th frame sent.
     if let Some(n) = cmdline.value("netreset").and_then(|v| v.parse().ok()) {
@@ -150,8 +155,10 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     }
     nt::init();
     net::init();
+    arch::bootphase::mark("drivers");
     // R8: the signed manifest, checked before anything else is loaded.
     trust::boot(&info);
+    arch::bootphase::mark("manifest");
     if handover::wanted(&cmdline)
         && let Some(file) = handover::next_image(&info, &cmdline)
     {
@@ -285,6 +292,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         for name in names.split(',').filter(|n| !n.is_empty()) {
             let mut decoded = alloc::vec::Vec::new();
             info!("run: begin {name}");
+            arch::bootphase::mark("program");
             if cmdline::percent_decode(args.next().unwrap_or(""), &mut decoded).is_err() {
                 error!("run: out of memory for {name}'s arguments");
                 info!("run: end {name}");
@@ -387,6 +395,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
             e => panic!("handover: failed: {e:?}"),
         }
     }
+    arch::bootphase::mark("boot_ok");
     kprintln!("{BOOT_OK_MARKER}");
     stop(QemuExitCode::Success)
 }
@@ -550,6 +559,7 @@ fn finish(code: QemuExitCode) -> ! {
 
 /// Called from the executable's `#[panic_handler]`.
 pub fn panic(info: &core::panic::PanicInfo) -> ! {
+    arch::bootphase::panic();
     console::emergency_println(format_args!("KERNEL PANIC: {info}"));
     // Return addresses, innermost first; `cargo xtask` turns them into
     // function names and lines from the kernel binary.
@@ -572,6 +582,132 @@ pub fn panic(info: &core::panic::PanicInfo) -> ! {
     // Kept on the disk for the next boot (when a volume is mounted).
     crash::save(info, &Backtrace);
     finish(QemuExitCode::Failure)
+}
+
+/// Starts the other CPUs and says what the bootloader, the firmware and
+/// the kernel each made of them (ARCHITECTURE "Processors").
+fn start_cpus(info: &BootInfo, cmdline: &Cmdline) {
+    use arch::smp::SmpTest;
+    log_processors(info);
+    let test = match cmdline.value("smptest") {
+        Some("hide") => SmpTest::Hide,
+        Some("late") => SmpTest::Late,
+        _ => SmpTest::None,
+    };
+    let t0 = time::raw_monotonic_ns();
+    let report = match arch::smp::start_aps(info, test, sched::run_ap) {
+        Ok(report) => report,
+        Err(e) => {
+            warn!("smp: cannot start the other CPUs: {e:?}");
+            return;
+        }
+    };
+    let ms = (time::raw_monotonic_ns() - t0) / 1_000_000;
+    if let Some(what) = report.late_replay {
+        info!("smptest: an AP made to answer the bootloader late: {what}");
+    }
+    let n = report.online;
+    match report.firmware {
+        Some(fw) => info!(
+            "smp: {n} CPUs online ({} reported by the bootloader, {fw} in the MADT; {ms} ms)",
+            report.reported
+        ),
+        None => {
+            info!("smp: {n} CPUs online ({} reported by the bootloader; {ms} ms)", report.reported)
+        }
+    }
+    if report.started_here > 0 {
+        warn!(
+            "smp: the bootloader did not start {} of the MADT's CPUs; the kernel started {} itself",
+            report.started_here + report.failed,
+            report.started_here
+        );
+    }
+    if let Some(id) = report.first_failed {
+        error!(
+            "smp: {} CPU(s) of the MADT's did not start (first: APIC id {id}); running on {n}",
+            report.failed
+        );
+    }
+    handover::report_cpus(info, n);
+}
+
+/// The bootloader's MP response and the firmware's MADT, side by side.
+fn log_processors(info: &BootInfo) {
+    use core::fmt::Write;
+    let mut line = heapless_line();
+    let _ = write!(
+        line,
+        "smp: {}: {} CPU(s), BSP APIC id {}:",
+        if info.handover.is_some() { "parked by the previous kernel" } else { "bootloader" },
+        info.processors.len(),
+        info.processors.bsp_lapic_id
+    );
+    for p in info.processors.iter() {
+        let _ = write!(line, " {}", p.lapic_id);
+    }
+    info!("{}", line.as_str());
+    match arch::smp::shelter_state() {
+        Some(arch::smp::Shelter::Added) => {
+            info!("smp: low 4 GiB identity-mapped in the bootloader's tables (for late APs)")
+        }
+        Some(arch::smp::Shelter::AlreadyMapped) => {}
+        Some(arch::smp::Shelter::NoTrampoline) => {
+            info!("smp: no bootloader AP trampoline in memory (no AP was sent there)")
+        }
+        Some(s) => warn!(
+            "smp: bootloader's AP tables not changed ({s:?}): a late AP would reset the machine"
+        ),
+        None => {}
+    }
+    match &info.firmware_cpus {
+        None => {}
+        Some(Err(e)) => warn!("smp: MADT not read: {e:?}"),
+        Some(Ok(fw)) => {
+            let mut line = heapless_line();
+            let _ = write!(line, "smp: MADT: {} enabled CPU(s):", fw.len());
+            for id in fw.ids() {
+                let _ = write!(line, " {id}");
+            }
+            let missing =
+                fw.ids().iter().filter(|id| !info.processors.iter().any(|p| p.lapic_id == **id));
+            let mut first = true;
+            for id in missing {
+                let _ = write!(
+                    line,
+                    "{} {id}",
+                    if first { "; not started by the bootloader: APIC id" } else { "," }
+                );
+                first = false;
+            }
+            info!("{}", line.as_str());
+        }
+    }
+}
+
+/// A fixed-size line buffer (no allocation).
+struct Line {
+    buf: [u8; 256],
+    len: usize,
+}
+
+fn heapless_line() -> Line {
+    Line { buf: [0; 256], len: 0 }
+}
+
+impl Line {
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+}
+
+impl core::fmt::Write for Line {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let n = s.len().min(self.buf.len() - self.len);
+        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+        self.len += n;
+        Ok(())
+    }
 }
 
 fn init_paging(info: &BootInfo) {

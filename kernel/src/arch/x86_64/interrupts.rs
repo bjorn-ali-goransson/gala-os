@@ -255,6 +255,8 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
         return;
     }
     if vector < FIRST_EXTERNAL_VECTOR {
+        // First on the phase port: the report below may not get out.
+        super::bootphase::fault(vector, frame.rip, frame.error_code);
         let cr2 = (vector == VECTOR_PAGE_FAULT).then(super::cpu::read_cr2);
         panic!("{}", ExceptionReport { frame, cr2 });
     }

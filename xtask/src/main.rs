@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod alloc_audit;
+mod telemetry;
 // The manifest's format and SHA-256 are the kernel's own code (one
 // definition for the writer and the reader).
 #[path = "../../kernel/src/trust/manifest.rs"]
@@ -2652,7 +2653,9 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     }
     let extra = std::env::var("XTASK_QEMU_ARGS").unwrap_or_default();
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-machine", "q35", "-cpu", "max", "-m", &format!("{memory}M"), "-smp", "2"]);
+    // Two processors (one for `onecpu_*` scenarios: telemetry::vm_cpus).
+    let cpus = telemetry::vm_cpus(iso).to_string();
+    cmd.args(["-machine", "q35", "-cpu", "max", "-m", &format!("{memory}M"), "-smp", &cpus]);
     // KVM when available, otherwise software emulation; an `-accel` in
     // XTASK_QEMU_ARGS replaces both (`-accel tcg,thread=multi` reproduces
     // what SINGLE_THREAD_TCG avoids).
@@ -3669,6 +3672,83 @@ const SCENARIOS: &[Scenario] = &[
             "handover_test: slept again",
             "handover_test: ok",
             "exited with status 0x00000000",
+            "gala: boot ok",
+        ],
+    },
+    // One CPU (ARCHITECTURE "Processors"): `onecpu_*` boot with `-smp 1`
+    // (telemetry::vm_cpus) and never share a VM. The kernel must run as
+    // well on one CPU as on two: a CPU count, a handover (no CPU to park),
+    // a few SMP programs and the benchmarks.
+    Scenario {
+        name: "onecpu_smp",
+        cmdline: "qemu_exit run=smp_test.exe args=cpus=1",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["smp: 1 CPUs online", "smp_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "onecpu_handover",
+        cmdline: "qemu_exit handover=2 run=handover_test.exe args=twice",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "parking 0 CPU(s)",
+            "handover: generation 1: 1 of 1 CPUs online again",
+            "handover: generation 2: 1 of 1 CPUs online again",
+            "handover_test: slept again",
+            "handover_test: ok",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        name: "onecpu_programs",
+        cmdline: "qemu_exit run=thread_test.exe,smpsched_test.exe,smpmem_test.exe,smpcow_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "thread_test: ok",
+            "smpsched_test: one processor, concurrency checks skipped",
+            "smpsched_test: ok",
+            "smpmem_test: ok",
+            "smpcow_test: ok",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        name: "onecpu_bench",
+        cmdline: "qemu_exit run=bench.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["smp: 1 CPUs online", "bench: done", "exited with status 0x00000000"],
+    },
+    // APs the bootloader missed (ARCHITECTURE "Processors"). `smptest=hide`:
+    // the kernel ignores the APs Limine started and starts them itself
+    // from the MADT (INIT, startup IPIs, its own trampoline).
+    Scenario {
+        name: "smp_missed",
+        cmdline: "qemu_exit smptest=hide run=smp_test.exe args=cpus=2",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "smp: MADT: 2 enabled CPU(s): 0 1",
+            "smp: 2 CPUs online (1 reported by the bootloader, 2 in the MADT",
+            "the kernel started 1 itself",
+            "smp_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    // `smptest=late`: as above, but first the AP runs Limine's trampoline
+    // again, as one that answers Limine's startup IPIs after Limine gave up
+    // does. Without the identity map the kernel adds to Limine's tables
+    // that AP triple-faults and QEMU ends with status 0, without a word
+    // (the silent ends seen under load). Then a handover, with the CPU the
+    // kernel started.
+    Scenario {
+        name: "smp_late",
+        cmdline: "qemu_exit smptest=late handover=1 run=handover_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "low 4 GiB identity-mapped in the bootloader's tables",
+            "it ran the bootloader's trampoline again and parked",
+            "smp: 2 CPUs online (1 reported by the bootloader, 2 in the MADT",
+            "parking 1 CPU(s)",
+            "handover: generation 1: 2 of 2 CPUs online again",
+            "handover_test: ok",
             "gala: boot ok",
         ],
     },
@@ -4851,6 +4931,7 @@ fn events_flag() -> String {
 /// (the same set: they share a VM); a scenario listed more than once
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("onecpu_programs", "smpsched_test"),
     ("kernel_watchdog", "hello"),
     ("server_profile", "user32_test"),
     ("server_kernel", "user32_test"),
@@ -4910,6 +4991,7 @@ fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
         || s.expect.iter().any(|e| e.contains("pid "))
         || net_marker(s.name).is_some()
         || disk_scenario(s.name).is_some()
+        || s.name.starts_with("onecpu_")
     {
         return None;
     }
@@ -5970,6 +6052,36 @@ fn run_vm(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // Early-boot telemetry (telemetry.rs): QEMU's resets and guest errors,
+    // SeaBIOS's log, the kernel's phase markers, QMP for the vCPU count.
+    let qemu_log = iso.with_extension("qemu.log");
+    let bios_log = iso.with_extension("bios.log");
+    let phases_log = iso.with_extension("phases.log");
+    for f in [&qemu_log, &bios_log, &phases_log] {
+        let _ = fs::remove_file(f);
+    }
+    let qmp = telemetry::qmp_socket();
+    let _ = fs::remove_file(&qmp);
+    // `XTASK_QEMU_LOG=int,cpu_reset`: more of QEMU's log (`-d int` is
+    // every exception with the registers: large).
+    let what = env::var("XTASK_QEMU_LOG").unwrap_or_else(|_| "cpu_reset,guest_errors".into());
+    cmd.args(["-d", &what, "-D"])
+        .arg(&qemu_log)
+        .arg("-chardev")
+        .arg(format!("file,id=gala_bios,path={}", bios_log.display()))
+        .args([
+            "-device",
+            &format!("isa-debugcon,iobase={},chardev=gala_bios", telemetry::BIOS_PORT),
+        ])
+        .arg("-chardev")
+        .arg(format!("file,id=gala_phases,path={}", phases_log.display()))
+        .args([
+            "-device",
+            &format!("isa-debugcon,iobase={},chardev=gala_phases", telemetry::PHASE_PORT),
+        ])
+        .arg("-qmp")
+        .arg(format!("unix:{},server=on,wait=off", qmp.display()));
+    let host_before = telemetry::host_state();
     let port = if net.is_some() { Some(free_port()?) } else { None };
     let (marker, kind) = net.unwrap_or(("", NetClient::Echo));
     if let Some(port) = port {
@@ -5979,6 +6091,10 @@ fn run_vm(
         add_disk(&mut cmd, disk);
     }
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn QEMU: {e}"))?;
+    let qmp_thread = {
+        let qmp = qmp.clone();
+        thread::spawn(move || telemetry::qmp_cpu_count(&qmp))
+    };
     let start = Instant::now();
     let mut to_banner = None;
     let mut client = None;
@@ -6071,6 +6187,17 @@ fn run_vm(
     if let Some(verdict) = screen_verdict {
         serial += &verdict;
     }
+    let vcpus = qmp_thread.join().ok().flatten();
+    let _ = fs::remove_file(&qmp);
+    serial += &boot_telemetry(BootFacts {
+        iso,
+        status,
+        stopped,
+        vcpus,
+        host_before: &host_before,
+        serial: &serial,
+        logs: [&qemu_log, &bios_log, &phases_log],
+    });
     if let Some(client) = client {
         let verdict = client.join().unwrap_or_else(|_| Err("client panicked".into()));
         serial += &match verdict {
@@ -6091,6 +6218,58 @@ fn run_vm(
         };
     }
     Ok((status, serial, BootTime { to_banner: to_banner.unwrap_or(total), total }))
+}
+
+/// What `run_vm` knows about a finished boot, for `boot_telemetry`.
+struct BootFacts<'a> {
+    iso: &'a Path,
+    status: Option<std::process::ExitStatus>,
+    stopped: bool,
+    vcpus: Option<usize>,
+    host_before: &'a str,
+    serial: &'a str,
+    /// QEMU's log, SeaBIOS's, the kernel's phase markers.
+    logs: [&'a Path; 3],
+}
+
+/// The `xtask:` lines appended to a boot's serial log (telemetry.rs): how
+/// QEMU ended, its vCPUs, the host; after an abnormal end (not the
+/// kernel's own exit code, not stopped by xtask) also the last phase
+/// markers and the tail of QEMU's log, so a silent death has a story.
+fn boot_telemetry(f: BootFacts) -> String {
+    let want = telemetry::vm_cpus(f.iso);
+    let mut out = format!(
+        "xtask: QEMU ended: {}\nxtask: vCPUs: {} of {want} asked\nxtask: host at start: {}\nxtask: host at end: {}\n",
+        telemetry::exit_reason(f.status, f.stopped),
+        f.vcpus.map_or("? (QMP did not answer)".to_string(), |n| n.to_string()),
+        f.host_before,
+        telemetry::host_state()
+    );
+    if let Some(n) = telemetry::cpus_online(f.serial).filter(|&n| n < want) {
+        out += &format!("xtask: {}\n", fewer_cpus(n, want));
+    }
+    let code = f.status.and_then(|s| s.code());
+    let normal = f.stopped || matches!(code, Some(QEMU_EXIT_SUCCESS | QEMU_EXIT_FAILURE));
+    if !normal {
+        let [qemu_log, _, phases] = f.logs;
+        let last = telemetry::tail(phases, 12);
+        out += &format!(
+            "xtask: last boot phases ({}):\n{}\n",
+            phases.display(),
+            if last.is_empty() { "(none)".to_string() } else { last }
+        );
+        out += &format!(
+            "xtask: QEMU log tail ({}):\n{}\n",
+            qemu_log.display(),
+            telemetry::tail(qemu_log, 30)
+        );
+    }
+    out
+}
+
+/// The failure reason for a VM that got fewer CPUs than it asked for.
+fn fewer_cpus(got: u32, want: u32) -> String {
+    format!("VM got {got} of {want} CPUs (host overloaded?)")
 }
 
 /// Joins the `{"ev":"rec","hex":...}` lines of an event stream into the
@@ -7625,16 +7804,44 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
     }
     let screen = single.and_then(screen_check);
-    let (status, serial, time) =
-        match run_vm(iso, boot, timeout, net, stop, disk.as_deref(), screen) {
-            Ok(r) => r,
-            Err(e) => {
-                return (
-                    BootTime::default(),
-                    scenarios.iter().map(|&s| (s, Err(e.clone()))).collect(),
+    let want_cpus = telemetry::vm_cpus(iso);
+    let mut attempt = 0;
+    let (status, serial, time) = loop {
+        let (status, serial, time) =
+            match run_vm(iso, boot, timeout, net, stop, disk.as_deref(), screen) {
+                Ok(r) => r,
+                Err(e) => {
+                    return (
+                        BootTime::default(),
+                        scenarios.iter().map(|&s| (s, Err(e.clone()))).collect(),
+                    );
+                }
+            };
+        // A boot that got fewer CPUs than asked for (Limine's AP start-up
+        // timed out and the kernel could not start the AP either) did not
+        // test what it should: once more (not with a disk: its state moved
+        // on).
+        let got = telemetry::cpus_online(&serial);
+        if attempt == 0 && disk.is_none() && got.is_some_and(|n| n < want_cpus) {
+            // Keep the short boot's logs: the next boot overwrites them.
+            for ext in ["serial.log", "phases.log", "qemu.log", "bios.log"] {
+                let _ = fs::copy(
+                    iso.with_extension(ext),
+                    iso.with_extension(format!("short-cpus.{ext}")),
                 );
             }
-        };
+            let _ = fs::write(iso.with_extension("short-cpus.serial.log"), &serial);
+            eprintln!(
+                "xtask: {}: {}; booting it once more (logs kept as *.short-cpus.*)",
+                iso.display(),
+                fewer_cpus(got.unwrap_or(0), want_cpus)
+            );
+            attempt += 1;
+            continue;
+        }
+        break (status, serial, time);
+    };
+    let short = telemetry::cpus_online(&serial).filter(|&n| n < want_cpus);
     let code = status.and_then(|s| s.code());
     let verdicts: Vec<(&Scenario, Result)> = match vm {
         Vm::Single(s) => {
@@ -7681,6 +7888,18 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
             })
             .collect(),
     };
+    // A failure on a VM short of CPUs says so first.
+    let verdicts = verdicts
+        .into_iter()
+        .map(|(s, v)| {
+            (
+                s,
+                v.map_err(|e| {
+                    short.map_or(e.clone(), |n| format!("{}: {e}", fewer_cpus(n, want_cpus)))
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
     let show = env::var_os("XTASK_VERBOSE").is_some() || verdicts.iter().any(|(_, v)| v.is_err());
     if show {
         eprintln!(

@@ -1937,6 +1937,76 @@ does a requester while it waits.
   free it early.
 - Counters (shootdowns, IPIs, leaked frames) are logged before `boot ok`.
 
+**APs the bootloader missed** (`arch::x86_64::apboot`; scenarios
+`smp_missed`, `smp_late`, `onecpu_*`). Limine sends each AP INIT and two
+startup IPIs and waits a bounded time for it (100 x 10 ms of its delay
+loop; on a BIOS boot under TCG, where CPUID leaf 0x15 is empty, that loop
+is a million `inb 0x80`, each an exit into QEMU under its global lock,
+which the waking vCPU needs too). On a loaded emulator host the AP's vCPU
+thread may not run in time; Limine then leaves the AP out of its MP
+response (no setting changes the wait), but its IPIs stay pending. When
+the AP finally runs, it executes Limine's trampoline, whose switch to long
+mode needs an identity map of the trampoline page, Limine's code and its
+stack; Limine removed that map before entering the kernel, so the AP page-
+faults with no IDT (limit 0) and triple-faults, which resets the whole
+machine: QEMU with `-no-reboot` exits with status 0 and the serial log
+just stops (seen twice under load average 12-20; reproduced by holding the
+AP's vCPU thread with ptrace until the kernel banner, and in-guest by
+`smptest=late`). An AP that answers between Limine's timeout and that
+removal parks harmlessly, which is why one such boot ran on with one CPU.
+- First thing in `boot::collect` (Limine boots): `shelter_bootloader_aps`
+  finds Limine's trampoline parameter block in bootloader-reclaimable
+  memory below 1 MiB (16-aligned, HHDM offset at +20, page starting with
+  `cli; cld`; Limine v11.4's internal layout, pinned with LIMINE_TAG, and
+  `smp_late` fails if it moves) and adds an identity map of the low 4 GiB
+  (4 KiB pages for the first 2 MiB, page 0 left out; 2 MiB pages beyond:
+  six kernel `.bss` tables) to the PML4 the trampoline loads, which is the
+  one the kernel was entered with (a block naming other tables is left
+  alone: `UnknownTables`). A late AP then gets through the trampoline and
+  parks in Limine's loop. With one CPU there is no block (`NoTrampoline`).
+  Quirk: an AP's run changes the block: the parking code stores its
+  "booted" flag as a dword, which zeroes the target-mode byte and the low
+  half of the root after it, and the GDTR's base gets the HHDM offset
+  added in place. So a late AP after one that got through (three or more
+  CPUs) would fault even with the identity map: `repair_limine_block`
+  puts the fields back, at boot, before each INIT round of the kernel's
+  own start-up (a startup IPI of Limine's still pending may send the AP
+  through Limine's trampoline once more: seen as a 1-in-6 triple fault of
+  `smp_late` under load before this) and around `replay_late_start`.
+- `boot::acpi` reads the MADT (RSDP from Limine's RSDP request, XSDT or
+  RSDT; enabled local APIC and x2APIC entries; host-tested parser) into
+  `BootInfo::firmware_cpus`. `start_aps` starts the CPUs Limine reported,
+  then every MADT CPU it did not report with the kernel's own trampoline:
+  four pages below 1 MiB taken from usable memory (the frame allocator
+  never hands out memory below 1 MiB), code copied to the first (real mode
+  -> protected mode -> long mode on AP boot tables: the kernel half of the
+  kernel PML4 plus a 2 MiB identity page, below 4 GiB for the 32-bit CR3
+  load) jumping to `gala_ap_entry` with an `MpInfo` of the kernel's.
+  Each AP gets INIT, 10 ms, startup IPI, 200 us, startup IPI, then a wait
+  of 250 ms, doubled for each of four rounds (an INIT also takes it out of
+  Limine's parking loop or a stale pending startup). An `ApStart` is
+  taken once (`taken`): a CPU arriving late on one already used halts. An
+  AP that never comes is logged (`error`) and the kernel runs on the rest.
+- The CPUs Limine started get a second to reach `ap_main`, then (with a
+  warning) up to ten: once, under load, a full run's boot had 1 of 2
+  CPUs online after the second although Limine had started both (the
+  retried boot is all that was kept; xtask now keeps a short boot's logs
+  as `*.short-cpus.*`).
+- After a handover there is no MADT pass: the CPUs are the previous
+  kernel's, parked (and `smptest` is ignored).
+- Log: `smp: bootloader: N CPU(s) ...: <APIC ids>`, the shelter, `smp:
+  MADT: M enabled CPU(s): ... ; not started by the bootloader: APIC id
+  ...`, `smp: N CPUs online (R reported by the bootloader, M in the MADT;
+  T ms)`, and a warning when the kernel started CPUs itself.
+- The kernel runs correctly on one CPU (`onecpu_*`: `-smp 1`; a full
+  boot-test run with `XTASK_QEMU_ARGS="-smp 1"` failed only the checks
+  that expect two processors).
+- TODO: bootloader-reclaimable memory must not be reclaimed while an AP
+  may still sit in Limine's parking loop (one that never started, after
+  the kernel gave up: INIT it first). MTRRs of APs the kernel starts are
+  not synchronised with the BSP's (Limine does it for its own); x2APIC
+  destinations above 255 for the startup IPIs are untested.
+
 
 ## Networking
 

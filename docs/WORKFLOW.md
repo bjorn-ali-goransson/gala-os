@@ -1250,6 +1250,33 @@ passes alone): if it recurs, its log says which bound was missed.
   Windows with `user/bin/run-all.ps1`.
 - See `docs/OBSERVABILITY.md` for the planned profiling and telemetry.
 
+### A boot that ends without a word
+
+The serial log just stops and QEMU "exited with Some(0)": the machine was
+reset (a triple fault, with `-no-reboot`) before the kernel could say
+anything. Read, in this order (docs/OBSERVABILITY.md "Early boot"):
+1. the `xtask:` lines at the end of `target/failed/<scenario>.log`: how
+   QEMU ended, the vCPUs it made, the host's load (a load average far
+   above the host's CPUs makes vCPUs late);
+2. `target/<profile>/<image>.phases.log`: the last `phase` line is how far
+   the boot got (`fault`/`panic` lines are exceptions on the way); the CPU
+   in it says which CPU wrote it;
+3. `<image>.qemu.log`: "Triple fault" and the register dumps of CPU resets
+   (an INIT is a reset too); a dump of CPU 1 with RIP in low memory or at
+   HHDM + a low address is an AP in a bootloader trampoline;
+4. `<image>.bios.log`: SeaBIOS (how many CPUs it found, the boot device).
+For the exception's own state use `XTASK_QEMU_LOG=int,cpu_reset` (every
+exception with its registers in `.qemu.log`: large; with `XTASK_REPEAT=n`
+each failed boot keeps its own `.rN.*` files).
+`smp: ... CPUs online` lower than asked: the bootloader missed an AP and
+the kernel could not start it either; xtask boots such a VM once more and
+says `VM got 1 of 2 CPUs (host overloaded?)`. To make Limine miss an AP
+for real, hold the AP's vCPU thread: QEMU with `-name x,debug-threads=on`,
+then ptrace-stop the thread named `CPU 1/TCG` (PTRACE_SEIZE +
+PTRACE_INTERRUPT) once SeaBIOS has printed "Booting from" (SeaBIOS waits
+for every CPU) and release it after the kernel banner; `smptest=late` is
+the in-guest, deterministic version.
+
 ### Debugging a kernel handover (R9)
 
 - `XTASK_VERBOSE=1 cargo xtask boot-test handover_same`: every kernel
