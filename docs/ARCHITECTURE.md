@@ -3155,7 +3155,12 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   dialogs and no recycle bin it proceeds without confirmation and
   deletes for good (both recorded when asked otherwise). SHChangeNotify
   has no listener to tell; Shell_NotifyIconW fails (no notification
-  area, recorded).
+  area, recorded). `icons.rs`: ExtractIconW/ExtractIconExW/SHDefExtractIconW read
+  the file (not loaded) and walk the PE resource directory's
+  RT_GROUP_ICON entries in directory order (named, then IDs; a negative
+  index is an ID), pick the image nearest the size asked with the most
+  bits per pixel, and make the icon with user32's
+  CreateIconFromResourceEx found at run time; .ico files too.
 - **dbghelp's image helpers and normaliz** (`user/dbghelp/src/image.rs`,
   `user/normaliz`; `dbghelp_test`): ImageNtHeader checks "MZ" and
   "PE\0\0"; SymSrvGetFileIndexInfoW reads an image file's headers (no

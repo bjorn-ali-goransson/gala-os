@@ -3,8 +3,5 @@
 //! `dll!function` to the ledger and ends the process.
 
 gala_stubs::unimplemented_exports!("shell32.dll":
-    ExtractIconExW
-    ExtractIconW
     SHBrowseForFolderW
-    SHDefExtractIconW
 );

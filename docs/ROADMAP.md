@@ -2101,6 +2101,11 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         xmlrw, hkcompile and wxWidgets). shlwapi has no stubs left.
         UrlCanonicalizeW knows the http-like schemes' rules only (other
         forms are copied, recorded).
+     7. shell32: `ExtractIconW`, `ExtractIconExW`, `SHDefExtractIconW`
+        (icon groups read from an image's resource directory or an .ico
+        file, made by user32's CreateIconFromResourceEx; `shell32_test`,
+        whose build.sh now embeds two icons). Left in shell32:
+        `SHBrowseForFolderW` (a dialog).
    - Known problem (2026-11-03): the FileZilla client's PREBUILT URL
      (`downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe`)
      now answers 404 (so does the `FileZilla_Client/3.69.3/` path), so
