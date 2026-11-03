@@ -1972,6 +1972,84 @@ LX. **A Linux personality, later; its seams now** (the owner,
    ld.so, epoll; static musl and busybox first) only when the owner
    schedules it.
 
+AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
+   "API shims and gaps"; started 2026-11-03 on branch `other/api-gaps`,
+   limited to msvcrt, shlwapi, oleaut32, crypt32, version, dbghelp,
+   comctl32, shell32, ole32 and new small DLLs while other agents work in
+   user32, gdi32, kernel32, advapi32, ntdll and the kernel). The gap list
+   comes from the import tables (`x86_64-w64-mingw32-objdump -p`: black-box
+   metadata) of the checked-in programs in `user/bin`, the JDK, PostgreSQL
+   17.2's `bin` (with pgAdmin's StackBuilder and its wxWidgets 3.2 VC
+   DLLs), FileZilla Server 1.12.6 (with its GUI, wxWidgets 3.2 gcc) and
+   SQL Server LocalDB 2022, against the exports of `user/bin/test*.dll`
+   (oleaut32's by-ordinal imports resolved with Wine's oleaut32.spec
+   numbers), and from the `gala_stubs` stubs in those crates (exported,
+   so a program loads, but a call ends it). Two kinds: **missing exports**
+   stop a program from loading at all; **stubs** stop it when called.
+   - Missing exports (load blockers):
+     - msvcrt: `_wtol`, `difftime` (wxbase32u_gcc_custom.dll), `iswlower`,
+       `iswupper` (filezilla-server-gui.exe): FileZilla Server's GUI
+       does not load.
+     - oleaut32: `SystemTimeToVariantTime` (184),
+       `VariantTimeToSystemTime` (185), `VarBstrFromCy` (113): the same
+       GUI's wxmsw32u_core_gcc_custom.dll and StackBuilder's
+       wxmsw326u_core; StackBuilder also `GetActiveObject` (35) and
+       `VarCyFromR8` (102) by ordinal.
+     - ole32: `OleLockRunning`, `OleRun`, `OleSetContainedObject`
+       (StackBuilder's wxmsw326u_core).
+     - dbghelp: `ImageNtHeader`, `MiniDumpWriteDump`,
+       `SymSrvGetFileIndexInfoW` (LocalDB's SqlDumper.exe, which
+       sqlservr starts to write a dump when it crashes).
+     - New DLLs: normaliz.dll (`IdnToAscii`, `IdnToUnicode`: libcurl in
+       PostgreSQL's bin), winspool.drv (wxmsw326u_core), and the JDK's
+       optional ones (dsound, winscard, msi, dbgeng: loaded only by
+       jsound, j2pcsc, jpackage, saproc).
+   - Stubs that real programs import (by program):
+     - shlwapi: SQL Server LocalDB (xe.dll, sqllang, msxmlsql,
+       hkcompile, SqlDumper, SqlUserInstance): `PathCanonicalizeW`,
+       `PathCombineW`, `PathFindExtensionW`, `PathIsRelativeW`,
+       `PathIsURLW`, `PathRemoveBackslashW`, `PathRemoveExtensionW`,
+       `PathSearchAndQualifyW`, `PathCreateFromUrlW`, `StrCmpW`,
+       `StrCmpIW`, `StrCmpNIW`, `StrStrW`, `StrStrIW`, `UrlIsW`,
+       `UrlEscapeW`, `UrlUnescapeW`, `UrlCanonicalizeW`, `UrlCombineW`,
+       `UrlCreateFromPathW`, `SHCreateStreamOnFileEx`, `SHDeleteKeyW`;
+       wxWidgets (FileZilla, FileZilla Server's GUI): `PathMatchSpecW`,
+       `StrCmpLogicalW`, `AssocQueryStringW`, `SHAutoComplete`.
+     - oleaut32 (LocalDB): `VarI4FromStr`, `VarUI4FromStr`,
+       `VarR8FromStr`, `VarBoolFromStr`, `VarBstrFromBool`,
+       `VarCyFromStr`, `VarDateFromStr`, `VarCmp`.
+     - shell32 (wxWidgets): `DragAcceptFiles`, `DragQueryFileW`,
+       `DragQueryPoint`, `DragFinish`, `ShellExecuteExW`,
+       `SHFileOperationW`, `SHChangeNotify`, `Shell_NotifyIconW`,
+       `ExtractIconW`, `ExtractIconExW`, `SHDefExtractIconW`,
+       `SHBrowseForFolderW`.
+     - ole32 (wxWidgets): `PropVariantClear`, `ReleaseStgMedium`, the
+       OLE clipboard (`OleSetClipboard`, `OleGetClipboard`,
+       `OleFlushClipboard`, `OleIsCurrentClipboard`: need user32's
+       clipboard, itself still stubs) and `DoDragDrop`; (LocalDB)
+       `CoCreateInstanceEx`, `CoSetProxyBlanket`, `CoQueryProxyBlanket`,
+       `CoImpersonateClient`, `CoRevertToSelf`, `CoRegisterMallocSpy`,
+       `CreateBindCtx`, `GetHGlobalFromStream`.
+     - comctl32 (wxWidgets): the image-list drag functions
+       (`ImageList_BeginDrag`, `DragEnter`, `DragMove`, `DragLeave`,
+       `EndDrag`, `SetDragCursorImage`) and `CreateUpDownControl`.
+     - crypt32: libcurl (`CertGetNameStringA`, `CertGetCertificateChain`,
+       `CertFreeCertificateChain`, the chain engine, `CryptDecodeObjectEx`,
+       `CryptQueryObject`, `PFXImportCertStore`,
+       `CertAddCertificateContextToStore`), GnuTLS (FileZilla:
+       `CertDeleteCertificateFromStore`, `CertEnumCRLsInStore`,
+       `PFXImportCertStore`), the JDK's sunmscapi (`CertOpenSystemStoreA`,
+       `CryptAcquireCertificatePrivateKey`, chains), LocalDB (`PFXIsPFXBlob`,
+       `CertAddEncodedCertificateToStore`; secforwarder.dll imports all of
+       crypt32 but forwards only).
+     - dbghelp (LocalDB's In-Memory OLTP): `SymFromAddr`,
+       `SymLoadModuleExW`, `SymUnloadModule64`.
+   - Elsewhere (not in these crates; for the agents there): FileZilla
+     Server's GUI also stops on user32 (54 stubs: carets, the clipboard,
+     DDE, DrawEdge/DrawFrameControl, window placement), gdi32 (16:
+     metafiles, font enumeration), kernel32 (13), comdlg32 (4), oleacc,
+     winmm's PlaySoundW, ws2_32's inet_pton/inet_ntop (GnuTLS).
+
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing
    is drawn until a program creates a window on a machine with a screen;
