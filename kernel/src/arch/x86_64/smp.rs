@@ -128,27 +128,60 @@ fn flush_cpus(mask: u64) {
 
 /// Flushes the TLBs of all CPUs (kernel and user entries) and waits until
 /// every online CPU has. Used after kernel mappings are removed, before
-/// their frames or virtual addresses are reused.
+/// their frames or virtual addresses are reused. Interrupts stay off from
+/// the local flush to the end: a thread moved to another CPU in between
+/// would leave that CPU out (`flush_cpus` skips the one it runs on).
 pub fn flush_tlb_everywhere() {
+    let restore = cpu::disable_interrupts();
     flush_local();
     flush_cpus(u64::MAX);
+    if restore {
+        cpu::enable_interrupts();
+    }
 }
 
-/// Makes every other CPU that has user space `root` loaded drop its cached
-/// translations (this CPU invalidates its own entries as it changes them).
-/// Call after changing the space's page tables and before reusing frames
-/// they mapped.
-pub fn flush_user_space(root: u64) {
+/// Shootdowns whose caller had moved to another CPU since its local
+/// invalidation (that CPU was flushed as well).
+static MOVED_FLUSHES: AtomicU64 = AtomicU64::new(0);
+
+/// Shootdowns done after the changing thread moved to another CPU.
+pub fn moved_flushes() -> u64 {
+    MOVED_FLUSHES.load(Ordering::Relaxed)
+}
+
+/// Makes every CPU that has user space `root` loaded drop its cached
+/// translations. `changed_on` is the CPU that invalidated its own entries
+/// as it changed them (`invlpg`), which need not be this one: the space's
+/// lock is released before this runs, and an interrupt held back while
+/// it was held is taken right there and may move the thread to another
+/// CPU. That CPU is then flushed too if it has the space loaded (it was
+/// left out before 2026-11-03, as "this CPU", and kept translations of
+/// pages whose frames were then freed and reused: the Java heap
+/// corruption, `shootdown_test`). Interrupts stay off from choosing the
+/// CPUs to the end, so this CPU stays this CPU. Call after changing the
+/// space's page tables and before reusing frames they mapped.
+pub fn flush_user_space(root: u64, changed_on: Option<u32>) {
     if !STARTED.load(Ordering::Acquire) {
         return;
     }
+    let restore = cpu::disable_interrupts();
     // Order the page-table writes before reading CPU_ROOT; a CPU that loads
     // the root later walks the new tables.
     core::sync::atomic::fence(Ordering::SeqCst);
+    let me = percpu::cpu_index();
+    if changed_on.is_some_and(|c| c != me) {
+        MOVED_FLUSHES.fetch_add(1, Ordering::Relaxed);
+        if CPU_ROOT[me as usize].load(Ordering::SeqCst) == root {
+            flush_local();
+        }
+    }
     let mask = (0..MAX_CPUS)
         .filter(|&c| CPU_ROOT[c].load(Ordering::SeqCst) == root)
         .fold(0u64, |m, c| m | 1 << c);
     flush_cpus(mask);
+    if restore {
+        cpu::enable_interrupts();
+    }
 }
 
 fn on_flush_ipi(_: &mut interrupts::TrapFrame) {

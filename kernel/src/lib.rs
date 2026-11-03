@@ -226,6 +226,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         info!("profile: server (no desktop, no console windows)");
     }
     nt::syscalls::set_trace(cmdline.flag("trace"));
+    sched::CHECK_USER_RETURN.store(cmdline.flag("checkuser"), Ordering::Relaxed);
     // The watchdog's test: CPU 1 stops taking timer interrupts for a while.
     time::set_hang_test(cmdline.flag("hangtest"));
     // The kernel watchdog's test: this thread stays in the kernel 25 s
@@ -364,9 +365,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     let heap = mm::heap::stats();
     let window_flushes = mm::vmap::WINDOW.lock().flushes();
     info!(
-        "stats: {shootdowns} TLB shootdowns ({ipis} IPIs), {} frames leaked by deferred frees, {} freed twice; \
+        "stats: {shootdowns} TLB shootdowns ({ipis} IPIs, {} after a move to another CPU), \
+         {} frames leaked by deferred frees, {} freed twice; \
          heap {} KiB in use, {} large pages, {window_flushes} mapped-window flushes; \
          frames free {} of {}",
+        arch::smp::moved_flushes(),
         arch::paging::leaked_frames(),
         mm::double_frees(),
         heap.in_use / 1024,

@@ -394,6 +394,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("smpsem_test", "ntdll.dll", "Windows/System32"),
     ("xstate_test", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
+    ("shootdown_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
     ("events", "testdll.dll", "gala"),
     ("kernel32_test", "ntdll.dll", "Windows/System32"),
@@ -1610,6 +1611,7 @@ const USER_PROGRAMS: &[&str] = &[
     "smpsem_test",
     "xstate_test",
     "safepoint_test",
+    "shootdown_test",
     "ledger_test",
     "bench",
     "kernel32_test",
@@ -3310,6 +3312,15 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["safepoint_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // TLB shootdowns when the changing thread moves to another
+        // processor right after the change: a reader on processor 1 must
+        // never keep a decommitted page's old translation.
+        name: "shootdown_test",
+        cmdline: "qemu_exit run=shootdown_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["shootdown_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         name: "kernel32_thread_test",
         cmdline: "qemu_exit run=kernel32_thread_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -4287,12 +4298,12 @@ const SCENARIOS: &[Scenario] = &[
         // P1: a Java program on the unmodified JDK: `java Hello.java`
         // (the source launcher compiles it in memory with jdk.compiler).
         // Expected as on Windows 11 (2 processors under QEMU).
-        // Pending: javac 16 times in one JVM (user/java/Stress.java), a
+        // Pending: javac 48 times in one JVM (user/java/Stress.java), a
         // stress run for the Java heap corruption (ROADMAP Priorities).
         name: "java_stress",
-        cmdline: "qemu_exit run=java.exe args=C:/gala/Stress.java%2016 dump=C:/hs_err_pid4.log",
+        cmdline: "qemu_exit checkuser run=java.exe args=C:/gala/Stress.java%2048 dump=C:/hs_err_pid4.log",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["java_stress: 16 compiles, 0 failed", "java.exe finished with status 0x00000000"],
+        expect: &["java_stress: 48 compiles, 0 failed", "java.exe finished with status 0x00000000"],
     },
     Scenario {
         name: "java_hello",

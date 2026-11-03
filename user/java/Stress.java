@@ -1,4 +1,4 @@
-// Runs javac in-process many times, two compilations at a time, compiling
+// Runs javac in-process many times, three compilations at a time, compiling
 // Http.java (the `java_stress` boot scenario, pending: a stress run for the
 // Java heap corruption, ROADMAP Priorities). A compiler crash (javac's
 // "An exception has occurred in the compiler") counts as a failure.
@@ -14,7 +14,7 @@ public class Stress {
     public static void main(String[] args) throws Exception {
         int rounds = args.length > 0 ? Integer.parseInt(args[0]) : 12;
         JavaCompiler javac = ToolProvider.getSystemJavaCompiler();
-        ExecutorService pool = Executors.newFixedThreadPool(2);
+        ExecutorService pool = Executors.newFixedThreadPool(3);
         List<Future<Integer>> results = new ArrayList<>();
         for (int i = 0; i < rounds; i++) {
             String out = "C:/stress/" + i;
