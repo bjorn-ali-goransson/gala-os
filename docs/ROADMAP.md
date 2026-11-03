@@ -1958,6 +1958,18 @@ LX. **A Linux personality, later; its seams now** (the owner,
    The Linux layer itself (ELF loader, system calls, fork, signals, ptys,
    ld.so, epoll; static musl and busybox first) only when the owner
    schedules it.
+   **Seams 2 and 6 done** (2026-11-03; ARCHITECTURE "The seams"): (2) a
+   `Personality` on every process (NT, fixed at creation) and a
+   dispatcher table keyed by it in the kernel's system-call entry (the
+   per-CPU block carries the running thread's personality) and in
+   gala-um's SIGSYS handler; host tests in `kernel/src/personality.rs`
+   (a process of a test-only personality reaches its dispatcher, never
+   NT's); the personality in process events, the crash report and the
+   thread dumps, the dispatcher in the unknown-service line (scenarios
+   events and crash check them). (6) `net` uses `crate::runtime` (core
+   threads and time) instead of `nt::platform`; xtask's
+   `net_does_not_depend_on_nt` keeps it so. Next seams: (3) with RS B2,
+   (1), (4), (5) as their areas are touched.
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing

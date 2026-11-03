@@ -40,9 +40,11 @@ pub mod input;
 pub mod mm;
 pub mod net;
 pub mod nt;
+pub mod personality;
 #[cfg(not(feature = "hosted"))]
 pub mod platform;
 pub mod replay;
+pub mod runtime;
 pub mod sched;
 mod selftest;
 /// Deterministic simulation's scheduler and clock (gala-um `--sim`).

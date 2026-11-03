@@ -7,6 +7,7 @@ use super::cpu;
 use super::gdt::{KERNEL_CS, USER_CS, USER_SS, USER32_CS};
 use super::percpu::{self, KERNEL_RSP_OFFSET, USER_RSP_OFFSET};
 use crate::mm::paging::USER_END;
+use crate::personality::{Dispatchers, NO_DISPATCHER_RESULT, NoDispatcher, Personality};
 
 const IA32_EFER: u32 = 0xc000_0080;
 const EFER_SCE: u64 = 1 << 0;
@@ -103,11 +104,20 @@ unsafe extern "C" {
 
 pub type Handler = fn(&mut SyscallFrame);
 
-static HANDLER: AtomicUsize = AtomicUsize::new(0);
+/// The system-call dispatchers, one per personality (`crate::personality`,
+/// ROADMAP LX seam 2): a call goes to the one of the calling thread's
+/// personality, which the context switch keeps in the per-CPU block.
+static DISPATCHERS: Dispatchers = Dispatchers::new();
 
-/// Sets the function system calls are delivered to (on every CPU).
-pub fn set_handler(handler: Handler) {
-    HANDLER.store(handler as usize, Ordering::Release);
+/// Sets the function the system calls of threads of `personality` are
+/// delivered to (on every CPU); `name` names it in logs. Once per
+/// personality: a second registration is refused and logged.
+pub fn set_handler(personality: Personality, name: &'static str, handler: Handler) {
+    if DISPATCHERS.register(personality, name, handler) {
+        crate::info!("syscall: personality {personality} dispatches to {name}");
+    } else {
+        crate::warn!("syscall: personality {personality} already has a dispatcher; {name} ignored");
+    }
 }
 
 /// Enables SYSCALL on this CPU. Each CPU calls it during its own setup
@@ -126,10 +136,17 @@ pub fn init_cpu() {
 }
 
 extern "C" fn dispatch(frame: &mut SyscallFrame) {
-    let raw = HANDLER.load(Ordering::Acquire);
-    // SAFETY: only `set_handler` stores into HANDLER, and it stores a `Handler`.
-    let handler: Handler = unsafe { core::mem::transmute::<usize, Handler>(raw) };
-    handler(frame);
+    let personality = percpu::personality();
+    if let Err(NoDispatcher(p)) = DISPATCHERS.dispatch(personality, frame) {
+        crate::warn!(
+            "syscall: no dispatcher for personality {p}: system call {:#x} from rip {:#x} \
+             (thread {}) fails with {NO_DISPATCHER_RESULT:#x}",
+            frame.rax,
+            frame.rip,
+            crate::sched::current()
+        );
+        frame.rax = NO_DISPATCHER_RESULT;
+    }
     // NtContinue: return with every register, through IRETQ. Only this
     // thread's request counts (another may have been preempted after
     // making one).
