@@ -158,6 +158,11 @@ explicitly in its commit.
 - **A browser: stock Edge (the owner, 2026-11-03)**: item BR below;
   Chromium headless first, then headful with software rendering, the
   sandbox, then Edge itself.
+- **GPU support (the owner, 2026-11-03)**: item GPU below: software
+  first (Chromium's own SwiftShader for BR stage 2, then DXVK and
+  vkd3d-proton on lavapipe for every program), virtio-gpu 2D (built),
+  then virtio-gpu 3D through Venus; design: ARCHITECTURE "Plan: graphics
+  and GPU".
 - **Remote access and sessions (the owner, 2026-11-03)**: item RS
   below; SSH (item SSH) is its first step.
 - **SSH that works as a remote shell (the owner, 2026-11-03)**: item SSH
@@ -1693,7 +1698,9 @@ RS. **Remote access and sessions** (the owner, 2026-11-03; design:
    - B3a. Window state apart from composition, and presenters: console
      attach and switch; the test presenter (headless render for screen
      checks without QEMU screendumps); a session with no presenter keeps
-     its windows.
+     its windows. The Display seam's `screen_flush` (damaged
+     area) and `screen_changed` (new size), added for virtio-gpu (item
+     GPU, G1), are what a presenter needs too.
    - B3b. Remote shasha: the compositor as a crate that also builds for
      the host, the versioned protocol, the server end (also in the server
      kernel, which has no compositor), a host client (winit); scenario: an
@@ -1744,12 +1751,60 @@ BR. **A web browser: stock Microsoft Edge** (the owner, 2026-11-03).
       WebView2-based programs.
    5. **Performance and graphics**: a real GPU path later (virtio-gpu with
       a D3D11-on-something layer) is out of scope until software rendering
-      works.
+      works. Item GPU plans it: stage 2 needs only GPU's G0 (D3D11, DXGI
+      and DirectComposition that fail cleanly, so Chromium falls back to
+      software compositing and its own SwiftShader); this stage is G3 +
+      G4 (Venus, GPU presentation).
    Observability: Chromium's `--enable-logging=stderr --v=1` into the
    serial log, its crash dumps (crashpad) kept, the ledger's top missing
    functions per stage in the report. Licensing: Chromium is BSD-style;
    Edge's license allows installing and running it but not redistributing
    it, so xtask downloads it and nothing of it is committed.
+
+GPU. **Graphics and GPU** (the owner, 2026-11-03; design: ARCHITECTURE
+   "Plan: graphics and GPU"). Software first, so everything works on every
+   VM and server; paravirtual hardware next; vendor GPUs (WDDM) never in
+   the kernel. Each stage test first:
+   - G0. **For BR stage 2** (next): `dxgi.dll`, `d3d11.dll`, `d3d12.dll`,
+     `dcomp.dll` as stubs that fail as Windows does without a usable
+     adapter (`gpu_stub_test`: D3D11CreateDevice, CreateDXGIFactory1,
+     D3D12CreateDevice and DCompositionCreateDevice fail with the codes
+     Chromium's fallbacks expect, checked on Windows with no adapter or
+     from documentation); then Chromium headful with `--disable-gpu`
+     (software compositing through GDI) and `--use-angle=swiftshader`
+     (its own SwiftShader).
+   - G1. **virtio-gpu 2D**: **done (2026-11-03)**: the modern virtio-pci
+     transport (`arch::virtio::ModernDevice`, `DmaBuffer`), the protocol
+     as plain data and the driver over a `Transport` trait, host-tested
+     against a fake device (start, flush, resize, reset recovery, cursor,
+     errors); `display=virtio` (default unchanged: `fb`), the Display
+     seam's `screen_flush`/`screen_changed`, the desktop re-laid out on a
+     resize; `events=display`, `gputrace`, `gpureset=`; scenarios
+     `virtio_gpu` and `virtio_gpu_reset` (gui_test's screen check on a
+     `virtio-gpu-pci` screen). **Not yet booted** (written while the
+     build machine's disk was full: run them first). Next: shasha's
+     pointer on the hardware cursor, WM_DISPLAYCHANGE and refitting
+     maximized windows on a resize (a test with QEMU's monitor resizing
+     the display), several scanouts as monitors.
+   - G2. **Software 3D for every program**: `vulkan-1.dll` (Khronos
+     loader), Mesa lavapipe (fallback SwiftShader), DXVK (d3d9/10/11,
+     dxgi), vkd3d-proton (d3d12), Mesa llvmpipe `opengl32.dll`; PREBUILT,
+     registered as on Windows; `vk_test`, `d3d11_test`, `gl_test` (screen
+     checks), then DXVK's and vkd3d-proton's own tests. WARP is ruled out
+     (Microsoft's, not redistributable).
+   - G3. **virtio-gpu 3D (Venus)**: `GalaGpu*` calls (contexts, blob
+     resources mapped into processes, submit, fences as waitable
+     objects), Mesa's venus ICD with a gala backend, Zink for GL; G2's
+     tests again on a host GPU (`virtio-gpu-gl-pci,venus=on`).
+   - G4. **GPU presentation**: DXGI flip-model swap chains as resources
+     shasha composes; then BR stage 5.
+   Observability with each stage: per-context submit/fence events, GPU
+   hangs (a fence late by N s) dumped into a crash report, `gala gpu`.
+   Security: GPU contexts are kernel objects with a descriptor on
+   `\Device\Gpu0` (sandboxed renderers refused), per-process host
+   contexts, sharing only by NT handles, per-session presentation, GPU
+   memory charged (R6). Handover (R9): GPU state dropped (devices reset),
+   programs see device-lost and re-create.
 
 PK. **Installing software: `gala install` over winget manifests** (the
    owner, 2026-11-03). winget's community manifests (the winget-pkgs

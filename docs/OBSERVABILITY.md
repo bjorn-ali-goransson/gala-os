@@ -182,7 +182,11 @@ Since 2026-11-03 also `net` (TCP accept, connect, close and reset with
 local and remote addresses), `logon` (LogonUser/LSA logons: pid, user,
 domain, type, how, status; never the password) and `console` (console
 sessions and pseudo consoles created, resized, closed with how many
-programs it ended); `process start` carries the command line. Server
+programs it ended); `process start` carries the command line. Also `display`
+(2026-11-03: virtio-gpu modes set, device resets, failed commands with
+their names); `gputrace` logs every virtio-gpu command and its result,
+and a boot ends with a `display:` line (commands, flushes, mode changes,
+errors, resets, the last error). Server
 logs: `logtee=C:/dir` copies what programs write below a directory to the
 serial log (`logtee: <file>: <line>`; sshd's and sshd-session's logs in
 the sshd scenarios), and `conpty=trace` logs a pseudo console's VT

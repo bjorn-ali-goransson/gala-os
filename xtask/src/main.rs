@@ -2605,9 +2605,16 @@ const UEFI_SCENARIOS: &[&str] = &[
     "selftest",
     "fault-pagefault",
     "gui_test",
+    "virtio_gpu",
+    "virtio_gpu_reset",
     "filezilla",
     "console_window",
 ];
+
+/// Scenarios whose screen is a virtio-gpu (modern only, no VGA: the
+/// firmware's framebuffer is not shown once the kernel runs) instead of
+/// QEMU's standard VGA; ARCHITECTURE "Plan: graphics and GPU".
+const GPU_SCENARIOS: &[&str] = &["virtio_gpu", "virtio_gpu_reset"];
 
 /// What xtask's host-side client does in a net scenario.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -3362,6 +3369,46 @@ const SCENARIOS: &[Scenario] = &[
             "xtask: screen ok",
             "gui_test: ok",
             "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // gui_test with the screen on virtio-gpu (`display=virtio`; QEMU
+        // gets `-vga none -device virtio-gpu-pci`: GPU_SCENARIOS), the same
+        // screen check (SCREEN_SCENARIOS). ARCHITECTURE "Plan: graphics and
+        // GPU", stage G1.
+        name: "virtio_gpu",
+        cmdline: "qemu_exit wallpaper=night display=virtio run=gui_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "display: virtio-gpu at",
+            "1280x800",
+            "gui_test: painted",
+            "gui_test: click",
+            "gui_test: typed hi",
+            "gui_test: menu 202",
+            "gui_test: combo picked Blue",
+            "xtask: screen ok",
+            "gui_test: ok",
+            "exited with status 0x00000000",
+            "display: virtio-gpu 1280x800:",
+        ],
+    },
+    Scenario {
+        // The same with the device reset under the driver after its 30th
+        // flush (invariant 4): the driver sets it up again from the memory
+        // it kept, and the screen check still passes.
+        name: "virtio_gpu_reset",
+        cmdline: "qemu_exit wallpaper=night display=virtio gpureset=30 run=gui_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "display: virtio-gpu at",
+            "display: resetting virtio-gpu under the driver (gpureset=30)",
+            "display: virtio-gpu was reset or gave up",
+            "gui_test: painted",
+            "xtask: screen ok",
+            "gui_test: ok",
+            "exited with status 0x00000000",
+            "1 resets",
         ],
     },
     Scenario {
@@ -5203,6 +5250,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("server_profile", "user32_test"),
     ("server_kernel", "user32_test"),
     ("gala_cli", "gui_test"),
+    ("virtio_gpu", "gui_test"),
+    ("virtio_gpu_reset", "gui_test"),
     ("gala_cli", "gala_cli_test"),
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
@@ -6548,6 +6597,9 @@ fn run_vm(
     if let Some(disk) = disk {
         add_disk(&mut cmd, disk);
     }
+    if GPU_SCENARIOS.contains(&iso_scenario(iso)) {
+        add_gpu(&mut cmd);
+    }
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn QEMU: {e}"))?;
     let qmp_thread = {
         let qmp = qmp.clone();
@@ -6872,157 +6924,158 @@ enum PixelCheck {
 /// start button (Gala's fortress) and the window's button centred, the
 /// clock at the right; the start menu (600 x 640) opens centred above it
 /// at (340, 100). Shaded colours are checked as "some pixel near".
-const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
-    (
-        "gui_test",
-        ScreenCheck {
-            marker: "gui_test: painted",
-            steps: &[
-                ScreenStep {
-                    input: &[],
-                    pixels: &[
-                        PixelCheck::AnyIn(4, 4, 12, 12, 0x060e2b), // the night wallpaper's corner
-                        PixelCheck::At(300, 110, 0xeef2f7),        // the active caption
-                        PixelCheck::At(101 + 100, 133 + 70, 0xff0000), // FillRect's red
-                        PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // COLOR_WINDOW
-                        PixelCheck::AnyIn(101 + 20, 133 + 140, 140, 16, 0x0000ff), // the text
-                        PixelCheck::AnyIn(880, 780, 40, 12, 0xe0e7f3), // the taskbar
-                        PixelCheck::AnyIn(600, 760, 32, 30, 0x167fd6), // the fortress
-                        PixelCheck::AnyIn(640, 788, 48, 8, 0x005fb8), // the active window's pill
-                        PixelCheck::AnyIn(648, 760, 32, 24, 0xff8000), // its class icon
-                        PixelCheck::At(121, 117, 0xff8000),        // and in its caption
-                    ],
-                },
-                ScreenStep {
-                    // From the middle to the start button (615, 776), a click.
-                    input: &[
-                        "mouse_move 0 255",
-                        "mouse_move -25 121",
-                        "mouse_button 1",
-                        "mouse_button 0",
-                    ],
-                    pixels: &[
-                        PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the start menu
-                        PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
-                        PixelCheck::AnyIn(398, 226, 32, 32, 0x4a80f0), // "Hello window"
-                    ],
-                },
-                ScreenStep {
-                    // Escape closes the menu; to client (250, 50) at (351, 183)
-                    // and a click: the program's green square.
-                    input: &[
-                        "sendkey esc",
-                        "mouse_move -132 -198",
-                        "mouse_move -132 -198",
-                        "mouse_move 0 -197",
-                        "mouse_button 1",
-                        "mouse_button 0",
-                    ],
-                    pixels: &[
-                        PixelCheck::AnyIn(343, 175, 16, 16, 0x00c000), // the green mark
-                        PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // the menu closed
-                    ],
-                },
-                ScreenStep {
-                    // Typing goes to the active window: "hi" in black.
-                    input: &["sendkey h", "sendkey i"],
-                    pixels: &[PixelCheck::AnyIn(101 + 20, 133 + 200, 24, 16, 0x000000)],
-                },
-                ScreenStep {
-                    // A right click at client (250, 50): the popup menu
-                    // (One, Two) at (351, 183), over the window.
-                    input: &["mouse_button 2", "mouse_button 0"],
-                    pixels: &[
-                        PixelCheck::At(470, 200, 0xf9f9f9),            // the menu
-                        PixelCheck::AnyIn(386, 190, 30, 14, 0x1b1b1b), // "One"
-                    ],
-                },
-                ScreenStep {
-                    // Down to "Two" (381, 222) and a click: TrackPopupMenu
-                    // returns 202, a blue square at the point; the menu
-                    // goes.
-                    input: &["mouse_move 30 39", "mouse_button 1", "mouse_button 0"],
-                    pixels: &[
-                        PixelCheck::AnyIn(345, 177, 12, 12, 0x0000ff), // the blue mark
-                        PixelCheck::At(470, 200, 0xffffff),            // the menu gone
-                    ],
-                },
-                ScreenStep {
-                    // The edit control at client (220, 230) - (370, 256):
-                    // a click in it (396, 376) and "ok" typed show there, with
-                    // the focused edit's accent underline.
-                    input: &[
-                        "mouse_move 15 154",
-                        "mouse_button 1",
-                        "mouse_button 0",
-                        "sendkey o",
-                        "sendkey k",
-                    ],
-                    pixels: &[
-                        PixelCheck::AnyIn(326, 368, 30, 16, 0x1b1b1b), // "ok"
-                        PixelCheck::AnyIn(323, 386, 140, 3, 0x005fb8), // the underline
-                    ],
-                },
-                ScreenStep {
-                    // The drop-down list combo box at client (220, 20) -
-                    // (370, 46), screen (321, 153) - (471, 179): a click on
-                    // it (396, 166) drops its list, a popup under it
-                    // (y 179..257, items of 24 rows from 182): light grey,
-                    // "Red" selected (the selected item's tint and accent
-                    // pill), "Blue" in the third row.
-                    input: &["mouse_move 0 -210", "mouse_button 1", "mouse_button 0"],
-                    pixels: &[
-                        PixelCheck::At(468, 220, 0xf9f9f9),            // the list
-                        PixelCheck::At(321, 220, 0xc8c8c8),            // its border
-                        PixelCheck::AnyIn(325, 186, 4, 16, 0x005fb8),  // the pill
-                        PixelCheck::AnyIn(335, 232, 40, 20, 0x1b1b1b), // "Blue"
-                    ],
-                },
-                ScreenStep {
-                    // The pointer on "Blue" (396, 242) lights it.
-                    input: &["mouse_move 0 76"],
-                    pixels: &[
-                        PixelCheck::At(332, 242, 0xe6e8eb), // the hover
-                        PixelCheck::At(332, 194, 0xeeeff1), // "Red", selected
-                    ],
-                },
-                ScreenStep {
-                    // A click picks it: the list goes, the program paints
-                    // its magenta square at client (380, 60) - (392, 72).
-                    input: &["mouse_button 1", "mouse_button 0"],
-                    pixels: &[
-                        PixelCheck::At(487, 199, 0xff00ff),            // the mark
-                        PixelCheck::At(468, 220, 0xffffff),            // the list gone
-                        PixelCheck::AnyIn(331, 156, 40, 20, 0x1b1b1b), // "Blue" shown
-                    ],
-                },
-                ScreenStep {
-                    // The pointer rests on the edit (396, 376): after the
-                    // initial delay its tooltip shows 20 rows below the
-                    // pointer, at (396, 396): a grey border, a light face,
-                    // "Type here" in dark text from (405, 401).
-                    input: &["mouse_move 0 134"],
-                    pixels: &[
-                        PixelCheck::At(396, 405, 0xc8c8c8),            // the border
-                        PixelCheck::At(398, 398, 0xf9f9f9),            // the face
-                        PixelCheck::AnyIn(405, 400, 50, 18, 0x1b1b1b), // "Type here"
-                    ],
-                },
-                ScreenStep {
-                    // Off the edit, into the client area (396, 276): the
-                    // tip goes (the window's white under it again).
-                    input: &["mouse_move 0 -100"],
-                    pixels: &[PixelCheck::At(398, 398, 0xffffff)],
-                },
-                ScreenStep {
-                    // The close button (x 453..498 of the caption): the program
-                    // ends (WM_SYSCOMMAND SC_CLOSE; no screendump).
-                    input: &["mouse_move 80 -159", "mouse_button 1", "mouse_button 0"],
-                    pixels: &[],
-                },
+const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "gui_test: painted",
+    steps: &[
+        ScreenStep {
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(4, 4, 12, 12, 0x060e2b), // the night wallpaper's corner
+                PixelCheck::At(300, 110, 0xeef2f7),        // the active caption
+                PixelCheck::At(101 + 100, 133 + 70, 0xff0000), // FillRect's red
+                PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // COLOR_WINDOW
+                PixelCheck::AnyIn(101 + 20, 133 + 140, 140, 16, 0x0000ff), // the text
+                PixelCheck::AnyIn(880, 780, 40, 12, 0xe0e7f3), // the taskbar
+                PixelCheck::AnyIn(600, 760, 32, 30, 0x167fd6), // the fortress
+                PixelCheck::AnyIn(640, 788, 48, 8, 0x005fb8), // the active window's pill
+                PixelCheck::AnyIn(648, 760, 32, 24, 0xff8000), // its class icon
+                PixelCheck::At(121, 117, 0xff8000),        // and in its caption
             ],
         },
-    ),
+        ScreenStep {
+            // From the middle to the start button (615, 776), a click.
+            input: &["mouse_move 0 255", "mouse_move -25 121", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the start menu
+                PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
+                PixelCheck::AnyIn(398, 226, 32, 32, 0x4a80f0), // "Hello window"
+            ],
+        },
+        ScreenStep {
+            // Escape closes the menu; to client (250, 50) at (351, 183)
+            // and a click: the program's green square.
+            input: &[
+                "sendkey esc",
+                "mouse_move -132 -198",
+                "mouse_move -132 -198",
+                "mouse_move 0 -197",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::AnyIn(343, 175, 16, 16, 0x00c000), // the green mark
+                PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // the menu closed
+            ],
+        },
+        ScreenStep {
+            // Typing goes to the active window: "hi" in black.
+            input: &["sendkey h", "sendkey i"],
+            pixels: &[PixelCheck::AnyIn(101 + 20, 133 + 200, 24, 16, 0x000000)],
+        },
+        ScreenStep {
+            // A right click at client (250, 50): the popup menu
+            // (One, Two) at (351, 183), over the window.
+            input: &["mouse_button 2", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::At(470, 200, 0xf9f9f9),            // the menu
+                PixelCheck::AnyIn(386, 190, 30, 14, 0x1b1b1b), // "One"
+            ],
+        },
+        ScreenStep {
+            // Down to "Two" (381, 222) and a click: TrackPopupMenu
+            // returns 202, a blue square at the point; the menu
+            // goes.
+            input: &["mouse_move 30 39", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::AnyIn(345, 177, 12, 12, 0x0000ff), // the blue mark
+                PixelCheck::At(470, 200, 0xffffff),            // the menu gone
+            ],
+        },
+        ScreenStep {
+            // The edit control at client (220, 230) - (370, 256):
+            // a click in it (396, 376) and "ok" typed show there, with
+            // the focused edit's accent underline.
+            input: &[
+                "mouse_move 15 154",
+                "mouse_button 1",
+                "mouse_button 0",
+                "sendkey o",
+                "sendkey k",
+            ],
+            pixels: &[
+                PixelCheck::AnyIn(326, 368, 30, 16, 0x1b1b1b), // "ok"
+                PixelCheck::AnyIn(323, 386, 140, 3, 0x005fb8), // the underline
+            ],
+        },
+        ScreenStep {
+            // The drop-down list combo box at client (220, 20) -
+            // (370, 46), screen (321, 153) - (471, 179): a click on
+            // it (396, 166) drops its list, a popup under it
+            // (y 179..257, items of 24 rows from 182): light grey,
+            // "Red" selected (the selected item's tint and accent
+            // pill), "Blue" in the third row.
+            input: &["mouse_move 0 -210", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::At(468, 220, 0xf9f9f9),            // the list
+                PixelCheck::At(321, 220, 0xc8c8c8),            // its border
+                PixelCheck::AnyIn(325, 186, 4, 16, 0x005fb8),  // the pill
+                PixelCheck::AnyIn(335, 232, 40, 20, 0x1b1b1b), // "Blue"
+            ],
+        },
+        ScreenStep {
+            // The pointer on "Blue" (396, 242) lights it.
+            input: &["mouse_move 0 76"],
+            pixels: &[
+                PixelCheck::At(332, 242, 0xe6e8eb), // the hover
+                PixelCheck::At(332, 194, 0xeeeff1), // "Red", selected
+            ],
+        },
+        ScreenStep {
+            // A click picks it: the list goes, the program paints
+            // its magenta square at client (380, 60) - (392, 72).
+            input: &["mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::At(487, 199, 0xff00ff),            // the mark
+                PixelCheck::At(468, 220, 0xffffff),            // the list gone
+                PixelCheck::AnyIn(331, 156, 40, 20, 0x1b1b1b), // "Blue" shown
+            ],
+        },
+        ScreenStep {
+            // The pointer rests on the edit (396, 376): after the
+            // initial delay its tooltip shows 20 rows below the
+            // pointer, at (396, 396): a grey border, a light face,
+            // "Type here" in dark text from (405, 401).
+            input: &["mouse_move 0 134"],
+            pixels: &[
+                PixelCheck::At(396, 405, 0xc8c8c8),            // the border
+                PixelCheck::At(398, 398, 0xf9f9f9),            // the face
+                PixelCheck::AnyIn(405, 400, 50, 18, 0x1b1b1b), // "Type here"
+            ],
+        },
+        ScreenStep {
+            // Off the edit, into the client area (396, 276): the
+            // tip goes (the window's white under it again).
+            input: &["mouse_move 0 -100"],
+            pixels: &[PixelCheck::At(398, 398, 0xffffff)],
+        },
+        ScreenStep {
+            // The close button (x 453..498 of the caption): the program
+            // ends (WM_SYSCOMMAND SC_CLOSE; no screendump).
+            input: &["mouse_move 80 -159", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+    ],
+};
+
+/// Scenarios with screen checks.
+const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
+    ("gui_test", GUI_TEST_SCREEN),
+    // The same program and checks with the screen on virtio-gpu (stage G1
+    // of ARCHITECTURE "Plan: graphics and GPU"): QEMU's screendump shows
+    // the scanout, so the pixels got there by TRANSFER_TO_HOST_2D and
+    // RESOURCE_FLUSH; the second resets the device midway (gpureset=).
+    ("virtio_gpu", GUI_TEST_SCREEN),
+    ("virtio_gpu_reset", GUI_TEST_SCREEN),
     (
         // `gala snap left` put gala_cli_test's window (client area
         // RGB 2e 8b 57) on the left half of the work area (640 x 752 on
@@ -7439,6 +7492,12 @@ fn add_net_to(cmd: &mut Command, port: u16, guest: u16) {
         ))
         // The legacy (0.9.5) interface: one I/O BAR (see docs/ARCHITECTURE.md).
         .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
+}
+
+/// A virtio-gpu (modern virtio-pci) as the only display, at 1280 x 800
+/// (its preferred mode, which GET_DISPLAY_INFO and the EDID report).
+fn add_gpu(cmd: &mut Command) {
+    cmd.args(["-vga", "none", "-device", "virtio-gpu-pci,xres=1280,yres=800,edid=on"]);
 }
 
 /// A virtio-blk disk backed by the raw image `path` (the legacy

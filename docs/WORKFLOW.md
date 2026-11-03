@@ -357,6 +357,19 @@ charged). Look
   WSADuplicateSocket) counts as a stream. The AFD datagram layouts
   (AFD_SEND_INFO_UDP, AFD_RECV_INFO_UDP) are ReactOS's, to be verified
   on Windows.
+- **GPU tests**: a scenario in xtask's `GPU_SCENARIOS` boots with `-vga
+  none -device virtio-gpu-pci,xres=1280,yres=800,edid=on` (UEFI) and its
+  command line says `display=virtio`; QEMU's `screendump` then shows the
+  virtio-gpu scanout, so the usual SCREEN_SCENARIOS checks work. The
+  device is modern-only (no `disable-legacy=off` like virtio-blk/net):
+  its driver uses `arch::virtio::ModernDevice`. With such a display the
+  boot splash is not visible (the firmware's framebuffer is no longer
+  shown): read the serial log. `gputrace` logs every command,
+  `events=display` the modes, resets and errors.
+- **Logging from host-tested kernel code**: `info!`/`warn!` write to the
+  serial port, which a host unit test does not have (the test dies with
+  SIGSEGV). Code that host tests reach logs through a wrapper that is
+  compiled out under `cfg(test)` (`display::virtio_gpu`'s `log!`).
 - **Disk tests**: VMs have no disk unless the scenario is in xtask's
   `DISK_SCENARIOS` (name, size, what xtask writes into the fresh raw
   image, what the image must hold afterwards). The image is
@@ -1489,6 +1502,8 @@ the in-guest, deterministic version.
 | Scheduler | `kernel/src/sched/` |
 | NT personality (objects, processes, files, sections, syscalls) | `kernel/src/nt/` |
 | Ramfs | `kernel/src/fs/` |
+| Disk (virtio-blk) | `kernel/src/disk/` |
+| Display (virtio-gpu; the protocol and driver host-tested) | `kernel/src/display/` |
 | Test runtime for user programs | `user/ntrt/` |
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
 | Checked-in binaries, Windows runner | `user/bin/` |

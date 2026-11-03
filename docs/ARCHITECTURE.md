@@ -28,6 +28,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/handover/         kernel handover (R9): the record format, ELF loading, what is carried
   src/arch/x86_64/handover.rs  the machine side: image, page tables, trampoline, parked CPUs [unsafe allowed]
   src/disk/             the disk: virtio-blk, whole-sector reads/writes/flush
+  src/display/          the screen on virtio-gpu (`display=virtio`): protocol, driver (host-tested), PCI transport
   src/nt/               NT personality: PE loader, processes, handles, syscalls
   src/nt/platform.rs    the seam: traits for what nt needs from the machine
   src/platform.rs       the kernel's implementation of nt::platform
@@ -110,9 +111,12 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `spintest` | the boot thread spins in the kernel for 25 s (the kernel-thread watchdog's scenario) |
 | `hangtest` | CPU 1 spins with interrupts off for 9 s, 3 s after its timer starts (the hang watchdog's scenario) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
+| `display=virtio` | the screen is the first virtio-gpu (2D: a scanout resource, damage flushed, resizes followed) instead of the bootloader's framebuffer (`display=fb`, the default); without one the framebuffer is used ("Plan: graphics and GPU", G1) |
+| `gputrace` | log every virtio-gpu command and its result (`gputrace: SET_SCANOUT -> Ok(())`) |
+| `gpureset=<n>` | the virtio-gpu is reset under the driver after the n-th flush (the driver's recovery test) |
 | `profile=server` | never bring up the graphical interface: the desktop is not drawn even with a screen (windows still exist), `console=` starts no console window (ROADMAP SD) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |
-| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console` or `all` (`mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
+| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display` or `all` (`display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
 | `restart=<file>[:<max>][,...]` | those `run=` programs are services: started again when they end (1 s later, at most `max` times, default 10; a run of over a minute starts the count again), logged as `service: ... restarting it (n of max)` and a `service restart` event (scenario `service_restart`; sshd_server's sshd) |
 | `logtee=C:/dir` | what programs write to files below that directory (percent-encoded) is also logged line by line, `logtee: <file>: <line>` (Win32-OpenSSH's %ProgramData%\ssh\logs in the sshd scenarios: the logs reach the failed log even when xtask stops the VM) |
 | `conpty=trace` | pseudo consoles' hosts log both directions of their VT traffic (`conpty <id> in|out|note: ...`) |
@@ -2685,10 +2689,14 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   still addressed to its top-level window. Caps Lock toggles. TranslateMessage
   posts WM_CHAR (WM_SYSCHAR) for a key down, US layout with Shift, Caps
   Lock and Ctrl (Ctrl+letter: 1-26).
-- **Display seam** (`nt::platform::Display`): `screen_size` and
-  `screen_write_row`. The kernel takes the framebuffer from the screen
-  console on first use (`console::take_framebuffer`; the console then
-  only writes to the serial port) and starts the input thread. gala-um
+- **Display seam** (`nt::platform::Display`): `screen_size`,
+  `screen_write_row`, `screen_flush` (a damaged rectangle's rows are
+  written: a GPU shows them) and `screen_changed` (a new size). The
+  screen is the bootloader's framebuffer, or with `display=virtio` a
+  virtio-gpu ("Plan: graphics and GPU", G1). The kernel takes the
+  framebuffer from the screen console on first use
+  (`console::take_framebuffer`; the console then only writes to the
+  serial port) and starts the input thread. gala-um
   has no screen (the window syscalls return STATUS_NOT_SUPPORTED). BIOS
   boots have no framebuffer either, so screen tests are UEFI scenarios.
 - **Devices** (`arch::ps2`, `input.rs`): the i8042 polled every 5 ms from
@@ -3563,6 +3571,264 @@ Windows' real RDP (MS-RDPBCGR is openly documented; IronRDP's server
 crate is a candidate) if mstsc compatibility is wanted. Interim, with no
 gala work: QEMU's own VNC (`-vnc :1`) shows gala's screen remotely.
 
+## Plan: graphics and GPU (proposed 2026-11-03; stage G1 built)
+
+The owner's goal: GPU support, first for the browser (ROADMAP BR stage 2,
+then stage 5) and for remote shasha (RS), then for programs in general.
+The plan below is ordered for the shortest path to a rendered web page,
+and stays usable on every VM and on servers (nothing needs a GPU to
+work). ROADMAP item GPU tracks it. Clean room: Microsoft's public
+documentation, the Khronos specifications, the virtio specification and
+open-source projects (Mesa, DXVK, vkd3d-proton, ANGLE, SwiftShader,
+virglrenderer, QEMU) may be read; nothing is disassembled; everything
+shipped or borrowed is recorded in THIRD_PARTY.md with its licence.
+
+### What Windows programs need
+
+- **DXGI** (`dxgi.dll`): factories, adapters and outputs, swap chains
+  that present to an HWND (flip model: `DXGI_SWAP_EFFECT_FLIP_DISCARD`),
+  shared resources (NT handles), `DXGI_ERROR_DEVICE_REMOVED` when the GPU
+  goes away.
+- **Direct3D 11 and 12** (`d3d11.dll`, `d3d12.dll`; older programs
+  `d3d9.dll`, `d3d10*.dll`): devices, resources, shaders (DXBC, DXIL),
+  command lists. The runtime is Microsoft's on Windows; gala needs its own
+  (open source, below).
+- **Direct2D and DirectWrite** (`d2d1.dll`, `dwrite.dll`): D2D draws on
+  D3D11 (or WARP); DirectWrite (fonts, shaping, glyph rasterization) is
+  CPU work and is needed without any GPU (Chromium's text, BR stage 1).
+- **OpenGL** (`opengl32.dll`, WGL: `wglCreateContext`,
+  `wglGetProcAddress`, gdi32's `ChoosePixelFormat`/`SetPixelFormat`/
+  `SwapBuffers`): on Windows Microsoft's opengl32 loads a vendor ICD; gala
+  has no Microsoft opengl32 to keep, so Mesa's own `opengl32.dll` (gallium
+  WGL) is the whole implementation.
+- **Vulkan** (`vulkan-1.dll`: the Khronos loader, Apache-2.0) finding
+  ICDs through `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` (JSON manifests);
+  presentation through `VK_KHR_win32_surface`.
+- **DirectComposition** (`dcomp.dll`): Chromium composes overlays with it
+  when it has a GPU, and does without it when creating a DComp device
+  fails.
+- GDI (what exists: gdi32 draws into client pixel buffers that shasha
+  composes) stays the path every program has.
+
+### Options
+
+**Software first** (every VM, servers, CI):
+
+- **Chromium needs no system GPU for BR stage 2.** With `--disable-gpu`
+  it composites in software (Skia raster) and presents through GDI (a
+  DIB blitted to the window, which gala's gdi32 already does). For WebGL
+  and GPU compositing in software it uses what it ships itself: ANGLE
+  (GLES on Vulkan) over SwiftShader (`vk_swiftshader.dll`, Apache-2.0),
+  `--use-angle=swiftshader`; SwiftShader's Win32 surface presents through
+  GDI too. On Windows Chromium's default is ANGLE on D3D11, so gala must
+  make D3D11/DXGI fail *cleanly* (D3D11CreateDevice and
+  CreateDXGIFactory* return an error, DirectComposition creation fails)
+  and Chromium falls back. Shortest path: stubs that fail, plus the JIT
+  memory, threads and GDI that already work.
+- **System-wide D3D on Vulkan**: DXVK (zlib licence: `d3d9`, `d3d10core`,
+  `d3d11`, `dxgi`) and vkd3d-proton (LGPL-2.1: `d3d12`, `d3d12core`) are
+  Windows PE DLLs that run unmodified on Windows over any Vulkan driver,
+  so they run on gala over a Vulkan ICD with no gala code in them.
+- **The software Vulkan driver**: Mesa's **lavapipe** (MIT; Vulkan 1.3
+  conformant, LLVM-JITted, builds for Windows) is recommended: one
+  codebase with **llvmpipe**, Mesa's software GL, which gives
+  `opengl32.dll` (gallium WGL) too; Mesa's developers track what DXVK and
+  vkd3d-proton need on lavapipe. **SwiftShader** (Apache-2.0) is the
+  fallback and is what Chromium brings anyway. Which one passes DXVK's and
+  vkd3d-proton's own tests in gala decides (stage G2's tests); both are
+  user-mode DLLs needing only JIT memory, threads, and GDI to present.
+- **WARP is ruled out**: Microsoft's software rasterizer
+  (`d3d10warp.dll`) ships only as part of Windows; it is not
+  redistributable, and it would need Microsoft's D3D runtime around it
+  too. gala's D3D comes from DXVK/vkd3d-proton instead (a program that
+  asks for `D3D_DRIVER_TYPE_WARP` gets DXVK's device on lavapipe).
+
+**Paravirtual hardware** (QEMU, cloud VMs with virtio-gpu):
+
+- **virtio-gpu 2D** (stage G1, built): scanouts, 2D resources backed by
+  guest pages, TRANSFER_TO_HOST_2D + RESOURCE_FLUSH of damaged
+  rectangles, the cursor queue, EDID, display-change events (the host
+  window resized), reset recovery. Multiple scanouts (monitors) and
+  `EnumDisplayMonitors` later. It gives a resizable display, a hardware
+  cursor and the base for 3D; drawing stays shasha's (CPU).
+- **virtio-gpu 3D** through virglrenderer on the host: **Venus** (Vulkan
+  serialized to the host's Vulkan driver; QEMU 9.2+:
+  `virtio-gpu-gl-pci,venus=on,blob=on,hostmem=...`) is recommended; GL
+  comes from Mesa's **Zink** (GL on Vulkan) over it, so the guest has one
+  GPU API. The older virgl protocol (GL only, Gallium/TGSI) is not
+  planned. The guest ICD is Mesa's venus driver (MIT), which today talks
+  to Linux's DRM virtgpu interface; gala adds a backend for its own
+  `GalaGpu*` calls. Needs: F_CONTEXT_INIT (a context per capset: Venus),
+  F_RESOURCE_BLOB with host memory mapped through the device's
+  shared-memory region, SUBMIT_3D with per-context fences on rings. DXVK
+  and vkd3d-proton then run on the host GPU unchanged.
+- **shasha with a GPU**: in G1 shasha composes on the CPU and only the
+  damaged rectangles go to the host. Later a GPU presenter: a DXGI swap
+  chain's buffers are host resources and shasha composes window surfaces
+  as resources, keeping its damage tracking so an idle desktop sends
+  nothing.
+
+**Real hardware later**: Intel, AMD and NVIDIA kernel drivers are out of
+scope. Windows' model is WDDM: a kernel-mode miniport under `dxgkrnl`
+plus a user-mode driver behind the D3D runtime's DDI. Running vendor
+WDDM drivers would mean reimplementing dxgkrnl's driver interface and GPU
+scheduling to the letter, for signed closed binaries whose licences tie
+them to Windows: gala avoids it. Its own model is small: the kernel
+moves command buffers, memory and fences for a paravirtual device, and
+user-mode ICDs do the rest. The cheap path to a real GPU is the host's:
+under gala-um a Vulkan ICD can call the Linux host's Vulkan (as Wine's
+winevulkan does), and in a VM, Venus reaches the host's GPU.
+
+### Recommendation and order
+
+1. **G0, for BR stage 2**: no GPU. `dxgi.dll`, `d3d11.dll`, `d3d12.dll`,
+   `dcomp.dll` as gala stubs that fail as Windows does without a usable
+   adapter (the exact codes checked against Chromium's fallback paths),
+   so Chromium runs `--disable-gpu` software compositing and then
+   `--use-angle=swiftshader` with its own SwiftShader. DirectWrite is
+   BR's own work.
+2. **G1, virtio-gpu 2D** (built 2026-11-03): below.
+3. **G2, software 3D for every program**: `vulkan-1.dll` (Khronos
+   loader), lavapipe as the ICD, DXVK for d3d9/10/11 and dxgi,
+   vkd3d-proton for d3d12, Mesa's llvmpipe `opengl32.dll`; all PREBUILT
+   (fetched and checked by xtask, nothing committed), registered in the
+   registry as on Windows. Tests: `vk_test` (instance, device, a triangle
+   read back), `d3d11_test` (device, swap chain on an HWND, a drawn frame
+   in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then
+   DXVK's and vkd3d-proton's test programs. D3D11 programs then work
+   everywhere, slowly.
+4. **G3, virtio-gpu 3D (Venus)**: the `GalaGpu*` calls, blob resources,
+   per-context fences; Mesa's venus ICD with a gala backend; Zink for GL.
+   The G2 programs run again on the host GPU (a scenario with
+   `virtio-gpu-gl-pci,venus=on` where the host has a GPU; skipped
+   otherwise).
+5. **G4, GPU presentation**: DXGI flip-model swap chains presented as
+   resources (no readback through GDI), shasha composing resources, then
+   BR stage 5 (Chromium with `--use-angle=vulkan` on Venus).
+
+### Kernel and user mode
+
+- **Kernel**: the virtio-gpu transport (modern virtio-pci), resource ids
+  and their guest memory, mapping blob memory into a process (as a
+  section's view is mapped), fences (a context's fence completes an NT
+  waitable object), command submission without reading the commands (the
+  host's virglrenderer validates Venus streams; the kernel checks
+  resource ownership and memory ranges only), and the display's scanouts.
+  Calls (proposed, `Gala*` family, versioned records as invariant 3
+  asks): `GalaGpuOpen` (a context of a capset: a handle),
+  `GalaGpuResource` (create 2D/blob, map, unmap, export as an NT handle
+  for DXGI sharing), `GalaGpuSubmit` (bytes, ring, fence out),
+  `GalaGpuWait` (or a wait on the fence's event), `GalaGpuPresent` (a
+  resource on a window: shasha's GPU presenter).
+- **User mode**: everything API-shaped: vulkan-1.dll, the ICDs
+  (lavapipe; venus with the gala backend), DXVK, vkd3d-proton, opengl32,
+  DXGI's presentation (GDI blits in G2, GalaGpuPresent in G4).
+- **Security**: a GPU context and resource are kernel objects in the
+  process's handle table, with a descriptor on `\Device\Gpu0` deciding
+  who may open one (a low-integrity or AppContainer renderer may be
+  refused: BR stage 3; Chromium already keeps GPU work in its GPU
+  process); each process's contexts are separate virtio-gpu contexts, so
+  the host keeps them apart; resources cross processes only as NT handles
+  (DuplicateHandle, as DXGI shared handles); a context belongs to its
+  session (RS) and presents only to windows of the caller's desktop. GPU
+  memory is charged to the process (R6).
+- **Kernel handover (R9)**: GPU state is not carried. Before a handover
+  every virtio device is reset (`arch::virtio::reset_all`, which since
+  G1 also resets modern devices through the status register their driver
+  registered); the next kernel probes again and shows a new screen; 3D
+  contexts are lost, which programs see as `VK_ERROR_DEVICE_LOST` /
+  `DXGI_ERROR_DEVICE_REMOVED` (as after a TDR on Windows) and handle by
+  re-creating them; presenters reconnect (RS B5).
+- **Observability**: `events=display` (modes, resets, failed commands:
+  built in G1), `gputrace` (every command and its result: built), the
+  `display:` stats line at the end of a boot (built); later per-context
+  submit and fence events (sizes, fence ids, latency); a fence not
+  signalled in N seconds treated as a GPU hang: the context's last
+  submissions and the device status dumped into a crash report and the
+  event stream, the context reset; `gala gpu` (contexts, resources,
+  memory per process).
+
+### How it serves BR and RS
+
+- **BR stage 2** needs G0 only (stubs that fail cleanly) plus what BR
+  lists itself (DirectWrite, input). **BR stage 5** is G3 + G4.
+- **RS**: the remote presenter sends damaged rectangles of shasha's
+  composition (or of window surfaces); G1's seam additions are what a
+  presenter needs too: `screen_flush` with the damaged area, and
+  `screen_changed` for a new size (a remote client's window resized, as
+  a host window resizes virtio-gpu's scanout). Software rendering (G2)
+  keeps every pixel in guest memory, so a remote client gets 3D-drawn
+  windows without readback; with G3 a remote presenter reads resources
+  back (TRANSFER_FROM_HOST) or, later, has the host encode video.
+
+### virtio-gpu 2D, the first driver (G1, built 2026-11-03)
+
+- **Transport** (`arch::virtio::ModernDevice`): virtio-gpu has no legacy
+  interface (virtio-blk and -net still use the legacy one), so the
+  modern one: the PCI capability list (`pci::Function::capabilities`),
+  vendor capabilities for the common, notify and device-configuration
+  structures (`find_layout`: the first of each), memory BARs (32/64-bit),
+  mapped uncached once per device (`paging::map_mmio`); reset,
+  ACKNOWLEDGE, DRIVER, features (VERSION_1 always, plus what the driver
+  asks), FEATURES_OK checked, queues (the legacy `Virtqueue`, its three
+  parts given separately, sized the largest power of two up to 16),
+  DRIVER_OK. `reinit` sets it up again in place; `needs_reset` is FAILED,
+  NEEDS_RESET or DRIVER_OK gone. Each live device registers its status
+  register in `MODERN_STATUS` so `reset_all` (kernel handover) resets it
+  without mapping anything. `DmaBuffer`: zeroed device-readable memory in
+  physically contiguous chunks of up to 1 MiB (halved when memory is
+  fragmented), written across chunk boundaries (`overlap`).
+- **Protocol** (`display::virtio_gpu::proto`): plain data: request
+  encoders, response decoders (display info, EDID and its parsing),
+  error codes; host unit tests.
+- **Driver** (`display::virtio_gpu::Gpu<T: Transport>`): `start` reads
+  the display info (and the EDID with F_EDID), takes the first enabled
+  scanout (else scanout 0 at 1024 x 768), creates a B8G8R8X8 resource
+  (shasha's `0x00RRGGBB` pixels as they are), attaches its memory, sets
+  the scanout and shows it. `write_row` writes guest memory; `flush(rect)`
+  is TRANSFER_TO_HOST_2D (at the rectangle's first pixel) then
+  RESOURCE_FLUSH. `poll` reads the configuration's events: on DISPLAY it
+  clears it, reads the display info and switches mode if the scanout's
+  size changed (the new resource shown first, then the old one detached,
+  unreferenced and its memory freed). Cursor: a 64 x 64 B8G8R8A8
+  resource and UPDATE_CURSOR/MOVE_CURSOR on the cursor queue (driver
+  API; shasha still draws its pointer itself: wiring it is a next step).
+  Recovery (invariant 4): a command that finds the device reset (or gets
+  no answer for 2 s, which marks it broken) re-initializes the transport
+  and re-creates the screen's resource from the memory the driver kept,
+  so the picture comes back without a redraw, and the cursor too. Field
+  order drops the transport (which resets the device) before the memory.
+  Every command is counted; failures go to `stats.last_error` and
+  `events=display`. Tested on the host against a fake device that
+  decodes the requests and reads "guest memory" (`virtio_gpu/tests.rs`:
+  start, flush, rows across chunks, resize, display off, reset recovery
+  from flush and from poll, cursor, device errors, too many chunks, drop
+  order).
+- **Kernel glue** (`display`, `display::pci`): `display=virtio` probes
+  the first virtio-gpu (1af4:1050) after the disk; without one, or if it
+  does not start, the framebuffer is used (logged). The control queue has
+  one 8 KiB slot (a request and its answer; ATTACH_BACKING up to 500
+  chunks), the cursor queue one 64-byte slot; requests are waited for by
+  spinning (the desktop flushes under its lock), bounded by 2 s.
+  `gputrace`, `gpureset=<n>` (reset after the n-th flush: the recovery
+  test), the `display:` line at the end of a boot.
+- **Seam** (`nt::platform::Display`): `screen_flush(x, y, w, h)` after
+  the desktop writes a damaged rectangle's rows (nothing for a
+  framebuffer) and `screen_changed()` (polled by `desktop::tick`, every
+  second from the input thread): a new size re-lays out the desktop
+  (`Desktop::set_screen`) and redraws it. Either way the console stops
+  drawing on the framebuffer when the desktop takes the screen.
+- Scenarios: `virtio_gpu` (gui_test with `display=virtio`; QEMU gets
+  `-vga none -device virtio-gpu-pci,xres=1280,yres=800,edid=on`;
+  gui_test's screen check against QEMU's screendump of the scanout) and
+  `virtio_gpu_reset` (the same with `gpureset=30`).
+- TODO: shasha's pointer on the hardware cursor; maximized and docked
+  windows refitted and WM_DISPLAYCHANGE sent on a resize; multiple
+  scanouts; device interrupts instead of spinning; the boot splash on
+  virtio-gpu (the console draws on the firmware's framebuffer, which a
+  `virtio-gpu-pci` display no longer shows once the driver has started:
+  from then until the desktop draws, the screen is black).
+
 ## UI Automation
 
 The aim is screen tests that drive programs as testers do on Windows:
@@ -4204,7 +4470,10 @@ one for the whole kernel means `time.rs`.
    sending it checks the device and sets it up again in place (new
    queues, every receive buffer posted again); frames in flight are lost
    and TCP sends them again (scenario `net_reset`: go_http with the card
-   reset after its 3rd frame).
+   reset after its 3rd frame). virtio-gpu too (2026-11-03): a command that
+   finds the device reset sets it up again and re-creates the screen's
+   resource from the memory the driver kept (scenario
+   `virtio_gpu_reset`, host tests in `display::virtio_gpu`).
 5. **All kernel time comes through one clock**: the NT layer through the
    `Clock` seam, the kernel's own modules through `time.rs`; nothing else
    reads the TSC or counts ticks (holds as of 2026-11-02). Deterministic

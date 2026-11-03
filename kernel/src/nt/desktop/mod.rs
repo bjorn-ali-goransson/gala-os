@@ -2280,6 +2280,8 @@ fn redraw(desktop: &Desktop, r: Rect) {
         row.extend((r.x..r.x + r.w).map(|x| desktop.pixel(x, y)));
         platform::screen_write_row(r.x as u32, y as u32, &row);
     }
+    // A GPU shows the rows now (TRANSFER_TO_HOST_2D + RESOURCE_FLUSH).
+    platform::screen_flush(r.x as u32, r.y as u32, r.w as u32, r.h as u32);
 }
 
 fn redraw_damage(d: &mut Desktop) {
@@ -2532,14 +2534,36 @@ pub fn listen(owner: u64, event: ObjectRef) -> Result<(), NtStatus> {
     Ok(())
 }
 
-/// The clock: called now and then (the input thread).
+/// The clock: called now and then (the input thread). Also notices a
+/// display change (virtio-gpu: the host's window resized).
 pub fn tick() {
+    let changed = platform::screen_changed();
     let mut d = DESKTOP.lock();
     if !d.painted {
         return;
     }
+    if let Some((w, h)) = changed {
+        resize(&mut d, w, h);
+    }
     d.set_minute(platform::system_time() / 600_000_000);
     redraw_damage(&mut d);
+}
+
+/// The screen is now w x h: the shell is laid out again and everything
+/// redrawn. Windows keep their places (a later step moves maximized and
+/// docked ones and sends WM_DISPLAYCHANGE: ARCHITECTURE "Plan: graphics
+/// and GPU").
+fn resize(d: &mut Desktop, w: u32, h: u32) {
+    if d.screen == (i64::from(w), i64::from(h)) {
+        return;
+    }
+    crate::info!("desktop: the screen is now {w}x{h}");
+    if d.set_screen(w, h).is_err() {
+        crate::warn!("desktop: no memory to lay out a {w}x{h} screen");
+        return;
+    }
+    d.damage.clear();
+    redraw(d, Rect { x: 0, y: 0, w: w.into(), h: h.into() });
 }
 
 /// Takes input waiting for `owner`'s windows into `out`; how many.
