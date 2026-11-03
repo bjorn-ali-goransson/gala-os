@@ -760,7 +760,19 @@ state + waiter list). One global dispatcher lock covers all signal changes
 and wait checks, so WaitAll sees a consistent state. A waiter registers on
 every object, calls `sched::prepare_wait(deadline)`, drops the lock and
 calls `sched::wait()`; signalling wakes all waiters, which re-check
-(auto-reset events are consumed by the first). Invariant: a signal
+(auto-reset events are consumed by the first). A signal also marks each
+waiter it wakes as released (`Waiter::released`): a notification event or
+timer set while a thread waits satisfies that wait (any-object waits)
+even when it is reset before the thread looks again, as on Windows,
+where the set itself satisfies the pending waits. Without it, a waiter
+that ran after another thread's reset slept on: the console's Ctrl+C
+event, shared by all its processes' handler threads, reached the second
+process only at GalaConsoleCtrl's 1 s backstop (sshd_shell's flaky
+Ctrl+C; `wait_test` sets and clears an event with two waiters). Objects
+a wait consumes (auto-reset events and timers, semaphores, mutants,
+completion ports) and files, pipes and sockets keep the plain re-check.
+TODO: a wait-all is still satisfied only when all are signaled at its
+re-check. Invariant: a signal
 state that depends on its old value (a semaphore's count) is changed only
 through `wait::update_signal`, which reads and writes it under one hold of
 the lock: a `signal_state()` read followed by `set_signal` lets a wait
@@ -1544,7 +1556,10 @@ Windows, never shadows the system's DLLs.)
     SetConsoleCtrlHandler handlers for CTRL_C_EVENT, the last added
     first, until one returns TRUE; else, unless a NULL handler made the
     process ignore Ctrl+C, ExitProcess(STATUS_CONTROL_C_EXIT) as Windows'
-    default handler. TODO: Ctrl+Break, CTRL_CLOSE_EVENT when the window
+    default handler. Every Ctrl+C is logged (`console N: Ctrl+C k`, event
+    `console ctrl`) and so is each process's handler thread taking it
+    (`... takes Ctrl+C k after m ms`, a warning from 250 ms: late is a
+    lost wake-up; event `console ctrl taken`). TODO: Ctrl+Break, CTRL_CLOSE_EVENT when the window
     closes, GenerateConsoleCtrlEvent, process groups, the
     CONSOLE_READCONSOLE_CONTROL wake-up keys.
   - The host: the kernel starts `conhost.exe` (user/conhost, a boot

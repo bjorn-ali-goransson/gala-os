@@ -5,7 +5,20 @@
 #![no_std]
 #![no_main]
 
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
 use ntrt::*;
+
+/// The event the `released` workers wait on, and their wait statuses.
+static SHARED_EVENT: AtomicUsize = AtomicUsize::new(0);
+static RELEASED: [AtomicU32; 2] = [const { AtomicU32::new(u32::MAX) }; 2];
+
+/// Waits (up to 10 s) for the shared notification event and records how.
+extern "C" fn released(slot: usize) -> ! {
+    let st = wait(Handle(SHARED_EVENT.load(Ordering::SeqCst)), Some(relative_ms(10_000)));
+    RELEASED[slot].store(st, Ordering::SeqCst);
+    exit_thread(0)
+}
 
 struct Checks(u32);
 
@@ -105,6 +118,36 @@ fn run() -> Result<(), u32> {
     c.eq(wait(ev, poll), STATUS_INVALID_HANDLE)?;
     c.eq(wait(dup, poll), STATUS_SUCCESS)?;
     c.eq(close(dup), STATUS_SUCCESS)?;
+
+    // Setting a notification event releases every thread waiting on it at
+    // that moment, even when it is cleared again before they run (the
+    // Ctrl+C event of a console had two processes' handler threads wait
+    // on one event; the first to run cleared it and the other slept on
+    // until its timeout: sshd_shell). Several rounds, two waiters each.
+    for _ in 0..8 {
+        let (st, shared) = create_event(EVENT_ALL_ACCESS, NOTIFICATION_EVENT, false);
+        c.eq(st, STATUS_SUCCESS)?;
+        SHARED_EVENT.store(shared.0, Ordering::SeqCst);
+        let mut threads = [Handle(0); 2];
+        for (slot, t) in threads.iter_mut().enumerate() {
+            RELEASED[slot].store(u32::MAX, Ordering::SeqCst);
+            let (st, h, _) = create_thread(released, slot, false);
+            c.eq(st, STATUS_SUCCESS)?;
+            *t = h;
+        }
+        // Let both block.
+        delay(relative_ms(20));
+        set_event(shared);
+        clear_event(shared);
+        c.eq(wait_multiple(&threads, WAIT_ALL, Some(relative_ms(20_000))), STATUS_SUCCESS)?;
+        for r in &RELEASED {
+            c.eq(r.load(Ordering::SeqCst), STATUS_SUCCESS)?;
+        }
+        for t in threads {
+            close(t);
+        }
+        close(shared);
+    }
 
     // The system clock is after 2020-01-01 (132223104000000000).
     let (st, now) = system_time();
