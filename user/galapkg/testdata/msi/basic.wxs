@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A small per-user package for galapkg's MSI reader tests (see
+     make_fixtures.sh): two directories below LocalAppDataFolder, a file
+     in each (big.txt spans several MSZIP blocks), a registry value, a
+     shortcut, a feature, a Binary row and a custom action using it. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="11111111-2222-3333-4444-555555555555" Name="Gala Test" Language="1033"
+           Version="1.2.3" Codepage="1252" Manufacturer="Gala" UpgradeCode="11111111-2222-3333-4444-666666666666">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perUser"/>
+    <Media Id="1" Cabinet="data.cab" EmbedCab="yes"/>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="INSTALLDIR" Name="GalaTest">
+          <Component Id="Main" Guid="11111111-2222-3333-4444-777777777777">
+            <File Id="hello.txt" Name="hello.txt" Source="hello.txt" KeyPath="yes"/>
+            <File Id="long" Name="Long file name.txt" Source="long.txt"/>
+            <RegistryValue Root="HKCU" Key="Software\Gala\Test" Name="Version" Type="string"
+                           Value="1.2.3"/>
+            <RegistryValue Root="HKCU" Key="Software\Gala\Test" Name="Café" Type="string"
+                           Value="crème brûlée"/>
+            <Shortcut Id="Sc" Name="Gala Test" Directory="INSTALLDIR" Target="[INSTALLDIR]hello.txt"/>
+          </Component>
+          <Directory Id="SUB" Name="sub dir">
+            <Component Id="Sub" Guid="11111111-2222-3333-4444-888888888888">
+              <File Id="big.txt" Name="big.txt" Source="big.txt" KeyPath="yes"/>
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Binary Id="Script" SourceFile="script.dll"/>
+    <CustomAction Id="RunIt" BinaryKey="Script" DllEntry="Main" Return="ignore"/>
+    <InstallExecuteSequence>
+      <Custom Action="RunIt" After="InstallFiles"/>
+    </InstallExecuteSequence>
+    <Feature Id="Complete" Title="Everything" Level="1">
+      <ComponentRef Id="Main"/>
+      <ComponentRef Id="Sub"/>
+    </Feature>
+  </Product>
+</Wix>

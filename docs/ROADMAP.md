@@ -1932,6 +1932,22 @@ PK. **Installing software: `gala install` over winget manifests** (the
       (BR stage 4) is a target. Built clean-room from Microsoft's
       documentation of the MSI database and actions (Wine's msi is LGPL:
       read only as CLEAN_ROOM.md allows, nothing copied unrecorded).
+      **Reading packages done** (2026-11-03, host tests `cargo test -p
+      galapkg`; ARCHITECTURE "Installing software", "Reading MSI
+      packages"): compound files (`cfb`: v3/v4, FAT/miniFAT/DIFAT, the
+      directory tree, streams), the MSI database (`msi`: stream names,
+      the string pool with long strings and long ids, `_Tables`/
+      `_Columns`, any table, typed File/Component/Directory/Feature/
+      Registry/Shortcut/Media/CustomAction/Binary rows, the summary
+      information), cabinets (`cab`: none and MSZIP), and the API `gala
+      install` will call (`install_files`: target paths through the
+      Directory table, `extract`/`extract_all` from embedded cabinets),
+      checked against msitools and gcab on wixl-built fixtures and fed
+      damaged files. Next: LZX (with a makecab-built fixture), then the
+      engine: `gala install` of an `msi` InstallerType (files, registry,
+      shortcuts from the tables, an ARP entry, rollback through
+      `install::Tx`), then msiexec/msi.dll with standard actions and
+      custom actions.
    6. Later: running stock winget itself (it is an MSIX: stage 4) against
       gala, the Microsoft Store source, `winget configure`.
    Ideas: installs are transactions (a failed install rolls back its

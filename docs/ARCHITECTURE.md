@@ -3682,6 +3682,96 @@ packages made by `make_source.py` (PkHello 1.0.0 as a singleton
 manifest, 1.1.0 multi-file; Conflict; BadHash; InnoSetup) and real
 winget-pkgs manifests (ripgrep, jq) for search and the HTTPS refusal.
 
+**Reading MSI packages (PK stage 5 groundwork, 2026-11-03).** Three
+modules of `user/galapkg`, pure Rust, `no_std` + `alloc`, host-tested,
+not yet called by gala.exe (nothing runs an installer):
+
+- `cfb`: compound files ([MS-CFB]), versions 3 and 4 (512- and
+  4096-byte sectors): header checks (signature, byte order, sector
+  shifts, the 4096-byte mini cutoff), the DIFAT (header and chained
+  sectors), FAT, mini FAT, the directory walked from the root (each
+  storage's sibling tree in order; an entry reached twice, a link out of
+  range or an unallocated entry in the tree is an error), streams of
+  either kind. `File::open`, `entries()`, `child`/`root_child` (names
+  compared ASCII-case-insensitively), `stream(index)`.
+- `msi`: the database. Stream names: two characters of `0-9A-Za-z._`
+  per code unit (0x3800 + a + 64·b), a lone one as 0x4800 + a, others as
+  themselves, tables prefixed with 0x4840 (`encode_name`/`decode_name`).
+  `_StringPool` is a u32 header (code page; bit 31: string ids are 3
+  bytes in tables, the long-id variant) and per id a u16 length and u16
+  reference count; length 0 with a non-zero count marks a string of 64
+  KiB or more whose u32 length follows (it takes one id); `_StringData`
+  is the bytes, decoded by the code page (65001, 1252, 28591; 0 as UTF-8
+  when valid, else 1252; others with U+FFFD and the pool's `lossy` flag).
+  Tables are column-major (each column for all rows, then the next):
+  integers with the sign bit flipped and 0 as NULL (i2 in 2 bytes, i4 in
+  4), strings as ids, stream columns as a 2-byte mark whose data is the
+  stream `<Table>.<key>[.<key>]`. Column types are `_Columns`' bits
+  (0x0800 string, 0x0400 with it: not a stream, 0x1000 nullable, 0x2000
+  key, 0x0200 localizable, the low byte the size), shown as `.idt`
+  writes them (`s72`, `L255`, `I4`, `v0`). Row count = stream size / row
+  size (an error if not whole). `Package::open` reads the pool and
+  catalog; `table(name)` any table; typed rows by column name (`files`,
+  `components`, `directories`, `features`, `registry`, `shortcuts`,
+  `media`, `custom_actions`, `binaries`, `binary(name)`), `summary()`
+  ([MS-OLEPS]: code page, title, subject, author, template, revision =
+  package code, page count = installer version, word count = source
+  flags, security).
+- `cab`: cabinets ([MS-CAB]): header with reserved areas and the
+  previous/next names skipped, folders, files, data blocks with their
+  checksum checked when not 0, compression none and MSZIP ([MS-MCI]: `CK`
+  + a deflate stream per block, the window carried over: miniz_oxide's
+  core inflater is given the folder's output so far). `folder_data`,
+  `extract(i)`, `extract_all` (each folder once).
+
+**What `gala install` will call:** `Package::install_files(&root)`:
+every File row with its component's directory resolved to a target
+path, and where its bytes are (`FileSource::Embedded{cabinet}` for a
+Media row's `#stream`, `External` for a cabinet file, `Loose` for an
+uncompressed file; compressed per the file's attributes, else the
+summary's word count bit 2; the Media row is the first whose
+LastSequence is at or above the file's Sequence). Directory resolution
+(`resolve_directories`): `root(id)` supplies directories set from
+outside (standard folders such as `LocalAppDataFolder` or
+`ProgramFilesFolder`, TARGETDIR, a public property from the command
+line); otherwise a directory is its parent's path plus DefaultDir's long
+target name (`target:source`, `short|long`; `.` adds nothing); a root
+without a value takes ROOTDRIVE, and without that it (and what is below
+it) stays unresolved, an error only for a file that needs it. Paths end
+with `\` as directory properties do. `Package::extract(key)` and
+`extract_all(each)` give file bytes from embedded cabinets, checked
+against the File table's FileSize.
+
+**Invariants.** Untrusted input never panics, loops or over-allocates:
+every offset and size is checked against the data before use, chains
+are bounded by a visited set (a looping chain is an error naming the
+stream and the sector), the directory walk visits each entry once, a
+table's rows are bounded by its stream, a cabinet's folder output by
+its blocks' checked sizes (≤ 32 KiB each); large buffers are
+`try_reserve`d (out of memory is an error). Errors say what and where:
+the byte offset, sector, directory entry, stream name, table, row and
+column, string id, folder and block. Host tests (`cargo test -p
+galapkg`) compare against independent readers (msiinfo, msiextract,
+gcab, 7-Zip: outputs checked in under `testdata/msi/expected`), cover
+hand-built edge cases (4096-byte sectors, a DIFAT chain beyond the
+header's 109 entries, nested storages, mini/regular boundary at 4095 and
+4096 bytes, reserved cabinet areas, the long-id pool, Windows-1252), and
+feed truncated and randomly damaged files to every reader.
+
+**Limits and TODO.** LZX (and Quantum) cabinets are refused with what
+they are (LZX is what large packages, Edge's among them, use; no tool
+here writes LZX cabinets to test against, so it waits for a fixture
+from Windows' makecab); cabinets spanning several files; external
+cabinets and loose files are located (`FileSource`) but not read (the
+caller has the files next to the package); code pages other than 1252,
+28591 and 65001 decode lossily; transforms (`.mst`), patches, the
+`_Validation`/`_Streams`/`_Storages` pseudo-tables and storages inside
+the package (embedded transforms) are not read; directory resolution
+does not apply the conditions, features or `SetDirectory` custom
+actions that an installer's costing would. Then stage 5 proper: the
+engine (standard actions, sequence tables, properties, conditions,
+custom actions, `msiexec /i /qn`).
+
 **Next (ROADMAP PK):** the HTTPS fetcher; then stage 3 (Inno Setup,
 NSIS, `exe` with switches: run the vendor's installer silently, uninstall
 through its UninstallString), 4 (MSIX), 5 (MSI); machine scope

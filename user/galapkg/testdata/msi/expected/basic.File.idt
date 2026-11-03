@@ -1,0 +1,6 @@
+File	Component_	FileName	FileSize	Version	Language	Attributes	Sequence
+s72	s72	l255	i4	S72	S20	I2	i4
+File	File
+hello.txt	Main	hello.txt	17			512	1
+long	Main	Long file name.txt	37			512	2
+big.txt	Sub	big.txt	112000			512	3
