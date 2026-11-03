@@ -136,6 +136,9 @@ explicitly in its commit.
   such boot ran on normally (smp_test failed its CPU count). Both the
   missing CPU and the silent end need explaining: a kernel that gets
   one CPU must run on one, and an end must leave a panic or a reason.
+- **SSH that works as a remote shell (the owner, 2026-11-03)**: item SSH
+  below: sshd as a real server, an interactive shell over ConPTY, sftp
+  and scp, port forwarding, the client.
 - **Observability carries great weight (the owner, 2026-11-03)**: every
   change ships with what explains its failures (OBSERVABILITY's rule);
   gaps found by failures are filled before or with the fix.
@@ -1582,6 +1585,38 @@ P1. **Unmodified prebuilt programs** (asked for 2026-10-31: run .exe
       WM_MOUSEWHEEL, conhost's scrollback (console_window turns it).
       Next: tooltips on popups (the combo boxes'
       drop-down lists are done).
+
+SSH. **SSH that works as a remote shell** (the owner, 2026-11-03).
+   Today (sshd_login, sshd_password): the host's ssh logs in to
+   Win32-OpenSSH's sshd on gala with a key or a password and runs one
+   command; sshd runs in debug mode (`-ddd`, one connection, then it
+   exits), as SYSTEM, from `run=`. To make it something you can live in:
+   1. **sshd as a server**: started at boot without `-d`, accepting
+      connection after connection (its listener plus one sshd-session per
+      connection), port 22 forwarded by xtask (`cargo xtask serve sshd`)
+      and in the Docker/server image; restarted if it dies; logs to a
+      file. Scenario: three sequential and two concurrent logins.
+   2. **Interactive shell with a pty**: ConPTY (CreatePseudoConsole,
+      ResizePseudoConsole, ClosePseudoConsole; conhost in pseudo-console
+      mode translating console output to VT sequences and VT input to
+      key events), so `ssh gala` gives a prompt with line editing, Ctrl+C,
+      window resize, full-screen programs; gala's cmd.exe (and busybox sh)
+      as the shell, `gala` commands available in it. Scenario driven by
+      the host with a pty (`ssh -tt`, expect-style).
+   3. **File transfer**: the sftp subsystem (sftp-server.exe) and scp:
+      upload, download, directory listing, permissions, large files.
+   4. **Port forwarding**: `ssh -L` and `-R` (sockets from sshd-session),
+      and agent forwarding if cheap.
+   5. **The client side**: gala's ssh.exe connecting out (to the host's
+      sshd through QEMU's network), keys in the user's profile,
+      known_hosts.
+   6. Observability (the owner's rule): sshd's and sshd-session's logs
+      kept in a file and in failed logs, connection and auth events in
+      the event stream, the ledger's ssh-related gaps in the report.
+   Security: logins go through LSA and tokens as now; UIPI and integrity
+   levels apply to the session; host keys persist across boots (`persist`)
+   and across handovers (R9: sshd's listening socket and sessions are
+   sockets and pipes that (e) carries; consoles are not carried yet).
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing
