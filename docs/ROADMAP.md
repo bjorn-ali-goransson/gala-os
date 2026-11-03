@@ -17,6 +17,13 @@ change that would make the kernel handover harder is argued for
 explicitly in its commit.
 
 **Priorities** (the owner, 2026-11-02):
+- **Foundational work first (the owner, 2026-11-03)**: of the work in
+  flight, the most foundational goes first and gets the machine's
+  resources; nothing running is cancelled. Order: kernel correctness
+  (the Java corruption, flaky races such as sshd_shell's Ctrl+C), then
+  core structures other items build on (LX seams, RS B2 with the
+  core/NT process split), then features on top (PK installers, the
+  browser), which run niced and yield VMs to the rest.
 - Work that speeds up development or troubleshooting comes first, as we
   are the ones who benefit: today that is R5 (deterministic simulation:
   a failure replays from its seed), then R7's record/replay and clock
