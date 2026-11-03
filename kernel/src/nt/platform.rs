@@ -27,6 +27,7 @@ pub use crate::hosted::memory::{SharedPage, SharedUserSpace, SpaceLock, UserSpac
 pub use crate::mm::PAGE_SIZE;
 pub use crate::mm::frame::Frame;
 pub use crate::mm::paging::{CacheMode, PageFlags};
+pub use crate::personality::Personality;
 pub use crate::sched::{SpawnError, ThreadId, WakeReason};
 
 /// The implementation the NT layer runs on: the kernel, or gala-um's host
@@ -70,13 +71,15 @@ pub trait Threads {
     fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<ThreadId, SpawnError>;
     /// A thread of a process: runs `entry(arg)` in the address space
     /// `space` with the user GS base `gs_base`; `entry` ends by entering
-    /// user mode.
+    /// user mode. Its system calls go to the dispatcher of `personality`
+    /// (its process's).
     fn spawn_user(
         name: &'static str,
         entry: fn(usize),
         arg: usize,
         space: SharedUserSpace,
         gs_base: u64,
+        personality: Personality,
     ) -> Result<ThreadId, SpawnError>;
     fn current() -> ThreadId;
     fn exit() -> !;
@@ -100,8 +103,14 @@ pub trait Threads {
 /// Entering and leaving user mode: system calls, returns to user mode,
 /// exceptions and the user's floating-point state.
 pub trait UserEntry {
-    /// Every NT system call goes to `handler`.
-    fn set_syscall_handler(handler: fn(&mut SyscallFrame));
+    /// The system calls of threads of `personality` go to `handler`
+    /// (called `name` in logs): the platform's entry keeps one dispatcher
+    /// per personality (`crate::personality::Dispatchers`).
+    fn set_syscall_handler(
+        personality: Personality,
+        name: &'static str,
+        handler: fn(&mut SyscallFrame),
+    );
     /// `hook` runs before each return to user mode; it may change the
     /// registers (APCs, suspension) and returns whether it did.
     fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool);
@@ -230,8 +239,9 @@ pub fn spawn_user(
     arg: usize,
     space: SharedUserSpace,
     gs_base: u64,
+    personality: Personality,
 ) -> Result<ThreadId, SpawnError> {
-    <P as Threads>::spawn_user(name, entry, arg, space, gs_base)
+    <P as Threads>::spawn_user(name, entry, arg, space, gs_base, personality)
 }
 #[inline]
 pub fn current() -> ThreadId {
@@ -289,8 +299,12 @@ pub fn online_mask() -> u64 {
 }
 
 #[inline]
-pub fn set_syscall_handler(handler: fn(&mut SyscallFrame)) {
-    <P as UserEntry>::set_syscall_handler(handler)
+pub fn set_syscall_handler(
+    personality: Personality,
+    name: &'static str,
+    handler: fn(&mut SyscallFrame),
+) {
+    <P as UserEntry>::set_syscall_handler(personality, name, handler)
 }
 #[inline]
 pub fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool) {

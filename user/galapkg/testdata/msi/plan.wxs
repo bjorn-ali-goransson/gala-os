@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A per-machine x64 package for galapkg's install-plan tests (see
+     make_fixtures.sh and src/msi/plan/tests.rs): features at several
+     levels, a Condition table row, component conditions and attributes,
+     registry values of every type with formatted text, shortcuts with
+     arguments and a working directory, custom actions of several types
+     and conditioned sequence rows. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="22222222-2222-3333-4444-555555555555" Name="Gala Plan" Language="1033"
+           Version="2.0.0" Manufacturer="Gala" UpgradeCode="22222222-2222-3333-4444-666666666666">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"/>
+    <Media Id="1" Cabinet="plan.cab" EmbedCab="yes"/>
+    <Property Id="GREETING" Value="hello"/>
+    <Property Id="SUBKEY" Value="Settings"/>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="Gala Plan">
+          <Component Id="Core" Guid="22222222-2222-3333-4444-000000000001" Win64="yes">
+            <File Id="core.txt" Name="core.txt" Source="core.txt" KeyPath="yes"/>
+            <File Id="tool.exe" Name="tool.exe" Source="tool.exe"/>
+            <RegistryValue Root="HKLM" Key="Software\Gala\Plan" Name="InstallDir" Type="string"
+                           Value="[INSTALLDIR]"/>
+            <RegistryValue Root="HKLM" Key="Software\Gala\Plan\[SUBKEY]" Name="Tool" Type="string"
+                           Value="[#tool.exe]"/>
+            <RegistryValue Root="HKLM" Key="Software\Gala\Plan" Name="Count" Type="integer"
+                           Value="42"/>
+            <RegistryValue Root="HKLM" Key="Software\Gala\Plan" Name="Blob" Type="binary"
+                           Value="0A0B0C"/>
+            <RegistryValue Root="HKLM" Key="Software\Gala\Plan" Name="Path" Type="expandable"
+                           Value="%ProgramFiles%\Gala Plan"/>
+            <RegistryValue Root="HKLM" Key="Software\Gala\Plan" Name="List" Type="string" Value="one[~][GREETING]"/>
+            <RegistryValue Root="HKMU" Key="Software\Gala\Plan" Name="Where" Type="string"
+                           Value="[$Core]|[!core.txt]|[%TEMP]|{[NOSUCH]x}|{plain}|[\[]x[\]]"/>
+          </Component>
+          <Component Id="Shortcuts" Guid="22222222-2222-3333-4444-000000000002" Win64="yes">
+            <RegistryValue Root="HKCU" Key="Software\Gala\Plan" Name="Shortcuts" Type="integer"
+                           Value="1" KeyPath="yes"/>
+            <Shortcut Id="ToolMenu" Name="Gala Tool" Directory="MenuDir" Target="[#tool.exe]"
+                      Arguments="--greet [GREETING]" WorkingDirectory="INSTALLDIR"
+                      Description="Runs the tool"/>
+            <Shortcut Id="ToolDesk" Name="Gala Tool" Directory="DesktopFolder"
+                      Target="[INSTALLDIR]tool.exe"/>
+          </Component>
+          <Directory Id="DOCS" Name="docs">
+            <Component Id="Docs" Guid="22222222-2222-3333-4444-000000000003" Win64="yes">
+              <File Id="readme.txt" Name="readme.txt" Source="readme.txt" KeyPath="yes"/>
+            </Component>
+          </Directory>
+          <Component Id="Extra" Guid="22222222-2222-3333-4444-000000000004" Win64="yes">
+            <File Id="extra.txt" Name="extra.txt" Source="extra.txt" KeyPath="yes"/>
+          </Component>
+          <Component Id="NeverComp" Guid="22222222-2222-3333-4444-000000000005" Win64="yes">
+            <File Id="never.txt" Name="never.txt" Source="never.txt" KeyPath="yes"/>
+          </Component>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="MenuDir" Name="Gala Plan"/>
+      </Directory>
+      <Directory Id="DesktopFolder"/>
+    </Directory>
+    <Binary Id="CaDll" SourceFile="ca.dll"/>
+    <CustomAction Id="SetGreeting" Property="SHOUT" Value="[GREETING]!"/>
+    <CustomAction Id="Deferred" BinaryKey="CaDll" DllEntry="Go" Execute="deferred"
+                  Impersonate="no" Return="check"/>
+    <CustomAction Id="Rollback" BinaryKey="CaDll" DllEntry="Undo" Execute="rollback"/>
+    <InstallExecuteSequence>
+      <Custom Action="SetGreeting" After="CostFinalize">NOT Installed</Custom>
+      <Custom Action="Rollback" Before="Deferred">&amp;Extras=3</Custom>
+      <Custom Action="Deferred" After="InstallFiles">$Core=3 AND NOT REMOVE</Custom>
+    </InstallExecuteSequence>
+    <Feature Id="Main" Title="Main" Level="1">
+      <ComponentRef Id="Core"/>
+      <ComponentRef Id="Shortcuts"/>
+      <Feature Id="Documentation" Title="Docs" Level="3">
+        <ComponentRef Id="Docs"/>
+      </Feature>
+      <Feature Id="Extras" Title="Extras" Level="200">
+        <ComponentRef Id="Extra"/>
+      </Feature>
+    </Feature>
+    <Feature Id="Never" Title="Never" Level="0">
+      <ComponentRef Id="NeverComp"/>
+    </Feature>
+  </Product>
+</Wix>

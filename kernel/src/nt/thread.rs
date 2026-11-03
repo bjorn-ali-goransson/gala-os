@@ -279,6 +279,7 @@ pub fn create(
         id as usize,
         process.space.clone(),
         teb_addr,
+        process.personality,
     ) {
         Ok(tid) => {
             *as_thread(&object).sched_id.lock() = Some(tid);
@@ -828,8 +829,15 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
 pub fn start_adopted(object: &ObjectRef) -> Result<(), NtStatus> {
     let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     let p = &t.process;
-    let tid = platform::spawn_user(p.name, thread_entry, t.id as usize, p.space.clone(), t.teb)
-        .map_err(|_| NtStatus::NO_MEMORY)?;
+    let tid = platform::spawn_user(
+        p.name,
+        thread_entry,
+        t.id as usize,
+        p.space.clone(),
+        t.teb,
+        p.personality,
+    )
+    .map_err(|_| NtStatus::NO_MEMORY)?;
     *t.sched_id.lock() = Some(tid);
     Ok(())
 }
@@ -901,7 +909,7 @@ pub fn dump() {
         let suspended = *t.suspend_count.lock();
         info!(
             "thread: pid {} tid {} (sched {:?}) suspend {} exited {} in a system call {} \
-             session {} ({})",
+             session {} personality {} ({})",
             t.process.id,
             t.id,
             sched,
@@ -909,6 +917,7 @@ pub fn dump() {
             t.has_exited(),
             in_syscall.is_some(),
             t.process.session,
+            t.process.personality,
             t.process.name
         );
         let Some((number, regs)) = in_syscall else {

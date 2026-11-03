@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 mod alloc_audit;
 mod clockcheck;
+mod lx_expect;
 mod telemetry;
 // The manifest's format and SHA-256 are the kernel's own code (one
 // definition for the writer and the reader).
@@ -346,6 +347,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "odbc32", file: "odbc32.dll", exported_as: "testodbc32.dll" },
     Dll { package: "wldap32", file: "wldap32.dll", exported_as: "testwldap32.dll" },
     Dll { package: "wsock32", file: "wsock32.dll", exported_as: "testwsock32.dll" },
+    // normaliz.dll: forwarders to kernel32's IDN functions (libcurl).
+    Dll { package: "normaliz", file: "normaliz.dll", exported_as: "testnormaliz.dll" },
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32.dll" },
     Dll { package: "authz", file: "authz.dll", exported_as: "testauthz.dll" },
@@ -737,6 +740,30 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shlwapi_test", "advapi32.dll", "Windows/System32"),
     ("shlwapi_test", "bcryptprimitives.dll", "Windows/System32"),
     ("shlwapi_test", "user/bin/shlwapi_test.exe", "gala"),
+    ("ole32_test", "ntdll.dll", "Windows/System32"),
+    ("ole32_test", "kernel32.dll", "Windows/System32"),
+    ("ole32_test", "msvcrt.dll", "Windows/System32"),
+    ("ole32_test", "ole32.dll", "Windows/System32"),
+    ("ole32_test", "oleaut32.dll", "Windows/System32"),
+    ("ole32_test", "advapi32.dll", "Windows/System32"),
+    ("ole32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("ole32_test", "uiautomationcore.dll", "Windows/System32"),
+    ("ole32_test", "user32.dll", "Windows/System32"),
+    ("ole32_test", "gdi32.dll", "Windows/System32"),
+    ("ole32_test", "user/bin/ole32_test.exe", "gala"),
+    ("shell32_test", "ntdll.dll", "Windows/System32"),
+    ("shell32_test", "kernel32.dll", "Windows/System32"),
+    ("shell32_test", "msvcrt.dll", "Windows/System32"),
+    ("shell32_test", "shell32.dll", "Windows/System32"),
+    ("shell32_test", "user32.dll", "Windows/System32"),
+    ("shell32_test", "gdi32.dll", "Windows/System32"),
+    ("shell32_test", "user/bin/shell32_test.exe", "gala"),
+    ("dbghelp_test", "ntdll.dll", "Windows/System32"),
+    ("dbghelp_test", "kernel32.dll", "Windows/System32"),
+    ("dbghelp_test", "msvcrt.dll", "Windows/System32"),
+    ("dbghelp_test", "dbghelp.dll", "Windows/System32"),
+    ("dbghelp_test", "normaliz.dll", "Windows/System32"),
+    ("dbghelp_test", "user/bin/dbghelp_test.exe", "gala"),
     ("richedit_test", "ntdll.dll", "Windows/System32"),
     ("richedit_test", "kernel32.dll", "Windows/System32"),
     ("richedit_test", "msvcrt.dll", "Windows/System32"),
@@ -1815,6 +1842,8 @@ commands:
                what was recorded
   bench        run user/bench on gala; write target/report/bench.json and
                compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
+  lx-expect    run the Linux test programs (user/lx) on this Linux host and compare
+               with their expected.txt: lx-expect [--record] [--no-build] [--runs N]
   alloc-audit  find infallible allocations in the kernel's machine code (calls that
                abort on out-of-memory: Vec::clone, collect, ...; clippy cannot see
                them): alloc-audit [kernel ELF] [--all: also growth after try_reserve]
@@ -1893,6 +1922,7 @@ fn main() -> ExitCode {
             Some("bench") => {
                 bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
             }
+            Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
             Some("alloc-audit") => alloc_audit(
                 release,
                 args.get(1).filter(|a| !a.starts_with("--")).map(Path::new),
@@ -1991,6 +2021,9 @@ fn unit_tests() -> Result {
             .arg("handover::"),
     )?;
     run_cmd(cargo().args(["test", "--package", "xtask"]))?;
+    // The Linux personality's ABI data, checked against the user/lx
+    // transcripts recorded on Linux (ROADMAP LX).
+    run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
     run_cmd(cargo().args(["test", "--package", "galapkg"]))
@@ -2635,12 +2668,12 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
     (
         "events",
         &[
-            r#""ev":"process start","pid":4,"session":1,"name":"import_test.exe""#,
+            r#""ev":"process start","pid":4,"session":1,"name":"import_test.exe","personality":"nt""#,
             r#""ev":"image","pid":4,"name":"import_test.exe""#,
             r#""name":"\\Device\\HarddiskVolume1\\gala\\testdll.dll""#,
             r#""ev":"syscall","pid":4,"tid":8,"nr":8,"name":"NtWriteFile""#,
             r#""ev":"thread exit","pid":4,"tid":8,"status":0"#,
-            r#""ev":"process exit","pid":4,"session":1,"status":0"#,
+            r#""ev":"process exit","pid":4,"session":1,"status":0,"personality":"nt""#,
         ],
     ),
 ];
@@ -3912,6 +3945,35 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=shlwapi_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["shlwapi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: ole32's PROPVARIANT and STGMEDIUM clean-up, the
+        // IRunnableObject helpers and proxy blankets against documented
+        // behaviour, for what wxWidgets and SQL Server LocalDB import
+        // (user/ole32_test/main.c, mingw).
+        name: "ole32_test",
+        cmdline: "qemu_exit run=ole32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["ole32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: shell32's ShellExecuteExW, dropped files, DragAcceptFiles
+        // and SHFileOperationW against documented behaviour, for what
+        // wxWidgets imports (user/shell32_test/main.c, mingw).
+        name: "shell32_test",
+        cmdline: "qemu_exit run=shell32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["shell32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: dbghelp's ImageNtHeader and SymSrvGetFileIndexInfoW (what
+        // SQL Server LocalDB's SqlDumper imports) and normaliz.dll's IDN
+        // forwarders (libcurl) against documented behaviour
+        // (user/dbghelp_test/main.c, mingw).
+        name: "dbghelp_test",
+        cmdline: "qemu_exit run=dbghelp_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["dbghelp_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // W3: rich edit controls (msftedit.dll's RICHEDIT50W, riched20.dll's
@@ -5364,6 +5426,8 @@ const SCENARIOS: &[Scenario] = &[
              (access violation) in thread",
             "(crash.exe+0x",
             "writing address 0x0",
+            // The personality (ROADMAP LX seam 2) and session.
+            "crash report:   personality nt, session ",
             "crash report:   rax=",
             "crash report:   [rsp+0x00]",
             "process crash.exe (pid 4) exited with status 0xc0000005",
@@ -5955,6 +6019,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("process_test", "child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("uipi_test", "a child process (one NT process per Linux process)"),
+    ("shell32_test", "a child process (ShellExecuteExW runs it)"),
     ("winevent_test", "a child process (one NT process per Linux process)"),
     ("uia_test", "a child process (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
@@ -9588,6 +9653,29 @@ mod constants {
             }
         }
         assert!(found.is_empty(), "use nt::platform instead:\n{}", found.join("\n"));
+    }
+
+    /// `net` is core, below every personality: it reaches threads and time
+    /// through `crate::runtime`, never through the NT layer (ROADMAP LX
+    /// seam 6; a Linux personality would build its sockets on it too).
+    #[test]
+    fn net_does_not_depend_on_nt() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel/src/net");
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                if line.contains("crate::nt") || line.contains("super::super::nt") {
+                    found.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "net/ names the NT layer; use crate::runtime:\n{}",
+            found.join("\n")
+        );
     }
 
     #[test]

@@ -8,10 +8,11 @@
 
 #![no_std]
 
+mod assoc;
 mod paths;
 mod paths_more;
 mod strings;
-mod unimplemented;
+mod urls;
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -22,6 +23,7 @@ unsafe extern "C" {
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
     // MSVC-target unwind tables reference it (gala's ntdll provides it).
     fn __CxxFrameHandler3();
+    fn __chkstk();
 }
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot

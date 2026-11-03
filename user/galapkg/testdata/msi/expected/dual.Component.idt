@@ -1,0 +1,4 @@
+Component	ComponentId	Directory_	Attributes	Condition	KeyPath
+s72	S38	s72	i2	S255	S72
+Component	Component
+App	{33333333-2222-3333-4444-000000000001}	APPDIR	0		app.txt

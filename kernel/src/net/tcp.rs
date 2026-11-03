@@ -13,10 +13,11 @@ use super::loopback::Loopback;
 use super::virtio_net::VirtioNet;
 use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
-// Threads and time through the NT layer's platform, so the stack also runs
-// in gala-um (loopback only there).
-use crate::nt::platform as sched;
-use crate::nt::platform as time;
+// Threads and time through the core's runtime (not `nt::platform`: `net`
+// is core, below every personality), so the stack also runs in gala-um
+// (loopback only there).
+use crate::runtime as sched;
+use crate::runtime as time;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet, SocketStorage};

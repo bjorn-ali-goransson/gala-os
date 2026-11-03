@@ -3,17 +3,5 @@
 //! `dll!function` to the ledger and ends the process.
 
 gala_stubs::unimplemented_exports!("shell32.dll":
-    DragAcceptFiles
-    DragFinish
-    DragQueryFileW
-    DragQueryPoint
-    ExtractIconExW
-    ExtractIconW
     SHBrowseForFolderW
-    SHChangeNotify
-    SHDefExtractIconW
-    SHFileOperationW
-    SHGetIconOverlayIndexW
-    ShellExecuteExW
-    Shell_NotifyIconW
 );

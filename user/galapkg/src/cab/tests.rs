@@ -252,10 +252,16 @@ fn damage_is_reported_with_its_place() {
     let mut d = good.clone();
     d[44..48].copy_from_slice(&50_000u32.to_le_bytes());
     assert!(err(&d).contains("file a.bin at 0..50000 of folder 0"), "{}", err(&d));
-    // LZX and spanning: refused, saying what.
+    // MSZIP data taken as LZX: an LZX error naming the block; a window
+    // LZX does not have; Quantum and spanning: refused, saying what.
     let mut d = good.clone();
     d[42..44].copy_from_slice(&0x1503u16.to_le_bytes());
-    assert!(err(&d).contains("LZX compression (window 2^21)"), "{}", err(&d));
+    let e = err(&d);
+    assert!(e.contains("folder 0 block 0") && e.contains("LZX"), "{e}");
+    d[42..44].copy_from_slice(&0x1603u16.to_le_bytes());
+    assert!(err(&d).contains("LZX window 2^22"), "{}", err(&d));
+    d[42..44].copy_from_slice(&0x0002u16.to_le_bytes());
+    assert!(err(&d).contains("Quantum"), "{}", err(&d));
     let mut d = good.clone();
     d[44 + 8..44 + 10].copy_from_slice(&0xfffeu16.to_le_bytes());
     assert!(err(&d).contains("another cabinet"), "{}", err(&d));

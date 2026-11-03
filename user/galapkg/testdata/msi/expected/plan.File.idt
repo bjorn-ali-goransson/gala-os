@@ -1,0 +1,8 @@
+File	Component_	FileName	FileSize	Version	Language	Attributes	Sequence
+s72	s72	l255	i4	S72	S20	I2	i4
+File	File
+core.txt	Core	core.txt	6			512	1
+tool.exe	Core	tool.exe	23			512	2
+readme.txt	Docs	readme.txt	8			512	3
+extra.txt	Extra	extra.txt	7			512	4
+never.txt	NeverComp	never.txt	7			512	5

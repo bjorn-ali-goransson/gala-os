@@ -59,6 +59,102 @@ once their net client has finished, and pass if it succeeded.
 `cargo xtask screenshot run=nginx.exe "args=-p%20C:/nginx/%20-c%20conf/nginx.conf"`
 shows it.
 
+## Linux test programs (user/lx, ROADMAP LX)
+
+Test first against real Linux (CLEAN_ROOM.md "Linux": man-pages, the
+ABI/ELF specs, observed behaviour, gVisor; never the Linux kernel source):
+- `user/lx/<name>_test/main.c`: a C program built with musl
+  (`apt install musl-tools`) that makes the system calls it checks itself
+  (`user/lx/common/lx.h`: `sys6` and friends with the `syscall`
+  instruction; failures are `-errno`), so it tests the kernel, not libc.
+  It prints `name = value` lines, one write per line, never an address
+  or anything that varies between runs, kernel versions (auxv entries
+  come and go: print only the ones you check), users (uid: print
+  "AT_UID is getuid() = yes", not the number) or build modes, and ends
+  with `<name>_test: ok`. Accessibility without signals: write(2) from
+  an address fails with EFAULT if it is unreadable, read(2) into it if
+  it is unwritable (brk_test, mmap_test).
+- `user/lx/build.sh` builds each as `user/lx/bin/<name>_test` (static,
+  ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN), reproducibly
+  (stripped, no build id, `-fno-stack-protector`: the canary is read
+  from %fs:0x28, so a test that moves FS would crash). The binaries are
+  checked in under `user/lx/bin`, not `user/bin` (`cargo xtask
+  export-tests` copies only the Windows build's outputs); the kernel's
+  host tests `include_bytes!` them.
+- `cargo xtask lx-expect` rebuilds them (when musl-gcc is there; else it
+  runs the checked-in ones), runs each binary on this host as
+  `./<name>_test first '' 'third arg'` from `target/lx-expect/<binary>/`
+  with only `A=1 EMPTY= LONGER_NAME=some value` in its environment, and
+  compares stdout + `-- exit status N` with `user/lx/<name>_test/
+  expected.txt` (both binaries against the same file). A mismatch prints
+  a line diff and leaves `actual.txt` there. `--record` writes
+  expected.txt (run on real Linux only, and check the diff: it is the
+  spec); `--no-build` skips the rebuild. CI runs it and then `git diff
+  --exit-code user/lx` (binaries and transcripts must match the sources).
+- Recorded on Linux 6.18 (this machine); CI's runner kernel differs, which
+  is why transcripts avoid version-dependent values.
+- Pitfalls met: Rust's `Command` passes the environment sorted by name
+  (auxv_test's envp order); a static-pie's initial break is not above its
+  bss (brk_test prints only what holds for both); a pipe write whose
+  buffer runs into an unmapped page fails with EFAULT, not a partial count
+  (write_exit_test records what Linux does).
+- The kernel side is `kernel/src/lx/` (ARCHITECTURE "The lx module"),
+  tested with `cargo test -p kernel --lib lx`, and the ABI data crate
+  `kernel/lx_abi` (ARCHITECTURE "The lx_abi crate"), `cargo test -p
+  lx_abi`, whose tests read the transcripts: changing a test program's
+  output can break them (re-run both). No boot scenarios yet: they come
+  with the exec path, one per user/lx program, expecting its
+  expected.txt.
+- **The milestone 2-3 corpus** (recorded on Linux 6.18.44, this machine,
+  as root and checked unchanged as uid 65534): fs_test (open/openat
+  flags, getdents64, the stat family, statx, rename/renameat2, unlink,
+  mkdir/rmdir, symlinks, errnos), pipe_test (pipe2 flags, EOF, EAGAIN,
+  EPIPE/SIGPIPE, dup/dup2/dup3, fcntl), fork_test (fork/vfork/execve/
+  wait4/waitid, statuses, groups and sessions, a subreaper), thread_test
+  (clone threads, futex), signal_test (actions, masks, pending, siginfo,
+  the observed rt_sigframe, sigaltstack, SIGCHLD, default actions),
+  clock_test, poll_test (poll/ppoll/select/pselect6/epoll), pty_test
+  (/dev/ptmx, termios, the line discipline, ISIG), proc_test
+  (/proc/self). They use `common/more.h` (on top of lx.h): musl's
+  `SYS_*` numbers and struct definitions, `say_ret` (the errno's name
+  appended), `lx_init` (closes every fd above 2, so fd numbers are
+  deterministic and printed; clears the signal mask, SIGPIPE/SIGCHLD to
+  default, umask 022), `set_action` (rt_sigaction with SA_RESTORER and
+  an rt_sigreturn restorer, as musl does), wait-status printing (the core
+  flag left out: it depends on core limits).
+- Determinism: `cargo xtask lx-expect --runs 5` runs each binary 5 times
+  and fails if a transcript varies (do it before `--record`). Rules the
+  corpus follows: print relations, not pids/addresses/times/inodes; sort
+  directory listings; children report through exit status or a pipe and
+  the parent waits before printing on; never rely on timing for an
+  ordering: a FUTEX_WAKE is retried until it wakes the thread known to be
+  about to wait, a signal that must arrive while a child waits is blocked
+  and taken with rt_sigtimedwait (pty_test's SIGWINCH: a handler plus a
+  blocking read raced and hung under load), echoes are read until the
+  expected byte count; nothing depends on root (EACCES checks would);
+  directory sizes and nlinks are file-system specific and not printed.
+- Linux behaviour found that the kernel must copy: a pipe's SIGPIPE has
+  si_code SI_USER; `select` ignores fds beyond the descriptor table
+  (fd 100 with a 64-entry table: 0, not EBADF); SA_RESETHAND keeps the
+  flag in the reset action (flags read back 0x84000004); SA_RESETHAND
+  does not imply SA_NODEFER; a blocked ignored signal stays pending until
+  unblocked; signals made deliverable at once nest (SIGUSR1's frame is
+  set up first, real-time ones on top run first: "35 35 10 12"); a store
+  to a never-touched bss page after mprotect(PROT_READ) faults with
+  err 6 (not present), so signal_test touches it first (err 7); musl's
+  `struct rusage` is 272 bytes, the kernel writes 144; a tiny child's
+  ru_maxrss can be 0; the process's exit status after the main thread's
+  exit(0) is the last thread's exit(5); clockid_t is 32-bit (a CPU clock
+  for pid p is `(int)((~p << 3) | 2)`); `^Z` to an orphaned foreground
+  group (a session leader's) is discarded; a fresh pty's master and
+  slave have the same termios.
+- Skips: nothing is skipped on this machine (ptys and /proc work), so
+  every expected.txt is the full transcript. pty_test and proc_test
+  print a single `SKIP: open(/dev/ptmx) = -errno` (or readlink
+  /proc/self) line instead when that is unavailable, so a machine
+  without them shows a mismatch whose diff names the reason; under gala
+  they are expected to pass once ptys and /proc exist.
+
 ## Adding a function to gala's ntdll or kernel32
 
 1. A test program that imports it (`raw-dylib` against `kernel32` or
@@ -80,6 +176,26 @@ shows it.
    list every missing import by name.
 
 ## Things that are easy to get wrong
+
+- Core code (`net/`, and later anything a second personality shares)
+  reaches threads, waits and time through `crate::runtime`, not
+  `crate::nt::platform` (the NT layer's seam) and not `crate::sched`/
+  `crate::time` directly (those do nothing in gala-um). Per-CPU state
+  read while interrupts may be on (system calls run with `sti`) must be
+  one GS-relative load (`percpu::cpu_index`, `percpu::personality`):
+  reading `gs:[0]` and then a field can land on another CPU's block after
+  a migration. Arch code (declared before `console` in lib.rs) writes
+  `crate::info!`/`crate::warn!`, not the bare macros. A new process
+  constructor must set `personality` (ARCHITECTURE "The seams", 2).
+- **A DLL test in C** (`user/<dll>_test/main.c`, mingw; oleaut32_test,
+  shlwapi_test, ole32_test, shell32_test, dbghelp_test): `build.sh`
+  rebuilds the checked-in `user/bin/<name>.exe` (xtask does not; run it
+  after editing main.c and commit the binary). To check that a function
+  is *exported*, import it statically (a call in a branch never taken):
+  GetProcAddress returns NULL for gala_stubs stubs (and so the test
+  cannot tell). An export forwarder (`/EXPORT:f=kernel32.f`) to a stub
+  fails to bind as a "missing export": implement the function where it
+  is forwarded from instead (normaliz's IdnToUnicode).
 
 - A test that runs a process at Low integrity (uipi_test, gala_cli_test)
   cannot signal or open the parent's named events (no write up: a
@@ -650,7 +766,11 @@ FlaUI) is a plain zip, its members paths such as
 `cargo xtask iso --file path/to/app.exe run=app.exe "args=..."` and boot
 it with QEMU (`-cpu max`), then follow the ledger and the program's own
 error messages (Go programs print which DLL or procedure they could not
-find). Survey an import table first with
+find). A pinned release can vanish upstream: the FileZilla 3.69.3
+client installer's SourceForge URL answers 404 since 2026-11 (ROADMAP
+AG, "Known problem"); keep a fetched `target/prebuilt/<name>` around,
+and change a URL only for an official one with the same SHA-256.
+Survey an import table first with
 `x86_64-w64-mingw32-objdump -p app.exe | grep "DLL Name"`; keep
 downloaded files in their own directory and run them only inside QEMU.
 
@@ -925,6 +1045,26 @@ where its pixel checks expect it (no pointer arithmetic).
   SHA-256s written into the manifests); rerun it after changing them.
   `manifests/b` and `manifests/j` are real winget-pkgs manifests (leave
   them; THIRD_PARTY.md).
+- `galapkg::winget` (the resolver) is tested on the host only: `cargo
+  test -p galapkg winget` (`-- --nocapture` prints the corpus summary
+  and every warning the corpus gives). The corpus is
+  `user/galapkg/testdata/winget-corpus/manifests` (real manifests: never
+  edit them; `.gitattributes` keeps their CRLFs). `selected.txt` there is
+  the golden answer of installer selection for 8 machine profiles; after
+  a deliberate rule change regenerate it with `GALAPKG_BLESS=1 cargo
+  test -p galapkg winget::corpus` and read the diff (each changed line is
+  a package whose installer moved), and say why in the commit.
+- Refreshing the corpus (rarely; keep it under ~3 MB): outside the
+  repository, `git clone --depth 1 --filter=blob:none --sparse
+  https://github.com/microsoft/winget-pkgs <dir>`, `git -C <dir> ls-tree
+  -r HEAD --name-only manifests > paths.txt`, `python3 -I
+  user/galapkg/testdata/winget-corpus/pick.py paths.txt 400 > pick.txt`,
+  `git -C <dir> sparse-checkout set --no-cone --stdin < pick.txt`, copy
+  `<dir>/manifests` over the corpus's, bless the golden, and record the
+  new commit in THIRD_PARTY.md. A manifest that fails to read is a
+  parser bug to fix (winget-pkgs is validated), not a file to drop.
+- The corpus test fails with the first differing golden lines; a
+  manifest that does not read is listed with `file:line:col`.
 - The boot test is `cargo xtask boot-test pk_install_zip`; a failed run
   shows the install log twice (`logtee: install.log:` lines, and
   pk_install_test prints it after the failing check).
@@ -946,13 +1086,59 @@ where its pixel checks expect it (no pointer arithmetic).
   current directory (the script runs it in its temporary directory).
   wixl miswrites a string longer than 128 KiB (its own reader rejects it,
   "string table load failed"): keep long-string fixtures between 64 and
-  128 KiB. gcab writes only uncompressed and MSZIP cabinets (7z none): an LZX
-  fixture needs Windows' makecab.
+  128 KiB. gcab writes only uncompressed and MSZIP cabinets (7z none).
+  The script also builds the install-plan packages `plan.msi` (x64,
+  `wixl -a x64`), `dual.msi` and `badcond.msi` and records msiinfo's
+  export of their tables. Rerunning it rewrites `basic.msi`,
+  `long.msi.zlib` and `expected/basic.suminfo` with new dates and
+  package codes: restore them with `git checkout` unless they were what
+  you changed.
+- wixl writes less than WiX: no `Condition` under Feature or Component,
+  no `Directory` on a CustomAction, no `MultiStringValue` (write the
+  `[~]` value as a string), no `Package/@Platform` (use `wixl -a x64`);
+  it writes HKMU as Root 4 instead of -1, drops the `#x`/`#%` prefixes of
+  binary and expandable values and eats `$` in formatted text (`[$Comp]`
+  becomes `[Comp]`). make_fixtures.sh fixes all of these afterwards with
+  `msibuild <msi> -q "<SQL>"` (UPDATE, INSERT, CREATE TABLE work; quote
+  names with backquotes). The test `plan_packages_read_as_msiinfo_exports_them`
+  checks the reader against msiinfo after that rewrite.
+- The install plan (`msi::plan`) has no msiexec to compare with: its
+  tests' expected values are the SDK's documented rules, each test
+  naming its page. When a real Windows run becomes possible, record
+  `msiexec /i x.msi /qn /l*v log` of the same fixtures and compare
+  (TODO).
+- LZX (`user/galapkg/testdata/lzx`): no tool on Linux writes LZX, so
+  `sh user/galapkg/testdata/lzx/make_fixtures.sh` makes the cabinets
+  with the test encoder (`src/lzx/encode.rs`, through the ignored test
+  `lzx::tests::write_fixtures`) and records cabextract's and 7-Zip's
+  decoding (`apt-get install -y cabextract`); the test
+  `fixtures_match_cabextract_and_7z` also checks the encoder still makes
+  the checked-in files byte for byte (change the encoder: rerun the
+  script). `sh user/galapkg/testdata/lzx/fetch_real.sh` fetches a cabinet
+  Microsoft made (inside the DirectX web installer, not committed) into
+  `target/galapkg-fixtures`; `microsoft_cabinet_matches_cabextract`
+  decodes it when present (it skips otherwise, so run the fetch before
+  changing `lzx.rs`). Do not read cabextract's, libmspack's, 7-Zip's or
+  Wine's source: black-box outputs only.
 - The readers' own tests build edge cases with small writers
   (`cfb::tests::build`, `cab::tests::build_with`); 7-Zip reads what they
   make (checked by hand when they were written: `7z t`), keep it so.
 - Every installed command is a copy of gala.exe: a gala.exe change does
   not reach commands installed before it until they are reinstalled.
+- MSIX fixtures (`user/galapkg/testdata/msix/`): regenerate with
+  `python3 -I user/galapkg/testdata/msix/make_fixtures.py`, then run
+  `sh user/galapkg/testdata/msix/check_fixtures.sh` (unzip, 7z, xmllint,
+  sha256sum: the independent cross-check) and update the hashes, line
+  numbers and sizes the `msix::tests` expect. Pitfalls: another zlib
+  version may deflate differently (the fixtures are checked in; only a
+  regeneration changes them); the generator refuses a fixture over
+  100 KB; the corrupted fixtures must stay valid zips where the test says
+  so (bad_hash keeps the changed data's CRC-32 and block Sizes, only the
+  hash disagrees), or the reader reports a different error first; shell
+  functions in check_fixtures.sh share variables with their callers. The
+  test publisher's id and the block-run rules come from our reading of
+  the documentation, not from makeappx (ARCHITECTURE "MSIX/AppX
+  reading" says which values are independently verified).
 - Low on disk: a few user programs can be built alone into a scratch
   target directory with xtask's flags (`cargo build --release --target
   x86_64-pc-windows-msvc --config 'target.x86_64-pc-windows-msvc.rustflags=
@@ -1613,11 +1799,15 @@ the in-guest, deterministic version.
 | Frames, heap | `kernel/src/mm/` |
 | Scheduler | `kernel/src/sched/` |
 | NT personality (objects, processes, files, sections, syscalls) | `kernel/src/nt/` |
+| Linux personality groundwork (ELF loader, initial stack, syscall/errno tables) | `kernel/src/lx/` |
+| Linux test programs, their binaries and expected transcripts | `user/lx/`, `user/lx/bin/` |
+| Linux ABI data (signal frames, sigsets, termios, struct layouts) | `kernel/lx_abi/` |
 | Ramfs | `kernel/src/fs/` |
 | Disk (virtio-blk) | `kernel/src/disk/` |
 | Display (virtio-gpu; the protocol and driver host-tested) | `kernel/src/display/` |
 | Test runtime for user programs | `user/ntrt/` |
 | `gala install` (winget packages): library, commands, test source | `user/galapkg/`, `user/gala/src/pkg.rs`, `user/pk_install_test/` |
+| winget manifest resolver (YAML, schemas, selection, dependencies, ARP) and its corpus | `user/galapkg/src/winget/`, `user/galapkg/testdata/winget-corpus/` |
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
 | Checked-in binaries, Windows runner | `user/bin/` |
 | Build, boot tests, reports | `xtask/` |

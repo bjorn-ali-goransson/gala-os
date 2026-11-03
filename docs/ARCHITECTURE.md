@@ -1350,6 +1350,7 @@ from the public documentation of each function (clean room):
 | bcrypt.dll | `user/bcrypt` | `testbcrypt.dll` | `C:\Windows\System32` |
 | riched20.dll | `user/riched20` (the control: `user/richedit`) | `testriched20.dll` | `C:\Windows\System32` |
 | msftedit.dll | `user/msftedit` (the control: `user/richedit`) | `testmsftedit.dll` | `C:\Windows\System32` |
+| normaliz.dll | `user/normaliz` | `testnormaliz.dll` | `C:\Windows\System32` |
 
 (Exported under other names so that `user/bin`, which also runs on
 Windows, never shadows the system's DLLs.)
@@ -1932,6 +1933,27 @@ Windows, never shadows the system's DLLs.)
   advapi32 are loaded on first use (LoadLibrary), so crypt32 keeps no
   static imports of them (caddy ships crypt32 alone). No user scope
   (every blob is machine-bound), no prompts.
+  CryptProtectMemory/CryptUnprotectMemory (`cert_test`) encrypt in
+  place with AES-256-CBC, zero IV, no padding (sizes are multiples of
+  16), under HMACs of the same master key: CROSS_PROCESS and SAME_LOGON
+  (one session per user) with a fixed label, SAME_PROCESS also with 32
+  random bytes made once per process. crypt32's misc.rs also has
+  CryptMemAlloc/Realloc/Free (the process heap), CertGetNameStringA (the
+  W form converted) and PFXIsPFXBlob (the outer SEQUENCE { INTEGER 3,
+  ContentInfo }).
+- **Certificate stores** (crypt32 store.rs, query.rs; `cert_test`): a
+  store is a reference-counted array of contexts, each a copy of the
+  added certificate (made with CertCreateCertificateContext) whose
+  hCertStore is the store and on which the store holds one reference;
+  enumeration and Find return the next context with one more reference
+  and free the previous one; closing the last reference releases the
+  contexts (a caller's context then keeps a dangling hCertStore, where
+  Windows would keep the store alive). The system stores are empty
+  memory stores (recorded: gala has no installed certificates yet).
+  CryptQueryObject recognises one certificate (DER, or base64 with or
+  without PEM lines); CryptDecodeObjectEx decodes GeneralNames into
+  CERT_ALT_NAME_INFO (e-mail, DNS, URL as UTF-16 strings, IPs as blobs,
+  all in one block; other choices are recorded and skipped).
 - **Thread stacks**: laid out as Windows does - a reservation of the
   executable's SizeOfStackReserve (main thread: the kernel, placed to end
   at 0x200000 when it fits; CreateThread with size 0: kernel32 reads the
@@ -2045,7 +2067,14 @@ Windows, never shadows the system's DLLs.)
   part against the directory's drive, comparisons go through kernel32's
   CompareStringW in the user's locale, StrCmpLogicalW compares digit
   runs by value; SHDeleteKeyW finds RegDeleteTreeW at run time so
-  loading shlwapi does not pull in advapi32).
+  loading shlwapi does not pull in advapi32), and its URL functions
+  (`urls.rs`; the escaping, slash and simplification rules Wine's tests
+  show Windows following, per scheme family: http-like schemes read
+  backslashes as slashes, opaque ones escape `/`, `?` and `#`; `#` is a
+  fragment in a file URL only after a .htm/.html name), AssocQueryStringW
+  (the user's classes, then HKCR; shell\<verb>\command) and
+  SHCreateStreamOnFileEx (`assoc.rs`, an IStream over a file handle; no
+  transactions, CopyTo, Clone or region locks: recorded).
   gala's cmd.exe (`user/cmd`, built as a program and placed in
   System32) implements `/c` (and switches before it): cmd's documented
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
@@ -3139,6 +3168,65 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   a path) or the empty list (the desktop); CSIDL_DRIVES is virtual.
   shell32, ole32 and comctl32 load the GUI DLLs they call on first use
   (LoadLibraryW): programs without windows use them too.
+- **shell32's programs, drops and file operations**
+  (`user/shell32/src/shellops.rs`; `shell32_test`): ShellExecuteW/ExW
+  run programs (.exe/.com, as given or along the search path, `.exe`
+  added) with CreateProcessW and the documented results (hInstApp 33,
+  hProcess with SEE_MASK_NOCLOSEPROCESS; SE_ERR_FNF and
+  ERROR_FILE_NOT_FOUND); other verbs, documents and URLs have no
+  associations yet (SE_ERR_NOASSOC, recorded). DragQueryFileW/
+  DragQueryPoint/DragFinish read a DROPFILES block (wide or ANSI names);
+  DragAcceptFiles sets WS_EX_ACCEPTFILES through user32 found at run
+  time (nothing generates WM_DROPFILES yet). SHFileOperationW does
+  FO_COPY/FO_MOVE/FO_RENAME/FO_DELETE with wildcards, double-NUL lists,
+  FOF_FILESONLY and FOF_MULTIDESTFILES, directories recursively; with no
+  dialogs and no recycle bin it proceeds without confirmation and
+  deletes for good (both recorded when asked otherwise). SHChangeNotify
+  has no listener to tell; Shell_NotifyIconW fails (no notification
+  area, recorded). `icons.rs`: ExtractIconW/ExtractIconExW/SHDefExtractIconW read
+  the file (not loaded) and walk the PE resource directory's
+  RT_GROUP_ICON entries in directory order (named, then IDs; a negative
+  index is an ID), pick the image nearest the size asked with the most
+  bits per pixel, and make the icon with user32's
+  CreateIconFromResourceEx found at run time; .ico files too.
+- **dbghelp's image helpers and normaliz** (`user/dbghelp/src/image.rs`,
+  `user/normaliz`; `dbghelp_test`): ImageNtHeader checks "MZ" and
+  "PE\0\0"; SymSrvGetFileIndexInfoW reads an image file's headers (no
+  mapping): TimeDateStamp, SizeOfImage, IMAGE_FILE_DEBUG_STRIPPED, and
+  the debug directory's CodeView RSDS record (PDB base name, GUID, age);
+  NB10 records and PDB/DBG files are recorded. MiniDumpWriteDump stays a
+  stub (exported, so SqlDumper loads). normaliz.dll forwards IdnToAscii
+  to kernel32 and has its own IdnToUnicode (RFC 3492 decoding), because
+  kernel32's is still a stub: a forwarder to a stub fails to bind (the
+  ledger says "missing export"). `symbols.rs`: SymLoadModuleExW keeps (base, size) of up to 64
+  modules of this process (the size from the mapped image's SizeOfImage
+  when not given); SymFromAddr checks the image is mapped (VirtualQuery),
+  walks its export directory and names the nearest export at or below
+  the address (SYMFLAG_EXPORT, SymTagPublicSymbol), forwarders skipped.
+  gala's own DLLs link with /OPT:ICF, so identical functions share an
+  address and SymFromAddr names the first export there.
+- **ole32's clean-up helpers** (`user/ole32/src/props.rs`;
+  `ole32_test`): PropVariantClear frees by type (task-allocator strings,
+  BSTRs and SAFEARRAYs through oleaut32 found at run time, interfaces,
+  blobs, CLIPDATA, vectors and their elements) and zeroes the
+  PROPVARIANT; the valid types are those of Wine's test_validtypes table
+  (checked on Windows), others are STG_E_INVALIDPARAMETER. ReleaseStgMedium
+  frees a medium it owns (pUnkForRelease NULL; TYMED_FILE deletes the
+  file), always releases interfaces and the owner. OleRun/OleLockRunning/
+  OleSetContainedObject go to IRunnableObject (S_OK without one);
+  CoSetProxyBlanket/CoQueryProxyBlanket to IClientSecurity, which no
+  object has without proxies (E_NOINTERFACE, as an in-process object
+  answers on Windows). `bindctx.rs`: CoCreateInstanceEx creates through
+  CoCreateInstance(IID_IUnknown) and fills each MULTI_QI by
+  QueryInterface; CreateBindCtx's object keeps up to 32 bound objects
+  and 16 named parameters (more is recorded) and the BIND_OPTS bytes;
+  CoImpersonateClient/CoRevertToSelf answer RPC_E_CALL_COMPLETE (gala
+  serves no COM calls across processes).
+- **Image-list drags** (`user/comctl32/src/drag.rs`; `comctl32_test`):
+  one process-wide drag (list, image, window, position); the calls
+  answer as documented while it lasts, but nothing draws the drag image
+  over the window yet (recorded per drag); drawing it needs saving and
+  restoring the window's pixels under it.
 - **Common controls** (`user/comctl32/src/`; `comctl32_test`):
   InitCommonControls(Ex) registers the classes (once). comctl32 imports
   user32 (the controls are windows) but loads gdi32 on first use (the
@@ -3604,7 +3692,8 @@ pieces:
   `zip` (APPNOTE: EOCD, central directory, stored and deflate through
   `miniz_oxide`, CRC-32 and size checked, `safe_path` refuses `..`,
   roots, drives and `:`), `source` (a winget-pkgs tree), `install` (the
-  transaction), `shim`.
+  transaction), `shim`; and `winget`, the full manifest resolver the
+  install command is to switch to ("The winget resolver" below).
 - **`user/gala`** module `pkg`: the commands and `Win32`, galapkg's
   `Host` over kernel32 (files) and advapi32 (the registry; loaded with
   LoadLibrary when a package command runs, so `gala`'s other commands
@@ -3751,10 +3840,10 @@ not yet called by gala.exe (nothing runs an installer):
   flags, security).
 - `cab`: cabinets ([MS-CAB]): header with reserved areas and the
   previous/next names skipped, folders, files, data blocks with their
-  checksum checked when not 0, compression none and MSZIP ([MS-MCI]: `CK`
+  checksum checked when not 0, compression none, MSZIP ([MS-MCI]: `CK`
   + a deflate stream per block, the window carried over: miniz_oxide's
-  core inflater is given the folder's output so far). `folder_data`,
-  `extract(i)`, `extract_all` (each folder once).
+  core inflater is given the folder's output so far) and LZX (`lzx`,
+  below). `folder_data`, `extract(i)`, `extract_all` (each folder once).
 
 **What `gala install` will call:** `Package::install_files(&root)`:
 every File row with its component's directory resolved to a target
@@ -3790,26 +3879,392 @@ header's 109 entries, nested storages, mini/regular boundary at 4095 and
 4096 bytes, reserved cabinet areas, the long-id pool, Windows-1252), and
 feed truncated and randomly damaged files to every reader.
 
-**Limits and TODO.** LZX (and Quantum) cabinets are refused with what
-they are (LZX is what large packages, Edge's among them, use; no tool
-here writes LZX cabinets to test against, so it waits for a fixture
-from Windows' makecab); cabinets spanning several files; external
+**Limits and TODO.** Quantum cabinets are refused with what they are;
+cabinets spanning several files; external
 cabinets and loose files are located (`FileSource`) but not read (the
 caller has the files next to the package); code pages other than 1252,
 28591 and 65001 decode lossily; transforms (`.mst`), patches, the
 `_Validation`/`_Streams`/`_Storages` pseudo-tables and storages inside
 the package (embedded transforms) are not read; directory resolution
 does not apply the conditions, features or `SetDirectory` custom
-actions that an installer's costing would. Then stage 5 proper: the
-engine (standard actions, sequence tables, properties, conditions,
+actions that an installer's costing would (`msi::plan` does the first
+two, below). Then stage 5 proper: the engine (standard actions run,
 custom actions, `msiexec /i /qn`).
+**MSIX/AppX reading (PK stage 4 groundwork, 2026-11-03; nothing is
+installed yet).** `galapkg::msix` reads packages and bundles from
+memory, host-tested (`cargo test -p galapkg`, the `msix::tests`,
+`blockmap::tests`, `appxmanifest::tests`, `xml::tests`); sources:
+Microsoft's manifest, bundle manifest and block map schema references,
+the package identity overview, ECMA-376 Part 2 (THIRD_PARTY.md). The
+API `gala install` will call:
+
+- `msix::open(data) -> Opened::{Package, Bundle}`; `Package::open`,
+  `Bundle::open` read and parse the footprint files ([Content_Types].xml,
+  AppxBlockMap.xml, the manifest) and note AppxSignature.p7x's presence
+  and size (`signature: Option<u32>`: **not validated**, TODO with the
+  certificate store).
+- `Package::verify() -> Result<Checked, Problems>`: every block map
+  file against its zip entry, every problem collected; `Package::files()`
+  (block map name, `safe_path`, size, footprint or payload) and
+  `Package::read(name)` (one file, checked) are what an installer
+  unpacks with. `Bundle::verify()` adds each inner package's entry
+  (stored, its data at the bundle manifest's Offset, Size bytes);
+  `Bundle::package_for(arch)` picks the application package (the arch,
+  else neutral); `Bundle::open_package(p)` opens it in place.
+- `Identity` (Name, Publisher, Version, architecture, ResourceId):
+  `full_name()` `<Name>_<Version>_<Arch>_<ResourceId>_<PublisherId>`
+  (a bundle's ResourceId is `~`), `family_name()`, `publisher_id()`:
+  SHA-256 of the Publisher in UTF-16LE, its first 8 bytes as 64 bits
+  padded with a zero bit to 65, 13 Crockford base32 digits in lower
+  case. Checked against the one pair Microsoft documents with both
+  values (Microsoft's own Publisher gives `8wekyb3d8bbwe`, and the
+  documented full name of Microsoft.WindowsAppRuntime.1.0); the test
+  publisher's id `dr59fkesnp31w` comes only from the same algorithm.
+- `AppxManifest`: Identity (Name a package string of 3-50 characters,
+  Version four parts of 0-65535, ProcessorArchitecture one of x86, x64,
+  arm, arm64, x86a64, neutral, ResourceId), Properties (DisplayName,
+  PublisherDisplayName, Logo, Description, Framework, ResourcePackage),
+  Dependencies (TargetDeviceFamily, PackageDependency), Resources
+  (languages), Applications (Id unique, Executable, EntryPoint,
+  VisualElements basics, uap or Windows 8 form), Capabilities (any
+  namespace, DeviceCapability; `run_full_trust()` for
+  `rescap:Capability Name="runFullTrust"`). Windows 10 (foundation)
+  and Windows 8 (2010) roots; other elements are ignored, as
+  IgnorableNamespaces intends. `BundleManifest`: Identity, Packages
+  (Type, Version, Architecture, ResourceId, FileName, Offset, Size,
+  languages). `ContentTypes`: Override by part name, else Default by
+  extension (ASCII case-insensitive).
+
+**Block map rules (`blockmap.rs`).** Every file but AppxBlockMap.xml,
+AppxSignature.p7x and [Content_Types].xml is listed once (names compared
+after decoding the zip item name's percent-escapes, `/` as `\`, ASCII
+case-insensitive), and every listed file is present. Per file: Size =
+the uncompressed size, LfhSize = the zip local header's size (30 + name
++ extra), one Block per 64 KiB (the last shorter, an empty file none),
+each block's hash (HashMethod SHA-256, SHA-384 or SHA-512 by its W3C
+URI, base64) over the uncompressed bytes. Deflated files: every block
+has a Size, they add up to the compressed size, and each block's run
+inflates to exactly that block (miniz_oxide's core decompressor fed one
+run at a time into the whole-file buffer, so a corrupt run is reported
+with its block index); stored files: a block Size, if any, is the
+block's length. The zip CRC-32 is checked after the hashes, so a
+changed byte is reported as "<file> block N: hash mismatch: the block
+map says X, the data hashes to Y" rather than a CRC failure.
+
+**Invariants.** The manifest a `Package` returns has passed its block
+map entry (a changed manifest fails `open`); an inner package from
+`open_package` has passed the bundle's block map and its identity
+agrees with the bundle (Name, Publisher) and its Package element
+(Version, Architecture, ResourceId); nothing panics on a hostile
+package (a test flips and truncates bytes all over the fixtures); a
+file's buffer is reserved fallibly (`try_reserve_exact`, an
+`OutOfMemory` error naming the file), as sizes come from the archive.
+Errors name the file (an inner package's as `<package>/<file>`), the
+block, expected and actual values, and for XML the element and line.
+
+**XML (`xml.rs`).** Gala's own: elements, attributes (normalized), text,
+CDATA, comments, PIs, the predefined entities and character references,
+namespaces (default and prefixed, the `xml` prefix), UTF-8 with or
+without BOM and UTF-16 with BOM. DTDs are refused (no entity expansion),
+as are undeclared prefixes, duplicate attributes and nesting beyond 256;
+iterative, so depth costs no stack.
+
+**ZIP64.** `zip.rs` reads the zip64 end record, locator and extra
+field (MSIX packages are zip64 with data descriptors; the central
+directory is authoritative, so data descriptors need nothing); entries
+of 4 GiB or more are refused (archives are in memory). New accessors:
+`local_header_size`, `data_offset`, `raw`.
+
+**Limits and assumptions (spec-derived, not checked against makeappx
+output, which needs Windows):** that makeappx flushes the deflate stream
+at each 64 KiB block (the schema's per-block Size implies it; a package
+whose runs are not byte-aligned per block fails with "its N compressed
+bytes inflate to ..."); that a bundle's Offset is where the inner
+package's bytes start (after its local header), its Size their length;
+that zip item names percent-encode as OPC part names do (a space as
+`%20`); the bundle full name's `neutral` architecture. Not read yet:
+AppxMetadata\CodeIntegrity.cat, the content group map, the
+`AppxBlockMap` b4/b5 extensions (FileId etc.), encrypted packages
+(.eappx), flat bundles; AppxSignature.p7x is only noticed.
+
+**Fixtures (`user/galapkg/testdata/msix/`, made by
+`make_fixtures.py`, checked by `check_fixtures.sh`).** app.msix (ZIP64
+with data descriptors, deflated multi-block text, a stored two-block
+file, an empty file, a space in a name, a placeholder signature),
+zipfile.msix (written by Python's zipfile: classic zip, all stored),
+unsigned.msix, app.msixbundle (x64 and x86 packages) and the damaged
+ones: bad_hash (block 1 of a deflated file), missing_file,
+extra_listed (a listed file not in the package), unlisted_file,
+wrong_size, wrong_lfh, wrong_block_size, bad_offset.msixbundle; a
+flipped stored byte and SHA-384/512 block maps are made in the tests.
+**Independently verified** (tools sharing no code with the generator or
+galapkg): the zip structure of every fixture (Info-ZIP `unzip -t`,
+7-Zip `7z t`), every block hash of the good packages (and their inner
+packages) recomputed by `sha256sum` over the extracted files split into
+64 KiB blocks, File Sizes against the extracted files, the bundle's
+Offset/Size (`dd` + `cmp` against the extracted inner package), and
+bad_hash/wrong_size failing that same check; Microsoft's documented
+publisher id. **From our reading of the specification only:** the
+deflate block runs and their Sizes, LfhSize (zipfile.msix's, from
+Python's own writer, agrees with our reading), the test publisher's
+id, the content type strings, the bundle full name form.
+
+**Next (ROADMAP PK):** the HTTPS fetcher; then stage 3 (Inno Setup,
+NSIS, `exe` with switches: run the vendor's installer silently, uninstall
+through its UninstallString), 4 (MSIX: on the reader above, signature
+validation against trusted certificates, staging under WindowsApps,
+registration, package identity for full-trust apps), 5 (MSI); machine scope
+(`%ProgramFiles%\WinGet\Packages`, HKLM, needs elevation); dependencies
+(`Dependencies: PackageDependencies`); `gala list` matching ARP entries
+to packages by ProductCode/AppsAndFeaturesEntries.
+### The winget resolver (`galapkg::winget`, built 2026-11-03)
+
+Full winget manifest support as a library the install command will call,
+built beside `manifest`/`yaml` (which the install path still uses) so the
+install, Inno and NSIS paths were not touched. Host-tested only; no
+scenario yet. Modules (each file's head comment gives every rule and its
+source):
+
+- `yaml`: the YAML 1.2.2 subset manifests use, every node with its
+  line and column: BOM, directives, `---`/`...`, comments (the
+  `# yaml-language-server` header), CRLF; block mappings and sequences
+  (compact forms); flow sequences and mappings (nested, multi-line,
+  trailing comma); plain, single- and double-quoted scalars (all YAML
+  escapes, multi-line folding, `\` continuation); `|`/`>` with chomping
+  and indentation indicators. Errors (`line:col: message`) for anchors,
+  aliases, tags, `?` keys, tabs in indentation, duplicate keys, a second
+  document, nesting deeper than 64. Plain `~`/`null`/empty are null;
+  everything else stays text.
+- `schema`: ManifestVersion (`major.minor.patch`, 1.x only), the five
+  ManifestTypes, and per field and per enumeration value the schema it
+  appeared in, from the published JSON schemas 1.0.0, 1.1.0, 1.2.0,
+  1.4.0, 1.5.0, 1.6.0, 1.7.0, 1.9.0, 1.10.0, 1.12.0 and 1.28.0 (no others
+  exist). E.g. `portable` 1.2, `zip`/NestedInstaller* 1.4, `deny`
+  1.6, `Repair`/RepairBehavior 1.7, ArchiveBinariesDependOnPath 1.9,
+  Authentication 1.10, `font` 1.12, DesiredStateConfiguration 1.28.
+- `package`: `Package::from_files(&[(name, text)])` reads a singleton or
+  a multi-file set (exactly one version, installer and defaultLocale
+  manifest, any number of distinct locales; every file the same
+  PackageIdentifier, PackageVersion and ManifestVersion; DefaultLocale =
+  the defaultLocale's PackageLocale) into every schema field of every
+  installer, typed (Architecture, InstallerType, Scope, UpgradeBehavior,
+  ElevationRequirement enums; Switches; Dependencies; AppsAndFeatures
+  entries; ExpectedReturnCodes; Markets; InstallationMetadata...), root
+  fields as defaults (InstallerSwitches merged per switch, everything
+  else replaced whole), and `localization(&[locales])` with per-field
+  fallback to the default locale. **Invariant: errors and warnings name
+  the file, line and column.** Hard errors: YAML, missing identity,
+  inconsistent files, missing Architecture/InstallerType/InstallerUrl/
+  InstallerSha256, a SHA-256 that is not 64 hex digits, an unknown
+  Architecture. Warnings (`Package::warnings`, for the install log):
+  unknown fields, fields or values newer than the declared schema, keys
+  or values in the wrong case, a newer or unpublished ManifestVersion,
+  an unknown InstallerType (that installer is never selected), duplicate
+  installers.
+- `select`: `select(&Package, &Machine, &Request) -> Result<Selection,
+  NoInstaller>`. `Machine` (architecture, OS version, locale, market;
+  `Machine::gala(arch, locale)` is build 26100); `Request` holds each of
+  scope/locales/architectures/installer types as a `Choice` (values best
+  first; `required` for command-line options and `requirements`
+  settings, else a preference), and `installed` for an upgrade. Filters:
+  runnable architecture (x64: x64, neutral, x86; arm64: arm64, neutral,
+  x64, x86, no Arm32 on 24H2), UnsupportedOSArchitectures,
+  MinimumOSVersion, Platform (Windows.Desktop), Markets, required scope
+  (unknown scope kept), required locale (exact, same language or
+  unknown), required installer type (InstallerType or the zip's
+  NestedInstallerType), unknown type, zip without nested type. Ranking,
+  most significant first: (upgrade) installed type family, installed
+  scope; architecture order; scope; locale (exact > language > unknown >
+  other, the machine's locale then en-US when none asked); type
+  preference; manifest order. Every rejection keeps its reason
+  (`NoInstaller` prints them all). `command_line(&Installer,
+  &CommandOptions)`: mode switch (silent, silent-with-progress default,
+  interactive; Silent and SilentWithProgress fall back to each other),
+  Log (`<LOGPATH>`), Upgrade, Custom, `--custom`, InstallLocation
+  (`<INSTALLPATH>`) last (NSIS's `/D=`); `--override` replaces all;
+  defaults per type (msi/wix `/quiet|/passive /norestart`, `/log`,
+  `TARGETDIR=`; burn the same without a location; inno `/SP- /VERYSILENT
+  |/SILENT /SUPPRESSMSGBOXES /NORESTART`, `/LOG=`, `/DIR=`; nullsoft `/S`,
+  `/D=`; others none), the nested type's for a zip; UnsupportedArguments
+  and InstallLocationRequired honoured (an error says which).
+- `deps`: `plan(&Package, &Machine, &Request, &impl Catalog) ->
+  Result<Plan, Error>`: the selected installer's Dependencies, depth
+  first, dependencies before dependants, each package once, the
+  requested one last; installed at MinimumVersion or later = satisfied
+  (not recursed into); else the source's latest version, which must meet
+  every MinimumVersion; cycles (`A -> B -> A`), missing packages, too-old
+  versions, unselectable dependencies and chains deeper than 32 are
+  errors naming the path or the requester; Windows features, libraries
+  and external dependencies collected once each with who needs them.
+  `describe(&Plan)` gives the log lines.
+- `arp`: `Signature::of(&Package)` (product codes, upgrade codes,
+  normalized names/publishers from AppsAndFeaturesEntries and the default
+  locale) matched against `ArpRecord`s: WinGetPackageIdentifier, then
+  ProductCode (the key), then UpgradeCode, then normalized DisplayName +
+  Publisher; `installed_version` maps a DisplayVersion back to the
+  PackageVersion whose entries list it; `installed_type` for an
+  upgrade's `Installed`; `update_available`.
+- `version`: `crate::version`'s ordering plus empty = Unknown,
+  `at_least`, a first-wins `latest`.
+
+**Switching the install command over (TODO, for whoever owns
+`user/gala`'s install command and `galapkg::install`):** read with
+`winget::Package::from_files` (pass the file names: errors then name the
+file); select with `winget::select::select` and a `Request` built from
+`--architecture/--scope/--locale/--installer-type` (required) and the
+settings' preferences, `installed` from `arp::installed_type` and the
+ARP record's hive for `upgrade`; log `Package::warnings`, the selected
+installer and each `Rejected` line into install.log; for installer types
+the install path supports (zip/portable now, inno/nullsoft next) build
+the arguments with `select::command_line`; run `deps::plan` first (a
+`Catalog` over `source::Source`) and install the plan in order; `gala
+list`/`upgrade` match ARP entries with `arp::find`. Then `manifest.rs`
+and `yaml.rs` can be deleted (their tests' manifests are covered by
+`winget::package`'s). The old `Manifest::select_installer` prefers user
+scope and x64-or-neutral only; the new rules are the ones above.
+
+**Corpus test** (`winget/corpus_tests.rs`): 400 real version
+directories (`testdata/winget-corpus`, a winget-pkgs snapshot,
+THIRD_PARTY.md) must all read (they do: schemas 1.1.0 to 1.28.0, 2
+warnings, both genuine manifest mistakes), parse the same twice, and
+give the selections in `testdata/winget-corpus/selected.txt` for 8
+profiles (x64/arm64 x preferred user/machine x en-US/de-DE): the
+installer, its URL, its effective type and its default-mode arguments.
+Damaged copies (every prefix, indicators injected at line starts) must
+not panic. Not covered by the corpus: singletons and 1.0.0 (winget-pkgs
+has neither any more; the unit tests have them).
+
+**LZX (`user/galapkg` `lzx`, 2026-11-03).** Written from the Cabinet
+SDK's "Microsoft LZX Data Compression Format" and [MS-PATCH] (LZX
+DELTA; cabinet LZX is it without reference data, chunk-size prefixes
+and the extra length field). `cab::Cabinet::folder_data` runs a
+`lzx::Decoder` per folder (window 2^15..2^21 from typeCompress bits
+8-12) and feeds it each CFDATA block as one frame: the bitstream (16-bit
+little-endian words, bits from the top) restarts at every frame, while
+LZX blocks (verbatim, aligned offset, uncompressed), the main/length
+tree path lengths (pretree deltas mod 17 against the previous block's,
+runs 17/18/19), R0-R2 and the window carry over. The window is a ring of
+2^w bytes of undecoded-E8 data; E8 translation is reversed per frame on
+the output only. Where the two documents disagree, a cabinet Microsoft
+made (`fetch_real.sh`: the DirectX web installer's, LZX:21 with E8,
+2.2 MB, decoded byte-identical to cabextract and 7-Zip) decided:
+aligned offset bits are used from 3 footer bits on ([MS-PATCH] 2.6.3;
+its own decoding pseudocode says "more than 3", which fails on that
+cabinet's first aligned block), and E8 bytes are looked for in a
+frame's first `len - 10` bytes ([MS-PATCH] 2.2.2; the SDK's "last 6"
+translates one at 32759 that Microsoft's encoder left alone). An
+uncompressed block's padding is 1 to 16 bits (16 when already on a
+word), its odd size padded by a byte, and it continues into the next
+frame's bytes; both readings were confirmed by cabextract on the
+checked-in fixtures. **Invariants:** every code is checked (an
+over-subscribed tree, a code no element has, a run past a tree's end,
+a match before the start of the data, past its frame or its block, or
+further than the window - 3, block types other than 1-3), reading past
+a frame's end gives at most 32 zero bits then an error, and errors name
+the frame and output position (cab adds the folder, block and offset).
+**Fixtures:** `testdata/lzx/*.cab`, made by a test encoder written from
+the same documents (`src/lzx/encode.rs`: greedy matching with repeated
+offsets, real length-limited Huffman codes, all three block types, E8),
+are decoded by cabextract and 7-Zip into `expected/*.sha256`: verbatim
+blocks spanning frames with tree deltas, aligned blocks over 2^21,
+uncompressed blocks (odd, spanning a frame, ending on one, with 16 bits
+of padding), E8 with calls in the last bytes of frames. The Microsoft
+cabinet is not committed (it is Microsoft's code): its test skips when
+`target/galapkg-fixtures/dxwebsetup.cab` is absent. TODO: matches
+across an LZX block boundary are refused (the SDK says nothing; no
+cabinet seen needs them); Quantum.
+
+**MSI install plans (`user/galapkg` `msi::cond`, `msi::format`,
+`msi::plan`; 2026-11-03).** What installing a package would do,
+computed from its tables without running anything; the API `gala
+install` will call: `msi::plan::Plan::compute(&Package, &Machine,
+&Properties) -> Result<Plan, PlanError>`. `Machine` is the known
+folders (gala.exe fills them from SHGetKnownFolderPath;
+`Machine::windows_defaults(user, package)` gives Windows' defaults for
+the tests), ROOTDRIVE, SourceDir, privileges, the environment, VersionNT.
+The `Plan` lists the context and why, every property after costing,
+directories (target and source path, how found), features (level after
+the Condition table, state, why), components (state, why, directory,
+key path, 64-bit), files of installed components (target or
+run-from-source path, where the bytes are), registry writes (hive, key,
+name, typed value), shortcuts (.lnk path, target or advertised
+feature, arguments, working directory), launch conditions with
+pass/fail and their formatted message, and the rows of
+InstallUISequence, InstallExecuteSequence, AdminUISequence,
+AdminExecuteSequence and AdvtExecuteSequence in Sequence order (exit
+actions -1..-4 after, 0/NULL last and never run), each with its
+condition's outcome and its kind: a standard action with what it does
+here (`copies files: 2`), a custom action with its Type decoded
+(base type 1-54 with Source/Target, return processing, immediate with
+scheduling or deferred/rollback/commit, no impersonation, TS-aware,
+hidden target, 64-bit script, patch uninstall), a dialog, or unknown.
+Every item has a one-line Display for the install log; `PlanError`
+names the table, the row (1-based), its key and the column, or the
+property. The order (module docs have it in full): Property table, the
+command line, the context, the installer's properties, directories
+(their properties then set to their paths), the Condition table,
+features, component conditions and states, files, registry, shortcuts,
+launch conditions, sequences.
+
+*Rules chosen where the documentation is silent or ambiguous*
+(TODO: check each against `msiexec /l*v` on Windows): ALLUSERS values
+other than "", 1, 2 are taken as per-machine; per-user
+ProgramFilesFolder/CommonFilesFolder (and the 64-bit ones) are
+%LOCALAPPDATA%\Programs[\Common] only for the dual-purpose case
+(ALLUSERS=2, MSIINSTALLPERUSER=1, as Single Package Authoring
+describes; a plain per-user package keeps the machine's, as that page
+says installs authored for Installer 4.5 do); Root 0 goes under the
+context hive's Software\Classes (the Installation Context table); the
+system folder properties override the Property table but not the
+command line; VersionNT is 603 (the SDK's table ends at Windows 8.1);
+UILevel is 2 (no UI, as gala installs); a fresh install: every
+feature's and component's installed state (`!`, `?`) is absent; REMOVE
+of a feature that is not installed leaves it absent; a {group} whose
+reference does not resolve is blank; a Registry value's `#` prefixes
+are looked for in the raw text, the rest formatted after. The plan
+does not run AppSearch, custom actions (type 51 and 35 included) or
+dialogs, so properties and directories they would set are not in it;
+sequence conditions see the final feature and component states even
+before CostFinalize.
+
+*The condition grammar* (`msi::cond`, from Conditional Statement
+Syntax; precedence high to low NOT, AND, OR, XOR, EQV, IMP, all
+left-associative): `term := value [ [~]op value ] | ( expr )`, op one of
+`= <> > >= < <=` and the substring/bitwise `>< << >>`; values are
+properties (case-sensitive names, unset = ""), `%env` (case-insensitive
+names), `$comp ?comp &feat !feat` (the INSTALLSTATE integers; no state
+= ""), "literal" (no escapes) and decimal integers. A value alone is
+true when non-empty or non-zero. Strings compare as text (`~`
+lowercases), integers as numbers; integer against string: the string's
+integer value if its whole text is one, else false except `<>`. On
+integers `><` is a bitwise AND test, `<<`/`>>` compare the high/low 16
+bits. Empty is true; a syntax error names the character. Tests: every
+example of the SDK's examples page and its rules, table-driven
+(`msi/cond/tests.rs`); Formatted from its page's examples
+(`msi/format/tests.rs`).
+
+*Tests:* `plan.msi` (x64 per-machine: features at levels 0, 1, 3, 200,
+a Condition table row, a component condition, an optional component of
+a favorSource feature, registry values of every type with formatted
+text, shortcuts, custom actions of types 51, 3073, 3329, 226, launch
+conditions), `dual.msi` (ALLUSERS=2 + MSIINSTALLPERUSER=1, Root -1 and
+0, exit and never-run UI actions), `basic.msi` (plain per-user),
+`badcond.msi` (a condition that does not parse): built with wixl and
+msibuild, their tables checked against msiinfo; the plans checked
+against the documented rules (each test names its page), plus random
+damage. **Not verified against msiexec** (none on the host).
+
+**Next (MSI):** run the plan: `gala install` of an `msi` InstallerType
+through `install::Tx` (files from `extract_all`, registry, shortcuts
+through shell32's IShellLink, an ARP entry, rollback), then AppSearch,
+type 51/35 custom actions in the plan, then msiexec/msi.dll proper.
 
 **Next (ROADMAP PK):** the HTTPS fetcher; then stage 3 (Inno Setup,
 NSIS, `exe` with switches: run the vendor's installer silently, uninstall
 through its UninstallString), 4 (MSIX), 5 (MSI); machine scope
-(`%ProgramFiles%\WinGet\Packages`, HKLM, needs elevation); dependencies
-(`Dependencies: PackageDependencies`); `gala list` matching ARP entries
-to packages by ProductCode/AppsAndFeaturesEntries.
+(`%ProgramFiles%\WinGet\Packages`, HKLM, needs elevation); the install
+command switched over to `galapkg::winget` (above), which brings
+dependencies and `gala list` matching ARP entries to packages.
 
 ## Plan: sessions and remote shasha (proposed 2026-11-03)
 ## Plan: sessions and remote shasha (proposed 2026-11-03; B1 done)
@@ -4043,11 +4498,50 @@ source).
    and the console session; moving its line handling into a core terminal
    object is now a refactor, ConPTY's tests deciding that Windows'
    behaviour is unchanged.
-2. **Per-process system-call dispatch**: a personality field on the
-   process and a dispatcher table keyed by it, in the kernel and gala-um;
-   a host test that a process with a second (test-only) personality
-   reaches that dispatcher; the dispatcher named in "unknown system call"
-   logs.
+2. **Per-process system-call dispatch** (**done** 2026-11-03): a
+   personality field on the process and a dispatcher table keyed by it,
+   in the kernel and gala-um; a host test that a process with a second
+   (test-only) personality reaches that dispatcher; the dispatcher named
+   in "unknown system call" logs. How it is built:
+   - `kernel/src/personality.rs` (core, no `unsafe`): `Personality`
+     (`Nt`, the default; `Test` only under `cfg(test)`), and
+     `Dispatchers`, one `spin::Once<Dispatcher>` (name + handler) per
+     personality: registered once at start, read without a lock on every
+     system call. Host tests: a process of the `Test` personality reaches
+     the test dispatcher and not NT's; a personality without a dispatcher
+     is reported, never sent to NT; registration is once.
+   - `nt::Process::personality`, fixed at creation (`process::spawn`: a
+     PE image is NT; `adopt` after a handover: NT, the PROCESSES record
+     has no personality field yet: a second personality needs a record
+     version). Each thread gets it at `platform::spawn_user(..,
+     personality)`; `nt::syscalls::init` registers NT's dispatcher with
+     `set_syscall_handler(Personality::Nt, "nt::syscalls", dispatch)`.
+   - Kernel: the scheduler's `UserThread` keeps the personality; the
+     context switch stores it in the per-CPU block next to the user GS
+     base (`percpu::set_personality`), and `arch::syscall::dispatch`
+     reads it with one GS-relative load (system calls run with interrupts
+     on: a load, not a pointer then a field, so a migration cannot tear
+     it) and calls `DISPATCHERS.dispatch`. No extra lock per call.
+     `checkuser` also checks the per-CPU personality against the
+     thread's.
+   - gala-um: a thread-local `PERSONALITY`, set by `entry::init_thread`
+     when `spawn_user` starts the thread; the SIGSYS handler dispatches on
+     it (`SYSCALL_HANDLER` is the same `Dispatchers` table).
+   - Invariants: a thread's personality is its process's and never
+     changes; NT stays index 0 and the default (kernel threads, an
+     unknown per-CPU number); a personality with no dispatcher fails the
+     call with -1 (`NO_DISPATCHER_RESULT`) and the log line `syscall: no
+     dispatcher for personality <p>: system call <n> from rip <r> (thread
+     <t>)`, never NT's table.
+   - Observability: `syscall: personality nt dispatches to nt::syscalls`
+     at start; the NT dispatcher's unknown-service line is `<process>:
+     unimplemented system service <n> (dispatcher nt::syscalls,
+     personality nt)` (triage still matches it); `"personality":"nt"` in
+     the `process start` and `process exit` events (the events scenario
+     checks both); `personality nt` at the end of the `process ... starting at` line,
+     in the crash report (`crash report:   personality nt, session 1`,
+     checked by the crash scenario) and in each `thread: pid ..` line of
+     the state and hang dumps.
 3. **Core process vs NT process**, with RS B2 (B1 has moved session ids
    onto processes from tokens; B2 removes the global statics): split
    `Process` in the same pass.
@@ -4061,8 +4555,14 @@ source).
    NT-side surface (testable on real Windows).
 5. **Shared objects**: when pipes, sockets or files are next reworked,
    their state goes in core objects that do not assume an NT handle.
-6. **`net` free of `nt`**: `kernel/src/net/tcp.rs` reaches scheduling and
-   time through `crate::nt::platform`; give it core scheduling/time.
+6. **`net` free of `nt`** (**done** 2026-11-03): `kernel/src/net/tcp.rs`
+   reached scheduling and time through `crate::nt::platform`; it now uses
+   `crate::runtime` (`kernel/src/runtime.rs`), the core's threads, waits
+   and time: the kernel's `sched`/`time`, or with `hosted` gala-um's host
+   threads and clocks (the same functions `nt::platform` forwards to on
+   each platform, so both seams agree). xtask's unit test
+   `net_does_not_depend_on_nt` fails if a file in `net/` names
+   `crate::nt`.
 Observability with each seam: the personality in process events, crash
 reports and the state dump.
 
@@ -4078,6 +4578,149 @@ gala), basic /proc and /dev; (4) dynamic linking (ld.so, glibc), epoll,
 sockets; (5) real workloads (a distribution's userland, build tools).
 Most programs need about 150-200 of Linux's ~450 system calls; priorities
 come from `strace` of target programs on real Linux.
+
+### The lx module (milestone 1 groundwork, built 2026-11-03)
+
+`kernel/src/lx/` holds the Linux personality's pieces that are plain data
+processing (safe Rust; `lx` is not in the `unsafe` allow-list), declared
+from lib.rs and reached by nothing yet:
+
+- **`lx::elf`**: `ElfImage::parse(&[u8])` validates an ELF64 x86-64
+  ET_EXEC or ET_DYN image and never panics (tests: truncations at every
+  length, every header byte mutated, synthetic bad images). Invariants
+  (the module's doc lists them): program headers inside the file and at
+  most 64 KiB; at least one PT_LOAD; each PT_LOAD inside the file,
+  `filesz <= memsz`, alignment 0/1/power of two up to 1 GiB, address and
+  offset congruent modulo 4 KiB, ending below `USER_END`
+  (0x7fff_ffff_f000, observed), sorted and not overlapping (sharing the
+  boundary page is allowed: the mapper gives that page both
+  protections); the entry inside a PT_LOAD; at most one PT_INTERP
+  (NUL-terminated, <= PATH_MAX) and one PT_TLS. `load_bias(base)` is 0
+  for ET_EXEC, `base - span.start` for ET_DYN (base aligned to the
+  largest p_align); `plan(bias)` gives the `LoadPlan`: segments at their
+  addresses with `file_pages()` (page-aligned file mapping),
+  `zero_tail()` (the bss part of the last file page, cleared after
+  mapping), `anon_pages()` (the rest of the bss), AT_PHDR (PT_PHDR's, or
+  the PT_LOAD holding the headers), AT_ENTRY, the initial break (the page
+  after the image; Linux randomizes it above that for ET_EXEC and puts a
+  static-pie's elsewhere: brk_test checks only what does not vary) and the
+  TLS template. Linux places a dynamic PIE at 0x5555_5555_4000 and a
+  static-pie like an mmap below the mmap base (observed, `setarch -R`);
+  gala uses `DEFAULT_DYN_BASE` (the former) for both until it randomizes.
+  Errors (`ElfError`) carry the values that explain them and print as one
+  line; `LoadPlan` prints one line per segment, for the exec path's log
+  line and the state dump.
+- **`lx::stack`**: `build(end, max, &StackParams)` lays out the initial
+  stack as bytes ending at the page-aligned `end`: the end marker, the
+  AT_EXECFN string, envp's and argv's strings, a gap (random on Linux; a
+  parameter here), AT_PLATFORM ("x86_64") ending 16-aligned, AT_RANDOM's
+  16 bytes right below, then argc/argv/envp/auxv with the least padding
+  that makes rsp 16-aligned. The auxv order is Linux 6.18's
+  (SYSINFO_EHDR, MINSIGSTKSZ optional, then HWCAP, PAGESZ, CLKTCK, PHDR,
+  PHENT, PHNUM, BASE, FLAGS, ENTRY, UID, EUID, GID, EGID, SECURE, RANDOM,
+  HWCAP2 optional, EXECFN, PLATFORM, NULL); AT_HWCAP is CPUID(1).EDX and
+  AT_CLKTCK 100 (observed). Its host test replays user/lx/auxv_test's
+  transcript (recorded on Linux) against a stack built here for the same
+  arguments and the real auxv_test binaries' load plans: every line
+  matches, the string area byte for byte. Too much for `max` is
+  `StackError::TooBig` (execve's E2BIG).
+- **`lx::syscalls`** (`SYSCALLS`, `nr::*`, `name`, `number`, `COUNT`
+  462) and **`lx::errno`** (`ERRNOS`, aliases, `to_return`/`from_return`
+  for the `-errno` convention): tables, with host tests against musl's
+  headers when installed. Sources: THIRD_PARTY.md and the files' docs.
+- Allocation is fallible (`TryVec`, `try_reserve_exact`), as everywhere.
+
+**How it plugs into the dispatcher seam** (ROADMAP LX step 2, built
+separately: a per-process personality and a dispatcher table keyed by
+it): a Linux exec reads the file, `ElfImage::parse`s it (an `ElfError`
+becomes ENOEXEC/EINVAL, logged with its text and emitted as an event),
+loads PT_INTERP's image too if any (its plan's entry starts first;
+AT_BASE is its bias), maps each `LoadPlan` segment (file pages, then
+`zero_tail`, then `anon_pages`, protections from `prot`), sets the break
+from `plan.brk`, maps a stack (non-executable unless `gnu_stack` says
+otherwise) and copies `stack::build`'s bytes to its top, and starts the
+thread at the entry with rsp = `InitialStack::sp` and the other
+registers zero (rdx 0: no atexit function). The process is created with
+the Linux personality; its system calls go to a table of
+`lx::syscalls::COUNT` entries indexed by `nr`, which returns
+`errno::to_return(ENOSYS)` for the missing ones and names them in the
+"unknown system call" log with `syscalls::name`.
+
+TODO: the exec path and the first system calls (ROADMAP LX "Next");
+randomization (the stack gap, AT_RANDOM from the kernel's random source,
+the bases); the system-call numbers 462..=469 (Linux 6.18 has them; our
+sources do not name them yet).
+
+### The lx_abi crate (milestones 2-3 data, built 2026-11-03)
+
+`kernel/lx_abi` is a separate crate (workspace member; `no_std`, no
+dependencies, no allocation, `#![forbid(unsafe_code)]`) holding the
+Linux ABI's plain data for milestones 2 and 3. It is a crate, not a
+module under `kernel/src/lx`, so it builds and is host-tested without
+editing `lx/mod.rs` or the kernel's module tree (other work owns those);
+the kernel adds `lx_abi = { path = "lx_abi" }` and uses it when the
+Linux system calls are built. Tested with `cargo test -p lx_abi` (part
+of `cargo xtask test`'s unit tests); CI runs clippy on it for the host
+with tests and for x86_64-unknown-none; kernel/clippy.toml applies to it
+too.
+
+- **`lx_abi::signal`**: signal numbers (1..=64; SIGRTMIN 32, the
+  kernel's; musl's is 35), `SA_*`, `SI_*`/`SEGV_*`/`CLD_*` codes,
+  `SigSet` (64-bit: `blockable()` drops SIGKILL/SIGSTOP, `apply(how,
+  set)` is rt_sigprocmask's SIG_BLOCK/UNBLOCK/SETMASK with that rule,
+  `lowest`), `default_action(sig)` (signal(7): Term/Core/Ign/Stop/Cont;
+  real-time signals Term), `KSigaction` (rt_sigaction's 32-byte struct
+  with sa_restorer), `Siginfo` (128 bytes; constructors for
+  kill/tgkill, SI_QUEUE, SIGCHLD and faults put pid/uid at 16/20,
+  status/value at 24, the address at 16), `Stack` (stack_t, 24),
+  `Sigcontext` (256: r8..r15, rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp,
+  rip, eflags, cs/gs/fs/ss, err, trapno, oldmask, cr2, fpstate,
+  reserved), `Ucontext` (the kernel's, 304 bytes, not libc's),
+  `RtSigframe` (pretcode = sa_restorer at the handler's rsp, the
+  ucontext at +8, siginfo at +312, then the FPU/XSAVE state 64-aligned,
+  its size CPU-dependent).
+- **`lx_abi::termios`**: the kernel's 36-byte `struct termios`, flag
+  bits, `c_cc` indexes (NCCS 19), `Termios::fresh_pty()` (iflag
+  ICRNL|IXON, oflag OPOST|ONLCR, cflag B38400|CS8|CREAD, lflag
+  ISIG|ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE|IEXTEN; INTR ^C, QUIT ^\,
+  ERASE DEL, KILL ^U, EOF ^D, VMIN 1, VTIME 0, ...; both ends of a new
+  pty start so), `make_raw` (cfmakeraw), `Winsize`, the tty ioctl
+  numbers.
+- **`lx_abi::layout`**: `Stat` (144), `Statx` (256), `Dirent64Head` (19,
+  packed: the name at 19; `dirent64_reclen` = align8(19 + len + 1)),
+  `EpollEvent` (packed, 12: data at 4), `Timespec`, `Timeval`, `Pollfd`
+  (8), `Rusage` (144: libc's may be larger), and their constants.
+
+**How the layouts are known**: each is checked by a host test against a
+transcript recorded on Linux (`include_str!` of the test programs'
+expected.txt). signal_test's fault probe loads a distinct marker into
+every general register and faults; the handler prints where each marker
+(and rip, rsp, eflags, cs, err, trapno, cr2, oldmask, uc_sigmask,
+uc_stack, the fpstate pointer) lies in the ucontext, how far siginfo is
+from it, and that the word below it is the restorer. fs_test, fork_test,
+poll_test and pty_test fill a buffer with a pattern and print how many
+bytes stat/statx/getrusage/epoll_wait/TCGETS wrote and where values
+landed. signal_test sends each signal to a child at SIG_DFL and prints
+the outcome, which `default_action` must predict; pty_test prints a fresh
+pty's and a cfmakeraw'd termios.
+
+**How the kernel will use it**: the Linux signal code builds an
+`RtSigframe` (plus the XSAVE area) below the interrupted rsp (or on the
+alternate stack for `SA_ONSTACK`), uc_sigmask = the mask before the
+handler, `Sigcontext` from the interrupted registers; the handler starts
+with rip = handler, rsp = &pretcode, rdi = signo, rsi = &info, rdx = &uc;
+rt_sigreturn restores from the `Ucontext` at rsp (the handler's `ret`
+popped pretcode) and re-applies `SigSet::blockable`. Default actions come
+from `default_action` (SIGTSTP/SIGTTIN/SIGTTOU from a terminal are
+discarded in an orphaned process group: pty_test). The pty's line
+discipline starts from `Termios::fresh_pty`; the stat family,
+getdents64, epoll, poll and wait4 copy these structs out.
+
+TODO (with the Linux signal code): XSAVE-area sizes per CPU (the frame's
+tail); `SA_RESTART`'s per-call rules (a pipe read restarts, nanosleep
+never does: signal_test); sigaltstack's minimum (MINSIGSTKSZ 2048 vs
+AT_MINSIGSTKSZ).
+
 ## Plan: graphics and GPU (proposed 2026-11-03; stage G1 built)
 
 The owner's goal: GPU support, first for the browser (ROADMAP BR stage 2,

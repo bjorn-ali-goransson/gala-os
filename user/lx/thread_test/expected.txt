@@ -1,0 +1,38 @@
+-- set_tid_address
+set_tid_address returns gettid() = yes
+-- a thread
+clone returned a tid > 0 = yes
+CLONE_PARENT_SETTID stored it = yes
+joined: ctid cleared to = 0
+the thread ran = yes
+getpid() in the thread is the process's = yes
+gettid() in the thread is clone's result = yes
+gettid() in the thread differs from the main thread's = yes
+CLONE_SETTLS: ARCH_GET_FS is the TLS given = yes
+  %fs:0 reads the TLS block's first word = yes
+-- shared state
+CLONE_FILES: the thread's fd is open here = yes
+CLONE_FS: umask as the thread set it = 077
+CLONE_SIGHAND: the thread's SIGUSR1 handler is here = yes
+-- futex
+FUTEX_WAKE(1) woke = 1
+  the waiter's FUTEX_WAIT = 0
+FUTEX_WAKE with no waiter = 0
+FUTEX_WAIT on a changed value (1 != 0) = -11 (EAGAIN)
+FUTEX_WAIT with a 50 ms timeout = -110 (ETIMEDOUT)
+  waited at least 50 ms = yes
+  and less than 5 s = yes
+FUTEX_WAIT with tv_nsec = 1e9 = -22 (EINVAL)
+FUTEX_WAIT on an unaligned address = -22 (EINVAL)
+FUTEX_WAIT on a bad address = -14 (EFAULT)
+futex(unknown op) = -38 (ENOSYS)
+-- four threads, a futex lock
+counter after 4 x 10000 = 40000
+-- clone's errors and exits
+CLONE_THREAD without CLONE_SIGHAND = -22 (EINVAL)
+CLONE_SIGHAND without CLONE_VM = -22 (EINVAL)
+CLONE_NEWNS|CLONE_FS = -22 (EINVAL)
+a thread's exit_group ends its process: exited 42
+main thread exit(0), then the last thread exit(5): exited 5
+thread_test: ok
+-- exit status 0

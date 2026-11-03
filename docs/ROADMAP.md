@@ -2013,11 +2013,27 @@ PK. **Installing software: `gala install` over winget manifests** (the
       install` will call (`install_files`: target paths through the
       Directory table, `extract`/`extract_all` from embedded cabinets),
       checked against msitools and gcab on wixl-built fixtures and fed
-      damaged files. Next: LZX (with a makecab-built fixture), then the
-      engine: `gala install` of an `msi` InstallerType (files, registry,
-      shortcuts from the tables, an ARP entry, rollback through
-      `install::Tx`), then msiexec/msi.dll with standard actions and
-      custom actions.
+      damaged files. **LZX and the install plan done** (2026-11-03,
+      host tests; ARCHITECTURE "LZX", "MSI install plans"): `lzx`
+      (cabinet LZX from the Cabinet SDK and [MS-PATCH], checked
+      byte-identical to cabextract and 7-Zip on a Microsoft-made LZX:21
+      cabinet with E8 (fetched, not committed) and on checked-in
+      cabinets from a spec-written test encoder); `msi::cond` (the full
+      condition grammar, table-driven from the SDK's examples),
+      `msi::format` (Formatted), `msi::plan` (`Plan::compute`: context
+      from ALLUSERS/MSIINSTALLPERUSER, system folders per context,
+      directories with source and target paths, the Condition table,
+      INSTALLLEVEL, ADDLOCAL/REMOVE/ADDSOURCE/ADDDEFAULT/ADVERTISE,
+      component conditions and states, files, registry values with
+      prefixes and [~] lists, shortcuts, launch conditions, the five
+      sequence tables with conditions evaluated and custom action types
+      decoded; one line per item for the log; errors name table, row,
+      column). Expected plans are the documented rules: no msiexec ran
+      (TODO: compare `msiexec /l*v` on Windows). Next: the engine:
+      `gala install` of an `msi` InstallerType running the plan (files
+      from the cabinets, registry, shortcuts, an ARP entry, rollback
+      through `install::Tx`), AppSearch and type 51/35 custom actions in
+      the plan, then msiexec/msi.dll with custom actions.
    6. Later: running stock winget itself (it is an MSIX: stage 4) against
       gala, the Microsoft Store source, `winget configure`.
    Ideas: installs are transactions (a failed install rolls back its
@@ -2041,6 +2057,43 @@ PK. **Installing software: `gala install` over winget manifests** (the
    contents URLs, winget's source index for search), real symbolic links
    for commands, the logon environment from `HKCU\Environment`, then
    stage 3.
+   **Stage 4 groundwork: the MSIX/AppX reader built** (2026-11-03,
+   branch other/msix-reader; host tests `cargo test -p galapkg`, modules
+   `msix`, `appxmanifest`, `blockmap`, `xml`; fixtures
+   `user/galapkg/testdata/msix` from `make_fixtures.py`, cross-checked
+   by `check_fixtures.sh` with unzip, 7z and sha256sum; ARCHITECTURE
+   "Installing software", "MSIX/AppX reading"): packages and bundles
+   opened from memory (ZIP64 with data descriptors), AppxManifest.xml
+   (Identity, Properties, Dependencies, Applications, Capabilities incl.
+   runFullTrust), [Content_Types].xml, AppxBlockMap.xml checked per
+   64 KiB block (SHA-256/384/512, deflate runs per block, sizes,
+   LfhSize, unlisted/missing files; errors name file and block), bundle
+   manifests with their packages' Offset/Size and inner packages opened
+   in place; package full/family names and the publisher id (checked
+   against Microsoft's documented `8wekyb3d8bbwe`). AppxSignature.p7x:
+   presence only. Next: signature validation (PKCS#7 over the
+   AppxBlockMap/content hashes against trusted certificates, crypt32),
+   then `gala install` of an .msix: staging to `C:\Program Files\
+   WindowsApps\<full name>`, registration, package identity for
+   full-trust apps; a real makeappx-built package as a fixture (needs
+   Windows) to confirm the spec-derived rules (per-block deflate runs,
+   bundle Offset).
+   **The winget resolver built** (2026-11-03, host tests `cargo test -p
+   galapkg winget`, a corpus of 400 real winget-pkgs version directories;
+   ARCHITECTURE "The winget resolver"): `galapkg::winget`, beside the
+   install path's `manifest`/`yaml`: a YAML subset parser with line and
+   column, schemas 1.0.0-1.28.0 (fields and values per version, warnings
+   for newer/unknown ones), singleton and multi-file manifests with every
+   installer field and locale fallback, installer selection as winget
+   (architecture with emulation, scope, locale, installer type,
+   MinimumOSVersion, Platform, Markets, upgrade keeping the installed
+   type/scope; every rejection's reason), the command line from
+   InstallerSwitches and per-type defaults, dependencies into an ordered
+   plan with cycle detection, AppsAndFeaturesEntries matched to ARP
+   records, version ordering. Next: switch `gala install`/`list`/
+   `upgrade` over to it (ARCHITECTURE says how), then delete
+   `manifest.rs`/`yaml.rs`; a boot scenario with a dependency and an
+   upgrade that keeps scope.
 
 LX. **A Linux personality, later; its seams now** (the owner,
    2026-11-03; design: ARCHITECTURE "Plan: a second personality (Linux)";
@@ -2057,6 +2110,18 @@ LX. **A Linux personality, later; its seams now** (the owner,
    The Linux layer itself (ELF loader, system calls, fork, signals, ptys,
    ld.so, epoll; static musl and busybox first) only when the owner
    schedules it.
+   **Seams 2 and 6 done** (2026-11-03; ARCHITECTURE "The seams"): (2) a
+   `Personality` on every process (NT, fixed at creation) and a
+   dispatcher table keyed by it in the kernel's system-call entry (the
+   per-CPU block carries the running thread's personality) and in
+   gala-um's SIGSYS handler; host tests in `kernel/src/personality.rs`
+   (a process of a test-only personality reaches its dispatcher, never
+   NT's); the personality in process events, the crash report and the
+   thread dumps, the dispatcher in the unknown-service line (scenarios
+   events and crash check them). (6) `net` uses `crate::runtime` (core
+   threads and time) instead of `nt::platform`; xtask's
+   `net_does_not_depend_on_nt` keeps it so. Next seams: (3) with RS B2,
+   (1), (4), (5) as their areas are touched.
 
 AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
    "API shims and gaps"; started 2026-11-03 on branch `other/api-gaps`,
@@ -2150,13 +2215,137 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         `StrCmpIW`, `StrCmpNIW`, `StrStrW`, `StrStrIW`, `StrCmpLogicalW`,
         `SHDeleteKeyW` (`shlwapi_test`; LocalDB's xe.dll, sqllang,
         msxmlsql, hkcompile, SqlDumper, SqlUserInstance and wxWidgets'
-        wxbase). Left in shlwapi: the URL functions, `PathCreateFromUrlW`,
-        `AssocQueryStringW`, `SHAutoComplete`, `SHCreateStreamOnFileEx`.
+        wxbase).
+     3. shell32: `ShellExecuteExW` (and `ShellExecuteW` now runs
+        programs), `DragQueryFileW`, `DragQueryPoint`, `DragFinish`,
+        `DragAcceptFiles`, `SHFileOperationW`, `SHChangeNotify`,
+        `Shell_NotifyIconW` (fails: no notification area, recorded),
+        `SHGetIconOverlayIndexW` (`shell32_test`); ole32:
+        `PropVariantClear`, `ReleaseStgMedium`, `OleRun`,
+        `OleLockRunning`, `OleSetContainedObject` (the last three were
+        missing exports: StackBuilder's wxmsw326u_core did not load),
+        `CoSetProxyBlanket`, `CoQueryProxyBlanket`,
+        `CoFreeUnusedLibraries` (`ole32_test`). Left: shell32's icon
+        extraction and SHBrowseForFolderW, ole32's OLE clipboard and
+        DoDragDrop (they need user32's clipboard), CoCreateInstanceEx,
+        CreateBindCtx, GetHGlobalFromStream, CoRegisterMallocSpy,
+        CoImpersonateClient/CoRevertToSelf.
+     4. dbghelp: `ImageNtHeader`, `SymSrvGetFileIndexInfoW` (and
+        `MiniDumpWriteDump` exported as a stub), so LocalDB's SqlDumper
+        loads; a new normaliz.dll (`IdnToAscii` forwarded to kernel32,
+        `IdnToUnicode` its own: kernel32's is a stub, for its owners to
+        replace) for libcurl (`dbghelp_test`).
+     5. crypt32: `CryptMemAlloc`, `CryptMemRealloc`, `CryptMemFree`,
+        `CryptProtectMemory`, `CryptUnprotectMemory`, `CertGetNameStringA`,
+        `PFXIsPFXBlob` (`cert_test`; libcurl, GnuTLS, the JDK's sunmscapi,
+        LocalDB). Left in crypt32: the chain engine and chains
+        (`CertGetCertificateChain` and friends: libcurl, sunmscapi),
+        `CryptDecodeObjectEx`, `CryptQueryObject`, `PFXImportCertStore`,
+        the store functions (`CertAddCertificateContextToStore`,
+        `CertDeleteCertificateFromStore`, `CertEnumCRLsInStore`,
+        `CertOpenSystemStoreA`), `CryptAcquireCertificatePrivateKey`.
+     6. shlwapi, the rest: `UrlIsW`, `UrlEscapeW`, `UrlUnescapeW`,
+        `UrlCanonicalizeW`, `UrlCombineW`, `UrlCreateFromPathW`,
+        `PathCreateFromUrlW`, `AssocQueryStringW`, `SHCreateStreamOnFileEx`,
+        `SHAutoComplete` (E_NOTIMPL, recorded) (`shlwapi_test`'s url.c,
+        Wine's url.c and path.c vectors; LocalDB's msxmlsql, sqllang, xe,
+        xmlrw, hkcompile and wxWidgets). shlwapi has no stubs left.
+        UrlCanonicalizeW knows the http-like schemes' rules only (other
+        forms are copied, recorded).
+     7. shell32: `ExtractIconW`, `ExtractIconExW`, `SHDefExtractIconW`
+        (icon groups read from an image's resource directory or an .ico
+        file, made by user32's CreateIconFromResourceEx; `shell32_test`,
+        whose build.sh now embeds two icons). Left in shell32:
+        `SHBrowseForFolderW` (a dialog).
+     8. ole32: `CoCreateInstanceEx` (MULTI_QI results; CUIAutomation in
+        the test), `CreateBindCtx` (bound objects, object parameters,
+        BIND_OPTS; no running object table: recorded),
+        `CoImpersonateClient`/`CoRevertToSelf` (RPC_E_CALL_COMPLETE: no
+        COM call is ever being served) (`ole32_test`). Left in ole32:
+        `GetHGlobalFromStream` and CreateStreamOnHGlobal with an HGLOBAL
+        (they need movable global memory: kernel32's GlobalSize is a stub
+        and GlobalAlloc hands out fixed blocks), `CoRegisterMallocSpy`,
+        the OLE clipboard and `DoDragDrop` (user32's clipboard).
+     9. crypt32: certificate stores (`CertOpenStore` memory, collection
+        and system stores, `CertOpenSystemStoreA/W`: the system stores are
+        empty and recorded, gala installs no certificates yet;
+        `CertAddEncodedCertificateToStore`,
+        `CertAddCertificateContextToStore` with the ADD_* dispositions,
+        `CertEnumCertificatesInStore`, `CertFindCertificateInStore` (any,
+        SHA-1 hash, subject name, subject/issuer text, existing),
+        `CertDeleteCertificateFromStore`, `CertDuplicateStore`,
+        `CertCloseStore`, `CertEnumCRLsInStore`), `CryptQueryObject` (a
+        certificate, DER or base64/PEM, from a file or blob) and
+        `CryptDecodeObjectEx` (alternative names) (`cert_test`). Before,
+        CertOpenStore failed for everything; nginx, nginx_tls and
+        caddy_http still pass. Left in crypt32: `PFXImportCertStore`
+        (PKCS #12 decryption), the other decode types, CRLs/CTLs,
+        collections' member stores (`CertAddStoreToCollection`),
+        `CryptAcquireCertificatePrivateKey`; the chain engine is
+        other/schannel-tls's.
+    10. dbghelp: `SymInitialize(W)`, `SymCleanup`, `SymSetOptions`,
+        `SymGetOptions`, `SymLoadModuleExW`, `SymUnloadModule64`,
+        `SymFromAddr` over the modules' exports (no PDBs yet: recorded)
+        (`dbghelp_test`; LocalDB's In-Memory OLTP, hkruntime and
+        hkengine). Left in dbghelp: `MiniDumpWriteDump` (a stub: writing
+        a minidump is its own piece of work), PDB symbols, other
+        processes' modules.
+    11. comctl32: the image-list drag functions (`ImageList_BeginDrag`,
+        `DragEnter`, `DragMove`, `DragLeave`, `EndDrag`,
+        `SetDragCursorImage`; the drag's state is kept, the drag image is
+        not drawn yet: recorded) (`comctl32_test`; wxWidgets). Left in
+        comctl32: `CreateUpDownControl` (a new control class).
+        version and msvcrt: nothing left that the surveyed programs import
+        (msvcrt's last four were group 1).
+   - Known problem (2026-11-03): the FileZilla client's PREBUILT URL
+     (`downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe`)
+     now answers 404 (so does the `FileZilla_Client/3.69.3/` path), so
+     the `filezilla`, `filezilla_flaui` and `filezilla_server` scenarios
+     (one module set) cannot be fetched on a machine without
+     `target/prebuilt/filezilla`. No official mirror with the pinned
+     SHA-256 (e87b8787...) was found; the URL is unchanged until one is.
    - Elsewhere (not in these crates; for the agents there): FileZilla
      Server's GUI also stops on user32 (54 stubs: carets, the clipboard,
      DDE, DrawEdge/DrawFrameControl, window placement), gdi32 (16:
      metafiles, font enumeration), kernel32 (13), comdlg32 (4), oleacc,
      winmm's PlaySoundW, ws2_32's inet_pton/inet_ntop (GnuTLS).
+   **Milestone 1 groundwork done** (2026-11-03; ARCHITECTURE "Plan: a
+   second personality (Linux)", "The lx module"; WORKFLOW "Linux test
+   programs"): the pieces that do not touch system-call dispatch.
+   `kernel/src/lx/` (declared, nothing wired): `elf` (ELF64 x86-64
+   ET_EXEC/ET_DYN parsed and validated, the load plan: segments, file
+   pages, bss, protections, PT_INTERP, PT_TLS, PT_GNU_STACK,
+   PT_GNU_RELRO, AT_PHDR, the ET_DYN load bias), `stack` (the initial
+   stack as bytes: argc, argv, envp, auxv, strings, AT_RANDOM; Linux's
+   layout byte for byte where Linux is deterministic), `syscalls` and
+   `errno` (name <-> number tables); host tests only (`cargo test -p
+   kernel --lib lx`: the real test binaries, malformed images, the
+   auxv_test transcript replayed against a stack built here). Linux test
+   programs in `user/lx/` (static musl and static-pie, raw system calls):
+   hello_test, write_exit_test, brk_test, mmap_test, arch_prctl_test,
+   auxv_test, their transcripts recorded on Linux 6.18 (`expected.txt`)
+   and checked by `cargo xtask lx-expect` (CI). **Next**, after the
+   per-process dispatch seam (step 2, being built elsewhere): the exec
+   path (map a `LoadPlan`, the stack, start the thread; a `Personality::
+   Linux` process), then write/exit_group/brk/mmap/munmap/mprotect/
+   arch_prctl in a Linux dispatcher table indexed by `lx::syscalls::nr`,
+   each user/lx program as a boot scenario expecting its expected.txt;
+   then milestone 2 (busybox's calls, from `strace` on real Linux).
+   **Milestones 2-3 test corpus done** (2026-11-03; WORKFLOW "Linux test
+   programs", ARCHITECTURE "The lx_abi crate"): nine more user/lx
+   programs recorded on Linux 6.18 and checked by `cargo xtask
+   lx-expect` (now with `--runs N`, a determinism check): fs_test,
+   pipe_test, fork_test, thread_test, signal_test, clock_test,
+   poll_test, pty_test, proc_test (about 930 transcript lines); and
+   `kernel/lx_abi` (signal numbers, sigsets, default actions, siginfo/
+   ucontext/sigcontext/rt_sigframe layouts, termios and a fresh pty's
+   defaults, stat/statx/dirent64/epoll_event/pollfd/rusage/timespec
+   layouts), host-tested against those transcripts. **Next**: each
+   program becomes a boot scenario as its system calls land in the Linux
+   dispatcher (files, pipes and fork first: busybox's needs), the kernel
+   depending on lx_abi; then signals (frames from `lx_abi::signal`),
+   threads/futex, clocks and polling, ptys over the core terminal object
+   (seam 1), /proc.
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing
