@@ -331,11 +331,25 @@ charged). Look
   them at once.
 - **Network tests**: VMs have no network card unless the scenario is in
   xtask's `NET_SCENARIOS` (`-nic none` otherwise). Those get a virtio-net
-  card on QEMU's user network with a host port forwarded to guest port 7,
-  and xtask plays the remote side (`net_client`) once the guest logs that
-  it listens; the client's verdict is appended to the serial log as an
-  `xtask: net client: ...` line for `expect` to check. QEMU's user network
-  needs no privileges, so this works in containers and CI.
+  card on QEMU's user network with a host port forwarded to guest port 7
+  (TCP and UDP, the same port number on both: `free_port` finds one free
+  for both), and xtask plays the remote side (`net_client`, `udp_client`,
+  ...) once the guest logs that it listens; the client's verdict is
+  appended to the serial log as an `xtask: net client: ...` line for
+  `expect` to check. QEMU's user network needs no privileges, so this
+  works in containers and CI. A UDP client resends until it gets its
+  answer (the guest's first reply may wait for ARP) and must skip late
+  duplicates of earlier answers. QEMU's DNS (10.0.2.3) forwards to the
+  host's resolver: a check that needs it accepts "no DNS" when the host
+  has none (`udp_echo` resolves example.com only if the host can).
+- **Datagram sockets in ws2_32**: whether a socket is a datagram one is
+  ws2_32's own per-socket record (SO_TYPE in the options table, set by
+  socket/WSASocketW and WSADuplicateSocket's receiver); sendto/recvfrom
+  pick the AFD request from it. A socket handle ws2_32 did not make
+  (an accepted one, one from another process without
+  WSADuplicateSocket) counts as a stream. The AFD datagram layouts
+  (AFD_SEND_INFO_UDP, AFD_RECV_INFO_UDP) are ReactOS's, to be verified
+  on Windows.
 - **Disk tests**: VMs have no disk unless the scenario is in xtask's
   `DISK_SCENARIOS` (name, size, what xtask writes into the fresh raw
   image, what the image must hold afterwards). The image is
@@ -1288,9 +1302,10 @@ passes alone): if it recurs, its log says which bound was missed.
   a side effect before its wait (signal-and-wait, alert-by-id) carries
   its blocked half as the plain wait.
 - Sockets (R9 (e), `cargo xtask boot-test handover_net`): `handover:
-  carrying N socket(s): C TCP connection(s), L listener(s); the network
-  is stopped` in the old kernel, `handover: N socket(s) resumed; the
-  network was stopped for X ms` in the new one. `refused: the network
+  carrying N socket(s): C TCP connection(s), L listener(s), U UDP
+  socket(s); the network is stopped` in the old kernel, `handover: N
+  socket(s) resumed; the network was stopped for X ms` in the new one.
+  `refused: the network
   did not stop` means the net thread did not park within 1 s (it is
   stuck in a poll or a notify hook). A connection that hangs after the
   handover: compare the carried `ConnState` with what the peer expects

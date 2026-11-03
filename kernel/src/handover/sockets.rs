@@ -19,12 +19,23 @@
 //!          closing connection nobody owns any more (CONNECTION)
 //! SOCKETS  an entry per AFD endpoint object (SocketRec): its own state,
 //!          the kernel socket behind it (bound, listener with its accept
-//!          queue, connection), its pending requests (RequestRec)
+//!          queue, connection, UDP socket), its pending requests
+//!          (RequestRec), then (version 2) a UDP socket's peer and its
+//!          datagrams not read yet (DATAGRAM entries)
 //! ```
 //!
 //! A CONNECTION entry: role and sequence (u32 each), then the `ConnState`
 //! fields in the order `write_conn` writes them, then the received and the
 //! unsent bytes (blobs). Absent optional values are written as all ones.
+//! A DATAGRAM entry: the sender's address, then the payload (a blob).
+//!
+//! Versions of SOCKETS: 1 (TCP); 2 adds UDP sockets (transport 2, socket
+//! kind UDP, the datagram part at the end of the entry) and the requests
+//! RECV_FROM and SEND_TO (their fields after the endpoints table). A
+//! version-2 writer marks the section must_read 2 only when it holds a
+//! UDP socket (`sockets_must_read`): TCP-only records still go to a
+//! version-1 reader, which skips the appended fields; this reader takes
+//! version 1 with the new fields absent.
 
 use alloc::vec::Vec;
 
@@ -53,6 +64,16 @@ pub mod socket_kind {
     pub const BOUND: u32 = 1;
     pub const LISTENER: u32 = 2;
     pub const CONNECTION: u32 = 3;
+    /// A UDP socket (version 2).
+    pub const UDP: u32 = 4;
+}
+
+/// SocketRec::transport.
+pub mod transport {
+    pub const NONE: u32 = 0;
+    pub const TCP: u32 = 1;
+    /// Version 2.
+    pub const UDP: u32 = 2;
 }
 
 /// A pending AFD request's kind (RequestRec::kind).
@@ -63,6 +84,10 @@ pub mod request_kind {
     pub const SUPER_ACCEPT: u32 = 3;
     pub const CONNECT: u32 = 4;
     pub const POLL: u32 = 5;
+    /// A datagram receive, with where the sender's address goes (version 2).
+    pub const RECV_FROM: u32 = 6;
+    /// A datagram send, with its destination (version 2).
+    pub const SEND_TO: u32 = 7;
 }
 
 const NONE32: u32 = u32::MAX;
@@ -270,6 +295,12 @@ pub struct RequestRec {
     /// SUPER_ACCEPT: the accepting endpoint (handle 0); POLL: (the
     /// socket handle, its endpoint object, the events asked for).
     pub endpoints: Vec<(u64, u32, u32)>,
+    /// RECV_FROM (version 2): where the sender's SOCKADDR_IN and its
+    /// length go (0: not asked for).
+    pub address: u64,
+    pub address_len: u64,
+    /// SEND_TO (version 2): the destination (None: the default peer).
+    pub to: Option<Addr>,
 }
 
 impl RequestRec {
@@ -301,6 +332,11 @@ impl RequestRec {
             w.u32(object)?;
             w.u32(events)?;
         }
+        // Version 2.
+        w.u64(self.address)?;
+        w.u64(self.address_len)?;
+        w.u32(u32::from(self.to.is_some()))?;
+        write_addr(w, self.to.unwrap_or_default())?;
         w.end_entry(e)
     }
 
@@ -329,6 +365,12 @@ impl RequestRec {
         for mut b in r.table().iter() {
             q.endpoints.try_push((b.u64(), b.u32(), b.u32()))?;
         }
+        // Version 2 (absent from version 1: zeros, no destination).
+        q.address = r.u64();
+        q.address_len = r.u64();
+        let has_to = r.u32() != 0;
+        let to = read_addr(r);
+        q.to = has_to.then_some(to);
         Ok(q)
     }
 }
@@ -337,7 +379,7 @@ impl RequestRec {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SocketRec {
     pub id: u32,
-    /// 0: a helper handle (no transport), 1: TCP.
+    /// `transport`: a helper handle (no transport), TCP, UDP.
     pub transport: u32,
     pub non_blocking: bool,
     /// FILE_SKIP_* notification modes.
@@ -382,6 +424,9 @@ impl SocketRec {
             Some(CarriedEntry { local, kind: CarriedKind::Conn { connected, .. } }) => {
                 (socket_kind::CONNECTION, *local, u32::from(*connected), 0)
             }
+            Some(CarriedEntry { local, kind: CarriedKind::Udp { .. } }) => {
+                (socket_kind::UDP, *local, 0, 0)
+            }
         };
         w.u32(kind)?;
         write_addr(w, local)?;
@@ -406,6 +451,20 @@ impl SocketRec {
         w.u32(self.requests.len() as u32)?;
         for q in &self.requests {
             q.write(w)?;
+        }
+        // Version 2: a UDP socket's peer and queued datagrams.
+        let (peer, datagrams) = match self.entry.as_ref().map(|e| &e.kind) {
+            Some(CarriedKind::Udp { peer, datagrams }) => (*peer, datagrams.as_slice()),
+            _ => (None, &[][..]),
+        };
+        w.u32(u32::from(peer.is_some()))?;
+        write_addr(w, peer.unwrap_or_default())?;
+        w.u32(datagrams.len() as u32)?;
+        for (from, data) in datagrams {
+            let d = w.begin_entry()?;
+            write_addr(w, *from)?;
+            w.blob(data)?;
+            w.end_entry(d)?;
         }
         w.end_entry(e)
     }
@@ -453,6 +512,10 @@ impl SocketRec {
                 local,
                 kind: CarriedKind::Conn { conn: own.ok_or(None)?, connected: a != 0 },
             }),
+            socket_kind::UDP => Some(CarriedEntry {
+                local,
+                kind: CarriedKind::Udp { peer: None, datagrams: Vec::new() },
+            }),
             _ => return Err(None),
         };
         let requests = r.u32();
@@ -460,13 +523,41 @@ impl SocketRec {
             let mut e = r.entry().ok_or(None)?;
             s.requests.try_push(RequestRec::read(&mut e).map_err(Some)?).map_err(Some)?;
         }
+        // Version 2 (a version-1 entry ends here: no peer, no datagrams).
+        let has_peer = r.u32() != 0;
+        let peer_addr = read_addr(r);
+        let count = r.u32();
+        let mut queued = Vec::new();
+        for _ in 0..count {
+            let mut d = r.entry().ok_or(None)?;
+            let from = read_addr(&mut d);
+            queued.try_push((from, copy(d.blob()).map_err(Some)?)).map_err(Some)?;
+        }
+        match s.entry.as_mut().map(|e| &mut e.kind) {
+            Some(CarriedKind::Udp { peer, datagrams }) => {
+                *peer = has_peer.then_some(peer_addr);
+                *datagrams = queued;
+            }
+            // Only a UDP socket has these.
+            _ if has_peer || count != 0 => return Err(None),
+            _ => {}
+        }
         Ok(s)
     }
 }
 
-/// Starts the SOCKETS section (its entries: `SocketRec::write`).
-pub fn sockets_section(w: &mut Writer) -> Result<(), AllocError> {
-    section(w, tag::SOCKETS)
+/// SOCKETS' `must_read`: a record holding a UDP socket (or a request on
+/// one) is misread by a version-1 reader, which knows neither.
+pub fn sockets_must_read(any_udp: bool) -> u16 {
+    let k = version::kind_of(tag::SOCKETS).map_or(0, |k| k.must_read);
+    if any_udp { k.max(2) } else { k }
+}
+
+/// Starts the SOCKETS section (its entries: `SocketRec::write`); `any_udp`:
+/// a UDP socket is among them.
+pub fn sockets_section(w: &mut Writer, any_udp: bool) -> Result<(), AllocError> {
+    let writes = version::writes(tag::SOCKETS);
+    w.section_needing(tag::SOCKETS, writes, REQUIRED, sockets_must_read(any_udp))
 }
 
 #[cfg(test)]
@@ -516,6 +607,43 @@ mod tests {
         }
     }
 
+    /// A UDP socket with a peer, two datagrams queued, a receive and a
+    /// send pending.
+    fn udp_socket() -> SocketRec {
+        let recv_from = RequestRec {
+            kind: request_kind::RECV_FROM,
+            pid: 4,
+            iosb: 0x1020,
+            flag: true,
+            buffers: [(0x7000, 512)].to_vec(),
+            address: 0x7200,
+            address_len: 0x7210,
+            ..RequestRec::default()
+        };
+        let send_to = RequestRec {
+            kind: request_kind::SEND_TO,
+            pid: 4,
+            iosb: 0x1030,
+            buffers: [(0x7400, 3)].to_vec(),
+            to: Some(Addr { ip: [10, 0, 2, 2], port: 53 }),
+            ..RequestRec::default()
+        };
+        let peer = Addr { ip: [127, 0, 0, 1], port: 50000 };
+        SocketRec {
+            id: 6,
+            transport: transport::UDP,
+            entry: Some(CarriedEntry {
+                local: Addr { ip: [0; 4], port: 7 },
+                kind: CarriedKind::Udp {
+                    peer: Some(peer),
+                    datagrams: [(peer, b"first".to_vec()), (peer, Vec::new())].to_vec(),
+                },
+            }),
+            requests: [recv_from, send_to].into_iter().collect(),
+            ..SocketRec::default()
+        }
+    }
+
     fn sockets() -> [SocketRec; 3] {
         let request = RequestRec {
             kind: request_kind::RECV,
@@ -533,6 +661,7 @@ mod tests {
             local: 0,
             buffers: [(0x2000, 4096), (0x4000, 16)].to_vec(),
             endpoints: Vec::new(),
+            ..RequestRec::default()
         };
         let poll = RequestRec {
             kind: request_kind::POLL,
@@ -615,7 +744,7 @@ mod tests {
     fn record() -> Vec<u8> {
         let mut w = Writer::new(1).unwrap();
         write_net(&mut w, &net()).unwrap();
-        sockets_section(&mut w).unwrap();
+        sockets_section(&mut w, false).unwrap();
         for s in sockets() {
             s.write(&mut w).unwrap();
         }
@@ -644,6 +773,90 @@ mod tests {
         }
     }
 
+    /// SOCKETS 2: UDP sockets round trip, and only a record holding one
+    /// needs a version-2 reader.
+    #[test]
+    fn udp_sockets_round_trip_and_need_version_2() {
+        let mut w = Writer::new(1).unwrap();
+        write_net(&mut w, &net()).unwrap();
+        sockets_section(&mut w, true).unwrap();
+        for s in sockets().into_iter().chain([udp_socket()]) {
+            s.write(&mut w).unwrap();
+        }
+        let bytes = w.finish().unwrap();
+        let rec = record::parse(&bytes).unwrap();
+        let got = read_sockets(&rec);
+        assert_eq!(got[3], udp_socket());
+        assert_eq!(&got[..3], &sockets());
+        let s = rec.sections().flatten().find(|s| s.tag == tag::SOCKETS).unwrap();
+        assert_eq!((s.version, s.must_read), (2, 2));
+        // Without a UDP socket a version-1 reader may take it.
+        let rec_bytes = record();
+        let rec = record::parse(&rec_bytes).unwrap();
+        let s = rec.sections().flatten().find(|s| s.tag == tag::SOCKETS).unwrap();
+        assert_eq!((s.version, s.must_read), (2, 0));
+        assert_eq!(sockets_must_read(true), 2);
+    }
+
+    /// A version-1 writer's SOCKETS (no datagram fields) reads with them
+    /// absent.
+    #[test]
+    fn version_1_sockets_are_read() {
+        let mut w = Writer::new(1).unwrap();
+        w.section_needing(tag::SOCKETS, 1, REQUIRED, 0).unwrap();
+        let e = w.begin_entry().unwrap();
+        for v in [2u32, 1, 0, 0, 0] {
+            w.u32(v).unwrap(); // id, TCP, blocking, modes, port
+        }
+        w.u64(0).unwrap(); // key
+        for _ in 0..4 {
+            w.u32(0).unwrap(); // select event, mask, recorded, signal
+        }
+        w.u32(socket_kind::BOUND).unwrap();
+        write_addr(&mut w, Addr { ip: [0; 4], port: 80 }).unwrap();
+        for _ in 0..3 {
+            w.u32(0).unwrap(); // a, b, connections
+        }
+        w.u32(1).unwrap(); // one request, in version 1's layout
+        let q = w.begin_entry().unwrap();
+        w.u32(request_kind::RECV).unwrap();
+        w.u64(4).unwrap();
+        w.u64(0x1000).unwrap();
+        w.u32(0).unwrap();
+        w.u64(0).unwrap();
+        w.u32(0).unwrap();
+        for _ in 0..4 {
+            w.u64(0).unwrap();
+        }
+        w.u32(0).unwrap();
+        for _ in 0..2 {
+            w.u64(0).unwrap();
+        }
+        for _ in 0..3 {
+            w.u32(0).unwrap();
+        }
+        w.table(1, 16).unwrap();
+        w.u64(0x2000).unwrap();
+        w.u64(64).unwrap();
+        w.table(0, 16).unwrap();
+        w.end_entry(q).unwrap();
+        w.end_entry(e).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = record::parse(&bytes).unwrap();
+        let got = read_sockets(&rec);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got[0].entry,
+            Some(CarriedEntry { local: Addr { ip: [0; 4], port: 80 }, kind: CarriedKind::Bound })
+        );
+        let q = &got[0].requests[0];
+        assert_eq!(
+            (q.kind, q.iosb, q.buffers.as_slice()),
+            (request_kind::RECV, 0x1000, &[(0x2000, 64)][..])
+        );
+        assert_eq!((q.address, q.address_len, q.to), (0, 0, None));
+    }
+
     #[test]
     fn damage_is_refused_not_misread() {
         let bytes = record();
@@ -654,7 +867,7 @@ mod tests {
         // An entry cut short (as a damaged length would leave it): the
         // reader gives defaults or refuses, it never reads past the end.
         let mut w = Writer::new(1).unwrap();
-        sockets_section(&mut w).unwrap();
+        sockets_section(&mut w, false).unwrap();
         let e = w.begin_entry().unwrap();
         w.u32(3).unwrap(); // id
         w.u32(1).unwrap(); // TCP
@@ -671,7 +884,7 @@ mod tests {
         assert_eq!(SocketRec::read(&mut e), Err(None));
         // An unknown role.
         let mut w = Writer::new(1).unwrap();
-        sockets_section(&mut w).unwrap();
+        sockets_section(&mut w, false).unwrap();
         let e = w.begin_entry().unwrap();
         for _ in 0..12 {
             w.u32(0).unwrap();

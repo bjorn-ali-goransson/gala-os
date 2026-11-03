@@ -638,6 +638,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winsock_test", "ntdll.dll", "Windows/System32"),
     ("winsock_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ws2_32.dll", "Windows/System32"),
+    ("udp_test", "ntdll.dll", "Windows/System32"),
+    ("udp_test", "kernel32.dll", "Windows/System32"),
+    ("udp_test", "ws2_32.dll", "Windows/System32"),
     ("handover_net_test", "ntdll.dll", "Windows/System32"),
     ("handover_net_test", "kernel32.dll", "Windows/System32"),
     ("handover_net_test", "ws2_32.dll", "Windows/System32"),
@@ -1635,6 +1638,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_env_test",
     "winsock_test",
     "winsock_async_test",
+    "udp_test",
     "process_test",
     "commit_test",
     "kernel32_file_test",
@@ -2507,6 +2511,9 @@ enum NetClient {
     /// handover_net_test's line protocol across a kernel handover
     /// (`handover_net_client`).
     HandoverNet,
+    /// UDP datagrams to the guest's port 7, echoed (`udp_client`), and a
+    /// name resolved by the guest through QEMU's DNS (10.0.2.3).
+    Udp,
 }
 
 /// Scenarios that get a virtio-net card on QEMU's user-mode network, with
@@ -2516,6 +2523,7 @@ enum NetClient {
 const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("net_echo", "net: echo listening on port 7", NetClient::Echo),
     ("winsock_test", "winsock_test: listening on port 7", NetClient::Echo),
+    ("udp_echo", "udp_test: listening on port 7", NetClient::Udp),
     ("handover_net", "handover_net_test: listening on port 7", NetClient::HandoverNet),
     ("handover_net_uefi", "handover_net_test: listening on port 7", NetClient::HandoverNet),
     ("go_http", "go_http: listening on port 7", NetClient::Http(GO_HTTP_PAGE)),
@@ -3329,6 +3337,28 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // UDP over gala's ws2_32 and AFD datagram endpoints (loopback).
+        name: "udp_test",
+        cmdline: "qemu_exit run=udp_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["udp_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // udp_test's `serve`: datagrams from the host through QEMU's
+        // network (a forwarded UDP port), echoed; a name resolved through
+        // QEMU's DNS (`udp_client`).
+        name: "udp_echo",
+        cmdline: "qemu_exit run=udp_test.exe args=serve",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "udp_test: listening on port 7",
+            "xtask: net client: udp ok",
+            "udp_test: echoed ",
+            "udp_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // N1c: overlapped Winsock with a completion port (what Go uses).
         name: "winsock_async_test",
         cmdline: "qemu_exit run=winsock_async_test.exe",
@@ -3759,21 +3789,23 @@ const SCENARIOS: &[Scenario] = &[
         // client talks to it through QEMU's port forward before, during
         // and after the handover; a second connection waits unaccepted in
         // the listener's backlog with a line unread across it; a third is
-        // accepted after it on the same listening socket. The program's
-        // line counter goes on, no connection is reset.
+        // accepted after it on the same listening socket. A bound UDP port
+        // keeps a datagram queued across it and gets new ones after it. The
+        // program's line counter goes on, no connection is reset.
         name: "handover_net",
         cmdline: "qemu_exit handover=1 run=handover_net_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "handover_net_test: listening on port 7",
             "handover: carrying 1 process(es)",
-            "socket(s): 2 TCP connection(s), 1 listener(s); the network is stopped",
+            "socket(s): 2 TCP connection(s), 1 listener(s), 1 UDP socket(s); the network is \
+             stopped",
             "handover: generation 1 (from generation 0)",
             "handover: resumed process handover_net_test.exe",
             "socket(s) resumed; the network was stopped for",
             "handover_net_test: connection 1: 15 line(s), 15 in all",
             "handover_net_test: connection 2: 2 line(s), 17 in all",
-            "handover_net_test: connection 3: 2 line(s), 19 in all",
+            "handover_net_test: connection 3: 3 line(s), 20 in all",
             "handover_net_test: ok",
             "xtask: net client: handover ok",
             "exited with status 0x00000000",
@@ -3818,7 +3850,7 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=handover_net_test.exe args=self",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
-            "handover_net_test: connection 3: 2 line(s), 19 in all",
+            "handover_net_test: connection 3: 3 line(s), 20 in all",
             "handover_net_test: self client ok",
             "handover_net_test: ok",
         ],
@@ -3830,9 +3862,10 @@ const SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "firmware: UEFI x86_64",
-            "socket(s): 2 TCP connection(s), 1 listener(s); the network is stopped",
+            "socket(s): 2 TCP connection(s), 1 listener(s), 1 UDP socket(s); the network is \
+             stopped",
             "handover: resumed process handover_net_test.exe",
-            "handover_net_test: connection 3: 2 line(s), 19 in all",
+            "handover_net_test: connection 3: 3 line(s), 20 in all",
             "handover_net_test: ok",
             "xtask: net client: handover ok",
             "gala: boot ok",
@@ -4781,6 +4814,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("handover_net", "handover_net_test"),
     ("handover_net_uefi", "handover_net_test"),
     ("handover_net_self", "handover_net_test"),
+    ("udp_echo", "udp_test"),
     ("handover_k32_twice", "handover_k32_test"),
     ("handover_upgrade", "handover_k32_test"),
     ("handover_upgrade_uefi", "handover_k32_test"),
@@ -5925,6 +5959,7 @@ fn run_vm(
                 NetClient::Psql => psql_client(port),
                 NetClient::Ftp => ftp_client(port),
                 NetClient::HandoverNet => handover_net_client(port),
+                NetClient::Udp => udp_client(port),
             }));
         }
         // A scenario that ends in the bootloader (R8: Limine refusing a
@@ -5996,6 +6031,7 @@ fn run_vm(
                     NetClient::Psql => "psql",
                     NetClient::Ftp => "ftp",
                     NetClient::HandoverNet => "handover",
+                    NetClient::Udp => "udp",
                     _ => "http",
                 }
             ),
@@ -6619,10 +6655,10 @@ fn read_ppm(ppm: &Path) -> Result<(usize, usize, Vec<u8>)> {
 }
 
 /// A virtio-net card on QEMU's user network, host `port` forwarded to the
-/// guest's TCP port 7.
+/// guest's TCP and UDP port 7.
 fn add_net(cmd: &mut Command, port: u16) {
     cmd.arg("-netdev")
-        .arg(format!("user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:7"))
+        .arg(format!("user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:7,hostfwd=udp:127.0.0.1:{port}-:7"))
         // The legacy (0.9.5) interface: one I/O BAR (see docs/ARCHITECTURE.md).
         .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
 }
@@ -6866,8 +6902,15 @@ fn serve(release: bool, args: &[String]) -> Result {
 
 /// A free host TCP port (for QEMU's port forward).
 fn free_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    Ok(listener.local_addr().map_err(|e| e.to_string())?.port())
+    // Free for TCP and for UDP (both are forwarded).
+    for _ in 0..32 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return Ok(port);
+        }
+    }
+    Err("no port free for both TCP and UDP".into())
 }
 
 /// The host side of `net_echo`: sends NET_ECHO_BYTES of a pattern to the
@@ -6938,12 +6981,19 @@ fn handover_net_client(port: u16) -> Result {
             Err(e) => Err(format!("{what}: closed with an error (reset?): {e}")),
         }
     };
+    // Datagrams to the program's UDP port 7 (the same host port, UDP).
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("udp: {e}"))?;
+    udp.connect(("127.0.0.1", port)).map_err(|e| format!("udp: {e}"))?;
+    udp.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
     let mut first = open("first connection")?;
     ask(&mut first, "hello", "1 hello")?;
     ask(&mut first, "before", "2 before")?;
     // The second connection: established, not accepted, a line unread.
     let mut second = open("second connection")?;
     send(&mut second, "early")?;
+    // A datagram that waits, unread, in the program's UDP socket across
+    // the handover.
+    udp.send(b"early-udp").map_err(|e| format!("udp send: {e}"))?;
     thread::sleep(Duration::from_millis(500));
     ask(&mut first, "handover", "3 handover requested")?;
     // Sent at once: it reaches a kernel that is stopping or starting.
@@ -6959,8 +7009,84 @@ fn handover_net_client(port: u16) -> Result {
     closed(&mut second, "second connection")?;
     let mut third = open("third connection")?;
     ask(&mut third, "after", "18 after")?;
-    ask(&mut third, "bye", "19 bye")?;
+    // One more datagram after the handover; then both are answered.
+    udp.send(b"late-udp").map_err(|e| format!("udp send: {e}"))?;
+    thread::sleep(Duration::from_millis(500));
+    ask(&mut third, "udp", "19 udp 2")?;
+    for want in ["udp early-udp", "udp late-udp"] {
+        let mut buf = [0u8; 64];
+        let n = udp.recv(&mut buf).map_err(|e| format!("waiting for {want:?}: {e}"))?;
+        if &buf[..n] != want.as_bytes() {
+            return Err(format!("expected {want:?}, got {:?}", String::from_utf8_lossy(&buf[..n])));
+        }
+    }
+    ask(&mut third, "bye", "20 bye")?;
     closed(&mut third, "third connection")
+}
+
+/// The host side of `udp_echo` (user/udp_test's `serve`): datagrams of
+/// several sizes to the guest's port 7 through QEMU's UDP forward, each
+/// echoed whole (sent again while no answer comes: UDP may lose one, and
+/// the guest's first answer may wait for ARP); then `dns example.com`,
+/// which the guest resolves through QEMU's DNS (10.0.2.3, forwarding to
+/// the host's resolver): an IPv4 address when the host resolves the name
+/// too, skipped (logged) when the host has no DNS; then `bye`.
+fn udp_client(port: u16) -> Result {
+    let s = std::net::UdpSocket::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    s.connect(("127.0.0.1", port)).map_err(|e| format!("connect: {e}"))?;
+    let timeout =
+        |ms| s.set_read_timeout(Some(Duration::from_millis(ms))).map_err(|e| e.to_string());
+    timeout(500)?;
+    // Sends `data` until an answer equal to `want` comes (answers to
+    // earlier tries are skipped).
+    let ask = |data: &[u8], want: Option<&[u8]>, tries: usize| -> Result<Vec<u8>> {
+        let mut buf = vec![0u8; 4096];
+        for _ in 0..tries {
+            s.send(data).map_err(|e| format!("send: {e}"))?;
+            loop {
+                match s.recv(&mut buf) {
+                    Ok(n) if want.is_none_or(|w| w == &buf[..n]) => return Ok(buf[..n].to_vec()),
+                    Ok(_) => continue,
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock
+                                | std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(e) => return Err(format!("recv: {e}")),
+                }
+            }
+        }
+        Err(format!("no answer to a {}-byte datagram", data.len()))
+    };
+    for (i, n) in [1usize, 2, 100, 512, 1000, 1400].into_iter().enumerate() {
+        let data: Vec<u8> = (0..n).map(|j| (j * 7 + i) as u8 | 0x80).collect();
+        ask(&data, Some(&data), 40).map_err(|e| format!("{e} (echo)"))?;
+    }
+    use std::net::ToSocketAddrs;
+    let host_resolves = ("example.com", 80).to_socket_addrs().is_ok_and(|mut a| a.next().is_some());
+    timeout(20_000)?;
+    let answer = loop {
+        // Skip late echoes still on their way.
+        let a = ask(b"dns example.com", None, 1)?;
+        if a.starts_with(b"dns ") {
+            break String::from_utf8_lossy(&a).into_owned();
+        }
+    };
+    timeout(500)?;
+    let address = answer.strip_prefix("dns ").and_then(|a| a.parse::<std::net::Ipv4Addr>().ok());
+    match (address, host_resolves) {
+        (Some(_), _) => {}
+        (None, false) => {
+            eprintln!("xtask: udp_echo: no DNS on the host; the guest said {answer:?}")
+        }
+        (None, true) => return Err(format!("dns example.com: {answer:?}")),
+    }
+    ask(b"bye", Some(b"bye"), 40).map(|_| ())
 }
 
 /// The host side of an HTTP scenario: GET / with HTTP/1.1, expect 200 and

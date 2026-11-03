@@ -115,6 +115,7 @@ impl NtStatus {
     pub const IMAGE_NOT_AT_BASE: NtStatus = NtStatus(0x4000_0003);
     // Network (AFD) statuses.
     pub const NOT_SUPPORTED: NtStatus = NtStatus(0xc000_00bb);
+    pub const INVALID_BUFFER_SIZE: NtStatus = NtStatus(0xc000_0206);
     pub const CANCELLED: NtStatus = NtStatus(0xc000_0120);
     pub const DEVICE_NOT_READY: NtStatus = NtStatus(0xc000_00a3);
     pub const NOT_FOUND: NtStatus = NtStatus(0xc000_0225);

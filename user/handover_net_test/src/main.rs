@@ -12,12 +12,20 @@
 //! (a pending AFD receive) while the kernel hands over. The line `bye` is
 //! answered and the connection closed.
 //!
+//! It also binds UDP port 7 of every address and leaves it alone until a
+//! connection sends the line `udp`: then it answers every datagram queued
+//! there with `udp <datagram>` to its sender and the line with
+//! `<n> udp <k>`, k the datagrams answered. The client sends one datagram
+//! before the handover (it waits in the socket's queue across it) and one
+//! after: the port, the queued datagram and new ones survive.
+//!
 //! xtask's client (the `handover_net` scenarios) talks to it through
 //! QEMU's port forward: the first connection before, across and after the
 //! handover; a second one it opened before the handover, which waits
 //! unaccepted in the listener's backlog with its first line unread until
 //! the program accepts it after the handover; a third one opened after
-//! it. The client checks every answer and that no connection was reset.
+//! it, which also asks for the UDP datagrams. The client checks every
+//! answer and that no connection was reset.
 //!
 //! With the argument `self` a thread of its own plays xtask's client over
 //! loopback (127.0.0.1:7), so the program also runs alone, on Windows
@@ -67,7 +75,37 @@ unsafe extern "system" {
     fn connect(s: Socket, addr: *const SockaddrIn, len: i32) -> i32;
     fn send(s: Socket, buf: *const u8, len: i32, flags: i32) -> i32;
     fn recv(s: Socket, buf: *mut u8, len: i32, flags: i32) -> i32;
+    fn sendto(
+        s: Socket,
+        buf: *const u8,
+        len: i32,
+        flags: i32,
+        to: *const SockaddrIn,
+        to_len: i32,
+    ) -> i32;
+    fn recvfrom(
+        s: Socket,
+        buf: *mut u8,
+        len: i32,
+        flags: i32,
+        from: *mut SockaddrIn,
+        from_len: *mut i32,
+    ) -> i32;
+    fn select(
+        n: i32,
+        read: *mut FdSet,
+        write: *mut FdSet,
+        except: *mut FdSet,
+        timeout: *const [i32; 2],
+    ) -> i32;
     fn closesocket(s: Socket) -> i32;
+}
+
+/// fd_set (x64): the count, then the sockets at offset 8.
+#[repr(C)]
+struct FdSet {
+    count: u32,
+    sockets: [Socket; 1],
 }
 
 #[allow(dead_code)]
@@ -102,6 +140,7 @@ struct WsaData {
 
 /// SOCKADDR_IN: family, port and address in network byte order.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct SockaddrIn {
     family: u16,
     port: u16,
@@ -111,7 +150,9 @@ struct SockaddrIn {
 
 const AF_INET: i32 = 2;
 const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
 const IPPROTO_TCP: i32 = 6;
+const IPPROTO_UDP: i32 = 17;
 const INVALID_SOCKET: Socket = !0;
 const PORT: u16 = 7;
 const CONNECTIONS: u32 = 3;
@@ -192,9 +233,43 @@ fn send_all(s: Socket, data: &[u8]) -> Result<(), u32> {
     Ok(())
 }
 
+/// Whether `s` is readable within `ms` milliseconds.
+fn readable(s: Socket, ms: i32) -> bool {
+    let mut set = FdSet { count: 1, sockets: [s] };
+    let timeout = [ms / 1000, ms % 1000 * 1000];
+    // SAFETY: a valid fd_set and timeval.
+    unsafe { select(0, &mut set, core::ptr::null_mut(), core::ptr::null_mut(), &timeout) == 1 }
+}
+
+/// `udp`: answers every datagram queued on the UDP socket with
+/// `udp <datagram>`; returns how many.
+fn answer_datagrams(udp: Socket) -> Result<u64, u32> {
+    let mut answered = 0;
+    let mut wait = 2000;
+    while readable(udp, wait) {
+        wait = 300;
+        let mut buf = [0u8; 256];
+        buf[..4].copy_from_slice(b"udp ");
+        let mut from = SockaddrIn { family: 0, port: 0, addr: [0; 4], zero: [0; 8] };
+        let mut len = size_of::<SockaddrIn>() as i32;
+        // SAFETY: valid buffers of the lengths given.
+        let n = unsafe { recvfrom(udp, buf[4..].as_mut_ptr(), 252, 0, &mut from, &mut len) };
+        if n < 0 {
+            return Err(fail(14));
+        }
+        // SAFETY: as above.
+        let sent = unsafe { sendto(udp, buf.as_ptr(), n + 4, 0, &from, len) };
+        if sent != n + 4 {
+            return Err(fail(15));
+        }
+        answered += 1;
+    }
+    Ok(answered)
+}
+
 /// Serves one connection; returns how many lines it answered. `count`
 /// numbers every line of every connection.
-fn serve(s: Socket, count: &mut u64) -> Result<u64, u32> {
+fn serve(s: Socket, udp: Socket, count: &mut u64) -> Result<u64, u32> {
     let mut buf = [0u8; 512];
     let mut have = 0usize;
     let mut lines = 0;
@@ -221,6 +296,9 @@ fn serve(s: Socket, count: &mut u64) -> Result<u64, u32> {
                     STATUS_ACCESS_DENIED => b"handover skipped (none allowed)",
                     _ => b"handover failed",
                 });
+            } else if line == b"udp" {
+                put(b"udp ");
+                put(decimal(answer_datagrams(udp)?, &mut d));
             } else {
                 put(line);
             }
@@ -352,15 +430,36 @@ impl Peer {
     }
 }
 
+/// The `self` client's datagrams: one to the server's UDP port.
+fn datagram_to_server(s: Socket, data: &[u8]) -> Result<(), u32> {
+    let to = SockaddrIn {
+        family: AF_INET as u16,
+        port: PORT.to_be(),
+        addr: [127, 0, 0, 1],
+        zero: [0; 8],
+    };
+    // SAFETY: valid buffers.
+    let n = unsafe {
+        sendto(s, data.as_ptr(), data.len() as i32, 0, &to, size_of::<SockaddrIn>() as i32)
+    };
+    if n != data.len() as i32 { Err(fail(65)) } else { Ok(()) }
+}
+
 /// The `self` client: xtask's conversation (`handover_net_client`) over
 /// loopback; 0 or the number of the failing check.
 extern "system" fn self_client(_: *mut c_void) -> u32 {
     let run = || -> Result<(), u32> {
+        // SAFETY: plain Winsock call.
+        let udp = unsafe { socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) };
+        if udp == INVALID_SOCKET {
+            return Err(fail(66));
+        }
         let first = Peer::open()?;
         first.ask(b"hello", 1, 50)?;
         first.ask(b"before", 2, 51)?;
         let second = Peer::open()?;
         second.send(b"early")?;
+        datagram_to_server(udp, b"early-udp")?;
         // SAFETY: plain call.
         unsafe { Sleep(200) };
         first.send(b"handover")?;
@@ -377,7 +476,26 @@ extern "system" fn self_client(_: *mut c_void) -> u32 {
         second.closed(60)?;
         let third = Peer::open()?;
         third.ask(b"after", 18, 62)?;
-        third.ask(b"bye", 19, 63)?;
+        datagram_to_server(udp, b"late-udp")?;
+        // SAFETY: plain call.
+        unsafe { Sleep(200) };
+        third.send(b"udp")?;
+        third.expect(19, b"udp 2", false, 67)?;
+        for want in [&b"udp early-udp"[..], b"udp late-udp"] {
+            let mut buf = [0u8; 64];
+            // SAFETY: a valid buffer; the sender is not asked for.
+            let n = unsafe {
+                recvfrom(udp, buf.as_mut_ptr(), 64, 0, core::ptr::null_mut(), core::ptr::null_mut())
+            };
+            if n < 0 || &buf[..n as usize] != want {
+                return Err(68);
+            }
+        }
+        // SAFETY: our socket.
+        if unsafe { closesocket(udp) } != 0 {
+            return Err(fail(69));
+        }
+        third.ask(b"bye", 20, 63)?;
         third.closed(64)
     };
     match run() {
@@ -408,6 +526,10 @@ fn run() -> Result<(), u32> {
         if listen(listener, 5) != 0 {
             return Err(fail(4));
         }
+        let udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if udp == INVALID_SOCKET || bind(udp, &any, size_of::<SockaddrIn>() as i32) != 0 {
+            return Err(fail(16));
+        }
         out(b"handover_net_test: listening on port 7\r\n");
         let client = if wants_self() {
             let t = CreateThread(
@@ -431,7 +553,7 @@ fn run() -> Result<(), u32> {
             if conn == INVALID_SOCKET {
                 return Err(fail(5));
             }
-            let lines = serve(conn, &mut count)?;
+            let lines = serve(conn, udp, &mut count)?;
             if closesocket(conn) != 0 {
                 return Err(fail(6));
             }
@@ -444,7 +566,7 @@ fn run() -> Result<(), u32> {
             out(decimal(count, &mut d));
             out(b" in all\r\n");
         }
-        if closesocket(listener) != 0 {
+        if closesocket(listener) != 0 || closesocket(udp) != 0 {
             return Err(fail(7));
         }
         if let Some(t) = client {

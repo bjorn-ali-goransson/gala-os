@@ -6,6 +6,7 @@
 
 pub mod loopback;
 pub mod tcp;
+pub mod udp;
 pub mod virtio_net;
 
 use crate::{sched, time};

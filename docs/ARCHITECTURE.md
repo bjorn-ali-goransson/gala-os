@@ -2002,6 +2002,25 @@ Layers, bottom up (N1a: the card and TCP/IP; N1b: sockets for user mode).
   many listeners come. `net: ...` at the end of every boot logs frames,
   loopback packets, polls and the sockets still open (0 after programs
   that closed theirs).
+- `net::udp` (N1d), UDP sockets in the same table (`tcp::Kind::Udp`;
+  TCP and UDP ports are apart, `port_in_use(port, udp)`): `bind`
+  (port 0: an ephemeral port), `connect` (a default peer, or None),
+  `send_to` (to an address or the peer), `recv_from` (a datagram, its
+  whole length and its sender; `peek`). A socket has a smoltcp UDP socket
+  on each interface its address covers (lo and eth for 0.0.0.0), with
+  64 datagrams / 64 KiB each way; after every poll (and before a
+  receive) the net thread moves what they received into the socket's own
+  queue (`drain`): datagrams from other addresses than a connected
+  socket's peer are discarded there (Windows' connect on a datagram
+  socket), the queue holds 256 datagrams / 64 KiB and drops what comes
+  beyond (and on allocation failure), and it is what a handover carries.
+  Sends go into the smoltcp socket of the interface that reaches the
+  destination (WouldBlock while its queue is full). No IP fragmentation:
+  a datagram larger than the interface's IP MTU less 28 is `TooLarge`
+  (1472 bytes on the card, 16356 on loopback; TODO, Windows sends up to
+  65507). Readiness: readable while a datagram is queued, always
+  writable; the signature counts arrivals, so a queue emptied and
+  refilled is reported. smoltcp's `socket-udp` feature is on.
 
 ### AFD: sockets for Windows programs (N1b)
 
@@ -2012,8 +2031,9 @@ attribute named `AfdOpenPacketXX`, and driven by NtDeviceIoControlFile
 in the namespace; opening anything below it creates an endpoint
 (`ObjectBody::Socket`, reported as type "File"). Without an open packet
 the endpoint is a helper handle (what libuv/wepoll open for
-IOCTL_AFD_POLL); with one, its transport name (`\Device\Tcp`) picks TCP
-(`\Device\Udp` and raw sockets: STATUS_NOT_SUPPORTED, ledger).
+IOCTL_AFD_POLL); with one, its transport name picks TCP (`\Device\Tcp`)
+or UDP (`\Device\Udp`, a datagram endpoint on `net::udp`; raw sockets:
+STATUS_NOT_SUPPORTED, ledger).
 
 Pending requests on an endpoint complete in order within their kind
 (receives, sends, accepts, connects: they consume the stream in order),
@@ -2035,7 +2055,9 @@ IOCTLs (code = 0x12000 | function << 2 | method):
 | 0x1200c | WAIT_FOR_LISTEN: returns `{u32 sequence; TRANSPORT_ADDRESS}` of a pending connection | ReactOS, to be verified |
 | 0x12010 | ACCEPT (on the listener): `{u32 use_san; u32 sequence; HANDLE accept_endpoint}` | ReactOS, to be verified |
 | 0x12017 | RECV: `{WSABUF *buffers; u32 count; u32 afd_flags; u32 tdi_flags}` | Wine (same as ReactOS) |
+| 0x1201b | RECV_DATAGRAM: AFD_RECV_INFO_UDP `{WSABUF *buffers; u32 count; u32 afd_flags; u32 tdi_flags; void *address at 24; int *address_length at 32}`; gala writes the sender's SOCKADDR_IN to `address` and 16 to `*address_length` when the datagram is taken | ReactOS, to be verified |
 | 0x1201f | SEND: same layout as RECV | ReactOS, to be verified |
+| 0x12023 | SEND_DATAGRAM: AFD_SEND_INFO_UDP `{WSABUF *buffers; u32 count; u32 afd_flags; TDI_REQUEST_SEND_DATAGRAM (40 bytes); TDI_CONNECTION_INFORMATION at 56}`: RemoteAddressLength at 88, RemoteAddress (a TRANSPORT_ADDRESS, copied during the call) at 96 | ReactOS, to be verified |
 | 0x1202b | DISCONNECT: `{u32 type (1 send, 2 receive, 4 abort); i64 timeout}` | ReactOS, to be verified |
 | 0x1202f | GETSOCKNAME: returns the local sockaddr | Wine |
 | 0x12033 | GET_PEER_NAME: returns the remote sockaddr | ReactOS, to be verified |
@@ -2116,6 +2138,21 @@ Internal/InternalHigh) and the endpoint's I/O completion port.
 - Receive flags (afd_recv_params.msg_flags, Wine's layout): AFD_MSG_PEEK
   (0x80) leaves the bytes in the socket (Nginx peeks to tell TLS from
   plain HTTP); OOB and WAITALL are not supported yet (ledger).
+- Datagram endpoints (N1d): BIND makes a `net::udp` socket; CONNECT
+  only sets the default peer (the zero address clears it; an unbound
+  socket is bound to 0.0.0.0 and an ephemeral port first), done at once;
+  SEND_DATAGRAM (and SEND, to the peer: STATUS_INVALID_CONNECTION, i.e.
+  WSAENOTCONN, without one) binds an unbound socket the same way and
+  sends the buffers as one datagram (`Op::SendTo`, pending while the
+  send queue is full; too large: STATUS_INVALID_BUFFER_SIZE,
+  WSAEMSGSIZE); RECV_DATAGRAM and RECV need a bound socket
+  (STATUS_INVALID_PARAMETER, WSAEINVAL) and take one datagram
+  (`Op::RecvFrom`; AFD_MSG_PEEK leaves it): one larger than the buffers
+  fills them and completes with STATUS_BUFFER_OVERFLOW and the bytes
+  copied (WSAEMSGSIZE; the rest is gone, as Windows documents).
+  LISTEN, ACCEPT, SUPER_ACCEPT/CONNECT: STATUS_NOT_SUPPORTED
+  (WSAEOPNOTSUPP); DISCONNECT does nothing. Poll: READ while a datagram
+  is queued, WRITE always (also before binding).
 - IOCTL_AFD_SUPER_ACCEPT (0x12083, AcceptEx: input
   `{u8 san; u8 fix; HANDLE accept; u32 receive_length; u32
   local_length; u32 remote_length}`, the output buffer receives
@@ -2165,7 +2202,23 @@ every accepted connection); unknown ones fail with WSAENOPROTOOPT and go
 to the ledger. getaddrinfo resolves numeric IPv4 addresses,
 "localhost" and the machine's own host name (gethostname's "gala", to
 loopback: what Windows answers without network adapters, until gala
-lists its adapters); other names are reported (WSAHOST_NOT_FOUND).
+lists its adapters); other names go to DNS (`dns`: one A query over UDP
+to 10.0.2.3, QEMU's user network's resolver standing in for a DHCP-given
+server; two tries of 2 s; NXDOMAIN is WSAHOST_NOT_FOUND, no A record
+WSANO_DATA, no answer WSATRY_AGAIN, no network card WSAHOST_NOT_FOUND at
+once; AI_NUMERICHOST skips it; no cache).
+Datagram sockets (N1d): socket/WSASocketW with SOCK_DGRAM (protocol 0 or
+IPPROTO_UDP) open a `\Device\Udp` endpoint and record SO_TYPE in the
+per-socket options table (what getsockopt(SO_TYPE) and sendto/recvfrom
+consult; WSADuplicateSocket carries it). sendto/WSASendTo send one
+datagram (SEND_DATAGRAM; NULL address: SEND to the peer), recvfrom/
+WSARecvFrom take one with its sender (RECV_DATAGRAM, which writes lpFrom
+and lpFromlen at completion: overlapped callers keep them valid, as
+documented); on stream sockets both ignore the address (send/recv).
+connect on a datagram socket with a zeroed address (AF_UNSPEC too, the
+way libuv disconnects) sends AFD the zero IPv4 address: no peer.
+STATUS_BUFFER_OVERFLOW and STATUS_INVALID_BUFFER_SIZE map to WSAEMSGSIZE.
+SO_BROADCAST is kept (no broadcast sending tested yet).
 
 ### Tests
 
@@ -2173,11 +2226,17 @@ lists its adapters); other names are reported (WSAHOST_NOT_FOUND).
 `net::tcp`) and `winsock_test` (a Windows program: loopback checks, then,
 with `serve`, an echo server on port 7). Both are in xtask's
 `NET_SCENARIOS`: QEMU gets `-netdev user,hostfwd=tcp:127.0.0.1:<free
-port>-:7` and a virtio-net card (every other VM gets `-nic none`); once the
+port>-:7,hostfwd=udp:127.0.0.1:<the same port>-:7` and a virtio-net card
+(every other VM gets `-nic none`); once the
 log shows the scenario's "listening" line, xtask's `net_client` sends 64 KiB
 while reading the echo, half-closes, checks every byte and appends
 `xtask: net client: echo ok` (or the error) to the serial log, which the
-scenario expects.
+scenario expects. `udp_test` (loopback datagram checks, also in gala-um)
+and `udp_echo` (its `serve`: `udp_client` sends datagrams of 1-1400
+bytes through the UDP forward, resending until each is echoed, then
+`dns example.com`, which the guest resolves through QEMU's DNS: an
+address is required when the host resolves the name, the check is
+skipped and logged when the host has no DNS).
 
 ## Disk (D1)
 
@@ -4658,7 +4717,11 @@ network is stopped for 0.5-0.7 s under TCG), never a reset.
   and SOCKETS (tag 35: per endpoint object, `SocketRec`, with the
   connections as CONNECTION entries carrying a role (the socket's own,
   READY with its sequence number, OPENING, LINGERING) and the pending
-  requests as `RequestRec`s). Both REQUIRED, version 1, and written only
+  requests as `RequestRec`s). Both REQUIRED (NET version 1, SOCKETS
+  version 2: UDP sockets and the
+  datagram requests at the ends of their entries, must_read 2 only when
+  the record holds a UDP socket, `sockets::sockets_must_read`; version 1
+  is read with them absent), and written only
   when a program holds a socket (`version::Kind::when_present`): `agree`
   does not ask for them up front, the record as written is checked
   (`check_record`), so programs without sockets still go to a kernel
@@ -4671,9 +4734,20 @@ network is stopped for 0.5-0.7 s under TCG), never a reset.
   then, once processes and threads are there, the pending requests
   (those that can finish do at once). The net thread's first poll
   reports every socket.
-- Not carried yet (refused or impossible today): UDP and raw sockets
-  (gala has no UDP: `\Device\Udp` opens fail, so no program can hold
-  one), IPv6, a handle to `\Device\Afd` itself. The time without the
+- *UDP sockets* (N1d, SOCKETS version 2): a socket kind UDP with its
+  local address, its default peer and the datagrams received and not
+  read (with their senders; what smoltcp still held is moved to the
+  socket's queue first, so a refused handover loses nothing); datagrams
+  in smoltcp's send queue are not carried (the poll before the stop sent
+  what it could; UDP may lose the rest). The next kernel binds fresh
+  smoltcp sockets on the same port. Pending RECV_FROM (buffers, peek,
+  where the address goes) and SEND_TO (buffers, destination) requests
+  are carried like the others. `handover_net`'s program keeps a datagram
+  queued on its bound port 7 across the handover and answers it and a
+  new one after it (`handover: carrying 3 socket(s): 2 TCP
+  connection(s), 1 listener(s), 1 UDP socket(s)`).
+- Not carried yet (refused or impossible today): raw sockets, IPv6, a
+  handle to `\Device\Afd` itself. The time without the
   network grows with the record (it is stopped before the draft record
   is encoded): fine for TCP (peers retransmit for minutes) but worth
   shrinking (stop it after the image is prepared, encode the sockets
@@ -4698,7 +4772,8 @@ state format differs; every future format change follows these rules.
   TIMERS 2) raises it to the new version. It may depend on the data:
   THREADS 3 needs a version-3 reader only when a thread's extended-state
   blob is not empty (`programs::threads_must_read`; with XSAVE enabled
-  and threads carried it is).
+  and threads carried it is); SOCKETS 2 only when a UDP socket is
+  carried (`sockets::sockets_must_read`).
 - *The note.* Each kernel image carries its read facts in an ELF note
   (name "GALA", type 0x47410001, section `.gala_note` in a PT_NOTE segment,
   `boot::HANDOVER_NOTE`, built at compile time from `KINDS`): note format

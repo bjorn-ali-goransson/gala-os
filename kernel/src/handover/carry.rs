@@ -161,10 +161,11 @@ impl Programs {
         self.objects.len()
     }
 
-    /// Sockets carried: (endpoints, connections, listeners).
-    pub fn socket_counts(&self) -> (usize, usize, usize) {
+    /// Sockets carried: (endpoints, TCP connections, listeners, UDP
+    /// sockets).
+    pub fn socket_counts(&self) -> (usize, usize, usize, usize) {
         let mut conns = self.net.as_ref().map_or(0, |n| n.lingering.len());
-        let mut listeners = 0;
+        let (mut listeners, mut udp) = (0, 0);
         for s in &self.sockets {
             match s.entry.as_ref().map(|e| &e.kind) {
                 Some(tcp::CarriedKind::Conn { .. }) => conns += 1,
@@ -172,10 +173,11 @@ impl Programs {
                     listeners += 1;
                     conns += ready.len() + opening.len();
                 }
+                Some(tcp::CarriedKind::Udp { .. }) => udp += 1,
                 _ => {}
             }
         }
-        (self.sockets.len(), conns, listeners)
+        (self.sockets.len(), conns, listeners, udp)
     }
 
     /// The extended state the threads carry (XCR0 bits): what this kernel
@@ -493,13 +495,16 @@ fn collect_sockets(p: &mut Programs, stopped_ns: u64) -> Result<(), Refusal> {
                 local: q.local,
                 buffers,
                 endpoints,
+                address: q.address,
+                address_len: q.address_len,
+                to: q.to,
             })?;
         }
         let (port, key) = c.completion.as_ref().map_or((0, 0), |(o, k)| (p.id(o), *k));
         let (select_event, select_mask) = c.select.as_ref().map_or((0, 0), |(o, m)| (p.id(o), *m));
         let rec = SocketRec {
             id: i as u32 + 1,
-            transport: u32::from(c.tcp),
+            transport: c.transport.number(),
             non_blocking: c.non_blocking,
             modes: c.modes,
             port,
@@ -997,7 +1002,8 @@ impl Programs {
         // Milestone (e): only when a program holds a socket.
         if let Some(net) = &self.net {
             sockets::write_net(w, net)?;
-            sockets::sockets_section(w)?;
+            let any_udp = self.sockets.iter().any(|s| s.transport == sockets::transport::UDP);
+            sockets::sockets_section(w, any_udp)?;
             for s in &self.sockets {
                 s.write(w)?;
             }
@@ -1750,6 +1756,9 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
                     local: q.local,
                     buffers: q.buffers,
                     endpoints,
+                    address: q.address,
+                    address_len: q.address_len,
+                    to: q.to,
                 })
                 .map_err(no_memory)?;
         }
@@ -1830,7 +1839,8 @@ fn restore_sockets(
             id => objects.get(id).cloned().map(Some).ok_or(NtStatus::INVALID_HANDLE),
         };
         let c = afd::CarriedEndpoint {
-            tcp: s.transport == 1,
+            transport: afd::Transport::from_number(s.transport)
+                .ok_or(NtStatus::INVALID_PARAMETER)?,
             socket: None,
             completion: get(s.port)?.map(|o| (o, s.key)),
             modes: s.modes,

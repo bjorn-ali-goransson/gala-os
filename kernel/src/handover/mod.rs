@@ -352,11 +352,11 @@ pub fn go(info: &BootInfo, cmdline: &Cmdline) -> HandoverError {
             p.object_count(),
             p.frame_count()
         );
-        let (sockets, conns, listeners) = p.socket_counts();
+        let (sockets, conns, listeners, udp) = p.socket_counts();
         if sockets != 0 {
             crate::info!(
                 "handover: carrying {sockets} socket(s): {conns} TCP connection(s), {listeners} \
-                 listener(s); the network is stopped"
+                 listener(s), {udp} UDP socket(s); the network is stopped"
             );
         }
     }

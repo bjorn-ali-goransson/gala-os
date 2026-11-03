@@ -49,6 +49,8 @@ pub enum NetError {
     NoMemory,
     /// The id names no live socket.
     NoSocket,
+    /// A datagram larger than the interface carries.
+    TooLarge,
 }
 
 /// An IPv4 address and port.
@@ -71,42 +73,58 @@ impl Addr {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SocketId {
-    index: u32,
+    pub(super) index: u32,
     generation: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Side {
+pub(super) enum Side {
     Lo,
     Eth,
 }
 
-type Sock = (Side, SocketHandle);
+pub(super) type Sock = (Side, SocketHandle);
 
-enum Kind {
+pub(super) enum Kind {
     Bound,
-    Listener { backlog: usize, listening: Vec<Sock>, ready: Vec<(u32, Sock)>, next_sequence: u32 },
-    Conn { sock: Sock, connected: bool },
+    Listener {
+        backlog: usize,
+        listening: Vec<Sock>,
+        ready: Vec<(u32, Sock)>,
+        next_sequence: u32,
+    },
+    Conn {
+        sock: Sock,
+        connected: bool,
+    },
+    /// A UDP socket (`net::udp`).
+    Udp(super::udp::Udp),
 }
 
-struct Entry {
+impl Kind {
+    fn is_udp(&self) -> bool {
+        matches!(self, Kind::Udp(_))
+    }
+}
+
+pub(super) struct Entry {
     generation: u32,
     token: u64,
-    local: Addr,
-    kind: Kind,
+    pub(super) local: Addr,
+    pub(super) kind: Kind,
     /// Readiness at the last report (see `signature`); STALE after the
     /// owner sent, received or accepted (the next poll reports it: a queue
     /// emptied and refilled to the same length looks unchanged).
-    last: u64,
+    pub(super) last: u64,
 }
 
 /// No signature: the next poll reports the entry.
-const STALE: u64 = u64::MAX;
+pub(super) const STALE: u64 = u64::MAX;
 
-struct Iface<D: Device> {
-    dev: D,
+pub(super) struct Iface<D: Device> {
+    pub(super) dev: D,
     iface: Interface,
-    sockets: SocketSet<'static>,
+    pub(super) sockets: SocketSet<'static>,
     count: usize,
 }
 
@@ -131,12 +149,12 @@ impl<D: Device> Iface<D> {
     }
 }
 
-struct Stack {
-    lo: Iface<Loopback>,
-    eth: Option<Iface<VirtioNet>>,
-    eth_ip: Option<[u8; 4]>,
+pub(super) struct Stack {
+    pub(super) lo: Iface<Loopback>,
+    pub(super) eth: Option<Iface<VirtioNet>>,
+    pub(super) eth_ip: Option<[u8; 4]>,
     eth_mac: [u8; 6],
-    entries: Vec<Option<Entry>>,
+    pub(super) entries: Vec<Option<Entry>>,
     /// Closed by their owner, still finishing (FIN, TIME-WAIT); removed
     /// from their set when done.
     lingering: Vec<Sock>,
@@ -174,7 +192,7 @@ fn new_socket() -> Option<tcp::Socket<'static>> {
 }
 
 impl Stack {
-    fn sockets(&mut self, side: Side) -> Option<&mut SocketSet<'static>> {
+    pub(super) fn sockets(&mut self, side: Side) -> Option<&mut SocketSet<'static>> {
         match side {
             Side::Lo => Some(&mut self.lo.sockets),
             Side::Eth => self.eth.as_mut().map(|e| &mut e.sockets),
@@ -185,7 +203,11 @@ impl Stack {
         Some(self.sockets(side)?.get_mut::<tcp::Socket>(handle))
     }
 
-    fn add(&mut self, side: Side, socket: tcp::Socket<'static>) -> Result<Sock, NetError> {
+    pub(super) fn add<S: smoltcp::socket::AnySocket<'static>>(
+        &mut self,
+        side: Side,
+        socket: S,
+    ) -> Result<Sock, NetError> {
         let count = match side {
             Side::Lo => &mut self.lo.count,
             Side::Eth => &mut self.eth.as_mut().ok_or(NetError::Unreachable)?.count,
@@ -198,7 +220,7 @@ impl Stack {
         Ok((side, handle))
     }
 
-    fn remove(&mut self, (side, handle): Sock) {
+    pub(super) fn remove(&mut self, (side, handle): Sock) {
         if let Some(set) = self.sockets(side) {
             set.remove(handle);
             match side {
@@ -212,29 +234,36 @@ impl Stack {
         }
     }
 
-    fn entry(&mut self, id: SocketId) -> Result<&mut Entry, NetError> {
+    pub(super) fn entry(&mut self, id: SocketId) -> Result<&mut Entry, NetError> {
         match self.entries.get_mut(id.index as usize) {
             Some(Some(e)) if e.generation == id.generation => Ok(e),
             _ => Err(NetError::NoSocket),
         }
     }
 
-    fn port_in_use(&self, port: u16) -> bool {
-        self.entries.iter().flatten().any(|e| e.local.port == port)
+    /// Whether a TCP (or, with `udp`, a UDP) socket has `port`: the two
+    /// protocols' ports are apart.
+    pub(super) fn port_in_use(&self, port: u16, udp: bool) -> bool {
+        self.entries.iter().flatten().any(|e| e.local.port == port && e.kind.is_udp() == udp)
     }
 
-    fn ephemeral_port(&mut self) -> Result<u16, NetError> {
+    pub(super) fn ephemeral_port(&mut self, udp: bool) -> Result<u16, NetError> {
         for _ in EPHEMERAL {
             let port = self.next_port;
             self.next_port = if port == *EPHEMERAL.end() { *EPHEMERAL.start() } else { port + 1 };
-            if !self.port_in_use(port) {
+            if !self.port_in_use(port, udp) {
                 return Ok(port);
             }
         }
         Err(NetError::AddressInUse)
     }
 
-    fn insert(&mut self, token: u64, local: Addr, kind: Kind) -> Result<SocketId, NetError> {
+    pub(super) fn insert(
+        &mut self,
+        token: u64,
+        local: Addr,
+        kind: Kind,
+    ) -> Result<SocketId, NetError> {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
         let entry = Entry { generation, token, local, kind, last: 0 };
@@ -252,7 +281,7 @@ impl Stack {
     }
 
     /// The interfaces a local address listens on.
-    fn sides_for(&self, ip: [u8; 4]) -> &'static [Side] {
+    pub(super) fn sides_for(&self, ip: [u8; 4]) -> &'static [Side] {
         match (ip, self.eth.is_some()) {
             ([0, 0, 0, 0], true) => &[Side::Lo, Side::Eth],
             ([0, 0, 0, 0], false) | ([127, ..], _) => &[Side::Lo],
@@ -260,7 +289,7 @@ impl Stack {
         }
     }
 
-    fn side_to(&self, ip: [u8; 4]) -> Result<Side, NetError> {
+    pub(super) fn side_to(&self, ip: [u8; 4]) -> Result<Side, NetError> {
         match ip {
             [127, ..] => Ok(Side::Lo),
             _ if self.eth.is_some() => Ok(Side::Eth),
@@ -358,6 +387,7 @@ impl Stack {
                 }
                 None => 0,
             },
+            Kind::Udp(_) => super::udp::signature(self, index),
         }
     }
 
@@ -376,6 +406,7 @@ impl Stack {
         }
         self.promote();
         self.reap();
+        super::udp::drain(self);
         for i in 0..self.entries.len() {
             let signature = self.signature(i);
             if let Some(entry) = self.entries[i].as_mut()
@@ -399,14 +430,18 @@ impl Stack {
     }
 }
 
-fn with_stack<R>(f: impl FnOnce(&mut Stack) -> Result<R, NetError>) -> Result<R, NetError> {
+pub(super) fn with_stack<R>(
+    f: impl FnOnce(&mut Stack) -> Result<R, NetError>,
+) -> Result<R, NetError> {
     let result = with_stack_quiet(f);
     kick();
     result
 }
 
 /// `with_stack` for calls that queue nothing (no reason to poll).
-fn with_stack_quiet<R>(f: impl FnOnce(&mut Stack) -> Result<R, NetError>) -> Result<R, NetError> {
+pub(super) fn with_stack_quiet<R>(
+    f: impl FnOnce(&mut Stack) -> Result<R, NetError>,
+) -> Result<R, NetError> {
     match STACK.lock().as_mut() {
         Some(stack) => f(stack),
         None => Err(NetError::Unreachable),
@@ -515,8 +550,8 @@ pub fn bind(local: Addr, token: u64) -> Result<SocketId, NetError> {
             return Err(NetError::AddressNotAvailable);
         }
         let port = match local.port {
-            0 => s.ephemeral_port()?,
-            p if s.port_in_use(p) => return Err(NetError::AddressInUse),
+            0 => s.ephemeral_port(false)?,
+            p if s.port_in_use(p, false) => return Err(NetError::AddressInUse),
             p => p,
         };
         s.insert(token, Addr { ip: local.ip, port }, Kind::Bound)
@@ -530,7 +565,7 @@ pub fn listen(id: SocketId, backlog: usize) -> Result<(), NetError> {
         match entry.kind {
             Kind::Bound => {}
             Kind::Listener { .. } => return Ok(()),
-            Kind::Conn { .. } => return Err(NetError::InvalidState),
+            Kind::Conn { .. } | Kind::Udp(_) => return Err(NetError::InvalidState),
         }
         let local = entry.local;
         let backlog = backlog.clamp(1, MAX_BACKLOG);
@@ -738,8 +773,10 @@ pub fn local(id: SocketId) -> Result<Addr, NetError> {
 
 pub fn remote(id: SocketId) -> Result<Addr, NetError> {
     with_stack(|s| {
-        let Kind::Conn { sock, .. } = s.entry(id)?.kind else {
-            return Err(NetError::NotConnected);
+        let sock = match &s.entry(id)?.kind {
+            Kind::Conn { sock, .. } => *sock,
+            Kind::Udp(u) => return u.peer.ok_or(NetError::NotConnected),
+            _ => return Err(NetError::NotConnected),
         };
         let t = s.tcp(sock).ok_or(NetError::NoSocket)?;
         t.remote_endpoint().map(Addr::from_endpoint).ok_or(NetError::NotConnected)
@@ -773,6 +810,11 @@ pub fn close(id: SocketId, abort: bool) {
                 }
             }
             Kind::Conn { sock, .. } => finish(s, sock, abort),
+            Kind::Udp(u) => {
+                for sock in u.socks.into_iter().flatten() {
+                    s.remove(sock);
+                }
+            }
         }
         Ok(())
     });
@@ -816,6 +858,11 @@ pub fn readiness(id: SocketId) -> Result<Readiness, NetError> {
                     connected: !opening && !refused,
                     refused,
                 }
+            }
+            // Datagrams: readable while one is queued; always writable (a
+            // send that finds the queue full waits, as on Windows).
+            Kind::Udp(ref u) => {
+                Readiness { readable: !u.queue.is_empty(), writable: true, ..Readiness::default() }
             }
         })
     })
@@ -949,6 +996,12 @@ pub enum CarriedKind {
     Conn {
         conn: CarriedConn,
         connected: bool,
+    },
+    /// A UDP socket: its default peer (connect) and the datagrams
+    /// received and not read, with their senders.
+    Udp {
+        peer: Option<Addr>,
+        datagrams: Vec<(Addr, Vec<u8>)>,
     },
 }
 
@@ -1215,6 +1268,7 @@ pub fn carry_entry(id: SocketId) -> Result<CarriedEntry, NetError> {
                 let (sock, connected) = (*sock, *connected);
                 CarriedKind::Conn { conn: s.carry_conn(sock)?, connected }
             }
+            Kind::Udp(_) => super::udp::carry(s, id)?,
             Kind::Listener { backlog, listening, ready, next_sequence } => {
                 let (backlog, next_sequence) = (*backlog as u32, *next_sequence);
                 let mut socks: Vec<(Option<u32>, Sock)> = Vec::new();
@@ -1310,6 +1364,9 @@ pub fn adopt_entry(c: &CarriedEntry, token: u64) -> Result<SocketId, NetError> {
         s.entries.try_reserve(1).map_err(|_| NetError::NoMemory)?;
         let kind = match &c.kind {
             CarriedKind::Bound => Kind::Bound,
+            CarriedKind::Udp { peer, datagrams } => {
+                Kind::Udp(super::udp::adopt(s, c.local, *peer, datagrams)?)
+            }
             CarriedKind::Conn { conn, connected } => {
                 Kind::Conn { sock: s.adopt_conn(conn)?, connected: *connected }
             }
@@ -1353,15 +1410,20 @@ pub fn adopt_entry(c: &CarriedEntry, token: u64) -> Result<SocketId, NetError> {
     })
 }
 
+/// The stack in host tests (`net::tcp`'s and `net::udp`'s).
 #[cfg(test)]
-mod tests {
+pub(super) mod testing {
     use super::*;
 
     /// The stack is global: tests that use it take turns.
     static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    pub fn turn() -> std::sync::MutexGuard<'static, ()> {
+        TURN.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// A stack with only the loopback interface, as `start` makes it.
-    fn loopback_stack() {
+    pub fn loopback_stack() {
         let lo = Iface::new(
             Loopback::new(),
             HardwareAddress::Ip,
@@ -1381,7 +1443,7 @@ mod tests {
     }
 
     /// One poll of the net thread: the tokens it would report.
-    fn poll() -> Vec<u64> {
+    pub fn poll() -> Vec<u64> {
         let mut changed = Vec::new();
         with_stack_quiet(|s| {
             s.poll(&mut changed);
@@ -1391,9 +1453,20 @@ mod tests {
         changed
     }
 
+    /// The test's stack is gone.
+    pub fn end() {
+        *STACK.lock() = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{loopback_stack, poll, turn};
+    use super::*;
+
     #[test]
     fn a_reader_is_told_of_the_next_message_of_the_same_size() {
-        let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = turn();
         loopback_stack();
         let addr = Addr { ip: [127, 0, 0, 1], port: 4000 };
         let listener = bind(addr, 1).unwrap();
@@ -1447,7 +1520,7 @@ mod tests {
     /// listener accepting new ones, a graceful close.
     #[test]
     fn connections_go_on_in_a_new_stack() {
-        let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = turn();
         loopback_stack();
         let addr = Addr { ip: [127, 0, 0, 1], port: 4100 };
         let listener = bind(addr, 1).unwrap();

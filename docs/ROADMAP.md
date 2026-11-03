@@ -392,6 +392,31 @@ N1. **Networking (next)**, re-planned 2026-10-30 from data: the official
         SetFileCompletionNotificationModes; tests `winsock_async_test`
         (Windows-compatible) and `go_http` (loopback GET, then the host's
         GET through QEMU's port forward).
+   N1d. UDP sockets. **Done** (2026-11-03): `net::udp` (smoltcp UDP
+        sockets, one per interface the address covers, and the socket's
+        own queue of received datagrams: the connected peer's filter, the
+        64 KiB receive limit, what a handover carries), AFD datagram
+        endpoints (`\Device\Udp`; IOCTL_AFD_SEND_DATAGRAM and
+        RECV_DATAGRAM with ReactOS's AFD_*_INFO_UDP layouts, to be
+        verified; RECV/SEND on a connected one; connect setting or, with
+        the zero address, clearing the default peer; a truncated datagram
+        is STATUS_BUFFER_OVERFLOW with the bytes copied), ws2_32 SOCK_DGRAM
+        (sendto/recvfrom, WSASendTo/WSARecvFrom overlapped and with
+        completion ports, SO_TYPE, SO_BROADCAST, WSAEMSGSIZE), getaddrinfo
+        resolving names over UDP through QEMU's DNS (10.0.2.3). Tests
+        `udp_test` (loopback: ephemeral ports, boundaries, MSG_PEEK,
+        truncation, select/WSAPoll, non-blocking, implicit bind, connect
+        and its filter, options, IOCP, closing with a receive pending; also
+        in gala-um) and `udp_echo` (datagrams from the host through a
+        forwarded UDP port, and a DNS lookup); UDP sockets across a
+        handover (`handover_net`, SOCKETS version 2). Not done: datagrams
+        larger than an interface's MTU (no IP fragmentation:
+        WSAEMSGSIZE above 1472 bytes on the card, 16356 on loopback;
+        Windows sends up to 65507), ICMP port unreachable as WSAECONNRESET
+        (Windows' SIO_UDP_CONNRESET behaviour), broadcast and multicast
+        beyond SO_BROADCAST being kept, SO_RCVBUF changing the receive
+        limit, gethostbyname over DNS, a DNS server from the network
+        (DHCP) instead of the static one.
 N2. **Nginx**: either our own 64-bit build of Nginx (cross-compiled with
    mingw-w64) or a WoW64-style layer for 32-bit programs (much larger);
    then CreateProcess for its worker processes, advapi32/crypt32 pieces.
@@ -1915,9 +1940,11 @@ R. **Robustness and live update, kernel included** (the owner's
      (unread and unsent bytes, a connection waiting to be accepted by
      its old number, new connections, a graceful close), the formats'
      round trip, damage, a newer writer's extra fields, the refusal of a
-     target without SOCKETS. Not done: UDP (gala has no UDP sockets yet:
-     `\Device\Udp` opens fail, so none can be held; when UDP comes, its
-     sockets need a kind in SOCKETS and their queued datagrams), IPv6,
+     target without SOCKETS. UDP sockets since 2026-11-03 (N1d: SOCKETS
+     version 2, a UDP kind with its peer and unread datagrams, must_read
+     2 only when a record holds one; `handover_net`'s program keeps a
+     datagram queued on its bound port across the handover and gets new
+     ones after it). Not done: IPv6,
      the neighbor cache (asked again by ARP), HTTP keep-alive with a real
      server (go_http or Nginx: a trigger the host client can time, and
      Nginx's log files need `persist`), a shorter window without network

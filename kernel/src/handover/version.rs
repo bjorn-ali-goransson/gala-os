@@ -117,7 +117,10 @@ const fn present(tag: u32, name: &'static str, writes: u16, must_read: u16) -> K
 ///   the section must_read 3, `programs::threads_must_read`).
 /// - TIMERS 2: the timer's APC (must_read 2: losing it loses a call).
 /// - NET 1, SOCKETS 1 (milestone (e)): the TCP stack and the programs'
-///   sockets, written only when a program holds a socket.
+///   sockets, written only when a program holds a socket. SOCKETS 2: UDP
+///   sockets and datagram requests (must_read 2 only when the record holds
+///   a UDP socket, `sockets::sockets_must_read`; version 1 is read with
+///   the new fields absent).
 pub const KINDS: [Kind; 35] = [
     kind(tag::MEMORY_MAP, "MEMORY_MAP", 1, 0, false),
     kind(tag::PLATFORM, "PLATFORM", 1, 0, false),
@@ -154,7 +157,7 @@ pub const KINDS: [Kind; 35] = [
     // The writer's name (optional; `handover_next` only, for now).
     kind(tag::WRITER, "WRITER", if NEXT { 1 } else { 0 }, 0, false),
     present(tag::NET, "NET", 1, 0),
-    present(tag::SOCKETS, "SOCKETS", 1, 0),
+    present(tag::SOCKETS, "SOCKETS", 2, 0),
 ];
 
 /// This build's facts about section `tag` (None: it does not know it).
@@ -691,7 +694,7 @@ mod tests {
         let mut w = Writer::new(1).unwrap();
         w.section_needing(tag::THREADS, 3, REQUIRED, 2).unwrap();
         crate::handover::sockets::write_net(&mut w, &Default::default()).unwrap();
-        crate::handover::sockets::sockets_section(&mut w).unwrap();
+        crate::handover::sockets::sockets_section(&mut w, false).unwrap();
         let bytes = w.finish().unwrap();
         let e = check_record(&bytes, &old).unwrap_err();
         assert!(matches!(e, Mismatch::Unknown { tag: tag::NET, .. }), "{e:?}");

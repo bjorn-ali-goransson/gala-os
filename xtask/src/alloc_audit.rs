@@ -35,11 +35,19 @@ const RESERVED_KINDS: &[&str] = &[
 
 /// (kernel function, library call) pairs that cannot allocate, and why
 /// (substrings of the demangled names).
-const ALLOWED: &[(&str, &str, &str)] = &[(
-    "kernel::net::tcp::Stack",
-    "SocketSet>::add",
-    "the socket set's storage is reserved for MAX_SOCKETS when the stack is made",
-)];
+const ALLOWED: &[(&str, &str, &str)] = &[
+    (
+        "kernel::net::tcp::Stack",
+        "SocketSet>::add",
+        "the socket set's storage is reserved for MAX_SOCKETS when the stack is made",
+    ),
+    (
+        // `Stack::add` inlined into the UDP socket's constructor.
+        "kernel::net::udp::open",
+        "SocketSet>::add",
+        "the socket set's storage is reserved for MAX_SOCKETS when the stack is made",
+    ),
+];
 
 /// One kernel function calling library code that may abort on OOM.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]

@@ -7,7 +7,7 @@
 //! Conventions, as documented: failures return SOCKET_ERROR (or
 //! INVALID_SOCKET) and set the thread's last error (TEB+0x68, which
 //! WSAGetLastError reads) to a WSA error code mapped from the NTSTATUS.
-//! IPv4 TCP only so far; anything else fails with a WSA error and is
+//! IPv4 TCP and UDP so far; anything else fails with a WSA error and is
 //! reported to the kernel's missing-features ledger.
 
 #![no_std]
@@ -148,7 +148,10 @@ const SOCKET_ERROR: i32 = -1;
 
 const AF_INET: i32 = 2;
 const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
 const IPPROTO_TCP: i32 = 6;
+const IPPROTO_UDP: i32 = 17;
+const WSAEMSGSIZE: u32 = 10040;
 const SOCKADDR_LEN: i32 = 16;
 
 const WSAEFAULT: u32 = 10014;
@@ -187,7 +190,9 @@ const IOCTL_AFD_LISTEN: u32 = 0x1200b;
 const IOCTL_AFD_WAIT_FOR_LISTEN: u32 = 0x1200c;
 const IOCTL_AFD_ACCEPT: u32 = 0x12010;
 const IOCTL_AFD_RECV: u32 = 0x12017;
+const IOCTL_AFD_RECV_DATAGRAM: u32 = 0x1201b;
 const IOCTL_AFD_SEND: u32 = 0x1201f;
+const IOCTL_AFD_SEND_DATAGRAM: u32 = 0x12023;
 const IOCTL_AFD_DISCONNECT: u32 = 0x1202b;
 const IOCTL_AFD_GETSOCKNAME: u32 = 0x1202f;
 const IOCTL_AFD_GET_PEER_NAME: u32 = 0x12033;
@@ -229,6 +234,9 @@ fn wsa_error(status: u32) -> u32 {
         0xc000_009a | 0xc000_0017 => WSAENOBUFS,
         0xc000_0005 => WSAEFAULT,
         0xc000_00bb => WSAEOPNOTSUPP,
+        // A datagram larger than the buffer (the start copied), or than
+        // the network carries.
+        0x8000_0005 | 0xc000_0206 => WSAEMSGSIZE,
         _ => WSAEINVAL,
     }
 }
@@ -436,12 +444,13 @@ fn sockaddr_of(t: &[u8]) -> [u8; 16] {
     sa
 }
 
-/// Opens a TCP endpoint: NtCreateFile of `\Device\Afd\Endpoint` with the
-/// open packet (ReactOS's AFD_CREATE_PACKET, transport `\Device\Tcp`) as
-/// the extended attribute `AfdOpenPacketXX`.
-fn open_endpoint() -> Result<Socket, u32> {
+/// Opens a TCP (or, with `udp`, a UDP) endpoint: NtCreateFile of
+/// `\Device\Afd\Endpoint` with the open packet (ReactOS's
+/// AFD_CREATE_PACKET, transport `\Device\Tcp` or `\Device\Udp`) as the
+/// extended attribute `AfdOpenPacketXX`.
+fn open_endpoint_of(udp: bool) -> Result<Socket, u32> {
     const NAME: &[u8] = b"AfdOpenPacketXX";
-    const TRANSPORT: &str = "\\Device\\Tcp";
+    let transport = if udp { "\\Device\\Udp" } else { "\\Device\\Tcp" };
     // FILE_FULL_EA_INFORMATION header, name + NUL, then the packet.
     let mut ea = [0u8; 8 + 16 + 12 + 22];
     ea[5] = NAME.len() as u8;
@@ -449,7 +458,7 @@ fn open_endpoint() -> Result<Socket, u32> {
     ea[8..8 + NAME.len()].copy_from_slice(NAME);
     let packet = 8 + NAME.len() + 1;
     ea[packet + 8..packet + 12].copy_from_slice(&22u32.to_le_bytes());
-    for (i, c) in TRANSPORT.encode_utf16().enumerate() {
+    for (i, c) in transport.encode_utf16().enumerate() {
         ea[packet + 12 + 2 * i..packet + 14 + 2 * i].copy_from_slice(&c.to_le_bytes());
     }
     let path: [u16; 20] = {
@@ -486,6 +495,15 @@ fn open_endpoint() -> Result<Socket, u32> {
         )
     };
     if status == 0 { Ok(handle) } else { Err(status) }
+}
+
+fn open_endpoint() -> Result<Socket, u32> {
+    open_endpoint_of(false)
+}
+
+/// Whether `s` is a datagram socket (its SO_TYPE, kept per socket).
+fn is_datagram(s: Socket) -> bool {
+    options::get(s, options::TYPE) == SOCK_DGRAM
 }
 
 /// WSAStartup(wVersionRequested, lpWSAData): version 2.2 at most.
@@ -532,7 +550,7 @@ pub extern "system" fn WSASetLastError(error: i32) {
     set_last_error(error as u32);
 }
 
-/// socket(af, type, protocol): IPv4 TCP.
+/// socket(af, type, protocol): IPv4 TCP and UDP.
 #[unsafe(no_mangle)]
 pub extern "system" fn socket(af: i32, kind: i32, protocol: i32) -> Socket {
     if !started() {
@@ -544,22 +562,36 @@ pub extern "system" fn socket(af: i32, kind: i32, protocol: i32) -> Socket {
         fail(WSAEAFNOSUPPORT);
         return INVALID_SOCKET;
     }
-    if kind != SOCK_STREAM {
-        missing(b"ws2_32.dll!socket(type)", kind as u64);
-        fail(WSAESOCKTNOSUPPORT);
-        return INVALID_SOCKET;
-    }
-    if protocol != 0 && protocol != IPPROTO_TCP {
-        fail(WSAEPROTONOSUPPORT);
-        return INVALID_SOCKET;
-    }
-    match open_endpoint() {
+    let udp = match (kind, protocol) {
+        (SOCK_STREAM, 0 | IPPROTO_TCP) => false,
+        (SOCK_DGRAM, 0 | IPPROTO_UDP) => true,
+        (SOCK_STREAM | SOCK_DGRAM, _) => {
+            fail(WSAEPROTONOSUPPORT);
+            return INVALID_SOCKET;
+        }
+        _ => {
+            missing(b"ws2_32.dll!socket(type)", kind as u64);
+            fail(WSAESOCKTNOSUPPORT);
+            return INVALID_SOCKET;
+        }
+    };
+    let s = match open_endpoint_of(udp) {
         Ok(s) => s,
         Err(status) => {
             fail(wsa_error(status));
-            INVALID_SOCKET
+            return INVALID_SOCKET;
         }
+    };
+    // A handle value is reused once closed: forget what an earlier socket
+    // of this value kept, then record the type.
+    options::forget(s);
+    if udp && !options::set(s, options::TYPE, SOCK_DGRAM) {
+        // SAFETY: closes the endpoint opened above.
+        unsafe { NtClose(s) };
+        fail(WSAENOBUFS);
+        return INVALID_SOCKET;
     }
+    s
 }
 
 #[unsafe(no_mangle)]
@@ -603,6 +635,7 @@ pub extern "system" fn accept(s: Socket, addr: *mut u8, len: *mut i32) -> Socket
             return INVALID_SOCKET;
         }
     };
+    options::forget(new);
     // {u32 use_san; u32 sequence; HANDLE accept endpoint}.
     let mut input = [0u8; 16];
     input[4..8].copy_from_slice(&pending[..4]);
@@ -622,7 +655,21 @@ pub extern "system" fn accept(s: Socket, addr: *mut u8, len: *mut i32) -> Socket
 
 #[unsafe(no_mangle)]
 pub extern "system" fn connect(s: Socket, name: *const u8, len: i32) -> i32 {
-    let sa = match read_sockaddr(name, len) {
+    // A datagram socket given a zeroed address (AF_UNSPEC included, as
+    // libuv disconnects) loses its default peer, as documented.
+    let unspec = is_datagram(s)
+        && !name.is_null()
+        && len >= SOCKADDR_LEN
+        // SAFETY: the caller's buffer holds at least 16 bytes.
+        && unsafe { core::slice::from_raw_parts(name, 16) }.iter().all(|&b| b == 0);
+    let sa = if unspec {
+        let mut zero = [0u8; 16];
+        zero[..2].copy_from_slice(&(AF_INET as u16).to_le_bytes());
+        Ok(zero)
+    } else {
+        read_sockaddr(name, len)
+    };
+    let sa = match sa {
         Ok(sa) => sa,
         Err(e) => return e,
     };
@@ -749,6 +796,9 @@ pub extern "system" fn WSASocketW(
         let reserved = field(INFO_PROVIDER_RESERVED) as u32 as usize;
         if af == FROM_PROTOCOL_INFO && kind == FROM_PROTOCOL_INFO && reserved != 0 {
             // From WSADuplicateSocketW: the handle it made for this process.
+            if field(INFO_TYPE) == SOCK_DGRAM {
+                options::set(reserved, options::TYPE, SOCK_DGRAM);
+            }
             return reserved;
         }
         let pick =
@@ -821,9 +871,10 @@ fn duplicate_socket(s: Socket, process: u32, info: *mut u8, info_size: usize) ->
     unsafe {
         memset(info, 0, info_size);
         let put = |at: usize, v: i32| info.add(at).cast::<i32>().write_unaligned(v);
+        let datagram = is_datagram(s);
         put(INFO_FAMILY, AF_INET);
-        put(INFO_TYPE, SOCK_STREAM);
-        put(INFO_PROTOCOL, IPPROTO_TCP);
+        put(INFO_TYPE, if datagram { SOCK_DGRAM } else { SOCK_STREAM });
+        put(INFO_PROTOCOL, if datagram { IPPROTO_UDP } else { IPPROTO_TCP });
         put(INFO_PROVIDER_RESERVED, h as i32);
     }
     0
@@ -1160,8 +1211,9 @@ mod options {
     /// (level, name, Windows' default): SO_REUSEADDR, SO_KEEPALIVE,
     /// SO_SNDBUF and SO_RCVBUF (gala's 64 KiB), SO_EXCLUSIVEADDRUSE,
     /// TCP_NODELAY, TCP_KEEPALIVE (idle, 2 h), TCP_KEEPCNT (10),
-    /// TCP_KEEPINTVL (1 s).
-    const OPTIONS: [(i32, i32, i32); 9] = [
+    /// TCP_KEEPINTVL (1 s), SO_BROADCAST; SO_TYPE (stream unless socket
+    /// made a datagram socket; read-only to setsockopt).
+    const OPTIONS: [(i32, i32, i32); 11] = [
         (SOL_SOCKET, 0x4, 0),
         (SOL_SOCKET, 0x8, 0),
         (SOL_SOCKET, 0x1001, 65536),
@@ -1171,7 +1223,11 @@ mod options {
         (IPPROTO_TCP, 3, 7200),
         (IPPROTO_TCP, 16, 10),
         (IPPROTO_TCP, 17, 1),
+        (SOL_SOCKET, 0x20, 0),
+        (SOL_SOCKET, 0x1008, super::SOCK_STREAM),
     ];
+    /// SO_TYPE's slot.
+    pub const TYPE: usize = 10;
     const SOCKETS: usize = 256;
 
     struct Table {
@@ -1249,10 +1305,10 @@ pub extern "system" fn setsockopt(
         return fail(WSANOTINITIALISED);
     }
     let accepted = match (level, name) {
-        // SO_REUSEADDR, SO_KEEPALIVE, SO_LINGER, SO_SNDBUF, SO_RCVBUF,
-        // SO_EXCLUSIVEADDRUSE, SO_UPDATE_ACCEPT_CONTEXT,
+        // SO_REUSEADDR, SO_KEEPALIVE, SO_BROADCAST, SO_LINGER, SO_SNDBUF,
+        // SO_RCVBUF, SO_EXCLUSIVEADDRUSE, SO_UPDATE_ACCEPT_CONTEXT,
         // SO_UPDATE_CONNECT_CONTEXT.
-        (SOL_SOCKET, 0x4 | 0x8 | 0x80 | 0x1001 | 0x1002 | -5 | 0x700b | 0x7010) => true,
+        (SOL_SOCKET, 0x4 | 0x8 | 0x20 | 0x80 | 0x1001 | 0x1002 | -5 | 0x700b | 0x7010) => true,
         // TCP_NODELAY (already the behaviour), TCP_KEEPIDLE, TCP_KEEPCNT,
         // TCP_KEEPINTVL.
         (IPPROTO_TCP, 1 | 3 | 16 | 17) => true,
@@ -1280,8 +1336,8 @@ pub extern "system" fn setsockopt(
     0
 }
 
-/// getsockopt: SO_ERROR (0), SO_TYPE (stream), and the integer options
-/// setsockopt keeps (their Windows defaults until set).
+/// getsockopt: SO_ERROR (0), SO_TYPE (stream or datagram), and the
+/// integer options setsockopt keeps (their Windows defaults until set).
 #[unsafe(no_mangle)]
 pub extern "system" fn getsockopt(
     s: Socket,
@@ -1291,8 +1347,7 @@ pub extern "system" fn getsockopt(
     len: *mut i32,
 ) -> i32 {
     let v: i32 = match (level, name) {
-        (SOL_SOCKET, 0x1007) => 0,           // SO_ERROR
-        (SOL_SOCKET, 0x1008) => SOCK_STREAM, // SO_TYPE
+        (SOL_SOCKET, 0x1007) => 0, // SO_ERROR
         _ if options::slot(level, name).is_some() => {
             options::get(s, options::slot(level, name).unwrap_or(0))
         }
@@ -1699,9 +1754,13 @@ pub extern "system" fn getaddrinfo(
                 [127, 0, 0, 1]
             } else if let Some(ip) = parse_ipv4(text) {
                 ip
-            } else {
-                missing(b"ws2_32.dll!getaddrinfo(name resolution)", 0);
+            } else if flags & AI_NUMERICHOST != 0 {
                 return WSAHOST_NOT_FOUND;
+            } else {
+                match dns::resolve(text) {
+                    Ok(ip) => ip,
+                    Err(e) => return e,
+                }
             }
         };
         let port = if service.is_null() {
@@ -1783,6 +1842,149 @@ pub extern "system" fn freeaddrinfo(ai: *mut u8) {
     if !ai.is_null() {
         // SAFETY: a page from getaddrinfo.
         unsafe { VirtualFree(ai, 0, 0x8000) };
+    }
+}
+
+const AI_NUMERICHOST: i32 = 4;
+
+/// Name resolution over UDP (RFC 1035): one A query to the DNS server of
+/// gala's static network configuration (QEMU's user network answers at
+/// 10.0.2.3, forwarding to the host's resolver). No cache, no search
+/// list, IPv4 only; without a network card the query cannot be sent and
+/// the name is not found.
+mod dns {
+    use super::*;
+
+    const SERVER: [u8; 4] = [10, 0, 2, 3];
+    const PORT: u16 = 53;
+    const TRIES: usize = 2;
+    const WAIT_MS: i64 = 2000;
+    const WSATRY_AGAIN: i32 = 11002;
+    const WSANO_DATA: i32 = 11004;
+
+    static NEXT_ID: AtomicU32 = AtomicU32::new(0x6a1a);
+
+    /// The first IPv4 address of `name`, or the getaddrinfo error.
+    pub fn resolve(name: &[u8]) -> Result<[u8; 4], i32> {
+        let name = name.strip_suffix(b".").unwrap_or(name);
+        let mut query = [0u8; 512];
+        let id = (NEXT_ID.fetch_add(0x9e37, Ordering::Relaxed) ^ (&raw const query as u32)) as u16;
+        let len = build_query(name, id, &mut query).ok_or(WSAHOST_NOT_FOUND)?;
+        let s = open_endpoint_of(true).map_err(|_| WSATRY_AGAIN)?;
+        let result = exchange(s, &query[..len], id);
+        // SAFETY: our endpoint.
+        unsafe { NtClose(s) };
+        result
+    }
+
+    /// Header (id, recursion desired, one question), the name as labels,
+    /// type A, class IN; its length (None: not a valid name).
+    pub fn build_query(name: &[u8], id: u16, out: &mut [u8; 512]) -> Option<usize> {
+        out[..12].copy_from_slice(&[0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+        out[..2].copy_from_slice(&id.to_be_bytes());
+        let mut at = 12;
+        if name.is_empty() || name.len() > 253 {
+            return None;
+        }
+        for label in name.split(|&c| c == b'.') {
+            if label.is_empty() || label.len() > 63 {
+                return None;
+            }
+            out[at] = label.len() as u8;
+            out[at + 1..at + 1 + label.len()].copy_from_slice(label);
+            at += 1 + label.len();
+        }
+        out[at..at + 5].copy_from_slice(&[0, 0, 1, 0, 1]);
+        Some(at + 5)
+    }
+
+    fn exchange(s: Socket, query: &[u8], id: u16) -> Result<[u8; 4], i32> {
+        let mut server = [0u8; 16];
+        server[..2].copy_from_slice(&(AF_INET as u16).to_le_bytes());
+        server[2..4].copy_from_slice(&PORT.to_be_bytes());
+        server[4..8].copy_from_slice(&SERVER);
+        let address = transport_address(&server);
+        let mut wsabuf = [0u8; 16];
+        wsabuf[..4].copy_from_slice(&(query.len() as u32).to_le_bytes());
+        wsabuf[8..].copy_from_slice(&(query.as_ptr() as u64).to_le_bytes());
+        let mut send = [0u8; 104];
+        send[..8].copy_from_slice(&(wsabuf.as_ptr() as u64).to_le_bytes());
+        send[8..12].copy_from_slice(&1u32.to_le_bytes());
+        send[88..92].copy_from_slice(&(address.len() as u32).to_le_bytes());
+        send[96..104].copy_from_slice(&(address.as_ptr() as u64).to_le_bytes());
+        let mut answer = [0u8; 512];
+        for _ in 0..TRIES {
+            // No route (no network card): not found, at once.
+            afd(s, IOCTL_AFD_SEND_DATAGRAM, &send, &mut []).map_err(|_| WSAHOST_NOT_FOUND)?;
+            // Wait for an answer (AFD_POLL_READ), at most WAIT_MS.
+            let mut poll_in = [0u8; 32];
+            poll_in[..8].copy_from_slice(&i64::MAX.to_le_bytes());
+            poll_in[8..12].copy_from_slice(&1u32.to_le_bytes());
+            poll_in[16..24].copy_from_slice(&(s as u64).to_le_bytes());
+            poll_in[24..28].copy_from_slice(&1u32.to_le_bytes());
+            let mut poll_out = [0u8; 32];
+            if poll(s, &poll_in, &mut poll_out, Some(WAIT_MS)) != 0 || poll_out[8] == 0 {
+                continue;
+            }
+            let mut rbuf = [0u8; 16];
+            rbuf[..4].copy_from_slice(&(answer.len() as u32).to_le_bytes());
+            rbuf[8..].copy_from_slice(&(answer.as_mut_ptr() as u64).to_le_bytes());
+            let mut recv = [0u8; 40];
+            recv[..8].copy_from_slice(&(rbuf.as_ptr() as u64).to_le_bytes());
+            recv[8..12].copy_from_slice(&1u32.to_le_bytes());
+            let Ok(n) = afd(s, IOCTL_AFD_RECV_DATAGRAM, &recv, &mut []) else { continue };
+            match parse_answer(&answer[..n.min(answer.len())], id) {
+                Some(result) => return result,
+                // Not the answer to this query: ask again.
+                None => continue,
+            }
+        }
+        Err(WSATRY_AGAIN)
+    }
+
+    /// The answer to query `id`: the first A record's address, or the
+    /// error (None: not an answer to it).
+    pub fn parse_answer(m: &[u8], id: u16) -> Option<Result<[u8; 4], i32>> {
+        if m.len() < 12 || m[..2] != id.to_be_bytes() || m[2] & 0x80 == 0 {
+            return None;
+        }
+        match m[3] & 0xf {
+            0 => {}
+            3 => return Some(Err(WSAHOST_NOT_FOUND)),
+            _ => return Some(Err(WSATRY_AGAIN)),
+        }
+        let count = |at: usize| usize::from(u16::from_be_bytes([m[at], m[at + 1]]));
+        let (questions, answers) = (count(4), count(6));
+        let mut at = 12;
+        for _ in 0..questions {
+            at = skip_name(m, at)? + 4;
+        }
+        for _ in 0..answers {
+            at = skip_name(m, at)?;
+            let fixed = m.get(at..at + 10)?;
+            let kind = u16::from_be_bytes([fixed[0], fixed[1]]);
+            let class = u16::from_be_bytes([fixed[2], fixed[3]]);
+            let len = usize::from(u16::from_be_bytes([fixed[8], fixed[9]]));
+            let data = m.get(at + 10..at + 10 + len)?;
+            if kind == 1 && class == 1 && len == 4 {
+                return Some(Ok([data[0], data[1], data[2], data[3]]));
+            }
+            at += 10 + len;
+        }
+        Some(Err(WSANO_DATA))
+    }
+
+    /// The offset after the name at `at` (labels, maybe ending in a
+    /// compression pointer).
+    fn skip_name(m: &[u8], mut at: usize) -> Option<usize> {
+        loop {
+            let len = *m.get(at)?;
+            match len {
+                0 => return Some(at + 1),
+                l if l & 0xc0 == 0xc0 => return Some(at + 2),
+                l => at += 1 + usize::from(l),
+            }
+        }
     }
 }
 
@@ -1889,32 +2091,201 @@ pub extern "system" fn getservbyport(_port: i32, _proto: *const u8) -> *const u8
     core::ptr::null()
 }
 
-/// sendto/recvfrom: datagram sockets do not exist yet (socket refuses
-/// SOCK_DGRAM), so these have nothing to work on.
+/// sendto(s, buf, len, flags, to, tolen): on a datagram socket one
+/// datagram to `to` (IOCTL_AFD_SEND_DATAGRAM; an unbound socket is bound
+/// to an ephemeral port), or to the connected peer when `to` is NULL; on
+/// a stream socket the address is ignored, as documented (send).
 #[unsafe(no_mangle)]
 pub extern "system" fn sendto(
-    _s: Socket,
-    _buf: *const u8,
-    _len: i32,
-    _flags: i32,
-    _to: *const u8,
-    _to_len: i32,
+    s: Socket,
+    buf: *const u8,
+    len: i32,
+    flags: i32,
+    to: *const u8,
+    to_len: i32,
 ) -> i32 {
-    missing(b"ws2_32.dll!sendto", 0);
-    fail(WSAEOPNOTSUPP)
+    if len < 0 {
+        return fail(WSAEINVAL);
+    }
+    let mut wsabuf = [0u8; 16];
+    wsabuf[..4].copy_from_slice(&(len as u32).to_le_bytes());
+    wsabuf[8..].copy_from_slice(&(buf as u64).to_le_bytes());
+    let mut sent = 0u32;
+    let r = WSASendTo(
+        s,
+        wsabuf.as_ptr(),
+        1,
+        &mut sent,
+        flags as u32,
+        to,
+        to_len,
+        core::ptr::null_mut(),
+        0,
+    );
+    if r == 0 { sent as i32 } else { r }
 }
 
+/// recvfrom(s, buf, len, flags, from, fromlen): on a datagram socket one
+/// datagram and its sender (IOCTL_AFD_RECV_DATAGRAM; a datagram larger
+/// than `len` fills the buffer and fails with WSAEMSGSIZE, the rest
+/// discarded); on a stream socket `from` is ignored, as documented (recv).
 #[unsafe(no_mangle)]
 pub extern "system" fn recvfrom(
-    _s: Socket,
-    _buf: *mut u8,
-    _len: i32,
-    _flags: i32,
-    _from: *mut u8,
-    _from_len: *mut i32,
+    s: Socket,
+    buf: *mut u8,
+    len: i32,
+    flags: i32,
+    from: *mut u8,
+    from_len: *mut i32,
 ) -> i32 {
-    missing(b"ws2_32.dll!recvfrom", 0);
-    fail(WSAEOPNOTSUPP)
+    if len < 0 {
+        return fail(WSAEINVAL);
+    }
+    let mut wsabuf = [0u8; 16];
+    wsabuf[..4].copy_from_slice(&(len as u32).to_le_bytes());
+    wsabuf[8..].copy_from_slice(&(buf as u64).to_le_bytes());
+    let (mut got, mut f) = (0u32, flags as u32);
+    let r = WSARecvFrom(
+        s,
+        wsabuf.as_ptr(),
+        1,
+        &mut got,
+        &mut f,
+        from,
+        from_len,
+        core::ptr::null_mut(),
+        0,
+    );
+    if r == 0 { got as i32 } else { r }
+}
+
+/// The address AFD sends a datagram to: a TRANSPORT_ADDRESS from the
+/// caller's SOCKADDR_IN.
+fn destination(to: *const u8, to_len: i32) -> Result<[u8; 22], i32> {
+    Ok(transport_address(&read_sockaddr(to, to_len)?))
+}
+
+/// WSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags,
+/// lpTo, iTolen, lpOverlapped, lpCompletionRoutine): one datagram of the
+/// buffers' bytes to `lpTo` (NULL: the connected peer); on a stream socket
+/// WSASend, the address ignored.
+#[unsafe(no_mangle)]
+pub extern "system" fn WSASendTo(
+    s: Socket,
+    buffers: *const u8,
+    count: u32,
+    sent: *mut u32,
+    flags: u32,
+    to: *const u8,
+    to_len: i32,
+    ov: *mut Overlapped,
+    routine: usize,
+) -> i32 {
+    if !started() {
+        return fail(WSANOTINITIALISED);
+    }
+    if !is_datagram(s) || to.is_null() {
+        return WSASend(s, buffers, count, sent, flags, ov, routine);
+    }
+    if flags != 0 {
+        missing(b"ws2_32.dll!WSASendTo(flags)", flags.into());
+        return fail(WSAEOPNOTSUPP);
+    }
+    let address = match destination(to, to_len) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    // AFD_SEND_INFO_UDP (docs/ARCHITECTURE.md, "AFD"): the buffers, then
+    // TDI_CONNECTION_INFORMATION's RemoteAddressLength at 88 and
+    // RemoteAddress at 96 (AFD copies it during the call).
+    let mut info = [0u8; 104];
+    info[..8].copy_from_slice(&(buffers as u64).to_le_bytes());
+    info[8..12].copy_from_slice(&count.to_le_bytes());
+    info[88..92].copy_from_slice(&(address.len() as u32).to_le_bytes());
+    info[96..104].copy_from_slice(&(address.as_ptr() as u64).to_le_bytes());
+    request(s, IOCTL_AFD_SEND_DATAGRAM, &info, sent, ov, routine)
+}
+
+/// WSARecvFrom(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd,
+/// lpFlags, lpFrom, lpFromlen, lpOverlapped, lpCompletionRoutine): one
+/// datagram and its sender (written when it completes: lpFrom and
+/// lpFromlen must stay valid until then, as documented); on a stream
+/// socket WSARecv, the address ignored.
+#[unsafe(no_mangle)]
+pub extern "system" fn WSARecvFrom(
+    s: Socket,
+    buffers: *const u8,
+    count: u32,
+    received: *mut u32,
+    flags: *mut u32,
+    from: *mut u8,
+    from_len: *mut i32,
+    ov: *mut Overlapped,
+    routine: usize,
+) -> i32 {
+    if !started() {
+        return fail(WSANOTINITIALISED);
+    }
+    if !is_datagram(s) {
+        return WSARecv(s, buffers, count, received, flags, ov, routine);
+    }
+    // SAFETY: the caller passes valid flags (in/out).
+    let given = if flags.is_null() { 0 } else { unsafe { *flags } };
+    if given & !(MSG_PEEK as u32) != 0 {
+        missing(b"ws2_32.dll!WSARecvFrom(flags)", given.into());
+        return fail(WSAEOPNOTSUPP);
+    }
+    // SAFETY: the caller's length, with its buffer.
+    if !from.is_null() && (from_len.is_null() || unsafe { *from_len } < SOCKADDR_LEN) {
+        return fail(WSAEFAULT);
+    }
+    // AFD_RECV_INFO_UDP: the buffers, the TDI flags (peek) at 16, where
+    // the sender's SOCKADDR_IN and its length go at 24 and 32.
+    let mut info = [0u8; 40];
+    info[..8].copy_from_slice(&(buffers as u64).to_le_bytes());
+    info[8..12].copy_from_slice(&count.to_le_bytes());
+    if given != 0 {
+        info[16..20].copy_from_slice(&AFD_MSG_PEEK.to_le_bytes());
+    }
+    let (from, from_len) = if from.is_null() { (0, 0) } else { (from as u64, from_len as u64) };
+    info[24..32].copy_from_slice(&from.to_le_bytes());
+    info[32..40].copy_from_slice(&from_len.to_le_bytes());
+    let result = request(s, IOCTL_AFD_RECV_DATAGRAM, &info, received, ov, routine);
+    if result == 0 && !flags.is_null() {
+        // SAFETY: as above.
+        unsafe { *flags = 0 };
+    }
+    result
+}
+
+/// An AFD request with the caller's byte count and OVERLAPPED (blocking
+/// without one), as WSARecv/WSASend make it.
+fn request(
+    s: Socket,
+    code: u32,
+    info: &[u8],
+    bytes: *mut u32,
+    ov: *mut Overlapped,
+    routine: usize,
+) -> i32 {
+    if ov.is_null() {
+        return match afd(s, code, info, &mut []) {
+            Ok(n) => {
+                if !bytes.is_null() {
+                    // SAFETY: the caller's count pointer.
+                    unsafe { *bytes = n as u32 };
+                }
+                0
+            }
+            Err(status) => fail(wsa_error(status)),
+        };
+    }
+    let status = afd_overlapped_apc(s, code, info, core::ptr::null_mut(), 0, ov, routine);
+    if status == 0 && !bytes.is_null() {
+        // SAFETY: done: the kernel wrote InternalHigh; the caller's count.
+        unsafe { *bytes = (*ov).internal_high as u32 };
+    }
+    overlapped_result(status)
 }
 
 #[unsafe(no_mangle)]

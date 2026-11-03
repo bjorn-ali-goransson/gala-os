@@ -14,6 +14,7 @@ use super::status::NtStatus;
 use super::wait::{self, Dispatcher};
 use crate::mm::heap::{KArc, TryVec};
 use crate::net::tcp::{self, Addr, NetError, SocketId};
+use crate::net::udp;
 use crate::sync::IrqMutex;
 
 pub const IOCTL_AFD_BIND: u32 = 0x12003;
@@ -22,7 +23,9 @@ pub const IOCTL_AFD_LISTEN: u32 = 0x1200b;
 pub const IOCTL_AFD_WAIT_FOR_LISTEN: u32 = 0x1200c;
 pub const IOCTL_AFD_ACCEPT: u32 = 0x12010;
 pub const IOCTL_AFD_RECV: u32 = 0x12017;
+pub const IOCTL_AFD_RECV_DATAGRAM: u32 = 0x1201b;
 pub const IOCTL_AFD_SEND: u32 = 0x1201f;
+pub const IOCTL_AFD_SEND_DATAGRAM: u32 = 0x12023;
 pub const IOCTL_AFD_DISCONNECT: u32 = 0x1202b;
 pub const IOCTL_AFD_GETSOCKNAME: u32 = 0x1202f;
 pub const IOCTL_AFD_GET_PEER_NAME: u32 = 0x12033;
@@ -57,6 +60,28 @@ pub enum Transport {
     /// No open packet: a helper handle (e.g. for IOCTL_AFD_POLL).
     None,
     Tcp,
+    /// A datagram endpoint (`\Device\Udp`, `net::udp`).
+    Udp,
+}
+
+impl Transport {
+    /// The number the handover record gives it (SocketRec::transport).
+    pub fn number(self) -> u32 {
+        match self {
+            Transport::None => 0,
+            Transport::Tcp => 1,
+            Transport::Udp => 2,
+        }
+    }
+
+    pub fn from_number(n: u32) -> Option<Self> {
+        Some(match n {
+            0 => Transport::None,
+            1 => Transport::Tcp,
+            2 => Transport::Udp,
+            _ => return None,
+        })
+    }
 }
 
 /// FILE_SKIP_COMPLETION_PORT_ON_SUCCESS / FILE_SKIP_SET_EVENT_ON_HANDLE
@@ -90,6 +115,20 @@ enum Op {
         buffers: Vec<(u64, usize)>,
         done: usize,
     },
+    /// A datagram received (RECV_DATAGRAM, or RECV on a datagram
+    /// endpoint): the sender's SOCKADDR_IN goes to `address` and its
+    /// length to the INT at `address_len` (0: not asked for).
+    RecvFrom {
+        buffers: Vec<(u64, usize)>,
+        peek: bool,
+        address: u64,
+        address_len: u64,
+    },
+    /// A datagram sent (SEND_DATAGRAM to `to`; SEND, None: the peer).
+    SendTo {
+        buffers: Vec<(u64, usize)>,
+        to: Option<Addr>,
+    },
     WaitForListen {
         output: u64,
         output_len: u32,
@@ -115,8 +154,8 @@ enum Op {
 impl Op {
     fn kind(&self) -> u8 {
         match self {
-            Op::Recv { .. } => 0,
-            Op::Send { .. } => 1,
+            Op::Recv { .. } | Op::RecvFrom { .. } => 0,
+            Op::Send { .. } | Op::SendTo { .. } => 1,
             Op::WaitForListen { .. } | Op::SuperAccept { .. } => 2,
             Op::Connect => 3,
             Op::Poll { .. } => 4,
@@ -217,7 +256,10 @@ const AFD_POLL_CONNECT_ERR: u32 = 0x100;
 
 /// The AFD_POLL_* events of one endpoint now.
 fn poll_events(state: &EndpointState) -> u32 {
-    let Some(id) = *state.socket.lock() else { return 0 };
+    let Some(id) = *state.socket.lock() else {
+        // An unbound datagram socket can send (it is bound then).
+        return if state.transport == Transport::Udp { AFD_POLL_WRITE } else { 0 };
+    };
     let Ok(r) = tcp::readiness(id) else { return AFD_POLL_HUP };
     let mut events = 0;
     for (on, bit) in [
@@ -326,12 +368,16 @@ fn attempt(state: &EndpointState, op: &mut Op, process: &Process) -> Attempt {
         Ok(None) | Err(Failure::Net(NetError::WouldBlock)) => Attempt::Wait,
         Err(Failure::Net(e)) => Attempt::Done(status_of(e), 0),
         Err(Failure::Nt(status)) => Attempt::Done(status, 0),
+        Err(Failure::Partly(status, information)) => Attempt::Done(status, information),
     }
 }
 
 enum Failure {
     Net(NetError),
     Nt(NtStatus),
+    /// Done with a warning and a byte count (a truncated datagram:
+    /// STATUS_BUFFER_OVERFLOW with the bytes copied).
+    Partly(NtStatus, u64),
 }
 
 impl From<NetError> for Failure {
@@ -398,6 +444,45 @@ fn attempt_inner(
                 }
             }
             Ok(Some(total as u64))
+        }
+        Op::RecvFrom { buffers, peek, address, address_len } => {
+            let capacity: usize = buffers.iter().map(|&(_, l)| l).sum();
+            let mut buf = bounce()?;
+            // A datagram is at most an MTU, less than CHUNK.
+            let got = udp::recv_from(id, &mut buf[..capacity.min(CHUNK)], *peek)?;
+            let mut copied = 0;
+            for &(addr, len) in buffers.iter() {
+                if copied == got.copied {
+                    break;
+                }
+                let n = len.min(got.copied - copied);
+                user_write(process, addr, &buf[copied..copied + n])?;
+                copied += n;
+            }
+            if *address != 0 {
+                user_write(process, *address, &to_sockaddr_in(got.from))?;
+            }
+            if *address_len != 0 {
+                user_write(process, *address_len, &(SOCKADDR_LEN as i32).to_le_bytes())?;
+            }
+            if got.length > got.copied {
+                // The rest of the datagram is gone (unless peeking).
+                return Err(Failure::Partly(NtStatus::BUFFER_OVERFLOW, got.copied as u64));
+            }
+            Ok(Some(got.copied as u64))
+        }
+        Op::SendTo { buffers, to } => {
+            let total: usize = buffers.iter().map(|&(_, l)| l).sum();
+            if total > CHUNK {
+                return Err(NetError::TooLarge.into());
+            }
+            let mut buf = bounce()?;
+            let mut at = 0;
+            for &(addr, len) in buffers.iter() {
+                user_read(process, addr, &mut buf[at..at + len])?;
+                at += len;
+            }
+            Ok(Some(udp::send_to(id, *to, &buf[..total])? as u64))
         }
         Op::WaitForListen { output, output_len } => {
             let (sequence, remote) = tcp::pending(id)?;
@@ -647,8 +732,14 @@ fn transport_of(packet: &[u8]) -> Result<Transport, NtStatus> {
         b'\\', 0, b'D', 0, b'e', 0, b'v', 0, b'i', 0, b'c', 0, b'e', 0, b'\\', 0, b'T', 0, b'c', 0,
         b'p', 0,
     ];
+    let udp: &[u8] = &[
+        b'\\', 0, b'D', 0, b'e', 0, b'v', 0, b'i', 0, b'c', 0, b'e', 0, b'\\', 0, b'U', 0, b'd', 0,
+        b'p', 0,
+    ];
     if name.eq_ignore_ascii_case(tcp) {
         Ok(Transport::Tcp)
+    } else if name.eq_ignore_ascii_case(udp) {
+        Ok(Transport::Udp)
     } else {
         super::ledger::record("NtCreateFile", "afd transport", name_bytes as u64);
         Err(NtStatus::NOT_SUPPORTED)
@@ -690,6 +781,7 @@ pub fn status_of(e: NetError) -> NtStatus {
         NetError::Unreachable => NtStatus::NETWORK_UNREACHABLE,
         NetError::NoMemory => NtStatus::INSUFFICIENT_RESOURCES,
         NetError::NoSocket => NtStatus::INVALID_HANDLE,
+        NetError::TooLarge => NtStatus::INVALID_BUFFER_SIZE,
     }
 }
 
@@ -846,6 +938,11 @@ enum Immediate {
 /// Validates a request; does what needs no waiting, or returns the
 /// operation to submit.
 fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus> {
+    if ep.transport == Transport::Udp
+        && let Some(i) = immediate_udp(r, ep)?
+    {
+        return Ok(i);
+    }
     let current = || *ep.socket.lock();
     let socket = || current().ok_or(NtStatus::INVALID_CONNECTION);
     Ok(match r.code {
@@ -1018,6 +1115,117 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
     })
 }
 
+/// AFD_RECV_INFO_UDP (ReactOS `drivers/afd/shared.h`, to be verified):
+/// `{WSABUF *buffers; u32 count; u32 afd_flags; u32 tdi_flags; (pad);
+/// void *address; int *address_length}`.
+const RECV_DATAGRAM_INFO: usize = 40;
+/// AFD_SEND_INFO_UDP (ReactOS, to be verified): `{WSABUF *buffers; u32
+/// count; u32 afd_flags; TDI_REQUEST_SEND_DATAGRAM (40 bytes);
+/// TDI_CONNECTION_INFORMATION at 56}`, whose RemoteAddressLength (at 88)
+/// and RemoteAddress (a TRANSPORT_ADDRESS, at 96) name the destination.
+const SEND_DATAGRAM_INFO: usize = 104;
+
+/// The requests a datagram endpoint answers differently from a stream
+/// one (None: the shared handling applies).
+fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate>, NtStatus> {
+    // Sending from an unbound socket binds it (0.0.0.0, an ephemeral
+    // port), as Windows does.
+    let bound_or_bind = || -> Result<SocketId, NtStatus> {
+        let mut slot = ep.socket.lock();
+        if let Some(id) = *slot {
+            return Ok(id);
+        }
+        let id = udp::bind(Addr::default(), ep.token).map_err(status_of)?;
+        *slot = Some(id);
+        Ok(id)
+    };
+    Ok(Some(match r.code {
+        IOCTL_AFD_BIND => {
+            let b: [u8; 4 + SOCKADDR_LEN] = r.input()?;
+            let local = sockaddr_in(&b[4..])?;
+            let mut slot = ep.socket.lock();
+            if slot.is_some() {
+                return Err(NtStatus::INVALID_PARAMETER);
+            }
+            let id = udp::bind(local, ep.token).map_err(status_of)?;
+            *slot = Some(id);
+            drop(slot);
+            let bound = tcp::local(id).map_err(status_of)?;
+            Immediate::Done(if r.output_len as usize >= SOCKADDR_LEN {
+                r.output(&to_sockaddr_in(bound))?
+            } else {
+                0
+            })
+        }
+        // connect on a datagram socket only sets (or, with the zero
+        // address, clears) the default peer.
+        IOCTL_AFD_CONNECT => {
+            let b: [u8; 12 + TRANSPORT_ADDRESS_LEN] = r.input()?;
+            let remote = transport_address(&b[12..])?;
+            if remote.ip == [0; 4] {
+                let current = *ep.socket.lock();
+                if let Some(id) = current {
+                    udp::connect(id, None).map_err(status_of)?;
+                }
+            } else {
+                udp::connect(bound_or_bind()?, Some(remote)).map_err(status_of)?;
+            }
+            Immediate::Done(0)
+        }
+        IOCTL_AFD_SEND_DATAGRAM => {
+            let info: [u8; SEND_DATAGRAM_INFO] = r.input()?;
+            if (u32_at(&info, 88) as usize) < TRANSPORT_ADDRESS_LEN {
+                return Err(NtStatus::INVALID_PARAMETER);
+            }
+            let mut ta = [0u8; TRANSPORT_ADDRESS_LEN];
+            r.read(u64_at(&info, 96), &mut ta)?;
+            let to = transport_address(&ta)?;
+            let buffers = buffers(r)?;
+            bound_or_bind()?;
+            Immediate::Async(Op::SendTo { buffers, to: Some(to) })
+        }
+        IOCTL_AFD_SEND => {
+            let id = (*ep.socket.lock()).ok_or(NtStatus::INVALID_CONNECTION)?;
+            tcp::remote(id).map_err(status_of)?;
+            Immediate::Async(Op::SendTo { buffers: buffers(r)?, to: None })
+        }
+        IOCTL_AFD_RECV | IOCTL_AFD_RECV_DATAGRAM => {
+            // Receiving needs a bound socket (WSAEINVAL otherwise).
+            (*ep.socket.lock()).ok_or(NtStatus::INVALID_PARAMETER)?;
+            let info: [u8; 24] = r.input()?;
+            let msg_flags = u32_at(&info, 16);
+            if msg_flags & (AFD_MSG_OOB | AFD_MSG_WAITALL) != 0 {
+                super::ledger::record(
+                    "NtDeviceIoControlFile",
+                    "afd datagram recv flags",
+                    u64::from(msg_flags),
+                );
+                return Err(NtStatus::NOT_SUPPORTED);
+            }
+            let (address, address_len) = if r.code == IOCTL_AFD_RECV_DATAGRAM {
+                let b: [u8; RECV_DATAGRAM_INFO] = r.input()?;
+                (u64_at(&b, 24), u64_at(&b, 32))
+            } else {
+                (0, 0)
+            };
+            Immediate::Async(Op::RecvFrom {
+                buffers: buffers(r)?,
+                peek: msg_flags & AFD_MSG_PEEK != 0,
+                address,
+                address_len,
+            })
+        }
+        // Connection requests have no meaning for datagrams.
+        IOCTL_AFD_LISTEN
+        | IOCTL_AFD_WAIT_FOR_LISTEN
+        | IOCTL_AFD_ACCEPT
+        | IOCTL_AFD_SUPER_ACCEPT
+        | IOCTL_AFD_SUPER_CONNECT => return Err(NtStatus::NOT_SUPPORTED),
+        IOCTL_AFD_DISCONNECT => Immediate::Done(0),
+        _ => return Ok(None),
+    }))
+}
+
 // Kernel handover (ROADMAP R9 (e), ARCHITECTURE "Sockets across a
 // handover"): an endpoint and its pending requests as data, with the
 // objects they name as references (`handover::carry` names them by id),
@@ -1033,7 +1241,7 @@ pub struct CarriedRequest {
     pub event: Option<ObjectRef>,
     pub context: u64,
     pub apc: Option<(ObjectRef, super::thread::UserApc)>,
-    /// RECV: peek; POLL: it waits.
+    /// RECV, RECV_FROM: peek; POLL: it waits.
     pub flag: bool,
     /// SEND: bytes already queued.
     pub done: u64,
@@ -1042,13 +1250,18 @@ pub struct CarriedRequest {
     pub receive: u32,
     pub local: u32,
     pub buffers: Vec<(u64, u64)>,
+    /// RECV_FROM: where the sender's address and its length go.
+    pub address: u64,
+    pub address_len: u64,
+    /// SEND_TO: the destination (None: the default peer).
+    pub to: Option<Addr>,
     /// SUPER_ACCEPT: the accepting endpoint (handle 0); POLL: the sockets.
     pub endpoints: Vec<(u64, KArc<EndpointState>, u32)>,
 }
 
 /// An endpoint as a handover carries it (the kernel socket apart).
 pub struct CarriedEndpoint {
-    pub tcp: bool,
+    pub transport: Transport,
     pub socket: Option<SocketId>,
     pub completion: Option<(ObjectRef, u64)>,
     pub modes: u32,
@@ -1104,6 +1317,9 @@ pub fn carry(state: &EndpointState) -> Result<CarriedEndpoint, NtStatus> {
             local: 0,
             buffers: Vec::new(),
             endpoints: Vec::new(),
+            address: 0,
+            address_len: 0,
+            to: None,
         };
         match &p.op {
             Op::Recv { buffers: b, peek } => {
@@ -1116,6 +1332,21 @@ pub fn carry(state: &EndpointState) -> Result<CarriedEndpoint, NtStatus> {
             Op::Send { buffers: b, done } => {
                 q.kind = rk::SEND;
                 q.done = *done as u64;
+                for &(addr, len) in b {
+                    buffers.try_push((addr, len as u64)).map_err(no_memory)?;
+                }
+            }
+            Op::RecvFrom { buffers: b, peek, address, address_len } => {
+                q.kind = rk::RECV_FROM;
+                q.flag = *peek;
+                (q.address, q.address_len) = (*address, *address_len);
+                for &(addr, len) in b {
+                    buffers.try_push((addr, len as u64)).map_err(no_memory)?;
+                }
+            }
+            Op::SendTo { buffers: b, to } => {
+                q.kind = rk::SEND_TO;
+                q.to = *to;
                 for &(addr, len) in b {
                     buffers.try_push((addr, len as u64)).map_err(no_memory)?;
                 }
@@ -1142,7 +1373,7 @@ pub fn carry(state: &EndpointState) -> Result<CarriedEndpoint, NtStatus> {
         requests.try_push(q).map_err(no_memory)?;
     }
     Ok(CarriedEndpoint {
-        tcp: state.transport == Transport::Tcp,
+        transport: state.transport,
         socket: *state.socket.lock(),
         completion: state.completion.lock().clone(),
         modes: state.modes.load(Ordering::Acquire),
@@ -1164,7 +1395,7 @@ pub fn adopt(
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
     let state = KArc::try_new(EndpointState {
         dispatcher: Dispatcher::new(c.signal),
-        transport: if c.tcp { Transport::Tcp } else { Transport::None },
+        transport: c.transport,
         token,
         socket: IrqMutex::new(None),
         completion: IrqMutex::new(c.completion.clone()),
@@ -1205,6 +1436,13 @@ pub fn adopt_requests(object: &ObjectRef, requests: Vec<CarriedRequest>) -> Resu
         let op = match q.kind {
             rk::RECV => Op::Recv { buffers, peek: q.flag },
             rk::SEND => Op::Send { buffers, done: q.done as usize },
+            rk::RECV_FROM => Op::RecvFrom {
+                buffers,
+                peek: q.flag,
+                address: q.address,
+                address_len: q.address_len,
+            },
+            rk::SEND_TO => Op::SendTo { buffers, to: q.to },
             rk::WAIT_FOR_LISTEN => Op::WaitForListen { output: q.output, output_len: q.output_len },
             rk::SUPER_ACCEPT => Op::SuperAccept {
                 accept: endpoints.next().ok_or(NtStatus::INVALID_PARAMETER)?.1,
@@ -1266,6 +1504,9 @@ mod tests {
         ea.push(0);
         ea.extend_from_slice(&value);
         assert_eq!(parse_open_packet(&ea), Ok(Transport::Tcp));
+        for t in [Transport::None, Transport::Tcp, Transport::Udp] {
+            assert_eq!(Transport::from_number(t.number()), Some(t));
+        }
         assert_eq!(parse_open_packet(&ea[..10]), Err(NtStatus::INVALID_PARAMETER));
     }
 
