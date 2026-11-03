@@ -123,7 +123,23 @@ pub fn dump(cpus: u64, max: usize, mut print: impl FnMut(core::fmt::Arguments)) 
     last[..n].sort_unstable_by_key(|e| e.0);
     print(format_args!("flight: the last {n} events (time ns, cpu, kind, values):"));
     for &(t, kind, a, b, cpu) in &last[..n] {
-        print(format_args!("flight: {t} cpu {cpu} {} {a:#x} {b:#x}", Kind::name(kind)));
+        // System calls by name, with the caller (xtask's triage reads
+        // these to show each thread's last calls).
+        let service = |number: u64| crate::nt::syscalls::service_name(number as u32);
+        match kind {
+            1 => print(format_args!(
+                "flight: {t} cpu {cpu} {} {a:#x} {b:#x} ({} pid {} tid {b})",
+                Kind::name(kind),
+                service(a & 0xffff_ffff),
+                a >> 32
+            )),
+            2 => print(format_args!(
+                "flight: {t} cpu {cpu} {} {a:#x} {b:#x} ({} status {b:#010x})",
+                Kind::name(kind),
+                service(a)
+            )),
+            _ => print(format_args!("flight: {t} cpu {cpu} {} {a:#x} {b:#x}", Kind::name(kind))),
+        }
     }
 }
 
@@ -210,6 +226,8 @@ pub fn on_tick(_hz: u64) {
              (interrupts off: a lock never released?); its last events:"
         ));
         dump(1 << next, 32, crate::console::emergency_println);
+        // And where it is (an NMI gets through with interrupts off).
+        crate::statedump::trace_cpu(next);
     }
 }
 

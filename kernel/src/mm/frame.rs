@@ -46,6 +46,9 @@ pub struct FrameAllocator<'a> {
     free_count: u64,
     /// Word index where the next single-frame search starts.
     hint: usize,
+    /// The fewest free frames there have been since the memory map was
+    /// read (the low-water mark, for failed logs).
+    low_free: u64,
 }
 
 impl<'a> FrameAllocator<'a> {
@@ -58,7 +61,7 @@ impl<'a> FrameAllocator<'a> {
     pub fn new(bitmap: &'a mut [u64]) -> Self {
         bitmap.fill(u64::MAX);
         let frame_count = bitmap.len() as u64 * 64;
-        Self { bitmap, frame_count, free_count: 0, hint: 0 }
+        Self { bitmap, frame_count, free_count: 0, hint: 0, low_free: 0 }
     }
 
     /// Creates an allocator whose free frames are the usable regions of `map`,
@@ -81,6 +84,7 @@ impl<'a> FrameAllocator<'a> {
         for range in reserved {
             alloc.claim_range(range.start / PAGE_SIZE, range.end.div_ceil(PAGE_SIZE));
         }
+        alloc.low_free = alloc.free_count;
         alloc
     }
 
@@ -98,6 +102,11 @@ impl<'a> FrameAllocator<'a> {
         self.frame_count
     }
 
+    /// The fewest free frames since the memory map was read.
+    pub fn low_free_frames(&self) -> u64 {
+        self.low_free
+    }
+
     fn is_used(&self, n: u64) -> bool {
         self.bitmap[(n / 64) as usize] & (1 << (n % 64)) != 0
     }
@@ -109,6 +118,7 @@ impl<'a> FrameAllocator<'a> {
         if used && !was_used {
             *word |= bit;
             self.free_count -= 1;
+            self.low_free = self.low_free.min(self.free_count);
         } else if !used && was_used {
             *word &= !bit;
             self.free_count += 1;
@@ -210,6 +220,18 @@ mod tests {
         let mut bits = [0; 1]; // 64 frames
         let alloc = FrameAllocator::from_memory_map(&mut bits, [region(0x3f000, 0x10000)], &[]);
         assert_eq!(alloc.free_frames(), 1);
+    }
+
+    #[test]
+    fn the_low_water_mark_keeps_the_fewest_free_frames() {
+        let mut bits = [0; 1];
+        let mut alloc = FrameAllocator::from_memory_map(&mut bits, [region(0x1000, 0x4000)], &[]);
+        assert_eq!(alloc.low_free_frames(), 4);
+        let a = alloc.allocate().unwrap();
+        let b = alloc.allocate().unwrap();
+        alloc.free(a).unwrap();
+        alloc.free(b).unwrap();
+        assert_eq!((alloc.free_frames(), alloc.low_free_frames()), (4, 2));
     }
 
     #[test]

@@ -51,6 +51,8 @@ pub struct HeapStats {
     pub slab_pages: usize,
     /// Pages currently held by large allocations.
     pub large_pages: usize,
+    /// The most `in_use` has been (the high-water mark, for failed logs).
+    pub peak_in_use: usize,
 }
 
 pub struct Heap<S: PageSource> {
@@ -77,7 +79,7 @@ impl<S: PageSource> Heap<S> {
         Self {
             free: [None; CLASSES.len()],
             source,
-            stats: HeapStats { in_use: 0, slab_pages: 0, large_pages: 0 },
+            stats: HeapStats { in_use: 0, slab_pages: 0, large_pages: 0, peak_in_use: 0 },
         }
     }
 
@@ -113,6 +115,7 @@ impl<S: PageSource> Heap<S> {
                 // written by `refill` or `dealloc`.
                 self.free[class] = unsafe { obj.as_ref().next };
                 self.stats.in_use += CLASSES[class];
+                self.stats.peak_in_use = self.stats.peak_in_use.max(self.stats.in_use);
                 Some(obj.cast())
             }
             None => {
@@ -127,6 +130,7 @@ impl<S: PageSource> Heap<S> {
                 };
                 self.stats.in_use += pages * PAGE;
                 self.stats.large_pages += pages;
+                self.stats.peak_in_use = self.stats.peak_in_use.max(self.stats.in_use);
                 Some(ptr)
             }
         }
@@ -352,15 +356,26 @@ mod global {
     pub fn stats() -> HeapStats {
         HEAP.0.lock().stats()
     }
+
+    /// The statistics if the heap's lock is free (a state dump from an
+    /// NMI, a panic: the interrupted code may hold it).
+    pub fn try_stats() -> Option<HeapStats> {
+        HEAP.0.try_lock_untracked().map(|h| h.stats())
+    }
 }
 
 #[cfg(not(any(test, feature = "hosted")))]
-pub use global::stats;
+pub use global::{stats, try_stats};
 
 /// Host builds use std's allocator; there are no kernel heap statistics.
 #[cfg(any(test, feature = "hosted"))]
 pub fn stats() -> HeapStats {
     HeapStats::default()
+}
+
+#[cfg(any(test, feature = "hosted"))]
+pub fn try_stats() -> Option<HeapStats> {
+    None
 }
 
 #[cfg(test)]
@@ -426,6 +441,8 @@ mod tests {
             unsafe { h.dealloc(p, l) };
         }
         assert_eq!(h.stats().in_use, 0);
+        // The high-water mark stays.
+        assert_eq!(h.stats().peak_in_use, 300 * 32);
         // LIFO reuse: the most recently freed object comes back first.
         let again = h.alloc(l).unwrap();
         assert!(unique.contains(&(again.as_ptr() as usize)));

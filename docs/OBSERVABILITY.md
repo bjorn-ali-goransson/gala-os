@@ -15,6 +15,143 @@ whose cause has to be guessed is a gap to fill before (or together with)
 the fix. Reviews ask: "if this broke silently at 3 a.m., what would we
 have?"
 
+## Gaps found 2026-11-03 (audit, ranked by the time they cost)
+
+An audit of what failures left behind, against the failures that cost the
+most agent time (ROADMAP "Priorities", WORKFLOW "Known intermittent").
+Each: what failed, what we lacked, what would have explained it, status.
+
+1. **Timeouts that said nothing.** java_http, java_hello, postgres and
+   smpsched_test failed under load with only "timed out after 300s"; the
+   one-minute hang dump came long before the end (and only for `run=`
+   programs), and nothing was taken at the moment of the kill. Lacked:
+   the state when xtask gave up. Would have explained: which threads
+   wait on what, which CPU spins where, which locks are held. **Done**:
+   xtask injects an NMI (QEMU monitor `nmi`, every CPU) before killing a
+   timed-out VM and waits up to 20 s for the kernel's state dump
+   (`kernel/src/statedump.rs`): each CPU's rip and kernel backtrace
+   (symbolized in the failed log), the thread each CPU runs, whether the
+   scheduler, heap, frame and console locks are free (a lock held for the
+   whole dump is the deadlock), heap and frames, the flight recorder;
+   then, from the boot thread, every NT thread's system call and wait
+   object, every scheduler thread, the ledger and `statedump: end`.
+   xtask's line says how far the dump got ("did not answer the NMI": the
+   machine is wedged or the handler is not installed yet). gala-um: SIGQUIT
+   (`timeout -s QUIT`) prints the same threads part. Scenario
+   `statedump_test` (a program that hangs on purpose; also in um-test).
+   `XTASK_TIMEOUT=<s>` shortens any scenario's timeout to get the dump
+   of a hang quickly. Found on the way: the LAPIC's LINT1 (the NMI line)
+   was masked, and an NMI arriving in user mode would have been handed to
+   the program as an exception.
+2. **A failed log had to be read whole.** Agents scrolled thousands of
+   lines (JVM runs) for the verdict. Lacked: a summary at the tail.
+   **Done**: every failed log (`target/failed/<scenario>.log`, and the
+   console) ends with a triage block (`xtask/src/triage.rs`): scenario,
+   verdict, duration, host CPUs/load/free disk, guest CPUs, heap (peak)
+   and frames (fewest free), warning/error counts and the first error,
+   panic/exception/watchdog/leak/out-of-memory/missing-function lines,
+   programs begun and not ended, processes that failed, the ledger's top
+   five, the state dump's CPUs, locks and threads, each thread's last
+   system calls (event stream, else flight recorder), user faults, the
+   last lines. `cargo xtask triage <log> [events.jsonl]` prints it for any
+   log. The event stream is copied next to the failed log
+   (`<scenario>.events.jsonl`) when it was on.
+3. **No summary of an event stream** (§1's "next"). **Done**: `cargo xtask
+   events <events.jsonl>`: events by kind, system calls by total time,
+   failing statuses by service, each thread's last calls, faults,
+   processes, images.
+4. **Flakiness was found by people rerunning.** Which scenarios fail 1 in
+   20, and since when, was in agents' memories. Lacked: a record across
+   runs. **Done**: every `cargo xtask test`/`boot-test` appends one line
+   per scenario to `target/report/history.jsonl` (time, commit, host
+   load, pass/fail, VM seconds, reason) and ends with `xtask: health:`
+   lines: scenarios that both passed and failed in their last 30 runs
+   (with the last failure's reason) and scenarios whose latest pass (alone
+   in a VM) took over 1.5 times, and 10 s more than, the median of their
+   last ten. Still open: XTASK_REPEAT boots and um-test into the history.
+5. **The disk filled up mid-suite** ("No space left on device" from a copy
+   or xorriso, read as a build failure). **Done**: an image is not started
+   with less than 300 MiB free, nor packed into an ISO without its tree's
+   size free; the error names the free space, the need, and what to
+   delete (WORKFLOW "Disk space"). Out-of-space errors on the way get the
+   same hint.
+6. **Programs died with only an exit status.** "exited with status
+   0xc0000005"; for the JVM we had only its own hs_err file, for others
+   nothing (a dispatched exception that no handler took said nothing at
+   all). **Done**: crash reports (`nt::crashreport`): every user exception
+   keeps a fixed-size note in its process; when the process ends with
+   that code, `crash report:` lines give the code and its name, the thread, the
+   address as module+offset (the executable or an image view), what was
+   read/written/executed, the registers and the top eight stack words
+   (each named by module when it points into an image). Scenarios
+   `crash` and `crash_dispatched`. Still open: a real stack walk (unwind
+   data or frame pointers) and export names (nearest exported symbol).
+7. **Memory high-water marks were missing.** Out of frames looks like a
+   bad image (WORKFLOW), and the `stats:` line showed only the end state.
+   **Done**: the heap's peak and the fewest free frames since boot, on the
+   `stats:` line, in the state dump and after a panic.
+8. **The flight recorder showed numbers.** `syscall 0x400000004 0x8` had
+   to be decoded by hand. **Done**: service names, pid and tid on each
+   system-call record; the triage lists them per thread.
+9. **A panic did not say which thread** (§5's TODO). **Done**: after the
+   flight recorder, the panic prints the memory line and each CPU's thread
+   (when the scheduler's lock is free).
+10. **The failpoint panic's backtrace was unreadable** (addresses of a
+    build since rebuilt). Done before (symbolized into the failed log when
+    the boot fails); the state dump's per-CPU backtraces now go the same
+    way, and the symbolized blocks say whose backtrace they are.
+11. **"address space still referenced"**: the holders are printed (done
+    before); the triage names the leak. Still open: who took each
+    reference (a per-reference tag or backtrace in debug builds).
+12. **gala_cli's split output lines**: a program's output and the
+    kernel's log share the serial port. The full suite of 2026-11-03
+    showed the cause of one: the watchdog's report (written without the
+    port's lock, as interrupt-time output must be) landed inside the
+    program's line "gala_cli_test target: WM_CLOSE". **Done**: emergency
+    output takes the port's lock when it comes free within 10 ms (untracked
+    by lockdep), so whole lines no longer mix; without the lock (the
+    interrupted code holds it) it still writes. Still open: program output
+    on its own channel (an `out` event per write with the pid, or a second
+    serial port) so that a test can match a program's lines alone. The
+    watchdog fired there because the boot under a host load of 10 measured
+    the TSC at 15 MHz (`apic:` line): a calibration that went wrong under
+    load, for the early-boot work (and the triage shows the `apic:` line's
+    figures in the guest line's neighbourhood: look there first when
+    watchdogs fire at boot).
+13. **Unexplained net client failures** ("Connection refused" from the
+    host port forward once in a full suite). Still open: the client's
+    attempts, the port and QEMU's forward in the failed log.
+14. **QEMU exiting at once on a loaded host with an empty log** (java_hello
+    12 of 30 never started), early boot visibility: the other agent's work
+    (QEMU exit reason, debugcon boot phases); not in this audit.
+15. **A stuck CPU's own stack** (§5 watchdog TODO). **Done**: the watchdog
+    sends an NMI to the CPU it found stuck, which prints `watchdog: CPU N
+    kernel rip ...` and `watchdog: CPU N backtrace: ...` (symbolized in the
+    failed log); scenario `watchdog` expects them.
+16. **Diagnostics that took locks confused lockdep**: a `try_lock` from an
+    interrupt or NMI records an order between the interrupted code's locks
+    and the one tried, which no real path has. **Done**:
+    `IrqMutex::try_lock_untracked` for the dump, the panic's figures and
+    emergency output.
+17. **A clock calibrated wrong under load went unnoticed.** Two full
+    suites (host load 10-15) had boots that calibrated the TSC at 15, 31
+    and 135 MHz (`apic:` line; right is ~2.8 GHz): guest time then runs
+    20-200x fast, so sleeps end early (handover_idle_uefi's check 0x16),
+    the watchdog reports CPUs "stuck" for "5 s" every quarter second
+    (postgres: dozens of reports, which slow the boot further; gala_cli's
+    split line). **Done**: the triage flags a TSC under 500 MHz as a
+    suspicious clock. Open (early boot, the other agent's area): calibrate
+    robustly (repeat and take the best, check against the PIT afterwards,
+    or use CPUID leaf 0x15/0x16 or the hypervisor's TSC frequency).
+18. **First fruits of the state dump** (full suite, 2026-11-03): java_http
+    timed out with a correct clock, and its dump shows the JVM's
+    threads 16, 20 and 40 in NtYieldExecution (spinning), 32 and 36
+    waiting on semaphores with count 0, the others in delays or waits on
+    events: the signature of a lost semaphore release at HotSpot's wait
+    barrier (ROADMAP "Priorities"), which the NtReleaseSemaphore fix was
+    meant to end. The failed log (`target/failed/java_http.log`) is the
+    starting point for the next look.
+
 ## 1. Structured event stream — done (`events`, scenario `events`)
 
 - A second output channel next to the human serial log: QEMU's
@@ -37,9 +174,10 @@ size: the exe and every image view), `thread` (create with start and TEB,
 exit with status), `process` (start, exit), `fault` (every user-mode CPU
 exception, before it is resolved or delivered). `XTASK_EVENTS=all cargo
 xtask boot-test` turns it on for every scenario; `EVENT_EXPECT` in xtask
-checks a scenario's stream. Next: process-relative times, a `cargo xtask
-events` summary (top services by count and time), user-address
-symbolization from the image events.
+checks a scenario's stream. `cargo xtask events <file>` summarizes a
+stream (done 2026-11-03: system calls by time, failing statuses, each
+thread's last calls, faults, processes, images). Next: process-relative
+times, user-address symbolization from the image events.
 
 ## 2. "What is missing" ledger — done (`nt::ledger`, `ledger_test`)
 
@@ -107,8 +245,9 @@ counts (TCG plugins) need a QEMU built with plugins; Ubuntu's has none.
   from a frame-pointer walk, `arch::backtrace`; the kernel is built with
   `-C force-frame-pointers=yes`). xtask symbolizes it with
   `llvm-addr2line`/`addr2line` whenever it shows a failed boot's log, and
-  `cargo xtask symbolize <log>` does it for any log. Still to do: the
-  current thread/process and the last N events in the panic output.
+  `cargo xtask symbolize <log>` does it for any log. After the
+  backtrace: the flight recorder's last events, the heap and frame figures
+  and each CPU's thread (done 2026-11-03).
 - `cargo xtask debug name` boots a scenario with QEMU's gdbstub (`-s -S`)
   and a gdb script, so an agent can get backtraces and inspect memory in
   batch mode.
@@ -144,8 +283,8 @@ counts (TCG plugins) need a QEMU built with plugins; Ubuntu's has none.
   20 s (a boot-module file is copied page by page into the ram file
   system under its lock when first mapped): fixed, such a file now turns
   into pages lazily, a page when it is written or mapped (java_hello 38 s
-  -> 25 s). TODO: the stuck CPU's own
-  stack (an NMI to it).
+  -> 25 s). The stuck CPU's own rip and backtrace follow, by an NMI
+  to it (done 2026-11-03).
 - **Crash record across reboots** (done 2026-11-02, `kernel/src/crash.rs`):
   a panic writes the panic message, the backtrace and the flight
   recorder's last 48 events to the crash area (the last 16 sectors of a
@@ -209,9 +348,13 @@ records, always on and cheap:
   APIC id), the MADT's enabled CPUs and which of them the bootloader did
   not start, how long start-up took, CPUs the kernel started itself.
 
-## 6. Live introspection — later
+## 6. Live introspection — first slice done (state dump on NMI)
 
-A command channel (second serial port or virtio-vsock) with read-only
+Done 2026-11-03: a read-only "what are you doing" query with no channel
+of its own: an NMI (QEMU monitor `nmi`; xtask sends it when a boot test
+times out) makes the kernel print a state dump (`kernel/src/statedump.rs`,
+"Gaps found 2026-11-03" item 1); SIGQUIT does the same in gala-um.
+Later: a command channel (second serial port or virtio-vsock) with read-only
 queries: threads and their states/CPUs, a process's handle table and VADs,
 object namespace, counters. Agents can ask a hung system what it is
 waiting on instead of guessing. Later read-write for tests (ROADMAP R7,

@@ -311,6 +311,12 @@ pub fn emergency_println(args: fmt::Arguments) {
     std::eprintln!("\n{args}");
 }
 
+#[cfg(feature = "hosted")]
+pub fn emergency_line(args: fmt::Arguments) {
+    let _host = crate::hosted::HostCode::enter();
+    std::eprintln!("{args}");
+}
+
 #[doc(hidden)]
 #[cfg(not(feature = "hosted"))]
 pub fn print(args: fmt::Arguments) {
@@ -340,7 +346,43 @@ pub fn write_bytes(bytes: &[u8]) {
 /// printing.
 #[cfg(not(feature = "hosted"))]
 pub fn emergency_println(args: fmt::Arguments) {
-    let _ = serial::com1_emergency().write_fmt(format_args!("\n{args}\n"));
+    emergency_write(format_args!("\n{args}\n"));
+    emergency_screen(args);
+}
+
+/// `emergency_println` without the blank line before (the next lines of
+/// a dump that began with one).
+#[cfg(not(feature = "hosted"))]
+pub fn emergency_line(args: fmt::Arguments) {
+    emergency_write(format_args!("{args}\n"));
+    emergency_screen(args);
+}
+
+/// Writes to the serial port under its lock when that comes free within
+/// 10 ms, else without it. A watchdog report or a dump written without
+/// the lock landed inside other CPUs' lines (a program's output line was
+/// cut in two and a test missed it: gala_cli 2026-11-03); the lock may
+/// be held by the very code this CPU interrupted, hence the limit.
+#[cfg(not(feature = "hosted"))]
+fn emergency_write(args: fmt::Arguments) {
+    let start = crate::time::raw_monotonic_ns();
+    loop {
+        if let Some(mut port) = serial::COM1.try_lock_untracked() {
+            let _ = port.write_fmt(args);
+            return;
+        }
+        let now = crate::time::raw_monotonic_ns();
+        // No clock yet (0): do not wait.
+        if now == 0 || now.saturating_sub(start) > 10_000_000 {
+            let _ = serial::com1_emergency().write_fmt(args);
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(not(feature = "hosted"))]
+fn emergency_screen(args: fmt::Arguments) {
     // On screen only if nobody holds it (the panic may come from inside).
     if let Some(mut guard) = SCREEN.try_lock()
         && let Some(screen) = guard.as_mut()

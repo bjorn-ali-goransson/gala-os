@@ -15,6 +15,7 @@ const REG_ID: u32 = 0x20;
 const REG_EOI: u32 = 0xb0;
 const REG_SPURIOUS: u32 = 0xf0;
 const REG_LVT_TIMER: u32 = 0x320;
+const REG_LVT_LINT1: u32 = 0x360;
 const REG_TIMER_INITIAL: u32 = 0x380;
 const REG_TIMER_CURRENT: u32 = 0x390;
 const REG_TIMER_DIVIDE: u32 = 0x3e0;
@@ -25,6 +26,10 @@ const ICR_DELIVERY_PENDING: u32 = 1 << 12;
 const SPURIOUS_ENABLE: u32 = 1 << 8;
 const LVT_MASKED: u32 = 1 << 16;
 const LVT_TIMER_PERIODIC: u32 = 1 << 17;
+/// LVT delivery mode NMI: the PC's NMI line (QEMU's monitor `nmi`
+/// raises it on every CPU) comes in as an NMI, which the kernel answers
+/// with a state dump (kernel/src/statedump.rs). Masked at reset.
+const LVT_DELIVERY_NMI: u32 = 0b100 << 8;
 const DIVIDE_BY_16: u32 = 0b0011;
 
 pub const TIMER_VECTOR: u8 = 0x30;
@@ -103,6 +108,7 @@ pub fn init_bsp() -> Result<Calibration, ApicError> {
     interrupts::set_handler(SPURIOUS_VECTOR, |_| {});
     write(REG_SPURIOUS, SPURIOUS_ENABLE | u32::from(SPURIOUS_VECTOR));
     write(REG_LVT_TIMER, LVT_MASKED);
+    write(REG_LVT_LINT1, LVT_DELIVERY_NMI);
 
     let (timer_hz, tsc_hz) = calibrate()?;
     let id = read(REG_ID);
@@ -123,6 +129,7 @@ pub fn init_ap() {
     }
     write(REG_SPURIOUS, SPURIOUS_ENABLE | u32::from(SPURIOUS_VECTOR));
     write(REG_LVT_TIMER, LVT_MASKED);
+    write(REG_LVT_LINT1, LVT_DELIVERY_NMI);
 }
 
 /// Measures the LAPIC timer and TSC over a PIT-timed interval.
@@ -195,6 +202,14 @@ pub fn send_startup(apic_id: u32, page: u8) {
     send_icr(apic_id, ICR_STARTUP | u32::from(page));
 }
 
+/// Sends an NMI to the CPU whose local APIC id is `apic_id` (the hang
+/// watchdog asks a stuck CPU where it is: kernel/src/statedump.rs).
+pub fn send_nmi(apic_id: u32) {
+    send_icr(apic_id, LVT_DELIVERY_NMI);
+}
+
+/// Writes the interrupt command register: `low` is its low half (vector
+/// and delivery mode), the destination a physical APIC id.
 fn send_icr(apic_id: u32, low: u32) {
     // An interrupt handler sending an IPI between the two xAPIC writes
     // would garble the ICR.

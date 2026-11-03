@@ -72,6 +72,27 @@ impl<T> IrqMutex<T> {
     }
 }
 
+impl<T> IrqMutex<T> {
+    /// `try_lock` that lockdep does not track: for diagnostics that run
+    /// on top of whatever the interrupted code holds (an NMI's state dump,
+    /// the watchdog, emergency output). Tracked, they would record an
+    /// order between the interrupted code's locks and this one that no
+    /// real code path has, and a later correct path would be reported as
+    /// an inversion. Hold it briefly and take nothing under it.
+    pub fn try_lock_untracked(&self) -> Option<IrqGuard<'_, T>> {
+        let restore = cpu::disable_interrupts();
+        match self.inner.try_lock() {
+            Some(guard) => Some(IrqGuard { guard: Some(guard), restore, class: 0 }),
+            None => {
+                if restore {
+                    cpu::enable_interrupts();
+                }
+                None
+            }
+        }
+    }
+}
+
 pub struct IrqGuard<'a, T> {
     guard: Option<spin::MutexGuard<'a, T>>,
     restore: bool,

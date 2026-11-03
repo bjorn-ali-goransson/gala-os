@@ -118,6 +118,18 @@ explicitly in its commit.
   Also seen once in a full suite: java_http listening but xtask's client
   getting "Connection refused" from the host port forward (not
   retried; a host port taken by another VM? unexplained).
+- **Observability audit** (2026-11-03, OBSERVABILITY "Gaps found
+  2026-11-03"): done: a state dump on every boot-test timeout (NMI;
+  SIGQUIT in gala-um), a triage block at the end of every failed log
+  (`cargo xtask triage`), `cargo xtask events`, test-suite history with
+  flaky/slower lines (`target/report/history.jsonl`), disk-space checks
+  before images, crash reports for programs ended by an exception, heap
+  peak and fewest free frames, flight-recorder service names, the
+  threads in a panic, the watchdog's NMI to a stuck CPU (its backtrace),
+  whole lines from emergency output. Open there: program output on its
+  own channel (split lines), reference holders of a leaked address space,
+  a real user stack walk in crash reports, TSC calibration under load
+  (watchdogs at boot), repeat boots and um-test in the history.
 - **Server and desktop stay separate**: the essential workloads (servers,
   console programs, the Docker image) never start the graphical
   interface. See "Server and desktop workloads" in ARCHITECTURE; item
