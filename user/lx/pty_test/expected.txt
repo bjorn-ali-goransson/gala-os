@@ -1,0 +1,76 @@
+-- /dev/ptmx
+open(/dev/ptmx, O_RDWR|O_NOCTTY) = ok
+TIOCGPTN = 0
+  pty number >= 0 = yes
+open(slave) while locked = -5 (EIO)
+TIOCSPTLCK(0) (unlockpt) = 0
+open(slave) = ok
+  slave is a character device = yes
+TIOCGPTN on the slave = -25 (ENOTTY)
+TCGETS on a pipe = -25 (ENOTTY)
+-- a fresh pty's termios
+TCGETS writes bytes = 36
+slave: iflag 0x500, oflag 0x5, cflag 0xbf, lflag 0x8a3b, line 0
+slave: c_cc 3 28 127 21 4 0 1 0 17 19 26 0 18 15 23 22 0 0 0
+master: iflag 0x500, oflag 0x5, cflag 0xbf, lflag 0x8a3b, line 0
+master: c_cc 3 28 127 21 4 0 1 0 17 19 26 0 18 15 23 22 0 0 0
+TIOCGWINSZ = 0
+  rows = 0
+  cols = 0
+TIOCSWINSZ(24x80) on the slave = 0
+  the master reads it back, pixels too = yes
+sizeof(struct winsize) = 8
+-- canonical mode
+a line without its newline: slave not readable = yes
+then the newline: read = 8 "partial\n"
+  echo = "partial\r\n"
+ab DEL c NL: read = 3 "ac\n"
+  echo (ECHOE: backspace, space, backspace) = "ab\b \bc\r\n"
+xyz ^U ok NL: read = 3 "ok\n"
+  echo = "xyz\b \b\b \b\b \bok\r\n"
+one two ^W three NL: read = 10 "one three\n"
+  echo = "one two\b \b\b \b\b \bthree\r\n"
+cr CR (ICRNL): read = 3 "cr\n"
+  echo = "cr\r\n"
+abc ^D: read = 3 "abc"
+^D alone: read (EOF) = 0
+  echo of both = "abc"
+hello NL: read(2) = 2 "he"
+  read again = 4 "llo\n"
+  echo = "hello\r\n"
+ctl ^A NL: read = 5 "ctl\x01\n"
+  echo (ECHOCTL) = "ctl^A\r\n"
+slave writes out NL put: master reads (ONLCR) = "out\r\nput"
+-- echo off
+ECHO off: read = 7 "secret\n"
+  echo = ""
+-- raw mode (cfmakeraw)
+TCSETSF(raw) = 0
+raw: iflag 0x0, oflag 0x4, cflag 0xbf, lflag 0xa30, line 0
+raw: c_cc 3 28 127 21 4 0 1 0 17 19 26 0 18 15 23 22 0 0 0
+read(1) #1 = 1 "x"
+read(1) #2 = 1 "\r"
+read(1) #3 = 1 "y"
+read(1) #4 = 1 "\x7f"
+read(1) #5 = 1 "\x03"
+  echo = ""
+FIONREAD after abc = 3
+read = 3 "abc"
+slave writes a NL b, OPOST off: master reads = "a\nb"
+VMIN 0, VTIME 0, nothing typed: read = 0
+VMIN 0, VTIME 2 (0.2 s), nothing typed: read = 0
+  waited >= 0.15 s = yes
+-- ISIG: a child with the pty as its controlling terminal
+child: setsid, open(slave) without O_NOCTTY: TIOCGSID is its pid = yes
+TIOCGPGRP on the master: the child's group = yes
+TIOCSWINSZ(50x132): SIGWINCH reached the child = yes
+^Z: echo = "^Z"
+  wait4(WNOHANG|WUNTRACED) (not stopped: orphaned group) = 0
+^C: echo = "^C"
+  child: killed by 2
+^\: echo = "^\\"
+  child: killed by 3
+-- hang-up
+every slave fd closed: read(master) = -5 (EIO)
+pty_test: ok
+-- exit status 0

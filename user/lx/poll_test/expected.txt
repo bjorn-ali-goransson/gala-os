@@ -1,0 +1,104 @@
+-- poll
+poll(empty read end, IN) = 0, revents 0
+poll(write end, OUT) = 1, revents OUT
+poll(write end, IN|OUT) = 1, revents OUT
+poll(read end with data, IN|PRI|OUT) = 1, revents IN
+poll(read end with data, 0 events) = 0, revents 0
+poll(999) = 1, revents NVAL
+poll(fd -1: skipped) = 0
+  revents = 0
+poll(both ends) = 2
+poll(read end, data, writer closed) = 1, revents IN|HUP
+poll(read end, empty, writer closed) = 1, revents HUP
+poll(read end, writer closed, 0 events) = 1, revents HUP
+poll(write end, reader closed, OUT) = 1, revents OUT|ERR
+poll(full write end, OUT) = 0, revents 0
+poll(write end, a page free, OUT) = 1, revents OUT
+poll(empty, 30 ms) = 0
+  waited >= 30 ms = yes
+ppoll(empty, 30 ms) = 0
+  waited >= 30 ms = yes
+  timeout left updated to 0 = yes
+ppoll(tv_nsec = 1e9) = -22 (EINVAL)
+poll(nfds too large) = -22 (EINVAL)
+poll(bad pointer) = -14 (EFAULT)
+poll(5 s) woken by a child's write = 1
+  revents IN
+sizeof(struct pollfd) = 8
+offsetof(pollfd, events) = 4
+offsetof(pollfd, revents) = 6
+-- select and pselect6
+select(read end empty, write end) = 1
+  read end set = no
+  write end set = yes
+select(read end with data) = 1
+  read end set = yes
+select(empty, 30 ms) = 0
+  waited >= 30 ms = yes
+  timeval updated to 0 = yes
+  read end cleared = yes
+select(fd 100, beyond the descriptor table: ignored) = 0
+select(fd 20, closed) = -9 (EBADF)
+select(nfds -1) = -22 (EINVAL)
+select(tv_usec = 1e6) = 0
+pselect6(empty, 30 ms, SIGUSR1 blocked meanwhile) = 0
+  waited >= 30 ms = yes
+  mask after (restored) = 0x0
+pselect6(read end with data, 0) = 1
+  read end set = yes
+pselect6(sigset size 4) = -22 (EINVAL)
+-- epoll
+epoll_create1(EPOLL_CLOEXEC) = ok
+  F_GETFD = 1
+epoll_create1(bad flags) = -22 (EINVAL)
+epoll_create(0) = -22 (EINVAL)
+epoll_create(1) = ok
+ADD read end (IN), data 1 = 0
+ADD read end again = -17 (EEXIST)
+MOD write end (not added) = -2 (ENOENT)
+DEL write end (not added) = -2 (ENOENT)
+ADD 999 = -9 (EBADF)
+ADD the epoll fd to itself = -22 (EINVAL)
+ADD a directory (no poll support) = -1 (EPERM)
+op 99 = -22 (EINVAL)
+epoll_ctl on a pipe as the epoll fd = -22 (EINVAL)
+epoll_wait(empty, 0) = 0
+epoll_wait(data) = 1: data 1 events IN
+epoll_wait again (level-triggered: still) = 1: data 1 events IN
+ADD write end (OUT), data 2 = 0
+epoll_wait(both) = 2: data 1 events IN; data 2 events OUT
+epoll_wait(both, maxevents 1) = 1: data 1 events IN
+epoll_wait(maxevents 0) = -22 (EINVAL)
+epoll_wait(not an epoll fd) = -22 (EINVAL)
+epoll_wait(bad pointer) = -14 (EFAULT)
+MOD read end to IN|ET, data 3 = 0
+DEL write end = 0
+EPOLLET: epoll_wait (data was there before) = 1: data 3 events IN
+EPOLLET: epoll_wait again (no new data) = 0
+EPOLLET: after a new write = 1: data 3 events IN
+EPOLLET: again = 0
+read everything = 3 "abc"
+MOD read end to IN|ONESHOT, data 4 = 0
+EPOLLONESHOT: epoll_wait = 1: data 4 events IN
+EPOLLONESHOT: again (disabled) = 0
+EPOLLONESHOT: after another write (still disabled) = 0
+ADD it again (it is still there) = -17 (EEXIST)
+MOD re-arms it, data 5 = 0
+EPOLLONESHOT: after MOD = 1: data 5 events IN
+MOD read end to IN, data 6 = 0
+epoll_wait(empty, 30 ms) = 0
+  waited >= 30 ms = yes
+epoll_pwait(empty, 30 ms, SIGUSR1 blocked meanwhile) = 0
+  waited >= 30 ms = yes
+epoll_wait(-1) woken by a child's write = 1: data 6 events IN
+writer closed, data left = 1: data 6 events IN|HUP
+writer closed, empty = 1: data 6 events HUP
+read end closed: removed from the set = 0
+epoll_wait(two ready, raw buffer) = 2
+  data's offset in the first entry = 4
+  observed stride between entries (bytes) = 12
+  bytes written = 24
+sizeof(struct epoll_event) = 12
+offsetof(epoll_event, data) = 4
+poll_test: ok
+-- exit status 0

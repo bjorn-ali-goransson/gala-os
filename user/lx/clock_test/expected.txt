@@ -1,0 +1,56 @@
+-- clock_gettime
+MONOTONIC never goes back (10000 reads) = yes
+clock_gettime(REALTIME) = 0
+  after 2020-01-01 and before 2100-01-01 = yes
+  tv_nsec < 1e9 = yes
+clock_gettime(BOOTTIME) = 0
+  BOOTTIME >= MONOTONIC = yes
+clock_gettime(MONOTONIC_RAW) = 0
+  > 0 = yes
+PROCESS_CPUTIME advanced during a busy loop = yes
+THREAD_CPUTIME advanced during a busy loop = yes
+  CPU time used <= wall time passed (+1 ms) = yes
+clock_gettime(100) = -22 (EINVAL)
+clock_gettime(-1) = -22 (EINVAL)
+clock_gettime(MONOTONIC, bad pointer) = -14 (EFAULT)
+clock_gettime(this process's CPU clock by pid) = 0
+clock_gettime(a nonexistent process's CPU clock) = -22 (EINVAL)
+-- clock_getres
+clock_getres(REALTIME) = 0, 0 s 1 ns
+clock_getres(MONOTONIC) = 0, 0 s 1 ns
+clock_getres(BOOTTIME) = 0, 0 s 1 ns
+clock_getres(PROCESS_CPUTIME_ID) = 0, 0 s 1 ns
+clock_getres(THREAD_CPUTIME_ID) = 0, 0 s 1 ns
+clock_getres(100) = -22 (EINVAL)
+clock_getres(MONOTONIC, NULL) = 0
+-- gettimeofday and time
+gettimeofday = 0
+  between two REALTIME reads (to the microsecond) = yes
+  tv_usec < 1e6 = yes
+time() returns what it stores = yes
+  within 2 s of REALTIME = yes
+-- nanosleep and clock_nanosleep
+nanosleep(20 ms) = 0
+  slept >= 20 ms = yes
+  slept < 5 s = yes
+  rem left alone = yes
+nanosleep(0) = 0
+nanosleep(tv_nsec = 1e9) = -22 (EINVAL)
+nanosleep(tv_nsec = -1) = -22 (EINVAL)
+nanosleep(tv_sec = -1) = -22 (EINVAL)
+nanosleep(bad pointer) = -14 (EFAULT)
+clock_nanosleep(MONOTONIC, 20 ms) = 0
+  slept >= 20 ms = yes
+clock_nanosleep(MONOTONIC, TIMER_ABSTIME, now + 30 ms) = 0
+  woke at or after the deadline = yes
+clock_nanosleep(TIMER_ABSTIME, in the past) = 0
+  returned at once (< 1 s) = yes
+clock_nanosleep(REALTIME, TIMER_ABSTIME, now + 10 ms) = 0
+clock_nanosleep(BOOTTIME, 1 ms) = 0
+clock_nanosleep(THREAD_CPUTIME_ID) = -95 (EOPNOTSUPP)
+clock_nanosleep(100) = -22 (EINVAL)
+clock_nanosleep(tv_nsec = 1e9) = -22 (EINVAL)
+sizeof(struct timespec) = 16
+clock_gettime writes 16 bytes or fewer = yes
+clock_test: ok
+-- exit status 0

@@ -853,6 +853,10 @@ name = "lsa_test"
 version = "0.1.0"
 
 [[package]]
+name = "lx_abi"
+version = "0.1.0"
+
+[[package]]
 name = "managed"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
