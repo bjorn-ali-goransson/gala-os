@@ -442,6 +442,23 @@ charged). Look
   seen in C1-compiled code fits this bug. A new program that generates or
   patches code (V8, LuaJIT, ...) belongs in that list. The Java heap
   corruption stayed with `thread=single` (java_http 1 of 40).
+- **Reproducing the Java corruption quickly: `java_stress`** (pending
+  scenario, 2026-11-03): `user/java/Stress.java` runs javac in-process
+  48 times, three at a time; about one boot in three fails (javac's
+  NullPointerException in `BaseFileManager.getKind` or
+  `ClassSymbol.setAnnotationTypeMetadata`, a crash in String.equals or in
+  the GC, the hs_err in the log). `XTASK_REPEAT=6 XTASK_REPEAT_JOBS=2
+  cargo xtask boot-test java_stress` (each boot 5-15 min under load; its
+  time limit is 30 min). Other JVM options: the kernel takes the last
+  `args=`, so `XTASK_CMDLINE="args=-Xmx64m%20C:/gala/Stress.java%2048"`
+  replaces them (a second argument, ms, forces a full collection that
+  often). The same program in gala-um (`um --dir=jdk/bin ...
+  java.exe "C:/gala/Stress.java 48"`, about 25 s) has never failed.
+- **`XTASK_CMDLINE`** adds kernel command-line words to every boot:
+  diagnostic flags (`checkuser`, `tlbparanoid`, `nomigrate`,
+  `framecheck`, `eagercommit`; ARCHITECTURE "Kernel command line") or a
+  replacement `args=`. With `XTASK_QEMU_ARGS="-smp 1"` or `-cpu Nehalem`
+  a scenario runs on one processor or without AVX/BMI/XSAVE.
 - **Running the JDK in gala-um**: `um --dir=jdk/bin` puts the program in
   C:\jdk\bin (the JDK finds its home from its own path); pass every file
   of `target/prebuilt/jdk/jdk-21.0.5+11/` as

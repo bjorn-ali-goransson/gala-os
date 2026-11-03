@@ -14,7 +14,14 @@
 //! releases the semaphore. The handler resumes the poll's next
 //! instruction (NtContinue), and the mutator must then see the new epoch
 //! everywhere: a value of an older epoch is what a JVM sees as a stale
-//! reference (a pre-GC address). A "noise" thread meanwhile commits,
+//! reference (a pre-GC address). Every other collection stops the
+//! mutators as HotSpot does instead: the handler only redirects the
+//! thread (NtContinue) to a stub that saves every register on the stack
+//! and blocks there; the collector rewrites that save area. The
+//! collector also patches constants embedded in "compiled code" (an
+//! RWX page), as HotSpot patches object addresses in compiled methods:
+//! one each mutator calls, and one inside the very loop (with its poll)
+//! two "looper" threads are stopped in. A "noise" thread meanwhile commits,
 //! touches, protects and frees memory (page faults and shootdowns while
 //! mutators run), and timer preemption moves the threads between
 //! processors.
@@ -519,7 +526,7 @@ extern "C" fn noise(_: usize) -> ! {
         free(base + 8 * PAGE, 4 * PAGE, MEM_DECOMMIT);
         free(base, 0, MEM_RELEASE);
         n += 1;
-        if n % 8 == 0 {
+        if n.is_multiple_of(8) {
             yield_execution();
         }
     }

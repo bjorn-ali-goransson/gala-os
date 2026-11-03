@@ -113,6 +113,7 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `tlbparanoid` | every change to a user address space flushes every CPU's whole TLB and every context switch reloads CR3 (tells TLB bugs from others) |
 | `nomigrate` | a thread that runs user code stays on the CPU it first ran on (tells migration bugs from others) |
 | `framecheck` | user mappings of each frame are counted; freeing a frame a user space still maps panics |
+| `eagercommit` | committed private pages get their frames at once instead of at the first touch (no demand-zero faults in user code) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `profile=server` | never bring up the graphical interface: the desktop is not drawn even with a screen (windows still exist), `console=` starts no console window (ROADMAP SD) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |

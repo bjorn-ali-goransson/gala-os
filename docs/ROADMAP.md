@@ -115,6 +115,48 @@ explicitly in its commit.
   NtGetContextThread gave up after a second waiting for a suspended
   thread to stop (now 30 s, as Windows waits), and the test now lets
   its waiter reach the wait first. `XTASK_REPEAT=n` repeats a boot test.
+  **Narrowed further (2026-11-03, second session), still open.** A
+  reproducer: `java_stress` (pending; WORKFLOW "Reproducing the Java
+  corruption") fails about one boot in three (5 of 19 at first), and
+  repeats sites: javac's NPE in `BaseFileManager.getKind` (a
+  `Kind.extension` read as null) and in
+  `ClassSymbol.setAnnotationTypeMetadata` (a field read as null), the
+  interpreter's String.equals + 8 crash, crashes in the GC and in
+  `ic_miss_stub`. Once it happens it stays (39 of 48 compiles failed in
+  one boot): a shared object or constant went stale. The same program
+  in gala-um never failed: 1292 compiles in 53 runs, also pinned to one
+  host CPU and with a forced full collection every 200 ms (44 full
+  collections a run). What the boots showed (each "fails" means at least
+  one failed boot in the batch): **one processor** (`-smp 1`) fails
+  (1 of 8), so it is not a race between processors, a TLB shootdown or
+  a migration; **`tlbparanoid`** (every change flushes every TLB, every
+  switch reloads CR3) fails; **`-cpu Nehalem`** (no AVX, BMI, XSAVE: the
+  FXSAVE path) fails at the same getKind site, so it is not an emulated
+  instruction extension or the XSAVE code; **`eagercommit`** (no
+  demand-zero faults in user code) fails, 3 of 6; **`checkuser`** (every
+  return to user mode checks kernel stack, CR3, user GS, no double run)
+  saw nothing in a failing boot; `-XX:-ImplicitNullChecks` fails;
+  `-XX:+VerifyBeforeGC -XX:+VerifyAfterGC` failed 1 of 4 *without* a
+  verification error, 1.8 s after a full collection whose verification
+  passed: the heap, the thread stacks and the compiled methods' oops
+  were consistent when the collection ended, and a thread saw a stale
+  value after it resumed. A large heap (`-Xms200m -Xmx200m -Xmn20m`, no
+  full collections) passed 8 of 8, but early failures after four young
+  collections only (String.equals in the source launcher's own javac)
+  show full collections are not required. `safepoint_test` (a JVM-style
+  safepoint: poll fault, vectored handler, NtContinue, HotSpot's stub
+  that saves registers on the stack, a collector rewriting registers,
+  stack slots, heap words and constants embedded in "compiled code",
+  including in the loop a thread is stopped in) passes in the kernel
+  (multi- and single-threaded TCG) and in gala-um. Found and fixed on
+  the way, though not this bug (no such move in the Java boots counted):
+  a TLB shootdown left out the CPU the changing thread had moved to
+  after releasing the address space's lock (ARCHITECTURE "TLB
+  shootdown"). Still unexplained; next: catch the stale value's origin
+  (an hs_err of a getKind crash shows the code bytes at pc: whether the
+  embedded constant in memory is the new one while the register got the
+  old one, i.e. stale translated code), QEMU record/replay of a failing
+  `-smp 1` boot, `-Xint` with forced full collections.
   Also seen once in a full suite: java_http listening but xtask's client
   getting "Connection refused" from the host port forward (not
   retried; a host port taken by another VM? unexplained).
