@@ -12,6 +12,7 @@
 mod base64;
 mod cert;
 mod dpapi;
+mod misc;
 mod unimplemented;
 
 use core::ffi::c_void;
