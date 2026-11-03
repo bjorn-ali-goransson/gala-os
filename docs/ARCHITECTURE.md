@@ -3341,6 +3341,123 @@ shortcut yet). Not done: the in-context synchronous call in the raising
 thread, UIPI between hooks and events, EVENT_OBJECT_LOCATIONCHANGE,
 REORDER, the menu and caret events, EVENT_SYSTEM_* beyond FOREGROUND.
 
+## Plan: sessions and remote shasha (proposed 2026-11-03)
+
+The owner's goals: reach gala over SSH and over something RDP-like; run
+**shasha on the client** and have it talk to the server; **multiple
+sessions**. One design covers all three: **sessions own desktops, and a
+desktop is shown by a presenter** (the local console, a remote shasha
+client, or none). Nothing here is built yet unless marked "exists".
+
+### What exists (checked 2026-11-03)
+
+- SSH: Win32-OpenSSH's sshd logs in with a key or a password and runs a
+  command (`sshd_login`, `sshd_password`); no pty, no sftp (ROADMAP SSH).
+- shasha (`kernel/src/nt/desktop/`): programs draw their own client
+  pixels (gdi32) and reach shasha only through gala calls (GalaWindow*,
+  GalaScreenInfo, the console host calls, GalaDesktopAction); every shell
+  action is a named `Action` through `Desktop::act`; its only hardware
+  seams are `platform::Display` and the PS/2 input thread;
+  `desktop_off.rs` proves the interface can be swapped.
+- Sessions: none. Every process is session 1 (`process::SESSION_ID`,
+  PEB, ProcessSessionInformation) while the SYSTEM token says session 0;
+  `\Sessions\1\BaseNamedObjects` and `\Sessions\BNOLINKS` are links to
+  the one `\BaseNamedObjects` (`Local\` == `Global\`); one global
+  `DESKTOP` and one global window `REGISTRY` (every process sees every
+  window); no window stations, desktop objects or WTS API.
+
+### Target
+
+```
+Session (id, its object directory, its token defaults, presenter)
+ └─ window station WinSta0 (later: clipboard, atoms)
+     └─ desktop "Default" = window state (registry, Z order, focus,
+                            capture, pixel buffers) + input queue
+                            + presenter: Console | Remote | None
+```
+
+1. **Session object** (kernel): id, `\Sessions\<n>\BaseNamedObjects` as a
+   real directory (session 0's is `\BaseNamedObjects`, as on Windows;
+   `Local\` resolves to the session's, `Global\` to the global one), its
+   window station and desktop. A process takes its session from its
+   primary token at creation; PEB.SessionId, ProcessSessionInformation,
+   ProcessIdToSessionId and TokenSessionId agree. Numbering: 0 for
+   services and SYSTEM (sshd and its logons are session 0 on Windows
+   too), 1 for the local console, 2+ for remote logons.
+2. **Per-session desktop and window registry**: the `DESKTOP` and
+   `REGISTRY` statics become fields of the session's desktop, each its own
+   `sync::IrqMutex`, reached through the caller's session. HWNDs keep one
+   global counter; entries carry their desktop and lookups filter by the
+   caller's. FindWindow, EnumWindows, Send/PostMessage, SetWindowPos,
+   WinEvent hooks and GalaDesktopAction never cross sessions (they fail
+   before the UIPI check: session 0 isolation; the exact Windows errors
+   checked by the test).
+3. **Window state apart from composition** (gala's own addition): the
+   desktop's window state and each window's last pixels are kept in all
+   kernels; the compositor (frames, taskbar, start menu, wallpaper,
+   fonts) is a presenter. So the server kernel (no `shasha` feature,
+   ROADMAP SD) can still serve GUI programs to a remote shasha client
+   without a compositor of its own, and a desktop with no presenter keeps
+   its windows alive (RDP-style disconnect/resume).
+4. **Presenters**: at most one per desktop at a time. **Console**
+   (framebuffer through `platform::Display`, PS/2 input routed to the
+   session the console shows); **Remote** (a shasha client over the
+   network); **None** (disconnected); **Test** (gala's addition: a
+   headless in-kernel presenter that renders to memory for screen checks
+   and records frames, replacing QEMU screendumps in tests). Console
+   switch or remote reconnect = attach a presenter.
+5. **Remote shasha protocol** (gala's own, documented here when built; no
+   clean-room concern): essentially the existing system-call surface over
+   a socket. Server -> client: window create/show/place/title/icon/
+   destroy, capture, screen info, damaged rectangles of client pixels
+   (compressed: a pure-Rust LZ4 or similar, recorded in THIRD_PARTY.md);
+   client -> server: input records in client coordinates, named actions
+   (Activate, Minimize, Maximize, Restore, Close, Snap, Place, Start), the
+   client's screen size. **The server owns window state** (Win32 programs
+   ask for geometry synchronously: GetWindowRect, ScreenToClient, menus
+   and tooltips in screen coordinates, the work area, Z order, FindWindow
+   from other processes); **the client owns presentation**: composition,
+   chrome, hover and the pointer drawn locally; a caption drag moves the
+   window locally and sends Place at the end (or throttled); only input
+   inside client areas round-trips. On connect the server sends the full
+   state and every window's last pixels, which also gives reconnect. The
+   protocol is versioned (invariant 3) and its messages are the same
+   records the kernel handover carries for windows (R9), so a GUI
+   survives a handover by the client reconnecting.
+6. **The client**: shasha's compositor factored into a crate that builds
+   for the kernel and the host (needs the statics gone, item B2); a host
+   app (winit plus a software framebuffer; Linux, macOS, Windows), later
+   wasm in a browser. Wallpapers and fonts live on the client. Later: a
+   seamless mode (each gala window a native host window, RemoteApp-like;
+   the same per-window protocol), clipboard, cursor shapes, sound.
+7. **Transport and authentication**: first version listens on 127.0.0.1
+   inside gala and is reached through `ssh -L` (so SSH's authentication
+   and encryption carry it); later TLS (OpenSSL already runs) with logon
+   through LSA.
+8. **Session manager**: a gala call `GalaSession` (create, attach a
+   presenter, detach, logoff, list; SeTcbPrivilege), a user-mode service
+   in the termsrv/winlogon role (accepts a remote client, authenticates
+   with LogonUserW/LSA, creates a session, sets the token's session id,
+   starts the user's shell), `wtsapi32` (WTSEnumerateSessions,
+   WTSQuerySessionInformation, WTSDisconnectSession, WTSLogoffSession) and
+   ProcessIdToSessionId; CLI first: `gala sessions`, `gala logoff <id>`,
+   `gala disconnect <id>`, `gala attach <id>`.
+9. **Observability** (the owner's rule): session events (create, logon,
+   attach, detach, logoff) in the event stream; per-session counts on the
+   `stats:` line; a protocol trace (`remote=trace`) and recording of a
+   client's input and the server's output for replay (R7); the client
+   shows connection quality (latency, frames, bytes).
+10. **Resources and security**: per-session charging (R6: commit, handles,
+    pixel memory per desktop); a session's processes and windows are
+    isolated as above; logons audited in the event stream.
+
+Later: several window stations and desktops per session (CreateDesktop,
+OpenDesktop, SetThreadDesktop, SwitchDesktop, a secure desktop for
+credential prompts), clipboard and atom tables per window station, and
+Windows' real RDP (MS-RDPBCGR is openly documented; IronRDP's server
+crate is a candidate) if mstsc compatibility is wanted. Interim, with no
+gala work: QEMU's own VNC (`-vnc :1`) shows gala's screen remotely.
+
 ## UI Automation
 
 The aim is screen tests that drive programs as testers do on Windows:

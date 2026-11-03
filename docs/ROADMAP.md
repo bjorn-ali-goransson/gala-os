@@ -140,6 +140,8 @@ explicitly in its commit.
   markers, vCPU and host facts) explains a silent end; xtask flags and
   re-boots a VM short of CPUs (ARCHITECTURE "Processors", OBSERVABILITY
   "Early boot"; scenarios `smp_missed`, `smp_late`, `onecpu_*`).
+- **Remote access and sessions (the owner, 2026-11-03)**: item RS
+  below; SSH (item SSH) is its first step.
 - **SSH that works as a remote shell (the owner, 2026-11-03)**: item SSH
   below: sshd as a real server, an interactive shell over ConPTY, sftp
   and scp, port forwarding, the client.
@@ -1628,6 +1630,40 @@ SSH. **SSH that works as a remote shell** (the owner, 2026-11-03).
    levels apply to the session; host keys persist across boots (`persist`)
    and across handovers (R9: sshd's listening socket and sessions are
    sockets and pipes that (e) carries; consoles are not carried yet).
+
+RS. **Remote access and sessions** (the owner, 2026-11-03; design:
+   ARCHITECTURE "Plan: sessions and remote shasha"). Sessions own
+   desktops; a desktop is shown by a presenter (console, remote shasha
+   client, none, test). Proposed order, each test first:
+   - A. SSH steps 1-2 (item SSH): sshd as a server, then ConPTY
+     (`conpty_test`, an interactive shell over ssh); then sftp.
+   - B1. Session ids and per-session named objects (`session_test`: a
+     SYSTEM process is session 0 and a normal one 1, PEB,
+     ProcessIdToSessionId and TokenSessionId agree; `Local\` objects of
+     session 1 are invisible from session 0, `Global\` ones are not).
+   - B2. Per-session desktop and window registry (the statics go): a GUI
+     program in session 2 is not found or messaged from session 1; `gala
+     windows` lists the caller's session; every GUI scenario still passes.
+   - B3a. Window state apart from composition, and presenters: console
+     attach and switch; the test presenter (headless render for screen
+     checks without QEMU screendumps); a session with no presenter keeps
+     its windows.
+   - B3b. Remote shasha: the compositor as a crate that also builds for
+     the host, the versioned protocol, the server end (also in the server
+     kernel, which has no compositor), a host client (winit); scenario: an
+     xtask test client connects through a forwarded port, gets a test
+     program's window (title, pixels), clicks, the program reports
+     WM_LBUTTONDOWN at the right client coordinates, and a reconnect gets
+     the same window back.
+   - B4. Session manager, `wtsapi32`, `gala sessions/logoff/disconnect/
+     attach`: two remote clients each log on to their own session and
+     shell.
+   - B5. Sessions across a kernel handover (R9): session, desktop and
+     window state carried (the window registry is refused today), remote
+     clients reconnect after it.
+   - Later: several desktops per session, a secure desktop, clipboard,
+     seamless windows, RDP proper. Interim with no gala work: QEMU's
+     `-vnc`.
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing
