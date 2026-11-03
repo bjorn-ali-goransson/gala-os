@@ -364,10 +364,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     let heap = mm::heap::stats();
     let window_flushes = mm::vmap::WINDOW.lock().flushes();
     info!(
-        "stats: {shootdowns} TLB shootdowns ({ipis} IPIs), {} frames leaked by deferred frees; \
+        "stats: {shootdowns} TLB shootdowns ({ipis} IPIs), {} frames leaked by deferred frees, {} freed twice; \
          heap {} KiB in use, {} large pages, {window_flushes} mapped-window flushes; \
          frames free {} of {}",
         arch::paging::leaked_frames(),
+        mm::double_frees(),
         heap.in_use / 1024,
         heap.large_pages,
         mm::frame_stats().0,

@@ -297,6 +297,8 @@ fn sync_range(process: &Process, vad: &vad::Vad, start: u64, size: u64) {
 }
 
 pub const MEM_RESET: u32 = 0x8_0000;
+/// Windows 8+: takes back a MEM_RESET; succeeds when the data is intact.
+pub const MEM_RESET_UNDO: u32 = 0x100_0000;
 pub const MEM_TOP_DOWN: u32 = 0x10_0000;
 pub const MEM_DECOMMIT: u32 = 0x4000;
 pub const MEM_RELEASE: u32 = 0x8000;
@@ -310,11 +312,16 @@ pub fn allocate(
     protect: u32,
 ) -> Result<(u64, u64), NtStatus> {
     let known = vad::MEM_COMMIT | vad::MEM_RESERVE | MEM_RESET | MEM_TOP_DOWN;
-    if kind & !known != 0 || kind & (vad::MEM_COMMIT | vad::MEM_RESERVE | MEM_RESET) == 0 {
+    // MEM_RESET_UNDO goes alone.
+    let alone = kind == MEM_RESET_UNDO;
+    if !alone
+        && (kind & !known != 0 || kind & (vad::MEM_COMMIT | vad::MEM_RESERVE | MEM_RESET) == 0)
+    {
         return Err(NtStatus::INVALID_PARAMETER_5);
     }
-    if kind & MEM_RESET != 0 {
-        // Contents may be discarded; keeping them is a valid implementation.
+    if kind & (MEM_RESET | MEM_RESET_UNDO) != 0 {
+        // Contents may be discarded; keeping them is a valid implementation
+        // (and MEM_RESET_UNDO then finds them intact: success).
         return Ok((base / PAGE_SIZE * PAGE_SIZE, size.next_multiple_of(PAGE_SIZE)));
     }
     let mut vad = process.vad.lock();

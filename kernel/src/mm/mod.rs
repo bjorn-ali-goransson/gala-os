@@ -93,7 +93,22 @@ pub fn allocate_frames(count: u64, align: u64) -> Option<Frame> {
 }
 
 pub fn free_frame(frame: Frame) -> Result<(), FreeError> {
-    with_frames(|a| a.free(frame)).unwrap_or(Err(FreeError::OutOfRange))
+    let result = with_frames(|a| a.free(frame)).unwrap_or(Err(FreeError::OutOfRange));
+    if result == Err(FreeError::NotAllocated) {
+        // A frame freed twice: a bug (callers ignore the result), which
+        // a reuse in between would turn into memory shared by two owners.
+        if DOUBLE_FREES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) == 0 {
+            crate::error!("mm: frame {:#x} freed twice", frame.start());
+        }
+    }
+    result
+}
+
+static DOUBLE_FREES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Frames freed while free (see `free_frame`).
+pub fn double_frees() -> u64 {
+    DOUBLE_FREES.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// `(free, total)` frames tracked by the allocator.

@@ -389,6 +389,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("smpsched_test", "ntdll.dll", "Windows/System32"),
     ("smpmem_test", "ntdll.dll", "Windows/System32"),
     ("smpcow_test", "ntdll.dll", "Windows/System32"),
+    ("vmcycle_test", "ntdll.dll", "Windows/System32"),
+    ("xmodify_test", "ntdll.dll", "Windows/System32"),
     ("smpsem_test", "ntdll.dll", "Windows/System32"),
     ("xstate_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
@@ -1581,6 +1583,8 @@ const USER_PROGRAMS: &[&str] = &[
     "smpsched_test",
     "smpmem_test",
     "smpcow_test",
+    "vmcycle_test",
+    "xmodify_test",
     "smpsem_test",
     "xstate_test",
     "ledger_test",
@@ -1678,13 +1682,17 @@ const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long scenario `name` may run.
 fn scenario_timeout(name: &str) -> Duration {
-    if name == "elasticsearch" || name.starts_with("sqllocaldb") {
+    let limit = if name == "elasticsearch" || name.starts_with("sqllocaldb") {
         ELASTICSEARCH_TIMEOUT
     } else if SLOW_SCENARIOS.contains(&name) {
         SLOW_TIMEOUT
     } else {
         BOOT_TEST_TIMEOUT
-    }
+    };
+    // One host thread for both processors (SINGLE_THREAD_TCG) is about
+    // half as fast: java_hello and java_http ran out of 300 s in a full
+    // suite on a loaded 4-CPU host.
+    if single_thread_tcg(name) && !Path::new("/dev/kvm").exists() { limit * 2 } else { limit }
 }
 
 type Result<T = ()> = std::result::Result<T, String>;
@@ -2607,6 +2615,24 @@ fn scenario_boot(name: &str) -> Boot {
     }
 }
 
+/// Scenarios (substrings of their image names) whose programs rewrite
+/// code that another processor runs: JIT compilers (HotSpot, the CLR) and
+/// xmodify_test. Without KVM they run with one host thread emulating both
+/// processors (`-accel tcg,thread=single`): QEMU's multi-threaded TCG (8.2,
+/// and still in 10.2: QEMU issue 4669) can keep a translation of code made
+/// while another processor was writing it, so the old instructions run on
+/// after the write. JITs patch code other threads run (inline caches,
+/// HotSpot's GC rewriting the object addresses embedded in compiled code).
+/// xmodify_test fails about 1 boot in 10 with `-accel tcg,thread=multi`.
+/// (The intermittent Java heap corruption is not this: WORKFLOW "Known
+/// intermittent".)
+const SINGLE_THREAD_TCG: &[&str] =
+    &["java_", "elasticsearch", "dotnet_", "pwsh_", "flaui", "xmodify_test"];
+
+fn single_thread_tcg(name: &str) -> bool {
+    SINGLE_THREAD_TCG.iter().any(|s| name.contains(s))
+}
+
 fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     // 512 MiB, plus twice the image for images with large programs (the
     // boot modules stay in memory, and programs like a JVM map them).
@@ -2624,11 +2650,21 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     }) {
         memory = memory.max(ELASTICSEARCH_MEMORY_MIB);
     }
+    let extra = std::env::var("XTASK_QEMU_ARGS").unwrap_or_default();
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-machine", "q35", "-cpu", "max", "-m", &format!("{memory}M"), "-smp", "2"])
-        // KVM when available, otherwise software emulation.
-        .args(["-accel", "kvm", "-accel", "tcg"])
-        .args(["-no-reboot"])
+    cmd.args(["-machine", "q35", "-cpu", "max", "-m", &format!("{memory}M"), "-smp", "2"]);
+    // KVM when available, otherwise software emulation; an `-accel` in
+    // XTASK_QEMU_ARGS replaces both (`-accel tcg,thread=multi` reproduces
+    // what SINGLE_THREAD_TCG avoids).
+    if !extra.split_whitespace().any(|a| a == "-accel") {
+        let tcg = if iso.file_name().is_some_and(|n| single_thread_tcg(&n.to_string_lossy())) {
+            "tcg,thread=single"
+        } else {
+            "tcg"
+        };
+        cmd.args(["-accel", "kvm", "-accel", tcg]);
+    }
+    cmd.args(["-no-reboot"])
         // No default network card; NET_SCENARIOS add their own.
         .args(["-nic", "none"]);
     if boot == Boot::Uefi {
@@ -2645,9 +2681,7 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     }
     cmd.arg("-cdrom").arg(iso);
     // Extra arguments for debugging, e.g. "-d int,cpu_reset -D qemu.log".
-    if let Ok(extra) = std::env::var("XTASK_QEMU_ARGS") {
-        cmd.args(extra.split_whitespace());
-    }
+    cmd.args(extra.split_whitespace());
     Ok(cmd)
 }
 
@@ -2784,6 +2818,22 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=smpcow_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["smpcow_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Commit, decommit, recommit and protect while another processor
+        // writes the pages around them.
+        name: "vmcycle_test",
+        cmdline: "qemu_exit run=vmcycle_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["vmcycle_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Code rewritten on one processor and run on the other (a JIT's
+        // garbage collector patching compiled code).
+        name: "xmodify_test",
+        cmdline: "qemu_exit run=xmodify_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["xmodify_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // A semaphore released and waited on from two processors at once.
@@ -4883,6 +4933,8 @@ fn plan_vms<'a>(selected: &[&'a Scenario]) -> Vec<Vm<'a>> {
     let mut vms = Vec::new();
     for &s in selected {
         match batchable(s) {
+            // Its own image, whose name picks the emulation (`qemu`).
+            Some(_) if single_thread_tcg(s.name) => vms.push(Vm::Single(s)),
             Some(_) if env::var_os("XTASK_NO_BATCH").is_none() => {
                 groups.entry(extra_modules(s.name)).or_default().push(s)
             }

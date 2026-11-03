@@ -550,6 +550,13 @@ memory runs under these locks: a data section's page is looked up before
 them (making a file's page may deliver directory change notifications,
 which write user buffers and may fault), and used only if the view is
 still there (lockdep caught the inverse order on a single-CPU run).
+MEM_DECOMMIT unmaps the pages and frees their frames (after the TLB
+shootdown), so a later MEM_COMMIT faults in fresh zeroed frames; all user
+mappings are 4 KiB pages, so a decommit or protect never has a large page
+to split (`vmcycle_test`: across 2 MiB boundaries, page by page, beside
+pages another processor writes). MEM_RESET keeps the contents (Windows
+may discard them, keeping them is allowed) and MEM_RESET_UNDO, alone in
+the allocation type, then succeeds.
 
 **Objects and handles** (`nt::object`): kernel objects are `KArc<KObject>`
 (an `ObjectBody` enum: console in/out, event, ...). A handle entry holds the

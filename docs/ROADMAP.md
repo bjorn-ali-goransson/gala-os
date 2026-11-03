@@ -82,6 +82,30 @@ explicitly in its commit.
   heap verification (`-XX:+VerifyBeforeGC -XX:+VerifyAfterGC`: 15 of 16
   java_http runs passed with no verification error, 1 timed out slowed
   by the verification under load).
+  **Narrowed (2026-11-03), still open.** The stale reference in the
+  String.equals crash's hs_err points into the survivor space the
+  collection just before had emptied (an object's pre-GC address); the
+  javac NPE inside String.equals is a field that read as 0. Ruled out:
+  (1) gala's NT layer and user-mode DLLs: the same JDK in gala-um (real
+  processors, the same `nt` code, ntdll, kernel32, heap) ran java_hello
+  440 times without a failure (`um --dir=jdk/bin`, WORKFLOW "Running the
+  JDK in gala-um"); (2) QEMU's multi-threaded TCG: it has a real
+  cross-modifying-code bug (`xmodify_test`, WORKFLOW "Known
+  intermittent"), and JIT scenarios now boot with `-accel
+  tcg,thread=single`, but then java_hello passed 40 of 40 and java_http
+  failed 1 of 40 with the MemberName NPE again; (3) the memory services
+  HotSpot grows and shrinks its heap and card table with: decommit then
+  commit gives zeroed pages (across 2 MiB boundaries, page by page),
+  NtQueryVirtualMemory's boundaries after partial decommit and protect
+  are exact, and protect/decommit/commit beside pages another processor
+  writes loses nothing (`vmcycle_test`; all user mappings are 4 KiB, so
+  there is no large page to split); MEM_RESET_UNDO is now accepted.
+  So what is left is the kernel's machine-level code that gala-um does
+  not run: paging and TLB shootdowns, the page-fault and exception
+  entry, context switches and interrupts. Frames freed twice are now
+  counted (the `stats:` line): with a panic on the first one, 80 more
+  JVM boots (java_hello 40 of 40, java_http 39 of 40, the other a
+  300 s timeout under load before it listened) freed no frame twice.
   smpsched_test's check 0x11 expected two threads to run at once, which
   Windows does not promise under load: the exchange is retried (and
   gala-um now keeps threads without an affinity on the processors the
