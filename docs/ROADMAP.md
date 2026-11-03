@@ -1903,6 +1903,44 @@ GPU. **Graphics and GPU** (the owner, 2026-11-03; design: ARCHITECTURE
    memory charged (R6). Handover (R9): GPU state dropped (devices reset),
    programs see device-lost and re-create.
 
+OT. **OpenTelemetry as the model for all telemetry** (the owner,
+   2026-11-03: "use open telemetry for all kinds of telemetry ... much
+   easier to trace things from the user space into the kernel space").
+   One data model (traces, spans, logs, metrics sharing trace and span
+   ids) for what today are separate streams (serial log, debugcon JSONL
+   events, `stats:` lines, crash reports, state dumps), readable by the
+   standard tools (an OTel collector, Jaeger, Tempo, Grafana). Sources:
+   the OpenTelemetry specification and opentelemetry-proto (Apache-2.0),
+   W3C Trace Context. Design rules:
+   - OTel is the **model**, not the in-kernel wire format: the kernel
+     writes compact binary records to per-CPU ring buffers (fixed size,
+     no allocation, never blocking, a drop counter); an exporter turns
+     them into OTLP outside the hot path (xtask on the host over
+     debugcon/virtio-serial; in a running system a user-mode service
+     sending OTLP/HTTP). Telemetry must not perturb record/replay (R7).
+   - **Context propagation is the core**: each thread carries a trace
+     context (W3C traceparent semantics) where the kernel reads it at
+     system-call entry (a gala-private TEB slot); kernel work becomes
+     child spans; the context follows work across process creation,
+     pipes, ALPC/RPC, I/O completion ports and work queues.
+   - **Windows programs speak ETW**: an ETW to OTel bridge
+     (`EventRegister`/`EventWrite`, TraceLogging in advapi32) turns what
+     real software already emits into OTel logs and spans; later the same
+     for the Linux personality (item LX).
+   - What exists maps onto it: events to span events/logs, `stats:` to
+     metrics, crash reports and dumps to logs carrying the trace context
+     they happened in; `cargo xtask triage` reads spans.
+   - **One clock** (R1): timestamps from the kernel's monotonic clock,
+     mapped to wall time once per export; ring state survives a kernel
+     handover (R9).
+   Stages: **OT1** xtask converts today's event stream to OTLP and opens
+   it in a local Jaeger (cheap, useful at once); **OT2** trace context in
+   the kernel, system calls, waits, faults, I/O and network as spans,
+   per-CPU rings; **OT3** propagation through ntdll/kernel32, process
+   creation, pipes, ALPC/RPC, IOCP; **OT4** the ETW bridge; **OT5** the
+   in-guest OTLP exporter for servers, controlled from the `gala` CLI
+   (on/off, sampling, endpoint).
+
 OF. **The current Office: Microsoft 365 apps and the new Outlook** (the
    owner, 2026-11-03: "the new Office suite would be very interesting to
    see if we have any blockers there"; classic Outlook is out of scope).

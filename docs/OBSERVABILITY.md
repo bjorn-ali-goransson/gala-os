@@ -15,6 +15,14 @@ whose cause has to be guessed is a gap to fill before (or together with)
 the fix. Reviews ask: "if this broke silently at 3 a.m., what would we
 have?"
 
+**Target model (the owner, 2026-11-03): OpenTelemetry** (ROADMAP item
+OT). New telemetry is designed to map onto OTel's traces, spans, logs and
+metrics with W3C trace context, so that a span opened in a program can be
+followed through ntdll into the kernel and back; the kernel keeps compact
+per-CPU binary records and an exporter produces OTLP. New events should
+carry the fields that mapping needs (thread, process, a span or parent
+when there is one) rather than free text.
+
 ## Gaps found 2026-11-03 (audit, ranked by the time they cost)
 
 An audit of what failures left behind, against the failures that cost the
