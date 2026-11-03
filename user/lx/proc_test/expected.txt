@@ -1,0 +1,50 @@
+-- /proc/self
+readlink(/proc/self) is getpid() = yes
+readlink(/proc/self/exe) = ok
+  absolute = yes
+  basename = proc_test
+readlink(/proc/self/cwd) is getcwd() = yes
+-- /proc/self/fd
+getdents64(/proc/self/fd), sorted: . .. 0 1 2 3 4 5 6
+readlink(fd/0) (stdin: /dev/null) = 9 "/dev/null"
+readlink(fd/3) starts with pipe:[ = yes
+readlink(fd/5) = 1 "/"
+readlink(fd/9) (not open) = -2 (ENOENT)
+open(/proc/self/fd/4) reopens the pipe's write end = ok
+  read(pipe) = 8 "via proc"
+-- /proc/self/stat
+read = yes
+field 1 is getpid() = yes
+comm = "proc_test"
+state = R
+field 4 is getppid() = yes
+at least 52 fields = yes
+field 5 is getpgid(0) = yes
+field 6 is getsid(0) = yes
+field 20 (threads) = 1
+-- /proc/self/status
+Name = "proc_test"
+Pid is getpid() = yes
+PPid is getppid() = yes
+Threads = 1
+-- /proc/self/maps
+more than 3 lines = yes
+every line: start-end perms ... = yes
+[stack] lines = 1
+[vdso] lines = 1
+the binary is mapped = yes
+  executable mappings of it = 1
+-- /proc/self/cmdline and environ
+cmdline[0] = "./proc_test"
+cmdline[1] = "first"
+cmdline[2] = ""
+cmdline[3] = "third arg"
+cmdline is argv = yes
+environ is envp = yes
+  entries = 3
+-- /proc/self/task
+task entries = 1
+  one is gettid() = yes
+open(/proc/self/nonexistent) = -2 (ENOENT)
+proc_test: ok
+-- exit status 0

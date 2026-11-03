@@ -1,0 +1,193 @@
+-- rt_sigaction
+SIGUSR1 at start = handler SIG_DFL, flags 0x0, mask 0x0, restorer none
+set SIGUSR1 (SA_SIGINFO|SA_RESTART, mask SIGUSR2) = 0
+SIGUSR1 now = handler ours, flags 0x14000004, mask 0x800, restorer ours
+set SIGUSR1 with SIGKILL|SIGSTOP in the mask = 0
+  SIGUSR1 (mask) = handler ours, flags 0x4000004, mask 0x800, restorer ours
+set SIGKILL = -22 (EINVAL)
+set SIGSTOP to SIG_IGN = -22 (EINVAL)
+query SIGKILL = handler SIG_DFL, flags 0x0, mask 0x0, restorer none
+set signal 0 = -22 (EINVAL)
+set signal 65 = -22 (EINVAL)
+rt_sigaction(sigsetsize 4) = -22 (EINVAL)
+rt_sigaction(bad pointer) = -14 (EFAULT)
+SIGCHLD = handler SIG_DFL, flags 0x4000000, mask 0x0, restorer ours
+-- rt_sigprocmask
+SIG_SETMASK(all) = 0
+  previous = 0x0
+  now (SIGKILL and SIGSTOP stay unblocked) = 0xfffffffffffbfeff
+SIG_UNBLOCK(SIGUSR1|SIGINT) = 0xfffffffffffbfcfd
+SIG_SETMASK(0), SIG_BLOCK(SIGTERM) = 0x4000
+how = 3 = -22 (EINVAL)
+sigsetsize 4 = -22 (EINVAL)
+how = 3 with no new set (ignored) = 0
+-- kill, tgkill, rt_sigqueueinfo and their siginfo
+kill(self, SIGUSR1) = 0
+  handler calls = 1
+  si_code (SI_USER) = 0
+  si_pid is us = yes
+  si_uid is getuid() = yes
+  in the handler: SIGUSR1 blocked = yes
+  mask after the handler = 0x0
+tgkill(self, self, SIGUSR1) = 0
+  si_code (SI_TKILL) = -6
+  si_pid is us = yes
+rt_sigqueueinfo(self, SIGUSR1, SI_QUEUE) = 0
+  si_code (SI_QUEUE) = -1
+  si_value = 0x1234567
+kill(self, 0) = 0
+kill(self, 65) = -22 (EINVAL)
+kill(nonexistent, SIGUSR1) = -3 (ESRCH)
+tgkill(self, nonexistent tid) = -3 (ESRCH)
+tgkill(0, self) = -22 (EINVAL)
+handler calls in all = 3
+-- pending signals
+blocked, sent USR2, USR1 x2, RTMIN x2: rt_sigpending = 0x400000a00
+  handler calls so far = 0
+  unblocked: the handlers ran in this order (RTMIN queued twice): 35 35 10 12
+  rt_sigpending now = 0x0
+rt_sigpending(sigsetsize 16) = -22 (EINVAL)
+rt_sigsuspend(empty) with SIGUSR1 pending = -4 (EINTR)
+  handler calls = 1
+  mask after (restored) = 0x200
+rt_sigtimedwait(SIGUSR1, 10 ms) with none pending = -11 (EAGAIN)
+rt_sigtimedwait(SIGUSR1) after tgkill = 10
+  si_signo = 10
+  si_code = -6
+  handler calls (none: taken, not delivered) = 1
+-- SA_NODEFER, SA_RESETHAND, sa_mask
+plain: SIGUSR2 blocked in its handler = yes
+SA_NODEFER: SIGUSR2 blocked in its handler = no
+  sa_mask's SIGTERM blocked in it = yes
+SA_RESETHAND: SIGUSR2 blocked in its handler = yes
+  SIGUSR2 after = handler SIG_DFL, flags 0x84000004, mask 0x0, restorer ours
+  handler calls = 3
+SIG_IGN: kill(self, SIGUSR2) = 0
+  blocked and ignored: left pending = yes
+  unblocked: discarded = yes
+-- SA_RESTART
+read(empty pipe), SIGALRM without SA_RESTART = -4 (EINTR)
+  then read = 1 "!"
+read(empty pipe), SIGALRM with SA_RESTART = 1 "!"
+nanosleep(5 s), SIGALRM with SA_RESTART (never restarted) = -4 (EINTR)
+  remaining time written, about 5 s = yes
+  SIGALRM handler calls = 3
+-- sigaltstack
+sigaltstack(query) = 0
+  ss_flags (SS_DISABLE) = 2
+sigaltstack(1 KiB) = -12 (ENOMEM)
+sigaltstack(bad flags) = -22 (EINVAL)
+sigaltstack(64 KiB) = 0
+SA_ONSTACK handler ran on the alternate stack = yes
+  sigaltstack's ss_flags in it (SS_ONSTACK) = 1
+  ucontext offset of uc_stack.ss_sp = 16
+  ss_flags after = 0
+without SA_ONSTACK: on the alternate stack = no
+sigaltstack(SS_DISABLE) = 0
+-- SIGCHLD
+rt_sigtimedwait(SIGCHLD) after a child's exit(7) = 17
+  si_code (CLD_EXITED) = 1
+  si_pid is the child = yes
+  si_status = 7
+  siginfo offset of the child's pid = 16
+  siginfo offset of the exit status = 24
+  wait4: exited 7
+handler: a child's exit(8): exited 8
+  SIGCHLD handler calls = 1
+  si_code = 1
+SIGCHLD ignored: wait4 (no zombie is left) = -10 (ECHILD)
+-- a fault's SIGSEGV and the rt_sigframe
+handler calls = 1
+fault_read returned the handler's RAX = 0x600d
+the interrupted mask is back after rt_sigreturn = yes
+si_signo = 11
+si_errno = 0
+si_code (SEGV_MAPERR) = 1
+si_addr = 0xdead000
+trapno (page fault) = 14
+err (user read, not present) = 4
+cr2 = 0xdead000
+cs = 0x33
+uc_flags & (UC_SIGCONTEXT_SS|UC_STRICT_RESTORE_SS) = 0x6
+RIP was the faulting instruction = yes
+the word below the ucontext is sa_restorer (pretcode) = yes
+siginfo minus ucontext (bytes) = 304
+fpstate 64-aligned, after siginfo = yes
+ucontext offset of r8 = 40
+ucontext offset of r9 = 48
+ucontext offset of r10 = 56
+ucontext offset of r11 = 64
+ucontext offset of r12 = 72
+ucontext offset of r13 = 80
+ucontext offset of r14 = 88
+ucontext offset of r15 = 96
+ucontext offset of rdi = 104
+ucontext offset of rsi = 112
+ucontext offset of rbp = 120
+ucontext offset of rbx = 128
+ucontext offset of rdx = 136
+ucontext offset of rax = 144
+ucontext offsets of the fault address (rcx, cr2) = 152 216
+ucontext offsets of the interrupted mask (oldmask, uc_sigmask) = 208 296
+ucontext offset of rsp (just above the handler's stack) = 160
+ucontext offset of rip (the faulting instruction) = 168
+ucontext offset of eflags (IF and bit 1 set) = 176
+ucontext offset of cs (0x33 in the low 16 bits) = 184
+ucontext offset of err (4) = 192
+ucontext offset of trapno (14) = 200
+ucontext offset of the fpstate pointer = 224
+siginfo offset of si_addr = 16
+musl offsetof(ucontext_t, uc_stack) = 16
+musl offsetof(ucontext_t, uc_mcontext) = 40
+musl offsetof(ucontext_t, uc_sigmask) = 296
+musl offsetof(siginfo_t, si_code) = 8
+musl offsetof(siginfo_t, si_addr) = 16
+musl offsetof(siginfo_t, si_pid) = 16
+musl offsetof(siginfo_t, si_uid) = 20
+musl offsetof(siginfo_t, si_status) = 24
+musl offsetof(siginfo_t, si_value) = 24
+sizeof(siginfo_t) = 128
+sizeof(stack_t) = 24
+store to a read-only page: handler calls = 1
+  si_code (SEGV_ACCERR) = 2
+  si_addr is the store's address = yes
+  err (user write, present) = 7
+  RIP was the store = yes
+fault with SIGSEGV blocked and a handler: killed by 11
+rt_sigreturn on a zeroed frame: killed by 11
+-- default actions (a child per signal; core files off)
+signal 1: killed by 1
+signal 2: killed by 2
+signal 3: killed by 3
+signal 4: killed by 4
+signal 5: killed by 5
+signal 6: killed by 6
+signal 7: killed by 7
+signal 8: killed by 8
+signal 9: killed by 9
+signal 10: killed by 10
+signal 11: killed by 11
+signal 12: killed by 12
+signal 13: killed by 13
+signal 14: killed by 14
+signal 15: killed by 15
+signal 16: killed by 16
+signal 17: ignored (the child exited 0)
+signal 18: ignored (the child exited 0)
+signal 19: stopped by 19
+signal 20: stopped by 20
+signal 21: stopped by 21
+signal 22: stopped by 22
+signal 23: ignored (the child exited 0)
+signal 24: killed by 24
+signal 25: killed by 25
+signal 26: killed by 26
+signal 27: killed by 27
+signal 28: ignored (the child exited 0)
+signal 29: killed by 29
+signal 30: killed by 30
+signal 31: killed by 31
+signal 34: killed by 34
+signal 64: killed by 64
+signal_test: ok
+-- exit status 0

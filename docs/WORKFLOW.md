@@ -99,9 +99,61 @@ ABI/ELF specs, observed behaviour, gVisor; never the Linux kernel source):
   buffer runs into an unmapped page fails with EFAULT, not a partial count
   (write_exit_test records what Linux does).
 - The kernel side is `kernel/src/lx/` (ARCHITECTURE "The lx module"),
-  tested with `cargo test -p kernel --lib lx`. No boot scenarios yet:
-  they come with the exec path, one per user/lx program, expecting its
+  tested with `cargo test -p kernel --lib lx`, and the ABI data crate
+  `kernel/lx_abi` (ARCHITECTURE "The lx_abi crate"), `cargo test -p
+  lx_abi`, whose tests read the transcripts: changing a test program's
+  output can break them (re-run both). No boot scenarios yet: they come
+  with the exec path, one per user/lx program, expecting its
   expected.txt.
+- **The milestone 2-3 corpus** (recorded on Linux 6.18.44, this machine,
+  as root and checked unchanged as uid 65534): fs_test (open/openat
+  flags, getdents64, the stat family, statx, rename/renameat2, unlink,
+  mkdir/rmdir, symlinks, errnos), pipe_test (pipe2 flags, EOF, EAGAIN,
+  EPIPE/SIGPIPE, dup/dup2/dup3, fcntl), fork_test (fork/vfork/execve/
+  wait4/waitid, statuses, groups and sessions, a subreaper), thread_test
+  (clone threads, futex), signal_test (actions, masks, pending, siginfo,
+  the observed rt_sigframe, sigaltstack, SIGCHLD, default actions),
+  clock_test, poll_test (poll/ppoll/select/pselect6/epoll), pty_test
+  (/dev/ptmx, termios, the line discipline, ISIG), proc_test
+  (/proc/self). They use `common/more.h` (on top of lx.h): musl's
+  `SYS_*` numbers and struct definitions, `say_ret` (the errno's name
+  appended), `lx_init` (closes every fd above 2, so fd numbers are
+  deterministic and printed; clears the signal mask, SIGPIPE/SIGCHLD to
+  default, umask 022), `set_action` (rt_sigaction with SA_RESTORER and
+  an rt_sigreturn restorer, as musl does), wait-status printing (the core
+  flag left out: it depends on core limits).
+- Determinism: `cargo xtask lx-expect --runs 5` runs each binary 5 times
+  and fails if a transcript varies (do it before `--record`). Rules the
+  corpus follows: print relations, not pids/addresses/times/inodes; sort
+  directory listings; children report through exit status or a pipe and
+  the parent waits before printing on; never rely on timing for an
+  ordering: a FUTEX_WAKE is retried until it wakes the thread known to be
+  about to wait, a signal that must arrive while a child waits is blocked
+  and taken with rt_sigtimedwait (pty_test's SIGWINCH: a handler plus a
+  blocking read raced and hung under load), echoes are read until the
+  expected byte count; nothing depends on root (EACCES checks would);
+  directory sizes and nlinks are file-system specific and not printed.
+- Linux behaviour found that the kernel must copy: a pipe's SIGPIPE has
+  si_code SI_USER; `select` ignores fds beyond the descriptor table
+  (fd 100 with a 64-entry table: 0, not EBADF); SA_RESETHAND keeps the
+  flag in the reset action (flags read back 0x84000004); SA_RESETHAND
+  does not imply SA_NODEFER; a blocked ignored signal stays pending until
+  unblocked; signals made deliverable at once nest (SIGUSR1's frame is
+  set up first, real-time ones on top run first: "35 35 10 12"); a store
+  to a never-touched bss page after mprotect(PROT_READ) faults with
+  err 6 (not present), so signal_test touches it first (err 7); musl's
+  `struct rusage` is 272 bytes, the kernel writes 144; a tiny child's
+  ru_maxrss can be 0; the process's exit status after the main thread's
+  exit(0) is the last thread's exit(5); clockid_t is 32-bit (a CPU clock
+  for pid p is `(int)((~p << 3) | 2)`); `^Z` to an orphaned foreground
+  group (a session leader's) is discarded; a fresh pty's master and
+  slave have the same termios.
+- Skips: nothing is skipped on this machine (ptys and /proc work), so
+  every expected.txt is the full transcript. pty_test and proc_test
+  print a single `SKIP: open(/dev/ptmx) = -errno` (or readlink
+  /proc/self) line instead when that is unavailable, so a machine
+  without them shows a mismatch whose diff names the reason; under gala
+  they are expected to pass once ptys and /proc exist.
 
 ## Adding a function to gala's ntdll or kernel32
 
@@ -1632,6 +1684,7 @@ the in-guest, deterministic version.
 | NT personality (objects, processes, files, sections, syscalls) | `kernel/src/nt/` |
 | Linux personality groundwork (ELF loader, initial stack, syscall/errno tables) | `kernel/src/lx/` |
 | Linux test programs, their binaries and expected transcripts | `user/lx/`, `user/lx/bin/` |
+| Linux ABI data (signal frames, sigsets, termios, struct layouts) | `kernel/lx_abi/` |
 | Ramfs | `kernel/src/fs/` |
 | Disk (virtio-blk) | `kernel/src/disk/` |
 | Display (virtio-gpu; the protocol and driver host-tested) | `kernel/src/display/` |

@@ -1993,6 +1993,21 @@ LX. **A Linux personality, later; its seams now** (the owner,
    arch_prctl in a Linux dispatcher table indexed by `lx::syscalls::nr`,
    each user/lx program as a boot scenario expecting its expected.txt;
    then milestone 2 (busybox's calls, from `strace` on real Linux).
+   **Milestones 2-3 test corpus done** (2026-11-03; WORKFLOW "Linux test
+   programs", ARCHITECTURE "The lx_abi crate"): nine more user/lx
+   programs recorded on Linux 6.18 and checked by `cargo xtask
+   lx-expect` (now with `--runs N`, a determinism check): fs_test,
+   pipe_test, fork_test, thread_test, signal_test, clock_test,
+   poll_test, pty_test, proc_test (about 930 transcript lines); and
+   `kernel/lx_abi` (signal numbers, sigsets, default actions, siginfo/
+   ucontext/sigcontext/rt_sigframe layouts, termios and a fresh pty's
+   defaults, stat/statx/dirent64/epoll_event/pollfd/rusage/timespec
+   layouts), host-tested against those transcripts. **Next**: each
+   program becomes a boot scenario as its system calls land in the Linux
+   dispatcher (files, pipes and fork first: busybox's needs), the kernel
+   depending on lx_abi; then signals (frames from `lx_abi::signal`),
+   threads/futex, clocks and polling, ptys over the core terminal object
+   (seam 1), /proc.
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing

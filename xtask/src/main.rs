@@ -1802,7 +1802,7 @@ commands:
   bench        run user/bench on gala; write target/report/bench.json and
                compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
   lx-expect    run the Linux test programs (user/lx) on this Linux host and compare
-               with their expected.txt: lx-expect [--record] [--no-build]
+               with their expected.txt: lx-expect [--record] [--no-build] [--runs N]
   alloc-audit  find infallible allocations in the kernel's machine code (calls that
                abort on out-of-memory: Vec::clone, collect, ...; clippy cannot see
                them): alloc-audit [kernel ELF] [--all: also growth after try_reserve]
@@ -1980,6 +1980,9 @@ fn unit_tests() -> Result {
             .arg("handover::"),
     )?;
     run_cmd(cargo().args(["test", "--package", "xtask"]))?;
+    // The Linux personality's ABI data, checked against the user/lx
+    // transcripts recorded on Linux (ROADMAP LX).
+    run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
     run_cmd(cargo().args(["test", "--package", "galapkg"]))

@@ -18,6 +18,10 @@
 //!   any, then `-- exit status N` or `-- killed by signal N`. A mismatch
 //!   prints a line diff, leaves `actual.txt` in the run directory and
 //!   fails the command.
+//! - `--runs N` runs each binary N times (default 1) and fails if the
+//!   transcripts differ between runs: a check that a test is
+//!   deterministic, made before recording (WORKFLOW "Linux test
+//!   programs").
 
 use std::fs;
 use std::io::Read;
@@ -46,6 +50,7 @@ pub fn lx_expect(args: &[String]) -> Result {
     }
     let record = args.iter().any(|a| a == "--record");
     let no_build = args.iter().any(|a| a == "--no-build");
+    let runs = runs_arg(args)?;
     let lx = root().join("user/lx");
     if !no_build {
         build(&lx)?;
@@ -66,6 +71,27 @@ pub fn lx_expect(args: &[String]) -> Result {
             }
             let dir = target_dir().join("lx-expect").join(&binary);
             let actual = run(&exe, &dir, test)?;
+            let mut varied = false;
+            for i in 1..runs {
+                let again = run(&exe, &dir, test)?;
+                if again != actual {
+                    let path = dir.join("varied.txt");
+                    let _ = fs::write(&path, &again);
+                    eprintln!(
+                        "lx-expect: {binary}: run {} differs from run 1 (- run 1, + run {}; all of it in {}):",
+                        i + 1,
+                        i + 1,
+                        path.display()
+                    );
+                    eprint!("{}", diff(&actual, &again));
+                    varied = true;
+                    break;
+                }
+            }
+            if varied {
+                failed.push(format!("{binary}: not deterministic over {runs} runs"));
+                continue;
+            }
             if record && binary == *test {
                 fs::write(&expected_path, &actual)
                     .map_err(|e| format!("writing {}: {e}", expected_path.display()))?;
@@ -101,6 +127,26 @@ pub fn lx_expect(args: &[String]) -> Result {
     } else {
         Err(format!("lx-expect: {} failed:\n  {}", failed.len(), failed.join("\n  ")))
     }
+}
+
+/// `--runs N` (or `--runs=N`): how many times each binary runs.
+fn runs_arg(args: &[String]) -> Result<usize> {
+    let mut runs = 1;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let value = if a == "--runs" {
+            it.next().map(String::as_str)
+        } else if let Some(v) = a.strip_prefix("--runs=") {
+            Some(v)
+        } else {
+            continue;
+        };
+        runs = value
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .ok_or_else(|| format!("--runs takes a count >= 1, not {value:?}"))?;
+    }
+    Ok(runs)
 }
 
 /// Rebuilds user/lx/bin when musl-gcc is there.
@@ -248,6 +294,16 @@ mod tests {
     }
 
     #[test]
+    fn runs_argument() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(runs_arg(&args(&[])).unwrap(), 1);
+        assert_eq!(runs_arg(&args(&["--record", "--runs", "5"])).unwrap(), 5);
+        assert_eq!(runs_arg(&args(&["--runs=3"])).unwrap(), 3);
+        assert!(runs_arg(&args(&["--runs", "0"])).is_err());
+        assert!(runs_arg(&args(&["--runs"])).is_err());
+    }
+
+    #[test]
     fn transcript_records_how_it_ended() {
         assert_eq!(transcript("hi\n", "", Some(44), None), "hi\n-- exit status 44\n");
         assert_eq!(
@@ -261,7 +317,7 @@ mod tests {
     fn every_test_has_expected_output_and_binaries() {
         let lx = root().join("user/lx");
         let tests = tests(&lx).unwrap();
-        assert!(tests.len() >= 6, "{tests:?}");
+        assert!(tests.len() >= 15, "{tests:?}");
         for t in tests {
             assert!(lx.join(&t).join("expected.txt").exists(), "{t}: no expected.txt");
             assert!(lx.join("bin").join(&t).exists(), "{t}: no binary in user/lx/bin");

@@ -4028,6 +4028,77 @@ TODO: the exec path and the first system calls (ROADMAP LX "Next");
 randomization (the stack gap, AT_RANDOM from the kernel's random source,
 the bases); the system-call numbers 462..=469 (Linux 6.18 has them; our
 sources do not name them yet).
+
+### The lx_abi crate (milestones 2-3 data, built 2026-11-03)
+
+`kernel/lx_abi` is a separate crate (workspace member; `no_std`, no
+dependencies, no allocation, `#![forbid(unsafe_code)]`) holding the
+Linux ABI's plain data for milestones 2 and 3. It is a crate, not a
+module under `kernel/src/lx`, so it builds and is host-tested without
+editing `lx/mod.rs` or the kernel's module tree (other work owns those);
+the kernel adds `lx_abi = { path = "lx_abi" }` and uses it when the
+Linux system calls are built. Tested with `cargo test -p lx_abi` (part
+of `cargo xtask test`'s unit tests); CI runs clippy on it for the host
+with tests and for x86_64-unknown-none; kernel/clippy.toml applies to it
+too.
+
+- **`lx_abi::signal`**: signal numbers (1..=64; SIGRTMIN 32, the
+  kernel's; musl's is 35), `SA_*`, `SI_*`/`SEGV_*`/`CLD_*` codes,
+  `SigSet` (64-bit: `blockable()` drops SIGKILL/SIGSTOP, `apply(how,
+  set)` is rt_sigprocmask's SIG_BLOCK/UNBLOCK/SETMASK with that rule,
+  `lowest`), `default_action(sig)` (signal(7): Term/Core/Ign/Stop/Cont;
+  real-time signals Term), `KSigaction` (rt_sigaction's 32-byte struct
+  with sa_restorer), `Siginfo` (128 bytes; constructors for
+  kill/tgkill, SI_QUEUE, SIGCHLD and faults put pid/uid at 16/20,
+  status/value at 24, the address at 16), `Stack` (stack_t, 24),
+  `Sigcontext` (256: r8..r15, rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp,
+  rip, eflags, cs/gs/fs/ss, err, trapno, oldmask, cr2, fpstate,
+  reserved), `Ucontext` (the kernel's, 304 bytes, not libc's),
+  `RtSigframe` (pretcode = sa_restorer at the handler's rsp, the
+  ucontext at +8, siginfo at +312, then the FPU/XSAVE state 64-aligned,
+  its size CPU-dependent).
+- **`lx_abi::termios`**: the kernel's 36-byte `struct termios`, flag
+  bits, `c_cc` indexes (NCCS 19), `Termios::fresh_pty()` (iflag
+  ICRNL|IXON, oflag OPOST|ONLCR, cflag B38400|CS8|CREAD, lflag
+  ISIG|ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE|IEXTEN; INTR ^C, QUIT ^\,
+  ERASE DEL, KILL ^U, EOF ^D, VMIN 1, VTIME 0, ...; both ends of a new
+  pty start so), `make_raw` (cfmakeraw), `Winsize`, the tty ioctl
+  numbers.
+- **`lx_abi::layout`**: `Stat` (144), `Statx` (256), `Dirent64Head` (19,
+  packed: the name at 19; `dirent64_reclen` = align8(19 + len + 1)),
+  `EpollEvent` (packed, 12: data at 4), `Timespec`, `Timeval`, `Pollfd`
+  (8), `Rusage` (144: libc's may be larger), and their constants.
+
+**How the layouts are known**: each is checked by a host test against a
+transcript recorded on Linux (`include_str!` of the test programs'
+expected.txt). signal_test's fault probe loads a distinct marker into
+every general register and faults; the handler prints where each marker
+(and rip, rsp, eflags, cs, err, trapno, cr2, oldmask, uc_sigmask,
+uc_stack, the fpstate pointer) lies in the ucontext, how far siginfo is
+from it, and that the word below it is the restorer. fs_test, fork_test,
+poll_test and pty_test fill a buffer with a pattern and print how many
+bytes stat/statx/getrusage/epoll_wait/TCGETS wrote and where values
+landed. signal_test sends each signal to a child at SIG_DFL and prints
+the outcome, which `default_action` must predict; pty_test prints a fresh
+pty's and a cfmakeraw'd termios.
+
+**How the kernel will use it**: the Linux signal code builds an
+`RtSigframe` (plus the XSAVE area) below the interrupted rsp (or on the
+alternate stack for `SA_ONSTACK`), uc_sigmask = the mask before the
+handler, `Sigcontext` from the interrupted registers; the handler starts
+with rip = handler, rsp = &pretcode, rdi = signo, rsi = &info, rdx = &uc;
+rt_sigreturn restores from the `Ucontext` at rsp (the handler's `ret`
+popped pretcode) and re-applies `SigSet::blockable`. Default actions come
+from `default_action` (SIGTSTP/SIGTTIN/SIGTTOU from a terminal are
+discarded in an orphaned process group: pty_test). The pty's line
+discipline starts from `Termios::fresh_pty`; the stat family,
+getdents64, epoll, poll and wait4 copy these structs out.
+
+TODO (with the Linux signal code): XSAVE-area sizes per CPU (the frame's
+tail); `SA_RESTART`'s per-call rules (a pipe read restarts, nanosleep
+never does: signal_test); sigaltstack's minimum (MINSIGSTKSZ 2048 vs
+AT_MINSIGSTKSZ).
+
 ## Plan: graphics and GPU (proposed 2026-11-03; stage G1 built)
 
 The owner's goal: GPU support, first for the browser (ROADMAP BR stage 2,
