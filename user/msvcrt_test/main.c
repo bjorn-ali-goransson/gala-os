@@ -25,7 +25,8 @@
  * _getmaxstdio/_setmaxstdio, fgetpos/fsetpos, the wide stream functions
  * on a narrow text stream (fputws, putwc, fgetwc, getwc, ungetwc),
  * _putws, _aligned_malloc/_aligned_free, _beginthread and
- * _getdrive/_chdrive. Built against msvcrt
+ * _getdrive/_chdrive; what FileZilla Server's GUI imports: iswlower,
+ * iswupper (and iswcntrl, iswgraph, iswascii), _wtol and difftime. Built against msvcrt
  * (not mingw's own stdio) by build.sh.
  * Prints "msvcrt_test: ok" or exits with the number of the failing check. */
 #include <stdio.h>
@@ -223,6 +224,28 @@ static void filezilla_checks(void) {
         Sleep(10);
     CHECK(begun == 5);
     CHECK(_getdrive() == 3 && _chdrive(3) == 0);
+
+    /* What FileZilla Server's GUI (and its wxbase DLL) imports by name:
+     * iswlower/iswupper (and the other classes), _wtol (long is 32 bits)
+     * and difftime (x64 msvcrt's time_t is 64 bits). Looked up, since
+     * mingw's headers make some of them macros or inline functions. */
+    HMODULE crt = GetModuleHandleA("msvcrt.dll");
+    typedef int (__cdecl *wclass)(wint_t);
+    wclass w_lower = (wclass)GetProcAddress(crt, "iswlower");
+    wclass w_upper = (wclass)GetProcAddress(crt, "iswupper");
+    wclass w_cntrl = (wclass)GetProcAddress(crt, "iswcntrl");
+    wclass w_graph = (wclass)GetProcAddress(crt, "iswgraph");
+    wclass w_ascii = (wclass)GetProcAddress(crt, "iswascii");
+    long (__cdecl *w_tol)(const wchar_t *) = (long (__cdecl *)(const wchar_t *))GetProcAddress(crt, "_wtol");
+    double (__cdecl *diff)(__int64, __int64) = (double (__cdecl *)(__int64, __int64))GetProcAddress(crt, "difftime");
+    CHECK(w_lower && w_upper && w_cntrl && w_graph && w_ascii && w_tol && diff);
+    CHECK(w_lower(L'a') && w_lower(0xe9) && !w_lower(L'A') && !w_lower(L'1'));
+    CHECK(w_upper(L'Z') && w_upper(0xc9) && !w_upper(L'z') && !w_upper(L' '));
+    CHECK(w_cntrl(L'\n') && w_cntrl(0x7f) && !w_cntrl(L'a'));
+    CHECK(w_graph(L'x') && w_graph(L'!') && !w_graph(L' ') && !w_graph(L'\t'));
+    CHECK(w_ascii(L'~') && !w_ascii(0x80) && !w_ascii(0xe9));
+    CHECK(w_tol(L"  -123xyz") == -123 && w_tol(L"+77") == 77 && w_tol(L"x") == 0);
+    CHECK(diff(1700000010, 1700000000) == 10.0 && diff(0, 5) == -5.0);
 }
 
 /* What MinGit's git.exe uses (wide strings and paths, startup, a few

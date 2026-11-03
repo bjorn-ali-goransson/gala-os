@@ -2044,6 +2044,20 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
        crypt32 but forwards only).
      - dbghelp (LocalDB's In-Memory OLTP): `SymFromAddr`,
        `SymLoadModuleExW`, `SymUnloadModule64`.
+   - Done (test first; expected values from Microsoft's documentation
+     and Wine's conformance tests, which are validated on Windows; no
+     Windows machine was at hand, so each test still needs a run-all.ps1
+     check there):
+     1. msvcrt `iswlower`, `iswupper` (and `iswcntrl`, `iswgraph`,
+        `iswascii`), `_wtol`, `difftime` (`msvcrt_test`); oleaut32
+        `SystemTimeToVariantTime`, `VariantTimeToSystemTime`,
+        `VarBstrFromCy`, `VarCyFromR8`, `GetActiveObject` (MK_E_UNAVAILABLE,
+        recorded) and the LocalDB stubs `VarI4FromStr`, `VarUI4FromStr`,
+        `VarR8FromStr`, `VarCyFromStr`, `VarBoolFromStr`,
+        `VarBstrFromBool`, `VarDateFromStr`, `VarCmp` (`oleaut32_test`).
+        FileZilla Server's GUI and StackBuilder's wxWidgets DLLs now find
+        every msvcrt and oleaut32 import (the GUI then needs user32's and
+        gdi32's stubs, below).
    - Elsewhere (not in these crates; for the agents there): FileZilla
      Server's GUI also stops on user32 (54 stubs: carets, the clipboard,
      DDE, DrawEdge/DrawFrameControl, window placement), gdi32 (16:

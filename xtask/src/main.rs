@@ -722,6 +722,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("controls_test", "user32.dll", "Windows/System32"),
     ("controls_test", "gdi32.dll", "Windows/System32"),
     ("controls_test", "user/bin/controls_test.exe", "gala"),
+    ("oleaut32_test", "ntdll.dll", "Windows/System32"),
+    ("oleaut32_test", "kernel32.dll", "Windows/System32"),
+    ("oleaut32_test", "msvcrt.dll", "Windows/System32"),
+    ("oleaut32_test", "ole32.dll", "Windows/System32"),
+    ("oleaut32_test", "oleaut32.dll", "Windows/System32"),
+    ("oleaut32_test", "advapi32.dll", "Windows/System32"),
+    ("oleaut32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("oleaut32_test", "user/bin/oleaut32_test.exe", "gala"),
     ("richedit_test", "ntdll.dll", "Windows/System32"),
     ("richedit_test", "kernel32.dll", "Windows/System32"),
     ("richedit_test", "msvcrt.dll", "Windows/System32"),
@@ -3878,6 +3886,16 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=controls_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["controls_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: oleaut32's dates, currency and string conversions and
+        // VarCmp against documented behaviour, for what wxWidgets
+        // (FileZilla Server's GUI) and SQL Server LocalDB import
+        // (user/oleaut32_test/main.c, mingw).
+        name: "oleaut32_test",
+        cmdline: "qemu_exit run=oleaut32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["oleaut32_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // W3: rich edit controls (msftedit.dll's RICHEDIT50W, riched20.dll's

@@ -1453,7 +1453,18 @@ Windows, never shadows the system's DLLs.)
   Automation"); ProgIDs and out-of-process servers fail as unregistered
   (recorded); no marshaling across apartments yet. oleaut32 has BSTRs, VARIANTs (clear, copy, conversions
   between numbers, booleans, currency and strings in the en-US format;
-  dates and decimals recorded as missing), SAFEARRAYs (descriptors with
+  dates and decimals in VARIANTs recorded as missing), the direct
+  conversions programs import (VarI4/UI4/R8/Cy/BoolFromStr,
+  VarCyFromR8, VarBstrFromCy/Bool; strings to currency in exact decimal
+  arithmetic, half to even), dates (date.rs: SystemTimeToVariantTime,
+  VariantTimeToSystemTime to the second, VarDateFromStr for en-US
+  month/day/year, year-month-day and English month names; the forms
+  Windows reads relative to the current year are recorded), VarCmp
+  (Windows' rules: a string is greater than any number, an empty one
+  equals VT_EMPTY, strings through kernel32's CompareStringW), and
+  GetActiveObject (no running object table: MK_E_UNAVAILABLE, recorded).
+  Locales other than English and the defaults are read as en-US and
+  recorded. SAFEARRAYs (descriptors with
   the VARTYPE/IRecordInfo/IID prefix, bounds stored rightmost first,
   BSTR/interface/VARIANT elements owned), VarCyFromDec; type libraries
   are not registered. Its exports have Windows' ordinals (build.rs, from
