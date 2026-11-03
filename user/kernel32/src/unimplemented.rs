@@ -15,7 +15,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     EnumResourceLanguagesA
     FindFirstChangeNotificationW
     FindNextChangeNotification
-    GetActiveProcessorCount
     GetCurrencyFormatEx
     GetCurrencyFormatW
     GetNamedPipeHandleStateA
@@ -30,7 +29,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetTapeParameters
     GetTapePosition
     GetTapeStatus
-    GetTempFileNameW
     GetThreadIOPendingFlag
     GetThreadPriorityBoost
     GetVolumePathNamesForVolumeNameW

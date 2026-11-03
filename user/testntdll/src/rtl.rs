@@ -294,6 +294,60 @@ pub extern "system" fn RtlUnicodeStringToAnsiString(
     STATUS_SUCCESS
 }
 
+/// RtlFormatCurrentUserKeyPath(*CurrentUserKeyPath): `\REGISTRY\USER\<SID>`
+/// for the user of the thread's token (or the process's), allocated from
+/// the process heap (freed with RtlFreeUnicodeString).
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlFormatCurrentUserKeyPath(out: *mut UnicodeString) -> u32 {
+    const TOKEN_QUERY: u32 = 8;
+    const TOKEN_USER: u32 = 1;
+    let mut token = 0usize;
+    if crate::NtOpenThreadToken(-2, TOKEN_QUERY, 1, &mut token) != STATUS_SUCCESS {
+        let status = crate::NtOpenProcessToken(-1, TOKEN_QUERY, &mut token);
+        if status != STATUS_SUCCESS {
+            return status;
+        }
+    }
+    // TOKEN_USER { SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes } } and
+    // the SID after it.
+    let mut info = [0u64; 16];
+    let mut ret = 0u32;
+    let status =
+        crate::NtQueryInformationToken(token, TOKEN_USER, info.as_mut_ptr().cast(), 128, &mut ret);
+    crate::NtClose(token);
+    if status != STATUS_SUCCESS {
+        return status;
+    }
+    let mut sid = UnicodeString { length: 0, maximum: 0, buffer: core::ptr::null_mut() };
+    let status = RtlConvertSidToUnicodeString(&mut sid, info[0] as *const u8, 1);
+    if status != STATUS_SUCCESS {
+        return status;
+    }
+    let prefix = b"\\REGISTRY\\USER\\";
+    // SAFETY: the converted SID string; the caller's output.
+    unsafe {
+        let n = usize::from(sid.length) / 2;
+        let total = prefix.len() + n;
+        let p = alloc(2 * total + 2).cast::<u16>();
+        if p.is_null() {
+            RtlFreeUnicodeString(&mut sid);
+            return STATUS_NO_MEMORY;
+        }
+        for (i, &c) in prefix.iter().enumerate() {
+            *p.add(i) = u16::from(c);
+        }
+        core::ptr::copy_nonoverlapping(sid.buffer, p.add(prefix.len()), n);
+        *p.add(total) = 0;
+        RtlFreeUnicodeString(&mut sid);
+        *out = UnicodeString {
+            length: (2 * total) as u16,
+            maximum: (2 * total + 2) as u16,
+            buffer: p,
+        };
+    }
+    STATUS_SUCCESS
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlFreeUnicodeString(s: *mut UnicodeString) {
     // SAFETY: a string from an allocating Rtl call.

@@ -25,9 +25,12 @@ pub enum Category {
     Logon = 128,
     /// Console sessions and pseudo consoles: created, resized, closed.
     Console = 256,
+    /// File opens: the name, the handle or the failing status.
+    File = 512,
 }
 
-const NAMES: [(&str, u32); 9] = [
+const NAMES: [(&str, u32); 10] = [
+    ("file", Category::File as u32),
     ("net", Category::Net as u32),
     ("logon", Category::Logon as u32),
     ("console", Category::Console as u32),

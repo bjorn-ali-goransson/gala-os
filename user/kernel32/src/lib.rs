@@ -21,6 +21,7 @@
 use core::ffi::c_void;
 
 mod actctx;
+mod address_wait;
 mod ansi;
 mod calendar;
 mod console;
@@ -35,6 +36,7 @@ mod pipe;
 mod pool;
 mod process;
 mod processor;
+mod procinfo;
 mod pty;
 mod resource;
 mod runtime;
@@ -3223,6 +3225,22 @@ pub extern "system" fn FlsFree(index: u32) -> Bool {
 #[unsafe(no_mangle)]
 pub extern "system" fn FlsGetValue(index: u32) -> *mut c_void {
     TlsGetValue(index)
+}
+
+/// FlsGetValue2 and TlsGetValue2 (Windows 11 24H2): the slot's value
+/// without changing the last error (and without checking the index, as
+/// documented: the caller passes a valid one).
+#[unsafe(no_mangle)]
+pub extern "system" fn FlsGetValue2(index: u32) -> *mut c_void {
+    TlsGetValue2(index)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TlsGetValue2(index: u32) -> *mut c_void {
+    if index >= 64 {
+        return core::ptr::null_mut();
+    }
+    teb_u64(tls_slot(index)) as *mut c_void
 }
 
 #[unsafe(no_mangle)]

@@ -278,6 +278,8 @@ syscall_stubs! {
     GalaConsoleSize = 0x7f81, fn(id: u32, size: *mut u32, set: u32);
     GalaConsoleClose = 0x7f82, fn(id: u32);
     GalaConsoleTrace = 0x7f83, fn(id: u32, direction: u32, bytes: *const u8, len: usize);
+    // Object identity (gala's number, unverified): CompareObjectHandles.
+    NtCompareObjects = 0x7f90, fn(first: usize, second: usize);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);
@@ -1341,6 +1343,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0x8000_0005, 234),  // BUFFER_OVERFLOW -> ERROR_MORE_DATA
     (0x8000_0006, 18),   // NO_MORE_FILES
     (0xc000_0001, 31),   // UNSUCCESSFUL -> ERROR_GEN_FAILURE
+    (0xc000_01ac, 1656), // NOT_SAME_OBJECT -> ERROR_NOT_SAME_OBJECT
     (0xc000_0002, 1),    // NOT_IMPLEMENTED -> ERROR_INVALID_FUNCTION
     (0xc000_0003, 87),   // INVALID_INFO_CLASS -> ERROR_INVALID_PARAMETER
     (0xc000_0004, 24),   // INFO_LENGTH_MISMATCH -> ERROR_BAD_LENGTH

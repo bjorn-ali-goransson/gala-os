@@ -121,6 +121,9 @@ pub const GALA_CONSOLE_CREATE: u32 = 0x7f80;
 pub const GALA_CONSOLE_SIZE: u32 = 0x7f81;
 pub const GALA_CONSOLE_CLOSE: u32 = 0x7f82;
 pub const GALA_CONSOLE_TRACE: u32 = 0x7f83;
+/// NtCompareObjects (kernelbase's CompareObjectHandles; gala's number,
+/// unverified; BR: Chromium's handle checks).
+pub const NT_COMPARE_OBJECTS: u32 = 0x7f90;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -340,6 +343,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_CONSOLE_SIZE, "GalaConsoleSize", 3, gala_console_size),
     (GALA_CONSOLE_CLOSE, "GalaConsoleClose", 1, gala_console_close),
     (GALA_CONSOLE_TRACE, "GalaConsoleTrace", 4, gala_console_trace),
+    (NT_COMPARE_OBJECTS, "NtCompareObjects", 2, nt_compare_objects),
     (GALA_WINDOW_REGISTER, "GalaWindowRegister", 2, gala_window_register),
     (GALA_WINDOW_UPDATE, "GalaWindowUpdate", 1, gala_window_update),
     (GALA_WINDOW_UNREGISTER, "GalaWindowUnregister", 1, gala_window_unregister),
@@ -942,6 +946,14 @@ fn nt_close(call: &mut Call<'_>) -> NtStatus {
         process::prune();
     }
     NtStatus::SUCCESS
+}
+
+/// NtCompareObjects(FirstObjectHandle, SecondObjectHandle): SUCCESS if
+/// both handles refer to the same object, STATUS_NOT_SAME_OBJECT if not.
+fn nt_compare_objects(call: &mut Call<'_>) -> NtStatus {
+    let first = tri!(call.handle(Handle(arg!(call, 0)))).object.clone();
+    let second = tri!(call.handle(Handle(arg!(call, 1)))).object.clone();
+    if KArc::ptr_eq(&first, &second) { NtStatus::SUCCESS } else { NtStatus::NOT_SAME_OBJECT }
 }
 
 /// NtTerminateProcess(ProcessHandle, ExitStatus)
@@ -3465,6 +3477,11 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
             let class = p.priority_class.load(core::sync::atomic::Ordering::Relaxed);
             return call.return_info(&[0, class], buffer, length, ret_ptr);
         }
+        PROCESS_HANDLE_COUNT => {
+            // A ULONG (PROCESS_HANDLE_INFORMATION's first field).
+            let n = p.handles.lock().iter().count() as u32;
+            return call.return_info(&n.to_le_bytes(), buffer, length, ret_ptr);
+        }
         PROCESS_SESSION_INFORMATION => {
             let session = process::SESSION_ID.to_le_bytes();
             return call.return_info(&session, buffer, length, ret_ptr);
@@ -3501,6 +3518,7 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
 const PROCESS_TIMES: u64 = 4;
 const PROCESS_DEBUG_PORT: u64 = 7;
 const PROCESS_PRIORITY_CLASS: u64 = 18;
+const PROCESS_HANDLE_COUNT: u64 = 20;
 const PROCESS_SESSION_INFORMATION: u64 = 24;
 const PROCESS_WOW64_INFORMATION: u64 = 26;
 const PROCESS_IMAGE_FILE_NAME: u64 = 27;
@@ -4496,7 +4514,7 @@ fn nt_create_file(call: &mut Call<'_>) -> NtStatus {
         (arg!(call, 6) as u32, arg!(call, 7) as u32, arg!(call, 8) as u32);
     // EaLength is a ULONG: on the stack its upper half is garbage.
     let ea = (arg!(call, 9), arg!(call, 10) as u32 as u64);
-    call.open_or_create(OpenRequest {
+    let status = call.open_or_create(OpenRequest {
         out,
         access,
         attrs_ptr: attrs,
@@ -4505,7 +4523,42 @@ fn nt_create_file(call: &mut Call<'_>) -> NtStatus {
         disposition,
         options,
         ea,
-    })
+    });
+    emit_open(call, attrs, out, status);
+    status
+}
+
+/// The `file` event of an open (`events=file`): the name as given (and
+/// its root directory handle), the handle made, the status. What a
+/// program opened and failed to open, in order (BR: Chromium's start-up
+/// opens files no ledger line names).
+fn emit_open(call: &Call<'_>, attrs: u64, out: u64, status: NtStatus) {
+    use crate::events::{Category, Str, emit, enabled};
+    if !enabled(Category::File) {
+        return;
+    }
+    let Ok(Some((root, name, _))) = call.raw_object_attributes(attrs) else { return };
+    let mut text = [0u8; 512];
+    let mut n = 0;
+    for c in char::decode_utf16(name.iter().copied()) {
+        let c = c.unwrap_or('?');
+        if n + c.len_utf8() > text.len() {
+            break;
+        }
+        n += c.encode_utf8(&mut text[n..]).len();
+    }
+    let path = core::str::from_utf8(&text[..n]).unwrap_or("?");
+    let handle = if status == NtStatus::SUCCESS { call.read_u64(out).unwrap_or(0) } else { 0 };
+    emit(
+        Category::File,
+        "open",
+        format_args!(
+            r#""pid":{},"path":{},"root":{root},"handle":{handle},"status":{}"#,
+            call.process.id,
+            Str(path),
+            status.0
+        ),
+    );
 }
 
 /// NtOpenFile(*FileHandle, DesiredAccess, ObjectAttributes, *IoStatusBlock,
@@ -4514,7 +4567,7 @@ fn nt_open_file(call: &mut Call<'_>) -> NtStatus {
     let (out, access, attrs, iosb) =
         (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));
     let (share, options) = (arg!(call, 4) as u32, arg!(call, 5) as u32);
-    call.open_or_create(OpenRequest {
+    let status = call.open_or_create(OpenRequest {
         out,
         access,
         attrs_ptr: attrs,
@@ -4523,7 +4576,9 @@ fn nt_open_file(call: &mut Call<'_>) -> NtStatus {
         disposition: file::FILE_OPEN,
         options,
         ea: (0, 0),
-    })
+    });
+    emit_open(call, attrs, out, status);
+    status
 }
 
 /// NtDeviceIoControlFile(FileHandle, Event, ApcRoutine, ApcContext,

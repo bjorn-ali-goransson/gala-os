@@ -264,6 +264,39 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["lib/netcoreapp3.0/Interop.UIAutomationClient.dll", "LICENSE.txt"],
         excludes: &[],
     },
+    // Chromium 159.0.8141.0 (BSD-style), the open-source browser Edge is
+    // built on: a build of the official snapshot bucket (Win_x64 revision
+    // 1733679, refs/heads/main@{#1733679}, commit a68e458a). Google
+    // publishes no checksum for snapshots: the SHA-256 is the one we
+    // measured (THIRD_PARTY.md). The browser (chrome.exe, chrome.dll,
+    // chrome_elf.dll), its data (ICU, V8's snapshot, the resource packs,
+    // English only) and the software GL/Vulkan DLLs; not the test
+    // program (interactive_ui_tests.exe, 375 MB), the installer or the
+    // services.
+    Prebuilt {
+        name: "chromium",
+        url: "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Win_x64/1733679/chrome-win.zip",
+        checksum: "a20f7944db889524f80dd0fa5c21456fe1842a178312ac1a0cfda36eec2ca9aa",
+        members: &[
+            "chrome-win/chrome.exe",
+            "chrome-win/chrome.dll",
+            "chrome-win/chrome_elf.dll",
+            "chrome-win/chrome_wer.dll",
+            "chrome-win/eventlog_provider.dll",
+            "chrome-win/159.0.8141.0.manifest",
+            "chrome-win/icudtl.dat",
+            "chrome-win/v8_context_snapshot.bin",
+            "chrome-win/resources.pak",
+            "chrome-win/chrome_100_percent.pak",
+            "chrome-win/locales/en-US.pak",
+            "chrome-win/libEGL.dll",
+            "chrome-win/libGLESv2.dll",
+            "chrome-win/vk_swiftshader.dll",
+            "chrome-win/vk_swiftshader_icd.json",
+            "chrome-win/vulkan-1.dll",
+        ],
+        excludes: &[],
+    },
 ];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -339,6 +372,8 @@ const USER_DLLS: &[Dll] = &[
     },
     Dll { package: "mpr", file: "mpr.dll", exported_as: "testmpr.dll" },
     Dll { package: "msimg32", file: "msimg32.dll", exported_as: "testmsimg32.dll" },
+    // DWrite.dll: chrome.dll imports it (BR).
+    Dll { package: "dwrite", file: "dwrite.dll", exported_as: "testdwrite.dll" },
     // Rich edit controls: one crate (`richedit`) behind both DLLs.
     Dll { package: "riched20", file: "riched20.dll", exported_as: "testriched20.dll" },
     Dll { package: "msftedit", file: "msftedit.dll", exported_as: "testmsftedit.dll" },
@@ -650,6 +685,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("process_test", "kernel32.dll", "Windows/System32"),
     ("commit_test", "ntdll.dll", "Windows/System32"),
     ("commit_test", "kernel32.dll", "Windows/System32"),
+    ("browser_api_test", "ntdll.dll", "Windows/System32"),
+    ("browser_api_test", "kernel32.dll", "Windows/System32"),
+    ("browser_api_test", "ws2_32.dll", "Windows/System32"),
     ("winsock_test", "ntdll.dll", "Windows/System32"),
     ("winsock_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ws2_32.dll", "Windows/System32"),
@@ -1284,6 +1322,48 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-time-l1-1-0.dll", "pwsh"),
     ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-utility-l1-1-0.dll", "pwsh"),
     ("pwsh", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "pwsh"),
+    // BR stage 1: headless Chromium (PREBUILT) with every gala DLL its
+    // imports and delay imports name (delay-loaded ones load on first call).
+    ("chromium", "target/prebuilt/chromium/chrome-win/", "chromium"),
+    ("chromium", "user/chromium/page.html", "gala"),
+    ("chromium", "ntdll.dll", "Windows/System32"),
+    ("chromium", "kernel32.dll", "Windows/System32"),
+    ("chromium", "kernelbase.dll", "Windows/System32"),
+    ("chromium", "advapi32.dll", "Windows/System32"),
+    ("chromium", "bcrypt.dll", "Windows/System32"),
+    ("chromium", "bcryptprimitives.dll", "Windows/System32"),
+    ("chromium", "crypt32.dll", "Windows/System32"),
+    ("chromium", "msvcrt.dll", "Windows/System32"),
+    ("chromium", "secur32.dll", "Windows/System32"),
+    ("chromium", "shell32.dll", "Windows/System32"),
+    ("chromium", "user32.dll", "Windows/System32"),
+    ("chromium", "gdi32.dll", "Windows/System32"),
+    ("chromium", "comctl32.dll", "Windows/System32"),
+    ("chromium", "ws2_32.dll", "Windows/System32"),
+    ("chromium", "mswsock.dll", "Windows/System32"),
+    ("chromium", "userenv.dll", "Windows/System32"),
+    ("chromium", "shlwapi.dll", "Windows/System32"),
+    ("chromium", "ncrypt.dll", "Windows/System32"),
+    ("chromium", "ole32.dll", "Windows/System32"),
+    ("chromium", "oleaut32.dll", "Windows/System32"),
+    ("chromium", "iphlpapi.dll", "Windows/System32"),
+    ("chromium", "version.dll", "Windows/System32"),
+    ("chromium", "rpcrt4.dll", "Windows/System32"),
+    ("chromium", "netapi32.dll", "Windows/System32"),
+    ("chromium", "powrprof.dll", "Windows/System32"),
+    ("chromium", "winmm.dll", "Windows/System32"),
+    ("chromium", "uxtheme.dll", "Windows/System32"),
+    ("chromium", "comdlg32.dll", "Windows/System32"),
+    ("chromium", "oleacc.dll", "Windows/System32"),
+    ("chromium", "dbghelp.dll", "Windows/System32"),
+    ("chromium", "winhttp.dll", "Windows/System32"),
+    ("chromium", "wininet.dll", "Windows/System32"),
+    ("chromium", "urlmon.dll", "Windows/System32"),
+    ("chromium", "wintrust.dll", "Windows/System32"),
+    ("chromium", "pdh.dll", "Windows/System32"),
+    ("chromium", "dhcpcsvc.dll", "Windows/System32"),
+    ("chromium", "uiautomationcore.dll", "Windows/System32"),
+    ("chromium", "dwrite.dll", "Windows/System32"),
     ("dotnet", "target/prebuilt/dotnet/", "dotnet"),
     ("dotnet", "user/bin/dotnet_hello.dll", "gala"),
     ("dotnet", "user/dotnet_hello/dotnet_hello.runtimeconfig.json", "gala"),
@@ -1623,6 +1703,7 @@ const USER_PROGRAMS: &[&str] = &[
     "conhost",
     "console_window_test",
     "conpty_test",
+    "browser_api_test",
     "persist_test",
     "kernel32_system_test",
     "kernel32_clr_test",
@@ -1703,7 +1784,10 @@ fn scenario_timeout(name: &str) -> Duration {
     }
     let limit = if SCENARIOS.iter().any(|s| s.name == name && s.exit_status == XTASK_DUMPS) {
         DUMP_SCENARIO_TIMEOUT
-    } else if name == "elasticsearch" || name.starts_with("sqllocaldb") {
+    } else if name == "elasticsearch"
+        || name.starts_with("sqllocaldb")
+        || name.starts_with("chromium_")
+    {
         ELASTICSEARCH_TIMEOUT
     } else if SLOW_SCENARIOS.contains(&name) {
         SLOW_TIMEOUT
@@ -2581,6 +2665,8 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
+    "chromium_version",
+    "chromium_dump",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
@@ -2776,7 +2862,7 @@ fn scenario_boot(name: &str) -> Boot {
 /// (The intermittent Java heap corruption is not this: WORKFLOW "Known
 /// intermittent".)
 const SINGLE_THREAD_TCG: &[&str] =
-    &["java_", "elasticsearch", "dotnet_", "pwsh_", "flaui", "xmodify_test"];
+    &["java_", "elasticsearch", "dotnet_", "pwsh_", "flaui", "xmodify_test", "chromium_"];
 
 fn single_thread_tcg(name: &str) -> bool {
     SINGLE_THREAD_TCG.iter().any(|s| name.contains(s))
@@ -2795,7 +2881,9 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     // buffers), a process per backend and helper, and its cluster on C:
     // ran the 750 MB machine out of frames.
     if iso.file_name().is_some_and(|n| {
-        ["elasticsearch", "sqllocaldb", "postgres"].iter().any(|s| n.to_string_lossy().contains(s))
+        ["elasticsearch", "sqllocaldb", "postgres", "chromium"]
+            .iter()
+            .any(|s| n.to_string_lossy().contains(s))
     }) {
         memory = memory.max(ELASTICSEARCH_MEMORY_MIB);
     }
@@ -3316,6 +3404,15 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_system_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_system_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // BR stage 1: the Win32 functions Chromium's start-up calls that
+        // gala lacked (mitigation policies, process/thread information,
+        // WaitOnAddress, CompareObjectHandles, GetAddrInfoExW, ...).
+        name: "browser_api_test",
+        cmdline: "qemu_exit run=browser_api_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["browser_api_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // Pseudo consoles (ConPTY): conpty_test plays a terminal for a
@@ -4607,6 +4704,30 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // BR stage 1: headless Chromium (PREBUILT) starts, loads
+        // about:blank and prints its DOM: the browser process, its
+        // children (renderer, network service) over Mojo, V8.
+        name: "chromium_version",
+        cmdline: "qemu_exit run=chrome.exe args=--headless%20--no-sandbox%20--disable-gpu%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--dump-dom%20about:blank",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "<html><head></head><body></body></html>",
+            "chrome.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // BR stage 1: a local page whose script changes it (so V8 ran),
+        // its DOM printed after the script.
+        name: "chromium_dump",
+        cmdline: "qemu_exit run=chrome.exe args=--headless%20--no-sandbox%20--disable-gpu%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--dump-dom%20file:///C:/gala/page.html",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "<p id=\"static\">static text</p>",
+            "<p id=\"dynamic\">V8 ran: 42</p>",
+            "chrome.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
         // P1: PowerShell 7.4 (fetched by xtask, PREBUILT), a self-contained
         // .NET 8 application, running one command.
         name: "pwsh_hello",
@@ -5240,6 +5361,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("filezilla_flaui", "dotnet"),
     ("filezilla_flaui", "filezilla"),
     ("pwsh_hello", "pwsh"),
+    ("chromium_version", "chromium"),
+    ("chromium_dump", "chromium"),
     ("sqllocaldb_persist", "sqllocaldb"),
 ];
 

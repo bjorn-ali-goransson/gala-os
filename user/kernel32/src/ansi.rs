@@ -167,7 +167,7 @@ pub extern "system" fn GetDiskFreeSpaceExA(
 
 /// WIN32_FIND_DATAW (592 bytes) to WIN32_FIND_DATAA (320): the first 44
 /// bytes are the same; the names are converted.
-fn find_data_to_ansi(w: &[u16; 296], a: *mut u8) {
+pub(crate) fn find_data_to_ansi(w: &[u16; 296], a: *mut u8) {
     let name_len = w[22..282].iter().position(|&c| c == 0).unwrap_or(260);
     let alt_len = w[282..296].iter().position(|&c| c == 0).unwrap_or(14);
     // SAFETY: the caller's WIN32_FIND_DATAA (320 bytes).

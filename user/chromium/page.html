@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html>
+<head><title>gala page</title></head>
+<body>
+<p id="static">static text</p>
+<p id="dynamic">not run</p>
+<script>
+document.getElementById("dynamic").textContent = "V8 ran: " + [6, 7].reduce((a, b) => a * b);
+</script>
+</body>
+</html>

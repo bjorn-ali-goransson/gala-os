@@ -1,0 +1,465 @@
+//! The Win32 functions Chromium's start-up calls that gala lacked (ROADMAP
+//! BR stage 1), with the results Microsoft documents for them:
+//!
+//! 1-3. mitigation policies: DEP is on and permanent in a 64-bit process;
+//!    a policy set with SetProcessMitigationPolicy (extension points off,
+//!    as Chromium's browser process does) reads back; a wrong size is
+//!    ERROR_INVALID_PARAMETER;
+//! 4-6. SetProcessInformation (power throttling, memory priority) and
+//!    GetProcessInformation reading the memory priority back;
+//!    SetThreadInformation (memory priority);
+//! 7. GetProcessHandleCount grows by one with a new handle;
+//! 8. ProcessIdToSessionId of this process is the PEB's SessionId;
+//! 9. GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) is SYSTEM_INFO's count,
+//!    GetMaximumProcessorCount at least that;
+//! 10. HeapSetInformation(HeapEnableTerminationOnCorruption); GetProcessHeaps
+//!    lists the process heap;
+//! 11. K32QueryWorkingSetEx: a written page is valid with PAGE_READWRITE,
+//!    a reserved page is not;
+//! 12. power requests: create, set, clear, close;
+//! 13. GetTempFileNameW: with a number, the name `<dir>\gal1234.TMP` and no
+//!    file; with 0, a new file;
+//! 14-16. WaitOnAddress: returns at once when the value differs, times out
+//!    (ERROR_TIMEOUT) when it does not change, and wakes on
+//!    WakeByAddressSingle and (two threads) WakeByAddressAll;
+//! 17. CompareObjectHandles: a duplicate is the same object, another handle
+//!    is not (ERROR_NOT_SAME_OBJECT);
+//! 18. FlsGetValue2/TlsGetValue2 read the slot without touching the last
+//!    error;
+//! 19. RtlFormatCurrentUserKeyPath is `\REGISTRY\USER\S-1-5-...`;
+//! 20. GetAddrInfoExW (synchronous, NS_DNS) resolves "localhost" to
+//!    127.0.0.1 with the service's port;
+//! 21. CheckRemoteDebuggerPresent says no debugger, QueryProcessCycleTime
+//!    succeeds.
+
+#![no_std]
+#![no_main]
+
+use core::ffi::c_void;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+type Handle = *mut c_void;
+
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GetStdHandle(which: u32) -> Handle;
+    fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> i32;
+    fn ExitProcess(code: u32) -> !;
+    fn Sleep(ms: u32);
+    fn GetLastError() -> u32;
+    fn SetLastError(e: u32);
+    fn CloseHandle(h: Handle) -> i32;
+    fn GetCurrentProcess() -> Handle;
+    fn GetCurrentThread() -> Handle;
+    fn GetCurrentProcessId() -> u32;
+    fn CreateEventW(sa: *const c_void, manual: i32, initial: i32, name: *const u16) -> Handle;
+    fn DuplicateHandle(
+        sp: Handle,
+        s: Handle,
+        tp: Handle,
+        t: *mut Handle,
+        access: u32,
+        inherit: i32,
+        options: u32,
+    ) -> i32;
+    fn GetProcessMitigationPolicy(p: Handle, policy: u32, buf: *mut c_void, len: usize) -> i32;
+    fn SetProcessMitigationPolicy(policy: u32, buf: *const c_void, len: usize) -> i32;
+    fn SetProcessInformation(p: Handle, class: u32, info: *const c_void, size: u32) -> i32;
+    fn GetProcessInformation(p: Handle, class: u32, info: *mut c_void, size: u32) -> i32;
+    fn SetThreadInformation(t: Handle, class: u32, info: *const c_void, size: u32) -> i32;
+    fn GetProcessHandleCount(p: Handle, count: *mut u32) -> i32;
+    fn ProcessIdToSessionId(id: u32, session: *mut u32) -> i32;
+    fn GetActiveProcessorCount(group: u16) -> u32;
+    fn GetMaximumProcessorCount(group: u16) -> u32;
+    fn GetSystemInfo(info: *mut [u32; 12]);
+    fn HeapSetInformation(h: Handle, class: u32, info: *const c_void, len: usize) -> i32;
+    fn GetProcessHeaps(n: u32, heaps: *mut Handle) -> u32;
+    fn GetProcessHeap() -> Handle;
+    fn VirtualAlloc(a: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut u8;
+    fn VirtualFree(a: *mut u8, size: usize, kind: u32) -> i32;
+    fn K32QueryWorkingSetEx(p: Handle, pv: *mut [u64; 2], cb: u32) -> i32;
+    fn PowerCreateRequest(context: *const ReasonContext) -> Handle;
+    fn PowerSetRequest(h: Handle, kind: u32) -> i32;
+    fn PowerClearRequest(h: Handle, kind: u32) -> i32;
+    fn GetTempPathW(n: u32, buf: *mut u16) -> u32;
+    fn GetTempFileNameW(path: *const u16, prefix: *const u16, unique: u32, out: *mut u16) -> u32;
+    fn GetFileAttributesW(path: *const u16) -> u32;
+    fn DeleteFileW(path: *const u16) -> i32;
+    fn CreateThread(
+        sa: *const c_void,
+        stack: usize,
+        start: extern "system" fn(*mut c_void) -> u32,
+        param: *mut c_void,
+        flags: u32,
+        id: *mut u32,
+    ) -> Handle;
+    fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+    fn CompareObjectHandles(a: Handle, b: Handle) -> i32;
+    fn FlsAlloc(callback: usize) -> u32;
+    fn FlsSetValue(i: u32, v: *mut c_void) -> i32;
+    fn FlsGetValue2(i: u32) -> *mut c_void;
+    fn TlsAlloc() -> u32;
+    fn TlsSetValue(i: u32, v: *mut c_void) -> i32;
+    fn TlsGetValue2(i: u32) -> *mut c_void;
+    fn CheckRemoteDebuggerPresent(p: Handle, present: *mut i32) -> i32;
+    fn QueryProcessCycleTime(p: Handle, cycles: *mut u64) -> i32;
+}
+
+#[link(name = "api-ms-win-core-synch-l1-2-0", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn WaitOnAddress(a: *const c_void, c: *const c_void, size: usize, ms: u32) -> i32;
+    fn WakeByAddressSingle(a: *const c_void);
+    fn WakeByAddressAll(a: *const c_void);
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RtlFormatCurrentUserKeyPath(out: *mut UnicodeString) -> u32;
+    fn RtlFreeUnicodeString(s: *mut UnicodeString);
+}
+
+#[link(name = "ws2_32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn WSAStartup(version: u16, data: *mut [u8; 408]) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn GetAddrInfoExW(
+        name: *const u16,
+        service: *const u16,
+        namespace: u32,
+        nsp: *const c_void,
+        hints: *const AddrInfoExW,
+        result: *mut *mut AddrInfoExW,
+        timeout: *const c_void,
+        overlapped: *mut c_void,
+        completion: usize,
+        handle: *mut Handle,
+    ) -> i32;
+    fn FreeAddrInfoExW(ai: *mut AddrInfoExW);
+}
+
+#[repr(C)]
+struct UnicodeString {
+    length: u16,
+    maximum: u16,
+    buffer: *mut u16,
+}
+
+#[repr(C)]
+struct ReasonContext {
+    version: u32,
+    flags: u32,
+    text: *const u16,
+}
+
+#[repr(C)]
+struct AddrInfoExW {
+    flags: i32,
+    family: i32,
+    socktype: i32,
+    protocol: i32,
+    addrlen: usize,
+    canonname: *mut u16,
+    addr: *const u8,
+    blob: *mut c_void,
+    bloblen: usize,
+    provider: *mut c_void,
+    next: *mut AddrInfoExW,
+}
+
+#[unsafe(no_mangle)]
+pub static _fltused: i32 = 0;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __CxxFrameHandler3() -> ! {
+    // SAFETY: ends the process.
+    unsafe { ExitProcess(0xdeac) }
+}
+
+#[allow(dead_code)]
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "C" {
+    fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
+    fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+}
+
+const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_TIMEOUT: u32 = 1460;
+const ERROR_NOT_SAME_OBJECT: u32 = 1656;
+const INFINITE: u32 = 0xffff_ffff;
+
+fn out(text: &[u8]) {
+    let mut written = 0;
+    // SAFETY: valid buffer and output pointer.
+    unsafe {
+        WriteFile(
+            GetStdHandle(-11i32 as u32),
+            text.as_ptr(),
+            text.len() as u32,
+            &mut written,
+            core::ptr::null_mut(),
+        )
+    };
+}
+
+/// Ends the program with check `n` failed.
+fn fail(n: u32) -> ! {
+    let mut line = *b"browser_api_test: check 00 failed\r\n";
+    line[24] = b'0' + (n / 10) as u8;
+    line[25] = b'0' + (n % 10) as u8;
+    out(&line);
+    // SAFETY: ends the process.
+    unsafe { ExitProcess(n) }
+}
+
+fn check(ok: bool, n: u32) {
+    if !ok {
+        fail(n);
+    }
+}
+
+fn w(s: &str, buf: &mut [u16; 64]) -> *const u16 {
+    for (i, c) in s.bytes().enumerate() {
+        buf[i] = u16::from(c);
+    }
+    buf[s.len()] = 0;
+    buf.as_ptr()
+}
+
+static VALUE: AtomicU32 = AtomicU32::new(0);
+static WOKEN: AtomicU32 = AtomicU32::new(0);
+
+/// Waits on VALUE until it is no longer 0, then counts itself woken.
+extern "system" fn waiter(_: *mut c_void) -> u32 {
+    let zero = 0u32;
+    while VALUE.load(Ordering::Acquire) == 0 {
+        // SAFETY: VALUE and a 4-byte compare value.
+        unsafe { WaitOnAddress(VALUE.as_ptr().cast(), (&raw const zero).cast(), 4, INFINITE) };
+    }
+    WOKEN.fetch_add(1, Ordering::AcqRel);
+    0
+}
+
+fn tests() {
+    // SAFETY (whole function): documented calls with valid arguments.
+    unsafe {
+        let me = GetCurrentProcess();
+        // 1-3. Mitigation policies.
+        let mut dep = [0u32; 2];
+        check(GetProcessMitigationPolicy(me, 0, dep.as_mut_ptr().cast(), 8) != 0, 1);
+        check(dep[0] & 1 == 1 && dep[1] & 0xff == 1, 1);
+        let on = 1u32; // DisableExtensionPoints
+        check(SetProcessMitigationPolicy(6, (&raw const on).cast(), 4) != 0, 2);
+        let mut got = 0u32;
+        check(GetProcessMitigationPolicy(me, 6, (&raw mut got).cast(), 4) != 0, 2);
+        check(got & 1 == 1, 2);
+        check(GetProcessMitigationPolicy(me, 6, (&raw mut got).cast(), 3) == 0, 3);
+        check(GetLastError() == ERROR_INVALID_PARAMETER, 3);
+
+        // 4-6. Process and thread information.
+        let throttle = [1u32, 1, 1]; // version 1, EXECUTION_SPEED on
+        check(SetProcessInformation(me, 4, throttle.as_ptr().cast(), 12) != 0, 4);
+        let normal = 5u32;
+        check(SetProcessInformation(me, 0, (&raw const normal).cast(), 4) != 0, 5);
+        let mut priority = 0u32;
+        check(GetProcessInformation(me, 0, (&raw mut priority).cast(), 4) != 0, 5);
+        check(priority == 5, 5);
+        check(SetThreadInformation(GetCurrentThread(), 0, (&raw const normal).cast(), 4) != 0, 6);
+
+        // 7. Handle count.
+        let (mut before, mut after) = (0u32, 0u32);
+        check(GetProcessHandleCount(me, &mut before) != 0 && before > 0, 7);
+        let e = CreateEventW(core::ptr::null(), 1, 0, core::ptr::null());
+        check(!e.is_null(), 7);
+        check(GetProcessHandleCount(me, &mut after) != 0 && after == before + 1, 7);
+
+        // 8. Session.
+        let mut session = 0xffff_ffffu32;
+        check(ProcessIdToSessionId(GetCurrentProcessId(), &mut session) != 0, 8);
+        let peb: usize;
+        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb);
+        check(session == *((peb + 0x2c0) as *const u32), 8);
+
+        // 9. Processors.
+        let mut si = [0u32; 12];
+        GetSystemInfo(&mut si);
+        let n = si[8]; // dwNumberOfProcessors (offset 32)
+        check(GetActiveProcessorCount(0xffff) == n, 9);
+        check(GetMaximumProcessorCount(0xffff) >= n, 9);
+
+        // 10. Heaps.
+        check(HeapSetInformation(core::ptr::null_mut(), 1, core::ptr::null(), 0) != 0, 10);
+        let mut heaps = [core::ptr::null_mut(); 64];
+        let count = GetProcessHeaps(64, heaps.as_mut_ptr());
+        check(count >= 1, 10);
+        check(heaps[..count.min(64) as usize].contains(&GetProcessHeap()), 10);
+
+        // 11. Working set.
+        let page = VirtualAlloc(core::ptr::null_mut(), 0x2000, 0x1000 | 0x2000, 4);
+        check(!page.is_null(), 11);
+        *page = 1;
+        let reserved = VirtualAlloc(core::ptr::null_mut(), 0x1000, 0x2000, 1);
+        check(!reserved.is_null(), 11);
+        let mut ws = [[page as u64, 0], [reserved as u64, 0]];
+        check(K32QueryWorkingSetEx(me, ws.as_mut_ptr(), 32) != 0, 11);
+        check(ws[0][1] & 1 == 1 && (ws[0][1] >> 4) & 0x7ff == 4, 11);
+        check(ws[1][1] & 1 == 0, 11);
+        VirtualFree(page, 0, 0x8000);
+        VirtualFree(reserved, 0, 0x8000);
+
+        // 12. Power requests.
+        let mut why = [0u16; 64];
+        let context = ReasonContext { version: 0, flags: 1, text: w("browser_api_test", &mut why) };
+        let request = PowerCreateRequest(&context);
+        check(!request.is_null() && request as isize != -1, 12);
+        check(PowerSetRequest(request, 1) != 0, 12); // PowerRequestSystemRequired
+        check(PowerClearRequest(request, 1) != 0, 12);
+        check(CloseHandle(request) != 0, 12);
+
+        // 13. Temporary file names.
+        let mut dir = [0u16; 261];
+        check(GetTempPathW(261, dir.as_mut_ptr()) != 0, 13);
+        let mut prefix = [0u16; 64];
+        let mut name = [0u16; 261];
+        check(
+            GetTempFileNameW(dir.as_ptr(), w("gala", &mut prefix), 0x1234, name.as_mut_ptr())
+                == 0x1234,
+            13,
+        );
+        let len = name.iter().position(|&c| c == 0).unwrap_or(0);
+        let tail: [u16; 12] = core::array::from_fn(|i| u16::from(b"\\gal1234.TMP"[i]));
+        check(len > 12 && name[len - 12..len] == tail, 13);
+        check(GetFileAttributesW(name.as_ptr()) == 0xffff_ffff, 13);
+        let made = GetTempFileNameW(dir.as_ptr(), w("gal", &mut prefix), 0, name.as_mut_ptr());
+        check(made != 0, 13);
+        check(GetFileAttributesW(name.as_ptr()) != 0xffff_ffff, 13);
+        check(DeleteFileW(name.as_ptr()) != 0, 13);
+
+        // 14-16. WaitOnAddress.
+        let one = 1u32;
+        let zero = 0u32;
+        check(WaitOnAddress(VALUE.as_ptr().cast(), (&raw const one).cast(), 4, INFINITE) != 0, 14);
+        SetLastError(0);
+        check(WaitOnAddress(VALUE.as_ptr().cast(), (&raw const zero).cast(), 4, 50) == 0, 15);
+        check(GetLastError() == ERROR_TIMEOUT, 15);
+        let threads = [
+            CreateThread(
+                core::ptr::null(),
+                0,
+                waiter,
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null_mut(),
+            ),
+            CreateThread(
+                core::ptr::null(),
+                0,
+                waiter,
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null_mut(),
+            ),
+        ];
+        check(!threads[0].is_null() && !threads[1].is_null(), 16);
+        Sleep(100);
+        check(WOKEN.load(Ordering::Acquire) == 0, 16);
+        // A wake with the value unchanged: the waiters wait again.
+        WakeByAddressSingle(VALUE.as_ptr().cast());
+        Sleep(50);
+        check(WOKEN.load(Ordering::Acquire) == 0, 16);
+        VALUE.store(1, Ordering::Release);
+        WakeByAddressAll(VALUE.as_ptr().cast());
+        for t in threads {
+            check(WaitForSingleObject(t, 10_000) == 0, 16);
+            CloseHandle(t);
+        }
+        check(WOKEN.load(Ordering::Acquire) == 2, 16);
+
+        // 17. CompareObjectHandles.
+        let mut copy = core::ptr::null_mut();
+        check(DuplicateHandle(me, e, me, &mut copy, 0, 0, 2) != 0, 17); // SAME_ACCESS
+        check(CompareObjectHandles(e, copy) != 0, 17);
+        let other = CreateEventW(core::ptr::null(), 1, 0, core::ptr::null());
+        check(CompareObjectHandles(e, other) == 0, 17);
+        check(GetLastError() == ERROR_NOT_SAME_OBJECT, 17);
+        CloseHandle(copy);
+        CloseHandle(other);
+        CloseHandle(e);
+
+        // 18. FlsGetValue2/TlsGetValue2.
+        let fls = FlsAlloc(0);
+        check(fls != 0xffff_ffff && FlsSetValue(fls, 0x1234 as *mut c_void) != 0, 18);
+        let tls = TlsAlloc();
+        check(tls != 0xffff_ffff && TlsSetValue(tls, 0x5678 as *mut c_void) != 0, 18);
+        SetLastError(77);
+        check(FlsGetValue2(fls) as usize == 0x1234 && TlsGetValue2(tls) as usize == 0x5678, 18);
+        check(GetLastError() == 77, 18);
+
+        // 19. The current user's key.
+        let mut path = UnicodeString { length: 0, maximum: 0, buffer: core::ptr::null_mut() };
+        check(RtlFormatCurrentUserKeyPath(&mut path) == 0, 19);
+        let prefix = b"\\REGISTRY\\USER\\S-1-5-";
+        check(usize::from(path.length) / 2 > prefix.len(), 19);
+        for (i, &c) in prefix.iter().enumerate() {
+            check(*path.buffer.add(i) == u16::from(c), 19);
+        }
+        RtlFreeUnicodeString(&mut path);
+
+        // 20. GetAddrInfoExW.
+        let mut wsa = [0u8; 408];
+        check(WSAStartup(0x202, &mut wsa) == 0, 20);
+        let hints = AddrInfoExW {
+            flags: 0,
+            family: 2, // AF_INET
+            socktype: 1,
+            protocol: 6,
+            addrlen: 0,
+            canonname: core::ptr::null_mut(),
+            addr: core::ptr::null(),
+            blob: core::ptr::null_mut(),
+            bloblen: 0,
+            provider: core::ptr::null_mut(),
+            next: core::ptr::null_mut(),
+        };
+        let (mut host, mut port) = ([0u16; 64], [0u16; 64]);
+        let mut result: *mut AddrInfoExW = core::ptr::null_mut();
+        let r = GetAddrInfoExW(
+            w("localhost", &mut host),
+            w("8080", &mut port),
+            12, // NS_DNS
+            core::ptr::null(),
+            &hints,
+            &mut result,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+        );
+        check(r == 0 && !result.is_null(), 20);
+        let sa = (*result).addr;
+        check((*result).family == 2 && !sa.is_null(), 20);
+        check(*sa.add(2) == 0x1f && *sa.add(3) == 0x90, 20); // port 8080
+        check(*sa.add(4) == 127 && *sa.add(7) == 1, 20);
+        FreeAddrInfoExW(result);
+
+        // 21. Debugger and cycle time.
+        let mut present = 1i32;
+        check(CheckRemoteDebuggerPresent(me, &mut present) != 0 && present == 0, 21);
+        let mut cycles = 0u64;
+        check(QueryProcessCycleTime(me, &mut cycles) != 0, 21);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mainCRTStartup() -> ! {
+    tests();
+    out(b"browser_api_test: ok\r\n");
+    // SAFETY: ends the process.
+    unsafe { ExitProcess(0) }
+}
+
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! {
+    // SAFETY: ends the process.
+    unsafe { ExitProcess(0xdead) }
+}
