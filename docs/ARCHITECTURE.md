@@ -650,7 +650,16 @@ type's `GenericMapping`) and attributes; services check rights with
 `\Sessions\1\BaseNamedObjects` and `\Sessions\BNOLINKS` created at boot
 (permanent; the sessions' part by `nt::session`). Named objects record their parent and name;
 each object counts its handles, and a non-permanent named object is
-unlinked when the last handle closes (`HandleTable::close`). Services
+unlinked when the last handle closes (`HandleTable::close`). Invariant
+(hygiene sweep, 2026-11-03): what an open or create by name finds is
+pinned (`object::NamePin`, counted as a handle) before the namespace's
+lock is let go, until the caller's handle exists; `namespace::unlink`
+looks at the count again under that lock. Before, a close that brought
+the count to zero removed the name although another CPU's open had just
+found the object (left with an unnamed object), and a creator's new
+object could lose its name to another process's open and close before
+the creator's handle existed (`smprace_test` round 3, failed within ~20
+tries). Kernel-internal lookups (`lookup`, `create`) do not pin. Services
 capture OBJECT_ATTRIBUTES (length must be 48, RootDirectory needs
 DIRECTORY_TRAVERSE / DIRECTORY_CREATE_OBJECT) and UNICODE_STRINGs.
 Case-insensitive matching is ASCII-only for now.

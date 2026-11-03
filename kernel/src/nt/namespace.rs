@@ -9,7 +9,7 @@
 use alloc::vec::Vec;
 
 use super::object::{
-    DirEntry, Directory, KObject, ObjectBody, ObjectName, ObjectRef, SymbolicLink,
+    DirEntry, Directory, KObject, NamePin, ObjectBody, ObjectName, ObjectRef, SymbolicLink,
 };
 use super::status::NtStatus;
 use crate::mm::heap::{AllocError, TryVec};
@@ -211,6 +211,21 @@ pub fn lookup_link(
     lookup_with(start, path, ci, false)
 }
 
+/// `lookup` (or `lookup_link`: `follow_final` false) for an open that
+/// makes a handle: the object is pinned (`NamePin`) before the namespace's
+/// lock is let go.
+pub fn lookup_pinned(
+    start: Option<&ObjectRef>,
+    path: &[u16],
+    ci: bool,
+    follow_final: bool,
+) -> Result<NamePin, NtStatus> {
+    with_root(|root| match walk(root, start, path, ci, Want::Object { follow_final })? {
+        Found::Object(o) => Ok(NamePin::new(o)),
+        _ => Err(NtStatus::OBJECT_NAME_NOT_FOUND),
+    })
+}
+
 fn lookup_with(
     start: Option<&ObjectRef>,
     path: &[u16],
@@ -328,6 +343,34 @@ pub fn create(
 ) -> Result<(ObjectRef, bool), NtStatus> {
     let guard = NAMESPACE.lock();
     let root = guard.as_ref().ok_or(NtStatus::OBJECT_PATH_NOT_FOUND)?;
+    link(root, start, path, object, ci, open_if)
+}
+
+/// `create` for a system call that makes a handle to the object (new or
+/// existing): it is pinned (`NamePin`) before the namespace's lock is let
+/// go, so that its name stays until that handle exists.
+pub fn create_pinned(
+    start: Option<&ObjectRef>,
+    path: &[u16],
+    object: ObjectRef,
+    ci: bool,
+    open_if: bool,
+) -> Result<(NamePin, bool), NtStatus> {
+    let guard = NAMESPACE.lock();
+    let root = guard.as_ref().ok_or(NtStatus::OBJECT_PATH_NOT_FOUND)?;
+    let (object, existed) = link(root, start, path, object, ci, open_if)?;
+    Ok((NamePin::new(object), existed))
+}
+
+/// `create`'s work, under the namespace's lock.
+fn link(
+    root: &ObjectRef,
+    start: Option<&ObjectRef>,
+    path: &[u16],
+    object: ObjectRef,
+    ci: bool,
+    open_if: bool,
+) -> Result<(ObjectRef, bool), NtStatus> {
     let Found::Parent(dir, last) = walk(root, start, path, ci, Want::Parent)? else {
         return Err(NtStatus::OBJECT_NAME_INVALID);
     };
@@ -351,9 +394,14 @@ pub fn create(
     Ok((object, false))
 }
 
-/// Removes a named object from its directory (last handle closed).
+/// Removes a named object from its directory (last handle closed),
+/// unless it has a handle again: the count is looked at under the lock
+/// under which opens by name pin what they find (`NamePin`).
 pub fn unlink(object: &ObjectRef) {
     let _guard = NAMESPACE.lock();
+    if object.handle_count() > 0 {
+        return;
+    }
     let Some(name) = object.name.lock().take() else { return };
     if let Some(d) = name.parent.as_directory() {
         d.entries.lock().retain(|e| !crate::mm::heap::KArc::ptr_eq(&e.object, object));
@@ -519,5 +567,35 @@ mod tests {
         table.close(h);
         assert_eq!(lookup(None, &path, false).err(), Some(NtStatus::OBJECT_NAME_NOT_FOUND));
         assert!(full_name(&obj).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_pinned_name_outlives_the_last_handle() {
+        setup();
+        let path = w("\\BaseNamedObjects\\host_test_pinned");
+        // A creator's object is pinned until its handle exists: another
+        // process's open and close in between does not remove the name.
+        let (pin, existed) = create_pinned(None, &path, console(), false, false).unwrap();
+        assert!(!existed);
+        let mut other = HandleTable::default();
+        let opened = lookup_pinned(None, &path, false, true).unwrap();
+        let h = other.insert_object(opened.clone()).unwrap();
+        drop(opened);
+        other.close(h);
+        assert!(KArc::ptr_eq(&lookup(None, &path, false).unwrap(), &pin));
+        // The creator's handle, then the pin let go: still named.
+        let mut table = HandleTable::default();
+        let h = table.insert_object(pin.clone()).unwrap();
+        let object = pin.clone();
+        drop(pin);
+        assert!(KArc::ptr_eq(&lookup(None, &path, false).unwrap(), &object));
+        // The last handle closed: gone.
+        table.close(h);
+        assert_eq!(lookup(None, &path, false).err(), Some(NtStatus::OBJECT_NAME_NOT_FOUND));
+        // An open that fails after pinning (no handle made) leaves no name
+        // behind either.
+        let (pin, _) = create_pinned(None, &path, console(), false, false).unwrap();
+        drop(pin);
+        assert_eq!(lookup(None, &path, false).err(), Some(NtStatus::OBJECT_NAME_NOT_FOUND));
     }
 }

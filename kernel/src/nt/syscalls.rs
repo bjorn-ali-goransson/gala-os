@@ -13,7 +13,7 @@ use super::file;
 use super::namespace;
 use super::object::{
     DIRECTORY_CREATE_OBJECT, DIRECTORY_TRAVERSE, EVENT_MODIFY_STATE, EVENT_QUERY_STATE, Event,
-    EventType, Handle, HandleEntry, KObject, ObjectBody, ObjectRef, PROCESS_ALL_ACCESS,
+    EventType, Handle, HandleEntry, KObject, NamePin, ObjectBody, ObjectRef, PROCESS_ALL_ACCESS,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_TERMINATE, SYNCHRONIZE,
     THREAD_ALL_ACCESS, THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME, THREAD_TERMINATE,
 };
@@ -1293,7 +1293,7 @@ impl Call<'_> {
         &self,
         attrs_ptr: u64,
         is_type: fn(&KObject) -> bool,
-    ) -> Result<(ObjectRef, u32), NtStatus> {
+    ) -> Result<(NamePin, u32), NtStatus> {
         self.open_named_with(attrs_ptr, is_type, true)
     }
 
@@ -1304,7 +1304,7 @@ impl Call<'_> {
         attrs_ptr: u64,
         is_type: fn(&KObject) -> bool,
         follow_final: bool,
-    ) -> Result<(ObjectRef, u32), NtStatus> {
+    ) -> Result<(NamePin, u32), NtStatus> {
         let attrs = self
             .object_attributes(attrs_ptr, DIRECTORY_TRAVERSE)?
             .ok_or(NtStatus::INVALID_PARAMETER)?;
@@ -1312,11 +1312,8 @@ impl Call<'_> {
             return Err(NtStatus::OBJECT_PATH_SYNTAX_BAD);
         }
         let ci = attrs.case_insensitive();
-        let object = if !follow_final {
-            namespace::lookup_link(attrs.root.as_ref(), &attrs.name, ci)?
-        } else {
-            namespace::lookup(attrs.root.as_ref(), &attrs.name, ci)?
-        };
+        // Pinned until the caller's handle exists (`NamePin`).
+        let object = namespace::lookup_pinned(attrs.root.as_ref(), &attrs.name, ci, follow_final)?;
         if !is_type(&object) {
             return Err(NtStatus::OBJECT_TYPE_MISMATCH);
         }
@@ -1341,23 +1338,24 @@ fn nt_create_event(call: &mut Call<'_>) -> NtStatus {
     let event = Event { kind, dispatcher: Dispatcher::new(i32::from(initial)) };
     let Ok(object) = KObject::new(ObjectBody::Event(event)) else { return NtStatus::NO_MEMORY };
     tri!(security_calls::assign_object(call, &object, attrs_ptr));
-    let (object, existed, handle_attributes) = match attrs {
+    // `_pin`: the name stays until the handle exists (`NamePin`).
+    let (object, existed, handle_attributes, _pin) = match attrs {
         Some(a) if !a.name.is_empty() || a.root.is_some() => {
             let open_if = a.attributes & OBJ_OPENIF != 0;
-            let (object, existed) = tri!(namespace::create(
+            let (pin, existed) = tri!(namespace::create_pinned(
                 a.root.as_ref(),
                 &a.name,
                 object,
                 a.case_insensitive(),
                 open_if
             ));
-            if existed && !matches!(object.body, ObjectBody::Event(_)) {
+            if existed && !matches!(pin.body, ObjectBody::Event(_)) {
                 return NtStatus::OBJECT_TYPE_MISMATCH;
             }
-            (object, existed, a.attributes & HANDLE_ATTRIBUTES)
+            (pin.clone(), existed, a.attributes & HANDLE_ATTRIBUTES, Some(pin))
         }
-        Some(a) => (object, false, a.attributes & HANDLE_ATTRIBUTES),
-        None => (object, false, 0),
+        Some(a) => (object, false, a.attributes & HANDLE_ATTRIBUTES, None),
+        None => (object, false, 0, None),
     };
     let status = if existed {
         call.return_opened(out, object, access, handle_attributes)
@@ -1372,14 +1370,14 @@ fn nt_open_event(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) =
         tri!(call.open_named(arg!(call, 2), |o| matches!(o.body, ObjectBody::Event(_))));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtOpenDirectoryObject(*DirectoryHandle, DesiredAccess, ObjectAttributes)
 fn nt_open_directory_object(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), |o| o.as_directory().is_some()));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// GalaWindowCreate(x, y, width, height, *title, title_length, *id, style):
@@ -2620,7 +2618,7 @@ fn nt_create_timer(call: &mut Call<'_>) -> NtStatus {
 fn nt_open_timer(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_timer));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtSetTimer(TimerHandle, *DueTime, TimerApcRoutine, TimerContext,
@@ -3666,25 +3664,31 @@ fn nt_set_information_process(call: &mut Call<'_>) -> NtStatus {
 }
 
 /// Creates or opens-if `object` under the name in `attrs` (if named), for
-/// the create services. Returns the object to hand out and whether it
-/// already existed.
+/// the create services. Returns the object to hand out (new or existing),
+/// whether it already existed, the handle attributes, and the pin that
+/// keeps its name until the caller's handle exists (`NamePin`).
 fn link_new_object(
     attrs: Option<Attributes>,
     object: ObjectRef,
     same_type: fn(&KObject) -> bool,
-) -> Result<(ObjectRef, bool, u32), NtStatus> {
+) -> Result<(ObjectRef, bool, u32, Option<NamePin>), NtStatus> {
     match attrs {
         Some(a) if !a.name.is_empty() || a.root.is_some() => {
             let open_if = a.attributes & OBJ_OPENIF != 0;
-            let (object, existed) =
-                namespace::create(a.root.as_ref(), &a.name, object, a.case_insensitive(), open_if)?;
-            if existed && !same_type(&object) {
+            let (pin, existed) = namespace::create_pinned(
+                a.root.as_ref(),
+                &a.name,
+                object,
+                a.case_insensitive(),
+                open_if,
+            )?;
+            if existed && !same_type(&pin) {
                 return Err(NtStatus::OBJECT_TYPE_MISMATCH);
             }
-            Ok((object, existed, a.attributes & HANDLE_ATTRIBUTES))
+            Ok((pin.clone(), existed, a.attributes & HANDLE_ATTRIBUTES, Some(pin)))
         }
-        Some(a) => Ok((object, false, a.attributes & HANDLE_ATTRIBUTES)),
-        None => Ok((object, false, 0)),
+        Some(a) => Ok((object, false, a.attributes & HANDLE_ATTRIBUTES, None)),
+        None => Ok((object, false, 0, None)),
     }
 }
 
@@ -3707,7 +3711,7 @@ fn create_object(
 ) -> NtStatus {
     let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
     tri!(security_calls::assign_object(call, &object, attrs_ptr));
-    let (object, existed, handle_attributes) = tri!(link_new_object(attrs, object, same));
+    let (object, existed, handle_attributes, _pin) = tri!(link_new_object(attrs, object, same));
     let status = if existed {
         call.return_opened(out, object, access, handle_attributes)
     } else {
@@ -3738,7 +3742,7 @@ fn nt_create_mutant(call: &mut Call<'_>) -> NtStatus {
 fn nt_open_mutant(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_mutant));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtReleaseMutant(MutantHandle, *PreviousCount)
@@ -3807,7 +3811,7 @@ fn nt_create_semaphore(call: &mut Call<'_>) -> NtStatus {
 fn nt_open_semaphore(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_semaphore));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtReleaseSemaphore(SemaphoreHandle, ReleaseCount, *PreviousCount)
@@ -3868,7 +3872,7 @@ fn nt_open_symbolic_link(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     // Opening a symbolic link opens the link, not its target.
     let (object, attributes) = tri!(call.open_named_with(arg!(call, 2), is_symbolic_link, false));
-    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_handle(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtQuerySymbolicLinkObject(LinkHandle, *LinkTarget, *ReturnedLength): the
@@ -4055,7 +4059,8 @@ fn finish_create_section(
     let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
     let Ok(object) = KObject::new(ObjectBody::Section(body)) else { return NtStatus::NO_MEMORY };
     tri!(security_calls::assign_object(call, &object, attrs_ptr));
-    let (object, existed, handle_attributes) = tri!(link_new_object(attrs, object, is_section));
+    let (object, existed, handle_attributes, _pin) =
+        tri!(link_new_object(attrs, object, is_section));
     let status = if existed {
         call.return_opened(out, object, access, handle_attributes)
     } else {
@@ -4068,7 +4073,7 @@ fn finish_create_section(
 fn nt_open_section(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_section));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 const MEM_TOP_DOWN: u32 = 0x10_0000;
@@ -6162,7 +6167,7 @@ fn nt_create_keyed_event(call: &mut Call<'_>) -> NtStatus {
 fn nt_open_keyed_event(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_keyed_event));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtWaitForKeyedEvent / NtReleaseKeyedEvent(KeyedEventHandle, Key,
