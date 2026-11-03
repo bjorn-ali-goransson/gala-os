@@ -1,0 +1,7 @@
+Directory	Directory_Parent	DefaultDir
+s72	S72	l255
+Directory	Directory
+INSTALLDIR	LocalAppDataFolder	GalaTest
+SUB	INSTALLDIR	sub dir
+LocalAppDataFolder	TARGETDIR	.
+TARGETDIR		SourceDir

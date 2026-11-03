@@ -5,9 +5,9 @@
 A from-scratch x86_64 kernel in Rust that runs unmodified 64-bit Windows
 programs. It implements the Windows NT kernel's system call interface
 (the "NT layer"), and ships its own clean-room ntdll.dll, kernel32.dll,
-msvcrt.dll, ws2_32.dll and other system DLLs, so that `.exe` files built
-for Windows - by MSVC-style toolchains, mingw-w64, Go or Rust - run on it
-as they are.
+msvcrt.dll, ws2_32.dll and some fifty other system DLLs, so that `.exe`
+files built for Windows - by MSVC, mingw-w64, Go or Rust, or downloaded
+as their makers ship them - run on it as they are.
 
 The source is public so that it can be read; it is not licensed under any open source license (see [License](#license) below).
 
@@ -21,6 +21,8 @@ test program whose expected results are those of real Windows (Windows 11
 - Goals and rules: [`docs/PROJECT_BRIEF.md`](docs/PROJECT_BRIEF.md)
 - Status and plan: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 - Design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- Security model: [`docs/SECURITY.md`](docs/SECURITY.md)
+- Observability (logs, events, what a failure leaves behind): [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md)
 - How work is done, pitfalls, tools: [`docs/WORKFLOW.md`](docs/WORKFLOW.md)
 - Performance measurements: [`docs/PERF.md`](docs/PERF.md)
 - gala-um (the NT layer as a Linux process): [`docs/GALA_UM.md`](docs/GALA_UM.md)
@@ -28,11 +30,16 @@ test program whose expected results are those of real Windows (Windows 11
 
 ## What runs on gala
 
-Everything below is checked by a boot scenario (`cargo xtask test`; the
-scenario names are in parentheses) that boots gala in QEMU, runs the
-program and compares its output with what Windows gives.
+Everything below is checked by a boot scenario (the names are in
+parentheses) that boots gala in QEMU, runs the program and compares its
+output with what Windows gives. `cargo xtask test` (and CI) runs every
+scenario except the *pending* ones, which are still being brought up and
+run only on request (`cargo xtask boot-test <name>`). Status as of
+2026-11-03.
 
 ### Real programs
+
+Built from source for gala's tests:
 
 | Program | What it does on gala | Scenarios |
 |---|---|---|
@@ -45,69 +52,126 @@ program and compares its output with what Windows gives.
 | **Lua** 5.4.7 | the unmodified source release is built on gala by its own makefile (37 compiler runs), then runs a test script | `lua` |
 | **SQLite** 3.54.1 | the 9.5 MB amalgamation compiled on gala by tcc; creates, queries and reopens a database file; two processes write it **at once**, using file locks | `sqlite` |
 | A C runtime test | gala's msvcrt.dll checked by a C program built with mingw-w64 - and also built by tcc on gala | `msvcrt_test`, `tcc_self` |
-| **Caddy** 2.8.4 | the **unmodified official Windows release** (not built by us): prints its version, lists its 121 modules, and serves a site to the host (`caddy file-server`) | `caddy`, `caddy_http` |
-| **Java** (Temurin JDK 21) | the **unmodified Eclipse Temurin release**: `java -version` starts the HotSpot server VM (the launcher, Microsoft's C and C++ runtimes, jvm.dll, the module image); `java Hello.java` compiles a program in memory with the JDK's own compiler and runs it (system properties, collections, a thread pool, formatting) | `java_version`, `java_hello` |
 
-Most of these programs were built from their sources for gala's tests,
-but Caddy and the JDK are official release binaries, downloaded by
-xtask and checked against its SHA-256. Getting it to run needed only
-small, honest pieces: a winmm.dll (timer resolution), an ncrypt.dll with
-no key storage, thread priorities, the user's profile directories and
-environment, computer names, and registry calls that answer "not found"
-(gala has no registry yet). More prebuilt programs are on the way
-(docs/ROADMAP.md, P1).
+**Unmodified official releases**, downloaded by xtask and checked
+against their SHA-256 (never committed):
+
+| Program | What it does on gala | Scenarios |
+|---|---|---|
+| **Caddy** 2.8.4 | prints its version, lists its 121 modules, serves a site to the host (`caddy file-server`) | `caddy`, `caddy_http` |
+| **Java** (Temurin JDK 21.0.5) | `java -version` starts the HotSpot server VM; `java Hello.java` compiles a program in memory with the JDK's own compiler and runs it; `com.sun.net.httpserver` serves the host. Known intermittent: about 1 run in 30-40 fails with Java heap corruption (under investigation, ROADMAP "Priorities") | `java_version`, `java_hello`, `java_http` |
+| **.NET 8** (runtime 8.0.33) | `dotnet --list-runtimes`; a C# program on the JIT and GC (exceptions, threads, formatting) | `dotnet_info`, `dotnet_hello` |
+| **PowerShell** 7.4.22 | `pwsh -NoProfile -Command ...` runs a command and prints `$PSVersionTable` | `pwsh_hello` |
+| **PostgreSQL** 17.2 | `initdb` makes a cluster, `postgres` serves it (a backend per connection, a restricted token as pg_ctl uses), the host's `psql` queries it | `postgres` |
+| **Win32-OpenSSH** 9.8 | the host logs in with a key or a password; sshd as a server started at boot (sequential and concurrent logins, restarted if it dies); an interactive shell over a pseudo console (ConPTY: line editing, Ctrl+C); sftp upload, listing and download | `sshd_login`, `sshd_password`, `sshd_server`, `sshd_shell`, `sshd_sftp`, `service_restart` |
+| **FileZilla Server** 1.12.6 | generates its TLS certificates, serves FTP; the host logs on | `filezilla_server` |
+| **FileZilla** 3.69.3 | its SFTP engine headless; the GUI client on gala's desktop connecting to FileZilla Server over TLS 1.3 (pending), also driven by FlaUI on .NET through UI Automation (pending) | `fzsftp`, `filezilla`, `filezilla_flaui` |
+| **FlaUI** 5.0 on .NET 8 | drives another program's window through gala's UI Automation (element tree, Invoke, Value, Toggle, Window patterns) | `flaui_test` |
+| **SQL Server 2022 LocalDB** | the database engine starts, answers a TDS login and `SELECT @@VERSION`, shuts down; a database kept across a reboot on the disk (both pending) | `sqllocaldb`, `sqllocaldb_persist` |
+| **MinGit** 2.47.1 | `git init`, `add`, `commit`, `log` in the user's profile (pending) | `mingit` |
+| **Elasticsearch** 8.15.3 | starts on the JDK and listens, but does not answer the host's request yet (pending) | `elasticsearch` |
+| **Git Bash** (PortableGit 2.47.1) | bash gets past its startup, then stops (pending, timeboxed) | `gitbash` |
+
+Getting the official releases to run is what drives most of the work: the
+missing-features ledger (below) lists what a program calls that gala lacks,
+and each gap is filled test first.
 
 ### The Windows layers underneath
 
 - **Processes and threads**: process creation with inherited handles,
   redirected standard handles and the C runtime's inherited descriptors;
-  threads, suspension and thread context; TLS; process and thread
-  information; OpenProcess; process lists (Toolhelp); exit codes.
+  threads, suspension and thread context; TLS (static and dynamic); job
+  objects; process and thread information; OpenProcess; Toolhelp; exit
+  codes.
 - **Memory**: virtual memory (reserve, commit, protect, query, guard
   pages and stack growth), sections and memory-mapped files, copy-on-write,
   image sections and a loader for DLLs (relocations, imports, ordinals,
-  forwarders, DllMain), the NT heap (HeapAlloc and friends).
-- **Synchronization**: events, mutexes, semaphores, waitable timers,
-  waits on many objects, APCs, I/O completion ports, critical sections.
-- **Files**: a case-insensitive in-memory file system with Windows share
-  modes, delete-on-close, directory listing with wildcards, rename, file
-  times and attributes, byte-range locks (LockFileEx), the NUL device,
-  anonymous and named pipes.
+  forwarders, API sets, DllMain), the NT heap.
+- **Synchronization**: events, mutexes, semaphores, keyed events, waitable
+  timers, waits on many objects, APCs, I/O completion ports, critical
+  sections, SRW locks, condition variables, the thread pool.
 - **Exceptions**: structured exception dispatch to user mode, vectored
-  handlers, unwinding information, guard page and stack overflow
-  exceptions.
+  handlers, frame-based unwinding (RtlVirtualUnwind, C++ exceptions),
+  guard page and stack overflow exceptions; x87, SSE and AVX state
+  (XSAVE) in contexts.
+- **Files and disk**: a case-insensitive in-memory file system with
+  Windows share modes, delete-on-close, directory listing with wildcards,
+  rename, file times and attributes, byte-range locks, directory change
+  notifications, the NUL device, anonymous and named pipes; a virtio-blk
+  driver, and with `persist` the changes to C: and the registry kept on
+  the disk as a log replayed at the next boot.
+- **Registry**: an in-memory registry (keys, values, the information
+  classes, access checks), seeded at boot, kept on the disk with
+  `persist`.
+- **Security**: access tokens, security descriptors and access checks on
+  files, keys and named objects; accounts, LSA logons (as sshd makes
+  them), user profiles, SYSTEM, restricted tokens, integrity levels and
+  UIPI between windows ([`docs/SECURITY.md`](docs/SECURITY.md)).
+- **Sessions**: session 0 for services and SYSTEM, session 1 for the
+  console, each with its own named objects (`Local\`, `Global\`) as on
+  Windows.
+- **Consoles**: console modes, Ctrl+C, console windows on the desktop
+  (gala's conhost.exe), and pseudo consoles (ConPTY) for remote shells.
 - **Networking**: Winsock (ws2_32.dll and mswsock.dll) over gala's AFD
-  driver on a TCP/IP stack (smoltcp): TCP and UDP, blocking and
-  overlapped sockets, select, I/O completion ports; a loopback device and
-  a virtio-net network card.
+  driver on a TCP/IP stack (smoltcp): TCP and UDP, blocking, non-blocking
+  and overlapped sockets, select and AFD polls, AcceptEx and ConnectEx,
+  I/O completion ports; a loopback device and a virtio-net network card.
+- **Windows on the screen**: user32 and gdi32 windows, controls, rich
+  edit and common dialogs, painted by gala's compositor (*shasha*) with a
+  taskbar, start menu, PS/2 mouse and keyboard, UI Automation
+  (UIAutomationCore) and WinEvents. Everything the desktop does can also
+  be done with the `gala` command (CLI parity); `profile=server` keeps the
+  desktop off. Screens: the bootloader's framebuffer or a virtio-gpu (2D).
 - **Multiprocessor**: all CPUs schedule threads; thread affinity; TLB
-  shootdowns.
+  shootdowns; CPUs the bootloader missed are started by the kernel.
+- **Time**: the TSC calibrated against the HPET or the ACPI PM timer,
+  checked against the RTC; KUSER_SHARED_DATA.
 - **System information**: PEB/TEB, KUSER_SHARED_DATA, environment,
   command lines, current directory, system and process information
   classes, random numbers (RDRAND).
-- **DLLs gala provides** (written from documentation): ntdll, kernel32,
-  msvcrt, ws2_32, mswsock, advapi32, user32 (no windows), crypt32,
-  bcryptprimitives, winmm, ncrypt.
+- **Installing software**: `gala install|search|list|upgrade|uninstall`
+  over winget's manifests (zip and portable packages from a local
+  mirror; downloads not yet).
+- **Robustness**: fault injection (`failpoint=`), lock-order checking, a
+  hang watchdog, a flight recorder and a crash record kept across
+  reboots, record/replay of a run's inputs, and **kernel handover**: the
+  running kernel hands the machine to a new kernel image without a
+  reboot, carrying running programs and their sockets (the path to live
+  update).
+- **DLLs gala provides** (written from documentation), among them:
+  ntdll, kernel32, kernelbase, msvcrt, advapi32, user32, gdi32, comctl32,
+  comdlg32, shell32, shlwapi, ole32, oleaut32, ws2_32, mswsock,
+  iphlpapi, winhttp, wininet, crypt32, bcrypt, bcryptprimitives, ncrypt,
+  secur32, rpcrt4, userenv, version, winmm, dbghelp, psapi,
+  uiautomationcore, riched20 and msftedit (`user/<name>/`); also
+  conhost.exe, cmd.exe and gala.exe.
 
-About 50 test programs (`user/*_test`) check these layers call by call;
+About 115 test programs (`user/*_test`) check these layers call by call;
 the same programs run on Windows (`user/bin/run-all.ps1`) so that the two
 can be compared (`cargo xtask compare`).
 
 ### Not there yet
 
-- **No keyboard, disk or real network card drivers.** Input comes from
-  the kernel command line; files live in memory (boot modules appear
-  under `C:\`, everything written is gone at reboot); the only network
-  card is QEMU's virtio-net. On a real PC gala boots, runs the programs
-  on its command line and shows their output on the screen.
-- No graphical user interface (user32 has no windows), no registry (keys
-  are reported as not found), no security model (tokens, ACLs), no
-  32-bit programs, no Windows services (no service control manager).
+- **Few drivers.** Storage is virtio-blk, the network card virtio-net,
+  the screen the bootloader's framebuffer or a virtio-gpu, input a PS/2
+  keyboard and mouse; devices are polled (no device interrupts). On a
+  real PC gala boots from a CD or USB stick, runs the programs on its command
+  line and shows their output on the screen; without a virtio disk,
+  files live in memory and are gone at reboot.
+- No 32-bit programs (WOW64), no service control manager (services are
+  started from the command line, `restart=` keeps them running), no IPv6,
+  no GPU acceleration (Direct3D, Vulkan and OpenGL are planned in
+  software first), no registry hives in Windows' file format.
 - Some system call numbers are gala's own guesses for the pinned Windows
   build (marked UNVERIFIED in `kernel/src/nt/syscalls.rs`); programs
   that go through ntdll are not affected.
 - Functions that are missing or only partly done are reported at the end
   of each run (the "ledger" lines), so gaps are never silent.
+- Planned next (ROADMAP "Next"): faster and more deterministic
+  debugging (simulation, record/replay), the Java heap corruption,
+  sessions with their own desktops and a remote desktop protocol,
+  HTTPS downloads for `gala install`, a browser (Chromium, then Edge), and
+  graphics in software.
 
 ## How it fits together
 
@@ -118,23 +182,35 @@ only those DLLs, and the kernel under them, are gala's.
 
 ```mermaid
 flowchart TB
-    subgraph user["User mode (per process)"]
-        app["Windows program (.exe)<br/>Go, Rust, mingw-w64 or MSVC-built"]
-        crt["msvcrt.dll<br/>(or the program's own ucrtbase)"]
-        dlls["kernel32 · advapi32 · ws2_32 · mswsock<br/>user32 · crypt32 · winmm · ncrypt · bcryptprimitives"]
+    subgraph user["User mode (per process, in a session)"]
+        app["Windows program (.exe)<br/>Go · Rust · mingw-w64 · MSVC · JDK · .NET · official releases"]
+        crt["msvcrt.dll<br/>(or the program's own UCRT)"]
+        dlls["kernel32 · kernelbase · advapi32 · user32 · gdi32 · ws2_32<br/>shell32 · ole32 · bcrypt · ncrypt · secur32 · winhttp · ... (~50)"]
         ntdll["ntdll.dll<br/>loader · heaps · exception and APC dispatch · system call stubs"]
+        tools["gala's programs<br/>conhost.exe · cmd.exe · gala.exe"]
         app --> crt --> dlls --> ntdll
         app --> dlls
+        tools --> dlls
     end
     subgraph kernel["gala kernel (Rust)"]
-        nt["NT layer (kernel/src/nt)<br/>system calls · objects and handles · processes and threads<br/>virtual memory and sections · files and pipes · waits and timers · AFD sockets · locks"]
+        nt["NT layer (kernel/src/nt)<br/>system calls · objects and handles · processes, threads, jobs<br/>virtual memory and sections · files and pipes · waits and timers<br/>registry · AFD sockets · consoles and ConPTY"]
+        sec["security<br/>tokens · descriptors · access checks<br/>LSA logons · sessions · UIPI"]
+        shasha["shasha compositor (feature)<br/>windows · taskbar · start menu<br/>GalaDesktopAction (= the gala CLI)"]
         seam["platform seam (nt::platform)"]
-        core["kernel core<br/>x86_64 and SMP · paging · frames and heap · scheduler · time"]
-        fs["ramfs (C:)"]
-        net["TCP/IP (smoltcp)<br/>loopback · virtio-net"]
-        nt --> seam --> core
+        core["kernel core<br/>x86_64 and SMP · paging and TLB · XSAVE<br/>frames and heap · scheduler · one clock"]
+        fs["ramfs (C:)<br/>+ disk log (persist)"]
+        net["TCP/IP (smoltcp)"]
+        drv["drivers<br/>virtio-net · virtio-blk · virtio-gpu<br/>framebuffer · PS/2 · serial"]
+        rob["robustness<br/>failpoints · lockdep · watchdogs<br/>flight recorder · handover"]
+        nt --> sec
+        nt --> shasha
         nt --> fs
         nt --> net
+        nt --> seam --> core
+        fs --> drv
+        net --> drv
+        shasha --> drv
+        rob -.- core
     end
     um["gala-um: the same NT layer<br/>as a Linux process (tests, debugging)"]
     ntdll -- "syscall" --> nt
@@ -146,10 +222,15 @@ flowchart TB
 ```mermaid
 flowchart LR
     fw["BIOS or UEFI<br/>(CD, disk or USB stick)"] --> limine["Limine<br/>kernel + boot modules<br/>+ command line"]
-    limine --> init["kernel init<br/>GDT/IDT · memory map · paging<br/>heap · APIC timer · all CPUs"]
-    init --> fsinit["C: in memory<br/>boot modules under C:\gala,<br/>DLLs under C:\Windows\System32"]
-    fsinit --> run["run=a.exe,b.exe<br/>each program as a process"]
-    run --> log["serial port + screen:<br/>output, ledger, nt: line"]
+    limine --> init["kernel init<br/>GDT/IDT · memory map · paging · heap<br/>clock calibration · all CPUs (MADT)"]
+    init --> drv["drivers<br/>virtio-net · virtio-blk · display"]
+    drv --> fsinit["C: in memory<br/>boot modules under C:\gala,<br/>DLLs under C:\Windows\System32,<br/>registry seeded, user profiles"]
+    fsinit --> persist{"persist?"}
+    persist -- yes --> replay["replay the disk log<br/>(files and registry)"]
+    persist -- no --> run
+    replay --> run["start= servers, then<br/>run=a.exe,b.exe<br/>(as=system, restart=)"]
+    run --> log["serial port + screen:<br/>output, ledger, nt: and stats: lines,<br/>gala: boot ok"]
+    log -. "handover=n" .-> handover["hand over to a new kernel"]
 ```
 
 ### Starting a process
@@ -160,10 +241,10 @@ sequenceDiagram
     participant K as gala kernel
     participant L as ntdll (child)
     participant C as Child program
-    P->>K: GalaCreateProcess(image, command line, handles, environment)
-    K->>K: image layout from the cache (shared code pages)<br/>address space, PEB, parameters, inherited handles
+    P->>K: GalaCreateProcess(image, command line, handles, environment, token)
+    K->>K: image layout from the cache (shared code pages)<br/>address space, PEB, parameters, inherited handles,<br/>session from the token
     K->>L: initial thread at LdrInitializeThunk
-    L->>L: process heap, load and bind DLLs, DllMain
+    L->>L: process heap, load and bind DLLs (API sets), TLS, DllMain
     L->>C: NtContinue to the entry point
     C-->>K: system calls ... NtTerminateProcess
     K-->>P: process object signaled, exit code
@@ -176,20 +257,98 @@ flowchart LR
     stub["ntdll stub<br/>mov eax, n · syscall"] --> entry["syscall entry<br/>(arch)"]
     entry --> dispatch["dispatch<br/>table of services"]
     dispatch --> handler["service<br/>e.g. NtReadFile"]
-    handler --> objects["objects and handles<br/>access checks"]
+    handler --> objects["objects and handles<br/>granted access"]
+    objects --> acc["access check<br/>token vs descriptor"]
     handler --> back["status in rax<br/>back to user mode"]
-    dispatch -.-> obs["ledger (gaps) · trace<br/>events · nt: counters"]
+    dispatch -.-> obs["ledger (gaps) · trace<br/>events · nt: counters · flight recorder"]
+```
+
+### Security and logons
+
+How a login over SSH becomes a process with its own token (SECURITY.md):
+
+```mermaid
+sequenceDiagram
+    participant H as Host ssh
+    participant S as sshd (SYSTEM, session 0)
+    participant A as advapi32 / secur32 (LSA)
+    participant K as gala kernel
+    participant U as User's shell
+    H->>S: TCP connection (port 22 via QEMU)
+    S->>S: key or password checked<br/>(authorized_keys owned and protected: ACLs)
+    S->>A: LsaLogonUser (S4U or interactive)
+    A->>K: token: user SID, groups, privileges,<br/>integrity level, session
+    S->>K: CreateProcessAsUserW(token)<br/>sshd-session, then the shell
+    K->>K: every open checks the token<br/>against the object's descriptor
+    K-->>U: process in the user's session<br/>(Local\ names under \Sessions\n)
+    U-->>H: output over the channel
+```
+
+### Consoles and remote shells
+
+```mermaid
+flowchart LR
+    ssh["host: ssh -tt"] -- TCP --> sess["sshd-session.exe"]
+    sess -- "CreatePseudoConsole<br/>(pipes)" --> con["conhost.exe --headless<br/>console ↔ VT sequences"]
+    con --> sh["busybox sh / cmd.exe"]
+    sh -- "console API<br/>(WriteConsole, ReadConsoleInput)" --> con
+    con -- "VT out, keys in<br/>Ctrl+C, resize" --> sess
+    desk["console= on the desktop"] --> win["conhost.exe console window<br/>on shasha"]
 ```
 
 ### Networking
 
 ```mermaid
 flowchart TB
-    prog["program: Winsock calls<br/>(socket, connect, WSARecv, select ...)"] --> ws2["ws2_32.dll · mswsock.dll"]
-    ws2 -- "NtDeviceIoControlFile on \Device\Afd" --> afd["AFD in the kernel<br/>endpoints · pending requests · completion ports"]
+    prog["program: Winsock calls<br/>(socket, connect, WSARecv, select, AcceptEx ...)"] --> ws2["ws2_32.dll · mswsock.dll"]
+    ws2 -- "NtDeviceIoControlFile on \Device\Afd" --> afd["AFD in the kernel<br/>TCP and UDP endpoints · pending requests<br/>polls · completion ports"]
     afd --> nett["net thread: smoltcp TCP/IP"]
     nett --> lo["loopback (127.0.0.1)"]
-    nett --> vio["virtio-net card<br/>(QEMU user network)"]
+    nett --> vio["virtio-net card<br/>(QEMU user network, host port forwards)"]
+```
+
+### The desktop and the command line
+
+Every desktop action goes through one kernel entry point, so the `gala`
+command can do anything the mouse can (ROADMAP SD):
+
+```mermaid
+flowchart LR
+    mouse["mouse and keyboard<br/>(PS/2)"] --> shasha["shasha<br/>taskbar · start menu · caption buttons · Win+arrows"]
+    cli["gala start / windows / activate<br/>minimize / snap / close / wallpaper / ps / kill"] --> act
+    shasha --> act["GalaDesktopAction<br/>(UIPI checked against the caller's token)"]
+    act --> reg["window registry<br/>(per session: planned)"]
+    reg --> comp["compositor"]
+    comp --> scr["framebuffer or virtio-gpu"]
+    prog["GUI program<br/>user32 · gdi32"] --> reg
+    uia["UI Automation clients<br/>(FlaUI)"] --> reg
+```
+
+### C: kept on the disk
+
+```mermaid
+flowchart LR
+    prog["programs write files<br/>and registry keys"] --> ram["ramfs and registry<br/>(the working copy, in memory)"]
+    ram -- "records: Create, Write,<br/>SetSize, Rename, Delete ..." --> logv["disk log<br/>(two areas, CRC per record,<br/>compacted into a snapshot)"]
+    logv --> blk["virtio-blk"]
+    blk -. "next boot" .-> replay["replay over the boot's files"]
+    replay --> ram
+```
+
+### Kernel handover (toward live update)
+
+```mermaid
+sequenceDiagram
+    participant O as Running kernel
+    participant N as New kernel image
+    participant P as Programs
+    O->>O: check the new ELF (signed, version allowed)<br/>sync the disk log
+    O->>O: park the other CPUs
+    O->>O: write the handover record: memory map, clock, CPUs,<br/>modules, volume, processes, address spaces, sockets
+    O->>N: jump (no firmware, no bootloader)
+    N->>N: frames from the record's map, clock carried,<br/>CPUs brought back
+    N->>P: processes, threads, handles and sockets rebuilt
+    P-->>N: programs carry on (a sleep or a connection<br/>spans the handover)
 ```
 
 ### Building on gala
@@ -211,16 +370,18 @@ flowchart LR
     sqlite --> out
 ```
 
-### Testing
+### Testing and troubleshooting
 
 ```mermaid
 flowchart LR
     tp["test program<br/>user/&lt;name&gt;_test<br/>expected = Windows' results"] --> sc["scenario in xtask<br/>command line + expected lines"]
     sc --> unit["host unit tests"]
-    sc --> um["gala-um<br/>(Linux process, ms)"]
+    sc --> um["gala-um<br/>(Linux process, ms)<br/>fault-test · sim-test"]
     sc --> qemu["QEMU boots<br/>(BIOS/UEFI, 2 CPUs)"]
     tp --> win["Windows 11<br/>run-all.ps1"]
     qemu --> rep["cargo xtask report"]
+    qemu -- "failure" --> fail["target/failed/&lt;scenario&gt;.log<br/>triage block · state dump<br/>crash report · events"]
+    qemu --> hist["history.jsonl<br/>flaky and slower scenarios"]
     win --> cmp["cargo xtask compare"]
     rep --> cmp
 ```
@@ -322,8 +483,8 @@ output (the same text the serial port gets), then `gala: boot ok`; the
 machine then idles until you power it off. Requirements: an x86_64 CPU
 with an APIC (anything from the last 15 years); RDRAND for Go programs
 and others that ask for random numbers (Intel since 2012, AMD since 2015);
-512 MB of memory or more. There is no keyboard input, the stick is not
-read after booting (programs and files are loaded into memory by the
+512 MB of memory or more. Input is a PS/2 keyboard and mouse only (no
+USB input driver), the stick is not read after booting (programs and files are loaded into memory by the
 bootloader), and network cards other than virtio-net are not supported,
 so on real hardware the network scenarios do not apply.
 
@@ -338,7 +499,18 @@ Words separated by spaces (`cargo xtask iso ... <words>`):
   and every user-mode fault.
 - `events=syscall,image,thread,process,fault` (or `all`) writes a JSON
   event stream to the debug console (docs/OBSERVABILITY.md).
+- `start=srv.exe` starts servers first without waiting for them;
+  `restart=srv.exe` makes a `run=` program a service that is started
+  again when it ends; `as=system` runs the programs as SYSTEM;
+  `cwd=C:/dir` sets their current directory.
+- `persist` keeps what programs change on C: and in the registry on the
+  virtio-blk disk, for the next boot.
+- `profile=server` never brings up the desktop; `console=prog.exe` gives
+  a program a console window; `display=virtio` uses a virtio-gpu screen.
 - `noscreen` keeps the screen console off (faster under emulation).
+- `failpoint=heap:every:97 failseed=7` injects failures (debug builds);
+  `record` / `replay=<file>` record and replay a run's outside inputs;
+  `handover=<n>` hands the machine to a fresh kernel n times at the end.
 - `qemu_exit` ends QEMU with the result (used by the tests);
   `selftest` runs the kernel's own tests; `fault=<name>` provokes a CPU
   exception.
@@ -351,6 +523,13 @@ cargo xtask um-test                 # the test programs in gala-um (seconds)
 target/debug/um user/bin/hello.exe  # one program in gala-um (see docs/GALA_UM.md)
 cargo xtask screenshot --scenario tcc --at 16 run=busybox.exe "args=..."  # PNG of the screen
 cargo xtask serve nginx 8080        # Nginx on gala, browse http://localhost:8080
+cargo xtask serve sshd              # sshd on gala, ssh to host port 2222 (docs/WORKFLOW.md)
+XTASK_REPEAT=20 cargo xtask boot-test java_hello   # repeat a boot test (flaky hunting)
+cargo xtask triage target/failed/lua.log            # the triage summary of a failed log
+cargo xtask events <file.events.jsonl>              # summarize an event stream
+cargo xtask fault-test              # test programs in gala-um under injected failures
+cargo xtask sim-test                # deterministic simulation in gala-um (seeds)
+cargo xtask symbolize <log>         # resolve kernel addresses in a log
 cargo xtask bench                   # micro-benchmarks (also run on Windows)
 cargo xtask report                  # every test program on gala -> target/report/
 cargo xtask compare windows.json    # against run-all.ps1's report from Windows
@@ -358,9 +537,12 @@ cargo xtask export-tests            # refresh the checked-in test binaries in us
 ```
 
 At the end of every run the log has the ledger (missing or partial
-functions, with hit counts) and an `nt:` line (time in system calls,
-faults and process creation). A failed scenario's serial log is kept in
-`target/failed/<scenario>.log`. More in [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
+functions, with hit counts), an `nt:` line (time in system calls, faults
+and process creation) and a `stats:` line (frames, heap peak). A failed
+scenario's serial log is kept in `target/failed/<scenario>.log`, with a
+triage block at its end, a state dump if it timed out, and a crash report
+for a program ended by an exception; `target/report/history.jsonl` names
+flaky and slower scenarios over runs (docs/OBSERVABILITY.md). More in [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
 
 To compare with Windows: copy `user/bin` to a Windows 11 machine and run
 `powershell -ExecutionPolicy Bypass -File run-all.ps1 -Out windows.json`
@@ -370,14 +552,15 @@ there, then `cargo xtask compare windows.json` here.
 
 | Path | What it holds |
 |---|---|
-| `kernel/` | the kernel: `arch` (x86_64, SMP, paging), `mm`, `sched`, `fs` (ramfs), `net` (virtio-net, smoltcp), `nt` (the NT system call layer), `hosted` (gala-um's platform) |
-| `user/<dll>/` | gala's DLLs: `testntdll` (ntdll), `kernel32`, `msvcrt`, `ws2_32`, `mswsock`, `advapi32`, `user32`, `crypt32`, `bcryptprimitives` |
-| `user/<name>_test/` | test programs (Rust on `user/ntrt` or kernel32, some C) |
-| `user/go_*`, `user/nginx`, `user/busybox`, `user/tcc`, `user/lua`, `user/sqlite` | real programs: build scripts, test scripts, data |
+| `kernel/` | the kernel: `arch` (x86_64, SMP, paging, virtio), `boot`, `mm`, `sched`, `fs` (ramfs, disk log), `disk` (virtio-blk), `net` (virtio-net, smoltcp), `display` (framebuffer, virtio-gpu), `nt` (the NT system call layer, security, registry, desktop), `handover` (kernel handover), `trust` (signed updates), `hosted` (gala-um's platform) |
+| `user/<dll>/` | gala's DLLs, about fifty: `testntdll` (ntdll), `kernel32`, `kernelbase`, `msvcrt`, `advapi32`, `user32`, `gdi32`, `ws2_32`, `shell32`, `ole32`, ... |
+| `user/conhost`, `user/cmd`, `user/gala`, `user/galapkg` | gala's own programs: the console host, cmd.exe, the `gala` command, `gala install` |
+| `user/<name>_test/` | test programs (Rust on `user/ntrt` or kernel32, some C and C#) |
+| `user/go_*`, `user/nginx`, `user/busybox`, `user/tcc`, `user/lua`, `user/sqlite`, `user/java`, `user/postgres`, `user/sshd`, ... | real programs: build scripts, test scripts, configuration, data |
 | `user/bin/` | the checked-in binaries (and `run-all.ps1` for Windows) |
 | `um/` | gala-um, the NT layer as a Linux process |
 | `xtask/` | the build and test driver (`cargo xtask ...`, scenarios) |
-| `docs/` | design, roadmap, workflow, measurements |
+| `docs/` | design, roadmap, workflow, security, observability, measurements |
 
 ## Contributing
 

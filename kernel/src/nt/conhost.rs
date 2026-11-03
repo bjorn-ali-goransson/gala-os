@@ -56,6 +56,9 @@ pub struct Session {
     /// Set when Ctrl+C was typed (processed input): the session's
     /// processes' control-handler threads wait on it (GalaConsoleCtrl).
     pub ctrl_event: ObjectRef,
+    /// When the last Ctrl+C came (raw monotonic ns): how late each
+    /// process's handler thread takes it is logged.
+    pub ctrl_raised_ns: core::sync::atomic::AtomicU64,
 }
 
 /// The console's input modes (SetConsoleMode) the session acts on.
@@ -182,6 +185,7 @@ impl Session {
             }),
             input_ready,
             ctrl_event,
+            ctrl_raised_ns: core::sync::atomic::AtomicU64::new(0),
         })
         .map_err(|_| NtStatus::NO_MEMORY)
     }

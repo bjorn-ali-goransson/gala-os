@@ -98,6 +98,34 @@ pub extern "C" fn iswprint(c: u16) -> i32 {
     crate::wide::iswctype(c, BLANK | PUNCT | ALPHA | DIGIT)
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn iswlower(c: u16) -> i32 {
+    crate::wide::iswctype(c, LOWER)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn iswupper(c: u16) -> i32 {
+    crate::wide::iswctype(c, UPPER)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn iswcntrl(c: u16) -> i32 {
+    crate::wide::iswctype(c, CONTROL)
+}
+
+/// iswgraph: _PUNCT | _ALPHA | _DIGIT (ctype.h), printable but not a
+/// space.
+#[unsafe(no_mangle)]
+pub extern "C" fn iswgraph(c: u16) -> i32 {
+    crate::wide::iswctype(c, PUNCT | ALPHA | DIGIT)
+}
+
+/// iswascii: a character below 0x80.
+#[unsafe(no_mangle)]
+pub extern "C" fn iswascii(c: u16) -> i32 {
+    i32::from(c < 0x80)
+}
+
 /// towupper: ASCII letters; past Latin-1, Unicode's simple mapping (the C
 /// locale maps nothing in 0x80..0xff).
 #[unsafe(no_mangle)]
@@ -142,9 +170,6 @@ fn map_case(c: u16, upper: bool) -> u16 {
         _ => c,
     }
 }
-
-// Silences "unused" for the classes this file does not name directly.
-const _: u16 = UPPER | LOWER | CONTROL;
 
 // ---- Numbers ----
 
@@ -241,6 +266,12 @@ pub extern "C" fn _wtoi(s: *const u16) -> i32 {
     let (v, negative, _, _) = parse_wide(s, 10);
     let v = v as u32 as i32;
     if negative { v.wrapping_neg() } else { v }
+}
+
+/// _wtol: _wtoi (a long is 32 bits on Windows).
+#[unsafe(no_mangle)]
+pub extern "C" fn _wtol(s: *const u16) -> i32 {
+    _wtoi(s)
 }
 
 // ---- Strings ----

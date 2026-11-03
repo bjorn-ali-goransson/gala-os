@@ -1,0 +1,13 @@
+Title: Installation Database
+Subject: Gala Test
+Author: Gala
+Keywords: Installer
+Comments: This installer database contains the logic and data required to install Gala Test.
+Template: Intel;1033
+Revision number (UUID): {F6093085-E620-42F2-A114-CD53C8C313CA}
+Created: Tue Nov  3 11:05:28 2026
+Last saved: Tue Nov  3 11:05:28 2026
+Version: 200 (c8)
+Source: 10 (a)
+Application: msitools 0.103
+Security: 2 (2)

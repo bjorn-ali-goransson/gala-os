@@ -451,6 +451,13 @@ charged). Look
   drops CONTEXT_XSTATE from its own CONTEXT copies (they have no
   CONTEXT_EX); a copy that keeps the flag makes NtContinue read whatever
   follows it as a CONTEXT_EX (it is validated, then ignored if wrong).
+- **A wait that ends only at its timeout** although the object was set:
+  look for someone resetting it before the waiter looked (before
+  2026-11-03 a reset could undo a notification event's set for waiters
+  not yet run; ARCHITECTURE "Waits"). Kernel code that shares one event
+  between several waiters must not count on each waiter seeing it set:
+  a count or generation next to it (GalaConsoleCtrl's) says what
+  happened.
 - **Known intermittent**: java_http/java_hello fail about 1 run in 30 to
   40 with Java heap corruption (a stale String reference: `String.equals`
   reading a bogus klass, a NullPointerException inside String.equals from
@@ -530,7 +537,9 @@ charged). Look
   twice in full suites (load about 6) with "slept again 1248", check 58:
   the second Sleep(1000) spans the handover, the thread is frozen and the
   monotonic clock goes on (that handover alone moved it 232 ms). Timing
-  checks across a handover bound only the short side tightly.
+  checks across a handover bound only the short side tightly (check 14
+  of the first handover too: "slept 4986" with a 1.3 s handover at load
+  29).
 - **Java hang with a state dump (2026-11-03)**: the first timeout with a
   state dump (correct clock): java_http hung with three JVM threads in
   NtYieldExecution and two waiting on semaphores with count 0
@@ -960,6 +969,24 @@ where its pixel checks expect it (no pointer arithmetic).
   list (`memmove`, `strlen` were needed; the link error names it).
   advapi32 is loaded at run time (`pkg::Reg`): do not import it
   statically, or `gala`'s window commands break on images without it.
+- MSI and cabinet fixtures (`user/galapkg/testdata/msi`): `sh
+  user/galapkg/testdata/msi/make_fixtures.sh` rebuilds `basic.msi`
+  (from `basic.wxs` with wixl), `long.msi.zlib` (a generated package
+  with a 70 KB string, zlib-compressed because it is mostly one letter),
+  `mszip.cab` and `stored.cab` (gcab), and rewrites `expected/` from
+  msiinfo, msiextract, gcab and 7z; commit all of it together (the MSI's
+  package code and dates change on every run, the tests read them from
+  `expected/`). wixl lacks some WiX attributes (VBScriptCall, ShortName,
+  Product/@Codepage is ignored: its pools have code page 0 with UTF-8
+  strings); `msiinfo export` writes a `Binary/` directory into the
+  current directory (the script runs it in its temporary directory).
+  wixl miswrites a string longer than 128 KiB (its own reader rejects it,
+  "string table load failed"): keep long-string fixtures between 64 and
+  128 KiB. gcab writes only uncompressed and MSZIP cabinets (7z none): an LZX
+  fixture needs Windows' makecab.
+- The readers' own tests build edge cases with small writers
+  (`cfb::tests::build`, `cab::tests::build_with`); 7-Zip reads what they
+  make (checked by hand when they were written: `7z t`), keep it so.
 - Every installed command is a copy of gala.exe: a gala.exe change does
   not reach commands installed before it until they are reinstalled.
 - Low on disk: a few user programs can be built alone into a scratch

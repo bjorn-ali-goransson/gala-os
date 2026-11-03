@@ -1,0 +1,5 @@
+Registry	Root	Key	Name	Value	Component_
+s72	i2	l255	L255	L0	s72
+Registry	Registry
+reg90568182F0C00DE72AD4EA2101E6CDEB	1	Software\Gala\Test	Version	1.2.3	Main
+regADBC87214D7F52F85B2D10E1C46B9C36	1	Software\Gala\Test	Café	crème brûlée	Main

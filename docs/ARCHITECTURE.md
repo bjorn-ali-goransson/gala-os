@@ -104,6 +104,10 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `start=<file>[,<file>...]`, `start_args=...` | start those programs first without waiting for them (a server for the `run=` programs); they end with the boot |
 | `console=<program>` | that `start=`/`run=` program gets a console window (a console session hosted by gala's conhost.exe) |
 | `cwd=C:/dir` | their current directory (default `C:\gala\`; Elasticsearch expects its home) |
+| `as=system` | the `run=` programs run as SYSTEM instead of the boot user (SECURITY.md; the sshd scenarios) |
+| `wait=all` | after each `run=` program, wait for every process still running too (a service that hands its work to a child and exits, as `sshd -d` does) |
+| `persist` | keep what programs change on C: and in the registry on the virtio-blk disk (a log replayed at the next boot; "Disk (D1)" and the persistence part below) |
+| `wallpaper=<name>` | pin the desktop's wallpaper (`drawn` for the drawn one; screen checks pin one) |
 | `trace` | log every system call (arguments, status) |
 | `netreset=<n>` | the network card is reset under the driver after the n-th frame sent (the driver's recovery test) |
 | `diskreset=<n>` | the n-th disk request has the device reset under the driver just after it is posted (the driver's recovery test) |
@@ -115,6 +119,8 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `nomigrate` | a thread that runs user code stays on the CPU it first ran on (tells migration bugs from others) |
 | `framecheck` | user mappings of each frame are counted; freeing a frame a user space still maps panics |
 | `eagercommit` | committed private pages get their frames at once instead of at the first touch (no demand-zero faults in user code) |
+| `calwrong`, `calstall` | clock-calibration tests: the first TSC calibration 20x low (the RTC check must catch it), or the boot CPU stalled inside the calibration ("Interrupts and time"; scenarios `clockcal_*`) |
+| `parkdelay` | delay a CPU's parking in a kernel handover, so the handover is abandoned cleanly (scenario `handover_park_late`) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `display=virtio` | the screen is the first virtio-gpu (2D: a scanout resource, damage flushed, resizes followed) instead of the bootloader's framebuffer (`display=fb`, the default); without one the framebuffer is used ("Plan: graphics and GPU", G1) |
 | `gputrace` | log every virtio-gpu command and its result (`gputrace: SET_SCANOUT -> Ok(())`) |
@@ -760,7 +766,19 @@ state + waiter list). One global dispatcher lock covers all signal changes
 and wait checks, so WaitAll sees a consistent state. A waiter registers on
 every object, calls `sched::prepare_wait(deadline)`, drops the lock and
 calls `sched::wait()`; signalling wakes all waiters, which re-check
-(auto-reset events are consumed by the first). Invariant: a signal
+(auto-reset events are consumed by the first). A signal also marks each
+waiter it wakes as released (`Waiter::released`): a notification event or
+timer set while a thread waits satisfies that wait (any-object waits)
+even when it is reset before the thread looks again, as on Windows,
+where the set itself satisfies the pending waits. Without it, a waiter
+that ran after another thread's reset slept on: the console's Ctrl+C
+event, shared by all its processes' handler threads, reached the second
+process only at GalaConsoleCtrl's 1 s backstop (sshd_shell's flaky
+Ctrl+C; `wait_test` sets and clears an event with two waiters). Objects
+a wait consumes (auto-reset events and timers, semaphores, mutants,
+completion ports) and files, pipes and sockets keep the plain re-check.
+TODO: a wait-all is still satisfied only when all are signaled at its
+re-check. Invariant: a signal
 state that depends on its old value (a semaphore's count) is changed only
 through `wait::update_signal`, which reads and writes it under one hold of
 the lock: a `signal_state()` read followed by `set_signal` lets a wait
@@ -1449,7 +1467,18 @@ Windows, never shadows the system's DLLs.)
   Automation"); ProgIDs and out-of-process servers fail as unregistered
   (recorded); no marshaling across apartments yet. oleaut32 has BSTRs, VARIANTs (clear, copy, conversions
   between numbers, booleans, currency and strings in the en-US format;
-  dates and decimals recorded as missing), SAFEARRAYs (descriptors with
+  dates and decimals in VARIANTs recorded as missing), the direct
+  conversions programs import (VarI4/UI4/R8/Cy/BoolFromStr,
+  VarCyFromR8, VarBstrFromCy/Bool; strings to currency in exact decimal
+  arithmetic, half to even), dates (date.rs: SystemTimeToVariantTime,
+  VariantTimeToSystemTime to the second, VarDateFromStr for en-US
+  month/day/year, year-month-day and English month names; the forms
+  Windows reads relative to the current year are recorded), VarCmp
+  (Windows' rules: a string is greater than any number, an empty one
+  equals VT_EMPTY, strings through kernel32's CompareStringW), and
+  GetActiveObject (no running object table: MK_E_UNAVAILABLE, recorded).
+  Locales other than English and the defaults are read as en-US and
+  recorded. SAFEARRAYs (descriptors with
   the VARTYPE/IRecordInfo/IID prefix, bounds stored rightmost first,
   BSTR/interface/VARIANT elements owned), VarCyFromDec; type libraries
   are not registered. Its exports have Windows' ordinals (build.rs, from
@@ -1546,7 +1575,10 @@ Windows, never shadows the system's DLLs.)
     SetConsoleCtrlHandler handlers for CTRL_C_EVENT, the last added
     first, until one returns TRUE; else, unless a NULL handler made the
     process ignore Ctrl+C, ExitProcess(STATUS_CONTROL_C_EXIT) as Windows'
-    default handler. TODO: Ctrl+Break, CTRL_CLOSE_EVENT when the window
+    default handler. Every Ctrl+C is logged (`console N: Ctrl+C k`, event
+    `console ctrl`) and so is each process's handler thread taking it
+    (`... takes Ctrl+C k after m ms`, a warning from 250 ms: late is a
+    lost wake-up; event `console ctrl taken`). TODO: Ctrl+Break, CTRL_CLOSE_EVENT when the window
     closes, GenerateConsoleCtrlEvent, process groups, the
     CONSOLE_READCONSOLE_CONTROL wake-up keys.
   - The host: the kernel starts `conhost.exe` (user/conhost, a boot
@@ -2009,7 +2041,13 @@ Windows, never shadows the system's DLLs.)
   Seventeen DLLs (netapi32, pdh, shlwapi, rpcrt4, urlmon, wininet,
   userenv, xolehlp, odbc32, authz, wintrust, webservices, dhcpcsvc,
   uxtheme, comdlg32, oleacc, mpr) are nothing but such stubs so far, apart from rpcrt4's UUID functions
-  (`rpcrt4_test`) and netapi32's NetWkstaGetInfo (`netapi32_test`).
+  (`rpcrt4_test`), netapi32's NetWkstaGetInfo (`netapi32_test`) and
+  shlwapi's path and string functions (`shlwapi_test`: PathCanonicalize
+  splits components at backslashes only, PathCombine resolves a file
+  part against the directory's drive, comparisons go through kernel32's
+  CompareStringW in the user's locale, StrCmpLogicalW compares digit
+  runs by value; SHDeleteKeyW finds RegDeleteTreeW at run time so
+  loading shlwapi does not pull in advapi32).
   gala's cmd.exe (`user/cmd`, built as a program and placed in
   System32) implements `/c` (and switches before it): cmd's documented
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
@@ -3680,6 +3718,96 @@ serial log (`logtee=`), and pk_install_test prints it when a check fails.
 packages made by `make_source.py` (PkHello 1.0.0 as a singleton
 manifest, 1.1.0 multi-file; Conflict; BadHash; InnoSetup) and real
 winget-pkgs manifests (ripgrep, jq) for search and the HTTPS refusal.
+
+**Reading MSI packages (PK stage 5 groundwork, 2026-11-03).** Three
+modules of `user/galapkg`, pure Rust, `no_std` + `alloc`, host-tested,
+not yet called by gala.exe (nothing runs an installer):
+
+- `cfb`: compound files ([MS-CFB]), versions 3 and 4 (512- and
+  4096-byte sectors): header checks (signature, byte order, sector
+  shifts, the 4096-byte mini cutoff), the DIFAT (header and chained
+  sectors), FAT, mini FAT, the directory walked from the root (each
+  storage's sibling tree in order; an entry reached twice, a link out of
+  range or an unallocated entry in the tree is an error), streams of
+  either kind. `File::open`, `entries()`, `child`/`root_child` (names
+  compared ASCII-case-insensitively), `stream(index)`.
+- `msi`: the database. Stream names: two characters of `0-9A-Za-z._`
+  per code unit (0x3800 + a + 64·b), a lone one as 0x4800 + a, others as
+  themselves, tables prefixed with 0x4840 (`encode_name`/`decode_name`).
+  `_StringPool` is a u32 header (code page; bit 31: string ids are 3
+  bytes in tables, the long-id variant) and per id a u16 length and u16
+  reference count; length 0 with a non-zero count marks a string of 64
+  KiB or more whose u32 length follows (it takes one id); `_StringData`
+  is the bytes, decoded by the code page (65001, 1252, 28591; 0 as UTF-8
+  when valid, else 1252; others with U+FFFD and the pool's `lossy` flag).
+  Tables are column-major (each column for all rows, then the next):
+  integers with the sign bit flipped and 0 as NULL (i2 in 2 bytes, i4 in
+  4), strings as ids, stream columns as a 2-byte mark whose data is the
+  stream `<Table>.<key>[.<key>]`. Column types are `_Columns`' bits
+  (0x0800 string, 0x0400 with it: not a stream, 0x1000 nullable, 0x2000
+  key, 0x0200 localizable, the low byte the size), shown as `.idt`
+  writes them (`s72`, `L255`, `I4`, `v0`). Row count = stream size / row
+  size (an error if not whole). `Package::open` reads the pool and
+  catalog; `table(name)` any table; typed rows by column name (`files`,
+  `components`, `directories`, `features`, `registry`, `shortcuts`,
+  `media`, `custom_actions`, `binaries`, `binary(name)`), `summary()`
+  ([MS-OLEPS]: code page, title, subject, author, template, revision =
+  package code, page count = installer version, word count = source
+  flags, security).
+- `cab`: cabinets ([MS-CAB]): header with reserved areas and the
+  previous/next names skipped, folders, files, data blocks with their
+  checksum checked when not 0, compression none and MSZIP ([MS-MCI]: `CK`
+  + a deflate stream per block, the window carried over: miniz_oxide's
+  core inflater is given the folder's output so far). `folder_data`,
+  `extract(i)`, `extract_all` (each folder once).
+
+**What `gala install` will call:** `Package::install_files(&root)`:
+every File row with its component's directory resolved to a target
+path, and where its bytes are (`FileSource::Embedded{cabinet}` for a
+Media row's `#stream`, `External` for a cabinet file, `Loose` for an
+uncompressed file; compressed per the file's attributes, else the
+summary's word count bit 2; the Media row is the first whose
+LastSequence is at or above the file's Sequence). Directory resolution
+(`resolve_directories`): `root(id)` supplies directories set from
+outside (standard folders such as `LocalAppDataFolder` or
+`ProgramFilesFolder`, TARGETDIR, a public property from the command
+line); otherwise a directory is its parent's path plus DefaultDir's long
+target name (`target:source`, `short|long`; `.` adds nothing); a root
+without a value takes ROOTDRIVE, and without that it (and what is below
+it) stays unresolved, an error only for a file that needs it. Paths end
+with `\` as directory properties do. `Package::extract(key)` and
+`extract_all(each)` give file bytes from embedded cabinets, checked
+against the File table's FileSize.
+
+**Invariants.** Untrusted input never panics, loops or over-allocates:
+every offset and size is checked against the data before use, chains
+are bounded by a visited set (a looping chain is an error naming the
+stream and the sector), the directory walk visits each entry once, a
+table's rows are bounded by its stream, a cabinet's folder output by
+its blocks' checked sizes (≤ 32 KiB each); large buffers are
+`try_reserve`d (out of memory is an error). Errors say what and where:
+the byte offset, sector, directory entry, stream name, table, row and
+column, string id, folder and block. Host tests (`cargo test -p
+galapkg`) compare against independent readers (msiinfo, msiextract,
+gcab, 7-Zip: outputs checked in under `testdata/msi/expected`), cover
+hand-built edge cases (4096-byte sectors, a DIFAT chain beyond the
+header's 109 entries, nested storages, mini/regular boundary at 4095 and
+4096 bytes, reserved cabinet areas, the long-id pool, Windows-1252), and
+feed truncated and randomly damaged files to every reader.
+
+**Limits and TODO.** LZX (and Quantum) cabinets are refused with what
+they are (LZX is what large packages, Edge's among them, use; no tool
+here writes LZX cabinets to test against, so it waits for a fixture
+from Windows' makecab); cabinets spanning several files; external
+cabinets and loose files are located (`FileSource`) but not read (the
+caller has the files next to the package); code pages other than 1252,
+28591 and 65001 decode lossily; transforms (`.mst`), patches, the
+`_Validation`/`_Streams`/`_Storages` pseudo-tables and storages inside
+the package (embedded transforms) are not read; directory resolution
+does not apply the conditions, features or `SetDirectory` custom
+actions that an installer's costing would. Then stage 5 proper: the
+engine (standard actions, sequence tables, properties, conditions,
+custom actions, `msiexec /i /qn`).
 
 **Next (ROADMAP PK):** the HTTPS fetcher; then stage 3 (Inno Setup,
 NSIS, `exe` with switches: run the vendor's installer silently, uninstall
@@ -5975,17 +6103,20 @@ tests in `kernel/src/trust/` and `fs::volume`):
 
 ## Not done yet
 
-suspension/context of threads running on other CPUs, ranged (invlpg)
-shootdowns and PCIDs (ROADMAP S4), a real ntdll and
-kernel32 (gala runs test stand-ins), process creation from user mode,
-security, registry symbolic link keys, change notifications and WOW64
-views, hive files in Windows' format, files on the disk read on demand
-(D2 keeps them in memory),
-interrupts for devices (virtio-net and virtio-blk poll), AcceptEx with
-receive data, ConnectEx with send data, UDP, IPv6,
-select/IOCTL_AFD_POLL, non-blocking sockets, socket options with effect, telling a reset from a FIN
-on receive, bindgen-generated
-layouts, ACPI (MADT/HPET), reclaiming bootloader memory. Observability
-plans: `docs/OBSERVABILITY.md`.
+(Reviewed 2026-11-03; what is planned is in ROADMAP "Next".)
+Suspension/context of threads running on other CPUs by IPI, ranged
+(invlpg) shootdowns and PCIDs (ROADMAP S4); registry symbolic link keys,
+change notifications and WOW64 views, hive files in Windows' format;
+files on the disk read on demand (D2 keeps them in memory); interrupts
+for devices (virtio-net, virtio-blk and virtio-gpu poll); AcceptEx with
+receive data (refused, recorded in the ledger), ConnectEx with send data,
+IPv6, socket options with effect, telling a reset from a FIN on receive;
+bindgen-generated layouts; reclaiming bootloader memory; 32-bit programs
+(WOW64); a service control manager. Done since this list was first
+written: process creation from user mode ("Processes started by
+programs"), the security model (SECURITY.md), UDP, select and
+IOCTL_AFD_POLL, non-blocking sockets ("Networking"), the MADT and the
+HPET ("Processors", "Interrupts and time"). Observability plans:
+`docs/OBSERVABILITY.md`.
 Bootloader-reclaimable memory must not be reused until the boot info that
 lives there has been copied out.

@@ -1568,6 +1568,15 @@ fn gala_console_input(call: &mut Call<'_>) -> NtStatus {
         wait::set_signal(&session.input_ready, 1);
     }
     if ctrl {
+        use core::sync::atomic::Ordering::Relaxed;
+        session.ctrl_raised_ns.store(platform::monotonic_ns(), Relaxed);
+        let count = session.ctrl_count();
+        info!("console {}: Ctrl+C {count}: a control event for its processes", session.id);
+        crate::events::emit(
+            crate::events::Category::Console,
+            "console ctrl",
+            format_args!(r#""id":{},"count":{count}"#, session.id),
+        );
         wait::set_signal(&session.ctrl_event, 1);
     }
     NtStatus::SUCCESS
@@ -1666,12 +1675,15 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
     }
     loop {
         // Reset first, then look: an event raised in between is seen in
-        // the count, one raised after sets the event again. Every waiter
-        // a set wakes looks again; the timeout is a backstop.
+        // the count, one raised after sets the event again. A set
+        // satisfies every wait pending then, even one that looks only
+        // after another process's thread reset the event here (nt::wait's
+        // `Waiter`); the timeout is a backstop.
         wait::set_signal(&session.ctrl_event, 0);
         let count = session.ctrl_count();
         if count != seen {
             tri!(call.write_u32(seen_ptr, count));
+            note_ctrl_taken(call, &session, count);
             return NtStatus::SUCCESS;
         }
         let event = core::slice::from_ref(&session.ctrl_event);
@@ -1680,6 +1692,32 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
             return waited;
         }
     }
+}
+
+/// A process's control-handler thread took Ctrl+C `count`: logged with
+/// how long after it came (late is a lost wake-up: the shell then sees
+/// its Ctrl+C in the next command line; sshd_shell).
+fn note_ctrl_taken(call: &Call<'_>, session: &super::conhost::Session, count: u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let raised = session.ctrl_raised_ns.load(Relaxed);
+    let ms = platform::monotonic_ns().saturating_sub(raised) / 1_000_000;
+    let (pid, tid) = (call.process.id, thread::current_id().unwrap_or(0));
+    if ms >= 250 {
+        warn!(
+            "console {}: pid {pid} tid {tid} ({}) took Ctrl+C {count} late: {ms} ms after it came",
+            session.id, call.process.name
+        );
+    } else {
+        info!(
+            "console {}: pid {pid} tid {tid} ({}) takes Ctrl+C {count} after {ms} ms",
+            session.id, call.process.name
+        );
+    }
+    crate::events::emit(
+        crate::events::Category::Console,
+        "console ctrl taken",
+        format_args!(r#""id":{},"pid":{pid},"tid":{tid},"count":{count},"ms":{ms}"#, session.id),
+    );
 }
 
 /// GalaConsoleCreate(Flags, Size, *Info): a new console session made by

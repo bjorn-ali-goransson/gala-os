@@ -24,6 +24,13 @@ explicitly in its commit.
   core structures other items build on (LX seams, RS B2 with the
   core/NT process split), then features on top (PK installers, the
   browser), which run niced and yield VMs to the rest.
+- **Hygiene sweeps (the owner, 2026-11-03)**: "we should do sweeps in
+  general to check for hygienic factors". Regular sweeps of existing code
+  for a class of defect at a time; the first is the early primitives
+  (written just before SMP bring-up) for single-thread-at-a-time
+  assumptions, after three such races (copy-on-write, NtReleaseSemaphore,
+  the notification-event wake-up). The checklist lives in WORKFLOW
+  "Hygiene sweeps".
 - **Token-heavy implementation as filler (the owner, 2026-11-03)**:
   when an agent slot frees up and nothing more foundational waits, use it
   for broad implementation work: item LX proper (the Linux personality's
@@ -36,6 +43,13 @@ explicitly in its commit.
   control (first part done 2026-11-02, see R7), then fixing the known flaky scenarios (java_http,
   java_hello, postgres, smpsched_test under load), before the rest of
   R6.
+  **sshd_shell's Ctrl+C fixed (2026-11-03)**: not a regression of the
+  clock calibration (the parent failed 1 of 10 solo boots the same way).
+  A lost wake-up in `nt::wait`: setting a notification event woke its
+  waiters, but one that looked only after another had reset it slept on
+  (busybox's Ctrl+C handler ran at GalaConsoleCtrl's 1 s backstop, in
+  the next command line). Waits are now satisfied by the set itself, as
+  on Windows (ARCHITECTURE "Waits"; `wait_test`).
   Flaky scenarios (2026-11-02): a kernel race fixed: a copy-on-write
   fault changed the VAD before mapping the copy, so a second thread's
   write fault in between made the shared frame writable (writes reached
@@ -1781,10 +1795,10 @@ RS. **Remote access and sessions** (the owner, 2026-11-03; design:
      caller's session, ProcessIdToSessionId, WTSGetActiveConsoleSessionId
      (KUSER ActiveConsoleId), logons in the caller's session, PROCESSES
      version 3 carrying the session across a handover, the session in
-     process events and the state dump. Not run yet in QEMU when written
-     (disk full): `cargo xtask boot-test session_test` and the handover
-     scenarios whose expected lines changed (`handover_upgrade`,
-     `handover_upgrade_uefi`, `handover_downgrade_refused`).
+     process events and the state dump. Written while the disk was full;
+     booted 2026-11-03: `session_test` and the handover scenarios whose
+     expected lines changed (`handover_upgrade`, `handover_upgrade_uefi`,
+     `handover_downgrade_refused`) pass.
    - B2. Per-session desktop and window registry (the statics go): a GUI
      program in session 2 is not found or messaged from session 1; `gala
      windows` lists the caller's session; every GUI scenario still passes.
@@ -1874,8 +1888,8 @@ GPU. **Graphics and GPU** (the owner, 2026-11-03; design: ARCHITECTURE
      seam's `screen_flush`/`screen_changed`, the desktop re-laid out on a
      resize; `events=display`, `gputrace`, `gpureset=`; scenarios
      `virtio_gpu` and `virtio_gpu_reset` (gui_test's screen check on a
-     `virtio-gpu-pci` screen). **Not yet booted** (written while the
-     build machine's disk was full: run them first). Next: shasha's
+     `virtio-gpu-pci` screen). Written while the build machine's disk
+     was full; booted 2026-11-03, both pass. Next: shasha's
      pointer on the hardware cursor, WM_DISPLAYCHANGE and refitting
      maximized windows on a resize (a test with QEMU's monitor resizing
      the display), several scanouts as monitors.
@@ -1898,6 +1912,62 @@ GPU. **Graphics and GPU** (the owner, 2026-11-03; design: ARCHITECTURE
    contexts, sharing only by NT handles, per-session presentation, GPU
    memory charged (R6). Handover (R9): GPU state dropped (devices reset),
    programs see device-lost and re-create.
+
+OT. **OpenTelemetry as the model for all telemetry** (the owner,
+   2026-11-03: "use open telemetry for all kinds of telemetry ... much
+   easier to trace things from the user space into the kernel space").
+   One data model (traces, spans, logs, metrics sharing trace and span
+   ids) for what today are separate streams (serial log, debugcon JSONL
+   events, `stats:` lines, crash reports, state dumps), readable by the
+   standard tools (an OTel collector, Jaeger, Tempo, Grafana). Sources:
+   the OpenTelemetry specification and opentelemetry-proto (Apache-2.0),
+   W3C Trace Context. Design rules:
+   - OTel is the **model**, not the in-kernel wire format: the kernel
+     writes compact binary records to per-CPU ring buffers (fixed size,
+     no allocation, never blocking, a drop counter); an exporter turns
+     them into OTLP outside the hot path (xtask on the host over
+     debugcon/virtio-serial; in a running system a user-mode service
+     sending OTLP/HTTP). Telemetry must not perturb record/replay (R7).
+   - **Context propagation is the core**: each thread carries a trace
+     context (W3C traceparent semantics) where the kernel reads it at
+     system-call entry (a gala-private TEB slot); kernel work becomes
+     child spans; the context follows work across process creation,
+     pipes, ALPC/RPC, I/O completion ports and work queues.
+   - **Windows programs speak ETW**: an ETW to OTel bridge
+     (`EventRegister`/`EventWrite`, TraceLogging in advapi32) turns what
+     real software already emits into OTel logs and spans; later the same
+     for the Linux personality (item LX).
+   - What exists maps onto it: events to span events/logs, `stats:` to
+     metrics, crash reports and dumps to logs carrying the trace context
+     they happened in; `cargo xtask triage` reads spans.
+   - **One clock** (R1): timestamps from the kernel's monotonic clock,
+     mapped to wall time once per export; ring state survives a kernel
+     handover (R9).
+   Stages: **OT1** xtask converts today's event stream to OTLP and opens
+   it in a local Jaeger (cheap, useful at once); **OT2** trace context in
+   the kernel, system calls, waits, faults, I/O and network as spans,
+   per-CPU rings; **OT3** propagation through ntdll/kernel32, process
+   creation, pipes, ALPC/RPC, IOCP; **OT4** the ETW bridge; **OT5** the
+   in-guest OTLP exporter for servers, controlled from the `gala` CLI
+   (on/off, sampling, endpoint).
+
+OF. **The current Office: Microsoft 365 apps and the new Outlook** (the
+   owner, 2026-11-03: "the new Office suite would be very interesting to
+   see if we have any blockers there"; classic Outlook is out of scope).
+   First an assessment, then the work it finds, in this order:
+   (1) **Gap analysis** (black-box metadata only, CLEAN_ROOM): the
+   import tables, delay loads, COM classes and services of the Microsoft
+   365 apps (Word, Excel, PowerPoint; Click-to-Run, installed with the
+   Office Deployment Tool) and of the new Outlook (an MSIX package over
+   WebView2), against gala's exports and stubs; the result is a ranked
+   blocker list in this item, like item AG's. (2) **The new Outlook**,
+   after item BR's WebView2: MSIX install (PK stage 4), sign-in through
+   the Web Account Manager, notifications. (3) **The Microsoft 365
+   apps**: Click-to-Run's service and its virtualization, then the apps'
+   own needs (expected: DirectWrite/Direct2D/Direct3D 11 in software,
+   item GPU; Schannel TLS; COM/OLE depth). Sign-in and activation depend
+   on Microsoft's services and licence terms: the owner decides how far
+   to go there.
 
 PK. **Installing software: `gala install` over winget manifests** (the
    owner, 2026-11-03). winget's community manifests (the winget-pkgs
@@ -1942,6 +2012,22 @@ PK. **Installing software: `gala install` over winget manifests** (the
       (BR stage 4) is a target. Built clean-room from Microsoft's
       documentation of the MSI database and actions (Wine's msi is LGPL:
       read only as CLEAN_ROOM.md allows, nothing copied unrecorded).
+      **Reading packages done** (2026-11-03, host tests `cargo test -p
+      galapkg`; ARCHITECTURE "Installing software", "Reading MSI
+      packages"): compound files (`cfb`: v3/v4, FAT/miniFAT/DIFAT, the
+      directory tree, streams), the MSI database (`msi`: stream names,
+      the string pool with long strings and long ids, `_Tables`/
+      `_Columns`, any table, typed File/Component/Directory/Feature/
+      Registry/Shortcut/Media/CustomAction/Binary rows, the summary
+      information), cabinets (`cab`: none and MSZIP), and the API `gala
+      install` will call (`install_files`: target paths through the
+      Directory table, `extract`/`extract_all` from embedded cabinets),
+      checked against msitools and gcab on wixl-built fixtures and fed
+      damaged files. Next: LZX (with a makecab-built fixture), then the
+      engine: `gala install` of an `msi` InstallerType (files, registry,
+      shortcuts from the tables, an ARP entry, rollback through
+      `install::Tx`), then msiexec/msi.dll with standard actions and
+      custom actions.
    6. Later: running stock winget itself (it is an MSIX: stage 4) against
       gala, the Microsoft Store source, `winget configure`.
    Ideas: installs are transactions (a failed install rolls back its
@@ -1950,10 +2036,9 @@ PK. **Installing software: `gala install` over winget manifests** (the
    list`; a scenario per installer type kept as a regression test; the
    ledger's per-installer gaps in the report.
    **Stages 1 and 2 built, except downloads** (2026-11-03, test
-   `pk_install_test`, scenario `pk_install_zip`, written but **not yet
-   booted**: the disk was too full for an image that day; run it first,
-   `cargo xtask boot-test pk_install_zip`; host tests `cargo test -p
-   galapkg` pass, including a failure injected at every step;
+   `pk_install_test`, scenario `pk_install_zip`, written while the disk
+   was too full for an image, booted 2026-11-03: passes; host tests
+   `cargo test -p galapkg` pass, including a failure injected at every step;
    ARCHITECTURE "Installing software"): `gala install|search|list|
    upgrade|uninstall` over a winget-pkgs tree (`--source <dir>`, an
    `installers\` mirror), manifests 1.x singleton and multi-file,
@@ -1982,6 +2067,106 @@ LX. **A Linux personality, later; its seams now** (the owner,
    The Linux layer itself (ELF loader, system calls, fork, signals, ptys,
    ld.so, epoll; static musl and busybox first) only when the owner
    schedules it.
+
+AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
+   "API shims and gaps"; started 2026-11-03 on branch `other/api-gaps`,
+   limited to msvcrt, shlwapi, oleaut32, crypt32, version, dbghelp,
+   comctl32, shell32, ole32 and new small DLLs while other agents work in
+   user32, gdi32, kernel32, advapi32, ntdll and the kernel). The gap list
+   comes from the import tables (`x86_64-w64-mingw32-objdump -p`: black-box
+   metadata) of the checked-in programs in `user/bin`, the JDK, PostgreSQL
+   17.2's `bin` (with pgAdmin's StackBuilder and its wxWidgets 3.2 VC
+   DLLs), FileZilla Server 1.12.6 (with its GUI, wxWidgets 3.2 gcc) and
+   SQL Server LocalDB 2022, against the exports of `user/bin/test*.dll`
+   (oleaut32's by-ordinal imports resolved with Wine's oleaut32.spec
+   numbers), and from the `gala_stubs` stubs in those crates (exported,
+   so a program loads, but a call ends it). Two kinds: **missing exports**
+   stop a program from loading at all; **stubs** stop it when called.
+   - Missing exports (load blockers):
+     - msvcrt: `_wtol`, `difftime` (wxbase32u_gcc_custom.dll), `iswlower`,
+       `iswupper` (filezilla-server-gui.exe): FileZilla Server's GUI
+       does not load.
+     - oleaut32: `SystemTimeToVariantTime` (184),
+       `VariantTimeToSystemTime` (185), `VarBstrFromCy` (113): the same
+       GUI's wxmsw32u_core_gcc_custom.dll and StackBuilder's
+       wxmsw326u_core; StackBuilder also `GetActiveObject` (35) and
+       `VarCyFromR8` (102) by ordinal.
+     - ole32: `OleLockRunning`, `OleRun`, `OleSetContainedObject`
+       (StackBuilder's wxmsw326u_core).
+     - dbghelp: `ImageNtHeader`, `MiniDumpWriteDump`,
+       `SymSrvGetFileIndexInfoW` (LocalDB's SqlDumper.exe, which
+       sqlservr starts to write a dump when it crashes).
+     - New DLLs: normaliz.dll (`IdnToAscii`, `IdnToUnicode`: libcurl in
+       PostgreSQL's bin), winspool.drv (wxmsw326u_core), and the JDK's
+       optional ones (dsound, winscard, msi, dbgeng: loaded only by
+       jsound, j2pcsc, jpackage, saproc).
+   - Stubs that real programs import (by program):
+     - shlwapi: SQL Server LocalDB (xe.dll, sqllang, msxmlsql,
+       hkcompile, SqlDumper, SqlUserInstance): `PathCanonicalizeW`,
+       `PathCombineW`, `PathFindExtensionW`, `PathIsRelativeW`,
+       `PathIsURLW`, `PathRemoveBackslashW`, `PathRemoveExtensionW`,
+       `PathSearchAndQualifyW`, `PathCreateFromUrlW`, `StrCmpW`,
+       `StrCmpIW`, `StrCmpNIW`, `StrStrW`, `StrStrIW`, `UrlIsW`,
+       `UrlEscapeW`, `UrlUnescapeW`, `UrlCanonicalizeW`, `UrlCombineW`,
+       `UrlCreateFromPathW`, `SHCreateStreamOnFileEx`, `SHDeleteKeyW`;
+       wxWidgets (FileZilla, FileZilla Server's GUI): `PathMatchSpecW`,
+       `StrCmpLogicalW`, `AssocQueryStringW`, `SHAutoComplete`.
+     - oleaut32 (LocalDB): `VarI4FromStr`, `VarUI4FromStr`,
+       `VarR8FromStr`, `VarBoolFromStr`, `VarBstrFromBool`,
+       `VarCyFromStr`, `VarDateFromStr`, `VarCmp`.
+     - shell32 (wxWidgets): `DragAcceptFiles`, `DragQueryFileW`,
+       `DragQueryPoint`, `DragFinish`, `ShellExecuteExW`,
+       `SHFileOperationW`, `SHChangeNotify`, `Shell_NotifyIconW`,
+       `ExtractIconW`, `ExtractIconExW`, `SHDefExtractIconW`,
+       `SHBrowseForFolderW`.
+     - ole32 (wxWidgets): `PropVariantClear`, `ReleaseStgMedium`, the
+       OLE clipboard (`OleSetClipboard`, `OleGetClipboard`,
+       `OleFlushClipboard`, `OleIsCurrentClipboard`: need user32's
+       clipboard, itself still stubs) and `DoDragDrop`; (LocalDB)
+       `CoCreateInstanceEx`, `CoSetProxyBlanket`, `CoQueryProxyBlanket`,
+       `CoImpersonateClient`, `CoRevertToSelf`, `CoRegisterMallocSpy`,
+       `CreateBindCtx`, `GetHGlobalFromStream`.
+     - comctl32 (wxWidgets): the image-list drag functions
+       (`ImageList_BeginDrag`, `DragEnter`, `DragMove`, `DragLeave`,
+       `EndDrag`, `SetDragCursorImage`) and `CreateUpDownControl`.
+     - crypt32: libcurl (`CertGetNameStringA`, `CertGetCertificateChain`,
+       `CertFreeCertificateChain`, the chain engine, `CryptDecodeObjectEx`,
+       `CryptQueryObject`, `PFXImportCertStore`,
+       `CertAddCertificateContextToStore`), GnuTLS (FileZilla:
+       `CertDeleteCertificateFromStore`, `CertEnumCRLsInStore`,
+       `PFXImportCertStore`), the JDK's sunmscapi (`CertOpenSystemStoreA`,
+       `CryptAcquireCertificatePrivateKey`, chains), LocalDB (`PFXIsPFXBlob`,
+       `CertAddEncodedCertificateToStore`; secforwarder.dll imports all of
+       crypt32 but forwards only).
+     - dbghelp (LocalDB's In-Memory OLTP): `SymFromAddr`,
+       `SymLoadModuleExW`, `SymUnloadModule64`.
+   - Done (test first; expected values from Microsoft's documentation
+     and Wine's conformance tests, which are validated on Windows; no
+     Windows machine was at hand, so each test still needs a run-all.ps1
+     check there):
+     1. msvcrt `iswlower`, `iswupper` (and `iswcntrl`, `iswgraph`,
+        `iswascii`), `_wtol`, `difftime` (`msvcrt_test`); oleaut32
+        `SystemTimeToVariantTime`, `VariantTimeToSystemTime`,
+        `VarBstrFromCy`, `VarCyFromR8`, `GetActiveObject` (MK_E_UNAVAILABLE,
+        recorded) and the LocalDB stubs `VarI4FromStr`, `VarUI4FromStr`,
+        `VarR8FromStr`, `VarCyFromStr`, `VarBoolFromStr`,
+        `VarBstrFromBool`, `VarDateFromStr`, `VarCmp` (`oleaut32_test`).
+        FileZilla Server's GUI and StackBuilder's wxWidgets DLLs now find
+        every msvcrt and oleaut32 import (the GUI then needs user32's and
+        gdi32's stubs, below).
+     2. shlwapi: `PathCanonicalizeW`, `PathCombineW`, `PathFindExtensionW`,
+        `PathRemoveExtensionW`, `PathRemoveBackslashW`, `PathIsRelativeW`,
+        `PathIsURLW`, `PathMatchSpecW`, `PathSearchAndQualifyW`, `StrCmpW`,
+        `StrCmpIW`, `StrCmpNIW`, `StrStrW`, `StrStrIW`, `StrCmpLogicalW`,
+        `SHDeleteKeyW` (`shlwapi_test`; LocalDB's xe.dll, sqllang,
+        msxmlsql, hkcompile, SqlDumper, SqlUserInstance and wxWidgets'
+        wxbase). Left in shlwapi: the URL functions, `PathCreateFromUrlW`,
+        `AssocQueryStringW`, `SHAutoComplete`, `SHCreateStreamOnFileEx`.
+   - Elsewhere (not in these crates; for the agents there): FileZilla
+     Server's GUI also stops on user32 (54 stubs: carets, the clipboard,
+     DDE, DrawEdge/DrawFrameControl, window placement), gdi32 (16:
+     metafiles, font enumeration), kernel32 (13), comdlg32 (4), oleacc,
+     winmm's PlaySoundW, ws2_32's inet_pton/inet_ntop (GnuTLS).
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing
