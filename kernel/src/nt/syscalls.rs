@@ -3518,8 +3518,12 @@ fn process_information(buffer: u64) -> Result<Vec<u8>, NtStatus> {
         let mut threads = Vec::new();
         for t in p.threads().map_err(no_memory)? {
             if let ObjectBody::Thread(t) = &t.body {
-                let record =
-                    ThreadRecord { id: t.id, start: t.win32_start, create_time: t.create_time };
+                let record = ThreadRecord {
+                    id: t.id,
+                    start: t.win32_start,
+                    create_time: t.create_time,
+                    context_switches: t.context_switches(),
+                };
                 threads.try_push(record).map_err(no_memory)?;
             }
         }

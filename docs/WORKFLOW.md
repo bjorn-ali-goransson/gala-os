@@ -508,6 +508,15 @@ charged). Look
   Passed alone twice after. Open; look at the second handover's request
   path (GalaRequestHandover while threads are already carried) if it
   recurs.
+- **Timing checks in test programs** measure the host as much as the
+  guest: under TCG a loaded host stops the VM's processors for
+  milliseconds at a time, the guest's clocks go on, and "this took under
+  2 s" fails. Check what the guest did instead (smpsched_test counts its
+  threads' ContextSwitches: one processor would need two per message);
+  keep elapsed-time bounds as generous give-ups only. To reproduce such a
+  failure, run QEMU on one host CPU: a directory first in PATH with a
+  `qemu-system-x86_64` script that runs `taskset -c 3
+  /usr/bin/qemu-system-x86_64 "$@"`.
 - **sshd_shell's Ctrl+C step (2026-11-03)**: every failed run (solo and
   in repeats) showed `~ $ sleep 60`, the prompt, `e^C^C`, then `cho:
   not found`: Ctrl+C ended `sleep`, but busybox's own control handler

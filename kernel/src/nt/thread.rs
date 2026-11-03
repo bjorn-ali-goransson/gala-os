@@ -152,6 +152,13 @@ impl NtThread {
         }
     }
 
+    /// SYSTEM_THREAD_INFORMATION's ContextSwitches: times a processor
+    /// switched to it (kept from before a handover: 0 then).
+    pub fn context_switches(&self) -> u32 {
+        let tid = *self.sched_id.lock();
+        tid.map_or(0, platform::context_switches)
+    }
+
     /// ExitStatus as reported by NtQueryInformationThread.
     pub fn exit_status(&self) -> NtStatus {
         self.exit_status.lock().unwrap_or(NtStatus::PENDING)

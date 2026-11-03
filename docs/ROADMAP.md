@@ -795,7 +795,13 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    passing alone (2026-11-01): java_http, java_hello, postgres (three
    times: not a race - the scenario's 120 s limit killed the VM, which
    psql saw as a closed connection; it needs ~45 s alone, so it joined
-   SLOW_SCENARIOS), smpsched_test (check 0x12, a timing check);
+   SLOW_SCENARIOS), smpsched_test (check 0x12, a timing check; fixed
+   2026-11-03: it timed the 1000-message exchange (< 2 s), which a host
+   running the VM's processors one at a time makes slow without the guest
+   doing anything wrong (4 of 4 failed with both vCPUs on one host CPU);
+   it now counts the two threads' ContextSwitches (SystemProcessInformation,
+   new), under 1000 where one processor needs at least 2000: 24 normally,
+   about 300 on one host CPU, 6 of 6 passed there);
    java_hello again on 2026-11-02, twice (java.exe ended with status 1
    and no output after 77 s of system calls, with other suites running
    on the host: load average 10; it passes alone in 34-41 s). Still open

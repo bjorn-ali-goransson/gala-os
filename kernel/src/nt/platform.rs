@@ -92,6 +92,9 @@ pub trait Threads {
     fn interrupt(id: ThreadId);
     /// The processors `id` may run on (bit n: processor n).
     fn set_affinity(id: ThreadId, mask: u64);
+    /// How many times `id` was switched to (SYSTEM_THREAD_INFORMATION's
+    /// ContextSwitches).
+    fn context_switches(id: ThreadId) -> u32;
     fn current_cpu() -> u32;
     fn online_count() -> u32;
     fn online_mask() -> u64;
@@ -268,6 +271,10 @@ pub fn interrupt(id: ThreadId) {
 #[inline]
 pub fn set_affinity(id: ThreadId, mask: u64) {
     <P as Threads>::set_affinity(id, mask)
+}
+#[inline]
+pub fn context_switches(id: ThreadId) -> u32 {
+    <P as Threads>::context_switches(id)
 }
 #[inline]
 pub fn current_cpu() -> u32 {

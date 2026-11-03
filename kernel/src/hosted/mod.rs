@@ -285,6 +285,11 @@ impl Threads for Um {
     fn set_affinity(id: ThreadId, mask: u64) {
         threads::set_affinity(id, mask)
     }
+    // The host schedules gala-um's threads: not counted (0, a thread
+    // that never had to be switched to).
+    fn context_switches(_: ThreadId) -> u32 {
+        0
+    }
     fn current_cpu() -> u32 {
         threads::current_cpu()
     }

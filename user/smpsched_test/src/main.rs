@@ -1,9 +1,13 @@
 //! Scheduling on several processors, as on real Windows:
 //! - two threads exchange 1000 messages through shared memory without any
-//!   system call; with one processor that would need ~1000 preemptions
-//!   (seconds), with two it is quick, and the processor numbers (RDTSCP)
-//!   seen by the two sides differ (in one of up to five attempts: other
-//!   load on the machine may hold one side back for a while);
+//!   system call; with one processor every exchange needs both threads
+//!   switched in (at least 2000 context switches, seconds of preemptions),
+//!   with two they run at once: the threads' ContextSwitches
+//!   (SystemProcessInformation) grow by far less than that, and the
+//!   processor numbers (RDTSCP) seen by the two sides differ (in one of up
+//!   to five attempts). Counted switches, not elapsed time: a loaded host
+//!   (a virtual machine's processors not scheduled for a while) makes the
+//!   exchange slow without the guest switching threads;
 //! - ThreadAffinityMask (NtSetInformationThread class 4) pins the thread:
 //!   RDTSCP and ntdll's NtGetCurrentProcessorNumber then report that
 //!   processor; a mask of no or unknown processors is STATUS_INVALID_PARAMETER,
@@ -74,6 +78,12 @@ fn past(deadline: i64) -> bool {
 static BALL: AtomicU32 = AtomicU32::new(0);
 static PARTNER_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
 static GIVE_UP: AtomicU64 = AtomicU64::new(0);
+/// Set by the main thread once it has counted the partner's switches: the
+/// partner stays (and stays listed) until then.
+static DONE: AtomicU32 = AtomicU32::new(0);
+/// How long an exchange may take at most (a bound against a hang only:
+/// a loaded host can make it slow).
+const GIVE_UP_SECONDS: i64 = 120;
 
 extern "C" fn partner(_: usize) -> ! {
     let give_up = GIVE_UP.load(Ordering::Relaxed) as i64;
@@ -93,13 +103,57 @@ extern "C" fn partner(_: usize) -> ! {
             core::hint::spin_loop();
         }
     }
+    while DONE.load(Ordering::Acquire) == 0 && !past(give_up) {
+        core::hint::spin_loop();
+    }
     exit_thread(STATUS_SUCCESS)
+}
+
+const SYSTEM_PROCESS_INFORMATION: u32 = 5;
+const STATUS_INFO_LENGTH_MISMATCH: NtStatus = 0xc000_0004;
+/// SYSTEM_PROCESS_INFORMATION's size on x64 (its threads follow it), and
+/// SYSTEM_THREAD_INFORMATION's.
+const PROCESS_ENTRY: usize = 0x100;
+const THREAD_ENTRY: usize = 0x50;
+
+/// The sum of the ContextSwitches of this process's threads `tids`
+/// (SystemProcessInformation), or None if the query failed.
+fn context_switches(buf: &mut [u8], tids: &[usize]) -> Option<u64> {
+    let (st, _) = query_system(SYSTEM_PROCESS_INFORMATION, buf);
+    if st != STATUS_SUCCESS {
+        return None;
+    }
+    let pid = teb_field(0x40);
+    let read = |at: usize, n: usize| -> Option<u64> {
+        let b = buf.get(at..at + n)?;
+        let mut v = [0u8; 8];
+        v[..n].copy_from_slice(b);
+        Some(u64::from_le_bytes(v))
+    };
+    let mut at = 0;
+    loop {
+        let threads = read(at + 4, 4)? as usize;
+        if read(at + 0x50, 8)? as usize == pid {
+            let mut sum = 0;
+            for i in 0..threads {
+                let t = at + PROCESS_ENTRY + THREAD_ENTRY * i;
+                if tids.contains(&(read(t + 0x30, 8)? as usize)) {
+                    sum += read(t + 0x40, 4)?;
+                }
+            }
+            return Some(sum);
+        }
+        match read(at, 4)? {
+            0 => return None,
+            next => at += next as usize,
+        }
+    }
 }
 
 /// Plays ROUNDS exchanges; returns (completed rounds, whether the two
 /// sides were ever seen on different processors at the same exchange).
 fn ping_pong() -> (u32, bool) {
-    let give_up = deadline(10);
+    let give_up = deadline(GIVE_UP_SECONDS);
     let mut different = false;
     let mut spins = 0u32;
     for round in 0..ROUNDS {
@@ -183,33 +237,51 @@ fn run() -> Result<(), u32> {
 
     // Two threads running at the same time. Windows does not promise that
     // two ready threads run at once at any given moment (other work on
-    // the machine, or a virtual machine's processors not being scheduled
-    // by its host, can put them on one processor for a while): the
-    // exchange is tried up to five times and must once be quick, and seen
-    // on two processors. Each attempt must complete.
+    // the machine can put them on one processor for a while): the
+    // exchange is tried up to five times and must once be seen on two
+    // processors with few context switches. Each attempt must complete.
+    let (st, list, size) = allocate(0, 0x40000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    c.eq(st.into(), ok)?;
+    // SAFETY: just committed, read-write, ours alone.
+    let list = unsafe { core::slice::from_raw_parts_mut(list as *mut u8, size) };
+    let me = teb_field(0x48);
     let mut attempts = Checks(c.0);
     let mut concurrent = (false, 0);
     for _ in 0..5 {
         attempts.0 = c.0;
         BALL.store(0, Ordering::Relaxed);
         PARTNER_CPU.store(u32::MAX, Ordering::Relaxed);
-        GIVE_UP.store(deadline(10) as u64, Ordering::Relaxed);
-        let (s, h, _) = create_thread(partner, 0, false);
+        DONE.store(0, Ordering::Relaxed);
+        GIVE_UP.store(deadline(GIVE_UP_SECONDS) as u64, Ordering::Relaxed);
+        let (s, h, tid) = create_thread(partner, 0, false);
         attempts.eq(s.into(), ok)?;
-        let start = performance_counter().0;
+        let before = context_switches(list, &[me, tid]);
         let (rounds, different) = ping_pong();
-        let (end, freq) = performance_counter();
+        let after = context_switches(list, &[me, tid]);
+        DONE.store(1, Ordering::Release);
         attempts.eq(rounds.into(), ROUNDS.into())?;
         attempts.eq(wait(h, Some(-50_000_000)).into(), ok)?;
         close(h);
-        // Far below the ~1000 quanta one processor would need.
-        concurrent = (different && end - start < 2 * freq, (end - start) as u64);
+        let (Some(before), Some(after)) = (before, after) else {
+            return attempts.ok(false, u64::from(STATUS_INFO_LENGTH_MISMATCH));
+        };
+        // Half the 2 * ROUNDS one processor would need at least. Not
+        // near 0: each time other work (the system's own threads) takes
+        // a processor, the spinning thread is switched in again after it,
+        // and that grows with the exchange's elapsed time: about 300 when
+        // the host ran the VM's two processors on one of its own.
+        let switches = after.saturating_sub(before);
+        concurrent = (different && switches < u64::from(ROUNDS), switches);
         if concurrent.0 {
             break;
         }
     }
     c.0 = attempts.0;
     c.ok(concurrent.0, concurrent.1)?;
+    // What it took (one line, one write): for a timing question later.
+    let mut line = *b"smpsched_test: exchange context switches 00000000\r\n";
+    line[41..49].copy_from_slice(&hex32(concurrent.1 as u32));
+    write_file(stdout(), &line);
 
     // Event round trips between threads pinned to processors 0 and 1.
     c.eq(pin(CURRENT_THREAD, 1).into(), ok)?;

@@ -1296,7 +1296,9 @@ process (id 0, no image, as on Windows) and every running process
 (`sysinfo::push_process`: SYSTEM_PROCESS_INFORMATION of 0x100 bytes,
 then SYSTEM_THREAD_INFORMATION entries of 0x50, then the image name;
 CreateTime, ImageName, UniqueProcessId, InheritedFromUniqueProcessId,
-HandleCount; base priority 8; threads show as waiting). A short buffer
+HandleCount; base priority 8; threads show as waiting; a thread's
+ContextSwitches is the scheduler's count of switches to it,
+`sched::context_switches`, 0 in gala-um where the host schedules). A short buffer
 gets STATUS_INFO_LENGTH_MISMATCH and the size needed. kernel32's Toolhelp
 (`toolhelp.rs`) is built on it as on Windows: CreateToolhelp32Snapshot
 copies the list into an anonymous section after a small header holding
