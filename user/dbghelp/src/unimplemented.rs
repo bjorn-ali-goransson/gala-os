@@ -4,7 +4,4 @@
 
 gala_stubs::unimplemented_exports!("dbghelp.dll":
     MiniDumpWriteDump
-    SymFromAddr
-    SymLoadModuleExW
-    SymUnloadModule64
 );

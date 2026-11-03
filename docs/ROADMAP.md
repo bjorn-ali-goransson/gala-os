@@ -2132,6 +2132,13 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         collections' member stores (`CertAddStoreToCollection`),
         `CryptAcquireCertificatePrivateKey`; the chain engine is
         other/schannel-tls's.
+    10. dbghelp: `SymInitialize(W)`, `SymCleanup`, `SymSetOptions`,
+        `SymGetOptions`, `SymLoadModuleExW`, `SymUnloadModule64`,
+        `SymFromAddr` over the modules' exports (no PDBs yet: recorded)
+        (`dbghelp_test`; LocalDB's In-Memory OLTP, hkruntime and
+        hkengine). Left in dbghelp: `MiniDumpWriteDump` (a stub: writing
+        a minidump is its own piece of work), PDB symbols, other
+        processes' modules.
    - Known problem (2026-11-03): the FileZilla client's PREBUILT URL
      (`downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe`)
      now answers 404 (so does the `FileZilla_Client/3.69.3/` path), so

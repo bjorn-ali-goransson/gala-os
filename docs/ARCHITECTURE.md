@@ -3183,7 +3183,13 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   stub (exported, so SqlDumper loads). normaliz.dll forwards IdnToAscii
   to kernel32 and has its own IdnToUnicode (RFC 3492 decoding), because
   kernel32's is still a stub: a forwarder to a stub fails to bind (the
-  ledger says "missing export").
+  ledger says "missing export"). `symbols.rs`: SymLoadModuleExW keeps (base, size) of up to 64
+  modules of this process (the size from the mapped image's SizeOfImage
+  when not given); SymFromAddr checks the image is mapped (VirtualQuery),
+  walks its export directory and names the nearest export at or below
+  the address (SYMFLAG_EXPORT, SymTagPublicSymbol), forwarders skipped.
+  gala's own DLLs link with /OPT:ICF, so identical functions share an
+  address and SymFromAddr names the first export there.
 - **ole32's clean-up helpers** (`user/ole32/src/props.rs`;
   `ole32_test`): PropVariantClear frees by type (task-allocator strings,
   BSTRs and SAFEARRAYs through oleaut32 found at run time, interfaces,

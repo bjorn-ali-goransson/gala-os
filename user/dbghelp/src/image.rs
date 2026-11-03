@@ -31,7 +31,7 @@ unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-fn unsupported(what: &[u8], detail: u64) {
+pub(crate) fn unsupported(what: &[u8], detail: u64) {
     // SAFETY: a valid buffer; 2 is GalaRecordMissing's "unsupported".
     unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, detail) };
 }
