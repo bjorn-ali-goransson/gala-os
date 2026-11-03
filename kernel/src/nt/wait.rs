@@ -334,32 +334,43 @@ fn unregister(objects: &[ObjectRef], me: ThreadId) -> Option<usize> {
 }
 
 /// Sleeps the current thread until `timeout` (NtDelayExecution). An
-/// alertable delay ends early, with STATUS_USER_APC, for a user APC.
+/// alertable delay ends early, with STATUS_USER_APC, for a user APC; a
+/// thread asked to terminate stops sleeping. Any other wake-up (a
+/// NtResumeThread's, a stale one) sleeps again until the deadline: up to
+/// 2026-11-03 it ended the delay, so a thread suspended and resumed while
+/// it slept (garbage collectors and Go's preemption do that) woke early
+/// (smprace_test).
 pub fn delay(timeout: Timeout, alertable: bool) -> NtStatus {
     let apc = || alertable && super::thread::has_user_apc();
-    let guard = DISPATCHER.lock();
-    if apc() {
-        return NtStatus::USER_APC;
-    }
-    match timeout {
-        Timeout::Poll => {
-            drop(guard);
-            platform::yield_now();
+    if timeout == Timeout::Poll {
+        let guard = DISPATCHER.lock();
+        if apc() {
+            return NtStatus::USER_APC;
         }
-        t => {
-            // Wake early if the thread is asked to terminate.
-            if !super::thread::is_terminating() {
-                super::thread::set_alertable(alertable);
-                platform::prepare_wait(t.deadline());
-                super::thread::wake_if_terminating();
-                drop(guard);
-                platform::wait();
-                super::kuser::catch_up();
-                super::thread::set_alertable(false);
-            }
+        drop(guard);
+        platform::yield_now();
+        return if apc() { NtStatus::USER_APC } else { NtStatus::SUCCESS };
+    }
+    loop {
+        let guard = DISPATCHER.lock();
+        if apc() {
+            return NtStatus::USER_APC;
+        }
+        // Wake early if the thread is asked to terminate.
+        if super::thread::is_terminating() {
+            return NtStatus::SUCCESS;
+        }
+        super::thread::set_alertable(alertable);
+        platform::prepare_wait(timeout.deadline());
+        super::thread::wake_if_terminating();
+        drop(guard);
+        let reason = platform::wait();
+        super::kuser::catch_up();
+        super::thread::set_alertable(false);
+        if reason == WakeReason::TimedOut {
+            return if apc() { NtStatus::USER_APC } else { NtStatus::SUCCESS };
         }
     }
-    if apc() { NtStatus::USER_APC } else { NtStatus::SUCCESS }
 }
 
 #[cfg(test)]
