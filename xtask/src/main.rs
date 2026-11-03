@@ -2635,12 +2635,12 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
     (
         "events",
         &[
-            r#""ev":"process start","pid":4,"session":1,"name":"import_test.exe""#,
+            r#""ev":"process start","pid":4,"session":1,"name":"import_test.exe","personality":"nt""#,
             r#""ev":"image","pid":4,"name":"import_test.exe""#,
             r#""name":"\\Device\\HarddiskVolume1\\gala\\testdll.dll""#,
             r#""ev":"syscall","pid":4,"tid":8,"nr":8,"name":"NtWriteFile""#,
             r#""ev":"thread exit","pid":4,"tid":8,"status":0"#,
-            r#""ev":"process exit","pid":4,"session":1,"status":0"#,
+            r#""ev":"process exit","pid":4,"session":1,"status":0,"personality":"nt""#,
         ],
     ),
 ];
@@ -5364,6 +5364,8 @@ const SCENARIOS: &[Scenario] = &[
              (access violation) in thread",
             "(crash.exe+0x",
             "writing address 0x0",
+            // The personality (ROADMAP LX seam 2) and session.
+            "crash report:   personality nt, session ",
             "crash report:   rax=",
             "crash report:   [rsp+0x00]",
             "process crash.exe (pid 4) exited with status 0xc0000005",
@@ -9588,6 +9590,29 @@ mod constants {
             }
         }
         assert!(found.is_empty(), "use nt::platform instead:\n{}", found.join("\n"));
+    }
+
+    /// `net` is core, below every personality: it reaches threads and time
+    /// through `crate::runtime`, never through the NT layer (ROADMAP LX
+    /// seam 6; a Linux personality would build its sockets on it too).
+    #[test]
+    fn net_does_not_depend_on_nt() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel/src/net");
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                if line.contains("crate::nt") || line.contains("super::super::nt") {
+                    found.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "net/ names the NT layer; use crate::runtime:\n{}",
+            found.join("\n")
+        );
     }
 
     #[test]

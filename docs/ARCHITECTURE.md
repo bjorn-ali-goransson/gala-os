@@ -4043,11 +4043,50 @@ source).
    and the console session; moving its line handling into a core terminal
    object is now a refactor, ConPTY's tests deciding that Windows'
    behaviour is unchanged.
-2. **Per-process system-call dispatch**: a personality field on the
-   process and a dispatcher table keyed by it, in the kernel and gala-um;
-   a host test that a process with a second (test-only) personality
-   reaches that dispatcher; the dispatcher named in "unknown system call"
-   logs.
+2. **Per-process system-call dispatch** (**done** 2026-11-03): a
+   personality field on the process and a dispatcher table keyed by it,
+   in the kernel and gala-um; a host test that a process with a second
+   (test-only) personality reaches that dispatcher; the dispatcher named
+   in "unknown system call" logs. How it is built:
+   - `kernel/src/personality.rs` (core, no `unsafe`): `Personality`
+     (`Nt`, the default; `Test` only under `cfg(test)`), and
+     `Dispatchers`, one `spin::Once<Dispatcher>` (name + handler) per
+     personality: registered once at start, read without a lock on every
+     system call. Host tests: a process of the `Test` personality reaches
+     the test dispatcher and not NT's; a personality without a dispatcher
+     is reported, never sent to NT; registration is once.
+   - `nt::Process::personality`, fixed at creation (`process::spawn`: a
+     PE image is NT; `adopt` after a handover: NT, the PROCESSES record
+     has no personality field yet: a second personality needs a record
+     version). Each thread gets it at `platform::spawn_user(..,
+     personality)`; `nt::syscalls::init` registers NT's dispatcher with
+     `set_syscall_handler(Personality::Nt, "nt::syscalls", dispatch)`.
+   - Kernel: the scheduler's `UserThread` keeps the personality; the
+     context switch stores it in the per-CPU block next to the user GS
+     base (`percpu::set_personality`), and `arch::syscall::dispatch`
+     reads it with one GS-relative load (system calls run with interrupts
+     on: a load, not a pointer then a field, so a migration cannot tear
+     it) and calls `DISPATCHERS.dispatch`. No extra lock per call.
+     `checkuser` also checks the per-CPU personality against the
+     thread's.
+   - gala-um: a thread-local `PERSONALITY`, set by `entry::init_thread`
+     when `spawn_user` starts the thread; the SIGSYS handler dispatches on
+     it (`SYSCALL_HANDLER` is the same `Dispatchers` table).
+   - Invariants: a thread's personality is its process's and never
+     changes; NT stays index 0 and the default (kernel threads, an
+     unknown per-CPU number); a personality with no dispatcher fails the
+     call with -1 (`NO_DISPATCHER_RESULT`) and the log line `syscall: no
+     dispatcher for personality <p>: system call <n> from rip <r> (thread
+     <t>)`, never NT's table.
+   - Observability: `syscall: personality nt dispatches to nt::syscalls`
+     at start; the NT dispatcher's unknown-service line is `<process>:
+     unimplemented system service <n> (dispatcher nt::syscalls,
+     personality nt)` (triage still matches it); `"personality":"nt"` in
+     the `process start` and `process exit` events (the events scenario
+     checks both); `personality nt` at the end of the `process ... starting at` line,
+     in the crash report (`crash report:   personality nt, session 1`,
+     checked by the crash scenario) and in each `thread: pid ..` line of
+     the state and hang dumps.
 3. **Core process vs NT process**, with RS B2 (B1 has moved session ids
    onto processes from tokens; B2 removes the global statics): split
    `Process` in the same pass.
@@ -4061,8 +4100,14 @@ source).
    NT-side surface (testable on real Windows).
 5. **Shared objects**: when pipes, sockets or files are next reworked,
    their state goes in core objects that do not assume an NT handle.
-6. **`net` free of `nt`**: `kernel/src/net/tcp.rs` reaches scheduling and
-   time through `crate::nt::platform`; give it core scheduling/time.
+6. **`net` free of `nt`** (**done** 2026-11-03): `kernel/src/net/tcp.rs`
+   reached scheduling and time through `crate::nt::platform`; it now uses
+   `crate::runtime` (`kernel/src/runtime.rs`), the core's threads, waits
+   and time: the kernel's `sched`/`time`, or with `hosted` gala-um's host
+   threads and clocks (the same functions `nt::platform` forwards to on
+   each platform, so both seams agree). xtask's unit test
+   `net_does_not_depend_on_nt` fails if a file in `net/` names
+   `crate::nt`.
 Observability with each seam: the personality in process events, crash
 reports and the state dump.
 

@@ -211,7 +211,14 @@ B1 (sessions) `process start` and `process exit` carry `"session"`, a
 session made after boot is an event (`"ev":"session"`, id and its
 BaseNamedObjects; category `process`) and a log line, the start line
 says the session (`process x.exe (pid 4, session 1): starting at`), and
-the state dump's thread lines end with `session N (name)`. Also `display`
+the state dump's thread lines end with `session N (name)`. Since ROADMAP
+LX seam 2 (2026-11-03) both events also carry `"personality":"nt"`, the
+start line ends with `, personality nt`, the thread lines read `session N
+personality nt (name)`, the crash report has `crash report:   personality
+nt, session N`, and the unknown-service line names its dispatcher
+(`unimplemented system service 0x.. (dispatcher nt::syscalls, personality
+nt)`); a thread whose personality has no dispatcher logs `syscall: no
+dispatcher for personality ..`. Also `display`
 (2026-11-03: virtio-gpu modes set, device resets, failed commands with
 their names); `gputrace` logs every virtio-gpu command and its result,
 and a boot ends with a `display:` line (commands, flushes, mode changes,

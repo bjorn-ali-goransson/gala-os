@@ -108,6 +108,15 @@ data types from the same module. No other nt file names `crate::arch`,
 `nt_uses_the_machine_only_through_platform` enforces it. No behaviour
 changed (all QEMU scenarios pass).
 
+Since ROADMAP LX seams 2 and 6 (2026-11-03): `Threads::spawn_user`
+takes the thread's `Personality` and `UserEntry::set_syscall_handler`
+registers a named dispatcher for one personality; both platforms keep a
+`personality::Dispatchers` table (gala-um: `entry::SYSCALL_HANDLER`,
+the thread's personality in a thread-local). Core code outside nt that
+must also run in gala-um (`net`) uses `crate::runtime`, which forwards
+to the same host functions as `Um`'s `Clock`/`Threads` (`hosted::sleep_ms`
+is shared).
+
 **Remaining for the split (`nt/` out of `kernel/`):**
 
 1. Move `mm::heap`, `sync` and `events` (or the parts nt uses) into a

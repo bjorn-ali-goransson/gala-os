@@ -81,6 +81,17 @@ shows it.
 
 ## Things that are easy to get wrong
 
+- Core code (`net/`, and later anything a second personality shares)
+  reaches threads, waits and time through `crate::runtime`, not
+  `crate::nt::platform` (the NT layer's seam) and not `crate::sched`/
+  `crate::time` directly (those do nothing in gala-um). Per-CPU state
+  read while interrupts may be on (system calls run with `sti`) must be
+  one GS-relative load (`percpu::cpu_index`, `percpu::personality`):
+  reading `gs:[0]` and then a field can land on another CPU's block after
+  a migration. Arch code (declared before `console` in lib.rs) writes
+  `crate::info!`/`crate::warn!`, not the bare macros. A new process
+  constructor must set `personality` (ARCHITECTURE "The seams", 2).
+
 - A test that runs a process at Low integrity (uipi_test, gala_cli_test)
   cannot signal or open the parent's named events (no write up: a
   Medium object's default label): pass inherited handles instead. A
