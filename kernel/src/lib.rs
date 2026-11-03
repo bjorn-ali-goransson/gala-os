@@ -24,6 +24,7 @@ pub mod cmdline;
 pub mod console;
 pub mod crash;
 pub mod disk;
+pub mod display;
 pub mod events;
 pub mod failpoint;
 pub mod flight;
@@ -148,6 +149,13 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     start_cpus(&info, &cmdline);
     arch::bootphase::mark("smp_done");
     disk::init();
+    // `display=virtio`: the screen is virtio-gpu (default `fb`: the
+    // bootloader's framebuffer); `gputrace` logs every command and
+    // `gpureset=<n>` resets the device after the n-th flush (recovery).
+    if let Some(n) = cmdline.value("gpureset").and_then(|v| v.parse().ok()) {
+        display::RESET_AT.store(n, Ordering::Relaxed);
+    }
+    display::init(display::Choice::parse(cmdline.value("display")), cmdline.flag("gputrace"));
     // The network driver's recovery test: reset after the n-th frame sent.
     if let Some(n) = cmdline.value("netreset").and_then(|v| v.parse().ok()) {
         net::virtio_net::RESET_AT.store(n, Ordering::Relaxed);
@@ -405,6 +413,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         info!("events: {} written to the debug console", events::written());
     }
     net::log_stats();
+    display::log_stats();
     info!("nt: {}", nt::stats::Summary);
     let (shootdowns, ipis) = arch::smp::flush_stats();
     let heap = mm::heap::stats();

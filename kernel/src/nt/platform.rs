@@ -168,12 +168,21 @@ pub trait Storage {
     fn disk_flush() -> Result<(), DiskError>;
 }
 
-/// The screen the desktop draws on (none: no windows).
+/// The screen the desktop draws on (none: no windows): the bootloader's
+/// framebuffer or virtio-gpu (`display=`; kernel/src/display).
 pub trait Display {
     /// Width and height in pixels, if there is a screen.
     fn screen_size() -> Option<(u32, u32)>;
     /// Writes `0x00RRGGBB` pixels from (x, y) to the right (clipped).
     fn screen_write_row(x: u32, y: u32, rgb: &[u32]);
+    /// Shows the rows written in the area (x, y, w, h): a GPU copies them
+    /// to the host and flushes; a framebuffer shows them already.
+    fn screen_flush(_x: u32, _y: u32, _w: u32, _h: u32) {}
+    /// The new size if the display changed since the last call (a host
+    /// window resized; polled about once a second).
+    fn screen_changed() -> Option<(u32, u32)> {
+        None
+    }
 }
 
 // The NT layer's calls. Thin and inlined: the kernel implementation costs
@@ -378,4 +387,12 @@ pub fn screen_size() -> Option<(u32, u32)> {
 #[inline]
 pub fn screen_write_row(x: u32, y: u32, rgb: &[u32]) {
     <P as Display>::screen_write_row(x, y, rgb)
+}
+#[inline]
+pub fn screen_flush(x: u32, y: u32, w: u32, h: u32) {
+    <P as Display>::screen_flush(x, y, w, h)
+}
+#[inline]
+pub fn screen_changed() -> Option<(u32, u32)> {
+    <P as Display>::screen_changed()
 }

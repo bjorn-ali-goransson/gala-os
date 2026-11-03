@@ -182,22 +182,44 @@ impl Storage for Kernel {
 /// The framebuffer once the desktop has taken it from the console.
 static SCREEN: crate::sync::IrqMutex<Option<crate::boot::Framebuffer>> =
     crate::sync::IrqMutex::new(None);
+/// The desktop has taken the screen (once: the console stops drawing).
+static TAKEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The desktop takes the screen: the console stops drawing on the
+/// framebuffer (with virtio-gpu it is not what is shown, and it is
+/// dropped), the input thread starts.
+fn take_screen() {
+    if TAKEN.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let fb = crate::console::take_framebuffer();
+    if crate::display::present() {
+        crate::input::start();
+    } else if let Some(fb) = fb {
+        *SCREEN.lock() = Some(fb);
+        crate::input::start();
+    }
+}
 
 impl Display for Kernel {
     fn screen_size() -> Option<(u32, u32)> {
-        let mut screen = SCREEN.lock();
-        if screen.is_none() {
-            *screen = crate::console::take_framebuffer();
-            if screen.is_some() {
-                // The desktop is on the screen: its mouse.
-                crate::input::start();
-            }
+        take_screen();
+        if crate::display::present() {
+            return crate::display::size();
         }
-        screen.as_ref().map(|fb| (fb.width() as u32, fb.height() as u32))
+        SCREEN.lock().as_ref().map(|fb| (fb.width() as u32, fb.height() as u32))
     }
     fn screen_write_row(x: u32, y: u32, rgb: &[u32]) {
-        if let Some(fb) = SCREEN.lock().as_ref() {
+        if crate::display::present() {
+            crate::display::write_row(x, y, rgb);
+        } else if let Some(fb) = SCREEN.lock().as_ref() {
             fb.write_row(x.into(), y.into(), rgb);
         }
+    }
+    fn screen_flush(x: u32, y: u32, w: u32, h: u32) {
+        crate::display::flush(x, y, w, h);
+    }
+    fn screen_changed() -> Option<(u32, u32)> {
+        crate::display::poll()
     }
 }
