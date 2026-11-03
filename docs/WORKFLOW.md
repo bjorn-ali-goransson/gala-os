@@ -455,6 +455,13 @@ charged). Look
   A failure that reproduces there is in the NT layer or the user-mode
   DLLs; one that does not points at the kernel's machine code (paging,
   switches, interrupts) or at the emulator.
+- **handover_k32_twice under heavy load (2026-11-03)**: once (load
+  about 24) the program resumed after the first handover ("slept 4001")
+  and then never finished its second one: the state dump showed its
+  other threads in their waits and the main thread with no system call.
+  Passed alone twice after. Open; look at the second handover's request
+  path (GalaRequestHandover while threads are already carried) if it
+  recurs.
 - **Java hang with a state dump (2026-11-03)**: the first timeout with a
   state dump (correct clock): java_http hung with three JVM threads in
   NtYieldExecution and two waiting on semaphores with count 0
