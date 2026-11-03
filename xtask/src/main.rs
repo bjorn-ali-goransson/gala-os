@@ -1466,6 +1466,27 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("java_http", "msvcrt.dll", "Windows/System32"),
     ("java_http", "target/prebuilt/jdk/jdk-21.0.5+11/", "jdk"),
     ("java_http", "user/java/Http.java", "gala"),
+    ("java_stress", "ntdll.dll", "Windows/System32"),
+    ("java_stress", "kernel32.dll", "Windows/System32"),
+    ("java_stress", "advapi32.dll", "Windows/System32"),
+    ("java_stress", "winmm.dll", "Windows/System32"),
+    ("java_stress", "version.dll", "Windows/System32"),
+    ("java_stress", "shell32.dll", "Windows/System32"),
+    ("java_stress", "powrprof.dll", "Windows/System32"),
+    ("java_stress", "comctl32.dll", "Windows/System32"),
+    ("java_stress", "ncrypt.dll", "Windows/System32"),
+    ("java_stress", "crypt32.dll", "Windows/System32"),
+    ("java_stress", "ws2_32.dll", "Windows/System32"),
+    ("java_stress", "mswsock.dll", "Windows/System32"),
+    ("java_stress", "bcryptprimitives.dll", "Windows/System32"),
+    ("java_stress", "user32.dll", "Windows/System32"),
+    ("java_stress", "iphlpapi.dll", "Windows/System32"),
+    ("java_stress", "secur32.dll", "Windows/System32"),
+    ("java_stress", "winhttp.dll", "Windows/System32"),
+    ("java_stress", "msvcrt.dll", "Windows/System32"),
+    ("java_stress", "target/prebuilt/jdk/jdk-21.0.5+11/", "jdk"),
+    ("java_stress", "user/java/Http.java", "gala"),
+    ("java_stress", "user/java/Stress.java", "gala"),
     ("lua", "ntdll.dll", "Windows/System32"),
     ("lua", "kernel32.dll", "Windows/System32"),
     ("lua", "ws2_32.dll", "Windows/System32"),
@@ -1669,6 +1690,7 @@ const SLOW_SCENARIOS: &[&str] = &[
     "java_version",
     "java_hello",
     "java_http",
+    "java_stress",
     "dotnet_hello",
     "flaui_test",
     "filezilla_flaui",
@@ -2466,6 +2488,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[(
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
+    "java_stress",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
@@ -4264,6 +4287,14 @@ const SCENARIOS: &[Scenario] = &[
         // P1: a Java program on the unmodified JDK: `java Hello.java`
         // (the source launcher compiles it in memory with jdk.compiler).
         // Expected as on Windows 11 (2 processors under QEMU).
+        // Pending: javac 16 times in one JVM (user/java/Stress.java), a
+        // stress run for the Java heap corruption (ROADMAP Priorities).
+        name: "java_stress",
+        cmdline: "qemu_exit run=java.exe args=C:/gala/Stress.java%2016 dump=C:/hs_err_pid4.log",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["java_stress: 16 compiles, 0 failed", "java.exe finished with status 0x00000000"],
+    },
+    Scenario {
         name: "java_hello",
         cmdline: "qemu_exit run=java.exe args=C:/gala/Hello.java dump=C:/hs_err_pid4.log",
         exit_status: QEMU_EXIT_SUCCESS,
