@@ -1691,7 +1691,7 @@ fn scenario_timeout(name: &str) -> Duration {
     if let Some(secs) = env::var("XTASK_TIMEOUT").ok().and_then(|s| s.parse().ok()) {
         return Duration::from_secs(secs);
     }
-    if SCENARIOS.iter().any(|s| s.name == name && s.exit_status == XTASK_DUMPS) {
+    let limit = if SCENARIOS.iter().any(|s| s.name == name && s.exit_status == XTASK_DUMPS) {
         DUMP_SCENARIO_TIMEOUT
     } else if name == "elasticsearch" || name.starts_with("sqllocaldb") {
         ELASTICSEARCH_TIMEOUT
