@@ -791,7 +791,23 @@ Ctrl+C; `wait_test` sets and clears an event with two waiters). Objects
 a wait consumes (auto-reset events and timers, semaphores, mutants,
 completion ports) and files, pipes and sockets keep the plain re-check.
 TODO: a wait-all is still satisfied only when all are signaled at its
-re-check. Invariant: a signal
+re-check. A WaitAll list naming one object twice (one handle twice, or
+two handles to it) is refused with STATUS_INVALID_PARAMETER_MIX, as on
+Windows (it consumed the object twice: a semaphore's count 1 became -1;
+`smprace_test` round 1). Invariant: every wait (`prepare_wait`/`wait`)
+loops on its own condition and deadline, because `sched::wake` wakes a
+waiting thread whatever it waits for (NtResumeThread's wake-up, a stale
+waiter list entry): NtDelayExecution slept once and so ended early when
+its thread was suspended and resumed (`smprace_test` round 5).
+Invariant: a mutant's owner and count change only through
+`wait::change_mutant` (under the dispatcher lock, which keeps its signal
+in step); NtReleaseMutant and abandonment changed them under the
+mutant's own lock and signaled after (hygiene sweep, 2026-11-03).
+Invariant: an object's signal is reset after a test of other state
+(the console's `input_ready` when its key queue is empty) only inside
+`update_signal`, where the test runs under the dispatcher lock: tested
+first and reset after, a key queued in between was left with the event
+reset. Invariant: a signal
 state that depends on its old value (a semaphore's count) is changed only
 through `wait::update_signal`, which reads and writes it under one hold of
 the lock: a `signal_state()` read followed by `set_signal` lets a wait

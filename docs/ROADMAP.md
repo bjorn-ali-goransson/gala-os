@@ -455,8 +455,39 @@ explicitly in its commit.
   buttons, clock) and mouse/keyboard input for programs; W4 step 1: the
   Windows 11 look (Selawik text, the fortress start button, maximize);
   W4 step 2: proportional Selawik text in gdi32
+- First hygiene sweep (2026-11-03; WORKFLOW "Hygiene sweeps" has the
+  checklist): the early primitives read for single-CPU assumptions.
+  `smprace_test` (two processors) failed each round before its fix:
+  (1) WaitAll naming one object twice consumed it twice (now
+  STATUS_INVALID_PARAMETER_MIX, as on Windows); (2) the timer thread
+  signaled an expiry after letting go of the timer's lock, so a re-arm in
+  between was followed by the stale signal (~1 in 1200 tries); (3) a
+  named object's name was removed when its handle count reached zero
+  although an open on another CPU had just found it (`NamePin`; ~1 in 20
+  tries); (4) a process was signaled before its handles were closed (a
+  parent found the child's named event still there, every time); (5)
+  NtDelayExecution ended at any wake-up, e.g. NtResumeThread's (a sleep
+  suspended and resumed ended early). Fixed without a test (reasoned in
+  ARCHITECTURE "Waits"): NtReleaseMutant and abandonment changed the
+  owner outside the dispatcher lock (`wait::change_mutant`); the
+  console's `settle` reset `input_ready` after testing the key queue in
+  an earlier hold (a waiter on console input could sleep with a key
+  queued); debug kernels now panic when an IrqMutex guard that re-enables
+  interrupts is dropped while another lock is held
+  (`lockdep::none_held`). Stale TODO removed (start_io). Left: see Next,
+  "Hygiene sweep leftovers"
 
 ## Next
+Hygiene sweep leftovers (2026-11-03, not races of the SMP kind; each
+needs a test against Windows first): NtRemoveIoCompletion waits are not
+ended when the port's last handle closes (Windows ends them:
+GetQueuedCompletionStatus fails with ERROR_ABANDONED_WAIT_0); an APC
+queued to a thread just as it exits is accepted (STATUS_SUCCESS) and
+never runs; NtRemoveIoCompletion takes the packet before writing the
+caller's outputs, so a bad pointer loses it; NtSuspendThread on a thread
+that is exiting can count a suspension it never sees. Next sweep: about a
+month on, or after the next change of assumptions (WORKFLOW).
+
 Direction from the project owner (2026-10-30): multiprocessor support, then
 a real Go program, then Nginx; fast testing (a QEMU test image, gala-um)
 and introspection are explicitly wanted. Priorities within that are ours

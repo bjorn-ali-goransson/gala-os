@@ -5445,9 +5445,8 @@ fn io_apc(
 
 /// The start of an I/O on `file`: the event (if any; it must be an event
 /// the caller may modify) and the file object are reset; they are signaled
-/// again by `finish_io` when the I/O completes. Every I/O completes before
-/// its system call returns so far.
-// TODO: APCs and I/O completion ports.
+/// again by `finish_io` when the I/O completes (which also queues the
+/// completion APC; `post_completion` the port's packet).
 fn start_io(call: &Call<'_>, file: &ObjectRef, event: u64) -> Result<Option<ObjectRef>, NtStatus> {
     let event = match event {
         0 => None,

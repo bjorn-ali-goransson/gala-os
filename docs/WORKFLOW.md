@@ -549,7 +549,8 @@ charged). Look
   turns interrupts back on while the inner lock is still held (the thread
   can then be preempted holding it; lockdep reported "X taken while
   holding Vad" from a user fault). Let guards drop at scope end, or drop
-  them innermost first.
+  them innermost first. Debug kernels panic on it since 2026-11-03
+  (`lockdep: releasing X turns interrupts on while Y is still held`).
 - **Read the source of the exact version** of an open-source program
   before deciding what it does: Win32-OpenSSH's `latestw_all` branch
   waits for sshd-session in `sshd -d`, the shipped 9.8.3 (tag
@@ -1387,6 +1388,77 @@ a captured value) when that matters.
   panic uses `IrqMutex::try_lock_untracked`: a tracked `try_lock` there
   teaches lockdep an order no real path has, and a later correct path
   panics as an "inversion".
+
+## Hygiene sweeps
+
+A sweep (the owner, 2026-11-03: "we should do sweeps in general to check
+for hygienic factors") reads existing code for one class of fault at a
+time instead of waiting for a flaky scenario to point at it. The kernel's
+primitives were written for one CPU at a time (2026-10-30) and SMP came
+after; three races had been found in them one by one before the first
+sweep. Do one after a change of assumptions (more CPUs, preemption in new
+places, a new kind of object or teardown path) and otherwise about once
+a month, or when a flaky scenario has no explanation yet.
+
+**What to check** (each item: what the bug looks like, where to look):
+1. *Check, then act, in separate lock holds*: a condition read under a
+   lock and acted on after letting go (or under another lock). Look for
+   `let x = a.lock().thing;` followed by a change elsewhere; for
+   `set_signal(.., 0)` after a test of some queue; for "decided under
+   lock A, signaled under lock B". Fix: one hold, or the dispatcher's
+   `update_signal`/`change_mutant`; or a pin (`NamePin`).
+2. *Wake-ups whose condition changes before the woken thread runs*: a
+   waiter that wakes and looks again can find the condition gone (a
+   notification event reset: `Waiter::released`); a waiter that does
+   not look again takes any wake-up for its own (NtDelayExecution and
+   NtResumeThread). Every `prepare_wait`/`wait` must sit in a loop that
+   re-checks its own condition and deadline.
+3. *Order of teardown*: what a waiter on the dying thing finds when it
+   wakes (process signaled before its handles were closed); queues of
+   work for something that is going away (APCs to an exiting thread,
+   packets to a closed port); a name or count dropping to zero while
+   another CPU is about to take a reference (handle count vs. lookups).
+4. *"This CPU"*: a per-CPU index read with interrupts on is stale after
+   the next instruction (`cpu_index()`, `current_cpu()`); only use it
+   with interrupts off or for diagnostics (shootdown's `changed_on`).
+5. *Interrupt state*: IrqMutex guards must drop innermost first (debug
+   kernels now panic otherwise: `lockdep: releasing X turns interrupts on
+   while Y is still held`); no `schedule()` with a lock held.
+6. *Duplicate or aliased arguments*: the same object twice in one call
+   (WaitAll with one semaphore twice consumed it twice).
+7. *Non-race hygiene on the way*: failure paths that leave nothing behind
+   (OBSERVABILITY.md), infallible allocation (`cargo xtask alloc-audit`),
+   `unsafe` without `SAFETY:`, stale TODOs.
+
+**How**: one SMP stress test per sweep (`smprace_test` for the first),
+one round per finding, two threads pinned to processors 0 and 1 doing
+the two sides in a loop, each round shown to fail before its fix (keep
+the iteration count at a few times what the failure needed: boots under
+a loaded host are slow, and the scenario's timeout is 120 s). A finding
+that cannot be made to fail is fixed when the fix is small and clearly
+right, and the reasoning is written down. Record each finding in
+ROADMAP (Done) and the invariant it breaks in ARCHITECTURE.
+
+**Last sweep: 2026-11-03** (the dispatcher and waits; events,
+semaphores, mutants, timers; APCs; thread and process teardown; handle
+tables and names; IOCP; the scheduler's waits; the heap and frame
+allocator's locks; the console's input signal). Fixed, with a failing
+round in `smprace_test` first: WaitAll with an object twice (round 1),
+a timer's stale expiry signaled after a re-arm (2), a name removed while
+an open was taking its handle (3), a process signaled before its handles
+were closed (4), NtDelayExecution ended by any wake-up (5). Fixed
+without a test: NtReleaseMutant and mutant abandonment changed the
+owner outside the dispatcher lock; the console's `settle` reset
+`input_ready` after checking the queue in an earlier lock hold; the
+out-of-order IrqMutex release detector. Left (ROADMAP "Next", hygiene
+sweep items): waits in NtRemoveIoCompletion are not ended when the port's
+last handle closes; an APC queued as its thread exits is accepted and
+never runs. Checked and found sound: the scheduler's
+`prepare_wait`/`wait`/`wake` protocol (preemption between them included),
+`on_cpu`, KArc's counts, the heap's and frame allocator's single locks,
+keyed events, semaphores (`update_signal`), APC queueing against the
+alertable flag, termination requests against `wake_if_terminating`,
+`add_thread` against `terminate`, the last-thread decision.
 
 ## Hunting a rare hang
 
