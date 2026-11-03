@@ -346,8 +346,17 @@ charged). Look
 - **Network tests**: VMs have no network card unless the scenario is in
   xtask's `NET_SCENARIOS` (`-nic none` otherwise). Those get a virtio-net
   card on QEMU's user network with a host port forwarded to guest port 7
-  (TCP and UDP, the same port number on both: `free_port` finds one free
-  for both), and xtask plays the remote side (`net_client`, `udp_client`,
+  (TCP and UDP, the same port number on both; sshd's 22 for
+  `SSH_PORT_22`). Each VM leases its own host port (`PortLease`: free for
+  both, below the host's ephemeral range so no outgoing connection takes
+  it before QEMU binds it, never given to another VM of the same xtask
+  while held); a QEMU that still cannot bind it (another process took it)
+  is booted again with another. The client's own files (ssh's key copy
+  and `-v` trace, sftp's transfer, the askpass script) are per port, in
+  `target/net-client/<port>/`, removed after the boot. So net scenarios
+  run in parallel (the suite, `XTASK_REPEAT_JOBS`). The failed log says
+  which port the VM had (`xtask: net: host 127.0.0.1:<port> forwarded to
+  ...`) and QEMU's standard error. xtask plays the remote side (`net_client`, `udp_client`,
   ...) once the guest logs that it listens; the client's verdict is
   appended to the serial log as an `xtask: net client: ...` line for
   `expect` to check. QEMU's user network needs no privileges, so this
@@ -499,6 +508,15 @@ charged). Look
   Passed alone twice after. Open; look at the second handover's request
   path (GalaRequestHandover while threads are already carried) if it
   recurs.
+- **sshd_shell's Ctrl+C step (2026-11-03)**: every failed run (solo and
+  in repeats) showed `~ $ sleep 60`, the prompt, `e^C^C`, then `cho:
+  not found`: Ctrl+C ended `sleep`, but busybox's own control handler
+  (its process's control thread, `GalaConsoleCtrl`) ran only after the
+  prompt was back and dropped the next typed line. The client now types
+  the line again (up to four times, 10 s each) while `sleep` would still
+  run. Whether gala should deliver the shell's event before the child's
+  exit is seen (Windows calls every attached process's handler on its
+  own thread too, with no order promised) is open.
 - **A sleep that spans a handover (2026-11-03)**: handover_upgrade failed
   twice in full suites (load about 6) with "slept again 1248", check 58:
   the second Sleep(1000) spans the handover, the thread is frozen and the
@@ -513,8 +531,12 @@ charged). Look
   times before blaming CI: `XTASK_REPEAT=12 cargo xtask boot-test name`
   boots one scenario's image 12 times, as many at once as the host has
   CPUs (the load brings races out), keeps each failed boot's log
-  (`target/debug/test-<name>.r<i>.serial.log`) and ends with "n of 12
-  boots failed". A race between processors is best caught by a test
+  (`target/debug/test-<name>.r<i>.serial.log`, with its triage in
+  `target/failed/<name>.r<i>.log`) and ends with "n of 12
+  boots failed". Code that derives a scenario from an image's name must
+  go through `iso_scenario`, which knows the `.r<i>` of a repeat's copy:
+  without it, repeats of sshd_shell/sshd_server/sshd_sftp forwarded to
+  the guest's port 7 and every connection was reset (2026-11-03). A race between processors is best caught by a test
   program that makes the two sides meet often (threads pinned to
   processors 0 and 1, kept in step: `smpcow_test`), repeated this way.
 - **Lock gaps in the memory manager**: a VAD change and the matching
@@ -667,7 +689,12 @@ instead of 120 s: a slow CI runner takes over twice as long as a local
 run (java_hello: ~35 s locally; it timed out at 120 s once in CI, with
 its threads still progressing - much of a JVM's time goes to gala's
 lightweight-lock waits, which sleep 1 ms at a time until a kernel address
-wait exists). In a shared VM,
+wait exists). Every limit (but a dump scenario's) is stretched by the
+host's overload when the VM starts (`host_overload`: the one-minute load
+average per host CPU, 1 to 3): with five agents on a 4-CPU host (load
+20-33) sshd_shell's guest had run only 58 s when its 120 s were up, and
+handover_k32_twice's verification was cut short the same way; the
+failed log's triage line has the load. In a shared VM,
 scenarios running the same program (two `dotnet.exe` runs) are judged on
 that program's n-th `run: begin`..`run: end` section, in group order.
 To see why a .NET program fails: the ledger first, then `XTASK_EVENTS=

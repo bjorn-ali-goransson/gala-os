@@ -119,8 +119,13 @@ Each: what failed, what we lacked, what would have explained it, status.
     figures in the guest line's neighbourhood: look there first when
     watchdogs fire at boot).
 13. **Unexplained net client failures** ("Connection refused" from the
-    host port forward once in a full suite). Still open: the client's
-    attempts, the port and QEMU's forward in the failed log.
+    host port forward once in a full suite). **Done** (2026-11-03): the
+    failed log names the VM's host port and guest port (`xtask: net:
+    host 127.0.0.1:<port> forwarded to the guest's port <n>`; that line
+    showed repeats of sshd_shell forwarding to port 7, the cause of their
+    resets) and QEMU's standard error (`<iso>.qemu.stderr`, e.g. a
+    forward it could not set up); repeats keep one failed log each
+    (`target/failed/<name>.r<i>.log`, they overwrote each other).
 14. **QEMU exiting at once on a loaded host with an empty log** (java_hello
     12 of 30 never started), early boot visibility: the other agent's work
     (QEMU exit reason, debugcon boot phases); not in this audit.

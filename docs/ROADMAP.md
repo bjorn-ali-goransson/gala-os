@@ -172,7 +172,11 @@ explicitly in its commit.
   `-smp 1` boot, `-Xint` with forced full collections.
   Also seen once in a full suite: java_http listening but xtask's client
   getting "Connection refused" from the host port forward (not
-  retried; a host port taken by another VM? unexplained).
+  retried; a host port taken by another VM? unexplained). Since
+  2026-11-03 host ports are leased per VM outside the ephemeral range
+  (an ephemeral port from `bind(0)` could be taken by any outgoing
+  connection before QEMU bound it) and a failed forward boots again
+  (WORKFLOW "Network tests").
 - **Observability audit** (2026-11-03, OBSERVABILITY "Gaps found
   2026-11-03"): done: a state dump on every boot-test timeout (NMI;
   SIGQUIT in gala-um), a triage block at the end of every failed log

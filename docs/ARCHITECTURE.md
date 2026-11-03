@@ -2504,9 +2504,12 @@ SO_BROADCAST is kept (no broadcast sending tested yet).
 `net_echo` (kernel only: the flag serves one connection on port 7 through
 `net::tcp`) and `winsock_test` (a Windows program: loopback checks, then,
 with `serve`, an echo server on port 7). Both are in xtask's
-`NET_SCENARIOS`: QEMU gets `-netdev user,hostfwd=tcp:127.0.0.1:<free
+`NET_SCENARIOS`: QEMU gets `-netdev user,hostfwd=tcp:127.0.0.1:<leased
 port>-:7,hostfwd=udp:127.0.0.1:<the same port>-:7` and a virtio-net card
-(every other VM gets `-nic none`); once the
+(every other VM gets `-nic none`). The port is the VM's own while it runs
+(xtask's `PortLease`, below the host's ephemeral range; WORKFLOW "Network
+tests"), so VMs run at once never share a forward or a client's files;
+once the
 log shows the scenario's "listening" line, xtask's `net_client` sends 64 KiB
 while reading the echo, half-closes, checks every byte and appends
 `xtask: net client: echo ok` (or the error) to the serial log, which the
