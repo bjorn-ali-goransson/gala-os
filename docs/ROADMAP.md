@@ -112,6 +112,13 @@ explicitly in its commit.
   such boot ran on normally (smp_test failed its CPU count). Both the
   missing CPU and the silent end need explaining: a kernel that gets
   one CPU must run on one, and an end must leave a panic or a reason.
+- **Early-boot visibility (the owner, 2026-11-03)**: that this failure
+  is conspicuous shows we see too little of the early boot. Every boot
+  gets QEMU-side telemetry (exit reason, `-d cpu_reset,guest_errors`,
+  vCPUs created, host load at start and end), boot phase codes on
+  debugcon that survive a silent death, SMP detail (Limine's MP answer
+  vs the MADT, per-AP timing) and early-fault output; xtask names a
+  short-CPU boot as such (OBSERVABILITY "Early boot").
 
 ## Done
 - M1 boot, serial, memory map
