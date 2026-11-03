@@ -911,6 +911,20 @@ where its pixel checks expect it (no pointer arithmetic).
   output is byte-identical to `export-tests`'s when no other program of
   the batch shares a dependency with different features (`cargo tree
   --workspace -i <crate>` tells).
+- **Installer packages (Inno, NSIS, exe; `install::exe`)**: the NSIS
+  test installers are built from `user/pk_install_test/nsis/pknsis.nsi`
+  by make_source.py with `makensis` (`apt install nsis`; Debian's package
+  has the `amd64-unicode` stubs, so `Target amd64-unicode` gives an x64
+  installer, which gala can run: there is no WOW64 for 32-bit ones; it
+  has no amd64 plug-ins, so the script uses none). The build is
+  reproducible; without makensis the checked-in installers are kept.
+  Third-party installers run only inside QEMU, never on the host. The
+  boot test is `cargo xtask boot-test pk_install_nsis`; a missing import
+  of the installer stops its load before anything runs (exit 3/4 with the
+  ledger naming it): compare its imports with gala's DLLs (`llvm-readobj
+  --coff-imports`). The Fake host in `install/tests.rs` plays the
+  installers (`run`), the NSIS uninstaller's late removal (`sleep`) and
+  an Inno Setup installer (`inno_registers`).
 
 ## Screenshots
 

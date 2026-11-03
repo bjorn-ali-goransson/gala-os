@@ -56,6 +56,7 @@ unsafe extern "system" {
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetExitCodeProcess(h: Handle, code: *mut u32) -> Bool;
     fn GetCommandLineW() -> *const u16;
+    fn Sleep(ms: u32);
     #[allow(clippy::too_many_arguments)]
     fn CreateProcessW(
         application: *const u16,
@@ -87,6 +88,7 @@ const OPEN_ALWAYS: u32 = 4;
 const FILE_SHARE_ALL: u32 = 7;
 const ERROR_NO_MORE_FILES: u32 = 18;
 const STARTF_USESTDHANDLES: u32 = 0x100;
+const WAIT_TIMEOUT: u32 = 0x102;
 
 /// A NUL-terminated UTF-16 copy of `s`.
 fn wide(s: &str) -> Vec<u16> {
@@ -699,6 +701,54 @@ impl Host for Win32 {
         unsafe { GetLocalTime(t.as_mut_ptr()) };
         format!("{:04}{:02}{:02}", t[0], t[1], t[3])
     }
+
+    fn run(&mut self, command_line: &str, timeout_ms: u32) -> Result<u32, HostError> {
+        // An installer or uninstaller: found as CreateProcessW finds the
+        // first token, no handles inherited (they are GUI programs run
+        // silently), waited for.
+        let mut cmd = wide(command_line);
+        let mut startup = [0u8; 104];
+        startup[0] = 104;
+        let mut info = [0usize; 3];
+        let null = core::ptr::null_mut();
+        // SAFETY: plain calls with our buffers; the handles are closed.
+        unsafe {
+            if CreateProcessW(
+                core::ptr::null(),
+                cmd.as_mut_ptr(),
+                null,
+                null,
+                0,
+                0,
+                null,
+                core::ptr::null(),
+                startup.as_ptr(),
+                &mut info,
+            ) == 0
+            {
+                return Err(last_error());
+            }
+            CloseHandle(info[1] as Handle);
+            self.log(&format!("started pid={} tid={}", info[2] & 0xffff_ffff, info[2] >> 32));
+            let w = WaitForSingleObject(info[0] as Handle, timeout_ms);
+            let mut code = 0;
+            let ok = GetExitCodeProcess(info[0] as Handle, &mut code) != 0;
+            let e = GetLastError();
+            CloseHandle(info[0] as Handle);
+            if w == WAIT_TIMEOUT {
+                return Err(HostError { code: install::exe::ERROR_TIMEOUT });
+            }
+            if !ok {
+                return Err(HostError { code: e });
+            }
+            Ok(code)
+        }
+    }
+
+    fn sleep(&mut self, ms: u32) {
+        // SAFETY: a plain call.
+        unsafe { Sleep(ms) };
+    }
 }
 
 // ---- Output ------------------------------------------------------------
@@ -753,6 +803,7 @@ struct Options {
     source: Option<String>,
     id: Option<String>,
     product_code: Option<String>,
+    location: Option<String>,
     all: bool,
     verbose: bool,
 }
@@ -764,6 +815,7 @@ fn options(a: &Args) -> Result<Options, u32> {
         source: None,
         id: None,
         product_code: None,
+        location: None,
         all: false,
         verbose: false,
     };
@@ -791,6 +843,10 @@ fn options(a: &Args) -> Result<Options, u32> {
             }
             "--product-code" => {
                 o.product_code = Some(value(i)?);
+                i += 1;
+            }
+            "--location" | "-l" => {
+                o.location = Some(value(i)?);
                 i += 1;
             }
             "--all" | "-r" | "--recurse" => o.all = true,
@@ -872,8 +928,12 @@ fn cmd_install(host: &mut Win32, o: &Options) -> Result<u32, install::Error> {
     };
     let s = source(o)?;
     let location = s.root.clone();
-    let req =
-        install::Request { id: &id, version: o.version.as_deref(), source_location: &location };
+    let req = install::Request {
+        id: &id,
+        version: o.version.as_deref(),
+        source_location: &location,
+        location: o.location.as_deref(),
+    };
     match install::install(host, &s, &req)? {
         Outcome::Installed { id, version, commands, location } => {
             print(&format!("Found {id} Version {version}\r\n"));

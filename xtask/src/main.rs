@@ -507,6 +507,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("win32_misc_test", "kernel32.dll", "Windows/System32"),
     ("win32_misc_test", "advapi32.dll", "Windows/System32"),
     ("win32_misc_test", "user32.dll", "Windows/System32"),
+    ("win32_misc_test", "gdi32.dll", "Windows/System32"),
     ("win32_misc_test", "ws2_32.dll", "Windows/System32"),
     ("win32_misc_test", "mswsock.dll", "Windows/System32"),
     ("win32_misc_test", "comctl32.dll", "Windows/System32"),
@@ -757,6 +758,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pk_install_test", "advapi32.dll", "Windows/System32"),
     ("pk_install_test", "bcryptprimitives.dll", "Windows/System32"),
     ("pk_install_test", "user/pk_install_test/source/", "pk_source"),
+    // pk_install_nsis: the NSIS installer's imports (ROADMAP PK).
+    ("pk_install_nsis", "user32.dll", "Windows/System32"),
+    ("pk_install_nsis", "gdi32.dll", "Windows/System32"),
+    ("pk_install_nsis", "comctl32.dll", "Windows/System32"),
+    ("pk_install_nsis", "ole32.dll", "Windows/System32"),
+    ("pk_install_nsis", "shell32.dll", "Windows/System32"),
     ("uipi_test", "ntdll.dll", "Windows/System32"),
     ("uipi_test", "kernel32.dll", "Windows/System32"),
     ("uipi_test", "msvcrt.dll", "Windows/System32"),
@@ -3490,6 +3497,24 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // ROADMAP PK stage 3: `gala install` of a real NSIS installer
+        // (user/pk_install_test/nsis, x64) from the snapshot: run with /S
+        // (and /D=), found through its uninstall entry, upgraded by the
+        // next version's installer, uninstalled through its
+        // UninstallString with /S (gala waits for the entry to go).
+        name: "pk_install_nsis",
+        cmdline: "qemu_exit logtee=C:/Users/gala/AppData/Local/gala/logs run=pk_install_test.exe args=nsis",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "pknsis-1.0.0.exe\" /S",
+            "found-by=the one new entry",
+            "upgraded id=GalaTest.PkNsis from=1.0.0 to=1.1.0",
+            "arp-entry-gone key=HKCU",
+            "pk_install_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // ntdll's run-time library and the calls Git Bash's msys-2.0.dll
         // imports.
         name: "rtl_test",
@@ -5297,6 +5322,8 @@ fn events_flag() -> String {
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
     ("pk_install_zip", "pk_install_test"),
+    ("pk_install_nsis", "pk_install_test"),
+    ("pk_install_nsis", "pk_install_nsis"),
     ("onecpu_programs", "smpsched_test"),
     ("kernel_watchdog", "hello"),
     ("service_restart", "hello"),

@@ -124,6 +124,13 @@ pub trait Host {
     fn record_missing(&mut self, _what: &str) {}
     /// Today as YYYYMMDD (InstallDate).
     fn today(&mut self) -> String;
+    /// Runs a command line (the program found as CreateProcessW finds
+    /// it), waits up to `timeout_ms` and returns its exit code;
+    /// ERROR_TIMEOUT (1460) if it is still running. Installers (inno,
+    /// nullsoft, exe) and uninstallers.
+    fn run(&mut self, command_line: &str, timeout_ms: u32) -> Result<u32, HostError>;
+    /// Waits (polling for an uninstaller to finish).
+    fn sleep(&mut self, ms: u32);
 }
 
 /// What went wrong, with the exit code `gala` returns for it.
@@ -338,10 +345,20 @@ impl<'h> Tx<'h> {
 
     /// Undoes every change, newest first; logs each step. Returns how
     /// many steps could not be undone.
-    pub fn rollback(mut self) -> usize {
+    pub fn rollback(self) -> usize {
+        self.undo("rollback")
+    }
+
+    /// Undoes temporary changes after they served (a staged installer),
+    /// logged as `cleanup`.
+    pub fn cleanup(self) -> usize {
+        self.undo("cleanup")
+    }
+
+    fn undo(mut self, label: &str) -> usize {
         let mut failures = 0;
         let n = self.journal.len();
-        self.host.log(&format!("rollback steps={n}"));
+        self.host.log(&format!("{label} steps={n}"));
         while let Some(u) = self.journal.pop() {
             let (what, path, r) = match u {
                 Undo::CreatedFile(p) => {
@@ -386,10 +403,10 @@ impl<'h> Tx<'h> {
                 }
             };
             match r {
-                Ok(()) => self.host.log(&format!("rollback {what} path={path}")),
+                Ok(()) => self.host.log(&format!("{label} {what} path={path}")),
                 Err(e) => {
                     failures += 1;
-                    self.host.log(&format!("rollback FAILED {what} path={path} {e}"));
+                    self.host.log(&format!("{label} FAILED {what} path={path} {e}"));
                 }
             }
         }
@@ -419,10 +436,13 @@ pub struct Plan {
     pub dir_on_path: bool,
 }
 
-/// Installer types gala installs (the rest: ROADMAP PK stages 3 to 5).
+/// Installer types gala installs (the rest: ROADMAP PK stages 4 and 5):
+/// portable, zip of portable, and installers that are programs (inno,
+/// nullsoft, exe: [`exe`]).
 pub fn supported(i: &Installer) -> bool {
     i.installer_type == "portable"
         || (i.installer_type == "zip" && i.nested_installer_type.as_deref() == Some("portable"))
+        || exe::is_program(&i.installer_type)
 }
 
 /// A command's name from a file name: without directory and `.exe`.
@@ -512,7 +532,7 @@ pub fn plan(installer: &Installer, data: &[u8]) -> Result<Plan, Error> {
         }
         other => {
             return Err(Error::unsupported(format!(
-                "InstallerType {other} is not supported yet (gala installs zip and portable; ROADMAP PK stages 3-5)"
+                "InstallerType {other} is not supported yet (gala installs zip, portable, inno, nullsoft and exe; ROADMAP PK stages 4-5)"
             )));
         }
     }
@@ -629,7 +649,10 @@ pub fn installed(host: &mut dyn Host) -> Vec<Installed> {
             let Some(name) = sz(host, root, &k, "DisplayName") else { continue };
             out.push(Installed {
                 root,
-                version: sz(host, root, &k, "DisplayVersion")
+                // A program installer's own DisplayVersion may differ from
+                // the manifest's version: gala's tag wins.
+                version: sz(host, root, &k, "GalaPackageVersion")
+                    .or_else(|| sz(host, root, &k, "DisplayVersion"))
                     .unwrap_or_else(|| "Unknown".to_string()),
                 publisher: sz(host, root, &k, "Publisher"),
                 id: sz(host, root, &k, "WinGetPackageIdentifier"),
@@ -665,6 +688,9 @@ pub struct Request<'a> {
     /// The source's location as given (kept in the ARP entry for
     /// `gala upgrade`).
     pub source_location: &'a str,
+    /// `--location`: where a program installer installs (its
+    /// InstallLocation switch).
+    pub location: Option<&'a str>,
 }
 
 /// What an install did.
@@ -682,6 +708,8 @@ struct Prepared {
     manifest: Manifest,
     installer: Installer,
     plan: Plan,
+    /// A program installer's bytes (to run); empty for the others.
+    data: Vec<u8>,
 }
 
 fn prepare(
@@ -718,7 +746,7 @@ fn prepare(
             installer.effective_type()
         ));
         return Err(Error::unsupported(format!(
-            "{} {}: InstallerType {} is not supported yet (gala installs zip and portable; ROADMAP PK stages 3-5)",
+            "{} {}: InstallerType {} is not supported yet (gala installs zip, portable, inno, nullsoft and exe; ROADMAP PK stages 4-5)",
             manifest.id,
             manifest.version,
             installer.effective_type()
@@ -736,6 +764,10 @@ fn prepare(
             ),
         });
     }
+    if exe::is_program(&installer.installer_type) {
+        host.log(&format!("plan run-installer type={}", installer.installer_type));
+        return Ok(Prepared { manifest, installer, plan: Plan::default(), data });
+    }
     let plan = plan(&installer, &data)?;
     host.log(&format!(
         "plan files={} dirs={} commands={}",
@@ -743,7 +775,7 @@ fn prepare(
         plan.dirs.len(),
         plan.commands.len()
     ));
-    Ok(Prepared { manifest, installer, plan })
+    Ok(Prepared { manifest, installer, plan, data: Vec::new() })
 }
 
 /// Writes a prepared package (inside `tx`).
@@ -844,7 +876,7 @@ fn apply(
 fn remove(tx: &mut Tx, layout: &Layout, i: &Installed) -> Result<(), Error> {
     if i.root != Root::CurrentUser || i.id.is_none() {
         return Err(Error::unsupported(format!(
-            "{} was not installed by gala or winget for this user; gala does not run other uninstallers yet (ROADMAP PK stage 3)",
+            "{} was not installed by gala or winget for this user; gala runs only the uninstallers of programs it installed (TODO: any entry's QuietUninstallString)",
             i.name
         )));
     }
@@ -908,6 +940,22 @@ pub fn install(host: &mut dyn Host, source: &Source, req: &Request) -> Result<Ou
         )));
     }
     let p = prepare(host, source, req.id, req.version)?;
+    if exe::is_program(&p.installer.installer_type) {
+        let location = exe::install_program(host, &p, req.source_location, req.location, None)?;
+        host.log(&format!("installed id={} version={}", p.manifest.id, p.manifest.version));
+        return Ok(Outcome::Installed {
+            id: p.manifest.id.clone(),
+            version: p.manifest.version.clone(),
+            commands: Vec::new(),
+            location,
+        });
+    }
+    if req.location.is_some() {
+        return Err(Error::usage(format!(
+            "--location: {} installs into its package directory (winget's portable layout)",
+            p.installer.effective_type()
+        )));
+    }
     let mut tx = Tx::new(host);
     match apply(&mut tx, &layout, &p, req.source_location) {
         Ok(location) => {
@@ -946,6 +994,11 @@ pub fn uninstall(host: &mut dyn Host, what: &str) -> Result<Outcome, Error> {
     host.log(&format!("uninstall what={what}"));
     let layout = Layout::new(host)?;
     let i = find_installed(host, what)?;
+    if let Some(t) = exe::installed_type(host, &i).filter(|t| exe::is_program(t)) {
+        exe::uninstall_program(host, &i, &t)?;
+        host.log(&format!("uninstalled key={}", i.key));
+        return Ok(Outcome::Uninstalled { id: i.id.unwrap_or(i.key), version: i.version });
+    }
     let mut tx = Tx::new(host);
     match remove(&mut tx, &layout, &i) {
         Ok(()) => {
@@ -1042,6 +1095,22 @@ pub fn upgrade(
     }
     let p = prepare(host, s, &id, Some(&target))?;
     let location = s.root.clone();
+    let old_type = exe::installed_type(host, &i).unwrap_or_default();
+    let (old_program, new_program) =
+        (exe::is_program(&old_type), exe::is_program(&p.installer.installer_type));
+    if old_program || new_program {
+        if !(old_program && new_program) {
+            return Err(Error::unsupported(format!(
+                "upgrading {id} from a {old_type} install to a {} one",
+                p.installer.installer_type
+            )));
+        }
+        // winget's default for these: the new installer runs over the old
+        // version (UpgradeBehavior install).
+        exe::install_program(host, &p, &location, None, Some(&i))?;
+        host.log(&format!("upgraded id={id} from={} to={}", i.version, p.manifest.version));
+        return Ok(Outcome::Upgraded { id, from: i.version, to: p.manifest.version.clone() });
+    }
     let mut tx = Tx::new(host);
     let r = remove(&mut tx, &layout, &i).and_then(|()| apply(&mut tx, &layout, &p, &location));
     match r {
@@ -1054,5 +1123,6 @@ pub fn upgrade(
     }
 }
 
+pub mod exe;
 #[cfg(test)]
 mod tests;

@@ -16,4 +16,5 @@ gala_stubs::unimplemented_exports!("shell32.dll":
     SHGetIconOverlayIndexW
     ShellExecuteExW
     Shell_NotifyIconW
+    SHCLSIDFromString
 );

@@ -2398,6 +2398,108 @@ pub extern "system" fn GetTempPathW(size: u32, buf: *mut u16) -> u32 {
     copy_out(&path[..n], buf, size)
 }
 
+/// GetTempFileNameW(path, prefix, unique, buf): `<path>\<up to 3
+/// characters of prefix><unique in upper-case hex>.tmp` into `buf`
+/// (MAX_PATH characters). With unique 0 the number starts from the tick
+/// count's low 16 bits and the file is created (CREATE_NEW) with the
+/// first free number; otherwise only the name is made. Returns the number
+/// used, 0 on failure (the last error: CreateFileW's, ERROR_FILE_EXISTS
+/// when every number is taken, ERROR_BUFFER_OVERFLOW for a path too long).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTempFileNameW(
+    path: *const u16,
+    prefix: *const u16,
+    unique: u32,
+    buf: *mut u16,
+) -> u32 {
+    const MAX_PATH: usize = 260;
+    const ERROR_BUFFER_OVERFLOW: u32 = 111;
+    const ERROR_FILE_EXISTS: u32 = 80;
+    if path.is_null() || buf.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    let dir = locale::c_units(path);
+    let pre = locale::c_units(prefix);
+    let pre = &pre[..pre.len().min(3)];
+    let mut name = [0u16; MAX_PATH];
+    let mut n = 0;
+    for &u in dir {
+        if n >= MAX_PATH - 14 {
+            return fail_with(ERROR_BUFFER_OVERFLOW, 0);
+        }
+        name[n] = u;
+        n += 1;
+    }
+    if n > 0 && name[n - 1] != u16::from(b'\\') && name[n - 1] != u16::from(b'/') {
+        name[n] = u16::from(b'\\');
+        n += 1;
+    }
+    for &u in pre {
+        name[n] = u;
+        n += 1;
+    }
+    let base = n;
+    let write = |name: &mut [u16; MAX_PATH], number: u32| -> usize {
+        let mut n = base;
+        let mut started = false;
+        for i in (0..4).rev() {
+            let d = ((number >> (4 * i)) & 0xf) as u8;
+            if d != 0 || started || i == 0 {
+                started = true;
+                name[n] = u16::from(if d < 10 { b'0' + d } else { b'A' + d - 10 });
+                n += 1;
+            }
+        }
+        for &b in b".tmp" {
+            name[n] = u16::from(b);
+            n += 1;
+        }
+        name[n] = 0;
+        n
+    };
+    let copy = |name: &[u16; MAX_PATH], len: usize| {
+        // SAFETY: the caller's buffer of MAX_PATH characters.
+        unsafe { core::ptr::copy_nonoverlapping(name.as_ptr(), buf, len + 1) };
+    };
+    if unique != 0 {
+        let number = unique & 0xffff;
+        let len = write(&mut name, number);
+        copy(&name, len);
+        SetLastError(0);
+        return number;
+    }
+    let start = (GetTickCount() & 0xffff).max(1);
+    let mut number = start;
+    loop {
+        let len = write(&mut name, number);
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const CREATE_NEW: u32 = 1;
+        let h = CreateFileW(
+            name.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            core::ptr::null_mut(),
+            CREATE_NEW,
+            0x80,
+            core::ptr::null_mut(),
+        );
+        if h != INVALID_HANDLE_VALUE {
+            CloseHandle(h);
+            copy(&name, len);
+            SetLastError(0);
+            return number;
+        }
+        let e = GetLastError();
+        if e != ERROR_FILE_EXISTS && e != ERROR_ALREADY_EXISTS {
+            return 0;
+        }
+        number = if number == 0xffff { 1 } else { number + 1 };
+        if number == start {
+            return fail_with(ERROR_FILE_EXISTS, 0);
+        }
+    }
+}
+
 /// GetTempPath2W: as GetTempPathW for processes not running as SYSTEM.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetTempPath2W(size: u32, buf: *mut u16) -> u32 {

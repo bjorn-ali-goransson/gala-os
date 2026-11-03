@@ -1,0 +1,16 @@
+# A test package of gala-os (pk_install_test nsis).
+PackageIdentifier: GalaTest.PkNsis
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: PkNsis
+License: Proprietary
+ShortDescription: Says hello, installed by an NSIS installer
+Installers:
+- Architecture: x64
+  InstallerType: nullsoft
+  Scope: user
+  InstallerUrl: https://packages.gala.invalid/pknsis-1.0.0.exe
+  InstallerSha256: 13ED42480CC32C998BB2F231A832164895B434D8E507C20E2C875F5F8FCF88ED
+ManifestType: singleton
+ManifestVersion: 1.6.0

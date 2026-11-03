@@ -59,5 +59,8 @@ gala_stubs::unimplemented_exports!("user32.dll":
     WaitForInputIdle
     keybd_event
     mouse_event
-    wsprintfW
+    DialogBoxParamW
+    MessageBoxIndirectW
+    SetClassLongPtrW
+    SetClipboardData
 );
