@@ -1,0 +1,5 @@
+The directory Win32-OpenSSH logs to with SyslogFacility LOCAL0
+(%ProgramData%\ssh\logs\<program>.log): sshd opens its log file there but
+does not make the directory, which an installed system already has. This
+file only makes the directory exist on gala (boot modules create the
+directories they are in).

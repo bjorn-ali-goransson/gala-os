@@ -7,9 +7,14 @@
 //! CSI m colours, CSI K, CSI J, CSI H/f, cursor moves). The colours are
 //! Windows Terminal's default scheme ("Campbell"). Typed keys go back to
 //! the session as key records (GalaConsoleInput).
+//!
+//! With `--headless` it is a pseudo console's host instead (ConPTY, no
+//! window: `pty.rs`).
 
 #![no_std]
 #![no_main]
+
+mod pty;
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
@@ -151,6 +156,7 @@ unsafe extern "system" {
     fn GalaConsoleHost(id: u32, event: Handle) -> u32;
     fn GalaConsoleRead(id: u32, buf: *mut u8, len: u32, count: *mut u32) -> u32;
     fn GalaConsoleInput(id: u32, records: *const u8, count: u32) -> u32;
+    fn GalaConsoleSize(id: u32, size: *mut u32, set: u32) -> u32;
 }
 
 // What the compiler's output expects from a C runtime.
@@ -736,6 +742,10 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
                 let cols = ((w - 2 * PAD) / st.cell_w.max(1)).max(1) as usize;
                 let rows = ((h - 2 * PAD) / st.cell_h.max(1)).max(1) as usize;
                 st.screen.resize(cols, rows);
+                // The programs see the new size (GetConsoleScreenBufferInfo).
+                let mut size = (cols.min(MAX_COLS) as u32) | ((rows.min(MAX_ROWS) as u32) << 16);
+                // SAFETY: our size; the session we host.
+                unsafe { GalaConsoleSize(st.session, &mut size, 1) };
                 // SAFETY: our window.
                 unsafe { InvalidateRect(hwnd, core::ptr::null(), 0) };
             }
@@ -933,7 +943,16 @@ fn run() -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
-    let code = run();
+    // SAFETY: the process's NUL-terminated command line.
+    let line = unsafe {
+        let p = GetCommandLineW();
+        let mut n = 0;
+        while *p.add(n) != 0 {
+            n += 1;
+        }
+        core::slice::from_raw_parts(p, n)
+    };
+    let code = if pty::wanted(line) { pty::run(line) } else { run() };
     // SAFETY: ends the process.
     unsafe { ExitProcess(code) }
 }

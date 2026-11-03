@@ -20,6 +20,7 @@ pub mod kuser;
 pub mod layout;
 pub mod ledger;
 pub mod locks;
+pub mod logtee;
 pub mod namespace;
 pub mod notify;
 pub mod ntdll;

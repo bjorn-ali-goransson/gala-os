@@ -242,6 +242,10 @@ name = "conhost"
 version = "0.1.0"
 
 [[package]]
+name = "conpty_test"
+version = "0.1.0"
+
+[[package]]
 name = "console_test"
 version = "0.1.0"
 

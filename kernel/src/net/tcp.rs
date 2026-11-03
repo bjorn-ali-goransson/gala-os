@@ -71,6 +71,27 @@ impl Addr {
     }
 }
 
+/// `"a.b.c.d:port"` (a JSON string, for the event stream).
+impl core::fmt::Display for Addr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let [a, b, c, d] = self.ip;
+        write!(f, "\"{a}.{b}.{c}.{d}:{}\"", self.port)
+    }
+}
+
+/// A connection event (`events=net`): accepted, connecting, closed.
+fn net_event(what: &str, id: SocketId, local: Addr, remote: Option<Addr>) {
+    crate::events::emit(
+        crate::events::Category::Net,
+        what,
+        format_args!(
+            r#""socket":{},"local":{local},"remote":{}"#,
+            id.index,
+            remote.map_or(Addr::default(), |r| r)
+        ),
+    );
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SocketId {
     pub(super) index: u32,
@@ -622,8 +643,12 @@ pub fn accept(id: SocketId, sequence: u32, token: u64) -> Result<SocketId, NetEr
         let (_, sock) = ready.remove(pos);
         s.entry(id)?.last = STALE;
         let local = s.tcp(sock).and_then(|t| t.local_endpoint()).map(Addr::from_endpoint);
+        let remote = s.tcp(sock).and_then(|t| t.remote_endpoint()).map(Addr::from_endpoint);
         match s.insert(token, local.unwrap_or_default(), Kind::Conn { sock, connected: true }) {
-            Ok(new) => Ok(new),
+            Ok(new) => {
+                net_event("tcp accept", new, local.unwrap_or_default(), remote);
+                Ok(new)
+            }
             Err(e) => {
                 s.remove(sock);
                 Err(e)
@@ -668,6 +693,7 @@ pub fn connect(id: Option<SocketId>, remote: Addr, token: u64) -> Result<SocketI
         let entry = s.entry(id)?;
         entry.local = local;
         entry.kind = Kind::Conn { sock, connected: false };
+        net_event("tcp connect", id, local, Some(remote));
         Ok(id)
     })
 }
@@ -791,6 +817,10 @@ pub fn close(id: SocketId, abort: bool) {
         let Some(entry) = entry.filter(|e| e.generation == id.generation) else {
             return Ok(());
         };
+        if let Kind::Conn { sock, .. } = entry.kind {
+            let remote = s.tcp(sock).and_then(|t| t.remote_endpoint()).map(Addr::from_endpoint);
+            net_event(if abort { "tcp reset" } else { "tcp close" }, id, entry.local, remote);
+        }
         let finish = |s: &mut Stack, sock: Sock, abort: bool| {
             if let Some(t) = s.tcp(sock) {
                 if abort { t.abort() } else { t.close() }

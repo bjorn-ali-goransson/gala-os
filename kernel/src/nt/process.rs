@@ -786,9 +786,10 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         crate::events::Category::Process,
         "process start",
         format_args!(
-            r#""pid":{id},"name":{},"image_base":{base},"entry":{}"#,
+            r#""pid":{id},"name":{},"image_base":{base},"entry":{},"cmdline":{}"#,
             crate::events::Str(name),
-            regs.rip
+            regs.rip,
+            crate::events::Str(command_line)
         ),
     );
     Ok((process, main))
@@ -878,6 +879,7 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     super::desktop::process_ended(process.id);
     super::window::process_ended(process.id as u32);
     super::winevent::process_ended(process.id as u32);
+    super::conhost::process_ended(process.id);
     super::charge::ended(process);
     // Close every handle (this breaks reference cycles through handles to
     // the process's own objects) and forget the process.

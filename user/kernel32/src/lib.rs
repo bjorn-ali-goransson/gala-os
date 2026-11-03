@@ -35,6 +35,7 @@ mod pipe;
 mod pool;
 mod process;
 mod processor;
+mod pty;
 mod resource;
 mod runtime;
 mod sync;

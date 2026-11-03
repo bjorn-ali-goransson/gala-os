@@ -112,7 +112,10 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `profile=server` | never bring up the graphical interface: the desktop is not drawn even with a screen (windows still exist), `console=` starts no console window (ROADMAP SD) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |
-| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock` or `all` (`mock`: clock-control changes) |
+| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console` or `all` (`mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
+| `restart=<file>[:<max>][,...]` | those `run=` programs are services: started again when they end (1 s later, at most `max` times, default 10; a run of over a minute starts the count again), logged as `service: ... restarting it (n of max)` and a `service restart` event (scenario `service_restart`; sshd_server's sshd) |
+| `logtee=C:/dir` | what programs write to files below that directory (percent-encoded) is also logged line by line, `logtee: <file>: <line>` (Win32-OpenSSH's %ProgramData%\ssh\logs in the sshd scenarios: the logs reach the failed log even when xtask stops the VM) |
+| `conpty=trace` | pseudo consoles' hosts log both directions of their VT traffic (`conpty <id> in|out|note: ...`) |
 | `failpoint=<point>:<mode>:<n>[,...]` | fault injection while the `start=`/`run=` programs run (debug builds; "Fault injection" below). Points `heap`, `frame`, `disk_io`, `net_tx`; modes `every:<n>` (the n-th, 2n-th, ... occurrence fails), `nth:<n>` (only the n-th), `random:<per-mille>` (from `failseed=`). Example: `failpoint=heap:every:97,net_tx:random:50` |
 | `failseed=<n>` | seed of the `random` failpoints (default 0): the same seed fails the same occurrences |
 | `failtrace` | log each injected failure with a backtrace (`cargo xtask symbolize` resolves it) |
@@ -1041,6 +1044,10 @@ one flat structure (120 bytes):
 | 48 / 56 | environment block (UTF-16, `NAME=value\0...\0`) / length in characters |
 | 64, 72, 80 | standard input, output, error handles (parent's values) |
 | 88, 96, 104, 112 | out: process handle, thread handle, process id, thread id |
+| 120, 128 | with flag 4: PROC_THREAD_ATTRIBUTE_HANDLE_LIST, count |
+| 136, 144 | with flag 8: lpReserved2 (the C runtime's descriptors), length |
+| 152 | with flag 16: the primary token (CreateProcessAsUserW) |
+| 160 | with flag 32: the console session (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: the HPCON's first field); flag 64 with it: the child gets new console handles as its standard handles (no STARTF_USESTDHANDLES); flag 128: DETACHED_PROCESS, no console session |
 
 The kernel opens the image like NtOpenFile (so a missing file is
 STATUS_OBJECT_NAME_NOT_FOUND, ERROR_FILE_NOT_FOUND to the caller), reads
@@ -1451,9 +1458,10 @@ Windows, never shadows the system's DLLs.)
     in a zero-initialized static, so the program file stays small); the
     wheel scrolls the view three lines a notch, a view scrolled up keeps
     its lines while output arrives, typing goes back to the screen.
-    TODO: a scroll bar, rewrapping on resize, telling the
-    programs the new size (GetConsoleScreenBufferInfo,
-    WINDOW_BUFFER_SIZE_EVENT), closing with the session.
+    WM_SIZE tells the session its new size (GalaConsoleSize), which the
+    programs see (GetConsoleScreenBufferInfo reports a session's size as
+    buffer and window). TODO: a scroll bar, rewrapping on resize,
+    closing with the session.
   - Tests: kernel host tests for the ring and queue; the console_window
     screen scenario (console_window_test prints text, VT colours and
     UTF-8, then reads what xtask types: "hi" with ReadFile (echoed in the
@@ -1461,6 +1469,67 @@ Windows, never shadows the system's DLLs.)
     "x" with ReadConsoleInputW); the
     filezilla scenario shows FileZilla Server's console (minimizing
     FileZilla, then restoring it from the taskbar).
+- **Pseudo consoles (ConPTY)** (2026-11-03; `conpty_test`, `sshd_shell`),
+  from Microsoft's "Creating a Pseudoconsole session" and the
+  CreatePseudoConsole / ResizePseudoConsole / ClosePseudoConsole pages:
+  - A pseudo console is a console session (above) made by a program
+    (GalaConsoleCreate(Flags, Size, *Info) 0x7f80; flag 1 pseudo; Info:
+    the id and whether `conpty=trace` is on) and hosted by gala's
+    conhost.exe in pseudo-console mode (`user/conhost/src/pty.rs`, no
+    window). Kernel differences from a window's session: its output does
+    not go to the serial line (an ssh session's would interleave with the
+    log), a bare LF is written as CR LF unless the output mode has
+    DISABLE_NEWLINE_AUTO_RETURN (SetConsoleMode on the output now reaches
+    the session: GalaConsoleMode(mode, 2)), it has a size
+    (GalaConsoleSize(Id, *Size, Set) 0x7f81: Id 0 the caller's own; set by
+    the host or the creator; a WINDOW_BUFFER_SIZE_EVENT is queued when the
+    input mode has ENABLE_WINDOW_INPUT, passed to kernel32 as a record
+    with bKeyDown 0x8000_0004), and it closes (GalaConsoleClose(Id) 0x7f82
+    by the host or creator, or when its host process ends): its processes
+    other than the host and creator end with STATUS_CONTROL_C_EXIT,
+    GalaConsoleRead then fails with STATUS_PIPE_BROKEN once the last
+    output is taken, and closed sessions nothing refers to are forgotten
+    at the next create. Events (`events=console`): console create,
+    resize, close.
+  - kernel32 (`pty.rs`): CreatePseudoConsole makes the session, a signal
+    pipe, and starts `<system>\conhost.exe --headless --width W --height
+    H --signal 0x<handle> --session <id> [--inheritcursor]` with the
+    caller's pipes as its standard handles (only the signal pipe
+    inherited: PROC_THREAD_ATTRIBUTE_HANDLE_LIST). An HPCON points at
+    {session id, signal pipe, host process}; CreateProcess with
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE passes the id (flag 32 above)
+    and, without STARTF_USESTDHANDLES, the child gets new console handles
+    (flag 64). ResizePseudoConsole sets the size; ClosePseudoConsole
+    closes the session (its programs end), closes the signal pipe and
+    waits up to 5 s for the host (the caller drains the output pipe, as
+    documented).
+  - conhost.exe `--headless`: becomes the host, copies the session's
+    output to its standard output (the terminal's pipe), and on an input
+    thread turns the bytes from its standard input into key records: UTF-8
+    text, CR Enter, DEL/BS Backspace, 0x03 Ctrl+C (the control event with
+    processed input), other control characters Ctrl+letter, ESC [ / ESC O
+    sequences the arrow, Home/End, Insert/Delete, Page and F keys (xterm's
+    modifier parameter), a cursor position report dropped. A signal
+    thread reads the signal pipe: records of 16-bit words, 8 = resize
+    (columns, rows); its end closes the session. With `-- <command
+    line>` (Win32-OpenSSH's sshd-session for a pty runs
+    `%SystemRoot%\System32\conhost.exe --headless --width W --height H
+    --signal 0x<h> -- <shell>`, found in its strings and seen in the
+    sshd_shell trace) it makes the session itself, starts the command in
+    it (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE with a block whose first field
+    is the session), closes the session when the command ends and exits
+    with its exit code; a 0 x 0 size (an ssh client without a tty) is
+    80 x 25. `--inheritcursor` sends ESC [ 6 n first.
+  - Tracing: `conpty=trace` on the kernel command line logs both
+    directions and the host's notes (`conpty <id> in|out|note: ...`,
+    escaped, GalaConsoleTrace 0x7f83).
+  - TODO: Windows' host renders its screen buffer into VT (cursor
+    positioning, a full repaint on resize); gala passes the programs' own
+    VT text through. Console APIs that draw by cell (SetConsoleCursorPosition,
+    FillConsoleOutput*, WriteConsoleOutput) do not reach the terminal
+    yet; neither do title changes (OSC 0). Mouse input, bracketed paste
+    and ENABLE_VIRTUAL_TERMINAL_INPUT (passing VT input through) are not
+    done.
 - **FormatMessage** (kernel32 messages.rs): system messages from a table
   of the documented US English texts, or the caller's string; inserts
   (%1..%99 with printf-style formats, %n %r %t %b %0 %%), IGNORE_INSERTS,
@@ -3352,7 +3421,11 @@ client, or none). Nothing here is built yet unless marked "exists".
 ### What exists (checked 2026-11-03)
 
 - SSH: Win32-OpenSSH's sshd logs in with a key or a password and runs a
-  command (`sshd_login`, `sshd_password`); no pty, no sftp (ROADMAP SSH).
+  command (`sshd_login`, `sshd_password`); since 2026-11-03 it runs as a
+  server (`sshd_server`: connection after connection, restarted if it
+  ends, logs in %ProgramData%\ssh\logs), gives an interactive shell over
+  a pseudo console (`sshd_shell`, ConPTY: "Pseudo consoles") and sftp
+  (`sshd_sftp`) (ROADMAP SSH).
 - shasha (`kernel/src/nt/desktop/`): programs draw their own client
   pixels (gdi32) and reach shasha only through gala calls (GalaWindow*,
   GalaScreenInfo, the console host calls, GalaDesktopAction); every shell

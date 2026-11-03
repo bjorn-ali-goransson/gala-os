@@ -423,14 +423,36 @@ pub(super) fn gala_logon_user(call: &mut Call<'_>) -> NtStatus {
     }
     let password = if s4u { None } else { Some(&password[..]) };
     let kind = kind & !(GALA_LOGON_S4U | GALA_LOGON_VIRTUAL);
-    let data = if virtual_account {
+    let result = if virtual_account {
         if !password.is_none_or(<[u16]>::is_empty) {
-            return super::super::accounts::LOGON_FAILURE;
+            Err(super::super::accounts::LOGON_FAILURE)
+        } else {
+            super::super::accounts::virtual_logon(&user, &domain, kind)
         }
-        tri!(super::super::accounts::virtual_logon(&user, &domain, kind))
     } else {
-        tri!(super::super::accounts::logon(&user, &domain, password, kind))
+        super::super::accounts::logon(&user, &domain, password, kind)
     };
+    // Logons in the event stream (who, how, the result; never the
+    // password).
+    let how = if s4u {
+        "s4u"
+    } else if virtual_account {
+        "virtual"
+    } else {
+        "password"
+    };
+    crate::events::emit(
+        crate::events::Category::Logon,
+        "logon",
+        format_args!(
+            r#""pid":{},"user":{},"domain":{},"type":{kind},"how":"{how}","status":{}"#,
+            call.process.id,
+            crate::events::Utf16(&user),
+            crate::events::Utf16(&domain),
+            result.as_ref().err().map_or(0, |s| s.0)
+        ),
+    );
+    let data = tri!(result);
     let object = tri!(token::object(data));
     call.return_handle(out, object, token::TOKEN_ALL_ACCESS, 0)
 }

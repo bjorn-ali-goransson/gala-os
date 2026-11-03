@@ -37,7 +37,16 @@ size: the exe and every image view), `thread` (create with start and TEB,
 exit with status), `process` (start, exit), `fault` (every user-mode CPU
 exception, before it is resolved or delivered). `XTASK_EVENTS=all cargo
 xtask boot-test` turns it on for every scenario; `EVENT_EXPECT` in xtask
-checks a scenario's stream. Next: process-relative times, a `cargo xtask
+checks a scenario's stream. Since 2026-11-03 also `net` (TCP accept,
+connect, close and reset with local and remote addresses), `logon`
+(LogonUser/LSA logons: pid, user, domain, type, how, status; never the
+password) and `console` (console sessions and pseudo consoles created,
+resized, closed with how many programs it ended); `process start`
+carries the command line. Server logs: `logtee=C:/dir` copies what
+programs write below a directory to the serial log (`logtee: <file>:
+<line>`; sshd's and sshd-session's logs in the sshd scenarios), and
+`conpty=trace` logs a pseudo console's VT traffic in both directions.
+Next: process-relative times, a `cargo xtask
 events` summary (top services by count and time), user-address
 symbolization from the image events.
 

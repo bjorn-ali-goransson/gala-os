@@ -119,6 +119,8 @@ impl NtStatus {
     pub const CANCELLED: NtStatus = NtStatus(0xc000_0120);
     pub const DEVICE_NOT_READY: NtStatus = NtStatus(0xc000_00a3);
     pub const NOT_FOUND: NtStatus = NtStatus(0xc000_0225);
+    /// A console program ended by its console closing (Ctrl+C, close).
+    pub const CONTROL_C_EXIT: NtStatus = NtStatus(0xc000_013a);
     pub const INSUFFICIENT_RESOURCES: NtStatus = NtStatus(0xc000_009a);
     pub const INVALID_CONNECTION: NtStatus = NtStatus(0xc000_0140);
     pub const INVALID_ADDRESS_COMPONENT: NtStatus = NtStatus(0xc000_0207);

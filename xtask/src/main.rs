@@ -453,6 +453,15 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gui_test", "gdi32.dll", "Windows/System32"),
     ("gui_test", "comctl32.dll", "Windows/System32"),
     ("console_window", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("sshd_server", "user/sshd/logs-placeholder.txt", "ProgramData/ssh/logs"),
+    ("sshd_sftp", "target/prebuilt/openssh/OpenSSH-Win64/sftp-server.exe", "Windows/System32"),
+    ("sshd_shell", "user/bin/conhost.exe", "Windows/System32"),
+    ("sshd_shell", "gdi32.dll", "Windows/System32"),
+    ("conpty_test", "ntdll.dll", "Windows/System32"),
+    ("conpty_test", "kernel32.dll", "Windows/System32"),
+    ("conpty_test", "user32.dll", "Windows/System32"),
+    ("conpty_test", "gdi32.dll", "Windows/System32"),
+    ("conpty_test", "user/bin/conhost.exe", "Windows/System32"),
     ("console_window", "ntdll.dll", "Windows/System32"),
     ("console_window", "kernel32.dll", "Windows/System32"),
     ("console_window", "user32.dll", "Windows/System32"),
@@ -1609,6 +1618,7 @@ const USER_PROGRAMS: &[&str] = &[
     "gui_test",
     "conhost",
     "console_window_test",
+    "conpty_test",
     "persist_test",
     "kernel32_system_test",
     "kernel32_clr_test",
@@ -2450,17 +2460,36 @@ enum Boot {
 }
 
 /// Lines the event stream (debug console) of a scenario must contain.
-const EVENT_EXPECT: &[(&str, &[&str])] = &[(
-    "events",
-    &[
-        r#""ev":"process start","pid":4,"name":"import_test.exe""#,
-        r#""ev":"image","pid":4,"name":"import_test.exe""#,
-        r#""name":"\\Device\\HarddiskVolume1\\gala\\testdll.dll""#,
-        r#""ev":"syscall","pid":4,"tid":8,"nr":8,"name":"NtWriteFile""#,
-        r#""ev":"thread exit","pid":4,"tid":8,"status":0"#,
-        r#""ev":"process exit","pid":4,"status":0"#,
-    ],
-)];
+const EVENT_EXPECT: &[(&str, &[&str])] = &[
+    (
+        "sshd_server",
+        &[
+            r#""ev":"tcp accept""#,
+            r#""local":"10.0.2.15:22""#,
+            r#""ev":"logon""#,
+            r#""user":"galatest""#,
+        ],
+    ),
+    (
+        "sshd_shell",
+        &[
+            r#""ev":"console create","id":1,"#,
+            r#""pseudo":true,"cols":80,"rows":25"#,
+            r#""ev":"console close","id":1,"pseudo":true"#,
+        ],
+    ),
+    (
+        "events",
+        &[
+            r#""ev":"process start","pid":4,"name":"import_test.exe""#,
+            r#""ev":"image","pid":4,"name":"import_test.exe""#,
+            r#""name":"\\Device\\HarddiskVolume1\\gala\\testdll.dll""#,
+            r#""ev":"syscall","pid":4,"tid":8,"nr":8,"name":"NtWriteFile""#,
+            r#""ev":"thread exit","pid":4,"tid":8,"status":0"#,
+            r#""ev":"process exit","pid":4,"status":0"#,
+        ],
+    ),
+];
 
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
@@ -2512,6 +2541,14 @@ enum NetClient {
     /// The same with galatest's password (`ssh_client`, through
     /// SSH_ASKPASS) and no key.
     SshPassword,
+    /// sshd as a server (`ssh_server_client`): three logins one after
+    /// another, then two at once, each running a command.
+    SshServer,
+    /// An interactive shell over a pty (`ssh_shell_client`, `ssh -tt`):
+    /// typed commands, line editing, Ctrl+C, exit.
+    SshShell,
+    /// File transfer with the host's sftp (`sftp_client`): put, ls, get.
+    Sftp,
     /// The host's psql runs `select 40+2` (`psql_client`).
     Psql,
     /// Logs on to an FTP server as `gala` and asks for the directory
@@ -2544,6 +2581,9 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("nginx_tls", "using the \"select\" event method", NetClient::Tls),
     ("sshd_login", "Server listening on", NetClient::Ssh),
     ("sshd_password", "Server listening on", NetClient::SshPassword),
+    ("sshd_server", "Server listening on", NetClient::SshServer),
+    ("sshd_shell", "Server listening on", NetClient::SshShell),
+    ("sshd_sftp", "Server listening on", NetClient::Sftp),
     ("postgres", "database system is ready to accept connections", NetClient::Psql),
     ("filezilla_server", "[FTP Server] Listening on 0.0.0.0:7", NetClient::Ftp),
     // Elasticsearch's root endpoint: the node's JSON description.
@@ -2586,6 +2626,21 @@ fn plain_text(text: &str) -> String {
     out
 }
 const STOPPED_LINE: &str = "xtask: stopped the VM after the client";
+
+/// The guest's port a net scenario's host port is forwarded to: sshd's
+/// own (22) for the sshd server scenarios, else 7.
+fn guest_port(name: &str) -> u16 {
+    if SSH_PORT_22.contains(&name) { 22 } else { 7 }
+}
+
+/// The scenario an ISO was made for (`test-<name>.iso`, `serve-<name>.iso`).
+fn iso_scenario(iso: &Path) -> &str {
+    let stem = iso.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    stem.strip_prefix("test-").or_else(|| stem.strip_prefix("serve-")).unwrap_or(stem)
+}
+
+/// Scenarios whose sshd listens on its configured port 22.
+const SSH_PORT_22: &[&str] = &["sshd_server", "sshd_shell", "sshd_sftp"];
 
 /// The listening marker and client of a NET_SCENARIOS entry.
 fn net_marker(name: &str) -> Option<(&'static str, NetClient)> {
@@ -3141,6 +3196,17 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_system_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_system_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Pseudo consoles (ConPTY): conpty_test plays a terminal for a
+        // child console program attached to a pseudo console (gala's
+        // conhost.exe in pseudo-console mode, in System32 as on Windows):
+        // line editing, size and resize, key events from VT input,
+        // Ctrl+C, ClosePseudoConsole.
+        name: "conpty_test",
+        cmdline: "qemu_exit run=conpty_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["conpty_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // A console program in a console window (gala's conhost.exe draws
@@ -4287,6 +4353,59 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // sshd as a server (ROADMAP SSH step 1): started at boot as SYSTEM
+        // without -d, on its configured port 22, restarted if it ends
+        // (`restart=`), logging to %ProgramData%\ssh\logs (sshd_config's
+        // SyslogFacility LOCAL0), which `logtee=` copies to the serial log.
+        // The host logs on with a key three times, then twice at once,
+        // each running a command; the logs and the event stream (logons,
+        // connections) show them.
+        name: "sshd_server",
+        cmdline: "qemu_exit as=system logtee=C:/ProgramData/ssh/logs restart=sshd.exe events=net,logon cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,",
+        exit_status: XTASK_STOPS,
+        expect: &[
+            "xtask: net client: ssh server ok",
+            "logtee: sshd.log: ",
+            "Accepted publickey for galatest",
+        ],
+    },
+    Scenario {
+        // File transfer (ROADMAP SSH step 3): the host's sftp uses sshd's
+        // sftp subsystem (sftp-server.exe): uploads a file of 200 KiB,
+        // lists the directory, downloads the file again (compared byte for
+        // byte), removes it.
+        name: "sshd_sftp",
+        cmdline: "qemu_exit as=system logtee=C:/ProgramData/ssh/logs events=net,logon,process cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,",
+        exit_status: XTASK_STOPS,
+        expect: &["xtask: net client: sftp ok"],
+    },
+    Scenario {
+        // `restart=` (the services' supervisor, as sshd_server uses it): a
+        // program that ends is started again, here at most twice.
+        name: "service_restart",
+        cmdline: "qemu_exit run=hello.exe restart=hello.exe:2",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "service: hello.exe ended; restarting it (1 of 2)",
+            "service: hello.exe ended; restarting it (2 of 2)",
+            "service: hello.exe ended 2 times; not restarted again",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // An interactive shell over ssh (ROADMAP SSH step 2): the host's
+        // `ssh -tt` asks for a pty, so sshd-session runs the shell (busybox
+        // sh, DefaultShellArguments) in a pseudo console: `conhost.exe
+        // --headless ... -- <shell>` (gala's, in System32). xtask types
+        // like a terminal and reads the VT output: a command's result,
+        // a line edited with DEL, Ctrl+C interrupting `sleep`, `exit`.
+        // `conpty=trace` logs both directions of the pseudo console.
+        name: "sshd_shell",
+        cmdline: "qemu_exit as=system logtee=C:/ProgramData/ssh/logs conpty=trace events=net,logon,console cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,",
+        exit_status: XTASK_STOPS,
+        expect: &["xtask: net client: ssh shell ok", "conpty "],
+    },
+    Scenario {
         // The same login with galatest's password (Win32-OpenSSH checks it
         // with LogonUserExExW, LOGON32_LOGON_NETWORK_CLEARTEXT); no key.
         name: "sshd_password",
@@ -4933,6 +5052,7 @@ fn events_flag() -> String {
 const MODULE_SETS: &[(&str, &str)] = &[
     ("onecpu_programs", "smpsched_test"),
     ("kernel_watchdog", "hello"),
+    ("service_restart", "hello"),
     ("server_profile", "user32_test"),
     ("server_kernel", "user32_test"),
     ("gala_cli", "gui_test"),
@@ -4960,6 +5080,14 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("dotnet_info", "dotnet"),
     ("fzsftp", "filezilla"),
     ("filezilla_server", "filezilla"),
+    ("sshd_server", "sshd_login"),
+    ("sshd_server", "sshd_server"),
+    ("sshd_shell", "sshd_login"),
+    ("sshd_shell", "sshd_server"),
+    ("sshd_shell", "sshd_shell"),
+    ("sshd_sftp", "sshd_login"),
+    ("sshd_sftp", "sshd_server"),
+    ("sshd_sftp", "sshd_sftp"),
     ("dotnet_hello", "dotnet"),
     ("flaui_test", "dotnet"),
     ("filezilla_flaui", "dotnet"),
@@ -5263,6 +5391,7 @@ fn run_parallel_on<J: Sync, T: Send>(
 
 /// Program scenarios gala-um does not run, and why (docs/GALA_UM.md).
 const NOT_IN_UM: &[(&str, &str)] = &[
+    ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("uipi_test", "a child process (one NT process per Linux process)"),
@@ -6085,7 +6214,7 @@ fn run_vm(
     let port = if net.is_some() { Some(free_port()?) } else { None };
     let (marker, kind) = net.unwrap_or(("", NetClient::Echo));
     if let Some(port) = port {
-        add_net(&mut cmd, port);
+        add_net_to(&mut cmd, port, guest_port(iso_scenario(iso)));
     }
     if let Some(disk) = disk {
         add_disk(&mut cmd, disk);
@@ -6124,6 +6253,9 @@ fn run_vm(
                 NetClient::Contains(parts) => contains_client(port, parts),
                 NetClient::Ssh => ssh_client(port, false),
                 NetClient::SshPassword => ssh_client(port, true),
+                NetClient::SshServer => ssh_server_client(port),
+                NetClient::SshShell => ssh_shell_client(port),
+                NetClient::Sftp => sftp_client(port),
                 NetClient::Psql => psql_client(port),
                 NetClient::Ftp => ftp_client(port),
                 NetClient::HandoverNet => handover_net_client(port),
@@ -6207,6 +6339,9 @@ fn run_vm(
                     NetClient::Echo => "echo",
                     NetClient::Tls => "tls",
                     NetClient::Ssh | NetClient::SshPassword => "ssh",
+                    NetClient::SshServer => "ssh server",
+                    NetClient::SshShell => "ssh shell",
+                    NetClient::Sftp => "sftp",
                     NetClient::Psql => "psql",
                     NetClient::Ftp => "ftp",
                     NetClient::HandoverNet => "handover",
@@ -6888,8 +7023,15 @@ fn read_ppm(ppm: &Path) -> Result<(usize, usize, Vec<u8>)> {
 /// A virtio-net card on QEMU's user network, host `port` forwarded to the
 /// guest's TCP and UDP port 7.
 fn add_net(cmd: &mut Command, port: u16) {
+    add_net_to(cmd, port, 7);
+}
+
+/// The same with the guest's port `guest` (sshd's 22).
+fn add_net_to(cmd: &mut Command, port: u16, guest: u16) {
     cmd.arg("-netdev")
-        .arg(format!("user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:7,hostfwd=udp:127.0.0.1:{port}-:7"))
+        .arg(format!(
+            "user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:{guest},hostfwd=udp:127.0.0.1:{port}-:{guest}"
+        ))
         // The legacy (0.9.5) interface: one I/O BAR (see docs/ARCHITECTURE.md).
         .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
 }
@@ -7117,6 +7259,11 @@ fn serve(release: bool, args: &[String]) -> Result {
         Some(p) => p.parse().map_err(|_| usage)?,
         None => 8080,
     };
+    // `serve sshd`: sshd as a server (sshd_server) on host port 2222.
+    let (name, port) = match name.as_str() {
+        "sshd" => ("sshd_server", if port == 8080 { 2222 } else { port }),
+        n => (n, port),
+    };
     let s = SCENARIOS
         .iter()
         .find(|s| s.name == name && net_marker(s.name).is_some())
@@ -7126,7 +7273,7 @@ fn serve(release: bool, args: &[String]) -> Result {
     let iso = make_iso(release, &format!("serve-{name}"), &cmdline, &extra_modules(s.name))?;
     let mut cmd = qemu(&iso, scenario_boot(s.name))?;
     cmd.args(["-serial", "stdio", "-display", "none"]);
-    add_net(&mut cmd, port);
+    add_net_to(&mut cmd, port, guest_port(s.name));
     eprintln!("xtask: serving {name} on 127.0.0.1:{port}");
     run_cmd(&mut cmd)
 }
@@ -7441,6 +7588,272 @@ fn ftp_client(port: u16) -> Result {
 
 /// galatest's password (user/access_test/access_test.regseed has its hash).
 const SSH_PASSWORD: &str = "Gala-Test-1";
+
+/// The host's ssh as galatest with the test key, running `command` on
+/// gala; its standard output, or why it failed (the end of its -v trace).
+fn ssh_key_run(port: u16, command: &[&str]) -> Result<String> {
+    let key = root().join("target/sshd_login_client_ed25519");
+    if !key.exists() {
+        fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&key, fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    let out = Command::new("timeout")
+        .arg("120")
+        .arg("ssh")
+        .arg("-v")
+        .arg("-i")
+        .arg(&key)
+        .args(["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"])
+        .args(["-p", &port.to_string()])
+        .args(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"])
+        .args(["-o", "ConnectTimeout=60"])
+        .arg("galatest@127.0.0.1")
+        .args(command)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("ssh: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if out.status.success() {
+        return Ok(stdout);
+    }
+    let trace = String::from_utf8_lossy(&out.stderr);
+    let mut tail: Vec<&str> = trace.lines().rev().take(25).collect();
+    tail.reverse();
+    Err(format!("ssh exit {:?}, stdout {stdout:?}:\n{}", out.status.code(), tail.join("\n")))
+}
+
+/// The host side of `sshd_shell`: the host's ssh with a pty forced
+/// (`-tt`; its standard input is a pipe, so the pty is 80 x 24 or the
+/// server's default) plays a terminal, expect-style: what it types goes to
+/// the shell as a terminal sends it (CR for Enter, DEL for Backspace, 0x03
+/// for Ctrl+C), what the shell prints comes back as VT text. Checks: a
+/// command runs (`echo gala-$((6*7))` prints gala-42, which the typed
+/// line does not contain), DEL edits the line before Enter, Ctrl+C ends a
+/// running `sleep 60` and the prompt comes back, `exit` ends the session.
+fn ssh_shell_client(port: u16) -> Result {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+    let key = root().join("target/sshd_login_client_ed25519");
+    fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    }
+    let trace = root().join("target/sshd_shell_client.trace");
+    let mut ssh = Command::new("timeout")
+        .arg("300")
+        .arg("ssh")
+        .arg("-tt")
+        .arg("-v")
+        .arg("-i")
+        .arg(&key)
+        .args(["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"])
+        .args(["-p", &port.to_string()])
+        .args(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"])
+        .args(["-o", "ConnectTimeout=60"])
+        .arg("galatest@127.0.0.1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(fs::File::create(&trace).map_err(|e| e.to_string())?)
+        .spawn()
+        .map_err(|e| format!("ssh: {e}"))?;
+    let mut input = ssh.stdin.take().ok_or("ssh: no stdin")?;
+    let mut output = ssh.stdout.take().ok_or("ssh: no stdout")?;
+    let seen = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let reader = {
+        let seen = seen.clone();
+        thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = output.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                seen.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&buf[..n]);
+            }
+        })
+    };
+    let len = || seen.lock().unwrap_or_else(|e| e.into_inner()).len();
+    // Waits for `want` after offset `from`; where it ends.
+    let expect = |want: &str, from: usize, secs: u64| -> Result<usize> {
+        let until = Instant::now() + Duration::from_secs(secs);
+        loop {
+            {
+                let all = seen.lock().unwrap_or_else(|e| e.into_inner());
+                let hay = &all[from.min(all.len())..];
+                if let Some(i) = hay.windows(want.len()).position(|w| w == want.as_bytes()) {
+                    return Ok(from + i + want.len());
+                }
+            }
+            if Instant::now() > until {
+                return Err(format!("no {want:?} within {secs} s"));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let mut steps = || -> Result {
+        let mut send = |bytes: &[u8]| input.write_all(bytes).map_err(|e| format!("send: {e}"));
+        // The shell is up when it has printed something (its prompt).
+        let until = Instant::now() + Duration::from_secs(90);
+        while len() == 0 {
+            if Instant::now() > until {
+                return Err("no prompt within 90 s".into());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        thread::sleep(Duration::from_millis(500));
+        let at = len();
+        send(b"echo gala-$((6*7))\r")?;
+        let at = expect("gala-42\r\n", at, 30).map_err(|e| format!("a command: {e}"))?;
+        // DEL takes the X back before Enter.
+        send(b"echo gala-$((40+3))X\x7f\r")?;
+        let at = expect("gala-43\r\n", at, 30).map_err(|e| format!("line editing: {e}"))?;
+        // Ctrl+C ends a running command; the shell goes on.
+        send(b"sleep 60\r")?;
+        thread::sleep(Duration::from_secs(3));
+        let started = Instant::now();
+        send(b"\x03")?;
+        thread::sleep(Duration::from_secs(1));
+        send(b"echo gala-$((50-6))\r")?;
+        let at = expect("gala-44\r\n", at, 30).map_err(|e| format!("Ctrl+C: {e}"))?;
+        if started.elapsed() > Duration::from_secs(25) {
+            return Err("Ctrl+C: the prompt came back only after sleep ended".into());
+        }
+        let _ = at;
+        send(b"exit\r")?;
+        let until = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = ssh.try_wait().map_err(|e| e.to_string())? {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("exit: ssh ended with {status}"))
+                };
+            }
+            if Instant::now() > until {
+                return Err("exit: the session did not end within 30 s".into());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let result = steps();
+    let _ = ssh.kill();
+    let _ = reader.join();
+    result.map_err(|e| {
+        // What the terminal showed (escaped) and the end of ssh's trace.
+        let all = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let shown: String = all[all.len().saturating_sub(1500)..]
+            .iter()
+            .map(|&b| match b {
+                b'\n' => "\\n\n".to_string(),
+                0x20..=0x7e => (b as char).to_string(),
+                _ => format!("\\x{b:02x}"),
+            })
+            .collect();
+        let trace = fs::read_to_string(&trace).unwrap_or_default();
+        let mut tail: Vec<&str> = trace.lines().rev().take(15).collect();
+        tail.reverse();
+        format!("{e}\nterminal:\n{shown}\nssh -v:\n{}", tail.join("\n"))
+    })
+}
+
+/// The host side of `sshd_sftp`: the host's sftp in batch mode with the
+/// test key: `put` a 200 KiB file, `ls`, `get` it back, `rm` it; the
+/// download must equal the upload and the listing name the file.
+fn sftp_client(port: u16) -> Result {
+    let key = root().join("target/sshd_login_client_ed25519");
+    fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    }
+    let dir = root().join("target/sshd_sftp");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let data: Vec<u8> = (0..200 * 1024u32).map(|i| (i * 31 + i / 7) as u8).collect();
+    fs::write(dir.join("up.bin"), &data).map_err(|e| e.to_string())?;
+    fs::write(
+        dir.join("batch"),
+        "put up.bin gala-up.bin\nls -l\nget gala-up.bin down.bin\nrm gala-up.bin\nls\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let out = Command::new("timeout")
+        .arg("180")
+        .arg("sftp")
+        .arg("-v")
+        .arg("-i")
+        .arg(&key)
+        .args(["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"])
+        .args(["-P", &port.to_string()])
+        .args(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"])
+        .args(["-o", "ConnectTimeout=60"])
+        .arg("-b")
+        .arg("batch")
+        .arg("galatest@127.0.0.1")
+        .current_dir(&dir)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("sftp: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let fail = |what: String| {
+        let trace = String::from_utf8_lossy(&out.stderr);
+        let mut tail: Vec<&str> = trace.lines().rev().take(20).collect();
+        tail.reverse();
+        Err(format!("{what}; stdout {stdout:?}:\n{}", tail.join("\n")))
+    };
+    if !out.status.success() {
+        // What the users' shell sees (the subsystem runs through it).
+        let seen = ssh_key_run(port, &["echo PATH=$PATH; command -v sftp-server.exe"])
+            .unwrap_or_else(|e| e);
+        return fail(format!("sftp exit {:?} (the shell: {seen:?})", out.status.code()));
+    }
+    if !stdout.contains("gala-up.bin") {
+        return fail("the listing has no gala-up.bin".into());
+    }
+    match fs::read(dir.join("down.bin")) {
+        Ok(got) if got == data => Ok(()),
+        Ok(got) => fail(format!("downloaded {} bytes, not the {} uploaded", got.len(), data.len())),
+        Err(e) => fail(format!("no download: {e}")),
+    }
+}
+
+/// The host side of `sshd_server`: three logins one after another, each
+/// running a command, then two at once (both connected before either
+/// ends: each sleeps a second), all through the one sshd.
+fn ssh_server_client(port: u16) -> Result {
+    for i in 1..=3 {
+        let word = format!("gala-ssh-{i}");
+        let out = ssh_key_run(port, &["echo", &word]).map_err(|e| format!("login {i}: {e}"))?;
+        if !out.contains(&word) {
+            return Err(format!("login {i}: stdout {out:?}"));
+        }
+    }
+    let together: Vec<_> = (1..=2)
+        .map(|i| {
+            thread::spawn(move || {
+                let word = format!("gala-ssh-together-{i}");
+                let line = format!("sleep 1; echo {word}");
+                let out =
+                    ssh_key_run(port, &[&line]).map_err(|e| format!("login together {i}: {e}"))?;
+                if out.contains(&word) {
+                    Ok(())
+                } else {
+                    Err(format!("login together {i}: stdout {out:?}"))
+                }
+            })
+        })
+        .collect();
+    for t in together {
+        t.join().unwrap_or_else(|_| Err("ssh thread panicked".into()))?;
+    }
+    Ok(())
+}
 
 fn ssh_client(port: u16, password: bool) -> Result {
     let mut ssh = Command::new("timeout");

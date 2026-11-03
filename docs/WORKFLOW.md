@@ -931,6 +931,32 @@ For a picture, Playwright's Chromium is preinstalled in the cloud
 container: `chromium.launch({args: ['--no-proxy-server']})`, because
 the agent proxy would otherwise intercept 127.0.0.1.
 
+## SSH into a running gala
+
+`cargo xtask serve sshd [port]` boots the `sshd_server` scenario (sshd
+as SYSTEM on its port 22, host keys made at boot, logs teed to the
+serial log) and forwards host port 2222 (or the one given) to the
+guest's 22. Then, from another terminal:
+
+```sh
+cp user/sshd/client_ed25519 /tmp/gala_key && chmod 600 /tmp/gala_key
+ssh -i /tmp/gala_key -p 2222 -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null galatest@127.0.0.1
+```
+
+(or galatest's password `Gala-Test-1`). The shell is busybox sh
+(`user/sshd/sshd.regseed`: DefaultShell, DefaultShellArguments) in a
+pseudo console; `sftp -P 2222 ...` works the same way. The serial log
+shows `logtee: sshd.log:` / `sshd-session.log:` lines for each
+connection; add `conpty=trace` to the scenario's command line to see
+every byte between the terminal and the console. Pitfalls found on the
+way: Win32-OpenSSH does not create %ProgramData%\ssh\logs (an installer
+does: the scenarios ship a placeholder file there), it runs subsystems
+and commands through DefaultShell with the command quoted (so
+sftp-server.exe must be on the shell's PATH: a copy in System32), and
+an ssh client without a tty asks for a 0 x 0 pty (conhost then uses
+80 x 25).
+
 ## gala-um
 
 `cargo xtask test` runs `um-test` right after the unit tests: every
