@@ -84,7 +84,6 @@ const GENERIC_WRITE: u32 = 0x4000_0000;
 const CREATE_NEW: u32 = 1;
 const OPEN_EXISTING: u32 = 3;
 const OPEN_ALWAYS: u32 = 4;
-const FILE_SHARE_READ: u32 = 1;
 const FILE_SHARE_ALL: u32 = 7;
 const ERROR_NO_MORE_FILES: u32 = 18;
 const STARTF_USESTDHANDLES: u32 = 0x100;
@@ -125,7 +124,7 @@ fn read_whole(path: &str) -> Result<Vec<u8>, HostError> {
         let h = CreateFileW(
             p.as_ptr(),
             GENERIC_READ,
-            FILE_SHARE_READ,
+            FILE_SHARE_ALL,
             core::ptr::null_mut(),
             OPEN_EXISTING,
             0,
@@ -473,7 +472,10 @@ impl Host for Win32 {
             let h = FindFirstFileW(p.as_ptr(), data.as_mut_ptr());
             if h == INVALID_HANDLE {
                 let e = last_error();
-                return if e.code == 2 || e.code == ERROR_NO_MORE_FILES { Ok(out) } else { Err(e) };
+                // No entries (an empty directory), or no directory.
+                let empty = (e.code == 2 || e.code == ERROR_NO_MORE_FILES)
+                    && self.exists(path) == Some(true);
+                return if empty { Ok(out) } else { Err(e) };
             }
             loop {
                 let bytes = core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), 592);
