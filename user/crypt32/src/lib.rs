@@ -1,5 +1,6 @@
 //! gala's crypt32.dll: certificate contexts (`cert`: X.509 decoding,
-//! properties, names, public keys), DPAPI (`dpapi`), memory certificate
+//! properties, names, public keys), chains without a chain engine yet
+//! (`chain`: untrusted, recorded), DPAPI (`dpapi`), memory certificate
 //! stores (`store`; the system stores open empty: gala installs no
 //! certificates yet), CryptQueryObject and CryptDecodeObjectEx for
 //! alternative names (`query`), and smaller helpers (`misc`).
@@ -10,6 +11,7 @@
 
 mod base64;
 mod cert;
+mod chain;
 mod dpapi;
 mod misc;
 mod query;

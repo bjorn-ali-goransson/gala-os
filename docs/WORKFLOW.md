@@ -154,6 +154,39 @@ ABI/ELF specs, observed behaviour, gVisor; never the Linux kernel source):
   /proc/self) line instead when that is unavailable, so a machine
   without them shows a mismatch whose diff names the reason; under gala
   they are expected to pass once ptys and /proc exist.
+## TLS tests (Schannel)
+
+`schannel_test` is a TLS client of Nginx (OpenSSL) inside the guest: the
+scenario starts `nginx.exe` with `start=` and `user/schannel_test/nginx.conf`
+(ports 8443-8445 on 127.0.0.1, so no xtask network client is involved),
+and the test retries its connect while Nginx starts. On Windows,
+run-all.ps1 starts the same Nginx from a prefix in TEMP and, as an
+administrator, imports the test CA into LocalMachine\Root for the run
+(skipped otherwise). The engine's rules are host-tested first:
+`cargo test -p schannel_tls` runs both sides in memory (seconds, no
+QEMU); boot the scenario once those pass.
+- Test certificates: `user/schannel_test/certs/make.sh` (host openssl
+  3.0+; run it in place and commit the results; test data, not secret):
+  a CA, an issued `localhost` certificate (ECDSA), an expired one (`openssl
+  ca` sets a past validity, `x509 -req` cannot), a self-signed one, an RSA
+  pair for the test's own server (`server-rsa.cer`/`.p8`, also used by the
+  host tests). They are valid from the moment they are made: host tests
+  use a clock two days later. Regenerating changes every file and
+  nothing in the tests' expectations.
+- gala's machine root store is `C:\Windows\System32\gala\roots`: a
+  scenario that needs a trusted root ships the CA there (an EXTRA_MODULES
+  line). Without one, automatic validation gives SEC_E_UNTRUSTED_ROOT and
+  the ledger says `schannel.dll!machine root store (no gala/roots ...)`.
+- A failing handshake leaves `schannel.dll!ISC: <rustls error>` (ASC for
+  a server) in the ledger with the SSPI status: read that first.
+- Pitfalls: SEC_E_INCOMPLETE_MESSAGE means the caller passes the same
+  bytes again with more (schannel_tls keeps a count, `retained`); a
+  rustls slice that still holds a partial handshake message must be the
+  same buffer on the next call (the engine hands it the context's own
+  copy). After a rustls error, do not call it with an empty buffer: it
+  may still point into the last one (it panics). schannel.dll is 1.4 MB
+  (rustls and RustCrypto): only processes that use Schannel load it,
+  through secur32.
 
 ## Adding a function to gala's ntdll or kernel32
 

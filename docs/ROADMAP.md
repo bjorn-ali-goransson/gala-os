@@ -463,6 +463,11 @@ explicitly in its commit.
   Windows 11 look (Selawik text, the fortress start button, maximize);
   W4 step 2: proportional Selawik text in gdi32
 
+- Schannel (TLS 1.2 and 1.3, client and server) behind secur32: SSPI's
+  token loop, EncryptMessage/DecryptMessage, certificate validation,
+  attributes (`schannel_test` against Nginx/OpenSSL, `schannel_tls` host
+  tests; item TLS)
+
 ## Next
 Direction from the project owner (2026-10-30): multiprocessor support, then
 a real Go program, then Nginx; fast testing (a QEMU test image, gala-um)
@@ -2053,7 +2058,8 @@ PK. **Installing software: `gala install` over winget manifests** (the
    PATH, winget's ARP entry, transactions with rollback (upgrade
    included), the install log and ledger records; kernel32's
    CreateProcess now searches PATH. Next: the HTTPS fetcher (designed in
-   ARCHITECTURE: Winsock + a TLS client on gala's CNG, the GitHub raw and
+   ARCHITECTURE: Winsock + a TLS client on gala's CNG; Schannel exists now,
+   item TLS: winhttp over it is the plan, the GitHub raw and
    contents URLs, winget's source index for search), real symbolic links
    for commands, the logon environment from `HKCU\Environment`, then
    stage 3.
@@ -2094,6 +2100,48 @@ PK. **Installing software: `gala install` over winget manifests** (the
    `upgrade` over to it (ARCHITECTURE says how), then delete
    `manifest.rs`/`yaml.rs`; a boot scenario with a dependency and an
    upgrade that keeps scope.
+
+TLS. **Schannel: SSPI's TLS package** (2026-11-03). **Client and server,
+   TLS 1.2 and 1.3, done** (test `schannel_test`, scenario of the same
+   name, against Nginx with OpenSSL on the loopback address started with
+   `start=`, and the test's own server in-process; host tests
+   `cargo test -p schannel_tls`; ARCHITECTURE "Schannel (TLS)"):
+   AcquireCredentialsHandleW/A with SCHANNEL_CRED and SCH_CREDENTIALS
+   (protocols forced either way, manual or automatic validation, server
+   certificates with a CNG key), InitializeSecurityContextW/A and
+   AcceptSecurityContext with the documented token rules (continue,
+   SEC_E_INCOMPLETE_MESSAGE with SECBUFFER_MISSING when the bytes come
+   one at a time, SECBUFFER_EXTRA, ALLOCATE_MEMORY, returned attributes,
+   SNI and the name check, TLS 1.3 tickets as SEC_I_RENEGOTIATE handed
+   back, shutdown with close_notify), EncryptMessage/DecryptMessage in
+   place (SEC_I_CONTEXT_EXPIRED on close_notify), QueryContextAttributes
+   (STREAM_SIZES, CONNECTION_INFO, CIPHER_INFO, REMOTE_CERT_CONTEXT,
+   APPLICATION_PROTOCOL for ALPN, PACKAGE_INFO), automatic validation's
+   SEC_E_WRONG_PRINCIPAL, SEC_E_UNTRUSTED_ROOT and SEC_E_CERT_EXPIRED
+   against gala's machine root store (`System32\gala\roots`). Engine:
+   rustls (unbuffered, `no_std`) with the pure-Rust RustCrypto provider,
+   in the new schannel.dll; ncrypt imports RSA keys and signs; crypt32's
+   chain functions fail closed instead of ending the process. Not yet run
+   on real Windows: run-all.ps1 runs it when Nginx can be started and,
+   as an administrator, imports the test CA into the machine's root
+   store first. **Next**, in this order:
+   1. winhttp over Schannel: WinHttpOpen/Connect/OpenRequest/SendRequest/
+      ReceiveResponse/ReadData for http and https (the JDK and .NET's
+      HttpClient on Windows use it), with a test against the same Nginx.
+   2. wininet's HTTP functions on the same code (InternetOpen/Connect,
+      HttpOpenRequest/SendRequest, InternetReadFile).
+   3. curl for Windows (its Schannel backend) as an unmodified program:
+      PREBUILT, a scenario fetching from the in-guest Nginx; then Git's
+      https remote (MinGit uses curl with Schannel).
+   4. `gala install`'s HTTPS downloads (PK stage 1's fetcher) on winhttp
+      and Schannel instead of a TLS stack in the tool, with gala's root
+      store holding the public roots (a pinned, documented CA bundle).
+   5. The browser (BR): Chromium brings BoringSSL for its own TLS but
+      uses the system's root store and CertVerifyCertificateChainPolicy:
+      crypt32's stores and chain engine (the ROOT store read from the
+      same directory) come first; Schannel then validates through them.
+   Also open: session resumption, client certificates, ECDSA server
+   keys, revocation, keys persisted across processes.
 
 LX. **A Linux personality, later; its seams now** (the owner,
    2026-11-03; design: ARCHITECTURE "Plan: a second personality (Linux)";
