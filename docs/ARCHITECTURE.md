@@ -3563,6 +3563,100 @@ Windows' real RDP (MS-RDPBCGR is openly documented; IronRDP's server
 crate is a candidate) if mstsc compatibility is wanted. Interim, with no
 gala work: QEMU's own VNC (`-vnc :1`) shows gala's screen remotely.
 
+## Plan: a second personality (Linux) (the owner, 2026-11-03)
+
+gala will one day run unmodified Linux x86_64 programs natively, as a
+**second personality** beside the NT one on gala's own core (the model of
+WSL1, FreeBSD's Linux layer, illumos LX zones, gVisor), not by running a
+Linux kernel in a VM (WSL2's model). Until the owner schedules the Linux
+layer, only its **seams** are built, each when its area is touched anyway:
+cheap now, costly to retrofit. Sources: CLEAN_ROOM.md "Linux" (man-pages,
+POSIX, ABI/ELF specs, observed behaviour, gVisor; not the Linux kernel
+source).
+
+```
+              NT personality            Linux personality (later)
+              PE loader, ntdll ABI,     ELF loader, Linux syscall ABI,
+              handles, PEB/TEB,         fd table, signals, /proc, /dev,
+              NT object views           futex, epoll, ptys
+                     \                       /
+                      core: processes (address space, threads,
+                      credentials, session), waits, files, pipes,
+                      sockets, terminals, scheduler, memory, devices
+```
+
+- **Personality per process**, fixed at creation from the image (PE or
+  ELF); the system-call entry dispatches on the current process's
+  personality (Linux numbers 0..~460 overlap NT's and gala's 0x7f..);
+  NT is the default and nothing changes for existing programs.
+- **Core process** owns the address space, threads, credentials (the
+  token), session, exit status and parent; the NT layer attaches its
+  handle table, PEB/TEB and NT-only state; the Linux layer would attach
+  its fd table, signal state, pid/pgid/sid, cwd/umask and rlimits.
+- **Shared core objects**: files, pipes, sockets, terminals and wait
+  objects are core objects; an NT handle and a Linux fd are two views of
+  one object, which later allows interop (a Windows and a Linux program on
+  one pipe; launching each from the other).
+- **Identity**: Linux uid/gid map to SIDs on the existing tokens; one
+  access-check implementation.
+- **One file system** for both personalities: case sensitivity per
+  directory, POSIX metadata per file, symlinks and hard links, POSIX
+  unlink/rename of open files.
+- **Signals** on the existing return-to-user hook; **futex** on core
+  waits; **epoll** on the readiness AFD poll already uses; **fork** on the
+  existing copy-on-write; **ptys** on the core terminal.
+- The handover (R9) carries core objects, so a later Linux personality
+  needs only its own sections; the remote/session plan (RS) is shared.
+- Why WSL1 lost to WSL2 matters less here: mostly file-system speed (NTFS
+  and Windows' filter-driver stack) and compatibility gaps; gala owns its
+  file system and has no filter stack, and compatibility is handled the
+  gala way, test first against real Linux.
+
+### The seams (ROADMAP LX steps 1-6)
+
+1. **Terminal core**: the pty as a core object (a master/slave pair with
+   a line discipline: canonical mode, echo, signal keys, window size) that
+   ConPTY/conhost uses for Windows and `/dev/ptmx` + `/dev/pts/N` can use
+   later. ConPTY (item SSH step 2) was built before this plan in conhost
+   and the console session; moving its line handling into a core terminal
+   object is now a refactor, ConPTY's tests deciding that Windows'
+   behaviour is unchanged.
+2. **Per-process system-call dispatch**: a personality field on the
+   process and a dispatcher table keyed by it, in the kernel and gala-um;
+   a host test that a process with a second (test-only) personality
+   reaches that dispatcher; the dispatcher named in "unknown system call"
+   logs.
+3. **Core process vs NT process**, with RS B2 (B1 has moved session ids
+   onto processes from tokens; B2 removes the global statics): split
+   `Process` in the same pass.
+4. **File-system metadata**, while persistence is young: a per-directory
+   case-sensitivity flag exposed to NT as Windows' own
+   FileCaseSensitiveInformation (tested against Windows 10 1803+); a
+   persisted slot for POSIX metadata per file (uid, gid, mode, device
+   numbers; NT ignores it); a plan for symlinks, hard links and POSIX
+   delete/rename of open files, with Windows'
+   FILE_DISPOSITION_POSIX_SEMANTICS and FILE_RENAME_POSIX_SEMANTICS as the
+   NT-side surface (testable on real Windows).
+5. **Shared objects**: when pipes, sockets or files are next reworked,
+   their state goes in core objects that do not assume an NT handle.
+6. **`net` free of `nt`**: `kernel/src/net/tcp.rs` reaches scheduling and
+   time through `crate::nt::platform`; give it core scheduling/time.
+Observability with each seam: the personality in process events, crash
+reports and the state dump.
+
+### Later: the Linux layer (only when scheduled)
+
+Test first like everything else: static (musl) Linux test programs whose
+expected results come from running them on real Linux, scenarios in
+xtask. Milestones: (1) an ELF static loader and a few system calls
+(write, exit_group, brk, mmap, arch_prctl): "hello" from static musl;
+(2) static busybox: files, directories, pipes, wait4, execve, clone for
+threads, futex; (3) fork, signals, ptys (`ssh` into a Linux shell on
+gala), basic /proc and /dev; (4) dynamic linking (ld.so, glibc), epoll,
+sockets; (5) real workloads (a distribution's userland, build tools).
+Most programs need about 150-200 of Linux's ~450 system calls; priorities
+come from `strace` of target programs on real Linux.
+
 ## UI Automation
 
 The aim is screen tests that drive programs as testers do on Windows:

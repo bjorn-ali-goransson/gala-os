@@ -152,6 +152,9 @@ explicitly in its commit.
   markers, vCPU and host facts) explains a silent end; xtask flags and
   re-boots a VM short of CPUs (ARCHITECTURE "Processors", OBSERVABILITY
   "Early boot"; scenarios `smp_missed`, `smp_late`, `onecpu_*`).
+- **Linux personality seams (the owner, 2026-11-03)**: item LX: a Linux
+  personality is a planned later goal; its seams are built as their
+  areas are touched (RS B2 and SSH's ConPTY first).
 - **Installing software (the owner, 2026-11-03)**: item PK below: `gala
   install` over winget manifests; zip/portable, then Inno Setup and NSIS,
   then MSIX sideloading, then MSI.
@@ -1801,6 +1804,21 @@ PK. **Installing software: `gala install` over winget manifests** (the
    cheap); every installed package recorded with its manifest for `gala
    list`; a scenario per installer type kept as a regression test; the
    ledger's per-installer gaps in the report.
+
+LX. **A Linux personality, later; its seams now** (the owner,
+   2026-11-03; design: ARCHITECTURE "Plan: a second personality (Linux)";
+   sources: CLEAN_ROOM.md "Linux"). A planned later goal; until it is
+   scheduled, only the seams are built, each with the work that touches
+   its area: (1) the pty as a core terminal object under ConPTY (a
+   refactor now: ConPTY, item SSH, was built first); (2) per-process
+   system-call dispatch; (3) the core/NT split of `Process` with RS B2;
+   (4) file-system metadata: per-directory case sensitivity
+   (FileCaseSensitiveInformation), POSIX metadata per file, a plan for
+   symlinks/hard links/POSIX delete and rename; (5) shared core objects
+   when pipes, sockets or files are reworked; (6) `net` free of `nt`.
+   The Linux layer itself (ELF loader, system calls, fork, signals, ptys,
+   ld.so, epoll; static musl and busybox first) only when the owner
+   schedules it.
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing

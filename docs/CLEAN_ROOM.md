@@ -16,6 +16,15 @@ These rules are mandatory for all contributions, human or AI.
 - Black-box behavior observed on real Windows (running test programs and
   recording their results, error codes and side effects).
 
+## Linux (for the planned Linux personality; the owner, 2026-11-03)
+Allowed: the Linux man-pages project, POSIX, the System V AMD64 ABI and
+the ELF specifications, black-box behaviour observed on real Linux
+(test programs run there and their results recorded, `strace` traces of
+target programs), and gVisor (Apache-2.0) as reference and borrowable
+code, recorded in `THIRD_PARTY.md` like any borrowed code. **Not** the
+Linux kernel source (GPL-2.0): copying from it would constrain how gala
+can be licensed, so it is not used as a source.
+
 ## How work flows
 1. **Spec**: describe the behavior (a doc, or better a test). Wine's
    conformance tests, which are validated on real Windows, are the primary

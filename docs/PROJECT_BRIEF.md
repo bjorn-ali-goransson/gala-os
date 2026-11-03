@@ -87,10 +87,14 @@ effects. Wine's conformance tests are validated on real Windows, so treat
 them as the primary spec.
 
 ## Out of scope
-- GPU drivers and hardware acceleration. Software rendering only, later.
+- Real GPU vendor drivers (Intel/AMD/NVIDIA, WDDM). Graphics go software
+  first, then paravirtual (virtio-gpu, Venus) as ROADMAP GPU plans (the
+  owner asked for GPU work, 2026-11-03).
 - Anti-cheat and EDR compatibility.
-- Legacy features: 16-bit/NTVDM, POSIX/OS2 subsystems, old compatibility
-  shims.
+- Legacy features: 16-bit/NTVDM, the old POSIX/OS2 subsystems, old
+  compatibility shims. (Not the same thing as a Linux personality: a
+  Linux personality on the same core is a planned later goal; until it is
+  scheduled, only its seams are built. The owner, 2026-11-03; ROADMAP LX.)
 - Windows driver (WDM/KMDF) compatibility for now. Use our own driver model
   with virtio first. A KMDF shim may come later.
 
