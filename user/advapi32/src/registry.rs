@@ -1618,3 +1618,27 @@ pub extern "system" fn RegQueryValueW(
         Err(e) => e,
     }
 }
+
+/// RegNotifyChangeKeyValue(hKey, bWatchSubtree, dwNotifyFilter, hEvent,
+/// fAsynchronous): gala's registry has no change notification yet. An
+/// asynchronous request is accepted and never signaled (reported to the
+/// ledger, so a program waiting on it is explained); a synchronous one
+/// would wait for ever and is refused (ERROR_NOT_SUPPORTED).
+#[unsafe(no_mangle)]
+pub extern "system" fn RegNotifyChangeKeyValue(
+    key: usize,
+    _subtree: i32,
+    filter: u32,
+    event: usize,
+    asynchronous: i32,
+) -> i32 {
+    if key == 0 || filter & !0x1000_000f != 0 || (asynchronous != 0 && event == 0) {
+        return 87; // ERROR_INVALID_PARAMETER
+    }
+    if asynchronous == 0 {
+        missing(b"advapi32.dll!RegNotifyChangeKeyValue(synchronous)");
+        return 50; // ERROR_NOT_SUPPORTED
+    }
+    missing(b"advapi32.dll!RegNotifyChangeKeyValue(never signaled)");
+    0
+}

@@ -650,6 +650,48 @@ for those. Exports by ordinal (ws2_32's) come from a build.rs printing
 `/EXPORT:name,@n`; lld warns that rustc's .def names them too and keeps
 the ordinal one (the warning cannot be silenced).
 
+## Chromium (BR)
+
+`cargo xtask boot-test chromium_version` (PENDING; PREBUILT
+`chromium`: 370 MB download, ~430 MB unpacked, a 430 MB ISO per run:
+delete `target/debug/test-chromium_*.iso` after a failed run, the disk
+is shared). A run takes ~5 minutes under TCG (2 minutes of it Limine
+loading the ISO, ~30 s mapping chrome.dll). Read, in order:
+
+- Chromium's own log lines in the serial log: `[pid:tid:date:LEVEL:file:line]`
+  (`--enable-logging=stderr`; the scenario's `dump=` adds
+  `C:\chromium\debug.log` and the profile's `chrome_debug.log` when
+  they exist). `delay_load_failure_support.cc ... NOTREACHED` means a
+  delay-loaded function or DLL is missing: the ledger's `missing export`
+  / `missing dll` line names it (chrome.dll delay-loads most of what it
+  uses; `gala_stubs` stubs are invisible to GetProcAddress, so a stubbed
+  delay import fails the same way). Exit status 0xffff7001/7002 follows a
+  FATAL; 21 is CHROME_RESULT_CODE_PROFILE_IN_USE (the process singleton:
+  its mutex and lock file).
+- `XTASK_EVENTS=syscall,image,fault,file,process,thread`: the `file`
+  category (`"ev":"open"`, path, handle, status) shows each open, which
+  `syscall` events cannot (their arguments are pointers).
+- A crash report's `module+offset`: symbolize it with the snapshot's own
+  PDBs (symbols are not disassembly: CLEAN_ROOM allows reading
+  Chromium's source, and the PDB names the source line). The revision is
+  pinned partly because its `chrome-win32-syms.zip` exists (922 MB): do
+  not download it whole; read the one member you need with HTTP range
+  requests (Python's `zipfile` over a file object whose `readinto` sends
+  `Range:` requests), e.g. `chrome-win32-syms/chrome_elf.dll.pdb` (30 MB)
+  or `chrome.exe.pdb` (40 MB); `chrome.dll.pdb` is 2.7 GB and does not fit
+  the shared disk. Put the PDB next to (a link to) the module and run
+  `llvm-symbolizer --obj=chrome_elf.dll 0x<ImageBase + offset>`
+  (ImageBase 0x180000000 for the DLLs, 0x140000000 for chrome.exe).
+- Chromium's source (github.com/chromium/chromium, crashpad on
+  chromium.googlesource.com) says what a symbolized function expects:
+  read it as documentation, as for any program.
+
+Pitfalls found on the way: a `CHECK` in Crashpad's handler kills only the
+handler (the browser logs "crash server did not respond" and goes on
+until it needs it); the handler re-runs chrome.exe as a child with an
+inherited handle list, so child-process and handle-inheritance bugs show
+there first.
+
 ## FlaUI (UI Automation tests in .NET)
 
 `user/flaui_test/` holds a C# test (`FlaUITest.cs`) and the program it
