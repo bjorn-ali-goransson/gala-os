@@ -136,12 +136,15 @@ pub extern "system" fn GetProcessWindowStation() -> usize {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetUserObjectInformationW(
-    _object: usize,
-    _index: i32,
-    _info: *mut u8,
-    _length: u32,
-    _needed: *mut u32,
+    object: usize,
+    index: i32,
+    info: *mut u8,
+    length: u32,
+    needed: *mut u32,
 ) -> i32 {
+    if object == session::DESKTOP {
+        return session::desktop_information(index, info, length, needed);
+    }
     // SAFETY: plain call.
     unsafe { SetLastError(6) }; // ERROR_INVALID_HANDLE
     0

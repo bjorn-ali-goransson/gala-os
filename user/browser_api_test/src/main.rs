@@ -45,7 +45,9 @@
 //! 28. a workgroup NT workstation: IsOS(OS_NT) but not OS_DOMAINMEMBER,
 //!    NetGetJoinInformation NetSetupWorkgroupName, DsRole standalone;
 //! 29. SetProcessDpiAwarenessContext(per monitor v2) once, then
-//!    ERROR_ACCESS_DENIED; shcore's GetProcessDpiAwareness says per monitor.
+//!    ERROR_ACCESS_DENIED; shcore's GetProcessDpiAwareness says per monitor;
+//! 30. the clipboard: CF_UNICODETEXT set while open is available and read
+//!    back after closing; the sequence number changes; a caret blink time.
 
 #![no_std]
 #![no_main]
@@ -127,6 +129,9 @@ unsafe extern "system" {
     fn TlsGetValue2(i: u32) -> *mut c_void;
     fn CheckRemoteDebuggerPresent(p: Handle, present: *mut i32) -> i32;
     fn LocalFree(p: *mut c_void) -> *mut c_void;
+    fn GlobalAlloc(flags: u32, bytes: usize) -> Handle;
+    fn GlobalLock(h: Handle) -> *mut c_void;
+    fn GlobalUnlock(h: Handle) -> i32;
     fn CreateMutexW(sa: *const c_void, owner: i32, name: *const u16) -> Handle;
     #[allow(clippy::too_many_arguments)]
     fn CreateNamedPipeW(
@@ -653,7 +658,42 @@ fn tests() {
         let mut awareness = 9u32;
         check(GetProcessDpiAwareness(core::ptr::null_mut(), &mut awareness) == 0, 29);
         check(awareness == 2, 29); // PROCESS_PER_MONITOR_DPI_AWARE
+
+        // 30. The clipboard: text set while open is there after closing,
+        // and the sequence number moved.
+        let before = GetClipboardSequenceNumber();
+        check(OpenClipboard(0) != 0, 30);
+        check(EmptyClipboard() != 0, 30);
+        let text = GlobalAlloc(2, 16); // GMEM_MOVEABLE
+        check(!text.is_null(), 30);
+        let p = GlobalLock(text).cast::<u16>();
+        for (i, &c) in b"gala\0".iter().enumerate() {
+            *p.add(i) = u16::from(c);
+        }
+        GlobalUnlock(text);
+        check(SetClipboardData(13, text) == text, 30); // CF_UNICODETEXT
+        check(CloseClipboard() != 0, 30);
+        check(GetClipboardSequenceNumber() != before, 30);
+        check(IsClipboardFormatAvailable(13) != 0, 30);
+        check(OpenClipboard(0) != 0, 30);
+        let got = GetClipboardData(13);
+        check(!got.is_null() && *GlobalLock(got).cast::<u16>() == u16::from(b'g'), 30);
+        GlobalUnlock(got);
+        check(CloseClipboard() != 0, 30);
+        check(GetCaretBlinkTime() != 0, 30);
     }
+}
+
+#[link(name = "user32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn OpenClipboard(owner: usize) -> i32;
+    fn CloseClipboard() -> i32;
+    fn EmptyClipboard() -> i32;
+    fn SetClipboardData(format: u32, memory: Handle) -> Handle;
+    fn GetClipboardData(format: u32) -> Handle;
+    fn IsClipboardFormatAvailable(format: u32) -> i32;
+    fn GetClipboardSequenceNumber() -> u32;
+    fn GetCaretBlinkTime() -> u32;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]

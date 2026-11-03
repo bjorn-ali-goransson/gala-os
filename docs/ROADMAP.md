@@ -1723,6 +1723,38 @@ BR. **A web browser: stock Microsoft Edge** (the owner, 2026-11-03).
       reservations, the commit charge), DirectWrite or Chromium's font
       fallback, CNG/BCrypt, Winsock, the JIT (single-threaded TCG:
       SINGLE_THREAD_TCG).
+      **Progress (2026-11-03; ARCHITECTURE "A web browser: Chromium,
+      then Edge", WORKFLOW "Chromium")**: PREBUILT `chromium` (snapshot
+      Win_x64 1733063, 159.0.8140.0, with published symbols), scenarios
+      `chromium_version` (`--dump-dom about:blank`) and `chromium_dump`
+      (a local page changed by its script) PENDING, in SINGLE_THREAD_TCG,
+      3 GiB, 900 s; `browser_api_test` (30 checks) and `dwrite_test`
+      cover what was added. Not passing yet. How far it gets: chrome.exe
+      starts, chrome_elf.dll's early security and Crashpad come up (the
+      handler runs as a child with an inherited handle list, and its
+      fallback handler too), chrome.dll (340 MB) loads (relocated:
+      ~30 s), the profile's process singleton is taken, DirectWrite and
+      Skia's font manager come up on Selawik, and the browser's main
+      start-up runs until a delay-loaded user32/ole32/... function gala
+      lacks ends it (`delay_load_failure_support.cc` FATAL; the ledger
+      names it: one per run, so batches of the delay-import list were
+      implemented ahead: the remaining list is in the import survey,
+      WORKFLOW "Chromium"). No renderer has been started yet. Next, in
+      the order the runs will meet them: the rest of chrome.dll's
+      delay imports (ole32's stream marshalling and WinRT strings,
+      shell32, gdi32's paths and metafiles, advapi32's
+      ImpersonateAnonymousToken), GetAdaptersAddresses (iphlpapi: not
+      supported yet; network change and DNS configuration),
+      NotifyAddrChange, WSALookupServiceBegin for NLA (logged as an
+      error), then the renderer and utility processes (Mojo over
+      inherited pipes), DirectWrite's custom collections and file loaders
+      (the renderer's font proxy) and glyph rasterization
+      (CreateGlyphRunAnalysis), V8 under TCG. Ledger lines that stay
+      (harmless so far): `uxtheme.dll!#133/#135` (dark mode, probed),
+      `mdmregistration.dll`, `msdia140.dll`,
+      `api-ms-win-appmodel-runtime-l1-1-2.dll` (all looked up, absent),
+      `NtQueryInformationToken` class 39 (TokenSecurityAttributes),
+      `ole32.dll!CoGetClassObject` of an unregistered class.
    2. **Headful, software rendering**: a window on shasha with SwiftShader
       or WARP-free software compositing (`--disable-gpu`,
       `--use-angle=swiftshader`): DXGI/D3D11 absent or emulated in

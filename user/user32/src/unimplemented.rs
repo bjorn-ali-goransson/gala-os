@@ -3,58 +3,28 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("user32.dll":
-    GetWindowPlacement
-    CloseClipboard
-    GetClipboardData
-    MessageBeep
-    OpenClipboard
     AnimateWindow
     ChangeDisplaySettingsExW
     ChildWindowFromPoint
     ChildWindowFromPointEx
     CreateCaret
-    DdeClientTransaction
-    DdeConnect
     DdeCreateDataHandle
-    DdeCreateStringHandleW
-    DdeDisconnect
     DdeFreeDataHandle
-    DdeFreeStringHandle
     DdeGetData
-    DdeGetLastError
-    DdeInitializeW
     DdeNameService
     DdePostAdvise
     DdeQueryStringW
-    DdeUninitialize
     DestroyCaret
-    DrawEdge
-    DrawFocusRect
-    DrawFrameControl
     DrawStateW
-    EmptyClipboard
-    EnumClipboardFormats
-    EnumDisplaySettingsW
     ExitWindowsEx
-    GetCaretBlinkTime
-    GetClassInfoW
-    GetKeyboardState
     GetProcessDefaultLayout
-    GetWindowDC
     HideCaret
-    IsClipboardFormatAvailable
     LoadCursorFromFileW
-    RegisterHotKey
     SetCaretBlinkTime
     SetCaretPos
-    SetCursorPos
     SetLayeredWindowAttributes
-    SetWindowPlacement
-    SetWindowRgn
     ShowCaret
-    ShowCursor
     ToUnicode
-    UnregisterHotKey
     ValidateRgn
     WaitForInputIdle
     keybd_event

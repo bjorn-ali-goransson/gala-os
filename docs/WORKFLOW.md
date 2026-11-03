@@ -665,7 +665,11 @@ loading the ISO, ~30 s mapping chrome.dll). Read, in order:
   delay-loaded function or DLL is missing: the ledger's `missing export`
   / `missing dll` line names it (chrome.dll delay-loads most of what it
   uses; `gala_stubs` stubs are invisible to GetProcAddress, so a stubbed
-  delay import fails the same way). Exit status 0xffff7001/7002 follows a
+  delay import fails the same way). One missing function per 5-minute
+  run is slow: list chrome.dll's delay imports (`llvm-readobj
+  --coff-imports`, the `DelayImport` blocks) against the built DLLs'
+  exports and against the `unimplemented_exports!` lists, and fill
+  them in batches. Exit status 0xffff7001/7002 follows a
   FATAL; 21 is CHROME_RESULT_CODE_PROFILE_IN_USE (the process singleton:
   its mutex and lock file).
 - `XTASK_EVENTS=syscall,image,fault,file,process,thread`: the `file`
