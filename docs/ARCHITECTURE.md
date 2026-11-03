@@ -1941,6 +1941,19 @@ Windows, never shadows the system's DLLs.)
   CryptMemAlloc/Realloc/Free (the process heap), CertGetNameStringA (the
   W form converted) and PFXIsPFXBlob (the outer SEQUENCE { INTEGER 3,
   ContentInfo }).
+- **Certificate stores** (crypt32 store.rs, query.rs; `cert_test`): a
+  store is a reference-counted array of contexts, each a copy of the
+  added certificate (made with CertCreateCertificateContext) whose
+  hCertStore is the store and on which the store holds one reference;
+  enumeration and Find return the next context with one more reference
+  and free the previous one; closing the last reference releases the
+  contexts (a caller's context then keeps a dangling hCertStore, where
+  Windows would keep the store alive). The system stores are empty
+  memory stores (recorded: gala has no installed certificates yet).
+  CryptQueryObject recognises one certificate (DER, or base64 with or
+  without PEM lines); CryptDecodeObjectEx decodes GeneralNames into
+  CERT_ALT_NAME_INFO (e-mail, DNS, URL as UTF-16 strings, IPs as blobs,
+  all in one block; other choices are recorded and skipped).
 - **Thread stacks**: laid out as Windows does - a reservation of the
   executable's SizeOfStackReserve (main thread: the kernel, placed to end
   at 0x200000 when it fits; CreateThread with size 0: kernel32 reads the
@@ -2054,7 +2067,14 @@ Windows, never shadows the system's DLLs.)
   part against the directory's drive, comparisons go through kernel32's
   CompareStringW in the user's locale, StrCmpLogicalW compares digit
   runs by value; SHDeleteKeyW finds RegDeleteTreeW at run time so
-  loading shlwapi does not pull in advapi32).
+  loading shlwapi does not pull in advapi32), and its URL functions
+  (`urls.rs`; the escaping, slash and simplification rules Wine's tests
+  show Windows following, per scheme family: http-like schemes read
+  backslashes as slashes, opaque ones escape `/`, `?` and `#`; `#` is a
+  fragment in a file URL only after a .htm/.html name), AssocQueryStringW
+  (the user's classes, then HKCR; shell\<verb>\command) and
+  SHCreateStreamOnFileEx (`assoc.rs`, an IStream over a file handle; no
+  transactions, CopyTo, Clone or region locks: recorded).
   gala's cmd.exe (`user/cmd`, built as a program and placed in
   System32) implements `/c` (and switches before it): cmd's documented
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
@@ -3163,7 +3183,12 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   dialogs and no recycle bin it proceeds without confirmation and
   deletes for good (both recorded when asked otherwise). SHChangeNotify
   has no listener to tell; Shell_NotifyIconW fails (no notification
-  area, recorded).
+  area, recorded). `icons.rs`: ExtractIconW/ExtractIconExW/SHDefExtractIconW read
+  the file (not loaded) and walk the PE resource directory's
+  RT_GROUP_ICON entries in directory order (named, then IDs; a negative
+  index is an ID), pick the image nearest the size asked with the most
+  bits per pixel, and make the icon with user32's
+  CreateIconFromResourceEx found at run time; .ico files too.
 - **dbghelp's image helpers and normaliz** (`user/dbghelp/src/image.rs`,
   `user/normaliz`; `dbghelp_test`): ImageNtHeader checks "MZ" and
   "PE\0\0"; SymSrvGetFileIndexInfoW reads an image file's headers (no
@@ -3173,7 +3198,13 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   stub (exported, so SqlDumper loads). normaliz.dll forwards IdnToAscii
   to kernel32 and has its own IdnToUnicode (RFC 3492 decoding), because
   kernel32's is still a stub: a forwarder to a stub fails to bind (the
-  ledger says "missing export").
+  ledger says "missing export"). `symbols.rs`: SymLoadModuleExW keeps (base, size) of up to 64
+  modules of this process (the size from the mapped image's SizeOfImage
+  when not given); SymFromAddr checks the image is mapped (VirtualQuery),
+  walks its export directory and names the nearest export at or below
+  the address (SYMFLAG_EXPORT, SymTagPublicSymbol), forwarders skipped.
+  gala's own DLLs link with /OPT:ICF, so identical functions share an
+  address and SymFromAddr names the first export there.
 - **ole32's clean-up helpers** (`user/ole32/src/props.rs`;
   `ole32_test`): PropVariantClear frees by type (task-allocator strings,
   BSTRs and SAFEARRAYs through oleaut32 found at run time, interfaces,
@@ -3185,7 +3216,17 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   OleSetContainedObject go to IRunnableObject (S_OK without one);
   CoSetProxyBlanket/CoQueryProxyBlanket to IClientSecurity, which no
   object has without proxies (E_NOINTERFACE, as an in-process object
-  answers on Windows).
+  answers on Windows). `bindctx.rs`: CoCreateInstanceEx creates through
+  CoCreateInstance(IID_IUnknown) and fills each MULTI_QI by
+  QueryInterface; CreateBindCtx's object keeps up to 32 bound objects
+  and 16 named parameters (more is recorded) and the BIND_OPTS bytes;
+  CoImpersonateClient/CoRevertToSelf answer RPC_E_CALL_COMPLETE (gala
+  serves no COM calls across processes).
+- **Image-list drags** (`user/comctl32/src/drag.rs`; `comctl32_test`):
+  one process-wide drag (list, image, window, position); the calls
+  answer as documented while it lasts, but nothing draws the drag image
+  over the window yet (recorded per drag); drawing it needs saving and
+  restoring the window's pixels under it.
 - **Common controls** (`user/comctl32/src/`; `comctl32_test`):
   InitCommonControls(Ex) registers the classes (once). comctl32 imports
   user32 (the controls are windows) but loads gdi32 on first use (the

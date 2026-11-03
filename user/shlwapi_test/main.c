@@ -32,15 +32,23 @@
  *   documented order 2string < 3string < 20string < st2ring < st20ring
  *   < string2 < string20).
  * - SHDeleteKeyW: a key and everything under it.
+ * - The URL functions, AssocQueryStringW and SHCreateStreamOnFileEx:
+ *   url.c (Wine's url.c vectors).
  *
  * Prints "shlwapi_test: ok" or exits with the number of the failing
  * check. */
+#define COBJMACROS
 #include <windows.h>
 #include <shlwapi.h>
 #include <stdio.h>
 
 static int check;
 #define CHECK(cond) do { check++; if (!(cond)) { printf("shlwapi_test: check %d (line %d) failed\n", check, __LINE__); fflush(stdout); ExitProcess(check); } } while (0)
+
+#ifndef INTERNET_MAX_URL_LENGTH
+#define INTERNET_MAX_URL_LENGTH 2084
+#endif
+#include "url.c"
 
 static int canon(const wchar_t *in, const wchar_t *want) {
     wchar_t out[MAX_PATH] = L"test";
@@ -185,6 +193,10 @@ int main(void) {
     CHECK(RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\GalaShlwapiTest", 0, KEY_READ, &key)
           == ERROR_FILE_NOT_FOUND);
     CHECK(SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\GalaShlwapiTest") == ERROR_FILE_NOT_FOUND);
+
+    url_checks();
+    assoc_checks();
+    stream_checks();
 
     printf("shlwapi_test: ok\n");
     return 0;

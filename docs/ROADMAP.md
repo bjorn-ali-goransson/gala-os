@@ -2143,8 +2143,7 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         `StrCmpIW`, `StrCmpNIW`, `StrStrW`, `StrStrIW`, `StrCmpLogicalW`,
         `SHDeleteKeyW` (`shlwapi_test`; LocalDB's xe.dll, sqllang,
         msxmlsql, hkcompile, SqlDumper, SqlUserInstance and wxWidgets'
-        wxbase). Left in shlwapi: the URL functions, `PathCreateFromUrlW`,
-        `AssocQueryStringW`, `SHAutoComplete`, `SHCreateStreamOnFileEx`.
+        wxbase).
      3. shell32: `ShellExecuteExW` (and `ShellExecuteW` now runs
         programs), `DragQueryFileW`, `DragQueryPoint`, `DragFinish`,
         `DragAcceptFiles`, `SHFileOperationW`, `SHChangeNotify`,
@@ -2173,6 +2172,66 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         the store functions (`CertAddCertificateContextToStore`,
         `CertDeleteCertificateFromStore`, `CertEnumCRLsInStore`,
         `CertOpenSystemStoreA`), `CryptAcquireCertificatePrivateKey`.
+     6. shlwapi, the rest: `UrlIsW`, `UrlEscapeW`, `UrlUnescapeW`,
+        `UrlCanonicalizeW`, `UrlCombineW`, `UrlCreateFromPathW`,
+        `PathCreateFromUrlW`, `AssocQueryStringW`, `SHCreateStreamOnFileEx`,
+        `SHAutoComplete` (E_NOTIMPL, recorded) (`shlwapi_test`'s url.c,
+        Wine's url.c and path.c vectors; LocalDB's msxmlsql, sqllang, xe,
+        xmlrw, hkcompile and wxWidgets). shlwapi has no stubs left.
+        UrlCanonicalizeW knows the http-like schemes' rules only (other
+        forms are copied, recorded).
+     7. shell32: `ExtractIconW`, `ExtractIconExW`, `SHDefExtractIconW`
+        (icon groups read from an image's resource directory or an .ico
+        file, made by user32's CreateIconFromResourceEx; `shell32_test`,
+        whose build.sh now embeds two icons). Left in shell32:
+        `SHBrowseForFolderW` (a dialog).
+     8. ole32: `CoCreateInstanceEx` (MULTI_QI results; CUIAutomation in
+        the test), `CreateBindCtx` (bound objects, object parameters,
+        BIND_OPTS; no running object table: recorded),
+        `CoImpersonateClient`/`CoRevertToSelf` (RPC_E_CALL_COMPLETE: no
+        COM call is ever being served) (`ole32_test`). Left in ole32:
+        `GetHGlobalFromStream` and CreateStreamOnHGlobal with an HGLOBAL
+        (they need movable global memory: kernel32's GlobalSize is a stub
+        and GlobalAlloc hands out fixed blocks), `CoRegisterMallocSpy`,
+        the OLE clipboard and `DoDragDrop` (user32's clipboard).
+     9. crypt32: certificate stores (`CertOpenStore` memory, collection
+        and system stores, `CertOpenSystemStoreA/W`: the system stores are
+        empty and recorded, gala installs no certificates yet;
+        `CertAddEncodedCertificateToStore`,
+        `CertAddCertificateContextToStore` with the ADD_* dispositions,
+        `CertEnumCertificatesInStore`, `CertFindCertificateInStore` (any,
+        SHA-1 hash, subject name, subject/issuer text, existing),
+        `CertDeleteCertificateFromStore`, `CertDuplicateStore`,
+        `CertCloseStore`, `CertEnumCRLsInStore`), `CryptQueryObject` (a
+        certificate, DER or base64/PEM, from a file or blob) and
+        `CryptDecodeObjectEx` (alternative names) (`cert_test`). Before,
+        CertOpenStore failed for everything; nginx, nginx_tls and
+        caddy_http still pass. Left in crypt32: `PFXImportCertStore`
+        (PKCS #12 decryption), the other decode types, CRLs/CTLs,
+        collections' member stores (`CertAddStoreToCollection`),
+        `CryptAcquireCertificatePrivateKey`; the chain engine is
+        other/schannel-tls's.
+    10. dbghelp: `SymInitialize(W)`, `SymCleanup`, `SymSetOptions`,
+        `SymGetOptions`, `SymLoadModuleExW`, `SymUnloadModule64`,
+        `SymFromAddr` over the modules' exports (no PDBs yet: recorded)
+        (`dbghelp_test`; LocalDB's In-Memory OLTP, hkruntime and
+        hkengine). Left in dbghelp: `MiniDumpWriteDump` (a stub: writing
+        a minidump is its own piece of work), PDB symbols, other
+        processes' modules.
+    11. comctl32: the image-list drag functions (`ImageList_BeginDrag`,
+        `DragEnter`, `DragMove`, `DragLeave`, `EndDrag`,
+        `SetDragCursorImage`; the drag's state is kept, the drag image is
+        not drawn yet: recorded) (`comctl32_test`; wxWidgets). Left in
+        comctl32: `CreateUpDownControl` (a new control class).
+        version and msvcrt: nothing left that the surveyed programs import
+        (msvcrt's last four were group 1).
+   - Known problem (2026-11-03): the FileZilla client's PREBUILT URL
+     (`downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe`)
+     now answers 404 (so does the `FileZilla_Client/3.69.3/` path), so
+     the `filezilla`, `filezilla_flaui` and `filezilla_server` scenarios
+     (one module set) cannot be fetched on a machine without
+     `target/prebuilt/filezilla`. No official mirror with the pinned
+     SHA-256 (e87b8787...) was found; the URL is unchanged until one is.
    - Elsewhere (not in these crates; for the agents there): FileZilla
      Server's GUI also stops on user32 (54 stubs: carets, the clipboard,
      DDE, DrawEdge/DrawFrameControl, window placement), gdi32 (16:

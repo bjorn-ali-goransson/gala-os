@@ -712,7 +712,11 @@ FlaUI) is a plain zip, its members paths such as
 `cargo xtask iso --file path/to/app.exe run=app.exe "args=..."` and boot
 it with QEMU (`-cpu max`), then follow the ledger and the program's own
 error messages (Go programs print which DLL or procedure they could not
-find). Survey an import table first with
+find). A pinned release can vanish upstream: the FileZilla 3.69.3
+client installer's SourceForge URL answers 404 since 2026-11 (ROADMAP
+AG, "Known problem"); keep a fetched `target/prebuilt/<name>` around,
+and change a URL only for an official one with the same SHA-256.
+Survey an import table first with
 `x86_64-w64-mingw32-objdump -p app.exe | grep "DLL Name"`; keep
 downloaded files in their own directory and run them only inside QEMU.
 

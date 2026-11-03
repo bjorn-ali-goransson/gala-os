@@ -8,6 +8,7 @@
 #![no_std]
 
 mod image;
+mod symbols;
 mod unimplemented;
 
 #[allow(dead_code)]

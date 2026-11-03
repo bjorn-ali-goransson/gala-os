@@ -21,6 +21,12 @@
  *   and the copied length. DragQueryPoint gives pt and TRUE when fNC is
  *   0. DragFinish frees it.
  * - DragAcceptFiles sets and clears WS_EX_ACCEPTFILES.
+ * - ExtractIconW: with index -1 the number of icon groups; index n the
+ *   n-th group's icon (SM_CXICON sized), a negative index the group with
+ *   that resource ID; NULL past the last or for a missing file; 1 for a
+ *   file that is not an image. ExtractIconExW: the count, or large
+ *   (32) and small (16) icons. SHDefExtractIconW: S_OK, S_FALSE when the
+ *   icon is not there.
  * - SHFileOperationW: FO_COPY of a directory to a new name copies the
  *   tree; FO_MOVE and FO_RENAME of a file; FO_DELETE of a wildcard with
  *   FOF_FILESONLY removes only files; FO_DELETE of directories (a
@@ -60,6 +66,21 @@ static HDROP make_drop(const void *names, size_t bytes, BOOL wide, LONG x, LONG 
     memcpy((char *)d + sizeof(DROPFILES), names, bytes);
     GlobalUnlock(h);
     return (HDROP)h;
+}
+
+/* The width of an icon's colour (or mask) bitmap. */
+static int icon_width(HICON icon) {
+    ICONINFO ii;
+    if (!GetIconInfo(icon, &ii))
+        return -1;
+    BITMAP bm;
+    HBITMAP b = ii.hbmColor ? ii.hbmColor : ii.hbmMask;
+    int w = GetObjectW(b, sizeof bm, &bm) ? bm.bmWidth : -1;
+    if (ii.hbmColor)
+        DeleteObject(ii.hbmColor);
+    if (ii.hbmMask)
+        DeleteObject(ii.hbmMask);
+    return w;
 }
 
 static int fileop(UINT func, const wchar_t *from, const wchar_t *to, FILEOP_FLAGS flags) {
@@ -152,6 +173,42 @@ int main(int argc, char **argv) {
     /* Notifications nothing listens to. */
     SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, L"C:\\", NULL);
     CHECK(SHGetIconOverlayIndexW(L"C:\\nothing.ico", 0) == -1);
+
+    /* Icons: this program has two icon groups (build.sh: one with 16 and
+     * 32 pixel images, one with 32 only). */
+    CHECK((UINT_PTR)ExtractIconW(NULL, self, (UINT)-1) == 2);
+    HICON icon = ExtractIconW(NULL, self, 0);
+    CHECK(icon != NULL && icon_width(icon) == GetSystemMetrics(SM_CXICON));
+    DestroyIcon(icon);
+    icon = ExtractIconW(NULL, self, 1);
+    CHECK(icon != NULL);
+    DestroyIcon(icon);
+    CHECK(ExtractIconW(NULL, self, 2) == NULL);
+    icon = ExtractIconW(NULL, self, (UINT)-2); /* resource ID 2 */
+    CHECK(icon != NULL);
+    DestroyIcon(icon);
+    CHECK(ExtractIconW(NULL, L"C:\\no-such-file.exe", 0) == NULL);
+    HANDLE text = CreateFileW(L"sh_text.txt", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    DWORD wrote;
+    WriteFile(text, "not an image", 12, &wrote, NULL);
+    CloseHandle(text);
+    CHECK((UINT_PTR)ExtractIconW(NULL, L"sh_text.txt", 0) == 1);
+    DeleteFileW(L"sh_text.txt");
+    CHECK(ExtractIconExW(self, -1, NULL, NULL, 0) == 2);
+    HICON large[2] = {0}, small[2] = {0};
+    CHECK(ExtractIconExW(self, 0, large, small, 2) == 2);
+    CHECK(large[0] && large[1] && small[0] && small[1]);
+    CHECK(icon_width(large[0]) == 32 && icon_width(small[0]) == 16);
+    for (int i = 0; i < 2; i++) {
+        DestroyIcon(large[i]);
+        DestroyIcon(small[i]);
+    }
+    HICON l = NULL, sm = NULL;
+    CHECK(SHDefExtractIconW(self, 0, 0, &l, &sm, MAKELONG(32, 16)) == S_OK && l && sm);
+    CHECK(icon_width(l) == 32 && icon_width(sm) == 16);
+    DestroyIcon(l);
+    DestroyIcon(sm);
+    CHECK(SHDefExtractIconW(self, 5, 0, &l, NULL, 32) == S_FALSE);
 
     printf("shell32_test: ok\n");
     return 0;

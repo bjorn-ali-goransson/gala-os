@@ -7,11 +7,9 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertAddCRLLinkToStore
     CertAddCTLContextToStore
     CertAddCTLLinkToStore
-    CertAddCertificateContextToStore
     CertAddCertificateLinkToStore
     CertAddEncodedCRLToStore
     CertAddEncodedCTLToStore
-    CertAddEncodedCertificateToStore
     CertAddEncodedCertificateToSystemStoreA
     CertAddEncodedCertificateToSystemStoreW
     CertAddEnhancedKeyUsageIdentifier
@@ -34,13 +32,10 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertCreateSelfSignCertificate
     CertDeleteCRLFromStore
     CertDeleteCTLFromStore
-    CertDeleteCertificateFromStore
     CertDuplicateCRLContext
     CertDuplicateCTLContext
     CertDuplicateCertificateChain
-    CertDuplicateStore
     CertEnumCRLContextProperties
-    CertEnumCRLsInStore
     CertEnumCTLContextProperties
     CertEnumCTLsInStore
     CertEnumPhysicalStore
@@ -78,7 +73,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertNameToStrA
     CertOIDToAlgId
     CertOpenServerOcspResponse
-    CertOpenSystemStoreA
     CertRDNValueToStrA
     CertRDNValueToStrW
     CertRegisterPhysicalStore
@@ -113,7 +107,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CryptCreateKeyIdentifierFromCSP
     CryptDecodeMessage
     CryptDecodeObject
-    CryptDecodeObjectEx
     CryptDecryptAndVerifyMessageSignature
     CryptDecryptMessage
     CryptEncodeObject
@@ -164,7 +157,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CryptMsgUpdate
     CryptMsgVerifyCountersignatureEncoded
     CryptMsgVerifyCountersignatureEncodedEx
-    CryptQueryObject
     CryptRegisterDefaultOIDFunction
     CryptRegisterOIDFunction
     CryptRegisterOIDInfo
