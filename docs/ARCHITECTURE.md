@@ -3842,10 +3842,130 @@ does not apply the conditions, features or `SetDirectory` custom
 actions that an installer's costing would. Then stage 5 proper: the
 engine (standard actions, sequence tables, properties, conditions,
 custom actions, `msiexec /i /qn`).
+**MSIX/AppX reading (PK stage 4 groundwork, 2026-11-03; nothing is
+installed yet).** `galapkg::msix` reads packages and bundles from
+memory, host-tested (`cargo test -p galapkg`, the `msix::tests`,
+`blockmap::tests`, `appxmanifest::tests`, `xml::tests`); sources:
+Microsoft's manifest, bundle manifest and block map schema references,
+the package identity overview, ECMA-376 Part 2 (THIRD_PARTY.md). The
+API `gala install` will call:
+
+- `msix::open(data) -> Opened::{Package, Bundle}`; `Package::open`,
+  `Bundle::open` read and parse the footprint files ([Content_Types].xml,
+  AppxBlockMap.xml, the manifest) and note AppxSignature.p7x's presence
+  and size (`signature: Option<u32>`: **not validated**, TODO with the
+  certificate store).
+- `Package::verify() -> Result<Checked, Problems>`: every block map
+  file against its zip entry, every problem collected; `Package::files()`
+  (block map name, `safe_path`, size, footprint or payload) and
+  `Package::read(name)` (one file, checked) are what an installer
+  unpacks with. `Bundle::verify()` adds each inner package's entry
+  (stored, its data at the bundle manifest's Offset, Size bytes);
+  `Bundle::package_for(arch)` picks the application package (the arch,
+  else neutral); `Bundle::open_package(p)` opens it in place.
+- `Identity` (Name, Publisher, Version, architecture, ResourceId):
+  `full_name()` `<Name>_<Version>_<Arch>_<ResourceId>_<PublisherId>`
+  (a bundle's ResourceId is `~`), `family_name()`, `publisher_id()`:
+  SHA-256 of the Publisher in UTF-16LE, its first 8 bytes as 64 bits
+  padded with a zero bit to 65, 13 Crockford base32 digits in lower
+  case. Checked against the one pair Microsoft documents with both
+  values (Microsoft's own Publisher gives `8wekyb3d8bbwe`, and the
+  documented full name of Microsoft.WindowsAppRuntime.1.0); the test
+  publisher's id `dr59fkesnp31w` comes only from the same algorithm.
+- `AppxManifest`: Identity (Name a package string of 3-50 characters,
+  Version four parts of 0-65535, ProcessorArchitecture one of x86, x64,
+  arm, arm64, x86a64, neutral, ResourceId), Properties (DisplayName,
+  PublisherDisplayName, Logo, Description, Framework, ResourcePackage),
+  Dependencies (TargetDeviceFamily, PackageDependency), Resources
+  (languages), Applications (Id unique, Executable, EntryPoint,
+  VisualElements basics, uap or Windows 8 form), Capabilities (any
+  namespace, DeviceCapability; `run_full_trust()` for
+  `rescap:Capability Name="runFullTrust"`). Windows 10 (foundation)
+  and Windows 8 (2010) roots; other elements are ignored, as
+  IgnorableNamespaces intends. `BundleManifest`: Identity, Packages
+  (Type, Version, Architecture, ResourceId, FileName, Offset, Size,
+  languages). `ContentTypes`: Override by part name, else Default by
+  extension (ASCII case-insensitive).
+
+**Block map rules (`blockmap.rs`).** Every file but AppxBlockMap.xml,
+AppxSignature.p7x and [Content_Types].xml is listed once (names compared
+after decoding the zip item name's percent-escapes, `/` as `\`, ASCII
+case-insensitive), and every listed file is present. Per file: Size =
+the uncompressed size, LfhSize = the zip local header's size (30 + name
++ extra), one Block per 64 KiB (the last shorter, an empty file none),
+each block's hash (HashMethod SHA-256, SHA-384 or SHA-512 by its W3C
+URI, base64) over the uncompressed bytes. Deflated files: every block
+has a Size, they add up to the compressed size, and each block's run
+inflates to exactly that block (miniz_oxide's core decompressor fed one
+run at a time into the whole-file buffer, so a corrupt run is reported
+with its block index); stored files: a block Size, if any, is the
+block's length. The zip CRC-32 is checked after the hashes, so a
+changed byte is reported as "<file> block N: hash mismatch: the block
+map says X, the data hashes to Y" rather than a CRC failure.
+
+**Invariants.** The manifest a `Package` returns has passed its block
+map entry (a changed manifest fails `open`); an inner package from
+`open_package` has passed the bundle's block map and its identity
+agrees with the bundle (Name, Publisher) and its Package element
+(Version, Architecture, ResourceId); nothing panics on a hostile
+package (a test flips and truncates bytes all over the fixtures); a
+file's buffer is reserved fallibly (`try_reserve_exact`, an
+`OutOfMemory` error naming the file), as sizes come from the archive.
+Errors name the file (an inner package's as `<package>/<file>`), the
+block, expected and actual values, and for XML the element and line.
+
+**XML (`xml.rs`).** Gala's own: elements, attributes (normalized), text,
+CDATA, comments, PIs, the predefined entities and character references,
+namespaces (default and prefixed, the `xml` prefix), UTF-8 with or
+without BOM and UTF-16 with BOM. DTDs are refused (no entity expansion),
+as are undeclared prefixes, duplicate attributes and nesting beyond 256;
+iterative, so depth costs no stack.
+
+**ZIP64.** `zip.rs` reads the zip64 end record, locator and extra
+field (MSIX packages are zip64 with data descriptors; the central
+directory is authoritative, so data descriptors need nothing); entries
+of 4 GiB or more are refused (archives are in memory). New accessors:
+`local_header_size`, `data_offset`, `raw`.
+
+**Limits and assumptions (spec-derived, not checked against makeappx
+output, which needs Windows):** that makeappx flushes the deflate stream
+at each 64 KiB block (the schema's per-block Size implies it; a package
+whose runs are not byte-aligned per block fails with "its N compressed
+bytes inflate to ..."); that a bundle's Offset is where the inner
+package's bytes start (after its local header), its Size their length;
+that zip item names percent-encode as OPC part names do (a space as
+`%20`); the bundle full name's `neutral` architecture. Not read yet:
+AppxMetadata\CodeIntegrity.cat, the content group map, the
+`AppxBlockMap` b4/b5 extensions (FileId etc.), encrypted packages
+(.eappx), flat bundles; AppxSignature.p7x is only noticed.
+
+**Fixtures (`user/galapkg/testdata/msix/`, made by
+`make_fixtures.py`, checked by `check_fixtures.sh`).** app.msix (ZIP64
+with data descriptors, deflated multi-block text, a stored two-block
+file, an empty file, a space in a name, a placeholder signature),
+zipfile.msix (written by Python's zipfile: classic zip, all stored),
+unsigned.msix, app.msixbundle (x64 and x86 packages) and the damaged
+ones: bad_hash (block 1 of a deflated file), missing_file,
+extra_listed (a listed file not in the package), unlisted_file,
+wrong_size, wrong_lfh, wrong_block_size, bad_offset.msixbundle; a
+flipped stored byte and SHA-384/512 block maps are made in the tests.
+**Independently verified** (tools sharing no code with the generator or
+galapkg): the zip structure of every fixture (Info-ZIP `unzip -t`,
+7-Zip `7z t`), every block hash of the good packages (and their inner
+packages) recomputed by `sha256sum` over the extracted files split into
+64 KiB blocks, File Sizes against the extracted files, the bundle's
+Offset/Size (`dd` + `cmp` against the extracted inner package), and
+bad_hash/wrong_size failing that same check; Microsoft's documented
+publisher id. **From our reading of the specification only:** the
+deflate block runs and their Sizes, LfhSize (zipfile.msix's, from
+Python's own writer, agrees with our reading), the test publisher's
+id, the content type strings, the bundle full name form.
 
 **Next (ROADMAP PK):** the HTTPS fetcher; then stage 3 (Inno Setup,
 NSIS, `exe` with switches: run the vendor's installer silently, uninstall
-through its UninstallString), 4 (MSIX), 5 (MSI); machine scope
+through its UninstallString), 4 (MSIX: on the reader above, signature
+validation against trusted certificates, staging under WindowsApps,
+registration, package identity for full-trust apps), 5 (MSI); machine scope
 (`%ProgramFiles%\WinGet\Packages`, HKLM, needs elevation); dependencies
 (`Dependencies: PackageDependencies`); `gala list` matching ARP entries
 to packages by ProductCode/AppsAndFeaturesEntries.

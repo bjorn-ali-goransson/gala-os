@@ -1985,6 +1985,27 @@ PK. **Installing software: `gala install` over winget manifests** (the
    contents URLs, winget's source index for search), real symbolic links
    for commands, the logon environment from `HKCU\Environment`, then
    stage 3.
+   **Stage 4 groundwork: the MSIX/AppX reader built** (2026-11-03,
+   branch other/msix-reader; host tests `cargo test -p galapkg`, modules
+   `msix`, `appxmanifest`, `blockmap`, `xml`; fixtures
+   `user/galapkg/testdata/msix` from `make_fixtures.py`, cross-checked
+   by `check_fixtures.sh` with unzip, 7z and sha256sum; ARCHITECTURE
+   "Installing software", "MSIX/AppX reading"): packages and bundles
+   opened from memory (ZIP64 with data descriptors), AppxManifest.xml
+   (Identity, Properties, Dependencies, Applications, Capabilities incl.
+   runFullTrust), [Content_Types].xml, AppxBlockMap.xml checked per
+   64 KiB block (SHA-256/384/512, deflate runs per block, sizes,
+   LfhSize, unlisted/missing files; errors name file and block), bundle
+   manifests with their packages' Offset/Size and inner packages opened
+   in place; package full/family names and the publisher id (checked
+   against Microsoft's documented `8wekyb3d8bbwe`). AppxSignature.p7x:
+   presence only. Next: signature validation (PKCS#7 over the
+   AppxBlockMap/content hashes against trusted certificates, crypt32),
+   then `gala install` of an .msix: staging to `C:\Program Files\
+   WindowsApps\<full name>`, registration, package identity for
+   full-trust apps; a real makeappx-built package as a fixture (needs
+   Windows) to confirm the spec-derived rules (per-block deflate runs,
+   bundle Offset).
 
 LX. **A Linux personality, later; its seams now** (the owner,
    2026-11-03; design: ARCHITECTURE "Plan: a second personality (Linux)";

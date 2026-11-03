@@ -1015,6 +1015,20 @@ where its pixel checks expect it (no pointer arithmetic).
   make (checked by hand when they were written: `7z t`), keep it so.
 - Every installed command is a copy of gala.exe: a gala.exe change does
   not reach commands installed before it until they are reinstalled.
+- MSIX fixtures (`user/galapkg/testdata/msix/`): regenerate with
+  `python3 -I user/galapkg/testdata/msix/make_fixtures.py`, then run
+  `sh user/galapkg/testdata/msix/check_fixtures.sh` (unzip, 7z, xmllint,
+  sha256sum: the independent cross-check) and update the hashes, line
+  numbers and sizes the `msix::tests` expect. Pitfalls: another zlib
+  version may deflate differently (the fixtures are checked in; only a
+  regeneration changes them); the generator refuses a fixture over
+  100 KB; the corrupted fixtures must stay valid zips where the test says
+  so (bad_hash keeps the changed data's CRC-32 and block Sizes, only the
+  hash disagrees), or the reader reports a different error first; shell
+  functions in check_fixtures.sh share variables with their callers. The
+  test publisher's id and the block-run rules come from our reading of
+  the documentation, not from makeappx (ARCHITECTURE "MSIX/AppX
+  reading" says which values are independently verified).
 - Low on disk: a few user programs can be built alone into a scratch
   target directory with xtask's flags (`cargo build --release --target
   x86_64-pc-windows-msvc --config 'target.x86_64-pc-windows-msvc.rustflags=
