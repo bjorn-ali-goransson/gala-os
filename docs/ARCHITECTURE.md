@@ -3124,6 +3124,34 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   a path) or the empty list (the desktop); CSIDL_DRIVES is virtual.
   shell32, ole32 and comctl32 load the GUI DLLs they call on first use
   (LoadLibraryW): programs without windows use them too.
+- **shell32's programs, drops and file operations**
+  (`user/shell32/src/shellops.rs`; `shell32_test`): ShellExecuteW/ExW
+  run programs (.exe/.com, as given or along the search path, `.exe`
+  added) with CreateProcessW and the documented results (hInstApp 33,
+  hProcess with SEE_MASK_NOCLOSEPROCESS; SE_ERR_FNF and
+  ERROR_FILE_NOT_FOUND); other verbs, documents and URLs have no
+  associations yet (SE_ERR_NOASSOC, recorded). DragQueryFileW/
+  DragQueryPoint/DragFinish read a DROPFILES block (wide or ANSI names);
+  DragAcceptFiles sets WS_EX_ACCEPTFILES through user32 found at run
+  time (nothing generates WM_DROPFILES yet). SHFileOperationW does
+  FO_COPY/FO_MOVE/FO_RENAME/FO_DELETE with wildcards, double-NUL lists,
+  FOF_FILESONLY and FOF_MULTIDESTFILES, directories recursively; with no
+  dialogs and no recycle bin it proceeds without confirmation and
+  deletes for good (both recorded when asked otherwise). SHChangeNotify
+  has no listener to tell; Shell_NotifyIconW fails (no notification
+  area, recorded).
+- **ole32's clean-up helpers** (`user/ole32/src/props.rs`;
+  `ole32_test`): PropVariantClear frees by type (task-allocator strings,
+  BSTRs and SAFEARRAYs through oleaut32 found at run time, interfaces,
+  blobs, CLIPDATA, vectors and their elements) and zeroes the
+  PROPVARIANT; the valid types are those of Wine's test_validtypes table
+  (checked on Windows), others are STG_E_INVALIDPARAMETER. ReleaseStgMedium
+  frees a medium it owns (pUnkForRelease NULL; TYMED_FILE deletes the
+  file), always releases interfaces and the owner. OleRun/OleLockRunning/
+  OleSetContainedObject go to IRunnableObject (S_OK without one);
+  CoSetProxyBlanket/CoQueryProxyBlanket to IClientSecurity, which no
+  object has without proxies (E_NOINTERFACE, as an in-process object
+  answers on Windows).
 - **Common controls** (`user/comctl32/src/`; `comctl32_test`):
   InitCommonControls(Ex) registers the classes (once). comctl32 imports
   user32 (the controls are windows) but loads gdi32 on first use (the

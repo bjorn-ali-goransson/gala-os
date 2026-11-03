@@ -2,13 +2,16 @@
 //! user's profile folders (the JVM's user.home). The answers come from the
 //! same place as the environment's: USERPROFILE, APPDATA, LOCALAPPDATA,
 //! ProgramData, ProgramFiles, and the Windows and system directories.
-//! Also SHGetFileInfoW with gala's system image lists (`fileinfo.rs`).
+//! Also SHGetFileInfoW with gala's system image lists (`fileinfo.rs`),
+//! and running programs, dropped files and file operations
+//! (`shellops.rs`).
 
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 mod fileinfo;
+mod shellops;
 mod unimplemented;
 
 #[allow(dead_code)]
@@ -43,6 +46,12 @@ unsafe extern "system" {
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
+}
+
+/// Reports `what` to the ledger as unsupported, with `detail`.
+pub(crate) fn unsupported(what: &[u8], detail: u64) {
+    // SAFETY: a valid buffer; 2 is GalaRecordMissing's "unsupported".
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, detail) };
 }
 
 const S_OK: i32 = 0;
@@ -281,29 +290,6 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {
         core::hint::spin_loop();
     }
-}
-
-/// ShellExecuteW: gala has no file associations or shell verbs yet. A file
-/// (or program) that does not exist gives ERROR_FILE_NOT_FOUND (2), as on
-/// Windows; anything else SE_ERR_NOASSOC (31), recorded. The result is an
-/// HINSTANCE-typed value; 32 or less means failure.
-#[unsafe(no_mangle)]
-pub extern "system" fn ShellExecuteW(
-    _window: usize,
-    _verb: *const u16,
-    file: *const u16,
-    _params: *const u16,
-    _dir: *const u16,
-    _show: i32,
-) -> usize {
-    // SAFETY: the caller's NUL-terminated path (or null).
-    if file.is_null() || unsafe { GetFileAttributesW(file) } == u32::MAX {
-        return 2;
-    }
-    let what = b"shell32.dll!ShellExecuteW";
-    // SAFETY: a valid buffer.
-    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, 0) };
-    31
 }
 
 /// Splits a command line as CommandLineToArgvW documents: the program
