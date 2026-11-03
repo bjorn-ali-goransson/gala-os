@@ -1914,7 +1914,9 @@ GPU. **Graphics and GPU** (the owner, 2026-11-03; design: ARCHITECTURE
      registered as on Windows; `vk_test`, `d3d11_test`, `gl_test` (screen
      checks), then DXVK's and vkd3d-proton's own tests. WARP is ruled out
      (Microsoft's, not redistributable).
-   - G3. **virtio-gpu 3D (Venus)**: `GalaGpu*` calls (contexts, blob
+   - G3. **virtio-gpu 3D (Venus)** (deferred by the owner, 2026-11-03:
+     out of scope for now, revisited when there is spare capacity;
+     hardware partitioning and passthrough stay out entirely): `GalaGpu*` calls (contexts, blob
      resources mapped into processes, submit, fences as waitable
      objects), Mesa's venus ICD with a gala backend, Zink for GL; G2's
      tests again on a host GPU (`virtio-gpu-gl-pci,venus=on`).
