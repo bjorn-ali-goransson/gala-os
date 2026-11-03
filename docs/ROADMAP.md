@@ -24,6 +24,12 @@ explicitly in its commit.
   core structures other items build on (LX seams, RS B2 with the
   core/NT process split), then features on top (PK installers, the
   browser), which run niced and yield VMs to the rest.
+- **Token-heavy implementation as filler (the owner, 2026-11-03)**:
+  when an agent slot frees up and nothing more foundational waits, use it
+  for broad implementation work: item LX proper (the Linux personality's
+  system calls, milestone 1 first, test first against real Linux, after
+  the seams) and API shims and gaps (DLL exports and behaviour the
+  ledgers report missing, each test first against real Windows).
 - Work that speeds up development or troubleshooting comes first, as we
   are the ones who benefit: today that is R5 (deterministic simulation:
   a failure replays from its seed), then R7's record/replay and clock
@@ -1953,9 +1959,10 @@ PK. **Installing software: `gala install` over winget manifests** (the
 
 LX. **A Linux personality, later; its seams now** (the owner,
    2026-11-03; design: ARCHITECTURE "Plan: a second personality (Linux)";
-   sources: CLEAN_ROOM.md "Linux"). A planned later goal; until it is
-   scheduled, only the seams are built, each with the work that touches
-   its area: (1) the pty as a core terminal object under ConPTY (a
+   sources: CLEAN_ROOM.md "Linux"). Scheduled as filler (the owner,
+   2026-11-03: token-heavy implementation when agents are free, see
+   Priorities): after the seams, the milestones below, test first against
+   real Linux. The seams are built with the work that touches each area: (1) the pty as a core terminal object under ConPTY (a
    refactor now: ConPTY, item SSH, was built first); (2) per-process
    system-call dispatch; (3) the core/NT split of `Process` with RS B2;
    (4) file-system metadata: per-directory case sensitivity

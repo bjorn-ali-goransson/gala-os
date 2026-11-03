@@ -93,8 +93,9 @@ them as the primary spec.
 - Anti-cheat and EDR compatibility.
 - Legacy features: 16-bit/NTVDM, the old POSIX/OS2 subsystems, old
   compatibility shims. (Not the same thing as a Linux personality: a
-  Linux personality on the same core is a planned later goal; until it is
-  scheduled, only its seams are built. The owner, 2026-11-03; ROADMAP LX.)
+  Linux personality on the same core is a planned goal: its seams first,
+  then its system calls as filler work when agents are free. The owner,
+  2026-11-03; ROADMAP LX.)
 - Windows driver (WDM/KMDF) compatibility for now. Use our own driver model
   with virtio first. A KMDF shim may come later.
 
