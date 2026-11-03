@@ -1758,10 +1758,10 @@ RS. **Remote access and sessions** (the owner, 2026-11-03; design:
      caller's session, ProcessIdToSessionId, WTSGetActiveConsoleSessionId
      (KUSER ActiveConsoleId), logons in the caller's session, PROCESSES
      version 3 carrying the session across a handover, the session in
-     process events and the state dump. Not run yet in QEMU when written
-     (disk full): `cargo xtask boot-test session_test` and the handover
-     scenarios whose expected lines changed (`handover_upgrade`,
-     `handover_upgrade_uefi`, `handover_downgrade_refused`).
+     process events and the state dump. Written while the disk was full;
+     booted 2026-11-03: `session_test` and the handover scenarios whose
+     expected lines changed (`handover_upgrade`, `handover_upgrade_uefi`,
+     `handover_downgrade_refused`) pass.
    - B2. Per-session desktop and window registry (the statics go): a GUI
      program in session 2 is not found or messaged from session 1; `gala
      windows` lists the caller's session; every GUI scenario still passes.
@@ -1851,8 +1851,8 @@ GPU. **Graphics and GPU** (the owner, 2026-11-03; design: ARCHITECTURE
      seam's `screen_flush`/`screen_changed`, the desktop re-laid out on a
      resize; `events=display`, `gputrace`, `gpureset=`; scenarios
      `virtio_gpu` and `virtio_gpu_reset` (gui_test's screen check on a
-     `virtio-gpu-pci` screen). **Not yet booted** (written while the
-     build machine's disk was full: run them first). Next: shasha's
+     `virtio-gpu-pci` screen). Written while the build machine's disk
+     was full; booted 2026-11-03, both pass. Next: shasha's
      pointer on the hardware cursor, WM_DISPLAYCHANGE and refitting
      maximized windows on a resize (a test with QEMU's monitor resizing
      the display), several scanouts as monitors.
@@ -1927,10 +1927,9 @@ PK. **Installing software: `gala install` over winget manifests** (the
    list`; a scenario per installer type kept as a regression test; the
    ledger's per-installer gaps in the report.
    **Stages 1 and 2 built, except downloads** (2026-11-03, test
-   `pk_install_test`, scenario `pk_install_zip`, written but **not yet
-   booted**: the disk was too full for an image that day; run it first,
-   `cargo xtask boot-test pk_install_zip`; host tests `cargo test -p
-   galapkg` pass, including a failure injected at every step;
+   `pk_install_test`, scenario `pk_install_zip`, written while the disk
+   was too full for an image, booted 2026-11-03: passes; host tests
+   `cargo test -p galapkg` pass, including a failure injected at every step;
    ARCHITECTURE "Installing software"): `gala install|search|list|
    upgrade|uninstall` over a winget-pkgs tree (`--source <dir>`, an
    `installers\` mirror), manifests 1.x singleton and multi-file,
