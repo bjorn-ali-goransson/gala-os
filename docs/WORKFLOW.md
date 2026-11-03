@@ -380,6 +380,11 @@ charged). Look
   thread running on another CPU has stopped, on Windows as on gala. A test
   that needs it stopped calls GetThreadContext first (kernel32_thread_test
   was flaky until it did).
+- **failpoint_heap fails every n-th allocation by count**: a change
+  that adds allocations (XSAVE's per-thread areas did) moves the failure
+  onto other paths and can expose old gaps. One found that way: `run=`
+  dropped the process object it waits on when the list push failed, and
+  then waited on nothing for ever (it now retries).
 - **Vector state (XSAVE, since 2026-11-02)**: the kernel stays
   soft-float; never add code that uses x87/SSE/AVX registers in the
   kernel (the user's state is live in them during system calls and

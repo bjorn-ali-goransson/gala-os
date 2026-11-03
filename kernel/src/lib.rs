@@ -842,7 +842,11 @@ fn run_program(
             match nt::object::KObject::new(nt::object::ObjectBody::Process(process.clone())) {
                 Ok(object) => {
                     let mut objects = alloc::vec::Vec::new();
-                    let _ = mm::heap::TryVec::try_push(&mut objects, object);
+                    // Without it the wait below would never end (an
+                    // empty list): try again until memory comes back.
+                    while mm::heap::TryVec::try_push(&mut objects, object.clone()).is_err() {
+                        sched::sleep_ms(1);
+                    }
                     if let Some(r) = handover_requests
                         && mm::heap::TryVec::try_push(&mut objects, r.clone()).is_err()
                     {
