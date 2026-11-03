@@ -178,6 +178,15 @@ checks a scenario's stream. `cargo xtask events <file>` summarizes a
 stream (done 2026-11-03: system calls by time, failing statuses, each
 thread's last calls, faults, processes, images). Next: process-relative
 times, user-address symbolization from the image events.
+Since 2026-11-03 also `net` (TCP accept, connect, close and reset with
+local and remote addresses), `logon` (LogonUser/LSA logons: pid, user,
+domain, type, how, status; never the password) and `console` (console
+sessions and pseudo consoles created, resized, closed with how many
+programs it ended); `process start` carries the command line. Server
+logs: `logtee=C:/dir` copies what programs write below a directory to the
+serial log (`logtee: <file>: <line>`; sshd's and sshd-session's logs in
+the sshd scenarios), and `conpty=trace` logs a pseudo console's VT
+traffic in both directions.
 
 ## 2. "What is missing" ledger — done (`nt::ledger`, `ledger_test`)
 

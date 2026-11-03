@@ -1638,6 +1638,32 @@ SSH. **SSH that works as a remote shell** (the owner, 2026-11-03).
    6. Observability (the owner's rule): sshd's and sshd-session's logs
       kept in a file and in failed logs, connection and auth events in
       the event stream, the ledger's ssh-related gaps in the report.
+   **Status (2026-11-03): steps 1-3 done in their first form.**
+   1. Done: `sshd_server` (sshd started at boot as SYSTEM without -d on
+      its port 22; three logins one after another and two at once, each
+      running a command; restarted when it ends by the kernel's
+      `restart=` supervisor, tested by `service_restart`; logs in
+      %ProgramData%\ssh\logs through sshd_config's SyslogFacility LOCAL0,
+      copied to the serial log by `logtee=`; `events=net,logon` checked).
+      `cargo xtask serve sshd` forwards host port 2222 (WORKFLOW "SSH into
+      a running gala"). Not yet: the Docker/server image.
+   2. Done: ConPTY (CreatePseudoConsole, ResizePseudoConsole,
+      ClosePseudoConsole; gala's conhost.exe `--headless`; ARCHITECTURE
+      "Pseudo consoles"; `conpty_test`: line editing, size and resize,
+      arrow keys and Backspace as key events, Ctrl+C to the handler,
+      close ends the child) and `sshd_shell` (sshd-session runs
+      `conhost.exe --headless ... -- busybox.exe sh`; the host's `ssh -tt`
+      types a command, edits a line with DEL, interrupts `sleep 60` with
+      Ctrl+C, exits; `conpty=trace`). Not yet: gala's cmd.exe has no
+      interactive prompt (busybox sh is the shell), resize over ssh is
+      not exercised (the host client has no tty in the scenario: sshd
+      sends a 0 x 0 resize, ignored), full-screen programs that draw with
+      the cell APIs (SetConsoleCursorPosition, WriteConsoleOutput) do not
+      reach the terminal (only VT text does), `gala` commands in the
+      shell untested.
+   3. Begun: `sshd_sftp` (put a 200 KiB file, ls, get it back byte for
+      byte, rm; sftp-server.exe found on the shell's PATH). Not yet: scp,
+      permissions, large files.
    Security: logins go through LSA and tokens as now; UIPI and integrity
    levels apply to the session; host keys persist across boots (`persist`)
    and across handovers (R9: sshd's listening socket and sessions are
@@ -1648,7 +1674,9 @@ RS. **Remote access and sessions** (the owner, 2026-11-03; design:
    desktops; a desktop is shown by a presenter (console, remote shasha
    client, none, test). Proposed order, each test first:
    - A. SSH steps 1-2 (item SSH): sshd as a server, then ConPTY
-     (`conpty_test`, an interactive shell over ssh); then sftp.
+     (`conpty_test`, an interactive shell over ssh); then sftp. **Done
+     (2026-11-03)**: `sshd_server`, `conpty_test`, `sshd_shell`,
+     `sshd_sftp` (item SSH's status).
    - B1. Session ids and per-session named objects (`session_test`: a
      SYSTEM process is session 0 and a normal one 1, PEB,
      ProcessIdToSessionId and TokenSessionId agree; `Local\` objects of

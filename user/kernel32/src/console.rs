@@ -253,11 +253,16 @@ pub extern "system" fn SetConsoleMode(h: Handle, mode: u32) -> Bool {
             s.output_mode = mode;
         }
     });
-    if input {
-        // The console window's session edits and echoes by these (none
-        // without a window).
-        // SAFETY: a plain call.
-        unsafe { GalaConsoleMode(mode & 7, 1) };
+    // The console window's session edits and echoes by the input mode
+    // (and queues resizes with ENABLE_WINDOW_INPUT); a pseudo console
+    // returns at LF by the output mode (none without a session).
+    // SAFETY: plain calls.
+    unsafe {
+        if input {
+            GalaConsoleMode(mode & 0xf, 1);
+        } else {
+            GalaConsoleMode(mode, 2);
+        }
     }
     TRUE
 }
@@ -477,12 +482,41 @@ fn window(cursor_y: i16) -> [i16; 4] {
     [0, top, WIDTH - 1, top + WINDOW_HEIGHT - 1]
 }
 
-/// CONSOLE_SCREEN_BUFFER_INFO (22 bytes) at `out`.
+/// The size (columns, rows) of the caller's console session (a window's
+/// or a pseudo console's), if it has one.
+fn session_size() -> Option<(i16, i16)> {
+    let mut size = 0u32;
+    // SAFETY: our output.
+    let status = unsafe { GalaConsoleSize(0, &mut size, 0) };
+    (status == 0).then_some((size as u16 as i16, (size >> 16) as u16 as i16))
+}
+
+/// CONSOLE_SCREEN_BUFFER_INFO (22 bytes) at `out`. A console session's
+/// buffer is its window (a pseudo console has no scrollback): its size,
+/// the cursor kept inside it.
 fn screen_info(out: *mut u8) {
     let (cursor, attributes) = with_state(|s| (s.cursor, s.attributes));
-    let words: [i16; 11] = {
-        let w = window(cursor.1);
-        [WIDTH, HEIGHT, cursor.0, cursor.1, attributes as i16, w[0], w[1], w[2], w[3], WIDTH, 60]
+    let words: [i16; 11] = match session_size() {
+        Some((w, h)) => {
+            let (x, y) = (cursor.0.min(w - 1), cursor.1.min(h - 1));
+            [w, h, x, y, attributes as i16, 0, 0, w - 1, h - 1, w, h]
+        }
+        None => {
+            let w = window(cursor.1);
+            [
+                WIDTH,
+                HEIGHT,
+                cursor.0,
+                cursor.1,
+                attributes as i16,
+                w[0],
+                w[1],
+                w[2],
+                w[3],
+                WIDTH,
+                60,
+            ]
+        }
     };
     for (i, v) in words.iter().enumerate() {
         // SAFETY: the caller's 22-byte structure.
@@ -674,7 +708,10 @@ pub extern "system" fn GetLargestConsoleWindowSize(h: Handle) -> u32 {
     if output(h).is_none() {
         return 0;
     }
-    (WIDTH as u32) | (60 << 16)
+    match session_size() {
+        Some((w, h)) => (w as u16 as u32) | ((h as u16 as u32) << 16),
+        None => (WIDTH as u32) | (60 << 16),
+    }
 }
 
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -682,6 +719,7 @@ unsafe extern "system" {
     fn GalaConsoleMode(mode: u32, set: u32) -> u32;
     fn GalaConsoleCtrl(seen: *mut u32) -> u32;
     fn GalaConsoleInputEvents(records: *mut u8, max: u32, count: *mut u32, flags: u32) -> u32;
+    fn GalaConsoleSize(id: u32, size: *mut u32, set: u32) -> u32;
 }
 
 /// A console input handle: one opened here, or one the kernel reports as
@@ -748,6 +786,15 @@ fn key_events(
     };
     for (i, k) in keys.chunks_exact(16).take(n).enumerate() {
         let mut record = [0u8; 20];
+        if k[0..4] == 0x8000_0004u32.to_le_bytes() {
+            // The kernel's WINDOW_BUFFER_SIZE_EVENT (nt::conhost::Key):
+            // EventType 4, dwSize.
+            record[0] = 4;
+            record[4..8].copy_from_slice(&k[4..8]);
+            // SAFETY: the caller's array of `length` INPUT_RECORDs.
+            unsafe { core::ptr::copy_nonoverlapping(record.as_ptr(), buffer.add(20 * i), 20) };
+            continue;
+        }
         record[0] = 1; // KEY_EVENT
         record[4..20].copy_from_slice(k);
         if ansi {

@@ -236,6 +236,16 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         info!("profile: server (no desktop, no console windows)");
     }
     nt::syscalls::set_trace(cmdline.flag("trace"));
+    // `conpty=trace`: pseudo consoles log their VT traffic (nt::conhost).
+    nt::conhost::set_tracing(cmdline.value("conpty") == Some("trace"));
+    // `logtee=C:/dir` (percent-encoded): writes to files below it are
+    // logged too (nt::logtee).
+    if let Some(dir) = cmdline.value("logtee") {
+        let mut decoded = alloc::vec::Vec::new();
+        if cmdline::percent_decode(dir, &mut decoded).is_ok() {
+            nt::logtee::configure(core::str::from_utf8(&decoded).unwrap_or(""));
+        }
+    }
     // The watchdog's test: CPU 1 stops taking timer interrupts for a while.
     time::set_hang_test(cmdline.flag("hangtest"));
     // The kernel watchdog's test: this thread stays in the kernel 25 s
@@ -310,16 +320,41 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
                 other => other,
             };
             let console = console_window(&info, name, cmdline.value("console"));
-            run_program(
-                &info,
-                &cmdline,
-                name,
-                core::str::from_utf8(&decoded).unwrap_or(""),
-                cwd,
-                wait_all,
-                console,
-                handover_requests.as_ref(),
-            );
+            // `restart=name[:max]`: a service that is started again when
+            // it ends (at most `max` times, default 10; a run of over a
+            // minute starts the count again), as the service control
+            // manager's recovery actions restart a failed service.
+            let restarts = restart_limit(cmdline.value("restart"), name);
+            let mut attempt = 0u32;
+            loop {
+                let started = time::raw_monotonic_ns();
+                run_program(
+                    &info,
+                    &cmdline,
+                    name,
+                    core::str::from_utf8(&decoded).unwrap_or(""),
+                    cwd,
+                    wait_all,
+                    console.clone(),
+                    handover_requests.as_ref(),
+                );
+                let Some(max) = restarts else { break };
+                if time::raw_monotonic_ns().saturating_sub(started) > 60_000_000_000 {
+                    attempt = 0;
+                }
+                if attempt >= max {
+                    warn!("service: {name} ended {attempt} times; not restarted again");
+                    break;
+                }
+                attempt += 1;
+                info!("service: {name} ended; restarting it ({attempt} of {max})");
+                events::emit(
+                    events::Category::Process,
+                    "service restart",
+                    format_args!(r#""name":{},"attempt":{attempt}"#, events::Str(name)),
+                );
+                sched::sleep_ms(1000);
+            }
             // What the program's end changed (delete-on-close at exit).
             nt::persist::sync();
             nt::ledger::dump();
@@ -896,6 +931,18 @@ fn wait_for_the_rest() {
             None => warn!("run: {} ended without an exit status", next.name),
         }
     }
+}
+
+/// How many times `restart=a.exe[:max],b.exe...` restarts program `name`
+/// (None: it is not listed; the default limit is 10).
+fn restart_limit(value: Option<&str>, name: &str) -> Option<u32> {
+    value?.split(',').find_map(|item| {
+        let (n, max) = match item.split_once(':') {
+            Some((n, max)) => (n, max.parse().ok()?),
+            None => (item, 10),
+        };
+        n.eq_ignore_ascii_case(name).then_some(max)
+    })
 }
 
 /// `console=<program>`: that program (a `start=` or `run=` module name)

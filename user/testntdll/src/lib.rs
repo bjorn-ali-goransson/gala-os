@@ -274,6 +274,10 @@ syscall_stubs! {
     GalaWindowSetIcon = 0x7f3e, fn(id: u32, pixels: *const u32, size: usize);
     GalaConsoleMode = 0x7f3f, fn(mode: u32, set: u32);
     GalaConsoleCtrl = 0x7f40, fn(seen: *mut u32);
+    GalaConsoleCreate = 0x7f80, fn(flags: u32, size: u32, info: *mut [u32; 2]);
+    GalaConsoleSize = 0x7f81, fn(id: u32, size: *mut u32, set: u32);
+    GalaConsoleClose = 0x7f82, fn(id: u32);
+    GalaConsoleTrace = 0x7f83, fn(id: u32, direction: u32, bytes: *const u8, len: usize);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);

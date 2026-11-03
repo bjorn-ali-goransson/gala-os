@@ -4,6 +4,16 @@
 Port 22
 AuthorizedKeysFile .ssh/authorized_keys
 PasswordAuthentication yes
+# The sftp subsystem: sshd-session runs it through the users' shell
+# (DefaultShell, busybox sh), which looks for it on the PATH (sshd quotes
+# the command, so a path with spaces cannot be given): the scenarios ship
+# a copy in C:\Windows\System32, as Windows' OpenSSH feature lives in
+# System32\OpenSSH, on the system PATH.
 Subsystem sftp sftp-server.exe
 # Where sshd finds its per-connection program (sshd_config(5) of 9.8).
 SshdSessionPath "C:\Program Files\OpenSSH\sshd-session.exe"
+# Logs go to %ProgramData%\ssh\logs (Win32-OpenSSH's file logging; -e on
+# the command line sends them to standard error instead, as the debug
+# scenarios do). VERBOSE names the key of each login.
+SyslogFacility LOCAL0
+LogLevel VERBOSE

@@ -1,7 +1,7 @@
 //! The event stream: one JSON object per line on the debug console
 //! (`arch::debugcon`), for tools rather than people (docs/OBSERVABILITY.md
 //! section 1). Off by default; `events=syscall,image,thread,process,fault,
-//! mock` (or `events=all`) on the kernel command line turns categories
+//! mock,net,logon,console` (or `events=all`) on the kernel command line turns categories
 //! on (`mock`: live mocking's changes, such as clock control). A `record`
 //! boot's recording also goes here (`"ev":"rec"`, whatever the mask). Each
 //! line starts with `"t"` (ns since boot), `"cpu"` and `"ev"`; the rest
@@ -19,9 +19,18 @@ pub enum Category {
     Fault = 16,
     /// Live mocking's changes (clock control, record/replay).
     Mock = 32,
+    /// Connections: TCP accepted, connected, closed (with the peer).
+    Net = 64,
+    /// Logons: LogonUser and LSA logons (user, type, result).
+    Logon = 128,
+    /// Console sessions and pseudo consoles: created, resized, closed.
+    Console = 256,
 }
 
-const NAMES: [(&str, u32); 6] = [
+const NAMES: [(&str, u32); 9] = [
+    ("net", Category::Net as u32),
+    ("logon", Category::Logon as u32),
+    ("console", Category::Console as u32),
     ("syscall", Category::Syscall as u32),
     ("image", Category::Image as u32),
     ("thread", Category::Thread as u32),

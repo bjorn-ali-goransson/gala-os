@@ -7,6 +7,8 @@
 "DefaultShell"=sz:C:\gala\busybox.exe
 "DefaultShellCommandOption"=sz:sh -c
 "DefaultShellEscapeArguments"=dword:0
+; An interactive session (no command) runs `busybox.exe sh`.
+"DefaultShellArguments"=sz:sh
 
 ; galatest has logged on before (its profile, C:\Users\galatest, holds
 ; .ssh\authorized_keys): sshd finds the home directory in ProfileList.

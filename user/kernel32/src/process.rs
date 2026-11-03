@@ -22,6 +22,8 @@ const IGNORED_FLAGS: u32 =
 const STARTF_USESTDHANDLES: u32 = 0x100;
 const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x2_0002;
+/// An HPCON (CreatePseudoConsole): the child is attached to it.
+const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x2_0016;
 /// GROUP_AFFINITY (16 bytes), for threads.
 const PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY: usize = 0x3_0003;
 /// PROCESSOR_NUMBER (4 bytes), for threads.
@@ -363,14 +365,21 @@ fn create_process(
         }
     };
     // STARTUPINFOEXW: lpAttributeList after the 104-byte STARTUPINFOW.
-    let handle_list = if flags & EXTENDED_STARTUPINFO_PRESENT != 0 && !startup.is_null() {
+    let list = if flags & EXTENDED_STARTUPINFO_PRESENT != 0 && !startup.is_null() {
         // SAFETY: the caller's STARTUPINFOEXW (cb is at least 112).
-        let list = unsafe { *startup.add(104).cast::<*const AttributeList>() };
-        attribute(list, PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
+        unsafe { *startup.add(104).cast::<*const AttributeList>() }
     } else {
-        None
+        core::ptr::null()
     };
-    let mut p = [0u8; 160];
+    let handle_list = attribute(list, PROC_THREAD_ATTRIBUTE_HANDLE_LIST);
+    // The pseudo console's session (the HPCON's first field).
+    let pseudo_console = attribute(list, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE)
+        // SAFETY: an HPCON from CreatePseudoConsole (a PseudoConsole).
+        .map(|(value, _)| unsafe { *(value as *const u32) });
+    // SAFETY: the caller's STARTUPINFOW (dwFlags at 60).
+    let own_std =
+        !startup.is_null() && unsafe { *startup.add(60).cast::<u32>() } & STARTF_USESTDHANDLES != 0;
+    let mut p = [0u8; 168];
     let mut put = |at: usize, v: u64| p[at..at + 8].copy_from_slice(&v.to_le_bytes());
     put(0, image.chars.as_ptr() as u64);
     put(16, line.as_ptr() as u64);
@@ -412,8 +421,20 @@ fn create_process(
         bits |= 16;
         p[152..160].copy_from_slice(&(token as u64).to_le_bytes());
     }
+    // Flag 32: attached to a pseudo console; 64: with its own standard
+    // handles (the documented default without STARTF_USESTDHANDLES).
+    if let Some(session) = pseudo_console {
+        bits |= 32;
+        if !own_std {
+            bits |= 64;
+        }
+        p[160..164].copy_from_slice(&session.to_le_bytes());
+    } else if flags & DETACHED_PROCESS != 0 {
+        // Flag 128: no console at all.
+        bits |= 128;
+    }
     p[12..16].copy_from_slice(&bits.to_le_bytes());
-    // SAFETY: the 160-byte parameter block; its pointers live through
+    // SAFETY: the 168-byte parameter block; its pointers live through
     // the call.
     let status = unsafe { GalaCreateProcess(p.as_mut_ptr()) };
     if own_env {
@@ -743,6 +764,11 @@ pub extern "system" fn UpdateProcThreadAttribute(
     }
     if attribute == PROC_THREAD_ATTRIBUTE_HANDLE_LIST {
         if size == 0 || !size.is_multiple_of(8) {
+            return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+        }
+    } else if attribute == PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE {
+        // The value is the HPCON itself.
+        if size != 8 || value == 0 {
             return fail_with(ERROR_INVALID_PARAMETER, FALSE);
         }
     } else if attribute == PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR

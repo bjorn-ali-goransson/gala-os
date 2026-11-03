@@ -3,6 +3,17 @@
 //! draws it in a window), and the keys the host queues for them. A
 //! process belongs to at most one session (`Process::console`), which the
 //! processes it creates inherit.
+//!
+//! A *pseudo console* (ConPTY: CreatePseudoConsole, or Win32-OpenSSH's
+//! `conhost.exe --headless`) is a session whose host is gala's conhost.exe
+//! in pseudo-console mode: it carries the output to a pipe as VT text and
+//! turns the VT input from another pipe into key records. Its output does
+//! not go to the serial line (`conpty=trace` logs both directions), a bare
+//! LF is written as CR LF (the console's processed output without
+//! DISABLE_NEWLINE_AUTO_RETURN: a terminal's LF only moves down), it has a
+//! size the programs see (GetConsoleScreenBufferInfo) and that the host or
+//! the creator changes (ResizePseudoConsole), and closing it
+//! (ClosePseudoConsole, or its host ending) ends its processes.
 
 use super::object::{Event, EventType, KObject, ObjectBody, ObjectRef};
 use super::status::NtStatus;
@@ -19,7 +30,11 @@ pub const MAX_INPUT: usize = 256;
 /// A key record as the host queues it (KEY_EVENT_RECORD's fields).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Key {
+    /// KEY_EVENT_RECORD's bKeyDown. A WINDOW_BUFFER_SIZE_EVENT is a record
+    /// with `size` set instead (gala's own encoding between the kernel and
+    /// kernel32: bKeyDown 0x8000_0004, then columns and rows as u16).
     pub down: bool,
+    pub size: Option<(u16, u16)>,
     pub repeat: u16,
     pub vk: u16,
     pub scan: u16,
@@ -29,6 +44,12 @@ pub struct Key {
 
 pub struct Session {
     pub id: u32,
+    /// A pseudo console (ConPTY): output to its host's pipe only, LF as
+    /// CR LF.
+    pub pseudo: bool,
+    /// The process that created it (0: the kernel): it may resize and
+    /// close it as the host may.
+    pub owner: u64,
     inner: IrqMutex<Inner>,
     /// Set while keys are queued (a reader waits on it).
     pub input_ready: ObjectRef,
@@ -41,6 +62,14 @@ pub struct Session {
 pub const ENABLE_PROCESSED_INPUT: u32 = 0x1;
 pub const ENABLE_LINE_INPUT: u32 = 0x2;
 pub const ENABLE_ECHO_INPUT: u32 = 0x4;
+/// Resizes are queued as WINDOW_BUFFER_SIZE_EVENT records only with it.
+pub const ENABLE_WINDOW_INPUT: u32 = 0x8;
+/// Output modes (SetConsoleMode on the output).
+pub const ENABLE_PROCESSED_OUTPUT: u32 = 0x1;
+pub const DISABLE_NEWLINE_AUTO_RETURN: u32 = 0x8;
+/// A console window's size until its host says (columns, rows): what
+/// kernel32 reported before sessions had sizes.
+pub const DEFAULT_SIZE: (u16, u16) = (120, 30);
 
 /// The longest line a cooked read collects (characters).
 pub const MAX_LINE: usize = 1024;
@@ -62,13 +91,54 @@ struct Inner {
     mode: u32,
     /// How many Ctrl+C events there have been.
     ctrl_count: u32,
+    /// The output mode (ENABLE_PROCESSED_OUTPUT, DISABLE_NEWLINE_AUTO_RETURN).
+    output_mode: u32,
+    /// The last byte written was CR (a following LF is not translated).
+    after_cr: bool,
+    /// Columns and rows.
+    size: (u16, u16),
+    /// Closed (ClosePseudoConsole, the host gone): no new host or member.
+    closed: bool,
 }
 
 static SESSIONS: IrqMutex<Vec<KArc<Session>>> = IrqMutex::new(Vec::new());
 static NEXT_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 
+/// `conpty=trace`: pseudo consoles' hosts log their VT traffic
+/// (GalaConsoleTrace).
+static TRACE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn set_tracing(on: bool) {
+    TRACE.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn tracing() -> bool {
+    TRACE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Bytes shown as text: printable ASCII as is, the rest (escape, control
+/// characters, `\`, UTF-8 bytes) as `\xNN`, so a VT trace is one line.
+pub struct Escaped<'a>(pub &'a [u8]);
+
+impl core::fmt::Display for Escaped<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for &b in self.0 {
+            if (0x20..0x7f).contains(&b) && b != b'\\' {
+                core::fmt::Write::write_char(f, char::from(b))?;
+            } else {
+                write!(f, "\\x{b:02x}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Session {
     pub fn new() -> Result<KArc<Session>, NtStatus> {
+        Self::with(false, 0, DEFAULT_SIZE)
+    }
+
+    pub fn with(pseudo: bool, owner: u64, size: (u16, u16)) -> Result<KArc<Session>, NtStatus> {
         let mut ring = Vec::new();
         ring.try_reserve_exact(RING).map_err(|_| NtStatus::NO_MEMORY)?;
         ring.resize(RING, 0);
@@ -91,6 +161,8 @@ impl Session {
         let id = NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         KArc::try_new(Session {
             id,
+            pseudo,
+            owner,
             inner: IrqMutex::new(Inner {
                 ring,
                 head: 0,
@@ -102,6 +174,11 @@ impl Session {
                 ready,
                 mode: ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT,
                 ctrl_count: 0,
+                // ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT.
+                output_mode: ENABLE_PROCESSED_OUTPUT | 0x2,
+                after_cr: false,
+                size,
+                closed: false,
             }),
             input_ready,
             ctrl_event,
@@ -113,8 +190,61 @@ impl Session {
     /// set (by the caller, outside the lock).
     pub fn write(&self, bytes: &[u8]) -> Option<ObjectRef> {
         let mut s = self.inner.lock();
-        s.append(bytes);
+        if self.pseudo {
+            // A terminal's LF only moves down: the console's processed
+            // output returns too (unless DISABLE_NEWLINE_AUTO_RETURN).
+            let translate = s.output_mode & ENABLE_PROCESSED_OUTPUT != 0
+                && s.output_mode & DISABLE_NEWLINE_AUTO_RETURN == 0;
+            for &b in bytes {
+                if translate && b == b'\n' && !s.after_cr {
+                    s.append(b"\r");
+                }
+                s.after_cr = b == b'\r';
+                s.append(&[b]);
+            }
+        } else {
+            s.append(bytes);
+        }
         s.event.clone()
+    }
+
+    /// The output mode (SetConsoleMode on the output).
+    pub fn set_output_mode(&self, mode: u32) {
+        self.inner.lock().output_mode = mode;
+    }
+
+    /// Columns and rows.
+    pub fn size(&self) -> (u16, u16) {
+        self.inner.lock().size
+    }
+
+    /// A new size (ResizePseudoConsole, the window's): queued as a
+    /// WINDOW_BUFFER_SIZE_EVENT when the input mode asks for those; whether
+    /// one was (the caller then sets `input_ready`).
+    pub fn resize(&self, size: (u16, u16)) -> bool {
+        let mut s = self.inner.lock();
+        if s.size == size {
+            return false;
+        }
+        s.size = size;
+        if s.mode & ENABLE_WINDOW_INPUT != 0 && s.input.len() < MAX_INPUT {
+            let record = Key { size: Some(size), ..Key::default() };
+            return s.input.try_push(record).is_ok();
+        }
+        false
+    }
+
+    /// Closes the session: whether this call did (the first), and the
+    /// host's event to set.
+    pub fn close(&self) -> (bool, Option<ObjectRef>) {
+        let mut s = self.inner.lock();
+        let first = !s.closed;
+        s.closed = true;
+        (first, s.event.clone())
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.inner.lock().closed
     }
 
     /// Takes up to `out.len()` bytes of output, oldest first; how many.
@@ -133,7 +263,7 @@ impl Session {
     /// waiting. Only one host: another process is refused.
     pub fn set_host(&self, host: u64, event: ObjectRef) -> Result<Option<ObjectRef>, NtStatus> {
         let mut s = self.inner.lock();
-        if s.host != 0 && s.host != host {
+        if (s.host != 0 && s.host != host) || s.closed {
             return Err(NtStatus::ACCESS_DENIED);
         }
         s.host = host;
@@ -317,9 +447,63 @@ impl Inner {
 /// A new session, kept until the kernel stops (sessions are few: one per
 /// console window).
 pub fn create() -> Result<KArc<Session>, NtStatus> {
-    let session = Session::new()?;
-    SESSIONS.lock().try_push(session.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
+    create_with(false, 0, DEFAULT_SIZE)
+}
+
+/// A new session (`pseudo`: a pseudo console created by process `owner`);
+/// closed sessions nothing refers to any more are forgotten first (a
+/// pseudo console per ssh login would otherwise add up).
+pub fn create_with(pseudo: bool, owner: u64, size: (u16, u16)) -> Result<KArc<Session>, NtStatus> {
+    let session = Session::with(pseudo, owner, size)?;
+    let mut sessions = SESSIONS.lock();
+    sessions.retain(|s| !(s.is_closed() && KArc::strong_count(s) == 1));
+    sessions.try_push(session.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
     Ok(session)
+}
+
+/// Closes session `s` (ClosePseudoConsole, its host gone): its processes
+/// other than the host and the creator end with STATUS_CONTROL_C_EXIT,
+/// as a closed console's do on Windows (CTRL_CLOSE_EVENT, then the end);
+/// how many.
+pub fn close(s: &KArc<Session>) -> usize {
+    let (first, event) = s.close();
+    if let Some(e) = event {
+        super::wait::set_signal(&e, 1);
+    }
+    // Readers waiting for keys look again (and find the session closed).
+    super::wait::set_signal(&s.input_ready, 1);
+    if !first {
+        return 0;
+    }
+    let host = s.host();
+    let Ok(running) = super::process::running() else { return 0 };
+    let mut ended = 0;
+    for p in running.iter() {
+        let member = p.console.as_ref().is_some_and(|c| KArc::ptr_eq(c, s));
+        if member && p.id != host && p.id != s.owner {
+            super::process::terminate(p, NtStatus::CONTROL_C_EXIT, false);
+            ended += 1;
+        }
+    }
+    crate::events::emit(
+        crate::events::Category::Console,
+        "console close",
+        format_args!(r#""id":{},"pseudo":{},"ended":{ended}"#, s.id, s.pseudo),
+    );
+    ended
+}
+
+/// A process ended: the sessions it hosted close (their programs end, as
+/// when Windows' console host goes).
+pub fn process_ended(pid: u64) {
+    let hosted: Option<KArc<Session>> = {
+        let sessions = SESSIONS.lock();
+        sessions.iter().find(|s| s.host() == pid && !s.is_closed()).cloned()
+    };
+    if let Some(s) = hosted {
+        crate::info!("console: session {} closes: its host (pid {pid}) ended", s.id);
+        close(&s);
+    }
 }
 
 pub fn find(id: u32) -> Option<KArc<Session>> {
@@ -416,5 +600,44 @@ mod tests {
         s.set_mode(0);
         assert_eq!(s.push_input(&[key(3)]), (1, false));
         assert_eq!(s.ctrl_count(), 1);
+    }
+
+    #[test]
+    fn a_pseudo_console_returns_at_line_feeds_and_resizes() {
+        let s = Session::with(true, 7, (80, 25)).unwrap();
+        // A bare LF becomes CR LF; CR LF stays (also across writes).
+        s.write(b"a\nb\r");
+        s.write(b"\nc\n");
+        let mut out = [0u8; 16];
+        let n = s.read(&mut out);
+        assert_eq!(&out[..n], b"a\r\nb\r\nc\r\n");
+        // DISABLE_NEWLINE_AUTO_RETURN: LF alone.
+        s.set_output_mode(ENABLE_PROCESSED_OUTPUT | DISABLE_NEWLINE_AUTO_RETURN);
+        s.write(b"d\n");
+        let n = s.read(&mut out);
+        assert_eq!(&out[..n], b"d\n");
+        // A window's session is not translated.
+        let w = Session::new().unwrap();
+        w.write(b"e\n");
+        assert_eq!(w.read(&mut out), 2);
+        // Resizes: the size, and a record only with ENABLE_WINDOW_INPUT.
+        assert_eq!(s.size(), (80, 25));
+        assert!(!s.resize((100, 30)));
+        assert_eq!(s.size(), (100, 30));
+        s.set_mode(ENABLE_WINDOW_INPUT);
+        assert!(s.resize((90, 20)));
+        assert!(!s.resize((90, 20)));
+        let mut keys = [Key::default(); 2];
+        assert_eq!(s.take_input(&mut keys), 1);
+        assert_eq!(keys[0].size, Some((90, 20)));
+        // Closing: once; a closed session takes no host.
+        assert!(s.close().0);
+        assert!(!s.close().0);
+        let event = KObject::new(ObjectBody::Event(Event {
+            kind: EventType::Notification,
+            dispatcher: Dispatcher::new(0),
+        }))
+        .unwrap();
+        assert!(s.set_host(9, event).is_err());
     }
 }

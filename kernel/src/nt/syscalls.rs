@@ -114,6 +114,13 @@ pub const GALA_CONSOLE_INPUT_EVENTS: u32 = 0x7f3d;
 pub const GALA_WINDOW_SET_ICON: u32 = 0x7f3e;
 pub const GALA_CONSOLE_MODE: u32 = 0x7f3f;
 pub const GALA_CONSOLE_CTRL: u32 = 0x7f40;
+/// Pseudo consoles (ConPTY; nt::conhost): a session made by a program
+/// (kernel32's CreatePseudoConsole, conhost.exe --headless), its size,
+/// its end, and the host's VT trace (`conpty=trace`).
+pub const GALA_CONSOLE_CREATE: u32 = 0x7f80;
+pub const GALA_CONSOLE_SIZE: u32 = 0x7f81;
+pub const GALA_CONSOLE_CLOSE: u32 = 0x7f82;
+pub const GALA_CONSOLE_TRACE: u32 = 0x7f83;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -329,6 +336,10 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_SET_ICON, "GalaWindowSetIcon", 3, gala_window_set_icon),
     (GALA_CONSOLE_MODE, "GalaConsoleMode", 2, gala_console_mode),
     (GALA_CONSOLE_CTRL, "GalaConsoleCtrl", 1, gala_console_ctrl),
+    (GALA_CONSOLE_CREATE, "GalaConsoleCreate", 3, gala_console_create),
+    (GALA_CONSOLE_SIZE, "GalaConsoleSize", 3, gala_console_size),
+    (GALA_CONSOLE_CLOSE, "GalaConsoleClose", 1, gala_console_close),
+    (GALA_CONSOLE_TRACE, "GalaConsoleTrace", 4, gala_console_trace),
     (GALA_WINDOW_REGISTER, "GalaWindowRegister", 2, gala_window_register),
     (GALA_WINDOW_UPDATE, "GalaWindowUpdate", 1, gala_window_update),
     (GALA_WINDOW_UNREGISTER, "GalaWindowUnregister", 1, gala_window_unregister),
@@ -782,7 +793,12 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
         if call.process.read(buffer + done, &mut chunk[..n]).is_err() {
             return NtStatus::ACCESS_VIOLATION;
         }
-        console::write_bytes(&chunk[..n]);
+        // A pseudo console's output goes to its terminal only (an ssh
+        // session's would interleave with the log); `conpty=trace` logs it.
+        let pseudo = call.process.console.as_ref().is_some_and(|s| s.pseudo);
+        if !pseudo {
+            console::write_bytes(&chunk[..n]);
+        }
         // A console window's session sees it too.
         if let Some(session) = &call.process.console
             && let Some(event) = session.write(&chunk[..n])
@@ -1513,6 +1529,10 @@ fn gala_console_read(call: &mut Call<'_>) -> NtStatus {
     let (buf, length, count) = (arg!(call, 1), (arg!(call, 2) as usize).min(4096), arg!(call, 3));
     let mut bytes = [0u8; 4096];
     let n = session.read(&mut bytes[..length]);
+    // A closed session's last output was taken: its host may go.
+    if n == 0 && session.is_closed() {
+        return NtStatus::PIPE_BROKEN;
+    }
     if n > 0 && call.process.write(buf, &bytes[..n]).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
@@ -1540,6 +1560,7 @@ fn gala_console_input(call: &mut Call<'_>) -> NtStatus {
             scan: w(8),
             ch: w(10),
             control: u32::from_le_bytes([r[12], r[13], r[14], r[15]]),
+            size: None,
         };
     }
     let (queued, ctrl) = session.push_input(&keys[..count]);
@@ -1586,6 +1607,14 @@ fn gala_console_input_events(call: &mut Call<'_>) -> NtStatus {
     }
     let mut raw = [0u8; 16 * 64];
     for (k, r) in keys[..n].iter().zip(raw.chunks_exact_mut(16)) {
+        if let Some((cols, rows)) = k.size {
+            // A WINDOW_BUFFER_SIZE_EVENT (gala's encoding, nt::conhost::Key).
+            r.fill(0);
+            r[0..4].copy_from_slice(&0x8000_0004u32.to_le_bytes());
+            r[4..6].copy_from_slice(&cols.to_le_bytes());
+            r[6..8].copy_from_slice(&rows.to_le_bytes());
+            continue;
+        }
         r[0..4].copy_from_slice(&u32::from(k.down).to_le_bytes());
         r[4..6].copy_from_slice(&k.repeat.to_le_bytes());
         r[6..8].copy_from_slice(&k.vk.to_le_bytes());
@@ -1601,11 +1630,15 @@ fn gala_console_input_events(call: &mut Call<'_>) -> NtStatus {
 }
 
 /// GalaConsoleMode(Mode, Set): the calling process's console session's
-/// input mode (ENABLE_PROCESSED/LINE/ECHO_INPUT; kernel32 keeps the
-/// others): set when Set is 1. STATUS_NOT_FOUND without a session.
+/// input mode (ENABLE_PROCESSED/LINE/ECHO/WINDOW_INPUT; kernel32 keeps the
+/// others): set when Set is 1; with Set 2 the output mode
+/// (ENABLE_PROCESSED_OUTPUT, DISABLE_NEWLINE_AUTO_RETURN: a pseudo
+/// console's LF translation). STATUS_NOT_FOUND without a session.
 fn gala_console_mode(call: &mut Call<'_>) -> NtStatus {
     let Some(session) = call.process.console.clone() else { return NtStatus::NOT_FOUND };
-    if arg!(call, 1) == 1 {
+    if arg!(call, 1) == 2 {
+        session.set_output_mode(arg!(call, 0) as u32);
+    } else if arg!(call, 1) == 1 {
         session.set_mode(arg!(call, 0) as u32);
         // Keys waiting for a cooked line may be ready now.
         wait::set_signal(&session.input_ready, 1);
@@ -1647,6 +1680,121 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
             return waited;
         }
     }
+}
+
+/// GalaConsoleCreate(Flags, Size, *Info): a new console session made by
+/// the caller; flag 1: a pseudo console (ConPTY). Size: columns in the
+/// low word, rows in the high one (each 1..=32767). Info receives the id
+/// (u32) and flags (u32; 1: `conpty=trace` is on, the host passes its VT
+/// traffic to GalaConsoleTrace).
+fn gala_console_create(call: &mut Call<'_>) -> NtStatus {
+    let (flags, size, info) = (arg!(call, 0) as u32, arg!(call, 1) as u32, arg!(call, 2));
+    let size = (size as u16, (size >> 16) as u16);
+    if flags & !1 != 0 || !(1..=0x7fff).contains(&size.0) || !(1..=0x7fff).contains(&size.1) {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let pseudo = flags & 1 != 0;
+    let session = tri!(super::conhost::create_with(pseudo, call.process.id, size));
+    let mut out = [0u8; 8];
+    out[0..4].copy_from_slice(&session.id.to_le_bytes());
+    out[4..8].copy_from_slice(&u32::from(super::conhost::tracing()).to_le_bytes());
+    if call.process.write(info, &out).is_err() {
+        super::conhost::close(&session);
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    crate::events::emit(
+        crate::events::Category::Console,
+        "console create",
+        format_args!(
+            r#""id":{},"pid":{},"pseudo":{pseudo},"cols":{},"rows":{}"#,
+            session.id, call.process.id, size.0, size.1
+        ),
+    );
+    NtStatus::SUCCESS
+}
+
+/// The session `id` if the caller hosts or created it.
+fn owned_session(call: &Call<'_>, id: u32) -> Result<KArc<super::conhost::Session>, NtStatus> {
+    let session = super::conhost::find(id).ok_or(NtStatus::INVALID_PARAMETER)?;
+    let pid = call.process.id;
+    if session.host() != pid && session.owner != pid {
+        return Err(NtStatus::ACCESS_DENIED);
+    }
+    Ok(session)
+}
+
+/// GalaConsoleSize(Id, *Size, Set): with Set 0, the size (columns low,
+/// rows high, u32) of session Id, or with Id 0 of the caller's own
+/// (STATUS_NOT_FOUND without one); with Set 1 the session's host or
+/// creator gives it a new size (ResizePseudoConsole, the window's).
+fn gala_console_size(call: &mut Call<'_>) -> NtStatus {
+    let (id, ptr, set) = (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2));
+    if set == 0 {
+        let session = if id == 0 {
+            match call.process.console.clone() {
+                Some(s) => s,
+                None => return NtStatus::NOT_FOUND,
+            }
+        } else {
+            tri!(super::conhost::find(id).ok_or(NtStatus::INVALID_PARAMETER))
+        };
+        let (cols, rows) = session.size();
+        tri!(call.write_u32(ptr, u32::from(cols) | (u32::from(rows) << 16)));
+        return NtStatus::SUCCESS;
+    }
+    let session = tri!(owned_session(call, id));
+    let mut raw = [0u8; 4];
+    if call.process.read(ptr, &mut raw).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let size = u32::from_le_bytes(raw);
+    let size = (size as u16, (size >> 16) as u16);
+    if !(1..=0x7fff).contains(&size.0) || !(1..=0x7fff).contains(&size.1) {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    if session.size() != size {
+        crate::events::emit(
+            crate::events::Category::Console,
+            "console resize",
+            format_args!(r#""id":{id},"cols":{},"rows":{}"#, size.0, size.1),
+        );
+    }
+    if session.resize(size) {
+        wait::set_signal(&session.input_ready, 1);
+    }
+    NtStatus::SUCCESS
+}
+
+/// GalaConsoleClose(Id): the session's host or creator closes it
+/// (ClosePseudoConsole): its programs end (STATUS_CONTROL_C_EXIT) and its
+/// host's event is set.
+fn gala_console_close(call: &mut Call<'_>) -> NtStatus {
+    let session = tri!(owned_session(call, arg!(call, 0) as u32));
+    super::conhost::close(&session);
+    NtStatus::SUCCESS
+}
+
+/// GalaConsoleTrace(Id, Direction, *Bytes, Length): with `conpty=trace`,
+/// the host's VT traffic (Direction 0: from the terminal, 1: to it, 2: a
+/// note) is logged, escaped (`conpty <id> in|out|note: ...`); else
+/// STATUS_NOT_SUPPORTED.
+fn gala_console_trace(call: &mut Call<'_>) -> NtStatus {
+    if !super::conhost::tracing() {
+        return NtStatus::NOT_SUPPORTED;
+    }
+    let (id, direction, ptr) = (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2));
+    let len = (arg!(call, 3) as usize).min(1024);
+    let mut bytes = [0u8; 1024];
+    if call.process.read(ptr, &mut bytes[..len]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let what = match direction {
+        0 => "in",
+        1 => "out",
+        _ => "note",
+    };
+    info!("conpty {id} {what}: {}", super::conhost::Escaped(&bytes[..len]));
+    NtStatus::SUCCESS
 }
 
 /// A window record (nt::window::Info) from the caller.
@@ -4571,11 +4719,33 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         |at: usize| u64::from(u32::from_le_bytes(b[at..at + 4].try_into().unwrap_or([0; 4])));
     let flags = u32_at(12);
     let (inherit, suspended) = (flags & 1 != 0, flags & 2 != 0);
+    // Flag 32: the child is attached to the console session whose id is
+    // at 160 (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE); flag 64 with it: its
+    // standard handles are new handles to that console (no
+    // STARTF_USESTDHANDLES), not the ones at 64..88.
+    let console = if flags & 32 != 0 {
+        let mut id = [0u8; 4];
+        if call.process.read(ptr + 160, &mut id).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        match super::conhost::find(u32::from_le_bytes(id)) {
+            Some(s) if !s.is_closed() => Some(s),
+            _ => return NtStatus::INVALID_HANDLE,
+        }
+    } else if flags & 128 != 0 {
+        // DETACHED_PROCESS: no console.
+        None
+    } else {
+        call.process.console.clone()
+    };
     let image = tri!(call.read_wide(u64_at(0), u32_at(8)));
     let command_line = tri!(utf8_of(&tri!(call.read_wide(u64_at(16), u32_at(24)))));
     let directory = tri!(utf8_of(&tri!(call.read_wide(u64_at(32), u32_at(40)))));
     let environment = tri!(utf8_of(&tri!(call.read_wide(u64_at(48), u32_at(56)))));
-    let std = [u64_at(64), u64_at(72), u64_at(80)];
+    let mut std = [u64_at(64), u64_at(72), u64_at(80)];
+    if flags & 96 == 96 {
+        std = [0; 3];
+    }
     // Flag 4: only the handles listed at 120 (count at 128) are inherited
     // (PROC_THREAD_ATTRIBUTE_HANDLE_LIST).
     let mut list: Vec<u64> = Vec::new();
@@ -4658,6 +4828,15 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
             }
         }
     }
+    // A pseudo console's own standard handles (CONIN$, CONOUT$ twice).
+    if flags & 96 == 96 {
+        let input = KObject::new(ObjectBody::ConsoleInput).map_err(|_| NtStatus::NO_MEMORY);
+        let output = KObject::new(ObjectBody::ConsoleOutput).map_err(|_| NtStatus::NO_MEMORY);
+        let (input, output) = (tri!(input), tri!(output));
+        for (i, object) in [input, output.clone(), output].into_iter().enumerate() {
+            std[i] = tri!(table.insert_object(object).map_err(|_| NtStatus::NO_MEMORY)).0;
+        }
+    }
 
     // `NAME=value\0...\0\0` to a list of strings.
     let env_text = core::str::from_utf8(&environment).unwrap_or("");
@@ -4695,7 +4874,7 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         runtime_data: &runtime_data,
         parent_id: call.process.id,
         token: Some(token),
-        console: call.process.console.clone(),
+        console,
     });
     let (child, thread_object) = match spawned {
         Ok(p) => p,
@@ -4792,8 +4971,23 @@ fn file_write(
     if file.synchronous {
         *file.position.lock() = offset + done;
     }
+    if super::logtee::active() {
+        logtee_write(call, file, buffer, done);
+    }
     tri!(call.write_iosb(iosb, NtStatus::SUCCESS, done));
     NtStatus::SUCCESS
+}
+
+/// `logtee=`: a write to a file below the logged directory goes to the
+/// log too (its first 4 KiB).
+fn logtee_write(call: &Call<'_>, file: &file::FileObject, buffer: u64, done: u64) {
+    let Ok(path) = file::volume_path(file.node) else { return };
+    let Some(name) = super::logtee::below(&path) else { return };
+    let mut bytes = [0u8; 4096];
+    let n = (done as usize).min(bytes.len());
+    if call.process.read(buffer, &mut bytes[..n]).is_ok() {
+        super::logtee::log(name, &bytes[..n]);
+    }
 }
 
 /// Writes `length` bytes from the caller's `buffer` at `offset`.
