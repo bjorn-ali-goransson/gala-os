@@ -393,6 +393,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("xmodify_test", "ntdll.dll", "Windows/System32"),
     ("smpsem_test", "ntdll.dll", "Windows/System32"),
     ("xstate_test", "ntdll.dll", "Windows/System32"),
+    ("safepoint_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
     ("events", "testdll.dll", "gala"),
     ("kernel32_test", "ntdll.dll", "Windows/System32"),
@@ -1587,6 +1588,7 @@ const USER_PROGRAMS: &[&str] = &[
     "xmodify_test",
     "smpsem_test",
     "xstate_test",
+    "safepoint_test",
     "ledger_test",
     "bench",
     "kernel32_test",
@@ -3274,6 +3276,15 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=xstate_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["xstate_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // A JVM-style safepoint (poll fault, vectored handler, values in
+        // registers and on the stack rewritten while stopped) on two
+        // processors: no value of an older epoch may survive.
+        name: "safepoint_test",
+        cmdline: "qemu_exit run=safepoint_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["safepoint_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "kernel32_thread_test",

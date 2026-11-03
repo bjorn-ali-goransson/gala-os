@@ -1290,6 +1290,13 @@ name = "rtl_test"
 version = "0.1.0"
 
 [[package]]
+name = "safepoint_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "section_test"
 version = "0.1.0"
 dependencies = [
