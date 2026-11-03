@@ -9,3 +9,6 @@ publish.workspace = true
 crate-type = ["cdylib"]
 test = false
 bench = false
+
+[dependencies]
+ttf-parser = { version = "0.25.1", default-features = false, features = ["no-std-float"] }

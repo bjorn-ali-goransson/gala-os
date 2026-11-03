@@ -688,6 +688,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("process_test", "kernel32.dll", "Windows/System32"),
     ("commit_test", "ntdll.dll", "Windows/System32"),
     ("commit_test", "kernel32.dll", "Windows/System32"),
+    ("dwrite_test", "ntdll.dll", "Windows/System32"),
+    ("dwrite_test", "kernel32.dll", "Windows/System32"),
+    ("dwrite_test", "dwrite.dll", "Windows/System32"),
+    ("dwrite_test", "fonts/selawik/selawk.ttf", "Windows/Fonts"),
+    ("dwrite_test", "fonts/selawik/selawksl.ttf", "Windows/Fonts"),
+    ("dwrite_test", "fonts/selawik/selawksb.ttf", "Windows/Fonts"),
+    ("dwrite_test", "fonts/selawik/selawkb.ttf", "Windows/Fonts"),
+    ("chromium", "fonts/selawik/selawk.ttf", "Windows/Fonts"),
+    ("chromium", "fonts/selawik/selawksl.ttf", "Windows/Fonts"),
+    ("chromium", "fonts/selawik/selawksb.ttf", "Windows/Fonts"),
+    ("chromium", "fonts/selawik/selawkb.ttf", "Windows/Fonts"),
     ("browser_api_test", "ntdll.dll", "Windows/System32"),
     ("browser_api_test", "kernel32.dll", "Windows/System32"),
     ("browser_api_test", "ws2_32.dll", "Windows/System32"),
@@ -1716,6 +1727,7 @@ const USER_PROGRAMS: &[&str] = &[
     "console_window_test",
     "conpty_test",
     "browser_api_test",
+    "dwrite_test",
     "persist_test",
     "kernel32_system_test",
     "kernel32_clr_test",
@@ -3425,6 +3437,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=browser_api_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["browser_api_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // BR stage 1: DirectWrite's system font collection (gala's
+        // dwrite.dll over Selawik), as Chromium's browser and Skia use it.
+        name: "dwrite_test",
+        cmdline: "qemu_exit run=dwrite_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["dwrite_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // Pseudo consoles (ConPTY): conpty_test plays a terminal for a

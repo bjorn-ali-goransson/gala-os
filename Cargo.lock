@@ -441,6 +441,13 @@ version = "0.1.0"
 [[package]]
 name = "dwrite"
 version = "0.1.0"
+dependencies = [
+ "ttf-parser",
+]
+
+[[package]]
+name = "dwrite_test"
+version = "0.1.0"
 
 [[package]]
 name = "ed25519-compact"
