@@ -46,6 +46,7 @@ mod selftest;
 /// Deterministic simulation's scheduler and clock (gala-um `--sim`).
 #[cfg(any(test, feature = "hosted"))]
 pub mod sim;
+pub mod statedump;
 pub mod sync;
 pub mod time;
 pub mod trust;
@@ -126,6 +127,8 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     );
     init_paging(&info);
     init_timer(&info);
+    // A state dump on an NMI (xtask asks for one when a boot test times out).
+    statedump::init();
     handover::check_marker(&info);
     if let Err(e) = sched::init() {
         panic!("scheduler: {e:?}");
@@ -366,12 +369,14 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     info!(
         "stats: {shootdowns} TLB shootdowns ({ipis} IPIs), {} frames leaked by deferred frees; \
          heap {} KiB in use, {} large pages, {window_flushes} mapped-window flushes; \
-         frames free {} of {}",
+         frames free {} of {}; heap peak {} KiB, fewest frames free {}",
         arch::paging::leaked_frames(),
         heap.in_use / 1024,
         heap.large_pages,
         mm::frame_stats().0,
-        mm::frame_stats().1
+        mm::frame_stats().1,
+        heap.peak_in_use / 1024,
+        mm::frame_low_water()
     );
     // R8 step 6: this release has booted and done its work; the disk's
     // rollback floor goes up to what its manifest says.
@@ -439,11 +444,16 @@ fn wait_real_secs_any(objects: &[nt::object::ObjectRef], secs: u64) -> Option<us
     use nt::wait::Timeout;
     let until = time::raw_ticks() + secs * time::TICK_HZ;
     loop {
-        let step = if clockctl::armed() { time::TICK_HZ } else { secs * time::TICK_HZ };
+        // A second at a time: a state dump asked for by an NMI (a boot
+        // test timing out) is done from here, where locks may be taken.
+        let step = time::TICK_HZ.min(secs * time::TICK_HZ);
         let timeout = Timeout::Tick(time::ticks() + step);
         let status = nt::wait::wait_for(objects, false, timeout);
         if status != nt::status::NtStatus::TIMEOUT {
             return (status.0 < objects.len() as u32).then_some(status.0 as usize).or(Some(0));
+        }
+        if statedump::take_request() {
+            statedump::full_dump();
         }
         if time::raw_ticks() >= until {
             return None;
@@ -568,6 +578,23 @@ pub fn panic(info: &core::panic::PanicInfo) -> ! {
     console::emergency_println(format_args!("{Backtrace}"));
     // What the CPUs did last (the flight recorder).
     flight::dump(u64::MAX, 48, console::emergency_println);
+    // Memory at the time (if those locks are free: the panic may be
+    // inside the allocator).
+    statedump::stats_line(mm::heap::try_stats(), mm::try_frame_stats());
+    // Which thread each CPU ran (if the scheduler's lock is free).
+    // (Only called once the scheduler exists, so the per-CPU data does.)
+    let listed = sched::try_cpu_threads(|cpu, id, name, state| {
+        let me = arch::percpu::cpu_index() as usize;
+        let this = if cpu == me { " (the panicking CPU)" } else { "" };
+        console::emergency_line(format_args!(
+            "panic: cpu {cpu} runs thread {id} ({name}) {state}{this}"
+        ));
+    });
+    if !listed {
+        console::emergency_line(format_args!(
+            "panic: the scheduler's lock is held (threads unknown)"
+        ));
+    }
     // Kept on the disk for the next boot (when a volume is mounted).
     crash::save(info, &Backtrace);
     finish(QemuExitCode::Failure)
@@ -725,7 +752,8 @@ fn wait_for_the_rest() {
             error!("run: out of memory");
             return;
         };
-        nt::wait::wait_for(core::slice::from_ref(&object), false, nt::wait::Timeout::Infinite);
+        // In steps (a state dump may be asked for meanwhile).
+        while wait_real_secs_any(core::slice::from_ref(&object), 3600).is_none() {}
         match next.exit_status() {
             Some(status) => info!("run: {} finished with status {:#010x}", next.name, status.0),
             None => warn!("run: {} ended without an exit status", next.name),

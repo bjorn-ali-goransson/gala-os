@@ -6,6 +6,7 @@ pub mod afd;
 pub mod charge;
 pub mod conhost;
 pub mod context;
+pub mod crashreport;
 #[cfg(feature = "shasha")]
 pub mod desktop;
 /// A server kernel (no `shasha` feature): the same interface, no desktop.

@@ -501,6 +501,54 @@ pub fn init() {
     }
     install(SIG_ENTER, on_enter);
     install(SIG_INTERRUPT, on_interrupt);
+    start_state_dumps();
+}
+
+/// The write end of the state-dump pipe (-1: none).
+static DUMP_PIPE: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
+
+/// SIGQUIT (xtask's `timeout -s QUIT` when a run takes too long): wakes
+/// the dump thread. Only write(2) here: the signal may land on any
+/// thread, in program code too.
+extern "C" fn on_quit(_sig: i32, _info: *mut libc::siginfo_t, _context: *mut libc::c_void) {
+    let fd = DUMP_PIPE.load(Ordering::Relaxed);
+    if fd >= 0 {
+        // SAFETY: writes one byte from a static to our own pipe.
+        unsafe { libc::write(fd, b"q".as_ptr().cast(), 1) };
+    }
+}
+
+/// A host thread that prints `statedump::full_dump` (every NT thread's
+/// system call and wait, the ledger) each time SIGQUIT arrives, as the
+/// kernel does for an NMI (docs/OBSERVABILITY.md).
+fn start_state_dumps() {
+    let mut fds = [0i32; 2];
+    // SAFETY: `fds` has room for the two descriptors pipe2 returns.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return;
+    }
+    let [read_end, write_end] = fds;
+    let _host = super::HostCode::enter();
+    let spawned = std::thread::Builder::new().name("statedump".into()).spawn(move || {
+        loop {
+            let mut byte = 0u8;
+            // SAFETY: reads one byte into a local.
+            let n = unsafe { libc::read(read_end, (&raw mut byte).cast(), 1) };
+            if n == 1 {
+                crate::statedump::full_dump();
+            } else if n < 0
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                continue;
+            } else {
+                return;
+            }
+        }
+    });
+    if spawned.is_ok() {
+        DUMP_PIPE.store(write_end, Ordering::Relaxed);
+        install(libc::SIGQUIT, on_quit);
+    }
 }
 
 /// Per-thread setup: no blocked signals (a thread created inside another

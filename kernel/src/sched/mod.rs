@@ -786,6 +786,34 @@ pub fn dump() {
     });
 }
 
+/// For a state dump that must not wait (an NMI): each online CPU's
+/// current thread `(cpu, thread id, name, state)` if the scheduler's lock
+/// is free; false if it is held.
+pub fn try_cpu_threads(mut f: impl FnMut(usize, usize, &'static str, &'static str)) -> bool {
+    let Some(guard) = SCHED.try_lock_untracked() else { return false };
+    if let Some(s) = guard.as_ref() {
+        for (cpu, c) in s.cpus.iter().enumerate().filter(|(_, c)| c.online) {
+            let id = c.current.0;
+            if let Some(t) = s.threads.get(id) {
+                let idle = c.idle == Some(c.current);
+                f(cpu, id, t.name, if idle { "idle" } else { state_name(&t.state) });
+            }
+        }
+    }
+    true
+}
+
+fn state_name(state: &State) -> &'static str {
+    match state {
+        State::Running => "running",
+        State::Ready => "ready",
+        State::Blocked => "blocked",
+        State::Sleeping { .. } => "sleeping",
+        State::Waiting { .. } => "waiting",
+        State::Dead => "dead",
+    }
+}
+
 /// Logs every thread that still holds the user address space whose PML4
 /// is `root` (state, whether a CPU is on its stack, which CPU runs it):
 /// what keeps an exited process's address space alive. Returns how many.
@@ -816,15 +844,7 @@ pub fn dump_space_holders(root: u64) -> usize {
 pub fn for_each_thread(mut f: impl FnMut(ThreadId, &'static str, &'static str)) {
     with(|s| {
         for (i, t) in s.threads.iter().enumerate() {
-            let state = match t.state {
-                State::Running => "running",
-                State::Ready => "ready",
-                State::Blocked => "blocked",
-                State::Sleeping { .. } => "sleeping",
-                State::Waiting { .. } => "waiting",
-                State::Dead => "dead",
-            };
-            f(ThreadId(i), t.name, state);
+            f(ThreadId(i), t.name, state_name(&t.state));
         }
     });
 }

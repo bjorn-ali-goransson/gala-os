@@ -1018,6 +1018,38 @@ timer's due tick and the timeout) and every scheduler thread
 (`sched::dump`: state, deadline, affinity). The dispatcher records the
 service number with the caller's registers for this.
 
+**State dump on NMI** (`kernel/src/statedump.rs`, 2026-11-03): the
+LAPIC's LINT1 is programmed for NMI delivery on every CPU (QEMU's monitor
+`nmi` raises it on all of them; xtask sends it when a boot test times
+out). The IDT's NMI entry (IST 2) is handled before anything else in
+`interrupts::dispatch`: never as a user exception, never through the
+user-return hook, with GS swapped to the kernel's when the NMI came
+between `syscall` and `swapgs`. Invariant: NMI code uses only atomics
+and `try_lock` (it may interrupt any lock holder, the console's too, so
+it prints with `console::emergency_line`). Each CPU stores its rip, rsp
+and a frame-pointer backtrace of the interrupted kernel stack
+(`backtrace::walk_from`) in its slot; the first CPU in waits up to half a
+second for the online ones, prints, then sets a flag. The part that needs
+locks (`statedump::full_dump`: `nt::thread::dump`, `sched::dump`, the
+ledger, the figures) runs from the boot thread, whose waits for its `run=`
+programs are one second long for this. An NMI within 2 s of a dump's end
+is taken as a late CPU's share of it. gala-um: SIGQUIT writes a byte to a
+pipe that a host thread reads before calling `full_dump`.
+The hang watchdog (`flight::on_tick`) also sends a stuck CPU an NMI
+(`apic::send_nmi`, `statedump::trace_cpu`): that CPU prints only its own
+rip and backtrace (`watchdog: CPU N ...`). Diagnostics that peek at
+locks there use `IrqMutex::try_lock_untracked` (no lockdep edge), and
+emergency output takes the console lock when it is free within 10 ms so
+that lines stay whole.
+
+**Crash reports** (`nt::crashreport`): every user exception, delivered
+or not, stores a fixed-size `Note` (code, rip, access address and kind,
+tid, registers, eight stack words) in `Process::last_exception`; when
+`process::finish` sees the exit status equal to that note's code, it
+prints `crash report:` lines, naming addresses by module (the executable's
+mapping or an image view's file name) with offsets. No allocation on the
+fault path.
+
 ## Processes started by programs (N2b)
 
 kernel32's CreateProcessW/A calls `GalaCreateProcess` (service 0x7f02,

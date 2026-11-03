@@ -689,6 +689,17 @@ pub fn unmap_view(process: &Process, addr: u64) -> Result<(), NtStatus> {
     Ok(())
 }
 
+/// For an address in a view of an image section: calls `f` with the
+/// image's NT path and returns the view's base (crash reports).
+pub fn image_view_name(process: &Process, addr: u64, f: impl FnOnce(&[u16])) -> Option<u64> {
+    let views = process.views.lock();
+    let v = views.iter().find(|v| (v.base..v.base + v.size).contains(&addr))?;
+    let section = section_of(&v.section);
+    section.image.as_ref()?;
+    f(section.file_name.as_deref()?);
+    Some(v.base)
+}
+
 /// The file name of the section view containing `addr`, if it has one.
 pub fn mapped_file_name(process: &Process, addr: u64) -> Option<Result<Vec<u16>, NtStatus>> {
     let views = process.views.lock();

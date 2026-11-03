@@ -20,6 +20,7 @@ mod manifest;
 mod report;
 #[path = "../../kernel/src/trust/sha256.rs"]
 mod sha256;
+mod triage;
 mod trust;
 
 /// Pinned Limine release (prebuilt binary branch tag) and its expected commit.
@@ -391,6 +392,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("smpcow_test", "ntdll.dll", "Windows/System32"),
     ("smpsem_test", "ntdll.dll", "Windows/System32"),
     ("xstate_test", "ntdll.dll", "Windows/System32"),
+    ("statedump_test", "ntdll.dll", "Windows/System32"),
+    ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
     ("events", "testdll.dll", "gala"),
     ("kernel32_test", "ntdll.dll", "Windows/System32"),
@@ -1583,6 +1586,7 @@ const USER_PROGRAMS: &[&str] = &[
     "smpcow_test",
     "smpsem_test",
     "xstate_test",
+    "statedump_test",
     "ledger_test",
     "bench",
     "kernel32_test",
@@ -1678,7 +1682,13 @@ const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long scenario `name` may run.
 fn scenario_timeout(name: &str) -> Duration {
-    if name == "elasticsearch" || name.starts_with("sqllocaldb") {
+    // `XTASK_TIMEOUT=<seconds>`: a hang's state dump without the wait.
+    if let Some(secs) = env::var("XTASK_TIMEOUT").ok().and_then(|s| s.parse().ok()) {
+        return Duration::from_secs(secs);
+    }
+    if SCENARIOS.iter().any(|s| s.name == name && s.exit_status == XTASK_DUMPS) {
+        DUMP_SCENARIO_TIMEOUT
+    } else if name == "elasticsearch" || name.starts_with("sqllocaldb") {
         ELASTICSEARCH_TIMEOUT
     } else if SLOW_SCENARIOS.contains(&name) {
         SLOW_TIMEOUT
@@ -1727,6 +1737,14 @@ commands:
                them): alloc-audit [kernel ELF] [--all: also growth after try_reserve]
   symbolize    resolve the kernel backtraces in a serial log to functions
                and source lines: symbolize <log> [--release]
+  triage       what a (failed) boot's log says, in one block: verdict, guest CPUs and
+               memory, warnings and errors, panics and faults, programs that did not
+               end, failed processes, the ledger's top, the state dump's threads and
+               CPUs, each thread's last system calls, the last lines:
+               triage <serial log> [<events.jsonl>] (failed logs end with it)
+  events       summarize an event stream (XTASK_EVENTS=...): system calls by time,
+               failing statuses, each thread's last calls, faults, processes, images:
+               events <events.jsonl>
   docker-test  build the test image (docker/test.Dockerfile) and run
                `cargo xtask test` (or the given xtask arguments) inside it
   report       run every test program on gala; write target/report/gala.{json,md}
@@ -1802,6 +1820,16 @@ fn main() -> ExitCode {
                     .map_err(|e| format!("reading {log}: {e}"))
                     .map(|text| print!("{}", symbolize(release, &text))),
                 None => Err("usage: cargo xtask symbolize <serial log> [--release]".into()),
+            },
+            Some("triage") => match args.get(1).filter(|a| !a.starts_with("--")) {
+                Some(log) => triage_command(Path::new(log), args.get(2).map(Path::new)),
+                None => Err("usage: cargo xtask triage <serial log> [<events.jsonl>]".into()),
+            },
+            Some("events") => match args.get(1).filter(|a| !a.starts_with("--")) {
+                Some(file) => fs::read_to_string(file)
+                    .map_err(|e| format!("reading {file}: {e}"))
+                    .map(|text| print!("{}", triage::events_summary(&text))),
+                None => Err("usage: cargo xtask events <events.jsonl>".into()),
             },
             Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
@@ -2065,6 +2093,63 @@ fn make_signed_iso(
     extra: &[(&str, &str)],
     signing: &trust::Signing,
 ) -> Result<PathBuf> {
+    // The disk is shared with other worktrees and fills up: say so plainly
+    // instead of a copy or xorriso failing half-way.
+    check_disk_space(name, MIN_FREE_MIB)?;
+    make_iso_unchecked(release, name, cmdline, extra, signing).map_err(|e| {
+        if e.contains("No space left") || e.contains("os error 28") {
+            format!("{e}\n{}", disk_hint(name, None))
+        } else {
+            e
+        }
+    })
+}
+
+/// Free space a new image needs at least before it is started (its tree,
+/// then the ISO: twice its files).
+const MIN_FREE_MIB: u64 = 300;
+
+/// What to do when the disk is full (WORKFLOW "Disk space").
+fn disk_hint(name: &str, need: Option<u64>) -> String {
+    let free = free_disk_mib(&target_dir()).map_or("?".into(), |m| format!("{m} MiB"));
+    let need = need.map_or(String::new(), |n| format!(", ~{n} MiB needed"));
+    format!(
+        "xtask: the disk is (nearly) full making {name}.iso: {free} free on the disk of \
+         {}{need}. Delete images (target/*/*.iso, kept for failed boots), \
+         target/debug/incremental, and other worktrees' target/*/test-* and *.iso \
+         (docs/WORKFLOW.md, \"Disk space\"); `du -sh target/* .claude/worktrees/*/target` \
+         shows who uses it.",
+        target_dir().display()
+    )
+}
+
+/// Fails early when less than `need` MiB are free.
+fn check_disk_space(name: &str, need: u64) -> Result {
+    match free_disk_mib(&target_dir()) {
+        Some(free) if free < need => Err(disk_hint(name, Some(need))),
+        _ => Ok(()),
+    }
+}
+
+/// Bytes of the files under `dir`.
+fn tree_size(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => tree_size(&e.path()),
+            _ => e.metadata().map_or(0, |m| m.len()),
+        })
+        .sum()
+}
+
+fn make_iso_unchecked(
+    release: bool,
+    name: &str,
+    cmdline: &str,
+    extra: &[(&str, &str)],
+    signing: &trust::Signing,
+) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
     let server = name.strip_prefix("test-").is_some_and(|n| SERVER_KERNEL_SCENARIOS.contains(&n));
     let kernel_dir = if server { server_target_dir() } else { target_dir() };
@@ -2144,6 +2229,8 @@ fn make_signed_iso(
     trust::seal(&iso_root, &config, signing)?;
 
     let iso = out.join(format!("{name}.iso"));
+    // The ISO is as large as its tree.
+    check_disk_space(name, (tree_size(&iso_root) >> 20) + 64)?;
     run_quiet(
         Command::new("xorriso")
             .args(["-as", "mkisofs", "-R", "-r", "-J", "-quiet"])
@@ -2553,6 +2640,12 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
 /// finished, xtask stops the VM (QEMU_EXIT_SUCCESS cannot come) and the
 /// scenario passes if the client succeeded.
 const XTASK_STOPS: i32 = -1;
+/// Scenarios that are meant to time out (a program that hangs on
+/// purpose): xtask asks for the state dump, which must have the expected
+/// lines.
+const XTASK_DUMPS: i32 = -2;
+/// How long they run before that.
+const DUMP_SCENARIO_TIMEOUT: Duration = Duration::from_secs(25);
 /// What Limine prints when it has panicked (R8: a file or config whose
 /// hash does not match): it waits for a key, or halts.
 const LIMINE_HALTED: &[&str] = &["Press a key to return to menu", "System halted."];
@@ -2784,6 +2877,33 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=smpcow_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["smpcow_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // A boot test that times out explains itself: statedump_test hangs
+        // on purpose (one thread waits for ever, one spins in user code);
+        // at the timeout xtask injects an NMI and the kernel's state dump
+        // must show every CPU, the flight recorder, both threads and the
+        // statistics (kernel/src/statedump.rs). In gala-um the same dump
+        // comes on SIGQUIT (um-test checks the lines both have).
+        name: "statedump_test",
+        cmdline: "qemu_exit run=statedump_test.exe",
+        exit_status: XTASK_DUMPS,
+        expect: &[
+            "statedump_test: waiting",
+            "statedump: begin (NMI",
+            "statedump: cpu 0 ",
+            "statedump: cpu 1 ",
+            "statedump: locks: scheduler free",
+            "statedump: heap ",
+            "flight: the last",
+            "statedump: NMI part done",
+            "statedump: threads",
+            "NtWaitForSingleObject from rip",
+            "Event signal 0",
+            "in user mode at rip",
+            "statedump: end",
+            "the guest's state dump (NMI) took",
+        ],
     },
     Scenario {
         // A semaphore released and waited on from two processors at once.
@@ -3958,6 +4078,9 @@ const SCENARIOS: &[Scenario] = &[
             "hangtest: CPU 1 spins with interrupts off",
             "watchdog: CPU 1 has taken no timer interrupt for 5 s",
             "flight: the last",
+            // Its own backtrace, by NMI (kernel/src/statedump.rs).
+            "watchdog: CPU 1 kernel rip",
+            "watchdog: CPU 1 backtrace:",
             "hangtest: CPU 1 goes on",
             "exited with status 0x00000000",
         ],
@@ -4732,6 +4855,30 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "crash: writing to address 0",
             "user exception: page fault (#PF)",
+            // The crash report (nt::crashreport).
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc0000005 \
+             (access violation) in thread",
+            "(crash.exe+0x",
+            "writing address 0x0",
+            "crash report:   rax=",
+            "crash report:   [rsp+0x00]",
+            "process crash.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // The same crash with ntdll: the exception goes to its dispatcher,
+        // finds no handler and ends the process (as on Windows), and the
+        // crash report says where.
+        name: "crash_dispatched",
+        cmdline: "qemu_exit run=crash.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: writing to address 0",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc0000005 \
+             (access violation) in thread",
+            "(crash.exe+0x",
+            "writing address 0x0",
             "process crash.exe (pid 4) exited with status 0xc0000005",
             BOOT_OK_MARKER,
         ],
@@ -4980,11 +5127,25 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     let booted = t2.elapsed();
     let mut failed = 0;
     let (mut firmware, mut kernel) = (Duration::ZERO, Duration::ZERO);
+    let mut history = Vec::new();
     for (vm, result) in vms.iter().zip(results) {
         let Ok((time, verdicts)) = result else { continue };
         firmware += time.to_banner;
         kernel += time.total.saturating_sub(time.to_banner);
         let shared = matches!(vm, Vm::Batch(_));
+        for (scenario, verdict) in &verdicts {
+            history.push(HistoryRun {
+                scenario: scenario.name,
+                ok: verdict.is_ok(),
+                secs: time.total.as_secs_f64(),
+                shared,
+                reason: verdict
+                    .as_ref()
+                    .err()
+                    .map(|e| e.split(" (serial log: ").next().unwrap_or(e).to_string())
+                    .unwrap_or_default(),
+            });
+        }
         for (scenario, verdict) in verdicts {
             match verdict {
                 Ok(()) if shared => eprintln!("xtask: boot test {:<20} ok", scenario.name),
@@ -5022,11 +5183,148 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     eprintln!("xtask: timing: {summary}");
     let _ = fs::create_dir_all(report_dir());
     let _ = write(&report_dir().join("timing.txt"), &format!("{summary}\n"));
+    // The suite's health over runs: flaky and slower scenarios.
+    record_history(&history);
+    let names: Vec<&str> = selected.iter().map(|s| s.name).collect();
+    let health = fs::read_to_string(history_path()).unwrap_or_default();
+    for line in history_findings(&health, &names) {
+        eprintln!("xtask: health: {line}");
+    }
     if failed == 0 {
         Ok(())
     } else {
         Err(format!("{failed} of {} boot tests failed", selected.len()))
     }
+}
+
+/// One scenario's outcome for target/report/history.jsonl.
+struct HistoryRun {
+    scenario: &'static str,
+    ok: bool,
+    /// The VM's whole time (a shared VM's for each of its scenarios).
+    secs: f64,
+    shared: bool,
+    reason: String,
+}
+
+fn history_path() -> PathBuf {
+    report_dir().join("history.jsonl")
+}
+
+/// Runs kept in the history (older ones are dropped when it grows past
+/// twice this).
+const HISTORY_KEEP: usize = 20_000;
+
+/// Appends this run's outcomes to target/report/history.jsonl (one JSON
+/// line per scenario: time, commit, host load, outcome, duration).
+fn record_history(runs: &[HistoryRun]) {
+    if runs.is_empty() {
+        return;
+    }
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let commit = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(root())
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let load = fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|l| l.split_whitespace().next().map(str::to_string))
+        .unwrap_or_else(|| "0".into());
+    let mut text = String::new();
+    for r in runs {
+        let reason: String = r
+            .reason
+            .chars()
+            .take(200)
+            .map(|c| match c {
+                '"' | '\\' => '\'',
+                c if c.is_control() => ' ',
+                c => c,
+            })
+            .collect();
+        text += &format!(
+            "{{\"t\":{t},\"commit\":\"{commit}\",\"load\":{load},\"scenario\":\"{}\",\"ok\":{},\"secs\":{:.1},\"shared\":{},\"reason\":\"{reason}\"}}\n",
+            r.scenario, r.ok, r.secs, r.shared
+        );
+    }
+    let path = history_path();
+    let old = fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<&str> = old.lines().collect();
+    if lines.len() > 2 * HISTORY_KEEP {
+        lines.drain(..lines.len() - HISTORY_KEEP);
+    }
+    let mut all = lines.join("\n");
+    if !all.is_empty() {
+        all.push('\n');
+    }
+    all += &text;
+    let _ = fs::create_dir_all(report_dir());
+    let _ = fs::write(&path, all);
+}
+
+/// Runs of one scenario looked at for flakiness.
+const HISTORY_WINDOW: usize = 30;
+
+/// What the history says about `scenarios` (this run's): those that both
+/// passed and failed in their last HISTORY_WINDOW runs (flaky, with the
+/// last failure's reason), and those whose latest run (alone in its VM)
+/// took over 1.5 times, and 10 s more than, the median of their previous
+/// ten passes.
+fn history_findings(history: &str, scenarios: &[&str]) -> Vec<String> {
+    use std::collections::BTreeMap;
+    use triage::field;
+    // Per scenario: (ok, secs, shared, reason, load).
+    type Run<'a> = (bool, f64, bool, &'a str, &'a str);
+    let mut runs: BTreeMap<&str, Vec<Run>> = BTreeMap::new();
+    for line in history.lines() {
+        let Some(name) = field(line, "scenario") else { continue };
+        let ok = field(line, "ok") == Some("true");
+        let secs = field(line, "secs").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let shared = field(line, "shared") == Some("true");
+        let reason = field(line, "reason").unwrap_or("");
+        let load = field(line, "load").unwrap_or("?");
+        runs.entry(name).or_default().push((ok, secs, shared, reason, load));
+    }
+    let mut out = Vec::new();
+    for name in scenarios {
+        let Some(all) = runs.get(name) else { continue };
+        let recent = &all[all.len().saturating_sub(HISTORY_WINDOW)..];
+        let failures = recent.iter().filter(|r| !r.0).count();
+        if failures > 0 && failures < recent.len() {
+            let last = recent.iter().rev().find(|r| !r.0).map_or("", |r| r.3);
+            out.push(format!(
+                "{name} is flaky: failed {failures} of its last {} runs (last failure: {})",
+                recent.len(),
+                last.chars().take(120).collect::<String>()
+            ));
+        }
+        let Some((latest, earlier)) = all.split_last() else { continue };
+        if latest.2 || !latest.0 {
+            continue;
+        }
+        let mut passes: Vec<f64> =
+            earlier.iter().rev().filter(|r| r.0 && !r.2).take(10).map(|r| r.1).collect();
+        if passes.len() < 3 {
+            continue;
+        }
+        passes.sort_by(f64::total_cmp);
+        let median = passes[passes.len() / 2];
+        if latest.1 > 1.5 * median && latest.1 - median > 10.0 {
+            out.push(format!(
+                "{name} is slower: {:.1}s against a median of {median:.1}s over its last {} \
+                 passes (host load {})",
+                latest.1,
+                passes.len(),
+                latest.4
+            ));
+        }
+    }
+    out
 }
 
 /// `XTASK_REPEAT=<n> cargo xtask boot-test <name>`: boots one scenario's
@@ -5159,6 +5457,20 @@ fn runs_in_um(s: &Scenario) -> bool {
         && !NOT_IN_UM.iter().any(|(n, _)| *n == s.name)
 }
 
+/// Expected lines that only a QEMU boot has: the boot marker, the NMI
+/// part of a state dump and xtask's own line about it, a user rip from
+/// the timer tick.
+fn kernel_only(line: &str) -> bool {
+    line == BOOT_OK_MARKER
+        || ["statedump: begin", "statedump: cpu", "statedump: locks", "statedump: heap"]
+            .iter()
+            .any(|p| line.starts_with(p))
+        || line.starts_with("statedump: NMI")
+        || line.starts_with("flight:")
+        || line == "in user mode at rip"
+        || line.starts_with("the guest's state dump")
+}
+
 /// Seconds a gala-um program may run (they take milliseconds).
 const UM_TIMEOUT_SECS: u32 = 30;
 
@@ -5172,9 +5484,17 @@ fn um_test(release: bool) -> Result {
     let selected: Vec<&Scenario> = SCENARIOS.iter().filter(|s| runs_in_um(s)).collect();
     for s in &selected {
         let started = Instant::now();
-        let log = run_um(&um, s)?;
+        // A program that hangs on purpose gets SIGQUIT (its state dump)
+        // after a few seconds.
+        let secs = if s.exit_status == XTASK_DUMPS { 3 } else { UM_TIMEOUT_SECS };
+        let (code, mut log) = run_um_with(&um, s, &[], secs)?;
+        if matches!(code, Some(124 | 137)) {
+            log += &format!(
+                "\nxtask: gala-um timed out after {secs}s (SIGQUIT asked for a state dump)\n"
+            );
+        }
         let missing: Vec<_> =
-            s.expect.iter().filter(|e| **e != BOOT_OK_MARKER && !log.contains(**e)).collect();
+            s.expect.iter().filter(|e| !kernel_only(e) && !log.contains(**e)).collect();
         if missing.is_empty() {
             eprintln!(
                 "xtask: um test {:<20} ok  ({:.1} ms)",
@@ -5237,8 +5557,12 @@ fn um_command(um: &Path, s: &Scenario, options: &[String], timeout_secs: u32) ->
     // A hung program fails instead of hanging the run (Linux only, as
     // gala-um itself).
     let mut cmd = Command::new("timeout");
+    // At the timeout SIGQUIT first: gala-um prints a state dump (every
+    // thread's system call and wait, the ledger; kernel/src/statedump.rs),
+    // then SIGKILL 5 s later (exit status 137).
+    cmd.args(["-s", "QUIT", "-k", "5"]).arg(timeout_secs.to_string());
     // As many processors as the QEMU boot tests (-smp 2).
-    cmd.arg(timeout_secs.to_string()).arg(um).arg("--cpus=2").args(options);
+    cmd.arg(um).arg("--cpus=2").args(options);
     // Clock control, as the kernel's `clock=`.
     if let Some(spec) = s.cmdline.split_whitespace().find_map(|w| w.strip_prefix("clock=")) {
         cmd.arg(format!("--clock={spec}"));
@@ -5362,7 +5686,9 @@ fn judge_fault_run(code: Option<i32>, log: &str) -> Result {
     }
     match code {
         Some(0..=2) => Ok(()),
-        Some(124) => Err(format!("hung (killed after {FAULT_TIMEOUT_SECS} s)")),
+        Some(124 | 137) => {
+            Err(format!("hung (killed after {FAULT_TIMEOUT_SECS} s; its state dump is in the log)"))
+        }
         Some(c) if c > 128 => Err(format!("killed by signal {}", c - 128)),
         Some(c) => Err(format!("um exited with {c}")),
         None => Err("killed by a signal".into()),
@@ -5766,8 +6092,11 @@ fn report_dir() -> PathBuf {
 /// Runs every test program's scenario and records each outcome.
 fn gala_report(release: bool) -> Result {
     build_kernel(release)?;
-    let selected: Vec<(&Scenario, &str)> =
-        SCENARIOS.iter().filter_map(|s| scenario_program(s).map(|p| (s, p))).collect();
+    let selected: Vec<(&Scenario, &str)> = SCENARIOS
+        .iter()
+        .filter(|s| s.exit_status != XTASK_DUMPS)
+        .filter_map(|s| scenario_program(s).map(|p| (s, p)))
+        .collect();
     let mut isos = Vec::new();
     for (scenario, _) in &selected {
         isos.push(make_iso(
@@ -5902,12 +6231,12 @@ fn run_vm(
     let events = iso.with_extension("events.jsonl");
     let _ = fs::remove_file(&events);
     let mut cmd = qemu(iso, boot)?;
-    let socket = iso.with_extension("monitor.sock");
+    // The monitor: screendumps and input for screen checks, and the NMI
+    // that asks for a state dump when the boot times out. A short path
+    // (a Unix socket's is limited to 107 bytes; worktrees are deep).
+    let socket = monitor_socket();
     let _ = fs::remove_file(&socket);
-    let monitor = match screen {
-        Some(_) => format!("unix:{},server,nowait", socket.display()),
-        None => "none".into(),
-    };
+    let monitor = format!("unix:{},server,nowait", socket.display());
     cmd.args(["-display", "none", "-monitor", &monitor])
         .arg("-serial")
         .arg(format!("file:{}", log.display()))
@@ -5932,6 +6261,7 @@ fn run_vm(
     let mut client = None;
     let mut stopped = false;
     let mut screen_verdict: Option<String> = None;
+    let mut dump_note = None;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break Some(status);
@@ -5992,16 +6322,22 @@ fn run_vm(
             to_banner = Some(start.elapsed());
         }
         if start.elapsed() > timeout {
+            // Before killing it: ask the guest what it is doing.
+            dump_note = Some(ask_for_state_dump(&socket, &log, &mut child, timeout));
             let _ = child.kill();
             let _ = child.wait();
             break None;
         }
         thread::sleep(Duration::from_millis(50));
     };
+    let _ = fs::remove_file(&socket);
     let total = start.elapsed();
     let mut serial = String::new();
     if let Ok(mut f) = fs::File::open(&log) {
         let _ = f.read_to_string(&mut serial);
+    }
+    if let Some(note) = dump_note {
+        serial += &note;
     }
     // A `record` boot's recording (kernel/src/replay.rs), from the debug
     // console's `"ev":"rec"` lines.
@@ -6039,6 +6375,75 @@ fn run_vm(
         };
     }
     Ok((status, serial, BootTime { to_banner: to_banner.unwrap_or(total), total }))
+}
+
+/// A fresh short path for a VM's monitor socket.
+fn monitor_socket() -> PathBuf {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    env::temp_dir().join(format!("gala-{}-{n}.mon", std::process::id()))
+}
+
+/// Marks of the guest's state dump (kernel/src/statedump.rs).
+const STATEDUMP_BEGIN: &str = "statedump: begin";
+const STATEDUMP_NMI_DONE: &str = "statedump: NMI part done";
+const STATEDUMP_END: &str = "statedump: end";
+/// How long a timed-out guest gets to finish its state dump (TCG on a
+/// loaded host prints slowly).
+const STATEDUMP_WAIT: Duration = Duration::from_secs(20);
+
+/// A boot that timed out: injects an NMI through the monitor (QEMU's
+/// `nmi` reaches every CPU; the kernel prints a state dump: each CPU's
+/// rip and backtrace, held locks, memory, the flight recorder, then every
+/// thread's system call and wait), waits for it to end, and says so in a
+/// line for the log (docs/OBSERVABILITY.md, "Gaps found 2026-11-03").
+fn ask_for_state_dump(
+    socket: &Path,
+    log: &Path,
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> String {
+    use std::io::Write as _;
+    let seen = |mark: &str| {
+        fs::read(log).is_ok_and(|b| b.windows(mark.len()).any(|w| w == mark.as_bytes()))
+    };
+    // Kept open while the guest dumps (QEMU may drop a command whose
+    // connection closed before it read it).
+    let monitor = std::os::unix::net::UnixStream::connect(socket).and_then(|mut m| {
+        m.write_all(b"nmi\n")?;
+        m.flush()?;
+        Ok(m)
+    });
+    let sent = monitor.as_ref().map(|_| ()).map_err(|e| e.to_string());
+    let asked = Instant::now();
+    if sent.is_ok() {
+        while asked.elapsed() < STATEDUMP_WAIT && !seen(STATEDUMP_END) {
+            if child.try_wait().ok().flatten().is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let secs = timeout.as_secs();
+    let wait = STATEDUMP_WAIT.as_secs();
+    match sent {
+        Err(e) => format!("\nxtask: timed out after {secs}s; no state dump (monitor: {e})\n"),
+        Ok(()) if seen(STATEDUMP_END) => format!(
+            "\nxtask: timed out after {secs}s; the guest's state dump (NMI) took {:.1}s\n",
+            asked.elapsed().as_secs_f64()
+        ),
+        Ok(()) if seen(STATEDUMP_NMI_DONE) => format!(
+            "\nxtask: timed out after {secs}s; the state dump's NMI part came, its threads part \
+             did not within {wait}s (the boot thread could not run: the scheduler or a lock stuck?)\n"
+        ),
+        Ok(()) if seen(STATEDUMP_BEGIN) => format!(
+            "\nxtask: timed out after {secs}s; the state dump began but did not end within {wait}s\n"
+        ),
+        Ok(()) => format!(
+            "\nxtask: timed out after {secs}s; the guest did not answer the NMI within {wait}s \
+             (no NMI handler yet: early boot, or the machine is wedged)\n"
+        ),
+    }
 }
 
 /// Joins the `{"ev":"rec","hex":...}` lines of an event stream into the
@@ -7380,22 +7785,102 @@ fn dechunk(mut b: &[u8]) -> Option<Vec<u8>> {
 /// Judges a run; on failure the serial log is kept in
 /// `target/failed/<scenario>.log` (rare failures need it), with its
 /// backtraces symbolized now (a later build moves the addresses).
-fn judge(scenario: &Scenario, status: Option<i32>, timed_out: bool, serial: &str) -> Result {
+fn judge(
+    scenario: &Scenario,
+    status: Option<i32>,
+    timed_out: bool,
+    serial: &str,
+    run: &RunFacts,
+) -> Result {
     judge_log(scenario, status, timed_out, serial).map_err(|e| {
         let dir = target_dir().join("failed");
         let path = dir.join(format!("{}.log", scenario.name));
         let symbols = symbolize(RELEASE.load(std::sync::atomic::Ordering::Relaxed), serial);
-        let kept = format!("{serial}\n{symbols}");
+        let events = run.events.as_deref().and_then(|p| fs::read_to_string(p).ok());
+        // The event stream (when it was on) next to the log.
+        if let Some(text) = events.as_deref().filter(|t| !t.is_empty()) {
+            let _ = fs::create_dir_all(&dir).and_then(|()| {
+                fs::write(dir.join(format!("{}.events.jsonl", scenario.name)), text)
+            });
+        }
+        let facts = triage::Facts {
+            scenario: scenario.name,
+            verdict: Some(&e),
+            secs: run.secs,
+            host: Some(host_facts()),
+        };
+        let summary = triage::triage(serial, events.as_deref(), &facts);
+        let kept = format!("{serial}\n{symbols}\n{summary}");
         match fs::create_dir_all(&dir).and_then(|()| fs::write(&path, kept)) {
-            Ok(()) => format!("{e} (serial log: {})", path.display()),
+            Ok(()) => format!("{e} (serial log: {}; it ends with a triage)", path.display()),
             Err(_) => e,
         }
     })
 }
 
+/// What xtask knows of a boot besides its log (for the triage).
+#[derive(Default)]
+struct RunFacts {
+    events: Option<PathBuf>,
+    secs: Option<f64>,
+}
+
+/// The host as a failed log should say: processors, load, free disk.
+fn host_facts() -> String {
+    let cpus = thread::available_parallelism().map_or(0, |n| n.get());
+    let load = fs::read_to_string("/proc/loadavg")
+        .map(|l| l.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
+        .unwrap_or_else(|_| "?".into());
+    let disk = free_disk_mib(&target_dir())
+        .map_or("?".into(), |m| format!("{:.1} GiB", m as f64 / 1024.0));
+    format!("{cpus} CPUs, load {load}, {disk} free on the target disk")
+}
+
+/// `cargo xtask triage <log> [events]`: the triage of any log; the
+/// event stream next to it is found by name when not given.
+fn triage_command(log: &Path, events: Option<&Path>) -> Result {
+    let serial = fs::read_to_string(log).map_err(|e| format!("reading {}: {e}", log.display()))?;
+    let name = log.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let guess = |suffix: &str| {
+        let stem = name.strip_suffix(suffix)?;
+        Some(log.with_file_name(format!("{stem}.events.jsonl")))
+    };
+    let events_path = events
+        .map(Path::to_path_buf)
+        .or_else(|| guess(".serial.log").or_else(|| guess(".log")).filter(|p| p.exists()));
+    let events = events_path.as_deref().and_then(|p| fs::read_to_string(p).ok());
+    // A failed log already ends with the triage xtask wrote: print the
+    // fresh one only (the scenario's name from the file name).
+    let serial = serial.split("===== triage (xtask").next().unwrap_or(&serial);
+    let scenario =
+        name.trim_end_matches(".log").trim_end_matches(".serial").trim_start_matches("test-");
+    let facts = triage::Facts { scenario, ..triage::Facts::default() };
+    print!("{}", triage::triage(serial, events.as_deref(), &facts));
+    Ok(())
+}
+
+/// Free space (MiB) on the file system holding `dir` (`df`), if known.
+fn free_disk_mib(dir: &Path) -> Option<u64> {
+    let mut probe = dir.to_path_buf();
+    while !probe.exists() {
+        probe = probe.parent()?.to_path_buf();
+    }
+    let out = Command::new("df").args(["-Pk"]).arg(&probe).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let kib: u64 = text.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()?;
+    Some(kib / 1024)
+}
+
 fn judge_log(scenario: &Scenario, status: Option<i32>, timed_out: bool, serial: &str) -> Result {
     let missing: Vec<&str> =
         scenario.expect.iter().copied().filter(|e| !serial.contains(e)).collect();
+    if scenario.exit_status == XTASK_DUMPS {
+        return match () {
+            _ if !timed_out => Err(format!("expected to time out, QEMU exited with {status:?}")),
+            _ if !missing.is_empty() => Err(format!("the state dump lacks {missing:?}")),
+            _ => Ok(()),
+        };
+    }
     if scenario.exit_status == XTASK_STOPS && serial.contains(STOPPED_LINE) {
         return if missing.is_empty() {
             Ok(())
@@ -7514,7 +7999,9 @@ fn symbolize(release: bool, serial: &str) -> String {
     let profile = if release { "release" } else { "debug" };
     let elf = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
     let mut out = String::new();
-    for line in serial.lines().filter_map(|l| l.split_once("backtrace:").map(|(_, a)| a)) {
+    for (what, line) in serial.lines().filter_map(|l| l.split_once("backtrace:")) {
+        // Whose backtrace (a state dump has one per CPU).
+        let what = what.trim_start_matches(['[', ' ']).trim();
         let addresses: Vec<&str> = line.split_whitespace().collect();
         if addresses.is_empty() {
             continue;
@@ -7530,7 +8017,10 @@ fn symbolize(release: bool, serial: &str) -> String {
         });
         match resolved {
             Some(o) => {
-                out += "backtrace (symbolized):\n";
+                out += &format!(
+                    "{what}{}backtrace (symbolized):\n",
+                    if what.is_empty() { "" } else { " " }
+                );
                 for frame in String::from_utf8_lossy(&o.stdout).lines() {
                     out += &format!("  {frame}\n");
                 }
@@ -7584,12 +8074,16 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
             }
         };
     let code = status.and_then(|s| s.code());
+    let facts = RunFacts {
+        events: Some(iso.with_extension("events.jsonl")),
+        secs: Some(time.total.as_secs_f64()),
+    };
     let verdicts: Vec<(&Scenario, Result)> = match vm {
         Vm::Single(s) => {
             let events = fs::read_to_string(iso.with_extension("events.jsonl")).unwrap_or_default();
             let wanted = EVENT_EXPECT.iter().filter(|(n, _)| *n == s.name).flat_map(|(_, e)| *e);
             let missing: Vec<&str> = wanted.copied().filter(|e| !events.contains(e)).collect();
-            let verdict = judge(s, code, status.is_none(), &serial)
+            let verdict = judge(s, code, status.is_none(), &serial, &facts)
                 .and_then(|()| {
                     if missing.is_empty() {
                         Ok(())
@@ -7615,12 +8109,16 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
                 let preamble = &serial[..serial.find("run: begin ").unwrap_or(0)];
                 let verdict = match program_section(&serial, program, nth) {
                     // Finished: judge its section as if it had its own VM.
-                    Some((section, true)) => {
-                        judge(s, Some(QEMU_EXIT_SUCCESS), false, &format!("{preamble}{section}"))
-                    }
+                    Some((section, true)) => judge(
+                        s,
+                        Some(QEMU_EXIT_SUCCESS),
+                        false,
+                        &format!("{preamble}{section}"),
+                        &facts,
+                    ),
                     // Started but the VM ended (or hung) in it.
                     Some((section, false)) => {
-                        judge(s, code, status.is_none(), &format!("{preamble}{section}"))
+                        judge(s, code, status.is_none(), &format!("{preamble}{section}"), &facts)
                             .and(Err("the shared VM ended during this program".into()))
                     }
                     None => Err("did not run (the shared VM ended before it)".into()),
@@ -7638,6 +8136,14 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
             serial.trim_end()
         );
         eprint!("{}", symbolize(RELEASE.load(std::sync::atomic::Ordering::Relaxed), &serial));
+        // The triage of each failed scenario (also at the end of its kept log).
+        let events = fs::read_to_string(iso.with_extension("events.jsonl")).ok();
+        for (s, v) in verdicts.iter().filter(|(_, v)| v.is_err()) {
+            let verdict = v.as_ref().err().map(String::as_str);
+            let host = Some(host_facts());
+            let facts = triage::Facts { scenario: s.name, verdict, secs: facts.secs, host };
+            eprint!("{}", triage::triage(&serial, events.as_deref(), &facts));
+        }
     }
     (time, verdicts)
 }
@@ -7649,7 +8155,7 @@ fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
         let boot = scenario_boot(scenario.name);
         earlier_boots(scenario.name, iso, boot, scenario_timeout(scenario.name), d)?;
     }
-    let (status, serial, _) = run_vm(
+    let (status, serial, time) = run_vm(
         iso,
         scenario_boot(scenario.name),
         scenario_timeout(scenario.name),
@@ -7658,7 +8164,11 @@ fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
         disk.as_deref(),
         screen_check(scenario.name),
     )?;
-    judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial)?;
+    let facts = RunFacts {
+        events: Some(iso.with_extension("events.jsonl")),
+        secs: Some(time.total.as_secs_f64()),
+    };
+    judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial, &facts)?;
     disk.as_deref().map_or(Ok(()), |d| check_disk(scenario.name, d))
 }
 
@@ -8298,5 +8808,51 @@ mod judging {
         // Without the client's line, or after a failure exit, it fails.
         assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, BOOT_OK_MARKER).is_err());
         assert!(judge_log(&s, Some(QEMU_EXIT_FAILURE), false, &ok).is_err());
+    }
+}
+
+#[cfg(test)]
+mod health {
+    use super::*;
+
+    fn line(name: &str, ok: bool, secs: f64, shared: bool) -> String {
+        format!(
+            r#"{{"t":1,"commit":"abc","load":2.5,"scenario":"{name}","ok":{ok},"secs":{secs},"shared":{shared},"reason":"timed out after 300s"}}"#
+        )
+    }
+
+    #[test]
+    fn flaky_and_slower_scenarios_are_found() {
+        let mut h = Vec::new();
+        for i in 0..10 {
+            h.push(line("java_http", i != 4, 40.0, false));
+            h.push(line("steady", true, 10.0, false));
+            h.push(line("slow", true, 20.0, false));
+            h.push(line("shared", i != 2, 5.0, true));
+        }
+        h.push(line("slow", true, 45.0, false));
+        h.push(line("steady", true, 11.0, false));
+        let found = history_findings(&h.join("\n"), &["java_http", "steady", "slow", "shared"]);
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found[0].starts_with("java_http is flaky: failed 1 of its last 10 runs"));
+        assert!(found[0].contains("timed out after 300s"));
+        assert!(found[1].starts_with("slow is slower: 45.0s against a median of 20.0s"));
+        assert!(found[1].contains("host load 2.5"));
+        assert!(found[2].starts_with("shared is flaky"));
+        // Only this run's scenarios.
+        assert!(history_findings(&h.join("\n"), &["steady"]).is_empty());
+    }
+
+    #[test]
+    fn a_dump_scenario_passes_only_on_a_timeout_with_its_lines() {
+        let s = Scenario {
+            name: "x",
+            cmdline: "",
+            exit_status: XTASK_DUMPS,
+            expect: &["statedump: end"],
+        };
+        assert!(judge_log(&s, None, true, "statedump: end").is_ok());
+        assert!(judge_log(&s, None, true, "statedump: begin").is_err());
+        assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, "statedump: end").is_err());
     }
 }

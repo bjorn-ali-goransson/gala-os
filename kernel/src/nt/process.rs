@@ -75,6 +75,9 @@ pub struct Process {
     /// The console session its console output also goes to (a console
     /// window's), inherited by the processes it creates.
     pub console: Option<KArc<super::conhost::Session>>,
+    /// The last exception one of its threads took (a crash report when it
+    /// ends the process; nt::crashreport).
+    pub last_exception: IrqMutex<Option<super::crashreport::Note>>,
 }
 
 impl Process {
@@ -752,6 +755,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),
         token: IrqMutex::new(token),
         console,
+        last_exception: IrqMutex::new(None),
     })?;
     prune();
     PROCESSES.lock().try_push(process.clone())?;
@@ -867,6 +871,11 @@ pub fn terminate_current(status: NtStatus) {
 pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     let status = *process.exit_status.lock().get_or_insert(last_status);
     *process.exit_time.lock() = platform::system_time();
+    // Ended by an exception: what Windows' error report would say.
+    let note = *process.last_exception.lock();
+    if let Some(note) = note.filter(|n| n.status == status) {
+        super::crashreport::report(process, &note);
+    }
     info!("process {} (pid {}) exited with status {:#010x}", process.name, process.id, status.0);
     crate::events::emit(
         crate::events::Category::Process,
@@ -925,6 +934,7 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
             vm::Fault::Resolved => return, // retry the instruction
             vm::Fault::Raise(status) => {
                 if !deliver_to_user(&process, frame, status, cr2) {
+                    keep_note(&process, frame, status, frame.rip, cr2);
                     warn!(
                         "user exception: {:#x} at rip {:#x} (cr2 {addr:#x})",
                         status.0, frame.rip
@@ -949,6 +959,9 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
     {
         return;
     }
+    if let Some(process) = current() {
+        keep_note(&process, frame, status, frame.rip, cr2);
+    }
     warn!(
         "user exception: {} at rip {:#x} (cr2 {:#x}, error {:#x})",
         platform::exception_name(vector),
@@ -958,6 +971,29 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
     );
     // Takes effect on the way back to user mode (the user-return hook).
     terminate_current(status)
+}
+
+/// Keeps the exception for a crash report (printed if it ends the
+/// process).
+fn keep_note(process: &Process, frame: &TrapFrame, status: NtStatus, rip: u64, cr2: Option<u64>) {
+    let access = matches!(
+        status,
+        NtStatus::ACCESS_VIOLATION | NtStatus::GUARD_PAGE_VIOLATION | NtStatus::STACK_OVERFLOW
+    )
+    .then(|| {
+        let kind = match frame.error_code {
+            e if e & (1 << 4) != 0 => 8,
+            e if e & (1 << 1) != 0 => 1,
+            _ => 0,
+        };
+        (cr2.unwrap_or(u64::MAX), kind)
+    });
+    let regs = [
+        frame.rax, frame.rcx, frame.rdx, frame.rbx, frame.rsp, frame.rbp, frame.rsi, frame.rdi,
+        frame.r8, frame.r9, frame.r10, frame.r11, frame.r12, frame.r13, frame.r14, frame.r15,
+    ];
+    let note = super::crashreport::Note::new(process, status, rip, access, regs);
+    *process.last_exception.lock() = Some(note);
 }
 
 /// The dispatcher frame on the user stack: the CONTEXT at the new rsp,
@@ -1028,6 +1064,7 @@ fn deliver_to_user(
         }
         _ => &[],
     };
+    keep_note(process, frame, status, rip, cr2);
     let record = exception_record(status, rip, info);
     let regs = UserRegs {
         gpr: [
@@ -1161,6 +1198,7 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
         priority_class: AtomicU8::new(a.priority_class),
         token: IrqMutex::new(token),
         console: None,
+        last_exception: IrqMutex::new(None),
     })
     .map_err(|_| NtStatus::NO_MEMORY)?;
     {

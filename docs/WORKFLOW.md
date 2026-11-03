@@ -123,6 +123,8 @@ shows it.
   VM's ISO just before it boots and deletes it after a pass (a failed
   one stays to boot by hand), so only the running VMs' images use disk;
   making all ~170 first (about 50 MB each) filled the shared disk.
+  xtask refuses to start an image with less than 300 MiB free (or to pack
+  an ISO without its tree's size free) and says what to delete.
   `XTASK_REPEAT` still makes its images first.
 - **Write each expected output line with one WriteFile call**: a test
   that writes a line in pieces can have a kernel log line land between
@@ -432,6 +434,10 @@ charged). Look
   race nor NtReleaseSemaphore's lost update (both below, fixed) was
   shown to be it, nor the vector state (XSAVE enabled 2026-11-02:
   java_hello still failed 1 of 30 with the String.equals crash).
+  2026-11-03, first timeout with a state dump: java_http hung (correct
+  clock) with three JVM threads in NtYieldExecution and two waiting on
+  semaphores with count 0 (OBSERVABILITY "Gaps found 2026-11-03" item
+  18): a lost semaphore release again, or a wake-up missed elsewhere.
 - **Flaky boot tests** usually mean a race; rerun the one scenario a few
   times before blaming CI: `XTASK_REPEAT=12 cargo xtask boot-test name`
   boots one scenario's image 12 times, as many at once as the host has
@@ -1171,13 +1177,72 @@ line a program writes in pieces can be split by a log line ("process ...
 exited"): expect lines that are written in one piece (a shell `echo` of
 a captured value) when that matters.
 
+## When a test fails (read this first)
+
+- **Start at the end of the failed log**: `target/failed/<scenario>.log`
+  (also printed to the console) ends with a `===== triage` block: the
+  verdict, how long it ran, the host's CPUs, load and free disk, the
+  guest's CPUs and memory (heap peak, fewest free frames), warning and
+  error counts and the first error, panics, CPU exceptions, watchdog,
+  leak, out-of-memory and missing-function lines, programs that began
+  and did not end, processes that failed, the ledger's top five, the
+  state dump's CPUs, locks and threads, each thread's last system calls
+  and the last lines. `cargo xtask triage <log> [events.jsonl]` prints
+  it for any log (a kept serial log, a CI artifact); the event stream
+  next to the log is found by name.
+- **A timeout comes with a state dump**: before killing a timed-out VM,
+  xtask injects an NMI and the kernel prints `statedump:` lines: per CPU
+  the rip (user or kernel) and a kernel backtrace (symbolized below the
+  log as `statedump: cpu N backtrace (symbolized)`), the thread each CPU
+  runs, `statedump: locks: ...` (a lock still HELD after 100 ms of trying
+  is what everything waits for), heap and frames, the flight recorder
+  (system calls by name with pid and tid); then from the boot thread
+  every NT thread's system call and wait object (with its signal state
+  and timeout), every scheduler thread, the ledger, `statedump: end`.
+  xtask's last line says how far it got: "did not answer the NMI" means
+  the guest was wedged or not yet past early boot; "NMI part came, its
+  threads part did not" means the boot thread could not run (the
+  scheduler or a lock is stuck: look at the locks line and the CPUs'
+  backtraces). To get the dump of a hang now rather than at the timeout:
+  `XTASK_TIMEOUT=30 cargo xtask boot-test <name>`.
+- **gala-um**: a run that hangs gets SIGQUIT at its timeout (`timeout -s
+  QUIT`, SIGKILL 5 s later) and prints the threads part of the dump to
+  stderr; for a live one, `kill -QUIT <pid of exe>`.
+- **A program that crashed** has `crash report:` lines before its exit line:
+  the exception (code and name), the thread, the address as
+  `module+offset`, what it read, wrote or executed, the registers and the
+  top of the stack with module offsets; look the offset up in that
+  module's disassembly (`llvm-objdump -d --start-address=...`).
+- **Is it flaky?** `cargo xtask test`/`boot-test` keep every scenario's
+  outcome in `target/report/history.jsonl` and end with `xtask: health:`
+  lines for this run's scenarios that both passed and failed in their
+  last 30 runs, or got much slower. A known-flaky scenario's failure is
+  still a bug; its history line has the reason of each failure (`jq
+  'select(.scenario=="java_http")' target/report/history.jsonl`).
+- **The event stream**: `XTASK_EVENTS=all cargo xtask boot-test <name>`,
+  then `cargo xtask events target/debug/test-<name>.events.jsonl` (or the
+  copy in `target/failed/`) for system calls by time, failing statuses,
+  each thread's last calls, faults and images.
+- **"the disk is (nearly) full"** from xtask: the message says how much is
+  free and what to delete; see "Disk space" above.
+- **A watchdog line** (`watchdog: CPU N has taken no timer interrupt`) is
+  followed by that CPU's own backtrace (`watchdog: CPU N backtrace:`,
+  symbolized at the end of the failed log). Watchdogs right after boot on
+  a loaded host: check the `apic:` line's TSC and timer figures (a
+  calibration gone wrong under load makes every timeout wrong).
+- **Diagnostic code that peeks at a lock** from an interrupt, an NMI or a
+  panic uses `IrqMutex::try_lock_untracked`: a tracked `try_lock` there
+  teaches lockdep an order no real path has, and a later correct path
+  panics as an "inversion".
+
 ## Hunting a rare hang
 
 A scenario that fails once in N runs: loop `cargo xtask boot-test <name>`
 until it fails and keep that serial log. After a minute without the
 program finishing the kernel dumps every thread (see ARCHITECTURE, "Hang
 dump"): which system call each NT thread is in, on which object, with
-which timeout. Tracing (`trace`) changes the timing enough to hide such
+which timeout; at the boot test's timeout xtask asks for a state dump
+too (NMI, "When a test fails" above), which is the state at the end. Tracing (`trace`) changes the timing enough to hide such
 races, so prefer the dump. In gala-um, catch a hung instance live and
 use `gdb -p` (`thread apply all bt`); its process is named `exe` after
 gala-um re-executes itself without ASLR.

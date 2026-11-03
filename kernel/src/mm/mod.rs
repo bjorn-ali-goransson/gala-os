@@ -100,3 +100,15 @@ pub fn free_frame(frame: Frame) -> Result<(), FreeError> {
 pub fn frame_stats() -> (u64, u64) {
     with_frames(|a| (a.free_frames(), a.total_frames())).unwrap_or((0, 0))
 }
+
+/// The fewest free frames there have been (the low-water mark).
+pub fn frame_low_water() -> u64 {
+    with_frames(|a| a.low_free_frames()).unwrap_or(0)
+}
+
+/// `(free, total, low-water)` if the allocator's lock is free (a state
+/// dump from an NMI or a panic, which must not wait).
+pub fn try_frame_stats() -> Option<(u64, u64, u64)> {
+    let guard = FRAMES.try_lock_untracked()?;
+    guard.as_ref().map(|a| (a.free_frames(), a.total_frames(), a.low_free_frames()))
+}

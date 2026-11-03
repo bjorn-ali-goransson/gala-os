@@ -9,20 +9,36 @@ const STACK_SPAN: u64 = 256 * 1024;
 const MAX_FRAMES: usize = 32;
 
 /// Calls `f` with each return address, innermost first.
-pub fn walk(mut f: impl FnMut(u64)) {
-    let (mut rbp, rsp): (u64, u64);
+pub fn walk(f: impl FnMut(u64)) {
+    let (rbp, rsp): (u64, u64);
     // SAFETY: reads two registers.
     unsafe {
         core::arch::asm!("mov {}, rbp", "mov {}, rsp", out(reg) rbp, out(reg) rsp,
                          options(nomem, nostack, preserves_flags));
     }
+    walk_stack(rbp, rsp, f);
+}
+
+/// The same for interrupted kernel code (an NMI's state dump): the frame
+/// chain from `rbp`, followed only within `STACK_SPAN` above `rsp` (the
+/// interrupted stack pointer, which must be a kernel stack's: this CPU's
+/// mapped pages).
+pub fn walk_from(rbp: u64, rsp: u64, f: impl FnMut(u64)) {
+    if rsp < 0xffff_8000_0000_0000 {
+        return;
+    }
+    walk_stack(rbp, rsp, f);
+}
+
+fn walk_stack(mut rbp: u64, rsp: u64, mut f: impl FnMut(u64)) {
     let top = rsp.saturating_add(STACK_SPAN);
     for _ in 0..MAX_FRAMES {
         if rbp < rsp || rbp.saturating_add(16) > top || !rbp.is_multiple_of(8) {
             break;
         }
-        // SAFETY: `rbp` lies between the current stack pointer and a bound
-        // above it, inside this stack's mapped pages, 8-byte aligned.
+        // SAFETY: `rbp` lies between the (current or interrupted kernel)
+        // stack pointer and a bound above it, inside that stack's mapped
+        // pages, 8-byte aligned.
         let (next, ret) = unsafe { (*(rbp as *const u64), *((rbp + 8) as *const u64)) };
         if ret == 0 {
             break;

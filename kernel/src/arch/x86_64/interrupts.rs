@@ -8,6 +8,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use super::gdt::{self, KERNEL_CS};
 use super::sync::HwCell;
 
+pub const VECTOR_NMI: u8 = 2;
 pub const VECTOR_BREAKPOINT: u8 = 3;
 pub const VECTOR_DOUBLE_FAULT: u8 = 8;
 pub const VECTOR_PAGE_FAULT: u8 = 14;
@@ -180,7 +181,7 @@ pub fn init() {
         for (vector, gate) in idt.0.iter_mut().enumerate() {
             let ist = match vector as u8 {
                 VECTOR_DOUBLE_FAULT => gdt::IST_DOUBLE_FAULT,
-                2 => gdt::IST_NMI,
+                VECTOR_NMI => gdt::IST_NMI,
                 18 => gdt::IST_MACHINE_CHECK,
                 _ => 0,
             };
@@ -209,6 +210,18 @@ static HANDLERS: [AtomicUsize; 256 - FIRST_EXTERNAL_VECTOR as usize] =
     [const { AtomicUsize::new(0) }; 256 - FIRST_EXTERNAL_VECTOR as usize];
 static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
 static USER_EXCEPTION_HANDLER: AtomicUsize = AtomicUsize::new(0);
+static NMI_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
+/// Handler for non-maskable interrupts (a state dump on request: xtask
+/// injects one with QEMU's `nmi` when a boot test times out). It runs
+/// with every interrupt blocked, possibly while this CPU holds any lock:
+/// it may only use atomics and `try_lock`.
+pub type NmiHandler = fn(&TrapFrame);
+
+/// Routes NMIs to `handler` (without one they are ignored).
+pub fn set_nmi_handler(handler: NmiHandler) {
+    NMI_HANDLER.store(handler as usize, Ordering::Release);
+}
 
 /// Handler for CPU exceptions raised in user mode: `(frame, cr2)`.
 pub type UserExceptionHandler = fn(&mut TrapFrame, Option<u64>);
@@ -238,6 +251,12 @@ pub fn breakpoint_count() -> u64 {
 
 extern "C" fn dispatch(frame: &mut TrapFrame) {
     let vector = frame.vector as u8;
+    // First: an NMI from user mode is no exception of the program's, and
+    // it must not run the user-return hook (it may come at any point).
+    if vector == VECTOR_NMI {
+        nmi(frame);
+        return;
+    }
     if vector < FIRST_EXTERNAL_VECTOR && frame.from_user_mode() {
         let raw = USER_EXCEPTION_HANDLER.load(Ordering::Acquire);
         if raw != 0 {
@@ -268,6 +287,35 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
     handler(frame);
     if frame.from_user_mode() {
         user_return(frame);
+    }
+}
+
+const IA32_GS_BASE: u32 = 0xc000_0101;
+
+fn nmi(frame: &TrapFrame) {
+    let raw = NMI_HANDLER.load(Ordering::Acquire);
+    if raw == 0 {
+        return;
+    }
+    // An NMI can arrive in kernel mode before the entry code's `swapgs`
+    // (right after `syscall`) or after the exit's: the GS base is then
+    // the user's (a lower-half address), and the per-CPU data is in
+    // IA32_KERNEL_GS_BASE. Swap for the handler and back.
+    // SAFETY: reading IA32_GS_BASE has no side effects.
+    let user_gs =
+        !frame.from_user_mode() && (unsafe { super::cpu::rdmsr(IA32_GS_BASE) } as i64) >= 0;
+    if user_gs {
+        // SAFETY: GS holds the user base here and the kernel's is in
+        // IA32_KERNEL_GS_BASE; swapped back below before returning.
+        unsafe { asm!("swapgs", options(nomem, nostack, preserves_flags)) };
+    }
+    // SAFETY: only `set_nmi_handler` stores non-zero values, and it
+    // stores `NmiHandler`s.
+    let handler = unsafe { core::mem::transmute::<usize, NmiHandler>(raw) };
+    handler(frame);
+    if user_gs {
+        // SAFETY: restores the GS base the interrupted code had.
+        unsafe { asm!("swapgs", options(nomem, nostack, preserves_flags)) };
     }
 }
 
