@@ -2108,6 +2108,25 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         msxmlsql, hkcompile, SqlDumper, SqlUserInstance and wxWidgets'
         wxbase). Left in shlwapi: the URL functions, `PathCreateFromUrlW`,
         `AssocQueryStringW`, `SHAutoComplete`, `SHCreateStreamOnFileEx`.
+     3. shell32: `ShellExecuteExW` (and `ShellExecuteW` now runs
+        programs), `DragQueryFileW`, `DragQueryPoint`, `DragFinish`,
+        `DragAcceptFiles`, `SHFileOperationW`, `SHChangeNotify`,
+        `Shell_NotifyIconW` (fails: no notification area, recorded),
+        `SHGetIconOverlayIndexW` (`shell32_test`); ole32:
+        `PropVariantClear`, `ReleaseStgMedium`, `OleRun`,
+        `OleLockRunning`, `OleSetContainedObject` (the last three were
+        missing exports: StackBuilder's wxmsw326u_core did not load),
+        `CoSetProxyBlanket`, `CoQueryProxyBlanket`,
+        `CoFreeUnusedLibraries` (`ole32_test`). Left: shell32's icon
+        extraction and SHBrowseForFolderW, ole32's OLE clipboard and
+        DoDragDrop (they need user32's clipboard), CoCreateInstanceEx,
+        CreateBindCtx, GetHGlobalFromStream, CoRegisterMallocSpy,
+        CoImpersonateClient/CoRevertToSelf.
+     4. dbghelp: `ImageNtHeader`, `SymSrvGetFileIndexInfoW` (and
+        `MiniDumpWriteDump` exported as a stub), so LocalDB's SqlDumper
+        loads; a new normaliz.dll (`IdnToAscii` forwarded to kernel32,
+        `IdnToUnicode` its own: kernel32's is a stub, for its owners to
+        replace) for libcurl (`dbghelp_test`).
    - Elsewhere (not in these crates; for the agents there): FileZilla
      Server's GUI also stops on user32 (54 stubs: carets, the clipboard,
      DDE, DrawEdge/DrawFrameControl, window placement), gdi32 (16:
