@@ -25,6 +25,17 @@
  *   result; an object without one is S_OK.
  * - CoSetProxyBlanket / CoQueryProxyBlanket on an object that is not a
  *   proxy (no IClientSecurity): E_NOINTERFACE.
+ * - CoCreateInstanceEx: each MULTI_QI's hr and pItf; S_OK when all were
+ *   found, CO_S_NOTALLINTERFACES when some, the activation's error (each
+ *   hr too) for an unregistered class, E_INVALIDARG for none asked.
+ * - CreateBindCtx: a bind context whose default BIND_OPTS are grfMode
+ *   STGM_READWRITE and the rest 0; options round-trip; bound objects
+ *   are held (AddRef) until revoked (MK_E_NOTBOUND after) or
+ *   ReleaseBoundObjects; object parameters by name (E_FAIL for an
+ *   unknown one, S_FALSE revoking it twice) until revoked or the context
+ *   ends; a reserved value other than 0 is E_INVALIDARG.
+ * - CoImpersonateClient / CoRevertToSelf outside a COM call:
+ *   RPC_E_CALL_COMPLETE (there is no call context).
  *
  * Prints "ole32_test: ok" or exits with the number of the failing check. */
 #define COBJMACROS
@@ -216,6 +227,65 @@ int main(void) {
           == E_NOINTERFACE);
     CHECK(o.refs == 1);
     CoFreeUnusedLibraries();
+
+    /* CoCreateInstanceEx: CUIAutomation (registered on Windows and gala)
+     * asked for three interfaces, one it does not have. */
+    static const CLSID clsid_uia = {0xff48dba4, 0x60ef, 0x4201, {0xaa, 0x87, 0x54, 0x10, 0x3e, 0xef, 0x59, 0x4e}};
+    static const IID iid_uia = {0x30cbe57d, 0xd9d0, 0x452a, {0xab, 0x13, 0x7a, 0xc5, 0xac, 0x48, 0x25, 0xee}};
+    static const IID iid_none = {0x1234abcd, 0x1, 0x2, {3, 4, 5, 6, 7, 8, 9, 10}};
+    MULTI_QI mqi[3] = {{&IID_IUnknown, (IUnknown *)1, 7}, {&iid_uia, (IUnknown *)1, 7}, {&iid_none, (IUnknown *)1, 7}};
+    CHECK(CoCreateInstanceEx(&clsid_uia, NULL, CLSCTX_INPROC_SERVER, NULL, 3, mqi) == CO_S_NOTALLINTERFACES);
+    CHECK(mqi[0].hr == S_OK && mqi[0].pItf != NULL && mqi[1].hr == S_OK && mqi[1].pItf != NULL);
+    CHECK(mqi[2].hr == E_NOINTERFACE && mqi[2].pItf == NULL);
+    IUnknown_Release(mqi[0].pItf);
+    IUnknown_Release(mqi[1].pItf);
+    MULTI_QI one = {&iid_uia, NULL, 7};
+    CHECK(CoCreateInstanceEx(&clsid_uia, NULL, CLSCTX_INPROC_SERVER, NULL, 1, &one) == S_OK && one.pItf);
+    IUnknown_Release(one.pItf);
+    one.pItf = (IUnknown *)1;
+    CHECK(CoCreateInstanceEx(&iid_none, NULL, CLSCTX_INPROC_SERVER, NULL, 1, &one) == REGDB_E_CLASSNOTREG);
+    CHECK(one.hr == REGDB_E_CLASSNOTREG && one.pItf == NULL);
+    CHECK(CoCreateInstanceEx(&clsid_uia, NULL, CLSCTX_INPROC_SERVER, NULL, 0, &one) == E_INVALIDARG);
+
+    /* CreateBindCtx: bound objects, parameters, bind options. */
+    IBindCtx *ctx = NULL;
+    CHECK(CreateBindCtx(0, &ctx) == S_OK && ctx != NULL);
+    BIND_OPTS opts;
+    memset(&opts, 0xcc, sizeof opts);
+    opts.cbStruct = sizeof opts;
+    CHECK(IBindCtx_GetBindOptions(ctx, &opts) == S_OK);
+    CHECK(opts.cbStruct == sizeof opts && opts.grfFlags == 0 && opts.grfMode == STGM_READWRITE
+          && opts.dwTickCountDeadline == 0);
+    opts.grfFlags = BIND_MAYBOTHERUSER;
+    opts.dwTickCountDeadline = 1234;
+    CHECK(IBindCtx_SetBindOptions(ctx, &opts) == S_OK);
+    memset(&opts, 0, sizeof opts);
+    opts.cbStruct = sizeof opts;
+    CHECK(IBindCtx_GetBindOptions(ctx, &opts) == S_OK && opts.grfFlags == BIND_MAYBOTHERUSER
+          && opts.dwTickCountDeadline == 1234);
+    Obj bound, param;
+    make(&bound, FALSE);
+    make(&param, FALSE);
+    CHECK(IBindCtx_RegisterObjectBound(ctx, (IUnknown *)&bound) == S_OK && bound.refs == 2);
+    CHECK(IBindCtx_RegisterObjectParam(ctx, L"gala", (IUnknown *)&param) == S_OK && param.refs == 2);
+    IUnknown *got = NULL;
+    CHECK(IBindCtx_GetObjectParam(ctx, L"gala", &got) == S_OK && got == (IUnknown *)&param && param.refs == 3);
+    IUnknown_Release(got);
+    got = (IUnknown *)1;
+    CHECK(IBindCtx_GetObjectParam(ctx, L"other", &got) == E_FAIL && got == NULL);
+    CHECK(IBindCtx_RevokeObjectParam(ctx, L"gala") == S_OK && param.refs == 1);
+    CHECK(IBindCtx_RevokeObjectParam(ctx, L"gala") == S_FALSE);
+    CHECK(IBindCtx_RevokeObjectBound(ctx, (IUnknown *)&bound) == S_OK && bound.refs == 1);
+    CHECK(IBindCtx_RevokeObjectBound(ctx, (IUnknown *)&bound) == MK_E_NOTBOUND);
+    CHECK(IBindCtx_RegisterObjectBound(ctx, (IUnknown *)&bound) == S_OK && bound.refs == 2);
+    CHECK(IBindCtx_RegisterObjectParam(ctx, L"gala", (IUnknown *)&param) == S_OK && param.refs == 2);
+    CHECK(IBindCtx_ReleaseBoundObjects(ctx) == S_OK && bound.refs == 1);
+    CHECK(IBindCtx_Release(ctx) == 0 && param.refs == 1);
+    CHECK(CreateBindCtx(1, &ctx) == E_INVALIDARG);
+
+    /* Outside a COM call there is no client to impersonate. */
+    CHECK(CoImpersonateClient() == RPC_E_CALL_COMPLETE);
+    CHECK(CoRevertToSelf() == RPC_E_CALL_COMPLETE);
 
     CoUninitialize();
     printf("ole32_test: ok\n");

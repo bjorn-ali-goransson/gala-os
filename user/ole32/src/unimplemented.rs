@@ -3,11 +3,7 @@
 //! the ledger and ends the process.
 
 gala_stubs::unimplemented_exports!("ole32.dll":
-    CoCreateInstanceEx
-    CoImpersonateClient
     CoRegisterMallocSpy
-    CoRevertToSelf
-    CreateBindCtx
     GetHGlobalFromStream
     DoDragDrop
     OleFlushClipboard

@@ -26,6 +26,7 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+mod bindctx;
 mod class;
 mod props;
 mod stream;

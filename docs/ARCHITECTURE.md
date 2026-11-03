@@ -3182,7 +3182,12 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   OleSetContainedObject go to IRunnableObject (S_OK without one);
   CoSetProxyBlanket/CoQueryProxyBlanket to IClientSecurity, which no
   object has without proxies (E_NOINTERFACE, as an in-process object
-  answers on Windows).
+  answers on Windows). `bindctx.rs`: CoCreateInstanceEx creates through
+  CoCreateInstance(IID_IUnknown) and fills each MULTI_QI by
+  QueryInterface; CreateBindCtx's object keeps up to 32 bound objects
+  and 16 named parameters (more is recorded) and the BIND_OPTS bytes;
+  CoImpersonateClient/CoRevertToSelf answer RPC_E_CALL_COMPLETE (gala
+  serves no COM calls across processes).
 - **Common controls** (`user/comctl32/src/`; `comctl32_test`):
   InitCommonControls(Ex) registers the classes (once). comctl32 imports
   user32 (the controls are windows) but loads gdi32 on first use (the

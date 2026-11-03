@@ -2106,6 +2106,15 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         file, made by user32's CreateIconFromResourceEx; `shell32_test`,
         whose build.sh now embeds two icons). Left in shell32:
         `SHBrowseForFolderW` (a dialog).
+     8. ole32: `CoCreateInstanceEx` (MULTI_QI results; CUIAutomation in
+        the test), `CreateBindCtx` (bound objects, object parameters,
+        BIND_OPTS; no running object table: recorded),
+        `CoImpersonateClient`/`CoRevertToSelf` (RPC_E_CALL_COMPLETE: no
+        COM call is ever being served) (`ole32_test`). Left in ole32:
+        `GetHGlobalFromStream` and CreateStreamOnHGlobal with an HGLOBAL
+        (they need movable global memory: kernel32's GlobalSize is a stub
+        and GlobalAlloc hands out fixed blocks), `CoRegisterMallocSpy`,
+        the OLE clipboard and `DoDragDrop` (user32's clipboard).
    - Known problem (2026-11-03): the FileZilla client's PREBUILT URL
      (`downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe`)
      now answers 404 (so does the `FileZilla_Client/3.69.3/` path), so
