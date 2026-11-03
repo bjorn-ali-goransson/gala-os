@@ -5631,9 +5631,9 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
         let mut name = Vec::new();
         tri!(name.try_reserve_exact(end.name().len() + 1).map_err(|_| NtStatus::NO_MEMORY));
         if end.name().first() != Some(&u16::from(b'\\')) {
-            name.push(u16::from(b'\\'));
+            tri!(name.try_push(u16::from(b'\\')).map_err(|_| NtStatus::NO_MEMORY));
         }
-        name.extend_from_slice(end.name());
+        tri!(name.try_extend_from_slice(end.name()).map_err(|_| NtStatus::NO_MEMORY));
         return return_file_name(call, &name, buffer, length, iosb);
     }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };

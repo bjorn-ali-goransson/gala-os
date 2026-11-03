@@ -208,3 +208,294 @@ pub extern "system" fn IsWindowArranged(_hwnd: usize) -> i32 {
 pub extern "system" fn GetShellWindow() -> usize {
     0
 }
+
+// ---- Cursor, keyboard state, display queries, pointer input ---------------
+
+/// ClipCursor(lpRect): accepted; gala does not confine the cursor yet.
+#[unsafe(no_mangle)]
+pub extern "system" fn ClipCursor(_rect: *const i32) -> i32 {
+    1
+}
+
+/// GetCursorInfo(pci): CURSORINFO { cbSize (24), flags, hCursor,
+/// ptScreenPos }: showing, the arrow (gala's cursor is not a handle: 0),
+/// at the cursor's position.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCursorInfo(info: *mut u8) -> i32 {
+    // SAFETY: the caller's CURSORINFO.
+    unsafe {
+        if info.is_null() || info.cast::<u32>().read_unaligned() != 24 {
+            set_error(87);
+            return 0;
+        }
+        info.add(4).cast::<u32>().write_unaligned(1); // CURSOR_SHOWING
+        info.add(8).cast::<usize>().write_unaligned(0);
+        let mut point = [0i32; 2];
+        super::window::GetCursorPos(&mut point);
+        info.add(16).cast::<[i32; 2]>().write_unaligned(point);
+    }
+    1
+}
+
+/// SetKeyboardState(lpKeyState): accepted (the next GetKeyboardState is
+/// the real keyboard's; gala keeps no per-thread copy).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetKeyboardState(state: *const u8) -> i32 {
+    if state.is_null() {
+        set_error(87);
+        return 0;
+    }
+    1
+}
+
+/// EnumDisplayDevicesW(lpDevice, iDevNum, lpDisplayDevice, dwFlags): one
+/// adapter, `\\.\DISPLAY1`, attached to the desktop and primary.
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumDisplayDevicesW(
+    device: *const u16,
+    index: u32,
+    out: *mut u8,
+    _flags: u32,
+) -> i32 {
+    // DISPLAY_DEVICEW: cb, DeviceName[32], DeviceString[128], StateFlags,
+    // DeviceID[128], DeviceKey[128] (840 bytes).
+    // SAFETY: the caller's structure (its cb says how much is there).
+    unsafe {
+        if out.is_null() || out.cast::<u32>().read_unaligned() < 4 + 64 + 256 + 4 {
+            set_error(87);
+            return 0;
+        }
+        if !device.is_null() || index != 0 {
+            return 0; // no monitors listed under the adapter, one adapter
+        }
+        let size = out.cast::<u32>().read_unaligned() as usize;
+        core::ptr::write_bytes(out.add(4), 0, size.min(840) - 4);
+        let put = |at: usize, text: &[u8]| {
+            for (i, &c) in text.iter().enumerate() {
+                out.add(at + 2 * i).cast::<u16>().write_unaligned(u16::from(c));
+            }
+        };
+        put(4, b"\\\\.\\DISPLAY1");
+        put(68, b"gala display");
+        out.add(324).cast::<u32>().write_unaligned(0x1 | 0x4); // ATTACHED | PRIMARY
+    }
+    1
+}
+
+/// GetDisplayConfigBufferSizes / QueryDisplayConfig /
+/// DisplayConfigGetDeviceInfo: the CCD display configuration is not
+/// supported (ERROR_NOT_SUPPORTED, their documented "not available").
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDisplayConfigBufferSizes(
+    _flags: u32,
+    _paths: *mut u32,
+    _modes: *mut u32,
+) -> i32 {
+    50
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryDisplayConfig(
+    _flags: u32,
+    _paths: *mut u32,
+    _path_info: *mut u8,
+    _modes: *mut u32,
+    _mode_info: *mut u8,
+    _topology: *mut u32,
+) -> i32 {
+    50
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DisplayConfigGetDeviceInfo(_packet: *mut u8) -> i32 {
+    50
+}
+
+/// GetPointerType / GetPointerDevice / GetPointerPenInfo: there are no
+/// pointers on gala, so every pointer id is unknown.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetPointerType(_id: u32, _kind: *mut u32) -> i32 {
+    set_error(87);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetPointerDevice(_device: usize, _info: *mut u8) -> i32 {
+    set_error(87);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetPointerPenInfo(_id: u32, _info: *mut u8) -> i32 {
+    set_error(87);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn CloseTouchInputHandle(_handle: usize) -> i32 {
+    set_error(6);
+    0
+}
+
+/// GetRawInputData / GetRawInputDeviceInfoW: no raw input ever arrives,
+/// so no handle is valid ((UINT)-1, ERROR_INVALID_HANDLE).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetRawInputData(
+    _input: usize,
+    _command: u32,
+    _data: *mut u8,
+    _size: *mut u32,
+    _header: u32,
+) -> u32 {
+    set_error(6);
+    u32::MAX
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetRawInputDeviceInfoW(
+    _device: usize,
+    _command: u32,
+    _data: *mut u8,
+    _size: *mut u32,
+) -> u32 {
+    set_error(6);
+    u32::MAX
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DefRawInputProc(_input: *const usize, _count: i32, _header: u32) -> isize {
+    0
+}
+
+/// SetWindowDisplayAffinity: accepted (gala's screen capture is not
+/// restricted, so WDA_NONE is what holds; other values are kept by nobody).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetWindowDisplayAffinity(hwnd: usize, _affinity: u32) -> i32 {
+    if hwnd == 0 {
+        set_error(1400);
+        return 0;
+    }
+    1
+}
+
+/// WindowFromDC: gala's DCs are not tied to windows it can name (NULL).
+#[unsafe(no_mangle)]
+pub extern "system" fn WindowFromDC(_dc: usize) -> usize {
+    0
+}
+
+// ---- Window properties (SetProp/GetProp/RemoveProp) -----------------------
+//
+// A process-wide table of (window, name, value); a name is an atom (high
+// word 0) or a string, kept as a case-insensitive hash (FNV-1a of the
+// upper-cased UTF-16). Up to PROPS properties at once.
+
+const PROPS: usize = 512;
+
+#[derive(Clone, Copy)]
+struct Prop {
+    hwnd: usize,
+    name: u64,
+    value: usize,
+}
+
+struct PropTable {
+    lock: core::sync::atomic::AtomicBool,
+    props: core::cell::UnsafeCell<[Prop; PROPS]>,
+}
+// SAFETY: `props` is only used under `lock`.
+unsafe impl Sync for PropTable {}
+
+static PROP_TABLE: PropTable = PropTable {
+    lock: core::sync::atomic::AtomicBool::new(false),
+    props: core::cell::UnsafeCell::new([Prop { hwnd: 0, name: 0, value: 0 }; PROPS]),
+};
+
+fn prop_name(name: *const u16) -> Option<u64> {
+    if name.is_null() {
+        return None;
+    }
+    if (name as usize) >> 16 == 0 {
+        return Some(name as u64); // an atom
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut i = 0;
+    // SAFETY: the caller's NUL-terminated string.
+    unsafe {
+        while *name.add(i) != 0 {
+            let c = *name.add(i);
+            let c = if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c };
+            h = (h ^ u64::from(c)).wrapping_mul(0x0100_0000_01b3);
+            i += 1;
+        }
+    }
+    Some(h | 1 << 63)
+}
+
+fn with_props<R>(f: impl FnOnce(&mut [Prop; PROPS]) -> R) -> R {
+    use core::sync::atomic::Ordering;
+    while PROP_TABLE
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: under the lock.
+    let r = f(unsafe { &mut *PROP_TABLE.props.get() });
+    PROP_TABLE.lock.store(false, Ordering::Release);
+    r
+}
+
+/// SetPropW(hWnd, lpString, hData).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetPropW(hwnd: usize, name: *const u16, value: usize) -> i32 {
+    let Some(key) = prop_name(name) else {
+        set_error(87);
+        return 0;
+    };
+    if hwnd == 0 {
+        set_error(1400);
+        return 0;
+    }
+    let ok = with_props(|props| {
+        if let Some(p) = props.iter_mut().find(|p| p.hwnd == hwnd && p.name == key) {
+            p.value = value;
+            return true;
+        }
+        match props.iter_mut().find(|p| p.hwnd == 0) {
+            Some(p) => {
+                *p = Prop { hwnd, name: key, value };
+                true
+            }
+            None => false,
+        }
+    });
+    if !ok {
+        set_error(8); // ERROR_NOT_ENOUGH_MEMORY
+    }
+    i32::from(ok)
+}
+
+/// GetPropW(hWnd, lpString): the value, or NULL.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetPropW(hwnd: usize, name: *const u16) -> usize {
+    let Some(key) = prop_name(name) else { return 0 };
+    with_props(|props| {
+        props.iter().find(|p| p.hwnd == hwnd && p.name == key).map_or(0, |p| p.value)
+    })
+}
+
+/// RemovePropW(hWnd, lpString): the value, the property gone.
+#[unsafe(no_mangle)]
+pub extern "system" fn RemovePropW(hwnd: usize, name: *const u16) -> usize {
+    let Some(key) = prop_name(name) else { return 0 };
+    with_props(|props| match props.iter_mut().find(|p| p.hwnd == hwnd && p.name == key) {
+        Some(p) => {
+            let v = p.value;
+            *p = Prop { hwnd: 0, name: 0, value: 0 };
+            v
+        }
+        None => 0,
+    })
+}

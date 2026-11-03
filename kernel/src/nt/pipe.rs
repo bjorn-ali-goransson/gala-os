@@ -275,7 +275,7 @@ pub fn create_server(name: &[u16], o: &ServerOptions) -> Result<PipeEnd, NtStatu
     let quota = |q: u32| if q == 0 { DEFAULT_QUOTA } else { (q as usize).max(DEFAULT_QUOTA) };
     let mut given = Vec::new();
     given.try_reserve_exact(name.len()).map_err(|_| NtStatus::NO_MEMORY)?;
-    given.extend_from_slice(name);
+    given.try_extend_from_slice(name).map_err(|_| NtStatus::NO_MEMORY)?;
     let pipe = KArc::try_new(Pipe {
         client_token: IrqMutex::new(None),
         name: given,
@@ -830,7 +830,7 @@ pub fn adopt(c: Carried) -> Result<KArc<Pipe>, NtStatus> {
     let quota = |q: u64| usize::try_from(q).map_err(|_| NtStatus::INVALID_PARAMETER);
     let mut given = Vec::new();
     given.try_reserve_exact(c.name.len()).map_err(|_| NtStatus::NO_MEMORY)?;
-    given.extend_from_slice(&c.name);
+    given.try_extend_from_slice(&c.name).map_err(|_| NtStatus::NO_MEMORY)?;
     let pipe = KArc::try_new(Pipe {
         client_token: IrqMutex::new(None),
         name: given,

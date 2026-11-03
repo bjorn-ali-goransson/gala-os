@@ -940,9 +940,11 @@ fn api_set_host(name: &[u8]) -> Option<&'static [u8]> {
         b"shcore.dll"
     } else if set.starts_with(b"power-") {
         b"powrprof.dll"
-    } else if let Some(rest) = set.strip_prefix(b"downlevel-") {
-        // The downlevel sets name the DLL that implements them
+    } else {
+        // Other sets are looked up as files, except the downlevel ones,
+        // which name the DLL that implements them
         // (api-ms-win-downlevel-shell32-l1-1-0: CommandLineToArgvW).
+        let rest = set.strip_prefix(b"downlevel-")?;
         const DOWNLEVEL: [&[u8]; 8] = [
             b"kernel32",
             b"advapi32",
@@ -967,8 +969,6 @@ fn api_set_host(name: &[u8]) -> Option<&'static [u8]> {
             .iter()
             .position(|d| rest.starts_with(d) && rest.get(d.len()) == Some(&b'-'))?;
         HOSTS[i]
-    } else {
-        return None; // not a set gala hosts: looked up as a file
     };
     Some(host)
 }

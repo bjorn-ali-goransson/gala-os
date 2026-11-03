@@ -244,7 +244,7 @@ fn tests() {
         let len = path.iter().position(|&c| c == 0).unwrap_or(0);
         let ext: [u16; 4] = core::array::from_fn(|i| u16::from(b".ttf"[i]));
         let tail: [u16; 4] =
-            core::array::from_fn(|i| path[len.saturating_sub(4) + i] | 0x20 * u16::from(i > 0));
+            core::array::from_fn(|i| path[len.saturating_sub(4) + i] | (0x20 * u16::from(i > 0)));
         check(len > 4 && tail == ext, 5);
         let stream_of: extern "system" fn(
             *mut c_void,
