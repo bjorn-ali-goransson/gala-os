@@ -2064,8 +2064,7 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         `StrCmpIW`, `StrCmpNIW`, `StrStrW`, `StrStrIW`, `StrCmpLogicalW`,
         `SHDeleteKeyW` (`shlwapi_test`; LocalDB's xe.dll, sqllang,
         msxmlsql, hkcompile, SqlDumper, SqlUserInstance and wxWidgets'
-        wxbase). Left in shlwapi: the URL functions, `PathCreateFromUrlW`,
-        `AssocQueryStringW`, `SHAutoComplete`, `SHCreateStreamOnFileEx`.
+        wxbase).
      3. shell32: `ShellExecuteExW` (and `ShellExecuteW` now runs
         programs), `DragQueryFileW`, `DragQueryPoint`, `DragFinish`,
         `DragAcceptFiles`, `SHFileOperationW`, `SHChangeNotify`,
@@ -2094,6 +2093,21 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         the store functions (`CertAddCertificateContextToStore`,
         `CertDeleteCertificateFromStore`, `CertEnumCRLsInStore`,
         `CertOpenSystemStoreA`), `CryptAcquireCertificatePrivateKey`.
+     6. shlwapi, the rest: `UrlIsW`, `UrlEscapeW`, `UrlUnescapeW`,
+        `UrlCanonicalizeW`, `UrlCombineW`, `UrlCreateFromPathW`,
+        `PathCreateFromUrlW`, `AssocQueryStringW`, `SHCreateStreamOnFileEx`,
+        `SHAutoComplete` (E_NOTIMPL, recorded) (`shlwapi_test`'s url.c,
+        Wine's url.c and path.c vectors; LocalDB's msxmlsql, sqllang, xe,
+        xmlrw, hkcompile and wxWidgets). shlwapi has no stubs left.
+        UrlCanonicalizeW knows the http-like schemes' rules only (other
+        forms are copied, recorded).
+   - Known problem (2026-11-03): the FileZilla client's PREBUILT URL
+     (`downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe`)
+     now answers 404 (so does the `FileZilla_Client/3.69.3/` path), so
+     the `filezilla`, `filezilla_flaui` and `filezilla_server` scenarios
+     (one module set) cannot be fetched on a machine without
+     `target/prebuilt/filezilla`. No official mirror with the pinned
+     SHA-256 (e87b8787...) was found; the URL is unchanged until one is.
    - Elsewhere (not in these crates; for the agents there): FileZilla
      Server's GUI also stops on user32 (54 stubs: carets, the clipboard,
      DDE, DrawEdge/DrawFrameControl, window placement), gdi32 (16:

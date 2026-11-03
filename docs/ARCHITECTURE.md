@@ -2039,7 +2039,14 @@ Windows, never shadows the system's DLLs.)
   part against the directory's drive, comparisons go through kernel32's
   CompareStringW in the user's locale, StrCmpLogicalW compares digit
   runs by value; SHDeleteKeyW finds RegDeleteTreeW at run time so
-  loading shlwapi does not pull in advapi32).
+  loading shlwapi does not pull in advapi32), and its URL functions
+  (`urls.rs`; the escaping, slash and simplification rules Wine's tests
+  show Windows following, per scheme family: http-like schemes read
+  backslashes as slashes, opaque ones escape `/`, `?` and `#`; `#` is a
+  fragment in a file URL only after a .htm/.html name), AssocQueryStringW
+  (the user's classes, then HKCR; shell\<verb>\command) and
+  SHCreateStreamOnFileEx (`assoc.rs`, an IStream over a file handle; no
+  transactions, CopyTo, Clone or region locks: recorded).
   gala's cmd.exe (`user/cmd`, built as a program and placed in
   System32) implements `/c` (and switches before it): cmd's documented
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
