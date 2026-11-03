@@ -1018,6 +1018,230 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
     })
 }
 
+// Kernel handover (ROADMAP R9 (e), ARCHITECTURE "Sockets across a
+// handover"): an endpoint and its pending requests as data, with the
+// objects they name as references (`handover::carry` names them by id),
+// and the endpoint rebuilt from that in the next kernel. The kernel
+// socket behind it is `net::tcp`'s (`carry_entry` / `adopt_entry`).
+
+/// A pending request as a handover carries it. `kind` is
+/// `handover::sockets::request_kind`'s number.
+pub struct CarriedRequest {
+    pub kind: u32,
+    pub process: KArc<Process>,
+    pub iosb: u64,
+    pub event: Option<ObjectRef>,
+    pub context: u64,
+    pub apc: Option<(ObjectRef, super::thread::UserApc)>,
+    /// RECV: peek; POLL: it waits.
+    pub flag: bool,
+    /// SEND: bytes already queued.
+    pub done: u64,
+    pub output: u64,
+    pub output_len: u32,
+    pub receive: u32,
+    pub local: u32,
+    pub buffers: Vec<(u64, u64)>,
+    /// SUPER_ACCEPT: the accepting endpoint (handle 0); POLL: the sockets.
+    pub endpoints: Vec<(u64, KArc<EndpointState>, u32)>,
+}
+
+/// An endpoint as a handover carries it (the kernel socket apart).
+pub struct CarriedEndpoint {
+    pub tcp: bool,
+    pub socket: Option<SocketId>,
+    pub completion: Option<(ObjectRef, u64)>,
+    pub modes: u32,
+    pub non_blocking: bool,
+    pub select: Option<(ObjectRef, u32)>,
+    pub recorded: u32,
+    pub signal: i32,
+    pub requests: Vec<CarriedRequest>,
+}
+
+use crate::handover::sockets::request_kind as rk;
+
+/// The objects an endpoint names: its completion port, its selected
+/// event, its requests' events and completion routines' threads.
+pub fn referenced(state: &EndpointState) -> Result<Vec<ObjectRef>, NtStatus> {
+    let mut out = Vec::new();
+    let no_memory = |_| NtStatus::NO_MEMORY;
+    if let Some((port, _)) = state.completion.lock().clone() {
+        out.try_push(port).map_err(no_memory)?;
+    }
+    if let Some((event, _)) = state.select.lock().clone() {
+        out.try_push(event).map_err(no_memory)?;
+    }
+    for p in state.pending.lock().iter() {
+        if let Some(e) = &p.io.event {
+            out.try_push(e.clone()).map_err(no_memory)?;
+        }
+        if let Some((thread, _)) = &p.io.apc {
+            out.try_push(thread.clone()).map_err(no_memory)?;
+        }
+    }
+    Ok(out)
+}
+
+/// Endpoint `state` as data (the network stopped, the programs stopped).
+pub fn carry(state: &EndpointState) -> Result<CarriedEndpoint, NtStatus> {
+    let no_memory = |_| NtStatus::NO_MEMORY;
+    let mut requests = Vec::new();
+    for p in state.pending.lock().iter() {
+        let (kind, mut buffers, mut endpoints) = (0, Vec::new(), Vec::new());
+        let mut q = CarriedRequest {
+            kind,
+            process: p.io.process.clone(),
+            iosb: p.io.iosb,
+            event: p.io.event.clone(),
+            context: p.io.context,
+            apc: p.io.apc.clone(),
+            flag: false,
+            done: 0,
+            output: 0,
+            output_len: 0,
+            receive: 0,
+            local: 0,
+            buffers: Vec::new(),
+            endpoints: Vec::new(),
+        };
+        match &p.op {
+            Op::Recv { buffers: b, peek } => {
+                q.kind = rk::RECV;
+                q.flag = *peek;
+                for &(addr, len) in b {
+                    buffers.try_push((addr, len as u64)).map_err(no_memory)?;
+                }
+            }
+            Op::Send { buffers: b, done } => {
+                q.kind = rk::SEND;
+                q.done = *done as u64;
+                for &(addr, len) in b {
+                    buffers.try_push((addr, len as u64)).map_err(no_memory)?;
+                }
+            }
+            Op::WaitForListen { output, output_len } => {
+                q.kind = rk::WAIT_FOR_LISTEN;
+                (q.output, q.output_len) = (*output, *output_len);
+            }
+            Op::SuperAccept { accept, output, receive, local } => {
+                q.kind = rk::SUPER_ACCEPT;
+                (q.output, q.receive, q.local) = (*output, *receive, *local);
+                endpoints.try_push((0, accept.clone(), 0)).map_err(no_memory)?;
+            }
+            Op::Connect => q.kind = rk::CONNECT,
+            Op::Poll { sockets, output, output_len, wait } => {
+                q.kind = rk::POLL;
+                (q.output, q.output_len, q.flag) = (*output, *output_len, *wait);
+                for (handle, s, events) in sockets {
+                    endpoints.try_push((*handle, s.clone(), *events)).map_err(no_memory)?;
+                }
+            }
+        }
+        (q.buffers, q.endpoints) = (buffers, endpoints);
+        requests.try_push(q).map_err(no_memory)?;
+    }
+    Ok(CarriedEndpoint {
+        tcp: state.transport == Transport::Tcp,
+        socket: *state.socket.lock(),
+        completion: state.completion.lock().clone(),
+        modes: state.modes.load(Ordering::Acquire),
+        non_blocking: state.non_blocking.load(Ordering::Acquire),
+        select: state.select.lock().clone(),
+        recorded: state.recorded.load(Ordering::Acquire),
+        signal: state.dispatcher.signal_state(),
+        requests,
+    })
+}
+
+/// In the next kernel: an endpoint again, with its kernel socket rebuilt
+/// from `entry` (requests come after every endpoint is there:
+/// `adopt_requests`). `c.socket` and `c.requests` are not used.
+pub fn adopt(
+    c: &CarriedEndpoint,
+    entry: Option<&tcp::CarriedEntry>,
+) -> Result<ObjectRef, NtStatus> {
+    let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
+    let state = KArc::try_new(EndpointState {
+        dispatcher: Dispatcher::new(c.signal),
+        transport: if c.tcp { Transport::Tcp } else { Transport::None },
+        token,
+        socket: IrqMutex::new(None),
+        completion: IrqMutex::new(c.completion.clone()),
+        modes: AtomicU32::new(c.modes),
+        non_blocking: AtomicBool::new(c.non_blocking),
+        pending: IrqMutex::new(Vec::new()),
+        select: IrqMutex::new(c.select.clone()),
+        recorded: AtomicU32::new(c.recorded),
+        polls: AtomicUsize::new(0),
+    })
+    .map_err(|_| NtStatus::NO_MEMORY)?;
+    REGISTRY.lock().try_push(state.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
+    // On failure the endpoint drops and unregisters itself.
+    let object = KObject::new(ObjectBody::Socket(Endpoint { state: state.clone() }))
+        .map_err(|_| NtStatus::NO_MEMORY)?;
+    if let Some(entry) = entry {
+        *state.socket.lock() = Some(tcp::adopt_entry(entry, token).map_err(status_of)?);
+    }
+    Ok(object)
+}
+
+/// In the next kernel, once every endpoint is there: the pending requests
+/// of endpoint `object` again; the ones that can finish now do, the rest
+/// when their socket changes (as before the handover).
+pub fn adopt_requests(object: &ObjectRef, requests: Vec<CarriedRequest>) -> Result<(), NtStatus> {
+    let ObjectBody::Socket(endpoint) = &object.body else {
+        return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+    };
+    let state = &endpoint.state;
+    let no_memory = |_| NtStatus::NO_MEMORY;
+    let mut pending = state.pending.lock();
+    for q in requests {
+        let mut buffers = Vec::new();
+        for &(addr, len) in &q.buffers {
+            buffers.try_push((addr, len as usize)).map_err(no_memory)?;
+        }
+        let mut endpoints = q.endpoints.into_iter();
+        let op = match q.kind {
+            rk::RECV => Op::Recv { buffers, peek: q.flag },
+            rk::SEND => Op::Send { buffers, done: q.done as usize },
+            rk::WAIT_FOR_LISTEN => Op::WaitForListen { output: q.output, output_len: q.output_len },
+            rk::SUPER_ACCEPT => Op::SuperAccept {
+                accept: endpoints.next().ok_or(NtStatus::INVALID_PARAMETER)?.1,
+                output: q.output,
+                receive: q.receive,
+                local: q.local,
+            },
+            rk::CONNECT => Op::Connect,
+            rk::POLL => {
+                let mut sockets = Vec::new();
+                for s in endpoints {
+                    sockets.try_push(s).map_err(no_memory)?;
+                }
+                Op::Poll { sockets, output: q.output, output_len: q.output_len, wait: q.flag }
+            }
+            _ => return Err(NtStatus::INVALID_PARAMETER),
+        };
+        let io =
+            Io { process: q.process, iosb: q.iosb, event: q.event, context: q.context, apc: q.apc };
+        if usize::from(op.kind()) == POLL_KIND {
+            state.polls.fetch_add(1, Ordering::AcqRel);
+            let mut pollers = POLLERS.lock();
+            if !pollers.iter().any(|e| e.token == state.token) {
+                pollers.try_push(state.clone()).map_err(no_memory)?;
+            }
+        }
+        pending.try_push(Pending { op, io }).map_err(no_memory)?;
+    }
+    drop(pending);
+    // What can finish already does (the net thread may have reported this
+    // socket before its requests were back).
+    try_complete(state);
+    check_select(state);
+    tcp::kick();
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {

@@ -2,8 +2,9 @@
 //! root, points and the focus; conditions; tree walkers; cache requests.
 //! CUIAutomation8 is the same object answering IUIAutomation2..6 too,
 //! whose methods extend IUIAutomation's vtable (one table serves all six
-//! interfaces): timeouts and options are kept and read back, the event
-//! methods are E_NOTIMPL (no events yet).
+//! interfaces): timeouts and options are kept and read back, IUIAutomation's
+//! event methods are events.rs's; those of IUIAutomation3..6 are
+//! E_NOTIMPL.
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -13,7 +14,7 @@ use crate::{
     E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, GetFocus, Guid, HResult, Hwnd,
     IID_IUNKNOWN, IsWindow, Point, S_OK, SafeArrayAccessData, SafeArrayGetDim,
     SafeArrayGetElemsize, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayUnaccessData, VT_I4,
-    VT_R8, VTable, Variant, WindowFromPoint, boxed, cache, condition, free, guid, iid_at,
+    VT_R8, VTable, Variant, WindowFromPoint, boxed, cache, condition, events, free, guid, iid_at,
     is_not_supported, mixed_attribute, not_supported, put, walker,
 };
 
@@ -429,7 +430,118 @@ extern "system" fn create_cache_request(_this: usize, out: *mut *mut c_void) -> 
 // ---- Helpers ----
 
 extern "system" fn remove_all_event_handlers(_this: usize) -> HResult {
-    S_OK
+    events::remove_all()
+}
+
+// ---- Events (events.rs) ----
+
+extern "system" fn add_event_handler(
+    _this: usize,
+    id: i32,
+    el: *mut c_void,
+    scope: i32,
+    _cache: *mut c_void,
+    handler: *mut c_void,
+) -> HResult {
+    match node_of(el) {
+        Some(n) => events::add_automation(id, n, scope, handler),
+        None => E_INVALIDARG,
+    }
+}
+
+extern "system" fn remove_event_handler(
+    _this: usize,
+    id: i32,
+    el: *mut c_void,
+    handler: *mut c_void,
+) -> HResult {
+    match node_of(el) {
+        Some(n) => events::remove_automation(id, n, handler),
+        None => E_INVALIDARG,
+    }
+}
+
+extern "system" fn add_property_handler_native(
+    _this: usize,
+    el: *mut c_void,
+    scope: i32,
+    _cache: *mut c_void,
+    handler: *mut c_void,
+    props: *const i32,
+    count: i32,
+) -> HResult {
+    let Some(n) = node_of(el) else { return E_INVALIDARG };
+    if count < 0 || (count > 0 && props.is_null()) {
+        return E_INVALIDARG;
+    }
+    let ids = if count == 0 {
+        &[][..]
+    } else {
+        // SAFETY: the caller's array of `count` ids.
+        unsafe { core::slice::from_raw_parts(props, count as usize) }
+    };
+    events::add_property(n, scope, handler, ids)
+}
+
+extern "system" fn add_property_handler(
+    _this: usize,
+    el: *mut c_void,
+    scope: i32,
+    _cache: *mut c_void,
+    handler: *mut c_void,
+    props: *mut c_void,
+) -> HResult {
+    let Some(n) = node_of(el) else { return E_INVALIDARG };
+    let mut ids = [0i32; 16];
+    let Some(k) = events::ints(props, &mut ids) else { return E_INVALIDARG };
+    events::add_property(n, scope, handler, &ids[..k])
+}
+
+extern "system" fn remove_property_handler(
+    _this: usize,
+    el: *mut c_void,
+    handler: *mut c_void,
+) -> HResult {
+    match node_of(el) {
+        Some(n) => events::remove_kind(events::Kind::Property, Some(n), handler),
+        None => E_INVALIDARG,
+    }
+}
+
+extern "system" fn add_structure_handler(
+    _this: usize,
+    el: *mut c_void,
+    scope: i32,
+    _cache: *mut c_void,
+    handler: *mut c_void,
+) -> HResult {
+    match node_of(el) {
+        Some(n) => events::add_structure(n, scope, handler),
+        None => E_INVALIDARG,
+    }
+}
+
+extern "system" fn remove_structure_handler(
+    _this: usize,
+    el: *mut c_void,
+    handler: *mut c_void,
+) -> HResult {
+    match node_of(el) {
+        Some(n) => events::remove_kind(events::Kind::Structure, Some(n), handler),
+        None => E_INVALIDARG,
+    }
+}
+
+extern "system" fn add_focus_handler(
+    _this: usize,
+    _cache: *mut c_void,
+    handler: *mut c_void,
+) -> HResult {
+    events::add_focus(handler)
+}
+
+extern "system" fn remove_focus_handler(_this: usize, handler: *mut c_void) -> HResult {
+    events::remove_kind(events::Kind::Focus, None, handler)
 }
 
 extern "system" fn int_array_to_safearray(
@@ -528,41 +640,18 @@ macro_rules! option {
 
 option!(get_auto_set_focus, put_auto_set_focus, auto_set_focus);
 option!(get_connection_timeout, put_connection_timeout, connection_timeout);
-option!(get_transaction_timeout, put_transaction_timeout, transaction_timeout);
+option!(get_transaction_timeout, put_transaction_timeout_field, transaction_timeout);
+
+/// TransactionTimeout also bounds every message sent to a window
+/// (crate::SendMessageW's SendMessageTimeout).
+extern "system" fn put_transaction_timeout(this: *mut Automation, value: u32) -> HResult {
+    crate::TRANSACTION_MS.store(value.max(1), Ordering::Relaxed);
+    put_transaction_timeout_field(this, value)
+}
 option!(get_connection_recovery, put_connection_recovery, connection_recovery);
 option!(get_coalesce_events, put_coalesce_events, coalesce_events);
 
 not_impl!(compare_runtime_ids, b"UIAutomationCore.dll!IUIAutomation::CompareRuntimeIds");
-not_impl!(add_event_handler, b"UIAutomationCore.dll!IUIAutomation::AddAutomationEventHandler");
-not_impl!(
-    remove_event_handler,
-    b"UIAutomationCore.dll!IUIAutomation::RemoveAutomationEventHandler"
-);
-not_impl!(
-    add_property_handler_native,
-    b"UIAutomationCore.dll!IUIAutomation::AddPropertyChangedEventHandlerNativeArray"
-);
-not_impl!(
-    add_property_handler,
-    b"UIAutomationCore.dll!IUIAutomation::AddPropertyChangedEventHandler"
-);
-not_impl!(
-    remove_property_handler,
-    b"UIAutomationCore.dll!IUIAutomation::RemovePropertyChangedEventHandler"
-);
-not_impl!(
-    add_structure_handler,
-    b"UIAutomationCore.dll!IUIAutomation::AddStructureChangedEventHandler"
-);
-not_impl!(
-    remove_structure_handler,
-    b"UIAutomationCore.dll!IUIAutomation::RemoveStructureChangedEventHandler"
-);
-not_impl!(add_focus_handler, b"UIAutomationCore.dll!IUIAutomation::AddFocusChangedEventHandler");
-not_impl!(
-    remove_focus_handler,
-    b"UIAutomationCore.dll!IUIAutomation::RemoveFocusChangedEventHandler"
-);
 not_impl!(
     int_safearray_to_native,
     b"UIAutomationCore.dll!IUIAutomation::IntSafeArrayToNativeArray"

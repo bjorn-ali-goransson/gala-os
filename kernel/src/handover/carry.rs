@@ -18,10 +18,15 @@
 //! What cannot be carried yet makes the handover refuse, before the point
 //! of no return, with the reason (`Refusal`): threads blocked in other
 //! system calls (or that never get to a safe point), terminating threads,
-//! impersonation; console windows, jobs; sockets, registry keys, tokens,
-//! object directories and the other object kinds not listed in
-//! `programs`; asynchronous pipe I/O in flight, writable views of files;
-//! files a program wrote (without `persist`) or that complete to a port.
+//! impersonation; console windows, jobs; registry keys, object
+//! directories, the AFD
+//! device and the other object kinds not listed in `programs`;
+//! asynchronous pipe I/O in flight, writable views of files; files a
+//! program wrote (without `persist`) or that complete to a port.
+//!
+//! Sockets (milestone (e)): once the threads are stopped the network is
+//! stopped too (`net::tcp::stop`), and every AFD endpoint is written down
+//! with its kernel socket and pending requests (`handover::sockets`).
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -32,9 +37,11 @@ use super::programs::{
     SectionRec, SemaphoreRec, ThreadRec, TimerRec, TokenRec, ViewRec, thread_state,
 };
 use super::record::{self, Range, Reader, Record, Wide, Writer, tag};
+use super::sockets::{self, RequestRec, SocketRec};
 use crate::mm::PAGE_SIZE;
 use crate::mm::frame::Frame;
 use crate::mm::heap::{AllocError, KArc, TryVec};
+use crate::net::tcp;
 use crate::nt::object::{
     CompletionPacket, CompletionQueue, Event, EventType, HandleEntry, IoCompletion, KObject,
     Mutant, MutantState, ObjectBody, ObjectRef, Semaphore, Timer, TimerState,
@@ -45,7 +52,7 @@ use crate::nt::section::ImageLayout;
 use crate::nt::status::NtStatus;
 use crate::nt::thread::{Resume, UserApc};
 use crate::nt::wait::Dispatcher;
-use crate::nt::{file, keyed_event, kuser, namespace, pipe, section, syscalls, thread, vad};
+use crate::nt::{afd, file, keyed_event, kuser, namespace, pipe, section, syscalls, thread, vad};
 use crate::sched::{self, UserWait};
 use crate::sync::IrqMutex;
 
@@ -126,6 +133,10 @@ pub struct Programs {
     pipes: Vec<KArc<pipe::Pipe>>,
     /// Frames of owned pages and section pages, sorted.
     frames: Vec<u64>,
+    /// Milestone (e): the TCP stack (stopped) and the AFD endpoints, by
+    /// object id; None and empty when no program holds a socket.
+    net: Option<tcp::CarriedStack>,
+    sockets: Vec<SocketRec>,
 }
 
 impl Programs {
@@ -150,6 +161,23 @@ impl Programs {
         self.objects.len()
     }
 
+    /// Sockets carried: (endpoints, connections, listeners).
+    pub fn socket_counts(&self) -> (usize, usize, usize) {
+        let mut conns = self.net.as_ref().map_or(0, |n| n.lingering.len());
+        let mut listeners = 0;
+        for s in &self.sockets {
+            match s.entry.as_ref().map(|e| &e.kind) {
+                Some(tcp::CarriedKind::Conn { .. }) => conns += 1,
+                Some(tcp::CarriedKind::Listener { ready, opening, .. }) => {
+                    listeners += 1;
+                    conns += ready.len() + opening.len();
+                }
+                _ => {}
+            }
+        }
+        (self.sockets.len(), conns, listeners)
+    }
+
     /// The extended state the threads carry (XCR0 bits): what this kernel
     /// enables (x87, SSE, AVX, AVX-512 where the CPU has it); the next
     /// kernel's note must say it restores all of it.
@@ -160,6 +188,7 @@ impl Programs {
 
 /// Lets the programs run again (a refused or failed handover).
 pub fn release() {
+    tcp::restart();
     sched::freeze_users(false);
     thread::hold_for_handover(false);
 }
@@ -352,7 +381,16 @@ fn collect_stopped(
         timers: Vec::new(),
         pipes: Vec::new(),
         frames: Vec::new(),
+        net: None,
+        sockets: Vec::new(),
     };
+    // The network stops before anything is written down: from here no
+    // frame is taken and nothing acknowledged that the record would not
+    // hold (peers send again what was not acknowledged).
+    if !tcp::stop(NET_STOP_MS) {
+        return Err(Refusal::Kernel("the network did not stop"));
+    }
+    let stopped_ns = crate::time::raw_monotonic_ns();
     // Live threads' objects first (handles to them name these ids).
     for t in &threads {
         if !processes.iter().any(|q| KArc::ptr_eq(q, &t.snap.process)) {
@@ -396,7 +434,90 @@ fn collect_stopped(
     }
     p.frames.sort_unstable();
     p.frames.dedup();
+    collect_sockets(&mut p, stopped_ns)?;
     Ok(p)
+}
+
+/// How long the net thread may take to stop.
+const NET_STOP_MS: u64 = 1000;
+
+/// The programs' sockets as data (milestone (e)): every AFD endpoint
+/// collected, its kernel socket and pending requests, and the stack's own
+/// state if there is any socket.
+fn collect_sockets(p: &mut Programs, stopped_ns: u64) -> Result<(), Refusal> {
+    for i in 0..p.objects.len() {
+        let ObjectBody::Socket(endpoint) = &p.objects[i].body else { continue };
+        let owner = owner_of(p, &p.objects[i]);
+        let refuse = |what| Refusal::Process { pid: owner, what };
+        let c = afd::carry(&endpoint.state).map_err(|_| Refusal::NoMemory)?;
+        let entry = match c.socket {
+            Some(id) => Some(tcp::carry_entry(id).map_err(|e| match e {
+                tcp::NetError::NoMemory => Refusal::NoMemory,
+                _ => refuse("a socket whose connection cannot be written down"),
+            })?),
+            None => None,
+        };
+        let mut requests = Vec::new();
+        for q in &c.requests {
+            if !p.processes.iter().any(|s| KArc::ptr_eq(&s.process, &q.process)) {
+                return Err(refuse("a socket request of a process that is not carried"));
+            }
+            let mut endpoints = Vec::new();
+            for (handle, state, events) in &q.endpoints {
+                let id = p
+                    .objects
+                    .iter()
+                    .position(|o| matches!(&o.body, ObjectBody::Socket(e) if KArc::ptr_eq(&e.state, state)))
+                    .ok_or(refuse("a socket request naming a socket that is not carried"))?;
+                endpoints.try_push((*handle, id as u32 + 1, *events))?;
+            }
+            let mut buffers = Vec::new();
+            buffers.try_extend_from_slice(&q.buffers)?;
+            let (apc_thread, apc) = match &q.apc {
+                Some((thread, a)) => (p.id(thread), [a.routine, a.args[0], a.args[1], a.args[2]]),
+                None => (0, [0; 4]),
+            };
+            requests.try_push(RequestRec {
+                kind: q.kind,
+                pid: q.process.id,
+                iosb: q.iosb,
+                event: p.id_opt(&q.event),
+                context: q.context,
+                apc_thread,
+                apc,
+                flag: q.flag,
+                done: q.done,
+                output: q.output,
+                output_len: q.output_len,
+                receive: q.receive,
+                local: q.local,
+                buffers,
+                endpoints,
+            })?;
+        }
+        let (port, key) = c.completion.as_ref().map_or((0, 0), |(o, k)| (p.id(o), *k));
+        let (select_event, select_mask) = c.select.as_ref().map_or((0, 0), |(o, m)| (p.id(o), *m));
+        let rec = SocketRec {
+            id: i as u32 + 1,
+            transport: u32::from(c.tcp),
+            non_blocking: c.non_blocking,
+            modes: c.modes,
+            port,
+            key,
+            select_event,
+            select_mask,
+            recorded: c.recorded,
+            signal: c.signal,
+            entry,
+            requests,
+        };
+        p.sockets.try_push(rec)?;
+    }
+    if !p.sockets.is_empty() {
+        let stack = tcp::carry_stack(stopped_ns).map_err(|_| Refusal::NoMemory)?;
+        p.net = Some(stack);
+    }
+    Ok(())
 }
 
 /// The objects `object` names that must be carried with it: a data
@@ -413,6 +534,13 @@ fn needs(object: &ObjectRef) -> Result<Vec<ObjectRef>, AllocError> {
             let apc = t.state.lock().apc.as_ref().map(|a| a.0.clone());
             if let Some(thread) = apc {
                 out.try_push(thread)?;
+            }
+        }
+        // Its completion port, selected event, requests' events and
+        // completion routines' threads.
+        ObjectBody::Socket(e) => {
+            for o in afd::referenced(&e.state).map_err(|_| AllocError)? {
+                out.try_push(o)?;
             }
         }
         _ => {}
@@ -643,7 +771,9 @@ fn check_object(
                 return Err(refuse("a handle to a process that is not carried"));
             }
         }
-        ObjectBody::Socket(_) | ObjectBody::AfdDevice => return Err(refuse("an open socket")),
+        // Sockets (milestone (e)): written down by `collect_sockets`.
+        ObjectBody::Socket(_) => {}
+        ObjectBody::AfdDevice => return Err(refuse("a handle to the AFD device")),
         ObjectBody::NamedPipeDevice => return Err(refuse("a handle to the pipe device")),
         ObjectBody::Key(_) => return Err(refuse("an open registry key")),
         ObjectBody::Job(_) => return Err(refuse("a job object")),
@@ -689,6 +819,10 @@ impl Programs {
     /// The id of an object already collected.
     fn id(&self, object: &ObjectRef) -> u32 {
         self.objects.iter().position(|o| KArc::ptr_eq(o, object)).map_or(0, |i| i as u32 + 1)
+    }
+
+    fn id_opt(&self, object: &Option<ObjectRef>) -> u32 {
+        object.as_ref().map_or(0, |o| self.id(o))
     }
 
     /// Writes the programs' sections (twice per handover: once to size
@@ -858,6 +992,14 @@ impl Programs {
             let sd = object.security.lock();
             if let Some(sd) = sd.as_ref() {
                 programs::write_security(w, i as u32 + 1, sd)?;
+            }
+        }
+        // Milestone (e): only when a program holds a socket.
+        if let Some(net) = &self.net {
+            sockets::write_net(w, net)?;
+            sockets::sockets_section(w)?;
+            for s in &self.sockets {
+                s.write(w)?;
             }
         }
         Ok(())
@@ -1435,6 +1577,10 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         let body = if input { ObjectBody::ConsoleInput } else { ObjectBody::ConsoleOutput };
         objects.set(id, new_object(body)?)
     })?;
+    // Sockets (milestone (e)): the stack's own state, then the endpoints
+    // with their kernel sockets; their requests once the processes and
+    // threads they name are there.
+    let sockets = restore_sockets(rec, &mut objects)?;
 
     // Processes with their address spaces.
     let mut processes: Vec<KArc<Process>> = Vec::new();
@@ -1563,6 +1709,60 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         }
     }
 
+    each(rec, tag::SOCKETS, |mut e| {
+        let s = SocketRec::read(&mut e).map_err(socket_damage)?;
+        let object = objects.get(s.id).ok_or(NtStatus::INVALID_HANDLE)?.clone();
+        let mut requests = Vec::new();
+        for q in s.requests {
+            let process = find(q.pid).ok_or(NtStatus::INVALID_CID)?;
+            let get = |id: u32| match id {
+                0 => Ok(None),
+                id => objects.get(id).cloned().map(Some).ok_or(NtStatus::INVALID_HANDLE),
+            };
+            let apc = match get(q.apc_thread)? {
+                Some(thread) => {
+                    let [routine, a0, a1, a2] = q.apc;
+                    Some((thread, UserApc { routine, args: [a0, a1, a2] }))
+                }
+                None => None,
+            };
+            let mut endpoints = Vec::new();
+            for (handle, id, events) in q.endpoints {
+                let o = get(id)?.ok_or(NtStatus::INVALID_HANDLE)?;
+                let ObjectBody::Socket(ep) = &o.body else {
+                    return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+                };
+                endpoints.try_push((handle, ep.state.clone(), events)).map_err(no_memory)?;
+            }
+            requests
+                .try_push(afd::CarriedRequest {
+                    kind: q.kind,
+                    process,
+                    iosb: q.iosb,
+                    event: get(q.event)?,
+                    context: q.context,
+                    apc,
+                    flag: q.flag,
+                    done: q.done,
+                    output: q.output,
+                    output_len: q.output_len,
+                    receive: q.receive,
+                    local: q.local,
+                    buffers: q.buffers,
+                    endpoints,
+                })
+                .map_err(no_memory)?;
+        }
+        afd::adopt_requests(&object, requests)
+    })?;
+    if let Some((count, stopped_ns)) = sockets {
+        let now = crate::time::raw_monotonic_ns();
+        crate::info!(
+            "handover: {count} socket(s) resumed; the network was stopped for {} ms",
+            now.saturating_sub(stopped_ns) / 1_000_000
+        );
+    }
+
     // Handle tables.
     each(rec, tag::HANDLES, |mut e| {
         let pid = e.u64();
@@ -1604,6 +1804,47 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         RESUMED.lock().try_push(p.clone()).map_err(no_memory)?;
     }
     Ok((processes.len(), live.len()))
+}
+
+fn socket_damage(e: Option<AllocError>) -> NtStatus {
+    if e.is_some() { NtStatus::NO_MEMORY } else { NtStatus::INVALID_PARAMETER }
+}
+
+/// NET and the first pass over SOCKETS: the stack's carried state (the
+/// card's address, the port counter, closing connections) and every
+/// endpoint with its kernel socket rebuilt. Returns how many endpoints
+/// and when the old kernel stopped the network (None: no sockets).
+fn restore_sockets(
+    rec: &Record<'_>,
+    objects: &mut Objects,
+) -> Result<Option<(usize, u64)>, Failed> {
+    let Some(mut net) = rec.section(tag::NET) else { return Ok(None) };
+    let fail = |section, status| Failed { section, index: 0, status };
+    let stack = sockets::read_net(&mut net).map_err(|_| fail(tag::NET, NtStatus::NO_MEMORY))?;
+    tcp::adopt_stack(&stack).map_err(|e| fail(tag::NET, afd::status_of(e)))?;
+    let mut count = 0;
+    each(rec, tag::SOCKETS, |mut e| {
+        let s = SocketRec::read(&mut e).map_err(socket_damage)?;
+        let get = |id: u32| match id {
+            0 => Ok(None),
+            id => objects.get(id).cloned().map(Some).ok_or(NtStatus::INVALID_HANDLE),
+        };
+        let c = afd::CarriedEndpoint {
+            tcp: s.transport == 1,
+            socket: None,
+            completion: get(s.port)?.map(|o| (o, s.key)),
+            modes: s.modes,
+            non_blocking: s.non_blocking,
+            select: get(s.select_event)?.map(|o| (o, s.select_mask)),
+            recorded: s.recorded,
+            signal: s.signal,
+            requests: Vec::new(),
+        };
+        let object = afd::adopt(&c, s.entry.as_ref())?;
+        count += 1;
+        objects.set(s.id, object)
+    })?;
+    Ok(Some((count, stack.stopped_ns)))
 }
 
 /// A process and its address space, from PROCESSES and ADDRESS_SPACES.

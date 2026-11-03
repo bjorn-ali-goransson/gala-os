@@ -119,6 +119,14 @@ pub mod tag {
     /// The writing kernel's build name (optional; `handover_next` writes
     /// it, the default build does not know it yet and skips it).
     pub const WRITER: u32 = 33;
+    // Milestone (e), REQUIRED, written only when a program holds a socket
+    // (`handover::sockets` has their formats).
+    /// The TCP stack: when it stopped, the card's address configuration,
+    /// the port counter, closing connections nobody owns.
+    pub const NET: u32 = 34;
+    /// AFD endpoints: their state, the kernel socket behind each (with its
+    /// connections in gala's terms) and their pending requests.
+    pub const SOCKETS: u32 = 35;
 }
 
 /// What a kept physical range is (KEPT section).

@@ -76,10 +76,29 @@ pub struct Kind {
     pub required: bool,
     /// Written only when programs are carried.
     pub programs: bool,
+    /// Written only when the programs hold such state (sockets): checked
+    /// on the record as written (`check_record`), not up front by
+    /// `agree`, so programs without it still go to a kernel that
+    /// predates the section.
+    pub when_present: bool,
 }
 
 const fn kind(tag: u32, name: &'static str, writes: u16, must_read: u16, programs: bool) -> Kind {
-    Kind { tag, name, writes, reads_from: 0, must_read, required: programs, programs }
+    Kind {
+        tag,
+        name,
+        writes,
+        reads_from: 0,
+        must_read,
+        required: programs,
+        programs,
+        when_present: false,
+    }
+}
+
+/// A programs' section written only when there is such state.
+const fn present(tag: u32, name: &'static str, writes: u16, must_read: u16) -> Kind {
+    Kind { when_present: true, ..kind(tag, name, writes, must_read, true) }
 }
 
 /// Every kind of section, as this build writes and reads it. Programs'
@@ -97,7 +116,9 @@ const fn kind(tag: u32, name: &'static str, writes: u16, must_read: u16, program
 ///   the APCs (empty while gala uses FXSAVE; a writer that fills it marks
 ///   the section must_read 3, `programs::threads_must_read`).
 /// - TIMERS 2: the timer's APC (must_read 2: losing it loses a call).
-pub const KINDS: [Kind; 33] = [
+/// - NET 1, SOCKETS 1 (milestone (e)): the TCP stack and the programs'
+///   sockets, written only when a program holds a socket.
+pub const KINDS: [Kind; 35] = [
     kind(tag::MEMORY_MAP, "MEMORY_MAP", 1, 0, false),
     kind(tag::PLATFORM, "PLATFORM", 1, 0, false),
     kind(tag::FRAMEBUFFER, "FRAMEBUFFER", 1, 0, false),
@@ -132,6 +153,8 @@ pub const KINDS: [Kind; 33] = [
     kind(tag::TOKENS, "TOKENS", 1, 0, true),
     // The writer's name (optional; `handover_next` only, for now).
     kind(tag::WRITER, "WRITER", if NEXT { 1 } else { 0 }, 0, false),
+    present(tag::NET, "NET", 1, 0),
+    present(tag::SOCKETS, "SOCKETS", 1, 0),
 ];
 
 /// This build's facts about section `tag` (None: it does not know it).
@@ -486,7 +509,10 @@ pub fn agree(target: &Reads<'_>, programs: bool) -> Result<(), Mismatch> {
             theirs: target.image_layout,
         });
     }
-    for k in KINDS.iter().filter(|k| k.writes != 0 && (programs || !k.programs)) {
+    // Sections written only when there is such state (sockets) are
+    // checked on the record as written (`check_record`).
+    for k in KINDS.iter().filter(|k| k.writes != 0 && !k.when_present && (programs || !k.programs))
+    {
         check_section(target, k.tag, k.writes, k.must_read, k.required)?;
     }
     Ok(())
@@ -644,6 +670,35 @@ mod tests {
         // Extended state.
         assert_eq!(agree_xstate(&t, 0b11), Ok(()));
         assert!(matches!(agree_xstate(&t, 0b111), Err(Mismatch::ExtendedState { .. })));
+    }
+
+    /// R9 (e): a kernel that does not read SOCKETS (or NET) takes programs
+    /// without sockets; a record that carries sockets is refused for it
+    /// before the point of no return.
+    #[test]
+    fn sockets_need_a_kernel_that_reads_them() {
+        let mut kinds = KINDS;
+        for k in kinds.iter_mut().filter(|k| matches!(k.tag, tag::SOCKETS | tag::NET)) {
+            k.writes = 0;
+        }
+        let d = desc_of(&kinds, (1, 1), IMAGE_LAYOUT);
+        let old = Reads::parse(&d).unwrap();
+        assert_eq!(agree(&old, true), Ok(()));
+        // The record as written with sockets in it.
+        let mut w = Writer::new(1).unwrap();
+        w.section_needing(tag::THREADS, 3, REQUIRED, 2).unwrap();
+        crate::handover::sockets::write_net(&mut w, &Default::default()).unwrap();
+        crate::handover::sockets::sockets_section(&mut w).unwrap();
+        let bytes = w.finish().unwrap();
+        let e = check_record(&bytes, &old).unwrap_err();
+        assert!(matches!(e, Mismatch::Unknown { tag: tag::NET, .. }), "{e:?}");
+        assert!(alloc::format!("{e}").contains("does not know section NET"));
+        assert_eq!(check_record(&bytes, &Reads::mine()), Ok(()));
+        // The kernel before notes: the same.
+        assert!(matches!(
+            check_record(&bytes, &BEFORE_NOTES),
+            Err(Mismatch::Unknown { tag: tag::NET, .. })
+        ));
     }
 
     #[test]

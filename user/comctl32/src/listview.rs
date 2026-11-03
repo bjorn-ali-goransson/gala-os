@@ -447,6 +447,34 @@ fn change_state(hwnd: Hwnd, i: usize, mask: u32, value: u32) {
     put_state(hwnd, i, new);
     send_lv(hwnd, LVN_ITEMCHANGED, i as i32, 0, new, old, LVIF_STATE, [0, 0]);
     redraw(hwnd);
+    // Accessibility: the item (child id index + 1) was selected (added,
+    // removed) or took the focus.
+    let child = i as i32 + 1;
+    if (new ^ old) & LVIS_SELECTED != 0 {
+        // The only selected item: EVENT_OBJECT_SELECTION; one more of
+        // several: SELECTIONADD; one less: SELECTIONREMOVE.
+        let only = !multi_select(hwnd) || with_state(hwnd, LVIS_SELECTED).len() == 1;
+        let event = match new & LVIS_SELECTED != 0 {
+            true if only => EVENT_OBJECT_SELECTION,
+            true => EVENT_OBJECT_SELECTIONADD,
+            false => EVENT_OBJECT_SELECTIONREMOVE,
+        };
+        crate::common::win_event(event, hwnd, child);
+    }
+    if new & LVIS_FOCUSED != 0 && old & LVIS_FOCUSED == 0 {
+        crate::common::win_event(EVENT_OBJECT_FOCUS, hwnd, child);
+    }
+}
+
+const EVENT_OBJECT_FOCUS: u32 = 0x8005;
+const EVENT_OBJECT_SELECTION: u32 = 0x8006;
+const EVENT_OBJECT_SELECTIONADD: u32 = 0x8007;
+const EVENT_OBJECT_SELECTIONREMOVE: u32 = 0x8008;
+
+/// Whether the list lets several items be selected (no LVS_SINGLESEL).
+fn multi_select(hwnd: Hwnd) -> bool {
+    // SAFETY: a plain call.
+    (unsafe { crate::common::GetWindowLongW(hwnd, -16) } as u32 & 0x0004) == 0
 }
 
 /// The items whose state has `mask` (for owner data: those changed).

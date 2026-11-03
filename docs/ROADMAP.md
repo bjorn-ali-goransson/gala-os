@@ -66,9 +66,15 @@ explicitly in its commit.
   with `-cpu max` it enables UseFMA and may emit VEX-encoded FMA
   instructions, which fault with #UD while CR4.OSXSAVE is off: a
   candidate for the EXCEPTION_ILLEGAL_INSTRUCTION once seen in
-  C1-compiled code (WORKFLOW "Known intermittent"); enabling XSAVE and
-  saving the extended state (as Windows does) would remove the
-  difference; the TLB shootdown and deferred frees (reviewed: fence
+  C1-compiled code (WORKFLOW "Known intermittent"). **XSAVE is now
+  enabled (2026-11-02, `xstate_test`)**: the JVM's CPU line has avx,
+  avx2, fma, vzeroupper, so it runs AVX code with its state saved per
+  thread; then java_http passed 30 of 30 boots (four VMs at a time) and
+  java_hello failed 1 of 30 with the same interpreter crash as before
+  (`String.equals` + 8, the instanceof template reading a klass from a
+  bogus narrow-klass pointer: a stale reference; from space 99-100% full
+  in every GC of the heap history). So the #UD candidate is gone, the
+  corruption is not the vector state; still open; the TLB shootdown and deferred frees (reviewed: fence
   before reading CPU_ROOT, frames freed only after the flush, spurious
   faults re-sync PTEs); gala's process heap and critical sections and
   condition variables (reviewed, and the heap's compiled lock code read);
@@ -1860,24 +1866,64 @@ R. **Robustness and live update, kernel included** (the owner's
      `version::trusted`); carrying image pages as frames across a
      loader change (refused instead). XSAVE came 2026-11-02 (the blob is
      filled, `version::XSTATE` = 0xe7).
-     **Milestone (e) needs** (open network connections): the TCP stack's
-     connection state as data (smoltcp's sockets: sequence numbers,
-     windows, timers as deadlines, buffers), sockets and AFD endpoints as
-     objects (a SOCKETS section, REQUIRED), the virtio-net device reset
-     and frames in flight resent by TCP (as `net_reset` does), threads
-     blocked in socket calls made restartable (accept, recv, send with
-     their deadlines), and the time without a NIC kept short (peers
-     retransmit). Versioning: smoltcp's structures are a dependency's,
-     so the record must hold gala's own description of a connection,
-     never a dependency's memory layout (a smoltcp upgrade is then a
-     loader-like change only if behaviour changes).
+     **Milestone (e) done** (2026-11-02, scenarios handover_net,
+     handover_net_uefi; test program `user/handover_net_test` on ws2_32;
+     ARCHITECTURE "Sockets across a handover"): a TCP server keeps
+     serving across a kernel handover. The test: xtask's client talks
+     numbered lines with it through QEMU's port forward; the line
+     `handover` makes the program ask for a handover and block in recv;
+     the client keeps sending through the handover (a line sent at once,
+     ten more over 3 s) and every answer comes, the program's counter
+     going on; a second connection opened before the handover waits
+     unaccepted in the listener's backlog with its first line unread and
+     is accepted after it; a third is accepted after it on the same
+     listening socket; no connection is reset (each ends with a FIN).
+     The network is stopped (the net thread parked) once the threads are,
+     so nothing is acknowledged that the record does not hold; peers
+     retransmit what came meanwhile (668 ms without network under TCG,
+     the new kernel says). Connections are carried in gala's own terms
+     (`net::tcp::ConnState`: state, sequence numbers, windows, window
+     scale/SACK/MSS as negotiated, timers as absolute deadlines, RTT,
+     socket options, buffer sizes, unread and unacknowledged/unsent
+     bytes), rebuilt through a minimal patch of the vendored smoltcp 0.12
+     (`Socket::carried`/`queued_bytes`/`restore`, THIRD_PARTY.md);
+     listeners with their accept queue (sequence numbers kept) and
+     half-open sockets, bound sockets, closing connections, the card's
+     address configuration and the port counter; AFD endpoints with their
+     modes, completion port, WSAEventSelect state and pending requests
+     (receive, send, wait-for-listen, AcceptEx, connect, poll) as data.
+     New REQUIRED sections NET and SOCKETS, written only when a program
+     holds a socket: negotiation checks them on the record as written,
+     so a kernel that predates them is refused with sockets and still
+     taken without. Host tests: a loopback stack carried into a new one
+     (unread and unsent bytes, a connection waiting to be accepted by
+     its old number, new connections, a graceful close), the formats'
+     round trip, damage, a newer writer's extra fields, the refusal of a
+     target without SOCKETS. Not done: UDP (gala has no UDP sockets yet:
+     `\Device\Udp` opens fail, so none can be held; when UDP comes, its
+     sockets need a kind in SOCKETS and their queued datagrams), IPv6,
+     the neighbor cache (asked again by ARP), HTTP keep-alive with a real
+     server (go_http or Nginx: a trigger the host client can time, and
+     Nginx's log files need `persist`), a shorter window without network
+     (stop it after the image is prepared).
+     **What is left for live update overall** (after (a)-(e)): R8's
+     signed manifest checking the next kernel (`version::trusted` is the
+     hook); the window registry, the desktop (shasha) and console windows
+     and conhost sessions as data; registry keys and their volatile
+     state, jobs, program-made object directories and links, writable file
+     views, files written without `persist`; asynchronous pipe I/O and
+     files bound to completion ports; threads blocked in calls that are
+     not restartable (pipe writes on a full pipe, console reads, pipe
+     listens); carrying image pages as frames across a loader change; freeing the first kernel's image and Limine's
+     reclaimable memory; and the user-mode half (versioned system images
+     behind an atomic pointer, processes restarted one at a time).
      Still refused (cleanly, with the reason), for later: threads blocked
      over 3 s in other calls (pipe writes on a full pipe, console reads,
-     pipe listens, socket calls); I/O bound to completion ports and
+     pipe listens); files and pipes bound to completion ports and
      asynchronous pipe requests in flight (carry the request: status
      block, event, port, APC); console windows and conhost sessions,
      jobs, registry keys, program-made object directories and links;
-     writable file views; sockets (milestone (e)). Not carried and not
+     writable file views; a handle to the AFD device. Not carried and not
      refused: byte-range locks, a pipe client's security context, the
      window registry, the desktop, volatile registry keys. Also open:
      freeing the first kernel's image and Limine's reclaimable memory.
@@ -2006,8 +2052,26 @@ desktop tells user32 when its own buttons minimize or restore), and
 IsIconic/IsZoomed answer for any process's window from the window
 registry. FlaUI's Window.Close (the title bar's Close button),
 Window.Move, ModalWindows and SetWindowVisualState work (flaui_test
-closes its target with Window.Close now). Next: GridItem/TableItem for
-columns, combo box and tree-view items, events, WM_GETOBJECT providers,
+closes its target with Window.Close now).
+Grids, events and SendMessageTimeout (2026-11-02, flaui_test,
+filezilla_flaui, winevent_test): report-view list views are grids (Grid
+and Table patterns on the list, the header control a Header with
+HeaderItems, each item's cells as its children with GridItem and
+TableItem; FlaUI's AsGrid reads FileZilla's remote list with its
+"Filename", "Filesize"... columns); WinEvents across processes
+(SetWinEventHook out of context, UnhookWinEvent, NotifyWinEvent through
+the kernel: GalaWinEvent* 0x7f70-0x7f73), raised by user32 and comctl32
+where Windows raises them (create, destroy, show, hide, focus,
+foreground, name, value, state, selection, invoked); UIAutomationCore's
+Add/Remove*EventHandler (automation, property-changed, structure-changed,
+focus-changed) turn them into UIA events on a thread of their own
+(WindowOpened/Closed, MenuOpened, Name/Value/ToggleState changes,
+ElementSelected/AddedToSelection/RemovedFromSelection, Invoked,
+StructureChanged); every message UIAutomationCore sends to a window is
+SendMessageTimeout with SMTO_ABORTIFHUNG (the TransactionTimeout), so a
+hung program no longer hangs the client. Next: WM_GETOBJECT providers
+(UiaReturnRawElementProvider, same process first), IUIAutomation3..6's
+event handlers and handler groups, combo box and tree-view items,
 GetParent of owned popups, the system menu in the title bar, and the
 other screen tests rewritten on FlaUI.
 

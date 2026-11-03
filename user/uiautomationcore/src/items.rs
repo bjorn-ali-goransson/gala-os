@@ -48,6 +48,7 @@ const LVM_ENSUREVISIBLE: u32 = 0x1013;
 const LVM_SETITEMSTATE: u32 = 0x102b;
 const LVM_GETITEMSTATE: u32 = 0x102c;
 const LVM_GETITEMTEXTW: u32 = 0x1073;
+const LVM_GETSUBITEMRECT: u32 = 0x1038;
 const LVS_SINGLESEL: u32 = 0x0004;
 const LVIS_FOCUSED: u32 = 0x1;
 const LVIS_SELECTED: u32 = 0x2;
@@ -116,14 +117,14 @@ pub fn count(h: Hwnd, k: Kind) -> u32 {
 
 /// A buffer the list's process can read and write: local memory for a
 /// list in this process, else memory allocated in the list's process.
-struct Buffer {
+pub(crate) struct Buffer {
     /// The other process (0: this one).
     process: usize,
     base: *mut u8,
 }
 
 impl Buffer {
-    fn new(h: Hwnd, size: usize) -> Option<Buffer> {
+    pub(crate) fn new(h: Hwnd, size: usize) -> Option<Buffer> {
         let mut pid = 0;
         // SAFETY: plain calls; our output.
         unsafe { GetWindowThreadProcessId(h, &mut pid) };
@@ -155,11 +156,11 @@ impl Buffer {
     }
 
     /// The buffer's address in the list's process.
-    fn at(&self, offset: usize) -> isize {
+    pub(crate) fn at(&self, offset: usize) -> isize {
         self.base as isize + offset as isize
     }
 
-    fn write(&self, offset: usize, bytes: &[u8]) -> bool {
+    pub(crate) fn write(&self, offset: usize, bytes: &[u8]) -> bool {
         if self.process == 0 {
             // SAFETY: our buffer, sized by the caller for this.
             unsafe {
@@ -180,7 +181,7 @@ impl Buffer {
         }
     }
 
-    fn read(&self, offset: usize, out: &mut [u8]) -> bool {
+    pub(crate) fn read(&self, offset: usize, out: &mut [u8]) -> bool {
         if self.process == 0 {
             // SAFETY: our buffer, sized by the caller for this.
             unsafe {
@@ -235,6 +236,15 @@ fn lvitem(base: isize, state: u32, mask: u32, text: bool) -> [u8; LVITEM_SIZE] {
 /// Item `i`'s text (a list view's: column 0) as a BSTR (null without
 /// memory).
 pub fn text(h: Hwnd, k: Kind, i: u32) -> *mut u16 {
+    text_of(h, k, i, 0)
+}
+
+/// A list view's item `i`'s text in column `sub` (a cell's) as a BSTR.
+pub fn cell_text(h: Hwnd, i: u32, sub: u32) -> *mut u16 {
+    text_of(h, Kind::ListView, i, sub)
+}
+
+fn text_of(h: Hwnd, k: Kind, i: u32, sub: u32) -> *mut u16 {
     let mut chars = [0u16; TEXT_MAX];
     let n = match k {
         Kind::ListBox => {
@@ -260,7 +270,9 @@ pub fn text(h: Hwnd, k: Kind, i: u32) -> *mut u16 {
             let Some(buf) = Buffer::new(h, LVITEM_SIZE + 2 * TEXT_MAX) else {
                 return bstr(&[]);
             };
-            if !buf.write(0, &lvitem(buf.at(0), 0, 0, true)) {
+            let mut it = lvitem(buf.at(0), 0, 0, true);
+            it[8..12].copy_from_slice(&sub.to_le_bytes()); // iSubItem
+            if !buf.write(0, &it) {
                 return bstr(&[]);
             }
             let got = send(h, LVM_GETITEMTEXTW, i as usize, buf.at(0))
@@ -279,7 +291,7 @@ pub fn text(h: Hwnd, k: Kind, i: u32) -> *mut u16 {
 }
 
 /// The list's client area on the screen.
-fn client_on_screen(h: Hwnd) -> [i32; 4] {
+pub(crate) fn client_on_screen(h: Hwnd) -> [i32; 4] {
     let mut c = [0i32; 4];
     let mut origin = [0i32; 2];
     // SAFETY: our outputs.
@@ -320,10 +332,31 @@ fn client_rect(h: Hwnd, k: Kind, i: u32, code: i32) -> Option<[i32; 4]> {
     }
 }
 
-/// Item `i`'s rectangle on the screen, clipped to the list's client area
-/// (the part that shows); None when none of it shows.
-pub fn rect(h: Hwnd, k: Kind, i: u32) -> Option<[i32; 4]> {
-    let r = client_rect(h, k, i, LVIR_BOUNDS)?;
+/// A list view's cell (item `i`, column `sub`) on the screen, clipped
+/// to the list's client area: LVM_GETSUBITEMRECT (column 0: its label,
+/// LVIR_LABEL; the others LVIR_BOUNDS); None when none of it shows.
+pub fn cell_rect(h: Hwnd, i: u32, sub: u32) -> Option<[i32; 4]> {
+    let buf = Buffer::new(h, 16)?;
+    let mut bytes = [0u8; 16];
+    let code: i32 = if sub == 0 { 2 } else { 0 };
+    bytes[0..4].copy_from_slice(&code.to_le_bytes());
+    bytes[4..8].copy_from_slice(&sub.to_le_bytes());
+    if !buf.write(0, &bytes) || send(h, LVM_GETSUBITEMRECT, i as usize, buf.at(0)) == 0 {
+        return None;
+    }
+    if !buf.read(0, &mut bytes) {
+        return None;
+    }
+    let mut r = [0i32; 4];
+    for (v, b) in r.iter_mut().zip(bytes.chunks_exact(4)) {
+        *v = i32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    }
+    clip(h, r)
+}
+
+/// A rectangle in the list's client coordinates on the screen, clipped
+/// to the client area (None when none of it shows).
+pub(crate) fn clip(h: Hwnd, r: [i32; 4]) -> Option<[i32; 4]> {
     let c = client_on_screen(h);
     let s = [
         (c[0] + r[0]).max(c[0]),
@@ -332,6 +365,12 @@ pub fn rect(h: Hwnd, k: Kind, i: u32) -> Option<[i32; 4]> {
         (c[1] + r[3]).min(c[3]),
     ];
     (s[2] > s[0] && s[3] > s[1]).then_some(s)
+}
+
+/// Item `i`'s rectangle on the screen, clipped to the list's client area
+/// (the part that shows); None when none of it shows.
+pub fn rect(h: Hwnd, k: Kind, i: u32) -> Option<[i32; 4]> {
+    clip(h, client_rect(h, k, i, LVIR_BOUNDS)?)
 }
 
 pub fn selected(h: Hwnd, k: Kind, i: u32) -> bool {

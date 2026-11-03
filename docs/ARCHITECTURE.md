@@ -1973,6 +1973,10 @@ Layers, bottom up (N1a: the card and TCP/IP; N1b: sockets for user mode).
   refilled to the same length looked unchanged, and a pending receive
   waited for good (winsock_test hung about once in six loaded runs; host
   test `a_reader_is_told_of_the_next_message_of_the_same_size`).
+- smoltcp is vendored (`vendor/smoltcp`, 0.12.0 with one patch so a
+  connection's state can be written down and rebuilt: "Sockets across a
+  handover"); `net::tcp::stop`/`restart` park the net thread for a
+  kernel handover.
 - `net::tcp` (N1b), the kernel's socket API, independent of NT:
   `listen(local, backlog)`, `accept`, `connect(remote)`, `send`, `recv`,
   `shutdown`, `close`, `local`/`remote` addresses, readiness. Sockets are
@@ -3160,6 +3164,47 @@ Not done: sessions and desktops (one of each), uiAccess, hooks across
 levels; the always-passing list is not documented by Microsoft (to
 verify on Windows).
 
+### Windows across processes: WinEvents (2026-11-02, `winevent_test`)
+
+SetWinEventHook, UnhookWinEvent and NotifyWinEvent as Microsoft
+documents them, for the whole desktop: the hooks live in the kernel
+(`nt::winevent`, its own lock): GalaWinEventHook(Min, Max, Pid, Tid,
+Flags, *Id) 0x7f70 registers one for the calling thread (events
+Min..=Max raised by process Pid and thread Tid, 0: any;
+WINEVENT_SKIPOWNTHREAD 1 and SKIPOWNPROCESS 2; Min > Max:
+STATUS_INVALID_PARAMETER; at most 1024; the thread gets a message
+queue); GalaWinEventUnhook(Id) 0x7f71 (the caller's process's hooks
+only, else STATUS_INVALID_HANDLE); GalaWinEventNotify(Event, Hwnd,
+idObject, idChild) 0x7f72 queues a record for every hook that wants it
+(the raising thread and the time in ms with it; at most 4096 waiting,
+the oldest go) and sets each hooking process's queue event (the window
+registry's listener: `window::listener`); GalaWinEventTake(*Records,
+Max, *Count) 0x7f73 hands the process's records over (40 bytes: hook,
+event, hwnd, idObject, idChild, event thread, time, hooking thread).
+Hooks go with their thread and process. user32 (`winevent.rs`): the
+callback of an out-of-context hook runs on the hooking thread when it
+reads its messages (`deliver` from the pump, only while the process has
+hooks: records for another of its threads are kept for it and that
+thread woken). No callback: ERROR_INVALID_FILTER_PROC; WINEVENT_INCONTEXT
+without a module: ERROR_HOOK_NEEDS_HMOD (as Wine's tests check);
+in-context hooks with a module are delivered the same way (gala maps no
+DLL into other processes); UnhookWinEvent of no hook:
+ERROR_INVALID_HANDLE; IsWinEventHookInstalled is TRUE. Raised by user32:
+EVENT_OBJECT_CREATE (after WM_CREATE), SHOW and HIDE (ShowWindow of top
+level and child windows), HIDE then DESTROY (DestroyWindow), FOCUS
+(SetFocus, OBJID_CLIENT), EVENT_SYSTEM_FOREGROUND (the foreground
+window changes), NAMECHANGE (DefWindowProc's WM_SETTEXT), VALUECHANGE
+(an edit's text, OBJID_CLIENT), STATECHANGE (a check box's or radio
+button's check), INVOKED (a push button's click: gala's choice; Windows
+documents the event, not who raises it), SELECTION (a list box's
+LB_SETCURSEL, child id index + 1); by comctl32: the list view's
+SELECTION (the only selected item), SELECTIONADD, SELECTIONREMOVE and
+FOCUS for an item (child id index + 1), the status bar's NAMECHANGE for
+a part. Every NotifyWinEvent is a system call (no "anyone listening?"
+shortcut yet). Not done: the in-context synchronous call in the raising
+thread, UIPI between hooks and events, EVENT_OBJECT_LOCATIONCHANGE,
+REORDER, the menu and caret events, EVENT_SYSTEM_* beyond FOREGROUND.
+
 ## UI Automation
 
 The aim is screen tests that drive programs as testers do on Windows:
@@ -3315,10 +3360,75 @@ client side over Win32 windows (`uia_test`, a mingw C program).
     written there, the message sent with that address, the answer read
     back (ReadProcessMemory) and the memory freed (VirtualFreeEx,
     CloseHandle); a list in this process gets a heap buffer instead.
-    Not yet: GridItem/TableItem for report-view subitems (and Grid/Table
-    on the list, the header's columns), combo boxes' items (the
-    ComboLBox list), tree-view items, ElementFromPoint finding an item,
-    the Value/Toggle patterns of items (check boxes in list views).
+    Report-view list views are also grids ("Grids" below). Not yet:
+    combo boxes' items (the ComboLBox list), tree-view items,
+    ElementFromPoint finding an item, the Value/Toggle patterns of items
+    (check boxes in list views).
+  - **Grids** (`grid.rs`, 2026-11-02, `flaui_test`, `filezilla_flaui`):
+    a SysListView32 in report view (LVS_REPORT) has the Grid pattern
+    (RowCount: its items; ColumnCount: its header's items, at least 1;
+    GetItem(row, column): the cell, E_INVALIDARG outside) and the Table
+    pattern (ColumnHeaders: the header's items; RowHeaders none;
+    RowOrColumnMajor RowMajor). Its header control (SysHeader32, already
+    a child window) is a Header element (ControlType 50034) whose
+    children are HeaderItems (50035), one per column, named by the
+    column's title (HDM_GETITEMW), their rectangles HDM_GETITEMRECT.
+    Each list item (still a ListItem) has a cell per column as its
+    children: ControlType Text named by the item's text in that column
+    (LVM_GETITEMTEXTW with iSubItem), rectangle LVM_GETSUBITEMRECT
+    (LVIR_LABEL for column 0, LVIR_BOUNDS for the others) clipped to the
+    list, no HWND or AutomationId, RuntimeId {42, list, -5, row, column}
+    (header items {42, header, -6, k}; gala's choices), with GridItem
+    (Row, Column, spans 1, ContainingGrid the list) and TableItem
+    (ColumnHeaderItems: the column's header item; no row headers). What
+    FlaUI's Grid needs: Header (a Header child), Rows (ListItem
+    children), a row's Cells (its children that are not HeaderItems) and
+    GetRowByIndex (GetItem(row, 0)'s parent through the control view).
+    Nodes: `Node.menu` CELL (hwnd the list, item the row, `col` the
+    column) and HEAD (hwnd the header, item the column). The header's
+    and cells' messages are above WM_USER, so another process's are read
+    through memory allocated there (items::Buffer), as list items are.
+    The cells' control type is gala's reading of Windows' list-view proxy
+    (unverified); Windows may expose report-view rows as DataItems.
+  - **Events** (`events.rs`, 2026-11-02, `flaui_test`,
+    `filezilla_flaui`): IUIAutomation's AddAutomationEventHandler,
+    AddPropertyChangedEventHandler(NativeArray) (the property ids from
+    the SAFEARRAY of VT_I4 .NET passes; at most 16),
+    AddStructureChangedEventHandler, AddFocusChangedEventHandler, their
+    Remove methods (by element, event id and the handler's identity:
+    its IUnknown) and RemoveAllEventHandlers. The handlers (the caller's
+    COM objects, .NET's CCWs for FlaUI: QueryInterface for the
+    handler's IID, AddRef while registered and during each call) sit in
+    a table of 128. The first Add starts UIAutomationCore's event thread
+    (and waits until its hook is in place): CoInitializeEx MTA (without
+    it .NET's handler fails with CO_E_NOTINITIALIZED when it wraps the
+    sender element), SetWinEventHook(EVENT_MIN, EVENT_MAX,
+    WINEVENT_OUTOFCONTEXT), a 100 ms thread timer (user32's queue event
+    is one per process: a wake may go to another thread), a GetMessage
+    loop. The hook's callback turns a WinEvent into UIA events and calls
+    the handlers whose element and TreeScope (Element: the sender;
+    Children: its parent; Descendants: an ancestor, as element::parent
+    walks) cover the sender, outside the table's lock: EVENT_OBJECT_SHOW
+    (OBJID_WINDOW) is StructureChanged ChildAdded and, for a Window
+    control type, Window_WindowOpened (a #32768 popup: MenuOpened);
+    EVENT_OBJECT_HIDE is ChildRemoved (sender the parent, runtime id the
+    child's); EVENT_OBJECT_DESTROY of a window reported opened is
+    Window_WindowClosed (judged by its ancestors when it opened; it is
+    gone); EVENT_OBJECT_FOCUS goes to the focus-changed handlers;
+    NAMECHANGE, VALUECHANGE (Value pattern) and STATECHANGE (Toggle
+    pattern) are property changes of Name, Value.Value and
+    Toggle.ToggleState with the current value (a VARIANT passed by
+    reference, as x64 passes it by value); SELECTION, SELECTIONADD,
+    SELECTIONREMOVE are SelectionItem's ElementSelected,
+    ElementAddedToSelection, ElementRemovedFromSelection; INVOKED is
+    Invoke_Invoked. A list's item is the sender for OBJID_CLIENT events
+    with a child id (index + 1). Handlers run on the event thread, as
+    UIA's do on its own thread. The cache request argument is ignored.
+    Not yet: IUIAutomation3..6's handlers (text edit, changes,
+    notification, handler groups, active text position), events from
+    providers (UiaRaise* still do nothing), AutomationFocusChanged and
+    property changes beyond those three, LayoutInvalidated,
+    Selection_Invalidated.
   - **Menus** (`menus.rs`, 2026-11-02, `uia_test`, `filezilla_flaui`): a
     window with a menu bar has a MenuBar child (no HWND; Name
     "Application", AutomationId "MenuBar", as Windows' Win32 menu proxy
@@ -3420,6 +3530,14 @@ client side over Win32 windows (`uia_test`, a mingw C program).
   - Walkers (`walker.rs`): a view is a condition; an element outside it
     is skipped and its children take its place; the root is in every
     view.
+  - **Messages to windows** (2026-11-02): every message UIAutomationCore
+    sends a window (WM_GETTEXT, LVM_*, LB_*, BM_*, GALA_MENU...) is
+    SendMessageTimeout with SMTO_ABORTIFHUNG and the TransactionTimeout
+    (IUIAutomation2, 20 s by default; the last value any client object
+    of the process set), as Windows' proxies send them (`crate::
+    SendMessageW`): a hung program (a sent message left waiting 5 s) or
+    one too slow gives 0 (recorded in the ledger) instead of hanging the
+    client. Properties then read empty; no UIA_E_TIMEOUT yet.
   - The provider API: UiaClientsAreListening is FALSE,
     UiaRaiseAutomationEvent / ...PropertyChangedEvent /
     ...StructureChangedEvent / UiaDisconnect(All)Provider(s) succeed
@@ -3439,8 +3557,8 @@ windows across processes", which also covers another thread of the
 client's own process);
 providers inside programs (WM_GETOBJECT answered with
 IRawElementProviderSimple via UiaReturnRawElementProvider, which wx and
-Qt implement for their widgets) are not consulted; no events
-(Add*EventHandler E_NOTIMPL); cache requests cache nothing (above); the
+Qt implement for their widgets) are not consulted; events only through
+IUIAutomation's own Add*EventHandler (above); cache requests cache nothing (above); the
 title bar has no system menu (Windows' has a "System" menu bar in it);
 no LegacyIAccessible pattern; ComboBox and tree-view items,
 ExpandCollapse on them, RangeValue, Text patterns; IUIAutomationElement2..9
@@ -4184,7 +4302,7 @@ delay mode; its faults stay `net_tx` drops and `netreset=`.
 - **A chain of trust for updates**: designed below (R8); built after
   R7, before live update ships.
 
-### Kernel handover (R9 milestones (a) to (d), 2026-11-02)
+### Kernel handover (R9 milestones (a) to (e), 2026-11-02)
 
 The running kernel hands the machine to a fresh kernel image without the
 firmware or the bootloader: same build, no programs running (milestone
@@ -4223,6 +4341,7 @@ said):
 | 10 | KERNEL_FILE | the kernel ELF to hand over to next time |
 | 11-32 | programs | REQUIRED, milestones (b) and (c): "Programs across a handover" below |
 | 33 | WRITER | the writing kernel's build name (optional; (d): only the `handover_next` build writes and reads it so far) |
+| 34, 35 | NET, SOCKETS | milestone (e), REQUIRED, written only when a program holds a socket: "Sockets across a handover" below |
 
 **Memory.** The receiving kernel builds its frame allocator from the
 record's map as from Limine's: the new image is "executable and modules",
@@ -4352,7 +4471,7 @@ host-tested: round trip, damage, older entries).
   any failure before the point of no return) lets the held threads go
   and unfreezes the scheduler, and is logged: `handover: refused: thread
   12 of process 4 is in a system call that cannot be made again
-  (NtWriteFile)`, `... process 4 has an open socket`. The calls Windows
+  (NtWriteFile)`, `... process 4 has a job`. The calls Windows
   splits into a side effect and a wait (NtSignalAndWaitForSingleObject,
   NtWaitForAlertByThreadId) do not exist in gala yet; when they come,
   the blocked half is carried as the plain wait (registers rewritten to
@@ -4438,10 +4557,12 @@ host-tested: round trip, damage, older entries).
 **Not carried yet** (each makes the handover refuse, with the reason):
 threads blocked for over 3 s in a system call that cannot be made again
 (NtWriteFile on a full pipe, a console read, NtFsControlFile's pipe
-listen, socket calls, NtWaitForDebugEvent...), terminating threads,
+listen, NtWaitForDebugEvent...), terminating threads,
 threads not started by the scheduler yet; I/O in flight: asynchronous
 pipe requests pending, files or pipes bound to a completion port (their
-packets would need the request's state), sockets (milestone (e));
+packets would need the request's state; sockets bound to one are
+carried, milestone (e)), a handle to the AFD device itself, a socket
+request naming a socket or process that is not carried;
 console windows and console sessions (conhost: the session's screen
 buffer and input queue are kernel state; console input and output
 objects without a window are carried), jobs, registry keys (a key the
@@ -4457,6 +4578,104 @@ security context (FSCTL_PIPE_IMPERSONATE on a carried pipe fails), the
 window registry, the desktop and the registry's volatile keys.
 The first kernel's image and Limine's reclaimable memory are not freed;
 the scaffold of the running kernel is freed only by the next handover.
+
+**Sockets across a handover** (milestone (e), 2026-11-02; scenarios
+`handover_net`, `handover_net_uefi`, test program
+`user/handover_net_test` on ws2_32; host tests in `net::tcp`,
+`handover::sockets`, `handover::version`). A server keeps its listening
+socket, its established TCP connections and the connections waiting in
+its backlog across a kernel handover; the peer sees a pause (the
+network is stopped for 0.5-0.7 s under TCG), never a reset.
+- *Stopping the network* (`net::tcp::stop`, from `carry::collect_stopped`
+  once the programs' threads are stopped): the net thread finishes its
+  poll and the notify hooks it calls (AFD completions), then parks: no
+  frame is taken and nothing acknowledged from then on, so the record
+  holds every byte the peers were told arrived. Frames that come later
+  stay in the card's ring and are lost when it is reset; frames still in
+  the transmit ring are lost too: TCP sends both again (the peer's
+  retransmission timer, ours carried with its absolute deadline). A
+  refused handover restarts the thread (`carry::release`, `tcp::restart`).
+  The new kernel logs how long the network was stopped
+  (`handover: 2 socket(s) resumed; the network was stopped for 668 ms`).
+- *Connections in gala's terms* (`net::tcp::ConnState`, never smoltcp's
+  memory layout, as (d) requires): on the card or loopback, the TCP state
+  (RFC 793's names, gala's numbering `tcp_state`), the endpoints and the
+  listen address, SND.UNA, the last sequence number sent, the sequence
+  number of the first unread byte, the last ACK and window sent, the
+  window scale this side advertised, the peer's window, window scale,
+  SACK permission and MSS as negotiated, when the last segment came, FIN
+  received, the timer (`timer_kind`: idle with its keep-alive deadline,
+  retransmit with its deadline and delay, fast retransmit, TIME-WAIT
+  close) with absolute deadlines on the kernel's monotonic clock (which
+  goes on across a handover), the RTT estimate, the peer's timestamp, the
+  socket's options (Nagle, delayed ACK, keep-alive, idle timeout, hop
+  limit) and its buffers' sizes; then the bytes received and not read,
+  and the bytes sent and not acknowledged followed by those not sent yet
+  (`CarriedConn`). Not carried: out-of-order segments (not acknowledged:
+  the peer sends them again; SACKed ones too, as RFC 2018 allows a
+  receiver to renege), the RTT sample in flight, delayed-ACK state.
+- *smoltcp* has no public way to set a socket's sequence numbers, so it
+  is vendored (`vendor/smoltcp`, 0.12.0, `[patch.crates-io]`) with one
+  patch between `gala: begin` and `gala: end` markers (THIRD_PARTY.md):
+  `Socket::carried` (the state as plain values), `Socket::queued_bytes`
+  (copies of the queues) and `Socket::restore` (a new, closed socket
+  becomes the connection; refused if the buffers are smaller than the
+  carried ones or the state is inconsistent). `net::tcp` converts
+  between those and `ConnState`; nothing else sees smoltcp's types. A
+  smoltcp upgrade re-applies the patch; the record does not change
+  unless behaviour does.
+- *Kernel sockets* (`net::tcp::carry_entry`/`adopt_entry`): a bound
+  socket (its address); a listener (its address, backlog, next sequence
+  number, its accept queue with the sequence numbers already handed to
+  the program by WAIT_FOR_LISTEN, and its listening sockets that are not
+  plain LISTEN: half-open, or established while the backlog was full;
+  the plain LISTEN sockets are made fresh); a connection (and whether
+  its connect completed). The stack's own state (`carry_stack`/
+  `adopt_stack`): the card's address configuration (IP, prefix, gateway,
+  MAC; gala's static configuration stands for a DHCP lease, and the next
+  kernel takes the carried one), the ephemeral port counter, and the
+  connections their owner closed that are still finishing (FIN,
+  TIME-WAIT). The neighbor (ARP) cache is not carried: smoltcp keeps it
+  private, and the first frame after the handover asks again (one round
+  trip).
+- *AFD endpoints* (`afd::carry`/`adopt`/`adopt_requests`): transport,
+  non-blocking mode, notification modes, completion port and key,
+  WSAEventSelect's event, mask and recorded events, the endpoint's own
+  signal state, and its pending requests as data: receive (buffers,
+  peek), send (buffers, bytes already queued), wait-for-listen, AcceptEx
+  (the accepting endpoint, the output layout), connect, poll (the
+  sockets, events, output, whether it waits), each with its process,
+  IO_STATUS_BLOCK, event, ApcContext and completion routine (thread,
+  routine, arguments). AFD never blocks inside NtDeviceIoControlFile, so
+  a thread "in recv" is in a wait on the request's event (made again in
+  the next kernel with its absolute deadline, as in (b)); its request is
+  the endpoint's state, carried and completed by the next kernel when
+  the bytes come. Socket options gala's ws2_32 keeps are in the
+  program's memory (carried as it is).
+- *Record*: NET (tag 34: a header entry, then the closing connections)
+  and SOCKETS (tag 35: per endpoint object, `SocketRec`, with the
+  connections as CONNECTION entries carrying a role (the socket's own,
+  READY with its sequence number, OPENING, LINGERING) and the pending
+  requests as `RequestRec`s). Both REQUIRED, version 1, and written only
+  when a program holds a socket (`version::Kind::when_present`): `agree`
+  does not ask for them up front, the record as written is checked
+  (`check_record`), so programs without sockets still go to a kernel
+  that predates (e), and a kernel that does not read SOCKETS is refused
+  with `the next kernel (...) does not know section NET`.
+- *Rebuilding*: `net::init` has reset the card and set the stack up;
+  `handover::resume_programs` takes NET (the card's address, the
+  counter, the closing connections), then every SOCKETS entry after the
+  objects it names (completion ports, events) with its kernel socket,
+  then, once processes and threads are there, the pending requests
+  (those that can finish do at once). The net thread's first poll
+  reports every socket.
+- Not carried yet (refused or impossible today): UDP and raw sockets
+  (gala has no UDP: `\Device\Udp` opens fail, so no program can hold
+  one), IPv6, a handle to `\Device\Afd` itself. The time without the
+  network grows with the record (it is stopped before the draft record
+  is encoded): fine for TCP (peers retransmit for minutes) but worth
+  shrinking (stop it after the image is prepared, encode the sockets
+  last).
 
 **Versions and negotiation** (milestone (d), 2026-11-02; scenarios
 `handover_upgrade`, `handover_upgrade_uefi`, `handover_downgrade_refused`;
@@ -4492,7 +4711,7 @@ state format differs; every future format change follows these rules.
   check (`version::trusted`: a hook, accepting all until the signed
   manifest is built), parses as a kernel ELF, its note is read and logged
   (`handover: gala hands over to gala-next (record framing 1-1, image
-  layout 1, extended state 0xe7, 33 section kinds; with programs)`); then,
+  layout 1, extended state 0xe7, 35 section kinds; with programs)`); then,
   before any thread is stopped, `version::agree`: the framing this kernel
   writes is in the target's range; with programs, the same image layout
   version; every REQUIRED section this kernel would write is known to the

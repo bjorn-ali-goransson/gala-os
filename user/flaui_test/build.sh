@@ -41,7 +41,8 @@ done
 refs=""
 for a in System.Runtime System.Console System.Collections System.ComponentModel.Primitives \
     System.Diagnostics.Process System.Drawing.Primitives System.Linq \
-    System.Runtime.InteropServices System.Threading.Thread netstandard; do
+    System.Runtime.InteropServices System.Threading System.Threading.Thread \
+    System.Collections.Concurrent netstandard; do
     refs="$refs -r:$REF/$a.dll"
 done
 # build <output> <source>: one test assembly.

@@ -29,11 +29,17 @@
 //! not take (`version::agree`, then the record as written:
 //! `version::check_record`), and readers convert older sections (new
 //! fields take their defaults).
+//!
+//! Milestone (e): open network connections. The network is stopped with
+//! the threads; listeners, connections (in gala's own terms, rebuilt
+//! through the vendored smoltcp's `restore`) and AFD endpoints with their
+//! pending requests are carried (`sockets` has the formats).
 
 pub mod carry;
 pub mod elf;
 pub mod programs;
 pub mod record;
+pub mod sockets;
 pub mod version;
 
 use alloc::vec::Vec;
@@ -341,6 +347,13 @@ pub fn go(info: &BootInfo, cmdline: &Cmdline) -> HandoverError {
             p.object_count(),
             p.frame_count()
         );
+        let (sockets, conns, listeners) = p.socket_counts();
+        if sockets != 0 {
+            crate::info!(
+                "handover: carrying {sockets} socket(s): {conns} TCP connection(s), {listeners} \
+                 listener(s); the network is stopped"
+            );
+        }
     }
     let next = Next { file, image: &image, target: &target, hhdm };
     let e = match prepare_and_go(info, cmdline, &next, programs.as_ref()) {

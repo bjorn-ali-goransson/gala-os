@@ -129,6 +129,12 @@ pub const GALA_WINDOW_POST_THREAD: u32 = 0x7f50;
 pub const GALA_WINDOW_SEND_ABANDON: u32 = 0x7f51;
 /// UIPI's message filters (ChangeWindowMessageFilter(Ex)).
 pub const GALA_WINDOW_FILTER: u32 = 0x7f6a;
+/// WinEvents across processes (SetWinEventHook, UnhookWinEvent,
+/// NotifyWinEvent, the hooking thread's records; nt::winevent).
+pub const GALA_WIN_EVENT_HOOK: u32 = 0x7f70;
+pub const GALA_WIN_EVENT_UNHOOK: u32 = 0x7f71;
+pub const GALA_WIN_EVENT_NOTIFY: u32 = 0x7f72;
+pub const GALA_WIN_EVENT_TAKE: u32 = 0x7f73;
 /// gala's test-only clock control (`clock=control`; ARCHITECTURE "Clock
 /// control"), also in user/ntrt.
 pub const GALA_CLOCK_CONTROL: u32 = 0x7f4c;
@@ -337,6 +343,10 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_POST_THREAD, "GalaWindowPostThread", 4, gala_window_post_thread),
     (GALA_WINDOW_SEND_ABANDON, "GalaWindowSendAbandon", 1, gala_window_send_abandon),
     (GALA_WINDOW_FILTER, "GalaWindowFilter", 4, gala_window_filter),
+    (GALA_WIN_EVENT_HOOK, "GalaWinEventHook", 6, gala_win_event_hook),
+    (GALA_WIN_EVENT_UNHOOK, "GalaWinEventUnhook", 1, gala_win_event_unhook),
+    (GALA_WIN_EVENT_NOTIFY, "GalaWinEventNotify", 4, gala_win_event_notify),
+    (GALA_WIN_EVENT_TAKE, "GalaWinEventTake", 3, gala_win_event_take),
     (GALA_CLOCK_CONTROL, "GalaClockControl", 4, gala_clock_control),
     (GALA_RANDOM, "GalaRandom", 2, gala_random),
     (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
@@ -1774,6 +1784,76 @@ fn gala_window_post_thread(call: &mut Call<'_>) -> NtStatus {
     if let Some(e) = event {
         wait::set_signal(&e, 1);
     }
+    NtStatus::SUCCESS
+}
+
+/// GalaWinEventHook(Min, Max, Pid, Tid, Flags, *Id): SetWinEventHook
+/// (out of context) for the calling thread: events Min..=Max raised by
+/// process Pid and thread Tid (0: any), WINEVENT_SKIPOWNTHREAD (1) and
+/// SKIPOWNPROCESS (2) as documented. The thread gets a message queue.
+/// STATUS_INVALID_PARAMETER for Min > Max.
+fn gala_win_event_hook(call: &mut Call<'_>) -> NtStatus {
+    let (min, max) = (arg!(call, 0) as u32, arg!(call, 1) as u32);
+    let (of_pid, of_tid, flags, out) =
+        (arg!(call, 2) as u32, arg!(call, 3) as u32, arg!(call, 4) as u32, arg!(call, 5));
+    tri!(note_queue(call));
+    let tid = thread::current_id().unwrap_or(0) as u32;
+    let id =
+        tri!(super::winevent::hook(call.process.id as u32, tid, min, max, of_pid, of_tid, flags));
+    tri!(call.write_u32(out, id));
+    NtStatus::SUCCESS
+}
+
+/// GalaWinEventUnhook(Id): UnhookWinEvent of the caller's hook Id
+/// (STATUS_INVALID_HANDLE for none).
+fn gala_win_event_unhook(call: &mut Call<'_>) -> NtStatus {
+    tri!(super::winevent::unhook(call.process.id as u32, arg!(call, 0) as u32));
+    NtStatus::SUCCESS
+}
+
+/// GalaWinEventNotify(Event, Hwnd, idObject, idChild): NotifyWinEvent
+/// from the calling thread: queued for every hook that wants it, whose
+/// processes' queue events are set.
+fn gala_win_event_notify(call: &mut Call<'_>) -> NtStatus {
+    let (event, hwnd) = (arg!(call, 0) as u32, arg!(call, 1));
+    let (object, child) = (arg!(call, 2) as u32 as i32, arg!(call, 3) as u32 as i32);
+    let tid = thread::current_id().unwrap_or(0) as u32;
+    let time = (platform::monotonic_ns() / 1_000_000) as u32;
+    let mut wake = [0u32; 16];
+    let n = super::winevent::notify(
+        call.process.id as u32,
+        tid,
+        event,
+        hwnd,
+        object,
+        child,
+        time,
+        &mut wake,
+    );
+    let mut events = Vec::new();
+    super::winevent::listeners(&wake[..n], &mut events);
+    for e in &events {
+        wait::set_signal(e, 1);
+    }
+    NtStatus::SUCCESS
+}
+
+/// GalaWinEventTake(*Records, Max, *Count): takes the events waiting for
+/// the caller's hooks (any of its threads'), oldest first: 40-byte
+/// records (nt::winevent::Record::to_bytes; the hooking thread at 32).
+fn gala_win_event_take(call: &mut Call<'_>) -> NtStatus {
+    use super::winevent::{RECORD_SIZE, Record};
+    let (ptr, max, count) = (arg!(call, 0), (arg!(call, 1) as usize).min(32), arg!(call, 2));
+    let mut got = [Record::EMPTY; 32];
+    let n = super::winevent::take(call.process.id as u32, &mut got[..max]);
+    let mut raw = [0u8; RECORD_SIZE * 32];
+    for (r, b) in got[..n].iter().zip(raw.chunks_exact_mut(RECORD_SIZE)) {
+        r.to_bytes(b);
+    }
+    if call.process.write(ptr, &raw[..RECORD_SIZE * n]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    tri!(call.write_u32(count, n as u32));
     NtStatus::SUCCESS
 }
 

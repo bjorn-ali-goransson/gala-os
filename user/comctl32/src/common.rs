@@ -18,6 +18,7 @@ pub type WndProc = extern "system" fn(Hwnd, u32, usize, isize) -> isize;
 unsafe extern "system" {
     pub fn RegisterClassExW(wc: *const WndClassExW) -> u16;
     pub fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+    pub fn NotifyWinEvent(event: u32, hwnd: Hwnd, object: i32, child: i32);
     pub fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
     pub fn GetParent(hwnd: Hwnd) -> Hwnd;
     pub fn TrackMouseEvent(tme: *mut u8) -> i32;
@@ -424,4 +425,12 @@ pub fn owned(s: &[u16]) -> Vec<u16> {
 pub extern "system" fn _TrackMouseEvent(tme: *mut u8) -> i32 {
     // SAFETY: the caller's TRACKMOUSEEVENT, passed on.
     unsafe { TrackMouseEvent(tme) }
+}
+
+/// An event the control raises for accessibility clients (UI Automation):
+/// NotifyWinEvent with OBJID_CLIENT and the child id (an item's index + 1;
+/// 0: the control).
+pub fn win_event(event: u32, hwnd: Hwnd, child: i32) {
+    // SAFETY: a plain call.
+    unsafe { NotifyWinEvent(event, hwnd, -4, child) };
 }

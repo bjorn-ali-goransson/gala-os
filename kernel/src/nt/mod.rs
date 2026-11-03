@@ -45,6 +45,7 @@ pub mod vad;
 pub mod vm;
 pub mod wait;
 pub mod window;
+pub mod winevent;
 
 /// Installs the syscall entry and user exception handling.
 pub fn init() {
