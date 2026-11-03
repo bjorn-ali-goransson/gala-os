@@ -1801,6 +1801,23 @@ PK. **Installing software: `gala install` over winget manifests** (the
    cheap); every installed package recorded with its manifest for `gala
    list`; a scenario per installer type kept as a regression test; the
    ledger's per-installer gaps in the report.
+   **Stages 1 and 2 built, except downloads** (2026-11-03, test
+   `pk_install_test`, scenario `pk_install_zip`, written but **not yet
+   booted**: the disk was too full for an image that day; run it first,
+   `cargo xtask boot-test pk_install_zip`; host tests `cargo test -p
+   galapkg` pass, including a failure injected at every step;
+   ARCHITECTURE "Installing software"): `gala install|search|list|
+   upgrade|uninstall` over a winget-pkgs tree (`--source <dir>`, an
+   `installers\` mirror), manifests 1.x singleton and multi-file,
+   SHA-256 checked, zip (deflate) and portable installs to WinGet\Packages,
+   commands as shims (gala.exe + `.shim`) in WinGet\Links on the user's
+   PATH, winget's ARP entry, transactions with rollback (upgrade
+   included), the install log and ledger records; kernel32's
+   CreateProcess now searches PATH. Next: the HTTPS fetcher (designed in
+   ARCHITECTURE: Winsock + a TLS client on gala's CNG, the GitHub raw and
+   contents URLs, winget's source index for search), real symbolic links
+   for commands, the logon environment from `HKCU\Environment`, then
+   stage 3.
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing
