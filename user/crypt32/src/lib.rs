@@ -1,5 +1,6 @@
 //! gala's crypt32.dll: certificate contexts (`cert`: X.509 decoding,
-//! properties, names, public keys), DPAPI (`dpapi`), and certificate
+//! properties, names, public keys), chains without a chain engine yet
+//! (`chain`: untrusted, recorded), DPAPI (`dpapi`), and certificate
 //! stores, which gala does not have yet. OpenSSL imports the store
 //! functions to look up certificates in Windows' stores (an option Nginx
 //! does not use); they fail as documented: no store opens, and an
@@ -11,6 +12,7 @@
 
 mod base64;
 mod cert;
+mod chain;
 mod dpapi;
 mod unimplemented;
 

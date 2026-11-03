@@ -1,13 +1,15 @@
 //! gala's ncrypt.dll (CNG key storage): the Microsoft Software Key
-//! Storage Provider opens (also as the default), with an empty key store:
-//! no key can be opened (NTE_BAD_KEYSET) and creating one is not
-//! supported yet (recorded in the ledger). Other providers (the TPM's
-//! Platform Crypto Provider, smart cards) do not exist here.
+//! Storage Provider opens (also as the default), with RSA keys imported
+//! into it (`keys`: NCryptImportKey, named keys opened again, signing;
+//! Schannel's server keys); generating one (NCryptCreatePersistedKey) is
+//! not supported yet (recorded in the ledger). Other providers (the
+//! TPM's Platform Crypto Provider, smart cards) do not exist here.
 
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod keys;
 mod unimplemented;
 
 #[allow(dead_code)]
@@ -16,7 +18,16 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
+    fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    // The stack probe for frames over a page (ntdll exports it).
+    fn __chkstk();
+    // MSVC-target unwind tables reference it (gala's ntdll provides it).
+    fn __CxxFrameHandler3();
 }
+
+/// MSVC-target codegen references this marker symbol directly.
+#[unsafe(no_mangle)]
+pub static _fltused: i32 = 0;
 
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -34,7 +45,7 @@ unsafe extern "system" {
 }
 
 /// bcrypt.dll's `name` (NUL-terminated), or 0.
-fn bcrypt(name: &[u8]) -> usize {
+pub(crate) fn bcrypt(name: &[u8]) -> usize {
     let dll: [u16; 11] = [
         b'b' as u16,
         b'c' as u16,
@@ -108,23 +119,23 @@ pub extern "system" fn BCryptGenRandom(
 }
 
 /// SECURITY_STATUS values.
-const NTE_INVALID_HANDLE: i32 = 0x8009_0026u32 as i32;
-const NTE_NOT_SUPPORTED: i32 = 0x8009_0029u32 as i32;
+pub(crate) const NTE_INVALID_HANDLE: i32 = 0x8009_0026u32 as i32;
+pub(crate) const NTE_NOT_SUPPORTED: i32 = 0x8009_0029u32 as i32;
 
-fn unsupported(function: &[u8]) {
+pub(crate) fn unsupported(function: &[u8]) {
     // SAFETY: a valid buffer.
     unsafe { GalaRecordMissing(function.as_ptr(), function.len(), 2, 0) };
 }
 
 const NTE_BAD_KEYSET: i32 = 0x8009_0016u32 as i32;
-const NTE_INVALID_PARAMETER: i32 = 0x8009_0027u32 as i32;
+pub(crate) const NTE_INVALID_PARAMETER: i32 = 0x8009_0027u32 as i32;
 const NTE_PROV_DLL_NOT_FOUND: i32 = 0x8009_001Eu32 as i32;
 
 /// The software provider's handle: the address of this marker (it has no
 /// state; opening it again gives the same handle).
 static SOFTWARE_PROVIDER: u8 = 0;
 
-fn software_provider() -> usize {
+pub(crate) fn software_provider() -> usize {
     &raw const SOFTWARE_PROVIDER as usize
 }
 
@@ -165,21 +176,25 @@ pub extern "system" fn NCryptOpenStorageProvider(
     0
 }
 
-/// NCryptFreeObject: providers (no keys exist yet).
+/// NCryptFreeObject: the provider, or a key handle.
 #[unsafe(no_mangle)]
 pub extern "system" fn NCryptFreeObject(object: usize) -> i32 {
-    if object == software_provider() { 0 } else { NTE_INVALID_HANDLE }
+    if object == software_provider() { 0 } else { keys::free_key(object) }
 }
 
+/// NCryptGetProperty: a key's length and algorithm group.
 #[unsafe(no_mangle)]
 pub extern "system" fn NCryptGetProperty(
-    _object: usize,
-    _property: *const u16,
-    _output: *mut u8,
-    _size: u32,
-    _result: *mut u32,
+    object: usize,
+    property: *const u16,
+    output: *mut u8,
+    size: u32,
+    result: *mut u32,
     _flags: u32,
 ) -> i32 {
+    if keys::is_key(object) {
+        return keys::property(object, property, output, size, result);
+    }
     NTE_INVALID_HANDLE
 }
 
@@ -194,23 +209,27 @@ pub extern "system" fn NCryptSetProperty(
     NTE_INVALID_HANDLE
 }
 
-/// NCryptOpenKey: the software provider's key store is empty.
+/// NCryptOpenKey: a named key imported into the software provider.
 #[unsafe(no_mangle)]
 pub extern "system" fn NCryptOpenKey(
     provider: usize,
     key: *mut usize,
-    _name: *const u16,
+    name: *const u16,
     _spec: u32,
     _flags: u32,
 ) -> i32 {
     if provider != software_provider() {
         return NTE_INVALID_HANDLE;
     }
-    if !key.is_null() {
-        // SAFETY: the caller's output pointer.
-        unsafe { *key = 0 };
+    if key.is_null() {
+        return NTE_INVALID_PARAMETER;
     }
-    NTE_BAD_KEYSET
+    // SAFETY: the caller's output pointer.
+    unsafe { *key = 0 };
+    if name.is_null() {
+        return NTE_BAD_KEYSET;
+    }
+    keys::open(key, name)
 }
 
 /// NCryptCreatePersistedKey: not supported yet (recorded).
@@ -230,14 +249,15 @@ pub extern "system" fn NCryptCreatePersistedKey(
     NTE_NOT_SUPPORTED
 }
 
+/// NCryptFinalizeKey: imported keys are complete already.
 #[unsafe(no_mangle)]
-pub extern "system" fn NCryptFinalizeKey(_key: usize, _flags: u32) -> i32 {
-    NTE_INVALID_HANDLE
+pub extern "system" fn NCryptFinalizeKey(key: usize, _flags: u32) -> i32 {
+    if keys::is_key(key) { 0 } else { NTE_INVALID_HANDLE }
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn NCryptDeleteKey(_key: usize, _flags: u32) -> i32 {
-    NTE_INVALID_HANDLE
+pub extern "system" fn NCryptDeleteKey(key: usize, _flags: u32) -> i32 {
+    keys::delete(key)
 }
 
 #[unsafe(no_mangle)]

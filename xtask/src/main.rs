@@ -312,6 +312,8 @@ const USER_DLLS: &[Dll] = &[
     // iphlpapi, secur32, winhttp: what the JDK's net.dll imports.
     Dll { package: "iphlpapi", file: "iphlpapi.dll", exported_as: "testiphlpapi.dll" },
     Dll { package: "secur32", file: "secur32.dll", exported_as: "testsecur32.dll" },
+    // gala's schannel.dll: the Schannel (TLS) package behind secur32.
+    Dll { package: "schannel", file: "schannel.dll", exported_as: "testschannel.dll" },
     Dll { package: "winhttp", file: "winhttp.dll", exported_as: "testwinhttp.dll" },
     // gala's ncrypt.dll (no key storage providers; bound at startup).
     Dll { package: "ncrypt", file: "ncrypt.dll", exported_as: "testncrypt.dll" },
@@ -1581,6 +1583,33 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("nginx_tls", "user/nginx/html/index.html", "nginx/html"),
     ("nginx_tls", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
     ("nginx_tls", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
+    // Schannel (TLS) against Nginx on the loopback address; the test CA
+    // in gala's machine root store.
+    ("schannel_test", "ntdll.dll", "Windows/System32"),
+    ("schannel_test", "kernel32.dll", "Windows/System32"),
+    ("schannel_test", "ws2_32.dll", "Windows/System32"),
+    ("schannel_test", "mswsock.dll", "Windows/System32"),
+    ("schannel_test", "msvcrt.dll", "Windows/System32"),
+    ("schannel_test", "advapi32.dll", "Windows/System32"),
+    ("schannel_test", "user32.dll", "Windows/System32"),
+    ("schannel_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("schannel_test", "bcrypt.dll", "Windows/System32"),
+    ("schannel_test", "crypt32.dll", "Windows/System32"),
+    ("schannel_test", "secur32.dll", "Windows/System32"),
+    ("schannel_test", "schannel.dll", "Windows/System32"),
+    ("schannel_test", "ncrypt.dll", "Windows/System32"),
+    ("schannel_test", "user/bin/nginx.exe", "nginx"),
+    ("schannel_test", "user/schannel_test/nginx.conf", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/server.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/server.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/untrusted.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/untrusted.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/expired.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/expired.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/ca.cer", "Windows/System32/gala/roots"),
+    ("schannel_test", "user/nginx/html/index.html", "nginx/html"),
+    ("schannel_test", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
+    ("schannel_test", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
     ("go_exit", "ntdll.dll", "Windows/System32"),
     ("go_exit", "kernel32.dll", "Windows/System32"),
     ("go_exit", "bcryptprimitives.dll", "Windows/System32"),
@@ -1651,6 +1680,7 @@ const USER_PROGRAMS: &[&str] = &[
     "netapi32_test",
     "clusapi_test",
     "sspi_test",
+    "schannel_test",
     "dpapi_test",
     "cert_test",
     "tds_test",
@@ -1978,7 +2008,9 @@ fn unit_tests() -> Result {
     run_cmd(cargo().args(["test", "--package", "xtask"]))?;
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
-    run_cmd(cargo().args(["test", "--package", "galapkg"]))
+    run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
+    // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
+    run_cmd(cargo().args(["test", "--package", "schannel_tls"]))
 }
 
 /// `cargo xtask alloc-audit`: disassembles the kernel (the debug build
@@ -5086,6 +5118,16 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=nginx.exe args=-p%20C:/nginx/%20-c%20conf/nginx-tls.conf",
         exit_status: XTASK_STOPS,
         expect: &["xtask: net client: tls ok"],
+    },
+    Scenario {
+        // Schannel (secur32 + schannel.dll): TLS 1.3 and 1.2 clients
+        // against Nginx (OpenSSL) on the loopback address, certificate
+        // validation, and a server (AcceptSecurityContext) in-process.
+        name: "schannel_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=schannel_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["schannel_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "go_exit",

@@ -7,9 +7,10 @@
 //! FreeContextBuffer frees. Kerberos is there as on a machine in a
 //! workgroup (no domain controller); Negotiate authenticates with NTLM,
 //! exchanging NTLM's own tokens (Windows' Negotiate accepts those too;
-//! SPNEGO-wrapped ones are not understood yet); Schannel (TLS) gives its
-//! information but no credentials yet (recorded). Other packages (Digest,
-//! CredSSP) do not exist: looking one up records its name.
+//! SPNEGO-wrapped ones are not understood yet); Schannel (TLS, under
+//! UNISP_NAME and SCHANNEL_NAME) is schannel.dll's (`super::schannel`):
+//! its handles are forwarded there. Other packages (Digest, CredSSP) do
+//! not exist: looking one up records its name.
 
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -75,8 +76,8 @@ fn boxed<T>(value: T) -> *mut T {
 /// SecHandle.
 #[repr(C)]
 pub struct SecHandle {
-    lower: usize,
-    upper: usize,
+    pub(crate) lower: usize,
+    pub(crate) upper: usize,
 }
 
 /// SecBuffer.
@@ -181,14 +182,15 @@ pub enum Package {
     /// NTLM underneath; tokens are NTLM's own (SPNEGO-wrapped tokens are
     /// not understood yet: recorded).
     Negotiate,
-    /// Schannel (TLS): its information only so far; acquiring
-    /// credentials is not supported yet (recorded).
+    /// Schannel (TLS), in schannel.dll: UNISP_NAME.
     Schannel,
+    /// The same package as SCHANNEL_NAME ("Schannel").
+    SchannelName,
 }
 
 /// (package, name, comment, SECPKG_FLAG_* capabilities, RPC id,
 /// cbMaxToken), as Windows reports them.
-const PACKAGES: [(Package, &str, &str, u32, u16, u32); 4] = [
+const PACKAGES: [(Package, &str, &str, u32, u16, u32); 5] = [
     (
         Package::Ntlm,
         ntlm::PACKAGE,
@@ -207,6 +209,7 @@ const PACKAGES: [(Package, &str, &str, u32, u16, u32); 4] = [
         14,
         24576,
     ),
+    (Package::SchannelName, "Schannel", "Schannel Security Package", 0x0001_07b3, 14, 24576),
 ];
 
 /// The package named `name` (ASCII, ignoring case).
@@ -288,7 +291,8 @@ fn package_info(packages: &[Package]) -> *mut SecPkgInfo {
     }
 }
 
-/// EnumerateSecurityPackagesW: NTLM, Kerberos, Negotiate and Schannel.
+/// EnumerateSecurityPackagesW: NTLM, Kerberos, Negotiate and Schannel
+/// (under both its names).
 #[unsafe(no_mangle)]
 pub extern "system" fn EnumerateSecurityPackagesW(
     count: *mut u32,
@@ -297,8 +301,13 @@ pub extern "system" fn EnumerateSecurityPackagesW(
     if count.is_null() || info.is_null() {
         return SEC_E_INVALID_TOKEN;
     }
-    let p =
-        package_info(&[Package::Ntlm, Package::Kerberos, Package::Negotiate, Package::Schannel]);
+    let p = package_info(&[
+        Package::Ntlm,
+        Package::Kerberos,
+        Package::Negotiate,
+        Package::Schannel,
+        Package::SchannelName,
+    ]);
     if p.is_null() {
         return SEC_E_INSUFFICIENT_MEMORY;
     }
@@ -365,21 +374,44 @@ pub struct Credential {
 /// SEC_WINNT_AUTH_IDENTITY given.
 #[unsafe(no_mangle)]
 pub extern "system" fn AcquireCredentialsHandleW(
-    _principal: *const u16,
+    principal: *const u16,
     package: *const u16,
-    _usage: u32,
-    _logon: usize,
+    usage: u32,
+    logon: usize,
     auth: *const Identity,
-    _get_key: usize,
-    _arg: usize,
+    get_key: usize,
+    arg: usize,
     credential: *mut SecHandle,
     expiry: *mut i64,
 ) -> u32 {
-    let Some(package) = package_of(package) else { return no_package(package) };
-    if package == Package::Schannel {
-        let _ = missing(b"secur32.dll!AcquireCredentialsHandleW(Schannel)");
-        return SEC_E_UNSUPPORTED_FUNCTION;
+    let Some(kind) = package_of(package) else { return no_package(package) };
+    if matches!(kind, Package::Schannel | Package::SchannelName) {
+        type F = extern "system" fn(
+            *const u16,
+            *const u16,
+            u32,
+            usize,
+            *const Identity,
+            usize,
+            usize,
+            *mut SecHandle,
+            *mut i64,
+        ) -> u32;
+        return crate::forward!(
+            b"AcquireCredentialsHandleW\0",
+            F,
+            principal,
+            package,
+            usage,
+            logon,
+            auth,
+            get_key,
+            arg,
+            credential,
+            expiry
+        );
     }
+    let package = kind;
     if credential.is_null() {
         return SEC_E_INVALID_HANDLE;
     }
@@ -417,6 +449,10 @@ pub extern "system" fn AcquireCredentialsHandleW(
 /// FreeCredentialsHandle.
 #[unsafe(no_mangle)]
 pub extern "system" fn FreeCredentialsHandle(credential: *mut SecHandle) -> u32 {
+    if super::schannel::credential(credential) {
+        type F = extern "system" fn(*mut SecHandle) -> u32;
+        return crate::forward!(b"FreeCredentialsHandle\0", F, credential);
+    }
     let Some(c) = state::<Credential>(credential, CREDENTIAL_TAG) else {
         return SEC_E_INVALID_HANDLE;
     };
@@ -469,17 +505,49 @@ fn new_context(context: Context, out: *mut SecHandle) -> Result<(), u32> {
 pub extern "system" fn InitializeSecurityContextW(
     credential: *mut SecHandle,
     context: *mut SecHandle,
-    _target: *const u16,
+    target: *const u16,
     flags: u32,
-    _reserved: u32,
-    _representation: u32,
+    reserved: u32,
+    representation: u32,
     input: *mut SecBufferDesc,
-    _reserved2: u32,
+    reserved2: u32,
     new_context_handle: *mut SecHandle,
     output: *mut SecBufferDesc,
     attributes: *mut u32,
     expiry: *mut i64,
 ) -> u32 {
+    if super::schannel::context(context) || super::schannel::credential(credential) {
+        type F = extern "system" fn(
+            *mut SecHandle,
+            *mut SecHandle,
+            *const u16,
+            u32,
+            u32,
+            u32,
+            *mut SecBufferDesc,
+            u32,
+            *mut SecHandle,
+            *mut SecBufferDesc,
+            *mut u32,
+            *mut i64,
+        ) -> u32;
+        return crate::forward!(
+            b"InitializeSecurityContextW\0",
+            F,
+            credential,
+            context,
+            target,
+            flags,
+            reserved,
+            representation,
+            input,
+            reserved2,
+            new_context_handle,
+            output,
+            attributes,
+            expiry
+        );
+    }
     let mut token = [0u8; ntlm::MAX_MESSAGE];
     let allocate_memory = flags & ALLOCATE_MEMORY != 0;
     if !expiry.is_null() {
@@ -541,12 +609,38 @@ pub extern "system" fn AcceptSecurityContext(
     context: *mut SecHandle,
     input: *mut SecBufferDesc,
     flags: u32,
-    _representation: u32,
+    representation: u32,
     new_context_handle: *mut SecHandle,
     output: *mut SecBufferDesc,
     attributes: *mut u32,
     expiry: *mut i64,
 ) -> u32 {
+    if super::schannel::context(context) || super::schannel::credential(credential) {
+        type F = extern "system" fn(
+            *mut SecHandle,
+            *mut SecHandle,
+            *mut SecBufferDesc,
+            u32,
+            u32,
+            *mut SecHandle,
+            *mut SecBufferDesc,
+            *mut u32,
+            *mut i64,
+        ) -> u32;
+        return crate::forward!(
+            b"AcceptSecurityContext\0",
+            F,
+            credential,
+            context,
+            input,
+            flags,
+            representation,
+            new_context_handle,
+            output,
+            attributes,
+            expiry
+        );
+    }
     let Some(token_in) = input_token(input) else { return SEC_E_INVALID_TOKEN };
     if !expiry.is_null() {
         // SAFETY: the caller's output.
@@ -607,6 +701,10 @@ pub extern "system" fn AcceptSecurityContext(
 /// DeleteSecurityContext.
 #[unsafe(no_mangle)]
 pub extern "system" fn DeleteSecurityContext(context: *mut SecHandle) -> u32 {
+    if super::schannel::context(context) {
+        type F = extern "system" fn(*mut SecHandle) -> u32;
+        return crate::forward!(b"DeleteSecurityContext\0", F, context);
+    }
     let Some(c) = state::<Context>(context, CONTEXT_TAG) else { return SEC_E_INVALID_HANDLE };
     free((c as *mut Context).cast());
     // SAFETY: the caller's handle, now cleared.
@@ -620,6 +718,9 @@ pub extern "system" fn CompleteAuthToken(
     context: *mut SecHandle,
     _token: *mut SecBufferDesc,
 ) -> u32 {
+    if super::schannel::context(context) {
+        return SEC_E_OK;
+    }
     if state::<Context>(context, CONTEXT_TAG).is_some() { SEC_E_OK } else { SEC_E_INVALID_HANDLE }
 }
 
@@ -632,6 +733,10 @@ pub extern "system" fn QueryContextAttributesW(
     attribute: u32,
     buffer: *mut u8,
 ) -> u32 {
+    if super::schannel::context(context) {
+        type F = extern "system" fn(*mut SecHandle, u32, *mut u8) -> u32;
+        return crate::forward!(b"QueryContextAttributesW\0", F, context, attribute, buffer);
+    }
     let Some(ctx) = state::<Context>(context, CONTEXT_TAG) else { return SEC_E_INVALID_HANDLE };
     if buffer.is_null() {
         return SEC_E_INVALID_TOKEN;
@@ -792,10 +897,14 @@ pub extern "system" fn VerifySignature(
 #[unsafe(no_mangle)]
 pub extern "system" fn EncryptMessage(
     context: *mut SecHandle,
-    _qop: u32,
+    qop: u32,
     desc: *mut SecBufferDesc,
-    _seq: u32,
+    seq: u32,
 ) -> u32 {
+    if super::schannel::context(context) {
+        type F = extern "system" fn(*mut SecHandle, u32, *mut SecBufferDesc, u32) -> u32;
+        return crate::forward!(b"EncryptMessage\0", F, context, qop, desc, seq);
+    }
     let Some(ctx) = state::<Context>(context, CONTEXT_TAG) else { return SEC_E_INVALID_HANDLE };
     let (mut data, token) = message(desc, false);
     let Some(token) = token.filter(|t| t.len() >= 16) else { return SEC_E_BUFFER_TOO_SMALL };
@@ -810,9 +919,13 @@ pub extern "system" fn EncryptMessage(
 pub extern "system" fn DecryptMessage(
     context: *mut SecHandle,
     desc: *mut SecBufferDesc,
-    _seq: u32,
+    seq: u32,
     qop: *mut u32,
 ) -> u32 {
+    if super::schannel::context(context) {
+        type F = extern "system" fn(*mut SecHandle, *mut SecBufferDesc, u32, *mut u32) -> u32;
+        return crate::forward!(b"DecryptMessage\0", F, context, desc, seq, qop);
+    }
     let Some(ctx) = state::<Context>(context, CONTEXT_TAG) else { return SEC_E_INVALID_HANDLE };
     let (mut data, token) = message(desc, false);
     let Some(token) = token.filter(|t| t.len() >= 16) else { return SEC_E_INVALID_TOKEN };
@@ -845,8 +958,38 @@ macro_rules! unsupported_function {
     )*};
 }
 
+/// ApplyControlToken: Schannel's (SCHANNEL_SHUTDOWN); NTLM has none.
+#[unsafe(no_mangle)]
+pub extern "system" fn ApplyControlToken(
+    context: *mut SecHandle,
+    input: *mut SecBufferDesc,
+) -> u32 {
+    if super::schannel::context(context) {
+        type F = extern "system" fn(*mut SecHandle, *mut SecBufferDesc) -> u32;
+        return crate::forward!(b"ApplyControlToken\0", F, context, input);
+    }
+    let _ = missing(b"secur32.dll!ApplyControlToken");
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+
+/// QueryCredentialsAttributesW: Schannel's; NTLM's are not served
+/// (recorded).
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryCredentialsAttributesW(
+    credential: *mut SecHandle,
+    attribute: u32,
+    buffer: *mut u8,
+) -> u32 {
+    if super::schannel::credential(credential) {
+        type F = extern "system" fn(*mut SecHandle, u32, *mut u8) -> u32;
+        return crate::forward!(b"QueryCredentialsAttributesW\0", F, credential, attribute, buffer);
+    }
+    let _ = missing(b"secur32.dll!QueryCredentialsAttributesW");
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+
 unsupported_function! {
-    QueryCredentialsAttributesW ApplyControlToken ImpersonateSecurityContext
+    ImpersonateSecurityContext
     RevertSecurityContext ExportSecurityContext ImportSecurityContextW AddCredentialsW
     QuerySecurityContextToken SetContextAttributesW SetCredentialsAttributesW
     ChangeAccountPasswordW QueryContextAttributesExW QueryCredentialsAttributesExW

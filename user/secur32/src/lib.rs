@@ -1,6 +1,8 @@
 //! gala's secur32.dll: SSPI (`sspi`: the Unicode functions and the
-//! dispatch table) with one security package, NTLM (`ntlm`); the ANSI
-//! functions the JDK's net.dll imports find no package (recorded).
+//! dispatch table) with one security package of its own, NTLM (`ntlm`),
+//! and Schannel (TLS) in schannel.dll (`schannel`: loaded on first use,
+//! its credentials and contexts forwarded there). The ANSI functions
+//! serve Schannel; for other packages they find none (recorded).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -11,6 +13,7 @@ use gala_heap as _;
 
 mod lsa;
 mod ntlm;
+mod schannel;
 mod sspi;
 mod unimplemented;
 
@@ -39,7 +42,7 @@ unsafe extern "system" {
 }
 
 const SEC_E_INVALID_HANDLE: u32 = 0x8009_0301;
-const SEC_E_SECPKG_NOT_FOUND: u32 = 0x8009_0305;
+pub(crate) const SEC_E_SECPKG_NOT_FOUND: u32 = 0x8009_0305;
 
 fn missing(name: &[u8]) -> u32 {
     missing_detail(name, 0)
@@ -52,39 +55,132 @@ fn missing_detail(name: &[u8], detail: u64) -> u32 {
     SEC_E_SECPKG_NOT_FOUND
 }
 
+/// The NUL-terminated ANSI string at `p` is `want` (ignoring case).
+fn ansi_is(p: *const u8, want: &str) -> bool {
+    if p.is_null() {
+        return false;
+    }
+    // SAFETY: the caller's NUL-terminated string.
+    unsafe {
+        want.bytes().enumerate().all(|(i, b)| (*p.add(i)).eq_ignore_ascii_case(&b))
+            && *p.add(want.len()) == 0
+    }
+}
+
+/// AcquireCredentialsHandleA: Schannel's (UNISP_NAME_A or "Schannel"),
+/// in schannel.dll; other packages are not served (recorded).
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn AcquireCredentialsHandleA(
-    _principal: usize,
-    _package: usize,
-    _use: u32,
-    _logon: usize,
-    _auth: usize,
-    _get_key: usize,
-    _arg: usize,
-    _credential: usize,
-    _expiry: usize,
+    principal: usize,
+    package: *const u8,
+    usage: u32,
+    logon: usize,
+    auth: usize,
+    get_key: usize,
+    arg: usize,
+    credential: usize,
+    expiry: usize,
 ) -> u32 {
+    if ansi_is(package, "Microsoft Unified Security Protocol Provider")
+        || ansi_is(package, "Schannel")
+    {
+        type F = extern "system" fn(
+            usize,
+            *const u8,
+            u32,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+        ) -> u32;
+        return forward!(
+            b"AcquireCredentialsHandleA\0",
+            F,
+            principal,
+            package,
+            usage,
+            logon,
+            auth,
+            get_key,
+            arg,
+            credential,
+            expiry
+        );
+    }
     missing(b"secur32.dll!AcquireCredentialsHandleA")
 }
 
+/// InitializeSecurityContextA: Schannel's contexts (schannel.dll).
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn InitializeSecurityContextA(
-    _credential: usize,
-    _context: usize,
-    _target: usize,
-    _flags: u32,
-    _reserved: u32,
-    _representation: u32,
-    _input: usize,
-    _reserved2: u32,
-    _new: usize,
-    _output: usize,
-    _attributes: usize,
-    _expiry: usize,
+    credential: *mut sspi::SecHandle,
+    context: *mut sspi::SecHandle,
+    target: usize,
+    flags: u32,
+    reserved: u32,
+    representation: u32,
+    input: usize,
+    reserved2: u32,
+    new: usize,
+    output: usize,
+    attributes: usize,
+    expiry: usize,
 ) -> u32 {
+    if schannel::context(context) || schannel::credential(credential) {
+        type F = extern "system" fn(
+            *mut sspi::SecHandle,
+            *mut sspi::SecHandle,
+            usize,
+            u32,
+            u32,
+            u32,
+            usize,
+            u32,
+            usize,
+            usize,
+            usize,
+            usize,
+        ) -> u32;
+        return forward!(
+            b"InitializeSecurityContextA\0",
+            F,
+            credential,
+            context,
+            target,
+            flags,
+            reserved,
+            representation,
+            input,
+            reserved2,
+            new,
+            output,
+            attributes,
+            expiry
+        );
+    }
     missing(b"secur32.dll!InitializeSecurityContextA")
+}
+
+/// QueryContextAttributesA: Schannel's contexts (schannel.dll); NTLM's
+/// SECPKG_ATTR_SIZES (the same structure as the W function's).
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryContextAttributesA(
+    context: *mut sspi::SecHandle,
+    attribute: u32,
+    buffer: *mut u8,
+) -> u32 {
+    if schannel::context(context) {
+        type F = extern "system" fn(*mut sspi::SecHandle, u32, *mut u8) -> u32;
+        return forward!(b"QueryContextAttributesA\0", F, context, attribute, buffer);
+    }
+    if attribute == 0 {
+        return sspi::QueryContextAttributesW(context, attribute, buffer);
+    }
+    missing(b"secur32.dll!QueryContextAttributesA")
 }
 
 #[link(name = "kernel32", kind = "raw-dylib")]

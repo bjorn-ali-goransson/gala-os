@@ -1427,7 +1427,7 @@ Windows, never shadows the system's DLLs.)
   control manager: a service is its key), and S-1-5-80-0 as ALL
   SERVICES; domain NT SERVICE, SidTypeWellKnownGroup.
 - **iphlpapi/secur32/winhttp** (what the JDK's net.dll imports): network
-  adapter tables, ICMP echo, SSPI and WinHTTP sessions are not supported
+  adapter tables, ICMP echo, WinHTTP sessions are not supported
   (documented failures, recorded); ConvertLengthToIpv4Mask is computed and
   WinHttpGetIEProxyConfigForCurrentUser answers that there are no IE proxy
   settings (ERROR_FILE_NOT_FOUND). The ledger holds 512 kinds of entries
@@ -2048,8 +2048,12 @@ Windows, never shadows the system's DLLs.)
   it back); the scheduler still runs every thread at the normal base
   priority.
 - **Keys and security packages**: ncrypt opens the Microsoft Software Key
-  Storage Provider (also for a null name) with an empty key store (no
-  key opens: NTE_BAD_KEYSET; creating one is not supported yet). secur32
+  Storage Provider (also for a null name); RSA private keys are imported
+  into it (`user/ncrypt/src/keys.rs`: NCryptImportKey of PKCS#8 or
+  RSAPRIVATEBLOB, named with NCRYPTBUFFER_PKCS_KEY_NAME and opened again
+  by NCryptOpenKey, NCryptSignHash through bcrypt's RSA, NCryptDeleteKey;
+  TODO: named keys last as long as the process, Windows keeps them in
+  the profile; no ECDSA, no generation, no export). secur32
   (`user/secur32/src/sspi.rs`, `ntlm.rs`) has SSPI's dispatch table
   (InitSecurityInterfaceW, version 4) and these packages:
   - NTLM, written from [MS-NLMP]: NTLMv2 with extended session security,
@@ -2068,8 +2072,8 @@ Windows, never shadows the system's DLLs.)
     yet (recorded). Its contexts report NTLM as the negotiated package
     (QueryContextAttributesW SECPKG_ATTR_NEGOTIATION_INFO, complete;
     SECPKG_ATTR_PACKAGE_INFO).
-  - Schannel: its information only; acquiring credentials is not
-    supported yet (recorded).
+  - Schannel (TLS), under UNISP_NAME and SCHANNEL_NAME: in schannel.dll,
+    see "Schannel (TLS)" below; secur32 forwards its handles there.
   Credential and context handles hold a heap block and a tag; buffers
   SSPI returns are process-heap blocks for FreeContextBuffer. A lookup
   of another package records its name (`secur32.dll!package <name>`).
@@ -2088,6 +2092,130 @@ Windows, never shadows the system's DLLs.)
 - **Message tables**: FormatMessage with FROM_HMODULE reads the module's
   RT_MESSAGETABLE (MESSAGE_RESOURCE_DATA blocks, ANSI or UTF-16 entries),
   then the system's messages if FROM_SYSTEM is also given.
+
+## Schannel (TLS)
+
+SSPI's TLS package, test `schannel_test` (scenario of the same name:
+Nginx with OpenSSL on the loopback address as the peer) and the host
+tests of `user/schannel_tls`.
+
+**What there was before** (2026-11-03): secur32 had SSPI's dispatch
+table, NTLM, Kerberos as on a workgroup machine and Negotiate over NTLM
+(`sspi_test`), and Schannel's package information only
+(AcquireCredentialsHandleW recorded and failed). crypt32 decodes
+certificates into CERT_CONTEXTs (properties, names, CERT_KEY_PROV_INFO)
+but has no stores and no chain engine (CertGetCertificateChain and
+CertVerifyCertificateChainPolicy were `gala_stubs` that end the
+process). winhttp has only the proxy functions the JDK imports
+(WinHttpOpen fails, recorded); wininet is all stubs: neither does HTTPS.
+bcrypt has hashes, AES/DES/RC2, RSA (PKCS#1 v1.5, PSS, OAEP); ncrypt had
+an empty key store. TLS in gala so far was OpenSSL inside programs
+(nginx_tls: the host's curl against Nginx in the guest).
+
+**Where things are**:
+- `user/secur32` (`src/schannel.rs`): loads schannel.dll on first use
+  and forwards every call whose credential or context handle carries
+  schannel.dll's tags (`galaSCHC`, `galaSCHX` in dwUpper), and
+  AcquireCredentialsHandleW/A for UNISP_NAME / "Schannel". The package
+  is listed under both names (EnumerateSecurityPackagesW,
+  QuerySecurityPackageInfoW: RPC id 14, cbMaxToken 24576).
+- `user/schannel` (schannel.dll; also exports the SSPI functions, as
+  Windows' does): credentials (`creds.rs`), the SecBuffer rules
+  (`lib.rs`), QueryContextAttributes (`attrs.rs`).
+- `user/schannel_tls` (a `no_std` library, host-tested): the context
+  state machine over rustls' unbuffered API, with rustls-rustcrypto as
+  the crypto provider (THIRD_PARTY.md). Why this engine: rustls is a
+  vetted TLS implementation; its unbuffered API needs no `std`, which
+  gala's freestanding DLLs cannot have; the RustCrypto provider is pure
+  Rust (ring and aws-lc need a C toolchain for the MSVC target). Its
+  `getrandom` needs a patch (vendor/getrandom: ProcessPrng by
+  `raw-dylib`, since the DLLs link without import libraries).
+
+**Credentials**: SCHANNEL_CRED (version 4: grbitEnabledProtocols, dwFlags,
+paCred) and SCH_CREDENTIALS (version 5: TLS_PARAMETERS'
+grbitDisabledProtocols for every ALPN id). TLS 1.2 and 1.3 only (others
+recorded, the context then fails with SEC_E_ALGORITHM_MISMATCH).
+SCH_CRED_MANUAL_CRED_VALIDATION (or ISC_REQ_MANUAL_CRED_VALIDATION):
+the server's certificate is not checked (its handshake signature is).
+Otherwise automatic validation: a path to a trust anchor of **gala's
+machine root store**, the certificates (DER or PEM) in
+`%SystemRoot%\System32\gala\roots` (read when the credential is
+acquired), validity, and the target name (SNI and the name check;
+SCH_CRED_NO_SERVERNAME_CHECK skips it), done by rustls' webpki
+verifier: SEC_E_UNTRUSTED_ROOT, SEC_E_CERT_EXPIRED,
+SEC_E_WRONG_PRINCIPAL, as documented for automatic validation. This
+runs in schannel.dll because crypt32 has no stores or chain engine
+yet; crypt32's CertGetCertificateChain now gives a chain of the
+certificate alone that is untrusted (CERT_TRUST_IS_UNTRUSTED_ROOT |
+PARTIAL_CHAIN, recorded) and CertVerifyCertificateChainPolicy
+CERT_E_UNTRUSTEDROOT, so callers validating themselves fail closed
+(`user/crypt32/src/chain.rs`). When crypt32 gets its ROOT store, it
+reads the same directory, and Schannel moves onto its chain engine.
+Revocation is not checked (the flags are recorded). A server
+credential is its certificate (paCred[0]) and the CNG key it names
+(CERT_NCRYPT_KEY_HANDLE_PROP_ID, or CERT_KEY_PROV_INFO_PROP_ID's
+provider and container, opened with NCryptOpenKey); rustls signs the
+handshake through NCryptSignHash (RSA: PSS for TLS 1.3, PSS or PKCS#1
+for 1.2), so the key stays in ncrypt. Only RSA server keys for now;
+client certificates are not sent (recorded).
+
+**A context is a state machine** (`Session` in schannel_tls), one per
+InitializeSecurityContext/AcceptSecurityContext chain:
+- handshaking: each call takes the input SECBUFFER_TOKEN and gives the
+  output token (ISC_REQ_ALLOCATE_MEMORY: a process-heap block for
+  FreeContextBuffer, else the caller's buffer) and SEC_I_CONTINUE_NEEDED
+  until SEC_E_OK; SEC_E_INCOMPLETE_MESSAGE with SECBUFFER_MISSING (the
+  bytes the current record still lacks) in the first empty input buffer
+  after the token; SECBUFFER_EXTRA there for bytes after the handshake's
+  last record (their pointer and count: the end of the input);
+- established: EncryptMessage, DecryptMessage, and token calls that
+  only take back post-handshake bytes (below) or, after
+  ApplyControlToken(SCHANNEL_SHUTDOWN), give close_notify (SEC_E_OK);
+- failed: sticky; every later call gives the same status.
+
+Invariants (rustls' rules made SSPI's):
+- Handshake input is copied into the context and handed to rustls one
+  complete record at a time, so rustls never reads past the record that
+  finishes the handshake (what follows is untouched SECBUFFER_EXTRA for
+  DecryptMessage).
+- SEC_E_INCOMPLETE_MESSAGE means nothing was taken: the caller passes
+  the same bytes again with more; the context counts the bytes it holds
+  already (`retained`) and takes only the new ones. Any other status:
+  every byte not reported as extra was taken (the context may keep a
+  partial record itself; callers then pass only new bytes).
+- DecryptMessage gives rustls exactly one record of the DATA buffer and
+  writes the plaintext over it after the header: STREAM_HEADER, DATA,
+  STREAM_TRAILER, then EXTRA (the bytes after the record) in the
+  caller's buffers, in that order. close_notify: SEC_I_CONTEXT_EXPIRED.
+  A record with a handshake message (TLS 1.3 NewSessionTicket, KeyUpdate)
+  is restored to its received bytes and returned as SECBUFFER_EXTRA with
+  SEC_I_RENEGOTIATE; rustls has processed it already, so the next token
+  call skips exactly those bytes and gives SEC_E_OK (and any reply
+  rustls made, e.g. to a KeyUpdate), the rest as extra.
+- EncryptMessage makes one record (up to cbMaximumMessage, 16384):
+  STREAM_SIZES is (5, 17) for TLS 1.3, (13, 16) for TLS 1.2 AES-GCM,
+  (5, 16) for ChaCha20; cBuffers 4, cbBlockSize 16 for AES.
+- Cipher suites are offered in Windows 11's default order (AES-256-GCM
+  first), so attributes match what Windows negotiates.
+
+QueryContextAttributesW: STREAM_SIZES, CONNECTION_INFO (SP_PROT_* of the
+side, CALG_AES_*, CALG_SHA_*, CALG_ECDH_EPHEM), CIPHER_INFO (IANA
+names), REMOTE_CERT_CONTEXT and LOCAL_CERT_CONTEXT (CERT_CONTEXTs from
+crypt32, freed by the caller), APPLICATION_PROTOCOL (ALPN from the
+first call's SECBUFFER_APPLICATION_PROTOCOLS), PACKAGE_INFO,
+NEGOTIATION_INFO, SIZES; others are recorded.
+
+What a failure leaves: a failing call records
+`schannel.dll!ISC: <rustls error>` (or ASC, DecryptMessage...) in the
+ledger with the SSPI status as detail; a panic in schannel.dll (a bug)
+records its location and ends the process with 0xC0000409.
+
+TODO: session resumption (rustls' is off: no cache without `std`),
+client certificates, ECDSA server keys, renegotiation requests
+(SCHANNEL_RENEGOTIATE), SCHANNEL_ALERT tokens (accepted, not sent),
+revocation, crypt32's stores and chain engine underneath (and a server
+chain with intermediates from them), a client context whose first call
+fails still has a handle (Windows gives none), DTLS.
 
 ## Processors
 

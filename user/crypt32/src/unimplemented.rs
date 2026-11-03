@@ -57,14 +57,12 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertFindSubjectInSortedCTL
     CertFreeCRLContext
     CertFreeCTLContext
-    CertFreeCertificateChain
     CertFreeCertificateChainEngine
     CertFreeCertificateChainList
     CertFreeServerOcspResponseContext
     CertGetCRLContextProperty
     CertGetCRLFromStore
     CertGetCTLContextProperty
-    CertGetCertificateChain
     CertGetEnhancedKeyUsage
     CertGetIntendedKeyUsage
     CertGetIssuerCertificateFromStore
@@ -105,7 +103,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertVerifyCRLRevocation
     CertVerifyCRLTimeValidity
     CertVerifyCTLUsage
-    CertVerifyCertificateChainPolicy
     CertVerifyRevocation
     CertVerifySubjectCertificateContext
     CertVerifyTimeValidity
