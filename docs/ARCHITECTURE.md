@@ -109,6 +109,10 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `crashtest` | with `persist`: panic on purpose after mounting when the disk holds no crash record (the crash record's scenario) |
 | `spintest` | the boot thread spins in the kernel for 25 s (the kernel-thread watchdog's scenario) |
 | `hangtest` | CPU 1 spins with interrupts off for 9 s, 3 s after its timer starts (the hang watchdog's scenario) |
+| `checkuser` | every return to user mode checks that the CPU is set up for the thread (its kernel stack, CR3, user GS base; no other CPU running it) and panics if not |
+| `tlbparanoid` | every change to a user address space flushes every CPU's whole TLB and every context switch reloads CR3 (tells TLB bugs from others) |
+| `nomigrate` | a thread that runs user code stays on the CPU it first ran on (tells migration bugs from others) |
+| `framecheck` | user mappings of each frame are counted; freeing a frame a user space still maps panics |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `profile=server` | never bring up the graphical interface: the desktop is not drawn even with a screen (windows still exist), `console=` starts no console window (ROADMAP SD) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (boot test `net_echo`) |
@@ -1935,7 +1939,30 @@ does a requester while it waits.
   frees the deferred frames. So no frame is reused while another CPU can
   still reach it. A failed deferral leaks the frame (counted) rather than
   free it early.
-- Counters (shootdowns, IPIs, leaked frames) are logged before `boot ok`.
+- **Invariant: "this CPU" is pinned while a shootdown picks its CPUs.**
+  The guard releases the lock (interrupts back on: an interrupt held back
+  meanwhile is taken right there and may preempt and move the thread)
+  before it flushes, so the CPU that invalidated locally (`changed_on`,
+  recorded by `UserSpace::invalidate`) need not be the one flushing. Up
+  to 2026-11-03 `flush_cpus` left out the CPU it ran on as "already
+  invalidated", which after such a move was the wrong one: its old
+  translations stayed (of pages whose frames were then freed).
+  `flush_user_space` now runs with interrupts off from choosing the CPUs
+  to the end and also flushes its own CPU when it is not `changed_on`;
+  `flush_tlb_everywhere` keeps interrupts off from its local flush on.
+  The stats line counts such moves ("after a move to another CPU";
+  `shootdown_test` provokes them; they were 0 in the Java runs measured,
+  so this was not the Java corruption).
+- Counters (shootdowns, IPIs, moves, leaked frames) are logged before
+  `boot ok`.
+- Diagnostic flags (kernel command line, ARCHITECTURE "Kernel command
+  line"): `tlbparanoid` makes every user-space change flush every CPU's
+  whole TLB and every switch reload CR3 (a bug that goes away with it is
+  a TLB bug); `nomigrate` keeps each user thread on its first CPU;
+  `checkuser` checks on every return to user mode that the CPU is set up
+  for the thread (kernel stack, CR3, user GS, no other CPU running it);
+  `framecheck` counts each frame's user mappings and panics when a frame
+  still mapped is freed.
 
 
 ## Networking

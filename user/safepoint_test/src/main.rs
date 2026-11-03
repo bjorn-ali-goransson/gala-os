@@ -186,12 +186,65 @@ global_asm!(
     "mov eax, 0xcf",
     "syscall",
     "ret",
+    // The safepoint stub (as HotSpot's safepoint blob), entered through
+    // NtContinue: makes room for the resume address (sp_block fills it
+    // in), saves every register on the stack, blocks in sp_block(save
+    // area), restores them and returns to the instruction after the poll.
+    ".globl sp_stub",
+    "sp_stub:",
+    "sub rsp, 8",
+    "push rax",
+    "push rbx",
+    "push rcx",
+    "push rdx",
+    "push rsi",
+    "push rdi",
+    "push rbp",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    "sub rsp, 64",
+    "movdqu [rsp], xmm8",
+    "movdqu [rsp + 16], xmm9",
+    "movdqu [rsp + 32], xmm10",
+    "movdqu [rsp + 48], xmm11",
+    "mov rcx, rsp",
+    "sub rsp, 40",
+    "call {block}",
+    "add rsp, 40",
+    "movdqu xmm8, [rsp]",
+    "movdqu xmm9, [rsp + 16]",
+    "movdqu xmm10, [rsp + 32]",
+    "movdqu xmm11, [rsp + 48]",
+    "add rsp, 64",
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rbp",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",
+    "pop rbx",
+    "pop rax",
+    "ret",
     ".globl sp_release_semaphore",
     "sp_release_semaphore:",
     "mov r10, rcx",
     "mov eax, 0x0a",
     "syscall",
     "ret",
+    block = sym sp_block,
 );
 
 unsafe extern "C" {
@@ -204,6 +257,57 @@ unsafe extern "C" {
         maximum: i32,
     ) -> NtStatus;
     fn sp_release_semaphore(handle: Handle, count: i32, previous: *mut i32) -> NtStatus;
+    fn sp_stub();
+}
+
+/// Offsets in sp_stub's save area of the registers `sp_mutate` loads (in
+/// its order: rax, rbx, rcx, rdx, rsi, rdi, rbp, r8, r9, r10, r12, r13,
+/// r14, r15), of xmm8 and of the return address (the stack slots follow).
+const STUB_GPR: [usize; GPRS] = [
+    64 + 8 * 14,
+    64 + 8 * 13,
+    64 + 8 * 12,
+    64 + 8 * 11,
+    64 + 8 * 10,
+    64 + 8 * 9,
+    64 + 8 * 8,
+    64 + 8 * 7,
+    64 + 8 * 6,
+    64 + 8 * 5,
+    64 + 8 * 3,
+    64 + 8 * 2,
+    64 + 8,
+    64,
+];
+const STUB_RETURN: usize = 64 + 8 * 15;
+
+/// How the collector stops a mutator: in the handler (its CONTEXT), or
+/// as HotSpot does, in sp_stub after NtContinue (its save area).
+static STUB_MODE: AtomicBool = AtomicBool::new(false);
+/// Per mutator: whether it is stopped in sp_stub (else in the handler).
+static IN_STUB: [AtomicBool; MUTATORS] = [const { AtomicBool::new(false) }; MUTATORS];
+/// Per mutator: where sp_stub returns to (after the poll that faulted).
+static RESUME: [AtomicU64; MUTATORS] = [const { AtomicU64::new(0) }; MUTATORS];
+
+/// Called by sp_stub with its save area: the mutator stops there.
+extern "C" fn sp_block(area: usize) {
+    let rsp = area + STUB_RETURN + 8;
+    let Some(m) = (0..MUTATORS).find(|&m| {
+        let top = STACK_TOPS[m].load(Ordering::SeqCst);
+        rsp < top && rsp + 0x10000 > top
+    }) else {
+        fail(0x22, 0, 0, area as u64, 0);
+        return;
+    };
+    // SAFETY: the stub's slot for its return address.
+    unsafe { ((area + STUB_RETURN) as *mut u64).write(RESUME[m].load(Ordering::SeqCst)) };
+    IN_STUB[m].store(true, Ordering::SeqCst);
+    CONTEXTS[m].store(area, Ordering::SeqCst);
+    ARRIVED.fetch_add(1, Ordering::SeqCst);
+    let s = wait(Handle(SEMAPHORE.load(Ordering::SeqCst)), None);
+    if s != STATUS_SUCCESS {
+        fail(0x21, m, 0, s.into(), 0);
+    }
 }
 
 /// The address the poll reads: the good page, or the bad one when armed.
@@ -276,6 +380,13 @@ extern "system" fn handler(pointers: *mut ExceptionPointers) -> i32 {
         if core::slice::from_raw_parts(at as *const u8, 3) != [0x41, 0x85, 0x03] {
             fail(0x20, m, 0, at, 0);
         }
+        if STUB_MODE.load(Ordering::SeqCst) {
+            // As HotSpot: resume in the stub, which returns after the poll.
+            RESUME[m].store(at + 3, Ordering::SeqCst);
+            rip.write_unaligned(sp_stub as *const () as u64);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        IN_STUB[m].store(false, Ordering::SeqCst);
         CONTEXTS[m].store(context as usize, Ordering::SeqCst);
         ARRIVED.fetch_add(1, Ordering::SeqCst);
         let s = wait(Handle(SEMAPHORE.load(Ordering::SeqCst)), None);
@@ -353,7 +464,8 @@ extern "C" fn noise(_: usize) -> ! {
 
 /// One collection: stop every mutator at its poll, check and rewrite its
 /// values, churn memory, let them go.
-fn collect(scratch: usize) -> Result<(), u32> {
+fn collect(scratch: usize, stub: bool) -> Result<(), u32> {
+    STUB_MODE.store(stub, Ordering::SeqCst);
     SP_POLL.store(BAD.load(Ordering::SeqCst), Ordering::SeqCst);
     let start = now_ms();
     while ARRIVED.load(Ordering::SeqCst) < MUTATORS {
@@ -370,7 +482,7 @@ fn collect(scratch: usize) -> Result<(), u32> {
         let old = EPOCH[m].load(Ordering::SeqCst);
         let new = old + 1;
         let ctx = CONTEXTS[m].load(Ordering::SeqCst) as *mut u8;
-        let mut check = |at: *mut u64, idx: usize, check: u32| {
+        let check = |at: *mut u64, idx: usize, check: u32| {
             // SAFETY: the stopped mutator's CONTEXT, stack and heap, which
             // it does not touch until released.
             let v = unsafe { at.read_unaligned() };
@@ -383,15 +495,21 @@ fn collect(scratch: usize) -> Result<(), u32> {
         // SAFETY (pointer arithmetic below): inside the CONTEXT, the
         // mutator's stack slots above its Rsp and its heap pages.
         unsafe {
-            for (i, &off) in CTX_GPR.iter().enumerate() {
+            let stub = IN_STUB[m].load(Ordering::SeqCst);
+            let (gprs, xmm8, rsp) = if stub {
+                (&STUB_GPR, 0, ctx as usize + STUB_RETURN + 8)
+            } else {
+                let rsp = (ctx.add(CTX_RSP) as *const u64).read_unaligned() as usize;
+                (&CTX_GPR, CTX_XMM8, rsp)
+            };
+            for (i, &off) in gprs.iter().enumerate() {
                 check(ctx.add(off) as *mut u64, i, 0x11);
             }
-            let rsp = (ctx.add(CTX_RSP) as *const u64).read_unaligned() as usize;
             for i in 0..SLOTS {
                 check((rsp + 8 * i) as *mut u64, GPRS + i, 0x12);
             }
             for i in 0..XMMS {
-                check(ctx.add(CTX_XMM8 + 16 * i) as *mut u64, GPRS + SLOTS + i, 0x13);
+                check(ctx.add(xmm8 + 16 * i) as *mut u64, GPRS + SLOTS + i, 0x13);
             }
             let heap = HEAPS[m].load(Ordering::SeqCst);
             for p in 0..HEAP_PAGES {
@@ -482,7 +600,7 @@ fn run() -> Result<u32, u32> {
         if rounds % 3 != 0 {
             delay(-((rounds as i64 % 3) * 10_000));
         }
-        if let Err(e) = collect(scratch) {
+        if let Err(e) = collect(scratch, rounds % 2 == 1) {
             result = Err(e);
             break;
         }
