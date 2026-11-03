@@ -40,6 +40,7 @@ pub mod msix;
 pub mod shim;
 pub mod source;
 pub mod version;
+pub mod winget;
 pub mod xml;
 pub mod yaml;
 pub mod zip;
