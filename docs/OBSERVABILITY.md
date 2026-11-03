@@ -200,7 +200,14 @@ B1 (sessions) `process start` and `process exit` carry `"session"`, a
 session made after boot is an event (`"ev":"session"`, id and its
 BaseNamedObjects; category `process`) and a log line, the start line
 says the session (`process x.exe (pid 4, session 1): starting at`), and
-the state dump's thread lines end with `session N (name)`. Also `display`
+the state dump's thread lines end with `session N (name)`. Since RS
+B2 `window` (`"op":"create"` with hwnd, parent, pid and session;
+`"describe"` with tid, class and text once user32 knows them;
+`"destroy"`; `"other session"` when a process asks
+about, sends or posts to another session's HWND, also logged the first
+32 times as `window: pid P (session S) ... not visible across
+sessions`), and the state dump has a sessions part (`statedump: session
+N: ... windows ...`, then its top-level windows). Also `display`
 (2026-11-03: virtio-gpu modes set, device resets, failed commands with
 their names); `gputrace` logs every virtio-gpu command and its result,
 and a boot ends with a `display:` line (commands, flushes, mode changes,

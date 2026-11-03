@@ -1765,6 +1765,21 @@ RS. **Remote access and sessions** (the owner, 2026-11-03; design:
    - B2. Per-session desktop and window registry (the statics go): a GUI
      program in session 2 is not found or messaged from session 1; `gala
      windows` lists the caller's session; every GUI scenario still passes.
+     **Done (2026-11-03)**: `nt::session::Desk` per session (window
+     registry, WinEvent hooks, shasha's desktop, each its own lock),
+     reached through `Process::desk`; the `REGISTRY`, `STATE` and
+     `DESKTOP` statics are gone (HWNDs keep one counter). Only the console
+     session's desktop is drawn and gets input; another session's GUI
+     calls see no screen. `session_test` (SYSTEM in session 0 and a child
+     in session 1, each with a window): IsWindow, FindWindowW,
+     EnumWindows, GetWindowThreadProcessId, PostMessageW,
+     SendMessageTimeoutW (ERROR_INVALID_WINDOW_HANDLE) and
+     PostThreadMessageW (ERROR_INVALID_THREAD_ID) never cross sessions;
+     `\Windows\WindowStations` and `\Sessions\<n>\Windows\WindowStations`
+     exist. Observability: `events=window` (create, destroy, an HWND asked
+     for from another session, also logged), the state dump's sessions
+     part. Not yet: window station and desktop objects
+     (GetProcessWindowStation is still NULL), presenters (B3a).
    - B3a. Window state apart from composition, and presenters: console
      attach and switch; the test presenter (headless render for screen
      checks without QEMU screendumps); a session with no presenter keeps
@@ -1950,7 +1965,8 @@ LX. **A Linux personality, later; its seams now** (the owner,
    scheduled, only the seams are built, each with the work that touches
    its area: (1) the pty as a core terminal object under ConPTY (a
    refactor now: ConPTY, item SSH, was built first); (2) per-process
-   system-call dispatch; (3) the core/NT split of `Process` with RS B2;
+   system-call dispatch; (3) the core/NT split of `Process` with RS B2
+   (**done 2026-11-03**: `nt::process::Core`, `Process` derefs to it);
    (4) file-system metadata: per-directory case sensitivity
    (FileCaseSensitiveInformation), POSIX metadata per file, a plan for
    symlinks/hard links/POSIX delete and rename; (5) shared core objects

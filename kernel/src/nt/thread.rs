@@ -998,8 +998,8 @@ pub fn exit_current(status: NtStatus) -> ! {
         // Its windows are destroyed with it, as on Windows (user32 frees
         // its own records at DLL_THREAD_DETACH; this covers threads that
         // never got there), and messages sent to it fail.
-        super::window::thread_ended(t.process.id as u32, t.id as u32);
-        super::winevent::thread_ended(t.process.id as u32, t.id as u32);
+        t.process.desk.windows.thread_ended(t.process.id as u32, t.id as u32);
+        t.process.desk.hooks.thread_ended(t.process.id as u32, t.id as u32);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
         let process = t.process.clone();
         let last = process.remove_thread(&object);

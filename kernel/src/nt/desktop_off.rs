@@ -70,6 +70,26 @@ pub struct InputEvent {
 /// No desktop can exist: `with` never calls its closure.
 pub enum Desktop {}
 
+/// A session's desktop as shasha would keep it: nothing here (the window
+/// registry, nt::window, still serves the session's windows).
+pub struct Shell;
+
+impl Shell {
+    pub const fn new(_session: u32) -> Shell {
+        Shell
+    }
+
+    /// Never shown: there is no compositor.
+    pub fn shown(&self) -> bool {
+        false
+    }
+
+    /// (windows on the screen, drawn yet): none.
+    pub fn counts(&self) -> (usize, bool) {
+        (0, false)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 impl Desktop {
     pub fn create(
@@ -134,17 +154,18 @@ pub fn server_profile() -> bool {
     true
 }
 
-pub fn screen() -> Option<(u32, u32)> {
+pub fn screen(_: &Shell) -> Option<(u32, u32)> {
     None
 }
 
 pub fn with<R>(
+    _: &Shell,
     _: impl FnOnce(&mut Desktop) -> Result<(R, Option<Rect>), NtStatus>,
 ) -> Result<R, NtStatus> {
     Err(NtStatus::NOT_SUPPORTED)
 }
 
-pub fn process_ended(_: u64) {}
+pub fn process_ended(_: &Shell, _: u64) {}
 
 pub fn pointer_event(_: i64, _: i64, _: u8) -> Option<&'static Program> {
     None
@@ -154,13 +175,13 @@ pub fn wheel_event(_: i64) {}
 
 pub fn key_event(_: u8, _: u8, _: bool, _: bool) {}
 
-pub fn listen(_: u64, _: ObjectRef) -> Result<(), NtStatus> {
+pub fn listen(_: &Shell, _: u64, _: ObjectRef) -> Result<(), NtStatus> {
     Err(NtStatus::NOT_SUPPORTED)
 }
 
 pub fn tick() {}
 
-pub fn take_input(_: u64, _: &mut [InputEvent]) -> usize {
+pub fn take_input(_: &Shell, _: u64, _: &mut [InputEvent]) -> usize {
     0
 }
 
@@ -168,14 +189,14 @@ pub fn start_menu() -> Vec<&'static Program> {
     Vec::new()
 }
 
-pub fn window_action(_: u64, _: u32, _: Action) -> Result<(), NtStatus> {
+pub fn window_action(_: &Shell, _: u64, _: u32, _: Action) -> Result<(), NtStatus> {
     Err(NtStatus::NOT_SUPPORTED)
 }
 
-pub fn list_windows() -> Result<Vec<Listed>, NtStatus> {
+pub fn list_windows(_: &Shell) -> Result<Vec<Listed>, NtStatus> {
     Err(NtStatus::NOT_SUPPORTED)
 }
 
-pub fn set_wallpaper(_: &str) -> Result<(), NtStatus> {
+pub fn set_wallpaper(_: &Shell, _: &str) -> Result<(), NtStatus> {
     Err(NtStatus::NOT_SUPPORTED)
 }
