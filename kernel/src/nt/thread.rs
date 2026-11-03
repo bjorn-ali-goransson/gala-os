@@ -900,13 +900,15 @@ pub fn dump() {
         let sched = *t.sched_id.lock();
         let suspended = *t.suspend_count.lock();
         info!(
-            "thread: pid {} tid {} (sched {:?}) suspend {} exited {} in a system call {} ({})",
+            "thread: pid {} tid {} (sched {:?}) suspend {} exited {} in a system call {} \
+             session {} ({})",
             t.process.id,
             t.id,
             sched,
             suspended,
             t.has_exited(),
             in_syscall.is_some(),
+            t.process.session,
             t.process.name
         );
         let Some((number, regs)) = in_syscall else {

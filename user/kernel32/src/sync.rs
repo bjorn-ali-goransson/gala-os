@@ -1,6 +1,8 @@
 //! Named events and mutexes (the object names Win32 programs pass live in
-//! the session's `\Sessions\1\BaseNamedObjects`, where `Global\` is a link
-//! to `\BaseNamedObjects`), and critical sections.
+//! the caller's session's BaseNamedObjects: `\BaseNamedObjects` in session
+//! 0, `\Sessions\<n>\BaseNamedObjects` in the others, where `Global\` and
+//! `Local\` are the kernel's links to the global and the session's
+//! directory; nt::session), and critical sections.
 
 use super::*;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -22,7 +24,6 @@ unsafe extern "system" {
 const OBJ_OPENIF: u32 = 0x80;
 const EVENT_ALL_ACCESS: u32 = 0x1f_0003;
 const MUTANT_ALL_ACCESS: u32 = 0x1f_0001;
-const SESSION_OBJECTS: &str = "\\Sessions\\1\\BaseNamedObjects\\";
 
 /// Converts a NUL-terminated ANSI (UTF-8) string to UTF-16 in `out`;
 /// returns the length, or None if it does not fit.
@@ -36,6 +37,49 @@ pub(crate) fn ansi_to_wide(s: *const u8, out: &mut [u16]) -> Option<usize> {
         n += 1;
     }
     *out.get_mut(n)? = 0;
+    Some(n)
+}
+
+/// PEB.SessionId: the caller's session.
+pub(crate) fn session_id() -> u32 {
+    // SAFETY: gs:[0x60] is the PEB; SessionId is at +0x2c0.
+    unsafe { *((teb_u64(0x60) as usize + 0x2c0) as *const u32) }
+}
+
+/// Writes `<the session's BaseNamedObjects>\<name>` (UTF-16, `name`
+/// NUL-terminated) into `path`; returns its length, or None if it does
+/// not fit. Session 0's directory is `\BaseNamedObjects`, another
+/// session's `\Sessions\<n>\BaseNamedObjects`, as Windows' kernel32
+/// names them.
+pub(crate) fn session_path(name: *const u16, path: &mut [u16]) -> Option<usize> {
+    let mut n = 0;
+    let mut put = |c: u16, n: &mut usize| -> Option<()> {
+        *path.get_mut(*n)? = c;
+        *n += 1;
+        Some(())
+    };
+    let session = session_id();
+    if session != 0 {
+        for c in "\\Sessions\\".encode_utf16() {
+            put(c, &mut n)?;
+        }
+        let mut digits = [0u16; 10];
+        let (mut k, mut v) = (0, session);
+        loop {
+            digits[k] = u16::from(b'0') + (v % 10) as u16;
+            k += 1;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        for &d in digits[..k].iter().rev() {
+            put(d, &mut n)?;
+        }
+    }
+    for c in "\\BaseNamedObjects\\".encode_utf16().chain(wide_slice(name).iter().copied()) {
+        put(c, &mut n)?;
+    }
     Some(n)
 }
 
@@ -90,11 +134,7 @@ fn with_name_and_descriptor<R>(
         return Ok(f(&oa));
     }
     let mut path = [0u16; 300];
-    let mut n = 0;
-    for c in SESSION_OBJECTS.encode_utf16().chain(wide_slice(name).iter().copied()) {
-        *path.get_mut(n).ok_or(ERROR_INVALID_PARAMETER)? = c;
-        n += 1;
-    }
+    let n = session_path(name, &mut path).ok_or(ERROR_INVALID_PARAMETER)?;
     let us = UnicodeString {
         length: (n * 2) as u16,
         maximum_length: (n * 2) as u16,

@@ -111,6 +111,13 @@ shows it.
   export directory (read from memory at the 64 KiB-aligned base below
   the address) names the DLL.
 
+- **Kernel code that host unit tests reach must not log**: `info!`/
+  `warn!` write to the serial port in a `cargo test -p kernel --lib`
+  build, and the test binary dies with SIGSEGV and no test name
+  ("process didn't exit successfully ... signal: 11"). Gate the log
+  lines with `#[cfg(not(test))]` (`nt::session`'s `log!`); events are
+  fine (`events::emit` is a no-op in tests). Find the test with
+  `--test-threads=1` or by filtering module names.
 - **Changing `nt::desktop`'s public functions or types**: the server
   kernel's stand-in `kernel/src/nt/desktop_off.rs` must follow, or the
   `--no-default-features` clippy line in CI fails.

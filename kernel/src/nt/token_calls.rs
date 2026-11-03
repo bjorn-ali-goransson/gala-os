@@ -452,7 +452,11 @@ pub(super) fn gala_logon_user(call: &mut Call<'_>) -> NtStatus {
             result.as_ref().err().map_or(0, |s| s.0)
         ),
     );
-    let data = tri!(result);
+    let mut data = tri!(result);
+    // The logon's token is in the caller's session (a service's logons,
+    // sshd's among them, are session 0's); a SeTcbPrivilege holder moves
+    // it with SetTokenInformation(TokenSessionId).
+    data.session = call.process.session;
     let object = tri!(token::object(data));
     call.return_handle(out, object, token::TOKEN_ALL_ACCESS, 0)
 }

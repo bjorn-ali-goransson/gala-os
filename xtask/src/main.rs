@@ -567,6 +567,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("system_test", "bcryptprimitives.dll", "Windows/System32"),
     ("system_test", "bcrypt.dll", "Windows/System32"),
     ("system_test", "user/access_test/access_test.regseed", "registry"),
+    ("session_test", "ntdll.dll", "Windows/System32"),
+    ("session_test", "kernel32.dll", "Windows/System32"),
+    ("session_test", "advapi32.dll", "Windows/System32"),
+    ("session_test", "secur32.dll", "Windows/System32"),
+    ("session_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("session_test", "bcrypt.dll", "Windows/System32"),
+    ("session_test", "user/access_test/access_test.regseed", "registry"),
     ("lsa_test", "ntdll.dll", "Windows/System32"),
     ("lsa_test", "kernel32.dll", "Windows/System32"),
     ("lsa_test", "advapi32.dll", "Windows/System32"),
@@ -1635,6 +1642,7 @@ const USER_PROGRAMS: &[&str] = &[
     "access_test",
     "logon_test",
     "system_test",
+    "session_test",
     "lsa_test",
     "restricted_test",
     "cmd",
@@ -3211,6 +3219,21 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["system_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // Sessions, ROADMAP RS step B1 (user/session_test): run as SYSTEM
+        // (session 0), it starts a child in session 1 and checks the
+        // session ids and the per-session named objects.
+        name: "session_test",
+        cmdline: "qemu_exit as=system events=process run=session_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "session: 1 made, named objects in \\Sessions\\1\\BaseNamedObjects",
+            "session 0): starting at",
+            "session 1): starting at",
+            "session_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // Security model S4 (docs/SECURITY.md): LSA logons as sshd makes
         // them, run as SYSTEM (user/lsa_test).
         name: "lsa_test",
@@ -4001,14 +4024,14 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // R9 (d): a handover to a newer kernel build with a changed state
         // format (the `handover_next` build, shipped as the boot module
-        // kernel-next: PROCESSES version 3 with a new field, the new WRITER
+        // kernel-next: PROCESSES version 4 with a new field, the new WRITER
         // section, the CLOCK record's in-memory structure laid out
         // differently), with the kernel32 program working across it. The
         // running kernel reads the next one's version note and checks the
         // record against it first; the new kernel reads PROCESSES version
-        // 2 with the new field's default. The program asks again and goes
+        // 3 with the new field's default. The program asks again and goes
         // on across a second handover, gala-next to gala-next (PROCESSES
-        // version 3 both ways).
+        // version 4 both ways).
         name: "handover_upgrade",
         cmdline: "qemu_exit handover=2 handover_image=kernel-next run=handover_k32_test.exe \
                   args=twice",
@@ -4023,10 +4046,10 @@ const SCENARIOS: &[Scenario] = &[
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala-next; the record was written by an older kernel \
              (no WRITER section)",
-            "handover: section PROCESSES version 2 read as version 3 (new fields take their \
+            "handover: section PROCESSES version 3 read as version 4 (new fields take their \
              defaults)",
             "handover: process handover_k32_test.exe has come through 1 handover(s) (counted \
-             from here: PROCESSES version 2)",
+             from here: an older PROCESSES version)",
             "handover: resumed process handover_k32_test.exe",
             "handover_k32_test: writer wrote lines:",
             "handover: gala-next hands over to gala-next",
@@ -4048,7 +4071,7 @@ const SCENARIOS: &[Scenario] = &[
             "firmware: UEFI x86_64",
             "handover: gala hands over to gala-next",
             "handover: this kernel is gala-next",
-            "handover: section PROCESSES version 2 read as version 3",
+            "handover: section PROCESSES version 3 read as version 4",
             "handover: resumed process handover_k32_test.exe",
             "handover_k32_test: ok",
             "exited with status 0x00000000",
@@ -4058,8 +4081,8 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // R9 (d): back from the newer build to the older one (the boot
         // module kernel-gala) while the program runs: gala-next writes
-        // PROCESSES version 3, which needs a version-3 reader, and the
-        // older kernel's note says it reads version 2, so gala-next refuses
+        // PROCESSES version 4, which needs a version-4 reader, and the
+        // older kernel's note says it reads version 3, so gala-next refuses
         // before stopping anything and the program goes on in it. With no
         // programs left, the boot's own handover to the older build is
         // done: it skips the WRITER section it does not know.
@@ -4070,8 +4093,8 @@ const SCENARIOS: &[Scenario] = &[
             "handover_k32_test: ready",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
              extended state 0xe7, 34 section kinds; with programs)",
-            "handover: refused: the next kernel (gala) reads PROCESSES up to version 2; this \
-             kernel writes version 3, which needs a reader of version 3",
+            "handover: refused: the next kernel (gala) reads PROCESSES up to version 3; this \
+             kernel writes version 4, which needs a reader of version 4",
             "handover_k32_test: slept",
             "handover_k32_test: ok",
             "exited with status 0x00000000",
@@ -5697,6 +5720,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("uia_test", "a child process (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
     ("system_test", "child processes; run as SYSTEM (a boot option)"),
+    ("session_test", "child processes; run as SYSTEM (a boot option)"),
     ("lsa_test", "runs as SYSTEM (a boot option)"),
     ("restricted_test", "runs as SYSTEM (a boot option)"),
     ("profile_test", "runs as SYSTEM (a boot option)"),

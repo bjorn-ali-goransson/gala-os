@@ -76,8 +76,11 @@ pub struct ProcessRec<'a> {
     /// Its primary token's object id (TOKENS; version 2, 0 from an older
     /// writer: the boot user's, made again).
     pub token: u32,
+    /// Its session (nt::session; version 3, None from an older writer:
+    /// its primary token's TokenSessionId).
+    pub session: Option<u32>,
     /// The handovers the process has come through, this one included
-    /// (version 3, the `handover_next` build: 0 from an older writer, not
+    /// (version 4, the `handover_next` build: 0 from an older writer, not
     /// counted).
     pub handovers: u32,
 }
@@ -88,7 +91,7 @@ impl<'a> ProcessRec<'a> {
         self.write_as(w, version_of(super::record::tag::PROCESSES))
     }
 
-    /// The entry at `version` (2: no handover count).
+    /// The entry at `version` (2: no session; 3: no handover count).
     pub fn write_as(&self, w: &mut Writer, version: u16) -> Result<(), AllocError> {
         let e = w.begin_entry()?;
         for v in [
@@ -110,6 +113,10 @@ impl<'a> ProcessRec<'a> {
         w.u32(self.token)?;
         w.u32(0)?;
         if version >= 3 {
+            w.u32(self.session.unwrap_or_default())?;
+            w.u32(0)?;
+        }
+        if version >= 4 {
             w.u32(self.handovers)?;
             w.u32(0)?;
         }
@@ -139,10 +146,16 @@ impl<'a> ProcessRec<'a> {
             path: r.str(),
             image_digest: r.u64(),
             token: r.u32(),
+            session: None,
             handovers: 0,
         };
         let _ = r.u32();
-        if knows >= 3 {
+        // An older writer's entry ends here (0 would be a session).
+        if knows >= 3 && !r.at_end() {
+            p.session = Some(r.u32());
+            let _ = r.u32();
+        }
+        if knows >= 4 {
             p.handovers = r.u32();
         }
         p
@@ -1111,6 +1124,7 @@ mod tests {
             path: "C:\\gala\\handover_test.exe",
             image_digest: 0x0123_4567_89ab_cdef,
             token: 22,
+            session: Some(1),
             handovers: 2,
         }
         .write(&mut w)
@@ -1385,7 +1399,9 @@ mod tests {
         assert!(!pages[1].flags.executable);
 
         assert_eq!(p.image_digest, 0x0123_4567_89ab_cdef);
-        // PROCESSES 3 (the `handover_next` build) carries the count.
+        // PROCESSES 3 carries the session, 4 (the `handover_next` build)
+        // the count too.
+        assert_eq!(p.session, Some(1));
         assert_eq!(p.handovers, if version::NEXT { 2 } else { 0 });
         let mut threads = rec.section(tag::THREADS).unwrap();
         let (t, apcs) = ThreadRec::read(&mut threads.entry().unwrap());
@@ -1594,6 +1610,7 @@ mod tests {
             path: "C:\\gala\\a.exe",
             image_digest: 77,
             token: 5,
+            session: Some(1),
             handovers: 3,
             ..Default::default()
         }
@@ -1601,31 +1618,41 @@ mod tests {
 
     #[test]
     fn processes_across_versions() {
-        // A version-2 entry (the default build's), then a version-3 one
-        // (entries carry their length, so one section can hold both here).
+        // Version-2, 3 and 4 entries (entries carry their length, so one
+        // section can hold all three here).
         let mut w = Writer::new(1).unwrap();
-        w.section(tag::PROCESSES, 3, REQUIRED).unwrap();
-        process().write_as(&mut w, 2).unwrap();
-        process().write_as(&mut w, 3).unwrap();
+        w.section(tag::PROCESSES, 4, REQUIRED).unwrap();
+        for version in [2, 3, 4] {
+            process().write_as(&mut w, version).unwrap();
+        }
         let bytes = w.finish().unwrap();
         let rec = record::parse(&bytes).unwrap();
         let mut r = rec.section(tag::PROCESSES).unwrap();
-        let (v2, v3) = (r.entry().unwrap(), r.entry().unwrap());
-        // Version 2 read by a version-3 reader (the `handover_next`
-        // build): the count takes its default, 0.
-        let p = ProcessRec::read_as(&mut v2.clone(), 3);
-        assert_eq!((p.token, p.image_digest, p.handovers), (5, 77, 0));
-        assert_eq!(
-            ProcessRec::read_as(&mut v2.clone(), 2),
-            ProcessRec { handovers: 0, ..process() }
-        );
-        // Version 3 read by a version-3 reader and (ignoring the new
-        // field) by a version-2 one; the bytes before it are version 2's.
-        assert_eq!(ProcessRec::read_as(&mut v3.clone(), 3), process());
-        assert_eq!(
-            ProcessRec::read_as(&mut v3.clone(), 2),
-            ProcessRec { handovers: 0, ..process() }
-        );
+        let (v2, v3, v4) = (r.entry().unwrap(), r.entry().unwrap(), r.entry().unwrap());
+        let old = ProcessRec { session: None, handovers: 0, ..process() };
+        // Version 2 (no session) read by every reader: the session is
+        // None (its token's), not 0, and the count 0.
+        for knows in [2, 3, 4] {
+            assert_eq!(ProcessRec::read_as(&mut v2.clone(), knows), old);
+        }
+        // Version 3 (the session) by a version-2 reader (ignoring it) and
+        // by newer ones; the bytes before it are version 2's.
+        assert_eq!(ProcessRec::read_as(&mut v3.clone(), 2), old);
+        let with_session = ProcessRec { handovers: 0, ..process() };
+        assert_eq!(ProcessRec::read_as(&mut v3.clone(), 3), with_session);
+        assert_eq!(ProcessRec::read_as(&mut v3.clone(), 4), with_session);
+        // Version 4 (the `handover_next` build's count) by each.
+        assert_eq!(ProcessRec::read_as(&mut v4.clone(), 2), old);
+        assert_eq!(ProcessRec::read_as(&mut v4.clone(), 3), with_session);
+        assert_eq!(ProcessRec::read_as(&mut v4.clone(), 4), process());
+        // Session 0 survives (it is not "absent").
+        let mut w = Writer::new(1).unwrap();
+        w.section(tag::PROCESSES, 3, REQUIRED).unwrap();
+        ProcessRec { session: Some(0), ..process() }.write_as(&mut w, 3).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = record::parse(&bytes).unwrap();
+        let p = ProcessRec::read_as(&mut rec.section(tag::PROCESSES).unwrap().entry().unwrap(), 3);
+        assert_eq!(p.session, Some(0));
         // Version 1 (milestone (b)) by both.
         let mut w = Writer::new(1).unwrap();
         w.section(tag::PROCESSES, 1, REQUIRED).unwrap();
@@ -1640,12 +1667,13 @@ mod tests {
         w.end_entry(e).unwrap();
         let bytes = w.finish().unwrap();
         let rec = record::parse(&bytes).unwrap();
-        for knows in [2, 3] {
+        for knows in [2, 3, 4] {
             let p = ProcessRec::read_as(
                 &mut rec.section(tag::PROCESSES).unwrap().entry().unwrap(),
                 knows,
             );
             assert_eq!((p.id, p.name, p.image_digest, p.token, p.handovers), (8, "a.exe", 0, 0, 0));
+            assert_eq!(p.session, None);
         }
     }
 

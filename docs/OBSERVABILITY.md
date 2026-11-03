@@ -182,7 +182,12 @@ Since 2026-11-03 also `net` (TCP accept, connect, close and reset with
 local and remote addresses), `logon` (LogonUser/LSA logons: pid, user,
 domain, type, how, status; never the password) and `console` (console
 sessions and pseudo consoles created, resized, closed with how many
-programs it ended); `process start` carries the command line. Server
+programs it ended); `process start` carries the command line. Since RS
+B1 (sessions) `process start` and `process exit` carry `"session"`, a
+session made after boot is an event (`"ev":"session"`, id and its
+BaseNamedObjects; category `process`) and a log line, the start line
+says the session (`process x.exe (pid 4, session 1): starting at`), and
+the state dump's thread lines end with `session N (name)`. Server
 logs: `logtee=C:/dir` copies what programs write below a directory to the
 serial log (`logtee: <file>: <line>`; sshd's and sshd-session's logs in
 the sshd scenarios), and `conpty=trace` logs a pseudo console's VT

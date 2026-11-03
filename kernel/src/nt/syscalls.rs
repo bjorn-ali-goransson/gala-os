@@ -3466,7 +3466,8 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
             return call.return_info(&[0, class], buffer, length, ret_ptr);
         }
         PROCESS_SESSION_INFORMATION => {
-            let session = process::SESSION_ID.to_le_bytes();
+            // PROCESS_SESSION_INFORMATION { ULONG SessionId }.
+            let session = p.session.to_le_bytes();
             return call.return_info(&session, buffer, length, ret_ptr);
         }
         PROCESS_IMAGE_FILE_NAME => {

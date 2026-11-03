@@ -1687,6 +1687,16 @@ RS. **Remote access and sessions** (the owner, 2026-11-03; design:
      SYSTEM process is session 0 and a normal one 1, PEB,
      ProcessIdToSessionId and TokenSessionId agree; `Local\` objects of
      session 1 are invisible from session 0, `Global\` ones are not).
+     **Done (2026-11-03)**: `nt::session` (session records, each
+     session's BaseNamedObjects and links as on Windows, BNOLINKS), a
+     process's session from its primary token, kernel32 naming under the
+     caller's session, ProcessIdToSessionId, WTSGetActiveConsoleSessionId
+     (KUSER ActiveConsoleId), logons in the caller's session, PROCESSES
+     version 3 carrying the session across a handover, the session in
+     process events and the state dump. Not run yet in QEMU when written
+     (disk full): `cargo xtask boot-test session_test` and the handover
+     scenarios whose expected lines changed (`handover_upgrade`,
+     `handover_upgrade_uefi`, `handover_downgrade_refused`).
    - B2. Per-session desktop and window registry (the statics go): a GUI
      program in session 2 is not found or messaged from session 1; `gala
      windows` lists the caller's session; every GUI scenario still passes.
