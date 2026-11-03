@@ -4123,6 +4123,78 @@ gala), basic /proc and /dev; (4) dynamic linking (ld.so, glibc), epoll,
 sockets; (5) real workloads (a distribution's userland, build tools).
 Most programs need about 150-200 of Linux's ~450 system calls; priorities
 come from `strace` of target programs on real Linux.
+
+### The lx module (milestone 1 groundwork, built 2026-11-03)
+
+`kernel/src/lx/` holds the Linux personality's pieces that are plain data
+processing (safe Rust; `lx` is not in the `unsafe` allow-list), declared
+from lib.rs and reached by nothing yet:
+
+- **`lx::elf`**: `ElfImage::parse(&[u8])` validates an ELF64 x86-64
+  ET_EXEC or ET_DYN image and never panics (tests: truncations at every
+  length, every header byte mutated, synthetic bad images). Invariants
+  (the module's doc lists them): program headers inside the file and at
+  most 64 KiB; at least one PT_LOAD; each PT_LOAD inside the file,
+  `filesz <= memsz`, alignment 0/1/power of two up to 1 GiB, address and
+  offset congruent modulo 4 KiB, ending below `USER_END`
+  (0x7fff_ffff_f000, observed), sorted and not overlapping (sharing the
+  boundary page is allowed: the mapper gives that page both
+  protections); the entry inside a PT_LOAD; at most one PT_INTERP
+  (NUL-terminated, <= PATH_MAX) and one PT_TLS. `load_bias(base)` is 0
+  for ET_EXEC, `base - span.start` for ET_DYN (base aligned to the
+  largest p_align); `plan(bias)` gives the `LoadPlan`: segments at their
+  addresses with `file_pages()` (page-aligned file mapping),
+  `zero_tail()` (the bss part of the last file page, cleared after
+  mapping), `anon_pages()` (the rest of the bss), AT_PHDR (PT_PHDR's, or
+  the PT_LOAD holding the headers), AT_ENTRY, the initial break (the page
+  after the image; Linux randomizes it above that for ET_EXEC and puts a
+  static-pie's elsewhere: brk_test checks only what does not vary) and the
+  TLS template. Linux places a dynamic PIE at 0x5555_5555_4000 and a
+  static-pie like an mmap below the mmap base (observed, `setarch -R`);
+  gala uses `DEFAULT_DYN_BASE` (the former) for both until it randomizes.
+  Errors (`ElfError`) carry the values that explain them and print as one
+  line; `LoadPlan` prints one line per segment, for the exec path's log
+  line and the state dump.
+- **`lx::stack`**: `build(end, max, &StackParams)` lays out the initial
+  stack as bytes ending at the page-aligned `end`: the end marker, the
+  AT_EXECFN string, envp's and argv's strings, a gap (random on Linux; a
+  parameter here), AT_PLATFORM ("x86_64") ending 16-aligned, AT_RANDOM's
+  16 bytes right below, then argc/argv/envp/auxv with the least padding
+  that makes rsp 16-aligned. The auxv order is Linux 6.18's
+  (SYSINFO_EHDR, MINSIGSTKSZ optional, then HWCAP, PAGESZ, CLKTCK, PHDR,
+  PHENT, PHNUM, BASE, FLAGS, ENTRY, UID, EUID, GID, EGID, SECURE, RANDOM,
+  HWCAP2 optional, EXECFN, PLATFORM, NULL); AT_HWCAP is CPUID(1).EDX and
+  AT_CLKTCK 100 (observed). Its host test replays user/lx/auxv_test's
+  transcript (recorded on Linux) against a stack built here for the same
+  arguments and the real auxv_test binaries' load plans: every line
+  matches, the string area byte for byte. Too much for `max` is
+  `StackError::TooBig` (execve's E2BIG).
+- **`lx::syscalls`** (`SYSCALLS`, `nr::*`, `name`, `number`, `COUNT`
+  462) and **`lx::errno`** (`ERRNOS`, aliases, `to_return`/`from_return`
+  for the `-errno` convention): tables, with host tests against musl's
+  headers when installed. Sources: THIRD_PARTY.md and the files' docs.
+- Allocation is fallible (`TryVec`, `try_reserve_exact`), as everywhere.
+
+**How it plugs into the dispatcher seam** (ROADMAP LX step 2, built
+separately: a per-process personality and a dispatcher table keyed by
+it): a Linux exec reads the file, `ElfImage::parse`s it (an `ElfError`
+becomes ENOEXEC/EINVAL, logged with its text and emitted as an event),
+loads PT_INTERP's image too if any (its plan's entry starts first;
+AT_BASE is its bias), maps each `LoadPlan` segment (file pages, then
+`zero_tail`, then `anon_pages`, protections from `prot`), sets the break
+from `plan.brk`, maps a stack (non-executable unless `gnu_stack` says
+otherwise) and copies `stack::build`'s bytes to its top, and starts the
+thread at the entry with rsp = `InitialStack::sp` and the other
+registers zero (rdx 0: no atexit function). The process is created with
+the Linux personality; its system calls go to a table of
+`lx::syscalls::COUNT` entries indexed by `nr`, which returns
+`errno::to_return(ENOSYS)` for the missing ones and names them in the
+"unknown system call" log with `syscalls::name`.
+
+TODO: the exec path and the first system calls (ROADMAP LX "Next");
+randomization (the stack gap, AT_RANDOM from the kernel's random source,
+the bases); the system-call numbers 462..=469 (Linux 6.18 has them; our
+sources do not name them yet).
 ## Plan: graphics and GPU (proposed 2026-11-03; stage G1 built)
 
 The owner's goal: GPU support, first for the browser (ROADMAP BR stage 2,

@@ -2113,6 +2113,28 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
      DDE, DrawEdge/DrawFrameControl, window placement), gdi32 (16:
      metafiles, font enumeration), kernel32 (13), comdlg32 (4), oleacc,
      winmm's PlaySoundW, ws2_32's inet_pton/inet_ntop (GnuTLS).
+   **Milestone 1 groundwork done** (2026-11-03; ARCHITECTURE "Plan: a
+   second personality (Linux)", "The lx module"; WORKFLOW "Linux test
+   programs"): the pieces that do not touch system-call dispatch.
+   `kernel/src/lx/` (declared, nothing wired): `elf` (ELF64 x86-64
+   ET_EXEC/ET_DYN parsed and validated, the load plan: segments, file
+   pages, bss, protections, PT_INTERP, PT_TLS, PT_GNU_STACK,
+   PT_GNU_RELRO, AT_PHDR, the ET_DYN load bias), `stack` (the initial
+   stack as bytes: argc, argv, envp, auxv, strings, AT_RANDOM; Linux's
+   layout byte for byte where Linux is deterministic), `syscalls` and
+   `errno` (name <-> number tables); host tests only (`cargo test -p
+   kernel --lib lx`: the real test binaries, malformed images, the
+   auxv_test transcript replayed against a stack built here). Linux test
+   programs in `user/lx/` (static musl and static-pie, raw system calls):
+   hello_test, write_exit_test, brk_test, mmap_test, arch_prctl_test,
+   auxv_test, their transcripts recorded on Linux 6.18 (`expected.txt`)
+   and checked by `cargo xtask lx-expect` (CI). **Next**, after the
+   per-process dispatch seam (step 2, being built elsewhere): the exec
+   path (map a `LoadPlan`, the stack, start the thread; a `Personality::
+   Linux` process), then write/exit_group/brk/mmap/munmap/mprotect/
+   arch_prctl in a Linux dispatcher table indexed by `lx::syscalls::nr`,
+   each user/lx program as a boot scenario expecting its expected.txt;
+   then milestone 2 (busybox's calls, from `strace` on real Linux).
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing

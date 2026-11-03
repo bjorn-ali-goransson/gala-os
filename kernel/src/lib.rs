@@ -37,6 +37,8 @@ pub mod handover;
 pub mod hosted;
 #[cfg(not(feature = "hosted"))]
 pub mod input;
+/// The Linux personality's groundwork (ROADMAP LX): not wired in yet.
+pub mod lx;
 pub mod mm;
 pub mod net;
 pub mod nt;

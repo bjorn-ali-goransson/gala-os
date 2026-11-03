@@ -1,0 +1,29 @@
+ARCH_GET_FS = 0
+FS set by musl = yes
+%fs:0 is the thread pointer = yes
+tls_value = 1234
+tls_zero = 0
+TLS below the thread pointer = yes
+tls_value after a store = 99
+ARCH_GET_GS = 0
+GS base at start = 0
+ARCH_SET_FS(block) = 0
+ARCH_SET_FS(musl's) back = 0
+%fs:0 was the block = yes
+%fs:8 = 0x5eed
+ARCH_GET_FS gave the block = yes
+tls_value with musl's FS back = 99
+ARCH_SET_GS(block) = 0
+%gs:8 = 0x5eed
+ARCH_GET_GS gave the block = yes
+ARCH_SET_GS(0) = 0
+ARCH_SET_FS(non-canonical) = -1
+ARCH_SET_FS(kernel address) = -1
+ARCH_SET_FS(top of user space) = -1
+ARCH_SET_FS(last user page) = 0
+ARCH_SET_FS(musl's) again = 0
+ARCH_GET_FS(bad pointer) = -14
+arch_prctl(unknown code) = -22
+arch_prctl(0) = -22
+arch_prctl_test: ok
+-- exit status 0
