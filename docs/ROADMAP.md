@@ -104,6 +104,14 @@ explicitly in its commit.
   everything the desktop can do can be done from a terminal too (the
   `gala` command, item SD). A desktop feature is built as an action the
   CLI reaches first, then given a mouse and keyboard binding.
+- **Open (2026-11-03): one CPU, then a silent end.** Under heavy host
+  load a boot sometimes gets only one CPU from Limine ("smp: 1 CPUs
+  online (1 reported by the bootloader)") although QEMU runs with
+  `-smp 2`, and twice the kernel then stopped without a word and QEMU
+  exited with status 0 (bench's shared VM, handover_idle_twice); one
+  such boot ran on normally (smp_test failed its CPU count). Both the
+  missing CPU and the silent end need explaining: a kernel that gets
+  one CPU must run on one, and an end must leave a panic or a reason.
 
 ## Done
 - M1 boot, serial, memory map
