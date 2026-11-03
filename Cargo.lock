@@ -568,6 +568,10 @@ name = "handover_k32_test"
 version = "0.1.0"
 
 [[package]]
+name = "handover_net_test"
+version = "0.1.0"
+
+[[package]]
 name = "handover_test"
 version = "0.1.0"
 dependencies = [
@@ -1387,8 +1391,6 @@ checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 [[package]]
 name = "smoltcp"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dad095989c1533c1c266d9b1e8d70a1329dd3723c3edac6d03bbd67e7bf6f4bb"
 dependencies = [
  "bitflags 1.3.2",
  "byteorder",

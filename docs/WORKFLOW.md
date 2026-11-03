@@ -1207,6 +1207,32 @@ passes alone): if it recurs, its log says which bound was missed.
   can be carried (`syscalls::restartable` and `restart_as`); a call with
   a side effect before its wait (signal-and-wait, alert-by-id) carries
   its blocked half as the plain wait.
+- Sockets (R9 (e), `cargo xtask boot-test handover_net`): `handover:
+  carrying N socket(s): C TCP connection(s), L listener(s); the network
+  is stopped` in the old kernel, `handover: N socket(s) resumed; the
+  network was stopped for X ms` in the new one. `refused: the network
+  did not stop` means the net thread did not park within 1 s (it is
+  stuck in a poll or a notify hook). A connection that hangs after the
+  handover: compare the carried `ConnState` with what the peer expects
+  (sequence numbers: `send_unacked`/`send_last`, `recv_first` plus the
+  unread bytes is RCV.NXT); a reset right after it means the new
+  kernel's socket was not found for the peer's segment (smoltcp answers
+  unknown segments with RST: an entry not rebuilt, a wrong tuple or
+  listen address). `Failed { section: 34/35, .. }` in `cannot resume the
+  programs` names NET or SOCKETS (`afd::adopt`, `tcp::adopt_entry`:
+  NO_MEMORY also when a carried buffer is larger than this kernel's
+  `BUFFER`). The host test `net::tcp::tests::connections_go_on_in_a_new_
+  stack` carries a loopback stack into a new one without booting.
+- smoltcp is vendored (`vendor/smoltcp`, a `[patch.crates-io]`, not a
+  workspace member) with gala's patch between `gala: begin`/`gala: end`
+  markers in `src/socket/tcp.rs` (and `#![allow(warnings)]` in
+  `src/lib.rs`: a path dependency's warnings are not capped). To upgrade
+  smoltcp: copy the new release from the registry (drop examples,
+  benches, dev-dependencies from its `Cargo.toml`), apply the marked
+  blocks again, run `cargo test -p kernel --lib net::tcp handover::` and
+  the handover_net scenarios; the record (`ConnState`) changes only if
+  the new release's behaviour needs more state. Record the version in
+  THIRD_PARTY.md.
 
 ## Where things are
 
@@ -1222,6 +1248,7 @@ passes alone): if it recurs, its log says which bound was missed.
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
 | Checked-in binaries, Windows runner | `user/bin/` |
 | Build, boot tests, reports | `xtask/` |
+| Vendored dependencies (smoltcp with gala's handover patch) | `vendor/` |
 
 ## Lock-order checking (lockdep)
 
