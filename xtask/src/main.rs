@@ -2587,12 +2587,12 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
     (
         "events",
         &[
-            r#""ev":"process start","pid":4,"name":"import_test.exe""#,
+            r#""ev":"process start","pid":4,"session":1,"name":"import_test.exe""#,
             r#""ev":"image","pid":4,"name":"import_test.exe""#,
             r#""name":"\\Device\\HarddiskVolume1\\gala\\testdll.dll""#,
             r#""ev":"syscall","pid":4,"tid":8,"nr":8,"name":"NtWriteFile""#,
             r#""ev":"thread exit","pid":4,"tid":8,"status":0"#,
-            r#""ev":"process exit","pid":4,"status":0"#,
+            r#""ev":"process exit","pid":4,"session":1,"status":0"#,
         ],
     ),
 ];
