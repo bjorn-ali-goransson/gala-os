@@ -752,6 +752,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gala_cli_test", "bcryptprimitives.dll", "Windows/System32"),
     // pk_install_test: `gala install` writes the registry (advapi32) and
     // installs from a winget-pkgs snapshot, C:\pk_source.
+    ("pk_install_test", "ntdll.dll", "Windows/System32"),
+    ("pk_install_test", "kernel32.dll", "Windows/System32"),
     ("pk_install_test", "advapi32.dll", "Windows/System32"),
     ("pk_install_test", "bcryptprimitives.dll", "Windows/System32"),
     ("pk_install_test", "user/pk_install_test/source/", "pk_source"),
@@ -5294,6 +5296,7 @@ fn events_flag() -> String {
 /// (the same set: they share a VM); a scenario listed more than once
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("pk_install_zip", "pk_install_test"),
     ("onecpu_programs", "smpsched_test"),
     ("kernel_watchdog", "hello"),
     ("service_restart", "hello"),
