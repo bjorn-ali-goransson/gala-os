@@ -1918,6 +1918,14 @@ Windows, never shadows the system's DLLs.)
   advapi32 are loaded on first use (LoadLibrary), so crypt32 keeps no
   static imports of them (caddy ships crypt32 alone). No user scope
   (every blob is machine-bound), no prompts.
+  CryptProtectMemory/CryptUnprotectMemory (`cert_test`) encrypt in
+  place with AES-256-CBC, zero IV, no padding (sizes are multiples of
+  16), under HMACs of the same master key: CROSS_PROCESS and SAME_LOGON
+  (one session per user) with a fixed label, SAME_PROCESS also with 32
+  random bytes made once per process. crypt32's misc.rs also has
+  CryptMemAlloc/Realloc/Free (the process heap), CertGetNameStringA (the
+  W form converted) and PFXIsPFXBlob (the outer SEQUENCE { INTEGER 3,
+  ContentInfo }).
 - **Thread stacks**: laid out as Windows does - a reservation of the
   executable's SizeOfStackReserve (main thread: the kernel, placed to end
   at 0x200000 when it fits; CreateThread with size 0: kernel32 reads the

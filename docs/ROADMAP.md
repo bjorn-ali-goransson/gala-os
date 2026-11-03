@@ -2085,6 +2085,15 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         loads; a new normaliz.dll (`IdnToAscii` forwarded to kernel32,
         `IdnToUnicode` its own: kernel32's is a stub, for its owners to
         replace) for libcurl (`dbghelp_test`).
+     5. crypt32: `CryptMemAlloc`, `CryptMemRealloc`, `CryptMemFree`,
+        `CryptProtectMemory`, `CryptUnprotectMemory`, `CertGetNameStringA`,
+        `PFXIsPFXBlob` (`cert_test`; libcurl, GnuTLS, the JDK's sunmscapi,
+        LocalDB). Left in crypt32: the chain engine and chains
+        (`CertGetCertificateChain` and friends: libcurl, sunmscapi),
+        `CryptDecodeObjectEx`, `CryptQueryObject`, `PFXImportCertStore`,
+        the store functions (`CertAddCertificateContextToStore`,
+        `CertDeleteCertificateFromStore`, `CertEnumCRLsInStore`,
+        `CertOpenSystemStoreA`), `CryptAcquireCertificatePrivateKey`.
    - Elsewhere (not in these crates; for the agents there): FileZilla
      Server's GUI also stops on user32 (54 stubs: carets, the clipboard,
      DDE, DrawEdge/DrawFrameControl, window placement), gdi32 (16:

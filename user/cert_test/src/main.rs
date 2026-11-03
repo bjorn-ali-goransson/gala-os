@@ -24,6 +24,16 @@
 //!   64 characters ending in CRLF unless CRYPT_STRING_NOCRLF,
 //!   ERROR_MORE_DATA) and CryptStringToBinaryA (CRLFs skipped, the format
 //!   found, ERROR_INVALID_DATA for what is not base64).
+//! - What libcurl, GnuTLS, the JDK and SQL Server LocalDB import (ROADMAP
+//!   AG; documented behaviour, no Windows run yet): CertGetNameStringA
+//!   (the W form's name and size in bytes with the NUL; a short buffer
+//!   gets a truncated, NUL-terminated name); CryptMemAlloc/Realloc/Free
+//!   (contents kept); CryptProtectMemory/CryptUnprotectMemory (in place,
+//!   the data changed and restored, for each scope;
+//!   ERROR_INVALID_PARAMETER for a size that is not a multiple of
+//!   CRYPTPROTECTMEMORY_BLOCK_SIZE, 16); PFXIsPFXBlob (a PFX's outer
+//!   SEQUENCE { INTEGER 3, ContentInfo }, not another version or a
+//!   certificate).
 //!
 //! Prints `cert_test: ok` or exits with the number of the failing check.
 
@@ -150,6 +160,20 @@ unsafe extern "system" {
         name: *mut u16,
         len: u32,
     ) -> u32;
+    fn CertGetNameStringA(
+        cert: *const CertContext,
+        kind: u32,
+        flags: u32,
+        kind_para: *const c_void,
+        name: *mut u8,
+        len: u32,
+    ) -> u32;
+    fn CryptMemAlloc(size: u32) -> *mut u8;
+    fn CryptMemRealloc(p: *mut u8, size: u32) -> *mut u8;
+    fn CryptMemFree(p: *mut u8);
+    fn CryptProtectMemory(data: *mut u8, size: u32, flags: u32) -> Bool;
+    fn CryptUnprotectMemory(data: *mut u8, size: u32, flags: u32) -> Bool;
+    fn PFXIsPFXBlob(pfx: *const Blob) -> Bool;
     fn CertGetPublicKeyLength(encoding: u32, info: *const PublicKeyInfo) -> u32;
     fn CertFindExtension(
         oid: *const u8,
@@ -433,6 +457,28 @@ fn run() -> Result<(), u32> {
             32,
         );
         c.ok(got == 5 && wide_is(name.as_ptr(), "gala"), got.into())?;
+        // The ANSI form.
+        let mut narrow = [0u8; 32];
+        let got = CertGetNameStringA(
+            cert,
+            CERT_NAME_SIMPLE_DISPLAY_TYPE,
+            0,
+            null,
+            narrow.as_mut_ptr(),
+            32,
+        );
+        c.ok(got == 10 && &narrow[..10] == b"gala test\0", got.into())?;
+        let got = CertGetNameStringA(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, null, null.cast(), 0);
+        c.eq(got.into(), 10)?;
+        let got = CertGetNameStringA(
+            cert,
+            CERT_NAME_SIMPLE_DISPLAY_TYPE,
+            0,
+            null,
+            narrow.as_mut_ptr(),
+            5,
+        );
+        c.ok(got == 5 && &narrow[..5] == b"gala\0", got.into())?;
 
         // The public key verifies the certificate's own signature.
         let mut key = null;
@@ -554,6 +600,42 @@ fn run() -> Result<(), u32> {
         );
         c.eq(r as u64, 0)?;
         c.eq(GetLastError().into(), 13)?;
+
+        // CryptMemAlloc/Realloc/Free.
+        let p = CryptMemAlloc(16);
+        c.ok(!p.is_null(), 0)?;
+        core::ptr::copy_nonoverlapping(b"0123456789abcdef".as_ptr(), p, 16);
+        let p = CryptMemRealloc(p, 4096);
+        c.ok(!p.is_null() && core::slice::from_raw_parts(p, 16) == b"0123456789abcdef", 0)?;
+        CryptMemFree(p);
+        CryptMemFree(null.cast());
+
+        // CryptProtectMemory / CryptUnprotectMemory, each scope.
+        let secret = *b"a secret of thirty-two bytes ..!";
+        for flags in [0u32, 1, 2] {
+            let mut buf = secret;
+            c.ok(CryptProtectMemory(buf.as_mut_ptr(), 32, flags) != 0, flags.into())?;
+            c.ok(buf != secret, flags.into())?;
+            c.ok(CryptUnprotectMemory(buf.as_mut_ptr(), 32, flags) != 0, flags.into())?;
+            c.ok(buf == secret, flags.into())?;
+        }
+        let mut odd = [0u8; 20];
+        c.eq(CryptProtectMemory(odd.as_mut_ptr(), 20, 0) as u64, 0)?;
+        c.eq(GetLastError().into(), 87)?;
+
+        // PFXIsPFXBlob: SEQUENCE { INTEGER 3, SEQUENCE { OID data, [0] } }.
+        let pfx = [
+            0x30u8, 0x16, 0x02, 0x01, 0x03, 0x30, 0x11, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7,
+            0x0d, 0x01, 0x07, 0x01, 0xa0, 0x04, 0x04, 0x02, 0x30, 0x00,
+        ];
+        let b = Blob { size: pfx.len() as u32, data: pfx.as_ptr().cast_mut() };
+        c.eq(PFXIsPFXBlob(&b) as u64, 1)?;
+        let mut v1 = pfx;
+        v1[4] = 1;
+        let b = Blob { size: v1.len() as u32, data: v1.as_mut_ptr() };
+        c.eq(PFXIsPFXBlob(&b) as u64, 0)?;
+        let b = Blob { size: CERT.len() as u32, data: CERT.as_ptr().cast_mut() };
+        c.eq(PFXIsPFXBlob(&b) as u64, 0)?;
     }
     Ok(())
 }
