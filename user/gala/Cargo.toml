@@ -9,3 +9,7 @@ publish.workspace = true
 name = "gala"
 test = false
 bench = false
+
+[dependencies]
+galapkg = { path = "../galapkg" }
+gala_heap = { path = "../gala_heap" }

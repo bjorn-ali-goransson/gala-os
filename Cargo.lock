@@ -528,6 +528,10 @@ dependencies = [
 [[package]]
 name = "gala"
 version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "galapkg",
+]
 
 [[package]]
 name = "gala_cli_test"

@@ -14,12 +14,15 @@ use std::path::Path;
 /// A file's contents, or a directory.
 type Node = Option<Vec<u8>>;
 
+/// A key as created and its values.
+type Key = (String, Vec<(String, RegValue)>);
+
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 struct Machine {
     /// Lower-case path -> (path as created, node).
     files: BTreeMap<String, (String, Node)>,
     /// (root, lower-case key) -> (key as created, values).
-    keys: BTreeMap<(u8, String), (String, Vec<(String, RegValue)>)>,
+    keys: BTreeMap<(u8, String), Key>,
 }
 
 struct Fake {
@@ -514,7 +517,7 @@ fn checks_before_any_change() {
     assert_eq!(e.kind, Kind::Unsupported);
     assert_eq!(f.missing, vec!["gala.exe!install(InstallerType inno)".to_string()]);
     // No mirrored installer: a download, which fails here.
-    assert_eq!(install_id(&mut f, "jqlang.jq", None).unwrap_err().kind, Kind::Failed);
+    assert_eq!(install_id(&mut f, "jqlang.jq", None).unwrap_err().kind, Kind::Unsupported);
     assert_eq!(f.m, before);
     assert!(f.log.iter().any(|l| l.starts_with("sha256 expected=")));
 }

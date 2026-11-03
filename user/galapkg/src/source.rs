@@ -24,6 +24,10 @@ use core::cmp::Ordering;
 /// winget does, so paths and registry keys are the ones winget makes.
 pub const WINGET_SOURCE_ID: &str = "Microsoft.Winget.Source_8wekyb3d8bbwe";
 
+/// A host's fetcher answers this (ERROR_NOT_SUPPORTED) for a URL scheme
+/// it cannot download yet.
+pub const ERROR_NOT_SUPPORTED: u32 = 50;
+
 pub struct Source {
     /// The tree's root (holding `manifests\`), a Windows path; or an
     /// `https://` URL (not supported yet: [`Source::open`]).
@@ -230,7 +234,17 @@ impl Source {
                 .map_err(|e| Error::failed(format!("reading {mirrored}: {e}")));
         }
         host.log(&format!("download url={}", installer.url));
-        host.fetch(&installer.url)
-            .map_err(|e| Error::failed(format!("downloading {}: {e}", installer.url)))
+        host.fetch(&installer.url).map_err(|e| {
+            if e.code == ERROR_NOT_SUPPORTED {
+                Error::unsupported(format!(
+                    "downloading {}: downloads over HTTP and HTTPS are not built yet (ROADMAP PK \
+                     stage 1: a TLS client in gala.exe); put the file in the source's \
+                     installers\\ directory",
+                    installer.url
+                ))
+            } else {
+                Error::failed(format!("downloading {}: {e}", installer.url))
+            }
+        })
     }
 }
