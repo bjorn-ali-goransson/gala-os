@@ -1903,6 +1903,24 @@ GPU. **Graphics and GPU** (the owner, 2026-11-03; design: ARCHITECTURE
    memory charged (R6). Handover (R9): GPU state dropped (devices reset),
    programs see device-lost and re-create.
 
+OF. **The current Office: Microsoft 365 apps and the new Outlook** (the
+   owner, 2026-11-03: "the new Office suite would be very interesting to
+   see if we have any blockers there"; classic Outlook is out of scope).
+   First an assessment, then the work it finds, in this order:
+   (1) **Gap analysis** (black-box metadata only, CLEAN_ROOM): the
+   import tables, delay loads, COM classes and services of the Microsoft
+   365 apps (Word, Excel, PowerPoint; Click-to-Run, installed with the
+   Office Deployment Tool) and of the new Outlook (an MSIX package over
+   WebView2), against gala's exports and stubs; the result is a ranked
+   blocker list in this item, like item AG's. (2) **The new Outlook**,
+   after item BR's WebView2: MSIX install (PK stage 4), sign-in through
+   the Web Account Manager, notifications. (3) **The Microsoft 365
+   apps**: Click-to-Run's service and its virtualization, then the apps'
+   own needs (expected: DirectWrite/Direct2D/Direct3D 11 in software,
+   item GPU; Schannel TLS; COM/OLE depth). Sign-in and activation depend
+   on Microsoft's services and licence terms: the owner decides how far
+   to go there.
+
 PK. **Installing software: `gala install` over winget manifests** (the
    owner, 2026-11-03). winget's community manifests (the winget-pkgs
    repository: PackageIdentifier, versions, InstallerType, InstallerUrl,
