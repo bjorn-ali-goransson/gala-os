@@ -2566,6 +2566,12 @@ fn nt_wait_for_multiple_objects(call: &mut Call<'_>) -> NtStatus {
         let h = Handle(tri!(call.read_u64(array + 8 * i)));
         let _ = objects.try_push(tri!(waitable(call, h)));
     }
+    // WaitAll may not name an object twice (the same handle or two handles
+    // to it): a satisfied wait would consume it twice (a semaphore's count
+    // 1 became -1). Windows refuses it (smprace_test); WaitAny is fine.
+    if wait_all && wait::has_duplicates(&objects) {
+        return NtStatus::INVALID_PARAMETER_MIX;
+    }
     let alertable = arg!(call, 3) as u8 != 0;
     let status = wait::wait_for_alertable(&objects, wait_all, timeout, alertable);
     drop(objects);

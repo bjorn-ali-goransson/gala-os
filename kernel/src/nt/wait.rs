@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use super::object::{EventType, ObjectBody, ObjectRef};
 use super::platform::{ThreadId, WakeReason};
 use super::status::NtStatus;
-use crate::mm::heap::TryVec;
+use crate::mm::heap::{KArc, TryVec};
 use crate::sync::IrqMutex;
 
 /// Signal state and waiters of one object. Only touched under `DISPATCHER`.
@@ -202,8 +202,15 @@ impl Timeout {
     }
 }
 
+/// Whether `objects` names one object more than once (a WaitAll wait on
+/// such a list is refused: it would consume the object twice).
+pub fn has_duplicates(objects: &[ObjectRef]) -> bool {
+    objects.iter().enumerate().any(|(i, a)| objects[..i].iter().any(|b| KArc::ptr_eq(a, b)))
+}
+
 /// Waits until any (or all) of `objects` is signaled. Returns
 /// STATUS_WAIT_0 + index (any), STATUS_WAIT_0 (all) or STATUS_TIMEOUT.
+/// A WaitAll list must not name an object twice (`has_duplicates`).
 pub fn wait_for(objects: &[ObjectRef], wait_all: bool, timeout: Timeout) -> NtStatus {
     wait_for_alertable(objects, wait_all, timeout, false)
 }
@@ -224,6 +231,7 @@ pub fn wait_for_alertable(
     timeout: Timeout,
     alertable: bool,
 ) -> NtStatus {
+    debug_assert!(!wait_all || !has_duplicates(objects), "WaitAll with an object twice");
     let me = platform::current();
     let mut timed_out = false;
     // The object whose signal released the last sleep (`Waiter`).
@@ -327,4 +335,20 @@ pub fn delay(timeout: Timeout, alertable: bool) -> NtStatus {
         }
     }
     if apc() { NtStatus::USER_APC } else { NtStatus::SUCCESS }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nt::object::{KObject, ObjectBody};
+
+    #[test]
+    fn duplicates_are_found_by_object_not_by_position() {
+        let a = KObject::new(ObjectBody::ConsoleOutput).unwrap();
+        let b = KObject::new(ObjectBody::ConsoleOutput).unwrap();
+        assert!(!has_duplicates(&[a.clone(), b.clone()]));
+        assert!(has_duplicates(&[a.clone(), b.clone(), a.clone()]));
+        assert!(has_duplicates(&[b.clone(), b]));
+        assert!(!has_duplicates(&[a]));
+    }
 }
