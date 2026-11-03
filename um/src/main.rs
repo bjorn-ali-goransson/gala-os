@@ -2,7 +2,7 @@
 //! gala's NT layer (the kernel library built with `--features hosted`) as
 //! its "kernel". The platform is `kernel::hosted` (docs/GALA_UM.md).
 //!
-//! usage: um [--trace] [--sim=<seed>] [--clock=<spec>] [--record=<file>] [--replay=<file>] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] [--module=<directory on C:>/<name>=<host file>]... <program.exe> [arguments]
+//! usage: um [--trace] [--sim=<seed>] [--clock=<spec>] [--record=<file>] [--replay=<file>] [--dir=<directory on C:>] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] [--module=<directory on C:>/<name>=<host file>]... <program.exe> [arguments]
 //!
 //! `--failpoint`, `--failseed`: fault injection while the program runs,
 //! as the kernel's `failpoint=` and `failseed=` (kernel/src/failpoint.rs).
@@ -37,7 +37,7 @@ use std::process::ExitCode;
 static ALLOCATOR: kernel::hosted::memory::Allocator = kernel::hosted::memory::Allocator;
 
 const USAGE: &str = "usage: um [--trace] [--sim=<seed>] [--clock=<spec>] [--record=<file>] \
-    [--replay=<file>] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] \
+    [--replay=<file>] [--dir=<directory on C:>] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] \
     [--module=<dir>/<name>=<host file>]... <program.exe> [arguments]";
 
 /// The settings a recording keeps (`--record`) and a replay restores.
@@ -54,6 +54,8 @@ fn main() -> ExitCode {
     kernel::hosted::fix_address_space();
     let mut args = std::env::args().skip(1).peekable();
     let mut modules = Vec::new();
+    // The program's directory on C: (`--dir=jdk/bin`; default C:\).
+    let mut directory = String::new();
     let mut settings = Settings::default();
     let (mut record, mut replay) = (None, None);
     while let Some(option) = args.next_if(|a| a.starts_with("--")) {
@@ -78,6 +80,8 @@ fn main() -> ExitCode {
         } else if option == "--trace" {
             // Every system call on stderr, as the kernel's `trace` flag.
             kernel::nt::syscalls::set_trace(true);
+        } else if let Some(d) = value("--dir=") {
+            directory = d;
         } else if let Some(n) = value("--cpus=") {
             settings.cpus = Some(n);
         } else if let Some(spec) = value("--module=") {
@@ -198,7 +202,7 @@ fn main() -> ExitCode {
             }
         }
     }
-    match kernel::hosted::run(&name, image, &arguments, modules) {
+    match kernel::hosted::run(&name, &directory, image, &arguments, modules) {
         // The program's exit status decides: 0 for success.
         Ok(status) => ExitCode::from(if status == 0 { 0 } else { 1 }),
         Err(e) => {

@@ -401,18 +401,39 @@ charged). Look
   drops CONTEXT_XSTATE from its own CONTEXT copies (they have no
   CONTEXT_EX); a copy that keeps the flag makes NtContinue read whatever
   follows it as a CONTEXT_EX (it is validated, then ignored if wrong).
-- **Known intermittent**: `java_http` once (2026-11-01) died with
-  EXCEPTION_ILLEGAL_INSTRUCTION in C1-compiled code (HotSpot patching
-  JIT code while another CPU runs it; cross-modifying code on 2 vCPUs,
-  possibly TCG); it passed on rerun. If it recurs, record it with
-  QEMU record/replay (OBSERVABILITY.md). Still open (2026-11-02):
-  java_http/java_hello fail about 1 run in 10 to 30 under load with Java heap
-  corruption (a stale String reference: `String.equals` reading a bogus
-  klass, or a NullPointerException in javac's MemberName); the hs_err
-  report is in the failed log (`dump:` lines). Neither the copy-on-write
-  race nor NtReleaseSemaphore's lost update (both below, fixed) was
-  shown to be it, nor the vector state (XSAVE enabled 2026-11-02:
-  java_hello still failed 1 of 30 with the String.equals crash).
+- **Known intermittent**: java_http/java_hello fail about 1 run in 30 to
+  40 with Java heap corruption (a stale String reference: `String.equals`
+  reading a bogus klass, a NullPointerException inside String.equals from
+  javac's MemberName.<init>, a crash in MethodHandleNatives.resolve); the
+  hs_err report is in the failed log (`dump:` lines). Still open
+  (2026-11-03); what is known is in ROADMAP Priorities. Not the cause but
+  found on the way: QEMU's multi-threaded TCG (8.2.2 here; still open in
+  10.2, QEMU issue 4669) can keep a translation of guest code made while
+  another processor was writing it, and run the old instructions after
+  the write, on every processor, until something else invalidates the
+  page. `xmodify_test` shows it: with `-accel tcg,thread=multi` its writer
+  called a function it had just rewritten and got an immediate 4500
+  rewrites old (about 2 boots in 22); 0 of 16 with `thread=single`. A JIT
+  patches code that other threads run (inline caches, a GC rewriting
+  embedded object addresses), so scenarios that run one
+  (`SINGLE_THREAD_TCG` in xtask: java_*, elasticsearch, dotnet_*, pwsh_*,
+  flaui, xmodify_test) boot with `-accel tcg,thread=single` when there is
+  no KVM: both processors emulated by one host thread (java_hello 84 s
+  instead of 47 s in the kernel, so their time limits are doubled); the EXCEPTION_ILLEGAL_INSTRUCTION once
+  seen in C1-compiled code fits this bug. A new program that generates or
+  patches code (V8, LuaJIT, ...) belongs in that list. The Java heap
+  corruption stayed with `thread=single` (java_http 1 of 40).
+- **Running the JDK in gala-um**: `um --dir=jdk/bin` puts the program in
+  C:\jdk\bin (the JDK finds its home from its own path); pass every file
+  of `target/prebuilt/jdk/jdk-21.0.5+11/` as
+  `--module=jdk/<path>=<host file>`, the scenario's DLLs from user/bin as
+  `--module=Windows/System32/<name>=user/bin/<exported_as>` and
+  `--module=gala/Hello.java=user/java/Hello.java`, then
+  `um --cpus=2 --dir=jdk/bin <modules> .../bin/java.exe C:/gala/Hello.java`:
+  javac and the program in about 3.5 s, so hundreds of runs take minutes.
+  A failure that reproduces there is in the NT layer or the user-mode
+  DLLs; one that does not points at the kernel's machine code (paging,
+  switches, interrupts) or at the emulator.
 - **Flaky boot tests** usually mean a race; rerun the one scenario a few
   times before blaming CI: `XTASK_REPEAT=12 cargo xtask boot-test name`
   boots one scenario's image 12 times, as many at once as the host has
@@ -1147,6 +1168,11 @@ passes alone): if it recurs, its log says which bound was missed.
 - `XTASK_VERBOSE=1 cargo xtask boot-test name` prints the serial log; logs
   are also kept in `target/debug/test-<name>.serial.log` (shared VMs:
   `target/debug/batch-<first program>.serial.log`).
+- An `-accel` in `XTASK_QEMU_ARGS` replaces xtask's own (`-accel kvm
+  -accel tcg`, or `tcg,thread=single` for SINGLE_THREAD_TCG scenarios):
+  `XTASK_QEMU_ARGS="-accel tcg,thread=multi"` boots a JIT scenario the old
+  way, `-accel tcg,thread=single` any other one without host-level
+  parallelism (to tell a guest race from an emulator one).
 - `XTASK_QEMU_ARGS="-d int -D qemu.log" cargo xtask boot-test name` passes
   extra QEMU arguments; the interrupt log shows every exception with the
   full register state (EFER, CR4, TR...), which is how per-CPU setup bugs

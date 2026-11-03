@@ -360,6 +360,7 @@ impl UserMemory for Um {
 /// the kernel gets as boot modules (e.g. ntdll.dll in Windows/System32).
 pub fn run(
     name: &str,
+    directory: &str,
     data: Vec<u8>,
     args: &str,
     modules: Vec<(String, String, Vec<u8>)>,
@@ -392,8 +393,12 @@ pub fn run(
     }
     let name: &'static str = String::from(name).leak();
     let data: &'static [u8] = data.leak();
-    crate::nt::file::add_boot_file("", name, data, false)
-        .map_err(|e| alloc::format!("adding {name}: {e:?}"))?;
+    // A program that is also one of the modules (`--dir=jdk/bin` with
+    // the JDK's tree) is there already.
+    match crate::nt::file::add_boot_file(directory, name, data, false) {
+        Ok(()) | Err(crate::nt::status::NtStatus::OBJECT_NAME_COLLISION) => {}
+        Err(e) => return Err(alloc::format!("adding {name}: {e:?}")),
+    }
     // Fault injection while the program runs, as the kernel's `run=`.
     if crate::failpoint::configured() {
         crate::info!("failpoint: armed while {name} runs");
@@ -403,7 +408,8 @@ pub fn run(
     threads::arm_clock_control();
     let started = nt_code(|| {
         let (process, main_thread) =
-            crate::nt::process::spawn_from_pe(name, "", data, args, None, None).map_err(Ok)?;
+            crate::nt::process::spawn_from_pe(name, directory, data, args, None, None)
+                .map_err(Ok)?;
         drop(main_thread);
         let body = crate::nt::object::ObjectBody::Process(process.clone());
         let object = crate::nt::object::KObject::new(body).map_err(Err)?;

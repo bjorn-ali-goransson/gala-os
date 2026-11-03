@@ -1740,6 +1740,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vmcycle_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wait_test"
 version = "0.1.0"
 dependencies = [
@@ -1816,6 +1823,13 @@ name = "xmllite"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+]
+
+[[package]]
+name = "xmodify_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
 ]
 
 [[package]]
