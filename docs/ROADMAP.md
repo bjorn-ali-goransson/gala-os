@@ -462,6 +462,9 @@ explicitly in its commit.
   buttons, clock) and mouse/keyboard input for programs; W4 step 1: the
   Windows 11 look (Selawik text, the fortress start button, maximize);
   W4 step 2: proportional Selawik text in gdi32
+- OpenTelemetry export OT1 (2026-11-03): `cargo xtask otel`, a boot's
+  event stream and serial log as OTLP/JSON traces, logs and metrics
+  (item OT below; OBSERVABILITY "1b")
 
 ## Next
 Direction from the project owner (2026-10-30): multiprocessor support, then
@@ -1934,7 +1937,35 @@ OT. **OpenTelemetry as the model for all telemetry** (the owner,
      mapped to wall time once per export; ring state survives a kernel
      handover (R9).
    Stages: **OT1** xtask converts today's event stream to OTLP and opens
-   it in a local Jaeger (cheap, useful at once); **OT2** trace context in
+   it in a local Jaeger (cheap, useful at once). **Done 2026-11-03**:
+   `cargo xtask otel <log | events.jsonl | scenario>` and `XTASK_OTEL=1`
+   for boot-test (`xtask/src/otel.rs`, a hand-written OTLP/JSON encoder;
+   mapping table in OBSERVABILITY "1b", use and viewing in WORKFLOW
+   "OpenTelemetry"): a resource and a trace per boot, processes, threads
+   and system calls as nested spans, faults, image loads and other events
+   as span events, serial lines as logs (a crash report and a state dump
+   one record each, the crash also an `exception` event), `stats:` as
+   gauges, system calls per service as sums; files and OTLP/HTTP
+   (`--endpoint`, `OTEL_EXPORTER_OTLP_ENDPOINT`). The converter counts
+   what it could not map per event kind and the stream's gaps. 14 unit
+   tests (ids, parents, times, closed spans, the OTLP/JSON schema, the
+   HTTP post); real boots converted (`XTASK_EVENTS=all`): hello 5 spans,
+   events 17, crash 4 (the exception on thread 8), sshd_shell 9518 spans
+   (8 processes, 9497 system calls; 13163 events), each checked against
+   the OTLP protobuf messages with python's strict json_format and for
+   parents inside one trace. Not shown in a live Jaeger: the host has no
+   Docker daemon and running the Jaeger release binary was not permitted
+   here (the WORKFLOW recipe is untested on this host). **OT2 must fill
+   these gaps** (what the conversion of real boots counted): no thread on
+   `fault`, `image`, `console`, `net` events (sshd_shell: 1885 faults
+   without a thread); no entry event for a system call (only waits have
+   one), so a call that never returns is invisible; no parent pid or
+   trace context on `process start`, so every process hangs off the boot
+   (sshd -> sshd-session -> conhost -> busybox are siblings); serial lines
+   carry no time (placed at the latest process start/exit or
+   `uptime_ms=` mark before them); the boot's wall-clock start is guessed
+   from the log's modification time; the `rec` stream is not telemetry.
+   **OT2** trace context in
    the kernel, system calls, waits, faults, I/O and network as spans,
    per-CPU rings; **OT3** propagation through ntdll/kernel32, process
    creation, pipes, ALPC/RPC, IOCP; **OT4** the ETW bridge; **OT5** the

@@ -597,7 +597,9 @@ the boot scenarios before T1 and 14 s after, under software emulation on a
   (`run=a.exe,b.exe`). Each program is judged on its own section of the
   log (between `run: begin` and `run: end`, plus the boot preamble).
   `XTASK_NO_BATCH=1` gives every scenario its own VM; `cargo xtask
-  boot-test <name>` with one match always boots it alone.
+  boot-test <name>` with one match always boots it alone. The name is a
+  substring (`hello` also boots java_hello, go_hello...); `hello$` boots
+  that scenario only.
 - xtask prints per-scenario (or per-VM) timing and a summary, also written
   to `target/report/timing.txt`.
 - **Docker**: `cargo xtask docker-test [xtask args]` builds
@@ -1330,6 +1332,87 @@ line a program writes in pieces can be split by a log line ("process ...
 exited"): expect lines that are written in one piece (a shell `echo` of
 a captured value) when that matters.
 
+## OpenTelemetry (a boot as traces, logs and metrics)
+
+`cargo xtask otel` converts a boot's event stream and serial log to
+OTLP/JSON (ROADMAP OT1; the mapping table is in OBSERVABILITY "1b"):
+the boot is one trace, processes and threads are spans, system calls
+spans under their thread, faults, image loads and other events span
+events, the serial log log records (a crash report or state dump one
+record each), `stats:` lines metrics.
+
+```sh
+XTASK_EVENTS=all cargo xtask boot-test 'crash$'   # spans need the stream
+cargo xtask otel crash                  # newest log of the scenario
+cargo xtask otel target/failed/java_http.log      # a kept failure
+cargo xtask otel target/debug/batch-x.serial.log  # a shared VM
+XTASK_EVENTS=all XTASK_OTEL=1 cargo xtask boot-test 'hello$'  # every boot
+```
+
+It writes `<log stem>.otlp.traces.json`, `.logs.json` and
+`.metrics.json` next to the log (`--out <prefix>` elsewhere; for
+boot-test `target/<profile>/<image>.otlp.*`). Each line of a file is one
+OTLP/JSON request (`ExportTraceServiceRequest` etc., at most 5000 spans
+or records), so a line is a valid body for `POST /v1/traces`. It prints
+`otel:` lines: what each event kind became, what was NOT mapped and the
+gaps in the stream; read them before trusting an empty view. Without
+`XTASK_EVENTS` a boot has only the boot span, log records and metrics.
+`name$` in boot-test's filter boots that scenario only (`hello` alone
+also boots java_hello, go_hello, ...).
+
+**Sending** it: `--endpoint http://host:4318` or
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://host:4318` (the standard variable;
+also honoured by `XTASK_OTEL=1` boot tests) POSTs it over OTLP/HTTP
+with JSON (plain http only).
+
+**Viewing in Jaeger** (traces; Jaeger 1.35+ takes OTLP by default):
+```sh
+docker run --rm -p 16686:16686 -p 4318:4318 jaegertracing/all-in-one:1.62.0
+# or the binary from github.com/jaegertracing/jaeger/releases:
+#   ./jaeger-all-in-one          (UI :16686, OTLP/HTTP :4318)
+cargo xtask otel crash --endpoint http://localhost:4318
+# or post the file by hand, one request per line:
+while read -r l; do curl -sS -H 'Content-Type: application/json' \
+  --data "$l" http://localhost:4318/v1/traces; done < target/debug/test-crash.otlp.traces.json
+```
+Open http://localhost:16686, service `gala-os`, operation `boot crash`
+(or search by tag `gala.scenario=crash`, `process.pid=4`,
+`gala.syscall.status=0xc0000034`). The trace view shows processes,
+threads and system calls nested in time; span events (faults, image
+loads, the crash's `exception`) are under each span's "Logs". Jaeger
+shows only traces: logs and metrics need a collector. (Written
+2026-11-03 without a running Jaeger: the development host had no Docker
+daemon. The output was checked against the OTLP protobuf messages with
+python's strict `json_format` instead, and xtask's unit tests check the
+OTLP/JSON shape and the HTTP post; the first agent to load it in a real
+Jaeger: fix this paragraph if a step differs.)
+
+**With the OpenTelemetry collector** (otelcol-contrib), reading the files
+directly (the `otlpjsonfile` receiver reads this one-request-per-line
+format) and printing or forwarding them:
+```yaml
+receivers:
+  otlpjsonfile:
+    include: [target/debug/*.otlp.*.json]
+    start_at: beginning
+exporters:
+  debug: {verbosity: detailed}
+  otlphttp/jaeger: {endpoint: http://localhost:4318}
+service:
+  pipelines:
+    traces: {receivers: [otlpjsonfile], exporters: [debug, otlphttp/jaeger]}
+    logs: {receivers: [otlpjsonfile], exporters: [debug]}
+    metrics: {receivers: [otlpjsonfile], exporters: [debug]}
+```
+`otelcol-contrib --config otel.yaml`; or an `otlp`/`otlphttp` receiver
+on :4318 and `--endpoint` pointed at it, which fans out to Tempo, Loki,
+Prometheus or Grafana.
+
+Large boots: a system-call-heavy boot (a JVM) is hundreds of thousands
+of spans; Jaeger's UI gets slow past ~50k spans in one trace. Convert a
+shorter run, or filter the stream first (`grep -v '"ev":"syscall"'`
+keeps lifetimes and events only).
+
 ## When a test fails (read this first)
 
 - **Start at the end of the failed log**: `target/failed/<scenario>.log`
@@ -1376,6 +1459,10 @@ a captured value) when that matters.
   then `cargo xtask events target/debug/test-<name>.events.jsonl` (or the
   copy in `target/failed/`) for system calls by time, failing statuses,
   each thread's last calls, faults and images.
+- **In a trace viewer**: `cargo xtask otel <scenario or log>` turns the
+  boot (with its event stream) into OTLP for Jaeger or a collector
+  ("OpenTelemetry" above): processes, threads and system calls on one
+  time line, the crash as an `exception` event.
 - **"the disk is (nearly) full"** from xtask: the message says how much is
   free and what to delete; see "Disk space" above.
 - **A watchdog line** (`watchdog: CPU N has taken no timer interrupt`) is
