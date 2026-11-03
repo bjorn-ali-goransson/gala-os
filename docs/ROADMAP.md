@@ -1863,6 +1863,26 @@ BR. **A web browser: stock Microsoft Edge** (the owner, 2026-11-03).
    Edge's license allows installing and running it but not redistributing
    it, so xtask downloads it and nothing of it is committed.
 
+DR. **Windows drivers, staged and isolated** (the owner, 2026-11-03;
+   later). Windows keeps a stable binary driver ABI, so vendor drivers are
+   a realistic catalogue (Linux drivers are not: no stable in-kernel API,
+   GPL-2.0; LX is a user-space ABI only). Sources: the WDK documentation
+   (CLEAN_ROOM). Invariant: a third-party driver never runs unsupervised in
+   gala's kernel address space; a driver crash restarts its host, and live
+   kernel handover (R9) keeps working. Stages:
+   (1) **UMDF 2 drivers in a user-mode host** (crash-contained; sensors,
+   many USB devices, some printers and readers); (2) **KMDF drivers in an
+   isolated driver host** with a supervisor that restarts it, plus the
+   class frameworks real hardware needs: **NDIS** miniports (network),
+   **Storport** miniports (storage), **HID** minidrivers (input);
+   (3) raw **WDM** drivers only for a needed device with no other route;
+   (4) **WDDM** (GPU display drivers): not planned (item GPU covers
+   virtual machines with software and paravirtual graphics). Each stage
+   test first against a real driver binary in QEMU (third-party binaries
+   run only in QEMU), with the driver host's state in crash reports and
+   the state dump. User-space Linux drivers (libusb, FUSE, CUPS, SANE)
+   come with item LX when it gets device interfaces.
+
 GPU. **Graphics and GPU** (the owner, 2026-11-03; design: ARCHITECTURE
    "Plan: graphics and GPU"). Software first, so everything works on every
    VM and server; paravirtual hardware next; vendor GPUs (WDDM) never in

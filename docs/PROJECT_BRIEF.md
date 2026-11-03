@@ -98,8 +98,11 @@ them as the primary spec.
   Linux personality on the same core is a planned goal: its seams first,
   then its system calls as filler work when agents are free. The owner,
   2026-11-03; ROADMAP LX.)
-- Windows driver (WDM/KMDF) compatibility for now. Use our own driver model
-  with virtio first. A KMDF shim may come later.
+- Windows driver (WDM/KMDF) compatibility in the kernel for now. gala's own
+  driver model with virtio first. (Windows drivers are a planned later
+  goal, staged and isolated: UMDF, then KMDF in a driver host, then the
+  class frameworks; never in gala's kernel address space unsupervised, and
+  not WDDM. The owner, 2026-11-03; ROADMAP DR.)
 
 ## Open-source reuse
 Wine is LGPL and ReactOS is mostly GPL. Track what is borrowed and from
