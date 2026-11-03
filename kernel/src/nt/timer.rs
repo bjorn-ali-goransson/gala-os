@@ -76,12 +76,19 @@ pub fn arm(
         }
         None => None,
     };
-    // Reset the signal before arming: the worker (on another CPU) may fire
-    // the timer as soon as it is armed, and that signal must not be wiped
-    // (a waiter would sleep on a timer that has already fired and been
-    // disarmed; Go's runtime hung in its first short sleep that way).
-    let previous = wait::set_signal(object, 0) > 0;
-    *timer.state.lock() = super::object::TimerState { due: Some(due), due_time, period, apc };
+    // Reset the signal and arm in one hold of the timer's lock, under
+    // which the worker (on another CPU) also decides an expiry and signals
+    // it: the worker may fire the timer as soon as it is armed, and that
+    // signal must not be wiped (a waiter would sleep on a timer that has
+    // already fired and been disarmed; Go's runtime hung in its first
+    // short sleep that way), and an expiry of the previous setting must
+    // not signal after this re-arm (smprace_test).
+    let previous = {
+        let mut state = timer.state.lock();
+        let previous = wait::set_signal(object, 0) > 0;
+        *state = super::object::TimerState { due: Some(due), due_time, period, apc };
+        previous
+    };
     // Then list it. Armed first: the worker prunes listed timers that are
     // not armed, and one listed before its due time was set could be
     // pruned in between and never fire (timer_test lost 50 ms timers so,
@@ -154,10 +161,15 @@ fn worker(_: usize) {
         let mut next = now + MAX_SLEEP_TICKS;
         for object in &timers {
             let Some(timer) = timer_of(object) else { continue };
+            // Decided and signaled in one hold of the timer's lock: a
+            // re-arm (`arm`) or cancel in between would otherwise be
+            // followed by this stale expiry's signal (smprace_test). Lock
+            // order: the timer's state, then the dispatcher.
             let fired = {
                 let mut state = timer.state.lock();
                 match state.due {
                     Some(due) if due <= now => {
+                        wait::set_signal(object, 1);
                         let apc = state.apc.clone();
                         if state.period > 0 {
                             let mut d = due;
@@ -180,14 +192,13 @@ fn worker(_: usize) {
                     None => None,
                 }
             };
-            if let Some(apc) = fired {
-                wait::set_signal(object, 1);
-                if let Some((thread, routine, context)) = apc {
-                    // TimerApcRoutine(TimerContext, TimerLowValue, TimerHighValue)
-                    let at = platform::system_time();
-                    let args = [context, at & 0xffff_ffff, at >> 32];
-                    let _ = thread::queue_user_apc(&thread, UserApc { routine, args });
-                }
+            // Queued after the lock: an expiry decided before a re-arm
+            // queues its APC as it would have had it come first.
+            if let Some(Some((thread, routine, context))) = fired {
+                // TimerApcRoutine(TimerContext, TimerLowValue, TimerHighValue)
+                let at = platform::system_time();
+                let args = [context, at & 0xffff_ffff, at >> 32];
+                let _ = thread::queue_user_apc(&thread, UserApc { routine, args });
             }
         }
         drop(timers);

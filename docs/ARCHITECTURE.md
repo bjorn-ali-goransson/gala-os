@@ -496,7 +496,14 @@ drop references; timers whose last handle is closed are dropped.
 Synchronization timers reset when a wait is satisfied. Invariant: NtSetTimer sets the
 timer's state (due tick) before listing it, because the worker prunes
 listed timers that are not armed; listing first lost timers now and then
-(`timer_test`).
+(`timer_test`). Invariant (hygiene sweep, 2026-11-03): the worker decides
+an expiry and signals it in one hold of the timer's state lock, and
+NtSetTimer resets the signal and re-arms in one hold of it (lock order:
+timer state, then the dispatcher). Signaled after letting go, an expiry
+of the previous setting followed a re-arm that had already reset the
+signal: the timer read as signaled a minute before its new due time
+(`smprace_test` round 2, failed within ~1200 tries). The APC is queued
+after the lock (an expiry decided first queues it as on Windows).
 
 **Services with build-dependent numbers**: the low system call numbers
 used so far are long-stable on x64; others (NtCreateMutant, NtOpenMutant,
