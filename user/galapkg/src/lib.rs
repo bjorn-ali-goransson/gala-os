@@ -12,7 +12,10 @@
 //! - [`install`]: install, uninstall, upgrade and list as transactions
 //!   over a [`install::Host`] (files, registry, downloads, the log), which
 //!   `gala.exe` implements with Win32 calls and the tests in memory;
-//! - [`shim`]: the command shims in the Links directory.
+//! - [`shim`]: the command shims in the Links directory;
+//! - [`cfb`], [`msi`], [`cab`]: reading Windows Installer packages
+//!   (compound files, the MSI database, embedded cabinets), the ground
+//!   for PK stage 5.
 //!
 //! `no_std` with `alloc`: `gala.exe` is freestanding (the process heap as
 //! the global allocator, `gala_heap`).
@@ -23,8 +26,11 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod cab;
+pub mod cfb;
 pub mod install;
 pub mod manifest;
+pub mod msi;
 pub mod shim;
 pub mod source;
 pub mod version;

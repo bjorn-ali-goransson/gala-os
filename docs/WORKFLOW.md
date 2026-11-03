@@ -931,6 +931,24 @@ where its pixel checks expect it (no pointer arithmetic).
   list (`memmove`, `strlen` were needed; the link error names it).
   advapi32 is loaded at run time (`pkg::Reg`): do not import it
   statically, or `gala`'s window commands break on images without it.
+- MSI and cabinet fixtures (`user/galapkg/testdata/msi`): `sh
+  user/galapkg/testdata/msi/make_fixtures.sh` rebuilds `basic.msi`
+  (from `basic.wxs` with wixl), `long.msi.zlib` (a generated package
+  with a 70 KB string, zlib-compressed because it is mostly one letter),
+  `mszip.cab` and `stored.cab` (gcab), and rewrites `expected/` from
+  msiinfo, msiextract, gcab and 7z; commit all of it together (the MSI's
+  package code and dates change on every run, the tests read them from
+  `expected/`). wixl lacks some WiX attributes (VBScriptCall, ShortName,
+  Product/@Codepage is ignored: its pools have code page 0 with UTF-8
+  strings); `msiinfo export` writes a `Binary/` directory into the
+  current directory (the script runs it in its temporary directory).
+  wixl miswrites a string longer than 128 KiB (its own reader rejects it,
+  "string table load failed"): keep long-string fixtures between 64 and
+  128 KiB. gcab writes only uncompressed and MSZIP cabinets (7z none): an LZX
+  fixture needs Windows' makecab.
+- The readers' own tests build edge cases with small writers
+  (`cfb::tests::build`, `cab::tests::build_with`); 7-Zip reads what they
+  make (checked by hand when they were written: `7z t`), keep it so.
 - Every installed command is a copy of gala.exe: a gala.exe change does
   not reach commands installed before it until they are reinstalled.
 - Low on disk: a few user programs can be built alone into a scratch
