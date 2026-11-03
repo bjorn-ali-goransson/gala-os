@@ -2139,6 +2139,13 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         hkengine). Left in dbghelp: `MiniDumpWriteDump` (a stub: writing
         a minidump is its own piece of work), PDB symbols, other
         processes' modules.
+    11. comctl32: the image-list drag functions (`ImageList_BeginDrag`,
+        `DragEnter`, `DragMove`, `DragLeave`, `EndDrag`,
+        `SetDragCursorImage`; the drag's state is kept, the drag image is
+        not drawn yet: recorded) (`comctl32_test`; wxWidgets). Left in
+        comctl32: `CreateUpDownControl` (a new control class).
+        version and msvcrt: nothing left that the surveyed programs import
+        (msvcrt's last four were group 1).
    - Known problem (2026-11-03): the FileZilla client's PREBUILT URL
      (`downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe`)
      now answers 404 (so does the `FileZilla_Client/3.69.3/` path), so

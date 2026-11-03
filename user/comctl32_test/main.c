@@ -14,6 +14,9 @@
  *   makes one. ImageList_Copy with ILCF_SWAP swaps two images.
  *   ImageList_Replace replaces one. ImageList_Remove removes one (-1:
  *   all). ImageList_Destroy.
+ * - Dragging (ImageList_BeginDrag/DragEnter/DragMove/
+ *   SetDragCursorImage/DragLeave/EndDrag): TRUE while a drag of an image
+ *   that exists is going on; BeginDrag of a missing image fails.
  * - The status bar: at the bottom of its parent, full width (and after
  *   WM_SIZE); parts, their texts and rectangles.
  * - Tooltips: tools added, counted, deleted; TTM_SETMAXTIPWIDTH. Hover
@@ -633,6 +636,15 @@ int main(void) {
     toolbar(parent, il);
     list_view(parent, il);
     tree_view(parent, il);
+    // Dragging an image: an image that is not there fails; then begin,
+    // enter the window, move, change the cursor image, leave, end.
+    CHECK(!ImageList_BeginDrag(il, 99, 0, 0));
+    CHECK(ImageList_BeginDrag(il, 0, 2, 3));
+    CHECK(ImageList_DragEnter(parent, 10, 10));
+    CHECK(ImageList_DragMove(20, 25));
+    CHECK(ImageList_SetDragCursorImage(il, 0, 1, 1));
+    CHECK(ImageList_DragLeave(parent));
+    ImageList_EndDrag();
     CHECK(ImageList_Destroy(il));
 
     DeleteObject(two);

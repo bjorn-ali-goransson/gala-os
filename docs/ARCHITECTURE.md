@@ -3207,6 +3207,11 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   and 16 named parameters (more is recorded) and the BIND_OPTS bytes;
   CoImpersonateClient/CoRevertToSelf answer RPC_E_CALL_COMPLETE (gala
   serves no COM calls across processes).
+- **Image-list drags** (`user/comctl32/src/drag.rs`; `comctl32_test`):
+  one process-wide drag (list, image, window, position); the calls
+  answer as documented while it lasts, but nothing draws the drag image
+  over the window yet (recorded per drag); drawing it needs saving and
+  restoring the window's pixels under it.
 - **Common controls** (`user/comctl32/src/`; `comctl32_test`):
   InitCommonControls(Ex) registers the classes (once). comctl32 imports
   user32 (the controls are windows) but loads gdi32 on first use (the
