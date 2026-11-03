@@ -37,6 +37,12 @@ const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
 const SEMAPHORE_ALL_ACCESS: u32 = 0x1f_0003;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 const MUTATORS: usize = 3;
+/// "Loopers": threads running compiled code (LOOP_CODE) whose embedded
+/// constant the collector patches while they are stopped at the poll in
+/// that same code, as HotSpot patches object addresses in a compiled
+/// method a thread is stopped in (a full collection moves every object).
+const LOOPERS: usize = 2;
+const THREADS: usize = MUTATORS + LOOPERS;
 /// Collections to run (fewer if the time limit comes first).
 const ROUNDS: u32 = 600;
 const TIME_LIMIT_MS: i64 = 30_000;
@@ -286,16 +292,15 @@ const STUB_RETURN: usize = 64 + 8 * 15;
 /// as HotSpot does, in sp_stub after NtContinue (its save area).
 static STUB_MODE: AtomicBool = AtomicBool::new(false);
 /// Per mutator: whether it is stopped in sp_stub (else in the handler).
-static IN_STUB: [AtomicBool; MUTATORS] = [const { AtomicBool::new(false) }; MUTATORS];
+static IN_STUB: [AtomicBool; THREADS] = [const { AtomicBool::new(false) }; THREADS];
 /// Per mutator: where sp_stub returns to (after the poll that faulted).
-static RESUME: [AtomicU64; MUTATORS] = [const { AtomicU64::new(0) }; MUTATORS];
+static RESUME: [AtomicU64; THREADS] = [const { AtomicU64::new(0) }; THREADS];
 
 /// Called by sp_stub with its save area: the mutator stops there.
 extern "C" fn sp_block(area: usize) {
-    let rsp = area + STUB_RETURN + 8;
-    let Some(m) = (0..MUTATORS).find(|&m| {
+    let Some(m) = (0..THREADS).find(|&m| {
         let top = STACK_TOPS[m].load(Ordering::SeqCst);
-        rsp < top && rsp + 0x10000 > top
+        top == teb_field(0x48)
     }) else {
         fail(0x22, 0, 0, area as u64, 0);
         return;
@@ -319,9 +324,9 @@ static BAD: AtomicUsize = AtomicUsize::new(0);
 static SEMAPHORE: AtomicUsize = AtomicUsize::new(0);
 /// Mutators stopped at the safepoint, and each one's CONTEXT there.
 static ARRIVED: AtomicUsize = AtomicUsize::new(0);
-static CONTEXTS: [AtomicUsize; MUTATORS] = [const { AtomicUsize::new(0) }; MUTATORS];
-/// Each mutator's stack (an address near its top), to tell them apart.
-static STACK_TOPS: [AtomicUsize; MUTATORS] = [const { AtomicUsize::new(0) }; MUTATORS];
+static CONTEXTS: [AtomicUsize; THREADS] = [const { AtomicUsize::new(0) }; THREADS];
+/// Each thread's id (TEB ClientId.UniqueThread), to tell them apart.
+static STACK_TOPS: [AtomicUsize; THREADS] = [const { AtomicUsize::new(0) }; THREADS];
 /// The epoch each mutator's values must have (set by the collector while
 /// the mutator is stopped).
 static EPOCH: [AtomicU64; MUTATORS] = [const { AtomicU64::new(1) }; MUTATORS];
@@ -333,6 +338,47 @@ static HEAPS: [AtomicUsize; MUTATORS] = [const { AtomicUsize::new(0) }; MUTATORS
 static CODE: AtomicUsize = AtomicUsize::new(0);
 /// Value index of the embedded constant.
 const CODE_VALUE: usize = 200;
+
+/// The loopers' code: `loop: mov r11, [r9]; test [r11], eax (the poll);
+/// mov r8d, imm32; mov [rcx], r8d; dec rdx; jnz loop; ret`, called as
+/// f(out: rcx, iterations: rdx, poll pointer: r9). After each stop at
+/// the poll it stores the constant again, so `*out` must be the newest.
+const LOOP_CODE: [u8; 21] = [
+    0x4d, 0x8b, 0x19, 0x41, 0x85, 0x03, 0x41, 0xb8, 0, 0, 0, 0, 0x44, 0x89, 0x01, 0x48, 0xff, 0xca,
+    0x75, 0xec, 0xc3,
+];
+/// Offset of LOOP_CODE in the code page, and of its immediate.
+const LOOP_CODE_AT: usize = 0x101;
+const LOOP_IMM: usize = 8;
+/// The constant's generation (bumped by each collection).
+static LOOP_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+fn loop_value(generation: u64) -> u32 {
+    0x10_0000 | (generation as u32 & 0xf_ffff)
+}
+
+/// LOOP_CODE's signature (Windows x64: out, iterations, unused, poll).
+type LoopFn = extern "C" fn(*mut u32, u64, u64, *const AtomicUsize);
+
+/// A looper: runs LOOP_CODE (polling meanwhile) and checks the constant.
+extern "C" fn looper(t: usize) -> ! {
+    STACK_TOPS[t].store(teb_field(0x48), Ordering::SeqCst);
+    let at = CODE.load(Ordering::SeqCst) + LOOP_CODE_AT;
+    // SAFETY: LOOP_CODE uses only volatile registers.
+    let f = unsafe { core::mem::transmute::<usize, LoopFn>(at) };
+    while !STOP.load(Ordering::SeqCst) {
+        let mut out = 0u32;
+        f(&mut out, 500, 0, &SP_POLL);
+        // The collector only patches while every looper is stopped, so
+        // the generation cannot move between the last store and this.
+        let want = loop_value(LOOP_EPOCH.load(Ordering::SeqCst));
+        if out != want {
+            fail(0x33, t, 0, out.into(), want.into());
+        }
+    }
+    RUNNING.fetch_sub(1, Ordering::SeqCst);
+    exit_thread(STATUS_SUCCESS)
+}
 
 /// Mutator `m`'s compiled function.
 fn code_of(m: usize) -> extern "C" fn() -> u64 {
@@ -382,10 +428,9 @@ extern "system" fn handler(pointers: *mut ExceptionPointers) -> i32 {
         {
             return EXCEPTION_CONTINUE_SEARCH;
         }
-        let rsp = (context.add(CTX_RSP) as *const u64).read_unaligned() as usize;
-        let Some(m) = (0..MUTATORS).find(|&m| {
+        let Some(m) = (0..THREADS).find(|&m| {
             let top = STACK_TOPS[m].load(Ordering::SeqCst);
-            rsp < top && rsp + 0x10000 > top
+            top == teb_field(0x48)
         }) else {
             return EXCEPTION_CONTINUE_SEARCH;
         };
@@ -413,8 +458,7 @@ extern "system" fn handler(pointers: *mut ExceptionPointers) -> i32 {
 }
 
 extern "C" fn mutator(m: usize) -> ! {
-    let mark = 0u64;
-    STACK_TOPS[m].store(&mark as *const u64 as usize, Ordering::SeqCst);
+    STACK_TOPS[m].store(teb_field(0x48), Ordering::SeqCst);
     let heap = HEAPS[m].load(Ordering::SeqCst);
     while !STOP.load(Ordering::SeqCst) {
         let epoch = EPOCH[m].load(Ordering::SeqCst);
@@ -490,7 +534,7 @@ fn collect(scratch: usize, stub: bool) -> Result<(), u32> {
     STUB_MODE.store(stub, Ordering::SeqCst);
     SP_POLL.store(BAD.load(Ordering::SeqCst), Ordering::SeqCst);
     let start = now_ms();
-    while ARRIVED.load(Ordering::SeqCst) < MUTATORS {
+    while ARRIVED.load(Ordering::SeqCst) < THREADS {
         if STOP.load(Ordering::SeqCst) {
             return Err(FAILED.load(Ordering::SeqCst));
         }
@@ -541,6 +585,20 @@ fn collect(scratch: usize, stub: bool) -> Result<(), u32> {
         }
         EPOCH[m].store(new, Ordering::SeqCst);
     }
+    // The loopers' compiled constant moves on (a 4-byte immediate, as a
+    // compressed object address).
+    let constant = LOOP_EPOCH.load(Ordering::SeqCst) + 1;
+    let imm = (CODE.load(Ordering::SeqCst) + LOOP_CODE_AT + LOOP_IMM) as *mut u32;
+    // SAFETY: the immediate of LOOP_CODE in the code page; no looper
+    // runs (all are stopped at the poll).
+    unsafe {
+        let old = imm.read_unaligned();
+        if old != loop_value(constant - 1) {
+            fail(0x16, MUTATORS, 0, old.into(), loop_value(constant - 1).into());
+        }
+        imm.write_unaligned(loop_value(constant));
+    }
+    LOOP_EPOCH.store(constant, Ordering::SeqCst);
     // Memory changes while the mutators are stopped (a heap resize).
     allocate(scratch, 8 * PAGE, MEM_COMMIT, PAGE_READWRITE);
     for p in 0..8 {
@@ -557,7 +615,7 @@ fn collect(scratch: usize, stub: bool) -> Result<(), u32> {
     let s = unsafe {
         sp_release_semaphore(
             Handle(SEMAPHORE.load(Ordering::SeqCst)),
-            MUTATORS as i32,
+            THREADS as i32,
             &mut previous,
         )
     };
@@ -595,6 +653,12 @@ fn run() -> Result<u32, u32> {
             ((at + 10) as *mut u8).write(0xc3);
         }
     }
+    // SAFETY: the code page; LOOP_CODE fits after the mutators' code.
+    unsafe {
+        let at = (code + LOOP_CODE_AT) as *mut u8;
+        at.copy_from_nonoverlapping(LOOP_CODE.as_ptr(), LOOP_CODE.len());
+        ((code + LOOP_CODE_AT + LOOP_IMM) as *mut u32).write_unaligned(loop_value(1));
+    }
     CODE.store(code, Ordering::SeqCst);
     for heap in &HEAPS {
         let (s, base, _) = allocate(0, HEAP_PAGES * PAGE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -613,8 +677,13 @@ fn run() -> Result<u32, u32> {
     let add = unsafe { core::mem::transmute::<usize, AddHandler>(add) };
     ok(4, add(1, handler) != 0)?;
 
-    let mut threads = [Handle(0); MUTATORS + 1];
-    RUNNING.store(MUTATORS + 1, Ordering::SeqCst);
+    let mut threads = [Handle(0); THREADS + 1];
+    RUNNING.store(THREADS + 1, Ordering::SeqCst);
+    for l in 0..LOOPERS {
+        let (s, th, _) = create_thread(looper, MUTATORS + l, false);
+        ok(6, s == STATUS_SUCCESS)?;
+        threads[MUTATORS + 1 + l] = th;
+    }
     for (m, t) in threads.iter_mut().enumerate().take(MUTATORS) {
         let (s, th, _) = create_thread(mutator, m, false);
         ok(6, s == STATUS_SUCCESS)?;
