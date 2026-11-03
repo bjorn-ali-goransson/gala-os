@@ -1,11 +1,16 @@
 //! gala's shlwapi.dll (shell path, string and URL helpers): the path
-//! functions SQL Server uses (`paths`); the other functions it imports
-//! are not implemented yet (`gala_stubs`: each reports itself to the
-//! missing-features ledger and ends the process when called).
+//! functions SQL Server LocalDB and wxWidgets use (`paths`,
+//! `paths_more`), string comparisons and searches and SHDeleteKeyW
+//! (`strings`); the URL functions, AssocQueryStringW, SHAutoComplete and
+//! SHCreateStreamOnFileEx are not implemented yet (`gala_stubs`: each
+//! reports itself to the missing-features ledger and ends the process
+//! when called).
 
 #![no_std]
 
 mod paths;
+mod paths_more;
+mod strings;
 mod unimplemented;
 
 #[allow(dead_code)]
@@ -14,6 +19,7 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
+    fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
     // MSVC-target unwind tables reference it (gala's ntdll provides it).
     fn __CxxFrameHandler3();
 }

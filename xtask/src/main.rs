@@ -730,6 +730,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("oleaut32_test", "advapi32.dll", "Windows/System32"),
     ("oleaut32_test", "bcryptprimitives.dll", "Windows/System32"),
     ("oleaut32_test", "user/bin/oleaut32_test.exe", "gala"),
+    ("shlwapi_test", "ntdll.dll", "Windows/System32"),
+    ("shlwapi_test", "kernel32.dll", "Windows/System32"),
+    ("shlwapi_test", "msvcrt.dll", "Windows/System32"),
+    ("shlwapi_test", "shlwapi.dll", "Windows/System32"),
+    ("shlwapi_test", "advapi32.dll", "Windows/System32"),
+    ("shlwapi_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("shlwapi_test", "user/bin/shlwapi_test.exe", "gala"),
     ("richedit_test", "ntdll.dll", "Windows/System32"),
     ("richedit_test", "kernel32.dll", "Windows/System32"),
     ("richedit_test", "msvcrt.dll", "Windows/System32"),
@@ -3896,6 +3903,15 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=oleaut32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["oleaut32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: shlwapi's path and string functions against documented
+        // behaviour, for what SQL Server LocalDB and wxWidgets import
+        // (user/shlwapi_test/main.c, mingw).
+        name: "shlwapi_test",
+        cmdline: "qemu_exit run=shlwapi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["shlwapi_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // W3: rich edit controls (msftedit.dll's RICHEDIT50W, riched20.dll's

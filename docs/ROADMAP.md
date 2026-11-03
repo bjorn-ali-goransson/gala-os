@@ -2058,6 +2058,14 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         FileZilla Server's GUI and StackBuilder's wxWidgets DLLs now find
         every msvcrt and oleaut32 import (the GUI then needs user32's and
         gdi32's stubs, below).
+     2. shlwapi: `PathCanonicalizeW`, `PathCombineW`, `PathFindExtensionW`,
+        `PathRemoveExtensionW`, `PathRemoveBackslashW`, `PathIsRelativeW`,
+        `PathIsURLW`, `PathMatchSpecW`, `PathSearchAndQualifyW`, `StrCmpW`,
+        `StrCmpIW`, `StrCmpNIW`, `StrStrW`, `StrStrIW`, `StrCmpLogicalW`,
+        `SHDeleteKeyW` (`shlwapi_test`; LocalDB's xe.dll, sqllang,
+        msxmlsql, hkcompile, SqlDumper, SqlUserInstance and wxWidgets'
+        wxbase). Left in shlwapi: the URL functions, `PathCreateFromUrlW`,
+        `AssocQueryStringW`, `SHAutoComplete`, `SHCreateStreamOnFileEx`.
    - Elsewhere (not in these crates; for the agents there): FileZilla
      Server's GUI also stops on user32 (54 stubs: carets, the clipboard,
      DDE, DrawEdge/DrawFrameControl, window placement), gdi32 (16:

@@ -2024,7 +2024,13 @@ Windows, never shadows the system's DLLs.)
   Seventeen DLLs (netapi32, pdh, shlwapi, rpcrt4, urlmon, wininet,
   userenv, xolehlp, odbc32, authz, wintrust, webservices, dhcpcsvc,
   uxtheme, comdlg32, oleacc, mpr) are nothing but such stubs so far, apart from rpcrt4's UUID functions
-  (`rpcrt4_test`) and netapi32's NetWkstaGetInfo (`netapi32_test`).
+  (`rpcrt4_test`), netapi32's NetWkstaGetInfo (`netapi32_test`) and
+  shlwapi's path and string functions (`shlwapi_test`: PathCanonicalize
+  splits components at backslashes only, PathCombine resolves a file
+  part against the directory's drive, comparisons go through kernel32's
+  CompareStringW in the user's locale, StrCmpLogicalW compares digit
+  runs by value; SHDeleteKeyW finds RegDeleteTreeW at run time so
+  loading shlwapi does not pull in advapi32).
   gala's cmd.exe (`user/cmd`, built as a program and placed in
   System32) implements `/c` (and switches before it): cmd's documented
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
