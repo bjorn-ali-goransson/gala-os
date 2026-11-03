@@ -85,14 +85,22 @@ global_asm!(
     "sub rsp, 64",
     // Stack slots: values[14..22] at [rsp + 8 * i].
     "mov r11, rcx",
-    "mov rax, [r11 + 112]", "mov [rsp], rax",
-    "mov rax, [r11 + 120]", "mov [rsp + 8], rax",
-    "mov rax, [r11 + 128]", "mov [rsp + 16], rax",
-    "mov rax, [r11 + 136]", "mov [rsp + 24], rax",
-    "mov rax, [r11 + 144]", "mov [rsp + 32], rax",
-    "mov rax, [r11 + 152]", "mov [rsp + 40], rax",
-    "mov rax, [r11 + 160]", "mov [rsp + 48], rax",
-    "mov rax, [r11 + 168]", "mov [rsp + 56], rax",
+    "mov rax, [r11 + 112]",
+    "mov [rsp], rax",
+    "mov rax, [r11 + 120]",
+    "mov [rsp + 8], rax",
+    "mov rax, [r11 + 128]",
+    "mov [rsp + 16], rax",
+    "mov rax, [r11 + 136]",
+    "mov [rsp + 24], rax",
+    "mov rax, [r11 + 144]",
+    "mov [rsp + 32], rax",
+    "mov rax, [r11 + 152]",
+    "mov [rsp + 40], rax",
+    "mov rax, [r11 + 160]",
+    "mov [rsp + 48], rax",
+    "mov rax, [r11 + 168]",
+    "mov [rsp + 56], rax",
     "movq xmm8, [r11 + 176]",
     "movq xmm9, [r11 + 184]",
     "movq xmm10, [r11 + 192]",
@@ -136,14 +144,22 @@ global_asm!(
     "mov [r11 + 88], r13",
     "mov [r11 + 96], r14",
     "mov [r11 + 104], r15",
-    "mov rax, [rsp]", "mov [r11 + 112], rax",
-    "mov rax, [rsp + 8]", "mov [r11 + 120], rax",
-    "mov rax, [rsp + 16]", "mov [r11 + 128], rax",
-    "mov rax, [rsp + 24]", "mov [r11 + 136], rax",
-    "mov rax, [rsp + 32]", "mov [r11 + 144], rax",
-    "mov rax, [rsp + 40]", "mov [r11 + 152], rax",
-    "mov rax, [rsp + 48]", "mov [r11 + 160], rax",
-    "mov rax, [rsp + 56]", "mov [r11 + 168], rax",
+    "mov rax, [rsp]",
+    "mov [r11 + 112], rax",
+    "mov rax, [rsp + 8]",
+    "mov [r11 + 120], rax",
+    "mov rax, [rsp + 16]",
+    "mov [r11 + 128], rax",
+    "mov rax, [rsp + 24]",
+    "mov [r11 + 136], rax",
+    "mov rax, [rsp + 32]",
+    "mov [r11 + 144], rax",
+    "mov rax, [rsp + 40]",
+    "mov [r11 + 152], rax",
+    "mov rax, [rsp + 48]",
+    "mov [r11 + 160], rax",
+    "mov rax, [rsp + 56]",
+    "mov [r11 + 168], rax",
     "movq [r11 + 176], xmm8",
     "movq [r11 + 184], xmm9",
     "movq [r11 + 192], xmm10",
@@ -243,7 +259,8 @@ extern "system" fn handler(pointers: *mut ExceptionPointers) -> i32 {
     unsafe {
         let (record, context) = ((*pointers).record, (*pointers).context);
         if (record as *const u32).read_unaligned() != STATUS_ACCESS_VIOLATION
-            || (record.add(0x28) as *const u64).read_unaligned() as usize != BAD.load(Ordering::SeqCst)
+            || (record.add(0x28) as *const u64).read_unaligned() as usize
+                != BAD.load(Ordering::SeqCst)
         {
             return EXCEPTION_CONTINUE_SEARCH;
         }
@@ -397,7 +414,11 @@ fn collect(scratch: usize) -> Result<(), u32> {
     let mut previous = 0;
     // SAFETY: a valid output pointer.
     let s = unsafe {
-        sp_release_semaphore(Handle(SEMAPHORE.load(Ordering::SeqCst)), MUTATORS as i32, &mut previous)
+        sp_release_semaphore(
+            Handle(SEMAPHORE.load(Ordering::SeqCst)),
+            MUTATORS as i32,
+            &mut previous,
+        )
     };
     if s != STATUS_SUCCESS {
         return Err(0x5);
@@ -423,21 +444,18 @@ fn run() -> Result<u32, u32> {
     let (s, scratch, _) = allocate(0, 8 * PAGE, MEM_RESERVE, PAGE_READWRITE);
     ok(1, s == STATUS_SUCCESS)?;
     for heap in &HEAPS {
-        let (s, base, _) =
-            allocate(0, HEAP_PAGES * PAGE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        let (s, base, _) = allocate(0, HEAP_PAGES * PAGE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         ok(2, s == STATUS_SUCCESS)?;
         heap.store(base, Ordering::SeqCst);
     }
     let mut h = Handle(0);
     // SAFETY: a valid output pointer and no attributes.
-    let s = unsafe {
-        sp_create_semaphore(&mut h, SEMAPHORE_ALL_ACCESS, core::ptr::null(), 0, 1000)
-    };
+    let s =
+        unsafe { sp_create_semaphore(&mut h, SEMAPHORE_ALL_ACCESS, core::ptr::null(), 0, 1000) };
     ok(3, s == STATUS_SUCCESS)?;
     SEMAPHORE.store(h.0, Ordering::SeqCst);
-    let add = find_ntdll()
-        .and_then(|n| find_export(n, b"RtlAddVectoredExceptionHandler"))
-        .ok_or(4u32)?;
+    let add =
+        find_ntdll().and_then(|n| find_export(n, b"RtlAddVectoredExceptionHandler")).ok_or(4u32)?;
     // SAFETY: ntdll's RtlAddVectoredExceptionHandler.
     let add = unsafe { core::mem::transmute::<usize, AddHandler>(add) };
     ok(4, add(1, handler) != 0)?;

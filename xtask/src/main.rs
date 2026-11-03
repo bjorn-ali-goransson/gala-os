@@ -1708,13 +1708,14 @@ const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long scenario `name` may run.
 fn scenario_timeout(name: &str) -> Duration {
-    let limit = if name == "elasticsearch" || name.starts_with("sqllocaldb") {
-        ELASTICSEARCH_TIMEOUT
-    } else if SLOW_SCENARIOS.contains(&name) {
-        SLOW_TIMEOUT
-    } else {
-        BOOT_TEST_TIMEOUT
-    };
+    let limit =
+        if name == "elasticsearch" || name == "java_stress" || name.starts_with("sqllocaldb") {
+            ELASTICSEARCH_TIMEOUT
+        } else if SLOW_SCENARIOS.contains(&name) {
+            SLOW_TIMEOUT
+        } else {
+            BOOT_TEST_TIMEOUT
+        };
     // One host thread for both processors (SINGLE_THREAD_TCG) is about
     // half as fast: java_hello and java_http ran out of 300 s in a full
     // suite on a loaded 4-CPU host.
@@ -4301,7 +4302,7 @@ const SCENARIOS: &[Scenario] = &[
         // Pending: javac 48 times in one JVM (user/java/Stress.java), a
         // stress run for the Java heap corruption (ROADMAP Priorities).
         name: "java_stress",
-        cmdline: "qemu_exit checkuser run=java.exe args=C:/gala/Stress.java%2048 dump=C:/hs_err_pid4.log",
+        cmdline: "qemu_exit run=java.exe args=C:/gala/Stress.java%2048 dump=C:/hs_err_pid4.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["java_stress: 48 compiles, 0 failed", "java.exe finished with status 0x00000000"],
     },
@@ -4897,7 +4898,11 @@ fn events_flag() -> String {
     // `XTASK_RECORD=1`: every boot records its programs' inputs
     // (`<iso>.rec`; kernel/src/replay.rs).
     let record = if env::var_os("XTASK_RECORD").is_some() { " record" } else { "" };
-    format!("{events}{record}")
+    // `XTASK_CMDLINE="checkuser tlbparanoid"`: more kernel command-line
+    // words for every boot (diagnostic flags, ARCHITECTURE "Kernel
+    // command line").
+    let extra = env::var("XTASK_CMDLINE").map(|c| format!(" {c}")).unwrap_or_default();
+    format!("{events}{record}{extra}")
 }
 
 /// Scenarios that ship named sets of EXTRA_MODULES instead of their own

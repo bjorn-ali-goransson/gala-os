@@ -227,6 +227,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     }
     nt::syscalls::set_trace(cmdline.flag("trace"));
     sched::CHECK_USER_RETURN.store(cmdline.flag("checkuser"), Ordering::Relaxed);
+    arch::smp::set_tlb_paranoid(cmdline.flag("tlbparanoid"));
+    sched::NO_MIGRATE.store(cmdline.flag("nomigrate"), Ordering::Relaxed);
+    mm::FRAME_CHECK.store(cmdline.flag("framecheck"), Ordering::Relaxed);
     // The watchdog's test: CPU 1 stops taking timer interrupts for a while.
     time::set_hang_test(cmdline.flag("hangtest"));
     // The kernel watchdog's test: this thread stays in the kernel 25 s

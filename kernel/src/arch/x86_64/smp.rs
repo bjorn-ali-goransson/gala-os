@@ -140,6 +140,19 @@ pub fn flush_tlb_everywhere() {
     }
 }
 
+/// `tlbparanoid` (kernel command line, for telling TLB bugs from others):
+/// every change to a user space flushes every CPU's whole TLB, and every
+/// context switch reloads CR3.
+static TLB_PARANOID: AtomicBool = AtomicBool::new(false);
+
+pub fn set_tlb_paranoid(on: bool) {
+    TLB_PARANOID.store(on, Ordering::Relaxed);
+}
+
+pub fn tlb_paranoid() -> bool {
+    TLB_PARANOID.load(Ordering::Relaxed)
+}
+
 /// Shootdowns whose caller had moved to another CPU since its local
 /// invalidation (that CPU was flushed as well).
 static MOVED_FLUSHES: AtomicU64 = AtomicU64::new(0);
@@ -162,6 +175,10 @@ pub fn moved_flushes() -> u64 {
 /// space's page tables and before reusing frames they mapped.
 pub fn flush_user_space(root: u64, changed_on: Option<u32>) {
     if !STARTED.load(Ordering::Acquire) {
+        return;
+    }
+    if tlb_paranoid() {
+        flush_tlb_everywhere();
         return;
     }
     let restore = cpu::disable_interrupts();

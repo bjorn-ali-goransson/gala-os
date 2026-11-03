@@ -283,7 +283,7 @@ pub unsafe fn activate(root: u64) {
     // Before loading it: a shootdown that misses this CPU's new root then
     // happened before the load, which flushes non-global entries.
     super::smp::note_root(root);
-    if cpu::read_cr3() & !0xfff != root {
+    if cpu::read_cr3() & !0xfff != root || super::smp::tlb_paranoid() {
         // SAFETY: forwarded to the caller; the kernel half, and therefore
         // the code, stack and data in use, is identical in every such space.
         unsafe { asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags)) };
@@ -453,6 +453,7 @@ impl UserSpace {
         let virt = virt / PAGE_SIZE * PAGE_SIZE;
         match self.mapper.unmap_4k_owned(virt) {
             Some((frame, owned)) => {
+                crate::mm::note_user_map(frame, false);
                 self.invalidate(virt);
                 // Other CPUs may still reach the frame through their TLBs
                 // until the lock is released (see `SpaceGuard`).
@@ -512,6 +513,7 @@ impl UserSpace {
                 let _ = crate::mm::free_frame(frame);
                 return Err(e.into());
             }
+            crate::mm::note_user_map(frame, true);
         }
         Ok(())
     }
@@ -608,6 +610,7 @@ impl UserSpace {
             flags,
             &mut alloc_table,
         )?;
+        crate::mm::note_user_map(frame, true);
         Ok(())
     }
 
@@ -630,6 +633,7 @@ impl UserSpace {
             flags,
             &mut alloc_table,
         )?;
+        crate::mm::note_user_map(frame, true);
         Ok(())
     }
 
@@ -676,6 +680,7 @@ impl UserSpace {
             let _ = crate::mm::free_frame(frame);
             return Err(e.into());
         }
+        crate::mm::note_user_map(frame, true);
         self.invalidate(virt);
         Ok(())
     }
@@ -701,6 +706,11 @@ impl UserSpace {
 impl Drop for UserSpace {
     fn drop(&mut self) {
         // The space must not be active on any CPU any more (see `activate`).
+        if crate::mm::FRAME_CHECK.load(Ordering::Relaxed) {
+            self.mapper.for_each_user_leaf(&mut |_, t| {
+                crate::mm::note_user_map(Frame::containing(t.phys), false);
+            });
+        }
         let mem = HhdmTables { offset: crate::mm::hhdm_offset() };
         let dummy = Frame::from_number(0);
         let mapper = core::mem::replace(&mut self.mapper, Mapper::from_root(mem, dummy));

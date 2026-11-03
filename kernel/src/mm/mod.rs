@@ -92,7 +92,37 @@ pub fn allocate_frames(count: u64, align: u64) -> Option<Frame> {
     with_frames(|a| a.allocate_contiguous(count, align)).flatten()
 }
 
+/// `framecheck` (kernel command line): user mappings of each frame are
+/// counted (`note_user_map`), and freeing a frame some user space still
+/// maps panics (a frame with two owners: one's writes show in the other).
+pub static FRAME_CHECK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Frames below 4 GiB whose user mappings `framecheck` counts.
+const COUNTED_FRAMES: usize = 1 << 20;
+static USER_MAPS: [core::sync::atomic::AtomicU8; COUNTED_FRAMES] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; COUNTED_FRAMES];
+
+/// Counts a user mapping of `frame` made (`add`) or removed.
+pub fn note_user_map(frame: Frame, add: bool) {
+    if !FRAME_CHECK.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Some(count) = USER_MAPS.get(frame.number() as usize) {
+        let _ = count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+            Some(if add { c.saturating_add(1) } else { c.saturating_sub(1) })
+        });
+    }
+}
+
 pub fn free_frame(frame: Frame) -> Result<(), FreeError> {
+    if FRAME_CHECK.load(Ordering::Relaxed)
+        && let Some(count) = USER_MAPS.get(frame.number() as usize)
+    {
+        let n = count.load(Ordering::Acquire);
+        if n != 0 {
+            panic!("mm: frame {:#x} freed while user spaces map it {n} times", frame.start());
+        }
+    }
     let result = with_frames(|a| a.free(frame)).unwrap_or(Err(FreeError::OutOfRange));
     if result == Err(FreeError::NotAllocated) {
         // A frame freed twice: a bug (callers ignore the result), which

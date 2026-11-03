@@ -430,6 +430,10 @@ pub fn take_pending_continue() -> Option<UserRegs> {
     })
 }
 
+/// `nomigrate` (kernel command line, for telling migration bugs from
+/// others): a thread that runs user code stays on the CPU it first ran on.
+pub static NO_MIGRATE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// `checkuser` (kernel command line): every return to user mode checks
 /// that this CPU is set up for the thread returning (`check_user_return`).
 pub static CHECK_USER_RETURN: core::sync::atomic::AtomicBool =
@@ -450,7 +454,8 @@ pub fn check_user_return() {
         let t = s.thread(id);
         let stack_top = t.stack.as_ref().map_or(0, KernelStack::top);
         let (root, gs) = t.user.as_ref().map_or((0, 0), |u| (u.root, u.gs_base));
-        let (cr3, kstack, ugs) = (cpu::read_cr3() & !0xfff, percpu::kernel_stack(), percpu::user_gs_base());
+        let (cr3, kstack, ugs) =
+            (cpu::read_cr3() & !0xfff, percpu::kernel_stack(), percpu::user_gs_base());
         if others != 0
             || !t.on_cpu
             || t.state != State::Running
@@ -527,6 +532,12 @@ fn schedule() {
         }
         let next = s.pick(here).or(s.cpus[here].idle).unwrap_or(cur);
         s.thread(next).state = State::Running;
+        if NO_MIGRATE.load(core::sync::atomic::Ordering::Relaxed) {
+            let n = s.thread(next);
+            if n.user.is_some() && n.affinity == ALL_CPUS {
+                n.affinity = 1 << here;
+            }
+        }
         let cpu = &mut s.cpus[here];
         cpu.current = next;
         cpu.quantum_left = QUANTUM_TICKS;
