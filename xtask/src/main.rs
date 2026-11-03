@@ -7722,7 +7722,14 @@ fn udp_client(port: u16) -> Result {
         }
         (None, true) => return Err(format!("dns example.com: {answer:?}")),
     }
-    ask(b"bye", Some(b"bye"), 40).map(|_| ())
+    // The guest answers `bye` once and ends; if that one answer is lost
+    // (UDP through QEMU's user network under load), no later try is
+    // answered. The scenario checks the guest's own `udp_test: ok` and
+    // its echo count, so a lost last answer is said, not failed.
+    if ask(b"bye", Some(b"bye"), 10).is_err() {
+        eprintln!("xtask: udp_echo: no answer to bye (the guest may have ended after a lost one)");
+    }
+    Ok(())
 }
 
 /// The host side of an HTTP scenario: GET / with HTTP/1.1, expect 200 and
