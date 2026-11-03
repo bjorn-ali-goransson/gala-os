@@ -5,10 +5,10 @@
 //! previous blocks; inflated by `miniz_oxide`, which is given the
 //! folder's output so far as the history).
 //!
-//! Supported: compression types none and MSZIP, reserved areas, data
-//! checksums (checked when not 0). Not supported (an error says which):
-//! LZX and Quantum (TODO: LZX, which large MSIs use), cabinets spanning
-//! several files (a folder continued from or into another cabinet).
+//! Supported: compression types none, MSZIP and LZX ([`crate::lzx`]),
+//! reserved areas, data checksums (checked when not 0). Not supported
+//! (an error says which): Quantum, cabinets spanning several files (a
+//! folder continued from or into another cabinet).
 //!
 //! Untrusted input: sizes are checked against the file and against each
 //! other before anything is allocated (a folder's output is the sum of
@@ -257,10 +257,11 @@ impl<'a> Cabinet<'a> {
         };
         match f.compression {
             Compression::None | Compression::MsZip => {}
+            Compression::Lzx(w) if (15..=21).contains(&w) => {}
             Compression::Lzx(w) => {
-                return Err(Error::Unsupported(alloc::format!(
-                    "folder {index}: LZX compression (window 2^{w}) is not implemented yet"
-                )));
+                return Err(corrupt!(
+                    "folder {index}: LZX window 2^{w} (cabinets allow 2^15 to 2^21)"
+                ));
             }
             Compression::Quantum => {
                 return Err(Error::Unsupported(alloc::format!(
@@ -322,8 +323,24 @@ impl<'a> Cabinet<'a> {
         }
         let mut out = Vec::new();
         out.try_reserve_exact(total).map_err(|_| Error::OutOfMemory(total as u64))?;
+        let mut lzx = match f.compression {
+            Compression::Lzx(w) => Some(crate::lzx::Decoder::new(w).map_err(|e| match e {
+                crate::lzx::Error::OutOfMemory(n) => Error::OutOfMemory(n),
+                e => corrupt!("folder {index}: {e}"),
+            })?),
+            _ => None,
+        };
         for (b, &(at, start, end, cb_uncomp)) in blocks.iter().enumerate() {
             let input = &self.data[start..end];
+            if let Some(d) = &mut lzx {
+                d.frame(input, cb_uncomp, &mut out).map_err(|e| match e {
+                    crate::lzx::Error::OutOfMemory(n) => Error::OutOfMemory(n),
+                    e => Error::Damaged(alloc::format!(
+                        "folder {index} block {b} (offset {at}): {e}"
+                    )),
+                })?;
+                continue;
+            }
             if f.compression == Compression::None {
                 out.extend_from_slice(input);
                 continue;

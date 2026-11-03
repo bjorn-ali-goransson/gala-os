@@ -1957,11 +1957,27 @@ PK. **Installing software: `gala install` over winget manifests** (the
       install` will call (`install_files`: target paths through the
       Directory table, `extract`/`extract_all` from embedded cabinets),
       checked against msitools and gcab on wixl-built fixtures and fed
-      damaged files. Next: LZX (with a makecab-built fixture), then the
-      engine: `gala install` of an `msi` InstallerType (files, registry,
-      shortcuts from the tables, an ARP entry, rollback through
-      `install::Tx`), then msiexec/msi.dll with standard actions and
-      custom actions.
+      damaged files. **LZX and the install plan done** (2026-11-03,
+      host tests; ARCHITECTURE "LZX", "MSI install plans"): `lzx`
+      (cabinet LZX from the Cabinet SDK and [MS-PATCH], checked
+      byte-identical to cabextract and 7-Zip on a Microsoft-made LZX:21
+      cabinet with E8 (fetched, not committed) and on checked-in
+      cabinets from a spec-written test encoder); `msi::cond` (the full
+      condition grammar, table-driven from the SDK's examples),
+      `msi::format` (Formatted), `msi::plan` (`Plan::compute`: context
+      from ALLUSERS/MSIINSTALLPERUSER, system folders per context,
+      directories with source and target paths, the Condition table,
+      INSTALLLEVEL, ADDLOCAL/REMOVE/ADDSOURCE/ADDDEFAULT/ADVERTISE,
+      component conditions and states, files, registry values with
+      prefixes and [~] lists, shortcuts, launch conditions, the five
+      sequence tables with conditions evaluated and custom action types
+      decoded; one line per item for the log; errors name table, row,
+      column). Expected plans are the documented rules: no msiexec ran
+      (TODO: compare `msiexec /l*v` on Windows). Next: the engine:
+      `gala install` of an `msi` InstallerType running the plan (files
+      from the cabinets, registry, shortcuts, an ARP entry, rollback
+      through `install::Tx`), AppSearch and type 51/35 custom actions in
+      the plan, then msiexec/msi.dll with custom actions.
    6. Later: running stock winget itself (it is an MSIX: stage 4) against
       gala, the Microsoft Store source, `winget configure`.
    Ideas: installs are transactions (a failed install rolls back its

@@ -1,0 +1,5 @@
+Registry	Root	Key	Name	Value	Component_
+s72	i2	l255	L255	L0	s72
+Registry	Registry
+regF5607CE3926E37D677D594F20E8CAB7F	-1	Software\Gala\Dual	Dir	[APPDIR]	App
+Cls	0	.galadual		GalaDual.File	App

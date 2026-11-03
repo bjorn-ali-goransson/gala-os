@@ -1084,8 +1084,40 @@ where its pixel checks expect it (no pointer arithmetic).
   current directory (the script runs it in its temporary directory).
   wixl miswrites a string longer than 128 KiB (its own reader rejects it,
   "string table load failed"): keep long-string fixtures between 64 and
-  128 KiB. gcab writes only uncompressed and MSZIP cabinets (7z none): an LZX
-  fixture needs Windows' makecab.
+  128 KiB. gcab writes only uncompressed and MSZIP cabinets (7z none).
+  The script also builds the install-plan packages `plan.msi` (x64,
+  `wixl -a x64`), `dual.msi` and `badcond.msi` and records msiinfo's
+  export of their tables. Rerunning it rewrites `basic.msi`,
+  `long.msi.zlib` and `expected/basic.suminfo` with new dates and
+  package codes: restore them with `git checkout` unless they were what
+  you changed.
+- wixl writes less than WiX: no `Condition` under Feature or Component,
+  no `Directory` on a CustomAction, no `MultiStringValue` (write the
+  `[~]` value as a string), no `Package/@Platform` (use `wixl -a x64`);
+  it writes HKMU as Root 4 instead of -1, drops the `#x`/`#%` prefixes of
+  binary and expandable values and eats `$` in formatted text (`[$Comp]`
+  becomes `[Comp]`). make_fixtures.sh fixes all of these afterwards with
+  `msibuild <msi> -q "<SQL>"` (UPDATE, INSERT, CREATE TABLE work; quote
+  names with backquotes). The test `plan_packages_read_as_msiinfo_exports_them`
+  checks the reader against msiinfo after that rewrite.
+- The install plan (`msi::plan`) has no msiexec to compare with: its
+  tests' expected values are the SDK's documented rules, each test
+  naming its page. When a real Windows run becomes possible, record
+  `msiexec /i x.msi /qn /l*v log` of the same fixtures and compare
+  (TODO).
+- LZX (`user/galapkg/testdata/lzx`): no tool on Linux writes LZX, so
+  `sh user/galapkg/testdata/lzx/make_fixtures.sh` makes the cabinets
+  with the test encoder (`src/lzx/encode.rs`, through the ignored test
+  `lzx::tests::write_fixtures`) and records cabextract's and 7-Zip's
+  decoding (`apt-get install -y cabextract`); the test
+  `fixtures_match_cabextract_and_7z` also checks the encoder still makes
+  the checked-in files byte for byte (change the encoder: rerun the
+  script). `sh user/galapkg/testdata/lzx/fetch_real.sh` fetches a cabinet
+  Microsoft made (inside the DirectX web installer, not committed) into
+  `target/galapkg-fixtures`; `microsoft_cabinet_matches_cabextract`
+  decodes it when present (it skips otherwise, so run the fetch before
+  changing `lzx.rs`). Do not read cabextract's, libmspack's, 7-Zip's or
+  Wine's source: black-box outputs only.
 - The readers' own tests build edge cases with small writers
   (`cfb::tests::build`, `cab::tests::build_with`); 7-Zip reads what they
   make (checked by hand when they were written: `7z t`), keep it so.

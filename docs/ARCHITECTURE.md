@@ -3840,10 +3840,10 @@ not yet called by gala.exe (nothing runs an installer):
   flags, security).
 - `cab`: cabinets ([MS-CAB]): header with reserved areas and the
   previous/next names skipped, folders, files, data blocks with their
-  checksum checked when not 0, compression none and MSZIP ([MS-MCI]: `CK`
+  checksum checked when not 0, compression none, MSZIP ([MS-MCI]: `CK`
   + a deflate stream per block, the window carried over: miniz_oxide's
-  core inflater is given the folder's output so far). `folder_data`,
-  `extract(i)`, `extract_all` (each folder once).
+  core inflater is given the folder's output so far) and LZX (`lzx`,
+  below). `folder_data`, `extract(i)`, `extract_all` (each folder once).
 
 **What `gala install` will call:** `Package::install_files(&root)`:
 every File row with its component's directory resolved to a target
@@ -3879,18 +3879,16 @@ header's 109 entries, nested storages, mini/regular boundary at 4095 and
 4096 bytes, reserved cabinet areas, the long-id pool, Windows-1252), and
 feed truncated and randomly damaged files to every reader.
 
-**Limits and TODO.** LZX (and Quantum) cabinets are refused with what
-they are (LZX is what large packages, Edge's among them, use; no tool
-here writes LZX cabinets to test against, so it waits for a fixture
-from Windows' makecab); cabinets spanning several files; external
+**Limits and TODO.** Quantum cabinets are refused with what they are;
+cabinets spanning several files; external
 cabinets and loose files are located (`FileSource`) but not read (the
 caller has the files next to the package); code pages other than 1252,
 28591 and 65001 decode lossily; transforms (`.mst`), patches, the
 `_Validation`/`_Streams`/`_Storages` pseudo-tables and storages inside
 the package (embedded transforms) are not read; directory resolution
 does not apply the conditions, features or `SetDirectory` custom
-actions that an installer's costing would. Then stage 5 proper: the
-engine (standard actions, sequence tables, properties, conditions,
+actions that an installer's costing would (`msi::plan` does the first
+two, below). Then stage 5 proper: the engine (standard actions run,
 custom actions, `msiexec /i /qn`).
 **MSIX/AppX reading (PK stage 4 groundwork, 2026-11-03; nothing is
 installed yet).** `galapkg::msix` reads packages and bundles from
@@ -4135,6 +4133,131 @@ installer, its URL, its effective type and its default-mode arguments.
 Damaged copies (every prefix, indicators injected at line starts) must
 not panic. Not covered by the corpus: singletons and 1.0.0 (winget-pkgs
 has neither any more; the unit tests have them).
+
+**LZX (`user/galapkg` `lzx`, 2026-11-03).** Written from the Cabinet
+SDK's "Microsoft LZX Data Compression Format" and [MS-PATCH] (LZX
+DELTA; cabinet LZX is it without reference data, chunk-size prefixes
+and the extra length field). `cab::Cabinet::folder_data` runs a
+`lzx::Decoder` per folder (window 2^15..2^21 from typeCompress bits
+8-12) and feeds it each CFDATA block as one frame: the bitstream (16-bit
+little-endian words, bits from the top) restarts at every frame, while
+LZX blocks (verbatim, aligned offset, uncompressed), the main/length
+tree path lengths (pretree deltas mod 17 against the previous block's,
+runs 17/18/19), R0-R2 and the window carry over. The window is a ring of
+2^w bytes of undecoded-E8 data; E8 translation is reversed per frame on
+the output only. Where the two documents disagree, a cabinet Microsoft
+made (`fetch_real.sh`: the DirectX web installer's, LZX:21 with E8,
+2.2 MB, decoded byte-identical to cabextract and 7-Zip) decided:
+aligned offset bits are used from 3 footer bits on ([MS-PATCH] 2.6.3;
+its own decoding pseudocode says "more than 3", which fails on that
+cabinet's first aligned block), and E8 bytes are looked for in a
+frame's first `len - 10` bytes ([MS-PATCH] 2.2.2; the SDK's "last 6"
+translates one at 32759 that Microsoft's encoder left alone). An
+uncompressed block's padding is 1 to 16 bits (16 when already on a
+word), its odd size padded by a byte, and it continues into the next
+frame's bytes; both readings were confirmed by cabextract on the
+checked-in fixtures. **Invariants:** every code is checked (an
+over-subscribed tree, a code no element has, a run past a tree's end,
+a match before the start of the data, past its frame or its block, or
+further than the window - 3, block types other than 1-3), reading past
+a frame's end gives at most 32 zero bits then an error, and errors name
+the frame and output position (cab adds the folder, block and offset).
+**Fixtures:** `testdata/lzx/*.cab`, made by a test encoder written from
+the same documents (`src/lzx/encode.rs`: greedy matching with repeated
+offsets, real length-limited Huffman codes, all three block types, E8),
+are decoded by cabextract and 7-Zip into `expected/*.sha256`: verbatim
+blocks spanning frames with tree deltas, aligned blocks over 2^21,
+uncompressed blocks (odd, spanning a frame, ending on one, with 16 bits
+of padding), E8 with calls in the last bytes of frames. The Microsoft
+cabinet is not committed (it is Microsoft's code): its test skips when
+`target/galapkg-fixtures/dxwebsetup.cab` is absent. TODO: matches
+across an LZX block boundary are refused (the SDK says nothing; no
+cabinet seen needs them); Quantum.
+
+**MSI install plans (`user/galapkg` `msi::cond`, `msi::format`,
+`msi::plan`; 2026-11-03).** What installing a package would do,
+computed from its tables without running anything; the API `gala
+install` will call: `msi::plan::Plan::compute(&Package, &Machine,
+&Properties) -> Result<Plan, PlanError>`. `Machine` is the known
+folders (gala.exe fills them from SHGetKnownFolderPath;
+`Machine::windows_defaults(user, package)` gives Windows' defaults for
+the tests), ROOTDRIVE, SourceDir, privileges, the environment, VersionNT.
+The `Plan` lists the context and why, every property after costing,
+directories (target and source path, how found), features (level after
+the Condition table, state, why), components (state, why, directory,
+key path, 64-bit), files of installed components (target or
+run-from-source path, where the bytes are), registry writes (hive, key,
+name, typed value), shortcuts (.lnk path, target or advertised
+feature, arguments, working directory), launch conditions with
+pass/fail and their formatted message, and the rows of
+InstallUISequence, InstallExecuteSequence, AdminUISequence,
+AdminExecuteSequence and AdvtExecuteSequence in Sequence order (exit
+actions -1..-4 after, 0/NULL last and never run), each with its
+condition's outcome and its kind: a standard action with what it does
+here (`copies files: 2`), a custom action with its Type decoded
+(base type 1-54 with Source/Target, return processing, immediate with
+scheduling or deferred/rollback/commit, no impersonation, TS-aware,
+hidden target, 64-bit script, patch uninstall), a dialog, or unknown.
+Every item has a one-line Display for the install log; `PlanError`
+names the table, the row (1-based), its key and the column, or the
+property. The order (module docs have it in full): Property table, the
+command line, the context, the installer's properties, directories
+(their properties then set to their paths), the Condition table,
+features, component conditions and states, files, registry, shortcuts,
+launch conditions, sequences.
+
+*Rules chosen where the documentation is silent or ambiguous*
+(TODO: check each against `msiexec /l*v` on Windows): ALLUSERS values
+other than "", 1, 2 are taken as per-machine; per-user
+ProgramFilesFolder/CommonFilesFolder (and the 64-bit ones) are
+%LOCALAPPDATA%\Programs[\Common] only for the dual-purpose case
+(ALLUSERS=2, MSIINSTALLPERUSER=1, as Single Package Authoring
+describes; a plain per-user package keeps the machine's, as that page
+says installs authored for Installer 4.5 do); Root 0 goes under the
+context hive's Software\Classes (the Installation Context table); the
+system folder properties override the Property table but not the
+command line; VersionNT is 603 (the SDK's table ends at Windows 8.1);
+UILevel is 2 (no UI, as gala installs); a fresh install: every
+feature's and component's installed state (`!`, `?`) is absent; REMOVE
+of a feature that is not installed leaves it absent; a {group} whose
+reference does not resolve is blank; a Registry value's `#` prefixes
+are looked for in the raw text, the rest formatted after. The plan
+does not run AppSearch, custom actions (type 51 and 35 included) or
+dialogs, so properties and directories they would set are not in it;
+sequence conditions see the final feature and component states even
+before CostFinalize.
+
+*The condition grammar* (`msi::cond`, from Conditional Statement
+Syntax; precedence high to low NOT, AND, OR, XOR, EQV, IMP, all
+left-associative): `term := value [ [~]op value ] | ( expr )`, op one of
+`= <> > >= < <=` and the substring/bitwise `>< << >>`; values are
+properties (case-sensitive names, unset = ""), `%env` (case-insensitive
+names), `$comp ?comp &feat !feat` (the INSTALLSTATE integers; no state
+= ""), "literal" (no escapes) and decimal integers. A value alone is
+true when non-empty or non-zero. Strings compare as text (`~`
+lowercases), integers as numbers; integer against string: the string's
+integer value if its whole text is one, else false except `<>`. On
+integers `><` is a bitwise AND test, `<<`/`>>` compare the high/low 16
+bits. Empty is true; a syntax error names the character. Tests: every
+example of the SDK's examples page and its rules, table-driven
+(`msi/cond/tests.rs`); Formatted from its page's examples
+(`msi/format/tests.rs`).
+
+*Tests:* `plan.msi` (x64 per-machine: features at levels 0, 1, 3, 200,
+a Condition table row, a component condition, an optional component of
+a favorSource feature, registry values of every type with formatted
+text, shortcuts, custom actions of types 51, 3073, 3329, 226, launch
+conditions), `dual.msi` (ALLUSERS=2 + MSIINSTALLPERUSER=1, Root -1 and
+0, exit and never-run UI actions), `basic.msi` (plain per-user),
+`badcond.msi` (a condition that does not parse): built with wixl and
+msibuild, their tables checked against msiinfo; the plans checked
+against the documented rules (each test names its page), plus random
+damage. **Not verified against msiexec** (none on the host).
+
+**Next (MSI):** run the plan: `gala install` of an `msi` InstallerType
+through `install::Tx` (files from `extract_all`, registry, shortcuts
+through shell32's IShellLink, an ARP entry, rollback), then AppSearch,
+type 51/35 custom actions in the plan, then msiexec/msi.dll proper.
 
 **Next (ROADMAP PK):** the HTTPS fetcher; then stage 3 (Inno Setup,
 NSIS, `exe` with switches: run the vendor's installer silently, uninstall

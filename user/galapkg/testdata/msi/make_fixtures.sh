@@ -43,6 +43,45 @@ for wxs in basic; do
     (cd "$work" && wixl -o "$here/$wxs.msi" "$here/$wxs.wxs")
 done
 
+# The install-plan packages (src/msi/plan/tests.rs). wixl does not write
+# everything WiX would (Condition elements, a custom action's Directory,
+# the #x and #% registry prefixes, HKMU as Root -1, $ in formatted
+# text), so msibuild (msitools) puts those rows in afterwards with SQL.
+printf 'core\r\n' > "$work/core.txt"
+printf 'MZ not a real program\r\n' > "$work/tool.exe"
+printf 'readme\r\n' > "$work/readme.txt"
+printf 'extra\r\n' > "$work/extra.txt"
+printf 'never\r\n' > "$work/never.txt"
+printf 'MZ not a real DLL\r\n' > "$work/ca.dll"
+find "$work" -type f -exec touch -d '2026-01-02 03:04:06' {} +
+(cd "$work" && wixl -a x64 -o "$here/plan.msi" "$here/plan.wxs")
+(cd "$work" && wixl -o "$here/dual.msi" "$here/dual.wxs")
+msibuild plan.msi \
+    -q "UPDATE \`Registry\` SET \`Root\` = -1 WHERE \`Root\` = 4" \
+    -q "UPDATE \`Registry\` SET \`Value\` = '#x0A0B0C' WHERE \`Name\` = 'Blob'" \
+    -q "UPDATE \`Registry\` SET \`Value\` = '#%%ProgramFiles%\\Gala Plan' WHERE \`Name\` = 'Path'" \
+    -q "UPDATE \`Registry\` SET \`Value\` = '[\$Core]|[!core.txt]|[%TEMP]|{[NOSUCH]x}|{plain}|[\\[]x[\\]]' WHERE \`Name\` = 'Where'" \
+    -q "UPDATE \`InstallExecuteSequence\` SET \`Condition\` = '\$Core=3 AND NOT REMOVE' WHERE \`Action\` = 'Deferred'" \
+    -q "UPDATE \`Component\` SET \`Condition\` = 'NOT NOEXTRA' WHERE \`Component\` = 'Extra'" \
+    -q "UPDATE \`Component\` SET \`Attributes\` = 258 WHERE \`Component\` = 'Docs'" \
+    -q "UPDATE \`Feature\` SET \`Attributes\` = 1 WHERE \`Feature\` = 'Documentation'" \
+    -q "CREATE TABLE \`Condition\` (\`Feature_\` CHAR(38) NOT NULL, \`Level\` SHORT NOT NULL, \`Condition\` CHAR(255) PRIMARY KEY \`Feature_\`, \`Level\`)" \
+    -q "INSERT INTO \`Condition\` (\`Feature_\`, \`Level\`, \`Condition\`) VALUES ('Extras', 1, 'WANTEXTRAS')" \
+    -q "INSERT INTO \`CustomAction\` (\`Action\`, \`Type\`, \`Source\`, \`Target\`) VALUES ('RunTool', 226, 'INSTALLDIR', '\"[#tool.exe]\" /setup')" \
+    -q "INSERT INTO \`InstallExecuteSequence\` (\`Action\`, \`Condition\`, \`Sequence\`) VALUES ('RunTool', 'GREETING ~= \"HELLO\"', 6601)" \
+    -q "INSERT INTO \`InstallUISequence\` (\`Action\`, \`Condition\`, \`Sequence\`) VALUES ('SetGreeting', 'UILevel > 3', 1001)" \
+    -q "INSERT INTO \`LaunchCondition\` (\`Condition\`, \`Description\`) VALUES ('VersionNT >= 600', '[ProductName] needs Windows Vista or later')" \
+    -q "INSERT INTO \`LaunchCondition\` (\`Condition\`, \`Description\`) VALUES ('NOT BLOCKME', '[ProductName] is blocked: BLOCKME=[BLOCKME]')"
+msibuild dual.msi \
+    -q "UPDATE \`Registry\` SET \`Root\` = -1 WHERE \`Root\` = 4" \
+    -q "INSERT INTO \`Registry\` (\`Registry\`, \`Root\`, \`Key\`, \`Name\`, \`Value\`, \`Component_\`) VALUES ('Cls', 0, '.galadual', '', 'GalaDual.File', 'App')" \
+    -q "INSERT INTO \`InstallUISequence\` (\`Action\`, \`Condition\`, \`Sequence\`) VALUES ('FatalErrorDlg', '', -3)" \
+    -q "INSERT INTO \`InstallUISequence\` (\`Action\`, \`Condition\`, \`Sequence\`) VALUES ('NeverRuns', '', 0)"
+# A package whose sequence holds a condition that does not parse.
+cp dual.msi badcond.msi
+msibuild badcond.msi \
+    -q "INSERT INTO \`InstallExecuteSequence\` (\`Action\`, \`Condition\`, \`Sequence\`) VALUES ('Broken', 'A = = B', 6700)"
+
 # A package with a string of 64 KiB or more (the string pool's long
 # entry), generated here and kept zlib-compressed (it is mostly "x").
 python3 -I -c '
@@ -89,6 +128,17 @@ for msi in basic; do
     (cd "$work/x-$msi" && find . -type f -print0 | sort -z | xargs -0 sha256sum) > "expected/$msi.sha256"
 done
 msiinfo suminfo basic.msi > expected/basic.suminfo
+# The plan packages' tables as msiinfo reads them (the tests check the
+# reader agrees, then plan from them).
+for t in Property Directory Component Feature FeatureComponents Condition Registry Shortcut \
+         CustomAction InstallExecuteSequence InstallUISequence LaunchCondition File; do
+    (cd "$work" && msiinfo export "$here/plan.msi" "$t") > "expected/plan.$t.idt"
+done
+for t in Property Directory Component Registry Shortcut; do
+    (cd "$work" && msiinfo export "$here/dual.msi" "$t") > "expected/dual.$t.idt"
+done
+mkdir -p "$work/x-plan"
+msiextract -C "$work/x-plan" plan.msi | sort > expected/plan.extract
 # The long package's Property table as name, value length, SHA-256.
 msiinfo export "$work/long.msi" Property | python3 -I -c '
 import sys, hashlib
