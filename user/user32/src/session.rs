@@ -1057,11 +1057,6 @@ pub extern "system" fn FrameRect(
     1
 }
 
-#[link(name = "gdi32", kind = "raw-dylib")]
-unsafe extern "system" {
-    fn PatBlt(dc: *mut core::ffi::c_void, x: i32, y: i32, w: i32, h: i32, rop: u32) -> i32;
-}
-
 /// InvertRect(hDC, lprc): PatBlt with DSTINVERT.
 #[unsafe(no_mangle)]
 pub extern "system" fn InvertRect(dc: *mut core::ffi::c_void, rect: *const [i32; 4]) -> i32 {
@@ -1070,8 +1065,17 @@ pub extern "system" fn InvertRect(dc: *mut core::ffi::c_void, rect: *const [i32;
     }
     // SAFETY: the caller's RECT.
     let [l, t, r, b] = unsafe { *rect };
-    // SAFETY: plain call.
-    unsafe { PatBlt(dc, l, t, r - l, b - t, 0x0055_0009) }
+    // gdi32 is looked up when needed (user32 does not import it: programs
+    // without gdi32 still load user32).
+    static PAT_BLT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let f = super::icon::gdi_proc(&PAT_BLT, b"PatBlt ");
+    if f == 0 {
+        return 0;
+    }
+    type PatBlt = extern "system" fn(*mut core::ffi::c_void, i32, i32, i32, i32, u32) -> i32;
+    // SAFETY: gdi32's PatBlt, with its documented signature.
+    let pat_blt: PatBlt = unsafe { core::mem::transmute(f) };
+    pat_blt(dc, l, t, r - l, b - t, 0x0055_0009)
 }
 
 // ---- What chrome.dll imports that has no use on gala yet ------------------

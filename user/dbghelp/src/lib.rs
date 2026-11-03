@@ -18,9 +18,11 @@ unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
-unsafe extern "system" {
-    fn SetLastError(code: u32);
+/// The thread's last error (TEB.LastErrorValue, x64 +0x68): dbghelp
+/// imports only ntdll.
+fn set_last_error(code: u32) {
+    // SAFETY: this thread's TEB.
+    unsafe { core::arch::asm!("mov gs:[0x68], {:e}", in(reg) code, options(nostack)) };
 }
 
 /// MiniDumpWriteDump(hProcess, ProcessId, hFile, DumpType, ...): gala
@@ -39,11 +41,9 @@ pub extern "system" fn MiniDumpWriteDump(
     _callback: usize,
 ) -> i32 {
     let name = b"dbghelp.dll!MiniDumpWriteDump";
-    // SAFETY: a valid buffer; plain calls.
-    unsafe {
-        GalaRecordMissing(name.as_ptr(), name.len(), 2, kind.into());
-        SetLastError(50); // ERROR_NOT_SUPPORTED
-    }
+    // SAFETY: a valid buffer; the service only reads it.
+    unsafe { GalaRecordMissing(name.as_ptr(), name.len(), 2, kind.into()) };
+    set_last_error(50); // ERROR_NOT_SUPPORTED
     0
 }
 
