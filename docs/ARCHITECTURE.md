@@ -1918,6 +1918,10 @@ Layers, bottom up (N1a: the card and TCP/IP; N1b: sockets for user mode).
   refilled to the same length looked unchanged, and a pending receive
   waited for good (winsock_test hung about once in six loaded runs; host
   test `a_reader_is_told_of_the_next_message_of_the_same_size`).
+- smoltcp is vendored (`vendor/smoltcp`, 0.12.0 with one patch so a
+  connection's state can be written down and rebuilt: "Sockets across a
+  handover"); `net::tcp::stop`/`restart` park the net thread for a
+  kernel handover.
 - `net::tcp` (N1b), the kernel's socket API, independent of NT:
   `listen(local, backlog)`, `accept`, `connect(remote)`, `send`, `recv`,
   `shutdown`, `close`, `local`/`remote` addresses, readiness. Sockets are
@@ -4243,7 +4247,7 @@ delay mode; its faults stay `net_tx` drops and `netreset=`.
 - **A chain of trust for updates**: designed below (R8); built after
   R7, before live update ships.
 
-### Kernel handover (R9 milestones (a) to (d), 2026-11-02)
+### Kernel handover (R9 milestones (a) to (e), 2026-11-02)
 
 The running kernel hands the machine to a fresh kernel image without the
 firmware or the bootloader: same build, no programs running (milestone
@@ -4282,6 +4286,7 @@ said):
 | 10 | KERNEL_FILE | the kernel ELF to hand over to next time |
 | 11-32 | programs | REQUIRED, milestones (b) and (c): "Programs across a handover" below |
 | 33 | WRITER | the writing kernel's build name (optional; (d): only the `handover_next` build writes and reads it so far) |
+| 34, 35 | NET, SOCKETS | milestone (e), REQUIRED, written only when a program holds a socket: "Sockets across a handover" below |
 
 **Memory.** The receiving kernel builds its frame allocator from the
 record's map as from Limine's: the new image is "executable and modules",
@@ -4412,7 +4417,7 @@ host-tested: round trip, damage, older entries).
   any failure before the point of no return) lets the held threads go
   and unfreezes the scheduler, and is logged: `handover: refused: thread
   12 of process 4 is in a system call that cannot be made again
-  (NtWriteFile)`, `... process 4 has an open socket`. The calls Windows
+  (NtWriteFile)`, `... process 4 has a job`. The calls Windows
   splits into a side effect and a wait (NtSignalAndWaitForSingleObject,
   NtWaitForAlertByThreadId) do not exist in gala yet; when they come,
   the blocked half is carried as the plain wait (registers rewritten to
@@ -4498,10 +4503,12 @@ host-tested: round trip, damage, older entries).
 **Not carried yet** (each makes the handover refuse, with the reason):
 threads blocked for over 3 s in a system call that cannot be made again
 (NtWriteFile on a full pipe, a console read, NtFsControlFile's pipe
-listen, socket calls, NtWaitForDebugEvent...), terminating threads,
+listen, NtWaitForDebugEvent...), terminating threads,
 threads not started by the scheduler yet; I/O in flight: asynchronous
 pipe requests pending, files or pipes bound to a completion port (their
-packets would need the request's state), sockets (milestone (e));
+packets would need the request's state; sockets bound to one are
+carried, milestone (e)), a handle to the AFD device itself, a socket
+request naming a socket or process that is not carried;
 console windows and console sessions (conhost: the session's screen
 buffer and input queue are kernel state; console input and output
 objects without a window are carried), jobs, registry keys (a key the
@@ -4517,6 +4524,104 @@ security context (FSCTL_PIPE_IMPERSONATE on a carried pipe fails), the
 window registry, the desktop and the registry's volatile keys.
 The first kernel's image and Limine's reclaimable memory are not freed;
 the scaffold of the running kernel is freed only by the next handover.
+
+**Sockets across a handover** (milestone (e), 2026-11-02; scenarios
+`handover_net`, `handover_net_uefi`, test program
+`user/handover_net_test` on ws2_32; host tests in `net::tcp`,
+`handover::sockets`, `handover::version`). A server keeps its listening
+socket, its established TCP connections and the connections waiting in
+its backlog across a kernel handover; the peer sees a pause (the
+network is stopped for 0.5-0.7 s under TCG), never a reset.
+- *Stopping the network* (`net::tcp::stop`, from `carry::collect_stopped`
+  once the programs' threads are stopped): the net thread finishes its
+  poll and the notify hooks it calls (AFD completions), then parks: no
+  frame is taken and nothing acknowledged from then on, so the record
+  holds every byte the peers were told arrived. Frames that come later
+  stay in the card's ring and are lost when it is reset; frames still in
+  the transmit ring are lost too: TCP sends both again (the peer's
+  retransmission timer, ours carried with its absolute deadline). A
+  refused handover restarts the thread (`carry::release`, `tcp::restart`).
+  The new kernel logs how long the network was stopped
+  (`handover: 2 socket(s) resumed; the network was stopped for 668 ms`).
+- *Connections in gala's terms* (`net::tcp::ConnState`, never smoltcp's
+  memory layout, as (d) requires): on the card or loopback, the TCP state
+  (RFC 793's names, gala's numbering `tcp_state`), the endpoints and the
+  listen address, SND.UNA, the last sequence number sent, the sequence
+  number of the first unread byte, the last ACK and window sent, the
+  window scale this side advertised, the peer's window, window scale,
+  SACK permission and MSS as negotiated, when the last segment came, FIN
+  received, the timer (`timer_kind`: idle with its keep-alive deadline,
+  retransmit with its deadline and delay, fast retransmit, TIME-WAIT
+  close) with absolute deadlines on the kernel's monotonic clock (which
+  goes on across a handover), the RTT estimate, the peer's timestamp, the
+  socket's options (Nagle, delayed ACK, keep-alive, idle timeout, hop
+  limit) and its buffers' sizes; then the bytes received and not read,
+  and the bytes sent and not acknowledged followed by those not sent yet
+  (`CarriedConn`). Not carried: out-of-order segments (not acknowledged:
+  the peer sends them again; SACKed ones too, as RFC 2018 allows a
+  receiver to renege), the RTT sample in flight, delayed-ACK state.
+- *smoltcp* has no public way to set a socket's sequence numbers, so it
+  is vendored (`vendor/smoltcp`, 0.12.0, `[patch.crates-io]`) with one
+  patch between `gala: begin` and `gala: end` markers (THIRD_PARTY.md):
+  `Socket::carried` (the state as plain values), `Socket::queued_bytes`
+  (copies of the queues) and `Socket::restore` (a new, closed socket
+  becomes the connection; refused if the buffers are smaller than the
+  carried ones or the state is inconsistent). `net::tcp` converts
+  between those and `ConnState`; nothing else sees smoltcp's types. A
+  smoltcp upgrade re-applies the patch; the record does not change
+  unless behaviour does.
+- *Kernel sockets* (`net::tcp::carry_entry`/`adopt_entry`): a bound
+  socket (its address); a listener (its address, backlog, next sequence
+  number, its accept queue with the sequence numbers already handed to
+  the program by WAIT_FOR_LISTEN, and its listening sockets that are not
+  plain LISTEN: half-open, or established while the backlog was full;
+  the plain LISTEN sockets are made fresh); a connection (and whether
+  its connect completed). The stack's own state (`carry_stack`/
+  `adopt_stack`): the card's address configuration (IP, prefix, gateway,
+  MAC; gala's static configuration stands for a DHCP lease, and the next
+  kernel takes the carried one), the ephemeral port counter, and the
+  connections their owner closed that are still finishing (FIN,
+  TIME-WAIT). The neighbor (ARP) cache is not carried: smoltcp keeps it
+  private, and the first frame after the handover asks again (one round
+  trip).
+- *AFD endpoints* (`afd::carry`/`adopt`/`adopt_requests`): transport,
+  non-blocking mode, notification modes, completion port and key,
+  WSAEventSelect's event, mask and recorded events, the endpoint's own
+  signal state, and its pending requests as data: receive (buffers,
+  peek), send (buffers, bytes already queued), wait-for-listen, AcceptEx
+  (the accepting endpoint, the output layout), connect, poll (the
+  sockets, events, output, whether it waits), each with its process,
+  IO_STATUS_BLOCK, event, ApcContext and completion routine (thread,
+  routine, arguments). AFD never blocks inside NtDeviceIoControlFile, so
+  a thread "in recv" is in a wait on the request's event (made again in
+  the next kernel with its absolute deadline, as in (b)); its request is
+  the endpoint's state, carried and completed by the next kernel when
+  the bytes come. Socket options gala's ws2_32 keeps are in the
+  program's memory (carried as it is).
+- *Record*: NET (tag 34: a header entry, then the closing connections)
+  and SOCKETS (tag 35: per endpoint object, `SocketRec`, with the
+  connections as CONNECTION entries carrying a role (the socket's own,
+  READY with its sequence number, OPENING, LINGERING) and the pending
+  requests as `RequestRec`s). Both REQUIRED, version 1, and written only
+  when a program holds a socket (`version::Kind::when_present`): `agree`
+  does not ask for them up front, the record as written is checked
+  (`check_record`), so programs without sockets still go to a kernel
+  that predates (e), and a kernel that does not read SOCKETS is refused
+  with `the next kernel (...) does not know section NET`.
+- *Rebuilding*: `net::init` has reset the card and set the stack up;
+  `handover::resume_programs` takes NET (the card's address, the
+  counter, the closing connections), then every SOCKETS entry after the
+  objects it names (completion ports, events) with its kernel socket,
+  then, once processes and threads are there, the pending requests
+  (those that can finish do at once). The net thread's first poll
+  reports every socket.
+- Not carried yet (refused or impossible today): UDP and raw sockets
+  (gala has no UDP: `\Device\Udp` opens fail, so no program can hold
+  one), IPv6, a handle to `\Device\Afd` itself. The time without the
+  network grows with the record (it is stopped before the draft record
+  is encoded): fine for TCP (peers retransmit for minutes) but worth
+  shrinking (stop it after the image is prepared, encode the sockets
+  last).
 
 **Versions and negotiation** (milestone (d), 2026-11-02; scenarios
 `handover_upgrade`, `handover_upgrade_uefi`, `handover_downgrade_refused`;
@@ -4550,7 +4655,7 @@ state format differs; every future format change follows these rules.
   check (`version::trusted`: a hook, accepting all until the signed
   manifest is built), parses as a kernel ELF, its note is read and logged
   (`handover: gala hands over to gala-next (record framing 1-1, image
-  layout 1, extended state 0x3, 33 section kinds; with programs)`); then,
+  layout 1, extended state 0x3, 35 section kinds; with programs)`); then,
   before any thread is stopped, `version::agree`: the framing this kernel
   writes is in the target's range; with programs, the same image layout
   version; every REQUIRED section this kernel would write is known to the

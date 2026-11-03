@@ -628,6 +628,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winsock_test", "ntdll.dll", "Windows/System32"),
     ("winsock_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ws2_32.dll", "Windows/System32"),
+    ("handover_net_test", "ntdll.dll", "Windows/System32"),
+    ("handover_net_test", "kernel32.dll", "Windows/System32"),
+    ("handover_net_test", "ws2_32.dll", "Windows/System32"),
     ("go_hello", "ntdll.dll", "Windows/System32"),
     ("go_hello", "kernel32.dll", "Windows/System32"),
     ("go_hello", "bcryptprimitives.dll", "Windows/System32"),
@@ -1559,6 +1562,7 @@ const USER_PROGRAMS: &[&str] = &[
     "clock_test",
     "handover_test",
     "handover_k32_test",
+    "handover_net_test",
     "loader_test",
     "smp_test",
     "smpsched_test",
@@ -2434,6 +2438,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "handover_upgrade_uefi",
     "handover_idle_uefi",
     "handover_k32_uefi",
+    "handover_net_uefi",
     "server_profile",
     "gala_cli",
     "hello",
@@ -2468,6 +2473,9 @@ enum NetClient {
     /// Logs on to an FTP server as `gala` and asks for the directory
     /// (`ftp_client`: the control connection only).
     Ftp,
+    /// handover_net_test's line protocol across a kernel handover
+    /// (`handover_net_client`).
+    HandoverNet,
 }
 
 /// Scenarios that get a virtio-net card on QEMU's user-mode network, with
@@ -2477,6 +2485,8 @@ enum NetClient {
 const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("net_echo", "net: echo listening on port 7", NetClient::Echo),
     ("winsock_test", "winsock_test: listening on port 7", NetClient::Echo),
+    ("handover_net", "handover_net_test: listening on port 7", NetClient::HandoverNet),
+    ("handover_net_uefi", "handover_net_test: listening on port 7", NetClient::HandoverNet),
     ("go_http", "go_http: listening on port 7", NetClient::Http(GO_HTTP_PAGE)),
     ("net_reset", "go_http: listening on port 7", NetClient::Http(GO_HTTP_PAGE)),
     ("nginx", "using the \"select\" event method", NetClient::Nginx),
@@ -3596,7 +3606,7 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "handover_k32_test: ready",
             "handover: gala hands over to gala-next (record framing 1-1, image layout 1, \
-             extended state 0x3, 33 section kinds; with programs)",
+             extended state 0x3, 35 section kinds; with programs)",
             "handover: carrying 1 process(es), 10 thread(s)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala-next; the record was written by an older kernel \
@@ -3647,17 +3657,72 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "handover_k32_test: ready",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0x3, 32 section kinds; with programs)",
+             extended state 0x3, 34 section kinds; with programs)",
             "handover: refused: the next kernel (gala) reads PROCESSES up to version 2; this \
              kernel writes version 3, which needs a reader of version 3",
             "handover_k32_test: slept",
             "handover_k32_test: ok",
             "exited with status 0x00000000",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0x3, 32 section kinds)",
+             extended state 0x3, 34 section kinds)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala; this build does not read the writer's name",
             "handover: skipped section 33 (unknown to this kernel)",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // R9 (e): a server with established TCP connections across a
+        // kernel handover (user/handover_net_test, on ws2_32): xtask's
+        // client talks to it through QEMU's port forward before, during
+        // and after the handover; a second connection waits unaccepted in
+        // the listener's backlog with a line unread across it; a third is
+        // accepted after it on the same listening socket. The program's
+        // line counter goes on, no connection is reset.
+        name: "handover_net",
+        cmdline: "qemu_exit handover=1 run=handover_net_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "handover_net_test: listening on port 7",
+            "handover: carrying 1 process(es)",
+            "socket(s): 2 TCP connection(s), 1 listener(s); the network is stopped",
+            "handover: generation 1 (from generation 0)",
+            "handover: resumed process handover_net_test.exe",
+            "socket(s) resumed; the network was stopped for",
+            "handover_net_test: connection 1: 15 line(s), 15 in all",
+            "handover_net_test: connection 2: 2 line(s), 17 in all",
+            "handover_net_test: connection 3: 2 line(s), 19 in all",
+            "handover_net_test: ok",
+            "xtask: net client: handover ok",
+            "exited with status 0x00000000",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // handover_net_test on its own (as on Windows, run-all.ps1): its
+        // `self` thread plays the client over loopback, with no handover
+        // allowed (the answer to `handover` says so).
+        name: "handover_net_self",
+        cmdline: "qemu_exit run=handover_net_test.exe args=self",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "handover_net_test: connection 3: 2 line(s), 19 in all",
+            "handover_net_test: self client ok",
+            "handover_net_test: ok",
+        ],
+    },
+    Scenario {
+        // handover_net booted by UEFI (UEFI_SCENARIOS).
+        name: "handover_net_uefi",
+        cmdline: "qemu_exit handover=1 run=handover_net_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "firmware: UEFI x86_64",
+            "socket(s): 2 TCP connection(s), 1 listener(s); the network is stopped",
+            "handover: resumed process handover_net_test.exe",
+            "handover_net_test: connection 3: 2 line(s), 19 in all",
+            "handover_net_test: ok",
+            "xtask: net client: handover ok",
             "gala: boot ok",
         ],
     },
@@ -4601,6 +4666,9 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("handover_disk", "persist_test"),
     ("handover_k32", "handover_k32_test"),
     ("handover_k32_uefi", "handover_k32_test"),
+    ("handover_net", "handover_net_test"),
+    ("handover_net_uefi", "handover_net_test"),
+    ("handover_net_self", "handover_net_test"),
     ("handover_k32_twice", "handover_k32_test"),
     ("handover_upgrade", "handover_k32_test"),
     ("handover_upgrade_uefi", "handover_k32_test"),
@@ -5744,6 +5812,7 @@ fn run_vm(
                 NetClient::SshPassword => ssh_client(port, true),
                 NetClient::Psql => psql_client(port),
                 NetClient::Ftp => ftp_client(port),
+                NetClient::HandoverNet => handover_net_client(port),
             }));
         }
         if stop_after_client && client.as_ref().is_some_and(|c| c.is_finished()) {
@@ -5796,6 +5865,7 @@ fn run_vm(
                     NetClient::Ssh | NetClient::SshPassword => "ssh",
                     NetClient::Psql => "psql",
                     NetClient::Ftp => "ftp",
+                    NetClient::HandoverNet => "handover",
                     _ => "http",
                 }
             ),
@@ -6659,6 +6729,69 @@ fn net_client(port: u16) -> Result {
         Some((i, b)) => Err(format!("byte {i} is {b:#x}, sent {:#x}", pattern(i))),
         None => Ok(()),
     }
+}
+
+/// The host side of the handover_net scenarios (user/handover_net_test):
+/// a conversation of numbered lines on one connection before, across and
+/// after a kernel handover (the line `handover` asks for it), a second
+/// connection opened before the handover that waits in the listener's
+/// backlog with its first line unread, a third opened after it. Every
+/// answer must come, in order, and no connection may be reset.
+fn handover_net_client(port: u16) -> Result {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    type Conn = (TcpStream, BufReader<TcpStream>);
+    let open = |what: &str| -> Result<Conn> {
+        let s =
+            TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("{what}: connect: {e}"))?;
+        s.set_read_timeout(Some(Duration::from_secs(60))).map_err(|e| e.to_string())?;
+        let r = BufReader::new(s.try_clone().map_err(|e| e.to_string())?);
+        Ok((s, r))
+    };
+    let send = |c: &mut Conn, line: &str| -> Result {
+        c.0.write_all(format!("{line}\n").as_bytes()).map_err(|e| format!("send {line:?}: {e}"))
+    };
+    let expect = |c: &mut Conn, want: &str| -> Result {
+        let mut got = String::new();
+        c.1.read_line(&mut got).map_err(|e| format!("waiting for {want:?}: {e}"))?;
+        if got.trim_end() == want { Ok(()) } else { Err(format!("expected {want:?}, got {got:?}")) }
+    };
+    let ask = |c: &mut Conn, line: &str, want: &str| -> Result {
+        send(c, line)?;
+        expect(c, want)
+    };
+    // The server closes after `bye`: a FIN, never a reset.
+    let closed = |c: &mut Conn, what: &str| -> Result {
+        let mut rest = String::new();
+        match c.1.read_line(&mut rest) {
+            Ok(0) => Ok(()),
+            Ok(_) => Err(format!("{what}: more after bye: {rest:?}")),
+            Err(e) => Err(format!("{what}: closed with an error (reset?): {e}")),
+        }
+    };
+    let mut first = open("first connection")?;
+    ask(&mut first, "hello", "1 hello")?;
+    ask(&mut first, "before", "2 before")?;
+    // The second connection: established, not accepted, a line unread.
+    let mut second = open("second connection")?;
+    send(&mut second, "early")?;
+    thread::sleep(Duration::from_millis(500));
+    ask(&mut first, "handover", "3 handover requested")?;
+    // Sent at once: it reaches a kernel that is stopping or starting.
+    ask(&mut first, "during", "4 during")?;
+    for i in 0..10 {
+        thread::sleep(Duration::from_millis(300));
+        ask(&mut first, &format!("line {i}"), &format!("{} line {i}", 5 + i))?;
+    }
+    ask(&mut first, "bye", "15 bye")?;
+    closed(&mut first, "first connection")?;
+    expect(&mut second, "16 early")?;
+    ask(&mut second, "bye", "17 bye")?;
+    closed(&mut second, "second connection")?;
+    let mut third = open("third connection")?;
+    ask(&mut third, "after", "18 after")?;
+    ask(&mut third, "bye", "19 bye")?;
+    closed(&mut third, "third connection")
 }
 
 /// The host side of an HTTP scenario: GET / with HTTP/1.1, expect 200 and
