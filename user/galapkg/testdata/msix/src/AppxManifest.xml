@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A test package manifest for galapkg's MSIX reader (written by hand
+     from Microsoft's App package manifest schema reference). {ARCH} is
+     replaced by make_fixtures.py. -->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity Name="Gala.TestApp"
+            Publisher="CN=Gala Test Publisher, O=Gala, C=US"
+            Version="1.2.3.0"
+            ProcessorArchitecture="{ARCH}" />
+
+  <Properties>
+    <DisplayName>Gala Test App</DisplayName>
+    <PublisherDisplayName>Gala &amp; Friends</PublisherDisplayName>
+    <Logo>Assets\My Logo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+    <PackageDependency Name="Microsoft.VCLibs.140.00.UWPDesktop"
+                       Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+                       MinVersion="14.0.30704.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App" Executable="app.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Gala Test App" Description="A test package"
+                          BackgroundColor="transparent"
+                          Square150x150Logo="Assets\My Logo.png"
+                          Square44x44Logo="Assets\My Logo.png" />
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

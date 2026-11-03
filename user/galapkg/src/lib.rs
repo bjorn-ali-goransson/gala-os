@@ -12,7 +12,10 @@
 //! - [`install`]: install, uninstall, upgrade and list as transactions
 //!   over a [`install::Host`] (files, registry, downloads, the log), which
 //!   `gala.exe` implements with Win32 calls and the tests in memory;
-//! - [`shim`]: the command shims in the Links directory.
+//! - [`shim`]: the command shims in the Links directory;
+//! - [`msix`]: MSIX/AppX packages and bundles (with [`appxmanifest`],
+//!   [`blockmap`] and the small XML reader [`xml`]): identity and
+//!   names, block map checks; nothing installed yet (PK stage 4).
 //!
 //! `no_std` with `alloc`: `gala.exe` is freestanding (the process heap as
 //! the global allocator, `gala_heap`).
@@ -23,11 +26,15 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod appxmanifest;
+pub mod blockmap;
 pub mod install;
 pub mod manifest;
+pub mod msix;
 pub mod shim;
 pub mod source;
 pub mod version;
+pub mod xml;
 pub mod yaml;
 pub mod zip;
 
