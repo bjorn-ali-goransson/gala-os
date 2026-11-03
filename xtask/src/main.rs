@@ -743,6 +743,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // gala_cli_test lowers a token (advapi32) to run `gala` at Low.
     ("gala_cli_test", "advapi32.dll", "Windows/System32"),
     ("gala_cli_test", "bcryptprimitives.dll", "Windows/System32"),
+    // pk_install_test: `gala install` writes the registry (advapi32) and
+    // installs from a winget-pkgs snapshot, C:\pk_source.
+    ("pk_install_test", "advapi32.dll", "Windows/System32"),
+    ("pk_install_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("pk_install_test", "user/pk_install_test/source/", "pk_source"),
     ("uipi_test", "ntdll.dll", "Windows/System32"),
     ("uipi_test", "kernel32.dll", "Windows/System32"),
     ("uipi_test", "msvcrt.dll", "Windows/System32"),
@@ -1641,6 +1646,7 @@ const USER_PROGRAMS: &[&str] = &[
     "cmd_test",
     "gala",
     "gala_cli_test",
+    "pk_install_test",
     "profile_test",
     "registry_test",
     "keyed_event_test",
@@ -1926,7 +1932,10 @@ fn unit_tests() -> Result {
             .args(["test", "--package", "kernel", "--lib", "--features", "handover_next"])
             .arg("handover::"),
     )?;
-    run_cmd(cargo().args(["test", "--package", "xtask"]))
+    run_cmd(cargo().args(["test", "--package", "xtask"]))?;
+    // `gala install`'s package manager (manifests, zip, the install
+    // transaction; ROADMAP PK).
+    run_cmd(cargo().args(["test", "--package", "galapkg"]))
 }
 
 /// `cargo xtask alloc-audit`: disassembles the kernel (the debug build
@@ -3387,6 +3396,24 @@ const SCENARIOS: &[Scenario] = &[
             "gala_cli_test target: WM_CLOSE",
             "gala_cli_test target: ok",
             "gala_cli_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // ROADMAP PK stages 1 and 2: `gala install` of a zip package from
+        // a local winget-pkgs snapshot (C:\pk_source), its command run
+        // from PATH through its shim, listed, upgraded, uninstalled; a
+        // conflicting install rolled back, a bad SHA-256 refused. The
+        // install log is copied to the serial log (`logtee:`).
+        name: "pk_install_zip",
+        cmdline: "qemu_exit logtee=C:/Users/gala/AppData/Local/gala/logs run=pk_install_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "installed id=GalaTest.PkHello version=1.0.0",
+            "rollback remove file",
+            "upgraded id=GalaTest.PkHello from=1.0.0 to=1.1.0",
+            "uninstalled key=GalaTest.PkHello_Microsoft.Winget.Source_8wekyb3d8bbwe",
+            "pk_install_test: ok",
             "exited with status 0x00000000",
         ],
     },

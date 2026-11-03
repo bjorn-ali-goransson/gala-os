@@ -14,8 +14,21 @@
 //! gala wallpaper <name>              dunes, ribbons, najdi, night or drawn
 //! gala ps                            list the processes
 //! gala kill <pid|name>               end a process (all of that name)
+//! gala install <id> [--version v] [--source dir]
+//! gala search <text> [--source dir]
+//! gala list [<text>]
+//! gala upgrade [<id>|--all] [--version v] [--source dir]
+//! gala uninstall <id>|--product-code <key>
 //! gala help
 //! ```
+//!
+//! The package commands (ROADMAP PK, ARCHITECTURE "Installing software")
+//! install winget packages the way winget does: module `pkg` over the
+//! `galapkg` library. Exit codes there: 0 done, 1 usage, 2 not found, 3
+//! an installer type or source gala cannot handle yet, 4 failed (rolled
+//! back), 5 the download's SHA-256 is not the manifest's. gala.exe
+//! copied into WinGet\Links under a command's name is that command's
+//! shim (`pkg::shim_main`).
 //!
 //! A window is its HWND (`0x20010`, as `gala windows` prints it) or its
 //! title (whole, or a part only one window's title has; any case).
@@ -28,6 +41,13 @@
 
 #![no_std]
 #![no_main]
+
+extern crate alloc;
+
+// The process heap as Rust's allocator (galapkg uses `alloc`).
+use gala_heap as _;
+
+mod pkg;
 
 use core::ffi::c_void;
 
@@ -64,6 +84,8 @@ unsafe extern "system" {
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn strlen(s: *const u8) -> usize;
     fn __chkstk();
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
@@ -93,12 +115,25 @@ const USAGE: &str = "usage: gala <command> [arguments]
   wallpaper <name>              dunes, ribbons, najdi, night or drawn
   ps                            list the processes
   kill <pid|name>               end a process (every one of that name)
+  install <id> [--version v] [--source dir]
+                                install a winget package (zip, portable)
+  search <text> [--source dir]  find packages by id, name, moniker or tag
+  list [<text>]                 installed programs (the uninstall records)
+  upgrade [<id>|--all] [--version v] [--source dir]
+                                list or install newer versions
+  uninstall <id>                remove a package (its files, commands, record)
   help                          this text
+
+Packages come from a winget-pkgs tree: --source <dir> (a local snapshot,
+installers in its installers\\ directory) or %GALA_WINGET_SOURCE%; the
+repository over HTTPS is not supported yet. The install log is
+%LOCALAPPDATA%\\gala\\logs\\install.log (--verbose shows it as it runs).
 
 A window is its HWND (as `gala windows` prints it) or its title (whole,
 or a part only one title has; any case).
 Exit codes: 0 done, 1 usage, 2 not found, 3 not supported here (no
-graphical shell), 4 failed.
+graphical shell; an installer type or source not supported yet), 4 failed
+(an install rolled back), 5 a download whose SHA-256 is not the manifest's.
 ";
 
 const EXIT_USAGE: u32 = 1;
@@ -840,6 +875,21 @@ fn kill(a: &Args) -> u32 {
     code
 }
 
+/// The package commands and their winget aliases (module `pkg`).
+const PACKAGE_COMMANDS: [&str; 11] = [
+    "install",
+    "add",
+    "search",
+    "find",
+    "list",
+    "ls",
+    "upgrade",
+    "update",
+    "uninstall",
+    "remove",
+    "rm",
+];
+
 fn run() -> u32 {
     let a = args();
     if a.count < 2 {
@@ -903,6 +953,8 @@ fn run() -> u32 {
             return status_error(status, "changed");
         }
         0
+    } else if PACKAGE_COMMANDS.iter().any(|w| a.is(1, w)) {
+        pkg::run(&a)
     } else if a.is(1, "ps") {
         ps()
     } else if a.is(1, "kill") {
@@ -916,7 +968,8 @@ fn run() -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
-    let code = run();
+    // A command shim (gala.exe copied into WinGet\Links), else gala.
+    let code = pkg::shim_main().unwrap_or_else(run);
     // SAFETY: ends the process.
     unsafe { ExitProcess(code) }
 }

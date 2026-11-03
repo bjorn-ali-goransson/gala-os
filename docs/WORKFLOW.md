@@ -861,6 +861,37 @@ where its pixel checks expect it (no pointer arithmetic).
   rather than reading them once right after `gala windows` (which is
   shasha's own state) changed.
 
+## Installing software (`gala install`, ROADMAP PK)
+
+- The logic is `user/galapkg`, tested on the host: `cargo test -p
+  galapkg` (seconds; `cargo xtask test` runs it with the unit tests).
+  Its install tests run against `user/pk_install_test/source` through an
+  in-memory machine and make every mutating call fail in turn: a new
+  step in the transaction gets that coverage for free, so add steps
+  through `install::Tx`, never with a bare `Host` call.
+- The test packages are made by `python3 -I
+  user/pk_install_test/make_source.py` (zips of `user/bin/hello.exe`,
+  SHA-256s written into the manifests); rerun it after changing them.
+  `manifests/b` and `manifests/j` are real winget-pkgs manifests (leave
+  them; THIRD_PARTY.md).
+- The boot test is `cargo xtask boot-test pk_install_zip`; a failed run
+  shows the install log twice (`logtee: install.log:` lines, and
+  pk_install_test prints it after the failing check).
+- gala.exe is `no_std` with `alloc` (gala_heap): code that brings in
+  more of `alloc` may need another ntdll C function in main.rs's import
+  list (`memmove`, `strlen` were needed; the link error names it).
+  advapi32 is loaded at run time (`pkg::Reg`): do not import it
+  statically, or `gala`'s window commands break on images without it.
+- Every installed command is a copy of gala.exe: a gala.exe change does
+  not reach commands installed before it until they are reinstalled.
+- Low on disk: a few user programs can be built alone into a scratch
+  target directory with xtask's flags (`cargo build --release --target
+  x86_64-pc-windows-msvc --config 'target.x86_64-pc-windows-msvc.rustflags=
+  ["--remap-path-prefix=<cargo home>=/cargo"]' -p gala -p ...`); the
+  output is byte-identical to `export-tests`'s when no other program of
+  the batch shares a dependency with different features (`cargo tree
+  --workspace -i <crate>` tells).
+
 ## Screenshots
 
 `cargo xtask screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]`
@@ -1497,6 +1528,7 @@ the in-guest, deterministic version.
 | NT personality (objects, processes, files, sections, syscalls) | `kernel/src/nt/` |
 | Ramfs | `kernel/src/fs/` |
 | Test runtime for user programs | `user/ntrt/` |
+| `gala install` (winget packages): library, commands, test source | `user/galapkg/`, `user/gala/src/pkg.rs`, `user/pk_install_test/` |
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
 | Checked-in binaries, Windows runner | `user/bin/` |
 | Build, boot tests, reports | `xtask/` |

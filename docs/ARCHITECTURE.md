@@ -1081,6 +1081,12 @@ one flat structure (120 bytes):
 | 152 | with flag 16: the primary token (CreateProcessAsUserW) |
 | 160 | with flag 32: the console session (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: the HPCON's first field); flag 64 with it: the child gets new console handles as its standard handles (no STARTF_USESTDHANDLES); flag 128: DETACHED_PROCESS, no console session |
 
+A program named without a directory is searched for as CreateProcess
+documents: the caller's executable's directory, the current directory,
+System32, the Windows directory, then each directory of the caller's
+PATH (2026-11-03, for `gala install`'s Links directory; `.exe` is
+appended to a name without an extension).
+
 The kernel opens the image like NtOpenFile (so a missing file is
 STATUS_OBJECT_NAME_NOT_FOUND, ERROR_FILE_NOT_FOUND to the caller), reads
 it and builds the process with the same code as boot-time programs
@@ -3441,6 +3447,142 @@ a part. Every NotifyWinEvent is a system call (no "anyone listening?"
 shortcut yet). Not done: the in-context synchronous call in the raising
 thread, UIPI between hooks and events, EVENT_OBJECT_LOCATIONCHANGE,
 REORDER, the menu and caret events, EVENT_SYSTEM_* beyond FOREGROUND.
+
+## Installing software (ROADMAP PK; stages 1 and 2 built 2026-11-03)
+
+`gala install` installs packages from winget's manifests the way winget
+does, from the command line (CLI parity: the server profile too). The
+pieces:
+
+- **`user/galapkg`** (a library, `no_std` + `alloc`, host-tested with
+  `cargo test -p galapkg`, run by `cargo xtask test`'s unit tests):
+  `yaml` (the subset manifests use: block mappings and sequences, plain,
+  quoted and block scalars, flow sequences of scalars; anchors, tags and
+  complex keys are errors naming the line), `manifest` (schema 1.x:
+  singleton or version + installer + defaultLocale/locale files merged,
+  root installer fields as each installer's defaults; installer
+  selection: x64, else neutral, user scope before machine, a type gala
+  installs before one it does not), `version` (winget's ordering: parts
+  by number then text, `1.0` after `1.0-beta`, missing parts are 0),
+  `zip` (APPNOTE: EOCD, central directory, stored and deflate through
+  `miniz_oxide`, CRC-32 and size checked, `safe_path` refuses `..`,
+  roots, drives and `:`), `source` (a winget-pkgs tree), `install` (the
+  transaction), `shim`.
+- **`user/gala`** module `pkg`: the commands and `Win32`, galapkg's
+  `Host` over kernel32 (files) and advapi32 (the registry; loaded with
+  LoadLibrary when a package command runs, so `gala`'s other commands
+  still need only kernel32 and ntdll). gala.exe now links `gala_heap`
+  (the process heap as the allocator) and grew from 44 to ~300 KB.
+
+**Commands** (winget's names and aliases): `install|add <id>
+[--version v] [--source s] [--verbose]`, `search|find <text>`,
+`list|ls [<text>]` (every ARP entry, HKCU then HKLM; winget's
+`ARP\User\X64\<key>` ids for others), `upgrade|update` (lists; with
+`<id>` or `--all` upgrades), `uninstall|remove|rm <id>|--product-code
+<key>`; winget's no-op flags (`-e`, `--silent`, the agreements) are
+accepted. Exit codes: 0, 1 usage, 2 not found, 3 not supported yet
+(installer type, HTTP(S)), 4 failed (rolled back), 5 SHA-256 mismatch.
+
+**Sources.** A winget-pkgs tree: `manifests\<first letter>\<id parts
+as directories>\<version>\*.yaml`; a version directory is one holding
+`<id>.*yaml` files, so `ripgrep\MSVC` (a package) and a version are told
+apart. `--source <dir>`, else `%GALA_WINGET_SOURCE%`, else
+`https://github.com/microsoft/winget-pkgs`, which is refused for now
+(exit 3). A local snapshot may carry installers under
+`installers\<the URL's file name>` (an offline mirror, used before any
+download; the SHA-256 is checked all the same). The source used is kept
+in the ARP entry (`GalaSource`) for `gala upgrade`. Search walks the
+whole tree (fine for snapshots; the real repository needs an index).
+
+**Downloads: designed, not built (TODO, ROADMAP PK stage 1).** `Host::
+fetch(url)` is the seam: gala.exe reads `file:///` URLs and paths and
+answers ERROR_NOT_SUPPORTED for `http(s)://` (galapkg turns that into
+exit 3 with what is missing). The plan: an HTTP/1.1 client in gala.exe
+over Winsock (getaddrinfo is real; ws2_32 loaded like advapi32), with
+TLS 1.2/1.3 from gala's own CNG (bcrypt: AES-GCM, SHA-2, ECDH, RSA
+already there) as a small client (or OpenSSL as nginx_tls links it, as a
+DLL gala.exe loads), certificates checked against the machine's root
+store (crypt32); redirects (GitHub release URLs redirect to
+objects.githubusercontent.com); then manifests fetched from
+`raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/...`
+and version lists from the GitHub contents API; `search` against
+winget's source index (`cdn.winget.microsoft.com/cache/source2.msix`, an
+MSIX with a SQLite index: needs stage 4's MSIX reading and sqlite).
+
+**Install, as winget does for `portable` and `zip` (NestedInstallerType
+portable).** The key `<PackageIdentifier>_Microsoft.Winget.Source_
+8wekyb3d8bbwe` (winget's source identifier: a snapshot of the community
+repository installs as winget would) names both the package directory,
+`%LOCALAPPDATA%\Microsoft\WinGet\Packages\<key>` (a zip unpacked whole;
+a portable `.exe` renamed to its command), and the ARP entry
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\<key>`:
+DisplayName, DisplayVersion, Publisher, InstallDate, InstallLocation,
+UninstallString and QuietUninstallString (`"<gala.exe>" uninstall
+--product-code <key>`), NoModify, NoRepair, URLInfoAbout,
+WinGetPackageIdentifier, WinGetSourceIdentifier, WinGetInstallerType,
+InstallDirectoryAddedToPath, and gala's GalaLinks (REG_MULTI_SZ: the
+files in Links), GalaSource, GalaInstallerSha256. Each command
+(PortableCommandAlias, else Commands[0], else the file's name) goes into
+`%LOCALAPPDATA%\Microsoft\WinGet\Links`, which is added to
+`HKCU\Environment\Path` (REG_EXPAND_SZ, once); ArchiveBinariesDependOnPath
+puts the package directory on PATH instead (and uninstall takes it off).
+Installing what is installed at the same version says so (exit 0);
+another version is `gala upgrade`'s.
+
+**Command shims (gala lacks file symbolic links: CreateSymbolicLinkW is
+ERROR_PRIVILEGE_NOT_HELD).** A command is `Links\<alias>.exe`, a copy
+of gala.exe, and `Links\<alias>.shim` (`target = <path>`). gala.exe
+started under another name than `gala` looks for its `.shim` first
+(`pkg::shim_main`) and runs the target with the rest of its own command
+line (unchanged), its standard handles (STARTF_USESTDHANDLES), waits
+and exits with the target's code. TODO: real symbolic links once the
+file system has them (winget's way), then shims only as the fallback.
+Programs see PATH as their parent gave it: the test takes the new value
+from `HKCU\Environment` as a new shell would (winget broadcasts
+WM_SETTINGCHANGE; gala's logon environment does not read
+`HKCU\Environment` yet: TODO, with userenv's CreateEnvironmentBlock).
+
+**Transactions (invariant: a failed install, upgrade or uninstall leaves
+the machine as it was).** Everything that can be checked goes first,
+without changes: the manifest, the installer selection, the SHA-256,
+the whole archive inflated and CRC-checked in memory, NestedInstallerFiles
+present, safe paths. Changes then go through `install::Tx`, which
+journals the undo of each: files and directories created, registry keys
+created, values set (with the old value), files removed (their contents
+kept in memory), keys deleted (their values kept). An error rolls back
+newest first, logging each step; the message ends "(rolled back:
+nothing was changed)" or says how many steps could not be undone. An
+upgrade is one transaction: the old version's removal and the new one's
+install, so a failure puts the old one back. A command another package
+owns is found only when its link is made (after the files): the
+realistic mid-install failure the scenario checks. Uninstall removes only
+what the record names inside the Packages and Links directories (an
+edited InstallLocation elsewhere is refused). Host tests make every
+single mutating call of install, upgrade and uninstall fail in turn and
+check the in-memory machine is unchanged afterwards.
+
+**Observability.** The install log `%LOCALAPPDATA%\gala\logs\install.log`:
+one line per step (`install`, `manifest`, `installer`, `download`,
+`sha256 expected= got=`, `plan`, `unpacked`, `link`, `path added`,
+`registered`, `installed`; `error ...` with the Win32 error; `rollback
+...` per undo step), timestamped with the process id; `--verbose` copies
+it to stderr. An installer type gala cannot install is recorded in the
+ledger (`gala.exe!install(InstallerType inno)`), so `cargo xtask report`
+lists what real packages needed. The scenario tees the log into the
+serial log (`logtee=`), and pk_install_test prints it when a check fails.
+
+**Test.** `pk_install_test` (scenario `pk_install_zip`) against
+`C:\pk_source` (user/pk_install_test/source, shipped as a tree): test
+packages made by `make_source.py` (PkHello 1.0.0 as a singleton
+manifest, 1.1.0 multi-file; Conflict; BadHash; InnoSetup) and real
+winget-pkgs manifests (ripgrep, jq) for search and the HTTPS refusal.
+
+**Next (ROADMAP PK):** the HTTPS fetcher; then stage 3 (Inno Setup,
+NSIS, `exe` with switches: run the vendor's installer silently, uninstall
+through its UninstallString), 4 (MSIX), 5 (MSI); machine scope
+(`%ProgramFiles%\WinGet\Packages`, HKLM, needs elevation); dependencies
+(`Dependencies: PackageDependencies`); `gala list` matching ARP entries
+to packages by ProductCode/AppsAndFeaturesEntries.
 
 ## Plan: sessions and remote shasha (proposed 2026-11-03)
 

@@ -77,7 +77,9 @@ fn exists(path: &PathBuf) -> bool {
 }
 
 /// Where Windows looks for a program named without a directory: the
-/// directory of the executable, the current directory, System32, Windows.
+/// directory of the executable, the current directory, System32, Windows,
+/// then the directories of the PATH variable in order (CreateProcess's
+/// documented search; `gala install`'s Links directory is found so).
 fn search(name: &PathBuf) -> Result<PathBuf, u32> {
     let mut exe = [0u16; MAX_PATH_CHARS];
     let n =
@@ -96,6 +98,31 @@ fn search(name: &PathBuf) -> Result<PathBuf, u32> {
             candidate.push(&[BACKSLASH])?;
         }
         candidate.push(name.as_slice())?;
+        if exists(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    let mut path = [0u16; 4096];
+    let n = GetEnvironmentVariableW(wide20("PATH").as_ptr(), path.as_mut_ptr(), 4096) as usize;
+    if n == 0 || n >= path.len() {
+        return Err(ERROR_FILE_NOT_FOUND);
+    }
+    for dir in path[..n].split(|&c| c == u16::from(b';')) {
+        // Quotes around an entry are allowed (as cmd.exe writes them).
+        let dir: &[u16] = match dir {
+            [q, inner @ .., e] if *q == u16::from(b'"') && *e == u16::from(b'"') => inner,
+            _ => dir,
+        };
+        if dir.is_empty() {
+            continue;
+        }
+        let mut candidate = PathBuf::new();
+        if candidate.push(dir).is_err()
+            || (!dir.last().is_some_and(|&ch| is_sep(ch)) && candidate.push(&[BACKSLASH]).is_err())
+            || candidate.push(name.as_slice()).is_err()
+        {
+            continue;
+        }
         if exists(&candidate) {
             return Ok(candidate);
         }

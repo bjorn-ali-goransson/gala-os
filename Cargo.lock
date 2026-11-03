@@ -528,6 +528,10 @@ dependencies = [
 [[package]]
 name = "gala"
 version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "galapkg",
+]
 
 [[package]]
 name = "gala_cli_test"
@@ -540,6 +544,14 @@ version = "0.1.0"
 [[package]]
 name = "gala_stubs"
 version = "0.1.0"
+
+[[package]]
+name = "galapkg"
+version = "0.1.0"
+dependencies = [
+ "miniz_oxide 0.8.9",
+ "sha2",
+]
 
 [[package]]
 name = "gdi32"
@@ -1065,6 +1077,10 @@ checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
 
 [[package]]
 name = "pipe_test"
+version = "0.1.0"
+
+[[package]]
+name = "pk_install_test"
 version = "0.1.0"
 
 [[package]]
