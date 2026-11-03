@@ -1,0 +1,18 @@
+PackageIdentifier: GalaTest.Conflict
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: Conflict
+License: Proprietary
+ShortDescription: Wants the command pkhello, which PkHello has
+Installers:
+- Architecture: neutral
+  InstallerType: zip
+  NestedInstallerType: portable
+  NestedInstallerFiles:
+  - RelativeFilePath: conflict/pkhello.exe
+    PortableCommandAlias: pkhello
+  InstallerUrl: https://packages.gala.invalid/conflict-1.0.0.zip
+  InstallerSha256: 001A0C9D02C121BD086E7A396862B9BC83A803887555247177292FBD450C8B91
+ManifestType: singleton
+ManifestVersion: 1.6.0

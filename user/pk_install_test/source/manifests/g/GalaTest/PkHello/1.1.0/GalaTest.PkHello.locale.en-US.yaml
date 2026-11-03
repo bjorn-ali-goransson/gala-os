@@ -1,0 +1,13 @@
+PackageIdentifier: GalaTest.PkHello
+PackageVersion: 1.1.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: PkHello
+License: Proprietary
+ShortDescription: |-
+  Says hello (gala's install test),
+  version 1.1.0
+Moniker: pkhello
+Tags: [test, hello]
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

@@ -1,0 +1,19 @@
+PackageIdentifier: GalaTest.PkHello
+PackageVersion: 1.1.0
+InstallerType: zip
+NestedInstallerType: portable
+Installers:
+- Architecture: x86
+  NestedInstallerFiles:
+  - RelativeFilePath: pkhello-1.1.0/pkhello.exe
+    PortableCommandAlias: pkhello
+  InstallerUrl: https://packages.gala.invalid/pkhello-1.1.0-x86.zip
+  InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+- Architecture: x64
+  NestedInstallerFiles:
+  - RelativeFilePath: pkhello-1.1.0/pkhello.exe
+    PortableCommandAlias: pkhello
+  InstallerUrl: https://packages.gala.invalid/pkhello-1.1.0.zip
+  InstallerSha256: 271FB926B26F4B16DA1370512C44B6BB2796B5ADE7B62F6FA1C6678DEE060A08
+ManifestType: installer
+ManifestVersion: 1.12.0

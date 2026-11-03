@@ -1,0 +1,16 @@
+PackageIdentifier: GalaTest.InnoSetup
+PackageVersion: "2.0"
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: InnoSetup
+License: Proprietary
+ShortDescription: An Inno Setup installer (ROADMAP PK stage 3)
+Installers:
+- Architecture: x64
+  InstallerType: inno
+  InstallerUrl: https://packages.gala.invalid/setup.exe
+  InstallerSha256: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  InstallerSwitches:
+    Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+ManifestType: singleton
+ManifestVersion: 1.6.0

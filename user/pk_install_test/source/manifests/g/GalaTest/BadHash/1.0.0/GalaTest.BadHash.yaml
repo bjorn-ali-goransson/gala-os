@@ -1,0 +1,18 @@
+PackageIdentifier: GalaTest.BadHash
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: BadHash
+License: Proprietary
+ShortDescription: Its installer's SHA-256 is wrong
+Installers:
+- Architecture: x64
+  InstallerType: zip
+  NestedInstallerType: portable
+  NestedInstallerFiles:
+  - RelativeFilePath: pkhello-1.0.0/pkhello.exe
+    PortableCommandAlias: badhash
+  InstallerUrl: https://packages.gala.invalid/pkhello-1.0.0.zip
+  InstallerSha256: 4D8F22FFF400376D00A1F42E9039CEA30152E48EAB67FEC1758B75D8356F0000
+ManifestType: singleton
+ManifestVersion: 1.6.0
