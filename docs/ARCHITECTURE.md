@@ -104,6 +104,10 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `start=<file>[,<file>...]`, `start_args=...` | start those programs first without waiting for them (a server for the `run=` programs); they end with the boot |
 | `console=<program>` | that `start=`/`run=` program gets a console window (a console session hosted by gala's conhost.exe) |
 | `cwd=C:/dir` | their current directory (default `C:\gala\`; Elasticsearch expects its home) |
+| `as=system` | the `run=` programs run as SYSTEM instead of the boot user (SECURITY.md; the sshd scenarios) |
+| `wait=all` | after each `run=` program, wait for every process still running too (a service that hands its work to a child and exits, as `sshd -d` does) |
+| `persist` | keep what programs change on C: and in the registry on the virtio-blk disk (a log replayed at the next boot; "Disk (D1)" and the persistence part below) |
+| `wallpaper=<name>` | pin the desktop's wallpaper (`drawn` for the drawn one; screen checks pin one) |
 | `trace` | log every system call (arguments, status) |
 | `netreset=<n>` | the network card is reset under the driver after the n-th frame sent (the driver's recovery test) |
 | `diskreset=<n>` | the n-th disk request has the device reset under the driver just after it is posted (the driver's recovery test) |
@@ -115,6 +119,8 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `nomigrate` | a thread that runs user code stays on the CPU it first ran on (tells migration bugs from others) |
 | `framecheck` | user mappings of each frame are counted; freeing a frame a user space still maps panics |
 | `eagercommit` | committed private pages get their frames at once instead of at the first touch (no demand-zero faults in user code) |
+| `calwrong`, `calstall` | clock-calibration tests: the first TSC calibration 20x low (the RTC check must catch it), or the boot CPU stalled inside the calibration ("Interrupts and time"; scenarios `clockcal_*`) |
+| `parkdelay` | delay a CPU's parking in a kernel handover, so the handover is abandoned cleanly (scenario `handover_park_late`) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `display=virtio` | the screen is the first virtio-gpu (2D: a scanout resource, damage flushed, resizes followed) instead of the bootloader's framebuffer (`display=fb`, the default); without one the framebuffer is used ("Plan: graphics and GPU", G1) |
 | `gputrace` | log every virtio-gpu command and its result (`gputrace: SET_SCANOUT -> Ok(())`) |
@@ -3995,6 +4001,78 @@ gala), basic /proc and /dev; (4) dynamic linking (ld.so, glibc), epoll,
 sockets; (5) real workloads (a distribution's userland, build tools).
 Most programs need about 150-200 of Linux's ~450 system calls; priorities
 come from `strace` of target programs on real Linux.
+
+### The lx module (milestone 1 groundwork, built 2026-11-03)
+
+`kernel/src/lx/` holds the Linux personality's pieces that are plain data
+processing (safe Rust; `lx` is not in the `unsafe` allow-list), declared
+from lib.rs and reached by nothing yet:
+
+- **`lx::elf`**: `ElfImage::parse(&[u8])` validates an ELF64 x86-64
+  ET_EXEC or ET_DYN image and never panics (tests: truncations at every
+  length, every header byte mutated, synthetic bad images). Invariants
+  (the module's doc lists them): program headers inside the file and at
+  most 64 KiB; at least one PT_LOAD; each PT_LOAD inside the file,
+  `filesz <= memsz`, alignment 0/1/power of two up to 1 GiB, address and
+  offset congruent modulo 4 KiB, ending below `USER_END`
+  (0x7fff_ffff_f000, observed), sorted and not overlapping (sharing the
+  boundary page is allowed: the mapper gives that page both
+  protections); the entry inside a PT_LOAD; at most one PT_INTERP
+  (NUL-terminated, <= PATH_MAX) and one PT_TLS. `load_bias(base)` is 0
+  for ET_EXEC, `base - span.start` for ET_DYN (base aligned to the
+  largest p_align); `plan(bias)` gives the `LoadPlan`: segments at their
+  addresses with `file_pages()` (page-aligned file mapping),
+  `zero_tail()` (the bss part of the last file page, cleared after
+  mapping), `anon_pages()` (the rest of the bss), AT_PHDR (PT_PHDR's, or
+  the PT_LOAD holding the headers), AT_ENTRY, the initial break (the page
+  after the image; Linux randomizes it above that for ET_EXEC and puts a
+  static-pie's elsewhere: brk_test checks only what does not vary) and the
+  TLS template. Linux places a dynamic PIE at 0x5555_5555_4000 and a
+  static-pie like an mmap below the mmap base (observed, `setarch -R`);
+  gala uses `DEFAULT_DYN_BASE` (the former) for both until it randomizes.
+  Errors (`ElfError`) carry the values that explain them and print as one
+  line; `LoadPlan` prints one line per segment, for the exec path's log
+  line and the state dump.
+- **`lx::stack`**: `build(end, max, &StackParams)` lays out the initial
+  stack as bytes ending at the page-aligned `end`: the end marker, the
+  AT_EXECFN string, envp's and argv's strings, a gap (random on Linux; a
+  parameter here), AT_PLATFORM ("x86_64") ending 16-aligned, AT_RANDOM's
+  16 bytes right below, then argc/argv/envp/auxv with the least padding
+  that makes rsp 16-aligned. The auxv order is Linux 6.18's
+  (SYSINFO_EHDR, MINSIGSTKSZ optional, then HWCAP, PAGESZ, CLKTCK, PHDR,
+  PHENT, PHNUM, BASE, FLAGS, ENTRY, UID, EUID, GID, EGID, SECURE, RANDOM,
+  HWCAP2 optional, EXECFN, PLATFORM, NULL); AT_HWCAP is CPUID(1).EDX and
+  AT_CLKTCK 100 (observed). Its host test replays user/lx/auxv_test's
+  transcript (recorded on Linux) against a stack built here for the same
+  arguments and the real auxv_test binaries' load plans: every line
+  matches, the string area byte for byte. Too much for `max` is
+  `StackError::TooBig` (execve's E2BIG).
+- **`lx::syscalls`** (`SYSCALLS`, `nr::*`, `name`, `number`, `COUNT`
+  462) and **`lx::errno`** (`ERRNOS`, aliases, `to_return`/`from_return`
+  for the `-errno` convention): tables, with host tests against musl's
+  headers when installed. Sources: THIRD_PARTY.md and the files' docs.
+- Allocation is fallible (`TryVec`, `try_reserve_exact`), as everywhere.
+
+**How it plugs into the dispatcher seam** (ROADMAP LX step 2, built
+separately: a per-process personality and a dispatcher table keyed by
+it): a Linux exec reads the file, `ElfImage::parse`s it (an `ElfError`
+becomes ENOEXEC/EINVAL, logged with its text and emitted as an event),
+loads PT_INTERP's image too if any (its plan's entry starts first;
+AT_BASE is its bias), maps each `LoadPlan` segment (file pages, then
+`zero_tail`, then `anon_pages`, protections from `prot`), sets the break
+from `plan.brk`, maps a stack (non-executable unless `gnu_stack` says
+otherwise) and copies `stack::build`'s bytes to its top, and starts the
+thread at the entry with rsp = `InitialStack::sp` and the other
+registers zero (rdx 0: no atexit function). The process is created with
+the Linux personality; its system calls go to a table of
+`lx::syscalls::COUNT` entries indexed by `nr`, which returns
+`errno::to_return(ENOSYS)` for the missing ones and names them in the
+"unknown system call" log with `syscalls::name`.
+
+TODO: the exec path and the first system calls (ROADMAP LX "Next");
+randomization (the stack gap, AT_RANDOM from the kernel's random source,
+the bases); the system-call numbers 462..=469 (Linux 6.18 has them; our
+sources do not name them yet).
 ## Plan: graphics and GPU (proposed 2026-11-03; stage G1 built)
 
 The owner's goal: GPU support, first for the browser (ROADMAP BR stage 2,
@@ -6015,17 +6093,20 @@ tests in `kernel/src/trust/` and `fs::volume`):
 
 ## Not done yet
 
-suspension/context of threads running on other CPUs, ranged (invlpg)
-shootdowns and PCIDs (ROADMAP S4), a real ntdll and
-kernel32 (gala runs test stand-ins), process creation from user mode,
-security, registry symbolic link keys, change notifications and WOW64
-views, hive files in Windows' format, files on the disk read on demand
-(D2 keeps them in memory),
-interrupts for devices (virtio-net and virtio-blk poll), AcceptEx with
-receive data, ConnectEx with send data, UDP, IPv6,
-select/IOCTL_AFD_POLL, non-blocking sockets, socket options with effect, telling a reset from a FIN
-on receive, bindgen-generated
-layouts, ACPI (MADT/HPET), reclaiming bootloader memory. Observability
-plans: `docs/OBSERVABILITY.md`.
+(Reviewed 2026-11-03; what is planned is in ROADMAP "Next".)
+Suspension/context of threads running on other CPUs by IPI, ranged
+(invlpg) shootdowns and PCIDs (ROADMAP S4); registry symbolic link keys,
+change notifications and WOW64 views, hive files in Windows' format;
+files on the disk read on demand (D2 keeps them in memory); interrupts
+for devices (virtio-net, virtio-blk and virtio-gpu poll); AcceptEx with
+receive data (refused, recorded in the ledger), ConnectEx with send data,
+IPv6, socket options with effect, telling a reset from a FIN on receive;
+bindgen-generated layouts; reclaiming bootloader memory; 32-bit programs
+(WOW64); a service control manager. Done since this list was first
+written: process creation from user mode ("Processes started by
+programs"), the security model (SECURITY.md), UDP, select and
+IOCTL_AFD_POLL, non-blocking sockets ("Networking"), the MADT and the
+HPET ("Processors", "Interrupts and time"). Observability plans:
+`docs/OBSERVABILITY.md`.
 Bootloader-reclaimable memory must not be reused until the boot info that
 lives there has been copied out.

@@ -54,13 +54,15 @@ done from a terminal with the `gala` command (ROADMAP SD).
 - Compatibility lives at the ABI boundary only. Never copy NT's internal
   design.
 - Target ONE pinned Windows 11 build for syscall numbers and struct layouts
-  (build number: TBD).
+  (Windows 11 24H2, build 26100, tentative; numbers in
+  `kernel/src/nt/syscalls.rs` and `user/ntrt`).
 
 ## Tech stack
 - Rust, `no_std` plus `alloc`, x86_64 only.
-- Limine bootloader, UEFI boot.
+- Limine bootloader, UEFI boot (BIOS too: the images are hybrid).
 - Develop and test in QEMU/KVM. Use virtio devices for disk, network, input.
-- Display: UEFI GOP framebuffer only.
+- Display: the bootloader's (UEFI GOP) framebuffer first; a virtio-gpu
+  (2D) since 2026-11-03 (ROADMAP GPU).
 - Generate C-layout Windows structs with `bindgen` from mingw-w64 headers,
   as `#[repr(C)]`.
 - Keep `unsafe` confined to a thin, reviewed ABI/syscall layer. The core

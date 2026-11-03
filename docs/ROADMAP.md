@@ -1771,10 +1771,10 @@ RS. **Remote access and sessions** (the owner, 2026-11-03; design:
      caller's session, ProcessIdToSessionId, WTSGetActiveConsoleSessionId
      (KUSER ActiveConsoleId), logons in the caller's session, PROCESSES
      version 3 carrying the session across a handover, the session in
-     process events and the state dump. Not run yet in QEMU when written
-     (disk full): `cargo xtask boot-test session_test` and the handover
-     scenarios whose expected lines changed (`handover_upgrade`,
-     `handover_upgrade_uefi`, `handover_downgrade_refused`).
+     process events and the state dump. Written while the disk was full;
+     booted 2026-11-03: `session_test` and the handover scenarios whose
+     expected lines changed (`handover_upgrade`, `handover_upgrade_uefi`,
+     `handover_downgrade_refused`) pass.
    - B2. Per-session desktop and window registry (the statics go): a GUI
      program in session 2 is not found or messaged from session 1; `gala
      windows` lists the caller's session; every GUI scenario still passes.
@@ -1864,8 +1864,8 @@ GPU. **Graphics and GPU** (the owner, 2026-11-03; design: ARCHITECTURE
      seam's `screen_flush`/`screen_changed`, the desktop re-laid out on a
      resize; `events=display`, `gputrace`, `gpureset=`; scenarios
      `virtio_gpu` and `virtio_gpu_reset` (gui_test's screen check on a
-     `virtio-gpu-pci` screen). **Not yet booted** (written while the
-     build machine's disk was full: run them first). Next: shasha's
+     `virtio-gpu-pci` screen). Written while the build machine's disk
+     was full; booted 2026-11-03, both pass. Next: shasha's
      pointer on the hardware cursor, WM_DISPLAYCHANGE and refitting
      maximized windows on a resize (a test with QEMU's monitor resizing
      the display), several scanouts as monitors.
@@ -1940,10 +1940,9 @@ PK. **Installing software: `gala install` over winget manifests** (the
    list`; a scenario per installer type kept as a regression test; the
    ledger's per-installer gaps in the report.
    **Stages 1 and 2 built, except downloads** (2026-11-03, test
-   `pk_install_test`, scenario `pk_install_zip`, written but **not yet
-   booted**: the disk was too full for an image that day; run it first,
-   `cargo xtask boot-test pk_install_zip`; host tests `cargo test -p
-   galapkg` pass, including a failure injected at every step;
+   `pk_install_test`, scenario `pk_install_zip`, written while the disk
+   was too full for an image, booted 2026-11-03: passes; host tests
+   `cargo test -p galapkg` pass, including a failure injected at every step;
    ARCHITECTURE "Installing software"): `gala install|search|list|
    upgrade|uninstall` over a winget-pkgs tree (`--source <dir>`, an
    `installers\` mirror), manifests 1.x singleton and multi-file,
@@ -1984,6 +1983,28 @@ LX. **A Linux personality, later; its seams now** (the owner,
    threads and time) instead of `nt::platform`; xtask's
    `net_does_not_depend_on_nt` keeps it so. Next seams: (3) with RS B2,
    (1), (4), (5) as their areas are touched.
+   **Milestone 1 groundwork done** (2026-11-03; ARCHITECTURE "Plan: a
+   second personality (Linux)", "The lx module"; WORKFLOW "Linux test
+   programs"): the pieces that do not touch system-call dispatch.
+   `kernel/src/lx/` (declared, nothing wired): `elf` (ELF64 x86-64
+   ET_EXEC/ET_DYN parsed and validated, the load plan: segments, file
+   pages, bss, protections, PT_INTERP, PT_TLS, PT_GNU_STACK,
+   PT_GNU_RELRO, AT_PHDR, the ET_DYN load bias), `stack` (the initial
+   stack as bytes: argc, argv, envp, auxv, strings, AT_RANDOM; Linux's
+   layout byte for byte where Linux is deterministic), `syscalls` and
+   `errno` (name <-> number tables); host tests only (`cargo test -p
+   kernel --lib lx`: the real test binaries, malformed images, the
+   auxv_test transcript replayed against a stack built here). Linux test
+   programs in `user/lx/` (static musl and static-pie, raw system calls):
+   hello_test, write_exit_test, brk_test, mmap_test, arch_prctl_test,
+   auxv_test, their transcripts recorded on Linux 6.18 (`expected.txt`)
+   and checked by `cargo xtask lx-expect` (CI). **Next**, after the
+   per-process dispatch seam (step 2, being built elsewhere): the exec
+   path (map a `LoadPlan`, the stack, start the thread; a `Personality::
+   Linux` process), then write/exit_group/brk/mmap/munmap/mprotect/
+   arch_prctl in a Linux dispatcher table indexed by `lx::syscalls::nr`,
+   each user/lx program as a boot scenario expecting its expected.txt;
+   then milestone 2 (busybox's calls, from `strace` on real Linux).
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing

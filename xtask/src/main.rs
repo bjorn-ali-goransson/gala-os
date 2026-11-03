@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 mod alloc_audit;
 mod clockcheck;
+mod lx_expect;
 mod telemetry;
 // The manifest's format and SHA-256 are the kernel's own code (one
 // definition for the writer and the reader).
@@ -1800,6 +1801,8 @@ commands:
                what was recorded
   bench        run user/bench on gala; write target/report/bench.json and
                compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
+  lx-expect    run the Linux test programs (user/lx) on this Linux host and compare
+               with their expected.txt: lx-expect [--record] [--no-build]
   alloc-audit  find infallible allocations in the kernel's machine code (calls that
                abort on out-of-memory: Vec::clone, collect, ...; clippy cannot see
                them): alloc-audit [kernel ELF] [--all: also growth after try_reserve]
@@ -1878,6 +1881,7 @@ fn main() -> ExitCode {
             Some("bench") => {
                 bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
             }
+            Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
             Some("alloc-audit") => alloc_audit(
                 release,
                 args.get(1).filter(|a| !a.starts_with("--")).map(Path::new),
