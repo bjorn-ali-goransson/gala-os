@@ -114,6 +114,11 @@ shows it.
 - **Changing `nt::desktop`'s public functions or types**: the server
   kernel's stand-in `kernel/src/nt/desktop_off.rs` must follow, or the
   `--no-default-features` clippy line in CI fails.
+- **Observability is part of every change** (the owner's rule,
+  OBSERVABILITY.md): a new subsystem, driver, boot stage, format or test
+  comes with its logs/events and what a failure leaves behind; when a
+  failure's cause had to be guessed, add the missing telemetry with the
+  fix.
 - **Boot-test images are made per VM**: `cargo xtask test` makes each
   VM's ISO just before it boots and deletes it after a pass (a failed
   one stays to boot by hand), so only the running VMs' images use disk;

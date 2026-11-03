@@ -6,6 +6,9 @@
   pitfalls, where things are), `docs/ROADMAP.md` (status and agreed order)
   and the sections of `docs/ARCHITECTURE.md` you touch (and `docs/SECURITY.md`,
   the security model's design, for tokens, descriptors and access checks).
+- Observability carries great weight (the owner): every change ships with
+  what would explain its failures (logs, events, what a failure leaves
+  behind); see the rule at the top of `docs/OBSERVABILITY.md`.
 - Keep the docs current in the same commit as the code: ROADMAP (done/next),
   ARCHITECTURE (design, invariants, TODOs), WORKFLOW (new conventions or
   pitfalls). The next session only knows what is written down.

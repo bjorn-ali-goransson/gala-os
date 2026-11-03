@@ -6,6 +6,15 @@ what did the program ask for, what did we not implement, where did the
 time go, and what was the state when it broke. Status per item: **done**,
 **next**, **later**.
 
+**Rule (the owner, 2026-11-03): observability carries great weight.**
+Every new subsystem, driver, boot stage, format or test ships with the
+means to explain its own failures: what it logs, which events it emits,
+what a failure leaves behind (panic line, flight records, crash record,
+the failed log's extra sections), and how an agent reads it. A failure
+whose cause has to be guessed is a gap to fill before (or together with)
+the fix. Reviews ask: "if this broke silently at 3 a.m., what would we
+have?"
+
 ## 1. Structured event stream — done (`events`, scenario `events`)
 
 - A second output channel next to the human serial log: QEMU's

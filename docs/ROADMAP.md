@@ -112,6 +112,9 @@ explicitly in its commit.
   such boot ran on normally (smp_test failed its CPU count). Both the
   missing CPU and the silent end need explaining: a kernel that gets
   one CPU must run on one, and an end must leave a panic or a reason.
+- **Observability carries great weight (the owner, 2026-11-03)**: every
+  change ships with what explains its failures (OBSERVABILITY's rule);
+  gaps found by failures are filled before or with the fix.
 - **Early-boot visibility (the owner, 2026-11-03)**: that this failure
   is conspicuous shows we see too little of the early boot. Every boot
   gets QEMU-side telemetry (exit reason, `-d cpu_reset,guest_errors`,
