@@ -24,6 +24,13 @@ explicitly in its commit.
   core structures other items build on (LX seams, RS B2 with the
   core/NT process split), then features on top (PK installers, the
   browser), which run niced and yield VMs to the rest.
+- **Hygiene sweeps (the owner, 2026-11-03)**: "we should do sweeps in
+  general to check for hygienic factors". Regular sweeps of existing code
+  for a class of defect at a time; the first is the early primitives
+  (written just before SMP bring-up) for single-thread-at-a-time
+  assumptions, after three such races (copy-on-write, NtReleaseSemaphore,
+  the notification-event wake-up). The checklist lives in WORKFLOW
+  "Hygiene sweeps".
 - **Token-heavy implementation as filler (the owner, 2026-11-03)**:
   when an agent slot frees up and nothing more foundational waits, use it
   for broad implementation work: item LX proper (the Linux personality's
