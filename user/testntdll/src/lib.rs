@@ -936,6 +936,10 @@ fn api_set_host(name: &[u8]) -> Option<&'static [u8]> {
         b"advapi32.dll"
     } else if set.starts_with(b"core-") {
         b"kernel32.dll"
+    } else if set.starts_with(b"shcore-") {
+        b"shcore.dll"
+    } else if set.starts_with(b"power-") {
+        b"powrprof.dll"
     } else if let Some(rest) = set.strip_prefix(b"downlevel-") {
         // The downlevel sets name the DLL that implements them
         // (api-ms-win-downlevel-shell32-l1-1-0: CommandLineToArgvW).

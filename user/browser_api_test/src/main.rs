@@ -43,7 +43,9 @@
 //!    `\<name>`;
 //! 27. RegisterGPNotification/UnregisterGPNotification succeed;
 //! 28. a workgroup NT workstation: IsOS(OS_NT) but not OS_DOMAINMEMBER,
-//!    NetGetJoinInformation NetSetupWorkgroupName, DsRole standalone.
+//!    NetGetJoinInformation NetSetupWorkgroupName, DsRole standalone;
+//! 29. SetProcessDpiAwarenessContext(per monitor v2) once, then
+//!    ERROR_ACCESS_DENIED; shcore's GetProcessDpiAwareness says per monitor.
 
 #![no_std]
 #![no_main]
@@ -642,7 +644,28 @@ fn tests() {
         check(DsRoleGetPrimaryDomainInformation(core::ptr::null(), 1, &mut role) == 0, 28);
         check(!role.is_null() && *role == 0, 28); // DsRole_RoleStandaloneWorkstation
         DsRoleFreeMemory(role.cast());
+
+        // 29. DPI awareness: per-monitor v2 set once (Chromium's), read
+        // back as per monitor; a second setting is refused.
+        check(SetProcessDpiAwarenessContext(-4) != 0, 29);
+        check(GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) == 2, 29);
+        check(SetProcessDpiAwarenessContext(-2) == 0 && GetLastError() == 5, 29);
+        let mut awareness = 9u32;
+        check(GetProcessDpiAwareness(core::ptr::null_mut(), &mut awareness) == 0, 29);
+        check(awareness == 2, 29); // PROCESS_PER_MONITOR_DPI_AWARE
     }
+}
+
+#[link(name = "user32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn SetProcessDpiAwarenessContext(context: isize) -> i32;
+    fn GetThreadDpiAwarenessContext() -> isize;
+    fn GetAwarenessFromDpiAwarenessContext(context: isize) -> i32;
+}
+
+#[link(name = "api-ms-win-shcore-scaling-l1-1-1", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GetProcessDpiAwareness(process: Handle, value: *mut u32) -> i32;
 }
 
 #[link(name = "shlwapi", kind = "raw-dylib")]

@@ -876,3 +876,82 @@ pub extern "system" fn CompareObjectHandles(first: Handle, second: Handle) -> Bo
     let status = unsafe { NtCompareObjects(first, second) };
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
+
+// ---- Power status, prefetch, mapped file names ---------------------------
+
+/// GetSystemPowerStatus(lpSystemPowerStatus): on AC power with no system
+/// battery (BatteryFlag 128, life unknown: 255 and -1), battery saver off.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSystemPowerStatus(status: *mut u8) -> Bool {
+    if status.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SYSTEM_POWER_STATUS: ACLineStatus, BatteryFlag, BatteryLifePercent,
+    // SystemStatusFlag, BatteryLifeTime, BatteryFullLifeTime.
+    // SAFETY: the caller's 12-byte structure.
+    unsafe {
+        *status = 1;
+        *status.add(1) = 128;
+        *status.add(2) = 255;
+        *status.add(3) = 0;
+        status.add(4).cast::<u32>().write_unaligned(u32::MAX);
+        status.add(8).cast::<u32>().write_unaligned(u32::MAX);
+    }
+    TRUE
+}
+
+/// PrefetchVirtualMemory(hProcess, NumberOfEntries, VirtualAddresses,
+/// Flags): a hint; gala's memory is resident already.
+#[unsafe(no_mangle)]
+pub extern "system" fn PrefetchVirtualMemory(
+    _process: Handle,
+    entries: usize,
+    addresses: *const c_void,
+    flags: u32,
+) -> Bool {
+    if flags != 0 || (entries != 0 && addresses.is_null()) {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    TRUE
+}
+
+/// K32GetMappedFileNameW(hProcess, lpv, lpFilename, nSize): the NT path of
+/// the file mapped at `lpv` (MemoryMappedFilenameInformation), truncated
+/// to nSize characters; the length copied, 0 for memory that maps no file.
+#[unsafe(no_mangle)]
+pub extern "system" fn K32GetMappedFileNameW(
+    process: Handle,
+    address: *const c_void,
+    name: *mut u16,
+    size: u32,
+) -> u32 {
+    if name.is_null() || size == 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    // UNICODE_STRING then the characters.
+    let mut buf = [0u64; 2 + 132];
+    let mut ret = 0usize;
+    // SAFETY: our buffer of the size given.
+    let status = unsafe {
+        NtQueryVirtualMemory(
+            process as isize,
+            address as usize,
+            2,
+            buf.as_mut_ptr().cast(),
+            core::mem::size_of_val(&buf),
+            &mut ret,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, 0);
+    }
+    let length = (buf[0] & 0xffff) as usize / 2;
+    let text = buf[1] as *const u16;
+    let n = length.min(size as usize - 1);
+    // SAFETY: the string the kernel wrote into `buf`; the caller's buffer.
+    unsafe {
+        core::ptr::copy_nonoverlapping(text, name, n);
+        *name.add(n) = 0;
+    }
+    n as u32
+}

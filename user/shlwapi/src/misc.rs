@@ -59,3 +59,38 @@ pub extern "system" fn QISearch(
         }
     }
 }
+
+/// PathFindExtensionW(pszPath): the "." starting the last component's
+/// extension, or the terminating NUL when it has none (a space or a
+/// backslash after the dot ends the candidate).
+#[unsafe(no_mangle)]
+pub extern "system" fn PathFindExtensionW(path: *const u16) -> *const u16 {
+    if path.is_null() {
+        return path;
+    }
+    let mut dot: *const u16 = core::ptr::null();
+    let mut p = path;
+    // SAFETY: the caller's NUL-terminated string.
+    unsafe {
+        while *p != 0 {
+            match *p {
+                0x5c | 0x20 => dot = core::ptr::null(),
+                0x2e => dot = p,
+                _ => {}
+            }
+            p = p.add(1);
+        }
+    }
+    if dot.is_null() { p } else { dot }
+}
+
+/// PathRemoveExtensionW(pszPath): cuts the extension off in place.
+#[unsafe(no_mangle)]
+pub extern "system" fn PathRemoveExtensionW(path: *mut u16) {
+    if path.is_null() {
+        return;
+    }
+    let ext = PathFindExtensionW(path).cast_mut();
+    // SAFETY: inside the caller's string (its "." or its NUL).
+    unsafe { *ext = 0 };
+}

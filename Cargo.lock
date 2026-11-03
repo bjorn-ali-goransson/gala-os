@@ -1357,6 +1357,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "shcore"
+version = "0.1.0"
+
+[[package]]
 name = "shell32"
 version = "0.1.0"
 dependencies = [

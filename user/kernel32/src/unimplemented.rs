@@ -33,10 +33,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GlobalFlags
     GlobalMemoryStatus
     GlobalReAlloc
-    GlobalSize
-    InitOnceBeginInitialize
-    InitOnceComplete
-    K32GetMappedFileNameW
     MapUserPhysicalPagesScatter
     MapViewOfFileExNuma
     OpenJobObjectW
@@ -84,7 +80,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetNumberOfConsoleMouseButtons
     IdnToUnicode
     IsBadStringPtrA
-    PrefetchVirtualMemory
     PurgeComm
     ReadConsoleOutputW
     ScrollConsoleScreenBufferW
@@ -100,7 +95,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     EnumResourceNamesW
     GetDiskFreeSpaceA
     GetProfileStringW
-    GetSystemPowerStatus
     GlobalHandle
     IsBadReadPtr
     ReadConsoleOutputCharacterA
