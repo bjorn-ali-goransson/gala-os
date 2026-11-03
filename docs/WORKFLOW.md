@@ -552,6 +552,9 @@ the boot scenarios before T1 and 14 s after, under software emulation on a
   near-native speed) and forwards the `XTASK_*` variables. In a cloud
   container without a running daemon, start one with `dockerd &`.
 
+On a shared host, `XTASK_VMS=1 nice -n 19 cargo xtask test` boots one VM
+at a time (the default is one per host CPU).
+
 ## Benchmarks
 
 Where time goes in a scenario: the `nt:` line at the end of its serial

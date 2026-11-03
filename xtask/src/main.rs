@@ -5816,7 +5816,13 @@ fn run_parallel<J: Sync, T: Send>(
     jobs: &[J],
     f: impl Fn(&J) -> Result<T> + Sync,
 ) -> Vec<Result<T>> {
-    run_parallel_on(thread::available_parallelism().map_or(2, |n| n.get()), jobs, f)
+    // `XTASK_VMS=<n>`: at most n at a time (a shared, busy host).
+    let workers = env::var("XTASK_VMS").ok().and_then(|n| n.parse().ok()).filter(|&n| n > 0);
+    run_parallel_on(
+        workers.unwrap_or_else(|| thread::available_parallelism().map_or(2, |n| n.get())),
+        jobs,
+        f,
+    )
 }
 
 /// `run_parallel` with at most `workers` jobs at a time.
