@@ -29,6 +29,8 @@ const NATIVE_PROCESSOR_ARCHITECTURE: usize = 0x26a;
 const NT_MAJOR_VERSION: usize = 0x26c;
 const NT_MINOR_VERSION: usize = 0x270;
 const PROCESSOR_FEATURES: usize = 0x274;
+/// The session the console shows (WTSGetActiveConsoleSessionId).
+const ACTIVE_CONSOLE_ID: usize = 0x2d8;
 const NUMBER_OF_PHYSICAL_PAGES: usize = 0x2e8;
 const TEST_RET_INSTRUCTION: usize = 0x2f8;
 const QPC_FREQUENCY: usize = 0x300;
@@ -111,6 +113,7 @@ pub fn init(physical_pages: u64) -> Result<(), platform::PagingError> {
         page.write(PROCESSOR_FEATURES + pf, &[1]);
     }
     write_xstate(&page);
+    page.write_u32(ACTIVE_CONSOLE_ID, super::session::CONSOLE);
     page.write_u32(NUMBER_OF_PHYSICAL_PAGES, physical_pages.min(u64::from(u32::MAX)) as u32);
     page.write(TEST_RET_INSTRUCTION, &[0xc3]); // ret
     page.write(QPC_FREQUENCY, &platform::PERFORMANCE_FREQUENCY.to_le_bytes());

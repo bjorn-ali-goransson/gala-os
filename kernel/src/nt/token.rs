@@ -228,6 +228,15 @@ pub fn for_new_process(
         .map_err(|_| NtStatus::NO_MEMORY)
 }
 
+/// The TokenSessionId of token object `token` (the console session for
+/// an object that is not a token).
+pub fn session_of(token: &super::object::ObjectRef) -> u32 {
+    match &token.body {
+        super::object::ObjectBody::Token(t) => t.data.lock().session,
+        _ => super::session::CONSOLE,
+    }
+}
+
 /// The system logon session's LUID (SYSTEM_LUID).
 pub const SYSTEM_LOGON: u64 = 0x3e7;
 

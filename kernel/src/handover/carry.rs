@@ -855,6 +855,7 @@ impl Programs {
                 path: q.path,
                 image_digest: q.layout().digest(),
                 token: self.id(&q.token.lock().clone()),
+                session: Some(q.session),
                 handovers: handovers_of(q.id).saturating_add(1),
             }
             .write(w)?;
@@ -1272,7 +1273,7 @@ fn frame_ranges(frames: &[u64]) -> impl Iterator<Item = Range> + '_ {
 static RESUMED: IrqMutex<Vec<KArc<Process>>> = IrqMutex::new(Vec::new());
 
 /// (pid, handovers come through) of the processes a handover brought, for
-/// PROCESSES version 3 (`handover_next`; the default build keeps none).
+/// PROCESSES version 4 (`handover_next`; the default build keeps none).
 static HANDOVERS: IrqMutex<Vec<(u64, u32)>> = IrqMutex::named("handover.counts", Vec::new());
 
 fn note_handovers(pid: u64, count: u32) -> Result<(), AllocError> {
@@ -1597,7 +1598,7 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         }
         let p = ProcessRec::read(&mut e);
         let process = restore_process(rec, &p, &objects)?;
-        if programs::version_of(tag::PROCESSES) >= 3 {
+        if programs::version_of(tag::PROCESSES) >= 4 {
             // 0: an older writer did not count (this one is the first
             // counted).
             let count = p.handovers.max(1);
@@ -1605,7 +1606,11 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
             crate::info!(
                 "handover: process {} has come through {count} handover(s){}",
                 process.name,
-                if p.handovers == 0 { " (counted from here: PROCESSES version 2)" } else { "" }
+                if p.handovers == 0 {
+                    " (counted from here: an older PROCESSES version)"
+                } else {
+                    ""
+                }
             );
         }
         processes.try_push(process).map_err(no_memory)
@@ -1946,6 +1951,7 @@ fn restore_process(
             0 => None,
             id => Some(objects.get(id).ok_or(NtStatus::INVALID_HANDLE)?.clone()),
         },
+        session: p.session,
     })
 }
 

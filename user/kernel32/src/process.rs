@@ -951,6 +951,56 @@ pub extern "system" fn GetProcessId(process: Handle) -> u32 {
     info[4] as u32
 }
 
+/// ProcessIdToSessionId(pid, *session): the caller's own from its PEB;
+/// another process's through OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)
+/// and ProcessSessionInformation (an id that is no process:
+/// ERROR_INVALID_PARAMETER; a process the caller may not query:
+/// ERROR_ACCESS_DENIED).
+#[unsafe(no_mangle)]
+pub extern "system" fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> Bool {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const PROCESS_SESSION_INFORMATION: u32 = 24;
+    if session.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let id = if pid == super::GetCurrentProcessId() {
+        super::sync::session_id()
+    } else {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if process.is_null() {
+            return FALSE; // OpenProcess set the error
+        }
+        let mut id = 0u32;
+        // SAFETY: a 4-byte buffer; our handle.
+        let status = unsafe {
+            let status = NtQueryInformationProcess(
+                process as isize,
+                PROCESS_SESSION_INFORMATION,
+                (&raw mut id).cast(),
+                4,
+                core::ptr::null_mut(),
+            );
+            NtClose(process);
+            status
+        };
+        if status != STATUS_SUCCESS {
+            return fail(status, FALSE);
+        }
+        id
+    };
+    // SAFETY: the caller's output.
+    unsafe { session.write_unaligned(id) };
+    TRUE
+}
+
+/// WTSGetActiveConsoleSessionId: the session the console shows
+/// (KUSER_SHARED_DATA.ActiveConsoleId at 0x7ffe02d8; 1 under gala).
+#[unsafe(no_mangle)]
+pub extern "system" fn WTSGetActiveConsoleSessionId() -> u32 {
+    // SAFETY: KUSER_SHARED_DATA is mapped read-only in every process.
+    unsafe { core::ptr::read_volatile(0x7ffe_02d8 as *const u32) }
+}
+
 /// IsWow64Process: gala runs 64-bit processes only.
 #[unsafe(no_mangle)]
 pub extern "system" fn IsWow64Process(_process: Handle, wow64: *mut Bool) -> Bool {

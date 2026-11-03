@@ -21,16 +21,8 @@ const BACKSLASH: u16 = b'\\' as u16;
 static NAMESPACE: IrqMutex<Option<ObjectRef>> = IrqMutex::new(None);
 
 /// Directories that exist at boot (Windows has these and more).
-const SYSTEM_DIRECTORIES: &[&str] = &[
-    "??",
-    "BaseNamedObjects",
-    "Device",
-    "KernelObjects",
-    "Sessions",
-    "Sessions\\1",
-    "Sessions\\1\\BaseNamedObjects",
-    "Sessions\\BNOLINKS",
-];
+const SYSTEM_DIRECTORIES: &[&str] =
+    &["??", "BaseNamedObjects", "Device", "KernelObjects", "Sessions", "Sessions\\BNOLINKS"];
 
 fn wide(s: &str) -> Result<Vec<u16>, AllocError> {
     let mut v = Vec::new();
@@ -55,23 +47,18 @@ pub fn init() -> Result<(), NtStatus> {
         let dir = new_directory().map_err(|_| NtStatus::NO_MEMORY)?;
         create(None, &full, dir, true, false)?;
     }
-    for (name, target) in SYSTEM_LINKS {
-        let target = wide(target).map_err(|_| NtStatus::NO_MEMORY)?;
-        let link = new_symbolic_link(&target)?;
-        create(None, &wide(name).map_err(|_| NtStatus::NO_MEMORY)?, link, true, false)?;
-    }
-    Ok(())
+    // Each session's directories and links (nt::session).
+    super::session::init()
 }
 
-/// Symbolic links that exist at boot.
-/// `\Sessions\BNOLINKS\<session>` names each session's BaseNamedObjects
-/// (session 0's are the global ones), as Windows' session manager makes
-/// them; Cygwin's runtime keeps its per-session objects there.
-const SYSTEM_LINKS: &[(&str, &str)] = &[
-    ("\\Sessions\\1\\BaseNamedObjects\\Global", "\\BaseNamedObjects"),
-    ("\\Sessions\\BNOLINKS\\0", "\\BaseNamedObjects"),
-    ("\\Sessions\\BNOLINKS\\1", "\\Sessions\\1\\BaseNamedObjects"),
-];
+/// The namespace for host tests, made once for all of them (tests run on
+/// several threads; a second `init` would replace the tree under the
+/// sessions' records).
+#[cfg(test)]
+pub fn test_init() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| init().unwrap());
+}
 
 /// Compares names, ignoring ASCII case if `ci`.
 // TODO: full Unicode upcase table, as the object manager uses.
@@ -414,8 +401,7 @@ mod tests {
     use crate::nt::object::{HandleTable, KObject, ObjectBody};
 
     fn setup() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| init().unwrap());
+        test_init();
     }
 
     fn w(s: &str) -> Vec<u16> {

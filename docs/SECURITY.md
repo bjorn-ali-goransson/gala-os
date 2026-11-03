@@ -179,8 +179,15 @@ start.
    Windows' taskbar does. `gala start` (GalaDesktopAction's Start) runs
    the program under a copy of the caller's primary token, as
    CreateProcess would; shasha's start menu still starts programs as the
-   boot user. Left: sessions and desktops (gala has one of each: a
+   boot user. Sessions (RS step B1, 2026-11-03, `session_test`): a
+   process's session is its primary token's TokenSessionId at creation
+   (SYSTEM 0, the boot user 1, a logon the caller's); moving a token to
+   another session (SetTokenInformation(TokenSessionId)) needs
+   SeTcbPrivilege; `Local\` named objects are per session and `Global\`
+   ones shared (ARCHITECTURE "Plan: sessions and remote shasha"). Left:
+   per-session desktops (one desktop for all sessions until RS B2: a
    service in session 0 cannot reach the user's windows on Windows),
+   SeCreateGlobalPrivilege for `Global\` file mappings, process DACLs,
    uiAccess, hooks (SetWindowsHookEx across levels), window handle
    validation from lower levels (IsWindow, FindWindow see every window).
 

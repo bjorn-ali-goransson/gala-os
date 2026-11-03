@@ -35,7 +35,7 @@ use super::elf::KernelImage;
 use super::record::{self, tag};
 
 /// The `handover_next` build: a stand-in for the next release, with a
-/// changed state format (PROCESSES version 3, the WRITER section, the
+/// changed state format (PROCESSES version 4, the WRITER section, the
 /// CLOCK section's in-memory structure laid out differently). The boot
 /// tests hand over between it and the default build both ways.
 pub const NEXT: bool = cfg!(feature = "handover_next");
@@ -108,8 +108,11 @@ const fn present(tag: u32, name: &'static str, writes: u16, must_read: u16) -> K
 /// - CLOCK 2: the APIC timer rate (optional to understand).
 /// - PROCESSES 2: the executable's digest, the primary token (a reader
 ///   that dropped the token would run the program as the boot user:
-///   must_read 2). 3 (`handover_next` only): the handovers the process
-///   came through, marked must-understand to stand in for such a change.
+///   must_read 2). 3 (RS B1): the process's session (a version-2 reader
+///   takes its token's TokenSessionId, the same unless the token was moved
+///   to another session after the process started: must_read stays 2).
+///   4 (`handover_next` only): the handovers the process came through,
+///   marked must-understand to stand in for such a change.
 /// - THREADS 2: how a thread stood (USER, START: a version-1 reader would
 ///   make a USER thread's "call" again), suspend counts, APCs, the
 ///   impersonation token (must_read 2). 3: the extended-state blob after
@@ -133,7 +136,7 @@ pub const KINDS: [Kind; 35] = [
     kind(tag::KEPT, "KEPT", 1, 0, false),
     kind(tag::KERNEL_FILE, "KERNEL_FILE", 1, 0, false),
     kind(tag::USER_FRAMES, "USER_FRAMES", 1, 0, true),
-    kind(tag::PROCESSES, "PROCESSES", if NEXT { 3 } else { 2 }, if NEXT { 3 } else { 2 }, true),
+    kind(tag::PROCESSES, "PROCESSES", if NEXT { 4 } else { 3 }, if NEXT { 4 } else { 2 }, true),
     kind(tag::ADDRESS_SPACES, "ADDRESS_SPACES", 1, 0, true),
     kind(tag::THREADS, "THREADS", 3, 2, true),
     kind(tag::EVENTS, "EVENTS", 1, 0, true),

@@ -116,14 +116,7 @@ fn named_path(name: *const u16, path: &mut [u16; 300]) -> Option<usize> {
     if name.is_null() {
         return Some(0);
     }
-    let mut n = 0;
-    for c in
-        "\\Sessions\\1\\BaseNamedObjects\\".encode_utf16().chain(wide_slice(name).iter().copied())
-    {
-        *path.get_mut(n)? = c;
-        n += 1;
-    }
-    Some(n)
+    super::sync::session_path(name, path)
 }
 
 #[link(name = "ntdll", kind = "raw-dylib")]

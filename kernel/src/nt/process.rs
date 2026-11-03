@@ -72,6 +72,10 @@ pub struct Process {
     pub priority_class: core::sync::atomic::AtomicU8,
     /// The primary token (nt::token).
     pub token: IrqMutex<ObjectRef>,
+    /// Its session (nt::session): its primary token's TokenSessionId when
+    /// it was created; fixed for its life (PEB.SessionId,
+    /// ProcessSessionInformation, where `Local\` names go).
+    pub session: u32,
     /// The console session its console output also goes to (a console
     /// window's), inherited by the processes it creates.
     pub console: Option<KArc<super::conhost::Session>>,
@@ -383,8 +387,6 @@ fn map_image(
 }
 
 const VER_PLATFORM_WIN32_NT: u32 = 2;
-/// Interactive programs run in session 1 (session 0 is for services).
-pub const SESSION_ID: u32 = 1;
 /// Boot modules live here; it is also the initial current directory.
 const BOOT_DIRECTORY: &str = "C:\\gala\\";
 /// FILE_TRAVERSE | SYNCHRONIZE, as Windows opens the current directory.
@@ -722,12 +724,15 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     let (major, minor) = info.subsystem_version;
     put_u32(&mut space, peb_addr + peb::IMAGE_SUBSYSTEM_MAJOR_VERSION, u32::from(major))?;
     put_u32(&mut space, peb_addr + peb::IMAGE_SUBSYSTEM_MINOR_VERSION, u32::from(minor))?;
-    put_u32(&mut space, peb_addr + peb::SESSION_ID, SESSION_ID)?;
-
+    // The session is the primary token's (as NtCreateUserProcess takes
+    // it); its directories are made on first use (nt::session).
     let token = match token {
         Some(t) => t,
         None => super::token::for_new_process(None).map_err(|_| LoadError::OutOfMemory)?,
     };
+    let session = super::token::session_of(&token);
+    super::session::ensure(session)?;
+    put_u32(&mut space, peb_addr + peb::SESSION_ID, session)?;
     let space = KArc::try_new(platform::SpaceLock::new(space))?;
     let process = KArc::try_new(Process {
         id,
@@ -754,6 +759,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         commit_ended: core::sync::atomic::AtomicBool::new(false),
         priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),
         token: IrqMutex::new(token),
+        session,
         console,
         last_exception: IrqMutex::new(None),
     })?;
@@ -785,12 +791,12 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             return Err(LoadError::OutOfMemory);
         }
     };
-    info!("process {} (pid {}): starting at {:#x}", name, id, regs.rip);
+    info!("process {} (pid {}, session {session}): starting at {:#x}", name, id, regs.rip);
     crate::events::emit(
         crate::events::Category::Process,
         "process start",
         format_args!(
-            r#""pid":{id},"name":{},"image_base":{base},"entry":{},"cmdline":{}"#,
+            r#""pid":{id},"session":{session},"name":{},"image_base":{base},"entry":{},"cmdline":{}"#,
             crate::events::Str(name),
             regs.rip,
             crate::events::Str(command_line)
@@ -881,7 +887,7 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     crate::events::emit(
         crate::events::Category::Process,
         "process exit",
-        format_args!(r#""pid":{},"status":{}"#, process.id, status.0),
+        format_args!(r#""pid":{},"session":{},"status":{}"#, process.id, process.session, status.0),
     );
     wait::signal_dispatcher(&process.dispatcher, 1);
     crate::flight::record(crate::flight::Kind::ProcessExit, process.id, u64::from(status.0));
@@ -1161,6 +1167,8 @@ pub struct Adopted {
     /// Its primary token (None: an older record without one: the boot
     /// user's, made again).
     pub token: Option<ObjectRef>,
+    /// Its session (None: an older record without one: its token's).
+    pub session: Option<u32>,
 }
 
 /// Rebuilds a process from a kernel handover's record, its commit charged
@@ -1171,6 +1179,8 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
         Some(t) => t,
         None => super::token::for_new_process(None).map_err(|_| NtStatus::NO_MEMORY)?,
     };
+    let session = a.session.unwrap_or_else(|| super::token::session_of(&token));
+    super::session::ensure(session)?;
     let space =
         KArc::try_new(platform::SpaceLock::new(a.space)).map_err(|_| NtStatus::NO_MEMORY)?;
     let commit = a.vad.private_commit();
@@ -1199,6 +1209,7 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
         commit_ended: AtomicBool::new(false),
         priority_class: AtomicU8::new(a.priority_class),
         token: IrqMutex::new(token),
+        session,
         console: None,
         last_exception: IrqMutex::new(None),
     })

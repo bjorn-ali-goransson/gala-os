@@ -36,6 +36,7 @@ pub mod registry;
 pub mod reglog;
 pub mod section;
 pub mod security;
+pub mod session;
 pub mod stats;
 pub mod status;
 pub mod syscalls;

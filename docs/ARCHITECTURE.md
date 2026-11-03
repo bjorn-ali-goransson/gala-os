@@ -294,7 +294,8 @@ preferred base with section permissions (no relocation or imports yet),
 a 1 MiB stack below `0x200000` (see guard pages below), and the PEB, process
 parameters and TEB at fixed addresses (`nt::layout`). The PEB carries the
 image base, OS version of the pinned build, processor count, image
-subsystem and its version, and session 1. `nt::params` builds a normalized
+subsystem and its version, and the process's session (its primary
+token's TokenSessionId; `nt::session`). `nt::params` builds a normalized
 RTL_USER_PROCESS_PARAMETERS: standard handles, ImagePathName and
 CommandLine (`C:\gala\<name>`), current directory `C:\gala\` with an
 open directory handle (FILE_TRAVERSE | SYNCHRONIZE), DllPath, WindowTitle
@@ -396,7 +397,8 @@ every lookup (create's parent, open, and parse into a device). A link met
 in the middle of a path, or at its end unless the link itself is opened
 (NtOpenSymbolicLinkObject), is replaced by its target and the walk starts
 again (at most 32 times). `\??\C:` is a link to `\Device\HarddiskVolume1`
-and `\Sessions\1\BaseNamedObjects\Global` one to `\BaseNamedObjects`.
+and each session's `Global`, `Local` and `Session` links are in its
+BaseNamedObjects (`nt::session`; "Plan: sessions and remote shasha").
 NtQueryDirectoryObject returns OBJECT_DIRECTORY_INFORMATION entries in
 link order, with the context as the next index.
 
@@ -568,8 +570,9 @@ type's `GenericMapping`) and attributes; services check rights with
 `HandleEntry::require`. Handle values are `(slot + 1) * 4`.
 
 **Namespace** (`nt::namespace`): a tree of `Directory` objects rooted at
-`\` with `\BaseNamedObjects`, `\KernelObjects`, `\Sessions\1\BaseNamedObjects`
-created at boot (permanent). Named objects record their parent and name;
+`\` with `\BaseNamedObjects`, `\KernelObjects`, `\Sessions\0`,
+`\Sessions\1\BaseNamedObjects` and `\Sessions\BNOLINKS` created at boot
+(permanent; the sessions' part by `nt::session`). Named objects record their parent and name;
 each object counts its handles, and a non-permanent named object is
 unlinked when the last handle closes (`HandleTable::close`). Services
 capture OBJECT_ATTRIBUTES (length must be 48, RootDirectory needs
@@ -3585,6 +3588,7 @@ through its UninstallString), 4 (MSIX), 5 (MSI); machine scope
 to packages by ProductCode/AppsAndFeaturesEntries.
 
 ## Plan: sessions and remote shasha (proposed 2026-11-03)
+## Plan: sessions and remote shasha (proposed 2026-11-03; B1 done)
 
 The owner's goals: reach gala over SSH and over something RDP-like; run
 **shasha on the client** and have it talk to the server; **multiple
@@ -3606,12 +3610,64 @@ client, or none). Nothing here is built yet unless marked "exists".
   action is a named `Action` through `Desktop::act`; its only hardware
   seams are `platform::Display` and the PS/2 input thread;
   `desktop_off.rs` proves the interface can be swapped.
-- Sessions: none. Every process is session 1 (`process::SESSION_ID`,
-  PEB, ProcessSessionInformation) while the SYSTEM token says session 0;
-  `\Sessions\1\BaseNamedObjects` and `\Sessions\BNOLINKS` are links to
-  the one `\BaseNamedObjects` (`Local\` == `Global\`); one global
-  `DESKTOP` and one global window `REGISTRY` (every process sees every
-  window); no window stations, desktop objects or WTS API.
+- Sessions (step B1, done 2026-11-03, `session_test`; below): session
+  ids and per-session named objects. Still one global `DESKTOP` and one
+  global window `REGISTRY` (every process sees every window, across
+  sessions too: step B2); no window stations, desktop objects or WTS API
+  beyond WTSGetActiveConsoleSessionId.
+
+### Step B1: session ids and per-session named objects (done)
+
+`nt::session` (host tests there): a session is a record (id, its
+BaseNamedObjects directory) in a list (at most `MAX_SESSIONS`, 64).
+Sessions 0 (services, SYSTEM) and 1 (the console) are made at boot by
+`namespace::init`; another id is made the first time a process is
+created in it (B4's session manager will make them and refuse unknown
+ids), logged (`session: 2 made, named objects in
+\Sessions\2\BaseNamedObjects`) and an event (`"ev":"session"`, category
+`process`). Sessions are never removed yet.
+
+- **Namespace**, as Windows lays it out: session 0's named objects are
+  `\BaseNamedObjects` (with links `Global` and `Local` to itself and
+  `Session` to `\Sessions\BNOLINKS`); `\Sessions\0` exists without a
+  BaseNamedObjects; session n's are `\Sessions\<n>\BaseNamedObjects`, a
+  real directory with `Global` -> `\BaseNamedObjects`, `Local` -> itself,
+  `Session` -> `\Sessions\BNOLINKS`; `\Sessions\BNOLINKS\<n>` links to
+  each session's directory.
+- **kernel32** names objects under the caller's session directory, from
+  PEB.SessionId (`sync::session_path`, also file mappings): `Local\x` and
+  a plain `x` resolve to the session's, `Global\x` to the global one
+  through the kernel's links. So a session-1 `Local\` object is not found
+  by that name from session 0, a `Global\` one is.
+- **A process's session** (`Process::session`) is its primary token's
+  TokenSessionId at creation (as NtCreateUserProcess takes it) and fixed
+  for its life: PEB.SessionId, ProcessSessionInformation, kernel32's
+  ProcessIdToSessionId (its own from the PEB, another's through
+  OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)) and GetTokenInformation
+  (TokenSessionId) agree. SYSTEM's token is session 0, the boot user's
+  1; a LogonUser/LSA logon's token takes the caller's session (sshd, a
+  SYSTEM service, gives its logons session 0, as on Windows); a
+  SeTcbPrivilege holder moves a token with SetTokenInformation
+  (TokenSessionId), and CreateProcessAsUserW with it starts the process
+  in that session (how a service starts a program in the console's
+  session). WTSGetActiveConsoleSessionId reads KUSER_SHARED_DATA's
+  ActiveConsoleId: 1.
+- **Handover** (R9): PROCESSES version 3 carries the session (a field at
+  the entry's end; a version-2 entry reads as "none": the token's
+  session; must_read stays 2, since the token gives the same answer
+  unless it was moved after the process started). `handover_next` moved
+  to PROCESSES 4 (the handover count after the session).
+- **Observability**: `process start` and `process exit` events carry
+  `"session"`; the start line says it (`process x.exe (pid 4, session
+  1): starting at ...`); the state dump's thread lines end with
+  `session N (name)` and xtask's triage shows it.
+- **Not yet**: per-session desktops and window registries (B2: windows
+  are still visible and messageable across sessions), DosDevices per
+  session or logon (`\Sessions\0\DosDevices`), SeCreateGlobalPrivilege
+  for file mappings in `Global\` from a session other than 0, directory
+  DACLs on the session directories, process DACLs (a standard user's
+  ProcessIdToSessionId of a SYSTEM process succeeds under gala; Windows
+  denies the OpenProcess), WTS API (B4).
 
 ### Target
 
@@ -5073,8 +5129,9 @@ host-tested: round trip, damage, older entries).
   the blocked half is carried as the plain wait (registers rewritten to
   NtWaitForSingleObject's), since the side effect is done.
 - *What is carried* (sections, all REQUIRED; version 1 but PROCESSES,
-  THREADS and TIMERS, version 2 since (c), THREADS 3 since (d) (and
-  PROCESSES 3 in the `handover_next` build); lists are entries with a
+  THREADS and TIMERS, version 2 since (c), THREADS 3 since (d),
+  PROCESSES 3 since RS B1 (the session) (and PROCESSES 4 in the
+  `handover_next` build); lists are entries with a
   length, or tables with a stride, so items gain fields at their end;
   objects are named by ids unique in the record, one section per object
   kind so a kernel that does not know a kind refuses the record before
@@ -5334,7 +5391,7 @@ state format differs; every future format change follows these rules.
   the new image and scaffold are allocated) and checked section by
   section as written (`check_record`). Any mismatch refuses the handover
   with the reason (`handover: refused: the next kernel (gala) reads
-  PROCESSES up to version 2; this kernel writes version 3, which needs a
+  PROCESSES up to version 3; this kernel writes version 4, which needs a
   reader of version 3`) and the programs go on.
 - *Reading* (the receiving kernel): `record::parse` refuses a REQUIRED
   section it does not know, whose must_read is above its newest version
@@ -5344,7 +5401,7 @@ state format differs; every future format change follows these rules.
   it cannot read. Each reader converts older versions: fields the writer
   did not have read as 0 and take their documented default (`ProcessRec::
   read_as`, `ThreadRec::read`). The log says what was converted or
-  skipped (`handover: section PROCESSES version 2 read as version 3 (new
+  skipped (`handover: section PROCESSES version 3 read as version 4 (new
   fields take their defaults)`, `handover: skipped section 33 (unknown to
   this kernel)`) and who wrote the record (WRITER).
 - *In-memory structures are the build's own*: a record's bytes are its
@@ -5354,17 +5411,18 @@ state format differs; every future format change follows these rules.
   the bytes in both builds: `cargo test -p kernel --lib --features
   handover_next handover::`, which `cargo xtask test` runs).
 - *The `handover_next` build* (cargo feature, built by xtask into
-  `target/next`) stands in for the next release: PROCESSES 3 (the
+  `target/next`) stands in for the next release: PROCESSES 4 (the
   handovers a process came through, a field marked must-understand to
   stand for one), WRITER (tag 33, optional, new), the re-laid-out Clock.
   `handover_upgrade` hands over gala -> gala-next -> gala-next with the
-  kernel32 program working (v2 read with defaults, then v3 both ways);
+  kernel32 program working (v3 read with defaults, then v4 both ways);
   `handover_downgrade_refused` boots gala-next with gala as the module:
   with the program running gala-next refuses (gala reads PROCESSES up to
-  2), the program finishes there, then the boot's own handover without
+  3), the program finishes there, then the boot's own handover without
   programs goes to gala, which skips WRITER. When a real format change
   lands, it goes into the default build and `handover_next` moves one
-  step ahead again.
+  step ahead again (RS B1 did this: the session became the default
+  build's PROCESSES 3, the count moved to 4).
 - *Rules for every future change*: a new tag for new state; fields only
   at an entry's or table record's end, version raised; never a changed
   meaning or unit of an old field (add a new field); a reader keeps

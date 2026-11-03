@@ -150,7 +150,8 @@ fn dumped_threads(serial: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in &lines[start..] {
         if let Some(rest) = line.strip_prefix("thread: pid ") {
-            // "4 tid 8 (sched ..) suspend 0 exited false in a system call true (name)"
+            // "4 tid 8 (sched ..) suspend 0 exited false in a system call true
+            // session 1 (name)" (no session before RS B1)
             let mut words = rest.split_whitespace();
             let pid = words.next().unwrap_or("?");
             let tid = words.nth(1).unwrap_or("?");
@@ -161,8 +162,12 @@ fn dumped_threads(serial: &str) -> Vec<String> {
                 .filter(|n| !n.contains([' ', ')']))
                 .unwrap_or("");
             let exited = rest.contains("exited true");
+            let session = rest
+                .split_once(" session ")
+                .and_then(|(_, r)| r.split_whitespace().next())
+                .map_or(String::new(), |s| format!(" session {s}"));
             out.push(format!(
-                "pid {pid} tid {tid}{}{}:",
+                "pid {pid} tid {tid}{}{session}{}:",
                 if name.is_empty() { String::new() } else { format!(" ({name})") },
                 if exited { " (exited)" } else { "" }
             ));
@@ -510,7 +515,7 @@ statedump: NMI part done; the threads follow from the boot thread if it still ru
 [info ] thread: pid 4 tid 8 (sched Some(ThreadId(5))) suspend 0 exited false in a system call true (java.exe)
 [info ] thread:   NtWaitForSingleObject from rip 0x1400010de
 [info ] thread:   on handle 0x14: Event signal 0
-[info ] thread: pid 4 tid 12 (sched Some(ThreadId(6))) suspend 0 exited false in a system call false (java.exe)
+[info ] thread: pid 4 tid 12 (sched Some(ThreadId(6))) suspend 0 exited false in a system call false session 1 (java.exe)
 [info ] thread:   in user mode at rip 0x1400010b9 (last tick)
 [info ] statedump: end
 ";
@@ -543,7 +548,9 @@ statedump: NMI part done; the threads follow from the boot thread if it still ru
         has(
             "triage: thread pid 4 tid 8 (java.exe): NtWaitForSingleObject from rip 0x1400010de on handle 0x14: Event signal 0",
         );
-        has("triage: thread pid 4 tid 12 (java.exe): in user mode at rip 0x1400010b9 (last tick)");
+        has(
+            "triage: thread pid 4 tid 12 (java.exe) session 1: in user mode at rip 0x1400010b9 (last tick)",
+        );
         has("triage: last calls of tid 8 (flight recorder): NtCreateEvent, NtWaitForSingleObject");
         assert!(!t.contains("no \"statedump: end\""));
     }
