@@ -29,9 +29,12 @@ pub enum Category {
     /// The display: modes set, resizes, device resets, failed commands;
     /// with `gputrace` every virtio-gpu command too.
     Display = 512,
+    /// The clock's calibration and its check against the RTC (a wrong
+    /// clock is written whatever the mask: `emit_always`).
+    Clock = 1024,
 }
 
-const NAMES: [(&str, u32); 10] = [
+const NAMES: [(&str, u32); 11] = [
     ("display", Category::Display as u32),
     ("net", Category::Net as u32),
     ("logon", Category::Logon as u32),
@@ -42,6 +45,7 @@ const NAMES: [(&str, u32); 10] = [
     ("process", Category::Process as u32),
     ("fault", Category::Fault as u32),
     ("mock", Category::Mock as u32),
+    ("clock", Category::Clock as u32),
 ];
 
 static MASK: AtomicU32 = AtomicU32::new(0);
@@ -90,6 +94,21 @@ pub fn emit(category: Category, name: &str, fields: fmt::Arguments) {
 /// Host unit tests and gala-um have no debug console.
 #[cfg(any(test, feature = "hosted"))]
 pub fn emit(_category: Category, _name: &str, _fields: fmt::Arguments) {}
+
+/// Writes one event whatever the mask (something going wrong that the
+/// stream must show: a wrong clock): `{"t":..,"cpu":..,<fields>}`,
+/// `fields` naming the event (`"ev":"..."`) themselves.
+#[cfg(not(any(test, feature = "hosted")))]
+pub fn emit_always(fields: fmt::Arguments) {
+    let t = crate::time::raw_monotonic_ns();
+    let cpu = crate::arch::percpu::cpu_index();
+    let mut port = crate::arch::debugcon::DEBUGCON.lock();
+    let _ = writeln!(port, r#"{{"t":{t},"cpu":{cpu},{fields}}}"#);
+    WRITTEN.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(any(test, feature = "hosted"))]
+pub fn emit_always(_fields: fmt::Arguments) {}
 
 /// (gala-um records to a file instead: hosted::record_to.)
 #[cfg(any(test, feature = "hosted"))]

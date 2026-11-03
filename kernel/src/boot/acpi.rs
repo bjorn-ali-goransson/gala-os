@@ -4,6 +4,10 @@
 //! fewer (ARCHITECTURE "Processors": an AP that does not answer Limine in
 //! time is left out of its MP response).
 //!
+//! It also finds the clock references the TSC is calibrated against (ARCHITECTURE
+//! "Interrupts and time"): the HPET table's base address and the FADT's
+//! ACPI PM timer port.
+//!
 //! Parsing works on byte slices (host-tested); `read_madt` maps the tables
 //! through the HHDM, where Limine (base revision >= 4) guarantees them.
 
@@ -139,6 +143,46 @@ pub fn parse_madt(madt: &[u8]) -> Result<FirmwareCpus, AcpiError> {
     Ok(cpus)
 }
 
+/// The ACPI PM timer (FADT PM_TMR_BLK / X_PM_TMR_BLK): an I/O port
+/// counting at 3.579545 MHz, 24 bits wide (32 with TMR_VAL_EXT).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PmTimer {
+    pub port: u16,
+    pub bits32: bool,
+}
+
+/// The firmware's wall-clock references for calibration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClockTables {
+    /// The HPET's physical MMIO base (HPET table, memory space).
+    pub hpet: Option<u64>,
+    pub pm_timer: Option<PmTimer>,
+}
+
+/// The HPET table's base address (a Generic Address Structure at offset
+/// 40: space id 0 = memory, the address at 44).
+pub fn parse_hpet(t: &[u8]) -> Option<u64> {
+    if t.get(..4) != Some(b"HPET") || !checksum_ok(t) || *t.get(40)? != 0 {
+        return None;
+    }
+    u64_at(t, 44).filter(|&a| a != 0)
+}
+
+/// The FADT's PM timer: X_PM_TMR_BLK (GAS at 208, space id 1 = I/O) when
+/// the table is long enough and it is set, else PM_TMR_BLK (76) with
+/// PM_TMR_LEN (91) 4; TMR_VAL_EXT is flag bit 8 (flags at 112).
+pub fn parse_fadt(t: &[u8]) -> Option<PmTimer> {
+    const TMR_VAL_EXT: u32 = 1 << 8;
+    if t.get(..4) != Some(b"FACP") || !checksum_ok(t) {
+        return None;
+    }
+    let bits32 = u32_at(t, 112).is_some_and(|f| f & TMR_VAL_EXT != 0);
+    let extended = (t.get(208) == Some(&1)).then(|| u64_at(t, 212)).flatten().filter(|&a| a != 0);
+    let legacy = (t.get(91) == Some(&4)).then(|| u32_at(t, 76)).flatten().map(u64::from);
+    let port = extended.or(legacy).filter(|&p| p != 0)?;
+    Some(PmTimer { port: u16::try_from(port).ok()?, bits32 })
+}
+
 /// Reads `len` bytes at physical `phys` (HHDM-mapped).
 ///
 /// # Safety
@@ -150,6 +194,25 @@ unsafe fn phys(hhdm_offset: u64, phys: u64, len: usize) -> &'static [u8] {
 
 /// The MADT's processors, from the RSDP at virtual `rsdp` (HHDM).
 pub fn read_madt(hhdm_offset: u64, rsdp_virt: u64) -> Result<FirmwareCpus, AcpiError> {
+    parse_madt(read_table(hhdm_offset, rsdp_virt, b"APIC")?.ok_or(AcpiError::NoMadt)?)
+}
+
+/// The HPET and PM timer, from the RSDP at virtual `rsdp` (HHDM); none
+/// when the tables cannot be read.
+pub fn read_clock_tables(hhdm_offset: u64, rsdp_virt: u64) -> ClockTables {
+    let table = |sig| read_table(hhdm_offset, rsdp_virt, sig).ok().flatten();
+    ClockTables {
+        hpet: table(b"HPET").and_then(parse_hpet),
+        pm_timer: table(b"FACP").and_then(parse_fadt),
+    }
+}
+
+/// The first table with signature `sig` the root table lists.
+fn read_table(
+    hhdm_offset: u64,
+    rsdp_virt: u64,
+    sig: &[u8; 4],
+) -> Result<Option<&'static [u8]>, AcpiError> {
     if rsdp_virt == 0 {
         return Err(AcpiError::NoRsdp);
     }
@@ -165,13 +228,13 @@ pub fn read_madt(hhdm_offset: u64, rsdp_virt: u64) -> Result<FirmwareCpus, AcpiE
     let root = unsafe { phys(hhdm_offset, root_phys, len) };
     for table in root_entries(root, xsdt)? {
         let header = unsafe { phys(hhdm_offset, table, SDT_HEADER_LEN) };
-        if header.get(..4) != Some(b"APIC") {
+        if header.get(..4) != Some(sig) {
             continue;
         }
-        let len = table_len(header).ok_or(AcpiError::BadTable("MADT"))?;
-        return parse_madt(unsafe { phys(hhdm_offset, table, len) });
+        let len = table_len(header).ok_or(AcpiError::BadTable("table length"))?;
+        return Ok(Some(unsafe { phys(hhdm_offset, table, len) }));
     }
-    Err(AcpiError::NoMadt)
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -223,6 +286,36 @@ mod tests {
         body.extend_from_slice(&[0, 0]); // zero length: stop
         let madt = table(b"APIC", &body);
         assert_eq!(parse_madt(&madt).unwrap().ids(), &[0]);
+    }
+
+    #[test]
+    fn clock_tables() {
+        // HPET: event timer block id (4), base address GAS (12), ...
+        let mut body = vec![0u8; 20];
+        body[4] = 0; // memory space
+        body[8..16].copy_from_slice(&0xfed0_0000u64.to_le_bytes());
+        let hpet = table(b"HPET", &body);
+        assert_eq!(parse_hpet(&hpet), Some(0xfed0_0000));
+        let mut io = body.clone();
+        io[4] = 1;
+        assert_eq!(parse_hpet(&table(b"HPET", &io)), None);
+
+        // FADT (ACPI 1 length 116): PM_TMR_BLK 0x608, length 4, 24 bits.
+        let mut fadt = vec![0u8; 116 - SDT_HEADER_LEN];
+        fadt[76 - 36..80 - 36].copy_from_slice(&0x608u32.to_le_bytes());
+        fadt[91 - 36] = 4;
+        let t = table(b"FACP", &fadt);
+        assert_eq!(parse_fadt(&t), Some(PmTimer { port: 0x608, bits32: false }));
+        // TMR_VAL_EXT and an X_PM_TMR_BLK in I/O space.
+        let mut long = vec![0u8; 244 - SDT_HEADER_LEN];
+        long[76 - 36..80 - 36].copy_from_slice(&0x608u32.to_le_bytes());
+        long[91 - 36] = 4;
+        long[112 - 36..116 - 36].copy_from_slice(&(1u32 << 8).to_le_bytes());
+        long[208 - 36] = 1;
+        long[212 - 36..220 - 36].copy_from_slice(&0x408u64.to_le_bytes());
+        assert_eq!(parse_fadt(&table(b"FACP", &long)), Some(PmTimer { port: 0x408, bits32: true }));
+        // No timer.
+        assert_eq!(parse_fadt(&table(b"FACP", &[0u8; 80])), None);
     }
 
     #[test]

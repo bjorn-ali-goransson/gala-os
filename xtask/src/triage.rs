@@ -237,6 +237,18 @@ pub fn triage(serial: &str, events: Option<&str>, facts: &Facts) -> String {
         )
         .ok();
     }
+    // The clock checked against the host (xtask's `uptime_ms=` timing,
+    // clockcheck.rs) and against the RTC (the kernel's check, which
+    // recalibrates): either saying WRONG explains early timeouts.
+    for l in plain
+        .iter()
+        .filter(|l| l.starts_with(crate::clockcheck::WRONG) || l.starts_with("clock: WRONG"))
+    {
+        writeln!(o, "triage: clock WRONG: {}", shorten(l, 300)).ok();
+    }
+    if let Some(l) = plain.iter().find(|l| l.starts_with("clock: recalibrated")) {
+        writeln!(o, "triage: clock: {}", shorten(l, 200)).ok();
+    }
     let warnings = lines.iter().filter(|l| l.starts_with("[warn ")).count();
     let errors = lines.iter().filter(|l| l.starts_with("[error")).count();
     writeln!(o, "triage: log: {} lines, {warnings} warnings, {errors} errors", lines.len()).ok();
@@ -564,6 +576,13 @@ statedump: NMI part done; the threads follow from the boot thread if it still ru
         );
         let log = "[info ] apic: id 0 (xAPIC), timer 62748 kHz, TSC 2811 MHz\n";
         assert!(!triage(log, None, &Facts::default()).contains("suspicious clock"));
+        let log = "[error] clock: WRONG: the TSC was calibrated at 140.0 MHz\n\
+                   [warn ] clock: recalibrated: TSC 2800.0 MHz\n\
+                   xtask: clock: WRONG: clock: the guest's time passed 20.00x the host's\n";
+        let t = triage(log, None, &Facts::default());
+        assert!(t.contains("triage: clock WRONG: clock: WRONG: the TSC was calibrated"), "{t}");
+        assert!(t.contains("triage: clock WRONG: xtask: clock: WRONG: clock: the guest's"), "{t}");
+        assert!(t.contains("triage: clock: clock: recalibrated: TSC 2800.0 MHz"), "{t}");
     }
 
     #[test]

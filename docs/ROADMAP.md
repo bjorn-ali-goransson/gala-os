@@ -128,8 +128,23 @@ explicitly in its commit.
   threads in a panic, the watchdog's NMI to a stuck CPU (its backtrace),
   whole lines from emergency output. Open there: program output on its
   own channel (split lines), reference holders of a leaked address space,
-  a real user stack walk in crash reports, TSC calibration under load
-  (watchdogs at boot), repeat boots and um-test in the history.
+  a real user stack walk in crash reports, repeat boots and um-test in
+  the history.
+- **Resolved (2026-11-03): a clock calibrated 20-200x wrong under load.**
+  The TSC and LAPIC timer were measured over a 10 ms PIT one-shot started
+  before the first TSC read; a vCPU descheduled in between (QEMU TCG, host
+  load ~14) measured only the window's end (TSC 15/31/35/135 MHz, the
+  timer low by the same factor), so sleeps ended early, watchdogs fired,
+  handover_idle_uefi's park wait gave up after 25 ms real and the machine
+  triple-faulted. Now: bracketed samples against the HPET / ACPI PM
+  timer with a median and outlier rejection (CPUID's rate when it
+  agrees), a kernel check against the CMOS RTC that recalibrates, a tick
+  count that keeps up with the TSC (ticks lost under load had made a 5 s
+  sleep take 8 s), bounded spin waits that a low calibration cannot cut
+  short (`time::SpinDeadline`), an abandoned handover that recovers when
+  no CPU parked, xtask timing the guest's `uptime_ms=` marks against the
+  host (ARCHITECTURE "Interrupts and time"; scenarios `clockcal_test`
+  under host load, `clockcal_recal`, `handover_park_late`).
 - **Server and desktop stay separate**: the essential workloads (servers,
   console programs, the Docker image) never start the graphical
   interface. See "Server and desktop workloads" in ARCHITECTURE; item

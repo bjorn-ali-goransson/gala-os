@@ -225,7 +225,7 @@ pub fn collect() -> Result<Option<Programs>, Refusal> {
 /// wait has consumed nothing.
 fn wait_quiet() -> Result<Vec<ThreadState>, Refusal> {
     thread::hold_for_handover(true);
-    let until = crate::time::raw_monotonic_ns() + QUIET_MS * 1_000_000;
+    let until = crate::time::SpinDeadline::after_ns(QUIET_MS * 1_000_000);
     loop {
         let mut check = check_threads().map(drop);
         if check.is_ok() {
@@ -238,7 +238,7 @@ fn wait_quiet() -> Result<Vec<ThreadState>, Refusal> {
             sched::freeze_users(false);
         }
         match check {
-            Err(why) if crate::time::raw_monotonic_ns() >= until => {
+            Err(why) if until.passed() => {
                 return Err(why.unwrap_or(Refusal::Thread {
                     pid: 0,
                     tid: 0,

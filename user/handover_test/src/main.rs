@@ -31,6 +31,13 @@
 //! handover, says why, and the program goes on undisturbed in the same
 //! kernel (`ok (refused)`).
 //!
+//! With the argument `late` (scenario handover_park_late), the other CPU
+//! takes the park IPI too late and the kernel abandons the handover: the
+//! program goes on in the same kernel, its sleep may end up to the
+//! abandoned attempt's few seconds late (`ok (late)`); run again in the
+//! next kernel, which takes no requests, it says `ok (no handover
+//! allowed)`.
+//!
 //! GalaRequestHandover is gala's own (number 0x7f5a), as are the timer
 //! services' numbers here: on Windows the request fails and the test
 //! reports itself skipped (exit 0).
@@ -56,6 +63,8 @@ const TIMER_MS: i64 = 2500;
 /// machine. A sleep started again after the handover would end later by
 /// the handover's time (a few hundred ms).
 const SLACK_TICKS: u64 = 100;
+/// `late`: the abandoned handover's wait (2 s) and freeze on top.
+const LATE_SLACK_MS: i64 = 10_000;
 
 const PAGE: usize = 4096;
 const FILE_READ_DATA: u32 = 1;
@@ -235,7 +244,13 @@ fn refused() -> Result<&'static str, u32> {
 }
 
 fn main() -> u32 {
-    let result = if last_arg_is("refuse") { refused() } else { run().map(|()| "ok") };
+    let result = if last_arg_is("refuse") {
+        refused()
+    } else if last_arg_is("late") {
+        run().map(|()| "ok (late)")
+    } else {
+        run().map(|()| "ok")
+    };
     match result {
         Ok(what) => {
             let mut line = [0u8; 80];
@@ -328,6 +343,10 @@ fn run() -> Result<(), u32> {
             say("handover_test: skipped (no GalaRequestHandover: not gala)\r\n");
             exit(0);
         }
+        STATUS_ACCESS_DENIED if last_arg_is("late") => {
+            say("handover_test: ok (no handover allowed)\r\n");
+            exit(0);
+        }
         _ => return Err(18),
     }
     check(delay(relative_ms(SLEEP_MS)) == STATUS_SUCCESS, 19)?;
@@ -341,7 +360,9 @@ fn run() -> Result<(), u32> {
     // Time: forward, and the sleep kept its deadline.
     check(after_qpc > before_qpc && after_system > before_system, 20)?;
     check(slept >= SLEEP_MS, 21)?;
-    check(slept < SLEEP_MS + SLACK_TICKS as i64, 22)?;
+    // An abandoned handover (`late`) held the threads for its wait.
+    let slack = if last_arg_is("late") { LATE_SLACK_MS } else { SLACK_TICKS as i64 };
+    check(slept < SLEEP_MS + slack, 22)?;
     // Memory.
     check(intact(private, PRIVATE_PAGES * PAGE, private_byte), 23)?;
     check(intact(view, SECTION_PAGES * PAGE, section_byte), 24)?;

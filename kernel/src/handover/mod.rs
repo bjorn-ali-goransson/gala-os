@@ -530,7 +530,12 @@ fn prepare_and_go(
     let others = &cpus[1..];
     drop(map);
     drop(bytes);
-    Err(machine::quiesce_and_jump(&prepared, record_at.0, others).into())
+    let e = machine::quiesce_and_jump(&prepared, record_at.0, others);
+    // Abandoned with no CPU parked: nothing uses what was prepared.
+    prepared.free();
+    record_pages.free();
+    bitmap.free();
+    Err(e.into())
 }
 
 /// Where `arch::handover::prepare` put the new image and the scaffold

@@ -140,9 +140,22 @@ Each: what failed, what we lacked, what would have explained it, status.
     the watchdog reports CPUs "stuck" for "5 s" every quarter second
     (postgres: dozens of reports, which slow the boot further; gala_cli's
     split line). **Done**: the triage flags a TSC under 500 MHz as a
-    suspicious clock. Open (early boot, the other agent's area): calibrate
-    robustly (repeat and take the best, check against the PIT afterwards,
-    or use CPUID leaf 0x15/0x16 or the hypervisor's TSC frequency).
+    suspicious clock. **Done** (2026-11-03, root cause and fix in
+    ARCHITECTURE "Interrupts and time"): the vCPU was descheduled between
+    starting the PIT one-shot and reading the TSC, so the TSC and the
+    LAPIC timer were both measured over a fraction of the window (the
+    135 MHz boot had its timer at 3043 kHz of 62748: the same 4.8%).
+    Calibration now uses bracketed samples against the HPET / PM timer
+    with a median and logs how (`tsc: ... from HPET ..., 5 samples (n
+    paused, n outliers), spread x%`, `phase tsc_mhz`, a `clock_cal`
+    event); a kernel thread checks the TSC against the CMOS RTC after
+    boot and recalibrates when they disagree (`clock: RTC check: agrees`
+    or `clock: WRONG`, `clock_wrong` event); xtask times every
+    `uptime_ms=` mark against the host and adds `xtask: clock: <source>:
+    guest N ms over host M ms` or `xtask: clock: WRONG: ...`; the triage
+    reports both (`triage: clock WRONG`), and a failure in a boot whose
+    clock was wrong says so in its verdict. Scenarios `clockcal_test`
+    (host CPUs kept busy, `calstall`), `clockcal_recal` (`calwrong`).
 18. **First fruits of the state dump** (full suite, 2026-11-03): java_http
     timed out with a correct clock, and its dump shows the JVM's
     threads 16, 20 and 40 in NtYieldExecution (spinning), 32 and 36

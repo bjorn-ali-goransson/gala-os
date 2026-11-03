@@ -1,9 +1,12 @@
 //! Local APIC: x2APIC (MSR access) when available, otherwise xAPIC (MMIO).
-//! Provides EOI and the periodic timer, calibrated against the PIT.
+//! Provides EOI and the periodic timer, calibrated against a wall-clock
+//! reference (`refclock`; the arithmetic in `crate::clockcal`).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::{cpu, interrupts, paging, pit};
+use super::refclock::{self, RefClock};
+use super::{cpu, interrupts, paging};
+use crate::clockcal::{self, Sample};
 
 const IA32_APIC_BASE: u32 = 0x1b;
 const APIC_BASE_ENABLE: u64 = 1 << 11;
@@ -78,10 +81,30 @@ pub struct Calibration {
     /// LAPIC timer ticks per second (after the divide-by-16).
     pub timer_hz: u64,
     pub tsc_hz: u64,
+    /// What it was measured against, and how well.
+    pub report: CalibrationReport,
+    /// For a recalibration.
+    pub inputs: CalibrationInputs,
+}
+
+/// What the calibration may use, and its test switch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CalibrationInputs {
+    /// The HPET's physical base (ACPI HPET table).
+    pub hpet: Option<u64>,
+    /// The ACPI PM timer's port and whether it is 32 bits wide.
+    pub pm_timer: Option<(u16, bool)>,
+    /// `calstall`: stall the boot CPU inside the calibration as a
+    /// descheduled vCPU would be (scenario clockcal_test).
+    pub stall: bool,
+    /// After a kernel handover: the first boot's (TSC, timer) rates, used
+    /// as they are (one clock across kernels; measuring again would only
+    /// slow the handover).
+    pub carried: Option<(u64, u64)>,
 }
 
 /// Enables the boot CPU's local APIC.
-pub fn init_bsp() -> Result<Calibration, ApicError> {
+pub fn init_bsp(inputs: CalibrationInputs) -> Result<Calibration, ApicError> {
     let features = cpu::cpuid(1, 0);
     const CPUID_APIC: u32 = 1 << 9;
     const CPUID_X2APIC: u32 = 1 << 21;
@@ -110,10 +133,13 @@ pub fn init_bsp() -> Result<Calibration, ApicError> {
     write(REG_LVT_TIMER, LVT_MASKED);
     write(REG_LVT_LINT1, LVT_DELIVERY_NMI);
 
-    let (timer_hz, tsc_hz) = calibrate()?;
+    let (timer_hz, tsc_hz, report) = match inputs.carried {
+        Some((tsc, timer)) if tsc != 0 && timer != 0 => (timer, tsc, carried_report(tsc)),
+        _ => calibrate(inputs)?,
+    };
     let id = read(REG_ID);
     let apic_id = if x2apic { id } else { id >> 24 };
-    Ok(Calibration { x2apic, apic_id, timer_hz, tsc_hz })
+    Ok(Calibration { x2apic, apic_id, timer_hz, tsc_hz, report, inputs })
 }
 
 /// Enables the local APIC of the calling CPU (not the boot CPU) in the
@@ -132,27 +158,165 @@ pub fn init_ap() {
     write(REG_LVT_LINT1, LVT_DELIVERY_NMI);
 }
 
-/// Measures the LAPIC timer and TSC over a PIT-timed interval.
-fn calibrate() -> Result<(u64, u64), ApicError> {
-    const SAMPLE_MS: u64 = 10;
+/// How the rates were found, for the log and the event stream.
+#[derive(Clone, Copy, Debug)]
+pub struct CalibrationReport {
+    pub reference: refclock::Kind,
+    pub reference_hz: u64,
+    /// The filtered samples' result (None: too few good samples; the
+    /// least disturbed one was used).
+    pub estimate: Option<clockcal::Estimate>,
+    /// Samples taken.
+    pub samples: usize,
+    /// The TSC rate the measurement gave.
+    pub measured_tsc_hz: u64,
+    /// The rate CPUID states, with the leaf.
+    pub cpuid: Option<(u64, &'static str)>,
+    /// Whether the CPUID rate was used (it agreed with the measurement).
+    pub cpuid_used: bool,
+    /// `calstall`: stalls injected.
+    pub stalls: u32,
+}
+
+/// How long one sample's window is, in reference time.
+const SAMPLE_WINDOW_MS: u64 = 10;
+/// A `calstall` stall: as long as the vCPU pauses seen under load.
+const STALL_MS: u64 = 8;
+
+/// One bracket: TSC, then the reference and the timer, then TSC again.
+/// `stall` reference ticks are spent between the reads (`calstall`).
+struct Bracket {
+    tsc: u64,
+    reference: u64,
+    timer: u32,
+    width: u64,
+}
+
+fn bracket(r: &mut RefClock, stall: u64) -> Bracket {
+    let t0 = cpu::rdtsc();
+    let reference = r.read();
+    let timer = read(REG_TIMER_CURRENT);
+    if stall > 0 {
+        spin_reference(r, stall);
+    }
+    let t1 = cpu::rdtsc();
+    Bracket { tsc: t0 + (t1 - t0) / 2, reference, timer, width: t1 - t0 }
+}
+
+/// Spins until the reference has moved `ticks`.
+fn spin_reference(r: &mut RefClock, ticks: u64) {
+    let start = r.read();
+    while r.read().wrapping_sub(start) < ticks {
+        core::hint::spin_loop();
+    }
+}
+
+/// Measures the LAPIC timer (one-shot, masked, from its maximum count)
+/// and the TSC against `r` (clockcal.rs: brackets, median, outliers).
+/// `stall`: pause inside the first sample's opening bracket, between
+/// the second's brackets and inside the third's closing bracket.
+fn measure(r: &mut RefClock, stall: bool) -> (Option<clockcal::Estimate>, Sample, usize, u32) {
+    let window = (r.hz() * SAMPLE_WINDOW_MS / 1000).max(1);
+    let stall_ticks = r.hz() * STALL_MS / 1000;
+    let mut samples = [Sample::default(); clockcal::MAX_SAMPLES];
+    let mut n = 0;
+    let mut tight = 0;
+    let mut stalls = 0;
+    write(REG_LVT_TIMER, LVT_MASKED);
     write(REG_TIMER_DIVIDE, DIVIDE_BY_16);
-    let pit_ticks = (pit::FREQUENCY_HZ * SAMPLE_MS / 1000) as u16;
-    pit::start_oneshot(pit_ticks);
-    write(REG_TIMER_INITIAL, u32::MAX);
-    let tsc_start = cpu::rdtsc();
-    if !pit::wait_oneshot() {
-        return Err(ApicError::CalibrationFailed);
+    while n < clockcal::MAX_SAMPLES && tight < clockcal::WANT_SAMPLES {
+        let at = |i: usize| if stall && n == i { stall_ticks } else { 0 };
+        stalls += [0, 1, 2].iter().filter(|&&i| at(i) > 0).count() as u32;
+        write(REG_TIMER_INITIAL, u32::MAX);
+        let start = bracket(r, at(0));
+        if at(1) > 0 {
+            spin_reference(r, at(1));
+        }
+        while r.read().wrapping_sub(start.reference) < window {
+            core::hint::spin_loop();
+        }
+        let end = bracket(r, at(2));
+        let s = Sample {
+            tsc: end.tsc.wrapping_sub(start.tsc),
+            timer: u64::from(start.timer.wrapping_sub(end.timer)),
+            reference: end.reference.wrapping_sub(start.reference),
+            bracket: start.width.max(end.width),
+        };
+        samples[n] = s;
+        n += 1;
+        if clockcal::tight(&s) {
+            tight += 1;
+        }
     }
-    let elapsed = u64::from(u32::MAX - read(REG_TIMER_CURRENT));
-    let tsc = cpu::rdtsc() - tsc_start;
     write(REG_TIMER_INITIAL, 0);
-    // Scale by the exact PIT interval rather than the nominal SAMPLE_MS.
-    let scale = |count: u64| count * pit::FREQUENCY_HZ / u64::from(pit_ticks);
-    let (timer_hz, tsc_hz) = (scale(elapsed), scale(tsc));
-    if timer_hz == 0 {
+    let taken = &samples[..n];
+    // Without enough good samples: the least disturbed one.
+    let best = taken
+        .iter()
+        .copied()
+        .filter(|s| s.tsc > 0 && s.reference > 0)
+        .min_by_key(|s| u128::from(s.bracket) * 1_000_000 / u128::from(s.tsc))
+        .unwrap_or_default();
+    (clockcal::estimate(taken, r.hz()), best, n, stalls)
+}
+
+/// Measures the LAPIC timer's and the TSC's rates against the best
+/// wall-clock reference (ARCHITECTURE "Interrupts and time").
+fn calibrate(inputs: CalibrationInputs) -> Result<(u64, u64, CalibrationReport), ApicError> {
+    let mut r = RefClock::best(inputs.hpet, inputs.pm_timer);
+    let (mut estimate, mut best, mut samples, stalls) = measure(&mut r, inputs.stall);
+    if estimate.is_none() {
+        // Once more, without the test's stalls.
+        let again = measure(&mut r, false);
+        (estimate, best, samples) = (again.0, again.1, samples + again.2);
+    }
+    let (measured_tsc, timer_hz) = match estimate {
+        Some(e) => (e.tsc_hz, e.timer_hz),
+        None if best.reference > 0 => (
+            (u128::from(best.tsc) * u128::from(r.hz()) / u128::from(best.reference)) as u64,
+            (u128::from(best.timer) * u128::from(r.hz()) / u128::from(best.reference)) as u64,
+        ),
+        None => return Err(ApicError::CalibrationFailed),
+    };
+    if timer_hz == 0 || measured_tsc == 0 {
         return Err(ApicError::CalibrationFailed);
     }
-    Ok((timer_hz, tsc_hz))
+    let cpuid = refclock::cpuid_tsc_hz();
+    let (tsc_hz, cpuid_used) = clockcal::choose(measured_tsc, cpuid.map(|c| c.0));
+    let report = CalibrationReport {
+        reference: r.kind(),
+        reference_hz: r.hz(),
+        estimate,
+        samples,
+        measured_tsc_hz: measured_tsc,
+        cpuid,
+        cpuid_used,
+        stalls,
+    };
+    Ok((timer_hz, tsc_hz, report))
+}
+
+fn carried_report(tsc_hz: u64) -> CalibrationReport {
+    CalibrationReport {
+        reference: refclock::Kind::Carried,
+        reference_hz: 0,
+        estimate: None,
+        samples: 0,
+        measured_tsc_hz: tsc_hz,
+        cpuid: None,
+        cpuid_used: false,
+        stalls: 0,
+    }
+}
+
+/// Calibrates again on this CPU (the RTC disagreed: time::recalibrate):
+/// its timer stops for the measurement; the caller restarts it. Runs with
+/// interrupts off.
+pub fn recalibrate(old: &Calibration) -> Result<Calibration, ApicError> {
+    stop_timer();
+    let inputs = CalibrationInputs { stall: false, carried: None, ..old.inputs };
+    let (timer_hz, tsc_hz, report) = calibrate(inputs)?;
+    Ok(Calibration { timer_hz, tsc_hz, report, ..*old })
 }
 
 /// Starts the periodic timer at `hz` on vector [`TIMER_VECTOR`].

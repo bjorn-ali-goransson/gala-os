@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod alloc_audit;
+mod clockcheck;
 mod telemetry;
 // The manifest's format and SHA-256 are the kernel's own code (one
 // definition for the writer and the reader).
@@ -1615,6 +1616,7 @@ const USER_PROGRAMS: &[&str] = &[
     "smpsem_test",
     "xstate_test",
     "statedump_test",
+    "clockcal_test",
     "ledger_test",
     "bench",
     "kernel32_test",
@@ -1710,6 +1712,11 @@ const ELASTICSEARCH_MEMORY_MIB: u64 = 3072;
 /// Elasticsearch starts three JVMs and ~60 modules under TCG.
 const ELASTICSEARCH_TIMEOUT: Duration = Duration::from_secs(900);
 const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Scenarios run under an artificial host load (clockcheck::HostLoad:
+/// a busy thread on every host CPU) whose guest clock must agree with the
+/// host's (`xtask: clock:` line, clockcheck.rs).
+const HOST_LOAD_SCENARIOS: &[&str] = &["clockcal_test"];
 
 /// How long scenario `name` may run.
 fn scenario_timeout(name: &str) -> Duration {
@@ -3013,6 +3020,47 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xmodify_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // The clock under a busy host (ARCHITECTURE "Interrupts and
+        // time", calibration): booted with every host CPU kept busy
+        // (HOST_LOAD_SCENARIOS) and `calstall`, which stalls the boot CPU
+        // inside the calibration as a descheduled vCPU would be; the
+        // guest's time must still pass at the host's rate: xtask times
+        // the program's two `uptime_ms=` marks (clockcheck.rs) and the
+        // kernel checks itself against the RTC.
+        name: "clockcal_test",
+        cmdline: "qemu_exit calstall run=clockcal_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "clockcal: stall injected",
+            "tsc: ",
+            // Agrees, or inconclusive when the host is so busy that no
+            // poll lands near a second edge; xtask's timing judges.
+            "clock: RTC check: ",
+            "clockcal_test: ok",
+            "exited with status 0x00000000",
+            "xtask: clock: clockcal_test: guest",
+            "xtask: clock: clock: guest",
+        ],
+    },
+    Scenario {
+        // The RTC check's recalibration: `calwrong` makes the first
+        // calibration 20x low (guest time runs 20x fast); the kernel's
+        // check against the CMOS RTC must say so, recalibrate, and the
+        // program (which waits for the check under `calwrong`) must then
+        // see the host's rate.
+        name: "clockcal_recal",
+        cmdline: "qemu_exit calwrong run=clockcal_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "clockcal: calibration made 20x low",
+            "clock: WRONG: the TSC was calibrated at",
+            "clock: recalibrated: TSC",
+            "clockcal_test: ok",
+            "exited with status 0x00000000",
+            "xtask: clock: clockcal_test: guest",
+        ],
+    },
+    Scenario {
         // A boot test that times out explains itself: statedump_test hangs
         // on purpose (one thread waits for ever, one spins in user code);
         // at the timeout xtask injects an NMI and the kernel's state dump
@@ -4297,6 +4345,27 @@ const SCENARIOS: &[Scenario] = &[
             "handover: resumed process handover_k32_test.exe",
             "handover_k32_test: ok",
             "exited with status 0x00000000",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // A CPU that takes the park IPI too late (`parkdelay`: 3 s, past
+        // the boot CPU's 2 s wait; a vCPU descheduled that long, or a wait
+        // cut short by a clock calibrated low, as handover_idle_uefi once
+        // was): the handover is abandoned cleanly (the late CPU finds the
+        // gate closed and goes on, the boot CPU's timer and interrupts
+        // come back), the program goes on in this kernel, and the boot's
+        // own handover afterwards works.
+        name: "handover_park_late",
+        cmdline: "qemu_exit handover=1 parkdelay run=handover_test.exe args=late",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "handover: parkdelay",
+            "handover: no other CPU parked within 2000 ms (0 of 1); the handover is abandoned",
+            "handover_test: ok (late)",
+            "exited with status 0x00000000",
+            "handover: generation 1 (from generation 0)",
+            "handover_test: ok (no handover allowed)",
             "gala: boot ok",
         ],
     },
@@ -5835,6 +5904,8 @@ fn kernel_only(line: &str) -> bool {
         || line.starts_with("flight:")
         || line == "in user mode at rip"
         || line.starts_with("the guest's state dump")
+        // The machine's clock: calibration, the RTC check, xtask's timing.
+        || ["clockcal:", "tsc: ", "clock: ", "xtask: clock"].iter().any(|p| line.starts_with(p))
 }
 
 /// Seconds a gala-um program may run (they take milliseconds).
@@ -6665,7 +6736,10 @@ fn run_vm(
     let mut stopped = false;
     let mut screen_verdict: Option<String> = None;
     let mut dump_note = None;
+    // The guest's `uptime_ms=` marks against the host's time (clockcheck.rs).
+    let mut clock_marks = clockcheck::ClockMarks::default();
     let status = loop {
+        clock_marks.poll(&log, start.elapsed().as_millis() as u64);
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break Some(status);
         }
@@ -6744,6 +6818,10 @@ fn run_vm(
     }
     if let Some(note) = dump_note {
         serial += &note;
+    }
+    clock_marks.poll(&log, total.as_millis() as u64);
+    if let Some(line) = clock_marks.verdict() {
+        serial += &line;
     }
     // A `record` boot's recording (kernel/src/replay.rs), from the debug
     // console's `"ev":"rec"` lines.
@@ -8636,6 +8714,29 @@ fn free_disk_mib(dir: &Path) -> Option<u64> {
 }
 
 fn judge_log(scenario: &Scenario, status: Option<i32>, timed_out: bool, serial: &str) -> Result {
+    // A guest whose clock disagreed with the host's (clockcheck.rs): the
+    // clock scenarios fail on it; any other failure says so, since wrong
+    // time explains early timeouts and watchdogs.
+    if HOST_LOAD_SCENARIOS.contains(&scenario.name)
+        && let Some(line) = serial.lines().find(|l| l.starts_with(clockcheck::WRONG))
+    {
+        return Err(line.to_string());
+    }
+    judge_log_inner(scenario, status, timed_out, serial).map_err(|e| {
+        if serial.contains(clockcheck::WRONG) {
+            format!("{e} (and the guest's clock was wrong: `{}` line)", clockcheck::WRONG)
+        } else {
+            e
+        }
+    })
+}
+
+fn judge_log_inner(
+    scenario: &Scenario,
+    status: Option<i32>,
+    timed_out: bool,
+    serial: &str,
+) -> Result {
     let missing: Vec<&str> =
         scenario.expect.iter().copied().filter(|e| !serial.contains(e)).collect();
     if scenario.exit_status == XTASK_DUMPS {
@@ -8828,6 +8929,9 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
     }
     let screen = single.and_then(screen_check);
     let want_cpus = telemetry::vm_cpus(iso);
+    // The clock under a busy host: every host CPU kept busy while it runs.
+    let _host_load =
+        single.filter(|n| HOST_LOAD_SCENARIOS.contains(n)).map(|_| clockcheck::HostLoad::start());
     let mut attempt = 0;
     let (status, serial, time) = loop {
         let (status, serial, time) =

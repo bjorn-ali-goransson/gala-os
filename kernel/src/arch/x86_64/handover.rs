@@ -125,7 +125,8 @@ pub enum HandoverError {
     OutOfMemory,
     Paging(PagingError),
     TooManyCpus,
-    /// Other CPUs did not park in time (count parked, wanted).
+    /// Other CPUs did not park in time (count parked, wanted); none had
+    /// begun to, and none will now: this kernel goes on.
     NotParked(u32, u32),
 }
 
@@ -154,6 +155,18 @@ pub struct Prepared {
     entry: u64,
     stack_top: u64,
     hhdm: u64,
+}
+
+impl Prepared {
+    /// Gives the new image's and the scaffold's frames back (a handover
+    /// abandoned: no CPU uses them).
+    pub fn free(self) {
+        // The trampoline's identity mapping in the running tables (no
+        // other CPU went through it: none parked).
+        paging::unmap_kernel_page(self.area.0);
+        free_run(Frame::from_number(self.image.0 / PAGE_SIZE), self.image.1 / PAGE_SIZE);
+        free_run(Frame::from_number(self.area.0 / PAGE_SIZE), self.area.1 / PAGE_SIZE);
+    }
 }
 
 /// `len` bytes at physical `phys`, through the HHDM.
@@ -353,6 +366,13 @@ impl OwnedPages {
 static PARK_TARGET: AtomicU64 = AtomicU64::new(0);
 static PARK_CR3: AtomicU64 = AtomicU64::new(0);
 static PARK_INFO: AtomicU64 = AtomicU64::new(0);
+/// The CPUs that committed to park (each adds one before leaving), and
+/// [`GATE_CLOSED`] once the boot CPU gave up waiting: a park IPI that
+/// arrives later then returns and the CPU goes on in this kernel.
+static PARK_GATE: AtomicU64 = AtomicU64::new(0);
+const GATE_CLOSED: u64 = 1 << 63;
+/// How long the boot CPU waits for the others to park.
+const PARK_WAIT_NS: u64 = 2_000_000_000;
 
 /// Installs the park IPI's handler (every kernel, so a pending one is
 /// harmless in the next).
@@ -362,11 +382,19 @@ pub fn init() {
 
 fn on_park_ipi(_: &mut interrupts::TrapFrame) {
     let target = PARK_TARGET.load(Ordering::Acquire);
-    apic::stop_timer();
-    apic::eoi();
-    if target == 0 {
+    if target != 0 && PARK_DELAY_ONCE.swap(false, Ordering::Relaxed) {
+        let late = crate::time::SpinDeadline::after_ns(PARK_WAIT_NS + 1_000_000_000);
+        while !late.passed() {
+            core::hint::spin_loop();
+        }
+    }
+    if target == 0 || !enter_park_gate() {
+        // No handover, or one given up: this CPU goes on, timer running.
+        apic::eoi();
         return;
     }
+    apic::stop_timer();
+    apic::eoi();
     let me = percpu::cpu_index() as u64;
     let info = PARK_INFO.load(Ordering::Acquire) + me * MP_INFO_SIZE;
     let root = PARK_CR3.load(Ordering::Acquire);
@@ -390,11 +418,38 @@ fn on_park_ipi(_: &mut interrupts::TrapFrame) {
     }
 }
 
+/// `parkdelay` (scenario handover_park_late): the next park IPI is taken
+/// 3 s late, after the boot CPU gave up waiting (a vCPU descheduled that
+/// long, or a wait cut short by a fast clock).
+static PARK_DELAY_ONCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn delay_next_park() {
+    PARK_DELAY_ONCE.store(true, Ordering::Relaxed);
+}
+
+/// Commits this CPU to park, unless the boot CPU gave up waiting.
+fn enter_park_gate() -> bool {
+    let mut gate = PARK_GATE.load(Ordering::Acquire);
+    loop {
+        if gate & GATE_CLOSED != 0 {
+            return false;
+        }
+        match PARK_GATE.compare_exchange(gate, gate + 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(now) => gate = now,
+        }
+    }
+}
+
 /// The handover's point of no return: parks the CPUs in `others` (CPU
 /// index, LAPIC id; this one must be CPU 0) in the trampoline, resets the
 /// virtio devices so none writes memory any more, and enters the new
-/// kernel with `record_phys`. Returns only if the CPUs did not park (they
-/// may be parked or not then: the machine must be stopped).
+/// kernel with `record_phys`. Returns only if no other CPU began to park
+/// within the wait ([`PARK_WAIT_NS`], never shortened by a clock
+/// calibrated low): the gate is closed so that none will, and this CPU's
+/// timer and interrupts are back on, so this kernel goes on. If some but
+/// not all began to, they are lost to this kernel: it panics (they are
+/// spinning in the trampoline with the new tables; nothing can go on).
 pub fn quiesce_and_jump(p: &Prepared, record_phys: u64, others: &[(u32, u32)]) -> HandoverError {
     let (jump, park, _, parked_count, _) = tramp_offsets();
     let tramp = p.area.0;
@@ -402,6 +457,7 @@ pub fn quiesce_and_jump(p: &Prepared, record_phys: u64, others: &[(u32, u32)]) -
     apic::stop_timer();
     PARK_CR3.store(p.root, Ordering::Release);
     PARK_INFO.store(p.hhdm + p.parked.0, Ordering::Release);
+    PARK_GATE.store(0, Ordering::Release);
     PARK_TARGET.store(tramp + park, Ordering::Release);
     for &(_, lapic_id) in others {
         apic::send_ipi(lapic_id, PARK_VECTOR);
@@ -410,16 +466,45 @@ pub fn quiesce_and_jump(p: &Prepared, record_phys: u64, others: &[(u32, u32)]) -
     // its identity mapping in the new tables; same frame).
     let count_at =
         core::ptr::with_exposed_provenance::<u32>((p.hhdm + tramp + parked_count) as usize);
-    let deadline = crate::time::raw_monotonic_ns() + 2_000_000_000;
+    let mut deadline = crate::time::SpinDeadline::after_ns(PARK_WAIT_NS);
     let wanted = others.len() as u32;
+    let mut closed = false;
     loop {
         // SAFETY: an aligned u32 in the scaffold, which this kernel owns.
         let parked = unsafe { count_at.read_volatile() };
         if parked == wanted {
             break;
         }
-        if crate::time::raw_monotonic_ns() > deadline {
-            return HandoverError::NotParked(parked, wanted);
+        if deadline.passed() {
+            if closed {
+                // Committed but never arrived: lost.
+                panic!(
+                    "handover: {wanted} CPU(s) began to park but only {parked} arrived; the \
+                     others are lost and this kernel cannot go on"
+                );
+            }
+            closed = true;
+            let committed = PARK_GATE.fetch_or(GATE_CLOSED, Ordering::AcqRel) & !GATE_CLOSED;
+            if committed == 0 {
+                // None began to park, and none will: this kernel goes on.
+                PARK_TARGET.store(0, Ordering::Release);
+                crate::time::start_tick_here();
+                cpu::enable_interrupts();
+                crate::error!(
+                    "handover: no other CPU parked within {} ms ({parked} of {wanted}); the \
+                     handover is abandoned and this kernel goes on",
+                    PARK_WAIT_NS / 1_000_000
+                );
+                return HandoverError::NotParked(parked, wanted);
+            }
+            if committed != u64::from(wanted) {
+                panic!(
+                    "handover: {committed} of {wanted} CPU(s) began to park, the others did not; \
+                     the parked ones are lost and this kernel cannot go on"
+                );
+            }
+            // All of them are on their way: wait once more for them.
+            deadline = crate::time::SpinDeadline::after_ns(PARK_WAIT_NS);
         }
         // A CPU waiting for this one to flush its TLB (with interrupts off,
         // so the park IPI waits too) goes on.

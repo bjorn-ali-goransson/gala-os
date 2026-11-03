@@ -18,6 +18,7 @@ extern crate std;
 pub mod arch;
 #[allow(unsafe_code)]
 pub mod boot;
+pub mod clockcal;
 pub mod clockctl;
 pub mod cmdline;
 #[macro_use]
@@ -134,7 +135,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     );
     init_paging(&info);
     arch::bootphase::mark("paging");
-    init_timer(&info);
+    init_timer(&info, cmdline.flag("calstall"), cmdline.flag("calwrong"));
     arch::bootphase::mark("apic");
     // A state dump on an NMI (xtask asks for one when a boot test times out).
     statedump::init();
@@ -256,6 +257,10 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     }
     // The watchdog's test: CPU 1 stops taking timer interrupts for a while.
     time::set_hang_test(cmdline.flag("hangtest"));
+    if cmdline.flag("parkdelay") {
+        arch::handover::delay_next_park();
+        info!("handover: parkdelay: the next park IPI is taken 3 s late (test)");
+    }
     // The kernel watchdog's test: this thread stays in the kernel 25 s
     // (interrupts on, never blocking).
     if cmdline.flag("spintest") {
@@ -267,6 +272,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         info!("spintest: done");
     }
     events::set_mask(cmdline.value("events").map_or(0, events::parse_mask));
+    time::emit_calibration_event();
+    // The TSC checked against the RTC in the background (recalibrated if
+    // they disagree); under `calwrong` and `calstall` (the clock's tests)
+    // the programs wait for it.
+    time::start_clock_check(cmdline.flag("calwrong") || cmdline.flag("calstall"));
     // `run=a.exe,b.exe` runs the programs one after another; `args=` holds
     // their (percent-encoded) command-line arguments in the same order;
     // `cwd=C:/dir` (percent-encoded) is their current directory (default
@@ -805,11 +815,35 @@ fn init_paging(info: &BootInfo) {
     }
 }
 
-fn init_timer(info: &BootInfo) {
-    let mut calibration = match arch::apic::init_bsp() {
+/// `stall` (`calstall`): the calibration's test stalls; `wrong`
+/// (`calwrong`): its result made 20x low, for the RTC check to catch.
+fn init_timer(info: &BootInfo, stall: bool, wrong: bool) {
+    let inputs = arch::apic::CalibrationInputs {
+        hpet: info.clock_tables.hpet,
+        pm_timer: info.clock_tables.pm_timer.map(|t| (t.port, t.bits32)),
+        stall,
+        carried: {
+            let (mut tsc, mut timer) = (0, 0);
+            handover::carried_rates(info, &mut tsc, &mut timer);
+            (tsc != 0 && timer != 0).then_some((tsc, timer))
+        },
+    };
+    let mut calibration = match arch::apic::init_bsp(inputs) {
         Ok(c) => c,
         Err(e) => panic!("local APIC: {e:?}"),
     };
+    time::log_calibration(&calibration);
+    if stall {
+        info!(
+            "clockcal: stall injected ({} stalls inside the calibration)",
+            calibration.report.stalls
+        );
+    }
+    if wrong {
+        calibration.tsc_hz /= 20;
+        calibration.timer_hz /= 20;
+        warn!("clockcal: calibration made 20x low (calwrong): guest time runs 20x fast");
+    }
     // After a handover: the first boot's rates (one clock across kernels).
     handover::carried_rates(info, &mut calibration.tsc_hz, &mut calibration.timer_hz);
     info!(

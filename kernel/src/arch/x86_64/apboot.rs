@@ -358,8 +358,9 @@ pub fn trampoline_reached(hhdm: u64, low: LowPages) -> bool {
 }
 
 fn delay_ns(ns: u64) {
-    let until = crate::time::raw_monotonic_ns() + ns;
-    while crate::time::raw_monotonic_ns() < until {
+    // At least `ns`, even with a clock calibrated low.
+    let until = crate::time::SpinDeadline::after_ns(ns);
+    while !until.passed() {
         core::hint::spin_loop();
     }
 }
@@ -425,8 +426,8 @@ pub fn replay_late_start(hhdm: u64, apic_id: u32) -> &'static str {
     write_u32(hhdm, flag, read_u32(hhdm, flag) & !0xff);
     repair_limine_block(hhdm);
     init_sipi_sipi(apic_id, (info >> 12) as u8);
-    let until = crate::time::raw_monotonic_ns() + 2_000_000_000;
-    while crate::time::raw_monotonic_ns() < until {
+    let until = crate::time::SpinDeadline::after_ns(2_000_000_000);
+    while !until.passed() {
         if read_u32(hhdm, flag) & 0xff == 1 {
             // Its booted store undid the repair: again, for a startup IPI
             // of ours still pending that would send it through once more.

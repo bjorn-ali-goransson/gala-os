@@ -144,11 +144,11 @@ fn irq_mutex_masks_interrupts() {
         let mut g = M.lock();
         assert!(!cpu::interrupts_enabled());
         *g += 1;
-        let t = time::ticks();
+        let t = time::tick_interrupts();
         for _ in 0..1_000_000 {
             core::hint::spin_loop();
         }
-        assert_eq!(time::ticks(), t, "no tick while the lock is held");
+        assert_eq!(time::tick_interrupts(), t, "no tick while the lock is held");
     }
     assert!(cpu::interrupts_enabled(), "interrupts restored on unlock");
     crate::sched::set_affinity(crate::sched::current(), u64::MAX);

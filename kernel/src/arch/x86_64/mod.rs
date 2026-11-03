@@ -18,6 +18,7 @@ mod pit;
 pub mod port;
 pub mod ps2;
 pub mod qemu;
+pub mod refclock;
 pub mod serial;
 pub mod smp;
 mod sync;

@@ -1334,8 +1334,26 @@ a captured value) when that matters.
 - **A watchdog line** (`watchdog: CPU N has taken no timer interrupt`) is
   followed by that CPU's own backtrace (`watchdog: CPU N backtrace:`,
   symbolized at the end of the failed log). Watchdogs right after boot on
-  a loaded host: check the `apic:` line's TSC and timer figures (a
-  calibration gone wrong under load makes every timeout wrong).
+  a loaded host: check the clock first (below).
+- **Is the guest's clock right?** Look for `xtask: clock:` lines (xtask
+  timed the guest's `uptime_ms=` marks against the host: `+0.4%` is
+  fine, `xtask: clock: WRONG` is not), the kernel's `tsc:` line (which
+  reference, how many samples were rejected, the spread) and `clock: RTC
+  check: agrees` / `clock: WRONG` (the kernel's own check against the
+  CMOS RTC a few seconds into the boot, which recalibrates). A wrong
+  clock makes sleeps end early, timeouts and watchdogs fire, and timing
+  checks fail; the failure's verdict then ends with "the guest's clock
+  was wrong". A program that wants its own timing checked prints
+  `<name>: ... uptime_ms=<n>` at two points (clockcal_test does).
+  `HOST_LOAD_SCENARIOS` in xtask run with a busy thread on every host
+  CPU; `calstall` stalls the boot CPU inside the calibration, `calwrong`
+  makes the first calibration 20x low (the RTC check must catch it).
+  On a host loaded far past its CPUs (load 25-35 on 4 CPUs, several
+  agents' suites at once) the clock is right but the handover scenarios'
+  sleep checks (handover_test 0x16/0x32, handover_k32_test 14/58) still
+  fail when the handover itself takes longer than the sleep's slack
+  (`resumed, N ms after the record` in the log): that is load, not the
+  clock; rerun alone.
 - **Diagnostic code that peeks at a lock** from an interrupt, an NMI or a
   panic uses `IrqMutex::try_lock_untracked`: a tracked `try_lock` there
   teaches lockdep an order no real path has, and a later correct path

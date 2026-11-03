@@ -204,9 +204,69 @@ uncached mapping in the MMIO window (`0xffff_e000_0000_0000`, bump
 allocated by `arch::paging::map_mmio`). Note: QEMU 8.x TCG has no x2APIC,
 so the boot tests only exercise xAPIC; x2APIC runs under KVM.
 
-The LAPIC timer (divide-by-16) and the TSC are calibrated against a 10 ms
-PIT channel-2 one-shot. `time` runs a 1 kHz periodic tick on vector 0x30
+**Calibration** (`arch::apic::calibrate`, the arithmetic in `clockcal.rs`,
+host-tested). The LAPIC timer (divide-by-16) and the TSC are measured
+against the best wall-clock reference the firmware lists
+(`arch::refclock`): the HPET (ACPI HPET table; enabled if it is not, only
+its main counter), else the ACPI PM timer (FADT), else PIT channel 2 as a
+free-running counter. A sample is a 10 ms window of the reference
+between two *brackets*, each reading the reference and the LAPIC timer
+between two TSC reads; up to 16 samples until 5 good ones. A bracket
+wider than 0.1% of the sample's TSC interval rejects the sample (the
+vCPU paused while reading), samples more than 0.5% from the median are
+outliers, the median of the rest is the result. CPUID's TSC rate (leaf
+0x15, or the hypervisor leaf 0x40000010) replaces the measured one only
+when it agrees within 1% (QEMU TCG's TSC runs at the host's rate
+whatever CPUID says). The log says how: `tsc: 2808.3 MHz from HPET
+(100000 kHz), 5 samples (0 paused, 0 outliers), spread 0.04%; APIC timer
+62500 kHz; CPUID: none` (and `phases.log` gets `phase tsc_mhz <n>`).
+Why: the old calibration started a 10 ms PIT one-shot and then read the
+TSC and the LAPIC timer; a vCPU descheduled between the two (QEMU TCG on
+a host with load ~14: port and MMIO writes wait for QEMU's big lock)
+measured only the end of the window, so both rates came out 5-200x low
+(TSC 15/31/135 MHz with the LAPIC timer at the same fraction of its
+62.5 MHz) and guest time ran that much fast. Under QEMU every reference,
+the TSC and the LAPIC timer follow the host's clock, so a pause *between*
+the brackets changes nothing; one *inside* a bracket is seen and rejected.
+
+**The RTC check** (`time::start_clock_check`, a kernel thread "clockcheck"
+after boot): polls the CMOS RTC's seconds every millisecond and times its
+second edges with the TSC (each edge bracketed by the polls around it;
+the seconds between two edges counted from the RTC's decoded value, not
+from the edges seen: a poll more than a second late misses one, and
+counting edges once judged a right 2.8 GHz TSC to be 4.7 GHz);
+after k seconds `clockcal::rtc_verdict` compares the calibrated rate with
+what the RTC allows: agrees (within 1% outside its bounds, bounds tighter
+than 2%: `clock: RTC check: agrees ...`), unsure (keep going, up to 10 s),
+or wrong (more than 3% outside, twice in a row): `clock: WRONG: ...`
+(error, `clock_wrong` event whatever the event mask), then the
+calibration is redone on the boot CPU with interrupts off (its timer
+restarted; the RTC's coarse rate is used only if the new measurement
+has too few good samples and still disagrees), the
+TSC's zero moved so that `monotonic_ns` goes on without a jump (a seqlock
+over the rate and the zero), and the other CPUs reprogram their timer at
+their next tick (`CAL_GEN`). `calwrong` on the command line divides the
+first calibration by 20 to test this path (scenario `clockcal_recal`; the
+programs then wait for the check). Its two lines carry `uptime_ms=`
+marks, which xtask times against the host (`xtask/src/clockcheck.rs`).
+
+`time` runs a 1 kHz periodic tick on vector 0x30
 and offers `monotonic_ns()` from the TSC. Spurious interrupts use vector 0xff.
+The boot CPU's tick count keeps up with the TSC (`next_tick`: a tick
+advances it to what the TSC says is due since `init` or a handover's
+resume, at least by one), and reading it (`ticks`, `raw_ticks`) gives
+the larger of the count and what is due, so a deadline taken from it is
+not early by the interrupts' lag: QEMU's TCG drops a periodic interrupt
+while the previous one is pending, and on a busy host the count fell 40%
+behind, so a 5 s sleep took 8 s (and with the count catching up only at
+interrupts, a Sleep(5) ended after 4 ms). `tick_interrupts` counts the
+interrupts themselves. After a kernel handover the carried rates are used
+as they are (`CalibrationInputs::carried`, `tsc: ... from the previous
+kernel`), not measured again. Bounded spin waits (AP start-up, the handover's
+park wait and quiet wait, `apboot` delays) use `time::SpinDeadline`,
+which counts the TSC at no less than 4 GHz: a low calibration makes them
+longer, never shorter. Invariant: no timeout or delay may be computed
+from `raw_monotonic_ns` alone where ending early is harmful.
 
 ## Threads and scheduling
 
@@ -5303,7 +5363,19 @@ returned yet (as on a cold boot).
    kernel's global entries), the new tables, the trampoline's GDT (same
    selectors 0x10/0x18 as gala's), the parked count raised, then a spin
    on its entry's `goto_address`, as Limine parks a CPU. The boot CPU
-   waits for all (2 s, serving TLB-flush requests meanwhile), resets
+   waits for all (2 s, serving TLB-flush requests meanwhile; counted with
+   `time::SpinDeadline`, which never counts the TSC at under 4 GHz, so a
+   clock calibrated low cannot cut it short, as one at 35 MHz once did).
+   Each CPU first enters a gate (`PARK_GATE`: a count of CPUs committed
+   to park). When the wait runs out the boot CPU closes the gate: if none
+   had committed, none will (a late park IPI finds it closed, sends EOI
+   and goes on, its timer untouched), so the handover is abandoned
+   cleanly: the trampoline's identity mapping is removed, the prepared
+   frames freed, the boot CPU's timer and interrupts come back, and the
+   caller gets `NotParked` (programs carried are released and run on;
+   scenario `handover_park_late`, `parkdelay`). If all had committed it
+   waits once more; if only some, those are lost in the trampoline and
+   the kernel panics. Then it resets
    every virtio device on the PCI bus (status 0: no DMA into reused
    memory; invariant 4), and jumps to the trampoline's jump code: PGE
    off, the new CR3, the trampoline's GDT, the new stack, then the ELF

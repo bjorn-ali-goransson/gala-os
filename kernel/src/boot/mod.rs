@@ -254,6 +254,9 @@ pub struct BootInfo {
     /// The processors the firmware's MADT lists (Limine boots only): more
     /// than `processors` when the bootloader missed an AP.
     pub firmware_cpus: Option<Result<acpi::FirmwareCpus, acpi::AcpiError>>,
+    /// The HPET and ACPI PM timer the firmware's tables list (Limine boots
+    /// only): references for the TSC's calibration.
+    pub clock_tables: acpi::ClockTables,
     pub framebuffer_facts: Option<FramebufferFacts>,
     /// The kernel's own executable file (ELF), to hand over to next time.
     pub kernel_file: Option<&'static [u8]>,
@@ -399,6 +402,7 @@ fn collect_handover(entry: HandoverEntry) -> Result<BootInfo, BootError> {
         boot_unix_time: platform.boot_unix_time.checked_sub(1).map(|t| t as i64),
         processors: Processors { bsp_lapic_id: cpus.bsp_lapic_id, cpus: CpuList::Parked(parked) },
         firmware_cpus: None,
+        clock_tables: acpi::ClockTables::default(),
         framebuffer_facts,
         kernel_file,
         handover: Some(Received {
@@ -532,6 +536,10 @@ pub fn collect(handover: Option<HandoverEntry>) -> Result<BootInfo, BootError> {
             hhdm_offset,
             REQUESTS.rsdp.response().map_or(0, |r| r.address),
         )),
+        clock_tables: acpi::read_clock_tables(
+            hhdm_offset,
+            REQUESTS.rsdp.response().map_or(0, |r| r.address),
+        ),
         framebuffer_facts,
         kernel_file,
         handover: None,

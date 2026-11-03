@@ -454,8 +454,8 @@ pub fn start_aps(
             // it through Limine's trampoline once more: keep that safe.
             apboot::repair_limine_block(hhdm);
             apboot::init_sipi_sipi(id, vector);
-            let deadline = crate::time::raw_monotonic_ns() + (250_000_000 << round);
-            while online_mask() & bit == 0 && crate::time::raw_monotonic_ns() < deadline {
+            let deadline = crate::time::SpinDeadline::after_ns(250_000_000 << round);
+            while online_mask() & bit == 0 && !deadline.passed() {
                 core::hint::spin_loop();
             }
             if online_mask() & bit != 0 {
