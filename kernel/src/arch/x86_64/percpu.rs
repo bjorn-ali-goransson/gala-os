@@ -113,6 +113,12 @@ pub fn kernel_stack() -> u64 {
     unsafe { (*current()).kernel_rsp }
 }
 
+/// The GS base user mode will see after the next `swapgs` to user.
+pub fn user_gs_base() -> u64 {
+    // SAFETY: reading an architected MSR has no side effects.
+    unsafe { cpu::rdmsr(IA32_KERNEL_GS_BASE) }
+}
+
 /// Sets the GS base user mode will see after the next `swapgs` to user.
 pub fn set_user_gs_base(base: u64) {
     // SAFETY: while in kernel mode this MSR only holds the user's GS base;

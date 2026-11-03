@@ -398,6 +398,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("xstate_test", "ntdll.dll", "Windows/System32"),
     ("statedump_test", "ntdll.dll", "Windows/System32"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
+    ("safepoint_test", "ntdll.dll", "Windows/System32"),
+    ("shootdown_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
     ("events", "testdll.dll", "gala"),
     ("kernel32_test", "ntdll.dll", "Windows/System32"),
@@ -1493,6 +1495,27 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("java_http", "msvcrt.dll", "Windows/System32"),
     ("java_http", "target/prebuilt/jdk/jdk-21.0.5+11/", "jdk"),
     ("java_http", "user/java/Http.java", "gala"),
+    ("java_stress", "ntdll.dll", "Windows/System32"),
+    ("java_stress", "kernel32.dll", "Windows/System32"),
+    ("java_stress", "advapi32.dll", "Windows/System32"),
+    ("java_stress", "winmm.dll", "Windows/System32"),
+    ("java_stress", "version.dll", "Windows/System32"),
+    ("java_stress", "shell32.dll", "Windows/System32"),
+    ("java_stress", "powrprof.dll", "Windows/System32"),
+    ("java_stress", "comctl32.dll", "Windows/System32"),
+    ("java_stress", "ncrypt.dll", "Windows/System32"),
+    ("java_stress", "crypt32.dll", "Windows/System32"),
+    ("java_stress", "ws2_32.dll", "Windows/System32"),
+    ("java_stress", "mswsock.dll", "Windows/System32"),
+    ("java_stress", "bcryptprimitives.dll", "Windows/System32"),
+    ("java_stress", "user32.dll", "Windows/System32"),
+    ("java_stress", "iphlpapi.dll", "Windows/System32"),
+    ("java_stress", "secur32.dll", "Windows/System32"),
+    ("java_stress", "winhttp.dll", "Windows/System32"),
+    ("java_stress", "msvcrt.dll", "Windows/System32"),
+    ("java_stress", "target/prebuilt/jdk/jdk-21.0.5+11/", "jdk"),
+    ("java_stress", "user/java/Http.java", "gala"),
+    ("java_stress", "user/java/Stress.java", "gala"),
     ("lua", "ntdll.dll", "Windows/System32"),
     ("lua", "kernel32.dll", "Windows/System32"),
     ("lua", "ws2_32.dll", "Windows/System32"),
@@ -1617,6 +1640,8 @@ const USER_PROGRAMS: &[&str] = &[
     "xstate_test",
     "statedump_test",
     "clockcal_test",
+    "safepoint_test",
+    "shootdown_test",
     "ledger_test",
     "bench",
     "kernel32_test",
@@ -1700,6 +1725,7 @@ const SLOW_SCENARIOS: &[&str] = &[
     "java_version",
     "java_hello",
     "java_http",
+    "java_stress",
     "dotnet_hello",
     "flaui_test",
     "filezilla_flaui",
@@ -1726,7 +1752,7 @@ fn scenario_timeout(name: &str) -> Duration {
     }
     let limit = if SCENARIOS.iter().any(|s| s.name == name && s.exit_status == XTASK_DUMPS) {
         DUMP_SCENARIO_TIMEOUT
-    } else if name == "elasticsearch" || name.starts_with("sqllocaldb") {
+    } else if name == "elasticsearch" || name == "java_stress" || name.starts_with("sqllocaldb") {
         ELASTICSEARCH_TIMEOUT
     } else if SLOW_SCENARIOS.contains(&name) {
         SLOW_TIMEOUT
@@ -2607,6 +2633,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
+    "java_stress",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
@@ -3610,6 +3637,24 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=xstate_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["xstate_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // A JVM-style safepoint (poll fault, vectored handler, values in
+        // registers and on the stack rewritten while stopped) on two
+        // processors: no value of an older epoch may survive.
+        name: "safepoint_test",
+        cmdline: "qemu_exit run=safepoint_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["safepoint_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // TLB shootdowns when the changing thread moves to another
+        // processor right after the change: a reader on processor 1 must
+        // never keep a decommitted page's old translation.
+        name: "shootdown_test",
+        cmdline: "qemu_exit run=shootdown_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["shootdown_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "kernel32_thread_test",
@@ -4743,6 +4788,14 @@ const SCENARIOS: &[Scenario] = &[
         // P1: a Java program on the unmodified JDK: `java Hello.java`
         // (the source launcher compiles it in memory with jdk.compiler).
         // Expected as on Windows 11 (2 processors under QEMU).
+        // Pending: javac 48 times in one JVM (user/java/Stress.java), a
+        // stress run for the Java heap corruption (ROADMAP Priorities).
+        name: "java_stress",
+        cmdline: "qemu_exit run=java.exe args=C:/gala/Stress.java%2048 dump=C:/hs_err_pid4.log",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["java_stress: 48 compiles, 0 failed", "java.exe finished with status 0x00000000"],
+    },
+    Scenario {
         name: "java_hello",
         cmdline: "qemu_exit run=java.exe args=C:/gala/Hello.java dump=C:/hs_err_pid4.log",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -5358,7 +5411,11 @@ fn events_flag() -> String {
     // `XTASK_RECORD=1`: every boot records its programs' inputs
     // (`<iso>.rec`; kernel/src/replay.rs).
     let record = if env::var_os("XTASK_RECORD").is_some() { " record" } else { "" };
-    format!("{events}{record}")
+    // `XTASK_CMDLINE="checkuser tlbparanoid"`: more kernel command-line
+    // words for every boot (diagnostic flags, ARCHITECTURE "Kernel
+    // command line").
+    let extra = env::var("XTASK_CMDLINE").map(|c| format!(" {c}")).unwrap_or_default();
+    format!("{events}{record}{extra}")
 }
 
 /// Scenarios that ship named sets of EXTRA_MODULES instead of their own

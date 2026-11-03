@@ -430,6 +430,49 @@ pub fn take_pending_continue() -> Option<UserRegs> {
     })
 }
 
+/// `nomigrate` (kernel command line, for telling migration bugs from
+/// others): a thread that runs user code stays on the CPU it first ran on.
+pub static NO_MIGRATE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// `checkuser` (kernel command line): every return to user mode checks
+/// that this CPU is set up for the thread returning (`check_user_return`).
+pub static CHECK_USER_RETURN: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// On a return to user mode (interrupts off, after the user-return hook):
+/// panics unless this CPU is set up for the current thread, as the
+/// switch that last put it here must have left it: its kernel stack for
+/// the next entry, its address space loaded, its TEB as the user GS base,
+/// and no other CPU running it.
+pub fn check_user_return() {
+    with(|s| {
+        let here = me();
+        let id = s.cpus[here].current;
+        let others = (0..smp::MAX_CPUS)
+            .filter(|&c| c != here && s.cpus[c].online && s.cpus[c].current == id)
+            .fold(0u64, |m, c| m | 1 << c);
+        let t = s.thread(id);
+        let stack_top = t.stack.as_ref().map_or(0, KernelStack::top);
+        let (root, gs) = t.user.as_ref().map_or((0, 0), |u| (u.root, u.gs_base));
+        let (cr3, kstack, ugs) =
+            (cpu::read_cr3() & !0xfff, percpu::kernel_stack(), percpu::user_gs_base());
+        if others != 0
+            || !t.on_cpu
+            || t.state != State::Running
+            || kstack != stack_top
+            || cr3 != root
+            || ugs != gs
+        {
+            panic!(
+                "sched: thread {id} ({}) returns to user mode on CPU {here} with others {others:#x}, \
+                 on_cpu {}, state {:?}, kernel stack {kstack:#x} (its own {stack_top:#x}), \
+                 cr3 {cr3:#x} (its {root:#x}), user GS {ugs:#x} (its {gs:#x})",
+                t.name, t.on_cpu, t.state
+            );
+        }
+    });
+}
+
 /// The CPU the caller runs on (it may move right after).
 pub fn current_cpu() -> u32 {
     percpu::cpu_index()
@@ -489,6 +532,12 @@ fn schedule() {
         }
         let next = s.pick(here).or(s.cpus[here].idle).unwrap_or(cur);
         s.thread(next).state = State::Running;
+        if NO_MIGRATE.load(core::sync::atomic::Ordering::Relaxed) {
+            let n = s.thread(next);
+            if n.user.is_some() && n.affinity == ALL_CPUS {
+                n.affinity = 1 << here;
+            }
+        }
         let cpu = &mut s.cpus[here];
         cpu.current = next;
         cpu.quantum_left = QUANTUM_TICKS;
