@@ -35,6 +35,7 @@ const STATUS_ACCESS_VIOLATION: u32 = 0xc000_0005;
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
 const SEMAPHORE_ALL_ACCESS: u32 = 0x1f_0003;
+const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 const MUTATORS: usize = 3;
 /// Collections to run (fewer if the time limit comes first).
 const ROUNDS: u32 = 600;
@@ -326,6 +327,19 @@ static STACK_TOPS: [AtomicUsize; MUTATORS] = [const { AtomicUsize::new(0) }; MUT
 static EPOCH: [AtomicU64; MUTATORS] = [const { AtomicU64::new(1) }; MUTATORS];
 /// Each mutator's heap: a word on each of HEAP_PAGES pages.
 static HEAPS: [AtomicUsize; MUTATORS] = [const { AtomicUsize::new(0) }; MUTATORS];
+/// "Compiled code" (as a JIT's, with an embedded constant the collector
+/// patches, as HotSpot patches object addresses in compiled methods):
+/// per mutator, `movabs rax, imm64; ret` at CODE + 32 * m.
+static CODE: AtomicUsize = AtomicUsize::new(0);
+/// Value index of the embedded constant.
+const CODE_VALUE: usize = 200;
+
+/// Mutator `m`'s compiled function.
+fn code_of(m: usize) -> extern "C" fn() -> u64 {
+    let at = CODE.load(Ordering::SeqCst) + 32 * m;
+    // SAFETY: CODE holds `movabs rax, imm64; ret` for every mutator.
+    unsafe { core::mem::transmute::<usize, extern "C" fn() -> u64>(at) }
+}
 static STOP: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicUsize = AtomicUsize::new(0);
 /// The first failure: check, mutator, value index, value found.
@@ -404,6 +418,14 @@ extern "C" fn mutator(m: usize) -> ! {
     let heap = HEAPS[m].load(Ordering::SeqCst);
     while !STOP.load(Ordering::SeqCst) {
         let epoch = EPOCH[m].load(Ordering::SeqCst);
+        // The patched constant is the current one (run the code often, so
+        // that an emulator keeps it translated).
+        for _ in 0..16 {
+            let got = code_of(m)();
+            if got != value(epoch, m, CODE_VALUE) {
+                fail(0x32, m, CODE_VALUE, got, value(epoch, m, CODE_VALUE));
+            }
+        }
         let mut values = [0u64; VALUES];
         for (i, v) in values.iter_mut().enumerate() {
             *v = value(epoch, m, i);
@@ -515,6 +537,7 @@ fn collect(scratch: usize, stub: bool) -> Result<(), u32> {
             for p in 0..HEAP_PAGES {
                 check((heap + p * PAGE) as *mut u64, 100 + p, 0x14);
             }
+            check((CODE.load(Ordering::SeqCst) + 32 * m + 2) as *mut u64, CODE_VALUE, 0x15);
         }
         EPOCH[m].store(new, Ordering::SeqCst);
     }
@@ -561,6 +584,18 @@ fn run() -> Result<u32, u32> {
     SP_POLL.store(good, Ordering::SeqCst);
     let (s, scratch, _) = allocate(0, 8 * PAGE, MEM_RESERVE, PAGE_READWRITE);
     ok(1, s == STATUS_SUCCESS)?;
+    let (s, code, _) = allocate(0, PAGE, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    ok(2, s == STATUS_SUCCESS)?;
+    for m in 0..MUTATORS {
+        let at = code + 32 * m;
+        // SAFETY: the freshly committed code page.
+        unsafe {
+            (at as *mut [u8; 2]).write([0x48, 0xb8]);
+            ((at + 2) as *mut u64).write_unaligned(value(1, m, CODE_VALUE));
+            ((at + 10) as *mut u8).write(0xc3);
+        }
+    }
+    CODE.store(code, Ordering::SeqCst);
     for heap in &HEAPS {
         let (s, base, _) = allocate(0, HEAP_PAGES * PAGE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         ok(2, s == STATUS_SUCCESS)?;
