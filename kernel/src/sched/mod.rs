@@ -28,6 +28,7 @@ use crate::arch::syscall::UserRegs;
 use crate::arch::xstate::XState;
 use crate::arch::{cpu, percpu, smp};
 use crate::mm::heap::{AllocError, TryVec, try_box};
+use crate::personality::Personality;
 use crate::sync::IrqMutex;
 use crate::time;
 
@@ -108,6 +109,9 @@ struct UserThread {
     root: u64,
     /// GS base in user mode (the TEB).
     gs_base: u64,
+    /// Its process's personality: which dispatcher its system calls go to
+    /// (`crate::personality`; fixed for the thread's life).
+    personality: Personality,
 }
 
 /// One CPU's scheduling state.
@@ -314,17 +318,19 @@ pub fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<ThreadI
 }
 
 /// Creates a thread that runs `entry(arg)` in kernel mode inside the user
-/// address space `space`, with user GS base `gs_base`. `entry` normally
-/// ends by entering user mode.
+/// address space `space`, with user GS base `gs_base`; its system calls
+/// go to `personality`'s dispatcher. `entry` normally ends by entering
+/// user mode.
 pub fn spawn_user(
     name: &'static str,
     entry: fn(usize),
     arg: usize,
     space: SharedUserSpace,
     gs_base: u64,
+    personality: Personality,
 ) -> Result<ThreadId, SpawnError> {
     let root = space.lock().root();
-    spawn_inner(name, entry, arg, Some(UserThread { space, root, gs_base }))
+    spawn_inner(name, entry, arg, Some(UserThread { space, root, gs_base, personality }))
 }
 
 fn spawn_inner(
@@ -454,19 +460,23 @@ pub fn check_user_return() {
         let t = s.thread(id);
         let stack_top = t.stack.as_ref().map_or(0, KernelStack::top);
         let (root, gs) = t.user.as_ref().map_or((0, 0), |u| (u.root, u.gs_base));
+        let personality = t.user.as_ref().map_or(Personality::Nt, |u| u.personality);
         let (cr3, kstack, ugs) =
             (cpu::read_cr3() & !0xfff, percpu::kernel_stack(), percpu::user_gs_base());
+        let cpu_personality = percpu::personality();
         if others != 0
             || !t.on_cpu
             || t.state != State::Running
             || kstack != stack_top
             || cr3 != root
             || ugs != gs
+            || cpu_personality != personality
         {
             panic!(
                 "sched: thread {id} ({}) returns to user mode on CPU {here} with others {others:#x}, \
                  on_cpu {}, state {:?}, kernel stack {kstack:#x} (its own {stack_top:#x}), \
-                 cr3 {cr3:#x} (its {root:#x}), user GS {ugs:#x} (its {gs:#x})",
+                 cr3 {cr3:#x} (its {root:#x}), user GS {ugs:#x} (its {gs:#x}), \
+                 personality {cpu_personality} (its {personality})",
                 t.name, t.on_cpu, t.state
             );
         }
@@ -552,6 +562,7 @@ fn schedule() {
                 kernel_stack_top: n.stack.as_ref().map(KernelStack::top),
                 root: n.user.as_ref().map_or_else(paging::kernel_root, |u| u.root),
                 user_gs_base: n.user.as_ref().map_or(0, |u| u.gs_base),
+                personality: n.user.as_ref().map_or(Personality::Nt, |u| u.personality),
             };
             (from, target)
         })

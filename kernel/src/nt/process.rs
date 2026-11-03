@@ -10,6 +10,7 @@ use super::object::{HandleTable, KObject, ObjectBody, ObjectRef};
 use super::pe::{PeError, PeImage};
 use super::platform::PAGE_SIZE;
 use super::platform::PageFlags;
+use super::platform::Personality;
 use super::platform::SpawnError;
 use super::platform::TrapFrame;
 use super::platform::UserRegs;
@@ -82,6 +83,10 @@ pub struct Process {
     /// The last exception one of its threads took (a crash report when it
     /// ends the process; nt::crashreport).
     pub last_exception: IrqMutex<Option<super::crashreport::Note>>,
+    /// Its system-call ABI, fixed at creation from the image (a PE image
+    /// is NT): its threads' system calls go to that personality's
+    /// dispatcher (`crate::personality`, ROADMAP LX seam 2).
+    pub personality: Personality,
 }
 
 impl Process {
@@ -762,6 +767,8 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         session,
         console,
         last_exception: IrqMutex::new(None),
+        // A PE image: the NT personality (an ELF loader would choose Linux).
+        personality: Personality::Nt,
     })?;
     prune();
     PROCESSES.lock().try_push(process.clone())?;
@@ -791,12 +798,16 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             return Err(LoadError::OutOfMemory);
         }
     };
-    info!("process {} (pid {}, session {session}): starting at {:#x}", name, id, regs.rip);
+    let personality = process.personality;
+    info!(
+        "process {} (pid {}, session {session}): starting at {:#x}, personality {personality}",
+        name, id, regs.rip
+    );
     crate::events::emit(
         crate::events::Category::Process,
         "process start",
         format_args!(
-            r#""pid":{id},"session":{session},"name":{},"image_base":{base},"entry":{},"cmdline":{}"#,
+            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","image_base":{base},"entry":{},"cmdline":{}"#,
             crate::events::Str(name),
             regs.rip,
             crate::events::Str(command_line)
@@ -887,7 +898,10 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     crate::events::emit(
         crate::events::Category::Process,
         "process exit",
-        format_args!(r#""pid":{},"session":{},"status":{}"#, process.id, process.session, status.0),
+        format_args!(
+            r#""pid":{},"session":{},"status":{},"personality":"{}""#,
+            process.id, process.session, status.0, process.personality
+        ),
     );
     wait::signal_dispatcher(&process.dispatcher, 1);
     crate::flight::record(crate::flight::Kind::ProcessExit, process.id, u64::from(status.0));
@@ -1212,6 +1226,9 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
         session,
         console: None,
         last_exception: IrqMutex::new(None),
+        // The handover's PROCESSES record has no personality yet: NT is
+        // the only one with processes (a second needs a record version).
+        personality: Personality::Nt,
     })
     .map_err(|_| NtStatus::NO_MEMORY)?;
     {
