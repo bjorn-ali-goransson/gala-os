@@ -182,6 +182,7 @@ syscall_stubs! {
         protect: u32, attributes: u32, file: usize
     );
     NtOpenSection = 0x37, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
+    NtQuerySection = 0x51, fn(h: usize, class: u32, buf: *mut u8, len: usize, ret: *mut usize);
     NtProtectVirtualMemory = 0x50, fn(
         process: isize, base: *mut usize, size: *mut usize, protect: u32, old: *mut u32
     );
@@ -761,9 +762,32 @@ const FREE: Module = Module {
 
 /// The loader lock: one thread at a time in the loader (loading,
 /// unloading, thread notifications), recursively (DllMain may load DLLs).
-/// The owner's thread id, and its depth (touched only by the owner).
-static LOADER_OWNER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static LOADER_DEPTH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Laid out as an RTL_CRITICAL_SECTION (DebugInfo, LockCount,
+/// RecursionCount, OwningThread at +0x10, LockSemaphore, SpinCount), whose
+/// address is PEB.LoaderLock (+0x110): programs read the owner from there
+/// to tell whether they run under the loader lock (Crashpad's
+/// IsThreadInLoaderLock, in Chromium's chrome_elf.dll). gala's loader only
+/// uses the owner and the depth (touched only by the owner).
+#[repr(C)]
+struct LoaderLock {
+    debug_info: usize,
+    lock_count: i32,
+    depth: core::sync::atomic::AtomicU32,
+    owner: core::sync::atomic::AtomicU64,
+    semaphore: usize,
+    spin_count: usize,
+}
+
+static LOADER_LOCK: LoaderLock = LoaderLock {
+    debug_info: 0,
+    lock_count: -1,
+    depth: core::sync::atomic::AtomicU32::new(0),
+    owner: core::sync::atomic::AtomicU64::new(0),
+    semaphore: 0,
+    spin_count: 0,
+};
+static LOADER_OWNER: &core::sync::atomic::AtomicU64 = &LOADER_LOCK.owner;
+static LOADER_DEPTH: &core::sync::atomic::AtomicU32 = &LOADER_LOCK.depth;
 
 /// Set while the executable's imports are bound at startup.
 static STARTUP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -909,6 +933,33 @@ fn api_set_host(name: &[u8]) -> Option<&'static [u8]> {
         b"advapi32.dll"
     } else if set.starts_with(b"core-") {
         b"kernel32.dll"
+    } else if let Some(rest) = set.strip_prefix(b"downlevel-") {
+        // The downlevel sets name the DLL that implements them
+        // (api-ms-win-downlevel-shell32-l1-1-0: CommandLineToArgvW).
+        const DOWNLEVEL: [&[u8]; 8] = [
+            b"kernel32",
+            b"advapi32",
+            b"user32",
+            b"shell32",
+            b"shlwapi",
+            b"ole32",
+            b"oleaut32",
+            b"version",
+        ];
+        const HOSTS: [&[u8]; 8] = [
+            b"kernel32.dll",
+            b"advapi32.dll",
+            b"user32.dll",
+            b"shell32.dll",
+            b"shlwapi.dll",
+            b"ole32.dll",
+            b"oleaut32.dll",
+            b"version.dll",
+        ];
+        let i = DOWNLEVEL
+            .iter()
+            .position(|d| rest.starts_with(d) && rest.get(d.len()) == Some(&b'-'))?;
+        HOSTS[i]
     } else {
         return None; // not a set gala hosts: looked up as a file
     };
@@ -1569,6 +1620,13 @@ pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base:
         core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
         rd64(peb + 0x10) as usize
     };
+    // PEB.LoaderLock: where programs find the loader lock's owner.
+    // SAFETY: gs:[0x60] is the PEB, writable by the process.
+    unsafe {
+        let peb: usize;
+        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        ((peb + 0x110) as *mut usize).write(&raw const LOADER_LOCK as usize);
+    }
     // The process heap, before any DLL's code runs.
     heap::create_process_heap();
     INITIAL_CONTEXT.store(context as usize, core::sync::atomic::Ordering::Relaxed);

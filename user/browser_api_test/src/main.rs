@@ -30,7 +30,13 @@
 //! 20. GetAddrInfoExW (synchronous, NS_DNS) resolves "localhost" to
 //!    127.0.0.1 with the service's port;
 //! 21. CheckRemoteDebuggerPresent says no debugger, QueryProcessCycleTime
-//!    succeeds.
+//!    succeeds;
+//! 22. PEB.LoaderLock points at an RTL_CRITICAL_SECTION not owned by
+//!    this thread outside the loader;
+//! 23. BuildExplicitAccessWithNameW and BuildSecurityDescriptorW make a
+//!    self-relative descriptor with a one-ACE DACL and no SACL;
+//! 24. AddMandatoryAce adds a SYSTEM_MANDATORY_LABEL_ACE (type 0x11) with
+//!    the policy as its mask; BuildTrusteeWithSidW makes a SID trustee.
 
 #![no_std]
 #![no_main]
@@ -102,6 +108,7 @@ unsafe extern "system" {
     fn TlsSetValue(i: u32, v: *mut c_void) -> i32;
     fn TlsGetValue2(i: u32) -> *mut c_void;
     fn CheckRemoteDebuggerPresent(p: Handle, present: *mut i32) -> i32;
+    fn LocalFree(p: *mut c_void) -> *mut c_void;
     fn QueryProcessCycleTime(p: Handle, cycles: *mut u64) -> i32;
 }
 
@@ -116,6 +123,32 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn RtlFormatCurrentUserKeyPath(out: *mut UnicodeString) -> u32;
     fn RtlFreeUnicodeString(s: *mut UnicodeString);
+}
+
+#[link(name = "advapi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn BuildExplicitAccessWithNameW(ea: *mut u8, name: *const u16, perm: u32, mode: u32, inh: u32);
+    fn BuildTrusteeWithSidW(t: *mut u8, sid: *const u8);
+    #[allow(clippy::too_many_arguments)]
+    fn BuildSecurityDescriptorW(
+        owner: *const u8,
+        group: *const u8,
+        n: u32,
+        entries: *const u8,
+        audits: u32,
+        audit: *const u8,
+        old: *const u8,
+        size: *mut u32,
+        new: *mut *mut u8,
+    ) -> u32;
+    fn IsValidSecurityDescriptor(sd: *const u8) -> i32;
+    fn GetSecurityDescriptorDacl(sd: *const u8, p: *mut i32, acl: *mut *mut u8, d: *mut i32)
+    -> i32;
+    fn GetSecurityDescriptorSacl(sd: *const u8, p: *mut i32, acl: *mut *mut u8, d: *mut i32)
+    -> i32;
+    fn InitializeAcl(acl: *mut u8, size: u32, revision: u32) -> i32;
+    fn AddMandatoryAce(acl: *mut u8, rev: u32, flags: u32, policy: u32, sid: *const u8) -> i32;
+    fn GetAce(acl: *const u8, index: u32, ace: *mut *mut u8) -> i32;
 }
 
 #[link(name = "ws2_32", kind = "raw-dylib")]
@@ -447,6 +480,66 @@ fn tests() {
         check(CheckRemoteDebuggerPresent(me, &mut present) != 0 && present == 0, 21);
         let mut cycles = 0u64;
         check(QueryProcessCycleTime(me, &mut cycles) != 0, 21);
+
+        // 22. PEB.LoaderLock is an RTL_CRITICAL_SECTION, not owned by this
+        // thread outside the loader (Crashpad's IsThreadInLoaderLock reads
+        // its OwningThread).
+        let lock = *((peb + 0x110) as *const usize);
+        check(lock != 0, 22);
+        let owner = *((lock + 0x10) as *const usize);
+        let me_id: usize;
+        core::arch::asm!("mov {}, gs:[0x48]", out(reg) me_id);
+        check(owner != me_id, 22);
+
+        // 23. Trustees and descriptors built from explicit access entries.
+        let mut name = [0u16; 64];
+        let mut ea = [0u8; 48];
+        // CURRENT_USER, GENERIC_ALL, SET_ACCESS, NO_INHERITANCE.
+        BuildExplicitAccessWithNameW(
+            ea.as_mut_ptr(),
+            w("CURRENT_USER", &mut name),
+            0x1000_0000,
+            2,
+            0,
+        );
+        check(*ea.as_ptr().cast::<u32>() == 0x1000_0000 && ea[16 + 12] == 1, 23); // TRUSTEE_IS_NAME
+        let mut size = 0u32;
+        let mut sd: *mut u8 = core::ptr::null_mut();
+        let r = BuildSecurityDescriptorW(
+            core::ptr::null(),
+            core::ptr::null(),
+            1,
+            ea.as_ptr(),
+            0,
+            core::ptr::null(),
+            core::ptr::null(),
+            &mut size,
+            &mut sd,
+        );
+        check(r == 0 && !sd.is_null() && size >= 20, 23);
+        check(IsValidSecurityDescriptor(sd) != 0, 23);
+        let (mut present, mut defaulted) = (0i32, 0i32);
+        let mut acl: *mut u8 = core::ptr::null_mut();
+        check(GetSecurityDescriptorDacl(sd, &mut present, &mut acl, &mut defaulted) != 0, 23);
+        check(present != 0 && !acl.is_null() && *acl.add(4) == 1, 23); // one ACE
+        check(GetSecurityDescriptorSacl(sd, &mut present, &mut acl, &mut defaulted) != 0, 23);
+        check(present == 0, 23);
+        LocalFree(sd.cast());
+
+        // 24. A mandatory label ACE (low integrity, no write up).
+        let mut sacl = [0u8; 64];
+        check(InitializeAcl(sacl.as_mut_ptr(), 64, 2) != 0, 24);
+        let low = [1u8, 1, 0, 0, 0, 0, 0, 16, 0x00, 0x10, 0, 0]; // S-1-16-4096
+        check(AddMandatoryAce(sacl.as_mut_ptr(), 2, 0, 1, low.as_ptr()) != 0, 24);
+        let mut ace: *mut u8 = core::ptr::null_mut();
+        check(GetAce(sacl.as_ptr(), 0, &mut ace) != 0, 24);
+        check(*ace == 0x11 && *ace.add(4) == 1, 24);
+        let mut trustee = [0u8; 32];
+        BuildTrusteeWithSidW(trustee.as_mut_ptr(), low.as_ptr());
+        check(
+            trustee[12] == 0 && *trustee.as_ptr().add(24).cast::<*const u8>() == low.as_ptr(),
+            24,
+        );
     }
 }
 

@@ -711,3 +711,53 @@ pub extern "system" fn VerifyVersionInfoW(info: *mut u32, kind: u32, mask: u64) 
     }
     TRUE
 }
+
+/// K32GetPerformanceInfo(pPerformanceInformation, cb): PERFORMANCE_INFORMATION
+/// (104 bytes) in pages: the commit total, limit and peak and physical
+/// memory from the kernel's counters; the system cache and kernel pools
+/// are not counted (0); handle, process and thread counts from the
+/// process list.
+#[unsafe(no_mangle)]
+pub extern "system" fn K32GetPerformanceInfo(info: *mut u8, size: u32) -> Bool {
+    if info.is_null() || size < 104 {
+        return fail_with(ERROR_BAD_LENGTH, FALSE);
+    }
+    let mut basic = [0u8; 64];
+    let mut perf = [0u8; 0x158];
+    let mut ret = 0;
+    // SAFETY: buffers of the classes' sizes.
+    unsafe {
+        NtQuerySystemInformation(0, basic.as_mut_ptr(), 64, &mut ret);
+        NtQuerySystemInformation(2, perf.as_mut_ptr(), 0x158, &mut ret);
+    }
+    let at = |b: &[u8], o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as usize;
+    let (processes, threads, handles) = super::toolhelp::system_counts();
+    let fields: [usize; 13] = [
+        at(&perf, 0x30),  // CommitTotal
+        at(&perf, 0x34),  // CommitLimit
+        at(&perf, 0x38),  // CommitPeak
+        at(&basic, 12),   // PhysicalTotal
+        at(&perf, 0x2c),  // PhysicalAvailable
+        0,                // SystemCache
+        0,                // KernelTotal
+        0,                // KernelPaged
+        0,                // KernelNonpaged
+        4096,             // PageSize
+        handles as usize, // HandleCount (DWORDs from here)
+        processes as usize,
+        threads as usize,
+    ];
+    // SAFETY: the caller's buffer of at least 104 bytes.
+    unsafe {
+        info.cast::<u32>().write_unaligned(104);
+        for (i, v) in fields[..10].iter().enumerate() {
+            info.add(8 + 8 * i).cast::<usize>().write_unaligned(*v);
+        }
+        for (i, v) in fields[10..].iter().enumerate() {
+            info.add(88 + 4 * i).cast::<u32>().write_unaligned(*v as u32);
+        }
+    }
+    TRUE
+}
+
+const ERROR_BAD_LENGTH: u32 = 24;

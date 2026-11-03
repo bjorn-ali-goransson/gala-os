@@ -264,9 +264,10 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["lib/netcoreapp3.0/Interop.UIAutomationClient.dll", "LICENSE.txt"],
         excludes: &[],
     },
-    // Chromium 159.0.8141.0 (BSD-style), the open-source browser Edge is
+    // Chromium 159.0.8140.0 (BSD-style), the open-source browser Edge is
     // built on: a build of the official snapshot bucket (Win_x64 revision
-    // 1733679, refs/heads/main@{#1733679}, commit a68e458a). Google
+    // 1733063, refs/heads/main@{#1733063}, commit 20692aad; one
+    // whose symbols (chrome-win32-syms.zip) are published too). Google
     // publishes no checksum for snapshots: the SHA-256 is the one we
     // measured (THIRD_PARTY.md). The browser (chrome.exe, chrome.dll,
     // chrome_elf.dll), its data (ICU, V8's snapshot, the resource packs,
@@ -275,15 +276,15 @@ const PREBUILT: &[Prebuilt] = &[
     // services.
     Prebuilt {
         name: "chromium",
-        url: "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Win_x64/1733679/chrome-win.zip",
-        checksum: "a20f7944db889524f80dd0fa5c21456fe1842a178312ac1a0cfda36eec2ca9aa",
+        url: "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Win_x64/1733063/chrome-win.zip",
+        checksum: "084b4343a8db0d3a24060078271d098ce788f9b9e75e202cdc9382521b0de6c9",
         members: &[
             "chrome-win/chrome.exe",
             "chrome-win/chrome.dll",
             "chrome-win/chrome_elf.dll",
             "chrome-win/chrome_wer.dll",
             "chrome-win/eventlog_provider.dll",
-            "chrome-win/159.0.8141.0.manifest",
+            "chrome-win/159.0.8140.0.manifest",
             "chrome-win/icudtl.dat",
             "chrome-win/v8_context_snapshot.bin",
             "chrome-win/resources.pak",
@@ -688,6 +689,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("browser_api_test", "ntdll.dll", "Windows/System32"),
     ("browser_api_test", "kernel32.dll", "Windows/System32"),
     ("browser_api_test", "ws2_32.dll", "Windows/System32"),
+    ("browser_api_test", "advapi32.dll", "Windows/System32"),
+    ("browser_api_test", "bcryptprimitives.dll", "Windows/System32"),
     ("winsock_test", "ntdll.dll", "Windows/System32"),
     ("winsock_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ws2_32.dll", "Windows/System32"),

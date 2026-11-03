@@ -39,7 +39,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     InitOnceBeginInitialize
     InitOnceComplete
     K32GetMappedFileNameW
-    K32GetPerformanceInfo
     MapUserPhysicalPagesScatter
     MapViewOfFileExNuma
     OpenJobObjectW
@@ -64,7 +63,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     SetTapePosition
     SetThreadPriorityBoost
     TerminateJobObject
-    TransactNamedPipe
     VerLanguageNameW
     WaitNamedPipeA
     WaitNamedPipeW

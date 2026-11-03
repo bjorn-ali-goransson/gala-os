@@ -417,3 +417,44 @@ pub extern "system" fn Module32FirstW(snapshot: Handle, entry: *mut u8) -> Bool 
 pub extern "system" fn Module32NextW(snapshot: Handle, entry: *mut u8) -> Bool {
     module32(snapshot, entry, false)
 }
+
+/// (processes, threads, handles) in the system now, from
+/// SystemProcessInformation (the idle process not counted); zeros if the
+/// list cannot be read.
+pub(crate) fn system_counts() -> (u32, u32, u32) {
+    let size = 256 * 1024usize;
+    let buf = VirtualAlloc(core::ptr::null_mut(), size, 0x3000, 4).cast::<u8>();
+    if buf.is_null() {
+        return (0, 0, 0);
+    }
+    let mut needed = 0u32;
+    // SAFETY: our buffer of `size` bytes.
+    let status = unsafe {
+        NtQuerySystemInformation(SYSTEM_PROCESS_INFORMATION, buf, size as u32, &mut needed)
+    };
+    let mut counts = (0, 0, 0);
+    if status == STATUS_SUCCESS {
+        // SAFETY: the list the kernel wrote (NextEntryOffset chains inside it).
+        let list = unsafe { core::slice::from_raw_parts(buf, needed as usize) };
+        let mut at = 0usize;
+        loop {
+            // SYSTEM_PROCESS_INFORMATION: NextEntryOffset, NumberOfThreads,
+            // UniqueProcessId at 0x50, HandleCount at 0x68.
+            if at + 0x6c > list.len() {
+                break;
+            }
+            if u64_at(list, at + 0x50) != 0 {
+                counts.0 += 1;
+                counts.1 += u32_at(list, at + 4);
+                counts.2 += u32_at(list, at + 0x68);
+            }
+            let next = u32_at(list, at) as usize;
+            if next == 0 {
+                break;
+            }
+            at += next;
+        }
+    }
+    VirtualFree(buf.cast(), 0, 0x8000);
+    counts
+}
