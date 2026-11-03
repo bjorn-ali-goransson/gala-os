@@ -1569,7 +1569,7 @@ fn gala_console_input(call: &mut Call<'_>) -> NtStatus {
     }
     if ctrl {
         use core::sync::atomic::Ordering::Relaxed;
-        session.ctrl_raised_ns.store(crate::time::raw_monotonic_ns(), Relaxed);
+        session.ctrl_raised_ns.store(platform::monotonic_ns(), Relaxed);
         let count = session.ctrl_count();
         info!("console {}: Ctrl+C {count}: a control event for its processes", session.id);
         crate::events::emit(
@@ -1700,7 +1700,7 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
 fn note_ctrl_taken(call: &Call<'_>, session: &super::conhost::Session, count: u32) {
     use core::sync::atomic::Ordering::Relaxed;
     let raised = session.ctrl_raised_ns.load(Relaxed);
-    let ms = crate::time::raw_monotonic_ns().saturating_sub(raised) / 1_000_000;
+    let ms = platform::monotonic_ns().saturating_sub(raised) / 1_000_000;
     let (pid, tid) = (call.process.id, thread::current_id().unwrap_or(0));
     if ms >= 250 {
         warn!(
