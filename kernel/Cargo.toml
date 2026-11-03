@@ -32,6 +32,9 @@ hosted = ["dep:libc"]
 handover_next = []
 
 [dependencies]
+# R8: the signed manifest's Ed25519 signature (kernel/src/trust); no
+# default features: no randomness, no std, no allocation.
+ed25519-compact = { version = "=2.6.0", default-features = false }
 libc = { version = "=0.2.191", optional = true }
 noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = ["size_16", "size_24", "regular", "bold", "unicode-basic-latin", "unicode-specials"] }
 smoltcp = { version = "0.12", default-features = false, features = ["alloc", "medium-ethernet", "medium-ip", "proto-ipv4", "socket-tcp"] }

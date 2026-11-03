@@ -1759,6 +1759,22 @@ R. **Robustness and live update, kernel included** (the owner's
      enrolled config hash and per-file BLAKE2B hashes, an Ed25519-signed
      manifest checked by the kernel, a rollback floor in the volume (and
      a TPM NV index). Building it comes after R7.
+     **First slice built** (2026-11-03; scenarios boot_tampered,
+     boot_config_edited, handover_unsigned_refused, rollback_refused;
+     host tests `trust::manifest`, `trust::sha256`, `fs::volume`;
+     ARCHITECTURE "Chain of trust", "What is built"): steps 2-3 (every
+     path in limine.conf with its BLAKE2B, `hash_mismatch_panic: yes`,
+     the config's hash enrolled in BOOTX64.EFI, limine-bios.sys and the
+     EFI partition image: Limine refuses a changed module or config);
+     steps 4-5 (an Ed25519-signed manifest of the boot files, format
+     GALAMANI version 1, written by xtask with a test key made in
+     `target/trust/`, verified by the kernel against the key built in
+     with `GALA_TRUST_KEY`; a kernel handover refuses an image not in it);
+     step 6 (the rollback floor in the superblock's sector, raised after
+     a verified boot, a release below it refused). Next: Secure Boot with
+     OVMF test keys (step 1, what it needs is in ARCHITECTURE), images
+     from the system tree checked against the manifest, a release key
+     separate from the test key, the TPM counter.
    - R9. **Live update, kernel included** (a goal, not an option): user
      mode first (versioned system images behind an atomic pointer, old
      processes restarted one at a time), then the kernel handover: the
@@ -1862,8 +1878,8 @@ R. **Robustness and live update, kernel included** (the owner's
      in-memory structure laid out differently). Host tests: notes (ELF,
      damaged, the build before notes), negotiation refusals, older
      versions read with defaults, must_read refusals. Not done: R8's
-     signed-manifest check of the next image (the hook is there:
-     `version::trusted`); carrying image pages as frames across a
+     signed-manifest check of the next image (done 2026-11-03, R8's first
+     slice); carrying image pages as frames across a
      loader change (refused instead). XSAVE came 2026-11-02 (the blob is
      filled, `version::XSTATE` = 0xe7).
      **Milestone (e) done** (2026-11-02, scenarios handover_net,
@@ -1907,8 +1923,9 @@ R. **Robustness and live update, kernel included** (the owner's
      Nginx's log files need `persist`), a shorter window without network
      (stop it after the image is prepared).
      **What is left for live update overall** (after (a)-(e)): R8's
-     signed manifest checking the next kernel (`version::trusted` is the
-     hook); the window registry, the desktop (shasha) and console windows
+     rest (Secure Boot, images from the system tree checked against the
+     manifest, a release key; the manifest check of the next kernel is
+     built); the window registry, the desktop (shasha) and console windows
      and conhost sessions as data; registry keys and their volatile
      state, jobs, program-made object directories and links, writable file
      views, files written without `persist`; asynchronous pipe I/O and

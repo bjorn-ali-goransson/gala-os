@@ -15,6 +15,15 @@
 //! areas for the crash record (`crate::crash`); version 1 volumes (all of
 //! the disk in the two areas) are still read as they are (ARCHITECTURE
 //! invariant 3).
+//!
+//! The rollback floor (R8, ARCHITECTURE "Chain of trust" step 6) is a block
+//! of its own at byte 64 of the superblock's sector, with its own magic,
+//! version and CRC (so the volume's layout version stays 2 and kernels
+//! before it still mount the disk): `GALAFLOR`, version (u32, 1), length
+//! (u32, 32), the floor (u64), the highest release seen (u64), CRC-32 of
+//! those 32 bytes. A later version keeps these fields first and may be
+//! longer (its CRC after its length). Missing or damaged reads as 0.
+//! Every superblock this code writes carries it.
 
 use super::log::{self, Decoded, NoMemory, Op};
 use crate::mm::heap::TryVec;
@@ -31,6 +40,53 @@ const VERSION: u32 = 2;
 pub const CRASH_SECTORS: u64 = 16;
 /// How much of an area mounting reads at a time.
 const CHUNK: usize = 64 * 1024;
+/// The rollback floor's block in the superblock's sector (see above).
+const FLOOR_AT: usize = 64;
+const FLOOR_MAGIC: &[u8; 8] = b"GALAFLOR";
+const FLOOR_VERSION: u32 = 1;
+const FLOOR_LEN: usize = 32;
+
+/// The rollback floor kept on the volume (R8 step 6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Floor {
+    /// The oldest release that may run on this disk.
+    pub floor: u64,
+    /// The highest release that has booted on it.
+    pub highest: u64,
+}
+
+impl Floor {
+    fn write(&self, s: &mut [u8; SECTOR]) {
+        let b = &mut s[FLOOR_AT..FLOOR_AT + FLOOR_LEN + 4];
+        b[0..8].copy_from_slice(FLOOR_MAGIC);
+        b[8..12].copy_from_slice(&FLOOR_VERSION.to_le_bytes());
+        b[12..16].copy_from_slice(&(FLOOR_LEN as u32).to_le_bytes());
+        b[16..24].copy_from_slice(&self.floor.to_le_bytes());
+        b[24..32].copy_from_slice(&self.highest.to_le_bytes());
+        let crc = log::crc32(0, &b[..FLOOR_LEN]);
+        b[32..36].copy_from_slice(&crc.to_le_bytes());
+    }
+
+    /// The block in sector `s`, or the default (0) when there is none or
+    /// it does not check out. A later version keeps these fields first and
+    /// may be longer (its CRC-32 follows its `length` bytes), so this
+    /// version still reads its floor.
+    fn read(s: &[u8; SECTOR]) -> Floor {
+        let b = &s[FLOOR_AT..];
+        let u32_at = |at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        let u64_at = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap_or([0; 8]));
+        let len = u32_at(12) as usize;
+        if &b[0..8] != FLOOR_MAGIC
+            || u32_at(8) < FLOOR_VERSION
+            || len < FLOOR_LEN
+            || len + 4 > b.len()
+            || u32_at(len) != log::crc32(0, &b[..len])
+        {
+            return Floor::default();
+        }
+        Floor { floor: u64_at(16), highest: u64_at(24) }
+    }
+}
 
 /// A transfer the disk failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +128,8 @@ pub struct Volume<B: Blocks> {
     tail: u64,
     /// The log's last partial sector (tail % SECTOR bytes of it).
     last: [u8; SECTOR],
+    /// The rollback floor (R8).
+    floor: Floor,
 }
 
 /// What mounting found.
@@ -101,6 +159,7 @@ impl<B: Blocks> Volume<B> {
         s[24..32].copy_from_slice(&self.dev.sectors().to_le_bytes());
         let crc = log::crc32(0, &s[..32]);
         s[32..36].copy_from_slice(&crc.to_le_bytes());
+        self.floor.write(&mut s);
         s
     }
 
@@ -128,6 +187,7 @@ impl<B: Blocks> Volume<B> {
             area_sectors,
             tail: 0,
             last: [0; SECTOR],
+            floor: if valid { Floor::read(&s) } else { Floor::default() },
         };
         if !valid {
             // A fresh volume: an empty log of generation 1 in area 0.
@@ -275,6 +335,32 @@ impl<B: Blocks> Volume<B> {
         let sb = self.superblock();
         io(self.dev.write(0, &sb))?;
         io(self.dev.flush())
+    }
+
+    /// The rollback floor kept on the volume.
+    pub fn floor(&self) -> Floor {
+        self.floor
+    }
+
+    /// Records `floor` (only ever raised: each field takes the higher of
+    /// the stored and the given value) in the superblock and flushes.
+    pub fn raise_floor(&mut self, floor: Floor) -> Result<Floor, VolumeError> {
+        let new = Floor {
+            floor: self.floor.floor.max(floor.floor),
+            highest: self.floor.highest.max(floor.highest),
+        };
+        if new == self.floor {
+            return Ok(new);
+        }
+        let old = self.floor;
+        self.floor = new;
+        let sb = self.superblock();
+        let written = io(self.dev.write(0, &sb)).and_then(|()| io(self.dev.flush()));
+        if let Err(e) = written {
+            self.floor = old;
+            return Err(e);
+        }
+        Ok(new)
     }
 
     pub fn area_bytes(&self) -> u64 {
@@ -443,6 +529,7 @@ mod tests {
             area_sectors: (200 - 1) / 2,
             tail: 0,
             last: [0; SECTOR],
+            floor: Floor::default(),
         };
         let sb = old.superblock();
         old.dev.write(0, &sb).unwrap();
@@ -450,5 +537,50 @@ mod tests {
         let (v, m) = remount(old);
         assert_eq!(m, Mounted::Log(vec![write_op(2, 20)]));
         assert_eq!(v.crash_area(), None);
+    }
+
+    #[test]
+    fn the_rollback_floor_is_kept_and_only_raised() {
+        let (mut v, _) = Volume::mount(disk(41)).unwrap();
+        assert_eq!(v.floor(), Floor::default());
+        let two = Floor { floor: 2, highest: 2 };
+        assert_eq!(v.raise_floor(two).unwrap(), two);
+        v.append(&[write_op(1, 10)]).unwrap();
+        let (mut v, m) = remount(v);
+        assert_eq!(m, Mounted::Log(vec![write_op(1, 10)]));
+        assert_eq!(v.floor(), two);
+        // Never lowered (a release 1 with floor 1 changes nothing); the
+        // highest release seen goes up on its own.
+        assert_eq!(v.raise_floor(Floor { floor: 1, highest: 1 }).unwrap(), two);
+        assert_eq!(
+            v.raise_floor(Floor { floor: 2, highest: 3 }).unwrap(),
+            Floor { floor: 2, highest: 3 }
+        );
+        // A compaction rewrites the superblock: the floor stays.
+        while v.append(&[write_op(2, 1000)]).is_ok() {}
+        v.compact(&[write_op(9, 100)]).unwrap();
+        let (v, _) = remount(v);
+        assert_eq!(v.floor(), Floor { floor: 2, highest: 3 });
+        // A later, longer version of the block still gives its floor.
+        let mut d = v.into_device();
+        let b = &mut d.data[FLOOR_AT..FLOOR_AT + 48];
+        b[8..12].copy_from_slice(&2u32.to_le_bytes());
+        b[12..16].copy_from_slice(&44u32.to_le_bytes());
+        b[32..44].fill(7);
+        let crc = log::crc32(0, &b[..44]);
+        b[44..48].copy_from_slice(&crc.to_le_bytes());
+        let (v, _) = Volume::mount(d).unwrap();
+        assert_eq!(v.floor(), Floor { floor: 2, highest: 3 });
+        // A damaged block reads as no floor, the volume still mounts; a
+        // superblock from before the floor (zeros there) too.
+        let mut d = v.into_device();
+        d.data[FLOOR_AT + 16] ^= 1;
+        let (v, m) = Volume::mount(d).unwrap();
+        assert_eq!(m, Mounted::Log(vec![write_op(9, 100)]));
+        assert_eq!(v.floor(), Floor::default());
+        let mut d = v.into_device();
+        d.data[FLOOR_AT..FLOOR_AT + FLOOR_LEN + 4].fill(0);
+        let (v, _) = Volume::mount(d).unwrap();
+        assert_eq!(v.floor(), Floor::default());
     }
 }

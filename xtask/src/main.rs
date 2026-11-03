@@ -12,7 +12,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod alloc_audit;
+// The manifest's format and SHA-256 are the kernel's own code (one
+// definition for the writer and the reader).
+#[path = "../../kernel/src/trust/manifest.rs"]
+#[allow(dead_code)]
+mod manifest;
 mod report;
+#[path = "../../kernel/src/trust/sha256.rs"]
+mod sha256;
+mod trust;
 
 /// Pinned Limine release (prebuilt binary branch tag) and its expected commit.
 const LIMINE_TAG: &str = "v11.4.1-binary";
@@ -1887,6 +1895,8 @@ fn alloc_audit(release: bool, elf: Option<&Path>, all: bool) -> Result {
                 "--target",
                 KERNEL_TARGET,
             ]);
+            // The kernel the boot tests run (its trust key too).
+            trust::kernel_env(&mut cmd)?;
             if release {
                 cmd.arg("--release");
             }
@@ -1936,8 +1946,10 @@ fn build(release: bool, name: &str, cmdline: &str) -> Result<PathBuf> {
 }
 
 fn build_kernel(release: bool) -> Result {
+    // Every kernel xtask builds trusts the test key (R8; `XTASK_UNSIGNED`).
     let mut cmd = cargo();
     cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET]);
+    trust::kernel_env(&mut cmd)?;
     if release {
         cmd.arg("--release");
     }
@@ -1948,6 +1960,7 @@ fn build_kernel(release: bool) -> Result {
     cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
         .args(["--no-default-features", "--target-dir"])
         .arg(server_target_dir());
+    trust::kernel_env(&mut cmd)?;
     if release {
         cmd.arg("--release");
     }
@@ -2026,6 +2039,7 @@ fn build_next_kernel(release: bool) -> Result<PathBuf> {
     cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
         .args(["--features", "handover_next", "--target-dir"])
         .arg(next_target_dir());
+    trust::kernel_env(&mut cmd)?;
     if release {
         cmd.arg("--release");
     }
@@ -2035,6 +2049,18 @@ fn build_next_kernel(release: bool) -> Result<PathBuf> {
 }
 
 fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) -> Result<PathBuf> {
+    make_signed_iso(release, name, cmdline, extra, &trust::signing_for(name))
+}
+
+/// `make_iso` with the image signed as `signing` says (R8: the manifest's
+/// release, files changed on purpose for a refusal scenario).
+fn make_signed_iso(
+    release: bool,
+    name: &str,
+    cmdline: &str,
+    extra: &[(&str, &str)],
+    signing: &trust::Signing,
+) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
     let server = name.strip_prefix("test-").is_some_and(|n| SERVER_KERNEL_SCENARIOS.contains(&n));
     let kernel_dir = if server { server_target_dir() } else { target_dir() };
@@ -2063,10 +2089,10 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
     for dir in [&efi_boot, &boot.join("limine")] {
         fs::create_dir_all(dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
     }
-    copy(&kernel, &boot.join("kernel"))?;
+    copy_kernel(&kernel, &boot.join("kernel"))?;
     let mut modules = String::new();
     if let Some((module, path)) = &other_kernel {
-        copy(path, &boot.join(module))?;
+        copy_kernel(path, &boot.join(module))?;
         modules += &format!("    module_path: boot():/boot/{module}\n");
     }
     for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS) {
@@ -2110,7 +2136,8 @@ fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) ->
     let config = format!(
         "timeout: 0\nquiet: yes\n\n/gala-os\n    protocol: limine\n    path: boot():/boot/kernel\n    cmdline: {cmdline}\n{modules}"
     );
-    write(&boot.join("limine/limine.conf"), &config)?;
+    // R8: the manifest, the config's hashes, the enrolled executables.
+    trust::seal(&iso_root, &config, signing)?;
 
     let iso = out.join(format!("{name}.iso"));
     run_quiet(
@@ -2437,6 +2464,7 @@ const PENDING: &[&str] = &[
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
+    "boot_config_edited",
     "handover_uefi",
     "handover_upgrade_uefi",
     "handover_idle_uefi",
@@ -2517,6 +2545,29 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
 /// finished, xtask stops the VM (QEMU_EXIT_SUCCESS cannot come) and the
 /// scenario passes if the client succeeded.
 const XTASK_STOPS: i32 = -1;
+/// What Limine prints when it has panicked (R8: a file or config whose
+/// hash does not match): it waits for a key, or halts.
+const LIMINE_HALTED: &[&str] = &["Press a key to return to menu", "System halted."];
+
+/// `text` without terminal control sequences (ESC [ ... final byte):
+/// Limine on the UEFI console places every character with one.
+fn plain_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
 const STOPPED_LINE: &str = "xtask: stopped the VM after the client";
 
 /// The listening marker and client of a NET_SCENARIOS entry.
@@ -3480,6 +3531,10 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit handover=2",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
+            // R8: each kernel checks the manifest and the image it hands
+            // over to (its own file).
+            "manifest: release 1 verified",
+            "manifest: the next kernel is /boot/kernel of release 1",
             "handover: generation 0 -> 1: record ",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: clock monotonic",
@@ -3614,6 +3669,8 @@ const SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "handover_k32_test: ready",
+            // R8: the next build is in the signed manifest.
+            "manifest: the next kernel is /boot/kernel-next of release 1",
             "handover: gala hands over to gala-next (record framing 1-1, image layout 1, \
              extended state 0xe7, 35 section kinds; with programs)",
             "handover: carrying 1 process(es), 10 thread(s)",
@@ -3681,6 +3738,22 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // R8 (ARCHITECTURE "Chain of trust", step 4): the boot's signed
+        // manifest does not list the image to hand over to (the boot
+        // module kernel-unsigned: the kernel with 8 bytes appended, a valid
+        // image Limine loaded by its config's hash), so the kernel refuses
+        // before stopping anything and goes on.
+        name: "handover_unsigned_refused",
+        cmdline: "qemu_exit handover=1 handover_image=kernel-unsigned",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "manifest: release 1 verified (rollback floor 1, ",
+            "handover: refused: the next kernel's image is not trusted: it is not in the signed \
+             manifest of release 1 (SHA-256 ",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
         // R9 (e): a server with established TCP connections across a
         // kernel handover (user/handover_net_test, on ws2_32): xtask's
         // client talks to it through QEMU's port forward before, during
@@ -3705,6 +3778,36 @@ const SCENARIOS: &[Scenario] = &[
             "xtask: net client: handover ok",
             "exited with status 0x00000000",
             "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // R8 steps 2-3: hello.exe changed after limine.conf was written
+        // with its BLAKE2B: Limine refuses it (hash_mismatch_panic) and
+        // never starts the kernel. xtask stops the VM at Limine's panic.
+        name: "boot_tampered",
+        cmdline: "qemu_exit run=hello.exe",
+        exit_status: XTASK_STOPS,
+        expect: &["PANIC: Blake2b hash for URI `boot():/boot/hello.exe` does not match!"],
+    },
+    Scenario {
+        // R8 step 2: limine.conf changed after its BLAKE2B was enrolled in
+        // BOOTX64.EFI: Limine refuses the config (booted by UEFI, from
+        // the image's EFI system partition).
+        name: "boot_config_edited",
+        cmdline: "qemu_exit run=hello.exe",
+        exit_status: XTASK_STOPS,
+        expect: &["CHECKSUM MISMATCH FOR CONFIG FILE"],
+    },
+    Scenario {
+        // R8 step 6: an earlier boot of release 2 (its own image, signed
+        // as release 2 with floor 2) raised the disk's rollback floor;
+        // this boot of release 1 is refused once the volume is mounted.
+        name: "rollback_refused",
+        cmdline: "qemu_exit persist",
+        exit_status: QEMU_EXIT_FAILURE,
+        expect: &[
+            "manifest: release 1 verified",
+            "rollback: refused: release 1 is below the rollback floor 2",
         ],
     },
     Scenario {
@@ -5824,6 +5927,20 @@ fn run_vm(
                 NetClient::HandoverNet => handover_net_client(port),
             }));
         }
+        // A scenario that ends in the bootloader (R8: Limine refusing a
+        // file) is stopped once Limine has said why.
+        if stop_after_client
+            && port.is_none()
+            && fs::read(&log).is_ok_and(|b| {
+                let text = plain_text(&String::from_utf8_lossy(&b));
+                LIMINE_HALTED.iter().any(|m| text.contains(m))
+            })
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            stopped = true;
+            break None;
+        }
         if stop_after_client && client.as_ref().is_some_and(|c| c.is_finished()) {
             // Let the server log the request, then stop it.
             thread::sleep(Duration::from_millis(500));
@@ -5857,6 +5974,10 @@ fn run_vm(
         serial += &line;
     }
     if stopped {
+        if port.is_none() {
+            // Limine's own output (boot-chain scenarios) as plain text.
+            serial = plain_text(&serial);
+        }
         serial += STOPPED_LINE;
         serial += "\n";
     }
@@ -6584,6 +6705,19 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         earlier_fail: false,
     },
     DiskScenario {
+        // R8 step 6: the earlier boot is release 2 (trust::EARLIER_SIGNING).
+        name: "rollback_refused",
+        size: 32 << 20,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[&[
+            "manifest: release 2 verified (rollback floor 2, ",
+            "rollback: the disk's floor is release 2 (was 0), highest release seen 2",
+            "gala: boot ok",
+        ]],
+        earlier_fail: false,
+    },
+    DiskScenario {
         name: "persist_test",
         size: 32 << 20,
         setup: |_| {},
@@ -6661,8 +6795,34 @@ fn check_disk(name: &str, path: &Path) -> Result {
 /// keeping each one's serial log as `<iso>.boot<n>.serial.log`.
 fn earlier_boots(name: &str, iso: &Path, boot: Boot, timeout: Duration, disk: &Path) -> Result {
     let Some(d) = disk_scenario(name) else { return Ok(()) };
+    // R8: earlier boots of another release (its own image, signed so).
+    let earlier = match trust::EARLIER_SIGNING.iter().find(|(n, _)| *n == name) {
+        Some((_, signing)) => {
+            let s = SCENARIOS.iter().find(|s| s.name == name).ok_or("no such scenario")?;
+            let release = RELEASE.load(std::sync::atomic::Ordering::Relaxed);
+            let cmdline = format!("{} noscreen", s.cmdline);
+            let earlier_name = format!("earlier-{name}");
+            Some(make_signed_iso(release, &earlier_name, &cmdline, &extra_modules(name), signing)?)
+        }
+        None => None,
+    };
+    let result = boot_earlier(d, earlier.as_deref().unwrap_or(iso), iso, boot, timeout, disk);
+    if let Some(earlier) = earlier {
+        let _ = fs::remove_file(earlier);
+    }
+    result
+}
+
+fn boot_earlier(
+    d: &DiskScenario,
+    image: &Path,
+    iso: &Path,
+    boot: Boot,
+    timeout: Duration,
+    disk: &Path,
+) -> Result {
     for (n, expect) in d.earlier_boots.iter().enumerate() {
-        let (status, serial, _) = run_vm(iso, boot, timeout, None, false, Some(disk), None)?;
+        let (status, serial, _) = run_vm(image, boot, timeout, None, false, Some(disk), None)?;
         let kept = iso.with_extension(format!("boot{}.serial.log", n + 1));
         let _ = fs::write(&kept, &serial);
         let missing: Vec<&str> = expect.iter().copied().filter(|e| !serial.contains(e)).collect();
@@ -7728,6 +7888,15 @@ fn export_tests() -> Result {
 
 fn copy(from: &Path, to: &Path) -> Result {
     fs::copy(from, to).map(drop).map_err(|e| format!("copying {from:?} to {to:?}: {e}"))
+}
+
+/// Copies a kernel ELF onto an image without its debug information
+/// (`objcopy --strip-debug`; symbols and the GALA note stay). The image's
+/// kernel is hashed by Limine at every boot and by the kernel before a
+/// handover (R8): 3 MB instead of 30 for a debug build. Backtraces are
+/// symbolized on the host from the build's own ELF, which keeps it.
+fn copy_kernel(from: &Path, to: &Path) -> Result {
+    run_quiet(Command::new("objcopy").arg("--strip-debug").arg(from).arg(to))
 }
 
 fn write(path: &Path, contents: &str) -> Result {

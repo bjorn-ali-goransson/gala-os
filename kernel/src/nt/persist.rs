@@ -107,6 +107,25 @@ pub fn position() -> Option<crate::handover::record::Volume> {
     Some(crate::handover::record::Volume { sectors: v.sectors(), generation, area, tail: v.used() })
 }
 
+/// The rollback floor kept on the mounted volume (R8), if one is mounted.
+pub fn floor() -> Option<crate::fs::volume::Floor> {
+    VOLUME.lock().as_ref().map(|v| v.floor())
+}
+
+/// Raises the mounted volume's rollback floor (R8): the floor kept, or
+/// None without a volume. Waits for a sync in progress (it has the
+/// volume out).
+pub fn raise_floor(
+    floor: crate::fs::volume::Floor,
+) -> Option<Result<crate::fs::volume::Floor, VolumeError>> {
+    let _turn = Turn::take();
+    // Out of the lock while the disk writes (as `sync` does).
+    let mut volume = VOLUME.lock().take()?;
+    let raised = volume.raise_floor(floor);
+    *VOLUME.lock() = Some(volume);
+    Some(raised)
+}
+
 /// The registry's change log on C:.
 const REGLOG: [&str; 4] = ["Windows", "System32", "config", "gala.reglog"];
 /// Past this size the registry's log is rewritten as a snapshot.

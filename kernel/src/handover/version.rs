@@ -370,11 +370,11 @@ pub fn of_image<'a>(image: &KernelImage<'a>) -> Result<Reads<'a>, Mismatch> {
 }
 
 /// R8 ("Chain of trust", step 4): the image must be listed, with its
-/// hash, in the running release's signed manifest before the machine is
-/// handed to it. Not built yet: every image is accepted, and the check
-/// comes first here when it is.
-pub fn trusted(_file: &[u8]) -> Result<(), Mismatch> {
-    Ok(())
+/// size and SHA-256, in the release's signed manifest that this kernel
+/// verified at boot (`trust`) before the machine is handed to it. An
+/// unsigned build (no release key built in) accepts every image.
+pub fn trusted(file: &[u8]) -> Result<(), Mismatch> {
+    crate::trust::trusted(file).map_err(Mismatch::Untrusted)
 }
 
 /// A name kept by value (the target's build, for a refusal's message).
@@ -422,6 +422,8 @@ pub enum Mismatch {
     TooNew { target: Name, tag: u32, version: u16, must_read: u16, reads: u16 },
     /// A REQUIRED section older than it reads.
     TooOld { target: Name, tag: u32, version: u16, reads_from: u16 },
+    /// The image is not in the signed manifest (R8).
+    Untrusted(crate::trust::Untrusted),
 }
 
 impl fmt::Display for Mismatch {
@@ -460,6 +462,7 @@ impl fmt::Display for Mismatch {
                  writes version {version}",
                 name(tag)
             ),
+            Mismatch::Untrusted(why) => write!(f, "the next kernel's image is not trusted: {why}"),
         }
     }
 }

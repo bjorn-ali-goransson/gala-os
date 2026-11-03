@@ -20,6 +20,11 @@ panic = "abort"
 [profile.dev.package.kernel]
 opt-level = 1
 
+# The manifest's signature check (R8) at every boot: optimized in test
+# builds too.
+[profile.dev.package.ed25519-compact]
+opt-level = 3
+
 [profile.release]
 panic = "abort"
 debug = true

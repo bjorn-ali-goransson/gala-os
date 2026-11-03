@@ -48,6 +48,7 @@ mod selftest;
 pub mod sim;
 pub mod sync;
 pub mod time;
+pub mod trust;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -149,7 +150,17 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     }
     nt::init();
     net::init();
+    // R8: the signed manifest, checked before anything else is loaded.
+    trust::boot(&info);
+    if handover::wanted(&cmdline)
+        && let Some(file) = handover::next_image(&info, &cmdline)
+    {
+        trust::prepare(file);
+    }
     for module in info.modules.iter() {
+        if module.cmdline == trust::MODULE_STRING {
+            continue;
+        }
         // `tar:<dir>`: a directory tree packed by xtask, shipped as C:\<dir>
         // (read-only files); `tarw:<dir>`: the same, writable (data files).
         if let Some(dir) = module.cmdline.strip_prefix("tar:") {
@@ -181,6 +192,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         nt::persist::CRASH_TEST.store(cmdline.flag("crashtest"), Ordering::Relaxed);
         nt::persist::mount();
         handover::check_volume(&info);
+        // R8 step 6: a release below the disk's rollback floor does not run.
+        if let Err(e) = trust::check_rollback(nt::persist::floor().map(|f| f.floor)) {
+            error!("rollback: refused: {e}; this release must not run on this disk");
+            stop(QemuExitCode::Failure);
+        }
     }
     // C: is made: what is older is made again by the next kernel's boot (a
     // kernel handover reopens the programs' files).
@@ -357,18 +373,46 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         mm::frame_stats().0,
         mm::frame_stats().1
     );
+    // R8 step 6: this release has booted and done its work; the disk's
+    // rollback floor goes up to what its manifest says.
+    raise_rollback_floor();
     // `handover=<n>`: hand the machine over to a fresh copy of the kernel
-    // until n handovers are done (ROADMAP R9).
+    // until n handovers are done (ROADMAP R9). A refusal (versions, an
+    // image not in the signed manifest) leaves this kernel running.
     if handover::wanted(&cmdline) {
-        let e = handover::go(&info, &cmdline);
-        panic!("handover: failed: {e:?}");
+        match handover::go(&info, &cmdline) {
+            handover::HandoverError::Incompatible(why) => warn!("handover: refused: {why}"),
+            handover::HandoverError::Refused(why) => warn!("handover: refused: {why}"),
+            e => panic!("handover: failed: {e:?}"),
+        }
     }
     kprintln!("{BOOT_OK_MARKER}");
+    stop(QemuExitCode::Success)
+}
+
+/// The end of the boot thread's work: QEMU exits with `code` (`qemu_exit`),
+/// else the CPU idles.
+fn stop(code: QemuExitCode) -> ! {
     if QEMU_EXIT.load(Ordering::Relaxed) {
-        qemu::exit(QemuExitCode::Success);
+        qemu::exit(code);
     }
     loop {
         arch::cpu::enable_interrupts_and_halt();
+    }
+}
+
+/// Raises the disk's rollback floor to the verified manifest's (R8).
+fn raise_rollback_floor() {
+    let (Some(want), Some(before)) = (trust::floor_for_disk(), nt::persist::floor()) else {
+        return;
+    };
+    match nt::persist::raise_floor(want) {
+        Some(Ok(now)) if now != before => info!(
+            "rollback: the disk's floor is release {} (was {}), highest release seen {}",
+            now.floor, before.floor, now.highest
+        ),
+        Some(Err(e)) => warn!("rollback: cannot raise the disk's floor: {e:?}"),
+        _ => {}
     }
 }
 

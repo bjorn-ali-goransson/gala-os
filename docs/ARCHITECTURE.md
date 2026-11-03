@@ -4299,8 +4299,10 @@ delay mode; its faults stay `net_tx` drops and `netreset=`.
   milestone (b), idle programs carried across, too.
 - Function-level live patching (as Microsoft's Hotpatch): not planned
   unless a concrete need appears.
-- **A chain of trust for updates**: designed below (R8); built after
-  R7, before live update ships.
+- **A chain of trust for updates**: designed below (R8); its first
+  slice is built (steps 2-6: Limine's enrolled config and file hashes,
+  the signed manifest, the rollback floor); Secure Boot signing (step 1)
+  and the TPM are not.
 
 ### Kernel handover (R9 milestones (a) to (e), 2026-11-02)
 
@@ -4708,8 +4710,8 @@ state format differs; every future format change follows these rules.
   TIMERS and CLOCK at 2).
 - *Negotiation, before the point of no return* (`handover::go`): the
   next kernel's file (the kernel file or `handover_image=`) passes R8's
-  check (`version::trusted`: a hook, accepting all until the signed
-  manifest is built), parses as a kernel ELF, its note is read and logged
+  check (`version::trusted`: its size and SHA-256 must be in the signed
+  manifest this kernel verified at boot; "Chain of trust" below), parses as a kernel ELF, its note is read and logged
   (`handover: gala hands over to gala-next (record framing 1-1, image
   layout 1, extended state 0xe7, 35 section kinds; with programs)`); then,
   before any thread is stopped, `version::agree`: the framing this kernel
@@ -4768,14 +4770,15 @@ state format differs; every future format change follows these rules.
   kernel cannot rebuild from the old record) means the new kernel cannot
   take programs from the old one: lower nothing, let negotiation refuse.
 
-### Chain of trust (R8, design 2026-11-02)
+### Chain of trust (R8, design 2026-11-02; steps 2-6 built 2026-11-03)
 
 What must hold: every byte of code that runs in kernel mode, and every
 system DLL and program gala ships, is what a gala release signed, on a
 cold boot and after any number of live updates; an older signed release
 cannot be put back (rollback); a machine owner can still run their own
-build by enrolling their own key. Nothing here is built yet; this fixes
-the formats and the order so live update (R9) is built around them.
+build by enrolling their own key. The design below fixes the formats and
+the order so live update (R9) is built around them; **what is built**
+follows it.
 
 1. **Firmware to Limine.** UEFI Secure Boot verifies `BOOTX64.EFI`. Two
    setups: the owner enrolls a gala key in the firmware's `db` (the
@@ -4835,6 +4838,99 @@ the kernel and a minimal set stay in `limine.conf`, the rest checked by
 manifest), and how a developer's machine runs unsigned builds (Secure
 Boot off and a kernel built with "accept unsigned" refuses to raise the
 rollback floor).
+
+**What is built** (2026-11-03; scenarios `boot_tampered`,
+`boot_config_edited`, `handover_unsigned_refused`, `rollback_refused`,
+and the manifest lines in `handover_same` and `handover_upgrade`; host
+tests in `kernel/src/trust/` and `fs::volume`):
+- *Steps 2-3* (`xtask/src/trust.rs`, `seal`): every image xtask makes
+  has `#<BLAKE2B>` after each path in `limine.conf` (the kernel, every
+  module, the manifest) and `hash_mismatch_panic: yes`; the config's
+  BLAKE2B is enrolled with `limine enroll-config` in `EFI/BOOT/BOOTX64.EFI`
+  and `boot/limine/limine-bios.sys`, and written the same way (after
+  Limine's `++CONFIG_B2SUM_SIGNATURE++` marker) into every executable
+  inside `limine-uefi-cd.bin`, the EFI system partition image a UEFI
+  machine boots a CD or USB stick from (it holds the executables of all
+  architectures; `enroll-config` only patches the first). A module
+  changed afterwards stops Limine with `PANIC: Blake2b hash for URI
+  ``boot():/boot/hello.exe`` does not match!` (`boot_tampered`, BIOS); a
+  changed config with `PANIC: !!! CHECKSUM MISMATCH FOR CONFIG FILE !!!`
+  (`boot_config_edited`, UEFI: Limine writes each character with a
+  cursor sequence there; xtask strips them and stops the VM at Limine's
+  "Press a key to return to menu" / "System halted."). Cost: Limine
+  hashes every file it loads: about 4 s more per BIOS boot of a test
+  image under emulation (TCG), little under KVM. Images carry the kernel
+  without debug information (`objcopy --strip-debug`, 3 MB instead of
+  30 for a debug build; symbols and the GALA note stay; xtask
+  symbolizes from the build's own ELF): with the debug kernel, hashing
+  it took Limine seconds, and the kernel's SHA-256 of the next image
+  before a handover took longer than handover_idle's 4 s sleep.
+- *Steps 4-5* (`kernel/src/trust/`): the manifest format is
+  `trust::manifest` (table in its module comment; format version 1,
+  header length for growth, flags a reader refuses if unknown), shared
+  with xtask, which includes the same file (`#[path]`) to write it.
+  SHA-256 is gala's own (`trust::sha256`, from FIPS 180-4); Ed25519 is
+  the `ed25519-compact` crate (no default features: no allocation, no
+  randomness). xtask signs a manifest of every file in `/boot` (kernel,
+  other kernel builds, programs, DLLs, tree archives) and ships it as
+  `/boot/gala.manifest` (module string `manifest`, itself hashed in the
+  config). The kernel verifies it right after `nt::init` (`trust::boot`:
+  `manifest: release 1 verified (rollback floor 1, 112 files, key
+  <id>)`), before any module is added to C:. `version::trusted` (a
+  handover's first check) hashes the next image (with `handover=`, at
+  boot already: `trust::prepare` caches it, so a program's request is
+  not delayed by the hash) and looks it up by size and SHA-256 (`manifest: the next kernel is /boot/kernel-next of
+  release 1`); an image not listed, no manifest, or a refused manifest
+  refuses the handover before anything is stopped (`handover: refused:
+  the next kernel's image is not trusted: it is not in the signed
+  manifest of release 1 (SHA-256 <first 8 bytes>..., <size> bytes)`),
+  and the boot goes on (the boot's own `handover=` no longer panics on a
+  refusal). A kernel handed over to verifies the same manifest again
+  (the modules stay in memory).
+- *Keys*: the kernel trusts one public key, built in from the
+  `GALA_TRUST_KEY` environment variable (64 hex digits) at compile time
+  (`option_env!`, so cargo rebuilds when it changes). xtask makes a test
+  key on first use, `target/trust/test-signing.seed` (the 32-byte
+  Ed25519 seed from `/dev/urandom`, mode 0600; `test-signing.pub` next
+  to it), never committed, and builds every kernel with it. The key id
+  is the first 8 bytes of SHA-256 of the public key; a manifest of
+  another key is refused by id first (`signed by key X, this kernel
+  trusts Y`). A kernel built without `GALA_TRUST_KEY` (plain `cargo
+  build`, CI's clippy lines, `XTASK_UNSIGNED=1`) is an *unsigned build*:
+  it logs so, checks nothing, takes any image and never raises the floor.
+  Not built: the release key (offline, a hardware token), several keys
+  per kernel (revocation by dropping one), the "test kernels refuse
+  release manifests" rule (follows from separate keys once both exist).
+- *Step 6* (`fs::volume`, `nt::persist::floor`/`raise_floor`): the
+  floor is a block of its own in the superblock's sector (byte 64:
+  `GALAFLOR`, version 1, length 32, floor, highest release seen, CRC-32;
+  a later version keeps these fields first and may be longer, its CRC
+  after its length, so this kernel still reads its floor),
+  so the volume layout stays version 2 and older kernels still mount the
+  disk; every superblock gala writes carries it (compaction keeps it);
+  a missing or damaged block reads as 0. After the volume is mounted
+  (`persist`), a verified release below the stored floor stops the
+  kernel (`rollback: refused: release 1 is below the rollback floor 2;
+  this release must not run on this disk`, QEMU failure status). At the
+  end of a boot that got through its work (before `gala: boot ok` or the
+  boot's handover), the floor is raised to the manifest's floor and the
+  highest release seen to its release (`rollback: the disk's floor is
+  release 2 (was 0), highest release seen 2`); never lowered. A release
+  normally names itself as floor; one that names a lower floor allows
+  going back to it. Limits, as designed: a disk wiped or rewritten
+  offline loses the floor (no TPM yet), and a kernel from before R8
+  rewrites the superblock without the block when it compacts.
+- *Not built*: step 1 (Secure Boot). What it needs: a test PK/KEK/db
+  made by xtask (`openssl req -x509`), an `OVMF_VARS` with them enrolled
+  (`virt-fw-vars --enroll-cert` from virt-firmware, or OVMF's
+  EnrollDefaultKeys with our certificate), `sbsign` of `BOOTX64.EFI`
+  and of the copy inside `limine-uefi-cd.bin` after enrolling the config
+  (`mcopy` to replace it in the FAT image), and a UEFI scenario with
+  Secure Boot on (`-global driver=cfi.pflash01,property=secure,value=on`
+  with the SMM OVMF build). Also not built: checking images loaded from
+  the system tree against the manifest (STATUS_INVALID_IMAGE_HASH), the
+  TPM NV counter, raising the floor only after a self-check (today: the
+  end of the boot's work).
 
 ## Not done yet
 

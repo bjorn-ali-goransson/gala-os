@@ -746,6 +746,47 @@ SeaBIOS and OVMF, and as `usb-storage` behind `qemu-xhci`. Use `-cpu max`
 in manual QEMU runs: QEMU's default CPU model has no RDRAND, and Go
 programs then fail fast (0xc0000409, ledger: ProcessPrng(no RDRAND)).
 
+## Signed images (R8, chain of trust)
+
+Every image xtask makes is sealed (ARCHITECTURE "Chain of trust",
+"What is built"; code `xtask/src/trust.rs`):
+- **The test key** is made on first use in `target/trust/`
+  (`test-signing.seed`, the private Ed25519 seed, mode 0600, never
+  committed; `test-signing.pub`). Every kernel xtask builds trusts it
+  (`GALA_TRUST_KEY` = its public key in hex, read at compile time).
+  Deleting `target/trust/` makes a new key: the next build recompiles
+  the kernels with it. A kernel from another checkout (another key)
+  refuses this checkout's manifests: `manifest: ... refused: signed by
+  key X, this kernel trusts Y`.
+- **The manifest** `/boot/gala.manifest` lists every file in `/boot`
+  (size, SHA-256), signed as release 1 with floor 1. A scenario that
+  needs another release or a file left out goes in
+  `trust::SCENARIO_SIGNING` (or `EARLIER_SIGNING` for the earlier
+  boots of a disk scenario).
+- **limine.conf** has `#<BLAKE2B>` after every path and its own hash
+  enrolled in the Limine executables: editing it on a USB stick (the
+  command line) makes Limine refuse to boot (`CHECKSUM MISMATCH FOR
+  CONFIG FILE`); make a new image with `cargo xtask iso ... <cmdline>`
+  instead. A module changed after sealing: `PANIC: Blake2b hash for URI
+  ... does not match!` (Limine prints it on the serial port only with
+  `serial: yes`, which the boot-chain scenarios set).
+- **An unsigned build** (a developer's own kernel, a quick experiment):
+  `XTASK_UNSIGNED=1 cargo xtask ...` builds the kernels without a key
+  and makes images as before R8 (no manifest, no hashes, nothing
+  enrolled); the kernel logs `manifest: unsigned build (no release key
+  built in): nothing is checked`, hands over to any image and never
+  raises a disk's rollback floor. The handover and rollback scenarios
+  expect a signed build. Switching between the two rebuilds the kernel
+  crate (the key is a compile-time input).
+- **The kernel on an image is stripped** of debug information (xtask's
+  `copy_kernel`); `cargo xtask symbolize` uses the build's ELF in
+  `target/`, which keeps it. A handover that comes seconds late (its
+  program finished before) is the SHA-256 of a large image: check the
+  image's kernel size.
+- **A disk that refuses the build** (`rollback: refused: release 1 is
+  below the rollback floor 2`): the disk image was used by a newer
+  release; make a fresh one (the floor lives in sector 0 at byte 64).
+
 ## shasha features: the `gala` command first
 
 **Every new shasha feature gets its `gala` command first** (the owner,

@@ -289,6 +289,15 @@ pub fn wanted(cmdline: &Cmdline) -> bool {
     cmdline.value("handover").and_then(|v| v.parse::<u64>().ok()).is_some_and(|n| generation() < n)
 }
 
+/// The kernel image a handover goes to: the boot module
+/// `handover_image=`, else this kernel's own file.
+pub fn next_image(info: &BootInfo, cmdline: &Cmdline) -> Option<&'static [u8]> {
+    match cmdline.value("handover_image") {
+        Some(name) => info.modules.find(name).map(|m| m.data),
+        None => info.kernel_file,
+    }
+}
+
 /// Hands the machine over to a fresh copy of the kernel (the kernel file,
 /// or the boot module `handover_image=`), with the programs that run
 /// (milestone (b): once each of their threads is blocked in a wait).
@@ -298,11 +307,7 @@ pub fn go(info: &BootInfo, cmdline: &Cmdline) -> HandoverError {
     // The next kernel: its file, checked as a kernel image, and what it
     // reads, before anything is stopped.
     let hhdm = info.hhdm_offset;
-    let file = match cmdline.value("handover_image") {
-        Some(name) => info.modules.find(name).map(|m| m.data),
-        None => info.kernel_file,
-    };
-    let Some(file) = file else { return HandoverError::NoKernelFile };
+    let Some(file) = next_image(info, cmdline) else { return HandoverError::NoKernelFile };
     if let Err(m) = version::trusted(file) {
         return HandoverError::Incompatible(m);
     }
