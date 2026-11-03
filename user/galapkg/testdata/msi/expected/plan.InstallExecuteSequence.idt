@@ -1,0 +1,26 @@
+Action	Condition	Sequence
+s72	S255	I2
+InstallExecuteSequence	Action
+CostInitialize		800
+FileCost		900
+CostFinalize		1000
+ValidateProductID		700
+SetGreeting	NOT Installed	1001
+Rollback	&Extras=3	1002
+InstallValidate		1400
+InstallInitialize		1500
+ProcessComponents		1600
+UnpublishFeatures		1800
+RemoveRegistryValues		2600
+RemoveShortcuts		3200
+RemoveFiles		3500
+InstallFiles		4000
+Deferred	$Core=3 AND NOT REMOVE	4001
+CreateShortcuts		4500
+WriteRegistryValues		5000
+RegisterUser		6000
+RegisterProduct		6100
+PublishFeatures		6300
+PublishProduct		6400
+InstallFinalize		6600
+RunTool	GREETING ~= "HELLO"	6601

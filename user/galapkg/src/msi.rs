@@ -43,6 +43,10 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod cond;
+pub mod format;
+pub mod plan;
+
 /// Why a package could not be read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {

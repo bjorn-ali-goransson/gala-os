@@ -29,6 +29,7 @@ extern crate std;
 pub mod cab;
 pub mod cfb;
 pub mod install;
+pub mod lzx;
 pub mod manifest;
 pub mod msi;
 pub mod shim;
