@@ -104,6 +104,10 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `start=<file>[,<file>...]`, `start_args=...` | start those programs first without waiting for them (a server for the `run=` programs); they end with the boot |
 | `console=<program>` | that `start=`/`run=` program gets a console window (a console session hosted by gala's conhost.exe) |
 | `cwd=C:/dir` | their current directory (default `C:\gala\`; Elasticsearch expects its home) |
+| `as=system` | the `run=` programs run as SYSTEM instead of the boot user (SECURITY.md; the sshd scenarios) |
+| `wait=all` | after each `run=` program, wait for every process still running too (a service that hands its work to a child and exits, as `sshd -d` does) |
+| `persist` | keep what programs change on C: and in the registry on the virtio-blk disk (a log replayed at the next boot; "Disk (D1)" and the persistence part below) |
+| `wallpaper=<name>` | pin the desktop's wallpaper (`drawn` for the drawn one; screen checks pin one) |
 | `trace` | log every system call (arguments, status) |
 | `netreset=<n>` | the network card is reset under the driver after the n-th frame sent (the driver's recovery test) |
 | `diskreset=<n>` | the n-th disk request has the device reset under the driver just after it is posted (the driver's recovery test) |
@@ -115,6 +119,8 @@ returns. Vectors 32..255 go to handlers registered with `set_handler`.
 | `nomigrate` | a thread that runs user code stays on the CPU it first ran on (tells migration bugs from others) |
 | `framecheck` | user mappings of each frame are counted; freeing a frame a user space still maps panics |
 | `eagercommit` | committed private pages get their frames at once instead of at the first touch (no demand-zero faults in user code) |
+| `calwrong`, `calstall` | clock-calibration tests: the first TSC calibration 20x low (the RTC check must catch it), or the boot CPU stalled inside the calibration ("Interrupts and time"; scenarios `clockcal_*`) |
+| `parkdelay` | delay a CPU's parking in a kernel handover, so the handover is abandoned cleanly (scenario `handover_park_late`) |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `display=virtio` | the screen is the first virtio-gpu (2D: a scanout resource, damage flushed, resizes followed) instead of the bootloader's framebuffer (`display=fb`, the default); without one the framebuffer is used ("Plan: graphics and GPU", G1) |
 | `gputrace` | log every virtio-gpu command and its result (`gputrace: SET_SCANOUT -> Ok(())`) |
@@ -1459,7 +1465,18 @@ Windows, never shadows the system's DLLs.)
   Automation"); ProgIDs and out-of-process servers fail as unregistered
   (recorded); no marshaling across apartments yet. oleaut32 has BSTRs, VARIANTs (clear, copy, conversions
   between numbers, booleans, currency and strings in the en-US format;
-  dates and decimals recorded as missing), SAFEARRAYs (descriptors with
+  dates and decimals in VARIANTs recorded as missing), the direct
+  conversions programs import (VarI4/UI4/R8/Cy/BoolFromStr,
+  VarCyFromR8, VarBstrFromCy/Bool; strings to currency in exact decimal
+  arithmetic, half to even), dates (date.rs: SystemTimeToVariantTime,
+  VariantTimeToSystemTime to the second, VarDateFromStr for en-US
+  month/day/year, year-month-day and English month names; the forms
+  Windows reads relative to the current year are recorded), VarCmp
+  (Windows' rules: a string is greater than any number, an empty one
+  equals VT_EMPTY, strings through kernel32's CompareStringW), and
+  GetActiveObject (no running object table: MK_E_UNAVAILABLE, recorded).
+  Locales other than English and the defaults are read as en-US and
+  recorded. SAFEARRAYs (descriptors with
   the VARTYPE/IRecordInfo/IID prefix, bounds stored rightmost first,
   BSTR/interface/VARIANT elements owned), VarCyFromDec; type libraries
   are not registered. Its exports have Windows' ordinals (build.rs, from
@@ -2022,7 +2039,13 @@ Windows, never shadows the system's DLLs.)
   Seventeen DLLs (netapi32, pdh, shlwapi, rpcrt4, urlmon, wininet,
   userenv, xolehlp, odbc32, authz, wintrust, webservices, dhcpcsvc,
   uxtheme, comdlg32, oleacc, mpr) are nothing but such stubs so far, apart from rpcrt4's UUID functions
-  (`rpcrt4_test`) and netapi32's NetWkstaGetInfo (`netapi32_test`).
+  (`rpcrt4_test`), netapi32's NetWkstaGetInfo (`netapi32_test`) and
+  shlwapi's path and string functions (`shlwapi_test`: PathCanonicalize
+  splits components at backslashes only, PathCombine resolves a file
+  part against the directory's drive, comparisons go through kernel32's
+  CompareStringW in the user's locale, StrCmpLogicalW compares digit
+  runs by value; SHDeleteKeyW finds RegDeleteTreeW at run time so
+  loading shlwapi does not pull in advapi32).
   gala's cmd.exe (`user/cmd`, built as a program and placed in
   System32) implements `/c` (and switches before it): cmd's documented
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
@@ -5985,17 +6008,20 @@ tests in `kernel/src/trust/` and `fs::volume`):
 
 ## Not done yet
 
-suspension/context of threads running on other CPUs, ranged (invlpg)
-shootdowns and PCIDs (ROADMAP S4), a real ntdll and
-kernel32 (gala runs test stand-ins), process creation from user mode,
-security, registry symbolic link keys, change notifications and WOW64
-views, hive files in Windows' format, files on the disk read on demand
-(D2 keeps them in memory),
-interrupts for devices (virtio-net and virtio-blk poll), AcceptEx with
-receive data, ConnectEx with send data, UDP, IPv6,
-select/IOCTL_AFD_POLL, non-blocking sockets, socket options with effect, telling a reset from a FIN
-on receive, bindgen-generated
-layouts, ACPI (MADT/HPET), reclaiming bootloader memory. Observability
-plans: `docs/OBSERVABILITY.md`.
+(Reviewed 2026-11-03; what is planned is in ROADMAP "Next".)
+Suspension/context of threads running on other CPUs by IPI, ranged
+(invlpg) shootdowns and PCIDs (ROADMAP S4); registry symbolic link keys,
+change notifications and WOW64 views, hive files in Windows' format;
+files on the disk read on demand (D2 keeps them in memory); interrupts
+for devices (virtio-net, virtio-blk and virtio-gpu poll); AcceptEx with
+receive data (refused, recorded in the ledger), ConnectEx with send data,
+IPv6, socket options with effect, telling a reset from a FIN on receive;
+bindgen-generated layouts; reclaiming bootloader memory; 32-bit programs
+(WOW64); a service control manager. Done since this list was first
+written: process creation from user mode ("Processes started by
+programs"), the security model (SECURITY.md), UDP, select and
+IOCTL_AFD_POLL, non-blocking sockets ("Networking"), the MADT and the
+HPET ("Processors", "Interrupts and time"). Observability plans:
+`docs/OBSERVABILITY.md`.
 Bootloader-reclaimable memory must not be reused until the boot info that
 lives there has been copied out.

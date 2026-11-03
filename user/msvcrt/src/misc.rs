@@ -446,6 +446,12 @@ pub extern "C" fn _difftime64(end: i64, start: i64) -> f64 {
     end as f64 - start as f64
 }
 
+/// difftime: x64 msvcrt.dll's time_t is 64 bits, so _difftime64.
+#[unsafe(no_mangle)]
+pub extern "C" fn difftime(end: i64, start: i64) -> f64 {
+    _difftime64(end, start)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _difftime32(end: i32, start: i32) -> f64 {
     f64::from(end) - f64::from(start)
