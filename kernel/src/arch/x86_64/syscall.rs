@@ -331,5 +331,9 @@ pub(super) fn run_user_return_hook(regs: &mut UserRegs) -> bool {
     // SAFETY: only `set_user_return_hook` stores non-zero values, and it
     // stores `UserReturnHook`s.
     let hook = unsafe { core::mem::transmute::<usize, UserReturnHook>(raw) };
-    hook(regs)
+    let changed = hook(regs);
+    if crate::sched::CHECK_USER_RETURN.load(Ordering::Relaxed) {
+        crate::sched::check_user_return();
+    }
+    changed
 }

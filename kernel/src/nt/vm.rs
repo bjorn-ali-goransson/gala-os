@@ -296,6 +296,33 @@ fn sync_range(process: &Process, vad: &vad::Vad, start: u64, size: u64) {
     }
 }
 
+/// `eagercommit` (kernel command line, a diagnostic): committed private
+/// pages get their frames at once instead of at the first touch, so user
+/// code takes no demand-zero page faults (tells page-fault bugs from
+/// others).
+pub static EAGER_COMMIT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Maps zeroed frames for the committed, accessible, not yet mapped pages
+/// of `[start, start + size)` (`eagercommit`). Best effort: a page left
+/// out is still mapped at its first touch.
+fn map_now(process: &Process, vad: &vad::Vad, start: u64, size: u64) {
+    let mut space = process.space.lock();
+    let mut addr = start;
+    while addr < start + size {
+        if let Some(PageState { committed: true, protect }) = vad.page(addr)
+            && protect & vad::PAGE_GUARD == 0
+            && !is_write_copy(protect)
+            && vad::access_of(protect).is_ok_and(|a| a.read || a.write)
+            && !space.is_mapped(addr)
+            && space.map_zero_page(addr, flags_for(protect)).is_err()
+        {
+            return;
+        }
+        addr += PAGE_SIZE;
+    }
+}
+
 pub const MEM_RESET: u32 = 0x8_0000;
 /// Windows 8+: takes back a MEM_RESET; succeeds when the data is intact.
 pub const MEM_RESET_UNDO: u32 = 0x100_0000;
@@ -343,6 +370,9 @@ pub fn allocate(
                 // Pages committed already take the new protection: their
                 // mappings follow (as NtProtectVirtualMemory's do).
                 sync_range(process, &vad, range.0, range.1);
+                if EAGER_COMMIT.load(core::sync::atomic::Ordering::Relaxed) {
+                    map_now(process, &vad, range.0, range.1);
+                }
                 return Ok(range);
             }
             Err(e) => {

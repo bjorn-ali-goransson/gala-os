@@ -283,7 +283,7 @@ pub unsafe fn activate(root: u64) {
     // Before loading it: a shootdown that misses this CPU's new root then
     // happened before the load, which flushes non-global entries.
     super::smp::note_root(root);
-    if cpu::read_cr3() & !0xfff != root {
+    if cpu::read_cr3() & !0xfff != root || super::smp::tlb_paranoid() {
         // SAFETY: forwarded to the caller; the kernel half, and therefore
         // the code, stack and data in use, is identical in every such space.
         unsafe { asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags)) };
@@ -335,11 +335,15 @@ impl Drop for SpaceGuard<'_> {
     fn drop(&mut self) {
         let Some(mut guard) = self.guard.take() else { return };
         let dirty = core::mem::take(&mut guard.dirty);
+        let changed_on = guard.changed_on.take();
         let frames = core::mem::take(&mut guard.freed);
         let root = guard.root();
         drop(guard);
         if dirty {
-            super::smp::flush_user_space(root);
+            // The thread may be on another CPU by now (an interrupt held
+            // back while the lock was held is taken at its release), one
+            // whose entries were not invalidated (see `flush_user_space`).
+            super::smp::flush_user_space(root, changed_on);
         }
         for frame in frames {
             let _ = crate::mm::free_frame(frame);
@@ -356,6 +360,9 @@ pub struct UserSpace {
     dirty: bool,
     /// Frames unmapped under the lock, freed once other CPUs are flushed.
     freed: alloc::vec::Vec<Frame>,
+    /// The CPU that invalidated its own entries for the changes (`invlpg`
+    /// under the lock, with interrupts off: one CPU per hold).
+    changed_on: Option<u32>,
 }
 
 /// A kernel-owned page that is also mapped into user address spaces
@@ -414,6 +421,14 @@ fn invlpg(virt: u64) {
 }
 
 impl UserSpace {
+    /// Drops this CPU's entry for `virt` after a change, and records that
+    /// the CPUs with the space loaded must be flushed when the lock goes.
+    fn invalidate(&mut self, virt: u64) {
+        invlpg(virt);
+        self.dirty = true;
+        self.changed_on = Some(super::percpu::cpu_index());
+    }
+
     /// Maps one fresh zeroed page at `virt` (demand-zero fault, commit).
     pub fn map_zero_page(&mut self, virt: u64, flags: PageFlags) -> Result<(), PagingError> {
         self.map_zeroed(virt / PAGE_SIZE * PAGE_SIZE, 1, flags)
@@ -429,8 +444,7 @@ impl UserSpace {
     pub fn set_flags(&mut self, virt: u64, mut flags: PageFlags) -> Result<(), PagingError> {
         flags.global = false;
         self.mapper.update_flags_4k(virt / PAGE_SIZE * PAGE_SIZE, flags)?;
-        invlpg(virt);
-        self.dirty = true;
+        self.invalidate(virt);
         Ok(())
     }
 
@@ -439,8 +453,8 @@ impl UserSpace {
         let virt = virt / PAGE_SIZE * PAGE_SIZE;
         match self.mapper.unmap_4k_owned(virt) {
             Some((frame, owned)) => {
-                invlpg(virt);
-                self.dirty = true;
+                crate::mm::note_user_map(frame, false);
+                self.invalidate(virt);
                 // Other CPUs may still reach the frame through their TLBs
                 // until the lock is released (see `SpaceGuard`).
                 if owned && self.freed.try_push(frame).is_err() {
@@ -462,7 +476,7 @@ impl UserSpace {
         let mem = HhdmTables { offset: crate::mm::hhdm_offset() };
         let mapper =
             Mapper::new_sharing_kernel_half(mem, Frame::containing(kernel), &mut alloc_table)?;
-        Ok(Self { mapper, dirty: false, freed: alloc::vec::Vec::new() })
+        Ok(Self { mapper, dirty: false, freed: alloc::vec::Vec::new(), changed_on: None })
     }
 
     pub fn root(&self) -> u64 {
@@ -499,6 +513,7 @@ impl UserSpace {
                 let _ = crate::mm::free_frame(frame);
                 return Err(e.into());
             }
+            crate::mm::note_user_map(frame, true);
         }
         Ok(())
     }
@@ -595,6 +610,7 @@ impl UserSpace {
             flags,
             &mut alloc_table,
         )?;
+        crate::mm::note_user_map(frame, true);
         Ok(())
     }
 
@@ -617,6 +633,7 @@ impl UserSpace {
             flags,
             &mut alloc_table,
         )?;
+        crate::mm::note_user_map(frame, true);
         Ok(())
     }
 
@@ -663,7 +680,8 @@ impl UserSpace {
             let _ = crate::mm::free_frame(frame);
             return Err(e.into());
         }
-        invlpg(virt);
+        crate::mm::note_user_map(frame, true);
+        self.invalidate(virt);
         Ok(())
     }
 
@@ -688,6 +706,11 @@ impl UserSpace {
 impl Drop for UserSpace {
     fn drop(&mut self) {
         // The space must not be active on any CPU any more (see `activate`).
+        if crate::mm::FRAME_CHECK.load(Ordering::Relaxed) {
+            self.mapper.for_each_user_leaf(&mut |_, t| {
+                crate::mm::note_user_map(Frame::containing(t.phys), false);
+            });
+        }
         let mem = HhdmTables { offset: crate::mm::hhdm_offset() };
         let dummy = Frame::from_number(0);
         let mapper = core::mem::replace(&mut self.mapper, Mapper::from_root(mem, dummy));

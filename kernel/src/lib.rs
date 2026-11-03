@@ -255,6 +255,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
             nt::logtee::configure(core::str::from_utf8(&decoded).unwrap_or(""));
         }
     }
+    sched::CHECK_USER_RETURN.store(cmdline.flag("checkuser"), Ordering::Relaxed);
+    arch::smp::set_tlb_paranoid(cmdline.flag("tlbparanoid"));
+    sched::NO_MIGRATE.store(cmdline.flag("nomigrate"), Ordering::Relaxed);
+    mm::FRAME_CHECK.store(cmdline.flag("framecheck"), Ordering::Relaxed);
+    nt::vm::EAGER_COMMIT.store(cmdline.flag("eagercommit"), Ordering::Relaxed);
     // The watchdog's test: CPU 1 stops taking timer interrupts for a while.
     time::set_hang_test(cmdline.flag("hangtest"));
     if cmdline.flag("parkdelay") {
@@ -429,9 +434,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     let heap = mm::heap::stats();
     let window_flushes = mm::vmap::WINDOW.lock().flushes();
     info!(
-        "stats: {shootdowns} TLB shootdowns ({ipis} IPIs), {} frames leaked by deferred frees, {} freed twice; \
+        "stats: {shootdowns} TLB shootdowns ({ipis} IPIs, {} after a move to another CPU), \
+         {} frames leaked by deferred frees, {} freed twice; \
          heap {} KiB in use, {} large pages, {window_flushes} mapped-window flushes; \
          frames free {} of {}; heap peak {} KiB, fewest frames free {}",
+        arch::smp::moved_flushes(),
         arch::paging::leaked_frames(),
         mm::double_frees(),
         heap.in_use / 1024,
