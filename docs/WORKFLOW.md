@@ -510,7 +510,9 @@ charged). Look
   twice in full suites (load about 6) with "slept again 1248", check 58:
   the second Sleep(1000) spans the handover, the thread is frozen and the
   monotonic clock goes on (that handover alone moved it 232 ms). Timing
-  checks across a handover bound only the short side tightly.
+  checks across a handover bound only the short side tightly (check 14
+  of the first handover too: "slept 4986" with a 1.3 s handover at load
+  29).
 - **Java hang with a state dump (2026-11-03)**: the first timeout with a
   state dump (correct clock): java_http hung with three JVM threads in
   NtYieldExecution and two waiting on semaphores with count 0

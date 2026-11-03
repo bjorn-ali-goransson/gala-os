@@ -543,7 +543,10 @@ fn run() -> Result<&'static str, u32> {
         let slept = GetTickCount64() - before;
         say_n(b"slept", slept);
         check(slept >= SLEEP_MS, 13)?;
-        check(slept < SLEEP_MS + SLACK_MS, 14)?;
+        // The sleep spans the handover: the thread is frozen while the
+        // monotonic clock goes on (1.3 s on a host at load 29): never
+        // short, at most three seconds late.
+        check(slept < SLEEP_MS + 3000 + SLACK_MS, 14)?;
 
         // Work went on across (the suspended one once resumed).
         check(ROUNDS[0].load(Ordering::SeqCst) > rounds_before[0], 15)?;
