@@ -59,6 +59,50 @@ once their net client has finished, and pass if it succeeded.
 `cargo xtask screenshot run=nginx.exe "args=-p%20C:/nginx/%20-c%20conf/nginx.conf"`
 shows it.
 
+## Linux test programs (user/lx, ROADMAP LX)
+
+Test first against real Linux (CLEAN_ROOM.md "Linux": man-pages, the
+ABI/ELF specs, observed behaviour, gVisor; never the Linux kernel source):
+- `user/lx/<name>_test/main.c`: a C program built with musl
+  (`apt install musl-tools`) that makes the system calls it checks itself
+  (`user/lx/common/lx.h`: `sys6` and friends with the `syscall`
+  instruction; failures are `-errno`), so it tests the kernel, not libc.
+  It prints `name = value` lines, one write per line, never an address
+  or anything that varies between runs, kernel versions (auxv entries
+  come and go: print only the ones you check), users (uid: print
+  "AT_UID is getuid() = yes", not the number) or build modes, and ends
+  with `<name>_test: ok`. Accessibility without signals: write(2) from
+  an address fails with EFAULT if it is unreadable, read(2) into it if
+  it is unwritable (brk_test, mmap_test).
+- `user/lx/build.sh` builds each as `user/lx/bin/<name>_test` (static,
+  ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN), reproducibly
+  (stripped, no build id, `-fno-stack-protector`: the canary is read
+  from %fs:0x28, so a test that moves FS would crash). The binaries are
+  checked in under `user/lx/bin`, not `user/bin` (`cargo xtask
+  export-tests` copies only the Windows build's outputs); the kernel's
+  host tests `include_bytes!` them.
+- `cargo xtask lx-expect` rebuilds them (when musl-gcc is there; else it
+  runs the checked-in ones), runs each binary on this host as
+  `./<name>_test first '' 'third arg'` from `target/lx-expect/<binary>/`
+  with only `A=1 EMPTY= LONGER_NAME=some value` in its environment, and
+  compares stdout + `-- exit status N` with `user/lx/<name>_test/
+  expected.txt` (both binaries against the same file). A mismatch prints
+  a line diff and leaves `actual.txt` there. `--record` writes
+  expected.txt (run on real Linux only, and check the diff: it is the
+  spec); `--no-build` skips the rebuild. CI runs it and then `git diff
+  --exit-code user/lx` (binaries and transcripts must match the sources).
+- Recorded on Linux 6.18 (this machine); CI's runner kernel differs, which
+  is why transcripts avoid version-dependent values.
+- Pitfalls met: Rust's `Command` passes the environment sorted by name
+  (auxv_test's envp order); a static-pie's initial break is not above its
+  bss (brk_test prints only what holds for both); a pipe write whose
+  buffer runs into an unmapped page fails with EFAULT, not a partial count
+  (write_exit_test records what Linux does).
+- The kernel side is `kernel/src/lx/` (ARCHITECTURE "The lx module"),
+  tested with `cargo test -p kernel --lib lx`. No boot scenarios yet:
+  they come with the exec path, one per user/lx program, expecting its
+  expected.txt.
+
 ## Adding a function to gala's ntdll or kernel32
 
 1. A test program that imports it (`raw-dylib` against `kernel32` or
@@ -1586,6 +1630,8 @@ the in-guest, deterministic version.
 | Frames, heap | `kernel/src/mm/` |
 | Scheduler | `kernel/src/sched/` |
 | NT personality (objects, processes, files, sections, syscalls) | `kernel/src/nt/` |
+| Linux personality groundwork (ELF loader, initial stack, syscall/errno tables) | `kernel/src/lx/` |
+| Linux test programs, their binaries and expected transcripts | `user/lx/`, `user/lx/bin/` |
 | Ramfs | `kernel/src/fs/` |
 | Disk (virtio-blk) | `kernel/src/disk/` |
 | Display (virtio-gpu; the protocol and driver host-tested) | `kernel/src/display/` |

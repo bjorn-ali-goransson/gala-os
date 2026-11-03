@@ -1,0 +1,48 @@
+auxv order (the types checked): HWCAP PAGESZ CLKTCK PHDR PHENT PHNUM BASE FLAGS ENTRY UID EUID GID EGID SECURE RANDOM EXECFN PLATFORM NULL
+argc = 4
+*sp = 4
+sp % 16 = 0
+argv[0] = "./auxv_test"
+argv[1] = "first"
+argv[2] = ""
+argv[3] = "third arg"
+argv[argc] NULL = yes
+envp[0] = "A=1"
+envp[1] = "EMPTY="
+envp[2] = "LONGER_NAME=some value"
+envp right after argv's NULL = yes
+end % 4096 = 0
+the end marker = 0
+AT_EXECFN is argv[0]'s text = yes
+argv[0] at end-83
+argv[1] at end-71
+argv[2] at end-65
+argv[3] at end-64
+envp[0] at end-54
+envp[1] at end-50
+envp[2] at end-43
+AT_EXECFN at end-20
+string area = 2e 2f 61 75 78 76 5f 74 65 73 74 00 66 69 72 73 74 00 00 74 68 69 72 64 20 61 72 67 00 41 3d 31 00 45 4d 50 54 59 3d 00 4c 4f 4e 47 45 52 5f 4e 41 4d 45 3d 73 6f 6d 65 20 76 61 6c 75 65 00 2e 2f 61 75 78 76 5f 74 65 73 74 00 00 00 00 00 00 00 00 00
+AT_PLATFORM[0] = "x86_64"
+AT_PLATFORM's end 16-byte aligned = yes
+AT_PLATFORM below the strings = yes
+AT_RANDOM right below AT_PLATFORM = yes
+AT_RANDOM's bytes not all zero = yes
+auxv's end padded the least below AT_RANDOM = yes
+AT_PAGESZ = 4096
+AT_PHENT = 56
+AT_PHNUM is e_phnum = yes
+AT_PHDR is the headers' address = yes
+AT_ENTRY is e_entry + the load bias = yes
+ET_DYN loaded at a non-zero bias = yes
+AT_BASE = 0
+AT_FLAGS = 0
+AT_UID is getuid() = yes
+AT_EUID is geteuid() = yes
+AT_GID is getgid() = yes
+AT_EGID is getegid() = yes
+AT_SECURE = 0
+AT_CLKTCK = 100
+AT_HWCAP is CPUID(1).EDX = yes
+auxv_test: ok
+-- exit status 0
