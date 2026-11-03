@@ -1338,6 +1338,7 @@ from the public documentation of each function (clean room):
 | bcrypt.dll | `user/bcrypt` | `testbcrypt.dll` | `C:\Windows\System32` |
 | riched20.dll | `user/riched20` (the control: `user/richedit`) | `testriched20.dll` | `C:\Windows\System32` |
 | msftedit.dll | `user/msftedit` (the control: `user/richedit`) | `testmsftedit.dll` | `C:\Windows\System32` |
+| normaliz.dll | `user/normaliz` | `testnormaliz.dll` | `C:\Windows\System32` |
 
 (Exported under other names so that `user/bin`, which also runs on
 Windows, never shadows the system's DLLs.)
@@ -3140,6 +3141,16 @@ font (Selawik); no Microsoft logo, font, wallpaper or icon file.
   deletes for good (both recorded when asked otherwise). SHChangeNotify
   has no listener to tell; Shell_NotifyIconW fails (no notification
   area, recorded).
+- **dbghelp's image helpers and normaliz** (`user/dbghelp/src/image.rs`,
+  `user/normaliz`; `dbghelp_test`): ImageNtHeader checks "MZ" and
+  "PE\0\0"; SymSrvGetFileIndexInfoW reads an image file's headers (no
+  mapping): TimeDateStamp, SizeOfImage, IMAGE_FILE_DEBUG_STRIPPED, and
+  the debug directory's CodeView RSDS record (PDB base name, GUID, age);
+  NB10 records and PDB/DBG files are recorded. MiniDumpWriteDump stays a
+  stub (exported, so SqlDumper loads). normaliz.dll forwards IdnToAscii
+  to kernel32 and has its own IdnToUnicode (RFC 3492 decoding), because
+  kernel32's is still a stub: a forwarder to a stub fails to bind (the
+  ledger says "missing export").
 - **ole32's clean-up helpers** (`user/ole32/src/props.rs`;
   `ole32_test`): PropVariantClear frees by type (task-allocator strings,
   BSTRs and SAFEARRAYs through oleaut32 found at run time, interfaces,

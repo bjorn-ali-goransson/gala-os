@@ -81,6 +81,16 @@ shows it.
 
 ## Things that are easy to get wrong
 
+- **A DLL test in C** (`user/<dll>_test/main.c`, mingw; oleaut32_test,
+  shlwapi_test, ole32_test, shell32_test, dbghelp_test): `build.sh`
+  rebuilds the checked-in `user/bin/<name>.exe` (xtask does not; run it
+  after editing main.c and commit the binary). To check that a function
+  is *exported*, import it statically (a call in a branch never taken):
+  GetProcAddress returns NULL for gala_stubs stubs (and so the test
+  cannot tell). An export forwarder (`/EXPORT:f=kernel32.f`) to a stub
+  fails to bind as a "missing export": implement the function where it
+  is forwarded from instead (normaliz's IdnToUnicode).
+
 - A test that runs a process at Low integrity (uipi_test, gala_cli_test)
   cannot signal or open the parent's named events (no write up: a
   Medium object's default label): pass inherited handles instead. A

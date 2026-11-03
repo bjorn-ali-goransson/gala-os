@@ -346,6 +346,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "odbc32", file: "odbc32.dll", exported_as: "testodbc32.dll" },
     Dll { package: "wldap32", file: "wldap32.dll", exported_as: "testwldap32.dll" },
     Dll { package: "wsock32", file: "wsock32.dll", exported_as: "testwsock32.dll" },
+    // normaliz.dll: forwarders to kernel32's IDN functions (libcurl).
+    Dll { package: "normaliz", file: "normaliz.dll", exported_as: "testnormaliz.dll" },
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32.dll" },
     Dll { package: "authz", file: "authz.dll", exported_as: "testauthz.dll" },
@@ -752,6 +754,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shell32_test", "user32.dll", "Windows/System32"),
     ("shell32_test", "gdi32.dll", "Windows/System32"),
     ("shell32_test", "user/bin/shell32_test.exe", "gala"),
+    ("dbghelp_test", "ntdll.dll", "Windows/System32"),
+    ("dbghelp_test", "kernel32.dll", "Windows/System32"),
+    ("dbghelp_test", "msvcrt.dll", "Windows/System32"),
+    ("dbghelp_test", "dbghelp.dll", "Windows/System32"),
+    ("dbghelp_test", "normaliz.dll", "Windows/System32"),
+    ("dbghelp_test", "user/bin/dbghelp_test.exe", "gala"),
     ("richedit_test", "ntdll.dll", "Windows/System32"),
     ("richedit_test", "kernel32.dll", "Windows/System32"),
     ("richedit_test", "msvcrt.dll", "Windows/System32"),
@@ -3946,6 +3954,16 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=shell32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["shell32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: dbghelp's ImageNtHeader and SymSrvGetFileIndexInfoW (what
+        // SQL Server LocalDB's SqlDumper imports) and normaliz.dll's IDN
+        // forwarders (libcurl) against documented behaviour
+        // (user/dbghelp_test/main.c, mingw).
+        name: "dbghelp_test",
+        cmdline: "qemu_exit run=dbghelp_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["dbghelp_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // W3: rich edit controls (msftedit.dll's RICHEDIT50W, riched20.dll's

@@ -2080,6 +2080,11 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         DoDragDrop (they need user32's clipboard), CoCreateInstanceEx,
         CreateBindCtx, GetHGlobalFromStream, CoRegisterMallocSpy,
         CoImpersonateClient/CoRevertToSelf.
+     4. dbghelp: `ImageNtHeader`, `SymSrvGetFileIndexInfoW` (and
+        `MiniDumpWriteDump` exported as a stub), so LocalDB's SqlDumper
+        loads; a new normaliz.dll (`IdnToAscii` forwarded to kernel32,
+        `IdnToUnicode` its own: kernel32's is a stub, for its owners to
+        replace) for libcurl (`dbghelp_test`).
    - Elsewhere (not in these crates; for the agents there): FileZilla
      Server's GUI also stops on user32 (54 stubs: carets, the clipboard,
      DDE, DrawEdge/DrawFrameControl, window placement), gdi32 (16:
