@@ -182,6 +182,28 @@ pub struct MpInfo {
     pub extra_argument: core::sync::atomic::AtomicU64,
 }
 
+impl MpInfo {
+    /// An entry of the kernel's own, in the same layout, for an AP the
+    /// kernel starts itself (`arch::smp`: one the bootloader missed).
+    pub const fn new(processor_id: u32, lapic_id: u32) -> Self {
+        Self {
+            processor_id,
+            lapic_id,
+            reserved: 0,
+            goto_address: core::sync::atomic::AtomicU64::new(0),
+            extra_argument: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+/// `struct limine_rsdp_response`: the RSDP's address (HHDM-virtual at base
+/// revision >= 4).
+#[repr(C)]
+pub struct RsdpResponse {
+    pub revision: u64,
+    pub address: u64,
+}
+
 pub const MP_INFO_EXTRA_ARGUMENT: usize = core::mem::offset_of!(MpInfo, extra_argument);
 
 #[repr(C)]
@@ -199,6 +221,7 @@ pub struct Requests {
     pub date_at_boot: Request<DateAtBootResponse>,
     pub mp: MpRequest,
     pub executable_file: Request<ExecutableFileResponse>,
+    pub rsdp: Request<RsdpResponse>,
     end_marker: [u64; 2],
 }
 
@@ -226,6 +249,7 @@ pub static REQUESTS: Requests = Requests {
     date_at_boot: Request::new([0x502746e184c088aa, 0xfbc5ec83e6327893]),
     mp: MpRequest { request: Request::new([0x95a67b819a1b857e, 0xa0b61b723b6a73e0]), flags: 0 },
     executable_file: Request::new([0xad97e90e83f1ed67, 0x31eb5d1c5ff23b69]),
+    rsdp: Request::new([0xc5e77b6b397e7b43, 0x27637845accdcf3c]),
     end_marker: REQUESTS_END_MARKER,
 };
 

@@ -16,9 +16,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use super::context::{KernelStack, StackError};
 use super::gdt::{self, CpuTables};
 use super::percpu::{self, PerCpu};
-use super::{apic, cpu, interrupts, paging, syscall};
-use crate::boot::{MP_INFO_EXTRA_ARGUMENT, MpInfo, Processors};
+use super::{apboot, apic, cpu, interrupts, paging, syscall};
+use crate::boot::{BootInfo, MP_INFO_EXTRA_ARGUMENT, MpInfo};
 use crate::mm::heap::{AllocError, try_box};
+pub use apboot::{Shelter, shelter_bootloader_aps, shelter_state};
 
 /// Processors beyond this many are left parked (affinity masks are 64 bits).
 pub const MAX_CPUS: usize = 64;
@@ -176,6 +177,9 @@ pub fn online_mask() -> u64 {
 struct ApStart {
     stack_top: u64,
     index: u32,
+    /// Set by the CPU that runs on this: a second one (an AP the kernel
+    /// gave up on that arrives late through the kernel's trampoline) halts.
+    taken: AtomicBool,
     percpu: *mut PerCpu,
     tables: *mut CpuTables,
     ist_tops: [u64; 3],
@@ -209,7 +213,14 @@ fn prepare(index: u32) -> Result<&'static ApStart, SmpError> {
     let percpu = Box::leak(try_box(PerCpu::new())?);
     let tables = Box::leak(try_box(CpuTables::new())?);
     let ist_tops = [leaked_stack()?, leaked_stack()?, leaked_stack()?];
-    let start = ApStart { stack_top: leaked_stack()?, index, percpu, tables, ist_tops };
+    let start = ApStart {
+        stack_top: leaked_stack()?,
+        index,
+        taken: AtomicBool::new(false),
+        percpu,
+        tables,
+        ist_tops,
+    };
     Ok(Box::leak(try_box(start)?))
 }
 
@@ -252,6 +263,10 @@ global_asm!(
 );
 
 extern "C" fn ap_main(start: &'static ApStart) -> ! {
+    if start.taken.swap(true, Ordering::AcqRel) {
+        // Interrupts are off (gala_ap_entry): this CPU stays here.
+        cpu::halt_forever();
+    }
     // SAFETY: `prepare` made the tables, stacks and per-CPU block for this
     // CPU alone and leaked them, so they live forever.
     unsafe {
@@ -271,6 +286,7 @@ extern "C" fn ap_main(start: &'static ApStart) -> ! {
     CPU_ROOT[start.index as usize].store(paging::kernel_root(), Ordering::SeqCst);
     ONLINE_MASK.fetch_or(1 << start.index, Ordering::AcqRel);
     ONLINE.fetch_add(1, Ordering::AcqRel);
+    super::bootphase::mark_n("ap_online", u64::from(start.index));
     let main = AP_MAIN.load(Ordering::Acquire);
     // SAFETY: only `start_aps` stores into AP_MAIN, and it stores a
     // `fn(u32) -> !` before starting any AP.
@@ -311,28 +327,171 @@ pub fn init_bsp() {
     }
 }
 
+/// Boot-test variants of AP start-up (`smptest=`): `Hide` treats the APs
+/// the bootloader started as missed (the kernel starts them itself);
+/// `Late` also makes one run the bootloader's trampoline again first, as
+/// an AP that answers the bootloader too late does (`apboot`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmpTest {
+    None,
+    Hide,
+    Late,
+}
+
+/// What `start_aps` found and did, for the boot log.
+#[derive(Debug, Default)]
+pub struct SmpReport {
+    pub online: u32,
+    /// CPUs the bootloader reported (the boot CPU included).
+    pub reported: usize,
+    /// CPUs the firmware's MADT lists as enabled (`None`: not read).
+    pub firmware: Option<usize>,
+    /// APs the bootloader did not start that the kernel started.
+    pub started_here: u32,
+    /// APs the bootloader did not start that did not start at all.
+    pub failed: u32,
+    /// The first of those, by local APIC id.
+    pub first_failed: Option<u32>,
+    /// What `smptest=late` saw.
+    pub late_replay: Option<&'static str>,
+    /// The CPUs the bootloader started took over a second to come.
+    pub slow: bool,
+}
+
 /// Starts the APs and waits (up to a second) for them to come online;
-/// returns the number of CPUs online. Each AP ends in `main(index)`. Call
-/// once, after paging, the heap and the boot CPU's local APIC are set up.
-pub fn start_aps(processors: &Processors, main: fn(u32) -> !) -> Result<u32, SmpError> {
+/// then starts, with the kernel's own trampoline, the processors the
+/// firmware lists that the bootloader did not start (`apboot`). Each AP
+/// ends in `main(index)`. Call once, after paging, the heap and the boot
+/// CPU's local APIC are set up.
+pub fn start_aps(
+    info: &BootInfo,
+    test: SmpTest,
+    main: fn(u32) -> !,
+) -> Result<SmpReport, SmpError> {
+    let processors = &info.processors;
+    // After a handover the CPUs are the previous kernel's, all parked.
+    let test = if info.handover.is_some() { SmpTest::None } else { test };
     CPU_ROOT[0].store(cpu::read_cr3() & !0xfff, Ordering::SeqCst);
     STARTED.store(true, Ordering::Release);
     AP_MAIN.store(main as usize as u64, Ordering::Release);
     AP_CR3.store(paging::kernel_root(), Ordering::Release);
+    // `smptest`: as if the bootloader had reported the boot CPU alone.
+    let reported = if test == SmpTest::None { processors.len() } else { 1 };
+    let mut report = SmpReport { reported, ..SmpReport::default() };
     let mut started = 1;
+    let mut by_bootloader = [0u32; MAX_CPUS];
+    let mut bootloader_count = 0;
     for info in processors.iter().filter(|p| p.lapic_id != processors.bsp_lapic_id) {
-        if started >= MAX_CPUS as u32 {
+        if started >= MAX_CPUS as u32 || test != SmpTest::None {
             break;
         }
         let start = prepare(started)?;
         info.extra_argument.store(start as *const ApStart as u64, Ordering::Release);
         // Release: the AP reads `extra_argument` and AP_CR3 after this.
         info.goto_address.store(gala_ap_entry as *const () as u64, Ordering::Release);
+        by_bootloader[bootloader_count] = info.lapic_id;
+        bootloader_count += 1;
         started += 1;
     }
-    let deadline = crate::time::raw_monotonic_ns() + 1_000_000_000;
-    while online_count() < started && crate::time::raw_monotonic_ns() < deadline {
+    // A started AP's vCPU may be slow to run on a loaded emulator host
+    // (a boot once had 1 of 2 CPUs online after a second): a second is
+    // the normal wait, ten the most.
+    let t0 = crate::time::raw_monotonic_ns();
+    let mut warned = false;
+    while online_count() < started && crate::time::raw_monotonic_ns() < t0 + 10_000_000_000 {
+        if !warned && crate::time::raw_monotonic_ns() >= t0 + 1_000_000_000 {
+            warned = true;
+            crate::warn!(
+                "smp: {} of {started} CPUs online after 1 s; waiting up to 10 s for the rest",
+                online_count()
+            );
+        }
         core::hint::spin_loop();
     }
-    Ok(online_count())
+    report.slow = warned;
+    // After a kernel handover the previous kernel's CPUs are all there is.
+    let Some(Ok(firmware)) = info.firmware_cpus else {
+        report.online = online_count();
+        return Ok(report);
+    };
+    report.firmware = Some(firmware.len());
+    let bsp = processors.bsp_lapic_id;
+    let by_bootloader = &by_bootloader[..bootloader_count];
+    let mut missed =
+        firmware.ids().iter().copied().filter(|id| *id != bsp && !by_bootloader.contains(id));
+    let Some(first) = missed.next() else {
+        report.online = online_count();
+        return Ok(report);
+    };
+    let hhdm = crate::mm::hhdm_offset();
+    let Some(low) = low_pages(info) else {
+        crate::warn!("smp: no free pages below 1 MiB for the AP trampoline");
+        report.online = online_count();
+        return Ok(report);
+    };
+    let entry = gala_ap_entry as *const () as u64;
+    let Some(vector) = apboot::prepare_trampoline(hhdm, low, paging::kernel_root(), entry) else {
+        crate::warn!("smp: cannot set up the AP trampoline at {:#x}", low.0[0]);
+        report.online = online_count();
+        return Ok(report);
+    };
+    if test == SmpTest::Late {
+        report.late_replay = Some(apboot::replay_late_start(hhdm, first));
+    }
+    for id in core::iter::once(first).chain(missed) {
+        if started >= MAX_CPUS as u32 {
+            break;
+        }
+        let start = prepare(started)?;
+        let mp = Box::leak(try_box(MpInfo::new(0, id))?);
+        mp.extra_argument.store(start as *const ApStart as u64, Ordering::Release);
+        apboot::set_trampoline_info(hhdm, low, mp as *const MpInfo as u64);
+        let bit = 1u64 << started;
+        // An INIT also takes the AP out of wherever it is (the
+        // bootloader's parking loop, or its trampoline still pending).
+        for round in 0..4 {
+            // A startup IPI of the bootloader's still pending would send
+            // it through Limine's trampoline once more: keep that safe.
+            apboot::repair_limine_block(hhdm);
+            apboot::init_sipi_sipi(id, vector);
+            let deadline = crate::time::raw_monotonic_ns() + (250_000_000 << round);
+            while online_mask() & bit == 0 && crate::time::raw_monotonic_ns() < deadline {
+                core::hint::spin_loop();
+            }
+            if online_mask() & bit != 0 {
+                break;
+            }
+        }
+        started += 1;
+        if online_mask() & bit != 0 {
+            report.started_here += 1;
+        } else {
+            report.failed += 1;
+            report.first_failed.get_or_insert(id);
+            crate::warn!(
+                "smp: CPU with APIC id {id} did not start (reached long mode: {})",
+                apboot::trampoline_reached(hhdm, low)
+            );
+        }
+    }
+    report.online = online_count();
+    Ok(report)
+}
+
+/// Four usable pages below 1 MiB (the frame allocator never hands these
+/// out: `boot::LOW_MEMORY_END`).
+fn low_pages(info: &BootInfo) -> Option<apboot::LowPages> {
+    let mut pages = [0u64; 4];
+    let mut n = 0;
+    for r in info.memory_map.iter().filter(|r| r.kind == crate::mm::memmap::RegionKind::Usable) {
+        let start = r.base.max(0x1000).next_multiple_of(4096);
+        let end = r.end().min(crate::boot::LOW_MEMORY_END) & !0xfff;
+        let mut p = start;
+        while p < end && n < pages.len() {
+            pages[n] = p;
+            n += 1;
+            p += 4096;
+        }
+    }
+    (n == pages.len()).then_some(apboot::LowPages(pages))
 }

@@ -104,14 +104,18 @@ explicitly in its commit.
   everything the desktop can do can be done from a terminal too (the
   `gala` command, item SD). A desktop feature is built as an action the
   CLI reaches first, then given a mouse and keyboard binding.
-- **Open (2026-11-03): one CPU, then a silent end.** Under heavy host
-  load a boot sometimes gets only one CPU from Limine ("smp: 1 CPUs
-  online (1 reported by the bootloader)") although QEMU runs with
-  `-smp 2`, and twice the kernel then stopped without a word and QEMU
-  exited with status 0 (bench's shared VM, handover_idle_twice); one
-  such boot ran on normally (smp_test failed its CPU count). Both the
-  missing CPU and the silent end need explaining: a kernel that gets
-  one CPU must run on one, and an end must leave a panic or a reason.
+- **Resolved (2026-11-03): one CPU, then a silent end.** Under heavy
+  host load Limine's AP start-up (a bounded wait) gave up on CPU 1, so
+  the kernel got one CPU; its startup IPIs stayed pending, and when the
+  AP's vCPU finally ran it executed Limine's trampoline without the
+  identity map Limine had removed, triple-faulted and reset the machine
+  (QEMU status 0, no word). Now the kernel identity-maps the low 4 GiB in
+  the tables Limine's trampoline loads (a late AP parks harmlessly),
+  reads the MADT and starts the CPUs Limine missed itself, and runs on
+  one CPU when it must; early-boot telemetry (QEMU's resets, phase
+  markers, vCPU and host facts) explains a silent end; xtask flags and
+  re-boots a VM short of CPUs (ARCHITECTURE "Processors", OBSERVABILITY
+  "Early boot"; scenarios `smp_missed`, `smp_late`, `onecpu_*`).
 
 ## Done
 - M1 boot, serial, memory map
@@ -245,6 +249,13 @@ explicitly in its commit.
   shootdown for freed kernel stacks; fixes for code that assumed one CPU
   (SYSCALL MSRs set per CPU, NtContinue state per thread);
   `smpsched_test`
+- SMP robustness (2026-11-03): APs the bootloader missed are started by
+  the kernel from the MADT with its own trampoline; a late AP in Limine's
+  trampoline is sheltered (identity map) instead of resetting the
+  machine; one-CPU boots (`onecpu_smp`, `onecpu_handover`,
+  `onecpu_programs`, `onecpu_bench`), `smp_missed`, `smp_late`; early-boot
+  telemetry (boot phase markers on port 0x403, QEMU reset log, SeaBIOS
+  log, QMP vCPU count, host load in failed logs)
 - SMP memory (S3): user TLB shootdown (per-CPU loaded roots, dirty spaces,
   frames freed only after other CPUs flushed, via the space lock's guard),
   counted flush requests, lock spinning serves flushes (no deadlock with

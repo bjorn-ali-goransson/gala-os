@@ -176,6 +176,26 @@ pub fn stop_timer() {
 /// Sends a fixed interrupt with `vector` to the CPU whose local APIC id is
 /// `apic_id` (physical destination mode).
 pub fn send_ipi(apic_id: u32, vector: u8) {
+    send_icr(apic_id, u32::from(vector));
+}
+
+/// ICR delivery modes (bits 8-10) with "level: assert" (bit 14).
+const ICR_INIT: u32 = 0b101 << 8 | 1 << 14;
+const ICR_STARTUP: u32 = 0b110 << 8 | 1 << 14;
+
+/// Sends INIT to `apic_id`: the CPU resets and waits for a startup IPI
+/// (from wherever it was, a bootloader's parking loop included).
+pub fn send_init(apic_id: u32) {
+    send_icr(apic_id, ICR_INIT);
+}
+
+/// Sends a startup IPI: a CPU waiting after INIT starts in real mode at
+/// physical `page << 12`.
+pub fn send_startup(apic_id: u32, page: u8) {
+    send_icr(apic_id, ICR_STARTUP | u32::from(page));
+}
+
+fn send_icr(apic_id: u32, low: u32) {
     // An interrupt handler sending an IPI between the two xAPIC writes
     // would garble the ICR.
     let restore = cpu::disable_interrupts();
@@ -185,7 +205,7 @@ pub fn send_ipi(apic_id: u32, vector: u8) {
         unsafe {
             cpu::wrmsr(
                 X2APIC_MSR_BASE + REG_ICR_LOW / 16,
-                u64::from(apic_id) << 32 | u64::from(vector),
+                u64::from(apic_id) << 32 | u64::from(low),
             )
         };
     } else {
@@ -194,7 +214,7 @@ pub fn send_ipi(apic_id: u32, vector: u8) {
         }
         // The write to the low half sends it.
         write(REG_ICR_HIGH, apic_id << 24);
-        write(REG_ICR_LOW, u32::from(vector));
+        write(REG_ICR_LOW, low);
     }
     if restore {
         cpu::enable_interrupts();

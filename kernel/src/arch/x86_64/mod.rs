@@ -1,8 +1,10 @@
 //! x86_64 hardware access. This is one of the two places (with `boot`) where
 //! `unsafe` is permitted; every `unsafe` block must state why it is sound.
 
+mod apboot;
 pub mod apic;
 pub mod backtrace;
+pub mod bootphase;
 pub mod context;
 pub mod cpu;
 pub mod debugcon;

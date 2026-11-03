@@ -6,6 +6,7 @@
 //! over by the bootloader (or the previous kernel); everything it exposes
 //! is safe.
 
+pub mod acpi;
 mod framebuffer;
 mod limine;
 
@@ -250,6 +251,9 @@ pub struct BootInfo {
     /// UNIX time (seconds) of boot, from the RTC.
     pub boot_unix_time: Option<i64>,
     pub processors: Processors,
+    /// The processors the firmware's MADT lists (Limine boots only): more
+    /// than `processors` when the bootloader missed an AP.
+    pub firmware_cpus: Option<Result<acpi::FirmwareCpus, acpi::AcpiError>>,
     pub framebuffer_facts: Option<FramebufferFacts>,
     /// The kernel's own executable file (ELF), to hand over to next time.
     pub kernel_file: Option<&'static [u8]>,
@@ -394,6 +398,7 @@ fn collect_handover(entry: HandoverEntry) -> Result<BootInfo, BootError> {
         modules,
         boot_unix_time: platform.boot_unix_time.checked_sub(1).map(|t| t as i64),
         processors: Processors { bsp_lapic_id: cpus.bsp_lapic_id, cpus: CpuList::Parked(parked) },
+        firmware_cpus: None,
         framebuffer_facts,
         kernel_file,
         handover: Some(Received {
@@ -416,6 +421,11 @@ pub fn collect(handover: Option<HandoverEntry>) -> Result<BootInfo, BootError> {
     if !supported {
         return Err(BootError::UnsupportedBaseRevision { loaded });
     }
+    let hhdm_offset = REQUESTS.hhdm.response().ok_or(BootError::MissingResponse("HHDM"))?.offset;
+    let kernel_address = REQUESTS
+        .executable_address
+        .response()
+        .map(|r| KernelAddress { physical_base: r.physical_base, virtual_base: r.virtual_base });
 
     // SAFETY (all `c_str` calls): response strings are NUL-terminated and live
     // in bootloader-reclaimable memory, per the protocol.
@@ -426,11 +436,6 @@ pub fn collect(handover: Option<HandoverEntry>) -> Result<BootInfo, BootError> {
     let cmdline = REQUESTS.cmdline.response().map_or("", |r| unsafe { limine::c_str(r.cmdline) });
     let firmware =
         REQUESTS.firmware_type.response().map(|r| FirmwareType::from_limine(r.firmware_type));
-    let hhdm_offset = REQUESTS.hhdm.response().ok_or(BootError::MissingResponse("HHDM"))?.offset;
-    let kernel_address = REQUESTS
-        .executable_address
-        .response()
-        .map(|r| KernelAddress { physical_base: r.physical_base, virtual_base: r.virtual_base });
 
     let memmap = REQUESTS.memmap.response().ok_or(BootError::MissingResponse("memory map"))?;
     let entries = if memmap.entries.is_null() {
@@ -440,6 +445,20 @@ pub fn collect(handover: Option<HandoverEntry>) -> Result<BootInfo, BootError> {
         // pointers in bootloader-reclaimable memory.
         unsafe { core::slice::from_raw_parts(memmap.entries, memmap.entry_count as usize) }
     };
+
+    // First: an AP that answers Limine's startup IPIs only now (after it
+    // gave up on it) runs Limine's trampoline, which needs the identity
+    // map Limine has removed by now (ARCHITECTURE "Processors").
+    if let Some(kernel) = kernel_address {
+        let reclaimable = entries.iter().filter_map(|&e| {
+            // SAFETY: non-null entry pointers to `MemmapEntry`s in
+            // bootloader-reclaimable memory, per the protocol.
+            let e = unsafe { e.as_ref()? };
+            (RegionKind::from_limine(e.type_) == RegionKind::BootloaderReclaimable)
+                .then_some((e.base, e.base + e.length))
+        });
+        crate::arch::smp::shelter_bootloader_aps(hhdm_offset, kernel, reclaimable);
+    }
 
     let raw_framebuffer = REQUESTS.framebuffer.response().and_then(|r| {
         if r.framebuffers.is_null() || r.framebuffer_count == 0 {
@@ -509,6 +528,10 @@ pub fn collect(handover: Option<HandoverEntry>) -> Result<BootInfo, BootError> {
         modules: BootModules::Limine(modules),
         boot_unix_time: REQUESTS.date_at_boot.response().map(|r| r.timestamp),
         processors: Processors { bsp_lapic_id, cpus: CpuList::Limine(cpus) },
+        firmware_cpus: Some(acpi::read_madt(
+            hhdm_offset,
+            REQUESTS.rsdp.response().map_or(0, |r| r.address),
+        )),
         framebuffer_facts,
         kernel_file,
         handover: None,

@@ -157,6 +157,49 @@ counts (TCG plugins) need a QEMU built with plugins; Ubuntu's has none.
   Go programs repeat too (RDRAND hidden by CPUID faulting, ProcessPrng
   from the seed, spin loops preempted at a canonical point).
 
+## 5b. Early boot — done (2026-11-03)
+
+A boot that dies before or without a panic used to leave a serial log
+that just stops and a QEMU exit status of 0 (an AP that triple-faulted
+reset the machine: ARCHITECTURE "Processors"). Every boot test now
+records, always on and cheap:
+- **QEMU's side** (xtask, `xtask/src/telemetry.rs`), next to the image
+  (`target/<profile>/<image>.*`): `.qemu.log` (QEMU `-d
+  cpu_reset,guest_errors -D`: each CPU reset with its registers, "Triple
+  fault", bad guest accesses), `.bios.log` (SeaBIOS's debug port 0x402:
+  the CPUs it counted, the boot device), `.phases.log` (the kernel's
+  phase markers, below). After the run a few `xtask:` lines end the serial
+  log (and so `target/failed/<scenario>.log`): how QEMU ended (status 33 /
+  35 = the kernel's exit codes, 0 = a reset or power-off without them,
+  which with `-no-reboot` is what a triple fault looks like, a signal, a
+  timeout), the vCPUs QEMU created (QMP `query-cpus-fast`, on a socket in
+  the temp directory), the host's load average and available memory at the
+  start and the end. After an abnormal end (not 33/35, not stopped by
+  xtask) also the last 12 phase markers and the last 30 lines of QEMU's
+  log.
+- **CPU count**: xtask compares the kernel's `smp: N CPUs online` with
+  the vCPUs it asked for (2, or 1 for `onecpu_*`); a boot short of CPUs
+  is booted once more (not with a disk), and a failure on one says first
+  `VM got 1 of 2 CPUs (host overloaded?)`.
+- **Boot phase markers** (`arch::bootphase`): a line per step on their own
+  debug-console port 0x403 (the event stream has 0xe9), lock-free and
+  allocation-free: `phase <name> cpu <APIC id> tsc <TSC>` for entry,
+  boot_info, xsave, gdt_idt, memory_map, frames, paging, apic, sched,
+  smp_start, `ap_online <index>` (from each AP), smp_done, drivers,
+  manifest, program (each `run=` program), boot_ok. The last line in the
+  file is how far the boot got, even when the machine reset before the
+  serial log said anything.
+- **Faults**: every CPU exception in kernel mode first writes `fault
+  <vector> rip <addr> error <code> cpu <id> tsc <n>` to the phase port,
+  then panics as before (message, backtrace, flight records, crash
+  record); a double fault runs on its own IST stack (gdt::IST_DOUBLE_FAULT)
+  and goes the same way. A panic writes `panic cpu <id>`. Before the IDT
+  is loaded (the first few hundred instructions) a fault still
+  triple-faults: the last phase is then `entry` or `boot_info`.
+- **SMP detail** in the boot log: Limine's MP response (count, BSP, each
+  APIC id), the MADT's enabled CPUs and which of them the bootloader did
+  not start, how long start-up took, CPUs the kernel started itself.
+
 ## 6. Live introspection — later
 
 A command channel (second serial port or virtio-vsock) with read-only
