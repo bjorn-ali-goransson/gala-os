@@ -442,6 +442,13 @@ charged). Look
   drops CONTEXT_XSTATE from its own CONTEXT copies (they have no
   CONTEXT_EX); a copy that keeps the flag makes NtContinue read whatever
   follows it as a CONTEXT_EX (it is validated, then ignored if wrong).
+- **A wait that ends only at its timeout** although the object was set:
+  look for someone resetting it before the waiter looked (before
+  2026-11-03 a reset could undo a notification event's set for waiters
+  not yet run; ARCHITECTURE "Waits"). Kernel code that shares one event
+  between several waiters must not count on each waiter seeing it set:
+  a count or generation next to it (GalaConsoleCtrl's) says what
+  happened.
 - **Known intermittent**: java_http/java_hello fail about 1 run in 30 to
   40 with Java heap corruption (a stale String reference: `String.equals`
   reading a bogus klass, a NullPointerException inside String.equals from

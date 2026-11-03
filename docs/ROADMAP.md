@@ -30,6 +30,13 @@ explicitly in its commit.
   control (first part done 2026-11-02, see R7), then fixing the known flaky scenarios (java_http,
   java_hello, postgres, smpsched_test under load), before the rest of
   R6.
+  **sshd_shell's Ctrl+C fixed (2026-11-03)**: not a regression of the
+  clock calibration (the parent failed 1 of 10 solo boots the same way).
+  A lost wake-up in `nt::wait`: setting a notification event woke its
+  waiters, but one that looked only after another had reset it slept on
+  (busybox's Ctrl+C handler ran at GalaConsoleCtrl's 1 s backstop, in
+  the next command line). Waits are now satisfied by the set itself, as
+  on Windows (ARCHITECTURE "Waits"; `wait_test`).
   Flaky scenarios (2026-11-02): a kernel race fixed: a copy-on-write
   fault changed the VAD before mapping the copy, so a second thread's
   write fault in between made the shared frame writable (writes reached

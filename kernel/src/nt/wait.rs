@@ -21,7 +21,28 @@ pub struct Dispatcher {
 
 struct DispatcherInner {
     signal: i32,
-    waiters: Vec<ThreadId>,
+    waiters: Vec<Waiter>,
+}
+
+/// A thread waiting on an object, and whether the object was signaled
+/// while it waited (`released`). A notification event or timer set while
+/// a thread waits satisfies that wait even when it is reset before the
+/// thread runs again, as on Windows: the woken thread's own check comes
+/// later and could find it reset (two console processes' Ctrl+C handler
+/// threads waited on one event and the first to run reset it: the other
+/// slept on until its timeout; sshd_shell, wait_test).
+#[derive(Clone, Copy)]
+struct Waiter {
+    thread: ThreadId,
+    released: bool,
+}
+
+/// Wakes `inner`'s waiters, marking them released (it became signaled).
+fn wake_all(inner: &mut DispatcherInner) {
+    for w in inner.waiters.iter_mut() {
+        w.released = true;
+        platform::wake(w.thread);
+    }
 }
 
 static DISPATCHER: IrqMutex<()> = IrqMutex::named("wait.dispatcher", ());
@@ -47,10 +68,9 @@ pub fn set_signal(object: &ObjectRef, signal: i32) -> i32 {
     inner.signal = signal;
     if signal > 0 {
         // Wake everyone; they re-check, and auto-reset objects are consumed
-        // by the first one to get there.
-        for &t in &inner.waiters {
-            platform::wake(t);
-        }
+        // by the first one to get there (notification objects release
+        // them all: `Waiter`).
+        wake_all(&mut inner);
     }
     previous
 }
@@ -72,9 +92,7 @@ pub fn update_signal<E>(
     let signal = f(previous)?;
     inner.signal = signal;
     if signal > 0 {
-        for &t in &inner.waiters {
-            platform::wake(t);
-        }
+        wake_all(&mut inner);
     }
     Ok(previous)
 }
@@ -86,9 +104,7 @@ pub fn signal_dispatcher(d: &Dispatcher, signal: i32) {
     let mut inner = d.inner.lock();
     inner.signal = signal;
     if signal > 0 {
-        for &t in &inner.waiters {
-            platform::wake(t);
-        }
+        wake_all(&mut inner);
     }
 }
 
@@ -103,6 +119,19 @@ fn is_signaled(object: &ObjectRef) -> bool {
         return owner.is_none() || owner == super::thread::current_id();
     }
     object.dispatcher().is_some_and(|d| d.inner.lock().signal > 0)
+}
+
+/// Whether a signal on `object` satisfies the waits it wakes, even if the
+/// object is reset before they look (notification events and timers: a
+/// wait on them consumes nothing). Objects a wait consumes (auto-reset
+/// events and timers, semaphores, mutants, completion ports) go to
+/// whoever looks first; files, pipes and sockets keep their re-check.
+fn releases_waiters(object: &ObjectRef) -> bool {
+    match &object.body {
+        ObjectBody::Event(e) => e.kind == EventType::Notification,
+        ObjectBody::Timer(t) => !t.synchronization,
+        _ => false,
+    }
 }
 
 /// The side effect of a satisfied wait: auto-reset events reset, semaphores
@@ -197,8 +226,14 @@ pub fn wait_for_alertable(
 ) -> NtStatus {
     let me = platform::current();
     let mut timed_out = false;
+    // The object whose signal released the last sleep (`Waiter`).
+    let mut released: Option<usize> = None;
     loop {
         let guard = DISPATCHER.lock();
+        if !wait_all && let Some(i) = released.filter(|&i| releases_waiters(&objects[i])) {
+            // Satisfied when it was set, though reset since.
+            return NtStatus(i as u32);
+        }
         if alertable && super::thread::has_user_apc() {
             return NtStatus::USER_APC;
         }
@@ -224,8 +259,8 @@ pub fn wait_for_alertable(
         // Register as a waiter everywhere, then sleep.
         for (n, object) in objects.iter().enumerate() {
             let d = object.dispatcher().expect("waitable objects only");
-            if d.inner.lock().waiters.try_push(me).is_err() {
-                unregister(&objects[..n], me);
+            if d.inner.lock().waiters.try_push(Waiter { thread: me, released: false }).is_err() {
+                let _ = unregister(&objects[..n], me);
                 return NtStatus::NO_MEMORY;
             }
         }
@@ -238,7 +273,7 @@ pub fn wait_for_alertable(
         super::thread::set_alertable(false);
         {
             let _guard = DISPATCHER.lock();
-            unregister(objects, me);
+            released = unregister(objects, me);
         }
         timed_out = reason == WakeReason::TimedOut;
         if super::thread::is_terminating() {
@@ -247,15 +282,22 @@ pub fn wait_for_alertable(
     }
 }
 
-fn unregister(objects: &[ObjectRef], me: ThreadId) {
-    for object in objects {
+/// Removes `me` from `objects`' waiters; the first object that released
+/// it (was signaled while it waited), if any.
+fn unregister(objects: &[ObjectRef], me: ThreadId) -> Option<usize> {
+    let mut released = None;
+    for (i, object) in objects.iter().enumerate() {
         if let Some(d) = object.dispatcher() {
             let mut inner = d.inner.lock();
-            if let Some(pos) = inner.waiters.iter().position(|&t| t == me) {
+            if let Some(pos) = inner.waiters.iter().position(|w| w.thread == me) {
+                if inner.waiters[pos].released && released.is_none() {
+                    released = Some(i);
+                }
                 inner.waiters.swap_remove(pos);
             }
         }
     }
+    released
 }
 
 /// Sleeps the current thread until `timeout` (NtDelayExecution). An

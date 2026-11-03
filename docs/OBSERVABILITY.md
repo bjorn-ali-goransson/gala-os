@@ -164,6 +164,17 @@ Each: what failed, what we lacked, what would have explained it, status.
     barrier (ROADMAP "Priorities"), which the NtReleaseSemaphore fix was
     meant to end. The failed log (`target/failed/java_http.log`) is the
     starting point for the next look.
+19. **sshd_shell's Ctrl+C, about one run in two to ten** (2026-11-03):
+    the shell printed `e^C^C` and `sh: cho: not found` after Ctrl+C had
+    ended `sleep`: busybox's control handler ran a second late, in the
+    next command line. Lacked: when each process's handler thread took
+    the event. Cause: a lost wake-up in `nt::wait` (a notification event
+    reset by one woken waiter before another looked; ARCHITECTURE
+    "Waits"). **Done**: `console N: Ctrl+C k` and `console N: pid P tid T
+    (name) takes Ctrl+C k after m ms` in the serial log (a warning `took
+    Ctrl+C k late` from 250 ms), events `console ctrl` and `console ctrl
+    taken`. The same lost wake-up may have been behind other waits that
+    ended only at a timeout (item 18's threads waiting on events).
 
 ## 1. Structured event stream — done (`events`, scenario `events`)
 
