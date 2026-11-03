@@ -152,6 +152,9 @@ explicitly in its commit.
   markers, vCPU and host facts) explains a silent end; xtask flags and
   re-boots a VM short of CPUs (ARCHITECTURE "Processors", OBSERVABILITY
   "Early boot"; scenarios `smp_missed`, `smp_late`, `onecpu_*`).
+- **Installing software (the owner, 2026-11-03)**: item PK below: `gala
+  install` over winget manifests; zip/portable, then Inno Setup and NSIS,
+  then MSIX sideloading, then MSI.
 - **A browser: stock Edge (the owner, 2026-11-03)**: item BR below;
   Chromium headless first, then headful with software rendering, the
   sandbox, then Edge itself.
@@ -1747,6 +1750,57 @@ BR. **A web browser: stock Microsoft Edge** (the owner, 2026-11-03).
    functions per stage in the report. Licensing: Chromium is BSD-style;
    Edge's license allows installing and running it but not redistributing
    it, so xtask downloads it and nothing of it is committed.
+
+PK. **Installing software: `gala install` over winget manifests** (the
+   owner, 2026-11-03). winget's community manifests (the winget-pkgs
+   repository: PackageIdentifier, versions, InstallerType, InstallerUrl,
+   InstallerSha256, silent switches, NestedInstallerFiles, commands) are
+   a ready catalogue of Windows software with checksums; gala reads them
+   and installs the way winget would, from the command line first (CLI
+   parity; the server profile too). Stages, each test first with a real
+   package and a scenario that installs it, runs it and uninstalls it:
+   1. **The client**: `gala install <id> [--version v]`, `gala search`,
+      `gala list`, `gala uninstall`, `gala upgrade`; manifests fetched from
+      the repository (or a pinned local snapshot for tests: no network
+      flakiness), installers downloaded inside gala over HTTPS (Winsock,
+      DNS and a TLS client: OpenSSL as in nginx_tls, or gala's own CNG
+      with an HTTPS stack in the `gala` tool), SHA-256 checked, an
+      install log and events (observability).
+   2. **zip and portable** (InstallerType `zip`, `portable`): unpacked
+      (a zip reader in the tool) to `%LOCALAPPDATA%\Microsoft\WinGet\
+      Packages\<id>`, NestedInstallerFiles' commands linked into a Links
+      directory on the user's PATH, an uninstall record kept as winget
+      does (the ARP entry under HKCU\...\Uninstall).
+   3. **Inno Setup and NSIS** (`inno`, `nullsoft`, `exe` with known
+      switches): the vendor's installer runs in gala with its silent
+      switches (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, `/S`): what it
+      needs (its own unpacker, registry writes, shortcuts through shell32's
+      IShellLink, file associations, UAC manifests honoured: elevation
+      becomes running with the admin token) is filled in by the ledger;
+      uninstall through the UninstallString it registered.
+   4. **MSIX sideloading for packaged Win32 programs**: the package (a zip
+      with AppxManifest.xml, AppxBlockMap.xml, AppxSignature.p7x) checked
+      (block map hashes, signature against trusted certificates), staged
+      under `C:\Program Files\WindowsApps\<full name>`, registered for
+      the user; package identity for full-trust Win32 apps
+      (GetCurrentPackageFullName/FamilyName, the package's VFS and
+      registry redirection, its app execution alias); Add-AppxPackage
+      style removal. AppContainer apps later (the sandbox work of BR
+      stage 3 helps).
+   5. **MSI**: a Windows Installer engine (msi.dll and msiexec: the
+      database tables, standard actions, the install script, custom
+      actions in DLLs and EXEs, transforms, logging with `/l*v`), enough
+      for `msiexec /i x.msi /qn` of common packages; Edge's enterprise MSI
+      (BR stage 4) is a target. Built clean-room from Microsoft's
+      documentation of the MSI database and actions (Wine's msi is LGPL:
+      read only as CLEAN_ROOM.md allows, nothing copied unrecorded).
+   6. Later: running stock winget itself (it is an MSIX: stage 4) against
+      gala, the Microsoft Store source, `winget configure`.
+   Ideas: installs are transactions (a failed install rolls back its
+   files and registry, as MSI does; the disk log, D2/D3, makes this
+   cheap); every installed package recorded with its manifest for `gala
+   list`; a scenario per installer type kept as a regression test; the
+   ledger's per-installer gaps in the report.
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing
