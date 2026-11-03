@@ -5,6 +5,7 @@
 
 #![no_std]
 
+mod misc;
 mod paths;
 mod unimplemented;
 

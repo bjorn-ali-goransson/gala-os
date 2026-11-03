@@ -691,6 +691,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("browser_api_test", "ws2_32.dll", "Windows/System32"),
     ("browser_api_test", "advapi32.dll", "Windows/System32"),
     ("browser_api_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("browser_api_test", "userenv.dll", "Windows/System32"),
+    ("browser_api_test", "shlwapi.dll", "Windows/System32"),
+    ("browser_api_test", "netapi32.dll", "Windows/System32"),
     ("winsock_test", "ntdll.dll", "Windows/System32"),
     ("winsock_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ws2_32.dll", "Windows/System32"),
@@ -4711,7 +4714,7 @@ const SCENARIOS: &[Scenario] = &[
         // about:blank and prints its DOM: the browser process, its
         // children (renderer, network service) over Mojo, V8.
         name: "chromium_version",
-        cmdline: "qemu_exit run=chrome.exe args=--headless%20--no-sandbox%20--disable-gpu%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--dump-dom%20about:blank",
+        cmdline: "qemu_exit run=chrome.exe args=--headless%20--no-sandbox%20--disable-gpu%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--dump-dom%20about:blank dump=C:/chromium/debug.log,C:/tmp/chr/chrome_debug.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "<html><head></head><body></body></html>",
@@ -4722,7 +4725,7 @@ const SCENARIOS: &[Scenario] = &[
         // BR stage 1: a local page whose script changes it (so V8 ran),
         // its DOM printed after the script.
         name: "chromium_dump",
-        cmdline: "qemu_exit run=chrome.exe args=--headless%20--no-sandbox%20--disable-gpu%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--dump-dom%20file:///C:/gala/page.html",
+        cmdline: "qemu_exit run=chrome.exe args=--headless%20--no-sandbox%20--disable-gpu%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--dump-dom%20file:///C:/gala/page.html dump=C:/chromium/debug.log,C:/tmp/chr/chrome_debug.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "<p id=\"static\">static text</p>",

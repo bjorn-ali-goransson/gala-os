@@ -6,6 +6,7 @@
 
 #![no_std]
 
+mod join;
 mod unimplemented;
 mod wksta;
 

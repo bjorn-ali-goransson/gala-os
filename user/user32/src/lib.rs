@@ -22,6 +22,7 @@ mod listbox;
 mod menu;
 mod message;
 mod monitor;
+mod power;
 mod rect;
 mod scroll;
 mod spi;

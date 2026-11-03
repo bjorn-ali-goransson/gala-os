@@ -281,6 +281,9 @@ syscall_stubs! {
     GalaConsoleTrace = 0x7f83, fn(id: u32, direction: u32, bytes: *const u8, len: usize);
     // Object identity (gala's number, unverified): CompareObjectHandles.
     NtCompareObjects = 0x7f90, fn(first: usize, second: usize);
+    // Process suspension (gala's numbers, unverified).
+    NtSuspendProcess = 0x7f91, fn(process: usize);
+    NtResumeProcess = 0x7f92, fn(process: usize);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);

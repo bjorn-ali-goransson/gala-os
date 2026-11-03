@@ -69,6 +69,14 @@ pub fn init() -> Result<(), NtStatus> {
 /// them; Cygwin's runtime keeps its per-session objects there.
 const SYSTEM_LINKS: &[(&str, &str)] = &[
     ("\\Sessions\\1\\BaseNamedObjects\\Global", "\\BaseNamedObjects"),
+    // `Local\` names the session's own directory (Chromium's
+    // `Local\ChromeProcessSingletonStartup!`), `Session\<n>\` another
+    // session's; session 0's directory has Global and Local links to itself.
+    ("\\Sessions\\1\\BaseNamedObjects\\Local", "\\Sessions\\1\\BaseNamedObjects"),
+    ("\\Sessions\\1\\BaseNamedObjects\\Session", "\\Sessions\\BNOLINKS"),
+    ("\\BaseNamedObjects\\Global", "\\BaseNamedObjects"),
+    ("\\BaseNamedObjects\\Local", "\\BaseNamedObjects"),
+    ("\\BaseNamedObjects\\Session", "\\Sessions\\BNOLINKS"),
     ("\\Sessions\\BNOLINKS\\0", "\\BaseNamedObjects"),
     ("\\Sessions\\BNOLINKS\\1", "\\Sessions\\1\\BaseNamedObjects"),
 ];

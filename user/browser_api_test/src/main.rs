@@ -18,7 +18,8 @@
 //!    a reserved page is not;
 //! 12. power requests: create, set, clear, close;
 //! 13. GetTempFileNameW: with a number, the name `<dir>\gal1234.TMP` and no
-//!    file; with 0, a new file;
+//!    file; with 0, a new file; a file opened with FILE_FLAG_DELETE_ON_CLOSE
+//!    (write access only) is gone once closed;
 //! 14-16. WaitOnAddress: returns at once when the value differs, times out
 //!    (ERROR_TIMEOUT) when it does not change, and wakes on
 //!    WakeByAddressSingle and (two threads) WakeByAddressAll;
@@ -36,7 +37,13 @@
 //! 23. BuildExplicitAccessWithNameW and BuildSecurityDescriptorW make a
 //!    self-relative descriptor with a one-ACE DACL and no SACL;
 //! 24. AddMandatoryAce adds a SYSTEM_MANDATORY_LABEL_ACE (type 0x11) with
-//!    the policy as its mask; BuildTrusteeWithSidW makes a SID trustee.
+//!    the policy as its mask; BuildTrusteeWithSidW makes a SID trustee;
+//! 25. a mutex named `Local\x` is the one named `x` (ERROR_ALREADY_EXISTS);
+//! 26. GetFileInformationByHandleEx(FileNameInfo) of a named pipe is
+//!    `\<name>`;
+//! 27. RegisterGPNotification/UnregisterGPNotification succeed;
+//! 28. a workgroup NT workstation: IsOS(OS_NT) but not OS_DOMAINMEMBER,
+//!    NetGetJoinInformation NetSetupWorkgroupName, DsRole standalone.
 
 #![no_std]
 #![no_main]
@@ -91,6 +98,15 @@ unsafe extern "system" {
     fn GetTempFileNameW(path: *const u16, prefix: *const u16, unique: u32, out: *mut u16) -> u32;
     fn GetFileAttributesW(path: *const u16) -> u32;
     fn DeleteFileW(path: *const u16) -> i32;
+    fn CreateFileW(
+        path: *const u16,
+        access: u32,
+        share: u32,
+        sa: *const c_void,
+        disposition: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
     fn CreateThread(
         sa: *const c_void,
         stack: usize,
@@ -109,6 +125,19 @@ unsafe extern "system" {
     fn TlsGetValue2(i: u32) -> *mut c_void;
     fn CheckRemoteDebuggerPresent(p: Handle, present: *mut i32) -> i32;
     fn LocalFree(p: *mut c_void) -> *mut c_void;
+    fn CreateMutexW(sa: *const c_void, owner: i32, name: *const u16) -> Handle;
+    #[allow(clippy::too_many_arguments)]
+    fn CreateNamedPipeW(
+        name: *const u16,
+        open: u32,
+        mode: u32,
+        max: u32,
+        out: u32,
+        inb: u32,
+        timeout: u32,
+        sa: *const c_void,
+    ) -> Handle;
+    fn GetFileInformationByHandleEx(h: Handle, class: u32, buf: *mut c_void, size: u32) -> i32;
     fn QueryProcessCycleTime(p: Handle, cycles: *mut u64) -> i32;
 }
 
@@ -218,6 +247,7 @@ unsafe extern "C" {
 
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_TIMEOUT: u32 = 1460;
+const ERROR_ALREADY_EXISTS: u32 = 183;
 const ERROR_NOT_SAME_OBJECT: u32 = 1656;
 const INFINITE: u32 = 0xffff_ffff;
 
@@ -367,6 +397,20 @@ fn tests() {
         check(made != 0, 13);
         check(GetFileAttributesW(name.as_ptr()) != 0xffff_ffff, 13);
         check(DeleteFileW(name.as_ptr()) != 0, 13);
+        // A lock file as Chromium's process singleton makes it: write
+        // access, FILE_FLAG_DELETE_ON_CLOSE; gone once closed.
+        let lock = CreateFileW(
+            name.as_ptr(),
+            0x4000_0000, // GENERIC_WRITE
+            1,           // FILE_SHARE_READ
+            core::ptr::null(),
+            2, // CREATE_ALWAYS
+            0x80 | 0x0400_0000,
+            core::ptr::null_mut(),
+        );
+        check(lock as isize != -1, 13);
+        check(CloseHandle(lock) != 0, 13);
+        check(GetFileAttributesW(name.as_ptr()) == 0xffff_ffff, 13);
 
         // 14-16. WaitOnAddress.
         let one = 1u32;
@@ -540,7 +584,85 @@ fn tests() {
             trustee[12] == 0 && *trustee.as_ptr().add(24).cast::<*const u8>() == low.as_ptr(),
             24,
         );
+
+        // 25. `Local\` names the session's namespace: the same mutex as
+        // the plain name (Chromium's process singleton).
+        let mut plain = [0u16; 64];
+        let mut local = [0u16; 64];
+        let m = CreateMutexW(core::ptr::null(), 0, w("browser_api_test_mutex", &mut plain));
+        check(!m.is_null(), 25);
+        let again =
+            CreateMutexW(core::ptr::null(), 0, w("Local\\browser_api_test_mutex", &mut local));
+        check(!again.is_null() && GetLastError() == ERROR_ALREADY_EXISTS, 25);
+        check(CompareObjectHandles(m, again) != 0, 25);
+        CloseHandle(again);
+        CloseHandle(m);
+
+        // 26. A named pipe's FileNameInfo is `\<name>` (Crashpad's handler
+        // finds its pipe's name so).
+        let mut pipe_name = [0u16; 64];
+        let pipe = CreateNamedPipeW(
+            w("\\\\.\\pipe\\browser_api_test", &mut pipe_name),
+            3,     // PIPE_ACCESS_DUPLEX
+            4 | 2, // PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE
+            1,
+            512,
+            512,
+            0,
+            core::ptr::null(),
+        );
+        check(pipe as isize != -1, 26);
+        let mut info = [0u32; 64];
+        check(GetFileInformationByHandleEx(pipe, 2, info.as_mut_ptr().cast(), 256) != 0, 26);
+        let expect = "\\browser_api_test";
+        check(info[0] as usize == 2 * expect.len(), 26);
+        let got = info.as_ptr().cast::<u16>().add(2);
+        for (i, c) in expect.bytes().enumerate() {
+            check(*got.add(i) == u16::from(c), 26);
+        }
+        CloseHandle(pipe);
+
+        // 27. Group policy notifications (no policy is applied on a machine
+        // without a domain, but registering works).
+        let gp = CreateEventW(core::ptr::null(), 0, 0, core::ptr::null());
+        check(RegisterGPNotification(gp, 0) != 0, 27);
+        check(UnregisterGPNotification(gp) != 0, 27);
+        CloseHandle(gp);
+
+        // 28. A standalone (workgroup) NT workstation: IsOS, the join
+        // information and the primary domain role (assumes the Windows
+        // test machine is in no domain).
+        check(IsOS(1) != 0 && IsOS(28) == 0, 28); // OS_NT, OS_DOMAINMEMBER
+        let mut join_name: *mut u16 = core::ptr::null_mut();
+        let mut join_kind = 0u32;
+        check(NetGetJoinInformation(core::ptr::null(), &mut join_name, &mut join_kind) == 0, 28);
+        check(join_kind == 2 && !join_name.is_null(), 28); // NetSetupWorkgroupName
+        NetApiBufferFree(join_name.cast());
+        let mut role: *mut u32 = core::ptr::null_mut();
+        check(DsRoleGetPrimaryDomainInformation(core::ptr::null(), 1, &mut role) == 0, 28);
+        check(!role.is_null() && *role == 0, 28); // DsRole_RoleStandaloneWorkstation
+        DsRoleFreeMemory(role.cast());
     }
+}
+
+#[link(name = "shlwapi", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn IsOS(os: u32) -> i32;
+}
+
+#[link(name = "netapi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NetGetJoinInformation(server: *const u16, name: *mut *mut u16, kind: *mut u32) -> u32;
+    fn NetApiBufferFree(p: *mut c_void) -> u32;
+    fn DsRoleGetPrimaryDomainInformation(server: *const u16, level: u32, out: *mut *mut u32)
+    -> u32;
+    fn DsRoleFreeMemory(p: *mut c_void);
+}
+
+#[link(name = "userenv", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RegisterGPNotification(event: Handle, machine: i32) -> i32;
+    fn UnregisterGPNotification(event: Handle) -> i32;
 }
 
 #[unsafe(no_mangle)]

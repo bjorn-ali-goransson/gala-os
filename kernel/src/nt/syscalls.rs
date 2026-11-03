@@ -124,6 +124,10 @@ pub const GALA_CONSOLE_TRACE: u32 = 0x7f83;
 /// NtCompareObjects (kernelbase's CompareObjectHandles; gala's number,
 /// unverified; BR: Chromium's handle checks).
 pub const NT_COMPARE_OBJECTS: u32 = 0x7f90;
+/// NtSuspendProcess and NtResumeProcess (gala's numbers, unverified;
+/// Crashpad's handler suspends a crashing client while it dumps it).
+pub const NT_SUSPEND_PROCESS: u32 = 0x7f91;
+pub const NT_RESUME_PROCESS: u32 = 0x7f92;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -344,6 +348,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_CONSOLE_CLOSE, "GalaConsoleClose", 1, gala_console_close),
     (GALA_CONSOLE_TRACE, "GalaConsoleTrace", 4, gala_console_trace),
     (NT_COMPARE_OBJECTS, "NtCompareObjects", 2, nt_compare_objects),
+    (NT_SUSPEND_PROCESS, "NtSuspendProcess", 1, nt_suspend_process),
+    (NT_RESUME_PROCESS, "NtResumeProcess", 1, nt_resume_process),
     (GALA_WINDOW_REGISTER, "GalaWindowRegister", 2, gala_window_register),
     (GALA_WINDOW_UPDATE, "GalaWindowUpdate", 1, gala_window_update),
     (GALA_WINDOW_UNREGISTER, "GalaWindowUnregister", 1, gala_window_unregister),
@@ -954,6 +960,39 @@ fn nt_compare_objects(call: &mut Call<'_>) -> NtStatus {
     let first = tri!(call.handle(Handle(arg!(call, 0)))).object.clone();
     let second = tri!(call.handle(Handle(arg!(call, 1)))).object.clone();
     if KArc::ptr_eq(&first, &second) { NtStatus::SUCCESS } else { NtStatus::NOT_SAME_OBJECT }
+}
+
+/// The threads of the process `handle` names (PROCESS_SUSPEND_RESUME),
+/// the calling thread left out (a process suspending itself goes on
+/// running the call).
+fn process_threads_for_suspend(call: &Call<'_>, handle: u64) -> Result<Vec<ObjectRef>, NtStatus> {
+    const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+    let entry = call.handle(Handle(handle))?;
+    let object = entry.require(PROCESS_SUSPEND_RESUME)?;
+    let ObjectBody::Process(p) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    let mut threads = p.threads().map_err(|_| NtStatus::NO_MEMORY)?;
+    if let Some(me) = thread::current() {
+        threads.retain(|t| !KArc::ptr_eq(t, &me));
+    }
+    Ok(threads)
+}
+
+/// NtSuspendProcess(ProcessHandle): suspends every thread of the process
+/// (threads already ending are left alone).
+fn nt_suspend_process(call: &mut Call<'_>) -> NtStatus {
+    for t in tri!(process_threads_for_suspend(call, arg!(call, 0))) {
+        let _ = thread::suspend(&t);
+    }
+    NtStatus::SUCCESS
+}
+
+/// NtResumeProcess(ProcessHandle): resumes every thread of the process
+/// once.
+fn nt_resume_process(call: &mut Call<'_>) -> NtStatus {
+    for t in tri!(process_threads_for_suspend(call, arg!(call, 0))) {
+        thread::resume(&t);
+    }
+    NtStatus::SUCCESS
 }
 
 /// NtTerminateProcess(ProcessHandle, ExitStatus)
@@ -5526,6 +5565,31 @@ const FILE_COMPLETION_INFORMATION: u64 = 30;
 const FILE_IO_COMPLETION_NOTIFICATION_INFORMATION: u64 = 41;
 const FILE_END_OF_FILE_INFORMATION: u64 = 20;
 
+/// FILE_NAME_INFORMATION { FileNameLength, FileName[] } for `name`: what
+/// fits, with STATUS_BUFFER_OVERFLOW.
+fn return_file_name(
+    call: &Call<'_>,
+    name: &[u16],
+    buffer: u64,
+    length: usize,
+    iosb: u64,
+) -> NtStatus {
+    if length < 4 {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let bytes = name.len() * 2;
+    tri!(call.write_u32(buffer, bytes as u32));
+    let fit = bytes.min(length - 4) / 2;
+    for (i, c) in name[..fit].iter().enumerate() {
+        if call.process.write(buffer + 4 + 2 * i as u64, &c.to_le_bytes()).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+    }
+    let status = if fit * 2 < bytes { NtStatus::BUFFER_OVERFLOW } else { NtStatus::SUCCESS };
+    tri!(call.write_iosb(iosb, status, 4 + 2 * fit as u64));
+    status
+}
+
 /// NtQueryInformationFile(FileHandle, *IoStatusBlock, Buffer, Length, Class)
 fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
@@ -5559,25 +5623,23 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
         tri!(call.write_iosb(iosb, NtStatus::SUCCESS, size as u64));
         return NtStatus::SUCCESS;
     }
+    if let ObjectBody::Pipe(end) = &entry.object.body
+        && class == FILE_NAME_INFORMATION
+    {
+        // A named pipe's name on the pipe file system, `\<name>` (what
+        // follows `\\.\pipe`: Crashpad's handler finds its pipe so).
+        let mut name = Vec::new();
+        tri!(name.try_reserve_exact(end.name().len() + 1).map_err(|_| NtStatus::NO_MEMORY));
+        if end.name().first() != Some(&u16::from(b'\\')) {
+            name.push(u16::from(b'\\'));
+        }
+        name.extend_from_slice(end.name());
+        return return_file_name(call, &name, buffer, length, iosb);
+    }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     if class == FILE_NAME_INFORMATION {
-        // FILE_NAME_INFORMATION { FileNameLength, FileName[] }: the path
-        // from the volume root; what fits, with STATUS_BUFFER_OVERFLOW.
-        if length < 4 {
-            return NtStatus::INFO_LENGTH_MISMATCH;
-        }
         let name = tri!(file::volume_path(file.node));
-        let bytes = name.len() * 2;
-        tri!(call.write_u32(buffer, bytes as u32));
-        let fit = bytes.min(length - 4) / 2;
-        for (i, c) in name[..fit].iter().enumerate() {
-            if call.process.write(buffer + 4 + 2 * i as u64, &c.to_le_bytes()).is_err() {
-                return NtStatus::ACCESS_VIOLATION;
-            }
-        }
-        let status = if fit * 2 < bytes { NtStatus::BUFFER_OVERFLOW } else { NtStatus::SUCCESS };
-        tri!(call.write_iosb(iosb, status, 4 + 2 * fit as u64));
-        return status;
+        return return_file_name(call, &name, buffer, length, iosb);
     }
     let mut out = [0u8; 40];
     let size = match class {

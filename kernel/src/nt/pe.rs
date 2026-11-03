@@ -368,13 +368,17 @@ pub fn apply_relocations(
 /// applied, computed from the unrelocated image (an entry that crosses
 /// into the next page is written in both pages, each its own bytes).
 /// The same result as `apply_relocations` on the whole image, a page at a
-/// time, so a large image is never copied whole.
+/// time, so a large image is never copied whole. With `index` (from
+/// `relocation_index`), only the page's block and the one before are
+/// read; without, the whole table is walked (fine for small images: a
+/// 340 MB DLL has 80 000 pages and a table of several MB).
 pub fn relocate_page(
     image: &[u8],
     reloc: DataDirectory,
     delta: u64,
     page_rva: usize,
     out: &mut [u8; 4096],
+    index: Option<&[u32]>,
 ) -> Result<(), PeError> {
     let page_end = page_rva + out.len();
     let have = image.len().min(page_end).saturating_sub(page_rva);
@@ -385,6 +389,35 @@ pub fn relocate_page(
     }
     let start = reloc.rva as usize;
     let end = start.checked_add(reloc.size as usize).ok_or(PeError::BadRelocation)?;
+    if let Some(index) = index {
+        let page = page_rva / 4096;
+        let previous = page.checked_sub(1).and_then(|p| index.get(p));
+        for &at in [previous, index.get(page)].into_iter().flatten() {
+            if at != NO_BLOCK {
+                apply_block(image, start + at as usize, end, delta, page_rva, out)?;
+            }
+        }
+        return Ok(());
+    }
+    let mut block = start;
+    while block + 8 <= end {
+        block = apply_block(image, block, end, delta, page_rva, out)?;
+    }
+    Ok(())
+}
+
+/// `relocation_index`'s "no block for this page".
+pub const NO_BLOCK: u32 = u32::MAX;
+
+/// Calls `f(page, offset)` for each relocation block (its page RVA and its
+/// offset in the table).
+pub fn relocation_blocks(
+    image: &[u8],
+    reloc: DataDirectory,
+    mut f: impl FnMut(usize, u32),
+) -> Result<(), PeError> {
+    let start = reloc.rva as usize;
+    let end = start.checked_add(reloc.size as usize).ok_or(PeError::BadRelocation)?;
     let mut block = start;
     while block + 8 <= end {
         let page = u32_at(image, block).map_err(|_| PeError::BadRelocation)? as usize;
@@ -392,41 +425,60 @@ pub fn relocate_page(
         if size < 8 || block + size > end {
             return Err(PeError::BadRelocation);
         }
-        // Only this page's block and the one before (entries crossing in).
-        if page == page_rva || page + 4096 == page_rva {
-            for entry in (block + 8..block + size).step_by(2) {
-                let e = u16_at(image, entry).map_err(|_| PeError::BadRelocation)?;
-                let (kind, offset) = (e >> 12, usize::from(e & 0xfff));
-                let at = page + offset;
-                let bytes: [u8; 8] = match kind {
-                    IMAGE_REL_BASED_ABSOLUTE => continue,
-                    IMAGE_REL_BASED_HIGHLOW => {
-                        let v = u32_at(image, at).map_err(|_| PeError::BadRelocation)?;
-                        let mut b = [0u8; 8];
-                        b[..4].copy_from_slice(&v.wrapping_add(delta as u32).to_le_bytes());
-                        b
-                    }
-                    IMAGE_REL_BASED_DIR64 => {
-                        let slot = image.get(at..at + 8).ok_or(PeError::BadRelocation)?;
-                        let v = u64::from_le_bytes(
-                            slot.try_into().map_err(|_| PeError::BadRelocation)?,
-                        );
-                        v.wrapping_add(delta).to_le_bytes()
-                    }
-                    _ => return Err(PeError::BadRelocation),
-                };
-                let width = if kind == IMAGE_REL_BASED_DIR64 { 8 } else { 4 };
-                for (k, &b) in bytes[..width].iter().enumerate() {
-                    let rva = at + k;
-                    if (page_rva..page_end).contains(&rva) {
-                        out[rva - page_rva] = b;
-                    }
-                }
-            }
-        }
+        f(page, (block - start) as u32);
         block += size;
     }
     Ok(())
+}
+
+/// Applies the block at `block` to `out` (page `page_rva`) if it is this
+/// page's or the one before (entries crossing in); returns the next
+/// block's offset.
+fn apply_block(
+    image: &[u8],
+    block: usize,
+    end: usize,
+    delta: u64,
+    page_rva: usize,
+    out: &mut [u8; 4096],
+) -> Result<usize, PeError> {
+    let page_end = page_rva + out.len();
+    let page = u32_at(image, block).map_err(|_| PeError::BadRelocation)? as usize;
+    let size = u32_at(image, block + 4).map_err(|_| PeError::BadRelocation)? as usize;
+    if size < 8 || block + size > end {
+        return Err(PeError::BadRelocation);
+    }
+    if page == page_rva || page + 4096 == page_rva {
+        for entry in (block + 8..block + size).step_by(2) {
+            let e = u16_at(image, entry).map_err(|_| PeError::BadRelocation)?;
+            let (kind, offset) = (e >> 12, usize::from(e & 0xfff));
+            let at = page + offset;
+            let bytes: [u8; 8] = match kind {
+                IMAGE_REL_BASED_ABSOLUTE => continue,
+                IMAGE_REL_BASED_HIGHLOW => {
+                    let v = u32_at(image, at).map_err(|_| PeError::BadRelocation)?;
+                    let mut b = [0u8; 8];
+                    b[..4].copy_from_slice(&v.wrapping_add(delta as u32).to_le_bytes());
+                    b
+                }
+                IMAGE_REL_BASED_DIR64 => {
+                    let slot = image.get(at..at + 8).ok_or(PeError::BadRelocation)?;
+                    let v =
+                        u64::from_le_bytes(slot.try_into().map_err(|_| PeError::BadRelocation)?);
+                    v.wrapping_add(delta).to_le_bytes()
+                }
+                _ => return Err(PeError::BadRelocation),
+            };
+            let width = if kind == IMAGE_REL_BASED_DIR64 { 8 } else { 4 };
+            for (k, &b) in bytes[..width].iter().enumerate() {
+                let rva = at + k;
+                if (page_rva..page_end).contains(&rva) {
+                    out[rva - page_rva] = b;
+                }
+            }
+        }
+    }
+    Ok(block + size)
 }
 
 #[cfg(test)]
@@ -502,8 +554,14 @@ mod tests {
         apply_relocations(&mut whole, reloc, delta).unwrap();
         for page in 0..4 {
             let mut out = [0u8; 4096];
-            relocate_page(&image, reloc, delta, page * 0x1000, &mut out).unwrap();
+            relocate_page(&image, reloc, delta, page * 0x1000, &mut out, None).unwrap();
             assert_eq!(&out[..], &whole[page * 0x1000..(page + 1) * 0x1000], "page {page}");
+            // The same with the block index.
+            let mut index = [NO_BLOCK; 4];
+            relocation_blocks(&image, reloc, |p, at| index[p / 4096] = at).unwrap();
+            let mut fast = [0u8; 4096];
+            relocate_page(&image, reloc, delta, page * 0x1000, &mut fast, Some(&index)).unwrap();
+            assert_eq!(fast, out, "page {page} (indexed)");
         }
     }
 

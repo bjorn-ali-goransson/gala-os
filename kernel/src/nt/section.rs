@@ -64,6 +64,10 @@ pub struct ImageLayout {
     bytes: Vec<u8>,
     page_protect: Vec<u32>,
     relocations: super::pe::DataDirectory,
+    /// Per page, the offset of its relocation block in the table
+    /// (`pe::NO_BLOCK` for none): relocating a page reads two blocks, not
+    /// the whole table.
+    reloc_index: Vec<u32>,
     relocatable: bool,
     /// Frames of read-only pages, shared by every view at the preferred
     /// base (made on first use, freed with the section).
@@ -83,6 +87,10 @@ const DYNAMIC_TOP: u64 = 0x3ff8_0000_0000;
 const DYNAMIC_BOTTOM: u64 = 0x3ff0_0000_0000;
 static NEXT_DYNAMIC: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(DYNAMIC_TOP);
+
+/// Images this large are relocated before their view is mapped
+/// (`ImageLayout::prepare_relocated`).
+const LARGE_IMAGE: u64 = 16 << 20;
 
 /// Header fields of an image, kept with its layout.
 #[derive(Clone, Copy, Debug)]
@@ -155,6 +163,18 @@ impl ImageLayout {
         let mut relocated = Vec::new();
         relocated.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
         relocated.resize(pages, None);
+        let relocations = image.directory(super::pe::DIRECTORY_BASERELOC);
+        let mut reloc_index = Vec::new();
+        reloc_index.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
+        reloc_index.resize(pages, super::pe::NO_BLOCK);
+        if image.relocatable && relocations.size != 0 {
+            super::pe::relocation_blocks(&bytes, relocations, |page, at| {
+                if let Some(slot) = reloc_index.get_mut(page / PAGE_SIZE as usize) {
+                    *slot = at;
+                }
+            })
+            .map_err(|_| NtStatus::INVALID_IMAGE_FORMAT)?;
+        }
         let info = ImageInfo {
             size_of_image: image.size_of_image,
             entry_rva: image.entry_rva,
@@ -170,7 +190,8 @@ impl ImageLayout {
             info,
             bytes,
             page_protect,
-            relocations: image.directory(super::pe::DIRECTORY_BASERELOC),
+            relocations,
+            reloc_index,
             relocatable: image.relocatable,
             shared: IrqMutex::new(shared),
             dynamic: IrqMutex::new(None),
@@ -209,22 +230,49 @@ impl ImageLayout {
     /// The shared frame of page `index` relocated for the alternative base
     /// `base` (made on first use).
     fn relocated_frame(&self, index: usize, base: u64) -> Option<Frame> {
+        if let Some(frame) = *self.relocated.lock().get(index)? {
+            return Some(frame);
+        }
+        // Made without the lock (interrupts stay on): two threads may make
+        // the same page; the second one's frame is freed.
+        let mut page = [0u8; PAGE_SIZE as usize];
+        let delta = base.wrapping_sub(self.base);
+        super::pe::relocate_page(
+            &self.bytes,
+            self.relocations,
+            delta,
+            index * PAGE_SIZE as usize,
+            &mut page,
+            Some(&self.reloc_index),
+        )
+        .ok()?;
+        let frame = UserSpace::frame_with(&page)?;
         let mut relocated = self.relocated.lock();
         let slot = relocated.get_mut(index)?;
-        if slot.is_none() {
-            let mut page = [0u8; PAGE_SIZE as usize];
-            let delta = base.wrapping_sub(self.base);
-            super::pe::relocate_page(
-                &self.bytes,
-                self.relocations,
-                delta,
-                index * PAGE_SIZE as usize,
-                &mut page,
-            )
-            .ok()?;
-            *slot = Some(UserSpace::frame_with(&page)?);
+        match *slot {
+            Some(first) => {
+                drop(relocated);
+                platform::free_frame(frame);
+                Some(first)
+            }
+            None => {
+                *slot = Some(frame);
+                Some(frame)
+            }
         }
-        *slot
+    }
+
+    /// Makes the relocated frames of every page for the image's
+    /// alternative base ahead of a view there, without any process lock
+    /// held: a large image (chrome.dll, 340 MB) takes seconds, which the
+    /// mapping loop must not spend with interrupts off.
+    fn prepare_relocated(&self) {
+        let Some(base) = self.dynamic_base() else { return };
+        for i in 0..self.page_protect.len() {
+            if self.relocated_frame(i, base).is_none() {
+                return;
+            }
+        }
     }
 
     pub fn size(&self) -> u64 {
@@ -584,10 +632,18 @@ fn map_image_view(
         return Err(NtStatus::INVALID_PARAMETER);
     }
     let size = image.size();
+    // A large relocatable image whose preferred base is taken here goes to
+    // its alternative base: relocate it first, with no lock held.
+    let wanted = if base != 0 { base } else { image.base };
+    if base == 0 && image.relocatable && size >= LARGE_IMAGE {
+        let taken = process.vad.lock().query(wanted).is_ok_and(|r| r.state != vad::MEM_FREE);
+        if taken {
+            image.prepare_relocated();
+        }
+    }
     let mut views = process.views.lock();
     views.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
     let mut vad = process.vad.lock();
-    let wanted = if base != 0 { base } else { image.base };
     // The preferred base; else the image's alternative base (shared,
     // relocated frames); else anywhere (private relocated pages).
     let reserve = |vad: &mut vad::Vad, at: Option<u64>| {
@@ -628,8 +684,15 @@ fn map_image_view(
         };
         if delta != 0 && !at_dynamic {
             let rva = i * PAGE_SIZE as usize;
-            if super::pe::relocate_page(&image.bytes, image.relocations, delta, rva, &mut page_buf)
-                .is_err()
+            if super::pe::relocate_page(
+                &image.bytes,
+                image.relocations,
+                delta,
+                rva,
+                &mut page_buf,
+                Some(&image.reloc_index),
+            )
+            .is_err()
             {
                 return Err(fail(&mut vad, &mut space, NtStatus::INVALID_IMAGE_FORMAT));
             }

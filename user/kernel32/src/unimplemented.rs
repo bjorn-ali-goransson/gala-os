@@ -23,14 +23,12 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetNumberFormatEx
     GetNumberFormatW
     GetPrivateProfileStringW
-    GetProcessPriorityBoost
     GetShortPathNameA
     GetSystemTimeAdjustment
     GetTapeParameters
     GetTapePosition
     GetTapeStatus
     GetThreadIOPendingFlag
-    GetThreadPriorityBoost
     GetVolumePathNamesForVolumeNameW
     GlobalFlags
     GlobalMemoryStatus
@@ -61,7 +59,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     SetProcessAffinityUpdateMode
     SetTapeParameters
     SetTapePosition
-    SetThreadPriorityBoost
     TerminateJobObject
     VerLanguageNameW
     WaitNamedPipeA
