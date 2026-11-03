@@ -1926,6 +1926,19 @@ Windows, never shadows the system's DLLs.)
   CryptMemAlloc/Realloc/Free (the process heap), CertGetNameStringA (the
   W form converted) and PFXIsPFXBlob (the outer SEQUENCE { INTEGER 3,
   ContentInfo }).
+- **Certificate stores** (crypt32 store.rs, query.rs; `cert_test`): a
+  store is a reference-counted array of contexts, each a copy of the
+  added certificate (made with CertCreateCertificateContext) whose
+  hCertStore is the store and on which the store holds one reference;
+  enumeration and Find return the next context with one more reference
+  and free the previous one; closing the last reference releases the
+  contexts (a caller's context then keeps a dangling hCertStore, where
+  Windows would keep the store alive). The system stores are empty
+  memory stores (recorded: gala has no installed certificates yet).
+  CryptQueryObject recognises one certificate (DER, or base64 with or
+  without PEM lines); CryptDecodeObjectEx decodes GeneralNames into
+  CERT_ALT_NAME_INFO (e-mail, DNS, URL as UTF-16 strings, IPs as blobs,
+  all in one block; other choices are recorded and skipped).
 - **Thread stacks**: laid out as Windows does - a reservation of the
   executable's SizeOfStackReserve (main thread: the kernel, placed to end
   at 0x200000 when it fits; CreateThread with size 0: kernel32 reads the

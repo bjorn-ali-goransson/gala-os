@@ -2115,6 +2115,23 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
         (they need movable global memory: kernel32's GlobalSize is a stub
         and GlobalAlloc hands out fixed blocks), `CoRegisterMallocSpy`,
         the OLE clipboard and `DoDragDrop` (user32's clipboard).
+     9. crypt32: certificate stores (`CertOpenStore` memory, collection
+        and system stores, `CertOpenSystemStoreA/W`: the system stores are
+        empty and recorded, gala installs no certificates yet;
+        `CertAddEncodedCertificateToStore`,
+        `CertAddCertificateContextToStore` with the ADD_* dispositions,
+        `CertEnumCertificatesInStore`, `CertFindCertificateInStore` (any,
+        SHA-1 hash, subject name, subject/issuer text, existing),
+        `CertDeleteCertificateFromStore`, `CertDuplicateStore`,
+        `CertCloseStore`, `CertEnumCRLsInStore`), `CryptQueryObject` (a
+        certificate, DER or base64/PEM, from a file or blob) and
+        `CryptDecodeObjectEx` (alternative names) (`cert_test`). Before,
+        CertOpenStore failed for everything; nginx, nginx_tls and
+        caddy_http still pass. Left in crypt32: `PFXImportCertStore`
+        (PKCS #12 decryption), the other decode types, CRLs/CTLs,
+        collections' member stores (`CertAddStoreToCollection`),
+        `CryptAcquireCertificatePrivateKey`; the chain engine is
+        other/schannel-tls's.
    - Known problem (2026-11-03): the FileZilla client's PREBUILT URL
      (`downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe`)
      now answers 404 (so does the `FileZilla_Client/3.69.3/` path), so

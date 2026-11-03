@@ -469,12 +469,12 @@ fn process_salt(a: &Api) -> Option<[u8; 32]> {
                 }
                 // SAFETY: only this thread writes it (state 1); readers wait
                 // for state 2.
-                unsafe { *(&raw mut PROCESS_SALT) = salt };
+                unsafe { PROCESS_SALT = salt };
                 SALT_STATE.store(2, Ordering::Release);
                 return Some(salt);
             }
             // SAFETY: written once, before the state became 2.
-            Err(2) => return Some(unsafe { *(&raw const PROCESS_SALT) }),
+            Err(2) => return Some(unsafe { PROCESS_SALT }),
             Err(_) => core::hint::spin_loop(),
         }
     }

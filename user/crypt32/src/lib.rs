@@ -1,9 +1,8 @@
 //! gala's crypt32.dll: certificate contexts (`cert`: X.509 decoding,
-//! properties, names, public keys), DPAPI (`dpapi`), and certificate
-//! stores, which gala does not have yet. OpenSSL imports the store
-//! functions to look up certificates in Windows' stores (an option Nginx
-//! does not use); they fail as documented: no store opens, and an
-//! enumeration finds nothing (CRYPT_E_NOT_FOUND).
+//! properties, names, public keys), DPAPI (`dpapi`), memory certificate
+//! stores (`store`; the system stores open empty: gala installs no
+//! certificates yet), CryptQueryObject and CryptDecodeObjectEx for
+//! alternative names (`query`), and smaller helpers (`misc`).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -13,9 +12,9 @@ mod base64;
 mod cert;
 mod dpapi;
 mod misc;
+mod query;
+mod store;
 mod unimplemented;
-
-use core::ffi::c_void;
 
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -45,66 +44,9 @@ unsafe extern "C" {
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
-const ERROR_NOT_SUPPORTED: u32 = 50;
-const CRYPT_E_NOT_FOUND: u32 = 0x8009_2004;
-
 fn missing_detail(function: &[u8], detail: u64) {
     // SAFETY: a valid buffer.
     unsafe { GalaRecordMissing(function.as_ptr(), function.len(), 2, detail) };
-}
-
-fn fail<T>(function: &[u8], error: u32, value: T) -> T {
-    // SAFETY: a valid buffer; a plain call.
-    unsafe {
-        GalaRecordMissing(function.as_ptr(), function.len(), 2, 0);
-        SetLastError(error);
-    }
-    value
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CertOpenStore(
-    _provider: *const u8,
-    _encoding: u32,
-    _crypt: usize,
-    _flags: u32,
-    _parameter: *const c_void,
-) -> *mut c_void {
-    fail(b"crypt32.dll!CertOpenStore", ERROR_NOT_SUPPORTED, core::ptr::null_mut())
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CertOpenSystemStoreW(_crypt: usize, _name: *const u16) -> *mut c_void {
-    fail(b"crypt32.dll!CertOpenSystemStoreW", ERROR_NOT_SUPPORTED, core::ptr::null_mut())
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CertCloseStore(_store: *mut c_void, _flags: u32) -> i32 {
-    1
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CertEnumCertificatesInStore(
-    _store: *mut c_void,
-    _previous: *const c_void,
-) -> *const c_void {
-    // SAFETY: plain call.
-    unsafe { SetLastError(CRYPT_E_NOT_FOUND) };
-    core::ptr::null()
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CertFindCertificateInStore(
-    _store: *mut c_void,
-    _encoding: u32,
-    _flags: u32,
-    _kind: u32,
-    _parameter: *const c_void,
-    _previous: *const c_void,
-) -> *const c_void {
-    // SAFETY: plain call.
-    unsafe { SetLastError(CRYPT_E_NOT_FOUND) };
-    core::ptr::null()
 }
 
 /// DllMain (the entry point our link flags name).

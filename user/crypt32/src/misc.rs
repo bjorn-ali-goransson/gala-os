@@ -73,7 +73,7 @@ fn protect(data: *mut u8, size: u32, flags: u32, encrypt: bool) -> i32 {
             return 0;
         }
     };
-    if data.is_null() || size % CRYPTPROTECTMEMORY_BLOCK_SIZE != 0 {
+    if data.is_null() || !size.is_multiple_of(CRYPTPROTECTMEMORY_BLOCK_SIZE) {
         // SAFETY: plain call.
         unsafe { SetLastError(ERROR_INVALID_PARAMETER) };
         return 0;
@@ -211,7 +211,7 @@ pub extern "system" fn PFXIsPFXBlob(pfx: *const DataBlob) -> i32 {
         }
         let outer = &b[..end];
         let (tag, vs, ve) = element(outer, start)?;
-        if tag != 0x02 || &outer[vs..ve] != [3] {
+        if tag != 0x02 || outer[vs..ve] != [3] {
             return Some(false);
         }
         let (tag, cs, _) = element(outer, ve)?;
