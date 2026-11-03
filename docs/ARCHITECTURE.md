@@ -5367,9 +5367,19 @@ What its start-up needed, and how gala gives it (tests:
   awareness (96 DPI), power and clipboard registrations, device lists
   (empty); winmm's audio and MIDI devices (none); ws2_32's
   GetAddrInfoExW (synchronous) and name-space provider calls;
-  dbghelp's MiniDumpWriteDump refused (reported); `shcore.dll`
-  (GetDpiForMonitor, SetProcessDpiAwareness); powrprof's platform role
-  and active scheme. API sets: `api-ms-win-downlevel-<dll>-*` name their
+  dbghelp's MiniDumpWriteDump refused (reported); new DLLs `shcore.dll`
+  (GetDpiForMonitor, SetProcessDpiAwareness), `dwmapi.dll` (no DWM:
+  attributes accepted without effect or E_NOTIMPL, reported),
+  `wtsapi32.dll` (the one console session, active) and `imm32.dll`
+  (no IMEs); powrprof's platform role and active scheme; uxtheme's
+  DrawThemeBackgroundEx as ordinal 47 (Wine's uxtheme.spec gives the
+  number). chrome.dll resolves every user32 function it delay-imports at
+  once, through GetProcAddress, which does not return `gala_stubs`
+  stubs: so all of them are real exports now, the ones without a use on
+  gala yet failing the documented way and reporting themselves (DDE,
+  hot keys, SetCursorPos, window regions, layered windows, SendInput),
+  and the window stations and desktops a program creates are refused
+  (stage 3). API sets: `api-ms-win-downlevel-<dll>-*` name their
   DLL, `shcore-*` is shcore, `power-*` is powrprof.
 - **DirectWrite** (`user/dwrite`): Chromium CHECKs that a factory
   exists and that Skia's font manager comes up on its system collection.

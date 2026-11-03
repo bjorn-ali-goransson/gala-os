@@ -101,7 +101,8 @@ macro_rules! no_theme {
 }
 
 no_theme!(
-    DrawThemeBackground GetThemeBackgroundContentRect GetThemeBackgroundExtent GetThemeColor
+    DrawThemeBackground DrawThemeBackgroundEx GetThemeBackgroundContentRect GetThemeBackgroundExtent
+    GetThemeColor
     GetThemeFont GetThemeInt GetThemeMargins GetThemePartSize DrawThemeParentBackground
 );
 

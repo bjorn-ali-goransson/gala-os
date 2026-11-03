@@ -1728,7 +1728,7 @@ BR. **A web browser: stock Microsoft Edge** (the owner, 2026-11-03).
       Win_x64 1733063, 159.0.8140.0, with published symbols), scenarios
       `chromium_version` (`--dump-dom about:blank`) and `chromium_dump`
       (a local page changed by its script) PENDING, in SINGLE_THREAD_TCG,
-      3 GiB, 900 s; `browser_api_test` (30 checks) and `dwrite_test`
+      3 GiB, 900 s; `browser_api_test` (31 checks) and `dwrite_test`
       cover what was added. Not passing yet. How far it gets: chrome.exe
       starts, chrome_elf.dll's early security and Crashpad come up (the
       handler runs as a child with an inherited handle list, and its

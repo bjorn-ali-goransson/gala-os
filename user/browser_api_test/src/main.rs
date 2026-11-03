@@ -47,7 +47,9 @@
 //! 29. SetProcessDpiAwarenessContext(per monitor v2) once, then
 //!    ERROR_ACCESS_DENIED; shcore's GetProcessDpiAwareness says per monitor;
 //! 30. the clipboard: CF_UNICODETEXT set while open is available and read
-//!    back after closing; the sequence number changes; a caret blink time.
+//!    back after closing; the sequence number changes; a caret blink time;
+//! 31. WTSQuerySessionInformationW: this session's id, active; the DWM
+//!    composes; the US layout is no IME.
 
 #![no_std]
 #![no_main]
@@ -250,6 +252,7 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    fn __chkstk();
 }
 
 const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -681,7 +684,43 @@ fn tests() {
         GlobalUnlock(got);
         check(CloseClipboard() != 0, 30);
         check(GetCaretBlinkTime() != 0, 30);
+
+        // 31. The session (wtsapi32), the DWM, the input method manager.
+        let mut info: *mut u8 = core::ptr::null_mut();
+        let mut bytes = 0u32;
+        check(WTSQuerySessionInformationW(0, u32::MAX, 4, &mut info, &mut bytes) != 0, 31);
+        check(bytes == 4 && *info.cast::<u32>() == *((peb + 0x2c0) as *const u32), 31);
+        WTSFreeMemory(info);
+        check(WTSQuerySessionInformationW(0, u32::MAX, 8, &mut info, &mut bytes) != 0, 31);
+        check(*info.cast::<u32>() == 0, 31); // WTSActive
+        WTSFreeMemory(info);
+        let mut composed = 0i32;
+        check(DwmIsCompositionEnabled(&mut composed) == 0 && composed != 0, 31);
+        let mut ime = [0u16; 8];
+        check(ImmGetIMEFileNameW(0x0409_0409, ime.as_mut_ptr(), 8) == 0, 31); // US: no IME
     }
+}
+
+#[link(name = "wtsapi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn WTSQuerySessionInformationW(
+        server: usize,
+        session: u32,
+        class: u32,
+        out: *mut *mut u8,
+        bytes: *mut u32,
+    ) -> i32;
+    fn WTSFreeMemory(p: *mut u8);
+}
+
+#[link(name = "dwmapi", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn DwmIsCompositionEnabled(enabled: *mut i32) -> i32;
+}
+
+#[link(name = "imm32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn ImmGetIMEFileNameW(layout: usize, name: *mut u16, length: u32) -> u32;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]

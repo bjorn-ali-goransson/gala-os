@@ -377,6 +377,10 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "dwrite", file: "dwrite.dll", exported_as: "testdwrite.dll" },
     // shcore.dll: the DPI scaling API set (BR).
     Dll { package: "shcore", file: "shcore.dll", exported_as: "testshcore.dll" },
+    // dwmapi, wtsapi32, imm32: what chrome.dll asks of them (BR).
+    Dll { package: "dwmapi", file: "dwmapi.dll", exported_as: "testdwmapi.dll" },
+    Dll { package: "wtsapi32", file: "wtsapi32.dll", exported_as: "testwtsapi32.dll" },
+    Dll { package: "imm32", file: "imm32.dll", exported_as: "testimm32.dll" },
     // Rich edit controls: one crate (`richedit`) behind both DLLs.
     Dll { package: "riched20", file: "riched20.dll", exported_as: "testriched20.dll" },
     Dll { package: "msftedit", file: "msftedit.dll", exported_as: "testmsftedit.dll" },
@@ -710,6 +714,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("browser_api_test", "user32.dll", "Windows/System32"),
     ("browser_api_test", "gdi32.dll", "Windows/System32"),
     ("browser_api_test", "shcore.dll", "Windows/System32"),
+    ("browser_api_test", "wtsapi32.dll", "Windows/System32"),
+    ("browser_api_test", "dwmapi.dll", "Windows/System32"),
+    ("browser_api_test", "imm32.dll", "Windows/System32"),
     ("winsock_test", "ntdll.dll", "Windows/System32"),
     ("winsock_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ws2_32.dll", "Windows/System32"),
@@ -1387,6 +1394,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("chromium", "uiautomationcore.dll", "Windows/System32"),
     ("chromium", "dwrite.dll", "Windows/System32"),
     ("chromium", "shcore.dll", "Windows/System32"),
+    ("chromium", "dwmapi.dll", "Windows/System32"),
+    ("chromium", "wtsapi32.dll", "Windows/System32"),
+    ("chromium", "imm32.dll", "Windows/System32"),
     ("dotnet", "target/prebuilt/dotnet/", "dotnet"),
     ("dotnet", "user/bin/dotnet_hello.dll", "gala"),
     ("dotnet", "user/dotnet_hello/dotnet_hello.runtimeconfig.json", "gala"),
