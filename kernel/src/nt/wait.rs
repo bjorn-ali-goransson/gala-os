@@ -97,6 +97,31 @@ pub fn update_signal<E>(
     Ok(previous)
 }
 
+/// Changes mutant `object`'s state with `f` in one hold of the dispatcher
+/// lock (under which waits check and acquire mutants), keeping its signal
+/// state in step (1 while free) and waking its waiters when it becomes
+/// free. Changed outside it (NtReleaseMutant and abandonment did that up
+/// to 2026-11-03), the signal set afterwards could mark a mutant free that
+/// a wait had acquired in between (not seen by waits, which look at the
+/// owner, but wrong for anything reading the signal).
+pub fn change_mutant<R>(
+    object: &ObjectRef,
+    f: impl FnOnce(&mut super::object::MutantState) -> R,
+) -> Option<R> {
+    let ObjectBody::Mutant(m) = &object.body else { return None };
+    let _guard = DISPATCHER.lock();
+    let mut state = m.state.lock();
+    let result = f(&mut state);
+    let free = state.owner.is_none();
+    drop(state);
+    let mut inner = m.dispatcher.inner.lock();
+    inner.signal = i32::from(free);
+    if free {
+        wake_all(&mut inner);
+    }
+    Some(result)
+}
+
 /// Sets a dispatcher's signal state directly (for objects reached without
 /// an `ObjectRef`, e.g. a process from its own code).
 pub fn signal_dispatcher(d: &Dispatcher, signal: i32) {

@@ -3749,22 +3749,23 @@ fn nt_open_mutant(call: &mut Call<'_>) -> NtStatus {
 fn nt_release_mutant(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let object = entry.object.clone();
-    let ObjectBody::Mutant(m) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
-    let (previous, free) = {
-        let mut state = m.state.lock();
-        if state.owner.is_none() || state.owner != thread::current_id() {
-            return NtStatus::MUTANT_NOT_OWNED;
+    let me = thread::current_id();
+    // Checked, changed and signaled in one hold of the dispatcher lock.
+    let released = wait::change_mutant(&object, |state| {
+        if state.owner.is_none() || state.owner != me {
+            return Err(NtStatus::MUTANT_NOT_OWNED);
         }
         let previous = state.current_count();
         state.count -= 1;
         if state.count == 0 {
             state.owner = None;
         }
-        (previous, state.count == 0)
-    };
+        Ok((previous, state.count == 0))
+    });
+    let Some(released) = released else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let (previous, free) = tri!(released);
     if free {
         thread::note_mutant_released(&object);
-        wait::set_signal(&object, 1);
     }
     let ptr = arg!(call, 1);
     if ptr != 0 {
