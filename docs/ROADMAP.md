@@ -152,6 +152,9 @@ explicitly in its commit.
   markers, vCPU and host facts) explains a silent end; xtask flags and
   re-boots a VM short of CPUs (ARCHITECTURE "Processors", OBSERVABILITY
   "Early boot"; scenarios `smp_missed`, `smp_late`, `onecpu_*`).
+- **A browser: stock Edge (the owner, 2026-11-03)**: item BR below;
+  Chromium headless first, then headful with software rendering, the
+  sandbox, then Edge itself.
 - **Remote access and sessions (the owner, 2026-11-03)**: item RS
   below; SSH (item SSH) is its first step.
 - **SSH that works as a remote shell (the owner, 2026-11-03)**: item SSH
@@ -1704,6 +1707,46 @@ RS. **Remote access and sessions** (the owner, 2026-11-03; design:
    - Later: several desktops per session, a secure desktop, clipboard,
      seamless windows, RDP proper. Interim with no gala work: QEMU's
      `-vnc`.
+
+BR. **A web browser: stock Microsoft Edge** (the owner, 2026-11-03).
+   Edge is Chromium plus Microsoft's services; nearly everything it needs
+   from Windows is what Chromium needs, so the open-source Chromium build
+   (a portable zip of the same engine, no installer or updater) goes first
+   and finds most gaps, then Edge itself. Each stage test first, binaries
+   fetched by xtask (PREBUILT, never committed; run only in QEMU), the
+   missing-features ledger leading the way:
+   1. **Headless Chromium**: `chrome.exe --headless --no-sandbox
+      --disable-gpu --dump-dom file:///C:/gala/page.html` prints the DOM
+      of a local page; then an `https://` page from a server in the guest
+      (nginx_tls) and a page from the host network. Needs: processes and
+      Mojo IPC over named pipes, many threads, large virtual memory (V8's
+      reservations, the commit charge), DirectWrite or Chromium's font
+      fallback, CNG/BCrypt, Winsock, the JIT (single-threaded TCG:
+      SINGLE_THREAD_TCG).
+   2. **Headful, software rendering**: a window on shasha with SwiftShader
+      or WARP-free software compositing (`--disable-gpu`,
+      `--use-angle=swiftshader`): DXGI/D3D11 absent or emulated in
+      software, DirectWrite, DirectComposition fallbacks, input, IME off;
+      a screen check of a rendered page and a click on a link; FlaUI
+      reading the page's accessibility tree (Chromium exposes UIA).
+   3. **The sandbox**: renderers in restricted tokens, low integrity and
+      AppContainer/LowBox tokens, job objects, process mitigation policies,
+      handle inheritance lists, desktop/window station checks (item RS's
+      sessions help); `--no-sandbox` dropped.
+   4. **Stock Edge**: the offline enterprise installer (MSI) or the
+      standalone setup, installed in the guest as on Windows (msiexec or
+      setup.exe; services: the updater and elevation service may stay
+      off), `msedge.exe` with its own pieces (WebView2 runtime shares the
+      same engine), the first-run experience, sign-in off; then
+      WebView2-based programs.
+   5. **Performance and graphics**: a real GPU path later (virtio-gpu with
+      a D3D11-on-something layer) is out of scope until software rendering
+      works.
+   Observability: Chromium's `--enable-logging=stderr --v=1` into the
+   serial log, its crash dumps (crashpad) kept, the ledger's top missing
+   functions per stage in the report. Licensing: Chromium is BSD-style;
+   Edge's license allows installing and running it but not redistributing
+   it, so xtask downloads it and nothing of it is committed.
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing
