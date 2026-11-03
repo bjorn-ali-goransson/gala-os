@@ -3572,7 +3572,8 @@ pieces:
   `zip` (APPNOTE: EOCD, central directory, stored and deflate through
   `miniz_oxide`, CRC-32 and size checked, `safe_path` refuses `..`,
   roots, drives and `:`), `source` (a winget-pkgs tree), `install` (the
-  transaction), `shim`.
+  transaction), `shim`; and `winget`, the full manifest resolver the
+  install command is to switch to ("The winget resolver" below).
 - **`user/gala`** module `pkg`: the commands and `Win32`, galapkg's
   `Host` over kernel32 (files) and advapi32 (the registry; loaded with
   LoadLibrary when a package command runs, so `gala`'s other commands
@@ -3682,12 +3683,129 @@ packages made by `make_source.py` (PkHello 1.0.0 as a singleton
 manifest, 1.1.0 multi-file; Conflict; BadHash; InnoSetup) and real
 winget-pkgs manifests (ripgrep, jq) for search and the HTTPS refusal.
 
+### The winget resolver (`galapkg::winget`, built 2026-11-03)
+
+Full winget manifest support as a library the install command will call,
+built beside `manifest`/`yaml` (which the install path still uses) so the
+install, Inno and NSIS paths were not touched. Host-tested only; no
+scenario yet. Modules (each file's head comment gives every rule and its
+source):
+
+- `yaml`: the YAML 1.2.2 subset manifests use, every node with its
+  line and column: BOM, directives, `---`/`...`, comments (the
+  `# yaml-language-server` header), CRLF; block mappings and sequences
+  (compact forms); flow sequences and mappings (nested, multi-line,
+  trailing comma); plain, single- and double-quoted scalars (all YAML
+  escapes, multi-line folding, `\` continuation); `|`/`>` with chomping
+  and indentation indicators. Errors (`line:col: message`) for anchors,
+  aliases, tags, `?` keys, tabs in indentation, duplicate keys, a second
+  document, nesting deeper than 64. Plain `~`/`null`/empty are null;
+  everything else stays text.
+- `schema`: ManifestVersion (`major.minor.patch`, 1.x only), the five
+  ManifestTypes, and per field and per enumeration value the schema it
+  appeared in, from the published JSON schemas 1.0.0, 1.1.0, 1.2.0,
+  1.4.0, 1.5.0, 1.6.0, 1.7.0, 1.9.0, 1.10.0, 1.12.0 and 1.28.0 (no others
+  exist). E.g. `portable` 1.2, `zip`/NestedInstaller* 1.4, `deny`
+  1.6, `Repair`/RepairBehavior 1.7, ArchiveBinariesDependOnPath 1.9,
+  Authentication 1.10, `font` 1.12, DesiredStateConfiguration 1.28.
+- `package`: `Package::from_files(&[(name, text)])` reads a singleton or
+  a multi-file set (exactly one version, installer and defaultLocale
+  manifest, any number of distinct locales; every file the same
+  PackageIdentifier, PackageVersion and ManifestVersion; DefaultLocale =
+  the defaultLocale's PackageLocale) into every schema field of every
+  installer, typed (Architecture, InstallerType, Scope, UpgradeBehavior,
+  ElevationRequirement enums; Switches; Dependencies; AppsAndFeatures
+  entries; ExpectedReturnCodes; Markets; InstallationMetadata...), root
+  fields as defaults (InstallerSwitches merged per switch, everything
+  else replaced whole), and `localization(&[locales])` with per-field
+  fallback to the default locale. **Invariant: errors and warnings name
+  the file, line and column.** Hard errors: YAML, missing identity,
+  inconsistent files, missing Architecture/InstallerType/InstallerUrl/
+  InstallerSha256, a SHA-256 that is not 64 hex digits, an unknown
+  Architecture. Warnings (`Package::warnings`, for the install log):
+  unknown fields, fields or values newer than the declared schema, keys
+  or values in the wrong case, a newer or unpublished ManifestVersion,
+  an unknown InstallerType (that installer is never selected), duplicate
+  installers.
+- `select`: `select(&Package, &Machine, &Request) -> Result<Selection,
+  NoInstaller>`. `Machine` (architecture, OS version, locale, market;
+  `Machine::gala(arch, locale)` is build 26100); `Request` holds each of
+  scope/locales/architectures/installer types as a `Choice` (values best
+  first; `required` for command-line options and `requirements`
+  settings, else a preference), and `installed` for an upgrade. Filters:
+  runnable architecture (x64: x64, neutral, x86; arm64: arm64, neutral,
+  x64, x86, no Arm32 on 24H2), UnsupportedOSArchitectures,
+  MinimumOSVersion, Platform (Windows.Desktop), Markets, required scope
+  (unknown scope kept), required locale (exact, same language or
+  unknown), required installer type (InstallerType or the zip's
+  NestedInstallerType), unknown type, zip without nested type. Ranking,
+  most significant first: (upgrade) installed type family, installed
+  scope; architecture order; scope; locale (exact > language > unknown >
+  other, the machine's locale then en-US when none asked); type
+  preference; manifest order. Every rejection keeps its reason
+  (`NoInstaller` prints them all). `command_line(&Installer,
+  &CommandOptions)`: mode switch (silent, silent-with-progress default,
+  interactive; Silent and SilentWithProgress fall back to each other),
+  Log (`<LOGPATH>`), Upgrade, Custom, `--custom`, InstallLocation
+  (`<INSTALLPATH>`) last (NSIS's `/D=`); `--override` replaces all;
+  defaults per type (msi/wix `/quiet|/passive /norestart`, `/log`,
+  `TARGETDIR=`; burn the same without a location; inno `/SP- /VERYSILENT
+  |/SILENT /SUPPRESSMSGBOXES /NORESTART`, `/LOG=`, `/DIR=`; nullsoft `/S`,
+  `/D=`; others none), the nested type's for a zip; UnsupportedArguments
+  and InstallLocationRequired honoured (an error says which).
+- `deps`: `plan(&Package, &Machine, &Request, &impl Catalog) ->
+  Result<Plan, Error>`: the selected installer's Dependencies, depth
+  first, dependencies before dependants, each package once, the
+  requested one last; installed at MinimumVersion or later = satisfied
+  (not recursed into); else the source's latest version, which must meet
+  every MinimumVersion; cycles (`A -> B -> A`), missing packages, too-old
+  versions, unselectable dependencies and chains deeper than 32 are
+  errors naming the path or the requester; Windows features, libraries
+  and external dependencies collected once each with who needs them.
+  `describe(&Plan)` gives the log lines.
+- `arp`: `Signature::of(&Package)` (product codes, upgrade codes,
+  normalized names/publishers from AppsAndFeaturesEntries and the default
+  locale) matched against `ArpRecord`s: WinGetPackageIdentifier, then
+  ProductCode (the key), then UpgradeCode, then normalized DisplayName +
+  Publisher; `installed_version` maps a DisplayVersion back to the
+  PackageVersion whose entries list it; `installed_type` for an
+  upgrade's `Installed`; `update_available`.
+- `version`: `crate::version`'s ordering plus empty = Unknown,
+  `at_least`, a first-wins `latest`.
+
+**Switching the install command over (TODO, for whoever owns
+`user/gala`'s install command and `galapkg::install`):** read with
+`winget::Package::from_files` (pass the file names: errors then name the
+file); select with `winget::select::select` and a `Request` built from
+`--architecture/--scope/--locale/--installer-type` (required) and the
+settings' preferences, `installed` from `arp::installed_type` and the
+ARP record's hive for `upgrade`; log `Package::warnings`, the selected
+installer and each `Rejected` line into install.log; for installer types
+the install path supports (zip/portable now, inno/nullsoft next) build
+the arguments with `select::command_line`; run `deps::plan` first (a
+`Catalog` over `source::Source`) and install the plan in order; `gala
+list`/`upgrade` match ARP entries with `arp::find`. Then `manifest.rs`
+and `yaml.rs` can be deleted (their tests' manifests are covered by
+`winget::package`'s). The old `Manifest::select_installer` prefers user
+scope and x64-or-neutral only; the new rules are the ones above.
+
+**Corpus test** (`winget/corpus_tests.rs`): 400 real version
+directories (`testdata/winget-corpus`, a winget-pkgs snapshot,
+THIRD_PARTY.md) must all read (they do: schemas 1.1.0 to 1.28.0, 2
+warnings, both genuine manifest mistakes), parse the same twice, and
+give the selections in `testdata/winget-corpus/selected.txt` for 8
+profiles (x64/arm64 x preferred user/machine x en-US/de-DE): the
+installer, its URL, its effective type and its default-mode arguments.
+Damaged copies (every prefix, indicators injected at line starts) must
+not panic. Not covered by the corpus: singletons and 1.0.0 (winget-pkgs
+has neither any more; the unit tests have them).
+
 **Next (ROADMAP PK):** the HTTPS fetcher; then stage 3 (Inno Setup,
 NSIS, `exe` with switches: run the vendor's installer silently, uninstall
 through its UninstallString), 4 (MSIX), 5 (MSI); machine scope
-(`%ProgramFiles%\WinGet\Packages`, HKLM, needs elevation); dependencies
-(`Dependencies: PackageDependencies`); `gala list` matching ARP entries
-to packages by ProductCode/AppsAndFeaturesEntries.
+(`%ProgramFiles%\WinGet\Packages`, HKLM, needs elevation); the install
+command switched over to `galapkg::winget` (above), which brings
+dependencies and `gala list` matching ARP entries to packages.
 
 ## Plan: sessions and remote shasha (proposed 2026-11-03)
 ## Plan: sessions and remote shasha (proposed 2026-11-03; B1 done)

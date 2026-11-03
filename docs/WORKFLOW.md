@@ -916,6 +916,26 @@ where its pixel checks expect it (no pointer arithmetic).
   SHA-256s written into the manifests); rerun it after changing them.
   `manifests/b` and `manifests/j` are real winget-pkgs manifests (leave
   them; THIRD_PARTY.md).
+- `galapkg::winget` (the resolver) is tested on the host only: `cargo
+  test -p galapkg winget` (`-- --nocapture` prints the corpus summary
+  and every warning the corpus gives). The corpus is
+  `user/galapkg/testdata/winget-corpus/manifests` (real manifests: never
+  edit them; `.gitattributes` keeps their CRLFs). `selected.txt` there is
+  the golden answer of installer selection for 8 machine profiles; after
+  a deliberate rule change regenerate it with `GALAPKG_BLESS=1 cargo
+  test -p galapkg winget::corpus` and read the diff (each changed line is
+  a package whose installer moved), and say why in the commit.
+- Refreshing the corpus (rarely; keep it under ~3 MB): outside the
+  repository, `git clone --depth 1 --filter=blob:none --sparse
+  https://github.com/microsoft/winget-pkgs <dir>`, `git -C <dir> ls-tree
+  -r HEAD --name-only manifests > paths.txt`, `python3 -I
+  user/galapkg/testdata/winget-corpus/pick.py paths.txt 400 > pick.txt`,
+  `git -C <dir> sparse-checkout set --no-cone --stdin < pick.txt`, copy
+  `<dir>/manifests` over the corpus's, bless the golden, and record the
+  new commit in THIRD_PARTY.md. A manifest that fails to read is a
+  parser bug to fix (winget-pkgs is validated), not a file to drop.
+- The corpus test fails with the first differing golden lines; a
+  manifest that does not read is listed with `file:line:col`.
 - The boot test is `cargo xtask boot-test pk_install_zip`; a failed run
   shows the install log twice (`logtee: install.log:` lines, and
   pk_install_test prints it after the failing check).
@@ -1591,6 +1611,7 @@ the in-guest, deterministic version.
 | Display (virtio-gpu; the protocol and driver host-tested) | `kernel/src/display/` |
 | Test runtime for user programs | `user/ntrt/` |
 | `gala install` (winget packages): library, commands, test source | `user/galapkg/`, `user/gala/src/pkg.rs`, `user/pk_install_test/` |
+| winget manifest resolver (YAML, schemas, selection, dependencies, ARP) and its corpus | `user/galapkg/src/winget/`, `user/galapkg/testdata/winget-corpus/` |
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
 | Checked-in binaries, Windows runner | `user/bin/` |
 | Build, boot tests, reports | `xtask/` |

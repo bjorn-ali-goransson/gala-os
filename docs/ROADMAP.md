@@ -1955,6 +1955,22 @@ PK. **Installing software: `gala install` over winget manifests** (the
    contents URLs, winget's source index for search), real symbolic links
    for commands, the logon environment from `HKCU\Environment`, then
    stage 3.
+   **The winget resolver built** (2026-11-03, host tests `cargo test -p
+   galapkg winget`, a corpus of 400 real winget-pkgs version directories;
+   ARCHITECTURE "The winget resolver"): `galapkg::winget`, beside the
+   install path's `manifest`/`yaml`: a YAML subset parser with line and
+   column, schemas 1.0.0-1.28.0 (fields and values per version, warnings
+   for newer/unknown ones), singleton and multi-file manifests with every
+   installer field and locale fallback, installer selection as winget
+   (architecture with emulation, scope, locale, installer type,
+   MinimumOSVersion, Platform, Markets, upgrade keeping the installed
+   type/scope; every rejection's reason), the command line from
+   InstallerSwitches and per-type defaults, dependencies into an ordered
+   plan with cycle detection, AppsAndFeaturesEntries matched to ARP
+   records, version ordering. Next: switch `gala install`/`list`/
+   `upgrade` over to it (ARCHITECTURE says how), then delete
+   `manifest.rs`/`yaml.rs`; a boot scenario with a dependency and an
+   upgrade that keeps scope.
 
 LX. **A Linux personality, later; its seams now** (the owner,
    2026-11-03; design: ARCHITECTURE "Plan: a second personality (Linux)";
