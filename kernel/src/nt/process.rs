@@ -889,8 +889,6 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
         "process exit",
         format_args!(r#""pid":{},"session":{},"status":{}"#, process.id, process.session, status.0),
     );
-    wait::signal_dispatcher(&process.dispatcher, 1);
-    crate::flight::record(crate::flight::Kind::ProcessExit, process.id, u64::from(status.0));
     super::desktop::process_ended(process.id);
     super::window::process_ended(process.id as u32);
     super::winevent::process_ended(process.id as u32);
@@ -900,6 +898,12 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     // the process's own objects) and forget the process.
     let entries = process.handles.lock().close_all();
     drop(entries);
+    // Signaled last, as on Windows: a waiter that wakes finds the
+    // process's handles closed (its named objects gone, its files and pipe
+    // ends closed). Signaled first, a parent on another CPU could open a
+    // name only the child held, or see a file still open (smprace_test).
+    wait::signal_dispatcher(&process.dispatcher, 1);
+    crate::flight::record(crate::flight::Kind::ProcessExit, process.id, u64::from(status.0));
     // Stays in PROCESSES while referenced (OpenProcess by id); `prune`
     // forgets it after that.
 }

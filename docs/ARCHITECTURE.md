@@ -674,7 +674,10 @@ exits at its next safe point (the user-return hook run after every syscall
 and every interrupt from user mode, or after a wait wakes). Self-exit also
 goes through the hook, so the syscall path drops its references first.
 When the last thread exits, the process records its exit status, closes all
-its handles (breaking reference cycles) and leaves the registry; the
+its handles (breaking reference cycles) and leaves the registry, and only
+then is its object signaled (as on Windows: a waiter that wakes finds its
+handles closed, its named objects gone; signaled first, a parent on another
+CPU found a name only the child had held: `smprace_test` round 4); the
 address space is freed when the last thread is reaped. `run=` checks this
 and logs "address space still referenced" otherwise, which fails the boot
 scenario: a leak is a second without progress (each reference that goes
