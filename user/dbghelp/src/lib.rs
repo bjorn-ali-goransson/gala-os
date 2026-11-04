@@ -9,7 +9,6 @@
 
 mod image;
 mod symbols;
-mod unimplemented;
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
