@@ -709,6 +709,52 @@ pub extern "system" fn GetDlgItem(parent: Hwnd, id: i32) -> Hwnd {
         .unwrap_or(0)
 }
 
+/// SetDlgItemTextW: SetWindowTextW of the dialog's control `id` (FALSE,
+/// ERROR_CONTROL_ID_NOT_FOUND, when there is none).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetDlgItemTextW(dialog: Hwnd, id: i32, text: *const u16) -> i32 {
+    match GetDlgItem(dialog, id) {
+        0 => {
+            crate::set_last_error(1421);
+            0
+        }
+        c => SetWindowTextW(c, text),
+    }
+}
+
+/// GetDlgItemTextW: GetWindowTextW of the dialog's control `id` (0 and an
+/// empty buffer when there is none).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDlgItemTextW(dialog: Hwnd, id: i32, buf: *mut u16, n: i32) -> u32 {
+    match GetDlgItem(dialog, id) {
+        0 => {
+            if !buf.is_null() && n > 0 {
+                // SAFETY: the caller's buffer of n characters.
+                unsafe { *buf = 0 };
+            }
+            crate::set_last_error(1421);
+            0
+        }
+        c => GetWindowTextW(c, buf, n).max(0) as u32,
+    }
+}
+
+/// CheckDlgButton: BM_SETCHECK to the dialog's button `id`.
+#[unsafe(no_mangle)]
+pub extern "system" fn CheckDlgButton(dialog: Hwnd, id: i32, check: u32) -> i32 {
+    const BM_SETCHECK: u32 = 0x00f1;
+    match GetDlgItem(dialog, id) {
+        0 => {
+            crate::set_last_error(1421);
+            0
+        }
+        c => {
+            crate::window::SendMessageW(c, BM_SETCHECK, check as usize, 0);
+            1
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDlgCtrlID(hwnd: Hwnd) -> i32 {
     match window(hwnd) {

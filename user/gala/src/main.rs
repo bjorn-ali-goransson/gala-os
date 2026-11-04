@@ -14,7 +14,7 @@
 //! gala wallpaper <name>              dunes, ribbons, najdi, night or drawn
 //! gala ps                            list the processes
 //! gala kill <pid|name>               end a process (all of that name)
-//! gala install <id> [--version v] [--source dir]
+//! gala install <id> [--version v] [--source dir] [--location dir]
 //! gala search <text> [--source dir]
 //! gala list [<text>]
 //! gala upgrade [<id>|--all] [--version v] [--source dir]
@@ -115,13 +115,15 @@ const USAGE: &str = "usage: gala <command> [arguments]
   wallpaper <name>              dunes, ribbons, najdi, night or drawn
   ps                            list the processes
   kill <pid|name>               end a process (every one of that name)
-  install <id> [--version v] [--source dir]
-                                install a winget package (zip, portable)
+  install <id> [--version v] [--source dir] [--location dir]
+                                install a winget package (zip, portable;
+                                Inno Setup, NSIS, exe: run silently)
   search <text> [--source dir]  find packages by id, name, moniker or tag
   list [<text>]                 installed programs (the uninstall records)
   upgrade [<id>|--all] [--version v] [--source dir]
                                 list or install newer versions
-  uninstall <id>                remove a package (its files, commands, record)
+  uninstall <id>                remove a package (its files, commands, record;
+                                or run its uninstaller silently)
   help                          this text
 
 Packages come from a winget-pkgs tree: --source <dir> (a local snapshot,

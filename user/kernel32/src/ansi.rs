@@ -398,6 +398,18 @@ pub extern "system" fn FreeEnvironmentStringsA(block: *mut u8) -> Bool {
 #[unsafe(no_mangle)]
 pub extern "system" fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> Bool {
     const MOVEFILE_REPLACE_EXISTING: u32 = 1;
+    const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 4;
+    if flags & MOVEFILE_DELAY_UNTIL_REBOOT != 0 {
+        // Windows records the operation for the next boot
+        // (PendingFileRenameOperations, administrators only) and leaves the
+        // file alone now; a standard user gets ERROR_ACCESS_DENIED. gala
+        // has no boot-time renames: the file is left alone, the caller
+        // told so, the ledger records it (NSIS uninstallers schedule
+        // their %TEMP% copy for deletion this way). TODO: record and
+        // perform them for administrators.
+        unsupported(b"kernel32.dll!MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)", flags.into());
+        return fail_with(5, FALSE);
+    }
     if to.is_null() {
         return DeleteFileW(from);
     }

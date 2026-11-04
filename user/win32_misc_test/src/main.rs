@@ -20,6 +20,12 @@
 //!   LoadResource, LockResource, SizeofResource; user32's LoadStringW
 //!   (copied and terminated, truncated, the read-only pointer form).
 //!
+//! - What NSIS installers use: kernel32's lstrcpynW, lstrcatW and
+//!   GetTempFileNameW (and CreateFileW's FILE_FLAG_DELETE_ON_CLOSE with
+//!   GENERIC_READ | GENERIC_WRITE; MoveFileExW's DELAY_UNTIL_REBOOT
+//!   leaving the file alone now), shfolder's SHGetFolderPathW, user32's CharPrevW and wsprintfW/wvsprintfW
+//!   (documented format), gdi32's CreateBrushIndirect.
+//!
 //! Prints `win32_misc_test: ok` or exits with the number of the failing
 //! check.
 
@@ -52,6 +58,22 @@ unsafe extern "system" {
     fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, size: u32) -> u32;
     fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32;
     fn GetModuleFileNameW(module: Handle, buf: *mut u16, size: u32) -> u32;
+    fn lstrcpynW(dst: *mut u16, src: *const u16, n: i32) -> *mut u16;
+    fn lstrcatW(dst: *mut u16, src: *const u16) -> *mut u16;
+    fn GetTempFileNameW(path: *const u16, prefix: *const u16, unique: u32, buf: *mut u16) -> u32;
+    fn GetFileAttributesW(path: *const u16) -> u32;
+    fn DeleteFileW(path: *const u16) -> Bool;
+    fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> Bool;
+    fn CloseHandle(h: Handle) -> Bool;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        sa: *mut c_void,
+        disposition: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
     fn GetSystemInfo(info: *mut u8);
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetModuleHandleW(name: *const u16) -> Handle;
@@ -85,12 +107,19 @@ unsafe extern "system" {
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
+unsafe extern "C" {
+    fn wsprintfW(buf: *mut u16, fmt: *const u16, ...) -> i32;
+}
+
+#[link(name = "user32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn wvsprintfW(buf: *mut u16, fmt: *const u16, args: *const u64) -> i32;
     fn CharNextExA(code_page: u16, s: *const u8, flags: u32) -> *const u8;
     fn CharUpperW(s: *mut u16) -> *mut u16;
     fn CharUpperBuffW(s: *mut u16, n: u32) -> u32;
     fn CharLowerBuffW(s: *mut u16, n: u32) -> u32;
     fn CharNextW(s: *const u16) -> *const u16;
+    fn CharPrevW(start: *const u16, current: *const u16) -> *const u16;
     fn CharNextA(s: *const u8) -> *const u8;
     fn GetUserObjectInformationA(
         h: Handle,
@@ -100,6 +129,13 @@ unsafe extern "system" {
         needed: *mut u32,
     ) -> Bool;
     fn LoadStringW(instance: Handle, id: u32, buf: *mut u16, max: i32) -> i32;
+}
+
+#[link(name = "gdi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn CreateBrushIndirect(lb: *const [usize; 2]) -> Handle;
+    fn DeleteObject(h: Handle) -> Bool;
+    fn GetObjectType(h: Handle) -> u32;
 }
 
 #[link(name = "ws2_32", kind = "raw-dylib")]
@@ -183,6 +219,7 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    fn __chkstk();
 }
 
 #[unsafe(no_mangle)]
@@ -260,6 +297,20 @@ impl Checks {
         // SAFETY: as above.
         self.ok(same, unsafe { *p }.into())
     }
+}
+
+/// Prints a NUL-terminated UTF-16 string (ASCII) a check got.
+fn show(s: &[u16]) {
+    let mut line = [0u8; 200];
+    let mut n = 0;
+    line[..18].copy_from_slice(b"win32_misc_test: [");
+    n += 18;
+    for &u in s.iter().take_while(|&&u| u != 0).take(170) {
+        line[n] = if u < 0x80 { u as u8 } else { b'?' };
+        n += 1;
+    }
+    line[n..n + 3].copy_from_slice(b"]\r\n");
+    out(&line[..n + 3]);
 }
 
 /// A NUL-terminated UTF-16 copy of an ASCII string.
@@ -742,8 +793,154 @@ fn sspi(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// What NSIS installers use (ROADMAP PK, pk_install_nsis), as
+/// documented: lstrcpynW copies at most n - 1 characters and a NUL (n 0
+/// writes nothing); lstrcatW appends; CharPrevW stops at the start;
+/// GetTempFileNameW makes `<path>\<3 characters of prefix><hex>.tmp`
+/// (only the name for a given number; the file too for 0);
+/// CreateBrushIndirect makes a brush (OBJ_BRUSH, 2) for BS_SOLID and
+/// BS_NULL.
+fn installer_helpers(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: buffers of ours, NUL-terminated.
+    unsafe {
+        let mut d = w("XXXXXXXX");
+        let r = lstrcpynW(d.as_mut_ptr(), w("abcdef").as_ptr(), 4);
+        c.eq(r as u64, d.as_ptr() as u64)?;
+        c.text(d.as_ptr(), "abc")?;
+        lstrcpynW(d.as_mut_ptr(), w("q").as_ptr(), 0);
+        c.text(d.as_ptr(), "abc")?;
+        lstrcpynW(d.as_mut_ptr(), w("xy").as_ptr(), 10);
+        c.text(d.as_ptr(), "xy")?;
+        let r = lstrcatW(d.as_mut_ptr(), w("\\z.exe").as_ptr());
+        c.eq(r as u64, d.as_ptr() as u64)?;
+        c.text(d.as_ptr(), "xy\\z.exe")?;
+        let s = w("ab");
+        c.eq(CharPrevW(s.as_ptr(), s.as_ptr().add(2)) as u64, s.as_ptr().add(1) as u64)?;
+        c.eq(CharPrevW(s.as_ptr(), s.as_ptr()) as u64, s.as_ptr() as u64)?;
+        // A name for a given number: nothing created.
+        let mut name = [0u16; 260];
+        let n =
+            GetTempFileNameW(w("C:\\gala").as_ptr(), w("nsis").as_ptr(), 0x1f, name.as_mut_ptr());
+        c.eq(n.into(), 0x1f)?;
+        let mut lower = name;
+        for u in lower.iter_mut() {
+            if (u16::from(b'A')..=u16::from(b'Z')).contains(u) {
+                *u += 32;
+            }
+        }
+        c.text(lower.as_ptr(), "c:\\gala\\nsi1f.tmp")?;
+        c.eq(GetFileAttributesW(name.as_ptr()).into(), u64::from(u32::MAX))?;
+        // Number 0: a new, empty file.
+        let n = GetTempFileNameW(w("C:\\gala\\").as_ptr(), w("ns").as_ptr(), 0, name.as_mut_ptr());
+        c.ok(n != 0 && n <= 0xffff, n.into())?;
+        c.ok(GetFileAttributesW(name.as_ptr()) != u32::MAX, 0)?;
+        c.eq(u64::from(name[8]), u64::from(b'n'))?;
+        // Deleting it at the next boot leaves it there now (whether the
+        // caller may schedule that or not).
+        MoveFileExW(name.as_ptr(), core::ptr::null(), 4);
+        c.ok(GetFileAttributesW(name.as_ptr()) != u32::MAX, 0)?;
+        c.eq(DeleteFileW(name.as_ptr()) as u64, 1)?;
+        // The NSIS way to use it: reopened for reading and writing,
+        // deleted on close (CreateFileW adds the DELETE access this needs).
+        let n = GetTempFileNameW(w("C:\\gala").as_ptr(), w("nsa").as_ptr(), 0, name.as_mut_ptr());
+        c.ok(n != 0, 0)?;
+        let h = CreateFileW(
+            name.as_ptr(),
+            0xc000_0000,
+            0,
+            core::ptr::null_mut(),
+            2,
+            0x100 | 0x0400_0000,
+            core::ptr::null_mut(),
+        );
+        c.ok(h as isize != -1, GetLastError().into())?;
+        let mut written = 0;
+        c.eq(WriteFile(h, b"data".as_ptr(), 4, &mut written, core::ptr::null_mut()) as u64, 1)?;
+        CloseHandle(h);
+        c.eq(GetFileAttributesW(name.as_ptr()).into(), u64::from(u32::MAX))?;
+        // shfolder.dll's SHGetFolderPathW (NSIS looks it up there): the
+        // same answer as shell32's (CSIDL_LOCAL_APPDATA, 0x1c).
+        type FolderPath = extern "system" fn(Handle, i32, Handle, u32, *mut u16) -> i32;
+        let m = LoadLibraryA(c"shfolder.dll".as_ptr().cast());
+        c.ok(!m.is_null(), GetLastError().into())?;
+        let f = GetProcAddress(m, c"SHGetFolderPathW".as_ptr().cast());
+        c.ok(!f.is_null(), 0)?;
+        let f: FolderPath = core::mem::transmute(f);
+        let (mut a, mut b) = ([0u16; 260], [0u16; 260]);
+        c.eq(f(core::ptr::null_mut(), 0x1c, core::ptr::null_mut(), 0, a.as_mut_ptr()) as u64, 0)?;
+        let n = 0;
+        c.eq(
+            SHGetFolderPathW(core::ptr::null_mut(), 0x1c, core::ptr::null_mut(), n, b.as_mut_ptr())
+                as u64,
+            0,
+        )?;
+        c.ok(same(a.as_ptr(), b.as_ptr()) && a[0] != 0, 0)?;
+        // A directory that is not there: 0.
+        let n =
+            GetTempFileNameW(w("C:\\no-such-dir").as_ptr(), w("x").as_ptr(), 0, name.as_mut_ptr());
+        c.eq(n.into(), 0)?;
+        let solid = CreateBrushIndirect(&[0x00ff_0000 << 32, 0]);
+        c.ok(!solid.is_null(), 0)?;
+        c.eq(GetObjectType(solid).into(), 2)?;
+        c.eq(DeleteObject(solid) as u64, 1)?;
+        let hollow = CreateBrushIndirect(&[1, 0]);
+        c.ok(!hollow.is_null(), 0)?;
+        c.eq(GetObjectType(hollow).into(), 2)?;
+        // wsprintfW: numbers (signed, unsigned, hex, widths, zero fill,
+        // left justified, I64), strings (wide, ANSI with %hs and %S,
+        // precision, NULL), characters and %%; the count without the NUL.
+        let mut b = [0u16; 1024];
+        let fmt = w("%d|%u|%x|%X|%5d|%-4d|%05d|%#x|%I64u|%c");
+        let n = wsprintfW(
+            b.as_mut_ptr(),
+            fmt.as_ptr(),
+            -42i32,
+            4_000_000_000u32,
+            0xbeefu32,
+            0xbeefu32,
+            7i32,
+            3i32,
+            -12i32,
+            0x1fu32,
+            12_345_678_901u64,
+            u32::from(b'Z'),
+        );
+        let want = "-42|4000000000|beef|BEEF|    7|3   |-0012|0x1f|12345678901|Z";
+        if n as usize != want.len() {
+            show(&b);
+        }
+        c.eq(n as u64, want.len() as u64)?;
+        c.text(b.as_ptr(), want)?;
+        let fmt = w("%s=%hs/%S;%.3s;%s;100%%");
+        let n = wsprintfW(
+            b.as_mut_ptr(),
+            fmt.as_ptr(),
+            w("key").as_ptr(),
+            c"ansi".as_ptr(),
+            c"S".as_ptr(),
+            w("abcdef").as_ptr(),
+            core::ptr::null::<u16>(),
+        );
+        let want = "key=ansi/S;abc;(null);100%";
+        c.eq(n as u64, want.len() as u64)?;
+        c.text(b.as_ptr(), want)?;
+        let x = w("x");
+        // %Id and %Ix: pointer-sized (NSIS keeps handles as text so).
+        let n =
+            wsprintfW(b.as_mut_ptr(), w("%Id,%Ix").as_ptr(), -5_000_000_000i64, 0x1_0000_0008u64);
+        c.eq(n as u64, 21)?;
+        c.text(b.as_ptr(), "-5000000000,100000008")?;
+        let args = [5u64, x.as_ptr() as u64];
+        let n = wvsprintfW(b.as_mut_ptr(), w("%u:%s").as_ptr(), args.as_ptr());
+        c.eq(n as u64, 3)?;
+        c.text(b.as_ptr(), "5:x")?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    installer_helpers(&mut c)?;
     characters(&mut c)?;
     sspi(&mut c)?;
     paths(&mut c)?;

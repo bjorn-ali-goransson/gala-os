@@ -30,7 +30,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetTapeParameters
     GetTapePosition
     GetTapeStatus
-    GetTempFileNameW
     GetThreadIOPendingFlag
     GetThreadPriorityBoost
     GetVolumePathNamesForVolumeNameW
@@ -111,4 +110,5 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GlobalHandle
     IsBadReadPtr
     ReadConsoleOutputCharacterA
+    WritePrivateProfileStringW
 );

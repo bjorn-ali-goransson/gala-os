@@ -1,0 +1,14 @@
+PackageIdentifier: GalaTest.Msix
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: Msix
+License: Proprietary
+ShortDescription: An MSIX package (ROADMAP PK stage 4)
+Installers:
+- Architecture: x64
+  InstallerType: msix
+  InstallerUrl: https://packages.gala.invalid/msix-1.0.0.msix
+  InstallerSha256: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+ManifestType: singleton
+ManifestVersion: 1.6.0

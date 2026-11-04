@@ -32,6 +32,15 @@ struct Fake {
     calls: usize,
     log: Vec<String>,
     missing: Vec<String>,
+    /// Command lines run.
+    runs: Vec<String>,
+    /// GalaTest.InnoSetup's stand-in behaves as a real Inno Setup
+    /// installer (else it registers nothing, as in pk_install_test).
+    inno_registers: bool,
+    /// An NSIS uninstaller's copy still running: the key it removes after
+    /// this many sleeps.
+    pending: Option<(String, u32)>,
+    sleeps: u32,
 }
 
 fn root_n(r: Root) -> u8 {
@@ -57,6 +66,10 @@ impl Fake {
             calls: 0,
             log: Vec::new(),
             missing: Vec::new(),
+            runs: Vec::new(),
+            inno_registers: false,
+            pending: None,
+            sleeps: 0,
         };
         for d in
             ["C:", "C:\\gala", "C:\\Users", "C:\\Users\\gala", "C:\\Users\\gala\\AppData", LOCAL]
@@ -311,6 +324,123 @@ impl Host for Fake {
     fn today(&mut self) -> String {
         "20261103".into()
     }
+    fn run(&mut self, command_line: &str, _timeout_ms: u32) -> Result<u32, HostError> {
+        self.mutate()?;
+        self.runs.push(command_line.into());
+        let (exe, args) = split_command(command_line);
+        let name = lc(exe.rsplit('\\').next().unwrap());
+        if name.starts_with("pknsis-") {
+            // An NSIS installer: /S (no UI), /D=<dir> last.
+            assert!(self.file(&exe).is_some(), "the installer is staged: {exe}");
+            assert!(args.split(' ').any(|a| a == "/S"), "{command_line}");
+            let version = name.trim_start_matches("pknsis-").trim_end_matches(".exe").to_string();
+            let dir = match args.find("/D=") {
+                Some(i) => args[i + 3..].to_string(),
+                None => format!("{LOCAL}\\Programs\\PkNsis"),
+            };
+            self.vendor_install(
+                &dir,
+                &["pknsis.exe", "README.txt", "uninstall.exe"],
+                "GalaTest.PkNsis",
+                &[
+                    ("DisplayName", "PkNsis"),
+                    ("DisplayVersion", &version),
+                    ("Publisher", "gala-os"),
+                    ("InstallLocation", &dir),
+                    ("UninstallString", &format!("\"{dir}\\uninstall.exe\"")),
+                ],
+            );
+            return Ok(0);
+        }
+        if name == "innosetup-2.0.exe" {
+            assert!(args.contains("/VERYSILENT") && args.contains("/SUPPRESSMSGBOXES"), "{args}");
+            if !self.inno_registers {
+                return Ok(0);
+            }
+            let dir = match args.find("/DIR=\"") {
+                Some(i) => args[i + 6..].split('"').next().unwrap().to_string(),
+                None => format!("{LOCAL}\\Programs\\InnoSetup"),
+            };
+            let unins = format!("\"{dir}\\unins000.exe\"");
+            self.vendor_install(
+                &dir,
+                &["inno.exe", "unins000.exe", "unins000.dat"],
+                "{8E2A0D4C-GALA}_is1",
+                &[
+                    ("DisplayName", "InnoSetup version 2.0"),
+                    ("DisplayVersion", "2.0"),
+                    ("InstallLocation", &format!("{dir}\\")),
+                    ("UninstallString", &unins),
+                    ("QuietUninstallString", &format!("{unins} /SILENT")),
+                ],
+            );
+            return Ok(0);
+        }
+        if name == "uninstall.exe" {
+            // NSIS: the copy in %TEMP% does the work after this exits.
+            assert_eq!(args, "/S");
+            self.pending = Some((format!("{UNINSTALL_KEY}\\GalaTest.PkNsis"), 3));
+            self.vendor_remove(parent_of(&exe).to_string());
+            return Ok(0);
+        }
+        if name == "unins000.exe" {
+            assert_eq!(args, "/SILENT");
+            self.vendor_remove(parent_of(&exe).to_string());
+            let k = format!("{UNINSTALL_KEY}\\{{8E2A0D4C-GALA}}_is1");
+            self.m.keys.remove(&(0, lc(&k)));
+            return Ok(0);
+        }
+        Err(HostError { code: 2 })
+    }
+    fn sleep(&mut self, _ms: u32) {
+        self.sleeps += 1;
+        if let Some((k, n)) = self.pending.take() {
+            if n <= 1 {
+                self.m.keys.remove(&(0, lc(&k)));
+            } else {
+                self.pending = Some((k, n - 1));
+            }
+        }
+    }
+}
+
+/// A command line's program (unquoted) and the rest.
+fn split_command(line: &str) -> (String, &str) {
+    if let Some(rest) = line.strip_prefix('"') {
+        let end = rest.find('"').unwrap();
+        (rest[..end].into(), rest[end + 1..].trim())
+    } else {
+        let end = line.find(' ').unwrap_or(line.len());
+        (line[..end].into(), line[end..].trim())
+    }
+}
+
+impl Fake {
+    /// What a vendor's installer does: its files and its ARP entry (not
+    /// through `mutate`: it is another program).
+    fn vendor_install(&mut self, dir: &str, files: &[&str], key: &str, values: &[(&str, &str)]) {
+        let mut d = String::new();
+        for part in dir.split('\\') {
+            if !d.is_empty() {
+                d.push('\\');
+            }
+            d.push_str(part);
+            self.m.files.entry(lc(&d)).or_insert_with(|| (d.clone(), None));
+        }
+        for f in files {
+            let p = format!("{dir}\\{f}");
+            self.m.files.insert(lc(&p), (p, Some(b"MZ vendor".to_vec())));
+        }
+        let k = format!("{UNINSTALL_KEY}\\{key}");
+        let values =
+            values.iter().map(|(n, v)| (n.to_string(), RegValue::Sz(v.to_string()))).collect();
+        self.m.keys.insert((0, lc(&k)), (k, values));
+    }
+
+    fn vendor_remove(&mut self, dir: String) {
+        let prefix = format!("{}\\", lc(&dir));
+        self.m.files.retain(|k, _| *k != lc(&dir) && !k.starts_with(&prefix));
+    }
 }
 
 fn source() -> Source {
@@ -318,7 +448,7 @@ fn source() -> Source {
 }
 
 fn install_id(f: &mut Fake, id: &str, version: Option<&str>) -> Result<Outcome, Error> {
-    install(f, &source(), &Request { id, version, source_location: SRC })
+    install(f, &source(), &Request { id, version, source_location: SRC, location: None })
 }
 
 const KEY: &str = "GalaTest.PkHello_Microsoft.Winget.Source_8wekyb3d8bbwe";
@@ -370,6 +500,9 @@ fn every_test_package_manifest_parses() {
         ("GalaTest.Conflict", "1.0.0"),
         ("GalaTest.BadHash", "1.0.0"),
         ("GalaTest.InnoSetup", "2.0"),
+        ("GalaTest.Msix", "1.0.0"),
+        ("GalaTest.PkNsis", "1.0.0"),
+        ("GalaTest.PkNsis", "1.1.0"),
         ("jqlang.jq", "1.8.2"),
     ] {
         s.manifest(&mut f, id, v).unwrap_or_else(|e| panic!("{id} {v}: {e}"));
@@ -513,9 +646,9 @@ fn checks_before_any_change() {
     let e = install_id(&mut f, "GalaTest.BadHash", None).unwrap_err();
     assert_eq!(e.kind, Kind::HashMismatch);
     assert!(e.message.contains("SHA-256"), "{}", e.message);
-    let e = install_id(&mut f, "GalaTest.InnoSetup", None).unwrap_err();
+    let e = install_id(&mut f, "GalaTest.Msix", None).unwrap_err();
     assert_eq!(e.kind, Kind::Unsupported);
-    assert_eq!(f.missing, vec!["gala.exe!install(InstallerType inno)".to_string()]);
+    assert_eq!(f.missing, vec!["gala.exe!install(InstallerType msix)".to_string()]);
     // No mirrored installer: a download, which fails here.
     assert_eq!(install_id(&mut f, "jqlang.jq", None).unwrap_err().kind, Kind::Unsupported);
     assert_eq!(f.m, before);
@@ -624,4 +757,236 @@ fn plans() {
     assert!(p.dir_on_path);
     let msi = Installer { installer_type: "msi".into(), ..portable };
     assert_eq!(plan(&msi, b"").unwrap_err().kind, Kind::Unsupported);
+}
+
+// ---- Installers that are programs (inno, nullsoft) --------------------
+
+const NSIS_KEY: &str = "GalaTest.PkNsis";
+
+fn nsis_arp() -> String {
+    format!("{UNINSTALL_KEY}\\{NSIS_KEY}")
+}
+
+#[test]
+fn nsis_install_upgrade_uninstall() {
+    let mut f = Fake::new();
+    let before = f.m.clone();
+    let out = install_id(&mut f, "GalaTest.PkNsis", Some("1.0.0")).unwrap();
+    let dir = format!("{LOCAL}\\Programs\\PkNsis");
+    assert_eq!(
+        out,
+        Outcome::Installed {
+            id: "GalaTest.PkNsis".into(),
+            version: "1.0.0".into(),
+            commands: vec![],
+            location: dir.clone(),
+        }
+    );
+    // Run as winget runs NSIS: the staged installer with /S.
+    let staged = format!(
+        "{LOCAL}\\Temp\\gala\\GalaTest.PkNsis_Microsoft.Winget.Source_8wekyb3d8bbwe\\pknsis-1.0.0.exe"
+    );
+    assert_eq!(f.runs, vec![format!("\"{staged}\" /S")]);
+    // The staged copy and its directories are gone.
+    assert!(f.exists(&format!("{LOCAL}\\Temp")).is_none(), "{:#?}", f.log);
+    assert!(f.file(&format!("{dir}\\pknsis.exe")).is_some());
+    // The installer's entry, tagged by gala.
+    let v = |f: &Fake, n: &str| f.value(Root::CurrentUser, &nsis_arp(), n);
+    assert_eq!(v(&f, "DisplayVersion"), Some(RegValue::Sz("1.0.0".into())));
+    assert_eq!(v(&f, "WinGetPackageIdentifier"), Some(RegValue::Sz("GalaTest.PkNsis".into())));
+    assert_eq!(v(&f, "WinGetInstallerType"), Some(RegValue::Sz("nullsoft".into())));
+    assert_eq!(v(&f, "GalaPackageVersion"), Some(RegValue::Sz("1.0.0".into())));
+    assert_eq!(v(&f, "GalaSource"), Some(RegValue::Sz(SRC.into())));
+    assert!(f.log.iter().any(|l| l == "exit code=0 (0x0)"), "{:#?}", f.log);
+    assert!(
+        f.log
+            .iter()
+            .any(|l| l.contains("arp-entry key=HKCU\\") && l.contains("found-by=the one new entry")),
+        "{:#?}",
+        f.log
+    );
+    let list = installed(&mut f);
+    assert_eq!(list[0].id.as_deref(), Some("GalaTest.PkNsis"));
+    assert_eq!(list[0].key, NSIS_KEY);
+    // Again: already installed, nothing run.
+    assert!(matches!(
+        install_id(&mut f, "GalaTest.PkNsis", Some("1.0.0")).unwrap(),
+        Outcome::AlreadyInstalled { .. }
+    ));
+    assert_eq!(f.runs.len(), 1);
+    // Upgrade: the new installer over the old one; the same entry.
+    let out = upgrade(&mut f, None, "GalaTest.PkNsis", None).unwrap();
+    assert_eq!(
+        out,
+        Outcome::Upgraded {
+            id: "GalaTest.PkNsis".into(),
+            from: "1.0.0".into(),
+            to: "1.1.0".into()
+        }
+    );
+    assert_eq!(f.runs.len(), 2);
+    assert!(f.runs[1].ends_with("pknsis-1.1.0.exe\" /S"), "{}", f.runs[1]);
+    assert!(f.log.iter().any(|l| l.contains("found-by=the previous version's entry")));
+    assert_eq!(v(&f, "DisplayVersion"), Some(RegValue::Sz("1.1.0".into())));
+    assert_eq!(v(&f, "GalaPackageVersion"), Some(RegValue::Sz("1.1.0".into())));
+    // Uninstall: UninstallString with /S; the entry goes a little later
+    // (the uninstaller's copy), and gala waits for it.
+    let out = uninstall(&mut f, "GalaTest.PkNsis").unwrap();
+    assert_eq!(out, Outcome::Uninstalled { id: "GalaTest.PkNsis".into(), version: "1.1.0".into() });
+    assert_eq!(f.runs[2], format!("\"{dir}\\uninstall.exe\" /S"));
+    assert_eq!(f.sleeps, 3);
+    assert!(f.log.iter().any(|l| l.starts_with("arp-entry-gone") && l.contains("waited=750ms")));
+    // The machine as before, but the Programs directory NSIS made.
+    let mut after = f.m.clone();
+    let programs = format!("{LOCAL}\\Programs");
+    assert!(after.files.remove(&lc(&programs)).is_some());
+    assert!(after == before, "{}", diff(&after, &before));
+}
+
+#[test]
+fn nsis_install_location() {
+    let mut f = Fake::new();
+    let req = Request {
+        id: "GalaTest.PkNsis",
+        version: None,
+        source_location: SRC,
+        location: Some("C:\\Apps\\Pk Nsis"),
+    };
+    let out = install(&mut f, &source(), &req).unwrap();
+    assert!(matches!(&out, Outcome::Installed { location, .. } if location == "C:\\Apps\\Pk Nsis"));
+    // /D= last and unquoted (as NSIS wants it).
+    assert!(f.runs[0].ends_with("\" /S /D=C:\\Apps\\Pk Nsis"), "{}", f.runs[0]);
+    assert!(f.file("C:\\Apps\\Pk Nsis\\pknsis.exe").is_some());
+    // A zip package has no location to choose.
+    let req = Request { id: "GalaTest.PkHello", ..req };
+    assert_eq!(install(&mut f, &source(), &req).unwrap_err().kind, Kind::Usage);
+}
+
+#[test]
+fn inno_install_and_uninstall() {
+    let mut f = Fake::new();
+    f.inno_registers = true;
+    install_id(&mut f, "GalaTest.InnoSetup", None).unwrap();
+    // winget's Inno switches, and the setup log next to gala's.
+    let staged = format!(
+        "{LOCAL}\\Temp\\gala\\GalaTest.InnoSetup_Microsoft.Winget.Source_8wekyb3d8bbwe\\innosetup-2.0.exe"
+    );
+    assert_eq!(
+        f.runs[0],
+        format!(
+            "\"{staged}\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG=\"{LOCAL}\\gala\\logs\\GalaTest.InnoSetup-2.0.setup.log\""
+        )
+    );
+    let k = format!("{UNINSTALL_KEY}\\{{8E2A0D4C-GALA}}_is1");
+    assert_eq!(
+        f.value(Root::CurrentUser, &k, "WinGetPackageIdentifier"),
+        Some(RegValue::Sz("GalaTest.InnoSetup".into()))
+    );
+    assert_eq!(installed(&mut f)[0].version, "2.0");
+    // QuietUninstallString as it is.
+    uninstall(&mut f, "GalaTest.InnoSetup").unwrap();
+    assert_eq!(f.runs[1], format!("\"{LOCAL}\\Programs\\InnoSetup\\unins000.exe\" /SILENT"));
+    assert!(!f.reg_key_exists(Root::CurrentUser, &k));
+    assert!(f.exists(&format!("{LOCAL}\\Programs\\InnoSetup")).is_none());
+}
+
+#[test]
+fn an_installer_that_registers_nothing() {
+    let mut f = Fake::new();
+    let before = f.m.clone();
+    let e = install_id(&mut f, "GalaTest.InnoSetup", None).unwrap_err();
+    assert_eq!(e.kind, Kind::Failed);
+    assert!(e.message.contains("registered no uninstall entry"), "{}", e.message);
+    assert!(f.log.iter().any(|l| l.starts_with("error no-arp-entry")));
+    assert!(f.m == before, "{}", diff(&f.m, &before));
+}
+
+#[test]
+fn program_install_failures() {
+    // Each of gala's own steps failing in turn: before the installer
+    // runs, nothing is changed; after it, the installer's changes stay
+    // (no vendor rollback) but gala's tags and staged file do not.
+    let mut n = 0;
+    loop {
+        let mut f = Fake::new();
+        let before = f.m.clone();
+        f.fail_at = Some(n);
+        match install_id(&mut f, "GalaTest.PkNsis", Some("1.0.0")) {
+            Ok(_) => break,
+            Err(e) => {
+                assert_eq!(e.kind, Kind::Failed, "step {n}: {e}");
+                assert!(f.exists(&format!("{LOCAL}\\Temp")).is_none(), "step {n}: {:#?}", f.log);
+                if f.runs.is_empty() {
+                    assert!(f.m == before, "step {n}: {e}\n{}", diff(&f.m, &before));
+                } else {
+                    assert!(e.message.contains("stays installed"), "step {n}: {e}");
+                    assert!(f.reg_key_exists(Root::CurrentUser, &nsis_arp()));
+                    let v = f.value(Root::CurrentUser, &nsis_arp(), "WinGetPackageIdentifier");
+                    assert_eq!(v, None, "step {n}");
+                }
+            }
+        }
+        n += 1;
+    }
+    assert!(n > 4, "{n}");
+}
+
+#[test]
+fn switches() {
+    let nsis = Installer {
+        architecture: "x64".into(),
+        installer_type: "nullsoft".into(),
+        nested_installer_type: None,
+        nested_files: vec![],
+        url: "https://h/setup.exe".into(),
+        sha256: "0".repeat(64),
+        scope: None,
+        commands: vec![],
+        switches: vec![],
+        product_code: None,
+        archive_binaries_depend_on_path: false,
+    };
+    assert_eq!(
+        exe::install_command(&nsis, "C:\\t\\s.exe", Some("L"), None).unwrap(),
+        "\"C:\\t\\s.exe\" /S"
+    );
+    // The manifest's switches: Silent replaces, Custom is added.
+    let custom = Installer {
+        switches: vec![("Silent".into(), "/S /quiet".into()), ("Custom".into(), "/X=1".into())],
+        ..nsis.clone()
+    };
+    assert_eq!(
+        exe::install_command(&custom, "s.exe", None, Some("D:\\p")).unwrap(),
+        "\"s.exe\" /S /quiet /X=1 /D=D:\\p"
+    );
+    let inno = Installer { installer_type: "inno".into(), ..nsis.clone() };
+    assert_eq!(
+        exe::install_command(&inno, "s.exe", None, Some("D:\\p q")).unwrap(),
+        "\"s.exe\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=\"D:\\p q\""
+    );
+    // A plain exe needs the manifest's Silent switch.
+    let exe_plain = Installer { installer_type: "exe".into(), ..nsis.clone() };
+    assert_eq!(
+        exe::install_command(&exe_plain, "s.exe", None, None).unwrap_err().kind,
+        Kind::Unsupported
+    );
+    let exe_silent = Installer { switches: vec![("Silent".into(), "-q".into())], ..exe_plain };
+    assert_eq!(exe::install_command(&exe_silent, "s.exe", None, None).unwrap(), "\"s.exe\" -q");
+    assert!(exe::install_command(&exe_silent, "s.exe", None, Some("D:\\")).is_err());
+    // Uninstall commands.
+    assert_eq!(
+        exe::uninstall_command("inno", None, Some("\"C:\\a\\unins000.exe\"")).unwrap(),
+        (
+            "\"C:\\a\\unins000.exe\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART".into(),
+            "UninstallString"
+        )
+    );
+    assert_eq!(
+        exe::uninstall_command("nullsoft", Some("u.exe /S"), Some("u.exe")).unwrap(),
+        ("u.exe /S".into(), "QuietUninstallString")
+    );
+    assert_eq!(
+        exe::uninstall_command("exe", None, Some("u.exe")).unwrap_err().kind,
+        Kind::Unsupported
+    );
 }

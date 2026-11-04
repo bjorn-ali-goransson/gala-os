@@ -267,8 +267,8 @@ explicitly in its commit.
   personality is a planned later goal; its seams are built as their
   areas are touched (RS B2 and SSH's ConPTY first).
 - **Installing software (the owner, 2026-11-03)**: item PK below: `gala
-  install` over winget manifests; zip/portable, then Inno Setup and NSIS,
-  then MSIX sideloading, then MSI.
+  install` over winget manifests; zip/portable, then Inno Setup and NSIS
+  (built: NSIS booted, Inno host-tested), then MSIX sideloading, then MSI.
 - **A browser: stock Edge (the owner, 2026-11-03)**: item BR below;
   Chromium headless first, then headful with software rendering, the
   sandbox, then Edge itself.
@@ -2278,6 +2278,26 @@ TLS. **Schannel: SSPI's TLS package** (2026-11-03). **Client and server,
    gala-um (`NOT_IN_UM`): its TLS 1.3 handshake with the in-process server
    hangs there (both threads waiting) while it passes in QEMU. Find the
    gala-um socket or wait gap and remove the exclusion.
+   **Stage 3 built: NSIS booted, Inno Setup host-tested** (2026-11-03,
+   scenario `pk_install_nsis`, `pk_install_test nsis`; host tests
+   `cargo test -p galapkg`; ARCHITECTURE "Installing software",
+   "Installers that are programs"): InstallerType inno, nullsoft and exe
+   run as winget runs them (staged in %TEMP%, winget's silent switches or
+   the manifest's, Inno's /LOG, `--location` as /DIR= or /D=), the
+   install found through its ARP entry (ProductCode, the new key, the
+   package's name, the previous version's key) and tagged; upgrade runs
+   the new installer over the old; uninstall runs Quiet/UninstallString
+   plus the silent switch and waits for the entry to go. A real x64 NSIS
+   installer (built with makensis from `user/pk_install_test/nsis`)
+   installs, runs, upgrades, uninstalls and installs with /D= under gala;
+   it needed wsprintfW, GetTempFileNameW, lstrcpynW/lstrcatW, CharPrevW,
+   CreateBrushIndirect, shfolder.dll and fixes to CreateFileW
+   (DELETE_ON_CLOSE) and MoveFileExW (DELAY_UNTIL_REBOOT). Not done: a
+   real Inno Setup installer in a scenario (they are 32-bit: WOW64; the
+   compiler runs only on Windows; a stand-in checks the switches and the
+   "no uninstall entry" failure), Scope switches and elevation for
+   machine-wide installers, the manifest's success codes, a tracking
+   catalog of gala's own instead of tagging vendors' ARP keys.
 
 LX. **A Linux personality, later; its seams now** (the owner,
    2026-11-03; design: ARCHITECTURE "Plan: a second personality (Linux)";

@@ -3841,7 +3841,7 @@ shortcut yet). Not done: the in-context synchronous call in the raising
 thread, UIPI between hooks and events, EVENT_OBJECT_LOCATIONCHANGE,
 REORDER, the menu and caret events, EVENT_SYSTEM_* beyond FOREGROUND.
 
-## Installing software (ROADMAP PK; stages 1 and 2 built 2026-11-03)
+## Installing software (ROADMAP PK; stages 1-3 built 2026-11-03, NSIS booted, Inno host-tested)
 
 `gala install` installs packages from winget's manifests the way winget
 does, from the command line (CLI parity: the server profile too). The
@@ -3965,11 +3965,85 @@ ledger (`gala.exe!install(InstallerType inno)`), so `cargo xtask report`
 lists what real packages needed. The scenario tees the log into the
 serial log (`logtee=`), and pk_install_test prints it when a check fails.
 
+**Installers that are programs (InstallerType `inno`, `nullsoft`, `exe`;
+`galapkg::install::exe`), as winget runs them.** The checked installer is
+staged as `%TEMP%\gala\<install key>\<file>.exe` (a `Tx` that is
+cleaned up afterwards, logged as `cleanup ...`) and started through
+`Host::run` (CreateProcessW of the command line, no inherited handles,
+waited for up to 10 minutes) with: InstallerSwitches.Silent if the
+manifest has one, else winget's default for the type (Inno `/SP-
+/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, NSIS `/S`; a plain `exe`
+without Silent is refused, exit 3: gala does not run installers
+interactively), then Custom, then Inno's `/LOG="%LOCALAPPDATA%\gala\logs\
+<id>-<version>.setup.log"`, then with `--location <dir>` the
+InstallLocation switch last (Inno `/DIR="<dir>"`, NSIS `/D=<dir>`,
+unquoted and last as NSIS requires). Exit 0 is success, 3010/1641 too
+(logged `restart-required`); anything else is exit 4 naming the code.
+ERROR_BAD_EXE_FORMAT (a 32-bit installer: gala has no WOW64) is exit 3
+and the ledger line `gala.exe!install(32-bit installer: WOW64)`.
+The install is then found through its ARP entry, from a snapshot of the
+HKCU and HKLM Uninstall keys taken before the run: the manifest's
+ProductCode if that key exists; else the one new key, or the new key
+whose DisplayName is the package's name; else (an upgrade) the old
+version's key; else an existing key with the package's name. None: exit
+4, "registered no uninstall entry" (what the installer did stays). gala
+tags the entry with WinGetPackageIdentifier, WinGetSourceIdentifier,
+WinGetInstallerType, GalaPackageVersion (preferred over DisplayVersion by
+`list`/`upgrade`), GalaSource, GalaInstallerSha256 (a `Tx`: a failure
+rolls the tags back and says the program stays installed). winget keeps
+this in its own tracking catalog instead; TODO: a catalog of gala's own,
+leaving vendors' keys untouched. Upgrade runs the new installer over the
+old version (winget's default UpgradeBehavior `install`); a switch
+between a program type and zip/portable is refused (exit 3). Uninstall
+runs QuietUninstallString, else UninstallString plus the type's silent
+switch (Inno `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, NSIS `/S`), then
+polls (250 ms, up to 60 s) until the ARP key is gone: an NSIS
+uninstaller copies itself to %TEMP% and exits at once, the copy doing the
+work. **Invariant** (weaker than for zips): a failure before the vendor's
+installer runs changes nothing; after it, the installer's own changes
+stay (winget cannot undo them either) and gala's are rolled back. Log
+lines: `plan run-installer type=`, `run type= switches=manifest|winget-
+default cmd=`, `started pid= tid=`, `exit code=`, `arp-entry key=
+found-by=`, `registered`, `run-uninstaller type= from= cmd=`,
+`arp-entry-gone key= waited=`, `error no-arp-entry`, `error
+arp-entry-still-there`. TODO: InstallerSuccessCodes/ExpectedReturnCodes
+from the manifest, Scope (`/CURRENTUSER`, `/ALLUSERS`) and elevation for
+machine-wide installers, `burn`/`wix`/`msi` (stage 5), WOW64 for the
+32-bit installers most Inno Setup packages are (Inno Setup's compiler
+also runs only on Windows, so the test has no real Inno installer: the
+host tests drive Inno's switches against a fake and the scenario runs a
+stand-in that registers nothing).
+
 **Test.** `pk_install_test` (scenario `pk_install_zip`) against
 `C:\pk_source` (user/pk_install_test/source, shipped as a tree): test
 packages made by `make_source.py` (PkHello 1.0.0 as a singleton
-manifest, 1.1.0 multi-file; Conflict; BadHash; InnoSetup) and real
-winget-pkgs manifests (ripgrep, jq) for search and the HTTPS refusal.
+manifest, 1.1.0 multi-file; Conflict; BadHash; InnoSetup, a stand-in
+that registers nothing; Msix; PkNsis 1.0.0 and 1.1.0, real x64 NSIS
+installers built with makensis from `user/pk_install_test/nsis/pknsis.nsi`)
+and real winget-pkgs manifests (ripgrep, jq) for search and the HTTPS
+refusal. `pk_install_test nsis` (scenario `pk_install_nsis`) installs
+PkNsis (/S), checks its files, its ARP entry and gala's tags, runs the
+program, upgrades it to 1.1.0, uninstalls it (/S, waiting for the entry
+to go), and installs and removes it again with `--location` (/D=). The
+NSIS stub needed kernel32's lstrcpynW, lstrcatW and GetTempFileNameW,
+user32's CharPrevW, wsprintfW/wvsprintfW (up to sixteen arguments:
+`user/user32/src/wsprintf.rs`), Set/GetDlgItemTextW and CheckDlgButton,
+gdi32's
+CreateBrushIndirect, a shfolder.dll (`user/shfolder`: export
+forwarders of SHGetFolderPathA/W to shell32; NSIS calls the pointer it
+looks up there without checking it), and three fixes: CreateFileW asks
+for DELETE access with FILE_FLAG_DELETE_ON_CLOSE (NtCreateFile refuses
+the option without it; NSIS reopens its temporary data file so),
+MoveFileExW's MOVEFILE_DELAY_UNTIL_REBOOT leaves the file alone (gala
+deleted it at once, so the NSIS uninstaller's %TEMP% copy was gone
+before it could start; now ERROR_ACCESS_DENIED, as a standard user gets,
+and a ledger line: gala has no boot-time renames), wsprintfW's `%Id`
+(NSIS keeps file handles as text so); CreateProcessW accepts
+CREATE_DEFAULT_ERROR_MODE (the error mode is never inherited on gala).
+All are checked by win32_misc_test. DialogBoxParamW,
+MessageBoxIndirectW, SetClassLongPtrW, SetClipboardData,
+WritePrivateProfileStringW and SHCLSIDFromString are stubs (UI and INI
+paths a silent install does not take).
 
 **Reading MSI packages (PK stage 5 groundwork, 2026-11-03).** Three
 modules of `user/galapkg`, pure Rust, `no_std` + `alloc`, host-tested,
@@ -4182,6 +4256,9 @@ NSIS, `exe` with switches: run the vendor's installer silently, uninstall
 through its UninstallString), 4 (MSIX: on the reader above, signature
 validation against trusted certificates, staging under WindowsApps,
 registration, package identity for full-trust apps), 5 (MSI); machine scope
+**Next (ROADMAP PK):** the HTTPS fetcher; a real Inno Setup installer
+in a scenario (needs WOW64, or an x64 Setup, and the compiler on a
+Windows host); 4 (MSIX), 5 (MSI); machine scope
 (`%ProgramFiles%\WinGet\Packages`, HKLM, needs elevation); dependencies
 (`Dependencies: PackageDependencies`); `gala list` matching ARP entries
 to packages by ProductCode/AppsAndFeaturesEntries.

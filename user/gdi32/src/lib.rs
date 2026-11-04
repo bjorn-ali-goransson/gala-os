@@ -604,6 +604,38 @@ pub extern "system" fn CreateSolidBrush(color: u32) -> Handle {
     new_object(Object::Brush { color: pixel(color), null: false })
 }
 
+/// LOGBRUSH: style, colour, hatch.
+#[repr(C)]
+pub struct LogBrush {
+    style: u32,
+    color: u32,
+    hatch: usize,
+}
+
+/// CreateBrushIndirect: BS_SOLID (0) as CreateSolidBrush, BS_NULL (1) a
+/// brush that paints nothing; BS_HATCHED (2) is painted solid (recorded);
+/// pattern and DIB brushes are not built (null, recorded).
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateBrushIndirect(lb: *const LogBrush) -> Handle {
+    if lb.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: the caller's LOGBRUSH.
+    let (style, color) = unsafe { ((*lb).style, (*lb).color) };
+    match style {
+        0 => CreateSolidBrush(color),
+        1 => new_object(Object::Brush { color: 0, null: true }),
+        2 => {
+            unsupported(b"gdi32.dll!CreateBrushIndirect(BS_HATCHED: painted solid)", 0);
+            CreateSolidBrush(color)
+        }
+        s => {
+            unsupported(b"gdi32.dll!CreateBrushIndirect(style)", u64::from(s));
+            core::ptr::null_mut()
+        }
+    }
+}
+
 /// CreatePen(style, width, color): PS_NULL (5) draws nothing; other
 /// styles draw solid.
 #[unsafe(no_mangle)]

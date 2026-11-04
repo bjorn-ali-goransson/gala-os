@@ -25,10 +25,14 @@
 //! runs (hello.exe's line) with its arguments; `gala list`; installing
 //! again is "already installed"; a package wanting the same command fails
 //! after writing its files and is rolled back (exit 4, nothing left); a
-//! wrong SHA-256 (exit 5); an Inno Setup installer and an HTTPS download
-//! (exit 3, not built yet); `gala upgrade` lists and installs 1.1.0 (the
+//! wrong SHA-256 (exit 5); an MSIX and an HTTPS download (exit 3, not
+//! built yet); `gala upgrade` lists and installs 1.1.0 (the
 //! old files gone); uninstall removes files, command and record; the
 //! command is gone from PATH.
+//!
+//! With the argument `nsis` (scenario pk_install_nsis) it checks an NSIS
+//! installer instead (`nsis_test`); the zip run also checks an Inno Setup
+//! stand-in that registers nothing (exit 4) and an MSIX (exit 3).
 //!
 //! Prints `pk_install_test: ok` or exits with the number of the failing
 //! check (the install log is printed on failure).
@@ -80,6 +84,7 @@ unsafe extern "system" {
     ) -> Bool;
     fn GetFileAttributesW(path: *const u16) -> u32;
     fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, size: u32) -> u32;
+    fn GetCommandLineW() -> *const u16;
     fn SetEnvironmentVariableW(name: *const u16, value: *const u16) -> Bool;
     fn CreateFileW(
         name: *const u16,
@@ -517,8 +522,13 @@ fn test() -> Result<(), u32> {
     let args = join(&mut a, &["install GalaTest.BadHash ", src]);
     c.gala(args, 5, &[b"SHA-256"])?;
     c.ok(!exists(local("\\Microsoft\\WinGet\\Links\\badhash.exe")), 0, "nothing of BadHash")?;
+    // An Inno Setup stand-in that registers nothing: run (winget's Inno
+    // switches), then refused for want of an uninstall entry.
     let args = join(&mut a, &["install GalaTest.InnoSetup ", src]);
-    c.gala(args, 3, &[b"inno"])?;
+    c.gala(args, 4, &[b"registered no uninstall entry"])?;
+    c.ok(log_has(b"/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"), 0, "Inno's switches")?;
+    let args = join(&mut a, &["install GalaTest.Msix ", src]);
+    c.gala(args, 3, &[b"msix"])?;
     let args = join(&mut a, &["install jqlang.jq ", src]);
     c.gala(args, 3, &[b"HTTPS"])?;
     c.gala("install No.Such.Package --source C:\\pk_source", 2, &[b"No.Such.Package"])?;
@@ -559,9 +569,189 @@ fn join<'a>(buf: &'a mut [u8], parts: &[&str]) -> &'a str {
     core::str::from_utf8(&buf[..n]).unwrap_or("")
 }
 
+// ---- An NSIS installer (scenario pk_install_nsis) ----------------------
+
+const NSIS_ARP: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GalaTest.PkNsis";
+
+/// A whole file (up to 16 KiB; None if it cannot be opened).
+fn read_file(mut path: W) -> Option<Output> {
+    let mut o = Output { b: [0; 16384], n: 0 };
+    // SAFETY: plain calls with our buffers.
+    unsafe {
+        let h = CreateFileW(
+            path.ptr(),
+            0x8000_0000,
+            7,
+            core::ptr::null_mut(),
+            3,
+            0,
+            core::ptr::null_mut(),
+        );
+        if h as isize == -1 {
+            return None;
+        }
+        let mut got = 0;
+        while o.n < o.b.len()
+            && ReadFile(
+                h,
+                o.b.as_mut_ptr().add(o.n),
+                (o.b.len() - o.n) as u32,
+                &mut got,
+                core::ptr::null_mut(),
+            ) != 0
+            && got > 0
+        {
+            o.n += got as usize;
+        }
+        CloseHandle(h);
+    }
+    Some(o)
+}
+
+/// Prints a file the test reads (what NSIS wrote), or that it is missing.
+fn show_file(name: &str, o: &Option<Output>) {
+    out(b"pk_install_test: ");
+    out(name.as_bytes());
+    match o {
+        Some(o) => {
+            out(b": ");
+            out(o.text());
+            out(b"\r\n");
+        }
+        None => out(b": cannot be opened\r\n"),
+    }
+}
+
+/// The install log has `what`.
+fn log_has(what: &[u8]) -> bool {
+    read_file(local("\\gala\\logs\\install.log")).is_some_and(|o| o.has(what))
+}
+
+fn nsis_value(value: &str) -> Option<([u8; 2048], usize)> {
+    hkcu(NSIS_ARP, value, false)
+}
+
+fn nsis_value_is(value: &str, want: &[u8]) -> bool {
+    nsis_value(value).is_some_and(|(s, n)| &s[..n] == want)
+}
+
+/// `%TEMP%` followed by `rest`.
+fn temp(rest: &str) -> W {
+    let mut buf = [0u16; 512];
+    let name = W::new("TEMP");
+    // SAFETY: our buffers.
+    let n = unsafe { GetEnvironmentVariableW(name.b.as_ptr(), buf.as_mut_ptr(), 512) } as usize;
+    let mut w = W::new("");
+    w.add_w(&buf[..n.min(512)]).add(rest.as_bytes());
+    w
+}
+
+/// `gala install` of a real NSIS installer (nsis/pknsis.nsi, x64), run
+/// as winget runs it (/S, /D=), found through its uninstall entry,
+/// upgraded by running 1.1.0's installer over it, uninstalled through its
+/// UninstallString with /S. What the installer leaves is what NSIS
+/// documents for this script: its files in $INSTDIR (default
+/// `%LOCALAPPDATA%\Programs\PkNsis`), uninstall.exe, the HKCU entry it
+/// writes.
+fn nsis_test() -> Result<(), u32> {
+    let mut c = Checks(0);
+    let src = "--source C:\\pk_source";
+    let mut a = [0u8; 300];
+    c.gala("search nsis --source C:\\pk_source", 0, &[b"GalaTest.PkNsis", b"1.1.0"])?;
+    // Install 1.0.0: the installer runs with /S.
+    let args = join(&mut a, &["install GalaTest.PkNsis --version 1.0.0 ", src]);
+    c.gala(args, 0, &[b"Successfully installed", b"Programs\\PkNsis"])?;
+    c.ok(log_has(b"cmd=\""), 0, "the install log has the command line")?;
+    c.ok(log_has(b"pknsis-1.0.0.exe\" /S"), 0, "run with /S")?;
+    c.ok(log_has(b"exit code=0 (0x0)"), 0, "the installer's exit code logged")?;
+    c.ok(
+        log_has(b"arp-entry key=HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GalaTest.PkNsis found-by="),
+        0,
+        "the ARP entry found",
+    )?;
+    let dir = "\\Programs\\PkNsis";
+    let mut p = [0u8; 300];
+    c.ok(exists(local(join(&mut p, &[dir, "\\pknsis.exe"]))), 0, "NSIS wrote the program")?;
+    c.ok(exists(local(join(&mut p, &[dir, "\\uninstall.exe"]))), 0, "NSIS wrote its uninstaller")?;
+    let readme = read_file(local(join(&mut p, &[dir, "\\README.txt"])));
+    show_file("README.txt", &readme);
+    c.ok(readme.is_some_and(|o| o.has(b"PkNsis 1.0.0")), 0, "NSIS's FileWrite")?;
+    c.ok(
+        !exists(temp("\\gala\\GalaTest.PkNsis_Microsoft.Winget.Source_8wekyb3d8bbwe")),
+        0,
+        "the staged installer removed",
+    )?;
+    c.ok(nsis_value_is("DisplayName", b"PkNsis"), 0, "NSIS's DisplayName")?;
+    c.ok(nsis_value_is("DisplayVersion", b"1.0.0"), 0, "NSIS's DisplayVersion")?;
+    c.ok(
+        nsis_value("InstallLocation").is_some_and(|(s, n)| contains(&s[..n], b"Programs\\PkNsis")),
+        0,
+        "NSIS's InstallLocation",
+    )?;
+    c.ok(nsis_value_is("WinGetPackageIdentifier", b"GalaTest.PkNsis"), 0, "gala's tag")?;
+    c.ok(nsis_value_is("WinGetInstallerType", b"nullsoft"), 0, "gala's type tag")?;
+    // The program runs.
+    let mut exe = local(join(&mut p, &[dir, "\\pknsis.exe"]));
+    let mut line = [0u8; 300];
+    let mut n = 0;
+    for &u in exe.text() {
+        if n < line.len() {
+            line[n] = u as u8;
+            n += 1;
+        }
+    }
+    let _ = exe.ptr();
+    let exe_s = core::str::from_utf8(&line[..n]).unwrap_or("");
+    let (got, o) = run(Some(exe_s), "pknsis");
+    c.ok(got == 0 && o.has(HELLO), got, "the installed program runs")?;
+    // Listed; again is "already installed".
+    c.gala("list", 0, &[b"GalaTest.PkNsis", b"1.0.0", b"PkNsis"])?;
+    let args = join(&mut a, &["install GalaTest.PkNsis --version 1.0.0 ", src]);
+    c.gala(args, 0, &[b"already installed"])?;
+    // Upgrade: 1.1.0's installer over 1.0.0.
+    c.gala("upgrade GalaTest.PkNsis", 0, &[b"Successfully upgraded", b"1.1.0"])?;
+    c.ok(nsis_value_is("DisplayVersion", b"1.1.0"), 0, "DisplayVersion after the upgrade")?;
+    let readme = read_file(local(join(&mut p, &[dir, "\\README.txt"])));
+    show_file("README.txt", &readme);
+    c.ok(readme.is_some_and(|o| o.has(b"PkNsis 1.1.0")), 0, "1.1.0's README")?;
+    // Uninstall: UninstallString /S; NSIS's uninstaller runs from %TEMP%
+    // and gala waits for the entry to go.
+    c.gala("uninstall GalaTest.PkNsis", 0, &[b"Successfully uninstalled"])?;
+    c.ok(log_has(b"uninstall.exe\" /S"), 0, "the uninstaller run with /S")?;
+    c.ok(log_has(b"arp-entry-gone key=HKCU"), 0, "the entry's removal logged")?;
+    c.ok(nsis_value("DisplayName").is_none(), 0, "the ARP entry removed")?;
+    c.ok(!exists(local(join(&mut p, &[dir, "\\pknsis.exe"]))), 0, "the program removed")?;
+    c.ok(!exists(local(join(&mut p, &[dir, "\\uninstall.exe"]))), 0, "the uninstaller removed")?;
+    let o = c.gala("list", 0, &[])?;
+    c.ok(!o.has(b"GalaTest.PkNsis"), 0, "not listed after the uninstall")?;
+    // --location: /D=<dir>.
+    let args = join(&mut a, &["install GalaTest.PkNsis --location C:\\PkNsisHere ", src]);
+    c.gala(args, 0, &[b"Successfully installed", b"C:\\PkNsisHere"])?;
+    c.ok(log_has(b"/S /D=C:\\PkNsisHere"), 0, "/D= last")?;
+    c.ok(exists(W::new("C:\\PkNsisHere\\pknsis.exe")), 0, "installed where asked")?;
+    c.gala("uninstall GalaTest.PkNsis", 0, &[b"Successfully uninstalled"])?;
+    c.ok(!exists(W::new("C:\\PkNsisHere\\pknsis.exe")), 0, "removed from there")?;
+    c.ok(nsis_value("DisplayName").is_none(), 0, "the ARP entry removed again")?;
+    Ok(())
+}
+
+/// Whether the command line has the argument `nsis`.
+fn nsis_mode() -> bool {
+    // SAFETY: the process's NUL-terminated command line.
+    unsafe {
+        let p = GetCommandLineW();
+        let mut n = 0;
+        while *p.add(n) != 0 {
+            n += 1;
+        }
+        let line = core::slice::from_raw_parts(p, n);
+        line.windows(5).any(|w| w == [32, 110, 115, 105, 115])
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
-    let code = match test() {
+    let code = match if nsis_mode() { nsis_test() } else { test() } {
         Ok(()) => {
             out(b"pk_install_test: ok\r\n");
             0

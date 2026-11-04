@@ -549,7 +549,7 @@ pub extern "system" fn LCMapStringA(
 }
 
 /// The NUL-terminated string at `s` (a null pointer is empty).
-fn c_units<'a>(s: *const u16) -> &'a [u16] {
+pub(crate) fn c_units<'a>(s: *const u16) -> &'a [u16] {
     if s.is_null() {
         return &[];
     }
@@ -567,6 +567,41 @@ fn c_units<'a>(s: *const u16) -> &'a [u16] {
 #[unsafe(no_mangle)]
 pub extern "system" fn lstrlenW(s: *const u16) -> i32 {
     c_units(s).len() as i32
+}
+
+/// lstrcpynW(dst, src, n): at most n - 1 characters of `src` and a NUL
+/// into `dst`; returns `dst` (nothing is written when n is 0).
+#[unsafe(no_mangle)]
+pub extern "system" fn lstrcpynW(dst: *mut u16, src: *const u16, n: i32) -> *mut u16 {
+    if dst.is_null() || n <= 0 {
+        return dst;
+    }
+    let s = c_units(src);
+    let len = s.len().min(n as usize - 1);
+    // SAFETY: the caller's buffer of n characters; `src` read up to its NUL.
+    unsafe {
+        core::ptr::copy(s.as_ptr(), dst, len);
+        *dst.add(len) = 0;
+    }
+    dst
+}
+
+/// lstrcatW(dst, src): `src` appended to `dst`; returns `dst` (null for a
+/// null `dst`).
+#[unsafe(no_mangle)]
+pub extern "system" fn lstrcatW(dst: *mut u16, src: *const u16) -> *mut u16 {
+    if dst.is_null() {
+        return dst;
+    }
+    let at = c_units(dst).len();
+    let s = c_units(src);
+    // SAFETY: the caller's buffer, large enough for both (lstrcatW's
+    // contract); `src` read up to its NUL.
+    unsafe {
+        core::ptr::copy(s.as_ptr(), dst.add(at), s.len());
+        *dst.add(at + s.len()) = 0;
+    }
+    dst
 }
 
 /// lstrlenA: the length in bytes (0 for a null pointer).

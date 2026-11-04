@@ -15,6 +15,7 @@ same every run; the SHA-256s in the manifests are computed here.
 import hashlib
 import os
 import shutil
+import subprocess
 import sys
 import zipfile
 
@@ -23,6 +24,7 @@ OUT = os.path.join(ROOT, "user", "pk_install_test", "source")
 HELLO = open(os.path.join(ROOT, "user", "bin", "hello.exe"), "rb").read()
 STAMP = (2026, 11, 3, 0, 0, 0)
 URL = "https://packages.gala.invalid/"
+KEPT = {}
 
 
 def make_zip(name, files):
@@ -34,6 +36,39 @@ def make_zip(name, files):
             info.external_attr = (0o40755 << 16) | 0x10 if data is None else 0o644 << 16
             info.compress_type = zipfile.ZIP_STORED if data is None else zipfile.ZIP_DEFLATED
             z.writestr(info, b"" if data is None else data)
+    return hashlib.sha256(open(path, "rb").read()).hexdigest().upper()
+
+
+def installer(name, data):
+    path = os.path.join(OUT, "installers", name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+    return hashlib.sha256(data).hexdigest().upper()
+
+
+def nsis_installer(version):
+    """pknsis-<version>.exe from nsis/pknsis.nsi with makensis (NSIS 3,
+    `apt install nsis`; the build is reproducible). Without makensis the
+    checked-in installer is kept."""
+    name = f"pknsis-{version}.exe"
+    path = os.path.join(OUT, "installers", name)
+    makensis = shutil.which("makensis")
+    if makensis is None:
+        print(f"makensis not found: keeping {name}", file=sys.stderr)
+        return hashlib.sha256(KEPT[name]).hexdigest().upper()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    subprocess.run(
+        [
+            makensis,
+            "-V2",
+            f"-DVERSION={version}",
+            "-DHELLO=" + os.path.join(ROOT, "user", "bin", "hello.exe"),
+            "-DOUTFILE=" + path,
+            os.path.join(ROOT, "user", "pk_install_test", "nsis", "pknsis.nsi"),
+        ],
+        check=True,
+    )
     return hashlib.sha256(open(path, "rb").read()).hexdigest().upper()
 
 
@@ -59,6 +94,12 @@ def pkhello_zip(version):
 
 
 def main():
+    # Installers built by tools that may be missing are kept across the
+    # clean-up below.
+    for name in ["pknsis-1.0.0.exe", "pknsis-1.1.0.exe"]:
+        path = os.path.join(OUT, "installers", name)
+        if os.path.exists(path):
+            KEPT[name] = open(path, "rb").read()
     for d in [os.path.join(OUT, "installers"), os.path.join(OUT, "manifests", "g", "GalaTest")]:
         if os.path.isdir(d):
             shutil.rmtree(d)
@@ -194,7 +235,12 @@ ManifestType: singleton
 ManifestVersion: 1.6.0
 """,
     )
-    # An installer type of a later stage.
+    # A stand-in for an Inno Setup installer: hello.exe, which ignores the
+    # switches and registers nothing, so the install fails with "no
+    # uninstall entry" (exit 4). Real Inno Setup installers are 32-bit
+    # programs (gala has no WOW64 yet) and the Inno Setup compiler runs
+    # only on Windows; the host tests run Inno's switches against a fake.
+    hi = installer("innosetup-2.0.exe", HELLO)
     write(
         "g/GalaTest/InnoSetup/2.0/GalaTest.InnoSetup.yaml",
         f"""PackageIdentifier: GalaTest.InnoSetup
@@ -203,18 +249,59 @@ PackageLocale: en-US
 Publisher: gala-os
 PackageName: InnoSetup
 License: Proprietary
-ShortDescription: An Inno Setup installer (ROADMAP PK stage 3)
+ShortDescription: A stand-in Inno Setup installer that registers nothing
 Installers:
 - Architecture: x64
   InstallerType: inno
-  InstallerUrl: {URL}setup.exe
-  InstallerSha256: {"A" * 64}
-  InstallerSwitches:
-    Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+  InstallerUrl: {URL}innosetup-2.0.exe
+  InstallerSha256: {hi}
 ManifestType: singleton
 ManifestVersion: 1.6.0
 """,
     )
+    # An installer type of a later stage.
+    write(
+        "g/GalaTest/Msix/1.0.0/GalaTest.Msix.yaml",
+        f"""PackageIdentifier: GalaTest.Msix
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: Msix
+License: Proprietary
+ShortDescription: An MSIX package (ROADMAP PK stage 4)
+Installers:
+- Architecture: x64
+  InstallerType: msix
+  InstallerUrl: {URL}msix-1.0.0.msix
+  InstallerSha256: {"A" * 64}
+ManifestType: singleton
+ManifestVersion: 1.6.0
+""",
+    )
+    # A real NSIS installer (nsis/pknsis.nsi, built with makensis for
+    # x64): 1.0.0 and 1.1.0, per-user, its ARP entry GalaTest.PkNsis.
+    for version in ["1.0.0", "1.1.0"]:
+        h = nsis_installer(version)
+        write(
+            f"g/GalaTest/PkNsis/{version}/GalaTest.PkNsis.yaml",
+            f"""# A test package of gala-os (pk_install_test nsis).
+PackageIdentifier: GalaTest.PkNsis
+PackageVersion: {version}
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: PkNsis
+License: Proprietary
+ShortDescription: Says hello, installed by an NSIS installer
+Installers:
+- Architecture: x64
+  InstallerType: nullsoft
+  Scope: user
+  InstallerUrl: {URL}pknsis-{version}.exe
+  InstallerSha256: {h}
+ManifestType: singleton
+ManifestVersion: 1.6.0
+""",
+        )
     print("made", OUT, file=sys.stderr)
 
 

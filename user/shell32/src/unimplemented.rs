@@ -4,4 +4,5 @@
 
 gala_stubs::unimplemented_exports!("shell32.dll":
     SHBrowseForFolderW
+    SHCLSIDFromString
 );

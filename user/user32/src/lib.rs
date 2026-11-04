@@ -32,6 +32,7 @@ mod tree;
 mod unimplemented;
 mod window;
 mod winevent;
+mod wsprintf;
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -87,6 +88,12 @@ unsafe extern "system" {
     fn SetLastError(code: u32);
     fn GetStdHandle(which: u32) -> usize;
     fn WriteFile(h: usize, buf: *const u8, len: u32, written: *mut u32, ov: usize) -> i32;
+}
+
+/// Sets the thread's last error.
+pub(crate) fn set_last_error(code: u32) {
+    // SAFETY: a plain call.
+    unsafe { SetLastError(code) };
 }
 
 /// GetProcessWindowStation: gala has no window stations (NULL), which is
@@ -219,6 +226,13 @@ pub extern "system" fn CharLowerBuffW(s: *mut u16, n: u32) -> u32 {
 pub extern "system" fn CharNextW(s: *const u16) -> *const u16 {
     // SAFETY: the caller's NUL-terminated string.
     if s.is_null() || unsafe { *s } == 0 { s } else { s.wrapping_add(1) }
+}
+
+/// CharPrevW(start, current): the character before `current`, or
+/// `start` when `current` is at it (or before it).
+#[unsafe(no_mangle)]
+pub extern "system" fn CharPrevW(start: *const u16, current: *const u16) -> *const u16 {
+    if current.is_null() || current <= start { start } else { current.wrapping_sub(1) }
 }
 
 /// CharNextA: CharNextExA in the ANSI code page.
