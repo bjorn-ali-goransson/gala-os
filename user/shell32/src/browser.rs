@@ -37,12 +37,6 @@ unsafe extern "system" {
     fn GetProcAddress(module: usize, name: *const u8) -> *const c_void;
 }
 
-#[link(name = "user32", kind = "raw-dylib")]
-unsafe extern "system" {
-    fn SystemParametersInfoW(action: u32, param: u32, out: *mut c_void, ini: u32) -> i32;
-    fn GetSystemMetrics(index: i32) -> i32;
-}
-
 const E_NOTIMPL: i32 = 0x8000_4001u32 as i32;
 
 /// The size of an item ID list (each item's cb, then the 2-byte
@@ -162,6 +156,21 @@ pub extern "system" fn SHQueryUserNotificationState(state: *mut i32) -> i32 {
     S_OK
 }
 
+/// A user32 function, loaded when first needed (a static import would
+/// make every program that loads shell32 load user32).
+fn user32(name: &core::ffi::CStr) -> Option<*const c_void> {
+    const USER32: [u16; 11] = [117, 115, 101, 114, 51, 50, 46, 100, 108, 108, 0];
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let module = LoadLibraryW(USER32.as_ptr());
+        if module == 0 {
+            return None;
+        }
+        let f = GetProcAddress(module, name.as_ptr().cast());
+        (!f.is_null()).then_some(f)
+    }
+}
+
 /// APPBARDATA (x64): cbSize, hWnd, uCallbackMessage, uEdge, rc, lParam.
 #[repr(C)]
 pub struct AppBarData {
@@ -192,13 +201,18 @@ pub extern "system" fn SHAppBarMessage(message: u32, data: *mut AppBarData) -> u
                 return 0;
             }
             let mut work = [0i32; 4];
-            // SAFETY: our RECT; SM_CXSCREEN, SM_CYSCREEN.
+            let (Some(spi), Some(metrics)) =
+                (user32(c"SystemParametersInfoW"), user32(c"GetSystemMetrics"))
+            else {
+                return 0;
+            };
+            // SAFETY: user32's SystemParametersInfoW(UINT, UINT, PVOID, UINT)
+            // and GetSystemMetrics(int); our RECT; SM_CXSCREEN, SM_CYSCREEN.
             let (ok, w, h) = unsafe {
-                (
-                    SystemParametersInfoW(SPI_GETWORKAREA, 0, work.as_mut_ptr().cast(), 0),
-                    GetSystemMetrics(0),
-                    GetSystemMetrics(1),
-                )
+                let spi: extern "system" fn(u32, u32, *mut c_void, u32) -> i32 =
+                    core::mem::transmute(spi);
+                let metrics: extern "system" fn(i32) -> i32 = core::mem::transmute(metrics);
+                (spi(SPI_GETWORKAREA, 0, work.as_mut_ptr().cast(), 0), metrics(0), metrics(1))
             };
             // No screen, no taskbar: the work area is the whole screen.
             if ok == 0 || work[3] >= h {
