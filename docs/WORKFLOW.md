@@ -230,6 +230,19 @@ QEMU); boot the scenario once those pass.
   fails to bind as a "missing export": implement the function where it
   is forwarded from instead (normaliz's IdnToUnicode).
 
+- **Windows live in a session** (RS step B2): kernel code reaches the
+  window registry, WinEvent hooks and shasha's desktop through the
+  process (`process.desk.windows` / `.hooks` / `.shell`), never a global;
+  `desktop::screen(shell)` is None for a session the console does not
+  show. A GUI test run with `as=system` is in session 0: its windows
+  exist (registry, messages) but are not drawn and get no input (`desktop:
+  session 0's windows are not shown` in the log), so screen checks need
+  the boot user (session 1). An HWND of another session is no window
+  (ERROR_INVALID_WINDOW_HANDLE; `events=window` and the log say where it
+  is). On real Windows a child started in another session needs
+  STARTUPINFO.lpDesktop `winsta0\default` and a token that may open it
+  (SYSTEM's, moved with SetTokenInformation(TokenSessionId), as
+  session_test does), or user32 fails to initialize.
 - A test that runs a process at Low integrity (uipi_test, gala_cli_test)
   cannot signal or open the parent's named events (no write up: a
   Medium object's default label): pass inherited handles instead. A

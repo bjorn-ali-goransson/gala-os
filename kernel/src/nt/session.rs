@@ -29,12 +29,21 @@
 //! another session makes that session's directories on first use (until
 //! the session manager of step B4 creates sessions and refuses unknown
 //! ones). Sessions are never removed yet.
+//!
+//! Step B2: each session has its desktop ([`Desk`], Windows' window
+//! station WinSta0 and its desktop "Default"): the window registry, the
+//! WinEvent hooks and shasha's desktop, each behind its own lock, reached
+//! through the caller's process (`Process::desk`). Nothing about windows
+//! crosses sessions. The window stations' directories exist as on
+//! Windows (`\Windows\WindowStations` for session 0,
+//! `\Sessions\<n>\Windows\WindowStations` for the others); window
+//! station and desktop objects in them are later work.
 
 use alloc::vec::Vec;
 
 use super::object::ObjectRef;
 use super::status::NtStatus;
-use crate::mm::heap::TryVec;
+use crate::mm::heap::{KArc, TryVec};
 use crate::sync::IrqMutex;
 
 /// Services and SYSTEM.
@@ -51,6 +60,33 @@ pub struct Session {
     pub id: u32,
     /// Its BaseNamedObjects directory.
     pub bno: ObjectRef,
+    /// Its desktop.
+    pub desk: KArc<Desk>,
+}
+
+/// A session's desktop (WinSta0\Default; one per session until several
+/// window stations and desktops are wanted): what the session's GUI
+/// programs share, and nothing another session sees.
+pub struct Desk {
+    pub session: u32,
+    /// Every window of the session's processes (FindWindow, EnumWindows,
+    /// messages between them, UIPI's filters).
+    pub windows: super::window::Windows,
+    /// SetWinEventHook's hooks and their waiting events.
+    pub hooks: super::winevent::Hooks,
+    /// shasha's desktop (drawn only while the console shows the session).
+    pub shell: super::desktop::Shell,
+}
+
+impl Desk {
+    pub const fn new(session: u32) -> Desk {
+        Desk {
+            session,
+            windows: super::window::Windows::new(),
+            hooks: super::winevent::Hooks::new(),
+            shell: super::desktop::Shell::new(session),
+        }
+    }
 }
 
 /// The sessions that exist (lock order: before the namespace's lock).
@@ -142,10 +178,28 @@ fn child(dir: &[u16], name: &str) -> Result<Vec<u16>, NtStatus> {
     Ok(p)
 }
 
+/// The NT path of session `id`'s window stations' directory:
+/// `\Windows\WindowStations` for session 0,
+/// `\Sessions\<id>\Windows\WindowStations` for the others.
+pub fn window_stations_path(id: u32) -> Result<Vec<u16>, NtStatus> {
+    let mut p = Vec::new();
+    if id == SERVICES {
+        push_str(&mut p, "\\Windows\\WindowStations")?;
+        Ok(p)
+    } else {
+        session_path(id, "\\Windows\\WindowStations")
+    }
+}
+
 /// Makes session `id`'s directories and links (see the module comment).
 fn make(id: u32) -> Result<Session, NtStatus> {
     let bno_path = bno_path(id)?;
     directory(&session_path(id, "")?)?;
+    let stations = window_stations_path(id)?;
+    // Its parent (`...\Windows`) first.
+    let parent = stations.len() - "\\WindowStations".len();
+    directory(&stations[..parent])?;
+    directory(&stations)?;
     let bno = directory(&bno_path)?;
     let mut global = Vec::new();
     push_str(&mut global, "\\BaseNamedObjects")?;
@@ -155,7 +209,8 @@ fn make(id: u32) -> Result<Session, NtStatus> {
     link(&child(&bno_path, "Local")?, &bno_path)?;
     link(&child(&bno_path, "Session")?, &bnolinks)?;
     link(&bnolink_path(id)?, &bno_path)?;
-    Ok(Session { id, bno })
+    let desk = KArc::try_new(Desk::new(id)).map_err(|_| NtStatus::NO_MEMORY)?;
+    Ok(Session { id, bno, desk })
 }
 
 /// The kernel log (host unit tests have no console: nothing).
@@ -166,12 +221,13 @@ macro_rules! log {
     };
 }
 
-/// Makes session `id` if it does not exist yet (its directories and its
-/// BNOLINKS entry). STATUS_INSUFFICIENT_RESOURCES past MAX_SESSIONS.
-pub fn ensure(id: u32) -> Result<(), NtStatus> {
+/// Makes session `id` if it does not exist yet (its directories, its
+/// BNOLINKS entry and its desktop); its desktop.
+/// STATUS_INSUFFICIENT_RESOURCES past MAX_SESSIONS.
+pub fn ensure(id: u32) -> Result<KArc<Desk>, NtStatus> {
     let mut sessions = SESSIONS.lock();
-    if sessions.iter().any(|s| s.id == id) {
-        return Ok(());
+    if let Some(s) = sessions.iter().find(|s| s.id == id) {
+        return Ok(s.desk.clone());
     }
     if sessions.len() >= MAX_SESSIONS {
         log!(warn, "session: cannot make session {id}: {MAX_SESSIONS} sessions exist");
@@ -184,6 +240,7 @@ pub fn ensure(id: u32) -> Result<(), NtStatus> {
             return Err(e);
         }
     };
+    let desk = session.desk.clone();
     sessions.try_push(session).map_err(|_| NtStatus::NO_MEMORY)?;
     drop(sessions);
     let path = bno_path(id)?;
@@ -193,7 +250,7 @@ pub fn ensure(id: u32) -> Result<(), NtStatus> {
         "session",
         format_args!(r#""id":{id},"bno":{}"#, crate::events::Utf16(&path)),
     );
-    Ok(())
+    Ok(desk)
 }
 
 /// A UTF-16 path as text (for the log).
@@ -214,6 +271,105 @@ pub fn bno(id: u32) -> Option<ObjectRef> {
     SESSIONS.lock().iter().find(|s| s.id == id).map(|s| s.bno.clone())
 }
 
+/// Session `id`'s desktop, if the session exists.
+pub fn desk(id: u32) -> Option<KArc<Desk>> {
+    SESSIONS.lock().iter().find(|s| s.id == id).map(|s| s.desk.clone())
+}
+
+/// The session other than `except` whose window registry holds `hwnd`,
+/// and the window's process (an HWND asked for across sessions: the log
+/// says where it is). Takes each registry's lock in turn, none held.
+pub fn window_elsewhere(hwnd: u64, except: u32) -> Option<(u32, u32)> {
+    let mut desks: [Option<KArc<Desk>>; MAX_SESSIONS] = [const { None }; MAX_SESSIONS];
+    for (slot, s) in desks.iter_mut().zip(SESSIONS.lock().iter()) {
+        *slot = Some(s.desk.clone());
+    }
+    desks
+        .iter()
+        .flatten()
+        .filter(|d| d.session != except)
+        .find_map(|d| d.windows.holds(hwnd).map(|pid| (d.session, pid)))
+}
+
+/// How many times a process asked for another session's window.
+static CROSSED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Process `pid` of session `session` asked (`what`: post, send, query)
+/// for window `hwnd`, which is not in its session: if another session
+/// holds it, the log says so (the first 32 times) and the event stream
+/// too (`"ev":"window","op":"other session"`), so an
+/// ERROR_INVALID_WINDOW_HANDLE across sessions explains itself.
+pub fn note_window_elsewhere(hwnd: u64, pid: u64, session: u32, what: &str) {
+    let Some((there, owner)) = window_elsewhere(hwnd, session) else { return };
+    let n = CROSSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n < 32 {
+        log!(
+            info,
+            "window: pid {pid} (session {session}) {what} window {hwnd:#x} of pid {owner} in session {there}: not visible across sessions"
+        );
+    }
+    crate::events::emit(
+        crate::events::Category::Window,
+        "window",
+        format_args!(
+            r#""op":"other session","what":{},"hwnd":{hwnd},"pid":{pid},"session":{session},"owner":{owner},"owner_session":{there}"#,
+            crate::events::Str(what)
+        ),
+    );
+}
+
+/// The state dump's sessions part: per session its window registry's,
+/// hooks' and shasha's figures and its top-level windows (at most 16).
+#[cfg_attr(test, allow(unused_variables))]
+pub fn dump() {
+    let mut desks: [Option<KArc<Desk>>; MAX_SESSIONS] = [const { None }; MAX_SESSIONS];
+    for (slot, s) in desks.iter_mut().zip(SESSIONS.lock().iter()) {
+        *slot = Some(s.desk.clone());
+    }
+    log!(
+        info,
+        "statedump: sessions (windows asked for across sessions: {}):",
+        CROSSED.load(core::sync::atomic::Ordering::Relaxed)
+    );
+    for d in desks.iter().flatten() {
+        let c = d.windows.counts();
+        let (hooks, events) = d.hooks.counts();
+        let (on_screen, painted) = d.shell.counts();
+        log!(
+            info,
+            "statedump: session {}: {} windows ({} top-level), {} queues, {} posted, {} sent, {} filters, {} hooks ({} events waiting), shasha: {} ({} windows{})",
+            d.session,
+            c.windows,
+            c.top_level,
+            c.queues,
+            c.posted,
+            c.sent,
+            c.filters,
+            hooks,
+            events,
+            if d.shell.shown() { "shown" } else { "not shown" },
+            on_screen,
+            if painted { ", drawn" } else { "" },
+        );
+        let mut top = [super::window::Info::default(); 16];
+        let n = d.windows.top_level(&mut top);
+        for w in &top[..n] {
+            log!(
+                info,
+                "statedump: session {} window {:#x} pid {} tid {} class {} text {} rect {:?} flags {:#x}",
+                d.session,
+                w.hwnd,
+                w.pid,
+                w.tid,
+                Plain(&w.class[..w.class_len as usize]),
+                Plain(&w.text[..w.text_len as usize]),
+                w.rect,
+                w.flags
+            );
+        }
+    }
+}
+
 /// The ids of the sessions that exist, in the order they were made.
 pub fn ids() -> Result<Vec<u32>, NtStatus> {
     let sessions = SESSIONS.lock();
@@ -230,7 +386,7 @@ pub fn ids() -> Result<Vec<u32>, NtStatus> {
 pub fn init() -> Result<(), NtStatus> {
     SESSIONS.lock().clear();
     ensure(SERVICES)?;
-    ensure(CONSOLE)
+    ensure(CONSOLE).map(drop)
 }
 
 #[cfg(test)]
@@ -339,5 +495,50 @@ mod tests {
         assert!(KArc::ptr_eq(&dir, &found));
         assert_eq!(target("\\Sessions\\BNOLINKS\\7"), w("\\Sessions\\7\\BaseNamedObjects"));
         assert_eq!(ids().unwrap().iter().filter(|&&i| i == 7).count(), 1);
+        // Its desktop, the same each time; its window stations' directory.
+        let desk = ensure(7).unwrap();
+        assert!(KArc::ptr_eq(&desk, &super::desk(7).unwrap()));
+        assert_eq!(desk.session, 7);
+        assert!(
+            lookup(None, &w("\\Sessions\\7\\Windows\\WindowStations"), true)
+                .unwrap()
+                .as_directory()
+                .is_some()
+        );
+    }
+
+    /// Step B2: a window registered in one session's registry is no
+    /// window in another's; the HWNDs differ (one counter).
+    #[test]
+    fn windows_stay_in_their_session() {
+        setup();
+        let (a, b) = (ensure(11).unwrap(), ensure(12).unwrap());
+        let info = crate::nt::window::Info::default();
+        let ha = a.windows.register(1101, info).unwrap();
+        let hb = b.windows.register(1201, info).unwrap();
+        assert_ne!(ha, hb);
+        assert!(a.windows.query(ha).is_some() && a.windows.query(hb).is_none());
+        assert!(b.windows.query(hb).is_some() && b.windows.query(ha).is_none());
+        let mut top = [0u64; 8];
+        let n = a.windows.children(0, &mut top);
+        assert!(top[..n.min(8)].contains(&ha) && !top[..n.min(8)].contains(&hb));
+        let from = crate::nt::window::Sender { pid: 1101, level: 0x2000 };
+        assert!(matches!(
+            a.windows.post(from, 0x2000, hb, 0x400, 0, 0),
+            Err(NtStatus::INVALID_HANDLE)
+        ));
+        b.windows.has_queue(1201, 5).unwrap();
+        assert!(matches!(
+            a.windows.post_thread(from, 0x2000, 5, 0x400, 0, 0),
+            Err(NtStatus::INVALID_CID)
+        ));
+        // Where an HWND asked for across sessions is.
+        assert_eq!(window_elsewhere(hb, 11), Some((12, 1201)));
+        assert_eq!(window_elsewhere(hb, 12), None);
+        // The window stations' directories, session 0's at \Windows.
+        assert!(lookup(None, &w("\\Windows\\WindowStations"), true).is_ok());
+        assert_eq!(window_stations_path(3).unwrap(), w("\\Sessions\\3\\Windows\\WindowStations"));
+        a.windows.process_ended(1101);
+        b.windows.process_ended(1201);
     }
 }

@@ -32,9 +32,13 @@ pub enum Category {
     /// The clock's calibration and its check against the RTC (a wrong
     /// clock is written whatever the mask: `emit_always`).
     Clock = 1024,
+    /// Windows (RS step B2): registered and gone (with their session),
+    /// and an HWND asked for from another session.
+    Window = 2048,
 }
 
-const NAMES: [(&str, u32); 11] = [
+const NAMES: [(&str, u32); 12] = [
+    ("window", Category::Window as u32),
     ("display", Category::Display as u32),
     ("net", Category::Net as u32),
     ("logon", Category::Logon as u32),

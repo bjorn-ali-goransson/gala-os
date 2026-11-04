@@ -123,12 +123,15 @@ pub fn window_action(r: &Request) -> Result<Option<Action>, NtStatus> {
 }
 
 /// Who asks (GalaDesktopAction's caller): its process and integrity
-/// level for UIPI, and the primary token Start gives the program (a copy
-/// of the caller's).
+/// level for UIPI, the primary token Start gives the program (a copy of
+/// the caller's) and its session's desktop: window actions and lists
+/// never leave it (ROADMAP RS step B2; another session's HWND is no
+/// window, STATUS_INVALID_HANDLE).
 pub struct Caller {
     pub pid: u32,
     pub level: u32,
     pub token: Option<super::object::ObjectRef>,
+    pub desk: crate::mm::heap::KArc<super::session::Desk>,
 }
 
 /// Runs request `r` for `caller`; what it writes to the caller. A window
@@ -144,10 +147,11 @@ pub fn run(
     if let Some(action) = window_action(r)? {
         // Without shasha nothing is on the screen to act on (checked
         // before the window, so a server always says so).
-        if desktop::screen().is_none() {
+        let shell = &caller.desk.shell;
+        if desktop::screen(shell).is_none() {
             return Err(NtStatus::NOT_SUPPORTED);
         }
-        let info = super::window::query(r.hwnd).ok_or(NtStatus::INVALID_HANDLE)?;
+        let info = caller.desk.windows.query(r.hwnd).ok_or(NtStatus::INVALID_HANDLE)?;
         if info.desktop == 0 {
             return Err(NtStatus::INVALID_HANDLE);
         }
@@ -156,24 +160,24 @@ pub fn run(
         if !super::window::may_act_on(from, info.pid, level) {
             return Err(NtStatus::ACCESS_DENIED);
         }
-        desktop::window_action(u64::from(info.pid), info.desktop, action)?;
+        desktop::window_action(shell, u64::from(info.pid), info.desktop, action)?;
         return Ok(out);
     }
     match r.action {
         ACTION_START => {
-            let pid = start(&r.text, caller.token.clone())?;
+            let pid = start(&r.text, caller.token.clone(), &caller.desk.shell)?;
             out.try_extend_from_slice(&pid.to_le_bytes()).map_err(|_| NtStatus::NO_MEMORY)?;
         }
         ACTION_WINDOWS => {
-            let listed = desktop::list_windows()?;
+            let listed = desktop::list_windows(&caller.desk.shell)?;
             list_header(&mut out, listed.len())?;
             for w in &listed {
-                let hwnd = super::window::hwnd_of_desktop(w.owner as u32, w.id).unwrap_or(0);
+                let hwnd = caller.desk.windows.hwnd_of_desktop(w.owner as u32, w.id).unwrap_or(0);
                 window_entry(&mut out, hwnd, w)?;
             }
         }
         ACTION_PROGRAMS => {
-            if desktop::screen().is_none() {
+            if desktop::screen(&caller.desk.shell).is_none() {
                 return Err(NtStatus::NOT_SUPPORTED);
             }
             let programs = desktop::start_menu();
@@ -185,7 +189,7 @@ pub fn run(
         ACTION_WALLPAPER => {
             let mut name = [0u8; 32];
             let name = ascii(&r.text, &mut name).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
-            desktop::set_wallpaper(name)?;
+            desktop::set_wallpaper(&caller.desk.shell, name)?;
         }
         _ => return Err(NtStatus::INVALID_PARAMETER),
     }
@@ -267,14 +271,18 @@ const SEARCH: [&str; 3] = ["C:\\gala\\", "C:\\", "C:\\Windows\\System32\\"];
 /// `text` as its arguments, under primary token `token` (see
 /// `start_path`); its process id. STATUS_OBJECT_NAME_NOT_FOUND when there
 /// is no such program.
-pub fn start(text: &[u16], token: Option<super::object::ObjectRef>) -> Result<u64, NtStatus> {
+pub fn start(
+    text: &[u16],
+    token: Option<super::object::ObjectRef>,
+    shell: &desktop::Shell,
+) -> Result<u64, NtStatus> {
     let mut buf = [0u8; MAX_TEXT];
     let text = ascii(text, &mut buf).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
     let (program, args) = split_program(text);
     if program.is_empty() {
         return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
     }
-    let path = resolve(program)?;
+    let path = resolve(program, shell)?;
     start_path(path, args, token)
 }
 
@@ -298,13 +306,14 @@ pub fn start_path(
     }
 }
 
-/// The path of the program `name` names (see `start`).
-fn resolve(name: &str) -> Result<&'static str, NtStatus> {
+/// The path of the program `name` names (see `start`; the start menu's
+/// names when `shell`'s desktop is on the screen).
+fn resolve(name: &str, shell: &desktop::Shell) -> Result<&'static str, NtStatus> {
     let mut path = [0u8; MAX_TEXT + 32];
     let has_drive = name.len() > 2 && name.as_bytes()[1] == b':';
     if !has_drive {
         // A start menu name.
-        if desktop::screen().is_some()
+        if desktop::screen(shell).is_some()
             && let Some(p) =
                 desktop::start_menu().iter().find(|p| p.name.eq_ignore_ascii_case(name))
         {

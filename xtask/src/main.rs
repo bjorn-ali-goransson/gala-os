@@ -585,6 +585,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("session_test", "secur32.dll", "Windows/System32"),
     ("session_test", "bcryptprimitives.dll", "Windows/System32"),
     ("session_test", "bcrypt.dll", "Windows/System32"),
+    ("session_test", "user32.dll", "Windows/System32"),
+    ("session_test", "gdi32.dll", "Windows/System32"),
     ("session_test", "user/access_test/access_test.regseed", "registry"),
     ("lsa_test", "ntdll.dll", "Windows/System32"),
     ("lsa_test", "kernel32.dll", "Windows/System32"),
@@ -2713,6 +2715,18 @@ enum Boot {
 /// Lines the event stream (debug console) of a scenario must contain.
 const EVENT_EXPECT: &[(&str, &[&str])] = &[
     (
+        // RS step B2: each window is registered in its own session, and
+        // HWNDs asked for across sessions are named.
+        "session_test",
+        &[
+            r#""ev":"window","op":"create""#,
+            r#""ev":"window","op":"describe""#,
+            r#""session":0,"class":"GalaSessionTestS0""#,
+            r#""session":1,"class":"GalaSessionTestS1""#,
+            r#""ev":"window","op":"other session""#,
+        ],
+    ),
+    (
         "sshd_server",
         &[
             r#""ev":"tcp accept""#,
@@ -3528,16 +3542,22 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["system_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
-        // Sessions, ROADMAP RS step B1 (user/session_test): run as SYSTEM
-        // (session 0), it starts a child in session 1 and checks the
-        // session ids and the per-session named objects.
+        // Sessions, ROADMAP RS steps B1 and B2 (user/session_test): run
+        // as SYSTEM (session 0), it starts a child in session 1 and checks
+        // the session ids and the per-session named objects; then a
+        // second child in session 1 and the parent each make a window
+        // the other cannot find, enumerate or message (the log says
+        // where the HWND asked for is).
         name: "session_test",
-        cmdline: "qemu_exit as=system events=process run=session_test.exe",
+        cmdline: "qemu_exit as=system events=process,window run=session_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "session: 1 made, named objects in \\Sessions\\1\\BaseNamedObjects",
             "session 0): starting at",
             "session 1): starting at",
+            "desktop: session 0's windows are not shown (the console shows session 1)",
+            "in session 0: not visible across sessions",
+            "in session 1: not visible across sessions",
             "session_test: ok",
             "exited with status 0x00000000",
         ],

@@ -26,7 +26,16 @@ use crate::sync::IrqMutex;
 /// PROCESS_PRIORITY_CLASS_NORMAL.
 pub const PRIORITY_CLASS_NORMAL: u8 = 2;
 
-pub struct Process {
+/// The personality-independent part of a process (ARCHITECTURE "Plan: a
+/// second personality (Linux)", seam 3, done with RS step B2): its
+/// identity and parent, address space, threads, credentials (the primary
+/// token), session and desktop, exit status and memory charge. The NT
+/// personality's state (handles, the PE image, ntdll's dispatchers, the
+/// job, the console, crash notes) is `Process` around it; a Linux
+/// personality would put its fd table, signal state and pid/pgid/sid
+/// around the same core. `Process` derefs to it, so `process.space`,
+/// `process.session` and the like read the core.
+pub struct Core {
     pub id: u64,
     /// The creating process's id (0: started by the kernel).
     pub parent_id: u64,
@@ -34,7 +43,6 @@ pub struct Process {
     /// The Win32 path of the executable (`C:\\gala\\x.exe`).
     pub path: &'static str,
     pub space: SharedUserSpace,
-    pub handles: IrqMutex<HandleTable>,
     /// Lock order: `vad` before `space`.
     pub vad: IrqMutex<Vad>,
     /// Mapped section views (lock order: `views`, then `vad`, then `space`).
@@ -46,6 +54,32 @@ pub struct Process {
     exit_status: IrqMutex<Option<NtStatus>>,
     /// Signaled when the process has ended.
     pub dispatcher: Dispatcher,
+    /// NT times (ProcessTimes); exit time 0 while it runs.
+    pub create_time: u64,
+    pub exit_time: IrqMutex<u64>,
+    /// A page fault found no free frame (logged once).
+    pub oom_logged: core::sync::atomic::AtomicBool,
+    /// Pages of committed private memory charged to the process
+    /// (nt::charge); set to 0 for good when it ends.
+    pub commit: core::sync::atomic::AtomicU64,
+    pub commit_ended: core::sync::atomic::AtomicBool,
+    /// The primary token (nt::token).
+    pub token: IrqMutex<ObjectRef>,
+    /// Its session (nt::session): its primary token's TokenSessionId when
+    /// it was created; fixed for its life (PEB.SessionId,
+    /// ProcessSessionInformation, where `Local\` names go).
+    pub session: u32,
+    /// Its session's desktop (nt::session::Desk): the window registry,
+    /// WinEvent hooks and shasha's desktop its windows live in.
+    pub desk: KArc<super::session::Desk>,
+}
+
+/// An NT process: its core (`Core`, shared with any later personality)
+/// and the NT personality's state.
+pub struct Process {
+    /// What every personality's process has.
+    core: Core,
+    pub handles: IrqMutex<HandleTable>,
     /// The executable's mapping: (base, size).
     pub image: (u64, u64),
     /// Its layout, whose shared frames back the executable's pages (held
@@ -56,27 +90,12 @@ pub struct Process {
     exception_dispatcher: core::sync::atomic::AtomicU64,
     /// ntdll!KiUserApcDispatcher in this process, or 0 (no user APCs run).
     pub apc_dispatcher: core::sync::atomic::AtomicU64,
-    /// NT times (ProcessTimes); exit time 0 while it runs.
-    pub create_time: u64,
-    pub exit_time: IrqMutex<u64>,
     /// The job object the process is in (nt::job).
     pub job: IrqMutex<Option<ObjectRef>>,
-    /// A page fault found no free frame (logged once).
-    pub oom_logged: core::sync::atomic::AtomicBool,
-    /// Pages of committed private memory charged to the process
-    /// (nt::charge); set to 0 for good when it ends.
-    pub commit: core::sync::atomic::AtomicU64,
-    pub commit_ended: core::sync::atomic::AtomicBool,
     /// The priority class (PROCESS_PRIORITY_CLASS_*: 2 is NORMAL), as set
     /// through ProcessPriorityClass. Recorded only: every thread runs at
     /// the normal base priority (thread.rs).
     pub priority_class: core::sync::atomic::AtomicU8,
-    /// The primary token (nt::token).
-    pub token: IrqMutex<ObjectRef>,
-    /// Its session (nt::session): its primary token's TokenSessionId when
-    /// it was created; fixed for its life (PEB.SessionId,
-    /// ProcessSessionInformation, where `Local\` names go).
-    pub session: u32,
     /// The console session its console output also goes to (a console
     /// window's), inherited by the processes it creates.
     pub console: Option<KArc<super::conhost::Session>>,
@@ -89,7 +108,20 @@ pub struct Process {
     pub personality: Personality,
 }
 
+impl core::ops::Deref for Process {
+    type Target = Core;
+
+    fn deref(&self) -> &Core {
+        &self.core
+    }
+}
+
 impl Process {
+    /// The personality-independent part.
+    pub fn core(&self) -> &Core {
+        &self.core
+    }
+
     /// Its primary token's integrity level (Medium if it has no label).
     pub fn integrity_level(&self) -> u32 {
         let token = self.token.lock().clone();
@@ -736,35 +768,38 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         None => super::token::for_new_process(None).map_err(|_| LoadError::OutOfMemory)?,
     };
     let session = super::token::session_of(&token);
-    super::session::ensure(session)?;
+    let desk = super::session::ensure(session)?;
     put_u32(&mut space, peb_addr + peb::SESSION_ID, session)?;
     let space = KArc::try_new(platform::SpaceLock::new(space))?;
     let process = KArc::try_new(Process {
-        id,
-        parent_id,
-        name,
-        path,
-        space,
+        core: Core {
+            id,
+            parent_id,
+            name,
+            path,
+            space,
+            vad: IrqMutex::new(vad),
+            views: IrqMutex::new(Vec::new()),
+            threads: IrqMutex::new(Vec::new()),
+            threads_created: core::sync::atomic::AtomicU32::new(0),
+            exit_status: IrqMutex::new(None),
+            dispatcher: Dispatcher::new(0),
+            create_time: platform::system_time(),
+            exit_time: IrqMutex::named("process.exit_time", 0),
+            oom_logged: core::sync::atomic::AtomicBool::new(false),
+            commit: core::sync::atomic::AtomicU64::new(0),
+            commit_ended: core::sync::atomic::AtomicBool::new(false),
+            token: IrqMutex::new(token),
+            session,
+            desk,
+        },
         handles: IrqMutex::new(handles),
-        vad: IrqMutex::new(vad),
-        views: IrqMutex::new(Vec::new()),
-        threads: IrqMutex::new(Vec::new()),
-        threads_created: core::sync::atomic::AtomicU32::new(0),
-        exit_status: IrqMutex::new(None),
-        dispatcher: Dispatcher::new(0),
         image: (base, u64::from(info.size_of_image)),
         _layout: image.clone(),
         exception_dispatcher: core::sync::atomic::AtomicU64::new(0),
         apc_dispatcher: core::sync::atomic::AtomicU64::new(0),
-        create_time: platform::system_time(),
-        exit_time: IrqMutex::named("process.exit_time", 0),
         job: IrqMutex::new(None),
-        oom_logged: core::sync::atomic::AtomicBool::new(false),
-        commit: core::sync::atomic::AtomicU64::new(0),
-        commit_ended: core::sync::atomic::AtomicBool::new(false),
         priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),
-        token: IrqMutex::new(token),
-        session,
         console,
         last_exception: IrqMutex::new(None),
         // A PE image: the NT personality (an ELF loader would choose Linux).
@@ -903,9 +938,9 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
             process.id, process.session, status.0, process.personality
         ),
     );
-    super::desktop::process_ended(process.id);
-    super::window::process_ended(process.id as u32);
-    super::winevent::process_ended(process.id as u32);
+    super::desktop::process_ended(&process.desk.shell, process.id);
+    process.desk.windows.process_ended(process.id as u32);
+    process.desk.hooks.process_ended(process.id as u32);
     super::conhost::process_ended(process.id);
     super::charge::ended(process);
     // Close every handle (this breaks reference cycles through handles to
@@ -1198,36 +1233,39 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
         None => super::token::for_new_process(None).map_err(|_| NtStatus::NO_MEMORY)?,
     };
     let session = a.session.unwrap_or_else(|| super::token::session_of(&token));
-    super::session::ensure(session)?;
+    let desk = super::session::ensure(session)?;
     let space =
         KArc::try_new(platform::SpaceLock::new(a.space)).map_err(|_| NtStatus::NO_MEMORY)?;
     let commit = a.vad.private_commit();
     let process = KArc::try_new(Process {
-        id: a.id,
-        parent_id: a.parent_id,
-        name: a.name,
-        path: a.path,
-        space,
+        core: Core {
+            id: a.id,
+            parent_id: a.parent_id,
+            name: a.name,
+            path: a.path,
+            space,
+            vad: IrqMutex::new(a.vad),
+            views: IrqMutex::new(a.views),
+            threads: IrqMutex::new(Vec::new()),
+            threads_created: AtomicU32::new(a.threads_created),
+            exit_status: IrqMutex::new(None),
+            dispatcher: Dispatcher::new(0),
+            create_time: a.create_time,
+            exit_time: IrqMutex::named("process.exit_time", 0),
+            oom_logged: AtomicBool::new(false),
+            commit: AtomicU64::new(0),
+            commit_ended: AtomicBool::new(false),
+            token: IrqMutex::new(token),
+            session,
+            desk,
+        },
         handles: IrqMutex::new(HandleTable::default()),
-        vad: IrqMutex::new(a.vad),
-        views: IrqMutex::new(a.views),
-        threads: IrqMutex::new(Vec::new()),
-        threads_created: AtomicU32::new(a.threads_created),
-        exit_status: IrqMutex::new(None),
-        dispatcher: Dispatcher::new(0),
         image: a.image,
         _layout: a.layout,
         exception_dispatcher: AtomicU64::new(a.exception_dispatcher),
         apc_dispatcher: AtomicU64::new(a.apc_dispatcher),
-        create_time: a.create_time,
-        exit_time: IrqMutex::named("process.exit_time", 0),
         job: IrqMutex::new(None),
-        oom_logged: AtomicBool::new(false),
-        commit: AtomicU64::new(0),
-        commit_ended: AtomicBool::new(false),
         priority_class: AtomicU8::new(a.priority_class),
-        token: IrqMutex::new(token),
-        session,
         console: None,
         last_exception: IrqMutex::new(None),
         // The handover's PROCESSES record has no personality yet: NT is

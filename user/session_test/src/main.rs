@@ -32,6 +32,22 @@
 //! - ProcessIdToSessionId of another process: the child's (1) from the
 //!   parent; an id that is no process: ERROR_INVALID_PARAMETER; a handle
 //!   without PROCESS_QUERY_LIMITED_INFORMATION: STATUS_ACCESS_DENIED.
+//! - Windows never cross sessions (step B2; Windows Internals: each
+//!   session has its own window stations, desktops and window manager
+//!   handle table): the window stations' directories are
+//!   `\Windows\WindowStations` (session 0) and
+//!   `\Sessions\1\Windows\WindowStations`. A second child, SYSTEM's own
+//!   token moved to session 1 (as `psexec -s -i` does; lpDesktop
+//!   `winsta0\default`, which a SYSTEM token may open), and the parent each
+//!   make a top-level window and get the other's HWND (an inherited
+//!   section): to each, the other's is no window (IsWindow FALSE,
+//!   GetWindowThreadProcessId 0), FindWindowW of its class finds nothing,
+//!   EnumWindows lists only the own session's, and PostMessageW and
+//!   SendMessageTimeoutW fail with ERROR_INVALID_WINDOW_HANDLE; the
+//!   child's PostThreadMessageW to the parent's thread (which has a
+//!   queue) fails with ERROR_INVALID_THREAD_ID. Each still finds its own
+//!   window. (Window handles are per session on Windows: a value from
+//!   another session could by chance name a window here; never seen.)
 //!
 //! Prints `session_test: ok` or exits with the number of the failing check
 //! (the child's failures are 0x100 + its check, seen as its exit code).
@@ -94,6 +110,23 @@ unsafe extern "system" {
     fn OpenProcess(access: u32, inherit: Bool, id: u32) -> Handle;
     fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> Bool;
     fn WTSGetActiveConsoleSessionId() -> u32;
+    fn GetCurrentThreadId() -> u32;
+    fn GetModuleHandleW(name: *const u16) -> Handle;
+    fn CreateFileMappingW(
+        file: Handle,
+        sa: *const SecurityAttributes,
+        protect: u32,
+        size_high: u32,
+        size_low: u32,
+        name: *const u16,
+    ) -> Handle;
+    fn MapViewOfFile(
+        mapping: Handle,
+        access: u32,
+        offset_high: u32,
+        offset_low: u32,
+        size: usize,
+    ) -> *mut c_void;
 }
 
 #[link(name = "advapi32", kind = "raw-dylib")]
@@ -115,6 +148,14 @@ unsafe extern "system" {
         ret: *mut u32,
     ) -> Bool;
     fn SetTokenInformation(token: Handle, class: u32, info: *const u8, len: u32) -> Bool;
+    fn DuplicateTokenEx(
+        token: Handle,
+        access: u32,
+        sa: *const SecurityAttributes,
+        level: u32,
+        kind: u32,
+        new: *mut Handle,
+    ) -> Bool;
     fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
         text: *const u16,
         revision: u32,
@@ -135,6 +176,63 @@ unsafe extern "system" {
         startup: *const u8,
         info: *mut [usize; 3],
     ) -> Bool;
+}
+
+type Hwnd = *mut c_void;
+type WndProc = unsafe extern "system" fn(Hwnd, u32, usize, isize) -> isize;
+type EnumProc = unsafe extern "system" fn(Hwnd, isize) -> Bool;
+
+#[repr(C)]
+struct WndClassW {
+    style: u32,
+    proc_: WndProc,
+    class_extra: i32,
+    window_extra: i32,
+    instance: Handle,
+    icon: Handle,
+    cursor: Handle,
+    background: Handle,
+    menu_name: *const u16,
+    class_name: *const u16,
+}
+
+#[link(name = "user32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RegisterClassW(class: *const WndClassW) -> u16;
+    #[allow(clippy::too_many_arguments)]
+    fn CreateWindowExW(
+        ex_style: u32,
+        class: *const u16,
+        name: *const u16,
+        style: u32,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        parent: Hwnd,
+        menu: Handle,
+        instance: Handle,
+        param: *mut c_void,
+    ) -> Hwnd;
+    fn DestroyWindow(hwnd: Hwnd) -> Bool;
+    fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn IsWindow(hwnd: Hwnd) -> Bool;
+    fn FindWindowW(class: *const u16, title: *const u16) -> Hwnd;
+    fn EnumWindows(proc_: EnumProc, data: isize) -> Bool;
+    fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
+    fn PostMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Bool;
+    fn PostThreadMessageW(tid: u32, msg: u32, wparam: usize, lparam: isize) -> Bool;
+    #[allow(clippy::too_many_arguments)]
+    fn SendMessageTimeoutW(
+        hwnd: Hwnd,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+        flags: u32,
+        ms: u32,
+        result: *mut usize,
+    ) -> isize;
+    fn PeekMessageW(msg: *mut [u64; 6], hwnd: Hwnd, min: u32, max: u32, remove: u32) -> Bool;
 }
 
 #[allow(dead_code)]
@@ -187,6 +285,20 @@ const LOGON32_LOGON_INTERACTIVE: u32 = 2;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+const ERROR_INVALID_THREAD_ID: u32 = 1444;
+const TOKEN_ALL_ACCESS: u32 = 0xf01ff;
+const SECURITY_IMPERSONATION: u32 = 2;
+const TOKEN_PRIMARY: u32 = 1;
+const PAGE_READWRITE: u32 = 4;
+const FILE_MAP_ALL_ACCESS: u32 = 0xf001f;
+const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
+const WM_NULL: u32 = 0;
+const WM_USER: u32 = 0x400;
+const SMTO_ABORTIFHUNG: u32 = 2;
+const PM_NOREMOVE: u32 = 0;
+const S0_CLASS: &str = "GalaSessionTestS0";
+const S1_CLASS: &str = "GalaSessionTestS1";
 /// PEB.SessionId (x64).
 const PEB_SESSION_ID: usize = 0x2c0;
 
@@ -443,9 +555,9 @@ fn child(ready: Handle, done: Handle) -> u32 {
     run().err().unwrap_or(0)
 }
 
-/// The command line's words after the program, if the first is `child`:
-/// (ready, done) handle values.
-fn child_args() -> Option<(Handle, Handle)> {
+/// The command line's words after the program: the first (`child` or
+/// `window`) and the numbers after it (at most 6).
+fn child_args() -> Option<(bool, [usize; 6])> {
     // SAFETY: the process's command line, NUL-terminated.
     let line = unsafe {
         let p = GetCommandLineW();
@@ -454,16 +566,167 @@ fn child_args() -> Option<(Handle, Handle)> {
     // After the quoted program name.
     let rest = line.iter().skip(1).position(|&c| c == u16::from(b'"')).map(|i| &line[i + 2..])?;
     let mut words = rest.split(|&c| c == u16::from(b' ')).filter(|w| !w.is_empty());
-    if !words.next()?.iter().copied().eq("child".encode_utf16()) {
+    let first = words.next()?;
+    let window = if first.iter().copied().eq("child".encode_utf16()) {
+        false
+    } else if first.iter().copied().eq("window".encode_utf16()) {
+        true
+    } else {
         return None;
-    }
-    let mut number = || -> Option<usize> {
-        words.next()?.iter().try_fold(0usize, |v, &d| {
+    };
+    let mut numbers = [0usize; 6];
+    for (slot, word) in numbers.iter_mut().zip(words) {
+        *slot = word.iter().try_fold(0usize, |v, &d| {
             let d = d.checked_sub(u16::from(b'0')).filter(|&d| d < 10)?;
             Some(v * 10 + usize::from(d))
-        })
+        })?;
+    }
+    Some((window, numbers))
+}
+
+unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
+    // SAFETY: the arguments user32 gave us.
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// Registers class `class` and makes a (hidden) top-level window of it,
+/// titled the same; null on failure.
+fn make_window(class: &str) -> Hwnd {
+    let name = w::<32>(class);
+    let null = core::ptr::null_mut();
+    // SAFETY: plain calls with our structure and NUL-terminated names.
+    unsafe {
+        let instance = GetModuleHandleW(core::ptr::null());
+        let wc = WndClassW {
+            style: 0,
+            proc_: window_proc,
+            class_extra: 0,
+            window_extra: 0,
+            instance,
+            icon: null,
+            cursor: null,
+            background: null,
+            menu_name: core::ptr::null(),
+            class_name: name.as_ptr(),
+        };
+        if RegisterClassW(&wc) == 0 {
+            return null;
+        }
+        let hwnd = CreateWindowExW(
+            0,
+            name.as_ptr(),
+            name.as_ptr(),
+            WS_OVERLAPPEDWINDOW,
+            40,
+            40,
+            300,
+            200,
+            null,
+            null,
+            instance,
+            null,
+        );
+        // Its thread has a message queue now (PostThreadMessage needs one).
+        let mut msg = [0u64; 6];
+        PeekMessageW(&mut msg, null, 0, 0, PM_NOREMOVE);
+        hwnd
+    }
+}
+
+/// What EnumWindows saw: the own window, and the other session's window
+/// or any window of the other session's process.
+struct Seen {
+    mine: Hwnd,
+    other: Hwnd,
+    other_pid: u32,
+    saw_mine: bool,
+    saw_other: bool,
+}
+
+unsafe extern "system" fn enum_proc(hwnd: Hwnd, data: isize) -> Bool {
+    // SAFETY: `data` is the caller's Seen.
+    let seen = unsafe { &mut *(data as *mut Seen) };
+    if hwnd == seen.mine {
+        seen.saw_mine = true;
+    }
+    let mut pid = 0;
+    // SAFETY: a plain call with our output.
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    if hwnd == seen.other || pid == seen.other_pid {
+        seen.saw_other = true;
+    }
+    1
+}
+
+/// What a process sees of another session's window `other` (of process
+/// `other_pid`, class `other_class`), its own being `mine` (class
+/// `own_class`): its own only.
+fn check_other_session(
+    c: &Checks,
+    mine: Hwnd,
+    own_class: &str,
+    other: Hwnd,
+    other_pid: u32,
+    other_class: &str,
+) -> Result<(), u32> {
+    let (own_class, other_class) = (w::<32>(own_class), w::<32>(other_class));
+    // SAFETY: plain calls with our names and outputs.
+    unsafe {
+        c.ok(FindWindowW(own_class.as_ptr(), core::ptr::null()) == mine, last_error())?;
+        c.ok(IsWindow(mine) != 0, 0)?;
+        c.ok(!other.is_null(), 0)?;
+        c.eq(IsWindow(other) as u64, 0)?;
+        c.ok(FindWindowW(other_class.as_ptr(), core::ptr::null()).is_null(), 0)?;
+        let mut pid = 0;
+        c.eq(GetWindowThreadProcessId(other, &mut pid).into(), 0)?;
+        let mut seen = Seen { mine, other, other_pid, saw_mine: false, saw_other: false };
+        c.ok(EnumWindows(enum_proc, (&raw mut seen) as isize) != 0, last_error())?;
+        c.ok(seen.saw_mine, 0)?;
+        c.ok(!seen.saw_other, 0)?;
+        SetLastError(0);
+        c.eq(PostMessageW(other, WM_USER, 0, 0) as u64, 0)?;
+        c.eq(last_error(), ERROR_INVALID_WINDOW_HANDLE.into())?;
+        SetLastError(0);
+        let mut result = 0usize;
+        c.eq(
+            SendMessageTimeoutW(other, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 1000, &mut result) as u64,
+            0,
+        )?;
+        c.eq(last_error(), ERROR_INVALID_WINDOW_HANDLE.into())?;
+    }
+    Ok(())
+}
+
+/// The window child, SYSTEM in session 1: (ready, done, section, the
+/// parent's thread, window and process) from its command line. Exits
+/// with 0 or 0x200 + the failing check.
+fn window_child(args: [usize; 6]) -> u32 {
+    let [ready, done, section, parent_tid, parent_hwnd, parent_pid] = args;
+    let c = Checks::new(0x200, true);
+    let run = || -> Result<(), u32> {
+        check_own_session(&c, 1)?;
+        let mine = make_window(S1_CLASS);
+        c.ok(!mine.is_null(), last_error())?;
+        // SAFETY: plain calls; the inherited section's view (4 KiB).
+        unsafe {
+            let view = MapViewOfFile(section as Handle, FILE_MAP_ALL_ACCESS, 0, 0, 4096);
+            c.ok(!view.is_null(), last_error())?;
+            *(view as *mut u64) = mine as u64;
+        }
+        check_other_session(&c, mine, S1_CLASS, parent_hwnd as Hwnd, parent_pid as u32, S0_CLASS)?;
+        // The parent's thread has a queue, in another session.
+        // SAFETY: plain calls; inherited handles.
+        unsafe {
+            SetLastError(0);
+            c.eq(PostThreadMessageW(parent_tid as u32, WM_USER, 0, 0) as u64, 0)?;
+            c.eq(last_error(), ERROR_INVALID_THREAD_ID.into())?;
+            c.ok(SetEvent(ready as Handle) != 0, last_error())?;
+            c.eq(WaitForSingleObject(done as Handle, 30_000).into(), 0)?;
+            DestroyWindow(mine);
+        }
+        Ok(())
     };
-    Some((number()? as Handle, number()? as Handle))
+    run().err().unwrap_or(0)
 }
 
 /// Appends `v` in decimal to `line` at `*n`.
@@ -505,6 +768,13 @@ fn run() -> Result<(), u32> {
     let r = link_target_is("\\Sessions\\BNOLINKS\\1", "\\Sessions\\1\\BaseNamedObjects");
     c.ok(r == Ok(true), r.err().unwrap_or(0).into())?;
     c.eq(nt_open(NtOpenDirectoryObject, DIRECTORY_QUERY, "\\Sessions\\BNOLINKS\\1").into(), 0)?;
+    // Each session's window stations (step B2).
+    c.eq(nt_open(NtOpenDirectoryObject, DIRECTORY_QUERY, "\\Windows\\WindowStations").into(), 0)?;
+    c.eq(
+        nt_open(NtOpenDirectoryObject, DIRECTORY_QUERY, "\\Sessions\\1\\Windows\\WindowStations")
+            .into(),
+        0,
+    )?;
 
     // SAFETY: plain calls with our buffers and handles throughout.
     unsafe {
@@ -670,14 +940,129 @@ fn run() -> Result<(), u32> {
         CloseHandle(global_event);
         CloseHandle(s0_event);
     }
+    windows_across_sessions(&c)
+}
+
+/// Step B2: the parent's window (session 0) and the window child's
+/// (session 1) do not see each other.
+fn windows_across_sessions(c: &Checks) -> Result<(), u32> {
+    let null = core::ptr::null_mut();
+    let mine = make_window(S0_CLASS);
+    c.ok(!mine.is_null(), last_error())?;
+    // SAFETY: plain calls with our buffers and handles throughout.
+    unsafe {
+        // SYSTEM's own token, moved to session 1.
+        let (mut own, mut token) = (null, null);
+        c.ok(OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut own) != 0, last_error())?;
+        c.ok(
+            DuplicateTokenEx(
+                own,
+                TOKEN_ALL_ACCESS,
+                core::ptr::null(),
+                SECURITY_IMPERSONATION,
+                TOKEN_PRIMARY,
+                &mut token,
+            ) != 0,
+            last_error(),
+        )?;
+        let one = 1u32;
+        c.ok(
+            SetTokenInformation(token, TOKEN_SESSION_ID, (&raw const one).cast(), 4) != 0,
+            last_error(),
+        )?;
+        let inherit_sa =
+            SecurityAttributes { length: 24, descriptor: core::ptr::null_mut(), inherit: 1 };
+        let section = CreateFileMappingW(
+            usize::MAX as Handle,
+            &inherit_sa,
+            PAGE_READWRITE,
+            0,
+            4096,
+            core::ptr::null(),
+        );
+        c.ok(!section.is_null(), last_error())?;
+        let view = MapViewOfFile(section, FILE_MAP_ALL_ACCESS, 0, 0, 4096);
+        c.ok(!view.is_null(), last_error())?;
+        let ready = CreateEventW(&inherit_sa, 1, 0, core::ptr::null());
+        let done = CreateEventW(&inherit_sa, 1, 0, core::ptr::null());
+        c.ok(!ready.is_null() && !done.is_null(), last_error())?;
+        let mut exe = [0u16; 260];
+        let n = GetModuleFileNameW(null, exe.as_mut_ptr(), 260) as usize;
+        c.ok(n > 0 && n < 200, 0)?;
+        let mut line = [0u16; 400];
+        line[0] = u16::from(b'"');
+        line[1..=n].copy_from_slice(&exe[..n]);
+        let mut at = n + 1;
+        for ch in "\" window".encode_utf16() {
+            line[at] = ch;
+            at += 1;
+        }
+        let numbers = [
+            ready as usize,
+            done as usize,
+            section as usize,
+            GetCurrentThreadId() as usize,
+            mine as usize,
+            GetCurrentProcessId() as usize,
+        ];
+        for v in numbers {
+            line[at] = u16::from(b' ');
+            at += 1;
+            put_number(&mut line, &mut at, v);
+        }
+        // STARTUPINFOW: cb, then lpDesktop at 16 (a process started in
+        // another session names its interactive desktop).
+        let desktop = w::<32>("winsta0\\default");
+        let mut startup = [0usize; 13];
+        startup[0] = 104;
+        startup[2] = desktop.as_ptr() as usize;
+        let mut info = [0usize; 3];
+        let r = CreateProcessAsUserW(
+            token,
+            exe.as_ptr(),
+            line.as_mut_ptr(),
+            null,
+            null,
+            1,
+            CREATE_NO_WINDOW,
+            null,
+            core::ptr::null(),
+            startup.as_ptr().cast(),
+            &mut info,
+        );
+        c.ok(r != 0, last_error())?;
+        let (process, pid) = (info[0] as Handle, info[2] as u32);
+        let either = [ready, process];
+        let woke = WaitForMultipleObjects(2, either.as_ptr(), 0, 30_000);
+        let mut code = 0;
+        GetExitCodeProcess(process, &mut code);
+        // 1: the child ended first (its exit code says why).
+        c.ok(woke == 0, if woke == 1 { code.into() } else { woke.into() })?;
+        let other = *(view as *const u64) as usize as Hwnd;
+        check_other_session(c, mine, S0_CLASS, other, pid, S1_CLASS)?;
+        SetEvent(done);
+        c.eq(WaitForSingleObject(process, 30_000).into(), 0)?;
+        c.ok(GetExitCodeProcess(process, &mut code) != 0, last_error())?;
+        c.eq(code.into(), 0)?;
+        CloseHandle(info[0] as Handle);
+        CloseHandle(info[1] as Handle);
+        CloseHandle(ready);
+        CloseHandle(done);
+        CloseHandle(section);
+        CloseHandle(token);
+        CloseHandle(own);
+        DestroyWindow(mine);
+    }
     Ok(())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
-    if let Some((ready, done)) = child_args() {
+    if let Some((window, args)) = child_args() {
+        let code =
+            if window { window_child(args) } else { child(args[0] as Handle, args[1] as Handle) };
         // SAFETY: ends the process.
-        unsafe { ExitProcess(child(ready, done)) }
+        unsafe { ExitProcess(code) }
     }
     let code = match run() {
         Ok(()) => {

@@ -4434,8 +4434,7 @@ through its UninstallString), 4 (MSIX), 5 (MSI); machine scope
 command switched over to `galapkg::winget` (above), which brings
 dependencies and `gala list` matching ARP entries to packages.
 
-## Plan: sessions and remote shasha (proposed 2026-11-03)
-## Plan: sessions and remote shasha (proposed 2026-11-03; B1 done)
+## Plan: sessions and remote shasha (proposed 2026-11-03; B1 and B2 done)
 
 The owner's goals: reach gala over SSH and over something RDP-like; run
 **shasha on the client** and have it talk to the server; **multiple
@@ -4457,11 +4456,12 @@ client, or none). Nothing here is built yet unless marked "exists".
   action is a named `Action` through `Desktop::act`; its only hardware
   seams are `platform::Display` and the PS/2 input thread;
   `desktop_off.rs` proves the interface can be swapped.
-- Sessions (step B1, done 2026-11-03, `session_test`; below): session
-  ids and per-session named objects. Still one global `DESKTOP` and one
-  global window `REGISTRY` (every process sees every window, across
-  sessions too: step B2); no window stations, desktop objects or WTS API
-  beyond WTSGetActiveConsoleSessionId.
+- Sessions (steps B1 and B2, done 2026-11-03, `session_test`; below):
+  session ids, per-session named objects, and a desktop per session (its
+  window registry, WinEvent hooks and shasha desktop; nothing about
+  windows crosses sessions). No window station or desktop objects yet
+  (their directories exist), no WTS API beyond
+  WTSGetActiveConsoleSessionId.
 
 ### Step B1: session ids and per-session named objects (done)
 
@@ -4508,13 +4508,84 @@ ids), logged (`session: 2 made, named objects in
   `"session"`; the start line says it (`process x.exe (pid 4, session
   1): starting at ...`); the state dump's thread lines end with
   `session N (name)` and xtask's triage shows it.
-- **Not yet**: per-session desktops and window registries (B2: windows
-  are still visible and messageable across sessions), DosDevices per
+- **Not yet**: DosDevices per
   session or logon (`\Sessions\0\DosDevices`), SeCreateGlobalPrivilege
   for file mappings in `Global\` from a session other than 0, directory
   DACLs on the session directories, process DACLs (a standard user's
   ProcessIdToSessionId of a SYSTEM process succeeds under gala; Windows
   denies the OpenProcess), WTS API (B4).
+
+### Step B2: a desktop per session (done)
+
+`nt::session::Desk` is a session's desktop (Windows' WinSta0\Default; one
+per session until several window stations and desktops are wanted),
+made with the session (`session::ensure` returns it) and held by every
+process of the session (`Process::desk`, fixed at creation like
+`Process::session`; a handover-restored process gets its session's too).
+It holds three parts, each behind its own lock (no lock is held while
+another session's is taken):
+
+- `windows: window::Windows`: what the global `REGISTRY` was (windows,
+  message queues, posted and sent messages, listeners, UIPI filters).
+  HWNDs still come from one counter (`window::NEXT_HWND`), so a value is
+  never reused across sessions.
+- `hooks: winevent::Hooks`: SetWinEventHook's hooks and waiting events
+  (was the global `STATE`); an event raised in a session reaches only
+  that session's hooks, and wakes listeners of that session's registry.
+- `shell: desktop::Shell`: shasha's `Desktop` (was the global `DESKTOP`).
+  Only a desktop the console shows is drawn and gets the PS/2 keyboard
+  and mouse (`Shell::shown`: the console session's, `session::CONSOLE`,
+  until B3a attaches presenters); for any other session
+  `desktop::screen(shell)` is None, so its GUI calls behave as on a
+  machine without a screen (STATUS_NOT_SUPPORTED, user32 keeps its
+  windows in the registry) and the log says so once per session
+  (`desktop: session 0's windows are not shown (the console shows
+  session 1)`). The wallpaper picture (`PICTURE`, the boot's choice) and
+  the server-profile flags stay global: they are machine settings, not
+  window state. The server kernel's `desktop_off::Shell` is empty.
+
+Every window system call reaches the caller's desk
+(`call.process.desk.windows` / `.hooks` / `.shell`), and so does
+GalaDesktopAction (`action::Caller::desk`: `gala windows` lists the
+caller's session, a window action on another session's HWND is
+STATUS_INVALID_HANDLE, `gala start` resolves start-menu names only when
+the caller's desktop is shown). Process and thread ends clean their
+session's registry, hooks and shell.
+
+What Windows does, and session_test checks (a SYSTEM parent in session
+0 and a child, SYSTEM's token moved to session 1, each with a window,
+handing each other its HWND): IsWindow FALSE, GetWindowThreadProcessId
+0, FindWindowW of the other's class NULL, EnumWindows without the
+other's, PostMessageW and SendMessageTimeoutW fail with
+ERROR_INVALID_WINDOW_HANDLE (Windows' window handle tables are per
+session: another session's HWND is no window here), PostThreadMessageW
+to the other session's thread fails with ERROR_INVALID_THREAD_ID. These
+fail as an unknown HWND does, so before UIPI. The window stations'
+directories exist as Windows lays them out: `\Windows\WindowStations`
+(session 0) and `\Sessions\<n>\Windows\WindowStations`; no objects in
+them yet (GetProcessWindowStation still returns NULL, which OpenSSL
+reads as "not interactive").
+
+**Observability**: event category `window` (`events=window`): `"op":
+"create"` (hwnd, parent, pid, session) and `"destroy"` from
+GalaWindowRegister/Unregister, `"describe"` (adds tid, class and text)
+at the first update that carries a class (user32 registers a window
+before it knows them), and `"op":"other session"` when a
+process asks about, sends or posts to an HWND its session does not hold
+but another does (also logged, the first 32 times: `window: pid 20
+(session 1) asked about window 0x20000 of pid 4 in session 0: not
+visible across sessions`), so an ERROR_INVALID_WINDOW_HANDLE across
+sessions explains itself. The state dump has a sessions part
+(`session::dump`): per session its windows (top-level), queues, posted
+and sent messages, filters, hooks and waiting events, whether shasha
+shows it and how many windows it has there, then each top-level window
+(hwnd, pid, tid, class, text, rectangle, flags; at most 16), and how
+many times a window was asked for across sessions.
+
+Host tests: `session::tests::windows_stay_in_their_session` (two
+sessions' registries, posts and thread posts across them, where an HWND
+is), `window::tests` and `winevent::tests` on their own `Windows` /
+`Hooks` (another session's hooks see nothing).
 
 ### Target
 
@@ -4534,8 +4605,9 @@ Session (id, its object directory, its token defaults, presenter)
    ProcessIdToSessionId and TokenSessionId agree. Numbering: 0 for
    services and SYSTEM (sshd and its logons are session 0 on Windows
    too), 1 for the local console, 2+ for remote logons.
-2. **Per-session desktop and window registry**: the `DESKTOP` and
-   `REGISTRY` statics become fields of the session's desktop, each its own
+2. **Per-session desktop and window registry** (done, step B2 above):
+   the `DESKTOP` and `REGISTRY` statics become fields of the session's
+   desktop, each its own
    `sync::IrqMutex`, reached through the caller's session. HWNDs keep one
    global counter; entries carry their desktop and lookups filter by the
    caller's. FindWindow, EnumWindows, Send/PostMessage, SetWindowPos,
@@ -4712,7 +4784,17 @@ source).
      the state and hang dumps.
 3. **Core process vs NT process**, with RS B2 (B1 has moved session ids
    onto processes from tokens; B2 removes the global statics): split
-   `Process` in the same pass.
+   `Process` in the same pass. **Done (2026-11-03)**: `nt::process::Core`
+   holds the id, parent, name and path, the address space (space, VAD,
+   views), threads (and how many were made), exit status and its
+   dispatcher, times, the primary token, the session and its desktop,
+   and the commit charge; `Process` is the NT personality around it
+   (handle table, PE image and layout, ntdll's exception and APC
+   dispatchers, job, priority class, console, crash note) and derefs to
+   its `Core` (`process.space` reads the core; `Process::core()` names
+   it). `Core` still lives in `nt::process` and uses NT types (the
+   token, ObjectRef threads): moving it out of `nt` comes with seam 2's
+   dispatcher and seam 5's core objects.
 4. **File-system metadata**, while persistence is young: a per-directory
    case-sensitivity flag exposed to NT as Windows' own
    FileCaseSensitiveInformation (tested against Windows 10 1803+); a
@@ -5605,7 +5687,8 @@ steps, each test first:
    GetClassName, GetWindowRect, GetDlgCtrlID, GetDlgItem,
    GetWindowLongPtr (style, ex style, id, parent), GW_CHILD and
    EnumChildWindows; EnumWindows, FindWindow and FindWindowEx search
-   every process's windows. The kernel drops a process's windows when
+   every process's windows of the caller's session (RS step B2: the
+   registry is per session). The kernel drops a process's windows when
    it ends. Limits: the text is what user32 last mirrored (an edit's
    typed text is not; step 3's WM_GETTEXT across processes fixes that),
    z order is per process (EnumWindows' order across processes is not
