@@ -278,7 +278,7 @@ fn guard_hit(process: &Process, vad: &mut vad::Vad, addr: u64, protect: u32) -> 
 /// Re-applies VAD state to the page tables for `[start, start + size)`:
 /// committed pages get their flags, others lose their frame. The caller
 /// holds the VAD lock from its change to this (see `resolve_once`).
-fn sync_range(process: &Process, vad: &vad::Vad, start: u64, size: u64) {
+pub fn sync_range(process: &Process, vad: &vad::Vad, start: u64, size: u64) {
     let mut space = process.space.lock();
     let mut addr = start;
     while addr < start + size {

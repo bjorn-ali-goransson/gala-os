@@ -12,6 +12,7 @@ use super::sync::HwCell;
 
 const IA32_GS_BASE: u32 = 0xc000_0101;
 const IA32_KERNEL_GS_BASE: u32 = 0xc000_0102;
+const IA32_FS_BASE: u32 = 0xc000_0100;
 
 #[repr(C)]
 pub struct PerCpu {
@@ -27,6 +28,10 @@ pub struct PerCpu {
     /// The personality of the thread running here (`Personality::index`),
     /// whose dispatcher its system calls go to (`syscall::dispatch`).
     personality: u64,
+    /// The FS base loaded for user mode (IA32_FS_BASE), kept here so a
+    /// switch between threads with the same one (every NT thread: 0)
+    /// costs no MSR write.
+    user_fs_base: u64,
 }
 
 impl PerCpu {
@@ -38,6 +43,7 @@ impl PerCpu {
             index: 0,
             tss: core::ptr::null_mut(),
             personality: 0,
+            user_fs_base: 0,
         }
     }
 }
@@ -77,6 +83,8 @@ pub unsafe fn init(block: *mut PerCpu, index: u32, tss: *mut Tss) {
         (*block).tss = tss;
         cpu::wrmsr(IA32_GS_BASE, block as u64);
         cpu::wrmsr(IA32_KERNEL_GS_BASE, 0);
+        cpu::wrmsr(IA32_FS_BASE, 0);
+        (*block).user_fs_base = 0;
     }
 }
 
@@ -163,4 +171,22 @@ pub fn set_user_gs_base(base: u64) {
     // SAFETY: while in kernel mode this MSR only holds the user's GS base;
     // any value is harmless to the kernel.
     unsafe { cpu::wrmsr(IA32_KERNEL_GS_BASE, base) };
+}
+
+/// Sets the FS base user mode sees (the kernel does not use FS; a Linux
+/// thread's TLS pointer). Written to the MSR only when it changes.
+/// Called with interrupts disabled (a context switch, or under the
+/// scheduler's lock); `base` must be canonical.
+pub fn set_user_fs_base(base: u64) {
+    let block = current();
+    // SAFETY: the block is this CPU's and interrupts are off, so no switch
+    // reads or writes the field meanwhile; IA32_FS_BASE only affects
+    // FS-relative accesses, which the kernel never makes, and a canonical
+    // value cannot fault.
+    unsafe {
+        if (*block).user_fs_base != base {
+            cpu::wrmsr(IA32_FS_BASE, base);
+            (*block).user_fs_base = base;
+        }
+    }
 }

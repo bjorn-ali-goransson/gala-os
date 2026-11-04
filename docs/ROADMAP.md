@@ -2531,6 +2531,26 @@ AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
    depending on lx_abi; then signals (frames from `lx_abi::signal`),
    threads/futex, clocks and polling, ptys over the core terminal object
    (seam 1), /proc.
+   and checked by `cargo xtask lx-expect` (CI).
+   **Milestone 1 done** (2026-11-03; ARCHITECTURE "The Linux
+   personality, milestone 1"; WORKFLOW "Linux test programs"): the first
+   Linux programs run in gala. `lxrun=/lx/<binary>` (with `lxargs=`,
+   `lxenv=`) execs a static or static-pie ELF from the file system as a
+   `Personality::Linux` process (`lx::exec`), whose system calls go to
+   `lx::dispatch`: read, write, writev, close, pipe2, fcntl, mmap,
+   munmap, mprotect, brk, arch_prctl, exit, exit_group, set_tid_address,
+   getpid/gettid/getuid..., rt_sigprocmask and ioctl as stubs, ENOSYS
+   for the rest (logged with its name, and in the ledger). stdout and
+   stderr go to the log as `lx: pid N stdout: ..`. Scenarios `lx_hello`,
+   `lx_write_exit`, `lx_brk`, `lx_mmap`, `lx_arch_prctl`, `lx_auxv`, each
+   also `_pie`: their transcripts equal real Linux's expected.txt
+   exactly (xtask `lx_expect::check_boot`). Host tests: the VAD's
+   page-granular mappings, shell words, protections, endings.
+   **Next**: milestone 2 (static busybox: files, directories, wait4,
+   execve, clone, futex; priorities from `strace` on real Linux and the
+   `linux syscall missing` ledger), with signals (SIGSEGV, SIGPIPE) and
+   wait queues for pipes; then seam 3 (the core process apart from NT's,
+   so `lx::state` moves onto it).
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing

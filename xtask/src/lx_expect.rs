@@ -251,6 +251,61 @@ fn transcript(stdout: &str, stderr: &str, code: Option<i32>, signal: Option<i32>
     out
 }
 
+/// The transcript of the Linux program a boot ran (`lxrun=`), from the
+/// kernel's `lx: pid <p> stdout: <line>`, `.. stderr: ..` and `lx: pid <p>
+/// -- exit status <n>` lines (kernel/src/lx/state.rs), in expected.txt's
+/// format; None if the log has no end line.
+pub fn transcript_from_log(serial: &str) -> Option<String> {
+    let (mut stdout, mut stderr, mut end) = (String::new(), String::new(), None);
+    for line in serial.lines() {
+        let Some((_, rest)) = line.split_once("lx: pid ") else { continue };
+        let Some((_pid, rest)) = rest.split_once(' ') else { continue };
+        if let Some(text) = rest.strip_prefix("stdout: ") {
+            stdout += text;
+            stdout.push('\n');
+        } else if let Some(text) = rest.strip_prefix("stderr: ") {
+            stderr += text;
+            stderr.push('\n');
+        } else if rest.starts_with("-- ") {
+            end = Some(rest.to_string());
+        }
+    }
+    let end = end?;
+    let mut out = stdout;
+    if !stderr.is_empty() {
+        out += "-- stderr:\n";
+        out += &stderr;
+    }
+    out += &end;
+    out.push('\n');
+    Some(out)
+}
+
+/// For a boot scenario that runs a user/lx program (`lxrun=/lx/<binary>`):
+/// whether the transcript in its serial log is the program's expected.txt
+/// (what real Linux printed), exactly. Ok for other scenarios.
+pub fn check_boot(cmdline: &str, serial: &str) -> std::result::Result<(), String> {
+    let Some(path) = cmdline.split_whitespace().find_map(|w| w.strip_prefix("lxrun=")) else {
+        return Ok(());
+    };
+    let binary = path.rsplit('/').next().unwrap_or(path);
+    let test = binary.strip_suffix("-pie").unwrap_or(binary);
+    let expected_path = root().join("user/lx").join(test).join("expected.txt");
+    let want = fs::read_to_string(&expected_path)
+        .map_err(|e| format!("reading {}: {e}", expected_path.display()))?;
+    let Some(got) = transcript_from_log(serial) else {
+        return Err(format!("{binary}: no `lx: pid N -- exit status` line in the log"));
+    };
+    if got == want {
+        return Ok(());
+    }
+    Err(format!(
+        "{binary}'s transcript differs from {} (- expected, + actual):\n{}",
+        expected_path.display(),
+        diff(&want, &got)
+    ))
+}
+
 /// A line diff (longest common subsequence): ` ` kept, `-` expected only,
 /// `+` actual only.
 fn diff(expected: &str, actual: &str) -> String {
@@ -285,6 +340,20 @@ fn diff(expected: &str, actual: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_from_a_boot_log() {
+        let log = "[info ] process hello_test (pid 4, session 1): starting at 0x401000\n\
+                   [info ] lx: pid 4 stdout: hello\n\
+                   [info ] lx: pid 4 stderr: oops\n\
+                   [info ] lx: pid 4 stdout: \n\
+                   [info ] lx: pid 4 -- exit status 44\n";
+        assert_eq!(
+            transcript_from_log(log).unwrap(),
+            "hello\n\n-- stderr:\noops\n-- exit status 44\n"
+        );
+        assert_eq!(transcript_from_log("[info ] lx: pid 4 stdout: x\n"), None);
+    }
 
     #[test]
     fn diff_marks_changed_lines() {

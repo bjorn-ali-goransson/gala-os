@@ -134,6 +134,12 @@ impl UserEntry for Kernel {
     fn xstate_enabled() -> u64 {
         xstate::enabled()
     }
+    fn user_bases() -> (u64, u64) {
+        sched::user_bases()
+    }
+    fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
+        sched::set_user_bases(fs, gs)
+    }
 }
 
 impl UserMemory for Kernel {

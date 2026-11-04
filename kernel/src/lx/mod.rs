@@ -2,9 +2,7 @@
 //! ARCHITECTURE "Plan: a second personality (Linux)"; sources:
 //! CLEAN_ROOM.md "Linux").
 //!
-//! Plain data processing only, nothing wired in yet: no system-call entry
-//! reaches this module and nothing here touches memory, processes or
-//! devices. Each piece is checked by host unit tests against what real
+//! The data processing, checked by host unit tests against what real
 //! Linux does (user/lx's programs, whose transcripts `cargo xtask
 //! lx-expect` records on Linux):
 //! - [`elf`]: ELF64 executables parsed and validated, and their load plan.
@@ -13,15 +11,33 @@
 //! - [`syscalls`] and [`errno`]: Linux x86_64 system-call numbers and
 //!   errno values, name <-> number.
 //!
-//! The exec path and the dispatcher plug in later (the per-process
-//! personality seam, ROADMAP LX step 2): exec parses the image
-//! (`ElfImage::parse`), chooses a base (`load_bias`), maps the plan's
-//! segments, builds the stack (`stack::build`) at the stack's top and
-//! starts the thread at the plan's entry (or the interpreter's) with rsp
-//! at `InitialStack::sp`; the dispatcher's table is indexed by
-//! [`syscalls::nr`] and names unknown calls with [`syscalls::name`].
+//!
+//! And the personality itself (milestone 1), on the core's processes,
+//! threads and address spaces (still `nt::Process` until seam 3):
+//! - [`exec`]: a static or static-pie ELF from the file system as a new
+//!   process of `Personality::Linux` (`lxrun=` on the kernel command
+//!   line).
+//! - [`dispatch`]: the Linux system calls, registered as that
+//!   personality's dispatcher.
+//! - [`mm`]: anonymous mmap, munmap, mprotect and brk on the VAD.
+//! - [`state`]: per-process Linux state (break, fds, pipes, the output
+//!   lines logged as `lx: pid <p> stdout: ..`).
 
+pub mod dispatch;
 pub mod elf;
 pub mod errno;
+pub mod exec;
+pub mod mm;
 pub mod stack;
+pub mod state;
 pub mod syscalls;
+
+/// Registers the Linux personality's dispatcher (at start, after NT's).
+pub fn init() {
+    dispatch::init();
+}
+
+/// A process of the Linux personality has ended (`nt::process::finish`).
+pub fn process_ended(pid: u64, status: crate::nt::status::NtStatus) {
+    state::ended(pid, status);
+}

@@ -20,7 +20,8 @@ is done and what comes next (the "Next" list is the agreed order).
    - `.github/workflows/ci.yml`: append `-p <feature>_test` to the
      Windows-target clippy line; test DLLs go on the DLL build/clippy lines.
    - `user/bin/run-all.ps1` only if the program needs arguments on Windows.
-3. `cargo xtask boot-test <feature>_test`: see it fail for the right reason.
+3. `cargo xtask boot-test <feature>_test`: see it fail for the right reason
+   (a filter matches names containing it; `a,b,c` runs exactly those).
 4. Implement. Host unit tests for pure logic (`#[cfg(test)]` in the module).
 5. Checks (all must pass):
    ```sh
@@ -187,6 +188,20 @@ QEMU); boot the scenario once those pass.
   may still point into the last one (it panics). schannel.dll is 1.4 MB
   (rustls and RustCrypto): only processes that use Schannel load it,
   through secur32.
+  tested with `cargo test -p kernel --lib lx`.
+- Boot scenarios `lx_<name>` and `lx_<name>_pie` (one per binary) run it
+  in gala: `qemu_exit lxrun=/lx/<binary> lxargs=<argv> lxenv=<env>`
+  (both percent-encoded shell words; argv[0] first, `./<name>_test` as
+  lx-expect gives it). The binary is shipped as `C:\lx\<binary>` by an
+  EXTRA_MODULES entry with its repository path. xtask rebuilds the
+  transcript from the kernel's `lx: pid N stdout: ..` / `-- exit status`
+  lines and requires it to equal expected.txt (a diff on mismatch;
+  `lx_expect::check_boot`). A new user/lx test needs its two entries in
+  EXTRA_MODULES and SCENARIOS (copy an `lx_` pair).
+- Bring-up of a new Linux program: run it with `lxrun=`, then read the
+  `unimplemented system call <name>` lines and the `ledger:` lines
+  (`"what":"linux syscall missing"`, by hits) after `run: end`: that is
+  the next work list.
 
 ## Adding a function to gala's ntdll or kernel32
 
@@ -2082,7 +2097,7 @@ the in-guest, deterministic version.
 | Frames, heap | `kernel/src/mm/` |
 | Scheduler | `kernel/src/sched/` |
 | NT personality (objects, processes, files, sections, syscalls) | `kernel/src/nt/` |
-| Linux personality groundwork (ELF loader, initial stack, syscall/errno tables) | `kernel/src/lx/` |
+| Linux personality (exec, system calls, mmap/brk, ELF loader, initial stack, syscall/errno tables) | `kernel/src/lx/` |
 | Linux test programs, their binaries and expected transcripts | `user/lx/`, `user/lx/bin/` |
 | Linux ABI data (signal frames, sigsets, termios, struct layouts) | `kernel/lx_abi/` |
 | Ramfs | `kernel/src/fs/` |

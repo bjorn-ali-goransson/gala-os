@@ -245,7 +245,13 @@ pub fn create(
         return Err(NtStatus::INVALID_PARAMETER);
     }
     let id = next_id();
-    let teb_addr = allocate_teb(process, id, stack)?;
+    // Only NT threads have a TEB (and start with it as their GS base); a
+    // Linux thread starts with GS and FS bases 0 (arch_prctl_test).
+    let teb_addr = if process.personality == super::platform::Personality::Nt {
+        allocate_teb(process, id, stack)?
+    } else {
+        0
+    };
     let thread = NtThread {
         id,
         teb: teb_addr,

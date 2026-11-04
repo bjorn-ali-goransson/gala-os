@@ -3,14 +3,14 @@
 //! personality (Linux)", seam 2).
 //!
 //! Every process has a personality, fixed when it is created (from its
-//! image: a PE image is NT; an ELF loader would make Linux processes). Its
+//! image: a PE image is NT; an ELF image Linux, `lx::exec`). Its
 //! threads carry it into the scheduler (the kernel keeps the running
 //! thread's in its per-CPU block; gala-um in a thread-local), and the
 //! system-call entry of each platform (`arch::syscall::dispatch`,
 //! `hosted::entry`'s SIGSYS handler) hands the call to the dispatcher
-//! registered for it here. NT is the default and today the only real one;
-//! host unit tests add a second, `Test`, to check that the entry is keyed
-//! by the personality and not hard-wired to NT.
+//! registered for it here. NT is the default; Linux (`lx`) is the second;
+//! host unit tests add `Test`, to check that the entry is keyed by the
+//! personality and not hard-wired to NT.
 //!
 //! The dispatchers are registered once, at start (`nt::syscalls::init`
 //! registers NT's), and read without a lock on every system call.
@@ -24,14 +24,17 @@ pub enum Personality {
     /// Windows NT: ntdll's system calls (`nt::syscalls`).
     #[default]
     Nt = 0,
-    /// Host unit tests only: a second personality with its own dispatcher.
+    /// Linux x86_64: an ELF program's system calls (`lx::dispatch`,
+    /// ROADMAP LX milestone 1).
+    Linux = 1,
+    /// Host unit tests only: a further personality with its own dispatcher.
     #[cfg(test)]
-    Test = 1,
+    Test = 2,
 }
 
 impl Personality {
     /// The number of personalities (the dispatcher table's size).
-    pub const COUNT: usize = if cfg!(test) { 2 } else { 1 };
+    pub const COUNT: usize = if cfg!(test) { 3 } else { 2 };
 
     pub const fn index(self) -> usize {
         self as usize
@@ -42,8 +45,9 @@ impl Personality {
     pub const fn from_index(i: usize) -> Option<Personality> {
         match i {
             0 => Some(Personality::Nt),
+            1 => Some(Personality::Linux),
             #[cfg(test)]
-            1 => Some(Personality::Test),
+            2 => Some(Personality::Test),
             _ => None,
         }
     }
@@ -52,6 +56,7 @@ impl Personality {
     pub const fn name(self) -> &'static str {
         match self {
             Personality::Nt => "nt",
+            Personality::Linux => "linux",
             #[cfg(test)]
             Personality::Test => "test",
         }
@@ -213,6 +218,7 @@ mod tests {
         }
         assert_eq!(Personality::from_index(Personality::COUNT), None);
         assert_eq!(Personality::Nt.name(), "nt");
+        assert_eq!(Personality::Linux.name(), "linux");
         assert_eq!(alloc::format!("{}", Personality::Test), "test");
     }
 }

@@ -78,5 +78,8 @@ pub fn init() {
         panic!("KUSER_SHARED_DATA: {e:?}");
     }
     syscalls::init();
+    // The Linux personality's dispatcher (ROADMAP LX), on the same
+    // processes and threads.
+    crate::lx::init();
     process::init();
 }
