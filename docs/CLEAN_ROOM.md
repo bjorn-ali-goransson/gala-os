@@ -16,7 +16,7 @@ These rules are mandatory for all contributions, human or AI.
 - Black-box behavior observed on real Windows (running test programs and
   recording their results, error codes and side effects).
 
-## Linux (for the planned Linux personality; the owner, 2026-11-03)
+## Linux (for the Linux personality)
 Allowed: the Linux man-pages project, POSIX, the System V AMD64 ABI and
 the ELF specifications, black-box behaviour observed on real Linux
 (test programs run there and their results recorded, `strace` traces of

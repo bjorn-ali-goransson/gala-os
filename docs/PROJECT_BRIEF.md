@@ -1,110 +1,112 @@
-# Project brief: NT-compatible kernel in Rust
+# Project brief
 
-**Name and context.** gala: from the Arabic *qal'a*, "fortress" (and a
-play on "Windows"). It belongs to the owner's *Built in Saudi* family
-(built-in-saudi.com; Ali Web Services, Riyadh, ali-web-services.com) and
-carries the same sovereign mindset: foundational software built and
-controlled in the Kingdom rather than rented from elsewhere. The values of
-those products apply here too:
-- privacy by design: collect nothing that is not needed, no telemetry
-  leaves the machine unless its owner sends it, no hidden logging;
-- honesty about limits: say plainly what does not work yet (ROADMAP,
-  "Not done yet", the missing-features ledger);
-- security built in: a small trusted core, fallible allocation, confined
-  `unsafe`, and user input that can never crash the kernel.
+gala is a new operating system kernel, written in Rust, that is
+binary-compatible with Windows at the user-mode ABI, so unmodified Windows
+programs run on it. Its internals are its own design. This brief states
+what the project is for and where its boundaries are; the plan is in
+`ROADMAP.md`, the design in `ARCHITECTURE.md`.
 
-(The observability work in docs/OBSERVABILITY.md is for the system's
-owner and its developers. It stays local by default.)
+## Name and values
 
-## Goal
-Build a new OS kernel, written in Rust, that is binary-compatible with
-Windows at the user-mode ABI level, so unmodified Windows programs can run
-on it. The internals are our own design and will be heavily optimized and
-re-architected. The source is public (readable on GitHub) but not licensed:
-no license is granted and all rights are reserved (see the README's
-"License" section). It may be licensed later.
+*gala* comes from the Arabic *qal'a*, "fortress" (and plays on
+"Windows"). It belongs to the owner's *Built in Saudi* family
+(built-in-saudi.com; Ali Web Services, Riyadh, ali-web-services.com):
+foundational software built and controlled in the Kingdom rather than
+rented from elsewhere. The values of that family apply here:
 
-**Live update, kernel included** (the owner's vision, 2026-11-02): a
-running gala is updated without a reboot. That covers the system
-image (gala's DLLs and programs) and the kernel itself, with programs
-kept running through the change. It is built step by step (ROADMAP R),
-and every change keeps the design open for it: kernel state kept as
-versioned data, system calls that can be restarted, drivers that
-survive a device reset, one clock (ARCHITECTURE, "Built in early").
+- **Privacy by design.** Collect nothing that is not needed. No telemetry
+  leaves the machine unless its owner sends it; no hidden logging. The
+  observability facilities (`OBSERVABILITY.md`) serve the system's owner
+  and its developers and stay local by default.
+- **Honesty about limits.** Say plainly what does not work yet: the
+  README's "Not there yet", the ROADMAP, and the missing-features ledger
+  printed at the end of every run.
+- **Security built in.** A small trusted core, fallible allocation,
+  confined `unsafe`, and user input that can never crash the kernel.
 
-**Editions** (the owner, 2026-11-02): the server edition (console
-programs and servers, no graphical interface) and the desktop edition,
-a strict superset of it: the same system plus **shasha** (Arabic شاشة,
-"screen"), gala's graphical shell. Everything shasha can do can also be
-done from a terminal with the `gala` command (ROADMAP SD).
+## Goals
+
+1. **Run unmodified Windows programs.** 64-bit console programs, servers
+   and desktop programs, as their makers ship them, on gala's own kernel
+   and gala's own clean-room system DLLs.
+2. **Own the internals.** Memory manager, scheduler, I/O, drivers and
+   interrupts are gala's design, free to be re-architected and optimized.
+   Compatibility lives at the ABI boundary only; NT's internal design is
+   never copied.
+3. **Live update, kernel included.** A running gala is updated without a
+   reboot: the system image (gala's DLLs and programs) and the kernel
+   itself, with programs kept running. Built step by step (ROADMAP R);
+   meanwhile every change keeps the design open for it (ARCHITECTURE,
+   "Built in early": state as versioned data, restartable system calls,
+   drivers that survive a device reset, one clock).
+4. **Two editions.** The *server* edition (console programs and servers,
+   no graphical interface) and the *desktop* edition, a strict superset:
+   the same system plus **shasha** (Arabic شاشة, "screen"), gala's
+   graphical shell. Everything shasha can do can also be done from a
+   terminal with the `gala` command (ROADMAP SD).
+5. **A second personality.** Linux programs on the same core, through
+   their own system call layer (ROADMAP LX).
 
 ## Clean-room rules (mandatory)
-- Never use disassembly, decompiled code, or leaked Windows source.
-- Allowed sources: Microsoft's public documentation, the "Windows Internals"
-  books, mingw-w64 headers, Wine and ReactOS source, and black-box behavior
-  observed on real Windows.
-- Specs and tests describe behavior. Implementation code is written only
-  from those specs and tests.
 
-## Architecture
-- Our own core: memory manager, scheduler, I/O, interrupts.
-- NT "personality" layer on top: syscall entry, PE loader, TEB/PEB and
-  KUSER_SHARED_DATA layouts, handle and object semantics as apps see them.
-  This layer translates into our core.
-- Compatibility lives at the ABI boundary only. Never copy NT's internal
-  design.
-- Target ONE pinned Windows 11 build for syscall numbers and struct layouts
-  (Windows 11 24H2, build 26100, tentative; numbers in
-  `kernel/src/nt/syscalls.rs` and `user/ntrt`).
+Never use disassembly, decompiled code or leaked Windows source.
+Implementation is written only from specifications and tests, and those
+come from public documentation, the *Windows Internals* books, mingw-w64
+headers, Wine and ReactOS source, and black-box behaviour observed on real
+Windows. The full rules, including those for the Linux personality, are
+in `CLEAN_ROOM.md`.
+
+## Architecture in brief
+
+- **Core** (gala's own): physical and virtual memory, interrupts and
+  time, threads and the scheduler, SMP, drivers, file system, TCP/IP.
+- **NT personality** on top: system call entry, the PE loader, TEB, PEB
+  and KUSER_SHARED_DATA layouts, and handle and object semantics as
+  programs observe them, translated into the core.
+- **Linux personality** beside it, on the same core.
+- **One pinned Windows build** for system call numbers and structure
+  layouts: Windows 11 24H2, build 26100 (tentative). The numbers are in
+  `kernel/src/nt/syscalls.rs` and `user/ntrt`.
 
 ## Tech stack
+
 - Rust, `no_std` plus `alloc`, x86_64 only.
-- Limine bootloader, UEFI boot (BIOS too: the images are hybrid).
-- Develop and test in QEMU/KVM. Use virtio devices for disk, network, input.
-- Display: the bootloader's (UEFI GOP) framebuffer first; a virtio-gpu
-  (2D) since 2026-11-03 (ROADMAP GPU).
-- Generate C-layout Windows structs with `bindgen` from mingw-w64 headers,
-  as `#[repr(C)]`.
-- Keep `unsafe` confined to a thin, reviewed ABI/syscall layer. The core
-  should be safe Rust.
-- Use fallible allocation. The kernel must never panic on out-of-memory.
+- Limine bootloader; hybrid images that boot on UEFI and BIOS.
+- Developed and tested in QEMU (KVM when available), with virtio devices
+  for disk, network and display.
+- Display: the bootloader's framebuffer (UEFI GOP) or a virtio-gpu (2D).
+- C-layout Windows structures generated from mingw-w64 headers with
+  `bindgen`, as `#[repr(C)]`.
+- `unsafe` confined to a thin, reviewed layer (the list is in
+  `CLAUDE.md`); the core is safe Rust.
+- Fallible allocation throughout: the kernel never panics on
+  out-of-memory.
 
-## Milestones (kernel first)
-1. Boot in QEMU via Limine/UEFI, serial logging, read the memory map.
-2. Core: physical and virtual memory, interrupts, threads, scheduler.
-3. NT-style object manager and handle tables (processes, threads, events,
-   files, sections).
-4. PE loader plus syscall entry. Run a tiny freestanding PE that makes raw
-   syscalls to print to the console and exit.
-5. Grow the syscall surface (memory, files, events/waits, sections,
-   registry), prioritized by syscall traces of target apps recorded on real
-   Windows.
-6. Run Wine's ntdll conformance tests against our kernel.
-7. Run Wine's ntdll and kernel32 on top, to get real Win32 apps running.
+## How correctness is established
 
-## Testing
-Differential testing is the core loop. Run the same test binaries on real
-Windows and on our kernel, then compare results, error codes, and side
-effects. Wine's conformance tests are validated on real Windows, so treat
-them as the primary spec.
+Differential testing is the core loop. The same test binaries run on real
+Windows and on gala, and their results, error codes and side effects are
+compared. Every feature starts from such a test program
+(`user/<feature>_test`). Wine's conformance tests, being validated on real
+Windows, are a primary specification; real programs (Go, Nginx, the JDK,
+.NET, PostgreSQL, OpenSSH, ...) are the acceptance tests.
 
 ## Out of scope
-- Real GPU vendor drivers (Intel/AMD/NVIDIA, WDDM). Graphics go software
-  first, then paravirtual (virtio-gpu, Venus) as ROADMAP GPU plans (the
-  owner asked for GPU work, 2026-11-03).
-- Anti-cheat and EDR compatibility.
-- Legacy features: 16-bit/NTVDM, the old POSIX/OS2 subsystems, old
-  compatibility shims. (Not the same thing as a Linux personality: a
-  Linux personality on the same core is a planned goal: its seams first,
-  then its system calls as filler work when agents are free. The owner,
-  2026-11-03; ROADMAP LX.)
-- Windows driver (WDM/KMDF) compatibility in the kernel for now. gala's own
-  driver model with virtio first. (Windows drivers are a planned later
-  goal, staged and isolated: UMDF, then KMDF in a driver host, then the
-  class frameworks; never in gala's kernel address space unsupervised, and
-  not WDDM. The owner, 2026-11-03; ROADMAP DR.)
 
-## Open-source reuse
-Wine is LGPL and ReactOS is mostly GPL. Track what is borrowed and from
-where (in `THIRD_PARTY.md`): the repository is public, and it matters if
-the project is ever licensed.
+- **GPU vendor drivers** (Intel, AMD, NVIDIA; WDDM). Graphics go software
+  first, then paravirtual (virtio-gpu, Venus), as ROADMAP GPU plans.
+- **Anti-cheat and EDR compatibility.**
+- **Legacy subsystems**: 16-bit programs and NTVDM, the old POSIX and
+  OS/2 subsystems, old compatibility shims. (The Linux personality is a
+  separate, planned goal.)
+- **Windows drivers inside gala's kernel.** gala has its own driver model,
+  virtio first. Windows drivers are a later, staged goal (UMDF, then KMDF
+  in a driver host, then the class frameworks), isolated and never in the
+  kernel's address space unsupervised, and never WDDM (ROADMAP DR).
+
+## Licensing and reuse
+
+The source is public but not licensed: no license is granted and all
+rights are reserved (README, "License"); it may be licensed later. Wine is
+LGPL and ReactOS mostly GPL, so everything borrowed or adapted, and every
+new dependency, is recorded in `THIRD_PARTY.md` in the same commit.

@@ -9,7 +9,7 @@
 - Observability carries great weight (the owner): every change ships with
   what would explain its failures (logs, events, what a failure leaves
   behind); see the rule at the top of `docs/OBSERVABILITY.md`.
-- Structural, root-cause quality (the owner, 2026-11-04): fix the cause,
+- Structural, root-cause quality (the owner): fix the cause,
   not the symptom. No widened timeouts, retries, exclusions or workarounds
   in place of understanding; when a stopgap is unavoidable it is named as
   one, tracked in ROADMAP, and replaced. Examples that set the bar: the
@@ -17,9 +17,16 @@
   the bug (not a kernel workaround); handover tests bounded by the
   measured pause (not a wider slack); smpsched_test counting context
   switches (not wall time).
-- Keep the docs current in the same commit as the code: ROADMAP (done/next),
-  ARCHITECTURE (design, invariants, TODOs), WORKFLOW (new conventions or
-  pitfalls). The next session only knows what is written down.
+- Keep the docs current in the same commit as the code: ROADMAP (status
+  and next steps), ARCHITECTURE (design, invariants, limits), WORKFLOW
+  (commands, conventions, pitfalls). The next session only knows what is
+  written down.
+- The docs describe the present, each for its purpose (README's
+  "Documentation" table): no devlog, no dated progress notes, no
+  "(the owner, <date>)" tags, no investigation stories. When something is
+  done, update its ROADMAP item and the design section in place instead
+  of appending a paragraph; a resolved bug leaves only its lesson (an
+  invariant or a pitfall). Git history keeps the story.
 - **Test first.** Every piece of work starts from a test program in
   `user/<feature>_test/` (a freestanding Windows .exe built on `user/ntrt`)
   whose expected results are those of real Windows. Write it first, add its
