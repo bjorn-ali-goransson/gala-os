@@ -1,5 +1,5 @@
 //! A program that never ends, on purpose: the test of xtask's state dump
-//! on a timeout (docs/OBSERVABILITY.md, "Gaps found 2026-11-03"). Its main
+//! on a timeout (docs/OBSERVABILITY.md, "State dump"). Its main
 //! thread waits for ever on an event nobody sets (NtWaitForSingleObject)
 //! and a second thread spins in user code. On Windows it hangs the same
 //! way. The boot scenario `statedump` lets it time out after a few

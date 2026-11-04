@@ -16,7 +16,7 @@
 //! reader's processor left that processor's old translations in place:
 //! the reader (and the changer) went on using the decommitted pages'
 //! frames, already freed and reused (stale data, lost writes: the Java
-//! heap corruption, ROADMAP Priorities, 2026-11-03).
+//! heap corruption, WORKFLOW "Known intermittent").
 //!
 //! Needs NumberOfProcessors >= 2. Prints `shootdown_test: ok <rounds>` or
 //! exits with the number of the failing check.

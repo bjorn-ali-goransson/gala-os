@@ -1,5 +1,5 @@
-//! State dumps on request (docs/OBSERVABILITY.md §6, "Gaps found
-//! 2026-11-03"): a boot test that times out used to end with "timed out
+//! State dumps on request (docs/OBSERVABILITY.md, "State
+//! dump"): a boot test that times out used to end with "timed out
 //! after 300s" and nothing else. Now xtask first injects an NMI (QEMU's
 //! monitor command `nmi`, delivered to every CPU) and waits for the dump;
 //! gala-um gets SIGQUIT (`timeout -s QUIT`). The dump has two parts:
