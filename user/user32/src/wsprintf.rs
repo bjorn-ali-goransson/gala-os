@@ -1,12 +1,12 @@
 //! wsprintfW and wvsprintfW: user32's small printf, as documented (the
 //! format `%[-][#][0][width][.precision][size]type`: types c, C, d, i,
-//! u, x, X, s, S and p; size h, l, w, I64 (and I32); `%%`; at most 1024
+//! u, x, X, s, S and p; size h, l, w, I (pointer-sized), I64, I32; `%%`; at most 1024
 //! characters written, NUL included, and the count without the NUL
 //! returned). NSIS installers format their numbers and paths with it.
 //!
 //! The arguments come one 8-byte slot each, as x64 passes variadic
 //! arguments: wvsprintfW's `va_list` is a pointer to them; wsprintfW
-//! takes up to eight (a C variadic function cannot be written in stable
+//! takes up to sixteen (a C variadic function cannot be written in stable
 //! Rust; on x64 the caller's slots are those of a function with that many
 //! fixed arguments, and slots it did not fill are never read unless the
 //! format asks for them).
@@ -112,6 +112,9 @@ fn format(buf: *mut u16, fmt: *const u16, args: &mut dyn Args) -> i32 {
                     i += 2;
                 }
                 0x49 if at(i + 1) == u16::from(b'3') && at(i + 2) == u16::from(b'2') => i += 2,
+                // I alone: pointer-sized (64 bits on x64; NSIS prints its
+                // handles with %Id).
+                0x49 => wide64 = true,
                 _ => break,
             }
             i += 1;
@@ -275,7 +278,7 @@ pub extern "system" fn wvsprintfW(buf: *mut u16, fmt: *const u16, args: *const u
     format(buf, fmt, &mut VaList(args))
 }
 
-/// wsprintfW(buf, format, ...): up to eight arguments (see the module
+/// wsprintfW(buf, format, ...): up to sixteen arguments (see the module
 /// comment).
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
@@ -290,7 +293,15 @@ pub extern "C" fn wsprintfW(
     a5: usize,
     a6: usize,
     a7: usize,
+    a8: usize,
+    a9: usize,
+    a10: usize,
+    a11: usize,
+    a12: usize,
+    a13: usize,
+    a14: usize,
+    a15: usize,
 ) -> i32 {
-    let slots = [a0, a1, a2, a3, a4, a5, a6, a7];
+    let slots = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15];
     format(buf, fmt, &mut Slots(&slots, 0))
 }

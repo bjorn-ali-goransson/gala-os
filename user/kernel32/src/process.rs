@@ -16,9 +16,16 @@ const CREATE_NEW_CONSOLE: u32 = 0x10;
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
 const CREATE_UNICODE_ENVIRONMENT: u32 = 0x400;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// CREATE_DEFAULT_ERROR_MODE: the child starts with the default error
+/// mode instead of the caller's (gala's processes always do: the error
+/// mode is not inherited yet). NSIS uninstallers pass it.
+const CREATE_DEFAULT_ERROR_MODE: u32 = 0x0400_0000;
 /// Flags that change nothing on gala (one console, no windows).
-const IGNORED_FLAGS: u32 =
-    DETACHED_PROCESS | CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+const IGNORED_FLAGS: u32 = DETACHED_PROCESS
+    | CREATE_NEW_CONSOLE
+    | CREATE_NEW_PROCESS_GROUP
+    | CREATE_NO_WINDOW
+    | CREATE_DEFAULT_ERROR_MODE;
 const STARTF_USESTDHANDLES: u32 = 0x100;
 const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x2_0002;

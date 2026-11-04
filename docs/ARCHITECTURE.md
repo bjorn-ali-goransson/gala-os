@@ -3643,8 +3643,21 @@ PkNsis (/S), checks its files, its ARP entry and gala's tags, runs the
 program, upgrades it to 1.1.0, uninstalls it (/S, waiting for the entry
 to go), and installs and removes it again with `--location` (/D=). The
 NSIS stub needed kernel32's lstrcpynW, lstrcatW and GetTempFileNameW,
-user32's CharPrevW, Set/GetDlgItemTextW and CheckDlgButton, gdi32's
-CreateBrushIndirect (win32_misc_test); DialogBoxParamW,
+user32's CharPrevW, wsprintfW/wvsprintfW (up to sixteen arguments:
+`user/user32/src/wsprintf.rs`), Set/GetDlgItemTextW and CheckDlgButton,
+gdi32's
+CreateBrushIndirect, a shfolder.dll (`user/shfolder`: export
+forwarders of SHGetFolderPathA/W to shell32; NSIS calls the pointer it
+looks up there without checking it), and three fixes: CreateFileW asks
+for DELETE access with FILE_FLAG_DELETE_ON_CLOSE (NtCreateFile refuses
+the option without it; NSIS reopens its temporary data file so),
+MoveFileExW's MOVEFILE_DELAY_UNTIL_REBOOT leaves the file alone (gala
+deleted it at once, so the NSIS uninstaller's %TEMP% copy was gone
+before it could start; now ERROR_ACCESS_DENIED, as a standard user gets,
+and a ledger line: gala has no boot-time renames), wsprintfW's `%Id`
+(NSIS keeps file handles as text so); CreateProcessW accepts
+CREATE_DEFAULT_ERROR_MODE (the error mode is never inherited on gala).
+All are checked by win32_misc_test. DialogBoxParamW,
 MessageBoxIndirectW, SetClassLongPtrW, SetClipboardData,
 WritePrivateProfileStringW and SHCLSIDFromString are stubs (UI and INI
 paths a silent install does not take).

@@ -925,6 +925,16 @@ where its pixel checks expect it (no pointer arithmetic).
   --coff-imports`). The Fake host in `install/tests.rs` plays the
   installers (`run`), the NSIS uninstaller's late removal (`sleep`) and
   an Inno Setup installer (`inno_registers`).
+- **A vendor installer exits with an odd code and no ledger line**:
+  boot with `XTASK_EVENTS=syscall,image` and list the installer's
+  system calls (its pid from the `image` event; skip the memory calls and
+  the reads): the failing one is usually near the end. That is how NSIS's
+  needs were found: a delete-on-close open without DELETE (0xc000000d),
+  a handle printed with `%Id` coming back as 0 (an NtWriteFile on handle
+  0), a %TEMP% copy deleted before CreateProcess (GalaCreateProcess
+  0xc0000034 in a loop). NSIS exit codes: 1 cancelled, 2 aborted (an
+  error, silently in /S mode). The events file is large (18 MB for
+  pk_install_nsis): delete it afterwards.
 
 ## Screenshots
 

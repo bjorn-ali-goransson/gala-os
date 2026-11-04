@@ -21,7 +21,9 @@
 //!   (copied and terminated, truncated, the read-only pointer form).
 //!
 //! - What NSIS installers use: kernel32's lstrcpynW, lstrcatW and
-//!   GetTempFileNameW, user32's CharPrevW and wsprintfW/wvsprintfW
+//!   GetTempFileNameW (and CreateFileW's FILE_FLAG_DELETE_ON_CLOSE with
+//!   GENERIC_READ | GENERIC_WRITE; MoveFileExW's DELAY_UNTIL_REBOOT
+//!   leaving the file alone now), shfolder's SHGetFolderPathW, user32's CharPrevW and wsprintfW/wvsprintfW
 //!   (documented format), gdi32's CreateBrushIndirect.
 //!
 //! Prints `win32_misc_test: ok` or exits with the number of the failing
@@ -61,6 +63,17 @@ unsafe extern "system" {
     fn GetTempFileNameW(path: *const u16, prefix: *const u16, unique: u32, buf: *mut u16) -> u32;
     fn GetFileAttributesW(path: *const u16) -> u32;
     fn DeleteFileW(path: *const u16) -> Bool;
+    fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> Bool;
+    fn CloseHandle(h: Handle) -> Bool;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        sa: *mut c_void,
+        disposition: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
     fn GetSystemInfo(info: *mut u8);
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetModuleHandleW(name: *const u16) -> Handle;
@@ -206,6 +219,7 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    fn __chkstk();
 }
 
 #[unsafe(no_mangle)]
@@ -283,6 +297,20 @@ impl Checks {
         // SAFETY: as above.
         self.ok(same, unsafe { *p }.into())
     }
+}
+
+/// Prints a NUL-terminated UTF-16 string (ASCII) a check got.
+fn show(s: &[u16]) {
+    let mut line = [0u8; 200];
+    let mut n = 0;
+    line[..18].copy_from_slice(b"win32_misc_test: [");
+    n += 18;
+    for &u in s.iter().take_while(|&&u| u != 0).take(170) {
+        line[n] = if u < 0x80 { u as u8 } else { b'?' };
+        n += 1;
+    }
+    line[n..n + 3].copy_from_slice(b"]\r\n");
+    out(&line[..n + 3]);
 }
 
 /// A NUL-terminated UTF-16 copy of an ASCII string.
@@ -807,7 +835,46 @@ fn installer_helpers(c: &mut Checks) -> Result<(), u32> {
         c.ok(n != 0 && n <= 0xffff, n.into())?;
         c.ok(GetFileAttributesW(name.as_ptr()) != u32::MAX, 0)?;
         c.eq(u64::from(name[8]), u64::from(b'n'))?;
+        // Deleting it at the next boot leaves it there now (whether the
+        // caller may schedule that or not).
+        MoveFileExW(name.as_ptr(), core::ptr::null(), 4);
+        c.ok(GetFileAttributesW(name.as_ptr()) != u32::MAX, 0)?;
         c.eq(DeleteFileW(name.as_ptr()) as u64, 1)?;
+        // The NSIS way to use it: reopened for reading and writing,
+        // deleted on close (CreateFileW adds the DELETE access this needs).
+        let n = GetTempFileNameW(w("C:\\gala").as_ptr(), w("nsa").as_ptr(), 0, name.as_mut_ptr());
+        c.ok(n != 0, 0)?;
+        let h = CreateFileW(
+            name.as_ptr(),
+            0xc000_0000,
+            0,
+            core::ptr::null_mut(),
+            2,
+            0x100 | 0x0400_0000,
+            core::ptr::null_mut(),
+        );
+        c.ok(h as isize != -1, GetLastError().into())?;
+        let mut written = 0;
+        c.eq(WriteFile(h, b"data".as_ptr(), 4, &mut written, core::ptr::null_mut()) as u64, 1)?;
+        CloseHandle(h);
+        c.eq(GetFileAttributesW(name.as_ptr()).into(), u64::from(u32::MAX))?;
+        // shfolder.dll's SHGetFolderPathW (NSIS looks it up there): the
+        // same answer as shell32's (CSIDL_LOCAL_APPDATA, 0x1c).
+        type FolderPath = extern "system" fn(Handle, i32, Handle, u32, *mut u16) -> i32;
+        let m = LoadLibraryA(c"shfolder.dll".as_ptr().cast());
+        c.ok(!m.is_null(), GetLastError().into())?;
+        let f = GetProcAddress(m, c"SHGetFolderPathW".as_ptr().cast());
+        c.ok(!f.is_null(), 0)?;
+        let f: FolderPath = core::mem::transmute(f);
+        let (mut a, mut b) = ([0u16; 260], [0u16; 260]);
+        c.eq(f(core::ptr::null_mut(), 0x1c, core::ptr::null_mut(), 0, a.as_mut_ptr()) as u64, 0)?;
+        let n = 0;
+        c.eq(
+            SHGetFolderPathW(core::ptr::null_mut(), 0x1c, core::ptr::null_mut(), n, b.as_mut_ptr())
+                as u64,
+            0,
+        )?;
+        c.ok(same(a.as_ptr(), b.as_ptr()) && a[0] != 0, 0)?;
         // A directory that is not there: 0.
         let n =
             GetTempFileNameW(w("C:\\no-such-dir").as_ptr(), w("x").as_ptr(), 0, name.as_mut_ptr());
@@ -839,6 +906,9 @@ fn installer_helpers(c: &mut Checks) -> Result<(), u32> {
             u32::from(b'Z'),
         );
         let want = "-42|4000000000|beef|BEEF|    7|3   |-0012|0x1f|12345678901|Z";
+        if n as usize != want.len() {
+            show(&b);
+        }
         c.eq(n as u64, want.len() as u64)?;
         c.text(b.as_ptr(), want)?;
         let fmt = w("%s=%hs/%S;%.3s;%s;100%%");
@@ -855,6 +925,11 @@ fn installer_helpers(c: &mut Checks) -> Result<(), u32> {
         c.eq(n as u64, want.len() as u64)?;
         c.text(b.as_ptr(), want)?;
         let x = w("x");
+        // %Id and %Ix: pointer-sized (NSIS keeps handles as text so).
+        let n =
+            wsprintfW(b.as_mut_ptr(), w("%Id,%Ix").as_ptr(), -5_000_000_000i64, 0x1_0000_0008u64);
+        c.eq(n as u64, 21)?;
+        c.text(b.as_ptr(), "-5000000000,100000008")?;
         let args = [5u64, x.as_ptr() as u64];
         let n = wvsprintfW(b.as_mut_ptr(), w("%u:%s").as_ptr(), args.as_ptr());
         c.eq(n as u64, 3)?;

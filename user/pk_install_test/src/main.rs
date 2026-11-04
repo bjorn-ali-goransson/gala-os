@@ -608,6 +608,20 @@ fn read_file(mut path: W) -> Option<Output> {
     Some(o)
 }
 
+/// Prints a file the test reads (what NSIS wrote), or that it is missing.
+fn show_file(name: &str, o: &Option<Output>) {
+    out(b"pk_install_test: ");
+    out(name.as_bytes());
+    match o {
+        Some(o) => {
+            out(b": ");
+            out(o.text());
+            out(b"\r\n");
+        }
+        None => out(b": cannot be opened\r\n"),
+    }
+}
+
 /// The install log has `what`.
 fn log_has(what: &[u8]) -> bool {
     read_file(local("\\gala\\logs\\install.log")).is_some_and(|o| o.has(what))
@@ -660,6 +674,7 @@ fn nsis_test() -> Result<(), u32> {
     c.ok(exists(local(join(&mut p, &[dir, "\\pknsis.exe"]))), 0, "NSIS wrote the program")?;
     c.ok(exists(local(join(&mut p, &[dir, "\\uninstall.exe"]))), 0, "NSIS wrote its uninstaller")?;
     let readme = read_file(local(join(&mut p, &[dir, "\\README.txt"])));
+    show_file("README.txt", &readme);
     c.ok(readme.is_some_and(|o| o.has(b"PkNsis 1.0.0")), 0, "NSIS's FileWrite")?;
     c.ok(
         !exists(temp("\\gala\\GalaTest.PkNsis_Microsoft.Winget.Source_8wekyb3d8bbwe")),
@@ -697,6 +712,7 @@ fn nsis_test() -> Result<(), u32> {
     c.gala("upgrade GalaTest.PkNsis", 0, &[b"Successfully upgraded", b"1.1.0"])?;
     c.ok(nsis_value_is("DisplayVersion", b"1.1.0"), 0, "DisplayVersion after the upgrade")?;
     let readme = read_file(local(join(&mut p, &[dir, "\\README.txt"])));
+    show_file("README.txt", &readme);
     c.ok(readme.is_some_and(|o| o.has(b"PkNsis 1.1.0")), 0, "1.1.0's README")?;
     // Uninstall: UninstallString /S; NSIS's uninstaller runs from %TEMP%
     // and gala waits for the entry to go.

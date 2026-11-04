@@ -1376,6 +1376,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "shfolder"
+version = "0.1.0"
+
+[[package]]
 name = "shlwapi"
 version = "0.1.0"
 dependencies = [

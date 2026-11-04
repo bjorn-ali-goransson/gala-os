@@ -1070,7 +1070,12 @@ pub extern "system" fn CreateFileW(
     // As Windows' CreateFileW: FILE_READ_ATTRIBUTES always, SYNCHRONIZE
     // for synchronous handles.
     let synchronize = if flags & FILE_FLAG_OVERLAPPED == 0 { SYNCHRONIZE } else { 0 };
-    let access = access | synchronize | FILE_READ_ATTRIBUTES;
+    // FILE_FLAG_DELETE_ON_CLOSE needs DELETE access (NtCreateFile refuses
+    // FILE_DELETE_ON_CLOSE without it); Windows' CreateFileW asks for it,
+    // so GENERIC_READ | GENERIC_WRITE with the flag works (NSIS's
+    // installers open their temporary data file so).
+    let delete = if flags & FILE_FLAG_DELETE_ON_CLOSE != 0 { 0x0001_0000 } else { 0 };
+    let access = access | synchronize | FILE_READ_ATTRIBUTES | delete;
     match open_path_sa(path, access, share, nt_disposition, options, flags & 0x7fff, security) {
         Ok((h, information)) => {
             // OPEN_ALWAYS/CREATE_ALWAYS on an existing file: success, with
