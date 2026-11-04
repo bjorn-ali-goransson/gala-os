@@ -489,16 +489,12 @@ pub fn note_mutant_released(mutant: &ObjectRef) {
 fn abandon_mutants(t: &NtThread) {
     let owned = core::mem::take(&mut *t.owned_mutants.lock());
     for object in owned {
-        if let ObjectBody::Mutant(m) = &object.body {
-            {
-                let mut state = m.state.lock();
-                if state.owner != Some(t.id) {
-                    continue;
-                }
+        // Checked and freed in one hold of the dispatcher lock.
+        wait::change_mutant(&object, |state| {
+            if state.owner == Some(t.id) {
                 *state = super::object::MutantState { owner: None, count: 0, abandoned: true };
             }
-            wait::set_signal(&object, 1);
-        }
+        });
     }
 }
 

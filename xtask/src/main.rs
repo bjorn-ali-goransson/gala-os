@@ -400,6 +400,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("vmcycle_test", "ntdll.dll", "Windows/System32"),
     ("xmodify_test", "ntdll.dll", "Windows/System32"),
     ("smpsem_test", "ntdll.dll", "Windows/System32"),
+    ("smprace_test", "ntdll.dll", "Windows/System32"),
+    ("smprace_test", "kernel32.dll", "Windows/System32"),
     ("xstate_test", "ntdll.dll", "Windows/System32"),
     ("straddle_test", "ntdll.dll", "Windows/System32"),
     ("statedump_test", "ntdll.dll", "Windows/System32"),
@@ -1709,6 +1711,7 @@ const USER_PROGRAMS: &[&str] = &[
     "vmcycle_test",
     "xmodify_test",
     "smpsem_test",
+    "smprace_test",
     "xstate_test",
     "straddle_test",
     "statedump_test",
@@ -3290,6 +3293,15 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=smpsem_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["smpsem_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Races found by the hygiene sweep (2026-11-03): WaitAll with an
+        // object twice, a timer's expiry vs. a re-arm, a name vs. its
+        // handle count, a process's handles vs. its signal.
+        name: "smprace_test",
+        cmdline: "qemu_exit run=smprace_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["smprace_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // N1a: a kernel TCP echo server on port 7 behind QEMU's user-mode
@@ -6149,6 +6161,7 @@ fn run_parallel_on<J: Sync, T: Send>(
 const NOT_IN_UM: &[(&str, &str)] = &[
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
+    ("smprace_test", "round 4 starts child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("uipi_test", "a child process (one NT process per Linux process)"),
     ("shell32_test", "a child process (ShellExecuteExW runs it)"),

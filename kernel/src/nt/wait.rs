@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use super::object::{EventType, ObjectBody, ObjectRef};
 use super::platform::{ThreadId, WakeReason};
 use super::status::NtStatus;
-use crate::mm::heap::TryVec;
+use crate::mm::heap::{KArc, TryVec};
 use crate::sync::IrqMutex;
 
 /// Signal state and waiters of one object. Only touched under `DISPATCHER`.
@@ -95,6 +95,31 @@ pub fn update_signal<E>(
         wake_all(&mut inner);
     }
     Ok(previous)
+}
+
+/// Changes mutant `object`'s state with `f` in one hold of the dispatcher
+/// lock (under which waits check and acquire mutants), keeping its signal
+/// state in step (1 while free) and waking its waiters when it becomes
+/// free. Changed outside it (NtReleaseMutant and abandonment did that up
+/// to 2026-11-03), the signal set afterwards could mark a mutant free that
+/// a wait had acquired in between (not seen by waits, which look at the
+/// owner, but wrong for anything reading the signal).
+pub fn change_mutant<R>(
+    object: &ObjectRef,
+    f: impl FnOnce(&mut super::object::MutantState) -> R,
+) -> Option<R> {
+    let ObjectBody::Mutant(m) = &object.body else { return None };
+    let _guard = DISPATCHER.lock();
+    let mut state = m.state.lock();
+    let result = f(&mut state);
+    let free = state.owner.is_none();
+    drop(state);
+    let mut inner = m.dispatcher.inner.lock();
+    inner.signal = i32::from(free);
+    if free {
+        wake_all(&mut inner);
+    }
+    Some(result)
 }
 
 /// Sets a dispatcher's signal state directly (for objects reached without
@@ -202,8 +227,15 @@ impl Timeout {
     }
 }
 
+/// Whether `objects` names one object more than once (a WaitAll wait on
+/// such a list is refused: it would consume the object twice).
+pub fn has_duplicates(objects: &[ObjectRef]) -> bool {
+    objects.iter().enumerate().any(|(i, a)| objects[..i].iter().any(|b| KArc::ptr_eq(a, b)))
+}
+
 /// Waits until any (or all) of `objects` is signaled. Returns
 /// STATUS_WAIT_0 + index (any), STATUS_WAIT_0 (all) or STATUS_TIMEOUT.
+/// A WaitAll list must not name an object twice (`has_duplicates`).
 pub fn wait_for(objects: &[ObjectRef], wait_all: bool, timeout: Timeout) -> NtStatus {
     wait_for_alertable(objects, wait_all, timeout, false)
 }
@@ -224,6 +256,7 @@ pub fn wait_for_alertable(
     timeout: Timeout,
     alertable: bool,
 ) -> NtStatus {
+    debug_assert!(!wait_all || !has_duplicates(objects), "WaitAll with an object twice");
     let me = platform::current();
     let mut timed_out = false;
     // The object whose signal released the last sleep (`Waiter`).
@@ -301,30 +334,57 @@ fn unregister(objects: &[ObjectRef], me: ThreadId) -> Option<usize> {
 }
 
 /// Sleeps the current thread until `timeout` (NtDelayExecution). An
-/// alertable delay ends early, with STATUS_USER_APC, for a user APC.
+/// alertable delay ends early, with STATUS_USER_APC, for a user APC; a
+/// thread asked to terminate stops sleeping. Any other wake-up (a
+/// NtResumeThread's, a stale one) sleeps again until the deadline: up to
+/// 2026-11-03 it ended the delay, so a thread suspended and resumed while
+/// it slept (garbage collectors and Go's preemption do that) woke early
+/// (smprace_test).
 pub fn delay(timeout: Timeout, alertable: bool) -> NtStatus {
     let apc = || alertable && super::thread::has_user_apc();
-    let guard = DISPATCHER.lock();
-    if apc() {
-        return NtStatus::USER_APC;
-    }
-    match timeout {
-        Timeout::Poll => {
-            drop(guard);
-            platform::yield_now();
+    if timeout == Timeout::Poll {
+        let guard = DISPATCHER.lock();
+        if apc() {
+            return NtStatus::USER_APC;
         }
-        t => {
-            // Wake early if the thread is asked to terminate.
-            if !super::thread::is_terminating() {
-                super::thread::set_alertable(alertable);
-                platform::prepare_wait(t.deadline());
-                super::thread::wake_if_terminating();
-                drop(guard);
-                platform::wait();
-                super::kuser::catch_up();
-                super::thread::set_alertable(false);
-            }
+        drop(guard);
+        platform::yield_now();
+        return if apc() { NtStatus::USER_APC } else { NtStatus::SUCCESS };
+    }
+    loop {
+        let guard = DISPATCHER.lock();
+        if apc() {
+            return NtStatus::USER_APC;
+        }
+        // Wake early if the thread is asked to terminate.
+        if super::thread::is_terminating() {
+            return NtStatus::SUCCESS;
+        }
+        super::thread::set_alertable(alertable);
+        platform::prepare_wait(timeout.deadline());
+        super::thread::wake_if_terminating();
+        drop(guard);
+        let reason = platform::wait();
+        super::kuser::catch_up();
+        super::thread::set_alertable(false);
+        if reason == WakeReason::TimedOut {
+            return if apc() { NtStatus::USER_APC } else { NtStatus::SUCCESS };
         }
     }
-    if apc() { NtStatus::USER_APC } else { NtStatus::SUCCESS }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nt::object::{KObject, ObjectBody};
+
+    #[test]
+    fn duplicates_are_found_by_object_not_by_position() {
+        let a = KObject::new(ObjectBody::ConsoleOutput).unwrap();
+        let b = KObject::new(ObjectBody::ConsoleOutput).unwrap();
+        assert!(!has_duplicates(&[a.clone(), b.clone()]));
+        assert!(has_duplicates(&[a.clone(), b.clone(), a.clone()]));
+        assert!(has_duplicates(&[b.clone(), b]));
+        assert!(!has_duplicates(&[a]));
+    }
 }

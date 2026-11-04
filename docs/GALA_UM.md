@@ -259,8 +259,9 @@ One processor as far as programs can tell (`online_count` 1).
 - `um --trace`: every system call on stderr (the kernel's `trace` flag).
 
 **Not in gala-um** (by design or not yet):
-- process_test, nginx_master: child processes (one NT process per Linux
-  process; a host process per NT process would be needed).
+- process_test, smprace_test, nginx_master: child processes (one NT
+  process per Linux process; a host process per NT process would be
+  needed).
 - Network-card scenarios (net_echo, winsock_test serve, go_http, nginx,
   nginx_tls): a TAP device or host sockets behind AFD.
 - bench: runs, but measures the host.
