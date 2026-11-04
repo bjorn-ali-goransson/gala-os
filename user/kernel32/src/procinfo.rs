@@ -12,8 +12,6 @@
 use super::*;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-const ERROR_ACCESS_DENIED: u32 = 5;
-const ERROR_FILE_EXISTS: u32 = 80;
 const ERROR_NOT_FOUND: u32 = 1168;
 const ERROR_BUFFER_OVERFLOW: u32 = 111;
 
@@ -336,49 +334,8 @@ pub extern "system" fn GetProcessHandleCount(process: Handle, count: *mut u32) -
     TRUE
 }
 
-/// ProcessIdToSessionId(dwProcessId, *pSessionId): the session of a
-/// process gala knows (ProcessSessionInformation).
-#[unsafe(no_mangle)]
-pub extern "system" fn ProcessIdToSessionId(id: u32, session: *mut u32) -> Bool {
-    if session.is_null() {
-        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
-    }
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    let h = super::process::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, id);
-    if h.is_null() {
-        return FALSE;
-    }
-    let mut s = 0u32;
-    // SAFETY: a 4-byte buffer.
-    let status = unsafe {
-        NtQueryInformationProcess(h as isize, 24, (&raw mut s).cast(), 4, core::ptr::null_mut())
-    };
-    CloseHandle(h);
-    if status != STATUS_SUCCESS {
-        return fail(status, FALSE);
-    }
-    // SAFETY: the caller's output.
-    unsafe { *session = s };
-    TRUE
-}
-
-/// WTSGetActiveConsoleSessionId: the session attached to the console, the
-/// one programs run in (gala has one interactive session).
-#[unsafe(no_mangle)]
-pub extern "system" fn WTSGetActiveConsoleSessionId() -> u32 {
-    let mut s = 0u32;
-    // SAFETY: a 4-byte buffer.
-    let status = unsafe {
-        NtQueryInformationProcess(
-            CURRENT_PROCESS,
-            24,
-            (&raw mut s).cast(),
-            4,
-            core::ptr::null_mut(),
-        )
-    };
-    if status != STATUS_SUCCESS { 0xffff_ffff } else { s }
-}
+// ProcessIdToSessionId and WTSGetActiveConsoleSessionId are in process.rs
+// (RS B2: the caller's session).
 
 /// QueryProcessCycleTime: the process's processor time scaled to cycles,
 /// as QueryThreadCycleTime does.
@@ -661,102 +618,7 @@ pub extern "system" fn Wow64GetThreadContext(_thread: Handle, _context: *mut c_v
 
 // ---- Temporary file names -----------------------------------------------
 
-/// GetTempFileNameW(lpPathName, lpPrefixString, uUnique, lpTempFileName):
-/// `<path>\<up to 3 prefix characters><hex>.TMP`. With uUnique 0 the
-/// number comes from the clock and the file is created (CREATE_NEW; the
-/// next number on ERROR_FILE_EXISTS), otherwise the name is only made.
-/// Returns the number used, or 0 (the last error says why).
-#[unsafe(no_mangle)]
-pub extern "system" fn GetTempFileNameW(
-    path: *const u16,
-    prefix: *const u16,
-    unique: u32,
-    out: *mut u16,
-) -> u32 {
-    const MAX_PATH: usize = 260;
-    if path.is_null() || out.is_null() {
-        return fail_with(ERROR_INVALID_PARAMETER, 0);
-    }
-    let mut name = [0u16; MAX_PATH];
-    let mut n = 0;
-    // SAFETY: the caller's NUL-terminated strings.
-    unsafe {
-        while *path.add(n) != 0 {
-            if n >= MAX_PATH - 14 {
-                return fail_with(ERROR_BUFFER_OVERFLOW, 0);
-            }
-            name[n] = *path.add(n);
-            n += 1;
-        }
-        if n > 0 && name[n - 1] != u16::from(b'\\') && name[n - 1] != u16::from(b'/') {
-            name[n] = u16::from(b'\\');
-            n += 1;
-        }
-        let mut i = 0;
-        while !prefix.is_null() && i < 3 && *prefix.add(i) != 0 {
-            name[n] = *prefix.add(i);
-            n += 1;
-            i += 1;
-        }
-    }
-    let stem = n;
-    let write = |number: u32, name: &mut [u16; MAX_PATH]| {
-        let mut m = stem;
-        let digits = b"0123456789ABCDEF";
-        let mut started = false;
-        for shift in [12u32, 8, 4, 0] {
-            let d = (number >> shift) & 0xf;
-            if d != 0 || started || shift == 0 {
-                name[m] = u16::from(digits[d as usize]);
-                m += 1;
-                started = true;
-            }
-        }
-        for &c in b".TMP" {
-            name[m] = u16::from(c);
-            m += 1;
-        }
-        name[m] = 0;
-        m
-    };
-    if unique != 0 {
-        let m = write(unique & 0xffff, &mut name);
-        // SAFETY: the caller's MAX_PATH buffer.
-        unsafe { core::ptr::copy_nonoverlapping(name.as_ptr(), out, m + 1) };
-        return unique & 0xffff;
-    }
-    let start = (GetTickCount() & 0xffff).max(1);
-    let mut number = start;
-    loop {
-        let m = write(number, &mut name);
-        const GENERIC_WRITE: u32 = 0x4000_0000;
-        const CREATE_NEW: u32 = 1;
-        const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
-        let h = CreateFileW(
-            name.as_ptr(),
-            GENERIC_WRITE,
-            0,
-            core::ptr::null_mut(),
-            CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL,
-            core::ptr::null_mut(),
-        );
-        if h != INVALID_HANDLE_VALUE {
-            CloseHandle(h);
-            // SAFETY: the caller's MAX_PATH buffer.
-            unsafe { core::ptr::copy_nonoverlapping(name.as_ptr(), out, m + 1) };
-            return number;
-        }
-        let e = GetLastError();
-        if e != ERROR_FILE_EXISTS && e != ERROR_ALREADY_EXISTS && e != ERROR_ACCESS_DENIED {
-            return 0;
-        }
-        number = if number == 0xffff { 1 } else { number + 1 };
-        if number == start {
-            return fail_with(ERROR_FILE_EXISTS, 0);
-        }
-    }
-}
+// GetTempFileNameW is in lib.rs (`<pre><HEX>.tmp`, as Windows names them).
 
 /// GetTempFileNameA: GetTempFileNameW with UTF-8 strings (gala's ANSI code
 /// page).

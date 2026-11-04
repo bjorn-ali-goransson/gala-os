@@ -17,7 +17,7 @@
 //! 11. K32QueryWorkingSetEx: a written page is valid with PAGE_READWRITE,
 //!    a reserved page is not;
 //! 12. power requests: create, set, clear, close;
-//! 13. GetTempFileNameW: with a number, the name `<dir>\gal1234.TMP` and no
+//! 13. GetTempFileNameW: with a number, the name `<dir>\gal1234.tmp` and no
 //!    file; with 0, a new file; a file opened with FILE_FLAG_DELETE_ON_CLOSE
 //!    (write access only) is gone once closed;
 //! 14-16. WaitOnAddress: returns at once when the value differs, times out
@@ -400,7 +400,7 @@ fn tests() {
             13,
         );
         let len = name.iter().position(|&c| c == 0).unwrap_or(0);
-        let tail: [u16; 12] = core::array::from_fn(|i| u16::from(b"\\gal1234.TMP"[i]));
+        let tail: [u16; 12] = core::array::from_fn(|i| u16::from(b"\\gal1234.tmp"[i]));
         check(len > 12 && name[len - 12..len] == tail, 13);
         check(GetFileAttributesW(name.as_ptr()) == 0xffff_ffff, 13);
         let made = GetTempFileNameW(dir.as_ptr(), w("gal", &mut prefix), 0, name.as_mut_ptr());

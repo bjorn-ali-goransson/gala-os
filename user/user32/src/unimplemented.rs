@@ -32,5 +32,4 @@ gala_stubs::unimplemented_exports!("user32.dll":
     DialogBoxParamW
     MessageBoxIndirectW
     SetClassLongPtrW
-    SetClipboardData
 );
