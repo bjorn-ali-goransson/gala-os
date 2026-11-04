@@ -4006,7 +4006,7 @@ come from `strace` of target programs on real Linux.
 
 `kernel/src/lx/` holds the Linux personality's pieces that are plain data
 processing (safe Rust; `lx` is not in the `unsafe` allow-list), declared
-from lib.rs and reached by nothing yet:
+from lib.rs (used by the exec path below):
 
 - **`lx::elf`**: `ElfImage::parse(&[u8])` validates an ELF64 x86-64
   ET_EXEC or ET_DYN image and never panics (tests: truncations at every
@@ -4069,10 +4069,84 @@ the Linux personality; its system calls go to a table of
 `errno::to_return(ENOSYS)` for the missing ones and names them in the
 "unknown system call" log with `syscalls::name`.
 
-TODO: the exec path and the first system calls (ROADMAP LX "Next");
-randomization (the stack gap, AT_RANDOM from the kernel's random source,
-the bases); the system-call numbers 462..=469 (Linux 6.18 has them; our
-sources do not name them yet).
+### The Linux personality, milestone 1 (built 2026-11-03)
+
+Static and static-pie musl programs run (`lxrun=`), on the core's
+processes, threads and address spaces, which are still `nt::Process`
+(seam 3 splits them later):
+
+- **Personality**: `Personality::Linux` (index 1; `Test` moved to 2 in
+  host tests). `lx::init` (from `nt::init`, after NT's) registers
+  `lx::dispatch::dispatch` as its dispatcher, named `lx::dispatch`.
+- **Exec** (`lx::exec::spawn(path, argv, envp)`): the Linux path `/a/b`
+  is `C:\a\b` (one file system); the file is read whole, parsed, an
+  interpreter refused (milestone 4), ET_EXEC mapped at its addresses and
+  ET_DYN at `DEFAULT_DYN_BASE` (rounded to its alignment). Each segment's
+  page range goes in the VAD (`Vad::map_exact`, page-granular, MEM_PRIVATE,
+  committed); a page two segments share gets both protections; the file
+  bytes are copied into frames mapped at once (`write_initial`), the bss
+  past them is demand-zero. The stack: 8 MiB committed ending at
+  `mm::STACK_END` (0x7fff_fffe_0000), executable only if PT_GNU_STACK
+  says so (or is missing); `stack::build`'s bytes (gap 0, AT_RANDOM from
+  `platform::fill_entropy`, AT_HWCAP from CPUID(1).EDX, uid/gid 1000)
+  copied to its top. Then `nt::process::create_bare` (no PEB, ntdll,
+  handles or image layout: `Process::layout()` is None) and
+  `thread::create`, which gives a non-NT thread no TEB: GS and FS base
+  0, rip = AT_ENTRY, rsp = argc's address, every other register 0.
+- **FS/GS bases**: the scheduler keeps a user FS base per thread beside
+  the GS base; the switch writes IA32_FS_BASE only when it differs from
+  the per-CPU cached value (NT threads all have 0: no cost between them).
+  `arch_prctl` sets them through `platform::set_user_bases` (gala-um
+  refuses: its host libc owns FS). FSGSBASE stays off, so user code
+  cannot change them behind the kernel's back.
+- **State** (`lx::state`, a table keyed by pid): the break, the fd table
+  (fds 0-2 on the console; pipes), the stdout/stderr line buffers.
+  Dropped in `nt::process::finish` (`lx::process_ended`).
+- **Memory** (`lx::mm`): anonymous mmap (hint used if free, else
+  top-down below `MMAP_TOP`; MAP_FIXED replaces, MAP_FIXED_NOREPLACE
+  EEXIST), munmap (cuts VAD allocations: `Vad::unmap_range`), mprotect
+  (every page mapped, else ENOMEM), brk (byte-exact break, pages up to it
+  rounded mapped; refused requests return the old break). Pages are
+  demand-zero through the core fault path; `vm::sync_range` frees frames
+  of removed pages. Linux overcommits: the commit charge counts but
+  never refuses. MAP_SHARED anonymous is private until fork exists.
+- **System calls** (`lx::dispatch`): read, write, close, mmap, mprotect,
+  munmap, brk, rt_sigprocmask (stub: no signals), ioctl (ENOTTY), writev,
+  getpid, gettid, exit (the thread), exit_group (the process, status &
+  0xff), fcntl (F_GETPIPE_SZ, F_GETFL; F_GETFD/SETFD/SETFL accepted),
+  getuid/geteuid/getgid/getegid, arch_prctl (SET/GET FS/GS; a base at or
+  above TASK_SIZE is EPERM), set_tid_address (returns the tid), pipe2
+  (64 KiB, O_NONBLOCK; blocking reads/writes poll every ms until the
+  process ends: no wait queue yet). Anything else: ENOSYS.
+- **Errors**: a user buffer is copied whole before anything happens, so a
+  fault is EFAULT with nothing done (pipes, as Linux's transcripts show);
+  a pipe read copies out before it takes the bytes (an EFAULT read leaves
+  them).
+- **Output**: fd 1 and 2 on the console are logged a line at a time:
+  `lx: pid <p> stdout: <line>` (`stderr`), and the end `lx: pid <p> --
+  exit status <n>` or `-- killed by signal <n>` (an exception: SIGSEGV
+  for an access violation etc.). xtask's `lx_expect::check_boot` rebuilds
+  the program's transcript from those lines and compares it with
+  expected.txt exactly.
+- **Observability**: `lx: exec <path> (<n> bytes): <plan>` (bias, entry,
+  break, a line per segment); `process ... personality linux` and the
+  `process start`/`process exit` events with `"personality":"linux"`; a
+  failed exec `lx: exec <path> failed: <why>` and an `lx exec failed`
+  event (path, errno, why); every call in the flight recorder (number |
+  pid << 32); an unimplemented call `<name> (pid <p>): unimplemented
+  system call <name> (<nr>) (dispatcher lx::dispatch, personality
+  linux): ENOSYS` once per process and number, and in the ledger every time as
+  `{"service":"<name>","what":"linux syscall missing","detail":<nr>}`
+  (printed at `run: end`); stubs as `"what":"linux syscall stub"`.
+- Invariants: a Linux process is never handed over (carry refuses "a
+  personality other than NT"); its threads have no TEB; NT threads' FS
+  base is 0.
+
+TODO: randomization (the stack gap, the bases); signals (SIGPIPE,
+SIGSEGV delivery); fork/clone, wait queues for pipes, files and the
+fd-based calls (milestone 2); a vDSO; Linux in gala-um; the system-call
+numbers 462..=469 (Linux 6.18 has them; our sources do not name them
+yet).
 ## Plan: graphics and GPU (proposed 2026-11-03; stage G1 built)
 
 The owner's goal: GPU support, first for the browser (ROADMAP BR stage 2,

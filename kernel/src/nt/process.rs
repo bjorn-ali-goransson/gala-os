@@ -49,8 +49,9 @@ pub struct Process {
     /// The executable's mapping: (base, size).
     pub image: (u64, u64),
     /// Its layout, whose shared frames back the executable's pages (held
-    /// for as long as they are mapped).
-    _layout: KArc<super::section::ImageLayout>,
+    /// for as long as they are mapped). None for a process of another
+    /// personality (a Linux program's ELF image is copied in, `lx::exec`).
+    _layout: Option<KArc<super::section::ImageLayout>>,
     /// ntdll!KiUserExceptionDispatcher in this process, or 0: then user
     /// exceptions end the process.
     exception_dispatcher: core::sync::atomic::AtomicU64,
@@ -108,8 +109,8 @@ impl fmt::Debug for Process {
 
 impl Process {
     /// The executable's layout (whose frames back its unwritten pages).
-    pub fn layout(&self) -> &KArc<super::section::ImageLayout> {
-        &self._layout
+    pub fn layout(&self) -> Option<&KArc<super::section::ImageLayout>> {
+        self._layout.as_ref()
     }
 
     /// ntdll!KiUserExceptionDispatcher in this process, or 0.
@@ -753,7 +754,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         exit_status: IrqMutex::new(None),
         dispatcher: Dispatcher::new(0),
         image: (base, u64::from(info.size_of_image)),
-        _layout: image.clone(),
+        _layout: Some(image.clone()),
         exception_dispatcher: core::sync::atomic::AtomicU64::new(0),
         apc_dispatcher: core::sync::atomic::AtomicU64::new(0),
         create_time: platform::system_time(),
@@ -798,22 +799,90 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             return Err(LoadError::OutOfMemory);
         }
     };
-    let personality = process.personality;
+    announce_start(&process, regs.rip, command_line);
+    Ok((process, main))
+}
+
+/// The `process ... starting at` line and the `process start` event, with
+/// the process's personality.
+pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
+    let (id, session, personality) = (process.id, process.session, process.personality);
     info!(
-        "process {} (pid {}, session {session}): starting at {:#x}, personality {personality}",
-        name, id, regs.rip
+        "process {} (pid {id}, session {session}): starting at {rip:#x}, personality {personality}",
+        process.name
     );
     crate::events::emit(
         crate::events::Category::Process,
         "process start",
         format_args!(
-            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","image_base":{base},"entry":{},"cmdline":{}"#,
-            crate::events::Str(name),
-            regs.rip,
+            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","image_base":{},"entry":{rip},"cmdline":{}"#,
+            crate::events::Str(process.name),
+            process.image.0,
             crate::events::Str(command_line)
         ),
     );
-    Ok((process, main))
+}
+
+/// A process of another personality than NT (`lx::exec`): its address
+/// space laid out by its loader, no PEB, no ntdll, no handles; the boot
+/// user's token. Its threads are created with `thread::create` (which
+/// gives a non-NT thread no TEB).
+pub struct Bare {
+    pub name: &'static str,
+    /// Its path (a Linux program's, as it was executed).
+    pub path: &'static str,
+    pub space: UserSpace,
+    pub vad: Vad,
+    /// The executable's span: (base, size).
+    pub image: (u64, u64),
+    pub personality: Personality,
+}
+
+/// Creates the process record for `bare` and lists it (no thread yet).
+pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
+    let id = thread::next_id();
+    let token = super::token::for_new_process(None).map_err(|_| LoadError::OutOfMemory)?;
+    let session = super::token::session_of(&token);
+    let space = KArc::try_new(platform::SpaceLock::new(bare.space))?;
+    let process = KArc::try_new(Process {
+        id,
+        parent_id: 0,
+        name: bare.name,
+        path: bare.path,
+        space,
+        handles: IrqMutex::new(HandleTable::default()),
+        vad: IrqMutex::new(bare.vad),
+        views: IrqMutex::new(Vec::new()),
+        threads: IrqMutex::new(Vec::new()),
+        threads_created: core::sync::atomic::AtomicU32::new(0),
+        exit_status: IrqMutex::new(None),
+        dispatcher: Dispatcher::new(0),
+        image: bare.image,
+        _layout: None,
+        exception_dispatcher: core::sync::atomic::AtomicU64::new(0),
+        apc_dispatcher: core::sync::atomic::AtomicU64::new(0),
+        create_time: platform::system_time(),
+        exit_time: IrqMutex::named("process.exit_time", 0),
+        job: IrqMutex::new(None),
+        oom_logged: core::sync::atomic::AtomicBool::new(false),
+        commit: core::sync::atomic::AtomicU64::new(0),
+        commit_ended: core::sync::atomic::AtomicBool::new(false),
+        priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),
+        token: IrqMutex::new(token),
+        session,
+        console: None,
+        last_exception: IrqMutex::new(None),
+        personality: bare.personality,
+    })?;
+    prune();
+    PROCESSES.lock().try_push(process.clone())?;
+    Ok(process)
+}
+
+/// Takes a process created by `create_bare` off the list again (its
+/// first thread could not be started).
+pub fn forget_bare(process: &KArc<Process>) {
+    PROCESSES.lock().retain(|p| !KArc::ptr_eq(p, process));
 }
 
 /// The initial registers: `start` itself, or, if there is a system ntdll,
@@ -889,6 +958,11 @@ pub fn terminate_current(status: NtStatus) {
 pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     let status = *process.exit_status.lock().get_or_insert(last_status);
     *process.exit_time.lock() = platform::system_time();
+    // A Linux process's last output lines and how it ended, before the
+    // core's line (ROADMAP LX).
+    if process.personality == Personality::Linux {
+        crate::lx::process_ended(process.id, status);
+    }
     // Ended by an exception: what Windows' error report would say.
     let note = *process.last_exception.lock();
     if let Some(note) = note.filter(|n| n.status == status) {
@@ -1212,7 +1286,7 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
         exit_status: IrqMutex::new(None),
         dispatcher: Dispatcher::new(0),
         image: a.image,
-        _layout: a.layout,
+        _layout: Some(a.layout),
         exception_dispatcher: AtomicU64::new(a.exception_dispatcher),
         apc_dispatcher: AtomicU64::new(a.apc_dispatcher),
         create_time: a.create_time,

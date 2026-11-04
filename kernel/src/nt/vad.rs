@@ -429,6 +429,151 @@ impl Vad {
     }
 }
 
+/// Page-granular mappings for the Linux personality (`lx::mm`): mmap,
+/// munmap and brk work on single pages, without NT's 64 KiB reservation
+/// granularity, and munmap may cut a reservation into pieces.
+impl Vad {
+    /// Whether no reservation touches `[start, end)`.
+    pub fn is_range_free(&self, start: u64, end: u64) -> bool {
+        self.is_free(start, end)
+    }
+
+    /// Reserves exactly `[start, end)` (page aligned, free) as one
+    /// allocation of `kind`, all of it committed with `protect`.
+    pub fn map_exact(
+        &mut self,
+        start: u64,
+        end: u64,
+        protect: u32,
+        kind: u32,
+    ) -> Result<(), NtStatus> {
+        access_of(protect)?;
+        if !start.is_multiple_of(PAGE) || !end.is_multiple_of(PAGE) || start >= end {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        if start < USER_MIN || end > USER_MAX {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        if !self.is_free(start, end) {
+            return Err(NtStatus::CONFLICTING_ADDRESSES);
+        }
+        let pages = (end - start) / PAGE;
+        let mut runs = Vec::new();
+        let state = PageState { committed: true, protect };
+        runs.try_push(Run { start: 0, pages, state }).map_err(|_| NtStatus::NO_MEMORY)?;
+        let i = self.allocs.partition_point(|a| a.base < start);
+        let a = Allocation { base: start, pages, kind, alloc_protect: protect, runs };
+        let charged = a.charged(0, pages);
+        self.allocs.try_insert(i, a).map_err(|_| NtStatus::NO_MEMORY)?;
+        self.private_commit += charged;
+        Ok(())
+    }
+
+    /// The highest page-aligned free range of `size` bytes that ends at
+    /// or below `below` (Linux's top-down mmap placement).
+    pub fn find_free_below(&self, size: u64, below: u64) -> Option<u64> {
+        let below = below.min(USER_MAX) / PAGE * PAGE;
+        let mut end = below;
+        // Walk the reservations from the top down.
+        for a in self.allocs.iter().rev() {
+            if a.base >= end {
+                continue;
+            }
+            if a.end() <= end {
+                // The gap between this reservation and `end`.
+                if end - a.end() >= size {
+                    return Some(end - size);
+                }
+            }
+            end = end.min(a.base);
+        }
+        (end >= USER_MIN && end - USER_MIN >= size).then(|| end - size)
+    }
+
+    /// The parts of reservations inside `[start, end)`, as (start, end)
+    /// pairs in address order.
+    pub fn pieces(&self, start: u64, end: u64) -> Result<Vec<(u64, u64)>, AllocError> {
+        let mut out = Vec::new();
+        let i = self.allocs.partition_point(|a| a.end() <= start);
+        for a in self.allocs[i..].iter().take_while(|a| a.base < end) {
+            out.try_push((a.base.max(start), a.end().min(end)))?;
+        }
+        Ok(out)
+    }
+
+    /// Whether every page of `[start, end)` is committed.
+    pub fn all_committed(&self, start: u64, end: u64) -> bool {
+        let mut addr = start;
+        while addr < end {
+            let Some(i) = self.index_of(addr) else { return false };
+            let a = &self.allocs[i];
+            let r = a.run_at((addr - a.base) / PAGE);
+            if !r.state.committed {
+                return false;
+            }
+            addr = (a.base + (r.start + r.pages) * PAGE).min(end);
+        }
+        true
+    }
+
+    /// Removes the pages `[start, end)` (page aligned) from every
+    /// reservation, cutting reservations that extend past either end
+    /// into pieces (munmap). Unreserved pages in the range are fine.
+    pub fn unmap_range(&mut self, start: u64, end: u64) -> Result<(), NtStatus> {
+        if !start.is_multiple_of(PAGE) || !end.is_multiple_of(PAGE) || start > end {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        let first = self.allocs.partition_point(|a| a.end() <= start);
+        let last = self.allocs.partition_point(|a| a.base < end);
+        if first >= last {
+            return Ok(());
+        }
+        // The pieces that stay, built before anything changes (all or
+        // nothing on out of memory).
+        let mut kept: Vec<Allocation> = Vec::new();
+        kept.try_reserve(2).map_err(|_| NtStatus::NO_MEMORY)?;
+        let mut released = 0;
+        for a in &self.allocs[first..last] {
+            let cut_from = (start.max(a.base) - a.base) / PAGE;
+            let cut_to = (end.min(a.end()) - a.base) / PAGE;
+            released += a.charged(cut_from, cut_to - cut_from);
+            if cut_from > 0 {
+                let _ = kept.try_push(a.slice(0, cut_from).map_err(|_| NtStatus::NO_MEMORY)?);
+            }
+            if cut_to < a.pages {
+                let _ = kept.try_push(a.slice(cut_to, a.pages).map_err(|_| NtStatus::NO_MEMORY)?);
+            }
+        }
+        self.allocs.try_reserve(kept.len()).map_err(|_| NtStatus::NO_MEMORY)?;
+        self.allocs.drain(first..last);
+        for (n, a) in kept.into_iter().enumerate() {
+            let _ = self.allocs.try_insert(first + n, a); // room reserved above
+        }
+        self.private_commit -= released;
+        Ok(())
+    }
+}
+
+impl Allocation {
+    /// Pages `[from, to)` as an allocation of their own.
+    fn slice(&self, from: u64, to: u64) -> Result<Allocation, AllocError> {
+        let mut runs = Vec::new();
+        for r in &self.runs {
+            let (s, e) = (r.start.max(from), (r.start + r.pages).min(to));
+            if s < e {
+                runs.try_push(Run { start: s - from, pages: e - s, state: r.state })?;
+            }
+        }
+        Ok(Allocation {
+            base: self.base + from * PAGE,
+            pages: to - from,
+            kind: self.kind,
+            alloc_protect: self.alloc_protect,
+            runs,
+        })
+    }
+}
+
 /// The VAD in a kernel handover record (ROADMAP R9, `handover::programs`):
 /// one entry, version 1: the private commit (u64), the allocation count
 /// (u32), then each allocation as an entry: base, pages (u64), kind,
@@ -507,6 +652,49 @@ mod tests {
 
     fn rw() -> u32 {
         PAGE_READWRITE
+    }
+
+    #[test]
+    fn linux_mappings_are_page_granular_and_cut_by_unmap() {
+        let mut v = Vad::default();
+        let base = 0x7000_0000_1000;
+        v.map_exact(base, base + 3 * PAGE, rw(), MEM_PRIVATE).unwrap();
+        assert_eq!(v.private_commit(), 3);
+        assert!(v.all_committed(base, base + 3 * PAGE));
+        assert!(!v.is_range_free(base + PAGE, base + 2 * PAGE));
+        // The middle page goes: two pieces stay.
+        v.protect(base + 2 * PAGE, PAGE, PAGE_READONLY).unwrap();
+        v.unmap_range(base + PAGE, base + 2 * PAGE).unwrap();
+        assert_eq!(v.private_commit(), 2);
+        assert!(v.page(base + PAGE).is_none());
+        assert_eq!(v.page(base).unwrap().protect, rw());
+        assert_eq!(v.page(base + 2 * PAGE).unwrap().protect, PAGE_READONLY);
+        assert_eq!(v.pieces(base, base + 3 * PAGE).unwrap().len(), 2);
+        assert!(!v.all_committed(base, base + 3 * PAGE));
+        // Unmapping unmapped pages is fine; then all of it.
+        v.unmap_range(base + PAGE, base + 2 * PAGE).unwrap();
+        v.unmap_range(base - PAGE, base + 4 * PAGE).unwrap();
+        assert_eq!(v.private_commit(), 0);
+        assert!(v.is_range_free(base, base + 3 * PAGE));
+        assert!(v.unmap_range(base + 1, base + PAGE).is_err());
+    }
+
+    #[test]
+    fn linux_placement_is_top_down_below_a_limit() {
+        let mut v = Vad::default();
+        let top = 0x7000_0000_0000;
+        let a = v.find_free_below(2 * PAGE, top).unwrap();
+        assert_eq!(a, top - 2 * PAGE);
+        v.map_exact(a, a + 2 * PAGE, rw(), MEM_PRIVATE).unwrap();
+        let b = v.find_free_below(PAGE, top).unwrap();
+        assert_eq!(b, a - PAGE);
+        v.map_exact(b, b + PAGE, rw(), MEM_PRIVATE).unwrap();
+        // A hole fits a smaller request only.
+        v.unmap_range(a, a + PAGE).unwrap();
+        assert_eq!(v.find_free_below(PAGE, top), Some(a));
+        assert_eq!(v.find_free_below(2 * PAGE, top), Some(b - 2 * PAGE));
+        assert_eq!(v.find_free_below(USER_MAX, top), None);
+        assert!(v.map_exact(b, b + PAGE, rw(), MEM_PRIVATE).is_err());
     }
 
     #[test]

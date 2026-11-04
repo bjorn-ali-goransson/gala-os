@@ -56,9 +56,97 @@ pub fn percent_decode(
     Ok(())
 }
 
+/// Why `shell_words` failed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WordsError {
+    UnclosedQuote,
+    OutOfMemory,
+}
+
+impl From<crate::mm::heap::AllocError> for WordsError {
+    fn from(_: crate::mm::heap::AllocError) -> Self {
+        WordsError::OutOfMemory
+    }
+}
+
+/// Splits `text` into words as a POSIX shell does plain words: blanks
+/// separate them; '...' keeps everything inside; "..." too, except that
+/// a backslash escapes `"` and `\` there; outside quotes a backslash
+/// escapes the next byte; an empty quoted word ('') is a word. For
+/// `lxargs=` and `lxenv=` (a Linux program's argv and environment).
+pub fn shell_words(
+    text: &[u8],
+    out: &mut alloc::vec::Vec<alloc::vec::Vec<u8>>,
+) -> Result<(), WordsError> {
+    use crate::mm::heap::TryVec;
+    let blank = |c: u8| c == b' ' || c == b'\t';
+    let mut i = 0;
+    loop {
+        while i < text.len() && blank(text[i]) {
+            i += 1;
+        }
+        if i == text.len() {
+            return Ok(());
+        }
+        let mut word = alloc::vec::Vec::new();
+        while i < text.len() && !blank(text[i]) {
+            match text[i] {
+                b'\'' => {
+                    let len = text[i + 1..].iter().position(|&c| c == b'\'');
+                    let close = i + 1 + len.ok_or(WordsError::UnclosedQuote)?;
+                    word.try_extend_from_slice(&text[i + 1..close])?;
+                    i = close + 1;
+                }
+                b'"' => {
+                    i += 1;
+                    loop {
+                        match text.get(i) {
+                            None => return Err(WordsError::UnclosedQuote),
+                            Some(b'"') => break,
+                            Some(b'\\') if matches!(text.get(i + 1), Some(b'"' | b'\\')) => {
+                                word.try_push(text[i + 1])?;
+                                i += 2;
+                            }
+                            Some(&c) => {
+                                word.try_push(c)?;
+                                i += 1;
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+                b'\\' if i + 1 < text.len() => {
+                    word.try_push(text[i + 1])?;
+                    i += 2;
+                }
+                c => {
+                    word.try_push(c)?;
+                    i += 1;
+                }
+            }
+        }
+        out.try_push(word)?;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_words_split_like_a_shell() {
+        let words = |s: &str| {
+            let mut out = alloc::vec::Vec::new();
+            shell_words(s.as_bytes(), &mut out).map(|()| out)
+        };
+        let w = words(r#"./auxv_test first '' 'third arg'"#).unwrap();
+        assert_eq!(w, [&b"./auxv_test"[..], b"first", b"", b"third arg"]);
+        let w = words(r#"  A=1 EMPTY= LONGER_NAME='some value' "q\"x" a\ b "#).unwrap();
+        assert_eq!(w, [&b"A=1"[..], b"EMPTY=", b"LONGER_NAME=some value", b"q\"x", b"a b"]);
+        assert!(words("").unwrap().is_empty());
+        assert_eq!(words("'open"), Err(WordsError::UnclosedQuote));
+        assert_eq!(words("\"open"), Err(WordsError::UnclosedQuote));
+    }
 
     #[test]
     fn percent_decoding() {

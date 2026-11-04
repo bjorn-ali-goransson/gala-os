@@ -107,8 +107,11 @@ struct UserThread {
     /// its PML4, read without taking the space's lock.
     space: SharedUserSpace,
     root: u64,
-    /// GS base in user mode (the TEB).
+    /// GS base in user mode (the TEB; a Linux thread's arch_prctl value).
     gs_base: u64,
+    /// FS base in user mode: 0 for NT threads; a Linux thread's
+    /// arch_prctl(ARCH_SET_FS) value (its TLS).
+    fs_base: u64,
     /// Its process's personality: which dispatcher its system calls go to
     /// (`crate::personality`; fixed for the thread's life).
     personality: Personality,
@@ -330,7 +333,12 @@ pub fn spawn_user(
     personality: Personality,
 ) -> Result<ThreadId, SpawnError> {
     let root = space.lock().root();
-    spawn_inner(name, entry, arg, Some(UserThread { space, root, gs_base, personality }))
+    spawn_inner(
+        name,
+        entry,
+        arg,
+        Some(UserThread { space, root, gs_base, fs_base: 0, personality }),
+    )
 }
 
 fn spawn_inner(
@@ -402,6 +410,36 @@ pub fn exit() -> ! {
 
 pub fn current() -> ThreadId {
     with(|s| s.current())
+}
+
+/// The current thread's user (FS, GS) bases; (0, 0) for a kernel thread.
+pub fn user_bases() -> (u64, u64) {
+    with(|s| {
+        let id = s.current();
+        s.thread(id).user.as_ref().map_or((0, 0), |u| (u.fs_base, u.gs_base))
+    })
+}
+
+/// Sets the current user thread's FS and/or GS base, for this return to
+/// user mode and every later switch to it (Linux's arch_prctl). The
+/// caller has checked the values are canonical user addresses. False for
+/// a kernel thread.
+pub fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
+    // Under the scheduler's lock (interrupts off): no switch between the
+    // thread's record and this CPU's registers.
+    with(|s| {
+        let id = s.current();
+        let Some(u) = s.thread(id).user.as_mut() else { return false };
+        if let Some(fs) = fs {
+            u.fs_base = fs;
+            percpu::set_user_fs_base(fs);
+        }
+        if let Some(gs) = gs {
+            u.gs_base = gs;
+            percpu::set_user_gs_base(gs);
+        }
+        true
+    })
 }
 
 /// This CPU's current thread and whether it is its idle thread; None
@@ -562,6 +600,7 @@ fn schedule() {
                 kernel_stack_top: n.stack.as_ref().map(KernelStack::top),
                 root: n.user.as_ref().map_or_else(paging::kernel_root, |u| u.root),
                 user_gs_base: n.user.as_ref().map_or(0, |u| u.gs_base),
+                user_fs_base: n.user.as_ref().map_or(0, |u| u.fs_base),
                 personality: n.user.as_ref().map_or(Personality::Nt, |u| u.personality),
             };
             (from, target)

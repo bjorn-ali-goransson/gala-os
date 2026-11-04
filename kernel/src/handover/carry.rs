@@ -588,6 +588,11 @@ fn image_file(s: &section::Section) -> Option<crate::fs::ramfs::NodeId> {
 fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessState, Refusal> {
     let pid = process.id;
     let refuse = |what| Refusal::Process { pid, what };
+    // Only NT processes are carried (the PROCESSES record has no
+    // personality yet; ROADMAP LX).
+    if process.personality != crate::personality::Personality::Nt {
+        return Err(refuse("a personality other than NT"));
+    }
     if process.console.is_some() {
         return Err(refuse("a console window"));
     }
@@ -632,7 +637,7 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
         return Err(Refusal::NoMemory);
     }
     let (image_base, image_size) = process.image;
-    let layout = process.layout();
+    let layout = process.layout().ok_or(refuse("no PE image layout"))?;
     let mut pages = Vec::new();
     pages.try_reserve_exact(raw.len()).map_err(|_| Refusal::NoMemory)?;
     for &(va, frame, flags) in &raw {
@@ -853,7 +858,7 @@ impl Programs {
                 ),
                 name: q.name,
                 path: q.path,
-                image_digest: q.layout().digest(),
+                image_digest: q.layout().map_or(0, |l| l.digest()),
                 token: self.id(&q.token.lock().clone()),
                 session: Some(q.session),
                 handovers: handovers_of(q.id).saturating_add(1),

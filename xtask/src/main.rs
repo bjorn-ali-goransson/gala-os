@@ -703,6 +703,20 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("nginx", "crypt32.dll", "Windows/System32"),
     ("nginx", "bcryptprimitives.dll", "Windows/System32"),
     ("nginx", "user/bin/nginx.exe", "nginx"),
+    // The Linux test programs (user/lx, ROADMAP LX): C:\lx\<binary>,
+    // which `lxrun=/lx/<binary>` runs.
+    ("lx_hello", "user/lx/bin/hello_test", "lx"),
+    ("lx_hello_pie", "user/lx/bin/hello_test-pie", "lx"),
+    ("lx_write_exit", "user/lx/bin/write_exit_test", "lx"),
+    ("lx_write_exit_pie", "user/lx/bin/write_exit_test-pie", "lx"),
+    ("lx_brk", "user/lx/bin/brk_test", "lx"),
+    ("lx_brk_pie", "user/lx/bin/brk_test-pie", "lx"),
+    ("lx_mmap", "user/lx/bin/mmap_test", "lx"),
+    ("lx_mmap_pie", "user/lx/bin/mmap_test-pie", "lx"),
+    ("lx_arch_prctl", "user/lx/bin/arch_prctl_test", "lx"),
+    ("lx_arch_prctl_pie", "user/lx/bin/arch_prctl_test-pie", "lx"),
+    ("lx_auxv", "user/lx/bin/auxv_test", "lx"),
+    ("lx_auxv_pie", "user/lx/bin/auxv_test-pie", "lx"),
     ("gdi32_test", "ntdll.dll", "Windows/System32"),
     ("gdi32_test", "kernel32.dll", "Windows/System32"),
     ("gdi32_test", "msvcrt.dll", "Windows/System32"),
@@ -1776,7 +1790,7 @@ commands:
   run          build, then boot in QEMU with serial on stdio [--headless]
   test         run host unit tests, then um-test (gala-um), replay-test, then the QEMU
                boot tests
-  boot-test    only the QEMU boot tests [scenario name filter]
+  boot-test    only the QEMU boot tests [scenario name filter, or exact names a,b,c]
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
@@ -5359,6 +5373,105 @@ const SCENARIOS: &[Scenario] = &[
             BOOT_OK_MARKER,
         ],
     },
+    // The Linux personality (ROADMAP LX milestone 1): each user/lx program,
+    // static and static-pie, with the arguments and environment `cargo
+    // xtask lx-expect` gives it on Linux.
+    Scenario {
+        // user/lx/hello_test, static (ET_EXEC): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_hello",
+        cmdline: "qemu_exit lxrun=/lx/hello_test lxargs=./hello_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/hello_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/hello_test, static-pie (ET_DYN): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_hello_pie",
+        cmdline: "qemu_exit lxrun=/lx/hello_test-pie lxargs=./hello_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/hello_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/write_exit_test, static (ET_EXEC): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_write_exit",
+        cmdline: "qemu_exit lxrun=/lx/write_exit_test lxargs=./write_exit_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/write_exit_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/write_exit_test, static-pie (ET_DYN): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_write_exit_pie",
+        cmdline: "qemu_exit lxrun=/lx/write_exit_test-pie lxargs=./write_exit_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/write_exit_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/brk_test, static (ET_EXEC): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_brk",
+        cmdline: "qemu_exit lxrun=/lx/brk_test lxargs=./brk_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/brk_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/brk_test, static-pie (ET_DYN): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_brk_pie",
+        cmdline: "qemu_exit lxrun=/lx/brk_test-pie lxargs=./brk_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/brk_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/mmap_test, static (ET_EXEC): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_mmap",
+        cmdline: "qemu_exit lxrun=/lx/mmap_test lxargs=./mmap_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/mmap_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/mmap_test, static-pie (ET_DYN): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_mmap_pie",
+        cmdline: "qemu_exit lxrun=/lx/mmap_test-pie lxargs=./mmap_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/mmap_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/arch_prctl_test, static (ET_EXEC): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_arch_prctl",
+        cmdline: "qemu_exit lxrun=/lx/arch_prctl_test lxargs=./arch_prctl_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/arch_prctl_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/arch_prctl_test, static-pie (ET_DYN): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_arch_prctl_pie",
+        cmdline: "qemu_exit lxrun=/lx/arch_prctl_test-pie lxargs=./arch_prctl_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/arch_prctl_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/auxv_test, static (ET_EXEC): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_auxv",
+        cmdline: "qemu_exit lxrun=/lx/auxv_test lxargs=./auxv_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/auxv_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/auxv_test, static-pie (ET_DYN): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_auxv_pie",
+        cmdline: "qemu_exit lxrun=/lx/auxv_test-pie lxargs=./auxv_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/auxv_test-pie", BOOT_OK_MARKER],
+    },
     Scenario {
         name: "hello",
         cmdline: "qemu_exit run=hello.exe",
@@ -5556,6 +5669,8 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
         .filter(|s| match filter {
             // Pending scenarios run only when named exactly.
             None => !PENDING.contains(&s.name),
+            // `a,b,c`: exactly these scenarios.
+            Some(f) if f.contains(',') => f.split(',').any(|n| n == s.name),
             Some(f) => {
                 s.name == f.as_str() || (s.name.contains(f.as_str()) && !PENDING.contains(&s.name))
             }
@@ -8839,7 +8954,9 @@ fn judge_log_inner(
         _ if scenario.exit_status == QEMU_EXIT_SUCCESS && serial.contains(LEAK_MARKER) => {
             Err("a process address space was not freed".into())
         }
-        _ => Ok(()),
+        // A user/lx program: its output and exit status exactly as real
+        // Linux's (its expected.txt).
+        _ => lx_expect::check_boot(scenario.cmdline, serial),
     }
 }
 

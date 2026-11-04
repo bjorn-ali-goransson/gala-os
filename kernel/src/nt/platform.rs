@@ -140,6 +140,17 @@ pub trait UserEntry {
     /// The state components programs can use (XCR0's user features:
     /// x87, SSE, AVX, AVX-512), as KUSER_SHARED_DATA reports them.
     fn xstate_enabled() -> u64;
+    /// The calling thread's user FS and GS bases (Linux's arch_prctl).
+    fn user_bases() -> (u64, u64) {
+        (0, 0)
+    }
+    /// Sets the calling thread's user FS and/or GS base from now on
+    /// (kept across context switches); false where the platform cannot
+    /// (gala-um, whose host libc owns FS).
+    fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
+        let _ = (fs, gs);
+        false
+    }
 }
 
 /// User memory: the address space of a process (`UserSpace`, whose
@@ -345,6 +356,14 @@ pub fn xstate_enabled() -> u64 {
 #[inline]
 pub fn set_mxcsr(value: u32) {
     <P as UserEntry>::set_mxcsr(value)
+}
+#[inline]
+pub fn user_bases() -> (u64, u64) {
+    <P as UserEntry>::user_bases()
+}
+#[inline]
+pub fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
+    <P as UserEntry>::set_user_bases(fs, gs)
 }
 
 #[inline]
