@@ -106,7 +106,8 @@ has a section under "Open items".
 | T1 | Test speed | done | boot tests 66 s -> 14 s; WORKFLOW "Test speed and environments" |
 | T2 | Boot-test limits on the VM's run time | done | `xtask/src/vmtime.rs`; WORKFLOW "Scenarios" |
 | O1 | Ledger, event stream, backtraces, benchmarks | done | OBSERVABILITY "Event stream", "Missing-features ledger", "Backtraces and panic output", "Benchmarks" |
-| U1-U3 | gala-um | done | 92 programs in seconds; GALA_UM.md |
+| U1-U3 | gala-um | done | 109 programs in seconds; GALA_UM.md |
+| U4 | gala-um: more than one NT process | planned | child processes and `start=`; GALA_UM "Limits and open questions" |
 | HS | Hygiene sweeps | in progress | recurring; first sweep done, four leftovers |
 
 ### NT core services (done, by test)
@@ -178,6 +179,27 @@ has a section under "Open items".
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
+
+### U4. gala-um: more than one NT process
+
+**Goal**: the scenarios with child processes or a server next to the
+test (`start=`) run in gala-um too: process_test, conpty_test, busybox,
+cmd_test, go_exec, the cross-process window tests, schannel_test (its
+Nginx), system_test and session_test.
+
+**Done so far**: such scenarios are left out by rule (`NOT_IN_UM`, and
+`UM_FLAGS` for the flags gala-um does not apply), never run without
+their setup. schannel_test passes in gala-um without its Nginx parts,
+the in-process TLS 1.3 and 1.2 server included.
+
+**Next**:
+1. A host process per NT process sharing one NT layer (objects,
+   handles, the loopback TCP stack), or several address spaces in one
+   host process: decide which, in GALA_UM.md.
+2. `start=` and child process creation on it; then the scenarios above
+   out of `NOT_IN_UM`.
+
+**Done when**: schannel_test and process_test pass in um-test.
 
 ### HS. Hygiene sweeps
 

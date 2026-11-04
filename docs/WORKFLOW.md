@@ -392,7 +392,18 @@ hosted`) as a Linux process (docs/GALA_UM.md). `cargo xtask test` runs
 about 50 programs in about 3 s. Run it alone with `cargo xtask um-test`
 while changing `kernel/src/nt`: it is the fastest check there is. A new
 test program runs in gala-um by default; if it cannot (child processes,
-a network card, a disk), add it to `NOT_IN_UM` with the reason.
+a network card, a disk), add it to `NOT_IN_UM` with the reason. A
+scenario with a kernel flag gala-um does not apply (anything not in
+`UM_FLAGS`: `start=`, `as=`, `events=`, ...) is left out by rule, and
+`um_command` refuses it; um-test's last lines list every program
+scenario it did not run and why (`um_gap`).
+
+- **A "hang" in gala-um is first a question of setup**: read the
+  SIGQUIT state dump and `um --trace` before naming a cause. A program
+  run without the server its scenario starts retries its connect
+  (STATUS_CONNECTION_REFUSED from AFD's connect IOCTL 0x12007, in a
+  loop in the trace) until um's 30 s timeout, which looks like a hang
+  in the sockets.
 
 Run a program directly:
 

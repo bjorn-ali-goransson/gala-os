@@ -182,18 +182,26 @@ business), and `P`, the type that implements them.
 
 ## What runs in gala-um
 
-`runs_in_um` in xtask: every program's own scenario (`run=<name>.exe`, no
-other kernel flags) runs in gala-um by default, so there is no list of
-passing programs to maintain. Excluded:
+`runs_in_um` in xtask: every program's own scenario (`run=<name>.exe`)
+runs in gala-um by default, so there is no list of passing programs to
+maintain. **Invariant: a scenario runs in gala-um with all of its kernel
+flags or not at all.** `UM_FLAGS` lists the flags um applies
+(`qemu_exit`, `run=`, `args=`, `clock=`, and `calstall`, which only
+touches the kernel's clock calibration); a scenario with any other flag
+is left out, and `um_command` refuses to run it, since the program would
+run without part of its setup. `um_gap` gives the reason a scenario is
+left out; um-test ends with every program scenario it did not run and
+why, and the report records it (host tests: xtask's `um_scenarios`).
+Excluded:
 
 | Excluded | Why |
 |---|---|
 | network scenarios (`NET_SCENARIOS`: net_echo, winsock_test, go_http, nginx, nginx_master, nginx_tls, sshd_*, java_http, ...) | they need a network card and xtask's client (a TAP device or host sockets behind AFD would be needed) |
 | disk scenarios | no virtio-blk in a Linux process |
 | `NOT_IN_UM`: process_test, smprace_test, conpty_test, busybox, cmd_test, go_exec, logon_test, windows_across_test, uipi_test, shell32_test, winevent_test, uia_test | child processes: one NT process per Linux process |
-| `NOT_IN_UM`: system_test, session_test, lsa_test, restricted_test, profile_test | run as SYSTEM (a boot option) |
+| `NOT_IN_UM`: system_test, session_test | run as SYSTEM (a boot option), and child processes |
+| kernel flags um does not apply: `as=system` (lsa_test, restricted_test, profile_test), `start=` (schannel_test's Nginx), `events=`, `wallpaper=`, ... | the `UM_FLAGS` rule above |
 | `NOT_IN_UM`: gui_test, gala_cli, console_window | need a screen |
-| `NOT_IN_UM`: schannel_test | the in-process TLS server's sockets hang in gala-um (ROADMAP TLS) |
 | `NOT_IN_UM`: bench | measures the platform: gala-um's numbers are the host's |
 | kernel scenarios (selftest, fault-*, trace, events) | not program scenarios: they test the kernel itself with kernel flags |
 
@@ -302,9 +310,11 @@ dump"); um-test's `timeout -s QUIT` sends it when a program hangs.
 
 ## Limits and open questions
 
-- **One NT process per Linux process**: no child processes. Running them
-  needs a host process per NT process (or several address spaces in
-  one); until then those scenarios run in QEMU only.
+- **One NT process per Linux process**: no child processes, and no
+  `start=` (a server next to the test, as schannel_test's Nginx).
+  Running them needs a host process per NT process sharing one NT layer
+  (objects, the loopback TCP stack), or several address spaces in one;
+  until then those scenarios run in QEMU only (ROADMAP U4).
 - **No network card, no disk, no screen**: see "What runs in gala-um".
 - **Fidelity drift**: anything emulated differently (memory placement,
   timer resolution, tick updates, lock spinning) must be listed here, so
