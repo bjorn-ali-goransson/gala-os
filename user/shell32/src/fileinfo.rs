@@ -262,14 +262,14 @@ unsafe extern "system" {
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
 }
 
-const KIND_PATH: u16 = 1;
+pub(crate) const KIND_PATH: u16 = 1;
 const KIND_DRIVES: u16 = 2;
 const CSIDL_DESKTOP: i32 = 0;
 const CSIDL_DRIVES: i32 = 0x11;
 const CSIDL_DESKTOPDIRECTORY: i32 = 0x10;
 
 /// A list of one item of `kind` with `path`, or the empty list.
-fn new_list(item: Option<(u16, &[u16])>) -> *mut u8 {
+pub(crate) fn new_list(item: Option<(u16, &[u16])>) -> *mut u8 {
     let body = item.map_or(0, |(_, p)| 2 + 4 + 2 + 2 * p.len());
     // SAFETY: plain call.
     let list = unsafe { HeapAlloc(GetProcessHeap(), 8, body + 2) }; // HEAP_ZERO_MEMORY

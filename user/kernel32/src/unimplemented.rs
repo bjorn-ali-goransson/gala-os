@@ -46,7 +46,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     QueueUserWorkItem
     ReadConsoleOutputA
     RemoveDirectoryA
-    ReplaceFileW
     ResolveLocaleName
     ScrollConsoleScreenBufferA
     SetFileIoOverlappedRange

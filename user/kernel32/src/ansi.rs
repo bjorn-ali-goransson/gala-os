@@ -392,9 +392,10 @@ pub extern "system" fn FreeEnvironmentStringsA(block: *mut u8) -> Bool {
     super::heap::HeapFree(super::heap::GetProcessHeap(), 0, block.cast())
 }
 
-/// MoveFileExW: MOVEFILE_REPLACE_EXISTING replaces the target; the other
-/// flags (copy allowed, write through) change nothing here; a null target
-/// deletes the source.
+/// MoveFileExW: MOVEFILE_REPLACE_EXISTING replaces the target in the same
+/// step as the rename (FileRenameInformation's ReplaceIfExists); the
+/// other flags (copy allowed, write through) change nothing here; a null
+/// target deletes the source.
 #[unsafe(no_mangle)]
 pub extern "system" fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> Bool {
     const MOVEFILE_REPLACE_EXISTING: u32 = 1;
@@ -413,16 +414,55 @@ pub extern "system" fn MoveFileExW(from: *const u16, to: *const u16, flags: u32)
     if to.is_null() {
         return DeleteFileW(from);
     }
-    if super::mapping::MoveFileW(from, to) != FALSE {
+    super::mapping::rename(from, to, flags & MOVEFILE_REPLACE_EXISTING != 0)
+}
+
+/// ReplaceFileW(replaced, replacement, backup, flags, ...): `replacement`
+/// takes `replaced`'s name, `replaced` first renamed to `backup` when one
+/// is named (replacing an existing backup). Errors as documented:
+/// ERROR_UNABLE_TO_REMOVE_REPLACED (1175) when `replaced` cannot be moved
+/// away (nothing changed), ERROR_UNABLE_TO_MOVE_REPLACEMENT (1176) when
+/// the replacement cannot be moved (nothing changed), and
+/// ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 (1177) when the backup was made but
+/// the replacement could not follow (the replaced file is under the
+/// backup's name). The flags (REPLACEFILE_WRITE_THROUGH, ...IGNORE_*) and
+/// the replaced file's attributes and security merged into the new one
+/// are not modelled: the replacement keeps its own.
+#[unsafe(no_mangle)]
+pub extern "system" fn ReplaceFileW(
+    replaced: *const u16,
+    replacement: *const u16,
+    backup: *const u16,
+    _flags: u32,
+    _exclude: *mut c_void,
+    _reserved: *mut c_void,
+) -> Bool {
+    const ERROR_UNABLE_TO_REMOVE_REPLACED: u32 = 1175;
+    const ERROR_UNABLE_TO_MOVE_REPLACEMENT: u32 = 1176;
+    const ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: u32 = 1177;
+    const INVALID: u32 = u32::MAX;
+    if replaced.is_null() || replacement.is_null() {
+        return fail_with(87, FALSE); // ERROR_INVALID_PARAMETER
+    }
+    if GetFileAttributesW(replaced) == INVALID {
+        return fail_with(ERROR_UNABLE_TO_REMOVE_REPLACED, FALSE);
+    }
+    if GetFileAttributesW(replacement) == INVALID {
+        return fail_with(ERROR_UNABLE_TO_MOVE_REPLACEMENT, FALSE);
+    }
+    if backup.is_null() {
+        if super::mapping::rename(replacement, replaced, true) == FALSE {
+            return fail_with(ERROR_UNABLE_TO_MOVE_REPLACEMENT, FALSE);
+        }
         return TRUE;
     }
-    if flags & MOVEFILE_REPLACE_EXISTING != 0
-        && GetLastError() == ERROR_ALREADY_EXISTS
-        && DeleteFileW(to) != FALSE
-    {
-        return super::mapping::MoveFileW(from, to);
+    if super::mapping::rename(replaced, backup, true) == FALSE {
+        return fail_with(ERROR_UNABLE_TO_REMOVE_REPLACED, FALSE);
     }
-    FALSE
+    if super::mapping::rename(replacement, replaced, false) == FALSE {
+        return fail_with(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2, FALSE);
+    }
+    TRUE
 }
 
 /// CreateNamedPipeA: CreateNamedPipeW with the name converted.

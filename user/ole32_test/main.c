@@ -37,12 +37,34 @@
  * - CoImpersonateClient / CoRevertToSelf outside a COM call:
  *   RPC_E_CALL_COMPLETE (there is no call context).
  *
+ * - HSTRING (winstring.h, through api-ms-win-core-winrt-string, as
+ *   Chromium imports it): WindowsCreateString copies (NULL for length 0,
+ *   E_POINTER for a NULL source with a length); a reference string
+ *   (WindowsCreateStringReference) uses the caller's text, which must
+ *   be NUL-terminated at its length (E_INVALIDARG); raw buffers, lengths
+ *   (L"" and 0 for NULL), duplicates (a copy of a reference string),
+ *   ordinal comparison; deleting NULL or a reference string is S_OK.
+ * - RoGetActivationFactory / RoActivateInstance of a class that is not
+ *   registered: REGDB_E_CLASSNOTREG, the output NULL.
+ * - CoMarshalInterThreadInterfaceInStream + CoGetInterfaceAndReleaseStream
+ *   in the object's own apartment: the object itself comes back; the
+ *   stream holds one reference until unmarshaled. A TABLESTRONG marshal
+ *   unmarshals twice and holds its reference until CoReleaseMarshalData.
+ * - RoGetAgileReference: Resolve gives the object; E_NOINTERFACE for an
+ *   interface it lacks; the reference is released with the agile one.
+ * - CoRegisterMessageFilter outside an STA: CO_E_NOT_SUPPORTED.
+ * - PropVariantCopy: a VT_LPWSTR is copied (a new string), a VT_UNKNOWN
+ *   AddRef'd, a vector of strings copied element by element; an invalid
+ *   type is STG_E_INVALIDPARAMETER.
+ *
  * Prints "ole32_test: ok" or exits with the number of the failing check. */
 #define COBJMACROS
 #include <windows.h>
 #include <ole2.h>
 #include <oleauto.h>
 #include <propidl.h>
+#include <roapi.h>
+#include <winstring.h>
 #include <stdio.h>
 
 static int check;
@@ -286,6 +308,120 @@ int main(void) {
     /* Outside a COM call there is no client to impersonate. */
     CHECK(CoImpersonateClient() == RPC_E_CALL_COMPLETE);
     CHECK(CoRevertToSelf() == RPC_E_CALL_COMPLETE);
+
+    /* HSTRING. */
+    {
+        static const WCHAR text[] = L"gala";
+        HSTRING s = (HSTRING)1, r = (HSTRING)1, d = NULL, e = (HSTRING)1;
+        HSTRING_HEADER header;
+        UINT32 len = 99;
+        INT32 order = 5;
+        CHECK(WindowsCreateString(text, 0, &e) == S_OK && e == NULL);
+        CHECK(WindowsCreateString(NULL, 3, &e) == E_POINTER);
+        CHECK(WindowsCreateString(text, 4, &s) == S_OK && s != NULL);
+        const WCHAR *raw = WindowsGetStringRawBuffer(s, &len);
+        CHECK(raw != text && len == 4 && raw[4] == 0 && memcmp(raw, text, 8) == 0);
+        CHECK(WindowsGetStringLen(s) == 4 && !WindowsIsStringEmpty(s));
+        CHECK(WindowsCreateStringReference(text, 3, &header, &r) == E_INVALIDARG);
+        CHECK(WindowsCreateStringReference(text, 4, &header, &r) == S_OK && r != NULL);
+        CHECK(WindowsGetStringRawBuffer(r, &len) == text && len == 4);
+        CHECK(WindowsCompareStringOrdinal(s, r, &order) == S_OK && order == 0);
+        CHECK(WindowsDuplicateString(r, &d) == S_OK && d != NULL && d != r);
+        CHECK(WindowsGetStringRawBuffer(d, NULL) != text);
+        CHECK(WindowsDeleteString(r) == S_OK);
+        raw = WindowsGetStringRawBuffer(NULL, &len);
+        CHECK(raw != NULL && raw[0] == 0 && len == 0 && WindowsIsStringEmpty(NULL));
+        CHECK(WindowsCompareStringOrdinal(NULL, s, &order) == S_OK && order == -1);
+        HSTRING s2 = NULL;
+        CHECK(WindowsDuplicateString(s, &s2) == S_OK && s2 != NULL);
+        CHECK(WindowsDeleteString(s) == S_OK && WindowsGetStringLen(s2) == 4);
+        CHECK(WindowsDeleteString(s2) == S_OK && WindowsDeleteString(d) == S_OK);
+        CHECK(WindowsDeleteString(NULL) == S_OK);
+
+        /* No Windows Runtime class of this name exists. */
+        static const WCHAR name[] = L"Gala.Test.NoSuchClass";
+        HSTRING cls;
+        void *factory = (void *)1;
+        IInspectable *inst = (IInspectable *)1;
+        CHECK(WindowsCreateStringReference(name, 21, &header, &cls) == S_OK);
+        CHECK(RoGetActivationFactory(cls, &IID_IUnknown, &factory) == REGDB_E_CLASSNOTREG && factory == NULL);
+        CHECK(RoActivateInstance(cls, &inst) == REGDB_E_CLASSNOTREG && inst == NULL);
+    }
+
+    /* Marshaling in the object's own apartment. */
+    {
+        Obj m = { &vtbl, 1, FALSE, 0, 0, 0, 0 };
+        IStream *stream = NULL;
+        IUnknown *got = NULL;
+        CHECK(CoMarshalInterThreadInterfaceInStream(&IID_IUnknown, (IUnknown *)&m, &stream) == S_OK && stream);
+        CHECK(m.refs == 2);
+        CHECK(CoGetInterfaceAndReleaseStream(stream, &IID_IUnknown, (void **)&got) == S_OK);
+        CHECK(got == (IUnknown *)&m && m.refs == 2);
+        IUnknown_Release(got);
+        CHECK(m.refs == 1);
+
+        LARGE_INTEGER zero = { 0 };
+        CHECK(CreateStreamOnHGlobal(NULL, TRUE, &stream) == S_OK);
+        CHECK(CoMarshalInterface(stream, &IID_IUnknown, (IUnknown *)&m, MSHCTX_INPROC, NULL, MSHLFLAGS_TABLESTRONG) == S_OK);
+        CHECK(m.refs == 2);
+        for (int i = 0; i < 2; i++) {
+            CHECK(IStream_Seek(stream, zero, STREAM_SEEK_SET, NULL) == S_OK);
+            CHECK(CoUnmarshalInterface(stream, &IID_IUnknown, (void **)&got) == S_OK && got == (IUnknown *)&m);
+            IUnknown_Release(got);
+        }
+        CHECK(m.refs == 2);
+        CHECK(IStream_Seek(stream, zero, STREAM_SEEK_SET, NULL) == S_OK);
+        CHECK(CoReleaseMarshalData(stream) == S_OK && m.refs == 1);
+        IStream_Release(stream);
+
+        HRESULT (WINAPI *agile)(DWORD, REFIID, IUnknown *, IAgileReference **) =
+            (void *)GetProcAddress(GetModuleHandleA("ole32.dll"), "RoGetAgileReference");
+        IAgileReference *ref = NULL;
+        CHECK(agile != NULL);
+        CHECK(agile(0, &IID_IUnknown, (IUnknown *)&m, &ref) == S_OK && ref != NULL && m.refs == 2);
+        CHECK(IAgileReference_Resolve(ref, &IID_IUnknown, (void **)&got) == S_OK && got == (IUnknown *)&m);
+        IUnknown_Release(got);
+        CHECK(IAgileReference_Resolve(ref, &IID_IRunnableObject, (void **)&got) == E_NOINTERFACE && got == NULL);
+        CHECK(agile(0, &IID_IRunnableObject, (IUnknown *)&m, &ref) == E_NOINTERFACE && ref == NULL);
+        CHECK(m.refs == 2);
+    }
+
+    /* The MTA has no message filter. */
+    {
+        IMessageFilter *old = (IMessageFilter *)1;
+        CHECK(CoRegisterMessageFilter(NULL, &old) == CO_E_NOT_SUPPORTED);
+    }
+
+    /* PropVariantCopy. */
+    {
+        Obj u = { &vtbl, 1, FALSE, 0, 0, 0, 0 };
+        PROPVARIANT a, b;
+        PropVariantInit(&a);
+        a.vt = VT_LPWSTR;
+        a.pwszVal = CoTaskMemAlloc(10);
+        memcpy(a.pwszVal, L"gala", 10);
+        CHECK(PropVariantCopy(&b, &a) == S_OK && b.vt == VT_LPWSTR);
+        CHECK(b.pwszVal != a.pwszVal && memcmp(b.pwszVal, L"gala", 10) == 0);
+        CHECK(PropVariantClear(&b) == S_OK && PropVariantClear(&a) == S_OK);
+        a.vt = VT_UNKNOWN;
+        a.punkVal = (IUnknown *)&u;
+        CHECK(PropVariantCopy(&b, &a) == S_OK && b.punkVal == (IUnknown *)&u && u.refs == 2);
+        CHECK(PropVariantClear(&b) == S_OK && u.refs == 1);
+        LPWSTR items[2] = { CoTaskMemAlloc(4), CoTaskMemAlloc(6) };
+        memcpy(items[0], L"a", 4);
+        memcpy(items[1], L"bc", 6);
+        a.vt = VT_VECTOR | VT_LPWSTR;
+        a.calpwstr.cElems = 2;
+        a.calpwstr.pElems = items;
+        CHECK(PropVariantCopy(&b, &a) == S_OK && b.calpwstr.cElems == 2);
+        CHECK(b.calpwstr.pElems != items && b.calpwstr.pElems[1] != items[1]);
+        CHECK(memcmp(b.calpwstr.pElems[1], L"bc", 6) == 0);
+        CHECK(PropVariantClear(&b) == S_OK);
+        CoTaskMemFree(items[0]);
+        CoTaskMemFree(items[1]);
+        a.vt = 0x5555;
+        CHECK(PropVariantCopy(&b, &a) == STG_E_INVALIDPARAMETER);
+    }
 
     CoUninitialize();
     printf("ole32_test: ok\n");

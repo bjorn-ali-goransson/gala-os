@@ -17,6 +17,7 @@
 
 extern crate alloc;
 
+mod absent;
 mod blend;
 mod dib;
 mod draw;
@@ -24,6 +25,7 @@ mod font;
 mod palette;
 mod region;
 mod shapes;
+mod state;
 mod surface;
 mod unimplemented;
 
@@ -147,6 +149,9 @@ pub(crate) struct Dc {
     pub bounds: [i32; 4],
     /// The selected palette (slot).
     pub palette: usize,
+    /// SetDCBrushColor's and SetDCPenColor's colours (COLORREF).
+    pub dc_brush: u32,
+    pub dc_pen: u32,
 }
 
 /// v * num / den rounded to the nearest (halves away from zero).
@@ -433,6 +438,8 @@ fn new_dc(kind: DcKind, surface: Surface, bitmap: usize) -> Handle {
         map_mode: 1,
         window_ext: (1, 1),
         viewport_ext: (1, 1),
+        dc_brush: 0xffffff,
+        dc_pen: 0,
     }))
 }
 
@@ -555,6 +562,7 @@ pub extern "system" fn DeleteDC(hdc: Handle) -> i32 {
             return 0;
         }
         slots[i] = Object::Free;
+        state::forget(i);
         1
     })
 }

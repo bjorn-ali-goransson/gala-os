@@ -1580,6 +1580,42 @@ pub unsafe extern "system" fn RtlGetVersion(info: *mut u32) -> u32 {
     STATUS_SUCCESS
 }
 
+/// The update build revision the registry seed gives
+/// (HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\UBR).
+const UBR: u64 = 1;
+
+/// RtlGetDeviceFamilyInfoEnum(*uap_info, *family, *form): the version as
+/// major.minor.build.revision in 16-bit fields (major highest), the
+/// device family DEVICEFAMILYINFOENUM_DESKTOP (3) and the form
+/// DEVICEFAMILYDEVICEFORM_UNKNOWN (0); each output optional.
+///
+/// # Safety
+/// Each non-null output must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlGetDeviceFamilyInfoEnum(
+    uap_info: *mut u64,
+    family: *mut u32,
+    form: *mut u32,
+) {
+    // SAFETY: KUSER_SHARED_DATA (as RtlGetVersion reads it); the caller's
+    // outputs, each written only when given.
+    unsafe {
+        let kuser = |offset: usize| {
+            u64::from(core::ptr::read_volatile((0x7ffe_0000 + offset) as *const u32))
+        };
+        if !uap_info.is_null() {
+            *uap_info =
+                kuser(0x26c) << 48 | kuser(0x270) << 32 | (kuser(0x260) & 0xffff) << 16 | UBR;
+        }
+        if !family.is_null() {
+            *family = 3;
+        }
+        if !form.is_null() {
+            *form = 0;
+        }
+    }
+}
+
 /// RtlGetNtVersionNumbers(*Major, *Minor, *Build): the pinned build's
 /// version (KUSER_SHARED_DATA has the same numbers), with 0xF0000000 in
 /// the build number as a free (release) build reports it.

@@ -121,20 +121,20 @@ static FACTORY_VTBL: VTable<24> = VTable([
     factory_create_font_file_reference as *const (),
     factory_create_custom_font_file_reference as *const (),
     factory_create_font_face as *const (),
-    factory_not_impl as *const (), // CreateRenderingParams
-    factory_not_impl as *const (), // CreateMonitorRenderingParams
-    factory_not_impl as *const (), // CreateCustomRenderingParams
+    factory_CreateRenderingParams as *const (),
+    factory_CreateMonitorRenderingParams as *const (),
+    factory_CreateCustomRenderingParams as *const (),
     factory_register_loader as *const (),
     factory_register_loader as *const (),
-    factory_not_impl as *const (), // CreateTextFormat
-    factory_not_impl as *const (), // CreateTypography
-    factory_not_impl as *const (), // GetGdiInterop
-    factory_not_impl as *const (), // CreateTextLayout
-    factory_not_impl as *const (), // CreateGdiCompatibleTextLayout
-    factory_not_impl as *const (), // CreateEllipsisTrimmingSign
-    factory_not_impl as *const (), // CreateTextAnalyzer
-    factory_not_impl as *const (), // CreateNumberSubstitution
-    factory_not_impl as *const (), // CreateGlyphRunAnalysis
+    factory_CreateTextFormat as *const (),
+    factory_CreateTypography as *const (),
+    factory_GetGdiInterop as *const (),
+    factory_CreateTextLayout as *const (),
+    factory_CreateGdiCompatibleTextLayout as *const (),
+    factory_CreateEllipsisTrimmingSign as *const (),
+    factory_CreateTextAnalyzer as *const (),
+    factory_CreateNumberSubstitution as *const (),
+    factory_CreateGlyphRunAnalysis as *const (),
 ]);
 
 /// Writes `object` to `out` if `riid` is one of `iids`.
@@ -288,10 +288,33 @@ extern "system" fn factory_create_font_face(
 }
 
 /// The factory methods not implemented yet (they all return an HRESULT;
-/// the caller's arguments are left alone, outputs included).
-extern "system" fn factory_not_impl(_this: *const c_void) -> HResult {
-    missing(b"dwrite.dll!IDWriteFactory (method)", 0);
-    E_NOTIMPL
+/// the caller's arguments are left alone, outputs included); each reports
+/// its own name.
+macro_rules! factory_not_impl {
+    ($($name:ident)*) => {
+        $(
+            #[allow(non_snake_case)]
+            extern "system" fn $name(_this: *const c_void) -> HResult {
+                missing(concat!("dwrite.dll!IDWriteFactory::", stringify!($name)).as_bytes(), 0);
+                E_NOTIMPL
+            }
+        )*
+    };
+}
+
+factory_not_impl! {
+    factory_CreateRenderingParams
+    factory_CreateMonitorRenderingParams
+    factory_CreateCustomRenderingParams
+    factory_CreateTextFormat
+    factory_CreateTypography
+    factory_GetGdiInterop
+    factory_CreateTextLayout
+    factory_CreateGdiCompatibleTextLayout
+    factory_CreateEllipsisTrimmingSign
+    factory_CreateTextAnalyzer
+    factory_CreateNumberSubstitution
+    factory_CreateGlyphRunAnalysis
 }
 
 /// DWriteCreateFactory(factoryType, iid, **factory): the process's

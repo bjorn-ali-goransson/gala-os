@@ -114,6 +114,7 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn RtlGetVersion(info: *mut u32) -> u32;
     fn RtlGetCurrentPeb() -> usize;
+    fn RtlGetDeviceFamilyInfoEnum(uap_info: *mut u64, family: *mut u32, form: *mut u32);
 }
 
 // C helpers the compiler calls; ntdll exports them (on Windows too).
@@ -405,6 +406,14 @@ fn run() -> Result<(), u32> {
         c.eq(version[2].into(), 0)?;
         c.eq(version[3].into(), core::ptr::read_volatile(0x7ffe_0260 as *const u32).into())?;
         c.eq(version[4].into(), 2)?; // VER_PLATFORM_WIN32_NT
+        // RtlGetDeviceFamilyInfoEnum: the same version in 16-bit fields
+        // (major highest), the desktop family (3); outputs optional.
+        let (mut uap, mut family) = (0u64, 0u32);
+        RtlGetDeviceFamilyInfoEnum(&mut uap, &mut family, core::ptr::null_mut());
+        c.eq(uap >> 48, 10)?;
+        c.eq((uap >> 32) & 0xffff, 0)?;
+        c.eq((uap >> 16) & 0xffff, u64::from(version[3]))?;
+        c.eq(family.into(), 3)?;
         let peb: usize;
         core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
         c.eq(RtlGetCurrentPeb() as u64, peb as u64)?;

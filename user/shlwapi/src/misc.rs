@@ -1,4 +1,5 @@
-//! IsOS and QISearch (shlwapi.h), which Chromium imports by ordinal.
+//! IsOS, QISearch and SHCreateMemStream (shlwapi.h), which Chromium
+//! imports by ordinal.
 
 const OS_NT: u32 = 1;
 const OS_WIN2000ORGREATER: u32 = 7;
@@ -58,6 +59,66 @@ pub extern "system" fn QISearch(
             entry = entry.add(16);
         }
     }
+}
+
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn LoadLibraryW(name: *const u16) -> usize;
+    fn GetProcAddress(module: usize, name: *const u8) -> usize;
+}
+
+/// ole32's CreateStreamOnHGlobal, loaded when first needed (a static
+/// import would make every program that loads shlwapi load ole32).
+fn create_stream(out: *mut *mut u8) -> i32 {
+    const OLE32: [u16; 10] = [111, 108, 101, 51, 50, 46, 100, 108, 108, 0]; // "ole32.dll"
+    // SAFETY: NUL-terminated names; ole32's CreateStreamOnHGlobal(HGLOBAL,
+    // BOOL, IStream**).
+    unsafe {
+        let module = LoadLibraryW(OLE32.as_ptr());
+        let f = if module == 0 {
+            0
+        } else {
+            GetProcAddress(module, c"CreateStreamOnHGlobal".as_ptr().cast())
+        };
+        if f == 0 {
+            return E_NOINTERFACE;
+        }
+        let f: extern "system" fn(usize, i32, *mut *mut u8) -> i32 = core::mem::transmute(f);
+        f(0, 1, out)
+    }
+}
+
+/// SHCreateMemStream(data, size): a memory IStream holding a copy of the
+/// `size` bytes at `data` (empty for NULL), positioned at its start; NULL
+/// on failure (ole32's memory stream).
+#[unsafe(no_mangle)]
+pub extern "system" fn SHCreateMemStream(data: *const u8, size: u32) -> *mut u8 {
+    let mut stream = core::ptr::null_mut();
+    if create_stream(&mut stream) < 0 || stream.is_null() {
+        return core::ptr::null_mut();
+    }
+    // IStream: Release is slot 2, Write 4, Seek 5.
+    // SAFETY: a live IStream; the caller's `size` bytes.
+    unsafe {
+        let vtable = stream.cast::<*const usize>().read();
+        let release: extern "system" fn(*mut u8) -> u32 = core::mem::transmute(*vtable.add(2));
+        let write: extern "system" fn(*mut u8, *const u8, u32, *mut u32) -> i32 =
+            core::mem::transmute(*vtable.add(4));
+        let seek: extern "system" fn(*mut u8, i64, u32, *mut u64) -> i32 =
+            core::mem::transmute(*vtable.add(5));
+        if !data.is_null() && size > 0 {
+            let mut written = 0;
+            if write(stream, data, size, &mut written) < 0 || written != size {
+                release(stream);
+                return core::ptr::null_mut();
+            }
+        }
+        if seek(stream, 0, 0, core::ptr::null_mut()) < 0 {
+            release(stream);
+            return core::ptr::null_mut();
+        }
+    }
+    stream
 }
 
 // PathFindExtensionW and PathRemoveExtensionW live in paths_more.rs.

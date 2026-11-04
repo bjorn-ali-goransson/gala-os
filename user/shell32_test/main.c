@@ -32,6 +32,17 @@
  *   FOF_FILESONLY removes only files; FO_DELETE of directories (a
  *   double-NUL list) removes the trees; a source that is not there is
  *   not 0.
+ * - What Chromium delay-imports (some by ordinal: SHChangeNotifyRegister
+ *   #2, SHChangeNotifyDeregister #4, ILGetSize #152, ILFree #155,
+ *   ILCreateFromPathW #190, IsUserAnAdmin #680; shlwapi's
+ *   SHCreateMemStream #12): ILCreateFromPathW gives the list of an
+ *   existing directory (its path read back by SHGetPathFromIDListW) and
+ *   NULL for one that is not there; ILGetSize is the list's size with its
+ *   2-byte terminator (2 for the desktop's empty list, 0 for NULL); SHQueryUserNotificationState is
+ *   S_OK; ABM_GETTASKBARPOS fills the taskbar's rectangle (within the
+ *   screen, not the whole screen) and edge when there is a taskbar; ShellExecuteA of a file that
+ *   is not there returns at most 32; SHCreateMemStream holds a copy of
+ *   the bytes, read back from its start.
  *
  * Prints "shell32_test: ok" or exits with the number of the failing
  * check. Run as "shell32_test child" it just exits with 7. */
@@ -209,6 +220,51 @@ int main(int argc, char **argv) {
     DestroyIcon(l);
     DestroyIcon(sm);
     CHECK(SHDefExtractIconW(self, 5, 0, &l, NULL, 32) == S_FALSE);
+
+    /* What Chromium delay-imports. */
+    HMODULE shell = GetModuleHandleA("shell32.dll");
+    UINT (WINAPI *il_size)(LPCITEMIDLIST) = (void *)GetProcAddress(shell, MAKEINTRESOURCEA(152));
+    LPITEMIDLIST (WINAPI *il_from_path)(LPCWSTR) = (void *)GetProcAddress(shell, MAKEINTRESOURCEA(190));
+    ULONG (WINAPI *notify_register)(HWND, int, LONG, UINT, int, const void *) =
+        (void *)GetProcAddress(shell, MAKEINTRESOURCEA(2));
+    BOOL (WINAPI *notify_deregister)(ULONG) = (void *)GetProcAddress(shell, MAKEINTRESOURCEA(4));
+    CHECK(il_from_path && notify_register && notify_deregister);
+    CHECK(il_from_path(L"C:\\no\\such\\dir") == NULL);
+    LPITEMIDLIST windows = il_from_path(L"C:\\Windows");
+    WCHAR back_path[MAX_PATH];
+    CHECK(windows != NULL && SHGetPathFromIDListW(windows, back_path) && lstrcmpiW(back_path, L"C:\\Windows") == 0);
+    CHECK(il_size(windows) > 2);
+    void (WINAPI *il_free)(LPITEMIDLIST) = (void *)GetProcAddress(shell, MAKEINTRESOURCEA(155));
+    BOOL (WINAPI *admin)(void) = (void *)GetProcAddress(shell, MAKEINTRESOURCEA(680));
+    CHECK(il_size && il_free && admin);
+    LPITEMIDLIST desktop = NULL;
+    CHECK(SHGetSpecialFolderLocation(NULL, CSIDL_DESKTOP, &desktop) == S_OK && desktop);
+    CHECK(il_size(desktop) == 2 && il_size(NULL) == 0);
+    il_free(desktop);
+    il_free(windows);
+    BOOL is_admin = admin();
+    CHECK(is_admin == TRUE || is_admin == FALSE);
+    QUERY_USER_NOTIFICATION_STATE state = 0;
+    CHECK(SHQueryUserNotificationState(&state) == S_OK && state >= 1 && state <= 7);
+    APPBARDATA bar = { sizeof bar };
+    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    /* (gala without a screen has no taskbar: then the call fails.) */
+    if (SHAppBarMessage(ABM_GETTASKBARPOS, &bar) != 0) {
+        CHECK(bar.uEdge <= ABE_BOTTOM);
+        CHECK(bar.rc.left >= 0 && bar.rc.top >= 0 && bar.rc.right <= sw && bar.rc.bottom <= sh);
+        CHECK(bar.rc.right > bar.rc.left && bar.rc.bottom > bar.rc.top);
+        CHECK((bar.rc.right - bar.rc.left) * (bar.rc.bottom - bar.rc.top) < sw * sh);
+    }
+    CHECK((INT_PTR)ShellExecuteA(NULL, "open", "C:\\no\\such\\file.exe", NULL, NULL, SW_HIDE) <= 32);
+    IStream *(WINAPI *mem_stream)(const BYTE *, UINT) =
+        (void *)GetProcAddress(LoadLibraryA("shlwapi.dll"), MAKEINTRESOURCEA(12));
+    CHECK(mem_stream != NULL);
+    IStream *stream = mem_stream((const BYTE *)"gala", 4);
+    CHECK(stream != NULL);
+    char back[8] = {0};
+    ULONG got = 0;
+    CHECK(stream->lpVtbl->Read(stream, back, 8, &got) == S_OK && got == 4 && memcmp(back, "gala", 4) == 0);
+    stream->lpVtbl->Release(stream);
 
     printf("shell32_test: ok\n");
     return 0;

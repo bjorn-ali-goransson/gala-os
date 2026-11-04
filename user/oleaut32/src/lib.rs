@@ -45,6 +45,7 @@ unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
     fn HeapFree(heap: usize, flags: u32, p: *mut u8) -> i32;
+    fn CompareStringW(lcid: u32, flags: u32, a: *const u16, na: i32, b: *const u16, nb: i32) -> i32;
 }
 
 pub type HResult = i32;
@@ -183,6 +184,24 @@ pub extern "system" fn SysStringByteLen(s: *const u16) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "system" fn SysStringLen(s: *const u16) -> u32 {
     SysStringByteLen(s) / 2
+}
+
+/// VarBstrCmp(left, right, lcid, flags) (#314): VARCMP_LT (0), VARCMP_EQ
+/// (1) or VARCMP_GT (2), by CompareStringW in `lcid` with `flags`
+/// (NORM_IGNORECASE ...); a NULL BSTR is the empty string. VARCMP_NULL
+/// (3) when CompareStringW fails (an invalid locale or flags).
+#[unsafe(no_mangle)]
+pub extern "system" fn VarBstrCmp(left: *const u16, right: *const u16, lcid: u32, flags: u32) -> i32 {
+    const EMPTY: [u16; 1] = [0];
+    let (l, nl) = if left.is_null() { (EMPTY.as_ptr(), 0) } else { (left, SysStringLen(left) as i32) };
+    let (r, nr) = if right.is_null() { (EMPTY.as_ptr(), 0) } else { (right, SysStringLen(right) as i32) };
+    // SAFETY: both strings' lengths in characters (BSTRs carry them).
+    match unsafe { CompareStringW(lcid, flags, l, nl, r, nr) } {
+        1 => 0, // CSTR_LESS_THAN
+        2 => 1,
+        3 => 2,
+        _ => 3,
+    }
 }
 
 /// SysReAllocStringLen: a new string replaces `*old` (freed); TRUE.

@@ -50,6 +50,18 @@
 //!    back after closing; the sequence number changes; a caret blink time;
 //! 31. WTSQuerySessionInformationW: this session's id, active; the DWM
 //!    composes; the US layout is no IME.
+//! 32. ReplaceFileW: the replacement takes the replaced file's name (the
+//!    replaced one under the backup name when given); a replaced file
+//!    that is not there is ERROR_UNABLE_TO_REMOVE_REPLACED, nothing moved.
+//!    MoveFileExW onto an existing file: ERROR_ALREADY_EXISTS, or the
+//!    target replaced with MOVEFILE_REPLACE_EXISTING.
+//! 33. kernel32.dll has a VS_VERSION_INFO (found by its bare name too):
+//!    its file version is 10.0 and the system's build (as RtlGetVersion
+//!    reports it).
+//! 34. RegisterApplicationRestart: the command line and flags read back
+//!    (GetApplicationRestartSettings; the size with the NUL, a short
+//!    buffer's error), unknown flags refused; after
+//!    UnregisterApplicationRestart: ERROR_NOT_FOUND.
 
 #![no_std]
 #![no_main]
@@ -104,6 +116,26 @@ unsafe extern "system" {
     fn GetTempFileNameW(path: *const u16, prefix: *const u16, unique: u32, out: *mut u16) -> u32;
     fn GetFileAttributesW(path: *const u16) -> u32;
     fn DeleteFileW(path: *const u16) -> i32;
+    fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
+    fn ReplaceFileW(
+        replaced: *const u16,
+        replacement: *const u16,
+        backup: *const u16,
+        flags: u32,
+        exclude: *mut c_void,
+        reserved: *mut c_void,
+    ) -> i32;
+    fn GetFileSizeEx(h: Handle, size: *mut i64) -> i32;
+    fn GetModuleHandleW(name: *const u16) -> Handle;
+    fn RegisterApplicationRestart(command: *const u16, flags: u32) -> i32;
+    fn UnregisterApplicationRestart() -> i32;
+    fn GetApplicationRestartSettings(
+        process: Handle,
+        buf: *mut u16,
+        size: *mut u32,
+        flags: *mut u32,
+    ) -> i32;
+    fn GetModuleFileNameW(module: Handle, buf: *mut u16, n: u32) -> u32;
     fn CreateFileW(
         path: *const u16,
         access: u32,
@@ -698,7 +730,139 @@ fn tests() {
         check(DwmIsCompositionEnabled(&mut composed) == 0 && composed != 0, 31);
         let mut ime = [0u16; 8];
         check(ImmGetIMEFileNameW(0x0409_0409, ime.as_mut_ptr(), 8) == 0, 31); // US: no IME
+
+        // 32. Replacing files as Chromium's profile writes do
+        // (ImportantFileWriter): ReplaceFileW, MoveFileExW replacing.
+        let path = |name: &str, out: &mut [u16; 261]| {
+            let n = dir.iter().position(|&c| c == 0).unwrap_or(0);
+            out[..n].copy_from_slice(&dir[..n]);
+            for (i, c) in name.encode_utf16().enumerate() {
+                out[n + i] = c;
+            }
+            out[n + name.len()] = 0;
+        };
+        let make = |p: &[u16; 261], bytes: u32| {
+            let h = CreateFileW(
+                p.as_ptr(),
+                0x4000_0000,
+                0,
+                core::ptr::null(),
+                2,
+                0x80,
+                core::ptr::null_mut(),
+            );
+            let mut written = 0;
+            let ok = h as isize != -1
+                && WriteFile(h, b"gala-gala".as_ptr(), bytes, &mut written, core::ptr::null_mut())
+                    != 0;
+            CloseHandle(h);
+            ok
+        };
+        let size = |p: &[u16; 261]| {
+            let h = CreateFileW(
+                p.as_ptr(),
+                0x8000_0000,
+                7,
+                core::ptr::null(),
+                3,
+                0x80,
+                core::ptr::null_mut(),
+            );
+            if h as isize == -1 {
+                return -1;
+            }
+            let mut n = 0i64;
+            GetFileSizeEx(h, &mut n);
+            CloseHandle(h);
+            n
+        };
+        let (mut a, mut b, mut c, mut none) = ([0u16; 261], [0u16; 261], [0u16; 261], [0u16; 261]);
+        path("rep_a.txt", &mut a);
+        path("rep_b.txt", &mut b);
+        path("rep_c.txt", &mut c);
+        path("rep_none.txt", &mut none);
+        let null = core::ptr::null_mut();
+        check(make(&a, 3) && make(&b, 5), 32);
+        check(ReplaceFileW(a.as_ptr(), b.as_ptr(), core::ptr::null(), 0, null, null) != 0, 32);
+        check(size(&a) == 5 && size(&b) == -1, 32);
+        check(make(&b, 7), 32);
+        check(ReplaceFileW(a.as_ptr(), b.as_ptr(), c.as_ptr(), 0, null, null) != 0, 32);
+        check(size(&a) == 7 && size(&c) == 5 && size(&b) == -1, 32);
+        check(make(&b, 2), 32);
+        check(ReplaceFileW(none.as_ptr(), b.as_ptr(), core::ptr::null(), 0, null, null) == 0, 32);
+        check(GetLastError() == 1175 && size(&b) == 2, 32); // ERROR_UNABLE_TO_REMOVE_REPLACED
+        check(MoveFileExW(b.as_ptr(), a.as_ptr(), 0) == 0 && GetLastError() == 183, 32);
+        check(MoveFileExW(b.as_ptr(), a.as_ptr(), 1) != 0 && size(&a) == 2 && size(&b) == -1, 32);
+        check(DeleteFileW(a.as_ptr()) != 0 && DeleteFileW(c.as_ptr()) != 0, 32);
+
+        // 33. kernel32.dll's version resource (Chromium reads the system's
+        // version from it): VS_FIXEDFILEINFO's file version is 10.0.<the
+        // build KUSER_SHARED_DATA gives>.
+        let mut module = [0u16; 261];
+        let mut k32_name = [0u16; 64];
+        let k32 = GetModuleHandleW(w("kernel32.dll", &mut k32_name));
+        check(GetModuleFileNameW(k32, module.as_mut_ptr(), 261) != 0, 33);
+        let mut handle = 0u32;
+        // A bare name is found as LoadLibrary finds it (Chromium asks for
+        // "kernel32.dll").
+        check(GetFileVersionInfoSizeW(k32_name.as_ptr(), &mut handle) > 92, 33);
+        let size = GetFileVersionInfoSizeW(module.as_ptr(), &mut handle);
+        check(size > 92 && size < 8192, 33);
+        let mut data = [0u8; 8192];
+        check(GetFileVersionInfoW(module.as_ptr(), 0, size, data.as_mut_ptr().cast()) != 0, 33);
+        let mut fixed: *mut u32 = core::ptr::null_mut();
+        let mut len = 0u32;
+        let root = [u16::from(b'\\'), 0];
+        check(
+            VerQueryValueW(data.as_ptr().cast(), root.as_ptr(), (&raw mut fixed).cast(), &mut len)
+                != 0,
+            33,
+        );
+        check(len == 52 && *fixed == 0xfeef_04bd, 33);
+        let build = *(0x7ffe_0260 as *const u32) & 0xffff;
+        check(*fixed.add(2) == 10 << 16 && *fixed.add(3) >> 16 == build, 33);
+
+        // 34. RegisterApplicationRestart (Chromium registers its command
+        // line): read back by GetApplicationRestartSettings; a short
+        // buffer gets the size; unregistered: ERROR_NOT_FOUND.
+        let me_process = -1isize as Handle;
+        let mut args = [0u16; 64];
+        check(RegisterApplicationRestart(w("--restore", &mut args), 1 | 2) == 0, 34);
+        let mut bad = [0u16; 64];
+        check(RegisterApplicationRestart(w("x", &mut bad), 0x100) == 0x8007_0057_u32 as i32, 34);
+        let (mut back, mut n, mut flags) = ([0u16; 64], 64u32, 0u32);
+        check(
+            GetApplicationRestartSettings(me_process, back.as_mut_ptr(), &mut n, &mut flags) == 0,
+            34,
+        );
+        check(n == 10 && flags == 3 && back[..10] == args[..10], 34);
+        n = 4;
+        check(
+            GetApplicationRestartSettings(me_process, back.as_mut_ptr(), &mut n, &mut flags)
+                == 0x8007_007a_u32 as i32,
+            34,
+        );
+        check(n == 10, 34);
+        check(UnregisterApplicationRestart() == 0, 34);
+        n = 64;
+        check(
+            GetApplicationRestartSettings(me_process, back.as_mut_ptr(), &mut n, &mut flags)
+                == 0x8007_0490_u32 as i32,
+            34,
+        );
     }
+}
+
+#[link(name = "version", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GetFileVersionInfoSizeW(path: *const u16, handle: *mut u32) -> u32;
+    fn GetFileVersionInfoW(path: *const u16, handle: u32, size: u32, data: *mut c_void) -> i32;
+    fn VerQueryValueW(
+        data: *const c_void,
+        sub: *const u16,
+        out: *mut *mut c_void,
+        len: *mut u32,
+    ) -> i32;
 }
 
 #[link(name = "wtsapi32", kind = "raw-dylib")]

@@ -191,6 +191,25 @@ pub fn metrics(f: &LogFont) -> Metrics {
     m
 }
 
+/// The font file that draws `f` (a Selawik weight), or None for the
+/// fixed-pitch bitmap font, which has no file.
+pub fn file(f: &LogFont) -> Option<&'static [u8]> {
+    match metrics(f).kind {
+        Kind::Selawik { face, .. } => Some(SELAWIK[face]),
+        Kind::Mono { .. } => None,
+    }
+}
+
+/// The Selawik files and their style names, lightest first.
+pub fn selawik_faces() -> [(&'static [u8], &'static str, i32); 4] {
+    [
+        (SELAWIK[0], "Semilight", 350),
+        (SELAWIK[1], "Regular", 400),
+        (SELAWIK[2], "Semibold", 600),
+        (SELAWIK[3], "Bold", 700),
+    ]
+}
+
 /// OS/2's xAvgCharWidth (the second field), in font units.
 fn selawik_average(data: &[u8]) -> Option<i64> {
     let raw = ttf_parser::RawFace::parse(data, 0).ok()?;

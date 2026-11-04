@@ -67,6 +67,18 @@
  *   StretchDIBits draw a DIB (the latter scaled); GdiFlush succeeds.
  * - kernel32's MulDiv (font sizes): rounded half away from zero, -1 for a
  *   zero divisor or overflow.
+ * - DC state (what Chromium delay-imports): SaveDC returns the new depth;
+ *   RestoreDC(-1) goes back one, RestoreDC(n) to depth n dropping those
+ *   after it; a depth not saved, or 0, fails. SetDCBrushColor and
+ *   SetDCPenColor return the previous colour (white and black at first;
+ *   CLR_INVALID for no DC). CreateFontA / GetTextFaceA keep the ANSI face
+ *   name (the count with the NUL). GetCharWidthW gives each character's
+ *   advance (as GetTextExtentPoint32W measures it); last < first fails.
+ *   GetFontData: the whole file for table 0, a table by its tag ('head'
+ *   starts with version 1.0), GDI_ERROR for a table the font lacks.
+ *   EnumFontFamiliesExW with an empty name and DEFAULT_CHARSET calls back
+ *   at least once and returns the callback's last value (0 stops it); an
+ *   unknown family gets no callback.
  *
  * Prints "gdi32_test: ok" or exits with the number of the failing check. */
 #include <windows.h>
@@ -725,6 +737,74 @@ static void msimg(void) {
     DeleteDC(d);
 }
 
+/* EnumFontFamiliesExW's callback: counts calls; stops when asked. */
+static int enum_calls, enum_stop;
+static int CALLBACK enum_font(const LOGFONTW *lf, const TEXTMETRICW *tm, DWORD type, LPARAM param) {
+    (void)tm;
+    enum_calls++;
+    if (param != 0x1234 || lf->lfFaceName[0] == 0 || type == 0) return 0;
+    return enum_stop ? 0 : 7;
+}
+
+/* SaveDC/RestoreDC, the DC brush and pen colours, ANSI fonts, widths,
+ * font data and enumeration (what Chromium delay-imports). */
+static void dc_state(void) {
+    HDC screen = GetDC(NULL);
+    HDC dc = CreateCompatibleDC(screen);
+    CHECK(SetTextColor(dc, RGB(1, 2, 3)) != CLR_INVALID);
+    CHECK(SaveDC(dc) == 1);
+    SetTextColor(dc, RGB(4, 5, 6));
+    CHECK(SaveDC(dc) == 2);
+    SetTextColor(dc, RGB(7, 8, 9));
+    CHECK(RestoreDC(dc, -1) && GetTextColor(dc) == RGB(4, 5, 6));
+    CHECK(SaveDC(dc) == 2);
+    CHECK(RestoreDC(dc, 1) && GetTextColor(dc) == RGB(1, 2, 3));
+    CHECK(!RestoreDC(dc, 1) && !RestoreDC(dc, 0) && !RestoreDC(dc, -1));
+
+    CHECK(SetDCBrushColor(dc, RGB(10, 20, 30)) == RGB(255, 255, 255));
+    CHECK(SetDCBrushColor(dc, RGB(1, 1, 1)) == RGB(10, 20, 30));
+    CHECK(SetDCPenColor(dc, RGB(40, 50, 60)) == RGB(0, 0, 0));
+    CHECK(SetDCPenColor(dc, RGB(0, 0, 0)) == RGB(40, 50, 60));
+    CHECK(SetDCBrushColor(NULL, 0) == CLR_INVALID);
+
+    HFONT font = CreateFontA(-16, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, "Arial");
+    CHECK(font != NULL);
+    HGDIOBJ old = SelectObject(dc, font);
+    char face[32];
+    CHECK(GetTextFaceA(dc, sizeof face, face) == 6 && strcmp(face, "Arial") == 0);
+    CHECK(GetTextFaceA(dc, 0, NULL) == 6);
+    INT widths[2] = {0, 0};
+    SIZE one;
+    CHECK(GetCharWidthW(dc, 'A', 'B', widths) && widths[0] > 0 && widths[1] > 0);
+    CHECK(GetTextExtentPoint32W(dc, L"A", 1, &one) && one.cx == widths[0]);
+    CHECK(!GetCharWidthW(dc, 'B', 'A', widths));
+
+    DWORD whole = GetFontData(dc, 0, 0, NULL, 0);
+    CHECK(whole != GDI_ERROR && whole > 1000);
+    DWORD head = 'h' | 'e' << 8 | 'a' << 16 | (DWORD)'d' << 24;
+    BYTE version[4];
+    CHECK(GetFontData(dc, head, 0, version, 4) == 4);
+    CHECK(version[0] == 0 && version[1] == 1 && version[2] == 0 && version[3] == 0);
+    CHECK(GetFontData(dc, head, 0, NULL, 0) >= 54); /* head's size */
+    CHECK(GetFontData(dc, 'z' | 'z' << 8 | 'z' << 16 | (DWORD)'z' << 24, 0, NULL, 0) == GDI_ERROR);
+
+    LOGFONTW any = {0};
+    any.lfCharSet = DEFAULT_CHARSET;
+    CHECK(EnumFontFamiliesExW(dc, &any, enum_font, 0x1234, 0) == 7 && enum_calls >= 1);
+    enum_calls = 0;
+    enum_stop = 1;
+    CHECK(EnumFontFamiliesExW(dc, &any, enum_font, 0x1234, 0) == 0 && enum_calls == 1);
+    lstrcpyW(any.lfFaceName, L"No Such Font Family");
+    enum_calls = 0;
+    EnumFontFamiliesExW(dc, &any, enum_font, 0x1234, 0);
+    CHECK(enum_calls == 0);
+
+    SelectObject(dc, old);
+    DeleteObject(font);
+    DeleteDC(dc);
+    ReleaseDC(NULL, screen);
+}
+
 int main(void) {
     CHECK(MulDiv(10, 3, 4) == 8 && MulDiv(-10, 3, 4) == -8 && MulDiv(9, 96, 72) == 12);
     CHECK(MulDiv(1, 1, 0) == -1 && MulDiv(0x7fffffff, 2, 1) == -1 && MulDiv(7, 1, 2) == 4);
@@ -740,6 +820,7 @@ int main(void) {
     palettes();
     dibs();
     msimg();
+    dc_state();
     printf("gdi32_test: ok\n");
     return 0;
 }

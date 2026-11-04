@@ -4,8 +4,6 @@
 
 gala_stubs::unimplemented_exports!("ole32.dll":
     CoRegisterMallocSpy
-    GetHGlobalFromStream
-    DoDragDrop
     OleFlushClipboard
     OleGetClipboard
     OleIsCurrentClipboard

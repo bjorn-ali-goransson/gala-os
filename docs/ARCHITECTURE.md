@@ -7265,6 +7265,47 @@ What its start-up needed, and how gala gives it (tests:
   and the window stations and desktops a program creates are refused
   (stage 3). API sets: `api-ms-win-downlevel-<dll>-*` name their
   DLL, `shcore-*` is shcore, `power-*` is powrprof.
+- **Delay imports, second batch** (2026-11-04; tests `gdi32_test`,
+  `ole32_test`, `shell32_test`, `oleaut32_test`, `browser_api_test`
+  32-34, `kernel32_sys_test`): chrome.dll resolves its gdi32 delay
+  imports at once too, so all of them are real exports. gdi32's
+  `state.rs`: SaveDC/RestoreDC (saved copies of the DC, in their own
+  spin-locked list taken after the object table's lock; dropped with
+  the DC), the DC brush and pen colours, CreateFontA/IndirectA,
+  GetTextFaceA, GetCharWidthW, GetFontData (tables of the selected
+  Selawik file by tag), EnumFontFamiliesExW (one family, Selawik, in
+  four faces). gdi32's `absent.rs`: paths, enhanced metafiles, printing,
+  OpenGL pixel formats, GetICMProfileW, GetOutlineTextMetricsW,
+  ExtEscape, GdiComment fail as documented (FALSE/0/NULL/SP_ERROR),
+  ERROR_NOT_SUPPORTED, reported. ole32: WinRT strings (`winrt.rs`, an
+  HSTRING is gala's 24-byte header, which also fits a caller's
+  HSTRING_HEADER for fast-pass strings), RoGetActivationFactory and
+  RoActivateInstance (no classes: REGDB_E_CLASSNOTREG, the class name in
+  the ledger), interface marshaling within the process (`marshal.rs`:
+  gala has no proxies, so unmarshaling hands out the object itself, as
+  Windows does in the object's apartment; NORMAL/TABLESTRONG/TABLEWEAK
+  reference rules; another process is E_NOTIMPL, reported),
+  RoGetAgileReference, CoRegisterMessageFilter (STA only, never called),
+  PropVariantCopy; structured storage, OleDuplicateData and DoDragDrop
+  fail as documented (`absent.rs`). shell32 (`browser.rs`) pins the
+  ordinals programs import by (build.rs, Wine's numbers): without them
+  the linker numbers exports itself and an import by ordinal binds to
+  whatever got the number (chrome.dll's #2 and #4 did). The rest:
+  ILCreateFromPathW, ILFree, ILGetSize, IsUserAnAdmin, SHAppBarMessage
+  (the taskbar below the work area; none without a screen),
+  SHQueryUserNotificationState, ShellExecuteA, SHChangeNotifyRegister
+  (an ID, never notified); the shell namespace objects are E_NOTIMPL,
+  reported. shlwapi #12 SHCreateMemStream, oleaut32 #314 VarBstrCmp;
+  shell32 and shlwapi load advapi32 and ole32 when first needed, not as
+  static imports (every program loading them would load those too).
+  kernel32: ReplaceFileW on MoveFileExW's rename, which now replaces in
+  the same step as the rename (FileRenameInformation's ReplaceIfExists;
+  it used to delete the target first), RegisterApplicationRestart (kept,
+  read back; no restart manager), lstrcpyW, and a VS_VERSION_INFO
+  (build.rs writes the .res: 10.0.26100.<UBR>), which version.dll finds
+  by bare name as LoadLibrary searches (SearchPathW). ntdll:
+  RtlGetDeviceFamilyInfoEnum (desktop). dwrite's missing factory
+  methods each report their own name.
 - **DirectWrite** (`user/dwrite`): Chromium CHECKs that a factory
   exists and that Skia's font manager comes up on its system collection.
   gala's collection has one family, Selawik, in four faces read from

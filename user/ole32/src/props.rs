@@ -218,6 +218,193 @@ pub extern "system" fn PropVariantClear(pv: *mut PropVariant) -> HResult {
     result
 }
 
+/// A task-allocator copy of `n` bytes at `p` (NULL stays NULL); None
+/// without memory.
+fn copy_bytes(p: *const u8, n: usize) -> Option<usize> {
+    if p.is_null() {
+        return Some(0);
+    }
+    let q = super::alloc(n.max(1));
+    if q.is_null() {
+        return None;
+    }
+    // SAFETY: `n` bytes at `p`; the new block holds them.
+    unsafe { core::ptr::copy_nonoverlapping(p, q, n) };
+    Some(q as usize)
+}
+
+/// The length in bytes (with the terminator) of the string of `unit`-byte
+/// characters at `p`.
+fn string_bytes(p: *const u8, unit: usize) -> usize {
+    let mut n = 0;
+    // SAFETY: a NUL-terminated string.
+    while unsafe { core::slice::from_raw_parts(p.add(n * unit), unit) }.iter().any(|&b| b != 0) {
+        n += 1;
+    }
+    (n + 1) * unit
+}
+
+/// BSTR copy through oleaut32 (SysAllocStringByteLen keeps the length).
+fn copy_bstr(b: usize) -> Option<usize> {
+    if b == 0 {
+        return Some(0);
+    }
+    let len = export(&OLEAUT32, b"SysStringByteLen\0");
+    let make = export(&OLEAUT32, b"SysAllocStringByteLen\0");
+    if len == 0 || make == 0 {
+        missing(b"ole32.dll!PropVariantCopy(helper DLL)", 0);
+        return None;
+    }
+    // SAFETY: oleaut32's SysStringByteLen(BSTR) and
+    // SysAllocStringByteLen(const char*, UINT).
+    let len = unsafe { core::mem::transmute::<usize, extern "system" fn(usize) -> u32>(len) };
+    // SAFETY: as above.
+    let make =
+        unsafe { core::mem::transmute::<usize, extern "system" fn(usize, u32) -> usize>(make) };
+    let copy = make(b, len(b));
+    (copy != 0).then_some(copy)
+}
+
+/// One owned element of type `t` copied (strings and clipboard data
+/// deep, the rest bitwise); None without memory.
+fn copy_element(t: u16, v: usize) -> Option<usize> {
+    match t {
+        VT_BSTR => copy_bstr(v),
+        VT_LPSTR if v != 0 => copy_bytes(v as *const u8, string_bytes(v as *const u8, 1)),
+        VT_LPWSTR if v != 0 => copy_bytes(v as *const u8, string_bytes(v as *const u8, 2)),
+        VT_CLSID => copy_bytes(v as *const u8, 16),
+        VT_CF if v != 0 => {
+            // SAFETY: the caller's CLIPDATA; its data is size - 4 bytes
+            // (the size counts the format).
+            let c = unsafe { &*(v as *const ClipData) };
+            let data = copy_bytes(c.data, (c.size as usize).saturating_sub(4))?;
+            let q = copy_bytes((c as *const ClipData).cast(), core::mem::size_of::<ClipData>())?;
+            // SAFETY: the new CLIPDATA.
+            unsafe { (*(q as *mut ClipData)).data = data as *mut u8 };
+            Some(q)
+        }
+        _ => Some(v),
+    }
+}
+
+/// PropVariantCopy(dest, src): a copy that owns its own data: strings,
+/// BSTRs, blobs, clipboard data and vectors copied, interfaces AddRef'd,
+/// SAFEARRAYs copied with SafeArrayCopy; by-reference values copied as
+/// they are. An invalid type is STG_E_INVALIDPARAMETER (dest zeroed).
+#[unsafe(no_mangle)]
+pub extern "system" fn PropVariantCopy(dest: *mut PropVariant, src: *const PropVariant) -> HResult {
+    if dest.is_null() || src.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's PROPVARIANTs.
+    let s = unsafe { &*src };
+    let mut d = PropVariant { vt: s.vt, reserved: s.reserved, value: s.value };
+    let (vt, base) = (s.vt, s.vt & 0xfff);
+    let ok = match vt & (VT_VECTOR | VT_ARRAY | VT_BYREF) {
+        0 if valid_simple(base) => match base {
+            VT_DISPATCH | VT_UNKNOWN | VT_STREAM | VT_STORAGE | VT_STREAMED_OBJECT
+            | VT_STORED_OBJECT => {
+                if s.value[0] != 0 {
+                    super::add_ref(s.value[0] as *mut c_void);
+                }
+                Some(())
+            }
+            VT_BSTR | VT_LPSTR | VT_LPWSTR | VT_CLSID | VT_CF => {
+                copy_element(base, s.value[0]).map(|v| d.value[0] = v)
+            }
+            VT_BLOB | VT_BLOB_OBJECT => {
+                copy_bytes(s.value[1] as *const u8, s.value[0] as u32 as usize)
+                    .map(|v| d.value[1] = v)
+            }
+            VT_RECORD if s.value[0] != 0 => {
+                missing(b"ole32.dll!PropVariantCopy(VT_RECORD)", 0);
+                None
+            }
+            _ => Some(()),
+        },
+        VT_VECTOR if valid_vector(base) => {
+            let (count, elements) = (s.value[0] as u32 as usize, s.value[1] as *const u8);
+            let size = element_size(base);
+            match copy_bytes(elements, count * size) {
+                None => None,
+                Some(copy) => {
+                    d.value[1] = copy;
+                    let mut ok = Some(());
+                    if copy != 0 {
+                        for i in 0..count {
+                            let at = (copy + i * size) as *mut u8;
+                            let copied = if base == VT_VARIANT {
+                                // SAFETY: element i of both vectors.
+                                let from = unsafe { elements.add(i * size) };
+                                PropVariantCopy(at.cast(), from.cast()) >= 0
+                            } else if matches!(base, VT_BSTR | VT_LPSTR | VT_LPWSTR | VT_CF) {
+                                // SAFETY: element i of the new vector.
+                                match copy_element(base, unsafe { *at.cast::<usize>() }) {
+                                    Some(v) => {
+                                        // SAFETY: as above.
+                                        unsafe { *at.cast::<usize>() = v };
+                                        true
+                                    }
+                                    None => false,
+                                }
+                            } else {
+                                true
+                            };
+                            if !copied {
+                                // The elements from here on still alias
+                                // the source's: zero them so the clear
+                                // below frees only the copies.
+                                // SAFETY: the new vector's elements i..count.
+                                unsafe { core::ptr::write_bytes(at, 0, (count - i) * size) };
+                                ok = None;
+                                break;
+                            }
+                        }
+                    }
+                    ok
+                }
+            }
+        }
+        VT_ARRAY if valid_array(base) => {
+            if s.value[0] == 0 {
+                Some(())
+            } else {
+                let f = export(&OLEAUT32, b"SafeArrayCopy\0");
+                if f == 0 {
+                    missing(b"ole32.dll!PropVariantCopy(helper DLL)", 0);
+                    None
+                } else {
+                    // SAFETY: oleaut32's SafeArrayCopy(SAFEARRAY*, SAFEARRAY**).
+                    let f: extern "system" fn(usize, *mut usize) -> HResult =
+                        unsafe { core::mem::transmute(f) };
+                    (f(s.value[0], &mut d.value[0]) >= 0).then_some(())
+                }
+            }
+        }
+        VT_BYREF if valid_array(base) => Some(()),
+        _ if vt == VT_EMPTY || vt == VT_NULL => Some(()),
+        _ => {
+            // SAFETY: the caller's PROPVARIANT.
+            unsafe { dest.write(PropVariant { vt: VT_EMPTY, reserved: [0; 3], value: [0; 2] }) };
+            return STG_E_INVALIDPARAMETER;
+        }
+    };
+    match ok {
+        Some(()) => {
+            // SAFETY: as above.
+            unsafe { dest.write(d) };
+            S_OK
+        }
+        None => {
+            // What was copied before running out is freed.
+            PropVariantClear(&mut d);
+            // SAFETY: as above.
+            unsafe { dest.write(PropVariant { vt: VT_EMPTY, reserved: [0; 3], value: [0; 2] }) };
+            super::E_OUTOFMEMORY
+        }
+    }
+}
+
 /// STGMEDIUM (x64): the medium's type, its handle or pointer, the object
 /// that owns it.
 #[repr(C)]

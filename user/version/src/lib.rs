@@ -48,6 +48,14 @@ unsafe extern "system" {
     fn ReadFile(h: isize, buf: *mut u8, len: u32, read: *mut u32, ov: *mut c_void) -> i32;
     fn SetFilePointerEx(h: isize, distance: i64, new: *mut i64, method: u32) -> i32;
     fn CloseHandle(h: isize) -> i32;
+    fn SearchPathW(
+        path: *const u16,
+        file: *const u16,
+        extension: *const u16,
+        size: u32,
+        buf: *mut u16,
+        file_part: *mut *mut u16,
+    ) -> u32;
     fn SetLastError(e: u32);
     fn MultiByteToWideChar(cp: u32, flags: u32, s: *const u8, n: i32, w: *mut u16, m: i32) -> i32;
     fn WideCharToMultiByte(
@@ -78,10 +86,47 @@ fn fail<T>(error: u32, value: T) -> T {
 struct File(isize);
 
 impl File {
+    /// Opens `path`; a bare file name (no directory) is found the way
+    /// LoadLibrary searches, as documented for GetFileVersionInfo (the
+    /// program's directory, System32, the Windows directory, the current
+    /// directory, PATH: SearchPathW's default order).
     fn open(path: *const u16) -> Option<File> {
-        // GENERIC_READ, share read/write/delete, OPEN_EXISTING.
+        if path.is_null() {
+            return None;
+        }
+        let mut found = [0u16; 520];
+        let mut n = 0;
         // SAFETY: the caller's NUL-terminated path.
-        let h = unsafe { CreateFileW(path, 0x8000_0000, 7, core::ptr::null_mut(), 3, 0, 0) };
+        let bare = unsafe {
+            let mut bare = true;
+            while *path.add(n) != 0 {
+                if matches!(*path.add(n), 0x5c | 0x2f | 0x3a) {
+                    bare = false; // '\', '/', ':'
+                }
+                n += 1;
+            }
+            bare && n > 0
+        };
+        let mut name = path;
+        if bare {
+            // SAFETY: the caller's name; our buffer of 520 units.
+            let len = unsafe {
+                SearchPathW(
+                    core::ptr::null(),
+                    path,
+                    core::ptr::null(),
+                    520,
+                    found.as_mut_ptr(),
+                    core::ptr::null_mut(),
+                )
+            };
+            if len > 0 && len < 520 {
+                name = found.as_ptr();
+            }
+        }
+        // GENERIC_READ, share read/write/delete, OPEN_EXISTING.
+        // SAFETY: a NUL-terminated path.
+        let h = unsafe { CreateFileW(name, 0x8000_0000, 7, core::ptr::null_mut(), 3, 0, 0) };
         (h != -1).then_some(File(h))
     }
 

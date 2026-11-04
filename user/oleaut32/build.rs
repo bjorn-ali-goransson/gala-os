@@ -61,6 +61,7 @@ fn main() {
         ("QueryPathOfRegTypeLib", 164),
         ("LoadTypeLibEx", 183),
         ("VarCyFromDec", 228),
+        ("VarBstrCmp", 314),
         ("GetRecordInfoFromGuids", 322),
         ("GetRecordInfoFromTypeInfo", 323),
         ("SafeArrayCreateVector", 411),

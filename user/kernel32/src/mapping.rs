@@ -801,6 +801,12 @@ pub extern "system" fn GetLongPathNameW(short: *const u16, long: *mut u16, size:
 /// target is an error).
 #[unsafe(no_mangle)]
 pub extern "system" fn MoveFileW(from: *const u16, to: *const u16) -> Bool {
+    rename(from, to, false)
+}
+
+/// Renames `from` to `to` in one step (FileRenameInformation); `replace`:
+/// an existing `to` is replaced atomically (ReplaceIfExists).
+pub(crate) fn rename(from: *const u16, to: *const u16, replace: bool) -> Bool {
     let target = match nt_path(to) {
         Ok(p) => p,
         Err(e) => return fail_with(e, FALSE),
@@ -819,6 +825,7 @@ pub extern "system" fn MoveFileW(from: *const u16, to: *const u16) -> Bool {
     // FILE_RENAME_INFORMATION: ReplaceIfExists, RootDirectory,
     // FileNameLength, FileName.
     let mut info = [0u8; 20 + 2 * MAX_PATH_CHARS];
+    info[0] = u8::from(replace);
     let name = target.as_slice();
     info[16..20].copy_from_slice(&((name.len() * 2) as u32).to_le_bytes());
     for (i, c) in name.iter().enumerate() {

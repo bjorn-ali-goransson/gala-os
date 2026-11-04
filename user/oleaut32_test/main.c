@@ -36,6 +36,9 @@
  *   equals VT_EMPTY.
  * - GetActiveObject: MK_E_UNAVAILABLE for a class nothing registered as
  *   running.
+ * - VarBstrCmp (#314, imported by ordinal by Chromium): VARCMP_LT, _EQ,
+ *   _GT by the locale's order; NORM_IGNORECASE makes case equal; a NULL
+ *   BSTR is the empty string.
  *
  * Prints "oleaut32_test: ok" or exits with the number of the failing
  * check. */
@@ -277,6 +280,19 @@ int main(void) {
     static const CLSID nothing = {0x6a0c8d1e, 0x3f2b, 0x4c55, {0x9e, 0x10, 0x5a, 0x77, 0x12, 0x34, 0x56, 0x78}};
     IUnknown *unk = (IUnknown *)1;
     CHECK(GetActiveObject(&nothing, NULL, &unk) == MK_E_UNAVAILABLE && unk == NULL);
+
+    BSTR apple = SysAllocString(L"apple"), apple2 = SysAllocString(L"APPLE"), pear = SysAllocString(L"pear");
+    BSTR blank = SysAllocString(L"");
+    CHECK(VarBstrCmp(apple, pear, LOCALE_USER_DEFAULT, 0) == VARCMP_LT);
+    CHECK(VarBstrCmp(pear, apple, LOCALE_USER_DEFAULT, 0) == VARCMP_GT);
+    CHECK(VarBstrCmp(apple, apple2, LOCALE_USER_DEFAULT, NORM_IGNORECASE) == VARCMP_EQ);
+    CHECK(VarBstrCmp(apple, apple2, LOCALE_USER_DEFAULT, 0) != VARCMP_EQ);
+    CHECK(VarBstrCmp(NULL, blank, LOCALE_USER_DEFAULT, 0) == VARCMP_EQ);
+    CHECK(VarBstrCmp(NULL, NULL, LOCALE_USER_DEFAULT, 0) == VARCMP_EQ);
+    SysFreeString(apple);
+    SysFreeString(apple2);
+    SysFreeString(pear);
+    SysFreeString(blank);
 
     printf("oleaut32_test: ok\n");
     return 0;

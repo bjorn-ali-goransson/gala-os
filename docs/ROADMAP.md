@@ -1937,22 +1937,32 @@ BR. **A web browser: stock Microsoft Edge** (the owner, 2026-11-03).
       Win_x64 1733063, 159.0.8140.0, with published symbols), scenarios
       `chromium_version` (`--dump-dom about:blank`) and `chromium_dump`
       (a local page changed by its script) PENDING, in SINGLE_THREAD_TCG,
-      3 GiB, 900 s; `browser_api_test` (31 checks) and `dwrite_test`
+      3 GiB, 900 s; `browser_api_test` (34 checks) and `dwrite_test`
       cover what was added. Not passing yet. How far it gets: chrome.exe
       starts, chrome_elf.dll's early security and Crashpad come up (the
       handler runs as a child with an inherited handle list, and its
       fallback handler too), chrome.dll (340 MB) loads (relocated:
       ~30 s), the profile's process singleton is taken, DirectWrite and
-      Skia's font manager come up on Selawik, and the browser's main
-      start-up runs until a delay-loaded user32/ole32/... function gala
-      lacks ends it (`delay_load_failure_support.cc` FATAL; the ledger
-      names it: one per run, so batches of the delay-import list were
-      implemented ahead: the remaining list is in the import survey,
-      WORKFLOW "Chromium"). No renderer has been started yet. Next, in
-      the order the runs will meet them: the rest of chrome.dll's
-      delay imports (ole32's stream marshalling and WinRT strings,
-      shell32, gdi32's paths and metafiles, advapi32's
-      ImpersonateAnonymousToken), GetAdaptersAddresses (iphlpapi: not
+      Skia's font manager come up on Selawik, and (2026-11-04) the
+      browser's main start-up runs to its end: every delay import
+      chrome.dll reaches on the way is now a real export (gdi32's paths,
+      metafiles, printing and pixel formats failing the documented way and
+      reporting themselves; ole32's WinRT strings, activation, in-process
+      marshaling, agile references, PropVariantCopy; shell32's ordinals,
+      app bar and notification state; ntdll's RtlGetDeviceFamilyInfoEnum;
+      kernel32's ReplaceFileW, RegisterApplicationRestart, a version
+      resource found by bare name). A run takes ~60 s now. It ends at a
+      `base::expected` CHECK in the browser process after
+      RegisterApplicationRestart, with no symbols for chrome.dll (its PDB
+      does not fit the disk): next, find what returned the error (the
+      dwrite ledger lines now name each missing IDWriteFactory method;
+      `XTASK_EVENTS=syscall` around it). The import survey
+      (`tools/import_survey.py`, WORKFLOW "Chromium") lists what is left:
+      the rest of the delay imports (advapi32's services and
+      ImpersonateAnonymousToken, iphlpapi, wintrust's catalogs, dbghelp's
+      stack walking, pdh, winhttp's proxy resolver, oleacc) and the static
+      imports that are still `gala_stubs` (crypt32, kernel32's comm and
+      locale formatting). Then GetAdaptersAddresses (iphlpapi: not
       supported yet; network change and DNS configuration),
       NotifyAddrChange, WSALookupServiceBegin for NLA (logged as an
       error), then the renderer and utility processes (Mojo over

@@ -730,6 +730,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("chromium", "fonts/selawik/selawkb.ttf", "Windows/Fonts"),
     ("browser_api_test", "ntdll.dll", "Windows/System32"),
     ("browser_api_test", "kernel32.dll", "Windows/System32"),
+    ("browser_api_test", "version.dll", "Windows/System32"),
     ("browser_api_test", "ws2_32.dll", "Windows/System32"),
     ("browser_api_test", "advapi32.dll", "Windows/System32"),
     ("browser_api_test", "bcryptprimitives.dll", "Windows/System32"),
@@ -850,6 +851,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shell32_test", "shell32.dll", "Windows/System32"),
     ("shell32_test", "user32.dll", "Windows/System32"),
     ("shell32_test", "gdi32.dll", "Windows/System32"),
+    ("shell32_test", "shlwapi.dll", "Windows/System32"),
+    ("shell32_test", "ole32.dll", "Windows/System32"),
+    ("shell32_test", "advapi32.dll", "Windows/System32"),
+    ("shell32_test", "bcryptprimitives.dll", "Windows/System32"),
     ("shell32_test", "user/bin/shell32_test.exe", "gala"),
     ("dbghelp_test", "ntdll.dll", "Windows/System32"),
     ("dbghelp_test", "kernel32.dll", "Windows/System32"),
@@ -6165,7 +6170,11 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
             Some(f) if f.ends_with('$') => s.name == f.trim_end_matches('$'),
             // `a,b,c`: exactly these scenarios.
             Some(f) if f.contains(',') => f.split(',').any(|n| n == s.name),
-            Some(f) => s.name.contains(f.as_str()) && !PENDING.contains(&s.name),
+            // A pending scenario runs when named exactly; others match
+            // by substring.
+            Some(f) => {
+                s.name == f.as_str() || (s.name.contains(f.as_str()) && !PENDING.contains(&s.name))
+            }
         })
         .collect();
     if selected.is_empty() {

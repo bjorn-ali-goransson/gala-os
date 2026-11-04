@@ -817,3 +817,114 @@ pub extern "system" fn K32GetMappedFileNameW(
     }
     n as u32
 }
+
+// ---- Application restart (Windows Error Reporting's restart manager) ----
+
+/// The registered restart command line and flags (one per process).
+struct Restart {
+    lock: core::sync::atomic::AtomicBool,
+    state: core::cell::UnsafeCell<(usize, u32, [u16; RESTART_MAX_CMD_LINE])>,
+}
+
+// SAFETY: every access is under `lock`.
+unsafe impl Sync for Restart {}
+
+const RESTART_MAX_CMD_LINE: usize = 1024;
+
+static RESTART: Restart = Restart {
+    lock: core::sync::atomic::AtomicBool::new(false),
+    state: core::cell::UnsafeCell::new((0, 0, [0; RESTART_MAX_CMD_LINE])),
+};
+
+fn with_restart<R>(f: impl FnOnce(&mut (usize, u32, [u16; RESTART_MAX_CMD_LINE])) -> R) -> R {
+    use core::sync::atomic::Ordering;
+    while RESTART.lock.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: under the lock.
+    let r = f(unsafe { &mut *RESTART.state.get() });
+    RESTART.lock.store(false, Ordering::Release);
+    r
+}
+
+/// RegisterApplicationRestart(command line, flags): the arguments to
+/// restart the program with after a crash, hang, patch or reboot (the
+/// RESTART_NO_* flags exclude cases). E_INVALIDARG for a command line of
+/// RESTART_MAX_CMD_LINE characters or more, or unknown flags. gala keeps
+/// the registration (GetApplicationRestartSettings reads it back) but
+/// has no restart manager: nothing restarts the program yet.
+#[unsafe(no_mangle)]
+pub extern "system" fn RegisterApplicationRestart(command: *const u16, flags: u32) -> i32 {
+    const E_INVALIDARG: i32 = 0x8007_0057_u32 as i32;
+    if flags & !0xf != 0 {
+        return E_INVALIDARG;
+    }
+    let mut n = 0;
+    if !command.is_null() {
+        // SAFETY: the caller's NUL-terminated command line.
+        while unsafe { *command.add(n) } != 0 {
+            n += 1;
+            if n >= RESTART_MAX_CMD_LINE {
+                return E_INVALIDARG;
+            }
+        }
+    }
+    with_restart(|state| {
+        if n > 0 {
+            // SAFETY: the caller's `n` characters.
+            unsafe { core::ptr::copy_nonoverlapping(command, state.2.as_mut_ptr(), n) };
+        }
+        state.0 = n + 1; // registered (the stored length with the NUL)
+        state.1 = flags;
+        state.2[n] = 0;
+    });
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn UnregisterApplicationRestart() -> i32 {
+    with_restart(|state| state.0 = 0);
+    0
+}
+
+/// GetApplicationRestartSettings(process, buffer, *size, *flags): the
+/// current process's registration; HRESULT_FROM_WIN32(ERROR_NOT_FOUND)
+/// without one, HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) (and the
+/// size needed) for a short buffer. Other processes: E_NOTIMPL, reported.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetApplicationRestartSettings(
+    process: Handle,
+    buffer: *mut u16,
+    size: *mut u32,
+    flags: *mut u32,
+) -> i32 {
+    const E_INVALIDARG: i32 = 0x8007_0057_u32 as i32;
+    const NOT_FOUND: i32 = 0x8007_0490_u32 as i32;
+    const INSUFFICIENT_BUFFER: i32 = 0x8007_007a_u32 as i32;
+    if size.is_null() {
+        return E_INVALIDARG;
+    }
+    if process as isize != -1 && crate::process::GetProcessId(process) != GetCurrentProcessId() {
+        unsupported(b"kernel32.dll!GetApplicationRestartSettings(another process)", 0);
+        return 0x8000_4001_u32 as i32;
+    }
+    with_restart(|state| {
+        if state.0 == 0 {
+            return NOT_FOUND;
+        }
+        // SAFETY: the caller's outputs.
+        unsafe {
+            let room = *size as usize;
+            *size = state.0 as u32;
+            if !flags.is_null() {
+                *flags = state.1;
+            }
+            if buffer.is_null() || room < state.0 {
+                return INSUFFICIENT_BUFFER;
+            }
+            core::ptr::copy_nonoverlapping(state.2.as_ptr(), buffer, state.0);
+        }
+        0
+    })
+}

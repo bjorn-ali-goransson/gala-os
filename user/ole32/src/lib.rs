@@ -26,11 +26,14 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+mod absent;
 mod bindctx;
 mod class;
+mod marshal;
 mod props;
 mod stream;
 mod unimplemented;
+mod winrt;
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -394,15 +397,17 @@ unsafe impl<const N: usize> Sync for VTable<N> {}
 
 const MAX_SPIES: usize = 8;
 
-struct ThreadState {
+pub(crate) struct ThreadState {
     /// 0: none, 1: MTA, 2: STA.
-    kind: u32,
+    pub(crate) kind: u32,
     refs: u32,
     spies: [usize; MAX_SPIES],
     cookies: [u64; MAX_SPIES],
     next_cookie: u64,
     /// The thread's error object (SetErrorInfo).
     error_info: usize,
+    /// CoRegisterMessageFilter's filter (an STA's; held).
+    pub(crate) message_filter: usize,
     /// This STA thread's context object.
     sta_context: Context,
 }
@@ -417,7 +422,7 @@ fn teb() -> usize {
 }
 
 /// This thread's state (made on first use; None without memory).
-fn thread_state() -> Option<&'static mut ThreadState> {
+pub(crate) fn thread_state() -> Option<&'static mut ThreadState> {
     let slot = (teb() + TEB_RESERVED_FOR_OLE) as *mut *mut ThreadState;
     // SAFETY: this thread's TEB; the state is only used by this thread.
     unsafe {
@@ -433,6 +438,7 @@ fn thread_state() -> Option<&'static mut ThreadState> {
                 cookies: [0; MAX_SPIES],
                 next_cookie: 1,
                 error_info: 0,
+                message_filter: 0,
                 sta_context: Context {
                     vtable: CONTEXT_UNKNOWN.0.as_ptr().cast(),
                     threading: CONTEXT_THREADING.0.as_ptr().cast(),
@@ -920,52 +926,7 @@ pub extern "system" fn CoCreateFreeThreadedMarshaler(
     S_OK
 }
 
-/// Marshaling across apartments is not there yet (recorded).
-fn no_marshaling(function: &[u8]) -> HResult {
-    missing(function, 0);
-    E_NOTIMPL
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CoGetMarshalSizeMax(
-    _size: *mut u32,
-    _iid: *const Guid,
-    _unknown: *mut c_void,
-    _context: u32,
-    _reserved: *mut c_void,
-    _flags: u32,
-) -> HResult {
-    no_marshaling(b"ole32.dll!CoGetMarshalSizeMax")
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CoMarshalInterface(
-    _stream: *mut c_void,
-    _iid: *const Guid,
-    _unknown: *mut c_void,
-    _context: u32,
-    _reserved: *mut c_void,
-    _flags: u32,
-) -> HResult {
-    no_marshaling(b"ole32.dll!CoMarshalInterface")
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CoUnmarshalInterface(
-    _stream: *mut c_void,
-    _iid: *const Guid,
-    out: *mut *mut c_void,
-) -> HResult {
-    if !out.is_null() {
-        put(out, core::ptr::null_mut());
-    }
-    no_marshaling(b"ole32.dll!CoUnmarshalInterface")
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CoReleaseMarshalData(_stream: *mut c_void) -> HResult {
-    no_marshaling(b"ole32.dll!CoReleaseMarshalData")
-}
+// Marshaling: marshal.rs.
 
 // ---- Waits ----
 

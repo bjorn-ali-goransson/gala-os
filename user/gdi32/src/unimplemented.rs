@@ -4,19 +4,12 @@
 
 gala_stubs::unimplemented_exports!("gdi32.dll":
     AddFontResourceExW
-    CloseEnhMetaFile
     CopyEnhMetaFileW
-    CreateEnhMetaFileW
-    DeleteEnhMetaFile
-    EnumFontFamiliesExW
     GetCharABCWidthsW
-    GetEnhMetaFileHeader
     GetEnhMetaFileW
     GetMetaFileBitsEx
-    GetOutlineTextMetricsW
     GetSystemPaletteEntries
     GetWinMetaFileBits
-    PlayEnhMetaFile
     SetMetaFileBitsEx
     SetWinMetaFileBits
 );

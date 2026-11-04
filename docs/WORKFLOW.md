@@ -1004,12 +1004,22 @@ loading the ISO, ~30 s mapping chrome.dll). Read, in order:
   / `missing dll` line names it (chrome.dll delay-loads most of what it
   uses; `gala_stubs` stubs are invisible to GetProcAddress, so a stubbed
   delay import fails the same way). One missing function per 5-minute
-  run is slow: list chrome.dll's delay imports (`llvm-readobj
-  --coff-imports`, the `DelayImport` blocks) against the built DLLs'
-  exports and against the `unimplemented_exports!` lists, and fill
-  them in batches. Exit status 0xffff7001/7002 follows a
+  run is slow: `python3 -I tools/import_survey.py
+  target/x86_64-pc-windows-msvc/release target/prebuilt/chromium/chrome-win/chrome.dll`
+  lists every import (static and delay-loaded) gala's built DLLs lack or
+  have only as `gala_stubs` stubs (API set names resolved as the loader
+  resolves them); fill them in batches. Imports by ordinal (`#N`) need
+  the ordinal pinned in the DLL's build.rs (`/EXPORT:name,@N`, the
+  number from Wine's .spec, checked there, not from memory): an unpinned
+  DLL numbers its exports arbitrarily, so `#N` may bind to an unrelated
+  function and the survey cannot tell. Exit status 0xffff7001/7002 follows a
   FATAL; 21 is CHROME_RESULT_CODE_PROFILE_IN_USE (the process singleton:
   its mutex and lock file).
+- A `Check failed` with an unresolved backtrace (no chrome.dll symbols:
+  its PDB does not fit the disk): read the Chromium source around the
+  last log line before it (the browser's start-up logs a lot), and the
+  ledger's last lines (each `unsupported`/`missing export` names the
+  function that failed).
 - `XTASK_EVENTS=syscall,image,fault,file,process,thread`: the `file`
   category (`"ev":"open"`, path, handle, status) shows each open, which
   `syscall` events cannot (their arguments are pointers).

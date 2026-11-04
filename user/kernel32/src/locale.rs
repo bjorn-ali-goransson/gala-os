@@ -586,6 +586,23 @@ pub extern "system" fn lstrcpynW(dst: *mut u16, src: *const u16, n: i32) -> *mut
     dst
 }
 
+/// lstrcpyW(dst, src): `src` with its NUL into `dst`; returns `dst` (null
+/// for a null `dst`; a null `src` copies the empty string).
+#[unsafe(no_mangle)]
+pub extern "system" fn lstrcpyW(dst: *mut u16, src: *const u16) -> *mut u16 {
+    if dst.is_null() {
+        return dst;
+    }
+    let s = c_units(src);
+    // SAFETY: the caller's buffer, large enough for `src` (lstrcpyW's
+    // contract); `src` read up to its NUL.
+    unsafe {
+        core::ptr::copy(s.as_ptr(), dst, s.len());
+        *dst.add(s.len()) = 0;
+    }
+    dst
+}
+
 /// lstrcatW(dst, src): `src` appended to `dst`; returns `dst` (null for a
 /// null `dst`).
 #[unsafe(no_mangle)]

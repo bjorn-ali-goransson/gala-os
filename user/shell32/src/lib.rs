@@ -10,6 +10,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod browser;
 mod fileinfo;
 mod icons;
 mod shellops;
