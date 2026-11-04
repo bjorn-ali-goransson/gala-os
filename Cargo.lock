@@ -1908,6 +1908,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "shfolder"
+version = "0.1.0"
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
