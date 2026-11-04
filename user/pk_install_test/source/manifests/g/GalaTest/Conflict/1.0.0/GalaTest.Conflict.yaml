@@ -13,6 +13,6 @@ Installers:
   - RelativeFilePath: conflict/pkhello.exe
     PortableCommandAlias: pkhello
   InstallerUrl: https://packages.gala.invalid/conflict-1.0.0.zip
-  InstallerSha256: 001A0C9D02C121BD086E7A396862B9BC83A803887555247177292FBD450C8B91
+  InstallerSha256: C7D6AE079EE0A8178E50A14127A952CCD3F1E43445D813EE5A0F992748188F33
 ManifestType: singleton
 ManifestVersion: 1.6.0

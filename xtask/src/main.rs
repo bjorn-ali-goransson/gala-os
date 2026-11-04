@@ -9875,6 +9875,12 @@ fn export_tests() -> Result {
         copy(&file, &dir.join(dll.exported_as))?;
     }
     eprintln!("xtask: exported {} test programs to {}", USER_PROGRAMS.len(), dir.display());
+    // pk_install_test's package source zips user/bin/hello.exe, so it is
+    // derived from what was just exported: remake it (deterministic), or
+    // a change to ntrt leaves the zips holding an old hello.exe.
+    run_cmd(
+        Command::new("python3").arg("-I").arg(root().join("user/pk_install_test/make_source.py")),
+    )?;
     Ok(())
 }
 

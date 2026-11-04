@@ -772,6 +772,15 @@ charged). Look
   handle values are reused at once (the lowest free slot), so follow
   NtClose and creation order rather than guessing from the value.
 
+## Derived test data
+
+Test data built from exported binaries is remade with them: `cargo xtask
+export-tests` runs `user/pk_install_test/make_source.py` after exporting,
+because that package source zips `user/bin/hello.exe` (a change to ntrt
+changes every ntrt-based exe, and left the zips holding an old hello.exe:
+galapkg's `install_list_run_uninstall` failed on 2026-11-04). New derived
+data goes in the same place.
+
 ## QEMU
 
 xtask runs a pinned QEMU (`QEMU_VERSION` in xtask, 11.1.3), built by
