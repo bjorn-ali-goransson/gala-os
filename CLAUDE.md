@@ -9,6 +9,14 @@
 - Observability carries great weight (the owner): every change ships with
   what would explain its failures (logs, events, what a failure leaves
   behind); see the rule at the top of `docs/OBSERVABILITY.md`.
+- Structural, root-cause quality (the owner, 2026-11-04): fix the cause,
+  not the symptom. No widened timeouts, retries, exclusions or workarounds
+  in place of understanding; when a stopgap is unavoidable it is named as
+  one, tracked in ROADMAP, and replaced. Examples that set the bar: the
+  JVM corruption traced to QEMU's TCG and fixed by pinning a QEMU without
+  the bug (not a kernel workaround); handover tests bounded by the
+  measured pause (not a wider slack); smpsched_test counting context
+  switches (not wall time).
 - Keep the docs current in the same commit as the code: ROADMAP (done/next),
   ARCHITECTURE (design, invariants, TODOs), WORKFLOW (new conventions or
   pitfalls). The next session only knows what is written down.

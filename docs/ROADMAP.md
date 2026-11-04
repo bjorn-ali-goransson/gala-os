@@ -2164,6 +2164,10 @@ TLS. **Schannel: SSPI's TLS package** (2026-11-03). **Client and server,
       same directory) come first; Schannel then validates through them.
    Also open: session resumption, client certificates, ECDSA server
    keys, revocation, keys persisted across processes.
+   **Stopgap to replace (2026-11-04):** `schannel_test` is excluded from
+   gala-um (`NOT_IN_UM`): its TLS 1.3 handshake with the in-process server
+   hangs there (both threads waiting) while it passes in QEMU. Find the
+   gala-um socket or wait gap and remove the exclusion.
 
 LX. **A Linux personality, later; its seams now** (the owner,
    2026-11-03; design: ARCHITECTURE "Plan: a second personality (Linux)";
