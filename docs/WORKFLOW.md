@@ -724,7 +724,10 @@ home to `/cargo` (`--remap-path-prefix`, merged into the target's
 rustflags with `--config`). A new dependency needs nothing more.
 Third-party builds (`user/<name>/build.sh`) pin their source and
 checksum and strip build ids and timestamps so two builds give the same
-hash.
+hash. Inputs' file times count too: export-tests rewrites `user/bin`, so
+a packer that stores them (NSIS's `File` without `SetDateSave off`)
+gives a new binary on every run. Check a generated binary by building it
+twice with a `touch` of its inputs in between.
 
 ### Linux test programs (user/lx, ROADMAP LX)
 

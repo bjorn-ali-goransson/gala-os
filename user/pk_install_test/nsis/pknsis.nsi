@@ -28,6 +28,9 @@ UninstPage instfiles
 
 Section "PkNsis"
   SetOutPath "$INSTDIR"
+  ; No file times in the installer: hello.exe is rewritten by every
+  ; export, and its time would make each build differ.
+  SetDateSave off
   File "/oname=pknsis.exe" "${HELLO}"
   FileOpen $0 "$INSTDIR\README.txt" w
   FileWrite $0 "PkNsis ${VERSION}$\r$\nA test package for gala install (NSIS).$\r$\n"
