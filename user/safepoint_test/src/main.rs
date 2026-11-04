@@ -26,7 +26,7 @@
 //! mutators run), and timer preemption moves the threads between
 //! processors.
 //!
-//! Written for the Java heap corruption (ROADMAP Priorities, 2026-11-03).
+//! Written for the Java heap corruption (WORKFLOW "Known intermittent").
 //! Prints `safepoint_test: ok <rounds>` or exits with the number of the
 //! failing check (details on stdout).
 

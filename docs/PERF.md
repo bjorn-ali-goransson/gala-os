@@ -1,35 +1,103 @@
 # Where the time goes
 
-Measurements of gala under QEMU (TCG: every instruction is translated,
-so only ratios between gala runs mean something; Windows numbers come
-from `run-all.ps1`). Tools:
+Measurements of gala and how to take them. Under QEMU TCG every
+instruction is translated, so only ratios between gala runs mean
+something; Windows numbers come from `user/bin/run-all.ps1` on a real
+machine. Each measurement below keeps its date and how it was taken.
 
-- **The `nt:` line** at the end of every run (`nt::stats`, always on):
-  system calls (count, time; waits apart, as their time is sleeping),
-  user faults the kernel resolves, processes created. Two clock reads
-  per event, so it does not change what it measures.
-- **The event stream** (`XTASK_EVENTS=syscall,...`, `events.rs`): one
-  JSON line per event with arguments and per-call time. Each line is a
-  debug-port write, slow under emulation: with `all` the lua scenario
-  takes 3x as long (faults dominate), so use it for shares and
-  arguments, not totals. Grouping script idea: count and sum `ns` by
-  `name`, split by argument (sizes) where it matters.
-- **`cargo xtask bench`**: micro-benchmarks also run on Windows.
+## How to measure
+
+- **The `nt:` line** at the end of every run (`kernel/src/nt/stats.rs`,
+  always on): system calls (count, time; waits counted apart, as their
+  time is mostly sleeping), user faults the kernel resolves, processes
+  created. Two clock reads per event, so it does not change what it
+  measures. It is in the scenario's serial log,
+  `target/<profile>/test-<scenario>.serial.log` (examples under H8).
+- **The event stream** (`XTASK_EVENTS=syscall,... cargo xtask boot-test
+  <scenario>`; `kernel/src/events.rs`, docs/OBSERVABILITY.md "Event
+  stream"): one JSON line per event with arguments and per-call time
+  (`ns`). `cargo xtask events <events.jsonl>` sums system calls by
+  service; for sizes or other arguments, group the lines yourself by
+  `name` and the argument. Each line is a debug-port write, slow under
+  emulation (with `all` the lua scenario takes 3x as long, faults
+  dominating), so use it for shares and arguments, not totals.
+- **Micro-benchmarks**: `user/bench` runs unchanged on Windows and gala
+  and prints `bench: <name> ns_per_op <n>` (wall time from the
+  performance counter): `null_syscall`, `handle_create_close`,
+  `virtual_alloc_free_64k`, `demand_zero_fault`, `section_map_unmap_64k`,
+  `image_load`, `thread_create_exit`, `event_pingpong_same_cpu`,
+  `event_pingpong_cross_cpu` (with two CPUs). `cargo xtask bench
+  --release [bench-windows.txt]` boots it (`run=bench.exe`, BIOS, no
+  screen), writes `target/report/bench.json` (platform `gala qemu-tcg`
+  or `qemu-kvm`) and prints a table next to Windows' numbers
+  (`run-all.ps1` saves `bench-windows.txt`). The kernel is a release
+  build only with `--release`.
+- **Without kernel changes**: QEMU TCG plugins (`-plugin`) count
+  instructions per address range (needs a QEMU built with plugins;
+  Ubuntu's has none); under KVM, `perf kvm` on the host. A sampling
+  profiler is planned (docs/OBSERVABILITY.md "Planned facilities").
+
+Rules of thumb:
+
+- Never benchmark a debug kernel: it is about 30x slower per system
+  call (boot tests use debug builds on purpose).
+- Under TCG, code in shared physical frames is translated once (QEMU's
+  translation cache is per physical page): sharing pages between
+  processes helps the emulator as much as it saves copying.
+- Pipe reads and writes that take hundreds of microseconds are usually
+  blocking (a parent waiting on its children), not work.
+
+## P1: first benchmark numbers
+
+The first `cargo xtask bench` run (date not recorded; before H8, so
+`image_load` is not in it): QEMU TCG on a 4-CPU container, release
+kernel; only relative.
+
+| Benchmark | Time per op |
+|---|---|
+| null system call | 2.2 us |
+| event create + close | 6 us |
+| 64 KiB alloc + free | 17 us |
+| demand-zero fault | 7 us (6.8-11 us across runs) |
+| section map + unmap (64 KiB) | 13 us |
+| event round trip, one CPU | 20 us |
+| event round trip, across CPUs | 124 us |
+| thread create + exit | 369 us |
+
+Thread creation and cross-CPU wakes are the outliers to look at first.
+
+## T1: boot-test speed
+
+Before and after item T1 (BIOS boots, shared VMs, parallel ISO
+creation; WORKFLOW "Test speed and environments"): software emulation
+on a 4-CPU container, 40 scenarios (date not recorded).
+
+| | before | after |
+|---|---|---|
+| VMs | 40 | 13 |
+| firmware + bootloader (summed over VMs) | 193 s (OVMF) | 24 s (SeaBIOS) |
+| kernel + tests (summed) | 38 s | 18 s |
+| ISO creation | 5.7 s (sequential) | 0.5 s (parallel) |
+| boot-test wall time | 66 s | 14 s |
+
+Single-threaded TCG costs about 1.8x: java_hello ran 84 s instead of
+47 s in the kernel with `-accel tcg,thread=single` (about 35 s
+locally).
 
 ## H8: building Lua (2026-10-31)
 
 The `lua` scenario: busybox sh unpacks TinyCC and Lua, tcc builds its
 runtime (15 runs), make builds Lua (37 tcc runs), lua.exe runs a script;
-119 processes in all.
+119 processes in all. Release kernel, no events.
 
-Before (release kernel, no events): **12.7 s** in the kernel.
+**Before: 12.7 s** in the kernel.
 
     nt: 50145 system calls in 3095 ms (and 4614 waits, 26580 ms),
         34034 user faults in 753 ms, 119 processes created in 641 ms
 
-So the NT layer's own work was about 3.9 s; the rest was user code
-(tcc compiling, under TCG) and idle time. From the event stream (system
-calls only), the largest kernel items:
+The NT layer's own work was about 3.9 s; the rest was user code (tcc
+compiling, under TCG) and idle time. The largest kernel items, from the
+event stream (system calls only):
 
 | Service | Calls | Median | Total |
 |---|---|---|---|
@@ -38,26 +106,24 @@ calls only), the largest kernel items:
 | NtMapViewOfSection | 1496 | 28 us (p90 392 us) | 0.34 s |
 | NtCreateSection | 617 | 168 us | 0.21 s |
 
-Small pipe reads and writes average hundreds of microseconds, but that
-is blocking (busybox waiting on its children), not work. Faults: 561 per
-tcc run, 6.8-11 us each (bench `demand_zero_fault`): about 5 ms a run.
+Faults: 561 per tcc run, about 5 ms a run. Loading images was the
+largest avoidable cost: each process re-read and re-laid-out every DLL
+(NtCreateSection SEC_IMAGE read the whole file), copied the layout again
+per view, and copied the whole executable into fresh frames
+(GalaCreateProcess).
 
-Loading images was the largest avoidable cost: each process re-read and
-re-laid-out every DLL (NtCreateSection SEC_IMAGE read the whole file),
-copied the layout again per view, and copied the whole executable into
-fresh frames (GalaCreateProcess).
+**Changes**:
 
-Changes:
 - Image layouts are cached per file and content version
   (`section::image_layout`, 16 entries); a cached layout keeps its
   shared read-only frames, so later loads map them directly.
-- A view at the preferred base no longer copies and "relocates" the
-  layout (it maps the shared frames anyway).
-- Executables are mapped from the same cached layout: every page
-  borrows the shared frame (copy-on-write for writable sections), as
-  image views do.
+- A view at the preferred base maps the shared frames without copying
+  and "relocating" the layout.
+- Executables are mapped from the same cached layout: every page borrows
+  the shared frame (copy-on-write for writable sections), as image views
+  do.
 
-After: **7.9 s** in the kernel for the lua scenario (-38 %).
+**After: 7.9 s** in the kernel (-38 %).
 
     nt: 50143 system calls in 2095 ms (and 2846 waits, 15364 ms),
         34034 user faults in 614 ms, 119 processes created in 266 ms
@@ -72,19 +138,18 @@ After: **7.9 s** in the kernel for the lua scenario (-38 %).
 
 The scenario gained more than the kernel counters lost (4.8 s against
 about 1.3 s): with each tcc run's code in the same physical frames,
-QEMU's translation cache (kept per physical page) reuses the translated
-code instead of translating tcc again in every process. Sharing pages
-helps the emulator as much as it saves copying.
+QEMU reuses the translated code instead of translating tcc again in
+every process.
 
-Next candidates: NtCreateFile path resolution (0.45 s, include
-probes), and the user time itself (tcc under TCG), which only a faster
-emulator or KVM changes.
+Next candidates: NtCreateFile path resolution (0.45 s, include probes),
+and the user time itself (tcc under TCG), which only a faster emulator
+or KVM changes.
 
 ## H9: SQLite (2026-10-31)
 
 The `sqlite` scenario (tcc runtime, unzip, one tcc run compiling the
 9.5 MB sqlite3.c with the driver, three SQLite runs): 6.9 s in the
-kernel.
+kernel. No breakdown taken.
 
     nt: 30254 system calls in 1970 ms (and 2928 waits, 10126 ms),
         24443 user faults in 746 ms, 46 processes created in 95 ms

@@ -2,44 +2,56 @@
 
 ![Gala - the Saudi operating system](docs/images/gala-banner.png)
 
-A from-scratch x86_64 kernel in Rust that runs unmodified 64-bit Windows
-programs. It implements the Windows NT kernel's system call interface
-(the "NT layer"), and ships its own clean-room ntdll.dll, kernel32.dll,
-msvcrt.dll, ws2_32.dll and some fifty other system DLLs, so that `.exe`
-files built for Windows - by MSVC, mingw-w64, Go or Rust, or downloaded
-as their makers ship them - run on it as they are.
+gala is a from-scratch x86_64 kernel in Rust that runs unmodified 64-bit
+Windows programs. It implements the Windows NT system call interface and
+ships its own clean-room `ntdll.dll`, `kernel32.dll`, `msvcrt.dll`,
+`ws2_32.dll` and about fifty other system DLLs, so `.exe` files built for
+Windows (by MSVC, mingw-w64, Go or Rust, or downloaded as their makers
+ship them) run on it as they are. A Linux personality on the same core
+runs its first static Linux programs.
 
-The source is public so that it can be read; it is not licensed under any open source license (see [License](#license) below).
+- **Clean room.** Written from public documentation, headers, open-source
+  reimplementations and the black-box behaviour of Windows only; never
+  from disassembly, decompiled code or leaked source
+  ([`docs/CLEAN_ROOM.md`](docs/CLEAN_ROOM.md)).
+- **Test first, against real Windows.** Every feature starts from a test
+  program whose expected results are those of Windows 11 24H2 (build
+  26100); the same binaries run on Windows and on gala and the results
+  are compared.
+- **Our own internals.** Compatibility lives at the user-mode ABI only;
+  the memory manager, scheduler, I/O and drivers are gala's own design,
+  built so a running system can later be updated without a reboot,
+  kernel included.
+- **Source available, not open source.** The code is public so it can be
+  read; no license is granted (see [License](#license)).
 
-It is written clean-room: from public documentation, headers, open-source
-reimplementations and black-box behaviour of Windows only, never from
-disassembly, decompiled code or leaked source
-([`docs/CLEAN_ROOM.md`](docs/CLEAN_ROOM.md)). Every feature starts from a
-test program whose expected results are those of real Windows (Windows 11
-24H2, build 26100).
+## Documentation
 
-- Goals and rules: [`docs/PROJECT_BRIEF.md`](docs/PROJECT_BRIEF.md)
-- Status and plan: [`docs/ROADMAP.md`](docs/ROADMAP.md)
-- Design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- Security model: [`docs/SECURITY.md`](docs/SECURITY.md)
-- Observability (logs, events, what a failure leaves behind): [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md)
-- How work is done, pitfalls, tools: [`docs/WORKFLOW.md`](docs/WORKFLOW.md)
-- Performance measurements: [`docs/PERF.md`](docs/PERF.md)
-- gala-um (the NT layer as a Linux process): [`docs/GALA_UM.md`](docs/GALA_UM.md)
-- Third-party code and provenance: [`THIRD_PARTY.md`](THIRD_PARTY.md)
+| Document | What it is for |
+|---|---|
+| [`docs/PROJECT_BRIEF.md`](docs/PROJECT_BRIEF.md) | Vision, goals, values, scope |
+| [`docs/CLEAN_ROOM.md`](docs/CLEAN_ROOM.md) | The provenance rules (mandatory for every contribution) |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Status and plan: priorities, open items, known issues |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Design reference, subsystem by subsystem |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | The security model: tokens, descriptors, access checks, logons |
+| [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | Logs, events, the ledger, what a failure leaves behind |
+| [`docs/GALA_UM.md`](docs/GALA_UM.md) | gala-um: the NT layer as a Linux process |
+| [`docs/WORKFLOW.md`](docs/WORKFLOW.md) | How work is done: commands, tools, recipes, pitfalls, debugging |
+| [`docs/PERF.md`](docs/PERF.md) | Performance measurements |
+| [`THIRD_PARTY.md`](THIRD_PARTY.md) | Third-party code and binaries, with provenance and licenses |
+| [`CLAUDE.md`](CLAUDE.md) | Rules for AI agents working in this repository |
 
 ## What runs on gala
 
-Everything below is checked by a boot scenario (the names are in
-parentheses) that boots gala in QEMU, runs the program and compares its
+Each program below is checked by a boot scenario (its name is in the last
+column): xtask boots gala in QEMU, runs the program and compares the
 output with what Windows gives. `cargo xtask test` (and CI) runs every
-scenario except the *pending* ones, which are still being brought up and
-run only on request (`cargo xtask boot-test <name>`). Status as of
-2026-11-03.
+scenario except the *pending* ones, which are run on request with
+`cargo xtask boot-test <name>`.
 
-### Real programs
+### Programs built from source
 
-Built from source for gala's tests:
+Built from source by the scripts in `user/<name>/`:
 
 | Program | What it does on gala | Scenarios |
 |---|---|---|
@@ -53,13 +65,15 @@ Built from source for gala's tests:
 | **SQLite** 3.54.1 | the 9.5 MB amalgamation compiled on gala by tcc; creates, queries and reopens a database file; two processes write it **at once**, using file locks | `sqlite` |
 | A C runtime test | gala's msvcrt.dll checked by a C program built with mingw-w64 - and also built by tcc on gala | `msvcrt_test`, `tcc_self` |
 
-**Unmodified official releases**, downloaded by xtask and checked
-against their SHA-256 (never committed):
+### Unmodified official releases
+
+Downloaded by xtask and checked against their SHA-256 (never committed).
+Scenarios marked *pending* are still being brought up.
 
 | Program | What it does on gala | Scenarios |
 |---|---|---|
 | **Caddy** 2.8.4 | prints its version, lists its 121 modules, serves a site to the host (`caddy file-server`) | `caddy`, `caddy_http` |
-| **Java** (Temurin JDK 21.0.5) | `java -version` starts the HotSpot server VM; `java Hello.java` compiles a program in memory with the JDK's own compiler and runs it; `com.sun.net.httpserver` serves the host. Known intermittent: about 1 run in 30-40 fails with Java heap corruption (under investigation, ROADMAP "Priorities") | `java_version`, `java_hello`, `java_http` |
+| **Java** (Temurin JDK 21.0.5) | `java -version` starts the HotSpot server VM; `java Hello.java` compiles a program in memory with the JDK's own compiler and runs it; `com.sun.net.httpserver` serves the host. | `java_version`, `java_hello`, `java_http` |
 | **.NET 8** (runtime 8.0.33) | `dotnet --list-runtimes`; a C# program on the JIT and GC (exceptions, threads, formatting) | `dotnet_info`, `dotnet_hello` |
 | **PowerShell** 7.4.22 | `pwsh -NoProfile -Command ...` runs a command and prints `$PSVersionTable` | `pwsh_hello` |
 | **PostgreSQL** 17.2 | `initdb` makes a cluster, `postgres` serves it (a backend per connection, a restricted token as pg_ctl uses), the host's `psql` queries it | `postgres` |
@@ -72,11 +86,10 @@ against their SHA-256 (never committed):
 | **Elasticsearch** 8.15.3 | starts on the JDK and listens, but does not answer the host's request yet (pending) | `elasticsearch` |
 | **Git Bash** (PortableGit 2.47.1) | bash gets past its startup, then stops (pending, timeboxed) | `gitbash` |
 
-Getting the official releases to run is what drives most of the work: the
-missing-features ledger (below) lists what a program calls that gala lacks,
-and each gap is filled test first.
-
 ### The Windows layers underneath
+
+What those programs stand on, each area checked call by call by the
+test programs in `user/*_test`:
 
 - **Processes and threads**: process creation with inherited handles,
   redirected standard handles and the C runtime's inherited descriptors;
@@ -146,32 +159,185 @@ and each gap is filled test first.
   uiautomationcore, riched20 and msftedit (`user/<name>/`); also
   conhost.exe, cmd.exe and gala.exe.
 
-About 115 test programs (`user/*_test`) check these layers call by call;
-the same programs run on Windows (`user/bin/run-all.ps1`) so that the two
-can be compared (`cargo xtask compare`).
+### Linux programs
+
+Static and static-pie Linux ELF programs (musl) run as Linux-personality
+processes on the same kernel core (`lxrun=/lx/<binary>`): `write`,
+`exit`, `brk`, `mmap`/`munmap`/`mprotect`, `arch_prctl`, pipes and the
+auxiliary vector, each transcript equal to real Linux's (`lx_*`
+scenarios). The rest of the Linux system calls are ROADMAP item LX.
 
 ### Not there yet
 
 - **Few drivers.** Storage is virtio-blk, the network card virtio-net,
-  the screen the bootloader's framebuffer or a virtio-gpu, input a PS/2
-  keyboard and mouse; devices are polled (no device interrupts). On a
-  real PC gala boots from a CD or USB stick, runs the programs on its command
-  line and shows their output on the screen; without a virtio disk,
-  files live in memory and are gone at reboot.
+  the screen the bootloader's framebuffer or a virtio-gpu (2D), input a
+  PS/2 keyboard and mouse; devices are polled (no device interrupts). On
+  a real PC gala boots from a CD or USB stick and runs the programs on
+  its command line, showing their output on the screen; without a virtio
+  disk, files live in memory and are gone at reboot.
 - No 32-bit programs (WOW64), no service control manager (services are
-  started from the command line, `restart=` keeps them running), no IPv6,
-  no GPU acceleration (Direct3D, Vulkan and OpenGL are planned in
-  software first), no registry hives in Windows' file format.
+  started from the kernel command line; `restart=` keeps them running),
+  no IPv6, no GPU acceleration (Direct3D, Vulkan and OpenGL are planned
+  in software first), no registry hives in Windows' file format, no
+  downloads in `gala install` yet.
 - Some system call numbers are gala's own guesses for the pinned Windows
-  build (marked UNVERIFIED in `kernel/src/nt/syscalls.rs`); programs
+  build (marked `UNVERIFIED` in `kernel/src/nt/syscalls.rs`); programs
   that go through ntdll are not affected.
 - Functions that are missing or only partly done are reported at the end
-  of each run (the "ledger" lines), so gaps are never silent.
-- Planned next (ROADMAP "Next"): faster and more deterministic
-  debugging (simulation, record/replay), the Java heap corruption,
-  sessions with their own desktops and a remote desktop protocol,
-  HTTPS downloads for `gala install`, a browser (Chromium, then Edge), and
-  graphics in software.
+  of each run (the ledger lines), so gaps are never silent.
+
+What is being worked on, and in what order, is in
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+## Quick start
+
+### Requirements
+
+- Linux (on other systems use the Docker image, below).
+- Rust via rustup. The pinned toolchain in `rust-toolchain.toml`, with
+  the `x86_64-unknown-none` and `x86_64-pc-windows-msvc` targets, is
+  installed automatically on first use.
+- `git`, `xorriso`, OVMF (for UEFI boots) and QEMU. The tests use a
+  pinned QEMU that `cargo xtask qemu` builds into `~/.cache/gala-qemu/`
+  (about ten minutes, once; its build dependencies are in
+  [`docs/WORKFLOW.md`](docs/WORKFLOW.md), "QEMU"). Without it xtask falls
+  back to `qemu-system-x86_64` from `PATH` and says so; some
+  distribution versions have a TCG bug that breaks the JVM scenarios.
+- Linux 5.11 or later for gala-um.
+
+Debian/Ubuntu:
+
+```sh
+sudo apt install git xorriso qemu-system-x86 ovmf
+curl --proto '=https' -sSf https://sh.rustup.rs | sh
+```
+
+If OVMF is somewhere unusual, set `OVMF_CODE` (and optionally
+`OVMF_VARS`).
+
+Optional, only to rebuild the checked-in third-party binaries in
+`user/bin`: Go (fetched by version automatically) and mingw-w64
+(`gcc-mingw-w64-x86-64`). Their build scripts are `user/<name>/build.sh`;
+each pins its source and checks its checksum.
+
+### Build, run, test
+
+```sh
+git clone <this repository> gala-os && cd gala-os
+cargo xtask qemu         # once: build the pinned QEMU
+cargo xtask build        # kernel, DLLs, test programs, target/debug/gala-os.iso
+cargo xtask run          # boot it in QEMU (UEFI), serial log on the terminal
+cargo xtask test         # unit tests, gala-um, and every boot scenario
+```
+
+The first build fetches the pinned Limine bootloader into `target/`. Add
+`--release` to any command for an optimized kernel. QEMU uses KVM when
+`/dev/kvm` is available. With Docker, `cargo xtask docker-test` builds
+`docker/test.Dockerfile` and runs the tests inside it.
+
+Common commands while developing (the full list, and what each tool is
+for, is in [`docs/WORKFLOW.md`](docs/WORKFLOW.md)):
+
+```sh
+cargo xtask boot-test sqlite        # scenarios whose name contains "sqlite"
+cargo xtask um-test                 # the test programs in gala-um (seconds)
+cargo xtask triage target/failed/lua.log   # summary of a failed scenario's log
+cargo xtask screenshot --scenario tcc --at 16   # PNG of the screen
+cargo xtask serve nginx 8080        # Nginx on gala, browse http://localhost:8080
+cargo xtask serve sshd              # sshd on gala, ssh to host port 2222
+cargo xtask export-tests            # refresh the checked-in test binaries in user/bin
+```
+
+A failed scenario's serial log is kept in `target/failed/<scenario>.log`
+with a triage block at its end; every run ends with the ledger (missing
+functions), an `nt:` line (time in system calls) and a `stats:` line
+(memory) ([`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md)).
+
+To compare with Windows, copy `user/bin` to a Windows 11 machine, run
+`powershell -ExecutionPolicy Bypass -File run-all.ps1 -Out windows.json`
+there, then `cargo xtask compare windows.json` here.
+
+## Running your own programs
+
+### A bootable image
+
+`cargo xtask iso` builds an image with every program and DLL and a kernel
+command line saying what to run:
+
+```sh
+cargo xtask iso                                  # demo: hello, Go hello, 1000 goroutines
+cargo xtask iso --scenario lua                   # any scenario: its files and command line
+cargo xtask iso --scenario sqlite --name db      # -> target/debug/gala-db.iso
+cargo xtask iso --file ~/hello.exe run=hello.exe # your own Windows program
+cargo xtask iso --file ~/data.txt=data run=busybox.exe "args=sh%20-c%20%22cat%20C:/data/data.txt%22"
+```
+
+It prints the image's path (`target/debug/gala-<name>.iso`) and how to
+boot it, e.g.:
+
+```sh
+qemu-system-x86_64 -cpu max -m 1G -smp 2 -cdrom target/debug/gala-demo.iso
+```
+
+`--file PATH[=DIR]` puts a file on the image as `C:\DIR\<name>`
+(`C:\gala` by default, which is also the programs' current directory).
+A program may import any of gala's DLLs; what it needs that gala lacks
+shows up in the ledger lines at the end of the log.
+
+### Booting a PC from a USB stick
+
+The image is a hybrid ISO: written byte for byte to a USB stick it boots
+on BIOS and UEFI machines. (Checked in QEMU as a raw disk under SeaBIOS
+and OVMF and as a USB mass-storage device behind xHCI; not yet on
+physical PCs.)
+
+1. Build an image: `cargo xtask iso` (with `--scenario` or `--file` as
+   above).
+2. Write it to the stick. **This erases the stick**; check the device
+   name twice.
+   - Linux: find the stick with `lsblk` (say `/dev/sdb`, not a partition
+     such as `/dev/sdb1`), then
+     `sudo dd if=target/debug/gala-demo.iso of=/dev/sdb bs=4M conv=fsync status=progress`
+   - macOS: find it with `diskutil list` (say `/dev/disk4`), then
+     `diskutil unmountDisk /dev/disk4` and
+     `sudo dd if=gala-demo.iso of=/dev/rdisk4 bs=4m`
+   - Windows: Rufus (choose "DD image mode") or balenaEtcher.
+3. Boot the PC from the stick (the boot menu key is often F12, F11, F10
+   or Esc). On UEFI machines turn **Secure Boot off**: the Limine
+   bootloader on the image is not signed.
+
+The screen shows gala's boot log, the programs' output and then
+`gala: boot ok`; the machine then idles until powered off. Needed: an
+x86_64 CPU with an APIC, RDRAND for programs that ask for random numbers
+(Intel since 2012, AMD since 2015), and 512 MB of memory. Input is PS/2
+only, the stick is not read after boot (everything is loaded into memory
+by the bootloader), and only virtio-net network cards are supported.
+
+### The kernel command line
+
+Words separated by spaces, given after `cargo xtask iso ...`. The most
+used (the full list is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+"Kernel command line"):
+
+| Word | Effect |
+|---|---|
+| `run=a.exe,b.exe` | run boot modules `C:\gala\a.exe`, then `b.exe` |
+| `args=x,y` | their command lines, percent-encoded (`%20` space, `%22` quote, `%25` percent) |
+| `start=srv.exe` | start servers first, without waiting for them |
+| `restart=srv.exe` | make a `run=` program a service, started again when it ends |
+| `as=system`, `cwd=C:/dir` | run the programs as SYSTEM; set their current directory |
+| `lxrun=/lx/prog` (`lxargs=`, `lxenv=`) | run a Linux program |
+| `persist` | keep changes to C: and the registry on the virtio-blk disk |
+| `profile=server` | never bring up the desktop |
+| `console=prog.exe` | give a program a console window on the desktop |
+| `display=virtio` | use a virtio-gpu screen |
+| `noscreen` | keep the screen console off (faster under emulation) |
+| `trace` | log every system call and user-mode fault |
+| `events=syscall,image,thread,process,fault` or `all` | a JSON event stream on the debug console |
+| `failpoint=heap:every:97 failseed=7` | inject failures (debug builds) |
+| `record`, `replay=<file>` | record or replay a run's outside inputs |
+| `handover=<n>` | hand the machine to a fresh kernel n times at the end |
+| `qemu_exit`, `selftest`, `fault=<name>` | end QEMU with the result; run the kernel's own tests; provoke a CPU exception |
 
 ## How it fits together
 
@@ -386,181 +552,23 @@ flowchart LR
     rep --> cmp
 ```
 
-## Building
-
-### Requirements
-
-- Linux (other systems: use the Docker image, below)
-- Rust via rustup: the pinned toolchain in `rust-toolchain.toml` (1.97.0
-  with the `x86_64-unknown-none` and `x86_64-pc-windows-msvc` targets) is
-  installed automatically on first use
-- `git`, `xorriso` and `qemu-system-x86_64`; OVMF for UEFI boots
-  (`cargo xtask run`); Linux 5.11 or later for gala-um
-
-Debian/Ubuntu:
-
-```sh
-sudo apt install git xorriso qemu-system-x86 ovmf
-curl --proto '=https' -sSf https://sh.rustup.rs | sh
-```
-
-If OVMF is somewhere unusual, set `OVMF_CODE` (and optionally `OVMF_VARS`).
-
-Optional, only to rebuild the checked-in third-party binaries
-(`user/bin`): Go (fetched by version automatically) for the Go programs,
-and mingw-w64 (`gcc-mingw-w64-x86-64`) for Nginx, busybox, TinyCC and the
-C tests. Their build scripts are in `user/<name>/build.sh`; each pins its
-source and checks its checksum. Without these tools the checked-in
-binaries are used.
-
-### Build and run
-
-```sh
-git clone <this repository> gala-os && cd gala-os
-cargo xtask build        # kernel, DLLs, test programs, target/debug/gala-os.iso
-cargo xtask run          # boot it in QEMU (UEFI), serial log on the terminal
-cargo xtask test         # unit tests, gala-um, and every boot scenario
-```
-
-The first build fetches the pinned Limine bootloader into `target/`. Add
-`--release` to any command for an optimized kernel. QEMU uses KVM when
-`/dev/kvm` is available.
-
-Docker (any host with Docker): `cargo xtask docker-test` builds
-`docker/test.Dockerfile` (the toolchain and QEMU) and runs the tests in
-it.
-
-## Using it
-
-### A bootable image
-
-`cargo xtask iso` builds an image with every program and DLL and a kernel
-command line saying what to run:
-
-```sh
-cargo xtask iso                                  # demo: hello, Go hello, 1000 goroutines
-cargo xtask iso --scenario lua                   # any scenario: its files and command line
-cargo xtask iso --scenario sqlite --name db      # -> target/debug/gala-db.iso
-cargo xtask iso --file ~/hello.exe run=hello.exe # your own Windows program
-cargo xtask iso --file ~/data.txt=data run=busybox.exe "args=sh%20-c%20%22cat%20C:/data/data.txt%22"
-```
-
-It prints where the image is (`target/debug/gala-<name>.iso`) and how to
-boot it:
-
-```sh
-qemu-system-x86_64 -cpu max -m 1G -smp 2 -cdrom target/debug/gala-demo.iso
-```
-
-`--file PATH[=DIR]` puts a file of yours on the image as `C:\DIR\<name>`
-(`C:\gala` by default, also the current directory of programs). Your
-program may import any of the DLLs listed above; what it needs that gala
-lacks shows up in the ledger lines at the end of the log.
-
-### Booting from a USB stick
-
-The image is a hybrid ISO: it boots from a CD, and written byte for byte
-to a USB stick it boots from that too, on BIOS and on UEFI machines.
-(Checked in QEMU as a raw disk under SeaBIOS and under OVMF, and as a USB
-mass-storage device behind an xHCI controller; not yet on physical PCs.)
-
-1. Build an image: `cargo xtask iso` (or with `--scenario`, `--file`).
-2. Write it to the stick. **This erases the stick**; check the device
-   name twice.
-   - Linux: `lsblk` to find the stick (say `/dev/sdb`, not a partition
-     like `/dev/sdb1`), then
-     `sudo dd if=target/debug/gala-demo.iso of=/dev/sdb bs=4M conv=fsync status=progress`
-   - macOS: `diskutil list` to find it (say `/dev/disk4`), then
-     `diskutil unmountDisk /dev/disk4` and
-     `sudo dd if=gala-demo.iso of=/dev/rdisk4 bs=4m`
-   - Windows: Rufus (choose "DD image mode" when asked) or balenaEtcher.
-3. Boot the PC from the stick (its boot menu key is often F12, F11, F10
-   or Esc). On UEFI machines turn **Secure Boot off**: the Limine
-   bootloader on the image is not signed. Legacy/CSM boot works too.
-
-What to expect: the screen shows gala's boot log, then the programs'
-output (the same text the serial port gets), then `gala: boot ok`; the
-machine then idles until you power it off. Requirements: an x86_64 CPU
-with an APIC (anything from the last 15 years); RDRAND for Go programs
-and others that ask for random numbers (Intel since 2012, AMD since 2015);
-512 MB of memory or more. Input is a PS/2 keyboard and mouse only (no
-USB input driver), the stick is not read after booting (programs and files are loaded into memory by the
-bootloader), and network cards other than virtio-net are not supported,
-so on real hardware the network scenarios do not apply.
-
-### Kernel command line
-
-Words separated by spaces (`cargo xtask iso ... <words>`):
-
-- `run=a.exe,b.exe` runs boot modules `C:\gala\a.exe`, then `b.exe`;
-  `args=x,y` gives them command lines, percent-encoded (`%20` space,
-  `%22` quote, `%25` percent): `args=alpha%20%22beta%20gamma%22`.
-- `trace` logs every system call (`trace: pid 4 tid 8 NtWriteFile(...) -> 0x0`)
-  and every user-mode fault.
-- `events=syscall,image,thread,process,fault` (or `all`) writes a JSON
-  event stream to the debug console (docs/OBSERVABILITY.md).
-- `start=srv.exe` starts servers first without waiting for them;
-  `restart=srv.exe` makes a `run=` program a service that is started
-  again when it ends; `as=system` runs the programs as SYSTEM;
-  `cwd=C:/dir` sets their current directory.
-- `persist` keeps what programs change on C: and in the registry on the
-  virtio-blk disk, for the next boot.
-- `profile=server` never brings up the desktop; `console=prog.exe` gives
-  a program a console window; `display=virtio` uses a virtio-gpu screen.
-- `noscreen` keeps the screen console off (faster under emulation).
-- `failpoint=heap:every:97 failseed=7` injects failures (debug builds);
-  `record` / `replay=<file>` record and replay a run's outside inputs;
-  `handover=<n>` hands the machine to a fresh kernel n times at the end.
-- `qemu_exit` ends QEMU with the result (used by the tests);
-  `selftest` runs the kernel's own tests; `fault=<name>` provokes a CPU
-  exception.
-
-### Developing
-
-```sh
-cargo xtask boot-test sqlite        # scenarios whose name contains "sqlite"
-cargo xtask um-test                 # the test programs in gala-um (seconds)
-target/debug/um user/bin/hello.exe  # one program in gala-um (see docs/GALA_UM.md)
-cargo xtask screenshot --scenario tcc --at 16 run=busybox.exe "args=..."  # PNG of the screen
-cargo xtask serve nginx 8080        # Nginx on gala, browse http://localhost:8080
-cargo xtask serve sshd              # sshd on gala, ssh to host port 2222 (docs/WORKFLOW.md)
-XTASK_REPEAT=20 cargo xtask boot-test java_hello   # repeat a boot test (flaky hunting)
-cargo xtask triage target/failed/lua.log            # the triage summary of a failed log
-cargo xtask events <file.events.jsonl>              # summarize an event stream
-cargo xtask fault-test              # test programs in gala-um under injected failures
-cargo xtask sim-test                # deterministic simulation in gala-um (seeds)
-cargo xtask symbolize <log>         # resolve kernel addresses in a log
-cargo xtask bench                   # micro-benchmarks (also run on Windows)
-cargo xtask report                  # every test program on gala -> target/report/
-cargo xtask compare windows.json    # against run-all.ps1's report from Windows
-cargo xtask export-tests            # refresh the checked-in test binaries in user/bin
-```
-
-At the end of every run the log has the ledger (missing or partial
-functions, with hit counts), an `nt:` line (time in system calls, faults
-and process creation) and a `stats:` line (frames, heap peak). A failed
-scenario's serial log is kept in `target/failed/<scenario>.log`, with a
-triage block at its end, a state dump if it timed out, and a crash report
-for a program ended by an exception; `target/report/history.jsonl` names
-flaky and slower scenarios over runs (docs/OBSERVABILITY.md). More in [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
-
-To compare with Windows: copy `user/bin` to a Windows 11 machine and run
-`powershell -ExecutionPolicy Bypass -File run-all.ps1 -Out windows.json`
-there, then `cargo xtask compare windows.json` here.
-
 ## Repository layout
 
 | Path | What it holds |
 |---|---|
-| `kernel/` | the kernel: `arch` (x86_64, SMP, paging, virtio), `boot`, `mm`, `sched`, `fs` (ramfs, disk log), `disk` (virtio-blk), `net` (virtio-net, smoltcp), `display` (framebuffer, virtio-gpu), `nt` (the NT system call layer, security, registry, desktop), `handover` (kernel handover), `trust` (signed updates), `hosted` (gala-um's platform) |
-| `user/<dll>/` | gala's DLLs, about fifty: `testntdll` (ntdll), `kernel32`, `kernelbase`, `msvcrt`, `advapi32`, `user32`, `gdi32`, `ws2_32`, `shell32`, `ole32`, ... |
+| `kernel/` | the kernel: `arch` (x86_64, SMP, paging, virtio), `boot`, `mm`, `sched`, `fs` (ramfs, disk log), `disk` (virtio-blk), `net` (virtio-net, smoltcp), `display` (framebuffer, virtio-gpu), `nt` (the NT system call layer, security, registry, desktop), `lx` (the Linux personality), `handover` (kernel handover), `trust` (signed updates), `hosted` (gala-um's platform) |
+| `kernel/lx_abi/` | Linux ABI data (signal numbers, struct layouts), host-tested |
+| `user/<dll>/` | gala's DLLs: `testntdll` (ntdll), `kernel32`, `kernelbase`, `msvcrt`, `advapi32`, `user32`, `gdi32`, `ws2_32`, `shell32`, `ole32`, ... |
 | `user/conhost`, `user/cmd`, `user/gala`, `user/galapkg` | gala's own programs: the console host, cmd.exe, the `gala` command, `gala install` |
-| `user/<name>_test/` | test programs (Rust on `user/ntrt` or kernel32, some C and C#) |
+| `user/<name>_test/` | Windows test programs (Rust on `user/ntrt` or kernel32; some C and C#) |
+| `user/lx/` | Linux test programs and their expected (real Linux) transcripts |
 | `user/go_*`, `user/nginx`, `user/busybox`, `user/tcc`, `user/lua`, `user/sqlite`, `user/java`, `user/postgres`, `user/sshd`, ... | real programs: build scripts, test scripts, configuration, data |
 | `user/bin/` | the checked-in binaries (and `run-all.ps1` for Windows) |
 | `um/` | gala-um, the NT layer as a Linux process |
-| `xtask/` | the build and test driver (`cargo xtask ...`, scenarios) |
-| `docs/` | design, roadmap, workflow, security, observability, measurements |
+| `xtask/` | the build and test driver (`cargo xtask ...`) and the scenarios |
+| `docker/` | the Docker image for running the tests anywhere |
+| `fonts/`, `vendor/` | the fonts the screen uses; vendored, patched crates (`smoltcp`, `getrandom`) |
+| `docs/` | the documentation (see [Documentation](#documentation)) |
 
 ## Contributing
 

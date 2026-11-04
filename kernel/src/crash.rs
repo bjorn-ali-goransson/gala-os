@@ -1,4 +1,4 @@
-//! The crash record kept across reboots (docs/OBSERVABILITY.md §5,
+//! The crash record kept across reboots (docs/OBSERVABILITY.md "Crash record across reboots",
 //! ROADMAP R4): when the kernel panics, the panic message, its backtrace
 //! and the flight recorder's last events go to the crash area of the disk
 //! (the last sectors of a version 2 volume, `fs::volume::CRASH_SECTORS`);

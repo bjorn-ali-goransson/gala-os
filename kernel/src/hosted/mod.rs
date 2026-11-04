@@ -8,10 +8,10 @@
 //! code as in the kernel. sim.rs is the deterministic simulation (`um
 //! --sim=<seed>`: one thread at a time, virtual time).
 //!
-//! Not yet (each reported where it matters): child processes (one NT
-//! process per Linux process), suspending a thread while it runs program
-//! code (it takes effect at its next system call), file-backed sections
-//! (file pages live in the host heap, not in the memfd), networking.
+//! Not yet (reported where it matters): child processes (one NT process
+//! per Linux process). Suspending a thread while it runs program code
+//! (`Threads::interrupt`, SIGURG), file-backed sections and networking
+//! (over loopback; no network card) are served as in the kernel.
 
 #![allow(clippy::disallowed_methods, clippy::disallowed_macros)]
 

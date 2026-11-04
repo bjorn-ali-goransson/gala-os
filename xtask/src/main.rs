@@ -5260,7 +5260,7 @@ const SCENARIOS: &[Scenario] = &[
         // (the source launcher compiles it in memory with jdk.compiler).
         // Expected as on Windows 11 (2 processors under QEMU).
         // Pending: javac 48 times in one JVM (user/java/Stress.java), a
-        // stress run for the Java heap corruption (ROADMAP Priorities).
+        // stress run for the Java heap corruption (WORKFLOW "Known intermittent").
         name: "java_stress",
         cmdline: "qemu_exit run=java.exe args=C:/gala/Stress.java%2048 dump=C:/hs_err_pid4.log",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -7714,7 +7714,7 @@ const STATEDUMP_WAIT: Duration = Duration::from_secs(20);
 /// `nmi` reaches every CPU; the kernel prints a state dump: each CPU's
 /// rip and backtrace, held locks, memory, the flight recorder, then every
 /// thread's system call and wait), waits for it to end, and says so in a
-/// line for the log (docs/OBSERVABILITY.md, "Gaps found 2026-11-03").
+/// line for the log (docs/OBSERVABILITY.md, "State dump").
 fn ask_for_state_dump(
     socket: &Path,
     log: &Path,
@@ -9222,7 +9222,7 @@ fn ssh_shell_client(port: u16) -> Result {
         thread::sleep(Duration::from_secs(1));
         // Typed once: the shell's control handler takes Ctrl+C while
         // `sleep` runs (a late one, a lost wake-up, dropped this line:
-        // ROADMAP "sshd_shell's Ctrl+C fixed").
+        // ARCHITECTURE "Waits").
         send(b"echo gala-$((50-6))\r")?;
         let at = expect("gala-44\r\n", at, 30).map_err(|e| format!("Ctrl+C: {e}"))?;
         if started.elapsed() > Duration::from_secs(25) {

@@ -1,4 +1,4 @@
-//! The flight recorder (docs/OBSERVABILITY.md §5, ROADMAP R4): an
+//! The flight recorder (docs/OBSERVABILITY.md "Flight recorder", ROADMAP R4): an
 //! always-on ring per CPU of the last events, kept in memory whether the
 //! event stream is on or not, and printed when the kernel panics or the
 //! hang watchdog finds a CPU that stopped taking timer interrupts. A record

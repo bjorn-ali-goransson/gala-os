@@ -1034,7 +1034,7 @@ fn nt_terminate_process(call: &mut Call<'_>) -> NtStatus {
 /// NtOpenProcess(*ProcessHandle, DesiredAccess, ObjectAttributes, ClientId):
 /// the process with CLIENT_ID.UniqueProcess (or, if that is 0, the
 /// process of UniqueThread); STATUS_INVALID_CID if there is none.
-/// Access is granted as asked (no security descriptors yet).
+/// Access is granted as asked (the open is not access-checked yet).
 fn nt_open_process(call: &mut Call<'_>) -> NtStatus {
     let (out, access, attrs, cid) =
         (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));

@@ -1,1050 +1,1026 @@
 # Working on gala-os (handbook for agents and humans)
 
-The fastest way to get productive in a new session. Read `CLAUDE.md`, then
-this, then the parts of `ARCHITECTURE.md` you touch. `ROADMAP.md` says what
-is done and what comes next (the "Next" list is the agreed order).
+How work is done: the test-first loop, the commands, the tools, program
+recipes, debugging recipes and the pitfalls met so far. Read `CLAUDE.md`
+first, then this, then the parts of `ARCHITECTURE.md` you touch.
+`ROADMAP.md` says what is done and what comes next (its "Current focus" is
+the order to work in). README.md is the short quick start; this is the
+full reference.
 
-## One chunk of work
+Contents: [The loop](#the-loop) ·
+[Building, running and testing](#building-running-and-testing) ·
+[Writing tests and adding functions](#writing-tests-and-adding-functions) ·
+[Program recipes](#program-recipes) · [Tools](#tools) ·
+[Debugging and troubleshooting](#debugging-and-troubleshooting) ·
+[Things that are easy to get wrong](#things-that-are-easy-to-get-wrong) ·
+[Hygiene sweeps](#hygiene-sweeps) · [Where things are](#where-things-are)
+
+## The loop
+
+Every piece of work starts from a test program whose expected results
+are those of real Windows (pinned build: Windows 11 24H2, build 26100),
+or of real Linux for the Linux personality.
+
+### One chunk of work
 
 1. **Test first.** Create `user/<feature>_test/` (copy `Cargo.toml` from
    another test with `sed 's/file_test/<feature>_test/g'`). Its `main`
    returns 0 or the number of the failing check and prints
-   `<feature>_test: ok`. Expected values are what real Windows (pinned
-   build) returns; say in the doc comment what is assumed.
-2. Wire it up:
+   `<feature>_test: ok`. Expected values are what real Windows returns;
+   say in the doc comment what is assumed.
+2. **Wire it up:**
    - `xtask/src/main.rs`: add to `USER_PROGRAMS`, add a `Scenario`
-     (`cmdline: "qemu_exit run=<feature>_test.exe [args=...]"`), and, if it
-     needs the test ntdll or DLLs, `EXTRA_MODULES` entries
+     (`cmdline: "qemu_exit run=<feature>_test.exe [args=...]"`), and, if
+     it needs the test ntdll or DLLs, `EXTRA_MODULES` entries
      (`("x_test", "ntdll.dll", "Windows/System32")`).
    - Root `Cargo.toml` workspace members.
    - `.github/workflows/ci.yml`: append `-p <feature>_test` to the
-     Windows-target clippy line; test DLLs go on the DLL build/clippy lines.
-   - `user/bin/run-all.ps1` only if the program needs arguments on Windows.
-3. `cargo xtask boot-test <feature>_test`: see it fail for the right reason
-   (a filter matches names containing it; `a,b,c` runs exactly those).
-4. Implement. Host unit tests for pure logic (`#[cfg(test)]` in the module).
-5. Checks (all must pass):
-   ```sh
-   cargo fmt --all
-   # every clippy/build line CI runs (selected by content, not line number)
-   grep -E '^ +cargo (clippy|build --release)' .github/workflows/ci.yml | sed 's/^ *//' | bash -e
-   cargo xtask test            # host tests + every boot scenario
-   cargo xtask export-tests    # refresh user/bin (CI compares)
-   ```
-6. Update `docs/ROADMAP.md` (move the item to done, with the test name) and
-   `docs/ARCHITECTURE.md` (how it works, invariants, TODOs). Commit with a
-   message saying what the test checks and what changed; push.
+     Windows-target clippy line; test DLLs go on the DLL build/clippy
+     lines.
+   - `user/bin/run-all.ps1` only if the program needs arguments on
+     Windows.
+   - A multi-threaded program also goes in `SIM_PROGRAMS`, and in
+     `FAULT_PROGRAMS` once its fault sweep passes. A program that cannot
+     run in gala-um goes in `NOT_IN_UM` with the reason.
+3. `cargo xtask boot-test <feature>_test`: see it fail for the right
+   reason.
+4. Implement. Host unit tests for pure logic (`#[cfg(test)]` in the
+   module).
+5. Run the checks below; update the docs; commit with a message saying
+   what the test checks and what changed; push.
 
-## Go programs
+### Before committing
 
-`user/<name>/` with a `main.go` and `go.mod`, listed in `GO_PROGRAMS` in
-xtask: built for windows/amd64 with the pinned toolchain (`GO_TOOLCHAIN`,
-`-trimpath`, empty build id, so the binary is reproducible and checked in
-under `user/bin`). Without `go` installed, xtask uses the checked-in
-binary. Bring-up loop: run it (`XTASK_EVENTS=all cargo xtask boot-test
-<name>` once it has a scenario, or `cargo xtask screenshot run=<name>.exe`)
-and read the `ledger:` lines: every missing import is listed by name.
+All must pass:
 
-## Nginx
+```sh
+cargo fmt --all
+# every clippy/build line CI runs (selected by content, not line number)
+grep -E '^ +cargo (clippy|build --release)' .github/workflows/ci.yml | sed 's/^ *//' | bash -e
+cargo xtask test            # host tests, alloc-audit, gala-um, replay, every boot scenario
+cargo xtask export-tests    # refresh user/bin (CI compares)
+```
 
-`user/nginx/build.sh` cross-compiles Nginx (pinned version and SHA-256)
-with mingw-w64 (`apt install gcc-mingw-w64-x86-64`) into
-`user/bin/nginx.exe`; the build is reproducible (fixed build directory,
-no debug info, no link timestamp: two builds give the same hash). CI
-uses the checked-in binary. Its configuration, page and placeholder
-files (boot modules only create the directories they are in) are in
-`user/nginx/` and shipped by EXTRA_MODULES entries with repository
-paths. It runs with `-p C:/nginx/ -c conf/nginx.conf`. A server never
-exits: scenarios with exit status `XTASK_STOPS` are stopped by xtask
-once their net client has finished, and pass if it succeeded.
-`cargo xtask screenshot run=nginx.exe "args=-p%20C:/nginx/%20-c%20conf/nginx.conf"`
-shows it.
+- CI also runs `cargo xtask lx-expect && git diff --exit-code user/lx`
+  and `cargo xtask export-tests && git diff --exit-code user/bin`:
+  checked-in binaries and transcripts must match their sources.
+- Commit messages pass through the shell: do not put backticks in a
+  double-quoted `-m`; use a heredoc with `-F -`.
+- Borrowed code or a new dependency gets a `THIRD_PARTY.md` entry in the
+  same commit.
 
-## Linux test programs (user/lx, ROADMAP LX)
+### Documents to update (same commit)
 
-Test first against real Linux (CLEAN_ROOM.md "Linux": man-pages, the
-ABI/ELF specs, observed behaviour, gVisor; never the Linux kernel source):
-- `user/lx/<name>_test/main.c`: a C program built with musl
-  (`apt install musl-tools`) that makes the system calls it checks itself
-  (`user/lx/common/lx.h`: `sys6` and friends with the `syscall`
-  instruction; failures are `-errno`), so it tests the kernel, not libc.
-  It prints `name = value` lines, one write per line, never an address
-  or anything that varies between runs, kernel versions (auxv entries
-  come and go: print only the ones you check), users (uid: print
-  "AT_UID is getuid() = yes", not the number) or build modes, and ends
-  with `<name>_test: ok`. Accessibility without signals: write(2) from
-  an address fails with EFAULT if it is unreadable, read(2) into it if
-  it is unwritable (brk_test, mmap_test).
-- `user/lx/build.sh` builds each as `user/lx/bin/<name>_test` (static,
-  ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN), reproducibly
-  (stripped, no build id, `-fno-stack-protector`: the canary is read
-  from %fs:0x28, so a test that moves FS would crash). The binaries are
-  checked in under `user/lx/bin`, not `user/bin` (`cargo xtask
-  export-tests` copies only the Windows build's outputs); the kernel's
-  host tests `include_bytes!` them.
-- `cargo xtask lx-expect` rebuilds them (when musl-gcc is there; else it
-  runs the checked-in ones), runs each binary on this host as
-  `./<name>_test first '' 'third arg'` from `target/lx-expect/<binary>/`
-  with only `A=1 EMPTY= LONGER_NAME=some value` in its environment, and
-  compares stdout + `-- exit status N` with `user/lx/<name>_test/
-  expected.txt` (both binaries against the same file). A mismatch prints
-  a line diff and leaves `actual.txt` there. `--record` writes
-  expected.txt (run on real Linux only, and check the diff: it is the
-  spec); `--no-build` skips the rebuild. CI runs it and then `git diff
-  --exit-code user/lx` (binaries and transcripts must match the sources).
-- Recorded on Linux 6.18 (this machine); CI's runner kernel differs, which
-  is why transcripts avoid version-dependent values.
-- Pitfalls met: Rust's `Command` passes the environment sorted by name
-  (auxv_test's envp order); a static-pie's initial break is not above its
-  bss (brk_test prints only what holds for both); a pipe write whose
-  buffer runs into an unmapped page fails with EFAULT, not a partial count
-  (write_exit_test records what Linux does).
-- The kernel side is `kernel/src/lx/` (ARCHITECTURE "The lx module"),
-  tested with `cargo test -p kernel --lib lx`, and the ABI data crate
-  `kernel/lx_abi` (ARCHITECTURE "The lx_abi crate"), `cargo test -p
-  lx_abi`, whose tests read the transcripts: changing a test program's
-  output can break them (re-run both). No boot scenarios yet: they come
-  with the exec path, one per user/lx program, expecting its
-  expected.txt.
-- **The milestone 2-3 corpus** (recorded on Linux 6.18.44, this machine,
-  as root and checked unchanged as uid 65534): fs_test (open/openat
-  flags, getdents64, the stat family, statx, rename/renameat2, unlink,
-  mkdir/rmdir, symlinks, errnos), pipe_test (pipe2 flags, EOF, EAGAIN,
-  EPIPE/SIGPIPE, dup/dup2/dup3, fcntl), fork_test (fork/vfork/execve/
-  wait4/waitid, statuses, groups and sessions, a subreaper), thread_test
-  (clone threads, futex), signal_test (actions, masks, pending, siginfo,
-  the observed rt_sigframe, sigaltstack, SIGCHLD, default actions),
-  clock_test, poll_test (poll/ppoll/select/pselect6/epoll), pty_test
-  (/dev/ptmx, termios, the line discipline, ISIG), proc_test
-  (/proc/self). They use `common/more.h` (on top of lx.h): musl's
-  `SYS_*` numbers and struct definitions, `say_ret` (the errno's name
-  appended), `lx_init` (closes every fd above 2, so fd numbers are
-  deterministic and printed; clears the signal mask, SIGPIPE/SIGCHLD to
-  default, umask 022), `set_action` (rt_sigaction with SA_RESTORER and
-  an rt_sigreturn restorer, as musl does), wait-status printing (the core
-  flag left out: it depends on core limits).
-- Determinism: `cargo xtask lx-expect --runs 5` runs each binary 5 times
-  and fails if a transcript varies (do it before `--record`). Rules the
-  corpus follows: print relations, not pids/addresses/times/inodes; sort
-  directory listings; children report through exit status or a pipe and
-  the parent waits before printing on; never rely on timing for an
-  ordering: a FUTEX_WAKE is retried until it wakes the thread known to be
-  about to wait, a signal that must arrive while a child waits is blocked
-  and taken with rt_sigtimedwait (pty_test's SIGWINCH: a handler plus a
-  blocking read raced and hung under load), echoes are read until the
-  expected byte count; nothing depends on root (EACCES checks would);
-  directory sizes and nlinks are file-system specific and not printed.
-- Linux behaviour found that the kernel must copy: a pipe's SIGPIPE has
-  si_code SI_USER; `select` ignores fds beyond the descriptor table
-  (fd 100 with a 64-entry table: 0, not EBADF); SA_RESETHAND keeps the
-  flag in the reset action (flags read back 0x84000004); SA_RESETHAND
-  does not imply SA_NODEFER; a blocked ignored signal stays pending until
-  unblocked; signals made deliverable at once nest (SIGUSR1's frame is
-  set up first, real-time ones on top run first: "35 35 10 12"); a store
-  to a never-touched bss page after mprotect(PROT_READ) faults with
-  err 6 (not present), so signal_test touches it first (err 7); musl's
-  `struct rusage` is 272 bytes, the kernel writes 144; a tiny child's
-  ru_maxrss can be 0; the process's exit status after the main thread's
-  exit(0) is the last thread's exit(5); clockid_t is 32-bit (a CPU clock
-  for pid p is `(int)((~p << 3) | 2)`); `^Z` to an orphaned foreground
-  group (a session leader's) is discarded; a fresh pty's master and
-  slave have the same termios.
-- Skips: nothing is skipped on this machine (ptys and /proc work), so
-  every expected.txt is the full transcript. pty_test and proc_test
-  print a single `SKIP: open(/dev/ptmx) = -errno` (or readlink
-  /proc/self) line instead when that is unavailable, so a machine
-  without them shows a mismatch whose diff names the reason; under gala
-  they are expected to pass once ptys and /proc exist.
-## TLS tests (Schannel)
+- `docs/ROADMAP.md`: move the item to done, with the test name.
+- `docs/ARCHITECTURE.md`: how it works, invariants, TODOs.
+- `docs/WORKFLOW.md`: a new convention, tool or pitfall.
+- `docs/OBSERVABILITY.md`: new logs, events or failure reports.
 
-`schannel_test` is a TLS client of Nginx (OpenSSL) inside the guest: the
-scenario starts `nginx.exe` with `start=` and `user/schannel_test/nginx.conf`
-(ports 8443-8445 on 127.0.0.1, so no xtask network client is involved),
-and the test retries its connect while Nginx starts. On Windows,
-run-all.ps1 starts the same Nginx from a prefix in TEMP and, as an
-administrator, imports the test CA into LocalMachine\Root for the run
-(skipped otherwise). The engine's rules are host-tested first:
-`cargo test -p schannel_tls` runs both sides in memory (seconds, no
-QEMU); boot the scenario once those pass.
-- Test certificates: `user/schannel_test/certs/make.sh` (host openssl
-  3.0+; run it in place and commit the results; test data, not secret):
-  a CA, an issued `localhost` certificate (ECDSA), an expired one (`openssl
-  ca` sets a past validity, `x509 -req` cannot), a self-signed one, an RSA
-  pair for the test's own server (`server-rsa.cer`/`.p8`, also used by the
-  host tests). They are valid from the moment they are made: host tests
-  use a clock two days later. Regenerating changes every file and
-  nothing in the tests' expectations.
-- gala's machine root store is `C:\Windows\System32\gala\roots`: a
-  scenario that needs a trusted root ships the CA there (an EXTRA_MODULES
-  line). Without one, automatic validation gives SEC_E_UNTRUSTED_ROOT and
-  the ledger says `schannel.dll!machine root store (no gala/roots ...)`.
-- A failing handshake leaves `schannel.dll!ISC: <rustls error>` (ASC for
-  a server) in the ledger with the SSPI status: read that first.
-- Pitfalls: SEC_E_INCOMPLETE_MESSAGE means the caller passes the same
-  bytes again with more (schannel_tls keeps a count, `retained`); a
-  rustls slice that still holds a partial handshake message must be the
-  same buffer on the next call (the engine hands it the context's own
-  copy). After a rustls error, do not call it with an empty buffer: it
-  may still point into the last one (it panics). schannel.dll is 1.4 MB
-  (rustls and RustCrypto): only processes that use Schannel load it,
-  through secur32.
-  tested with `cargo test -p kernel --lib lx`.
-- Boot scenarios `lx_<name>` and `lx_<name>_pie` (one per binary) run it
-  in gala: `qemu_exit lxrun=/lx/<binary> lxargs=<argv> lxenv=<env>`
-  (both percent-encoded shell words; argv[0] first, `./<name>_test` as
-  lx-expect gives it). The binary is shipped as `C:\lx\<binary>` by an
-  EXTRA_MODULES entry with its repository path. xtask rebuilds the
-  transcript from the kernel's `lx: pid N stdout: ..` / `-- exit status`
-  lines and requires it to equal expected.txt (a diff on mismatch;
-  `lx_expect::check_boot`). A new user/lx test needs its two entries in
-  EXTRA_MODULES and SCENARIOS (copy an `lx_` pair).
-- Bring-up of a new Linux program: run it with `lxrun=`, then read the
-  `unimplemented system call <name>` lines and the `ledger:` lines
-  (`"what":"linux syscall missing"`, by hits) after `run: end`: that is
-  the next work list.
+### Rules for every change
 
-## Adding a function to gala's ntdll or kernel32
+- **Observability is part of every change** (OBSERVABILITY.md): a new
+  subsystem, driver, boot stage, format or test comes with its
+  logs/events and what a failure leaves behind; when a failure's cause
+  had to be guessed, add the missing telemetry with the fix.
+- **Fallible allocation only** (`try_box`, `try_push`, `try_reserve`,
+  `mm::heap::try_to_vec`); clippy bans the rest (`collect` and `to_vec`
+  included) and `cargo xtask alloc-audit` finds what clippy cannot see
+  ("Fault injection"). `unsafe` only where `CLAUDE.md` allows it, each
+  block with a `SAFETY:` comment.
+- **Unsupported paths are recorded**: when you leave a flag, class or
+  case unimplemented, call `nt::ledger::record(service, what, detail)`
+  there (in DLLs: `unsupported(b"dll!Name(case)", detail)`), so real
+  programs that need it show up in `target/report/ledger.md`.
+- **Constants come from headers**: values typed in by hand go wrong
+  silently (a wrong STATUS_OBJECT_NAME_EXISTS once matched a test that
+  agreed with it). With mingw-w64 installed (`apt install
+  mingw-w64-common`, or the cross compiler), `cargo test -p xtask`
+  compares every NTSTATUS in `kernel/src/nt/status.rs` with
+  `ntstatus.h`; check other constants the same way when you add them.
+- **System call numbers** live in `kernel/src/nt/syscalls.rs` and
+  `user/ntrt/src/lib.rs` and must match ("Test programs").
+- **shasha features: the `gala` command first.** Everything the
+  graphical shell does can be done from a terminal. Make a new feature a
+  named action (`nt::desktop::Action`, or a new GalaDesktopAction
+  request in `nt/action.rs` and `user/gala`), test it through `gala` as
+  `gala_cli_test` does (start the program with `gala start`, wait on
+  `gala windows`, check what the program saw), and only then bind the
+  mouse or a key to the same action. A `gala` command is also the easy
+  way to put a screen test's window where its pixel checks expect it.
+
+## Building, running and testing
+
+### Commands
+
+`cargo xtask <command> [--release]`; `--release` builds an optimized
+kernel (user programs are always release builds). Running `cargo xtask`
+alone prints the usage.
+
+| Command | What it does |
+|---|---|
+| `build` | kernel (default and server builds), DLLs, programs, `target/<profile>/gala-os.iso` |
+| `run [--headless]` | build, then boot in QEMU (UEFI) with the serial log on stdio |
+| `test` | host unit tests, `alloc-audit`, `um-test`, `replay-test`, then every boot scenario not in `PENDING` |
+| `boot-test [filter]` | boot scenarios only; a filter matches names containing it, `name$` exactly that one, `a,b,c` exactly those |
+| `export-tests` | copy the built test programs and DLLs to `user/bin/`, then remake derived test data |
+| `iso [--name N] [--scenario S] [--file PATH[=DIR]]... [cmdline...]` | a bootable image ("Bootable images and USB sticks") |
+| `screenshot [--uefi] [--at 1,3,5] [--name N] [--scenario S] [cmdline...]` | PNGs of the screen ("Screenshots") |
+| `serve <scenario> [port]` | boot a network scenario and keep it running ("Serving to a browser", "SSH into a running gala") |
+| `um-test` | the program scenarios that `runs_in_um`, in gala-um |
+| `fault-test [filter] [--sweep[=frame\|net_tx]]` | gala-um under injected failures ("Fault injection") |
+| `sim-test [filter] [--seeds N] [--seed S] [--all]` | gala-um's deterministic simulation ("Deterministic simulation") |
+| `replay-test` | record programs' inputs in gala-um and replay them, live and simulated |
+| `lx-expect [--record] [--no-build] [--runs N]` | the Linux test programs on this host against their transcripts |
+| `alloc-audit [kernel ELF] [--all]` | infallible allocations in the kernel's machine code |
+| `symbolize <log> [--release]` | resolve kernel backtraces in a serial log |
+| `triage <serial log> [events.jsonl]` | the triage block of a log ("When a test fails") |
+| `events <events.jsonl>` | summarize an event stream |
+| `otel <log\|events.jsonl\|scenario> [events.jsonl] [--out P] [--endpoint URL]` | OTLP/JSON ("OpenTelemetry") |
+| `bench [bench-windows.txt]` | `user/bench` on gala ("Benchmarks") |
+| `report` | every test program on gala -> `target/report/gala.{json,md}` |
+| `compare <windows.json> [gala.json]` | against `run-all.ps1`'s report from Windows |
+| `docker-test [xtask args]` | run `cargo xtask test` (or the args) in `docker/test.Dockerfile` |
+| `qemu` | build the pinned QEMU ("QEMU") |
+| `bake-fonts`, `bake-icons` | rasterize the desktop's fonts and icons ("Screenshots") |
+
+To compare with Windows: copy `user/bin` to a Windows 11 machine, run
+`powershell -ExecutionPolicy Bypass -File run-all.ps1 -Out windows.json`
+there, then `cargo xtask compare windows.json` here. `cargo xtask
+report` also lists programs that pass in QEMU but not in gala-um, or the
+other way round (one of the two platforms is then wrong).
+
+Requirements (README "Requirements"): Linux, rustup (the pinned
+toolchain in `rust-toolchain.toml` installs itself), `git`, `xorriso`,
+QEMU, OVMF for UEFI boots (`OVMF_CODE`, `OVMF_VARS` if it is somewhere
+unusual), Linux 5.11+ for gala-um. The first build fetches the pinned
+Limine into `target/`. The server kernel (`--no-default-features`, no
+shasha) is built into `target/server`, the `handover_next` kernel into
+`target/next`.
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `XTASK_VERBOSE=1` | print the serial log while booting |
+| `XTASK_EVENTS=all` or `syscall,image,thread,process,fault,window,display,...` | write the event stream to `target/<profile>/<iso>.events.jsonl` |
+| `XTASK_CMDLINE="words"` | add kernel command-line words to every boot (the kernel takes the last `args=`, so this can replace a scenario's arguments) |
+| `XTASK_QEMU_ARGS="..."` | extra QEMU arguments; an `-accel` here replaces xtask's own |
+| `XTASK_QEMU_LOG=int,cpu_reset` | QEMU's `-d` log into `<image>.qemu.log` |
+| `XTASK_QEMU=<path>` | the QEMU binary to use |
+| `XTASK_FIRMWARE=uefi\|bios` | force one firmware for every boot |
+| `XTASK_NO_BATCH=1` | every scenario in its own VM |
+| `XTASK_REPEAT=n` | boot one scenario's image n times ("Flaky tests and repeats") |
+| `XTASK_REPEAT_JOBS=n` | VMs at once for repeats (default one per two host CPUs) |
+| `XTASK_TIMEOUT=<s>` | every scenario's time limit (a hang's state dump without the wait) |
+| `XTASK_RECORD=1` | record every boot's outside inputs ("Clock control, record/replay") |
+| `XTASK_OTEL=1` | write OTLP files for every boot |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | where `otel` and `XTASK_OTEL=1` post |
+| `XTASK_UNSIGNED=1` | unsigned kernels and images ("Signed images") |
+| `XTASK_DOCKER_CA` (or `SSL_CERT_FILE`) | a CA for `docker-test` to trust (behind a proxy) |
+| `GALAPKG_BLESS=1` | regenerate galapkg's winget golden file ("Installing software") |
+
+Examples: `XTASK_QEMU_ARGS="-smp 1"` runs on one processor,
+`XTASK_QEMU_ARGS="-cpu Nehalem"` without AVX/BMI/XSAVE;
+`XTASK_CMDLINE="checkuser tlbparanoid"` adds diagnostic flags
+(`checkuser`, `tlbparanoid`, `nomigrate`, `framecheck`, `eagercommit`;
+ARCHITECTURE "Kernel command line").
+
+### Scenarios
+
+A boot scenario (`SCENARIOS` in xtask) is a kernel command line, the
+boot modules, the expected exit status and the lines its serial log must
+contain. Expected lines are only searched for, so a program that prints
+several similar steps labels each line with its step. The lists in
+xtask that change how a scenario boots:
+
+| List | Effect |
+|---|---|
+| `USER_PROGRAMS`, `USER_DLLS`, `GO_PROGRAMS` | what is built and exported |
+| `EXTRA_MODULES` | extra files for a scenario: `(scenario, file, directory on C:)`; repository paths and `target/prebuilt/...` paths work too |
+| `MODULE_SETS` | a named set of modules shared by scenarios (and so a VM); a scenario listed twice gets the union |
+| `WRITABLE_TREES` | directory modules programs may write to (`sql/data`, `fzs`, `ftp`) |
+| `PENDING` | still being brought up: `boot-test <name>` runs it, `test` and CI do not |
+| `SLOW_SCENARIOS` | 300 s instead of `BOOT_TEST_TIMEOUT` (120 s) |
+| `UEFI_SCENARIOS` | boot by UEFI (the rest by BIOS) |
+| `NET_SCENARIOS` | a network card and a host-side client ("Network tests") |
+| `DISK_SCENARIOS` | a virtio-blk disk ("Disk tests") |
+| `GPU_SCENARIOS` | a virtio-gpu screen ("GPU tests") |
+| `SCREEN_SCENARIOS` | pixel checks through the QEMU monitor ("Screenshots") |
+| `SINGLE_THREAD_TCG` | `-accel tcg,thread=single` without KVM ("Known intermittent") |
+| `HOST_LOAD_SCENARIOS` | run with a busy thread on every host CPU |
+| `NOT_IN_UM` | not run by `um-test`, with the reason |
+| `SIM_PROGRAMS`, `FAULT_PROGRAMS`, `FAULT_RULES` | sim-test and fault-test |
+| `trust::SCENARIO_SIGNING`, `EARLIER_SIGNING` | images signed differently ("Signed images") |
+
+- **Time limits**: 120 s by default; `SLOW_SCENARIOS` (JVMs, .NET,
+  PowerShell, FlaUI, PostgreSQL, FileZilla) 300 s; elasticsearch,
+  java_stress and sqllocaldb* 900 s; dump scenarios 25 s. A
+  `SINGLE_THREAD_TCG` scenario's limit doubles without KVM. Every limit
+  counts the VM's *run time*, not wall time (`xtask/src/vmtime.rs`): the
+  wall time less the run-queue wait of its most-starved vCPU thread
+  (`/proc/<pid>/task/<tid>/schedstat`). A VM starved by a loaded host is
+  not killed, and a hung one is caught as before (halted vCPUs sleep, so
+  its run time is the wall time); a wall ceiling of 4x the limit
+  remains. The guest's own clock cannot do this: under TCG it follows
+  the host's even when starved (ARCHITECTURE "What a guest's clock
+  follows"). Every log has `xtask: vm time: <run> run of <wall> wall
+  (<w> waiting for a host CPU)`, the triage repeats it, and the state
+  dump's wait after a timeout counts run time too.
+- **A scenario that runs many processes** (a database, a runtime) can
+  pass alone and time out under the full suite (2-3x slower); its client
+  then reports a dropped connection, not a timeout. Look for "timed out
+  after" first; such scenarios go in `SLOW_SCENARIOS`.
+- **Memory**: QEMU gets 512 MiB, plus twice the image size when the
+  image is over 64 MiB (boot modules stay in memory); elasticsearch,
+  sqllocaldb and postgres get 3 GiB (`qemu()` in xtask).
+- **Servers**: a server never exits; scenarios with exit status
+  `XTASK_STOPS` are stopped by xtask once their net client has finished,
+  and pass if it succeeded.
+- **A server and a client at once**: `run=` starts programs one after
+  another, so the client starts the server itself (CreateProcessW) and
+  waits for it, as `tds_test` does with sqlservr; or the scenario starts
+  it with `start=` (`schannel_test`).
+- **A program that ends while its children work on** needs the boot
+  option `wait=all`.
+- Code that derives a scenario from an image's name must go through
+  `iso_scenario`, which knows the `.r<i>` of a repeat's copy.
+
+Logs: `target/<profile>/test-<name>.serial.log` (shared VMs:
+`target/debug/batch-<first program>.serial.log`), the event stream next
+to it, a failed boot's copy with its triage in
+`target/failed/<scenario>.log` (overwritten by the next failure of the
+same scenario: after a pass it is stale). Timing per scenario (or VM) and
+a summary go to `target/report/timing.txt`; outcomes to
+`target/report/history.jsonl`.
+
+### Network tests
+
+VMs have no network card unless the scenario is in `NET_SCENARIOS`
+(`-nic none` otherwise).
+
+- A net scenario gets a virtio-net card on QEMU's user network with a
+  host port forwarded to guest port 7 (TCP and UDP, the same port number
+  on both; sshd's 22 for `SSH_PORT_22`). User networking needs no
+  privileges, so this works in containers and CI.
+- Each VM leases its own host port (`PortLease`: free for both
+  protocols, below the host's ephemeral range so no outgoing connection
+  takes it before QEMU binds it, never given to another VM of the same
+  xtask while held); a QEMU that still cannot bind it is booted again
+  with another. The failed log says which port the VM had (`xtask: net:
+  host 127.0.0.1:<port> forwarded to ...`) and has QEMU's standard
+  error. Net scenarios therefore run in parallel (the suite,
+  `XTASK_REPEAT_JOBS`).
+- xtask plays the remote side (`NetClient`: echo, HTTP, Nginx, TLS with
+  the host's `curl -k`, ssh with key or password, sshd server, an
+  interactive shell with `ssh -tt`, sftp, psql, ...) once the guest logs
+  that it listens; the verdict is appended to the serial log as an
+  `xtask: net client: ...` line for `expect` to check. The client's own
+  files (ssh's key copy and `-v` trace, sftp's transfer, the askpass
+  script) are per port in `target/net-client/<port>/`, removed after the
+  boot. On failure the end of curl's or ssh's `-v` trace is in the log.
+- A UDP client resends until it gets its answer (the guest's first reply
+  may wait for ARP) and must skip late duplicates of earlier answers.
+- QEMU's DNS (10.0.2.3) forwards to the host's resolver: a check that
+  needs it accepts "no DNS" when the host has none (`udp_echo` resolves
+  example.com only if the host can).
+- Servers start late: a program may log that it started before it
+  listens (Nginx's master logs, then its worker opens the socket). The
+  HTTP client retries for 10 s while it gets no response at all.
+
+### Disk tests
+
+VMs have no disk unless the scenario is in `DISK_SCENARIOS` (name, size,
+what xtask writes into the fresh raw image, what the image must hold
+afterwards).
+
+- The image is `target/.../<scenario>.disk.img` next to the ISO,
+  attached as a legacy virtio-blk device; such scenarios boot alone and
+  not in gala-um.
+- Raw disk access needs an administrator, so their programs run
+  `as=system`.
+- `earlier_boots` boots the same image first (each with the lines its
+  log must have; logs kept as `<iso>.boot<n>.serial.log`): that is how a
+  test checks what survives a reboot (`persist_test`, which tells the
+  boots apart by what it finds on C:).
+- `persist` keeps C: on the disk; without it a disk is left alone (the
+  raw disk tests).
+- A slow disk: `failpoint=disk_io:delay:<ms>` (with `persist`).
+
+### GPU tests
+
+A scenario in `GPU_SCENARIOS` boots with `-vga none -device
+virtio-gpu-pci,xres=1280,yres=800,edid=on` (UEFI) and its command line
+says `display=virtio`; QEMU's `screendump` then shows the virtio-gpu
+scanout, so the usual `SCREEN_SCENARIOS` checks work. The device is
+modern-only (no `disable-legacy=off` as for virtio-blk/net): its driver
+uses `arch::virtio::ModernDevice`. With such a display the boot splash
+is not visible (the firmware's framebuffer is no longer shown): read the
+serial log. The kernel flag `gputrace` logs every command; `events=display`
+the modes, resets and errors.
+
+### Test speed and environments
+
+- **BIOS boot by default.** ISOs are hybrid (BIOS and UEFI). SeaBIOS
+  reaches the kernel in about 0.9 s against about 4.5 s for OVMF; the
+  `UEFI_SCENARIOS` (hello, selftest, fault-pagefault, the handover
+  `_uefi` ones, the screen ones, ...) keep the UEFI path tested.
+- **Shared VMs.** Scenarios that just run one program with no other
+  flags, expect success, boot by BIOS and expect no process ids are
+  grouped by identical boot modules and run in shared VMs
+  (`run=a.exe,b.exe`). Each program is judged on its own section of the
+  log (between `run: begin` and `run: end`, plus the boot preamble);
+  scenarios running the same program (two `dotnet.exe` runs) are judged
+  on that program's n-th section, in group order. `XTASK_NO_BATCH=1`
+  gives every scenario its own VM; `boot-test` with one match always
+  boots it alone.
+- **Boot tests pass `noscreen`** (serial only) except in the UEFI
+  scenarios: drawing text roughly doubles kernel time under emulation.
+- **KVM**: QEMU uses KVM when `/dev/kvm` is available (near-native
+  speed); otherwise TCG with one host thread per processor (multi-threaded
+  TCG), except `SINGLE_THREAD_TCG` scenarios.
+- **Docker**: `cargo xtask docker-test [xtask args]` builds
+  `docker/test.Dockerfile` (Ubuntu 24.04, QEMU, OVMF, xorriso, the
+  pinned toolchain) and runs `cargo xtask test` (or the given arguments)
+  inside it with the repository at /work and build output in
+  `target/docker`. It passes `/dev/kvm` through when the host has it and
+  forwards the `XTASK_*` variables and proxy settings. In a cloud
+  container without a running daemon, start one with `dockerd &`.
+- **Never run two xtask boot runs at once** (a full `cargo xtask test`
+  and a single `boot-test`): they share ISO and serial-log files under
+  `target/` and fail each other.
+- **Fresh checkouts**: CI starts without `target/`; anything fetched or
+  built on first use (Limine, prebuilt programs) must also work when
+  several threads need it at once.
+
+### QEMU
+
+xtask runs a pinned QEMU (`QEMU_VERSION` in xtask, 11.1.3), built by
+`cargo xtask qemu` into `~/.cache/gala-qemu/<version>` (downloaded from
+download.qemu.org, SHA-256 checked, only `x86_64-softmmu` with user
+networking).
+
+- `XTASK_QEMU=<path>` overrides it; without either, xtask uses
+  `qemu-system-x86_64` from PATH and says so once. Every run prints which
+  QEMU it uses.
+- Build dependencies (Ubuntu): `libglib2.0-dev libpixman-1-dev
+  libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
+  pkg-config`. CI builds it once and caches it.
+- Why not the distribution's: QEMU 8.1.0-8.2.5 (Ubuntu 24.04 ships
+  8.2.2) keeps running stale translations of code rewritten on a
+  translated block's second page, which corrupted JIT-compiled code
+  ("Known intermittent"). `straddle_test` (single-threaded TCG) rewrites
+  code across a page boundary and runs it: it passes on the pinned QEMU
+  and fails on 8.2.2 (check 2, round 1 gets the pre-rewrite value), so
+  it is the quick way to tell whether a QEMU build has the bug. On the
+  pinned QEMU `java_stress` passed 15 of 15 boots; on 8.2.2, 2 of 6
+  failed.
+- QEMU TCG (8.x) has no x2APIC: boot tests exercise only the xAPIC path;
+  the x2APIC path runs only under KVM.
+- A cloud container is ephemeral: run `cargo xtask qemu` in the
+  environment's setup script, or once per new container (about 10
+  minutes).
+- In manual QEMU runs use `-cpu max`: QEMU's default CPU model has no
+  RDRAND, and Go programs then fail fast (0xc0000409, ledger:
+  `ProcessPrng(no RDRAND)`).
+
+### gala-um
+
+gala-um runs the real NT layer (the kernel crate with `--features
+hosted`) as a Linux process (docs/GALA_UM.md). `cargo xtask test` runs
+`um-test` right after the unit tests: every program scenario that
+`runs_in_um` (xtask), checked against the scenario's `expect` lines;
+about 50 programs in about 3 s. Run it alone with `cargo xtask um-test`
+while changing `kernel/src/nt`: it is the fastest check there is. A new
+test program runs in gala-um by default; if it cannot (child processes,
+a network card, a disk), add it to `NOT_IN_UM` with the reason.
+
+Run a program directly:
+
+    target/debug/um [--trace] [--cpus=2] \
+        --module=Windows/System32/ntdll.dll=user/bin/testntdll.dll \
+        user/bin/<name>.exe [arguments]
+
+- `--module=<path on C:>=<host file>` adds a file to C: as a boot module
+  would (DLLs under their `test*` names in user/bin); `--dir=<dir>` sets
+  the program's directory on C:; `--trace` logs every system call;
+  `--cpus` caps the processors (um-test uses 2, as QEMU);
+  `--failpoint=`, `--failseed=` and `--failtrace` inject failures;
+  `--sim=<seed>` runs deterministically; `--record=<f>` and
+  `--replay=<f>` record and replay outside inputs.
+- The kernel's log goes to stderr, the program's output to stdout.
+- Program code must stay below 0x5000_0000_0000 (above is the host's,
+  where `syscall` is not caught). Needs Linux 5.11+ (syscall user
+  dispatch).
+- gala-um re-executes itself without ASLR under the name `exe`: `gdb -p`
+  that process (`handle SIGSYS nostop noprint`, `handle SIGURG nostop
+  noprint`), and `thread apply all bt` shows where NT threads are inside
+  the NT layer.
+- A run that hangs gets SIGQUIT at its timeout (`timeout -s QUIT`,
+  SIGKILL 5 s later) and prints the threads part of the state dump to
+  stderr; for a live one, `kill -QUIT <pid of exe>`.
+- A failure that reproduces in gala-um is in the NT layer or the
+  user-mode DLLs; one that does not points at the kernel's machine code
+  (paging, switches, interrupts) or at the emulator.
+- A builtin or in-process program step can be tried in milliseconds
+  (`um ... user/bin/busybox.exe 'sh -c "..."'`: pass the command line
+  pre-quoted, as one argument); anything that starts a child needs QEMU.
+
+#### Running the JDK in gala-um
+
+`um --dir=jdk/bin` puts the program in C:\jdk\bin (the JDK finds its
+home from its own path). Pass every file of
+`target/prebuilt/jdk/jdk-21.0.5+11/` as `--module=jdk/<path>=<host
+file>`, the scenario's DLLs from user/bin as
+`--module=Windows/System32/<name>=user/bin/<exported_as>` and
+`--module=gala/Hello.java=user/java/Hello.java`, then
+`um --cpus=2 --dir=jdk/bin <modules> .../bin/java.exe C:/gala/Hello.java`:
+javac and the program in about 3.5 s, so hundreds of runs take minutes.
+
+### Disk space
+
+ISOs of the runtime scenarios are 120-470 MB each, about 50 MB for the
+rest.
+
+- `cargo xtask test` makes each VM's ISO just before it boots and
+  deletes it after a pass (a failed one stays to boot by hand), so only
+  the running VMs' images use disk. xtask deletes each `*-iso-root` once
+  its ISO is made. `XTASK_REPEAT` still makes its images first.
+- xtask refuses to start an image with less than 300 MiB free
+  (`MIN_FREE_MIB`), or to pack an ISO without its tree's size free, and
+  says what to delete: images (`target/*/*.iso`, kept for failed boots),
+  `target/debug/incremental`, and other worktrees' `target/*/test-*` and
+  `*.iso`. The session's disk allowance is shared with any agents'
+  worktrees (`.claude/worktrees/*/target`); `du -sh target/*
+  .claude/worktrees/*/target` shows who uses it.
+- Low on disk, a few user programs can be built alone into a scratch
+  target directory with xtask's flags (`cargo build --release --target
+  x86_64-pc-windows-msvc --config 'target.x86_64-pc-windows-msvc.rustflags=
+  ["--remap-path-prefix=<cargo home>=/cargo"]' -p gala -p ...`); the
+  output is byte-identical to `export-tests`'s when no other program of
+  the batch shares a dependency with different features (`cargo tree
+  --workspace -i <crate>` tells).
+
+### Bootable images and USB sticks
+
+`cargo xtask iso [--name N] [--scenario S] [--file PATH[=DIR]]... [cmdline...]`
+writes `target/<profile>/gala-<N>.iso` (N defaults to `demo`) with every
+program and DLL, a scenario's files and command line (without
+`qemu_exit`), host files as `C:\DIR\<name>` (DIR defaults to `gala`,
+also the programs' current directory), and the given command line, or
+the demo (`run=hello.exe,go_hello.exe,go_goroutines.exe`). It prints the
+QEMU and `dd` commands. The ISO is hybrid, so `dd` to a USB stick boots
+on BIOS and UEFI (README.md has the steps); checked in QEMU as `-drive
+file=...,format=raw` under SeaBIOS and OVMF and as `usb-storage` behind
+`qemu-xhci`, not yet on physical PCs.
+
+To try a new program: `cargo xtask iso --file path/to/app.exe
+run=app.exe "args=..."` and boot it with QEMU (`-cpu max`), then follow
+the ledger and the program's own error messages.
+
+### Signed images
+
+Every image xtask makes is sealed (R8; ARCHITECTURE "Chain of trust";
+code `xtask/src/trust.rs`).
+
+- **The test key** is made on first use in `target/trust/`
+  (`test-signing.seed`, the private Ed25519 seed, mode 0600, never
+  committed; `test-signing.pub`). Every kernel xtask builds trusts it
+  (`GALA_TRUST_KEY` = its public key in hex, read at compile time).
+  Deleting `target/trust/` makes a new key: the next build recompiles
+  the kernels with it. A kernel from another checkout refuses this
+  checkout's manifests: `manifest: ... refused: signed by key X, this
+  kernel trusts Y`.
+- **The manifest** `/boot/gala.manifest` lists every file in `/boot`
+  (size, SHA-256), signed as release 1 with floor 1. A scenario that
+  needs another release or a file left out goes in
+  `trust::SCENARIO_SIGNING` (or `EARLIER_SIGNING` for the earlier boots
+  of a disk scenario).
+- **limine.conf** has `#<BLAKE2B>` after every path and its own hash
+  enrolled in the Limine executables: editing it on a USB stick (the
+  command line) makes Limine refuse to boot (`CHECKSUM MISMATCH FOR
+  CONFIG FILE`); make a new image with `cargo xtask iso ... <cmdline>`
+  instead. A module changed after sealing: `PANIC: Blake2b hash for URI
+  ... does not match!` (on the serial port only with `serial: yes`,
+  which the boot-chain scenarios set). Under UEFI Limine writes each
+  character with a cursor sequence: for `boot_config_edited` xtask
+  strips them and stops the VM at Limine's "Press a key to return to
+  menu" / "System halted.".
+- **An unsigned build** (a developer's own kernel, a quick experiment):
+  `XTASK_UNSIGNED=1 cargo xtask ...` builds the kernels without a key and
+  makes images without manifest, hashes or enrolment; the kernel logs
+  `manifest: unsigned build (no release key built in): nothing is
+  checked`, hands over to any image and never raises a disk's rollback
+  floor. The handover and rollback scenarios expect a signed build.
+  Switching between the two rebuilds the kernel crate (the key is a
+  compile-time input).
+- **The kernel on an image is stripped** of debug information (xtask's
+  `copy_kernel`); `cargo xtask symbolize` uses the build's ELF in
+  `target/` (symbols and the GALA note are kept). Limine hashes every
+  file it loads (about 4 s more per BIOS boot under TCG with a 30 MB
+  debug kernel) and the kernel SHA-256s the next image before a
+  handover. A handover that comes seconds late (its program finished
+  before) is the SHA-256 of a large image: check the image's kernel
+  size.
+- **A disk that refuses the build** (`rollback: refused: release 1 is
+  below the rollback floor 2`) was used by a newer release; make a fresh
+  one (the floor lives in sector 0 at byte 64).
+
+## Writing tests and adding functions
+
+### Test programs
+
+Test programs are freestanding Windows executables on `user/ntrt` (or
+kernel32 through `raw-dylib`), run under gala and under Windows
+(`user/bin/run-all.ps1`).
+
+- **System call numbers.** Long-stable x64 numbers are used directly
+  (list in `kernel/src/nt/syscalls.rs`). Numbers that change between
+  builds are gala's own choices, unverified: tests must call those
+  services through ntdll exports (`find_ntdll()` + `find_export()` in
+  ntrt), and `user/testntdll` provides stubs with gala's numbers
+  (`syscall_stubs!`). On Windows the same test then uses the real ntdll.
+- **testntdll is gala's stand-in ntdll**, shipped only in scenarios that
+  list it in `EXTRA_MODULES`: a small loader (LdrLoadDll and friends),
+  the exception/APC dispatchers and the stubs. Adding an export there
+  changes `user/bin/testntdll.dll`.
+- **Write each expected output line with one WriteFile call**: the
+  program's output and the kernel's log share the serial port, and a
+  kernel log line ("process ... exited") can land between the pieces of
+  a line written in parts, so the expected substring is missing. In
+  shell scripts, `echo` a captured value in one piece.
+- **Ask for exactly the access Windows would grant**: kernel32's
+  CreateFileW adds SYNCHRONIZE for synchronous handles (open overlapped
+  to avoid it); an object's owner only gets READ_CONTROL and WRITE_DAC
+  implicitly; deleting a key needs DELETE on it; FILE_GENERIC_WRITE
+  includes SYNCHRONIZE and READ_CONTROL (a deny ACE with FW denies
+  reading too). To find a denial: gala-um's `--trace` (or
+  `events=syscall`) shows the call that returned 0xc0000022.
+- **A process at Low integrity** (uipi_test, gala_cli_test) cannot
+  signal or open the parent's named events (no write up to a Medium
+  object's default label): pass inherited handles instead.
+- **Asynchronous Windows APIs**: SuspendThread returns before a thread
+  running on another CPU has stopped, on Windows as on gala; a test that
+  needs it stopped calls GetThreadContext first.
+- **Handle reuse**: a handle value freed by NtClose is handed out again
+  at once (the lowest free slot), so "use after close" tests may hit a
+  new object of another type (ws2_32 maps "not a socket" device requests
+  to WSAENOTSOCK).
+- **Terminating a thread**: let it reach its own code first; ended
+  during its start-up it holds ntdll's loader lock, and the next
+  LoadLibrary (or DLL notification) spins in NtYieldExecution for ever.
+- **Timing checks measure the host as much as the guest**: under TCG a
+  loaded host stops the VM's processors for milliseconds at a time while
+  the guest's clocks go on, so "this took under 2 s" fails. Check what the
+  guest did instead (smpsched_test counts its threads' ContextSwitches);
+  keep elapsed-time bounds as generous give-ups only. A sleep that spans a
+  kernel handover is bounded by the pause the kernel measured
+  (GalaHandoverPause: 200-350 ms under TCG, seconds on a loaded host;
+  ARCHITECTURE "Programs across a handover"), never by a guessed constant.
+  To reproduce a timing failure, run QEMU on one host CPU:
+  `XTASK_QEMU=<script>` with a script that runs `taskset -c 3
+  ~/.cache/gala-qemu/<version>/bin/qemu-system-x86_64 "$@"`, plus busy
+  loops pinned to that CPU (`taskset -c 3 sh -c 'while :; do :; done'`).
+  The same holds for KUSER_SHARED_DATA's clocks (a snapshot written at
+  clock interrupts, which come late under load: compare them with a
+  counter read on each side of a fresh snapshot, as clockcal_test does)
+  and for screen checks: a program must not end or move on after a
+  guessed time while xtask looks; it waits for xtask's input
+  (console_window's "q"), and a step whose input acts on output the
+  program is still printing waits for that output (`ScreenStep::after`).
+  On the host side, timing xtask's own observations in a loop that does
+  other work is the same mistake: xtask times `uptime_ms=` marks in a
+  thread of its own.
+- **Single-CPU tests that measure ticks** pin themselves
+  (`sched::set_affinity`).
+- **Cross-processor races**: a test program that makes the two sides
+  meet often (threads pinned to processors 0 and 1, kept in step:
+  `smpcow_test`, `smpsem_test`, `smprace_test`), repeated with
+  `XTASK_REPEAT`. Cross-CPU memory tests need the victim thread pinned
+  to another CPU and nothing else flushing meanwhile (let reaping settle
+  first, as `smpmem_test` does), or the bug is masked.
+- **Vector registers**: a test that looks at YMM registers must declare
+  the xmm registers clobbered (Rust has no ymm operands without the avx
+  target feature) and check only what Windows keeps across a system call
+  (the upper halves, and ymm6-15 whole: xmm0-5 are volatile).
+- **Hover without a screen**: under gala the cursor is at (0, 0) and
+  GetCursorPos follows moves over the program's own windows only; tests
+  that hover put their window under GetCursorPos's point, so the same
+  check holds on Windows (comctl32_test).
+- **Windows in another session**: a GUI test run with `as=system` is in
+  session 0: its windows exist (registry, messages) but are not drawn
+  and get no input (`desktop: session 0's windows are not shown`), so
+  screen checks need the boot user (session 1). On real Windows a child
+  started in another session needs STARTUPINFO.lpDesktop
+  `winsta0\default` and a token that may open it (SYSTEM's, moved with
+  SetTokenInformation(TokenSessionId), as session_test does), or user32
+  fails to initialize.
+- **A resource** (a manifest: `manifest_test`): the test's build.rs
+  writes a .res file (the documented compiled resource format) and
+  passes it to the linker; lld-link converts it itself (its
+  /MANIFEST:EMBED would need Microsoft's mt.exe).
+
+### Adding a function to gala's ntdll or kernel32
 
 1. A test program that imports it (`raw-dylib` against `kernel32` or
-   `ntdll`, as `kernel32_test` does), with the results real Windows gives,
-   last-error codes included. Its scenario lists the DLLs in
+   `ntdll`, as `kernel32_test` does), with the results real Windows
+   gives, last-error codes included. Its scenario lists the DLLs in
    `EXTRA_MODULES` (`ntdll.dll` and `kernel32.dll` to
    `Windows/System32`).
 2. In `user/kernel32/src/lib.rs`: `#[unsafe(no_mangle)] pub extern
    "system" fn Name(...)` with the documented signature. Call ntdll's
-   exports (add them to the `raw-dylib` block); set the last error through
-   `fail(status, value)` / `fail_with(error, value)`; report unsupported
-   cases with `unsupported(b"kernel32.dll!Name(case)", detail)`.
-3. A new system call for it goes into testntdll's `syscall_stubs!` (and
-   the kernel's table), with a stable x64 number or gala's own (see
-   "System call numbers" below).
+   exports (add them to the `raw-dylib` block); set the last error
+   through `fail(status, value)` / `fail_with(error, value)`; report
+   unsupported cases with `unsupported(b"kernel32.dll!Name(case)",
+   detail)`.
+3. A new system call goes into testntdll's `syscall_stubs!` and the
+   kernel's table, with a stable x64 number or gala's own.
 4. A new NTSTATUS the kernel returns needs a row in testntdll's
    `STATUS_TO_ERROR` (unmapped ones give 317 and are reported).
-5. Run the program you are bringing up and read the `ledger:` lines: they
-   list every missing import by name.
+5. Run the program you are bringing up and read the `ledger:` lines:
+   they list every missing import by name.
 
-## Things that are easy to get wrong
+### Programs that import functions gala lacks
 
-- Core code (`net/`, and later anything a second personality shares)
-  reaches threads, waits and time through `crate::runtime`, not
-  `crate::nt::platform` (the NT layer's seam) and not `crate::sched`/
-  `crate::time` directly (those do nothing in gala-um). Per-CPU state
-  read while interrupts may be on (system calls run with `sti`) must be
-  one GS-relative load (`percpu::cpu_index`, `percpu::personality`):
-  reading `gs:[0]` and then a field can land on another CPU's block after
-  a migration. Arch code (declared before `console` in lib.rs) writes
-  `crate::info!`/`crate::warn!`, not the bare macros. A new process
-  constructor must set `personality` (ARCHITECTURE "The seams", 2).
-- **A DLL test in C** (`user/<dll>_test/main.c`, mingw; oleaut32_test,
-  shlwapi_test, ole32_test, shell32_test, dbghelp_test): `build.sh`
-  rebuilds the checked-in `user/bin/<name>.exe` (xtask does not; run it
-  after editing main.c and commit the binary). To check that a function
-  is *exported*, import it statically (a call in a branch never taken):
-  GetProcAddress returns NULL for gala_stubs stubs (and so the test
-  cannot tell). An export forwarder (`/EXPORT:f=kernel32.f`) to a stub
-  fails to bind as a "missing export": implement the function where it
-  is forwarded from instead (normaliz's IdnToUnicode).
-
-- **Windows live in a session** (RS step B2): kernel code reaches the
-  window registry, WinEvent hooks and shasha's desktop through the
-  process (`process.desk.windows` / `.hooks` / `.shell`), never a global;
-  `desktop::screen(shell)` is None for a session the console does not
-  show. A GUI test run with `as=system` is in session 0: its windows
-  exist (registry, messages) but are not drawn and get no input (`desktop:
-  session 0's windows are not shown` in the log), so screen checks need
-  the boot user (session 1). An HWND of another session is no window
-  (ERROR_INVALID_WINDOW_HANDLE; `events=window` and the log say where it
-  is). On real Windows a child started in another session needs
-  STARTUPINFO.lpDesktop `winsta0\default` and a token that may open it
-  (SYSTEM's, moved with SetTokenInformation(TokenSessionId), as
-  session_test does), or user32 fails to initialize.
-- A test that runs a process at Low integrity (uipi_test, gala_cli_test)
-  cannot signal or open the parent's named events (no write up: a
-  Medium object's default label): pass inherited handles instead. A
-  program importing advapi32 needs `bcryptprimitives.dll` in its
+- A missing export stops the load (as on Windows), so add it to the
+  DLL's `src/unimplemented.rs` (`gala_stubs::unimplemented_exports!`)
+  to get the program running. The stub logs at once (`[warn ]
+  <program>: <dll>!<function> not implemented, ending the process`),
+  records `dll!function` in the ledger and ends the process with
+  STATUS_NOT_IMPLEMENTED when called. Implementing one means removing it
+  from that list.
+- GetProcAddress returns NULL for stubs, so a test that checks a
+  function is *exported* imports it statically (a call in a branch never
+  taken).
+- An export forwarder (`/EXPORT:f=kernel32.f`) to a stub fails to bind
+  as a "missing export": implement the function where it is forwarded
+  from instead (normaliz's IdnToUnicode).
+- List a program's missing imports by comparing its import tables
+  (`llvm-readobj --coff-imports`, or `x86_64-w64-mingw32-objdump -p
+  app.exe | grep "DLL Name"` for a first survey) with the
+  `--coff-exports` of `user/bin/test*.dll`, ordinals included (an
+  export with RVA 0 is an empty ordinal slot, not an export). For a
+  program with many DLLs, walk the whole import closure (imports and
+  delay imports of every DLL it loads, following export forwarders such
+  as the api-ms-win-* sets) before booting, and fix the gaps in batches.
+  DLLs loaded at run time (LoadLibrary: the JDK's launcher loads msvcp140
+  and jvm.dll) are not in the closure: boot and read the ledger
+  (`"what":"missing dll"`, `missing export`).
+- Exports by ordinal (ws2_32's) come from a build.rs printing
+  `/EXPORT:name,@n`; lld warns that rustc's .def names them too and
+  keeps the ordinal one (the warning cannot be silenced).
+- A program importing advapi32 needs `bcryptprimitives.dll` in its
   scenario's modules too (advapi32 imports it), or it ends with
   0xc0000135 (the ledger names the missing DLL).
-
-- A DLL's static tables go in its data section (copied into every
-  process that loads it) unless their initial value is all zero bytes:
-  give "empty" slots zero fields (`disabled` rather than `enabled: true`,
-  offsets rather than a base like 0xC000) and data-carrying enums
-  `#[repr(u8)]` with the empty variant 0. `llvm-objdump -h` shows the
-  .data size (user32's was 212 KB, gdi32's 156 KB, both now ~0).
-- A scenario that runs many processes (a database, a runtime) can pass
-  alone and hit BOOT_TEST_TIMEOUT under the full suite (2-3x slower);
-  its client then reports a dropped connection, not a timeout. Look at
-  "timed out after" first; such scenarios go in SLOW_SCENARIOS.
-
-- A DLL that exports a function under the name of one it calls in
-  another DLL (ncrypt's BCryptGenRandom, which Windows forwards to
-  bcrypt) cannot import that name with `raw-dylib`: the linker binds the
-  import to the export itself and the call becomes `jmp $` (a silent
-  hang). Find the other DLL's function at run time (LoadLibraryW +
-  GetProcAddress), as `user/ncrypt` does.
-- A hang in user mode with no system calls: run the program in gala-um
-  and `gdb -p` the `exe` process (gala-um re-executes itself under that
-  name); `thread apply all x/3i $pc` shows the loop, and the image's
-  export directory (read from memory at the 64 KiB-aligned base below
-  the address) names the DLL.
-
-- **Kernel code that host unit tests reach must not log**: `info!`/
-  `warn!` write to the serial port in a `cargo test -p kernel --lib`
-  build, and the test binary dies with SIGSEGV and no test name
-  ("process didn't exit successfully ... signal: 11"). Gate the log
-  lines with `#[cfg(not(test))]` (`nt::session`'s `log!`); events are
-  fine (`events::emit` is a no-op in tests). Find the test with
-  `--test-threads=1` or by filtering module names.
-- **Changing `nt::desktop`'s public functions or types**: the server
-  kernel's stand-in `kernel/src/nt/desktop_off.rs` must follow, or the
-  `--no-default-features` clippy line in CI fails.
-- **Observability is part of every change** (the owner's rule,
-  OBSERVABILITY.md): a new subsystem, driver, boot stage, format or test
-  comes with its logs/events and what a failure leaves behind; when a
-  failure's cause had to be guessed, add the missing telemetry with the
-  fix.
-- **Boot-test images are made per VM**: `cargo xtask test` makes each
-  VM's ISO just before it boots and deletes it after a pass (a failed
-  one stays to boot by hand), so only the running VMs' images use disk;
-  making all ~170 first (about 50 MB each) filled the shared disk.
-  xtask refuses to start an image with less than 300 MiB free (or to pack
-  an ISO without its tree's size free) and says what to delete.
-  `XTASK_REPEAT` still makes its images first.
-- **Write each expected output line with one WriteFile call**: a test
-  that writes a line in pieces can have a kernel log line land between
-  them on the serial port, and the scenario's expected substring is then
-  missing (gala_cli once failed on "target: " + "key g").
-- **A JVM crashing with access violations at odd addresses** after a
-  long run may be the machine out of memory: a user page fault that finds
-  no free frame becomes an access violation (the commit charge, R6, covers
-private memory only; mapped and image pages and the kernel heap are not
-charged). Look
-  for "vm: out of memory" in the log and the free frames on the `stats:`
-  line; give the scenario more memory (xtask's `qemu`).
-- **Hover logic that waits for "the pointer left"** (tooltips): a
-  window only gets WM_MOUSEMOVE while the pointer is over it, so code fed
-  by one window's moves (a subclass, TTM_RELAYEVENT) never sees it leave
-  across other windows; poll GetCursorPos against the rectangle on a
-  timer while the pointer is on it. gala's GetCursorPos follows moves
-  over the program's own windows only. Tests that hover without a screen
-  (cursor at (0, 0) under gala) put their window under GetCursorPos's
-  point, so the same check holds on Windows (comctl32_test).
-- **Disk space**: ISOs of the runtime scenarios are 120-470 MB each.
-  xtask deletes each `*-iso-root` once its ISO is made, and a VM's ISO
-  once all its scenarios passed (a failed one stays to boot by hand);
-  the session's disk allowance is shared with any agents' worktrees
-  (`.claude/worktrees/*/target`), so delete their `test-*` files too when
-  writes fail with "No space left on device".
-- **PREBUILT members** are unzip patterns (`*` crosses `/`), `excludes`
-  are unzip `-x` patterns; the unpack marker includes a hash of both, so
-  changing them unpacks again. For an MSI (a `.msi` URL) members are
-  directories of the installed layout, each moved to
-  `target/prebuilt/<name>/<last component>`, and excludes are paths
-  removed after that; unpacking needs msitools (`apt install msitools`).
-- **A thread spinning in user mode** (no system calls): the one-minute
-  hang dump prints `in user mode at rip ...` (the last timer tick that
-  caught it) and the ledger so far; map the rip to a module with
-  `events=image`, then `llvm-objdump -d` the DLL around it (gala's DLLs
-  name their exports). A temporary `unsupported(b"PROBE", detail)` in a
-  gala DLL shows up in `events=syscall` as GalaRecordMissing with its
-  detail (how FileZilla's LVM_GETNEXTITEM loop was found). Probes are
-  told apart by their name's length (args[1] in the event) and their
-  detail (args[3]); remove them before committing. After the first
-  minute the kernel prints what the ledger newly recorded every 30
-  seconds, so gaps a screen check's input reaches late still show.
-  When `events=syscall` slows a screen scenario too much (FileZilla's
-  steps then time out), write the probe's sequence number and detail
-  into its name instead (a stack buffer, e.g. `0012 PROBE_SWP <hex>`):
-  each call is then its own ledger line, in order once sorted, without
-  the event stream. Put `GetTickCount` differences in the detail to see
-  how long things take.
-- **A screendump shows a stale or half-drawn window** although the
-  step's checks passed: a step's dump is taken as soon as its pixels
-  match, which may be while the program is still repainting (FileZilla
-  after a snap). Check the final state with pixels that only it has
-  (text in the new place), and to tell a wrong layout from a late
-  repaint, probe SetWindowPos (the sizes the program set) and present a
-  window's whole buffer again a few seconds later: if the dump is right
-  then, the layout was.
-- **A program hangs without a ledger** (it never exits, so the ledger is
-  not printed): add `events=syscall,thread` to its scenario's command
-  line and read `target/debug/test-<name>.events.jsonl` while QEMU still
-  runs (`grep -v` the calls it repeats; a loop of time queries means it
-  waits for a clock to move). Waiting services also log a `"ev":"wait"`
-  event when they start, so a wait that never returns shows as the
-  thread's last line. Do not delete the events file of a running
-  VM (it is still open: `/proc/<qemu pid>/fd/` reaches it).
-- **Tracing exception dispatch in a third-party program**: a temporary
-  `GalaRecordMissing` call in gala's ntdll dispatcher (`seh.rs`: code and
-  address in the detail; one per walked frame with its pc and handler)
-  shows up in the `events=syscall` stream, in order and per thread; map
-  addresses to modules with `events=image` (base and size per process).
-  Use probe names of distinct lengths (the event has the name's pointer
-  and length, not its text). Revert before committing.
-- **Tests and access checks** (since S3): a test that opens objects must
-  ask for exactly what it may have on Windows. kernel32's CreateFileW adds
-  SYNCHRONIZE for synchronous handles (open overlapped to avoid it), the
-  owner of an object only gets READ_CONTROL and WRITE_DAC implicitly,
-  deleting a key needs DELETE on it, and FILE_GENERIC_WRITE includes
-  SYNCHRONIZE and READ_CONTROL (a deny ACE with FW denies reading too).
-  To find a denial: gala-um's `--trace` (or `events=syscall`) shows the
-  call that returned 0xc0000022.
-- **A DLL forwarding to another DLL's function of the same name**
-  (advapi32's CreateProcessAsUserW to kernel32's): a raw-dylib import of
-  that name binds to the DLL's own export, so the call jumps to itself
-  for ever (no stack growth: a tail call). Look the target up with
-  GetProcAddress instead.
-- **Win32-OpenSSH's diagnostics**: as SYSTEM (and with `-d`) sshd and
-  ssh-keygen log to the system log (ETW), not the console: pass `-e` to
-  sshd for stderr. Its source (github.com/PowerShell/openssh-portable,
-  BSD-licensed; not Windows source) says what it expects of an API, for
-  example `contrib/win32/win32compat/pwd.c` (accounts must be
-  SidTypeUser; home from ProfileList).
-- **Reading MSVC C++ EH data** (as data, from .pdata/.xdata): check the
-  format before decoding. A FuncInfo starting with the magic number
-  0x19930520-0x19930522 (bytes `22 05 93 19`) is the older format
-  (__CxxFrameHandler3: try blocks, unwind map, an ip-to-state map with
-  absolute RVAs); FH4's FuncInfo4 starts with a one-byte header. Reading
-  FH3 data as FH4 gives plausible-looking nonsense (it misled the
-  SHUTDOWN investigation for a while). The handler data of a
-  GS-checking handler is the FuncInfo RVA, then the GS data.
-- **C++ exception tests**: `user/cxx_eh_test` is C++ built with clang
-  for x86_64-pc-windows-msvc and lld-link (`build.sh`, import libraries
-  from .def files with llvm-dlltool), no CRT, against Microsoft's
-  vcruntime140 (the JDK's, app-local); the binary is checked in (rebuild
-  with the script; the build is reproducible).
-- **A scenario needs a server and a client at once**: `run=` starts
-  programs one after another, so the client starts the server itself
-  (CreateProcessW) and waits for it, as `tds_test` does with sqlservr.
-- **A program fails without a ledger entry or a failing system call**
-  (a function returned data it did not like): add temporary probes,
-  `missing_detail(b"TRACE dll!Function", detail)` at the top of the
-  suspect DLL functions (name, class or argument as the detail, or the
-  argument text in the name), run, read the `TRACE` ledger lines, and
-  revert them before committing. That is how sqlservr's unresolved
-  `NT SERVICE\SQLWriter` SID was found.
-- **A program imports functions gala lacks**: a missing export stops the
-  load (as on Windows), so add it to the DLL's `src/unimplemented.rs`
-  (`gala_stubs::unimplemented_exports!`) to get the program running; the
-  stub reports `dll!function` ("not implemented") and ends the process
-  with STATUS_NOT_IMPLEMENTED when called, so the ledger names the next
-  function to implement. Implementing one means removing it from that
-  list. List a program's missing imports by comparing its import tables
-  (`llvm-readobj --coff-imports`, through its own DLLs) with the
-  `--coff-exports` of `user/bin/test*.dll`, ordinals included (an export
-  with RVA 0 is an empty ordinal slot, not an export).
-
-- **richedit.h packs its structures to 4 bytes** (`pshpack4.h`): a
-  pointer or WPARAM after a 4-byte field is not 8-aligned (ENLINK's
-  wParam at 28, lParam at 36, chrg at 44; GETTEXTEX's lpDefaultChar at
-  12; EDITSTREAM's callback at 12). Write such structures byte by byte;
-  EN_LINK's range read back as (0, 4) until this was found. Check other
-  SDK headers for `pshpack` before laying out a structure.
-- **Nothing that may send a message under a control's lock**:
-  BeginPaint sends WM_ERASEBKGND, SetWindowLong(GWL_STYLE) may send
-  WM_STYLECHANGING, and wx subclasses every control (its procedure may
-  send the control anything). Take the DC (or change the style) outside
-  the lock, as `user/richedit` does; its `Store` returns None to a
-  thread that asks again while holding it rather than spinning.
-- **Two DLLs with one implementation** (riched20 and msftedit): an rlib
-  crate (`user/richedit`, its own panic handler and imports) and a small
-  cdylib crate per DLL whose DllMain registers its classes; list each
-  cdylib in USER_DLLS and the rlib on the CI clippy line.
-- **COM interfaces written in Rust** (gala's UIAutomationCore): take the
-  method order from the C `...Vtbl` structs in the mingw-w64 header
-  (inherited methods included). On x64 a by-value argument over 8 bytes
-  (VARIANT, RECT) arrives as a pointer to the caller's copy, an 8-byte
-  POINT in one register. Tell objects apart by a field, not only by
-  vtable address: identical read-only tables may be folded by the linker.
-  mingw-w64's headers spell some names differently from the SDK
-  (`TreeScope_SubTree` for `TreeScope_Subtree`): a C test meant to build
-  with both uses the value.
-- **Predefined registry keys are sign-extended on x64**: winreg.h
-  defines HKEY_LOCAL_MACHINE as `(HKEY)(ULONG_PTR)((LONG)0x80000002)`,
-  0xFFFFFFFF80000002; C programs and .NET pass that form, Rust test
-  programs usually the zero-extended one. Accept both (advapi32's
-  `predefined`). PowerShell's 23 registry reads all failed with
-  ERROR_INVALID_HANDLE until this was handled.
-- **Registry keys a program needs**: boot it and read the ledger's
+- Registry keys a program needs: boot it and read the ledger's
   `"what":"absent key"` lines (`registry:MACHINE/...`, the end of long
   names). Keys a clean Windows has go in `kernel/src/nt/registry.seed`
   with Windows' values; keys a clean Windows lacks too (policies, other
   products) stay absent.
 
-- **Functions that must start from their caller's registers** (anything
-  that captures a context or walks frames: RtlCaptureContext,
-  RtlRaiseException, RtlUnwindEx, the dispatchers) are `global_asm!` with
-  `.seh_*` directives in ntdll's `seh.rs`, not naked functions: naked
-  functions get no unwind data, and a walk cannot pass through them.
-  Assembly symbols are exported through `/EXPORT` in testntdll's
-  build.rs. `llvm-readobj --unwind` shows what the assembler emitted.
-- **The exception dispatcher runs on what is left of the stack** (a stack
-  overflow is delivered with only the guard region below rsp): keep the
-  vectored-handler path's frames small and put CONTEXT copies in
-  `#[inline(never)]` helpers (`guard_test` catches this).
+### Tests in C, C++ and C#
 
-- **System call numbers.** Long-stable x64 numbers are used directly (list
-  in `kernel/src/nt/syscalls.rs`). Numbers that change between builds are
-  *gala's own choices*, unverified: tests must call those services through
-  ntdll exports (`find_ntdll()` + `find_export()` in ntrt), and
-  `user/testntdll` provides stubs with gala's numbers (`syscall_stubs!`).
-  On Windows the same test then uses the real ntdll.
-- **testntdll is gala's stand-in ntdll**, shipped only in scenarios that
-  list it in `EXTRA_MODULES`. It contains a small loader (LdrLoadDll etc.),
-  exception/APC dispatchers and the stubs. Adding an export there changes
-  `user/bin/testntdll.dll`.
-- **Fallible allocation only** (`try_box`, `try_push`, `try_reserve`);
-  clippy bans the rest. `unsafe` only where `CLAUDE.md` allows it.
-- **Multiprocessor.** All CPUs schedule threads (S2), and any thread,
-  the boot thread included, can move between CPUs at any reschedule.
-  Never rely on "interrupts off" as a lock; use `sync::IrqMutex`. Per-CPU
-  data lives behind GS (`arch::percpu`); per-CPU hardware setup belongs in
-  each CPU's own init path (`ap_main` / early `kernel_main`), never in code
-  run later by a thread. Per-thread state goes in `sched::Thread` or
-  `NtThread`, not in a global "current request" slot. Single-CPU tests
-  that measure ticks must pin themselves (`sched::set_affinity`).
-- **Changing user mappings** goes through `process.space.lock()` (a
-  `SpaceGuard`): the guard's drop does the TLB shootdown and frees the
-  unmapped frames. Do not free user frames any other way while the space
-  may be live. Cross-CPU memory tests need the victim thread pinned to
-  another CPU and nothing else flushing meanwhile (let reaping settle
-  first, as `smpmem_test` does), or the bug they look for is masked.
-- **Commit messages** are passed through the shell: do not put backticks in
-  a double-quoted `-m` (use a heredoc `-F -`).
-- **Never run two xtask boot runs at once** (e.g. a full `cargo xtask test`
-  and a single `boot-test`): they share ISO and serial-log files under
-  `target/` and fail each other.
-- **Unsupported paths**: when you leave a flag, class or case
-  unimplemented, call `nt::ledger::record(service, what, detail)` there, so
-  real programs that need it show up in `target/report/ledger.md`.
-- **Fresh checkouts**: CI starts without `target/`; things fetched or
-  built on first use (Limine) must also work when several threads need
-  them at once.
-- **Network tests**: VMs have no network card unless the scenario is in
-  xtask's `NET_SCENARIOS` (`-nic none` otherwise). Those get a virtio-net
-  card on QEMU's user network with a host port forwarded to guest port 7
-  (TCP and UDP, the same port number on both; sshd's 22 for
-  `SSH_PORT_22`). Each VM leases its own host port (`PortLease`: free for
-  both, below the host's ephemeral range so no outgoing connection takes
-  it before QEMU binds it, never given to another VM of the same xtask
-  while held); a QEMU that still cannot bind it (another process took it)
-  is booted again with another. The client's own files (ssh's key copy
-  and `-v` trace, sftp's transfer, the askpass script) are per port, in
-  `target/net-client/<port>/`, removed after the boot. So net scenarios
-  run in parallel (the suite, `XTASK_REPEAT_JOBS`). The failed log says
-  which port the VM had (`xtask: net: host 127.0.0.1:<port> forwarded to
-  ...`) and QEMU's standard error. xtask plays the remote side (`net_client`, `udp_client`,
-  ...) once the guest logs that it listens; the client's verdict is
-  appended to the serial log as an `xtask: net client: ...` line for
-  `expect` to check. QEMU's user network needs no privileges, so this
-  works in containers and CI. A UDP client resends until it gets its
-  answer (the guest's first reply may wait for ARP) and must skip late
-  duplicates of earlier answers. QEMU's DNS (10.0.2.3) forwards to the
-  host's resolver: a check that needs it accepts "no DNS" when the host
-  has none (`udp_echo` resolves example.com only if the host can).
-- **Datagram sockets in ws2_32**: whether a socket is a datagram one is
-  ws2_32's own per-socket record (SO_TYPE in the options table, set by
-  socket/WSASocketW and WSADuplicateSocket's receiver); sendto/recvfrom
-  pick the AFD request from it. A socket handle ws2_32 did not make
-  (an accepted one, one from another process without
-  WSADuplicateSocket) counts as a stream. The AFD datagram layouts
-  (AFD_SEND_INFO_UDP, AFD_RECV_INFO_UDP) are ReactOS's, to be verified
-  on Windows.
-- **GPU tests**: a scenario in xtask's `GPU_SCENARIOS` boots with `-vga
-  none -device virtio-gpu-pci,xres=1280,yres=800,edid=on` (UEFI) and its
-  command line says `display=virtio`; QEMU's `screendump` then shows the
-  virtio-gpu scanout, so the usual SCREEN_SCENARIOS checks work. The
-  device is modern-only (no `disable-legacy=off` like virtio-blk/net):
-  its driver uses `arch::virtio::ModernDevice`. With such a display the
-  boot splash is not visible (the firmware's framebuffer is no longer
-  shown): read the serial log. `gputrace` logs every command,
-  `events=display` the modes, resets and errors.
-- **Logging from host-tested kernel code**: `info!`/`warn!` write to the
-  serial port, which a host unit test does not have (the test dies with
-  SIGSEGV). Code that host tests reach logs through a wrapper that is
-  compiled out under `cfg(test)` (`display::virtio_gpu`'s `log!`).
-- **Disk tests**: VMs have no disk unless the scenario is in xtask's
-  `DISK_SCENARIOS` (name, size, what xtask writes into the fresh raw
-  image, what the image must hold afterwards). The image is
-  `target/.../<scenario>.disk.img` next to the ISO, attached as a legacy
-  virtio-blk device; such scenarios boot alone and not in gala-um.
-  Raw disk access needs an administrator, so their programs run
-  `as=system`. `earlier_boots` boots the same image first (each with the
-  lines its log must have; logs kept as `<iso>.boot<n>.serial.log`):
-  that is how a test checks what survives a reboot (`persist_test`, which
-  tells the boots apart by what it finds on C:).
-- **`persist`**: with this boot option C: is kept on the disk; without
-  it a disk is left alone (D1's raw tests).
-- **Constants from headers**: values typed in by hand go wrong
-  silently (STATUS_OBJECT_NAME_EXISTS was 0x40000035, and a test agreed
-  with it). With mingw-w64 installed (`apt install mingw-w64-common`, or
-  the cross compiler), `cargo test -p xtask` compares every NTSTATUS in
-  `kernel/src/nt/status.rs` with `ntstatus.h`; check other constants the
-  same way when you add them.
-- **Non-blocking state is inherited**: Windows gives an accepted socket
-  the listener's non-blocking mode, and Nginx relies on it. Missing that
-  made gala's recv block on the TLS handshake's second flight; a request
-  that arrives in one piece hid it for plain HTTP. When a server hangs
-  mid-conversation, `XTASK_EVENTS=syscall` shows which call pended.
-- **The TLS client**: `nginx_tls` uses the host's `curl -k`; on failure
-  the end of curl's `-v` trace is in the log (where the handshake or the
-  request stopped).
-- **Servers start late**: a program may log that it started before it
-  listens (Nginx's master logs, then its worker opens the socket). The
-  HTTP client retries for 10 s while it gets no response at all.
-- **Boot module directories are real paths**: a program run from a boot
-  module in `nginx/` has the image path `C:\nginx\nginx.exe`; the
-  loader looks for DLLs next to it, then in System32.
-- **32-bit system call arguments**: a ULONG (lengths, classes, codes,
-  flags) passed on the stack, and sometimes in a register, has garbage in
-  its upper half. Read it with `arg!(call, n) as u32`. go_http failed
-  6 times out of 10 because NtCreateFile read EaLength as 64 bits
-  (`0xc0_0000_003a`); the event stream (`XTASK_EVENTS=syscall`) showed it.
-- **Handle reuse**: a handle value freed by NtClose is handed out again
-  at once, so "use after close" tests may hit a new object of another
-  type (ws2_32 maps "not a socket" device requests to WSAENOTSOCK).
-- **Asynchronous Windows APIs in tests**: SuspendThread returns before a
-  thread running on another CPU has stopped, on Windows as on gala. A test
-  that needs it stopped calls GetThreadContext first (kernel32_thread_test
-  was flaky until it did).
-- **failpoint_heap fails every n-th allocation by count**: a change
-  that adds allocations (XSAVE's per-thread areas did) moves the failure
-  onto other paths and can expose old gaps. One found that way: `run=`
-  dropped the process object it waits on when the list push failed, and
-  then waited on nothing for ever (it now retries).
-- **Vector state (XSAVE, since 2026-11-02)**: the kernel stays
-  soft-float; never add code that uses x87/SSE/AVX registers in the
-  kernel (the user's state is live in them during system calls and
-  traps). Read a thread's saved state only through
-  `Context::saved_xstate` or `xstate::save` (both `normalize`: XSAVEOPT
-  leaves components in their initial state unwritten), never write a
-  thread's switch area, and load user-supplied state only through
-  `xstate::restore` (it sanitizes: a bad XSTATE_BV or MXCSR bit makes
-  XRSTOR fault in the kernel). `XState` is 2.7 KiB: keep copies off deep
-  kernel stacks. A test that looks at YMM registers must declare the xmm
-  registers clobbered (Rust has no ymm operands without the avx target
-  feature) and check only what Windows keeps across a system call (the
-  upper halves, and ymm6-15 whole: xmm0-5 are volatile). gala's ntdll
-  drops CONTEXT_XSTATE from its own CONTEXT copies (they have no
-  CONTEXT_EX); a copy that keeps the flag makes NtContinue read whatever
-  follows it as a CONTEXT_EX (it is validated, then ignored if wrong).
-- **A wait that ends only at its timeout** although the object was set:
-  look for someone resetting it before the waiter looked (before
-  2026-11-03 a reset could undo a notification event's set for waiters
-  not yet run; ARCHITECTURE "Waits"). Kernel code that shares one event
-  between several waiters must not count on each waiter seeing it set:
-  a count or generation next to it (GalaConsoleCtrl's) says what
-  happened.
-- **Known intermittent**: java_http/java_hello fail about 1 run in 30 to
-  40 with Java heap corruption (a stale String reference: `String.equals`
-  reading a bogus klass, a NullPointerException inside String.equals from
-  javac's MemberName.<init>, a crash in MethodHandleNatives.resolve); the
-  hs_err report is in the failed log (`dump:` lines). **Cause found
-  (2026-11-04): QEMU 8.1.0-8.2.5's TCG** (`tb_record` registered a block
-  that spans two pages under its first page only, so a write to the
-  second page did not invalidate it: HotSpot's patched `mov r64, imm64`
-  constants straddling a page end kept their pre-GC values); fixed in
-  QEMU 8.2.6. gala is tested on a pinned QEMU (section "QEMU" below),
-  not on the distribution's 8.2.2. ROADMAP Priorities has the history. Not the cause but
-  found on the way: QEMU's multi-threaded TCG (8.2.2 here; still open in
-  10.2, QEMU issue 4669) can keep a translation of guest code made while
-  another processor was writing it, and run the old instructions after
-  the write, on every processor, until something else invalidates the
-  page. `xmodify_test` shows it: with `-accel tcg,thread=multi` its writer
-  called a function it had just rewritten and got an immediate 4500
-  rewrites old (about 2 boots in 22); 0 of 16 with `thread=single`. A JIT
-  patches code that other threads run (inline caches, a GC rewriting
-  embedded object addresses), so scenarios that run one
-  (`SINGLE_THREAD_TCG` in xtask: java_*, elasticsearch, dotnet_*, pwsh_*,
-  flaui, xmodify_test) boot with `-accel tcg,thread=single` when there is
-  no KVM: both processors emulated by one host thread (java_hello 84 s
-  instead of 47 s in the kernel, so their time limits are doubled); the EXCEPTION_ILLEGAL_INSTRUCTION once
-  seen in C1-compiled code fits this bug. A new program that generates or
-  patches code (V8, LuaJIT, ...) belongs in that list. The Java heap
-  corruption stayed with `thread=single` (java_http 1 of 40).
-- **Reproducing the Java corruption quickly: `java_stress`** (pending
-  scenario, 2026-11-03): `user/java/Stress.java` runs javac in-process
-  48 times, three at a time; about one boot in three fails (javac's
-  NullPointerException in `BaseFileManager.getKind` or
-  `ClassSymbol.setAnnotationTypeMetadata`, a crash in String.equals or in
-  the GC, the hs_err in the log). `XTASK_REPEAT=6 XTASK_REPEAT_JOBS=2
-  cargo xtask boot-test java_stress` (each boot 5-15 min under load; its
-  time limit is 30 min). Other JVM options: the kernel takes the last
-  `args=`, so `XTASK_CMDLINE="args=-Xmx64m%20C:/gala/Stress.java%2048"`
-  replaces them (a second argument, ms, forces a full collection that
-  often). The same program in gala-um (`um --dir=jdk/bin ...
-  java.exe "C:/gala/Stress.java 48"`, about 25 s) has never failed.
-- **`XTASK_CMDLINE`** adds kernel command-line words to every boot:
-  diagnostic flags (`checkuser`, `tlbparanoid`, `nomigrate`,
-  `framecheck`, `eagercommit`; ARCHITECTURE "Kernel command line") or a
-  replacement `args=`. With `XTASK_QEMU_ARGS="-smp 1"` or `-cpu Nehalem`
-  a scenario runs on one processor or without AVX/BMI/XSAVE.
-- **Running the JDK in gala-um**: `um --dir=jdk/bin` puts the program in
-  C:\jdk\bin (the JDK finds its home from its own path); pass every file
-  of `target/prebuilt/jdk/jdk-21.0.5+11/` as
-  `--module=jdk/<path>=<host file>`, the scenario's DLLs from user/bin as
-  `--module=Windows/System32/<name>=user/bin/<exported_as>` and
-  `--module=gala/Hello.java=user/java/Hello.java`, then
-  `um --cpus=2 --dir=jdk/bin <modules> .../bin/java.exe C:/gala/Hello.java`:
-  javac and the program in about 3.5 s, so hundreds of runs take minutes.
-  A failure that reproduces there is in the NT layer or the user-mode
-  DLLs; one that does not points at the kernel's machine code (paging,
-  switches, interrupts) or at the emulator.
-- **handover_k32_twice under heavy load (2026-11-03)**: once (load
-  about 24) it timed out after "slept 4001". Not a hang and not the
-  second handover (its "writer wrote lines:" never came): the state
-  dump's main thread was in user mode at 0x140001550, inside `round`
-  (llvm-objdump of user/bin/handover_k32_test.exe), redoing alone, on
-  one processor, every round the two busy threads had computed in
-  parallel through the whole 4 s sleep: longer than the work itself, at
-  a third of the guest's tick rate. Fixed: the busy threads do 200
-  rounds after the handover (the writer thread sees the kernel's
-  generation change, GalaHandoverPause) and then wait for the stop; the
-  test prints the rounds it checked and how long that took; time limits
-  count the VM's run time now (vmtime.rs), not the wall time.
-- **Timing checks in test programs** measure the host as much as the
-  guest: under TCG a loaded host stops the VM's processors for
-  milliseconds at a time, the guest's clocks go on, and "this took under
-  2 s" fails. Check what the guest did instead (smpsched_test counts its
-  threads' ContextSwitches: one processor would need two per message);
-  keep elapsed-time bounds as generous give-ups only. To reproduce such a
-  failure, run QEMU on one host CPU: `XTASK_QEMU=<script>` with a script
-  that runs `taskset -c 3 ~/.cache/gala-qemu/<version>/bin/qemu-system-x86_64
-  "$@"`, plus busy loops pinned to that CPU (`taskset -c 3 sh -c 'while
-  :; do :; done'`). The same holds for KUSER_SHARED_DATA's clocks (a
-  snapshot written at clock interrupts, which come late under load:
-  compare them with a counter read on each side of a fresh snapshot, as
-  clockcal_test does) and for screen checks: a program must not end or
-  move on after a guessed time while xtask looks; wait for xtask's input
-  (console_window's "q"), and a step whose input acts on output the
-  program is still printing waits for that output (`ScreenStep::after`).
-  Timing xtask's own observations in a loop that does other work is the
-  same mistake on the host side (the false `xtask: clock: WRONG`s,
-  2026-11-04).
-- **sshd_shell's Ctrl+C step (2026-11-03)**: every failed run (solo and
-  in repeats) showed `~ $ sleep 60`, the prompt, `e^C^C`, then `cho:
-  not found`: busybox's control handler (its process's control thread
-  in `GalaConsoleCtrl`) ran only after the prompt was back and dropped
-  the next typed line. The cause was in gala, not in the order of
-  delivery: a lost wake-up in `nt::wait` (a waiter that looked after
-  another process's thread had reset the session's Ctrl+C event slept
-  until the call's 1 s backstop; ROADMAP "sshd_shell's Ctrl+C fixed").
-  A client retry briefly papered over it and is gone again: the line is
-  typed once. Each process's handler thread logs how long after the
-  Ctrl+C it took it (`took Ctrl+C N late` from 250 ms on).
-- **A sleep that spans a handover (2026-11-03)**: handover_upgrade failed
-  with "slept again 1248" (check 58), handover_k32 with "slept 4986"
-  (check 14), handover_idle_uefi with "slept 7634 ms" (check 0x16), each
-  late by much more than the clock jump the log reports: the programs
-  stay stopped from just before the record until the next kernel has
-  rebuilt them (4.3 s at load 29), and a sleep whose deadline falls in
-  that time ends when they go on. Bound such sleeps by the pause the
-  kernel measured from the stop (GalaHandoverPause; ARCHITECTURE "The
-  pause"), never by a guessed constant.
-- **Java hang with a state dump (2026-11-03)**: the first timeout with a
-  state dump (correct clock): java_http hung with three JVM threads in
-  NtYieldExecution and two waiting on semaphores with count 0
-  (OBSERVABILITY "Gaps found 2026-11-03" item 18): a lost semaphore
-  release again, or a wake-up missed elsewhere.
-- **Flaky boot tests** usually mean a race; rerun the one scenario a few
-  times before blaming CI: `XTASK_REPEAT=12 cargo xtask boot-test name`
-  boots one scenario's image 12 times, as many at once as the host has
-  CPUs (the load brings races out), keeps each failed boot's log
-  (`target/debug/test-<name>.r<i>.serial.log`, with its triage in
-  `target/failed/<name>.r<i>.log`) and ends with "n of 12
-  boots failed". With `XTASK_REPEAT` a scenario's exact name selects it
-  alone (`handover_upgrade`, not also `handover_upgrade_uefi`). Code
-  that derives a scenario from an image's name must
-  go through `iso_scenario`, which knows the `.r<i>` of a repeat's copy:
-  without it, repeats of sshd_shell/sshd_server/sshd_sftp forwarded to
-  the guest's port 7 and every connection was reset (2026-11-03). A race between processors is best caught by a test
-  program that makes the two sides meet often (threads pinned to
-  processors 0 and 1, kept in step: `smpcow_test`), repeated this way.
-- **Lock gaps in the memory manager**: a VAD change and the matching
-  page-table change must happen under one hold of the VAD lock (views,
-  VAD, space; ARCHITECTURE "Virtual memory"). Reading the VAD, dropping
-  its lock and then mapping lets a fault or service on the other processor
-  act on the state in between: two threads' first writes to one
-  copy-on-write page made its shared frame writable (`smpcow_test`).
-  Nothing that may write user memory (with_fs, which delivers directory
-  change notifications) may run under those locks: lockdep panics.
-- **Read-modify-write of shared kernel state in one lock hold**: reading
-  a value under a lock, dropping it and storing a value computed from it
-  under a second hold loses whatever happened in between.
-  NtReleaseSemaphore did that with a semaphore's count: two releases at
-  once added one (a waiter never woke: the JVM hung with its VM thread
-  spinning in NtYieldExecution) and a wait satisfied in between was
-  undone (a count too many, which lets a Java thread leave the JVM's
-  safepoint wait barrier while the garbage collector is still moving
-  objects). A heap corruption in a program with its own garbage collector is worth
-  checking against the synchronization services its stop-the-world uses
-  (for HotSpot on Windows: semaphores, events, critical sections), not
-  only the memory manager; `smpsem_test` is the pattern for such a test.
-- **IrqMutex guards go in reverse order**: each guard restores the
-  interrupt flag it found, so dropping an outer guard before an inner one
-  turns interrupts back on while the inner lock is still held (the thread
-  can then be preempted holding it; lockdep reported "X taken while
-  holding Vad" from a user fault). Let guards drop at scope end, or drop
-  them innermost first. Debug kernels panic on it since 2026-11-03
-  (`lockdep: releasing X turns interrupts on while Y is still held`).
-- **Read the source of the exact version** of an open-source program
-  before deciding what it does: Win32-OpenSSH's `latestw_all` branch
-  waits for sshd-session in `sshd -d`, the shipped 9.8.3 (tag
-  `v9.8.3.0`) exits with 255 right after spawning it. Tags are listed by
-  `git ls-remote --tags`; a sparse, blob-less clone of one directory is
-  quick. A program that ends while its children work on needs the boot
-  option `wait=all`.
-- **Out of frames looks like a bad image**: when NtMapViewOfSection
-  cannot get a frame, the loader reports STATUS_INVALID_IMAGE_FORMAT
-  (0xC000007B) for the process. Check the free frames (`mm::frame_stats`)
-  before suspecting the image; a scenario with many processes or big data
-  may need the larger VM (`qemu()` in xtask).
-- **A failed boot test keeps its log in `target/failed/`** until the next
-  failure overwrites it: after a pass, that file is stale (the pass's own
-  log is `target/debug/test-<name>.serial.log`).
-- **A stub that ends its process** (gala_stubs' "not implemented") is
-  logged at once (`[warn ] <program>: <dll>!<function> not implemented,
-  ending the process`): the ledger is only dumped when the `run=`
-  program ends, which for a service's children may be never.
-- **Which handle is which** in an event stream (`XTASK_EVENTS=all`):
-  handle values are reused at once (the lowest free slot), so follow
-  NtClose and creation order rather than guessing from the value.
+- **DLL tests in C** (`user/<dll>_test/main.c`, mingw; oleaut32_test,
+  shlwapi_test, ole32_test, shell32_test, dbghelp_test, msvcrt_test):
+  `build.sh` rebuilds the checked-in `user/bin/<name>.exe` (xtask does
+  not; run it after editing main.c and commit the binary).
+  `user/msvcrt_test` builds against msvcrt's own stdio, and its main.c
+  must also build with TinyCC's headers (the `tcc_self` scenario).
+- **C++ exception tests**: `user/cxx_eh_test` is C++ built with clang
+  for x86_64-pc-windows-msvc and lld-link (`build.sh`, import libraries
+  from .def files with llvm-dlltool), no CRT, against Microsoft's
+  vcruntime140 (the JDK's, app-local); the binary is checked in and the
+  build is reproducible.
+- **Managed (.NET) tests** are C# in `user/<name>/` built by its
+  `build.sh` with Mono's `mcs` (apt package `mono-mcs`) into `user/bin`
+  (reproducible: the script pins the MVID and timestamp). CI does not
+  rebuild them, as for the other third-party-tool builds. FlaUI tests:
+  "FlaUI".
 
-## Derived test data
+### Derived test data
 
 Test data built from exported binaries is remade with them: `cargo xtask
 export-tests` runs `user/pk_install_test/make_source.py` after exporting,
 because that package source zips `user/bin/hello.exe` (a change to ntrt
-changes every ntrt-based exe, and left the zips holding an old hello.exe:
-galapkg's `install_list_run_uninstall` failed on 2026-11-04). New derived
-data goes in the same place.
+changes every ntrt-based exe). New derived data goes in the same place.
 
-## QEMU
+### Reproducible user binaries
 
-xtask runs a pinned QEMU (`QEMU_VERSION` in xtask, 11.1.3), built by
-`cargo xtask qemu` into `~/.cache/gala-qemu/<version>` (download from
-download.qemu.org, SHA-256 checked, only `x86_64-softmmu` with user
-networking). `XTASK_QEMU=<path>` overrides it; without either, xtask
-uses `qemu-system-x86_64` from PATH and says so once. Every run prints
-which QEMU it uses. Build dependencies (Ubuntu): `libglib2.0-dev
-libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv
-libfdt-dev zlib1g-dev pkg-config`. CI builds it once and caches it.
-Why not the distribution's: Ubuntu 24.04 ships 8.2.2, whose TCG keeps
-running stale translations of code rewritten on a block's second page
-(the JVM corruption, "Known intermittent" above). A cloud container is
-ephemeral: run `cargo xtask qemu` in the environment's setup script, or
-once per new container (about 10 minutes).
+`cargo xtask export-tests` output must be the same on every machine (CI
+compares it). Workspace crates get relative source paths, but crates.io
+dependencies (libm in msvcrt) get absolute paths under the cargo home,
+which end up in panic locations: xtask's `user_build` remaps the cargo
+home to `/cargo` (`--remap-path-prefix`, merged into the target's
+rustflags with `--config`). A new dependency needs nothing more.
+Third-party builds (`user/<name>/build.sh`) pin their source and
+checksum and strip build ids and timestamps so two builds give the same
+hash.
 
-## Test speed and environments
+### Linux test programs (user/lx, ROADMAP LX)
 
-`cargo xtask test` (host unit tests + every boot scenario) took 66 s for
-the boot scenarios before T1 and 14 s after, under software emulation on a
-4-CPU container (40 scenarios). Where the time went, and what changed:
+Test first against real Linux (CLEAN_ROOM.md "Linux": man-pages, the
+ABI/ELF specs, observed behaviour, gVisor; never the Linux kernel
+source).
 
-| | before | after |
-|---|---|---|
-| VMs | 40 | 13 |
-| firmware + bootloader (summed over VMs) | 193 s (OVMF) | 24 s (SeaBIOS) |
-| kernel + tests (summed) | 38 s | 18 s |
-| ISO creation | 5.7 s (sequential) | 0.5 s (parallel) |
-| boot-test wall time | 66 s | 14 s |
+- **The program**: `user/lx/<name>_test/main.c`, built with musl
+  (`apt install musl-tools`), makes the system calls it checks itself
+  (`user/lx/common/lx.h`: `sys6` and friends with the `syscall`
+  instruction; failures are `-errno`), so it tests the kernel, not libc.
+  `common/more.h` (on top of lx.h) adds musl's `SYS_*` numbers and
+  struct definitions, `say_ret` (the errno's name appended), `lx_init`
+  (closes every fd above 2 so fd numbers are deterministic and printed;
+  clears the signal mask, SIGPIPE/SIGCHLD to default, umask 022),
+  `set_action` (rt_sigaction with SA_RESTORER and an rt_sigreturn
+  restorer, as musl does) and wait-status printing (without the core
+  flag, which depends on core limits).
+- **Output**: `name = value` lines, one write per line, ending with
+  `<name>_test: ok`. Never an address or anything that varies between
+  runs, kernel versions (auxv entries come and go: print only the ones
+  you check), users (print "AT_UID is getuid() = yes", not the number)
+  or build modes. Print relations, not pids/addresses/times/inodes; sort
+  directory listings; directory sizes and nlinks are file-system
+  specific and not printed; nothing depends on root (EACCES checks
+  would).
+- **Determinism**: children report through exit status or a pipe and
+  the parent waits before printing on; never rely on timing for an
+  ordering: a FUTEX_WAKE is retried until it wakes the thread known to be
+  about to wait, a signal that must arrive while a child waits is
+  blocked and taken with rt_sigtimedwait (a handler plus a blocking read
+  raced and hung under load), echoes are read until the expected byte
+  count. Accessibility without signals: write(2) from an address fails
+  with EFAULT if it is unreadable, read(2) into it if it is unwritable
+  (brk_test, mmap_test).
+- **Build**: `user/lx/build.sh` builds each as `user/lx/bin/<name>_test`
+  (static, ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN),
+  reproducibly (stripped, no build id, `-fno-stack-protector`: the
+  canary is read from %fs:0x28, so a test that moves FS would crash).
+  The binaries are checked in under `user/lx/bin`, not `user/bin`
+  (`export-tests` copies only the Windows build's outputs); the kernel's
+  host tests `include_bytes!` them.
+- **Transcripts**: `cargo xtask lx-expect` rebuilds them (when musl-gcc
+  is there; else it runs the checked-in ones), runs each binary on this
+  host as `./<name>_test first '' 'third arg'` from
+  `target/lx-expect/<binary>/` with only `A=1 EMPTY= LONGER_NAME=some
+  value` in its environment, and compares stdout + `-- exit status N`
+  with `user/lx/<name>_test/expected.txt` (both binaries against the
+  same file). A mismatch prints a line diff and leaves `actual.txt`
+  there. `--runs 5` runs each binary 5 times and fails if a transcript
+  varies (do it before recording); `--record` writes expected.txt (on
+  real Linux only, and check the diff: it is the spec); `--no-build`
+  skips the rebuild. Transcripts avoid version-dependent values because
+  CI's runner kernel differs from the recording machine's.
+- **Skips**: pty_test and proc_test print a single `SKIP:
+  open(/dev/ptmx) = -errno` (or readlink /proc/self) line when that is
+  unavailable, so a machine without them shows a mismatch whose diff
+  names the reason.
+- **Kernel side**: `kernel/src/lx/` (ARCHITECTURE "The lx module"),
+  `cargo test -p kernel --lib lx`; the ABI data crate `kernel/lx_abi`
+  (ARCHITECTURE "The lx_abi crate"), `cargo test -p lx_abi`, whose tests
+  read the transcripts: changing a test program's output can break them
+  (rerun both).
+- **Boot scenarios** `lx_<name>` and `lx_<name>_pie` (one per binary)
+  run it in gala: `qemu_exit lxrun=/lx/<binary> lxargs=<argv>
+  lxenv=<env>` (both percent-encoded shell words; argv[0] first,
+  `./<name>_test` as lx-expect gives it). The binary is shipped as
+  `C:\lx\<binary>` by an EXTRA_MODULES entry with its repository path.
+  xtask rebuilds the transcript from the kernel's `lx: pid N stdout: ..`
+  / `-- exit status` lines and requires it to equal expected.txt (a diff
+  on mismatch; `lx_expect::check_boot`). A new user/lx test that should
+  boot needs its two entries in EXTRA_MODULES and SCENARIOS (copy an
+  `lx_` pair).
+- **Bring-up of a new Linux program**: run it with `lxrun=`, then read
+  the `unimplemented system call <name>` lines and the `ledger:` lines
+  (`"what":"linux syscall missing"`, by hits) after `run: end`: that is
+  the next work list.
+- **Pitfalls met**: Rust's `Command` passes the environment sorted by
+  name (auxv_test's envp order); a static-pie's initial break is not
+  above its bss (brk_test prints only what holds for both); a pipe write
+  whose buffer runs into an unmapped page fails with EFAULT, not a
+  partial count (write_exit_test); a store to a never-touched bss page
+  after mprotect(PROT_READ) faults with error code 6 (not present), so
+  signal_test touches it first (7).
 
-- **BIOS boot by default.** ISOs are hybrid (BIOS and UEFI). SeaBIOS
-  reaches the kernel in ~0.9 s against ~4.5 s for OVMF. `hello`,
-  `selftest` and `fault-pagefault` still boot by UEFI so that path stays
-  tested; `XTASK_FIRMWARE=uefi|bios` forces one for everything.
-- **Shared VMs.** Scenarios that just run one program with no other
-  flags, expect success, boot by BIOS and expect no process ids are
-  grouped by identical boot modules and run in shared VMs
-  (`run=a.exe,b.exe`). Each program is judged on its own section of the
-  log (between `run: begin` and `run: end`, plus the boot preamble).
-  `XTASK_NO_BATCH=1` gives every scenario its own VM; `cargo xtask
-  boot-test <name>` with one match always boots it alone. The name is a
-  substring (`hello` also boots java_hello, go_hello...); `hello$` boots
-  that scenario only.
-- xtask prints per-scenario (or per-VM) timing and a summary, also written
-  to `target/report/timing.txt`.
-- **Docker**: `cargo xtask docker-test [xtask args]` builds
-  `docker/test.Dockerfile` (Ubuntu 24.04, QEMU, OVMF, xorriso, the pinned
-  toolchain) and runs `cargo xtask test` (or the given arguments) inside
-  it with the repository at /work and build output in `target/docker`.
-  It passes `/dev/kvm` through when the host has it (then boots run at
-  near-native speed) and forwards the `XTASK_*` variables. In a cloud
-  container without a running daemon, start one with `dockerd &`.
+## Program recipes
 
-On a shared host, `XTASK_VMS=1 nice -n 19 cargo xtask test` boots one VM
-at a time (the default is one per host CPU).
-
-## Benchmarks
-
-Where time goes in a scenario: the `nt:` line at the end of its serial
-log (`target/<profile>/test-<scenario>.serial.log`) gives the NT layer's
-system call, fault and process creation time without disturbing the
-run; the event stream gives per-call detail but slows the run down
-(docs/PERF.md has the method and the H8 numbers). Under QEMU TCG,
-user code that sits in shared physical frames is translated once:
-copying code pages per process costs far more than the copy.
-
-`cargo xtask bench` (always a release kernel) runs `user/bench` and writes
-`target/report/bench.json`; on Windows, `user/bin/run-all.ps1` writes
-`bench-windows.txt`, which `cargo xtask bench bench-windows.txt` puts next
-to gala's numbers. For where time goes inside the kernel:
-`XTASK_EVENTS=syscall cargo xtask boot-test bench`, then group the
-`events.jsonl` lines by `name` and look at `ns`.
-
-## Prebuilt programs
-
-A program's own configuration lives under `user/<program>/` (e.g.
-`user/filezilla_server/fzs`): a directory module (`dir/` path) becomes a
-tree on C:, read-only unless its directory is in `WRITABLE_TREES`
-(programs that rewrite their settings, such as FileZilla Server, need
-that). To see the configuration a program writes by default, run it and
-then `busybox.exe cat` on the files (`run=a.exe,busybox.exe
-args=...,cat%20C:/dir/file`; gala's cmd has no `type` or `&` lists).
-
-Unmodified releases (Caddy, the JDK) are not kept in the repository: the
-`PREBUILT` table in xtask pins each one (URL, SHA-256, the files used
-from its zip), and a scenario module path `target/prebuilt/<name>/<file>`
-makes xtask download, check and unzip it on first use (curl, sha256sum,
-unzip, msiextract for an MSI, 7-Zip for an NSIS installer or 7-Zip
-self-extractor, and for a Chocolatey `.nupkg` the installer in its
-`tools/` unpacked with 7-Zip; a nuget.org `.nupkg` (a library package,
-FlaUI) is a plain zip, its members paths such as
-`lib/net8.0-windows7.0/FlaUI.Core.dll`; one fetch at a time, since ISOs are built in parallel, and a
-`.unpacked-<sha256>` marker so an interrupted unpack is redone). To try a new prebuilt program before writing its scenario:
-`cargo xtask iso --file path/to/app.exe run=app.exe "args=..."` and boot
-it with QEMU (`-cpu max`), then follow the ledger and the program's own
-error messages (Go programs print which DLL or procedure they could not
-find). A pinned release can vanish upstream: the FileZilla 3.69.3
-client installer's SourceForge URL answers 404 since 2026-11 (ROADMAP
-AG, "Known problem"); keep a fetched `target/prebuilt/<name>` around,
-and change a URL only for an official one with the same SHA-256.
-Survey an import table first with
-`x86_64-w64-mingw32-objdump -p app.exe | grep "DLL Name"`; keep
+Third-party programs are either built reproducibly by a checked-in
+script (the binary is checked in under `user/bin`; CI uses it and never
+runs the script) or fetched as pinned releases (`PREBUILT`). Keep
 downloaded files in their own directory and run them only inside QEMU.
+Read the source of the exact version of an open-source program before
+deciding what it does (tags: `git ls-remote --tags`; a sparse,
+blob-less clone of one directory is quick).
 
-Large programs (the JDK): a module path ending in `/`
-(`target/prebuilt/jdk/jdk-21.0.5+11/`) ships the whole tree as
-`C:\<dir>` with its subdirectories, packed into one USTAR archive
-(`boot/<dir>.tree.tar`, module string `tar:<dir>`) that the kernel unpacks
-into its ramfs in place (`kernel/src/fs/tar.rs`): Limine panics with
-"Memory map exhausted" with a few hundred modules (the .NET runtime has
-~190 files). `run=` finds a program inside an archive too, by file name,
-or by its path when the name has a `/`, in the archive or below C:
-(`run=cmd/git.exe`: MinGit has two git.exe; `run=git/usr/bin/bash.exe`
-when each directory is its own archive). Prebuilt releases may be zips,
-MSIs (msitools' `msiextract`) or 7-Zip self-extracting archives (`7z`
-from p7zip-full; members are directories). Scenarios
-that ship the same large set share it through `MODULE_SETS` (and so a
-VM). Managed (.NET) test programs are C# in `user/<name>/` built by its
-`build.sh` with Mono's `mcs` (apt package `mono-mcs`) into `user/bin`
-(reproducible: the script pins the MVID and timestamp); CI does not
-rebuild them, as for the other third-party-tool builds. Whole-runtime scenarios
-(`SLOW_SCENARIOS`: the JVM ones, dotnet_hello, pwsh_hello) get 300 s
-instead of 120 s: a slow CI runner takes over twice as long as a local
-run (java_hello: ~35 s locally; it timed out at 120 s once in CI, with
-its threads still progressing - much of a JVM's time goes to gala's
-lightweight-lock waits, which sleep 1 ms at a time until a kernel address
-wait exists). Every limit counts the VM's *run time*, not wall time
-(`xtask/src/vmtime.rs`): the wall time less the run-queue wait of its
-most-starved vCPU thread (`/proc/<pid>/task/<tid>/schedstat`), so a VM
-starved by a loaded host is not killed (with five agents on a 4-CPU
-host sshd_shell's guest had run only 58 s when 120 s of wall time were
-up), while a hung one is caught as before (halted vCPUs sleep, so its
-run time is the wall time). A wall ceiling of 4x the limit remains.
-The guest's own clock cannot do this: under TCG it follows the host's
-even when starved (ARCHITECTURE "What a guest's clock follows"). Every
-log has `xtask: vm time: <run> run of <wall> wall (<w> waiting for a
-host CPU)`, and the triage repeats it. The state dump's wait after a
-timeout counts run time too. In a shared VM,
-scenarios running the same program (two `dotnet.exe` runs) are judged on
-that program's n-th `run: begin`..`run: end` section, in group order.
-To see why a .NET program fails: the ledger first, then `XTASK_EVENTS=
-syscall,image,fault` (the stream lands in `target/debug/<iso>.events.jsonl`);
-CoreCLR's own source (dotnet/runtime, MIT) says what it expects of the OS
-(read only, as any application's documentation). QEMU gets 512 MiB
-plus twice the image size when the image is over 64 MiB (boot modules stay
-in memory). A scenario still being brought up goes in `PENDING`: `cargo
-xtask boot-test <name>` runs it, `cargo xtask test` and CI do not. A DLL
-the loader cannot find is in the ledger (`"what":"missing dll"`); a
-missing function is a `missing export`. For a program with many DLLs,
-walk the whole import closure (imports and delay imports of every DLL it
-loads, following export forwarders such as the api-ms-win-* sets) against
-the exports of gala's DLLs before booting, and fix the gaps in batches.
-A crashing JVM writes `C:\hs_err_pid<N>.log` (registers, the faulting
-address, the thread's stack, the memory map); the boot option
-`dump=C:/hs_err_pid4.log` (comma-separated, percent-encoded paths) prints
-such files to the serial log as `dump:` lines once the `run=` programs
-have ended, and the Java scenarios have it, so a flaky crash's report is
-in `target/failed/<name>.log` (or the repeat's log, below). An unhandled exception's code and address are in the ledger;
-`XTASK_EVENTS=image` gives each image's base and size to map them.
-A test program that needs a resource (a manifest: `manifest_test`) gets
-it from its build.rs, which writes a .res file (the documented compiled
-resource format) and passes it to the linker; lld-link converts it
-itself (its /MANIFEST:EMBED would need Microsoft's mt.exe).
-DLLs a program loads at run time (LoadLibrary: the JDK's launcher loads
-msvcp140 and jvm.dll) are not in the closure; boot and read the ledger
-for those. Exports by ordinal (ws2_32's) come from a build.rs printing
-`/EXPORT:name,@n`; lld warns that rustc's .def names them too and keeps
-the ordinal one (the warning cannot be silenced).
+### Go programs
 
-## Chromium (BR)
+`user/<name>/` with a `main.go` and `go.mod`, listed in `GO_PROGRAMS` in
+xtask: built for windows/amd64 with the pinned toolchain (`GO_TOOLCHAIN`,
+fetched by version; `-trimpath`, empty build id, so the binary is
+reproducible and checked in under `user/bin`). Without `go` installed,
+xtask uses the checked-in binary. Bring-up loop: run it
+(`XTASK_EVENTS=all cargo xtask boot-test <name>` once it has a scenario,
+or `cargo xtask screenshot run=<name>.exe`) and read the `ledger:` lines;
+Go programs also print which DLL or procedure they could not find.
 
-`cargo xtask boot-test chromium_version` (PENDING; PREBUILT
-`chromium`: 370 MB download, ~430 MB unpacked, a 430 MB ISO per run:
-delete `target/debug/test-chromium_*.iso` after a failed run, the disk
-is shared). A run takes ~5 minutes under TCG (2 minutes of it Limine
-loading the ISO, ~30 s mapping chrome.dll). Read, in order:
+### Nginx
 
-- Chromium's own log lines in the serial log: `[pid:tid:date:LEVEL:file:line]`
-  (`--enable-logging=stderr`; the scenario's `dump=` adds
-  `C:\chromium\debug.log` and the profile's `chrome_debug.log` when
-  they exist). `delay_load_failure_support.cc ... NOTREACHED` means a
-  delay-loaded function or DLL is missing: the ledger's `missing export`
-  / `missing dll` line names it (chrome.dll delay-loads most of what it
-  uses; `gala_stubs` stubs are invisible to GetProcAddress, so a stubbed
-  delay import fails the same way). One missing function per 5-minute
-  run is slow: `python3 -I tools/import_survey.py
-  target/x86_64-pc-windows-msvc/release target/prebuilt/chromium/chrome-win/chrome.dll`
-  lists every import (static and delay-loaded) gala's built DLLs lack or
-  have only as `gala_stubs` stubs (API set names resolved as the loader
-  resolves them); fill them in batches. Imports by ordinal (`#N`) need
-  the ordinal pinned in the DLL's build.rs (`/EXPORT:name,@N`, the
-  number from Wine's .spec, checked there, not from memory): an unpinned
-  DLL numbers its exports arbitrarily, so `#N` may bind to an unrelated
-  function and the survey cannot tell. Exit status 0xffff7001/7002 follows a
-  FATAL; 21 is CHROME_RESULT_CODE_PROFILE_IN_USE (the process singleton:
-  its mutex and lock file).
-- A `Check failed` with an unresolved backtrace (no chrome.dll symbols:
-  its PDB does not fit the disk): read the Chromium source around the
-  last log line before it (the browser's start-up logs a lot), and the
-  ledger's last lines (each `unsupported`/`missing export` names the
-  function that failed).
-- `XTASK_EVENTS=syscall,image,fault,file,process,thread`: the `file`
-  category (`"ev":"open"`, path, handle, status) shows each open, which
-  `syscall` events cannot (their arguments are pointers).
-- A crash report's `module+offset`: symbolize it with the snapshot's own
-  PDBs (symbols are not disassembly: CLEAN_ROOM allows reading
-  Chromium's source, and the PDB names the source line). The revision is
-  pinned partly because its `chrome-win32-syms.zip` exists (922 MB): do
-  not download it whole; read the one member you need with HTTP range
-  requests (Python's `zipfile` over a file object whose `readinto` sends
-  `Range:` requests), e.g. `chrome-win32-syms/chrome_elf.dll.pdb` (30 MB)
-  or `chrome.exe.pdb` (40 MB); `chrome.dll.pdb` is 2.7 GB and does not fit
-  the shared disk. Put the PDB next to (a link to) the module and run
-  `llvm-symbolizer --obj=chrome_elf.dll 0x<ImageBase + offset>`
-  (ImageBase 0x180000000 for the DLLs, 0x140000000 for chrome.exe).
-- Chromium's source (github.com/chromium/chromium, crashpad on
-  chromium.googlesource.com) says what a symbolized function expects:
-  read it as documentation, as for any program.
+`user/nginx/build.sh` cross-compiles Nginx (pinned version and SHA-256)
+with mingw-w64 (`apt install gcc-mingw-w64-x86-64`) into
+`user/bin/nginx.exe`, reproducibly (fixed build directory, no debug
+info, no link timestamp). Its configuration, page and placeholder files
+(boot modules only create the directories they are in) are in
+`user/nginx/` and shipped by EXTRA_MODULES entries with repository
+paths. It runs with `-p C:/nginx/ -c conf/nginx.conf`; the image path is
+then `C:\nginx\nginx.exe` and the loader looks for DLLs next to it, then
+in System32. `cargo xtask screenshot run=nginx.exe
+"args=-p%20C:/nginx/%20-c%20conf/nginx.conf"` shows it; `cargo xtask
+serve nginx` serves it to a browser. Nginx relies on an accepted socket
+inheriting the listener's non-blocking mode.
 
-Pitfalls found on the way: a `CHECK` in Crashpad's handler kills only the
-handler (the browser logs "crash server did not respond" and goes on
-until it needs it); the handler re-runs chrome.exe as a child with an
-inherited handle list, so child-process and handle-inheritance bugs show
-there first.
+### TLS tests (Schannel)
 
-## FlaUI (UI Automation tests in .NET)
+`schannel_test` is a TLS client of Nginx (OpenSSL) inside the guest: the
+scenario starts `nginx.exe` with `start=` and
+`user/schannel_test/nginx.conf` (ports 8443-8445 on 127.0.0.1, so no
+xtask network client is involved), and the test retries its connect
+while Nginx starts. On Windows, run-all.ps1 starts the same Nginx from a
+prefix in TEMP and, as an administrator, imports the test CA into
+LocalMachine\Root for the run (skipped otherwise). `nginx_tls` instead
+uses the host's `curl -k` as the client.
+
+- Host-test the engine first: `cargo test -p schannel_tls` runs both
+  sides in memory (seconds, no QEMU); boot the scenario once those pass.
+- Test certificates: `user/schannel_test/certs/make.sh` (host openssl
+  3.0+; run it in place and commit the results; test data, not secret):
+  a CA, an issued `localhost` certificate (ECDSA), an expired one
+  (`openssl ca` sets a past validity, `x509 -req` cannot), a self-signed
+  one, an RSA pair for the test's own server (`server-rsa.cer`/`.p8`,
+  also used by the host tests). They are valid from the moment they are
+  made: host tests use a clock two days later. Regenerating changes
+  every file and nothing in the tests' expectations.
+- gala's machine root store is `C:\Windows\System32\gala\roots`: a
+  scenario that needs a trusted root ships the CA there (an
+  EXTRA_MODULES line). Without one, automatic validation gives
+  SEC_E_UNTRUSTED_ROOT and the ledger says `schannel.dll!machine root
+  store (no gala/roots ...)`.
+- A failing handshake leaves `schannel.dll!ISC: <rustls error>` (ASC for
+  a server) in the ledger with the SSPI status: read that first.
+- SEC_E_INCOMPLETE_MESSAGE means the caller passes the same bytes again
+  with more (schannel_tls keeps a count, `retained`); a rustls slice that
+  still holds a partial handshake message must be the same buffer on the
+  next call (the engine hands it the context's own copy). After a rustls
+  error, do not call it with an empty buffer: it may still point into
+  the last one (it panics).
+- schannel.dll is 1.4 MB (rustls and RustCrypto): only processes that
+  use Schannel load it, through secur32.
+
+### busybox
+
+`user/busybox/build.sh` rebuilds `user/bin/busybox.exe` (pinned
+busybox-w32 commit, reproducible; the build directory
+`/tmp/gala-busybox-build` keeps `busybox_unstripped.exe.map`, which maps
+a faulting rip to a function). The `busybox` scenario runs a sh command
+line; to try others, change its `args=` (percent-encoded). The script
+scenarios (`busybox_files`, `busybox_script`) run checked-in scripts
+from `user/busybox/` (boot modules in C:\gala); each prints one labelled
+line per result. busybox is also the tool for looking at files on gala:
+`run=a.exe,busybox.exe args=...,cat%20C:/dir/file` (gala's cmd has no
+`type` or `&` lists).
+
+### TinyCC
+
+`user/tcc/build.sh` rebuilds `user/bin/tcc.tar` (pinned TinyCC commit,
+reproducible): it compiles `tcc.c` as one unit with mingw-w64 and writes
+`config.h` itself instead of running TinyCC's `configure` and `make`
+(which would run third-party build scripts on the host);
+`CONFIG_TCC_PREDEFS=0` makes tcc read `include/tccdefs.h` at run time
+instead of a header generated by a host-built tool.
+
+- `tcc` (`user/tcc/tcc.sh`, run by busybox sh): unpacks the archive with
+  busybox's tar, builds the runtime library (`libtcc1.a`, the startup
+  code) with that `tcc.exe` as win32/build-tcc.bat does, compiles
+  `user/tcc/hello.c` and runs it (about 4 s in the kernel, 16 tcc runs).
+  A program tcc builds imports msvcrt's startup functions
+  (`__getmainargs`, `__argc`, `_controlfp`, `_XcptFilter`); tcc itself
+  uses `_spawnvp`/`_cwait`/`SearchPathA` only for tools the scenario
+  does not run.
+- `tcc_self` (`user/tcc/self.sh`): tcc.sh, then TinyCC's sources
+  (`tcc/src/tcc/` in the archive) compiled by tcc on gala into
+  tcc2.exe, which builds hello.c and `user/msvcrt_test/main.c` (about
+  7 s). main.c must build with both mingw's and TinyCC's headers
+  (TinyCC's float.h lacks `_controlfp`; mingw's headers send `strtod` to
+  libmingwex, so the test looks msvcrt's up).
+- `tcc_make` (`user/tcc/make.sh`): builds `user/tcc/make/` (boot modules
+  in `C:\gala\make`) with busybox's make, passing `CC=../tcc/tcc.exe
+  CFLAGS=-B../tcc` so make's echoed commands are the same on gala and
+  Windows; each step's lines carry the step's name (`build:`, `after
+  touch:`, `again:`, `broken:`).
+
+### Lua
+
+`user/lua/build.sh` repacks the Lua 5.4.7 release into
+`user/bin/lua.tar` (checked against lua.org's published SHA-256; nothing
+is compiled on the host). The `lua` scenario (`user/lua/lua.sh`) builds
+it on gala with Lua's own `src/Makefile`, overriding only its documented
+settings (`CC`, `CFLAGS`, `AR=tcc -ar rcs`, `RANLIB=:`, `LIBS=` since
+msvcrt has the math functions, `LUA_T`/`LUAC_T` with `.exe`), and runs
+`user/lua/test.lua`. Expected lines come from Lua's and msvcrt.dll's
+documented behaviour (compiling Lua on the host would be a third-party
+build; Windows is the reference through `run-all.ps1`). test.lua avoids
+output that depends on the script's path (`error(msg, 0)`) and exact
+decimal ties (C runtimes round them differently).
+
+### SQLite
+
+`user/sqlite/build.sh` fetches the SQLite amalgamation zip (checked
+against sqlite.org's SHA3-256) into `user/bin`; the `sqlite` scenario
+unzips it on gala, compiles it with tcc and `user/sqlite/sqlrun.c`, then
+runs `test.sql` and `reopen.sql` (expected lines computed with Python's
+sqlite3 module on the host: same SQL, another SQLite version). TinyCC's
+Windows headers and `.def` files are older than SQLite needs: `tcc
+-impdef` makes kernel32.def from the system's kernel32.dll, and
+`tcc_win.h` (force-included) declares GetTickCount64. The last step runs
+two writers at once (busybox `&` and `wait`); to see whether they really
+contended, run with `XTASK_EVENTS=syscall,process` and count NtLockFile
+results per process (STATUS_LOCK_NOT_GRANTED 0xc0000055 is a retry).
+
+### Prebuilt programs
+
+Unmodified releases (Caddy, the JDK, .NET, PowerShell, FileZilla, FlaUI,
+...) are not kept in the repository: the `PREBUILT` table in xtask pins
+each one (URL, SHA-256, the files used), and a scenario module path
+`target/prebuilt/<name>/<file>` makes xtask download, check and unpack
+it on first use.
+
+- Unpackers: unzip for zips, msitools' `msiextract` for an MSI (`apt
+  install msitools`), 7-Zip (`7z` from p7zip-full) for an NSIS installer
+  or 7-Zip self-extractor, and for a Chocolatey `.nupkg` the installer in
+  its `tools/` unpacked with 7-Zip; a nuget.org `.nupkg` (a library
+  package: FlaUI) is a plain zip, its members paths such as
+  `lib/net8.0-windows7.0/FlaUI.Core.dll`. One fetch runs at a time
+  (ISOs are built in parallel), and a `.unpacked-<sha256>` marker makes
+  an interrupted unpack run again.
+- `members` are unzip patterns (`*` crosses `/`), `excludes` unzip `-x`
+  patterns; the marker includes a hash of both, so changing them unpacks
+  again. For an MSI, members are directories of the installed layout,
+  each moved to `target/prebuilt/<name>/<last component>`, and excludes
+  are paths removed after that; for 7-Zip archives members are
+  directories.
+- A pinned release can vanish upstream (the FileZilla 3.69.3 client
+  installer's SourceForge URL answers 404; ROADMAP AG): keep a fetched
+  `target/prebuilt/<name>` around, and change a URL only for an official
+  one with the same SHA-256.
+- **Large programs**: a module path ending in `/`
+  (`target/prebuilt/jdk/jdk-21.0.5+11/`) ships the whole tree as
+  `C:\<dir>` with its subdirectories, packed into one USTAR archive
+  (`boot/<dir>.tree.tar`, module string `tar:<dir>`) that the kernel
+  unpacks into its ramfs in place (`kernel/src/fs/tar.rs`): Limine panics
+  with "Memory map exhausted" with a few hundred modules. `run=` finds a
+  program inside an archive by file name, or by its path when the name
+  has a `/`, in the archive or below C: (`run=cmd/git.exe`: MinGit has
+  two git.exe; `run=git/usr/bin/bash.exe` when each directory is its own
+  archive). Scenarios that ship the same large set share it through
+  `MODULE_SETS`.
+- **A program's own configuration** lives under `user/<program>/` (e.g.
+  `user/filezilla_server/fzs`): a directory module (`dir/` path) becomes
+  a tree on C:, read-only unless its directory is in `WRITABLE_TREES`
+  (programs that rewrite their settings need that). To see the
+  configuration a program writes by default, run it and then `cat` the
+  files with busybox.
+- **Java**: a crashing JVM writes `C:\hs_err_pid<N>.log` (registers, the
+  faulting address, the thread's stack, the memory map); the boot option
+  `dump=C:/hs_err_pid4.log` (comma-separated, percent-encoded paths)
+  prints such files to the serial log as `dump:` lines once the `run=`
+  programs have ended. The Java scenarios have it, so a crash's report
+  is in `target/failed/<name>.log`.
+- **.NET**: the ledger first, then `XTASK_EVENTS=syscall,image,fault`.
+  CoreCLR's own source (dotnet/runtime, MIT) says what it expects of the
+  OS (read only, as any application's documentation).
+- An unhandled exception's code and address are in the ledger;
+  `XTASK_EVENTS=image` gives each image's base and size to map them.
+
+### Win32-OpenSSH (sshd)
+
+The sshd scenarios (`sshd_server`, `sshd_shell`, `sshd_sftp`, ...) run
+Win32-OpenSSH; "SSH into a running gala" says how to log in.
+
+- As SYSTEM (and with `-d`) sshd and ssh-keygen log to the system log
+  (ETW), not the console: pass `-e` to sshd for stderr. The scenarios tee
+  `sshd.log` / `sshd-session.log` to the serial log (`logtee:` lines).
+- Its source (github.com/PowerShell/openssh-portable, BSD-licensed; not
+  Windows source) says what it expects of an API, for example
+  `contrib/win32/win32compat/pwd.c` (accounts must be SidTypeUser; home
+  from ProfileList). Read the shipped tag (`v9.8.3.0`), not
+  `latestw_all`: the branch waits for sshd-session in `sshd -d`, 9.8.3
+  exits with 255 right after spawning it.
+- Win32-OpenSSH does not create %ProgramData%\ssh\logs (an installer
+  does: the scenarios ship a placeholder file there); it runs subsystems
+  and commands through DefaultShell with the command quoted, so
+  sftp-server.exe must be on the shell's PATH (a copy in System32); an
+  ssh client without a tty asks for a 0 x 0 pty (conhost then uses
+  80 x 25).
+- Each process's console-control handler thread logs how late it took a
+  Ctrl+C (`took Ctrl+C N late`, from 250 ms on).
+
+### FlaUI (UI Automation tests in .NET)
 
 `user/flaui_test/` holds a C# test (`FlaUITest.cs`) and the program it
 drives (`target.c`, a Win32 window with a button, an edit and a check
@@ -1055,313 +1031,179 @@ fetches with its checksum into `target/prebuilt/dotnet-ref`) and the
 FlaUI assemblies xtask fetches (PREBUILT `flaui-core`, `flaui-uia3`,
 `uiautomation-interop`; run `cargo xtask boot-test flaui_test` once
 first, which fetches them and then fails if the test is not built).
-Pitfalls:
+
+Building and running:
 
 - mcs cannot compile against the runtime's own assemblies
   (`shared/Microsoft.NETCore.App/8.0.33`): System.Private.CoreLib's Span
-  has ref fields, which mcs's metadata reader rejects (an internal
-  error loading ReadOnlySpan). The reference pack declares them with
-  dummy fields. Mono's own mscorlib does not work with FlaUI either:
-  FlaUI's types come from System.Runtime, and mcs would see two
-  System.Objects.
+  has ref fields, which mcs's metadata reader rejects. The reference
+  pack declares them with dummy fields. Mono's own mscorlib does not
+  work with FlaUI either (FlaUI's types come from System.Runtime, and
+  mcs would see two System.Objects).
+- mcs (C# 7-ish) rejects nullable reference annotations (`Window?`);
+  a type forwarded to an assembly not in build.sh's reference list
+  (System.Threading.Thread) needs that assembly added there.
 - A new test is a new `.cs` (or a new program in the directory) next to
-  FlaUITest.cs; its scenario runs `dotnet.exe C:/gala/<name>.dll` with
-  a `<name>.runtimeconfig.json` and the FlaUI assemblies in the `dotnet`
+  FlaUITest.cs; its scenario runs `dotnet.exe C:/gala/<name>.dll` with a
+  `<name>.runtimeconfig.json` and the FlaUI assemblies in the `dotnet`
   module set (EXTRA_MODULES), as `flaui_test` does.
-- FlaUI reads every property with GetCurrentPropertyValueEx(id, TRUE)
-  and compares the result with ReservedNotSupportedValue by reference:
-  a property UIAutomationCore cannot answer must be the not-supported
-  value, not VT_EMPTY, or FlaUI converts null and throws.
-- When FlaUI throws, the test prints the exception with its stack
-  (`flaui_test: exception:`), which names the Interop.UIAutomationClient
-  method; `UIAutomationCore.dll!...` ledger lines name gala's missing
-  methods (E_NOTIMPL becomes NotImplementedException in .NET).
-- A UIA property whose value is an element or element array
-  (SelectionContainer, Selection) is VT_UNKNOWN holding our element /
-  IUIAutomationElementArray object: FlaUI casts the RCW to the
-  interface (QueryInterface), so those objects must answer it.
-- Driving another process's list view: LVM_* messages are not
-  marshaled across processes (they are above WM_USER, on Windows too);
-  pointers in them must be in the list's process (`items.rs`'s
-  `Buffer`). LB_/CB_ messages are marshaled by user32
-  (`foreign::send_remote`): pass local pointers.
 - On Windows: `dotnet flaui_test.dll` in a directory holding the test,
-  its runtimeconfig, `flaui_target.exe` and the three FlaUI assemblies
-  (the window appears for a moment). run-all.ps1 skips
-  `flaui_target.exe`, which would wait for its window to be closed.
+  its runtimeconfig, `flaui_target.exe` and the three FlaUI assemblies.
+  run-all.ps1 skips `flaui_target.exe`, which would wait for its window
+  to be closed.
+- When FlaUI throws, the test prints the exception with its stack
+  (`flaui_test: exception:`), which names the
+  Interop.UIAutomationClient method; `UIAutomationCore.dll!...` ledger
+  lines name gala's missing methods (E_NOTIMPL becomes
+  NotImplementedException in .NET).
 
 **Screen tests on FlaUI** (`filezilla_flaui`, FileZillaFlaUI.cs, is the
-example): a C# program next to FlaUITest.cs, built by the same
-build.sh (add a `build` line), shipped through the `dotnet` module set
-plus the program's own: list the scenario twice in MODULE_SETS
-(`("filezilla_flaui", "dotnet")`, `("filezilla_flaui", "filezilla")`)
-and it gets the union. The scenario starts servers with `start=` and
-runs `dotnet.exe C:/gala/<test>.dll`; the test launches the program
-itself (Application.Launch) so it can wait for it to end. No screen is
-needed (BIOS boot, `noscreen`): windows exist and are driven without
-being shown, which makes such a test several times faster than its
-pixel version. Writing one:
+example): a C# program next to FlaUITest.cs, built by the same build.sh
+(add a `build` line), shipped through the `dotnet` module set plus the
+program's own: list the scenario twice in MODULE_SETS
+(`("filezilla_flaui", "dotnet")`, `("filezilla_flaui", "filezilla")`).
+The scenario starts servers with `start=` and runs `dotnet.exe
+C:/gala/<test>.dll`; the test launches the program itself
+(Application.Launch) so it can wait for it to end. No screen is needed
+(BIOS boot, `noscreen`): windows exist and are driven without being
+shown, several times faster than the pixel version.
+
+Writing one:
 
 - Find controls by what a tester sees: ControlType and Name (a field's
   Name is its label's text, `ByName("Host", MatchSubstring)`), not
-  AutomationId, when the program numbers its controls itself (wx's ids
+  AutomationId when the program numbers its controls itself (wx's ids
   are negative pool ids, many 5999).
-- Dialogs are owned windows: they are children of the window that owns
-  them (`main.FindFirstChild(cf => cf.ByControlType(Window))`), not of
-  the desktop. Answer them in a loop with a deadline, as they come.
-- Invoke, Expand and SetValue return before the program has acted:
-  wait for the effect with `Retry.WhileNull`/`WhileTrue` (a dialog
-  gone, a list item there, a menu open), never with fixed sleeps.
+- Dialogs are owned windows: children of the window that owns them
+  (`main.FindFirstChild(cf => cf.ByControlType(Window))`), not of the
+  desktop. Answer them in a loop with a deadline, as they come.
+- Invoke, Expand and SetValue return before the program has acted: wait
+  for the effect with `Retry.WhileNull`/`WhileTrue` (a dialog gone, a
+  list item there, a menu open), never with fixed sleeps.
 - An element can go between two reads (a dialog closing after OK, a
-  pane FileZilla rebuilds): FlaUI then throws ElementNotAvailable
+  pane the program rebuilds): FlaUI then throws ElementNotAvailable
   (COMException 0x80040201) from the second read, on Windows too. Wait
   for a dialog to go with a check that treats the exception as "gone"
-  (the test's `Showing`), and catch it in polling loops (filezilla_flaui
-  failed once in four runs before it did).
+  (the test's `Showing`), and catch it in polling loops.
 - On failure print the tree (the test's `Dump`: control type, name,
-  automation id, class for a few levels): that is how the Welcome
-  dialog's absence (owned windows) and the missing menu bar showed.
-- mcs (C# 7-ish) rejects nullable reference annotations (`Window?`):
-  leave them out; a type forwarded to an assembly not in build.sh's
-  reference list (System.Threading.Thread) needs that assembly added
-  there.
-- A UIA call on another process's element is a sent message to it
-  (SendMessageTimeout with SMTO_ABORTIFHUNG and the TransactionTimeout,
-  as on Windows): if the program's thread is stuck (not pumping), the
-  call waits up to the TransactionTimeout (20 s by default) or 5 s once
-  the program counts as hung, then reads empty (a ledger line
-  `UIAutomationCore.dll!SendMessageTimeout(timed out)` says so).
+  automation id, class for a few levels).
+- Close a window with `window.Close()`: FlaUI invokes the title bar's
+  Close button (AutomationId "Close", WM_SYSCOMMAND SC_CLOSE posted), so
+  it returns before the program has acted; wait for `app.HasExited` or
+  the window gone. Window/Transform calls need a top-level window with a
+  caption: SetWindowVisualState(Maximized) on a window without
+  WS_MAXIMIZEBOX is UIA_E_INVALIDOPERATION (InvalidOperationException),
+  Move on a maximized one too.
+- A window's first UIA child is its TitleBar (no HWND): count a window's
+  controls with a NativeWindowHandle condition, or by ControlType, not
+  by position among all children.
+- Grids: FlaUI's AsGrid works on a report-view list view (cells are the
+  items' children, so FindAllDescendants on a big list visits a cell per
+  column too; search children of the list where you can).
 - Events (FlaUI's Register*Event): the handlers run on
-  UIAutomationCore's event thread, not the test's, so collect what they
-  see in a ConcurrentQueue and wait for it with Retry (flaui_test's
+  UIAutomationCore's event thread, not the test's: collect what they see
+  in a ConcurrentQueue and wait for it with Retry (flaui_test's
   `Event`); register before the action that raises the event (an Add
   returns once the event thread's hook is in place). They come from
   WinEvents that user32 and comctl32 raise: an event a control does not
-  raise yet never comes (ARCHITECTURE "Windows across processes:
-  WinEvents" lists them).
+  raise never comes (ARCHITECTURE "Windows across processes: WinEvents"
+  lists them).
 - A native thread that calls into .NET COM objects (a handler) must be
-  in an apartment (CoInitializeEx): without it the call fails with
+  in an apartment (CoInitializeEx), or the call fails with
   CO_E_NOTINITIALIZED (0x800401F0) and the handler never runs.
-- Grids: FlaUI's AsGrid works on a report-view list view (cells are the
-  items' children: a FindAllDescendants on a big list now visits a
-  cell per column too; search children of the list where you can).
-- **A thread's windows go when it ends** (as on Windows, since
-  2026-11-02): a test or gala DLL that creates a window on a worker
-  thread which then returns loses the window (IsWindow FALSE, sends fail
-  with ERROR_INVALID_WINDOW_HANDLE). Keep such a thread alive and
-  pumping. A thread gets a message queue (PostThreadMessage reaches it)
-  only once it creates a window or calls a message function; post to a
-  new thread after it has called PeekMessage, as PostThreadMessage's
-  documentation says.
-- user32's queue event is one per process (auto-reset): with several
-  threads waiting in GetMessage at once, a wake can go to the wrong one,
-  which then waits again. Tests with several pumping threads keep only
-  one waiting at a time (windows_across_test waits on thread handles
-  without pumping while a worker pumps).
-- Close a window with `window.Close()`: FlaUI invokes the title bar's
-  Close button (AutomationId "Close", WM_SYSCOMMAND SC_CLOSE posted),
-  so it returns before the program has acted; wait for the effect
-  (`app.HasExited`, the window gone). Its Window/Transform calls need a
-  top-level window with a caption: SetWindowVisualState(Maximized) on a
-  window without WS_MAXIMIZEBOX is UIA_E_INVALIDOPERATION (an
-  InvalidOperationException in .NET), Move on a maximized one too.
-- A window's first UIA child is now its TitleBar (no HWND): count a
-  window's controls with a NativeWindowHandle condition, or by
-  ControlType, not by position among all children.
-- user32 calls on another process's window that change it (SetWindowPos,
-  menus) go there as a message user32 answers itself (GALA_SETWINDOWPOS,
-  GALA_MENU, in the system range below WM_USER); a new one needs its
-  buffer marshaled in `foreign::send_remote` and an entry in
-  `carries_pointer` (it cannot be posted), and its answer in
+- A UIA call on another process's element is a sent message to it
+  (SendMessageTimeout with SMTO_ABORTIFHUNG and the TransactionTimeout,
+  as on Windows): if the program's thread is not pumping, the call waits
+  up to the TransactionTimeout (20 s by default) or 5 s once the program
+  counts as hung, then reads empty (ledger line
+  `UIAutomationCore.dll!SendMessageTimeout(timed out)`).
+
+Implementing what FlaUI needs (gala's UIAutomationCore, user32):
+
+- FlaUI reads every property with GetCurrentPropertyValueEx(id, TRUE)
+  and compares the result with ReservedNotSupportedValue by reference: a
+  property UIAutomationCore cannot answer must be the not-supported
+  value, not VT_EMPTY, or FlaUI converts null and throws.
+- A property whose value is an element or element array
+  (SelectionContainer, Selection) is VT_UNKNOWN holding our element /
+  IUIAutomationElementArray object: FlaUI casts the RCW to the interface
+  (QueryInterface), so those objects must answer it.
+- Driving another process's list view: LVM_* messages are not marshaled
+  across processes (they are above WM_USER, on Windows too); pointers in
+  them must be in the list's process (`items.rs`'s `Buffer`). LB_/CB_
+  messages are marshaled by user32 (`foreign::send_remote`): pass local
+  pointers.
+- user32 calls on another process's window that change it
+  (SetWindowPos, menus) go there as a message user32 answers itself
+  (GALA_SETWINDOWPOS, GALA_MENU, in the system range below WM_USER); a
+  new one needs its buffer marshaled in `foreign::send_remote` and an
+  entry in `carries_pointer` (it cannot be posted), and its answer in
   `SendMessageW` before the window procedure.
 
-## Bootable images and USB sticks
+### Chromium (BR)
 
-`cargo xtask iso [--name N] [--scenario S] [--file PATH[=DIR]]... [cmdline...]`
-writes `target/<profile>/gala-<N>.iso` with every program and DLL, a
-scenario's files and command line (without `qemu_exit`), host files as
-`C:\DIR\<name>`, or a demo (hello, go_hello, go_goroutines). The ISO is
-hybrid, so `dd` to a USB stick boots on BIOS and UEFI (README.md has the
-steps). Checked by hand in QEMU: `-drive file=...,format=raw` under
-SeaBIOS and OVMF, and as `usb-storage` behind `qemu-xhci`. Use `-cpu max`
-in manual QEMU runs: QEMU's default CPU model has no RDRAND, and Go
-programs then fail fast (0xc0000409, ledger: ProcessPrng(no RDRAND)).
+`cargo xtask boot-test chromium_version` (PENDING; PREBUILT `chromium`:
+370 MB download, ~430 MB unpacked, a 430 MB ISO per run: delete
+`target/debug/test-chromium_*.iso` after a failed run). A run takes
+about a minute under TCG. Read, in order:
 
-## Signed images (R8, chain of trust)
+- Chromium's own log lines in the serial log: `[pid:tid:date:LEVEL:file:line]`
+  (`--enable-logging=stderr`; the scenario's `dump=` adds
+  `C:\chromium\debug.log` and the profile's `chrome_debug.log` when they
+  exist). Exit status 0xffff7001/7002 follows a FATAL; 21 is
+  CHROME_RESULT_CODE_PROFILE_IN_USE (the process singleton: its mutex and
+  lock file).
+- `delay_load_failure_support.cc ... NOTREACHED`: a delay-loaded
+  function or DLL is missing; the ledger's `missing export` / `missing
+  dll` line names it. chrome.dll delay-loads most of what it uses, and
+  `gala_stubs` stubs are invisible to GetProcAddress, so a stubbed delay
+  import fails the same way. Rather than one function per run, list them
+  all: `python3 -I tools/import_survey.py target/x86_64-pc-windows-msvc/release
+  target/prebuilt/chromium/chrome-win/chrome.dll` prints every import
+  (static and delay-loaded) gala's built DLLs lack or have only as stubs,
+  API set names resolved as the loader resolves them.
+- Imports by ordinal (`#N`) need the ordinal pinned in the DLL's
+  build.rs (`/EXPORT:name,@N`, the number checked in Wine's .spec, not
+  recalled): an unpinned DLL numbers its exports arbitrarily, so `#N`
+  binds to an unrelated function and the survey cannot tell.
+- A `Check failed` with an unresolved backtrace (no chrome.dll symbols:
+  its PDB does not fit the disk): read the Chromium source around the
+  last log line before it, and the ledger's last lines (each
+  `unsupported` / `missing export` names the function that failed).
+- `XTASK_EVENTS=syscall,image,fault,file,process,thread`: the `file`
+  category (`"ev":"open"`, path, handle, status) shows each open, which
+  `syscall` events cannot (their arguments are pointers).
+- A crash report's `module+offset`: symbolize it with the snapshot's own
+  PDBs (symbols are not disassembly: CLEAN_ROOM allows reading
+  Chromium's source, and the PDB names the source line). The revision is
+  pinned partly because its `chrome-win32-syms.zip` exists (922 MB): read
+  only the member you need with HTTP range requests (Python's `zipfile`
+  over a file object whose `readinto` sends `Range:` requests), e.g.
+  `chrome-win32-syms/chrome_elf.dll.pdb` (30 MB) or `chrome.exe.pdb`
+  (40 MB). Put the PDB next to (a link to) the module and run
+  `llvm-symbolizer --obj=chrome_elf.dll 0x<ImageBase + offset>`
+  (ImageBase 0x180000000 for the DLLs, 0x140000000 for chrome.exe).
+- Chromium's source (github.com/chromium/chromium; crashpad on
+  chromium.googlesource.com) says what a function expects: read it as
+  documentation, as for any program.
+- A `CHECK` in Crashpad's handler kills only the handler (the browser
+  logs "crash server did not respond" and goes on until it needs it).
+  The handler re-runs chrome.exe as a child with an inherited handle
+  list, so child-process and handle-inheritance bugs show there first.
 
-Every image xtask makes is sealed (ARCHITECTURE "Chain of trust",
-"What is built"; code `xtask/src/trust.rs`):
-- **The test key** is made on first use in `target/trust/`
-  (`test-signing.seed`, the private Ed25519 seed, mode 0600, never
-  committed; `test-signing.pub`). Every kernel xtask builds trusts it
-  (`GALA_TRUST_KEY` = its public key in hex, read at compile time).
-  Deleting `target/trust/` makes a new key: the next build recompiles
-  the kernels with it. A kernel from another checkout (another key)
-  refuses this checkout's manifests: `manifest: ... refused: signed by
-  key X, this kernel trusts Y`.
-- **The manifest** `/boot/gala.manifest` lists every file in `/boot`
-  (size, SHA-256), signed as release 1 with floor 1. A scenario that
-  needs another release or a file left out goes in
-  `trust::SCENARIO_SIGNING` (or `EARLIER_SIGNING` for the earlier
-  boots of a disk scenario).
-- **limine.conf** has `#<BLAKE2B>` after every path and its own hash
-  enrolled in the Limine executables: editing it on a USB stick (the
-  command line) makes Limine refuse to boot (`CHECKSUM MISMATCH FOR
-  CONFIG FILE`); make a new image with `cargo xtask iso ... <cmdline>`
-  instead. A module changed after sealing: `PANIC: Blake2b hash for URI
-  ... does not match!` (Limine prints it on the serial port only with
-  `serial: yes`, which the boot-chain scenarios set).
-- **An unsigned build** (a developer's own kernel, a quick experiment):
-  `XTASK_UNSIGNED=1 cargo xtask ...` builds the kernels without a key
-  and makes images as before R8 (no manifest, no hashes, nothing
-  enrolled); the kernel logs `manifest: unsigned build (no release key
-  built in): nothing is checked`, hands over to any image and never
-  raises a disk's rollback floor. The handover and rollback scenarios
-  expect a signed build. Switching between the two rebuilds the kernel
-  crate (the key is a compile-time input).
-- **The kernel on an image is stripped** of debug information (xtask's
-  `copy_kernel`); `cargo xtask symbolize` uses the build's ELF in
-  `target/`, which keeps it. A handover that comes seconds late (its
-  program finished before) is the SHA-256 of a large image: check the
-  image's kernel size.
-- **A disk that refuses the build** (`rollback: refused: release 1 is
-  below the rollback floor 2`): the disk image was used by a newer
-  release; make a fresh one (the floor lives in sector 0 at byte 64).
+### Installing software (`gala install`, ROADMAP PK)
 
-## shasha features: the `gala` command first
-
-**Every new shasha feature gets its `gala` command first** (the owner,
-2026-11-02: everything the graphical shell does can be done from a
-terminal). Make it a named action (`nt::desktop::Action`, or a new
-GalaDesktopAction request in `nt/action.rs` and `user/gala`), test it
-through `gala` the way `gala_cli_test` does (start the program with
-`gala start`, wait on `gala windows`, check what the program saw), and
-only then bind the mouse or a key to it, calling the same action. A
-`gala` command is also the easy way to put a screen test's window
-where its pixel checks expect it (no pointer arithmetic).
-
-- A window moved without a new size (snapped from the left half to the
-  right) gets WM_MOVE but no WM_SIZE, as on Windows: a test program
-  that watches its rectangle checks both.
-- A program's state reaches the registry after it handled the request
-  (user32 mirrors it): poll IsZoomed/IsIconic from another process
-  rather than reading them once right after `gala windows` (which is
-  shasha's own state) changed.
-
-## Installing software (`gala install`, ROADMAP PK)
-
-- The logic is `user/galapkg`, tested on the host: `cargo test -p
+- **The logic** is `user/galapkg`, tested on the host: `cargo test -p
   galapkg` (seconds; `cargo xtask test` runs it with the unit tests).
   Its install tests run against `user/pk_install_test/source` through an
   in-memory machine and make every mutating call fail in turn: a new
   step in the transaction gets that coverage for free, so add steps
   through `install::Tx`, never with a bare `Host` call.
-- The test packages are made by `python3 -I
+- **The test packages** are made by `python3 -I
   user/pk_install_test/make_source.py` (zips of `user/bin/hello.exe`,
-  SHA-256s written into the manifests); rerun it after changing them.
+  SHA-256s written into the manifests; `export-tests` reruns it).
   `manifests/b` and `manifests/j` are real winget-pkgs manifests (leave
   them; THIRD_PARTY.md).
-- `galapkg::winget` (the resolver) is tested on the host only: `cargo
-  test -p galapkg winget` (`-- --nocapture` prints the corpus summary
-  and every warning the corpus gives). The corpus is
-  `user/galapkg/testdata/winget-corpus/manifests` (real manifests: never
-  edit them; `.gitattributes` keeps their CRLFs). `selected.txt` there is
-  the golden answer of installer selection for 8 machine profiles; after
-  a deliberate rule change regenerate it with `GALAPKG_BLESS=1 cargo
-  test -p galapkg winget::corpus` and read the diff (each changed line is
-  a package whose installer moved), and say why in the commit.
-- Refreshing the corpus (rarely; keep it under ~3 MB): outside the
-  repository, `git clone --depth 1 --filter=blob:none --sparse
-  https://github.com/microsoft/winget-pkgs <dir>`, `git -C <dir> ls-tree
-  -r HEAD --name-only manifests > paths.txt`, `python3 -I
-  user/galapkg/testdata/winget-corpus/pick.py paths.txt 400 > pick.txt`,
-  `git -C <dir> sparse-checkout set --no-cone --stdin < pick.txt`, copy
-  `<dir>/manifests` over the corpus's, bless the golden, and record the
-  new commit in THIRD_PARTY.md. A manifest that fails to read is a
-  parser bug to fix (winget-pkgs is validated), not a file to drop.
-- The corpus test fails with the first differing golden lines; a
-  manifest that does not read is listed with `file:line:col`.
-- The boot test is `cargo xtask boot-test pk_install_zip`; a failed run
-  shows the install log twice (`logtee: install.log:` lines, and
-  pk_install_test prints it after the failing check).
-- gala.exe is `no_std` with `alloc` (gala_heap): code that brings in
-  more of `alloc` may need another ntdll C function in main.rs's import
-  list (`memmove`, `strlen` were needed; the link error names it).
-  advapi32 is loaded at run time (`pkg::Reg`): do not import it
-  statically, or `gala`'s window commands break on images without it.
-- MSI and cabinet fixtures (`user/galapkg/testdata/msi`): `sh
-  user/galapkg/testdata/msi/make_fixtures.sh` rebuilds `basic.msi`
-  (from `basic.wxs` with wixl), `long.msi.zlib` (a generated package
-  with a 70 KB string, zlib-compressed because it is mostly one letter),
-  `mszip.cab` and `stored.cab` (gcab), and rewrites `expected/` from
-  msiinfo, msiextract, gcab and 7z; commit all of it together (the MSI's
-  package code and dates change on every run, the tests read them from
-  `expected/`). wixl lacks some WiX attributes (VBScriptCall, ShortName,
-  Product/@Codepage is ignored: its pools have code page 0 with UTF-8
-  strings); `msiinfo export` writes a `Binary/` directory into the
-  current directory (the script runs it in its temporary directory).
-  wixl miswrites a string longer than 128 KiB (its own reader rejects it,
-  "string table load failed"): keep long-string fixtures between 64 and
-  128 KiB. gcab writes only uncompressed and MSZIP cabinets (7z none).
-  The script also builds the install-plan packages `plan.msi` (x64,
-  `wixl -a x64`), `dual.msi` and `badcond.msi` and records msiinfo's
-  export of their tables. Rerunning it rewrites `basic.msi`,
-  `long.msi.zlib` and `expected/basic.suminfo` with new dates and
-  package codes: restore them with `git checkout` unless they were what
-  you changed.
-- wixl writes less than WiX: no `Condition` under Feature or Component,
-  no `Directory` on a CustomAction, no `MultiStringValue` (write the
-  `[~]` value as a string), no `Package/@Platform` (use `wixl -a x64`);
-  it writes HKMU as Root 4 instead of -1, drops the `#x`/`#%` prefixes of
-  binary and expandable values and eats `$` in formatted text (`[$Comp]`
-  becomes `[Comp]`). make_fixtures.sh fixes all of these afterwards with
-  `msibuild <msi> -q "<SQL>"` (UPDATE, INSERT, CREATE TABLE work; quote
-  names with backquotes). The test `plan_packages_read_as_msiinfo_exports_them`
-  checks the reader against msiinfo after that rewrite.
-- The install plan (`msi::plan`) has no msiexec to compare with: its
-  tests' expected values are the SDK's documented rules, each test
-  naming its page. When a real Windows run becomes possible, record
-  `msiexec /i x.msi /qn /l*v log` of the same fixtures and compare
-  (TODO).
-- LZX (`user/galapkg/testdata/lzx`): no tool on Linux writes LZX, so
-  `sh user/galapkg/testdata/lzx/make_fixtures.sh` makes the cabinets
-  with the test encoder (`src/lzx/encode.rs`, through the ignored test
-  `lzx::tests::write_fixtures`) and records cabextract's and 7-Zip's
-  decoding (`apt-get install -y cabextract`); the test
-  `fixtures_match_cabextract_and_7z` also checks the encoder still makes
-  the checked-in files byte for byte (change the encoder: rerun the
-  script). `sh user/galapkg/testdata/lzx/fetch_real.sh` fetches a cabinet
-  Microsoft made (inside the DirectX web installer, not committed) into
-  `target/galapkg-fixtures`; `microsoft_cabinet_matches_cabextract`
-  decodes it when present (it skips otherwise, so run the fetch before
-  changing `lzx.rs`). Do not read cabextract's, libmspack's, 7-Zip's or
-  Wine's source: black-box outputs only.
-- The readers' own tests build edge cases with small writers
-  (`cfb::tests::build`, `cab::tests::build_with`); 7-Zip reads what they
-  make (checked by hand when they were written: `7z t`), keep it so.
-- Every installed command is a copy of gala.exe: a gala.exe change does
-  not reach commands installed before it until they are reinstalled.
-- MSIX fixtures (`user/galapkg/testdata/msix/`): regenerate with
-  `python3 -I user/galapkg/testdata/msix/make_fixtures.py`, then run
-  `sh user/galapkg/testdata/msix/check_fixtures.sh` (unzip, 7z, xmllint,
-  sha256sum: the independent cross-check) and update the hashes, line
-  numbers and sizes the `msix::tests` expect. Pitfalls: another zlib
-  version may deflate differently (the fixtures are checked in; only a
-  regeneration changes them); the generator refuses a fixture over
-  100 KB; the corrupted fixtures must stay valid zips where the test says
-  so (bad_hash keeps the changed data's CRC-32 and block Sizes, only the
-  hash disagrees), or the reader reports a different error first; shell
-  functions in check_fixtures.sh share variables with their callers. The
-  test publisher's id and the block-run rules come from our reading of
-  the documentation, not from makeappx (ARCHITECTURE "MSIX/AppX
-  reading" says which values are independently verified).
-- Low on disk: a few user programs can be built alone into a scratch
-  target directory with xtask's flags (`cargo build --release --target
-  x86_64-pc-windows-msvc --config 'target.x86_64-pc-windows-msvc.rustflags=
-  ["--remap-path-prefix=<cargo home>=/cargo"]' -p gala -p ...`); the
-  output is byte-identical to `export-tests`'s when no other program of
-  the batch shares a dependency with different features (`cargo tree
-  --workspace -i <crate>` tells).
 - **Installer packages (Inno, NSIS, exe; `install::exe`)**: the NSIS
   test installers are built from `user/pk_install_test/nsis/pknsis.nsi`
   by make_source.py with `makensis` (`apt install nsis`; Debian's package
@@ -1371,74 +1213,180 @@ where its pixel checks expect it (no pointer arithmetic).
   reproducible; without makensis the checked-in installers are kept.
   Third-party installers run only inside QEMU, never on the host. The
   boot test is `cargo xtask boot-test pk_install_nsis`; a missing import
-  of the installer stops its load before anything runs (exit 3/4 with the
-  ledger naming it): compare its imports with gala's DLLs (`llvm-readobj
-  --coff-imports`). The Fake host in `install/tests.rs` plays the
+  of the installer stops its load before anything runs (exit 3/4 with
+  the ledger naming it). The Fake host in `install/tests.rs` plays the
   installers (`run`), the NSIS uninstaller's late removal (`sleep`) and
   an Inno Setup installer (`inno_registers`).
 - **A vendor installer exits with an odd code and no ledger line**:
-  boot with `XTASK_EVENTS=syscall,image` and list the installer's
-  system calls (its pid from the `image` event; skip the memory calls and
-  the reads): the failing one is usually near the end. That is how NSIS's
-  needs were found: a delete-on-close open without DELETE (0xc000000d),
-  a handle printed with `%Id` coming back as 0 (an NtWriteFile on handle
-  0), a %TEMP% copy deleted before CreateProcess (GalaCreateProcess
-  0xc0000034 in a loop). NSIS exit codes: 1 cancelled, 2 aborted (an
-  error, silently in /S mode). The events file is large (18 MB for
-  pk_install_nsis): delete it afterwards.
+  boot with `XTASK_EVENTS=syscall,image` and list the installer's system
+  calls (its pid from the `image` event; skip the memory calls and the
+  reads): the failing one is usually near the end. NSIS exit codes: 1
+  cancelled, 2 aborted (an error, silently in /S mode). The events file
+  is large (18 MB for pk_install_nsis): delete it afterwards.
+- **The boot test** is `cargo xtask boot-test pk_install_zip`; a failed
+  run shows the install log twice (`logtee: install.log:` lines, and
+  pk_install_test prints it after the failing check).
+- **gala.exe is `no_std` with `alloc`** (gala_heap): code that brings in
+  more of `alloc` may need another ntdll C function in main.rs's import
+  list (`memmove`, `strlen`; the link error names it). advapi32 is
+  loaded at run time (`pkg::Reg`): do not import it statically, or
+  `gala`'s window commands break on images without it. Every installed
+  command is a copy of gala.exe: a gala.exe change does not reach
+  commands installed before it until they are reinstalled.
 
-## Screenshots
+**The winget resolver** (`galapkg::winget`) is tested on the host only:
+`cargo test -p galapkg winget` (`-- --nocapture` prints the corpus
+summary and every warning).
 
-`cargo xtask screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]`
+- The corpus is `user/galapkg/testdata/winget-corpus/manifests` (real
+  manifests: never edit them; `.gitattributes` keeps their CRLFs).
+  `selected.txt` there is the golden answer of installer selection for 8
+  machine profiles; after a deliberate rule change regenerate it with
+  `GALAPKG_BLESS=1 cargo test -p galapkg winget::corpus`, read the diff
+  (each changed line is a package whose installer moved) and say why in
+  the commit. The test fails with the first differing golden lines; a
+  manifest that does not read is listed with `file:line:col`.
+- Refreshing the corpus (rarely; keep it under about 3 MB): outside the
+  repository, `git clone --depth 1 --filter=blob:none --sparse
+  https://github.com/microsoft/winget-pkgs <dir>`, `git -C <dir> ls-tree
+  -r HEAD --name-only manifests > paths.txt`, `python3 -I
+  user/galapkg/testdata/winget-corpus/pick.py paths.txt 400 > pick.txt`,
+  `git -C <dir> sparse-checkout set --no-cone --stdin < pick.txt`, copy
+  `<dir>/manifests` over the corpus's, bless the golden, and record the
+  new commit in THIRD_PARTY.md. A manifest that fails to read is a
+  parser bug to fix (winget-pkgs is validated), not a file to drop.
+
+**MSI and cabinet fixtures** (`user/galapkg/testdata/msi`):
+
+- `sh user/galapkg/testdata/msi/make_fixtures.sh` rebuilds `basic.msi`
+  (from `basic.wxs` with wixl), `long.msi.zlib` (a generated package with
+  a 70 KB string, zlib-compressed because it is mostly one letter),
+  `mszip.cab` and `stored.cab` (gcab), the install-plan packages
+  `plan.msi` (`wixl -a x64`), `dual.msi` and `badcond.msi`, and rewrites
+  `expected/` from msiinfo, msiextract, gcab and 7z. Commit all of it
+  together; the MSI's package code and dates change on every run (the
+  tests read them from `expected/`), so restore `basic.msi`,
+  `long.msi.zlib` and `expected/basic.suminfo` with `git checkout`
+  unless they were what you changed.
+- wixl's limits: it lacks some WiX attributes (VBScriptCall, ShortName;
+  Product/@Codepage is ignored: its pools have code page 0 with UTF-8
+  strings); it miswrites a string longer than 128 KiB (its own reader
+  rejects it, "string table load failed"), so keep long-string fixtures
+  between 64 and 128 KiB; it writes no `Condition` under Feature or
+  Component, no `Directory` on a CustomAction, no `MultiStringValue`
+  (write the `[~]` value as a string), no `Package/@Platform` (use
+  `wixl -a x64`); it writes HKMU as Root 4 instead of -1, drops the
+  `#x`/`#%` prefixes of binary and expandable values and eats `$` in
+  formatted text (`[$Comp]` becomes `[Comp]`). make_fixtures.sh fixes
+  all of these afterwards with `msibuild <msi> -q "<SQL>"` (UPDATE,
+  INSERT, CREATE TABLE work; quote names with backquotes); the test
+  `plan_packages_read_as_msiinfo_exports_them` checks the reader against
+  msiinfo after that rewrite.
+- `msiinfo export` writes a `Binary/` directory into the current
+  directory (the script runs it in its temporary directory). gcab writes
+  only uncompressed and MSZIP cabinets.
+- The install plan (`msi::plan`) has no msiexec to compare with: its
+  tests' expected values are the SDK's documented rules, each test
+  naming its page. When a Windows run becomes possible, record `msiexec
+  /i x.msi /qn /l*v log` of the same fixtures and compare.
+- The readers' own tests build edge cases with small writers
+  (`cfb::tests::build`, `cab::tests::build_with`); 7-Zip reads what they
+  make (`7z t`), keep it so.
+
+**LZX** (`user/galapkg/testdata/lzx`): no tool on Linux writes LZX, so
+`sh user/galapkg/testdata/lzx/make_fixtures.sh` makes the cabinets with
+the test encoder (`src/lzx/encode.rs`, through the ignored test
+`lzx::tests::write_fixtures`) and records cabextract's and 7-Zip's
+decoding (`apt-get install -y cabextract`); the test
+`fixtures_match_cabextract_and_7z` also checks the encoder still makes
+the checked-in files byte for byte (change the encoder: rerun the
+script). `sh user/galapkg/testdata/lzx/fetch_real.sh` fetches a cabinet
+Microsoft made (inside the DirectX web installer, not committed) into
+`target/galapkg-fixtures`; `microsoft_cabinet_matches_cabextract`
+decodes it when present (it skips otherwise, so run the fetch before
+changing `lzx.rs`). Do not read cabextract's, libmspack's, 7-Zip's or
+Wine's source: black-box outputs only.
+
+**MSIX fixtures** (`user/galapkg/testdata/msix/`): regenerate with
+`python3 -I user/galapkg/testdata/msix/make_fixtures.py`, then run `sh
+user/galapkg/testdata/msix/check_fixtures.sh` (unzip, 7z, xmllint,
+sha256sum: the independent cross-check) and update the hashes, line
+numbers and sizes the `msix::tests` expect. Another zlib version may
+deflate differently (the fixtures are checked in; only a regeneration
+changes them); the generator refuses a fixture over 100 KB; the
+corrupted fixtures must stay valid zips where the test says so
+(bad_hash keeps the changed data's CRC-32 and block sizes, only the hash
+disagrees), or the reader reports a different error first; shell
+functions in check_fixtures.sh share variables with their callers. The
+test publisher's id and the block-run rules come from our reading of
+the documentation, not from makeappx (ARCHITECTURE "MSIX/AppX reading"
+says which values are independently verified).
+
+## Tools
+
+### Screenshots
+
+`cargo xtask screenshot [--uefi] [--at 1,3,5] [--name N] [--scenario S] [kernel cmdline...]`
 boots an ISO (all test programs and DLLs as boot modules, ntdll in
-System32) and writes `target/screenshots/<name>-<t>s.png` at each time,
-through QEMU's monitor (`screendump`). The kernel's screen console shows
-the same log as the serial port (green header bar; warnings yellow, errors
-and panics red), so a screenshot shows what is going on. Example:
+System32; BIOS unless `--uefi`) and writes
+`target/screenshots/<name>-<t>s.png` at each time (default 3 s) through
+QEMU's monitor (`screendump`). `--scenario S` adds S's files from the
+repository (scripts, archives). The kernel's screen console shows the
+same log as the serial port (green header bar; warnings yellow, errors
+and panics red). The boot splash replaces the text console: add
+`bootlog` to see the log.
 
     cargo xtask screenshot --name demo --at 6 run=hello.exe,smp_test.exe args=,cpus=2
-
-`--scenario S` adds S's files from the repository (scripts, archives):
-
     cargo xtask screenshot --name tcc --scenario tcc --at 16 run=busybox.exe "args=sh%20C:/gala/tcc.sh%20C:/gala/tcc.tar"
 
-Boot tests pass `noscreen` (serial only) except in the UEFI scenarios:
-drawing text roughly doubles kernel time under emulation.
+#### Screen checks
 
-Screen checks: a scenario listed in `SCREEN_SCENARIOS` (xtask) gets a
-QEMU monitor socket; when its serial log shows the trigger line, xtask
-takes a screendump and checks pixels (exact colours, or "some pixel near
-this colour in this rectangle" for anti-aliased text) and logs
-`xtask: screen ok` or the mismatch. A check has steps: each first sends
-QEMU monitor commands (`mouse_move dx dy`, `mouse_button 1` (bit 0 the
-left button, bit 1 the right: `mouse_button 2` is a right press), `sendkey`;
-250 ms apart: with 100 ms, clicks landed off target when the whole suite
-loaded the host), then takes a screendump (none when the step checks no
-pixels: e.g. the click that ends the program), kept as
-`target/debug/test-<scenario>.screen<step>.png`. The guest's pointer
-starts in the middle of the screen and is clamped to it: moving it far
-up and left first (`mouse_move -255 -255` three times) puts it at (0, 0)
-whatever the earlier steps did. Windows-key chords are one `sendkey`
-(`sendkey meta_l-right`: Snap). The wheel: `mouse_move 0 0 1` is one
-notch up (away from the user; a negative dz is down). A step's pixel check is retried (a new screendump every 0.5 s,
-for about 30 s) before it fails, because a redraw under load (the full
-suite) can outlast the first dump, and a step may wait for the program
-(FileZilla's TLS handshake, then its certificate dialog). Input is
-queued: the guest may still be processing typed keys when a dump is
-taken, so check for the final state. A mouse press is sent 0.75 s after the
-command before it, so the moves queued ahead of it are drained first. Keep each
-`mouse_move` within 255 per axis: QEMU queues a few PS/2 packets of at
-most 255 and hands the rest of a larger move over with later events (a
-click then lands somewhere else); reach a corner with several moves. Such scenarios must be UEFI ones (BIOS
-boots have no framebuffer). A program's trigger can be the desktop's
-`desktop: shown window '<title>'` log line. When a click seems to do
-nothing, give that step a pixel check that always passes to get its
-screendump; if the click landed, look at how the program waits (wx's
-modal loops wait in MsgWaitForMultipleObjects, which must wake for the
-input) — the hang dump shows each thread's system call.
+A scenario in `SCREEN_SCENARIOS` gets a QEMU monitor socket; when its
+serial log shows the trigger line (a program's can be the desktop's
+`desktop: shown window '<title>'`), xtask runs the check's steps and
+logs `xtask: screen ok` or the mismatch. Such scenarios must boot by
+UEFI (BIOS boots have no framebuffer).
+
+- A step first sends QEMU monitor commands, 250 ms apart: `mouse_move dx
+  dy`, `mouse_button 1` (bit 0 the left button, bit 1 the right:
+  `mouse_button 2` is a right press), `sendkey`. Then it takes a
+  screendump (none when the step checks no pixels, e.g. the click that
+  ends the program), kept as `target/debug/test-<scenario>.screen<step>.png`,
+  and checks pixels (exact colours, or "some pixel near this colour in
+  this rectangle" for anti-aliased text).
+- A pixel check is retried (a new screendump every 0.5 s, for about
+  30 s) before it fails: a redraw under load can outlast the first
+  dump, and a step may wait for the program.
+- The guest's pointer starts in the middle of the screen and is clamped
+  to it: `mouse_move -255 -255` three times puts it at (0, 0) whatever
+  the earlier steps did. Keep each `mouse_move` within 255 per axis:
+  QEMU queues PS/2 packets of at most 255 and hands the rest of a larger
+  move over with later events (a click then lands elsewhere).
+- A mouse press is sent 0.75 s after the command before it, so queued
+  moves are drained first. Typed input is queued too: check for the
+  final state.
+- Windows-key chords are one `sendkey` (`sendkey meta_l-right`: Snap).
+  The wheel: `mouse_move 0 0 1` is one notch up (away from the user; a
+  negative dz is down).
+- When a click seems to do nothing, give that step a pixel check that
+  always passes to get its screendump; if the click landed, look at how
+  the program waits (wx's modal loops wait in MsgWaitForMultipleObjects,
+  which must wake for the input): the hang dump shows each thread's
+  system call.
+- A dump is taken as soon as its pixels match, which may be while the
+  program is still repainting. Check the final state with pixels that
+  only it has (text in the new place); to tell a wrong layout from a
+  late repaint, probe SetWindowPos (the sizes the program set) and
+  present a window's whole buffer again a few seconds later: if the dump
+  is right then, the layout was.
+- A screen check pins a wallpaper with `wallpaper=<name>` (the default
+  is a random one).
+
+#### Fonts, icons and wallpapers
 
 The desktop's text and pictures are baked at build time, so the kernel
-has no font engine or SVG renderer (both are xtask host dependencies):
+has no font engine or SVG renderer (both are xtask host dependencies).
+Rerun the command and commit its output after changing a source.
 
 - `cargo xtask bake-fonts` rasterizes Selawik (`fonts/selawik/`) with
   fontdue into `kernel/assets/ui-<px>-<weight>.glyphs` (12 regular and
@@ -1448,30 +1396,22 @@ has no font engine or SVG renderer (both are xtask host dependencies):
 - `cargo xtask bake-icons` renders `kernel/assets/fortress.svg` (24 and
   96 px, square) and `wordmark.svg` (112 px wide, cropped) with resvg
   into `.alpha` coverage masks; the compositor tints them.
+- Wallpapers are QOI files in `kernel/assets/wallpapers/` (provenance
+  and conversion in its README.md); scenarios that use the screen list
+  them in `EXTRA_MODULES` (`Windows/Web/Wallpaper`).
 
-- The desktop's wallpapers are QOI files in `kernel/assets/wallpapers/`
-  (provenance and conversion in its README.md); scenarios that use the
-  screen list them in `EXTRA_MODULES` (`Windows/Web/Wallpaper`), and a
-  screen check pins one with `wallpaper=<name>` on the command line (the
-  default is a random one).
-- The boot splash replaces the text console on the screen; boot with
-  `bootlog` (e.g. `cargo xtask screenshot ... bootlog`) to see the log
-  there.
-
-Rerun the command and commit its output after changing a source.
-
-## Serving to a browser
+### Serving to a browser
 
 `cargo xtask serve <scenario> [port]` boots a network scenario (nginx,
-nginx_master, nginx_tls, go_http, ...) as its boot test does, but forwards
-a fixed host port (default 8080) to the guest's port 7 and keeps the VM
-running, with the serial log on stdout. Then open `http://127.0.0.1:8080/`
-(or `https://` for nginx_tls; the certificate is self-signed) in a browser.
-For a picture, Playwright's Chromium is preinstalled in the cloud
-container: `chromium.launch({args: ['--no-proxy-server']})`, because
-the agent proxy would otherwise intercept 127.0.0.1.
+nginx_master, nginx_tls, go_http, ...) as its boot test does, but
+forwards a fixed host port (default 8080) to the guest's port 7 and
+keeps the VM running, with the serial log on stdout. Then open
+`http://127.0.0.1:8080/` (or `https://` for nginx_tls; the certificate
+is self-signed). For a picture, Playwright's Chromium is preinstalled in
+the cloud container: `chromium.launch({args: ['--no-proxy-server']})`,
+because the agent proxy would otherwise intercept 127.0.0.1.
 
-## SSH into a running gala
+### SSH into a running gala
 
 `cargo xtask serve sshd [port]` boots the `sshd_server` scenario (sshd
 as SYSTEM on its port 22, host keys made at boot, logs teed to the
@@ -1489,309 +1429,65 @@ ssh -i /tmp/gala_key -p 2222 -o StrictHostKeyChecking=no \
 pseudo console; `sftp -P 2222 ...` works the same way. The serial log
 shows `logtee: sshd.log:` / `sshd-session.log:` lines for each
 connection; add `conpty=trace` to the scenario's command line to see
-every byte between the terminal and the console. Pitfalls found on the
-way: Win32-OpenSSH does not create %ProgramData%\ssh\logs (an installer
-does: the scenarios ship a placeholder file there), it runs subsystems
-and commands through DefaultShell with the command quoted (so
-sftp-server.exe must be on the shell's PATH: a copy in System32), and
-an ssh client without a tty asks for a 0 x 0 pty (conhost then uses
-80 x 25).
+every byte between the terminal and the console.
 
-## gala-um
+### Benchmarks
 
-`cargo xtask test` runs `um-test` right after the unit tests: every
-program scenario that `runs_in_um` (xtask) runs as a Linux process with
-the real NT layer (the kernel crate with `--features hosted`), checked
-against the scenario's `expect` lines; ~50 programs in ~3 s. Run it
-alone with `cargo xtask um-test` while changing `kernel/src/nt`: it is
-the fastest check there is. A new test program runs in gala-um by
-default; if it cannot (child processes, a network card), add it to
-`NOT_IN_UM` with the reason.
+- The `nt:` line at the end of a scenario's serial log gives the NT
+  layer's system call, fault and process creation time without
+  disturbing the run; the event stream gives per-call detail but slows
+  the run down (docs/PERF.md has the method and the numbers).
+- `cargo xtask bench --release` runs `user/bench` (without `--release`
+  it benchmarks a debug kernel, about 30x slower per system call) and
+  writes `target/report/bench.json`; on Windows, `user/bin/run-all.ps1`
+  writes `bench-windows.txt`, which `cargo xtask bench bench-windows.txt`
+  puts next to gala's numbers.
+- Inside the kernel: `XTASK_EVENTS=syscall cargo xtask boot-test bench`,
+  then group the `events.jsonl` lines by `name` and look at `ns`.
+- Under QEMU TCG, user code in shared physical frames is translated
+  once: copying code pages per process costs far more than the copy.
 
-Run a program directly:
-
-    target/debug/um [--trace] [--cpus=2] \
-        --module=Windows/System32/ntdll.dll=user/bin/testntdll.dll \
-        user/bin/<name>.exe [arguments]
-
-`--module` adds a file to C: as a boot module would (DLLs under their
-`test*` names in user/bin), `--trace` logs every system call, `--cpus`
-caps the processors (um-test uses 2, as QEMU), `--failpoint=`,
-`--failseed=` and `--failtrace` inject failures ("Fault injection"),
-`--sim=<seed>` runs it deterministically ("Deterministic simulation"). The kernel's log goes to
-stderr, the program's output to stdout. When a program passes in QEMU
-but not in gala-um, or the other way round, one of the two platforms is
-wrong; `cargo xtask report` lists such programs. Program code must stay
-below 0x5000_0000_0000 (above is the host's, where `syscall` is not
-caught). Needs Linux 5.11+ (syscall user dispatch). `gdb -p` works
-(`handle SIGSYS nostop noprint`, `handle SIGURG nostop noprint`), and
-`thread apply all bt` shows where NT threads are inside the NT layer:
-that is how the lock starvation and the GetContext bug were found.
-
-## Fault injection
-
-`cargo xtask fault-test` runs FAULT_PROGRAMS (xtask) in gala-um under
-FAULT_RULES (`heap:every:7`, `frame:random:20`, ...; ARCHITECTURE "Fault
-injection") in a few seconds; each run must end without a panic, an
-abort, a hang (10 s) or a valid image reported as a bad one.
-`--sweep` fails each heap allocation of each program in turn
-(`heap:nth:k`), `--sweep=frame` each frame allocation, `--sweep=net_tx`
-each packet; a filter picks programs (`cargo xtask fault-test pipe_test
---sweep`). A failed run's whole log is in
-`target/failed/fault-<program>-<rule>-<seed>.log`. QEMU: the
-`failpoint_*` boot scenarios. Add a program to FAULT_PROGRAMS once its
-sweep passes.
-
-To find the code behind a failure, rerun the one rule by hand with
-`--failtrace` (kernel: `failtrace`): each injected failure prints a
-backtrace, and the program's own symptom (a status, a hang) follows:
-
-    target/debug/um --failtrace --trace --failpoint=heap:nth:976 \
-        --module=Windows/System32/ntdll.dll=user/bin/testntdll.dll ... \
-        user/bin/pipe_test.exe
-
-- **"KERNEL PANIC: memory allocation of N bytes failed"** (a
-  `failpoint_*` scenario, or a real out-of-memory) is an infallible
-  allocation: alloc's `handle_alloc_error` panics. The `backtrace:` line
-  under it is complete (frame pointers): failed boot tests print it
-  symbolized, and `target/failed/<scenario>.log` keeps the symbolized
-  copy at its end (addresses move with the next build; `cargo xtask
-  symbolize` only fits the build that ran). Skip the panic and liballoc
-  frames (`handle_error`, `with_capacity_in`, `to_vec`, `Clone::clone`):
-  the first kernel frame is the culprit (failpoint_heap's was
-  `gala_create_process`: `image.clone()` of a `Vec<u16>`). Then run
-  `cargo xtask alloc-audit` (also part of `cargo xtask test`): it
-  disassembles the debug kernel and lists every kernel function that
-  calls library code which can abort on out-of-memory, which clippy
-  cannot see by name (`Clone::clone` of a Vec/String/Box, `Extend`,
-  generic code); growth after `try_reserve` (`extend`, `resize`, an
-  inlined `try_push`) is excused (`--all` lists it too). Fix with the
-  fallible APIs (`mm::heap::try_to_vec` for a copy) and check the audit
-  is clean. clippy bans `collect` and `to_vec` in the kernel too.
-- **A hang under fault injection may be the test's**: a test thread that
-  gives up after a failed call without closing its pipe end, or a loop
-  waiting for a thread that CreateThread never made, waits for ever on
-  Windows too. Check every result before waiting on what it should have
-  produced, and release what the other side waits for on the error
-  path. Tell it from a kernel bug with the trace: the kernel's bug is a
-  call that returned success (or nothing) while dropping work.
-- **What must not fail must not allocate on its way**: ending one's
-  own process, reporting a finished I/O request, waking a waiter.
-  Allocate beforehand (when the request is made) or keep the state in
-  what already exists (the pending entry). `let _ = v.try_push(x)` on
-  such a path is the bug pattern to look for.
-- **gala-um's host code allocates infallibly** (std, the platform's
-  bookkeeping): it runs under `hosted::HostCode`, so injected heap
-  failures only reach the NT layer. New host code reached from NT code
-  that allocates (a std collection, a thread, printing) needs the guard,
-  or a sweep aborts with "memory allocation of N bytes failed" in host
-  code.
-
-## Deterministic simulation (reproducing a race from its seed)
-
-`cargo xtask sim-test` runs the multi-threaded test programs in gala-um's
-simulation (`um --sim=<seed>`, ARCHITECTURE "Deterministic simulation")
-under seeds 1..4, each twice; `--seeds 40` explores more, `--all` takes
-every gala-um program, a filter picks programs. A failing run is
-reported with its seed, its log (`target/failed/sim-<program>-<seed>-
-<run>.log`) and the um command line that repeats it exactly:
-
-    target/debug/um --cpus=2 --sim=17 --module=... user/bin/pipe_test.exe ''
-
-- Add `--trace` to that line to see every system call with its thread:
-  the same seed gives the same sequence each time, so print-debugging
-  and `gdb` (`handle SIGSYS nostop noprint`, `handle SIGURG nostop
-  noprint`, `handle SIGSEGV nostop noprint`: RDTSC faults on purpose)
-  see the same interleaving. Adding log lines does not change it (the
-  NT layer's own output takes no scheduling decision).
-- Changing the NT layer changes the interleavings a seed makes (a new
-  lock, a new system call is a new decision): keep the seed in the bug
-  report, and after a fix check the seed passes and a sweep
-  (`--seeds 40`) still does.
-- `DEADLOCK` (um exits with 4): the dump lists every simulated thread
-  (state, deadline) and the NT layer's view (each thread's system call
-  and the objects it waits on). Make the smallest test program that
-  waits that way and add it to SIM_PROGRAMS.
-- "not reproducible (watchdog preemptions)": a thread computed in
-  program code for ~100 ms without a system call while another could
-  run, and the watchdog preempted it where it was (a spin loop that
-  repeats exactly is preempted reproducibly instead: "N spin loops
-  preempted"). Reported, not failed, for programs outside SIM_PROGRAMS;
-  a SIM_PROGRAM must repeat. A hang or a wrong result is a failure.
-- In the simulation program code faults on purpose: CPUID (CPUID
-  faulting), RDTSC, and any read of KUSER_SHARED_DATA (its page is
-  `PROT_NONE`; the read is then single-stepped, SIGTRAP), and the spin
-  capture single-steps spinning threads. In gdb add `handle SIGTRAP
-  nostop noprint` too, and do not read 0x7ffe0000 from gdb expecting
-  data (use the NT layer's copy). A program's own single-stepping (the
-  trap flag) still works, except on an instruction that reads
-  KUSER_SHARED_DATA (that trap is taken as the simulation's).
-- A new multi-threaded test program: add it to SIM_PROGRAMS (`true` if
-  its system calls can interleave, so traces must differ across seeds).
-
-## Clock control, record/replay, slow devices (R7)
-
-ARCHITECTURE "Live mocking" has the design and formats; how to use it:
-
-- **Tests of timeouts, timers, expiry without waiting**: boot (or run
-  in gala-um) with `clock=control` and call GalaClockControl from the
-  test (`ntrt::clock_control`: `CLOCK_SET_RATE` 0 freezes,
-  `CLOCK_ADVANCE` jumps every view of the clock, `CLOCK_SET_SYSTEM`
-  moves only the system time). Freeze first, then advance: the views
-  then move by exactly the amount, and waits in progress whose deadline
-  passed end (`clock_test` is the example). Without the call:
-  `clock=rate:1000` runs a whole program 1000 times faster,
-  `clock=system:2147483648` starts it in 2038, `clock=freeze` stops the
-  programs' clock (the kernel keeps its own).
-- **A failure that depends on outside input (timing, random numbers)**:
-  run it in gala-um with `--record=f.rec` until it fails (with `--sim`,
-  vary the seed), then `target/debug/um --replay=f.rec --module=...
-  program.exe` repeats it with the same settings and inputs; add
-  `--trace` or attach gdb to the replay. In QEMU, `XTASK_RECORD=1 cargo
-  xtask boot-test <name>` records every boot (`xtask: recording
-  target/debug/test-<name>.rec` in the log; random numbers and the boot
-  time); replay one with `cargo xtask iso --scenario <name> --file
-  target/debug/test-<name>.rec=gala replay=test-<name>.rec run=...`
-  or in gala-um (`--replay`: a kernel recording replays there too).
-  `replay: diverged at ...` names the first input the recording did not
-  have (the run took another path, or a helper thread ran longer).
-- **A slow disk**: `failpoint=disk_io:delay:<ms>` (with `persist`).
-- Keep checked-in recordings (`user/replay_test/replay_test.rec`)
-  readable: a format change bumps `replay::VERSION` and the reader
-  keeps the previous version.
-
-## busybox
-
-`user/busybox/build.sh` rebuilds `user/bin/busybox.exe` (pinned
-busybox-w32 commit, reproducible; the build directory
-`/tmp/gala-busybox-build` keeps `busybox_unstripped.exe.map`, which maps
-a faulting rip to a function). The `busybox` scenario runs a sh command
-line; to try others, change its `args=` (percent-encoded). With the
-`trace` flag the kernel also logs every user fault (vector, rip, cr2),
-which a system call trace cannot show: an unhandled one ends the process
-with its status through ntdll's dispatcher.
-
-The script scenarios (`busybox_files`, `busybox_script`) run checked-in
-scripts from `user/busybox/` (boot modules in C:\gala); each prints one
-labelled line per result, which is what the scenario expects. A builtin
-or in-process applet (cd, mkdir, echo) can be tried in gala-um in
-milliseconds (`um ... user/bin/busybox.exe 'sh -c "..."'`: pass the
-command line pre-quoted, as one argument); anything that starts a child
-needs QEMU. `user/msvcrt_test/` is a C test of gala's msvcrt
-(`build.sh` rebuilds the checked-in binary with mingw against msvcrt's
-own stdio).
-
-## TinyCC
-
-`user/tcc/build.sh` rebuilds `user/bin/tcc.tar` (pinned TinyCC commit,
-reproducible): it compiles `tcc.c` as one unit with mingw-w64 and
-writes `config.h` itself instead of running TinyCC's `configure` and
-`make` (they would run third-party build scripts on the host; the direct
-compile needs none, and `CONFIG_TCC_PREDEFS=0` makes tcc read
-`include/tccdefs.h` at run time instead of a header generated by a
-host-built tool). Its runtime library (`libtcc1.a`, the startup code) is
-not built on the host: the `tcc` scenario (`user/tcc/tcc.sh`, run by
-busybox sh) unpacks the archive with busybox's tar, builds the runtime
-with that `tcc.exe` as win32/build-tcc.bat does, compiles
-`user/tcc/hello.c` and runs it. A program tcc builds imports msvcrt's
-startup functions (`__getmainargs`, `__argc`, `_controlfp`,
-`_XcptFilter`), and tcc itself uses `_spawnvp`/`_cwait`/`SearchPathA`
-only for tools that the scenario does not run. The scenario takes about
-4 s in the kernel (16 tcc runs).
-
-The `tcc_self` scenario (`user/tcc/self.sh`) runs tcc.sh, then compiles
-TinyCC's sources (`tcc/src/tcc/` in the archive) with tcc on gala into
-tcc2.exe, and uses tcc2 to build hello.c and `user/msvcrt_test/main.c`
-(about 7 s in the kernel). main.c must therefore build with both mingw's
-and TinyCC's headers (TinyCC's float.h lacks `_controlfp`; mingw's
-headers send `strtod` to libmingwex, so the test looks msvcrt's up).
-
-The `tcc_make` scenario (`user/tcc/make.sh`) builds `user/tcc/make/`
-(boot modules in `C:\gala\make`) with busybox's make, passing
-`CC=../tcc/tcc.exe CFLAGS=-B../tcc` so make's echoed commands are the
-same on gala and Windows; each step's lines carry the step's name
-(`build:`, `after touch:`, `again:`, `broken:`), since a scenario's
-expected lines are only searched for.
-
-## Lua
-
-`user/lua/build.sh` repacks the Lua 5.4.7 release into `user/bin/lua.tar`
-(checked against lua.org's published SHA-256; nothing is compiled on the
-host). The `lua` scenario (`user/lua/lua.sh`) builds it on gala with
-Lua's own `src/Makefile`, overriding only its documented settings
-(`CC`, `CFLAGS`, `AR=tcc -ar rcs`, `RANLIB=:`, `LIBS=` since msvcrt has
-the math functions, `LUA_T`/`LUAC_T` with `.exe`), and runs
-`user/lua/test.lua`. Expected lines were written from Lua's and
-msvcrt.dll's documented behaviour (compiling Lua on the host to compare
-is a third-party build, which the session's permissions refuse; Windows
-itself is the reference through `run-all.ps1`). test.lua avoids output
-that depends on the script's path (`error(msg, 0)`) and exact decimal
-ties (C runtimes round them differently).
-
-## Reproducible user binaries
-
-`cargo xtask export-tests` output must be the same on every machine (CI
-compares it). Workspace crates get relative source paths, but crates.io
-dependencies (libm in msvcrt) get absolute paths under the cargo home,
-which end up in panic locations: xtask's `user_build` remaps the cargo
-home to `/cargo` (`--remap-path-prefix`, merged into the target's
-rustflags with `--config`). A new dependency needs nothing more.
-
-## SQLite
-
-`user/sqlite/build.sh` fetches the SQLite amalgamation zip (checked
-against sqlite.org's SHA3-256) into `user/bin`; the `sqlite` scenario
-unzips it on gala and compiles it with tcc and `user/sqlite/sqlrun.c`,
-then runs `test.sql` and `reopen.sql` (expected lines computed with
-Python's sqlite3 module on the host: same SQL, another SQLite version).
-TinyCC's Windows headers and `.def` files are older than SQLite's needs:
-`tcc -impdef` makes kernel32.def from the system's kernel32.dll, and
-`tcc_win.h` (force-included) declares GetTickCount64.
-
-The scenario's last step runs two writers at once (busybox `&` and
-`wait`). To see whether they really contended, run it with
-`XTASK_EVENTS=syscall,process` and count NtLockFile results per process
-(STATUS_LOCK_NOT_GRANTED 0xc0000055 means a retry).
-
-A program's output and the kernel's log share the serial console, so a
-line a program writes in pieces can be split by a log line ("process ...
-exited"): expect lines that are written in one piece (a shell `echo` of
-a captured value) when that matters.
-
-## OpenTelemetry (a boot as traces, logs and metrics)
+### OpenTelemetry
 
 `cargo xtask otel` converts a boot's event stream and serial log to
-OTLP/JSON (ROADMAP OT1; the mapping table is in OBSERVABILITY "1b"):
-the boot is one trace, processes and threads are spans, system calls
-spans under their thread, faults, image loads and other events span
-events, the serial log log records (a crash report or state dump one
-record each), `stats:` lines metrics.
+OTLP/JSON (ROADMAP OT1; the mapping table is in OBSERVABILITY
+"OpenTelemetry export"): the boot is one trace, processes and threads are
+spans, system calls spans under their thread, faults, image loads and
+other events span events, the serial log log records (a crash report or
+state dump one record each), `stats:` lines metrics.
 
 ```sh
 XTASK_EVENTS=all cargo xtask boot-test 'crash$'   # spans need the stream
-cargo xtask otel crash                  # newest log of the scenario
+cargo xtask otel crash                            # newest log of the scenario
 cargo xtask otel target/failed/java_http.log      # a kept failure
 cargo xtask otel target/debug/batch-x.serial.log  # a shared VM
 XTASK_EVENTS=all XTASK_OTEL=1 cargo xtask boot-test 'hello$'  # every boot
 ```
 
-It writes `<log stem>.otlp.traces.json`, `.logs.json` and
-`.metrics.json` next to the log (`--out <prefix>` elsewhere; for
-boot-test `target/<profile>/<image>.otlp.*`). Each line of a file is one
-OTLP/JSON request (`ExportTraceServiceRequest` etc., at most 5000 spans
-or records), so a line is a valid body for `POST /v1/traces`. It prints
-`otel:` lines: what each event kind became, what was NOT mapped and the
-gaps in the stream; read them before trusting an empty view. Without
-`XTASK_EVENTS` a boot has only the boot span, log records and metrics.
-`name$` in boot-test's filter boots that scenario only (`hello` alone
-also boots java_hello, go_hello, ...).
+- It writes `<log stem>.otlp.traces.json`, `.logs.json` and
+  `.metrics.json` next to the log (`--out <prefix>` elsewhere; for
+  boot-test `target/<profile>/<image>.otlp.*`). Each line is one
+  OTLP/JSON request (`ExportTraceServiceRequest` etc., at most 5000
+  spans or records), so a line is a valid body for `POST /v1/traces`.
+- It prints `otel:` lines: what each event kind became, what was NOT
+  mapped and the gaps in the stream; read them before trusting an empty
+  view. Without `XTASK_EVENTS` a boot has only the boot span, log records
+  and metrics.
+- **Sending**: `--endpoint http://host:4318` or
+  `OTEL_EXPORTER_OTLP_ENDPOINT=http://host:4318` (also honoured by
+  `XTASK_OTEL=1` boot tests) POSTs it over OTLP/HTTP with JSON (plain
+  http only).
+- **Large boots**: a system-call-heavy boot (a JVM) is hundreds of
+  thousands of spans; Jaeger's UI gets slow past about 50k spans in one
+  trace. Convert a shorter run, or filter the stream first (`grep -v
+  '"ev":"syscall"'` keeps lifetimes and events only).
 
-**Sending** it: `--endpoint http://host:4318` or
-`OTEL_EXPORTER_OTLP_ENDPOINT=http://host:4318` (the standard variable;
-also honoured by `XTASK_OTEL=1` boot tests) POSTs it over OTLP/HTTP
-with JSON (plain http only).
+**Viewing in Jaeger** (traces only; Jaeger 1.35+ takes OTLP by default).
+This recipe has not yet been run against a real Jaeger (the output was
+checked against the OTLP protobuf messages with python's strict
+`json_format`, and xtask's unit tests check the shape and the HTTP
+post): fix it if a step differs.
 
-**Viewing in Jaeger** (traces; Jaeger 1.35+ takes OTLP by default):
 ```sh
 docker run --rm -p 16686:16686 -p 4318:4318 jaegertracing/all-in-one:1.62.0
 # or the binary from github.com/jaegertracing/jaeger/releases:
@@ -1801,21 +1497,18 @@ cargo xtask otel crash --endpoint http://localhost:4318
 while read -r l; do curl -sS -H 'Content-Type: application/json' \
   --data "$l" http://localhost:4318/v1/traces; done < target/debug/test-crash.otlp.traces.json
 ```
+
 Open http://localhost:16686, service `gala-os`, operation `boot crash`
 (or search by tag `gala.scenario=crash`, `process.pid=4`,
 `gala.syscall.status=0xc0000034`). The trace view shows processes,
 threads and system calls nested in time; span events (faults, image
-loads, the crash's `exception`) are under each span's "Logs". Jaeger
-shows only traces: logs and metrics need a collector. (Written
-2026-11-03 without a running Jaeger: the development host had no Docker
-daemon. The output was checked against the OTLP protobuf messages with
-python's strict `json_format` instead, and xtask's unit tests check the
-OTLP/JSON shape and the HTTP post; the first agent to load it in a real
-Jaeger: fix this paragraph if a step differs.)
+loads, the crash's `exception`) are under each span's "Logs". Logs and
+metrics need a collector.
 
 **With the OpenTelemetry collector** (otelcol-contrib), reading the files
 directly (the `otlpjsonfile` receiver reads this one-request-per-line
-format) and printing or forwarding them:
+format):
+
 ```yaml
 receivers:
   otlpjsonfile:
@@ -1830,16 +1523,14 @@ service:
     logs: {receivers: [otlpjsonfile], exporters: [debug]}
     metrics: {receivers: [otlpjsonfile], exporters: [debug]}
 ```
+
 `otelcol-contrib --config otel.yaml`; or an `otlp`/`otlphttp` receiver
 on :4318 and `--endpoint` pointed at it, which fans out to Tempo, Loki,
 Prometheus or Grafana.
 
-Large boots: a system-call-heavy boot (a JVM) is hundreds of thousands
-of spans; Jaeger's UI gets slow past ~50k spans in one trace. Convert a
-shorter run, or filter the stream first (`grep -v '"ev":"syscall"'`
-keeps lifetimes and events only).
+## Debugging and troubleshooting
 
-## When a test fails (read this first)
+### When a test fails (read this first)
 
 - **Start at the end of the failed log**: `target/failed/<scenario>.log`
   (also printed to the console) ends with a `===== triage` block: the
@@ -1849,32 +1540,34 @@ keeps lifetimes and events only).
   leak, out-of-memory and missing-function lines, programs that began
   and did not end, processes that failed, the ledger's top five, the
   state dump's CPUs, locks and threads, each thread's last system calls
-  and the last lines. `cargo xtask triage <log> [events.jsonl]` prints
-  it for any log (a kept serial log, a CI artifact); the event stream
-  next to the log is found by name.
+  and the last lines. `cargo xtask triage <log> [events.jsonl]` prints it
+  for any log (a kept serial log, a CI artifact); the event stream next
+  to the log is found by name.
 - **A timeout comes with a state dump**: before killing a timed-out VM,
   xtask injects an NMI and the kernel prints `statedump:` lines: per CPU
   the rip (user or kernel) and a kernel backtrace (symbolized below the
   log as `statedump: cpu N backtrace (symbolized)`), the thread each CPU
-  runs, `statedump: locks: ...` (a lock still HELD after 100 ms of trying
-  is what everything waits for), heap and frames, the flight recorder
-  (system calls by name with pid and tid); then from the boot thread
-  every NT thread's system call and wait object (with its signal state
-  and timeout), every scheduler thread, the ledger, `statedump: end`.
-  xtask's last line says how far it got: "did not answer the NMI" means
-  the guest was wedged or not yet past early boot; "NMI part came, its
-  threads part did not" means the boot thread could not run (the
-  scheduler or a lock is stuck: look at the locks line and the CPUs'
-  backtraces). To get the dump of a hang now rather than at the timeout:
-  `XTASK_TIMEOUT=30 cargo xtask boot-test <name>`.
-- **gala-um**: a run that hangs gets SIGQUIT at its timeout (`timeout -s
-  QUIT`, SIGKILL 5 s later) and prints the threads part of the dump to
-  stderr; for a live one, `kill -QUIT <pid of exe>`.
-- **A program that crashed** has `crash report:` lines before its exit line:
-  the exception (code and name), the thread, the address as
+  runs, `statedump: locks: ...` (a lock still HELD after 100 ms of
+  trying is what everything waits for), heap and frames, the flight
+  recorder (system calls by name with pid and tid); then from the boot
+  thread every NT thread's system call and wait object (with its signal
+  state and timeout), every scheduler thread, the ledger,
+  `statedump: end`. xtask's last line says how far it got: "did not
+  answer the NMI" means the guest was wedged or not yet past early boot;
+  "NMI part came, its threads part did not" means the boot thread could
+  not run (the scheduler or a lock is stuck: look at the locks line and
+  the CPUs' backtraces). To get the dump of a hang now rather than at
+  the timeout: `XTASK_TIMEOUT=30 cargo xtask boot-test <name>`.
+- **A program that crashed** has `crash report:` lines before its exit
+  line: the exception (code and name), the thread, the address as
   `module+offset`, what it read, wrote or executed, the registers and the
   top of the stack with module offsets; look the offset up in that
   module's disassembly (`llvm-objdump -d --start-address=...`).
+- **A kernel panic** prints `backtrace:` return addresses (complete:
+  frame pointers); failed boot tests show them symbolized (function and
+  source line) and the failed log keeps the symbolized copy at its end
+  (addresses move with the next build; `cargo xtask symbolize <log>`
+  only fits the build that ran).
 - **Is it flaky?** `cargo xtask test`/`boot-test` keep every scenario's
   outcome in `target/report/history.jsonl` and end with `xtask: health:`
   lines for this run's scenarios that both passed and failed in their
@@ -1882,209 +1575,478 @@ keeps lifetimes and events only).
   still a bug; its history line has the reason of each failure (`jq
   'select(.scenario=="java_http")' target/report/history.jsonl`).
 - **The event stream**: `XTASK_EVENTS=all cargo xtask boot-test <name>`,
-  then `cargo xtask events target/debug/test-<name>.events.jsonl` (or the
-  copy in `target/failed/`) for system calls by time, failing statuses,
-  each thread's last calls, faults and images.
-- **In a trace viewer**: `cargo xtask otel <scenario or log>` turns the
-  boot (with its event stream) into OTLP for Jaeger or a collector
-  ("OpenTelemetry" above): processes, threads and system calls on one
-  time line, the crash as an `exception` event.
-- **"the disk is (nearly) full"** from xtask: the message says how much is
-  free and what to delete; see "Disk space" above.
-- **A watchdog line** (`watchdog: CPU N has taken no timer interrupt`) is
-  followed by that CPU's own backtrace (`watchdog: CPU N backtrace:`,
-  symbolized at the end of the failed log). Watchdogs right after boot on
-  a loaded host: check the clock first (below).
+  then `cargo xtask events target/debug/test-<name>.events.jsonl` (or
+  the copy in `target/failed/`) for system calls by time, failing
+  statuses, each thread's last calls, faults and images. In a trace
+  viewer: `cargo xtask otel <scenario or log>` ("OpenTelemetry").
+- **"the disk is (nearly) full"** from xtask: the message says how much
+  is free and what to delete ("Disk space").
+- **A watchdog line** (`watchdog: CPU N has taken no timer interrupt`)
+  is followed by that CPU's own backtrace (`watchdog: CPU N backtrace:`,
+  symbolized at the end of the failed log). Watchdogs right after boot
+  on a loaded host: check the clock first.
 - **Is the guest's clock right?** Look for `xtask: clock:` lines (xtask
   timed the guest's `uptime_ms=` marks against the host, in a thread of
   their own, each within its poll window: `guest 5118 ms over host
   5096..5136 ms (+0.0% of the middle)` is fine, `xtask: clock: WRONG` is
-  not; under TCG the right guest clock is the host's, starved or not), the kernel's `tsc:` line (which
+  not; under TCG the right guest clock is the host's, starved or not),
+  the kernel's `tsc:` line (which
   reference, how many samples were rejected, the spread) and `clock: RTC
   check: agrees` / `clock: WRONG` (the kernel's own check against the
   CMOS RTC a few seconds into the boot, which recalibrates). A wrong
   clock makes sleeps end early, timeouts and watchdogs fire, and timing
-  checks fail; the failure's verdict then ends with "the guest's clock
-  was wrong". A program that wants its own timing checked prints
-  `<name>: ... uptime_ms=<n>` at two points (clockcal_test does).
-  `HOST_LOAD_SCENARIOS` in xtask run with a busy thread on every host
-  CPU; `calstall` stalls the boot CPU inside the calibration, `calwrong`
-  makes the first calibration 20x low (the RTC check must catch it).
-  On a host loaded far past its CPUs (load 25-35 on 4 CPUs, several
-  agents' suites at once) the clock is right but the handover scenarios'
-  sleep checks (handover_test 0x16/0x32, handover_k32_test 14/58) still
-  fail when the handover itself takes longer than the sleep's slack
-  (`resumed, N ms after the record` in the log): that is load, not the
-  clock; rerun alone.
-- **Diagnostic code that peeks at a lock** from an interrupt, an NMI or a
+  checks fail; the verdict then ends with "the guest's clock was wrong".
+  A program that wants its own timing checked prints `<name>: ...
+  uptime_ms=<n>` at two points (clockcal_test does).
+  `HOST_LOAD_SCENARIOS` run with a busy thread on every host CPU; the
+  kernel flags `calstall` (stalls the boot CPU inside the calibration)
+  and `calwrong` (makes the first calibration 20x low; the RTC check
+  must catch it) test this.
+- **A host loaded far past its CPUs** (load 25-35 on 4 CPUs, several
+  agents' suites at once): the clock is right but the handover
+  scenarios' sleep checks (handover_test 0x16/0x32, handover_k32_test
+  14/58) can still fail when the handover itself takes longer than the
+  sleep's slack (`resumed, N ms after the record` in the log): that is
+  load, not the clock; rerun alone.
+- **A corruption only the kernel shows: eliminate layers, then suspect
+  the emulator** (the method that found the JVM heap corruption):
+  1. Run the same program in gala-um (same `nt` code and DLLs, real
+     processors): hundreds of clean runs there put the fault below the
+     NT layer (paging, TLB shootdowns, fault and exception entry,
+     context switches, interrupts) or in the emulator.
+  2. Make a reproducer that fails often (`java_stress`: one boot in
+     three) and repeat it (`XTASK_REPEAT=n XTASK_REPEAT_JOBS=k`).
+  3. Turn features off one at a time and record each batch: `-smp 1`
+     (not a cross-processor race), `tlbparanoid` (not a missed flush),
+     `-cpu Nehalem` (not XSAVE or a CPU extension), `eagercommit` (not
+     demand-zero faults), `checkuser` (return-to-user invariants), the
+     program's own verification (HotSpot's `-XX:+VerifyBeforeGC
+     -XX:+VerifyAfterGC`). A failure that survives all of them, with the
+     state consistent at one point and stale just after, points at
+     stale translated code.
+  4. Write a focused test of the suspected emulator behaviour
+     (`xmodify_test`, `straddle_test`) and try other QEMU versions.
+  5. Fix the cause (here: pin a fixed QEMU), not with a kernel
+     workaround.
+
+### Known intermittent
+
+Scenarios that fail now and then, and what is known.
+
+- **Java heap corruption on QEMU 8.1.0-8.2.5**: java_http/java_hello
+  failing about 1 run in 30-40 with a stale String reference
+  (`String.equals` reading a bogus klass, a NullPointerException inside
+  String.equals from javac's MemberName.<init>, a crash in
+  MethodHandleNatives.resolve; the hs_err report in the failed log's
+  `dump:` lines) is QEMU's TCG bug: `tb_record` registered a block that
+  spans two pages under its first page only, so a write to the second
+  page did not invalidate it, and HotSpot's patched `mov r64, imm64`
+  constants straddling a page end kept their pre-GC values. Fixed in
+  QEMU 8.2.6. If it shows, check which QEMU the run used ("QEMU").
+- **Multi-threaded TCG and code rewritten by another processor** (still
+  open in QEMU 10.2, QEMU issue 4669): it can keep a translation of
+  guest code made while another processor was writing it and run the
+  old instructions after the write, on every processor, until something
+  else invalidates the page. `xmodify_test` shows it (with `-accel
+  tcg,thread=multi` its writer called a function it had just rewritten
+  and got a version thousands of rewrites old, about 1 boot in 10). A
+  JIT patches code that other threads run (inline caches, a GC
+  rewriting embedded object addresses), so the `SINGLE_THREAD_TCG`
+  scenarios (java_*, elasticsearch, dotnet_*, pwsh_*, flaui*,
+  xmodify_test, straddle_test) boot with `-accel tcg,thread=single`
+  when there is no KVM: both processors emulated by one host thread,
+  about half as fast, so their time limits are doubled. A new program
+  that generates or patches code (V8, LuaJIT, ...) belongs in that
+  list.
+- **java_http timing out with a lost wake-up's signature**: once, a
+  state dump showed three JVM threads in NtYieldExecution and two
+  waiting on semaphores with count 0, the others in delays or waits on
+  events: the signature of a lost semaphore release at HotSpot's wait
+  barrier, seen after the NtReleaseSemaphore fix (the waits on events
+  may have been the lost wake-up in `nt::wait` fixed since: a
+  notification event reset by one woken waiter before another looked).
+  Open; whether it recurs on the pinned QEMU is not recorded.
+  `target/failed/java_http.log` is the starting point if it does.
+- **Watchdogs firing during boot**: look first at the `apic:` / `tsc:`
+  lines (the triage shows their figures near the guest line). A TSC
+  calibrated at tens of MHz instead of about 2.8 GHz makes guest time
+  run 20-200x fast: sleeps end early and the watchdog reports CPUs
+  "stuck" for "5 s" every quarter second. The triage flags a TSC under
+  500 MHz and `clock: WRONG`.
+- **Scenarios cut short by host load**: limits count run time
+  ("Scenarios"), so a starved VM gets its time; a timeout's `xtask: vm
+  time:` line says how much it had. On a shared host, `XTASK_VMS=1 nice
+  -n 19 cargo xtask test` boots one VM at a time (the default is one per
+  host CPU).
+- **timer_test** failed once in three full runs under the load of the
+  full suite and passes alone; if it recurs, its log says which bound
+  was missed.
+
+#### Reproducing the Java corruption: `java_stress`
+
+`java_stress` (in `PENDING`) runs `user/java/Stress.java`: javac
+in-process 48 times, three at a time. On an affected QEMU about one boot
+in three fails (javac's NullPointerException in `BaseFileManager.getKind`
+or `ClassSymbol.setAnnotationTypeMetadata`, a crash in String.equals or
+in the GC, the hs_err in the log). `XTASK_REPEAT=6 XTASK_REPEAT_JOBS=2
+cargo xtask boot-test java_stress` (each boot 5-15 min under load; its
+limit is 900 s, doubled without KVM). Other JVM options replace the
+scenario's through the last `args=`:
+`XTASK_CMDLINE="args=-Xmx64m%20C:/gala/Stress.java%2048"` (a second
+argument, ms, forces a full collection that often). The same program in
+gala-um (`um --dir=jdk/bin ... java.exe "C:/gala/Stress.java 48"`, about
+25 s) has never failed.
+
+### Flaky tests and repeats
+
+Flaky boot tests usually mean a race; rerun the one scenario a few times
+before blaming CI:
+
+- `XTASK_REPEAT=12 cargo xtask boot-test name` boots one scenario's
+  image 12 times, one VM per two host CPUs at once (`XTASK_REPEAT_JOBS`
+  for more: the load brings races out, but a JVM then runs into its
+  time limit), keeps each failed boot's log
+  (`target/debug/test-<name>.r<i>.serial.log`, its triage in
+  `target/failed/<name>.r<i>.log`) and ends with "n of 12 boots failed".
+  With `XTASK_REPEAT` a scenario's exact name selects it alone
+  (`handover_upgrade`, not also `handover_upgrade_uefi`), and the
+  filter must select one scenario of its own VM.
+- `XTASK_QEMU_ARGS="-accel tcg,thread=single"` boots any scenario
+  without host-level parallelism (to tell a guest race from an emulator
+  one); `-accel tcg,thread=multi` boots a JIT scenario multi-threaded.
+
+### Hunting a rare hang
+
+- Loop `cargo xtask boot-test <name>` (or `XTASK_REPEAT`) until it
+  fails and keep that serial log. After a minute without the program
+  finishing the kernel dumps every thread (ARCHITECTURE "Diagnostics of
+  stuck and crashed programs"):
+  which system call each NT thread is in, on which object, with which
+  timeout; at the boot test's timeout xtask asks for a state dump too.
+  Tracing (`trace`) changes the timing enough to hide races, so prefer
+  the dumps.
+- After the first minute the kernel also prints what the ledger newly
+  recorded every 30 seconds, so gaps that a screen check's input reaches
+  late still show.
+- In gala-um, catch a hung instance live and `gdb -p` the `exe` process
+  (`thread apply all bt`).
+- **A program hangs without a ledger** (it never exits, so the ledger is
+  not printed): add `events=syscall,thread` to its scenario's command
+  line and read `target/debug/test-<name>.events.jsonl` while QEMU still
+  runs (`grep -v` the calls it repeats; a loop of time queries means it
+  waits for a clock to move). Waiting services log a `"ev":"wait"` event
+  when they start, so a wait that never returns shows as the thread's
+  last line. Do not delete the events file of a running VM (it is still
+  open: `/proc/<qemu pid>/fd/` reaches it).
+- **A server hangs mid-conversation**: `XTASK_EVENTS=syscall` shows
+  which call pended.
+- **A wait that ends only at its timeout** although the object was set:
+  look for someone resetting it before the waiter looked (ARCHITECTURE
+  "Waits").
+- **Where a thread was when it was terminated**: log `regs.rip` in
+  `on_user_return` (kernel/src/nt/thread.rs) and look the address up in
+  the DLL (`llvm-objdump -d` on our own build in
+  `target/x86_64-pc-windows-msvc/release/`).
+- **"run: address space still referenced N times after exit"** is
+  preceded by the holders: the threads not reaped (state, CPU), the
+  references reaps in progress hold, and the process's own references
+  (thread objects, handles in other processes). Count them against N:
+  what is left over is held by something else (a clone of
+  `Process::space`).
+
+### Programs that spin or fail silently (probes)
+
+- **A thread spinning in user mode** (no system calls): the one-minute
+  hang dump prints `in user mode at rip ...` (the last timer tick that
+  caught it) and the ledger so far; map the rip to a module with
+  `events=image`, then `llvm-objdump -d` the DLL around it (gala's DLLs
+  name their exports). In gala-um: `gdb -p` the `exe` process; `thread
+  apply all x/3i $pc` shows the loop, and the image's export directory
+  (read from memory at the 64 KiB-aligned base below the address) names
+  the DLL. A GUI program that hangs or spins often waits for something
+  gala lacks: the same dump prints the missing-features ledger, and an
+  unregistered window class shows there as
+  `user32.dll!CreateWindowExW(<class>)`.
+- **Probes in gala's DLLs**: a temporary `unsupported(b"PROBE", detail)`
+  shows up in `events=syscall` as GalaRecordMissing with its detail.
+  Probes are told apart by their name's length (args[1] in the event:
+  the event has the name's pointer and length, not its text) and their
+  detail (args[3]). When `events=syscall` slows a screen scenario too
+  much, write the probe's sequence number and detail into its name
+  instead (a stack buffer, e.g. `0012 PROBE_SWP <hex>`): each call is
+  then its own ledger line, in order once sorted, without the event
+  stream. Put `GetTickCount` differences in the detail to see how long
+  things take.
+- **A program fails without a ledger entry or a failing system call** (a
+  function returned data it did not like): add temporary probes,
+  `missing_detail(b"TRACE dll!Function", detail)` at the top of the
+  suspect DLL functions (name, class or argument as the detail, or the
+  argument text in the name), run, read the `TRACE` ledger lines.
+- **Tracing exception dispatch in a third-party program**: a temporary
+  `GalaRecordMissing` call in gala's ntdll dispatcher (`seh.rs`: code and
+  address in the detail; one per walked frame with its pc and handler)
+  shows up in the `events=syscall` stream, in order and per thread; map
+  addresses to modules with `events=image` (base and size per process).
+- **User faults**: the `trace` flag also logs every user fault (vector,
+  rip, cr2), which a system call trace cannot show; an unhandled one ends
+  the process with its status through ntdll's dispatcher.
+- Remove every probe before committing.
+
+### Fault injection
+
+`cargo xtask fault-test` runs `FAULT_PROGRAMS` in gala-um under
+`FAULT_RULES` (`heap:every:2`..`heap:every:499`, `heap:random:20`,
+`frame:every:3`, `frame:every:61`, `frame:random:20`, `net_tx:every:3`, a
+mixed rule; seeds 1-3; ARCHITECTURE "Fault injection") and sweeps
+`FAULT_SWEEPS`: about 3200 runs in about 40 s. Each run must end without a
+panic, an abort, a hang (10 s) or a valid image reported as a bad one.
+`--sweep` fails each heap allocation of each program in turn
+(`heap:nth:k`), `--sweep=frame` each frame allocation, `--sweep=net_tx`
+each packet; a filter picks programs (`cargo xtask fault-test pipe_test
+--sweep`; a full heap sweep is about 14,800 runs in four minutes, a frame
+sweep about 3,500). A failed run's whole log is in
+`target/failed/fault-<program>-<rule>-<seed>.log`. In QEMU: the
+`failpoint_*` boot scenarios, or `failpoint=heap:every:97 failseed=7` on
+any command line (debug builds). Add a program to `FAULT_PROGRAMS` once
+its sweep passes.
+
+To find the code behind a failure, rerun the one rule by hand with
+`--failtrace` (kernel: `failtrace`): each injected failure prints a
+backtrace, and the program's own symptom (a status, a hang) follows:
+
+    target/debug/um --failtrace --trace --failpoint=heap:nth:976 \
+        --module=Windows/System32/ntdll.dll=user/bin/testntdll.dll ... \
+        user/bin/pipe_test.exe
+
+- **"KERNEL PANIC: memory allocation of N bytes failed"** is an
+  infallible allocation: alloc's `handle_alloc_error` panics. Skip the
+  panic and liballoc frames of the backtrace (`handle_error`,
+  `with_capacity_in`, `to_vec`, `Clone::clone`): the first kernel frame
+  is the culprit. Then run `cargo xtask alloc-audit` (also part of
+  `cargo xtask test`): it disassembles the debug kernel and lists every
+  kernel function that calls library code which can abort on
+  out-of-memory, which clippy cannot see by name (`Clone::clone` of a
+  Vec/String/Box, `Extend`, generic code); growth after `try_reserve`
+  (`extend`, `resize`, an inlined `try_push`) is excused (`--all` lists
+  it too). Fix with the fallible APIs (`mm::heap::try_to_vec` for a
+  copy) and check the audit is clean. It needs `objdump` (skipped with a
+  warning otherwise).
+- **failpoint_heap fails every n-th allocation by count**: a change that
+  adds allocations moves the failure onto other paths and can expose old
+  gaps.
+- **A hang under fault injection may be the test's**: a test thread that
+  gives up after a failed call without closing its pipe end, or a loop
+  waiting for a thread that CreateThread never made, waits for ever on
+  Windows too. Check every result before waiting on what it should have
+  produced, and release what the other side waits for on the error path.
+  Tell it from a kernel bug with the trace: the kernel's bug is a call
+  that returned success (or nothing) while dropping work.
+- **What must not fail must not allocate on its way**: ending one's own
+  process, reporting a finished I/O request, waking a waiter. Allocate
+  beforehand (when the request is made) or keep the state in what
+  already exists (the pending entry). `let _ = v.try_push(x)` on such a
+  path is the bug pattern to look for.
+- **gala-um's host code allocates infallibly** (std, the platform's
+  bookkeeping): it runs under `hosted::HostCode`, so injected heap
+  failures only reach the NT layer. New host code reached from NT code
+  that allocates (a std collection, a thread, printing) needs the guard,
+  or a sweep aborts with "memory allocation of N bytes failed" in host
+  code.
+- **Out of frames looks like a bad image**: when NtMapViewOfSection
+  cannot get a frame, the loader reports STATUS_INVALID_IMAGE_FORMAT
+  (0xC000007B). Check the free frames (`mm::frame_stats`, the `stats:`
+  line) before suspecting the image.
+- **A JVM crashing with access violations at odd addresses** after a
+  long run may be the machine out of memory: a user page fault that
+  finds no free frame becomes an access violation (the commit charge
+  covers private memory only; mapped and image pages and the kernel heap
+  are not charged). Look for "vm: out of memory" in the log and the free
+  frames on the `stats:` line; give the scenario more memory (`qemu()`
+  in xtask).
+
+### Deterministic simulation (reproducing a race from its seed)
+
+`cargo xtask sim-test` runs the multi-threaded test programs
+(`SIM_PROGRAMS`) in gala-um's simulation (`um --sim=<seed>`,
+ARCHITECTURE "Deterministic simulation") under seeds 1..4, each twice:
+expected output, the same trace for the same seed, different traces
+across seeds. `--seeds 40` explores more, `--seed S` runs only S,
+`--all` takes every gala-um program, a filter picks programs. A failing
+run is reported with its seed, its log
+(`target/failed/sim-<program>-<seed>-<run>.log`) and the um command line
+that repeats it exactly:
+
+    target/debug/um --cpus=2 --sim=17 --module=... user/bin/pipe_test.exe ''
+
+- Add `--trace` to that line to see every system call with its thread:
+  the same seed gives the same sequence each time, so print-debugging
+  and `gdb` see the same interleaving (adding log lines does not change
+  it). In gdb: `handle SIGSYS nostop noprint`, `handle SIGURG nostop
+  noprint`, `handle SIGSEGV nostop noprint` (RDTSC faults on purpose),
+  `handle SIGTRAP nostop noprint`.
+- In the simulation program code faults on purpose: CPUID (CPUID
+  faulting), RDTSC, and any read of KUSER_SHARED_DATA (its page is
+  `PROT_NONE`; the read is then single-stepped, SIGTRAP); the spin
+  capture single-steps spinning threads. Do not read 0x7ffe0000 from gdb
+  expecting data (use the NT layer's copy). A program's own
+  single-stepping (the trap flag) still works, except on an instruction
+  that reads KUSER_SHARED_DATA.
+- Changing the NT layer changes the interleavings a seed makes (a new
+  lock or system call is a new decision): keep the seed in the bug
+  report, and after a fix check the seed passes and a sweep (`--seeds
+  40`) still does.
+- `DEADLOCK` (um exits with 4): the dump lists every simulated thread
+  (state, deadline) and the NT layer's view (each thread's system call
+  and the objects it waits on). Make the smallest test program that
+  waits that way and add it to `SIM_PROGRAMS`.
+- "not reproducible (watchdog preemptions)": a thread computed in
+  program code for about 100 ms without a system call while another
+  could run, and the watchdog preempted it where it was (a spin loop that
+  repeats exactly is preempted reproducibly instead: "N spin loops
+  preempted"). Reported, not failed, for programs outside
+  `SIM_PROGRAMS`; a SIM_PROGRAM must repeat. A hang or a wrong result is
+  a failure.
+- A new multi-threaded test program: add it to `SIM_PROGRAMS` (`true`
+  if its system calls can interleave, so traces must differ across
+  seeds).
+
+### Clock control, record/replay, slow devices (R7)
+
+ARCHITECTURE "Clock control" and "Record/replay" have the design and
+formats.
+
+- **Timeouts, timers, expiry without waiting**: boot (or run in gala-um)
+  with `clock=control` and call GalaClockControl from the test
+  (`ntrt::clock_control`: `CLOCK_SET_RATE` 0 freezes, `CLOCK_ADVANCE`
+  jumps every view of the clock, `CLOCK_SET_SYSTEM` moves only the
+  system time). Freeze first, then advance: the views then move by
+  exactly the amount, and waits in progress whose deadline passed end
+  (`clock_test` is the example). Without the call: `clock=rate:1000`
+  runs a whole program 1000 times faster, `clock=system:2147483648`
+  starts it in 2038, `clock=freeze` stops the programs' clock (the
+  kernel keeps its own).
+- **A failure that depends on outside input** (timing, random numbers):
+  run it in gala-um with `--record=f.rec` until it fails (with `--sim`,
+  vary the seed), then `target/debug/um --replay=f.rec --module=...
+  program.exe` repeats it with the same settings and inputs; add
+  `--trace` or attach gdb to the replay. In QEMU, `XTASK_RECORD=1 cargo
+  xtask boot-test <name>` records every boot (`xtask: recording
+  target/debug/test-<name>.rec` in the log; random numbers and the boot
+  time); replay one with `cargo xtask iso --scenario <name> --file
+  target/debug/test-<name>.rec=gala replay=test-<name>.rec run=...` or
+  in gala-um (`--replay`: a kernel recording replays there too).
+  `replay: diverged at ...` names the first input the recording did not
+  have (the run took another path, or a helper thread ran longer).
+- **A slow disk**: `failpoint=disk_io:delay:<ms>` (with `persist`).
+- Keep checked-in recordings (`user/replay_test/replay_test.rec`)
+  readable: a format change bumps `replay::VERSION` and the reader keeps
+  the previous version.
+
+### Lock-order checking (lockdep)
+
+Debug kernels, host tests and gala-um panic with `lockdep: X taken while
+holding Y, but Y was taken while holding X before` on the first
+lock-order inversion (ARCHITECTURE "Built in early"), and with `lockdep:
+releasing X turns interrupts on while Y is still held` when IrqMutex
+guards drop out of order.
+
+- A class is the protected type, so give a lock over a plain type
+  (`u32`, `Option<id>`, `()`) a name with `IrqMutex::named("module.field",
+  value)`, or unrelated locks of that type share a class and report
+  false inversions.
+- A guard taken inside a format macro's arguments (`info!("{}",
+  *a.lock())`) lives to the end of the statement: read such values into
+  locals first.
+- Diagnostic code that peeks at a lock from an interrupt, an NMI or a
   panic uses `IrqMutex::try_lock_untracked`: a tracked `try_lock` there
   teaches lockdep an order no real path has, and a later correct path
   panics as an "inversion".
 
-## Hygiene sweeps
+### Debugging tools
 
-A sweep (the owner, 2026-11-03: "we should do sweeps in general to check
-for hygienic factors") reads existing code for one class of fault at a
-time instead of waiting for a flaky scenario to point at it. The kernel's
-primitives were written for one CPU at a time (2026-10-30) and SMP came
-after; three races had been found in them one by one before the first
-sweep. Do one after a change of assumptions (more CPUs, preemption in new
-places, a new kind of object or teardown path) and otherwise about once
-a month, or when a flaky scenario has no explanation yet.
-
-**What to check** (each item: what the bug looks like, where to look):
-1. *Check, then act, in separate lock holds*: a condition read under a
-   lock and acted on after letting go (or under another lock). Look for
-   `let x = a.lock().thing;` followed by a change elsewhere; for
-   `set_signal(.., 0)` after a test of some queue; for "decided under
-   lock A, signaled under lock B". Fix: one hold, or the dispatcher's
-   `update_signal`/`change_mutant`; or a pin (`NamePin`).
-2. *Wake-ups whose condition changes before the woken thread runs*: a
-   waiter that wakes and looks again can find the condition gone (a
-   notification event reset: `Waiter::released`); a waiter that does
-   not look again takes any wake-up for its own (NtDelayExecution and
-   NtResumeThread). Every `prepare_wait`/`wait` must sit in a loop that
-   re-checks its own condition and deadline.
-3. *Order of teardown*: what a waiter on the dying thing finds when it
-   wakes (process signaled before its handles were closed); queues of
-   work for something that is going away (APCs to an exiting thread,
-   packets to a closed port); a name or count dropping to zero while
-   another CPU is about to take a reference (handle count vs. lookups).
-4. *"This CPU"*: a per-CPU index read with interrupts on is stale after
-   the next instruction (`cpu_index()`, `current_cpu()`); only use it
-   with interrupts off or for diagnostics (shootdown's `changed_on`).
-5. *Interrupt state*: IrqMutex guards must drop innermost first (debug
-   kernels now panic otherwise: `lockdep: releasing X turns interrupts on
-   while Y is still held`); no `schedule()` with a lock held.
-6. *Duplicate or aliased arguments*: the same object twice in one call
-   (WaitAll with one semaphore twice consumed it twice).
-7. *Non-race hygiene on the way*: failure paths that leave nothing behind
-   (OBSERVABILITY.md), infallible allocation (`cargo xtask alloc-audit`),
-   `unsafe` without `SAFETY:`, stale TODOs.
-
-**How**: one SMP stress test per sweep (`smprace_test` for the first),
-one round per finding, two threads pinned to processors 0 and 1 doing
-the two sides in a loop, each round shown to fail before its fix (keep
-the iteration count at a few times what the failure needed: boots under
-a loaded host are slow, and the scenario's timeout is 120 s). A finding
-that cannot be made to fail is fixed when the fix is small and clearly
-right, and the reasoning is written down. Record each finding in
-ROADMAP (Done) and the invariant it breaks in ARCHITECTURE.
-
-**Last sweep: 2026-11-03** (the dispatcher and waits; events,
-semaphores, mutants, timers; APCs; thread and process teardown; handle
-tables and names; IOCP; the scheduler's waits; the heap and frame
-allocator's locks; the console's input signal). Fixed, with a failing
-round in `smprace_test` first: WaitAll with an object twice (round 1),
-a timer's stale expiry signaled after a re-arm (2), a name removed while
-an open was taking its handle (3), a process signaled before its handles
-were closed (4), NtDelayExecution ended by any wake-up (5). Fixed
-without a test: NtReleaseMutant and mutant abandonment changed the
-owner outside the dispatcher lock; the console's `settle` reset
-`input_ready` after checking the queue in an earlier lock hold; the
-out-of-order IrqMutex release detector. Left (ROADMAP "Next", hygiene
-sweep items): waits in NtRemoveIoCompletion are not ended when the port's
-last handle closes; an APC queued as its thread exits is accepted and
-never runs. Checked and found sound: the scheduler's
-`prepare_wait`/`wait`/`wake` protocol (preemption between them included),
-`on_cpu`, KArc's counts, the heap's and frame allocator's single locks,
-keyed events, semaphores (`update_signal`), APC queueing against the
-alertable flag, termination requests against `wake_if_terminating`,
-`add_thread` against `terminate`, the last-thread decision.
-
-## Hunting a rare hang
-
-A scenario that fails once in N runs: loop `cargo xtask boot-test <name>`
-until it fails and keep that serial log. After a minute without the
-program finishing the kernel dumps every thread (see ARCHITECTURE, "Hang
-dump"): which system call each NT thread is in, on which object, with
-which timeout; at the boot test's timeout xtask asks for a state dump
-too (NMI, "When a test fails" above), which is the state at the end. Tracing (`trace`) changes the timing enough to hide such
-races, so prefer the dump. In gala-um, catch a hung instance live and
-use `gdb -p` (`thread apply all bt`); its process is named `exe` after
-gala-um re-executes itself without ASLR.
-
-To see where a thread was when it was terminated, log `regs.rip` in
-`on_user_return` (kernel/src/nt/thread.rs) and look the address up in the
-DLL (`llvm-objdump -d` on our own build in
-`target/x86_64-pc-windows-msvc/release/`). A test that terminates a thread
-must let it reach its own code first: ended during its start-up it holds
-ntdll's loader lock, and the next LoadLibrary (or DLL notification) spins
-in NtYieldExecution forever (rtl_test hung so under load).
-
-"run: address space still referenced N times after exit" is preceded
-by the holders: the threads not reaped (state, CPU), the references
-reaps in progress hold, and the process's own references (thread
-objects, handles in other processes). Count them against N: what is
-left over is held by something else (a clone of `Process::space`).
-
-A failed boot scenario's serial log is kept in
-`target/failed/<scenario>.log` (also from `cargo xtask test`), so a rare
-failure in a full run is not lost. timer_test failed once in three full
-runs after tcc_self added load (the check was not captured then; it
-passes alone): if it recurs, its log says which bound was missed.
-
-## Debugging
-
-- `XTASK_VERBOSE=1 cargo xtask boot-test name` prints the serial log; logs
-  are also kept in `target/debug/test-<name>.serial.log` (shared VMs:
-  `target/debug/batch-<first program>.serial.log`).
-- An `-accel` in `XTASK_QEMU_ARGS` replaces xtask's own (`-accel kvm
-  -accel tcg`, or `tcg,thread=single` for SINGLE_THREAD_TCG scenarios):
-  `XTASK_QEMU_ARGS="-accel tcg,thread=multi"` boots a JIT scenario the old
-  way, `-accel tcg,thread=single` any other one without host-level
-  parallelism (to tell a guest race from an emulator one).
-- `XTASK_QEMU_ARGS="-d int -D qemu.log" cargo xtask boot-test name` passes
-  extra QEMU arguments; the interrupt log shows every exception with the
-  full register state (EFER, CR4, TR...), which is how per-CPU setup bugs
-  show up (e.g. #UD on `syscall` = EFER.SCE missing on that CPU).
+- `XTASK_VERBOSE=1 cargo xtask boot-test name` prints the serial log
+  while it runs.
 - Kernel command-line flag `trace` logs every system call with arguments
-  and status (add it to a scenario's `cmdline` temporarily).
-- Kernel panics print `backtrace:` return addresses; failed boot tests show
-  them symbolized (function and source line), and `cargo xtask symbolize
-  <serial log>` resolves any log.
-- The event stream: `XTASK_EVENTS=all cargo xtask boot-test name` writes
-  JSON lines (system calls with timing, image maps, threads, processes,
-  faults) to `target/debug/<iso>.events.jsonl`; filter with `jq` or grep.
-- `cargo xtask report` writes `target/report/gala.{json,md}`;
-  `cargo xtask compare windows.json` diffs against results collected on
-  Windows with `user/bin/run-all.ps1`.
-- See `docs/OBSERVABILITY.md` for the planned profiling and telemetry.
+  and status (`trace: pid 4 tid 8 NtWriteFile(...) -> 0x0`) and every
+  user fault; add it to a scenario's `cmdline` temporarily (it changes
+  timing).
+- `XTASK_QEMU_ARGS="-d int -D qemu.log" cargo xtask boot-test name`: the
+  interrupt log shows every exception with the full register state
+  (EFER, CR4, TR...), which is how per-CPU setup bugs show up (#UD on
+  `syscall` = EFER.SCE missing on that CPU).
+- `cargo xtask symbolize <serial log>` resolves the kernel addresses in
+  any log.
+- The event stream (`XTASK_EVENTS=all`) writes JSON lines (system calls
+  with timing, image maps, threads, processes, faults) to
+  `target/debug/<iso>.events.jsonl`; filter with `jq` or grep. Handle
+  values are reused at once (the lowest free slot), so follow NtClose and
+  creation order rather than guessing which handle is which from the
+  value.
+- Reading MSVC C++ EH data (as data, from .pdata/.xdata):
+  check the format before decoding. A FuncInfo starting with the magic
+  number 0x19930520-0x19930522 (bytes `22 05 93 19`) is the older format
+  (__CxxFrameHandler3: try blocks, unwind map, an ip-to-state map with
+  absolute RVAs); FH4's FuncInfo4 starts with a one-byte header. Reading
+  FH3 data as FH4 gives plausible-looking nonsense. The handler data of
+  a GS-checking handler is the FuncInfo RVA, then the GS data.
+  `llvm-readobj --unwind` shows unwind data.
+- **One CPU**: `XTASK_QEMU_ARGS="-smp 1" cargo xtask test` runs the whole
+  suite on one processor; only the checks that expect two processors
+  fail. The `onecpu_*` scenarios do it for a few.
+- **TLB or migration suspects**: boot with `tlbparanoid` (a bug that
+  goes away with it is a TLB bug), `nomigrate`, `checkuser`, `framecheck`
+  (ARCHITECTURE "Kernel command line"); the shootdown counters before
+  `boot ok` include threads moved to another CPU mid-shootdown.
 
 ### A boot that ends without a word
 
 The serial log just stops and QEMU "exited with Some(0)": the machine was
 reset (a triple fault, with `-no-reboot`) before the kernel could say
-anything. Read, in this order (docs/OBSERVABILITY.md "Early boot"):
+anything. Read, in this order (OBSERVABILITY "Early boot"):
+
 1. the `xtask:` lines at the end of `target/failed/<scenario>.log`: how
    QEMU ended, the vCPUs it made, the host's load (a load average far
    above the host's CPUs makes vCPUs late);
-2. `target/<profile>/<image>.phases.log`: the last `phase` line is how far
-   the boot got (`fault`/`panic` lines are exceptions on the way); the CPU
-   in it says which CPU wrote it;
-3. `<image>.qemu.log`: "Triple fault" and the register dumps of CPU resets
-   (an INIT is a reset too); a dump of CPU 1 with RIP in low memory or at
-   HHDM + a low address is an AP in a bootloader trampoline;
-4. `<image>.bios.log`: SeaBIOS (how many CPUs it found, the boot device).
+2. `target/<profile>/<image>.phases.log`: the last `phase` line is how
+   far the boot got (`fault`/`panic` lines are exceptions on the way);
+   the CPU in it says which CPU wrote it;
+3. `<image>.qemu.log`: "Triple fault" and the register dumps of CPU
+   resets (an INIT is a reset too); a dump of CPU 1 with RIP in low
+   memory or at HHDM + a low address is an AP in a bootloader
+   trampoline;
+4. `<image>.bios.log`: SeaBIOS (how many CPUs it found, the boot
+   device).
+
 For the exception's own state use `XTASK_QEMU_LOG=int,cpu_reset` (every
-exception with its registers in `.qemu.log`: large; with `XTASK_REPEAT=n`
-each failed boot keeps its own `.rN.*` files).
+exception with its registers in `.qemu.log`: large; with
+`XTASK_REPEAT=n` each failed boot keeps its own `.rN.*` files).
 `smp: ... CPUs online` lower than asked: the bootloader missed an AP and
 the kernel could not start it either; xtask boots such a VM once more and
-says `VM got 1 of 2 CPUs (host overloaded?)`. To make Limine miss an AP
-for real, hold the AP's vCPU thread: QEMU with `-name x,debug-threads=on`,
-then ptrace-stop the thread named `CPU 1/TCG` (PTRACE_SEIZE +
-PTRACE_INTERRUPT) once SeaBIOS has printed "Booting from" (SeaBIOS waits
-for every CPU) and release it after the kernel banner; `smptest=late` is
-the in-guest, deterministic version.
+says `VM got 1 of 2 CPUs (host overloaded?)`, keeping the short boot's
+logs (serial, phases, qemu, bios) as `*.short-cpus.*` next to the image. A
+reset with no word is typically an AP that Limine timed out on (its vCPU
+thread did not run in time on a loaded host, seen at load averages of
+12-20) and that later ran Limine's trampoline without its identity map and
+triple-faulted; the kernel shelters such APs (ARCHITECTURE "APs the
+bootloader missed"; `smptest=late`, `smptest=hide` reproduce a late or
+hidden AP). To make Limine miss an AP for real, hold the AP's vCPU thread:
+QEMU with `-name x,debug-threads=on`, then ptrace-stop the thread named
+`CPU 1/TCG` (PTRACE_SEIZE + PTRACE_INTERRUPT) once SeaBIOS has printed
+"Booting from" (SeaBIOS waits for every CPU) and release it after the
+kernel banner; `smptest=late` is the in-guest, deterministic version.
 
 ### Debugging a kernel handover (R9)
 
-- `XTASK_VERBOSE=1 cargo xtask boot-test handover_same`: every kernel
-  prints its banner again; `handover: generation A -> B: record ...`
-  (written by the old kernel: where the record, the new image and the
-  scaffold are) is the last line before the jump, and `handover:
-  generation B (from generation A)` the new kernel's first word about it.
+The handover's design: ARCHITECTURE "Kernel handover", "Programs across
+a handover", "Sockets across a handover", "Versions and negotiation".
+
+**The jump** (`cargo xtask boot-test handover_same`):
+
+- With `XTASK_VERBOSE=1` every kernel prints its banner again;
+  `handover: generation A -> B: record ...` (written by the old kernel:
+  where the record, the new image and the scaffold are) is the last line
+  before the jump, and `handover: generation B (from generation A)` the
+  new kernel's first word about it.
 - Nothing after the jump line: the new kernel died before its console
   came up (a triple fault resets the VM, `-no-reboot` ends QEMU).
   `XTASK_QEMU_ARGS="-d int,cpu_reset -D qemu.log"` shows the faulting
@@ -2098,127 +2060,400 @@ the in-guest, deterministic version.
 - A refused record panics with `bootloader handoff rejected: handover
   record: ...` (CRC, version, a REQUIRED section this kernel does not
   know). The record's format and tests are in
-  `kernel/src/handover/record.rs`.
-- A new kind of state goes into a new section (or new fields at the end
-  of one, its version raised), never a changed meaning of an old field;
-  add a round-trip test and an "older writer" test.
-- Programs across a handover (R9 (b), `cargo xtask boot-test
-  handover_idle`): `handover: refused: <reason>` says what stopped it
-  (the programs go on); a thread that "runs user code" or "is not
-  blocked yet" for 3 s never reached a wait (a busy loop, or a call not
-  in `syscalls::restartable`). `handover: carrying N process(es), ...`
-  is the last line before the record; in the new kernel `handover:
-  resumed process ...` and `... resumed, N ms after the record`; `cannot
-  resume the programs: Failed { section, index, status }` names the
-  record section and entry that could not be rebuilt (the programs are
-  then lost: the record is past the point of no return; check what the
-  old kernel wrote in `carry::Programs::write`).
+  `kernel/src/handover/record.rs`. A new kind of state goes into a new
+  section (or new fields at the end of one, its version raised), never a
+  changed meaning of an old field; add a round-trip test and an "older
+  writer" test.
+
+**Programs** (`handover_idle`, busy ones `handover_k32`):
+
+- `handover: refused: <reason>` says what stopped it (the programs go
+  on). A thread that "runs user code" or "is not blocked yet" for 3 s
+  never reached a wait or the user-return hook (a busy loop, a CPU with
+  interrupts off, or in `thread_entry` without having entered user
+  mode); "is in a system call that cannot be made again (NtXxx)" names a
+  call blocked for 3 s that is not in `syscalls::restartable` /
+  `restart_as` (make it restartable only if it has done nothing while
+  blocked: the reissue does it all again).
+- `handover: carrying N process(es), ...` (with `(3 stopped in user
+  mode)` for busy ones) is the last line before the record; in the new
+  kernel `handover: resumed process ...` and `... resumed, N ms after the
+  record`. `cannot resume the programs: Failed { section, index, status
+  }` names the record section and entry that could not be rebuilt (the
+  programs are then lost: the record is past the point of no return;
+  check what the old kernel wrote in `carry::Programs::write`).
 - A carried thread that faults or returns garbage right after the
   handover: its registers come from `in_syscall` (the `syscall`'s) and
   its x87/SSE state from the scheduler's saved context; the call is made
-  again through `arch::syscall::reissue`. A sleep that ends early or late
-  across a handover is the clock: the tick count must go on from the
-  record's (`time::resume`), at the first boot's timer rate (CLOCK v2).
+  again through `arch::syscall::reissue`. USER threads come back through
+  `thread_entry`'s parked path (IRETQ with every register, `fxrstor` of
+  the held FXSAVE). A DLL page with wrong contents means the layout
+  differs (`INVALID_IMAGE_HASH` in `cannot resume the programs`) or a
+  page was taken as shared that was private (only borrowed frames equal
+  to `ImageLayout::view_frame` are IMAGE_VIEW).
+- A sleep that ends early or late across a handover is the clock: the
+  tick count must go on from the record's (`time::resume`), at the first
+  boot's timer rate (CLOCK v2).
 - Something new a program can hold must be carried or refused in
-  `carry::check_object` (the match is exhaustive over `ObjectBody`: a
-  new object kind does not compile until it is decided).
-- Busy programs (R9 (c), `cargo xtask boot-test handover_k32`): the
-  carrying line says how many threads were stopped in user mode
-  (`(3 stopped in user mode)`). A thread that "runs user code" for 3 s
-  never reached the user-return hook (it is not taking timer ticks: a
-  CPU with interrupts off) or is in `thread_entry` without having
-  entered user mode; "is in a system call that cannot be made again
-  (NtXxx)" names a call blocked for 3 s that is not in
-  `syscalls::restart_as` (make it restartable only if it has done
-  nothing while blocked: the reissue does it all again). A carried
-  thread that misbehaves only after the handover: USER threads come
-  back through `thread_entry`'s parked path (IRETQ with every register,
-  `fxrstor` of the held FXSAVE); a DLL page with wrong contents means
-  the layout differs (`INVALID_IMAGE_HASH` in `cannot resume the
-  programs`) or a page was taken as shared that was private (only
-  borrowed frames equal to `ImageLayout::view_frame` are IMAGE_VIEW).
-- Changing the handover record's format (R9 (d), ARCHITECTURE
-  "Versions and negotiation"): change the section's writer and reader
-  (fields at the end only), raise its version in `handover::version::
-  KINDS` (and its comment), decide `must_read` (raise it to the new
-  version only if a reader ignoring the new fields would lose what a
-  program sees), make the reader give the new fields their defaults for
-  older versions, and add host tests (the previous version read with
-  defaults, the new one round-tripped). Run `cargo test -p kernel --lib`
-  and `cargo test -p kernel --lib --features handover_next handover::`
-  (both builds), then `cargo xtask boot-test handover_upgrade` and
-  `handover_downgrade_refused` (the default build to the next and back:
-  if the default build now writes what `handover_next` writes, move
-  `handover_next` ahead so the scenarios still cross a format change).
-  `handover: refused: the next kernel (...) reads X up to version N` is
-  negotiation working; `bootloader handoff rejected: handover record:
-  section X version V needs a reader of version M` in the new kernel
-  means a record got past negotiation (a must_read the note did not
-  match): check `KINDS` against the writers (`readelf -n` on the kernel
-  shows the note).
+  `carry::check_object` (the match is exhaustive over `ObjectBody`: a new
+  object kind does not compile until it is decided).
 - A new system call that blocks: decide whether a thread blocked in it
   can be carried (`syscalls::restartable` and `restart_as`); a call with
   a side effect before its wait (signal-and-wait, alert-by-id) carries
   its blocked half as the plain wait.
-- Sockets (R9 (e), `cargo xtask boot-test handover_net`): `handover:
-  carrying N socket(s): C TCP connection(s), L listener(s), U UDP
-  socket(s); the network is stopped` in the old kernel, `handover: N
-  socket(s) resumed; the network was stopped for X ms` in the new one.
-  `refused: the network
-  did not stop` means the net thread did not park within 1 s (it is
-  stuck in a poll or a notify hook). A connection that hangs after the
-  handover: compare the carried `ConnState` with what the peer expects
-  (sequence numbers: `send_unacked`/`send_last`, `recv_first` plus the
-  unread bytes is RCV.NXT); a reset right after it means the new
-  kernel's socket was not found for the peer's segment (smoltcp answers
-  unknown segments with RST: an entry not rebuilt, a wrong tuple or
-  listen address). `Failed { section: 34/35, .. }` in `cannot resume the
-  programs` names NET or SOCKETS (`afd::adopt`, `tcp::adopt_entry`:
-  NO_MEMORY also when a carried buffer is larger than this kernel's
-  `BUFFER`). The host test `net::tcp::tests::connections_go_on_in_a_new_
-  stack` carries a loopback stack into a new one without booting.
-- smoltcp is vendored (`vendor/smoltcp`, a `[patch.crates-io]`, not a
-  workspace member) with gala's patch between `gala: begin`/`gala: end`
-  markers in `src/socket/tcp.rs` (and `#![allow(warnings)]` in
-  `src/lib.rs`: a path dependency's warnings are not capped). To upgrade
-  smoltcp: copy the new release from the registry (drop examples,
-  benches, dev-dependencies from its `Cargo.toml`), apply the marked
-  blocks again, run `cargo test -p kernel --lib net::tcp handover::` and
-  the handover_net scenarios; the record (`ConnState`) changes only if
-  the new release's behaviour needs more state. Record the version in
-  THIRD_PARTY.md.
+
+**Changing the record's format** (R9 (d)): change the section's writer
+and reader (fields at the end only), raise its version in
+`handover::version::KINDS` (and its comment), decide `must_read` (raise
+it to the new version only if a reader ignoring the new fields would lose
+what a program sees), make the reader give the new fields their defaults
+for older versions, and add host tests (the previous version read with
+defaults, the new one round-tripped). Run `cargo test -p kernel --lib`
+and `cargo test -p kernel --lib --features handover_next handover::`
+(both builds), then `cargo xtask boot-test handover_upgrade` and
+`handover_downgrade_refused` (the default build to the next and back: if
+the default build now writes what `handover_next` writes, move
+`handover_next` ahead so the scenarios still cross a format change).
+`handover: refused: the next kernel (...) reads X up to version N` is
+negotiation working; `bootloader handoff rejected: handover record:
+section X version V needs a reader of version M` in the new kernel means
+a record got past negotiation (a must_read the note did not match):
+check `KINDS` against the writers (`readelf -n` on the kernel shows the
+note).
+
+**Sockets** (`handover_net`): `handover: carrying N socket(s): C TCP
+connection(s), L listener(s), U UDP socket(s); the network is stopped`
+in the old kernel, `handover: N socket(s) resumed; the network was
+stopped for X ms` in the new one.
+
+- `refused: the network did not stop`: the net thread did not park
+  within 1 s (it is stuck in a poll or a notify hook).
+- A connection that hangs after the handover: compare the carried
+  `ConnState` with what the peer expects (sequence numbers:
+  `send_unacked`/`send_last`, `recv_first` plus the unread bytes is
+  RCV.NXT); a reset right after it means the new kernel's socket was not
+  found for the peer's segment (smoltcp answers unknown segments with
+  RST: an entry not rebuilt, a wrong tuple or listen address).
+- `Failed { section: 34/35, .. }` in `cannot resume the programs` names
+  NET or SOCKETS (`afd::adopt`, `tcp::adopt_entry`: NO_MEMORY also when
+  a carried buffer is larger than this kernel's `BUFFER`).
+- The host test `net::tcp::tests::connections_go_on_in_a_new_stack`
+  carries a loopback stack into a new one without booting.
+
+**Upgrading smoltcp**: it is vendored (`vendor/smoltcp`, a
+`[patch.crates-io]`, not a workspace member) with gala's patch between
+`gala: begin`/`gala: end` markers in `src/socket/tcp.rs` (and
+`#![allow(warnings)]` in `src/lib.rs`: a path dependency's warnings are
+not capped). Copy the new release from the registry (drop examples,
+benches, dev-dependencies from its `Cargo.toml`), apply the marked
+blocks again, run `cargo test -p kernel --lib net::tcp handover::` and
+the handover_net scenarios; the record (`ConnState`) changes only if the
+new release's behaviour needs more state. Record the version in
+THIRD_PARTY.md.
+
+## Things that are easy to get wrong
+
+Pitfalls met so far, by area. Test-writing pitfalls are under "Test
+programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
+
+### Kernel code
+
+- **The seams**: core code (`net/`, and anything a second personality
+  shares) reaches threads, waits and time through `crate::runtime`, not
+  `crate::nt::platform` (the NT layer's seam) and not
+  `crate::sched`/`crate::time` directly (those do nothing in gala-um). A
+  new process constructor must set `personality` (ARCHITECTURE "The
+  seams").
+- **Arch code** (declared before `console` in lib.rs) writes
+  `crate::info!`/`crate::warn!`, not the bare macros.
+- **Multiprocessor**: all CPUs schedule threads, and any thread, the
+  boot thread included, can move between CPUs at any reschedule. Never
+  rely on "interrupts off" as a lock; use `sync::IrqMutex`. Per-CPU data
+  lives behind GS (`arch::percpu`); per-CPU hardware setup belongs in
+  each CPU's own init path (`ap_main` / early `kernel_main`), never in
+  code run later by a thread. Per-thread state goes in `sched::Thread`
+  or `NtThread`, not in a global "current request" slot.
+- **Per-CPU state read while interrupts may be on** (system calls run
+  with `sti`) must be one GS-relative load (`percpu::cpu_index`,
+  `percpu::personality`): reading `gs:[0]` and then a field can land on
+  another CPU's block after a migration. A per-CPU index read with
+  interrupts on is stale after the next instruction: use it only with
+  interrupts off or for diagnostics.
+- **IrqMutex guards go in reverse order**: each guard restores the
+  interrupt flag it found, so dropping an outer guard before an inner
+  one turns interrupts back on while the inner lock is still held (the
+  thread can then be preempted holding it). Let guards drop at scope
+  end, or drop them innermost first; debug kernels panic otherwise. No
+  `schedule()` with a lock held.
+- **Read-modify-write of shared kernel state in one lock hold**: reading
+  a value under a lock, dropping it and storing a value computed from it
+  under a second hold loses whatever happened in between (two
+  NtReleaseSemaphore calls at once once added one, and a wait satisfied
+  in between was undone). Use one hold, or the dispatcher's
+  `update_signal`/`change_mutant`. A heap corruption in a program with
+  its own garbage collector is worth checking against the
+  synchronization services its stop-the-world uses (for HotSpot on
+  Windows: semaphores, events, critical sections), not only the memory
+  manager; `smpsem_test` is the pattern for such a test.
+- **Waits**: every `prepare_wait`/`wait` sits in a loop that re-checks
+  its own condition and deadline (`sched::wake` wakes a waiting thread
+  whatever it waits for). Kernel code that shares one event between
+  several waiters must not count on each waiter seeing it set: a count
+  or generation next to it (GalaConsoleCtrl's) says what happened.
+- **Signals**: never read-modify-write a signal with `signal_state()` +
+  `set_signal`, and never reset a signal after testing other state
+  outside `wait::update_signal`: both lose wake-ups under SMP
+  (`smpsem_test`, `smprace_test`; ARCHITECTURE "Waits").
+- **Termination-aware waits** call `thread::wake_if_terminating()` right
+  after `platform::prepare_wait`; checking `is_terminating()` before
+  marking the thread waiting loses a termination request made in
+  between.
+- **Memory manager locks**: a VAD change and the matching page-table
+  change happen under one hold of the VAD lock (views, VAD, space;
+  ARCHITECTURE "Virtual memory"); reading the VAD, dropping its lock and
+  then mapping lets a fault or service on the other processor act on the
+  state in between. Nothing that may write user memory (with_fs, which
+  delivers directory change notifications) may run under those locks:
+  lockdep panics.
+- **Changing user mappings** goes through `process.space.lock()` (a
+  `SpaceGuard`): the guard's drop does the TLB shootdown and frees the
+  unmapped frames. Do not free user frames any other way while the space
+  may be live.
+- **32-bit system call arguments**: a ULONG (lengths, classes, codes,
+  flags) passed on the stack, and sometimes in a register, has garbage in
+  its upper half. Read it with `arg!(call, n) as u32` (NtCreateFile once
+  read EaLength as 64 bits, `0xc0_0000_003a`; `XTASK_EVENTS=syscall`
+  showed it).
+- **Vector state**: the kernel is soft-float; never add code that uses
+  x87/SSE/AVX registers in the kernel (the user's state is live in them
+  during system calls and traps). Read a thread's saved state only
+  through `Context::saved_xstate` or `xstate::save` (both `normalize`:
+  XSAVEOPT leaves components in their initial state unwritten), never
+  write a thread's switch area, and load user-supplied state only
+  through `xstate::restore` (it sanitizes: a bad XSTATE_BV or MXCSR bit
+  makes XRSTOR fault in the kernel). `XState` is 2.7 KiB: keep copies
+  off deep kernel stacks.
+- **Kernel code that host unit tests reach must not log**: `info!`/
+  `warn!` write to the serial port, and in a `cargo test -p kernel
+  --lib` build the test binary dies with SIGSEGV and no test name
+  ("process didn't exit successfully ... signal: 11"). Gate the log
+  lines with `#[cfg(not(test))]` or a wrapper compiled out under
+  `cfg(test)` (`nt::session`'s and `display::virtio_gpu`'s `log!`);
+  events are fine (`events::emit` is a no-op in tests). Find the test
+  with `--test-threads=1` or by filtering module names.
+- **Changing `nt::desktop`'s public functions or types**: the server
+  kernel's stand-in `kernel/src/nt/desktop_off.rs` must follow, or the
+  `--no-default-features` clippy line in CI fails.
+- **Windows live in a session**: kernel code reaches the window
+  registry, WinEvent hooks and shasha's desktop through the process
+  (`process.desk.windows` / `.hooks` / `.shell`), never a global;
+  `desktop::screen(shell)` is None for a session the console does not
+  show. An HWND of another session is no window
+  (ERROR_INVALID_WINDOW_HANDLE; `events=window` and the log say where it
+  is).
+
+### gala's DLLs
+
+- **The standard handles are not consoles without a console session**:
+  making GetConsoleMode succeed on the serial-line handles changes
+  programs' output (Caddy's logging; `kernel32_sys_test` and
+  `winsock_test` expect redirected handles). Keep them non-consoles.
+- **Static tables** go in a DLL's data section (copied into every
+  process that loads it) unless their initial value is all zero bytes:
+  give "empty" slots zero fields (`disabled` rather than `enabled:
+  true`, offsets rather than a base like 0xC000) and data-carrying enums
+  `#[repr(u8)]` with the empty variant 0. `llvm-objdump -h` shows the
+  .data size.
+- **A DLL that exports a function under the name of one it calls in
+  another DLL** (ncrypt's BCryptGenRandom, which Windows forwards to
+  bcrypt; advapi32's CreateProcessAsUserW to kernel32's) cannot import
+  that name with `raw-dylib`: the linker binds the import to the DLL's
+  own export and the call jumps to itself for ever (`jmp $`, a silent
+  hang with no stack growth). Look the other DLL's function up at run
+  time (LoadLibraryW + GetProcAddress), as `user/ncrypt` does.
+- **Functions that must start from their caller's registers** (anything
+  that captures a context or walks frames: RtlCaptureContext,
+  RtlRaiseException, RtlUnwindEx, the dispatchers) are `global_asm!`
+  with `.seh_*` directives in ntdll's `seh.rs`, not naked functions:
+  naked functions get no unwind data, and a walk cannot pass through
+  them. Assembly symbols are exported through `/EXPORT` in testntdll's
+  build.rs. `llvm-readobj --unwind` shows what the assembler emitted.
+- **The exception dispatcher runs on what is left of the stack** (a
+  stack overflow is delivered with only the guard region below rsp):
+  keep the vectored-handler path's frames small and put CONTEXT copies
+  in `#[inline(never)]` helpers (`guard_test` catches this).
+- **CONTEXT_XSTATE**: gala's ntdll drops it from its own CONTEXT copies
+  (they have no CONTEXT_EX); a copy that keeps the flag makes NtContinue
+  read whatever follows it as a CONTEXT_EX (validated, then ignored if
+  wrong).
+- **Predefined registry keys are sign-extended on x64**: winreg.h
+  defines HKEY_LOCAL_MACHINE as `(HKEY)(ULONG_PTR)((LONG)0x80000002)`,
+  0xFFFFFFFF80000002; C programs and .NET pass that form, Rust test
+  programs usually the zero-extended one. Accept both (advapi32's
+  `predefined`).
+- **SDK structure packing**: richedit.h packs its structures to 4 bytes
+  (`pshpack4.h`): a pointer or WPARAM after a 4-byte field is not
+  8-aligned (ENLINK's wParam at 28, lParam at 36, chrg at 44;
+  GETTEXTEX's lpDefaultChar at 12; EDITSTREAM's callback at 12). Write
+  such structures byte by byte, and check other SDK headers for
+  `pshpack` before laying out a structure.
+- **Nothing that may send a message under a control's lock**:
+  BeginPaint sends WM_ERASEBKGND, SetWindowLong(GWL_STYLE) may send
+  WM_STYLECHANGING, and wx subclasses every control (its procedure may
+  send the control anything). Take the DC (or change the style) outside
+  the lock, as `user/richedit` does; its `Store` returns None to a thread
+  that asks again while holding it rather than spinning.
+- **Two DLLs with one implementation** (riched20 and msftedit): an rlib
+  crate (`user/richedit`, its own panic handler and imports) and a small
+  cdylib crate per DLL whose DllMain registers its classes; list each
+  cdylib in `USER_DLLS` and the rlib on the CI clippy line.
+- **COM interfaces written in Rust** (gala's UIAutomationCore): take the
+  method order from the C `...Vtbl` structs in the mingw-w64 header
+  (inherited methods included). On x64 a by-value argument over 8 bytes
+  (VARIANT, RECT) arrives as a pointer to the caller's copy, an 8-byte
+  POINT in one register. Tell objects apart by a field, not only by
+  vtable address: identical read-only tables may be folded by the
+  linker. mingw-w64's headers spell some names differently from the SDK
+  (`TreeScope_SubTree` for `TreeScope_Subtree`): a C test meant to build
+  with both uses the value.
+- **Datagram sockets in ws2_32**: whether a socket is a datagram one is
+  ws2_32's own per-socket record (SO_TYPE in the options table, set by
+  socket/WSASocketW and WSADuplicateSocket's receiver); sendto/recvfrom
+  pick the AFD request from it. A socket handle ws2_32 did not make (an
+  accepted one, one from another process without WSADuplicateSocket)
+  counts as a stream.
+- **Non-blocking state is inherited**: Windows gives an accepted socket
+  the listener's non-blocking mode (Nginx relies on it; without it recv
+  blocked on the TLS handshake's second flight while plain HTTP, arriving
+  in one piece, hid the bug).
+
+### Windows behaviour gala must copy
+
+- **A thread's windows go when it ends**: a test or gala DLL that
+  creates a window on a worker thread which then returns loses the
+  window (IsWindow FALSE, sends fail with ERROR_INVALID_WINDOW_HANDLE).
+  Keep such a thread alive and pumping. A thread gets a message queue
+  (PostThreadMessage reaches it) only once it creates a window or calls
+  a message function; post to a new thread after it has called
+  PeekMessage, as PostThreadMessage's documentation says.
+- **user32's queue event is one per process** (auto-reset): with several
+  threads waiting in GetMessage at once, a wake can go to the wrong one,
+  which then waits again. Tests with several pumping threads keep only
+  one waiting at a time (windows_across_test waits on thread handles
+  without pumping while a worker pumps).
+- **Hover logic that waits for "the pointer left"** (tooltips): a window
+  only gets WM_MOUSEMOVE while the pointer is over it, so code fed by one
+  window's moves (a subclass, TTM_RELAYEVENT) never sees it leave across
+  other windows; poll GetCursorPos against the rectangle on a timer while
+  the pointer is on it.
+- **A window moved without a new size** (snapped from the left half to
+  the right) gets WM_MOVE but no WM_SIZE, as on Windows: a test program
+  that watches its rectangle checks both.
+- **A program's window state reaches it after it handled the request**
+  (user32 mirrors it): poll IsZoomed/IsIconic from another process
+  rather than reading them once right after `gala windows` (which is
+  shasha's own state) changed.
+
+## Hygiene sweeps
+
+A sweep reads existing code for one class of fault at a time instead of
+waiting for a flaky scenario to point at it. The kernel's primitives
+were written for one CPU at a time and SMP came after. Do one after a
+change of assumptions (more CPUs, preemption in new places, a new kind
+of object or teardown path), otherwise about once a month, or when a
+flaky scenario has no explanation yet.
+
+**What to check** (each item: what the bug looks like, where to look):
+
+1. *Check, then act, in separate lock holds*: a condition read under a
+   lock and acted on after letting go (or under another lock). Look for
+   `let x = a.lock().thing;` followed by a change elsewhere; for
+   `set_signal(.., 0)` after a test of some queue; for "decided under
+   lock A, signaled under lock B". Fix: one hold, or the dispatcher's
+   `update_signal`/`change_mutant`; or a pin (`NamePin`).
+2. *Wake-ups whose condition changes before the woken thread runs*: a
+   waiter that wakes and looks again can find the condition gone (a
+   notification event reset: `Waiter::released`); a waiter that does
+   not look again takes any wake-up for its own (NtDelayExecution and
+   NtResumeThread were). Every `prepare_wait`/`wait` must sit in a loop
+   that re-checks its own condition and deadline.
+3. *Order of teardown*: what a waiter on the dying thing finds when it
+   wakes (a process signaled before its handles were closed); queues of
+   work for something that is going away (APCs to an exiting thread,
+   packets to a closed port); a name or count dropping to zero while
+   another CPU is about to take a reference (handle count vs. lookups).
+4. *"This CPU"*: a per-CPU index read with interrupts on is stale after
+   the next instruction (`cpu_index()`, `current_cpu()`); only use it
+   with interrupts off or for diagnostics (shootdown's `changed_on`).
+5. *Interrupt state*: IrqMutex guards must drop innermost first (debug
+   kernels panic otherwise); no `schedule()` with a lock held.
+6. *Duplicate or aliased arguments*: the same object twice in one call
+   (WaitAll with one semaphore twice consumed it twice).
+7. *Non-race hygiene on the way*: failure paths that leave nothing
+   behind (OBSERVABILITY.md), infallible allocation (`cargo xtask
+   alloc-audit`), `unsafe` without `SAFETY:`, stale TODOs.
+
+**How**: one SMP stress test per sweep (`smprace_test` for the first),
+one round per finding, two threads pinned to processors 0 and 1 doing
+the two sides in a loop, each round shown to fail before its fix (keep
+the iteration count at a few times what the failure needed: boots under
+a loaded host are slow, and the scenario's timeout is 120 s). A finding
+that cannot be made to fail is fixed when the fix is small and clearly
+right, and the reasoning is written down. Record each finding in ROADMAP
+and the invariant it breaks in ARCHITECTURE.
+
+**Sweeps done**: the first covered the dispatcher and waits (events,
+semaphores, mutants, timers), APCs, thread and process teardown, handle
+tables and names, IOCP, the scheduler's waits, the heap and frame
+allocator's locks and the console's input signal. `smprace_test`'s
+rounds are its findings: WaitAll with an object twice (round 1), a
+timer's stale expiry signaled after a re-arm (2), a name removed while
+an open was taking its handle (3), a process signaled before its handles
+were closed (4), NtDelayExecution ended by any wake-up (5). What was
+fixed without a test, what was left open and what was checked and found
+sound are in ROADMAP "HS. Hygiene sweeps"; the invariants in
+ARCHITECTURE "Waits".
 
 ## Where things are
 
 | Area | Path |
 |---|---|
 | Boot, Limine protocol | `kernel/src/boot/` |
-| CPU, paging, interrupts, SYSCALL, SMP | `kernel/src/arch/x86_64/` |
+| CPU, paging, interrupts, SYSCALL, SMP, virtio transport | `kernel/src/arch/x86_64/` |
 | Frames, heap | `kernel/src/mm/` |
 | Scheduler | `kernel/src/sched/` |
-| NT personality (objects, processes, files, sections, syscalls) | `kernel/src/nt/` |
+| Core seam to threads, waits, time | `kernel/src/runtime.rs` |
+| NT personality (objects, processes, files, sections, syscalls, registry seed) | `kernel/src/nt/` |
 | Linux personality (exec, system calls, mmap/brk, ELF loader, initial stack, syscall/errno tables) | `kernel/src/lx/` |
-| Linux test programs, their binaries and expected transcripts | `user/lx/`, `user/lx/bin/` |
 | Linux ABI data (signal frames, sigsets, termios, struct layouts) | `kernel/lx_abi/` |
-| Ramfs | `kernel/src/fs/` |
+| Ramfs, boot-module tar trees | `kernel/src/fs/` |
 | Disk (virtio-blk) | `kernel/src/disk/` |
 | Display (virtio-gpu; the protocol and driver host-tested) | `kernel/src/display/` |
+| Kernel handover record | `kernel/src/handover/` |
+| gala-um's platform | `kernel/src/hosted/`, `um/` |
+| Baked fonts, icons, wallpapers | `kernel/assets/`, `fonts/selawik/` |
 | Test runtime for user programs | `user/ntrt/` |
-| `gala install` (winget packages): library, commands, test source | `user/galapkg/`, `user/gala/src/pkg.rs`, `user/pk_install_test/` |
-| winget manifest resolver (YAML, schemas, selection, dependencies, ARP) and its corpus | `user/galapkg/src/winget/`, `user/galapkg/testdata/winget-corpus/` |
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
-| Checked-in binaries, Windows runner | `user/bin/` |
-| Build, boot tests, reports | `xtask/` |
+| Linux test programs, their binaries and transcripts | `user/lx/`, `user/lx/bin/` |
+| `gala install` (winget packages): library, commands, test source | `user/galapkg/`, `user/gala/src/pkg.rs`, `user/pk_install_test/` |
+| winget manifest resolver and its corpus | `user/galapkg/src/winget/`, `user/galapkg/testdata/winget-corpus/` |
+| Third-party program builds, scripts and configuration | `user/<program>/` (`build.sh`) |
+| Checked-in binaries, Windows runner (`run-all.ps1`) | `user/bin/` |
+| Build, boot tests, scenarios, reports | `xtask/src/main.rs`; signing `xtask/src/trust.rs`; triage `triage.rs`; OTLP `otel.rs`; lx transcripts `lx_expect.rs`; audit `alloc_audit.rs`; clock check `clockcheck.rs` |
+| Docker test image | `docker/test.Dockerfile` |
 | Vendored dependencies (smoltcp with gala's handover patch) | `vendor/` |
 
-## Lock-order checking (lockdep)
+Output under `target/`:
 
-Debug kernels, host tests and gala-um panic with `lockdep: X taken while
-holding Y, but Y was taken while holding X before` on the first lock-order
-inversion (docs/ARCHITECTURE.md, "Built in early"). A class is the
-protected type, so give a lock over a plain type (`u32`, `Option<id>`,
-`()`) a name with `IrqMutex::named("module.field", value)`, or unrelated
-locks of that type share a class and report false inversions. A guard
-taken inside a format macro's arguments (`info!("{}", *a.lock())`) lives
-to the end of the statement: read such values into locals first.
-
+| Path | What |
+|---|---|
+| `target/<profile>/test-<name>.serial.log`, `.events.jsonl`, `.phases.log`, `.qemu.log`, `.bios.log` | a boot's logs |
+| `target/failed/<scenario>.log` | the last failed boot's log with its triage |
+| `target/report/` | `history.jsonl`, `timing.txt`, `ledger.md`, `gala.{json,md}`, `bench.json` |
+| `target/prebuilt/<name>/` | fetched releases |
+| `target/screenshots/` | screenshots |
+| `target/trust/` | the test signing key |
+| `target/net-client/<port>/` | a net client's files during a boot |
+| `target/lx-expect/<binary>/` | lx-expect's runs and `actual.txt` |
+| `target/server/`, `target/next/` | the server kernel and the `handover_next` kernel |
+| `~/.cache/gala-qemu/<version>` | the pinned QEMU |

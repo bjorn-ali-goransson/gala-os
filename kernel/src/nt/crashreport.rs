@@ -1,4 +1,4 @@
-//! Crash reports (docs/OBSERVABILITY.md, "Gaps found 2026-11-03"): when
+//! Crash reports (docs/OBSERVABILITY.md, "Crash reports (programs)"): when
 //! a program dies of an exception, the log says what Windows' error
 //! reporting would: the exception code and its name, the address as
 //! module+offset, what was accessed, the thread, the registers and the

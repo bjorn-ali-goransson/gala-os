@@ -1,5 +1,5 @@
 //! Processes: a user address space, a handle table and threads. Includes
-//! the loader for freestanding PE executables (no imports yet).
+//! the loader for PE executables (ntdll binds their imports).
 
 use super::platform;
 use alloc::vec::Vec;

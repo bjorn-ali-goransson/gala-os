@@ -1,5 +1,5 @@
 //! winget manifests in full, for `gala install` to call (ROADMAP PK;
-//! ARCHITECTURE "Installing software: the winget resolver"):
+//! ARCHITECTURE "Installing software", "The winget resolver"):
 //!
 //! - [`yaml`]: the YAML subset manifests are written in, with line and
 //!   column on every node and error;

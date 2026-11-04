@@ -168,7 +168,7 @@ pub const TIMEOUT_FLOOR_HZ: u64 = 4_000_000_000;
 /// in TSC ticks at the calibrated rate or [`TIMEOUT_FLOOR_HZ`], whichever
 /// is higher, so it never ends early when the calibration was wrong (the
 /// handover's wait for the other CPUs to park failed that way: OBSERVABILITY
-/// "Gaps found 2026-11-03" item 17).
+/// "Clock checks").
 #[derive(Clone, Copy, Debug)]
 pub struct SpinDeadline {
     start: u64,

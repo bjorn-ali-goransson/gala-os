@@ -1,5 +1,5 @@
-//! The guest's clock against the host's (docs/OBSERVABILITY.md "Gaps
-//! found 2026-11-03" item 17; ARCHITECTURE "Interrupts and time").
+//! The guest's clock against the host's (docs/OBSERVABILITY.md "Clock
+//! checks"; ARCHITECTURE "Interrupts and time").
 //!
 //! The guest prints its uptime in lines carrying `uptime_ms=<n>` (the
 //! kernel's RTC check, clockcal_test's marks). While the VM runs, a

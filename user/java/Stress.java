@@ -1,6 +1,6 @@
 // Runs javac in-process many times, three compilations at a time, compiling
 // Http.java (the `java_stress` boot scenario, pending: a stress run for the
-// Java heap corruption, ROADMAP Priorities). A compiler crash (javac's
+// Java heap corruption, WORKFLOW "Known intermittent"). A crash (javac's
 // "An exception has occurred in the compiler") counts as a failure.
 // Arguments: compilations (default 12), then optionally the interval in
 // ms of full collections forced meanwhile (System.gc()).
