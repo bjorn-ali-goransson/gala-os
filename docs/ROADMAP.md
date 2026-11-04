@@ -613,6 +613,11 @@ U3. **gala-um in CI** next to the QEMU scenarios, with differences between
    um-test first in `cargo xtask test`, gala-um outcomes in the report;
    host CPUs, loopback networking; 51 programs in ~2.7 s. It found a real
    NT bug at once (context of a thread suspended in a system call).
+   **gala-um: more than one NT process** (open, 2026-11-04): child
+   processes and the kernel's `start=` (a server next to the test, as
+   schannel_test's Nginx) need a host process per NT process sharing one
+   NT layer (objects, the loopback TCP stack); until then those
+   scenarios stay out of gala-um (`NOT_IN_UM`, `UM_FLAGS` in xtask).
 N1. **Networking (next)**, re-planned 2026-10-30 from data: the official
    Nginx Windows build is a 32-bit (PE32) program (imports: KERNEL32 152,
    ADVAPI32 21, WS2_32 7, CRYPT32 7, USER32 4; C runtime linked in), and
@@ -2321,10 +2326,17 @@ TLS. **Schannel: SSPI's TLS package** (2026-11-03). **Client and server,
       same directory) come first; Schannel then validates through them.
    Also open: session resumption, client certificates, ECDSA server
    keys, revocation, keys persisted across processes.
-   **Stopgap to replace (2026-11-04):** `schannel_test` is excluded from
-   gala-um (`NOT_IN_UM`): its TLS 1.3 handshake with the in-process server
-   hangs there (both threads waiting) while it passes in QEMU. Find the
-   gala-um socket or wait gap and remove the exclusion.
+   **gala-um exclusion resolved (2026-11-04):** `schannel_test` was in
+   `NOT_IN_UM` for a supposed TLS 1.3 hang in gala-um's sockets. There
+   was none: um-test ran it without the Nginx its scenario starts
+   (`start=`, which gala-um did not apply and xtask dropped silently), so
+   its client retried a refused connect for 60 s past um's 30 s timeout.
+   Without the Nginx parts it passes in gala-um, the in-process TLS 1.3
+   and 1.2 server included. xtask now keeps any scenario with a kernel
+   flag gala-um does not apply out of gala-um by rule (`UM_FLAGS`,
+   `um_gap`; host tests `um_scenarios`), and `um_command` refuses one.
+   schannel_test runs in gala-um once gala-um can run a second process
+   (below, "gala-um: more than one NT process").
    **Stage 3 built: NSIS booted, Inno Setup host-tested** (2026-11-03,
    scenario `pk_install_nsis`, `pk_install_test nsis`; host tests
    `cargo test -p galapkg`; ARCHITECTURE "Installing software",

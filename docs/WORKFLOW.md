@@ -1496,7 +1496,20 @@ against the scenario's `expect` lines; ~50 programs in ~3 s. Run it
 alone with `cargo xtask um-test` while changing `kernel/src/nt`: it is
 the fastest check there is. A new test program runs in gala-um by
 default; if it cannot (child processes, a network card), add it to
-`NOT_IN_UM` with the reason.
+`NOT_IN_UM` with the reason. A scenario with a kernel flag gala-um does
+not apply (anything but `UM_FLAGS` in xtask: `start=`, `as=`, `events=`,
+...) is left out by that rule, and `um_command` refuses to run it: the
+program would run without part of its setup. um-test ends with every
+program scenario it did not run and why (`um_gap`).
+
+- **Pitfall: a "hang" in gala-um is first a question of setup.**
+  schannel_test (`start=nginx.exe`) was once run in gala-um without its
+  Nginx; its client retried connect (STATUS_CONNECTION_REFUSED from
+  AFD's connect) every 200 ms for 60 s, past um's 30 s timeout, and the
+  exclusion blamed a TLS handshake hang in gala-um's sockets. The state
+  dump said otherwise (one thread, in NtDelayExecution), as did
+  `--trace` (the refused IOCTL 0x12007 in a loop). Read the dump and the
+  trace before naming a cause.
 
 Run a program directly:
 

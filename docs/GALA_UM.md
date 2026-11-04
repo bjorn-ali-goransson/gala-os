@@ -220,6 +220,15 @@ One processor as far as programs can tell (`online_count` 1).
   and `NOT_IN_UM` (process_test: child processes; bench: measures the
   platform). No list of passing programs to maintain: a new test program
   runs in gala-um by default.
+- **Invariant (2026-11-04): a scenario runs in gala-um with all of its
+  kernel flags or not at all.** `UM_FLAGS` (xtask) lists the flags um
+  applies (`qemu_exit`, `run=`, `args=`, `clock=`; `calstall`, which
+  only touches the kernel's clock calibration); a scenario with any other
+  flag is left out (`um_gap` gives the reason, which um-test prints and
+  the report records) and `um_command` refuses it. Before, `start=` was
+  dropped silently: schannel_test ran without its Nginx and waited for
+  it, and the wait was taken for a TLS hang in gala-um's sockets. Host
+  tests: xtask's `um_scenarios`.
 - **`cargo xtask test`** runs um-test after the unit tests and before the
   QEMU boots: a broken NT layer fails in seconds.
 - **`cargo xtask report`** also runs gala-um and writes
@@ -261,7 +270,10 @@ One processor as far as programs can tell (`online_count` 1).
 **Not in gala-um** (by design or not yet):
 - process_test, smprace_test, nginx_master: child processes (one NT
   process per Linux process; a host process per NT process would be
-  needed).
+  needed). The same for `start=` (schannel_test's Nginx): ROADMAP
+  "gala-um: more than one NT process".
+- `as=system` (system_test, lsa_test, restricted_test, profile_test),
+  `events=`, `wallpaper=` and the other boot options um does not take.
 - Network-card scenarios (net_echo, winsock_test serve, go_http, nginx,
   nginx_tls): a TAP device or host sockets behind AFD.
 - bench: runs, but measures the host.

@@ -6542,17 +6542,11 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("uipi_test", "a child process (one NT process per Linux process)"),
     ("shell32_test", "a child process (ShellExecuteExW runs it)"),
-    // Hangs in its TLS 1.3 handshake with the in-process server (both
-    // threads waiting); passes in QEMU. A gala-um socket gap: ROADMAP TLS.
-    ("schannel_test", "the in-process TLS server's sockets (gala-um gap)"),
     ("winevent_test", "a child process (one NT process per Linux process)"),
     ("uia_test", "a child process (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
     ("system_test", "child processes; run as SYSTEM (a boot option)"),
     ("session_test", "child processes; run as SYSTEM (a boot option)"),
-    ("lsa_test", "runs as SYSTEM (a boot option)"),
-    ("restricted_test", "runs as SYSTEM (a boot option)"),
-    ("profile_test", "runs as SYSTEM (a boot option)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
     ("busybox", "child processes (pipelines are child processes)"),
@@ -6562,15 +6556,53 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("console_window", "needs a screen (the console window is on the desktop)"),
 ];
 
-/// Whether gala-um runs scenario `s`: a program's own scenario (its
-/// program and expected lines, no other kernel flags), except network
-/// scenarios (they need a network card and xtask's client), disk scenarios
-/// (no virtio-blk in a Linux process) and NOT_IN_UM.
+/// The kernel flags gala-um applies to a scenario's run (`um_command`),
+/// and how. A scenario with any other flag (`start=`, `as=`, `events=`,
+/// `wallpaper=`, ...) does not run in gala-um: `um_command` would drop
+/// the flag and run a different test. schannel_test (`start=nginx.exe`)
+/// once ran there without its server and waited for it, which looked like
+/// a TLS hang in gala-um (2026-11-04).
+const UM_FLAGS: &[(&str, &str)] = &[
+    ("qemu_exit", "the run ends with the program"),
+    ("run", "the program (um's program argument)"),
+    ("args", "its command line"),
+    ("clock", "um --clock="),
+    ("calstall", "stalls the kernel's clock calibration; gala-um has none"),
+];
+
+/// The first kernel flag of `s` that gala-um does not apply (UM_FLAGS).
+fn um_unapplied_flag(s: &Scenario) -> Option<&'static str> {
+    s.cmdline.split_whitespace().find(|w| {
+        let key = w.split_once('=').map_or(*w, |(k, _)| k);
+        !UM_FLAGS.iter().any(|(f, _)| *f == key)
+    })
+}
+
+/// Why gala-um does not run scenario `s`, or None if it does: it runs a
+/// program's own scenario (its program and expected lines, only the flags
+/// of UM_FLAGS), except network scenarios (they need a network card and
+/// xtask's client), disk scenarios (no virtio-blk in a Linux process) and
+/// NOT_IN_UM.
+fn um_gap(s: &Scenario) -> Option<String> {
+    if scenario_program(s).is_none() {
+        return Some("not a program's own scenario".into());
+    }
+    if net_marker(s.name).is_some() {
+        return Some("network scenario (needs a network card and xtask's client)".into());
+    }
+    if disk_scenario(s.name).is_some() {
+        return Some("disk scenario (no virtio-blk in a Linux process)".into());
+    }
+    if let Some((_, why)) = NOT_IN_UM.iter().find(|(n, _)| *n == s.name) {
+        return Some(why.to_string());
+    }
+    um_unapplied_flag(s)
+        .map(|flag| format!("kernel flag {flag} (gala-um does not apply it, UM_FLAGS)"))
+}
+
+/// Whether gala-um runs scenario `s` (`um_gap` says why not).
 fn runs_in_um(s: &Scenario) -> bool {
-    scenario_program(s).is_some()
-        && net_marker(s.name).is_none()
-        && disk_scenario(s.name).is_none()
-        && !NOT_IN_UM.iter().any(|(n, _)| *n == s.name)
+    um_gap(s).is_none()
 }
 
 /// Expected lines that only a QEMU boot has: the boot marker, the NMI
@@ -6629,6 +6661,13 @@ fn um_test(release: bool) -> Result {
         selected.len(),
         all.elapsed().as_secs_f64()
     );
+    // What it left out, each with its reason (um_gap), so that a program
+    // missing here is explained rather than silently absent.
+    for s in SCENARIOS.iter().filter(|s| scenario_program(s).is_some()) {
+        if let Some(why) = um_gap(s) {
+            eprintln!("xtask: um-test: not run: {:<20} {why}", s.name);
+        }
+    }
     if failed.is_empty() { Ok(()) } else { Err(format!("um tests failed: {failed:?}")) }
 }
 
@@ -6670,6 +6709,11 @@ fn run_um_with(
 fn um_command(um: &Path, s: &Scenario, options: &[String], timeout_secs: u32) -> Result<Command> {
     let name = s.name;
     let program = scenario_program(s).ok_or(format!("{name}: not a program scenario"))?;
+    // Never a run without part of its setup (a server `start=` starts, a
+    // token `as=` gives): it would fail in a way that says nothing.
+    if let Some(flag) = um_unapplied_flag(s) {
+        return Err(format!("{name}: gala-um does not apply kernel flag {flag} (UM_FLAGS)"));
+    }
     // The scenario's `args=` (percent-encoded), as one command-line string.
     let args = s.cmdline.split_whitespace().find_map(|w| w.strip_prefix("args=")).unwrap_or("");
     // A hung program fails instead of hanging the run (Linux only, as
@@ -7250,13 +7294,9 @@ fn gala_report(release: bool) -> Result {
         um_results.push(if runs_in_um(scenario) {
             report::outcome_from_serial(program, &run_um(&um, scenario)?)
         } else {
-            let why = NOT_IN_UM.iter().find(|(n, _)| *n == scenario.name).map_or(
-                "network scenario (needs a network card and xtask's client)",
-                |(_, why)| why,
-            );
             report::Outcome {
                 program: program.to_string(),
-                skipped: Some(why.to_string()),
+                skipped: um_gap(scenario),
                 ..Default::default()
             }
         });
@@ -10929,5 +10969,43 @@ mod repeats {
         ports.sort_unstable();
         ports.dedup();
         assert_eq!(ports.len(), 8);
+    }
+}
+
+#[cfg(test)]
+mod um_scenarios {
+    use super::*;
+
+    /// A scenario whose setup gala-um cannot give (a server `start=`
+    /// starts) does not run there, and the reason names the flag:
+    /// schannel_test once ran without its Nginx and waited 60 s for it,
+    /// which was taken for a TLS hang in gala-um.
+    #[test]
+    fn a_flag_gala_um_does_not_apply_keeps_a_scenario_out() {
+        let s = Scenario {
+            name: "tls_client_test",
+            cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/ run=tls_client_test.exe",
+            exit_status: QEMU_EXIT_SUCCESS,
+            expect: &["tls_client_test: ok"],
+        };
+        assert!(!runs_in_um(&s));
+        assert!(um_gap(&s).is_some_and(|why| why.contains("start=nginx.exe")), "{:?}", um_gap(&s));
+        let um = Path::new("um");
+        assert!(um_command(um, &s, &[], 1).is_err_and(|e| e.contains("start=nginx.exe")));
+        // Flags gala-um applies keep it in.
+        let s = Scenario { cmdline: "qemu_exit clock=pause run=tls_client_test.exe", ..s };
+        assert!(runs_in_um(&s), "{:?}", um_gap(&s));
+    }
+
+    /// Every scenario gala-um runs is run with all of its kernel flags,
+    /// and schannel_test, which needs Nginx (`start=`), is kept out by
+    /// that rule, not by a list.
+    #[test]
+    fn um_scenarios_have_only_flags_um_applies() {
+        for s in SCENARIOS.iter().filter(|s| runs_in_um(s)) {
+            assert_eq!(um_unapplied_flag(s), None, "{}", s.name);
+        }
+        let schannel = SCENARIOS.iter().find(|s| s.name == "schannel_test").unwrap();
+        assert!(um_gap(schannel).is_some_and(|why| why.starts_with("kernel flag start=nginx.exe")));
     }
 }
