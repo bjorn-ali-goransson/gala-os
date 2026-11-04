@@ -685,13 +685,15 @@ charged). Look
   /usr/bin/qemu-system-x86_64 "$@"`.
 - **sshd_shell's Ctrl+C step (2026-11-03)**: every failed run (solo and
   in repeats) showed `~ $ sleep 60`, the prompt, `e^C^C`, then `cho:
-  not found`: Ctrl+C ended `sleep`, but busybox's own control handler
-  (its process's control thread, `GalaConsoleCtrl`) ran only after the
-  prompt was back and dropped the next typed line. The client now types
-  the line again (up to four times, 10 s each) while `sleep` would still
-  run. Whether gala should deliver the shell's event before the child's
-  exit is seen (Windows calls every attached process's handler on its
-  own thread too, with no order promised) is open.
+  not found`: busybox's control handler (its process's control thread
+  in `GalaConsoleCtrl`) ran only after the prompt was back and dropped
+  the next typed line. The cause was in gala, not in the order of
+  delivery: a lost wake-up in `nt::wait` (a waiter that looked after
+  another process's thread had reset the session's Ctrl+C event slept
+  until the call's 1 s backstop; ROADMAP "sshd_shell's Ctrl+C fixed").
+  A client retry briefly papered over it and is gone again: the line is
+  typed once. Each process's handler thread logs how long after the
+  Ctrl+C it took it (`took Ctrl+C N late` from 250 ms on).
 - **A sleep that spans a handover (2026-11-03)**: handover_upgrade failed
   with "slept again 1248" (check 58), handover_k32 with "slept 4986"
   (check 14), handover_idle_uefi with "slept 7634 ms" (check 0x16), each
@@ -891,7 +893,8 @@ run (java_hello: ~35 s locally; it timed out at 120 s once in CI, with
 its threads still progressing - much of a JVM's time goes to gala's
 lightweight-lock waits, which sleep 1 ms at a time until a kernel address
 wait exists). Every limit (but a dump scenario's) is stretched by the
-host's overload when the VM starts (`host_overload`: the one-minute load
+host's overload when the VM starts (a tracked stopgap, ROADMAP
+Priorities: limits should count guest time) (`host_overload`: the one-minute load
 average per host CPU, 1 to 3): with five agents on a 4-CPU host (load
 20-33) sshd_shell's guest had run only 58 s when its 120 s were up, and
 handover_k32_twice's verification was cut short the same way; the

@@ -47,7 +47,14 @@ explicitly in its commit.
   port), smpsched_test counts context switches instead of timing,
   handover sleeps bounded by the measured pause (GalaHandoverPause),
   handover_k32_twice's verification bounded, time limits stretched by
-  host load (WORKFLOW "Known intermittent").
+  host load (WORKFLOW "Known intermittent"). **Stopgap, to replace**
+  (CLAUDE.md's rule): the load stretch (`host_overload`) widens wall-time
+  limits; the structural fix is a limit on the guest's own progress (its
+  monotonic clock, which xtask can read from the serial log's
+  `uptime_ms=` marks or ask through the monitor) so a starved VM is not
+  killed and a hung one is still caught at the same guest time. The
+  sshd_shell client's Ctrl+C retry (2026-11-03) was removed again once
+  the lost wake-up below was fixed.
   **sshd_shell's Ctrl+C fixed (2026-11-03)**: not a regression of the
   clock calibration (the parent failed 1 of 10 solo boots the same way).
   A lost wake-up in `nt::wait`: setting a notification event woke its

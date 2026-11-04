@@ -8755,23 +8755,12 @@ fn ssh_shell_client(port: u16) -> Result {
         let started = Instant::now();
         send(b"\x03")?;
         thread::sleep(Duration::from_secs(1));
-        // The shell's own control handler runs in its own thread, which a
-        // loaded host may schedule after `sleep` has ended and the prompt
-        // is back: busybox then drops the line being typed ("~ $ e^C^C",
-        // then "cho: not found"; seen in every failed run of 2026-11-03,
-        // solo and in repeats). So the line is typed again until it runs
-        // (what a person at a terminal would do), while sleep would still
-        // be running.
-        let mut ran = Err(String::new());
-        for _ in 0..4 {
-            send(b"echo gala-$((50-6))\r")?;
-            ran = expect("gala-44\r\n", at, 10).map_err(|e| format!("Ctrl+C: {e}"));
-            if ran.is_ok() {
-                break;
-            }
-        }
-        let at = ran?;
-        if started.elapsed() > Duration::from_secs(50) {
+        // Typed once: the shell's control handler takes Ctrl+C while
+        // `sleep` runs (a late one, a lost wake-up, dropped this line:
+        // ROADMAP "sshd_shell's Ctrl+C fixed").
+        send(b"echo gala-$((50-6))\r")?;
+        let at = expect("gala-44\r\n", at, 30).map_err(|e| format!("Ctrl+C: {e}"))?;
+        if started.elapsed() > Duration::from_secs(25) {
             return Err("Ctrl+C: the prompt came back only after sleep ended".into());
         }
         let _ = at;
