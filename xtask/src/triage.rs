@@ -249,6 +249,11 @@ pub fn triage(serial: &str, events: Option<&str>, facts: &Facts) -> String {
     if let Some(l) = plain.iter().find(|l| l.starts_with("clock: recalibrated")) {
         writeln!(o, "triage: clock: {}", shorten(l, 200)).ok();
     }
+    // How much of the wall time the VM could run (vmtime.rs): a timeout
+    // with most of it spent waiting for a host CPU was the ceiling's.
+    if let Some(l) = plain.iter().find_map(|l| l.strip_prefix("xtask: vm time: ")) {
+        writeln!(o, "triage: vm time: {}", shorten(l, 200)).ok();
+    }
     let warnings = lines.iter().filter(|l| l.starts_with("[warn ")).count();
     let errors = lines.iter().filter(|l| l.starts_with("[error")).count();
     writeln!(o, "triage: log: {} lines, {warnings} warnings, {errors} errors", lines.len()).ok();
@@ -588,7 +593,10 @@ statedump: NMI part done; the threads follow from the boot thread if it still ru
     #[test]
     fn a_timeout_without_a_dump_says_so() {
         let facts = Facts { verdict: Some("timed out after 120s"), ..Facts::default() };
-        let t = triage("[info ] run: begin a.exe\nhello\n", None, &facts);
+        let log = "[info ] run: begin a.exe\nhello\nxtask: vm time: 121.0s run of 130.2s wall \
+                   (9.2s waiting for a host CPU) (limit 120s of run time)\n";
+        let t = triage(log, None, &facts);
+        assert!(t.contains("triage: vm time: 121.0s run of 130.2s wall"), "{t}");
         assert!(t.contains("state dump: none"), "{t}");
         assert!(t.contains("CPUs unknown"), "{t}");
         assert!(t.contains("triage:   hello"), "{t}");

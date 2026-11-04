@@ -165,7 +165,11 @@ Each: what failed, what we lacked, what would have explained it, status.
     boot and recalibrates when they disagree (`clock: RTC check: agrees`
     or `clock: WRONG`, `clock_wrong` event); xtask times every
     `uptime_ms=` mark against the host and adds `xtask: clock: <source>:
-    guest N ms over host M ms` or `xtask: clock: WRONG: ...`; the triage
+    guest N ms over host A..B ms` (each mark's poll window, timed by a
+    thread of its own since 2026-11-04) or `xtask: clock: WRONG: ...`;
+    every boot also ends with `xtask: vm time: <run> run of <wall> wall
+    (<w> waiting for a host CPU)`, what its time limit counted
+    (xtask/src/vmtime.rs), and a timeout says which limit; the triage
     reports both (`triage: clock WRONG`), and a failure in a boot whose
     clock was wrong says so in its verdict. Scenarios `clockcal_test`
     (host CPUs kept busy, `calstall`), `clockcal_recal` (`calwrong`).

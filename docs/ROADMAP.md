@@ -47,12 +47,23 @@ explicitly in its commit.
   port), smpsched_test counts context switches instead of timing,
   handover sleeps bounded by the measured pause (GalaHandoverPause),
   handover_k32_twice's verification bounded, time limits stretched by
-  host load (WORKFLOW "Known intermittent"). **Stopgap, to replace**
-  (CLAUDE.md's rule): the load stretch (`host_overload`) widens wall-time
-  limits; the structural fix is a limit on the guest's own progress (its
-  monotonic clock, which xtask can read from the serial log's
-  `uptime_ms=` marks or ask through the monitor) so a starved VM is not
-  killed and a hung one is still caught at the same guest time. The
+  host load (WORKFLOW "Known intermittent"; replaced 2026-11-04, below).
+  **Guest time versus host time under load (2026-11-04, done)**: the
+  `host_overload` stretch is gone. Measured: under TCG the guest's clocks
+  (TSC, HPET, PM timer, RTC) follow the host's even when the VM is
+  starved, so the guest's clock cannot measure progress; VM limits now
+  count the VM's run time, the wall time less its vCPU threads' run-queue
+  wait (`xtask/src/vmtime.rs`, 4x wall ceiling; every log has an
+  `xtask: vm time:` line). The `xtask: clock: WRONG`s under load
+  (console_window: "guest 9914 ms over host 39959 ms") were xtask's
+  timing (marks timed by a loop a screen check held for a minute), not
+  the guest's clock: marks are timed by their own thread with their poll
+  windows. Also fixed, same class: console_window ended 8 s after its
+  last line, whatever the screen check's pace (it waits for xtask's "q"
+  now; its wheel step waits for the last line, `ScreenStep::after`);
+  clockcal_test's check 2 assumed prompt clock interrupts; user32
+  published a moved window's rectangle to other processes after the
+  desktop listed it (gala_cli check 0x1f). The
   sshd_shell client's Ctrl+C retry (2026-11-03) was removed again once
   the lost wake-up below was fixed.
   **sshd_shell's Ctrl+C fixed (2026-11-03)**: not a regression of the

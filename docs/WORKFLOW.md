@@ -673,16 +673,26 @@ charged). Look
   rounds after the handover (the writer thread sees the kernel's
   generation change, GalaHandoverPause) and then wait for the stop; the
   test prints the rounds it checked and how long that took; time limits
-  also stretch with host load now.
+  count the VM's run time now (vmtime.rs), not the wall time.
 - **Timing checks in test programs** measure the host as much as the
   guest: under TCG a loaded host stops the VM's processors for
   milliseconds at a time, the guest's clocks go on, and "this took under
   2 s" fails. Check what the guest did instead (smpsched_test counts its
   threads' ContextSwitches: one processor would need two per message);
   keep elapsed-time bounds as generous give-ups only. To reproduce such a
-  failure, run QEMU on one host CPU: a directory first in PATH with a
-  `qemu-system-x86_64` script that runs `taskset -c 3
-  /usr/bin/qemu-system-x86_64 "$@"`.
+  failure, run QEMU on one host CPU: `XTASK_QEMU=<script>` with a script
+  that runs `taskset -c 3 ~/.cache/gala-qemu/<version>/bin/qemu-system-x86_64
+  "$@"`, plus busy loops pinned to that CPU (`taskset -c 3 sh -c 'while
+  :; do :; done'`). The same holds for KUSER_SHARED_DATA's clocks (a
+  snapshot written at clock interrupts, which come late under load:
+  compare them with a counter read on each side of a fresh snapshot, as
+  clockcal_test does) and for screen checks: a program must not end or
+  move on after a guessed time while xtask looks; wait for xtask's input
+  (console_window's "q"), and a step whose input acts on output the
+  program is still printing waits for that output (`ScreenStep::after`).
+  Timing xtask's own observations in a loop that does other work is the
+  same mistake on the host side (the false `xtask: clock: WRONG`s,
+  2026-11-04).
 - **sshd_shell's Ctrl+C step (2026-11-03)**: every failed run (solo and
   in repeats) showed `~ $ sleep 60`, the prompt, `e^C^C`, then `cho:
   not found`: busybox's control handler (its process's control thread
@@ -902,13 +912,18 @@ instead of 120 s: a slow CI runner takes over twice as long as a local
 run (java_hello: ~35 s locally; it timed out at 120 s once in CI, with
 its threads still progressing - much of a JVM's time goes to gala's
 lightweight-lock waits, which sleep 1 ms at a time until a kernel address
-wait exists). Every limit (but a dump scenario's) is stretched by the
-host's overload when the VM starts (a tracked stopgap, ROADMAP
-Priorities: limits should count guest time) (`host_overload`: the one-minute load
-average per host CPU, 1 to 3): with five agents on a 4-CPU host (load
-20-33) sshd_shell's guest had run only 58 s when its 120 s were up, and
-handover_k32_twice's verification was cut short the same way; the
-failed log's triage line has the load. In a shared VM,
+wait exists). Every limit counts the VM's *run time*, not wall time
+(`xtask/src/vmtime.rs`): the wall time less the run-queue wait of its
+most-starved vCPU thread (`/proc/<pid>/task/<tid>/schedstat`), so a VM
+starved by a loaded host is not killed (with five agents on a 4-CPU
+host sshd_shell's guest had run only 58 s when 120 s of wall time were
+up), while a hung one is caught as before (halted vCPUs sleep, so its
+run time is the wall time). A wall ceiling of 4x the limit remains.
+The guest's own clock cannot do this: under TCG it follows the host's
+even when starved (ARCHITECTURE "What a guest's clock follows"). Every
+log has `xtask: vm time: <run> run of <wall> wall (<w> waiting for a
+host CPU)`, and the triage repeats it. The state dump's wait after a
+timeout counts run time too. In a shared VM,
 scenarios running the same program (two `dotnet.exe` runs) are judged on
 that program's n-th `run: begin`..`run: end` section, in group order.
 To see why a .NET program fails: the ledger first, then `XTASK_EVENTS=
@@ -1683,8 +1698,10 @@ a captured value) when that matters.
   symbolized at the end of the failed log). Watchdogs right after boot on
   a loaded host: check the clock first (below).
 - **Is the guest's clock right?** Look for `xtask: clock:` lines (xtask
-  timed the guest's `uptime_ms=` marks against the host: `+0.4%` is
-  fine, `xtask: clock: WRONG` is not), the kernel's `tsc:` line (which
+  timed the guest's `uptime_ms=` marks against the host, in a thread of
+  their own, each within its poll window: `guest 5118 ms over host
+  5096..5136 ms (+0.0% of the middle)` is fine, `xtask: clock: WRONG` is
+  not; under TCG the right guest clock is the host's, starved or not), the kernel's `tsc:` line (which
   reference, how many samples were rejected, the spread) and `clock: RTC
   check: agrees` / `clock: WRONG` (the kernel's own check against the
   CMOS RTC a few seconds into the boot, which recalibrates). A wrong

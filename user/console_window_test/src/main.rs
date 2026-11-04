@@ -14,8 +14,8 @@
 //! z`); Ctrl+C typed in the window is not input but a CTRL_C_EVENT to the
 //! handler, on another thread (`console_window_test: ctrl-c`; the handler
 //! returns TRUE, so the process goes on). Forty numbered lines follow
-//! (the window's scrollback keeps the first ones). It ends 8 seconds
-//! later, so xtask sees the window.
+//! (the window's scrollback keeps the first ones). It ends when xtask,
+//! done looking at the window, types "q" (`console_window_test: done`).
 //! ReadFile on a console returns
 //! the line with "\r\n", as Windows' cooked mode does.
 
@@ -194,10 +194,19 @@ pub extern "C" fn mainCRTStartup() -> ! {
             out(&[b'l', b'i', b'n', b'e', b' ', b'0' + i / 10, b'0' + i % 10, b'\n']);
         }
     }
-    // Time for xtask to look at the window, then the end.
-    // SAFETY: plain calls.
+    // xtask looks at the window, then types "q" (still raw input): the
+    // end. Not a fixed time: under load the screen checks take longer.
+    // SAFETY: plain calls; the buffer outlives them.
     unsafe {
-        Sleep(8000);
+        let stdin = GetStdHandle(-10i32 as u32);
+        let mut key = [0u8; 8];
+        let mut got = 0u32;
+        let ok = ReadFile(stdin, key.as_mut_ptr(), 8, &mut got, core::ptr::null_mut());
+        if ok == 0 || got != 1 || key[0] != b'q' {
+            out(b"console_window_test: no q\n");
+            ExitProcess(8);
+        }
+        out(b"console_window_test: done\n");
         ExitProcess(0)
     }
 }

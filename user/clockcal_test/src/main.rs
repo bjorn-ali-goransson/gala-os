@@ -10,7 +10,9 @@
 //! NtDelayExecution does not end early on the performance counter, and
 //! KUSER_SHARED_DATA's interrupt time and tick count follow the
 //! performance counter (the tick count may lag a little behind under an
-//! emulator, never run ahead).
+//! emulator, never run ahead). The page is a snapshot written at clock
+//! interrupts, so each mark brackets a fresh one between two counter
+//! reads (see `mark`) instead of assuming the interrupts come on time.
 //!
 //! Prints `clockcal_test: ok` or exits with the number of the failing
 //! check.
@@ -32,14 +34,14 @@ fn u64_at(off: usize) -> u64 {
     unsafe { ((KUSER + off) as *const u64).read_volatile() }
 }
 
-/// KUSER_SHARED_DATA.InterruptTime (a KSYSTEM_TIME) in milliseconds.
-fn interrupt_ms() -> i64 {
+/// KUSER_SHARED_DATA.InterruptTime (a KSYSTEM_TIME) in 100 ns units.
+fn interrupt_raw() -> u64 {
     loop {
         let high1 = u32_at(0x0c);
         let low = u32_at(0x08);
         let high2 = u32_at(0x10);
         if high1 == high2 {
-            return ((u64::from(high1) << 32 | u64::from(low)) / 10_000) as i64;
+            return u64::from(high1) << 32 | u64::from(low);
         }
     }
 }
@@ -63,14 +65,47 @@ fn print_dec(mut v: u64) {
     write_file(stdout(), &buf[i..]);
 }
 
-fn mark(n: u64) -> (i64, i64, i64) {
-    let t = (now_ms(), interrupt_ms(), tick_ms());
+/// A snapshot of KUSER_SHARED_DATA's clocks and when it was taken on
+/// the performance counter: between `lo` and `hi` (ms).
+struct Mark {
+    lo: i64,
+    hi: i64,
+    interrupt: i64,
+    tick: i64,
+}
+
+/// The page is a snapshot that the kernel writes at each clock
+/// interrupt, as Windows does. Under an emulator on a busy host an
+/// interrupt can come tens of milliseconds late, so the page read at
+/// any moment can lag the counter by that much (check 2 once failed
+/// with the interrupt time 26 ms behind, 2026-11-04). So a mark waits
+/// for the page to change, reading the counter before and after: the
+/// new snapshot was taken between those two reads, however late.
+fn mark(n: u64) -> Option<Mark> {
+    let start = now_ms();
+    // The counter read before the last read of the page that still
+    // showed the old snapshot: the new one was written after it.
+    let mut before = start;
+    let first = interrupt_raw();
+    let (interrupt, tick) = loop {
+        let now = now_ms();
+        let raw = interrupt_raw();
+        if raw != first {
+            break ((raw / 10_000) as i64, tick_ms());
+        }
+        before = now;
+        // A generous give-up: the page did not change for 5 s.
+        if now - start > SLEEP_MS {
+            return None;
+        }
+    };
+    let hi = now_ms();
     print("clockcal_test: mark ");
     print_dec(n);
     print(" uptime_ms=");
-    print_dec(t.0.max(0) as u64);
+    print_dec(if n == 1 { hi } else { before }.max(0) as u64);
     print("\r\n");
-    t
+    Some(Mark { lo: before, hi, interrupt, tick })
 }
 
 fn fail(check: u32, what: &str, got: i64) -> u32 {
@@ -87,20 +122,26 @@ fn fail(check: u32, what: &str, got: i64) -> u32 {
 const SLEEP_MS: i64 = 5000;
 
 fn main() -> u32 {
-    let (q0, i0, t0) = mark(1);
+    let Some(m0) = mark(1) else { return fail(4, "the page did not change in", SLEEP_MS) };
     delay(-SLEEP_MS * 10_000);
-    let (q1, i1, t1) = mark(2);
-    let (q, i, t) = (q1 - q0, i1 - i0, t1 - t0);
+    let Some(m1) = mark(2) else { return fail(4, "the page did not change in", SLEEP_MS) };
+    // The sleep lies between the first mark's end and the second's start.
+    let q = m1.lo - m0.hi;
     // Not early (a millisecond's rounding allowed).
     if q < SLEEP_MS - 1 {
         return fail(1, "slept short on the performance counter:", q);
     }
-    // The interrupt time is the performance counter's clock.
-    if (i - q).abs() > 20 {
+    // The interrupt time is the performance counter's clock: the two
+    // snapshots lay between the marks' brackets (a millisecond's
+    // rounding at each end allowed).
+    let (shortest, longest) = (m1.lo - m0.hi, m1.hi - m0.lo);
+    let i = m1.interrupt - m0.interrupt;
+    if i < shortest - 2 || i > longest + 2 {
         return fail(2, "interrupt time moved", i);
     }
     // Ticks may lag (late interrupts under emulation), never lead.
-    if t > q + 20 || t < q * 8 / 10 {
+    let t = m1.tick - m0.tick;
+    if t > longest + 20 || t < shortest * 8 / 10 {
         return fail(3, "tick count moved", t);
     }
     print("clockcal_test: slept ");
