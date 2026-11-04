@@ -14,6 +14,7 @@ mod accel;
 mod combo;
 mod controls;
 mod dialog;
+mod dpi;
 mod foreign;
 mod hook;
 mod icon;
@@ -22,8 +23,10 @@ mod listbox;
 mod menu;
 mod message;
 mod monitor;
+mod power;
 mod rect;
 mod scroll;
+mod session;
 mod spi;
 mod text;
 mod timer;
@@ -83,6 +86,39 @@ pub extern "system" fn CharToOemBuffA(src: *const u8, dst: *mut u8, length: u32)
     1
 }
 
+/// CharToOemBuffW(lpszSrc, lpszDst, cchDstLength): UTF-16 to the OEM code
+/// page (WideCharToMultiByte with CP_OEMCP), `length` characters into as
+/// many bytes.
+#[unsafe(no_mangle)]
+pub extern "system" fn CharToOemBuffW(src: *const u16, dst: *mut u8, length: u32) -> i32 {
+    if src.is_null() || dst.is_null() || length > i32::MAX as u32 {
+        return 0;
+    }
+    let n = length as i32;
+    // SAFETY: the caller's buffers of `length` characters and bytes.
+    let done = unsafe {
+        WideCharToMultiByte(1, 0, src, n, dst, n, core::ptr::null(), core::ptr::null_mut())
+    };
+    i32::from(done != 0 || length == 0)
+}
+
+/// OemToCharBuffA(lpszSrc, lpszDst, cchDstLength): OEM to ANSI; gala's
+/// two code pages are the same, so this copies.
+#[unsafe(no_mangle)]
+pub extern "system" fn OemToCharBuffA(src: *const u8, dst: *mut u8, length: u32) -> i32 {
+    CharToOemBuffA(src, dst, length)
+}
+
+/// OemToCharA(pSrc, pDst): as OemToCharBuffA up to the NUL (copied too).
+#[unsafe(no_mangle)]
+pub extern "system" fn OemToCharA(src: *const u8, dst: *mut u8) -> i32 {
+    if src.is_null() || dst.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's NUL-terminated string and a buffer as long.
+    unsafe { CharToOemBuffA(src, dst, strlen(src) as u32 + 1) }
+}
+
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn SetLastError(code: u32);
@@ -107,12 +143,15 @@ pub extern "system" fn GetProcessWindowStation() -> usize {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetUserObjectInformationW(
-    _object: usize,
-    _index: i32,
-    _info: *mut u8,
-    _length: u32,
-    _needed: *mut u32,
+    object: usize,
+    index: i32,
+    info: *mut u8,
+    length: u32,
+    needed: *mut u32,
 ) -> i32 {
+    if object == session::DESKTOP {
+        return session::desktop_information(index, info, length, needed);
+    }
     // SAFETY: plain call.
     unsafe { SetLastError(6) }; // ERROR_INVALID_HANDLE
     0

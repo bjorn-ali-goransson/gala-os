@@ -15,7 +15,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     EnumResourceLanguagesA
     FindFirstChangeNotificationW
     FindNextChangeNotification
-    GetActiveProcessorCount
     GetCurrencyFormatEx
     GetCurrencyFormatW
     GetNamedPipeHandleStateA
@@ -24,23 +23,16 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetNumberFormatEx
     GetNumberFormatW
     GetPrivateProfileStringW
-    GetProcessPriorityBoost
     GetShortPathNameA
     GetSystemTimeAdjustment
     GetTapeParameters
     GetTapePosition
     GetTapeStatus
     GetThreadIOPendingFlag
-    GetThreadPriorityBoost
     GetVolumePathNamesForVolumeNameW
     GlobalFlags
     GlobalMemoryStatus
     GlobalReAlloc
-    GlobalSize
-    InitOnceBeginInitialize
-    InitOnceComplete
-    K32GetMappedFileNameW
-    K32GetPerformanceInfo
     MapUserPhysicalPagesScatter
     MapViewOfFileExNuma
     OpenJobObjectW
@@ -63,9 +55,7 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     SetProcessAffinityUpdateMode
     SetTapeParameters
     SetTapePosition
-    SetThreadPriorityBoost
     TerminateJobObject
-    TransactNamedPipe
     VerLanguageNameW
     WaitNamedPipeA
     WaitNamedPipeW
@@ -90,7 +80,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetNumberOfConsoleMouseButtons
     IdnToUnicode
     IsBadStringPtrA
-    PrefetchVirtualMemory
     PurgeComm
     ReadConsoleOutputW
     ScrollConsoleScreenBufferW
@@ -106,7 +95,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     EnumResourceNamesW
     GetDiskFreeSpaceA
     GetProfileStringW
-    GetSystemPowerStatus
     GlobalHandle
     IsBadReadPtr
     ReadConsoleOutputCharacterA

@@ -160,3 +160,9 @@ pub extern "system" fn GlobalLock(memory: *mut c_void) -> *mut c_void {
 pub extern "system" fn GlobalUnlock(_memory: *mut c_void) -> Bool {
     FALSE
 }
+
+/// GlobalSize: the size of a GlobalAlloc block (gala's are LocalAlloc's).
+#[unsafe(no_mangle)]
+pub extern "system" fn GlobalSize(memory: *mut c_void) -> usize {
+    LocalSize(memory)
+}

@@ -244,6 +244,10 @@ N: ... windows ...`, then its top-level windows). Also `display`
 their names); `gputrace` logs every virtio-gpu command and its result,
 and a boot ends with a `display:` line (commands, flushes, mode changes,
 errors, resets, the last error). Server
+programs it ended); `process start` carries the command line. Since 2026-11-03 (BR)
+also `file`: each NtCreateFile/NtOpenFile with the name as given, its
+root directory handle, the handle made and the status (Chromium opens
+files no ledger line names). Server
 logs: `logtee=C:/dir` copies what programs write below a directory to the
 serial log (`logtee: <file>: <line>`; sshd's and sshd-session's logs in
 the sshd scenarios), and `conpty=trace` logs a pseudo console's VT

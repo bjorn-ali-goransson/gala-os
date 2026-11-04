@@ -21,6 +21,7 @@
 use core::ffi::c_void;
 
 mod actctx;
+mod address_wait;
 mod ansi;
 mod calendar;
 mod console;
@@ -35,6 +36,7 @@ mod pipe;
 mod pool;
 mod process;
 mod processor;
+mod procinfo;
 mod pty;
 mod resource;
 mod runtime;
@@ -1061,8 +1063,12 @@ pub extern "system" fn CreateFileW(
     } else {
         options |= FILE_NON_DIRECTORY_FILE;
     }
+    // FILE_FLAG_DELETE_ON_CLOSE asks for DELETE access too (as Windows'
+    // CreateFileW does: NT refuses FILE_DELETE_ON_CLOSE without it).
+    let mut access = access;
     if flags & FILE_FLAG_DELETE_ON_CLOSE != 0 {
         options |= 0x1000;
+        access |= 0x1_0000; // DELETE
     }
     if flags & FILE_FLAG_OPEN_REPARSE_POINT != 0 {
         options |= FILE_OPEN_REPARSE_POINT;
@@ -1659,6 +1665,7 @@ pub extern "system" fn GetFileInformationByHandleEx(
     let (nt_class, listing, restart) = match class {
         0 => (4, false, false),  // FileBasicInfo
         1 => (5, false, false),  // FileStandardInfo
+        2 => (9, false, false),  // FileNameInfo
         9 => (35, false, false), // FileAttributeTagInfo
         10 => (37, true, false), // FileIdBothDirectoryInfo
         11 => (37, true, true),  // FileIdBothDirectoryRestartInfo
@@ -1921,6 +1928,30 @@ pub extern "system" fn WerGetFlags(_process: Handle, flags: *mut u32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "system" fn SetProcessPriorityBoost(_process: Handle, _disable: Bool) -> Bool {
     TRUE
+}
+
+/// SetThreadPriorityBoost: as SetProcessPriorityBoost.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetThreadPriorityBoost(_thread: Handle, _disable: Bool) -> Bool {
+    TRUE
+}
+
+/// GetProcessPriorityBoost/GetThreadPriorityBoost(h, *pDisablePriorityBoost):
+/// FALSE, boosts enabled, as Windows starts every process and thread
+/// (gala's scheduler boosts nothing, so nothing to report either way).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetProcessPriorityBoost(_process: Handle, disabled: *mut Bool) -> Bool {
+    if disabled.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's output.
+    unsafe { *disabled = FALSE };
+    TRUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadPriorityBoost(thread: Handle, disabled: *mut Bool) -> Bool {
+    GetProcessPriorityBoost(thread, disabled)
 }
 
 // ---- System information ----
@@ -3330,6 +3361,22 @@ pub extern "system" fn FlsFree(index: u32) -> Bool {
 #[unsafe(no_mangle)]
 pub extern "system" fn FlsGetValue(index: u32) -> *mut c_void {
     TlsGetValue(index)
+}
+
+/// FlsGetValue2 and TlsGetValue2 (Windows 11 24H2): the slot's value
+/// without changing the last error (and without checking the index, as
+/// documented: the caller passes a valid one).
+#[unsafe(no_mangle)]
+pub extern "system" fn FlsGetValue2(index: u32) -> *mut c_void {
+    TlsGetValue2(index)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TlsGetValue2(index: u32) -> *mut c_void {
+    if index >= 64 {
+        return core::ptr::null_mut();
+    }
+    teb_u64(tls_slot(index)) as *mut c_void
 }
 
 #[unsafe(no_mangle)]

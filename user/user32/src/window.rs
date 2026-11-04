@@ -2923,3 +2923,65 @@ pub extern "system" fn SetForegroundWindow(hwnd: Hwnd) -> i32 {
 pub extern "system" fn BringWindowToTop(hwnd: Hwnd) -> i32 {
     crate::tree::SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x1 | 0x2 | 0x10) // NOSIZE | NOMOVE | NOACTIVATE
 }
+
+/// GetClassInfoExW(hInstance, lpszClass, lpwcx): the class's WNDCLASSEXW
+/// (style, procedure, background, icons; the name as given); its atom, or
+/// 0 with ERROR_CLASS_DOES_NOT_EXIST.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetClassInfoExW(
+    instance: Handle,
+    name: *const u16,
+    out: *mut WndClassExW,
+) -> i32 {
+    if out.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+    crate::controls::register_system_classes();
+    let found = with(|s| find_class(s, name).map(|i| s.classes[i]));
+    let Some(c) = found else {
+        set_last_error(ERROR_CLASS_DOES_NOT_EXIST);
+        return 0;
+    };
+    // SAFETY: the caller's WNDCLASSEXW (its cbSize is theirs).
+    unsafe {
+        let size = (*out).size;
+        out.write(WndClassExW {
+            size,
+            style: c.style,
+            proc_: c.proc_,
+            class_extra: 0,
+            window_extra: 0,
+            instance,
+            icon: c.icon as Handle,
+            cursor: core::ptr::null_mut(),
+            background: c.background as Handle,
+            menu_name: core::ptr::null(),
+            class_name: name,
+            icon_small: c.icon_small as Handle,
+        });
+    }
+    i32::from(c.atom)
+}
+
+/// GetClassLongPtrW(hWnd, nIndex): the window's class's procedure
+/// (GCLP_WNDPROC), background (GCLP_HBRBACKGROUND), icons (GCLP_HICON,
+/// GCLP_HICONSM), atom (GCW_ATOM) and style (GCL_STYLE); 0 for the
+/// others (no extra class bytes, menus or cursors are kept).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetClassLongPtrW(hwnd: Hwnd, index: i32) -> usize {
+    let class = window(hwnd).map(|w| with(|s| s.classes[w.class]));
+    let Some(c) = class else {
+        set_last_error(1400);
+        return 0;
+    };
+    match index {
+        -24 => c.proc_.map_or(0, |p| p as usize),
+        -10 => c.background,
+        -14 => c.icon,
+        -34 => c.icon_small,
+        -32 => usize::from(c.atom),
+        -26 => c.style as usize,
+        _ => 0,
+    }
+}

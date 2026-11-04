@@ -43,6 +43,7 @@ mod policy;
 mod registry;
 mod security;
 mod token;
+mod trustee;
 mod unimplemented;
 
 /// The C runtime's marker that floating point is used (the linker wants

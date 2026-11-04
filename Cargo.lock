@@ -190,6 +190,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser_api_test"
+version = "0.1.0"
+
+[[package]]
 name = "bytemuck"
 version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -556,6 +560,21 @@ name = "dpapi_test"
 version = "0.1.0"
 
 [[package]]
+name = "dwmapi"
+version = "0.1.0"
+
+[[package]]
+name = "dwrite"
+version = "0.1.0"
+dependencies = [
+ "ttf-parser",
+]
+
+[[package]]
+name = "dwrite_test"
+version = "0.1.0"
+
+[[package]]
 name = "ecdsa"
 version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -900,6 +919,10 @@ name = "imagesize"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
+
+[[package]]
+name = "imm32"
+version = "0.1.0"
 
 [[package]]
 name = "import_test"
@@ -1901,6 +1924,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "shcore"
+version = "0.1.0"
+
+[[package]]
 name = "shell32"
 version = "0.1.0"
 dependencies = [
@@ -2513,6 +2540,10 @@ dependencies = [
 
 [[package]]
 name = "wsock32"
+version = "0.1.0"
+
+[[package]]
+name = "wtsapi32"
 version = "0.1.0"
 
 [[package]]

@@ -9,6 +9,7 @@
 #![no_std]
 
 mod assoc;
+mod misc;
 mod paths;
 mod paths_more;
 mod strings;

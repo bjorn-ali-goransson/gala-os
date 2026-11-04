@@ -35,9 +35,12 @@ pub enum Category {
     /// Windows (RS step B2): registered and gone (with their session),
     /// and an HWND asked for from another session.
     Window = 2048,
+    /// File opens: the name, the handle or the failing status.
+    File = 4096,
 }
 
-const NAMES: [(&str, u32); 12] = [
+const NAMES: [(&str, u32); 13] = [
+    ("file", Category::File as u32),
     ("window", Category::Window as u32),
     ("display", Category::Display as u32),
     ("net", Category::Net as u32),

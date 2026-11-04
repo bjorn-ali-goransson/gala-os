@@ -8,6 +8,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod policy;
 mod unimplemented;
 
 #[allow(dead_code)]

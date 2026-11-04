@@ -39,6 +39,7 @@ impl NtStatus {
     pub const INVALID_CID: NtStatus = NtStatus(0xc000_000b);
     pub const INVALID_PARAMETER_MIX: NtStatus = NtStatus(0xc000_0030);
     pub const INVALID_HANDLE: NtStatus = NtStatus(0xc000_0008);
+    pub const NOT_SAME_OBJECT: NtStatus = NtStatus(0xc000_01ac);
     pub const INVALID_PARAMETER: NtStatus = NtStatus(0xc000_000d);
     pub const NO_MEMORY: NtStatus = NtStatus(0xc000_0017);
     /// The commit limit (system, job or process) would be exceeded.

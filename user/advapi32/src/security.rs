@@ -728,7 +728,7 @@ pub extern "system" fn AddAccessAllowedAce(
     AddAccessAllowedAceEx(acl, revision, 0, mask, sid)
 }
 
-fn add_simple_ace(acl: *mut u8, kind: u8, flags: u32, mask: u32, sid: *const u8) -> i32 {
+pub(crate) fn add_simple_ace(acl: *mut u8, kind: u8, flags: u32, mask: u32, sid: *const u8) -> i32 {
     let Some((_, _, n)) = read_sid(sid) else { return fail(ERROR_INVALID_SID, 0) };
     let size = 8 + sid_len(n);
     let mut ace = [0u8; 8 + 8 + 4 * SID_MAX_SUB_AUTHORITIES];
@@ -1472,7 +1472,10 @@ pub extern "system" fn SetEntriesInAclW(
 
 /// The SID of trustee name `name` ("CURRENT_USER" or an account
 /// LookupAccountNameW knows) into `out`.
-fn trustee_name_sid(name: *const u16, out: &mut [u8; 8 + 4 * SID_MAX_SUB_AUTHORITIES]) -> bool {
+pub(crate) fn trustee_name_sid(
+    name: *const u16,
+    out: &mut [u8; 8 + 4 * SID_MAX_SUB_AUTHORITIES],
+) -> bool {
     if name.is_null() {
         return false;
     }

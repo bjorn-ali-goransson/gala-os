@@ -481,3 +481,30 @@ pub extern "system" fn CallNamedPipeA(
     }
     CallNamedPipeW(wide.as_ptr(), input, input_size, output, output_size, read, timeout)
 }
+
+/// TransactNamedPipe(hNamedPipe, lpInBuffer, nInBufferSize, lpOutBuffer,
+/// nOutBufferSize, lpBytesRead, lpOverlapped): writes one message and reads
+/// one on a message-mode pipe (ERROR_MORE_DATA when the answer is longer
+/// than the buffer). Synchronous handles only: an OVERLAPPED is not
+/// supported yet (reported; ERROR_NOT_SUPPORTED).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn TransactNamedPipe(
+    pipe: Handle,
+    input: *const u8,
+    input_size: u32,
+    output: *mut u8,
+    output_size: u32,
+    read: *mut u32,
+    overlapped: *mut c_void,
+) -> Bool {
+    if !overlapped.is_null() {
+        unsupported(b"kernel32.dll!TransactNamedPipe(overlapped)", 0);
+        return fail_with(ERROR_NOT_SUPPORTED, FALSE);
+    }
+    let mut written = 0;
+    if super::WriteFile(pipe, input, input_size, &mut written, core::ptr::null_mut()) == FALSE {
+        return FALSE;
+    }
+    super::ReadFile(pipe, output, output_size, read, core::ptr::null_mut())
+}

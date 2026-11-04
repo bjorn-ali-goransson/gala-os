@@ -781,3 +781,78 @@ pub extern "system" fn InterlockedFlushSList(head: *mut SListHeader) -> *mut SLi
         old = seen;
     }
 }
+
+/// InitOnceBeginInitialize(lpInitOnce, dwFlags, fPending, lpContext): the
+/// asynchronous-free form of one-time initialization. Without flags the
+/// first caller gets *fPending TRUE and must call InitOnceComplete; others
+/// wait until it has. INIT_ONCE_CHECK_ONLY (1) only reports: TRUE with
+/// *fPending FALSE when done, else FALSE (ERROR_GEN_FAILURE).
+/// INIT_ONCE_ASYNC (2) is not supported (reported).
+#[unsafe(no_mangle)]
+pub extern "system" fn InitOnceBeginInitialize(
+    once: *mut usize,
+    flags: u32,
+    pending: *mut Bool,
+    context: *mut *mut c_void,
+) -> Bool {
+    const INIT_ONCE_CHECK_ONLY: u32 = 1;
+    const INIT_ONCE_ASYNC: u32 = 2;
+    if once.is_null() || pending.is_null() || flags & !INIT_ONCE_CHECK_ONLY != 0 {
+        if flags & INIT_ONCE_ASYNC != 0 {
+            unsupported(b"kernel32.dll!InitOnceBeginInitialize(INIT_ONCE_ASYNC)", flags.into());
+        }
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let state = srw(once);
+    let mut spins = 0;
+    loop {
+        let v = state.load(Ordering::Acquire);
+        if v & 3 == ONCE_DONE {
+            // SAFETY: the caller's outputs.
+            unsafe {
+                *pending = FALSE;
+                if !context.is_null() {
+                    *context = (v & !3) as *mut c_void;
+                }
+            }
+            return TRUE;
+        }
+        if flags & INIT_ONCE_CHECK_ONLY != 0 {
+            return fail_with(31, FALSE); // ERROR_GEN_FAILURE
+        }
+        if v == 0
+            && state.compare_exchange(0, ONCE_RUNNING, Ordering::Acquire, Ordering::Relaxed).is_ok()
+        {
+            // SAFETY: the caller's output.
+            unsafe { *pending = TRUE };
+            return TRUE;
+        }
+        backoff(&mut spins);
+    }
+}
+
+/// InitOnceComplete(lpInitOnce, dwFlags, lpContext): ends the
+/// initialization InitOnceBeginInitialize began: done with the context
+/// (its low two bits must be clear), or with INIT_ONCE_INIT_FAILED (4)
+/// back to uninitialized so another caller tries.
+#[unsafe(no_mangle)]
+pub extern "system" fn InitOnceComplete(
+    once: *mut usize,
+    flags: u32,
+    context: *mut c_void,
+) -> Bool {
+    const INIT_ONCE_INIT_FAILED: u32 = 4;
+    if once.is_null() || flags & !INIT_ONCE_INIT_FAILED != 0 || context as usize & 3 != 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let state = srw(once);
+    if state.load(Ordering::Acquire) != ONCE_RUNNING {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if flags & INIT_ONCE_INIT_FAILED != 0 {
+        state.store(0, Ordering::Release);
+    } else {
+        state.store(context as usize | ONCE_DONE, Ordering::Release);
+    }
+    TRUE
+}

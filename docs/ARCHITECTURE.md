@@ -7165,6 +7165,98 @@ tests in `kernel/src/trust/` and `fs::volume`):
   TPM NV counter, raising the floor only after a self-check (today: the
   end of the boot's work).
 
+## A web browser: Chromium, then Edge (BR, 2026-11-03)
+
+ROADMAP item BR. Stage 1 runs an unmodified Chromium snapshot
+(PREBUILT `chromium`, Win_x64 revision 1733063, 159.0.8140.0) headless:
+scenarios `chromium_version` (`--dump-dom about:blank`) and
+`chromium_dump` (a local page whose script changes it), both PENDING
+until they pass, both in SINGLE_THREAD_TCG and given 3 GiB and 900 s.
+The browser loads `chrome.dll` (340 MB) at run time, starts Crashpad's
+handler (`chrome.exe --type=crashpad-handler`, a child with an
+inherited handle list: its pipe, events and a read-only section), then
+its own children (renderer, network service, ...) over Mojo.
+
+What its start-up needed, and how gala gives it (tests:
+`browser_api_test`, `dwrite_test`):
+
+- **Images that size**: an image section keeps, per page, the offset of
+  its relocation block (`ImageLayout::reloc_index`, built once with
+  `pe::relocation_blocks`), so relocating a page reads two blocks, not
+  the whole table (`relocate_page(.., Some(index))`; 80 000 pages times a
+  multi-MB table took minutes with interrupts off before). A large
+  relocatable image (16 MB+) whose preferred base is taken in the mapping
+  process (chrome.dll and gala's ntdll both want 0x180000000) gets its
+  shared relocated frames made before the view is mapped, with no process
+  lock held (`prepare_relocated`); each frame is made outside the
+  layout's lock too. The first map of chrome.dll still takes ~30 s under
+  TCG (copying and relocating 340 MB); later processes share the frames.
+- **The loader lock in the PEB**: ntdll's loader lock is laid out as an
+  RTL_CRITICAL_SECTION (`LOADER_LOCK`, owner at +0x10) and
+  PEB.LoaderLock (+0x110) points at it (Crashpad's
+  IsThreadInLoaderLock reads it).
+- **Named objects**: `\Sessions\1\BaseNamedObjects\Local` links to the
+  session's directory, `Session` to `\Sessions\BNOLINKS`, and session
+  0's directory has its own Global/Local/Session links (Chromium's
+  process singleton mutex is `Local\ChromeProcessSingletonStartup!`).
+- **Pipes**: a pipe keeps the name it was created with; FileNameInformation
+  of a pipe handle is `\<name>` (Crashpad's handler rebuilds its pipe
+  path from it). TransactNamedPipe (synchronous handles) writes one
+  message and reads one.
+- **Kernel calls** (gala numbers): NtCompareObjects 0x7f90
+  (CompareObjectHandles), NtSuspendProcess 0x7f91 and NtResumeProcess
+  0x7f92 (every thread but the caller's); NtQuerySection is exported by
+  ntdll; ProcessHandleCount (class 20).
+- **kernel32**: mitigation policies kept per process and read back (not
+  enforced: stage 3), Get/SetProcessInformation (memory priority, power
+  throttling, protection level none, machine x64), SetThreadInformation,
+  HeapSetInformation/GetProcessHeaps/HeapLock, K32QueryWorkingSetEx
+  (committed pages are valid), power requests, ProcessIdToSessionId,
+  GetActive/MaximumProcessorCount, GetTempFileName, WaitOnAddress and
+  WakeByAddress* (`address_wait.rs`: waiters on a list, one keyed
+  event, a node's address as key), InitOnceBegin/Complete,
+  FlsGetValue2/TlsGetValue2, GetSystemPowerStatus (AC, no battery),
+  DPI and priority-boost queries, CreateFileW adding DELETE for
+  FILE_FLAG_DELETE_ON_CLOSE.
+- **Other DLLs**: advapi32 trustees and BuildSecurityDescriptorW,
+  AddMandatoryAce, GetSecurityDescriptorSacl, RegNotifyChangeKeyValue
+  (asynchronous: accepted, never signaled, reported); userenv's group
+  policy notifications; netapi32's join and DS role (a workgroup
+  workstation); shlwapi's IsOS and QISearch by ordinal; user32's DPI
+  awareness (96 DPI), power and clipboard registrations, device lists
+  (empty); winmm's audio and MIDI devices (none); ws2_32's
+  GetAddrInfoExW (synchronous) and name-space provider calls;
+  dbghelp's MiniDumpWriteDump refused (reported); new DLLs `shcore.dll`
+  (GetDpiForMonitor, SetProcessDpiAwareness), `dwmapi.dll` (no DWM:
+  attributes accepted without effect or E_NOTIMPL, reported),
+  `wtsapi32.dll` (the one console session, active) and `imm32.dll`
+  (no IMEs); powrprof's platform role and active scheme; uxtheme's
+  DrawThemeBackgroundEx as ordinal 47 (Wine's uxtheme.spec gives the
+  number). chrome.dll resolves every user32 function it delay-imports at
+  once, through GetProcAddress, which does not return `gala_stubs`
+  stubs: so all of them are real exports now, the ones without a use on
+  gala yet failing the documented way and reporting themselves (DDE,
+  hot keys, SetCursorPos, window regions, layered windows, SendInput),
+  and the window stations and desktops a program creates are refused
+  (stage 3). API sets: `api-ms-win-downlevel-<dll>-*` name their
+  DLL, `shcore-*` is shcore, `power-*` is powrprof.
+- **DirectWrite** (`user/dwrite`): Chromium CHECKs that a factory
+  exists and that Skia's font manager comes up on its system collection.
+  gala's collection has one family, Selawik, in four faces read from
+  `C:\Windows\Fonts\selawk*.ttf` (ttf-parser); Segoe UI, Arial, Times New
+  Roman, ... are found as Selawik, as in gdi32. Every object reachable
+  from it is static (AddRef/Release count nothing): factory, collection,
+  family (also the font list), fonts, faces (metrics, glyph indices and
+  design metrics, font tables in place), files with the local file
+  loader (paths) and streams, localized strings (en-us). Not yet: custom
+  collections and file loaders (the renderer's font proxy), text layout,
+  glyph run analysis and outlines (rasterizing), IDWriteFactory1+.
+
+Diagnosis without disassembly (CLEAN_ROOM): Chromium's logs go to the
+serial log (`--enable-logging=stderr`), the `file` event category shows
+what it opened and failed to open, and a crash report's `module+offset`
+is symbolized with the snapshot's own PDBs (WORKFLOW "Chromium").
+
 ## Not done yet
 
 (Reviewed 2026-11-03; what is planned is in ROADMAP "Next".)
