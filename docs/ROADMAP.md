@@ -24,6 +24,10 @@ explicitly in its commit.
   core structures other items build on (LX seams, RS B2 with the
   core/NT process split), then features on top (PK installers, the
   browser), which run niced and yield VMs to the rest.
+- **Tracked flakes under host load (2026-11-04)**: `gala_cli` check 0x1f
+  (the snap-left wait) and `clockcal_test` check 2 ("interrupt time moved
+  5003 ms") failed in a full suite at load 9-11 and pass alone; both are in
+  the guest-time-versus-host investigation (the clock agent), not hidden.
 - **Hygiene sweeps (the owner, 2026-11-03)**: "we should do sweeps in
   general to check for hygienic factors". Regular sweeps of existing code
   for a class of defect at a time; the first is the early primitives
