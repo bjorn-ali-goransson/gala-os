@@ -20,6 +20,7 @@ mod telemetry;
 #[path = "../../kernel/src/trust/manifest.rs"]
 #[allow(dead_code)]
 mod manifest;
+mod otel;
 mod report;
 #[path = "../../kernel/src/trust/sha256.rs"]
 mod sha256;
@@ -1910,6 +1911,12 @@ commands:
   events       summarize an event stream (XTASK_EVENTS=...): system calls by time,
                failing statuses, each thread's last calls, faults, processes, images:
                events <events.jsonl>
+  otel         convert a boot's event stream and serial log to OpenTelemetry
+               (OTLP/JSON traces, logs, metrics; view in Jaeger or an OTel
+               collector, docs/WORKFLOW.md, OpenTelemetry): otel <serial log |
+               events.jsonl | scenario> [<events.jsonl>] [--out <prefix>]
+               [--endpoint http://host:4318 (or OTEL_EXPORTER_OTLP_ENDPOINT)];
+               XTASK_OTEL=1 makes boot-test write it for every boot
   docker-test  build the test image (docker/test.Dockerfile) and run
                `cargo xtask test` (or the given xtask arguments) inside it
   report       run every test program on gala; write target/report/gala.{json,md}
@@ -1998,6 +2005,7 @@ fn main() -> ExitCode {
                     .map(|text| print!("{}", triage::events_summary(&text))),
                 None => Err("usage: cargo xtask events <events.jsonl>".into()),
             },
+            Some("otel") => otel_cli(&args[1..]),
             Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
                 None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
@@ -5824,6 +5832,8 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
             // Pending scenarios run only when named exactly.
             None => !PENDING.contains(&s.name),
             Some(f) if exact => s.name == f.as_str(),
+            // `name$`: that scenario only (`hello$`, not java_hello too).
+            Some(f) if f.ends_with('$') => s.name == f.trim_end_matches('$'),
             Some(f) => s.name.contains(f.as_str()) && !PENDING.contains(&s.name),
         })
         .collect();
@@ -9126,6 +9136,201 @@ fn host_facts() -> String {
     format!("{cpus} CPUs, load {load}, {disk} free on the target disk")
 }
 
+/// The kernel build a boot ran: profile and the checkout's commit.
+fn kernel_build() -> String {
+    let release = RELEASE.load(std::sync::atomic::Ordering::Relaxed);
+    let commit = Command::new("git")
+        .args(["describe", "--always", "--dirty"])
+        .current_dir(root())
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    format!("{} {commit}", if release { "release" } else { "debug" })
+}
+
+/// Converts a boot that just ended to OTLP/JSON (`otel_export_at`).
+fn otel_export(
+    serial: &str,
+    events: &str,
+    scenario: &str,
+    prefix: &Path,
+    endpoint: Option<&str>,
+) -> Result<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    otel_export_at(serial, events, scenario, prefix, endpoint, now)
+}
+
+/// Converts a boot to OTLP/JSON: `<prefix>.traces.json` (one request per
+/// line, `otel::SPANS_PER_REQUEST` spans each), `<prefix>.logs.json`,
+/// `<prefix>.metrics.json`; posts them to `endpoint` when given. The
+/// boot's time 0 in wall time is `end_unix_ns` minus its last event's
+/// time. Returns the report (`otel:` lines) and where the files went.
+fn otel_export_at(
+    serial: &str,
+    events: &str,
+    scenario: &str,
+    prefix: &Path,
+    endpoint: Option<&str>,
+    end_unix_ns: u64,
+) -> Result<String> {
+    let last = events
+        .lines()
+        .filter_map(|l| triage::field(l, "t").and_then(|t| t.parse::<u64>().ok()))
+        .max()
+        .unwrap_or(0);
+    let build = kernel_build();
+    let export = otel::convert(&otel::Boot {
+        serial,
+        events,
+        scenario,
+        build: &build,
+        start_unix_ns: end_unix_ns.saturating_sub(last),
+    });
+    let name = |signal: &str| {
+        let mut p = prefix.as_os_str().to_owned();
+        p.push(format!(".{signal}.json"));
+        PathBuf::from(p)
+    };
+    let write = |signal: &str, bodies: &[String]| -> Result<PathBuf> {
+        let path = name(signal);
+        let mut text = bodies.join("\n");
+        text.push('\n');
+        fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        Ok(path)
+    };
+    let traces = write("traces", &export.traces)?;
+    write("logs", &export.logs)?;
+    write("metrics", std::slice::from_ref(&export.metrics))?;
+    let mut said = export.report.lines();
+    said += &format!(
+        "otel: wrote {} (and .logs.json, .metrics.json; OTLP/JSON, one request per line)\n",
+        traces.display()
+    );
+    if let Some(endpoint) = endpoint {
+        match otel::post(endpoint, &export) {
+            Ok(sent) => said += &format!("otel: sent to {endpoint}: {sent}\n"),
+            Err(e) => said += &format!("otel: sending to {endpoint} FAILED: {e}\n"),
+        }
+    }
+    Ok(said)
+}
+
+/// `cargo xtask otel`'s arguments: <what> [<events>] [--out <prefix>]
+/// [--endpoint <url>].
+fn otel_cli(args: &[String]) -> Result {
+    let flag =
+        |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let positional: Vec<&String> = args
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| {
+            !a.starts_with("--")
+                && !(*i > 0 && matches!(args[*i - 1].as_str(), "--out" | "--endpoint"))
+        })
+        .map(|(_, a)| a)
+        .collect();
+    match positional.first() {
+        Some(what) => otel_command(
+            what,
+            positional.get(1).map(Path::new),
+            flag("--out").map(PathBuf::from),
+            flag("--endpoint").or_else(|| env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok()),
+        ),
+        None => Err("usage: cargo xtask otel <serial log | events.jsonl | scenario> \
+                     [<events.jsonl>] [--out <prefix>] [--endpoint <url>]"
+            .into()),
+    }
+}
+
+/// `cargo xtask otel <serial log | events.jsonl | scenario> [events]`.
+fn otel_command(
+    what: &str,
+    events: Option<&Path>,
+    out: Option<PathBuf>,
+    endpoint: Option<String>,
+) -> Result {
+    let given = Path::new(what);
+    let stem_of = |name: &str| -> String {
+        name.strip_suffix(".events.jsonl")
+            .or_else(|| name.strip_suffix(".serial.log"))
+            .or_else(|| name.strip_suffix(".log"))
+            .unwrap_or(name)
+            .to_string()
+    };
+    // The serial log and the stream: a file and its sibling, or the
+    // newest logs of a scenario.
+    let (serial_path, events_path) = if given.is_file() {
+        let name = given.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let stem = stem_of(name);
+        let sibling = |ext: &str| given.with_file_name(format!("{stem}{ext}"));
+        if name.ends_with(".events.jsonl") {
+            let serial =
+                [sibling(".serial.log"), sibling(".log")].into_iter().find(|p| p.is_file());
+            (serial, Some(given.to_path_buf()))
+        } else {
+            (Some(given.to_path_buf()), Some(sibling(".events.jsonl")))
+        }
+    } else {
+        let candidates = [
+            target_dir().join(format!("debug/test-{what}.serial.log")),
+            target_dir().join(format!("release/test-{what}.serial.log")),
+            target_dir().join(format!("failed/{what}.log")),
+        ];
+        let newest = candidates
+            .into_iter()
+            .filter(|p| p.is_file())
+            .max_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
+            .ok_or_else(|| {
+                format!(
+                    "{what}: not a file, and no log of scenario {what} in \
+                     target/{{debug,release}}/test-{what}.serial.log or target/failed/{what}.log \
+                     (a batched scenario: give its batch-*.serial.log)"
+                )
+            })?;
+        let events = if newest.parent().is_some_and(|d| d.ends_with("failed")) {
+            newest.with_file_name(format!("{what}.events.jsonl"))
+        } else {
+            newest.with_file_name(format!("test-{what}.events.jsonl"))
+        };
+        (Some(newest), Some(events))
+    };
+    let events_path = events.map(Path::to_path_buf).or(events_path).filter(|p| p.is_file());
+    let read =
+        |p: &Path| fs::read_to_string(p).map_err(|e| format!("reading {}: {e}", p.display()));
+    let serial = serial_path.as_deref().map(read).transpose()?.unwrap_or_default();
+    let events = events_path.as_deref().map(read).transpose()?.unwrap_or_default();
+    if serial.is_empty() && events.is_empty() {
+        return Err(format!("{what}: no serial log and no event stream to convert"));
+    }
+    let base = serial_path.clone().or(events_path.clone()).unwrap_or_default();
+    let stem = stem_of(base.file_name().and_then(|n| n.to_str()).unwrap_or("boot"));
+    let scenario = stem.strip_prefix("test-").unwrap_or(&stem);
+    let prefix = out.unwrap_or_else(|| base.with_file_name(format!("{stem}.otlp")));
+    // The boot ended about when its newest file was last written.
+    let end = [serial_path.as_deref(), events_path.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter_map(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
+        .max()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as u64);
+    eprintln!(
+        "otel: serial log {}, event stream {}",
+        serial_path.as_ref().map_or("(none)".into(), |p| p.display().to_string()),
+        events_path
+            .as_ref()
+            .map_or("(none or empty: boot with XTASK_EVENTS=all for spans)".into(), |p| p
+                .display()
+                .to_string())
+    );
+    let said = otel_export_at(&serial, &events, scenario, &prefix, endpoint.as_deref(), end)?;
+    eprint!("{said}");
+    if said.contains("FAILED") { Err("sending the OTLP export failed".into()) } else { Ok(()) }
+}
+
 /// `cargo xtask triage <log> [events]`: the triage of any log; the
 /// event stream next to it is found by name when not given.
 fn triage_command(log: &Path, events: Option<&Path>) -> Result {
@@ -9416,6 +9621,25 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         }
         break (status, serial, time);
     };
+    // XTASK_OTEL: the boot as OpenTelemetry, next to its logs.
+    if env::var_os("XTASK_OTEL").is_some() {
+        let label = match vm {
+            Vm::Single(s) => s.name.to_string(),
+            Vm::Batch(_) => iso_scenario(iso).to_string(),
+        };
+        let events = fs::read_to_string(iso.with_extension("events.jsonl")).unwrap_or_default();
+        let endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+        match otel_export(
+            &serial,
+            &events,
+            &label,
+            &iso.with_extension("otlp"),
+            endpoint.as_deref(),
+        ) {
+            Ok(said) => eprint!("{}", said.replace("otel:", &format!("xtask: otel {label}:"))),
+            Err(e) => eprintln!("xtask: otel {label}: {e}"),
+        }
+    }
     let short = telemetry::cpus_online(&serial).filter(|&n| n < want_cpus);
     let code = status.and_then(|s| s.code());
     let facts = RunFacts {

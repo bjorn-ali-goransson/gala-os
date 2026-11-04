@@ -241,6 +241,61 @@ serial log (`logtee: <file>: <line>`; sshd's and sshd-session's logs in
 the sshd scenarios), and `conpty=trace` logs a pseudo console's VT
 traffic in both directions.
 
+## 1b. OpenTelemetry export — done (OT1, `cargo xtask otel`)
+
+`xtask/src/otel.rs` turns one boot's event stream and serial log into
+OTLP/JSON (ROADMAP item OT, stage OT1; how to use and view it: WORKFLOW
+"OpenTelemetry"). Nothing in the kernel changed: this is the mapping of
+what exists today, and its gaps are OT2's list. A hand-written encoder
+(no OTel crate) following the OTLP/JSON mapping of opentelemetry-proto:
+ids in hex, 64-bit integers as decimal strings, enums as numbers.
+
+| Source | OTel | Names (semantic conventions first, else `gala.`) |
+|---|---|---|
+| the boot | one resource; one trace whose root span is `boot <scenario>` (0 to the last event) | `service.name` gala-os, `service.version` (the banner), `service.instance.id` (= the trace id), `gala.scenario`, `gala.kernel.build` (profile and commit), `gala.cmdline`, `gala.cpus` |
+| `process start` / `process exit` | span `process <name>`, child of the boot | `process.pid`, `process.executable.name`, `process.command_line`, `process.exit.code`, `gala.exit_status`, `gala.session`, `gala.image_base`, `gala.entry`; status ERROR for an NTSTATUS error |
+| `thread create` / `thread exit` | span `thread <tid>`, child of its process | `thread.id`, `process.pid`, `gala.start_address`, `gala.teb`, `gala.exit_status` |
+| `syscall` (end time `t`, duration `ns`) | span named by the service, child of its thread | `code.function.name`, `gala.syscall.nr`, `gala.syscall.status`, `gala.syscall.args` (hex), `gala.cpu`, `thread.id`, `process.pid`; status ERROR for 0xC... |
+| `wait` (a wait's entry) | merged into its `syscall` span; one that never returns: span event `<service> (entered, no return)` on its thread | as the stream has them |
+| `fault` | span event `fault #PF page fault` (by vector) on the thread, else the process | `gala.fault.vector`, `.rip`, `.address` (cr2), `.error` |
+| `image` | span event `image load <file>` on the process | `gala.image.name`, `.base`, `.size` |
+| every other kind (`console *`, `clock_*`, `tcp *`, `logon`, `session`, `display *`, ...) | span event of that name on its thread, process, or the boot | `gala.<field>`; `pid`/`tid` as `process.pid`/`thread.id` |
+| `rec` (record/replay bytes) | not mapped (counted) | |
+| serial log lines | one log record each, severity from `[info ]`/`[warn ]`/`[error]` (none: program output, severity 0), linked to the process span when the line names a pid, else to the boot | `gala.log.line`, `gala.time.estimated`, `process.pid`, `gala.log.source` |
+| `crash report:` block | one log record (ERROR) and an `exception` span event on the crashing thread (status ERROR) | `exception.type` (code and name), `exception.message`, `exception.stacktrace` (registers, stack words), `gala.crash.address`, `gala.crash.location` (module+offset) |
+| `statedump: begin` .. `end` | one log record (WARN) and a `state dump` span event on the boot | `gala.statedump` |
+| `KERNEL PANIC:` | log record (FATAL) and an `exception` event on the boot (status ERROR) | `exception.*` |
+| `stats:` lines | gauges, one point per line | `gala.stats.<words>` (`heap_in_use` KiBy, `frames_free` and `.total`, ...) |
+| system calls | sums per service over the boot | `gala.syscall.calls`, `gala.syscall.duration` (ns), by `code.function.name` |
+| the converter itself | a log record `otel: ...` on the boot; `gala.otel.gaps`, `gala.otel.not_mapped` on the root span | |
+
+Times: the stream's `t` is ns since boot; wall time is the log's
+modification time (the boot's end) minus the last event's `t`. Serial
+lines carry no time: each takes the time of the latest line before it
+that can be placed (a process start or exit line, matched to the
+stream's event; an `uptime_ms=` mark; a state dump's `now N ms since
+boot`), and says so (`gala.time.estimated`). Ids are derived from the
+boot's content, so converting the same boot twice gives the same ids.
+
+**Its own observability**: every conversion prints `otel:` lines: what
+each event kind became, what was **not mapped** (per kind, e.g. `rec`,
+unparsed lines) and the **gaps in the stream** (per kind: a fault
+without a thread, a wait without return, a thread or process without
+an exit or seen before its create event, a system call without a
+thread); the same text is a log record in the export.
+
+**Gaps for OT2** (found by converting real boots, ROADMAP OT): faults,
+image loads and console/net events carry no thread id (`fault without
+thread` on every page fault); a system call has no entry event, so a
+call that never returns is invisible unless it is a wait; serial lines
+have no time; a span cannot be linked across processes (a parent's
+CreateProcess to the child, sshd to its session) because the stream
+has no parent pid or context; a boot's wall-clock start is guessed.
+Converted real boots (`XTASK_EVENTS=all`, 2026-11-03): hello 5 spans,
+events 17, crash 4 (with its exception), sshd_shell 9518 spans and 1976
+span events from 13163 events (1885 faults without a thread, sshd itself
+open at the end since xtask stops the server).
+
 ## 2. "What is missing" ledger — done (`nt::ledger`, `ledger_test`)
 
 Every STATUS_NOT_IMPLEMENTED, STATUS_INVALID_SYSTEM_SERVICE, unknown
