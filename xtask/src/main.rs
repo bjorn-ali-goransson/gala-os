@@ -15,6 +15,7 @@ mod alloc_audit;
 mod clockcheck;
 mod lx_expect;
 mod telemetry;
+mod vmtime;
 // The manifest's format and SHA-256 are the kernel's own code (one
 // definition for the writer and the reader).
 #[path = "../../kernel/src/trust/manifest.rs"]
@@ -1963,7 +1964,9 @@ const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
 /// host's (`xtask: clock:` line, clockcheck.rs).
 const HOST_LOAD_SCENARIOS: &[&str] = &["clockcal_test"];
 
-/// How long scenario `name` may run.
+/// How long scenario `name` may run: in the VM's run time (vmtime.rs:
+/// the wall time less what its vCPUs waited for a host CPU), with a wall
+/// ceiling of `vmtime::BACKSTOP` times as much.
 fn scenario_timeout(name: &str) -> Duration {
     // `XTASK_TIMEOUT=<seconds>`: a hang's state dump without the wait.
     if let Some(secs) = env::var("XTASK_TIMEOUT").ok().and_then(|s| s.parse().ok()) {
@@ -1988,22 +1991,10 @@ fn scenario_timeout(name: &str) -> Duration {
     // One host thread for both processors (SINGLE_THREAD_TCG) is about
     // half as fast: java_hello and java_http ran out of 300 s in a full
     // suite on a loaded 4-CPU host.
-    let limit =
-        if single_thread_tcg(name) && !Path::new("/dev/kvm").exists() { limit * 2 } else { limit };
-    limit.mul_f64(host_overload())
-}
-
-/// How overloaded the host is when a VM starts: the one-minute load
-/// average per host CPU, from 1 (not overloaded) to 3. A VM's time limit
-/// is stretched by it: under a load of 33 on 4 CPUs sshd_shell's guest
-/// had run 58 s when its 120 s were up, the client half done (2026-11-03).
-fn host_overload() -> f64 {
-    let cpus = thread::available_parallelism().map_or(1, |n| n.get()) as f64;
-    let load = fs::read_to_string("/proc/loadavg")
-        .ok()
-        .and_then(|l| l.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()))
-        .unwrap_or(0.0);
-    (load / cpus).clamp(1.0, 3.0)
+    // A loaded host needs nothing here: the limit counts the VM's run
+    // time (under a load of 33 on 4 CPUs sshd_shell's guest had run 58 s
+    // when 120 s of wall time were up, 2026-11-03).
+    if single_thread_tcg(name) && !Path::new("/dev/kvm").exists() { limit * 2 } else { limit }
 }
 
 type Result<T = ()> = std::result::Result<T, String>;
@@ -3866,6 +3857,7 @@ const SCENARIOS: &[Scenario] = &[
             "console_window_test: key x",
             "console_window_test: raw z",
             "console_window_test: ctrl-c",
+            "console_window_test: done",
             "exited with status 0x00000000",
         ],
     },
@@ -7466,10 +7458,12 @@ fn run_vm_once(
     let mut stopped = false;
     let mut screen_verdict: Option<String> = None;
     let mut dump_note = None;
-    // The guest's `uptime_ms=` marks against the host's time (clockcheck.rs).
-    let mut clock_marks = clockcheck::ClockMarks::default();
+    // The guest's `uptime_ms=` marks against the host's time, timed by a
+    // thread of their own (clockcheck.rs).
+    let clock_marks = clockcheck::Watcher::start(&log, start);
+    // The limit counts the VM's run time (vmtime.rs).
+    let mut vm_clock = vmtime::VmClock::new(child.id(), start);
     let status = loop {
-        clock_marks.poll(&log, start.elapsed().as_millis() as u64);
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break Some(status);
         }
@@ -7531,9 +7525,27 @@ fn run_vm_once(
         {
             to_banner = Some(start.elapsed());
         }
-        if start.elapsed() > timeout {
+        let now = vm_clock.sample();
+        // A VM that ended while this loop waited (a screen check, which
+        // can take minutes under load) ended within its time.
+        if now.over(timeout).is_some()
+            && let Some(status) = child.try_wait().map_err(|e| e.to_string())?
+        {
+            break Some(status);
+        }
+        if let Some(over) = now.over(timeout) {
             // Before killing it: ask the guest what it is doing.
-            dump_note = Some(ask_for_state_dump(&socket, &log, &mut child, timeout));
+            let what = match over {
+                vmtime::Over::RunTime => format!("{}s of run time", timeout.as_secs()),
+                vmtime::Over::Backstop => format!(
+                    "{}s of wall time (the ceiling: {}x the limit of {}s of run time)",
+                    timeout.as_secs() * u64::from(vmtime::BACKSTOP),
+                    vmtime::BACKSTOP,
+                    timeout.as_secs()
+                ),
+            };
+            let what = format!("{what}; {}", now.describe());
+            dump_note = Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &what));
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -7542,6 +7554,7 @@ fn run_vm_once(
     };
     let _ = fs::remove_file(&socket);
     let total = start.elapsed();
+    let vm_time = vm_clock.sample();
     let mut serial = String::new();
     if let Ok(mut f) = fs::File::open(&log) {
         let _ = f.read_to_string(&mut serial);
@@ -7549,10 +7562,14 @@ fn run_vm_once(
     if let Some(note) = dump_note {
         serial += &note;
     }
-    clock_marks.poll(&log, total.as_millis() as u64);
-    if let Some(line) = clock_marks.verdict() {
+    if let Some(line) = clock_marks.finish() {
         serial += &line;
     }
+    serial += &format!(
+        "xtask: vm time: {} (limit {}s of run time)\n",
+        vm_time.describe(),
+        timeout.as_secs()
+    );
     // A `record` boot's recording (kernel/src/replay.rs), from the debug
     // console's `"ev":"rec"` lines.
     if let Some(line) = extract_recording(&events, &iso.with_extension("rec")) {
@@ -7693,7 +7710,8 @@ fn ask_for_state_dump(
     socket: &Path,
     log: &Path,
     child: &mut std::process::Child,
-    timeout: Duration,
+    vm_clock: &mut vmtime::VmClock,
+    what: &str,
 ) -> String {
     use std::io::Write as _;
     let seen = |mark: &str| {
@@ -7708,31 +7726,37 @@ fn ask_for_state_dump(
     });
     let sent = monitor.as_ref().map(|_| ()).map_err(|e| e.to_string());
     let asked = Instant::now();
+    let run_at_ask = vm_clock.sample().run_ms();
+    // STATEDUMP_WAIT of the VM's run time, as its limit (vmtime.rs).
+    let mut waited_enough = || {
+        let ran = vm_clock.sample().run_ms().saturating_sub(run_at_ask);
+        ran > STATEDUMP_WAIT.as_millis() as u64
+            || asked.elapsed() > STATEDUMP_WAIT * vmtime::BACKSTOP
+    };
     if sent.is_ok() {
-        while asked.elapsed() < STATEDUMP_WAIT && !seen(STATEDUMP_END) {
+        while !waited_enough() && !seen(STATEDUMP_END) {
             if child.try_wait().ok().flatten().is_some() {
                 break;
             }
             thread::sleep(Duration::from_millis(100));
         }
     }
-    let secs = timeout.as_secs();
     let wait = STATEDUMP_WAIT.as_secs();
     match sent {
-        Err(e) => format!("\nxtask: timed out after {secs}s; no state dump (monitor: {e})\n"),
+        Err(e) => format!("\nxtask: timed out after {what}; no state dump (monitor: {e})\n"),
         Ok(()) if seen(STATEDUMP_END) => format!(
-            "\nxtask: timed out after {secs}s; the guest's state dump (NMI) took {:.1}s\n",
+            "\nxtask: timed out after {what}; the guest's state dump (NMI) took {:.1}s\n",
             asked.elapsed().as_secs_f64()
         ),
         Ok(()) if seen(STATEDUMP_NMI_DONE) => format!(
-            "\nxtask: timed out after {secs}s; the state dump's NMI part came, its threads part \
-             did not within {wait}s (the boot thread could not run: the scheduler or a lock stuck?)\n"
+            "\nxtask: timed out after {what}; the state dump's NMI part came, its threads part \
+             did not within {wait}s of run time (the boot thread could not run: the scheduler or a lock stuck?)\n"
         ),
         Ok(()) if seen(STATEDUMP_BEGIN) => format!(
-            "\nxtask: timed out after {secs}s; the state dump began but did not end within {wait}s\n"
+            "\nxtask: timed out after {what}; the state dump began but did not end within {wait}s of run time\n"
         ),
         Ok(()) => format!(
-            "\nxtask: timed out after {secs}s; the guest did not answer the NMI within {wait}s \
+            "\nxtask: timed out after {what}; the guest did not answer the NMI within {wait}s of run time \
              (no NMI handler yet: early boot, or the machine is wedged)\n"
         ),
     }
@@ -7773,6 +7797,10 @@ struct ScreenCheck {
 }
 
 struct ScreenStep {
+    /// A serial-log line (substring) the guest must have printed before
+    /// the input is sent ("" for none): the program is done drawing
+    /// what the input acts on, however slowly a busy host runs it.
+    after: &'static str,
     /// QEMU monitor commands sent first (`mouse_move`, `mouse_button`,
     /// `sendkey`), 250 ms apart (time for the guest to read the device, also
     /// when the host is busy). Keep each move within 255 pixels per axis:
@@ -7802,6 +7830,7 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
     marker: "gui_test: painted",
     steps: &[
         ScreenStep {
+            after: "",
             input: &[],
             pixels: &[
                 PixelCheck::AnyIn(4, 4, 12, 12, 0x060e2b), // the night wallpaper's corner
@@ -7817,6 +7846,7 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
+            after: "",
             // From the middle to the start button (615, 776), a click.
             input: &["mouse_move 0 255", "mouse_move -25 121", "mouse_button 1", "mouse_button 0"],
             pixels: &[
@@ -7826,6 +7856,7 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
+            after: "",
             // Escape closes the menu; to client (250, 50) at (351, 183)
             // and a click: the program's green square.
             input: &[
@@ -7842,11 +7873,13 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
+            after: "",
             // Typing goes to the active window: "hi" in black.
             input: &["sendkey h", "sendkey i"],
             pixels: &[PixelCheck::AnyIn(101 + 20, 133 + 200, 24, 16, 0x000000)],
         },
         ScreenStep {
+            after: "",
             // A right click at client (250, 50): the popup menu
             // (One, Two) at (351, 183), over the window.
             input: &["mouse_button 2", "mouse_button 0"],
@@ -7856,6 +7889,7 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
+            after: "",
             // Down to "Two" (381, 222) and a click: TrackPopupMenu
             // returns 202, a blue square at the point; the menu
             // goes.
@@ -7866,6 +7900,7 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
+            after: "",
             // The edit control at client (220, 230) - (370, 256):
             // a click in it (396, 376) and "ok" typed show there, with
             // the focused edit's accent underline.
@@ -7882,6 +7917,7 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
+            after: "",
             // The drop-down list combo box at client (220, 20) -
             // (370, 46), screen (321, 153) - (471, 179): a click on
             // it (396, 166) drops its list, a popup under it
@@ -7897,6 +7933,7 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
+            after: "",
             // The pointer on "Blue" (396, 242) lights it.
             input: &["mouse_move 0 76"],
             pixels: &[
@@ -7905,6 +7942,7 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
+            after: "",
             // A click picks it: the list goes, the program paints
             // its magenta square at client (380, 60) - (392, 72).
             input: &["mouse_button 1", "mouse_button 0"],
@@ -7915,6 +7953,7 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
+            after: "",
             // The pointer rests on the edit (396, 376): after the
             // initial delay its tooltip shows 20 rows below the
             // pointer, at (396, 396): a grey border, a light face,
@@ -7927,12 +7966,14 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
+            after: "",
             // Off the edit, into the client area (396, 276): the
             // tip goes (the window's white under it again).
             input: &["mouse_move 0 -100"],
             pixels: &[PixelCheck::At(398, 398, 0xffffff)],
         },
         ScreenStep {
+            after: "",
             // The close button (x 453..498 of the caption): the program
             // ends (WM_SYSCOMMAND SC_CLOSE; no screendump).
             input: &["mouse_move 80 -159", "mouse_button 1", "mouse_button 0"],
@@ -7961,6 +8002,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
             marker: "gala_cli_test: snapped left",
             steps: &[
                 ScreenStep {
+                    after: "",
                     input: &[],
                     pixels: &[
                         PixelCheck::At(300, 12, 0xeef2f7),             // the active caption
@@ -7970,7 +8012,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                         PixelCheck::AnyIn(900, 300, 40, 40, 0x060e2b), // the wallpaper
                     ],
                 },
-                ScreenStep { input: &["sendkey g"], pixels: &[] },
+                ScreenStep { after: "", input: &["sendkey g"], pixels: &[] },
             ],
         },
     ),
@@ -7982,6 +8024,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
             marker: "console_window_test: printed",
             steps: &[
                 ScreenStep {
+                    after: "",
                     input: &[],
                     pixels: &[
                         PixelCheck::AnyIn(66, 98, 300, 14, 0xcccccc), // "Hello from ..."
@@ -7990,18 +8033,21 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
+                    after: "",
                     // "hi" and Enter in the window: echoed on the fifth line
                     // (y 174..190) by the console's cooked input.
                     input: &["sendkey h", "sendkey i", "sendkey ret"],
                     pixels: &[PixelCheck::AnyIn(66, 174, 30, 16, 0xcccccc)],
                 },
                 ScreenStep {
+                    after: "",
                     // "ok" and Enter (ReadConsoleW), then "x" (one raw key
                     // record): the program's answer on the ninth line.
                     input: &["sendkey o", "sendkey k", "sendkey ret", "sendkey x"],
                     pixels: &[PixelCheck::AnyIn(66, 250, 300, 16, 0xcccccc)],
                 },
                 ScreenStep {
+                    after: "",
                     // Win+Right (Snap): the console fills the right half of
                     // the work area (its black down to the taskbar), its
                     // grid follows and keeps the text, now at the top left
@@ -8014,6 +8060,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
+                    after: "",
                     // Raw input: "z" without Enter, then Ctrl+C (a
                     // CTRL_C_EVENT, not a key): the program's answers on
                     // the 11th and 12th lines (19 pixels each).
@@ -8024,6 +8071,10 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
+                    // After the last of them: wheel events that came while
+                    // the lines were still printing scrolled from another
+                    // bottom (step 5 failed under load, 2026-11-04).
+                    after: "line 39",
                     // Forty more lines pushed the first ones off the top;
                     // the wheel turned up (six notches, three lines each)
                     // scrolls back to them: the green line shows again.
@@ -8036,6 +8087,15 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                         "mouse_move 0 0 1",
                     ],
                     pixels: &[PixelCheck::AnyIn(646, 38 + 19, 300, 16, 0x13a10e)],
+                },
+                ScreenStep {
+                    after: "",
+                    // Done looking: "q" (raw input) ends the program. It
+                    // used to end 8 s after its last line, which a screen
+                    // check on a loaded host outlasted (step 5: the
+                    // monitor gone, 2026-11-04).
+                    input: &["sendkey q"],
+                    pixels: &[],
                 },
             ],
         },
@@ -8050,6 +8110,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
             marker: "desktop: shown window 'Welcome to FileZilla'",
             steps: &[
                 ScreenStep {
+                    after: "",
                     input: &[],
                     pixels: &[
                         PixelCheck::AnyIn(660, 118, 80, 16, 0x005fb8), // Quickconnect
@@ -8057,6 +8118,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
+                    after: "",
                     // To OK (763, 522) and a click: the dialog (0xf0f0f0)
                     // goes, the file lists (white) under it show.
                     input: &["mouse_move 122 122", "mouse_button 1", "mouse_button 0"],
@@ -8069,6 +8131,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
+                    after: "",
                     // From OK (763, 522) to the toolbar's Refresh button
                     // (206, 93): after the initial delay its tooltip (the
                     // toolbar's tooltip control, the text from wx's
@@ -8078,11 +8141,13 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     pixels: &[PixelCheck::At(208, 115, 0xf9f9f9)],
                 },
                 ScreenStep {
+                    after: "",
                     // Back to (763, 522), where the next step starts.
                     input: &["mouse_move 255 255", "mouse_move 255 174", "mouse_move 47 0"],
                     pixels: &[],
                 },
                 ScreenStep {
+                    after: "",
                     // Quickconnect to FileZilla Server (started first):
                     // Host (136, 126) "127.0.0.1", Username (318) "gala",
                     // Password (499) "gala" (the server's user needs none;
@@ -8130,6 +8195,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     pixels: &[PixelCheck::AnyIn(730, 491, 60, 20, 0x005fb8)],
                 },
                 ScreenStep {
+                    after: "",
                     // OK (763, 501): FileZilla connects to the server.
                     input: &[
                         "mouse_move 61 188",
@@ -8143,6 +8209,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     pixels: &[PixelCheck::AnyIn(800, 646, 60, 18, 0x005fb8)],
                 },
                 ScreenStep {
+                    after: "",
                     // OK (833, 655): FileZilla trusts it, logs on and lists
                     // the remote directory (C:\ftp): "hello.txt" at the left
                     // of the remote list.
@@ -8150,6 +8217,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     pixels: &[PixelCheck::AnyIn(650, 405, 150, 40, 0x1b1b1b)],
                 },
                 ScreenStep {
+                    after: "",
                     // Win+Right (Snap): FileZilla on the right half of the
                     // screen (its Quickconnect button there); at the left
                     // the server's console window (conhost, at (60, 60))
@@ -8169,6 +8237,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
+                    after: "",
                     // A click in the console (300, 400) activates it, and
                     // Win+Left snaps it to the left half: the server's log
                     // next to FileZilla.
@@ -8188,6 +8257,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
+                    after: "",
                     // The pointer to the corner (0, 0), then to "File" on
                     // FileZilla's menu bar (663, 44) and a click: its menu
                     // opens.
@@ -8208,6 +8278,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                 },
                 ScreenStep {
+                    after: "",
                     // Down to "Exit" (692, 288) and a click: WM_COMMAND,
                     // FileZilla ends (status 0).
                     input: &["mouse_move 29 244", "mouse_button 1", "mouse_button 0"],
@@ -8235,7 +8306,11 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
         thread::sleep(Duration::from_millis(20));
     }
     let mut monitor = monitor.ok_or("cannot connect to the QEMU monitor")?;
+    let log = iso.with_extension("serial.log");
     for (n, step) in check.steps.iter().enumerate() {
+        if !step.after.is_empty() {
+            wait_for_line(&log, step.after).map_err(|e| format!("step {n}: {e}"))?;
+        }
         for command in step.input {
             // Each command, then time for the guest to read the device
             // (QEMU's PS/2 queue is short: a click queued behind a long
@@ -8251,6 +8326,19 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
         check_screen_step(&mut monitor, iso, n, step).map_err(|e| format!("step {n}: {e}"))?;
     }
     Ok(())
+}
+
+/// Waits for `line` in the serial log `log`. A give-up only (the VM's
+/// own limit is not checked while a screen check runs): two minutes.
+fn wait_for_line(log: &Path, line: &str) -> Result {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(120) {
+        if fs::read(log).is_ok_and(|b| b.windows(line.len()).any(|w| w == line.as_bytes())) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!("no {line:?} in the serial log within 120 s"))
 }
 
 fn check_screen_step(
@@ -9764,9 +9852,10 @@ fn judge_log_inner(
         return Ok(());
     }
     match status {
-        _ if timed_out => {
-            Err(format!("timed out after {}s", scenario_timeout(scenario.name).as_secs()))
-        }
+        _ if timed_out => Err(format!(
+            "timed out after {}s of run time (vmtime.rs)",
+            scenario_timeout(scenario.name).as_secs()
+        )),
         s if s != Some(scenario.exit_status) => {
             Err(format!("QEMU exited with {s:?}, expected status {}", scenario.exit_status))
         }

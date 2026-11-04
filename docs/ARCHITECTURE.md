@@ -261,6 +261,27 @@ first calibration by 20 to test this path (scenario `clockcal_recal`; the
 programs then wait for the check). Its two lines carry `uptime_ms=`
 marks, which xtask times against the host (`xtask/src/clockcheck.rs`).
 
+**What a guest's clock follows (measured 2026-11-04).** Under QEMU's TCG
+without `-icount` every clock the guest can read (TSC, HPET, PM timer,
+LAPIC timer, RTC) follows the host's monotonic clock, starved or not:
+with QEMU pinned to one host CPU next to three busy loops, its vCPU
+threads waiting for the CPU ~90% of the time, the HPET advanced 44656 ms
+over 44656 ms of host time and gala's uptime followed the HPET. So a
+correct guest clock equals host time, and xtask's check compares with
+it; what starvation slows is the guest's *work* per second (and the
+firmware's: 133 s before the kernel in that run), and timer interrupts
+can come tens of ms late (QEMU raises them from its main-loop thread),
+so the KUSER_SHARED_DATA snapshot, written at each tick as on Windows,
+can lag the performance counter by that much (clockcal_test brackets a
+fresh snapshot between two counter reads instead of assuming prompt
+ticks). The false `xtask: clock: WRONG`s under load were xtask's own:
+it timed marks from the middle of a gap between polls of a loop that
+a screen check held for over a minute; a thread of their own times
+them now, and the verdict allows for each mark's poll window. Time
+limits count the VM's run time (wall time less its vCPU threads'
+run-queue wait: `xtask/src/vmtime.rs`), since no guest clock slows when
+the VM is starved.
+
 `time` runs a 1 kHz periodic tick on vector 0x30
 and offers `monotonic_ns()` from the TSC. Spurious interrupts use vector 0xff.
 The boot CPU's tick count keeps up with the TSC (`next_tick`: a tick
@@ -5834,7 +5855,11 @@ steps, each test first:
    text (256, UTF-16). HWNDs start
    at 0x20000, 16 apart. user32 (`foreign.rs`) registers a window as
    its slot is taken and syncs the record after create, SetWindowPos
-   (with its descendants: their screen rectangles move), the desktop's
+   (with its descendants: their screen rectangles move; for a top-level
+   window *before* it tells the desktop, GalaWindowPlace: invariant, once
+   `gala windows` lists a new rectangle, GetWindowRect from any process
+   returns it; the other order failed gala_cli's check 0x1f under load,
+   2026-11-04), the desktop's
    moves, ShowWindow, EnableWindow, SetParent and SetWindowText;
    another process's HWND is answered from the registry by IsWindow,
    IsWindowVisible (ancestors too), IsWindowEnabled,

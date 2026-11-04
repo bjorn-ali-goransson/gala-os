@@ -1216,6 +1216,12 @@ pub extern "system" fn SetWindowPos(
             v.h = nh;
         });
         if w.desktop != 0 {
+            // The record other processes read (GetWindowRect of a foreign
+            // window) first: once the desktop lists the new rectangle,
+            // it must be what they read too. Published after it, a lister
+            // could see the move and then the old rectangle (gala_cli's
+            // check 0x1f under load, 2026-11-04).
+            crate::foreign::sync_tree(hwnd);
             // SAFETY: our desktop window.
             unsafe { GalaWindowPlace(w.desktop, nx, ny, nw as u32, nh as u32) };
             // The desktop's new buffer needs the bar again.
