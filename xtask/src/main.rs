@@ -401,6 +401,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("xmodify_test", "ntdll.dll", "Windows/System32"),
     ("smpsem_test", "ntdll.dll", "Windows/System32"),
     ("xstate_test", "ntdll.dll", "Windows/System32"),
+    ("straddle_test", "ntdll.dll", "Windows/System32"),
     ("statedump_test", "ntdll.dll", "Windows/System32"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
@@ -1709,6 +1710,7 @@ const USER_PROGRAMS: &[&str] = &[
     "xmodify_test",
     "smpsem_test",
     "xstate_test",
+    "straddle_test",
     "statedump_test",
     "clockcal_test",
     "safepoint_test",
@@ -2917,7 +2919,7 @@ fn scenario_boot(name: &str) -> Boot {
 /// (The intermittent Java heap corruption is not this: WORKFLOW "Known
 /// intermittent".)
 const SINGLE_THREAD_TCG: &[&str] =
-    &["java_", "elasticsearch", "dotnet_", "pwsh_", "flaui", "xmodify_test"];
+    &["java_", "elasticsearch", "dotnet_", "pwsh_", "flaui", "xmodify_test", "straddle_test"];
 
 fn single_thread_tcg(name: &str) -> bool {
     SINGLE_THREAD_TCG.iter().any(|s| name.contains(s))
@@ -3194,6 +3196,17 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=vmcycle_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["vmcycle_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Code rewritten where an instruction straddles a page boundary
+        // (a JIT patching an object address in compiled code): the next
+        // call must run the new instruction. Fails under QEMU 8.1.0-8.2.5
+        // TCG (the Java corruption, WORKFLOW "QEMU"); xtask's pinned QEMU
+        // passes it.
+        name: "straddle_test",
+        cmdline: "qemu_exit run=straddle_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["straddle_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // Code rewritten on one processor and run on the other (a JIT's
