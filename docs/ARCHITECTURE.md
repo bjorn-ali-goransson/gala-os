@@ -1349,7 +1349,9 @@ process (id 0, no image, as on Windows) and every running process
 (`sysinfo::push_process`: SYSTEM_PROCESS_INFORMATION of 0x100 bytes,
 then SYSTEM_THREAD_INFORMATION entries of 0x50, then the image name;
 CreateTime, ImageName, UniqueProcessId, InheritedFromUniqueProcessId,
-HandleCount; base priority 8; threads show as waiting). A short buffer
+HandleCount; base priority 8; threads show as waiting; a thread's
+ContextSwitches is the scheduler's count of switches to it,
+`sched::context_switches`, 0 in gala-um where the host schedules). A short buffer
 gets STATUS_INFO_LENGTH_MISMATCH and the size needed. kernel32's Toolhelp
 (`toolhelp.rs`) is built on it as on Windows: CreateToolhelp32Snapshot
 copies the list into an anonymous section after a small header holding
@@ -2734,9 +2736,12 @@ SO_BROADCAST is kept (no broadcast sending tested yet).
 `net_echo` (kernel only: the flag serves one connection on port 7 through
 `net::tcp`) and `winsock_test` (a Windows program: loopback checks, then,
 with `serve`, an echo server on port 7). Both are in xtask's
-`NET_SCENARIOS`: QEMU gets `-netdev user,hostfwd=tcp:127.0.0.1:<free
+`NET_SCENARIOS`: QEMU gets `-netdev user,hostfwd=tcp:127.0.0.1:<leased
 port>-:7,hostfwd=udp:127.0.0.1:<the same port>-:7` and a virtio-net card
-(every other VM gets `-nic none`); once the
+(every other VM gets `-nic none`). The port is the VM's own while it runs
+(xtask's `PortLease`, below the host's ephemeral range; WORKFLOW "Network
+tests"), so VMs run at once never share a forward or a client's files;
+once the
 log shows the scenario's "listening" line, xtask's `net_client` sends 64 KiB
 while reading the echo, half-closes, checks every byte and appends
 `xtask: net client: echo ok` (or the error) to the serial log, which the
@@ -6284,6 +6289,7 @@ said):
 | 11-32 | programs | REQUIRED, milestones (b) and (c): "Programs across a handover" below |
 | 33 | WRITER | the writing kernel's build name (optional; (d): only the `handover_next` build writes and reads it so far) |
 | 34, 35 | NET, SOCKETS | milestone (e), REQUIRED, written only when a program holds a socket: "Sockets across a handover" below |
+| 36 | STOPPED | the tick count when the programs were stopped (optional, written with programs): the next kernel's pause for GalaHandoverPause ("The pause" below) |
 
 **Memory.** The receiving kernel builds its frame allocator from the
 record's map as from Limine's: the new image is "executable and modules",
@@ -6394,6 +6400,25 @@ host-tested: round trip, damage, older entries).
   an event `run=`'s wait also waits on; the boot thread then calls
   `handover::go`. `handover=<n>` at the end of the boot carries whatever
   still runs (`start=` servers) the same way.
+- *The pause* (what a wait spanning a handover can be late by): a
+  carried wait keeps its absolute deadline (invariant 2), so it ends at
+  the deadline or when the programs go on, whichever is later. They stop
+  just before the record (the old kernel logs "the programs stopped N ms
+  before this line") and go on once the next kernel has started, mounted
+  C: and rebuilt them (`carry::restore` logs "resumed, N ms after the
+  record (M ms of the tick count)"). Under TCG on a loaded host that took
+  seconds (4.3 s at load 29, against a clock jump of 1.3 s: most of it
+  is the next kernel's own start-up at the emulator's speed, not a
+  stall). GalaHandoverPause (0x7f5b, test-only, in user/ntrt) gives a
+  program { generation, pause in ms of the tick count } of the last one,
+  so tests bound their sleeps by the measured pause (handover_test,
+  handover_k32_test) instead of a guess. It is measured from when the
+  kernel begins to stop them (`wait_quiet`: from then a thread whose
+  wait ends does not get back to user mode; the record's STOPPED
+  section holds the tick count then) to the threads going on; a record
+  without it (an older writer) gives the pause from the record on.
+  Measuring from the freeze instead missed up to half a second at load
+  20 (a "slept again 3616" against a 2162 ms pause).
 - *Safe points* (`carry::collect`, milestone (c)): the boot thread sets
   `thread::hold_for_handover(true)`: every thread returning to user mode
   (from a system call or an interrupt: the user-return hook) waits on
@@ -6682,7 +6707,7 @@ state format differs; every future format change follows these rules.
   check (`version::trusted`: its size and SHA-256 must be in the signed
   manifest this kernel verified at boot; "Chain of trust" below), parses as a kernel ELF, its note is read and logged
   (`handover: gala hands over to gala-next (record framing 1-1, image
-  layout 1, extended state 0xe7, 35 section kinds; with programs)`); then,
+  layout 1, extended state 0xe7, 36 section kinds; with programs)`); then,
   before any thread is stopped, `version::agree`: the framing this kernel
   writes is in the target's range; with programs, the same image layout
   version; every REQUIRED section this kernel would write is known to the

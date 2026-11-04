@@ -92,6 +92,9 @@ struct Thread {
     is_idle: bool,
     /// Registers the current system call returns with (NtContinue).
     pending_continue: Option<UserRegs>,
+    /// Times a CPU switched to this thread (SYSTEM_THREAD_INFORMATION's
+    /// ContextSwitches; wraps).
+    switches: u32,
 }
 
 /// Why a `prepare_wait`/`wait` ended.
@@ -263,6 +266,7 @@ fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Result<Thread, S
         affinity,
         is_idle,
         pending_continue: None,
+        switches: 0,
     })
 }
 
@@ -355,6 +359,7 @@ fn spawn_inner(
         affinity: ALL_CPUS,
         is_idle: false,
         pending_continue: None,
+        switches: 0,
     };
     let thread = try_box(thread)?;
     let added = {
@@ -483,6 +488,11 @@ pub fn check_user_return() {
     });
 }
 
+/// How many times a CPU switched to thread `id` (0 for an unknown id).
+pub fn context_switches(id: ThreadId) -> u32 {
+    with(|s| s.threads.get(id.0).map_or(0, |t| t.switches))
+}
+
 /// The CPU the caller runs on (it may move right after).
 pub fn current_cpu() -> u32 {
     percpu::cpu_index()
@@ -557,6 +567,7 @@ fn schedule() {
             let from: *const Context = &s.thread(cur).context;
             let n = s.thread(next);
             n.on_cpu = true;
+            n.switches = n.switches.wrapping_add(1);
             let target = switch::Target {
                 context: &n.context,
                 kernel_stack_top: n.stack.as_ref().map(KernelStack::top),

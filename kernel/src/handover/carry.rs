@@ -214,6 +214,31 @@ pub fn collect() -> Result<Option<Programs>, Refusal> {
     collected.map(Some)
 }
 
+/// When `wait_quiet` last began to stop the programs (raw monotonic ns;
+/// 0: never): from then on a thread whose wait ends does not get back to
+/// user mode (`hold_for_handover`), so a sleep due then is late from
+/// there. The record's log line says how long before it that was.
+static STOPPED_AT_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The same in the tick count (the record's STOPPED section).
+static STOPPED_AT_TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The tick count when the programs were stopped for this handover.
+pub fn stopped_ticks() -> Option<u64> {
+    match STOPPED_AT_NS.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        _ => Some(STOPPED_AT_TICKS.load(core::sync::atomic::Ordering::Relaxed)),
+    }
+}
+
+/// Milliseconds since the programs were stopped for a handover (None if
+/// they were not).
+pub fn stopped_ms() -> Option<u64> {
+    match STOPPED_AT_NS.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        at => Some(crate::time::raw_monotonic_ns().saturating_sub(at) / 1_000_000),
+    }
+}
+
 /// Brings every thread of a program to a safe point and stops it there
 /// (they stay stopped on success), returning them as they were then.
 /// Threads returning to user mode wait on the way (`hold_for_handover`);
@@ -224,6 +249,9 @@ pub fn collect() -> Result<Option<Programs>, Refusal> {
 /// be woken (a timer, an event): it is queued but does not run, so its
 /// wait has consumed nothing.
 fn wait_quiet() -> Result<Vec<ThreadState>, Refusal> {
+    STOPPED_AT_TICKS.store(crate::time::raw_ticks(), core::sync::atomic::Ordering::Relaxed);
+    STOPPED_AT_NS
+        .store(crate::time::raw_monotonic_ns().max(1), core::sync::atomic::Ordering::Relaxed);
     thread::hold_for_handover(true);
     let until = crate::time::SpinDeadline::after_ns(QUIET_MS * 1_000_000);
     loop {
@@ -1302,13 +1330,22 @@ pub fn restore(rec: &Record<'_>) {
     match restore_all(rec) {
         Ok((processes, threads)) => {
             // How long the programs were stopped (the clock at the record).
-            let at = rec
-                .section(tag::CLOCK)
-                .map_or(0, |mut c| record::Clock::read(&mut c).monotonic_ns());
+            let clock = rec.section(tag::CLOCK).map(|mut c| record::Clock::read(&mut c));
+            let at = clock.as_ref().map_or(0, record::Clock::monotonic_ns);
             let now = crate::time::raw_monotonic_ns();
+            // In the tick count that waits' deadlines and GetTickCount
+            // use, from when the programs stopped (just before the record;
+            // the record's own time if the writer did not say): what a
+            // sleep spanning the handover can be late by.
+            let stopped = rec.section(tag::STOPPED).map(|mut s| s.u64());
+            let ticks = crate::time::raw_ticks().saturating_sub(
+                stopped.unwrap_or_else(|| clock.as_ref().map_or(0, record::Clock::ticks)),
+            );
+            let pause_ms = ticks * 1000 / crate::time::TICK_HZ;
+            crate::nt::syscalls::set_handover_pause(super::generation(), pause_ms);
             crate::info!(
                 "handover: {processes} process(es) and {threads} thread(s) resumed, {} ms after \
-                 the record",
+                 the record (stopped {pause_ms} ms of the tick count)",
                 now.saturating_sub(at) / 1_000_000
             );
         }

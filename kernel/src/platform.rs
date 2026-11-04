@@ -82,6 +82,9 @@ impl Threads for Kernel {
     fn set_affinity(id: ThreadId, mask: u64) {
         sched::set_affinity(id, mask)
     }
+    fn context_switches(id: ThreadId) -> u32 {
+        sched::context_switches(id)
+    }
     fn current_cpu() -> u32 {
         sched::current_cpu()
     }

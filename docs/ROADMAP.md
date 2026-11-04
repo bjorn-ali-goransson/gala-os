@@ -42,7 +42,19 @@ explicitly in its commit.
   a failure replays from its seed), then R7's record/replay and clock
   control (first part done 2026-11-02, see R7), then fixing the known flaky scenarios (java_http,
   java_hello, postgres, smpsched_test under load), before the rest of
-  R6.
+  R6. Done 2026-11-03 (test harness): net scenarios in repeats and in
+  parallel (repeats of the sshd scenarios forwarded to the wrong guest
+  port), smpsched_test counts context switches instead of timing,
+  handover sleeps bounded by the measured pause (GalaHandoverPause),
+  handover_k32_twice's verification bounded, time limits stretched by
+  host load (WORKFLOW "Known intermittent"). **Stopgap, to replace**
+  (CLAUDE.md's rule): the load stretch (`host_overload`) widens wall-time
+  limits; the structural fix is a limit on the guest's own progress (its
+  monotonic clock, which xtask can read from the serial log's
+  `uptime_ms=` marks or ask through the monitor) so a starved VM is not
+  killed and a hung one is still caught at the same guest time. The
+  sshd_shell client's Ctrl+C retry (2026-11-03) was removed again once
+  the lost wake-up below was fixed.
   **sshd_shell's Ctrl+C fixed (2026-11-03)**: not a regression of the
   clock calibration (the parent failed 1 of 10 solo boots the same way).
   A lost wake-up in `nt::wait`: setting a notification event woke its
@@ -197,7 +209,11 @@ explicitly in its commit.
   `-smp 1` boot, `-Xint` with forced full collections.
   Also seen once in a full suite: java_http listening but xtask's client
   getting "Connection refused" from the host port forward (not
-  retried; a host port taken by another VM? unexplained).
+  retried; a host port taken by another VM? unexplained). Since
+  2026-11-03 host ports are leased per VM outside the ephemeral range
+  (an ephemeral port from `bind(0)` could be taken by any outgoing
+  connection before QEMU bound it) and a failed forward boots again
+  (WORKFLOW "Network tests").
 - **Observability audit** (2026-11-03, OBSERVABILITY "Gaps found
   2026-11-03"): done: a state dump on every boot-test timeout (NMI;
   SIGQUIT in gala-um), a triage block at the end of every failed log
@@ -852,7 +868,13 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    passing alone (2026-11-01): java_http, java_hello, postgres (three
    times: not a race - the scenario's 120 s limit killed the VM, which
    psql saw as a closed connection; it needs ~45 s alone, so it joined
-   SLOW_SCENARIOS), smpsched_test (check 0x12, a timing check);
+   SLOW_SCENARIOS), smpsched_test (check 0x12, a timing check; fixed
+   2026-11-03: it timed the 1000-message exchange (< 2 s), which a host
+   running the VM's processors one at a time makes slow without the guest
+   doing anything wrong (4 of 4 failed with both vCPUs on one host CPU);
+   it now counts the two threads' ContextSwitches (SystemProcessInformation,
+   new), under 1000 where one processor needs at least 2000: 24 normally,
+   about 300 on one host CPU, 6 of 6 passed there);
    java_hello again on 2026-11-02, twice (java.exe ended with status 1
    and no output after 77 s of system calls, with other suites running
    on the host: load average 10; it passes alone in 34-41 s). Still open

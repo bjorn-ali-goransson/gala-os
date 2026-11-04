@@ -75,6 +75,7 @@ stubs! {
     ntrt_gala_create_process = 0x7f02;
     ntrt_gala_clock_control = 0x7f4c;
     ntrt_gala_request_handover = 0x7f5a;
+    ntrt_gala_handover_pause = 0x7f5b;
     // Waitable timers: gala's numbers, UNVERIFIED for the pinned build
     // (programs on Windows reach them through ntdll's exports).
     ntrt_nt_create_timer = 0x00d9;
@@ -114,6 +115,7 @@ unsafe extern "system" {
     fn ntrt_invalid_service() -> NtStatus;
     fn ntrt_gala_clock_control(operation: u32, a: i64, b: i64, state: *mut ClockState) -> NtStatus;
     fn ntrt_gala_request_handover() -> NtStatus;
+    fn ntrt_gala_handover_pause(info: *mut [u64; 2]) -> NtStatus;
     fn ntrt_nt_create_timer(
         handle: *mut Handle,
         access: u32,
@@ -409,6 +411,15 @@ pub fn clock_control(operation: u32, a: i64, b: i64) -> (NtStatus, ClockState) {
 pub fn request_handover() -> NtStatus {
     // SAFETY: no arguments.
     unsafe { ntrt_gala_request_handover() }
+}
+
+/// GalaHandoverPause (gala only): (status, the kernel's generation, how
+/// long the last handover stopped the programs in ms of the tick count).
+pub fn handover_pause() -> (NtStatus, u64, u64) {
+    let mut info = [0u64; 2];
+    // SAFETY: a valid output buffer of 16 bytes.
+    let st = unsafe { ntrt_gala_handover_pause(&mut info) };
+    (st, info[0], info[1])
 }
 
 pub const TIMER_ALL_ACCESS: u32 = 0x1f_0003;

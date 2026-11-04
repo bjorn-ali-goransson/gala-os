@@ -1836,10 +1836,28 @@ fn scenario_timeout(name: &str) -> Duration {
     } else {
         BOOT_TEST_TIMEOUT
     };
+    if limit == DUMP_SCENARIO_TIMEOUT {
+        return limit;
+    }
     // One host thread for both processors (SINGLE_THREAD_TCG) is about
     // half as fast: java_hello and java_http ran out of 300 s in a full
     // suite on a loaded 4-CPU host.
-    if single_thread_tcg(name) && !Path::new("/dev/kvm").exists() { limit * 2 } else { limit }
+    let limit =
+        if single_thread_tcg(name) && !Path::new("/dev/kvm").exists() { limit * 2 } else { limit };
+    limit.mul_f64(host_overload())
+}
+
+/// How overloaded the host is when a VM starts: the one-minute load
+/// average per host CPU, from 1 (not overloaded) to 3. A VM's time limit
+/// is stretched by it: under a load of 33 on 4 CPUs sshd_shell's guest
+/// had run 58 s when its 120 s were up, the client half done (2026-11-03).
+fn host_overload() -> f64 {
+    let cpus = thread::available_parallelism().map_or(1, |n| n.get()) as f64;
+    let load = fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|l| l.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()))
+        .unwrap_or(0.0);
+    (load / cpus).clamp(1.0, 3.0)
 }
 
 type Result<T = ()> = std::result::Result<T, String>;
@@ -2872,9 +2890,17 @@ fn guest_port(name: &str) -> u16 {
     if SSH_PORT_22.contains(&name) { 22 } else { 7 }
 }
 
-/// The scenario an ISO was made for (`test-<name>.iso`, `serve-<name>.iso`).
+/// The scenario an ISO was made for (`test-<name>.iso`, `serve-<name>.iso`,
+/// and an `XTASK_REPEAT` copy `test-<name>.r<i>.iso`). Without the repeat
+/// suffix a repeat of sshd_shell was its own unknown scenario: its port
+/// forward went to the guest's port 7 instead of sshd's 22 (every
+/// connection reset), and a GPU scenario lost its display.
 fn iso_scenario(iso: &Path) -> &str {
     let stem = iso.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let stem = match stem.rsplit_once(".r") {
+        Some((name, i)) if !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => stem,
+    };
     stem.strip_prefix("test-").or_else(|| stem.strip_prefix("serve-")).unwrap_or(stem)
 }
 
@@ -4440,7 +4466,7 @@ const SCENARIOS: &[Scenario] = &[
             // R8: the next build is in the signed manifest.
             "manifest: the next kernel is /boot/kernel-next of release 1",
             "handover: gala hands over to gala-next (record framing 1-1, image layout 1, \
-             extended state 0xe7, 35 section kinds; with programs)",
+             extended state 0xe7, 36 section kinds; with programs)",
             "handover: carrying 1 process(es), 10 thread(s)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala-next; the record was written by an older kernel \
@@ -4491,14 +4517,14 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "handover_k32_test: ready",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0xe7, 34 section kinds; with programs)",
+             extended state 0xe7, 35 section kinds; with programs)",
             "handover: refused: the next kernel (gala) reads PROCESSES up to version 3; this \
              kernel writes version 4, which needs a reader of version 4",
             "handover_k32_test: slept",
             "handover_k32_test: ok",
             "exited with status 0x00000000",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0xe7, 34 section kinds)",
+             extended state 0xe7, 35 section kinds)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala; this build does not read the writer's name",
             "handover: skipped section 33 (unknown to this kernel)",
@@ -5787,14 +5813,18 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     let t0 = Instant::now();
     build_kernel(release)?;
     let built = t0.elapsed();
+    // With `XTASK_REPEAT`, a scenario's exact name selects it alone (it
+    // repeats one scenario: handover_upgrade's name is part of
+    // handover_upgrade_uefi's); otherwise the filter is a substring.
+    let exact = env::var_os("XTASK_REPEAT").is_some()
+        && filter.is_some_and(|f| SCENARIOS.iter().any(|s| s.name == f.as_str()));
     let selected: Vec<&Scenario> = SCENARIOS
         .iter()
         .filter(|s| match filter {
             // Pending scenarios run only when named exactly.
             None => !PENDING.contains(&s.name),
-            Some(f) => {
-                s.name == f.as_str() || (s.name.contains(f.as_str()) && !PENDING.contains(&s.name))
-            }
+            Some(f) if exact => s.name == f.as_str(),
+            Some(f) => s.name.contains(f.as_str()) && !PENDING.contains(&s.name),
         })
         .collect();
     if selected.is_empty() {
@@ -6956,9 +6986,42 @@ struct BootTime {
 /// The kernel's first serial line (see `kernel_main`).
 const KERNEL_BANNER: &str = "gala-os kernel";
 
+/// What QEMU prints (its standard error) when it cannot set up a host
+/// port forward (the port was taken by another process meanwhile).
+const QEMU_FORWARD_FAILED: &str = "host forwarding rule";
+
 /// Boots `iso` (with `boot` firmware) until QEMU exits or `timeout`;
 /// returns the exit status (None on timeout), the serial log and timing.
+/// A net scenario whose QEMU could not forward its host port (another
+/// process took it between the lease and QEMU's bind) boots again with
+/// another port, up to three times.
 fn run_vm(
+    iso: &Path,
+    boot: Boot,
+    timeout: Duration,
+    net: Option<(&'static str, NetClient)>,
+    stop_after_client: bool,
+    disk: Option<&Path>,
+    screen: Option<&'static ScreenCheck>,
+) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
+    let mut tries = 0;
+    loop {
+        let run = run_vm_once(iso, boot, timeout, net, stop_after_client, disk, screen)?;
+        let stderr = fs::read_to_string(iso.with_extension("qemu.stderr")).unwrap_or_default();
+        tries += 1;
+        if net.is_none() || tries == 3 || !stderr.contains(QEMU_FORWARD_FAILED) {
+            return Ok(run);
+        }
+        eprintln!(
+            "xtask: {}: QEMU could not forward its host port ({}); booting again with another",
+            iso.display(),
+            stderr.trim()
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_vm_once(
     iso: &Path,
     boot: Boot,
     timeout: Duration,
@@ -6987,7 +7050,12 @@ fn run_vm(
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // QEMU's own complaints (a port it cannot forward, a bad option):
+        // in the failed log's telemetry.
+        .stderr(
+            fs::File::create(iso.with_extension("qemu.stderr"))
+                .map_or_else(|_| Stdio::null(), Stdio::from),
+        );
     // Early-boot telemetry (telemetry.rs): QEMU's resets and guest errors,
     // SeaBIOS's log, the kernel's phase markers, QMP for the vCPU count.
     let qemu_log = iso.with_extension("qemu.log");
@@ -7018,7 +7086,10 @@ fn run_vm(
         .arg("-qmp")
         .arg(format!("unix:{},server=on,wait=off", qmp.display()));
     let host_before = telemetry::host_state();
-    let port = if net.is_some() { Some(free_port()?) } else { None };
+    // Held until this boot (and its client) is over: no other VM of this
+    // xtask gets the port meanwhile.
+    let lease = if net.is_some() { Some(PortLease::new()?) } else { None };
+    let port = lease.as_ref().map(|l| l.0);
     let (marker, kind) = net.unwrap_or(("", NetClient::Echo));
     if let Some(port) = port {
         add_net_to(&mut cmd, port, guest_port(iso_scenario(iso)));
@@ -7154,6 +7225,13 @@ fn run_vm(
         serial: &serial,
         logs: [&qemu_log, &bios_log, &phases_log],
     });
+    if let Some(port) = port {
+        // Which forward this VM had (VMs at once each have their own).
+        serial += &format!(
+            "xtask: net: host 127.0.0.1:{port} forwarded to the guest's port {} (TCP and UDP)\n",
+            guest_port(iso_scenario(iso))
+        );
+    }
     if let Some(client) = client {
         let verdict = client.join().unwrap_or_else(|_| Err("client panicked".into()));
         serial += &match verdict {
@@ -7222,6 +7300,11 @@ fn boot_telemetry(f: BootFacts) -> String {
             qemu_log.display(),
             telemetry::tail(qemu_log, 30)
         );
+    }
+    let stderr = f.iso.with_extension("qemu.stderr");
+    let complaints = telemetry::tail(&stderr, 10);
+    if !complaints.trim().is_empty() {
+        out += &format!("xtask: QEMU's standard error ({}):\n{complaints}\n", stderr.display());
     }
     out
 }
@@ -8178,17 +8261,63 @@ fn serve(release: bool, args: &[String]) -> Result {
     run_cmd(&mut cmd)
 }
 
-/// A free host TCP port (for QEMU's port forward).
-fn free_port() -> Result<u16> {
-    // Free for TCP and for UDP (both are forwarded).
-    for _ in 0..32 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
-            return Ok(port);
+/// Ports leased to this xtask's running VMs (see `PortLease`).
+static LEASED_PORTS: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+
+/// A host port for one VM's forward (TCP and UDP), held until dropped:
+/// no other VM of this xtask gets it meanwhile. Taken below the kernel's
+/// ephemeral range (`ip_local_port_range`), from a random start: a port
+/// from `bind(0)` was free when asked but is an ephemeral port, which any
+/// outgoing connection (another VM's net client, another agent's) could
+/// take before QEMU binds it. Another process on the host can still
+/// take it first; QEMU then cannot forward it and `run_vm` boots again
+/// with another port.
+struct PortLease(u16);
+
+impl PortLease {
+    fn new() -> Result<Self> {
+        let low = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+            .ok()
+            .and_then(|r| r.split_whitespace().next().and_then(|p| p.parse::<u16>().ok()))
+            .unwrap_or(32768);
+        let (first, span) = if low > 12000 { (low - 12000, 12000u32) } else { (1024, 8000) };
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos())
+            ^ std::process::id().wrapping_mul(2_654_435_761);
+        let mut leased = LEASED_PORTS.lock().unwrap_or_else(|e| e.into_inner());
+        for i in 0..span {
+            let port = first + (seed.wrapping_add(i.wrapping_mul(7919)) % span) as u16;
+            if leased.contains(&port) {
+                continue;
+            }
+            // Free for TCP and for UDP (both are forwarded).
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+                && std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok()
+            {
+                leased.push(port);
+                return Ok(PortLease(port));
+            }
         }
+        Err(format!("no port in {first}..{} free for both TCP and UDP", u32::from(first) + span))
     }
-    Err("no port free for both TCP and UDP".into())
+}
+
+impl Drop for PortLease {
+    fn drop(&mut self) {
+        let mut leased = LEASED_PORTS.lock().unwrap_or_else(|e| e.into_inner());
+        leased.retain(|&p| p != self.0);
+        // The net client's files (`client_dir`).
+        let _ = fs::remove_dir_all(root().join("target/net-client").join(self.0.to_string()));
+    }
+}
+
+/// A free host port for `screenshot` (its only VM, for the whole run).
+fn free_port() -> Result<u16> {
+    let lease = PortLease::new()?;
+    let port = lease.0;
+    std::mem::forget(lease);
+    Ok(port)
 }
 
 /// The host side of `net_echo`: sends NET_ECHO_BYTES of a pattern to the
@@ -8493,13 +8622,22 @@ fn ftp_client(port: u16) -> Result {
     Ok(())
 }
 
-/// galatest's password (user/access_test/access_test.regseed has its hash).
-const SSH_PASSWORD: &str = "Gala-Test-1";
+/// The host-side net client's own files (ssh's key copy and trace, the
+/// sftp transfer, the askpass script) for the VM whose forward is host
+/// `port`: VMs that run at once (`XTASK_REPEAT_JOBS`, the suite) have
+/// distinct ports, so their clients never share a file (one client
+/// rewriting the key while another's ssh read it, one trace written by
+/// two). Removed by `boot_vm` after the run.
+fn client_dir(port: u16) -> Result<PathBuf> {
+    let dir = root().join("target/net-client").join(port.to_string());
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    Ok(dir)
+}
 
-/// The host's ssh as galatest with the test key, running `command` on
-/// gala; its standard output, or why it failed (the end of its -v trace).
-fn ssh_key_run(port: u16, command: &[&str]) -> Result<String> {
-    let key = root().join("target/sshd_login_client_ed25519");
+/// The test key (user/sshd/client_ed25519) as ssh wants it: a 0600 copy
+/// (ssh refuses a private key others may read), in `client_dir(port)`.
+fn ssh_key(port: u16) -> Result<PathBuf> {
+    let key = client_dir(port)?.join("client_ed25519");
     if !key.exists() {
         fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
         #[cfg(unix)]
@@ -8509,6 +8647,16 @@ fn ssh_key_run(port: u16, command: &[&str]) -> Result<String> {
                 .map_err(|e| e.to_string())?;
         }
     }
+    Ok(key)
+}
+
+/// galatest's password (user/access_test/access_test.regseed has its hash).
+const SSH_PASSWORD: &str = "Gala-Test-1";
+
+/// The host's ssh as galatest with the test key, running `command` on
+/// gala; its standard output, or why it failed (the end of its -v trace).
+fn ssh_key_run(port: u16, command: &[&str]) -> Result<String> {
+    let key = ssh_key(port)?;
     let out = Command::new("timeout")
         .arg("120")
         .arg("ssh")
@@ -8545,14 +8693,8 @@ fn ssh_key_run(port: u16, command: &[&str]) -> Result<String> {
 fn ssh_shell_client(port: u16) -> Result {
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
-    let key = root().join("target/sshd_login_client_ed25519");
-    fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
-    }
-    let trace = root().join("target/sshd_shell_client.trace");
+    let key = ssh_key(port)?;
+    let trace = client_dir(port)?.join("ssh.trace");
     let mut ssh = Command::new("timeout")
         .arg("300")
         .arg("ssh")
@@ -8626,6 +8768,9 @@ fn ssh_shell_client(port: u16) -> Result {
         let started = Instant::now();
         send(b"\x03")?;
         thread::sleep(Duration::from_secs(1));
+        // Typed once: the shell's control handler takes Ctrl+C while
+        // `sleep` runs (a late one, a lost wake-up, dropped this line:
+        // ROADMAP "sshd_shell's Ctrl+C fixed").
         send(b"echo gala-$((50-6))\r")?;
         let at = expect("gala-44\r\n", at, 30).map_err(|e| format!("Ctrl+C: {e}"))?;
         if started.elapsed() > Duration::from_secs(25) {
@@ -8673,14 +8818,8 @@ fn ssh_shell_client(port: u16) -> Result {
 /// test key: `put` a 200 KiB file, `ls`, `get` it back, `rm` it; the
 /// download must equal the upload and the listing name the file.
 fn sftp_client(port: u16) -> Result {
-    let key = root().join("target/sshd_login_client_ed25519");
-    fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
-    }
-    let dir = root().join("target/sshd_sftp");
+    let key = ssh_key(port)?;
+    let dir = client_dir(port)?.join("sftp");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let data: Vec<u8> = (0..200 * 1024u32).map(|i| (i * 31 + i / 7) as u8).collect();
@@ -8767,7 +8906,7 @@ fn ssh_client(port: u16, password: bool) -> Result {
     ssh.arg("120").arg("ssh").arg("-v");
     if password {
         // ssh asks SSH_ASKPASS (forced) for the password: a script.
-        let askpass = root().join("target/sshd_password_askpass");
+        let askpass = client_dir(port)?.join("askpass");
         fs::write(&askpass, format!("#!/bin/sh\necho '{SSH_PASSWORD}'\n"))
             .map_err(|e| e.to_string())?;
         #[cfg(unix)]
@@ -8784,14 +8923,7 @@ fn ssh_client(port: u16, password: bool) -> Result {
             .args(["-o", "NumberOfPasswordPrompts=1"]);
     } else {
         // ssh refuses a private key others may read: a 0600 copy.
-        let key = root().join("target/sshd_login_client_ed25519");
-        fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&key, fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
-        }
+        let key = ssh_key(port)?;
         ssh.arg("-i").arg(&key).args(["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"]);
     }
     let out = ssh
@@ -8940,14 +9072,19 @@ fn judge(
 ) -> Result {
     judge_log(scenario, status, timed_out, serial).map_err(|e| {
         let dir = target_dir().join("failed");
-        let path = dir.join(format!("{}.log", scenario.name));
+        // A repeat's boot (`test-<name>.r<i>.iso`) keeps its own: boots
+        // at once must not overwrite each other's.
+        let name = match run.events.as_deref().and_then(repeat_index) {
+            Some(i) => format!("{}.r{i}", scenario.name),
+            None => scenario.name.to_string(),
+        };
+        let path = dir.join(format!("{name}.log"));
         let symbols = symbolize(RELEASE.load(std::sync::atomic::Ordering::Relaxed), serial);
         let events = run.events.as_deref().and_then(|p| fs::read_to_string(p).ok());
         // The event stream (when it was on) next to the log.
         if let Some(text) = events.as_deref().filter(|t| !t.is_empty()) {
-            let _ = fs::create_dir_all(&dir).and_then(|()| {
-                fs::write(dir.join(format!("{}.events.jsonl", scenario.name)), text)
-            });
+            let _ = fs::create_dir_all(&dir)
+                .and_then(|()| fs::write(dir.join(format!("{name}.events.jsonl")), text));
         }
         let facts = triage::Facts {
             scenario: scenario.name,
@@ -8962,6 +9099,13 @@ fn judge(
             Err(_) => e,
         }
     })
+}
+
+/// The repeat number of a file of an `XTASK_REPEAT` boot
+/// (`test-<name>.r<i>.<ext>`).
+fn repeat_index(path: &Path) -> Option<usize> {
+    let name = path.file_name()?.to_str()?;
+    name.split('.').find_map(|part| part.strip_prefix('r')?.parse().ok())
 }
 
 /// What xtask knows of a boot besides its log (for the triage).
@@ -10089,5 +10233,35 @@ mod health {
         assert!(judge_log(&s, None, true, "statedump: end").is_ok());
         assert!(judge_log(&s, None, true, "statedump: begin").is_err());
         assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, "statedump: end").is_err());
+    }
+}
+
+#[cfg(test)]
+mod repeats {
+    use super::*;
+
+    /// A repeat's copy of an image is the same scenario (its port
+    /// forward, display, ...) and keeps its own failed log.
+    #[test]
+    fn a_repeat_copy_is_its_scenario() {
+        let iso = |n: &str| PathBuf::from(format!("/t/debug/{n}"));
+        assert_eq!(iso_scenario(&iso("test-sshd_shell.iso")), "sshd_shell");
+        assert_eq!(iso_scenario(&iso("test-sshd_shell.r0.iso")), "sshd_shell");
+        assert_eq!(iso_scenario(&iso("test-sshd_shell.r11.iso")), "sshd_shell");
+        assert_eq!(iso_scenario(&iso("serve-go_http.iso")), "go_http");
+        assert_eq!(guest_port(iso_scenario(&iso("test-sshd_shell.r3.iso"))), 22);
+        assert_eq!(iso_scenario(&iso("test-handover_k32_twice.iso")), "handover_k32_twice");
+        assert_eq!(repeat_index(&iso("test-udp_echo.r4.events.jsonl")), Some(4));
+        assert_eq!(repeat_index(&iso("test-udp_echo.events.jsonl")), None);
+    }
+
+    /// Leases held at once never share a port.
+    #[test]
+    fn port_leases_are_distinct() {
+        let leases: Vec<PortLease> = (0..8).map(|_| PortLease::new().unwrap()).collect();
+        let mut ports: Vec<u16> = leases.iter().map(|l| l.0).collect();
+        ports.sort_unstable();
+        ports.dedup();
+        assert_eq!(ports.len(), 8);
     }
 }

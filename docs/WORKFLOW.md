@@ -495,8 +495,17 @@ charged). Look
 - **Network tests**: VMs have no network card unless the scenario is in
   xtask's `NET_SCENARIOS` (`-nic none` otherwise). Those get a virtio-net
   card on QEMU's user network with a host port forwarded to guest port 7
-  (TCP and UDP, the same port number on both: `free_port` finds one free
-  for both), and xtask plays the remote side (`net_client`, `udp_client`,
+  (TCP and UDP, the same port number on both; sshd's 22 for
+  `SSH_PORT_22`). Each VM leases its own host port (`PortLease`: free for
+  both, below the host's ephemeral range so no outgoing connection takes
+  it before QEMU binds it, never given to another VM of the same xtask
+  while held); a QEMU that still cannot bind it (another process took it)
+  is booted again with another. The client's own files (ssh's key copy
+  and `-v` trace, sftp's transfer, the askpass script) are per port, in
+  `target/net-client/<port>/`, removed after the boot. So net scenarios
+  run in parallel (the suite, `XTASK_REPEAT_JOBS`). The failed log says
+  which port the VM had (`xtask: net: host 127.0.0.1:<port> forwarded to
+  ...`) and QEMU's standard error. xtask plays the remote side (`net_client`, `udp_client`,
   ...) once the guest logs that it listens; the client's verdict is
   appended to the serial log as an `xtask: net client: ...` line for
   `expect` to check. QEMU's user network needs no privileges, so this
@@ -654,19 +663,46 @@ charged). Look
   DLLs; one that does not points at the kernel's machine code (paging,
   switches, interrupts) or at the emulator.
 - **handover_k32_twice under heavy load (2026-11-03)**: once (load
-  about 24) the program resumed after the first handover ("slept 4001")
-  and then never finished its second one: the state dump showed its
-  other threads in their waits and the main thread with no system call.
-  Passed alone twice after. Open; look at the second handover's request
-  path (GalaRequestHandover while threads are already carried) if it
-  recurs.
+  about 24) it timed out after "slept 4001". Not a hang and not the
+  second handover (its "writer wrote lines:" never came): the state
+  dump's main thread was in user mode at 0x140001550, inside `round`
+  (llvm-objdump of user/bin/handover_k32_test.exe), redoing alone, on
+  one processor, every round the two busy threads had computed in
+  parallel through the whole 4 s sleep: longer than the work itself, at
+  a third of the guest's tick rate. Fixed: the busy threads do 200
+  rounds after the handover (the writer thread sees the kernel's
+  generation change, GalaHandoverPause) and then wait for the stop; the
+  test prints the rounds it checked and how long that took; time limits
+  also stretch with host load now.
+- **Timing checks in test programs** measure the host as much as the
+  guest: under TCG a loaded host stops the VM's processors for
+  milliseconds at a time, the guest's clocks go on, and "this took under
+  2 s" fails. Check what the guest did instead (smpsched_test counts its
+  threads' ContextSwitches: one processor would need two per message);
+  keep elapsed-time bounds as generous give-ups only. To reproduce such a
+  failure, run QEMU on one host CPU: a directory first in PATH with a
+  `qemu-system-x86_64` script that runs `taskset -c 3
+  /usr/bin/qemu-system-x86_64 "$@"`.
+- **sshd_shell's Ctrl+C step (2026-11-03)**: every failed run (solo and
+  in repeats) showed `~ $ sleep 60`, the prompt, `e^C^C`, then `cho:
+  not found`: busybox's control handler (its process's control thread
+  in `GalaConsoleCtrl`) ran only after the prompt was back and dropped
+  the next typed line. The cause was in gala, not in the order of
+  delivery: a lost wake-up in `nt::wait` (a waiter that looked after
+  another process's thread had reset the session's Ctrl+C event slept
+  until the call's 1 s backstop; ROADMAP "sshd_shell's Ctrl+C fixed").
+  A client retry briefly papered over it and is gone again: the line is
+  typed once. Each process's handler thread logs how long after the
+  Ctrl+C it took it (`took Ctrl+C N late` from 250 ms on).
 - **A sleep that spans a handover (2026-11-03)**: handover_upgrade failed
-  twice in full suites (load about 6) with "slept again 1248", check 58:
-  the second Sleep(1000) spans the handover, the thread is frozen and the
-  monotonic clock goes on (that handover alone moved it 232 ms). Timing
-  checks across a handover bound only the short side tightly (check 14
-  of the first handover too: "slept 4986" with a 1.3 s handover at load
-  29).
+  with "slept again 1248" (check 58), handover_k32 with "slept 4986"
+  (check 14), handover_idle_uefi with "slept 7634 ms" (check 0x16), each
+  late by much more than the clock jump the log reports: the programs
+  stay stopped from just before the record until the next kernel has
+  rebuilt them (4.3 s at load 29), and a sleep whose deadline falls in
+  that time ends when they go on. Bound such sleeps by the pause the
+  kernel measured from the stop (GalaHandoverPause; ARCHITECTURE "The
+  pause"), never by a guessed constant.
 - **Java hang with a state dump (2026-11-03)**: the first timeout with a
   state dump (correct clock): java_http hung with three JVM threads in
   NtYieldExecution and two waiting on semaphores with count 0
@@ -676,8 +712,14 @@ charged). Look
   times before blaming CI: `XTASK_REPEAT=12 cargo xtask boot-test name`
   boots one scenario's image 12 times, as many at once as the host has
   CPUs (the load brings races out), keeps each failed boot's log
-  (`target/debug/test-<name>.r<i>.serial.log`) and ends with "n of 12
-  boots failed". A race between processors is best caught by a test
+  (`target/debug/test-<name>.r<i>.serial.log`, with its triage in
+  `target/failed/<name>.r<i>.log`) and ends with "n of 12
+  boots failed". With `XTASK_REPEAT` a scenario's exact name selects it
+  alone (`handover_upgrade`, not also `handover_upgrade_uefi`). Code
+  that derives a scenario from an image's name must
+  go through `iso_scenario`, which knows the `.r<i>` of a repeat's copy:
+  without it, repeats of sshd_shell/sshd_server/sshd_sftp forwarded to
+  the guest's port 7 and every connection was reset (2026-11-03). A race between processors is best caught by a test
   program that makes the two sides meet often (threads pinned to
   processors 0 and 1, kept in step: `smpcow_test`), repeated this way.
 - **Lock gaps in the memory manager**: a VAD change and the matching
@@ -851,7 +893,13 @@ instead of 120 s: a slow CI runner takes over twice as long as a local
 run (java_hello: ~35 s locally; it timed out at 120 s once in CI, with
 its threads still progressing - much of a JVM's time goes to gala's
 lightweight-lock waits, which sleep 1 ms at a time until a kernel address
-wait exists). In a shared VM,
+wait exists). Every limit (but a dump scenario's) is stretched by the
+host's overload when the VM starts (a tracked stopgap, ROADMAP
+Priorities: limits should count guest time) (`host_overload`: the one-minute load
+average per host CPU, 1 to 3): with five agents on a 4-CPU host (load
+20-33) sshd_shell's guest had run only 58 s when its 120 s were up, and
+handover_k32_twice's verification was cut short the same way; the
+failed log's triage line has the load. In a shared VM,
 scenarios running the same program (two `dotnet.exe` runs) are judged on
 that program's n-th `run: begin`..`run: end` section, in group order.
 To see why a .NET program fails: the ledger first, then `XTASK_EVENTS=
