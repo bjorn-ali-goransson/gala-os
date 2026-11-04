@@ -3,9 +3,9 @@
 How work is done: the test-first loop, the commands, the tools, program
 recipes, debugging recipes and the pitfalls met so far. Read `CLAUDE.md`
 first, then this, then the parts of `ARCHITECTURE.md` you touch.
-`ROADMAP.md` says what is done and what comes next (its "Next" list is
-the agreed order). README.md is the short quick start; this is the full
-reference.
+`ROADMAP.md` says what is done and what comes next (its "Current focus" is
+the order to work in). README.md is the short quick start; this is the
+full reference.
 
 Contents: [The loop](#the-loop) ·
 [Building, running and testing](#building-running-and-testing) ·
@@ -219,7 +219,7 @@ xtask that change how a scenario boots:
   but a dump scenario's is then multiplied by `host_overload` (the
   one-minute load average per host CPU, clamped to 1-3; the failed
   log's triage line has the load). This stretch is a stopgap (ROADMAP
-  Priorities: limits should count guest time).
+  T2: limits should count guest time).
 - **A scenario that runs many processes** (a database, a runtime) can
   pass alone and time out under the full suite (2-3x slower); its client
   then reports a dropped connection, not a timeout. Look for "timed out
@@ -362,8 +362,14 @@ networking).
 - Why not the distribution's: QEMU 8.1.0-8.2.5 (Ubuntu 24.04 ships
   8.2.2) keeps running stale translations of code rewritten on a
   translated block's second page, which corrupted JIT-compiled code
-  ("Known intermittent"). `straddle_test` passes on the pinned QEMU and
-  fails on 8.2.2.
+  ("Known intermittent"). `straddle_test` (single-threaded TCG) rewrites
+  code across a page boundary and runs it: it passes on the pinned QEMU
+  and fails on 8.2.2 (check 2, round 1 gets the pre-rewrite value), so
+  it is the quick way to tell whether a QEMU build has the bug. On the
+  pinned QEMU `java_stress` passed 15 of 15 boots; on 8.2.2, 2 of 6
+  failed.
+- QEMU TCG (8.x) has no x2APIC: boot tests exercise only the xAPIC path;
+  the x2APIC path runs only under KVM.
 - A cloud container is ephemeral: run `cargo xtask qemu` in the
   environment's setup script, or once per new container (about 10
   minutes).
@@ -467,8 +473,8 @@ the ledger and the program's own error messages.
 
 ### Signed images
 
-Every image xtask makes is sealed (R8; ARCHITECTURE "Chain of trust",
-"What is built"; code `xtask/src/trust.rs`).
+Every image xtask makes is sealed (R8; ARCHITECTURE "Chain of trust";
+code `xtask/src/trust.rs`).
 
 - **The test key** is made on first use in `target/trust/`
   (`test-signing.seed`, the private Ed25519 seed, mode 0600, never
@@ -489,7 +495,10 @@ Every image xtask makes is sealed (R8; ARCHITECTURE "Chain of trust",
   CONFIG FILE`); make a new image with `cargo xtask iso ... <cmdline>`
   instead. A module changed after sealing: `PANIC: Blake2b hash for URI
   ... does not match!` (on the serial port only with `serial: yes`,
-  which the boot-chain scenarios set).
+  which the boot-chain scenarios set). Under UEFI Limine writes each
+  character with a cursor sequence: for `boot_config_edited` xtask
+  strips them and stops the VM at Limine's "Press a key to return to
+  menu" / "System halted.".
 - **An unsigned build** (a developer's own kernel, a quick experiment):
   `XTASK_UNSIGNED=1 cargo xtask ...` builds the kernels without a key and
   makes images without manifest, hashes or enrolment; the kernel logs
@@ -500,7 +509,10 @@ Every image xtask makes is sealed (R8; ARCHITECTURE "Chain of trust",
   compile-time input).
 - **The kernel on an image is stripped** of debug information (xtask's
   `copy_kernel`); `cargo xtask symbolize` uses the build's ELF in
-  `target/`. A handover that comes seconds late (its program finished
+  `target/` (symbols and the GALA note are kept). Limine hashes every
+  file it loads (about 4 s more per BIOS boot under TCG with a 30 MB
+  debug kernel) and the kernel SHA-256s the next image before a
+  handover. A handover that comes seconds late (its program finished
   before) is the SHA-256 of a large image: check the image's kernel
   size.
 - **A disk that refuses the build** (`rollback: refused: release 1 is
@@ -552,14 +564,15 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   LoadLibrary (or DLL notification) spins in NtYieldExecution for ever.
 - **Timing checks measure the host as much as the guest**: under TCG a
   loaded host stops the VM's processors for milliseconds at a time while
-  the guest's clocks go on, so "this took under 2 s" fails. Check what
-  the guest did instead (smpsched_test counts its threads'
-  ContextSwitches); keep elapsed-time bounds as generous give-ups only.
-  A sleep that spans a kernel handover is bounded by the pause the
-  kernel measured (GalaHandoverPause; ARCHITECTURE "The pause"), never by
-  a guessed constant. To reproduce a timing failure, run QEMU on one
-  host CPU: a directory first in PATH with a `qemu-system-x86_64` script
-  that runs `taskset -c 3 /usr/bin/qemu-system-x86_64 "$@"`.
+  the guest's clocks go on, so "this took under 2 s" fails. Check what the
+  guest did instead (smpsched_test counts its threads' ContextSwitches);
+  keep elapsed-time bounds as generous give-ups only. A sleep that spans a
+  kernel handover is bounded by the pause the kernel measured
+  (GalaHandoverPause: 200-350 ms under TCG, seconds on a loaded host;
+  ARCHITECTURE "Programs across a handover"), never by a guessed constant.
+  To reproduce a timing failure, run QEMU on one host CPU: a directory
+  first in PATH with a `qemu-system-x86_64` script that runs `taskset -c 3
+  /usr/bin/qemu-system-x86_64 "$@"`.
 - **Single-CPU tests that measure ticks** pin themselves
   (`sched::set_affinity`).
 - **Cross-processor races**: a test program that makes the two sides
@@ -1337,7 +1350,8 @@ every byte between the terminal and the console.
   layer's system call, fault and process creation time without
   disturbing the run; the event stream gives per-call detail but slows
   the run down (docs/PERF.md has the method and the numbers).
-- `cargo xtask bench` (always a release kernel) runs `user/bench` and
+- `cargo xtask bench --release` runs `user/bench` (without `--release`
+  it benchmarks a debug kernel, about 30x slower per system call) and
   writes `target/report/bench.json`; on Windows, `user/bin/run-all.ps1`
   writes `bench-windows.txt`, which `cargo xtask bench bench-windows.txt`
   puts next to gala's numbers.
@@ -1504,6 +1518,26 @@ Prometheus or Grafana.
   14/58) can still fail when the handover itself takes longer than the
   sleep's slack (`resumed, N ms after the record` in the log): that is
   load, not the clock; rerun alone.
+- **A corruption only the kernel shows: eliminate layers, then suspect
+  the emulator** (the method that found the JVM heap corruption):
+  1. Run the same program in gala-um (same `nt` code and DLLs, real
+     processors): hundreds of clean runs there put the fault below the
+     NT layer (paging, TLB shootdowns, fault and exception entry,
+     context switches, interrupts) or in the emulator.
+  2. Make a reproducer that fails often (`java_stress`: one boot in
+     three) and repeat it (`XTASK_REPEAT=n XTASK_REPEAT_JOBS=k`).
+  3. Turn features off one at a time and record each batch: `-smp 1`
+     (not a cross-processor race), `tlbparanoid` (not a missed flush),
+     `-cpu Nehalem` (not XSAVE or a CPU extension), `eagercommit` (not
+     demand-zero faults), `checkuser` (return-to-user invariants), the
+     program's own verification (HotSpot's `-XX:+VerifyBeforeGC
+     -XX:+VerifyAfterGC`). A failure that survives all of them, with the
+     state consistent at one point and stale just after, points at
+     stale translated code.
+  4. Write a focused test of the suspected emulator behaviour
+     (`xmodify_test`, `straddle_test`) and try other QEMU versions.
+  5. Fix the cause (here: pin a fixed QEMU), not with a kernel
+     workaround.
 
 ### Known intermittent
 
@@ -1536,8 +1570,19 @@ Scenarios that fail now and then, and what is known.
   list.
 - **java_http timing out with a lost wake-up's signature**: once, a
   state dump showed three JVM threads in NtYieldExecution and two
-  waiting on semaphores with count 0 (OBSERVABILITY "Open gaps"), the signature of a lost semaphore release at
-  HotSpot's wait barrier. Open; the failed log is the starting point.
+  waiting on semaphores with count 0, the others in delays or waits on
+  events: the signature of a lost semaphore release at HotSpot's wait
+  barrier, seen after the NtReleaseSemaphore fix (the waits on events
+  may have been the lost wake-up in `nt::wait` fixed since: a
+  notification event reset by one woken waiter before another looked).
+  Open; whether it recurs on the pinned QEMU is not recorded.
+  `target/failed/java_http.log` is the starting point if it does.
+- **Watchdogs firing during boot**: look first at the `apic:` / `tsc:`
+  lines (the triage shows their figures near the guest line). A TSC
+  calibrated at tens of MHz instead of about 2.8 GHz makes guest time
+  run 20-200x fast: sleeps end early and the watchdog reports CPUs
+  "stuck" for "5 s" every quarter second. The triage flags a TSC under
+  500 MHz and `clock: WRONG`.
 - **Scenarios cut short by host load**: wall-time limits stretch with
   `host_overload`, but a host far past its CPUs can still starve a VM
   (see the end of "When a test fails").
@@ -1582,7 +1627,8 @@ before blaming CI:
 
 - Loop `cargo xtask boot-test <name>` (or `XTASK_REPEAT`) until it
   fails and keep that serial log. After a minute without the program
-  finishing the kernel dumps every thread (ARCHITECTURE "Hang dump"):
+  finishing the kernel dumps every thread (ARCHITECTURE "Diagnostics of
+  stuck and crashed programs"):
   which system call each NT thread is in, on which object, with which
   timeout; at the boot test's timeout xtask asks for a state dump too.
   Tracing (`trace`) changes the timing enough to hide races, so prefer
@@ -1625,7 +1671,10 @@ before blaming CI:
   name their exports). In gala-um: `gdb -p` the `exe` process; `thread
   apply all x/3i $pc` shows the loop, and the image's export directory
   (read from memory at the 64 KiB-aligned base below the address) names
-  the DLL.
+  the DLL. A GUI program that hangs or spins often waits for something
+  gala lacks: the same dump prints the missing-features ledger, and an
+  unregistered window class shows there as
+  `user32.dll!CreateWindowExW(<class>)`.
 - **Probes in gala's DLLs**: a temporary `unsupported(b"PROBE", detail)`
   shows up in `events=syscall` as GalaRecordMissing with its detail.
   Probes are told apart by their name's length (args[1] in the event:
@@ -1655,14 +1704,16 @@ before blaming CI:
 
 `cargo xtask fault-test` runs `FAULT_PROGRAMS` in gala-um under
 `FAULT_RULES` (`heap:every:2`..`heap:every:499`, `heap:random:20`,
-`frame:every:3`, `frame:every:61`, `frame:random:20`, `net_tx:every:3`,
-a mixed rule; seeds 1-3; ARCHITECTURE "Fault injection") in a few
-seconds; each run must end without a panic, an abort, a hang (10 s) or a
-valid image reported as a bad one. `--sweep` fails each heap allocation
-of each program in turn (`heap:nth:k`), `--sweep=frame` each frame
-allocation, `--sweep=net_tx` each packet; a filter picks programs
-(`cargo xtask fault-test pipe_test --sweep`). A failed run's whole log is
-in `target/failed/fault-<program>-<rule>-<seed>.log`. In QEMU: the
+`frame:every:3`, `frame:every:61`, `frame:random:20`, `net_tx:every:3`, a
+mixed rule; seeds 1-3; ARCHITECTURE "Fault injection") and sweeps
+`FAULT_SWEEPS`: about 3200 runs in about 40 s. Each run must end without a
+panic, an abort, a hang (10 s) or a valid image reported as a bad one.
+`--sweep` fails each heap allocation of each program in turn
+(`heap:nth:k`), `--sweep=frame` each frame allocation, `--sweep=net_tx`
+each packet; a filter picks programs (`cargo xtask fault-test pipe_test
+--sweep`; a full heap sweep is about 14,800 runs in four minutes, a frame
+sweep about 3,500). A failed run's whole log is in
+`target/failed/fault-<program>-<rule>-<seed>.log`. In QEMU: the
 `failpoint_*` boot scenarios, or `failpoint=heap:every:97 failseed=7` on
 any command line (debug builds). Add a program to `FAULT_PROGRAMS` once
 its sweep passes.
@@ -1847,6 +1898,13 @@ guards drop out of order.
   FH3 data as FH4 gives plausible-looking nonsense. The handler data of
   a GS-checking handler is the FuncInfo RVA, then the GS data.
   `llvm-readobj --unwind` shows unwind data.
+- **One CPU**: `XTASK_QEMU_ARGS="-smp 1" cargo xtask test` runs the whole
+  suite on one processor; only the checks that expect two processors
+  fail. The `onecpu_*` scenarios do it for a few.
+- **TLB or migration suspects**: boot with `tlbparanoid` (a bug that
+  goes away with it is a TLB bug), `nomigrate`, `checkuser`, `framecheck`
+  (ARCHITECTURE "Kernel command line"); the shootdown counters before
+  `boot ok` include threads moved to another CPU mid-shootdown.
 
 ### A boot that ends without a word
 
@@ -1872,12 +1930,18 @@ exception with its registers in `.qemu.log`: large; with
 `XTASK_REPEAT=n` each failed boot keeps its own `.rN.*` files).
 `smp: ... CPUs online` lower than asked: the bootloader missed an AP and
 the kernel could not start it either; xtask boots such a VM once more and
-says `VM got 1 of 2 CPUs (host overloaded?)`. To make Limine miss an AP
-for real, hold the AP's vCPU thread: QEMU with `-name x,debug-threads=on`,
-then ptrace-stop the thread named `CPU 1/TCG` (PTRACE_SEIZE +
-PTRACE_INTERRUPT) once SeaBIOS has printed "Booting from" (SeaBIOS waits
-for every CPU) and release it after the kernel banner; `smptest=late` is
-the in-guest, deterministic version.
+says `VM got 1 of 2 CPUs (host overloaded?)`, keeping the short boot's
+logs (serial, phases, qemu, bios) as `*.short-cpus.*` next to the image. A
+reset with no word is typically an AP that Limine timed out on (its vCPU
+thread did not run in time on a loaded host, seen at load averages of
+12-20) and that later ran Limine's trampoline without its identity map and
+triple-faulted; the kernel shelters such APs (ARCHITECTURE "APs the
+bootloader missed"; `smptest=late`, `smptest=hide` reproduce a late or
+hidden AP). To make Limine miss an AP for real, hold the AP's vCPU thread:
+QEMU with `-name x,debug-threads=on`, then ptrace-stop the thread named
+`CPU 1/TCG` (PTRACE_SEIZE + PTRACE_INTERRUPT) once SeaBIOS has printed
+"Booting from" (SeaBIOS waits for every CPU) and release it after the
+kernel banner; `smptest=late` is the in-guest, deterministic version.
 
 ### Debugging a kernel handover (R9)
 
@@ -2040,9 +2104,18 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   Windows: semaphores, events, critical sections), not only the memory
   manager; `smpsem_test` is the pattern for such a test.
 - **Waits**: every `prepare_wait`/`wait` sits in a loop that re-checks
-  its own condition and deadline. Kernel code that shares one event
-  between several waiters must not count on each waiter seeing it set: a
-  count or generation next to it (GalaConsoleCtrl's) says what happened.
+  its own condition and deadline (`sched::wake` wakes a waiting thread
+  whatever it waits for). Kernel code that shares one event between
+  several waiters must not count on each waiter seeing it set: a count
+  or generation next to it (GalaConsoleCtrl's) says what happened.
+- **Signals**: never read-modify-write a signal with `signal_state()` +
+  `set_signal`, and never reset a signal after testing other state
+  outside `wait::update_signal`: both lose wake-ups under SMP
+  (`smpsem_test`, `smprace_test`; ARCHITECTURE "Waits").
+- **Termination-aware waits** call `thread::wake_if_terminating()` right
+  after `platform::prepare_wait`; checking `is_terminating()` before
+  marking the thread waiting loses a termination request made in
+  between.
 - **Memory manager locks**: a VAD change and the matching page-table
   change happen under one hold of the VAD lock (views, VAD, space;
   ARCHITECTURE "Virtual memory"); reading the VAD, dropping its lock and
@@ -2089,6 +2162,10 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
 
 ### gala's DLLs
 
+- **The standard handles are not consoles without a console session**:
+  making GetConsoleMode succeed on the serial-line handles changes
+  programs' output (Caddy's logging; `kernel32_sys_test` and
+  `winsock_test` expect redirected handles). Keep them non-consoles.
 - **Static tables** go in a DLL's data section (copied into every
   process that loads it) unless their initial value is all zero bytes:
   give "empty" slots zero fields (`disabled` rather than `enabled:
@@ -2242,7 +2319,8 @@ timer's stale expiry signaled after a re-arm (2), a name removed while
 an open was taking its handle (3), a process signaled before its handles
 were closed (4), NtDelayExecution ended by any wake-up (5). What was
 fixed without a test, what was left open and what was checked and found
-sound are in ROADMAP (hygiene sweep items) and ARCHITECTURE "Waits".
+sound are in ROADMAP "HS. Hygiene sweeps"; the invariants in
+ARCHITECTURE "Waits".
 
 ## Where things are
 

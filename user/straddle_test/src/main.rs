@@ -15,7 +15,7 @@
 //!   high half (on the second page) changes;
 //! - case 3: the same function inside one page (the control).
 //!
-//! Why (WORKFLOW "QEMU", "the Java corruption"): QEMU's
+//! Why (WORKFLOW "QEMU", "Known intermittent"): QEMU's
 //! TCG 8.1.0 to 8.2.5 records a translated block that spans two pages
 //! only under its first page (accel/tcg/tb-maint.c `tb_record`
 //! computes the second page's index from the first page's address), so a

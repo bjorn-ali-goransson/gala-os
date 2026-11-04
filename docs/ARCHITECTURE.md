@@ -848,6 +848,12 @@ and the fault path.
   `vm::resolve_fault` (returns Resolved / Raise / Denied), which maps a
   zeroed frame if the VAD allows the access. `eagercommit` gives
   committed private pages their frames at once instead.
+- **No frame for a committed page**: the fault is retried
+  (`OOM_RETRIES` = 100, 1 ms apart) before the program gets an access
+  violation: on Windows a committed access does not fail for lack of
+  memory, but the commit charge covers private memory only, not the
+  kernel's own use (fault injection found a copy-on-write fault that
+  raised an access violation when it could not allocate).
 - **NOACCESS and GUARD** pages stay mapped but kernel-only, so user
   accesses fault while contents survive.
 - **Page size**: all user mappings are 4 KiB pages, so a decommit or
@@ -1780,7 +1786,7 @@ The configuration manager (`nt::registry`, the services in
 `nt/registry_calls.rs`; `registry_test`) keeps the registry in kernel
 memory: one tree rooted at `\REGISTRY` with `MACHINE` and `USER` below
 it, nodes in an arena under one `IrqMutex`. With `persist` its changes are
-kept on the disk ("The registry kept (D3)"); without it writes last until
+kept on the disk ("The registry kept"); without it writes last until
 shutdown.
 
 - **Names**: the registry is not part of the object manager's directory
@@ -2333,11 +2339,12 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   documented failure, recorded); ConvertLengthToIpv4Mask is computed and
   WinHttpGetIEProxyConfigForCurrentUser answers that there are no IE
   proxy settings (ERROR_FILE_NOT_FOUND).
-- **uxtheme** runs with themes off, the documented "classic" state:
-  IsAppThemed and IsThemeActive are FALSE, OpenThemeData gives NULL
-  (programs then draw controls themselves), functions taking a theme fail
-  with E_HANDLE for NULL except GetThemeSysColor/GetThemeSysFont (the
-  system's, documented for a NULL theme); SetWindowTheme is accepted.
+- **uxtheme** (`user/uxtheme`) runs with themes off, the documented
+  "classic" state: IsAppThemed and IsThemeActive are FALSE, OpenThemeData
+  gives NULL (programs then draw controls themselves), functions taking a
+  theme fail with E_HANDLE for NULL except
+  GetThemeSysColor/GetThemeSysFont (the system's, documented for a NULL
+  theme); SetWindowTheme is accepted.
 - **winmm**: the multimedia timer functions (timeBeginPeriod, asked for by
   Go and the JVM) succeed; timers run on the 1 ms tick whatever is asked.
 - **shlwapi** (`shlwapi_test`): path and string functions
@@ -3716,10 +3723,8 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   GUI font, the work area, the icon title font, high contrast off, three
   wheel lines, and Windows' defaults for the visual-effect switches;
   unknown actions fail and are recorded.
-- **uxtheme** (`user/uxtheme`): themes off, the documented classic state
-  (IsAppThemed and IsThemeActive FALSE, OpenThemeData NULL, theme-handle
-  functions E_HANDLE, GetThemeSysColor/Font the system's), so programs
-  draw their controls themselves.
+- **uxtheme**: themes off ("Other DLLs and programs"), so programs draw
+  their controls themselves.
 
 #### Menus
 
@@ -5477,6 +5482,38 @@ discarded in an orphaned process group: pty_test). The pty's line
 discipline starts from `Termios::fresh_pty`; the stat family,
 getdents64, epoll, poll and wait4 copy these structs out.
 
+**Behaviour the corpus recorded** (Linux 6.18.44, as root and unchanged
+as uid 65534), which the personality must match:
+
+- A pipe's SIGPIPE has si_code SI_USER.
+- `select` ignores fds beyond the descriptor table (fd 100 with a
+  64-entry table: 0, not EBADF).
+- SA_RESETHAND keeps the flag in the reset action (flags read back
+  0x84000004) and does not imply SA_NODEFER.
+- A blocked ignored signal stays pending until unblocked.
+- Signals made deliverable at once nest: SIGUSR1's frame is set up
+  first, real-time ones on top run first ("35 35 10 12").
+- A store to a never-touched bss page after mprotect(PROT_READ) faults
+  with error code 6 (not present); after a touch, 7.
+- musl's `struct rusage` is 272 bytes, the kernel writes 144; a tiny
+  child's ru_maxrss can be 0.
+- The exit status after the main thread's exit(0) is the last thread's
+  exit(5).
+- clockid_t is 32-bit; the CPU clock for pid p is `(int)((~p << 3) | 2)`.
+- `^Z` to an orphaned foreground group (a session leader's) is
+  discarded; a fresh pty's master and slave have the same termios.
+
+What each corpus program covers: fs_test (open/openat flags,
+getdents64, the stat family, statx, rename/renameat2, unlink,
+mkdir/rmdir, symlinks, errnos), pipe_test (pipe2 flags, EOF, EAGAIN,
+EPIPE/SIGPIPE, dup/dup2/dup3, fcntl), fork_test
+(fork/vfork/execve/wait4/waitid, statuses, groups and sessions, a
+subreaper), thread_test (clone threads, futex), signal_test (actions,
+masks, pending, siginfo, the rt_sigframe, sigaltstack, SIGCHLD, default
+actions), clock_test, poll_test (poll/ppoll/select/pselect6/epoll),
+pty_test (/dev/ptmx, termios, the line discipline, ISIG), proc_test
+(/proc/self).
+
 TODO (with the signal code): XSAVE-area sizes per CPU (the frame's
 tail); `SA_RESTART`'s per-call rules (a pipe read restarts, nanosleep
 never does: signal_test); sigaltstack's minimum (MINSIGSTKSZ 2048 vs
@@ -5710,8 +5747,8 @@ clicking pixels and comparing colours). gala implements the client side
 over Win32 windows, in its own process and in others ("Plan: windows
 across processes"). Tests: `uia_test` (a mingw C program, with a second
 process), `flaui_test` (FlaUI on .NET 8 driving `flaui_target.exe`),
-`filezilla_flaui` (FlaUI driving FileZilla). ROADMAP: "Screen tests
-through UI Automation"; how to write such tests: WORKFLOW "FlaUI".
+`filezilla_flaui` (FlaUI driving FileZilla). ROADMAP: item UIA; how to
+write such tests: WORKFLOW "FlaUI".
 
 ### Activation
 
@@ -6136,7 +6173,7 @@ ledger has no UIAutomationCore lines.
 
 ### Limits
 
-TODO (ROADMAP "Screen tests through UI Automation"):
+TODO (ROADMAP UIA):
 
 - providers inside programs (WM_GETOBJECT answered with
   IRawElementProviderSimple via UiaReturnRawElementProvider, which wx
@@ -6408,7 +6445,8 @@ New code follows them; old code is brought in line (ROADMAP R1).
     before `POLLERS` (the request path and `notify` both take them in
     that order; a per-endpoint poll count avoids the reverse).
 - **Flight recorder, hang watchdog and a crash record kept across
-  reboots** (R4): docs/OBSERVABILITY.md §5.
+  reboots** (R4): OBSERVABILITY "Flight recorder", "Hang watchdog",
+  "Crash record across reboots".
 - **Deterministic simulation** (R5) and **live mocking** (R7): below.
 
 ### Fault injection
@@ -6635,9 +6673,9 @@ Design rules:
 - **Per-process faults at the API level in gala's DLLs**, as Windows'
   Application Verifier does (CreateFileW failing for given paths, heap
   allocations failing at a set rate).
-- **Control**: OBSERVABILITY §6's introspection channel made
-  read-write, plus test-only private `Gala*` calls so a test program can
-  trigger a change at an exact moment.
+- **Control**: the live introspection channel (OBSERVABILITY "Planned
+  facilities") made read-write, plus test-only private `Gala*` calls so a
+  test program can trigger a change at an exact moment.
 - **Security**: off unless booted with an explicit flag, compiled out
   of release images, every change logged to the event stream (a live
   component-swap interface is otherwise an ideal rootkit hook).
@@ -7531,4 +7569,8 @@ ROADMAP.
 - Bootloader-reclaimable memory is not reclaimed (it must not be reused
   until the boot info that lives there has been copied out).
 - No 32-bit programs (WOW64); no service control manager.
+- No Windows drivers (ROADMAP Later, DR). The invariant they keep from
+  the start: a third-party driver never runs unsupervised in gala's
+  kernel address space; a driver crash restarts its host, and kernel
+  handover keeps working.
 - Observability gaps: docs/OBSERVABILITY.md.

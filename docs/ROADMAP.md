@@ -59,7 +59,7 @@ The ordering rules in force (set by the owner):
    workloads (servers, console programs, the Docker image) never start
    the graphical interface; a desktop feature is built as an action the
    `gala` command reaches first, then given a mouse and keyboard binding
-   (item SD, WORKFLOW "shasha features: the `gala` command first").
+   (item SD, WORKFLOW "Rules for every change").
 
 ## Current focus
 
@@ -95,7 +95,7 @@ has a section under "Open items".
 
 | ID | Title | State | Note |
 |---|---|---|---|
-| M1, M2, M4 | Boot, memory, scheduler, user mode | done | ARCHITECTURE "Boot", "Virtual memory", "Threads and scheduling", "User mode and the NT personality" |
+| M1, M2, M4 | Boot, memory, scheduler, user mode | done | ARCHITECTURE "Boot", "Virtual memory", "Threads and scheduling", "NT personality" |
 | — | NT core services | done | the table below lists them with their tests |
 | — | XSAVE and AVX state | done | `xstate_test` (also gala-um); ARCHITECTURE "x87/SSE/AVX state" |
 | — | Screen console, `cargo xtask screenshot` | done | WORKFLOW "Screenshots" |
@@ -107,7 +107,7 @@ has a section under "Open items".
 | S4 | SMP, the rest | later | per-CPU run queues, ranged shootdowns, PCIDs |
 | T1 | Test speed | done | boot tests 66 s -> 14 s; WORKFLOW "Test speed and environments" |
 | T2 | Guest-time limits for boot tests | planned | replaces the `host_overload` stopgap |
-| O1 | Ledger, event stream, backtraces, benchmarks | done | OBSERVABILITY 1, 2, 4 |
+| O1 | Ledger, event stream, backtraces, benchmarks | done | OBSERVABILITY "Event stream", "Missing-features ledger", "Backtraces and panic output", "Benchmarks" |
 | U1-U3 | gala-um | done | 92 programs in seconds; GALA_UM.md |
 | HS | Hygiene sweeps | in progress | recurring; first sweep done, four leftovers |
 
@@ -140,7 +140,7 @@ has a section under "Open items".
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | planned | |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
-| SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Phases" S1-S6 (leftovers listed there) |
+| SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel done; winhttp, wininet, curl next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
@@ -213,9 +213,20 @@ time, instead of waiting for flaky scenarios to point at each one.
 
 **Done so far**:
 - The first sweep: the early primitives for single-CPU assumptions,
-  with `smprace_test` (five rounds, each failing before its fix) and
-  three fixes reasoned without a test (ARCHITECTURE "Waits"; findings
-  and checklist in WORKFLOW "Hygiene sweeps").
+  with `smprace_test` (five rounds, each failing before its fix;
+  findings and checklist in WORKFLOW "Hygiene sweeps").
+- Fixed without a failing test (invariants in ARCHITECTURE "Waits"):
+  NtReleaseMutant and mutant abandonment changed the owner outside the
+  dispatcher lock; the console's `settle` reset `input_ready` after
+  checking the queue in an earlier lock hold; and the out-of-order
+  IrqMutex release detector was added (debug kernels panic: `lockdep:
+  releasing X turns interrupts on while Y is still held`).
+- Checked and found sound: the scheduler's `prepare_wait`/`wait`/`wake`
+  protocol (preemption between them included), `on_cpu`, KArc's counts,
+  the heap's and frame allocator's single locks, keyed events,
+  semaphores (`update_signal`), APC queueing against the alertable
+  flag, termination requests against `wake_if_terminating`,
+  `add_thread` against `terminate`, the last-thread decision.
 
 **Next** (the first sweep's leftovers; each needs a test against
 Windows first):
@@ -246,8 +257,8 @@ parks at its next tick).
 (when a benchmark shows the shared queue costs); ranged (invlpg)
 shootdowns and PCIDs; boot scenarios on 4 CPUs.
 
-**Design**: ARCHITECTURE "Threads and scheduling", "Processors", "Not
-done yet".
+**Design**: ARCHITECTURE "Threads and scheduling", "Processors", "Known
+limits".
 
 ### H11. busybox httpd and wget over loopback
 
@@ -315,9 +326,8 @@ boot-test <name>`, see "Pending scenarios" below):
 **Done when**: each program's scenario passes; pending ones are moved
 into `cargo xtask test` when CI can afford them.
 
-**Design**: ARCHITECTURE "User mode and the NT personality", "Registry",
-"Processes started by programs"; SECURITY.md for OpenSSH and
-PostgreSQL.
+**Design**: ARCHITECTURE "NT personality", "Registry", "Processes started
+by programs"; SECURITY.md for OpenSSH and PostgreSQL.
 
 ### W3. FileZilla
 
@@ -395,6 +405,11 @@ patterns and read their state, so one test runs on Windows and on gala
 3. Combo box and tree-view items, GetParent of owned popups, the system
    menu in the title bar.
 4. The other screen tests rewritten on FlaUI.
+5. The rest of the limits in ARCHITECTURE "UI Automation" ("Limits",
+   "Plan: windows across processes"): UiaRaise*, real caching, the
+   LegacyIAccessible, RangeValue and Text patterns; HWND_BROADCAST,
+   SMTO_ERRORONEXIT, IsHungAppWindow, owned windows destroyed and
+   hidden with their owner, minimized windows moved to -32000,-32000.
 
 **Design**: ARCHITECTURE "UI Automation", "Plan: windows across
 processes"; WORKFLOW "FlaUI".
@@ -500,8 +515,12 @@ own session and shell.
 2. B3b: remote shasha: the compositor as a crate that also builds for
    the host, a versioned protocol, the server end (also in the server
    kernel, which has no compositor), a host client (winit).
-3. B4: a session manager, `wtsapi32`, `gala sessions/logoff/disconnect/
-   attach`.
+3. B4: a session manager, `wtsapi32` (only WTSGetActiveConsoleSessionId
+   exists), `gala sessions/logoff/disconnect/attach`; and B1's open ends:
+   DosDevices per session and logon, the SeCreateGlobalPrivilege check for
+   `Global\` file mappings outside session 0, DACLs on session directories
+   and on processes (a standard user's ProcessIdToSessionId of a SYSTEM
+   process succeeds).
 4. B5: sessions across a kernel handover (session, desktop and window
    state carried; the window registry is refused today), remote clients
    reconnecting after it.
@@ -538,7 +557,9 @@ the kernel.
 2. G1's rest: shasha's pointer on the hardware cursor,
    WM_DISPLAYCHANGE and refitting maximized windows on a resize (a test
    resizing the display through QEMU's monitor), several scanouts as
-   monitors.
+   monitors, device interrupts instead of spinning, the boot splash on
+   virtio-gpu (the screen is black from the driver's start until the
+   desktop draws).
 3. G2, software 3D for every program: `vulkan-1.dll` (Khronos loader),
    Mesa lavapipe (fallback SwiftShader), DXVK (d3d9/10/11, dxgi),
    vkd3d-proton (d3d12), Mesa llvmpipe `opengl32.dll`; PREBUILT,
@@ -758,13 +779,16 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
    symlinks, hard links, POSIX delete and rename.
 5. Seam 5: shared core objects when pipes, sockets or files are
    reworked.
+6. Also open (ARCHITECTURE "The lx module"): address randomization, a
+   vDSO, Linux in gala-um, the system-call numbers 462..=469; `lx_abi`
+   becomes a kernel dependency with the signal, pty and file calls.
 
 **Done when** (each milestone): every corpus program of the milestone
 runs as a boot scenario whose transcript equals its `expected.txt`.
 
 **Design**: ARCHITECTURE "Plan: a second personality (Linux)", "The
-seams", "The lx module", "The lx_abi crate", "The Linux personality,
-milestone 1"; WORKFLOW "Linux test programs".
+seams", "The Linux layer's milestones", "The lx module", "The lx_abi
+crate"; WORKFLOW "Linux test programs".
 
 ### PK. Installing software: `gala install` over winget manifests
 
@@ -830,8 +854,8 @@ from the command line first (CLI parity; the server profile too).
 type, runs it and uninstalls it, and is kept as a regression test with
 the ledger's per-installer gaps in the report.
 
-**Design**: ARCHITECTURE "Installing software", "Installing software:
-the winget resolver", "LZX"; WORKFLOW "Installing software".
+**Design**: ARCHITECTURE "Installing software", "The winget resolver",
+"LZX"; WORKFLOW "Installing software".
 
 ### R. Robustness and live update, kernel included
 
@@ -886,7 +910,8 @@ Next:
 2. The display and input as swappable devices; device events (NIC
    removed, resolution change).
 3. API-level faults in gala's DLLs (Application Verifier style).
-4. The read-write control channel (OBSERVABILITY §6).
+4. The read-write control channel (OBSERVABILITY "Planned facilities",
+   the live introspection channel).
 5. A frozen clock's effect on absolute timers (Windows re-evaluates them
    on a system time change).
 
@@ -900,9 +925,10 @@ floor in the superblock's sector. Next:
 1. Step 1: Secure Boot with OVMF test keys (ARCHITECTURE "Chain of
    trust" lists what it needs).
 2. Images from the system tree checked against the manifest.
-3. A release key separate from the test key; the TPM counter.
+3. A release key separate from the test key; the rollback floor kept in
+   a TPM NV counter, and raised only after the new release's self-check.
 
-WORKFLOW "Signed images (R8, chain of trust)".
+WORKFLOW "Signed images".
 
 #### R9. Live update, kernel included
 
@@ -939,10 +965,10 @@ handover refuse cleanly with the reason.
 3. Image pages as frames across a loader change (refused today; the
    layout digest catches a difference only after the point of no
    return, so a newer loader must keep the layout until then).
-4. Networking: IPv6, the neighbor cache (asked again by ARP today), HTTP
-   keep-alive with a real server (go_http or Nginx; Nginx's logs need
-   `persist`), a shorter window without network (stop it after the
-   image is prepared).
+4. Networking: IPv6 and raw sockets, the neighbor cache (asked again by
+   ARP today), HTTP keep-alive with a real server (go_http or Nginx;
+   Nginx's logs need `persist`), a shorter window without network (stop it
+   after the image is prepared).
 5. Free the first kernel's image and Limine's reclaimable memory.
 6. R8's rest (Secure Boot, a release key).
 7. The user-mode half: versioned system images behind an atomic
@@ -1020,7 +1046,12 @@ Each entry: what, why it matters, the structural fix, the owning item.
 - **Observability gaps** still open from the audit: program output on
   its own channel (split lines), reference holders of a leaked address
   space, a real user stack walk in crash reports, repeat boots and
-  um-test results in `target/report/history.jsonl` (OBSERVABILITY "Open gaps").
+  um-test results in `target/report/history.jsonl` (OBSERVABILITY "Open
+  gaps").
+- **java_http timed out once with a lost wake-up's signature** (JVM
+  threads spinning in NtYieldExecution, two waiting on semaphores with
+  count 0) after the NtReleaseSemaphore fix; whether it recurs on the
+  pinned QEMU is not recorded. Owner: P1; WORKFLOW "Known intermittent".
 
 ### Pending scenarios
 
@@ -1029,7 +1060,7 @@ xtask test` or CI.
 
 | Scenario | Why pending | Owner |
 |---|---|---|
-| `java_stress` | a stress reproducer: 5-15 min a boot under load (30 min limit); passes 15 of 15 on the pinned QEMU | P1 |
+| `java_stress` | a stress reproducer: 5-15 min a boot under load (30 min limit); passes 15 of 15 on the pinned QEMU; to decide: a regular scenario or dropped | P1 |
 | `elasticsearch` | 3 GiB and about 8 minutes under TCG | P1 |
 | `sqllocaldb`, `sqllocaldb_persist` | 3 GiB and a 50 MB MSI download (1 GiB disk for the second) | P1 |
 | `mingit` | not recorded (it passed when written; a PREBUILT download); a candidate for the suite | P1 |
@@ -1097,8 +1128,42 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   syscall boundary translated (the NT layer stays native). Windows'
   documented ARM64EC/CHPE design can guide the interface between
   emulated and native code. After the ARM64 port runs native programs.
+- **Smaller gaps with no item yet** (each stated as a limit in its
+  ARCHITECTURE section; cross-cutting ones in its "Known limits"):
+  - Scheduler: processor time accounting (thread times are 0,
+    GetSystemTimes reports all idle); thread priorities are not
+    scheduled on.
+  - Loader and threads: relocating an executable whose preferred base
+    is taken (`process::map_image`); LOAD_WITH_ALTERED_SEARCH_PATH's
+    dependency search; NtCreateThread applying FltSave beyond MxCsr and
+    the XSTATE area; SEH's nested exceptions and collided unwinds.
+  - Waits: wait-all satisfied only when all objects are signaled at its
+    re-check; a kernel address wait (WaitOnAddress) for kernel32's
+    lightweight locks; an atomic SignalObjectAndWait; the thread pool's
+    callback environments and freeing of closed objects.
+  - Pipes: WaitNamedPipe, TransactNamedPipe, PIPE_NOWAIT, pipe
+    security, asynchronous writes that pend.
+  - Access checks for processes, threads, pipes, devices and traversal;
+    labels on objects a low-integrity token creates; SetSecurityInfo's
+    inheritance propagation; auditing.
+  - Consoles: Ctrl+Break, CTRL_CLOSE_EVENT, GenerateConsoleCtrlEvent,
+    process groups, READCONSOLE_CONTROL wake-up keys, the scroll bar,
+    rewrap on resize; ConPTY rendering of cell-based console APIs into
+    VT, OSC 0 titles, mouse, bracketed paste, VT input.
+  - Resources: pool and handle quotas (R6), job limit messages,
+    charging copy-on-write section views, limits on kernel commits;
+    nested jobs, job time accounting and the other job limits.
+  - Files: directory notification filters for attributes and times.
+  - DLLs: msvcrt printing inf/nan as `inf`/`nan` instead of `1.#INF00`;
+    ncrypt's persistent named keys, ECDSA, key generation and export;
+    crypt32's persistent certificate stores (system stores open empty);
+    secur32's SPNEGO-wrapped Negotiate tokens, NTLM proved against
+    Windows.
+  - Accounts: the SAM key readable by programs, NetUserAdd,
+    KERB_S4U_LOGON, identification-level S4U tokens for untrusted
+    callers, the default profile's contents and NTUSER.DAT (D3).
 - **Tooling**: bindgen-generated layouts from mingw-w64 headers;
   verifying syscall numbers against traces of the pinned build (Windows
   11 24H2, 26100); trace diffing against Windows, the sampling profiler
-  and live introspection (OBSERVABILITY 3, 4, 6); fuzzing
-  (OBSERVABILITY 7).
+  and live introspection, fuzzing (OBSERVABILITY "Planned
+  facilities").

@@ -66,6 +66,24 @@ kernel; only relative.
 
 Thread creation and cross-CPU wakes are the outliers to look at first.
 
+## T1: boot-test speed
+
+Before and after item T1 (BIOS boots, shared VMs, parallel ISO
+creation; WORKFLOW "Test speed and environments"): software emulation
+on a 4-CPU container, 40 scenarios (date not recorded).
+
+| | before | after |
+|---|---|---|
+| VMs | 40 | 13 |
+| firmware + bootloader (summed over VMs) | 193 s (OVMF) | 24 s (SeaBIOS) |
+| kernel + tests (summed) | 38 s | 18 s |
+| ISO creation | 5.7 s (sequential) | 0.5 s (parallel) |
+| boot-test wall time | 66 s | 14 s |
+
+Single-threaded TCG costs about 1.8x: java_hello ran 84 s instead of
+47 s in the kernel with `-accel tcg,thread=single` (about 35 s
+locally).
+
 ## H8: building Lua (2026-10-31)
 
 The `lua` scenario: busybox sh unpacks TinyCC and Lua, tcc builds its

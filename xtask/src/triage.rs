@@ -1,5 +1,5 @@
-//! Triage of a boot's log (docs/OBSERVABILITY.md, "Gaps found
-//! 2026-11-03"): what an agent reads first when a scenario failed. A
+//! Triage of a boot's log (docs/OBSERVABILITY.md, "Failed logs: triage
+//! and history"): what an agent reads first when a scenario failed. A
 //! failed log ends with this block (`target/failed/<scenario>.log`), and
 //! `cargo xtask triage <log> [events.jsonl]` prints it for any log;
 //! `cargo xtask events <events.jsonl>` summarizes an event stream.

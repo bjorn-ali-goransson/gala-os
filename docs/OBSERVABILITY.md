@@ -414,6 +414,28 @@ What failures still leave unexplained, ranked by the time they cost.
   waits, faults, I/O and network as spans in per-CPU rings; propagation
   through ntdll/kernel32, process creation, pipes, ALPC/RPC, IOCP; an
   ETW bridge; an in-guest OTLP exporter controlled from the `gala` CLI.
+  Design rules:
+  - The kernel writes compact binary records to per-CPU ring buffers:
+    fixed size, no allocation, never blocking, with a drop counter. An
+    exporter turns them into OTLP outside the hot path (xtask over
+    debugcon/virtio-serial; in a running system a user-mode service
+    sending OTLP/HTTP). Telemetry must not perturb record/replay (R7).
+  - Context propagation is the core: each thread carries a trace
+    context (W3C traceparent semantics) in a gala-private TEB slot that
+    the kernel reads at system-call entry; kernel work becomes child
+    spans; the context follows work across process creation, pipes,
+    ALPC/RPC, I/O completion ports and work queues.
+  - Windows programs speak ETW: the ETW-to-OTel bridge (EventRegister/
+    EventWrite, TraceLogging in advapi32) turns what software already
+    emits into logs and spans; later the same for the Linux
+    personality.
+  - What exists maps onto it: events to span events and logs, `stats:`
+    to metrics, crash reports and dumps to logs carrying the trace
+    context they happened in; `cargo xtask triage` reads spans.
+  - One clock (R1): timestamps from the kernel's monotonic clock, mapped
+    to wall time once per export; ring state survives a kernel handover.
+  - Sources: the OpenTelemetry specification and opentelemetry-proto
+    (Apache-2.0), W3C Trace Context.
 - **Trace diffing against Windows**: `cargo xtask diff-trace gala.jsonl
   windows.jsonl` aligns two system-call traces of the same program and
   shows the first divergence (service, arguments, status). The Windows

@@ -27,7 +27,7 @@
 //!
 //! Separate from `crate::yaml` (which `crate::manifest` and the install
 //! path use) so that the install path is unchanged until it switches to
-//! `crate::winget` (ARCHITECTURE "Installing software: the winget
+//! `crate::winget` (ARCHITECTURE "Installing software", "The winget
 //! resolver").
 
 use alloc::string::String;
