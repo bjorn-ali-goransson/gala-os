@@ -42,7 +42,12 @@ explicitly in its commit.
   a failure replays from its seed), then R7's record/replay and clock
   control (first part done 2026-11-02, see R7), then fixing the known flaky scenarios (java_http,
   java_hello, postgres, smpsched_test under load), before the rest of
-  R6.
+  R6. Done 2026-11-03 (test harness): net scenarios in repeats and in
+  parallel (repeats of the sshd scenarios forwarded to the wrong guest
+  port), smpsched_test counts context switches instead of timing,
+  handover sleeps bounded by the measured pause (GalaHandoverPause),
+  handover_k32_twice's verification bounded, time limits stretched by
+  host load (WORKFLOW "Known intermittent").
   **sshd_shell's Ctrl+C fixed (2026-11-03)**: not a regression of the
   clock calibration (the parent failed 1 of 10 solo boots the same way).
   A lost wake-up in `nt::wait`: setting a notification event woke its

@@ -527,6 +527,9 @@ fn prepare_and_go(
         prepared.area.0,
         cpus.len() - 1
     );
+    if let Some(ms) = carry::stopped_ms() {
+        crate::info!("handover: the programs stopped {ms} ms before this line");
+    }
     let others = &cpus[1..];
     drop(map);
     drop(bytes);
@@ -623,6 +626,10 @@ impl State<'_> {
         )?;
         if let Some(p) = self.programs {
             p.write(&mut w)?;
+            if let Some(ticks) = carry::stopped_ticks() {
+                w.section(tag::STOPPED, version::writes(tag::STOPPED), 0)?;
+                w.u64(ticks)?;
+            }
         }
         if version::known(tag::WRITER) {
             w.section(tag::WRITER, version::writes(tag::WRITER), 0)?;

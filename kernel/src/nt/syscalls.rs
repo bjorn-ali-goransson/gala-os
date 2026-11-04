@@ -154,6 +154,9 @@ pub const GALA_DESKTOP_ACTION: u32 = 0x7f58;
 /// gala's test-only request for a kernel handover (ROADMAP R9 (b); allowed
 /// with `handover=` on the command line), also in user/ntrt.
 pub const GALA_REQUEST_HANDOVER: u32 = 0x7f5a;
+/// gala's test-only report of the last kernel handover's pause (how long
+/// the programs were stopped), also in user/ntrt.
+pub const GALA_HANDOVER_PAUSE: u32 = 0x7f5b;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -362,6 +365,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_RANDOM, "GalaRandom", 2, gala_random),
     (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
     (GALA_REQUEST_HANDOVER, "GalaRequestHandover", 0, gala_request_handover),
+    (GALA_HANDOVER_PAUSE, "GalaHandoverPause", 1, gala_handover_pause),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -3429,6 +3433,41 @@ fn gala_request_handover(_call: &mut Call<'_>) -> NtStatus {
         }
         None => NtStatus::ACCESS_DENIED,
     }
+}
+
+/// The last kernel handover that carried programs: the generation it
+/// made and how long its programs were stopped (ms of the tick count,
+/// from the record to their threads going on). Set by
+/// `handover::carry::restore`.
+static HANDOVER_PAUSE: [core::sync::atomic::AtomicU64; 2] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// Notes the handover that brought the programs here (see
+/// GalaHandoverPause).
+pub fn set_handover_pause(generation: u64, ms: u64) {
+    use core::sync::atomic::Ordering;
+    HANDOVER_PAUSE[1].store(ms, Ordering::Relaxed);
+    HANDOVER_PAUSE[0].store(generation, Ordering::Release);
+}
+
+/// GalaHandoverPause(*Info): Info receives { ULONG64 Generation; ULONG64
+/// PauseMs }: the kernel generation (handovers so far) and how long the
+/// last handover stopped the programs, from the record to their threads
+/// going on, in ms of the tick count (0, 0 before any). A wait that spans
+/// a handover ends up to that much late (its deadline is kept: it ends
+/// at the deadline or when the threads go on, whichever is later); tests
+/// bound their sleeps by it instead of guessing the handover's time.
+fn gala_handover_pause(call: &mut Call<'_>) -> NtStatus {
+    use core::sync::atomic::Ordering;
+    let generation = HANDOVER_PAUSE[0].load(Ordering::Acquire);
+    let ms = HANDOVER_PAUSE[1].load(Ordering::Relaxed);
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&generation.to_le_bytes());
+    out[8..].copy_from_slice(&ms.to_le_bytes());
+    if call.process.write(arg!(call, 0), &out).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    NtStatus::SUCCESS
 }
 
 fn gala_random(call: &mut Call<'_>) -> NtStatus {

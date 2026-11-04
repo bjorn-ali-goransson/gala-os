@@ -6,10 +6,12 @@
 //! Before asking for the handover (gala's test-only GalaRequestHandover)
 //! the program sets up:
 //! - two busy threads computing a checksum in user mode (integer and SSE
-//!   floating-point state in registers, no system calls) until told to
-//!   stop; afterwards the main thread computes the same checksum over the
-//!   same number of rounds and compares (their full user context, with
-//!   the vector registers, came across);
+//!   floating-point state in registers, no system calls) through the
+//!   handover and for a bounded number of rounds after it (then they wait
+//!   for the stop, so that the check below stays short on a loaded host);
+//!   afterwards the main thread computes the same checksum over the same
+//!   number of rounds and compares (their full user context, with the
+//!   vector registers, came across);
 //! - a thread blocked in ReadFile on an anonymous pipe (it read a first
 //!   message before; the second is written after the handover), and a
 //!   second pipe holding bytes nobody has read yet;
@@ -147,10 +149,23 @@ const TIMER_MS: i64 = 2500;
 /// sleep made again with its relative timeout would end later by the
 /// handover's time (a few hundred ms).
 const SLACK_MS: u64 = 150;
+/// How late a sleep may end when a handover was refused (the next kernel
+/// cannot read this one's record): the programs were stopped for it, and
+/// no kernel measured how long.
+const REFUSED_SLACK_MS: u64 = 3000;
 const BUSY: usize = 2;
 const PATTERN_BYTES: usize = 3 * 4096 + 100;
 
 static STOP: AtomicU32 = AtomicU32::new(0);
+/// Set once the (first) handover is done (the writer thread sees the
+/// kernel's generation change): the busy threads then do
+/// AFTER_ROUNDS more rounds and wait for STOP without computing. The main
+/// thread redoes all their rounds alone to check the result; unbounded,
+/// that took longer than the work itself (two threads' worth on one
+/// processor) and timed the scenario out on a loaded host.
+static HANDED_OVER: AtomicU32 = AtomicU32::new(0);
+/// Rounds a busy thread does after it sees HANDED_OVER.
+const AFTER_ROUNDS: u64 = 200;
 static ROUNDS: [AtomicU64; BUSY] = [const { AtomicU64::new(0) }; BUSY];
 static SUM: [AtomicU64; BUSY] = [const { AtomicU64::new(0) }; BUSY];
 static FSUM: [AtomicU64; BUSY] = [const { AtomicU64::new(0) }; BUSY];
@@ -275,6 +290,30 @@ fn request_handover() -> u32 {
     status
 }
 
+/// GalaHandoverPause (gala's test-only service 0x7f5b): (status, the
+/// kernel's generation, how long the last handover stopped the programs,
+/// ms of the tick count).
+fn handover_pause() -> (u32, u64, u64) {
+    let mut info = [0u64; 2];
+    let status: u32;
+    // SAFETY: a system call writing 16 bytes to `info`; the registers it
+    // may change are declared.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inout("eax") 0x7f5bu32 => status,
+            inout("r10") info.as_mut_ptr() => _,
+            lateout("rcx") _,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r11") _,
+            options(nostack),
+        )
+    };
+    (status, info[0], info[1])
+}
+
 /// One round of the busy threads' work: 1024 steps of xorshift with a
 /// floating-point accumulation (SSE) of each value.
 #[inline(never)]
@@ -298,7 +337,18 @@ extern "system" fn busy_thread(param: *mut c_void) -> u32 {
     let (mut x, mut f) = (seed(i), 1.0f64);
     let mut n = 0u64;
     STARTED.fetch_add(1, Ordering::SeqCst);
+    let mut last = u64::MAX;
     while STOP.load(Ordering::Relaxed) == 0 {
+        if last == u64::MAX && HANDED_OVER.load(Ordering::Relaxed) != 0 {
+            last = n + AFTER_ROUNDS;
+        }
+        if n >= last {
+            // Enough work after the handover: wait (the state stays in
+            // this thread) instead of making the check longer.
+            // SAFETY: a plain sleep.
+            unsafe { Sleep(1) };
+            continue;
+        }
         (x, f) = round(x, f);
         n += 1;
         ROUNDS[i].store(n, Ordering::Relaxed);
@@ -334,9 +384,13 @@ extern "system" fn reader_thread(_: *mut c_void) -> u32 {
 
 /// Writes numbered lines to the console until STOP, a few ms apart.
 extern "system" fn writer_thread(_: *mut c_void) -> u32 {
+    let generation = handover_pause().1;
     STARTED.fetch_add(1, Ordering::SeqCst);
     let mut n = 0;
     while STOP.load(Ordering::SeqCst) == 0 {
+        if HANDED_OVER.load(Ordering::SeqCst) == 0 && handover_pause().1 != generation {
+            HANDED_OVER.store(1, Ordering::SeqCst);
+        }
         if say_n(b"line", u64::from(n)) == 0 {
             return 0x501;
         }
@@ -527,6 +581,7 @@ fn run() -> Result<&'static str, u32> {
         let lines_before = LINES.load(Ordering::SeqCst);
         out(b"handover_k32_test: ready, asking for a handover\r\n");
         let before = GetTickCount64();
+        let generation = handover_pause().1;
         match request_handover() {
             0 => {}
             STATUS_INVALID_SYSTEM_SERVICE => {
@@ -543,10 +598,20 @@ fn run() -> Result<&'static str, u32> {
         let slept = GetTickCount64() - before;
         say_n(b"slept", slept);
         check(slept >= SLEEP_MS, 13)?;
-        // The sleep spans the handover: the thread is frozen while the
-        // monotonic clock goes on (1.3 s on a host at load 29): never
-        // short, at most three seconds late.
-        check(slept < SLEEP_MS + 3000 + SLACK_MS, 14)?;
+        // The sleep spans the handover: its deadline is kept, but the
+        // thread cannot run while the programs are stopped (from just
+        // before the record until the next kernel has rebuilt them; 4.3 s
+        // on a host at load 29), so it ends at its deadline or when they
+        // go on, whichever is later: never short, late by at most the
+        // pause the kernel reports.
+        let (st, generation_after, pause) = handover_pause();
+        say_n(b"handover pause", pause);
+        check(st == 0 && generation_after <= generation + 1, 65)?;
+        HANDED_OVER.store(1, Ordering::SeqCst);
+        // No new generation: the handover was refused
+        // (handover_downgrade_refused) and the program went on here.
+        let allowed = if generation_after == generation { REFUSED_SLACK_MS } else { pause };
+        check(slept < SLEEP_MS + allowed + SLACK_MS, 14)?;
 
         // Work went on across (the suspended one once resumed).
         check(ROUNDS[0].load(Ordering::SeqCst) > rounds_before[0], 15)?;
@@ -558,6 +623,9 @@ fn run() -> Result<&'static str, u32> {
         }
         check(LINES.load(Ordering::SeqCst) > lines_before, 17)?;
         STOP.store(1, Ordering::SeqCst);
+        // What the check below costs (its rounds and time), for a timeout.
+        let check_start = GetTickCount64();
+        let mut checked = 0;
         for (i, &h) in busy.iter().enumerate() {
             check(WaitForSingleObject(h, 30_000) == 0, 18)?;
             check(exit_code(h) == 0x11, 19)?;
@@ -568,8 +636,11 @@ fn run() -> Result<&'static str, u32> {
             }
             check(x == SUM[i].load(Ordering::SeqCst), 20)?;
             check(f.to_bits() == FSUM[i].load(Ordering::SeqCst), 21)?;
+            checked += ROUNDS[i].load(Ordering::SeqCst);
             CloseHandle(h);
         }
+        say_n(b"busy rounds checked:", checked);
+        say_n(b"checking them took ms:", GetTickCount64() - check_start);
         check(WaitForSingleObject(writer, 10_000) == 0 && exit_code(writer) == 0x55, 22)?;
         say_n(b"writer wrote lines:", u64::from(LINES.load(Ordering::SeqCst)));
 
@@ -624,15 +695,18 @@ fn run() -> Result<&'static str, u32> {
             // Again, with only this thread left and the pipes, events and
             // DLL views as they are now: on into a third kernel.
             check(WriteFile(w2, b"again".as_ptr(), 5, &mut n, core::ptr::null_mut()) != 0, 56)?;
+            let generation = handover_pause().1;
             check(request_handover() == 0, 57)?;
             let before = GetTickCount64();
             Sleep(1000);
             let slept = GetTickCount64() - before;
             say_n(b"slept again", slept);
-            // This sleep spans the handover itself, during which the thread
-            // is frozen and the clock goes on (under a loaded host the
-            // handover alone took 232 ms): never short, at most a second late.
-            check((1000..2000 + SLACK_MS).contains(&slept), 58)?;
+            // This sleep spans the handover itself: as the first one, late
+            // by at most the pause.
+            let (st, generation_after, pause) = handover_pause();
+            say_n(b"handover pause", pause);
+            check(st == 0 && generation_after == generation + 1, 66)?;
+            check((1000..1000 + pause + SLACK_MS).contains(&slept), 58)?;
             check(ReadFile(r2, buf.as_mut_ptr(), 32, &mut n, core::ptr::null_mut()) != 0, 59)?;
             check(&buf[..n as usize] == b"again", 60)?;
             check(GetEnvironmentVariableW(name.as_ptr(), got.as_mut_ptr(), 8) == 3, 61)?;

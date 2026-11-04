@@ -4270,7 +4270,7 @@ const SCENARIOS: &[Scenario] = &[
             // R8: the next build is in the signed manifest.
             "manifest: the next kernel is /boot/kernel-next of release 1",
             "handover: gala hands over to gala-next (record framing 1-1, image layout 1, \
-             extended state 0xe7, 35 section kinds; with programs)",
+             extended state 0xe7, 36 section kinds; with programs)",
             "handover: carrying 1 process(es), 10 thread(s)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala-next; the record was written by an older kernel \
@@ -4321,14 +4321,14 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "handover_k32_test: ready",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0xe7, 34 section kinds; with programs)",
+             extended state 0xe7, 35 section kinds; with programs)",
             "handover: refused: the next kernel (gala) reads PROCESSES up to version 3; this \
              kernel writes version 4, which needs a reader of version 4",
             "handover_k32_test: slept",
             "handover_k32_test: ok",
             "exited with status 0x00000000",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0xe7, 34 section kinds)",
+             extended state 0xe7, 35 section kinds)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala; this build does not read the writer's name",
             "handover: skipped section 33 (unknown to this kernel)",
@@ -5605,14 +5605,18 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     let t0 = Instant::now();
     build_kernel(release)?;
     let built = t0.elapsed();
+    // With `XTASK_REPEAT`, a scenario's exact name selects it alone (it
+    // repeats one scenario: handover_upgrade's name is part of
+    // handover_upgrade_uefi's); otherwise the filter is a substring.
+    let exact = env::var_os("XTASK_REPEAT").is_some()
+        && filter.is_some_and(|f| SCENARIOS.iter().any(|s| s.name == f.as_str()));
     let selected: Vec<&Scenario> = SCENARIOS
         .iter()
         .filter(|s| match filter {
             // Pending scenarios run only when named exactly.
             None => !PENDING.contains(&s.name),
-            Some(f) => {
-                s.name == f.as_str() || (s.name.contains(f.as_str()) && !PENDING.contains(&s.name))
-            }
+            Some(f) if exact => s.name == f.as_str(),
+            Some(f) => s.name.contains(f.as_str()) && !PENDING.contains(&s.name),
         })
         .collect();
     if selected.is_empty() {

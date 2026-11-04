@@ -509,12 +509,17 @@ charged). Look
   DLLs; one that does not points at the kernel's machine code (paging,
   switches, interrupts) or at the emulator.
 - **handover_k32_twice under heavy load (2026-11-03)**: once (load
-  about 24) the program resumed after the first handover ("slept 4001")
-  and then never finished its second one: the state dump showed its
-  other threads in their waits and the main thread with no system call.
-  Passed alone twice after. Open; look at the second handover's request
-  path (GalaRequestHandover while threads are already carried) if it
-  recurs.
+  about 24) it timed out after "slept 4001". Not a hang and not the
+  second handover (its "writer wrote lines:" never came): the state
+  dump's main thread was in user mode at 0x140001550, inside `round`
+  (llvm-objdump of user/bin/handover_k32_test.exe), redoing alone, on
+  one processor, every round the two busy threads had computed in
+  parallel through the whole 4 s sleep: longer than the work itself, at
+  a third of the guest's tick rate. Fixed: the busy threads do 200
+  rounds after the handover (the writer thread sees the kernel's
+  generation change, GalaHandoverPause) and then wait for the stop; the
+  test prints the rounds it checked and how long that took; time limits
+  also stretch with host load now.
 - **Timing checks in test programs** measure the host as much as the
   guest: under TCG a loaded host stops the VM's processors for
   milliseconds at a time, the guest's clocks go on, and "this took under
@@ -534,12 +539,14 @@ charged). Look
   exit is seen (Windows calls every attached process's handler on its
   own thread too, with no order promised) is open.
 - **A sleep that spans a handover (2026-11-03)**: handover_upgrade failed
-  twice in full suites (load about 6) with "slept again 1248", check 58:
-  the second Sleep(1000) spans the handover, the thread is frozen and the
-  monotonic clock goes on (that handover alone moved it 232 ms). Timing
-  checks across a handover bound only the short side tightly (check 14
-  of the first handover too: "slept 4986" with a 1.3 s handover at load
-  29).
+  with "slept again 1248" (check 58), handover_k32 with "slept 4986"
+  (check 14), handover_idle_uefi with "slept 7634 ms" (check 0x16), each
+  late by much more than the clock jump the log reports: the programs
+  stay stopped from just before the record until the next kernel has
+  rebuilt them (4.3 s at load 29), and a sleep whose deadline falls in
+  that time ends when they go on. Bound such sleeps by the pause the
+  kernel measured from the stop (GalaHandoverPause; ARCHITECTURE "The
+  pause"), never by a guessed constant.
 - **Java hang with a state dump (2026-11-03)**: the first timeout with a
   state dump (correct clock): java_http hung with three JVM threads in
   NtYieldExecution and two waiting on semaphores with count 0
@@ -551,7 +558,9 @@ charged). Look
   CPUs (the load brings races out), keeps each failed boot's log
   (`target/debug/test-<name>.r<i>.serial.log`, with its triage in
   `target/failed/<name>.r<i>.log`) and ends with "n of 12
-  boots failed". Code that derives a scenario from an image's name must
+  boots failed". With `XTASK_REPEAT` a scenario's exact name selects it
+  alone (`handover_upgrade`, not also `handover_upgrade_uefi`). Code
+  that derives a scenario from an image's name must
   go through `iso_scenario`, which knows the `.r<i>` of a repeat's copy:
   without it, repeats of sshd_shell/sshd_server/sshd_sftp forwarded to
   the guest's port 7 and every connection was reset (2026-11-03). A race between processors is best caught by a test
