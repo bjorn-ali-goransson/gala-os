@@ -142,6 +142,17 @@ explicitly in its commit.
   NtGetContextThread gave up after a second waiting for a suspended
   thread to stop (now 30 s, as Windows waits), and the test now lets
   its waiter reach the wait first. `XTASK_REPEAT=n` repeats a boot test.
+  **Resolved (2026-11-04): the cause was QEMU, not gala.** QEMU 8.1.0 to
+  8.2.5's TCG (`tb_record` registering a block that spans two pages under
+  its first page only) kept running the old bytes of code rewritten on a
+  block's second page; HotSpot's patched `mov r64, imm64` object
+  addresses that straddle a page end kept their pre-GC values. Fixed in
+  QEMU 8.2.6. gala now runs on a pinned QEMU (11.1.3, `cargo xtask qemu`,
+  WORKFLOW "QEMU"); `straddle_test` passes on it and fails on Ubuntu's
+  8.2.2 (check 2 round 1 got the pre-rewrite value). java_stress: 15 of
+  15 boots with the bug avoided, 2 of 6 failed without. A kernel
+  workaround was written and not adopted (the owner: fix the cause).
+  The history below is kept for the method.
   **Narrowed further (2026-11-03, second session), still open.** A
   reproducer: `java_stress` (pending; WORKFLOW "Reproducing the Java
   corruption") fails about one boot in three (5 of 19 at first), and
