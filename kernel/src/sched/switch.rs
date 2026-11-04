@@ -10,6 +10,8 @@ pub(super) struct Target {
     /// PML4 to load: the thread's user space, or the kernel's.
     pub root: u64,
     pub user_gs_base: u64,
+    /// Its personality (where its system calls are dispatched).
+    pub personality: crate::personality::Personality,
 }
 
 /// Switches from the context at `from` to `to`.
@@ -27,6 +29,7 @@ pub(super) fn switch(from: *const Context, to: Target) {
         percpu::set_kernel_stack(top);
     }
     percpu::set_user_gs_base(to.user_gs_base);
+    percpu::set_personality(to.personality);
     // SAFETY: see above.
     unsafe {
         paging::activate(to.root);

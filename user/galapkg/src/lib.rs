@@ -16,6 +16,9 @@
 //! - [`cfb`], [`msi`], [`cab`]: reading Windows Installer packages
 //!   (compound files, the MSI database, embedded cabinets), the ground
 //!   for PK stage 5.
+//! - [`msix`]: MSIX/AppX packages and bundles (with [`appxmanifest`],
+//!   [`blockmap`] and the small XML reader [`xml`]): identity and
+//!   names, block map checks; nothing installed yet (PK stage 4).
 //!
 //! `no_std` with `alloc`: `gala.exe` is freestanding (the process heap as
 //! the global allocator, `gala_heap`).
@@ -26,14 +29,20 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod appxmanifest;
+pub mod blockmap;
 pub mod cab;
 pub mod cfb;
 pub mod install;
+pub mod lzx;
 pub mod manifest;
 pub mod msi;
+pub mod msix;
 pub mod shim;
 pub mod source;
 pub mod version;
+pub mod winget;
+pub mod xml;
 pub mod yaml;
 pub mod zip;
 

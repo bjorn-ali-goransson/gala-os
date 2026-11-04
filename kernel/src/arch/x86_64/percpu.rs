@@ -24,11 +24,21 @@ pub struct PerCpu {
     index: u64,
     /// This CPU's TSS.
     tss: *mut Tss,
+    /// The personality of the thread running here (`Personality::index`),
+    /// whose dispatcher its system calls go to (`syscall::dispatch`).
+    personality: u64,
 }
 
 impl PerCpu {
     pub const fn new() -> Self {
-        PerCpu { self_ptr: 0, kernel_rsp: 0, user_rsp: 0, index: 0, tss: core::ptr::null_mut() }
+        PerCpu {
+            self_ptr: 0,
+            kernel_rsp: 0,
+            user_rsp: 0,
+            index: 0,
+            tss: core::ptr::null_mut(),
+            personality: 0,
+        }
     }
 }
 
@@ -41,6 +51,7 @@ impl Default for PerCpu {
 pub const KERNEL_RSP_OFFSET: usize = offset_of!(PerCpu, kernel_rsp);
 pub const USER_RSP_OFFSET: usize = offset_of!(PerCpu, user_rsp);
 const INDEX_OFFSET: usize = offset_of!(PerCpu, index);
+const PERSONALITY_OFFSET: usize = offset_of!(PerCpu, personality);
 
 /// The boot CPU's block; other CPUs' are allocated by `smp`. Each block is
 /// written only by its own CPU, with interrupts disabled.
@@ -106,6 +117,34 @@ pub fn set_kernel_stack(top: u64) {
         (*block).kernel_rsp = top;
         gdt::set_rsp0((*block).tss, top);
     }
+}
+
+/// Sets the personality of the thread this CPU runs (its system calls'
+/// dispatcher).
+pub fn set_personality(personality: crate::personality::Personality) {
+    let block = current();
+    // SAFETY: only called with interrupts disabled during a context switch;
+    // the block is this CPU's and only this CPU reads the field.
+    unsafe { (*block).personality = personality.index() as u64 };
+}
+
+/// The personality of the thread this CPU runs (NT if the field holds a
+/// number no personality has, which `set_personality` never writes).
+pub fn personality() -> crate::personality::Personality {
+    let raw: u64;
+    // SAFETY: as in `cpu_index`: a single GS-relative load, so a migration
+    // cannot tear it (system calls run with interrupts on): whichever CPU
+    // the load runs on is running the calling thread, whose personality
+    // the switch to it stored there.
+    unsafe {
+        core::arch::asm!(
+            "mov {}, gs:[{off}]",
+            out(reg) raw,
+            off = const PERSONALITY_OFFSET,
+            options(nostack, readonly, preserves_flags)
+        )
+    };
+    crate::personality::Personality::from_index(raw as usize).unwrap_or_default()
 }
 
 pub fn kernel_stack() -> u64 {

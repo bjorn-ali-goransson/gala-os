@@ -13,6 +13,16 @@
 // Every export is a C-ABI function called by foreign code with the raw
 // pointers its documentation describes; Rust callers do not exist.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
+// Lints found when msvcrt joined CI's clippy line (2026-11-03); kept as
+// written: `&mut *(&raw mut STATIC)` is the deliberate way to borrow a
+// `static mut` without the static_mut_refs lint, and the C string, enum
+// and fd-loop forms match the C runtime's layouts.
+#![allow(
+    clippy::deref_addrof,
+    clippy::manual_c_str_literals,
+    clippy::large_enum_variant,
+    clippy::needless_range_loop
+)]
 
 mod float;
 mod heap;

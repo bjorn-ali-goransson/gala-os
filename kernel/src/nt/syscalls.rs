@@ -599,7 +599,11 @@ fn dispatch(frame: &mut SyscallFrame) {
     let status = match service {
         Some((.., handler)) => handler(&mut call),
         None => {
-            warn!("{}: unimplemented system service {number:#x}", call.process.name);
+            warn!(
+                "{}: unimplemented system service {number:#x} (dispatcher {DISPATCHER}, \
+                 personality {})",
+                call.process.name, call.process.personality
+            );
             super::ledger::record("?", "unknown service", u64::from(number));
             NtStatus::INVALID_SYSTEM_SERVICE
         }
@@ -755,8 +759,12 @@ impl fmt::Display for TraceLine<'_> {
     }
 }
 
+/// This dispatcher's name in logs ("unknown system call", the platform's
+/// registration line).
+pub const DISPATCHER: &str = "nt::syscalls";
+
 pub fn init() {
-    platform::set_syscall_handler(dispatch);
+    platform::set_syscall_handler(platform::Personality::Nt, DISPATCHER, dispatch);
 }
 
 /// NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock,

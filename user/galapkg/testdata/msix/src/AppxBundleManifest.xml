@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A test bundle manifest (written by hand from Microsoft's bundle
+     manifest schema reference). {PACKAGES} is replaced by
+     make_fixtures.py with one Package element per inner package, its
+     Offset and Size measured in the bundle being written. -->
+<Bundle xmlns="http://schemas.microsoft.com/appx/2013/bundle" SchemaVersion="5.0">
+  <Identity Name="Gala.TestApp" Publisher="CN=Gala Test Publisher, O=Gala, C=US" Version="1.2.3.0" />
+  <Packages>
+{PACKAGES}
+  </Packages>
+</Bundle>

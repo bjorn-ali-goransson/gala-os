@@ -1,0 +1,45 @@
+mmap(3 pages) succeeded = yes
+page aligned = yes
+zero filled = yes
+rw page: rw
+mprotect(page 2, PROT_READ) = 0
+page 1: rw
+page 2: r-
+mprotect(page 3, PROT_NONE) = 0
+page 3: --
+mprotect(page 3, rw) = 0
+page 3 kept its data = 2
+mprotect(unaligned) = -22
+mprotect(bad prot) = -22
+munmap(page 2) = 0
+page 2 after munmap: --
+page 1 after munmap of 2: rw
+munmap(page 2) again = 0
+munmap(unaligned) = -22
+munmap(length 0) = -22
+munmap(unaligned length) = 0
+page 3 after munmap(len 100): --
+hint used = yes
+MAP_FIXED at the hint's second page = yes
+first page kept = 7
+second page replaced (zero) = 0
+replaced page: r-
+MAP_FIXED_NOREPLACE over it = -17
+MAP_FIXED_NOREPLACE next to it = yes
+munmap(the whole range, 3 pages) = 0
+hint after munmap: --
+unaligned hint rounded down = yes
+length 100, last byte of its page: rw
+munmap(length 100) = 0
+mmap(length 0) = -22
+mmap(MAP_FIXED, unaligned) = -22
+mmap(neither shared nor private) = -22
+mmap(no MAP_ANONYMOUS, fd -1) = -9
+mmap(anonymous, offset 1) = -22
+mmap(huge length) = -12
+mmap(MAP_FIXED, kernel address) = -12
+MAP_SHARED|MAP_ANONYMOUS succeeded = yes
+shared page: rw
+munmap(shared) = 0
+mmap_test: ok
+-- exit status 0

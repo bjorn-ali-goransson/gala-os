@@ -1,0 +1,25 @@
+initial break page aligned = yes
+brk(0) again, relative = 0
+the initial break is not mapped = yes
+brk(+3 pages), relative = 12288
+new pages zero = yes
+new pages writable = yes
+page after the break mapped = no
+brk(+3 pages + 100), relative = 12388
+the partial page is mapped = yes
+the rest of that page is mapped = yes
+brk(shrink to +1 page + 1), relative = 4097
+kept page still holds its data = yes
+page 3 unmapped = yes
+brk(+3 pages again), relative = 12288
+page 3 zero again = 0
+byte 5000 kept = 42
+brk(below the initial break), relative = 12288
+brk(initial), relative = 0
+first page unmapped = yes
+brk(top of user space), relative = 0
+brk(kernel address), relative = 0
+brk(+256 MiB), relative = 268435456
+brk(initial) again, relative = 0
+brk_test: ok
+-- exit status 0

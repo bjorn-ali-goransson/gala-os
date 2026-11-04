@@ -14,7 +14,6 @@ gala_stubs::unimplemented_exports!("ncrypt.dll":
     NCryptEnumStorageProviders
     NCryptFreeBuffer
     NCryptGetProtectionDescriptorInfo
-    NCryptImportKey
     NCryptIsAlgSupported
     NCryptIsKeyHandle
     NCryptKeyDerivation
@@ -23,7 +22,6 @@ gala_stubs::unimplemented_exports!("ncrypt.dll":
     NCryptQueryProtectionDescriptorName
     NCryptRegisterProtectionDescriptorName
     NCryptSecretAgreement
-    NCryptSignHash
     NCryptStreamClose
     NCryptStreamOpenToProtect
     NCryptStreamOpenToUnprotect

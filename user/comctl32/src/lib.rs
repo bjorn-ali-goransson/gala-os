@@ -12,6 +12,7 @@
 extern crate alloc;
 
 mod common;
+mod drag;
 mod header;
 mod imagelist;
 mod listview;

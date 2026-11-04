@@ -24,7 +24,7 @@ unsafe extern "system" {
 const LOCALE_USER_DEFAULT: u32 = 0x400;
 const NORM_IGNORECASE: u32 = 1;
 
-fn unsupported(what: &[u8], detail: u64) {
+pub(crate) fn unsupported(what: &[u8], detail: u64) {
     // SAFETY: a valid buffer; 2 is GalaRecordMissing's "unsupported".
     unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, detail) };
 }
@@ -178,4 +178,13 @@ pub extern "system" fn SHDeleteKeyW(key: usize, sub: *const u16) -> i32 {
     let delete_tree: extern "system" fn(usize, *const u16) -> i32 =
         unsafe { core::mem::transmute(f) };
     delete_tree(key, sub)
+}
+
+/// SHAutoComplete: gala's edit controls have no autocompletion yet, so
+/// it is not attached: E_NOTIMPL (a documented failure; the edit control
+/// works without it), recorded.
+#[unsafe(no_mangle)]
+pub extern "system" fn SHAutoComplete(_edit: usize, flags: u32) -> i32 {
+    unsupported(b"shlwapi.dll!SHAutoComplete", flags.into());
+    0x8000_4001u32 as i32
 }

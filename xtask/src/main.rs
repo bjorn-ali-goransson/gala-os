@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 mod alloc_audit;
 mod clockcheck;
+mod lx_expect;
 mod telemetry;
 // The manifest's format and SHA-256 are the kernel's own code (one
 // definition for the writer and the reader).
@@ -312,6 +313,8 @@ const USER_DLLS: &[Dll] = &[
     // iphlpapi, secur32, winhttp: what the JDK's net.dll imports.
     Dll { package: "iphlpapi", file: "iphlpapi.dll", exported_as: "testiphlpapi.dll" },
     Dll { package: "secur32", file: "secur32.dll", exported_as: "testsecur32.dll" },
+    // gala's schannel.dll: the Schannel (TLS) package behind secur32.
+    Dll { package: "schannel", file: "schannel.dll", exported_as: "testschannel.dll" },
     Dll { package: "winhttp", file: "winhttp.dll", exported_as: "testwinhttp.dll" },
     // gala's ncrypt.dll (no key storage providers; bound at startup).
     Dll { package: "ncrypt", file: "ncrypt.dll", exported_as: "testncrypt.dll" },
@@ -346,6 +349,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "odbc32", file: "odbc32.dll", exported_as: "testodbc32.dll" },
     Dll { package: "wldap32", file: "wldap32.dll", exported_as: "testwldap32.dll" },
     Dll { package: "wsock32", file: "wsock32.dll", exported_as: "testwsock32.dll" },
+    // normaliz.dll: forwarders to kernel32's IDN functions (libcurl).
+    Dll { package: "normaliz", file: "normaliz.dll", exported_as: "testnormaliz.dll" },
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32.dll" },
     Dll { package: "authz", file: "authz.dll", exported_as: "testauthz.dll" },
@@ -396,6 +401,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("xmodify_test", "ntdll.dll", "Windows/System32"),
     ("smpsem_test", "ntdll.dll", "Windows/System32"),
     ("xstate_test", "ntdll.dll", "Windows/System32"),
+    ("straddle_test", "ntdll.dll", "Windows/System32"),
     ("statedump_test", "ntdll.dll", "Windows/System32"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
@@ -737,6 +743,30 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shlwapi_test", "advapi32.dll", "Windows/System32"),
     ("shlwapi_test", "bcryptprimitives.dll", "Windows/System32"),
     ("shlwapi_test", "user/bin/shlwapi_test.exe", "gala"),
+    ("ole32_test", "ntdll.dll", "Windows/System32"),
+    ("ole32_test", "kernel32.dll", "Windows/System32"),
+    ("ole32_test", "msvcrt.dll", "Windows/System32"),
+    ("ole32_test", "ole32.dll", "Windows/System32"),
+    ("ole32_test", "oleaut32.dll", "Windows/System32"),
+    ("ole32_test", "advapi32.dll", "Windows/System32"),
+    ("ole32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("ole32_test", "uiautomationcore.dll", "Windows/System32"),
+    ("ole32_test", "user32.dll", "Windows/System32"),
+    ("ole32_test", "gdi32.dll", "Windows/System32"),
+    ("ole32_test", "user/bin/ole32_test.exe", "gala"),
+    ("shell32_test", "ntdll.dll", "Windows/System32"),
+    ("shell32_test", "kernel32.dll", "Windows/System32"),
+    ("shell32_test", "msvcrt.dll", "Windows/System32"),
+    ("shell32_test", "shell32.dll", "Windows/System32"),
+    ("shell32_test", "user32.dll", "Windows/System32"),
+    ("shell32_test", "gdi32.dll", "Windows/System32"),
+    ("shell32_test", "user/bin/shell32_test.exe", "gala"),
+    ("dbghelp_test", "ntdll.dll", "Windows/System32"),
+    ("dbghelp_test", "kernel32.dll", "Windows/System32"),
+    ("dbghelp_test", "msvcrt.dll", "Windows/System32"),
+    ("dbghelp_test", "dbghelp.dll", "Windows/System32"),
+    ("dbghelp_test", "normaliz.dll", "Windows/System32"),
+    ("dbghelp_test", "user/bin/dbghelp_test.exe", "gala"),
     ("richedit_test", "ntdll.dll", "Windows/System32"),
     ("richedit_test", "kernel32.dll", "Windows/System32"),
     ("richedit_test", "msvcrt.dll", "Windows/System32"),
@@ -1596,6 +1626,33 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("nginx_tls", "user/nginx/html/index.html", "nginx/html"),
     ("nginx_tls", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
     ("nginx_tls", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
+    // Schannel (TLS) against Nginx on the loopback address; the test CA
+    // in gala's machine root store.
+    ("schannel_test", "ntdll.dll", "Windows/System32"),
+    ("schannel_test", "kernel32.dll", "Windows/System32"),
+    ("schannel_test", "ws2_32.dll", "Windows/System32"),
+    ("schannel_test", "mswsock.dll", "Windows/System32"),
+    ("schannel_test", "msvcrt.dll", "Windows/System32"),
+    ("schannel_test", "advapi32.dll", "Windows/System32"),
+    ("schannel_test", "user32.dll", "Windows/System32"),
+    ("schannel_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("schannel_test", "bcrypt.dll", "Windows/System32"),
+    ("schannel_test", "crypt32.dll", "Windows/System32"),
+    ("schannel_test", "secur32.dll", "Windows/System32"),
+    ("schannel_test", "schannel.dll", "Windows/System32"),
+    ("schannel_test", "ncrypt.dll", "Windows/System32"),
+    ("schannel_test", "user/bin/nginx.exe", "nginx"),
+    ("schannel_test", "user/schannel_test/nginx.conf", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/server.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/server.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/untrusted.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/untrusted.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/expired.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/expired.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/ca.cer", "Windows/System32/gala/roots"),
+    ("schannel_test", "user/nginx/html/index.html", "nginx/html"),
+    ("schannel_test", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
+    ("schannel_test", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
     ("go_exit", "ntdll.dll", "Windows/System32"),
     ("go_exit", "kernel32.dll", "Windows/System32"),
     ("go_exit", "bcryptprimitives.dll", "Windows/System32"),
@@ -1653,6 +1710,7 @@ const USER_PROGRAMS: &[&str] = &[
     "xmodify_test",
     "smpsem_test",
     "xstate_test",
+    "straddle_test",
     "statedump_test",
     "clockcal_test",
     "safepoint_test",
@@ -1666,6 +1724,7 @@ const USER_PROGRAMS: &[&str] = &[
     "netapi32_test",
     "clusapi_test",
     "sspi_test",
+    "schannel_test",
     "dpapi_test",
     "cert_test",
     "tds_test",
@@ -1833,6 +1892,8 @@ commands:
                what was recorded
   bench        run user/bench on gala; write target/report/bench.json and
                compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
+  lx-expect    run the Linux test programs (user/lx) on this Linux host and compare
+               with their expected.txt: lx-expect [--record] [--no-build] [--runs N]
   alloc-audit  find infallible allocations in the kernel's machine code (calls that
                abort on out-of-memory: Vec::clone, collect, ...; clippy cannot see
                them): alloc-audit [kernel ELF] [--all: also growth after try_reserve]
@@ -1911,6 +1972,8 @@ fn main() -> ExitCode {
             Some("bench") => {
                 bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
             }
+            Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
+            Some("qemu") => build_qemu(),
             Some("alloc-audit") => alloc_audit(
                 release,
                 args.get(1).filter(|a| !a.starts_with("--")).map(Path::new),
@@ -2009,9 +2072,14 @@ fn unit_tests() -> Result {
             .arg("handover::"),
     )?;
     run_cmd(cargo().args(["test", "--package", "xtask"]))?;
+    // The Linux personality's ABI data, checked against the user/lx
+    // transcripts recorded on Linux (ROADMAP LX).
+    run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
-    run_cmd(cargo().args(["test", "--package", "galapkg"]))
+    run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
+    // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
+    run_cmd(cargo().args(["test", "--package", "schannel_tls"]))
 }
 
 /// `cargo xtask alloc-audit`: disassembles the kernel (the debug build
@@ -2653,12 +2721,12 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
     (
         "events",
         &[
-            r#""ev":"process start","pid":4,"session":1,"name":"import_test.exe""#,
+            r#""ev":"process start","pid":4,"session":1,"name":"import_test.exe","personality":"nt""#,
             r#""ev":"image","pid":4,"name":"import_test.exe""#,
             r#""name":"\\Device\\HarddiskVolume1\\gala\\testdll.dll""#,
             r#""ev":"syscall","pid":4,"tid":8,"nr":8,"name":"NtWriteFile""#,
             r#""ev":"thread exit","pid":4,"tid":8,"status":0"#,
-            r#""ev":"process exit","pid":4,"session":1,"status":0"#,
+            r#""ev":"process exit","pid":4,"session":1,"status":0,"personality":"nt""#,
         ],
     ),
 ];
@@ -2877,10 +2945,86 @@ fn scenario_boot(name: &str) -> Boot {
 /// (The intermittent Java heap corruption is not this: WORKFLOW "Known
 /// intermittent".)
 const SINGLE_THREAD_TCG: &[&str] =
-    &["java_", "elasticsearch", "dotnet_", "pwsh_", "flaui", "xmodify_test"];
+    &["java_", "elasticsearch", "dotnet_", "pwsh_", "flaui", "xmodify_test", "straddle_test"];
 
 fn single_thread_tcg(name: &str) -> bool {
     SINGLE_THREAD_TCG.iter().any(|s| name.contains(s))
+}
+
+/// The QEMU gala is tested with: QEMU_VERSION built by `cargo xtask qemu`
+/// into `~/.cache/gala-qemu/<version>`. QEMU 8.1.0-8.2.5 (Ubuntu 24.04's
+/// 8.2.2) loses writes to the second page of a translated block that
+/// spans two pages, which corrupted JIT-compiled code (the JVM's heap
+/// "corruption", WORKFLOW "Known intermittent"); 8.2.6 fixed it.
+const QEMU_VERSION: &str = "11.1.3";
+const QEMU_SHA256: &str = "5a8289c7940dc77d3873c81a6c29ba3afe1446fc9d36e77fa1658cdbecb84b22";
+
+fn qemu_prefix() -> PathBuf {
+    let home = env::var_os("HOME").map_or_else(|| PathBuf::from("/root"), PathBuf::from);
+    home.join(".cache/gala-qemu").join(QEMU_VERSION)
+}
+
+/// `XTASK_QEMU` (a path), else the pinned build if present, else the one
+/// on PATH (with a warning once: it may be a QEMU with the 8.2.x bug).
+fn qemu_binary() -> PathBuf {
+    if let Some(p) = env::var_os("XTASK_QEMU") {
+        return PathBuf::from(p);
+    }
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let pinned = qemu_prefix().join("bin/qemu-system-x86_64");
+    if pinned.is_file() {
+        WARNED.call_once(|| eprintln!("xtask: QEMU {QEMU_VERSION} ({})", pinned.display()));
+        return pinned;
+    }
+    WARNED.call_once(|| {
+        eprintln!(
+            "xtask: QEMU {QEMU_VERSION} not built (`cargo xtask qemu`); using qemu-system-x86_64 from PATH"
+        );
+    });
+    PathBuf::from("qemu-system-x86_64")
+}
+
+/// `cargo xtask qemu`: downloads QEMU_VERSION from download.qemu.org,
+/// checks QEMU_SHA256, and builds only the x86_64 system emulator (with
+/// user networking) into `qemu_prefix()`. Build dependencies: WORKFLOW
+/// "QEMU".
+fn build_qemu() -> Result {
+    let prefix = qemu_prefix();
+    let bin = prefix.join("bin/qemu-system-x86_64");
+    if bin.is_file() {
+        eprintln!("xtask: QEMU {QEMU_VERSION} already built at {}", bin.display());
+        return Ok(());
+    }
+    let work = target_dir().join("qemu-build");
+    fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+    let tarball = work.join(format!("qemu-{QEMU_VERSION}.tar.xz"));
+    let url = format!("https://download.qemu.org/qemu-{QEMU_VERSION}.tar.xz");
+    eprintln!("xtask: fetching {url}");
+    run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&tarball).arg(&url))?;
+    let sum =
+        Command::new("sha256sum").arg(&tarball).output().map_err(|e| format!("sha256sum: {e}"))?;
+    let sum = String::from_utf8_lossy(&sum.stdout);
+    if sum.split_whitespace().next() != Some(QEMU_SHA256) {
+        let _ = fs::remove_file(&tarball);
+        return Err(format!("{url}: SHA-256 mismatch ({sum})"));
+    }
+    run_cmd(Command::new("tar").arg("xf").arg(&tarball).arg("-C").arg(&work))?;
+    let src = work.join(format!("qemu-{QEMU_VERSION}"));
+    let build = work.join("build");
+    fs::create_dir_all(&build).map_err(|e| format!("{}: {e}", build.display()))?;
+    run_cmd(
+        Command::new(src.join("configure"))
+            .current_dir(&build)
+            .args(["--target-list=x86_64-softmmu", "--enable-slirp", "--disable-docs"])
+            .args(["--disable-werror", "--disable-gtk", "--disable-sdl"])
+            .arg(format!("--prefix={}", prefix.display())),
+    )?;
+    let jobs = std::thread::available_parallelism().map_or(2, |n| n.get()).to_string();
+    run_cmd(Command::new("make").current_dir(&build).args(["-j", &jobs]))?;
+    run_cmd(Command::new("make").current_dir(&build).arg("install"))?;
+    let _ = fs::remove_dir_all(&work);
+    eprintln!("xtask: QEMU {QEMU_VERSION} built at {}", bin.display());
+    Ok(())
 }
 
 fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
@@ -2901,7 +3045,7 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
         memory = memory.max(ELASTICSEARCH_MEMORY_MIB);
     }
     let extra = std::env::var("XTASK_QEMU_ARGS").unwrap_or_default();
-    let mut cmd = Command::new("qemu-system-x86_64");
+    let mut cmd = Command::new(qemu_binary());
     // Two processors (one for `onecpu_*` scenarios: telemetry::vm_cpus).
     let cpus = telemetry::vm_cpus(iso).to_string();
     cmd.args(["-machine", "q35", "-cpu", "max", "-m", &format!("{memory}M"), "-smp", &cpus]);
@@ -3078,6 +3222,17 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=vmcycle_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["vmcycle_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Code rewritten where an instruction straddles a page boundary
+        // (a JIT patching an object address in compiled code): the next
+        // call must run the new instruction. Fails under QEMU 8.1.0-8.2.5
+        // TCG (the Java corruption, WORKFLOW "QEMU"); xtask's pinned QEMU
+        // passes it.
+        name: "straddle_test",
+        cmdline: "qemu_exit run=straddle_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["straddle_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // Code rewritten on one processor and run on the other (a JIT's
@@ -3938,6 +4093,35 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=shlwapi_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["shlwapi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: ole32's PROPVARIANT and STGMEDIUM clean-up, the
+        // IRunnableObject helpers and proxy blankets against documented
+        // behaviour, for what wxWidgets and SQL Server LocalDB import
+        // (user/ole32_test/main.c, mingw).
+        name: "ole32_test",
+        cmdline: "qemu_exit run=ole32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["ole32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: shell32's ShellExecuteExW, dropped files, DragAcceptFiles
+        // and SHFileOperationW against documented behaviour, for what
+        // wxWidgets imports (user/shell32_test/main.c, mingw).
+        name: "shell32_test",
+        cmdline: "qemu_exit run=shell32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["shell32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: dbghelp's ImageNtHeader and SymSrvGetFileIndexInfoW (what
+        // SQL Server LocalDB's SqlDumper imports) and normaliz.dll's IDN
+        // forwarders (libcurl) against documented behaviour
+        // (user/dbghelp_test/main.c, mingw).
+        name: "dbghelp_test",
+        cmdline: "qemu_exit run=dbghelp_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["dbghelp_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // W3: rich edit controls (msftedit.dll's RICHEDIT50W, riched20.dll's
@@ -5148,6 +5332,16 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xtask: net client: tls ok"],
     },
     Scenario {
+        // Schannel (secur32 + schannel.dll): TLS 1.3 and 1.2 clients
+        // against Nginx (OpenSSL) on the loopback address, certificate
+        // validation, and a server (AcceptSecurityContext) in-process.
+        name: "schannel_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=schannel_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["schannel_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         name: "go_exit",
         cmdline: "qemu_exit run=go_exit.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -5390,6 +5584,8 @@ const SCENARIOS: &[Scenario] = &[
              (access violation) in thread",
             "(crash.exe+0x",
             "writing address 0x0",
+            // The personality (ROADMAP LX seam 2) and session.
+            "crash report:   personality nt, session ",
             "crash report:   rax=",
             "crash report:   [rsp+0x00]",
             "process crash.exe (pid 4) exited with status 0xc0000005",
@@ -5985,6 +6181,10 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("process_test", "child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("uipi_test", "a child process (one NT process per Linux process)"),
+    ("shell32_test", "a child process (ShellExecuteExW runs it)"),
+    // Hangs in its TLS 1.3 handshake with the in-process server (both
+    // threads waiting); passes in QEMU. A gala-um socket gap: ROADMAP TLS.
+    ("schannel_test", "the in-process TLS server's sockets (gala-um gap)"),
     ("winevent_test", "a child process (one NT process per Linux process)"),
     ("uia_test", "a child process (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
@@ -9743,6 +9943,29 @@ mod constants {
             }
         }
         assert!(found.is_empty(), "use nt::platform instead:\n{}", found.join("\n"));
+    }
+
+    /// `net` is core, below every personality: it reaches threads and time
+    /// through `crate::runtime`, never through the NT layer (ROADMAP LX
+    /// seam 6; a Linux personality would build its sockets on it too).
+    #[test]
+    fn net_does_not_depend_on_nt() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel/src/net");
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                if line.contains("crate::nt") || line.contains("super::super::nt") {
+                    found.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "net/ names the NT layer; use crate::runtime:\n{}",
+            found.join("\n")
+        );
     }
 
     #[test]

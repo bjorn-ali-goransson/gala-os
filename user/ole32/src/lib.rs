@@ -26,7 +26,9 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+mod bindctx;
 mod class;
+mod props;
 mod stream;
 mod unimplemented;
 
@@ -353,7 +355,7 @@ pub extern "system" fn StringFromIID(iid: *const Guid, text: *mut *mut u16) -> H
 
 /// The vtable entry `i` of COM object `obj`, called as `fn(obj, args)`.
 macro_rules! com_call {
-    ($obj:expr, $i:expr, fn($($t:ty),*) -> $r:ty $(, $a:expr)*) => {{
+    ($obj:expr, $i:expr, fn($($t:ty),* $(,)?) -> $r:ty $(, $a:expr)*) => {{
         let obj = $obj as *mut *const usize;
         // SAFETY: a COM object whose vtable has entry $i of this type.
         let f: extern "system" fn(*mut *const usize $(, $t)*) -> $r =

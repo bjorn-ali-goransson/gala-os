@@ -1,0 +1,4 @@
+hello from static musl
+write returned = 23
+hello_test: ok
+-- exit status 0
