@@ -169,7 +169,7 @@ fn oid_text(oid: &[u8], out: &mut [u8]) -> Result<usize, u32> {
 
 /// Days from 1601-01-01 to `y`-`m`-`d` (proleptic Gregorian).
 fn days_from_1601(y: u64, m: u64, d: u64) -> u64 {
-    let leap = |y: u64| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let leap = |y: u64| (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400);
     let before = y - 1601;
     let mut days = before * 365 + before / 4 - before / 100 + before / 400;
     const CUM: [u64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];

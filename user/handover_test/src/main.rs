@@ -14,6 +14,9 @@
 //! - the sleep ended at its deadline: it took the time asked, not that
 //!   plus the handover (the call is made again with its absolute
 //!   deadline, ARCHITECTURE invariant 2), and the clocks went forward;
+//!   it may end later only by the time the handover stopped the programs
+//!   (GalaHandoverPause, 0x7f5b, reports it: a loaded host made it
+//!   seconds), when that ran past the deadline;
 //! - the memory patterns are intact (the user pages stayed in their
 //!   frames), in the main thread and in a thread woken in the new kernel;
 //! - the handles work: the threads woke and exited with their codes
@@ -336,6 +339,7 @@ fn run() -> Result<(), u32> {
     let (before_qpc, frequency) = performance_counter();
     let (_, before_system) = system_time();
     let before_ticks = tick_count();
+    let generation = handover_pause().1;
     say("handover_test: ready, asking for a handover\r\n");
     match request_handover() {
         STATUS_SUCCESS => {}
@@ -360,8 +364,17 @@ fn run() -> Result<(), u32> {
     // Time: forward, and the sleep kept its deadline.
     check(after_qpc > before_qpc && after_system > before_system, 20)?;
     check(slept >= SLEEP_MS, 21)?;
-    // An abandoned handover (`late`) held the threads for its wait.
-    let slack = if last_arg_is("late") { LATE_SLACK_MS } else { SLACK_TICKS as i64 };
+    // An abandoned handover (`late`) held the threads for its wait; a
+    // handover done during the sleep, for its pause, when that ran past
+    // the deadline.
+    let (st, generation_after, pause) = handover_pause();
+    say_ms("handover pause", pause as i64);
+    let slack = if last_arg_is("late") {
+        LATE_SLACK_MS
+    } else {
+        check(st == STATUS_SUCCESS && generation_after == generation + 1, 108)?;
+        SLACK_TICKS as i64 + pause as i64
+    };
     check(slept < SLEEP_MS + slack, 22)?;
     // Memory.
     check(intact(private, PRIVATE_PAGES * PAGE, private_byte), 23)?;
@@ -406,12 +419,17 @@ fn run() -> Result<(), u32> {
     if last_arg_is("twice") {
         // Everyone but this thread has exited; their objects stay (open
         // handles), and the next kernel must have them too.
+        let generation = handover_pause().1;
         check(request_handover() == STATUS_SUCCESS, 48)?;
         let before = tick_count();
         check(delay(relative_ms(1000)) == STATUS_SUCCESS, 49)?;
         let slept = tick_count().wrapping_sub(before) as i64;
         say_ms("slept again", slept);
-        check((1000..1000 + SLACK_TICKS as i64).contains(&slept), 50)?;
+        let (st, generation_after, pause) = handover_pause();
+        say_ms("handover pause", pause as i64);
+        check(st == STATUS_SUCCESS && generation_after == generation + 1, 109)?;
+        let late = SLACK_TICKS as i64 + pause as i64;
+        check((1000..1000 + late).contains(&slept), 50)?;
         check(intact(private, PRIVATE_PAGES * PAGE, private_byte), 51)?;
         check(intact(view, SECTION_PAGES * PAGE, section_byte), 52)?;
         check(intact(view2, SECTION_PAGES * PAGE, section_byte), 53)?;

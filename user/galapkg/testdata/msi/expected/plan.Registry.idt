@@ -1,0 +1,11 @@
+Registry	Root	Key	Name	Value	Component_
+s72	i2	l255	L255	L0	s72
+Registry	Registry
+regFF5D9F73C09A292B792D65FFCA833126	2	Software\Gala\Plan	InstallDir	[INSTALLDIR]	Core
+reg04E1BB127F866F25943B9BC1859EBFF2	2	Software\Gala\Plan\[SUBKEY]	Tool	[#tool.exe]	Core
+reg974A16540B7FFA4C966C09C89A160716	2	Software\Gala\Plan	Count	#42	Core
+reg554223FE06BD56BAD2F3281BA5A3E60F	2	Software\Gala\Plan	Blob	#x0A0B0C	Core
+reg6D26D35F0D877DF35AAFBBC63030E6B7	2	Software\Gala\Plan	Path	#%%ProgramFiles%\Gala Plan	Core
+reg6A8B7AA22EB09280137C288292EFB131	2	Software\Gala\Plan	List	one[~][GREETING]	Core
+regAC26FCAA74734CA1F13463D0652208F3	-1	Software\Gala\Plan	Where	[$Core]|[!core.txt]|[%TEMP]|{[NOSUCH]x}|{plain}|[\[]x[\]]	Core
+reg981EC58237CF5D36C1AC0645F75BAEEA	1	Software\Gala\Plan	Shortcuts	#1	Shortcuts

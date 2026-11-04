@@ -28,6 +28,7 @@ use crate::arch::syscall::UserRegs;
 use crate::arch::xstate::XState;
 use crate::arch::{cpu, percpu, smp};
 use crate::mm::heap::{AllocError, TryVec, try_box};
+use crate::personality::Personality;
 use crate::sync::IrqMutex;
 use crate::time;
 
@@ -91,6 +92,9 @@ struct Thread {
     is_idle: bool,
     /// Registers the current system call returns with (NtContinue).
     pending_continue: Option<UserRegs>,
+    /// Times a CPU switched to this thread (SYSTEM_THREAD_INFORMATION's
+    /// ContextSwitches; wraps).
+    switches: u32,
 }
 
 /// Why a `prepare_wait`/`wait` ended.
@@ -106,8 +110,14 @@ struct UserThread {
     /// its PML4, read without taking the space's lock.
     space: SharedUserSpace,
     root: u64,
-    /// GS base in user mode (the TEB).
+    /// GS base in user mode (the TEB; a Linux thread's arch_prctl value).
     gs_base: u64,
+    /// FS base in user mode: 0 for NT threads; a Linux thread's
+    /// arch_prctl(ARCH_SET_FS) value (its TLS).
+    fs_base: u64,
+    /// Its process's personality: which dispatcher its system calls go to
+    /// (`crate::personality`; fixed for the thread's life).
+    personality: Personality,
 }
 
 /// One CPU's scheduling state.
@@ -259,6 +269,7 @@ fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Result<Thread, S
         affinity,
         is_idle,
         pending_continue: None,
+        switches: 0,
     })
 }
 
@@ -314,17 +325,24 @@ pub fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<ThreadI
 }
 
 /// Creates a thread that runs `entry(arg)` in kernel mode inside the user
-/// address space `space`, with user GS base `gs_base`. `entry` normally
-/// ends by entering user mode.
+/// address space `space`, with user GS base `gs_base`; its system calls
+/// go to `personality`'s dispatcher. `entry` normally ends by entering
+/// user mode.
 pub fn spawn_user(
     name: &'static str,
     entry: fn(usize),
     arg: usize,
     space: SharedUserSpace,
     gs_base: u64,
+    personality: Personality,
 ) -> Result<ThreadId, SpawnError> {
     let root = space.lock().root();
-    spawn_inner(name, entry, arg, Some(UserThread { space, root, gs_base }))
+    spawn_inner(
+        name,
+        entry,
+        arg,
+        Some(UserThread { space, root, gs_base, fs_base: 0, personality }),
+    )
 }
 
 fn spawn_inner(
@@ -349,6 +367,7 @@ fn spawn_inner(
         affinity: ALL_CPUS,
         is_idle: false,
         pending_continue: None,
+        switches: 0,
     };
     let thread = try_box(thread)?;
     let added = {
@@ -396,6 +415,36 @@ pub fn exit() -> ! {
 
 pub fn current() -> ThreadId {
     with(|s| s.current())
+}
+
+/// The current thread's user (FS, GS) bases; (0, 0) for a kernel thread.
+pub fn user_bases() -> (u64, u64) {
+    with(|s| {
+        let id = s.current();
+        s.thread(id).user.as_ref().map_or((0, 0), |u| (u.fs_base, u.gs_base))
+    })
+}
+
+/// Sets the current user thread's FS and/or GS base, for this return to
+/// user mode and every later switch to it (Linux's arch_prctl). The
+/// caller has checked the values are canonical user addresses. False for
+/// a kernel thread.
+pub fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
+    // Under the scheduler's lock (interrupts off): no switch between the
+    // thread's record and this CPU's registers.
+    with(|s| {
+        let id = s.current();
+        let Some(u) = s.thread(id).user.as_mut() else { return false };
+        if let Some(fs) = fs {
+            u.fs_base = fs;
+            percpu::set_user_fs_base(fs);
+        }
+        if let Some(gs) = gs {
+            u.gs_base = gs;
+            percpu::set_user_gs_base(gs);
+        }
+        true
+    })
 }
 
 /// This CPU's current thread and whether it is its idle thread; None
@@ -454,23 +503,32 @@ pub fn check_user_return() {
         let t = s.thread(id);
         let stack_top = t.stack.as_ref().map_or(0, KernelStack::top);
         let (root, gs) = t.user.as_ref().map_or((0, 0), |u| (u.root, u.gs_base));
+        let personality = t.user.as_ref().map_or(Personality::Nt, |u| u.personality);
         let (cr3, kstack, ugs) =
             (cpu::read_cr3() & !0xfff, percpu::kernel_stack(), percpu::user_gs_base());
+        let cpu_personality = percpu::personality();
         if others != 0
             || !t.on_cpu
             || t.state != State::Running
             || kstack != stack_top
             || cr3 != root
             || ugs != gs
+            || cpu_personality != personality
         {
             panic!(
                 "sched: thread {id} ({}) returns to user mode on CPU {here} with others {others:#x}, \
                  on_cpu {}, state {:?}, kernel stack {kstack:#x} (its own {stack_top:#x}), \
-                 cr3 {cr3:#x} (its {root:#x}), user GS {ugs:#x} (its {gs:#x})",
+                 cr3 {cr3:#x} (its {root:#x}), user GS {ugs:#x} (its {gs:#x}), \
+                 personality {cpu_personality} (its {personality})",
                 t.name, t.on_cpu, t.state
             );
         }
     });
+}
+
+/// How many times a CPU switched to thread `id` (0 for an unknown id).
+pub fn context_switches(id: ThreadId) -> u32 {
+    with(|s| s.threads.get(id.0).map_or(0, |t| t.switches))
 }
 
 /// The CPU the caller runs on (it may move right after).
@@ -547,11 +605,14 @@ fn schedule() {
             let from: *const Context = &s.thread(cur).context;
             let n = s.thread(next);
             n.on_cpu = true;
+            n.switches = n.switches.wrapping_add(1);
             let target = switch::Target {
                 context: &n.context,
                 kernel_stack_top: n.stack.as_ref().map(KernelStack::top),
                 root: n.user.as_ref().map_or_else(paging::kernel_root, |u| u.root),
                 user_gs_base: n.user.as_ref().map_or(0, |u| u.gs_base),
+                user_fs_base: n.user.as_ref().map_or(0, |u| u.fs_base),
+                personality: n.user.as_ref().map_or(Personality::Nt, |u| u.personality),
             };
             (from, target)
         })

@@ -12,6 +12,7 @@ use super::sync::HwCell;
 
 const IA32_GS_BASE: u32 = 0xc000_0101;
 const IA32_KERNEL_GS_BASE: u32 = 0xc000_0102;
+const IA32_FS_BASE: u32 = 0xc000_0100;
 
 #[repr(C)]
 pub struct PerCpu {
@@ -24,11 +25,26 @@ pub struct PerCpu {
     index: u64,
     /// This CPU's TSS.
     tss: *mut Tss,
+    /// The personality of the thread running here (`Personality::index`),
+    /// whose dispatcher its system calls go to (`syscall::dispatch`).
+    personality: u64,
+    /// The FS base loaded for user mode (IA32_FS_BASE), kept here so a
+    /// switch between threads with the same one (every NT thread: 0)
+    /// costs no MSR write.
+    user_fs_base: u64,
 }
 
 impl PerCpu {
     pub const fn new() -> Self {
-        PerCpu { self_ptr: 0, kernel_rsp: 0, user_rsp: 0, index: 0, tss: core::ptr::null_mut() }
+        PerCpu {
+            self_ptr: 0,
+            kernel_rsp: 0,
+            user_rsp: 0,
+            index: 0,
+            tss: core::ptr::null_mut(),
+            personality: 0,
+            user_fs_base: 0,
+        }
     }
 }
 
@@ -41,6 +57,7 @@ impl Default for PerCpu {
 pub const KERNEL_RSP_OFFSET: usize = offset_of!(PerCpu, kernel_rsp);
 pub const USER_RSP_OFFSET: usize = offset_of!(PerCpu, user_rsp);
 const INDEX_OFFSET: usize = offset_of!(PerCpu, index);
+const PERSONALITY_OFFSET: usize = offset_of!(PerCpu, personality);
 
 /// The boot CPU's block; other CPUs' are allocated by `smp`. Each block is
 /// written only by its own CPU, with interrupts disabled.
@@ -66,6 +83,8 @@ pub unsafe fn init(block: *mut PerCpu, index: u32, tss: *mut Tss) {
         (*block).tss = tss;
         cpu::wrmsr(IA32_GS_BASE, block as u64);
         cpu::wrmsr(IA32_KERNEL_GS_BASE, 0);
+        cpu::wrmsr(IA32_FS_BASE, 0);
+        (*block).user_fs_base = 0;
     }
 }
 
@@ -108,6 +127,34 @@ pub fn set_kernel_stack(top: u64) {
     }
 }
 
+/// Sets the personality of the thread this CPU runs (its system calls'
+/// dispatcher).
+pub fn set_personality(personality: crate::personality::Personality) {
+    let block = current();
+    // SAFETY: only called with interrupts disabled during a context switch;
+    // the block is this CPU's and only this CPU reads the field.
+    unsafe { (*block).personality = personality.index() as u64 };
+}
+
+/// The personality of the thread this CPU runs (NT if the field holds a
+/// number no personality has, which `set_personality` never writes).
+pub fn personality() -> crate::personality::Personality {
+    let raw: u64;
+    // SAFETY: as in `cpu_index`: a single GS-relative load, so a migration
+    // cannot tear it (system calls run with interrupts on): whichever CPU
+    // the load runs on is running the calling thread, whose personality
+    // the switch to it stored there.
+    unsafe {
+        core::arch::asm!(
+            "mov {}, gs:[{off}]",
+            out(reg) raw,
+            off = const PERSONALITY_OFFSET,
+            options(nostack, readonly, preserves_flags)
+        )
+    };
+    crate::personality::Personality::from_index(raw as usize).unwrap_or_default()
+}
+
 pub fn kernel_stack() -> u64 {
     // SAFETY: plain read of a field written only by this CPU.
     unsafe { (*current()).kernel_rsp }
@@ -124,4 +171,22 @@ pub fn set_user_gs_base(base: u64) {
     // SAFETY: while in kernel mode this MSR only holds the user's GS base;
     // any value is harmless to the kernel.
     unsafe { cpu::wrmsr(IA32_KERNEL_GS_BASE, base) };
+}
+
+/// Sets the FS base user mode sees (the kernel does not use FS; a Linux
+/// thread's TLS pointer). Written to the MSR only when it changes.
+/// Called with interrupts disabled (a context switch, or under the
+/// scheduler's lock); `base` must be canonical.
+pub fn set_user_fs_base(base: u64) {
+    let block = current();
+    // SAFETY: the block is this CPU's and interrupts are off, so no switch
+    // reads or writes the field meanwhile; IA32_FS_BASE only affects
+    // FS-relative accesses, which the kernel never makes, and a canonical
+    // value cannot fault.
+    unsafe {
+        if (*block).user_fs_base != base {
+            cpu::wrmsr(IA32_FS_BASE, base);
+            (*block).user_fs_base = base;
+        }
+    }
 }

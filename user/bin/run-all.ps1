@@ -5,7 +5,8 @@ Runs gala-os's test programs on Windows and writes a report for
 
 .DESCRIPTION
 Runs every *.exe next to this script (PowerShell 5 or later, no admin
-rights needed), captures each program's output and exit status, and writes
+rights needed, except for schannel_test, which is skipped without them),
+captures each program's output and exit status, and writes
 them as JSON in the schema of `cargo xtask report` (see
 xtask/src/report.rs). Programs report through their exit status: 0, the
 number of the failing check, or an NTSTATUS if they crash.
@@ -38,11 +39,49 @@ $arguments = @{ "args_test" = 'alpha "beta gamma"'; "go_http" = 'self'; "handove
 # smp_test takes an expected processor count (cpus=N); none on Windows.
 
 $results = @()
+
+# schannel_test talks TLS to Nginx on 127.0.0.1:8443-8445 (its scenario
+# starts Nginx with `start=`): Nginx runs from a prefix made in TEMP with
+# ..\schannel_test\nginx.conf and its certificates, and the test CA must be
+# a trusted root of the machine, which only an administrator can make it
+# (then it is removed again). Without that the test is skipped.
+$schannelSkip = $null
+$schannelNginx = $null
+$schannelCa = $null
+$admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+$schannelDir = Join-Path $here "..\schannel_test"
+if (-not (Test-Path (Join-Path $here "schannel_test.exe"))) {
+    $schannelSkip = "no schannel_test.exe"
+} elseif (-not $admin) {
+    $schannelSkip = "needs an administrator (the test CA goes into LocalMachine\Root)"
+} elseif (-not (Test-Path (Join-Path $here "nginx.exe"))) {
+    $schannelSkip = "no nginx.exe"
+} else {
+    $prefix = Join-Path $env:TEMP "gala-schannel-nginx"
+    foreach ($d in @("conf", "html", "logs", "temp")) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $prefix $d) | Out-Null
+    }
+    Copy-Item (Join-Path $schannelDir "nginx.conf") (Join-Path $prefix "conf")
+    Copy-Item (Join-Path $schannelDir "certs\*.crt") (Join-Path $prefix "conf")
+    Copy-Item (Join-Path $schannelDir "certs\*.key") (Join-Path $prefix "conf")
+    Copy-Item (Join-Path $here "..\nginx\html\index.html") (Join-Path $prefix "html")
+    $schannelCa = Import-Certificate -FilePath (Join-Path $schannelDir "certs\ca.cer") `
+        -CertStoreLocation Cert:\LocalMachine\Root
+    $schannelNginx = Start-Process -FilePath (Join-Path $here "nginx.exe") -PassThru -WindowStyle Hidden `
+        -ArgumentList @("-p", "$prefix\", "-c", "conf/nginx.conf")
+}
+
 foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     $name = [IO.Path]::GetFileNameWithoutExtension($exe.Name)
     # Driven by flaui_test (a .NET program: docs/WORKFLOW.md, "FlaUI");
     # alone it waits for its window to be closed.
     if ($name -eq "flaui_target") { continue }
+    if ($name -eq "schannel_test" -and $null -ne $schannelSkip) {
+        $results += [ordered]@{ program = $name; exit = $null; line = ""; skipped = $schannelSkip }
+        Write-Host ("{0,-18} skipped: {1}" -f $name, $schannelSkip)
+        continue
+    }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exe.FullName
     # import_test and loader_test load testdll*.dll from the executable's
@@ -78,6 +117,9 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     }
     Write-Host ("{0,-18} {1:x8}  {2}" -f $name, $code, $line)
 }
+
+if ($null -ne $schannelNginx) { Stop-Process -Id $schannelNginx.Id -Force -ErrorAction SilentlyContinue }
+if ($null -ne $schannelCa) { $schannelCa | Remove-Item -ErrorAction SilentlyContinue }
 
 # Scripts run by busybox sh (the busybox_files, busybox_script and tcc
 # scenarios): their full output goes to <name>-windows.txt next to the

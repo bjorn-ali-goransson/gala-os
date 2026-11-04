@@ -1,0 +1,105 @@
+-- exit statuses
+fork returned a pid > 0 = yes
+exit(0): exited 0
+exit(7): exited 7
+exit(255): exited 255
+exit(256): exited 0
+exit(-1): exited 255
+exit (not exit_group) 9: exited 9
+kill(self, SIGKILL): killed by 9
+kill(self, SIGTERM): killed by 15
+store to address 8: killed by 11
+kill(self, SIGSTOP), WUNTRACED: stopped by 19
+  kill(child, SIGCONT) = 0
+  WCONTINUED: continued
+  then: exited 5
+-- memory: fork copies, vfork shares
+fork child set the value to 2: exited 2
+  parent's value = 1
+vfork returned a pid > 0 = yes
+  parent's value after the vfork child stored 3 = 3
+  vfork child: exited 4
+-- wait4 and waitid
+wait4(-1) with no children = -10 (ECHILD)
+wait4(1) (not a child) = -10 (ECHILD)
+wait4(-1, bad options) = -22 (EINVAL)
+wait4(child, WNOHANG) while it runs = 0
+wait4(child, &ru) returned the child's pid = yes
+  status: exited 0
+  ru_maxrss written (>= 0) = yes
+  ru_nivcsw written (>= 0) = yes
+  ru_utime plausible = yes
+  ru_stime plausible = yes
+offsetof(rusage, ru_utime) = 0
+offsetof(rusage, ru_stime) = 16
+offsetof(rusage, ru_maxrss) = 32
+offsetof(rusage, ru_minflt) = 64
+offsetof(rusage, ru_nvcsw) = 128
+offsetof(rusage, ru_nivcsw) = 136
+getrusage writes bytes = 144
+waitid(P_PID, WEXITED|WNOWAIT) = 0
+  si_pid is the child = yes
+  si_signo = 17
+  si_code (CLD_EXITED) = 1
+  si_status = 6
+  the zombie is still there: wait4: exited 6
+  then wait4 again = -10 (ECHILD)
+waitid(P_ALL, WEXITED) of a killed child = 0
+  si_code (CLD_KILLED) = 2
+  si_status (the signal) = 15
+waitid(P_ALL, no WEXITED etc.) = -22 (EINVAL)
+four zombies reaped = 4
+  their statuses' sum = 46
+  then wait4(-1) = -10 (ECHILD)
+-- pids, groups, sessions
+child: getppid() is the parent (1 = yes): exited 1
+fork's result is the child's getpid() = yes
+gettid() = getpid() (one thread) = yes
+getpgrp() = getpgid(0) = yes
+getpgid(self) = getpgid(0) = yes
+getpgid(nonexistent) = -3 (ESRCH)
+getsid(nonexistent) = -3 (ESRCH)
+child: same process group (1 = yes): exited 1
+child: setpgid(0,0)=0 | pgid=pid<<1 | setsid EPERM<<2: exited 7
+child: setsid=pid | sid=pid<<1 | pgid=pid<<2 | again EPERM<<3 | setpgid(old) EPERM<<4: exited 31
+setpgid(nonexistent, 0) = -3 (ESRCH)
+setpgid(0, -1) = -22 (EINVAL)
+prctl(PR_SET_CHILD_SUBREAPER, 1) = 0
+middle child: exited 0
+orphan's getppid() is now us = yes
+we reap the orphan = yes
+  orphan: parent was the middle child | now us<<1: exited 3
+-- execve
+execve(missing) = -2 (ENOENT)
+execve(.) = -13 (EACCES)
+execve(not executable) = -13 (EACCES)
+execve(executable, not a program) = -8 (ENOEXEC)
+execve(f/x) = -20 (ENOTDIR)
+execve(bad pointer) = -14 (EFAULT)
+exec child: argc = 4
+exec child: argv[0] = "./fork_test"
+exec child: argv[1] = "exec-child"
+exec child: argv[2] = ""
+exec child: argv[3] = "with space"
+exec child: envp[0] = "ONE=1"
+exec child: envp[1] = "EMPTY="
+exec child: envp[2] = "LAST=the end"
+exec child: envc = 3
+exec child: F_GETFD(3) (opened without O_CLOEXEC) = 0
+exec child: F_GETFD(4) (opened with O_CLOEXEC) = -9 (EBADF)
+exec child: SIGUSR1 handler (was caught) = 0
+exec child: SIGUSR2 handler (was ignored) = 1
+exec child: SIGTERM still blocked = yes
+execve'd child: exited 3
+exec child: argc = 2
+exec child: argv[0] = "renamed"
+exec child: argv[1] = "exec-child"
+exec child: envc = 0
+exec child: F_GETFD(3) (opened without O_CLOEXEC) = 0
+exec child: F_GETFD(4) (opened with O_CLOEXEC) = -9 (EBADF)
+exec child: SIGUSR1 handler (was caught) = 0
+exec child: SIGUSR2 handler (was ignored) = 1
+exec child: SIGTERM still blocked = yes
+execve'd child with argv[0] renamed and no environment: exited 3
+fork_test: ok
+-- exit status 0

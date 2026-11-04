@@ -174,6 +174,8 @@ pub struct ThreadRecord {
     pub id: u64,
     pub start: u64,
     pub create_time: u64,
+    /// ContextSwitches: times a processor switched to it.
+    pub context_switches: u32,
 }
 
 /// SYSTEM_PROCESS_INFORMATION's size on x64; its SYSTEM_THREAD_INFORMATION
@@ -226,6 +228,7 @@ pub fn push_process(
         put(e, at + 0x30, &t.id.to_le_bytes()); // ClientId.UniqueThread
         put(e, at + 0x38, &NORMAL_PRIORITY.to_le_bytes()); // Priority
         put(e, at + 0x3c, &NORMAL_PRIORITY.to_le_bytes()); // BasePriority
+        put(e, at + 0x40, &t.context_switches.to_le_bytes()); // ContextSwitches
         put(e, at + 0x44, &WAITING.to_le_bytes()); // ThreadState
     }
     // Link the previous entry to this one.
@@ -284,7 +287,8 @@ mod tests {
         push_process(&mut out, &idle, &[], base).unwrap();
         let p =
             ProcessRecord { id: 8, parent_id: 4, create_time: 77, handle_count: 3, name: "a.exe" };
-        let threads = [ThreadRecord { id: 12, start: 0x1400, create_time: 78 }];
+        let threads =
+            [ThreadRecord { id: 12, start: 0x1400, create_time: 78, context_switches: 9 }];
         push_process(&mut out, &p, &threads, base).unwrap();
         let u32_at = |at: usize| u32::from_le_bytes(out[at..at + 4].try_into().unwrap());
         let u64_at = |at: usize| u64::from_le_bytes(out[at..at + 8].try_into().unwrap());
@@ -302,6 +306,7 @@ mod tests {
         assert_eq!(u64_at(t + 0x28), 8);
         assert_eq!(u64_at(t + 0x30), 12);
         assert_eq!(u64_at(t + 0x20), 0x1400);
+        assert_eq!(u32_at(t + 0x40), 9);
         assert_eq!(out[e + 0x38], 10);
         let name = (u64_at(e + 0x40) - base) as usize;
         assert_eq!(name, t + THREAD_ENTRY);

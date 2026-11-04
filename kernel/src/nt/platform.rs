@@ -27,6 +27,7 @@ pub use crate::hosted::memory::{SharedPage, SharedUserSpace, SpaceLock, UserSpac
 pub use crate::mm::PAGE_SIZE;
 pub use crate::mm::frame::Frame;
 pub use crate::mm::paging::{CacheMode, PageFlags};
+pub use crate::personality::Personality;
 pub use crate::sched::{SpawnError, ThreadId, WakeReason};
 
 /// The implementation the NT layer runs on: the kernel, or gala-um's host
@@ -70,13 +71,15 @@ pub trait Threads {
     fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<ThreadId, SpawnError>;
     /// A thread of a process: runs `entry(arg)` in the address space
     /// `space` with the user GS base `gs_base`; `entry` ends by entering
-    /// user mode.
+    /// user mode. Its system calls go to the dispatcher of `personality`
+    /// (its process's).
     fn spawn_user(
         name: &'static str,
         entry: fn(usize),
         arg: usize,
         space: SharedUserSpace,
         gs_base: u64,
+        personality: Personality,
     ) -> Result<ThreadId, SpawnError>;
     fn current() -> ThreadId;
     fn exit() -> !;
@@ -92,6 +95,9 @@ pub trait Threads {
     fn interrupt(id: ThreadId);
     /// The processors `id` may run on (bit n: processor n).
     fn set_affinity(id: ThreadId, mask: u64);
+    /// How many times `id` was switched to (SYSTEM_THREAD_INFORMATION's
+    /// ContextSwitches).
+    fn context_switches(id: ThreadId) -> u32;
     fn current_cpu() -> u32;
     fn online_count() -> u32;
     fn online_mask() -> u64;
@@ -100,8 +106,14 @@ pub trait Threads {
 /// Entering and leaving user mode: system calls, returns to user mode,
 /// exceptions and the user's floating-point state.
 pub trait UserEntry {
-    /// Every NT system call goes to `handler`.
-    fn set_syscall_handler(handler: fn(&mut SyscallFrame));
+    /// The system calls of threads of `personality` go to `handler`
+    /// (called `name` in logs): the platform's entry keeps one dispatcher
+    /// per personality (`crate::personality::Dispatchers`).
+    fn set_syscall_handler(
+        personality: Personality,
+        name: &'static str,
+        handler: fn(&mut SyscallFrame),
+    );
     /// `hook` runs before each return to user mode; it may change the
     /// registers (APCs, suspension) and returns whether it did.
     fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool);
@@ -131,6 +143,17 @@ pub trait UserEntry {
     /// The state components programs can use (XCR0's user features:
     /// x87, SSE, AVX, AVX-512), as KUSER_SHARED_DATA reports them.
     fn xstate_enabled() -> u64;
+    /// The calling thread's user FS and GS bases (Linux's arch_prctl).
+    fn user_bases() -> (u64, u64) {
+        (0, 0)
+    }
+    /// Sets the calling thread's user FS and/or GS base from now on
+    /// (kept across context switches); false where the platform cannot
+    /// (gala-um, whose host libc owns FS).
+    fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
+        let _ = (fs, gs);
+        false
+    }
 }
 
 /// User memory: the address space of a process (`UserSpace`, whose
@@ -230,8 +253,9 @@ pub fn spawn_user(
     arg: usize,
     space: SharedUserSpace,
     gs_base: u64,
+    personality: Personality,
 ) -> Result<ThreadId, SpawnError> {
-    <P as Threads>::spawn_user(name, entry, arg, space, gs_base)
+    <P as Threads>::spawn_user(name, entry, arg, space, gs_base, personality)
 }
 #[inline]
 pub fn current() -> ThreadId {
@@ -270,6 +294,10 @@ pub fn set_affinity(id: ThreadId, mask: u64) {
     <P as Threads>::set_affinity(id, mask)
 }
 #[inline]
+pub fn context_switches(id: ThreadId) -> u32 {
+    <P as Threads>::context_switches(id)
+}
+#[inline]
 pub fn current_cpu() -> u32 {
     <P as Threads>::current_cpu()
 }
@@ -289,8 +317,12 @@ pub fn online_mask() -> u64 {
 }
 
 #[inline]
-pub fn set_syscall_handler(handler: fn(&mut SyscallFrame)) {
-    <P as UserEntry>::set_syscall_handler(handler)
+pub fn set_syscall_handler(
+    personality: Personality,
+    name: &'static str,
+    handler: fn(&mut SyscallFrame),
+) {
+    <P as UserEntry>::set_syscall_handler(personality, name, handler)
 }
 #[inline]
 pub fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool) {
@@ -331,6 +363,14 @@ pub fn xstate_enabled() -> u64 {
 #[inline]
 pub fn set_mxcsr(value: u32) {
     <P as UserEntry>::set_mxcsr(value)
+}
+#[inline]
+pub fn user_bases() -> (u64, u64) {
+    <P as UserEntry>::user_bases()
+}
+#[inline]
+pub fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
+    <P as UserEntry>::set_user_bases(fs, gs)
 }
 
 #[inline]

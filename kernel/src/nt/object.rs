@@ -403,6 +403,55 @@ impl KObject {
         self.handle_count.load(Ordering::Acquire)
     }
 
+    /// Counts a handle (or a `NamePin`).
+    fn add_handle(&self) {
+        self.handle_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Uncounts a handle (or a `NamePin`); removes the object's name when
+    /// that was the last and it is not permanent. `namespace::unlink`
+    /// looks at the count again under the namespace's lock, so an open by
+    /// name that pinned the object meanwhile keeps the name.
+    fn drop_handle(object: &ObjectRef) {
+        if object.handle_count.fetch_sub(1, Ordering::AcqRel) == 1 && !object.permanent {
+            super::namespace::unlink(object);
+        }
+    }
+}
+
+/// An object found or created by name, counted as a handle from the moment
+/// the namespace's lock (under which it was found) was let go until its
+/// real handle exists (or the open fails and this is dropped). Without it
+/// a concurrent close of the object's last handle removed the name in
+/// between: the opener was left with an unnamed object, and a creator's
+/// new object could lose its name before the creator's handle existed
+/// (smprace_test). Made by `namespace::lookup_pinned`/`create_pinned`
+/// only (under the namespace's lock); dropped outside it.
+pub struct NamePin(ObjectRef);
+
+impl NamePin {
+    /// Pins `object`; the caller holds the namespace's lock.
+    pub(super) fn new(object: ObjectRef) -> NamePin {
+        object.add_handle();
+        NamePin(object)
+    }
+}
+
+impl core::ops::Deref for NamePin {
+    type Target = ObjectRef;
+
+    fn deref(&self) -> &ObjectRef {
+        &self.0
+    }
+}
+
+impl Drop for NamePin {
+    fn drop(&mut self) {
+        KObject::drop_handle(&self.0);
+    }
+}
+
+impl KObject {
     pub fn type_name(&self) -> &'static str {
         match self.body {
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => "File",
@@ -603,7 +652,7 @@ impl HandleTable {
                 self.entries.len() - 1
             }
         };
-        object.handle_count.fetch_add(1, Ordering::AcqRel);
+        object.add_handle();
         Ok(Handle((index as u64 + 1) * 4))
     }
 
@@ -617,7 +666,7 @@ impl HandleTable {
         if self.entries[index].is_some() {
             return Err(AllocError);
         }
-        entry.object.handle_count.fetch_add(1, Ordering::AcqRel);
+        entry.object.add_handle();
         self.entries[index] = Some(entry);
         Ok(())
     }
@@ -667,10 +716,7 @@ impl HandleTable {
 
     pub fn close(&mut self, handle: Handle) -> Option<HandleEntry> {
         let entry = self.entries.get_mut(slot(handle)?)?.take()?;
-        if entry.object.handle_count.fetch_sub(1, Ordering::AcqRel) == 1 && !entry.object.permanent
-        {
-            super::namespace::unlink(&entry.object);
-        }
+        KObject::drop_handle(&entry.object);
         Some(entry)
     }
 }

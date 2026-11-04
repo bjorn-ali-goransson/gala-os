@@ -1,0 +1,5 @@
+Condition	Description
+s255	l255
+LaunchCondition	Condition
+VersionNT >= 600	[ProductName] needs Windows Vista or later
+NOT BLOCKME	[ProductName] is blocked: BLOCKME=[BLOCKME]

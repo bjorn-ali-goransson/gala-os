@@ -120,6 +120,11 @@ impl<T> Drop for IrqGuard<'_, T> {
         self.guard = None;
         lockdep::release(self.class);
         if self.restore {
+            // Only the outermost lock turns interrupts back on; released
+            // before an inner one, it would leave that one held with
+            // interrupts on, and an interrupt on this CPU taking it would
+            // spin forever (debug builds panic: `lockdep::none_held`).
+            lockdep::none_held(self.class);
             cpu::enable_interrupts();
         }
     }
@@ -416,6 +421,26 @@ pub mod lockdep {
             });
         }
         #[cfg(not(debug_assertions))]
+        let _ = class;
+    }
+
+    /// Before a released lock of class `class` turns interrupts back on
+    /// (it was taken with them on): panics if this CPU still holds a lock
+    /// (debug kernel builds), which would then be held with interrupts on:
+    /// locks released out of order (hygiene sweep, 2026-11-03).
+    pub fn none_held(class: u16) {
+        #[cfg(all(debug_assertions, not(any(test, feature = "hosted"))))]
+        if ON.load(Ordering::Acquire) {
+            let held = held::with(|slots| slots.iter().map(held::get).find(|&c| c != 0));
+            if let Some(other) = held {
+                panic!(
+                    "lockdep: releasing {} turns interrupts on while {} is still held \
+                     (locks released out of order)",
+                    name(class),
+                    name(other)
+                );
+            }
+        }
         let _ = class;
     }
 

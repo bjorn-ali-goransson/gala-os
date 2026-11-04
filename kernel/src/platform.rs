@@ -3,8 +3,9 @@
 
 use crate::arch::{cpu, interrupts, paging, smp, syscall, xstate};
 use crate::nt::platform::{
-    Clock, DiskError, Display, Frame, SharedUserSpace, SpawnError, Storage, SyscallFrame, ThreadId,
-    Threads, TrapFrame, UserEntry, UserMemory, UserRegs, WakeReason, XState,
+    Clock, DiskError, Display, Frame, Personality, SharedUserSpace, SpawnError, Storage,
+    SyscallFrame, ThreadId, Threads, TrapFrame, UserEntry, UserMemory, UserRegs, WakeReason,
+    XState,
 };
 use crate::{mm, sched, time};
 
@@ -49,8 +50,9 @@ impl Threads for Kernel {
         arg: usize,
         space: SharedUserSpace,
         gs_base: u64,
+        personality: Personality,
     ) -> Result<ThreadId, SpawnError> {
-        sched::spawn_user(name, entry, arg, space, gs_base)
+        sched::spawn_user(name, entry, arg, space, gs_base, personality)
     }
     fn current() -> ThreadId {
         sched::current()
@@ -80,6 +82,9 @@ impl Threads for Kernel {
     fn set_affinity(id: ThreadId, mask: u64) {
         sched::set_affinity(id, mask)
     }
+    fn context_switches(id: ThreadId) -> u32 {
+        sched::context_switches(id)
+    }
     fn current_cpu() -> u32 {
         sched::current_cpu()
     }
@@ -92,8 +97,12 @@ impl Threads for Kernel {
 }
 
 impl UserEntry for Kernel {
-    fn set_syscall_handler(handler: fn(&mut SyscallFrame)) {
-        syscall::set_handler(handler)
+    fn set_syscall_handler(
+        personality: Personality,
+        name: &'static str,
+        handler: fn(&mut SyscallFrame),
+    ) {
+        syscall::set_handler(personality, name, handler)
     }
     fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool) {
         syscall::set_user_return_hook(hook)
@@ -124,6 +133,12 @@ impl UserEntry for Kernel {
     }
     fn xstate_enabled() -> u64 {
         xstate::enabled()
+    }
+    fn user_bases() -> (u64, u64) {
+        sched::user_bases()
+    }
+    fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
+        sched::set_user_bases(fs, gs)
     }
 }
 

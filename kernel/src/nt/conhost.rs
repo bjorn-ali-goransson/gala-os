@@ -56,6 +56,9 @@ pub struct Session {
     /// Set when Ctrl+C was typed (processed input): the session's
     /// processes' control-handler threads wait on it (GalaConsoleCtrl).
     pub ctrl_event: ObjectRef,
+    /// When the last Ctrl+C came (raw monotonic ns): how late each
+    /// process's handler thread takes it is logged.
+    pub ctrl_raised_ns: core::sync::atomic::AtomicU64,
 }
 
 /// The console's input modes (SetConsoleMode) the session acts on.
@@ -182,6 +185,7 @@ impl Session {
             }),
             input_ready,
             ctrl_event,
+            ctrl_raised_ns: core::sync::atomic::AtomicU64::new(0),
         })
         .map_err(|_| NtStatus::NO_MEMORY)
     }
@@ -398,12 +402,16 @@ impl Session {
     }
 
     /// Resets `input_ready` if no key is queued (after the queue was
-    /// emptied; checked again under the lock).
+    /// emptied). The check and the reset happen in one hold of the
+    /// dispatcher lock, which setting the event takes too: checked first
+    /// and reset after (as up to 2026-11-03), a key queued and signaled in
+    /// between was left queued with the event reset, and a thread waiting
+    /// on the console's input slept on (hygiene sweep). Lock order: the
+    /// dispatcher, then the session's state.
     pub fn settle(&self) {
-        let empty = self.inner.lock().input.is_empty();
-        if empty {
-            super::wait::set_signal(&self.input_ready, 0);
-        }
+        let _ = super::wait::update_signal(&self.input_ready, |signal| {
+            Ok::<i32, ()>(if self.inner.lock().input.is_empty() { 0 } else { signal })
+        });
     }
 
     /// Copies up to `out.len()` queued keys, oldest first, without taking

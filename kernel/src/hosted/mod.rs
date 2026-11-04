@@ -28,7 +28,8 @@ use crate::arch::syscall::{SyscallFrame, UserRegs};
 use crate::arch::xstate::XState;
 use crate::mm::frame::Frame;
 use crate::nt::platform::{
-    Clock, DiskError, Display, SharedUserSpace, Storage, Threads, UserEntry, UserMemory,
+    Clock, DiskError, Display, Personality, SharedUserSpace, Storage, Threads, UserEntry,
+    UserMemory,
 };
 use crate::sched::{SpawnError, ThreadId, WakeReason};
 
@@ -209,8 +210,18 @@ impl Storage for Um {
     }
 }
 
+/// Blocks the current thread for at least `ms` milliseconds (virtual
+/// time under the simulation). `nt::platform` and `crate::runtime` both
+/// sleep here.
+pub fn sleep_ms(ms: u64) {
+    if sim::on() {
+        return sim::sleep_ms(ms);
+    }
+    std::thread::sleep(core::time::Duration::from_millis(ms))
+}
+
 impl Clock for Um {
-    const TICK_HZ: u64 = 1000;
+    const TICK_HZ: u64 = crate::runtime::TICK_HZ;
     const PERFORMANCE_FREQUENCY: u64 = crate::time::PERFORMANCE_FREQUENCY;
 
     fn ticks() -> u64 {
@@ -235,7 +246,7 @@ impl Clock for Um {
 
 impl Threads for Um {
     fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<ThreadId, SpawnError> {
-        threads::spawn(name, entry, arg, false, || {})
+        crate::runtime::spawn(name, entry, arg)
     }
     fn spawn_user(
         name: &'static str,
@@ -243,11 +254,12 @@ impl Threads for Um {
         arg: usize,
         space: SharedUserSpace,
         gs_base: u64,
+        personality: Personality,
     ) -> Result<ThreadId, SpawnError> {
         threads::spawn(name, entry, arg, true, move || {
             // The thread keeps its address space alive, as in the kernel.
             core::mem::forget(space);
-            entry::init_thread();
+            entry::init_thread(personality);
             entry::set_gs_base(gs_base);
         })
     }
@@ -264,10 +276,7 @@ impl Threads for Um {
         std::thread::yield_now()
     }
     fn sleep_ms(ms: u64) {
-        if sim::on() {
-            return sim::sleep_ms(ms);
-        }
-        std::thread::sleep(core::time::Duration::from_millis(ms))
+        sleep_ms(ms)
     }
     fn prepare_wait(deadline: Option<u64>) {
         threads::prepare_wait(deadline)
@@ -285,6 +294,11 @@ impl Threads for Um {
     fn set_affinity(id: ThreadId, mask: u64) {
         threads::set_affinity(id, mask)
     }
+    // The host schedules gala-um's threads: not counted (0, a thread
+    // that never had to be switched to).
+    fn context_switches(_: ThreadId) -> u32 {
+        0
+    }
     fn current_cpu() -> u32 {
         threads::current_cpu()
     }
@@ -297,8 +311,12 @@ impl Threads for Um {
 }
 
 impl UserEntry for Um {
-    fn set_syscall_handler(handler: fn(&mut SyscallFrame)) {
-        entry::set_syscall_handler(handler)
+    fn set_syscall_handler(
+        personality: Personality,
+        name: &'static str,
+        handler: fn(&mut SyscallFrame),
+    ) {
+        entry::set_syscall_handler(personality, name, handler)
     }
     fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool) {
         entry::set_user_return_hook(hook)

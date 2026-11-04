@@ -1,0 +1,3 @@
+# Real winget-pkgs manifests, byte for byte (CRLF line ends and BOMs are
+# part of what the parser is tested on): no line-end conversion.
+* -text

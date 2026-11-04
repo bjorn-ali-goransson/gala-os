@@ -13,12 +13,14 @@ use std::time::{Duration, Instant};
 
 mod alloc_audit;
 mod clockcheck;
+mod lx_expect;
 mod telemetry;
 // The manifest's format and SHA-256 are the kernel's own code (one
 // definition for the writer and the reader).
 #[path = "../../kernel/src/trust/manifest.rs"]
 #[allow(dead_code)]
 mod manifest;
+mod otel;
 mod report;
 #[path = "../../kernel/src/trust/sha256.rs"]
 mod sha256;
@@ -312,6 +314,8 @@ const USER_DLLS: &[Dll] = &[
     // iphlpapi, secur32, winhttp: what the JDK's net.dll imports.
     Dll { package: "iphlpapi", file: "iphlpapi.dll", exported_as: "testiphlpapi.dll" },
     Dll { package: "secur32", file: "secur32.dll", exported_as: "testsecur32.dll" },
+    // gala's schannel.dll: the Schannel (TLS) package behind secur32.
+    Dll { package: "schannel", file: "schannel.dll", exported_as: "testschannel.dll" },
     Dll { package: "winhttp", file: "winhttp.dll", exported_as: "testwinhttp.dll" },
     // gala's ncrypt.dll (no key storage providers; bound at startup).
     Dll { package: "ncrypt", file: "ncrypt.dll", exported_as: "testncrypt.dll" },
@@ -346,6 +350,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "odbc32", file: "odbc32.dll", exported_as: "testodbc32.dll" },
     Dll { package: "wldap32", file: "wldap32.dll", exported_as: "testwldap32.dll" },
     Dll { package: "wsock32", file: "wsock32.dll", exported_as: "testwsock32.dll" },
+    // normaliz.dll: forwarders to kernel32's IDN functions (libcurl).
+    Dll { package: "normaliz", file: "normaliz.dll", exported_as: "testnormaliz.dll" },
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32.dll" },
     Dll { package: "authz", file: "authz.dll", exported_as: "testauthz.dll" },
@@ -395,7 +401,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("vmcycle_test", "ntdll.dll", "Windows/System32"),
     ("xmodify_test", "ntdll.dll", "Windows/System32"),
     ("smpsem_test", "ntdll.dll", "Windows/System32"),
+    ("smprace_test", "ntdll.dll", "Windows/System32"),
+    ("smprace_test", "kernel32.dll", "Windows/System32"),
     ("xstate_test", "ntdll.dll", "Windows/System32"),
+    ("straddle_test", "ntdll.dll", "Windows/System32"),
     ("statedump_test", "ntdll.dll", "Windows/System32"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
@@ -576,6 +585,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("session_test", "secur32.dll", "Windows/System32"),
     ("session_test", "bcryptprimitives.dll", "Windows/System32"),
     ("session_test", "bcrypt.dll", "Windows/System32"),
+    ("session_test", "user32.dll", "Windows/System32"),
+    ("session_test", "gdi32.dll", "Windows/System32"),
     ("session_test", "user/access_test/access_test.regseed", "registry"),
     ("lsa_test", "ntdll.dll", "Windows/System32"),
     ("lsa_test", "kernel32.dll", "Windows/System32"),
@@ -702,6 +713,20 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("nginx", "crypt32.dll", "Windows/System32"),
     ("nginx", "bcryptprimitives.dll", "Windows/System32"),
     ("nginx", "user/bin/nginx.exe", "nginx"),
+    // The Linux test programs (user/lx, ROADMAP LX): C:\lx\<binary>,
+    // which `lxrun=/lx/<binary>` runs.
+    ("lx_hello", "user/lx/bin/hello_test", "lx"),
+    ("lx_hello_pie", "user/lx/bin/hello_test-pie", "lx"),
+    ("lx_write_exit", "user/lx/bin/write_exit_test", "lx"),
+    ("lx_write_exit_pie", "user/lx/bin/write_exit_test-pie", "lx"),
+    ("lx_brk", "user/lx/bin/brk_test", "lx"),
+    ("lx_brk_pie", "user/lx/bin/brk_test-pie", "lx"),
+    ("lx_mmap", "user/lx/bin/mmap_test", "lx"),
+    ("lx_mmap_pie", "user/lx/bin/mmap_test-pie", "lx"),
+    ("lx_arch_prctl", "user/lx/bin/arch_prctl_test", "lx"),
+    ("lx_arch_prctl_pie", "user/lx/bin/arch_prctl_test-pie", "lx"),
+    ("lx_auxv", "user/lx/bin/auxv_test", "lx"),
+    ("lx_auxv_pie", "user/lx/bin/auxv_test-pie", "lx"),
     ("gdi32_test", "ntdll.dll", "Windows/System32"),
     ("gdi32_test", "kernel32.dll", "Windows/System32"),
     ("gdi32_test", "msvcrt.dll", "Windows/System32"),
@@ -722,6 +747,45 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("controls_test", "user32.dll", "Windows/System32"),
     ("controls_test", "gdi32.dll", "Windows/System32"),
     ("controls_test", "user/bin/controls_test.exe", "gala"),
+    ("oleaut32_test", "ntdll.dll", "Windows/System32"),
+    ("oleaut32_test", "kernel32.dll", "Windows/System32"),
+    ("oleaut32_test", "msvcrt.dll", "Windows/System32"),
+    ("oleaut32_test", "ole32.dll", "Windows/System32"),
+    ("oleaut32_test", "oleaut32.dll", "Windows/System32"),
+    ("oleaut32_test", "advapi32.dll", "Windows/System32"),
+    ("oleaut32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("oleaut32_test", "user/bin/oleaut32_test.exe", "gala"),
+    ("shlwapi_test", "ntdll.dll", "Windows/System32"),
+    ("shlwapi_test", "kernel32.dll", "Windows/System32"),
+    ("shlwapi_test", "msvcrt.dll", "Windows/System32"),
+    ("shlwapi_test", "shlwapi.dll", "Windows/System32"),
+    ("shlwapi_test", "advapi32.dll", "Windows/System32"),
+    ("shlwapi_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("shlwapi_test", "user/bin/shlwapi_test.exe", "gala"),
+    ("ole32_test", "ntdll.dll", "Windows/System32"),
+    ("ole32_test", "kernel32.dll", "Windows/System32"),
+    ("ole32_test", "msvcrt.dll", "Windows/System32"),
+    ("ole32_test", "ole32.dll", "Windows/System32"),
+    ("ole32_test", "oleaut32.dll", "Windows/System32"),
+    ("ole32_test", "advapi32.dll", "Windows/System32"),
+    ("ole32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("ole32_test", "uiautomationcore.dll", "Windows/System32"),
+    ("ole32_test", "user32.dll", "Windows/System32"),
+    ("ole32_test", "gdi32.dll", "Windows/System32"),
+    ("ole32_test", "user/bin/ole32_test.exe", "gala"),
+    ("shell32_test", "ntdll.dll", "Windows/System32"),
+    ("shell32_test", "kernel32.dll", "Windows/System32"),
+    ("shell32_test", "msvcrt.dll", "Windows/System32"),
+    ("shell32_test", "shell32.dll", "Windows/System32"),
+    ("shell32_test", "user32.dll", "Windows/System32"),
+    ("shell32_test", "gdi32.dll", "Windows/System32"),
+    ("shell32_test", "user/bin/shell32_test.exe", "gala"),
+    ("dbghelp_test", "ntdll.dll", "Windows/System32"),
+    ("dbghelp_test", "kernel32.dll", "Windows/System32"),
+    ("dbghelp_test", "msvcrt.dll", "Windows/System32"),
+    ("dbghelp_test", "dbghelp.dll", "Windows/System32"),
+    ("dbghelp_test", "normaliz.dll", "Windows/System32"),
+    ("dbghelp_test", "user/bin/dbghelp_test.exe", "gala"),
     ("richedit_test", "ntdll.dll", "Windows/System32"),
     ("richedit_test", "kernel32.dll", "Windows/System32"),
     ("richedit_test", "msvcrt.dll", "Windows/System32"),
@@ -1581,6 +1645,33 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("nginx_tls", "user/nginx/html/index.html", "nginx/html"),
     ("nginx_tls", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
     ("nginx_tls", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
+    // Schannel (TLS) against Nginx on the loopback address; the test CA
+    // in gala's machine root store.
+    ("schannel_test", "ntdll.dll", "Windows/System32"),
+    ("schannel_test", "kernel32.dll", "Windows/System32"),
+    ("schannel_test", "ws2_32.dll", "Windows/System32"),
+    ("schannel_test", "mswsock.dll", "Windows/System32"),
+    ("schannel_test", "msvcrt.dll", "Windows/System32"),
+    ("schannel_test", "advapi32.dll", "Windows/System32"),
+    ("schannel_test", "user32.dll", "Windows/System32"),
+    ("schannel_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("schannel_test", "bcrypt.dll", "Windows/System32"),
+    ("schannel_test", "crypt32.dll", "Windows/System32"),
+    ("schannel_test", "secur32.dll", "Windows/System32"),
+    ("schannel_test", "schannel.dll", "Windows/System32"),
+    ("schannel_test", "ncrypt.dll", "Windows/System32"),
+    ("schannel_test", "user/bin/nginx.exe", "nginx"),
+    ("schannel_test", "user/schannel_test/nginx.conf", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/server.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/server.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/untrusted.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/untrusted.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/expired.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/expired.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/ca.cer", "Windows/System32/gala/roots"),
+    ("schannel_test", "user/nginx/html/index.html", "nginx/html"),
+    ("schannel_test", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
+    ("schannel_test", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
     ("go_exit", "ntdll.dll", "Windows/System32"),
     ("go_exit", "kernel32.dll", "Windows/System32"),
     ("go_exit", "bcryptprimitives.dll", "Windows/System32"),
@@ -1637,7 +1728,9 @@ const USER_PROGRAMS: &[&str] = &[
     "vmcycle_test",
     "xmodify_test",
     "smpsem_test",
+    "smprace_test",
     "xstate_test",
+    "straddle_test",
     "statedump_test",
     "clockcal_test",
     "safepoint_test",
@@ -1651,6 +1744,7 @@ const USER_PROGRAMS: &[&str] = &[
     "netapi32_test",
     "clusapi_test",
     "sspi_test",
+    "schannel_test",
     "dpapi_test",
     "cert_test",
     "tds_test",
@@ -1759,10 +1853,28 @@ fn scenario_timeout(name: &str) -> Duration {
     } else {
         BOOT_TEST_TIMEOUT
     };
+    if limit == DUMP_SCENARIO_TIMEOUT {
+        return limit;
+    }
     // One host thread for both processors (SINGLE_THREAD_TCG) is about
     // half as fast: java_hello and java_http ran out of 300 s in a full
     // suite on a loaded 4-CPU host.
-    if single_thread_tcg(name) && !Path::new("/dev/kvm").exists() { limit * 2 } else { limit }
+    let limit =
+        if single_thread_tcg(name) && !Path::new("/dev/kvm").exists() { limit * 2 } else { limit };
+    limit.mul_f64(host_overload())
+}
+
+/// How overloaded the host is when a VM starts: the one-minute load
+/// average per host CPU, from 1 (not overloaded) to 3. A VM's time limit
+/// is stretched by it: under a load of 33 on 4 CPUs sshd_shell's guest
+/// had run 58 s when its 120 s were up, the client half done (2026-11-03).
+fn host_overload() -> f64 {
+    let cpus = thread::available_parallelism().map_or(1, |n| n.get()) as f64;
+    let load = fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|l| l.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()))
+        .unwrap_or(0.0);
+    (load / cpus).clamp(1.0, 3.0)
 }
 
 type Result<T = ()> = std::result::Result<T, String>;
@@ -1775,7 +1887,7 @@ commands:
   run          build, then boot in QEMU with serial on stdio [--headless]
   test         run host unit tests, then um-test (gala-um), replay-test, then the QEMU
                boot tests
-  boot-test    only the QEMU boot tests [scenario name filter]
+  boot-test    only the QEMU boot tests [scenario name filter, or exact names a,b,c]
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
@@ -1800,6 +1912,8 @@ commands:
                what was recorded
   bench        run user/bench on gala; write target/report/bench.json and
                compare with Windows: bench [<bench-windows.txt from run-all.ps1>]
+  lx-expect    run the Linux test programs (user/lx) on this Linux host and compare
+               with their expected.txt: lx-expect [--record] [--no-build] [--runs N]
   alloc-audit  find infallible allocations in the kernel's machine code (calls that
                abort on out-of-memory: Vec::clone, collect, ...; clippy cannot see
                them): alloc-audit [kernel ELF] [--all: also growth after try_reserve]
@@ -1813,6 +1927,12 @@ commands:
   events       summarize an event stream (XTASK_EVENTS=...): system calls by time,
                failing statuses, each thread's last calls, faults, processes, images:
                events <events.jsonl>
+  otel         convert a boot's event stream and serial log to OpenTelemetry
+               (OTLP/JSON traces, logs, metrics; view in Jaeger or an OTel
+               collector, docs/WORKFLOW.md, OpenTelemetry): otel <serial log |
+               events.jsonl | scenario> [<events.jsonl>] [--out <prefix>]
+               [--endpoint http://host:4318 (or OTEL_EXPORTER_OTLP_ENDPOINT)];
+               XTASK_OTEL=1 makes boot-test write it for every boot
   docker-test  build the test image (docker/test.Dockerfile) and run
                `cargo xtask test` (or the given xtask arguments) inside it
   report       run every test program on gala; write target/report/gala.{json,md}
@@ -1878,6 +1998,8 @@ fn main() -> ExitCode {
             Some("bench") => {
                 bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
             }
+            Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
+            Some("qemu") => build_qemu(),
             Some("alloc-audit") => alloc_audit(
                 release,
                 args.get(1).filter(|a| !a.starts_with("--")).map(Path::new),
@@ -1899,6 +2021,7 @@ fn main() -> ExitCode {
                     .map(|text| print!("{}", triage::events_summary(&text))),
                 None => Err("usage: cargo xtask events <events.jsonl>".into()),
             },
+            Some("otel") => otel_cli(&args[1..]),
             Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
                 None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
@@ -1976,9 +2099,14 @@ fn unit_tests() -> Result {
             .arg("handover::"),
     )?;
     run_cmd(cargo().args(["test", "--package", "xtask"]))?;
+    // The Linux personality's ABI data, checked against the user/lx
+    // transcripts recorded on Linux (ROADMAP LX).
+    run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
-    run_cmd(cargo().args(["test", "--package", "galapkg"]))
+    run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
+    // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
+    run_cmd(cargo().args(["test", "--package", "schannel_tls"]))
 }
 
 /// `cargo xtask alloc-audit`: disassembles the kernel (the debug build
@@ -2601,6 +2729,18 @@ enum Boot {
 /// Lines the event stream (debug console) of a scenario must contain.
 const EVENT_EXPECT: &[(&str, &[&str])] = &[
     (
+        // RS step B2: each window is registered in its own session, and
+        // HWNDs asked for across sessions are named.
+        "session_test",
+        &[
+            r#""ev":"window","op":"create""#,
+            r#""ev":"window","op":"describe""#,
+            r#""session":0,"class":"GalaSessionTestS0""#,
+            r#""session":1,"class":"GalaSessionTestS1""#,
+            r#""ev":"window","op":"other session""#,
+        ],
+    ),
+    (
         "sshd_server",
         &[
             r#""ev":"tcp accept""#,
@@ -2620,12 +2760,12 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
     (
         "events",
         &[
-            r#""ev":"process start","pid":4,"session":1,"name":"import_test.exe""#,
+            r#""ev":"process start","pid":4,"session":1,"name":"import_test.exe","personality":"nt""#,
             r#""ev":"image","pid":4,"name":"import_test.exe""#,
             r#""name":"\\Device\\HarddiskVolume1\\gala\\testdll.dll""#,
             r#""ev":"syscall","pid":4,"tid":8,"nr":8,"name":"NtWriteFile""#,
             r#""ev":"thread exit","pid":4,"tid":8,"status":0"#,
-            r#""ev":"process exit","pid":4,"session":1,"status":0"#,
+            r#""ev":"process exit","pid":4,"session":1,"status":0,"personality":"nt""#,
         ],
     ),
 ];
@@ -2786,9 +2926,17 @@ fn guest_port(name: &str) -> u16 {
     if SSH_PORT_22.contains(&name) { 22 } else { 7 }
 }
 
-/// The scenario an ISO was made for (`test-<name>.iso`, `serve-<name>.iso`).
+/// The scenario an ISO was made for (`test-<name>.iso`, `serve-<name>.iso`,
+/// and an `XTASK_REPEAT` copy `test-<name>.r<i>.iso`). Without the repeat
+/// suffix a repeat of sshd_shell was its own unknown scenario: its port
+/// forward went to the guest's port 7 instead of sshd's 22 (every
+/// connection reset), and a GPU scenario lost its display.
 fn iso_scenario(iso: &Path) -> &str {
     let stem = iso.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let stem = match stem.rsplit_once(".r") {
+        Some((name, i)) if !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => stem,
+    };
     stem.strip_prefix("test-").or_else(|| stem.strip_prefix("serve-")).unwrap_or(stem)
 }
 
@@ -2836,10 +2984,86 @@ fn scenario_boot(name: &str) -> Boot {
 /// (The intermittent Java heap corruption is not this: WORKFLOW "Known
 /// intermittent".)
 const SINGLE_THREAD_TCG: &[&str] =
-    &["java_", "elasticsearch", "dotnet_", "pwsh_", "flaui", "xmodify_test"];
+    &["java_", "elasticsearch", "dotnet_", "pwsh_", "flaui", "xmodify_test", "straddle_test"];
 
 fn single_thread_tcg(name: &str) -> bool {
     SINGLE_THREAD_TCG.iter().any(|s| name.contains(s))
+}
+
+/// The QEMU gala is tested with: QEMU_VERSION built by `cargo xtask qemu`
+/// into `~/.cache/gala-qemu/<version>`. QEMU 8.1.0-8.2.5 (Ubuntu 24.04's
+/// 8.2.2) loses writes to the second page of a translated block that
+/// spans two pages, which corrupted JIT-compiled code (the JVM's heap
+/// "corruption", WORKFLOW "Known intermittent"); 8.2.6 fixed it.
+const QEMU_VERSION: &str = "11.1.3";
+const QEMU_SHA256: &str = "5a8289c7940dc77d3873c81a6c29ba3afe1446fc9d36e77fa1658cdbecb84b22";
+
+fn qemu_prefix() -> PathBuf {
+    let home = env::var_os("HOME").map_or_else(|| PathBuf::from("/root"), PathBuf::from);
+    home.join(".cache/gala-qemu").join(QEMU_VERSION)
+}
+
+/// `XTASK_QEMU` (a path), else the pinned build if present, else the one
+/// on PATH (with a warning once: it may be a QEMU with the 8.2.x bug).
+fn qemu_binary() -> PathBuf {
+    if let Some(p) = env::var_os("XTASK_QEMU") {
+        return PathBuf::from(p);
+    }
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let pinned = qemu_prefix().join("bin/qemu-system-x86_64");
+    if pinned.is_file() {
+        WARNED.call_once(|| eprintln!("xtask: QEMU {QEMU_VERSION} ({})", pinned.display()));
+        return pinned;
+    }
+    WARNED.call_once(|| {
+        eprintln!(
+            "xtask: QEMU {QEMU_VERSION} not built (`cargo xtask qemu`); using qemu-system-x86_64 from PATH"
+        );
+    });
+    PathBuf::from("qemu-system-x86_64")
+}
+
+/// `cargo xtask qemu`: downloads QEMU_VERSION from download.qemu.org,
+/// checks QEMU_SHA256, and builds only the x86_64 system emulator (with
+/// user networking) into `qemu_prefix()`. Build dependencies: WORKFLOW
+/// "QEMU".
+fn build_qemu() -> Result {
+    let prefix = qemu_prefix();
+    let bin = prefix.join("bin/qemu-system-x86_64");
+    if bin.is_file() {
+        eprintln!("xtask: QEMU {QEMU_VERSION} already built at {}", bin.display());
+        return Ok(());
+    }
+    let work = target_dir().join("qemu-build");
+    fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+    let tarball = work.join(format!("qemu-{QEMU_VERSION}.tar.xz"));
+    let url = format!("https://download.qemu.org/qemu-{QEMU_VERSION}.tar.xz");
+    eprintln!("xtask: fetching {url}");
+    run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&tarball).arg(&url))?;
+    let sum =
+        Command::new("sha256sum").arg(&tarball).output().map_err(|e| format!("sha256sum: {e}"))?;
+    let sum = String::from_utf8_lossy(&sum.stdout);
+    if sum.split_whitespace().next() != Some(QEMU_SHA256) {
+        let _ = fs::remove_file(&tarball);
+        return Err(format!("{url}: SHA-256 mismatch ({sum})"));
+    }
+    run_cmd(Command::new("tar").arg("xf").arg(&tarball).arg("-C").arg(&work))?;
+    let src = work.join(format!("qemu-{QEMU_VERSION}"));
+    let build = work.join("build");
+    fs::create_dir_all(&build).map_err(|e| format!("{}: {e}", build.display()))?;
+    run_cmd(
+        Command::new(src.join("configure"))
+            .current_dir(&build)
+            .args(["--target-list=x86_64-softmmu", "--enable-slirp", "--disable-docs"])
+            .args(["--disable-werror", "--disable-gtk", "--disable-sdl"])
+            .arg(format!("--prefix={}", prefix.display())),
+    )?;
+    let jobs = std::thread::available_parallelism().map_or(2, |n| n.get()).to_string();
+    run_cmd(Command::new("make").current_dir(&build).args(["-j", &jobs]))?;
+    run_cmd(Command::new("make").current_dir(&build).arg("install"))?;
+    let _ = fs::remove_dir_all(&work);
+    eprintln!("xtask: QEMU {QEMU_VERSION} built at {}", bin.display());
+    Ok(())
 }
 
 fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
@@ -2860,7 +3084,7 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
         memory = memory.max(ELASTICSEARCH_MEMORY_MIB);
     }
     let extra = std::env::var("XTASK_QEMU_ARGS").unwrap_or_default();
-    let mut cmd = Command::new("qemu-system-x86_64");
+    let mut cmd = Command::new(qemu_binary());
     // Two processors (one for `onecpu_*` scenarios: telemetry::vm_cpus).
     let cpus = telemetry::vm_cpus(iso).to_string();
     cmd.args(["-machine", "q35", "-cpu", "max", "-m", &format!("{memory}M"), "-smp", &cpus]);
@@ -3039,6 +3263,17 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["vmcycle_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // Code rewritten where an instruction straddles a page boundary
+        // (a JIT patching an object address in compiled code): the next
+        // call must run the new instruction. Fails under QEMU 8.1.0-8.2.5
+        // TCG (the Java corruption, WORKFLOW "QEMU"); xtask's pinned QEMU
+        // passes it.
+        name: "straddle_test",
+        cmdline: "qemu_exit run=straddle_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["straddle_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // Code rewritten on one processor and run on the other (a JIT's
         // garbage collector patching compiled code).
         name: "xmodify_test",
@@ -3120,6 +3355,15 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=smpsem_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["smpsem_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Races found by the hygiene sweep (2026-11-03): WaitAll with an
+        // object twice, a timer's expiry vs. a re-arm, a name vs. its
+        // handle count, a process's handles vs. its signal.
+        name: "smprace_test",
+        cmdline: "qemu_exit run=smprace_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["smprace_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // N1a: a kernel TCP echo server on port 7 behind QEMU's user-mode
@@ -3312,16 +3556,22 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["system_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
-        // Sessions, ROADMAP RS step B1 (user/session_test): run as SYSTEM
-        // (session 0), it starts a child in session 1 and checks the
-        // session ids and the per-session named objects.
+        // Sessions, ROADMAP RS steps B1 and B2 (user/session_test): run
+        // as SYSTEM (session 0), it starts a child in session 1 and checks
+        // the session ids and the per-session named objects; then a
+        // second child in session 1 and the parent each make a window
+        // the other cannot find, enumerate or message (the log says
+        // where the HWND asked for is).
         name: "session_test",
-        cmdline: "qemu_exit as=system events=process run=session_test.exe",
+        cmdline: "qemu_exit as=system events=process,window run=session_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "session: 1 made, named objects in \\Sessions\\1\\BaseNamedObjects",
             "session 0): starting at",
             "session 1): starting at",
+            "desktop: session 0's windows are not shown (the console shows session 1)",
+            "in session 0: not visible across sessions",
+            "in session 1: not visible across sessions",
             "session_test: ok",
             "exited with status 0x00000000",
         ],
@@ -3880,6 +4130,54 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["controls_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // AG: oleaut32's dates, currency and string conversions and
+        // VarCmp against documented behaviour, for what wxWidgets
+        // (FileZilla Server's GUI) and SQL Server LocalDB import
+        // (user/oleaut32_test/main.c, mingw).
+        name: "oleaut32_test",
+        cmdline: "qemu_exit run=oleaut32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["oleaut32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: shlwapi's path and string functions against documented
+        // behaviour, for what SQL Server LocalDB and wxWidgets import
+        // (user/shlwapi_test/main.c, mingw).
+        name: "shlwapi_test",
+        cmdline: "qemu_exit run=shlwapi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["shlwapi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: ole32's PROPVARIANT and STGMEDIUM clean-up, the
+        // IRunnableObject helpers and proxy blankets against documented
+        // behaviour, for what wxWidgets and SQL Server LocalDB import
+        // (user/ole32_test/main.c, mingw).
+        name: "ole32_test",
+        cmdline: "qemu_exit run=ole32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["ole32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: shell32's ShellExecuteExW, dropped files, DragAcceptFiles
+        // and SHFileOperationW against documented behaviour, for what
+        // wxWidgets imports (user/shell32_test/main.c, mingw).
+        name: "shell32_test",
+        cmdline: "qemu_exit run=shell32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["shell32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // AG: dbghelp's ImageNtHeader and SymSrvGetFileIndexInfoW (what
+        // SQL Server LocalDB's SqlDumper imports) and normaliz.dll's IDN
+        // forwarders (libcurl) against documented behaviour
+        // (user/dbghelp_test/main.c, mingw).
+        name: "dbghelp_test",
+        cmdline: "qemu_exit run=dbghelp_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["dbghelp_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // W3: rich edit controls (msftedit.dll's RICHEDIT50W, riched20.dll's
         // RichEdit20W/A) against documented behaviour, for wxWidgets'
         // wxTE_RICH2 text controls (FileZilla's message log;
@@ -4210,7 +4508,7 @@ const SCENARIOS: &[Scenario] = &[
             // R8: the next build is in the signed manifest.
             "manifest: the next kernel is /boot/kernel-next of release 1",
             "handover: gala hands over to gala-next (record framing 1-1, image layout 1, \
-             extended state 0xe7, 35 section kinds; with programs)",
+             extended state 0xe7, 36 section kinds; with programs)",
             "handover: carrying 1 process(es), 10 thread(s)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala-next; the record was written by an older kernel \
@@ -4261,14 +4559,14 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "handover_k32_test: ready",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0xe7, 34 section kinds; with programs)",
+             extended state 0xe7, 35 section kinds; with programs)",
             "handover: refused: the next kernel (gala) reads PROCESSES up to version 3; this \
              kernel writes version 4, which needs a reader of version 4",
             "handover_k32_test: slept",
             "handover_k32_test: ok",
             "exited with status 0x00000000",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0xe7, 34 section kinds)",
+             extended state 0xe7, 35 section kinds)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala; this build does not read the writer's name",
             "handover: skipped section 33 (unknown to this kernel)",
@@ -5088,6 +5386,16 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xtask: net client: tls ok"],
     },
     Scenario {
+        // Schannel (secur32 + schannel.dll): TLS 1.3 and 1.2 clients
+        // against Nginx (OpenSSL) on the loopback address, certificate
+        // validation, and a server (AcceptSecurityContext) in-process.
+        name: "schannel_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=schannel_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["schannel_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         name: "go_exit",
         cmdline: "qemu_exit run=go_exit.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -5330,6 +5638,8 @@ const SCENARIOS: &[Scenario] = &[
              (access violation) in thread",
             "(crash.exe+0x",
             "writing address 0x0",
+            // The personality (ROADMAP LX seam 2) and session.
+            "crash report:   personality nt, session ",
             "crash report:   rax=",
             "crash report:   [rsp+0x00]",
             "process crash.exe (pid 4) exited with status 0xc0000005",
@@ -5352,6 +5662,105 @@ const SCENARIOS: &[Scenario] = &[
             "process crash.exe (pid 4) exited with status 0xc0000005",
             BOOT_OK_MARKER,
         ],
+    },
+    // The Linux personality (ROADMAP LX milestone 1): each user/lx program,
+    // static and static-pie, with the arguments and environment `cargo
+    // xtask lx-expect` gives it on Linux.
+    Scenario {
+        // user/lx/hello_test, static (ET_EXEC): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_hello",
+        cmdline: "qemu_exit lxrun=/lx/hello_test lxargs=./hello_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/hello_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/hello_test, static-pie (ET_DYN): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_hello_pie",
+        cmdline: "qemu_exit lxrun=/lx/hello_test-pie lxargs=./hello_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/hello_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/write_exit_test, static (ET_EXEC): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_write_exit",
+        cmdline: "qemu_exit lxrun=/lx/write_exit_test lxargs=./write_exit_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/write_exit_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/write_exit_test, static-pie (ET_DYN): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_write_exit_pie",
+        cmdline: "qemu_exit lxrun=/lx/write_exit_test-pie lxargs=./write_exit_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/write_exit_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/brk_test, static (ET_EXEC): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_brk",
+        cmdline: "qemu_exit lxrun=/lx/brk_test lxargs=./brk_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/brk_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/brk_test, static-pie (ET_DYN): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_brk_pie",
+        cmdline: "qemu_exit lxrun=/lx/brk_test-pie lxargs=./brk_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/brk_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/mmap_test, static (ET_EXEC): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_mmap",
+        cmdline: "qemu_exit lxrun=/lx/mmap_test lxargs=./mmap_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/mmap_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/mmap_test, static-pie (ET_DYN): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_mmap_pie",
+        cmdline: "qemu_exit lxrun=/lx/mmap_test-pie lxargs=./mmap_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/mmap_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/arch_prctl_test, static (ET_EXEC): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_arch_prctl",
+        cmdline: "qemu_exit lxrun=/lx/arch_prctl_test lxargs=./arch_prctl_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/arch_prctl_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/arch_prctl_test, static-pie (ET_DYN): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_arch_prctl_pie",
+        cmdline: "qemu_exit lxrun=/lx/arch_prctl_test-pie lxargs=./arch_prctl_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/arch_prctl_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/auxv_test, static (ET_EXEC): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_auxv",
+        cmdline: "qemu_exit lxrun=/lx/auxv_test lxargs=./auxv_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/auxv_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/auxv_test, static-pie (ET_DYN): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_auxv_pie",
+        cmdline: "qemu_exit lxrun=/lx/auxv_test-pie lxargs=./auxv_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/auxv_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
         name: "hello",
@@ -5545,14 +5954,22 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     let t0 = Instant::now();
     build_kernel(release)?;
     let built = t0.elapsed();
+    // With `XTASK_REPEAT`, a scenario's exact name selects it alone (it
+    // repeats one scenario: handover_upgrade's name is part of
+    // handover_upgrade_uefi's); otherwise the filter is a substring.
+    let exact = env::var_os("XTASK_REPEAT").is_some()
+        && filter.is_some_and(|f| SCENARIOS.iter().any(|s| s.name == f.as_str()));
     let selected: Vec<&Scenario> = SCENARIOS
         .iter()
         .filter(|s| match filter {
             // Pending scenarios run only when named exactly.
             None => !PENDING.contains(&s.name),
-            Some(f) => {
-                s.name == f.as_str() || (s.name.contains(f.as_str()) && !PENDING.contains(&s.name))
-            }
+            Some(f) if exact => s.name == f.as_str(),
+            // `name$`: that scenario only (`hello$`, not java_hello too).
+            Some(f) if f.ends_with('$') => s.name == f.trim_end_matches('$'),
+            // `a,b,c`: exactly these scenarios.
+            Some(f) if f.contains(',') => f.split(',').any(|n| n == s.name),
+            Some(f) => s.name.contains(f.as_str()) && !PENDING.contains(&s.name),
         })
         .collect();
     if selected.is_empty() {
@@ -5919,8 +6336,13 @@ fn run_parallel_on<J: Sync, T: Send>(
 const NOT_IN_UM: &[(&str, &str)] = &[
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
+    ("smprace_test", "round 4 starts child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("uipi_test", "a child process (one NT process per Linux process)"),
+    ("shell32_test", "a child process (ShellExecuteExW runs it)"),
+    // Hangs in its TLS 1.3 handshake with the in-process server (both
+    // threads waiting); passes in QEMU. A gala-um socket gap: ROADMAP TLS.
+    ("schannel_test", "the in-process TLS server's sockets (gala-um gap)"),
     ("winevent_test", "a child process (one NT process per Linux process)"),
     ("uia_test", "a child process (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
@@ -6709,9 +7131,42 @@ struct BootTime {
 /// The kernel's first serial line (see `kernel_main`).
 const KERNEL_BANNER: &str = "gala-os kernel";
 
+/// What QEMU prints (its standard error) when it cannot set up a host
+/// port forward (the port was taken by another process meanwhile).
+const QEMU_FORWARD_FAILED: &str = "host forwarding rule";
+
 /// Boots `iso` (with `boot` firmware) until QEMU exits or `timeout`;
 /// returns the exit status (None on timeout), the serial log and timing.
+/// A net scenario whose QEMU could not forward its host port (another
+/// process took it between the lease and QEMU's bind) boots again with
+/// another port, up to three times.
 fn run_vm(
+    iso: &Path,
+    boot: Boot,
+    timeout: Duration,
+    net: Option<(&'static str, NetClient)>,
+    stop_after_client: bool,
+    disk: Option<&Path>,
+    screen: Option<&'static ScreenCheck>,
+) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
+    let mut tries = 0;
+    loop {
+        let run = run_vm_once(iso, boot, timeout, net, stop_after_client, disk, screen)?;
+        let stderr = fs::read_to_string(iso.with_extension("qemu.stderr")).unwrap_or_default();
+        tries += 1;
+        if net.is_none() || tries == 3 || !stderr.contains(QEMU_FORWARD_FAILED) {
+            return Ok(run);
+        }
+        eprintln!(
+            "xtask: {}: QEMU could not forward its host port ({}); booting again with another",
+            iso.display(),
+            stderr.trim()
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_vm_once(
     iso: &Path,
     boot: Boot,
     timeout: Duration,
@@ -6740,7 +7195,12 @@ fn run_vm(
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // QEMU's own complaints (a port it cannot forward, a bad option):
+        // in the failed log's telemetry.
+        .stderr(
+            fs::File::create(iso.with_extension("qemu.stderr"))
+                .map_or_else(|_| Stdio::null(), Stdio::from),
+        );
     // Early-boot telemetry (telemetry.rs): QEMU's resets and guest errors,
     // SeaBIOS's log, the kernel's phase markers, QMP for the vCPU count.
     let qemu_log = iso.with_extension("qemu.log");
@@ -6771,7 +7231,10 @@ fn run_vm(
         .arg("-qmp")
         .arg(format!("unix:{},server=on,wait=off", qmp.display()));
     let host_before = telemetry::host_state();
-    let port = if net.is_some() { Some(free_port()?) } else { None };
+    // Held until this boot (and its client) is over: no other VM of this
+    // xtask gets the port meanwhile.
+    let lease = if net.is_some() { Some(PortLease::new()?) } else { None };
+    let port = lease.as_ref().map(|l| l.0);
     let (marker, kind) = net.unwrap_or(("", NetClient::Echo));
     if let Some(port) = port {
         add_net_to(&mut cmd, port, guest_port(iso_scenario(iso)));
@@ -6907,6 +7370,13 @@ fn run_vm(
         serial: &serial,
         logs: [&qemu_log, &bios_log, &phases_log],
     });
+    if let Some(port) = port {
+        // Which forward this VM had (VMs at once each have their own).
+        serial += &format!(
+            "xtask: net: host 127.0.0.1:{port} forwarded to the guest's port {} (TCP and UDP)\n",
+            guest_port(iso_scenario(iso))
+        );
+    }
     if let Some(client) = client {
         let verdict = client.join().unwrap_or_else(|_| Err("client panicked".into()));
         serial += &match verdict {
@@ -6975,6 +7445,11 @@ fn boot_telemetry(f: BootFacts) -> String {
             qemu_log.display(),
             telemetry::tail(qemu_log, 30)
         );
+    }
+    let stderr = f.iso.with_extension("qemu.stderr");
+    let complaints = telemetry::tail(&stderr, 10);
+    if !complaints.trim().is_empty() {
+        out += &format!("xtask: QEMU's standard error ({}):\n{complaints}\n", stderr.display());
     }
     out
 }
@@ -7931,17 +8406,63 @@ fn serve(release: bool, args: &[String]) -> Result {
     run_cmd(&mut cmd)
 }
 
-/// A free host TCP port (for QEMU's port forward).
-fn free_port() -> Result<u16> {
-    // Free for TCP and for UDP (both are forwarded).
-    for _ in 0..32 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
-            return Ok(port);
+/// Ports leased to this xtask's running VMs (see `PortLease`).
+static LEASED_PORTS: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+
+/// A host port for one VM's forward (TCP and UDP), held until dropped:
+/// no other VM of this xtask gets it meanwhile. Taken below the kernel's
+/// ephemeral range (`ip_local_port_range`), from a random start: a port
+/// from `bind(0)` was free when asked but is an ephemeral port, which any
+/// outgoing connection (another VM's net client, another agent's) could
+/// take before QEMU binds it. Another process on the host can still
+/// take it first; QEMU then cannot forward it and `run_vm` boots again
+/// with another port.
+struct PortLease(u16);
+
+impl PortLease {
+    fn new() -> Result<Self> {
+        let low = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+            .ok()
+            .and_then(|r| r.split_whitespace().next().and_then(|p| p.parse::<u16>().ok()))
+            .unwrap_or(32768);
+        let (first, span) = if low > 12000 { (low - 12000, 12000u32) } else { (1024, 8000) };
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos())
+            ^ std::process::id().wrapping_mul(2_654_435_761);
+        let mut leased = LEASED_PORTS.lock().unwrap_or_else(|e| e.into_inner());
+        for i in 0..span {
+            let port = first + (seed.wrapping_add(i.wrapping_mul(7919)) % span) as u16;
+            if leased.contains(&port) {
+                continue;
+            }
+            // Free for TCP and for UDP (both are forwarded).
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+                && std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok()
+            {
+                leased.push(port);
+                return Ok(PortLease(port));
+            }
         }
+        Err(format!("no port in {first}..{} free for both TCP and UDP", u32::from(first) + span))
     }
-    Err("no port free for both TCP and UDP".into())
+}
+
+impl Drop for PortLease {
+    fn drop(&mut self) {
+        let mut leased = LEASED_PORTS.lock().unwrap_or_else(|e| e.into_inner());
+        leased.retain(|&p| p != self.0);
+        // The net client's files (`client_dir`).
+        let _ = fs::remove_dir_all(root().join("target/net-client").join(self.0.to_string()));
+    }
+}
+
+/// A free host port for `screenshot` (its only VM, for the whole run).
+fn free_port() -> Result<u16> {
+    let lease = PortLease::new()?;
+    let port = lease.0;
+    std::mem::forget(lease);
+    Ok(port)
 }
 
 /// The host side of `net_echo`: sends NET_ECHO_BYTES of a pattern to the
@@ -8246,13 +8767,22 @@ fn ftp_client(port: u16) -> Result {
     Ok(())
 }
 
-/// galatest's password (user/access_test/access_test.regseed has its hash).
-const SSH_PASSWORD: &str = "Gala-Test-1";
+/// The host-side net client's own files (ssh's key copy and trace, the
+/// sftp transfer, the askpass script) for the VM whose forward is host
+/// `port`: VMs that run at once (`XTASK_REPEAT_JOBS`, the suite) have
+/// distinct ports, so their clients never share a file (one client
+/// rewriting the key while another's ssh read it, one trace written by
+/// two). Removed by `boot_vm` after the run.
+fn client_dir(port: u16) -> Result<PathBuf> {
+    let dir = root().join("target/net-client").join(port.to_string());
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    Ok(dir)
+}
 
-/// The host's ssh as galatest with the test key, running `command` on
-/// gala; its standard output, or why it failed (the end of its -v trace).
-fn ssh_key_run(port: u16, command: &[&str]) -> Result<String> {
-    let key = root().join("target/sshd_login_client_ed25519");
+/// The test key (user/sshd/client_ed25519) as ssh wants it: a 0600 copy
+/// (ssh refuses a private key others may read), in `client_dir(port)`.
+fn ssh_key(port: u16) -> Result<PathBuf> {
+    let key = client_dir(port)?.join("client_ed25519");
     if !key.exists() {
         fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
         #[cfg(unix)]
@@ -8262,6 +8792,16 @@ fn ssh_key_run(port: u16, command: &[&str]) -> Result<String> {
                 .map_err(|e| e.to_string())?;
         }
     }
+    Ok(key)
+}
+
+/// galatest's password (user/access_test/access_test.regseed has its hash).
+const SSH_PASSWORD: &str = "Gala-Test-1";
+
+/// The host's ssh as galatest with the test key, running `command` on
+/// gala; its standard output, or why it failed (the end of its -v trace).
+fn ssh_key_run(port: u16, command: &[&str]) -> Result<String> {
+    let key = ssh_key(port)?;
     let out = Command::new("timeout")
         .arg("120")
         .arg("ssh")
@@ -8298,14 +8838,8 @@ fn ssh_key_run(port: u16, command: &[&str]) -> Result<String> {
 fn ssh_shell_client(port: u16) -> Result {
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
-    let key = root().join("target/sshd_login_client_ed25519");
-    fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
-    }
-    let trace = root().join("target/sshd_shell_client.trace");
+    let key = ssh_key(port)?;
+    let trace = client_dir(port)?.join("ssh.trace");
     let mut ssh = Command::new("timeout")
         .arg("300")
         .arg("ssh")
@@ -8379,6 +8913,9 @@ fn ssh_shell_client(port: u16) -> Result {
         let started = Instant::now();
         send(b"\x03")?;
         thread::sleep(Duration::from_secs(1));
+        // Typed once: the shell's control handler takes Ctrl+C while
+        // `sleep` runs (a late one, a lost wake-up, dropped this line:
+        // ROADMAP "sshd_shell's Ctrl+C fixed").
         send(b"echo gala-$((50-6))\r")?;
         let at = expect("gala-44\r\n", at, 30).map_err(|e| format!("Ctrl+C: {e}"))?;
         if started.elapsed() > Duration::from_secs(25) {
@@ -8426,14 +8963,8 @@ fn ssh_shell_client(port: u16) -> Result {
 /// test key: `put` a 200 KiB file, `ls`, `get` it back, `rm` it; the
 /// download must equal the upload and the listing name the file.
 fn sftp_client(port: u16) -> Result {
-    let key = root().join("target/sshd_login_client_ed25519");
-    fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
-    }
-    let dir = root().join("target/sshd_sftp");
+    let key = ssh_key(port)?;
+    let dir = client_dir(port)?.join("sftp");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let data: Vec<u8> = (0..200 * 1024u32).map(|i| (i * 31 + i / 7) as u8).collect();
@@ -8520,7 +9051,7 @@ fn ssh_client(port: u16, password: bool) -> Result {
     ssh.arg("120").arg("ssh").arg("-v");
     if password {
         // ssh asks SSH_ASKPASS (forced) for the password: a script.
-        let askpass = root().join("target/sshd_password_askpass");
+        let askpass = client_dir(port)?.join("askpass");
         fs::write(&askpass, format!("#!/bin/sh\necho '{SSH_PASSWORD}'\n"))
             .map_err(|e| e.to_string())?;
         #[cfg(unix)]
@@ -8537,14 +9068,7 @@ fn ssh_client(port: u16, password: bool) -> Result {
             .args(["-o", "NumberOfPasswordPrompts=1"]);
     } else {
         // ssh refuses a private key others may read: a 0600 copy.
-        let key = root().join("target/sshd_login_client_ed25519");
-        fs::copy(root().join("user/sshd/client_ed25519"), &key).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&key, fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
-        }
+        let key = ssh_key(port)?;
         ssh.arg("-i").arg(&key).args(["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"]);
     }
     let out = ssh
@@ -8693,14 +9217,19 @@ fn judge(
 ) -> Result {
     judge_log(scenario, status, timed_out, serial).map_err(|e| {
         let dir = target_dir().join("failed");
-        let path = dir.join(format!("{}.log", scenario.name));
+        // A repeat's boot (`test-<name>.r<i>.iso`) keeps its own: boots
+        // at once must not overwrite each other's.
+        let name = match run.events.as_deref().and_then(repeat_index) {
+            Some(i) => format!("{}.r{i}", scenario.name),
+            None => scenario.name.to_string(),
+        };
+        let path = dir.join(format!("{name}.log"));
         let symbols = symbolize(RELEASE.load(std::sync::atomic::Ordering::Relaxed), serial);
         let events = run.events.as_deref().and_then(|p| fs::read_to_string(p).ok());
         // The event stream (when it was on) next to the log.
         if let Some(text) = events.as_deref().filter(|t| !t.is_empty()) {
-            let _ = fs::create_dir_all(&dir).and_then(|()| {
-                fs::write(dir.join(format!("{}.events.jsonl", scenario.name)), text)
-            });
+            let _ = fs::create_dir_all(&dir)
+                .and_then(|()| fs::write(dir.join(format!("{name}.events.jsonl")), text));
         }
         let facts = triage::Facts {
             scenario: scenario.name,
@@ -8715,6 +9244,13 @@ fn judge(
             Err(_) => e,
         }
     })
+}
+
+/// The repeat number of a file of an `XTASK_REPEAT` boot
+/// (`test-<name>.r<i>.<ext>`).
+fn repeat_index(path: &Path) -> Option<usize> {
+    let name = path.file_name()?.to_str()?;
+    name.split('.').find_map(|part| part.strip_prefix('r')?.parse().ok())
 }
 
 /// What xtask knows of a boot besides its log (for the triage).
@@ -8733,6 +9269,201 @@ fn host_facts() -> String {
     let disk = free_disk_mib(&target_dir())
         .map_or("?".into(), |m| format!("{:.1} GiB", m as f64 / 1024.0));
     format!("{cpus} CPUs, load {load}, {disk} free on the target disk")
+}
+
+/// The kernel build a boot ran: profile and the checkout's commit.
+fn kernel_build() -> String {
+    let release = RELEASE.load(std::sync::atomic::Ordering::Relaxed);
+    let commit = Command::new("git")
+        .args(["describe", "--always", "--dirty"])
+        .current_dir(root())
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    format!("{} {commit}", if release { "release" } else { "debug" })
+}
+
+/// Converts a boot that just ended to OTLP/JSON (`otel_export_at`).
+fn otel_export(
+    serial: &str,
+    events: &str,
+    scenario: &str,
+    prefix: &Path,
+    endpoint: Option<&str>,
+) -> Result<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    otel_export_at(serial, events, scenario, prefix, endpoint, now)
+}
+
+/// Converts a boot to OTLP/JSON: `<prefix>.traces.json` (one request per
+/// line, `otel::SPANS_PER_REQUEST` spans each), `<prefix>.logs.json`,
+/// `<prefix>.metrics.json`; posts them to `endpoint` when given. The
+/// boot's time 0 in wall time is `end_unix_ns` minus its last event's
+/// time. Returns the report (`otel:` lines) and where the files went.
+fn otel_export_at(
+    serial: &str,
+    events: &str,
+    scenario: &str,
+    prefix: &Path,
+    endpoint: Option<&str>,
+    end_unix_ns: u64,
+) -> Result<String> {
+    let last = events
+        .lines()
+        .filter_map(|l| triage::field(l, "t").and_then(|t| t.parse::<u64>().ok()))
+        .max()
+        .unwrap_or(0);
+    let build = kernel_build();
+    let export = otel::convert(&otel::Boot {
+        serial,
+        events,
+        scenario,
+        build: &build,
+        start_unix_ns: end_unix_ns.saturating_sub(last),
+    });
+    let name = |signal: &str| {
+        let mut p = prefix.as_os_str().to_owned();
+        p.push(format!(".{signal}.json"));
+        PathBuf::from(p)
+    };
+    let write = |signal: &str, bodies: &[String]| -> Result<PathBuf> {
+        let path = name(signal);
+        let mut text = bodies.join("\n");
+        text.push('\n');
+        fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        Ok(path)
+    };
+    let traces = write("traces", &export.traces)?;
+    write("logs", &export.logs)?;
+    write("metrics", std::slice::from_ref(&export.metrics))?;
+    let mut said = export.report.lines();
+    said += &format!(
+        "otel: wrote {} (and .logs.json, .metrics.json; OTLP/JSON, one request per line)\n",
+        traces.display()
+    );
+    if let Some(endpoint) = endpoint {
+        match otel::post(endpoint, &export) {
+            Ok(sent) => said += &format!("otel: sent to {endpoint}: {sent}\n"),
+            Err(e) => said += &format!("otel: sending to {endpoint} FAILED: {e}\n"),
+        }
+    }
+    Ok(said)
+}
+
+/// `cargo xtask otel`'s arguments: <what> [<events>] [--out <prefix>]
+/// [--endpoint <url>].
+fn otel_cli(args: &[String]) -> Result {
+    let flag =
+        |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let positional: Vec<&String> = args
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| {
+            !a.starts_with("--")
+                && !(*i > 0 && matches!(args[*i - 1].as_str(), "--out" | "--endpoint"))
+        })
+        .map(|(_, a)| a)
+        .collect();
+    match positional.first() {
+        Some(what) => otel_command(
+            what,
+            positional.get(1).map(Path::new),
+            flag("--out").map(PathBuf::from),
+            flag("--endpoint").or_else(|| env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok()),
+        ),
+        None => Err("usage: cargo xtask otel <serial log | events.jsonl | scenario> \
+                     [<events.jsonl>] [--out <prefix>] [--endpoint <url>]"
+            .into()),
+    }
+}
+
+/// `cargo xtask otel <serial log | events.jsonl | scenario> [events]`.
+fn otel_command(
+    what: &str,
+    events: Option<&Path>,
+    out: Option<PathBuf>,
+    endpoint: Option<String>,
+) -> Result {
+    let given = Path::new(what);
+    let stem_of = |name: &str| -> String {
+        name.strip_suffix(".events.jsonl")
+            .or_else(|| name.strip_suffix(".serial.log"))
+            .or_else(|| name.strip_suffix(".log"))
+            .unwrap_or(name)
+            .to_string()
+    };
+    // The serial log and the stream: a file and its sibling, or the
+    // newest logs of a scenario.
+    let (serial_path, events_path) = if given.is_file() {
+        let name = given.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let stem = stem_of(name);
+        let sibling = |ext: &str| given.with_file_name(format!("{stem}{ext}"));
+        if name.ends_with(".events.jsonl") {
+            let serial =
+                [sibling(".serial.log"), sibling(".log")].into_iter().find(|p| p.is_file());
+            (serial, Some(given.to_path_buf()))
+        } else {
+            (Some(given.to_path_buf()), Some(sibling(".events.jsonl")))
+        }
+    } else {
+        let candidates = [
+            target_dir().join(format!("debug/test-{what}.serial.log")),
+            target_dir().join(format!("release/test-{what}.serial.log")),
+            target_dir().join(format!("failed/{what}.log")),
+        ];
+        let newest = candidates
+            .into_iter()
+            .filter(|p| p.is_file())
+            .max_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
+            .ok_or_else(|| {
+                format!(
+                    "{what}: not a file, and no log of scenario {what} in \
+                     target/{{debug,release}}/test-{what}.serial.log or target/failed/{what}.log \
+                     (a batched scenario: give its batch-*.serial.log)"
+                )
+            })?;
+        let events = if newest.parent().is_some_and(|d| d.ends_with("failed")) {
+            newest.with_file_name(format!("{what}.events.jsonl"))
+        } else {
+            newest.with_file_name(format!("test-{what}.events.jsonl"))
+        };
+        (Some(newest), Some(events))
+    };
+    let events_path = events.map(Path::to_path_buf).or(events_path).filter(|p| p.is_file());
+    let read =
+        |p: &Path| fs::read_to_string(p).map_err(|e| format!("reading {}: {e}", p.display()));
+    let serial = serial_path.as_deref().map(read).transpose()?.unwrap_or_default();
+    let events = events_path.as_deref().map(read).transpose()?.unwrap_or_default();
+    if serial.is_empty() && events.is_empty() {
+        return Err(format!("{what}: no serial log and no event stream to convert"));
+    }
+    let base = serial_path.clone().or(events_path.clone()).unwrap_or_default();
+    let stem = stem_of(base.file_name().and_then(|n| n.to_str()).unwrap_or("boot"));
+    let scenario = stem.strip_prefix("test-").unwrap_or(&stem);
+    let prefix = out.unwrap_or_else(|| base.with_file_name(format!("{stem}.otlp")));
+    // The boot ended about when its newest file was last written.
+    let end = [serial_path.as_deref(), events_path.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter_map(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
+        .max()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as u64);
+    eprintln!(
+        "otel: serial log {}, event stream {}",
+        serial_path.as_ref().map_or("(none)".into(), |p| p.display().to_string()),
+        events_path
+            .as_ref()
+            .map_or("(none or empty: boot with XTASK_EVENTS=all for spans)".into(), |p| p
+                .display()
+                .to_string())
+    );
+    let said = otel_export_at(&serial, &events, scenario, &prefix, endpoint.as_deref(), end)?;
+    eprint!("{said}");
+    if said.contains("FAILED") { Err("sending the OTLP export failed".into()) } else { Ok(()) }
 }
 
 /// `cargo xtask triage <log> [events]`: the triage of any log; the
@@ -8833,7 +9564,9 @@ fn judge_log_inner(
         _ if scenario.exit_status == QEMU_EXIT_SUCCESS && serial.contains(LEAK_MARKER) => {
             Err("a process address space was not freed".into())
         }
-        _ => Ok(()),
+        // A user/lx program: its output and exit status exactly as real
+        // Linux's (its expected.txt).
+        _ => lx_expect::check_boot(scenario.cmdline, serial),
     }
 }
 
@@ -9025,6 +9758,25 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         }
         break (status, serial, time);
     };
+    // XTASK_OTEL: the boot as OpenTelemetry, next to its logs.
+    if env::var_os("XTASK_OTEL").is_some() {
+        let label = match vm {
+            Vm::Single(s) => s.name.to_string(),
+            Vm::Batch(_) => iso_scenario(iso).to_string(),
+        };
+        let events = fs::read_to_string(iso.with_extension("events.jsonl")).unwrap_or_default();
+        let endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+        match otel_export(
+            &serial,
+            &events,
+            &label,
+            &iso.with_extension("otlp"),
+            endpoint.as_deref(),
+        ) {
+            Ok(said) => eprint!("{}", said.replace("otel:", &format!("xtask: otel {label}:"))),
+            Err(e) => eprintln!("xtask: otel {label}: {e}"),
+        }
+    }
     let short = telemetry::cpus_online(&serial).filter(|&n| n < want_cpus);
     let code = status.and_then(|s| s.code());
     let facts = RunFacts {
@@ -9484,6 +10236,12 @@ fn export_tests() -> Result {
         copy(&file, &dir.join(dll.exported_as))?;
     }
     eprintln!("xtask: exported {} test programs to {}", USER_PROGRAMS.len(), dir.display());
+    // pk_install_test's package source zips user/bin/hello.exe, so it is
+    // derived from what was just exported: remake it (deterministic), or
+    // a change to ntrt leaves the zips holding an old hello.exe.
+    run_cmd(
+        Command::new("python3").arg("-I").arg(root().join("user/pk_install_test/make_source.py")),
+    )?;
     Ok(())
 }
 
@@ -9554,6 +10312,29 @@ mod constants {
             }
         }
         assert!(found.is_empty(), "use nt::platform instead:\n{}", found.join("\n"));
+    }
+
+    /// `net` is core, below every personality: it reaches threads and time
+    /// through `crate::runtime`, never through the NT layer (ROADMAP LX
+    /// seam 6; a Linux personality would build its sockets on it too).
+    #[test]
+    fn net_does_not_depend_on_nt() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel/src/net");
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                if line.contains("crate::nt") || line.contains("super::super::nt") {
+                    found.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "net/ names the NT layer; use crate::runtime:\n{}",
+            found.join("\n")
+        );
     }
 
     #[test]
@@ -9819,5 +10600,35 @@ mod health {
         assert!(judge_log(&s, None, true, "statedump: end").is_ok());
         assert!(judge_log(&s, None, true, "statedump: begin").is_err());
         assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, "statedump: end").is_err());
+    }
+}
+
+#[cfg(test)]
+mod repeats {
+    use super::*;
+
+    /// A repeat's copy of an image is the same scenario (its port
+    /// forward, display, ...) and keeps its own failed log.
+    #[test]
+    fn a_repeat_copy_is_its_scenario() {
+        let iso = |n: &str| PathBuf::from(format!("/t/debug/{n}"));
+        assert_eq!(iso_scenario(&iso("test-sshd_shell.iso")), "sshd_shell");
+        assert_eq!(iso_scenario(&iso("test-sshd_shell.r0.iso")), "sshd_shell");
+        assert_eq!(iso_scenario(&iso("test-sshd_shell.r11.iso")), "sshd_shell");
+        assert_eq!(iso_scenario(&iso("serve-go_http.iso")), "go_http");
+        assert_eq!(guest_port(iso_scenario(&iso("test-sshd_shell.r3.iso"))), 22);
+        assert_eq!(iso_scenario(&iso("test-handover_k32_twice.iso")), "handover_k32_twice");
+        assert_eq!(repeat_index(&iso("test-udp_echo.r4.events.jsonl")), Some(4));
+        assert_eq!(repeat_index(&iso("test-udp_echo.events.jsonl")), None);
+    }
+
+    /// Leases held at once never share a port.
+    #[test]
+    fn port_leases_are_distinct() {
+        let leases: Vec<PortLease> = (0..8).map(|_| PortLease::new().unwrap()).collect();
+        let mut ports: Vec<u16> = leases.iter().map(|l| l.0).collect();
+        ports.sort_unstable();
+        ports.dedup();
+        assert_eq!(ports.len(), 8);
     }
 }

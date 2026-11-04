@@ -37,12 +37,16 @@ pub mod handover;
 pub mod hosted;
 #[cfg(not(feature = "hosted"))]
 pub mod input;
+/// The Linux personality's groundwork (ROADMAP LX): not wired in yet.
+pub mod lx;
 pub mod mm;
 pub mod net;
 pub mod nt;
+pub mod personality;
 #[cfg(not(feature = "hosted"))]
 pub mod platform;
 pub mod replay;
+pub mod runtime;
 pub mod sched;
 mod selftest;
 /// Deterministic simulation's scheduler and clock (gala-um `--sim`).
@@ -383,6 +387,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
             nt::ledger::dump();
             info!("run: end {name}");
         }
+    }
+    // `lxrun=/lx/hello_test`: Linux programs, after the `run=` ones
+    // (`run_linux_programs`).
+    if let Some(paths) = cmdline.value("lxrun") {
+        run_linux_programs(&info, &cmdline, paths, wait_all, handover_requests.as_ref());
     }
     // `dump=C:/hs_err_pid4.log,...` (percent-encoded): files the programs
     // left in the ramfs, printed to the log once they have ended (a
@@ -1142,83 +1151,160 @@ fn run_program(
                 .map(|(process, _main)| process)
         }
     };
-    let space = match started {
-        Ok(process) => {
-            // Wait for the whole process (all threads) to end.
-            match nt::object::KObject::new(nt::object::ObjectBody::Process(process.clone())) {
-                Ok(object) => {
-                    let mut objects = alloc::vec::Vec::new();
-                    // Without it the wait below would never end (an
-                    // empty list): try again until memory comes back.
-                    while mm::heap::TryVec::try_push(&mut objects, object.clone()).is_err() {
-                        sched::sleep_ms(1);
-                    }
-                    if let Some(r) = handover_requests
-                        && mm::heap::TryVec::try_push(&mut objects, r.clone()).is_err()
-                    {
-                        error!("run: out of memory for the handover requests");
-                    }
-                    let mut reported = false;
-                    loop {
-                        match wait_real_secs_any(&objects, if reported { 30 } else { 60 }) {
-                            Some(0) => break,
-                            // The program asked for a kernel handover: it
-                            // happens once its threads are all blocked.
-                            Some(_) => {
-                                let e = handover::go(info, cmdline);
-                                match e {
-                                    handover::HandoverError::Refused(why) => {
-                                        warn!("handover: refused: {why}")
-                                    }
-                                    handover::HandoverError::Incompatible(why) => {
-                                        warn!("handover: refused: {why}")
-                                    }
-                                    e => error!("handover: failed: {e:?}"),
-                                }
-                            }
-                            // A minute without finishing: log every
-                            // thread's state (what a hang is waiting for),
-                            // then wait on.
-                            None if !reported => {
-                                reported = true;
-                                warn!(
-                                    "run: {} still running after a minute; threads:",
-                                    process.name
-                                );
-                                nt::thread::dump();
-                                sched::dump();
-                                // What it has missed so far (the ledger
-                                // otherwise prints when the run ends, which
-                                // a hang never does).
-                                nt::ledger::dump();
-                            }
-                            // Then what it newly missed every 30 seconds
-                            // (e.g. after a screen check's input).
-                            None => {
-                                info!("run: {} still running; the ledger so far:", process.name);
-                                nt::ledger::dump();
-                            }
-                        }
-                    }
-                }
-                Err(_) => error!("run: out of memory"),
-            }
-            match process.exit_status() {
-                Some(status) => {
-                    info!("run: {} finished with status {:#010x}", process.name, status.0)
-                }
-                None => warn!("run: {} ended without an exit status", process.name),
-            }
-            if wait_all {
-                wait_for_the_rest();
-            }
-            process.space.clone()
-        }
+    let process = match started {
+        Ok(process) => process,
         Err(e) => {
             error!("run: cannot start {name}: {e:?}");
             return;
         }
     };
+    await_program(info, cmdline, process, wait_all, handover_requests, free_before);
+}
+
+/// `lxrun=/lx/a,/lx/b`: Linux programs (static ELF; ROADMAP LX), run one
+/// after another like `run=`'s. `lxargs=` holds each one's whole argv,
+/// argv[0] first (percent-encoded, shell-style words with '..' and ".."
+/// quoting, comma-separated per program; default: the path alone);
+/// `lxenv=` the environment of all of them (the same encoding; default
+/// none).
+fn run_linux_programs(
+    info: &BootInfo,
+    cmdline: &Cmdline,
+    paths: &str,
+    wait_all: bool,
+    handover_requests: Option<&nt::object::ObjectRef>,
+) {
+    let mut env_text = alloc::vec::Vec::new();
+    if cmdline::percent_decode(cmdline.value("lxenv").unwrap_or(""), &mut env_text).is_err() {
+        error!("lxrun: out of memory for lxenv");
+        return;
+    }
+    let mut env_words = alloc::vec::Vec::new();
+    if cmdline::shell_words(&env_text, &mut env_words).is_err() {
+        error!("lxrun: lxenv is not a list of words (an unclosed quote, or out of memory)");
+        return;
+    }
+    let mut args = cmdline.value("lxargs").unwrap_or("").split(',');
+    for path in paths.split(',').filter(|p| !p.is_empty()) {
+        info!("run: begin {path}");
+        arch::bootphase::mark("program");
+        let mut text = alloc::vec::Vec::new();
+        let mut words = alloc::vec::Vec::new();
+        let decoded = cmdline::percent_decode(args.next().unwrap_or(""), &mut text)
+            .map_err(cmdline::WordsError::from)
+            .and_then(|()| cmdline::shell_words(&text, &mut words));
+        if let Err(e) = decoded {
+            error!("lxrun: {path}'s lxargs are not a list of words: {e:?}");
+            info!("run: end {path}");
+            continue;
+        }
+        let mut argv: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::new();
+        let mut envp: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::new();
+        let listed = (if words.is_empty() {
+            mm::heap::TryVec::try_push(&mut argv, path.as_bytes())
+        } else {
+            words.iter().try_for_each(|w| mm::heap::TryVec::try_push(&mut argv, w.as_slice()))
+        })
+        .and_then(|()| {
+            env_words.iter().try_for_each(|w| mm::heap::TryVec::try_push(&mut envp, w.as_slice()))
+        });
+        if listed.is_err() {
+            error!("lxrun: out of memory for {path}'s arguments");
+            info!("run: end {path}");
+            continue;
+        }
+        let (free_before, _) = mm::frame_stats();
+        match lx::exec::spawn(path, &argv, &envp) {
+            Ok(process) => {
+                await_program(info, cmdline, process, wait_all, handover_requests, free_before)
+            }
+            Err(e) => error!("run: cannot start {path}: {e}"),
+        }
+        nt::ledger::dump();
+        info!("run: end {path}");
+    }
+}
+
+/// Waits for `process` (a `run=` or `lxrun=` program) to end, then checks
+/// that its address space is freed.
+fn await_program(
+    info: &BootInfo,
+    cmdline: &Cmdline,
+    process: mm::heap::KArc<nt::process::Process>,
+    wait_all: bool,
+    handover_requests: Option<&nt::object::ObjectRef>,
+    free_before: u64,
+) {
+    let space = {
+        // Wait for the whole process (all threads) to end.
+        match nt::object::KObject::new(nt::object::ObjectBody::Process(process.clone())) {
+            Ok(object) => {
+                let mut objects = alloc::vec::Vec::new();
+                // Without it the wait below would never end (an
+                // empty list): try again until memory comes back.
+                while mm::heap::TryVec::try_push(&mut objects, object.clone()).is_err() {
+                    sched::sleep_ms(1);
+                }
+                if let Some(r) = handover_requests
+                    && mm::heap::TryVec::try_push(&mut objects, r.clone()).is_err()
+                {
+                    error!("run: out of memory for the handover requests");
+                }
+                let mut reported = false;
+                loop {
+                    match wait_real_secs_any(&objects, if reported { 30 } else { 60 }) {
+                        Some(0) => break,
+                        // The program asked for a kernel handover: it
+                        // happens once its threads are all blocked.
+                        Some(_) => {
+                            let e = handover::go(info, cmdline);
+                            match e {
+                                handover::HandoverError::Refused(why) => {
+                                    warn!("handover: refused: {why}")
+                                }
+                                handover::HandoverError::Incompatible(why) => {
+                                    warn!("handover: refused: {why}")
+                                }
+                                e => error!("handover: failed: {e:?}"),
+                            }
+                        }
+                        // A minute without finishing: log every
+                        // thread's state (what a hang is waiting for),
+                        // then wait on.
+                        None if !reported => {
+                            reported = true;
+                            warn!("run: {} still running after a minute; threads:", process.name);
+                            nt::thread::dump();
+                            sched::dump();
+                            // What it has missed so far (the ledger
+                            // otherwise prints when the run ends, which
+                            // a hang never does).
+                            nt::ledger::dump();
+                        }
+                        // Then what it newly missed every 30 seconds
+                        // (e.g. after a screen check's input).
+                        None => {
+                            info!("run: {} still running; the ledger so far:", process.name);
+                            nt::ledger::dump();
+                        }
+                    }
+                }
+            }
+            Err(_) => error!("run: out of memory"),
+        }
+        match process.exit_status() {
+            Some(status) => {
+                info!("run: {} finished with status {:#010x}", process.name, status.0)
+            }
+            None => warn!("run: {} ended without an exit status", process.name),
+        }
+        if wait_all {
+            wait_for_the_rest();
+        }
+        process.space.clone()
+    };
+    // Only `space` may hold the address space now.
+    drop(process);
     // Teardown check: once the exiting threads are reaped, ours must be the
     // last reference to the address space; then its memory is returned.
     // A leak is a second without progress: the teardown itself takes time

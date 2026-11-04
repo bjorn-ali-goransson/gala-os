@@ -89,140 +89,166 @@ struct State {
     next: u32,
 }
 
-static STATE: IrqMutex<State> =
-    IrqMutex::new(State { hooks: Vec::new(), waiting: Vec::new(), next: 1 });
+/// One session's WinEvent hooks and waiting events (ROADMAP RS step
+/// B2): an event raised in a session reaches only that session's hooks.
+pub struct Hooks(IrqMutex<State>);
 
-/// SetWinEventHook for thread `tid` of process `pid`: the hook's id
-/// (nonzero). STATUS_INVALID_PARAMETER for an empty range.
-#[allow(clippy::too_many_arguments)]
-pub fn hook(
-    pid: u32,
-    tid: u32,
-    min: u32,
-    max: u32,
-    of_pid: u32,
-    of_tid: u32,
-    flags: u32,
-) -> Result<u32, NtStatus> {
-    if min > max {
-        return Err(NtStatus::INVALID_PARAMETER);
+impl Default for Hooks {
+    fn default() -> Self {
+        Self::new()
     }
-    let mut s = STATE.lock();
-    if s.hooks.len() >= MAX_HOOKS {
-        return Err(NtStatus::INSUFFICIENT_RESOURCES);
+}
+
+impl Hooks {
+    pub const fn new() -> Hooks {
+        Hooks(IrqMutex::new(State { hooks: Vec::new(), waiting: Vec::new(), next: 1 }))
     }
-    let id = s.next;
-    s.next = s.next.wrapping_add(1).max(1);
-    s.hooks
-        .try_push(Hook { id, pid, tid, min, max, of_pid, of_tid, flags })
-        .map_err(|_| NtStatus::NO_MEMORY)?;
-    Ok(id)
-}
 
-/// UnhookWinEvent: process `pid`'s hook `id` goes, with its waiting
-/// events. STATUS_INVALID_HANDLE for no such hook of this process.
-pub fn unhook(pid: u32, id: u32) -> Result<(), NtStatus> {
-    let mut s = STATE.lock();
-    let at =
-        s.hooks.iter().position(|h| h.id == id && h.pid == pid).ok_or(NtStatus::INVALID_HANDLE)?;
-    s.hooks.remove(at);
-    s.waiting.retain(|r| r.hook != id);
-    Ok(())
-}
-
-/// NotifyWinEvent from thread `tid` of process `pid`: queues the event
-/// for every hook that wants it; the processes whose queue event to set
-/// (`wake` gets their ids, at most its length; how many).
-#[allow(clippy::too_many_arguments)]
-pub fn notify(
-    pid: u32,
-    tid: u32,
-    event: u32,
-    hwnd: u64,
-    object: i32,
-    child: i32,
-    time: u32,
-    wake: &mut [u32],
-) -> usize {
-    let mut s = STATE.lock();
-    let mut n = 0;
-    let State { hooks, waiting, .. } = &mut *s;
-    for h in hooks.iter() {
-        let wanted = (h.min..=h.max).contains(&event)
-            && (h.of_pid == 0 || h.of_pid == pid)
-            && (h.of_tid == 0 || h.of_tid == tid)
-            && !(h.flags & SKIP_OWN_PROCESS != 0 && h.pid == pid)
-            && !(h.flags & SKIP_OWN_THREAD != 0 && h.pid == pid && h.tid == tid);
-        if !wanted {
-            continue;
-        }
-        if waiting.len() >= MAX_WAITING {
-            waiting.remove(0);
-        }
-        let r = Record {
-            pid: h.pid,
-            tid: h.tid,
-            hook: h.id,
-            event,
-            hwnd,
-            object,
-            child,
-            thread: tid,
-            time,
-        };
-        if waiting.try_push(r).is_err() {
-            continue;
-        }
-        if n < wake.len() && !wake[..n].contains(&h.pid) {
-            wake[n] = h.pid;
-            n += 1;
-        }
+    /// (hooks, waiting events): the state dump's figures.
+    pub fn counts(&self) -> (usize, usize) {
+        let s = self.0.lock();
+        (s.hooks.len(), s.waiting.len())
     }
-    n
 }
 
-/// Whether any hook wants event `event` (IsWinEventHookInstalled).
-pub fn installed(event: u32) -> bool {
-    STATE.lock().hooks.iter().any(|h| (h.min..=h.max).contains(&event))
-}
-
-/// Takes up to `out.len()` of the events waiting for process `pid`'s
-/// hooks, oldest first; how many.
-pub fn take(pid: u32, out: &mut [Record]) -> usize {
-    let mut s = STATE.lock();
-    let mut n = 0;
-    s.waiting.retain(|r| {
-        if r.pid == pid && n < out.len() {
-            out[n] = *r;
-            n += 1;
-            false
-        } else {
-            true
+impl Hooks {
+    /// SetWinEventHook for thread `tid` of process `pid`: the hook's id
+    /// (nonzero). STATUS_INVALID_PARAMETER for an empty range.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hook(
+        &self,
+        pid: u32,
+        tid: u32,
+        min: u32,
+        max: u32,
+        of_pid: u32,
+        of_tid: u32,
+        flags: u32,
+    ) -> Result<u32, NtStatus> {
+        if min > max {
+            return Err(NtStatus::INVALID_PARAMETER);
         }
-    });
-    n
+        let mut s = self.0.lock();
+        if s.hooks.len() >= MAX_HOOKS {
+            return Err(NtStatus::INSUFFICIENT_RESOURCES);
+        }
+        let id = s.next;
+        s.next = s.next.wrapping_add(1).max(1);
+        s.hooks
+            .try_push(Hook { id, pid, tid, min, max, of_pid, of_tid, flags })
+            .map_err(|_| NtStatus::NO_MEMORY)?;
+        Ok(id)
+    }
+
+    /// UnhookWinEvent: process `pid`'s hook `id` goes, with its waiting
+    /// events. STATUS_INVALID_HANDLE for no such hook of this process.
+    pub fn unhook(&self, pid: u32, id: u32) -> Result<(), NtStatus> {
+        let mut s = self.0.lock();
+        let at = s
+            .hooks
+            .iter()
+            .position(|h| h.id == id && h.pid == pid)
+            .ok_or(NtStatus::INVALID_HANDLE)?;
+        s.hooks.remove(at);
+        s.waiting.retain(|r| r.hook != id);
+        Ok(())
+    }
+
+    /// NotifyWinEvent from thread `tid` of process `pid`: queues the event
+    /// for every hook that wants it; the processes whose queue event to set
+    /// (`wake` gets their ids, at most its length; how many).
+    #[allow(clippy::too_many_arguments)]
+    pub fn notify(
+        &self,
+        pid: u32,
+        tid: u32,
+        event: u32,
+        hwnd: u64,
+        object: i32,
+        child: i32,
+        time: u32,
+        wake: &mut [u32],
+    ) -> usize {
+        let mut s = self.0.lock();
+        let mut n = 0;
+        let State { hooks, waiting, .. } = &mut *s;
+        for h in hooks.iter() {
+            let wanted = (h.min..=h.max).contains(&event)
+                && (h.of_pid == 0 || h.of_pid == pid)
+                && (h.of_tid == 0 || h.of_tid == tid)
+                && !(h.flags & SKIP_OWN_PROCESS != 0 && h.pid == pid)
+                && !(h.flags & SKIP_OWN_THREAD != 0 && h.pid == pid && h.tid == tid);
+            if !wanted {
+                continue;
+            }
+            if waiting.len() >= MAX_WAITING {
+                waiting.remove(0);
+            }
+            let r = Record {
+                pid: h.pid,
+                tid: h.tid,
+                hook: h.id,
+                event,
+                hwnd,
+                object,
+                child,
+                thread: tid,
+                time,
+            };
+            if waiting.try_push(r).is_err() {
+                continue;
+            }
+            if n < wake.len() && !wake[..n].contains(&h.pid) {
+                wake[n] = h.pid;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Whether any hook wants event `event` (IsWinEventHookInstalled).
+    pub fn installed(&self, event: u32) -> bool {
+        self.0.lock().hooks.iter().any(|h| (h.min..=h.max).contains(&event))
+    }
+
+    /// Takes up to `out.len()` of the events waiting for process `pid`'s
+    /// hooks, oldest first; how many.
+    pub fn take(&self, pid: u32, out: &mut [Record]) -> usize {
+        let mut s = self.0.lock();
+        let mut n = 0;
+        s.waiting.retain(|r| {
+            if r.pid == pid && n < out.len() {
+                out[n] = *r;
+                n += 1;
+                false
+            } else {
+                true
+            }
+        });
+        n
+    }
+
+    /// A process ended: its hooks and their events go.
+    pub fn process_ended(&self, pid: u32) {
+        let mut s = self.0.lock();
+        s.hooks.retain(|h| h.pid != pid);
+        s.waiting.retain(|r| r.pid != pid);
+    }
+
+    /// A thread ended: its hooks go (a hook belongs to the thread that set
+    /// it).
+    pub fn thread_ended(&self, pid: u32, tid: u32) {
+        let mut s = self.0.lock();
+        s.hooks.retain(|h| !(h.pid == pid && h.tid == tid));
+        s.waiting.retain(|r| !(r.pid == pid && r.tid == tid));
+    }
 }
 
-/// A process ended: its hooks and their events go.
-pub fn process_ended(pid: u32) {
-    let mut s = STATE.lock();
-    s.hooks.retain(|h| h.pid != pid);
-    s.waiting.retain(|r| r.pid != pid);
-}
-
-/// A thread ended: its hooks go (a hook belongs to the thread that set
-/// it).
-pub fn thread_ended(pid: u32, tid: u32) {
-    let mut s = STATE.lock();
-    s.hooks.retain(|h| !(h.pid == pid && h.tid == tid));
-    s.waiting.retain(|r| !(r.pid == pid && r.tid == tid));
-}
-
-/// The queue events of the processes in `pids` (the window registry's
-/// listeners).
-pub fn listeners(pids: &[u32], out: &mut Vec<ObjectRef>) {
+/// The queue events of the processes in `pids` (the session's window
+/// registry's listeners).
+pub fn listeners(windows: &super::window::Windows, pids: &[u32], out: &mut Vec<ObjectRef>) {
     for &p in pids {
-        if let Some(e) = super::window::listener(p)
+        if let Some(e) = windows.listener(p)
             && out.try_push(e).is_err()
         {
             return;
@@ -236,21 +262,25 @@ mod tests {
 
     #[test]
     fn events_reach_the_hooks_that_want_them() {
+        let h = Hooks::new();
+        // Another session's hooks see nothing of this one's events.
+        let other = Hooks::new();
+        other.hook(801, 5, 1, 0x7fff_ffff, 0, 0, 0).unwrap();
         // Process 801's thread 5 hooks names (0x800c) of process 802;
         // its thread 6 hooks everything but its own process's.
-        let names = hook(801, 5, 0x800c, 0x800c, 802, 0, 0).unwrap();
-        let all = hook(801, 6, 1, 0x7fff_ffff, 0, 0, SKIP_OWN_PROCESS).unwrap();
-        assert_eq!(hook(801, 6, 9, 8, 0, 0, 0), Err(NtStatus::INVALID_PARAMETER));
+        let names = h.hook(801, 5, 0x800c, 0x800c, 802, 0, 0).unwrap();
+        let all = h.hook(801, 6, 1, 0x7fff_ffff, 0, 0, SKIP_OWN_PROCESS).unwrap();
+        assert_eq!(h.hook(801, 6, 9, 8, 0, 0, 0), Err(NtStatus::INVALID_PARAMETER));
         let mut wake = [0u32; 4];
-        assert_eq!(notify(802, 9, 0x800c, 0x20010, 0, 0, 7, &mut wake), 1);
+        assert_eq!(h.notify(802, 9, 0x800c, 0x20010, 0, 0, 7, &mut wake), 1);
         assert_eq!(wake[0], 801);
         // Not 802's other events for `names`; 801's own skipped by `all`.
-        assert_eq!(notify(802, 9, 0x8000, 0x20010, 0, 0, 8, &mut wake), 1);
-        assert_eq!(notify(801, 5, 0x800c, 0x20020, 0, 0, 9, &mut wake), 0);
-        assert_eq!(notify(803, 1, 0x800c, 0x20030, -4, 2, 10, &mut wake), 1);
+        assert_eq!(h.notify(802, 9, 0x8000, 0x20010, 0, 0, 8, &mut wake), 1);
+        assert_eq!(h.notify(801, 5, 0x800c, 0x20020, 0, 0, 9, &mut wake), 0);
+        assert_eq!(h.notify(803, 1, 0x800c, 0x20030, -4, 2, 10, &mut wake), 1);
         let mut got = [Record::EMPTY; 8];
-        assert_eq!(take(802, &mut got), 0);
-        let n = take(801, &mut got);
+        assert_eq!(h.take(802, &mut got), 0);
+        let n = h.take(801, &mut got);
         assert_eq!(n, 4);
         let seen: Vec<(u32, u32, u32)> =
             got[..n].iter().map(|r| (r.hook, r.event, r.time)).collect();
@@ -260,12 +290,14 @@ mod tests {
         );
         assert_eq!((got[3].object, got[3].child, got[3].thread, got[3].tid), (-4, 2, 1, 6));
         // Only the owner unhooks; the thread's end drops its hooks.
-        assert_eq!(unhook(802, names), Err(NtStatus::INVALID_HANDLE));
-        unhook(801, names).unwrap();
-        assert_eq!(unhook(801, names), Err(NtStatus::INVALID_HANDLE));
-        assert!(installed(0x8000));
-        thread_ended(801, 6);
-        assert_eq!(notify(802, 9, 0x800c, 0x20010, 0, 0, 11, &mut wake), 0);
-        assert_eq!(take(801, &mut got), 0);
+        assert_eq!(h.unhook(802, names), Err(NtStatus::INVALID_HANDLE));
+        h.unhook(801, names).unwrap();
+        assert_eq!(h.unhook(801, names), Err(NtStatus::INVALID_HANDLE));
+        assert!(h.installed(0x8000));
+        h.thread_ended(801, 6);
+        assert_eq!(h.notify(802, 9, 0x800c, 0x20010, 0, 0, 11, &mut wake), 0);
+        assert_eq!(h.take(801, &mut got), 0);
+        assert_eq!(other.take(801, &mut got), 0);
+        assert_eq!(other.counts(), (1, 0));
     }
 }

@@ -437,3 +437,106 @@ pub extern "system" fn CryptUnprotectData(
     }
     1
 }
+
+/// Whose processes may undo CryptProtectMemory.
+pub(crate) enum MemoryScope {
+    /// This process only.
+    Process,
+    /// Every process on the machine (until it restarts).
+    Machine,
+    /// The logon session's processes (gala has one session per user).
+    Logon,
+}
+
+/// This process's own secret for CRYPTPROTECTMEMORY_SAME_PROCESS: 0 until
+/// made, then 2 with the bytes in PROCESS_SALT (1 while being made).
+static SALT_STATE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+static mut PROCESS_SALT: [u8; 32] = [0; 32];
+
+fn process_salt(a: &Api) -> Option<[u8; 32]> {
+    use core::sync::atomic::Ordering;
+    loop {
+        match SALT_STATE.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire) {
+            Ok(_) => {
+                let mut salt = [0u8; 32];
+                // SAFETY: bcrypt's RNG into our buffer.
+                let r = unsafe {
+                    (a.random)(0, salt.as_mut_ptr(), 32, BCRYPT_USE_SYSTEM_PREFERRED_RNG)
+                };
+                if r != 0 {
+                    SALT_STATE.store(0, Ordering::Release);
+                    return None;
+                }
+                // SAFETY: only this thread writes it (state 1); readers wait
+                // for state 2.
+                unsafe { PROCESS_SALT = salt };
+                SALT_STATE.store(2, Ordering::Release);
+                return Some(salt);
+            }
+            // SAFETY: written once, before the state became 2.
+            Err(2) => return Some(unsafe { PROCESS_SALT }),
+            Err(_) => core::hint::spin_loop(),
+        }
+    }
+}
+
+/// CryptProtectMemory's work: AES-256 in CBC mode with a zero IV and no
+/// padding, in place (the length is a multiple of 16), under a key from
+/// the machine's DPAPI master key (which lives until restart) and, for
+/// the process scope, a random secret of this process.
+pub(crate) fn protect_memory(buf: &mut [u8], scope: MemoryScope, encrypt: bool) -> bool {
+    let Some(a) = api() else { return fail(ERROR_NOT_ENOUGH_MEMORY, false) };
+    let Some(master) = master_key(&a) else { return fail(ERROR_NOT_ENOUGH_MEMORY, false) };
+    let key = match scope {
+        MemoryScope::Process => {
+            let Some(salt) = process_salt(&a) else { return fail(ERROR_NOT_ENOUGH_MEMORY, false) };
+            hmac(&a, &master, &[b"gala memory process", &salt])
+        }
+        MemoryScope::Machine => hmac(&a, &master, &[b"gala memory machine"]),
+        MemoryScope::Logon => hmac(&a, &master, &[b"gala memory logon"]),
+    };
+    let Some(key) = key else { return fail(ERROR_NOT_ENOUGH_MEMORY, false) };
+    let mut alg = 0;
+    let mut k = 0;
+    // SAFETY: bcrypt calls with buffers of ours and the caller's buffer
+    // (copied, then written back).
+    unsafe {
+        if (a.open)(&mut alg, wide("AES").as_ptr(), core::ptr::null(), 0) != 0 {
+            return fail(ERROR_NOT_ENOUGH_MEMORY, false);
+        }
+        if (a.key)(alg, &mut k, core::ptr::null_mut(), 0, key.as_ptr(), 32, 0) != 0 {
+            (a.close)(alg, 0);
+            return fail(ERROR_NOT_ENOUGH_MEMORY, false);
+        }
+        let copy = LocalAlloc(0, buf.len());
+        let mut iv = [0u8; 16];
+        let mut n = 0u32;
+        let r = if copy.is_null() {
+            1
+        } else {
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), copy, buf.len());
+            let f = if encrypt { a.encrypt } else { a.decrypt };
+            f(
+                k,
+                copy,
+                buf.len() as u32,
+                core::ptr::null(),
+                iv.as_mut_ptr(),
+                16,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut n,
+                0,
+            )
+        };
+        if !copy.is_null() {
+            LocalFree(copy);
+        }
+        (a.destroy)(k);
+        (a.close)(alg, 0);
+        if r != 0 || n as usize != buf.len() {
+            return fail(ERROR_INVALID_DATA, false);
+        }
+    }
+    true
+}

@@ -20,7 +20,8 @@ is done and what comes next (the "Next" list is the agreed order).
    - `.github/workflows/ci.yml`: append `-p <feature>_test` to the
      Windows-target clippy line; test DLLs go on the DLL build/clippy lines.
    - `user/bin/run-all.ps1` only if the program needs arguments on Windows.
-3. `cargo xtask boot-test <feature>_test`: see it fail for the right reason.
+3. `cargo xtask boot-test <feature>_test`: see it fail for the right reason
+   (a filter matches names containing it; `a,b,c` runs exactly those).
 4. Implement. Host unit tests for pure logic (`#[cfg(test)]` in the module).
 5. Checks (all must pass):
    ```sh
@@ -59,6 +60,149 @@ once their net client has finished, and pass if it succeeded.
 `cargo xtask screenshot run=nginx.exe "args=-p%20C:/nginx/%20-c%20conf/nginx.conf"`
 shows it.
 
+## Linux test programs (user/lx, ROADMAP LX)
+
+Test first against real Linux (CLEAN_ROOM.md "Linux": man-pages, the
+ABI/ELF specs, observed behaviour, gVisor; never the Linux kernel source):
+- `user/lx/<name>_test/main.c`: a C program built with musl
+  (`apt install musl-tools`) that makes the system calls it checks itself
+  (`user/lx/common/lx.h`: `sys6` and friends with the `syscall`
+  instruction; failures are `-errno`), so it tests the kernel, not libc.
+  It prints `name = value` lines, one write per line, never an address
+  or anything that varies between runs, kernel versions (auxv entries
+  come and go: print only the ones you check), users (uid: print
+  "AT_UID is getuid() = yes", not the number) or build modes, and ends
+  with `<name>_test: ok`. Accessibility without signals: write(2) from
+  an address fails with EFAULT if it is unreadable, read(2) into it if
+  it is unwritable (brk_test, mmap_test).
+- `user/lx/build.sh` builds each as `user/lx/bin/<name>_test` (static,
+  ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN), reproducibly
+  (stripped, no build id, `-fno-stack-protector`: the canary is read
+  from %fs:0x28, so a test that moves FS would crash). The binaries are
+  checked in under `user/lx/bin`, not `user/bin` (`cargo xtask
+  export-tests` copies only the Windows build's outputs); the kernel's
+  host tests `include_bytes!` them.
+- `cargo xtask lx-expect` rebuilds them (when musl-gcc is there; else it
+  runs the checked-in ones), runs each binary on this host as
+  `./<name>_test first '' 'third arg'` from `target/lx-expect/<binary>/`
+  with only `A=1 EMPTY= LONGER_NAME=some value` in its environment, and
+  compares stdout + `-- exit status N` with `user/lx/<name>_test/
+  expected.txt` (both binaries against the same file). A mismatch prints
+  a line diff and leaves `actual.txt` there. `--record` writes
+  expected.txt (run on real Linux only, and check the diff: it is the
+  spec); `--no-build` skips the rebuild. CI runs it and then `git diff
+  --exit-code user/lx` (binaries and transcripts must match the sources).
+- Recorded on Linux 6.18 (this machine); CI's runner kernel differs, which
+  is why transcripts avoid version-dependent values.
+- Pitfalls met: Rust's `Command` passes the environment sorted by name
+  (auxv_test's envp order); a static-pie's initial break is not above its
+  bss (brk_test prints only what holds for both); a pipe write whose
+  buffer runs into an unmapped page fails with EFAULT, not a partial count
+  (write_exit_test records what Linux does).
+- The kernel side is `kernel/src/lx/` (ARCHITECTURE "The lx module"),
+  tested with `cargo test -p kernel --lib lx`, and the ABI data crate
+  `kernel/lx_abi` (ARCHITECTURE "The lx_abi crate"), `cargo test -p
+  lx_abi`, whose tests read the transcripts: changing a test program's
+  output can break them (re-run both). No boot scenarios yet: they come
+  with the exec path, one per user/lx program, expecting its
+  expected.txt.
+- **The milestone 2-3 corpus** (recorded on Linux 6.18.44, this machine,
+  as root and checked unchanged as uid 65534): fs_test (open/openat
+  flags, getdents64, the stat family, statx, rename/renameat2, unlink,
+  mkdir/rmdir, symlinks, errnos), pipe_test (pipe2 flags, EOF, EAGAIN,
+  EPIPE/SIGPIPE, dup/dup2/dup3, fcntl), fork_test (fork/vfork/execve/
+  wait4/waitid, statuses, groups and sessions, a subreaper), thread_test
+  (clone threads, futex), signal_test (actions, masks, pending, siginfo,
+  the observed rt_sigframe, sigaltstack, SIGCHLD, default actions),
+  clock_test, poll_test (poll/ppoll/select/pselect6/epoll), pty_test
+  (/dev/ptmx, termios, the line discipline, ISIG), proc_test
+  (/proc/self). They use `common/more.h` (on top of lx.h): musl's
+  `SYS_*` numbers and struct definitions, `say_ret` (the errno's name
+  appended), `lx_init` (closes every fd above 2, so fd numbers are
+  deterministic and printed; clears the signal mask, SIGPIPE/SIGCHLD to
+  default, umask 022), `set_action` (rt_sigaction with SA_RESTORER and
+  an rt_sigreturn restorer, as musl does), wait-status printing (the core
+  flag left out: it depends on core limits).
+- Determinism: `cargo xtask lx-expect --runs 5` runs each binary 5 times
+  and fails if a transcript varies (do it before `--record`). Rules the
+  corpus follows: print relations, not pids/addresses/times/inodes; sort
+  directory listings; children report through exit status or a pipe and
+  the parent waits before printing on; never rely on timing for an
+  ordering: a FUTEX_WAKE is retried until it wakes the thread known to be
+  about to wait, a signal that must arrive while a child waits is blocked
+  and taken with rt_sigtimedwait (pty_test's SIGWINCH: a handler plus a
+  blocking read raced and hung under load), echoes are read until the
+  expected byte count; nothing depends on root (EACCES checks would);
+  directory sizes and nlinks are file-system specific and not printed.
+- Linux behaviour found that the kernel must copy: a pipe's SIGPIPE has
+  si_code SI_USER; `select` ignores fds beyond the descriptor table
+  (fd 100 with a 64-entry table: 0, not EBADF); SA_RESETHAND keeps the
+  flag in the reset action (flags read back 0x84000004); SA_RESETHAND
+  does not imply SA_NODEFER; a blocked ignored signal stays pending until
+  unblocked; signals made deliverable at once nest (SIGUSR1's frame is
+  set up first, real-time ones on top run first: "35 35 10 12"); a store
+  to a never-touched bss page after mprotect(PROT_READ) faults with
+  err 6 (not present), so signal_test touches it first (err 7); musl's
+  `struct rusage` is 272 bytes, the kernel writes 144; a tiny child's
+  ru_maxrss can be 0; the process's exit status after the main thread's
+  exit(0) is the last thread's exit(5); clockid_t is 32-bit (a CPU clock
+  for pid p is `(int)((~p << 3) | 2)`); `^Z` to an orphaned foreground
+  group (a session leader's) is discarded; a fresh pty's master and
+  slave have the same termios.
+- Skips: nothing is skipped on this machine (ptys and /proc work), so
+  every expected.txt is the full transcript. pty_test and proc_test
+  print a single `SKIP: open(/dev/ptmx) = -errno` (or readlink
+  /proc/self) line instead when that is unavailable, so a machine
+  without them shows a mismatch whose diff names the reason; under gala
+  they are expected to pass once ptys and /proc exist.
+## TLS tests (Schannel)
+
+`schannel_test` is a TLS client of Nginx (OpenSSL) inside the guest: the
+scenario starts `nginx.exe` with `start=` and `user/schannel_test/nginx.conf`
+(ports 8443-8445 on 127.0.0.1, so no xtask network client is involved),
+and the test retries its connect while Nginx starts. On Windows,
+run-all.ps1 starts the same Nginx from a prefix in TEMP and, as an
+administrator, imports the test CA into LocalMachine\Root for the run
+(skipped otherwise). The engine's rules are host-tested first:
+`cargo test -p schannel_tls` runs both sides in memory (seconds, no
+QEMU); boot the scenario once those pass.
+- Test certificates: `user/schannel_test/certs/make.sh` (host openssl
+  3.0+; run it in place and commit the results; test data, not secret):
+  a CA, an issued `localhost` certificate (ECDSA), an expired one (`openssl
+  ca` sets a past validity, `x509 -req` cannot), a self-signed one, an RSA
+  pair for the test's own server (`server-rsa.cer`/`.p8`, also used by the
+  host tests). They are valid from the moment they are made: host tests
+  use a clock two days later. Regenerating changes every file and
+  nothing in the tests' expectations.
+- gala's machine root store is `C:\Windows\System32\gala\roots`: a
+  scenario that needs a trusted root ships the CA there (an EXTRA_MODULES
+  line). Without one, automatic validation gives SEC_E_UNTRUSTED_ROOT and
+  the ledger says `schannel.dll!machine root store (no gala/roots ...)`.
+- A failing handshake leaves `schannel.dll!ISC: <rustls error>` (ASC for
+  a server) in the ledger with the SSPI status: read that first.
+- Pitfalls: SEC_E_INCOMPLETE_MESSAGE means the caller passes the same
+  bytes again with more (schannel_tls keeps a count, `retained`); a
+  rustls slice that still holds a partial handshake message must be the
+  same buffer on the next call (the engine hands it the context's own
+  copy). After a rustls error, do not call it with an empty buffer: it
+  may still point into the last one (it panics). schannel.dll is 1.4 MB
+  (rustls and RustCrypto): only processes that use Schannel load it,
+  through secur32.
+  tested with `cargo test -p kernel --lib lx`.
+- Boot scenarios `lx_<name>` and `lx_<name>_pie` (one per binary) run it
+  in gala: `qemu_exit lxrun=/lx/<binary> lxargs=<argv> lxenv=<env>`
+  (both percent-encoded shell words; argv[0] first, `./<name>_test` as
+  lx-expect gives it). The binary is shipped as `C:\lx\<binary>` by an
+  EXTRA_MODULES entry with its repository path. xtask rebuilds the
+  transcript from the kernel's `lx: pid N stdout: ..` / `-- exit status`
+  lines and requires it to equal expected.txt (a diff on mismatch;
+  `lx_expect::check_boot`). A new user/lx test needs its two entries in
+  EXTRA_MODULES and SCENARIOS (copy an `lx_` pair).
+- Bring-up of a new Linux program: run it with `lxrun=`, then read the
+  `unimplemented system call <name>` lines and the `ledger:` lines
+  (`"what":"linux syscall missing"`, by hits) after `run: end`: that is
+  the next work list.
+
 ## Adding a function to gala's ntdll or kernel32
 
 1. A test program that imports it (`raw-dylib` against `kernel32` or
@@ -81,6 +225,39 @@ shows it.
 
 ## Things that are easy to get wrong
 
+- Core code (`net/`, and later anything a second personality shares)
+  reaches threads, waits and time through `crate::runtime`, not
+  `crate::nt::platform` (the NT layer's seam) and not `crate::sched`/
+  `crate::time` directly (those do nothing in gala-um). Per-CPU state
+  read while interrupts may be on (system calls run with `sti`) must be
+  one GS-relative load (`percpu::cpu_index`, `percpu::personality`):
+  reading `gs:[0]` and then a field can land on another CPU's block after
+  a migration. Arch code (declared before `console` in lib.rs) writes
+  `crate::info!`/`crate::warn!`, not the bare macros. A new process
+  constructor must set `personality` (ARCHITECTURE "The seams", 2).
+- **A DLL test in C** (`user/<dll>_test/main.c`, mingw; oleaut32_test,
+  shlwapi_test, ole32_test, shell32_test, dbghelp_test): `build.sh`
+  rebuilds the checked-in `user/bin/<name>.exe` (xtask does not; run it
+  after editing main.c and commit the binary). To check that a function
+  is *exported*, import it statically (a call in a branch never taken):
+  GetProcAddress returns NULL for gala_stubs stubs (and so the test
+  cannot tell). An export forwarder (`/EXPORT:f=kernel32.f`) to a stub
+  fails to bind as a "missing export": implement the function where it
+  is forwarded from instead (normaliz's IdnToUnicode).
+
+- **Windows live in a session** (RS step B2): kernel code reaches the
+  window registry, WinEvent hooks and shasha's desktop through the
+  process (`process.desk.windows` / `.hooks` / `.shell`), never a global;
+  `desktop::screen(shell)` is None for a session the console does not
+  show. A GUI test run with `as=system` is in session 0: its windows
+  exist (registry, messages) but are not drawn and get no input (`desktop:
+  session 0's windows are not shown` in the log), so screen checks need
+  the boot user (session 1). An HWND of another session is no window
+  (ERROR_INVALID_WINDOW_HANDLE; `events=window` and the log say where it
+  is). On real Windows a child started in another session needs
+  STARTUPINFO.lpDesktop `winsta0\default` and a token that may open it
+  (SYSTEM's, moved with SetTokenInformation(TokenSessionId), as
+  session_test does), or user32 fails to initialize.
 - A test that runs a process at Low integrity (uipi_test, gala_cli_test)
   cannot signal or open the parent's named events (no write up: a
   Medium object's default label): pass inherited handles instead. A
@@ -346,8 +523,17 @@ charged). Look
 - **Network tests**: VMs have no network card unless the scenario is in
   xtask's `NET_SCENARIOS` (`-nic none` otherwise). Those get a virtio-net
   card on QEMU's user network with a host port forwarded to guest port 7
-  (TCP and UDP, the same port number on both: `free_port` finds one free
-  for both), and xtask plays the remote side (`net_client`, `udp_client`,
+  (TCP and UDP, the same port number on both; sshd's 22 for
+  `SSH_PORT_22`). Each VM leases its own host port (`PortLease`: free for
+  both, below the host's ephemeral range so no outgoing connection takes
+  it before QEMU binds it, never given to another VM of the same xtask
+  while held); a QEMU that still cannot bind it (another process took it)
+  is booted again with another. The client's own files (ssh's key copy
+  and `-v` trace, sftp's transfer, the askpass script) are per port, in
+  `target/net-client/<port>/`, removed after the boot. So net scenarios
+  run in parallel (the suite, `XTASK_REPEAT_JOBS`). The failed log says
+  which port the VM had (`xtask: net: host 127.0.0.1:<port> forwarded to
+  ...`) and QEMU's standard error. xtask plays the remote side (`net_client`, `udp_client`,
   ...) once the guest logs that it listens; the client's verdict is
   appended to the serial log as an `xtask: net client: ...` line for
   `expect` to check. QEMU's user network needs no privileges, so this
@@ -442,12 +628,24 @@ charged). Look
   drops CONTEXT_XSTATE from its own CONTEXT copies (they have no
   CONTEXT_EX); a copy that keeps the flag makes NtContinue read whatever
   follows it as a CONTEXT_EX (it is validated, then ignored if wrong).
+- **A wait that ends only at its timeout** although the object was set:
+  look for someone resetting it before the waiter looked (before
+  2026-11-03 a reset could undo a notification event's set for waiters
+  not yet run; ARCHITECTURE "Waits"). Kernel code that shares one event
+  between several waiters must not count on each waiter seeing it set:
+  a count or generation next to it (GalaConsoleCtrl's) says what
+  happened.
 - **Known intermittent**: java_http/java_hello fail about 1 run in 30 to
   40 with Java heap corruption (a stale String reference: `String.equals`
   reading a bogus klass, a NullPointerException inside String.equals from
   javac's MemberName.<init>, a crash in MethodHandleNatives.resolve); the
-  hs_err report is in the failed log (`dump:` lines). Still open
-  (2026-11-03); what is known is in ROADMAP Priorities. Not the cause but
+  hs_err report is in the failed log (`dump:` lines). **Cause found
+  (2026-11-04): QEMU 8.1.0-8.2.5's TCG** (`tb_record` registered a block
+  that spans two pages under its first page only, so a write to the
+  second page did not invalidate it: HotSpot's patched `mov r64, imm64`
+  constants straddling a page end kept their pre-GC values); fixed in
+  QEMU 8.2.6. gala is tested on a pinned QEMU (section "QEMU" below),
+  not on the distribution's 8.2.2. ROADMAP Priorities has the history. Not the cause but
   found on the way: QEMU's multi-threaded TCG (8.2.2 here; still open in
   10.2, QEMU issue 4669) can keep a translation of guest code made while
   another processor was writing it, and run the old instructions after
@@ -493,17 +691,46 @@ charged). Look
   DLLs; one that does not points at the kernel's machine code (paging,
   switches, interrupts) or at the emulator.
 - **handover_k32_twice under heavy load (2026-11-03)**: once (load
-  about 24) the program resumed after the first handover ("slept 4001")
-  and then never finished its second one: the state dump showed its
-  other threads in their waits and the main thread with no system call.
-  Passed alone twice after. Open; look at the second handover's request
-  path (GalaRequestHandover while threads are already carried) if it
-  recurs.
+  about 24) it timed out after "slept 4001". Not a hang and not the
+  second handover (its "writer wrote lines:" never came): the state
+  dump's main thread was in user mode at 0x140001550, inside `round`
+  (llvm-objdump of user/bin/handover_k32_test.exe), redoing alone, on
+  one processor, every round the two busy threads had computed in
+  parallel through the whole 4 s sleep: longer than the work itself, at
+  a third of the guest's tick rate. Fixed: the busy threads do 200
+  rounds after the handover (the writer thread sees the kernel's
+  generation change, GalaHandoverPause) and then wait for the stop; the
+  test prints the rounds it checked and how long that took; time limits
+  also stretch with host load now.
+- **Timing checks in test programs** measure the host as much as the
+  guest: under TCG a loaded host stops the VM's processors for
+  milliseconds at a time, the guest's clocks go on, and "this took under
+  2 s" fails. Check what the guest did instead (smpsched_test counts its
+  threads' ContextSwitches: one processor would need two per message);
+  keep elapsed-time bounds as generous give-ups only. To reproduce such a
+  failure, run QEMU on one host CPU: a directory first in PATH with a
+  `qemu-system-x86_64` script that runs `taskset -c 3
+  /usr/bin/qemu-system-x86_64 "$@"`.
+- **sshd_shell's Ctrl+C step (2026-11-03)**: every failed run (solo and
+  in repeats) showed `~ $ sleep 60`, the prompt, `e^C^C`, then `cho:
+  not found`: busybox's control handler (its process's control thread
+  in `GalaConsoleCtrl`) ran only after the prompt was back and dropped
+  the next typed line. The cause was in gala, not in the order of
+  delivery: a lost wake-up in `nt::wait` (a waiter that looked after
+  another process's thread had reset the session's Ctrl+C event slept
+  until the call's 1 s backstop; ROADMAP "sshd_shell's Ctrl+C fixed").
+  A client retry briefly papered over it and is gone again: the line is
+  typed once. Each process's handler thread logs how long after the
+  Ctrl+C it took it (`took Ctrl+C N late` from 250 ms on).
 - **A sleep that spans a handover (2026-11-03)**: handover_upgrade failed
-  twice in full suites (load about 6) with "slept again 1248", check 58:
-  the second Sleep(1000) spans the handover, the thread is frozen and the
-  monotonic clock goes on (that handover alone moved it 232 ms). Timing
-  checks across a handover bound only the short side tightly.
+  with "slept again 1248" (check 58), handover_k32 with "slept 4986"
+  (check 14), handover_idle_uefi with "slept 7634 ms" (check 0x16), each
+  late by much more than the clock jump the log reports: the programs
+  stay stopped from just before the record until the next kernel has
+  rebuilt them (4.3 s at load 29), and a sleep whose deadline falls in
+  that time ends when they go on. Bound such sleeps by the pause the
+  kernel measured from the stop (GalaHandoverPause; ARCHITECTURE "The
+  pause"), never by a guessed constant.
 - **Java hang with a state dump (2026-11-03)**: the first timeout with a
   state dump (correct clock): java_http hung with three JVM threads in
   NtYieldExecution and two waiting on semaphores with count 0
@@ -513,8 +740,14 @@ charged). Look
   times before blaming CI: `XTASK_REPEAT=12 cargo xtask boot-test name`
   boots one scenario's image 12 times, as many at once as the host has
   CPUs (the load brings races out), keeps each failed boot's log
-  (`target/debug/test-<name>.r<i>.serial.log`) and ends with "n of 12
-  boots failed". A race between processors is best caught by a test
+  (`target/debug/test-<name>.r<i>.serial.log`, with its triage in
+  `target/failed/<name>.r<i>.log`) and ends with "n of 12
+  boots failed". With `XTASK_REPEAT` a scenario's exact name selects it
+  alone (`handover_upgrade`, not also `handover_upgrade_uefi`). Code
+  that derives a scenario from an image's name must
+  go through `iso_scenario`, which knows the `.r<i>` of a repeat's copy:
+  without it, repeats of sshd_shell/sshd_server/sshd_sftp forwarded to
+  the guest's port 7 and every connection was reset (2026-11-03). A race between processors is best caught by a test
   program that makes the two sides meet often (threads pinned to
   processors 0 and 1, kept in step: `smpcow_test`), repeated this way.
 - **Lock gaps in the memory manager**: a VAD change and the matching
@@ -542,7 +775,8 @@ charged). Look
   turns interrupts back on while the inner lock is still held (the thread
   can then be preempted holding it; lockdep reported "X taken while
   holding Vad" from a user fault). Let guards drop at scope end, or drop
-  them innermost first.
+  them innermost first. Debug kernels panic on it since 2026-11-03
+  (`lockdep: releasing X turns interrupts on while Y is still held`).
 - **Read the source of the exact version** of an open-source program
   before deciding what it does: Win32-OpenSSH's `latestw_all` branch
   waits for sshd-session in `sshd -d`, the shipped 9.8.3 (tag
@@ -565,6 +799,31 @@ charged). Look
 - **Which handle is which** in an event stream (`XTASK_EVENTS=all`):
   handle values are reused at once (the lowest free slot), so follow
   NtClose and creation order rather than guessing from the value.
+
+## Derived test data
+
+Test data built from exported binaries is remade with them: `cargo xtask
+export-tests` runs `user/pk_install_test/make_source.py` after exporting,
+because that package source zips `user/bin/hello.exe` (a change to ntrt
+changes every ntrt-based exe, and left the zips holding an old hello.exe:
+galapkg's `install_list_run_uninstall` failed on 2026-11-04). New derived
+data goes in the same place.
+
+## QEMU
+
+xtask runs a pinned QEMU (`QEMU_VERSION` in xtask, 11.1.3), built by
+`cargo xtask qemu` into `~/.cache/gala-qemu/<version>` (download from
+download.qemu.org, SHA-256 checked, only `x86_64-softmmu` with user
+networking). `XTASK_QEMU=<path>` overrides it; without either, xtask
+uses `qemu-system-x86_64` from PATH and says so once. Every run prints
+which QEMU it uses. Build dependencies (Ubuntu): `libglib2.0-dev
+libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv
+libfdt-dev zlib1g-dev pkg-config`. CI builds it once and caches it.
+Why not the distribution's: Ubuntu 24.04 ships 8.2.2, whose TCG keeps
+running stale translations of code rewritten on a block's second page
+(the JVM corruption, "Known intermittent" above). A cloud container is
+ephemeral: run `cargo xtask qemu` in the environment's setup script, or
+once per new container (about 10 minutes).
 
 ## Test speed and environments
 
@@ -590,7 +849,9 @@ the boot scenarios before T1 and 14 s after, under software emulation on a
   (`run=a.exe,b.exe`). Each program is judged on its own section of the
   log (between `run: begin` and `run: end`, plus the boot preamble).
   `XTASK_NO_BATCH=1` gives every scenario its own VM; `cargo xtask
-  boot-test <name>` with one match always boots it alone.
+  boot-test <name>` with one match always boots it alone. The name is a
+  substring (`hello` also boots java_hello, go_hello...); `hello$` boots
+  that scenario only.
 - xtask prints per-scenario (or per-VM) timing and a summary, also written
   to `target/report/timing.txt`.
 - **Docker**: `cargo xtask docker-test [xtask args]` builds
@@ -641,7 +902,11 @@ FlaUI) is a plain zip, its members paths such as
 `cargo xtask iso --file path/to/app.exe run=app.exe "args=..."` and boot
 it with QEMU (`-cpu max`), then follow the ledger and the program's own
 error messages (Go programs print which DLL or procedure they could not
-find). Survey an import table first with
+find). A pinned release can vanish upstream: the FileZilla 3.69.3
+client installer's SourceForge URL answers 404 since 2026-11 (ROADMAP
+AG, "Known problem"); keep a fetched `target/prebuilt/<name>` around,
+and change a URL only for an official one with the same SHA-256.
+Survey an import table first with
 `x86_64-w64-mingw32-objdump -p app.exe | grep "DLL Name"`; keep
 downloaded files in their own directory and run them only inside QEMU.
 
@@ -667,7 +932,13 @@ instead of 120 s: a slow CI runner takes over twice as long as a local
 run (java_hello: ~35 s locally; it timed out at 120 s once in CI, with
 its threads still progressing - much of a JVM's time goes to gala's
 lightweight-lock waits, which sleep 1 ms at a time until a kernel address
-wait exists). In a shared VM,
+wait exists). Every limit (but a dump scenario's) is stretched by the
+host's overload when the VM starts (a tracked stopgap, ROADMAP
+Priorities: limits should count guest time) (`host_overload`: the one-minute load
+average per host CPU, 1 to 3): with five agents on a 4-CPU host (load
+20-33) sshd_shell's guest had run only 58 s when its 120 s were up, and
+handover_k32_twice's verification was cut short the same way; the
+failed log's triage line has the load. In a shared VM,
 scenarios running the same program (two `dotnet.exe` runs) are judged on
 that program's n-th `run: begin`..`run: end` section, in group order.
 To see why a .NET program fails: the ledger first, then `XTASK_EVENTS=
@@ -916,6 +1187,26 @@ where its pixel checks expect it (no pointer arithmetic).
   SHA-256s written into the manifests); rerun it after changing them.
   `manifests/b` and `manifests/j` are real winget-pkgs manifests (leave
   them; THIRD_PARTY.md).
+- `galapkg::winget` (the resolver) is tested on the host only: `cargo
+  test -p galapkg winget` (`-- --nocapture` prints the corpus summary
+  and every warning the corpus gives). The corpus is
+  `user/galapkg/testdata/winget-corpus/manifests` (real manifests: never
+  edit them; `.gitattributes` keeps their CRLFs). `selected.txt` there is
+  the golden answer of installer selection for 8 machine profiles; after
+  a deliberate rule change regenerate it with `GALAPKG_BLESS=1 cargo
+  test -p galapkg winget::corpus` and read the diff (each changed line is
+  a package whose installer moved), and say why in the commit.
+- Refreshing the corpus (rarely; keep it under ~3 MB): outside the
+  repository, `git clone --depth 1 --filter=blob:none --sparse
+  https://github.com/microsoft/winget-pkgs <dir>`, `git -C <dir> ls-tree
+  -r HEAD --name-only manifests > paths.txt`, `python3 -I
+  user/galapkg/testdata/winget-corpus/pick.py paths.txt 400 > pick.txt`,
+  `git -C <dir> sparse-checkout set --no-cone --stdin < pick.txt`, copy
+  `<dir>/manifests` over the corpus's, bless the golden, and record the
+  new commit in THIRD_PARTY.md. A manifest that fails to read is a
+  parser bug to fix (winget-pkgs is validated), not a file to drop.
+- The corpus test fails with the first differing golden lines; a
+  manifest that does not read is listed with `file:line:col`.
 - The boot test is `cargo xtask boot-test pk_install_zip`; a failed run
   shows the install log twice (`logtee: install.log:` lines, and
   pk_install_test prints it after the failing check).
@@ -924,8 +1215,72 @@ where its pixel checks expect it (no pointer arithmetic).
   list (`memmove`, `strlen` were needed; the link error names it).
   advapi32 is loaded at run time (`pkg::Reg`): do not import it
   statically, or `gala`'s window commands break on images without it.
+- MSI and cabinet fixtures (`user/galapkg/testdata/msi`): `sh
+  user/galapkg/testdata/msi/make_fixtures.sh` rebuilds `basic.msi`
+  (from `basic.wxs` with wixl), `long.msi.zlib` (a generated package
+  with a 70 KB string, zlib-compressed because it is mostly one letter),
+  `mszip.cab` and `stored.cab` (gcab), and rewrites `expected/` from
+  msiinfo, msiextract, gcab and 7z; commit all of it together (the MSI's
+  package code and dates change on every run, the tests read them from
+  `expected/`). wixl lacks some WiX attributes (VBScriptCall, ShortName,
+  Product/@Codepage is ignored: its pools have code page 0 with UTF-8
+  strings); `msiinfo export` writes a `Binary/` directory into the
+  current directory (the script runs it in its temporary directory).
+  wixl miswrites a string longer than 128 KiB (its own reader rejects it,
+  "string table load failed"): keep long-string fixtures between 64 and
+  128 KiB. gcab writes only uncompressed and MSZIP cabinets (7z none).
+  The script also builds the install-plan packages `plan.msi` (x64,
+  `wixl -a x64`), `dual.msi` and `badcond.msi` and records msiinfo's
+  export of their tables. Rerunning it rewrites `basic.msi`,
+  `long.msi.zlib` and `expected/basic.suminfo` with new dates and
+  package codes: restore them with `git checkout` unless they were what
+  you changed.
+- wixl writes less than WiX: no `Condition` under Feature or Component,
+  no `Directory` on a CustomAction, no `MultiStringValue` (write the
+  `[~]` value as a string), no `Package/@Platform` (use `wixl -a x64`);
+  it writes HKMU as Root 4 instead of -1, drops the `#x`/`#%` prefixes of
+  binary and expandable values and eats `$` in formatted text (`[$Comp]`
+  becomes `[Comp]`). make_fixtures.sh fixes all of these afterwards with
+  `msibuild <msi> -q "<SQL>"` (UPDATE, INSERT, CREATE TABLE work; quote
+  names with backquotes). The test `plan_packages_read_as_msiinfo_exports_them`
+  checks the reader against msiinfo after that rewrite.
+- The install plan (`msi::plan`) has no msiexec to compare with: its
+  tests' expected values are the SDK's documented rules, each test
+  naming its page. When a real Windows run becomes possible, record
+  `msiexec /i x.msi /qn /l*v log` of the same fixtures and compare
+  (TODO).
+- LZX (`user/galapkg/testdata/lzx`): no tool on Linux writes LZX, so
+  `sh user/galapkg/testdata/lzx/make_fixtures.sh` makes the cabinets
+  with the test encoder (`src/lzx/encode.rs`, through the ignored test
+  `lzx::tests::write_fixtures`) and records cabextract's and 7-Zip's
+  decoding (`apt-get install -y cabextract`); the test
+  `fixtures_match_cabextract_and_7z` also checks the encoder still makes
+  the checked-in files byte for byte (change the encoder: rerun the
+  script). `sh user/galapkg/testdata/lzx/fetch_real.sh` fetches a cabinet
+  Microsoft made (inside the DirectX web installer, not committed) into
+  `target/galapkg-fixtures`; `microsoft_cabinet_matches_cabextract`
+  decodes it when present (it skips otherwise, so run the fetch before
+  changing `lzx.rs`). Do not read cabextract's, libmspack's, 7-Zip's or
+  Wine's source: black-box outputs only.
+- The readers' own tests build edge cases with small writers
+  (`cfb::tests::build`, `cab::tests::build_with`); 7-Zip reads what they
+  make (checked by hand when they were written: `7z t`), keep it so.
 - Every installed command is a copy of gala.exe: a gala.exe change does
   not reach commands installed before it until they are reinstalled.
+- MSIX fixtures (`user/galapkg/testdata/msix/`): regenerate with
+  `python3 -I user/galapkg/testdata/msix/make_fixtures.py`, then run
+  `sh user/galapkg/testdata/msix/check_fixtures.sh` (unzip, 7z, xmllint,
+  sha256sum: the independent cross-check) and update the hashes, line
+  numbers and sizes the `msix::tests` expect. Pitfalls: another zlib
+  version may deflate differently (the fixtures are checked in; only a
+  regeneration changes them); the generator refuses a fixture over
+  100 KB; the corrupted fixtures must stay valid zips where the test says
+  so (bad_hash keeps the changed data's CRC-32 and block Sizes, only the
+  hash disagrees), or the reader reports a different error first; shell
+  functions in check_fixtures.sh share variables with their callers. The
+  test publisher's id and the block-run rules come from our reading of
+  the documentation, not from makeappx (ARCHITECTURE "MSIX/AppX
+  reading" says which values are independently verified).
 - Low on disk: a few user programs can be built alone into a scratch
   target directory with xtask's flags (`cargo build --release --target
   x86_64-pc-windows-msvc --config 'target.x86_64-pc-windows-msvc.rustflags=
@@ -1305,6 +1660,87 @@ line a program writes in pieces can be split by a log line ("process ...
 exited"): expect lines that are written in one piece (a shell `echo` of
 a captured value) when that matters.
 
+## OpenTelemetry (a boot as traces, logs and metrics)
+
+`cargo xtask otel` converts a boot's event stream and serial log to
+OTLP/JSON (ROADMAP OT1; the mapping table is in OBSERVABILITY "1b"):
+the boot is one trace, processes and threads are spans, system calls
+spans under their thread, faults, image loads and other events span
+events, the serial log log records (a crash report or state dump one
+record each), `stats:` lines metrics.
+
+```sh
+XTASK_EVENTS=all cargo xtask boot-test 'crash$'   # spans need the stream
+cargo xtask otel crash                  # newest log of the scenario
+cargo xtask otel target/failed/java_http.log      # a kept failure
+cargo xtask otel target/debug/batch-x.serial.log  # a shared VM
+XTASK_EVENTS=all XTASK_OTEL=1 cargo xtask boot-test 'hello$'  # every boot
+```
+
+It writes `<log stem>.otlp.traces.json`, `.logs.json` and
+`.metrics.json` next to the log (`--out <prefix>` elsewhere; for
+boot-test `target/<profile>/<image>.otlp.*`). Each line of a file is one
+OTLP/JSON request (`ExportTraceServiceRequest` etc., at most 5000 spans
+or records), so a line is a valid body for `POST /v1/traces`. It prints
+`otel:` lines: what each event kind became, what was NOT mapped and the
+gaps in the stream; read them before trusting an empty view. Without
+`XTASK_EVENTS` a boot has only the boot span, log records and metrics.
+`name$` in boot-test's filter boots that scenario only (`hello` alone
+also boots java_hello, go_hello, ...).
+
+**Sending** it: `--endpoint http://host:4318` or
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://host:4318` (the standard variable;
+also honoured by `XTASK_OTEL=1` boot tests) POSTs it over OTLP/HTTP
+with JSON (plain http only).
+
+**Viewing in Jaeger** (traces; Jaeger 1.35+ takes OTLP by default):
+```sh
+docker run --rm -p 16686:16686 -p 4318:4318 jaegertracing/all-in-one:1.62.0
+# or the binary from github.com/jaegertracing/jaeger/releases:
+#   ./jaeger-all-in-one          (UI :16686, OTLP/HTTP :4318)
+cargo xtask otel crash --endpoint http://localhost:4318
+# or post the file by hand, one request per line:
+while read -r l; do curl -sS -H 'Content-Type: application/json' \
+  --data "$l" http://localhost:4318/v1/traces; done < target/debug/test-crash.otlp.traces.json
+```
+Open http://localhost:16686, service `gala-os`, operation `boot crash`
+(or search by tag `gala.scenario=crash`, `process.pid=4`,
+`gala.syscall.status=0xc0000034`). The trace view shows processes,
+threads and system calls nested in time; span events (faults, image
+loads, the crash's `exception`) are under each span's "Logs". Jaeger
+shows only traces: logs and metrics need a collector. (Written
+2026-11-03 without a running Jaeger: the development host had no Docker
+daemon. The output was checked against the OTLP protobuf messages with
+python's strict `json_format` instead, and xtask's unit tests check the
+OTLP/JSON shape and the HTTP post; the first agent to load it in a real
+Jaeger: fix this paragraph if a step differs.)
+
+**With the OpenTelemetry collector** (otelcol-contrib), reading the files
+directly (the `otlpjsonfile` receiver reads this one-request-per-line
+format) and printing or forwarding them:
+```yaml
+receivers:
+  otlpjsonfile:
+    include: [target/debug/*.otlp.*.json]
+    start_at: beginning
+exporters:
+  debug: {verbosity: detailed}
+  otlphttp/jaeger: {endpoint: http://localhost:4318}
+service:
+  pipelines:
+    traces: {receivers: [otlpjsonfile], exporters: [debug, otlphttp/jaeger]}
+    logs: {receivers: [otlpjsonfile], exporters: [debug]}
+    metrics: {receivers: [otlpjsonfile], exporters: [debug]}
+```
+`otelcol-contrib --config otel.yaml`; or an `otlp`/`otlphttp` receiver
+on :4318 and `--endpoint` pointed at it, which fans out to Tempo, Loki,
+Prometheus or Grafana.
+
+Large boots: a system-call-heavy boot (a JVM) is hundreds of thousands
+of spans; Jaeger's UI gets slow past ~50k spans in one trace. Convert a
+shorter run, or filter the stream first (`grep -v '"ev":"syscall"'`
+keeps lifetimes and events only).
+
 ## When a test fails (read this first)
 
 - **Start at the end of the failed log**: `target/failed/<scenario>.log`
@@ -1351,6 +1787,10 @@ a captured value) when that matters.
   then `cargo xtask events target/debug/test-<name>.events.jsonl` (or the
   copy in `target/failed/`) for system calls by time, failing statuses,
   each thread's last calls, faults and images.
+- **In a trace viewer**: `cargo xtask otel <scenario or log>` turns the
+  boot (with its event stream) into OTLP for Jaeger or a collector
+  ("OpenTelemetry" above): processes, threads and system calls on one
+  time line, the crash as an `exception` event.
 - **"the disk is (nearly) full"** from xtask: the message says how much is
   free and what to delete; see "Disk space" above.
 - **A watchdog line** (`watchdog: CPU N has taken no timer interrupt`) is
@@ -1380,6 +1820,77 @@ a captured value) when that matters.
   panic uses `IrqMutex::try_lock_untracked`: a tracked `try_lock` there
   teaches lockdep an order no real path has, and a later correct path
   panics as an "inversion".
+
+## Hygiene sweeps
+
+A sweep (the owner, 2026-11-03: "we should do sweeps in general to check
+for hygienic factors") reads existing code for one class of fault at a
+time instead of waiting for a flaky scenario to point at it. The kernel's
+primitives were written for one CPU at a time (2026-10-30) and SMP came
+after; three races had been found in them one by one before the first
+sweep. Do one after a change of assumptions (more CPUs, preemption in new
+places, a new kind of object or teardown path) and otherwise about once
+a month, or when a flaky scenario has no explanation yet.
+
+**What to check** (each item: what the bug looks like, where to look):
+1. *Check, then act, in separate lock holds*: a condition read under a
+   lock and acted on after letting go (or under another lock). Look for
+   `let x = a.lock().thing;` followed by a change elsewhere; for
+   `set_signal(.., 0)` after a test of some queue; for "decided under
+   lock A, signaled under lock B". Fix: one hold, or the dispatcher's
+   `update_signal`/`change_mutant`; or a pin (`NamePin`).
+2. *Wake-ups whose condition changes before the woken thread runs*: a
+   waiter that wakes and looks again can find the condition gone (a
+   notification event reset: `Waiter::released`); a waiter that does
+   not look again takes any wake-up for its own (NtDelayExecution and
+   NtResumeThread). Every `prepare_wait`/`wait` must sit in a loop that
+   re-checks its own condition and deadline.
+3. *Order of teardown*: what a waiter on the dying thing finds when it
+   wakes (process signaled before its handles were closed); queues of
+   work for something that is going away (APCs to an exiting thread,
+   packets to a closed port); a name or count dropping to zero while
+   another CPU is about to take a reference (handle count vs. lookups).
+4. *"This CPU"*: a per-CPU index read with interrupts on is stale after
+   the next instruction (`cpu_index()`, `current_cpu()`); only use it
+   with interrupts off or for diagnostics (shootdown's `changed_on`).
+5. *Interrupt state*: IrqMutex guards must drop innermost first (debug
+   kernels now panic otherwise: `lockdep: releasing X turns interrupts on
+   while Y is still held`); no `schedule()` with a lock held.
+6. *Duplicate or aliased arguments*: the same object twice in one call
+   (WaitAll with one semaphore twice consumed it twice).
+7. *Non-race hygiene on the way*: failure paths that leave nothing behind
+   (OBSERVABILITY.md), infallible allocation (`cargo xtask alloc-audit`),
+   `unsafe` without `SAFETY:`, stale TODOs.
+
+**How**: one SMP stress test per sweep (`smprace_test` for the first),
+one round per finding, two threads pinned to processors 0 and 1 doing
+the two sides in a loop, each round shown to fail before its fix (keep
+the iteration count at a few times what the failure needed: boots under
+a loaded host are slow, and the scenario's timeout is 120 s). A finding
+that cannot be made to fail is fixed when the fix is small and clearly
+right, and the reasoning is written down. Record each finding in
+ROADMAP (Done) and the invariant it breaks in ARCHITECTURE.
+
+**Last sweep: 2026-11-03** (the dispatcher and waits; events,
+semaphores, mutants, timers; APCs; thread and process teardown; handle
+tables and names; IOCP; the scheduler's waits; the heap and frame
+allocator's locks; the console's input signal). Fixed, with a failing
+round in `smprace_test` first: WaitAll with an object twice (round 1),
+a timer's stale expiry signaled after a re-arm (2), a name removed while
+an open was taking its handle (3), a process signaled before its handles
+were closed (4), NtDelayExecution ended by any wake-up (5). Fixed
+without a test: NtReleaseMutant and mutant abandonment changed the
+owner outside the dispatcher lock; the console's `settle` reset
+`input_ready` after checking the queue in an earlier lock hold; the
+out-of-order IrqMutex release detector. Left (ROADMAP "Next", hygiene
+sweep items): waits in NtRemoveIoCompletion are not ended when the port's
+last handle closes; an APC queued as its thread exits is accepted and
+never runs. Checked and found sound: the scheduler's
+`prepare_wait`/`wait`/`wake` protocol (preemption between them included),
+`on_cpu`, KArc's counts, the heap's and frame allocator's single locks,
+keyed events, semaphores (`update_signal`), APC queueing against the
+alertable flag, termination requests against `wake_if_terminating`,
+`add_thread` against `terminate`, the last-thread decision.
 
 ## Hunting a rare hang
 
@@ -1586,11 +2097,15 @@ the in-guest, deterministic version.
 | Frames, heap | `kernel/src/mm/` |
 | Scheduler | `kernel/src/sched/` |
 | NT personality (objects, processes, files, sections, syscalls) | `kernel/src/nt/` |
+| Linux personality (exec, system calls, mmap/brk, ELF loader, initial stack, syscall/errno tables) | `kernel/src/lx/` |
+| Linux test programs, their binaries and expected transcripts | `user/lx/`, `user/lx/bin/` |
+| Linux ABI data (signal frames, sigsets, termios, struct layouts) | `kernel/lx_abi/` |
 | Ramfs | `kernel/src/fs/` |
 | Disk (virtio-blk) | `kernel/src/disk/` |
 | Display (virtio-gpu; the protocol and driver host-tested) | `kernel/src/display/` |
 | Test runtime for user programs | `user/ntrt/` |
 | `gala install` (winget packages): library, commands, test source | `user/galapkg/`, `user/gala/src/pkg.rs`, `user/pk_install_test/` |
+| winget manifest resolver (YAML, schemas, selection, dependencies, ARP) and its corpus | `user/galapkg/src/winget/`, `user/galapkg/testdata/winget-corpus/` |
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
 | Checked-in binaries, Windows runner | `user/bin/` |
 | Build, boot tests, reports | `xtask/` |

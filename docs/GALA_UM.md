@@ -108,6 +108,15 @@ data types from the same module. No other nt file names `crate::arch`,
 `nt_uses_the_machine_only_through_platform` enforces it. No behaviour
 changed (all QEMU scenarios pass).
 
+Since ROADMAP LX seams 2 and 6 (2026-11-03): `Threads::spawn_user`
+takes the thread's `Personality` and `UserEntry::set_syscall_handler`
+registers a named dispatcher for one personality; both platforms keep a
+`personality::Dispatchers` table (gala-um: `entry::SYSCALL_HANDLER`,
+the thread's personality in a thread-local). Core code outside nt that
+must also run in gala-um (`net`) uses `crate::runtime`, which forwards
+to the same host functions as `Um`'s `Clock`/`Threads` (`hosted::sleep_ms`
+is shared).
+
 **Remaining for the split (`nt/` out of `kernel/`):**
 
 1. Move `mm::heap`, `sync` and `events` (or the parts nt uses) into a
@@ -250,8 +259,9 @@ One processor as far as programs can tell (`online_count` 1).
 - `um --trace`: every system call on stderr (the kernel's `trace` flag).
 
 **Not in gala-um** (by design or not yet):
-- process_test, nginx_master: child processes (one NT process per Linux
-  process; a host process per NT process would be needed).
+- process_test, smprace_test, nginx_master: child processes (one NT
+  process per Linux process; a host process per NT process would be
+  needed).
 - Network-card scenarios (net_echo, winsock_test serve, go_http, nginx,
   nginx_tls): a TAP device or host sockets behind AFD.
 - bench: runs, but measures the host.

@@ -24,6 +24,13 @@ explicitly in its commit.
   core structures other items build on (LX seams, RS B2 with the
   core/NT process split), then features on top (PK installers, the
   browser), which run niced and yield VMs to the rest.
+- **Hygiene sweeps (the owner, 2026-11-03)**: "we should do sweeps in
+  general to check for hygienic factors". Regular sweeps of existing code
+  for a class of defect at a time; the first is the early primitives
+  (written just before SMP bring-up) for single-thread-at-a-time
+  assumptions, after three such races (copy-on-write, NtReleaseSemaphore,
+  the notification-event wake-up). The checklist lives in WORKFLOW
+  "Hygiene sweeps".
 - **Token-heavy implementation as filler (the owner, 2026-11-03)**:
   when an agent slot frees up and nothing more foundational waits, use it
   for broad implementation work: item LX proper (the Linux personality's
@@ -35,7 +42,26 @@ explicitly in its commit.
   a failure replays from its seed), then R7's record/replay and clock
   control (first part done 2026-11-02, see R7), then fixing the known flaky scenarios (java_http,
   java_hello, postgres, smpsched_test under load), before the rest of
-  R6.
+  R6. Done 2026-11-03 (test harness): net scenarios in repeats and in
+  parallel (repeats of the sshd scenarios forwarded to the wrong guest
+  port), smpsched_test counts context switches instead of timing,
+  handover sleeps bounded by the measured pause (GalaHandoverPause),
+  handover_k32_twice's verification bounded, time limits stretched by
+  host load (WORKFLOW "Known intermittent"). **Stopgap, to replace**
+  (CLAUDE.md's rule): the load stretch (`host_overload`) widens wall-time
+  limits; the structural fix is a limit on the guest's own progress (its
+  monotonic clock, which xtask can read from the serial log's
+  `uptime_ms=` marks or ask through the monitor) so a starved VM is not
+  killed and a hung one is still caught at the same guest time. The
+  sshd_shell client's Ctrl+C retry (2026-11-03) was removed again once
+  the lost wake-up below was fixed.
+  **sshd_shell's Ctrl+C fixed (2026-11-03)**: not a regression of the
+  clock calibration (the parent failed 1 of 10 solo boots the same way).
+  A lost wake-up in `nt::wait`: setting a notification event woke its
+  waiters, but one that looked only after another had reset it slept on
+  (busybox's Ctrl+C handler ran at GalaConsoleCtrl's 1 s backstop, in
+  the next command line). Waits are now satisfied by the set itself, as
+  on Windows (ARCHITECTURE "Waits"; `wait_test`).
   Flaky scenarios (2026-11-02): a kernel race fixed: a copy-on-write
   fault changed the VAD before mapping the copy, so a second thread's
   write fault in between made the shared frame writable (writes reached
@@ -128,6 +154,17 @@ explicitly in its commit.
   NtGetContextThread gave up after a second waiting for a suspended
   thread to stop (now 30 s, as Windows waits), and the test now lets
   its waiter reach the wait first. `XTASK_REPEAT=n` repeats a boot test.
+  **Resolved (2026-11-04): the cause was QEMU, not gala.** QEMU 8.1.0 to
+  8.2.5's TCG (`tb_record` registering a block that spans two pages under
+  its first page only) kept running the old bytes of code rewritten on a
+  block's second page; HotSpot's patched `mov r64, imm64` object
+  addresses that straddle a page end kept their pre-GC values. Fixed in
+  QEMU 8.2.6. gala now runs on a pinned QEMU (11.1.3, `cargo xtask qemu`,
+  WORKFLOW "QEMU"); `straddle_test` passes on it and fails on Ubuntu's
+  8.2.2 (check 2 round 1 got the pre-rewrite value). java_stress: 15 of
+  15 boots with the bug avoided, 2 of 6 failed without. A kernel
+  workaround was written and not adopted (the owner: fix the cause).
+  The history below is kept for the method.
   **Narrowed further (2026-11-03, second session), still open.** A
   reproducer: `java_stress` (pending; WORKFLOW "Reproducing the Java
   corruption") fails about one boot in three (5 of 19 at first), and
@@ -172,7 +209,11 @@ explicitly in its commit.
   `-smp 1` boot, `-Xint` with forced full collections.
   Also seen once in a full suite: java_http listening but xtask's client
   getting "Connection refused" from the host port forward (not
-  retried; a host port taken by another VM? unexplained).
+  retried; a host port taken by another VM? unexplained). Since
+  2026-11-03 host ports are leased per VM outside the ephemeral range
+  (an ephemeral port from `bind(0)` could be taken by any outgoing
+  connection before QEMU bound it) and a failed forward boots again
+  (WORKFLOW "Network tests").
 - **Observability audit** (2026-11-03, OBSERVABILITY "Gaps found
   2026-11-03"): done: a state dump on every boot-test timeout (NMI;
   SIGQUIT in gala-um), a triage block at the end of every failed log
@@ -448,8 +489,47 @@ explicitly in its commit.
   buttons, clock) and mouse/keyboard input for programs; W4 step 1: the
   Windows 11 look (Selawik text, the fortress start button, maximize);
   W4 step 2: proportional Selawik text in gdi32
+- First hygiene sweep (2026-11-03; WORKFLOW "Hygiene sweeps" has the
+  checklist): the early primitives read for single-CPU assumptions.
+  `smprace_test` (two processors) failed each round before its fix:
+  (1) WaitAll naming one object twice consumed it twice (now
+  STATUS_INVALID_PARAMETER_MIX, as on Windows); (2) the timer thread
+  signaled an expiry after letting go of the timer's lock, so a re-arm in
+  between was followed by the stale signal (~1 in 1200 tries); (3) a
+  named object's name was removed when its handle count reached zero
+  although an open on another CPU had just found it (`NamePin`; ~1 in 20
+  tries); (4) a process was signaled before its handles were closed (a
+  parent found the child's named event still there, every time); (5)
+  NtDelayExecution ended at any wake-up, e.g. NtResumeThread's (a sleep
+  suspended and resumed ended early). Fixed without a test (reasoned in
+  ARCHITECTURE "Waits"): NtReleaseMutant and abandonment changed the
+  owner outside the dispatcher lock (`wait::change_mutant`); the
+  console's `settle` reset `input_ready` after testing the key queue in
+  an earlier hold (a waiter on console input could sleep with a key
+  queued); debug kernels now panic when an IrqMutex guard that re-enables
+  interrupts is dropped while another lock is held
+  (`lockdep::none_held`). Stale TODO removed (start_io). Left: see Next,
+  "Hygiene sweep leftovers"
+
+- Schannel (TLS 1.2 and 1.3, client and server) behind secur32: SSPI's
+  token loop, EncryptMessage/DecryptMessage, certificate validation,
+  attributes (`schannel_test` against Nginx/OpenSSL, `schannel_tls` host
+  tests; item TLS)
+- OpenTelemetry export OT1 (2026-11-03): `cargo xtask otel`, a boot's
+  event stream and serial log as OTLP/JSON traces, logs and metrics
+  (item OT below; OBSERVABILITY "1b")
 
 ## Next
+Hygiene sweep leftovers (2026-11-03, not races of the SMP kind; each
+needs a test against Windows first): NtRemoveIoCompletion waits are not
+ended when the port's last handle closes (Windows ends them:
+GetQueuedCompletionStatus fails with ERROR_ABANDONED_WAIT_0); an APC
+queued to a thread just as it exits is accepted (STATUS_SUCCESS) and
+never runs; NtRemoveIoCompletion takes the packet before writing the
+caller's outputs, so a bad pointer loses it; NtSuspendThread on a thread
+that is exiting can count a suspension it never sees. Next sweep: about a
+month on, or after the next change of assumptions (WORKFLOW).
+
 Direction from the project owner (2026-10-30): multiprocessor support, then
 a real Go program, then Nginx; fast testing (a QEMU test image, gala-um)
 and introspection are explicitly wanted. Priorities within that are ours
@@ -791,7 +871,13 @@ W3. **FileZilla** (asked for 2026-11-01): next. Surveyed: FileZilla
    passing alone (2026-11-01): java_http, java_hello, postgres (three
    times: not a race - the scenario's 120 s limit killed the VM, which
    psql saw as a closed connection; it needs ~45 s alone, so it joined
-   SLOW_SCENARIOS), smpsched_test (check 0x12, a timing check);
+   SLOW_SCENARIOS), smpsched_test (check 0x12, a timing check; fixed
+   2026-11-03: it timed the 1000-message exchange (< 2 s), which a host
+   running the VM's processors one at a time makes slow without the guest
+   doing anything wrong (4 of 4 failed with both vCPUs on one host CPU);
+   it now counts the two threads' ContextSwitches (SystemProcessInformation,
+   new), under 1000 where one processor needs at least 2000: 24 normally,
+   about 300 on one host CPU, 6 of 6 passed there);
    java_hello again on 2026-11-02, twice (java.exe ended with status 1
    and no output after 77 s of system calls, with other suites running
    on the host: load average 10; it passes alone in 34-41 s). Still open
@@ -1778,6 +1864,21 @@ RS. **Remote access and sessions** (the owner, 2026-11-03; design:
    - B2. Per-session desktop and window registry (the statics go): a GUI
      program in session 2 is not found or messaged from session 1; `gala
      windows` lists the caller's session; every GUI scenario still passes.
+     **Done (2026-11-03)**: `nt::session::Desk` per session (window
+     registry, WinEvent hooks, shasha's desktop, each its own lock),
+     reached through `Process::desk`; the `REGISTRY`, `STATE` and
+     `DESKTOP` statics are gone (HWNDs keep one counter). Only the console
+     session's desktop is drawn and gets input; another session's GUI
+     calls see no screen. `session_test` (SYSTEM in session 0 and a child
+     in session 1, each with a window): IsWindow, FindWindowW,
+     EnumWindows, GetWindowThreadProcessId, PostMessageW,
+     SendMessageTimeoutW (ERROR_INVALID_WINDOW_HANDLE) and
+     PostThreadMessageW (ERROR_INVALID_THREAD_ID) never cross sessions;
+     `\Windows\WindowStations` and `\Sessions\<n>\Windows\WindowStations`
+     exist. Observability: `events=window` (create, destroy, an HWND asked
+     for from another session, also logged), the state dump's sessions
+     part. Not yet: window station and desktop objects
+     (GetProcessWindowStation is still NULL), presenters (B3a).
    - B3a. Window state apart from composition, and presenters: console
      attach and switch; the test presenter (headless render for screen
      checks without QEMU screendumps); a session with no presenter keeps
@@ -1844,6 +1945,26 @@ BR. **A web browser: stock Microsoft Edge** (the owner, 2026-11-03).
    Edge's license allows installing and running it but not redistributing
    it, so xtask downloads it and nothing of it is committed.
 
+DR. **Windows drivers, staged and isolated** (the owner, 2026-11-03;
+   later). Windows keeps a stable binary driver ABI, so vendor drivers are
+   a realistic catalogue (Linux drivers are not: no stable in-kernel API,
+   GPL-2.0; LX is a user-space ABI only). Sources: the WDK documentation
+   (CLEAN_ROOM). Invariant: a third-party driver never runs unsupervised in
+   gala's kernel address space; a driver crash restarts its host, and live
+   kernel handover (R9) keeps working. Stages:
+   (1) **UMDF 2 drivers in a user-mode host** (crash-contained; sensors,
+   many USB devices, some printers and readers); (2) **KMDF drivers in an
+   isolated driver host** with a supervisor that restarts it, plus the
+   class frameworks real hardware needs: **NDIS** miniports (network),
+   **Storport** miniports (storage), **HID** minidrivers (input);
+   (3) raw **WDM** drivers only for a needed device with no other route;
+   (4) **WDDM** (GPU display drivers): not planned (item GPU covers
+   virtual machines with software and paravirtual graphics). Each stage
+   test first against a real driver binary in QEMU (third-party binaries
+   run only in QEMU), with the driver host's state in crash reports and
+   the state dump. User-space Linux drivers (libusb, FUSE, CUPS, SANE)
+   come with item LX when it gets device interfaces.
+
 GPU. **Graphics and GPU** (the owner, 2026-11-03; design: ARCHITECTURE
    "Plan: graphics and GPU"). Software first, so everything works on every
    VM and server; paravirtual hardware next; vendor GPUs (WDDM) never in
@@ -1875,7 +1996,9 @@ GPU. **Graphics and GPU** (the owner, 2026-11-03; design: ARCHITECTURE
      registered as on Windows; `vk_test`, `d3d11_test`, `gl_test` (screen
      checks), then DXVK's and vkd3d-proton's own tests. WARP is ruled out
      (Microsoft's, not redistributable).
-   - G3. **virtio-gpu 3D (Venus)**: `GalaGpu*` calls (contexts, blob
+   - G3. **virtio-gpu 3D (Venus)** (deferred by the owner, 2026-11-03:
+     out of scope for now, revisited when there is spare capacity;
+     hardware partitioning and passthrough stay out entirely): `GalaGpu*` calls (contexts, blob
      resources mapped into processes, submit, fences as waitable
      objects), Mesa's venus ICD with a gala backend, Zink for GL; G2's
      tests again on a host GPU (`virtio-gpu-gl-pci,venus=on`).
@@ -1888,6 +2011,90 @@ GPU. **Graphics and GPU** (the owner, 2026-11-03; design: ARCHITECTURE
    contexts, sharing only by NT handles, per-session presentation, GPU
    memory charged (R6). Handover (R9): GPU state dropped (devices reset),
    programs see device-lost and re-create.
+
+OT. **OpenTelemetry as the model for all telemetry** (the owner,
+   2026-11-03: "use open telemetry for all kinds of telemetry ... much
+   easier to trace things from the user space into the kernel space").
+   One data model (traces, spans, logs, metrics sharing trace and span
+   ids) for what today are separate streams (serial log, debugcon JSONL
+   events, `stats:` lines, crash reports, state dumps), readable by the
+   standard tools (an OTel collector, Jaeger, Tempo, Grafana). Sources:
+   the OpenTelemetry specification and opentelemetry-proto (Apache-2.0),
+   W3C Trace Context. Design rules:
+   - OTel is the **model**, not the in-kernel wire format: the kernel
+     writes compact binary records to per-CPU ring buffers (fixed size,
+     no allocation, never blocking, a drop counter); an exporter turns
+     them into OTLP outside the hot path (xtask on the host over
+     debugcon/virtio-serial; in a running system a user-mode service
+     sending OTLP/HTTP). Telemetry must not perturb record/replay (R7).
+   - **Context propagation is the core**: each thread carries a trace
+     context (W3C traceparent semantics) where the kernel reads it at
+     system-call entry (a gala-private TEB slot); kernel work becomes
+     child spans; the context follows work across process creation,
+     pipes, ALPC/RPC, I/O completion ports and work queues.
+   - **Windows programs speak ETW**: an ETW to OTel bridge
+     (`EventRegister`/`EventWrite`, TraceLogging in advapi32) turns what
+     real software already emits into OTel logs and spans; later the same
+     for the Linux personality (item LX).
+   - What exists maps onto it: events to span events/logs, `stats:` to
+     metrics, crash reports and dumps to logs carrying the trace context
+     they happened in; `cargo xtask triage` reads spans.
+   - **One clock** (R1): timestamps from the kernel's monotonic clock,
+     mapped to wall time once per export; ring state survives a kernel
+     handover (R9).
+   Stages: **OT1** xtask converts today's event stream to OTLP and opens
+   it in a local Jaeger (cheap, useful at once). **Done 2026-11-03**:
+   `cargo xtask otel <log | events.jsonl | scenario>` and `XTASK_OTEL=1`
+   for boot-test (`xtask/src/otel.rs`, a hand-written OTLP/JSON encoder;
+   mapping table in OBSERVABILITY "1b", use and viewing in WORKFLOW
+   "OpenTelemetry"): a resource and a trace per boot, processes, threads
+   and system calls as nested spans, faults, image loads and other events
+   as span events, serial lines as logs (a crash report and a state dump
+   one record each, the crash also an `exception` event), `stats:` as
+   gauges, system calls per service as sums; files and OTLP/HTTP
+   (`--endpoint`, `OTEL_EXPORTER_OTLP_ENDPOINT`). The converter counts
+   what it could not map per event kind and the stream's gaps. 14 unit
+   tests (ids, parents, times, closed spans, the OTLP/JSON schema, the
+   HTTP post); real boots converted (`XTASK_EVENTS=all`): hello 5 spans,
+   events 17, crash 4 (the exception on thread 8), sshd_shell 9518 spans
+   (8 processes, 9497 system calls; 13163 events), each checked against
+   the OTLP protobuf messages with python's strict json_format and for
+   parents inside one trace. Not shown in a live Jaeger: the host has no
+   Docker daemon and running the Jaeger release binary was not permitted
+   here (the WORKFLOW recipe is untested on this host). **OT2 must fill
+   these gaps** (what the conversion of real boots counted): no thread on
+   `fault`, `image`, `console`, `net` events (sshd_shell: 1885 faults
+   without a thread); no entry event for a system call (only waits have
+   one), so a call that never returns is invisible; no parent pid or
+   trace context on `process start`, so every process hangs off the boot
+   (sshd -> sshd-session -> conhost -> busybox are siblings); serial lines
+   carry no time (placed at the latest process start/exit or
+   `uptime_ms=` mark before them); the boot's wall-clock start is guessed
+   from the log's modification time; the `rec` stream is not telemetry.
+   **OT2** trace context in
+   the kernel, system calls, waits, faults, I/O and network as spans,
+   per-CPU rings; **OT3** propagation through ntdll/kernel32, process
+   creation, pipes, ALPC/RPC, IOCP; **OT4** the ETW bridge; **OT5** the
+   in-guest OTLP exporter for servers, controlled from the `gala` CLI
+   (on/off, sampling, endpoint).
+
+OF. **The current Office: Microsoft 365 apps and the new Outlook** (the
+   owner, 2026-11-03: "the new Office suite would be very interesting to
+   see if we have any blockers there"; classic Outlook is out of scope).
+   First an assessment, then the work it finds, in this order:
+   (1) **Gap analysis** (black-box metadata only, CLEAN_ROOM): the
+   import tables, delay loads, COM classes and services of the Microsoft
+   365 apps (Word, Excel, PowerPoint; Click-to-Run, installed with the
+   Office Deployment Tool) and of the new Outlook (an MSIX package over
+   WebView2), against gala's exports and stubs; the result is a ranked
+   blocker list in this item, like item AG's. (2) **The new Outlook**,
+   after item BR's WebView2: MSIX install (PK stage 4), sign-in through
+   the Web Account Manager, notifications. (3) **The Microsoft 365
+   apps**: Click-to-Run's service and its virtualization, then the apps'
+   own needs (expected: DirectWrite/Direct2D/Direct3D 11 in software,
+   item GPU; Schannel TLS; COM/OLE depth). Sign-in and activation depend
+   on Microsoft's services and licence terms: the owner decides how far
+   to go there.
 
 PK. **Installing software: `gala install` over winget manifests** (the
    owner, 2026-11-03). winget's community manifests (the winget-pkgs
@@ -1932,6 +2139,38 @@ PK. **Installing software: `gala install` over winget manifests** (the
       (BR stage 4) is a target. Built clean-room from Microsoft's
       documentation of the MSI database and actions (Wine's msi is LGPL:
       read only as CLEAN_ROOM.md allows, nothing copied unrecorded).
+      **Reading packages done** (2026-11-03, host tests `cargo test -p
+      galapkg`; ARCHITECTURE "Installing software", "Reading MSI
+      packages"): compound files (`cfb`: v3/v4, FAT/miniFAT/DIFAT, the
+      directory tree, streams), the MSI database (`msi`: stream names,
+      the string pool with long strings and long ids, `_Tables`/
+      `_Columns`, any table, typed File/Component/Directory/Feature/
+      Registry/Shortcut/Media/CustomAction/Binary rows, the summary
+      information), cabinets (`cab`: none and MSZIP), and the API `gala
+      install` will call (`install_files`: target paths through the
+      Directory table, `extract`/`extract_all` from embedded cabinets),
+      checked against msitools and gcab on wixl-built fixtures and fed
+      damaged files. **LZX and the install plan done** (2026-11-03,
+      host tests; ARCHITECTURE "LZX", "MSI install plans"): `lzx`
+      (cabinet LZX from the Cabinet SDK and [MS-PATCH], checked
+      byte-identical to cabextract and 7-Zip on a Microsoft-made LZX:21
+      cabinet with E8 (fetched, not committed) and on checked-in
+      cabinets from a spec-written test encoder); `msi::cond` (the full
+      condition grammar, table-driven from the SDK's examples),
+      `msi::format` (Formatted), `msi::plan` (`Plan::compute`: context
+      from ALLUSERS/MSIINSTALLPERUSER, system folders per context,
+      directories with source and target paths, the Condition table,
+      INSTALLLEVEL, ADDLOCAL/REMOVE/ADDSOURCE/ADDDEFAULT/ADVERTISE,
+      component conditions and states, files, registry values with
+      prefixes and [~] lists, shortcuts, launch conditions, the five
+      sequence tables with conditions evaluated and custom action types
+      decoded; one line per item for the log; errors name table, row,
+      column). Expected plans are the documented rules: no msiexec ran
+      (TODO: compare `msiexec /l*v` on Windows). Next: the engine:
+      `gala install` of an `msi` InstallerType running the plan (files
+      from the cabinets, registry, shortcuts, an ARP entry, rollback
+      through `install::Tx`), AppSearch and type 51/35 custom actions in
+      the plan, then msiexec/msi.dll with custom actions.
    6. Later: running stock winget itself (it is an MSIX: stage 4) against
       gala, the Microsoft Store source, `winget configure`.
    Ideas: installs are transactions (a failed install rolls back its
@@ -1951,10 +2190,94 @@ PK. **Installing software: `gala install` over winget manifests** (the
    PATH, winget's ARP entry, transactions with rollback (upgrade
    included), the install log and ledger records; kernel32's
    CreateProcess now searches PATH. Next: the HTTPS fetcher (designed in
-   ARCHITECTURE: Winsock + a TLS client on gala's CNG, the GitHub raw and
+   ARCHITECTURE: Winsock + a TLS client on gala's CNG; Schannel exists now,
+   item TLS: winhttp over it is the plan, the GitHub raw and
    contents URLs, winget's source index for search), real symbolic links
    for commands, the logon environment from `HKCU\Environment`, then
    stage 3.
+   **Stage 4 groundwork: the MSIX/AppX reader built** (2026-11-03,
+   branch other/msix-reader; host tests `cargo test -p galapkg`, modules
+   `msix`, `appxmanifest`, `blockmap`, `xml`; fixtures
+   `user/galapkg/testdata/msix` from `make_fixtures.py`, cross-checked
+   by `check_fixtures.sh` with unzip, 7z and sha256sum; ARCHITECTURE
+   "Installing software", "MSIX/AppX reading"): packages and bundles
+   opened from memory (ZIP64 with data descriptors), AppxManifest.xml
+   (Identity, Properties, Dependencies, Applications, Capabilities incl.
+   runFullTrust), [Content_Types].xml, AppxBlockMap.xml checked per
+   64 KiB block (SHA-256/384/512, deflate runs per block, sizes,
+   LfhSize, unlisted/missing files; errors name file and block), bundle
+   manifests with their packages' Offset/Size and inner packages opened
+   in place; package full/family names and the publisher id (checked
+   against Microsoft's documented `8wekyb3d8bbwe`). AppxSignature.p7x:
+   presence only. Next: signature validation (PKCS#7 over the
+   AppxBlockMap/content hashes against trusted certificates, crypt32),
+   then `gala install` of an .msix: staging to `C:\Program Files\
+   WindowsApps\<full name>`, registration, package identity for
+   full-trust apps; a real makeappx-built package as a fixture (needs
+   Windows) to confirm the spec-derived rules (per-block deflate runs,
+   bundle Offset).
+   **The winget resolver built** (2026-11-03, host tests `cargo test -p
+   galapkg winget`, a corpus of 400 real winget-pkgs version directories;
+   ARCHITECTURE "The winget resolver"): `galapkg::winget`, beside the
+   install path's `manifest`/`yaml`: a YAML subset parser with line and
+   column, schemas 1.0.0-1.28.0 (fields and values per version, warnings
+   for newer/unknown ones), singleton and multi-file manifests with every
+   installer field and locale fallback, installer selection as winget
+   (architecture with emulation, scope, locale, installer type,
+   MinimumOSVersion, Platform, Markets, upgrade keeping the installed
+   type/scope; every rejection's reason), the command line from
+   InstallerSwitches and per-type defaults, dependencies into an ordered
+   plan with cycle detection, AppsAndFeaturesEntries matched to ARP
+   records, version ordering. Next: switch `gala install`/`list`/
+   `upgrade` over to it (ARCHITECTURE says how), then delete
+   `manifest.rs`/`yaml.rs`; a boot scenario with a dependency and an
+   upgrade that keeps scope.
+
+TLS. **Schannel: SSPI's TLS package** (2026-11-03). **Client and server,
+   TLS 1.2 and 1.3, done** (test `schannel_test`, scenario of the same
+   name, against Nginx with OpenSSL on the loopback address started with
+   `start=`, and the test's own server in-process; host tests
+   `cargo test -p schannel_tls`; ARCHITECTURE "Schannel (TLS)"):
+   AcquireCredentialsHandleW/A with SCHANNEL_CRED and SCH_CREDENTIALS
+   (protocols forced either way, manual or automatic validation, server
+   certificates with a CNG key), InitializeSecurityContextW/A and
+   AcceptSecurityContext with the documented token rules (continue,
+   SEC_E_INCOMPLETE_MESSAGE with SECBUFFER_MISSING when the bytes come
+   one at a time, SECBUFFER_EXTRA, ALLOCATE_MEMORY, returned attributes,
+   SNI and the name check, TLS 1.3 tickets as SEC_I_RENEGOTIATE handed
+   back, shutdown with close_notify), EncryptMessage/DecryptMessage in
+   place (SEC_I_CONTEXT_EXPIRED on close_notify), QueryContextAttributes
+   (STREAM_SIZES, CONNECTION_INFO, CIPHER_INFO, REMOTE_CERT_CONTEXT,
+   APPLICATION_PROTOCOL for ALPN, PACKAGE_INFO), automatic validation's
+   SEC_E_WRONG_PRINCIPAL, SEC_E_UNTRUSTED_ROOT and SEC_E_CERT_EXPIRED
+   against gala's machine root store (`System32\gala\roots`). Engine:
+   rustls (unbuffered, `no_std`) with the pure-Rust RustCrypto provider,
+   in the new schannel.dll; ncrypt imports RSA keys and signs; crypt32's
+   chain functions fail closed instead of ending the process. Not yet run
+   on real Windows: run-all.ps1 runs it when Nginx can be started and,
+   as an administrator, imports the test CA into the machine's root
+   store first. **Next**, in this order:
+   1. winhttp over Schannel: WinHttpOpen/Connect/OpenRequest/SendRequest/
+      ReceiveResponse/ReadData for http and https (the JDK and .NET's
+      HttpClient on Windows use it), with a test against the same Nginx.
+   2. wininet's HTTP functions on the same code (InternetOpen/Connect,
+      HttpOpenRequest/SendRequest, InternetReadFile).
+   3. curl for Windows (its Schannel backend) as an unmodified program:
+      PREBUILT, a scenario fetching from the in-guest Nginx; then Git's
+      https remote (MinGit uses curl with Schannel).
+   4. `gala install`'s HTTPS downloads (PK stage 1's fetcher) on winhttp
+      and Schannel instead of a TLS stack in the tool, with gala's root
+      store holding the public roots (a pinned, documented CA bundle).
+   5. The browser (BR): Chromium brings BoringSSL for its own TLS but
+      uses the system's root store and CertVerifyCertificateChainPolicy:
+      crypt32's stores and chain engine (the ROOT store read from the
+      same directory) come first; Schannel then validates through them.
+   Also open: session resumption, client certificates, ECDSA server
+   keys, revocation, keys persisted across processes.
+   **Stopgap to replace (2026-11-04):** `schannel_test` is excluded from
+   gala-um (`NOT_IN_UM`): its TLS 1.3 handshake with the in-process server
+   hangs there (both threads waiting) while it passes in QEMU. Find the
+   gala-um socket or wait gap and remove the exclusion.
 
 LX. **A Linux personality, later; its seams now** (the owner,
    2026-11-03; design: ARCHITECTURE "Plan: a second personality (Linux)";
@@ -1963,7 +2286,8 @@ LX. **A Linux personality, later; its seams now** (the owner,
    Priorities): after the seams, the milestones below, test first against
    real Linux. The seams are built with the work that touches each area: (1) the pty as a core terminal object under ConPTY (a
    refactor now: ConPTY, item SSH, was built first); (2) per-process
-   system-call dispatch; (3) the core/NT split of `Process` with RS B2;
+   system-call dispatch; (3) the core/NT split of `Process` with RS B2
+   (**done 2026-11-03**: `nt::process::Core`, `Process` derefs to it);
    (4) file-system metadata: per-directory case sensitivity
    (FileCaseSensitiveInformation), POSIX metadata per file, a plan for
    symlinks/hard links/POSIX delete and rename; (5) shared core objects
@@ -1971,6 +2295,262 @@ LX. **A Linux personality, later; its seams now** (the owner,
    The Linux layer itself (ELF loader, system calls, fork, signals, ptys,
    ld.so, epoll; static musl and busybox first) only when the owner
    schedules it.
+   **Seams 2 and 6 done** (2026-11-03; ARCHITECTURE "The seams"): (2) a
+   `Personality` on every process (NT, fixed at creation) and a
+   dispatcher table keyed by it in the kernel's system-call entry (the
+   per-CPU block carries the running thread's personality) and in
+   gala-um's SIGSYS handler; host tests in `kernel/src/personality.rs`
+   (a process of a test-only personality reaches its dispatcher, never
+   NT's); the personality in process events, the crash report and the
+   thread dumps, the dispatcher in the unknown-service line (scenarios
+   events and crash check them). (6) `net` uses `crate::runtime` (core
+   threads and time) instead of `nt::platform`; xtask's
+   `net_does_not_depend_on_nt` keeps it so. Next seams: (3) with RS B2,
+   (1), (4), (5) as their areas are touched.
+
+AG. **API gaps in the shell and runtime DLLs** (filler work, Priorities:
+   "API shims and gaps"; started 2026-11-03 on branch `other/api-gaps`,
+   limited to msvcrt, shlwapi, oleaut32, crypt32, version, dbghelp,
+   comctl32, shell32, ole32 and new small DLLs while other agents work in
+   user32, gdi32, kernel32, advapi32, ntdll and the kernel). The gap list
+   comes from the import tables (`x86_64-w64-mingw32-objdump -p`: black-box
+   metadata) of the checked-in programs in `user/bin`, the JDK, PostgreSQL
+   17.2's `bin` (with pgAdmin's StackBuilder and its wxWidgets 3.2 VC
+   DLLs), FileZilla Server 1.12.6 (with its GUI, wxWidgets 3.2 gcc) and
+   SQL Server LocalDB 2022, against the exports of `user/bin/test*.dll`
+   (oleaut32's by-ordinal imports resolved with Wine's oleaut32.spec
+   numbers), and from the `gala_stubs` stubs in those crates (exported,
+   so a program loads, but a call ends it). Two kinds: **missing exports**
+   stop a program from loading at all; **stubs** stop it when called.
+   - Missing exports (load blockers):
+     - msvcrt: `_wtol`, `difftime` (wxbase32u_gcc_custom.dll), `iswlower`,
+       `iswupper` (filezilla-server-gui.exe): FileZilla Server's GUI
+       does not load.
+     - oleaut32: `SystemTimeToVariantTime` (184),
+       `VariantTimeToSystemTime` (185), `VarBstrFromCy` (113): the same
+       GUI's wxmsw32u_core_gcc_custom.dll and StackBuilder's
+       wxmsw326u_core; StackBuilder also `GetActiveObject` (35) and
+       `VarCyFromR8` (102) by ordinal.
+     - ole32: `OleLockRunning`, `OleRun`, `OleSetContainedObject`
+       (StackBuilder's wxmsw326u_core).
+     - dbghelp: `ImageNtHeader`, `MiniDumpWriteDump`,
+       `SymSrvGetFileIndexInfoW` (LocalDB's SqlDumper.exe, which
+       sqlservr starts to write a dump when it crashes).
+     - New DLLs: normaliz.dll (`IdnToAscii`, `IdnToUnicode`: libcurl in
+       PostgreSQL's bin), winspool.drv (wxmsw326u_core), and the JDK's
+       optional ones (dsound, winscard, msi, dbgeng: loaded only by
+       jsound, j2pcsc, jpackage, saproc).
+   - Stubs that real programs import (by program):
+     - shlwapi: SQL Server LocalDB (xe.dll, sqllang, msxmlsql,
+       hkcompile, SqlDumper, SqlUserInstance): `PathCanonicalizeW`,
+       `PathCombineW`, `PathFindExtensionW`, `PathIsRelativeW`,
+       `PathIsURLW`, `PathRemoveBackslashW`, `PathRemoveExtensionW`,
+       `PathSearchAndQualifyW`, `PathCreateFromUrlW`, `StrCmpW`,
+       `StrCmpIW`, `StrCmpNIW`, `StrStrW`, `StrStrIW`, `UrlIsW`,
+       `UrlEscapeW`, `UrlUnescapeW`, `UrlCanonicalizeW`, `UrlCombineW`,
+       `UrlCreateFromPathW`, `SHCreateStreamOnFileEx`, `SHDeleteKeyW`;
+       wxWidgets (FileZilla, FileZilla Server's GUI): `PathMatchSpecW`,
+       `StrCmpLogicalW`, `AssocQueryStringW`, `SHAutoComplete`.
+     - oleaut32 (LocalDB): `VarI4FromStr`, `VarUI4FromStr`,
+       `VarR8FromStr`, `VarBoolFromStr`, `VarBstrFromBool`,
+       `VarCyFromStr`, `VarDateFromStr`, `VarCmp`.
+     - shell32 (wxWidgets): `DragAcceptFiles`, `DragQueryFileW`,
+       `DragQueryPoint`, `DragFinish`, `ShellExecuteExW`,
+       `SHFileOperationW`, `SHChangeNotify`, `Shell_NotifyIconW`,
+       `ExtractIconW`, `ExtractIconExW`, `SHDefExtractIconW`,
+       `SHBrowseForFolderW`.
+     - ole32 (wxWidgets): `PropVariantClear`, `ReleaseStgMedium`, the
+       OLE clipboard (`OleSetClipboard`, `OleGetClipboard`,
+       `OleFlushClipboard`, `OleIsCurrentClipboard`: need user32's
+       clipboard, itself still stubs) and `DoDragDrop`; (LocalDB)
+       `CoCreateInstanceEx`, `CoSetProxyBlanket`, `CoQueryProxyBlanket`,
+       `CoImpersonateClient`, `CoRevertToSelf`, `CoRegisterMallocSpy`,
+       `CreateBindCtx`, `GetHGlobalFromStream`.
+     - comctl32 (wxWidgets): the image-list drag functions
+       (`ImageList_BeginDrag`, `DragEnter`, `DragMove`, `DragLeave`,
+       `EndDrag`, `SetDragCursorImage`) and `CreateUpDownControl`.
+     - crypt32: libcurl (`CertGetNameStringA`, `CertGetCertificateChain`,
+       `CertFreeCertificateChain`, the chain engine, `CryptDecodeObjectEx`,
+       `CryptQueryObject`, `PFXImportCertStore`,
+       `CertAddCertificateContextToStore`), GnuTLS (FileZilla:
+       `CertDeleteCertificateFromStore`, `CertEnumCRLsInStore`,
+       `PFXImportCertStore`), the JDK's sunmscapi (`CertOpenSystemStoreA`,
+       `CryptAcquireCertificatePrivateKey`, chains), LocalDB (`PFXIsPFXBlob`,
+       `CertAddEncodedCertificateToStore`; secforwarder.dll imports all of
+       crypt32 but forwards only).
+     - dbghelp (LocalDB's In-Memory OLTP): `SymFromAddr`,
+       `SymLoadModuleExW`, `SymUnloadModule64`.
+   - Done (test first; expected values from Microsoft's documentation
+     and Wine's conformance tests, which are validated on Windows; no
+     Windows machine was at hand, so each test still needs a run-all.ps1
+     check there):
+     1. msvcrt `iswlower`, `iswupper` (and `iswcntrl`, `iswgraph`,
+        `iswascii`), `_wtol`, `difftime` (`msvcrt_test`); oleaut32
+        `SystemTimeToVariantTime`, `VariantTimeToSystemTime`,
+        `VarBstrFromCy`, `VarCyFromR8`, `GetActiveObject` (MK_E_UNAVAILABLE,
+        recorded) and the LocalDB stubs `VarI4FromStr`, `VarUI4FromStr`,
+        `VarR8FromStr`, `VarCyFromStr`, `VarBoolFromStr`,
+        `VarBstrFromBool`, `VarDateFromStr`, `VarCmp` (`oleaut32_test`).
+        FileZilla Server's GUI and StackBuilder's wxWidgets DLLs now find
+        every msvcrt and oleaut32 import (the GUI then needs user32's and
+        gdi32's stubs, below).
+     2. shlwapi: `PathCanonicalizeW`, `PathCombineW`, `PathFindExtensionW`,
+        `PathRemoveExtensionW`, `PathRemoveBackslashW`, `PathIsRelativeW`,
+        `PathIsURLW`, `PathMatchSpecW`, `PathSearchAndQualifyW`, `StrCmpW`,
+        `StrCmpIW`, `StrCmpNIW`, `StrStrW`, `StrStrIW`, `StrCmpLogicalW`,
+        `SHDeleteKeyW` (`shlwapi_test`; LocalDB's xe.dll, sqllang,
+        msxmlsql, hkcompile, SqlDumper, SqlUserInstance and wxWidgets'
+        wxbase).
+     3. shell32: `ShellExecuteExW` (and `ShellExecuteW` now runs
+        programs), `DragQueryFileW`, `DragQueryPoint`, `DragFinish`,
+        `DragAcceptFiles`, `SHFileOperationW`, `SHChangeNotify`,
+        `Shell_NotifyIconW` (fails: no notification area, recorded),
+        `SHGetIconOverlayIndexW` (`shell32_test`); ole32:
+        `PropVariantClear`, `ReleaseStgMedium`, `OleRun`,
+        `OleLockRunning`, `OleSetContainedObject` (the last three were
+        missing exports: StackBuilder's wxmsw326u_core did not load),
+        `CoSetProxyBlanket`, `CoQueryProxyBlanket`,
+        `CoFreeUnusedLibraries` (`ole32_test`). Left: shell32's icon
+        extraction and SHBrowseForFolderW, ole32's OLE clipboard and
+        DoDragDrop (they need user32's clipboard), CoCreateInstanceEx,
+        CreateBindCtx, GetHGlobalFromStream, CoRegisterMallocSpy,
+        CoImpersonateClient/CoRevertToSelf.
+     4. dbghelp: `ImageNtHeader`, `SymSrvGetFileIndexInfoW` (and
+        `MiniDumpWriteDump` exported as a stub), so LocalDB's SqlDumper
+        loads; a new normaliz.dll (`IdnToAscii` forwarded to kernel32,
+        `IdnToUnicode` its own: kernel32's is a stub, for its owners to
+        replace) for libcurl (`dbghelp_test`).
+     5. crypt32: `CryptMemAlloc`, `CryptMemRealloc`, `CryptMemFree`,
+        `CryptProtectMemory`, `CryptUnprotectMemory`, `CertGetNameStringA`,
+        `PFXIsPFXBlob` (`cert_test`; libcurl, GnuTLS, the JDK's sunmscapi,
+        LocalDB). Left in crypt32: the chain engine and chains
+        (`CertGetCertificateChain` and friends: libcurl, sunmscapi),
+        `CryptDecodeObjectEx`, `CryptQueryObject`, `PFXImportCertStore`,
+        the store functions (`CertAddCertificateContextToStore`,
+        `CertDeleteCertificateFromStore`, `CertEnumCRLsInStore`,
+        `CertOpenSystemStoreA`), `CryptAcquireCertificatePrivateKey`.
+     6. shlwapi, the rest: `UrlIsW`, `UrlEscapeW`, `UrlUnescapeW`,
+        `UrlCanonicalizeW`, `UrlCombineW`, `UrlCreateFromPathW`,
+        `PathCreateFromUrlW`, `AssocQueryStringW`, `SHCreateStreamOnFileEx`,
+        `SHAutoComplete` (E_NOTIMPL, recorded) (`shlwapi_test`'s url.c,
+        Wine's url.c and path.c vectors; LocalDB's msxmlsql, sqllang, xe,
+        xmlrw, hkcompile and wxWidgets). shlwapi has no stubs left.
+        UrlCanonicalizeW knows the http-like schemes' rules only (other
+        forms are copied, recorded).
+     7. shell32: `ExtractIconW`, `ExtractIconExW`, `SHDefExtractIconW`
+        (icon groups read from an image's resource directory or an .ico
+        file, made by user32's CreateIconFromResourceEx; `shell32_test`,
+        whose build.sh now embeds two icons). Left in shell32:
+        `SHBrowseForFolderW` (a dialog).
+     8. ole32: `CoCreateInstanceEx` (MULTI_QI results; CUIAutomation in
+        the test), `CreateBindCtx` (bound objects, object parameters,
+        BIND_OPTS; no running object table: recorded),
+        `CoImpersonateClient`/`CoRevertToSelf` (RPC_E_CALL_COMPLETE: no
+        COM call is ever being served) (`ole32_test`). Left in ole32:
+        `GetHGlobalFromStream` and CreateStreamOnHGlobal with an HGLOBAL
+        (they need movable global memory: kernel32's GlobalSize is a stub
+        and GlobalAlloc hands out fixed blocks), `CoRegisterMallocSpy`,
+        the OLE clipboard and `DoDragDrop` (user32's clipboard).
+     9. crypt32: certificate stores (`CertOpenStore` memory, collection
+        and system stores, `CertOpenSystemStoreA/W`: the system stores are
+        empty and recorded, gala installs no certificates yet;
+        `CertAddEncodedCertificateToStore`,
+        `CertAddCertificateContextToStore` with the ADD_* dispositions,
+        `CertEnumCertificatesInStore`, `CertFindCertificateInStore` (any,
+        SHA-1 hash, subject name, subject/issuer text, existing),
+        `CertDeleteCertificateFromStore`, `CertDuplicateStore`,
+        `CertCloseStore`, `CertEnumCRLsInStore`), `CryptQueryObject` (a
+        certificate, DER or base64/PEM, from a file or blob) and
+        `CryptDecodeObjectEx` (alternative names) (`cert_test`). Before,
+        CertOpenStore failed for everything; nginx, nginx_tls and
+        caddy_http still pass. Left in crypt32: `PFXImportCertStore`
+        (PKCS #12 decryption), the other decode types, CRLs/CTLs,
+        collections' member stores (`CertAddStoreToCollection`),
+        `CryptAcquireCertificatePrivateKey`; the chain engine is
+        other/schannel-tls's.
+    10. dbghelp: `SymInitialize(W)`, `SymCleanup`, `SymSetOptions`,
+        `SymGetOptions`, `SymLoadModuleExW`, `SymUnloadModule64`,
+        `SymFromAddr` over the modules' exports (no PDBs yet: recorded)
+        (`dbghelp_test`; LocalDB's In-Memory OLTP, hkruntime and
+        hkengine). Left in dbghelp: `MiniDumpWriteDump` (a stub: writing
+        a minidump is its own piece of work), PDB symbols, other
+        processes' modules.
+    11. comctl32: the image-list drag functions (`ImageList_BeginDrag`,
+        `DragEnter`, `DragMove`, `DragLeave`, `EndDrag`,
+        `SetDragCursorImage`; the drag's state is kept, the drag image is
+        not drawn yet: recorded) (`comctl32_test`; wxWidgets). Left in
+        comctl32: `CreateUpDownControl` (a new control class).
+        version and msvcrt: nothing left that the surveyed programs import
+        (msvcrt's last four were group 1).
+   - Known problem (2026-11-03): the FileZilla client's PREBUILT URL
+     (`downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe`)
+     now answers 404 (so does the `FileZilla_Client/3.69.3/` path), so
+     the `filezilla`, `filezilla_flaui` and `filezilla_server` scenarios
+     (one module set) cannot be fetched on a machine without
+     `target/prebuilt/filezilla`. No official mirror with the pinned
+     SHA-256 (e87b8787...) was found; the URL is unchanged until one is.
+   - Elsewhere (not in these crates; for the agents there): FileZilla
+     Server's GUI also stops on user32 (54 stubs: carets, the clipboard,
+     DDE, DrawEdge/DrawFrameControl, window placement), gdi32 (16:
+     metafiles, font enumeration), kernel32 (13), comdlg32 (4), oleacc,
+     winmm's PlaySoundW, ws2_32's inet_pton/inet_ntop (GnuTLS).
+   **Milestone 1 groundwork done** (2026-11-03; ARCHITECTURE "Plan: a
+   second personality (Linux)", "The lx module"; WORKFLOW "Linux test
+   programs"): the pieces that do not touch system-call dispatch.
+   `kernel/src/lx/` (declared, nothing wired): `elf` (ELF64 x86-64
+   ET_EXEC/ET_DYN parsed and validated, the load plan: segments, file
+   pages, bss, protections, PT_INTERP, PT_TLS, PT_GNU_STACK,
+   PT_GNU_RELRO, AT_PHDR, the ET_DYN load bias), `stack` (the initial
+   stack as bytes: argc, argv, envp, auxv, strings, AT_RANDOM; Linux's
+   layout byte for byte where Linux is deterministic), `syscalls` and
+   `errno` (name <-> number tables); host tests only (`cargo test -p
+   kernel --lib lx`: the real test binaries, malformed images, the
+   auxv_test transcript replayed against a stack built here). Linux test
+   programs in `user/lx/` (static musl and static-pie, raw system calls):
+   hello_test, write_exit_test, brk_test, mmap_test, arch_prctl_test,
+   auxv_test, their transcripts recorded on Linux 6.18 (`expected.txt`)
+   and checked by `cargo xtask lx-expect` (CI). **Next**, after the
+   per-process dispatch seam (step 2, being built elsewhere): the exec
+   path (map a `LoadPlan`, the stack, start the thread; a `Personality::
+   Linux` process), then write/exit_group/brk/mmap/munmap/mprotect/
+   arch_prctl in a Linux dispatcher table indexed by `lx::syscalls::nr`,
+   each user/lx program as a boot scenario expecting its expected.txt;
+   then milestone 2 (busybox's calls, from `strace` on real Linux).
+   **Milestones 2-3 test corpus done** (2026-11-03; WORKFLOW "Linux test
+   programs", ARCHITECTURE "The lx_abi crate"): nine more user/lx
+   programs recorded on Linux 6.18 and checked by `cargo xtask
+   lx-expect` (now with `--runs N`, a determinism check): fs_test,
+   pipe_test, fork_test, thread_test, signal_test, clock_test,
+   poll_test, pty_test, proc_test (about 930 transcript lines); and
+   `kernel/lx_abi` (signal numbers, sigsets, default actions, siginfo/
+   ucontext/sigcontext/rt_sigframe layouts, termios and a fresh pty's
+   defaults, stat/statx/dirent64/epoll_event/pollfd/rusage/timespec
+   layouts), host-tested against those transcripts. **Next**: each
+   program becomes a boot scenario as its system calls land in the Linux
+   dispatcher (files, pipes and fork first: busybox's needs), the kernel
+   depending on lx_abi; then signals (frames from `lx_abi::signal`),
+   threads/futex, clocks and polling, ptys over the core terminal object
+   (seam 1), /proc.
+   and checked by `cargo xtask lx-expect` (CI).
+   **Milestone 1 done** (2026-11-03; ARCHITECTURE "The Linux
+   personality, milestone 1"; WORKFLOW "Linux test programs"): the first
+   Linux programs run in gala. `lxrun=/lx/<binary>` (with `lxargs=`,
+   `lxenv=`) execs a static or static-pie ELF from the file system as a
+   `Personality::Linux` process (`lx::exec`), whose system calls go to
+   `lx::dispatch`: read, write, writev, close, pipe2, fcntl, mmap,
+   munmap, mprotect, brk, arch_prctl, exit, exit_group, set_tid_address,
+   getpid/gettid/getuid..., rt_sigprocmask and ioctl as stubs, ENOSYS
+   for the rest (logged with its name, and in the ledger). stdout and
+   stderr go to the log as `lx: pid N stdout: ..`. Scenarios `lx_hello`,
+   `lx_write_exit`, `lx_brk`, `lx_mmap`, `lx_arch_prctl`, `lx_auxv`, each
+   also `_pie`: their transcripts equal real Linux's expected.txt
+   exactly (xtask `lx_expect::check_boot`). Host tests: the VAD's
+   page-granular mappings, shell words, protections, endings.
+   **Next**: milestone 2 (static busybox: files, directories, wait4,
+   execve, clone, futex; priorities from `strace` on real Linux and the
+   `linux syscall missing` ledger), with signals (SIGSEGV, SIGPIPE) and
+   wait queues for pipes; then seam 3 (the core process apart from NT's,
+   so `lx::state` moves onto it).
 
 SD. **Server and desktop workloads kept apart** (the owner, 2026-11-02;
    ARCHITECTURE "Server and desktop workloads"). Already true: nothing

@@ -11,8 +11,8 @@ use super::{
 };
 use crate::safearray::{SafeArray, SafeArrayCopy, SafeArrayDestroy};
 
-const DISP_E_BADVARTYPE: HResult = 0x8002_0008u32 as i32;
-const DISP_E_TYPEMISMATCH: HResult = 0x8002_0005u32 as i32;
+pub(crate) const DISP_E_BADVARTYPE: HResult = 0x8002_0008u32 as i32;
+pub(crate) const DISP_E_TYPEMISMATCH: HResult = 0x8002_0005u32 as i32;
 
 pub const VT_EMPTY: u16 = 0;
 pub const VT_NULL: u16 = 1;
@@ -39,7 +39,7 @@ pub const VT_RECORD: u16 = 36;
 pub const VT_ARRAY: u16 = 0x2000;
 pub const VT_BYREF: u16 = 0x4000;
 
-const VARIANT_ALPHABOOL: u16 = 0x2;
+pub(crate) const VARIANT_ALPHABOOL: u16 = 0x2;
 const VARIANT_LOCALBOOL: u16 = 0x10;
 
 #[repr(C)]
@@ -199,14 +199,15 @@ pub fn element_size(vt: u16) -> usize {
 
 /// A variant's value for conversion.
 #[derive(Clone, Copy)]
-enum Value {
+pub(crate) enum Value {
     Int(i128),
     Real(f64),
     Bool(bool),
-    Text(*const u16),
+    /// Characters (a BSTR's, or a caller's string without its NUL).
+    Text(*const u16, usize),
 }
 
-fn value_of(vt: u16, v: [u64; 2]) -> Result<Value, HResult> {
+pub(crate) fn value_of(vt: u16, v: [u64; 2]) -> Result<Value, HResult> {
     let raw = v[0];
     Ok(match vt {
         VT_EMPTY => Value::Int(0),
@@ -222,7 +223,7 @@ fn value_of(vt: u16, v: [u64; 2]) -> Result<Value, HResult> {
         VT_R8 => Value::Real(f64::from_bits(raw)),
         VT_CY => Value::Real(raw as i64 as f64 / 10000.0),
         VT_BOOL => Value::Bool(raw as i16 != 0),
-        VT_BSTR => Value::Text(raw as *const u16),
+        VT_BSTR => Value::Text(raw as *const u16, SysStringLen(raw as *const u16) as usize),
         VT_NULL => return Err(DISP_E_TYPEMISMATCH),
         _ => {
             missing(b"oleaut32.dll!VariantChangeType(source type)", vt.into());
@@ -232,7 +233,7 @@ fn value_of(vt: u16, v: [u64; 2]) -> Result<Value, HResult> {
 }
 
 /// `v` rounded to an integer, half to even (Automation's rounding).
-fn round_even(v: f64) -> Option<i128> {
+pub(crate) fn round_even(v: f64) -> Option<i128> {
     if v.is_nan() || v.abs() > 1.8e19 {
         return None;
     }
@@ -246,12 +247,27 @@ fn round_even(v: f64) -> Option<i128> {
     })
 }
 
+/// The characters of a `Value::Text`.
+pub(crate) fn chars<'a>(s: *const u16, len: usize) -> &'a [u16] {
+    if s.is_null() || len == 0 {
+        return &[];
+    }
+    // SAFETY: the BSTR's or caller's `len` characters.
+    unsafe { core::slice::from_raw_parts(s, len) }
+}
+
+/// A decimal number's parts: sign, digits (at most 37 kept: later
+/// integer digits raise the exponent, later fraction digits are
+/// dropped) and the power of ten they are scaled by.
+pub(crate) struct Number {
+    pub negative: bool,
+    pub digits: u128,
+    pub exponent: i32,
+}
+
 /// Parses a decimal number (spaces around it, a sign, digits, a point,
 /// an exponent), as en-US formats them.
-fn parse(s: *const u16) -> Option<f64> {
-    let len = SysStringLen(s) as usize;
-    // SAFETY: the BSTR's characters.
-    let text = unsafe { core::slice::from_raw_parts(s, len) };
+pub(crate) fn parse_number(text: &[u16]) -> Option<Number> {
     let mut chars = text.iter().map(|&c| c as u32).peekable();
     while chars.peek() == Some(&0x20) {
         chars.next();
@@ -267,15 +283,19 @@ fn parse(s: *const u16) -> Option<f64> {
         }
         _ => false,
     };
-    let (mut mantissa, mut scale, mut digits, mut point) = (0f64, 0i32, 0, false);
+    let (mut mantissa, mut scale, mut digits, mut point) = (0u128, 0i32, 0, false);
     while let Some(&c) = chars.peek() {
         match c {
             0x30..=0x39 => {
-                mantissa = mantissa * 10.0 + f64::from(c - 0x30);
-                digits += 1;
-                if point {
-                    scale -= 1;
+                if mantissa < 10u128.pow(36) {
+                    mantissa = mantissa * 10 + u128::from(c - 0x30);
+                    if point {
+                        scale -= 1;
+                    }
+                } else if !point {
+                    scale += 1;
                 }
+                digits += 1;
             }
             0x2e if !point => point = true,
             0x2c if !point => {} // thousands separators
@@ -317,15 +337,54 @@ fn parse(s: *const u16) -> Option<f64> {
     if chars.next().is_some() {
         return None;
     }
-    let mut v = mantissa;
-    for _ in 0..scale.unsigned_abs().min(400) {
-        if scale > 0 { v *= 10.0 } else { v /= 10.0 }
+    Some(Number { negative, digits: mantissa, exponent: scale })
+}
+
+/// A parsed number as a double: one division or multiplication by an
+/// exact power of ten when it is one (10^22 at most), so short decimals
+/// ("0.6") give the nearest double.
+pub(crate) fn number_value(n: &Number) -> f64 {
+    let mut v = n.digits as f64;
+    let mut e = n.exponent;
+    while e != 0 && v != 0.0 && !v.is_infinite() {
+        let step = e.unsigned_abs().min(22) as i32;
+        let p = (0..step).fold(1f64, |p, _| p * 10.0); // exact up to 10^22
+        if e > 0 {
+            v *= p;
+            e -= step;
+        } else {
+            v /= p;
+            e += step;
+        }
     }
-    Some(if negative { -v } else { v })
+    if n.negative { -v } else { v }
+}
+
+fn parse(s: *const u16, len: usize) -> Option<f64> {
+    parse_number(chars(s, len)).map(|n| number_value(&n))
+}
+
+/// A parsed number in currency units (1/10000), rounded half to even, or
+/// None out of range: exact decimal arithmetic, as for a DECIMAL.
+pub(crate) fn number_currency(n: &Number) -> Option<i64> {
+    let e = n.exponent + 4;
+    let q = if e >= 0 {
+        n.digits.checked_mul(10u128.checked_pow(e as u32)?)?
+    } else {
+        let Some(d) = 10u128.checked_pow(e.unsigned_abs()) else { return Some(0) };
+        let (whole, rest) = (n.digits / d, n.digits % d);
+        let twice = rest * 2;
+        if twice > d || (twice == d && whole % 2 == 1) { whole + 1 } else { whole }
+    };
+    if n.negative {
+        (q <= i64::MAX as u128 + 1).then(|| (q as i128).wrapping_neg() as i64)
+    } else {
+        i64::try_from(q).ok()
+    }
 }
 
 /// ASCII `text` as a BSTR.
-fn bstr(text: &[u8]) -> Result<u64, HResult> {
+pub(crate) fn bstr(text: &[u8]) -> Result<u64, HResult> {
     let mut wide = [0u16; 64];
     for (w, &b) in wide.iter_mut().zip(text) {
         *w = b.into();
@@ -335,7 +394,7 @@ fn bstr(text: &[u8]) -> Result<u64, HResult> {
 }
 
 /// The decimal digits of `v` into `out` (from its end); the start.
-fn decimal(mut v: u128, out: &mut [u8], mut at: usize) -> usize {
+pub(crate) fn decimal(mut v: u128, out: &mut [u8], mut at: usize) -> usize {
     loop {
         at -= 1;
         out[at] = b'0' + (v % 10) as u8;
@@ -423,7 +482,7 @@ fn format_real(v: f64, out: &mut [u8; 48]) -> usize {
 }
 
 /// Converts `value` to type `vt`.
-fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; 2], HResult> {
+pub(crate) fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; 2], HResult> {
     let as_real = |v: Value| -> Result<f64, HResult> {
         Ok(match v {
             Value::Int(i) => i as f64,
@@ -435,7 +494,7 @@ fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; 2], HResult> {
                     0.0
                 }
             }
-            Value::Text(s) => parse(s).ok_or(DISP_E_TYPEMISMATCH)?,
+            Value::Text(s, n) => parse(s, n).ok_or(DISP_E_TYPEMISMATCH)?,
         })
     };
     let as_int = |v: Value| -> Result<i128, HResult> {
@@ -462,6 +521,10 @@ fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; 2], HResult> {
         VT_R4 => u64::from((as_real(value)? as f32).to_bits()),
         VT_R8 => as_real(value)?.to_bits(),
         VT_CY => {
+            if let Value::Text(s, n) = value {
+                let number = parse_number(chars(s, n)).ok_or(DISP_E_TYPEMISMATCH)?;
+                return Ok([number_currency(&number).ok_or(DISP_E_OVERFLOW)? as u64, 0]);
+            }
             let r = as_real(value)? * 10000.0;
             round_even(r)
                 .filter(|&c| c >= i64::MIN.into() && c <= i64::MAX.into())
@@ -470,7 +533,7 @@ fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; 2], HResult> {
         VT_BOOL => {
             let truth = match value {
                 Value::Bool(b) => b,
-                Value::Text(s) => match text_bool(s) {
+                Value::Text(s, n) => match text_bool(chars(s, n)) {
                     Some(b) => b,
                     None => as_real(value)? != 0.0,
                 },
@@ -479,8 +542,8 @@ fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; 2], HResult> {
             if truth { 0xffff } else { 0 }
         }
         VT_BSTR => match value {
-            Value::Text(s) => {
-                let p = SysAllocStringLen(s, SysStringLen(s));
+            Value::Text(s, n) => {
+                let p = SysAllocStringLen(s, n as u32);
                 if p.is_null() {
                     return Err(E_OUTOFMEMORY);
                 }
@@ -513,11 +576,18 @@ fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; 2], HResult> {
     Ok([bits, 0])
 }
 
-/// "True"/"False" in any case.
-fn text_bool(s: *const u16) -> Option<bool> {
-    let len = SysStringLen(s) as usize;
-    // SAFETY: the BSTR's characters.
-    let text = unsafe { core::slice::from_raw_parts(s, len) };
+/// "#TRUE#"/"#FALSE#" (as written), or English "True"/"False" in any
+/// case.
+fn text_bool(text: &[u16]) -> Option<bool> {
+    let exactly = |word: &[u8]| {
+        text.len() == word.len() && text.iter().zip(word).all(|(&c, &w)| c == u16::from(w))
+    };
+    if exactly(b"#TRUE#") {
+        return Some(true);
+    }
+    if exactly(b"#FALSE#") {
+        return Some(false);
+    }
     let is = |word: &[u8]| {
         text.len() == word.len()
             && text.iter().zip(word).all(|(&c, &w)| c < 128 && (c as u8).eq_ignore_ascii_case(&w))

@@ -13,7 +13,7 @@ use super::file;
 use super::namespace;
 use super::object::{
     DIRECTORY_CREATE_OBJECT, DIRECTORY_TRAVERSE, EVENT_MODIFY_STATE, EVENT_QUERY_STATE, Event,
-    EventType, Handle, HandleEntry, KObject, ObjectBody, ObjectRef, PROCESS_ALL_ACCESS,
+    EventType, Handle, HandleEntry, KObject, NamePin, ObjectBody, ObjectRef, PROCESS_ALL_ACCESS,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_TERMINATE, SYNCHRONIZE,
     THREAD_ALL_ACCESS, THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME, THREAD_TERMINATE,
 };
@@ -154,6 +154,9 @@ pub const GALA_DESKTOP_ACTION: u32 = 0x7f58;
 /// gala's test-only request for a kernel handover (ROADMAP R9 (b); allowed
 /// with `handover=` on the command line), also in user/ntrt.
 pub const GALA_REQUEST_HANDOVER: u32 = 0x7f5a;
+/// gala's test-only report of the last kernel handover's pause (how long
+/// the programs were stopped), also in user/ntrt.
+pub const GALA_HANDOVER_PAUSE: u32 = 0x7f5b;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -362,6 +365,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_RANDOM, "GalaRandom", 2, gala_random),
     (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
     (GALA_REQUEST_HANDOVER, "GalaRequestHandover", 0, gala_request_handover),
+    (GALA_HANDOVER_PAUSE, "GalaHandoverPause", 1, gala_handover_pause),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -595,7 +599,11 @@ fn dispatch(frame: &mut SyscallFrame) {
     let status = match service {
         Some((.., handler)) => handler(&mut call),
         None => {
-            warn!("{}: unimplemented system service {number:#x}", call.process.name);
+            warn!(
+                "{}: unimplemented system service {number:#x} (dispatcher {DISPATCHER}, \
+                 personality {})",
+                call.process.name, call.process.personality
+            );
             super::ledger::record("?", "unknown service", u64::from(number));
             NtStatus::INVALID_SYSTEM_SERVICE
         }
@@ -751,8 +759,12 @@ impl fmt::Display for TraceLine<'_> {
     }
 }
 
+/// This dispatcher's name in logs ("unknown system call", the platform's
+/// registration line).
+pub const DISPATCHER: &str = "nt::syscalls";
+
 pub fn init() {
-    platform::set_syscall_handler(dispatch);
+    platform::set_syscall_handler(platform::Personality::Nt, DISPATCHER, dispatch);
 }
 
 /// NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock,
@@ -1293,7 +1305,7 @@ impl Call<'_> {
         &self,
         attrs_ptr: u64,
         is_type: fn(&KObject) -> bool,
-    ) -> Result<(ObjectRef, u32), NtStatus> {
+    ) -> Result<(NamePin, u32), NtStatus> {
         self.open_named_with(attrs_ptr, is_type, true)
     }
 
@@ -1304,7 +1316,7 @@ impl Call<'_> {
         attrs_ptr: u64,
         is_type: fn(&KObject) -> bool,
         follow_final: bool,
-    ) -> Result<(ObjectRef, u32), NtStatus> {
+    ) -> Result<(NamePin, u32), NtStatus> {
         let attrs = self
             .object_attributes(attrs_ptr, DIRECTORY_TRAVERSE)?
             .ok_or(NtStatus::INVALID_PARAMETER)?;
@@ -1312,11 +1324,8 @@ impl Call<'_> {
             return Err(NtStatus::OBJECT_PATH_SYNTAX_BAD);
         }
         let ci = attrs.case_insensitive();
-        let object = if !follow_final {
-            namespace::lookup_link(attrs.root.as_ref(), &attrs.name, ci)?
-        } else {
-            namespace::lookup(attrs.root.as_ref(), &attrs.name, ci)?
-        };
+        // Pinned until the caller's handle exists (`NamePin`).
+        let object = namespace::lookup_pinned(attrs.root.as_ref(), &attrs.name, ci, follow_final)?;
         if !is_type(&object) {
             return Err(NtStatus::OBJECT_TYPE_MISMATCH);
         }
@@ -1341,23 +1350,24 @@ fn nt_create_event(call: &mut Call<'_>) -> NtStatus {
     let event = Event { kind, dispatcher: Dispatcher::new(i32::from(initial)) };
     let Ok(object) = KObject::new(ObjectBody::Event(event)) else { return NtStatus::NO_MEMORY };
     tri!(security_calls::assign_object(call, &object, attrs_ptr));
-    let (object, existed, handle_attributes) = match attrs {
+    // `_pin`: the name stays until the handle exists (`NamePin`).
+    let (object, existed, handle_attributes, _pin) = match attrs {
         Some(a) if !a.name.is_empty() || a.root.is_some() => {
             let open_if = a.attributes & OBJ_OPENIF != 0;
-            let (object, existed) = tri!(namespace::create(
+            let (pin, existed) = tri!(namespace::create_pinned(
                 a.root.as_ref(),
                 &a.name,
                 object,
                 a.case_insensitive(),
                 open_if
             ));
-            if existed && !matches!(object.body, ObjectBody::Event(_)) {
+            if existed && !matches!(pin.body, ObjectBody::Event(_)) {
                 return NtStatus::OBJECT_TYPE_MISMATCH;
             }
-            (object, existed, a.attributes & HANDLE_ATTRIBUTES)
+            (pin.clone(), existed, a.attributes & HANDLE_ATTRIBUTES, Some(pin))
         }
-        Some(a) => (object, false, a.attributes & HANDLE_ATTRIBUTES),
-        None => (object, false, 0),
+        Some(a) => (object, false, a.attributes & HANDLE_ATTRIBUTES, None),
+        None => (object, false, 0, None),
     };
     let status = if existed {
         call.return_opened(out, object, access, handle_attributes)
@@ -1372,14 +1382,14 @@ fn nt_open_event(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) =
         tri!(call.open_named(arg!(call, 2), |o| matches!(o.body, ObjectBody::Event(_))));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtOpenDirectoryObject(*DirectoryHandle, DesiredAccess, ObjectAttributes)
 fn nt_open_directory_object(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), |o| o.as_directory().is_some()));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// GalaWindowCreate(x, y, width, height, *title, title_length, *id, style):
@@ -1401,7 +1411,7 @@ fn gala_window_create(call: &mut Call<'_>) -> NtStatus {
         *t = u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]);
     }
     let owner = call.process.id;
-    let id = tri!(super::desktop::with(|d| Ok((
+    let id = tri!(super::desktop::with(&call.process.desk.shell, |d| Ok((
         d.create(owner, x, y, w, h, &title[..title_len], style)?,
         None
     ))));
@@ -1415,7 +1425,7 @@ fn gala_window_show(call: &mut Call<'_>) -> NtStatus {
     let (id, show) = (arg!(call, 0) as u32, arg!(call, 1) as u8);
     let owner = call.process.id;
     // 2: shown minimized (user32's SC_MINIMIZE).
-    tri!(super::desktop::with(|d| {
+    tri!(super::desktop::with(&call.process.desk.shell, |d| {
         let r =
             if show == 2 { d.show_minimized(id, owner)? } else { d.show(id, owner, show != 0)? };
         Ok(((), Some(r)))
@@ -1462,7 +1472,10 @@ fn gala_window_present(call: &mut Call<'_>) -> NtStatus {
     }
     pixels.extend(bytes.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
     let owner = call.process.id;
-    tri!(super::desktop::with(|d| Ok(((), Some(d.present(id, owner, r, &pixels, stride / 4)?)))));
+    tri!(super::desktop::with(&call.process.desk.shell, |d| Ok((
+        (),
+        Some(d.present(id, owner, r, &pixels, stride / 4)?)
+    ))));
     NtStatus::SUCCESS
 }
 
@@ -1470,7 +1483,7 @@ fn gala_window_present(call: &mut Call<'_>) -> NtStatus {
 fn gala_window_destroy(call: &mut Call<'_>) -> NtStatus {
     let id = arg!(call, 0) as u32;
     let owner = call.process.id;
-    tri!(super::desktop::with(|d| Ok(((), Some(d.destroy(id, owner)?)))));
+    tri!(super::desktop::with(&call.process.desk.shell, |d| Ok(((), Some(d.destroy(id, owner)?)))));
     NtStatus::SUCCESS
 }
 
@@ -1481,11 +1494,11 @@ fn gala_window_listen(call: &mut Call<'_>) -> NtStatus {
     let event = tri!(event_object(call, Handle(arg!(call, 0)), EVENT_MODIFY_STATE));
     // Messages posted from other processes arrive with or without a
     // screen.
-    tri!(super::window::listen(call.process.id as u32, event.clone()));
-    if super::desktop::screen().is_none() {
+    tri!(call.process.desk.windows.listen(call.process.id as u32, event.clone()));
+    if super::desktop::screen(&call.process.desk.shell).is_none() {
         return NtStatus::NOT_SUPPORTED;
     }
-    tri!(super::desktop::listen(call.process.id, event));
+    tri!(super::desktop::listen(&call.process.desk.shell, call.process.id, event));
     NtStatus::SUCCESS
 }
 
@@ -1496,7 +1509,10 @@ fn gala_window_place(call: &mut Call<'_>) -> NtStatus {
     let (x, y) = (arg!(call, 1) as u32 as i32, arg!(call, 2) as u32 as i32);
     let (w, h) = (arg!(call, 3) as u32, arg!(call, 4) as u32);
     let owner = call.process.id;
-    tri!(super::desktop::with(|d| Ok(((), Some(d.place(id, owner, x, y, w, h)?)))));
+    tri!(super::desktop::with(&call.process.desk.shell, |d| Ok((
+        (),
+        Some(d.place(id, owner, x, y, w, h)?)
+    ))));
     NtStatus::SUCCESS
 }
 
@@ -1568,6 +1584,15 @@ fn gala_console_input(call: &mut Call<'_>) -> NtStatus {
         wait::set_signal(&session.input_ready, 1);
     }
     if ctrl {
+        use core::sync::atomic::Ordering::Relaxed;
+        session.ctrl_raised_ns.store(platform::monotonic_ns(), Relaxed);
+        let count = session.ctrl_count();
+        info!("console {}: Ctrl+C {count}: a control event for its processes", session.id);
+        crate::events::emit(
+            crate::events::Category::Console,
+            "console ctrl",
+            format_args!(r#""id":{},"count":{count}"#, session.id),
+        );
         wait::set_signal(&session.ctrl_event, 1);
     }
     NtStatus::SUCCESS
@@ -1666,12 +1691,15 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
     }
     loop {
         // Reset first, then look: an event raised in between is seen in
-        // the count, one raised after sets the event again. Every waiter
-        // a set wakes looks again; the timeout is a backstop.
+        // the count, one raised after sets the event again. A set
+        // satisfies every wait pending then, even one that looks only
+        // after another process's thread reset the event here (nt::wait's
+        // `Waiter`); the timeout is a backstop.
         wait::set_signal(&session.ctrl_event, 0);
         let count = session.ctrl_count();
         if count != seen {
             tri!(call.write_u32(seen_ptr, count));
+            note_ctrl_taken(call, &session, count);
             return NtStatus::SUCCESS;
         }
         let event = core::slice::from_ref(&session.ctrl_event);
@@ -1680,6 +1708,32 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
             return waited;
         }
     }
+}
+
+/// A process's control-handler thread took Ctrl+C `count`: logged with
+/// how long after it came (late is a lost wake-up: the shell then sees
+/// its Ctrl+C in the next command line; sshd_shell).
+fn note_ctrl_taken(call: &Call<'_>, session: &super::conhost::Session, count: u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let raised = session.ctrl_raised_ns.load(Relaxed);
+    let ms = platform::monotonic_ns().saturating_sub(raised) / 1_000_000;
+    let (pid, tid) = (call.process.id, thread::current_id().unwrap_or(0));
+    if ms >= 250 {
+        warn!(
+            "console {}: pid {pid} tid {tid} ({}) took Ctrl+C {count} late: {ms} ms after it came",
+            session.id, call.process.name
+        );
+    } else {
+        info!(
+            "console {}: pid {pid} tid {tid} ({}) takes Ctrl+C {count} after {ms} ms",
+            session.id, call.process.name
+        );
+    }
+    crate::events::emit(
+        crate::events::Category::Console,
+        "console ctrl taken",
+        format_args!(r#""id":{},"pid":{pid},"tid":{tid},"count":{count},"ms":{ms}"#, session.id),
+    );
 }
 
 /// GalaConsoleCreate(Flags, Size, *Info): a new console session made by
@@ -1816,27 +1870,69 @@ fn read_window_info(call: &Call<'_>, ptr: u64) -> Result<super::window::Info, Nt
 /// windows (its record: the process id is the caller's); its HWND.
 fn gala_window_register(call: &mut Call<'_>) -> NtStatus {
     let info = tri!(read_window_info(call, arg!(call, 0)));
-    let hwnd = tri!(super::window::register(call.process.id as u32, info));
+    let hwnd = tri!(call.process.desk.windows.register(call.process.id as u32, info));
     // A thread that makes a window has a message queue.
     tri!(note_queue(call));
     if call.process.write(arg!(call, 1), &hwnd.to_le_bytes()).is_err() {
-        let _ = super::window::unregister(call.process.id as u32, hwnd);
+        let _ = call.process.desk.windows.unregister(call.process.id as u32, hwnd);
         return NtStatus::ACCESS_VIOLATION;
     }
+    crate::events::emit(
+        crate::events::Category::Window,
+        "window",
+        format_args!(
+            r#""op":"create","hwnd":{hwnd},"parent":{},"pid":{},"session":{}"#,
+            info.parent, call.process.id, call.process.session
+        ),
+    );
     NtStatus::SUCCESS
 }
 
 /// GalaWindowUpdate(*Info): the caller's window Info.hwnd's new record.
 fn gala_window_update(call: &mut Call<'_>) -> NtStatus {
     let info = tri!(read_window_info(call, arg!(call, 0)));
-    tri!(super::window::update(call.process.id as u32, info));
+    let described = tri!(call.process.desk.windows.update(call.process.id as u32, info));
+    if described {
+        // Its class and text, once user32 knows them.
+        crate::events::emit(
+            crate::events::Category::Window,
+            "window",
+            format_args!(
+                r#""op":"describe","hwnd":{},"parent":{},"pid":{},"tid":{},"session":{},"class":{},"text":{}"#,
+                info.hwnd,
+                info.parent,
+                call.process.id,
+                info.tid,
+                call.process.session,
+                crate::events::Utf16(&info.class[..info.class_len as usize]),
+                crate::events::Utf16(&info.text[..info.text_len as usize])
+            ),
+        );
+    }
     NtStatus::SUCCESS
 }
 
 /// GalaWindowUnregister(Hwnd): the caller's window is gone.
 fn gala_window_unregister(call: &mut Call<'_>) -> NtStatus {
-    tri!(super::window::unregister(call.process.id as u32, arg!(call, 0)));
+    let hwnd = arg!(call, 0);
+    tri!(call.process.desk.windows.unregister(call.process.id as u32, hwnd));
+    crate::events::emit(
+        crate::events::Category::Window,
+        "window",
+        format_args!(
+            r#""op":"destroy","hwnd":{hwnd},"pid":{},"session":{}"#,
+            call.process.id, call.process.session
+        ),
+    );
     NtStatus::SUCCESS
+}
+
+/// The caller asked (`what`) for window `hwnd`, which its session's
+/// registry does not hold: STATUS_INVALID_HANDLE, and the log says so if
+/// another session holds it (nt::session::note_window_elsewhere).
+fn no_window(call: &Call<'_>, hwnd: u64, what: &str) -> NtStatus {
+    super::session::note_window_elsewhere(hwnd, call.process.id, call.process.session, what);
+    NtStatus::INVALID_HANDLE
 }
 
 /// GalaWindowQuery(Hwnd, *Info): any process's window's record;
@@ -1844,7 +1940,9 @@ fn gala_window_unregister(call: &mut Call<'_>) -> NtStatus {
 /// it reads in the buffer's version field (bytes 84..88): 2 gets a
 /// version 2 record, anything else (a zeroed buffer) version 1.
 fn gala_window_query(call: &mut Call<'_>) -> NtStatus {
-    let Some(info) = super::window::query(arg!(call, 0)) else { return NtStatus::INVALID_HANDLE };
+    let Some(info) = call.process.desk.windows.query(arg!(call, 0)) else {
+        return no_window(call, arg!(call, 0), "asked about");
+    };
     let mut asked = [0u8; 4];
     if call.process.read(arg!(call, 1) + 84, &mut asked).is_err() {
         return NtStatus::ACCESS_VIOLATION;
@@ -1869,7 +1967,7 @@ fn gala_window_children(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::NO_MEMORY;
     }
     hwnds.resize(max, 0u64);
-    let n = super::window::children(parent, &mut hwnds);
+    let n = call.process.desk.windows.children(parent, &mut hwnds);
     let mut bytes = Vec::new();
     if bytes.try_reserve_exact(8 * max).is_err() {
         return NtStatus::NO_MEMORY;
@@ -1903,10 +2001,14 @@ fn uipi_level(pid: Option<u32>) -> u32 {
 /// the window's process, a message no filter lets through).
 fn gala_window_post(call: &mut Call<'_>) -> NtStatus {
     let (hwnd, message) = (arg!(call, 0), arg!(call, 1) as u32);
-    let to_level = uipi_level(super::window::owner_pid(hwnd));
+    let to_level = uipi_level(call.process.desk.windows.owner_pid(hwnd));
     let from = uipi_sender(call);
-    let event =
-        tri!(super::window::post(from, to_level, hwnd, message, arg!(call, 2), arg!(call, 3)));
+    let posted =
+        call.process.desk.windows.post(from, to_level, hwnd, message, arg!(call, 2), arg!(call, 3));
+    let event = match posted {
+        Err(NtStatus::INVALID_HANDLE) => return no_window(call, hwnd, "posted to"),
+        r => tri!(r),
+    };
     if let Some(e) = event {
         wait::set_signal(&e, 1);
     }
@@ -1919,9 +2021,9 @@ fn gala_window_post(call: &mut Call<'_>) -> NtStatus {
 /// STATUS_ACCESS_DENIED when UIPI blocks it.
 fn gala_window_post_thread(call: &mut Call<'_>) -> NtStatus {
     let (tid, message) = (arg!(call, 0) as u32, arg!(call, 1) as u32);
-    let to_level = uipi_level(super::window::queue_owner(tid));
+    let to_level = uipi_level(call.process.desk.windows.queue_owner(tid));
     let from = uipi_sender(call);
-    let event = tri!(super::window::post_thread(
+    let event = tri!(call.process.desk.windows.post_thread(
         from,
         to_level,
         tid,
@@ -1946,8 +2048,15 @@ fn gala_win_event_hook(call: &mut Call<'_>) -> NtStatus {
         (arg!(call, 2) as u32, arg!(call, 3) as u32, arg!(call, 4) as u32, arg!(call, 5));
     tri!(note_queue(call));
     let tid = thread::current_id().unwrap_or(0) as u32;
-    let id =
-        tri!(super::winevent::hook(call.process.id as u32, tid, min, max, of_pid, of_tid, flags));
+    let id = tri!(call.process.desk.hooks.hook(
+        call.process.id as u32,
+        tid,
+        min,
+        max,
+        of_pid,
+        of_tid,
+        flags
+    ));
     tri!(call.write_u32(out, id));
     NtStatus::SUCCESS
 }
@@ -1955,7 +2064,7 @@ fn gala_win_event_hook(call: &mut Call<'_>) -> NtStatus {
 /// GalaWinEventUnhook(Id): UnhookWinEvent of the caller's hook Id
 /// (STATUS_INVALID_HANDLE for none).
 fn gala_win_event_unhook(call: &mut Call<'_>) -> NtStatus {
-    tri!(super::winevent::unhook(call.process.id as u32, arg!(call, 0) as u32));
+    tri!(call.process.desk.hooks.unhook(call.process.id as u32, arg!(call, 0) as u32));
     NtStatus::SUCCESS
 }
 
@@ -1968,7 +2077,7 @@ fn gala_win_event_notify(call: &mut Call<'_>) -> NtStatus {
     let tid = thread::current_id().unwrap_or(0) as u32;
     let time = (platform::monotonic_ns() / 1_000_000) as u32;
     let mut wake = [0u32; 16];
-    let n = super::winevent::notify(
+    let n = call.process.desk.hooks.notify(
         call.process.id as u32,
         tid,
         event,
@@ -1979,7 +2088,7 @@ fn gala_win_event_notify(call: &mut Call<'_>) -> NtStatus {
         &mut wake,
     );
     let mut events = Vec::new();
-    super::winevent::listeners(&wake[..n], &mut events);
+    super::winevent::listeners(&call.process.desk.windows, &wake[..n], &mut events);
     for e in &events {
         wait::set_signal(e, 1);
     }
@@ -1993,7 +2102,7 @@ fn gala_win_event_take(call: &mut Call<'_>) -> NtStatus {
     use super::winevent::{RECORD_SIZE, Record};
     let (ptr, max, count) = (arg!(call, 0), (arg!(call, 1) as usize).min(32), arg!(call, 2));
     let mut got = [Record::EMPTY; 32];
-    let n = super::winevent::take(call.process.id as u32, &mut got[..max]);
+    let n = call.process.desk.hooks.take(call.process.id as u32, &mut got[..max]);
     let mut raw = [0u8; RECORD_SIZE * 32];
     for (r, b) in got[..n].iter().zip(raw.chunks_exact_mut(RECORD_SIZE)) {
         r.to_bytes(b);
@@ -2008,7 +2117,7 @@ fn gala_win_event_take(call: &mut Call<'_>) -> NtStatus {
 /// The calling thread has a message queue (PostThreadMessage reaches it).
 fn note_queue(call: &Call<'_>) -> Result<(), NtStatus> {
     let tid = thread::current_id().unwrap_or(0) as u32;
-    super::window::has_queue(call.process.id as u32, tid)
+    call.process.desk.windows.has_queue(call.process.id as u32, tid)
 }
 
 /// GalaWindowPosted(*Records, Max, *Count): takes the messages posted to
@@ -2020,7 +2129,7 @@ fn gala_window_posted(call: &mut Call<'_>) -> NtStatus {
     use super::window::Posted;
     let (ptr, max, count) = (arg!(call, 0), (arg!(call, 1) as usize).min(64), arg!(call, 2));
     let mut got = [Posted::EMPTY; 64];
-    let n = super::window::take_posted(call.process.id as u32, &mut got[..max]);
+    let n = call.process.desk.windows.take_posted(call.process.id as u32, &mut got[..max]);
     let mut raw = [0u8; 32 * 64];
     for (m, r) in got[..n].iter().zip(raw.chunks_exact_mut(32)) {
         r[0..8].copy_from_slice(&m.hwnd.to_le_bytes());
@@ -2065,8 +2174,8 @@ fn gala_window_send(call: &mut Call<'_>) -> NtStatus {
     let u64_at = |at: usize| u64::from_le_bytes(req[at..at + 8].try_into().unwrap_or([0; 8]));
     let u32_at = |at: usize| u32::from_le_bytes(req[at..at + 4].try_into().unwrap_or([0; 4]));
     let data = tri!(read_vec(call, u64_at(32), u32_at(40) as usize));
-    let to_level = uipi_level(super::window::owner_pid(u64_at(0)));
-    let (id, wake) = tri!(super::window::send(super::window::Request {
+    let to_level = uipi_level(call.process.desk.windows.owner_pid(u64_at(0)));
+    let sent = call.process.desk.windows.send(super::window::Request {
         from_pid: call.process.id as u32,
         from_level: call.process.integrity_level(),
         to_level,
@@ -2079,7 +2188,11 @@ fn gala_window_send(call: &mut Call<'_>) -> NtStatus {
         out_max: u32_at(12),
         flags: u32_at(44),
         now: platform::monotonic_ns() / 1_000_000,
-    }));
+    });
+    let (id, wake) = match sent {
+        Err(NtStatus::INVALID_HANDLE) => return no_window(call, u64_at(0), "sent to"),
+        r => tri!(r),
+    };
     if let Some(e) = wake {
         wait::set_signal(&e, 1);
     }
@@ -2098,7 +2211,7 @@ fn gala_window_send(call: &mut Call<'_>) -> NtStatus {
 fn gala_window_send_wait(call: &mut Call<'_>) -> NtStatus {
     let (id, ms) = (arg!(call, 0), arg!(call, 1) as i64);
     let pid = call.process.id as u32;
-    if let Some(e) = super::window::sent_event(pid, id) {
+    if let Some(e) = call.process.desk.windows.sent_event(pid, id) {
         let waited = wait::wait_for(
             core::slice::from_ref(&e),
             false,
@@ -2108,7 +2221,7 @@ fn gala_window_send_wait(call: &mut Call<'_>) -> NtStatus {
             return waited;
         }
     }
-    match super::window::take_reply(pid, id) {
+    match call.process.desk.windows.take_reply(pid, id) {
         None => NtStatus::TIMEOUT,
         Some(Err(e)) => e,
         Some(Ok((result, out))) => {
@@ -2134,7 +2247,8 @@ fn gala_window_filter(call: &mut Call<'_>) -> NtStatus {
     let (hwnd, message, action, ext) =
         (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2) as u32, arg!(call, 3));
     let from = uipi_sender(call);
-    let status = tri!(super::window::change_filter(from.pid, from.level, hwnd, message, action));
+    let status =
+        tri!(call.process.desk.windows.change_filter(from.pid, from.level, hwnd, message, action));
     if ext != 0 {
         tri!(call.write_u32(ext, status));
     }
@@ -2144,7 +2258,7 @@ fn gala_window_filter(call: &mut Call<'_>) -> NtStatus {
 /// GalaWindowSendAbandon(Id): the caller stops waiting for sent message
 /// Id (SendMessageTimeout's time-out); the receiver still handles it.
 fn gala_window_send_abandon(call: &mut Call<'_>) -> NtStatus {
-    tri!(super::window::abandon(call.process.id as u32, arg!(call, 0)));
+    tri!(call.process.desk.windows.abandon(call.process.id as u32, arg!(call, 0)));
     NtStatus::SUCCESS
 }
 
@@ -2160,13 +2274,13 @@ fn gala_window_receive(call: &mut Call<'_>) -> NtStatus {
         (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2), arg!(call, 3) as usize);
     tri!(note_queue(call));
     if head == 0 {
-        return if super::window::sent_waiting(call.process.id as u32, tid) {
+        return if call.process.desk.windows.sent_waiting(call.process.id as u32, tid) {
             NtStatus::SUCCESS
         } else {
             NtStatus::NO_MORE_ENTRIES
         };
     }
-    let Some(m) = super::window::receive(call.process.id as u32, tid) else {
+    let Some(m) = call.process.desk.windows.receive(call.process.id as u32, tid) else {
         return NtStatus::NO_MORE_ENTRIES;
     };
     let n = m.data.len().min(max);
@@ -2192,7 +2306,7 @@ fn gala_window_receive(call: &mut Call<'_>) -> NtStatus {
 fn gala_window_reply(call: &mut Call<'_>) -> NtStatus {
     let (id, result) = (arg!(call, 0), arg!(call, 1) as i64);
     let out = tri!(read_vec(call, arg!(call, 2), arg!(call, 3) as usize));
-    let wake = tri!(super::window::reply(call.process.id as u32, id, result, out));
+    let wake = tri!(call.process.desk.windows.reply(call.process.id as u32, id, result, out));
     for e in wake.iter().flatten() {
         wait::set_signal(e, 1);
     }
@@ -2204,7 +2318,7 @@ fn gala_window_reply(call: &mut Call<'_>) -> NtStatus {
 fn gala_window_capture(call: &mut Call<'_>) -> NtStatus {
     let id = arg!(call, 0) as u32;
     let owner = call.process.id;
-    tri!(super::desktop::with(|d| Ok((d.capture(id, owner)?, None))));
+    tri!(super::desktop::with(&call.process.desk.shell, |d| Ok((d.capture(id, owner)?, None))));
     NtStatus::SUCCESS
 }
 
@@ -2232,7 +2346,10 @@ fn gala_window_set_icon(call: &mut Call<'_>) -> NtStatus {
     }
     pixels.extend(raw.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
     let owner = call.process.id;
-    tri!(super::desktop::with(|d| Ok((d.set_icon(id, owner, &pixels, size)?, None))));
+    tri!(super::desktop::with(&call.process.desk.shell, |d| Ok((
+        d.set_icon(id, owner, &pixels, size)?,
+        None
+    ))));
     NtStatus::SUCCESS
 }
 
@@ -2250,7 +2367,10 @@ fn gala_window_set_title(call: &mut Call<'_>) -> NtStatus {
         *t = u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]);
     }
     let owner = call.process.id;
-    tri!(super::desktop::with(|d| Ok(((), Some(d.set_title(id, owner, &title[..len])?)))));
+    tri!(super::desktop::with(&call.process.desk.shell, |d| Ok((
+        (),
+        Some(d.set_title(id, owner, &title[..len])?)
+    ))));
     NtStatus::SUCCESS
 }
 
@@ -2258,7 +2378,9 @@ fn gala_window_set_title(call: &mut Call<'_>) -> NtStatus {
 /// taskbar) as two RECTs (left, top, right, bottom as i32);
 /// STATUS_NOT_SUPPORTED without a screen.
 fn gala_screen_info(call: &mut Call<'_>) -> NtStatus {
-    let Some((w, h)) = super::desktop::screen() else { return NtStatus::NOT_SUPPORTED };
+    let Some((w, h)) = super::desktop::screen(&call.process.desk.shell) else {
+        return NtStatus::NOT_SUPPORTED;
+    };
     let work_bottom = h.saturating_sub(super::desktop::TASKBAR);
     let mut out = [0u8; 32];
     for (i, v) in [0, 0, w, h, 0, 0, w, work_bottom].iter().enumerate() {
@@ -2279,7 +2401,8 @@ fn gala_window_input(call: &mut Call<'_>) -> NtStatus {
     let (buf, max, count_ptr) =
         (arg!(call, 0), (arg!(call, 1) as u32).min(64) as usize, arg!(call, 2));
     let mut events = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 64];
-    let n = super::desktop::take_input(call.process.id, &mut events[..max]);
+    let n =
+        super::desktop::take_input(&call.process.desk.shell, call.process.id, &mut events[..max]);
     for (i, e) in events[..n].iter().enumerate() {
         let mut record = [0u8; 24];
         record[0..4].copy_from_slice(&e.window.to_le_bytes());
@@ -2528,6 +2651,12 @@ fn nt_wait_for_multiple_objects(call: &mut Call<'_>) -> NtStatus {
         let h = Handle(tri!(call.read_u64(array + 8 * i)));
         let _ = objects.try_push(tri!(waitable(call, h)));
     }
+    // WaitAll may not name an object twice (the same handle or two handles
+    // to it): a satisfied wait would consume it twice (a semaphore's count
+    // 1 became -1). Windows refuses it (smprace_test); WaitAny is fine.
+    if wait_all && wait::has_duplicates(&objects) {
+        return NtStatus::INVALID_PARAMETER_MIX;
+    }
     let alertable = arg!(call, 3) as u8 != 0;
     let status = wait::wait_for_alertable(&objects, wait_all, timeout, alertable);
     drop(objects);
@@ -2576,7 +2705,7 @@ fn nt_create_timer(call: &mut Call<'_>) -> NtStatus {
 fn nt_open_timer(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_timer));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtSetTimer(TimerHandle, *DueTime, TimerApcRoutine, TimerContext,
@@ -3393,6 +3522,41 @@ fn gala_request_handover(_call: &mut Call<'_>) -> NtStatus {
     }
 }
 
+/// The last kernel handover that carried programs: the generation it
+/// made and how long its programs were stopped (ms of the tick count,
+/// from the record to their threads going on). Set by
+/// `handover::carry::restore`.
+static HANDOVER_PAUSE: [core::sync::atomic::AtomicU64; 2] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// Notes the handover that brought the programs here (see
+/// GalaHandoverPause).
+pub fn set_handover_pause(generation: u64, ms: u64) {
+    use core::sync::atomic::Ordering;
+    HANDOVER_PAUSE[1].store(ms, Ordering::Relaxed);
+    HANDOVER_PAUSE[0].store(generation, Ordering::Release);
+}
+
+/// GalaHandoverPause(*Info): Info receives { ULONG64 Generation; ULONG64
+/// PauseMs }: the kernel generation (handovers so far) and how long the
+/// last handover stopped the programs, from the record to their threads
+/// going on, in ms of the tick count (0, 0 before any). A wait that spans
+/// a handover ends up to that much late (its deadline is kept: it ends
+/// at the deadline or when the threads go on, whichever is later); tests
+/// bound their sleeps by it instead of guessing the handover's time.
+fn gala_handover_pause(call: &mut Call<'_>) -> NtStatus {
+    use core::sync::atomic::Ordering;
+    let generation = HANDOVER_PAUSE[0].load(Ordering::Acquire);
+    let ms = HANDOVER_PAUSE[1].load(Ordering::Relaxed);
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&generation.to_le_bytes());
+    out[8..].copy_from_slice(&ms.to_le_bytes());
+    if call.process.write(arg!(call, 0), &out).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    NtStatus::SUCCESS
+}
+
 fn gala_random(call: &mut Call<'_>) -> NtStatus {
     use crate::replay::{self, Kind};
     if !(platform::entropy_seeded() || replay::on()) {
@@ -3518,8 +3682,12 @@ fn process_information(buffer: u64) -> Result<Vec<u8>, NtStatus> {
         let mut threads = Vec::new();
         for t in p.threads().map_err(no_memory)? {
             if let ObjectBody::Thread(t) = &t.body {
-                let record =
-                    ThreadRecord { id: t.id, start: t.win32_start, create_time: t.create_time };
+                let record = ThreadRecord {
+                    id: t.id,
+                    start: t.win32_start,
+                    create_time: t.create_time,
+                    context_switches: t.context_switches(),
+                };
                 threads.try_push(record).map_err(no_memory)?;
             }
         }
@@ -3622,25 +3790,31 @@ fn nt_set_information_process(call: &mut Call<'_>) -> NtStatus {
 }
 
 /// Creates or opens-if `object` under the name in `attrs` (if named), for
-/// the create services. Returns the object to hand out and whether it
-/// already existed.
+/// the create services. Returns the object to hand out (new or existing),
+/// whether it already existed, the handle attributes, and the pin that
+/// keeps its name until the caller's handle exists (`NamePin`).
 fn link_new_object(
     attrs: Option<Attributes>,
     object: ObjectRef,
     same_type: fn(&KObject) -> bool,
-) -> Result<(ObjectRef, bool, u32), NtStatus> {
+) -> Result<(ObjectRef, bool, u32, Option<NamePin>), NtStatus> {
     match attrs {
         Some(a) if !a.name.is_empty() || a.root.is_some() => {
             let open_if = a.attributes & OBJ_OPENIF != 0;
-            let (object, existed) =
-                namespace::create(a.root.as_ref(), &a.name, object, a.case_insensitive(), open_if)?;
-            if existed && !same_type(&object) {
+            let (pin, existed) = namespace::create_pinned(
+                a.root.as_ref(),
+                &a.name,
+                object,
+                a.case_insensitive(),
+                open_if,
+            )?;
+            if existed && !same_type(&pin) {
                 return Err(NtStatus::OBJECT_TYPE_MISMATCH);
             }
-            Ok((object, existed, a.attributes & HANDLE_ATTRIBUTES))
+            Ok((pin.clone(), existed, a.attributes & HANDLE_ATTRIBUTES, Some(pin)))
         }
-        Some(a) => Ok((object, false, a.attributes & HANDLE_ATTRIBUTES)),
-        None => Ok((object, false, 0)),
+        Some(a) => Ok((object, false, a.attributes & HANDLE_ATTRIBUTES, None)),
+        None => Ok((object, false, 0, None)),
     }
 }
 
@@ -3663,7 +3837,7 @@ fn create_object(
 ) -> NtStatus {
     let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
     tri!(security_calls::assign_object(call, &object, attrs_ptr));
-    let (object, existed, handle_attributes) = tri!(link_new_object(attrs, object, same));
+    let (object, existed, handle_attributes, _pin) = tri!(link_new_object(attrs, object, same));
     let status = if existed {
         call.return_opened(out, object, access, handle_attributes)
     } else {
@@ -3694,29 +3868,30 @@ fn nt_create_mutant(call: &mut Call<'_>) -> NtStatus {
 fn nt_open_mutant(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_mutant));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtReleaseMutant(MutantHandle, *PreviousCount)
 fn nt_release_mutant(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let object = entry.object.clone();
-    let ObjectBody::Mutant(m) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
-    let (previous, free) = {
-        let mut state = m.state.lock();
-        if state.owner.is_none() || state.owner != thread::current_id() {
-            return NtStatus::MUTANT_NOT_OWNED;
+    let me = thread::current_id();
+    // Checked, changed and signaled in one hold of the dispatcher lock.
+    let released = wait::change_mutant(&object, |state| {
+        if state.owner.is_none() || state.owner != me {
+            return Err(NtStatus::MUTANT_NOT_OWNED);
         }
         let previous = state.current_count();
         state.count -= 1;
         if state.count == 0 {
             state.owner = None;
         }
-        (previous, state.count == 0)
-    };
+        Ok((previous, state.count == 0))
+    });
+    let Some(released) = released else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let (previous, free) = tri!(released);
     if free {
         thread::note_mutant_released(&object);
-        wait::set_signal(&object, 1);
     }
     let ptr = arg!(call, 1);
     if ptr != 0 {
@@ -3763,7 +3938,7 @@ fn nt_create_semaphore(call: &mut Call<'_>) -> NtStatus {
 fn nt_open_semaphore(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_semaphore));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtReleaseSemaphore(SemaphoreHandle, ReleaseCount, *PreviousCount)
@@ -3824,7 +3999,7 @@ fn nt_open_symbolic_link(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     // Opening a symbolic link opens the link, not its target.
     let (object, attributes) = tri!(call.open_named_with(arg!(call, 2), is_symbolic_link, false));
-    call.return_handle(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_handle(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtQuerySymbolicLinkObject(LinkHandle, *LinkTarget, *ReturnedLength): the
@@ -4011,7 +4186,8 @@ fn finish_create_section(
     let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
     let Ok(object) = KObject::new(ObjectBody::Section(body)) else { return NtStatus::NO_MEMORY };
     tri!(security_calls::assign_object(call, &object, attrs_ptr));
-    let (object, existed, handle_attributes) = tri!(link_new_object(attrs, object, is_section));
+    let (object, existed, handle_attributes, _pin) =
+        tri!(link_new_object(attrs, object, is_section));
     let status = if existed {
         call.return_opened(out, object, access, handle_attributes)
     } else {
@@ -4024,7 +4200,7 @@ fn finish_create_section(
 fn nt_open_section(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_section));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 const MEM_TOP_DOWN: u32 = 0x10_0000;
@@ -5395,9 +5571,8 @@ fn io_apc(
 
 /// The start of an I/O on `file`: the event (if any; it must be an event
 /// the caller may modify) and the file object are reset; they are signaled
-/// again by `finish_io` when the I/O completes. Every I/O completes before
-/// its system call returns so far.
-// TODO: APCs and I/O completion ports.
+/// again by `finish_io` when the I/O completes (which also queues the
+/// completion APC; `post_completion` the port's packet).
 fn start_io(call: &Call<'_>, file: &ObjectRef, event: u64) -> Result<Option<ObjectRef>, NtStatus> {
     let event = match event {
         0 => None,
@@ -6118,7 +6293,7 @@ fn nt_create_keyed_event(call: &mut Call<'_>) -> NtStatus {
 fn nt_open_keyed_event(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (object, attributes) = tri!(call.open_named(arg!(call, 2), is_keyed_event));
-    call.return_opened(out, object, access, attributes & HANDLE_ATTRIBUTES)
+    call.return_opened(out, object.clone(), access, attributes & HANDLE_ATTRIBUTES)
 }
 
 /// NtWaitForKeyedEvent / NtReleaseKeyedEvent(KeyedEventHandle, Key,
@@ -6175,6 +6350,7 @@ fn gala_desktop_action(call: &mut Call<'_>) -> NtStatus {
         pid: call.process.id as u32,
         level: call.process.integrity_level(),
         token,
+        desk: call.process.desk.clone(),
     };
     let out = tri!(action::run(&request, &caller, |pid| process::integrity_level(u64::from(pid))));
     let (ptr, room, ret) = (arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4));

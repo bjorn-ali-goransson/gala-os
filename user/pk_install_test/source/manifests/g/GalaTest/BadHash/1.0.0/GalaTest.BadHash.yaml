@@ -13,6 +13,6 @@ Installers:
   - RelativeFilePath: pkhello-1.0.0/pkhello.exe
     PortableCommandAlias: badhash
   InstallerUrl: https://packages.gala.invalid/pkhello-1.0.0.zip
-  InstallerSha256: 4D8F22FFF400376D00A1F42E9039CEA30152E48EAB67FEC1758B75D8356F0000
+  InstallerSha256: F889251C168A6760E2D20F059092AF2E0613503135D43120B2A1172FC83F0000
 ManifestType: singleton
 ManifestVersion: 1.6.0

@@ -21,6 +21,7 @@ use super::HOST_START;
 use crate::arch::interrupts::TrapFrame;
 use crate::arch::syscall::{SyscallFrame, UserRegs};
 use crate::arch::xstate::{self, XState};
+use crate::personality::{Dispatchers, NO_DISPATCHER_RESULT, NoDispatcher, Personality};
 use crate::sim::{SpinCapture, SpinState, SpinStep};
 
 const HOST_END: u64 = 0x8000_0000_0000;
@@ -53,7 +54,10 @@ const ALT_STACK: usize = 256 * 1024;
 
 static SELECTOR: AtomicU8 = AtomicU8::new(SYSCALL_DISPATCH_FILTER_BLOCK);
 
-static SYSCALL_HANDLER: OnceLock<fn(&mut SyscallFrame)> = OnceLock::new();
+/// The system-call dispatchers, one per personality (`crate::personality`,
+/// ROADMAP LX seam 2): a call goes to the one of the calling thread's
+/// personality (`PERSONALITY`).
+static SYSCALL_HANDLER: Dispatchers = Dispatchers::new();
 static RETURN_HOOK: OnceLock<fn(&mut UserRegs) -> bool> = OnceLock::new();
 static EXCEPTION_HANDLER: OnceLock<fn(&mut TrapFrame, Option<u64>)> = OnceLock::new();
 
@@ -66,6 +70,9 @@ std::thread_local! {
     static ENTER: Cell<Option<UserRegs>> = const { Cell::new(None) };
     /// This thread's user GS base (its TEB).
     static GS_BASE: Cell<u64> = const { Cell::new(0) };
+    /// This thread's personality (its process's): where its system calls
+    /// are dispatched.
+    static PERSONALITY: Cell<Personality> = const { Cell::new(Personality::Nt) };
     /// Simulation: this thread is single-stepping an instruction that
     /// reads KUSER_SHARED_DATA, whose page is readable until it is done.
     static STEPPING: Cell<bool> = const { Cell::new(false) };
@@ -200,8 +207,16 @@ fn simulated_cpuid(leaf: u32, sub: u32) -> (u32, u32, u32, u32) {
     (eax, ebx, ecx, edx)
 }
 
-pub fn set_syscall_handler(handler: fn(&mut SyscallFrame)) {
-    let _ = SYSCALL_HANDLER.set(handler);
+pub fn set_syscall_handler(
+    personality: Personality,
+    name: &'static str,
+    handler: fn(&mut SyscallFrame),
+) {
+    if SYSCALL_HANDLER.register(personality, name, handler) {
+        crate::info!("syscall: personality {personality} dispatches to {name}");
+    } else {
+        crate::warn!("syscall: personality {personality} already has a dispatcher; {name} ignored");
+    }
 }
 
 pub fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool) {
@@ -294,8 +309,16 @@ extern "C" fn on_sigsys(_sig: i32, _info: *mut libc::siginfo_t, context: *mut li
         if super::sim::on() {
             super::sim::point(&[0, frame.rax]);
         }
-        if let Some(handler) = SYSCALL_HANDLER.get() {
-            handler(&mut frame);
+        let personality = PERSONALITY.with(Cell::get);
+        if let Err(NoDispatcher(p)) = SYSCALL_HANDLER.dispatch(personality, &mut frame) {
+            crate::warn!(
+                "syscall: no dispatcher for personality {p}: system call {:#x} from rip {:#x} \
+                 (thread {}) fails with {NO_DISPATCHER_RESULT:#x}",
+                frame.rax,
+                frame.rip,
+                super::threads::current()
+            );
+            frame.rax = NO_DISPATCHER_RESULT;
         }
         if super::sim::on() {
             super::sim::point(&[1, frame.rax]);
@@ -555,8 +578,9 @@ fn start_state_dumps() {
 /// thread's SIGSYS handler inherits its mask, and a blocked SIGSYS from
 /// syscall user dispatch kills the process), an alternate signal stack
 /// (handlers must not run on the program's stack) and syscall user
-/// dispatch.
-pub fn init_thread() {
+/// dispatch. Its system calls go to `personality`'s dispatcher.
+pub fn init_thread(personality: Personality) {
+    PERSONALITY.with(|p| p.set(personality));
     // SAFETY: an empty signal set, applied to this thread.
     unsafe {
         let mut none: libc::sigset_t = core::mem::zeroed();

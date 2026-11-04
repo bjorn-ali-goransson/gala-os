@@ -152,6 +152,13 @@ impl NtThread {
         }
     }
 
+    /// SYSTEM_THREAD_INFORMATION's ContextSwitches: times a processor
+    /// switched to it (kept from before a handover: 0 then).
+    pub fn context_switches(&self) -> u32 {
+        let tid = *self.sched_id.lock();
+        tid.map_or(0, platform::context_switches)
+    }
+
     /// ExitStatus as reported by NtQueryInformationThread.
     pub fn exit_status(&self) -> NtStatus {
         self.exit_status.lock().unwrap_or(NtStatus::PENDING)
@@ -238,7 +245,13 @@ pub fn create(
         return Err(NtStatus::INVALID_PARAMETER);
     }
     let id = next_id();
-    let teb_addr = allocate_teb(process, id, stack)?;
+    // Only NT threads have a TEB (and start with it as their GS base); a
+    // Linux thread starts with GS and FS bases 0 (arch_prctl_test).
+    let teb_addr = if process.personality == super::platform::Personality::Nt {
+        allocate_teb(process, id, stack)?
+    } else {
+        0
+    };
     let thread = NtThread {
         id,
         teb: teb_addr,
@@ -279,6 +292,7 @@ pub fn create(
         id as usize,
         process.space.clone(),
         teb_addr,
+        process.personality,
     ) {
         Ok(tid) => {
             *as_thread(&object).sched_id.lock() = Some(tid);
@@ -488,16 +502,12 @@ pub fn note_mutant_released(mutant: &ObjectRef) {
 fn abandon_mutants(t: &NtThread) {
     let owned = core::mem::take(&mut *t.owned_mutants.lock());
     for object in owned {
-        if let ObjectBody::Mutant(m) = &object.body {
-            {
-                let mut state = m.state.lock();
-                if state.owner != Some(t.id) {
-                    continue;
-                }
+        // Checked and freed in one hold of the dispatcher lock.
+        wait::change_mutant(&object, |state| {
+            if state.owner == Some(t.id) {
                 *state = super::object::MutantState { owner: None, count: 0, abandoned: true };
             }
-            wait::set_signal(&object, 1);
-        }
+        });
     }
 }
 
@@ -828,8 +838,15 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
 pub fn start_adopted(object: &ObjectRef) -> Result<(), NtStatus> {
     let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     let p = &t.process;
-    let tid = platform::spawn_user(p.name, thread_entry, t.id as usize, p.space.clone(), t.teb)
-        .map_err(|_| NtStatus::NO_MEMORY)?;
+    let tid = platform::spawn_user(
+        p.name,
+        thread_entry,
+        t.id as usize,
+        p.space.clone(),
+        t.teb,
+        p.personality,
+    )
+    .map_err(|_| NtStatus::NO_MEMORY)?;
     *t.sched_id.lock() = Some(tid);
     Ok(())
 }
@@ -901,7 +918,7 @@ pub fn dump() {
         let suspended = *t.suspend_count.lock();
         info!(
             "thread: pid {} tid {} (sched {:?}) suspend {} exited {} in a system call {} \
-             session {} ({})",
+             session {} personality {} ({})",
             t.process.id,
             t.id,
             sched,
@@ -909,6 +926,7 @@ pub fn dump() {
             t.has_exited(),
             in_syscall.is_some(),
             t.process.session,
+            t.process.personality,
             t.process.name
         );
         let Some((number, regs)) = in_syscall else {
@@ -998,8 +1016,8 @@ pub fn exit_current(status: NtStatus) -> ! {
         // Its windows are destroyed with it, as on Windows (user32 frees
         // its own records at DLL_THREAD_DETACH; this covers threads that
         // never got there), and messages sent to it fail.
-        super::window::thread_ended(t.process.id as u32, t.id as u32);
-        super::winevent::thread_ended(t.process.id as u32, t.id as u32);
+        t.process.desk.windows.thread_ended(t.process.id as u32, t.id as u32);
+        t.process.desk.hooks.thread_ended(t.process.id as u32, t.id as u32);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
         let process = t.process.clone();
         let last = process.remove_thread(&object);

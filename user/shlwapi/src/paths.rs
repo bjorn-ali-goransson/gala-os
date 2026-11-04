@@ -9,10 +9,10 @@ unsafe extern "system" {
     fn GetFileAttributesW(path: *const u16) -> u32;
 }
 
-const MAX_PATH: usize = 260;
-const BACKSLASH: u16 = b'\\' as u16;
+pub(crate) const MAX_PATH: usize = 260;
+pub(crate) const BACKSLASH: u16 = b'\\' as u16;
 
-fn len(p: *const u16) -> usize {
+pub(crate) fn len(p: *const u16) -> usize {
     let mut n = 0;
     // SAFETY: the caller's NUL-terminated string.
     while unsafe { *p.add(n) } != 0 {

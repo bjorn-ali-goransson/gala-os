@@ -141,6 +141,7 @@ pub fn report(process: &Process, note: &Note) {
         exception_name(note.status),
         note.tid
     );
+    info!("crash report:   personality {}, session {}", process.personality, process.session);
     match note.access {
         Some((addr, kind)) => info!(
             "crash report:   at {at}, {} address {addr:#x}",

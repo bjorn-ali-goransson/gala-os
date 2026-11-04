@@ -127,6 +127,9 @@ pub mod tag {
     /// AFD endpoints: their state, the kernel socket behind each (with its
     /// connections in gala's terms) and their pending requests.
     pub const SOCKETS: u32 = 35;
+    /// When the programs stopped (the tick count, u64): with the record's
+    /// clock, how long they were stopped (GalaHandoverPause). Optional.
+    pub const STOPPED: u32 = 36;
 }
 
 /// What a kept physical range is (KEPT section).

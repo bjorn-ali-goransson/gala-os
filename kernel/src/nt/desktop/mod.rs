@@ -2220,7 +2220,45 @@ fn clock(minute: u64) -> ([u8; 8], usize, [u8; 10], usize) {
     (time, tn, date, dn)
 }
 
-static DESKTOP: IrqMutex<Desktop> = IrqMutex::new(Desktop::new());
+/// One session's desktop as shasha keeps it (ROADMAP RS step B2): its
+/// windows on the screen, Z order, focus, capture, pixels and input
+/// queue, behind its own lock (nt::session::Desk holds it). Only the
+/// desktop the console shows is drawn and gets the keyboard and mouse:
+/// the console session's (session::CONSOLE) until step B3a attaches
+/// presenters; another session's programs find no screen there (as on a
+/// machine without one: their windows live in the registry only).
+pub struct Shell {
+    session: u32,
+    d: IrqMutex<Desktop>,
+    /// "not shown" was logged for this session.
+    noted: core::sync::atomic::AtomicBool,
+}
+
+impl Shell {
+    pub const fn new(session: u32) -> Shell {
+        Shell {
+            session,
+            d: IrqMutex::new(Desktop::new()),
+            noted: core::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Whether the console shows this desktop.
+    pub fn shown(&self) -> bool {
+        self.session == super::session::CONSOLE
+    }
+
+    /// (windows on the screen, drawn yet): the state dump's figures.
+    pub fn counts(&self) -> (usize, bool) {
+        let d = self.d.lock();
+        (d.windows.len(), d.painted)
+    }
+}
+
+/// The console's desktop (the input thread's), if its session exists.
+fn console() -> Option<crate::mm::heap::KArc<super::session::Desk>> {
+    super::session::desk(super::session::CONSOLE)
+}
 
 /// The wallpaper picture chosen at boot (`choose_wallpaper`).
 static PICTURE: IrqMutex<Option<Picture>> = IrqMutex::new(None);
@@ -2307,12 +2345,23 @@ pub fn server_profile() -> bool {
     SERVER.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// The screen the desktop may draw on: none in the server profile (noted
-/// once in the log the first time a program asks for it).
-pub fn screen() -> Option<(u32, u32)> {
+/// The screen `shell`'s desktop may draw on: none in the server profile
+/// (noted once in the log the first time a program asks for it), none
+/// for a desktop the console does not show (noted once per session).
+pub fn screen(shell: &Shell) -> Option<(u32, u32)> {
     if server_profile() {
         if !SERVER_NOTED.swap(true, core::sync::atomic::Ordering::Relaxed) {
             crate::info!("desktop: not drawn (server profile)");
+        }
+        return None;
+    }
+    if !shell.shown() {
+        if !shell.noted.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            crate::info!(
+                "desktop: session {}'s windows are not shown (the console shows session {})",
+                shell.session,
+                super::session::CONSOLE
+            );
         }
         return None;
     }
@@ -2335,12 +2384,13 @@ fn ensure_painted(d: &mut Desktop) -> Result<(), NtStatus> {
 /// Runs `f` on the desktop and redraws what it changed; STATUS_NOT_SUPPORTED
 /// without a screen.
 pub fn with<R>(
+    shell: &Shell,
     f: impl FnOnce(&mut Desktop) -> Result<(R, Option<Rect>), NtStatus>,
 ) -> Result<R, NtStatus> {
-    if screen().is_none() {
+    if screen(shell).is_none() {
         return Err(NtStatus::NOT_SUPPORTED);
     }
-    let mut d = DESKTOP.lock();
+    let mut d = shell.d.lock();
     ensure_painted(&mut d)?;
     let (r, area) = f(&mut d)?;
     if let Some(area) = area {
@@ -2351,11 +2401,11 @@ pub fn with<R>(
 }
 
 /// A process ended: its windows go.
-pub fn process_ended(owner: u64) {
-    if server_profile() || platform::screen_size().is_none() {
+pub fn process_ended(shell: &Shell, owner: u64) {
+    if server_profile() || !shell.shown() || platform::screen_size().is_none() {
         return;
     }
-    let mut d = DESKTOP.lock();
+    let mut d = shell.d.lock();
     if !d.painted {
         return;
     }
@@ -2369,7 +2419,8 @@ pub fn process_ended(owner: u64) {
 pub fn pointer_event(dx: i64, dy: i64, buttons: u8) -> Option<&'static Program> {
     // Which programs exist (outside the desktop's lock: the file system).
     let (available, n) = if buttons & 1 != 0 { available_programs() } else { ([0; 8], 0) };
-    let mut d = DESKTOP.lock();
+    let desk = console()?;
+    let mut d = desk.shell.d.lock();
     if !d.painted {
         return None;
     }
@@ -2424,11 +2475,11 @@ pub fn start_menu() -> Vec<&'static Program> {
 /// ids; the caller found it from the window's HWND):
 /// STATUS_NOT_SUPPORTED without shasha on the screen (no screen, the
 /// server profile), STATUS_INVALID_HANDLE when there is no such window.
-pub fn window_action(owner: u64, id: u32, action: Action) -> Result<(), NtStatus> {
-    if screen().is_none() {
+pub fn window_action(shell: &Shell, owner: u64, id: u32, action: Action) -> Result<(), NtStatus> {
+    if screen(shell).is_none() {
         return Err(NtStatus::NOT_SUPPORTED);
     }
-    let mut d = DESKTOP.lock();
+    let mut d = shell.d.lock();
     if d.window(id).is_none_or(|w| w.owner != owner) {
         return Err(NtStatus::INVALID_HANDLE);
     }
@@ -2442,18 +2493,18 @@ pub fn window_action(owner: u64, id: u32, action: Action) -> Result<(), NtStatus
 
 /// The windows the taskbar shows (GalaDesktopAction): none before the
 /// desktop is drawn; STATUS_NOT_SUPPORTED without shasha on the screen.
-pub fn list_windows() -> Result<Vec<Listed>, NtStatus> {
-    if screen().is_none() {
+pub fn list_windows(shell: &Shell) -> Result<Vec<Listed>, NtStatus> {
+    if screen(shell).is_none() {
         return Err(NtStatus::NOT_SUPPORTED);
     }
-    Ok(DESKTOP.lock().list())
+    Ok(shell.d.lock().list())
 }
 
 /// Shows wallpaper `name` (one of WALLPAPERS, or "drawn") from now on
 /// (GalaDesktopAction): STATUS_OBJECT_NAME_NOT_FOUND for another name or
 /// a missing file, STATUS_NOT_SUPPORTED without shasha on the screen.
-pub fn set_wallpaper(name: &str) -> Result<(), NtStatus> {
-    if screen().is_none() {
+pub fn set_wallpaper(shell: &Shell, name: &str) -> Result<(), NtStatus> {
+    if screen(shell).is_none() {
         return Err(NtStatus::NOT_SUPPORTED);
     }
     let picture = if name.eq_ignore_ascii_case("drawn") {
@@ -2470,14 +2521,14 @@ pub fn set_wallpaper(name: &str) -> Result<(), NtStatus> {
     };
     // The new layout is made outside the desktop's lock (it scales the
     // picture to the screen), then swapped in.
-    let screen = DESKTOP.lock().screen;
+    let screen = shell.d.lock().screen;
     let layout = if screen.0 > 0 {
         Some(Wallpaper::new(screen.0, screen.1, picture.as_ref()).ok_or(NtStatus::NO_MEMORY)?)
     } else {
         None
     };
     *PICTURE.lock() = picture;
-    let mut d = DESKTOP.lock();
+    let mut d = shell.d.lock();
     if let Some(layout) = layout
         && d.painted
         && d.screen == screen
@@ -2502,7 +2553,8 @@ fn signal(events: Vec<ObjectRef>) {
 /// `extended`) went down or up.
 /// The mouse wheel (from the input thread).
 pub fn wheel_event(notches: i64) {
-    let mut d = DESKTOP.lock();
+    let Some(desk) = console() else { return };
+    let mut d = desk.shell.d.lock();
     if !d.painted {
         return;
     }
@@ -2513,7 +2565,8 @@ pub fn wheel_event(notches: i64) {
 }
 
 pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) {
-    let mut d = DESKTOP.lock();
+    let Some(desk) = console() else { return };
+    let mut d = desk.shell.d.lock();
     if !d.painted {
         return;
     }
@@ -2525,8 +2578,8 @@ pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) {
 }
 
 /// GalaWindowListen: `owner`'s input event.
-pub fn listen(owner: u64, event: ObjectRef) -> Result<(), NtStatus> {
-    let mut d = DESKTOP.lock();
+pub fn listen(shell: &Shell, owner: u64, event: ObjectRef) -> Result<(), NtStatus> {
+    let mut d = shell.d.lock();
     d.listen(owner, event)?;
     let wakes = d.take_wakes();
     drop(d);
@@ -2538,7 +2591,8 @@ pub fn listen(owner: u64, event: ObjectRef) -> Result<(), NtStatus> {
 /// display change (virtio-gpu: the host's window resized).
 pub fn tick() {
     let changed = platform::screen_changed();
-    let mut d = DESKTOP.lock();
+    let Some(desk) = console() else { return };
+    let mut d = desk.shell.d.lock();
     if !d.painted {
         return;
     }
@@ -2567,12 +2621,12 @@ fn resize(d: &mut Desktop, w: u32, h: u32) {
 }
 
 /// Takes input waiting for `owner`'s windows into `out`; how many.
-pub fn take_input(owner: u64, out: &mut [InputEvent]) -> usize {
-    DESKTOP.lock().take_input(owner, out)
+pub fn take_input(shell: &Shell, owner: u64, out: &mut [InputEvent]) -> usize {
+    shell.d.lock().take_input(owner, out)
 }
 
-pub fn has_input(owner: u64) -> bool {
-    DESKTOP.lock().has_input(owner)
+pub fn has_input(shell: &Shell, owner: u64) -> bool {
+    shell.d.lock().has_input(owner)
 }
 
 #[cfg(test)]
