@@ -602,8 +602,13 @@ charged). Look
   40 with Java heap corruption (a stale String reference: `String.equals`
   reading a bogus klass, a NullPointerException inside String.equals from
   javac's MemberName.<init>, a crash in MethodHandleNatives.resolve); the
-  hs_err report is in the failed log (`dump:` lines). Still open
-  (2026-11-03); what is known is in ROADMAP Priorities. Not the cause but
+  hs_err report is in the failed log (`dump:` lines). **Cause found
+  (2026-11-04): QEMU 8.1.0-8.2.5's TCG** (`tb_record` registered a block
+  that spans two pages under its first page only, so a write to the
+  second page did not invalidate it: HotSpot's patched `mov r64, imm64`
+  constants straddling a page end kept their pre-GC values); fixed in
+  QEMU 8.2.6. gala is tested on a pinned QEMU (section "QEMU" below),
+  not on the distribution's 8.2.2. ROADMAP Priorities has the history. Not the cause but
   found on the way: QEMU's multi-threaded TCG (8.2.2 here; still open in
   10.2, QEMU issue 4669) can keep a translation of guest code made while
   another processor was writing it, and run the old instructions after
@@ -723,6 +728,22 @@ charged). Look
 - **Which handle is which** in an event stream (`XTASK_EVENTS=all`):
   handle values are reused at once (the lowest free slot), so follow
   NtClose and creation order rather than guessing from the value.
+
+## QEMU
+
+xtask runs a pinned QEMU (`QEMU_VERSION` in xtask, 11.1.3), built by
+`cargo xtask qemu` into `~/.cache/gala-qemu/<version>` (download from
+download.qemu.org, SHA-256 checked, only `x86_64-softmmu` with user
+networking). `XTASK_QEMU=<path>` overrides it; without either, xtask
+uses `qemu-system-x86_64` from PATH and says so once. Every run prints
+which QEMU it uses. Build dependencies (Ubuntu): `libglib2.0-dev
+libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv
+libfdt-dev zlib1g-dev pkg-config`. CI builds it once and caches it.
+Why not the distribution's: Ubuntu 24.04 ships 8.2.2, whose TCG keeps
+running stale translations of code rewritten on a block's second page
+(the JVM corruption, "Known intermittent" above). A cloud container is
+ephemeral: run `cargo xtask qemu` in the environment's setup script, or
+once per new container (about 10 minutes).
 
 ## Test speed and environments
 

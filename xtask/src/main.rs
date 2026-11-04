@@ -1953,6 +1953,7 @@ fn main() -> ExitCode {
                 bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
             }
             Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
+            Some("qemu") => build_qemu(),
             Some("alloc-audit") => alloc_audit(
                 release,
                 args.get(1).filter(|a| !a.starts_with("--")).map(Path::new),
@@ -2922,6 +2923,82 @@ fn single_thread_tcg(name: &str) -> bool {
     SINGLE_THREAD_TCG.iter().any(|s| name.contains(s))
 }
 
+/// The QEMU gala is tested with: QEMU_VERSION built by `cargo xtask qemu`
+/// into `~/.cache/gala-qemu/<version>`. QEMU 8.1.0-8.2.5 (Ubuntu 24.04's
+/// 8.2.2) loses writes to the second page of a translated block that
+/// spans two pages, which corrupted JIT-compiled code (the JVM's heap
+/// "corruption", WORKFLOW "Known intermittent"); 8.2.6 fixed it.
+const QEMU_VERSION: &str = "11.1.3";
+const QEMU_SHA256: &str = "5a8289c7940dc77d3873c81a6c29ba3afe1446fc9d36e77fa1658cdbecb84b22";
+
+fn qemu_prefix() -> PathBuf {
+    let home = env::var_os("HOME").map_or_else(|| PathBuf::from("/root"), PathBuf::from);
+    home.join(".cache/gala-qemu").join(QEMU_VERSION)
+}
+
+/// `XTASK_QEMU` (a path), else the pinned build if present, else the one
+/// on PATH (with a warning once: it may be a QEMU with the 8.2.x bug).
+fn qemu_binary() -> PathBuf {
+    if let Some(p) = env::var_os("XTASK_QEMU") {
+        return PathBuf::from(p);
+    }
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let pinned = qemu_prefix().join("bin/qemu-system-x86_64");
+    if pinned.is_file() {
+        WARNED.call_once(|| eprintln!("xtask: QEMU {QEMU_VERSION} ({})", pinned.display()));
+        return pinned;
+    }
+    WARNED.call_once(|| {
+        eprintln!(
+            "xtask: QEMU {QEMU_VERSION} not built (`cargo xtask qemu`); using qemu-system-x86_64 from PATH"
+        );
+    });
+    PathBuf::from("qemu-system-x86_64")
+}
+
+/// `cargo xtask qemu`: downloads QEMU_VERSION from download.qemu.org,
+/// checks QEMU_SHA256, and builds only the x86_64 system emulator (with
+/// user networking) into `qemu_prefix()`. Build dependencies: WORKFLOW
+/// "QEMU".
+fn build_qemu() -> Result {
+    let prefix = qemu_prefix();
+    let bin = prefix.join("bin/qemu-system-x86_64");
+    if bin.is_file() {
+        eprintln!("xtask: QEMU {QEMU_VERSION} already built at {}", bin.display());
+        return Ok(());
+    }
+    let work = target_dir().join("qemu-build");
+    fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+    let tarball = work.join(format!("qemu-{QEMU_VERSION}.tar.xz"));
+    let url = format!("https://download.qemu.org/qemu-{QEMU_VERSION}.tar.xz");
+    eprintln!("xtask: fetching {url}");
+    run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&tarball).arg(&url))?;
+    let sum =
+        Command::new("sha256sum").arg(&tarball).output().map_err(|e| format!("sha256sum: {e}"))?;
+    let sum = String::from_utf8_lossy(&sum.stdout);
+    if sum.split_whitespace().next() != Some(QEMU_SHA256) {
+        let _ = fs::remove_file(&tarball);
+        return Err(format!("{url}: SHA-256 mismatch ({sum})"));
+    }
+    run_cmd(Command::new("tar").arg("xf").arg(&tarball).arg("-C").arg(&work))?;
+    let src = work.join(format!("qemu-{QEMU_VERSION}"));
+    let build = work.join("build");
+    fs::create_dir_all(&build).map_err(|e| format!("{}: {e}", build.display()))?;
+    run_cmd(
+        Command::new(src.join("configure"))
+            .current_dir(&build)
+            .args(["--target-list=x86_64-softmmu", "--enable-slirp", "--disable-docs"])
+            .args(["--disable-werror", "--disable-gtk", "--disable-sdl"])
+            .arg(format!("--prefix={}", prefix.display())),
+    )?;
+    let jobs = std::thread::available_parallelism().map_or(2, |n| n.get()).to_string();
+    run_cmd(Command::new("make").current_dir(&build).args(["-j", &jobs]))?;
+    run_cmd(Command::new("make").current_dir(&build).arg("install"))?;
+    let _ = fs::remove_dir_all(&work);
+    eprintln!("xtask: QEMU {QEMU_VERSION} built at {}", bin.display());
+    Ok(())
+}
+
 fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     // 512 MiB, plus twice the image for images with large programs (the
     // boot modules stay in memory, and programs like a JVM map them).
@@ -2940,7 +3017,7 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
         memory = memory.max(ELASTICSEARCH_MEMORY_MIB);
     }
     let extra = std::env::var("XTASK_QEMU_ARGS").unwrap_or_default();
-    let mut cmd = Command::new("qemu-system-x86_64");
+    let mut cmd = Command::new(qemu_binary());
     // Two processors (one for `onecpu_*` scenarios: telemetry::vm_cpus).
     let cpus = telemetry::vm_cpus(iso).to_string();
     cmd.args(["-machine", "q35", "-cpu", "max", "-m", &format!("{memory}M"), "-smp", &cpus]);
@@ -6062,6 +6139,9 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("uipi_test", "a child process (one NT process per Linux process)"),
     ("shell32_test", "a child process (ShellExecuteExW runs it)"),
+    // Hangs in its TLS 1.3 handshake with the in-process server (both
+    // threads waiting); passes in QEMU. A gala-um socket gap: ROADMAP TLS.
+    ("schannel_test", "the in-process TLS server's sockets (gala-um gap)"),
     ("winevent_test", "a child process (one NT process per Linux process)"),
     ("uia_test", "a child process (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
