@@ -1536,8 +1536,7 @@ Scenarios that fail now and then, and what is known.
   list.
 - **java_http timing out with a lost wake-up's signature**: once, a
   state dump showed three JVM threads in NtYieldExecution and two
-  waiting on semaphores with count 0 (OBSERVABILITY "Gaps found
-  2026-11-03" item 18), the signature of a lost semaphore release at
+  waiting on semaphores with count 0 (OBSERVABILITY "Open gaps"), the signature of a lost semaphore release at
   HotSpot's wait barrier. Open; the failed log is the starting point.
 - **Scenarios cut short by host load**: wall-time limits stretch with
   `host_overload`, but a host far past its CPUs can still starve a VM

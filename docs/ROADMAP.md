@@ -1020,8 +1020,7 @@ Each entry: what, why it matters, the structural fix, the owning item.
 - **Observability gaps** still open from the audit: program output on
   its own channel (split lines), reference holders of a leaked address
   space, a real user stack walk in crash reports, repeat boots and
-  um-test results in `target/report/history.jsonl` (OBSERVABILITY "Gaps
-  found 2026-11-03").
+  um-test results in `target/report/history.jsonl` (OBSERVABILITY "Open gaps").
 
 ### Pending scenarios
 
