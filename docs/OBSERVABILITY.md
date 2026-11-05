@@ -528,6 +528,28 @@ silent):
   given process, a network accept), with the adjusted count recorded
   (OTel's probability sampling in tracestate) so the backend can still
   scale counts.
+- **Sampling rules**: what is sampled how is a list of rules, the first
+  match deciding (a default rule last). A rule matches on the
+  transaction's or span's **name** (a glob: `NtWriteFile`,
+  `chrome.exe/net*`), its **type** (system call, wait, fault, file,
+  IPC, network accept or connect, process start, profiler sample, log),
+  the **process** (image name, command-line text, pid) and thread, and
+  on what is only known at the end (status: failed; duration over a
+  threshold). Its action, per signal: a head ratio for traces (0 to 1),
+  a tail rule (keep always, if failed, if slower than X), a profiler
+  rate (samples per second for those threads, 0: none), and
+  metrics-only (counted and timed, never a span). Examples: every
+  failed system call kept; `NtWriteFile` of the console metrics-only;
+  1% of `NtWaitFor*` unless slower than 100 ms; Chromium's network
+  service at 1000 samples per second, everything else at 100. Each
+  kept item carries the rule that kept it (`gala.sampling.rule`, with
+  its ratio for the adjusted count) and each rule's matched, kept and
+  dropped counts are metrics, so a view knows what it is not seeing.
+  The rules are kernel state: set at boot (a rules file the command
+  line names) and changed at run time (the `gala` CLI, OT5), evaluated
+  where the event is made (the kernel for its spans and samples).
+  `events_pid=`/`events_match=` (the system-call stream of chosen
+  processes) and `sample_hz=` are the first, fixed forms of such rules.
 - **Tail sampling at the source.** The kernel records every span into
   its per-CPU rings anyway (cheap, fixed size, like the flight
   recorder); what decides is the end of the root: a transaction that

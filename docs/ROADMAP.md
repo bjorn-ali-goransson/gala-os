@@ -1104,8 +1104,10 @@ need unwinding: next).
    memory, from kernel time accounting that ThreadTimes and
    NtQuerySystemInformation also return), hot paths, impact table,
    service map; volume bounded per signal: metrics aggregated, traces
-   sampled per transaction at the root and at its end, profiles
-   aggregated per stack, a byte budget, dropped counts reported), then transactions (causal chains with owners, callers and a
+   sampled per transaction at the root and at its end by sampling rules
+   (matching name, type, process, status, duration; OBSERVABILITY
+   "Volume"), profiles aggregated per stack, a byte budget, dropped
+   counts reported), then transactions (causal chains with owners, callers and a
    critical-path breakdown) as their own view.
 
 **Design**: OBSERVABILITY "OpenTelemetry export"; WORKFLOW
