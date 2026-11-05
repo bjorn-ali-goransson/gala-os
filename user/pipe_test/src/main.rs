@@ -44,7 +44,8 @@
 //!   DisconnectNamedPipe after it does not take the answer away.
 //! - Crashpad's registration server: it reads a request, writes the reply
 //!   and calls DisconnectNamedPipe at once (no flush). A client already
-//!   waiting in ReadFile gets the reply, and so does one using
+//!   waiting in ReadFile (an overlapped read posted before its write) gets
+//!   the reply, and so does one using
 //!   TransactNamedPipe (write and read as one operation: its read is in
 //!   place before its write), every time (50 rounds each); disconnecting
 //!   discards only data nobody was reading. TransactNamedPipe with unread
@@ -849,10 +850,15 @@ fn reply_then_disconnect(c: &mut Checks) -> Result<(), u32> {
             let mut ok_rounds = 0u32;
             for _ in 0..ROUNDS {
                 // The instance listens again after each disconnect.
-                let mut cl = client(&name, 0);
+                // Without TransactNamedPipe the client's read must be in
+                // place before its write (an overlapped read posted first):
+                // a read issued after the server's disconnect fails, as on
+                // Windows.
+                let flags = if transact { 0 } else { FILE_FLAG_OVERLAPPED };
+                let mut cl = client(&name, flags);
                 while cl == INVALID_HANDLE && GetLastError() == ERROR_PIPE_BUSY {
                     SleepEx(1, 0);
-                    cl = client(&name, 0);
+                    cl = client(&name, flags);
                 }
                 c.ok(cl != INVALID_HANDLE, GetLastError().into())?;
                 let mode = PIPE_READMODE_MESSAGE;
@@ -873,13 +879,55 @@ fn reply_then_disconnect(c: &mut Checks) -> Result<(), u32> {
                         core::ptr::null_mut(),
                     )
                 } else {
-                    let sent = write(cl, b"request");
-                    let read =
-                        ReadFile(cl, reply.as_mut_ptr(), 16, &mut got, core::ptr::null_mut());
-                    i32::from(sent && read != 0)
+                    let (read_event, write_event) = (
+                        CreateEventW(core::ptr::null(), 1, 0, core::ptr::null()),
+                        CreateEventW(core::ptr::null(), 1, 0, core::ptr::null()),
+                    );
+                    let blank = |event| Overlapped {
+                        internal: 0,
+                        internal_high: 0,
+                        offset: 0,
+                        offset_high: 0,
+                        event,
+                    };
+                    let (mut rov, mut wov) = (blank(read_event), blank(write_event));
+                    let posted = ReadFile(
+                        cl,
+                        reply.as_mut_ptr(),
+                        16,
+                        core::ptr::null_mut(),
+                        (&mut rov as *mut Overlapped).cast(),
+                    ) != 0
+                        || GetLastError() == ERROR_IO_PENDING;
+                    let mut sent = 0;
+                    let wrote = WriteFile(
+                        cl,
+                        b"request".as_ptr(),
+                        7,
+                        core::ptr::null_mut(),
+                        (&mut wov as *mut Overlapped).cast(),
+                    ) != 0
+                        || GetLastError() == ERROR_IO_PENDING;
+                    let wrote = wrote && GetOverlappedResult(cl, &mut wov, &mut sent, 1) != 0;
+                    let read = posted && GetOverlappedResult(cl, &mut rov, &mut got, 1) != 0;
+                    CloseHandle(read_event);
+                    CloseHandle(write_event);
+                    i32::from(wrote && read)
                 };
                 if done != 0 && got == 5 && &reply[..5] == b"reply" {
                     ok_rounds += 1;
+                } else {
+                    // What went wrong in this round (the count alone does
+                    // not say).
+                    let error = GetLastError();
+                    out(if transact { b"pipe_test: transact" } else { b"pipe_test: write+read" });
+                    out(b" round failed: done ");
+                    out(&hex(done as u32));
+                    out(b" got ");
+                    out(&hex(got));
+                    out(b" error ");
+                    out(&hex(error));
+                    out(b"\r\n");
                 }
                 CloseHandle(cl);
             }

@@ -1417,7 +1417,9 @@ Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
   satisfies it hands it the bytes at once, as Windows completes a waiting
   read's IRP. DisconnectNamedPipe then discards only bytes nobody was
   reading: Crashpad's server writes its reply and disconnects at once.
-  A kernel handover does
+  The waiting thread looks for its result before every wait (the reply
+  to a transceive's write can complete its read while the lock is not
+  held, and that wake-up is spent). A kernel handover does
   not carry a synchronous request; its thread asks again.
 - **FSCTL_PIPE_TRANSCEIVE** (TransactNamedPipe, also under CallNamedPipe):
   the read is queued before the message is written, so the answer cannot

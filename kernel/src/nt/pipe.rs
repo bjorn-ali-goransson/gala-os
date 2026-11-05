@@ -40,7 +40,9 @@
 //! bytes nobody was reading (Crashpad's server writes its reply and
 //! disconnects at once). FSCTL_PIPE_TRANSCEIVE (TransactNamedPipe) puts
 //! its read in place before its write, so the answer cannot be lost
-//! either.
+//! either. A waiting thread looks for its result before each wait, never
+//! after only: the result can come while the lock is not held (the reply
+//! to a transceive's write), and its wake-up is then already spent.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -577,13 +579,11 @@ impl PipeEnd {
         op: Op,
         token: u64,
     ) -> Result<Outcome, NtStatus> {
+        // The result is looked for before each wait: it may have come
+        // while the lock was not held (TransactNamedPipe's read, completed
+        // by the reply to its write before this end took the lock again),
+        // and that wake-up has passed.
         loop {
-            if let Err(e) = self.wait(s) {
-                let mut s = self.pipe.state.lock();
-                s.pending.retain(|p| p.token != token || p.request.is_some());
-                return Err(e);
-            }
-            s = self.pipe.state.lock();
             match s.pending.iter().position(|p| p.token == token && p.request.is_none()) {
                 Some(i) if s.pending[i].result.is_some() => {
                     let p = s.pending.remove(i);
@@ -607,6 +607,12 @@ impl PipeEnd {
                     s.pending.try_push(p).map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)?;
                 }
             }
+            if let Err(e) = self.wait(s) {
+                let mut s = self.pipe.state.lock();
+                s.pending.retain(|p| p.token != token || p.request.is_some());
+                return Err(e);
+            }
+            s = self.pipe.state.lock();
         }
     }
 
