@@ -70,22 +70,63 @@ static MASK: AtomicU32 = AtomicU32::new(0);
 /// most `PIDS`; none listed: every process). The `syscall` category is the
 /// stream's bulk; one process of a large program is often all that is
 /// needed.
-const PIDS: usize = 8;
+/// `events_match=<text>` adds each process whose command line contains
+/// the text when it starts (`note_process`): a program's processes chosen
+/// by what they are (Chromium's network service: its `--utility-sub-type`)
+/// rather than by pids not known before the run.
+const PIDS: usize = 64;
 static SYSCALL_PIDS: [AtomicU64; PIDS] = [const { AtomicU64::new(0) }; PIDS];
+
+/// The `events_match=` text (at most 63 bytes; empty: none).
+static MATCH: crate::sync::IrqMutex<([u8; 63], usize)> = crate::sync::IrqMutex::new(([0; 63], 0));
+static MATCHING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Sets the `events_pid=` list (unparsable entries are ignored).
 pub fn set_syscall_pids(value: &str) {
-    for (slot, pid) in
-        SYSCALL_PIDS.iter().zip(value.split(',').filter_map(|p| p.parse::<u64>().ok()))
-    {
+    for pid in value.split(',').filter_map(|p| p.parse::<u64>().ok()) {
+        add_syscall_pid(pid);
+    }
+}
+
+fn add_syscall_pid(pid: u64) {
+    if let Some(slot) = SYSCALL_PIDS.iter().find(|s| s.load(Ordering::Relaxed) == 0) {
         slot.store(pid, Ordering::Relaxed);
     }
 }
 
-/// Whether process `pid`'s system calls are wanted (`events_pid=`).
+/// Sets the `events_match=` text.
+pub fn set_syscall_match(text: &str) {
+    let mut m = MATCH.lock();
+    let n = text.len().min(m.0.len());
+    m.0[..n].copy_from_slice(&text.as_bytes()[..n]);
+    m.1 = n;
+    MATCHING.store(n > 0, Ordering::Relaxed);
+}
+
+/// A process started with `command_line`: its system calls are wanted
+/// from now on if it matches `events_match=`.
+pub fn note_process(pid: u64, command_line: &str) {
+    if !MATCHING.load(Ordering::Relaxed) {
+        return;
+    }
+    let matches = {
+        let m = MATCH.lock();
+        let needle = &m.0[..m.1];
+        command_line.as_bytes().windows(needle.len()).any(|w| w == needle)
+    };
+    if matches {
+        add_syscall_pid(pid);
+    }
+}
+
+/// Whether process `pid`'s system calls are wanted (`events_pid=`,
+/// `events_match=`; neither given: every process's).
 pub fn syscall_pid_wanted(pid: u64) -> bool {
     let first = SYSCALL_PIDS[0].load(Ordering::Relaxed);
-    first == 0 || first == pid || SYSCALL_PIDS[1..].iter().any(|p| p.load(Ordering::Relaxed) == pid)
+    if first == 0 {
+        return !MATCHING.load(Ordering::Relaxed);
+    }
+    first == pid || SYSCALL_PIDS[1..].iter().any(|p| p.load(Ordering::Relaxed) == pid)
 }
 static WRITTEN: AtomicU64 = AtomicU64::new(0);
 

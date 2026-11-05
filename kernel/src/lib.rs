@@ -284,6 +284,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(pids) = cmdline.value("events_pid") {
         events::set_syscall_pids(pids);
     }
+    if let Some(text) = cmdline.value("events_match") {
+        events::set_syscall_match(text);
+    }
     time::emit_calibration_event();
     // The TSC checked against the RTC in the background (recalibrated if
     // they disagree); under `calwrong` and `calstall` (the clock's tests)

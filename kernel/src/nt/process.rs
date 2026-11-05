@@ -854,6 +854,7 @@ pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
         0 => (0, 0),
         p => (p, crate::events::current_client()),
     };
+    crate::events::note_process(id, command_line);
     info!(
         "process {} (pid {id}, session {session}): starting at {rip:#x}, personality {personality}",
         process.name

@@ -2870,6 +2870,13 @@ enum Boot {
 /// must not hold).
 const EVENT_EXPECT: &[(&str, &[&str])] = &[
     (
+        // `events_match=` records the system calls of processes whose
+        // command line contains the text: process_test's children
+        // (`process_test child ...`), not the parent.
+        "events_match",
+        &[r#"!"ev":"syscall","pid":4,"#, r#""ev":"syscall","pid":12,"#],
+    ),
+    (
         // `events_pid=` limits system-call events to those processes:
         // process_test's own (pid 4), none of its children's; a wait
         // names the object it waits on.
@@ -3609,6 +3616,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit events=ipc,thread run=pipe_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["pipe_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // System-call events of processes chosen by their command line
+        // (see EVENT_EXPECT).
+        name: "events_match",
+        cmdline: "qemu_exit events=syscall,process events_match=child run=process_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["process_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // System-call events of one process only (see EVENT_EXPECT).
@@ -6141,6 +6156,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("events_process", "process_test"),
     ("events_ipc", "pipe_test"),
     ("events_pid", "process_test"),
+    ("events_match", "process_test"),
     ("pk_install_zip", "pk_install_test"),
     ("pk_install_nsis", "pk_install_test"),
     ("pk_install_nsis", "pk_install_nsis"),
