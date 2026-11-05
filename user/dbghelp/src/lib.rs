@@ -1,13 +1,15 @@
 //! gala's dbghelp.dll (debugging symbols; In-Memory OLTP looks up its
 //! native code with them, SqlDumper writes crash dumps): ImageNtHeader
-//! and SymSrvGetFileIndexInfoW (`image`); the symbol functions and
-//! MiniDumpWriteDump are not implemented yet. Each of those reports
+//! and SymSrvGetFileIndexInfoW (`image`); a symbol handler over the
+//! modules' exports (`symbols`); StackWalk64 and its callbacks (`stack`).
+//! MiniDumpWriteDump is not implemented yet. Each of those reports
 //! itself to the missing-features ledger and ends the process when
 //! called (`gala_stubs`), so the ledger shows which ones a program uses.
 
 #![no_std]
 
 mod image;
+mod stack;
 mod symbols;
 
 #[allow(dead_code)]

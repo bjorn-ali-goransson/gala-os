@@ -10,6 +10,9 @@
 //!   the entry whose unwind data it shares) is resolved: the lookup
 //!   returns the entry it names (the C++ and GS handlers read the unwind
 //!   information through DISPATCHER_CONTEXT.FunctionEntry; as Wine does).
+//! - A growable function table (RtlAddGrowableFunctionTable,
+//!   RtlGrowFunctionTable, RtlDeleteGrowableFunctionTable): its counted
+//!   entries are found, relative to its range's base.
 //! - RtlVirtualUnwind unwinds a frame from its body (restores the pushed
 //!   registers, returns the handler, its data and the establisher frame),
 //!   from inside its prologue (only what ran is undone, no handler) and
@@ -571,6 +574,46 @@ fn run() -> Result<(), u32> {
     c.eq(entry as u64, region + 0x10c)?;
     c.eq(base64, region)?;
     c.ok(delete(table) != 0, 0)?;
+
+    // A growable table (RtlAddGrowableFunctionTable: V8 registers its
+    // code space's with it): entries relative to RangeBase, covering
+    // [RangeBase, RangeEnd); only the first EntryCount are searched until
+    // RtlGrowFunctionTable counts more; none after
+    // RtlDeleteGrowableFunctionTable.
+    let (Some(add), Some(grow), Some(delete)) = (
+        find_export(ntdll, b"RtlAddGrowableFunctionTable"),
+        find_export(ntdll, b"RtlGrowFunctionTable"),
+        find_export(ntdll, b"RtlDeleteGrowableFunctionTable"),
+    ) else {
+        return c.ok(false, 0);
+    };
+    type AddGrowable = extern "system" fn(*mut usize, *mut [u32; 3], u32, u32, usize, usize) -> u32;
+    // SAFETY: the documented signatures.
+    let (add, grow, delete) = unsafe {
+        (
+            core::mem::transmute::<usize, AddGrowable>(add),
+            core::mem::transmute::<usize, extern "system" fn(usize, u32)>(grow),
+            core::mem::transmute::<usize, extern "system" fn(usize)>(delete),
+        )
+    };
+    let mut entries = [[0x10u32, 0x20, 0x80], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let table = entries.as_mut_ptr();
+    let region = 0x7_0000_0000u64;
+    let mut handle = 0usize;
+    c.eq(add(&mut handle, table, 1, 4, region as usize, region as usize + 0x100).into(), 0)?;
+    c.ok(handle != 0, 0)?;
+    let entry = (fns.lookup)(region + 0x18, &mut base64, core::ptr::null_mut());
+    c.eq(entry as u64, table as u64)?;
+    c.eq(base64, region)?;
+    c.ok((fns.lookup)(region + 0x38, &mut base64, core::ptr::null_mut()).is_null(), 0)?;
+    // SAFETY: the table's second slot, written before it is counted.
+    unsafe { table.add(1).write_volatile([0x30, 0x40, 0x90]) };
+    grow(handle, 2);
+    let entry = (fns.lookup)(region + 0x38, &mut base64, core::ptr::null_mut());
+    c.eq(entry as u64, table as u64 + 12)?;
+    c.ok((fns.lookup)(region + 0x48, &mut base64, core::ptr::null_mut()).is_null(), 0)?;
+    delete(handle);
+    c.ok((fns.lookup)(region + 0x18, &mut base64, core::ptr::null_mut()).is_null(), 0)?;
 
     // RtlVirtualUnwind from seh_outer's body: a fake stack with the saved
     // rsi at +0x28, the saved rbx at +0x30 and a return address at +0x38.

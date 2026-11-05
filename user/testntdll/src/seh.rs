@@ -197,9 +197,35 @@ struct Callback {
 
 const NO_CALLBACK: Callback = Callback { id: 0, base: 0, length: 0, callback: 0, context: 0 };
 
+/// A table registered with RtlAddGrowableFunctionTable: its entries
+/// (0: free slot), how many are in use and may be, and the range
+/// [base, end) they describe (relative to base). Its handle is
+/// `growable_handle(slot)`.
+#[derive(Clone, Copy)]
+struct Growable {
+    table: usize,
+    count: u32,
+    max: u32,
+    base: u64,
+    end: u64,
+}
+
+const NO_GROWABLE: Growable = Growable { table: 0, count: 0, max: 0, base: 0, end: 0 };
+
+/// The opaque handle of growable slot `i` (never null).
+fn growable_handle(i: usize) -> usize {
+    0x6700_0000 + i * 16
+}
+
+fn growable_slot(handle: usize) -> Option<usize> {
+    let i = handle.checked_sub(0x6700_0000)?;
+    (i % 16 == 0 && i / 16 < MAX_TABLES).then_some(i / 16)
+}
+
 struct State {
     tables: [(usize, u32, u64); MAX_TABLES],
     callbacks: [Callback; MAX_TABLES],
+    growable: [Growable; MAX_TABLES],
 }
 
 struct Tables {
@@ -216,6 +242,7 @@ static TABLES: Tables = Tables {
     state: core::cell::UnsafeCell::new(State {
         tables: [(0, 0, 0); MAX_TABLES],
         callbacks: [NO_CALLBACK; MAX_TABLES],
+        growable: [NO_GROWABLE; MAX_TABLES],
     }),
 };
 
@@ -319,13 +346,26 @@ fn lookup(pc: u64) -> (u64, *const RuntimeFunction) {
             }
         }
     }
-    let found = with_tables(|t| {
-        t.iter().find_map(|&(table, count, base)| {
+    let found = with_state(|s| {
+        let fixed = s.tables.iter().find_map(|&(table, count, base)| {
             if table == 0 || pc < base || pc - base > u64::from(u32::MAX) {
                 return None;
             }
             let f = search(table as *const RuntimeFunction, count as usize, (pc - base) as u32);
-            (!f.is_null()).then_some((base, resolve(base, f)))
+            (!f.is_null()).then(|| (base, resolve(base, f)))
+        });
+        fixed.or_else(|| {
+            s.growable.iter().find_map(|g| {
+                if g.table == 0 || pc < g.base || pc >= g.end || pc - g.base > u64::from(u32::MAX) {
+                    return None;
+                }
+                let f = search(
+                    g.table as *const RuntimeFunction,
+                    g.count as usize,
+                    (pc - g.base) as u32,
+                );
+                (!f.is_null()).then(|| (g.base, resolve(g.base, f)))
+            })
         })
     });
     if let Some(found) = found {
@@ -391,6 +431,70 @@ pub extern "system" fn RtlAddFunctionTable(
         }
         None => 0,
     })
+}
+
+/// RtlAddGrowableFunctionTable(*DynamicTable, FunctionTable, EntryCount,
+/// MaximumEntryCount, RangeBase, RangeEnd): registers a table for code in
+/// [RangeBase, RangeEnd) whose first EntryCount entries (sorted, relative
+/// to RangeBase) are in use; RtlGrowFunctionTable counts more. V8
+/// registers its code space with it. STATUS_SUCCESS and the table's
+/// handle; STATUS_INVALID_PARAMETER for a count over the maximum or an
+/// empty range; STATUS_NO_MEMORY when all slots are taken.
+///
+/// # Safety
+/// `handle` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlAddGrowableFunctionTable(
+    handle: *mut usize,
+    table: *const RuntimeFunction,
+    count: u32,
+    max: u32,
+    base: usize,
+    end: usize,
+) -> u32 {
+    if handle.is_null() || table.is_null() || count > max || end <= base {
+        return 0xc000_000d; // STATUS_INVALID_PARAMETER
+    }
+    let slot = with_state(|s| {
+        let i = s.growable.iter().position(|g| g.table == 0)?;
+        s.growable[i] =
+            Growable { table: table as usize, count, max, base: base as u64, end: end as u64 };
+        Some(i)
+    });
+    match slot {
+        Some(i) => {
+            // SAFETY: the caller's output pointer.
+            unsafe { *handle = growable_handle(i) };
+            0
+        }
+        None => {
+            let what = b"ntdll.dll!RtlAddGrowableFunctionTable(table slots full)";
+            crate::GalaRecordMissing(what.as_ptr(), what.len(), 2, MAX_TABLES as u64);
+            0xc000_0017 // STATUS_NO_MEMORY
+        }
+    }
+}
+
+/// RtlGrowFunctionTable(DynamicTable, NewEntryCount): the first
+/// NewEntryCount entries are in use now (the caller has written them; at
+/// most the maximum, and never fewer than before).
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlGrowFunctionTable(handle: usize, count: u32) {
+    let Some(i) = growable_slot(handle) else { return };
+    with_state(|s| {
+        let g = &mut s.growable[i];
+        if g.table != 0 && count <= g.max && count >= g.count {
+            g.count = count;
+        }
+    });
+}
+
+/// RtlDeleteGrowableFunctionTable(DynamicTable).
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlDeleteGrowableFunctionTable(handle: usize) {
+    if let Some(i) = growable_slot(handle) {
+        with_state(|s| s.growable[i] = NO_GROWABLE);
+    }
 }
 
 /// RtlDeleteFunctionTable(FunctionTable).

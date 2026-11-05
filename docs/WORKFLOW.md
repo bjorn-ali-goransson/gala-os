@@ -2275,6 +2275,13 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
 
 ### gala's DLLs
 
+- **`cond.then_some(f(x))` evaluates `f(x)` even when `cond` is
+  false**: with `f` dereferencing a pointer `cond` checks for null,
+  the compiler takes the dereference as proof the pointer is never
+  null and drops the checks that lead there (ntdll's function table
+  search lost its loop exit and spun on a miss). Use
+  `cond.then(|| f(x))`.
+
 - **The standard handles are not consoles without a console session**:
   making GetConsoleMode succeed on the serial-line handles changes
   programs' output (Caddy's logging; `kernel32_sys_test` and

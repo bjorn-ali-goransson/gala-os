@@ -842,7 +842,11 @@ Microsoft's "x64 exception handling" documentation; `seh_test`,
 - RtlAddFunctionTable registers unwind data for code outside images (JIT
   compilers); RtlInstallFunctionTableCallback registers a callback that
   RtlLookupFunctionEntry asks for addresses in its range (CoreCLR's code
-  heaps; called without the tables' spin lock held). An indirect
+  heaps; called without the tables' spin lock held);
+  RtlAddGrowableFunctionTable registers a table for [RangeBase,
+  RangeEnd) of which RtlGrowFunctionTable says how many entries are in
+  use (V8's code space; up to 32 tables, then STATUS_NO_MEMORY,
+  recorded), removed by RtlDeleteGrowableFunctionTable. An indirect
   RUNTIME_FUNCTION (UnwindData with bit 0 set: the RVA of the entry whose
   unwind data it shares, for code split off its function) is resolved by
   the lookup, in images and registered tables, so DISPATCHER_CONTEXT's
@@ -4362,7 +4366,7 @@ windows can use them too.
     and 16 named parameters (more is recorded) and the BIND_OPTS bytes;
     CoImpersonateClient/CoRevertToSelf answer RPC_E_CALL_COMPLETE (gala
     serves no COM calls across processes).
-- **dbghelp** (`user/dbghelp/src/image.rs`, `symbols.rs`;
+- **dbghelp** (`user/dbghelp/src/image.rs`, `symbols.rs`, `stack.rs`;
   `dbghelp_test`): ImageNtHeader checks "MZ" and "PE\0\0";
   SymSrvGetFileIndexInfoW reads an image file's headers (no mapping):
   TimeDateStamp, SizeOfImage, IMAGE_FILE_DEBUG_STRIPPED, and the debug
@@ -4374,8 +4378,17 @@ windows can use them too.
   nearest export at or below the address (SYMFLAG_EXPORT,
   SymTagPublicSymbol), forwarders skipped. gala's own DLLs link with
   /OPT:ICF, so identical functions share an address and SymFromAddr
-  names the first export there. MiniDumpWriteDump stays a stub
-  (exported, so SqlDumper loads).
+  names the first export there. StackWalk64 walks x64 frames of this
+  process (Chromium's exception filter prints a crash's stack with it):
+  the first call gives the context's frame (STACKFRAME64.Reserved[0]
+  marks a walk in progress), each later one undoes a frame with ntdll's
+  RtlLookupFunctionEntry and RtlVirtualUnwind (a function without unwind
+  data is a leaf: its return address at Rsp), and the walk ends at a
+  return address of 0, an unreadable stack or a frame that does not
+  move up; another process or a ReadMemoryRoutine is recorded and
+  FALSE. SymFunctionTableAccess64 is RtlLookupFunctionEntry,
+  SymGetModuleBase64 the allocation base of a MEM_IMAGE region.
+  MiniDumpWriteDump stays a stub (exported, so SqlDumper loads).
 - **normaliz** (`user/normaliz`): forwards IdnToAscii to kernel32 and
   has its own IdnToUnicode (RFC 3492 decoding), because kernel32's is
   still a stub and a forwarder to a stub fails to bind (the ledger says

@@ -24,6 +24,15 @@
  *   (FALSE the second time; SymFromAddr fails after), SymCleanup.
  * - MiniDumpWriteDump is exported (not called: gala does not write dumps
  *   yet, and its stub ends the process).
+ * - StackWalk64 over this thread (x64, the current process, with
+ *   SymFunctionTableAccess64 and SymGetModuleBase64 as the callbacks):
+ *   the first call gives the frame the context describes (AddrPC its
+ *   Rip), each later one the caller's, AddrPC its return address; the
+ *   stack only grows towards the caller, and the walk ends (FALSE) at
+ *   the thread's first frame. Another machine type is FALSE.
+ *   SymFunctionTableAccess64 is the RUNTIME_FUNCTION covering an address
+ *   (NULL outside images), SymGetModuleBase64 the base of the image
+ *   holding it (0 outside images).
  * - normaliz.dll's IdnToAscii/IdnToUnicode are kernel32's ("bücher" is
  *   "xn--bcher-kva").
  *
@@ -54,6 +63,54 @@ typedef struct {
 typedef PIMAGE_NT_HEADERS (WINAPI *image_nt_header_fn)(PVOID);
 typedef BOOL (WINAPI *index_info_fn)(PCWSTR, INDEX_INFOW *, DWORD);
 typedef int (WINAPI *idn_fn)(DWORD, LPCWSTR, int, LPWSTR, int);
+
+typedef BOOL (WINAPI *walk_fn)(DWORD, HANDLE, HANDLE, STACKFRAME64 *, PVOID,
+    PREAD_PROCESS_MEMORY_ROUTINE64, PFUNCTION_TABLE_ACCESS_ROUTINE64,
+    PGET_MODULE_BASE_ROUTINE64, PTRANSLATE_ADDRESS_ROUTINE64);
+static walk_fn stack_walk;
+static PFUNCTION_TABLE_ACCESS_ROUTINE64 table_access;
+static PGET_MODULE_BASE_ROUTINE64 module_base;
+static DWORD64 walked[64];
+static int walked_n, walk_ended;
+static DWORD64 first_pc, into_level1, into_walker;
+static volatile int sink;
+
+/* Walks this thread's stack from here into walked[]. */
+__attribute__((noinline)) static int level2(int x) {
+    static CONTEXT ctx;
+    into_level1 = (DWORD64)__builtin_return_address(0);
+    RtlCaptureContext(&ctx);
+    first_pc = ctx.Rip;
+    static STACKFRAME64 frame;
+    memset(&frame, 0, sizeof frame);
+    frame.AddrPC.Offset = ctx.Rip;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Rbp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Rsp;
+    frame.AddrStack.Mode = AddrModeFlat;
+    DWORD64 last_sp = 0;
+    walk_ended = 0;
+    while (walked_n < 64) {
+        if (!stack_walk(IMAGE_FILE_MACHINE_AMD64, GetCurrentProcess(), GetCurrentThread(), &frame,
+                &ctx, NULL, table_access, module_base, NULL)) {
+            walk_ended = 1;
+            break;
+        }
+        if (frame.AddrStack.Offset < last_sp)
+            return -1;
+        last_sp = frame.AddrStack.Offset;
+        walked[walked_n++] = frame.AddrPC.Offset;
+    }
+    return x + walked_n;
+}
+
+__attribute__((noinline)) static int level1(int x) {
+    into_walker = (DWORD64)__builtin_return_address(0);
+    int r = level2(x + 1);
+    sink = r;
+    return r + 1;
+}
 
 int main(void) {
     HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll");
@@ -128,6 +185,36 @@ int main(void) {
     CHECK(sym_unload(proc, dll_base));
     CHECK(!sym_unload(proc, dll_base));
     CHECK(!sym_from_addr(proc, at + 1, &disp, &sym.info));
+    CHECK(sym_cleanup(proc));
+
+    /* StackWalk64 over this thread. */
+    stack_walk = (walk_fn)GetProcAddress(dbghelp, "StackWalk64");
+    table_access = (PFUNCTION_TABLE_ACCESS_ROUTINE64)GetProcAddress(dbghelp, "SymFunctionTableAccess64");
+    module_base = (PGET_MODULE_BASE_ROUTINE64)GetProcAddress(dbghelp, "SymGetModuleBase64");
+    CHECK(stack_walk && table_access && module_base);
+    CHECK(sym_init(proc, NULL, TRUE));
+    DWORD64 exe = (DWORD64)(ULONG_PTR)base;
+    CHECK(module_base(proc, (DWORD64)(ULONG_PTR)&level2) == exe);
+    BYTE *heap = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    CHECK(heap != NULL && module_base(proc, (DWORD64)(ULONG_PTR)heap) == 0);
+    RUNTIME_FUNCTION *rf = (RUNTIME_FUNCTION *)table_access(proc, (DWORD64)(ULONG_PTR)&level2 + 4);
+    CHECK(rf != NULL && exe + rf->BeginAddress <= (DWORD64)(ULONG_PTR)&level2 + 4
+        && (DWORD64)(ULONG_PTR)&level2 + 4 < exe + rf->EndAddress);
+    CHECK(table_access(proc, (DWORD64)(ULONG_PTR)heap) == NULL);
+    int r = level1(1);
+    sink = r;
+    CHECK(r != -1);
+    CHECK(walk_ended && walked_n >= 3);
+    CHECK(walked[0] == first_pc && walked[1] == into_level1 && walked[2] == into_walker);
+    /* Another machine type. */
+    {
+        static STACKFRAME64 frame;
+        static CONTEXT ctx;
+        memset(&frame, 0, sizeof frame);
+        RtlCaptureContext(&ctx);
+        CHECK(!stack_walk(IMAGE_FILE_MACHINE_I386, proc, GetCurrentThread(), &frame, &ctx, NULL,
+            table_access, module_base, NULL));
+    }
     CHECK(sym_cleanup(proc));
 
     /* normaliz.dll. */

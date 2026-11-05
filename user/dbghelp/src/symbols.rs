@@ -75,7 +75,7 @@ fn with<T>(f: impl FnOnce(&mut [Module; MODULES]) -> T) -> T {
 
 /// Whether `process` is this process (the only one gala reads symbols
 /// of: other processes' memory would need ReadProcessMemory).
-fn own(process: usize) -> bool {
+pub(crate) fn own(process: usize) -> bool {
     // SAFETY: plain call.
     process == unsafe { GetCurrentProcess() } || process == usize::MAX || process == 0
 }
