@@ -13,9 +13,9 @@ use super::process::Process;
 use super::status::NtStatus;
 use super::wait::{self, Dispatcher};
 use crate::mm::heap::{KArc, TryVec};
-use crate::net::Ip;
 use crate::net::tcp::{self, Addr, NetError, SocketId};
 use crate::net::udp;
+use crate::net::{Ip, Scope};
 use crate::sync::IrqMutex;
 
 pub const IOCTL_AFD_BIND: u32 = 0x12003;
@@ -34,6 +34,9 @@ pub const IOCTL_AFD_SUPER_ACCEPT: u32 = 0x12083;
 pub const IOCTL_AFD_POLL: u32 = 0x12024;
 pub const IOCTL_AFD_SET_INFO: u32 = 0x1203b;
 const AFD_INFO_BLOCKING_MODE: u32 = 2;
+/// gala's own AFD_INFO class (Windows passes IPV6_V6ONLY to the transport,
+/// whose interface is undocumented): a BOOLEAN at 8, IPV6_V6ONLY.
+const GALA_AFD_INFO_V6ONLY: u32 = 0x6761_0001;
 pub const IOCTL_AFD_SUPER_CONNECT: u32 = 0x120c7;
 /// WSAEventSelect and WSAEnumNetworkEvents (the numbers of Wine's afd.h).
 pub const IOCTL_AFD_EVENT_SELECT: u32 = 0x12087;
@@ -112,6 +115,18 @@ impl Transport {
         match self {
             Transport::Tcp6 | Transport::Udp6 => Addr { ip: Ip::V6([0; 16]), port: 0 },
             _ => Addr::default(),
+        }
+    }
+}
+
+impl EndpointState {
+    /// The families its socket takes: IPv4; IPv6 only; or both (an IPv6
+    /// endpoint with IPV6_V6ONLY off).
+    fn scope(&self) -> Scope {
+        match (self.transport.is_v6(), self.v6only.load(Ordering::Acquire)) {
+            (false, _) => Scope::V4,
+            (true, true) => Scope::V6,
+            (true, false) => Scope::Dual,
         }
     }
 }
@@ -218,6 +233,9 @@ pub struct EndpointState {
     /// Non-blocking mode (FIONBIO): requests without a completion context
     /// fail with STATUS_DEVICE_NOT_READY instead of pending.
     non_blocking: AtomicBool,
+    /// IPV6_V6ONLY of an IPv6 endpoint (on, Windows' default; off: dual
+    /// stack), taken at bind (`scope`).
+    v6only: AtomicBool,
     pending: IrqMutex<Vec<Pending>>,
     /// How many polls (IOCTL_AFD_POLL) are pending: `notify` keeps the
     /// endpoint in POLLERS while there are any, without taking `pending`
@@ -812,6 +830,7 @@ pub fn open(ea: &[u8]) -> Result<ObjectRef, NtStatus> {
         completion: IrqMutex::new(None),
         modes: AtomicU32::new(0),
         non_blocking: AtomicBool::new(false),
+        v6only: AtomicBool::new(true),
         pending: IrqMutex::new(Vec::new()),
         select: IrqMutex::new(None),
         recorded: AtomicU32::new(0),
@@ -1063,7 +1082,7 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
-            let id = tcp::bind(local, ep.token).map_err(status_of)?;
+            let id = tcp::bind_scoped(local, ep.scope(), ep.token).map_err(status_of)?;
             *slot = Some(id);
             drop(slot);
             let bound = tcp::local(id).map_err(status_of)?;
@@ -1171,6 +1190,7 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             let b: [u8; 16] = r.input()?;
             match u32_at(&b, 0) {
                 AFD_INFO_BLOCKING_MODE => ep.non_blocking.store(b[8] != 0, Ordering::Release),
+                GALA_AFD_INFO_V6ONLY => ep.v6only.store(b[8] != 0, Ordering::Release),
                 class => {
                     super::ledger::record(
                         "NtDeviceIoControlFile",
@@ -1252,7 +1272,8 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
         if let Some(id) = *slot {
             return Ok(id);
         }
-        let id = udp::bind(ep.transport.any_address(), ep.token).map_err(status_of)?;
+        let id = udp::bind_scoped(ep.transport.any_address(), ep.scope(), ep.token)
+            .map_err(status_of)?;
         *slot = Some(id);
         Ok(id)
     };
@@ -1264,7 +1285,7 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
-            let id = udp::bind(local, ep.token).map_err(status_of)?;
+            let id = udp::bind_scoped(local, ep.scope(), ep.token).map_err(status_of)?;
             *slot = Some(id);
             drop(slot);
             let bound = tcp::local(id).map_err(status_of)?;
@@ -1524,6 +1545,8 @@ pub fn adopt(
         completion: IrqMutex::new(c.completion.clone()),
         modes: AtomicU32::new(c.modes),
         non_blocking: AtomicBool::new(c.non_blocking),
+        // Carried endpoints are IPv4 (a handover refuses IPv6 ones).
+        v6only: AtomicBool::new(true),
         pending: IrqMutex::new(Vec::new()),
         select: IrqMutex::new(c.select.clone()),
         recorded: AtomicU32::new(c.recorded),

@@ -3299,9 +3299,7 @@ against Windows' results (a Winsock IPv6 test program):
    family beside SO_TYPE, so accept, implicit binds and SO_PROTOCOL_INFO
    follow it; getaddrinfo answers IPv6 for AF_INET6 hints (localhost,
    the host name, numeric addresses) and for a numeric IPv6 address with
-   any hints, while AF_UNSPEC names stay IPv4 until step 2 (Windows lists
-   ::1 first, which a program listening on 127.0.0.1 only would then not
-   reach); no AAAA queries yet (recorded); inet_pton/inet_ntop and their
+   any hints (AF_UNSPEC: step 2); no AAAA queries yet (recorded); inet_pton/inet_ntop and their
    W forms (RFC 4291 text, RFC 5952 output); WSAStringToAddress and
    WSAAddressToString are still stubs. A kernel handover refuses a
    process holding an IPv6 socket (the record holds IPv4 addresses).
@@ -3313,11 +3311,18 @@ against Windows' results (a Winsock IPv6 test program):
    `Ip::mapped`/`unmapped`), and a listener on :: takes IPv4
    connections too (smoltcp's listen on no address takes both), which
    is what Java's dual-stack sockets need (its loopback pipe binds
-   ::ffff:127.0.0.1; `java_http`). Not yet: IPV6_V6ONLY 1 enforced (a
-   v6-only listener takes IPv4 peers too, mapped) and separate port
-   spaces per family (binding 0.0.0.0:p and [::]:p, both v6-only on
-   Windows, is refused here as the port in use); getaddrinfo with
-   AF_UNSPEC listing ::1 first.
+   ::ffff:127.0.0.1; `java_http`). IPV6_V6ONLY reaches AFD through
+   gala's own AFD_INFO class (0x67610001: Windows hands the option to
+   its transport, whose interface is undocumented); at bind the endpoint
+   becomes a `net::Scope` (V4, V6 for v6-only, Dual). Ports are per
+   scope (two sockets conflict only when their scopes overlap: 0.0.0.0:p
+   and a v6-only [::]:p bind side by side), and an unspecified address
+   listens on each interface's address of its family (an IPv4 socket on
+   127.0.0.1 and the card's address, a v6-only one on ::1, a dual one on
+   no address: both), so smoltcp's own address matching keeps the
+   families apart. getaddrinfo with AF_UNSPEC lists localhost (and the
+   host name) as ::1, then 127.0.0.1, as Windows does; other names stay
+   IPv4.
 3. **The card**: a link-local fe80:: address from the MAC (EUI-64) and
    QEMU's user network's IPv6 (fec0::/64, router fec0::2) by router
    advertisement; iphlpapi's tables get the IPv6 rows

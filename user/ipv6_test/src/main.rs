@@ -5,7 +5,10 @@
 //! getpeername; a send/recv round trip both ways; a datagram to itself
 //! with recvfrom's sender; getaddrinfo("localhost") with AF_INET6 hints
 //! (::1); a dual-stack socket (IPV6_V6ONLY 0) bound to ::ffff:127.0.0.1
-//! taking an IPv4 client (seen IPv4-mapped); inet_pton/inet_ntop of "::1"
+//! taking an IPv4 client (seen IPv4-mapped); a v6-only listener on [::]
+//! refusing IPv4 clients, 0.0.0.0 of the same port bindable beside it;
+//! getaddrinfo("localhost") with AF_UNSPEC (::1, then 127.0.0.1);
+//! inet_pton/inet_ntop of "::1"
 //! and "fe80::1:2". Prints
 //! `ipv6_test: ok` or exits with the number of the failing check.
 
@@ -58,6 +61,9 @@ unsafe extern "system" {
     fn setsockopt(s: Socket, level: i32, name: i32, value: *const u8, len: i32) -> i32;
     #[link_name = "connect"]
     fn connect4(s: Socket, addr: *const Sockaddr4, len: i32) -> i32;
+    #[link_name = "bind"]
+    fn bind4(s: Socket, addr: *const Sockaddr4, len: i32) -> i32;
+    fn WSAGetLastError() -> i32;
     fn closesocket(s: Socket) -> i32;
     fn getaddrinfo(
         node: *const u8,
@@ -136,6 +142,7 @@ const SOCK_DGRAM: i32 = 2;
 const IPPROTO_IPV6: i32 = 41;
 const IPV6_V6ONLY: i32 = 27;
 const LEN: i32 = 28;
+const WSAECONNREFUSED: i32 = 10061;
 const LOOPBACK: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
 /// ::ffff:127.0.0.1 (IPv4-mapped).
 const MAPPED_LOOPBACK: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1];
@@ -231,6 +238,24 @@ pub extern "C" fn mainCRTStartup() -> ! {
         closesocket(ds);
         closesocket(v4);
         closesocket(d);
+        // IPV6_V6ONLY (on by default): a v6-only listener on [::]:p takes
+        // no IPv4 client, and 0.0.0.0:p can be bound beside it (each
+        // family has its own ports).
+        let only = socket(AF_INET6, SOCK_STREAM, 6);
+        c.ok(bind(only, &Sockaddr6::new([0; 16], 0), LEN) == 0);
+        let mut oname = Sockaddr6::empty();
+        let mut olen = LEN;
+        c.ok(getsockname(only, &mut oname, &mut olen) == 0);
+        c.ok(listen(only, 4) == 0);
+        let v4b = socket(2, SOCK_STREAM, 6);
+        let any4 = Sockaddr4 { family: 2, port: oname.port, addr: [0; 4], zero: [0; 8] };
+        c.ok(bind4(v4b, &any4, 16) == 0);
+        closesocket(v4b);
+        let v4c = socket(2, SOCK_STREAM, 6);
+        let to4 = Sockaddr4 { family: 2, port: oname.port, addr: [127, 0, 0, 1], zero: [0; 8] };
+        c.ok(connect4(v4c, &to4, 16) == -1 && WSAGetLastError() == WSAECONNREFUSED);
+        closesocket(v4c);
+        closesocket(only);
         // UDP over ::1: a datagram to itself.
         let u = socket(AF_INET6, SOCK_DGRAM, 17);
         c.ok(u != !0);
@@ -252,6 +277,15 @@ pub extern "C" fn mainCRTStartup() -> ! {
         c.ok(!list.is_null() && (*list).family == AF_INET6 && (*list).addrlen == LEN as usize);
         c.ok((*(*list).addr).addr == LOOPBACK);
         freeaddrinfo(list);
+        // AF_UNSPEC: ::1 first, then 127.0.0.1 (as Windows lists them).
+        let unspec = [0i32, 0, SOCK_STREAM, 6, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut both: *mut AddrInfo = core::ptr::null_mut();
+        c.ok(getaddrinfo(b"localhost\0".as_ptr(), null(), unspec.as_ptr(), &mut both) == 0);
+        c.ok(!both.is_null() && (*both).family == AF_INET6);
+        let second = (*both).next;
+        c.ok(!second.is_null() && (*second).family == 2 && (*second).addrlen == 16);
+        c.ok((*(*second).addr.cast::<Sockaddr4>()).addr == [127, 0, 0, 1]);
+        freeaddrinfo(both);
         let mut bin = [0u8; 16];
         c.ok(inet_pton(AF_INET6, b"::1\0".as_ptr(), bin.as_mut_ptr()) == 1 && bin == LOOPBACK);
         c.ok(inet_pton(AF_INET6, b"fe80::1:2\0".as_ptr(), bin.as_mut_ptr()) == 1);

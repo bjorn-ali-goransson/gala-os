@@ -34,7 +34,7 @@ const BUFFER: usize = 64 * 1024;
 const MAX_BACKLOG: usize = 8;
 const EPHEMERAL: core::ops::RangeInclusive<u16> = 49152..=65535;
 
-use super::Ip;
+use super::{Ip, Scope};
 
 pub const LOOPBACK: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
 
@@ -141,6 +141,8 @@ pub(super) struct Entry {
     generation: u32,
     token: u64,
     pub(super) local: Addr,
+    /// The families it takes (ports and listening addresses follow it).
+    pub(super) scope: Scope,
     pub(super) kind: Kind,
     /// Readiness at the last report (see `signature`); STALE after the
     /// owner sent, received or accepted (the next poll reports it: a queue
@@ -273,15 +275,18 @@ impl Stack {
 
     /// Whether a TCP (or, with `udp`, a UDP) socket has `port`: the two
     /// protocols' ports are apart.
-    pub(super) fn port_in_use(&self, port: u16, udp: bool) -> bool {
-        self.entries.iter().flatten().any(|e| e.local.port == port && e.kind.is_udp() == udp)
+    pub(super) fn port_in_use(&self, port: u16, udp: bool, scope: Scope) -> bool {
+        self.entries
+            .iter()
+            .flatten()
+            .any(|e| e.local.port == port && e.kind.is_udp() == udp && e.scope.overlaps(scope))
     }
 
-    pub(super) fn ephemeral_port(&mut self, udp: bool) -> Result<u16, NetError> {
+    pub(super) fn ephemeral_port(&mut self, udp: bool, scope: Scope) -> Result<u16, NetError> {
         for _ in EPHEMERAL {
             let port = self.next_port;
             self.next_port = if port == *EPHEMERAL.end() { *EPHEMERAL.start() } else { port + 1 };
-            if !self.port_in_use(port, udp) {
+            if !self.port_in_use(port, udp, scope) {
                 return Ok(port);
             }
         }
@@ -292,11 +297,12 @@ impl Stack {
         &mut self,
         token: u64,
         local: Addr,
+        scope: Scope,
         kind: Kind,
     ) -> Result<SocketId, NetError> {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
-        let entry = Entry { generation, token, local, kind, last: 0 };
+        let entry = Entry { generation, token, local, scope, kind, last: 0 };
         let index = match self.entries.iter().position(Option::is_none) {
             Some(i) => {
                 self.entries[i] = Some(entry);
@@ -335,9 +341,37 @@ impl Stack {
         ip.is_unspecified() || ip.is_loopback() || matches!(ip, Ip::V4(a) if Some(a) == self.eth_ip)
     }
 
-    fn listening_socket(&mut self, side: Side, local: Addr) -> Result<Sock, NetError> {
+    /// The address a socket of `scope` bound to `ip` takes on `side`: the
+    /// address itself, or for an unspecified one the side's address of
+    /// the scope's family (no address: any family, dual stack); None: it
+    /// takes nothing on that side (no IPv6 address on the card yet).
+    pub(super) fn side_address(
+        &self,
+        side: Side,
+        ip: Ip,
+        scope: Scope,
+    ) -> Option<Option<IpAddress>> {
+        if !ip.is_unspecified() {
+            return Some(Some(ip.to_smoltcp()));
+        }
+        match (scope, side) {
+            (Scope::Dual, _) => Some(None),
+            (Scope::V4, Side::Lo) => Some(Some(Ip::V4([127, 0, 0, 1]).to_smoltcp())),
+            (Scope::V4, Side::Eth) => self.eth_ip.map(|a| Some(Ip::V4(a).to_smoltcp())),
+            (Scope::V6, Side::Lo) => Some(Some(Ip::V6(Ip::LOOPBACK6).to_smoltcp())),
+            (Scope::V6, Side::Eth) => None,
+        }
+    }
+
+    fn listening_socket(
+        &mut self,
+        side: Side,
+        local: Addr,
+        scope: Scope,
+    ) -> Result<Sock, NetError> {
         let mut socket = new_socket().ok_or(NetError::NoMemory)?;
-        let endpoint = IpListenEndpoint { addr: local.ip.listen_addr(), port: local.port };
+        let addr = self.side_address(side, local.ip, scope).ok_or(NetError::AddressNotAvailable)?;
+        let endpoint = IpListenEndpoint { addr, port: local.port };
         socket.listen(endpoint).map_err(|_| NetError::InvalidState)?;
         self.add(side, socket)
     }
@@ -349,18 +383,18 @@ impl Stack {
             let mut n = 0;
             // The n-th listening socket of entry i, if any.
             let nth = |entries: &[Option<Entry>], n: usize| match &entries[i] {
-                Some(Entry { kind: Kind::Listener { listening, .. }, local, .. }) => {
-                    listening.get(n).map(|&sock| (sock, *local))
+                Some(Entry { kind: Kind::Listener { listening, .. }, local, scope, .. }) => {
+                    listening.get(n).map(|&sock| (sock, *local, *scope))
                 }
                 _ => None,
             };
-            while let Some((sock, local)) = nth(&self.entries, n) {
+            while let Some((sock, local, scope)) = nth(&self.entries, n) {
                 let state = self.tcp(sock).map(|t| t.state());
                 if !matches!(state, Some(State::Established | State::CloseWait)) {
                     n += 1;
                     continue;
                 }
-                let fresh = self.listening_socket(sock.0, local);
+                let fresh = self.listening_socket(sock.0, local, scope);
                 let Some(Some(Entry {
                     kind: Kind::Listener { listening, ready, next_sequence, backlog },
                     ..
@@ -586,16 +620,22 @@ fn net_thread(_: usize) {
 /// Binds a socket to `local` (port 0: an ephemeral port). `token` is
 /// passed to the notify hook.
 pub fn bind(local: Addr, token: u64) -> Result<SocketId, NetError> {
+    bind_scoped(local, Scope::of(local.ip), token)
+}
+
+/// The same for a socket of `scope` (an IPv6 one with or without
+/// IPV6_V6ONLY: `nt::afd`).
+pub fn bind_scoped(local: Addr, scope: Scope, token: u64) -> Result<SocketId, NetError> {
     with_stack(|s| {
         if !s.may_bind(local.ip) {
             return Err(NetError::AddressNotAvailable);
         }
         let port = match local.port {
-            0 => s.ephemeral_port(false)?,
-            p if s.port_in_use(p, false) => return Err(NetError::AddressInUse),
+            0 => s.ephemeral_port(false, scope)?,
+            p if s.port_in_use(p, false, scope) => return Err(NetError::AddressInUse),
             p => p,
         };
-        s.insert(token, Addr { ip: local.ip, port }, Kind::Bound)
+        s.insert(token, Addr { ip: local.ip, port }, scope, Kind::Bound)
     })
 }
 
@@ -608,15 +648,18 @@ pub fn listen(id: SocketId, backlog: usize) -> Result<(), NetError> {
             Kind::Listener { .. } => return Ok(()),
             Kind::Conn { .. } | Kind::Udp(_) => return Err(NetError::InvalidState),
         }
-        let local = entry.local;
+        let (local, scope) = (entry.local, entry.scope);
         let backlog = backlog.clamp(1, MAX_BACKLOG);
         let mut listening = Vec::new();
         listening.try_reserve(backlog * 2).map_err(|_| NetError::NoMemory)?;
         let mut ready = Vec::new();
         ready.try_reserve(backlog * 2).map_err(|_| NetError::NoMemory)?;
         for &side in s.sides_for(local.ip) {
+            if s.side_address(side, local.ip, scope).is_none() {
+                continue;
+            }
             for _ in 0..backlog {
-                match s.listening_socket(side, local) {
+                match s.listening_socket(side, local, scope) {
                     Ok(sock) => listening.try_push(sock).map_err(|_| NetError::NoMemory)?,
                     Err(e) => {
                         let (free, total) = crate::mm::frame_stats();
@@ -664,9 +707,10 @@ pub fn accept(id: SocketId, sequence: u32, token: u64) -> Result<SocketId, NetEr
         s.entry(id)?.last = STALE;
         let local = s.tcp(sock).and_then(|t| t.local_endpoint()).map(Addr::from_endpoint);
         let remote = s.tcp(sock).and_then(|t| t.remote_endpoint()).map(Addr::from_endpoint);
-        match s.insert(token, local.unwrap_or_default(), Kind::Conn { sock, connected: true }) {
+        let local = local.unwrap_or_default();
+        match s.insert(token, local, Scope::of(local.ip), Kind::Conn { sock, connected: true }) {
             Ok(new) => {
-                net_event("tcp accept", new, local.unwrap_or_default(), remote);
+                net_event("tcp accept", new, local, remote);
                 Ok(new)
             }
             Err(e) => {
@@ -1431,7 +1475,7 @@ pub fn adopt_entry(c: &CarriedEntry, token: u64) -> Result<SocketId, NetError> {
                     for &side in s.sides_for(c.local.ip) {
                         let busy = listening.iter().filter(|l| l.0 == side).count();
                         for _ in busy..backlog {
-                            let sock = s.listening_socket(side, c.local)?;
+                            let sock = s.listening_socket(side, c.local, Scope::of(c.local.ip))?;
                             listening.try_push(sock).map_err(|_| NetError::NoMemory)?;
                         }
                     }
@@ -1447,7 +1491,7 @@ pub fn adopt_entry(c: &CarriedEntry, token: u64) -> Result<SocketId, NetError> {
             }
         };
         // Room was reserved: this cannot fail.
-        s.insert(token, c.local, kind)
+        s.insert(token, c.local, Scope::of(c.local.ip), kind)
     })
 }
 

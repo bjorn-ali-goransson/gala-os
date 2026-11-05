@@ -193,6 +193,8 @@ const MSG_PEEK: i32 = 2;
 /// afd_recv_params.msg_flags: peek (Wine's afd.h).
 const AFD_MSG_PEEK: u32 = 0x80;
 const IOCTL_AFD_SET_INFO: u32 = 0x1203b;
+/// gala's AFD_INFO class for IPV6_V6ONLY (kernel/src/nt/afd.rs).
+const GALA_AFD_INFO_V6ONLY: u32 = 0x6761_0001;
 const WSA_IO_PENDING: u32 = 997;
 const WSA_IO_INCOMPLETE: u32 = 996;
 const WSA_OPERATION_ABORTED: u32 = 995;
@@ -1457,6 +1459,16 @@ pub extern "system" fn setsockopt(
         if !options::set(s, slot, i32::from_le_bytes(b)) {
             return fail(WSAENOBUFS);
         }
+        // IPV6_V6ONLY decides which families the socket takes: AFD binds
+        // by it (gala's own AFD_INFO class).
+        if (level, name) == (IPPROTO_IPV6, 27) && family_of(s) == AF_INET6 {
+            let mut info = [0u8; 16];
+            info[..4].copy_from_slice(&GALA_AFD_INFO_V6ONLY.to_le_bytes());
+            info[8] = u8::from(i32::from_le_bytes(b) != 0);
+            if let Err(e) = afd_call(s, IOCTL_AFD_SET_INFO, &info, &mut []) {
+                return e;
+            }
+        }
     }
     0
 }
@@ -1879,7 +1891,14 @@ pub extern "system" fn getaddrinfo(
         } else {
             Some(core::slice::from_raw_parts(node, strlen(node)))
         };
+        // AF_UNSPEC "localhost" (and the host name): ::1, then 127.0.0.1,
+        // as Windows lists them.
+        let both = family == 0
+            && text.is_some_and(|t| {
+                t.eq_ignore_ascii_case(b"localhost") || t.eq_ignore_ascii_case(HOST_NAME)
+            });
         let v6 = match text {
+            _ if both => Some(LOOPBACK6),
             None if family == AF_INET6 => Some(if flags & 1 != 0 { [0u8; 16] } else { LOOPBACK6 }),
             Some(t) if family == AF_INET6 || family == 0 => match parse_ipv6(t) {
                 Some(a) => Some(a),
@@ -1935,23 +1954,32 @@ pub extern "system" fn getaddrinfo(
             return WSAENOBUFS as i32;
         }
         // ADDRINFOA (x64): flags, family, socktype, protocol, addrlen,
-        // canonname, addr, next; the SOCKADDR_IN(6) follows it.
-        let ai = page.cast::<i32>();
-        *ai = flags;
-        *ai.add(1) = if v6.is_some() { AF_INET6 } else { AF_INET };
-        *ai.add(2) = socktype;
-        *ai.add(3) = protocol;
-        let sa = page.add(48);
-        *page.add(32).cast::<*mut u8>() = sa;
-        core::ptr::copy_nonoverlapping(port.to_be_bytes().as_ptr(), sa.add(2), 2);
-        if let Some(a) = v6 {
-            *page.add(16).cast::<usize>() = SOCKADDR6_LEN as usize;
-            *sa = AF_INET6 as u8;
-            core::ptr::copy_nonoverlapping(a.as_ptr(), sa.add(8), 16);
-        } else {
-            *page.add(16).cast::<usize>() = SOCKADDR_LEN as usize;
-            *sa = AF_INET as u8;
-            core::ptr::copy_nonoverlapping(ip.as_ptr(), sa.add(4), 4);
+        // canonname, addr, next; the SOCKADDR_IN(6) follows it. A second
+        // result (AF_UNSPEC localhost's 127.0.0.1) at 128.
+        let fill = |at: *mut u8, v6: Option<[u8; 16]>, ip: [u8; 4]| {
+            let ai = at.cast::<i32>();
+            *ai = flags;
+            *ai.add(1) = if v6.is_some() { AF_INET6 } else { AF_INET };
+            *ai.add(2) = socktype;
+            *ai.add(3) = protocol;
+            let sa = at.add(48);
+            *at.add(32).cast::<*mut u8>() = sa;
+            core::ptr::copy_nonoverlapping(port.to_be_bytes().as_ptr(), sa.add(2), 2);
+            if let Some(a) = v6 {
+                *at.add(16).cast::<usize>() = SOCKADDR6_LEN as usize;
+                *sa = AF_INET6 as u8;
+                core::ptr::copy_nonoverlapping(a.as_ptr(), sa.add(8), 16);
+            } else {
+                *at.add(16).cast::<usize>() = SOCKADDR_LEN as usize;
+                *sa = AF_INET as u8;
+                core::ptr::copy_nonoverlapping(ip.as_ptr(), sa.add(4), 4);
+            }
+        };
+        fill(page, v6, ip);
+        if both {
+            let second = page.add(128);
+            fill(second, None, [127, 0, 0, 1]);
+            *page.add(40).cast::<*mut u8>() = second;
         }
         *result = page;
     }

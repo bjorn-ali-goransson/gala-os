@@ -119,6 +119,28 @@ impl Ip {
     }
 }
 
+/// Which families a socket takes (N3 step 2): an IPv4 socket's, an
+/// IPv6 socket's with IPV6_V6ONLY (Windows' default) or without it (dual
+/// stack: IPv4 peers too). Ports are per family: two sockets conflict
+/// only when their scopes overlap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    V4,
+    V6,
+    Dual,
+}
+
+impl Scope {
+    /// An address's own family (a socket bound without a stated scope).
+    pub fn of(ip: Ip) -> Scope {
+        if ip.is_v6() { Scope::V6 } else { Scope::V4 }
+    }
+
+    pub fn overlaps(self, other: Scope) -> bool {
+        self == other || self == Scope::Dual || other == Scope::Dual
+    }
+}
+
 /// `a.b.c.d` or the IPv6 text form (RFC 5952: the longest run of zero
 /// groups as `::`).
 impl core::fmt::Display for Ip {

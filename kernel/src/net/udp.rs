@@ -21,6 +21,8 @@ use smoltcp::phy::Device;
 use smoltcp::socket::udp;
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 
+use super::Scope;
+
 /// Bytes of received datagrams a socket keeps until they are read
 /// (Windows' default SO_RCVBUF is 64 KiB); more are dropped.
 const RECV_LIMIT: usize = 64 * 1024;
@@ -108,10 +110,12 @@ fn addr_of(e: IpEndpoint) -> Addr {
 }
 
 /// The smoltcp sockets for `local` (already checked and with its port).
-fn open(s: &mut Stack, local: Addr) -> Result<[Option<Sock>; 2], NetError> {
+fn open(s: &mut Stack, local: Addr, scope: Scope) -> Result<[Option<Sock>; 2], NetError> {
     let mut socks = [None; 2];
-    let listen = IpListenEndpoint { addr: local.ip.listen_addr(), port: local.port };
     for &side in s.sides_for(local.ip) {
+        // The side's address of the socket's family (none: not on it).
+        let Some(addr) = s.side_address(side, local.ip, scope) else { continue };
+        let listen = IpListenEndpoint { addr, port: local.port };
         let made = new_socket().ok_or(NetError::NoMemory).and_then(|mut socket| {
             socket.bind(listen).map_err(|_| NetError::InvalidState)?;
             s.add(side, socket)
@@ -132,19 +136,24 @@ fn open(s: &mut Stack, local: Addr) -> Result<[Option<Sock>; 2], NetError> {
 /// Binds a UDP socket to `local` (port 0: an ephemeral port). `token` is
 /// passed to the notify hook.
 pub fn bind(local: Addr, token: u64) -> Result<SocketId, NetError> {
+    bind_scoped(local, Scope::of(local.ip), token)
+}
+
+/// The same for a socket of `scope` (`nt::afd`).
+pub fn bind_scoped(local: Addr, scope: Scope, token: u64) -> Result<SocketId, NetError> {
     with_stack(|s| {
         if !s.may_bind(local.ip) {
             return Err(NetError::AddressNotAvailable);
         }
         let port = match local.port {
-            0 => s.ephemeral_port(true)?,
-            p if s.port_in_use(p, true) => return Err(NetError::AddressInUse),
+            0 => s.ephemeral_port(true, scope)?,
+            p if s.port_in_use(p, true, scope) => return Err(NetError::AddressInUse),
             p => p,
         };
         let local = Addr { ip: local.ip, port };
-        let socks = open(s, local)?;
+        let socks = open(s, local, scope)?;
         let udp = Udp { socks, peer: None, queue: Vec::new(), queued_bytes: 0, arrived: 0 };
-        s.insert(token, local, Kind::Udp(udp)).inspect_err(|_| {
+        s.insert(token, local, scope, Kind::Udp(udp)).inspect_err(|_| {
             for sock in socks.into_iter().flatten() {
                 s.remove(sock);
             }
@@ -332,10 +341,12 @@ pub(super) fn adopt(
         queued_bytes += copy.len();
         queue.try_push(Datagram { from: *from, data: copy }).map_err(|_| NetError::NoMemory)?;
     }
-    if local.port == 0 || s.port_in_use(local.port, true) {
+    // Carried sockets are IPv4 (a handover refuses IPv6 ones).
+    let scope = Scope::of(local.ip);
+    if local.port == 0 || s.port_in_use(local.port, true, scope) {
         return Err(NetError::AddressInUse);
     }
-    let socks = open(s, local)?;
+    let socks = open(s, local, scope)?;
     Ok(Udp { socks, peer, queue, queued_bytes, arrived: 0 })
 }
 
