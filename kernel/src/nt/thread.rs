@@ -219,6 +219,11 @@ fn by_id(id: u64) -> Option<ObjectRef> {
     THREADS.lock().iter().find(|o| as_thread(o).id == id).cloned()
 }
 
+/// The object of thread `id` (NtOpenThread).
+pub fn object_by_id(id: u64) -> Option<ObjectRef> {
+    by_id(id)
+}
+
 /// Whether thread `id` exists and has not exited.
 pub fn is_running(id: u64) -> bool {
     by_id(id).is_some_and(|t| !as_thread(&t).has_exited())

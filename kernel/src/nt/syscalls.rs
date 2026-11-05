@@ -128,6 +128,9 @@ pub const NT_COMPARE_OBJECTS: u32 = 0x7f90;
 /// Crashpad's handler suspends a crashing client while it dumps it).
 pub const NT_SUSPEND_PROCESS: u32 = 0x7f91;
 pub const NT_RESUME_PROCESS: u32 = 0x7f92;
+/// NtOpenThread (gala's number, unverified; Crashpad's handler opens a
+/// crashed client's threads for their contexts).
+pub const NT_OPEN_THREAD: u32 = 0x7f93;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -394,6 +397,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_QUERY_VIRTUAL_MEMORY, "NtQueryVirtualMemory", 6, nt_query_virtual_memory),
     (NT_TERMINATE_PROCESS, "NtTerminateProcess", 2, nt_terminate_process),
     (NT_OPEN_PROCESS, "NtOpenProcess", 4, nt_open_process),
+    (NT_OPEN_THREAD, "NtOpenThread", 4, nt_open_thread),
     (NT_PROTECT_VIRTUAL_MEMORY, "NtProtectVirtualMemory", 5, nt_protect_virtual_memory),
     (NT_OPEN_KEY, "NtOpenKey", 3, registry_calls::nt_open_key),
     (NT_OPEN_KEY_EX, "NtOpenKeyEx", 4, registry_calls::nt_open_key_ex),
@@ -1053,6 +1057,27 @@ fn nt_open_process(call: &mut Call<'_>) -> NtStatus {
     };
     let Some(p) = found else { return NtStatus::INVALID_CID };
     let Ok(object) = KObject::new(ObjectBody::Process(p)) else { return NtStatus::NO_MEMORY };
+    call.return_handle(out, object, access, attributes)
+}
+
+/// NtOpenThread(*ThreadHandle, DesiredAccess, ObjectAttributes, ClientId):
+/// a handle to the thread ClientId.UniqueThread names (its process, when
+/// ClientId.UniqueProcess is not 0, must be that one): the thread's own
+/// object, so waiting on it waits for the thread. STATUS_INVALID_CID for
+/// a thread that does not exist (or not in that process).
+fn nt_open_thread(call: &mut Call<'_>) -> NtStatus {
+    let (out, access, attrs, cid) =
+        (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3));
+    if cid == 0 {
+        return NtStatus::INVALID_PARAMETER_MIX;
+    }
+    let attributes = tri!(call.handle_attributes(attrs));
+    let pid = tri!(call.read_u64(cid));
+    let tid = tri!(call.read_u64(cid + 8));
+    let Some(object) = thread::object_by_id(tid) else { return NtStatus::INVALID_CID };
+    if pid != 0 && thread::process_of(tid).is_none_or(|p| p.id != pid) {
+        return NtStatus::INVALID_CID;
+    }
     call.return_handle(out, object, access, attributes)
 }
 
