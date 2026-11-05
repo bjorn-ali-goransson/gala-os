@@ -65,6 +65,28 @@ const NAMES: [(&str, u32); 14] = [
 ];
 
 static MASK: AtomicU32 = AtomicU32::new(0);
+
+/// `events_pid=a,b,..`: the processes whose system calls are written (at
+/// most `PIDS`; none listed: every process). The `syscall` category is the
+/// stream's bulk; one process of a large program is often all that is
+/// needed.
+const PIDS: usize = 8;
+static SYSCALL_PIDS: [AtomicU64; PIDS] = [const { AtomicU64::new(0) }; PIDS];
+
+/// Sets the `events_pid=` list (unparsable entries are ignored).
+pub fn set_syscall_pids(value: &str) {
+    for (slot, pid) in
+        SYSCALL_PIDS.iter().zip(value.split(',').filter_map(|p| p.parse::<u64>().ok()))
+    {
+        slot.store(pid, Ordering::Relaxed);
+    }
+}
+
+/// Whether process `pid`'s system calls are wanted (`events_pid=`).
+pub fn syscall_pid_wanted(pid: u64) -> bool {
+    let first = SYSCALL_PIDS[0].load(Ordering::Relaxed);
+    first == 0 || first == pid || SYSCALL_PIDS[1..].iter().any(|p| p.load(Ordering::Relaxed) == pid)
+}
 static WRITTEN: AtomicU64 = AtomicU64::new(0);
 
 /// The category mask for an `events=` value (unknown names are ignored).

@@ -106,7 +106,7 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 
 | Category | Events |
 |---|---|
-| `syscall` | each call (pid, tid, nr, name, args, status, ns); `wait` on entry to a wait, so a thread blocked for good shows |
+| `syscall` | each call (pid, tid, nr, name, args, status, ns); `wait` on entry to a wait, so a thread blocked for good shows, naming the object waited on (`obj`: its type, `oid`: its identity, the same in every process; the first of several). `events_pid=a,b,..` (up to 8) limits system calls and waits to those processes (scenario `events_pid`; `XTASK_CMDLINE=events_pid=4` for a boot test) |
 | `image` | the exe and every image view (pid, NT path, base, size) |
 | `thread` | create (start address, TEB), exit (status) |
 | `process` | start (command line, `"session"`, `"personality":"nt"`, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; scenario `events_process`), exit; `session` (a session made after boot: id, its BaseNamedObjects) |

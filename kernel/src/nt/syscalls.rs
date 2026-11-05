@@ -612,6 +612,7 @@ fn dispatch(frame: &mut SyscallFrame) {
     if let Some(&(_, name, argc, _)) = service
         && super::stats::is_wait(name)
         && crate::events::enabled(crate::events::Category::Syscall)
+        && crate::events::syscall_pid_wanted(call.process.id)
     {
         syscall_event(&call, number, Some((name, argc)), NtStatus::SUCCESS, started, "wait");
     }
@@ -650,7 +651,9 @@ fn dispatch(frame: &mut SyscallFrame) {
             _ => {}
         }
     }
-    if crate::events::enabled(crate::events::Category::Syscall) {
+    if crate::events::enabled(crate::events::Category::Syscall)
+        && crate::events::syscall_pid_wanted(call.process.id)
+    {
         syscall_event(
             &call,
             number,
@@ -703,21 +706,43 @@ fn syscall_event(
         }
     }
     let (name, argc) = service.unwrap_or(("?", 0));
-    let tid = thread::current().and_then(|t| match &t.body {
-        ObjectBody::Thread(t) => Some(t.id),
-        _ => None,
-    });
+    // The calling thread (kept per CPU: no search of the thread table).
+    let tid = crate::events::current_client();
+    // A wait names the object it waits on (the first, for several): its
+    // type and identity (its address, the same in every process), so
+    // waits on one object can be told apart and matched.
+    struct On<'a>(&'a Call<'a>, &'a str, bool);
+    impl fmt::Display for On<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            if !self.2 {
+                return Ok(());
+            }
+            let handle = match self.1 {
+                "NtWaitForMultipleObjects" | "NtWaitForMultipleObjects32" => {
+                    self.0.arg(1).and_then(|a| self.0.read_u64(a)).ok()
+                }
+                "NtSignalAndWaitForSingleObject" => self.0.arg(1).ok(),
+                _ => self.0.arg(0).ok(),
+            };
+            let Some(h) = handle else { return Ok(()) };
+            let Some(e) = self.0.process.handles.lock().get(super::object::Handle(h)) else {
+                return Ok(());
+            };
+            let oid = &*e.object as *const _ as usize;
+            write!(f, r#","obj":"{}","oid":{oid}"#, e.object.type_name())
+        }
+    }
     crate::events::emit(
         crate::events::Category::Syscall,
         event,
         format_args!(
-            r#""pid":{},"tid":{},"nr":{number},"name":{},"args":[{}],"status":{},"ns":{}"#,
+            r#""pid":{},"tid":{tid},"nr":{number},"name":{},"args":[{}],"status":{},"ns":{}{}"#,
             call.process.id,
-            tid.unwrap_or(0),
             crate::events::Str(name),
             Args(call, argc),
             status.0,
-            platform::monotonic_ns().saturating_sub(started)
+            platform::monotonic_ns().saturating_sub(started),
+            On(call, name, event == "wait")
         ),
     );
 }

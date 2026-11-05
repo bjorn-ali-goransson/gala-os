@@ -281,6 +281,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         info!("spintest: done");
     }
     events::set_mask(cmdline.value("events").map_or(0, events::parse_mask));
+    if let Some(pids) = cmdline.value("events_pid") {
+        events::set_syscall_pids(pids);
+    }
     time::emit_calibration_event();
     // The TSC checked against the RTC in the background (recalibrated if
     // they disagree); under `calwrong` and `calstall` (the clock's tests)

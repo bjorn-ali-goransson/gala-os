@@ -2866,7 +2866,22 @@ enum Boot {
 }
 
 /// Lines the event stream (debug console) of a scenario must contain.
+/// What scenarios' event streams must hold (an entry starting with `!`:
+/// must not hold).
 const EVENT_EXPECT: &[(&str, &[&str])] = &[
+    (
+        // `events_pid=` limits system-call events to those processes:
+        // process_test's own (pid 4), none of its children's; a wait
+        // names the object it waits on.
+        "events_pid",
+        &[
+            r#""ev":"syscall","pid":4,"#,
+            r#"!"ev":"syscall","pid":12,"#,
+            r#"!"ev":"syscall","pid":20,"#,
+            r#""ev":"wait","pid":4,"#,
+            r#""obj":"Process","oid":"#,
+        ],
+    ),
     (
         // RS step B2: each window is registered in its own session, and
         // HWNDs asked for across sessions are named.
@@ -3594,6 +3609,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit events=ipc,thread run=pipe_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["pipe_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // System-call events of one process only (see EVENT_EXPECT).
+        name: "events_pid",
+        cmdline: "qemu_exit events=syscall,process events_pid=4 run=process_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["process_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // Smoke test only; `cargo xtask bench` collects the numbers.
@@ -6118,6 +6140,7 @@ fn events_flag() -> String {
 const MODULE_SETS: &[(&str, &str)] = &[
     ("events_process", "process_test"),
     ("events_ipc", "pipe_test"),
+    ("events_pid", "process_test"),
     ("pk_install_zip", "pk_install_test"),
     ("pk_install_nsis", "pk_install_test"),
     ("pk_install_nsis", "pk_install_nsis"),
@@ -10250,13 +10273,20 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         Vm::Single(s) => {
             let events = fs::read_to_string(iso.with_extension("events.jsonl")).unwrap_or_default();
             let wanted = EVENT_EXPECT.iter().filter(|(n, _)| *n == s.name).flat_map(|(_, e)| *e);
-            let missing: Vec<&str> = wanted.copied().filter(|e| !events.contains(e)).collect();
+            // An entry starting with '!' must not be in the stream.
+            let missing: Vec<&str> = wanted
+                .copied()
+                .filter(|e| match e.strip_prefix('!') {
+                    Some(absent) => events.contains(absent),
+                    None => !events.contains(e),
+                })
+                .collect();
             let verdict = judge(s, code, status.is_none(), &serial, &facts)
                 .and_then(|()| {
                     if missing.is_empty() {
                         Ok(())
                     } else {
-                        Err(format!("event stream lacks {missing:?}"))
+                        Err(format!("event stream lacks (or, for a '!' entry, has) {missing:?}"))
                     }
                 })
                 .and_then(|()| disk.as_deref().map_or(Ok(()), |d| check_disk(s.name, d)));
