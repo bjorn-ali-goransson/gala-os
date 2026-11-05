@@ -236,6 +236,9 @@ const SOL_SOCKET: i32 = 0xffff;
 const SO_TYPE: i32 = 0x1008;
 const SO_RCVBUF: i32 = 0x1002;
 const SO_BROADCAST: i32 = 0x20;
+const SO_RANDOMIZE_PORT: i32 = 0x3005;
+const IPPROTO_IP: i32 = 0;
+const IP_DONTFRAGMENT: i32 = 14;
 const INVALID_SOCKET: Socket = !0;
 const SOCKET_ERROR: i32 = -1;
 const MSG_PEEK: i32 = 2;
@@ -496,6 +499,17 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         let size = 32768i32;
         c.eq(setsockopt(b, SOL_SOCKET, SO_RCVBUF, (&raw const size).cast(), 4) as u64, 0)?;
         c.eq(get_int(b, SO_RCVBUF).1 as u64, 32768)?;
+        // SO_RANDOMIZE_PORT and IP_DONTFRAGMENT (Chromium's UDP sockets
+        // set both): accepted, read back.
+        c.eq(setsockopt(b, SOL_SOCKET, SO_RANDOMIZE_PORT, (&raw const one).cast(), 4) as u64, 0)?;
+        c.eq(get_int(b, SO_RANDOMIZE_PORT).1 as u64, 1)?;
+        c.eq(setsockopt(b, IPPROTO_IP, IP_DONTFRAGMENT, (&raw const one).cast(), 4) as u64, 0)?;
+        let (mut df, mut df_len) = (-1i32, 4i32);
+        c.eq(
+            getsockopt(b, IPPROTO_IP, IP_DONTFRAGMENT, (&raw mut df).cast(), &mut df_len) as u64,
+            0,
+        )?;
+        c.eq(df as u64, 1)?;
 
         // Overlapped, through a completion port.
         let d = WSASocketW(AF_INET, SOCK_DGRAM, IPPROTO_UDP, null_mut(), 0, WSA_FLAG_OVERLAPPED);

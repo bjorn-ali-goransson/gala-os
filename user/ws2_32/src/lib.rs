@@ -1202,6 +1202,7 @@ pub extern "system" fn WSAIoctl(
 }
 
 const SOL_SOCKET: i32 = 0xffff;
+const IPPROTO_IP: i32 = 0;
 
 /// The integer socket options setsockopt keeps per socket, for getsockopt.
 mod options {
@@ -1213,8 +1214,10 @@ mod options {
     /// SO_SNDBUF and SO_RCVBUF (gala's 64 KiB), SO_EXCLUSIVEADDRUSE,
     /// TCP_NODELAY, TCP_KEEPALIVE (idle, 2 h), TCP_KEEPCNT (10),
     /// TCP_KEEPINTVL (1 s), SO_BROADCAST; SO_TYPE (stream unless socket
-    /// made a datagram socket; read-only to setsockopt).
-    const OPTIONS: [(i32, i32, i32); 11] = [
+    /// made a datagram socket; read-only to setsockopt); SO_RANDOMIZE_PORT
+    /// and IP_DONTFRAGMENT (kept only: ephemeral ports are chosen and
+    /// datagrams sent as without them).
+    const OPTIONS: [(i32, i32, i32); 13] = [
         (SOL_SOCKET, 0x4, 0),
         (SOL_SOCKET, 0x8, 0),
         (SOL_SOCKET, 0x1001, 65536),
@@ -1226,6 +1229,8 @@ mod options {
         (IPPROTO_TCP, 17, 1),
         (SOL_SOCKET, 0x20, 0),
         (SOL_SOCKET, 0x1008, super::SOCK_STREAM),
+        (SOL_SOCKET, 0x3005, 0),
+        (super::IPPROTO_IP, 14, 0),
     ];
     /// SO_TYPE's slot.
     pub const TYPE: usize = 10;
@@ -1308,8 +1313,12 @@ pub extern "system" fn setsockopt(
     let accepted = match (level, name) {
         // SO_REUSEADDR, SO_KEEPALIVE, SO_BROADCAST, SO_LINGER, SO_SNDBUF,
         // SO_RCVBUF, SO_EXCLUSIVEADDRUSE, SO_UPDATE_ACCEPT_CONTEXT,
-        // SO_UPDATE_CONNECT_CONTEXT.
-        (SOL_SOCKET, 0x4 | 0x8 | 0x20 | 0x80 | 0x1001 | 0x1002 | -5 | 0x700b | 0x7010) => true,
+        // SO_UPDATE_CONNECT_CONTEXT, SO_RANDOMIZE_PORT (kept only).
+        (SOL_SOCKET, 0x4 | 0x8 | 0x20 | 0x80 | 0x1001 | 0x1002 | -5 | 0x700b | 0x7010 | 0x3005) => {
+            true
+        }
+        // IP_DONTFRAGMENT (kept only).
+        (IPPROTO_IP, 14) => true,
         // TCP_NODELAY (already the behaviour), TCP_KEEPIDLE, TCP_KEEPCNT,
         // TCP_KEEPINTVL.
         (IPPROTO_TCP, 1 | 3 | 16 | 17) => true,
