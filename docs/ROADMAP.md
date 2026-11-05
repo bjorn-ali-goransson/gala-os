@@ -76,8 +76,8 @@ In order:
    record/replay), R6's kernel pool and handle quotas, R8's Secure Boot.
 6. **PK**: `gala install`/`list`/`upgrade` on the winget resolver; HTTPS
    downloads (after TLS step 1); a real Inno Setup installer.
-7. **BR** stage 1 (headless Chromium: the utilities' connections, the
-   run's time, then `chromium_dump`) with **GPU** G0.
+7. **BR** stage 1 (headless Chromium: `chromium_dump`, the profile's
+   hotspots) with **GPU** G0.
 8. **AG**: the remaining stubs (filler).
 9. **SSH**: scp, port forwarding, the client; **H11**: busybox httpd
     and wget over loopback.
@@ -158,7 +158,7 @@ has a section under "Open items".
 | SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
 | RS | Remote access and sessions | in progress | A, B1, B2 done; B3a next |
 | GPU | Graphics and GPU | in progress | G1 done; G0 next; G3 parked |
-| BR | A web browser: stock Edge | in progress | stage 1: chromium_version passes (about:blank's DOM, exit 0); utilities' connections and speed next |
+| BR | A web browser: stock Edge | in progress | stage 1: chromium_version passes in the gate (about:blank's DOM, exit 0, ~4.5 min); chromium_dump next |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
 
 ### Robustness, live update, tooling
@@ -584,8 +584,8 @@ QEMU.
 **Done so far** (stage 1 under way; ARCHITECTURE "A web browser:
 Chromium, then Edge", WORKFLOW "Chromium (BR)"): PREBUILT `chromium`
 (snapshot Win_x64 1733063, 159.0.8140.0, with published symbols);
-scenarios `chromium_version` (`--dump-dom about:blank`) and
-`chromium_dump` (a local page changed by its script), PENDING, in
+scenarios `chromium_version` (`--dump-dom about:blank`; in the gate)
+and `chromium_dump` (a local page changed by its script; PENDING), in
 `SINGLE_THREAD_TCG`, 3 GiB, 900 s; `browser_api_test` and `dwrite_test`
 cover what was added. chrome.exe starts; chrome_elf.dll's early security
 and Crashpad come up (the handler runs as a child with an inherited
@@ -599,20 +599,22 @@ utility (network, storage, audio) and renderer processes, all sharing
 one chrome.dll layout; renderers start V8 (growable function tables)
 and create script contexts; crashes print symbolizable stacks
 (dbghelp's StackWalk64) and leave a crash report even when Crashpad's
-filter ends the process. `chromium_version` passes: `--dump-dom
-about:blank` prints `<html><head></head><body></body></html>` and
-chrome.exe exits with 0, in about 840 s of its 900 under TCG (still
-PENDING for that margin). Overlapped pipe writes no longer block the
-browser's IO thread (it had spent 149 s of a run inside NtWriteFile).
+filter ends the process. `chromium_version` passes and is in the gate:
+`--dump-dom about:blank` prints `<html><head></head><body></body></html>`
+and chrome.exe exits with 0, in about 250-280 s of its 900 under TCG
+(840 s before two fixes the traces found: overlapped pipe writes
+blocked the browser's IO thread, 149 s of a run inside NtWriteFile; and
+`thread::current` scanned every thread on each system call, 36% of all
+samples).
 
 **Next** (each stage test first, the ledger leading):
-1. Headless Chromium. First the utilities that still end "after 15
-   seconds with no connection" (15 a run, 10 of them the network
-   service; the traces show the children themselves slow to take their
-   own completions, 7-8 s), and the run's time (840 s of 900: out of
-   PENDING with a margin); the on_device_model utility's delay import
-   of `dxgi.dll` (G0); then `chromium_dump` (a page whose script runs).
-   After it:
+1. Headless Chromium. `chromium_dump` (a page whose script runs) next;
+   the profile's top items (PartitionAlloc's SpinningMutex spinning,
+   5.5%; the kernel's `vm::allocate`, 4.7%, and address-space guard
+   drops, 3.8%); the 2 utilities a run that still end "after 15
+   seconds with no connection" (the browser's UI thread answers their
+   ping late); the on_device_model utility's delay import of `dxgi.dll`
+   (G0). After it:
    what `tools/import_survey.py` still lists (the rest of the delay imports:
    advapi32's services and ImpersonateAnonymousToken, iphlpapi,
    wintrust's catalogs, dbghelp's stack walking, pdh, winhttp's proxy
