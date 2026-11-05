@@ -661,7 +661,17 @@ const POLL_KIND: usize = 4;
 fn submit(state: &EndpointState, mut op: Op, io: Io) -> NtStatus {
     let mut pending = state.pending.lock();
     let kind = op.kind();
-    if (usize::from(kind) == POLL_KIND || !pending.iter().any(|p| p.op.kind() == kind))
+    // A non-blocking socket's synchronous connect never completes in the
+    // call, as on Windows (WSAEWOULDBLOCK, then writable): over loopback
+    // the handshake can finish on another CPU before this attempt, and a
+    // program may take a 0 for impossible (Chromium's tcp_socket_win.cc
+    // NOTREACHED; winsock_test).
+    let nonblocking_connect = matches!(op, Op::Connect)
+        && io.context == 0
+        && io.apc.is_none()
+        && state.non_blocking.load(Ordering::Acquire);
+    if !nonblocking_connect
+        && (usize::from(kind) == POLL_KIND || !pending.iter().any(|p| p.op.kind() == kind))
         && let Attempt::Done(status, information) = attempt(state, &mut op, &io.process)
     {
         finish(state, &io, status, information, true);

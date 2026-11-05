@@ -496,6 +496,30 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
             c.eq(closesocket(s) as u64, 0)?;
         }
 
+        // A non-blocking socket's connect never completes in the call
+        // (Windows: WSAEWOULDBLOCK, then writable when connected), even
+        // over loopback where the handshake can finish at once (Chromium
+        // treats a 0 as unreachable: tcp_socket_win.cc's NOTREACHED).
+        let listener3 = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        c.eq(bind(listener3, &any_port, ADDR_LEN) as u64, 0)?;
+        c.eq(listen(listener3, 64) as u64, 0)?;
+        len = ADDR_LEN;
+        c.eq(getsockname(listener3, &mut bound, &mut len) as u64, 0)?;
+        let to3 = SockaddrIn::new(LOOPBACK, u16::from_be(bound.port));
+        for _ in 0..40 {
+            let nb = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            let mut on = 1u32;
+            c.eq(ioctlsocket(nb, FIONBIO, &mut on) as u64, 0)?;
+            c.eq(connect(nb, &to3, ADDR_LEN) as u64, SOCKET_ERROR as u64)?;
+            c.eq(WSAGetLastError() as u64, WSAEWOULDBLOCK as u64)?;
+            c.eq(closesocket(nb) as u64, 0)?;
+            let a = accept(listener3, core::ptr::null_mut(), core::ptr::null_mut());
+            if a != INVALID_SOCKET {
+                closesocket(a);
+            }
+        }
+        c.eq(closesocket(listener3) as u64, 0)?;
+
         // Nobody listens on the port any more.
         let refused = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         c.ok(refused != INVALID_SOCKET, WSAGetLastError() as u64)?;

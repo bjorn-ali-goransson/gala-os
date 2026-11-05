@@ -3170,7 +3170,13 @@ endpoint's I/O completion port.
 - **Non-blocking sockets** (FIONBIO through SET_INFO): a request without
   a completion context (not overlapped through a port) that would pend
   fails with STATUS_DEVICE_NOT_READY instead (ws2_32: WSAEWOULDBLOCK); a
-  connect still proceeds in the background, as on Windows. A send that
+  connect still proceeds in the background, as on Windows. **A
+  non-blocking connect never completes in the call**, even when the
+  loopback handshake already finished on another CPU (`submit` skips the
+  immediate attempt for it): Windows always answers WSAEWOULDBLOCK, and
+  Chromium treats a 0 as unreachable (tcp_socket_win.cc's NOTREACHED;
+  chromium_https failed now and then that way; winsock_test makes 40
+  such connects). A send that
   queued part of its bytes succeeds with that count (the bytes are in
   the socket). An accepted socket inherits the listener's mode (Nginx
   never sets it on accepted sockets).
