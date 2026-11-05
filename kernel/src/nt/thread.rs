@@ -518,10 +518,11 @@ pub fn request_termination(object: &ObjectRef, status: NtStatus) {
 /// alertable wait (NtQueueApcThread).
 pub fn queue_user_apc(object: &ObjectRef, apc: UserApc) -> Result<(), NtStatus> {
     let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
-    if t.has_exited() {
-        return Err(NtStatus::UNSUCCESSFUL);
-    }
     wait::with_dispatcher_lock(|| {
+        // Under the lock the thread's exit marks it under (`exit_current`).
+        if t.has_exited() {
+            return Err(NtStatus::UNSUCCESSFUL);
+        }
         t.apcs.lock().try_push(apc).map_err(|_| NtStatus::NO_MEMORY)?;
         if t.alertable.load(Ordering::SeqCst)
             && let Some(tid) = *t.sched_id.lock()
@@ -698,10 +699,12 @@ pub fn hold_for_handover(on: bool) {
 /// back to user mode). Returns the previous count.
 pub fn suspend(object: &ObjectRef) -> Result<u32, NtStatus> {
     let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    // Checked under the suspend count, which the thread's exit marks it
+    // under (`exit_current`): no suspension is counted once it began.
+    let mut count = t.suspend_count.lock();
     if t.has_exited() || t.terminate_request.lock().is_some() {
         return Err(NtStatus::THREAD_IS_TERMINATING);
     }
-    let mut count = t.suspend_count.lock();
     if *count >= MAXIMUM_SUSPEND_COUNT {
         return Err(NtStatus::SUSPEND_COUNT_EXCEEDED);
     }
@@ -1051,7 +1054,17 @@ pub fn exit_current(status: NtStatus) -> ! {
     // which never returns.
     if let Some(object) = current() {
         let t = as_thread(&object);
-        t.exit_status.lock().get_or_insert(status);
+        // The thread counts as exited from here, decided under the locks
+        // that queuing an APC (the dispatcher lock) and suspending (the
+        // suspend count) check it under: a call sees it before its exit
+        // began or after, never between a check and its effect (an APC
+        // accepted that never runs, a suspension never seen). User APCs
+        // still queued are discarded, as on Windows.
+        wait::with_dispatcher_lock(|| {
+            let _count = t.suspend_count.lock();
+            t.exit_status.lock().get_or_insert(status);
+            t.apcs.lock().clear();
+        });
         crate::events::emit(
             crate::events::Category::Thread,
             "thread exit",

@@ -65,8 +65,8 @@ The ordering rules in force (set by the owner):
 
 In order:
 
-1. **HS**: the hygiene sweep leftovers (APCs to an exiting thread,
-   NtSuspendThread on an exiting thread), each test first.
+1. **HS**: the next sweep (after the next change of assumptions,
+   otherwise a month after the first).
 2. **TLS**: winhttp over Schannel (TLS step 1).
 3. **LX**: seams 1, 4 and 5 as their areas are touched; milestone 2
    (static busybox) as filler.
@@ -106,7 +106,7 @@ has a section under "Open items".
 | O1 | Ledger, event stream, backtraces, benchmarks | done | OBSERVABILITY "Event stream", "Missing-features ledger", "Backtraces and panic output", "Benchmarks" |
 | U1-U3 | gala-um | done | 109 programs in seconds; GALA_UM.md |
 | U4 | gala-um: more than one NT process | planned | child processes and `start=`; GALA_UM "Limits and open questions" |
-| HS | Hygiene sweeps | in progress | recurring; first sweep done, two leftovers (APC to an exiting thread, suspending an exiting thread) |
+| HS | Hygiene sweeps | in progress | recurring; first sweep and its four leftovers done; the next sweep after the next change of assumptions |
 
 ### NT core services (done, by test)
 
@@ -227,13 +227,19 @@ Windows first):
 1. (Done: `iocp_test`.) NtRemoveIoCompletion waits end when the port's
    last handle closes (STATUS_ABANDONED_WAIT_0; GetQueuedCompletionStatus
    fails with ERROR_ABANDONED_WAIT_0 and a NULL lpOverlapped).
-2. An APC queued to a thread just as it exits is accepted
-   (STATUS_SUCCESS) and never runs.
+2. (Done, fixed without a failing test: no user-mode test can hold a
+   thread between its exit's start and its end.) An APC queued to a
+   thread just as it exits was accepted (STATUS_SUCCESS) and never ran:
+   the exit is now marked under the dispatcher lock, which the queuing
+   checks under; APCs still queued are discarded at exit, as on
+   Windows.
 3. (Done: `iocp_test`.) NtRemoveIoCompletion writes (probes) the
    caller's outputs before taking a packet: a bad pointer fails with
    STATUS_ACCESS_VIOLATION and the packet stays queued.
-4. NtSuspendThread on an exiting thread can count a suspension the
-   thread never sees.
+4. (Done, fixed without a failing test, as 2.) NtSuspendThread on an
+   exiting thread could count a suspension the thread never saw: the
+   exit is marked under the suspend count too, which suspending checks
+   under (THREAD_IS_TERMINATING).
 5. The next sweep: after the next change of assumptions, otherwise a
    month after the first.
 
@@ -1136,8 +1142,6 @@ None open.
   kernel's input path, the window's message delivery) is open; the
   `input:` line at exit now counts the notches the kernel received, so
   the next failure says. Item W3.
-- **Hygiene sweep leftovers**: two lifecycle defects in APCs and
-  suspension. Item HS.
 - **Fault-injection leftovers**: a failed push in `notify::complete`
   loses a completion packet; out-of-memory reported as
   STATUS_DLL_NOT_FOUND / STATUS_INVALID_IMAGE_FORMAT. Item R2.

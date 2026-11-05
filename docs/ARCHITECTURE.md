@@ -724,6 +724,12 @@ current process, -2 = current thread.
   system call returns the registers the dispatcher recorded at entry,
   with the default floating-point state, as Windows does. The caller's
   own context comes from its system call frame.
+- **A thread's exit against calls on it**: `exit_current` marks the
+  thread exited under the dispatcher lock and its suspend count, the
+  locks NtQueueApcThread and NtSuspendThread check it under, so a call
+  sees it before its exit began or after (STATUS_UNSUCCESSFUL,
+  STATUS_THREAD_IS_TERMINATING), never between its check and its
+  effect; user APCs still queued are discarded then, as on Windows.
 
 ### x87/SSE/AVX state
 
