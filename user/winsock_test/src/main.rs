@@ -503,6 +503,10 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         let listener3 = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         c.eq(bind(listener3, &any_port, ADDR_LEN) as u64, 0)?;
         c.eq(listen(listener3, 64) as u64, 0)?;
+        // Non-blocking: its accept below only drains (a client closed
+        // before its handshake finished leaves nothing to accept).
+        let mut on3 = 1u32;
+        c.eq(ioctlsocket(listener3, FIONBIO, &mut on3) as u64, 0)?;
         len = ADDR_LEN;
         c.eq(getsockname(listener3, &mut bound, &mut len) as u64, 0)?;
         let to3 = SockaddrIn::new(LOOPBACK, u16::from_be(bound.port));
