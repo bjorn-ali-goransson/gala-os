@@ -9851,12 +9851,23 @@ fn otel_export_at(
         .max()
         .unwrap_or(0);
     let build = kernel_build();
+    // Function names for the profile: the kernel's from its ELF, a
+    // program's from `XTASK_SYMBOLS=<dir>` (its modules and symbols, e.g.
+    // target/prebuilt/chromium-syms).
+    let kernel = target_dir().join("x86_64-unknown-none/debug/kernel");
+    let dir = env::var_os("XTASK_SYMBOLS").map(PathBuf::from);
+    let symbolize = |module: &str, offsets: &[u64]| match (module, &dir) {
+        ("kernel", _) => profile::llvm_symbolize_kernel(&kernel, offsets),
+        (_, Some(dir)) => profile::llvm_symbolize(dir, module, offsets),
+        _ => vec![None; offsets.len()],
+    };
     let export = otel::convert(&otel::Boot {
         serial,
         events,
         scenario,
         build: &build,
         start_unix_ns: end_unix_ns.saturating_sub(last),
+        symbols: Some(&symbolize),
     });
     let name = |signal: &str| {
         let mut p = prefix.as_os_str().to_owned();
@@ -9873,10 +9884,15 @@ fn otel_export_at(
     let traces = write("traces", &export.traces)?;
     write("logs", &export.logs)?;
     write("metrics", std::slice::from_ref(&export.metrics))?;
+    let profiles = !export.profiles.is_empty();
+    if profiles {
+        write("profiles", std::slice::from_ref(&export.profiles))?;
+    }
     let mut said = export.report.lines();
     said += &format!(
-        "otel: wrote {} (and .logs.json, .metrics.json; OTLP/JSON, one request per line)\n",
-        traces.display()
+        "otel: wrote {} (and .logs.json, .metrics.json{}; OTLP/JSON, one request per line)\n",
+        traces.display(),
+        if profiles { ", .profiles.json" } else { "" }
     );
     if let Some(endpoint) = endpoint {
         match otel::post(endpoint, &export) {
@@ -9887,8 +9903,6 @@ fn otel_export_at(
     Ok(said)
 }
 
-/// `cargo xtask otel`'s arguments: <what> [<events>] [--out <prefix>]
-/// [--endpoint <url>].
 /// `cargo xtask profile <events.jsonl | scenario> [--pid N] [--tid N]
 /// [--from S --to S] [--top N] [--symbols DIR]`: the sampling profiler's
 /// report (xtask/src/profile.rs).
@@ -9932,6 +9946,8 @@ fn profile_cli(args: &[String]) -> Result {
     Ok(())
 }
 
+/// `cargo xtask otel`'s arguments: <what> [<events>] [--out <prefix>]
+/// [--endpoint <url>].
 fn otel_cli(args: &[String]) -> Result {
     let flag =
         |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();

@@ -52,6 +52,7 @@ fn export() -> Export {
         scenario: "crash",
         build: "debug 1234567",
         start_unix_ns: BASE,
+        symbols: None,
     })
 }
 
@@ -379,8 +380,14 @@ fn a_boot_converts_to_the_same_ids_twice_and_splits_large_traces() {
             100 + i * 10
         );
     }
-    let e =
-        convert(&Boot { serial: "", events: &events, scenario: "x", build: "", start_unix_ns: 0 });
+    let e = convert(&Boot {
+        serial: "",
+        events: &events,
+        scenario: "x",
+        build: "",
+        start_unix_ns: 0,
+        symbols: None,
+    });
     assert_eq!(e.traces.len(), 2);
     let all = spans(&e);
     let ids: HashSet<&str> = all.iter().map(|s| s.id.as_str()).collect();
@@ -399,6 +406,7 @@ fn a_serial_log_alone_still_converts() {
         scenario: "crash",
         build: "",
         start_unix_ns: 5,
+        symbols: None,
     });
     let all = spans(&e);
     assert_eq!(all.len(), 1, "only the boot without a stream");
@@ -446,6 +454,18 @@ enum Kind {
     Bool,
     TraceId,
     SpanId,
+    /// A trace or span id that may be all zeros (a profiles dictionary's
+    /// zero link), by its hex length.
+    IdOrZero(usize),
+    /// int32 (a JSON number) and repeated int32.
+    I32,
+    I32s,
+    /// repeated int64 / fixed64 (decimal strings), repeated string.
+    I64s,
+    U64s,
+    Strs,
+    /// bytes (base64).
+    Bytes,
 }
 
 fn schema(message: &str) -> &'static [(&'static str, Kind)] {
@@ -511,6 +531,67 @@ fn schema(message: &str) -> &'static [(&'static str, Kind)] {
             ("timeUnixNano", U64),
             ("asInt", I64),
         ],
+        // Profiles (opentelemetry-proto profiles/v1development).
+        "ExportProfilesServiceRequest" => &[
+            ("resourceProfiles", Msgs("ResourceProfiles")),
+            ("dictionary", Msg("ProfilesDictionary")),
+        ],
+        "ResourceProfiles" => {
+            &[("resource", Msg("Resource")), ("scopeProfiles", Msgs("ScopeProfiles"))]
+        }
+        "ScopeProfiles" => &[("scope", Msg("InstrumentationScope")), ("profiles", Msgs("Profile"))],
+        "Profile" => &[
+            ("sampleType", Msg("ValueType")),
+            ("samples", Msgs("Sample")),
+            ("timeUnixNano", U64),
+            ("durationNano", U64),
+            ("periodType", Msg("ValueType")),
+            ("period", I64),
+            ("profileId", Bytes),
+            ("attributeIndices", I32s),
+        ],
+        "ValueType" => &[("typeStrindex", I32), ("unitStrindex", I32)],
+        "Sample" => &[
+            ("stackIndex", I32),
+            ("attributeIndices", I32s),
+            ("linkIndex", I32),
+            ("values", I64s),
+            ("timestampsUnixNano", U64s),
+        ],
+        "ProfilesDictionary" => &[
+            ("mappingTable", Msgs("Mapping")),
+            ("locationTable", Msgs("Location")),
+            ("functionTable", Msgs("Function")),
+            ("linkTable", Msgs("ProfileLink")),
+            ("stringTable", Strs),
+            ("attributeTable", Msgs("KeyValueAndUnit")),
+            ("stackTable", Msgs("Stack")),
+        ],
+        "Mapping" => &[
+            ("memoryStart", U64),
+            ("memoryLimit", U64),
+            ("fileOffset", U64),
+            ("filenameStrindex", I32),
+            ("attributeIndices", I32s),
+        ],
+        "Location" => &[
+            ("mappingIndex", I32),
+            ("address", U64),
+            ("lines", Msgs("Line")),
+            ("attributeIndices", I32s),
+        ],
+        "Line" => &[("functionIndex", I32), ("line", I64), ("column", I64)],
+        "Function" => &[
+            ("nameStrindex", I32),
+            ("systemNameStrindex", I32),
+            ("filenameStrindex", I32),
+            ("startLine", I64),
+        ],
+        "ProfileLink" => &[("traceId", IdOrZero(32)), ("spanId", IdOrZero(16))],
+        "KeyValueAndUnit" => {
+            &[("keyStrindex", I32), ("value", Msg("AnyValue")), ("unitStrindex", I32)]
+        }
+        "Stack" => &[("locationIndices", I32s)],
         other => panic!("no schema for {other}"),
     }
 }
@@ -540,6 +621,36 @@ fn check_message(v: &Json, message: &str, path: &str) {
             }
             (Kind::TraceId, Json::Str(s)) => assert!(is_hex(s, 32), "{at}: {s}"),
             (Kind::SpanId, Json::Str(s)) => assert!(is_hex(s, 16), "{at}: {s}"),
+            (Kind::IdOrZero(len), Json::Str(s)) => {
+                assert!(s.len() == len && s.bytes().all(|b| b.is_ascii_hexdigit()), "{at}: {s}")
+            }
+            (Kind::I32, Json::Num(n)) => assert!(n.parse::<i32>().is_ok(), "{at}: {n}"),
+            (Kind::I32s, Json::Arr(a)) => {
+                assert!(
+                    a.iter().all(|v| matches!(v, Json::Num(n) if n.parse::<i32>().is_ok())),
+                    "{at}"
+                )
+            }
+            (Kind::I64s, Json::Arr(a)) => {
+                assert!(
+                    a.iter().all(|v| matches!(v, Json::Str(n) if n.parse::<i64>().is_ok())),
+                    "{at}"
+                )
+            }
+            (Kind::U64s, Json::Arr(a)) => {
+                assert!(
+                    a.iter().all(|v| matches!(v, Json::Str(n) if n.parse::<u64>().is_ok())),
+                    "{at}"
+                )
+            }
+            (Kind::Strs, Json::Arr(a)) => {
+                assert!(a.iter().all(|v| matches!(v, Json::Str(_))), "{at}")
+            }
+            (Kind::Bytes, Json::Str(s)) => assert!(
+                !s.is_empty()
+                    && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)),
+                "{at}: {s}"
+            ),
             (_, v) => panic!("{at}: wrong type {v:?}"),
         }
     }
@@ -628,6 +739,7 @@ fn tree() -> Export {
         scenario: "tree",
         build: "debug 1",
         start_unix_ns: BASE,
+        symbols: None,
     })
 }
 
@@ -676,6 +788,7 @@ fn reads_link_the_writes_they_took_and_dequeues_their_posts() {
         scenario: "ipc",
         build: "debug 1",
         start_unix_ns: BASE,
+        symbols: None,
     });
     let all = spans(&e);
     let by_id: HashMap<&str, &S> = all.iter().map(|s| (s.id.as_str(), s)).collect();
@@ -714,4 +827,126 @@ fn reads_link_the_writes_they_took_and_dequeues_their_posts() {
         "{lines}"
     );
     assert!(lines.contains("otel: slow pipe data: 0.0 ms from write to read: pipe 3 \\mojo.1 end 0, 16 bytes at offset 0, written by thread 24"), "{lines}");
+}
+
+const PROFILED: &str = r#"{"t":100,"cpu":0,"by":0,"ev":"process start","pid":4,"session":1,"name":"a.exe","personality":"nt","ppid":0,"ptid":0,"image_base":5368709120,"entry":1,"cmdline":"a.exe"}
+{"t":200,"cpu":0,"by":0,"ev":"thread create","pid":4,"tid":8,"start":1,"teb":2}
+{"t":300,"cpu":0,"by":0,"ev":"image","pid":4,"name":"a.exe","base":5368709120,"size":65536}
+{"t":400,"cpu":0,"by":8,"ev":"image","pid":4,"name":"\\Device\\HarddiskVolume1\\gala\\b.dll","base":6442450944,"size":65536}
+{"t":10000000,"cpu":0,"by":8,"ev":"sample","mode":"user","rip":5368713216}
+{"t":20000000,"cpu":0,"by":8,"ev":"sample","mode":"user","rip":5368713216}
+{"t":30000000,"cpu":1,"by":8,"ev":"sample","mode":"user","rip":6442451200}
+{"t":40000000,"cpu":1,"by":8,"ev":"sample","mode":"kernel","rip":18446744071562067968}
+{"t":50000000,"cpu":0,"by":8,"ev":"thread exit","pid":4,"tid":8,"status":0}
+{"t":60000000,"cpu":0,"by":0,"ev":"process exit","pid":4,"session":1,"status":0}
+"#;
+
+fn profiled() -> Export {
+    let names: &dyn Fn(&str, &[u64]) -> Vec<Option<String>> =
+        &|m, offs| offs.iter().map(|_| (m == "b.dll").then(|| "b_function".to_string())).collect();
+    convert(&Boot {
+        serial: "",
+        events: PROFILED,
+        scenario: "prof",
+        build: "debug 1",
+        start_unix_ns: BASE,
+        symbols: Some(names),
+    })
+}
+
+#[test]
+fn samples_become_an_otlp_profile_linked_to_their_threads() {
+    let e = profiled();
+    assert!(!e.profiles.is_empty(), "a profile is written when there are samples");
+    let req = parse_json(&e.profiles).unwrap();
+    check_message(&req, "ExportProfilesServiceRequest", "profiles");
+    let dict = req.get("dictionary").unwrap();
+    let strings: Vec<&str> = arr(dict, "stringTable")
+        .iter()
+        .map(|s| match s {
+            Json::Str(s) => s.as_str(),
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(strings[0], "", "string 0 is empty");
+    for table in [
+        "mappingTable",
+        "locationTable",
+        "functionTable",
+        "linkTable",
+        "attributeTable",
+        "stackTable",
+    ] {
+        assert!(!arr(dict, table).is_empty(), "{table} has its zero entry");
+    }
+    let num = |v: &Json, k: &str| match v.get(k) {
+        Some(Json::Num(n)) => n.parse::<usize>().unwrap(),
+        None => 0,
+        other => panic!("{k}: {other:?}"),
+    };
+    let s = |i: usize| strings[i];
+    let (_, scope) = resource(&req, "resourceProfiles", "scopeProfiles");
+    let profile = &arr(&scope, "profiles")[0];
+    let st = profile.get("sampleType").unwrap();
+    assert_eq!((s(num(st, "typeStrindex")), s(num(st, "unitStrindex"))), ("samples", "count"));
+    let pt = profile.get("periodType").unwrap();
+    assert_eq!((s(num(pt, "typeStrindex")), s(num(pt, "unitStrindex"))), ("cpu", "nanoseconds"));
+    assert_eq!(profile.get("period"), Some(&Json::Str("10000000".into())));
+    // Three distinct places: a.exe+0x1000 twice (one sample, two
+    // timestamps), b.dll's function, the kernel.
+    let samples = arr(profile, "samples");
+    assert_eq!(samples.len(), 3);
+    let total: usize = samples.iter().map(|x| arr(x, "values").len()).sum();
+    assert_eq!(total, 4);
+    for x in samples {
+        assert_eq!(arr(x, "values").len(), arr(x, "timestampsUnixNano").len());
+    }
+    // Each sample's leaf: a location in a mapping named by its module;
+    // b.dll's has its function.
+    let stacks = arr(dict, "stackTable");
+    let locations = arr(dict, "locationTable");
+    let mappings = arr(dict, "mappingTable");
+    let functions = arr(dict, "functionTable");
+    let leaf = |x: &Json| {
+        let stack = &stacks[num(x, "stackIndex")];
+        let li = match &arr(stack, "locationIndices")[0] {
+            Json::Num(n) => n.parse::<usize>().unwrap(),
+            _ => panic!(),
+        };
+        &locations[li]
+    };
+    let mut modules: Vec<&str> = samples
+        .iter()
+        .map(|x| s(num(&mappings[num(leaf(x), "mappingIndex")], "filenameStrindex")))
+        .collect();
+    modules.sort();
+    assert_eq!(modules, ["a.exe", "b.dll", "kernel"]);
+    let b = samples
+        .iter()
+        .find(|x| s(num(&mappings[num(leaf(x), "mappingIndex")], "filenameStrindex")) == "b.dll")
+        .unwrap();
+    let line = &arr(leaf(b), "lines")[0];
+    assert_eq!(s(num(&functions[num(line, "functionIndex")], "nameStrindex")), "b_function");
+    // Attributes: the thread, its process, the mode.
+    let attrs = arr(dict, "attributeTable");
+    let keys: Vec<&str> = arr(b, "attributeIndices")
+        .iter()
+        .map(|i| match i {
+            Json::Num(n) => s(num(&attrs[n.parse::<usize>().unwrap()], "keyStrindex")),
+            _ => panic!(),
+        })
+        .collect();
+    for k in ["thread.id", "process.pid", "process.executable.name", "gala.cpu.mode"] {
+        assert!(keys.contains(&k), "{k} in {keys:?}");
+    }
+    // The link: the sample's thread span in the trace export.
+    let thread_span = spans(&e).into_iter().find(|x| x.name == "thread 8").unwrap();
+    let link = &arr(dict, "linkTable")[num(b, "linkIndex")];
+    assert_eq!(text(link, "spanId"), thread_span.id);
+    assert_eq!(text(link, "traceId"), thread_span.trace);
+}
+
+#[test]
+fn a_boot_without_samples_has_no_profile() {
+    assert!(export().profiles.is_empty());
 }

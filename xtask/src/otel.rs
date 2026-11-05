@@ -35,6 +35,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
 /// One boot to convert.
+/// Function names for a module's offsets, in order (None: unknown).
+pub type Symbols<'a> = &'a dyn Fn(&str, &[u64]) -> Vec<Option<String>>;
+
 pub struct Boot<'a> {
     pub serial: &'a str,
     pub events: &'a str,
@@ -45,6 +48,9 @@ pub struct Boot<'a> {
     /// Wall time (Unix ns) of the boot's time 0 (the stream's `t` is ns
     /// since boot).
     pub start_unix_ns: u64,
+    /// Function names for a module's offsets (the kernel's: its ELF;
+    /// a program's: its symbols), for the profile; None: addresses only.
+    pub symbols: Option<Symbols<'a>>,
 }
 
 /// The OTLP/JSON requests (each one an `Export*ServiceRequest`, the body
@@ -53,6 +59,10 @@ pub struct Export {
     pub traces: Vec<String>,
     pub logs: Vec<String>,
     pub metrics: String,
+    /// An `ExportProfilesServiceRequest` (profiles v1development, the body
+    /// of a POST to `/v1development/profiles`) of the `sample` events;
+    /// empty when the stream has none.
+    pub profiles: String,
     pub report: Report,
 }
 
@@ -1036,6 +1046,12 @@ pub fn convert(boot: &Boot) -> Export {
                 st.waits.insert(tid, (t, name, generic_attrs(ev)));
                 st.report.mapped(&kind, "paired with its return; else span event");
             }
+            "sample" => {
+                // Profiler samples: the profile (`profiles_json`), linked to
+                // their threads' spans, not span events.
+                st.report
+                    .mapped(&kind, "the profile (.profiles.json), linked to its thread's span");
+            }
             "rec" => {
                 // Record/replay data (R7), bytes for `um --replay`.
                 *st.report.not_mapped.entry("rec (record/replay data)".into()).or_default() += 1;
@@ -1560,7 +1576,8 @@ pub fn convert(boot: &Boot) -> Export {
         m.push_str("]}}");
     }
     m.push_str("]}]}]}");
-    Export { traces, logs: log_requests, metrics: m, report: st.report }
+    let profiles = profiles_json(&events, &st, &trace_id, &res_json, base, boot.symbols);
+    Export { traces, logs: log_requests, metrics: m, profiles, report: st.report }
 }
 
 /// Spans per OTLP request (a collector's default body limit is 20 MiB;
@@ -1585,9 +1602,12 @@ pub fn post(endpoint: &str, export: &Export) -> Result<String, String> {
         .iter()
         .map(|b| ("traces", b))
         .chain(export.logs.iter().map(|b| ("logs", b)))
-        .chain(std::iter::once(("metrics", &export.metrics)));
+        .chain(std::iter::once(("metrics", &export.metrics)))
+        .chain((!export.profiles.is_empty()).then_some(("profiles", &export.profiles)));
     for (signal, body) in bodies {
-        let path = format!("{prefix}/v1/{signal}");
+        // Profiles are still a development signal: their own path.
+        let version = if signal == "profiles" { "v1development" } else { "v1" };
+        let path = format!("{prefix}/{version}/{signal}");
         let status = http_post(&host, &path, body)?;
         if !(200..300).contains(&status.0) {
             return Err(format!("POST {path} to {host}: HTTP {}: {}", status.0, status.1.trim()));
@@ -1630,3 +1650,271 @@ fn http_post(host: &str, path: &str, body: &str) -> Result<(u16, String), String
 
 #[cfg(test)]
 mod tests;
+
+// ---- profiles (opentelemetry-proto profiles/v1development) ----
+
+/// Tables with a zero value at index 0 and no duplicates, as the profiles
+/// dictionary requires: each entry's JSON, by that JSON.
+struct Table {
+    entries: Vec<String>,
+    index: HashMap<String, usize>,
+}
+
+impl Table {
+    fn new(zero: &str) -> Table {
+        let mut t = Table { entries: Vec::new(), index: HashMap::new() };
+        t.add(zero.to_string());
+        t
+    }
+    fn add(&mut self, json: String) -> usize {
+        if let Some(&i) = self.index.get(&json) {
+            return i;
+        }
+        self.entries.push(json.clone());
+        self.index.insert(json, self.entries.len() - 1);
+        self.entries.len() - 1
+    }
+    fn json(&self) -> String {
+        format!("[{}]", self.entries.join(","))
+    }
+}
+
+/// Addresses in the heaviest blocks a module may have symbolized (looking
+/// up every address of a large program's run is slow).
+const SYMBOLIZED_BLOCKS: usize = 400;
+
+/// The profile of the boot's `sample` events (empty when none): one
+/// Profile (sample type samples/count, period cpu/nanoseconds), a sample
+/// per (location, thread attributes, the thread's span) with the
+/// timestamps it was taken at; a location per address, in the mapping of
+/// the module there, with its function when `symbols` knows it.
+fn profiles_json(
+    events: &[(u64, Json)],
+    st: &State,
+    trace_id: &str,
+    res_json: &str,
+    base: u64,
+    symbols: Option<Symbols>,
+) -> String {
+    struct Img {
+        base: u64,
+        size: u64,
+        name: String,
+    }
+    let mut thread_pid: HashMap<u64, u64> = HashMap::new();
+    let mut names: HashMap<u64, String> = HashMap::new();
+    let mut images: HashMap<u64, Vec<Img>> = HashMap::new();
+    // (t, tid, user mode, rip)
+    let mut samples: Vec<(u64, u64, bool, u64)> = Vec::new();
+    for (t, ev) in events {
+        match ev.str("ev") {
+            Some("thread create") => {
+                if let (Some(tid), Some(pid)) = (ev.u64("tid"), ev.u64("pid")) {
+                    thread_pid.insert(tid, pid);
+                }
+            }
+            Some("process start") => {
+                if let (Some(pid), Some(n)) = (ev.u64("pid"), ev.str("name")) {
+                    names.insert(pid, n.to_string());
+                }
+            }
+            Some("image") => {
+                if let (Some(pid), Some(b), Some(size)) =
+                    (ev.u64("pid"), ev.u64("base"), ev.u64("size"))
+                {
+                    let n = ev.str("name").or(ev.str("path")).unwrap_or("?");
+                    let n = n.rsplit(['\\', '/']).next().unwrap_or(n).to_string();
+                    images.entry(pid).or_default().push(Img { base: b, size, name: n });
+                }
+            }
+            Some("sample") => {
+                if let (Some(by), Some(rip)) = (ev.u64("by"), ev.u64("rip")) {
+                    samples.push((*t, by, ev.str("mode") == Some("user"), rip));
+                }
+            }
+            _ => {}
+        }
+    }
+    if samples.is_empty() {
+        return String::new();
+    }
+    // Where each sample is: (module, its start and end, the offset).
+    const KERNEL_START: u64 = 0xffff_8000_0000_0000;
+    let place = |tid: u64, user: bool, rip: u64| -> (String, u64, u64, u64) {
+        if !user {
+            return ("kernel".into(), KERNEL_START, u64::MAX, rip);
+        }
+        let pid = thread_pid.get(&tid).copied().unwrap_or(0);
+        match images
+            .get(&pid)
+            .and_then(|v| v.iter().find(|i| (i.base..i.base + i.size).contains(&rip)))
+        {
+            Some(i) => (i.name.clone(), i.base, i.base + i.size, rip - i.base),
+            None => (String::new(), 0, 0, rip),
+        }
+    };
+    // Function names: the heaviest blocks' addresses, per module.
+    let mut blocks: HashMap<(String, u64), usize> = HashMap::new();
+    for &(_, tid, user, rip) in &samples {
+        let (m, _, _, off) = place(tid, user, rip);
+        *blocks.entry((m, off & !0xff)).or_default() += 1;
+    }
+    let mut heavy: Vec<((String, u64), usize)> = blocks.into_iter().collect();
+    heavy.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    heavy.truncate(SYMBOLIZED_BLOCKS);
+    let heavy: std::collections::HashSet<(String, u64)> =
+        heavy.into_iter().map(|(k, _)| k).collect();
+    let mut wanted: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    for &(_, tid, user, rip) in &samples {
+        let (m, _, _, off) = place(tid, user, rip);
+        if !m.is_empty() && heavy.contains(&(m.clone(), off & !0xff)) {
+            let v = wanted.entry(m).or_default();
+            if !v.contains(&off) {
+                v.push(off);
+            }
+        }
+    }
+    let mut function_of: HashMap<(String, u64), String> = HashMap::new();
+    if let Some(symbolize) = symbols {
+        for (m, offs) in &wanted {
+            for (off, name) in offs.iter().zip(symbolize(m, offs)) {
+                if let Some(name) = name {
+                    function_of.insert((m.clone(), *off), name);
+                }
+            }
+        }
+    }
+
+    let mut strings = Table::new("\"\"");
+    let mut s = |text: &str| {
+        let mut j = String::new();
+        esc(&mut j, text);
+        strings.add(j)
+    };
+    let mut mappings = Table::new("{}");
+    let mut functions = Table::new("{}");
+    let mut locations = Table::new("{}");
+    let mut stacks = Table::new("{}");
+    let mut attributes = Table::new("{}");
+    let mut links = Table::new(&format!(
+        "{{\"traceId\":\"{}\",\"spanId\":\"{}\"}}",
+        "0".repeat(32),
+        "0".repeat(16)
+    ));
+    // (stack, attributes, link) -> timestamps.
+    let mut grouped: BTreeMap<(usize, Vec<usize>, usize), Vec<u64>> = BTreeMap::new();
+    let mut thread_span: HashMap<u64, Option<u64>> = HashMap::new();
+    for &(t, tid, user, rip) in &samples {
+        let (m, start, limit, off) = place(tid, user, rip);
+        let mapping = if m.is_empty() {
+            0
+        } else {
+            let f = s(&m);
+            mappings.add(format!(
+                "{{\"memoryStart\":\"{start}\",\"memoryLimit\":\"{limit}\",\"filenameStrindex\":{f}}}"
+            ))
+        };
+        let lines = match function_of.get(&(m.clone(), off)) {
+            Some(name) => {
+                let (n, f) = (s(name), s(&m));
+                let func =
+                    functions.add(format!("{{\"nameStrindex\":{n},\"filenameStrindex\":{f}}}"));
+                format!(",\"lines\":[{{\"functionIndex\":{func}}}]")
+            }
+            None => String::new(),
+        };
+        let mapping_field =
+            if mapping == 0 { String::new() } else { format!("\"mappingIndex\":{mapping},") };
+        let location = locations.add(format!("{{{mapping_field}\"address\":\"{rip}\"{lines}}}"));
+        let stack = stacks.add(format!("{{\"locationIndices\":[{location}]}}"));
+        let pid = thread_pid.get(&tid).copied().unwrap_or(0);
+        let mut attrs = Vec::new();
+        let mut int_attr = |key: &str, v: u64, s: &mut dyn FnMut(&str) -> usize| {
+            let k = s(key);
+            attributes.add(format!("{{\"keyStrindex\":{k},\"value\":{{\"intValue\":\"{v}\"}}}}"))
+        };
+        attrs.push(int_attr("thread.id", tid, &mut s));
+        attrs.push(int_attr("process.pid", pid, &mut s));
+        let mut str_attr = |key: &str, v: &str, s: &mut dyn FnMut(&str) -> usize| {
+            let k = s(key);
+            let mut j = String::new();
+            esc(&mut j, v);
+            attributes.add(format!("{{\"keyStrindex\":{k},\"value\":{{\"stringValue\":{j}}}}}"))
+        };
+        if let Some(n) = names.get(&pid) {
+            attrs.push(str_attr("process.executable.name", n, &mut s));
+        }
+        attrs.push(str_attr("gala.cpu.mode", if user { "user" } else { "kernel" }, &mut s));
+        attrs.sort_unstable();
+        // The thread's span in the trace export: profiles and traces meet.
+        let span = *thread_span
+            .entry(tid)
+            .or_insert_with(|| st.find_thread_span(tid).map(|i| st.spans[i].id));
+        let link = match span {
+            Some(id) => {
+                links.add(format!("{{\"traceId\":\"{trace_id}\",\"spanId\":\"{id:016x}\"}}"))
+            }
+            None => 0,
+        };
+        grouped.entry((stack, attrs, link)).or_default().push(t);
+    }
+    let first = samples.iter().map(|s| s.0).min().unwrap_or(0);
+    let last = samples.iter().map(|s| s.0).max().unwrap_or(0);
+    // The period: the median gap between one thread's samples on one CPU
+    // is not known here; `sample_hz=`'s default (100) is 10 ms.
+    let period = 10_000_000u64;
+    let (samples_s, count_s, cpu_s, ns_s) = (s("samples"), s("count"), s("cpu"), s("nanoseconds"));
+    let mut sample_json = Vec::new();
+    for ((stack, attrs, link), times) in &grouped {
+        let attrs: Vec<String> = attrs.iter().map(|a| a.to_string()).collect();
+        let values: Vec<&str> = times.iter().map(|_| "\"1\"").collect();
+        let stamps: Vec<String> = times.iter().map(|t| format!("\"{}\"", base + t)).collect();
+        let link = if *link == 0 { String::new() } else { format!(",\"linkIndex\":{link}") };
+        sample_json.push(format!(
+            "{{\"stackIndex\":{stack},\"attributeIndices\":[{}]{link},\"values\":[{}],\"timestampsUnixNano\":[{}]}}",
+            attrs.join(","),
+            values.join(","),
+            stamps.join(",")
+        ));
+    }
+    // A profile id from the trace id (16 bytes, not all zero), base64.
+    let id_bytes: Vec<u8> = (0..16)
+        .map(|i| {
+            u8::from_str_radix(trace_id.get(2 * i..2 * i + 2).unwrap_or("01"), 16).unwrap_or(1)
+        })
+        .collect();
+    let profile_id = base64(&id_bytes);
+    let profile = format!(
+        "{{\"sampleType\":{{\"typeStrindex\":{samples_s},\"unitStrindex\":{count_s}}},\"samples\":[{}],\"timeUnixNano\":\"{}\",\"durationNano\":\"{}\",\"periodType\":{{\"typeStrindex\":{cpu_s},\"unitStrindex\":{ns_s}}},\"period\":\"{period}\",\"profileId\":\"{profile_id}\"}}",
+        sample_json.join(","),
+        base + first,
+        last - first
+    );
+    format!(
+        "{{\"resourceProfiles\":[{{\"resource\":{res_json},\"scopeProfiles\":[{{\"scope\":{SCOPE},\"profiles\":[{profile}]}}]}}],\"dictionary\":{{\"mappingTable\":{},\"locationTable\":{},\"functionTable\":{},\"linkTable\":{},\"stringTable\":{},\"attributeTable\":{},\"stackTable\":{}}}}}",
+        mappings.json(),
+        locations.json(),
+        functions.json(),
+        links.json(),
+        strings.json(),
+        attributes.json(),
+        stacks.json()
+    )
+}
+
+/// Standard base64 (with padding).
+fn base64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}

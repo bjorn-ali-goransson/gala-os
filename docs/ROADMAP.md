@@ -1060,7 +1060,9 @@ child under its parent with a span link to its creator (scenario
 `events_process`). From OT3: the `ipc` events (pipes with byte offsets,
 completion packets with who queued them and when; scenario
 `events_ipc`) become spans linked write to read and post to dequeue,
-and the converter names the slowest hand-offs.
+and the converter names the slowest hand-offs. The sampling profiler's
+samples go to OTLP's profiles signal (v1development), each linked to
+its thread's span.
 
 **Next**:
 1. OT2: trace context in the kernel; system calls, waits, faults, I/O
