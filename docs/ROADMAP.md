@@ -613,9 +613,14 @@ samples).
    of a page its script changed, about 410 s; `chromium_https`: an
    `https://` page from the guest's nginx, its CA in crypt32's ROOT
    store, about 320 s); next a page from the host network, and
-   the profile's top items (PartitionAlloc's SpinningMutex spinning,
-   5.5%; the kernel's `vm::allocate`, 4.7%, and address-space guard
-   drops, 3.8%); the 2 utilities a run that still end "after 15
+   the profile's top items on a release kernel (`cargo xtask profile
+   --release`: the kernel is 22% of samples, 124 s in the kernel
+   against 215 s for the debug kernel the gate boots, whose lockdep
+   alone is 13% of kernel samples): NtWriteFile to the serial console,
+   image views (`prepare_relocated`), `on_user_exception`,
+   `Process::read_u64`; long interrupts-off stretches (the profiler's
+   lost samples); the run edits of `Vad::commit` were the largest and
+   are done; the 2 utilities a run that still end "after 15
    seconds with no connection" (the browser's UI thread answers their
    ping late); the on_device_model utility's delay import of `dxgi.dll`
    (G0). After it:
