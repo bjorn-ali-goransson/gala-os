@@ -151,6 +151,12 @@ unsafe extern "system" {
         attributes: *const ObjectAttributes,
         client_id: *const [usize; 2],
     ) -> u32;
+    fn NtOpenThread(
+        handle: *mut usize,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        client_id: *const [usize; 2],
+    ) -> u32;
     fn NtTerminateProcess(process: isize, status: u32) -> u32;
     fn RtlNtStatusToDosError(status: u32) -> u32;
     fn LdrLoadDll(

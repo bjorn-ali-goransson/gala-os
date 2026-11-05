@@ -1,7 +1,6 @@
-//! gala's oleacc.dll (accessibility (Active Accessibility): for now the functions FileZilla imports, none implemented yet.
-//! Each reports itself to the missing-features ledger and ends the process
-//! when called (`gala_stubs`), so the ledger shows which ones a program
-//! uses.
+//! gala's oleacc.dll (Active Accessibility): the functions FileZilla and
+//! Chromium import, none implemented yet; each reports itself to the
+//! missing-features ledger and fails as documented (`unimplemented.rs`).
 
 #![no_std]
 

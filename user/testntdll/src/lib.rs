@@ -283,6 +283,9 @@ syscall_stubs! {
     NtCompareObjects = 0x7f90, fn(first: usize, second: usize);
     // Process suspension (gala's numbers, unverified).
     NtSuspendProcess = 0x7f91, fn(process: usize);
+    NtOpenThread = 0x7f93, fn(
+        handle: *mut usize, access: u32, attributes: *const ObjectAttributes, client_id: *const [usize; 2]
+    );
     NtResumeProcess = 0x7f92, fn(process: usize);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);

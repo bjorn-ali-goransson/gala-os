@@ -1296,26 +1296,24 @@ pub extern "system" fn GetThreadId(h: Handle) -> u32 {
     basic[3] as u32 // ClientId.UniqueThread
 }
 
-/// OpenThread: the current thread only (a duplicate of its pseudo
-/// handle); other threads need NtOpenThread (reported).
+/// OpenThread: NtOpenThread on the thread's id (ERROR_INVALID_PARAMETER
+/// for an id no thread has).
 #[unsafe(no_mangle)]
 pub extern "system" fn OpenThread(access: u32, inherit: Bool, id: u32) -> Handle {
-    if id != GetCurrentThreadId() {
-        unsupported(b"kernel32.dll!OpenThread(another thread)", id.into());
-        return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
+    let attributes = ObjectAttributes {
+        length: size_of::<ObjectAttributes>() as u32,
+        root_directory: 0,
+        object_name: core::ptr::null(),
+        attributes: if inherit != 0 { 2 } else { 0 }, // OBJ_INHERIT
+        security_descriptor: 0,
+        security_quality_of_service: 0,
+    };
+    let client_id = [0usize, id as usize];
+    let mut h = 0usize;
+    // SAFETY: valid output, attributes and CLIENT_ID.
+    let status = unsafe { NtOpenThread(&mut h, access, &attributes, &client_id) };
+    if status != STATUS_SUCCESS {
+        return fail(status, core::ptr::null_mut());
     }
-    let mut h = core::ptr::null_mut();
-    if DuplicateHandle(
-        GetCurrentProcess(),
-        GetCurrentThread(),
-        GetCurrentProcess(),
-        &mut h,
-        access,
-        inherit,
-        0,
-    ) == 0
-    {
-        return core::ptr::null_mut();
-    }
-    h
+    h as Handle
 }

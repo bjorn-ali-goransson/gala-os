@@ -8,7 +8,9 @@
 //! saturated values, an invalid one), GetCurrentThreadStackLimits (the
 //! reserved stack: TEB DeallocationStack to StackBase), Get/
 //! SetPriorityClass, CreateRemoteThreadEx in this process with an ideal
-//! processor and a group affinity in its attribute list. Prints `kernel32_thread_test: ok` or
+//! processor and a group affinity in its attribute list; OpenThread of
+//! another thread by its id (waited on through that handle; an unknown id
+//! is ERROR_INVALID_PARAMETER). Prints `kernel32_thread_test: ok` or
 //! exits with the number of the failing check.
 
 #![no_std]
@@ -275,6 +277,24 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         c.ok(!h.is_null(), GetLastError().into())?;
         c.eq(GetThreadId(h).into(), me.into())?;
         c.ok(CloseHandle(h) != 0, 0)?;
+        // OpenThread of another thread (Crashpad's handler opens its
+        // client's): the thread's own object, waited on, its exit code;
+        // a thread id that does not exist is ERROR_INVALID_PARAMETER.
+        let mut tid = 0u32;
+        let t = CreateThread(core::ptr::null_mut(), 0, worker, 3 as *mut c_void, 4, &mut tid);
+        c.ok(!t.is_null() && tid != 0, GetLastError().into())?; // CREATE_SUSPENDED
+        let other = OpenThread(0x0010_0000 | 0x0040 | 0x0002, 0, tid); // SYNCHRONIZE, QUERY, SUSPEND_RESUME
+        c.ok(!other.is_null(), GetLastError().into())?;
+        c.eq(GetThreadId(other).into(), tid.into())?;
+        c.ok(ResumeThread(other) == 1, 0)?;
+        c.eq(WaitForSingleObject(other, 10_000).into(), 0)?;
+        let mut code = 0;
+        c.ok(GetExitCodeThread(other, &mut code) != 0 && code == 99, code.into())?;
+        CloseHandle(other);
+        CloseHandle(t);
+        let none = OpenThread(0x0040, 0, 0x7fff_fff0);
+        c.ok(none.is_null(), 0)?;
+        c.eq(GetLastError().into(), 87)?;
     }
     Ok(())
 }

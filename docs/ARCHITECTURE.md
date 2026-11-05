@@ -486,7 +486,9 @@ numbers and the version reported to programs depend on it.
   NtQuery/NtSetSecurityObject, 0x7f22 NtAllocateLocallyUniqueId, 0x7f23
   NtSetInformationToken, 0x7f24 NtCreateDirectoryObject, 0x7f90
   NtCompareObjects (CompareObjectHandles), 0x7f91/0x7f92
-  NtSuspendProcess/NtResumeProcess (every thread but the caller's).
+  NtSuspendProcess/NtResumeProcess (every thread but the caller's), 0x7f93
+  NtOpenThread (the thread's own object by its ClientId; kernel32's
+  OpenThread).
   NtQuerySection is exported by ntdll; NtQueryInformationProcess answers
   ProcessHandleCount (class 20). NtLockFile
   (0x123), NtUnlockFile (0x1c5) and NtSetValueKey (0x60) use Windows-range
@@ -5184,6 +5186,10 @@ stations and desktops a program creates are refused until stage 3).
   scheme. uxtheme: DrawThemeBackgroundEx as ordinal 47.
 - ntdll: RtlGetDeviceFamilyInfoEnum (10.0.26100.<UBR>, the desktop
   family, an unknown form).
+- oleacc: no default IAccessible yet. CreateStdAccessibleObject,
+  LresultFromObject, AccessibleObjectFromWindow, AccessibleChildren and
+  WindowFromAccessibleObject are real exports that fail as documented
+  (E_NOTIMPL) and are recorded.
 
 ### DirectWrite
 
