@@ -383,6 +383,10 @@ syscall_stubs! {
     // gala's own service: report a gap to the kernel's missing-features
     // ledger (not part of Windows; gala's DLLs only).
     GalaRecordMissing = 0x7f00, fn(name: *const u8, length: usize, what: u32, detail: u64);
+    // gala's own: the exception no handler took, before the top-level
+    // filter runs (null: the filter continued); the kernel's crash report
+    // describes it whatever status the process then ends with.
+    GalaUnhandledException = 0x7f5c, fn(record: *const u8, context: *const u8);
     // Waitable timers (gala's numbers, unverified).
     NtCreateTimer = 0xd9, fn(
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, kind: u32
@@ -681,8 +685,10 @@ fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
         file,
     );
     NtClose(file);
+    // The section's own status (not a bad format: a kernel out of memory
+    // says so, and LoadLibrary's error tells it apart).
     if st != STATUS_SUCCESS {
-        return Err(STATUS_INVALID_IMAGE_FORMAT);
+        return Err(st);
     }
     let (mut base, mut size) = (0usize, 0usize);
     // ViewShare, PAGE_READWRITE (image views take their own protections).
@@ -691,7 +697,7 @@ fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
     NtClose(section);
     match st {
         STATUS_SUCCESS | STATUS_IMAGE_NOT_AT_BASE => {}
-        _ => return Err(STATUS_INVALID_IMAGE_FORMAT),
+        _ => return Err(st),
     }
     // Image sections take 32-bit images too; a 64-bit process loads one
     // as a module only if it is an IL-only .NET assembly (no code runs).
@@ -1812,6 +1818,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0181, 1021), // CHILD_MUST_BE_VOLATILE -> ERROR_CHILD_MUST_BE_VOLATILE
     (0xc000_0120, 995),  // CANCELLED -> ERROR_OPERATION_ABORTED
     (0xc000_0135, 126),  // DLL_NOT_FOUND -> ERROR_MOD_NOT_FOUND
+    (0xc000_012f, 193),  // INVALID_IMAGE_NOT_MZ -> ERROR_BAD_EXE_FORMAT
     (0xc000_0138, 182),  // ORDINAL_NOT_FOUND -> ERROR_INVALID_ORDINAL
     (0xc000_0139, 127),  // ENTRYPOINT_NOT_FOUND -> ERROR_PROC_NOT_FOUND
     (0xc000_0225, 1168), // NOT_FOUND -> ERROR_NOT_FOUND

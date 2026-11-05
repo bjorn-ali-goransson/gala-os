@@ -234,13 +234,16 @@ pub struct Node {
     /// NT times (100 ns since 1601).
     pub created: u64,
     pub written: u64,
-    /// Changes with every change of the contents (and on data mapping),
-    /// unique across all nodes: what caches of the contents key on.
+    /// Changes with every change of the contents (and when a writable
+    /// data section maps the file or ends), unique across all nodes: what
+    /// caches of the contents key on.
     version: u64,
     opens: Opens,
     delete_pending: bool,
-    /// Sections mapping the file, and the largest size they map.
+    /// Sections mapping the file, how many of them can write it, and the
+    /// largest size they map.
     map_count: u32,
+    write_maps: u32,
     mapped_size: u64,
     /// Its security descriptor (self-relative; nt::security), if one was
     /// assigned (files gala creates at boot have none).
@@ -259,10 +262,13 @@ fn next_version() -> u64 {
 }
 
 impl Node {
-    /// The contents' version, or None while a data section maps the file
-    /// (writes through its views do not pass through here).
+    /// The contents' version, or None while a writable data section maps
+    /// the file (writes through its views do not pass through here). A
+    /// read-only one cannot change it: image sections of the file keep
+    /// sharing their cached layout (Chromium maps chrome.dll as data while
+    /// every process maps it as an image).
     pub fn version(&self) -> Option<u64> {
-        (self.map_count == 0).then_some(self.version)
+        (self.write_maps == 0).then_some(self.version)
     }
 
     pub fn is_dir(&self) -> bool {
@@ -396,6 +402,7 @@ impl RamFs {
             opens: Opens::default(),
             delete_pending: false,
             map_count: 0,
+            write_maps: 0,
             mapped_size: 0,
             security: None,
             boot: true,
@@ -553,6 +560,7 @@ impl RamFs {
             opens: Opens::default(),
             delete_pending: false,
             map_count: 0,
+            write_maps: 0,
             mapped_size: 0,
             security: None,
             boot: !self.recording && !self.replaying,
@@ -890,8 +898,9 @@ impl RamFs {
 
     /// Registers a section mapping the first `size` bytes of file `id`
     /// (the file must be that large): its pages stay put and the file
-    /// cannot shrink below `size` until `unmap`.
-    pub fn map(&mut self, id: NodeId, size: u64) -> Result<(), FsError> {
+    /// cannot shrink below `size` until `unmap`. A `writable` one voids the
+    /// version until it ends (`Node::version`).
+    pub fn map(&mut self, id: NodeId, size: u64, writable: bool) -> Result<(), FsError> {
         let node = self.node_mut(id)?;
         let Kind::File(contents) = &mut node.kind else { return Err(FsError::IsADirectory) };
         if size > contents.len() as u64 {
@@ -899,15 +908,24 @@ impl RamFs {
         }
         contents.paged()?;
         node.map_count += 1;
-        node.version = next_version();
+        if writable {
+            node.write_maps += 1;
+            node.version = next_version();
+        }
         node.mapped_size = node.mapped_size.max(size);
         Ok(())
     }
 
-    /// Ends a mapping registered with `map`.
-    pub fn unmap(&mut self, id: NodeId) {
+    /// Ends a mapping registered with `map` (as `writable` as it was): a
+    /// writable one may have changed the contents, so they get a new
+    /// version.
+    pub fn unmap(&mut self, id: NodeId, writable: bool) {
         if let Ok(node) = self.node_mut(id) {
             node.map_count = node.map_count.saturating_sub(1);
+            if writable {
+                node.write_maps = node.write_maps.saturating_sub(1);
+                node.version = next_version();
+            }
             if node.map_count == 0 {
                 node.mapped_size = 0;
             }
@@ -1447,8 +1465,8 @@ mod tests {
         let mut f = fs();
         let id = f.create(ROOT, &w("m"), false, 1).unwrap();
         f.write(id, 0, &[7; 5000], 2).unwrap();
-        assert_eq!(f.map(id, 0x3000), Err(FsError::NoMemory), "larger than the file");
-        f.map(id, 5000).unwrap();
+        assert_eq!(f.map(id, 0x3000, true), Err(FsError::NoMemory), "larger than the file");
+        f.map(id, 5000, true).unwrap();
         let first = f.page_address(id, 0).unwrap();
         assert_eq!(first % PAGE, 0);
         f.write(id, 9000, b"grow", 3).unwrap();
@@ -1456,8 +1474,13 @@ mod tests {
         assert!(f.page_address(id, 2).is_some());
         assert_eq!(f.set_size(id, 100, 4), Err(FsError::UserMapped));
         f.set_size(id, 6000, 4).unwrap();
-        f.unmap(id);
+        f.unmap(id, true);
         f.set_size(id, 100, 5).unwrap();
+        // A read-only mapping blocks truncation too.
+        f.map(id, 100, false).unwrap();
+        assert_eq!(f.set_size(id, 50, 6), Err(FsError::UserMapped));
+        f.unmap(id, false);
+        f.set_size(id, 50, 7).unwrap();
     }
 
     #[test]
@@ -1474,7 +1497,7 @@ mod tests {
         };
         let mut f = fs();
         let id = f.add_static_file(ROOT, &w("m"), &BIG, false, 1).unwrap();
-        f.map(id, BIG.len() as u64).unwrap();
+        f.map(id, BIG.len() as u64, true).unwrap();
         let made = |f: &RamFs| match &f.node(id).unwrap().kind {
             Kind::File(Data::Paged { pages, .. }) => pages.iter().filter(|p| p.is_some()).count(),
             _ => usize::MAX,
@@ -1492,7 +1515,7 @@ mod tests {
         assert_eq!(f.page_address(id, 3), Some(addr));
         f.read(id, PAGE as u64, &mut b).unwrap();
         assert_eq!(b, [b'x', 2, 2, 2]);
-        f.unmap(id);
+        f.unmap(id, true);
         // Shrinking ends the module's bytes there too: growing shows zeros.
         f.set_size(id, 5, 1).unwrap();
         f.set_size(id, 2 * PAGE as u64, 1).unwrap();
@@ -1508,7 +1531,7 @@ mod tests {
         let mut f = fs();
         let id = f.add_static_file(ROOT, &w("s.dll"), DATA, false, 1).unwrap();
         assert_eq!(f.page_address(id, 0), None);
-        f.map(id, 6).unwrap();
+        f.map(id, 6, false).unwrap();
         assert!(f.page_address(id, 0).is_some());
         let mut b = [0u8; 6];
         f.read(id, 0, &mut b).unwrap();
@@ -1542,10 +1565,21 @@ mod tests {
         assert_ne!(v, v2);
         f.set_basic(a, Some(9), Some(9), None).unwrap();
         assert_eq!(f.node(a).unwrap().version(), Some(v2));
-        f.map(a, 2).unwrap();
+        // A read-only data section cannot change the contents: the
+        // version stays (an image section of the file shares its layout).
+        f.map(a, 2, false).unwrap();
+        assert_eq!(f.node(a).unwrap().version(), Some(v2));
+        f.unmap(a, false);
+        assert_eq!(f.node(a).unwrap().version(), Some(v2));
+        // A writable one can, behind the file system's back.
+        f.map(a, 2, true).unwrap();
         assert_eq!(f.node(a).unwrap().version(), None);
-        f.unmap(a);
-        assert_ne!(f.node(a).unwrap().version(), Some(v2));
+        f.map(a, 2, false).unwrap();
+        f.unmap(a, true);
+        let v3 = f.node(a).unwrap().version().unwrap();
+        assert_ne!(v3, v2);
+        f.unmap(a, false);
+        assert_eq!(f.node(a).unwrap().version(), Some(v3));
     }
 
     /// A boot tree: \\boot\\keep.txt and \\boot\\gone.txt (static files).

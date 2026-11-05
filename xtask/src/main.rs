@@ -451,6 +451,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("straddle_test", "ntdll.dll", "Windows/System32"),
     ("statedump_test", "ntdll.dll", "Windows/System32"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
+    ("crash_filtered", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
     ("shootdown_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
@@ -5857,6 +5858,23 @@ const SCENARIOS: &[Scenario] = &[
             "(crash.exe+0x",
             "writing address 0x0",
             "process crash.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // The same crash taken by a top-level filter that ends the process
+        // with its own code (Crashpad's 0xffff7002 when its handler cannot
+        // snapshot): the report still describes the exception.
+        name: "crash_filtered",
+        cmdline: "qemu_exit run=crash.exe args=filter",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: the top-level filter ends the process",
+            "crash report: crash.exe (pid 4) ended with status 0xffff7002 after an unhandled \
+             exception 0xc0000005 (access violation) in thread",
+            "(crash.exe+0x",
+            "writing address 0x0",
+            "process crash.exe (pid 4) exited with status 0xffff7002",
             BOOT_OK_MARKER,
         ],
     },

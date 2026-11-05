@@ -167,6 +167,10 @@ pub const GALA_REQUEST_HANDOVER: u32 = 0x7f5a;
 /// gala's test-only report of the last kernel handover's pause (how long
 /// the programs were stopped), also in user/ntrt.
 pub const GALA_HANDOVER_PAUSE: u32 = 0x7f5b;
+/// gala's own: ntdll reports the exception no handler took (its record
+/// and context), or none when the top-level filter continued execution
+/// (nt::crashreport).
+pub const GALA_UNHANDLED_EXCEPTION: u32 = 0x7f5c;
 pub const NT_WRITE_FILE: u32 = 0x0008;
 pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
 pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
@@ -379,6 +383,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
     (GALA_REQUEST_HANDOVER, "GalaRequestHandover", 0, gala_request_handover),
     (GALA_HANDOVER_PAUSE, "GalaHandoverPause", 1, gala_handover_pause),
+    (GALA_UNHANDLED_EXCEPTION, "GalaUnhandledException", 2, gala_unhandled_exception),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -3638,6 +3643,35 @@ pub fn set_handover_pause(generation: u64, ms: u64) {
 /// a handover ends up to that much late (its deadline is kept: it ends
 /// at the deadline or when the threads go on, whichever is later); tests
 /// bound their sleeps by it instead of guessing the handover's time.
+/// GalaUnhandledException(ExceptionRecord, ContextRecord): ntdll's
+/// report of an exception no handler took, before it calls the top-level
+/// filter; (0, 0) when the filter continued execution. Kept as the
+/// process's crash report, printed when it ends (nt::crashreport).
+fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
+    let (record, context) = (arg!(call, 0), arg!(call, 1));
+    if record == 0 {
+        *call.process.unhandled_exception.lock() = None;
+        return NtStatus::SUCCESS;
+    }
+    // EXCEPTION_RECORD: code +0, address +0x10, parameter count +0x18,
+    // parameters +0x20; CONTEXT: rax..r15 from +0x78.
+    let code = tri!(call.read_u64(record)) as u32;
+    let rip = tri!(call.read_u64(record + 0x10));
+    let count = tri!(call.read_u64(record + 0x18)) as u32;
+    let access = if code == NtStatus::ACCESS_VIOLATION.0 && count >= 2 {
+        Some((tri!(call.read_u64(record + 0x28)), tri!(call.read_u64(record + 0x20))))
+    } else {
+        None
+    };
+    let mut regs = [0u64; 16];
+    for (i, r) in regs.iter_mut().enumerate() {
+        *r = tri!(call.read_u64(context + 0x78 + 8 * i as u64));
+    }
+    let note = super::crashreport::Note::new(&call.process, NtStatus(code), rip, access, regs);
+    *call.process.unhandled_exception.lock() = Some(note);
+    NtStatus::SUCCESS
+}
+
 fn gala_handover_pause(call: &mut Call<'_>) -> NtStatus {
     use core::sync::atomic::Ordering;
     let generation = HANDOVER_PAUSE[0].load(Ordering::Acquire);

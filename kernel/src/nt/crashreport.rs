@@ -10,7 +10,11 @@
 //! allocation); when the process ends with that exception's code as its
 //! status (the unhandled exception ended it: from the kernel when there
 //! is no dispatcher, from ntdll's unhandled-exception path otherwise),
-//! `report` prints it as `crash report:` lines.
+//! `report` prints it as `crash report:` lines. ntdll also reports an
+//! exception no handler took before it calls the top-level filter
+//! (GalaUnhandledException): the process's report then comes whatever
+//! status it ends with (Chromium's Crashpad ends it with 0xffff7002 when
+//! its handler fails), unless the filter continued execution.
 
 use core::fmt;
 
@@ -128,19 +132,27 @@ impl fmt::Display for At {
     }
 }
 
-/// Prints the crash report of `process`, which ended by `note`'s exception.
-pub fn report(process: &Process, note: &Note) {
+/// Prints the crash report of `process`, which ended with `status` by
+/// `note`'s exception (or after it, when a top-level filter ended it with
+/// another status).
+pub fn report(process: &Process, note: &Note, status: NtStatus) {
     // Modules first (the views' lock), then the lines (the console's).
     let at = At(note.rip, module_at(process, note.rip));
     let stack = note.stack.map(|v| v.map(|v| At(v, module_at(process, v))));
-    info!(
-        "crash report: {} (pid {}) ended by an unhandled exception {:#010x} ({}) in thread {}",
-        process.name,
-        process.id,
-        note.status.0,
-        exception_name(note.status),
-        note.tid
-    );
+    let (code, name) = (note.status.0, exception_name(note.status));
+    if status == note.status {
+        info!(
+            "crash report: {} (pid {}) ended by an unhandled exception {code:#010x} ({name}) in \
+             thread {}",
+            process.name, process.id, note.tid
+        );
+    } else {
+        info!(
+            "crash report: {} (pid {}) ended with status {:#010x} after an unhandled exception \
+             {code:#010x} ({name}) in thread {}",
+            process.name, process.id, status.0, note.tid
+        );
+    }
     info!("crash report:   personality {}, session {}", process.personality, process.session);
     match note.access {
         Some((addr, kind)) => info!(

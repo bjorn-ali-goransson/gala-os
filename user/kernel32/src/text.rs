@@ -269,23 +269,18 @@ pub extern "system" fn GetModuleHandleExW(
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
     let found = if flags & FROM_ADDRESS != 0 {
-        // MEMORY_BASIC_INFORMATION.AllocationBase of the address.
-        let mut info = [0usize; 6];
-        // SAFETY: a 48-byte buffer.
-        let status = unsafe {
-            NtQueryVirtualMemory(
-                CURRENT_PROCESS,
-                name as usize,
-                0,
-                info.as_mut_ptr().cast(),
-                48,
-                core::ptr::null_mut(),
-            )
-        };
-        if status != STATUS_SUCCESS {
-            return fail(status, FALSE);
+        // The loaded module containing the address (the loader's list:
+        // other memory, such as a JIT's code or an image section mapped
+        // as a view, is in no module).
+        let mut base: Handle = core::ptr::null_mut();
+        // SAFETY: `base` is writable.
+        unsafe { RtlPcToFileHeader(name as usize, &mut base) };
+        if base.is_null() {
+            // SAFETY: the caller's output pointer.
+            unsafe { *module = core::ptr::null_mut() };
+            return fail_with(126 /* ERROR_MOD_NOT_FOUND */, FALSE);
         }
-        info[1] as Handle
+        base
     } else {
         super::mapping::GetModuleHandleW(name)
     };
@@ -312,6 +307,7 @@ const UNCHANGED_REFCOUNT: u32 = 2;
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
     fn LdrAddRefDll(flags: u32, module: Handle) -> u32;
+    fn RtlPcToFileHeader(pc: usize, base: *mut Handle) -> Handle;
 }
 
 // Fibers: not yet (OpenSSL's asynchronous jobs use them; Nginx does not

@@ -474,6 +474,7 @@ numbers and the version reported to programs depend on it.
 | 0x7f80-0x7f83 | GalaConsoleCreate, GalaConsoleSize, GalaConsoleClose, GalaConsoleTrace | "Pseudo consoles (ConPTY)" |
 | 0x7f4c, 0x7f4d | GalaClockControl, GalaRandom | "Clock control", "Record/replay" |
 | 0x7f5a, 0x7f5b | GalaRequestHandover, GalaHandoverPause | "Kernel handover" |
+| 0x7f5c | GalaUnhandledException | OBSERVABILITY "Crash reports (programs)" |
 | other numbers in 0x7f30-0x7f73 | windows, screen, WinEvents, desktop actions | "Windows on the screen" |
 
   gala's numbers for Windows services (until verified): 0x7f01
@@ -1011,11 +1012,16 @@ address-space teardown never free.
   Non-PE files fail with STATUS_INVALID_IMAGE_NOT_MZ. PE32 images are
   accepted (ntdll loads only IL-only ones: "ntdll: the loader").
 - **Image cache**: `section::image_layout(node)` returns the laid-out
-  image of a file, cached (16 layouts, least recently used out) by node
-  and content version. ramfs gives every node a version from a global
-  counter, renewed on each write, resize and data mapping, and reports
-  none while a data section maps the file (writes through views bypass
-  the file system), so a changed or replaced file is never served stale.
+  image of a file, cached by node and content version: every layout in
+  use (held by a section or process) and up to 16 unused ones, the least
+  recently used of those out, so a file's layout is shared by all its
+  loads while any is alive (chrome.dll's is 335 MB). ramfs gives every
+  node a version from a global counter, renewed on each write, resize
+  and writable data mapping (and its end), and reports none while a
+  writable data section maps the file (writes through views bypass the
+  file system), so a changed or replaced file is never served stale; a
+  read-only data section leaves the version alone. A layout of 8 MB or
+  more, and a failed one, is logged ("section: laid out ...").
   NtCreateSection(SEC_IMAGE) and process creation both use it. A layout
   owns the shared frames of its pages (made on first use); views and
   executables borrow them, so processes of one program share its code,

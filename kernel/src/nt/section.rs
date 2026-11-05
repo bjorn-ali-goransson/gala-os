@@ -42,6 +42,9 @@ pub struct Section {
 struct FileMapping {
     _object: ObjectRef,
     node: crate::fs::ramfs::NodeId,
+    /// The section's protection lets views write the file (PAGE_READWRITE,
+    /// PAGE_EXECUTE_READWRITE; copy-on-write views get private pages).
+    writable: bool,
 }
 
 /// SEC_FILE: reported for sections backed by a file.
@@ -350,11 +353,29 @@ impl ImageLayout {
 static IMAGE_CACHE: IrqMutex<Vec<(ImageKey, KArc<ImageLayout>)>> = IrqMutex::new(Vec::new());
 /// A file and the version of its contents.
 type ImageKey = (crate::fs::ramfs::NodeId, u64);
-/// Layouts kept (the least recently used goes first).
+/// Unused layouts kept (the least recently used goes first). Layouts in
+/// use (a section or process holds them) always stay: they are alive
+/// anyway, and a later load must share them, not lay the file out again
+/// (Chromium's processes load ~40 DLLs each; chrome.dll's 335 MB layout
+/// was evicted between them and every child made its own).
 const IMAGE_CACHE_SIZE: usize = 16;
+
+/// The entry of `cache` (oldest first) to evict before adding one: the
+/// oldest held by nothing but the cache, once `keep` such entries are
+/// there.
+fn evictable<K, T>(cache: &[(K, KArc<T>)], keep: usize) -> Option<usize> {
+    let unused = || cache.iter().enumerate().filter(|(_, (_, l))| KArc::strong_count(l) == 1);
+    if unused().count() < keep {
+        return None;
+    }
+    unused().next().map(|(i, _)| i)
+}
 
 /// The image layout of file `node`: cached, or read and laid out (and
 /// cached when the file has a stable version).
+/// Image layouts this large or larger are logged when made.
+const LOGGED_LAYOUT: u64 = 8 << 20;
+
 pub fn image_layout(node: crate::fs::ramfs::NodeId) -> Result<KArc<ImageLayout>, NtStatus> {
     let version = super::file::with_fs(|fs| fs.node(node).and_then(|n| n.version()));
     if let Some(v) = version {
@@ -368,19 +389,36 @@ pub fn image_layout(node: crate::fs::ramfs::NodeId) -> Result<KArc<ImageLayout>,
             return Ok(layout);
         }
     }
-    let data = super::file::read_all(node)?;
-    let layout = KArc::try_new(ImageLayout::new(&data)?).map_err(|_| NtStatus::NO_MEMORY)?;
+    let built = super::file::read_all(node)
+        .and_then(|data| KArc::try_new(ImageLayout::new(&data)?).map_err(|_| NtStatus::NO_MEMORY));
+    // Large layouts (each holds its own frames) and failures are logged:
+    // what explains a kernel short of memory, or an image that does not
+    // load.
+    let size = built.as_ref().map_or(0, |l| l.size());
+    if built.is_err() || size >= LOGGED_LAYOUT {
+        let path = super::file::nt_path(node).unwrap_or_default();
+        let path = crate::events::Utf16(&path);
+        let why = if version.is_some() { "not cached" } else { "a writable data section maps it" };
+        match &built {
+            Ok(_) => crate::info!("section: laid out {path} ({} KiB; {why})", size / 1024),
+            Err(e) => crate::warn!("section: laying out {path} failed: {e:?} ({why})"),
+        }
+    }
+    let layout = built?;
     if let Some(v) = version {
         let evicted = {
             let mut cache = IMAGE_CACHE.lock();
-            // Drop older versions of this file and, when full, the oldest.
+            // Drop older versions of this file and, when full, the oldest
+            // unused layout.
             let mut evicted = Vec::new();
             let _ = evicted.try_reserve(cache.len());
             while let Some(i) = cache.iter().position(|((n, _), _)| *n == node) {
                 let _ = evicted.try_push(cache.remove(i));
             }
-            if cache.len() >= IMAGE_CACHE_SIZE {
-                let _ = evicted.try_push(cache.remove(0));
+            // A layout held only here cannot gain a holder meanwhile: other
+            // holders clone it from theirs, the cache under this lock.
+            if let Some(i) = evictable(&cache, IMAGE_CACHE_SIZE) {
+                let _ = evicted.try_push(cache.remove(i));
             }
             let _ = cache.try_push(((node, v), layout.clone()));
             evicted
@@ -419,7 +457,8 @@ impl Section {
         protect: u32,
     ) -> Result<Self, NtStatus> {
         vad::access_of(protect)?;
-        super::file::with_fs(|fs| fs.map(node, size)).map_err(super::file::fs_status)?;
+        let writable = matches!(protect, vad::PAGE_READWRITE | vad::PAGE_EXECUTE_READWRITE);
+        super::file::with_fs(|fs| fs.map(node, size, writable)).map_err(super::file::fs_status)?;
         Ok(Section {
             size,
             protect,
@@ -427,7 +466,7 @@ impl Section {
             pages: IrqMutex::new(Vec::new()),
             image: None,
             file_name: super::file::nt_path(node).ok(),
-            file: Some(FileMapping { _object: object, node }),
+            file: Some(FileMapping { _object: object, node, writable }),
         })
     }
 
@@ -536,7 +575,7 @@ impl Section {
 impl Drop for Section {
     fn drop(&mut self) {
         if let Some(f) = &self.file {
-            super::file::with_fs(|fs| fs.unmap(f.node));
+            super::file::with_fs(|fs| fs.unmap(f.node, f.writable));
         }
         for frame in self.pages.lock().iter().flatten() {
             platform::free_frame(*frame);
@@ -797,4 +836,31 @@ pub fn in_view_of(views: &[View], addr: u64, section: &ObjectRef) -> bool {
     views.iter().any(|v| {
         (v.base..v.base + v.size).contains(&addr) && core::ptr::eq(&*v.section, &**section)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layouts_in_use_are_never_evicted() {
+        let arc = |v: u32| KArc::try_new(v).unwrap();
+        let mut cache = alloc::vec![(1, arc(1)), (2, arc(2)), (3, arc(3))];
+        // Under the limit: nothing goes.
+        assert_eq!(evictable(&cache, 4), None);
+        // At it: the oldest unused one.
+        assert_eq!(evictable(&cache, 3), Some(0));
+        // The oldest is in use (a process holds it): the next one goes.
+        let held = cache[0].1.clone();
+        assert_eq!(evictable(&cache, 2), Some(1));
+        // In-use layouts do not count towards the limit.
+        assert_eq!(evictable(&cache, 3), None);
+        let other = cache[1].1.clone();
+        assert_eq!(evictable(&cache, 1), Some(2));
+        let last = cache[2].1.clone();
+        assert_eq!(evictable(&cache, 1), None, "all in use: the cache grows");
+        drop((held, other, last));
+        cache.remove(0);
+        assert_eq!(evictable(&cache, 2), Some(0));
+    }
 }

@@ -11,7 +11,8 @@
 //!   K32GetModuleInformation, K32GetModuleFileNameExA, K32GetModuleBaseNameW
 //!   (the file name's last component),
 //!   K32GetProcessMemoryInfo; QueryFullProcessImageNameW;
-//!   GetModuleHandleExA by name and by address.
+//!   GetModuleHandleExA by name and by address (an address in no module
+//!   fails with ERROR_MOD_NOT_FOUND).
 //! - GetEnvironmentStrings (ANSI block, double NUL) and
 //!   FreeEnvironmentStringsA; GetTempPathA as the W form.
 //! - CreateDirectoryA (ERROR_ALREADY_EXISTS the second time),
@@ -394,6 +395,13 @@ fn process(c: &mut Checks) -> Result<(), u32> {
         let inside = (kernel32 as usize + info.size as usize / 2) as *const u8;
         c.ok(GetModuleHandleExA(4 | 2, inside, &mut h) != 0, GetLastError().into())?; // FROM_ADDRESS
         c.eq(h as u64, kernel32 as u64)?;
+        // An address in no module (this thread's stack; V8's code space
+        // for Chromium's profiler): FALSE, a null module, ERROR_MOD_NOT_FOUND.
+        let local = core::hint::black_box(0u8);
+        SetLastError(0);
+        c.ok(GetModuleHandleExA(4 | 2, &local, &mut h) == 0, h as u64)?;
+        c.ok(h.is_null(), h as u64)?;
+        c.eq(GetLastError().into(), 126)?;
 
         let block = GetEnvironmentStrings();
         c.ok(!block.is_null(), 0)?;

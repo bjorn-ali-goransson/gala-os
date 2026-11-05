@@ -303,7 +303,13 @@ process. When the process ends with that exception's code (unhandled),
 personality and session, the address as module+offset (the executable or
 an image view), what was read/written/executed, the registers and the
 top eight stack words, each named by module when it points into an
-image. Scenarios `crash` and `crash_dispatched`.
+image. ntdll reports an exception no handler took before it calls the
+top-level filter (GalaUnhandledException, its record and context), so a
+filter that ends the process with its own status (Chromium's Crashpad:
+0xffff7002 when its handler fails) still leaves the report, headed
+"ended with status S after an unhandled exception C"; a filter that
+continues execution withdraws it. Scenarios `crash`, `crash_dispatched`
+and `crash_filtered`.
 
 ### Crash record across reboots
 

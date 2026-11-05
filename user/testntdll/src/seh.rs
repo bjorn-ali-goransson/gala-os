@@ -978,10 +978,14 @@ pub extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> 
     // otherwise the process ends.
     let filter = TOP_FILTER.load(core::sync::atomic::Ordering::Acquire);
     if filter != 0 {
+        // The kernel keeps it for the crash report: the filter may end
+        // the process with a status of its own (Crashpad's 0xffff7002).
+        crate::GalaUnhandledException(record, context);
         // SAFETY: a filter registered with RtlSetUnhandledExceptionFilter.
         let f: extern "system" fn(*mut ExceptionPointers) -> i32 =
             unsafe { core::mem::transmute(filter) };
         if f(&mut pointers) == -1 {
+            crate::GalaUnhandledException(core::ptr::null(), core::ptr::null());
             NtContinue(context, 0);
         }
     }

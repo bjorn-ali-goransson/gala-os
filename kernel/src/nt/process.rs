@@ -103,6 +103,11 @@ pub struct Process {
     /// The last exception one of its threads took (a crash report when it
     /// ends the process; nt::crashreport).
     pub last_exception: IrqMutex<Option<super::crashreport::Note>>,
+    /// The exception no handler took, as ntdll reported it before calling
+    /// the top-level filter (GalaUnhandledException): reported when the
+    /// process ends, whatever its status (a filter such as Crashpad's
+    /// ends the process with its own code).
+    pub unhandled_exception: IrqMutex<Option<super::crashreport::Note>>,
     /// Its system-call ABI, fixed at creation from the image (a PE image
     /// is NT): its threads' system calls go to that personality's
     /// dispatcher (`crate::personality`, ROADMAP LX seam 2).
@@ -803,6 +808,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),
         console,
         last_exception: IrqMutex::new(None),
+        unhandled_exception: IrqMutex::new(None),
         // A PE image: the NT personality (an ELF loader would choose Linux).
         personality: Personality::Nt,
     })?;
@@ -911,6 +917,7 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
         priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),
         console: None,
         last_exception: IrqMutex::new(None),
+        unhandled_exception: IrqMutex::new(None),
         personality: bare.personality,
     })?;
     prune();
@@ -1004,8 +1011,9 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     }
     // Ended by an exception: what Windows' error report would say.
     let note = *process.last_exception.lock();
-    if let Some(note) = note.filter(|n| n.status == status) {
-        super::crashreport::report(process, &note);
+    let unhandled = *process.unhandled_exception.lock();
+    if let Some(note) = note.filter(|n| n.status == status).or(unhandled) {
+        super::crashreport::report(process, &note, status);
     }
     info!("process {} (pid {}) exited with status {:#010x}", process.name, process.id, status.0);
     crate::events::emit(
@@ -1346,6 +1354,7 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
         priority_class: AtomicU8::new(a.priority_class),
         console: None,
         last_exception: IrqMutex::new(None),
+        unhandled_exception: IrqMutex::new(None),
         // The handover's PROCESSES record has no personality yet: NT is
         // the only one with processes (a second needs a record version).
         personality: Personality::Nt,
