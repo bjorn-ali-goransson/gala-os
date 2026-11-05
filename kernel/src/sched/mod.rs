@@ -452,6 +452,18 @@ pub fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
 
 /// This CPU's current thread and whether it is its idle thread; None
 /// before the scheduler exists (early timer ticks).
+/// Per CPU: whether it runs its idle thread (set at each switch), for
+/// readers that may not take the scheduler's lock (the profiler's choice
+/// of CPUs to sample, from another CPU's tick).
+static RUNNING_IDLE: [core::sync::atomic::AtomicBool; crate::arch::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::smp::MAX_CPUS];
+
+/// Whether CPU `cpu` runs its idle thread (lock-free; as of its last
+/// switch).
+pub fn cpu_idle(cpu: usize) -> bool {
+    RUNNING_IDLE.get(cpu).is_some_and(|f| f.load(core::sync::atomic::Ordering::Relaxed))
+}
+
 pub fn current_if_running() -> Option<(ThreadId, bool)> {
     let guard = SCHED.lock();
     let s = guard.as_ref()?;
@@ -608,6 +620,9 @@ fn schedule() {
             let from: *const Context = &s.thread(cur).context;
             let n = s.thread(next);
             n.on_cpu = true;
+            if let Some(flag) = RUNNING_IDLE.get(here) {
+                flag.store(n.is_idle, core::sync::atomic::Ordering::Relaxed);
+            }
             n.switches = n.switches.wrapping_add(1);
             let target = switch::Target {
                 context: &n.context,

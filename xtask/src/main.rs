@@ -3640,9 +3640,11 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // Profiler samples while bench runs (see EVENT_EXPECT).
         name: "events_sample",
-        cmdline: "qemu_exit events=sample,image,thread,process run=bench.exe",
+        // `sampleprobe`: CPU 1 spins with interrupts off; samples (NMIs
+        // from the other CPU) must land inside.
+        cmdline: "qemu_exit events=sample,image,thread,process sampleprobe run=bench.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["bench: done", "exited with status 0x00000000"],
+        expect: &["sampleprobe: ok", "bench: done", "exited with status 0x00000000"],
     },
     Scenario {
         // System-call events of processes chosen by their command line

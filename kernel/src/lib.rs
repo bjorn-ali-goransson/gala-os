@@ -266,6 +266,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     nt::vm::EAGER_COMMIT.store(cmdline.flag("eagercommit"), Ordering::Relaxed);
     // The watchdog's test: CPU 1 stops taking timer interrupts for a while.
     time::set_hang_test(cmdline.flag("hangtest"));
+    time::set_sample_probe(cmdline.flag("sampleprobe"));
     if cmdline.flag("parkdelay") {
         arch::handover::delay_next_park();
         info!("handover: parkdelay: the next park IPI is taken 3 s late (test)");
@@ -443,7 +444,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
 
     nt::ledger::dump();
     if events::written() > 0 {
-        info!("events: {} written to the debug console", events::written());
+        info!(
+            "events: {} written to the debug console, {} profiler samples lost (interrupts off too long)",
+            events::written(),
+            time::SAMPLES_LOST.load(core::sync::atomic::Ordering::Relaxed)
+        );
     }
     net::log_stats();
     display::log_stats();

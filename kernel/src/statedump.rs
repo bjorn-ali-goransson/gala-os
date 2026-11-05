@@ -141,6 +141,13 @@ mod nmi {
     }
 
     pub fn on_nmi(frame: &TrapFrame) {
+        // A profiler sample (asked by another CPU's tick) is no dump
+        // request. (A dump NMI that arrives while one is pending merges
+        // with it: that CPU then misses the dump, which waits for it at
+        // most half a second.)
+        if crate::time::on_sample_nmi(frame) {
+            return;
+        }
         let cpu = me();
         let Some(snap) = SNAPSHOTS.get(cpu) else { return };
         snap.rip.store(frame.rip, Ordering::Relaxed);

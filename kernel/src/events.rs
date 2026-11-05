@@ -192,6 +192,23 @@ pub fn emit(category: Category, name: &str, fields: fmt::Arguments) {
 #[cfg(any(test, feature = "hosted"))]
 pub fn emit(_category: Category, _name: &str, _fields: fmt::Arguments) {}
 
+/// As [`emit`] for an event that happened earlier, at `t`, on behalf of
+/// client `by` (a profiler sample taken in an NMI, written at the next
+/// tick).
+#[cfg(not(any(test, feature = "hosted")))]
+pub fn emit_at(category: Category, name: &str, t: u64, by: u64, fields: fmt::Arguments) {
+    if !enabled(category) {
+        return;
+    }
+    let cpu = crate::arch::percpu::cpu_index();
+    let mut port = crate::arch::debugcon::DEBUGCON.lock();
+    let _ = writeln!(port, r#"{{"t":{t},"cpu":{cpu},"by":{by},"ev":"{name}",{fields}}}"#);
+    WRITTEN.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(any(test, feature = "hosted"))]
+pub fn emit_at(_category: Category, _name: &str, _t: u64, _by: u64, _fields: fmt::Arguments) {}
+
 /// Writes one event whatever the mask (something going wrong that the
 /// stream must show: a wrong clock): `{"t":..,"cpu":..,"by":..,<fields>}`,
 /// `fields` naming the event (`"ev":"..."`) themselves.

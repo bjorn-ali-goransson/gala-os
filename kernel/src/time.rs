@@ -116,38 +116,238 @@ pub fn set_sample_hz(hz: u64) {
 static SAMPLE_TICKS: [AtomicU64; crate::arch::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
 
-/// A profiler sample of the interrupted thread (`by`), every
-/// `SAMPLE_EVERY` ticks of a busy CPU.
-fn sample(frame: &TrapFrame) {
+// ---- the sampling profiler ----
+//
+// A sample must be able to land anywhere, including code that runs with
+// interrupts off (every `IrqMutex` section, interrupt handlers): a timer
+// tick held back there is taken where interrupts come back on, which
+// bills a whole locked section to its unlock. So samples are NMIs: every
+// `SAMPLE_EVERY` ticks a CPU sends one to the next online CPU (round
+// robin), which records where it was into its ring without locks; its
+// own next tick writes the events (a ring of `RING`). The sender's tick may be late (its own
+// interrupts off), but that only moves when the target is sampled, not
+// where. With one CPU the tick samples itself (and is blind inside
+// interrupts-off sections).
+
+/// Samples a CPU can hold until its tick writes them: 8 x 10 ms at the
+/// default rate with interrupts off.
+const RING: usize = 8;
+
+/// One NMI sample, waiting for its CPU's tick to write it.
+struct SampleEntry {
+    t: AtomicU64,
+    by: AtomicU64,
+    rip: AtomicU64,
+    user: core::sync::atomic::AtomicBool,
+    len: AtomicU64,
+    frames: [AtomicU64; SAMPLE_FRAMES],
+}
+
+/// A CPU's waiting samples: its NMI handler adds at `head`, its tick
+/// takes from `tail` (one producer and one consumer, both on that CPU;
+/// the NMI may interrupt the tick, never the reverse).
+struct SampleRing {
+    head: AtomicU64,
+    tail: AtomicU64,
+    entries: [SampleEntry; RING],
+}
+
+static RINGS: [SampleRing; crate::arch::smp::MAX_CPUS] = [const {
+    SampleRing {
+        head: AtomicU64::new(0),
+        tail: AtomicU64::new(0),
+        entries: [const {
+            SampleEntry {
+                t: AtomicU64::new(0),
+                by: AtomicU64::new(0),
+                rip: AtomicU64::new(0),
+                user: core::sync::atomic::AtomicBool::new(false),
+                len: AtomicU64::new(0),
+                frames: [const { AtomicU64::new(0) }; SAMPLE_FRAMES],
+            }
+        }; RING],
+    }
+}; crate::arch::smp::MAX_CPUS];
+
+/// Per CPU: a sample was asked of it (set before the NMI is sent), so its
+/// NMI handler tells a profiler NMI from a state-dump request.
+static SAMPLE_ASKED: [core::sync::atomic::AtomicBool; crate::arch::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::smp::MAX_CPUS];
+
+/// NMI samples dropped because the CPU's ring was full (interrupts off
+/// for longer than `RING` samples); in the `events:` line.
+pub static SAMPLES_LOST: AtomicU64 = AtomicU64::new(0);
+
+/// `sampleprobe`: CPU 1 spins with interrupts off for half a second, 1 s
+/// after its timer starts, and reports whether samples landed inside
+/// (the NMI sampler's scenario test).
+static SAMPLE_PROBE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Per CPU: inside the probe's interrupts-off spin.
+static PROBING: [core::sync::atomic::AtomicBool; crate::arch::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::smp::MAX_CPUS];
+static PROBE_HITS: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_sample_probe(on: bool) {
+    SAMPLE_PROBE.store(on, Ordering::Relaxed);
+}
+
+/// The profiler's part of a tick: write this CPU's waiting NMI sample,
+/// and every `SAMPLE_EVERY` ticks ask the next busy CPU for one.
+fn sample_tick(frame: &TrapFrame, idle: bool) {
     let cpu = crate::arch::percpu::cpu_index() as usize;
+    write_samples(cpu);
     let Some(ticks) = SAMPLE_TICKS.get(cpu) else { return };
     if ticks.fetch_add(1, Ordering::Relaxed) + 1 < SAMPLE_EVERY.load(Ordering::Relaxed) {
         return;
     }
     ticks.store(0, Ordering::Relaxed);
-    if frame.from_user_mode() {
-        crate::events::emit(
-            crate::events::Category::Sample,
-            "sample",
-            format_args!(r#""mode":"user","rip":{}"#, frame.rip),
-        );
+    let mask = crate::arch::smp::online_mask();
+    if mask.count_ones() < 2 {
+        if !idle {
+            sample_here(frame);
+        }
         return;
     }
-    // In the kernel, the return addresses of the interrupted code's frames
-    // (frame pointers; the chain ends at the first user-mode or
-    // out-of-stack frame pointer), so `cargo xtask profile` names callers.
-    let mut stack = SampleStack { addrs: [0; SAMPLE_FRAMES], len: 0 };
-    crate::arch::backtrace::walk_from(frame.rbp, frame.rsp, |ret| {
-        if stack.len < SAMPLE_FRAMES {
-            stack.addrs[stack.len] = ret;
-            stack.len += 1;
+    // The next online CPU after this one.
+    let n = crate::arch::smp::MAX_CPUS;
+    let Some(target) = (1..n).map(|d| (cpu + d) % n).find(|&c| mask & (1 << c) != 0) else {
+        return;
+    };
+    let probing = PROBING.get(target).is_some_and(|p| p.load(Ordering::Relaxed));
+    if crate::sched::cpu_idle(target) && !probing {
+        return;
+    }
+    let Some((_, apic_id)) = crate::arch::smp::online_cpus().find(|&(i, _)| i as usize == target)
+    else {
+        return;
+    };
+    SAMPLE_ASKED[target].store(true, Ordering::Release);
+    crate::arch::apic::send_nmi(apic_id);
+}
+
+/// A profiler NMI on this CPU: records where it was into its ring (only
+/// atomics: it may have interrupted any lock's holder). Returns whether
+/// the NMI was the profiler's (else it is a state-dump request).
+pub fn on_sample_nmi(frame: &TrapFrame) -> bool {
+    let cpu = crate::arch::percpu::cpu_index() as usize;
+    let Some(asked) = SAMPLE_ASKED.get(cpu) else { return false };
+    if !asked.swap(false, Ordering::AcqRel) {
+        return false;
+    }
+    if PROBING[cpu].load(Ordering::Relaxed) {
+        PROBE_HITS.fetch_add(1, Ordering::Relaxed);
+    }
+    let ring = &RINGS[cpu];
+    let head = ring.head.load(Ordering::Relaxed);
+    if head - ring.tail.load(Ordering::Acquire) >= RING as u64 {
+        SAMPLES_LOST.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
+    let e = &ring.entries[head as usize % RING];
+    e.t.store(raw_monotonic_ns(), Ordering::Relaxed);
+    e.by.store(crate::arch::percpu::client(), Ordering::Relaxed);
+    e.rip.store(frame.rip, Ordering::Relaxed);
+    let user = frame.from_user_mode();
+    e.user.store(user, Ordering::Relaxed);
+    let mut len = 0;
+    if !user {
+        crate::arch::backtrace::walk_from(frame.rbp, frame.rsp, |ret| {
+            if len < SAMPLE_FRAMES {
+                e.frames[len].store(ret, Ordering::Relaxed);
+                len += 1;
+            }
+        });
+    }
+    e.len.store(len as u64, Ordering::Relaxed);
+    ring.head.store(head + 1, Ordering::Release);
+    true
+}
+
+/// Writes CPU `cpu`'s waiting NMI samples (from its tick).
+fn write_samples(cpu: usize) {
+    let Some(ring) = RINGS.get(cpu) else { return };
+    loop {
+        let tail = ring.tail.load(Ordering::Relaxed);
+        if tail == ring.head.load(Ordering::Acquire) {
+            return;
         }
-    });
-    crate::events::emit(
-        crate::events::Category::Sample,
-        "sample",
-        format_args!(r#""mode":"kernel","rip":{},"stack":{stack}"#, frame.rip),
-    );
+        let e = &ring.entries[tail as usize % RING];
+        let (t, by, rip, user) = (
+            e.t.load(Ordering::Relaxed),
+            e.by.load(Ordering::Relaxed),
+            e.rip.load(Ordering::Relaxed),
+            e.user.load(Ordering::Relaxed),
+        );
+        let mut stack = SampleStack { addrs: [0; SAMPLE_FRAMES], len: 0 };
+        stack.len = (e.len.load(Ordering::Relaxed) as usize).min(SAMPLE_FRAMES);
+        for (a, f) in stack.addrs.iter_mut().zip(&e.frames).take(stack.len) {
+            *a = f.load(Ordering::Relaxed);
+        }
+        // The entry is copied: the NMI may reuse it.
+        ring.tail.store(tail + 1, Ordering::Release);
+        emit_sample(t, by, user, rip, &stack);
+    }
+}
+
+/// A sample of this CPU from its own tick (one CPU only).
+fn sample_here(frame: &TrapFrame) {
+    let mut stack = SampleStack { addrs: [0; SAMPLE_FRAMES], len: 0 };
+    let user = frame.from_user_mode();
+    if !user {
+        crate::arch::backtrace::walk_from(frame.rbp, frame.rsp, |ret| {
+            if stack.len < SAMPLE_FRAMES {
+                stack.addrs[stack.len] = ret;
+                stack.len += 1;
+            }
+        });
+    }
+    emit_sample(raw_monotonic_ns(), crate::arch::percpu::client(), user, frame.rip, &stack);
+}
+
+/// The `sample` event: the thread (`by`), the mode, the address and in
+/// the kernel the return addresses of its frames (frame pointers; the
+/// chain ends at the first user-mode or out-of-stack frame pointer), so
+/// `cargo xtask profile` names callers.
+fn emit_sample(t: u64, by: u64, user: bool, rip: u64, stack: &SampleStack) {
+    use crate::events::Category::Sample;
+    if user {
+        crate::events::emit_at(
+            Sample,
+            "sample",
+            t,
+            by,
+            format_args!(r#""mode":"user","rip":{rip}"#),
+        );
+    } else {
+        crate::events::emit_at(
+            Sample,
+            "sample",
+            t,
+            by,
+            format_args!(r#""mode":"kernel","rip":{rip},"stack":{stack}"#),
+        );
+    }
+}
+
+/// `sampleprobe` on CPU 1's tick: the spin and its verdict.
+fn sample_probe() {
+    static BEATS: AtomicU64 = AtomicU64::new(0);
+    if BEATS.fetch_add(1, Ordering::Relaxed) != TICK_HZ {
+        return;
+    }
+    SAMPLE_PROBE.store(false, Ordering::Relaxed);
+    PROBING[1].store(true, Ordering::Relaxed);
+    let until = raw_monotonic_ns() + 500_000_000;
+    while raw_monotonic_ns() < until {
+        core::hint::spin_loop();
+    }
+    PROBING[1].store(false, Ordering::Relaxed);
+    let hits = PROBE_HITS.load(Ordering::Relaxed);
+    if hits > 0 {
+        crate::info!("sampleprobe: ok ({hits} samples inside 0.5 s with interrupts off)");
+    } else {
+        crate::warn!("sampleprobe: FAILED (no sample inside 0.5 s with interrupts off)");
+    }
 }
 
 /// Frames a kernel sample carries (the innermost ones).
@@ -183,11 +383,13 @@ fn on_tick(frame: &mut TrapFrame) {
         } else if !idle {
             crate::flight::on_kernel_tick(id.as_usize(), frame.rip);
         }
-        // The profiler: busy CPUs only (an idle CPU's tick is in its idle
-        // loop).
-        if !idle && crate::events::enabled(crate::events::Category::Sample) {
-            sample(frame);
+        // The profiler (idle CPUs ask too: they sample their neighbor).
+        if crate::events::enabled(crate::events::Category::Sample) {
+            sample_tick(frame, idle);
         }
+    }
+    if crate::arch::percpu::cpu_index() == 1 && SAMPLE_PROBE.load(Ordering::Relaxed) {
+        sample_probe();
     }
     if crate::arch::percpu::cpu_index() == 1 && HANG_TEST.load(Ordering::Relaxed) {
         static BEATS: AtomicU64 = AtomicU64::new(0);

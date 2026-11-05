@@ -2637,6 +2637,17 @@ The kernel's side of OBSERVABILITY.md's dumps; crash reports are under
 - **Hang watchdog** (`flight::on_tick`): sends a stuck CPU an NMI
   (`apic::send_nmi`, `statedump::trace_cpu`); that CPU prints only its own
   rip and backtrace (`watchdog: CPU N ...`).
+- **Profiler NMIs** (`time::sample_tick`, `time::on_sample_nmi`; OBSERVABILITY
+  `sample`): every sample period each CPU's tick sets the next online
+  busy CPU's "sample asked" flag and sends it an NMI; the NMI handler
+  takes the flag first (set: a sample, not a dump) and records rip, mode,
+  client and the kernel backtrace into that CPU's ring (8 entries, one
+  producer and one consumer on the same CPU); the CPU's own tick writes
+  the events. A CPU's idle state for the choice is read lock-free
+  (`sched::cpu_idle`, set at each switch). A QEMU dump NMI that arrives
+  while a sample NMI is pending merges with it: that CPU misses the
+  dump (the dump waits for it half a second). With one CPU the tick
+  samples itself.
 - Invariants: NMI code uses only atomics and `try_lock` (it may interrupt
   any lock holder, the console's too, so it prints with
   `console::emergency_line`); diagnostics that peek at locks there use
