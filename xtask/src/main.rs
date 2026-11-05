@@ -9952,13 +9952,18 @@ fn profile_cli(args: &[String]) -> Result {
     let secs = |name: &str| flag(name).and_then(|v| v.parse::<f64>().ok());
     let Some(what) = args.first().filter(|a| !a.starts_with("--")) else {
         return Err("usage: cargo xtask profile <events.jsonl | scenario> [--pid N] [--tid N] \
-                    [--from S --to S] [--top N] [--symbols DIR]"
+                    [--from S --to S] [--top N] [--symbols DIR] [--release]"
             .into());
     };
+    // A release boot's stream and kernel (`boot-test --release`): asked
+    // for, or a stream under target/release.
+    let release = args.iter().any(|a| a == "--release")
+        || Path::new(what).components().any(|c| c.as_os_str() == "release");
+    let profile_dir = if release { "release" } else { "debug" };
     let path = if Path::new(what).exists() {
         PathBuf::from(what)
     } else {
-        target_dir().join("debug").join(format!("test-{what}.events.jsonl"))
+        target_dir().join(profile_dir).join(format!("test-{what}.events.jsonl"))
     };
     let text = fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     if profile::count(&text) == 0 {
@@ -9974,8 +9979,9 @@ fn profile_cli(args: &[String]) -> Result {
         top: num("--top").unwrap_or(15) as usize,
     };
     let symbols = flag("--symbols").map(PathBuf::from);
-    // The kernel's own addresses: its ELF (the debug build boot tests use).
-    let kernel = target_dir().join("x86_64-unknown-none/debug/kernel");
+    // The kernel's own addresses: its ELF (the debug build boot tests
+    // use, or the release one).
+    let kernel = target_dir().join("x86_64-unknown-none").join(profile_dir).join("kernel");
     let symbolize = |module: &str, offsets: &[u64]| match (module, &symbols) {
         ("kernel", _) => profile::llvm_symbolize_kernel(&kernel, offsets),
         (_, Some(dir)) => profile::llvm_symbolize(dir, module, offsets),

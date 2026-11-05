@@ -28,7 +28,11 @@ machine. Each measurement below keeps its date and how it was taken.
   grow with the threads, as a browser has hundreds; compare the two in
   one run, absolute numbers move ±30% between runs under TCG),
   `handle_create_close`,
-  `virtual_alloc_free_64k`, `demand_zero_fault`, `section_map_unmap_64k`,
+  `virtual_alloc_free_64k`, `commit_decommit_page` and
+  `commit_decommit_page_4096_runs` (one page of a fresh reservation and
+  of one split into 4096 runs: the cost must not grow with the runs;
+  about 23 and 76 us under TCG, the latter 2.6 ms when each change
+  rebuilt the run list), `demand_zero_fault`, `section_map_unmap_64k`,
   `image_load`, `thread_create_exit`, `event_pingpong_same_cpu`,
   `event_pingpong_cross_cpu` (with two CPUs). `cargo xtask bench
   --release [bench-windows.txt]` boots it (`run=bench.exe`, BIOS, no

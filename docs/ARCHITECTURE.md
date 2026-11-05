@@ -878,7 +878,12 @@ Microsoft's "x64 exception handling" documentation; `seh_test`,
 `nt::vad::Vad` tracks reservations (64 KiB aligned) as run-length lists
 of per-page state (committed + protection), so query regions fall out
 directly and huge reservations are cheap; `nt::vm` holds the services
-and the fault path.
+and the fault path. A state change edits the runs in place (binary
+search, at most three runs written, equal neighbours merged), so a
+commit in a reservation split into thousands of runs (a JIT's or an
+allocator's) costs about the same as in a fresh one: no allocation
+unless the runs grow, then only the shift of the runs after it (bench
+`commit_decommit_page_4096_runs` against `commit_decommit_page`).
 
 - **Demand paging**: committed pages get frames lazily. The user #PF path
   (and kernel copies into user memory via `Process::read/write`) calls

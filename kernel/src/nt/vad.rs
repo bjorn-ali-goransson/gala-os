@@ -133,51 +133,73 @@ impl Allocation {
         &self.runs[i]
     }
 
-    /// Sets pages `[start, start + pages)` to `state`.
+    /// Sets pages `[start, start + pages)` (inside the allocation) to
+    /// `state`, in place: the overlapped runs are found by binary search
+    /// and replaced by at most three (what is left of the first and the
+    /// last, and the new run, merged with equal neighbours), so a change
+    /// costs the same in an allocation of thousands of runs (a JIT's or an
+    /// allocator's reservation) as in a fresh one. Allocates only when the
+    /// runs grow (fallibly, before anything changes).
     fn set(&mut self, start: u64, pages: u64, state: PageState) -> Result<(), AllocError> {
         let end = start + pages;
-        // Worst case one run splits into three.
-        self.runs.try_reserve(2).map_err(|_| AllocError)?;
-        let mut out: Vec<Run> = Vec::new();
-        out.try_reserve(self.runs.len() + 2).map_err(|_| AllocError)?;
-        let push = |out: &mut Vec<Run>, run: Run| {
-            if run.pages == 0 {
-                return;
-            }
-            if let Some(last) = out.last_mut()
-                && last.state == run.state
-            {
-                last.pages += run.pages;
-                return;
-            }
-            let _ = out.try_push(run); // capacity reserved above
-        };
-        let mut inserted = false;
-        for r in &self.runs {
-            let (rs, re) = (r.start, r.start + r.pages);
-            if re <= start || rs >= end {
-                if rs >= end && !inserted {
-                    push(&mut out, Run { start, pages, state });
-                    inserted = true;
-                }
-                push(&mut out, *r);
-                continue;
-            }
-            if rs < start {
-                push(&mut out, Run { start: rs, pages: start - rs, state: r.state });
-            }
-            if !inserted {
-                push(&mut out, Run { start, pages, state });
-                inserted = true;
-            }
-            if re > end {
-                push(&mut out, Run { start: end, pages: re - end, state: r.state });
-            }
+        if pages == 0 || end > self.pages {
+            return Ok(());
         }
-        if !inserted {
-            push(&mut out, Run { start, pages, state });
+        // Runs [i, j) overlap the range (at least one: runs cover the
+        // allocation).
+        let i = self.runs.partition_point(|r| r.start + r.pages <= start);
+        let j = self.runs.partition_point(|r| r.start < end);
+        let (first, last) = (self.runs[i], self.runs[j - 1]);
+        let last_end = last.start + last.pages;
+        // The range to replace and the new run's extent.
+        let (mut lo, mut hi) = (i, j);
+        let (mut new_start, mut new_end) = (start, end);
+        let mut left = None;
+        let mut right = None;
+        if first.start < start {
+            if first.state == state {
+                new_start = first.start;
+            } else {
+                left = Some(Run {
+                    start: first.start,
+                    pages: start - first.start,
+                    state: first.state,
+                });
+            }
+        } else if i > 0 && self.runs[i - 1].state == state {
+            lo = i - 1;
+            new_start = self.runs[lo].start;
         }
-        self.runs = out;
+        if last_end > end {
+            if last.state == state {
+                new_end = last_end;
+            } else {
+                right = Some(Run { start: end, pages: last_end - end, state: last.state });
+            }
+        } else if j < self.runs.len() && self.runs[j].state == state {
+            hi = j + 1;
+            new_end = self.runs[j].start + self.runs[j].pages;
+        }
+        let new = Run { start: new_start, pages: new_end - new_start, state };
+        let pieces = [left, Some(new), right];
+        let k = pieces.iter().flatten().count();
+        if k > hi - lo {
+            // Room for the extra runs: reserved first (nothing changes on
+            // failure), then the runs after the range move right.
+            let extra = k - (hi - lo);
+            self.runs.try_reserve(extra).map_err(|_| AllocError)?;
+            for _ in 0..extra {
+                self.runs.try_push(new)?;
+            }
+            self.runs[hi..].rotate_right(extra);
+            hi += extra;
+        }
+        let mut at = lo;
+        for piece in pieces.into_iter().flatten() {
+            self.runs[at] = piece;
+            at += 1;
+        }
+        self.runs.drain(at..hi);
         Ok(())
     }
 }
@@ -887,5 +909,57 @@ mod tests {
         }
         v.commit(b, 64 * PAGE, rw()).unwrap();
         assert_eq!(v.query(b).unwrap().size, 64 * PAGE);
+    }
+
+    /// Random state changes against a page-by-page model: the same state
+    /// for every page, and runs that stay sorted, contiguous, non-empty
+    /// and different from their neighbours.
+    #[test]
+    fn run_edits_match_a_page_model() {
+        const PAGES: u64 = 97;
+        let states = [
+            RESERVED,
+            PageState { committed: true, protect: PAGE_READWRITE },
+            PageState { committed: true, protect: PAGE_READONLY },
+        ];
+        let mut a = Allocation {
+            base: 0,
+            pages: PAGES,
+            kind: MEM_PRIVATE,
+            alloc_protect: PAGE_READWRITE,
+            runs: alloc::vec![Run { start: 0, pages: PAGES, state: RESERVED }],
+        };
+        let mut model = [RESERVED; PAGES as usize];
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for step in 0..5000 {
+            let start = next(PAGES);
+            // Mostly short ranges (splits), sometimes long ones (merges).
+            let len =
+                1 + if next(8) == 0 { next(PAGES - start) } else { next(3).min(PAGES - start - 1) };
+            let state = states[next(3) as usize];
+            a.set(start, len, state).unwrap();
+            for p in start..start + len {
+                model[p as usize] = state;
+            }
+            let mut at = 0;
+            for (k, r) in a.runs.iter().enumerate() {
+                assert_eq!(r.start, at, "step {step}: runs contiguous");
+                assert!(r.pages > 0, "step {step}: no empty run");
+                if k > 0 {
+                    assert_ne!(a.runs[k - 1].state, r.state, "step {step}: neighbours differ");
+                }
+                for p in r.start..r.start + r.pages {
+                    assert_eq!(model[p as usize], r.state, "step {step}: page {p}");
+                }
+                at += r.pages;
+            }
+            assert_eq!(at, PAGES, "step {step}: runs cover the allocation");
+        }
     }
 }

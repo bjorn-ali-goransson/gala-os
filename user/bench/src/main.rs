@@ -126,6 +126,26 @@ fn main() -> u32 {
         let (_, base, _) = allocate(0, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         free(base, 0, MEM_RELEASE);
     });
+    // Committing and decommitting one page of a reservation: the same
+    // in a fresh one and in one split into 4096 runs (every other page
+    // committed, as a JIT's or allocator's reservations become). The cost
+    // must not grow with the runs; compare the two in one run.
+    const RESERVED: usize = 4096 * 0x1000;
+    for (name, split) in [("commit_decommit_page", false), ("commit_decommit_page_4096_runs", true)]
+    {
+        let (_, r, _) = allocate(0, RESERVED, MEM_RESERVE, PAGE_READWRITE);
+        if split {
+            for p in (0..RESERVED / 0x1000).step_by(2) {
+                allocate(r + p * 0x1000, 0x1000, MEM_COMMIT, PAGE_READWRITE);
+            }
+        }
+        let middle = r + RESERVED / 2 + 0x1000;
+        bench(name, 300, || {
+            allocate(middle, 0x1000, MEM_COMMIT, PAGE_READWRITE);
+            free(middle, 0x1000, MEM_DECOMMIT);
+        });
+        free(r, 0, MEM_RELEASE);
+    }
     // Demand-zero faults: first touch of committed pages.
     const PAGES: usize = 256;
     let (_, base, _) = allocate(0, PAGES * 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);

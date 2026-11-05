@@ -136,7 +136,7 @@ alone prints the usage.
 | `triage <serial log> [events.jsonl]` | the triage block of a log ("When a test fails") |
 | `events <events.jsonl>` | summarize an event stream |
 | `otel <log\|events.jsonl\|scenario> [events.jsonl] [--out P] [--endpoint URL]` | OTLP/JSON ("OpenTelemetry") |
-| `profile <events.jsonl\|scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR]` | the sampling profiler's report (OBSERVABILITY `sample`) |
+| `profile <events.jsonl\|scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` | the sampling profiler's report (OBSERVABILITY `sample`) |
 | `perfetto <events.jsonl\|scenario> [--out FILE]` | a Perfetto trace for ui.perfetto.dev (OBSERVABILITY "Visualization") |
 | `bench [bench-windows.txt]` | `user/bench` on gala ("Benchmarks") |
 | `report` | every test program on gala -> `target/report/gala.{json,md}` |
