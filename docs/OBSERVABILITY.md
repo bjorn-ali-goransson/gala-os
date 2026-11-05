@@ -547,6 +547,22 @@ silent):
   "watch" for a chain is itself a head decision with its own ratio,
   carried in the trace context, and only watched chains take ring
   space (a full ring drops and counts, as the profiler's does).
+- **Failures are never sampled out.** Unhandled exceptions and crashes
+  (with their crash report), a process ending with an error, the
+  ledger's unsupported and missing calls, kernel errors and watchdog
+  reports, and whatever gala itself finds wrong (`emit_always`, the
+  clock check) bypass the rules and the byte budget: rare, and the
+  thing one debugs. Error statuses are another matter: many are a
+  program's normal control flow (NtOpenKey's OBJECT_NAME_NOT_FOUND for
+  keys probed, thousands at Chromium's start; BUFFER_OVERFLOW from a
+  size query; WSAEWOULDBLOCK; first-chance exceptions: guard pages, the
+  CLR's and V8's own use of SEH). Every error status is counted (per
+  call, status and process: a metric, never lost) and kept by default,
+  except where a rule calls a (call, status) expected (count only), and
+  repeats are limited: the first N of each (call, status, process) or
+  (exception code, address) kept whole, the rest counted, as the ledger
+  dedupes its entries. Every failure is thus visible: the real ones in
+  full, the expected-looking ones as counts with their first examples.
 - **Sampling rules**: what is sampled how is a list of rules, the first
   match deciding (a default rule last). A rule matches on the
   transaction's or span's **name** (a glob: `NtWriteFile`,
