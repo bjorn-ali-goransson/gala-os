@@ -159,6 +159,10 @@ const INVALID_SOCKET: Socket = !0;
 const SOCKET_ERROR: i32 = -1;
 
 const AF_INET: i32 = 2;
+const AF_INET6: i32 = 23;
+/// SOCKADDR_IN6.
+const SOCKADDR6_LEN: i32 = 28;
+const IPPROTO_IPV6: i32 = 41;
 const SOCK_STREAM: i32 = 1;
 const SOCK_DGRAM: i32 = 2;
 const IPPROTO_TCP: i32 = 6;
@@ -407,53 +411,110 @@ fn afd_call(s: Socket, code: u32, input: &[u8], output: &mut [u8]) -> Result<usi
     afd(s, code, input, output).map_err(|status| fail(wsa_error(status)))
 }
 
-/// Reads a SOCKADDR_IN the caller passed (`len` bytes at `name`).
-fn read_sockaddr(name: *const u8, len: i32) -> Result<[u8; 16], i32> {
+/// A socket address: SOCKADDR_IN (16 bytes) or SOCKADDR_IN6 (28).
+#[derive(Clone, Copy)]
+struct Sa {
+    b: [u8; 28],
+    len: usize,
+}
+
+impl Sa {
+    fn bytes(&self) -> &[u8] {
+        &self.b[..self.len]
+    }
+
+    fn family(&self) -> i32 {
+        i32::from(u16::from_le_bytes([self.b[0], self.b[1]]))
+    }
+
+    /// The unspecified address of `family` (port 0).
+    fn any(family: i32) -> Sa {
+        let mut b = [0u8; 28];
+        b[..2].copy_from_slice(&(family as u16).to_le_bytes());
+        Sa { b, len: if family == AF_INET6 { 28 } else { 16 } }
+    }
+}
+
+/// Reads the socket address the caller passed (`len` bytes at `name`):
+/// SOCKADDR_IN or SOCKADDR_IN6.
+fn read_sockaddr(name: *const u8, len: i32) -> Result<Sa, i32> {
     if name.is_null() || len < SOCKADDR_LEN {
         return Err(fail(WSAEFAULT));
     }
-    let mut b = [0u8; 16];
+    let mut b = [0u8; 28];
     // SAFETY: the caller's buffer holds at least 16 bytes.
     unsafe { core::ptr::copy_nonoverlapping(name, b.as_mut_ptr(), 16) };
-    if i32::from(u16::from_le_bytes([b[0], b[1]])) != AF_INET {
-        return Err(fail(WSAEAFNOSUPPORT));
+    match i32::from(u16::from_le_bytes([b[0], b[1]])) {
+        AF_INET => Ok(Sa { b, len: 16 }),
+        AF_INET6 if len >= SOCKADDR6_LEN => {
+            // SAFETY: the caller's buffer holds at least 28 bytes.
+            unsafe { core::ptr::copy_nonoverlapping(name, b.as_mut_ptr(), 28) };
+            Ok(Sa { b, len: 28 })
+        }
+        AF_INET6 => Err(fail(WSAEFAULT)),
+        _ => Err(fail(WSAEAFNOSUPPORT)),
     }
-    Ok(b)
 }
 
-/// Writes a SOCKADDR_IN into the caller's (`name`, `*len`) buffer.
-fn write_sockaddr(addr: &[u8; 16], name: *mut u8, len: *mut i32) -> Result<(), i32> {
+/// Writes a socket address into the caller's (`name`, `*len`) buffer.
+fn write_sockaddr(addr: &Sa, name: *mut u8, len: *mut i32) -> Result<(), i32> {
     if name.is_null() {
         return Ok(());
     }
     // SAFETY: the caller passes a valid length pointer with the buffer.
-    if len.is_null() || unsafe { *len } < SOCKADDR_LEN {
+    if len.is_null() || (unsafe { *len } as usize) < addr.len {
         return Err(fail(WSAEFAULT));
     }
-    // SAFETY: the buffer holds `*len` >= 16 bytes.
+    // SAFETY: the buffer holds `*len` >= addr.len bytes.
     unsafe {
-        core::ptr::copy_nonoverlapping(addr.as_ptr(), name, 16);
-        *len = SOCKADDR_LEN;
+        core::ptr::copy_nonoverlapping(addr.b.as_ptr(), name, addr.len);
+        *len = addr.len as i32;
     }
     Ok(())
 }
 
-/// A TRANSPORT_ADDRESS for an IPv4 SOCKADDR_IN.
-fn transport_address(sa: &[u8; 16]) -> [u8; 22] {
-    let mut t = [0u8; 22];
+/// A TRANSPORT_ADDRESS (TDI_ADDRESS_IP or TDI_ADDRESS_IP6) for a socket
+/// address: the bytes and their length.
+fn transport_address(sa: &Sa) -> ([u8; 34], usize) {
+    let mut t = [0u8; 34];
     t[..4].copy_from_slice(&1u32.to_le_bytes());
-    t[4..6].copy_from_slice(&14u16.to_le_bytes());
-    t[6..8].copy_from_slice(&2u16.to_le_bytes());
-    t[8..14].copy_from_slice(&sa[2..8]); // port and address, network order
-    t
+    if sa.family() == AF_INET6 {
+        t[4..6].copy_from_slice(&26u16.to_le_bytes());
+        t[6..8].copy_from_slice(&(AF_INET6 as u16).to_le_bytes());
+        t[8..10].copy_from_slice(&sa.b[2..4]); // port, network order
+        t[10..34].copy_from_slice(&sa.b[4..28]); // flow info, address, scope id
+        (t, 34)
+    } else {
+        t[4..6].copy_from_slice(&14u16.to_le_bytes());
+        t[6..8].copy_from_slice(&2u16.to_le_bytes());
+        t[8..14].copy_from_slice(&sa.b[2..8]); // port and address, network order
+        (t, 22)
+    }
 }
 
-/// The SOCKADDR_IN of a TRANSPORT_ADDRESS.
-fn sockaddr_of(t: &[u8]) -> [u8; 16] {
-    let mut sa = [0u8; 16];
-    sa[..2].copy_from_slice(&2u16.to_le_bytes());
-    sa[2..8].copy_from_slice(&t[8..14]);
-    sa
+/// The socket address of a TRANSPORT_ADDRESS.
+fn sockaddr_of(t: &[u8]) -> Sa {
+    let mut b = [0u8; 28];
+    if t.len() >= 34 && u16::from_le_bytes([t[6], t[7]]) == AF_INET6 as u16 {
+        b[..2].copy_from_slice(&(AF_INET6 as u16).to_le_bytes());
+        b[2..4].copy_from_slice(&t[8..10]);
+        b[4..28].copy_from_slice(&t[10..34]);
+        Sa { b, len: 28 }
+    } else {
+        b[..2].copy_from_slice(&2u16.to_le_bytes());
+        b[2..8].copy_from_slice(&t[8..14]);
+        Sa { b, len: 16 }
+    }
+}
+
+/// The address family a socket was made with (AF_INET unless AF_INET6).
+fn family_of(s: Socket) -> i32 {
+    options::get(s, options::FAMILY)
+}
+
+/// The smallest address buffer a socket's calls take.
+fn min_len_of(s: Socket) -> i32 {
+    if family_of(s) == AF_INET6 { SOCKADDR6_LEN } else { SOCKADDR_LEN }
 }
 
 /// Opens a TCP (or, with `udp`, a UDP) endpoint: NtCreateFile of
@@ -461,15 +522,28 @@ fn sockaddr_of(t: &[u8]) -> [u8; 16] {
 /// AFD_CREATE_PACKET, transport `\Device\Tcp` or `\Device\Udp`) as the
 /// extended attribute `AfdOpenPacketXX`.
 fn open_endpoint_of(udp: bool) -> Result<Socket, u32> {
+    open_endpoint_family(udp, AF_INET)
+}
+
+/// The same for `family` (AF_INET6: Windows' `\Device\Tcp6` and
+/// `\Device\Udp6`).
+fn open_endpoint_family(udp: bool, family: i32) -> Result<Socket, u32> {
     const NAME: &[u8] = b"AfdOpenPacketXX";
-    let transport = if udp { "\\Device\\Udp" } else { "\\Device\\Tcp" };
+    let transport = match (udp, family == AF_INET6) {
+        (false, false) => "\\Device\\Tcp",
+        (true, false) => "\\Device\\Udp",
+        (false, true) => "\\Device\\Tcp6",
+        (true, true) => "\\Device\\Udp6",
+    };
+    let name_bytes = 2 * transport.len();
     // FILE_FULL_EA_INFORMATION header, name + NUL, then the packet.
-    let mut ea = [0u8; 8 + 16 + 12 + 22];
+    let mut ea = [0u8; 8 + 16 + 12 + 24];
+    let ea = &mut ea[..8 + 16 + 12 + name_bytes];
     ea[5] = NAME.len() as u8;
-    ea[6..8].copy_from_slice(&(12u16 + 22).to_le_bytes());
+    ea[6..8].copy_from_slice(&(12 + name_bytes as u16).to_le_bytes());
     ea[8..8 + NAME.len()].copy_from_slice(NAME);
     let packet = 8 + NAME.len() + 1;
-    ea[packet + 8..packet + 12].copy_from_slice(&22u32.to_le_bytes());
+    ea[packet + 8..packet + 12].copy_from_slice(&(name_bytes as u32).to_le_bytes());
     for (i, c) in transport.encode_utf16().enumerate() {
         ea[packet + 12 + 2 * i..packet + 14 + 2 * i].copy_from_slice(&c.to_le_bytes());
     }
@@ -507,10 +581,6 @@ fn open_endpoint_of(udp: bool) -> Result<Socket, u32> {
         )
     };
     if status == 0 { Ok(handle) } else { Err(status) }
-}
-
-fn open_endpoint() -> Result<Socket, u32> {
-    open_endpoint_of(false)
 }
 
 /// Whether `s` is a datagram socket (its SO_TYPE, kept per socket).
@@ -569,7 +639,7 @@ pub extern "system" fn socket(af: i32, kind: i32, protocol: i32) -> Socket {
         fail(WSANOTINITIALISED);
         return INVALID_SOCKET;
     }
-    if af != AF_INET {
+    if af != AF_INET && af != AF_INET6 {
         missing(b"ws2_32.dll!socket(address family)", af as u64);
         fail(WSAEAFNOSUPPORT);
         return INVALID_SOCKET;
@@ -587,7 +657,7 @@ pub extern "system" fn socket(af: i32, kind: i32, protocol: i32) -> Socket {
             return INVALID_SOCKET;
         }
     };
-    let s = match open_endpoint_of(udp) {
+    let s = match open_endpoint_family(udp, af) {
         Ok(s) => s,
         Err(status) => {
             fail(wsa_error(status));
@@ -595,8 +665,14 @@ pub extern "system" fn socket(af: i32, kind: i32, protocol: i32) -> Socket {
         }
     };
     // A handle value is reused once closed: forget what an earlier socket
-    // of this value kept, then record the type.
+    // of this value kept, then record the family and the type.
     options::forget(s);
+    if af == AF_INET6 && !options::set(s, options::FAMILY, AF_INET6) {
+        // SAFETY: closes the endpoint opened above.
+        unsafe { NtClose(s) };
+        fail(WSAENOBUFS);
+        return INVALID_SOCKET;
+    }
     if udp && !options::set(s, options::TYPE, SOCK_DGRAM) {
         // SAFETY: closes the endpoint opened above.
         unsafe { NtClose(s) };
@@ -613,10 +689,10 @@ pub extern "system" fn bind(s: Socket, name: *const u8, len: i32) -> i32 {
         Err(e) => return e,
     };
     // {u32 share access; SOCKADDR}; the bound address comes back.
-    let mut input = [0u8; 20];
-    input[4..].copy_from_slice(&sa);
-    let mut bound = [0u8; 16];
-    match afd_call(s, IOCTL_AFD_BIND, &input, &mut bound) {
+    let mut input = [0u8; 4 + 28];
+    input[4..4 + sa.len].copy_from_slice(sa.bytes());
+    let mut bound = [0u8; 28];
+    match afd_call(s, IOCTL_AFD_BIND, &input[..4 + sa.len], &mut bound) {
         Ok(_) => 0,
         Err(e) => e,
     }
@@ -636,11 +712,13 @@ pub extern "system" fn listen(s: Socket, backlog: i32) -> i32 {
 /// attach the connection to it (WAIT_FOR_LISTEN, then ACCEPT).
 #[unsafe(no_mangle)]
 pub extern "system" fn accept(s: Socket, addr: *mut u8, len: *mut i32) -> Socket {
-    let mut pending = [0u8; 4 + 22];
+    let mut pending = [0u8; 4 + 34];
     if afd_call(s, IOCTL_AFD_WAIT_FOR_LISTEN, &[], &mut pending).is_err() {
         return INVALID_SOCKET;
     }
-    let new = match open_endpoint() {
+    // A connection takes the listener's family.
+    let family = family_of(s);
+    let new = match open_endpoint_family(false, family) {
         Ok(h) => h,
         Err(status) => {
             fail(wsa_error(status));
@@ -648,6 +726,12 @@ pub extern "system" fn accept(s: Socket, addr: *mut u8, len: *mut i32) -> Socket
         }
     };
     options::forget(new);
+    if family == AF_INET6 && !options::set(new, options::FAMILY, AF_INET6) {
+        // SAFETY: closes the endpoint opened above.
+        unsafe { NtClose(new) };
+        fail(WSAENOBUFS);
+        return INVALID_SOCKET;
+    }
     // {u32 use_san; u32 sequence; HANDLE accept endpoint}.
     let mut input = [0u8; 16];
     input[4..8].copy_from_slice(&pending[..4]);
@@ -674,21 +758,16 @@ pub extern "system" fn connect(s: Socket, name: *const u8, len: i32) -> i32 {
         && len >= SOCKADDR_LEN
         // SAFETY: the caller's buffer holds at least 16 bytes.
         && unsafe { core::slice::from_raw_parts(name, 16) }.iter().all(|&b| b == 0);
-    let sa = if unspec {
-        let mut zero = [0u8; 16];
-        zero[..2].copy_from_slice(&(AF_INET as u16).to_le_bytes());
-        Ok(zero)
-    } else {
-        read_sockaddr(name, len)
-    };
+    let sa = if unspec { Ok(Sa::any(family_of(s))) } else { read_sockaddr(name, len) };
     let sa = match sa {
         Ok(sa) => sa,
         Err(e) => return e,
     };
     // {u8 use_san; u32 root; u32 unknown; TRANSPORT_ADDRESS}.
-    let mut input = [0u8; 12 + 22];
-    input[12..].copy_from_slice(&transport_address(&sa));
-    match afd_call(s, IOCTL_AFD_CONNECT, &input, &mut []) {
+    let (t, n) = transport_address(&sa);
+    let mut input = [0u8; 12 + 34];
+    input[12..12 + n].copy_from_slice(&t[..n]);
+    match afd_call(s, IOCTL_AFD_CONNECT, &input[..12 + n], &mut []) {
         Ok(_) => 0,
         Err(e) => e,
     }
@@ -733,10 +812,12 @@ pub extern "system" fn recv(s: Socket, buf: *mut u8, len: i32, flags: i32) -> i3
 }
 
 fn query_name(s: Socket, code: u32, name: *mut u8, len: *mut i32) -> i32 {
-    let mut sa = [0u8; 16];
-    if let Err(e) = afd_call(s, code, &[], &mut sa) {
-        return e;
-    }
+    let mut b = [0u8; 28];
+    let n = match afd_call(s, code, &[], &mut b) {
+        Ok(n) => n as usize,
+        Err(e) => return e,
+    };
+    let sa = Sa { b, len: if n >= 28 { 28 } else { 16 } };
     if name.is_null() {
         return fail(WSAEFAULT);
     }
@@ -884,7 +965,7 @@ fn duplicate_socket(s: Socket, process: u32, info: *mut u8, info_size: usize) ->
         memset(info, 0, info_size);
         let put = |at: usize, v: i32| info.add(at).cast::<i32>().write_unaligned(v);
         let datagram = is_datagram(s);
-        put(INFO_FAMILY, AF_INET);
+        put(INFO_FAMILY, family_of(s));
         put(INFO_TYPE, if datagram { SOCK_DGRAM } else { SOCK_STREAM });
         put(INFO_PROTOCOL, if datagram { IPPROTO_UDP } else { IPPROTO_TCP });
         put(INFO_PROVIDER_RESERVED, h as i32);
@@ -1072,11 +1153,20 @@ pub extern "system" fn GetAcceptExSockaddrs(
 ) {
     // SAFETY: the caller's AcceptEx buffer and output pointers.
     unsafe {
+        // Each block starts with the address AcceptEx stored: its family
+        // says its length.
+        let len_of = |p: *const u8| {
+            if u16::from_le_bytes([*p, *p.add(1)]) == AF_INET6 as u16 {
+                SOCKADDR6_LEN
+            } else {
+                SOCKADDR_LEN
+            }
+        };
         let at = output.add(receive as usize);
         *local_addr = at;
-        *local_len = SOCKADDR_LEN;
+        *local_len = len_of(at);
         *remote_addr = at.add(local as usize);
-        *remote_len = SOCKADDR_LEN;
+        *remote_len = len_of(at.add(local as usize));
     }
 }
 
@@ -1105,9 +1195,11 @@ extern "system" fn connect_ex(
         Err(_) => return 0,
     };
     // {u8 use_san; TRANSPORT_ADDRESS at 4}.
-    let mut info = [0u8; 4 + 22];
-    info[4..].copy_from_slice(&transport_address(&sa));
-    let status = afd_overlapped(s, IOCTL_AFD_SUPER_CONNECT, &info, core::ptr::null_mut(), 0, ov);
+    let (t, n) = transport_address(&sa);
+    let mut info = [0u8; 4 + 34];
+    info[4..4 + n].copy_from_slice(&t[..n]);
+    let status =
+        afd_overlapped(s, IOCTL_AFD_SUPER_CONNECT, &info[..4 + n], core::ptr::null_mut(), 0, ov);
     if status == 0 && !sent.is_null() {
         // SAFETY: the caller's count.
         unsafe { *sent = 0 };
@@ -1225,11 +1317,14 @@ mod options {
     /// SO_SNDBUF and SO_RCVBUF (gala's 64 KiB), SO_EXCLUSIVEADDRUSE,
     /// TCP_NODELAY, TCP_KEEPALIVE (idle, 2 h), TCP_KEEPCNT (10),
     /// TCP_KEEPINTVL (1 s), SO_BROADCAST; SO_TYPE (stream unless socket
-    /// made a datagram socket; read-only to setsockopt); SO_RANDOMIZE_PORT,
+    /// made a datagram socket; read-only to setsockopt); the address family
+    /// (gala's own, not an option: `family_of`); IPV6_V6ONLY (1, Windows'
+    /// default: a v6 socket takes only v6; dual stack is N3 step 2);
+    /// SO_RANDOMIZE_PORT,
     /// IP_DONTFRAGMENT and IP_RECVECN (kept only: ephemeral ports are
     /// chosen and datagrams sent as without them, and receives carry no
     /// ECN control data).
-    const OPTIONS: [(i32, i32, i32); 14] = [
+    const OPTIONS: [(i32, i32, i32); 16] = [
         (SOL_SOCKET, 0x4, 0),
         (SOL_SOCKET, 0x8, 0),
         (SOL_SOCKET, 0x1001, 65536),
@@ -1244,7 +1339,12 @@ mod options {
         (SOL_SOCKET, 0x3005, 0),
         (super::IPPROTO_IP, 14, 0),
         (super::IPPROTO_IP, 50, 0),
+        (FAMILY_LEVEL, 0, super::AF_INET),
+        (super::IPPROTO_IPV6, 27, 1),
     ];
+    /// The family's slot: a level no option uses.
+    const FAMILY_LEVEL: i32 = 0x7fff_0000;
+    pub const FAMILY: usize = 14;
     /// SO_TYPE's slot.
     pub const TYPE: usize = 10;
     const SOCKETS: usize = 256;
@@ -1332,6 +1432,8 @@ pub extern "system" fn setsockopt(
         }
         // IP_DONTFRAGMENT, IP_RECVECN (kept only).
         (IPPROTO_IP, 14 | 50) => true,
+        // IPV6_V6ONLY: kept; 0 (dual stack) is N3 step 2.
+        (IPPROTO_IPV6, 27) => true,
         // TCP_NODELAY (already the behaviour), TCP_KEEPIDLE, TCP_KEEPCNT,
         // TCP_KEEPINTVL.
         (IPPROTO_TCP, 1 | 3 | 16 | 17) => true,
@@ -1766,10 +1868,39 @@ pub extern "system" fn getaddrinfo(
         } else {
             (*hints, *hints.add(1), *hints.add(2), *hints.add(3))
         };
-        if family != 0 && family != AF_INET {
+        if family != 0 && family != AF_INET && family != AF_INET6 {
             return WSAEAFNOSUPPORT as i32;
         }
-        let ip = if node.is_null() {
+        // IPv6 answers: AF_INET6 hints (numeric addresses, loopback names),
+        // or an IPv6 numeric address with any hints. AF_UNSPEC names stay
+        // IPv4 (N3 step 2: both, ::1 first as Windows lists them).
+        let text = if node.is_null() {
+            None
+        } else {
+            Some(core::slice::from_raw_parts(node, strlen(node)))
+        };
+        let v6 = match text {
+            None if family == AF_INET6 => Some(if flags & 1 != 0 { [0u8; 16] } else { LOOPBACK6 }),
+            Some(t) if family == AF_INET6 || family == 0 => match parse_ipv6(t) {
+                Some(a) => Some(a),
+                None if family == AF_INET6 => {
+                    if t.eq_ignore_ascii_case(b"localhost") || t.eq_ignore_ascii_case(HOST_NAME) {
+                        Some(LOOPBACK6)
+                    } else if flags & AI_NUMERICHOST != 0 {
+                        return WSAHOST_NOT_FOUND;
+                    } else {
+                        // No AAAA queries yet (N3 step 3).
+                        missing(b"ws2_32.dll!getaddrinfo(AF_INET6 name)", 0);
+                        return WSAHOST_NOT_FOUND;
+                    }
+                }
+                None => None,
+            },
+            _ => None,
+        };
+        let ip = if v6.is_some() {
+            [0; 4]
+        } else if node.is_null() {
             if flags & 1 != 0 { [0, 0, 0, 0] } else { [127, 0, 0, 1] } // AI_PASSIVE
         } else {
             let text = core::slice::from_raw_parts(node, strlen(node));
@@ -1804,18 +1935,24 @@ pub extern "system" fn getaddrinfo(
             return WSAENOBUFS as i32;
         }
         // ADDRINFOA (x64): flags, family, socktype, protocol, addrlen,
-        // canonname, addr, next; the SOCKADDR_IN follows it.
+        // canonname, addr, next; the SOCKADDR_IN(6) follows it.
         let ai = page.cast::<i32>();
         *ai = flags;
-        *ai.add(1) = AF_INET;
+        *ai.add(1) = if v6.is_some() { AF_INET6 } else { AF_INET };
         *ai.add(2) = socktype;
         *ai.add(3) = protocol;
-        *page.add(16).cast::<usize>() = SOCKADDR_LEN as usize;
         let sa = page.add(48);
         *page.add(32).cast::<*mut u8>() = sa;
-        *sa = AF_INET as u8;
         core::ptr::copy_nonoverlapping(port.to_be_bytes().as_ptr(), sa.add(2), 2);
-        core::ptr::copy_nonoverlapping(ip.as_ptr(), sa.add(4), 4);
+        if let Some(a) = v6 {
+            *page.add(16).cast::<usize>() = SOCKADDR6_LEN as usize;
+            *sa = AF_INET6 as u8;
+            core::ptr::copy_nonoverlapping(a.as_ptr(), sa.add(8), 16);
+        } else {
+            *page.add(16).cast::<usize>() = SOCKADDR_LEN as usize;
+            *sa = AF_INET as u8;
+            core::ptr::copy_nonoverlapping(ip.as_ptr(), sa.add(4), 4);
+        }
         *result = page;
     }
     0
@@ -1987,11 +2124,11 @@ mod dns {
     }
 
     fn exchange(s: Socket, query: &[u8], id: u16) -> Result<[u8; 4], i32> {
-        let mut server = [0u8; 16];
-        server[..2].copy_from_slice(&(AF_INET as u16).to_le_bytes());
-        server[2..4].copy_from_slice(&PORT.to_be_bytes());
-        server[4..8].copy_from_slice(&SERVER);
-        let address = transport_address(&server);
+        let mut server = Sa::any(AF_INET);
+        server.b[2..4].copy_from_slice(&PORT.to_be_bytes());
+        server.b[4..8].copy_from_slice(&SERVER);
+        let (address, address_len) = transport_address(&server);
+        let address = &address[..address_len];
         let mut wsabuf = [0u8; 16];
         wsabuf[..4].copy_from_slice(&(query.len() as u32).to_le_bytes());
         wsabuf[8..].copy_from_slice(&(query.as_ptr() as u64).to_le_bytes());
@@ -2082,6 +2219,293 @@ fn parse_u16(s: &[u8]) -> Option<u16> {
     }
     let v = s.iter().fold(0u32, |v, &d| v * 10 + u32::from(d - b'0'));
     u16::try_from(v).ok()
+}
+
+/// ::1.
+const LOOPBACK6: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+/// An IPv6 address in text (RFC 4291 section 2.2: eight groups of up to
+/// four hex digits, one `::` for a run of zero groups, the last 32 bits
+/// as a dotted IPv4 address).
+fn parse_ipv6(s: &[u8]) -> Option<[u8; 16]> {
+    if s.is_empty() || s.len() > 45 {
+        return None;
+    }
+    let mut head = [0u16; 8];
+    let mut tail = [0u16; 8];
+    let (mut nh, mut nt) = (0usize, 0usize);
+    let (before, after) = match s.windows(2).position(|w| w == b"::") {
+        Some(i) => (&s[..i], Some(&s[i + 2..])),
+        None => (s, None),
+    };
+    // Groups of one side; an IPv4 tail counts as two.
+    fn groups(part: &[u8], out: &mut [u16; 8], n: &mut usize, last: bool) -> Option<()> {
+        if part.is_empty() {
+            return Some(());
+        }
+        let fields: &[u8] = part;
+        let mut iter = fields.split(|&c| c == b':').peekable();
+        while let Some(g) = iter.next() {
+            let is_last = iter.peek().is_none();
+            if is_last && last && g.contains(&b'.') {
+                let v4 = parse_ipv4(g)?;
+                if *n + 2 > 8 {
+                    return None;
+                }
+                out[*n] = u16::from_be_bytes([v4[0], v4[1]]);
+                out[*n + 1] = u16::from_be_bytes([v4[2], v4[3]]);
+                *n += 2;
+                continue;
+            }
+            if g.is_empty() || g.len() > 4 || *n == 8 {
+                return None;
+            }
+            let mut v = 0u16;
+            for &c in g {
+                v = v * 16 + (c as char).to_digit(16)? as u16;
+            }
+            out[*n] = v;
+            *n += 1;
+        }
+        Some(())
+    }
+    groups(before, &mut head, &mut nh, after.is_none())?;
+    if let Some(after) = after {
+        if after.windows(2).any(|w| w == b"::") {
+            return None;
+        }
+        groups(after, &mut tail, &mut nt, true)?;
+        if nh + nt > 7 {
+            return None;
+        }
+    } else if nh != 8 {
+        return None;
+    }
+    let mut words = [0u16; 8];
+    words[..nh].copy_from_slice(&head[..nh]);
+    words[8 - nt..].copy_from_slice(&tail[..nt]);
+    let mut a = [0u8; 16];
+    for (i, w) in words.iter().enumerate() {
+        a[2 * i..2 * i + 2].copy_from_slice(&w.to_be_bytes());
+    }
+    Some(a)
+}
+
+/// An IPv6 address as text (RFC 5952: lower-case hex, no leading zeros,
+/// the longest run of two or more zero groups as `::`, the first if
+/// tied; IPv4-mapped addresses as `::ffff:a.b.c.d`), NUL-terminated, in
+/// `out`; its length without the NUL.
+fn format_ipv6(a: &[u8; 16], out: &mut [u8; 48]) -> usize {
+    let words: [u16; 8] = core::array::from_fn(|i| u16::from_be_bytes([a[2 * i], a[2 * i + 1]]));
+    let mut n = 0;
+    let mut put = |b: u8, n: &mut usize| {
+        out[*n] = b;
+        *n += 1;
+    };
+    let hex = |v: u16, out: &mut dyn FnMut(u8)| {
+        let digits = b"0123456789abcdef";
+        let mut started = false;
+        for shift in [12, 8, 4, 0] {
+            let d = ((v >> shift) & 0xf) as usize;
+            if d != 0 || started || shift == 0 {
+                started = true;
+                out(digits[d]);
+            }
+        }
+    };
+    if words[..5] == [0; 5] && words[5] == 0xffff {
+        for &b in b"::ffff:" {
+            put(b, &mut n);
+        }
+        let mut text = [0u8; 16];
+        let len = format_ipv4(&[a[12], a[13], a[14], a[15]], &mut text);
+        for &b in &text[..len] {
+            put(b, &mut n);
+        }
+        out[n] = 0;
+        return n;
+    }
+    // The longest run of zero groups (two or more).
+    let (mut best, mut best_len, mut i) = (8usize, 1usize, 0usize);
+    while i < 8 {
+        if words[i] == 0 {
+            let start = i;
+            while i < 8 && words[i] == 0 {
+                i += 1;
+            }
+            if i - start > best_len {
+                (best, best_len) = (start, i - start);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let mut i = 0;
+    while i < 8 {
+        if i == best {
+            put(b':', &mut n);
+            if i == 0 {
+                put(b':', &mut n);
+            }
+            i += best_len;
+            continue;
+        }
+        hex(words[i], &mut |b| put(b, &mut n));
+        if i < 7 {
+            put(b':', &mut n);
+        }
+        i += 1;
+    }
+    out[n] = 0;
+    n
+}
+
+/// a.b.c.d into `out`; its length.
+fn format_ipv4(a: &[u8; 4], out: &mut [u8; 16]) -> usize {
+    let mut n = 0;
+    for (i, &v) in a.iter().enumerate() {
+        if i > 0 {
+            out[n] = b'.';
+            n += 1;
+        }
+        if v >= 100 {
+            out[n] = b'0' + v / 100;
+            n += 1;
+        }
+        if v >= 10 {
+            out[n] = b'0' + v / 10 % 10;
+            n += 1;
+        }
+        out[n] = b'0' + v % 10;
+        n += 1;
+    }
+    n
+}
+
+/// inet_pton(family, text, out): 1 for an address of `family` (AF_INET:
+/// 4 bytes, AF_INET6: 16), 0 for text that is none, -1 (WSAEAFNOSUPPORT)
+/// for another family.
+#[unsafe(no_mangle)]
+pub extern "system" fn inet_pton(family: i32, text: *const u8, out: *mut u8) -> i32 {
+    if text.is_null() || out.is_null() {
+        fail(WSAEFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's NUL-terminated text.
+    let t = unsafe { core::slice::from_raw_parts(text, strlen(text)) };
+    // SAFETY: the caller's buffer holds the address of `family`.
+    unsafe {
+        match family {
+            AF_INET => match parse_ipv4(t) {
+                Some(a) => core::ptr::copy_nonoverlapping(a.as_ptr(), out, 4),
+                None => return 0,
+            },
+            AF_INET6 => match parse_ipv6(t) {
+                Some(a) => core::ptr::copy_nonoverlapping(a.as_ptr(), out, 16),
+                None => return 0,
+            },
+            _ => {
+                fail(WSAEAFNOSUPPORT);
+                return -1;
+            }
+        }
+    }
+    1
+}
+
+/// InetPtonW: inet_pton with UTF-16 text.
+#[unsafe(no_mangle)]
+pub extern "system" fn InetPtonW(family: i32, text: *const u16, out: *mut u8) -> i32 {
+    let mut narrow = [0u8; 64];
+    if text.is_null() {
+        fail(WSAEFAULT);
+        return -1;
+    }
+    let mut i = 0;
+    // SAFETY: the caller's NUL-terminated text, read to its end or 63.
+    unsafe {
+        while i < 63 && *text.add(i) != 0 {
+            let c = *text.add(i);
+            narrow[i] = if c < 0x80 { c as u8 } else { b'?' };
+            i += 1;
+        }
+    }
+    inet_pton(family, narrow.as_ptr(), out)
+}
+
+/// inet_ntop(family, address, out, size): the address as text in `out`,
+/// or NULL (WSAEINVAL: `size` too small; WSAEAFNOSUPPORT).
+#[unsafe(no_mangle)]
+pub extern "system" fn inet_ntop(
+    family: i32,
+    addr: *const u8,
+    out: *mut u8,
+    size: usize,
+) -> *const u8 {
+    if addr.is_null() || out.is_null() {
+        fail(WSAEFAULT);
+        return core::ptr::null();
+    }
+    let mut text = [0u8; 48];
+    // SAFETY: the caller's address of `family`.
+    let len = unsafe {
+        match family {
+            AF_INET => {
+                let mut a = [0u8; 4];
+                core::ptr::copy_nonoverlapping(addr, a.as_mut_ptr(), 4);
+                let mut t = [0u8; 16];
+                let n = format_ipv4(&a, &mut t);
+                text[..n].copy_from_slice(&t[..n]);
+                n
+            }
+            AF_INET6 => {
+                let mut a = [0u8; 16];
+                core::ptr::copy_nonoverlapping(addr, a.as_mut_ptr(), 16);
+                format_ipv6(&a, &mut text)
+            }
+            _ => {
+                fail(WSAEAFNOSUPPORT);
+                return core::ptr::null();
+            }
+        }
+    };
+    if size <= len {
+        fail(WSAEINVAL);
+        return core::ptr::null();
+    }
+    // SAFETY: the caller's buffer of `size` > len bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(text.as_ptr(), out, len);
+        *out.add(len) = 0;
+    }
+    out
+}
+
+/// InetNtopW: inet_ntop with UTF-16 text (`size` in characters).
+#[unsafe(no_mangle)]
+pub extern "system" fn InetNtopW(
+    family: i32,
+    addr: *const u8,
+    out: *mut u16,
+    size: usize,
+) -> *const u16 {
+    let mut narrow = [0u8; 48];
+    if out.is_null() || inet_ntop(family, addr, narrow.as_mut_ptr(), 48).is_null() {
+        return core::ptr::null();
+    }
+    let len = narrow.iter().position(|&b| b == 0).unwrap_or(0);
+    if size <= len {
+        fail(WSAEINVAL);
+        return core::ptr::null();
+    }
+    // SAFETY: the caller's buffer of `size` > len characters.
+    unsafe {
+        for (i, &b) in narrow[..len].iter().enumerate() {
+            *out.add(i) = u16::from(b);
+        }
+        *out.add(len) = 0;
+    }
+    out
 }
 
 fn parse_ipv4(s: &[u8]) -> Option<[u8; 4]> {
@@ -2249,7 +2673,7 @@ pub extern "system" fn recvfrom(
 
 /// The address AFD sends a datagram to: a TRANSPORT_ADDRESS from the
 /// caller's SOCKADDR_IN.
-fn destination(to: *const u8, to_len: i32) -> Result<[u8; 22], i32> {
+fn destination(to: *const u8, to_len: i32) -> Result<([u8; 34], usize), i32> {
     Ok(transport_address(&read_sockaddr(to, to_len)?))
 }
 
@@ -2279,7 +2703,7 @@ pub extern "system" fn WSASendTo(
         missing(b"ws2_32.dll!WSASendTo(flags)", flags.into());
         return fail(WSAEOPNOTSUPP);
     }
-    let address = match destination(to, to_len) {
+    let (address, address_len) = match destination(to, to_len) {
         Ok(a) => a,
         Err(e) => return e,
     };
@@ -2289,7 +2713,7 @@ pub extern "system" fn WSASendTo(
     let mut info = [0u8; 104];
     info[..8].copy_from_slice(&(buffers as u64).to_le_bytes());
     info[8..12].copy_from_slice(&count.to_le_bytes());
-    info[88..92].copy_from_slice(&(address.len() as u32).to_le_bytes());
+    info[88..92].copy_from_slice(&(address_len as u32).to_le_bytes());
     info[96..104].copy_from_slice(&(address.as_ptr() as u64).to_le_bytes());
     request(s, IOCTL_AFD_SEND_DATAGRAM, &info, sent, ov, routine)
 }
@@ -2324,7 +2748,7 @@ pub extern "system" fn WSARecvFrom(
         return fail(WSAEOPNOTSUPP);
     }
     // SAFETY: the caller's length, with its buffer.
-    if !from.is_null() && (from_len.is_null() || unsafe { *from_len } < SOCKADDR_LEN) {
+    if !from.is_null() && (from_len.is_null() || unsafe { *from_len } < min_len_of(s)) {
         return fail(WSAEFAULT);
     }
     // AFD_RECV_INFO_UDP: the buffers, the TDI flags (peek) at 16, where

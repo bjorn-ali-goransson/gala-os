@@ -136,7 +136,7 @@ has a section under "Open items".
 | G3 | Workable Go programs | done | `go_goroutines`, `go_time`, `go_gc`, `go_os`, `go_exit` |
 | N1 | Networking: virtio-net, TCP/IP, AFD, ws2_32, UDP | done | `net_echo`, `winsock_test`, `winsock_async_test`, `go_http`, `udp_test`, `udp_echo`; UDP limits in ARCHITECTURE "Networking" |
 | N2 | Nginx (x64 build, master/worker, zlib, PCRE2, OpenSSL) | done | `nginx`, `nginx_master`, `nginx_tls`; WORKFLOW "Nginx" |
-| N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | planned | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
+| N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | in progress (step 1, ::1, done: `ipv6_test`) | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | planned | |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
@@ -615,9 +615,8 @@ samples).
    `https://` page from the guest's nginx, its CA in crypt32's ROOT
    store, about 320 s; `chromium_host`: `http://10.0.2.100/` from
    the host by name, `gala-host.test` from the hosts file, `xtask
-   serve-page`, about 165 s); next AF_INET6 sockets (N3: Chromium asks
-   for them; ws2_32 refuses today: the ledger's `socket(address family)`
-   23), and
+   serve-page`, about 165 s); AF_INET6 sockets exist (N3 step 1, ::1;
+   steps 2 and 3, dual stack and the card's addresses, next), and
    the profile's top items on a release kernel (`cargo xtask profile
    --release`: the kernel is 22% of samples, 124 s in the kernel
    against 215 s for the debug kernel the gate boots, whose lockdep

@@ -4,11 +4,7 @@
 
 gala_stubs::unimplemented_exports!("ws2_32.dll":
     GetNameInfoW
-    InetNtopW
-    InetPtonW
     WSAAddressToStringW
     WSAStringToAddressA
     WSAStringToAddressW
-    inet_ntop
-    inet_pton
 );

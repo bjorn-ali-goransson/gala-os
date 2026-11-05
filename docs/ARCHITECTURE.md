@@ -3282,7 +3282,7 @@ Chromium opens one to probe for IPv6 (refused today: the ledger's
 listen dual-stack by default where they can. Steps, each test first
 against Windows' results (a Winsock IPv6 test program):
 
-1. **Loopback `::1`**: smoltcp's `proto-ipv6`; `lo` gets ::1/128 beside
+1. **Loopback `::1`** (done; `ipv6_test`): smoltcp's `proto-ipv6`; `lo` gets ::1/128 beside
    127.0.0.1/8; `net::tcp`/`net::udp` endpoints become `IpEndpoint`s
    (they are IPv4 throughout today). AFD's transport addresses take
    TDI_ADDRESS_IP6 (family 23: port, flow info, the 16-byte address,
@@ -3291,7 +3291,20 @@ against Windows' results (a Winsock IPv6 test program):
    bind, connect, accept(Ex), getsockname/getpeername, sendto/recvfrom;
    getaddrinfo with AF_INET6 or AF_UNSPEC hints answering `::1` for
    localhost (Windows lists ::1 first); inet_pton/inet_ntop and
-   WSAStringToAddress/WSAAddressToString for v6.
+   WSAStringToAddress/WSAAddressToString for v6. As built: the stack's
+   `net::Addr` holds an `Ip` (V4 or V6); an IPv6 address off the
+   loopback has no route (`Unreachable`) until step 3; AFD endpoints
+   learn their family from the transport name (`Transport::Tcp6/Udp6`)
+   and take inputs of either address length; ws2_32 keeps each socket's
+   family beside SO_TYPE, so accept, implicit binds and SO_PROTOCOL_INFO
+   follow it; getaddrinfo answers IPv6 for AF_INET6 hints (localhost,
+   the host name, numeric addresses) and for a numeric IPv6 address with
+   any hints, while AF_UNSPEC names stay IPv4 until step 2 (Windows lists
+   ::1 first, which a program listening on 127.0.0.1 only would then not
+   reach); no AAAA queries yet (recorded); inet_pton/inet_ntop and their
+   W forms (RFC 4291 text, RFC 5952 output); WSAStringToAddress and
+   WSAAddressToString are still stubs. A kernel handover refuses a
+   process holding an IPv6 socket (the record holds IPv4 addresses).
 2. **IPV6_V6ONLY**: Windows' default is on (a v6 socket takes only v6);
    off makes a dual-stack socket that accepts IPv4 peers as
    ::ffff:a.b.c.d (IPv4-mapped). gala keeps the option per socket

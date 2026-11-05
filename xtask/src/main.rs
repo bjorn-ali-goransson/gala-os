@@ -3002,7 +3002,6 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
     "java_stress",
-    "ipv6_test",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
