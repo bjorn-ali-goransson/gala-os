@@ -616,11 +616,17 @@ samples).
    the profile's top items on a release kernel (`cargo xtask profile
    --release`: the kernel is 22% of samples, 124 s in the kernel
    against 215 s for the debug kernel the gate boots, whose lockdep
-   alone is 13% of kernel samples): `on_user_exception`,
-   `Process::read_u64`, laying out chrome.dll (one whole copy in the
-   kernel heap per file version); done: the run edits of `Vad::commit`,
-   one status read per serial FIFO, demand-paged image views (they were
-   the longest interrupts-off stretches); the 2 utilities a run that still end "after 15
+   alone is 13% of kernel samples). Done: the run edits of
+   `Vad::commit`, one status read per serial FIFO, demand-paged image
+   views (they were the longest interrupts-off stretches). What is left
+   is about 1% of a run each: demand-zero faults zeroing frames
+   (`on_user_exception`; a pre-zeroed frame list would move it to idle
+   CPUs), kernel access to user memory through the space lock and a
+   page-table walk per call (`Process::read_u64`, also for each system
+   call argument past the fourth; a fault-fixup user copy would read it
+   directly), laying out chrome.dll (one whole copy in the kernel heap
+   per file version); the kernel is about 20% of samples, the rest
+   chrome.dll's own code under TCG; the 2 utilities a run that still end "after 15
    seconds with no connection" (the browser's UI thread answers their
    ping late); the on_device_model utility's delay import of `dxgi.dll`
    (G0). After it:
