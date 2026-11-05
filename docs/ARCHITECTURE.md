@@ -3333,6 +3333,15 @@ against Windows' results (a Winsock IPv6 test program):
    QEMU's user network's IPv6 (fec0::/64, router fec0::2) by router
    advertisement; iphlpapi's tables get the IPv6 rows
    (GetUnicastIpAddressTable, GetAdaptersAddresses' unicast list).
+   Waiting for a test: the QEMU gala pins (11.1.3) refuses IPv6 in
+   `hostfwd` rules (host and guest side: "Bad host address", "Bad guest
+   address"), so a host client cannot reach the guest over IPv6; the
+   guest reaching the host (fec0::2) needs a port the guest cannot know
+   (the command line is in the ISO, made before a port is leased): the
+   way in is a launch-time value the kernel reads (QEMU's fw_cfg,
+   `-fw_cfg name=opt/gala/...`); AAAA answers through fec0::3 depend on
+   the host's resolver. Nothing needs IPv6 off the loopback yet
+   (Chromium's pages come over IPv4).
 
 Not planned: IPv6 extension headers beyond what smoltcp parses, DHCPv6,
 privacy addresses.

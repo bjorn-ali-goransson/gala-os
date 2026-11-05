@@ -76,8 +76,7 @@ In order:
    record/replay), R6's kernel pool and handle quotas, R8's Secure Boot.
 6. **PK**: `gala install`/`list`/`upgrade` on the winget resolver; HTTPS
    downloads (after TLS step 1); a real Inno Setup installer.
-7. **BR** stage 1's rest (IPv6 sockets; the profile's hotspots) with
-   **GPU** G0.
+7. **BR** stage 1's rest (the profile's hotspots) with **GPU** G0.
 8. **AG**: the remaining stubs (filler).
 9. **SSH**: scp, port forwarding, the client; **H11**: busybox httpd
     and wget over loopback.
@@ -136,7 +135,7 @@ has a section under "Open items".
 | G3 | Workable Go programs | done | `go_goroutines`, `go_time`, `go_gc`, `go_os`, `go_exit` |
 | N1 | Networking: virtio-net, TCP/IP, AFD, ws2_32, UDP | done | `net_echo`, `winsock_test`, `winsock_async_test`, `go_http`, `udp_test`, `udp_echo`; UDP limits in ARCHITECTURE "Networking" |
 | N2 | Nginx (x64 build, master/worker, zlib, PCRE2, OpenSSL) | done | `nginx`, `nginx_master`, `nginx_tls`; WORKFLOW "Nginx" |
-| N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | in progress (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, next) | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
+| N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | in progress (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, waits for a way to test it: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | planned | |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
