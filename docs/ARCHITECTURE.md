@@ -2516,7 +2516,15 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   NetWkstaGetInfo; NetUserGetInfo levels 0 and 1 for the accounts
   LookupAccountNameW finds as users (all USER_PRIV_USER, password age 0:
   no alias memberships or change times are kept; Chromium's password
-  manager reads it) (`netapi32_test`). **wldap32** (PostgreSQL's LDAP
+  manager reads it) (`netapi32_test`). **pdh**: real-time queries
+  (PdhOpenQueryW, PdhAdd(English)CounterW, PdhCollectQueryData,
+  PdhGetFormattedCounterValue, PdhRemoveCounter, PdhCloseQuery) of
+  `\Processor(_Total)` and `\Processor Information(_Total)`'s `% Processor
+  Time` and `% Idle Time`, rates over GetSystemTimes between the last two
+  collections (so 0% busy until the kernel keeps processor times); other
+  objects and counters are recorded and fail as on a machine without
+  them; handles carry a generation (`pdh_test`; Chromium's CPU probe).
+  **wldap32** (PostgreSQL's LDAP
   functions): stubs, exported by Windows' ordinals.
 - **Failover clustering is not installed**: clusapi.dll and resutils.dll
   are real, not stubs (SQL Server resolves the whole API with

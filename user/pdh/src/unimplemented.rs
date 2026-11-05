@@ -3,10 +3,5 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("pdh.dll":
-    PdhAddCounterW
-    PdhCloseQuery
-    PdhCollectQueryData
-    PdhGetFormattedCounterValue
     PdhGetRawCounterArrayW
-    PdhOpenQueryW
 );
