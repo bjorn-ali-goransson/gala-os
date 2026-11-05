@@ -76,8 +76,8 @@ In order:
    record/replay), R6's kernel pool and handle quotas, R8's Secure Boot.
 6. **PK**: `gala install`/`list`/`upgrade` on the winget resolver; HTTPS
    downloads (after TLS step 1); a real Inno Setup installer.
-7. **BR** stage 1's rest (a host name resolved through DNS; IPv6
-   sockets; the profile's hotspots) with **GPU** G0.
+7. **BR** stage 1's rest (IPv6 sockets; the profile's hotspots) with
+   **GPU** G0.
 8. **AG**: the remaining stubs (filler).
 9. **SSH**: scp, port forwarding, the client; **H11**: busybox httpd
     and wget over loopback.
@@ -613,9 +613,10 @@ samples).
    of a page its script changed, about 410 s; `chromium_https`: an
    `https://` page from the guest's nginx, its CA in crypt32's ROOT
    store, about 320 s; `chromium_host`: `http://10.0.2.100/` from
-   the host, `xtask serve-page`, about 210 s); next a host name (DNS
-   through QEMU's resolver; Chromium's UDP sockets, AF_INET6 sockets,
-   which ws2_32 refuses today), and
+   the host by name, `gala-host.test` from the hosts file, `xtask
+   serve-page`, about 165 s); next AF_INET6 sockets (Chromium asks for
+   them; ws2_32 refuses today: the ledger's `socket(address family)` 23),
+   and
    the profile's top items on a release kernel (`cargo xtask profile
    --release`: the kernel is 22% of samples, 124 s in the kernel
    against 215 s for the debug kernel the gate boots, whose lockdep
