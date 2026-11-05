@@ -111,6 +111,7 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 | `thread` | create (start address, TEB), exit (status) |
 | `process` | start (command line, `"session"`, `"personality":"nt"`, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; scenario `events_process`), exit; `session` (a session made after boot: id, its BaseNamedObjects) |
 | `fault` | every user-mode CPU exception, before it is resolved or delivered (pid, vector, rip, cr2, error) |
+| `sample` | the sampling profiler: every `sample_hz=` (default 100) a busy CPU's timer tick writes the interrupted thread (`by`), `mode` (`user`/`kernel`) and `rip`. `cargo xtask profile <events.jsonl \| scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR]` attributes them to processes (Chromium's `--type` and utility sub-type shown), threads, modules (the `image` events; record `image,thread,process` with it) and functions: kernel addresses from the kernel ELF, a module's from `DIR/<module>` and its symbols (llvm-symbolizer at its preferred base; `target/prebuilt/chromium-syms` for Chromium), else 256-byte blocks. Scenario `events_sample` |
 | `ipc` | pipes: `pipe create` (pipe number, name, message type, instance), `pipe connect`, `pipe write` (`end`, `to`, `off`: the offset of its first byte in the stream to that end, `bytes`, `queued`), `pipe read` (`end`, `off`, `bytes`, `left`; `by` may be the writer completing a waiting read), `pipe disconnect` (`unread`: bytes discarded), `pipe close`; I/O completion ports: `iocp post` (port number, key, ctx, status, bytes, depth) and `iocp dequeue` (the same with `queued_t` and `queued_by`: when and by which thread the packet was queued). Scenario `events_ipc` |
 | `mock` | live mocking's changes (clock control, record/replay) |
 | `net` | TCP accept, connect, close, reset, with local and remote addresses |
@@ -464,11 +465,10 @@ What failures still leave unexplained, ranked by the time they cost.
   side comes from a user-mode tracer (an NtTrace-like tool, or ETW
   system-call events) run by `user/bin/run-all.ps1`; those results are
   black-box behaviour, so this stays clean-room.
-- **Sampling profiler**: at each LAPIC timer tick record the interrupted
-  RIP (and, with frame pointers, a short stack) into a per-CPU ring and
-  dump it at exit; xtask symbolizes kernel addresses with the kernel ELF
-  and user addresses with the image events plus PE exports, and writes
-  folded stacks for a flame graph.
+- **Sampling profiler, next steps**: a short stack per sample (unwind
+  data or frame pointers) and folded stacks for a flame graph; samples
+  into a per-CPU ring instead of the debug console (each sample costs
+  its bytes' port writes under TCG).
 - **Counters**: per-service call counts and TSC time (the `nt:` line
   has totals), spin iterations on each `IrqMutex` (contention), context
   switches and IPIs per CPU; printed at exit and queryable at run time.

@@ -217,13 +217,13 @@ impl Json {
             _ => None,
         }
     }
-    fn u64(&self, key: &str) -> Option<u64> {
+    pub fn u64(&self, key: &str) -> Option<u64> {
         match self.get(key)? {
             Json::Num(n) => n.parse().ok(),
             _ => None,
         }
     }
-    fn str(&self, key: &str) -> Option<&str> {
+    pub fn str(&self, key: &str) -> Option<&str> {
         match self.get(key)? {
             Json::Str(s) => Some(s),
             _ => None,

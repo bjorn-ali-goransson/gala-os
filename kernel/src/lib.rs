@@ -287,6 +287,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(text) = cmdline.value("events_match") {
         events::set_syscall_match(text);
     }
+    if let Some(hz) = cmdline.value("sample_hz").and_then(|v| v.parse::<u64>().ok()) {
+        time::set_sample_hz(hz);
+    }
     time::emit_calibration_event();
     // The TSC checked against the RTC in the background (recalibrated if
     // they disagree); under `calwrong` and `calstall` (the clock's tests)

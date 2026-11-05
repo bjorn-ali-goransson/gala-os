@@ -45,9 +45,15 @@ pub enum Category {
     /// followed from a write to its read and to the thread that took the
     /// completion.
     Ipc = 8192,
+    /// The sampling profiler: every `sample_hz=` (default 100) the timer
+    /// tick of each busy CPU writes the thread it interrupted (`by`), the
+    /// mode and the instruction pointer; `cargo xtask profile` attributes
+    /// them to threads, modules and symbols.
+    Sample = 16384,
 }
 
-const NAMES: [(&str, u32); 14] = [
+const NAMES: [(&str, u32); 15] = [
+    ("sample", Category::Sample as u32),
     ("ipc", Category::Ipc as u32),
     ("file", Category::File as u32),
     ("window", Category::Window as u32),

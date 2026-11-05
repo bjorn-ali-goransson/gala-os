@@ -105,6 +105,34 @@ pub fn set_hang_test(on: bool) {
     HANG_TEST.store(on, Ordering::Relaxed);
 }
 
+/// `sample_hz=`: profiler samples per second and CPU (`sample` events).
+static SAMPLE_EVERY: AtomicU64 = AtomicU64::new(TICK_HZ / 100);
+
+pub fn set_sample_hz(hz: u64) {
+    SAMPLE_EVERY.store((TICK_HZ / hz.clamp(1, TICK_HZ)).max(1), Ordering::Relaxed);
+}
+
+/// Per CPU: ticks since its last sample.
+static SAMPLE_TICKS: [AtomicU64; crate::arch::smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
+
+/// A profiler sample of the interrupted thread (`by`), every
+/// `SAMPLE_EVERY` ticks of a busy CPU.
+fn sample(frame: &TrapFrame) {
+    let cpu = crate::arch::percpu::cpu_index() as usize;
+    let Some(ticks) = SAMPLE_TICKS.get(cpu) else { return };
+    if ticks.fetch_add(1, Ordering::Relaxed) + 1 < SAMPLE_EVERY.load(Ordering::Relaxed) {
+        return;
+    }
+    ticks.store(0, Ordering::Relaxed);
+    let mode = if frame.from_user_mode() { "user" } else { "kernel" };
+    crate::events::emit(
+        crate::events::Category::Sample,
+        "sample",
+        format_args!(r#""mode":"{mode}","rip":{}"#, frame.rip),
+    );
+}
+
 fn on_tick(frame: &mut TrapFrame) {
     crate::flight::on_tick(TICK_HZ);
     // A thread that stays in the kernel without blocking (the watchdog);
@@ -114,6 +142,11 @@ fn on_tick(frame: &mut TrapFrame) {
             crate::flight::progress(id.as_usize());
         } else if !idle {
             crate::flight::on_kernel_tick(id.as_usize(), frame.rip);
+        }
+        // The profiler: busy CPUs only (an idle CPU's tick is in its idle
+        // loop).
+        if !idle && crate::events::enabled(crate::events::Category::Sample) {
+            sample(frame);
         }
     }
     if crate::arch::percpu::cpu_index() == 1 && HANG_TEST.load(Ordering::Relaxed) {

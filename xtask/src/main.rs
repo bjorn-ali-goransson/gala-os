@@ -22,6 +22,7 @@ mod vmtime;
 #[allow(dead_code)]
 mod manifest;
 mod otel;
+mod profile;
 mod report;
 #[path = "../../kernel/src/trust/sha256.rs"]
 mod sha256;
@@ -2066,6 +2067,9 @@ commands:
   events       summarize an event stream (XTASK_EVENTS=...): system calls by time,
                failing statuses, each thread's last calls, faults, processes, images:
                events <events.jsonl>
+  profile      the sampling profiler's report: <events.jsonl | scenario> [--pid N]
+               [--tid N] [--from S --to S] [--top N] [--symbols DIR] (boot
+               with events=sample,image,thread,process; sample_hz=, default 100)
   otel         convert a boot's event stream and serial log to OpenTelemetry
                (OTLP/JSON traces, logs, metrics; view in Jaeger or an OTel
                collector, docs/WORKFLOW.md, OpenTelemetry): otel <serial log |
@@ -2161,6 +2165,7 @@ fn main() -> ExitCode {
                 None => Err("usage: cargo xtask events <events.jsonl>".into()),
             },
             Some("otel") => otel_cli(&args[1..]),
+            Some("profile") => profile_cli(&args[1..]),
             Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
                 None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
@@ -2869,6 +2874,12 @@ enum Boot {
 /// What scenarios' event streams must hold (an entry starting with `!`:
 /// must not hold).
 const EVENT_EXPECT: &[(&str, &[&str])] = &[
+    (
+        // The sampling profiler: timer ticks sample the running thread
+        // (`by`), its mode and instruction pointer.
+        "events_sample",
+        &[r#""ev":"sample","mode":"user","rip":"#, r#""ev":"sample","mode":"kernel","rip":"#],
+    ),
     (
         // `events_match=` records the system calls of processes whose
         // command line contains the text: process_test's children
@@ -3616,6 +3627,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit events=ipc,thread run=pipe_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["pipe_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Profiler samples while bench runs (see EVENT_EXPECT).
+        name: "events_sample",
+        cmdline: "qemu_exit events=sample,image,thread,process run=bench.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["bench: done", "exited with status 0x00000000"],
     },
     Scenario {
         // System-call events of processes chosen by their command line
@@ -9856,6 +9874,49 @@ fn otel_export_at(
 
 /// `cargo xtask otel`'s arguments: <what> [<events>] [--out <prefix>]
 /// [--endpoint <url>].
+/// `cargo xtask profile <events.jsonl | scenario> [--pid N] [--tid N]
+/// [--from S --to S] [--top N] [--symbols DIR]`: the sampling profiler's
+/// report (xtask/src/profile.rs).
+fn profile_cli(args: &[String]) -> Result {
+    let flag =
+        |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let num = |name: &str| flag(name).and_then(|v| v.parse::<u64>().ok());
+    let secs = |name: &str| flag(name).and_then(|v| v.parse::<f64>().ok());
+    let Some(what) = args.first().filter(|a| !a.starts_with("--")) else {
+        return Err("usage: cargo xtask profile <events.jsonl | scenario> [--pid N] [--tid N] \
+                    [--from S --to S] [--top N] [--symbols DIR]"
+            .into());
+    };
+    let path = if Path::new(what).exists() {
+        PathBuf::from(what)
+    } else {
+        target_dir().join("debug").join(format!("test-{what}.events.jsonl"))
+    };
+    let text = fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    if profile::count(&text) == 0 {
+        return Err(format!(
+            "{}: no sample events (boot with events=sample, or XTASK_EVENTS=sample,image,thread,process)",
+            path.display()
+        ));
+    }
+    let options = profile::Options {
+        pid: num("--pid"),
+        tid: num("--tid"),
+        window: secs("--from").map(|a| (a, secs("--to").unwrap_or(f64::MAX))),
+        top: num("--top").unwrap_or(15) as usize,
+    };
+    let symbols = flag("--symbols").map(PathBuf::from);
+    // The kernel's own addresses: its ELF (the debug build boot tests use).
+    let kernel = target_dir().join("x86_64-unknown-none/debug/kernel");
+    let symbolize = |module: &str, offsets: &[u64]| match (module, &symbols) {
+        ("kernel", _) => profile::llvm_symbolize_kernel(&kernel, offsets),
+        (_, Some(dir)) => profile::llvm_symbolize(dir, module, offsets),
+        _ => vec![None; offsets.len()],
+    };
+    print!("{}", profile::report(&text, &options, &symbolize));
+    Ok(())
+}
+
 fn otel_cli(args: &[String]) -> Result {
     let flag =
         |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
