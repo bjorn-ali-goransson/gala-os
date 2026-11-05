@@ -42,6 +42,7 @@ use alloc::vec::Vec;
 use super::record::{REQUIRED, Reader, Writer, tag};
 use super::version;
 use crate::mm::heap::{AllocError, TryVec};
+use crate::net::Ip;
 use crate::net::tcp::{Addr, CardConfig, CarriedConn, CarriedEntry, CarriedKind, CarriedStack};
 
 /// What a CONNECTION entry is to its socket.
@@ -105,14 +106,20 @@ fn ip_u32(ip: [u8; 4]) -> u32 {
     u32::from_le_bytes(ip)
 }
 
+/// An address as the record holds it: IPv4 only (a handover refuses
+/// IPv6 sockets: `carry::collect_sockets`).
 fn write_addr(w: &mut Writer, a: Addr) -> Result<(), AllocError> {
-    w.u32(ip_u32(a.ip))?;
+    let ip = match a.ip {
+        Ip::V4(ip) => ip,
+        Ip::V6(_) => [0; 4],
+    };
+    w.u32(ip_u32(ip))?;
     w.u32(u32::from(a.port))
 }
 
 fn read_addr(r: &mut Reader<'_>) -> Addr {
     let ip = r.u32().to_le_bytes();
-    Addr { ip, port: r.u32() as u16 }
+    Addr::v4(ip, r.u32() as u16)
 }
 
 fn opt32(v: Option<u32>) -> u32 {
@@ -572,10 +579,10 @@ mod tests {
                 on_card: true,
                 state: tcp_state::ESTABLISHED,
                 tuple: Some((
-                    Addr { ip: [10, 0, 2, 15], port: 7 },
-                    Addr { ip: [10, 0, 2, 2], port: 40000 + u16::from(n) },
+                    Addr::v4([10, 0, 2, 15], 7),
+                    Addr::v4([10, 0, 2, 2], 40000 + u16::from(n)),
                 )),
-                listen: Addr { ip: [0; 4], port: 7 },
+                listen: Addr::v4([0; 4], 7),
                 send_unacked: 0xffff_fff0,
                 send_last: 0x10,
                 recv_first: 0x1234_5678,
@@ -625,15 +632,15 @@ mod tests {
             pid: 4,
             iosb: 0x1030,
             buffers: [(0x7400, 3)].to_vec(),
-            to: Some(Addr { ip: [10, 0, 2, 2], port: 53 }),
+            to: Some(Addr::v4([10, 0, 2, 2], 53)),
             ..RequestRec::default()
         };
-        let peer = Addr { ip: [127, 0, 0, 1], port: 50000 };
+        let peer = Addr::v4([127, 0, 0, 1], 50000);
         SocketRec {
             id: 6,
             transport: transport::UDP,
             entry: Some(CarriedEntry {
-                local: Addr { ip: [0; 4], port: 7 },
+                local: Addr::v4([0; 4], 7),
                 kind: CarriedKind::Udp {
                     peer: Some(peer),
                     datagrams: [(peer, b"first".to_vec()), (peer, Vec::new())].to_vec(),
@@ -690,7 +697,7 @@ mod tests {
                 recorded: 0,
                 signal: 0,
                 entry: Some(CarriedEntry {
-                    local: Addr { ip: [0; 4], port: 7 },
+                    local: Addr::v4([0; 4], 7),
                     kind: CarriedKind::Listener {
                         backlog: 5,
                         next_sequence: 3,
@@ -712,7 +719,7 @@ mod tests {
                 recorded: 1,
                 signal: 1,
                 entry: Some(CarriedEntry {
-                    local: Addr { ip: [10, 0, 2, 15], port: 7 },
+                    local: Addr::v4([10, 0, 2, 15], 7),
                     kind: CarriedKind::Conn { conn: conn(1), connected: true },
                 }),
                 requests: [request].into_iter().collect(),
@@ -813,7 +820,7 @@ mod tests {
             w.u32(0).unwrap(); // select event, mask, recorded, signal
         }
         w.u32(socket_kind::BOUND).unwrap();
-        write_addr(&mut w, Addr { ip: [0; 4], port: 80 }).unwrap();
+        write_addr(&mut w, Addr::v4([0; 4], 80)).unwrap();
         for _ in 0..3 {
             w.u32(0).unwrap(); // a, b, connections
         }
@@ -847,7 +854,7 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(
             got[0].entry,
-            Some(CarriedEntry { local: Addr { ip: [0; 4], port: 80 }, kind: CarriedKind::Bound })
+            Some(CarriedEntry { local: Addr::v4([0; 4], 80), kind: CarriedKind::Bound })
         );
         let q = &got[0].requests[0];
         assert_eq!(

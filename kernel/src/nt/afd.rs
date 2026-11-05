@@ -13,6 +13,7 @@ use super::process::Process;
 use super::status::NtStatus;
 use super::wait::{self, Dispatcher};
 use crate::mm::heap::{KArc, TryVec};
+use crate::net::Ip;
 use crate::net::tcp::{self, Addr, NetError, SocketId};
 use crate::net::udp;
 use crate::sync::IrqMutex;
@@ -48,10 +49,15 @@ const AFD_DISCONNECT_ABORT: u32 = 4;
 const OPEN_PACKET_NAME: &[u8] = b"AfdOpenPacketXX";
 
 const AF_INET: u16 = 2;
+const AF_INET6: u16 = 23;
 /// SOCKADDR_IN.
 const SOCKADDR_LEN: usize = 16;
+/// SOCKADDR_IN6.
+const SOCKADDR6_LEN: usize = 28;
 /// TRANSPORT_ADDRESS with one TA_ADDRESS holding a TDI_ADDRESS_IP.
 const TRANSPORT_ADDRESS_LEN: usize = 22;
+/// With TDI_ADDRESS_IP6.
+const TRANSPORT_ADDRESS6_LEN: usize = 34;
 /// Bytes copied through the kernel per step of a send or receive.
 const CHUNK: usize = 16 * 1024;
 
@@ -62,6 +68,10 @@ pub enum Transport {
     Tcp,
     /// A datagram endpoint (`\Device\Udp`, `net::udp`).
     Udp,
+    /// The same for IPv6 (`\Device\Tcp6`, `\Device\Udp6`: Windows'
+    /// transport names; N3).
+    Tcp6,
+    Udp6,
 }
 
 impl Transport {
@@ -71,6 +81,8 @@ impl Transport {
             Transport::None => 0,
             Transport::Tcp => 1,
             Transport::Udp => 2,
+            Transport::Tcp6 => 3,
+            Transport::Udp6 => 4,
         }
     }
 
@@ -79,8 +91,22 @@ impl Transport {
             0 => Transport::None,
             1 => Transport::Tcp,
             2 => Transport::Udp,
+            3 => Transport::Tcp6,
+            4 => Transport::Udp6,
             _ => return None,
         })
+    }
+
+    pub fn is_udp(self) -> bool {
+        matches!(self, Transport::Udp | Transport::Udp6)
+    }
+
+    /// The unspecified address of its family (an implicit bind's).
+    pub fn any_address(self) -> Addr {
+        match self {
+            Transport::Tcp6 | Transport::Udp6 => Addr { ip: Ip::V6([0; 16]), port: 0 },
+            _ => Addr::default(),
+        }
     }
 }
 
@@ -258,7 +284,7 @@ const AFD_POLL_CONNECT_ERR: u32 = 0x100;
 fn poll_events(state: &EndpointState) -> u32 {
     let Some(id) = *state.socket.lock() else {
         // An unbound datagram socket can send (it is bound then).
-        return if state.transport == Transport::Udp { AFD_POLL_WRITE } else { 0 };
+        return if state.transport.is_udp() { AFD_POLL_WRITE } else { 0 };
     };
     let Ok(r) = tcp::readiness(id) else { return AFD_POLL_HUP };
     let mut events = 0;
@@ -460,10 +486,12 @@ fn attempt_inner(
                 copied += n;
             }
             if *address != 0 {
-                user_write(process, *address, &to_sockaddr_in(got.from))?;
+                let (b, n) = to_sockaddr(got.from);
+                user_write(process, *address, &b[..n])?;
             }
             if *address_len != 0 {
-                user_write(process, *address_len, &(SOCKADDR_LEN as i32).to_le_bytes())?;
+                let n = to_sockaddr(got.from).1;
+                user_write(process, *address_len, &(n as i32).to_le_bytes())?;
             }
             if got.length > got.copied {
                 // The rest of the datagram is gone (unless peeking).
@@ -486,13 +514,15 @@ fn attempt_inner(
         }
         Op::WaitForListen { output, output_len } => {
             let (sequence, remote) = tcp::pending(id)?;
-            let mut out = [0u8; 4 + TRANSPORT_ADDRESS_LEN];
+            let (ta, n) = to_transport_address(remote);
+            let mut out = [0u8; 4 + TRANSPORT_ADDRESS6_LEN];
             out[..4].copy_from_slice(&sequence.to_le_bytes());
-            out[4..].copy_from_slice(&to_transport_address(remote));
+            out[4..4 + n].copy_from_slice(&ta[..n]);
+            let out = &out[..4 + n];
             if (*output_len as usize) < out.len() {
                 return Err(NtStatus::BUFFER_TOO_SMALL.into());
             }
-            user_write(process, *output, &out)?;
+            user_write(process, *output, out)?;
             Ok(Some(out.len() as u64))
         }
         Op::SuperAccept { accept, output, receive, local } => {
@@ -509,8 +539,12 @@ fn attempt_inner(
             drop(slot);
             let local_addr = tcp::local(new)?;
             let at = *output + u64::from(*receive);
-            user_write(process, at, &to_sockaddr_in(local_addr))?;
-            user_write(process, at + u64::from(*local), &to_sockaddr_in(remote))?;
+            let ((lb, ln), (rb, rn)) = (to_sockaddr(local_addr), to_sockaddr(remote));
+            if ln > *local as usize {
+                return Err(NtStatus::BUFFER_TOO_SMALL.into());
+            }
+            user_write(process, at, &lb[..ln])?;
+            user_write(process, at + u64::from(*local), &rb[..rn])?;
             Ok(Some(0))
         }
         Op::Connect => {
@@ -736,10 +770,21 @@ fn transport_of(packet: &[u8]) -> Result<Transport, NtStatus> {
         b'\\', 0, b'D', 0, b'e', 0, b'v', 0, b'i', 0, b'c', 0, b'e', 0, b'\\', 0, b'U', 0, b'd', 0,
         b'p', 0,
     ];
+    let six: &[u8] = &[b'6', 0];
     if name.eq_ignore_ascii_case(tcp) {
         Ok(Transport::Tcp)
     } else if name.eq_ignore_ascii_case(udp) {
         Ok(Transport::Udp)
+    } else if name.len() == tcp.len() + 2
+        && name.ends_with(six)
+        && name[..tcp.len()].eq_ignore_ascii_case(tcp)
+    {
+        Ok(Transport::Tcp6)
+    } else if name.len() == udp.len() + 2
+        && name.ends_with(six)
+        && name[..udp.len()].eq_ignore_ascii_case(udp)
+    {
+        Ok(Transport::Udp6)
     } else {
         super::ledger::record("NtCreateFile", "afd transport", name_bytes as u64);
         Err(NtStatus::NOT_SUPPORTED)
@@ -814,6 +859,19 @@ impl Request<'_> {
         Ok(buf)
     }
 
+    /// The first `N` bytes of the input buffer, or all of it when shorter
+    /// but at least `min` (an address of either family): the bytes and
+    /// how many were read.
+    fn input_upto<const N: usize>(&self, min: usize) -> Result<([u8; N], usize), NtStatus> {
+        let n = (self.input_len as usize).min(N);
+        if n < min {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        let mut buf = [0u8; N];
+        self.read(self.input, &mut buf[..n])?;
+        Ok((buf, n))
+    }
+
     /// Writes `data` to the output buffer; returns IoStatus.Information.
     fn output(&self, data: &[u8]) -> Result<u64, NtStatus> {
         if (self.output_len as usize) < data.len() {
@@ -834,40 +892,80 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(v)
 }
 
-/// SOCKADDR_IN -> address (IPv4 only).
-fn sockaddr_in(b: &[u8]) -> Result<Addr, NtStatus> {
-    if u16::from_le_bytes([b[0], b[1]]) != AF_INET {
-        return Err(NtStatus::INVALID_ADDRESS_COMPONENT);
+/// SOCKADDR_IN (16 bytes) or SOCKADDR_IN6 (28: port, flow info, the
+/// address, scope id) -> address.
+fn sockaddr(b: &[u8]) -> Result<Addr, NtStatus> {
+    let bad = NtStatus::INVALID_ADDRESS_COMPONENT;
+    match u16::from_le_bytes([*b.first().ok_or(bad)?, *b.get(1).ok_or(bad)?]) {
+        AF_INET if b.len() >= SOCKADDR_LEN => Ok(Addr {
+            port: u16::from_be_bytes([b[2], b[3]]),
+            ip: Ip::V4([b[4], b[5], b[6], b[7]]),
+        }),
+        AF_INET6 if b.len() >= SOCKADDR6_LEN => {
+            let mut ip = [0u8; 16];
+            ip.copy_from_slice(&b[8..24]);
+            Ok(Addr { port: u16::from_be_bytes([b[2], b[3]]), ip: Ip::V6(ip) })
+        }
+        _ => Err(bad),
     }
-    Ok(Addr { port: u16::from_be_bytes([b[2], b[3]]), ip: [b[4], b[5], b[6], b[7]] })
 }
 
-fn to_sockaddr_in(a: Addr) -> [u8; SOCKADDR_LEN] {
-    let mut b = [0u8; SOCKADDR_LEN];
-    b[..2].copy_from_slice(&AF_INET.to_le_bytes());
+/// Address -> SOCKADDR_IN or SOCKADDR_IN6: the bytes and their length.
+fn to_sockaddr(a: Addr) -> ([u8; SOCKADDR6_LEN], usize) {
+    let mut b = [0u8; SOCKADDR6_LEN];
     b[2..4].copy_from_slice(&a.port.to_be_bytes());
-    b[4..8].copy_from_slice(&a.ip);
-    b
-}
-
-/// TRANSPORT_ADDRESS (count, length, type, TDI_ADDRESS_IP) -> address.
-fn transport_address(b: &[u8]) -> Result<Addr, NtStatus> {
-    let count = u32_at(b, 0);
-    let kind = u16::from_le_bytes([b[6], b[7]]);
-    if count < 1 || kind != AF_INET {
-        return Err(NtStatus::INVALID_ADDRESS_COMPONENT);
+    match a.ip {
+        Ip::V4(ip) => {
+            b[..2].copy_from_slice(&AF_INET.to_le_bytes());
+            b[4..8].copy_from_slice(&ip);
+            (b, SOCKADDR_LEN)
+        }
+        Ip::V6(ip) => {
+            b[..2].copy_from_slice(&AF_INET6.to_le_bytes());
+            b[8..24].copy_from_slice(&ip);
+            (b, SOCKADDR6_LEN)
+        }
     }
-    Ok(Addr { port: u16::from_be_bytes([b[8], b[9]]), ip: [b[10], b[11], b[12], b[13]] })
 }
 
-fn to_transport_address(a: Addr) -> [u8; TRANSPORT_ADDRESS_LEN] {
-    let mut b = [0u8; TRANSPORT_ADDRESS_LEN];
+/// TRANSPORT_ADDRESS (count, length, type, then TDI_ADDRESS_IP or
+/// TDI_ADDRESS_IP6: port, flow info, the address, scope id) -> address.
+fn transport_address(b: &[u8]) -> Result<Addr, NtStatus> {
+    let bad = NtStatus::INVALID_ADDRESS_COMPONENT;
+    if b.len() < TRANSPORT_ADDRESS_LEN || u32_at(b, 0) < 1 {
+        return Err(bad);
+    }
+    let port = u16::from_be_bytes([b[8], b[9]]);
+    match u16::from_le_bytes([b[6], b[7]]) {
+        AF_INET => Ok(Addr { port, ip: Ip::V4([b[10], b[11], b[12], b[13]]) }),
+        AF_INET6 if b.len() >= TRANSPORT_ADDRESS6_LEN => {
+            let mut ip = [0u8; 16];
+            ip.copy_from_slice(&b[14..30]);
+            Ok(Addr { port, ip: Ip::V6(ip) })
+        }
+        _ => Err(bad),
+    }
+}
+
+/// Address -> TRANSPORT_ADDRESS: the bytes and their length.
+fn to_transport_address(a: Addr) -> ([u8; TRANSPORT_ADDRESS6_LEN], usize) {
+    let mut b = [0u8; TRANSPORT_ADDRESS6_LEN];
     b[..4].copy_from_slice(&1u32.to_le_bytes());
-    b[4..6].copy_from_slice(&14u16.to_le_bytes());
-    b[6..8].copy_from_slice(&AF_INET.to_le_bytes());
     b[8..10].copy_from_slice(&a.port.to_be_bytes());
-    b[10..14].copy_from_slice(&a.ip);
-    b
+    match a.ip {
+        Ip::V4(ip) => {
+            b[4..6].copy_from_slice(&14u16.to_le_bytes());
+            b[6..8].copy_from_slice(&AF_INET.to_le_bytes());
+            b[10..14].copy_from_slice(&ip);
+            (b, TRANSPORT_ADDRESS_LEN)
+        }
+        Ip::V6(ip) => {
+            b[4..6].copy_from_slice(&26u16.to_le_bytes());
+            b[6..8].copy_from_slice(&AF_INET6.to_le_bytes());
+            b[14..30].copy_from_slice(&ip);
+            (b, TRANSPORT_ADDRESS6_LEN)
+        }
+    }
 }
 
 /// Reads the WSABUF array of a RECV/SEND request: (address, length) pairs.
@@ -938,7 +1036,7 @@ enum Immediate {
 /// Validates a request; does what needs no waiting, or returns the
 /// operation to submit.
 fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus> {
-    if ep.transport == Transport::Udp
+    if ep.transport.is_udp()
         && let Some(i) = immediate_udp(r, ep)?
     {
         return Ok(i);
@@ -947,8 +1045,8 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
     let socket = || current().ok_or(NtStatus::INVALID_CONNECTION);
     Ok(match r.code {
         IOCTL_AFD_BIND => {
-            let b: [u8; 4 + SOCKADDR_LEN] = r.input()?;
-            let local = sockaddr_in(&b[4..])?;
+            let (b, n): ([u8; 4 + SOCKADDR6_LEN], usize) = r.input_upto(4 + SOCKADDR_LEN)?;
+            let local = sockaddr(&b[4..n])?;
             let mut slot = ep.socket.lock();
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER);
@@ -958,7 +1056,7 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             drop(slot);
             let bound = tcp::local(id).map_err(status_of)?;
             Immediate::Done(if r.output_len as usize >= SOCKADDR_LEN {
-                r.output(&to_sockaddr_in(bound))?
+                r.output(&to_sockaddr(bound).0[..to_sockaddr(bound).1])?
             } else {
                 0
             })
@@ -971,11 +1069,13 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
         }
         IOCTL_AFD_CONNECT | IOCTL_AFD_SUPER_CONNECT => {
             let remote = if r.code == IOCTL_AFD_CONNECT {
-                let b: [u8; 12 + TRANSPORT_ADDRESS_LEN] = r.input()?;
-                transport_address(&b[12..])?
+                let (b, n): ([u8; 12 + TRANSPORT_ADDRESS6_LEN], usize) =
+                    r.input_upto(12 + TRANSPORT_ADDRESS_LEN)?;
+                transport_address(&b[12..n])?
             } else {
-                let b: [u8; 4 + TRANSPORT_ADDRESS_LEN] = r.input()?;
-                transport_address(&b[4..])?
+                let (b, n): ([u8; 4 + TRANSPORT_ADDRESS6_LEN], usize) =
+                    r.input_upto(4 + TRANSPORT_ADDRESS_LEN)?;
+                transport_address(&b[4..n])?
             };
             let id = tcp::connect(current(), remote, ep.token).map_err(status_of)?;
             *ep.socket.lock() = Some(id);
@@ -1102,11 +1202,11 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
         IOCTL_AFD_GETSOCKNAME => {
             let local = tcp::local(socket().map_err(|_| NtStatus::INVALID_PARAMETER)?)
                 .map_err(status_of)?;
-            Immediate::Done(r.output(&to_sockaddr_in(local))?)
+            Immediate::Done(r.output(&to_sockaddr(local).0[..to_sockaddr(local).1])?)
         }
         IOCTL_AFD_GET_PEER_NAME => {
             let remote = tcp::remote(socket()?).map_err(status_of)?;
-            Immediate::Done(r.output(&to_sockaddr_in(remote))?)
+            Immediate::Done(r.output(&to_sockaddr(remote).0[..to_sockaddr(remote).1])?)
         }
         code => {
             super::ledger::record("NtDeviceIoControlFile", "afd ioctl", u64::from(code));
@@ -1135,14 +1235,14 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
         if let Some(id) = *slot {
             return Ok(id);
         }
-        let id = udp::bind(Addr::default(), ep.token).map_err(status_of)?;
+        let id = udp::bind(ep.transport.any_address(), ep.token).map_err(status_of)?;
         *slot = Some(id);
         Ok(id)
     };
     Ok(Some(match r.code {
         IOCTL_AFD_BIND => {
-            let b: [u8; 4 + SOCKADDR_LEN] = r.input()?;
-            let local = sockaddr_in(&b[4..])?;
+            let (b, n): ([u8; 4 + SOCKADDR6_LEN], usize) = r.input_upto(4 + SOCKADDR_LEN)?;
+            let local = sockaddr(&b[4..n])?;
             let mut slot = ep.socket.lock();
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER);
@@ -1152,7 +1252,7 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
             drop(slot);
             let bound = tcp::local(id).map_err(status_of)?;
             Immediate::Done(if r.output_len as usize >= SOCKADDR_LEN {
-                r.output(&to_sockaddr_in(bound))?
+                r.output(&to_sockaddr(bound).0[..to_sockaddr(bound).1])?
             } else {
                 0
             })
@@ -1160,9 +1260,10 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
         // connect on a datagram socket only sets (or, with the zero
         // address, clears) the default peer.
         IOCTL_AFD_CONNECT => {
-            let b: [u8; 12 + TRANSPORT_ADDRESS_LEN] = r.input()?;
-            let remote = transport_address(&b[12..])?;
-            if remote.ip == [0; 4] {
+            let (b, n): ([u8; 12 + TRANSPORT_ADDRESS6_LEN], usize) =
+                r.input_upto(12 + TRANSPORT_ADDRESS_LEN)?;
+            let remote = transport_address(&b[12..n])?;
+            if remote.ip.is_unspecified() {
                 let current = *ep.socket.lock();
                 if let Some(id) = current {
                     udp::connect(id, None).map_err(status_of)?;
@@ -1174,12 +1275,14 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
         }
         IOCTL_AFD_SEND_DATAGRAM => {
             let info: [u8; SEND_DATAGRAM_INFO] = r.input()?;
-            if (u32_at(&info, 88) as usize) < TRANSPORT_ADDRESS_LEN {
+            let len = u32_at(&info, 88) as usize;
+            if len < TRANSPORT_ADDRESS_LEN {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
-            let mut ta = [0u8; TRANSPORT_ADDRESS_LEN];
-            r.read(u64_at(&info, 96), &mut ta)?;
-            let to = transport_address(&ta)?;
+            let mut ta = [0u8; TRANSPORT_ADDRESS6_LEN];
+            let n = len.min(TRANSPORT_ADDRESS6_LEN);
+            r.read(u64_at(&info, 96), &mut ta[..n])?;
+            let to = transport_address(&ta[..n])?;
             let buffers = buffers(r)?;
             bound_or_bind()?;
             Immediate::Async(Op::SendTo { buffers, to: Some(to) })
@@ -1504,7 +1607,8 @@ mod tests {
         ea.push(0);
         ea.extend_from_slice(&value);
         assert_eq!(parse_open_packet(&ea), Ok(Transport::Tcp));
-        for t in [Transport::None, Transport::Tcp, Transport::Udp] {
+        for t in [Transport::None, Transport::Tcp, Transport::Udp, Transport::Tcp6, Transport::Udp6]
+        {
             assert_eq!(Transport::from_number(t.number()), Some(t));
         }
         assert_eq!(parse_open_packet(&ea[..10]), Err(NtStatus::INVALID_PARAMETER));
@@ -1512,9 +1616,25 @@ mod tests {
 
     #[test]
     fn address_layouts() {
-        let a = Addr { ip: [127, 0, 0, 1], port: 0x1234 };
-        assert_eq!(sockaddr_in(&to_sockaddr_in(a)), Ok(a));
-        assert_eq!(transport_address(&to_transport_address(a)), Ok(a));
-        assert_eq!(&to_sockaddr_in(a)[..4], &[2, 0, 0x12, 0x34]);
+        let a = Addr::v4([127, 0, 0, 1], 0x1234);
+        let (b, n) = to_sockaddr(a);
+        assert_eq!(n, SOCKADDR_LEN);
+        assert_eq!(sockaddr(&b[..n]), Ok(a));
+        let (t, m) = to_transport_address(a);
+        assert_eq!(m, TRANSPORT_ADDRESS_LEN);
+        assert_eq!(transport_address(&t[..m]), Ok(a));
+        assert_eq!(&b[..4], &[2, 0, 0x12, 0x34]);
+        // IPv6: SOCKADDR_IN6 and TDI_ADDRESS_IP6.
+        let a6 = Addr { ip: Ip::V6(Ip::LOOPBACK6), port: 0x1234 };
+        let (b, n) = to_sockaddr(a6);
+        assert_eq!(n, SOCKADDR6_LEN);
+        assert_eq!(&b[..4], &[23, 0, 0x12, 0x34]);
+        assert_eq!(b[23], 1);
+        assert_eq!(sockaddr(&b[..n]), Ok(a6));
+        let (t, m) = to_transport_address(a6);
+        assert_eq!(m, TRANSPORT_ADDRESS6_LEN);
+        assert_eq!(transport_address(&t[..m]), Ok(a6));
+        // A SOCKADDR_IN6 cut short is refused.
+        assert!(sockaddr(&b[..SOCKADDR_LEN]).is_err());
     }
 }

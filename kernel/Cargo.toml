@@ -37,5 +37,5 @@ handover_next = []
 ed25519-compact = { version = "=2.6.0", default-features = false }
 libc = { version = "=0.2.191", optional = true }
 noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = ["size_16", "size_24", "regular", "bold", "unicode-basic-latin", "unicode-specials"] }
-smoltcp = { version = "0.12", default-features = false, features = ["alloc", "medium-ethernet", "medium-ip", "proto-ipv4", "socket-tcp", "socket-udp"] }
+smoltcp = { version = "0.12", default-features = false, features = ["alloc", "medium-ethernet", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 spin = { version = "0.12.3", default-features = false, features = ["spin_mutex", "once"] }

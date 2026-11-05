@@ -19,7 +19,7 @@ use crate::mm::heap::TryVec;
 use alloc::vec::Vec;
 use smoltcp::phy::Device;
 use smoltcp::socket::udp;
-use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address};
+use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 
 /// Bytes of received datagrams a socket keeps until they are read
 /// (Windows' default SO_RCVBUF is 64 KiB); more are dropped.
@@ -100,21 +100,17 @@ fn side_index(side: Side) -> usize {
 }
 
 fn endpoint(a: Addr) -> IpEndpoint {
-    IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::from(a.ip)), a.port)
+    a.endpoint()
 }
 
 fn addr_of(e: IpEndpoint) -> Addr {
-    let IpAddress::Ipv4(ip) = e.addr;
-    Addr { ip: ip.octets(), port: e.port }
+    Addr { ip: super::Ip::from_smoltcp(e.addr), port: e.port }
 }
 
 /// The smoltcp sockets for `local` (already checked and with its port).
 fn open(s: &mut Stack, local: Addr) -> Result<[Option<Sock>; 2], NetError> {
     let mut socks = [None; 2];
-    let listen = IpListenEndpoint {
-        addr: (local.ip != [0; 4]).then(|| IpAddress::Ipv4(Ipv4Address::from(local.ip))),
-        port: local.port,
-    };
+    let listen = IpListenEndpoint { addr: local.ip.listen_addr(), port: local.port };
     for &side in s.sides_for(local.ip) {
         let made = new_socket().ok_or(NetError::NoMemory).and_then(|mut socket| {
             socket.bind(listen).map_err(|_| NetError::InvalidState)?;
@@ -137,8 +133,7 @@ fn open(s: &mut Stack, local: Addr) -> Result<[Option<Sock>; 2], NetError> {
 /// passed to the notify hook.
 pub fn bind(local: Addr, token: u64) -> Result<SocketId, NetError> {
     with_stack(|s| {
-        let ok_ip = local.ip == [0; 4] || local.ip[0] == 127 || Some(local.ip) == s.eth_ip;
-        if !ok_ip {
+        if !s.may_bind(local.ip) {
             return Err(NetError::AddressNotAvailable);
         }
         let port = match local.port {
@@ -205,11 +200,11 @@ pub fn send_to(id: SocketId, to: Option<Addr>, data: &[u8]) -> Result<usize, Net
         let u = udp_of(entry)?;
         let to = to.or(u.peer).ok_or(NetError::NotConnected)?;
         let socks = u.socks;
-        if to.ip == [0; 4] || to.port == 0 {
+        if to.ip.is_unspecified() || to.port == 0 {
             return Err(NetError::AddressNotAvailable);
         }
         let side = s.side_to(to.ip)?;
-        let sock = socks[side_index(side)].ok_or(if local.ip[0] == 127 {
+        let sock = socks[side_index(side)].ok_or(if local.ip.is_loopback() {
             NetError::Unreachable
         } else {
             NetError::AddressNotAvailable
@@ -368,8 +363,8 @@ mod tests {
     fn datagrams_keep_boundaries_senders_and_the_peer_filter() {
         let _turn = testing::turn();
         testing::loopback_stack();
-        let a = bind(Addr { ip: LO, port: 0 }, 1).unwrap();
-        let b = bind(Addr { ip: LO, port: 0 }, 2).unwrap();
+        let a = bind(Addr { ip: LO.into(), port: 0 }, 1).unwrap();
+        let b = bind(Addr { ip: LO.into(), port: 0 }, 2).unwrap();
         let (la, lb) = (tcp::local(a).unwrap(), tcp::local(b).unwrap());
         assert!(la.port >= 49152 && la.port != lb.port);
         // UDP and TCP ports are apart; a UDP port in use is refused.
@@ -394,7 +389,7 @@ mod tests {
         assert_eq!(recv_from(b, &mut buf, false), Err(NetError::WouldBlock));
 
         // Connected: only the peer's datagrams come.
-        let c = bind(Addr { ip: LO, port: 0 }, 5).unwrap();
+        let c = bind(Addr { ip: LO.into(), port: 0 }, 5).unwrap();
         connect(b, Some(la)).unwrap();
         assert_eq!(tcp::remote(b), Ok(la));
         assert_eq!(send_to(c, Some(lb), b"stranger"), Ok(8));
@@ -424,11 +419,11 @@ mod tests {
     fn udp_sockets_go_on_in_a_new_stack() {
         let _turn = testing::turn();
         testing::loopback_stack();
-        let a = bind(Addr { ip: [0; 4], port: 5300 }, 1).unwrap();
-        let b = bind(Addr { ip: LO, port: 0 }, 2).unwrap();
+        let a = bind(Addr::v4([0; 4], 5300), 1).unwrap();
+        let b = bind(Addr { ip: LO.into(), port: 0 }, 2).unwrap();
         let lb = tcp::local(b).unwrap();
-        assert_eq!(send_to(b, Some(Addr { ip: LO, port: 5300 }), b"kept"), Ok(4));
-        assert_eq!(send_to(b, Some(Addr { ip: LO, port: 5300 }), b"too"), Ok(3));
+        assert_eq!(send_to(b, Some(Addr { ip: LO.into(), port: 5300 }), b"kept"), Ok(4));
+        assert_eq!(send_to(b, Some(Addr { ip: LO.into(), port: 5300 }), b"too"), Ok(3));
         testing::poll();
         connect(a, Some(lb)).unwrap();
         assert!(tcp::stop(100));
@@ -458,7 +453,7 @@ mod tests {
         assert_eq!(send_to(a, None, b"new"), Ok(3));
         let r = recv_wait(b, &mut buf);
         assert_eq!(&buf[..r.copied], b"new");
-        assert_eq!(send_to(b, Some(Addr { ip: LO, port: 5300 }), b"again"), Ok(5));
+        assert_eq!(send_to(b, Some(Addr { ip: LO.into(), port: 5300 }), b"again"), Ok(5));
         let r = recv_wait(a, &mut buf);
         assert_eq!(&buf[..r.copied], b"again");
         testing::end();

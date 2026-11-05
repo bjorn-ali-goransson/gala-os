@@ -19,6 +19,99 @@ pub const ADDRESS: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
 pub const PREFIX: u8 = 24;
 pub const GATEWAY: Ipv4Address = Ipv4Address::new(10, 0, 2, 2);
 
+/// An IPv4 or IPv6 address (N3: ARCHITECTURE "Plan: IPv6"), the stack's
+/// own type (smoltcp's `IpAddress` at its edges).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ip {
+    V4([u8; 4]),
+    V6([u8; 16]),
+}
+
+impl Default for Ip {
+    fn default() -> Self {
+        Ip::V4([0; 4])
+    }
+}
+
+impl From<[u8; 4]> for Ip {
+    fn from(a: [u8; 4]) -> Self {
+        Ip::V4(a)
+    }
+}
+
+impl Ip {
+    /// ::1.
+    pub const LOOPBACK6: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+    /// 0.0.0.0 or ::.
+    pub fn is_unspecified(self) -> bool {
+        match self {
+            Ip::V4(a) => a == [0; 4],
+            Ip::V6(a) => a == [0; 16],
+        }
+    }
+
+    /// 127.0.0.0/8 or ::1.
+    pub fn is_loopback(self) -> bool {
+        match self {
+            Ip::V4(a) => a[0] == 127,
+            Ip::V6(a) => a == Self::LOOPBACK6,
+        }
+    }
+
+    pub fn is_v6(self) -> bool {
+        matches!(self, Ip::V6(_))
+    }
+
+    /// The unspecified address of this family.
+    pub fn unspecified_like(self) -> Ip {
+        match self {
+            Ip::V4(_) => Ip::V4([0; 4]),
+            Ip::V6(_) => Ip::V6([0; 16]),
+        }
+    }
+
+    /// The loopback address of this family.
+    pub fn loopback_like(self) -> Ip {
+        match self {
+            Ip::V4(_) => Ip::V4([127, 0, 0, 1]),
+            Ip::V6(_) => Ip::V6(Self::LOOPBACK6),
+        }
+    }
+
+    pub fn to_smoltcp(self) -> smoltcp::wire::IpAddress {
+        use smoltcp::wire::{IpAddress, Ipv4Address, Ipv6Address};
+        match self {
+            Ip::V4(a) => IpAddress::Ipv4(Ipv4Address::from(a)),
+            Ip::V6(a) => IpAddress::Ipv6(Ipv6Address::from(a)),
+        }
+    }
+
+    pub fn from_smoltcp(a: smoltcp::wire::IpAddress) -> Ip {
+        use smoltcp::wire::IpAddress;
+        match a {
+            IpAddress::Ipv4(a) => Ip::V4(a.octets()),
+            IpAddress::Ipv6(a) => Ip::V6(a.octets()),
+        }
+    }
+
+    /// The address a listen or bind endpoint takes: None for unspecified.
+    pub fn listen_addr(self) -> Option<smoltcp::wire::IpAddress> {
+        (!self.is_unspecified()).then(|| self.to_smoltcp())
+    }
+}
+
+/// `a.b.c.d` or the IPv6 text form (RFC 5952: the longest run of zero
+/// groups as `::`).
+impl core::fmt::Display for Ip {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Ip::V4([a, b, c, d]) => write!(f, "{a}.{b}.{c}.{d}"),
+            Ip::V6(a) => write!(f, "{}", smoltcp::wire::Ipv6Address::from(a)),
+        }
+    }
+}
+
 const ECHO_PORT: u16 = 7;
 const ECHO_TIMEOUT_NS: u64 = 60_000_000_000;
 
@@ -65,7 +158,7 @@ fn blocking<R>(start: u64, mut f: impl FnMut() -> Result<R, NetError>) -> Result
 pub fn echo_test() {
     let start = time::monotonic_ns();
     let result = (|| {
-        let listener = tcp::bind(Addr { ip: [0; 4], port: ECHO_PORT }, 0)?;
+        let listener = tcp::bind(Addr::v4([0; 4], ECHO_PORT), 0)?;
         tcp::listen(listener, 1)?;
         info!("net: echo listening on port {ECHO_PORT}");
         let (sequence, _) = blocking(start, || tcp::pending(listener))?;

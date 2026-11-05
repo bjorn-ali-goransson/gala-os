@@ -34,6 +34,8 @@ const BUFFER: usize = 64 * 1024;
 const MAX_BACKLOG: usize = 8;
 const EPHEMERAL: core::ops::RangeInclusive<u16> = 49152..=65535;
 
+use super::Ip;
+
 pub const LOOPBACK: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,29 +56,35 @@ pub enum NetError {
     TooLarge,
 }
 
-/// An IPv4 address and port.
+/// An IPv4 or IPv6 address and port.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Addr {
-    pub ip: [u8; 4],
+    pub ip: Ip,
     pub port: u16,
 }
 
 impl Addr {
-    fn ip(&self) -> Ipv4Address {
-        Ipv4Address::from(self.ip)
+    /// An IPv4 address and port.
+    pub const fn v4(ip: [u8; 4], port: u16) -> Self {
+        Self { ip: Ip::V4(ip), port }
     }
 
     fn from_endpoint(e: IpEndpoint) -> Self {
-        let IpAddress::Ipv4(ip) = e.addr;
-        Self { ip: ip.octets(), port: e.port }
+        Self { ip: Ip::from_smoltcp(e.addr), port: e.port }
+    }
+
+    pub fn endpoint(self) -> IpEndpoint {
+        IpEndpoint::new(self.ip.to_smoltcp(), self.port)
     }
 }
 
 /// `"a.b.c.d:port"` (a JSON string, for the event stream).
 impl core::fmt::Display for Addr {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let [a, b, c, d] = self.ip;
-        write!(f, "\"{a}.{b}.{c}.{d}:{}\"", self.port)
+        match self.ip {
+            Ip::V4(_) => write!(f, "\"{}:{}\"", self.ip, self.port),
+            Ip::V6(_) => write!(f, "\"[{}]:{}\"", self.ip, self.port),
+        }
     }
 }
 
@@ -303,28 +311,33 @@ impl Stack {
     }
 
     /// The interfaces a local address listens on.
-    pub(super) fn sides_for(&self, ip: [u8; 4]) -> &'static [Side] {
-        match (ip, self.eth.is_some()) {
-            ([0, 0, 0, 0], true) => &[Side::Lo, Side::Eth],
-            ([0, 0, 0, 0], false) | ([127, ..], _) => &[Side::Lo],
+    pub(super) fn sides_for(&self, ip: Ip) -> &'static [Side] {
+        match (ip.is_unspecified(), ip.is_loopback(), self.eth.is_some()) {
+            (true, _, true) => &[Side::Lo, Side::Eth],
+            (true, _, false) | (_, true, _) => &[Side::Lo],
             _ => &[Side::Eth],
         }
     }
 
-    pub(super) fn side_to(&self, ip: [u8; 4]) -> Result<Side, NetError> {
+    pub(super) fn side_to(&self, ip: Ip) -> Result<Side, NetError> {
         match ip {
-            [127, ..] => Ok(Side::Lo),
+            ip if ip.is_loopback() => Ok(Side::Lo),
+            // The card has no IPv6 address yet (N3 step 3).
+            Ip::V6(_) => Err(NetError::Unreachable),
             _ if self.eth.is_some() => Ok(Side::Eth),
             _ => Err(NetError::Unreachable),
         }
     }
 
+    /// Whether a socket may bind to `ip`: unspecified, loopback or the
+    /// card's (IPv4) address.
+    pub(super) fn may_bind(&self, ip: Ip) -> bool {
+        ip.is_unspecified() || ip.is_loopback() || matches!(ip, Ip::V4(a) if Some(a) == self.eth_ip)
+    }
+
     fn listening_socket(&mut self, side: Side, local: Addr) -> Result<Sock, NetError> {
         let mut socket = new_socket().ok_or(NetError::NoMemory)?;
-        let endpoint = IpListenEndpoint {
-            addr: (local.ip != [0; 4]).then(|| IpAddress::Ipv4(local.ip())),
-            port: local.port,
-        };
+        let endpoint = IpListenEndpoint { addr: local.ip.listen_addr(), port: local.port };
         socket.listen(endpoint).map_err(|_| NetError::InvalidState)?;
         self.add(side, socket)
     }
@@ -497,6 +510,13 @@ pub fn set_notify(hook: fn(u64)) {
 pub fn start(card: Option<VirtioNet>) -> Result<(), NetError> {
     let lo =
         Iface::new(Loopback::new(), HardwareAddress::Ip, IpCidr::new(IpAddress::Ipv4(LOOPBACK), 8))
+            .map(|mut lo| {
+                // ::1 beside 127.0.0.1 (N3 step 1).
+                lo.iface.update_ip_addrs(|addrs| {
+                    let _ = addrs.push(IpCidr::new(Ip::V6(Ip::LOOPBACK6).to_smoltcp(), 128));
+                });
+                lo
+            })
             .ok_or(NetError::NoMemory)?;
     let (mut eth, mut eth_ip, mut eth_mac) = (None, None, [0; 6]);
     if let Some(card) = card {
@@ -567,8 +587,7 @@ fn net_thread(_: usize) {
 /// passed to the notify hook.
 pub fn bind(local: Addr, token: u64) -> Result<SocketId, NetError> {
     with_stack(|s| {
-        let ok_ip = local.ip == [0; 4] || local.ip[0] == 127 || Some(local.ip) == s.eth_ip;
-        if !ok_ip {
+        if !s.may_bind(local.ip) {
             return Err(NetError::AddressNotAvailable);
         }
         let port = match local.port {
@@ -663,7 +682,8 @@ pub fn accept(id: SocketId, sequence: u32, token: u64) -> Result<SocketId, NetEr
 pub fn connect(id: Option<SocketId>, remote: Addr, token: u64) -> Result<SocketId, NetError> {
     let id = match id {
         Some(id) => id,
-        None => bind(Addr::default(), token)?,
+        // The unspecified address of the remote's family.
+        None => bind(Addr { ip: remote.ip.unspecified_like(), port: 0 }, token)?,
     };
     with_stack(|s| {
         let side = s.side_to(remote.ip)?;
@@ -672,10 +692,10 @@ pub fn connect(id: Option<SocketId>, remote: Addr, token: u64) -> Result<SocketI
             return Err(NetError::InvalidState);
         }
         let mut local = entry.local;
-        if local.ip == [0; 4] {
+        if local.ip.is_unspecified() {
             local.ip = match side {
-                Side::Lo => LOOPBACK.octets(),
-                Side::Eth => s.eth_ip.ok_or(NetError::Unreachable)?,
+                Side::Lo => remote.ip.loopback_like(),
+                Side::Eth => Ip::V4(s.eth_ip.ok_or(NetError::Unreachable)?),
             };
         }
         let mut socket = new_socket().ok_or(NetError::NoMemory)?;
@@ -684,11 +704,7 @@ pub fn connect(id: Option<SocketId>, remote: Addr, token: u64) -> Result<SocketI
             Side::Eth => s.eth.as_mut().ok_or(NetError::Unreachable)?.iface.context(),
         };
         socket
-            .connect(
-                context,
-                IpEndpoint::new(IpAddress::Ipv4(remote.ip()), remote.port),
-                IpEndpoint::new(IpAddress::Ipv4(local.ip()), local.port),
-            )
+            .connect(context, remote.endpoint(), local.endpoint())
             .map_err(|_| NetError::InvalidState)?;
         let sock = s.add(side, socket)?;
         let entry = s.entry(id)?;
@@ -1118,7 +1134,7 @@ fn duration_of(ms: Option<u32>) -> Option<smoltcp::time::Duration> {
 }
 
 fn ip_endpoint(a: Addr) -> IpEndpoint {
-    IpEndpoint::new(IpAddress::Ipv4(a.ip()), a.port)
+    a.endpoint()
 }
 
 /// A smoltcp socket in gala's terms.
@@ -1136,10 +1152,7 @@ fn conn_state(on_card: bool, t: &tcp::Socket<'static>) -> ConnState {
         CarriedTimer::Close { expires_at } => (timer_kind::CLOSE, ns_of(expires_at), 0),
     };
     let listen = Addr {
-        ip: match c.listen_endpoint.addr {
-            Some(IpAddress::Ipv4(ip)) => ip.octets(),
-            None => [0; 4],
-        },
+        ip: c.listen_endpoint.addr.map_or(Ip::V4([0; 4]), Ip::from_smoltcp),
         port: c.listen_endpoint.port,
     };
     ConnState {
@@ -1191,10 +1204,7 @@ fn smoltcp_state(s: &ConnState) -> Result<smoltcp::socket::tcp::Carried, NetErro
         timer_kind::CLOSE => CarriedTimer::Close { expires_at: instant_of(s.timer_at_ns) },
         _ => return Err(NetError::InvalidState),
     };
-    let listen = IpListenEndpoint {
-        addr: (s.listen.ip != [0; 4]).then(|| IpAddress::Ipv4(s.listen.ip())),
-        port: s.listen.port,
-    };
+    let listen = IpListenEndpoint { addr: s.listen.ip.listen_addr(), port: s.listen.port };
     Ok(Carried {
         state: state_of(s.state).ok_or(NetError::InvalidState)?,
         listen_endpoint: listen,
@@ -1499,7 +1509,7 @@ mod tests {
     fn a_reader_is_told_of_the_next_message_of_the_same_size() {
         let _turn = turn();
         loopback_stack();
-        let addr = Addr { ip: [127, 0, 0, 1], port: 4000 };
+        let addr = Addr::v4([127, 0, 0, 1], 4000);
         let listener = bind(addr, 1).unwrap();
         listen(listener, 4).unwrap();
         let client = connect(None, addr, 2).unwrap();
@@ -1520,6 +1530,32 @@ mod tests {
             assert_eq!(recv(server, &mut buf).unwrap(), 24);
             assert_eq!(buf[0], round);
         }
+        *STACK.lock() = None;
+    }
+
+    /// N3 step 1: a connection over ::1, both ends seeing IPv6 addresses.
+    #[test]
+    fn connections_over_ipv6_loopback() {
+        let _turn = turn();
+        loopback_stack();
+        let addr = Addr { ip: Ip::V6(Ip::LOOPBACK6), port: 4200 };
+        let listener = bind(addr, 1).unwrap();
+        listen(listener, 4).unwrap();
+        let client = connect(None, addr, 2).unwrap();
+        polls(4);
+        let (sequence, remote) = pending(listener).unwrap();
+        assert_eq!(remote.ip, Ip::V6(Ip::LOOPBACK6));
+        let server = accept(listener, sequence, 3).unwrap();
+        polls(2);
+        assert_eq!(local(client).unwrap().ip, Ip::V6(Ip::LOOPBACK6));
+        assert_eq!(super::remote(client).unwrap(), addr);
+        assert_eq!(send(client, b"over ::1").unwrap(), 8);
+        polls(2);
+        assert_eq!(recv_all(server, 8), b"over ::1");
+        // An IPv6 address off the loopback has no route yet (step 3).
+        let far =
+            Addr { ip: Ip::V6([0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]), port: 80 };
+        assert_eq!(connect(None, far, 4), Err(NetError::Unreachable));
         *STACK.lock() = None;
     }
 
@@ -1553,7 +1589,7 @@ mod tests {
     fn connections_go_on_in_a_new_stack() {
         let _turn = turn();
         loopback_stack();
-        let addr = Addr { ip: [127, 0, 0, 1], port: 4100 };
+        let addr = Addr::v4([127, 0, 0, 1], 4100);
         let listener = bind(addr, 1).unwrap();
         listen(listener, 2).unwrap();
         let client = connect(None, addr, 2).unwrap();

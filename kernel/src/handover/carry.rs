@@ -479,6 +479,11 @@ fn collect_sockets(p: &mut Programs, stopped_ns: u64) -> Result<(), Refusal> {
         let ObjectBody::Socket(endpoint) = &p.objects[i].body else { continue };
         let owner = owner_of(p, &p.objects[i]);
         let refuse = |what| Refusal::Process { pid: owner, what };
+        // The record writes IPv4 addresses (ROADMAP N3: IPv6 sockets
+        // across a handover are a step of their own).
+        if matches!(endpoint.state.transport, afd::Transport::Tcp6 | afd::Transport::Udp6) {
+            return Err(refuse("an IPv6 socket"));
+        }
         let c = afd::carry(&endpoint.state).map_err(|_| Refusal::NoMemory)?;
         let entry = match c.socket {
             Some(id) => Some(tcp::carry_entry(id).map_err(|e| match e {
@@ -548,6 +553,9 @@ fn collect_sockets(p: &mut Programs, stopped_ns: u64) -> Result<(), Refusal> {
     }
     if !p.sockets.is_empty() {
         let stack = tcp::carry_stack(stopped_ns).map_err(|_| Refusal::NoMemory)?;
+        if stack.lingering.iter().any(|c| c.state.tuple.is_some_and(|(l, _)| l.ip.is_v6())) {
+            return Err(Refusal::Kernel("a closing IPv6 connection"));
+        }
         p.net = Some(stack);
     }
     Ok(())
