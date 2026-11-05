@@ -3243,8 +3243,9 @@ SOCKET values are the endpoint handles.
   effect yet. The integer ones (SO_REUSEADDR, SO_KEEPALIVE,
   SO_SNDBUF/RCVBUF, SO_EXCLUSIVEADDRUSE, TCP_NODELAY, the TCP
   keep-alive idle/count/interval, SO_BROADCAST, SO_TYPE,
-  SO_RANDOMIZE_PORT and IP_DONTFRAGMENT, the last two set by Chromium's
-  UDP sockets and kept only: ports and datagrams as without them) are kept per
+  SO_RANDOMIZE_PORT, IP_DONTFRAGMENT and IP_RECVECN, the last three set
+  by Chromium's UDP sockets and kept only: ports and datagrams as
+  without them, receives with no ECN control data) are kept per
   socket so getsockopt reports what was set, or Windows' defaults
   (Netty reads them back for every accepted connection); unknown ones
   fail with WSAENOPROTOOPT and are recorded. No broadcast sending is

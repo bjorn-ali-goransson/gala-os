@@ -239,6 +239,7 @@ const SO_BROADCAST: i32 = 0x20;
 const SO_RANDOMIZE_PORT: i32 = 0x3005;
 const IPPROTO_IP: i32 = 0;
 const IP_DONTFRAGMENT: i32 = 14;
+const IP_RECVECN: i32 = 50;
 const INVALID_SOCKET: Socket = !0;
 const SOCKET_ERROR: i32 = -1;
 const MSG_PEEK: i32 = 2;
@@ -510,6 +511,11 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
             0,
         )?;
         c.eq(df as u64, 1)?;
+        // IP_RECVECN (Chromium's QUIC sockets): accepted, read back.
+        c.eq(setsockopt(b, IPPROTO_IP, IP_RECVECN, (&raw const one).cast(), 4) as u64, 0)?;
+        let (mut ecn, mut ecn_len) = (-1i32, 4i32);
+        c.eq(getsockopt(b, IPPROTO_IP, IP_RECVECN, (&raw mut ecn).cast(), &mut ecn_len) as u64, 0)?;
+        c.eq(ecn as u64, 1)?;
 
         // Overlapped, through a completion port.
         let d = WSASocketW(AF_INET, SOCK_DGRAM, IPPROTO_UDP, null_mut(), 0, WSA_FLAG_OVERLAPPED);
