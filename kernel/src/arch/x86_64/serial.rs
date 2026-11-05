@@ -21,7 +21,11 @@ pub fn com1_emergency() -> SerialPort {
     unsafe { SerialPort::new(COM1_BASE) }
 }
 
+/// Line status: the transmitter holding register is empty (with FIFOs on:
+/// the transmit FIFO is).
 const LSR_TRANSMIT_EMPTY: u8 = 1 << 5;
+/// A 16550's transmit FIFO.
+const FIFO_DEPTH: u8 = 16;
 
 pub struct SerialPort {
     data: Port<u8>,
@@ -30,6 +34,14 @@ pub struct SerialPort {
     line_control: Port<u8>,
     modem_control: Port<u8>,
     line_status: Port<u8>,
+    /// Bytes that can be written without asking the line status: a lower
+    /// bound of the free FIFO space (it only grows while the UART sends).
+    /// A status read per FIFO, not per byte: port I/O is the cost of the
+    /// console under emulation.
+    room: u8,
+    /// FIFOs were enabled by `init` (else one byte at a time: a handle
+    /// that did not program the UART, `com1_emergency`).
+    fifo: bool,
 }
 
 impl SerialPort {
@@ -46,6 +58,8 @@ impl SerialPort {
                 line_control: Port::new(base + 3),
                 modem_control: Port::new(base + 4),
                 line_status: Port::new(base + 5),
+                room: 0,
+                fifo: false,
             }
         }
     }
@@ -59,17 +73,24 @@ impl SerialPort {
         self.line_control.write(0x03); // DLAB off, 8 data bits, no parity, 1 stop bit
         self.fifo_control.write(0xc7); // enable + clear FIFOs, 14-byte threshold
         self.modem_control.write(0x03); // DTR + RTS
+        self.fifo = true;
+        self.room = 0;
     }
 
     pub fn write_byte(&mut self, byte: u8) {
-        // Bounded spin so a missing or wedged UART cannot hang the kernel.
-        for _ in 0..100_000 {
-            if self.line_status.read() & LSR_TRANSMIT_EMPTY != 0 {
-                break;
+        if self.room == 0 {
+            // Bounded spin so a missing or wedged UART cannot hang the
+            // kernel.
+            for _ in 0..100_000 {
+                if self.line_status.read() & LSR_TRANSMIT_EMPTY != 0 {
+                    break;
+                }
+                core::hint::spin_loop();
             }
-            core::hint::spin_loop();
+            self.room = if self.fifo { FIFO_DEPTH } else { 1 };
         }
         self.data.write(byte);
+        self.room -= 1;
     }
 }
 
