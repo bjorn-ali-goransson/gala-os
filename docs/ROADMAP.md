@@ -76,8 +76,8 @@ In order:
    record/replay), R6's kernel pool and handle quotas, R8's Secure Boot.
 6. **PK**: `gala install`/`list`/`upgrade` on the winget resolver; HTTPS
    downloads (after TLS step 1); a real Inno Setup installer.
-7. **BR** stage 1 (headless Chromium: `chromium_dump`, the profile's
-   hotspots) with **GPU** G0.
+7. **BR** stage 1 (headless Chromium: an https page from the guest's
+   nginx, the profile's hotspots) with **GPU** G0.
 8. **AG**: the remaining stubs (filler).
 9. **SSH**: scp, port forwarding, the client; **H11**: busybox httpd
     and wget over loopback.
@@ -158,7 +158,7 @@ has a section under "Open items".
 | SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
 | RS | Remote access and sessions | in progress | A, B1, B2 done; B3a next |
 | GPU | Graphics and GPU | in progress | G1 done; G0 next; G3 parked |
-| BR | A web browser: stock Edge | in progress | stage 1: chromium_version passes in the gate (about:blank's DOM, exit 0, ~4.5 min); chromium_dump next |
+| BR | A web browser: stock Edge | in progress | stage 1: chromium_version and chromium_dump (a page's script runs) pass in the gate; https pages next |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
 
 ### Robustness, live update, tooling
@@ -584,8 +584,9 @@ QEMU.
 **Done so far** (stage 1 under way; ARCHITECTURE "A web browser:
 Chromium, then Edge", WORKFLOW "Chromium (BR)"): PREBUILT `chromium`
 (snapshot Win_x64 1733063, 159.0.8140.0, with published symbols);
-scenarios `chromium_version` (`--dump-dom about:blank`; in the gate)
-and `chromium_dump` (a local page changed by its script; PENDING), in
+scenarios `chromium_version` (`--dump-dom about:blank`) and
+`chromium_dump` (a local page changed by its script: V8 runs), both in
+the gate, in
 `SINGLE_THREAD_TCG`, 3 GiB, 900 s; `browser_api_test` and `dwrite_test`
 cover what was added. chrome.exe starts; chrome_elf.dll's early security
 and Crashpad come up (the handler runs as a child with an inherited
@@ -608,7 +609,9 @@ blocked the browser's IO thread, 149 s of a run inside NtWriteFile; and
 samples).
 
 **Next** (each stage test first, the ledger leading):
-1. Headless Chromium. `chromium_dump` (a page whose script runs) next;
+1. Headless Chromium. Its local goal is met (`chromium_dump`: the DOM
+   of a page its script changed, about 410 s); next an `https://` page
+   from nginx_tls in the guest and a page from the host network, and
    the profile's top items (PartitionAlloc's SpinningMutex spinning,
    5.5%; the kernel's `vm::allocate`, 4.7%, and address-space guard
    drops, 3.8%); the 2 utilities a run that still end "after 15
