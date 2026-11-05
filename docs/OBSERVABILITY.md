@@ -528,6 +528,25 @@ silent):
   given process, a network accept), with the adjusted count recorded
   (OTel's probability sampling in tracestate) so the backend can still
   scale counts.
+- **Decide before the cost**: recording everything and choosing at the
+  end (a collector's tail sampling) spends the most on what is thrown
+  away: at millions of transactions a second most of the work would
+  be discarded. A rule decides where the item is made, before it is
+  formatted or buffered, one of three:
+  - **drop**: counted only (a per-CPU counter and a latency histogram
+    bucket: the metrics), nothing formatted, buffered or sent;
+  - **keep**: recorded and exported;
+  - **watch**: recorded provisionally and kept only if it turns out
+    failed or slow.
+  A single-span item (a system call, a wait, a fault) costs nothing to
+  watch: the kernel already notes its start (accounting), and at its
+  end status and duration are known where it ends, so "keep if failed
+  or slower than X" is a comparison there, with nothing buffered; it
+  can apply to every call. Only a multi-span transaction (a chain across
+  threads and processes) has to be held until its root ends, so
+  "watch" for a chain is itself a head decision with its own ratio,
+  carried in the trace context, and only watched chains take ring
+  space (a full ring drops and counts, as the profiler's does).
 - **Sampling rules**: what is sampled how is a list of rules, the first
   match deciding (a default rule last). A rule matches on the
   transaction's or span's **name** (a glob: `NtWriteFile`,
@@ -535,8 +554,9 @@ silent):
   IPC, network accept or connect, process start, profiler sample, log),
   the **process** (image name, command-line text, pid) and thread, and
   on what is only known at the end (status: failed; duration over a
-  threshold). Its action, per signal: a head ratio for traces (0 to 1),
-  a tail rule (keep always, if failed, if slower than X), a profiler
+  threshold). Its action, per signal: drop, keep or watch (above) with
+  a ratio for traces (0 to 1), the watch condition (if failed, if
+  slower than X), a profiler
   rate (samples per second for those threads, 0: none), and
   metrics-only (counted and timed, never a span). Examples: every
   failed system call kept; `NtWriteFile` of the console metrics-only;
