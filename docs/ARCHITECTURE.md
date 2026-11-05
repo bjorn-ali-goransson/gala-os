@@ -3632,7 +3632,8 @@ rather than a format of their own.
 
 **shasha** (Arabic شاشة, "screen") is gala's graphical shell: a
 compositor, window manager and shell in the kernel for now (module
-`nt::desktop`, the `shasha` cargo feature). It imitates Windows 11's look
+`nt::desktop`, the `shasha` cargo feature; ROADMAP SH moves the shell,
+then the compositor, to user mode). It imitates Windows 11's look
 (layout, metrics and colours of captions, taskbar and start menu) with
 gala's own artwork (the Masmak fortress and the wordmark) and an open
 font (Selawik); no Microsoft logo, font, wallpaper or icon file is used.
