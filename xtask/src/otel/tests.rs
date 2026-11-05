@@ -836,14 +836,22 @@ const PROFILED: &str = r#"{"t":100,"cpu":0,"by":0,"ev":"process start","pid":4,"
 {"t":10000000,"cpu":0,"by":8,"ev":"sample","mode":"user","rip":5368713216}
 {"t":20000000,"cpu":0,"by":8,"ev":"sample","mode":"user","rip":5368713216}
 {"t":30000000,"cpu":1,"by":8,"ev":"sample","mode":"user","rip":6442451200}
-{"t":40000000,"cpu":1,"by":8,"ev":"sample","mode":"kernel","rip":18446744071562067968}
+{"t":40000000,"cpu":1,"by":8,"ev":"sample","mode":"kernel","rip":18446744071562067968,"stack":[18446744071562072065]}
 {"t":50000000,"cpu":0,"by":8,"ev":"thread exit","pid":4,"tid":8,"status":0}
 {"t":60000000,"cpu":0,"by":0,"ev":"process exit","pid":4,"session":1,"status":0}
 "#;
 
 fn profiled() -> Export {
-    let names: &dyn Fn(&str, &[u64]) -> Vec<Option<String>> =
-        &|m, offs| offs.iter().map(|_| (m == "b.dll").then(|| "b_function".to_string())).collect();
+    let names: &dyn Fn(&str, &[u64]) -> Vec<Option<String>> = &|m, offs| {
+        offs.iter()
+            .map(|&o| match m {
+                "b.dll" => Some("b_function".to_string()),
+                // A kernel return address is named one byte back.
+                "kernel" if o == 0xffff_ffff_8000_1000 => Some("caller".to_string()),
+                _ => None,
+            })
+            .collect()
+    };
     convert(&Boot {
         serial: "",
         events: PROFILED,
@@ -927,6 +935,20 @@ fn samples_become_an_otlp_profile_linked_to_their_threads() {
         .unwrap();
     let line = &arr(leaf(b), "lines")[0];
     assert_eq!(s(num(&functions[num(line, "functionIndex")], "nameStrindex")), "b_function");
+    // The kernel sample's stack: its address, then its caller, named.
+    let k = samples
+        .iter()
+        .find(|x| s(num(&mappings[num(leaf(x), "mappingIndex")], "filenameStrindex")) == "kernel")
+        .unwrap();
+    let frames = arr(&stacks[num(k, "stackIndex")], "locationIndices");
+    assert_eq!(frames.len(), 2);
+    let caller = match &frames[1] {
+        Json::Num(n) => &locations[n.parse::<usize>().unwrap()],
+        _ => panic!(),
+    };
+    assert_eq!(text(caller, "address"), "18446744071562072065");
+    let line = &arr(caller, "lines")[0];
+    assert_eq!(s(num(&functions[num(line, "functionIndex")], "nameStrindex")), "caller");
     // Attributes: the thread, its process, the mode.
     let attrs = arr(dict, "attributeTable");
     let keys: Vec<&str> = arr(b, "attributeIndices")

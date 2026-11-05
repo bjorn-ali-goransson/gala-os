@@ -1063,11 +1063,14 @@ completion packets with who queued them and when; scenario
 `events_ipc`) become spans linked write to read and post to dequeue,
 and the converter names the slowest hand-offs. The sampling profiler's
 samples go to OTLP's profiles signal (v1development), each linked to
-its thread's span.
+its thread's span; kernel samples carry their frame-pointer stack, so
+the profile names a hot kernel function's callers (user-mode stacks
+need unwinding: next).
 
 **Next**:
 1. OT2: trace context in the kernel; system calls, waits, faults, I/O
-   and network as spans; per-CPU rings. Still open of OT1's gaps: an
+   and network as spans; per-CPU rings; user-mode stacks on samples
+   (the unwind tables of x64 images). Still open of OT1's gaps: an
    entry event for every system call; times on serial lines; the boot's
    wall-clock start.
 2. OT3: trace context carried through ntdll/kernel32 (a TEB slot) and
@@ -1082,8 +1085,13 @@ its thread's span.
    export is done (`cargo xtask perfetto`: tracks per thread, IPC
    flows, samples); next a live view (`cargo xtask
    observe`: streaming OTLP into a collector and Grafana's stack with
-   provisioned dashboards: overview, hot paths, impact table, service
-   map), then transactions (causal chains with owners, callers and a
+   provisioned dashboards: overview, system (Task Manager's Performance
+   tab: per-CPU user, kernel and interrupt time, per-process CPU and
+   memory, from kernel time accounting that ThreadTimes and
+   NtQuerySystemInformation also return), hot paths, impact table,
+   service map; volume bounded per signal: metrics aggregated, traces
+   sampled per transaction at the root and at its end, profiles
+   aggregated per stack, a byte budget, dropped counts reported), then transactions (causal chains with owners, callers and a
    critical-path breakdown) as their own view.
 
 **Design**: OBSERVABILITY "OpenTelemetry export"; WORKFLOW

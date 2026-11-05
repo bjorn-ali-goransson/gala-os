@@ -111,7 +111,7 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 | `thread` | create (start address, TEB), exit (status) |
 | `process` | start (command line, `"session"`, `"personality":"nt"`, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; scenario `events_process`), exit; `session` (a session made after boot: id, its BaseNamedObjects) |
 | `fault` | every user-mode CPU exception, before it is resolved or delivered (pid, vector, rip, cr2, error) |
-| `sample` | the sampling profiler: every `sample_hz=` (default 100) a busy CPU's timer tick writes the interrupted thread (`by`), `mode` (`user`/`kernel`) and `rip`. `cargo xtask profile <events.jsonl \| scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR]` attributes them to processes (Chromium's `--type` and utility sub-type shown), threads, modules (the `image` events; record `image,thread,process` with it) and functions: kernel addresses from the kernel ELF, a module's from `DIR/<module>` and its symbols (llvm-symbolizer at its preferred base; `target/prebuilt/chromium-syms` for Chromium), else 256-byte blocks. Scenario `events_sample` |
+| `sample` | the sampling profiler: every `sample_hz=` (default 100) a busy CPU's timer tick writes the interrupted thread (`by`), `mode` (`user`/`kernel`) and `rip`; a kernel sample also its `stack` (the return addresses of the interrupted code's frames, innermost first, at most 24: frame pointers, the chain ending at the first user-mode frame pointer). `cargo xtask profile <events.jsonl \| scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR]` attributes them to processes (Chromium's `--type` and utility sub-type shown), threads, modules (the `image` events; record `image,thread,process` with it) and functions: kernel addresses from the kernel ELF, a module's from `DIR/<module>` and its symbols (llvm-symbolizer at its preferred base; `target/prebuilt/chromium-syms` for Chromium), else 256-byte blocks; from the kernel stacks, each kernel function's share including what it calls and the heaviest call paths (`leaf <- caller <- ...`), which name who calls a hot function. A tick that arrives while interrupts are off is taken at the instruction that turns them back on: a lock guard's drop (`IrqGuard`, `SpaceGuard`) as a leaf stands for the whole section the lock was held, so read its callers, not the drop. Scenario `events_sample` |
 | `ipc` | pipes: `pipe create` (pipe number, name, message type, instance), `pipe connect`, `pipe write` (`end`, `to`, `off`: the offset of its first byte in the stream to that end, `bytes`, `queued`), `pipe read` (`end`, `off`, `bytes`, `left`; `by` may be the writer completing a waiting read), `pipe disconnect` (`unread`: bytes discarded), `pipe close`; I/O completion ports: `iocp post` (port number, key, ctx, status, bytes, depth) and `iocp dequeue` (the same with `queued_t` and `queued_by`: when and by which thread the packet was queued). Scenario `events_ipc` |
 | `mock` | live mocking's changes (clock control, record/replay) |
 | `net` | TCP accept, connect, close, reset, with local and remote addresses |
@@ -453,8 +453,22 @@ standard tools first, gala's own views only where gala knows more:
    - **Overview**: processes and threads alive, CPU by process (the
      samples), system calls and waits per second, the ledger's new
      entries, crash reports, IPC throughput.
-   - **Hot paths**: flame graphs of the samples (Pyroscope; leaf
-     frames now, whole stacks once samples carry them), filterable by
+   - **System** (Task Manager's Performance tab, Process Explorer):
+     per CPU its busy share split into user, kernel and interrupt
+     time and what ran there (process and thread per CPU over time);
+     per process CPU, commit charge and working set, threads, handles,
+     I/O bytes, context switches; per thread its start address, state,
+     times and a sampled stack. Exact numbers from the kernel's own
+     accounting (metrics), not from samples. The same accounting feeds
+     NtQuerySystemInformation (SystemProcessorPerformanceInformation,
+     SystemProcessInformation) and ThreadTimes, so real Task Manager
+     and Process Explorer show it inside gala too. Needs: kernel and
+     user time per thread and idle, kernel, user and interrupt time per
+     CPU, taken at context switch and at kernel entry and exit
+     (ThreadTimes returns zeros for both today).
+
+     samples carry whole stacks, user-mode ones their leaf until they
+     are unwound), filterable by
      process, thread and mode, and a "from the trace" jump (each sample
      links its thread's span).
    - **Impact table**: per system call, wait object, function and IPC
@@ -491,10 +505,53 @@ standard tools first, gala's own views only where gala knows more:
      reports and state dumps placed on the timeline and on the spans
      they happened in.
 
+**Volume: what is sent, and how it is sampled.** Each signal keeps its
+cost bounded in its own way, and every reduction is visible (the
+observability rule: a dropped or sampled-out item is counted, never
+silent):
+
+- **Metrics are never sampled; they are aggregated.** Counters and
+  histograms (per CPU, process, thread, system call, wait object, IPC
+  channel) are kept in the kernel and exported once per interval: the
+  cost is fixed whatever the load. A Task Manager view, call rates and
+  latency percentiles need nothing else. High-frequency events
+  (system calls, waits, pipe writes) become metrics first, and spans
+  only when sampled.
+- **Exemplars join the two**: each histogram bucket keeps a few
+  sampled spans' ids (OTel exemplars), so a p99 bar jumps to a trace
+  that was actually that slow.
+- **Traces: one decision per transaction, made at its root and carried
+  with it.** The decision travels in the trace context (W3C
+  traceparent's sampled flag, the TEB slot, across process creation,
+  pipes, ALPC and completion ports), so a chain is kept whole or not at
+  all. Head sampling is a ratio per root kind (a system call from a
+  given process, a network accept), with the adjusted count recorded
+  (OTel's probability sampling in tracestate) so the backend can still
+  scale counts.
+- **Tail sampling at the source.** The kernel records every span into
+  its per-CPU rings anyway (cheap, fixed size, like the flight
+  recorder); what decides is the end of the root: a transaction that
+  was slow (over a per-kind threshold), failed (an error status, a
+  crash, a ledger entry) or was asked for is exported whole, the rest
+  only counted. Always record, rarely send; a collector's tail
+  sampler is the fallback for streams that leave the machine unsampled.
+- **Profiles are aggregated**: per interval, each distinct stack and its
+  count (OTLP profiles allow values without per-sample timestamps), so
+  the volume follows the number of hot stacks, not `sample_hz`. The
+  rate itself stays adjustable (`sample_hz=`, and at run time).
+- **Logs**: by severity; a repeated line goes once with a count (as the
+  ledger does).
+- **A budget**: the exporter has bytes per second to spend. Over
+  budget, it lowers head ratios and the profile rate (never the
+  metrics), and says so: dropped and sampled-out counts per signal are
+  themselves metrics, and the export says what ratio was in force.
+- Debugging a test boot stays unsampled (`events=`, everything to the
+  file); sampling is for long-running systems and the live view.
+
 Order: the Perfetto export first (done), then the live stack, then
 transactions as their own view. The kernel side the live view needs
 (per-CPU rings instead of the debug console, which costs a port write
-per byte under TCG; stacks on samples) is OT2's.
+per byte under TCG; user-mode stacks on samples) is OT2's.
 
 - **Trace context in the kernel** (ROADMAP OT2..OT5): system calls,
   waits, faults, I/O and network as spans in per-CPU rings; propagation

@@ -125,12 +125,52 @@ fn sample(frame: &TrapFrame) {
         return;
     }
     ticks.store(0, Ordering::Relaxed);
-    let mode = if frame.from_user_mode() { "user" } else { "kernel" };
+    if frame.from_user_mode() {
+        crate::events::emit(
+            crate::events::Category::Sample,
+            "sample",
+            format_args!(r#""mode":"user","rip":{}"#, frame.rip),
+        );
+        return;
+    }
+    // In the kernel, the return addresses of the interrupted code's frames
+    // (frame pointers; the chain ends at the first user-mode or
+    // out-of-stack frame pointer), so `cargo xtask profile` names callers.
+    let mut stack = SampleStack { addrs: [0; SAMPLE_FRAMES], len: 0 };
+    crate::arch::backtrace::walk_from(frame.rbp, frame.rsp, |ret| {
+        if stack.len < SAMPLE_FRAMES {
+            stack.addrs[stack.len] = ret;
+            stack.len += 1;
+        }
+    });
     crate::events::emit(
         crate::events::Category::Sample,
         "sample",
-        format_args!(r#""mode":"{mode}","rip":{}"#, frame.rip),
+        format_args!(r#""mode":"kernel","rip":{},"stack":{stack}"#, frame.rip),
     );
+}
+
+/// Frames a kernel sample carries (the innermost ones).
+const SAMPLE_FRAMES: usize = 24;
+
+/// A kernel sample's return addresses as a JSON array (written without
+/// allocating: the timer interrupt).
+struct SampleStack {
+    addrs: [u64; SAMPLE_FRAMES],
+    len: usize,
+}
+
+impl fmt::Display for SampleStack {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("[")?;
+        for (i, a) in self.addrs[..self.len].iter().enumerate() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{a}")?;
+        }
+        f.write_str("]")
+    }
 }
 
 fn on_tick(frame: &mut TrapFrame) {

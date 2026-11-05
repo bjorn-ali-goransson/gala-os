@@ -239,6 +239,19 @@ impl Json {
             _ => None,
         }
     }
+    /// An array of numbers (a kernel sample's `stack`); empty if absent.
+    pub fn u64s(&self, key: &str) -> Vec<u64> {
+        match self.get(key) {
+            Some(Json::Arr(a)) => a
+                .iter()
+                .filter_map(|v| match v {
+                    Json::Num(n) => n.parse().ok(),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 pub fn parse_json(text: &str) -> Result<Json, String> {
@@ -1706,6 +1719,8 @@ fn profiles_json(
     let mut images: HashMap<u64, Vec<Img>> = HashMap::new();
     // (t, tid, user mode, rip)
     let mut samples: Vec<(u64, u64, bool, u64)> = Vec::new();
+    // A kernel sample's return addresses (its `stack`), by sample index.
+    let mut callers: HashMap<usize, Vec<u64>> = HashMap::new();
     for (t, ev) in events {
         match ev.str("ev") {
             Some("thread create") => {
@@ -1729,6 +1744,10 @@ fn profiles_json(
             }
             Some("sample") => {
                 if let (Some(by), Some(rip)) = (ev.u64("by"), ev.u64("rip")) {
+                    let stack = ev.u64s("stack");
+                    if !stack.is_empty() {
+                        callers.insert(samples.len(), stack);
+                    }
                     samples.push((*t, by, ev.str("mode") == Some("user"), rip));
                 }
             }
@@ -1774,6 +1793,14 @@ fn profiles_json(
             }
         }
     }
+    // Kernel callers: every return address, named one byte back (inside
+    // its call instruction).
+    for ret in callers.values().flatten() {
+        let v = wanted.entry("kernel".into()).or_default();
+        if !v.contains(&(ret - 1)) {
+            v.push(ret - 1);
+        }
+    }
     let mut function_of: HashMap<(String, u64), String> = HashMap::new();
     if let Some(symbolize) = symbols {
         for (m, offs) in &wanted {
@@ -1804,7 +1831,7 @@ fn profiles_json(
     // (stack, attributes, link) -> timestamps.
     let mut grouped: BTreeMap<(usize, Vec<usize>, usize), Vec<u64>> = BTreeMap::new();
     let mut thread_span: HashMap<u64, Option<u64>> = HashMap::new();
-    for &(t, tid, user, rip) in &samples {
+    for (index, &(t, tid, user, rip)) in samples.iter().enumerate() {
         let (m, start, limit, off) = place(tid, user, rip);
         let mapping = if m.is_empty() {
             0
@@ -1814,19 +1841,29 @@ fn profiles_json(
                 "{{\"memoryStart\":\"{start}\",\"memoryLimit\":\"{limit}\",\"filenameStrindex\":{f}}}"
             ))
         };
-        let lines = match function_of.get(&(m.clone(), off)) {
-            Some(name) => {
-                let (n, f) = (s(name), s(&m));
-                let func =
-                    functions.add(format!("{{\"nameStrindex\":{n},\"filenameStrindex\":{f}}}"));
-                format!(",\"lines\":[{{\"functionIndex\":{func}}}]")
-            }
-            None => String::new(),
-        };
         let mapping_field =
             if mapping == 0 { String::new() } else { format!("\"mappingIndex\":{mapping},") };
-        let location = locations.add(format!("{{{mapping_field}\"address\":\"{rip}\"{lines}}}"));
-        let stack = stacks.add(format!("{{\"locationIndices\":[{location}]}}"));
+        // (address, the offset its name is looked up at): the sampled
+        // address, then a kernel sample's callers, innermost first.
+        let mut frames = vec![(rip, off)];
+        frames.extend(callers.get(&index).into_iter().flatten().map(|&r| (r, r - 1)));
+        let mut indices = Vec::new();
+        for (address, name_at) in frames {
+            let lines = match function_of.get(&(m.clone(), name_at)) {
+                Some(name) => {
+                    let (n, f) = (s(name), s(&m));
+                    let func =
+                        functions.add(format!("{{\"nameStrindex\":{n},\"filenameStrindex\":{f}}}"));
+                    format!(",\"lines\":[{{\"functionIndex\":{func}}}]")
+                }
+                None => String::new(),
+            };
+            indices.push(
+                locations.add(format!("{{{mapping_field}\"address\":\"{address}\"{lines}}}")),
+            );
+        }
+        let indices: Vec<String> = indices.iter().map(|i| i.to_string()).collect();
+        let stack = stacks.add(format!("{{\"locationIndices\":[{}]}}", indices.join(",")));
         let pid = thread_pid.get(&tid).copied().unwrap_or(0);
         let mut attrs = Vec::new();
         let mut int_attr = |key: &str, v: u64, s: &mut dyn FnMut(&str) -> usize| {

@@ -2882,9 +2882,14 @@ enum Boot {
 const EVENT_EXPECT: &[(&str, &[&str])] = &[
     (
         // The sampling profiler: timer ticks sample the running thread
-        // (`by`), its mode and instruction pointer.
+        // (`by`), its mode and instruction pointer, and in the kernel the
+        // return addresses of its frames.
         "events_sample",
-        &[r#""ev":"sample","mode":"user","rip":"#, r#""ev":"sample","mode":"kernel","rip":"#],
+        &[
+            r#""ev":"sample","mode":"user","rip":"#,
+            r#""ev":"sample","mode":"kernel","rip":"#,
+            r#","stack":[18446744"#,
+        ],
     ),
     (
         // `events_match=` records the system calls of processes whose

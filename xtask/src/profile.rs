@@ -72,6 +72,8 @@ pub fn report(events: &str, o: &Options, symbolize: Symbolizer) -> String {
     let mut images: HashMap<u64, Vec<Image>> = HashMap::new();
     // (t, tid, user, rip)
     let mut samples: Vec<(u64, u64, bool, u64)> = Vec::new();
+    // A kernel sample's return addresses, by its index in `samples`.
+    let mut stacks: HashMap<usize, Vec<u64>> = HashMap::new();
     for line in events.lines() {
         let Ok(ev) = parse_json(line.trim()) else { continue };
         match ev.str("ev") {
@@ -99,19 +101,33 @@ pub fn report(events: &str, o: &Options, symbolize: Symbolizer) -> String {
                 else {
                     continue;
                 };
+                let stack = ev.u64s("stack");
+                if !stack.is_empty() {
+                    stacks.insert(samples.len(), stack);
+                }
                 samples.push((t, by, ev.str("mode") == Some("user"), rip));
             }
             _ => {}
         }
     }
     let pid_of = |tid: u64| thread_pid.get(&tid).copied().unwrap_or(0);
-    let selected: Vec<(u64, u64, bool, u64)> = samples
+    let wanted = |&(t, tid, _, _): &(u64, u64, bool, u64)| {
+        o.tid.is_none_or(|w| w == tid)
+            && o.pid.is_none_or(|w| w == pid_of(tid))
+            && o.window.is_none_or(|(a, b)| (a..b).contains(&(t as f64 / 1e9)))
+    };
+    let selected: Vec<(u64, u64, bool, u64)> =
+        samples.iter().copied().filter(|s| wanted(s)).collect();
+    // The selected kernel samples' frames, innermost first (the
+    // interrupted address, then return addresses).
+    let kernel_stacks: Vec<Vec<u64>> = samples
         .iter()
-        .copied()
-        .filter(|&(t, tid, _, _)| {
-            o.tid.is_none_or(|w| w == tid)
-                && o.pid.is_none_or(|w| w == pid_of(tid))
-                && o.window.is_none_or(|(a, b)| (a..b).contains(&(t as f64 / 1e9)))
+        .enumerate()
+        .filter(|(i, s)| !s.2 && wanted(s) && stacks.contains_key(i))
+        .map(|(i, s)| {
+            let mut v = vec![s.3];
+            v.extend(&stacks[&i]);
+            v
         })
         .collect();
     let mut out = String::new();
@@ -220,7 +236,61 @@ pub fn report(events: &str, o: &Options, symbolize: Symbolizer) -> String {
     for (f, n) in ranked(&by_function, top) {
         let _ = writeln!(out, "  {n:7} {:5.1}%  {f}", pct(n, total));
     }
+    kernel_callers(&mut out, &kernel_stacks, top, symbolize);
     out
+}
+
+/// Path frames shown per kernel call path.
+const PATH_FRAMES: usize = 6;
+
+/// The kernel samples' stacks: each function's share including what it
+/// calls (inclusive), and the heaviest call paths (leaf <- callers).
+fn kernel_callers(out: &mut String, stacks: &[Vec<u64>], top: usize, symbolize: Symbolizer) {
+    if stacks.is_empty() {
+        return;
+    }
+    // A return address is symbolized one byte back: inside the call
+    // instruction (its line and inlined frames, not the next statement's).
+    let lookup = |i: usize, a: u64| if i == 0 { a } else { a - 1 };
+    let mut addrs: Vec<u64> =
+        stacks.iter().flat_map(|s| s.iter().enumerate().map(|(i, &a)| lookup(i, a))).collect();
+    addrs.sort_unstable();
+    addrs.dedup();
+    let names: HashMap<u64, String> = addrs
+        .iter()
+        .zip(symbolize("kernel", &addrs))
+        .map(|(&a, n)| (a, n.unwrap_or_else(|| format!("{a:#x}"))))
+        .collect();
+    let named = |s: &Vec<u64>| -> Vec<String> {
+        s.iter().enumerate().map(|(i, &a)| names[&lookup(i, a)].clone()).collect()
+    };
+    let total = stacks.len();
+    let mut inclusive: HashMap<String, usize> = HashMap::new();
+    let mut paths: HashMap<String, usize> = HashMap::new();
+    for s in stacks {
+        let mut frames = named(s);
+        // Recursion counts once per sample.
+        let mut seen = frames.clone();
+        seen.sort();
+        seen.dedup();
+        for f in seen {
+            *inclusive.entry(f).or_default() += 1;
+        }
+        frames.dedup();
+        frames.truncate(PATH_FRAMES);
+        *paths.entry(frames.join(" <- ")).or_default() += 1;
+    }
+    let _ = writeln!(
+        out,
+        "profile: kernel functions with their callees ({total} samples with stacks):"
+    );
+    for (f, n) in ranked(&inclusive, top) {
+        let _ = writeln!(out, "  {n:7} {:5.1}%  {f}", pct(n, total));
+    }
+    let _ = writeln!(out, "profile: kernel call paths (leaf <- callers):");
+    for (p, n) in ranked(&paths, top) {
+        let _ = writeln!(out, "  {n:7} {:5.1}%  {p}", pct(n, total));
+    }
 }
 
 /// Samples in a stream (for the CLI's message when there are none).
@@ -266,10 +336,21 @@ fn symbolize_at(obj: &std::path::Path, base: u64, offsets: &[u64]) -> Vec<Option
     let mut names: Vec<Option<String>> = text
         .split("\n\n")
         .filter(|b| !b.trim().is_empty())
-        .map(|b| b.lines().next().filter(|f| *f != "??").map(str::to_string))
+        .map(|b| {
+            b.lines().next().filter(|f| *f != "??").map(|f| without_llvm_suffix(f).to_string())
+        })
         .collect();
     names.resize(offsets.len(), None);
     names
+}
+
+/// A function name without the ` (.llvm.<hash>)` suffix LLVM gives local
+/// symbols it promotes across codegen units (noise in a report).
+fn without_llvm_suffix(name: &str) -> &str {
+    match name.find(" (.llvm.") {
+        Some(i) => &name[..i],
+        None => name,
+    }
 }
 
 /// The preferred base of a PE image (OptionalHeader.ImageBase, PE32+).
@@ -295,7 +376,7 @@ mod tests {
 {"t":2010000000,"cpu":0,"by":8,"ev":"sample","mode":"user","rip":5368713232}
 {"t":2020000000,"cpu":0,"by":8,"ev":"sample","mode":"user","rip":5368717312}
 {"t":2030000000,"cpu":0,"by":8,"ev":"sample","mode":"user","rip":6442451200}
-{"t":2040000000,"cpu":1,"by":8,"ev":"sample","mode":"kernel","rip":18446744071562067968}
+{"t":2040000000,"cpu":1,"by":8,"ev":"sample","mode":"kernel","rip":18446744071562067968,"stack":[18446744071562072065,18446744071562076161]}
 {"t":2050000000,"cpu":1,"by":99,"ev":"sample","mode":"user","rip":4096}
 "#;
 
@@ -312,6 +393,36 @@ mod tests {
         // 0x1000 and 0x1010 share a block; b.dll is symbolized.
         assert!(r.contains("      2  40.0%  a.exe+0x1000"), "{r}");
         assert!(r.contains("      1  20.0%  b.dll!foo"), "{r}");
+    }
+
+    #[test]
+    fn llvm_suffixes_are_dropped() {
+        assert_eq!(without_llvm_suffix("a::b (.llvm.5252664376076994469)"), "a::b");
+        assert_eq!(without_llvm_suffix("a::b"), "a::b");
+    }
+
+    #[test]
+    fn kernel_stacks_give_callers() {
+        // The leaf at 0xffffffff80000000, called from 0x..1000 (return
+        // address 0x..1001), called from 0x..2000.
+        let fake: Symbolizer = &|m, offs| {
+            offs.iter()
+                .map(|&o| match (m, o & 0xffff) {
+                    ("kernel", 0) => Some("leaf".to_string()),
+                    ("kernel", 0x1000) => Some("allocate".to_string()),
+                    ("kernel", 0x2000) => Some("syscall".to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let r = report(EVENTS, &Options::default(), fake);
+        assert!(
+            r.contains("profile: kernel functions with their callees (1 samples with stacks):"),
+            "{r}"
+        );
+        assert!(r.contains("      1 100.0%  allocate\n"), "{r}");
+        assert!(r.contains("profile: kernel call paths (leaf <- callers):"), "{r}");
+        assert!(r.contains("      1 100.0%  leaf <- allocate <- syscall\n"), "{r}");
     }
 
     #[test]
