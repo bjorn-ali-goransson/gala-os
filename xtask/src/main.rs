@@ -2975,6 +2975,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
     "java_stress",
+    "chromium_https",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
@@ -5447,6 +5448,19 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // BR stage 1: an https:// page from Nginx in the guest (OpenSSL,
+        // schannel_test's configuration: a certificate issued by the test
+        // CA, a trusted root on the machine), its DOM printed: Winsock,
+        // the network service, BoringSSL and certificate verification
+        // through crypt32's chain engine.
+        name: "chromium_https",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=chrome.exe args=--headless%20--no-sandbox%20--disable-gpu%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--dump-dom%20https://127.0.0.1:8443/ \
+                  dump=C:/chromium/debug.log,C:/tmp/chr/chrome_debug.log",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["<h1>Welcome to nginx!</h1>", "chrome.exe finished with status 0x00000000"],
+    },
+    Scenario {
         // P1: PowerShell 7.4 (fetched by xtask, PREBUILT), a self-contained
         // .NET 8 application, running one command.
         name: "pwsh_hello",
@@ -6223,6 +6237,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("pwsh_hello", "pwsh"),
     ("chromium_version", "chromium"),
     ("chromium_dump", "chromium"),
+    ("chromium_https", "chromium"),
+    ("chromium_https", "schannel_test"),
     ("sqllocaldb_persist", "sqllocaldb"),
 ];
 
