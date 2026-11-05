@@ -1906,6 +1906,14 @@ name = "session_test"
 version = "0.1.0"
 
 [[package]]
+name = "setupapi"
+version = "0.1.0"
+
+[[package]]
+name = "setupapi_test"
+version = "0.1.0"
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

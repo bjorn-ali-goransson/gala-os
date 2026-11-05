@@ -362,6 +362,7 @@ const USER_DLLS: &[Dll] = &[
     // (functions not implemented yet: gala_stubs).
     Dll { package: "netapi32", file: "netapi32.dll", exported_as: "testnetapi32.dll" },
     Dll { package: "pdh", file: "pdh.dll", exported_as: "testpdh.dll" },
+    Dll { package: "setupapi", file: "setupapi.dll", exported_as: "testsetupapi.dll" },
     Dll { package: "shlwapi", file: "shlwapi.dll", exported_as: "testshlwapi.dll" },
     Dll { package: "rpcrt4", file: "rpcrt4.dll", exported_as: "testrpcrt4.dll" },
     Dll { package: "urlmon", file: "urlmon.dll", exported_as: "testurlmon.dll" },
@@ -494,6 +495,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pdh_test", "ntdll.dll", "Windows/System32"),
     ("pdh_test", "kernel32.dll", "Windows/System32"),
     ("pdh_test", "pdh.dll", "Windows/System32"),
+    ("setupapi_test", "ntdll.dll", "Windows/System32"),
+    ("setupapi_test", "kernel32.dll", "Windows/System32"),
+    ("setupapi_test", "setupapi.dll", "Windows/System32"),
     ("rpcrt4_test", "ntdll.dll", "Windows/System32"),
     ("rpcrt4_test", "kernel32.dll", "Windows/System32"),
     ("rpcrt4_test", "rpcrt4.dll", "Windows/System32"),
@@ -1494,6 +1498,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("chromium", "urlmon.dll", "Windows/System32"),
     ("chromium", "wintrust.dll", "Windows/System32"),
     ("chromium", "pdh.dll", "Windows/System32"),
+    ("chromium", "setupapi.dll", "Windows/System32"),
     ("chromium", "dhcpcsvc.dll", "Windows/System32"),
     ("chromium", "uiautomationcore.dll", "Windows/System32"),
     ("chromium", "dwrite.dll", "Windows/System32"),
@@ -1879,6 +1884,7 @@ const USER_PROGRAMS: &[&str] = &[
     "rpcrt4_test",
     "netapi32_test",
     "pdh_test",
+    "setupapi_test",
     "clusapi_test",
     "sspi_test",
     "schannel_test",
@@ -3606,6 +3612,12 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=pdh_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["pdh_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "setupapi_test",
+        cmdline: "qemu_exit run=setupapi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["setupapi_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "rpcrt4_test",
@@ -6272,7 +6284,29 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     let (mut firmware, mut kernel) = (Duration::ZERO, Duration::ZERO);
     let mut history = Vec::new();
     for (vm, result) in vms.iter().zip(results) {
-        let Ok((time, verdicts)) = result else { continue };
+        // A VM that could not be made or booted fails its scenarios (its
+        // error was once dropped here, and the run passed without them).
+        let (time, verdicts) = match result {
+            Ok(r) => r,
+            Err(e) => {
+                let names: Vec<&str> = match vm {
+                    Vm::Single(s) => vec![s.name],
+                    Vm::Batch(group) => group.iter().map(|s| s.name).collect(),
+                };
+                for name in names {
+                    failed += 1;
+                    eprintln!("xtask: boot test {name:<20} FAILED: {e}");
+                    history.push(HistoryRun {
+                        scenario: name,
+                        ok: false,
+                        secs: 0.0,
+                        shared: false,
+                        reason: e.to_string(),
+                    });
+                }
+                continue;
+            }
+        };
         firmware += time.to_banner;
         kernel += time.total.saturating_sub(time.to_banner);
         let shared = matches!(vm, Vm::Batch(_));

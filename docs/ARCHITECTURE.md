@@ -1948,7 +1948,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
 | UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation") |
 | COM, shell | ole32, oleaut32, rpcrt4, shell32, shlwapi, xmllite |
-| other | winmm, powrprof, version, dbghelp, pdh, odbc32, xolehlp, webservices, wintrust, clusapi, resutils |
+| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils |
 
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 "Consoles") and `user/cmd` (cmd.exe, "Other DLLs and programs").
@@ -2524,6 +2524,12 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   collections (so 0% busy until the kernel keeps processor times); other
   objects and counters are recorded and fail as on a machine without
   them; handles carry a generation (`pdh_test`; Chromium's CPU probe).
+  **setupapi**: device information sets over an empty device tree (no
+  Plug and Play manager): every class has no devices, so sets are valid
+  and empty, enumeration is ERROR_NO_MORE_ITEMS and opening a device or
+  interface is ERROR_NO_SUCH_DEVINST / ERROR_NO_SUCH_DEVICE_INTERFACE;
+  each SetupDiGetClassDevsW is recorded ("no device tree", the class's
+  first dword) (`setupapi_test`; Chromium's battery-level provider).
   **wldap32** (PostgreSQL's LDAP
   functions): stubs, exported by Windows' ordinals.
 - **Failover clustering is not installed**: clusapi.dll and resutils.dll
