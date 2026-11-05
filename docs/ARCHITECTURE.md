@@ -1500,6 +1500,19 @@ with a console (Caddy logs differently; `kernel32_sys_test` and
 `winsock_test` expect redirected handles), so the serial-line handles stay
 non-consoles.
 
+**The serial line's discipline** (`kernel/src/console.rs`): programs
+and the kernel log share the serial port, and programs write a line in
+pieces (msvcrt is unbuffered; `puts` is two writes). While a program's
+line is open (the last user byte written was not a newline), kernel
+lines are held in a 4 KiB buffer and written when the program ends its
+line, so a log line never lands inside a program's line. A program
+cannot hold the log back: past 100 ms the next kernel print or timer
+tick ends the line with a newline and releases what is held; so do the
+process's exit (before its exit line), a full buffer and emergency
+output. There is one line state for all programs: two programs writing
+at once can still share a line. `console_test` checks a line written
+around a thread exit's log line.
+
 **Without a session** (kernel32 `console.rs`):
 
 - kernel32 maps CONOUT$/CONIN$ to `\??\CONOUT$`/`\??\CONIN$`, which the

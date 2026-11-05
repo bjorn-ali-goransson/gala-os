@@ -317,10 +317,142 @@ pub fn emergency_line(args: fmt::Arguments) {
     std::eprintln!("{args}");
 }
 
+/// The serial line discipline: while a program's output line is open
+/// (the last user byte written to the port was not a newline), kernel
+/// lines are held here and go out when the program ends its line, so a
+/// log line never lands inside a program's line (a test looking for
+/// that line would miss it: msvcrt writes a line in pieces). A program
+/// cannot hold the log back: after [`HOLD_NS`] the next kernel print or
+/// timer tick breaks the line and releases what is held, and so does
+/// the program's exit ([`end_program_line`]) and a full buffer.
+/// One line state for all programs: two programs writing at once can
+/// still share a line (each has its own console on Windows).
+#[cfg(not(feature = "hosted"))]
+struct Held {
+    bytes: [u8; HELD_BYTES],
+    len: usize,
+}
+
+#[cfg(not(feature = "hosted"))]
+const HELD_BYTES: usize = 4096;
+/// How long an open program line holds kernel lines back.
+#[cfg(not(feature = "hosted"))]
+const HOLD_NS: u64 = 100_000_000;
+
+/// When the open program line began (monotonic ns; 0: none). Written
+/// only under the COM1 lock; read without it by the tick's check.
+#[cfg(not(feature = "hosted"))]
+static LINE_OPEN_SINCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Kernel lines waiting for the program's line to end. Taken only under
+/// the COM1 lock.
+#[cfg(not(feature = "hosted"))]
+static HELD: IrqMutex<Held> = IrqMutex::new(Held { bytes: [0; HELD_BYTES], len: 0 });
+
+#[cfg(not(feature = "hosted"))]
+impl Held {
+    /// Ends the program's line (a newline if it is still open: the
+    /// program did not end it) and writes the held kernel lines.
+    fn release(&mut self, port: &mut serial::SerialPort) {
+        use core::sync::atomic::Ordering;
+        if LINE_OPEN_SINCE.swap(0, Ordering::Relaxed) != 0 {
+            port.write_byte(b'\r');
+            port.write_byte(b'\n');
+        }
+        for &b in self.bytes.get(..self.len).unwrap_or(&[]) {
+            port.write_byte(b);
+        }
+        self.len = 0;
+    }
+}
+
+/// A kernel print under the line discipline.
+#[cfg(not(feature = "hosted"))]
+struct KernelOut<'a> {
+    port: &'a mut serial::SerialPort,
+    held: &'a mut Held,
+}
+
+#[cfg(not(feature = "hosted"))]
+impl fmt::Write for KernelOut<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        use core::sync::atomic::Ordering;
+        if LINE_OPEN_SINCE.load(Ordering::Relaxed) != 0 {
+            let start = self.held.len;
+            let mut end = start;
+            for &b in s.as_bytes() {
+                let extra = usize::from(b == b'\n');
+                if end + extra + 1 > HELD_BYTES {
+                    // Full: the program's line is broken after all.
+                    self.held.len = start;
+                    self.held.release(self.port);
+                    return self.port.write_str(s);
+                }
+                if extra == 1 {
+                    self.held.bytes[end] = b'\r';
+                }
+                self.held.bytes[end + extra] = b;
+                end += extra + 1;
+            }
+            self.held.len = end;
+            return Ok(());
+        }
+        self.port.write_str(s)
+    }
+}
+
+/// True if the open program line has held kernel lines long enough.
+#[cfg(not(feature = "hosted"))]
+fn line_overdue() -> bool {
+    use core::sync::atomic::Ordering;
+    let since = LINE_OPEN_SINCE.load(Ordering::Relaxed);
+    since != 0 && crate::time::raw_monotonic_ns().saturating_sub(since) > HOLD_NS
+}
+
+/// From the timer tick: releases kernel lines an open program line has
+/// held past [`HOLD_NS`] (a prompt waiting for input never ends its
+/// line). Skips the tick if the port is busy.
+#[cfg(not(feature = "hosted"))]
+pub fn release_overdue() {
+    if !line_overdue() {
+        return;
+    }
+    if let Some(mut port) = serial::COM1.try_lock()
+        && let Some(mut held) = HELD.try_lock()
+        && held.len != 0
+    {
+        held.release(&mut port);
+    }
+}
+
+/// A program is gone: its open line ends (a newline) and held kernel
+/// lines go out.
+#[cfg(not(feature = "hosted"))]
+pub fn end_program_line() {
+    use core::sync::atomic::Ordering;
+    if LINE_OPEN_SINCE.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let mut port = serial::COM1.lock();
+    HELD.lock().release(&mut port);
+}
+
+#[cfg(feature = "hosted")]
+pub fn end_program_line() {}
+
+#[cfg(feature = "hosted")]
+pub fn release_overdue() {}
+
 #[doc(hidden)]
 #[cfg(not(feature = "hosted"))]
 pub fn print(args: fmt::Arguments) {
-    let _ = serial::COM1.lock().write_fmt(args);
+    {
+        let mut port = serial::COM1.lock();
+        let mut held = HELD.lock();
+        if line_overdue() {
+            held.release(&mut port);
+        }
+        let _ = KernelOut { port: &mut port, held: &mut held }.write_fmt(args);
+    }
     if let Some(screen) = SCREEN.lock().as_mut() {
         let _ = screen.write_fmt(args);
     }
@@ -329,10 +461,20 @@ pub fn print(args: fmt::Arguments) {
 /// Writes raw bytes (no newline translation), e.g. user-mode output.
 #[cfg(not(feature = "hosted"))]
 pub fn write_bytes(bytes: &[u8]) {
+    use core::sync::atomic::Ordering;
     {
         let mut port = serial::COM1.lock();
         for &b in bytes {
             port.write_byte(b);
+        }
+        if let Some(&last) = bytes.last() {
+            if last == b'\n' {
+                LINE_OPEN_SINCE.store(0, Ordering::Relaxed);
+                HELD.lock().release(&mut port);
+            } else if LINE_OPEN_SINCE.load(Ordering::Relaxed) == 0 || bytes.contains(&b'\n') {
+                // A new line opened (0 before the clock runs: no holding).
+                LINE_OPEN_SINCE.store(crate::time::raw_monotonic_ns(), Ordering::Relaxed);
+            }
         }
     }
     if let Some(screen) = SCREEN.lock().as_mut() {
@@ -368,6 +510,11 @@ fn emergency_write(args: fmt::Arguments) {
     let start = crate::time::raw_monotonic_ns();
     loop {
         if let Some(mut port) = serial::COM1.try_lock_untracked() {
+            // Kernel lines held for a program's line go first (a panic
+            // may come before anything else releases them).
+            if let Some(mut held) = HELD.try_lock_untracked() {
+                held.release(&mut port);
+            }
             let _ = port.write_fmt(args);
             return;
         }

@@ -16,6 +16,9 @@
 //!   duplicate of a console handle (DuplicateHandle), and of the standard
 //!   output handle when that is the console (FILE_TYPE_CHAR), it writes.
 //! - GetNumberOfConsoleInputEvents of CONIN$ succeeds.
+//! - A line written in two parts stays whole in the log when the kernel
+//!   logs a line in between (`console_test: split-line`; gala's own
+//!   serial console, not a Windows contract).
 //!
 //! Prints `console_test: ok` or exits with the number of the failing
 //! check.
@@ -44,6 +47,16 @@ unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn ExitProcess(code: u32) -> !;
+    fn ExitThread(code: u32) -> !;
+    fn CreateThread(
+        security: *mut c_void,
+        stack: usize,
+        start: extern "system" fn(*mut c_void) -> u32,
+        param: *mut c_void,
+        flags: u32,
+        id: *mut u32,
+    ) -> Handle;
+    fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn CloseHandle(h: Handle) -> Bool;
     fn CreateFileW(
         name: *const u16,
@@ -256,6 +269,23 @@ fn run() -> Result<(), u32> {
         CloseHandle(f);
         CloseHandle(con);
 
+        // A program's line written in two parts with a kernel log line
+        // made between them (a thread exiting with an error status logs
+        // one) stays whole in the log: `console_test: split-line`.
+        out(b"console_test: split-");
+        let t = CreateThread(
+            core::ptr::null_mut(),
+            0,
+            exit_with_error,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+        );
+        c.ok(!t.is_null(), GetLastError().into())?;
+        c.eq(WaitForSingleObject(t, 10_000).into(), 0)?;
+        CloseHandle(t);
+        out(b"line\r\n");
+
         let input = open("CONIN$");
         c.ok(input as isize != -1, GetLastError().into())?;
         c.ok(GetConsoleMode(input, &mut mode) != 0, 0)?;
@@ -265,6 +295,12 @@ fn run() -> Result<(), u32> {
         CloseHandle(input);
     }
     Ok(())
+}
+
+/// A thread that exits with an error status (the kernel logs it).
+extern "system" fn exit_with_error(_: *mut c_void) -> u32 {
+    // SAFETY: ends this thread.
+    unsafe { ExitThread(1) }
 }
 
 #[unsafe(no_mangle)]

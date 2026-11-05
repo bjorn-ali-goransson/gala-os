@@ -410,6 +410,7 @@ impl fmt::Display for SampleStack {
 
 fn on_tick(frame: &mut TrapFrame) {
     crate::flight::on_tick(TICK_HZ);
+    crate::console::release_overdue();
     // A thread that stays in the kernel without blocking (the watchdog);
     // user mode is progress.
     if let Some((id, idle)) = crate::sched::current_if_running() {

@@ -3963,7 +3963,7 @@ const SCENARIOS: &[Scenario] = &[
         name: "console_test",
         cmdline: "qemu_exit run=console_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["console_test: ok", "exited with status 0x00000000"],
+        expect: &["console_test: split-line", "console_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (PowerShell): CNG random numbers and hashes (.NET's crypto).
